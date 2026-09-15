@@ -35,7 +35,7 @@ vm.runInContext(source, sandbox);
 const requests = vm.runInContext("OVERVIEW_REQUESTS", sandbox);
 const expected = ["read_overview", "data_monthly_summary", "data_daily_summary", "read_calendar_month",
   "data_source_status", "data_status", "data_codex_quota", "data_claude_quota",
-  "billing_import_candidates", "billing_declarations", "billing_recalculation_jobs"];
+  "billing_import_candidates", "billing_confirmation_groups", "billing_declarations", "billing_recalculation_jobs"];
 assert.deepEqual(Array.from(requests, (r) => r.command).sort(), expected.sort());
 for (const command of [...expected, "statistics_timezone_config"]) {
   assert.ok(mock.includes('case "' + command + '":'), command + " has an explicit fixture");
@@ -46,8 +46,8 @@ await fixtureInvoke("save_statistics_timezone_config", { timezone: "Pacific/Kiri
 let result = await sandbox.loadOverviewData();
 assert.deepEqual(Object.keys(result.errors), []);
 assert.equal(calls[0].command, "statistics_timezone_config");
-// 12 = 原有 11 条 + data_claude_quota（2026-09-14：Claude Pro 的窗口状态）。
-assert.equal(calls.length, 12);
+// 13 = 原有 11 条 + data_claude_quota（2026-09-14）+ billing_confirmation_groups（计费主链 B1）。
+assert.equal(calls.length, 13);
 for (const { command, args } of calls) {
   if (command === "data_daily_summary") assert.equal(args.date, result.window.date);
   if (["data_monthly_summary", "read_calendar_month"].includes(command)) assert.equal(args.month, result.window.month);
@@ -107,8 +107,8 @@ override = async (command, args) => command === "billing_import_candidates"
 calls.length = 0;
 const loading = sandbox.loadOverviewData();
 for (let i = 0; i < 10; i++) await Promise.resolve();
-// 并发发起（不等任何一条返回）——12 条与上面的 calls.length 同源。
-assert.equal(calls.length, 12);
+// 并发发起（不等任何一条返回）——13 条与上面的 calls.length 同源。
+assert.equal(calls.length, 13);
 release();
 await loading;
 override = null;
@@ -223,15 +223,17 @@ for (const mode of ["rejected", "malformed"]) {
         break;
       case "calendar": assert.match(valueOf("ov-days-empty"), /暂不可读/); break;
       case "quality": assert.equal(elements.get("ov-trust-route").className, "notice danger"); break;
-      case "candidates":
+      // 组与候选是两个来源：一个失败时另一个仍渲染，文案标注部分不可读；
+      // 只有两个都失败才是整块「暂不可读」（renderBillingConfirmation）。
+      case "candidates": case "billingGroups":
         assert.equal(elements.get("ov-billing-prompt").hidden, false);
-        assert.match(valueOf("ov-billing-prompt-copy"), /待确认状态暂不可读/);
+        assert.match(valueOf("ov-billing-prompt-copy"), /暂不可读/);
         break;
       case "declarations": case "jobs": {
         const name = request.key === "jobs" ? "recalculation" : "declarations";
         assert.equal(elements.get("ov-billing-" + name + "-panel").hidden, false);
         assert.match(valueOf("ov-billing-" + name + "-list"), /待确认状态暂不可读/);
-        assert.match(valueOf("ov-billing-prompt-copy"), /发现 1 条/);
+        assert.match(valueOf("ov-billing-prompt-copy"), /发现 \d+ 组/);
         break;
       }
       case "quota":
@@ -244,6 +246,7 @@ for (const mode of ["rejected", "malformed"]) {
 // Successful empty billing reports remove the error state, independently of KPI data.
 override = async (command, args) => {
   if (command === "billing_import_candidates") return { status: "ok", candidates: [] };
+  if (command === "billing_confirmation_groups") return { status: "ok", month: args.month, groups: [] };
   if (command === "billing_declarations") return { status: "ok", declarations: [] };
   if (command === "billing_recalculation_jobs") return { status: "ok", jobs: [] };
   return fixtureInvoke(command, args);
@@ -272,6 +275,8 @@ for (const budget of [{}, { source: "sql", level: "warn", month_cost: "bad", mon
 // Nested malformed billing data cannot fabricate zero impact or undefined declarations.
 for (const [command, patch, key] of [
   ["billing_import_candidates", (v) => { delete v.candidates[0].impact.total_tokens; }, "candidates"],
+  ["billing_confirmation_groups", (v) => { delete v.groups[0].tokens; }, "billingGroups"],
+  ["billing_confirmation_groups", (v) => { v.groups[0].estimated_amounts = [{ amount_minor: "12", currency: "USD" }]; }, "billingGroups"],
   ["billing_declarations", (v) => { v.declarations = [{ declaration_id: "d", host: "codex", provider_id: "openai" }]; }, "declarations"],
   ["billing_recalculation_jobs", (v) => { v.jobs = [null]; }, "jobs"],
 ]) {

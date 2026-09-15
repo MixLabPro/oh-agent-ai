@@ -141,12 +141,12 @@
       <section class="notice todo" id="ov-billing-prompt" hidden aria-live="polite">
         <span class="notice-icon" aria-hidden="true"></span>
         <span class="notice-text">
-          <strong>有套餐信息待确认</strong>
+          <strong>有计费方式待确认</strong>
           <span class="notice-sub" id="ov-billing-prompt-copy"></span>
         </span>
         <span class="notice-actions">
           <button type="button" class="btn secondary" id="ov-billing-later">稍后（30 天内不再提醒）</button>
-          <button type="button" class="btn primary" id="ov-billing-review">确认套餐信息</button>
+          <button type="button" class="btn primary" id="ov-billing-review">确认计费方式</button>
         </span>
       </section>
 
@@ -415,12 +415,12 @@
           <!-- 全页唯一实心主按钮：它是待办，不是保存（规格 §5.2）。 -->
           <div class="notice todo">
             <span class="notice-icon" aria-hidden="true"></span>
-            <div class="notice-text"><strong>有套餐信息待确认</strong><div class="notice-sub" id="settings-billing-candidates-copy"></div></div>
+            <div class="notice-text"><strong>有计费方式待确认</strong><div class="notice-sub" id="settings-billing-candidates-copy"></div></div>
             <div class="notice-actions"><button class="btn primary" id="settings-billing-candidates-open" type="button">查看并处理</button></div>
           </div>
           <section class="billing-review" id="ov-billing-review-panel" hidden role="region" aria-labelledby="ov-billing-review-title">
             <div class="setting-head row">
-              <div class="setting-title" id="ov-billing-review-title">待确认的套餐</div>
+              <div class="setting-title" id="ov-billing-review-title">待确认的计费方式</div>
               <button class="chip-link" id="ov-billing-review-close" type="button">收起</button>
             </div>
             <div id="ov-billing-review-list"></div>
@@ -431,6 +431,9 @@
             <div class="setting-title">确认计费方式</div>
             <p id="ov-billing-declaration-context"></p>
           </div>
+          <!-- 第一问固定「这批用量如何付费？」；每个选项旁一句结果说明是 Beta 的真实
+               行为（只有官方订阅改数字）。作用范围显式有界：起止月必填、不晚于当前统计月，
+               Beta 不开放「以后同类记录」（计费主链规格 §5.3/§5.4）。 -->
           <div class="form-row">
             <label><span>这批用量如何付费？</span>
               <select id="ov-billing-relationship">
@@ -441,18 +444,22 @@
                 <option value="unknown">仍不确定</option>
               </select>
             </label>
-            <label><span>作用范围</span>
-              <select id="ov-billing-scope">
-                <option value="declaration">该工具与服务商（按有效期）</option>
-              </select>
+            <p class="muted" id="ov-billing-relationship-effect" aria-live="polite"></p>
+          </div>
+          <div class="form-row">
+            <label><span>起始月（北京时间）</span>
+              <input id="ov-billing-start" type="text" inputmode="numeric" pattern="\d{4}-\d{2}" placeholder="YYYY-MM" aria-describedby="ov-billing-scope-text">
             </label>
-            <button class="btn secondary" id="ov-billing-save" type="button">保存并预览影响</button>
+            <label><span>结束月（北京时间，不晚于本月）</span>
+              <input id="ov-billing-end" type="text" inputmode="numeric" pattern="\d{4}-\d{2}" placeholder="YYYY-MM" aria-describedby="ov-billing-scope-text">
+            </label>
+            <p class="muted" id="ov-billing-scope-text"></p>
+          </div>
+          <div class="form-row">
+            <button class="btn secondary" id="ov-billing-save" type="button">预览影响</button>
             <button class="chip-link" id="ov-billing-cancel" type="button">取消</button>
           </div>
-          <div class="form-receipt block" id="ov-billing-preview" hidden></div>
-          <div class="form-row" id="ov-billing-apply-actions" hidden>
-            <button class="btn secondary" id="ov-billing-apply" type="button">应用到汇总并开始重算</button>
-          </div>
+          <div class="form-receipt block" id="ov-billing-preview" hidden aria-live="polite"></div>
         </section>
         <section class="setting" id="ov-billing-declarations-panel" hidden>
           <div class="setting-head">

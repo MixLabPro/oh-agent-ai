@@ -1504,7 +1504,7 @@ fn billing_import_candidates() -> Value {
                 let impact = window.and_then(|(window_start_ms, window_end_ms)| {
                     db.billing_declaration_impact_preview_for(
                         &host, &provider_id, &billing_period_start, None, &[],
-                        window_start_ms, window_end_ms,
+                        Some((window_start_ms, window_end_ms)),
                     ).ok()
                 });
                 serde_json::json!({
@@ -1527,20 +1527,40 @@ fn billing_import_candidates() -> Value {
     }
 }
 
-/// 用户明确核对旧套餐声明后才落下决定。接受的是“这是我的套餐”，不是
-/// “我已付款”：actual spend 仍必须来自付款/账单记录。
+/// 「确认计费方式」面板的待确认组（REQ-023）：宿主 × provider × 模型 × 路由证据 ×
+/// 计价依据，带分币估算金额、按金额降序。数据来自
+/// `runtime::billing_preview::confirmation_groups`（组 SQL 与待处理投影同一份，
+/// 金额与 MCP `cost_breakdown` 同一条计价路径）。此前面板只从旧资产迁移候选出发，
+/// 没有旧资产的用户永远看不到待确认组（计费主链规格 G5）。
+#[tauri::command(async)]
+fn billing_confirmation_groups(month: String) -> Value {
+    let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({ "status": "unavailable", "month": month, "groups": [] });
+    };
+    agent_vitals_runtime::billing_preview::confirmation_groups(&db, &month)
+}
+
+/// 候选只有「不是我的」与「重新打开」两个直接决定。「接受」不再是独立动作：
+/// 它曾经只把候选翻成 accepted 而不写声明、不重算，用量继续按量估算，与提示
+/// 文案「确认后就能分清哪些在套餐内」相反（计费主链规格 G1）。接受现在只能
+/// 由 `save_billing_declaration_revision` 在同一事务内完成。
+fn candidate_decision_status(decision: &str) -> Result<&'static str, String> {
+    match decision {
+        "dismiss" => Ok("dismissed"),
+        "reopen" => Ok("pending"),
+        "accept" => Err("accepting a candidate requires saving a billing declaration".to_string()),
+        _ => Err("invalid billing candidate decision".to_string()),
+    }
+}
+
 #[tauri::command]
 fn resolve_billing_import_candidate(candidate_id: String, decision: String) -> Result<Value, String> {
+    let status = candidate_decision_status(&decision)?;
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
     let db = agent_vitals_data::authority::AuthorityDb::open(&path, agent_vitals_runtime::sql_sync::now_ms())
         .map_err(|error| error.to_string())?;
-    let status = match decision.as_str() {
-        "accept" => "accepted",
-        "dismiss" => "dismissed",
-        "reopen" => "pending",
-        _ => return Err("invalid billing candidate decision".to_string()),
-    };
     let changed = db.with_immediate_txn(|_| {
         let now_ms = agent_vitals_runtime::sql_sync::now_ms();
         if status == "pending" {
@@ -2311,8 +2331,33 @@ fn clear_budget_snooze() -> Result<Value, String> {
     Ok(serde_json::json!({ "status": "cleared" }))
 }
 
+/// 桌面端声明的 Beta 范围纪律（计费主链规格 §5.4 / B3）。数据层
+/// `billing_declaration_revision_save` 故意保持通用（内部 MCP 仍可写开放期），
+/// 这里是用户面：`unknown` 不是声明；`effective_end` 必填且不晚于当前统计月，
+/// 否则一次 retry 就会把之后同步进来的事实扫进订阅覆盖（§3 事实 3）。
+fn validate_desktop_declaration(
+    relationship_kind: &str, effective_start: &str, effective_end: Option<&str>, current_month: &str,
+) -> Result<(), String> {
+    if relationship_kind == "unknown" {
+        return Err("\"unknown\" is not a billing declaration; keep the group pending instead".to_string());
+    }
+    let Some(end) = effective_end.filter(|end| !end.trim().is_empty()) else {
+        return Err("effective_end is required: Beta declarations must be bounded to an explicit month range".to_string());
+    };
+    if end < effective_start {
+        return Err("effective_end must not be earlier than effective_start".to_string());
+    }
+    if end > current_month {
+        return Err("effective_end must not be later than the current statistics month".to_string());
+    }
+    Ok(())
+}
+
 /// 保存一条可追溯的计费关系修订。声明当前态与不可变修订在同一个用户动作中
 /// 写入；scope 由前端显式传入，空数组表示只使用宿主/provider/有效期约束。
+/// 官方订阅在保存成功后立即入队重算并返回 `job`——「保存」与「应用」曾是
+/// 两次点击，只保存不应用会留下声明已存在、数字未变、待处理也不显示的半状态
+/// （规格 G6）。入队失败不回滚修订（修订是不可变事实），回执如实带出。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 fn save_billing_declaration_revision(
@@ -2331,6 +2376,10 @@ fn save_billing_declaration_revision(
     evidence_ref: Option<String>,
     scopes: Vec<BillingScopeInput>,
 ) -> Result<Value, String> {
+    validate_desktop_declaration(
+        &relationship_kind, &effective_start, effective_end.as_deref(),
+        &overview::current_month_beijing(),
+    )?;
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
     let db = agent_vitals_data::authority::AuthorityDb::open(
@@ -2346,9 +2395,26 @@ fn save_billing_declaration_revision(
         amount_minor, currency.as_deref(), &effective_start, effective_end.as_deref(),
         source_candidate_id.as_deref(), evidence_ref.as_deref(), &scope_refs, now_ms,
     ).map_err(|error| error.to_string())?;
+    let job = if relationship_kind == "official_subscription" {
+        let job_id = format!("billing-{revision_id}");
+        match db.billing_recalculation_enqueue(&job_id, &declaration_id, &revision_id, now_ms) {
+            Ok(queued) => {
+                drop(db);
+                if queued {
+                    spawn_billing_recalculation_worker(path, job_id.clone());
+                }
+                serde_json::json!({ "job_id": job_id, "status": "queued", "changed": queued })
+            }
+            Err(error) => serde_json::json!({
+                "job_id": job_id, "status": "enqueue_failed", "error": error.to_string(),
+            }),
+        }
+    } else {
+        Value::Null
+    };
     Ok(serde_json::json!({
         "status": "saved", "revision_id": revision_id,
-        "declaration_id": declaration_id, "changed": changed,
+        "declaration_id": declaration_id, "changed": changed, "job": job,
     }))
 }
 
@@ -2400,23 +2466,14 @@ fn revoke_billing_declaration(
     }))
 }
 
-/// 保存前影响预览：只读返回事实/会话/token 范围，不提前改变汇总或账单。
-#[tauri::command]
-fn billing_declaration_impact_preview(
-    revision_id: String, window_start_ms: i64, window_end_ms: i64,
-) -> Value {
-    agent_vitals_runtime::summary::billing_declaration_impact_preview(
-        &revision_id, window_start_ms, window_end_ms,
-    )
-}
-
-/// 对尚未保存的候选做只读影响预览。与修订版预览共用 data 层查询，
-/// 因而不会提前创建声明、接受候选或改变汇总。
+/// 对尚未保存的声明做只读影响预览。参数就是保存时的参数（宿主、provider、
+/// 关系、起止月、作用域）——不再由前端另传统计月窗口：预览范围必须等于写入范围
+/// （计费主链规格 G2/R1）。三组数字与分币金额由 `runtime::billing_preview` 用与重算
+/// 归因同一条谓词、与 MCP `cost_breakdown` 同一条计价路径算出。
 #[tauri::command(async)]
 fn billing_candidate_impact_preview(
-    host: String, provider_id: String, effective_start: String,
-    effective_end: Option<String>, window_start_ms: i64, window_end_ms: i64,
-    scopes: Vec<BillingScopeInput>,
+    host: String, provider_id: String, relationship_kind: String, effective_start: String,
+    effective_end: Option<String>, scopes: Vec<BillingScopeInput>,
 ) -> Value {
     let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
@@ -2425,18 +2482,10 @@ fn billing_candidate_impact_preview(
     let scope_refs = scopes.iter()
         .map(|scope| (scope.scope_kind.as_str(), scope.scope_value.as_str()))
         .collect::<Vec<_>>();
-    match db.billing_declaration_impact_preview_for(
-        &host, &provider_id, &effective_start, effective_end.as_deref(),
-        &scope_refs, window_start_ms, window_end_ms,
-    ) {
-        Ok(preview) => serde_json::json!({
-            "status": "ok", "fact_count": preview.fact_count,
-            "session_count": preview.session_count, "total_tokens": preview.total_tokens,
-            "first_event_ts_ms": preview.first_event_ts_ms,
-            "last_event_ts_ms": preview.last_event_ts_ms,
-        }),
-        Err(error) => serde_json::json!({"status": "unavailable", "reason": error.to_string()}),
-    }
+    agent_vitals_runtime::billing_preview::declaration_impact_preview(
+        &db, &host, &provider_id, &relationship_kind, &effective_start,
+        effective_end.as_deref(), &scope_refs,
+    )
 }
 
 #[tauri::command]
@@ -3112,11 +3161,11 @@ pub fn run() {
             read_overview,
             data_status,
             billing_import_candidates,
+            billing_confirmation_groups,
             resolve_billing_import_candidate,
             save_billing_declaration_revision,
             billing_declarations,
             revoke_billing_declaration,
-            billing_declaration_impact_preview,
             billing_candidate_impact_preview,
             custom_source_roots,
             pick_custom_source_root,
@@ -3264,6 +3313,30 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 规格 R6：「接受」不再是候选的直接决定——它曾经只翻状态、不归因、不重算，
+    /// 用户以为确认了而数字没变。dismiss/reopen 照旧。
+    #[test]
+    fn candidate_accept_is_no_longer_a_direct_decision() {
+        assert!(candidate_decision_status("accept").is_err());
+        assert_eq!(candidate_decision_status("dismiss"), Ok("dismissed"));
+        assert_eq!(candidate_decision_status("reopen"), Ok("pending"));
+        assert!(candidate_decision_status("approve").is_err());
+    }
+
+    /// 规格 R4 + B3：`unknown` 不是声明；`effective_end` 必填、不早于起始、
+    /// 不晚于当前统计月——空 end 就是「以后同类记录」，Beta 不开放。
+    #[test]
+    fn desktop_declaration_must_be_bounded_and_never_unknown() {
+        let now = "2026-09";
+        assert!(validate_desktop_declaration("unknown", "2026-07", Some("2026-09"), now).is_err());
+        assert!(validate_desktop_declaration("official_subscription", "2026-07", None, now).is_err());
+        assert!(validate_desktop_declaration("official_subscription", "2026-07", Some(""), now).is_err());
+        assert!(validate_desktop_declaration("official_subscription", "2026-07", Some("2026-06"), now).is_err());
+        assert!(validate_desktop_declaration("official_subscription", "2026-07", Some("2026-10"), now).is_err());
+        assert!(validate_desktop_declaration("official_subscription", "2026-07", Some("2026-09"), now).is_ok());
+        assert!(validate_desktop_declaration("organization", "2026-09", Some("2026-09"), now).is_ok());
+    }
 
     #[test]
     fn independent_sync_stages_continue_after_source_failure() {

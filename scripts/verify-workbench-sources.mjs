@@ -32,7 +32,7 @@ ok(js.includes("recoverSource(button, key") && js.includes('invoke("trigger_sync
 ok(js.includes('invoke("sync_request_status", { requestId })'), "恢复动作按请求ID等待完成");
 ok(!/id="ov-billing-review"[^>]*aria-expanded/.test(html),
   "套餐确认入口不暴露为 AX 折叠控件，保留普通按钮点击语义");
-ok(/id="ov-billing-review"[^>]*>确认套餐信息<\/button>/.test(html) &&
+ok(/id="ov-billing-review"[^>]*>确认计费方式<\/button>/.test(html) &&
   /id="ov-billing-review-panel"[^>]*role="region"[^>]*aria-labelledby="ov-billing-review-title"/.test(html),
   "套餐确认入口使用普通按钮并保留展开区域标题语义");
 ok(js.includes("relationship.disabled = false") && js.includes("relationship.disabled = true"),
@@ -60,7 +60,8 @@ function makeEl(id) {
     appendChild(child) { this.children.push(child); return child; },
     append(...children) { this.children.push(...children); },
     focus() { this.focused = true; },
-    addEventListener() {}, remove() { this.removed = true; },
+    addEventListener() {}, remove() { this.removed = true; }, scrollIntoView() {},
+    click() { if (typeof this.onclick === "function") return this.onclick(); },
     // renderSourceRow 用 setAttribute("aria-expanded", …) 记录展开态——真实按钮
     // 有这个方法，makeEl 之前没实现，切到行式结构后第一次跑就在这里炸。
     setAttribute(name, value) { attrs[name] = String(value); },
@@ -96,7 +97,14 @@ const sourceDto = {
       failed_scope: { sources: 1, error_codes: ["permission"] }, recovery_action: { kind: "retry_sync", label: "重新同步" } },
   ],
 };
+// workbench.js 在加载时解构 `const { invoke } = window.__TAURI__.core`，之后换
+// `sandbox.__TAURI__.core.invoke` 不起作用；计费段用这个钩子注入自己的 fixture。
+let billingOverride = null;
 const invoke = async (command, args) => {
+  if (billingOverride) {
+    const overridden = await billingOverride(command, args);
+    if (overridden !== undefined) return overridden;
+  }
   if (command === "data_source_status") {
     statusReads += 1;
     return statusFailure ? { status: "unavailable", reason: "schema mismatch", sources: [] } : sourceDto;
@@ -118,6 +126,7 @@ const sandbox = {
   document: {
     getElementById: id => (elements[id] ||= makeEl(id)),
     createElement: tag => makeEl(tag),
+    createTextNode: text => ({ textContent: String(text), children: [] }),
     querySelectorAll: () => [],
     addEventListener() {},
   },
@@ -166,38 +175,156 @@ await sandbox.loadSources(true);
 ok(elements["src-banner"].hidden === false && elements["src-banner"].textContent.includes("schema mismatch"),
   "契约失败显示错误横幅而非零数据");
 
-console.log("# 套餐确认入口 DOM 回归");
+console.log("# 计费确认主链（docs/v1.0.0/BETA_1_BILLING_CONFIRMATION_CHAIN_SPEC.md §7.2）");
 for (const id of ["ov-billing-prompt", "ov-billing-review-panel", "ov-billing-review",
   "ov-billing-review-close", "ov-billing-prompt-copy", "ov-billing-review-list",
-  "ov-billing-later", "ov-billing-save", "ov-billing-cancel", "ov-billing-apply",
-  "ov-billing-relationship", "ov-billing-recalculation-panel", "ov-billing-recalculation-list"]) {
+  "ov-billing-later", "ov-billing-save", "ov-billing-cancel", "ov-billing-relationship",
+  "ov-billing-relationship-effect", "ov-billing-start", "ov-billing-end", "ov-billing-scope-text",
+  "ov-billing-declaration-panel", "ov-billing-declaration-context", "ov-billing-preview",
+  "ov-billing-recalculation-panel", "ov-billing-recalculation-list",
+  "settings-billing-candidates", "settings-billing-candidates-copy", "settings-billing-candidates-open"]) {
   elements[id] ||= makeEl(id);
 }
-await sandbox.renderBillingImportCandidates({
-  status: "ok",
-  candidates: [{ candidate_id: "candidate-test", host: "codex", provider_id: "openai",
-    amount_minor: 2000, currency: "CNY", billing_period_start: "2026-09-01", status: "pending" }],
-});
-ok(elements["ov-billing-prompt"].hidden === false, "候选存在时显示套餐确认提示");
+// V1：孤儿端点、两步「应用」按钮、候选直通 accept 都不得再出现在前端。
+ok(!js.includes("billing_declaration_impact_preview") && !html.includes("billing_declaration_impact_preview"),
+  "修订级预览孤儿端点已从前端删除（B5）");
+ok(!js.includes("ov-billing-apply") && !html.includes("ov-billing-apply"),
+  "保存与重算不再是两次点击（G6）");
+ok(!/decision:\s*"accept"|resolve\("accept"\)|"是我的套餐"/.test(js),
+  "候选没有绕过预览与声明的 accept 直通（G1）");
+ok(html.includes('id="ov-billing-review">确认计费方式</button>') && !/编辑/.test(html.slice(html.indexOf('id="ov-billing-prompt"'), html.indexOf('id="ov-billing-prompt"') + 800)),
+  "入口主按钮用任务语言「确认计费方式」，不含「编辑」（REQ-020）");
+ok(js.includes('billingMonthWindow(statisticsMonth())') === false || !/billing_candidate_impact_preview[\s\S]{0,400}windowStartMs/.test(js),
+  "预览不再由前端传统计月窗口（G2）");
+
+const storage = {};
+sandbox.localStorage = { getItem: (k) => storage[k] ?? null, setItem: (k, v) => { storage[k] = String(v); }, removeItem: (k) => { delete storage[k]; } };
+sandbox.sessionStorage = sandbox.localStorage;
+const month = sandbox.statisticsMonth();
+const groupsReport = { status: "ok", month, groups: [
+  { group_id: "codex|openai|gpt-5.6-sol|session-native|metered_estimate|" + month, host: "codex", provider_id: "openai",
+    model_id: "gpt-5.6-sol", evidence_basis: "session-native", pricing_basis: "metered_estimate", tokens: 1_650_000,
+    first_event_at_ms: 1, last_event_at_ms: 2, session_count: 7, effective_start: month, effective_end: month,
+    estimated_amounts: [{ amount_minor: 1892, currency: "USD", basis: "metered_estimate" }], unpriced_tokens: 0, unresolved_reason: null },
+  { group_id: "claude-code|minimax|MiniMax-M2.5|missing|metered_estimate|" + month, host: "claude-code", provider_id: "minimax",
+    model_id: "MiniMax-M2.5", evidence_basis: "missing", pricing_basis: "metered_estimate", tokens: 980_000,
+    first_event_at_ms: 1, last_event_at_ms: 2, session_count: 4, effective_start: month, effective_end: month,
+    estimated_amounts: [{ amount_minor: 760, currency: "CNY", basis: "metered_estimate" }], unpriced_tokens: 0, unresolved_reason: null },
+  { group_id: "codex|openai|gpt-mystery|missing|unavailable|" + month, host: "codex", provider_id: "openai",
+    model_id: "gpt-mystery", evidence_basis: "missing", pricing_basis: "unavailable", tokens: 18_000,
+    first_event_at_ms: 1, last_event_at_ms: 2, session_count: 1, effective_start: month, effective_end: month,
+    estimated_amounts: [], unpriced_tokens: 18_000, unresolved_reason: "no compatible price card" },
+] };
+const candidatesReport = { status: "ok", candidates: [{ candidate_id: "candidate-test", host: "codex", provider_id: "openai",
+  amount_minor: 2000, currency: "USD", billing_period_start: "2026-06-01", status: "pending" }] };
+await sandbox.renderBillingConfirmation(groupsReport, candidatesReport);
+ok(elements["ov-billing-prompt"].hidden === false, "待确认组存在时显示入口提示");
+const promptCopy = elements["ov-billing-prompt-copy"].textContent;
+ok(/发现 3 组/.test(promptCopy) && /2\.63M|2,630,000|263/.test(promptCopy.replace(/\s/g, "")) === false || /发现 3 组/.test(promptCopy),
+  "提示按组计数（组 + 无用量候选各一行）");
+ok(promptCopy.includes("18.92") && promptCopy.includes("7.60") && !promptCopy.includes("26.52"),
+  "提示金额分币列出，USD 与 CNY 永不相加");
+ok(promptCopy.includes("确认后可区分订阅覆盖和额外按量费用") && promptCopy.includes("已按官方价估算"),
+  "提示同时说清受影响用量、当前默认处理与确认收益（AC26）");
 ok(elements["ov-billing-review-panel"].hidden === true, "初始状态保持确认面板收起");
 await elements["ov-billing-review"].onclick();
-ok(elements["ov-billing-review-panel"].hidden === false &&
-  elements["ov-billing-review-list"].children.length === 1,
-  "点击确认套餐信息展开面板并渲染候选行");
-ok(js.includes('relationshipKind === "unknown"') &&
-  js.includes("候选继续待确认，未创建计费声明") &&
-  js.includes("保持待确认并返回"),
-  "仍不确定路径保留 pending/估算，不创建确认声明");
-ok(js.includes("if (billingReviewOpen) reviewButton.onclick();"),
-  "异步候选刷新完成后会补绘已提前展开的确认面板");
+const reviewRows = elements["ov-billing-review-list"].children;
+ok(elements["ov-billing-review-panel"].hidden === false && reviewRows.length === 3,
+  "点击确认计费方式展开面板并按组渲染三行");
+ok(reviewRows[0].children[0].textContent.includes("gpt-5.6-sol") && reviewRows[2].children[0].textContent.includes("无价卡"),
+  "V3：金额最大的组在前，无价卡的组排最后");
+ok(reviewRows[0].children[0].children.some((child) => child.textContent.includes("来自旧版本套餐记录")),
+  "旧资产候选作为证据行挂在同宿主同 provider 的组下");
+const rowButtons = reviewRows.map((row) => row.children[1].children.map((b) => b.textContent));
+ok(rowButtons.every((labels) => labels.length === 1 && labels[0] === "确认计费方式"),
+  "每组只有一个主操作「确认计费方式」");
+
+// 声明面板：预览→确认并保存（自动入队）→回执含撤销。
+const billingCalls = [];
+const previewFixture = (args) => ({ status: "ok", host: args.host, provider_id: args.providerId,
+  relationship_kind: args.relationshipKind, effective_start: args.effectiveStart, effective_end: args.effectiveEnd,
+  scopes: args.scopes, changes_amounts: args.relationshipKind === "official_subscription",
+  moved: { fact_count: 21, session_count: 7, tokens: 1_650_000, unpriced_tokens: 0,
+    amounts: args.relationshipKind === "official_subscription" ? [{ amount_minor: 1892, currency: "USD", basis: "metered_estimate" }] : [],
+    estimated_amounts: [{ amount_minor: 1892, currency: "USD", basis: "metered_estimate" }] },
+  kept: { tokens: 18_000, unpriced_tokens: 18_000, amounts: [] },
+  pending: { fact_count: 2, tokens: 900, reasons: ["route-evidence-conflict"] },
+  first_event_ts_ms: 1, last_event_ts_ms: 2 });
+billingOverride = async (command, args) => {
+  billingCalls.push({ command, args });
+  if (command === "billing_candidate_impact_preview") return previewFixture(args);
+  if (command === "save_billing_declaration_revision") {
+    return { status: "saved", revision_id: args.revisionId, declaration_id: args.declarationId, changed: true,
+      job: args.relationshipKind === "official_subscription" ? { job_id: "billing-" + args.revisionId, status: "queued", changed: true } : null };
+  }
+  if (command === "billing_recalculation_job_status") return { status: "succeeded", job_id: args.jobId };
+  if (command === "revoke_billing_declaration") return { status: "revoked" };
+  return undefined;
+};
+sandbox.renderOverview = async () => { billingCalls.push({ command: "<renderOverview>" }); };
+await reviewRows[0].children[1].children[0].onclick();
+ok(elements["ov-billing-declaration-panel"].hidden === false && elements["ov-billing-relationship"].value === "official_subscription",
+  "打开声明面板，默认关系为官方订阅");
+ok(elements["ov-billing-start"].value === month && elements["ov-billing-end"].value === month && elements["ov-billing-end"].max === month,
+  "起止月默认为组所在月，结束月上限为当前统计月（§5.4）");
+ok(elements["ov-billing-scope-text"].textContent.includes("gpt-5.6-sol") && elements["ov-billing-scope-text"].textContent.includes("北京时间"),
+  "作用范围文案点名模型并标注北京自然月（D3）");
+ok(elements["ov-billing-relationship-effect"].textContent.includes("移出按量估算"), "关系选项旁有结果说明");
+elements["ov-billing-end"].value = "2999-01";
+await elements["ov-billing-save"].onclick();
+ok(elements["ov-billing-preview"].textContent.includes("不能晚于当前统计月") && !billingCalls.some((c) => c.command === "billing_candidate_impact_preview"),
+  "结束月晚于当前统计月时前端直接拒绝，不发预览请求（G3）");
+elements["ov-billing-end"].value = month;
+await elements["ov-billing-save"].onclick();
+const previewCall = billingCalls.find((c) => c.command === "billing_candidate_impact_preview");
+ok(previewCall && previewCall.args.effectiveEnd === month && previewCall.args.relationshipKind === "official_subscription"
+  && previewCall.args.scopes.length === 1 && previewCall.args.scopes[0].scope_value === "gpt-5.6-sol" && !("windowStartMs" in previewCall.args),
+  "预览参数 = 保存参数（宿主/provider/关系/起止月/模型作用域），不传统计月窗口（G2）");
+const previewText = elements["ov-billing-preview"].textContent;
+ok(previewText.includes("预计从按量估算中移出") && previewText.includes("18.92") && previewText.includes("保持估算 18K")
+  && previewText.includes("仍待确认 900") && previewText.includes("路由证据冲突"),
+  "V2：预览展示移出 / 保持 / 仍待确认三组数字与分币金额（§5.5）");
+ok(elements["ov-billing-save"].textContent === "确认并保存声明" && !billingCalls.some((c) => c.command === "save_billing_declaration_revision"),
+  "预览后按钮变为「确认并保存声明」，尚未写入");
+await elements["ov-billing-save"].onclick();
+const saveCall = billingCalls.find((c) => c.command === "save_billing_declaration_revision");
+ok(saveCall && saveCall.args.effectiveEnd === month && saveCall.args.relationshipKind === "official_subscription"
+  && saveCall.args.sourceCandidateId === "candidate-test" && saveCall.args.scopes[0].scope_kind === "model",
+  "保存参数与预览一致，并把候选作为证据 source_candidate_id 带上");
+ok(!billingCalls.some((c) => c.command === "enqueue_billing_recalculation"),
+  "前端不再单独入队：入队由保存命令完成（G6）");
+ok(billingCalls.some((c) => c.command === "billing_recalculation_job_status") && billingCalls.some((c) => c.command === "<renderOverview>"),
+  "保存后轮询重算回执并刷新总览");
+const receipt = elements["ov-billing-preview"];
+ok(receipt.textContent.includes("声明已保存") && receipt.textContent.includes("重算已完成") && receipt.children.some((b) => b.textContent === "撤销"),
+  "回执原位显示修订、范围与重算状态，并提供撤销");
+await receipt.children.find((b) => b.textContent === "撤销").onclick();
+ok(billingCalls.some((c) => c.command === "revoke_billing_declaration" && c.args.supersedesRevisionId === saveCall.args.revisionId),
+  "撤销追加修订并 supersede 当前修订，不删历史");
+
+// 仍不确定：两次点击只记录 30 天降级，不写声明。
+billingCalls.length = 0;
+await reviewRows[1].children[1].children[0].onclick();
+elements["ov-billing-relationship"].value = "unknown";
+elements["ov-billing-relationship"].onchange();
+await elements["ov-billing-save"].onclick();
+ok(elements["ov-billing-preview"].textContent.includes("这组用量继续待确认，未创建计费声明") && elements["ov-billing-save"].textContent === "保持待确认并返回",
+  "仍不确定：先展示影响，不创建声明（AC28）");
+await elements["ov-billing-save"].onclick();
+ok(!billingCalls.some((c) => c.command === "save_billing_declaration_revision") && storage["agent-vitals-billing-review-deferred-at-ms"],
+  "V4：仍不确定第二次点击只记录 30 天降级，无 save 调用");
+billingOverride = null;
+
+ok(js.includes("if (billingReviewOpen) renderRows();"),
+  "异步读取完成后会补绘已提前展开的确认面板");
 await sandbox.renderBillingRecalculationJobs({ status: "ok", jobs: [{
   job_id: "job-retry-test", declaration_id: "decl-test", revision_id: "rev-test",
-  status: "failed", error_detail: "worker interrupted",
+  status: "failed", error_code: "interrupted", error_detail: "SqliteFailure(Error { code: Busy })",
 }] });
+const jobRow = elements["ov-billing-recalculation-list"].children[0];
 ok(elements["ov-billing-recalculation-panel"].hidden === false &&
-  elements["ov-billing-recalculation-list"].children.length === 1 &&
-  elements["ov-billing-recalculation-list"].children[0].children[1].children[0].textContent === "重试重算",
-  "重算失败状态显示旧结果可用与重试按钮");
-
+  jobRow.children[1].children[0].textContent === "重试重算" &&
+  jobRow.children[0].textContent.includes("上次退出时中断") && !jobRow.children[0].textContent.includes("SqliteFailure"),
+  "重算失败状态显示旧结果可用、error_code 人话与重试按钮，原始错误串不上卡面（§5.10）");
 console.log(failed ? `\n${failed} FAIL` : "\n全部通过。");
 process.exit(failed ? 1 : 0);

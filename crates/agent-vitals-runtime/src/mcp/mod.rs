@@ -23,7 +23,7 @@ mod session_ref;
 mod sessions_search;
 mod usage_hourly;
 mod budget_profiles;
-mod cost_breakdown;
+pub(crate) mod cost_breakdown;
 mod control_plane;
 mod data_quality_issues;
 mod workflow_summary;

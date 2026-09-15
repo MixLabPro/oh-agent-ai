@@ -909,60 +909,32 @@ pub fn unresolved_billing_groups(month: &str) -> serde_json::Value {
     let Some(db) = SqlSummaryRepository::new().open_db() else {
         return json!({"month": month, "groups": [], "status": "unavailable"});
     };
+    unresolved_billing_groups_in(&db, month)
+}
+
+/// 组的定义只有一份：`authority_query::SQL_UNRESOLVED_BILLING_GROUPS`。这里只做
+/// 月窗与序列化；金额由 `billing_preview::confirmation_groups` 用同一条计价路径补。
+pub fn unresolved_billing_groups_in(
+    db: &agent_vitals_data::authority::AuthorityDb, month: &str,
+) -> serde_json::Value {
     let Some((start, end)) = agent_vitals_data::authority_query::beijing_month_bounds_ms(month) else {
         return json!({"month": month, "groups": [], "status": "invalid_month"});
     };
-    let mut stmt = match db.conn().prepare(
-        "SELECT host, COALESCE(provider_id, '<unknown>'), COALESCE(model_id, '<unknown>'),
-                COALESCE(evidence_basis, 'missing'), COALESCE(pricing_basis, 'unavailable'),
-                SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens),
-                MIN(event_ts_ms), MAX(event_ts_ms),
-                COUNT(DISTINCT COALESCE(session_key, host || ':' || machine_namespace || ':' || native_session_id))
-         FROM usage_facts
-         WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'
-           AND event_ts_ms >= ?1 AND event_ts_ms < ?2
-           AND COALESCE(billing_mode, 'unknown') != 'subscription'
-           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
-               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
-               WHERE ba.fact_id = usage_facts.fact_id
-                 AND ba.attribution_kind = 'subscription_covered'
-                 AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2
-                   WHERE br2.declaration_id = br.declaration_id)
-                 AND br.change_kind = 'saved')
-           AND (COALESCE(pricing_basis, 'unavailable') = 'metered_estimate'
-                OR COALESCE(evidence_basis, 'missing') != 'explicit-official-route')
-         GROUP BY host, provider_id, model_id, evidence_basis, pricing_basis
-         ORDER BY SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens) DESC",
-    ) { Ok(stmt) => stmt, Err(_) => return json!({"month": month, "groups": [], "status": "unavailable"}) };
-    let rows = stmt.query_map(rusqlite::params![start, end], |r| Ok(json!({
-        "host": r.get::<_, String>(0)?, "provider_id": r.get::<_, String>(1)?,
-        "model_id": r.get::<_, String>(2)?, "evidence_basis": r.get::<_, String>(3)?,
-        "pricing_basis": r.get::<_, String>(4)?, "tokens": r.get::<_, i64>(5)?,
-        "first_event_at_ms": r.get::<_, i64>(6)?, "last_event_at_ms": r.get::<_, i64>(7)?,
-        "session_count": r.get::<_, i64>(8)?, "estimated_cost_minor": serde_json::Value::Null,
-    })));
-    let groups = rows.ok().into_iter().flatten().filter_map(Result::ok).collect::<Vec<_>>();
-    json!({"month": month, "groups": groups, "status": "ok"})
-}
-
-/// 统一的只读声明影响预览入口；桌面与 CLI 共享数据层口径，不在 UI 拼 SQL。
-pub fn billing_declaration_impact_preview(
-    revision_id: &str, window_start_ms: i64, window_end_ms: i64,
-) -> serde_json::Value {
-    let Some(db) = SqlSummaryRepository::new().open_db() else {
-        return json!({"status": "unavailable", "revision_id": revision_id});
+    let rows = match agent_vitals_data::authority_query::unresolved_billing_group_rows(db.conn(), start, end) {
+        Ok(rows) => rows,
+        Err(_) => return json!({"month": month, "groups": [], "status": "unavailable"}),
     };
-    match db.billing_declaration_impact_preview(revision_id, window_start_ms, window_end_ms) {
-        Ok(preview) => json!({
-            "status": "ok", "revision_id": revision_id,
-            "fact_count": preview.fact_count, "session_count": preview.session_count,
-            "total_tokens": preview.total_tokens,
-            "first_event_ts_ms": preview.first_event_ts_ms,
-            "last_event_ts_ms": preview.last_event_ts_ms,
-        }),
-        Err(_) => json!({"status": "unavailable", "revision_id": revision_id}),
-    }
+    let groups = rows.into_iter().map(|row| json!({
+        "group_id": format!("{}|{}|{}|{}|{}|{month}", row.host, row.provider_id, row.model_id,
+            row.evidence_basis, row.pricing_basis),
+        "host": row.host, "provider_id": row.provider_id, "model_id": row.model_id,
+        "evidence_basis": row.evidence_basis, "pricing_basis": row.pricing_basis,
+        "tokens": row.tokens, "first_event_at_ms": row.first_event_at_ms,
+        "last_event_at_ms": row.last_event_at_ms, "session_count": row.session_count,
+        "effective_start": month, "effective_end": month,
+        "estimated_cost_minor": serde_json::Value::Null,
+    })).collect::<Vec<_>>();
+    json!({"month": month, "groups": groups, "status": "ok"})
 }
 
 /// codex 下钻的纯分类核（可注入真实两层形状做钉测）：`by_model` 是
