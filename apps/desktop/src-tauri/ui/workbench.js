@@ -1979,8 +1979,21 @@ function openBillingDeclaration(target, rows) {
   asks.push("计费方式");
   if (missingText) missingText.textContent = "待补充：" + asks.join("、") + "。按顺序补齐即可，不要求一次填完整表单；这一步只明确计费关系，不证明已付款。";
   const batchModels = document.getElementById("ov-billing-batch-models");
+  const batchToggle = document.getElementById("ov-billing-batch-models-toggle");
   if (batchModels) {
     batchModels.textContent = "";
+    batchModels.hidden = true;
+    if (batchToggle) {
+      const total = peers.length + 1;
+      const label = (open) => (open ? "收起模型清单" : "查看这 " + total + " 个模型");
+      batchToggle.textContent = label(false);
+      batchToggle.setAttribute("aria-expanded", "false");
+      batchToggle.onclick = () => {
+        batchModels.hidden = !batchModels.hidden;
+        batchToggle.textContent = label(!batchModels.hidden);
+        batchToggle.setAttribute("aria-expanded", batchModels.hidden ? "false" : "true");
+      };
+    }
     for (const row of [target, ...peers]) {
       const chip = document.createElement("span");
       chip.className = "bd-model" + (row === target ? " is-target" : "");

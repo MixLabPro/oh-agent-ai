@@ -1766,8 +1766,9 @@ summary.detail-section-title {
 .billing-batch[hidden] { display: none; }
 .billing-batch-toggle { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; cursor: pointer; }
 .billing-batch-toggle input { margin-top: 3px; }
+.bd-models-toggle { justify-self: start; margin-left: 24px; font-size: 12px; }
 .bd-models { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 24px; }
-.bd-models:empty { display: none; }
+.bd-models[hidden], .bd-models:empty { display: none; }
 .bd-model { font-size: 11px; line-height: 18px; padding: 0 8px; border-radius: 9px;
   background: var(--panel); border: 1px solid var(--line, #dce4f2); color: var(--text); }
 .bd-model.is-target { font-weight: 600; }

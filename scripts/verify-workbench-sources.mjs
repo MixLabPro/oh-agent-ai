@@ -184,7 +184,7 @@ for (const id of ["ov-billing-prompt", "ov-billing-review-panel", "ov-billing-re
   "ov-billing-batch-row", "ov-billing-batch", "ov-billing-batch-text",
   "ov-billing-provider-row", "ov-billing-provider", "ov-billing-route-row", "ov-billing-route",
   "ov-billing-mode-row", "ov-billing-mode", "ov-billing-subscription-fields", "ov-billing-subscription-name",
-  "ov-billing-backdrop", "ov-billing-close", "ov-billing-declaration-stats", "ov-billing-batch-models", "ov-billing-dates-row",
+  "ov-billing-backdrop", "ov-billing-close", "ov-billing-declaration-stats", "ov-billing-batch-models", "ov-billing-batch-models-toggle", "ov-billing-dates-row",
   "ov-billing-subscription-amount", "ov-billing-subscription-currency", "ov-billing-amount-unknown",
   "ov-billing-recalculation-panel", "ov-billing-recalculation-list",
   "settings-billing-candidates", "settings-billing-candidates-copy", "settings-billing-candidates-open"]) {
@@ -291,10 +291,14 @@ ok(elements["ov-billing-declaration-panel"].hidden === false && elements["ov-bil
 ok(elements["ov-billing-batch-row"].hidden === false && elements["ov-billing-batch"].checked === true
   && /将同时处理 2 个模型、8 个会话、1\.8M tokens/.test(elements["ov-billing-batch-text"].textContent),
   "默认勾选同宿主、同未知原因、同日期的同类组并汇总模型/会话/tokens");
-ok(elements["ov-billing-batch-models"].children.length === 2
+ok(elements["ov-billing-batch-models"].hidden === true && elements["ov-billing-batch-models-toggle"].textContent === "查看这 2 个模型",
+  "模型清单默认折叠，只留一个展开入口");
+elements["ov-billing-batch-models-toggle"].onclick();
+ok(elements["ov-billing-batch-models"].hidden === false && elements["ov-billing-batch-models"].children.length === 2
   && elements["ov-billing-batch-models"].children.map((c) => c.textContent).join("|").includes("gpt-5.6-sol")
-  && elements["ov-billing-batch-models"].children.map((c) => c.textContent).join("|").includes("gpt-5.6-luna"),
-  "批量行列出将一起处理的模型（含 token 规模），不只给个数");
+  && elements["ov-billing-batch-models"].children.map((c) => c.textContent).join("|").includes("gpt-5.6-luna")
+  && elements["ov-billing-batch-models-toggle"].textContent === "收起模型清单",
+  "展开后列出将一起处理的模型（含 token 规模），可再收起");
 ok(elements["ov-billing-backdrop"].hidden === false && elements["ov-billing-declaration-stats"].textContent.includes("1.6M tokens · 7 个会话"),
   "弹窗打开时显示真实遮罩层，头部规模信息单独一行");
 ok(elements["ov-billing-scope-text"].textContent.includes("2 个模型（gpt-5.6-sol 等）") && elements["ov-billing-scope-text"].textContent.includes(monthStart + " – " + today),

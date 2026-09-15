@@ -450,7 +450,10 @@
               <input id="ov-billing-batch" type="checkbox" checked>
               <span id="ov-billing-batch-text"></span>
             </label>
-            <div class="bd-models" id="ov-billing-batch-models" aria-label="将一起处理的模型"></div>
+            <!-- 模型清单默认折叠：勾选行一句话已够决策，展开只为核对（2026-09-15 截图反馈）。 -->
+            <button class="chip-link bd-models-toggle" id="ov-billing-batch-models-toggle" type="button"
+              aria-expanded="false" aria-controls="ov-billing-batch-models"></button>
+            <div class="bd-models" id="ov-billing-batch-models" aria-label="将一起处理的模型" hidden></div>
           </div>
           <!-- 按缺什么问什么（规格 v1.2 §5.3a），左标签右控件，只给可见步骤编号。 -->
           <div class="bd-grid">
