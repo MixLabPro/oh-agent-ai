@@ -257,6 +257,8 @@ const wbPull = makePullMerger();
 // 合并的「重拉当前 tab」入口：事件桥与手点都走这里。只刷两个便宜页
 // （overview/calendar）：sessions/findings/sources 是懒加载的重活（spawn 二进制、
 // 几十秒），fold 事件不该把用户正在看的分页/筛选搅掉——与聚焦刷新同一口径。
+// 普通 tab 切换由 loadActiveTab() 负责首进加载；日历同一月份命中缓存，事件桥
+// 和显式刷新仍会直接走到这里。
 async function refreshActiveTab() {
   if (!wbPull.fire()) return;
   do {
@@ -372,6 +374,9 @@ function subscribeFocusTargetEvent() {
 
 let activeTab = "overview";
 let calMonth = statisticsMonth();
+// 用量（日历）页按月份缓存首屏结果。切换 tab 不应重复发起同一月份的两次
+// 查询；事件桥、刷新按钮和月份选择仍会直接调用 renderCalendar() 主动更新。
+let calendarLoadedMonth = null;
 let calSelectedDate = null; // 当日按小时面板选中的日期（null = 今天）
 let calData = null;
 let calMetric = "tokens"; // 日历主数：tokens 或按来源口径的成本
@@ -403,8 +408,11 @@ async function loadActiveTab() {
   // 总览/日历的所有入口（切 tab、刷新按钮、窗口 focus、fold 事件）必须共用
   // wbPull：否则连续点刷新或频繁切回窗口仍会绕开事件桥的合并器，重叠查询同一
   // 份 SQL 数据。sessions/findings/sources 保留各自的懒加载语义，不进这里。
-  if (activeTab === "overview" || activeTab === "calendar") {
+  if (activeTab === "overview") {
     await refreshActiveTab();
+  }
+  else if (activeTab === "calendar") {
+    if (calendarLoadedMonth !== calMonth) await refreshActiveTab();
   }
   // 会话页懒加载：首进一次，之后只在「重载列表 / 加载更多」时拉。切 tab 不重拉
   // 也不追加——反复 overview↔sessions 切着看，分页游标不能被一次切换吞掉一页。
@@ -3520,9 +3528,11 @@ async function renderCalendar() {
     empty.textContent = "读取失败：" + errText(e);
     grid.innerHTML = "";
     total.textContent = "";
+    calendarLoadedMonth = null;
     return;
   }
   calData = resp;
+  calendarLoadedMonth = calMonth;
   grid.innerHTML = "";
 
   // 数据源 panel（v0.9 Stage 0.6 日历页月份级诚实状态）：并发拉
