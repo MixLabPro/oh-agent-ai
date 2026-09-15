@@ -1,0 +1,293 @@
+# v1.0.0-beta.1 计费确认主链规格（B06 / B07）
+
+**状态：** Draft v1（2026-09-15 按代码逐行核对写成），作为 Beta 1 P2 / B1-M3「计费闭环」的实现合同  
+**日期：** 2026-09-15  
+**范围编号：** [发布规格](BETA_1_RELEASE_SPEC.md) B06、B07；真机矩阵 T06、T08、T10；[执行计划](BETA_1_EXECUTION_PLAN.md) E201–E208；PRD REQ-017–032、REQ-143–149；AC05、AC09、AC13、AC14、AC26、AC27、AC28  
+**关联文档：** [UAT 2026-09-15](UAT_FULL_2026-09-15.md)、[小闭环 UAT 清单](UAT_SMALL_LOOPS.md)、[总览后端接入规格](BETA_1_OVERVIEW_BACKEND_INTEGRATION_SPEC.md)、[设置页规格](BETA_1_SETTINGS_PAGE_SPEC.md)、[版本冻结记录](BETA_1_VERSION_FREEZE_2026-09-15.md)、[Provider 路由归属规格](../PROVIDER_ROUTE_ATTRIBUTION_SPEC.md)
+
+## 0. 一句话结论
+
+这条链**不是从零开始**：数据层的声明/修订/作用范围/重算任务/归因表、原子发布、
+重启恢复、撤销，以及内部 MCP `billing_workflow` 的 20 个 typed 动作都已实现并有
+测试。真正的缺口有六处，其中三处会让用户在真实 `.app` 里得到**错误的结论**（而
+不只是缺证据），必须在 T08 真机验收之前修：
+
+| # | 缺口 | 严重度 | 现象 |
+|---|---|---|---|
+| G1 | 候选列表的主按钮「是我的套餐」只改候选状态，**不产生归因、不重算**，用量仍按量估算；而提示文案承诺「确认后就能分清哪些在套餐内」 | **P0**（AC27 反向失败：用户以为确认了，数字没变） | `workbench.js:2359-2426` |
+| G2 | 保存前预览只算**当前统计月**，重算却按声明有效期**全历史**归因（`i64::MIN..MAX`）；预览 ≠ 实际写入范围 | **P0**（E203「预览与实际写入使用同一范围」失败） | `workbench.js:1865-1873` vs `authority.rs:2524` |
+| G3 | 声明一律 `effective_end = null`（开放到未来）；B06 明令 Beta「不自动扩展到未来记录」 | **P0**（范围纪律） | `workbench.js:1899` |
+| G4 | 预览没有金额，只有 tokens/事实/会话；REQ-026/AC27 要求「移出估算 X / 保持估算 X / 仍待确认 X」 | P1 | `BillingDeclarationImpactPreview` 无金额字段 |
+| G5 | REQ-023 的「宿主 × provider × 模型 × 路由证据」分组已在数据层实现（`summary.rs:908 unresolved_billing_groups`）但**零消费方**；UI 只从旧资产迁移候选 `billing_import_candidates` 出发，无旧资产的新用户看不到任何待确认组 | P1（E201 一般情形不成立） | `summary.rs:908`；无 Tauri 命令 |
+| G6 | 保存与重算分成「保存」「应用」两次点击；只保存不应用会留下「声明已存在、数字未变、待处理列表也不显示」的半状态 | P1 | `workbench.js:1911-1912, 1919` |
+
+另有三处不改数字但要收口：修订级预览 `billing_declaration_impact_preview` 前端零调用（孤儿端点）；「稍后」的 30 天降级存在 webview `localStorage` 而不在权威库；声明的生效月边界硬编码北京时（`'+8 hours'`），与可配置统计时区无关。§8 给出决策。
+
+## 1. 目标
+
+用户在真实 `.app` 中不看文档、不开终端，能完成两条路径并得到与 CLI/MCP 一致的结果：
+
+1. **确认路径**：总览提示 → 待确认组 → 选「官方订阅」→ 看到作用范围与金额变化 → 保存 → 重算回执 → 总览/日历/会话同一版本 → 撤销 → 回到确认前。
+2. **不确定路径**：选「仍不确定」或「稍后」→ 按量估算与不确定标记保留 → 退出重开仍能从待处理找回 → 30 天内不再抢占首屏。
+
+以及一条恢复路径：重算失败 / 处理中退出 → 重开后旧结果仍可读、任务可见可重试、没有半发布。
+
+## 2. 范围与非目标
+
+### 2.1 本规格改动的范围
+
+- 候选/待确认组的**来源与分组**（G5）、主按钮语义（G1）。
+- 声明的**作用范围纪律**：显式起止月 + 模型作用域（G3）。
+- **预览合同**：范围 = 写入范围，三个数字 + 分币金额（G2、G4）。
+- **保存即入队**的单动作合同与回执（G6）。
+- 撤销、不确定/稍后、失败/重试/重启恢复的既有实现按本规格钉住不变量并补真机证据。
+- 删除孤儿端点；不新增第二套预览/计价逻辑。
+
+### 2.2 不在范围（保持 D01/D02 延期状态，不得因本规格回流）
+
+- 付款/账单录入、CSV 导入、已确认支出预算（D01）。`host_bill_*` 命令保留只读兼容，不新增入口。
+- 第三方价卡/倍率编辑、多账户套餐、「以后同类记录」自动声明（D02）。`relationship_kind = third_party` 在 Beta 只记录关系，不改变金额。
+- 跨宿主 canonical 归一（D05）：组键用 `host/raw` 消歧后的 `provider_id`/`model_id`，不合并实体。
+- 在线价目更新（D06）。
+- 修改**已保存**声明的编辑表单：Beta 只提供「撤销后重新确认」，不提供原位编辑（这也是删除修订级预览端点的依据）。
+
+### 2.3 计费边界（发布规格 §3.1，本规格不得放松）
+
+- 声明只改变**归因**（哪些用量在套餐内），永不产生「已付款」：`actual spend` 仍只来自账单/付款记录。
+- 币种永不相加；金额永远带 `currency` 与 `basis`。
+- `unknown` 不是声明：不写 `billing_declarations`，不入队重算。
+- 原始 `usage_facts` 不因任何声明/撤销/重算而变；守恒用 `data-reimport-verify` 与事实计数对拍。
+
+## 3. 数据模型与「一个谓词」
+
+已存在（`crates/agent-vitals-data/src/authority.rs`，schema v13）：
+
+| 表 | 作用 | 关键约束 |
+|---|---|---|
+| `billing_import_candidates` | 旧资产迁移出的套餐候选（`pending/accepted/dismissed`） | 幂等 put；`reopen` 回到 pending |
+| `billing_declarations` | 声明当前态（每 `declaration_id` 一行） | upsert |
+| `billing_declaration_revisions` | 不可变修订（`saved`/`revoked`），`revision_number` 递增、`supersedes_revision_id` 唯一 | `save` 校验必须 supersede 当前修订（`authority.rs:2136-2150`） |
+| `billing_declaration_scopes` | 修订的作用域 `account/route/model/session` | 同一修订内不得重复 |
+| `billing_recalculation_jobs` | 每修订一个任务（`ON CONFLICT(revision_id) DO NOTHING`） | `queued→running→succeeded/failed/cancelled`；`retry` 只允许 failed/cancelled |
+| `billing_recalculation_results` | 任务结果快照 | 只在 COMMIT 内写入 |
+| `billing_fact_attributions` | 事实级归因（`subscription_covered` / `user_declared`） | 只在 COMMIT 内写入（`authority.rs:2555-2596`） |
+
+**唯一的排除谓词**（所有金额/日历/小时/会话/MCP 查询共用；`authority_query.rs:58-63` 等 7 处、`summary.rs:925`（`unresolved_billing_groups`）、`cost_breakdown.rs:222`）：
+
+```sql
+NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+  JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+  WHERE ba.fact_id = usage_facts.fact_id
+    AND ba.attribution_kind = 'subscription_covered'
+    AND br.revision_number = (SELECT MAX(br2.revision_number)
+        FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+    AND br.change_kind = 'saved')
+```
+
+由此推出三条本规格依赖的既有事实，验收时按它们解释现象：
+
+1. **只有 `official_subscription` 改数字。** 重算把该修订匹配到的事实写成 `subscription_covered`，按量估算随即排除它们；其他四种 kind 写 `user_declared`，谓词不认，金额不变（`authority.rs:2541-2544`）。UI 必须把这件事说出来（§5.3），不能让「组织承担」看起来像省了钱。
+2. **撤销不需要重算。** `revoke` 追加 `change_kind='revoked'` 的新修订成为 MAX，谓词立即失效，事实回到按量估算；旧 `results`/`attributions` 原样保留可追溯（`authority.rs:2194-2260`）。
+3. **未归因的事实永远按量。** 归因只在重算 COMMIT 时按当时存在的 `fact_id` 写入；之后同步进来的新事实没有归因行。所以「不自动扩展到未来」在数据层已经成立——但只要 `effective_end` 为空，任何一次 `retry` 或新修订的重算都会把新事实扫进去。G3 因此必须在写入侧堵住，而不是依赖这个副作用。
+
+## 4. 术语
+
+| 词 | 定义 | Beta 里的来源 |
+|---|---|---|
+| 候选（candidate） | 旧资产迁移出的「你可能有这个套餐」记录 | `billing_import_candidates` |
+| 待确认组（group） | 一个月内 `host × provider_id × model_id × evidence_basis × pricing_basis` 上仍按量估算或路由证据不是 `explicit-official-route` 的用量聚合 | `summary.rs:908 unresolved_billing_groups` |
+| 声明（declaration） | 用户对「这批用量如何付费」的回答；版本化 | `billing_declarations` + revisions |
+| 作用范围（scope） | 声明命中事实的条件：`host`、`provider_id`、`effective_start..=effective_end`（北京月）、`scopes[]` | revision + scopes |
+| 影响预览（preview） | 在**与写入完全相同的范围**上只读计算：命中事实数/会话数/tokens，以及分币金额三分 | §5.5 |
+| 重算（recalc） | 把一个 `saved` 修订的命中事实写成归因并原子发布结果快照 | `billing_recalculation_run` |
+| 回执（receipt） | 保存后原位显示的结果：修订号、任务状态、范围、金额变化、撤销按钮 | §5.6 |
+
+候选与组的关系：候选只是组的一种**证据来源**（`evidence_ref = legacy-import-candidate:<id>`，`source_candidate_id` 回填）。面板以**组**为单位展示；有候选证据的组预填 provider/金额/起始月，并在保存时把候选置为 `accepted`（`authority.rs:2109-2135` 已做）。
+
+## 5. 用户路径合同
+
+### 5.1 入口提示（AC26、REQ-019/020）
+
+- 触发条件：本统计月 `unresolved_billing_groups` 非空**或**存在 pending 候选。只有候选、无组时（旧资产但当月无用量）也提示。
+- 文案必须同时含三件事：受影响 tokens 与会话数（各组求和）、当前默认处理（「已按官方价估算」）、确认收益（「确认后可区分订阅覆盖和额外费用」）。金额只在**单币**时显示总数，多币按币种分列，不相加。
+- 主按钮文案固定「确认计费方式」；次操作「稍后」；不得出现「编辑」「已省」。「查看数据状态」是另一个入口，不能替代。
+- 现有实现：`workbench.js:2306-2323`、`renderBillingImportCandidates`。改动：`pendingTokens` 的来源从候选 `impact` 改为组聚合 + 候选并集（§6 F1）。
+
+### 5.2 待确认组面板（REQ-023、E201）
+
+- 打开位置：不离开总览的侧边面板（当前实现跳到「数据源」tab 的 `ov-billing-review-panel`，`workbench.js:2339 switchTab("sources")`——**改回总览内面板或独立抽屉**，不得把用户带到数据源页；这是 UI/UX 差距分析已指出的信息架构问题）。
+- 数据源：新增只读 Tauri 命令 `billing_confirmation_groups(month)`，返回 `runtime::summary::unresolved_billing_groups(month)` 的结果并补齐 `estimated_amounts[]`（§6 B1）。
+- 排序：默认按**估算金额**降序（同币内），无价卡的组按 tokens 降序排在有金额组之后；不得按创建顺序或 `candidate_id`。
+- 每组展示：宿主、provider、模型、路由证据（`evidence_basis` 的用户文案映射，见设置页规格的 reason code 表）、日期范围（`first/last_event_at_ms` 按统计时区）、会话数、tokens、名义估算（分币）、当前依据（`pricing_basis`）与置信状态。
+- 组行只有一个主操作「确认计费方式」（打开 §5.3），没有「是我的套餐 / 不是」二选一（G1 的修法）。有候选证据的组附一行「来自旧版本套餐记录：<provider> <金额> 自 <月> 起」和一个文字链「这不是我的套餐」→ `candidate_resolve(dismissed)`，只处理候选，不碰用量。
+- 每次只展开一组。
+
+### 5.3 关系选择（REQ-021/024/029/030/031、AC05/AC09）
+
+面板第一问固定：「这批用量如何付费？」五选一，每项旁边一句**结果说明**（Beta 的真实行为，不许美化）：
+
+| 选项 | `relationship_kind` | Beta 对数字的影响 | 进一步问什么 |
+|---|---|---|---|
+| 官方订阅 | `official_subscription` | 命中用量移出按量估算，进入「订阅覆盖」；订阅月费只在有账单/付款记录时计入实际支出 | 套餐名（可空）、月费与币种（可选「金额暂不清楚」→ `amount_minor/currency = null`，不补挂牌价）、起止月 |
+| 官方 API | `official_api` | 金额不变（本来就按官方价估算）；记录为已确认依据 | 无 |
+| 第三方服务 | `third_party` | Beta 不改金额；提示「第三方价卡编辑随后续测试版提供，当前仍按官方价估算」 | 无（D02） |
+| 组织承担 | `organization` | 只改承担者标签；金额与估算状态不变，不等于免费 | 无 |
+| 仍不确定 | （不写声明） | 保持按量估算与不确定原因；进入待处理，30 天不抢首屏 | 无 |
+
+约束：
+
+- 同一宿主可有多条声明（不同 provider/模型/期间），但同一 `declaration_id` 的当前修订只有一条。
+- 与仓库 Watchlist 冲突的证据不被订阅吞掉（E207）：组的 `evidence_basis` 若已是 `explicit-official-route` 以外的**明确相反证据**（例如显式 custom endpoint），选「官方订阅」时预览必须显示「仍待确认 X」而非移出。实现：预览与重算都只匹配 `evidence_basis` 与组一致的事实（§6 B2 的 `route` scope）。
+- `unknown` 永不持久化为声明（守卫测试 §7 R4）。
+
+### 5.4 作用范围（REQ-025 的 Beta 子集、B06、G3）
+
+Beta 只开放两种范围，都**显式有界**：
+
+1. **仅这一组**（默认，系统推荐的最窄可靠范围）：`scopes = [{model: <model_id>}, {route: <route_evidence_id 或组的 evidence_basis 键>}]`，`effective_start = 组内最早事实所在月`，`effective_end = 组内最晚事实所在月`。
+2. **所选日期范围**：用户在起止月控件里改，`effective_end` 不得为空，`end >= start`，且不得晚于当前统计月。
+
+不开放「以后同类记录」（D02）；`effective_end = null` 在桌面命令层拒绝（§6 B3），内部 MCP `billing_workflow.declaration_save` 保持允许（它不是用户面）。
+
+月边界按数据层现状使用北京自然月（`strftime(... '+8 hours')`）。UI 起止月控件旁注明「按北京时间自然月」；统计时区改动不影响声明月（§8 D3）。
+
+### 5.5 影响预览（REQ-026、AC27、E203、G2、G4）
+
+- 预览必须与写入使用**同一组参数**：`host, provider_id, effective_start, effective_end, scopes`——`window_start/end_ms` 不再由前端按统计月传，而由后端从 `effective_start..=effective_end` 推出（§6 B2）。前端不得再传 `billingMonthWindow(statisticsMonth())`。
+- 返回三组数字，缺一不可：
+  - **移出估算**：命中且当前为 `metered_estimate` 的事实 → tokens、会话数、分币金额；
+  - **保持估算**：同 host/provider/期间内**未命中** scope 的事实 → tokens、分币金额；
+  - **仍待确认**：命中但 `evidence_basis` 与组不一致（冲突证据）或无价卡的事实 → tokens，金额标 `unresolved` 与原因码。
+- 金额口径 = 名义按量估算（`metered_estimate` 同一价卡版本），与总览「按量估算」卡片同源；由 `cost_breakdown` 的桶计价路径抽出的共享函数计算（§6 B1/B2），**不得**在预览里另写一套价格查询。
+- 非 `official_subscription` 的关系：预览仍显示三组，但「移出估算」恒为 0，并明示「此选项不改变金额」。
+- 文案模板：`预计从按量估算中移出 {tokens} tokens · {sessions} 个会话 · ¥{cny} / ${usd}；保持估算 {tokens}；仍待确认 {tokens}（{reason}）。范围：{host} · {provider} · {model} · {start}–{end}。` 币种缺项不显示，不写 0。
+
+### 5.6 保存 = 确认 + 入队（REQ-147、E204、G6）
+
+- 预览之后只有一个主按钮「确认并保存声明」。点击后**一次**用户动作完成：`save_billing_declaration_revision` → 成功后立即 `enqueue_billing_recalculation`（`official_subscription` 时）→ 返回 `{revision_id, declaration_id, job_id|null}`。不再有第二个「应用」按钮。
+- 顺序与失败语义：保存成功、入队失败 → 回执显示「声明已保存，重算未入队」+「重试入队」按钮；声明不回滚（修订是不可变事实）。
+- 回执（原位、不跳页）：修订号、范围、三组数字、任务状态（`queued/running/succeeded/failed`）、「撤销」按钮。轮询策略：前端 250ms × 20 次后若仍非终态，显示「后台处理中，可在待处理查看」，并把任务留在 `billing_recalculation_jobs` 列表（已实现，`workbench.js:758`）。
+- 幂等：同一 `revision_id` 重复保存返回 `changed=false`，不重复入队（数据层已保证）。
+
+### 5.7 各面刷新（AC27「总览/日历/会话/MCP 一致」）
+
+- 一致性来源不是「刷新调用」而是**§3 的唯一谓词**：任何面只要重新查询，就得到同一版本。桌面端日历与会话 tab 每次激活都重新查询（`workbench.js:264`），无 JS 端缓存。
+- 因此规格要求：重算成功与撤销成功后 `renderOverview()`（已做），并**使总览首屏内嵌的日历/近几天小部件与「按量估算」卡片同时刷新**（它们都在 `renderOverview` 内，已做）。不新增跨 tab 推送。
+- 真机证据要求（T08）：同一隔离数据根上，保存前/后、撤销后三个时点各截：总览按量估算卡、日历该月合计、会话列表该组任一会话的成本依据、`data coverage --month`、MCP `cost_breakdown{group_by:[host,provider_id,billing_mode]}`。五处的移出金额必须逐位相等；`cost_breakdown` 的 `billing_mode='subscription'` 桶等于预览「移出估算」。
+- 性能：`billing_confirmation_groups` 与预览走 `SqlSummaryRepository` 直查；不得引入新的 fold 管线（CLAUDE.md 2026-09-05 事故）。
+
+### 5.8 撤销（AC13、E205）
+
+- 入口：回执上的「撤销」，以及「计费与套餐」设置分区里每条有效声明的「撤销计费声明」（已实现 `workbench.js:2221-2245`）。
+- 行为：`revoke_billing_declaration(revision_id=rev-revoke-*, declaration_id, supersedes=current_revision_id)`；不删除任何行；不入队重算（§3 事实 2）；回执文案「已撤销，用量已回到按量估算；历史修订与重算结果保留可查」。
+- 撤销后同一组重新出现在待确认组列表（谓词失效 → `unresolved_billing_groups` 再次命中）；来源候选若已 `accepted`，保持 accepted（候选≠归因），不自动 reopen。
+- 证据：撤销前后 `usage_facts` 计数与 `data-reimport-verify` 通过；`declaration_revisions` 长度 +1；金额回到确认前逐位相等。
+
+### 5.9 仍不确定 / 稍后（AC28、E206、T06）
+
+- 「仍不确定」：只做影响展示（已实现 `unknown_preview` 分支）+ 记录 30 天降级；不写声明、不改候选、不入队。
+- 「稍后」：只记录 30 天降级。
+- 30 天降级存储：Beta 保留 webview `localStorage` + `sessionStorage` 双写（`workbench.js:1784-1792`），理由与代价见 §8 D2。
+- 找回入口：待处理页 `BILLING_CONFIRMATION` 组（`issues.rs:592-608` 已投影 pending 候选；**需补**：无候选、只有组的情形也要投影，§6 B4）+ 设置「计费与套餐」分区的候选入口（已有 `settings-billing-candidates`）。
+- 真机证据：选「稍后」→ 退出 → 重开：首屏无提示；待处理可见；设置可打开；`data-unresolved --month` 该组仍在；`billing_declarations` 无新行。
+
+### 5.10 失败、重试、重启恢复（AC14、E208、T10）
+
+已实现且本规格钉住不变：
+
+- worker 在独立线程持 `.billing-recalculation.lock`（60s TTL），锁被占 → 任务 `failed(worker_busy)`；三次退避重试后 `failed(worker_failed)`（`lib.rs:2512-2564`）。
+- 启动时 `recover_billing_recalculations`：`running` → `failed(interrupted)`，`queued` 重新派发（`lib.rs:3205`，`authority.rs:2468-2484`）。
+- 只有 COMMIT 内才写结果与归因；失败/中断的任务对谓词零影响（旧版本继续可读，无半发布）。
+- `jobs_needing_attention` 列出 `queued/running/failed/cancelled`，`succeeded` 不出现；显式重试只接受 `failed/cancelled`（`authority.rs:2452-2463`）。
+
+补充要求：
+
+- 失败回执必须显示 `error_code` 的用户文案（`worker_busy`「另一次重算正在进行」、`interrupted`「上次退出时中断」、`preview_failed/fact_match_failed/transaction_failed`「重算未能完成」），并保留「重试」按钮；不得显示原始 SQLite 错误串。
+- 重复触发：同一修订再次入队返回 `changed=false`，UI 提示「该修订已有任务」。
+- 真机证据（T10）：入队后立即 `kill -9` App → 重开 → 待处理/回执显示 `failed(interrupted)` → 点重试 → `succeeded`；全程 `usage_facts` 计数不变、`billing_fact_attributions` 无重复 `(fact_id, revision_id)`（唯一索引保证）、`billing_recalculation_results` 每 job 一行。
+
+## 6. 改动清单
+
+### 6.1 后端（Rust）
+
+| ID | 位置 | 改动 | 对应缺口 |
+|---|---|---|---|
+| B1 | `crates/agent-vitals-runtime/src/summary.rs::unresolved_billing_groups` + 新 Tauri 命令 `billing_confirmation_groups(month)`（`apps/desktop/src-tauri/src/lib.rs`，注册进 `generate_handler!`） | 把 `estimated_cost_minor: null` 换成 `estimated_amounts: [{currency, amount_minor, basis:"metered_estimate", pricing_version}]`，计价复用 `mcp/cost_breakdown.rs::collect_window` 的桶计价——把「桶 → 金额」抽成 `agent-vitals-runtime` 内可复用函数，`cost_breakdown` 与本命令共用；无价卡组 `estimated_amounts=[]` 并给 `unresolved_reason` | G5、G4 |
+| B2 | `crates/agent-vitals-data/src/authority.rs::billing_declaration_impact_preview_for` + `lib.rs::billing_candidate_impact_preview` | 返回结构扩为 `{moved: {facts, sessions, tokens, amounts[]}, kept: {...}, pending: {tokens, reasons[]}}`；窗口由 `effective_start..=effective_end` 推出，命令签名去掉 `window_*_ms`；`route` scope 用于把冲突证据归入 `pending` | G2、G4、E207 |
+| B3 | `lib.rs::save_billing_declaration_revision` | 桌面命令层校验：`effective_end` 必填、`<=` 当前统计月；`relationship_kind != "unknown"`；`official_subscription` 时在同一命令内 `billing_recalculation_enqueue` 并 spawn worker，返回 `job_id`。数据层 `billing_declaration_revision_save` 不改（MCP 面保持通用） | G3、G6 |
+| B4 | `crates/agent-vitals-data/src/issues.rs` 的 `BILLING_CONFIRMATION` 投影 | 除 pending 候选外，把 `unresolved_billing_groups` 的组也投影为 `billing_group` 来源，`source_kind` 区分，同对象同原因去重（B09 已有规则） | AC28 找回 |
+| B5 | `lib.rs::billing_declaration_impact_preview`（`:2405`）与 `runtime::summary::billing_declaration_impact_preview`（`summary.rs:950`） | 删除（前端零调用；MCP `declaration_preview` 直接走 db 方法 `billing_declaration_impact_preview_for`，不受影响）；`generate_handler!` 同步移除；`tauri-mock.js:526` 对未知命令抛 `Unsupported browser mock command`，jsdom 守卫中任何残留调用都会失败 | 孤儿端点 |
+| B6 | `lib.rs::resolve_billing_import_candidate` | 保留 `dismiss/reopen`；`accept` 分支改为拒绝（返回错误「请通过确认计费方式保存声明」），因为 accept 由 `save` 在事务内完成（`authority.rs:2127-2134`） | G1 |
+
+不改：schema（v13 不动）、`billing_workflow` MCP 面、`billing_recalculation_run` 的原子发布、谓词。
+
+### 6.2 前端（`apps/desktop/src-tauri/ui/workbench.js` / `.html` / `.css`）
+
+| ID | 改动 | 对应 |
+|---|---|---|
+| F1 | `loadOverviewData` 的 `candidates` 行改为并发读 `billing_confirmation_groups(statisticsMonth())` + `billing_import_candidates`；`renderBillingImportCandidates` 重命名为 `renderBillingConfirmation`，输入为组列表（候选合并为组的证据行） | G5、G1 |
+| F2 | 面板不再 `switchTab("sources")`；在总览内以侧栏/抽屉展开（复用 `ov-billing-declaration-panel` 容器） | §5.2 |
+| F3 | 组行主按钮唯一「确认计费方式」；去掉「是我的套餐 / 不是」；候选证据行的「这不是我的套餐」→ `dismiss` | G1 |
+| F4 | 声明面板：五选一 + 每项结果说明；起止月控件（默认组的首尾月，`end` 必填）；作用范围固定「仅这一组」+ 可改日期 | §5.3、§5.4 |
+| F5 | 预览调用改为无 `window_*`，渲染三组数字与分币金额；非订阅关系时「移出」显示 0 并注明不改金额 | §5.5 |
+| F6 | 「确认并保存声明」单按钮：save → 用返回的 `job_id` 轮询；删除 `ov-billing-apply` 及其 onclick | G6 |
+| F7 | 失败回执 `error_code` 文案映射；重复入队提示 | §5.10 |
+| F8 | `tauri-mock.js` 新增 `billing_confirmation_groups` 与新预览形状的 fixture，**注明来源函数与行号**（CLAUDE.md 形状来源纪律） | 合同测试 |
+
+## 7. 不变量与测试
+
+### 7.1 Rust（各在既有测试文件旁）
+
+- R1 `authority.rs`：预览（新签名）与 `billing_declaration_matching_fact_ids` 对同一修订返回**相同事实集合**（`fact_count` 相等、`total_tokens` 相等）——这是 G2 的直接钉子。
+- R2 `authority.rs`：`effective_end` 为空的修订重算后，再同步一条更晚的事实并 `retry` 同一任务 → 数据层允许扫入（记录现状）；桌面命令层 B3 拒绝空 `effective_end`（在 `lib.rs` 单测钉住）。
+- R3 `summary.rs`：`unresolved_billing_groups` 在一组被 `official_subscription` 重算后消失，撤销后重新出现；`official_api/organization/third_party` 重算后**不**消失。
+- R4 `lib.rs`：`save_billing_declaration_revision` 收到 `relationship_kind="unknown"` 返回错误，`billing_declarations` 无新行。
+- R5 `cost_breakdown.rs` ↔ 新预览：同一隔离库上，`cost_breakdown` 的 `subscription` 桶金额 == 预览 `moved.amounts`（同币逐位）。
+- R6 `lib.rs`：`accept` 分支返回错误且候选状态不变。
+- R7 既有 `mutation_requires_explicit_local_write_permission`、`billing_declaration_revisions_are_scoped_immutable_and_revocable`、`unified_groups_include_source_failures_and_pending_candidates_without_merging` 保持通过；后者扩一条「只有组、无候选」的用例。
+
+### 7.2 结构守卫（`scripts/verify-workbench-*.mjs`，jsdom + `tauri-mock.js`）
+
+- V1 `workbench.js` 不再出现字符串 `billing_declaration_impact_preview`、`ov-billing-apply`、`switchTab("sources")` 于计费路径。
+- V2 预览渲染出的三组数字与 mock fixture 逐字段一致；多币不相加（fixture 放 CNY+USD）。
+- V3 组列表排序：金额降序，无价卡组在后。
+- V4 「仍不确定」两次点击后：无 `save_billing_declaration_revision` 调用、`localStorage` 写入 `BILLING_REVIEW_DEFER_KEY`。
+
+### 7.3 隔离环境 smoke（已有 `tests/mcp_v1_management_smoke.py`）
+
+- 保持 29 步通过；新增 3 步：`declaration_preview` 的 `effective_end` 为空与非空各一次，断言非空时 `fact_count` ≤ 空时；`recalc_run` 后 `candidate_list` 中来源候选为 `accepted`。
+- 桌面命令层没有 MCP 等价面，B3/B6 只能靠 R2/R4/R6 单测 + 真机。
+
+### 7.4 真机（唯一能关闭 AC 的证据；发布规格 §5：不以 `tauri dev`/mock 替代）
+
+| 小闭环 | AC | 步骤（同一脱敏可回滚数据根） | 必须留下的证据 |
+|---|---|---|---|
+| Loop 18-22 | AC26 | 迁移出候选 → 总览 | 提示三要素截图；`data-unresolved --month` 组列表 |
+| Loop 24-28 | AC27 | 组 → 官方订阅 → 预览 → 确认并保存 → 回执 succeeded → 总览/日历/会话 → CLI/MCP | §5.7 的五处对拍逐位相等 |
+| Loop 41/12 | AC13 | 撤销 → 回执 → 三面 | 金额回到确认前；`data-reimport-verify` 通过 |
+| Loop 28 | AC28 | 仍不确定 / 稍后 → 退出重开 → 待处理/设置找回 | 首屏无提示截图；待处理有组；`billing_declarations` 无新行 |
+| Loop 20-22 | AC14 | 入队 → `kill -9` → 重开 → failed(interrupted) → 重试 → succeeded | 事实计数不变；归因无重复；结果每 job 一行 |
+
+真机走查需要桌面 Computer Use 或人工；本仓库的编码代理只能交付 §7.1–7.3 与构建好的候选 `.app`，不能自证 §7.4。
+
+## 8. 决策记录（待拍板项标 ⏳）
+
+- **D1 候选主按钮语义（G1）**：采纳「组为主体、候选为证据」，去掉「是我的套餐」直接 accept。替代方案「accept 自动创建 official_subscription 声明并入队」被否：它跳过预览，违反 REQ-026「保存前预览」。
+- **D2 30 天降级存在 localStorage**：Beta 保留。代价：换数据根/清 webview 存储会重新提示；诊断导出看不到。收益：不动 schema v13、不给权威库加 UI 偏好表。正式版若要跨设备一致再入库。
+- **D3 声明月边界 = 北京自然月**：Beta 接受并在 UI 标注。原因：改成统计时区需同时改 `billing_declaration_impact_preview_for`、`matching_fact_ids`、`unresolved_billing_groups`、`beijing_month_bounds_ms` 四处并重做 R1；且当前用户群统计时区即 Asia/Shanghai。⏳ 若 B11 时区验收要求声明月随统计时区，则本项升级为 P1。
+- **D4 删除修订级预览端点（B5）**：删。理由：Beta 无原位编辑；保留会让 `generate_handler!` 暴露一条无 UI、无 mock、无守卫的命令。
+- **D5 撤销不重算**：维持数据层现状，理由见 §3 事实 2；回执文案说明「立即生效」。
+- **D6 非订阅关系不改金额**：维持并在 UI 明示（§5.3 结果说明列）。⏳ 产品是否接受「组织承担」在 Beta 只是标签——若不接受，需要 D01 的付款方模型，超出 Beta。
+- ⏳ **D7 组键是否含 `model_id`**：本规格按 REQ-023 含模型。若真机发现同 provider 多模型导致组过碎（用户要逐个确认），可退到 `host × provider × evidence_basis`，但 `scopes` 仍按模型写多条，不得写空 scope。
+
+## 9. 执行顺序与出口
+
+1. B5、B6、R4、R6（半天）：先关掉会误导的面（孤儿端点、accept 直通）。
+2. B2 + R1 + R5（1 天）：预览 = 写入范围 + 金额；这是 T08 的前提。
+3. B1 + B4 + F1–F3 + V3（1–1.5 天）：组面板与待处理投影。
+4. B3 + F4–F7 + V1/V2/V4（1 天）：范围纪律、单按钮保存、回执与失败文案。
+5. 7.3 smoke 扩展 + 构建候选 `.app`（半天）→ 交真机 §7.4。
+
+P2 出口（执行计划 §6）：同一隔离数据根上「候选/组 → 预览 → 保存 → 重算 → 各面刷新 → 撤销」与「仍不确定 → 重开 → 找回」两条真实 App 路径通过，底层表守恒；不能用 MCP 写操作或 Vite mock 关闭 T06/T08/T10。
+
+出口前不得做的事：不因 T08 数字对不上而放宽谓词或改价卡；不为让「组织承担」看起来有效而伪造金额变化；不把 `unknown` 写成声明去消掉黄色状态（REQ-031）。
