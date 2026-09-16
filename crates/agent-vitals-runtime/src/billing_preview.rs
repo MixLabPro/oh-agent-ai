@@ -1009,6 +1009,8 @@ mod tests {
         // 夹具配一个**真实可达**的宿主：只有 pi/workbuddy 会产出 `model_endpoints` +
         // `per_model_config: true`（claude/codex/dsh 恒为宿主级），而 workbuddy 被
         // `credits_only` 摘掉，所以用 pi（它没有注册人格 → NEUTRAL，正好也走通用路径）。
+        // 配置侧的键全是带前缀的（真机 pi store 也有）；"裸 id"出现在**事实**侧
+        // （`f-pi-deepseek` 是 `deepseek-v4-flash`），用来钉最后一段匹配。
         insert("f-pi-deepseek", "pi", "deepseek-v4-flash", "inferred", noon + 5);
         insert("f-pi-orphan", "pi", "deepseek-v4-flash-0731", "inferred", noon + 6);
         insert("f-pi-minimax", "pi", "MiniMax-M3", "inferred", noon + 7);
@@ -1029,9 +1031,15 @@ mod tests {
             per_model_config: true,
             // read_pi 恒会填 provider 名（`Some(first key)`），夹具照它写。
             provider_name: Some("openai-codex".to_string()),
-            // 真机形状：同一条文件里既有带前缀的 id 也有裸 id —— 这条列表**不是**对全宿主的
-            // 陈述，拿它给 MiniMax 下结论就是这一轮抓到的缺陷（iteration 8 #1）。
-            gateway_named_models: vec!["deepseek/deepseek-v4-flash".to_string()],
+            // 真机形状：`observe_model` 会把**每个**带 `/` 的 id 收进来，而上面三条
+            // `model_endpoints` 的键就是那三个 id —— 所以能产出那些端点的文件必然产出
+            // 这三条。这条列表**不是**对全宿主的陈述，拿它给 MiniMax 下结论就是
+            // iteration 8 #1 抓到的缺陷（`per_model_config` 下判定器根本不读它）。
+            gateway_named_models: vec![
+                "deepseek/deepseek-v4-flash".to_string(),
+                "deepseek/deepseek-v4-pro-0813".to_string(),
+                "minimax/MiniMax-M3".to_string(),
+            ],
             evidence_basis: EvidenceBasis::ConfigCurrent,
             source: "test".to_string(),
         };
