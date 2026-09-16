@@ -276,7 +276,9 @@ billingOverride = async (command, args) => {
   if (command === "billing_candidate_impact_preview") return previewFixture(args);
   if (command === "save_billing_declaration_revision") {
     return { status: "saved", revision_id: args.revisionId, declaration_id: args.declarationId, changed: true,
-      job: args.relationshipKind === "official_subscription" ? { job_id: "billing-" + args.revisionId, status: "queued", changed: true } : null };
+      // 2026-09-16 起所有关系都入队重算：非订阅写 user_declared（金额不变），
+      // 待确认组认它——确认经中转/按量/组织后行要关掉（真机缺口：关不掉）。
+      job: { job_id: "billing-" + args.revisionId, status: "queued", changed: true } };
   }
   if (command === "billing_recalculation_job_status") return { status: "succeeded", job_id: args.jobId };
   if (command === "revoke_billing_declaration") return { status: "revoked" };
@@ -392,8 +394,8 @@ await elements["ov-billing-save"].onclick();
 const routeCall = billingCalls.find((c) => c.command === "save_price_route");
 ok(routeCall && routeCall.args.input.model_prefix === "glm-5" && routeCall.args.input.provider_id === "zhipu-glm" && routeCall.args.input.mode === "metered",
   "保存时同时写型号归属（下一轮同步归到该服务商）");
-ok(!billingCalls.some((c) => c.command === "billing_recalculation_job_status") && billingCalls.some((c) => c.command === "<renderOverview>"),
-  "官方 API 不改金额：无重算任务，但仍刷新各面");
+ok(billingCalls.some((c) => c.command === "billing_recalculation_job_status") && billingCalls.some((c) => c.command === "<renderOverview>"),
+  "官方 API 也入队重算（写 user_declared 关掉待确认组；金额不变），完成后刷新各面");
 
 // 仍不确定：两次点击只记录 30 天降级，不写声明、不写归属，组留在待处理。
 billingCalls.length = 0;

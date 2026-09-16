@@ -21,7 +21,7 @@
 | F3 | 「中转 + 套餐」无法表达（选中转即隐藏订阅字段且不走金额） | **P0**（真机形态被挡在门外） | `workbench.js:1920-1931` 路由先说话；`workbench.js:1841-1847` 文案；`authority.rs:723,756` 两张表的 CHECK |
 | F4 | 金额语义挂在 `official_subscription` 上，而不是「机制＝套餐」上 | P1 | `billing_preview.rs:45`；`summary.rs:1331/1367`（月费摊派只认它） |
 | F5 | 「通道是否官方」的词汇表在 JS 与 Rust 各写一份，无守卫 | P1 | `billing_preview.rs:205` vs `workbench.js:1902` |
-| F6 | 非订阅声明的归因行（`user_declared`）全仓库零消费方 | P1 | 全仓库 grep 只有写入与 CHECK；声明"只记录关系"实际在任何面上都不可见 |
+| F6 | 非订阅声明的归因行（`user_declared`）全仓库零消费方 | P1（**主体已修**，2026-09-16：保存对**所有关系**入队重算，待确认组谓词认 `user_declared`——确认经中转/按量/组织后行关掉、撤销重开；剩"已声明"徽标一项见 B10） | 修前：全仓库 grep 只有写入与 CHECK；真机发作：确认经中转后行永远留在待确认 |
 | F7 | 同一件事有两条写入路径，一条可撤销、一条不可 | P2 | 声明不写 `billing_mode`；覆盖写它（`workbench.js:956` 设置页、`workbench.js:2494-2499` 声明连带），且撤销不回退 |
 | F8 | `billing_declaration_put` 是死代码（仅测试调用），与 `revision_save` 并行 | P2 | 全仓库唯一调用方是测试；**本次修候选泄漏时就只改了后者** |
 | F9 | 同一订阅分成两条声明（按模型组各声明一次）→ 月费**双计**（¥44+¥44） | P1（潜伏；**摊派侧已修**，见 §3.4；弹窗侧守卫 B14 未做） | `summary.rs::declared_subscription_fees`（修前不去重） |

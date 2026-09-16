@@ -613,10 +613,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// 规格 R3：待确认组带分币估算金额、按金额降序；只有 `official_subscription`
-    /// 的重算让组消失（其他关系不改数字），撤销后组立即回来（撤销不需要重算）。
+    /// 规格 R3（2026-09-16 修订）：待确认组带分币估算金额、按金额降序；**任意关系**
+    /// 的确认都让组消失（已回答；非订阅写 user_declared，金额仍不变——D02），撤销后
+    /// 组立即回来（撤销不需要重算）。
     #[test]
-    fn confirmation_groups_price_and_react_to_subscription_attribution_only() {
+    fn confirmation_groups_price_close_on_any_relation_and_reopen_on_revoke() {
         let home = temp_home("r3");
         let path = agent_vitals_data::authority::default_authority_path(&home);
         let db = AuthorityDb::open(&path, 1).unwrap();
@@ -643,27 +644,37 @@ mod tests {
         assert!(groups[0].get("estimated_cost_minor").is_none());
 
         let scopes = [("model", "gpt-5.6-sol")];
+        // 2026-09-16 起**任意关系种类**都关掉自己的组（确认＝已回答），不再只有订阅：
+        // official_api 的重算写 user_declared 归因——金额排除谓词不认它（数字不变，
+        // D02），待确认组谓词认它（行关掉）。此前"只有订阅关组"的真机后果：确认
+        // 经中转后行永远留在待确认里。
         db.billing_declaration_revision_save(
             "rev-api", "decl-api", None, "codex", "openai", "official_api",
             None, None, None, "2026-08", Some("2026-08"), None, None, &scopes, 2,
         ).unwrap();
         db.billing_recalculation_enqueue("job-api", "decl-api", "rev-api", 3).unwrap();
         assert!(db.billing_recalculation_run("job-api", 4).unwrap());
+        let after_api = confirmation_groups(&db, "2026-08");
+        assert_eq!(after_api["groups"].as_array().unwrap().len(), 1,
+            "确认官方 API 也把组关掉（已回答），只剩未回答的 luna");
+        assert_eq!(after_api["groups"][0]["model_id"], json!("gpt-5.6-luna"));
+
+        assert!(db.billing_declaration_revision_revoke("rev-api-revoke", "decl-api", "rev-api", 5).unwrap());
         assert_eq!(confirmation_groups(&db, "2026-08")["groups"].as_array().unwrap().len(), 2,
-            "official_api never changes numbers");
+            "撤销官方 API 后组重新打开（MAX 修订变 revoked，无需重算）");
 
         db.billing_declaration_revision_save(
             "rev-sub", "decl-sub", None, "codex", "openai", "official_subscription",
-            None, None, None, "2026-08", Some("2026-08"), None, None, &scopes, 5,
+            None, None, None, "2026-08", Some("2026-08"), None, None, &scopes, 6,
         ).unwrap();
-        db.billing_recalculation_enqueue("job-sub", "decl-sub", "rev-sub", 6).unwrap();
-        assert!(db.billing_recalculation_run("job-sub", 7).unwrap());
+        db.billing_recalculation_enqueue("job-sub", "decl-sub", "rev-sub", 7).unwrap();
+        assert!(db.billing_recalculation_run("job-sub", 8).unwrap());
         let after = confirmation_groups(&db, "2026-08");
         let remaining = after["groups"].as_array().unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0]["model_id"], json!("gpt-5.6-luna"));
 
-        assert!(db.billing_declaration_revision_revoke("rev-sub-revoke", "decl-sub", "rev-sub", 8).unwrap());
+        assert!(db.billing_declaration_revision_revoke("rev-sub-revoke", "decl-sub", "rev-sub", 9).unwrap());
         assert_eq!(confirmation_groups(&db, "2026-08")["groups"].as_array().unwrap().len(), 2,
             "revoke restores the group without a recalculation job");
         let _ = std::fs::remove_dir_all(&home);

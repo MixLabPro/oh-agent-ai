@@ -2304,6 +2304,40 @@ mod tests {
         });
     }
 
+    /// **任意关系种类都能把自己的组关掉，撤销后重开**（2026-09-16 真机缺口）：
+    /// 确认「经中转」（third_party）此前既不入队重算、组谓词也只认 subscription_covered
+    /// ——声明存下了、行却永远留在待确认里。现在重算为非订阅关系写 `user_declared`
+    /// 归因行（金额不变，D02），组谓词认它；撤销后 MAX 修订变 revoked，组回来。
+    #[test]
+    fn declared_relations_of_any_kind_close_their_group_until_revoked() {
+        with_home(|| {
+            let db = seed_authority_db();
+            let ts = agent_vitals_data::authority_query::beijing_day_bounds_ms("2026-09-02")
+                .unwrap().0 + 12 * 3_600_000;
+            seed_fact(&db, "group-relay", "codex", Some("gpt-relay"), "token_count", ts, 0, 100, 20, 0, 5);
+            db.billing_declaration_revision_save(
+                "rev-relay", "decl-relay", None, "codex", "shengsuanyun.com", "third_party",
+                None, None, None, "2026-09-01", None, None, None,
+                &[("provider", "unresolved")], 1,
+            ).unwrap();
+            db.billing_recalculation_enqueue("job-relay", "decl-relay", "rev-relay", 2).unwrap();
+            assert!(db.billing_recalculation_run("job-relay", 3).unwrap());
+
+            let rows = unresolved_billing_groups("2026-09")["groups"].as_array().unwrap().clone();
+            assert!(
+                rows.iter().all(|row| row["model_id"] != json!("gpt-relay")),
+                "确认经中转后该组必须从待确认里消失（user_declared 也算已回答）",
+            );
+
+            assert!(db.billing_declaration_revision_revoke("rev-relay-revoke", "decl-relay", "rev-relay", 4).unwrap());
+            let rows = unresolved_billing_groups("2026-09")["groups"].as_array().unwrap().clone();
+            assert!(
+                rows.iter().any(|row| row["model_id"] == json!("gpt-relay")),
+                "撤销后组重新打开（MAX 修订是 revoked）",
+            );
+        });
+    }
+
     /// 组装层：monthly summary 的 by_provider 必含三个宿主的 provider 条目、
     /// 不含 workbuddy（excluded 检查双向成立）、contract_violations 为空、
     /// by_host 与 by_provider 互不串扰。

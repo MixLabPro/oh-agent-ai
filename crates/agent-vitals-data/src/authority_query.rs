@@ -157,6 +157,11 @@ pub(crate) const SQL_HOURLY_BY_HOST_PROVIDER: &str = concat!("SELECT host, COALE
 /// 声明覆盖、且不是宿主自报 subscription 的事实。运行时的组面板
 /// （`runtime::billing_preview::confirmation_groups`）、总览摘要与待处理投影
 /// （`issues.rs`）三处共用这一条 SQL——组的定义只有一份。
+/// 「覆盖」认**任意归因种类**（subscription_covered / user_declared）：确认过
+/// 中转/按量/组织的关系也算"已回答"，组要关掉——否则确认经中转后行永远留在
+/// 待确认里（2026-09-16 真机）。撤销后 MAX 修订变 revoked → 组重新打开。
+/// 注意：**金额**侧的排除谓词（7 处共用那份字面量）仍只认 subscription_covered
+/// ——user_declared 不改金额（D02），两份谓词的差异是故意的。
 /// 待确认组的事实谓词（别名 `f`，`?1`/`?2` = 窗口毫秒）。运行时计价用它喂
 /// `price_fact_selection`，保证组金额与组 token 是同一批事实。
 pub const SQL_UNRESOLVED_BILLING_FACT_WHERE: &str =
@@ -166,7 +171,6 @@ pub const SQL_UNRESOLVED_BILLING_FACT_WHERE: &str =
        AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
            JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
            WHERE ba.fact_id = f.fact_id
-             AND ba.attribution_kind = 'subscription_covered'
              AND br.revision_number = (SELECT MAX(br2.revision_number)
                FROM billing_declaration_revisions br2
                WHERE br2.declaration_id = br.declaration_id)
@@ -188,7 +192,6 @@ pub const SQL_UNRESOLVED_BILLING_GROUPS: &str = concat!(
        AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
            JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
            WHERE ba.fact_id = f.fact_id
-             AND ba.attribution_kind = 'subscription_covered'
              AND br.revision_number = (SELECT MAX(br2.revision_number)
                FROM billing_declaration_revisions br2
                WHERE br2.declaration_id = br.declaration_id)

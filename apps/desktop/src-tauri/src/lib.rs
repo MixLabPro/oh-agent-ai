@@ -2407,7 +2407,12 @@ fn save_billing_declaration_revision(
         amount_minor, currency.as_deref(), &effective_start, effective_end.as_deref(),
         source_candidate_id.as_deref(), evidence_ref.as_deref(), &scope_refs, now_ms,
     ).map_err(|error| error.to_string())?;
-    let job = if relationship_kind == "official_subscription" {
+    // **所有关系种类都入队重算**（2026-09-16 放开，此前只有官方订阅）。非订阅关系的
+    // 重算写 `user_declared` 归因行——金额排除谓词不认它（D02：不改金额），但待确认
+    // 组的谓词认它：确认经中转/按量/组织后，那组事实标成"已回答"、行从待确认关掉。
+    // 不入队的后果是真机踩过的：third_party 声明存下了，可没有任何东西消费它，
+    // 行永远留在待确认里（axis 规格 F6 的发作面）。
+    let job = {
         let job_id = format!("billing-{revision_id}");
         match db.billing_recalculation_enqueue(&job_id, &declaration_id, &revision_id, now_ms) {
             Ok(queued) => {
@@ -2421,8 +2426,6 @@ fn save_billing_declaration_revision(
                 "job_id": job_id, "status": "enqueue_failed", "error": error.to_string(),
             }),
         }
-    } else {
-        Value::Null
     };
     Ok(serde_json::json!({
         "status": "saved", "revision_id": revision_id,
