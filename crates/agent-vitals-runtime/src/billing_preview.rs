@@ -222,21 +222,24 @@ fn auto_verdict(
     // 见 `agent_vitals_hosts::sources::endpoint_evidence`）。配置里的端点都不是该模型厂商的
     // 官方端点 → 请求经中转。强度 `config-current`(4) 低于会话级，所以它只能把
     // 「官方还是中转」这一问变成一次**确认**，永远不能单独判 determined。
+    use agent_vitals_hosts::sources::endpoint_evidence::model_tail;
     let endpoint = endpoints.get(host);
-    let config_host = endpoint.and_then(|e| e.endpoint_host.clone());
     let config_source = endpoint.map(|e| e.source.clone());
     let all_hosts: Vec<String> = endpoint.map(|e| e.endpoint_hosts.clone()).unwrap_or_default();
     // **厂商未知时"官方端点"无从谈起**：`official_for_vendor` 恒 false，会把配置里的每个
-    // 端点都算成中转——连 `api.anthropic.com` 也能被当成中转名写进声明
-    // （验收审查 iteration 7 #1）。厂商名不认识就只带 `config_endpoint` 供展示，不做中转断言。
+    // 端点都算成中转——连 `api.anthropic.com` 也能被当成中转名写进声明（验收审查 iteration 7 #1）。
     let vendor_known = vendor_name.is_some();
     let official_for_vendor = |h: &str| {
         vendor_name.as_deref()
             .is_some_and(|v| agent_vitals_domain::attribution::is_official_endpoint(v, h))
     };
-    // 逐模型端点优先（workbuddy/pi 的配置本来就是逐模型的）——最精确的一档：同一条配置里
-    // MiniMax 走官方端点、deepseek 走中转，宿主级的列表分不出来。
-    let model_host = endpoint.and_then(|e| e.model_endpoints.get(model)).cloned();
+    // 逐模型端点：键先精确匹配，再按"最后一段"匹配（配置常带厂商前缀、事实常是上游裸名）。
+    let per_model: Option<(String, String)> = endpoint.and_then(|e| {
+        e.model_endpoints.iter().find(|(k, _)| k.as_str() == model)
+            .or_else(|| e.model_endpoints.iter().find(|(k, _)| model_tail(k) == model_tail(model)))
+            .map(|(k, v)| (k.clone(), v.clone()))
+    });
+    let model_host = per_model.as_ref().map(|(_, v)| v.clone());
     let (config_relay, config_relay_multiple, config_relay_ambiguous) = if !vendor_known {
         (None, false, false)
     } else if let Some(single) = model_host.clone() {
@@ -247,22 +250,30 @@ fn auto_verdict(
         if all_hosts.len() == 1 && relays.len() == 1 {
             (relays.first().map(|h| (*h).clone()), false, false)
         } else if official == 0 && relays.len() > 1 {
-            // 全是非官方端点 → 判经中转，但不替用户在多个里挑（workbuddy 本机配了三个）。
             (None, true, false)
         } else if official > 0 && !relays.is_empty() {
-            // 官方与中转混着配 → **不说也不猜**：既不能断言经中转，也不能装作没看见。
             (None, false, true)
         } else {
             (None, false, false)
         }
     };
-    // 第二路配置证据（用户 2026-09-16 实测指出）：**官方端点不带厂商 id，中转才需要**——
-    // 官方 deepseek 就是 `deepseek-v4.1-flash`，胜算云这类要把 `deepseek/…` 写进模型
-    // 映射才路由得动。所以配置里的模型映射只要带 `vendor/model` 前缀，本身就是过一次
-    // 网关的痕迹，与基址无关（少了这一路，只换中转不改基址的配置就漏判）。
-    let config_gateway_named = endpoint.map(|e| !e.gateway_named_models.is_empty()).unwrap_or(false)
-        && vendor_known;
+    // 第二路配置证据（用户 2026-09-16 实测指出）：**官方端点不带厂商 id，中转才需要**。
+    // **作用域必须跟着配置的形状走**：逐模型配置（workbuddy/pi）里"某个模型的 id 带前缀"
+    // 只是那个模型的事——同一条文件里 `deepseek/…` 与裸 `MiniMax-M3` 并存，拿前者当宿主级
+    // 信号会把 MiniMax 说成经中转（验收审查 iteration 8 #1）。宿主级配置（claude/codex/dsh，
+    // 一套映射管全部请求）才是对全宿主的陈述。
+    let config_gateway_named = endpoint.map(|e| {
+        if e.per_model_config {
+            // 这条模型自己有没有逐模型条目、且它的 id 带前缀。
+            per_model.as_ref().is_some_and(|(key, _)| key.contains('/'))
+        } else {
+            !e.gateway_named_models.is_empty()
+        }
+    }).unwrap_or(false) && vendor_known;
     let relay_evidence = config_relay.is_some() || config_relay_multiple || config_gateway_named;
+    // 展示用的端点必须是**判定实际用的那一个**（逐模型优先），否则行面会说
+    // "经中转（api.minimaxi.com）"而按钮写着另一个名字（验收审查 iteration 8 #2）。
+    let config_host = model_host.clone().or_else(|| endpoint.and_then(|e| e.endpoint_host.clone()));
     let mut basis: Vec<String> = Vec::new();
     // `conflict` = 宿主自报的 provider 与会话级路由证据指的不是同一家。这样的事实本身
     // 就没有归因（emitter 写 `provider_id=null` / `metered_estimate`），判定器更不能拿它
@@ -861,6 +872,7 @@ mod tests {
             endpoint_host: Some("router.shengsuanyun.com".to_string()),
             endpoint_hosts: vec!["router.shengsuanyun.com".to_string()],
             model_endpoints: Default::default(),
+            per_model_config: false,
             provider_name: None,
             gateway_named_models: vec!["deepseek/deepseek-v4-pro-0813".to_string()],
             evidence_basis: EvidenceBasis::ConfigCurrent,
@@ -892,6 +904,7 @@ mod tests {
             endpoint_host: Some("a.example-relay.com".to_string()),
             endpoint_hosts: vec!["a.example-relay.com".to_string(), "b.example-relay.com".to_string()],
             model_endpoints: Default::default(),
+            per_model_config: false,
             provider_name: None,
             gateway_named_models: Vec::new(),
             evidence_basis: EvidenceBasis::ConfigCurrent,
@@ -947,6 +960,7 @@ mod tests {
             endpoint_host: Some("api.minimaxi.com".to_string()),
             endpoint_hosts: vec!["api.minimaxi.com".to_string(), "alpha-relay.example".to_string()],
             model_endpoints: Default::default(),
+            per_model_config: false,
             provider_name: None,
             gateway_named_models: Vec::new(),
             evidence_basis: EvidenceBasis::ConfigCurrent,
@@ -968,10 +982,13 @@ mod tests {
             endpoint_hosts: vec!["api.minimaxi.com".to_string(), "beta-router.shengsuanyun.com".to_string()],
             model_endpoints: [
                 ("MiniMax-M3".to_string(), "api.minimaxi.com".to_string()),
-                ("deepseek-v4-flash".to_string(), "beta-router.shengsuanyun.com".to_string()),
+                ("deepseek/deepseek-v4-flash".to_string(), "beta-router.shengsuanyun.com".to_string()),
             ].into_iter().collect(),
+            per_model_config: true,
             provider_name: None,
-            gateway_named_models: Vec::new(),
+            // 真机形状：同一条文件里既有带前缀的 id 也有裸 id —— 这条列表**不是**对全宿主的
+            // 陈述，拿它给 MiniMax 下结论就是这一轮抓到的缺陷（iteration 8 #1）。
+            gateway_named_models: vec!["deepseek/deepseek-v4-flash".to_string()],
             evidence_basis: EvidenceBasis::ConfigCurrent,
             source: "test".to_string(),
         };
@@ -982,10 +999,15 @@ mod tests {
         let minimax = pm_groups.iter().find(|g| g["model_id"] == json!("MiniMax-M3")).unwrap()["auto_verdict"].clone();
         assert_ne!(minimax["route_state"], json!("relay_config"),
             "the per-model endpoint for MiniMax is its official one: {minimax}");
+        assert_eq!(minimax["config_endpoint"], json!("api.minimaxi.com"),
+            "the displayed endpoint is the one the verdict used: {minimax}");
+        // 事实里的模型名是上游裸名、配置里的键带前缀 → 按最后一段匹配（真机就是这个形状）。
         let deepseek = pm_groups.iter().find(|g| g["model_id"] == json!("deepseek-v4-flash")).unwrap()["auto_verdict"].clone();
         assert_eq!(deepseek["route_state"], json!("relay_config"), "{deepseek}");
         assert_eq!(deepseek["billing_party"], json!("shengsuanyun.com"),
             "the per-model endpoint names the relay exactly: {deepseek}");
+        assert_eq!(deepseek["config_endpoint"], json!("beta-router.shengsuanyun.com"),
+            "the displayed endpoint must be the per-model one, not the first configured host: {deepseek}");
         // 配置是整个宿主一份的（这是"当前配置"的语义，不是逐条的），所以同一宿主下
         // 另一个 deepseek 组同样是 relay_config——这正是我们要的：它不逐模型乱猜。
         assert_eq!(verdict_of("deepseek-v4-pro")["route_state"], json!("relay_config"));
@@ -996,6 +1018,7 @@ mod tests {
             endpoint_host: Some("api.deepseek.com".to_string()),
             endpoint_hosts: vec!["api.deepseek.com".to_string()],
             model_endpoints: Default::default(),
+            per_model_config: false,
             provider_name: None,
             gateway_named_models: Vec::new(),
             evidence_basis: EvidenceBasis::ConfigCurrent,
@@ -1011,6 +1034,7 @@ mod tests {
             endpoint_host: None,
             endpoint_hosts: Vec::new(),
             model_endpoints: Default::default(),
+            per_model_config: false,
             provider_name: None,
             gateway_named_models: vec!["deepseek/deepseek-v4.1-flash".to_string()],
             evidence_basis: EvidenceBasis::ConfigCurrent,

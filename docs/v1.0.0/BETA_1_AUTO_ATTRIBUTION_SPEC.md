@@ -390,7 +390,8 @@ claude-code  shengsuanyun.com  one_question  relay_config  models=11  tokens=276
 `NEUTRAL`（不做任何特殊处理）。新增宿主接入 = 填一行声明，不改判定器。
 
 **仍留在 runtime 的宿主名字**（本期未动，同一纪律的欠账）。这份清单是**抽样不是穷尽**——
-`agent-vitals-runtime` 的 production 代码里约有 45 处宿主名字面量（多数是注册表分派，
+`agent-vitals-runtime` 里宿主名字面量实测 **171 处出现在非测试代码**（含测试共 460 行命中；
+`summary.rs` 46、`sessions/r2a_store.rs` 34、`skills/scanner.rs` 24、`sync_service.rs` 21…）（多数是注册表分派，
 如 `FACT_HOSTS`/`WIRED_HOSTS`/`TRACE_HOSTS` 与 `sync_service`/`trace_service` 的 host→函数分派，
 那是正当的路由）；**其中真正像"宿主名字决定一条规则"的**至少还有：
 `mcp/cost_breakdown.rs:405,416`（逐宿主计价语义）、`mcp/data_status.rs:252,256,258`（逐宿主状态语义）、
@@ -399,4 +400,26 @@ claude-code  shengsuanyun.com  one_question  relay_config  models=11  tokens=276
 `skills/inventory.rs:176,203,214,219`、`sync_service.rs:84,136,170,214`、`r2a_store.rs:368,381,1570`。
 用 `/usr/bin/grep -nE '"(claude-code|codex|dsh|workbuddy)"' crates/agent-vitals-runtime/src -r`
 自己数一遍再决定收编哪些——**别把这份清单当完整负债表**（验收审查 iteration 7 #7）。
+
+### 11.8 逐模型配置的作用域（A12 收尾，iteration 8）
+
+验收审查发现上一轮修复里最严重的一条：**宿主级"模型映射带前缀"信号盖过了逐模型端点**。
+真机 `~/.workbuddy/models.json` 同时有 `deepseek/deepseek-v4-flash`（前缀）与裸 `MiniMax-M3`，
+前者让 `gateway_named_models` 非空，于是**同一个文件里那些自己配了官方端点的模型
+（MiniMax → api.minimaxi.com）也被判成"经中转"**，行面还会写"经中转（api.minimaxi.com）"。
+
+根因与修法：前缀信号的作用域必须**跟着配置的形状走**。
+
+| 配置形状 | 前缀信号的作用域 |
+|---|---|
+| 宿主级（claude `env`、codex `config.toml`、dsh）——一套映射管全部请求 | 对全宿主成立 |
+| **逐模型**（workbuddy/pi）——每个模型一条 | **只对那条模型成立**（`per_model_config` 标记，判定器改为查该模型自己的条目） |
+
+同时修掉两处随之而来的问题：逐模型端点按"最后一段"匹配（配置常带前缀、事实常是上游裸名），
+展示用的 `config_endpoint` 改为**判定实际使用的那个端点**（不再是列表里的第一个）。
+
+**教训（值得单独记一笔）**：这一轮的缺陷之所以能溜过上一轮的测试，是因为**测试夹具用了真实文件
+产生不出的形状**（`gateway_named_models` 为空 + 只有两个条目）——正是本仓库「形状来源纪律」
+点名的假绿模式，而我在同一次提交里刚刚批评过它。夹具现在按真机形状写：混合前缀与裸 id、
+前缀列表非空。凡"逐模型"这类断言，夹具必须复刻真机文件的**混杂性**，而不只是它支持的那个分支。
 

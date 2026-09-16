@@ -38,6 +38,11 @@ pub struct EndpointEvidence {
     /// 所以单列出来（验收审查 iteration 7 #2：把它们压成一个列表就丢了配对的精度，
     /// 于是 MiniMax 走官方端点这件事被"配置里有中转"淹没）。
     pub model_endpoints: BTreeMap<String, String>,
+    /// 这份配置是**逐模型**写的（workbuddy/pi：每个模型一条、各带端点）。为真时，
+    /// 宿主级的 `gateway_named_models` 列表**不是**对全宿主的陈述——它只是"某些模型的
+    /// id 带前缀"，不能拿来给另一个模型下结论（验收审查 iteration 8 #1：workbuddy 的真实
+    /// 文件里既有 `deepseek/…` 也有裸 `MiniMax-M3`，把前者当宿主级信号会把 MiniMax 说成经中转）。
+    pub per_model_config: bool,
     /// 配置里显式声明的服务商名（dsh `agent-default-model.provider`）。**只作展示**：
     /// 实测本机 dsh 写 `deepseek-official` 而基址是中转，名字会说谎，主机名不会。
     pub provider_name: Option<String>,
@@ -56,6 +61,7 @@ impl EndpointEvidence {
             endpoint_host: None,
             endpoint_hosts: Vec::new(),
             model_endpoints: BTreeMap::new(),
+            per_model_config: false,
             provider_name: None,
             gateway_named_models: Vec::new(),
             evidence_basis: EvidenceBasis::ConfigCurrent,
@@ -108,6 +114,12 @@ impl EndpointEvidence {
         }
         Some(self)
     }
+}
+
+/// 模型名的"最后一段"：配置常带厂商前缀（`deepseek/deepseek-v4-flash`）而事实常是
+/// 上游裸名（`deepseek-v4-flash`），比对时去掉前缀层。
+pub fn model_tail(model: &str) -> &str {
+    model.rsplit('/').next().unwrap_or(model)
 }
 
 /// 取 URL 的主机名：去 scheme、去路径、去端口（仅全数字）、去尾点、转小写。
@@ -264,6 +276,7 @@ pub fn read_pi(home: &Path) -> Option<EndpointEvidence> {
     let text = std::fs::read_to_string(&path).ok()?;
     let doc: Value = serde_json::from_str(&text).ok()?;
     let mut evidence = EndpointEvidence::new("pi", "~/.pi/agent/models-store.json".to_string());
+    evidence.per_model_config = true;
     for (provider, spec) in doc.as_object()? {
         // provider 名本身就是"经哪一家"的痕迹，但它不是主机名，只作展示。
         if evidence.provider_name.is_none() {
@@ -341,6 +354,7 @@ pub fn read_workbuddy(home: &Path) -> Option<EndpointEvidence> {
     let text = std::fs::read_to_string(&path).ok()?;
     let doc: Value = serde_json::from_str(&text).ok()?;
     let mut evidence = EndpointEvidence::new("workbuddy", "~/.workbuddy/models.json".to_string());
+    evidence.per_model_config = true;
     for entry in doc.as_array().into_iter().flatten() {
         let url = entry.get("url").and_then(Value::as_str);
         let model = entry.get("id").and_then(Value::as_str);
@@ -392,14 +406,15 @@ mod tests {
           }, "model": "sonnet" }"#);
         let e = read_claude(&h).expect("evidence");
         let EndpointEvidence {
-            host, base_url, endpoint_host, endpoint_hosts, model_endpoints, provider_name,
-            gateway_named_models, evidence_basis, source,
+            host, base_url, endpoint_host, endpoint_hosts, model_endpoints, per_model_config,
+            provider_name, gateway_named_models, evidence_basis, source,
         } = e;
         assert_eq!(host, "claude-code");
         assert_eq!(base_url.as_deref(), Some("https://router.shengsuanyun.com/api"));
         assert_eq!(endpoint_host.as_deref(), Some("router.shengsuanyun.com"));
         assert_eq!(endpoint_hosts, vec!["router.shengsuanyun.com"]);
         assert!(model_endpoints.is_empty(), "claude has one global base URL, no per-model endpoints");
+        assert!(!per_model_config, "claude's env is a host-level mapping set, not per-model");
         assert_eq!(provider_name, None);
         assert_eq!(gateway_named_models, vec!["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro-0813"]);
         assert_eq!(evidence_basis, EvidenceBasis::ConfigCurrent);
