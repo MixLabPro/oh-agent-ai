@@ -445,3 +445,24 @@ pi/workbuddy 恒为 true）。夹具现在挂在 `pi`（真实可达的配对，
 补齐第三个端点（真机 workbuddy 文件就是三个）、并加了一条**配置表里没有的模型**
 （`deepseek-v4-flash-0731`）断言"没有证据就没有断言、也不显示别人的端点"。
 
+### 11.10 簇级展示字段：成员不一致时不许替它们说话（iteration 10）
+
+§11.9 把**组**级的端点证据收口了，但列表渲染的是**簇**——而 `clusters_of` 把第一个成员组的
+`auto_verdict` 整份复制给簇。于是同一个簇里两条模型各配了不同中转时，行面只显示第一条的端点
+（验收审查 iteration 10 #1：`deepseek-v4-flash → beta-router.shengsuanyun.com` 与
+`deepseek/deepseek-v4-pro-0813 → router.shengsuanyun.com` 同簇，行面替后者声称了前者）。
+组级判定全对，聚合把差异抹平了。
+
+修法：簇级 `config_endpoint` 只在**成员一致**时沿用第一个的；不一致则留空，并把
+`config.endpoint*` 依据换成 `config.endpoint.mixed`（行面："这行里的模型各自配了不同端点"）。
+"没有条目"（`null`）与具体端点算**不同的成员值**——这正是"簇里混着一个有端点、一个没有"的情形。
+
+**这一轮同时补上的测试洞**：§11.9 的 (b)（带前缀的键指向官方端点不算中转）**当时没有测试**——
+把 `&& !official_for_vendor(host)` 删掉，292 个测试全绿。夹具现在把 MiniMax 的键换成带前缀的
+`minimax/MiniMax-M3 → api.minimaxi.com`（真机 workbuddy 里带前缀的键都指向中转，所以这个输入
+只能构造），删掉该子句即变红。夹具的 `provider_name` 也改成 `read_pi` 真正会填的值
+（`Some(first provider key)`）——之前写 `None`，是读取器产不出的形状。
+
+三个断言都验证过**会红**：去掉 (a) 的收口 → 孤儿模型变 `relay_config`；去掉 (c) → 显示
+`api.minimaxi.com`；去掉簇级 mixed 规则 → 簇沿用第一个成员的端点。夹具会红才算夹具。
+

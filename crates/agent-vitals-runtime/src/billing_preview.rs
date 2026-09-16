@@ -404,6 +404,10 @@ fn auto_verdict(
 fn clusters_of(groups: &[Value]) -> Vec<Value> {
     let mut order: Vec<String> = Vec::new();
     let mut by_key: BTreeMap<String, Value> = BTreeMap::new();
+    // 每个簇里出现过的 `config_endpoint` 集合：成员们不一致时簇级不能沿用第一个的
+    // （验收审查 iteration 10 #1：簇级聚合会把小组级正确的差异抹平，行面就替另一条模型
+    // 声称一个它没用过的端点）。`None` 与具体值都算不同的成员值。
+    let mut endpoints_seen: BTreeMap<String, std::collections::BTreeSet<Option<String>>> = BTreeMap::new();
     for group in groups {
         let v = &group["auto_verdict"];
         // 行主键 = `host × (计费方 or 厂商) × route_state × 判定状态 × 日期`（规格 §5.1）。
@@ -440,6 +444,8 @@ fn clusters_of(groups: &[Value]) -> Vec<Value> {
             "estimated_amounts": group["estimated_amounts"], "group_id": group["group_id"],
         }));
         entry["group_ids"].as_array_mut().unwrap().push(group["group_id"].clone());
+        endpoints_seen.entry(key.clone()).or_default()
+            .insert(v["config_endpoint"].as_str().map(ToOwned::to_owned));
         for field in ["tokens", "session_count", "unpriced_tokens"] {
             let sum = entry[field].as_i64().unwrap_or(0) + group[field].as_i64().unwrap_or(0);
             entry[field] = json!(sum);
@@ -454,6 +460,19 @@ fn clusters_of(groups: &[Value]) -> Vec<Value> {
         })).collect::<Vec<_>>());
     }
     let mut clusters: Vec<Value> = order.into_iter().filter_map(|k| by_key.remove(&k)).collect();
+    // 簇级展示字段只在该簇**成员一致**时才沿用第一个的：不一致时留空并记一条依据，
+    // 让行面说"这些模型配置的端点不一样"，而不是替它们挑一个。
+    for cluster in clusters.iter_mut() {
+        let id = cluster["cluster_id"].as_str().unwrap_or("").to_string();
+        let seen = endpoints_seen.remove(&id).unwrap_or_default();
+        if seen.len() > 1 {
+            cluster["auto_verdict"]["config_endpoint"] = json!(null);
+            if let Some(basis) = cluster["auto_verdict"]["basis"].as_array_mut() {
+                basis.retain(|b| !b.as_str().unwrap_or("").starts_with("config.endpoint"));
+                basis.push(json!("config.endpoint.mixed"));
+            }
+        }
+    }
     // 程序已判定的置顶（一键确认清掉最多），其余按金额降序，无价卡按 tokens。
     clusters.sort_by(|a, b| {
         let rank = |c: &Value| match c["auto_verdict"]["state"].as_str() {
@@ -993,6 +1012,7 @@ mod tests {
         insert("f-pi-deepseek", "pi", "deepseek-v4-flash", "inferred", noon + 5);
         insert("f-pi-orphan", "pi", "deepseek-v4-flash-0731", "inferred", noon + 6);
         insert("f-pi-minimax", "pi", "MiniMax-M3", "inferred", noon + 7);
+        insert("f-pi-deepseek-pro", "pi", "deepseek/deepseek-v4-pro-0813", "inferred", noon + 8);
         let per_model = agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence {
             host: "pi".to_string(),
             base_url: Some("https://api.minimaxi.com/v1".to_string()),
@@ -1001,11 +1021,14 @@ mod tests {
             endpoint_hosts: vec!["api.minimaxi.com".to_string(), "beta-router.shengsuanyun.com".to_string(),
                 "router.shengsuanyun.com".to_string()],
             model_endpoints: [
-                ("MiniMax-M3".to_string(), "api.minimaxi.com".to_string()),
+                // 带前缀的键 + **官方**端点：前缀不该把官方端点说成中转（iteration 9 #2）。
+                ("minimax/MiniMax-M3".to_string(), "api.minimaxi.com".to_string()),
                 ("deepseek/deepseek-v4-flash".to_string(), "beta-router.shengsuanyun.com".to_string()),
+                ("deepseek/deepseek-v4-pro-0813".to_string(), "router.shengsuanyun.com".to_string()),
             ].into_iter().collect(),
             per_model_config: true,
-            provider_name: None,
+            // read_pi 恒会填 provider 名（`Some(first key)`），夹具照它写。
+            provider_name: Some("openai-codex".to_string()),
             // 真机形状：同一条文件里既有带前缀的 id 也有裸 id —— 这条列表**不是**对全宿主的
             // 陈述，拿它给 MiniMax 下结论就是这一轮抓到的缺陷（iteration 8 #1）。
             gateway_named_models: vec!["deepseek/deepseek-v4-flash".to_string()],
@@ -1016,6 +1039,12 @@ mod tests {
         pm_endpoints.insert("pi".to_string(), per_model);
         let pm_report = confirmation_groups_with(&db, "2026-08", &accounts, &pm_endpoints);
         let pm_groups = pm_report["groups"].as_array().unwrap();
+        let report_cluster_of = |report: &Value, host: &str, model: &str| -> Value {
+            report["clusters"].as_array().unwrap().iter()
+                .find(|c| c["host"] == json!(host)
+                    && c["models"].as_array().is_some_and(|ms| ms.iter().any(|m| m["model_id"] == json!(model))))
+                .cloned().unwrap()
+        };
         let pi_verdict = |model: &str| pm_groups.iter()
             .find(|g| g["host"] == json!("pi") && g["model_id"] == json!(model)).unwrap()["auto_verdict"].clone();
         let minimax = pi_verdict("MiniMax-M3");
@@ -1033,6 +1062,14 @@ mod tests {
         // 验收审查 iteration 9 #1/#3：配置表里**没有**这条模型时，逐模型配置对它就毫无证据——
         // 不能拿"某些模型的端点"下结论，也不能把第一个配置的端点冒充成它的（`hy3`/`glm-5.2`
         // 这类模型在真机就是这样）。
+        // 验收审查 iteration 10 #1：簇级字段只在成员一致时才敢沿用第一个的。两条 deepseek
+        // 模型各自配了不同中转（beta-router / router），它们的组判定都对，但**簇**不能
+        // 拿第一个的端点当作整行的。
+        let pi_relay_cluster = report_cluster_of(&pm_report, "pi", "deepseek/deepseek-v4-pro-0813");
+        assert_eq!(pi_relay_cluster["auto_verdict"]["config_endpoint"], json!(null),
+            "a cluster whose members use different endpoints must not display one of them: {pi_relay_cluster}");
+        assert!(pi_relay_cluster["auto_verdict"]["basis"].as_array().unwrap()
+            .contains(&json!("config.endpoint.mixed")), "{pi_relay_cluster}");
         let orphan = pi_verdict("deepseek-v4-flash-0731");
         assert_ne!(orphan["route_state"], json!("relay_config"),
             "a model absent from a per-model config has no endpoint evidence: {orphan}");

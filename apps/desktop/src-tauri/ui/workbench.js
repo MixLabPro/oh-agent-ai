@@ -2951,6 +2951,7 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     "route.conflict": "宿主自报与会话路由证据冲突", "config.endpoint": "配置里的端点", "config.gateway_named": "模型映射带厂商前缀（中转约定）",
     "config.endpoint.multiple": "配置里列了多个端点（其中至少一个是中转）",
     "config.endpoint.ambiguous": "配置里官方端点与中转同时存在（不确定这批走的是哪一个）",
+    "config.endpoint.mixed": "这行里的模型各自配了不同端点（不替它们挑一个）",
     "config.endpoint.conflict": "⚠ 但这批用量是官方形状，而配置指向中转——两者需你核对",
   }[b] || (b.startsWith("account.") ? "账户套餐 " + b.slice(8) : b))).join(" · ");
   const renderClusterRow = (cluster) => {
