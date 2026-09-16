@@ -1,7 +1,7 @@
 # v1.0.0-beta.1 计费确认主链规格（B06 / B07）
 
-**状态：** v1.2（2026-09-15；v1.1 全部落地后，按产品决策收敛为「明确计费方式」单一路径：按缺什么问什么、同类组批量、保存→重新归因→重算→各面刷新，见 §5.2a/§5.3a/§5.7 与 §10），作为 Beta 1 P2 / B1-M3「计费闭环」的实现合同  
-**日期：** 2026-09-15  
+**状态：** v1.3（2026-09-16；按产品决策把声明结束日期改为**选填**——留空＝持续有效、开放到未来，用于「按量充值 / 长期付费，不知道哪天结束」的关系，见 §5.4a 与 D02）。v1.2（2026-09-15；v1.1 全部落地后，按产品决策收敛为「明确计费方式」单一路径：按缺什么问什么、同类组批量、保存→重新归因→重算→各面刷新，见 §5.2a/§5.3a/§5.7 与 §10），作为 Beta 1 P2 / B1-M3「计费闭环」的实现合同  
+**日期：** 2026-09-16  
 **范围编号：** [发布规格](BETA_1_RELEASE_SPEC.md) B06、B07；真机矩阵 T06、T08、T10；[执行计划](BETA_1_EXECUTION_PLAN.md) E201–E208；PRD REQ-017–032、REQ-143–149；AC05、AC09、AC13、AC14、AC26、AC27、AC28  
 **关联文档：** [UAT 2026-09-15](UAT_FULL_2026-09-15.md)、[小闭环 UAT 清单](UAT_SMALL_LOOPS.md)、[总览后端接入规格](BETA_1_OVERVIEW_BACKEND_INTEGRATION_SPEC.md)、[设置页规格](BETA_1_SETTINGS_PAGE_SPEC.md)、[版本冻结记录](BETA_1_VERSION_FREEZE_2026-09-15.md)、[Provider 路由归属规格](../PROVIDER_ROUTE_ATTRIBUTION_SPEC.md)
 
@@ -16,7 +16,7 @@
 |---|---|---|---|
 | G1 | 候选列表的主按钮「是我的套餐」只改候选状态，**不产生归因、不重算**，用量仍按量估算；而提示文案承诺「确认后就能分清哪些在套餐内」 | **P0**（AC27 反向失败：用户以为确认了，数字没变） | `workbench.js:2359-2426` |
 | G2 | 保存前预览只算**当前统计月**，重算却按声明有效期**全历史**归因（`i64::MIN..MAX`）；预览 ≠ 实际写入范围 | **P0**（E203「预览与实际写入使用同一范围」失败） | `workbench.js:1865-1873` vs `authority.rs:2524` |
-| G3 | 声明一律 `effective_end = null`（开放到未来）；B06 明令 Beta「不自动扩展到未来记录」 | **P0**（范围纪律） | `workbench.js:1899` |
+| G3 | 声明一律 `effective_end = null`（开放到未来）；B06 明令 Beta「不自动扩展到未来记录」 | **P0**（范围纪律）；v1.3 起改为**结束选填**（留空＝持续有效），原推理已在 §3 事实 3 修正 / §5.4a | `workbench.js:1899` |
 | G4 | 预览没有金额，只有 tokens/事实/会话；REQ-026/AC27 要求「移出估算 X / 保持估算 X / 仍待确认 X」 | P1 | `BillingDeclarationImpactPreview` 无金额字段 |
 | G5 | REQ-023 的「宿主 × provider × 模型 × 路由证据」分组已在数据层实现（`summary.rs:908 unresolved_billing_groups`）但**零消费方**；UI 只从旧资产迁移候选 `billing_import_candidates` 出发，无旧资产的新用户看不到任何待确认组 | P1（E201 一般情形不成立） | `summary.rs:908`；无 Tauri 命令 |
 | G6 | 保存与重算分成「保存」「应用」两次点击；只保存不应用会留下「声明已存在、数字未变、待处理列表也不显示」的半状态 | P1 | `workbench.js:1911-1912, 1919` |
@@ -89,6 +89,7 @@ NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
 1. **只有 `official_subscription` 改数字。** 重算把该修订匹配到的事实写成 `subscription_covered`，按量估算随即排除它们；其他四种 kind 写 `user_declared`，谓词不认，金额不变（`authority.rs:2541-2544`）。UI 必须把这件事说出来（§5.3），不能让「组织承担」看起来像省了钱。
 2. **撤销不需要重算。** `revoke` 追加 `change_kind='revoked'` 的新修订成为 MAX，谓词立即失效，事实回到按量估算；旧 `results`/`attributions` 原样保留可追溯（`authority.rs:2194-2260`）。
 3. **未归因的事实永远按量。** 归因只在重算 COMMIT 时按当时存在的 `fact_id` 写入；之后同步进来的新事实没有归因行。所以「不自动扩展到未来」在数据层已经成立——但只要 `effective_end` 为空，任何一次 `retry` 或新修订的重算都会把新事实扫进去。G3 因此必须在写入侧堵住，而不是依赖这个副作用。
+   **v1.3 修正**：上面这半句「任何一次 retry 都会把新事实扫进去」漏掉了前提——重算**根本不会自己再跑**。`billing_recalculation_jobs` 是 `UNIQUE(revision_id)`，`billing_recalculation_retry` 只收 `failed`/`cancelled`（注释写明「成功任务不回退」），没有任何周期性重跑；桌面侧 `recover_billing_recalculations` 只恢复**已排队**的任务，不新建。所以留空 `effective_end` 并不构成「自动扩展到未来」：它不会改写任何已写事实的归因，新同步进来的事实仍是按量（见 §5.4a）。原文把「开放期」误当成了「自动扩展开关」——两个不同的东西。
 
 ## 4. 术语
 
@@ -162,12 +163,18 @@ NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
 
 ### 5.4 作用范围（REQ-025 的 Beta 子集、B06、G3）
 
-Beta 只开放两种范围，都**显式有界**：
+Beta 只开放两种范围（v1.3 起第二种的结束日可选）：
 
 1. **仅这一组**（默认，系统推荐的最窄可靠范围）：`scopes = [{model: <model_id>}, {route: <route_evidence_id 或组的 evidence_basis 键>}]`，`effective_start = 组内最早事实所在日`，`effective_end = 组内最晚事实所在日`。
-2. **所选日期范围**：用户在起止日期控件里改，`effective_end` 不得为空，`end >= start`，且不得晚于今天（北京时间）。
+2. **所选日期范围**：用户在起止日期控件里改，`end >= start`，且不得晚于今天（北京时间）；`effective_end` 可留空＝持续有效（§5.4a）。
 
-不开放「以后同类记录」（D02）；`effective_end = null` 在桌面命令层拒绝（§6 B3），内部 MCP `billing_workflow.declaration_save` 保持允许（它不是用户面）。
+不开放「以后同类记录」**自动声明**（D02 的原意）；`effective_end = null` 在桌面命令层**允许**（§6 B3，v1.3），内部 MCP `billing_workflow.declaration_save` 一直允许（它不是用户面）。
+
+### 5.4a 结束日期选填（v1.3，2026-09-16）
+
+- **规则**：`effective_start` 必填且不晚于今天（北京时间）；`effective_end` **选填**——留空（或空串）＝**持续有效**（开放到未来），用于「按量充值 / 长期付费，不知道哪天结束」的关系；填了则必须 `end >= start` 且不晚于今天。
+- **为什么留空是安全的**（§3 事实 3 的 v1.3 修正）：归因只在重算 COMMIT 时按当时存在的事实写入，而成功任务是终态、没有任何周期性重跑。所以留空**既不会**改写已写事实的归因，**也不会**让之后同步进来的事实自动变成套餐内。留空是「这个关系还没结束」的**记录**，不是「自动扩展到未来」的开关。
+- **留空的边界（验收时必须知道）**：正因为它不自动重跑，留空声明的覆盖停在**保存那一刻**已入库的事实。之后同步进来的用量仍是按量，直到用户重新声明。对 `official_subscription` 以外的四种 kind 这件事**不影响金额**——它们写 `user_declared`，而「唯一的排除谓词」只认 `subscription_covered`（§3 事实 1），`user_declared` 当前全仓库零消费方。`official_subscription` 的日期控件是隐藏的、由订阅锚点写成「锚点 – 今天」（§4 第 5 步），本次不改——要让订阅持续覆盖未来用量需要一条显式的重跑路径，属于**独立的后续决定**。
 
 日期边界使用北京时间自然日（`strftime('%Y-%m-%d', ..., '+8 hours')`）。UI 起止日期控件旁注明「按北京时间日期」；统计时区改动不影响声明日期。
 
@@ -235,7 +242,7 @@ Beta 只开放两种范围，都**显式有界**：
 |---|---|---|---|
 | B1 | `crates/agent-vitals-runtime/src/summary.rs::unresolved_billing_groups` + 新 Tauri 命令 `billing_confirmation_groups(month)`（`apps/desktop/src-tauri/src/lib.rs`，注册进 `generate_handler!`） | 把 `estimated_cost_minor: null` 换成 `estimated_amounts: [{currency, amount_minor, basis:"metered_estimate", pricing_version}]`，计价复用 `mcp/cost_breakdown.rs::collect_window` 的桶计价——把「桶 → 金额」抽成 `agent-vitals-runtime` 内可复用函数，`cost_breakdown` 与本命令共用；无价卡组 `estimated_amounts=[]` 并给 `unresolved_reason` | G5、G4 |
 | B2 | `crates/agent-vitals-data/src/authority.rs::billing_declaration_impact_preview_for` + `lib.rs::billing_candidate_impact_preview` | 返回结构扩为 `{moved: {facts, sessions, tokens, amounts[]}, kept: {...}, pending: {tokens, reasons[]}}`；窗口由 `effective_start..=effective_end` 推出，命令签名去掉 `window_*_ms`；`route` scope 用于把冲突证据归入 `pending` | G2、G4、E207 |
-| B3 | `lib.rs::save_billing_declaration_revision` | 桌面命令层校验：`effective_end` 必填、`<=` 当前统计月；`relationship_kind != "unknown"`；`official_subscription` 时在同一命令内 `billing_recalculation_enqueue` 并 spawn worker，返回 `job_id`。数据层 `billing_declaration_revision_save` 不改（MCP 面保持通用） | G3、G6 |
+| B3 | `lib.rs::save_billing_declaration_revision` | 桌面命令层校验（v1.3）：`effective_start` 必填且不晚于今天（北京时间）；`effective_end` **选填**——留空/空串＝持续有效，填了则 `>= start` 且 `<=` 今天；`relationship_kind != "unknown"`；`official_subscription` 时在同一命令内 `billing_recalculation_enqueue` 并 spawn worker，返回 `job_id`。数据层 `billing_declaration_revision_save` 不改（MCP 面保持通用） | G3、G6 |
 | B4 | `crates/agent-vitals-data/src/issues.rs` 的 `BILLING_CONFIRMATION` 投影 | 除 pending 候选外，把 `unresolved_billing_groups` 的组也投影为 `billing_group` 来源，`source_kind` 区分，同对象同原因去重（B09 已有规则） | AC28 找回 |
 | B5 | `lib.rs::billing_declaration_impact_preview`（`:2405`）与 `runtime::summary::billing_declaration_impact_preview`（`summary.rs:950`） | 删除（前端零调用；MCP `declaration_preview` 直接走 db 方法 `billing_declaration_impact_preview_for`，不受影响）；`generate_handler!` 同步移除；`tauri-mock.js:526` 对未知命令抛 `Unsupported browser mock command`，jsdom 守卫中任何残留调用都会失败 | 孤儿端点 |
 | B6 | `lib.rs::resolve_billing_import_candidate` | 保留 `dismiss/reopen`；`accept` 分支改为拒绝（返回错误「请通过确认计费方式保存声明」），因为 accept 由 `save` 在事务内完成（`authority.rs:2127-2134`） | G1 |
@@ -249,7 +256,7 @@ Beta 只开放两种范围，都**显式有界**：
 | F1 | `loadOverviewData` 的 `candidates` 行改为并发读 `billing_confirmation_groups(statisticsMonth())` + `billing_import_candidates`；`renderBillingImportCandidates` 重命名为 `renderBillingConfirmation`，输入为组列表（候选合并为组的证据行） | G5、G1 |
 | F2 | 面板保持在设置 › 计费与套餐分区（`switchTab("sources")` 即设置 tab）；本条按 v1.1 更正为「不改」 | §5.2 |
 | F3 | 组行主按钮唯一「确认计费方式」；去掉「是我的套餐 / 不是」；候选证据行的「这不是我的套餐」→ `dismiss` | G1 |
-| F4 | 声明面板：五选一 + 每项结果说明；起止日期控件（默认组的首尾日，`end` 必填）；作用范围固定「仅这一组」+ 可改日期 | §5.3、§5.4 |
+| F4 | 声明面板：五选一 + 每项结果说明；起止日期控件（默认组的首尾日，`end` **选填**——留空＝持续有效，v1.3）；作用范围固定「仅这一组」+ 可改日期 | §5.3、§5.4、§5.4a |
 | F5 | 预览调用改为无 `window_*`，渲染三组数字与分币金额；非订阅关系时「移出」显示 0 并注明不改金额 | §5.5 |
 | F6 | 「确认并保存声明」单按钮：save → 用返回的 `job_id` 轮询；删除 `ov-billing-apply` 及其 onclick | G6 |
 | F7 | 失败回执 `error_code` 文案映射；重复入队提示 | §5.10 |
@@ -260,7 +267,7 @@ Beta 只开放两种范围，都**显式有界**：
 ### 7.1 Rust（各在既有测试文件旁）
 
 - R1 `authority.rs`：预览（新签名）与 `billing_declaration_matching_fact_ids` 对同一修订返回**相同事实集合**（`fact_count` 相等、`total_tokens` 相等）——这是 G2 的直接钉子。
-- R2 `authority.rs`：`effective_end` 为空的修订重算后，再同步一条更晚的事实并 `retry` 同一任务 → 数据层允许扫入（记录现状）；桌面命令层 B3 拒绝空 `effective_end`（在 `lib.rs` 单测钉住）。
+- R2 `authority.rs`：`effective_end` 为空的修订重算后，再同步一条更晚的事实 → 该事实**拿不到**归因行、仍是按量估算（重算不会自己再跑，§5.4a）；对已成功的任务调 `retry` 是 no-op（`billing_recalculation_retry` 只收 `failed`/`cancelled`）。桌面命令层 B3（v1.3）**接受**空 `effective_end`，只拒绝非法起始与「倒置 / 晚于今天」的结束（在 `lib.rs` 单测钉住）。
 - R3 `summary.rs`：`unresolved_billing_groups` 在一组被 `official_subscription` 重算后消失，撤销后重新出现；`official_api/organization/third_party` 重算后**不**消失。
 - R4 `lib.rs`：`save_billing_declaration_revision` 收到 `relationship_kind="unknown"` 返回错误，`billing_declarations` 无新行。
 - R5 `cost_breakdown.rs` ↔ 新预览：同一隔离库上，`cost_breakdown` 的 `subscription` 桶金额 == 预览 `moved.amounts`（同币逐位）。
@@ -337,3 +344,11 @@ skipped 208）、golden 15/15（Python 与 Rust 二进制各一遍）、全部 `
 - 前端：`openBillingDeclaration(target, rows)` 按缺什么问什么 + 批量勾选；`refreshAfterBillingChange()` 作废三处缓存并重拉当前页；待处理页 `billing_group` 项入口同样打开该弹窗；文案「明确计费方式」。
 - 守卫：`verify-workbench-sources.mjs` 计费段重写（三步表单、批量、服务商未知、月费未知不补挂牌价、缓存作废、仍不确定不写声明/归属）；`verify-workbench-kpi-decide.mjs` 待处理入口文案。
 - 全量门：根 workspace `cargo test` / clippy、桌面 116 单测 / clippy、Python 1189、golden 15/15（Python + Rust 二进制）、全部 `verify-workbench-*.mjs`、两条 MCP smoke。
+
+### 10.2 v1.3 结束日期选填（2026-09-16，同一分支）
+
+- **决定**：声明的 `effective_end` 改为**选填**，留空＝持续有效（开放到未来）。触发是产品侧的用例——按量充值 / 长期付费的关系「不知道哪天结束」，强制填结束日等于让用户编一个日期出来。
+- **推理修正**：v1.2 把「开放期」当成「自动扩展开关」而选择堵住（§3 事实 3 原文），但重算**没有**任何周期性重跑（`UNIQUE(revision_id)` + 成功即终态 + `recover` 只恢复已排队任务），所以留空既不改写已写归因，也不会自动覆盖后来同步进来的事实。允许之后不会引入「静默扩展」。见 §3 事实 3 的 v1.3 修正与 §5.4a。
+- **改动面**：`lib.rs::validate_desktop_declaration`（空 end 放行；仍拒非法起始、倒置的结束、晚于今天）；`workbench.html` 结束字段文案（「结束（选填）」＋留空即持续有效的说明）；`workbench.js`（保存校验、三处 `invoke` 发 `null`、新增 `billingRangeText` 统一区间文案、`syncBillingDateBounds` 不把清空的字段填回去、作用范围句写「持续有效」）。
+- **守卫**：`lib.rs` 单测改名 `desktop_declaration_is_bounded_when_dated_and_open_ended_when_blank`；`verify-workbench-sources.mjs` 新增 4 条断言（留空的作用范围文案、留空经 restep 仍是空、预览发 `null`、保存发 `null`），并已确认回退修复时会变红。
+- **留空的边界**（验收别误读）：留空声明的覆盖停在**保存那一刻**已入库的事实，之后同步进来的用量仍按量。对 `official_subscription` 以外的四种 kind，这不影响金额——它们写 `user_declared`，而排除谓词只认 `subscription_covered`。`official_subscription` 的日期控件本来就隐藏、由订阅锚点写成「锚点 – 今天」，本次**未改**：要让订阅持续覆盖未来用量需要一条显式的重跑路径（成功任务终态，`retry` 不收成功任务），**未做，属独立决定**。

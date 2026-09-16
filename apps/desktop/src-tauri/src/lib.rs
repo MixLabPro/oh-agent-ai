@@ -2331,21 +2331,29 @@ fn clear_budget_snooze() -> Result<Value, String> {
     Ok(serde_json::json!({ "status": "cleared" }))
 }
 
-/// 桌面端声明的 Beta 范围纪律（计费主链规格 §5.4 / B3）。数据层
-/// `billing_declaration_revision_save` 故意保持通用（内部 MCP 仍可写开放期），
-/// 这里是用户面：`unknown` 不是声明；`effective_end` 必填且不晚于今天（北京时间），
-/// 否则一次 retry 就会把之后同步进来的事实扫进订阅覆盖（§3 事实 3）。
+/// 桌面端声明的 Beta 范围纪律（计费主链规格 §5.4 / B3；2026-09-16 按产品决策
+/// 放开结束日期）。数据层 `billing_declaration_revision_save` 故意保持通用（内部
+/// MCP 仍可写开放期），这里是用户面：`unknown` 不是声明；`effective_start` 必填且
+/// 不晚于今天（北京时间）；`effective_end` **选填**——留空表示「持续有效」（按量
+/// 充值 / 长期付费没有结束日），填了则必须不早于起始、不晚于今天。
+///
+/// 留空在这里为什么不再需要堵（规格 §3 事实 3 担心的"一次 retry 把之后同步进来的
+/// 事实扫进订阅覆盖"）：归因只在重算 COMMIT 时按当时存在的事实写入，而成功任务
+/// 是终态（`UNIQUE(revision_id)`，`billing_recalculation_retry` 只收 failed /
+/// cancelled），没有任何周期性重跑——所以留空只是「这个关系还没结束」的记录，
+/// 不是「自动扩展到未来」的开关。真是那条路径要重建，属于独立的决定。
 fn validate_desktop_declaration(
     relationship_kind: &str, effective_start: &str, effective_end: Option<&str>,
 ) -> Result<(), String> {
     if relationship_kind == "unknown" {
         return Err("\"unknown\" is not a billing declaration; keep the group pending instead".to_string());
     }
-    let Some(end) = effective_end.filter(|end| !end.trim().is_empty()) else {
-        return Err("effective_end is required: declarations must be bounded to an explicit date range".to_string());
-    };
     let start_date = agent_vitals_data::authority::billing_boundary_date(effective_start, false)
         .ok_or_else(|| "effective_start must be YYYY-MM-DD (YYYY-MM is accepted for legacy data)".to_string())?;
+    // 空串与 None 同义：前端把清空的日期输入框发成 null，但脚本/历史调用可能发 ""。
+    let Some(end) = effective_end.map(str::trim).filter(|end| !end.is_empty()) else {
+        return Ok(());
+    };
     let end_date = agent_vitals_data::authority::billing_boundary_date(end, true)
         .ok_or_else(|| "effective_end must be YYYY-MM-DD (YYYY-MM is accepted for legacy data)".to_string())?;
     if end_date < start_date {
@@ -3328,13 +3336,20 @@ mod tests {
         assert!(candidate_decision_status("approve").is_err());
     }
 
-    /// 规格 R4 + B3：`unknown` 不是声明；`effective_end` 必填、不早于起始、
-    /// 不晚于今天——空 end 就是「以后同类记录」，Beta 不开放。
+    /// 规格 R4 + B3（2026-09-16 起结束日期改为选填）：`unknown` 不是声明；起始必填
+    /// 且真实存在；结束留空＝开放到未来，填了则不早于起始、不晚于今天。
     #[test]
-    fn desktop_declaration_must_be_bounded_and_never_unknown() {
+    fn desktop_declaration_is_bounded_when_dated_and_open_ended_when_blank() {
+        // `unknown` 永远不是声明；起始必须是一个真实存在的日期。
         assert!(validate_desktop_declaration("unknown", "2026-07", Some("2026-09-30")).is_err());
-        assert!(validate_desktop_declaration("official_subscription", "2026-07-01", None).is_err());
-        assert!(validate_desktop_declaration("official_subscription", "2026-07-01", Some("")).is_err());
+        assert!(validate_desktop_declaration("official_api", "", None).is_err());
+        assert!(validate_desktop_declaration("official_api", "2026-13-01", None).is_err());
+        assert!(validate_desktop_declaration("official_api", "2026-07", None).is_ok());
+        // 结束是选填的：None / 空串 / 纯空白都表示「持续有效」（按量充值没有结束日）。
+        assert!(validate_desktop_declaration("official_subscription", "2026-07-01", None).is_ok());
+        assert!(validate_desktop_declaration("official_subscription", "2026-07-01", Some("")).is_ok());
+        assert!(validate_desktop_declaration("official_subscription", "2026-07-01", Some("  ")).is_ok());
+        // 填了就必须是一段真实可行的区间：不早于起始、不晚于今天（北京时间）。
         assert!(validate_desktop_declaration("official_subscription", "2026-08-15", Some("2026-08-14")).is_err());
         assert!(validate_desktop_declaration("official_subscription", "2026-07-01", Some("2026-10-01")).is_err());
         assert!(validate_desktop_declaration("official_subscription", "2026-07-01", Some("2026-09-15")).is_ok());

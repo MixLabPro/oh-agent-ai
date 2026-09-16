@@ -1886,6 +1886,17 @@ function minBillingDate(left, right) {
   return left < right ? left : right;
 }
 
+// 声明适用区间的统一文案。结束为空＝持续有效（选填，见 `syncBillingDateBounds`）。
+// **不能直接拼 `"–" + end`**：`null` 会拼成字面量 "null" 出现在界面上；旧的分组行
+// 用 `end !== start` 做判断，对 null 恒真，正好踩中这条。
+function billingRangeText(start, end) {
+  const from = String(start == null ? "" : start);
+  const to = String(end == null ? "" : end);
+  if (!from) return to ? to : "";
+  if (!to) return from + " 起（持续有效）";
+  return to === from ? from : from + " – " + to;
+}
+
 // 路由证据里这几种已经说明「走的是官方路由」，不必再问用户；其余（missing /
 // inferred / conflict / config-current / env-current）才需要用户明确。
 const BILLING_ROUTE_KNOWN_OFFICIAL = new Set([
@@ -2043,6 +2054,8 @@ function openBillingDeclaration(target, rows, preset) {
   //     一起校验，必然拒绝）；
   //   · 结束早于起始 → 只有保存时才报错，选择器里看不出来。
   // 所以起始也封顶到今天，结束以起始为下界（`syncBillingDateBounds` 在改动时重算）。
+  // 结束是**选填**的：上面这几行只是给个默认值，用户清空即得开放区间，而
+  // `syncBillingDateBounds` 只在结束非空时才把它抬到起始，不会把清空动作填回来。
   start.max = today;
   end.max = today;
   end.min = start.value;
@@ -2095,6 +2108,11 @@ function closeBillingDeclaration() {
 
 // 起止是一对约束：起始封顶今天（声明不能从未来开始），结束以起始为下界。任何一处改动
 // 都重算一次，选择器里就不会出现"看起来能选、其实永远不合法"的区间。
+//
+// 结束是**选填**的：留空＝持续有效（开放到未来），用于「按量充值 / 长期付费，不知道
+// 哪天结束」的关系。留空必须留得住——`end.value` 为空时不设下界，也不参与下面的
+// "抬到起始"（`end.value &&` 那半个条件），否则用户刚清空的字段会被下一次 restep
+// 悄悄填回去，选填就变成了必填。
 function syncBillingDateBounds() {
   const start = document.getElementById("ov-billing-start");
   const end = document.getElementById("ov-billing-end");
@@ -2119,9 +2137,12 @@ function syncBillingScopeText() {
   const modelText = !target.model_id ? "全部模型"
     : models.length === 1 ? models[0]
     : models.length + " 个模型（" + models[0] + " 等）";
+  // 结束留空＝持续有效，这里必须跟着说出来——否则那个「?」会被读成"还没填完"，
+  // 用户就会去填一个自己并不知道的日期。
+  const rangeText = billingRangeText((start && start.value) || "", (end && end.value) || "");
   scope.textContent = "作用范围：" + target.host + " · " +
     (target.missing.provider ? "待选服务商" : target.provider_id) + " · " + modelText + " · " +
-    String((start && start.value) || "?") + " – " + String((end && end.value) || "?") + "（北京时间日期）。";
+    (rangeText || "?") + "（北京时间日期）。";
 }
 
 // 当前弹窗里选中的模型集合（批量勾选时 = 目标组 + 同类组）。
@@ -2248,8 +2269,7 @@ function billingPreviewText(impact, relationshipKind) {
   const models = (impact.scopes || []).filter((s) => s.scope_kind === "model").map((s) => s.scope_value);
   text += "。范围：" + impact.host + " · " + impact.provider_id +
     (models.length > 3 ? " · " + models.length + " 个模型" : (models.length ? " · " + models.join("、") : "")) +
-    " · " + impact.effective_start +
-    (impact.effective_end && impact.effective_end !== impact.effective_start ? "–" + impact.effective_end : "") + "。";
+    " · " + billingRangeText(impact.effective_start, impact.effective_end) + "。";
   return text;
 }
 
@@ -2309,15 +2329,20 @@ function bindBillingDeclarationPanel() {
       syncBillingDeclarationSteps();
     }
     const effectiveStart = String(start.value || "").trim();
+    // 结束留空＝持续有效（开放到未来）。空值既不是"格式错误"，也不能拿去做字符串
+    // 比较——`"" < start` 恒真，会把留空误判成"结束早于起始"而拒绝保存。
     const effectiveEnd = String(end.value || "").trim();
-    if (!BILLING_DATE_RE.test(effectiveStart) || !BILLING_DATE_RE.test(effectiveEnd)) {
-      return fail("起止日期格式应为 YYYY-MM-DD。");
+    if (!BILLING_DATE_RE.test(effectiveStart)) {
+      return fail("起始日期格式应为 YYYY-MM-DD。");
     }
-    if (effectiveEnd < effectiveStart) {
+    if (effectiveEnd && !BILLING_DATE_RE.test(effectiveEnd)) {
+      return fail("结束日期格式应为 YYYY-MM-DD，或留空表示持续有效。");
+    }
+    if (effectiveEnd && effectiveEnd < effectiveStart) {
       return fail("结束日期不能早于起始日期。");
     }
-    if (effectiveEnd > today) {
-      return fail("结束日期不能晚于今天（北京时间）；声明不会扩展到未来记录。");
+    if (effectiveEnd && effectiveEnd > today) {
+      return fail("结束日期不能晚于今天（北京时间）。");
     }
     if (!relationshipKind) {
       return fail("请选择计费方式：官方订阅 / 官方 API（按量）/ 组织承担。");
@@ -2334,7 +2359,7 @@ function bindBillingDeclarationPanel() {
           (!billingDeclarationState || billingDeclarationState.phase !== "unknown_preview")) {
         const impact = await invoke("billing_candidate_impact_preview", {
           host: target.host, providerId: providerId || target.provider_id, relationshipKind,
-          effectiveStart, effectiveEnd, scopes,
+          effectiveStart, effectiveEnd: effectiveEnd || null, scopes,
         });
         preview.hidden = false;
         if (impact.status !== "ok") {
@@ -2361,7 +2386,7 @@ function bindBillingDeclarationPanel() {
       }
       if (!billingDeclarationState || billingDeclarationState.phase !== "preview") {
         const impact = await invoke("billing_candidate_impact_preview", {
-          host: target.host, providerId, relationshipKind, effectiveStart, effectiveEnd, scopes,
+          host: target.host, providerId, relationshipKind, effectiveStart, effectiveEnd: effectiveEnd || null, scopes,
         });
         preview.hidden = false;
         if (impact.status !== "ok") {
@@ -2393,7 +2418,7 @@ function bindBillingDeclarationPanel() {
         // （候选金额已在打开弹窗时预填，用户看得见、改得了）。
         amountMinor: subscription.amountMinor,
         currency: subscription.currency,
-        effectiveStart, effectiveEnd,
+        effectiveStart, effectiveEnd: effectiveEnd || null,
         sourceCandidateId: candidate ? candidate.candidate_id : null,
         evidenceRef: (target.autoBasis ? "auto:" + target.autoBasis.join("+") + ";" : "") +
           (candidate ? "legacy-import-candidate:" + candidate.candidate_id
@@ -2779,8 +2804,7 @@ function renderBillingDeclarations(report) {
     const label = declaration.relationship_kind === "official_subscription" ? "官方订阅" :
       declaration.relationship_kind === "official_api" ? "官方 API" : declaration.relationship_kind;
     detail.textContent = declaration.host + " · " + declaration.provider_id + " · " + label +
-      " · 自 " + declaration.effective_start + " 起" +
-      (declaration.effective_end ? "，至 " + declaration.effective_end : "");
+      " · " + billingRangeText(declaration.effective_start, declaration.effective_end);
     const actions = document.createElement("div");
     actions.className = "billing-review-actions";
     const revoke = document.createElement("button");
@@ -3124,7 +3148,7 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
       const rowAmount = billingAmountsText(row.estimated_amounts);
       detail.textContent = row.host + " · " + row.provider_id + (row.model_id ? " · " + row.model_id : "") +
         " · " + billingEvidenceLabel(row.evidence_basis) +
-        " · " + row.effective_start + (row.effective_end !== row.effective_start ? "–" + row.effective_end : "") +
+        " · " + billingRangeText(row.effective_start, row.effective_end) +
         " · " + Number(row.session_count || 0) + " 个会话 · " + fmtTokens(Number(row.tokens || 0)) + " tokens · " +
         (rowAmount ? "按量估算 " + rowAmount : (Number(row.tokens || 0) > 0 ? "无价卡，仅计 token" : "本月无用量"));
       if (row.candidate) {

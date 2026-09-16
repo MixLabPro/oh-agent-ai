@@ -715,6 +715,28 @@ elements["ov-billing-end"].onchange();
 elements["ov-billing-batch"].onchange();
 ok(elements["ov-billing-end"].value === "2026-09-10" && elements["ov-billing-start"].value === monthStart,
   "手改的结束日期经 restep 后仍在：撤回只针对程序写入的账户锚点（复验 iteration 4 #1）");
+
+// 结束是**选填**的：留空＝持续有效（开放到未来），给「按量充值 / 长期付费，不知道哪天
+// 结束」的关系用。留空必须留得住——清空之后任何一次 restep（改起始、勾批量）都不能把
+// 字段填回去，否则"选填"在用户手里还是必填（复验 2026-09-16）。
+elements["ov-billing-end"].value = "";
+elements["ov-billing-end"].onchange();
+ok(elements["ov-billing-end"].value === "" && elements["ov-billing-scope-text"].textContent.includes("持续有效"),
+  "结束留空＝持续有效：作用范围照实说出来，不留一个会被读成没填完的「?」");
+elements["ov-billing-start"].value = "2026-08-20";
+elements["ov-billing-start"].onchange();
+elements["ov-billing-batch"].onchange();
+ok(elements["ov-billing-end"].value === "" && elements["ov-billing-start"].value === "2026-08-20",
+  "留空的结束日期经起始改动与 restep 后仍是空的（选填留得住）");
+billingCalls.length = 0;
+await elements["ov-billing-save"].onclick();
+const openPreview = billingCalls.find((c) => c.command === "billing_candidate_impact_preview");
+ok(openPreview && openPreview.args.effectiveEnd === null,
+  "留空时的影响预览发 effectiveEnd=null（预览范围 = 写入范围）");
+await elements["ov-billing-save"].onclick();
+const openCall = billingCalls.find((c) => c.command === "save_billing_declaration_revision");
+ok(openCall && openCall.args.effectiveEnd === null && openCall.args.effectiveStart === "2026-08-20",
+  "留空保存写 null 而不是空串：声明开放到未来");
 elements["ov-billing-close"].onclick();
 billingOverride = null;
 
