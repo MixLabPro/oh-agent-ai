@@ -129,6 +129,8 @@
 | A7 | `crates/agent-vitals-data/src/authority_query.rs::SQL_UNRESOLVED_BILLING_GROUPS` | 分组列去掉 `model_id`（模型进 `models[]` 子列表），加 `provider_raw`；待处理投影同步 | §5.1 |
 | A8 | `apps/desktop/src-tauri/ui/workbench.js` | 列表三态渲染；「确认」直写声明（`evidence_ref=auto:…`）；弹窗只剩 L3 步骤；订阅步改为确认扣款日/月费；`<unknown>` 不上卡面 | §4/§5 |
 | A9 | `apps/desktop/src-tauri/src/lib.rs::validate_desktop_declaration` | 系统判定确认的声明允许 `effective_start = subscriptionCreatedAt`（早于本月）；`effective_end` 仍 ≤ 今天 | §5.2 |
+| A12 | 新 `crates/agent-vitals-hosts/src/hosts/claude_code/sources/config.rs` | 读 `~/.claude/settings.json`（`settings.local.json` 覆盖）`env` 的**白名单 5 键**（`ANTHROPIC_BASE_URL` + 4 个模型映射）→ `ClaudeEndpointConfig`，`ConfigCurrent`(4)。基址不是该模型厂商官方端点、或模型映射带 `vendor/model` 前缀 → `auto_verdict` 判 `relay_config`（计费方 = 中转注册域；无基址时留空不猜），依据 `config.endpoint` / `config.gateway_named`，**恒为 `one_question`**；与会话级官方形状并存时追加 `config.endpoint.conflict`（P5） | §2 L2 端点面 / §10.2 层② |
+| A11 | 「确认」直写声明（阶段 2） |
 | A10 | `tests/`：`test_pricing_lockstep.py`（新目录段）、hosts 单测（每种 ID 形状一条 fixture）、`billing_preview` R-测（verdict 三态）、隐私测（任何 DTO/导出/日志不含 email/accountUuid） | | §7 |
 
 阶段 2（A11）：`sync_service` 在 ingest 后跑 `auto_attribute()`，对满足 §5.3 条件的组写系统声明并入队；撤销与用户声明同一机制。
@@ -292,4 +294,41 @@ Cline 就是现成的验证对象：`metadata.modelId = anthropic/claude-sonnet-
 | 复验 #4 | 浏览器 mock 的簇主键仍只用 `billing_party`，与 Rust 不同键 | 同步为 `billing_party \|\| model_vendor \|\| "<unknown>"`；`rowByGroupId` 提到 `clusterRowsOf` 之前，消除 TDZ 依赖 |
 
 复验同时确认：真实数据下网关簇确实按厂商拆开（`claude-code|deepseek|gateway` 与 `claude-code|zhipu-glm|gateway`）；冲突短路返回的对象与常规路径同键，`clusters_of` 与前端都不会因 `billing_party: null` 出错；新增的 Rust 测试在删掉冲突短路或把簇主键改回 `billing_party` 时都会失败（两条缺陷各自被独立断言抓住）。
+
+### 11.6 端点/配置证据（A12，2026-09-16 用户提问驱动）
+
+**问题**：用户在「明确计费方式」里看到 `claude-code · 服务商未知 · deepseek-v4-flash-0731`（856M tokens），
+问"能不能知道是哪个 provider？有 base url 信息吗？胜算云还是 deepseek 官方？"
+
+**排查（只读真机）**：
+
+1. **会话日志里没有端点**：44,827 条含 deepseek 的记录中 `requestId` 只出现 176 次，日志正文里的
+   `router.shengsuanyun.com` 全是**对话内容**而非请求元数据——§10.1 表格里 claude-code 那格写的
+   "端点：启动环境变量，日志不记"被真机确认。
+2. **配置里有**：`~/.claude/settings.json` 的 `env` 为
+   `ANTHROPIC_BASE_URL = https://router.shengsuanyun.com/api`，模型映射 `ANTHROPIC_MODEL = deepseek/deepseek-v4-pro-0813`
+   等。→ 这批用量走的是**胜算云**，不是 DeepSeek 官方。
+3. **两条独立的配置信号**（第二条由用户指出，已实现）：基址不是官方端点；以及**模型映射带
+   `vendor/model` 前缀——官方端点不需要厂商 id（`deepseek-v4.1-flash`），中转才需要
+   （`deepseek/deepseek/…`）**。只换中转、不改基址的配置靠第二路才不漏判。
+4. 该批事实里的模型名是**裸名**（中转上报的上游名），配置里才是带前缀的；所以我们此前判
+   `vendor_shape`（32 位 hex 响应 id，中转直通时与官方同形）——这正是它只能到 `Inferred` 的原因。
+
+**真机效果**（`billing-groups --month 2026-09`）：
+
+```
+claude-code  shengsuanyun.com  one_question  relay_config  models=11  tokens=2762606626  basis=config.endpoint+config.gateway_named
+```
+
+11 个模型（2.76B tokens）从 6 个"请你回答官方还是中转"的行收敛成 **1 行**并直接写出中转名字；
+判据是 `config-current`(4)，所以仍是"一次确认"，不是替用户断言。
+
+**隐私**：`env` 里紧挨着 `ANTHROPIC_AUTH_TOKEN`。读取器**白名单取键**（5 个），令牌连值都不复制；
+`ClaudeEndpointConfig` 没有令牌槽位且故意不 derive `Serialize`；测试注入假令牌断言它不出现在结构里。
+
+**残留风险（已显式暴露）**：中转代理 Anthropic 时会**原样保留** `req_01…`/`msg_01…` 形状，于是
+"会话级官方形状"与"配置指向中转"可以同时成立。判定不推翻强证据，但依据里出现
+`config.endpoint.conflict`，UI 显示"⚠ 但这批用量是官方形状，而配置指向中转——两者需你核对"。
+**真机提示**：本机 claude-code 的 Claude Pro 声明（`evidence_ref=auto:route.session-native+account.Claude Pro`）
+正是这种形状——若那批用量实际也经胜算云，该声明需要重新核对。
 
