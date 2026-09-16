@@ -528,10 +528,14 @@
                   </label>
                   <span class="bd-range-sep" aria-hidden="true">–</span>
                   <label class="bd-field"><span>结束（选填）</span>
-                    <input id="ov-billing-end" type="date" inputmode="numeric" pattern="\d{4}-\d{2}-\d{2}" placeholder="留空＝持续有效" aria-describedby="ov-billing-scope-text">
+                    <input id="ov-billing-end" type="date" inputmode="numeric" pattern="\d{4}-\d{2}-\d{2}" placeholder="YYYY-MM-DD" aria-describedby="ov-billing-scope-text">
                   </label>
                 </div>
-                <p class="bd-help muted">结束留空＝持续有效，声明一直覆盖到未来（按量充值、长期付费没有结束日时用它）；填了就只覆盖到那一天。起始与结束都不晚于今天，结束不早于起始。</p>
+                <label class="bd-check">
+                  <input id="ov-billing-open-ended" type="checkbox">
+                  <span>持续有效（不设结束日期）</span>
+                </label>
+                <p class="bd-help muted">勾上「持续有效」＝不设结束日期，声明一直覆盖到未来（按量充值、长期付费不知道哪天结束时用它）；不勾就只覆盖到上面填的那一天。起始与结束都不晚于今天，结束不早于起始。</p>
                 <p class="bd-help muted" id="ov-billing-scope-text"></p>
               </div>
             </div>

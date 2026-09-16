@@ -179,7 +179,7 @@ console.log("# 计费确认主链（docs/v1.0.0/BETA_1_BILLING_CONFIRMATION_CHAI
 for (const id of ["ov-billing-prompt", "ov-billing-review-panel", "ov-billing-review",
   "ov-billing-review-close", "ov-billing-prompt-copy", "ov-billing-review-list",
   "ov-billing-later", "ov-billing-save", "ov-billing-cancel",
-  "ov-billing-relationship-effect", "ov-billing-start", "ov-billing-end", "ov-billing-scope-text",
+  "ov-billing-relationship-effect", "ov-billing-start", "ov-billing-end", "ov-billing-open-ended", "ov-billing-scope-text",
   "ov-billing-declaration-panel", "ov-billing-declaration-context", "ov-billing-preview", "ov-billing-missing",
   "ov-billing-batch-row", "ov-billing-batch", "ov-billing-batch-text",
   "ov-billing-provider-row", "ov-billing-provider", "ov-billing-route-row", "ov-billing-route",
@@ -716,27 +716,32 @@ elements["ov-billing-batch"].onchange();
 ok(elements["ov-billing-end"].value === "2026-09-10" && elements["ov-billing-start"].value === monthStart,
   "手改的结束日期经 restep 后仍在：撤回只针对程序写入的账户锚点（复验 iteration 4 #1）");
 
-// 结束是**选填**的：留空＝持续有效（开放到未来），给「按量充值 / 长期付费，不知道哪天
-// 结束」的关系用。留空必须留得住——清空之后任何一次 restep（改起始、勾批量）都不能把
-// 字段填回去，否则"选填"在用户手里还是必填（复验 2026-09-16）。
-elements["ov-billing-end"].value = "";
-elements["ov-billing-end"].onchange();
-ok(elements["ov-billing-end"].value === "" && elements["ov-billing-scope-text"].textContent.includes("持续有效"),
-  "结束留空＝持续有效：作用范围照实说出来，不留一个会被读成没填完的「?」");
+// 结束是**选填**的：「持续有效」勾选框是不设结束日期的**唯一**入口——原生
+// `<input type="date">` 根本没有"未设置"这个状态（点开日历弹窗选不出空，清空只能全选
+// 删除），用户看到「选填」却做不到（2026-09-16 真机复验）。勾选后字段必须为空且禁用，
+// 且经 restep 不能被填回一个日期。
+ok(elements["ov-billing-end"].value !== "" && elements["ov-billing-open-ended"].checked === false
+  && elements["ov-billing-end"].disabled === false,
+  "默认不勾「持续有效」：结束日期有值可改（保持有界）");
+elements["ov-billing-open-ended"].checked = true;
+elements["ov-billing-open-ended"].onchange();
+ok(elements["ov-billing-end"].value === "" && elements["ov-billing-end"].disabled === true
+  && elements["ov-billing-scope-text"].textContent.includes("持续有效"),
+  "勾「持续有效」＝不设结束日期：字段清空并禁用，作用范围照实说「持续有效」");
 elements["ov-billing-start"].value = "2026-08-20";
 elements["ov-billing-start"].onchange();
 elements["ov-billing-batch"].onchange();
-ok(elements["ov-billing-end"].value === "" && elements["ov-billing-start"].value === "2026-08-20",
-  "留空的结束日期经起始改动与 restep 后仍是空的（选填留得住）");
+ok(elements["ov-billing-end"].value === "" && elements["ov-billing-open-ended"].checked === true,
+  "勾选经起始改动与 restep 后仍在（持续有效不会被填回一个日期）");
 billingCalls.length = 0;
 await elements["ov-billing-save"].onclick();
 const openPreview = billingCalls.find((c) => c.command === "billing_candidate_impact_preview");
 ok(openPreview && openPreview.args.effectiveEnd === null,
-  "留空时的影响预览发 effectiveEnd=null（预览范围 = 写入范围）");
+  "持续有效的影响预览发 effectiveEnd=null（预览范围 = 写入范围）");
 await elements["ov-billing-save"].onclick();
 const openCall = billingCalls.find((c) => c.command === "save_billing_declaration_revision");
 ok(openCall && openCall.args.effectiveEnd === null && openCall.args.effectiveStart === "2026-08-20",
-  "留空保存写 null 而不是空串：声明开放到未来");
+  "持续有效保存写 null 而不是空串：声明开放到未来");
 elements["ov-billing-close"].onclick();
 billingOverride = null;
 

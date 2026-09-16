@@ -172,7 +172,7 @@ Beta 只开放两种范围（v1.3 起第二种的结束日可选）：
 
 ### 5.4a 结束日期选填（v1.3，2026-09-16）
 
-- **规则**：`effective_start` 必填且不晚于今天（北京时间）；`effective_end` **选填**——留空（或空串）＝**持续有效**（开放到未来），用于「按量充值 / 长期付费，不知道哪天结束」的关系；填了则必须 `end >= start` 且不晚于今天。
+- **规则**：`effective_start` 必填且不晚于今天（北京时间）；`effective_end` **选填**——留空（或空串）＝**持续有效**（开放到未来），用于「按量充值 / 长期付费，不知道哪天结束」的关系；填了则必须 `end >= start` 且不晚于今天。桌面 UI 的入口是日期行下面的「持续有效（不设结束日期）」勾选框：勾选＝结束字段清空并禁用，保存发 `null`。**不要把这个入口做成"让用户清空日期框"**——原生 `<input type="date">` 没有"未设置"这个状态（点开日历弹窗选不出空、清空只能全选删除），用户看到「选填」却做不到（2026-09-16 真机复验）。
 - **为什么留空是安全的**（§3 事实 3 的 v1.3 修正）：归因只在重算 COMMIT 时按当时存在的事实写入，而成功任务是终态、没有任何周期性重跑。所以留空**既不会**改写已写事实的归因，**也不会**让之后同步进来的事实自动变成套餐内。留空是「这个关系还没结束」的**记录**，不是「自动扩展到未来」的开关。
 - **留空的边界（验收时必须知道）**：正因为它不自动重跑，留空声明的覆盖停在**保存那一刻**已入库的事实。之后同步进来的用量仍是按量，直到用户重新声明。对 `official_subscription` 以外的四种 kind 这件事**不影响金额**——它们写 `user_declared`，而「唯一的排除谓词」只认 `subscription_covered`（§3 事实 1），`user_declared` 当前全仓库零消费方。`official_subscription` 的日期控件是隐藏的、由订阅锚点写成「锚点 – 今天」（§4 第 5 步），本次不改——要让订阅持续覆盖未来用量需要一条显式的重跑路径，属于**独立的后续决定**。
 
@@ -256,7 +256,7 @@ Beta 只开放两种范围（v1.3 起第二种的结束日可选）：
 | F1 | `loadOverviewData` 的 `candidates` 行改为并发读 `billing_confirmation_groups(statisticsMonth())` + `billing_import_candidates`；`renderBillingImportCandidates` 重命名为 `renderBillingConfirmation`，输入为组列表（候选合并为组的证据行） | G5、G1 |
 | F2 | 面板保持在设置 › 计费与套餐分区（`switchTab("sources")` 即设置 tab）；本条按 v1.1 更正为「不改」 | §5.2 |
 | F3 | 组行主按钮唯一「确认计费方式」；去掉「是我的套餐 / 不是」；候选证据行的「这不是我的套餐」→ `dismiss` | G1 |
-| F4 | 声明面板：五选一 + 每项结果说明；起止日期控件（默认组的首尾日，`end` **选填**——留空＝持续有效，v1.3）；作用范围固定「仅这一组」+ 可改日期 | §5.3、§5.4、§5.4a |
+| F4 | 声明面板：五选一 + 每项结果说明；起止日期控件（默认组的首尾日，`end` **选填**——日期行下的「持续有效（不设结束日期）」勾选框，v1.3）；作用范围固定「仅这一组」+ 可改日期 | §5.3、§5.4、§5.4a |
 | F5 | 预览调用改为无 `window_*`，渲染三组数字与分币金额；非订阅关系时「移出」显示 0 并注明不改金额 | §5.5 |
 | F6 | 「确认并保存声明」单按钮：save → 用返回的 `job_id` 轮询；删除 `ov-billing-apply` 及其 onclick | G6 |
 | F7 | 失败回执 `error_code` 文案映射；重复入队提示 | §5.10 |
@@ -349,6 +349,6 @@ skipped 208）、golden 15/15（Python 与 Rust 二进制各一遍）、全部 `
 
 - **决定**：声明的 `effective_end` 改为**选填**，留空＝持续有效（开放到未来）。触发是产品侧的用例——按量充值 / 长期付费的关系「不知道哪天结束」，强制填结束日等于让用户编一个日期出来。
 - **推理修正**：v1.2 把「开放期」当成「自动扩展开关」而选择堵住（§3 事实 3 原文），但重算**没有**任何周期性重跑（`UNIQUE(revision_id)` + 成功即终态 + `recover` 只恢复已排队任务），所以留空既不改写已写归因，也不会自动覆盖后来同步进来的事实。允许之后不会引入「静默扩展」。见 §3 事实 3 的 v1.3 修正与 §5.4a。
-- **改动面**：`lib.rs::validate_desktop_declaration`（空 end 放行；仍拒非法起始、倒置的结束、晚于今天）；`workbench.html` 结束字段文案（「结束（选填）」＋留空即持续有效的说明）；`workbench.js`（保存校验、三处 `invoke` 发 `null`、新增 `billingRangeText` 统一区间文案、`syncBillingDateBounds` 不把清空的字段填回去、作用范围句写「持续有效」）。
-- **守卫**：`lib.rs` 单测改名 `desktop_declaration_is_bounded_when_dated_and_open_ended_when_blank`；`verify-workbench-sources.mjs` 新增 4 条断言（留空的作用范围文案、留空经 restep 仍是空、预览发 `null`、保存发 `null`），并已确认回退修复时会变红。
+- **改动面**：`lib.rs::validate_desktop_declaration`（空 end 放行；仍拒非法起始、倒置的结束、晚于今天）；`workbench.html` 结束字段文案（「结束（选填）」）＋日期行下的「持续有效（不设结束日期）」勾选框；`workbench.js`（新增 `syncBillingOpenEnded` 作为不设结束日期的唯一入口、保存校验、三处 `invoke` 发 `null`、新增 `billingRangeText` 统一区间文案、`syncBillingDateBounds` 不把清空的字段填回去、作用范围句写「持续有效」、订阅分支强制撤销勾选）。
+- **守卫**：`lib.rs` 单测改名 `desktop_declaration_is_bounded_when_dated_and_open_ended_when_blank`；`verify-workbench-sources.mjs` 新增 5 条断言（默认不勾即保持有界、勾选后字段清空并禁用且作用范围写「持续有效」、勾选经 restep 仍在、预览发 `null`、保存发 `null`），并已确认回退时会红（摘掉勾选框的事件绑定后该段直接抛错）。
 - **留空的边界**（验收别误读）：留空声明的覆盖停在**保存那一刻**已入库的事实，之后同步进来的用量仍按量。对 `official_subscription` 以外的四种 kind，这不影响金额——它们写 `user_declared`，而排除谓词只认 `subscription_covered`。`official_subscription` 的日期控件本来就隐藏、由订阅锚点写成「锚点 – 今天」，本次**未改**：要让订阅持续覆盖未来用量需要一条显式的重跑路径（成功任务终态，`retry` 不收成功任务），**未做，属独立决定**。

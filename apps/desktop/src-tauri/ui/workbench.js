@@ -2054,11 +2054,19 @@ function openBillingDeclaration(target, rows, preset) {
   //     一起校验，必然拒绝）；
   //   · 结束早于起始 → 只有保存时才报错，选择器里看不出来。
   // 所以起始也封顶到今天，结束以起始为下界（`syncBillingDateBounds` 在改动时重算）。
-  // 结束是**选填**的：上面这几行只是给个默认值，用户清空即得开放区间，而
-  // `syncBillingDateBounds` 只在结束非空时才把它抬到起始，不会把清空动作填回来。
+  // 结束是**选填**的：上面几行只是给个默认值，「持续有效」勾选框才是"不设结束日期"的
+  // 入口（原生 date 控件清不出空，见 `syncBillingOpenEnded`）。
   start.max = today;
   end.max = today;
   end.min = start.value;
+  const openEnded = document.getElementById("ov-billing-open-ended");
+  if (openEnded) {
+    // 组自己带结束日（`unresolved_billing_groups_in` 恒给统计月）→ 默认不勾、保持有界；
+    // 只有真的没有结束日的组才默认勾上。
+    openEnded.checked = !target.effective_end;
+    openEnded.disabled = false;
+    syncBillingOpenEnded();
+  }
   // 组自己的默认起止（切换计费方式时用来撤销程序写进去的订阅锚点，见
   // `syncBillingDeclarationSteps`）。
   billingDeclarationTarget.defaultStart = start.value;
@@ -2109,10 +2117,9 @@ function closeBillingDeclaration() {
 // 起止是一对约束：起始封顶今天（声明不能从未来开始），结束以起始为下界。任何一处改动
 // 都重算一次，选择器里就不会出现"看起来能选、其实永远不合法"的区间。
 //
-// 结束是**选填**的：留空＝持续有效（开放到未来），用于「按量充值 / 长期付费，不知道
-// 哪天结束」的关系。留空必须留得住——`end.value` 为空时不设下界，也不参与下面的
-// "抬到起始"（`end.value &&` 那半个条件），否则用户刚清空的字段会被下一次 restep
-// 悄悄填回去，选填就变成了必填。
+// 「结束选填」不靠把这个框清空实现——原生 `<input type="date">` 根本没有"未设置"这个
+// 状态：点开日历弹窗选不出空，清空只能全选删除，用户看到「选填」却做不到（2026-09-16
+// 真机复验）。入口是旁边的「持续有效」勾选框，见 `syncBillingOpenEnded`。
 function syncBillingDateBounds() {
   const start = document.getElementById("ov-billing-start");
   const end = document.getElementById("ov-billing-end");
@@ -2121,8 +2128,32 @@ function syncBillingDateBounds() {
   start.max = today;
   end.max = today;
   end.min = start.value || "";
-  // 起始被改到结束之后：把结束抬到起始，别留下一个已经非法的区间。
+  // 起始被改到结束之后：把结束抬到起始，别留下一个已经非法的区间。结束为空（＝持续
+  // 有效）时不参与——否则勾了「持续有效」再改起始，就会把字段填回去、把勾选架空。
   if (start.value && end.value && end.value < start.value) end.value = start.value;
+}
+
+// 「持续有效」是结束日期的**唯一**可发现入口，也是这个字段唯一说得清"没设结束"的形态。
+// 勾选 → 结束日期为空且禁用（保存时发 null，作用范围句写「持续有效」）；取消勾选 →
+// 恢复当天（或组自己的默认结束日）并重新同步成对约束。切换计费方式时必须能撤销它，
+// 见 `syncBillingDeclarationSteps` 的订阅分支。
+function syncBillingOpenEnded() {
+  const box = document.getElementById("ov-billing-open-ended");
+  const end = document.getElementById("ov-billing-end");
+  const target = billingDeclarationTarget;
+  if (!box || !end) return;
+  if (box.checked) {
+    end.value = "";
+    end.disabled = true;
+    return;
+  }
+  end.disabled = false;
+  if (!end.value) {
+    const today = new Date().toISOString().slice(0, 10);
+    const fallback = (target && target.defaultEnd) || monthEndDate(statisticsMonth());
+    end.value = minBillingDate(fallback, today);
+    syncBillingDateBounds();
+  }
 }
 
 // 作用范围一句话跟着批量勾选与日期变：宿主 · N 个模型（首个 等）· 起–止（北京时间）。
@@ -2137,8 +2168,8 @@ function syncBillingScopeText() {
   const modelText = !target.model_id ? "全部模型"
     : models.length === 1 ? models[0]
     : models.length + " 个模型（" + models[0] + " 等）";
-  // 结束留空＝持续有效，这里必须跟着说出来——否则那个「?」会被读成"还没填完"，
-  // 用户就会去填一个自己并不知道的日期。
+  // 不设结束日（勾了「持续有效」）时这里必须跟着说出来——否则那个「?」会被读成
+  // "还没填完"，用户就会去填一个自己并不知道的日期。
   const rangeText = billingRangeText((start && start.value) || "", (end && end.value) || "");
   scope.textContent = "作用范围：" + target.host + " · " +
     (target.missing.provider ? "待选服务商" : target.provider_id) + " · " + modelText + " · " +
@@ -2206,6 +2237,12 @@ function syncBillingDeclarationSteps() {
     if (BILLING_DATE_RE.test(value)) {
       start.value = value;
       end.value = today;
+      // 订阅的适用范围由程序给（锚点 → 今天），「持续有效」在这里没有意义：勾着它会让
+      // 保存发出 null、把订阅声明变成开放期——那是另一个决定，本次不做。切到订阅一律
+      // 撤销勾选并恢复控件。
+      const openEndedBox = document.getElementById("ov-billing-open-ended");
+      if (openEndedBox) openEndedBox.checked = false;
+      end.disabled = false;
       if (typeof syncBillingDateBounds === "function") syncBillingDateBounds();
       target.anchorApplied = Boolean(target.anchorDate && value === target.anchorDate);
       if (anchorText) anchorText.textContent = "每月 " + Number(value.slice(8, 10)) + " 日扣款 · 适用 " + value + " – 今天（" + today + "）；不用填起止，程序按订阅期归因。";
@@ -2221,6 +2258,11 @@ function syncBillingDeclarationSteps() {
     // 组首日）——「只撤回程序写的」是对这条路径的唯一解释，且该字段当时可见、可改。
     if (target.defaultStart) start.value = target.defaultStart;
     if (target.defaultEnd) end.value = target.defaultEnd;
+    // 离开订阅：订阅期里被强行撤销的「持续有效」也一并复原成"可勾可选"，否则回到按量时
+    // 结束日期框会停在被禁用的状态。
+    const openEndedBox = document.getElementById("ov-billing-open-ended");
+    if (openEndedBox) openEndedBox.checked = false;
+    end.disabled = false;
     target.anchorApplied = false;
   }
   // 只给可见步骤编号：服务商未知时是 1 2 3 4 5，路由已知时是 1 2 3。
@@ -2309,6 +2351,8 @@ function bindBillingDeclarationPanel() {
   }
   if (start) start.onchange = () => { syncBillingDateBounds(); syncBillingScopeText(); resetPreview(); };
   if (end) end.onchange = () => { syncBillingScopeText(); resetPreview(); };
+  const openEnded = document.getElementById("ov-billing-open-ended");
+  if (openEnded) openEnded.onchange = () => { syncBillingOpenEnded(); syncBillingScopeText(); resetPreview(); };
   const anchor = document.getElementById("ov-billing-subscription-anchor");
   if (anchor) anchor.onchange = restep;
   save.onclick = async () => {
@@ -2329,14 +2373,15 @@ function bindBillingDeclarationPanel() {
       syncBillingDeclarationSteps();
     }
     const effectiveStart = String(start.value || "").trim();
-    // 结束留空＝持续有效（开放到未来）。空值既不是"格式错误"，也不能拿去做字符串
-    // 比较——`"" < start` 恒真，会把留空误判成"结束早于起始"而拒绝保存。
+    // 结束是选填的：走「持续有效」勾选框（`syncBillingOpenEnded` 会把字段清空并禁用），
+    // 所以空值在这里是合法状态，不是"格式错误"，也不能拿去做字符串比较——`"" < start`
+    // 恒真，会把不设结束日误判成"结束早于起始"而拒绝保存。
     const effectiveEnd = String(end.value || "").trim();
     if (!BILLING_DATE_RE.test(effectiveStart)) {
       return fail("起始日期格式应为 YYYY-MM-DD。");
     }
     if (effectiveEnd && !BILLING_DATE_RE.test(effectiveEnd)) {
-      return fail("结束日期格式应为 YYYY-MM-DD，或留空表示持续有效。");
+      return fail("结束日期格式应为 YYYY-MM-DD；不设结束日期请勾「持续有效」。");
     }
     if (effectiveEnd && effectiveEnd < effectiveStart) {
       return fail("结束日期不能早于起始日期。");
