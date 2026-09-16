@@ -1333,11 +1333,20 @@ fn declared_subscription_fees(
 ) -> Vec<DeclaredSubscriptionFee> {
     let Ok(rows) = db.billing_declarations() else { return Vec::new() };
     let mut out = Vec::new();
+    // **一个 host+provider 只摊一次**：待确认组按"模型组"切，用户对同一订阅常会分
+    // 两次声明（MiniMax-M3 一组、MiniMax-M2.7 一组），两条声明各带 ¥44——不去重就
+    // 是 ¥88/月的双计。读取方 ORDER BY（host, provider_id, effective_start,
+    // declaration_id）保证留下的第一条是**最早生效**的那条。多账户同服务商的订阅
+    // 当前模型表达不了，属规格 §3.4 的修订范围，不用去重冒充支持。
+    let mut seen: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
     for (_id, host, provider, kind, _name, amount_minor, currency, start, end, _candidate) in rows {
         if kind != "official_subscription" { continue; }
         let (Some(amount_minor), Some(currency)) = (amount_minor, currency) else { continue };
         if amount_minor <= 0 || currency.trim().is_empty() { continue; }
         if host.trim().is_empty() || provider.trim().is_empty() { continue; }
+        // 占坑放在**合格性检查之后**：「金额暂不清楚」的声明（无金额，不产出月费）
+        // 若先占了坑，会把后来带真实金额的同服务商声明挡掉，订阅月费凭空消失。
+        if !seen.insert((host.clone(), provider.clone())) { continue; }
         // chars 而非字节切片：声明混入非 ASCII 时 [..7] 会 panic（与
         // `apply_subscription_fees` 同一条脏数据纪律）。
         out.push(DeclaredSubscriptionFee {
@@ -3175,6 +3184,59 @@ mod tests {
             let mut after_end: BTreeMap<String, HostAmount> = BTreeMap::new();
             apply_declared_subscription_fees(&mut after_end, "2026-04", &declared);
             assert!(after_end.is_empty(), "到期后继续收月费是编造");
+        });
+    }
+
+    /// **双计守卫**：待确认组按模型组切，同一订阅常被分两次声明（M3 一组、M2.7 一组），
+    /// 两条声明各带 ¥44——不去重就是 ¥88/月。一个 host+provider 只摊一次，留最早生效的。
+    #[test]
+    fn duplicate_provider_subscription_declarations_charge_one_fee() {
+        with_home(|| {
+            let db = seed_authority_db();
+            for (rev, decl, model, ts) in [
+                ("rev-dup-a", "decl-dup-a", "MiniMax-M3", 1),
+                ("rev-dup-b", "decl-dup-b", "MiniMax-M2.7", 2),
+            ] {
+                db.billing_declaration_revision_save(
+                    rev, decl, None, "claude-code", "minimax", "official_subscription",
+                    Some("MiniMax"), Some(4_400), Some("CNY"), "2026-06-01", None, None, None,
+                    &[("model", model)], ts,
+                ).unwrap();
+            }
+            let declared = declared_subscription_fees(&db);
+            assert_eq!(declared.len(), 1, "同一 host+provider 的两条订阅声明只摊一次");
+            let mut by_provider: BTreeMap<String, HostAmount> = BTreeMap::new();
+            apply_declared_subscription_fees(&mut by_provider, "2026-09", &declared);
+            let entry = by_provider.get("claude-code/minimax").expect("月费条目");
+            assert_eq!(
+                entry.amounts_by_basis.get(&BillingBasis::FixedSubscription),
+                Some(&44.0),
+                "44 元一份，不是两份 88",
+            );
+        });
+    }
+
+    /// 去重的占坑必须放在合格性检查**之后**：「金额暂不清楚」的声明（无金额）若先占坑，
+    /// 会把后来带真实金额的同服务商声明挡掉——月费凭空消失（比双计更糟，因为无声）。
+    #[test]
+    fn amountless_declaration_does_not_block_a_later_priced_one() {
+        with_home(|| {
+            let db = seed_authority_db();
+            // 先声明的一条没填金额（弹窗允许勾「金额暂不清楚」）。
+            db.billing_declaration_revision_save(
+                "rev-noamt", "decl-noamt", None, "claude-code", "minimax",
+                "official_subscription", Some("MiniMax"), None, None,
+                "2026-05-01", None, None, None, &[("model", "MiniMax-M3")], 1,
+            ).unwrap();
+            // 后声明的同服务商一条带了真实金额。
+            db.billing_declaration_revision_save(
+                "rev-priced", "decl-priced", None, "claude-code", "minimax",
+                "official_subscription", Some("MiniMax"), Some(4_400), Some("CNY"),
+                "2026-06-01", None, None, None, &[("model", "MiniMax-M2.7")], 2,
+            ).unwrap();
+            let declared = declared_subscription_fees(&db);
+            assert_eq!(declared.len(), 1, "无金额的声明不占坑");
+            assert_eq!(declared[0].amount, 44.0, "带金额的那条生效");
         });
     }
 
