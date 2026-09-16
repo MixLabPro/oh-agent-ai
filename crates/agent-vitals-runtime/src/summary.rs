@@ -1282,6 +1282,50 @@ struct DeclaredSubscriptionFee {
     end_month: Option<String>,
 }
 
+/// `created_at_ms` → 北京时间月份 `YYYY-MM`（与声明边界的时区纪律一致）。
+fn beijing_month_of_ms(ms: i64) -> String {
+    let (y, m, _d) = agent_vitals_domain::domain::util::civil_from_unix_secs(ms / 1000, 8 * 3600);
+    format!("{y:04}-{m:02}")
+}
+
+fn month_prefix(value: &str) -> String {
+    value.chars().take(7).collect()
+}
+
+/// 一条声明在**某个查询月**的适用月费（按修订链解析，改价不追溯）。
+///
+/// 规则（规格 §3.4）：
+/// - 最新修订是 `revoked` → 整条作废，任何月份都不摊（撤销＝写错了）；
+/// - 流水区间 = 首修订的 `effective_start` .. 最新 saved 修订的 `effective_end`（可空＝开放）；
+/// - 对区间内的月份 M，适用修订 = 满足「区间覆盖 M」且「修订号 = 1 **或** 声明月 ≤ M」
+///   的**最大修订号**。首修订允许回溯（订阅费自始就在付）；后续修订只从**声明那个月**起
+///   改价——10 月改 ¥49，7–9 月仍是 ¥44，改价不重写历史。
+///   退订不是撤销：补一条带 `effective_end` 的修订，过去的月照摊、到期的月停。
+fn declared_fee_for_month(
+    db: &agent_vitals_data::authority::AuthorityDb,
+    declaration_id: &str,
+    month: &str,
+) -> Option<(f64, String, String, Option<String>)> {
+    let revisions = db.billing_declaration_revisions(declaration_id).ok()?;
+    let first = revisions.first()?;
+    let latest = revisions.last()?;
+    if latest.3 != "saved" { return None; } // revoked = 全链作废
+    let stream_start = month_prefix(&first.11);
+    let stream_end = latest.12.as_deref().map(month_prefix);
+    if month < stream_start.as_str() { return None; }
+    if stream_end.as_deref().is_some_and(|end| month > end) { return None; }
+    let applicable = revisions.iter()
+        .filter(|r| r.3 == "saved")
+        .filter(|r| month_prefix(&r.11).as_str() <= month)
+        .filter(|r| r.12.as_deref().map(month_prefix).is_none_or(|end| month <= end.as_str()))
+        .filter(|r| r.2 == 1 || beijing_month_of_ms(r.15).as_str() <= month)
+        .max_by_key(|r| r.2)?;
+    let amount_minor = applicable.9?;
+    let currency = applicable.10.clone()?;
+    if amount_minor <= 0 || currency.trim().is_empty() { return None; }
+    Some((amount_minor as f64 / 100.0, currency, stream_start, stream_end))
+}
+
 /// 把一笔月费落进 `by_provider` 的 `FixedSubscription` 档。
 ///
 /// `HostAmount` 只有一个币种位：零用量纯月费条目（如 glm 无 token 的月份）此前
@@ -1330,32 +1374,33 @@ fn add_fixed_subscription_fee(
 /// `declared_subscriptions` 对未声明金额的 openai 同一处理。
 fn declared_subscription_fees(
     db: &agent_vitals_data::authority::AuthorityDb,
+    month: &str,
 ) -> Vec<DeclaredSubscriptionFee> {
     let Ok(rows) = db.billing_declarations() else { return Vec::new() };
     let mut out = Vec::new();
     // **一个 host+provider 只摊一次**：待确认组按"模型组"切，用户对同一订阅常会分
     // 两次声明（MiniMax-M3 一组、MiniMax-M2.7 一组），两条声明各带 ¥44——不去重就
     // 是 ¥88/月的双计。读取方 ORDER BY（host, provider_id, effective_start,
-    // declaration_id）保证留下的第一条是**最早生效**的那条。多账户同服务商的订阅
-    // 当前模型表达不了，属规格 §3.4 的修订范围，不用去重冒充支持。
+    // declaration_id）保证留下的第一条是**最早生效**的那条。占坑放在**产出月费之后**：
+    // 「金额暂不清楚」的声明不产出月费，不能把后来带金额的声明挡掉。多账户同服务商
+    // 的订阅当前模型表达不了，属规格 §3.4 的修订范围，不用去重冒充支持。
     let mut seen: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
-    for (_id, host, provider, kind, _name, amount_minor, currency, start, end, _candidate) in rows {
+    for (declaration_id, host, provider, kind, _name, _amount, _currency, _start, _end, _candidate) in rows
+    {
         if kind != "official_subscription" { continue; }
-        let (Some(amount_minor), Some(currency)) = (amount_minor, currency) else { continue };
-        if amount_minor <= 0 || currency.trim().is_empty() { continue; }
         if host.trim().is_empty() || provider.trim().is_empty() { continue; }
-        // 占坑放在**合格性检查之后**：「金额暂不清楚」的声明（无金额，不产出月费）
-        // 若先占了坑，会把后来带真实金额的同服务商声明挡掉，订阅月费凭空消失。
+        // 月费按修订链对**查询月**解析（改价不追溯，见 `declared_fee_for_month`）。
+        let Some((amount, currency, start_month, end_month)) =
+            declared_fee_for_month(db, &declaration_id, month)
+        else { continue; };
         if !seen.insert((host.clone(), provider.clone())) { continue; }
-        // chars 而非字节切片：声明混入非 ASCII 时 [..7] 会 panic（与
-        // `apply_subscription_fees` 同一条脏数据纪律）。
         out.push(DeclaredSubscriptionFee {
             host,
             provider,
             currency,
-            amount: amount_minor as f64 / 100.0,
-            start_month: start.chars().take(7).collect(),
-            end_month: end.map(|end| end.chars().take(7).collect()),
+            amount,
+            start_month,
+            end_month,
         });
     }
     out
@@ -1997,7 +2042,7 @@ impl SummaryRepository for SqlSummaryRepository {
         // 更新）与用户在「明确计费方式」里声明的订阅（权威库、可撤销）。`declared`
         // 只取一次，两条路径共用同一份，价目表那条据此跳过同 provider 的重复摊。
         let declared = match &db {
-            Some(db) => declared_subscription_fees(db),
+            Some(db) => declared_subscription_fees(db, &query.month),
             None => Vec::new(),
         };
         apply_subscription_fees(&mut by_provider, &query.month, &cards, &declared);
@@ -3081,7 +3126,7 @@ mod tests {
             )
             .unwrap();
 
-            let declared = declared_subscription_fees(&db);
+            let declared = declared_subscription_fees(&db, "2026-09");
             assert_eq!(declared.len(), 1);
             assert_eq!(declared[0].amount, 20.0, "2000 minor = 20.00");
             assert_eq!(declared[0].start_month, "2025-07");
@@ -3105,7 +3150,7 @@ mod tests {
                 .billing_declaration_revision_revoke("rev-pro-revoke", "decl-pro", "rev-pro", 2)
                 .unwrap());
             assert!(
-                declared_subscription_fees(&db).is_empty(),
+                declared_subscription_fees(&db, "2026-09").is_empty(),
                 "撤销后不得再摊月费"
             );
         });
@@ -3172,10 +3217,15 @@ mod tests {
             )
             .unwrap();
 
-            let declared = declared_subscription_fees(&db);
-            assert_eq!(declared.len(), 1, "只有 ended 那条是合格的订阅月费");
+            // 月费按**查询月**解析：这条到期声明在 2026-02 仍适用、2026-09 已不适用。
+            let declared = declared_subscription_fees(&db, "2026-02");
+            assert_eq!(declared.len(), 1, "只有 ended 那条是 2026-02 的合格订阅月费");
             assert_eq!(declared[0].provider, "openai");
             assert_eq!(declared[0].end_month.as_deref(), Some("2026-03"));
+            assert!(
+                declared_subscription_fees(&db, "2026-09").is_empty(),
+                "到期后的月份不再产出月费"
+            );
 
             let mut in_range: BTreeMap<String, HostAmount> = BTreeMap::new();
             apply_declared_subscription_fees(&mut in_range, "2026-02", &declared);
@@ -3203,7 +3253,7 @@ mod tests {
                     &[("model", model)], ts,
                 ).unwrap();
             }
-            let declared = declared_subscription_fees(&db);
+            let declared = declared_subscription_fees(&db, "2026-09");
             assert_eq!(declared.len(), 1, "同一 host+provider 的两条订阅声明只摊一次");
             let mut by_provider: BTreeMap<String, HostAmount> = BTreeMap::new();
             apply_declared_subscription_fees(&mut by_provider, "2026-09", &declared);
@@ -3234,9 +3284,63 @@ mod tests {
                 "official_subscription", Some("MiniMax"), Some(4_400), Some("CNY"),
                 "2026-06-01", None, None, None, &[("model", "MiniMax-M2.7")], 2,
             ).unwrap();
-            let declared = declared_subscription_fees(&db);
+            let declared = declared_subscription_fees(&db, "2026-09");
             assert_eq!(declared.len(), 1, "无金额的声明不占坑");
             assert_eq!(declared[0].amount, 44.0, "带金额的那条生效");
+        });
+    }
+
+    /// **改价不追溯**（§3.4）：10 月把 ¥44 改成 ¥49，7–9 月仍按 ¥44 摊——修订链按月取价，
+    /// 后续修订只从**声明那个月**起改价；首修订允许回溯（订阅费自始就在付）。
+    #[test]
+    fn price_amendment_prices_from_the_amended_month_not_retroactively() {
+        with_home(|| {
+            let june = agent_vitals_data::authority_query::beijing_month_bounds_ms("2026-06").unwrap().0;
+            let october = agent_vitals_data::authority_query::beijing_month_bounds_ms("2026-10").unwrap().0;
+            let db = seed_authority_db();
+            db.billing_declaration_revision_save(
+                "rev-p1", "decl-price", None, "claude-code", "minimax",
+                "official_subscription", Some("MiniMax"), Some(4_400), Some("CNY"),
+                "2026-06-01", None, None, None, &[], june + 1,
+            ).unwrap();
+            db.billing_declaration_revision_save(
+                "rev-p2", "decl-price", Some("rev-p1"), "claude-code", "minimax",
+                "official_subscription", Some("MiniMax"), Some(4_900), Some("CNY"),
+                // 修订的适用范围**沿用原起点**（覆盖不断档）；新价格从声明月起。
+                "2026-06-01", None, None, None, &[], october + 86_400_000,
+            ).unwrap();
+
+            let sep = declared_subscription_fees(&db, "2026-09");
+            assert_eq!(sep.len(), 1);
+            assert_eq!(sep[0].amount, 44.0, "9 月仍是旧价：改价不重写历史");
+            let oct = declared_subscription_fees(&db, "2026-10");
+            assert_eq!(oct[0].amount, 49.0, "10 月起按新价");
+            assert!(declared_subscription_fees(&db, "2026-05").is_empty(), "订阅前不摊");
+        });
+    }
+
+    /// **退订＝带结束日的修订**（§3.4）：过去的月照摊（那些月真付过钱），到期后停。
+    /// 区别于撤销（写错了 → 全链作废，任何月份都不摊）。
+    #[test]
+    fn end_date_amendment_keeps_history_and_stops_after_end() {
+        with_home(|| {
+            let june = agent_vitals_data::authority_query::beijing_month_bounds_ms("2026-06").unwrap().0;
+            let november = agent_vitals_data::authority_query::beijing_month_bounds_ms("2026-11").unwrap().0;
+            let db = seed_authority_db();
+            db.billing_declaration_revision_save(
+                "rev-e1", "decl-end", None, "claude-code", "minimax",
+                "official_subscription", Some("MiniMax"), Some(4_400), Some("CNY"),
+                "2026-06-01", None, None, None, &[], june + 1,
+            ).unwrap();
+            db.billing_declaration_revision_save(
+                "rev-e2", "decl-end", Some("rev-e1"), "claude-code", "minimax",
+                "official_subscription", Some("MiniMax"), Some(4_400), Some("CNY"),
+                "2026-06-01", Some("2026-11-20"), None, None, &[], november + 86_400_000,
+            ).unwrap();
+
+            assert_eq!(declared_subscription_fees(&db, "2026-09")[0].amount, 44.0, "退订前的月照摊");
+            assert_eq!(declared_subscription_fees(&db, "2026-11")[0].amount, 44.0, "结束月当月仍摊");
+            assert!(declared_subscription_fees(&db, "2026-12").is_empty(), "到期后停");
         });
     }
 

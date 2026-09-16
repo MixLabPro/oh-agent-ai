@@ -2444,6 +2444,14 @@ fn billing_declarations() -> Value {
                 amount_minor, currency, effective_start, effective_end, source_candidate_id) = row;
             let current_revision_id = db.billing_declaration_revisions(&declaration_id)
                 .ok().and_then(|revisions| revisions.last().map(|revision| revision.0.clone()));
+            // 当前修订的作用域：修改订阅必须原样带回，否则修订会悄悄把声明范围
+            // 从"这几个模型"放宽成"该服务商全部模型"（B13）。
+            let scopes = current_revision_id.as_deref()
+                .and_then(|revision_id| db.billing_declaration_scopes(revision_id).ok())
+                .map(|rows| rows.into_iter().map(|(_, kind, value)| serde_json::json!({
+                    "scope_kind": kind, "scope_value": value,
+                })).collect::<Vec<_>>())
+                .unwrap_or_default();
             serde_json::json!({
                 "declaration_id": declaration_id, "host": host, "provider_id": provider_id,
                 "relationship_kind": relationship_kind, "subscription_name": subscription_name,
@@ -2451,6 +2459,7 @@ fn billing_declarations() -> Value {
                 "effective_start": effective_start, "effective_end": effective_end,
                 "source_candidate_id": source_candidate_id,
                 "current_revision_id": current_revision_id,
+                "scopes": scopes,
             })
         }).collect::<Vec<_>>() }),
         Err(error) => serde_json::json!({ "status": "unavailable", "reason": error.to_string(), "declarations": [] }),

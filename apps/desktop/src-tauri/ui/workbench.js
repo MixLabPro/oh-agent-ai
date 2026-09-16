@@ -2883,9 +2883,154 @@ function renderBillingDeclarations(report) {
       }
     };
     actions.appendChild(revoke);
+    // B13 修改订阅：追加 supersede 修订（改价/退订），不再要求"撤销后重新确认"。
+    // 只给订阅关系——按量/组织/中转的声明没有可改的金额面。
+    if (declaration.relationship_kind === "official_subscription" && declaration.current_revision_id) {
+      const amend = document.createElement("button");
+      amend.className = "btn secondary";
+      amend.textContent = "修改订阅";
+      amend.onclick = () => renderBillingAmendment(row, declaration, amend);
+      actions.appendChild(amend);
+    }
     row.append(detail, actions);
     list.appendChild(row);
   }
+}
+
+// 修改订阅（B13）：追加一条 supersede 修订，不是撤销重申。两条语义都在月费摊派侧
+// 由修订链按月解析（summary.rs::declared_fee_for_month）：改价从**当月**起、不重写
+// 历史；退订＝取消「持续有效」并填结束日，过去的月照摊。作用域原样带回（DTO 带
+// 当前修订的 scopes）——丢了作用域，修订会把声明范围悄悄放宽成该服务商全部模型。
+function renderBillingAmendment(row, declaration, amendButton) {
+  const closeForm = () => {
+    if (row.__amendForm) { row.__amendForm.remove(); row.__amendForm = null; }
+    amendButton.textContent = "修改订阅";
+  };
+  if (row.__amendForm) { closeForm(); return; }
+  amendButton.textContent = "收起修改";
+  const today = new Date().toISOString().slice(0, 10);
+  const form = document.createElement("div");
+  form.className = "billing-amend-form block";
+  const hint = document.createElement("p");
+  hint.className = "muted";
+  hint.textContent = "新价格自本月起生效（历史月份不变）；要结束订阅请取消「持续有效」并填结束日——那会保留过去的月费、只停未来的。";
+  form.appendChild(hint);
+
+  const fields = document.createElement("div");
+  fields.className = "bd-inline";
+  const field = (labelText, control) => {
+    const label = document.createElement("label");
+    label.className = "bd-field";
+    const span = document.createElement("span");
+    span.textContent = labelText;
+    label.append(span, control);
+    return label;
+  };
+  const name = document.createElement("input");
+  name.type = "text"; name.placeholder = "套餐名（可选）";
+  name.value = declaration.subscription_name || "";
+  const amount = document.createElement("input");
+  amount.type = "number"; amount.step = "0.01"; amount.min = "0"; amount.placeholder = "月费";
+  const hasAmount = declaration.amount_minor != null;
+  amount.value = hasAmount ? String(Number(declaration.amount_minor) / 100) : "";
+  const currency = document.createElement("select");
+  for (const code of ["CNY", "USD"]) {
+    const option = document.createElement("option");
+    option.value = code; option.textContent = code;
+    currency.appendChild(option);
+  }
+  currency.value = declaration.currency || "CNY";
+  const amountUnknown = document.createElement("input");
+  amountUnknown.type = "checkbox";
+  amountUnknown.checked = !hasAmount;
+  const syncAmount = () => { amount.disabled = amountUnknown.checked; currency.disabled = amountUnknown.checked; };
+  amountUnknown.onchange = syncAmount;
+  syncAmount();
+  const openEnded = document.createElement("input");
+  openEnded.type = "checkbox";
+  openEnded.checked = !declaration.effective_end;
+  const end = document.createElement("input");
+  end.type = "date"; end.max = today;
+  end.value = declaration.effective_end || "";
+  const syncEnd = () => { end.disabled = openEnded.checked; };
+  openEnded.onchange = syncEnd;
+  syncEnd();
+  const check = (labelText, control) => {
+    const label = document.createElement("label");
+    label.className = "bd-check";
+    const span = document.createElement("span");
+    span.textContent = labelText;
+    label.append(control, span);
+    return label;
+  };
+  fields.append(
+    field("套餐名", name),
+    field("月费", amount),
+    field("币种", currency),
+    check("金额暂不清楚", amountUnknown),
+    field("结束日", end),
+    check("持续有效", openEnded),
+  );
+  form.appendChild(fields);
+
+  const actions = document.createElement("div");
+  actions.className = "billing-review-actions";
+  const status = document.createElement("span");
+  status.className = "muted";
+  const save = document.createElement("button");
+  save.className = "btn primary";
+  save.textContent = "保存修订";
+  const cancel = document.createElement("button");
+  cancel.className = "chip-link";
+  cancel.textContent = "取消";
+  cancel.onclick = closeForm;
+  save.onclick = async () => {
+    const fail = (message) => { status.textContent = message; save.disabled = false; };
+    if (!amountUnknown.checked) {
+      const value = Number(amount.value);
+      if (!Number.isFinite(value) || value < 0 || !String(amount.value).trim()) {
+        return fail("月费必须是不小于 0 的数字，或勾选「金额暂不清楚」。");
+      }
+    }
+    const effectiveEnd = openEnded.checked ? null : String(end.value || "").trim();
+    if (!openEnded.checked) {
+      if (!BILLING_DATE_RE.test(effectiveEnd)) return fail("结束日期格式应为 YYYY-MM-DD，或勾「持续有效」。");
+      if (effectiveEnd < declaration.effective_start) return fail("结束日期不能早于声明的起始日。");
+      if (effectiveEnd > today) return fail("结束日期不能晚于今天（北京时间）。");
+    }
+    save.disabled = true;
+    try {
+      const suffix = Date.now().toString(36);
+      await invoke("save_billing_declaration_revision", {
+        revisionId: "rev-amend-" + suffix,
+        declarationId: declaration.declaration_id,
+        supersedesRevisionId: declaration.current_revision_id,
+        host: declaration.host,
+        providerId: declaration.provider_id,
+        relationshipKind: "official_subscription",
+        subscriptionName: String(name.value || "").trim() || null,
+        amountMinor: amountUnknown.checked ? null : Math.round(Number(amount.value) * 100),
+        currency: amountUnknown.checked ? null : currency.value,
+        // 修订沿用原起点（覆盖不断档）；新价格自本月起，由修订链按月取价。
+        effectiveStart: declaration.effective_start,
+        effectiveEnd,
+        sourceCandidateId: declaration.source_candidate_id || null,
+        evidenceRef: "amend:" + declaration.current_revision_id,
+        scopes: (declaration.scopes || []).map((scope) => ({
+          scope_kind: scope.scope_kind, scope_value: scope.scope_value,
+        })),
+      });
+      status.textContent = "修订已保存；月费与覆盖按新修订继续。";
+      await renderOverview();
+      closeForm();
+    } catch (e) {
+      fail("保存失败：" + errText(e));
+    }
+  };
+  actions.append(save, cancel, status);
+  form.appendChild(actions);
+  row.appendChild(form);
+  row.__amendForm = form;
 }
 
 // 「明确计费方式」入口与面板（计费主链规格 §5.1/§5.2）。主体是**待确认组**

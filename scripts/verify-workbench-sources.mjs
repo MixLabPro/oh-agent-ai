@@ -752,5 +752,59 @@ ok(openCall && openCall.args.effectiveEnd === null && openCall.args.effectiveSta
 elements["ov-billing-close"].onclick();
 billingOverride = null;
 
+// B13 修改订阅：当前计费声明面板上，订阅声明可以追加 supersede 修订（改价/退订），
+// 不再要求"撤销后重新确认"。断言四件事：入口只在订阅声明上出现；修订沿用原
+// declaration_id 并 supersede 当前修订；**作用域原样带回**（丢了会把声明范围悄悄放宽
+// 成该服务商全部模型）；退订＝取消「持续有效」+ 结束日，effectiveStart 沿用原起点。
+billingOverride = async (command, args) => {
+  billingCalls.push({ command, args });
+  if (command === "save_billing_declaration_revision") {
+    return { status: "saved", revision_id: args.revisionId, declaration_id: args.declarationId,
+      changed: true, job: { job_id: "billing-" + args.revisionId, status: "queued", changed: true } };
+  }
+  return undefined;
+};
+await sandbox.renderBillingDeclarations({ status: "ok", declarations: [
+  { declaration_id: "decl-mini", host: "claude-code", provider_id: "minimax",
+    relationship_kind: "official_subscription", subscription_name: "MiniMax",
+    amount_minor: 4400, currency: "CNY", effective_start: "2026-06-01", effective_end: null,
+    source_candidate_id: null, current_revision_id: "rev-mini-1",
+    scopes: [{ scope_kind: "model", scope_value: "MiniMax-M3" }, { scope_kind: "model", scope_value: "MiniMax-M2.7" }] },
+  { declaration_id: "decl-api", host: "claude-code", provider_id: "anthropic",
+    relationship_kind: "official_api", subscription_name: null,
+    amount_minor: null, currency: null, effective_start: "2026-06-01", effective_end: null,
+    source_candidate_id: null, current_revision_id: "rev-api-1", scopes: [] },
+] });
+const declRows = elements["ov-billing-declarations-list"].children;
+const miniActions = declRows[0].children[1];
+const apiActions = declRows[1].children[1];
+ok(miniActions.children.some((b) => b.textContent === "修改订阅")
+  && !apiActions.children.some((b) => b.textContent === "修改订阅"),
+  "「修改订阅」只出现在订阅声明上（按量/组织/中转没有可改的金额面）");
+billingCalls.length = 0;
+await miniActions.children.find((b) => b.textContent === "修改订阅").onclick();
+const amendForm = declRows[0].children[2];
+ok(amendForm && amendForm.children.length === 3, "点「修改订阅」展开内联修订表单");
+const amendFields = amendForm.children[1].children;   // [套餐名, 月费, 币种, 金额暂不清楚, 结束日, 持续有效]
+amendFields[1].children[1].value = "49";              // 月费 44 → 49
+const openEndedBox = amendFields[5].children[0];
+openEndedBox.checked = false;                         // 取消「持续有效」＝退订
+openEndedBox.onchange();
+amendFields[4].children[1].value = "2026-09-10";      // 结束日
+const amendSave = amendForm.children[2].children[0];
+await amendSave.onclick();
+const amendCall = billingCalls.find((c) => c.command === "save_billing_declaration_revision");
+ok(amendCall && amendCall.args.declarationId === "decl-mini"
+  && amendCall.args.supersedesRevisionId === "rev-mini-1",
+  "修订沿用原 declaration_id 并 supersede 当前修订（不是撤销重申）");
+ok(amendCall && amendCall.args.effectiveStart === "2026-06-01" && amendCall.args.effectiveEnd === "2026-09-10",
+  "改价/退订修订沿用原起点（覆盖不断档），结束日按表单");
+ok(amendCall && amendCall.args.amountMinor === 4900 && amendCall.args.scopes.length === 2
+  && amendCall.args.scopes.every((s) => s.scope_kind === "model"),
+  "新金额与**原样带回的作用域**一起保存（不放宽成全部模型）");
+ok(billingCalls.some((c) => c.command === "<renderOverview>"),
+  "保存修订后刷新总览（月费当月生效）");
+billingOverride = null;
+
 console.log(failed ? `\n${failed} FAIL` : "\n全部通过。");
 process.exit(failed ? 1 : 0);
