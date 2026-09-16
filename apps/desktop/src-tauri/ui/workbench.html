@@ -523,7 +523,7 @@
               <div class="bd-label"><span class="bd-step" aria-hidden="true"></span><span>适用日期</span></div>
               <div class="bd-control">
                 <div class="bd-inline">
-                  <label class="bd-field"><span>起始</span>
+                  <label class="bd-field"><span>起始（不晚于今天）</span>
                     <input id="ov-billing-start" type="date" inputmode="numeric" pattern="\d{4}-\d{2}-\d{2}" placeholder="YYYY-MM-DD" aria-describedby="ov-billing-scope-text">
                   </label>
                   <span class="bd-range-sep" aria-hidden="true">–</span>
@@ -531,6 +531,7 @@
                     <input id="ov-billing-end" type="date" inputmode="numeric" pattern="\d{4}-\d{2}-\d{2}" placeholder="YYYY-MM-DD" aria-describedby="ov-billing-scope-text">
                   </label>
                 </div>
+                <p class="bd-help muted">声明只覆盖到今天为止（北京时间）：起始与结束都不晚于今天，结束不早于起始。</p>
                 <p class="bd-help muted" id="ov-billing-scope-text"></p>
               </div>
             </div>

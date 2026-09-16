@@ -2038,7 +2038,14 @@ function openBillingDeclaration(target, rows, preset) {
     ? (BILLING_DATE_RE.test(target.effective_end) ? target.effective_end : monthEndDate(target.effective_end))
     : minBillingDate(monthEndDate(currentMonth), today);
   end.value = minBillingDate(end.value, today);
+  // 起止两条约束必须**成对**给，否则选择器能拼出一个永远不成立的区间：
+  //   · 起始晚于今天 → 在「结束 ≤ 今天」的前提下永远无法满足「结束 ≥ 起始」（服务端两条
+  //     一起校验，必然拒绝）；
+  //   · 结束早于起始 → 只有保存时才报错，选择器里看不出来。
+  // 所以起始也封顶到今天，结束以起始为下界（`syncBillingDateBounds` 在改动时重算）。
+  start.max = today;
   end.max = today;
+  end.min = start.value;
   // 组自己的默认起止（切换计费方式时用来撤销程序写进去的订阅锚点，见
   // `syncBillingDeclarationSteps`）。
   billingDeclarationTarget.defaultStart = start.value;
@@ -2084,6 +2091,20 @@ function closeBillingDeclaration() {
   const backdrop = document.getElementById("ov-billing-backdrop");
   if (panel) panel.hidden = true;
   if (backdrop) backdrop.hidden = true;
+}
+
+// 起止是一对约束：起始封顶今天（声明不能从未来开始），结束以起始为下界。任何一处改动
+// 都重算一次，选择器里就不会出现"看起来能选、其实永远不合法"的区间。
+function syncBillingDateBounds() {
+  const start = document.getElementById("ov-billing-start");
+  const end = document.getElementById("ov-billing-end");
+  if (!start || !end) return;
+  const today = new Date().toISOString().slice(0, 10);
+  start.max = today;
+  end.max = today;
+  end.min = start.value || "";
+  // 起始被改到结束之后：把结束抬到起始，别留下一个已经非法的区间。
+  if (start.value && end.value && end.value < start.value) end.value = start.value;
 }
 
 // 作用范围一句话跟着批量勾选与日期变：宿主 · N 个模型（首个 等）· 起–止（北京时间）。
@@ -2164,6 +2185,7 @@ function syncBillingDeclarationSteps() {
     if (BILLING_DATE_RE.test(value)) {
       start.value = value;
       end.value = today;
+      if (typeof syncBillingDateBounds === "function") syncBillingDateBounds();
       target.anchorApplied = Boolean(target.anchorDate && value === target.anchorDate);
       if (anchorText) anchorText.textContent = "每月 " + Number(value.slice(8, 10)) + " 日扣款 · 适用 " + value + " – 今天（" + today + "）；不用填起止，程序按订阅期归因。";
     } else if (anchorText) {
@@ -2265,7 +2287,7 @@ function bindBillingDeclarationPanel() {
     const control = document.getElementById(id);
     if (control) control.onchange = restep;
   }
-  if (start) start.onchange = () => { syncBillingScopeText(); resetPreview(); };
+  if (start) start.onchange = () => { syncBillingDateBounds(); syncBillingScopeText(); resetPreview(); };
   if (end) end.onchange = () => { syncBillingScopeText(); resetPreview(); };
   const anchor = document.getElementById("ov-billing-subscription-anchor");
   if (anchor) anchor.onchange = restep;

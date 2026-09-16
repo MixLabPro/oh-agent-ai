@@ -697,6 +697,19 @@ elements["ov-billing-mode"].value = "api";
 elements["ov-billing-mode"].onchange();
 ok(elements["ov-billing-dates-row"].hidden === false && elements["ov-billing-start"].value === monthStart,
   "无锚点组切到按量后仍可用起止日期（起始日 = 组首日）");
+// 起止是**一对**约束：只封顶结束，选择器就能拼出"永远不成立"的区间（起始晚于今天 →
+// 在结束 ≤ 今天的前提下无法满足结束 ≥ 起始；结束早于起始 → 保存时才报错）。
+ok(elements["ov-billing-start"].max === today && elements["ov-billing-end"].max === today
+  && elements["ov-billing-end"].min === elements["ov-billing-start"].value,
+  "起始与结束都封顶今天，结束以起始为下界（选择器里拼不出非法区间）");
+elements["ov-billing-end"].value = "2026-09-10";
+elements["ov-billing-end"].onchange();
+elements["ov-billing-start"].value = "2026-09-15";
+elements["ov-billing-start"].onchange();
+ok(elements["ov-billing-end"].min === "2026-09-15" && elements["ov-billing-end"].value === "2026-09-15",
+  "起始改到结束之后：结束被抬到起始、下界同步，不留下已非法的区间");
+elements["ov-billing-start"].value = monthStart;
+elements["ov-billing-start"].onchange();
 elements["ov-billing-end"].value = "2026-09-10";
 elements["ov-billing-end"].onchange();
 elements["ov-billing-batch"].onchange();
