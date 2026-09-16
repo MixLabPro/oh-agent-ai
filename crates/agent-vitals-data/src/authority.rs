@@ -2249,6 +2249,33 @@ impl AuthorityDb {
         rows
     }
 
+    /// 释放被**已撤销**声明占住的旧资产候选。
+    ///
+    /// `billing_declarations.source_candidate_id` 上有 UNIQUE 约束，而 SQLite 的
+    /// UNIQUE **对软删行照样生效**——撤销只置 `deleted_at_ms` 的话，那张候选就被一条
+    /// 看不见的行永久锁住，用户再也声明不了它。2026-09-16 真机就是这个：撤销
+    /// claude-code/anthropic 后重新声明同一张旧套餐记录 →
+    /// `保存失败：authority sqlite: UNIQUE constraint failed:
+    /// billing_declarations.source_candidate_id`。
+    ///
+    /// **撤销是不再生效，不是放弃这张候选**，所以候选回到 `pending`（可以重新确认，
+    /// 也可以走「这不是我的套餐」→ dismissed，那是另一条路）。声明侧的溯源不丢：
+    /// `billing_declaration_revisions.source_candidate_id` 没有 UNIQUE、逐条留痕，
+    /// 撤销修订本身就是带着它写进去的。
+    fn release_revoked_candidate_claims(&self, candidate_id: &str) -> Result<(), AuthorityError> {
+        self.conn.execute(
+            "UPDATE billing_declarations SET source_candidate_id = NULL
+             WHERE source_candidate_id = ?1 AND deleted_at_ms IS NOT NULL",
+            rusqlite::params![candidate_id],
+        )?;
+        self.conn.execute(
+            "UPDATE billing_import_candidates SET status = 'pending', resolved_at_ms = NULL
+             WHERE candidate_id = ?1 AND status = 'accepted'",
+            rusqlite::params![candidate_id],
+        )?;
+        Ok(())
+    }
+
     /// 保存一个追加式声明修订。作用范围只能缩小到已指定的账户、路由、模型或
     /// 会话；空范围表示仅由声明本身的宿主/provider/有效期约束，绝不扩大历史。
     #[allow(clippy::too_many_arguments)]
@@ -2298,6 +2325,9 @@ impl AuthorityDb {
                 return Ok(false);
             }
             if let Some(candidate_id) = source_candidate_id {
+                // 撤销过的声明不该继续占着这张候选（见 `release_revoked_candidate_claims`）：
+                // 先释放它，再按「一张候选只归一条**有效**声明」的约束往下走。
+                self.release_revoked_candidate_claims(candidate_id)?;
                 let candidate = self.conn.query_row(
                     "SELECT host, provider_id, status FROM billing_import_candidates WHERE candidate_id = ?1",
                     rusqlite::params![candidate_id],
@@ -2313,6 +2343,20 @@ impl AuthorityDb {
                 {
                     return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
                         "billing declaration candidate must be pending/accepted and match host/provider".to_string(),
+                    )));
+                }
+                // 同一张候选被两条**有效**声明同时占用是约束本身要挡的（一张旧套餐记录
+                // 只对应一条声明）。这里先判一次只为把话说清楚——不然用户看到的是裸的
+                // `UNIQUE constraint failed: billing_declarations.source_candidate_id`。
+                let claimed: Option<String> = self.conn.query_row(
+                    "SELECT declaration_id FROM billing_declarations
+                     WHERE source_candidate_id = ?1 AND deleted_at_ms IS NULL AND declaration_id <> ?2
+                     LIMIT 1",
+                    rusqlite::params![candidate_id, declaration_id], |row| row.get(0),
+                ).optional()?;
+                if claimed.is_some() {
+                    return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                        "this legacy package record is already used by another live declaration; revoke that one first".to_string(),
                     )));
                 }
                 if status == "pending" {
@@ -2412,6 +2456,9 @@ impl AuthorityDb {
                     "billing declaration revoke must supersede the active revision".to_string(),
                 )));
             };
+            // 撤销要释放它占的旧资产候选；下面写撤销修订时会把 `source_candidate_id`
+            // 移进参数列表，所以先留一份。
+            let revoked_candidate_id = source_candidate_id.clone();
             let current: Option<String> = self.conn.query_row(
                 "SELECT revision_id FROM billing_declaration_revisions WHERE declaration_id = ?1
                  ORDER BY revision_number DESC LIMIT 1", rusqlite::params![declaration_id], |row| row.get(0),
@@ -2441,6 +2488,12 @@ impl AuthorityDb {
                  WHERE declaration_id = ?1 AND deleted_at_ms IS NULL",
                 rusqlite::params![declaration_id, now_ms],
             )?;
+            // 撤销必须**释放**它占的旧资产候选——`source_candidate_id` 上的 UNIQUE 对软删
+            // 行照样生效，只置 `deleted_at_ms` 会把那张候选永久锁在一条看不见的行上
+            // （见 `release_revoked_candidate_claims` 的注释）。
+            if let Some(candidate_id) = revoked_candidate_id.as_deref() {
+                self.release_revoked_candidate_claims(candidate_id)?;
+            }
             Ok(true)
         })();
         match result {
@@ -3281,6 +3334,116 @@ mod tests {
             [], |row| row.get(0),
         ).unwrap();
         assert_eq!(status, "pending", "a failed revision must roll candidate acceptance back");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 2026-09-16 真机：撤销一条挂过旧资产候选的声明之后，那张候选被一条看不见的软删行
+    /// 永久占住，重新声明同一张候选直接失败：
+    /// `保存失败：authority sqlite: UNIQUE constraint failed: billing_declarations.source_candidate_id`。
+    /// 根因是 `source_candidate_id` 上的 UNIQUE **对软删行照样生效**。撤销必须释放它，
+    /// 候选回到 pending（撤销是不再生效，不是放弃这张候选）。
+    #[test]
+    fn revoking_a_declaration_releases_its_legacy_candidate_for_reuse() {
+        let db = tmp_db("billing-revoke-releases-candidate");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority
+            .billing_import_candidate_put(
+                "cand-reuse", "claude-code", "anthropic", "USD", 2_000, "2025-07", "uat", 1,
+            )
+            .unwrap();
+        assert!(authority
+            .billing_declaration_revision_save(
+                "rev-1", "decl-1", None, "claude-code", "anthropic", "official_subscription",
+                Some("Claude Pro"), Some(2_000), Some("USD"), "2025-07-20", None,
+                Some("cand-reuse"), None, &[], 2,
+            )
+            .unwrap());
+        assert_eq!(authority.billing_import_candidates().unwrap()[0].6, "accepted");
+
+        assert!(authority
+            .billing_declaration_revision_revoke("rev-1-revoke", "decl-1", "rev-1", 3)
+            .unwrap());
+        assert_eq!(
+            authority.billing_import_candidates().unwrap()[0].6,
+            "pending",
+            "撤销只是不再生效，不是放弃候选：候选必须回到 pending",
+        );
+
+        // 用户的原始动作：撤销之后重新声明同一张旧套餐记录——必须成功。
+        assert!(
+            authority
+                .billing_declaration_revision_save(
+                    "rev-2", "decl-2", None, "claude-code", "anthropic", "official_subscription",
+                    Some("Claude Pro"), Some(2_000), Some("USD"), "2025-07-20", None,
+                    Some("cand-reuse"), None, &[], 4,
+                )
+                .unwrap(),
+            "撤销后同一张候选必须可以重新声明",
+        );
+
+        // 但**有效**声明仍然只认一张候选（约束本意），且错误要说得清——不能让用户再看到
+        // 裸的 UNIQUE 串。
+        authority
+            .billing_import_candidate_put(
+                "cand-taken", "codex", "openai", "CNY", 1_000, "2026-09", "uat", 5,
+            )
+            .unwrap();
+        assert!(authority
+            .billing_declaration_revision_save(
+                "rev-taken-1", "decl-taken-1", None, "codex", "openai", "official_subscription",
+                None, Some(1_000), Some("CNY"), "2026-09", None, Some("cand-taken"), None, &[], 6,
+            )
+            .unwrap());
+        let error = authority
+            .billing_declaration_revision_save(
+                "rev-taken-2", "decl-taken-2", None, "codex", "openai", "official_subscription",
+                None, Some(1_000), Some("CNY"), "2026-09", None, Some("cand-taken"), None, &[], 7,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("already used by another live declaration"),
+            "同一张候选被两条有效声明占用时要给人话而不是裸 UNIQUE 串：{error}",
+        );
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 保存路径自愈历史脏数据：**旧版本撤销**留下「软删行仍占着候选」的记录，升级后
+    /// 也必须能重新声明——真机上用户正是被这种行卡住的（撤销发生在修复之前）。
+    #[test]
+    fn saving_heals_a_candidate_claim_left_by_an_older_revoke() {
+        let db = tmp_db("billing-heal-stale-candidate");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority
+            .billing_import_candidate_put(
+                "cand-stale", "claude-code", "anthropic", "USD", 2_000, "2025-07", "uat", 1,
+            )
+            .unwrap();
+        assert!(authority
+            .billing_declaration_revision_save(
+                "rev-stale", "decl-stale", None, "claude-code", "anthropic",
+                "official_subscription", None, Some(2_000), Some("USD"), "2025-07-20", None,
+                Some("cand-stale"), None, &[], 2,
+            )
+            .unwrap());
+        // 复现旧版本的撤销：只置 `deleted_at_ms`，没有释放 `source_candidate_id`。
+        authority
+            .conn()
+            .execute(
+                "UPDATE billing_declarations SET deleted_at_ms = 3 WHERE declaration_id = 'decl-stale'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            authority
+                .billing_declaration_revision_save(
+                    "rev-heal", "decl-heal", None, "claude-code", "anthropic",
+                    "official_subscription", None, Some(2_000), Some("USD"), "2025-07-20", None,
+                    Some("cand-stale"), None, &[], 4,
+                )
+                .unwrap(),
+            "历史脏数据必须在保存路径上自愈，否则升级后用户仍然卡住",
+        );
         let _ = std::fs::remove_file(&db);
     }
 
