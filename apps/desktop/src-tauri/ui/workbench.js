@@ -1839,7 +1839,7 @@ function deferBillingReviewPrompt() {
 // 改变金额；其余三种只记录关系或承担者，UI 必须照实说，不能让「组织承担」看起来
 // 像省了钱。
 const BILLING_RELATIONSHIP_EFFECT = Object.freeze({
-  official_subscription: "命中的用量将移出按量估算，进入「订阅覆盖」；订阅月费只在有账单或付款记录时才计入实际支出。",
+  official_subscription: "命中的用量将移出按量估算，进入「订阅覆盖」；填写的月费即按此声明计入「订阅月费」与实际支出（自报口径），之后录到真实账单时以账单为准校准。",
   official_api: "金额不变——这批用量本来就按官方价估算；保存后记录为已确认依据。",
   third_party: "Beta 不改变金额：第三方价卡编辑随后续测试版提供，当前仍按官方价估算。",
   organization: "只改变费用承担者标签；金额与估算状态不变，不等于免费。",
