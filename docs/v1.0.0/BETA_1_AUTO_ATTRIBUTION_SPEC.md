@@ -263,3 +263,18 @@ Cline 就是现成的验证对象：`metadata.modelId = anthropic/claude-sonnet-
   - **2 需补充**：codex 的 `<unknown>` 与 minimax（无路由证据）。共 ~0.14B tokens。
 - 账户证据真机读数：`plan.label=Claude Pro`、`channel=apple_subscription`（由 `billingType` 推出）、`anchor_date=2025-07-20`（订阅锚点，即每月 20 日扣款——与用户"每月20美金、20日扣款"的描述一致）；DTO 中不含 email / accountUuid / organizationUuid / 令牌（真机输出扫描确认）。
 
+### 11.4 验收审查与修复（iteration 3 → 4）
+
+子代理按 §1–§7 逐条验收 iterations 2–3，报 6 条确认缺陷（全部为真，`e97ffa1` 修复）：
+
+| # | 缺陷 | 后果 | 修复 |
+|---|---|---|---|
+| 1 | `auto_verdict` 把 `evidence_basis="conflict"` 归到 `provider_reported` | codex 自报 openai 而会话路由指向别家的冲突事实，配上 `auth_mode=chatgpt` 就成了「一键确认 ChatGPT 订阅」——违反 §2「Conflict 单列，不归因」与不变量 P3（此前只有写入侧的 `ConflictEvidence::Exclude` 兜住了钱，判定与标签是错的） | `conflict` 短路：`needs_input` + `route_state="conflict"`，`billing_party=null`，依据 `route.conflict` |
+| 2 | `ROUTE_KNOWN_OFFICIAL` 收 `account-time-bound`(6)/`config-time-bound`(5) | 低于 §2/§4 的 ≥ `SessionNative` 门槛：配置文件写着"官方"就能产一键订阅。今天无 emitter 产这两种 basis，属潜在洞 | 收窄为 `explicit-official-route` + `session-native`（前端同表同改） |
+| 3 | 簇渲染后，挂在有用量组上的旧资产候选被整行跳过 | 提示说"另有 N 条旧版本套餐记录待核对"，页面上却无处核对、无处忽略 | 候选折进对应簇行（证据行 +「这不是我的套餐」） |
+| 4 | 簇主键用 `billing_party`，网关行恒空 | 不同厂商的网关模型并成一行，再用第一组的厂商当整行标签——与 §5.1「行 = host × 厂商 × route_state」不符 | 主键改为 `billing_party or model_vendor` |
+| 5 | 从订阅切到按量时，程序写进去的订阅锚点留在 `effective_start` | 真机锚点 `2025-07-20` 会被写进一条**按量**声明 | 切走时撤回组自己的默认起止（只在值仍是程序写入的锚点时才撤，不动用户手改） |
+| 6 | `evidence_ref` 在挂了旧候选时丢掉 `auto:` 依据链 | 程序判定 + 候选并存时，追溯性只剩候选 id | 两段都记；簇行的 target 也带上原组的 `candidate`，`source_candidate_id` 不再丢 |
+
+新增测试：Rust `auto_verdict_covers_conflict_api_key_and_cluster_arithmetic`（冲突 / 官方+ApiKey → `official_api` / 官方+无账户 → 问计费方式 / 账户厂商不匹配不套用 / 零 token 组不进列表 / 网关行按厂商拆簇 / 簇内 tokens 与分币金额等于各模型之和）；`verify-workbench-sources.mjs` 新增 8 条断言（含候选折进簇行与锚点撤回）；浏览器 mock 补 `conflict` 分支，使这类缺陷今后能被前端守卫抓到。
+
