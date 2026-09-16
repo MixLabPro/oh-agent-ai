@@ -1889,7 +1889,7 @@ function minBillingDate(left, right) {
 // 路由证据里这几种已经说明「走的是官方路由」，不必再问用户；其余（missing /
 // inferred / conflict / config-current / env-current）才需要用户明确。
 const BILLING_ROUTE_KNOWN_OFFICIAL = new Set([
-  "explicit-official-route", "session-native", "account-time-bound", "config-time-bound",
+  "explicit-official-route", "session-native",
 ]);
 
 // 「缺什么问什么」的判定（计费主链规格 v1.2 §5.3a）。三个布尔决定弹窗展示哪几步。
@@ -2034,6 +2034,10 @@ function openBillingDeclaration(target, rows, preset) {
     : minBillingDate(monthEndDate(currentMonth), today);
   end.value = minBillingDate(end.value, today);
   end.max = today;
+  // 组自己的默认起止（切换计费方式时用来撤销程序写进去的订阅锚点，见
+  // `syncBillingDeclarationSteps`）。
+  billingDeclarationTarget.defaultStart = start.value;
+  billingDeclarationTarget.defaultEnd = end.value;
   // 订阅锚点：账户证据里的订阅开始日（subscriptionCreatedAt）优先，否则组的首日；
   // 用户想的是"哪天订的、每月扣多少"，不是起止日期（规格 §4 第 5 步）。
   const anchor = document.getElementById("ov-billing-subscription-anchor");
@@ -2154,6 +2158,14 @@ function syncBillingDeclarationSteps() {
       if (anchorText) anchorText.textContent = "每月 " + Number(value.slice(8, 10)) + " 日扣款 · 适用 " + value + " – 今天（" + today + "）；不用填起止，程序按订阅期归因。";
     } else if (anchorText) {
       anchorText.textContent = "填订阅开始（首次扣款）日期，程序按它算适用范围。";
+    }
+  } else if (kind !== "official_subscription" && anchor && start && end) {
+    // 离开订阅：把程序写进去的锚点撤回到组自己的默认起止，否则「订阅锚点」会变成
+    // 按量声明的 effective_start（真机锚点 2025-07-20 会一路写进声明，验收审查 #5）。
+    const anchorValue = String(anchor.value || "").trim();
+    if (anchorValue && String(start.value || "").trim() === anchorValue) {
+      if (target.defaultStart) start.value = target.defaultStart;
+      if (target.defaultEnd) end.value = target.defaultEnd;
     }
   }
   // 只给可见步骤编号：服务商未知时是 1 2 3 4 5，路由已知时是 1 2 3。
@@ -2346,9 +2358,9 @@ function bindBillingDeclarationPanel() {
         currency: subscription.currency,
         effectiveStart, effectiveEnd,
         sourceCandidateId: candidate ? candidate.candidate_id : null,
-        evidenceRef: candidate ? "legacy-import-candidate:" + candidate.candidate_id
-          : (target.autoBasis ? "auto:" + target.autoBasis.join("+") + ";" : "") +
-            "confirmation-group:" + selected.map((row) => row.group_id || "").join(","),
+        evidenceRef: (target.autoBasis ? "auto:" + target.autoBasis.join("+") + ";" : "") +
+          (candidate ? "legacy-import-candidate:" + candidate.candidate_id
+            : "confirmation-group:" + selected.map((row) => row.group_id || "").join(",")),
         scopes,
       });
       billingDeclarationState = { phase: "saved", declarationId, revisionId, impact, relationshipKind };
@@ -2903,13 +2915,25 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     evidence_basis: cluster.evidence_basis, pricing_basis: cluster.pricing_basis,
     tokens: m.tokens, session_count: m.session_count, estimated_amounts: m.estimated_amounts || [],
     effective_start: cluster.effective_start, effective_end: cluster.effective_end,
-    candidate: null, auto_verdict: cluster.auto_verdict,
+    // 候选跟着原组走：簇行折叠后 target 若丢掉 `candidate`，弹窗既预填不了旧套餐金额，
+    // 声明也记不上 `source_candidate_id`（验收审查 iteration 3 #6 的根因）。
+    candidate: (rowByGroupId.get(m.group_id) || {}).candidate || null,
+    auto_verdict: cluster.auto_verdict,
   }));
+  // 钉在某个组上的旧资产候选（`renderBillingConfirmation` 挂的 `row.candidate`）：簇把逐模型
+  // 行折掉了，候选的证据行与「这不是我的套餐」必须跟着折进簇行——否则提示里说"另有 N 条旧版本
+  // 套餐记录待核对"，页面上却无处可点（验收审查 iteration 3 #2）。
+  const rowByGroupId = new Map(rows.filter((row) => row.group_id).map((row) => [row.group_id, row]));
+  const clusterCandidatesOf = (cluster) => (cluster.group_ids || [])
+    .map((id) => rowByGroupId.get(id))
+    .filter((row) => row && row.candidate && row.candidate.status === "pending")
+    .map((row) => row.candidate);
   const basisText = (verdict) => (verdict.basis || []).map((b) => ({
     "route.session-native": "请求 ID 为官方格式", "route.explicit-official-route": "明确官方路由",
     "route.account-time-bound": "账户期证据", "route.config-time-bound": "配置期证据",
     "host.provider_reported": "宿主自报服务商", "model.gateway_named": "网关式模型命名",
     "response_id.vendor_shape": "响应 ID 与厂商形状一致", "account.api_key": "账户使用 API key",
+    "route.conflict": "宿主自报与会话路由证据冲突",
   }[b] || (b.startsWith("account.") ? "账户套餐 " + b.slice(8) : b))).join(" · ");
   const renderClusterRow = (cluster) => {
     const verdict = cluster.auto_verdict || {};
@@ -2924,7 +2948,7 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     const party = verdict.billing_party || null;
     const vendor = verdict.model_vendor || null;
     const who = party ? party : (vendor ? "计费方待定（模型厂商 " + vendor + "）" : "服务商未知");
-    const routeText = { official: "官方路由", provider_reported: "宿主自报官方", gateway: "经中转", vendor_shape: "厂商端点或中转", unknown: "路由未知" }[verdict.route_state] || "路由未知";
+    const routeText = { official: "官方路由", provider_reported: "宿主自报官方", gateway: "经中转", vendor_shape: "厂商端点或中转", conflict: "路由证据冲突", unknown: "路由未知" }[verdict.route_state] || "路由未知";
     const amount = billingAmountsText(cluster.estimated_amounts);
     const models = (cluster.models || []).map((m) => m.model_id).filter(Boolean);
     let head = cluster.host + " · " + who + " · " + routeText;
@@ -2943,6 +2967,27 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     basis.textContent = (verdict.state === "determined" ? "程序判定，依据：" : verdict.state === "one_question" ? "已知：" : "缺少证据：")
       + (basisText(verdict) || "无");
     detail.appendChild(basis);
+    for (const candidate of clusterCandidatesOf(cluster)) {
+      const evidence = document.createElement("div");
+      evidence.className = "muted";
+      evidence.textContent = "来自旧版本套餐记录：" + candidate.provider_id + " " +
+        billingCandidateAmount(candidate) + " 自 " + candidate.billing_period_start + " 起";
+      const dismiss = document.createElement("button");
+      dismiss.className = "chip-link";
+      dismiss.textContent = "这不是我的套餐";
+      dismiss.onclick = async () => {
+        dismiss.disabled = true;
+        try {
+          await invoke("resolve_billing_import_candidate", { candidateId: candidate.candidate_id, decision: "dismiss" });
+          await renderOverview();
+        } catch (e) {
+          dismiss.disabled = false;
+          evidence.textContent += " · 操作失败：" + errText(e);
+        }
+      };
+      evidence.append(document.createTextNode(" "), dismiss);
+      detail.appendChild(evidence);
+    }
     const open = (preset) => openBillingDeclaration(target, rows, preset);
     if (verdict.state === "determined") {
       const confirm = document.createElement("button");

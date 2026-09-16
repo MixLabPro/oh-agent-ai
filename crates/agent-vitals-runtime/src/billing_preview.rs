@@ -180,9 +180,12 @@ fn account_evidence_by_host() -> std::collections::BTreeMap<String, agent_vitals
 }
 
 /// 证据里已能说明「走的是官方路由」的 basis（与 `workbench.js::BILLING_ROUTE_KNOWN_OFFICIAL` 同表）。
-const ROUTE_KNOWN_OFFICIAL: [&str; 4] = [
-    "explicit-official-route", "session-native", "account-time-bound", "config-time-bound",
-];
+///
+/// 门槛是 **≥ `SessionNative`**（规格 §2/§4）：`account-time-bound`(6) 与
+/// `config-time-bound`(5) 都比会话级证据弱，曾经把它们也算作"官方路由"——那等于
+/// 「配置文件里写着官方」直接产出一键订阅判定。今天没有 emitter 产这两种 basis，
+/// 所以是潜在洞；一旦配置源写入器落地就会立刻编造归属（验收审查 iteration 3 #3）。
+const ROUTE_KNOWN_OFFICIAL: [&str; 2] = ["explicit-official-route", "session-native"];
 
 /// 程序判定（规格 §2 阶梯的合成，§5.1 三态）。只用事实里已有的 provider/evidence、
 /// 目录里的 L0 厂商和白名单账户证据；`inferred` 永远到不了 determined。
@@ -198,6 +201,21 @@ fn auto_verdict(
     let vendor_name = vendor.as_ref().map(|v| v.vendor.clone());
     let gateway_named = vendor.as_ref().is_some_and(|v| v.gateway_named);
     let mut basis: Vec<String> = Vec::new();
+    // `conflict` = 宿主自报的 provider 与会话级路由证据指的不是同一家。这样的事实本身
+    // 就没有归因（emitter 写 `provider_id=null` / `metered_estimate`），判定器更不能拿它
+    // 产 `determined`：规格 §2「Conflict 单列，不归因」、不变量 P3「冲突不吞」。
+    // 曾经它落进 provider_reported 分支，codex 的冲突事实 + `auth_mode=chatgpt`
+    // 就成了「一键确认 ChatGPT 订阅」，只是写入侧另有一道 ConflictEvidence::Exclude
+    // 兜住钱（验收审查 iteration 3 #1）。
+    if evidence == "conflict" {
+        return json!({
+            "model_vendor": vendor_name, "gateway_named": gateway_named,
+            "route_state": "conflict", "route_basis": evidence,
+            "billing_party": null, "billing_mode": null, "relationship_kind": null,
+            "plan": null, "state": "needs_input", "question": null,
+            "basis": ["route.conflict"],
+        });
+    }
     let route_state = if provider.is_some() && ROUTE_KNOWN_OFFICIAL.contains(&evidence) {
         basis.push(format!("route.{evidence}"));
         "official"
@@ -266,10 +284,17 @@ fn clusters_of(groups: &[Value]) -> Vec<Value> {
     let mut by_key: BTreeMap<String, Value> = BTreeMap::new();
     for group in groups {
         let v = &group["auto_verdict"];
+        // 行主键 = `host × (计费方 or 厂商) × route_state × 判定状态 × 日期`（规格 §5.1）。
+        // 空位补上 `model_vendor`：网关行的 `billing_party` 恒空，只按它分组会把
+        // anthropic 与 deepseek 的网关模型并成一行、再用第一组的厂商当整行标签
+        // （验收审查 iteration 3 #4）。
+        let party = v["billing_party"].as_str()
+            .or_else(|| v["model_vendor"].as_str())
+            .unwrap_or("<unknown>");
         let key = format!(
             "{}|{}|{}|{}|{}|{}",
             group["host"].as_str().unwrap_or(""),
-            v["billing_party"].as_str().unwrap_or("<unknown>"),
+            party,
             v["route_state"].as_str().unwrap_or("unknown"),
             v["state"].as_str().unwrap_or("needs_input"),
             group["effective_start"].as_str().unwrap_or(""),
@@ -567,6 +592,115 @@ mod tests {
         assert!(clusters.len() >= 4, "{clusters:?}");
         assert_eq!(clusters[0]["auto_verdict"]["state"], json!("determined"), "determined clusters come first");
         assert!(clusters.iter().all(|c| c["host"] != json!("workbuddy")));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 验收审查 iteration 3 列的未覆盖面：`conflict` 必须单列不归因（规格 §2/P3）；
+    /// 官方路由 + API key → determined/official_api；官方路由但**没有**账户证据 →
+    /// one_question/billing_mode（不能默认订阅）；账户厂商与该行计费方不一致时不套用；
+    /// 零 token 组不进列表；网关行按厂商拆簇、簇内数字是各模型之和。
+    #[test]
+    fn auto_verdict_covers_conflict_api_key_and_cluster_arithmetic() {
+        use agent_vitals_provider::{AccountEvidence, EvidenceBasis, PlanKind};
+        let home = temp_home("verdict2");
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        let (month_start, _) = agent_vitals_data::authority_query::beijing_month_bounds_ms("2026-08").unwrap();
+        let noon = month_start + 12 * 3_600_000;
+        db.conn().execute(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES ('run', 1, 'cli', 'succeeded', 14)", [],
+        ).unwrap();
+        let insert = |fact: &str, host: &str, provider: Option<&str>, model: &str, evidence: &str,
+                      pricing: &str, uncached: i64, output: i64, ts: i64| {
+            db.conn().execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                     observation_kind, provider_id, model_id, event_ts_ms, event_peak, pricing_basis, evidence_basis,
+                     billing_mode, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                     ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 'm', 'sess', ?1, 'token_count', ?3, ?4, ?5, 0, ?6, ?7, 'metered', ?8, 0, 0, ?9, 'run', 1, 1)",
+                rusqlite::params![fact, host, provider, model, ts, pricing, evidence, uncached, output],
+            ).unwrap();
+        };
+        // 冲突事实：宿主自报 openai，但会话路由证据指向别家（emitter 真会这么写）。
+        insert("f-conflict", "codex", Some("openai"), "gpt-5.6-sol", "conflict", "metered_estimate", 1000, 10, noon);
+        // 官方路由 + API key 账户 → 官方 API 按量（determined，不是订阅）。换一个宿主：
+        // claude-code 的账户是订阅，套不上 ApiKey 分支。
+        insert("f-apikey", "dsh", Some("anthropic"), "claude-haiku-4-5", "session-native", "route-observed", 1000, 10, noon + 1);
+        // 官方路由 + 无账户证据 → 只能问计费方式。
+        insert("f-no-account", "claude-code", Some("minimax"), "MiniMax-M3", "session-native", "route-observed", 1000, 10, noon + 2);
+        // 两个 anthropic 官方模型 → 同一簇，数字相加。
+        insert("f-opus", "claude-code", Some("anthropic"), "claude-opus-5", "session-native", "route-observed", 2000, 20, noon + 3);
+        insert("f-sonnet", "claude-code", Some("anthropic"), "claude-sonnet-5", "session-native", "route-observed", 3000, 30, noon + 4);
+        // 网关式命名、两个不同厂商 → 必须拆成两簇（billing_party 都为空）。
+        insert("f-gw-anthropic", "claude-code", None, "anthropic/claude-opus-5", "inferred", "metered_estimate", 4000, 40, noon + 5);
+        insert("f-gw-zhipu", "claude-code", None, "openrouter/glm-5.3-flash", "inferred", "metered_estimate", 5000, 50, noon + 6);
+        // 零 token 组不进列表。
+        insert("f-zero", "claude-code", None, "gpt-5.6-luna", "missing", "metered_estimate", 0, 0, noon + 7);
+        let mut accounts = std::collections::BTreeMap::new();
+        // claude-code 的账户是 anthropic 订阅；minimax 那行没有账户证据，不套用。
+        accounts.insert("claude-code".to_string(), AccountEvidence {
+            host: "claude-code".into(), vendor: "anthropic".into(), plan_kind: PlanKind::Subscription,
+            plan_label: Some("Claude Pro".into()), billing_channel: None, anchor_date: Some("2025-07-20".into()),
+            evidence_basis: EvidenceBasis::AccountTimeBound, source: "test".into(),
+        });
+        // 官方路由 + API key 账户 → 官方 API 按量：这是"API key 不是订阅"的唯一出处。
+        accounts.insert("dsh".to_string(), AccountEvidence {
+            host: "dsh".into(), vendor: "anthropic".into(), plan_kind: PlanKind::ApiKey,
+            plan_label: None, billing_channel: None, anchor_date: None,
+            evidence_basis: EvidenceBasis::AccountTimeBound, source: "test".into(),
+        });
+        // codex 登录的是 openai 但事实是冲突：既不能 determined，也不能拿到 ChatGPT 套餐。
+        accounts.insert("codex".to_string(), AccountEvidence {
+            host: "codex".into(), vendor: "openai".into(), plan_kind: PlanKind::Subscription,
+            plan_label: Some("ChatGPT".into()), billing_channel: None, anchor_date: None,
+            evidence_basis: EvidenceBasis::AccountTimeBound, source: "test".into(),
+        });
+        let report = confirmation_groups_with(&db, "2026-08", &accounts);
+        let groups = report["groups"].as_array().unwrap();
+        assert!(!groups.iter().any(|g| g["model_id"] == json!("gpt-5.6-luna")), "zero-token group must not be pending");
+        let verdict_of = |model: &str| groups.iter().find(|g| g["model_id"] == json!(model)).unwrap()["auto_verdict"].clone();
+        let conflict = verdict_of("gpt-5.6-sol");
+        assert_eq!((conflict["state"].clone(), conflict["route_state"].clone(), conflict["billing_party"].clone()),
+            (json!("needs_input"), json!("conflict"), json!(null)),
+            "conflict evidence must be neither determined nor attributed to a billing party: {conflict}");
+        assert_eq!(conflict["plan"], json!(null));
+        assert_eq!(conflict["basis"], json!(["route.conflict"]));
+        let api_key = verdict_of("claude-haiku-4-5");
+        assert_eq!((api_key["state"].clone(), api_key["relationship_kind"].clone(), api_key["billing_mode"].clone()),
+            (json!("determined"), json!("official_api"), json!("metered")),
+            "an official route with an API-key account is official API, never a subscription: {api_key}");
+        let no_account = verdict_of("MiniMax-M3");
+        assert_eq!((no_account["state"].clone(), no_account["question"].clone()),
+            (json!("one_question"), json!("billing_mode")),
+            "official route without account evidence must ask, never default to subscription");
+        let clusters = report["clusters"].as_array().unwrap();
+        let gateway: Vec<&Value> = clusters.iter()
+            .filter(|c| c["auto_verdict"]["route_state"] == json!("gateway")).collect();
+        assert_eq!(gateway.len(), 2, "gateway rows split by model_vendor: {clusters:?}");
+        let vendors: Vec<&Value> = gateway.iter().map(|c| &c["model_vendor"]).collect();
+        assert!(vendors.contains(&&json!("anthropic")) && vendors.contains(&&json!("zhipu-glm")), "{vendors:?}");
+        // 同一簇：数字与模型清单是各模型之和 / 之并。
+        let claude_family = clusters.iter()
+            .find(|c| c["models"].as_array().unwrap().iter().any(|m| m["model_id"] == json!("claude-opus-5")))
+            .unwrap();
+        assert_eq!(claude_family["models"].as_array().unwrap().len(), 2, "same-vendor official rows fold into one cluster");
+        assert_eq!(claude_family["group_ids"].as_array().unwrap().len(), 2);
+        let model_tokens: i64 = claude_family["models"].as_array().unwrap().iter()
+            .map(|m| m["tokens"].as_i64().unwrap()).sum();
+        assert_eq!(claude_family["tokens"], json!(model_tokens), "cluster tokens are the sum of its models");
+        // 金额按 (currency, basis) 逐槽相加，与逐模型之和一致。
+        let mut expected: std::collections::BTreeMap<(String, String), i64> = std::collections::BTreeMap::new();
+        for model in claude_family["models"].as_array().unwrap() {
+            for row in model["estimated_amounts"].as_array().unwrap() {
+                let key = (row["currency"].as_str().unwrap().to_string(), row["basis"].as_str().unwrap().to_string());
+                *expected.entry(key).or_insert(0) += row["amount_minor"].as_i64().unwrap();
+            }
+        }
+        let merged: std::collections::BTreeMap<(String, String), i64> = claude_family["estimated_amounts"].as_array().unwrap().iter()
+            .map(|row| ((row["currency"].as_str().unwrap().to_string(), row["basis"].as_str().unwrap().to_string()),
+                        row["amount_minor"].as_i64().unwrap())).collect();
+        assert_eq!(merged, expected, "cluster amounts merge per currency+basis");
         let _ = std::fs::remove_dir_all(&home);
     }
 

@@ -330,6 +330,13 @@
         const groups = billingGroups.filter((group) => !billingCoveredGroups.has(group.group_id));
         // 与 billing_preview.rs::auto_verdict / clusters_of 同一形状（浏览器里用固定判定）。
         const verdictOf = (g) => {
+          // 冲突证据单列：宿主自报与会话路由证据打架时既不归因也不给一键订阅
+          // （billing_preview.rs::auto_verdict 的 conflict 短路）。
+          if (g.evidence_basis === "conflict") {
+            return { model_vendor: g.provider_id && g.provider_id !== "<unknown>" ? g.provider_id : null, gateway_named: false,
+              route_state: "conflict", route_basis: "conflict", billing_party: null, billing_mode: null,
+              relationship_kind: null, plan: null, state: "needs_input", question: null, basis: ["route.conflict"] };
+          }
           if (g.provider_id === "openai" && g.host === "codex") {
             return { model_vendor: "openai", gateway_named: false, route_state: "provider_reported", route_basis: g.evidence_basis,
               billing_party: "openai", billing_mode: "subscription", relationship_kind: "official_subscription",

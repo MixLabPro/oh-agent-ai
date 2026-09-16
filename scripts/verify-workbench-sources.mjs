@@ -545,6 +545,62 @@ ok(elements["ov-billing-provider-row"].hidden === true && elements["ov-billing-r
   && elements["ov-billing-mode"].value === "api" && elements["ov-billing-subscription-fields"].hidden === true,
   "回答「按量 API」后只剩确认，订阅字段不出现");
 elements["ov-billing-close"].onclick();
+
+// 验收审查 iteration 3 的修复（#1/#2/#5/#6）：
+// #1 冲突证据单列：不归因、不给一键订阅。
+billingCalls.length = 0;
+const conflictReport = { status: "ok", month, clusters: [{
+  cluster_id: "c-conflict", host: "codex", billing_party: null, model_vendor: "openai", provider_id: "openai",
+  evidence_basis: "conflict", pricing_basis: "metered_estimate", effective_start: month, effective_end: month,
+  auto_verdict: { model_vendor: "openai", gateway_named: false, route_state: "conflict", route_basis: "conflict",
+    billing_party: null, billing_mode: null, relationship_kind: null, plan: null,
+    state: "needs_input", question: null, basis: ["route.conflict"] },
+  models: [clusterModel("gpt-5.6-sol", 1000, 1, "g-conflict", [])], group_ids: ["g-conflict"],
+  tokens: 1000, session_count: 1, unpriced_tokens: 0, estimated_amounts: [] }], groups: [
+  { group_id: "g-conflict", host: "codex", provider_id: "openai", model_id: "gpt-5.6-sol", evidence_basis: "conflict",
+    pricing_basis: "metered_estimate", tokens: 1000, session_count: 1, effective_start: month, effective_end: month,
+    estimated_amounts: [], unpriced_tokens: 0, unresolved_reason: null, first_event_at_ms: 1, last_event_at_ms: 2 }] };
+await sandbox.renderBillingConfirmation(conflictReport, { status: "ok", candidates: [] });
+if (elements["ov-billing-review-panel"].hidden) await elements["ov-billing-review"].onclick();
+const conflictRow = elements["ov-billing-review-list"].children[0];
+ok(conflictRow.children[0].textContent.includes("路由证据冲突") && conflictRow.children[1].children.length === 1
+  && conflictRow.children[1].children[0].textContent === "明确计费方式",
+  "#1：证据冲突的行既不归因也不给一键订阅，只留「明确计费方式」");
+ok(conflictRow.children[0].children.map((c) => c.textContent).join("|").includes("宿主自报与会话路由证据冲突"),
+  "#1：冲突行的依据写清是宿主自报与会话路由证据打架");
+
+// #2 + #6：钉在有用量组上的旧资产候选跟着折进簇行，且不吞掉 auto: 依据链。
+billingCalls.length = 0;
+const candidateReport = JSON.parse(JSON.stringify(clusterReport));
+await sandbox.renderBillingConfirmation(candidateReport, { status: "ok", candidates: [{ candidate_id: "cand-cluster",
+  host: "claude-code", provider_id: "anthropic", amount_minor: 2000, currency: "USD",
+  billing_period_start: "2026-06-01", status: "pending" }] });
+const detRow = elements["ov-billing-review-list"].children[1];
+const candLine = detRow.children[0].children.find((c) => c.textContent.includes("来自旧版本套餐记录"));
+ok(candLine && candLine.children.some((b) => b.textContent === "这不是我的套餐"),
+  "#2：候选的证据行与「这不是我的套餐」跟着折进簇行，不再被逐模型行一起跳过");
+const clusterRows2 = elements["ov-billing-review-list"].children;
+ok(clusterRows2.length === 4, "#2：候选不再额外占一行");
+await candLine.children.find((b) => b.textContent === "这不是我的套餐").onclick();
+ok(billingCalls.some((c) => c.command === "resolve_billing_import_candidate" && c.args.decision === "dismiss"),
+  "#2：簇行里的「这不是我的套餐」真的写入忽略决定");
+// #5：离开订阅时撤销程序写进去的锚点。
+await clusterRows2[1].children[1].children[0].onclick();
+ok(elements["ov-billing-start"].value === "2026-08-20" && elements["ov-billing-dates-row"].hidden === true,
+  "#5：订阅态把 anchor 写进起始日（2026-08-20）");
+elements["ov-billing-mode"].value = "api";
+elements["ov-billing-mode"].onchange();
+ok(elements["ov-billing-dates-row"].hidden === false && elements["ov-billing-start"].value === monthStart
+  && elements["ov-billing-end"].value === today,
+  "#5：切到按量 API 时起始日撤回组自己的首日，锚点不会写进按量声明");
+billingCalls.length = 0;
+await elements["ov-billing-save"].onclick();
+await elements["ov-billing-save"].onclick();
+const refCall = billingCalls.find((c) => c.command === "save_billing_declaration_revision");
+
+ok(refCall && refCall.args.evidenceRef === "auto:route.session-native+account.Claude Pro;legacy-import-candidate:cand-cluster",
+  "#6：程序判定 + 旧候选同时存在时，auto: 依据链与候选 id 都保留");
+elements["ov-billing-close"].onclick();
 billingOverride = null;
 
 console.log(failed ? `\n${failed} FAIL` : "\n全部通过。");
