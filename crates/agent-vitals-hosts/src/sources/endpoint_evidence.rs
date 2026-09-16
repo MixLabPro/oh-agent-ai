@@ -33,6 +33,11 @@ pub struct EndpointEvidence {
     /// 配置里出现过的**全部**端点主机（去重升序）。多于一个时，判定器不会替用户挑一个
     /// ——它只知道"配置里有中转"，不知道这批用量用的是哪一个。
     pub endpoint_hosts: Vec<String>,
+    /// **逐模型**配置的端点（模型 id → 端点主机）。workbuddy 与 pi 的配置本来就是
+    /// "每个模型一条、各带自己的 url/baseUrl"的形状——那是最精确的证据，比宿主级列表强，
+    /// 所以单列出来（验收审查 iteration 7 #2：把它们压成一个列表就丢了配对的精度，
+    /// 于是 MiniMax 走官方端点这件事被"配置里有中转"淹没）。
+    pub model_endpoints: BTreeMap<String, String>,
     /// 配置里显式声明的服务商名（dsh `agent-default-model.provider`）。**只作展示**：
     /// 实测本机 dsh 写 `deepseek-official` 而基址是中转，名字会说谎，主机名不会。
     pub provider_name: Option<String>,
@@ -50,6 +55,7 @@ impl EndpointEvidence {
             base_url: None,
             endpoint_host: None,
             endpoint_hosts: Vec::new(),
+            model_endpoints: BTreeMap::new(),
             provider_name: None,
             gateway_named_models: Vec::new(),
             evidence_basis: EvidenceBasis::ConfigCurrent,
@@ -68,6 +74,17 @@ impl EndpointEvidence {
         if !self.endpoint_hosts.contains(&host) {
             self.endpoint_hosts.push(host);
         }
+    }
+
+    /// 记一条"这个模型配的是哪个端点"。同一个模型重复出现时**保留第一个**
+    /// （配置文件顺序即用户摆放顺序；不猜"最后一个覆盖"）。
+    fn observe_model_endpoint(&mut self, model: &str, url: &str) {
+        let (Some(model), Some(host)) = (Some(model.trim()), host_of(url)) else { return };
+        if model.is_empty() {
+            return;
+        }
+        self.push_endpoint(url);
+        self.model_endpoints.entry(model.to_string()).or_insert(host);
     }
 
     fn observe_model(&mut self, model: &str) {
@@ -125,9 +142,11 @@ fn host_of(url: &str) -> Option<String> {
 /// 早期版本把 `relay.co.uk` 判成 `co.uk`、把 `10.0.0.7` 判成 `0.7`，用户确认后会把
 /// 这个字符串写成声明的 provider_id）。这里不是公共后缀表（PSL），只是一张
 /// 「二级公共后缀」小表 + IP 拒判；覆盖不到的后缀宁可不给标签，让上层只显示主机名。
-pub fn relay_label_of(host: &str) -> Option<String> {
-    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
-    if host.is_empty() {
+pub fn relay_label_of(raw: &str) -> Option<String> {
+    // 入口先归一化：调用方现在都传已归一的主机名，但函数**不能靠调用方守规矩**——
+    // 直接喂一个 URL 会原样吐回 `https://user:pass@host/`（验收审查 iteration 7 #5）。
+    let host = host_of(raw)?;
+    if host.contains(':') {
         return None;
     }
     let labels: Vec<&str> = host.split('.').collect();
@@ -251,11 +270,17 @@ pub fn read_pi(home: &Path) -> Option<EndpointEvidence> {
             evidence.provider_name = Some(provider.clone());
         }
         for model in spec.get("models").and_then(Value::as_array).into_iter().flatten() {
-            if let Some(url) = model.get("baseUrl").and_then(Value::as_str) {
-                evidence.push_endpoint(url);
-            }
-            if let Some(id) = model.get("id").and_then(Value::as_str) {
-                evidence.observe_model(id);
+            let id = model.get("id").and_then(Value::as_str);
+            let url = model.get("baseUrl").and_then(Value::as_str);
+            match (id, url) {
+                // pi 的 store 也是逐模型带 baseUrl —— 逐模型记（比宿主级列表精确）。
+                (Some(id), Some(url)) => {
+                    evidence.observe_model_endpoint(id, url);
+                    evidence.observe_model(id);
+                }
+                (Some(id), None) => evidence.observe_model(id),
+                (None, Some(url)) => evidence.push_endpoint(url),
+                (None, None) => {}
             }
         }
     }
@@ -263,9 +288,11 @@ pub fn read_pi(home: &Path) -> Option<EndpointEvidence> {
 }
 
 /// **dsh**：`~/.dsh/settings.yaml` 里 **LLM 段**（段名以 `llm-` 开头）的 `baseURL` 与
-/// `models[].id`；`agent-default-model.provider` 作展示名。段名启发式的理由：本机实测
-/// `web-search-deepseek` 段也带 `baseURL`（同一个中转），但那是搜索不是 LLM，
-/// 把它算进来会给出错误的端点。`.credentials.yaml` **整体不读**。
+/// `models[].id`；`agent-default-model.provider` 作展示名（**只作展示**：它是用户写的
+/// 标签，本机写着 `deepseek-official`）。段名启发式的理由：本机 `web-search-deepseek`
+/// 段也带 `baseURL`（指向中转），但那是搜索不是 LLM，算进来会给出错误的端点；本机
+/// `llm-deepseek.baseURL` 是官方的 `https://api.deepseek.com`。
+/// `.credentials.yaml` **整体不读**。
 pub fn read_dsh(home: &Path) -> Option<EndpointEvidence> {
     let path = home.join(".dsh").join("settings.yaml");
     let text = std::fs::read_to_string(&path).ok()?;
@@ -303,19 +330,25 @@ pub fn read_dsh(home: &Path) -> Option<EndpointEvidence> {
     evidence.finish()
 }
 
-/// **workbuddy**：`~/.workbuddy/models.json` 的 `[].url`（可配置多个服务商）。
-/// `apiKey` 与它同一个对象——白名单取键，凭据不进结构。
+/// **workbuddy**：`~/.workbuddy/models.json` 的 `[].url`。真机形状是
+/// `{id, name, vendor, url, supports…}`——**每个模型一条、各带自己的端点**
+/// （`MiniMax-M3 → api.minimaxi.com`、`deepseek/… → beta-router.shengsuanyun.com`），
+/// 所以逐模型记下来；`gateway_named_models` 取 `id`（曾经误读 `model` 键——真机上
+/// 根本没有这个键，于是这个宿主的前缀信号一直是死的；验收审查 iteration 7 #4）。
+/// `apiKey` 与 `url` 同一个对象——白名单取键，凭据不进结构。
 pub fn read_workbuddy(home: &Path) -> Option<EndpointEvidence> {
     let path = home.join(".workbuddy").join("models.json");
     let text = std::fs::read_to_string(&path).ok()?;
     let doc: Value = serde_json::from_str(&text).ok()?;
     let mut evidence = EndpointEvidence::new("workbuddy", "~/.workbuddy/models.json".to_string());
     for entry in doc.as_array().into_iter().flatten() {
-        if let Some(url) = entry.get("url").and_then(Value::as_str) {
-            evidence.push_endpoint(url);
-        }
-        if let Some(model) = entry.get("model").and_then(Value::as_str) {
+        let url = entry.get("url").and_then(Value::as_str);
+        let model = entry.get("id").and_then(Value::as_str);
+        if let (Some(url), Some(model)) = (url, model) {
+            evidence.observe_model_endpoint(model, url);
             evidence.observe_model(model);
+        } else if let Some(url) = url {
+            evidence.push_endpoint(url);
         }
     }
     evidence.finish()
@@ -359,13 +392,14 @@ mod tests {
           }, "model": "sonnet" }"#);
         let e = read_claude(&h).expect("evidence");
         let EndpointEvidence {
-            host, base_url, endpoint_host, endpoint_hosts, provider_name, gateway_named_models,
-            evidence_basis, source,
+            host, base_url, endpoint_host, endpoint_hosts, model_endpoints, provider_name,
+            gateway_named_models, evidence_basis, source,
         } = e;
         assert_eq!(host, "claude-code");
         assert_eq!(base_url.as_deref(), Some("https://router.shengsuanyun.com/api"));
         assert_eq!(endpoint_host.as_deref(), Some("router.shengsuanyun.com"));
         assert_eq!(endpoint_hosts, vec!["router.shengsuanyun.com"]);
+        assert!(model_endpoints.is_empty(), "claude has one global base URL, no per-model endpoints");
         assert_eq!(provider_name, None);
         assert_eq!(gateway_named_models, vec!["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro-0813"]);
         assert_eq!(evidence_basis, EvidenceBasis::ConfigCurrent);
@@ -419,6 +453,8 @@ env_key = "RELAY_KEY"
         assert_eq!(e.provider_name.as_deref(), Some("openai-codex"));
         assert_eq!(e.endpoint_hosts, vec!["chatgpt.com", "open.bigmodel.cn"]);
         assert_eq!(e.gateway_named_models, vec!["zhipu/glm-5.3"]);
+        assert_eq!(e.model_endpoints.get("gpt-5.3-codex-spark").map(String::as_str), Some("chatgpt.com"));
+        assert_eq!(e.model_endpoints.get("zhipu/glm-5.3").map(String::as_str), Some("open.bigmodel.cn"));
         let debug = format!("{:?}", e);
         assert!(!debug.contains("maxTokens"), "{debug}");
         let _ = std::fs::remove_dir_all(&h);
@@ -439,16 +475,24 @@ env_key = "RELAY_KEY"
         let _ = std::fs::remove_dir_all(&h);
     }
 
-    /// workbuddy：多个服务商 → 全部主机都记下来（判定器不替用户在多个端点里挑一个）；
-    /// `apiKey` 与 `url` 同一个对象但绝不进结构。
+    /// workbuddy：真机形状 `{id, name, vendor, url, …}`——**逐模型**端点（这是最精确的
+    /// 证据：MiniMax 走官方端点、deepseek 走中转，同一个文件里各不相同）。`apiKey` 与
+    /// `url` 同一个对象但绝不进结构。曾经误读不存在的 `model` 键 → 前缀信号恒空
+    /// （验收审查 iteration 7 #4），所以这里用真机键名钉住。
     #[test]
-    fn workbuddy_records_every_configured_endpoint_but_no_credentials() {
+    fn workbuddy_records_per_model_endpoints_and_no_credentials() {
         let h = home("workbuddy");
-        write(&h, ".workbuddy/models.json", r#"[{"url":"https://api.minimaxi.com/anthropic","apiKey":"sk-WB-SECRET"},
-          {"url":"https://router.shengsuanyun.com/api","apiKey":"sk-WB-SECRET-2"}]"#);
+        write(&h, ".workbuddy/models.json", r#"[
+          {"id":"MiniMax-M3","name":"MiniMax-M3","vendor":"Custom","url":"https://api.minimaxi.com/v1","apiKey":"sk-WB-SECRET"},
+          {"id":"deepseek/deepseek-v4-flash","name":"deepseek/deepseek-v4-flash","vendor":"Custom","url":"https://beta-router.shengsuanyun.com/api","apiKey":"sk-WB-SECRET-2"}
+        ]"#);
         let e = read_workbuddy(&h).unwrap();
-        assert_eq!(e.endpoint_hosts, vec!["api.minimaxi.com", "router.shengsuanyun.com"]);
-        assert_eq!(e.endpoint_host.as_deref(), Some("api.minimaxi.com"), "first configured is the default");
+        assert_eq!(e.endpoint_hosts, vec!["api.minimaxi.com", "beta-router.shengsuanyun.com"]);
+        assert_eq!(e.model_endpoints.get("MiniMax-M3").map(String::as_str), Some("api.minimaxi.com"));
+        assert_eq!(e.model_endpoints.get("deepseek/deepseek-v4-flash").map(String::as_str),
+            Some("beta-router.shengsuanyun.com"));
+        assert_eq!(e.gateway_named_models, vec!["deepseek/deepseek-v4-flash"],
+            "read from the real `id` key, not the non-existent `model` key");
         let debug = format!("{:?}", e);
         assert!(!debug.contains("SECRET") && !debug.contains("apiKey"), "{debug}");
         let _ = std::fs::remove_dir_all(&h);
@@ -467,6 +511,10 @@ env_key = "RELAY_KEY"
         assert_eq!(relay_label_of("co.uk"), None);
         assert_eq!(relay_label_of("10.0.0.7"), None);
         assert_eq!(relay_label_of("localhost"), None);
+        // 直接喂 URL：入口归一化（userinfo 被剥掉，凭据不可能从标签漏出去），
+        // 认不出的（非数字端口残留 `:`）拒判。
+        assert_eq!(relay_label_of("https://user:pass@host.example/").as_deref(), Some("host.example"));
+        assert_eq!(relay_label_of("router.shengsuanyun.com:8443x"), None);
     }
 
     #[test]

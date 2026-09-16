@@ -289,6 +289,9 @@ pub fn degrade_rule_outcomes(host_id: &str, outcomes: &mut [(&'static str, RuleO
 }
 
 
+#[cfg(test)]
+mod tests {
+
     /// 归因声明是**宿主人格**的一部分：未知宿主 fail-closed 到最保守的一份（不做任何
     /// 特殊处理），已注册宿主按声明生效（codex 自报即官方、workbuddy 恒积分制）。
     #[test]
@@ -302,9 +305,6 @@ pub fn degrade_rule_outcomes(host_id: &str, outcomes: &mut [(&'static str, RuleO
         assert_eq!(attribution_profile("nope").provider_reported_implies_official,
             AttributionProfile::NEUTRAL.provider_reported_implies_official);
     }
-
-#[cfg(test)]
-mod tests {
     use super::*;
 
     fn outcomes() -> Vec<(&'static str, RuleOutcome)> {

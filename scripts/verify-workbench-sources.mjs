@@ -618,7 +618,8 @@ const relayReport = { status: "ok", month, clusters: [{
   provider_id: "<unknown>", evidence_basis: "inferred", pricing_basis: "metered_estimate",
   effective_start: month, effective_end: month,
   auto_verdict: { model_vendor: "deepseek", gateway_named: false, route_state: "relay_config", route_basis: "inferred",
-    billing_party: "shengsuanyun.com", config_endpoint: "router.shengsuanyun.com", billing_mode: "metered",
+    billing_party: "shengsuanyun.com", config_endpoint: "router.shengsuanyun.com",
+    config_source: "~/.claude/settings.json env", billing_mode: "metered",
     relationship_kind: null, plan: null, state: "one_question", question: "route", basis: ["config.endpoint"] },
   models: [clusterModel("deepseek-v4-flash", 856_000_000, 35, "g-relay", [])], group_ids: ["g-relay"],
   tokens: 856_000_000, session_count: 35, unpriced_tokens: 856_000_000, estimated_amounts: [] }],
@@ -629,7 +630,7 @@ const relayReport = { status: "ok", month, clusters: [{
 await sandbox.renderBillingConfirmation(relayReport, { status: "ok", candidates: [] });
 if (elements["ov-billing-review-panel"].hidden) await elements["ov-billing-review"].onclick();
 const relayRow = elements["ov-billing-review-list"].children[0];
-ok(relayRow.children[0].textContent.includes("配置 ANTHROPIC_BASE_URL → router.shengsuanyun.com")
+ok(relayRow.children[0].textContent.includes("配置 ~/.claude/settings.json env → router.shengsuanyun.com")
   && relayRow.children[1].children.map((b) => b.textContent).join("|") === "deepseek 官方端点（不对，走的是官方）|确认经中转（shengsuanyun.com）",
   "A12：配置指向中转时行面写清端点，主操作变成一次确认而不是开放提问");
 await relayRow.children[1].children[1].onclick();
@@ -643,6 +644,33 @@ const relayPreview = billingCalls.find((c) => c.command === "billing_candidate_i
 ok(relayPreview && relayPreview.args.relationshipKind === "third_party"
   && relayPreview.args.scopes.some((s) => s.scope_kind === "provider" && s.scope_value === "unresolved"),
   "A12：第三方关系仍带 provider:unresolved 作用域（这批事实的 provider_id 是 NULL）");
+elements["ov-billing-close"].onclick();
+
+// 验收审查 iteration 7 #3：配置里多个端点时判定器**不点名**，UI 也不许拿"第一个端点"顶上
+// ——按钮文案只说"中转 / 第三方"，点开不预填任何人（否则一键确认会写下没人判过的字符串）。
+billingCalls.length = 0;
+const ambiguousReport = { status: "ok", month, clusters: [{
+  cluster_id: "c-multi", host: "workbuddy", billing_party: null, model_vendor: "deepseek", provider_id: "<unknown>",
+  evidence_basis: "inferred", pricing_basis: "metered_estimate", effective_start: month, effective_end: month,
+  auto_verdict: { model_vendor: "deepseek", gateway_named: false, route_state: "relay_config", route_basis: "inferred",
+    billing_party: null, config_endpoint: "alpha-relay.example", config_source: "~/.workbuddy/models.json",
+    billing_mode: "metered", relationship_kind: null, plan: null, state: "one_question", question: "route",
+    basis: ["config.endpoint.multiple"] },
+  models: [clusterModel("deepseek-v4-flash", 1000, 1, "g-multi", [])], group_ids: ["g-multi"],
+  tokens: 1000, session_count: 1, unpriced_tokens: 1000, estimated_amounts: [] }],
+  groups: [{ group_id: "g-multi", host: "workbuddy", provider_id: "<unknown>", model_id: "deepseek-v4-flash",
+    evidence_basis: "inferred", pricing_basis: "metered_estimate", tokens: 1000, session_count: 1,
+    effective_start: month, effective_end: month, estimated_amounts: [], unpriced_tokens: 1000,
+    unresolved_reason: "billing-route-unknown", first_event_at_ms: 1, last_event_at_ms: 2 }] };
+await sandbox.renderBillingConfirmation(ambiguousReport, { status: "ok", candidates: [] });
+if (elements["ov-billing-review-panel"].hidden) await elements["ov-billing-review"].onclick();
+const multiRow = elements["ov-billing-review-list"].children[0];
+ok(multiRow.children[1].children[1].textContent === "中转 / 第三方"
+  && multiRow.children[0].textContent.includes("配置 ~/.workbuddy/models.json → alpha-relay.example"),
+  "#3：多个端点时按钮不点名、行面只说配置文件与端点（不替判定器挑一个）");
+await multiRow.children[1].children[1].onclick();
+ok(elements["ov-billing-provider"].value === "",
+  "#3：不预填「第一个端点」——判定器没点名的字符串不许进声明");
 elements["ov-billing-close"].onclick();
 
 // 复验 iteration 4 的回归守卫：**没有账户锚点**的组切到按量后，手改的结束日期不能被

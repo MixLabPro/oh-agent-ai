@@ -129,7 +129,7 @@
 | A7 | `crates/agent-vitals-data/src/authority_query.rs::SQL_UNRESOLVED_BILLING_GROUPS` | 分组列去掉 `model_id`（模型进 `models[]` 子列表），加 `provider_raw`；待处理投影同步 | §5.1 |
 | A8 | `apps/desktop/src-tauri/ui/workbench.js` | 列表三态渲染；「确认」直写声明（`evidence_ref=auto:…`）；弹窗只剩 L3 步骤；订阅步改为确认扣款日/月费；`<unknown>` 不上卡面 | §4/§5 |
 | A9 | `apps/desktop/src-tauri/src/lib.rs::validate_desktop_declaration` | 系统判定确认的声明允许 `effective_start = subscriptionCreatedAt`（早于本月）；`effective_end` 仍 ≤ 今天 | §5.2 |
-| A12 | 新 `crates/agent-vitals-hosts/src/hosts/claude_code/sources/config.rs` | 读 `~/.claude/settings.json`（`settings.local.json` 覆盖）`env` 的**白名单 5 键**（`ANTHROPIC_BASE_URL` + 4 个模型映射）→ `ClaudeEndpointConfig`，`ConfigCurrent`(4)。基址不是该模型厂商官方端点、或模型映射带 `vendor/model` 前缀 → `auto_verdict` 判 `relay_config`（计费方 = 中转注册域；无基址时留空不猜），依据 `config.endpoint` / `config.gateway_named`，**恒为 `one_question`**；与会话级官方形状并存时追加 `config.endpoint.conflict`（P5） | §2 L2 端点面 / §10.2 层② |
+| A12 | 新 `crates/agent-vitals-hosts/src/sources/endpoint_evidence.rs`（跨宿主提取器；2026-09-16 泛化，原 claude 专用的 `hosts/claude_code/sources/config.rs` 已删除） | 逐宿主读取器（claude=`settings.json` 的 `env` 白名单 5 键；codex=`config.toml` 的 `[model_providers.*].base_url`；pi/workbuddy=逐模型 `baseUrl`/`url`；dsh=`settings.yaml` 的 `llm-*` 段）→ 中立 `EndpointEvidence{base_url, endpoint_host, endpoint_hosts, model_endpoints, provider_name, gateway_named_models}`，`ConfigCurrent`(4)。**逐模型端点优先**；没有时按宿主级列表：单个非官方端点敢点名，全是非官方且多个 → `config.endpoint.multiple`，官方与中转混配 → `config.endpoint.ambiguous`，厂商认不出 → 不做断言。凡判 `relay_config` 恒为 `one_question`（强度 4 不能单独判定）；与会话级官方形状并存时追加 `config.endpoint.conflict`（P5） | §2 L2 端点面 / §10.2 层② |
 | A11 | 「确认」直写声明（阶段 2） |
 | A10 | `tests/`：`test_pricing_lockstep.py`（新目录段）、hosts 单测（每种 ID 形状一条 fixture）、`billing_preview` R-测（verdict 三态）、隐私测（任何 DTO/导出/日志不含 email/accountUuid） | | §7 |
 
@@ -324,7 +324,7 @@ claude-code  shengsuanyun.com  one_question  relay_config  models=11  tokens=276
 判据是 `config-current`(4)，所以仍是"一次确认"，不是替用户断言。
 
 **隐私**：`env` 里紧挨着 `ANTHROPIC_AUTH_TOKEN`。读取器**白名单取键**（5 个），令牌连值都不复制；
-`ClaudeEndpointConfig` 没有令牌槽位且故意不 derive `Serialize`；测试注入假令牌断言它不出现在结构里。
+`EndpointEvidence` 没有令牌槽位且故意不 derive `Serialize`；测试注入假令牌 + **穷举解构**（新增字段即编译失败）+ `{:?}` 断言它不出现在结构里。
 
 **残留风险（已显式暴露）**：中转代理 Anthropic 时会**原样保留** `req_01…`/`msg_01…` 形状，于是
 "会话级官方形状"与"配置指向中转"可以同时成立。判定不推翻强证据，但依据里出现
@@ -344,7 +344,7 @@ claude-code  shengsuanyun.com  one_question  relay_config  models=11  tokens=276
 | 宿主 | 文件 | 本机实测 |
 |---|---|---|
 | claude-code | `~/.claude/settings.json` `env` | `router.shengsuanyun.com/api`（中转） |
-| dsh | `~/.dsh/settings.yaml` | `agent-default-model.provider: deepseek-official`，但 **LLM 段 `baseURL` = 胜算云中转**；`web-search-deepseek` 段另有同一个中转（搜索，不算 LLM） |
+| dsh | `~/.dsh/settings.yaml` | `agent-default-model.provider: deepseek-official`（用户写的标签）；**LLM 段 `llm-deepseek.baseURL` = `https://api.deepseek.com`（官方）**；中转只在 `web-search-deepseek` 段（搜索，不算 LLM） |
 | workbuddy | `~/.workbuddy/models.json` | 配了三个端点：`api.minimaxi.com` / `beta-router.shengsuanyun.com` / `router.shengsuanyun.com` |
 | pi | `~/.pi/agent/models-store.json` | 每模型 `baseUrl`（本机 `chatgpt.com`） |
 | codex | `~/.codex/config.toml` | **无** `model_providers` 段 → 官方路径，诚实返回"无证据" |
@@ -360,7 +360,21 @@ claude-code  shengsuanyun.com  one_question  relay_config  models=11  tokens=276
 多端点诚实：配置里列了多个端点时判定器**不替用户挑**（workbuddy 本机就有三个），
 只给 `relay_config` + 依据 `config.endpoint.multiple`、计费方留空。
 
-**第二件：宿主强相关规则搬回宿主层。** 用户点出的正是本仓库自己的架构纪律
+**第二件：逐模型端点（真机形状纠正）。** workbuddy 与 pi 的配置**本来就是逐模型的**——
+`~/.workbuddy/models.json` 每条 `{id, name, vendor, url}` 各自带端点（`MiniMax-M3 → api.minimaxi.com`、
+`deepseek/deepseek-v4-flash → beta-router.shengsuanyun.com`），pi 每模型带 `baseUrl`。
+把它们压成一个"宿主级端点列表"就丢了配对的精度（验收审查 iteration 7 #2），
+所以 `EndpointEvidence.model_endpoints` 逐模型记下来，判定器**逐模型端点优先**：
+同一条配置里 MiniMax 走官方、deepseek 走中转，各自判各自的。workbuddy 的读键也从
+不存在的 `model` 改成真机的 `id`（旧写法让这个宿主的前缀信号一直是死的，而测试用的
+假键名把错误形状钉成了绿——正是 CLAUDE.md「形状来源纪律」警告的那种假绿）。
+
+宿主级列表仍在，规则收敛成三档：单个端点 → 敢点名；**全是**非官方端点且多于一个 →
+`config.endpoint.multiple`（不挑）；官方与中转**混着配** → `config.endpoint.ambiguous`
+（不给断言也不装作没看见）。厂商未知时（`model_vendor` 认不出）**一律不做中转断言**——
+那时"官方端点"无从谈起，旧写法会把 `api.anthropic.com` 也说成中转名（验收审查 iteration 7 #1）。
+
+**第三件：宿主强相关规则搬回宿主层。** 用户点出的正是本仓库自己的架构纪律
 （`HostProfile` = 宿主人格声明，`hosts/<h>/capability.rs` 为落点）。`billing_preview` 里
 原有的两处宿主名字判断已删除：
 
@@ -375,9 +389,14 @@ claude-code  shengsuanyun.com  one_question  relay_config  models=11  tokens=276
 `test_cli_matrix::test_hosts_json_byte_parity` 逐字节比对。未知宿主 fail-closed 到
 `NEUTRAL`（不做任何特殊处理）。新增宿主接入 = 填一行声明，不改判定器。
 
-**仍留在 runtime 的宿主名字**（本期未动，同一纪律的欠账，逐个记在这里）：
-`mcp/cost_breakdown.rs:405-416`（逐宿主计价语义）、`mcp/data_status.rs:252-258`（逐宿主状态语义）、
+**仍留在 runtime 的宿主名字**（本期未动，同一纪律的欠账）。这份清单是**抽样不是穷尽**——
+`agent-vitals-runtime` 的 production 代码里约有 45 处宿主名字面量（多数是注册表分派，
+如 `FACT_HOSTS`/`WIRED_HOSTS`/`TRACE_HOSTS` 与 `sync_service`/`trace_service` 的 host→函数分派，
+那是正当的路由）；**其中真正像"宿主名字决定一条规则"的**至少还有：
+`mcp/cost_breakdown.rs:405,416`（逐宿主计价语义）、`mcp/data_status.rs:252,256,258`（逐宿主状态语义）、
 `price_discovery.rs:40`（`ROUTE_UNCONFIRMED_EXEMPT_HOSTS`）、`sql_sync.rs:136`（provider→host 映射）、
-`skills/scanner.rs:206`（openclaw 特例）、`skills/inventory.rs:176/203/214`。它们与本次改动无交集，
-但都是同一个"声明该住宿主层"的形状，宜按 `HostProfile` 逐条收编。
+`skills/scanner.rs:206,226,234,237,251,357,362,371,472,485,503,580,640,660,715`、
+`skills/inventory.rs:176,203,214,219`、`sync_service.rs:84,136,170,214`、`r2a_store.rs:368,381,1570`。
+用 `/usr/bin/grep -nE '"(claude-code|codex|dsh|workbuddy)"' crates/agent-vitals-runtime/src -r`
+自己数一遍再决定收编哪些——**别把这份清单当完整负债表**（验收审查 iteration 7 #7）。
 

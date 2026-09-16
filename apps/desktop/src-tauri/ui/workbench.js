@@ -2950,6 +2950,7 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     "response_id.vendor_shape": "响应 ID 与厂商形状一致", "account.api_key": "账户使用 API key",
     "route.conflict": "宿主自报与会话路由证据冲突", "config.endpoint": "配置里的端点", "config.gateway_named": "模型映射带厂商前缀（中转约定）",
     "config.endpoint.multiple": "配置里列了多个端点（其中至少一个是中转）",
+    "config.endpoint.ambiguous": "配置里官方端点与中转同时存在（不确定这批走的是哪一个）",
     "config.endpoint.conflict": "⚠ 但这批用量是官方形状，而配置指向中转——两者需你核对",
   }[b] || (b.startsWith("account.") ? "账户套餐 " + b.slice(8) : b))).join(" · ");
   const renderClusterRow = (cluster) => {
@@ -2970,7 +2971,11 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     const models = (cluster.models || []).map((m) => m.model_id).filter(Boolean);
     let head = cluster.host + " · " + who + " · " + routeText;
     if (verdict.route_state === "relay_config" && verdict.config_endpoint) {
-      head += "（配置 ANTHROPIC_BASE_URL → " + verdict.config_endpoint + "）";
+      // 说清是**哪个文件**给出来的端点——曾经写死 "ANTHROPIC_BASE_URL"，codex/dsh/pi
+      // 的行会因此说假话（验收审查 iteration 7 #3）。
+      head += "（配置 " + (verdict.config_source || "端点") + " → " + verdict.config_endpoint + "）";
+    } else if (verdict.config_endpoint) {
+      head += "（配置 " + (verdict.config_source || "端点") + " → " + verdict.config_endpoint + "，与" + routeText + "需你核对）";
     }
     if (verdict.state === "determined" && verdict.plan && verdict.plan.label) {
       head += " · " + verdict.plan.label + " 订阅" +
@@ -3029,9 +3034,12 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
       official.onclick = () => open({ verdict, provider: vendor, route: "official", mode: "api" });
       const relay = document.createElement("button");
       relay.className = "btn secondary";
-      const relayName = verdict.route_state === "relay_config" ? (verdict.billing_party || verdict.config_endpoint) : "";
+      // 只认判定器**敢点名**的计费方。配置里有多个端点时 `billing_party` 是空的——
+      // 那时不能用 `config_endpoint` 顶上（那是"第一个"端点，不是判定结果），
+      // 否则用户一键确认就把一串没人判过的字符串写进声明（验收审查 iteration 7 #3）。
+      const relayName = verdict.route_state === "relay_config" ? (verdict.billing_party || "") : "";
       relay.textContent = relayName ? "确认经中转（" + relayName + "）" : "中转 / 第三方";
-      relay.onclick = () => open({ verdict, provider: relayName || vendor, route: "third_party" });
+      relay.onclick = () => open({ verdict, provider: relayName || "", route: "third_party" });
       actions.append(official, relay);
     } else if (verdict.state === "one_question") {
       for (const [label, mode] of [["订阅", "subscription"], ["按量 API", "api"], ["组织承担", "organization"]]) {
