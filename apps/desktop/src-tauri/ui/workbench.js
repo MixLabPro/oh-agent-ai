@@ -2174,6 +2174,8 @@ function syncBillingDeclarationSteps() {
     // 按量声明的 effective_start（验收审查 iteration 3 #5）。判据是「程序写过」这个
     // 事实，不是值相等——值相等对没有锚点的组恒成立，会在每次 restep 时抹掉用户手改的
     // 结束日期（同一份审查的 iteration 4 #1）。
+    // 有意保留的行为：用户亲手改过订阅日期后切到按量，起始日保留用户的值（不再撤回到
+    // 组首日）——「只撤回程序写的」是对这条路径的唯一解释，且该字段当时可见、可改。
     if (target.defaultStart) start.value = target.defaultStart;
     if (target.defaultEnd) end.value = target.defaultEnd;
     target.anchorApplied = false;
@@ -2946,7 +2948,8 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     "route.account-time-bound": "账户期证据", "route.config-time-bound": "配置期证据",
     "host.provider_reported": "宿主自报服务商", "model.gateway_named": "网关式模型命名",
     "response_id.vendor_shape": "响应 ID 与厂商形状一致", "account.api_key": "账户使用 API key",
-    "route.conflict": "宿主自报与会话路由证据冲突",
+    "route.conflict": "宿主自报与会话路由证据冲突", "config.endpoint": "配置里的端点", "config.gateway_named": "模型映射带厂商前缀（中转约定）",
+    "config.endpoint.conflict": "⚠ 但这批用量是官方形状，而配置指向中转——两者需你核对",
   }[b] || (b.startsWith("account.") ? "账户套餐 " + b.slice(8) : b))).join(" · ");
   const renderClusterRow = (cluster) => {
     const verdict = cluster.auto_verdict || {};
@@ -2961,10 +2964,13 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     const party = verdict.billing_party || null;
     const vendor = verdict.model_vendor || null;
     const who = party ? party : (vendor ? "计费方待定（模型厂商 " + vendor + "）" : "服务商未知");
-    const routeText = { official: "官方路由", provider_reported: "宿主自报官方", gateway: "经中转", vendor_shape: "厂商端点或中转", conflict: "路由证据冲突", unknown: "路由未知" }[verdict.route_state] || "路由未知";
+    const routeText = { official: "官方路由", provider_reported: "宿主自报官方", gateway: "经中转", relay_config: "经中转", vendor_shape: "厂商端点或中转", conflict: "路由证据冲突", unknown: "路由未知" }[verdict.route_state] || "路由未知";
     const amount = billingAmountsText(cluster.estimated_amounts);
     const models = (cluster.models || []).map((m) => m.model_id).filter(Boolean);
     let head = cluster.host + " · " + who + " · " + routeText;
+    if (verdict.route_state === "relay_config" && verdict.config_endpoint) {
+      head += "（配置 ANTHROPIC_BASE_URL → " + verdict.config_endpoint + "）";
+    }
     if (verdict.state === "determined" && verdict.plan && verdict.plan.label) {
       head += " · " + verdict.plan.label + " 订阅" +
         (verdict.plan.anchor_date ? " · 每月 " + Number(verdict.plan.anchor_date.slice(8, 10)) + " 日续费" : "");
@@ -3017,12 +3023,14 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     } else if (verdict.state === "one_question" && verdict.question === "route") {
       const official = document.createElement("button");
       official.className = "btn secondary";
-      official.textContent = (vendor ? vendor + " " : "") + "官方端点";
+      official.textContent = (vendor ? vendor + " " : "") + "官方端点" +
+        (verdict.route_state === "relay_config" ? "（不对，走的是官方）" : "");
       official.onclick = () => open({ verdict, provider: vendor, route: "official", mode: "api" });
       const relay = document.createElement("button");
       relay.className = "btn secondary";
-      relay.textContent = "中转 / 第三方";
-      relay.onclick = () => open({ verdict, provider: vendor, route: "third_party" });
+      const relayName = verdict.route_state === "relay_config" ? (verdict.billing_party || verdict.config_endpoint) : "";
+      relay.textContent = relayName ? "确认经中转（" + relayName + "）" : "中转 / 第三方";
+      relay.onclick = () => open({ verdict, provider: relayName || vendor, route: "third_party" });
       actions.append(official, relay);
     } else if (verdict.state === "one_question") {
       for (const [label, mode] of [["订阅", "subscription"], ["按量 API", "api"], ["组织承担", "organization"]]) {

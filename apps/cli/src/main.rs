@@ -3195,12 +3195,20 @@ session_store={store} fold={fold}"
             println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
         } else {
             println!("Billing confirmation clusters (month {month}, status {}):", report["status"].as_str().unwrap_or("?"));
+            println!("  (~vendor = billing party still open; the row is the model vendor's)");
             for c in report["clusters"].as_array().map(|a| a.iter()).into_iter().flatten() {
                 let v = &c["auto_verdict"];
+                // 网关行的 `billing_party` 恒空，只印它会让同宿主的多行长得一模一样
+                // （簇主键含 model_vendor 才拆开，人眼却看不到那个维度）。
+                let party = match (v["billing_party"].as_str(), v["model_vendor"].as_str()) {
+                    (Some(party), _) => party.to_string(),
+                    (None, Some(vendor)) => format!("~{vendor}"),
+                    (None, None) => "<unknown>".to_string(),
+                };
                 println!(
                     "  {:<12} {:<12} {:<12} {:<18} {:<21} models={:<2} tokens={:<12} basis={}",
                     c["host"].as_str().unwrap_or("?"),
-                    v["billing_party"].as_str().unwrap_or("<unknown>"),
+                    party,
                     v["state"].as_str().unwrap_or("?"),
                     v["route_state"].as_str().unwrap_or("?"),
                     v["relationship_kind"].as_str().unwrap_or("-"),

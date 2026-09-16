@@ -40,6 +40,8 @@ pub mod workflow;
 pub mod quota;
 // v1.0.0-beta.1 自动归因 A5：账户级证据（只读 oauthAccount 三个属性键）。
 pub mod account;
+// v1.0.0-beta.1 自动归因 A12：端点/配置证据（只读 settings.json env 的基址与模型映射）。
+pub mod config;
 
 /// 一个会话文件对 `claude-session` 有用的全部信息（路径本身没有消费者——
 /// 调用方各自从 walk 结果拿路径，这里只携带读出来的元数据）。

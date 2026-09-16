@@ -172,6 +172,29 @@ pub fn official_endpoint_vendor(host: &str) -> Option<String> {
     None
 }
 
+/// 该厂商声明的全部官方端点主机名（可能不止一个环境/区域）。
+pub fn official_endpoints_of(vendor: &str) -> Vec<String> {
+    signatures()
+        .pointer(&format!("/vendors/{vendor}/official_endpoints"))
+        .and_then(Value::as_array)
+        .map(|rows| rows.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// 这个主机名是不是该厂商的官方端点（边界感知，含子域；与 `official_endpoint_vendor`
+/// 同一套比较规则）。**用来判"配置里的基址是不是中转"**：不是官方端点 ≠ 一定中转，
+/// 但"是官方端点"就是官方——这个否定面足够让 L3 的那一问改成一次确认。
+pub fn is_official_endpoint(vendor: &str, host: &str) -> bool {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    official_endpoints_of(vendor).iter().any(|endpoint| {
+        let e = endpoint.to_ascii_lowercase();
+        host == e || host.ends_with(&format!(".{e}"))
+    })
+}
+
 pub fn official_endpoint_of(vendor: &str) -> Option<String> {
     signatures()
         .pointer(&format!("/vendors/{vendor}/official_endpoints/0"))
@@ -182,6 +205,19 @@ pub fn official_endpoint_of(vendor: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 官方端点判定必须是边界感知的：`api.deepseek.com` 是官方的，
+    /// `router.shengsuanyun.com` / `api.deepseek.com.evil.example` 都不是。
+    #[test]
+    fn official_endpoint_membership_is_boundary_aware() {
+        assert!(is_official_endpoint("deepseek", "api.deepseek.com"));
+        assert!(is_official_endpoint("deepseek", "API.DeepSeek.com."));
+        assert!(is_official_endpoint("deepseek", "beta.api.deepseek.com"));
+        assert!(!is_official_endpoint("deepseek", "router.shengsuanyun.com"));
+        assert!(!is_official_endpoint("deepseek", "api.deepseek.com.evil.example"));
+        assert!(!is_official_endpoint("deepseek", ""));
+        assert_eq!(official_endpoints_of("deepseek"), vec!["api.deepseek.com"]);
+    }
 
     #[test]
     fn catalog_parses_and_every_vendor_has_prefixes_or_endpoints() {

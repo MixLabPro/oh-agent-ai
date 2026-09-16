@@ -223,6 +223,11 @@
       last_event_at_ms: monthStartMs + 86_400_000 * 9, session_count: 7, effective_start: month, effective_end: month,
       estimated_amounts: [{ amount_minor: 1892, currency: "USD", basis: "metered_estimate" }],
       unpriced_tokens: 0, unresolved_reason: null },
+    { group_id: "claude-code|<unknown>|deepseek-v4-flash|inferred|metered_estimate|" + month, host: "claude-code",
+      provider_id: "<unknown>", model_id: "deepseek-v4-flash", evidence_basis: "inferred",
+      pricing_basis: "metered_estimate", tokens: 856_000_000, first_event_at_ms: monthStartMs + 3_600_000,
+      last_event_at_ms: monthStartMs + 86_400_000 * 14, session_count: 35, effective_start: month, effective_end: month,
+      estimated_amounts: [], unpriced_tokens: 856_000_000, unresolved_reason: "billing-route-unknown" },
     { group_id: "claude-code|minimax|MiniMax-M2.5|missing|metered_estimate|" + month, host: "claude-code",
       provider_id: "minimax", model_id: "MiniMax-M2.5", evidence_basis: "missing",
       pricing_basis: "metered_estimate", tokens: 980_000, first_event_at_ms: monthStartMs + 7_200_000,
@@ -342,6 +347,14 @@
               billing_party: "openai", billing_mode: "subscription", relationship_kind: "official_subscription",
               plan: { label: "ChatGPT", channel: null, anchor_date: null, source: "~/.codex/auth.json auth_mode" },
               state: "determined", question: null, basis: ["host.provider_reported", "account.ChatGPT"] };
+          }
+          // 配置证据（billing_preview.rs::auto_verdict 的 relay_config 分支）：基址不是
+          // 该厂商官方端点 → 计费方是中转的注册域，状态仍是 one_question。
+          if (g.host === "claude-code" && /^deepseek/.test(g.model_id)) {
+            return { model_vendor: "deepseek", gateway_named: false, route_state: "relay_config",
+              route_basis: g.evidence_basis, billing_party: "shengsuanyun.com",
+              config_endpoint: "router.shengsuanyun.com", billing_mode: "metered", relationship_kind: null,
+              plan: null, state: "one_question", question: "route", basis: ["config.endpoint"] };
           }
           if (g.provider_id === "<unknown>" && /^glm/.test(g.model_id)) {
             return { model_vendor: "zhipu-glm", gateway_named: false, route_state: "vendor_shape", route_basis: "inferred",

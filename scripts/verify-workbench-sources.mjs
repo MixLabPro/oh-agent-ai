@@ -608,6 +608,73 @@ const refCall = billingCalls.find((c) => c.command === "save_billing_declaration
 ok(refCall && refCall.args.evidenceRef === "auto:route.session-native+account.Claude Pro;legacy-import-candidate:cand-cluster",
   "#6：程序判定 + 旧候选同时存在时，auto: 依据链与候选 id 都保留");
 elements["ov-billing-close"].onclick();
+
+// A12 端点/配置证据：claude-code 的日志不记端点，配置记（ANTHROPIC_BASE_URL）。基址不是
+// 该厂商官方端点时，行面写清"配置指向哪"，并把 L3 的那一问变成一次确认（形状出处：
+// billing_preview.rs::auto_verdict 的 relay_config 分支 + relay_label_of）。
+billingCalls.length = 0;
+const relayReport = { status: "ok", month, clusters: [{
+  cluster_id: "c-relay", host: "claude-code", billing_party: "shengsuanyun.com", model_vendor: "deepseek",
+  provider_id: "<unknown>", evidence_basis: "inferred", pricing_basis: "metered_estimate",
+  effective_start: month, effective_end: month,
+  auto_verdict: { model_vendor: "deepseek", gateway_named: false, route_state: "relay_config", route_basis: "inferred",
+    billing_party: "shengsuanyun.com", config_endpoint: "router.shengsuanyun.com", billing_mode: "metered",
+    relationship_kind: null, plan: null, state: "one_question", question: "route", basis: ["config.endpoint"] },
+  models: [clusterModel("deepseek-v4-flash", 856_000_000, 35, "g-relay", [])], group_ids: ["g-relay"],
+  tokens: 856_000_000, session_count: 35, unpriced_tokens: 856_000_000, estimated_amounts: [] }],
+  groups: [{ group_id: "g-relay", host: "claude-code", provider_id: "<unknown>", model_id: "deepseek-v4-flash",
+    evidence_basis: "inferred", pricing_basis: "metered_estimate", tokens: 856_000_000, session_count: 35,
+    effective_start: month, effective_end: month, estimated_amounts: [], unpriced_tokens: 856_000_000,
+    unresolved_reason: "billing-route-unknown", first_event_at_ms: 1, last_event_at_ms: 2 }] };
+await sandbox.renderBillingConfirmation(relayReport, { status: "ok", candidates: [] });
+if (elements["ov-billing-review-panel"].hidden) await elements["ov-billing-review"].onclick();
+const relayRow = elements["ov-billing-review-list"].children[0];
+ok(relayRow.children[0].textContent.includes("配置 ANTHROPIC_BASE_URL → router.shengsuanyun.com")
+  && relayRow.children[1].children.map((b) => b.textContent).join("|") === "deepseek 官方端点（不对，走的是官方）|确认经中转（shengsuanyun.com）",
+  "A12：配置指向中转时行面写清端点，主操作变成一次确认而不是开放提问");
+await relayRow.children[1].children[1].onclick();
+ok(elements["ov-billing-provider"].value === "shengsuanyun.com" && elements["ov-billing-route"].value === "third_party"
+  && elements["ov-billing-subscription-fields"].hidden === true,
+  "A12：确认经中转时预填中转名与第三方路由，且不按订阅展开");
+ok(elements["ov-billing-missing"].textContent.includes("待补充：服务商、路由、计费方式"),
+  "A12：config-current 只是证据，仍要求用户确认（不冒充已判定）");
+await elements["ov-billing-save"].onclick();
+const relayPreview = billingCalls.find((c) => c.command === "billing_candidate_impact_preview");
+ok(relayPreview && relayPreview.args.relationshipKind === "third_party"
+  && relayPreview.args.scopes.some((s) => s.scope_kind === "provider" && s.scope_value === "unresolved"),
+  "A12：第三方关系仍带 provider:unresolved 作用域（这批事实的 provider_id 是 NULL）");
+elements["ov-billing-close"].onclick();
+
+// 复验 iteration 4 的回归守卫：**没有账户锚点**的组切到按量后，手改的结束日期不能被
+// 后续 restep 抹掉。旧实现按「值相等」判撤回，而这类组的 anchor 只是组首日的副本，
+// 于是每次 restep 都把结束日期打回默认（复验者在真实 workbench.js 上复现过）。
+billingCalls.length = 0;
+const noAnchorReport = { status: "ok", month, clusters: [{
+  cluster_id: "c-noanchor", host: "claude-code", billing_party: "anthropic", model_vendor: "anthropic",
+  provider_id: "anthropic", evidence_basis: "session-native", pricing_basis: "route-observed",
+  effective_start: month, effective_end: month,
+  auto_verdict: { model_vendor: "anthropic", gateway_named: false, route_state: "official", route_basis: "session-native",
+    billing_party: "anthropic", billing_mode: null, relationship_kind: null, plan: null,
+    state: "one_question", question: "billing_mode", basis: ["route.session-native"] },
+  models: [clusterModel("claude-opus-5", 1000, 1, "g-noanchor", [])], group_ids: ["g-noanchor"],
+  tokens: 1000, session_count: 1, unpriced_tokens: 0, estimated_amounts: [] }],
+  groups: [{ group_id: "g-noanchor", host: "claude-code", provider_id: "anthropic", model_id: "claude-opus-5",
+    evidence_basis: "session-native", pricing_basis: "route-observed", tokens: 1000, session_count: 1,
+    effective_start: month, effective_end: month, estimated_amounts: [], unpriced_tokens: 0,
+    unresolved_reason: null, first_event_at_ms: 1, last_event_at_ms: 2, auto_verdict: null }] };
+await sandbox.renderBillingConfirmation(noAnchorReport, { status: "ok", candidates: [] });
+if (elements["ov-billing-review-panel"].hidden) await elements["ov-billing-review"].onclick();
+await elements["ov-billing-review-list"].children[0].children[1].children[0].onclick();
+elements["ov-billing-mode"].value = "api";
+elements["ov-billing-mode"].onchange();
+ok(elements["ov-billing-dates-row"].hidden === false && elements["ov-billing-start"].value === monthStart,
+  "无锚点组切到按量后仍可用起止日期（起始日 = 组首日）");
+elements["ov-billing-end"].value = "2026-09-10";
+elements["ov-billing-end"].onchange();
+elements["ov-billing-batch"].onchange();
+ok(elements["ov-billing-end"].value === "2026-09-10" && elements["ov-billing-start"].value === monthStart,
+  "手改的结束日期经 restep 后仍在：撤回只针对程序写入的账户锚点（复验 iteration 4 #1）");
+elements["ov-billing-close"].onclick();
 billingOverride = null;
 
 console.log(failed ? `\n${failed} FAIL` : "\n全部通过。");
