@@ -1908,8 +1908,12 @@ function billingBatchKey(row) {
 // 从三步选择推导 relationship_kind；`unknown` 不是声明，只做展示与降级。
 function billingRelationshipFromSteps(missing, routeValue, modeValue) {
   const route = missing.route ? routeValue : "official";
+  // 路由先说话：中转/仍不确定这两条路根本不需要计费方式（选项行此时是隐藏的）。
   if (route === "unknown") return "unknown";
   if (route === "third_party") return "third_party";
+  // 官方路由下没选计费方式就是没回答——不能悄悄落成「官方订阅」
+  // （规格 §4「无证据 → 不预选」）。
+  if (!String(modeValue || "").trim()) return "";
   if (modeValue === "api") return "official_api";
   if (modeValue === "organization") return "organization";
   return "official_subscription";
@@ -1964,7 +1968,8 @@ function openBillingDeclaration(target, rows, preset) {
   }
   if (provider) provider.value = preset.provider && missing.provider ? preset.provider : "";
   route.value = preset.route || "official";
-  mode.value = preset.mode || (preset.verdict && preset.verdict.billing_mode === "metered" ? "api" : "subscription");
+  const presetMode = preset.verdict && preset.verdict.billing_mode;
+  mode.value = preset.mode || (presetMode === "metered" ? "api" : presetMode === "subscription" ? "subscription" : "");
   // 订阅字段：有旧资产候选就预填它的套餐金额/币种，让用户核对而不是重填。
   const subscriptionName = document.getElementById("ov-billing-subscription-name");
   const subscriptionAmount = document.getElementById("ov-billing-subscription-amount");
@@ -2045,6 +2050,10 @@ function openBillingDeclaration(target, rows, preset) {
     const planAnchor = preset.plan && BILLING_DATE_RE.test(String(preset.plan.anchor_date || "")) ? preset.plan.anchor_date : null;
     anchor.value = minBillingDate(planAnchor || start.value, today);
     anchor.max = today;
+    // 只有账户证据给出来的锚点才算「程序写进去的」——没有锚点时 anchor 只是组的首日，
+    // 用它做值比较会在每次 restep 时误撤回用户手改的结束日期（验收审查 iteration 4 #1）。
+    billingDeclarationTarget.anchorDate = planAnchor;
+    billingDeclarationTarget.anchorApplied = false;
   }
   const amountText = billingAmountsText(target.estimated_amounts);
   context.textContent = target.host + " · " + (missing.provider ? "服务商未知" : target.provider_id) +
@@ -2155,18 +2164,19 @@ function syncBillingDeclarationSteps() {
     if (BILLING_DATE_RE.test(value)) {
       start.value = value;
       end.value = today;
+      target.anchorApplied = Boolean(target.anchorDate && value === target.anchorDate);
       if (anchorText) anchorText.textContent = "每月 " + Number(value.slice(8, 10)) + " 日扣款 · 适用 " + value + " – 今天（" + today + "）；不用填起止，程序按订阅期归因。";
     } else if (anchorText) {
       anchorText.textContent = "填订阅开始（首次扣款）日期，程序按它算适用范围。";
     }
-  } else if (kind !== "official_subscription" && anchor && start && end) {
-    // 离开订阅：把程序写进去的锚点撤回到组自己的默认起止，否则「订阅锚点」会变成
-    // 按量声明的 effective_start（真机锚点 2025-07-20 会一路写进声明，验收审查 #5）。
-    const anchorValue = String(anchor.value || "").trim();
-    if (anchorValue && String(start.value || "").trim() === anchorValue) {
-      if (target.defaultStart) start.value = target.defaultStart;
-      if (target.defaultEnd) end.value = target.defaultEnd;
-    }
+  } else if (anchor && start && end && target.anchorApplied) {
+    // 离开订阅：撤回**程序**从账户证据写进去的锚点，否则真机锚点 2025-07-20 会变成
+    // 按量声明的 effective_start（验收审查 iteration 3 #5）。判据是「程序写过」这个
+    // 事实，不是值相等——值相等对没有锚点的组恒成立，会在每次 restep 时抹掉用户手改的
+    // 结束日期（同一份审查的 iteration 4 #1）。
+    if (target.defaultStart) start.value = target.defaultStart;
+    if (target.defaultEnd) end.value = target.defaultEnd;
+    target.anchorApplied = false;
   }
   // 只给可见步骤编号：服务商未知时是 1 2 3 4 5，路由已知时是 1 2 3。
   let step = 0;
@@ -2284,6 +2294,9 @@ function bindBillingDeclarationPanel() {
     }
     if (effectiveEnd > today) {
       return fail("结束日期不能晚于今天（北京时间）；声明不会扩展到未来记录。");
+    }
+    if (!relationshipKind) {
+      return fail("请选择计费方式：官方订阅 / 官方 API（按量）/ 组织承担。");
     }
     const subscription = relationshipKind === "official_subscription" ? billingSubscriptionInput() : { subscriptionName: null, amountMinor: null, currency: null };
     if (subscription.error) return fail(subscription.error);
@@ -2909,6 +2922,10 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     panel.hidden = true;
     prompt.hidden = true;
   };
+  // 钉在某个组上的旧资产候选（`renderBillingConfirmation` 挂的 `row.candidate`）：簇把逐模型
+  // 行折掉了，候选的证据行与「这不是我的套餐」必须跟着折进簇行——否则提示里说"另有 N 条旧版本
+  // 套餐记录待核对"，页面上却无处可点（验收审查 iteration 3 #2）。
+  const rowByGroupId = new Map(rows.filter((row) => row.group_id).map((row) => [row.group_id, row]));
   const clusterRowsOf = (cluster) => (cluster.models || []).map((m) => ({
     group_id: m.group_id, host: cluster.host,
     provider_id: cluster.provider_id || "<unknown>", model_id: m.model_id,
@@ -2920,10 +2937,6 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     candidate: (rowByGroupId.get(m.group_id) || {}).candidate || null,
     auto_verdict: cluster.auto_verdict,
   }));
-  // 钉在某个组上的旧资产候选（`renderBillingConfirmation` 挂的 `row.candidate`）：簇把逐模型
-  // 行折掉了，候选的证据行与「这不是我的套餐」必须跟着折进簇行——否则提示里说"另有 N 条旧版本
-  // 套餐记录待核对"，页面上却无处可点（验收审查 iteration 3 #2）。
-  const rowByGroupId = new Map(rows.filter((row) => row.group_id).map((row) => [row.group_id, row]));
   const clusterCandidatesOf = (cluster) => (cluster.group_ids || [])
     .map((id) => rowByGroupId.get(id))
     .filter((row) => row && row.candidate && row.candidate.status === "pending")

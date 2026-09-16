@@ -259,7 +259,9 @@ Cline 就是现成的验证对象：`metadata.modelId = anthropic/claude-sonnet-
 - `data-status` `unresolved_tokens` 13.61B → 5.0B。
 - `billing-groups --month 2026-09`（真机，最终形态）：**30 行 → 9 簇**
   - **2 程序判定（一键确认）**：`claude-code · anthropic`（Claude Pro，4.77B tokens，依据 `route.session-native + account.Claude Pro`）与 `codex · openai`（ChatGPT，2.24B，依据 `host.provider_reported + account.ChatGPT`）。
-  - **5 差一问**：deepseek / minimax / zhipu-glm（`vendor_shape` → 问"官方端点还是中转"）、claude-code 与 codex 的网关式命名（`gateway` → 同上）。共 ~3.1B tokens。
+  - **6 差一问**：deepseek / minimax / zhipu-glm（`vendor_shape` → 问"官方端点还是中转"）与三个网关式命名簇（`gateway` → 同上）。共 ~3.1B tokens。
+    （§11.4 #4 修好簇主键后，网关簇按厂商拆开：claude-code 的 `deepseek` 与 `zhipu-glm` 各成一行，
+    所以是 **10 簇**，不再是 9——拆开是对的，标签不再借第一组的厂商名。）
   - **2 需补充**：codex 的 `<unknown>` 与 minimax（无路由证据）。共 ~0.14B tokens。
 - 账户证据真机读数：`plan.label=Claude Pro`、`channel=apple_subscription`（由 `billingType` 推出）、`anchor_date=2025-07-20`（订阅锚点，即每月 20 日扣款——与用户"每月20美金、20日扣款"的描述一致）；DTO 中不含 email / accountUuid / organizationUuid / 令牌（真机输出扫描确认）。
 
@@ -277,4 +279,17 @@ Cline 就是现成的验证对象：`metadata.modelId = anthropic/claude-sonnet-
 | 6 | `evidence_ref` 在挂了旧候选时丢掉 `auto:` 依据链 | 程序判定 + 候选并存时，追溯性只剩候选 id | 两段都记；簇行的 target 也带上原组的 `candidate`，`source_candidate_id` 不再丢 |
 
 新增测试：Rust `auto_verdict_covers_conflict_api_key_and_cluster_arithmetic`（冲突 / 官方+ApiKey → `official_api` / 官方+无账户 → 问计费方式 / 账户厂商不匹配不套用 / 零 token 组不进列表 / 网关行按厂商拆簇 / 簇内 tokens 与分币金额等于各模型之和）；`verify-workbench-sources.mjs` 新增 8 条断言（含候选折进簇行与锚点撤回）；浏览器 mock 补 `conflict` 分支，使这类缺陷今后能被前端守卫抓到。
+
+### 11.5 修复的复验（iteration 4）
+
+对 §11.4 的六条修复再做一轮验收：**4 条 PASS、1 条 PARTIAL、1 条 PASS 但暴露新缺陷**，另加 3 条低危项。本轮全部处理：
+
+| 来源 | 问题 | 处理 |
+|---|---|---|
+| 复验 #5 | 我修 #5 时引入的新缺陷：撤回判据用"值相等"，而没有账户锚点的组里 `anchor` 只会被填成组首日，于是**每次 restep 都会把用户手改的结束日期抹回默认** | 改成"程序是否真的写过"标志：只有 `plan.anchor_date`（账户证据）落进 `start` 时才置 `anchorApplied`，撤回只看这个标志 |
+| 复验 #2 | 冲突/needs_input 行的计费方式仍默认「官方订阅」（`billing_mode` 为 null 时落到 else 分支），与 §4「无证据 → 不预选」冲突 | `<select>` 增加空占位项；预选只来自 `billing_mode`；未选时保存被前端拒绝并提示。路由先于计费方式判定（中转/仍不确定不需要计费方式） |
+| 复验 #3 | §11.4 #2 的收窄没有测试守——把 `account-time-bound`/`config-time-bound` 放回去不会有任何测试变红 | 新增两条事实（两种弱证据 + 官方 provider）断言 `one_question` 且 `route_state != official` |
+| 复验 #4 | 浏览器 mock 的簇主键仍只用 `billing_party`，与 Rust 不同键 | 同步为 `billing_party \|\| model_vendor \|\| "<unknown>"`；`rowByGroupId` 提到 `clusterRowsOf` 之前，消除 TDZ 依赖 |
+
+复验同时确认：真实数据下网关簇确实按厂商拆开（`claude-code|deepseek|gateway` 与 `claude-code|zhipu-glm|gateway`）；冲突短路返回的对象与常规路径同键，`clusters_of` 与前端都不会因 `billing_party: null` 出错；新增的 Rust 测试在删掉冲突短路或把簇主键改回 `billing_party` 时都会失败（两条缺陷各自被独立断言抓住）。
 

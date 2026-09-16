@@ -637,6 +637,11 @@ mod tests {
         insert("f-gw-zhipu", "claude-code", None, "openrouter/glm-5.3-flash", "inferred", "metered_estimate", 5000, 50, noon + 6);
         // 零 token 组不进列表。
         insert("f-zero", "claude-code", None, "gpt-5.6-luna", "missing", "metered_estimate", 0, 0, noon + 7);
+        // 弱于会话级的证据不能当「官方路由」：`account-time-bound`(6) / `config-time-bound`(5)
+        // 都低于 §2 要求的 `SessionNative`。谁把它们放回 `ROUTE_KNOWN_OFFICIAL`，这两行就会从
+        // 「问计费方式」变成一键订阅（验收审查 iteration 4 #3）。
+        insert("f-config-bound", "claude-code", Some("anthropic"), "claude-opus-4-1", "config-time-bound", "route-observed", 1000, 10, noon + 8);
+        insert("f-account-bound", "claude-code", Some("anthropic"), "claude-3-7-sonnet", "account-time-bound", "route-observed", 1000, 10, noon + 9);
         let mut accounts = std::collections::BTreeMap::new();
         // claude-code 的账户是 anthropic 订阅；minimax 那行没有账户证据，不套用。
         accounts.insert("claude-code".to_string(), AccountEvidence {
@@ -670,6 +675,12 @@ mod tests {
         assert_eq!((api_key["state"].clone(), api_key["relationship_kind"].clone(), api_key["billing_mode"].clone()),
             (json!("determined"), json!("official_api"), json!("metered")),
             "an official route with an API-key account is official API, never a subscription: {api_key}");
+        for model in ["claude-opus-4-1", "claude-3-7-sonnet"] {
+            let weak = verdict_of(model);
+            assert_eq!(weak["state"], json!("one_question"),
+                "evidence weaker than session-native must never produce a determined verdict: {model} -> {weak}");
+            assert_ne!(weak["route_state"], json!("official"), "{model} must not count as an official route");
+        }
         let no_account = verdict_of("MiniMax-M3");
         assert_eq!((no_account["state"].clone(), no_account["question"].clone()),
             (json!("one_question"), json!("billing_mode")),

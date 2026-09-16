@@ -303,8 +303,15 @@ ok(elements["ov-billing-backdrop"].hidden === false && elements["ov-billing-decl
   "弹窗打开时显示真实遮罩层，头部规模信息单独一行");
 ok(elements["ov-billing-scope-text"].textContent.includes("2 个模型（gpt-5.6-sol 等）") && elements["ov-billing-scope-text"].textContent.includes(monthStart + " – " + today),
   "作用范围一句话列出模型数与起止日期");
+ok(elements["ov-billing-mode"].value === "" && elements["ov-billing-subscription-fields"].hidden === true,
+  "没有账户证据时不预选计费方式（规格 §4「无证据 → 不预选」），订阅字段也不出现");
+await elements["ov-billing-save"].onclick();
+ok(elements["ov-billing-preview"].textContent.includes("请选择计费方式") && !billingCalls.some((c) => c.command === "billing_candidate_impact_preview"),
+  "未选计费方式时前端直接拒绝，不发预览请求");
+elements["ov-billing-mode"].value = "subscription";
+elements["ov-billing-mode"].onchange();
 ok(elements["ov-billing-subscription-fields"].hidden === false && elements["ov-billing-relationship-effect"].textContent.includes("移出按量估算"),
-  "默认官方订阅：展示套餐名/月费/币种字段与结果说明");
+  "选择官方订阅后展示套餐名/月费/币种字段与结果说明");
 ok(elements["ov-billing-subscription-amount"].value === "20.00" && elements["ov-billing-subscription-currency"].value === "USD",
   "有旧资产候选时预填其套餐金额/币种供核对");
 elements["ov-billing-subscription-amount"].value = "";

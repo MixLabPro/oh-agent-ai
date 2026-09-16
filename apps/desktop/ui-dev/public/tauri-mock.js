@@ -359,7 +359,10 @@
         const clusters = new Map();
         for (const g of groups) {
           const v = verdictOf(g);
-          const key = [g.host, v.billing_party || "<unknown>", v.route_state, v.state, g.effective_start, g.effective_end].join("|");
+          // 与 billing_preview.rs::clusters_of 同键：计费方为空时用 model_vendor 补位，
+          // 否则不同厂商的网关模型会被并成一行。
+          const key = [g.host, v.billing_party || v.model_vendor || "<unknown>", v.route_state, v.state,
+            g.effective_start, g.effective_end].join("|");
           if (!clusters.has(key)) {
             clusters.set(key, { cluster_id: key, host: g.host, billing_party: v.billing_party, model_vendor: v.model_vendor,
               provider_id: g.provider_id, evidence_basis: g.evidence_basis, pricing_basis: g.pricing_basis,
