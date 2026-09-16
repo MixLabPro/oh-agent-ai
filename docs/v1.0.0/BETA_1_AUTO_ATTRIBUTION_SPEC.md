@@ -257,5 +257,9 @@ Cline 就是现成的验证对象：`metadata.modelId = anthropic/claude-sonnet-
 
 - claude-code 本月 25,323 条事实：12,272 → `session-native / anthropic / route-observed`，12,916 → `inferred`，135 `<synthetic>` → `missing`；归属冲突 0。
 - `data-status` `unresolved_tokens` 13.61B → 5.0B。
-- `billing-groups --month 2026-09`：30 行 → 11 簇（2 程序判定：claude-code Claude Pro 4.7B、codex ChatGPT 2.2B；6 差一问；3 需补充）。
+- `billing-groups --month 2026-09`（真机，最终形态）：**30 行 → 9 簇**
+  - **2 程序判定（一键确认）**：`claude-code · anthropic`（Claude Pro，4.77B tokens，依据 `route.session-native + account.Claude Pro`）与 `codex · openai`（ChatGPT，2.24B，依据 `host.provider_reported + account.ChatGPT`）。
+  - **5 差一问**：deepseek / minimax / zhipu-glm（`vendor_shape` → 问"官方端点还是中转"）、claude-code 与 codex 的网关式命名（`gateway` → 同上）。共 ~3.1B tokens。
+  - **2 需补充**：codex 的 `<unknown>` 与 minimax（无路由证据）。共 ~0.14B tokens。
+- 账户证据真机读数：`plan.label=Claude Pro`、`channel=apple_subscription`（由 `billingType` 推出）、`anchor_date=2025-07-20`（订阅锚点，即每月 20 日扣款——与用户"每月20美金、20日扣款"的描述一致）；DTO 中不含 email / accountUuid / organizationUuid / 令牌（真机输出扫描确认）。
 
