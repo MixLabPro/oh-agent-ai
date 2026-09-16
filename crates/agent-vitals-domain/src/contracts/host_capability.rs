@@ -42,6 +42,37 @@ pub struct HostProfile {
     pub session_store: bool,
     /// 日/月折叠的**产出能力**；`None` = 声明缺席（合法状态，不是遗漏）。
     pub fold: Option<FoldOutput>,
+    /// 归因面人格（自动归因 §10.6）：判定器读声明，不比宿主名字。
+    pub attribution: AttributionProfile,
+}
+
+/// 归因面的宿主人格（自动归因规格 §10.6）。
+///
+/// **宿主强相关的判定事实住在这里，不住在 runtime**：`billing_preview::auto_verdict`
+/// 原来写 `host == "codex"` / `host != "workbuddy"`——runtime 里出现宿主名字，就是
+/// 把适配器知识漏进了机器层（用户 2026-09-16 指出）。声明搬到 `HostProfile` 后，
+/// 判定器只做合成，新宿主接入 = 填一行声明，不改判定器。
+///
+/// 与其余 `HostProfile` 字段同纪律：**只声明不证明**——声明说"该宿主具备某性质"，
+/// 由宿主适配器的事实产出兑现（`tests/` 与 golden 钉住）。
+#[derive(Clone, Copy, Debug)]
+pub struct AttributionProfile {
+    /// 宿主在事实里**自报** provider（codex 的 `model_provider`）时，配合账户订阅证据
+    /// 即可判「官方订阅」——请求确实打在该厂商后端。claude-code 为 `false`：它没有
+    /// 自报 provider，`provider_id` 是从请求 ID 形状推断出来的（§2 L1），不能与
+    /// 账户证据合成"订阅覆盖"。
+    pub provider_reported_implies_official: bool,
+    /// 金额面恒为宿主自报的积分 / 账单（workbuddy）：既不进按量估算，也不参与订阅
+    /// 覆盖判定，更不冒充逐模型 token 重计价（§0 表 E）。
+    pub credits_only: bool,
+}
+
+impl AttributionProfile {
+    /// 最保守的一份：不做任何特殊处理。未知宿主 fail-closed 到它。
+    pub const NEUTRAL: AttributionProfile = AttributionProfile {
+        provider_reported_implies_official: false,
+        credits_only: false,
+    };
 }
 
 /// 降级逐条声明——reason 挂在规则上而非宿主上（一条 reason 盖全部规则撑不过
@@ -97,6 +128,7 @@ pub static HOSTS: &[HostProfile] = &[
         degraded_rules: &[],
         session_store: true,
         fold: Some(FoldOutput::TokenBuckets),
+        attribution: AttributionProfile::NEUTRAL,
     },
     HostProfile {
         id: "codex",
@@ -110,6 +142,8 @@ pub static HOSTS: &[HostProfile] = &[
         degraded_rules: &[],
         session_store: true,
         fold: Some(FoldOutput::TokenBuckets),
+        // 自报 provider（`model_provider`）+ 账户订阅 → 官方订阅（§2 L2）。
+        attribution: AttributionProfile { provider_reported_implies_official: true, credits_only: false },
     },
     HostProfile {
         id: "claude-code",
@@ -137,6 +171,7 @@ pub static HOSTS: &[HostProfile] = &[
         ],
         session_store: true,
         fold: Some(FoldOutput::TokenBuckets),
+        attribution: AttributionProfile::NEUTRAL,
     },
     HostProfile {
         id: "workbuddy",
@@ -166,6 +201,8 @@ pub static HOSTS: &[HostProfile] = &[
         // 无日/月折叠机制（会话审计的成本块是宿主已计费 credit 求和，不重计价）；
         // M4（可选演练）会把这行改成 `Some(HostBillTotals)`。
         fold: None,
+        // 积分制：金额面是宿主自报的积分/账单，不进按量与订阅判定（§0 表 E）。
+        attribution: AttributionProfile { provider_reported_implies_official: false, credits_only: true },
     },
 ];
 
@@ -174,6 +211,12 @@ pub static HOSTS: &[HostProfile] = &[
 /// 条款 2）。
 pub fn host_profile(host_id: &str) -> Option<&'static HostProfile> {
     HOSTS.iter().find(|h| h.id == host_id)
+}
+
+/// 归因面人格。**未知宿主 fail-closed 到 `NEUTRAL`**（不做任何特殊处理）：判定器
+/// 拿不到声明时宁可少判，也不按名字猜（自动归因 §10.6）。
+pub fn attribution_profile(host_id: &str) -> AttributionProfile {
+    host_profile(host_id).map(|h| h.attribution).unwrap_or(AttributionProfile::NEUTRAL)
 }
 
 /// `agent-vitals hosts --json` 的负载——`HOSTS` 行的忠实序列化，供 G1
@@ -205,6 +248,10 @@ pub fn hosts_json() -> serde_json::Value {
                 "degraded_rules": degraded,
                 "session_store": h.session_store,
                 "fold": h.fold.map(FoldOutput::as_str),
+                "attribution": {
+                    "provider_reported_implies_official": h.attribution.provider_reported_implies_official,
+                    "credits_only": h.attribution.credits_only,
+                },
             })
         })
         .collect();
@@ -240,6 +287,21 @@ pub fn degrade_rule_outcomes(host_id: &str, outcomes: &mut [(&'static str, RuleO
         }
     }
 }
+
+
+    /// 归因声明是**宿主人格**的一部分：未知宿主 fail-closed 到最保守的一份（不做任何
+    /// 特殊处理），已注册宿主按声明生效（codex 自报即官方、workbuddy 恒积分制）。
+    #[test]
+    fn attribution_profile_declares_the_host_facts_and_fails_closed() {
+        assert!(attribution_profile("codex").provider_reported_implies_official);
+        assert!(attribution_profile("workbuddy").credits_only);
+        assert!(!attribution_profile("claude-code").provider_reported_implies_official,
+            "claude-code has no self-reported provider — its provider_id is inferred from id shapes");
+        assert!(!attribution_profile("claude-code").credits_only);
+        assert_eq!(attribution_profile("nope").credits_only, AttributionProfile::NEUTRAL.credits_only);
+        assert_eq!(attribution_profile("nope").provider_reported_implies_official,
+            AttributionProfile::NEUTRAL.provider_reported_implies_official);
+    }
 
 #[cfg(test)]
 mod tests {

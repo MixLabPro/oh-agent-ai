@@ -332,3 +332,52 @@ claude-code  shengsuanyun.com  one_question  relay_config  models=11  tokens=276
 **真机提示**：本机 claude-code 的 Claude Pro 声明（`evidence_ref=auto:route.session-native+account.Claude Pro`）
 正是这种形状——若那批用量实际也经胜算云，该声明需要重新核对。
 
+### 11.7 端点证据跨宿主化 + 宿主人格归位（A12 泛化，2026-09-16）
+
+用户两条意见驱动：
+
+> 「其他宿主和模型供应商应该也有类似的逻辑，这个规则不仅仅在 claude」
+> 「agent-vitals-runtime 写了很多 adapter 层的逻辑吗？有一些 host 强相关的逻辑不是应该在宿主层处理吗」
+
+**第一件：端点证据跨宿主化。** 真机勘测（只读）证明每个宿主都有端点配置，形状各不相同：
+
+| 宿主 | 文件 | 本机实测 |
+|---|---|---|
+| claude-code | `~/.claude/settings.json` `env` | `router.shengsuanyun.com/api`（中转） |
+| dsh | `~/.dsh/settings.yaml` | `agent-default-model.provider: deepseek-official`，但 **LLM 段 `baseURL` = 胜算云中转**；`web-search-deepseek` 段另有同一个中转（搜索，不算 LLM） |
+| workbuddy | `~/.workbuddy/models.json` | 配了三个端点：`api.minimaxi.com` / `beta-router.shengsuanyun.com` / `router.shengsuanyun.com` |
+| pi | `~/.pi/agent/models-store.json` | 每模型 `baseUrl`（本机 `chatgpt.com`） |
+| codex | `~/.codex/config.toml` | **无** `model_providers` 段 → 官方路径，诚实返回"无证据" |
+| hermes | `.env` | **凭据文件，整体不读**（§10.1 定案） |
+| cline | `~/.cline/data/settings/providers.json` | 只有服务商**名**（`lastUsedProvider: shengsuanyun`）没有 URL——名字 ≠ 中转（可能是自建），故本期不用；留待"未知服务商名"的决策 |
+
+读取器落 `crates/agent-vitals-hosts/src/sources/endpoint_evidence.rs`（跨宿主 I/O 层，
+路径含 `/sources` 落进既有的 `io_tokens_only_appear_under_sources` 守卫）；判定器只吃中立的
+`EndpointEvidence`，不认识任何宿主的文件格式。每个读取器**白名单取键**：凭据就挨在同文件里
+（claude 的 `ANTHROPIC_AUTH_TOKEN`、workbuddy 的 `apiKey`、pi 的 `maxTokens`、cline 的 `tokenSource`），
+读取器连值都不复制，测试注入假令牌 + **穷举解构**（新增字段会编译失败）+ `{:?}` 断言。
+
+多端点诚实：配置里列了多个端点时判定器**不替用户挑**（workbuddy 本机就有三个），
+只给 `relay_config` + 依据 `config.endpoint.multiple`、计费方留空。
+
+**第二件：宿主强相关规则搬回宿主层。** 用户点出的正是本仓库自己的架构纪律
+（`HostProfile` = 宿主人格声明，`hosts/<h>/capability.rs` 为落点）。`billing_preview` 里
+原有的两处宿主名字判断已删除：
+
+| 原写法 | 现写法 |
+|---|---|
+| `groups.retain(\|g\| g["host"] != "workbuddy" && …)` | `AttributionProfile::credits_only` 声明 |
+| `("provider_reported", Subscription) if host == "codex"` | `AttributionProfile::provider_reported_implies_official` 声明 |
+
+`AttributionProfile { provider_reported_implies_official, credits_only }` 进
+`contracts/host_capability.rs::HostProfile`（§10.6 早已写明它该落在这里），随
+`hosts --json` 序列化——**双实现契约**：Python `host_capability.py::HOSTS` 同步加字段，
+`test_cli_matrix::test_hosts_json_byte_parity` 逐字节比对。未知宿主 fail-closed 到
+`NEUTRAL`（不做任何特殊处理）。新增宿主接入 = 填一行声明，不改判定器。
+
+**仍留在 runtime 的宿主名字**（本期未动，同一纪律的欠账，逐个记在这里）：
+`mcp/cost_breakdown.rs:405-416`（逐宿主计价语义）、`mcp/data_status.rs:252-258`（逐宿主状态语义）、
+`price_discovery.rs:40`（`ROUTE_UNCONFIRMED_EXEMPT_HOSTS`）、`sql_sync.rs:136`（provider→host 映射）、
+`skills/scanner.rs:206`（openclaw 特例）、`skills/inventory.rs:176/203/214`。它们与本次改动无交集，
+但都是同一个"声明该住宿主层"的形状，宜按 `HostProfile` 逐条收编。
+

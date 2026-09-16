@@ -73,6 +73,7 @@ HOSTS = (
         "degraded_rules": [],
         "session_store": True,
         "fold": "token_buckets",
+        "attribution": {"provider_reported_implies_official": False, "credits_only": False},
     },
     {
         "id": "codex",
@@ -86,6 +87,7 @@ HOSTS = (
         "degraded_rules": [],
         "session_store": True,
         "fold": "token_buckets",
+        "attribution": {"provider_reported_implies_official": True, "credits_only": False},
     },
     {
         "id": "claude-code",
@@ -105,6 +107,7 @@ HOSTS = (
         ],
         "session_store": True,
         "fold": "token_buckets",
+        "attribution": {"provider_reported_implies_official": False, "credits_only": False},
     },
     {
         "id": "workbuddy",
@@ -129,6 +132,7 @@ HOSTS = (
         # 无日/月折叠机制（会话审计的成本块是宿主已计费 credit 求和，不重计价）；
         # M4（可选演练）会把这行改成 "host_bill_totals"。
         "fold": None,
+        "attribution": {"provider_reported_implies_official": False, "credits_only": True},
     },
 )
 

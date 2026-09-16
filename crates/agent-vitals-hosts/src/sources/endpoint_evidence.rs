@@ -1,0 +1,479 @@
+//! 跨宿主的「端点 / 配置证据」读取器（自动归因规格 A12、§10.2 层②）。
+//!
+//! **为什么在这里**：会话日志普遍不记端点——claude-code 实测 44,827 条 deepseek 记录里
+//! `requestId` 只出现 176 次，日志正文里的中转主机名全是**对话内容**（§10.1 表格里
+//! claude-code 那格写的就是"启动环境变量，日志不记"）。能回答"这批用量打到谁的端点"
+//! 的只有**配置**。而每个宿主的配置形状都不一样，所以这里是「按宿主声明用哪个文件、
+//! 哪个字段」的提取器层——判定器（`billing_preview::auto_verdict`）只吃中立结构，
+//! 不认识任何宿主的文件格式。
+//!
+//! **隐私边界**（与 `hosts/*/sources/account.rs` 同纪律）：每个读取器**白名单取键**。
+//! 各宿主的凭据就挨在同一个文件里（claude `env.ANTHROPIC_AUTH_TOKEN`、workbuddy
+//! `models[].apiKey`、pi `maxTokens`、cline `providers.*.tokenSource`），读取器连它们的值
+//! 都不复制出来；`EndpointEvidence` 没有放凭据的槽位。**Hermes 的 `.env` 整体不读**
+//! （§10.1 已定案：凭据文件，不读），所以 hermes 在这里恒为 `None`。
+//!
+//! **证据强度一律 `ConfigCurrent`(4)**：配置说的是"现在"，历史事实可能用另一个端点。
+//! 所以它只能把"官方还是中转"变成一次确认，永远不能单独判定归属（P3）。
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use agent_vitals_provider::EvidenceBasis;
+use serde_json::Value;
+
+/// 一个宿主在配置面暴露出来的端点证据。**能带出去的只有这些字段**——凭据连槽位都没有。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointEvidence {
+    pub host: String,
+    /// 选中的基址（多个端点时是哪一个由各读取器的语义决定）。
+    pub base_url: Option<String>,
+    /// 选中基址的主机名。
+    pub endpoint_host: Option<String>,
+    /// 配置里出现过的**全部**端点主机（去重升序）。多于一个时，判定器不会替用户挑一个
+    /// ——它只知道"配置里有中转"，不知道这批用量用的是哪一个。
+    pub endpoint_hosts: Vec<String>,
+    /// 配置里显式声明的服务商名（dsh `agent-default-model.provider`）。**只作展示**：
+    /// 实测本机 dsh 写 `deepseek-official` 而基址是中转，名字会说谎，主机名不会。
+    pub provider_name: Option<String>,
+    /// 模型映射里带 `vendor/model` 前缀的条目：官方端点不需要厂商 id，中转才需要
+    /// （用户 2026-09-16 指出）。
+    pub gateway_named_models: Vec<String>,
+    pub evidence_basis: EvidenceBasis,
+    pub source: String,
+}
+
+impl EndpointEvidence {
+    fn new(host: &str, source: String) -> Self {
+        EndpointEvidence {
+            host: host.to_string(),
+            base_url: None,
+            endpoint_host: None,
+            endpoint_hosts: Vec::new(),
+            provider_name: None,
+            gateway_named_models: Vec::new(),
+            evidence_basis: EvidenceBasis::ConfigCurrent,
+            source,
+        }
+    }
+
+    /// 收一个候选基址：记进 `endpoint_hosts`，并让**第一个**成为 `base_url`/`endpoint_host`
+    /// （各读取器按语义决定顺序；单端点的宿主自然只有一个）。
+    fn push_endpoint(&mut self, url: &str) {
+        let Some(host) = host_of(url) else { return };
+        if self.endpoint_host.is_none() {
+            self.base_url = Some(url.trim().to_string());
+            self.endpoint_host = Some(host.clone());
+        }
+        if !self.endpoint_hosts.contains(&host) {
+            self.endpoint_hosts.push(host);
+        }
+    }
+
+    fn observe_model(&mut self, model: &str) {
+        let model = model.trim();
+        if model.contains('/') && !self.gateway_named_models.iter().any(|m| m == model) {
+            self.gateway_named_models.push(model.to_string());
+        }
+    }
+
+    /// 证据是否为空——没有端点也没有前缀痕迹的条目不进判定（不猜）。
+    fn has_signal(&self) -> bool {
+        !self.endpoint_hosts.is_empty() || !self.gateway_named_models.is_empty() || self.provider_name.is_some()
+    }
+
+    fn finish(mut self) -> Option<Self> {
+        self.endpoint_hosts.sort();
+        self.endpoint_hosts.dedup();
+        self.gateway_named_models.sort();
+        if !self.has_signal() {
+            return None;
+        }
+        Some(self)
+    }
+}
+
+/// 取 URL 的主机名：去 scheme、去路径、去端口（仅全数字）、去尾点、转小写。
+fn host_of(url: &str) -> Option<String> {
+    let mut value = url.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        return None;
+    }
+    if let Some((_, rest)) = value.split_once("://") {
+        value = rest.to_string();
+    }
+    // userinfo（`https://user:pass@host/`）只取 `@` 之后——凭据不进结构。
+    if let Some((_, rest)) = value.rsplit_once('@') {
+        value = rest.to_string();
+    }
+    value = value.split('/').next().unwrap_or(&value).to_string();
+    if let Some((host, port)) = value.rsplit_once(':') {
+        if port.chars().all(|c| c.is_ascii_digit()) {
+            value = host.to_string();
+        }
+    }
+    let value = value.trim_end_matches('.').to_string();
+    if value.is_empty() || !value.contains('.') {
+        return None;
+    }
+    Some(value)
+}
+
+/// 中转/服务商的展示标签 = 注册域（`router.shengsuanyun.com` → `shengsuanyun.com`）。
+///
+/// 返回 `Option`：**认不出就返回 `None`，绝不编一个出来**（验收审查 iteration 5 #1：
+/// 早期版本把 `relay.co.uk` 判成 `co.uk`、把 `10.0.0.7` 判成 `0.7`，用户确认后会把
+/// 这个字符串写成声明的 provider_id）。这里不是公共后缀表（PSL），只是一张
+/// 「二级公共后缀」小表 + IP 拒判；覆盖不到的后缀宁可不给标签，让上层只显示主机名。
+pub fn relay_label_of(host: &str) -> Option<String> {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 2 {
+        return None;
+    }
+    // 字面 IPv4（也涵盖 `10.0.0.7` 这类内网地址）：没有"注册域"可言。
+    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit())) {
+        return None;
+    }
+    // 形如 `com.cn` / `co.uk` / `ne.jp` 的公共后缀：再往前取一层才是注册域。
+    const SECOND_LEVEL: [&str; 12] = ["com", "net", "org", "gov", "edu", "co", "ac", "ne", "or", "go", "in", "com"];
+    let last = labels[labels.len() - 1];
+    let second = labels[labels.len() - 2];
+    let take = if last.len() == 2 && SECOND_LEVEL.contains(&second) { 3 } else { 2 };
+    if labels.len() < take {
+        // 例如裸 `co.uk`：候选本身就是公共后缀 → 不给标签。
+        return None;
+    }
+    let candidate = labels[labels.len() - take..].join(".");
+    // 候选仍是一个公共后缀（`co.uk`、`com.cn`）→ 拒判，不冒充付款方。
+    if candidate.split('.').count() == 2
+        && candidate.split('.').next().is_some_and(|first| SECOND_LEVEL.contains(&first))
+        && candidate.split('.').nth(1).is_some_and(|tail| tail.len() == 2)
+    {
+        return None;
+    }
+    Some(candidate)
+}
+
+/// 汇总所有宿主的端点证据。读不到的宿主**不进 map**（判定器按"没有证据"处理）。
+pub fn read_all(home: &Path) -> BTreeMap<String, EndpointEvidence> {
+    let mut out = BTreeMap::new();
+    for reader in [
+        read_claude as fn(&Path) -> Option<EndpointEvidence>,
+        read_codex,
+        read_pi,
+        read_dsh,
+        read_workbuddy,
+    ] {
+        if let Some(evidence) = reader(home) {
+            out.insert(evidence.host.clone(), evidence);
+        }
+    }
+    out
+}
+
+/// **claude-code**：`~/.claude/settings.json`（`settings.local.json` 覆盖）的 `env`。
+/// 只读 5 个白名单键——同一个 `env` 里就挨着 `ANTHROPIC_AUTH_TOKEN`。
+pub fn read_claude(home: &Path) -> Option<EndpointEvidence> {
+    const ALLOWED: [&str; 5] = [
+        "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    ];
+    const MODEL_KEYS: [&str; 4] = [
+        "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    ];
+    let mut evidence = EndpointEvidence::new("claude-code", "~/.claude/settings.json env".to_string());
+    let mut source_file = None;
+    for name in ["settings.json", "settings.local.json"] {
+        let path = home.join(".claude").join(name);
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(doc) = serde_json::from_str::<Value>(&text) else { continue };
+        let Some(block) = doc.get("env").and_then(Value::as_object) else { continue };
+        // 白名单投影：其余键（尤其凭据）连值都不复制出来。
+        let picked: Vec<(&str, &str)> = ALLOWED.iter()
+            .filter_map(|k| block.get(*k).and_then(Value::as_str).map(|v| (*k, v.trim())))
+            .filter(|(_, v)| !v.is_empty())
+            .collect();
+        for (key, value) in &picked {
+            if *key == "ANTHROPIC_BASE_URL" {
+                evidence.base_url = None;
+                evidence.endpoint_host = None;
+                evidence.endpoint_hosts.clear();
+                evidence.push_endpoint(value);
+            } else if MODEL_KEYS.contains(key) {
+                evidence.observe_model(value);
+            }
+        }
+        source_file = Some(name.to_string());
+    }
+    evidence.source = format!("~/.claude/{} env", source_file.unwrap_or_else(|| "settings.json".into()));
+    evidence.finish()
+}
+
+/// **codex**：`~/.codex/config.toml` 的 `[model_providers.<name>] base_url`。
+/// 本机实测没有这一段（走官方路径），读不到就是 `None`——不猜。TOML 只按行取窄形状
+/// （不进 toml 依赖：本 crate 的供应链约束不允许；形状漂移时读不到比读错好）。
+pub fn read_codex(home: &Path) -> Option<EndpointEvidence> {
+    let path = home.join(".codex").join("config.toml");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let mut evidence = EndpointEvidence::new("codex", "~/.codex/config.toml".to_string());
+    let mut in_providers = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_providers = line.starts_with("[model_providers.");
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let (key, value) = (key.trim(), value.trim().trim_matches('"'));
+        if in_providers && key == "base_url" {
+            evidence.push_endpoint(value);
+        } else if !in_providers && key == "model" {
+            evidence.observe_model(value);
+        }
+    }
+    evidence.finish()
+}
+
+/// **pi**：`~/.pi/agent/models-store.json` 的 `models[].baseUrl` 与 `models[].id`。
+pub fn read_pi(home: &Path) -> Option<EndpointEvidence> {
+    let path = home.join(".pi").join("agent").join("models-store.json");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let doc: Value = serde_json::from_str(&text).ok()?;
+    let mut evidence = EndpointEvidence::new("pi", "~/.pi/agent/models-store.json".to_string());
+    for (provider, spec) in doc.as_object()? {
+        // provider 名本身就是"经哪一家"的痕迹，但它不是主机名，只作展示。
+        if evidence.provider_name.is_none() {
+            evidence.provider_name = Some(provider.clone());
+        }
+        for model in spec.get("models").and_then(Value::as_array).into_iter().flatten() {
+            if let Some(url) = model.get("baseUrl").and_then(Value::as_str) {
+                evidence.push_endpoint(url);
+            }
+            if let Some(id) = model.get("id").and_then(Value::as_str) {
+                evidence.observe_model(id);
+            }
+        }
+    }
+    evidence.finish()
+}
+
+/// **dsh**：`~/.dsh/settings.yaml` 里 **LLM 段**（段名以 `llm-` 开头）的 `baseURL` 与
+/// `models[].id`；`agent-default-model.provider` 作展示名。段名启发式的理由：本机实测
+/// `web-search-deepseek` 段也带 `baseURL`（同一个中转），但那是搜索不是 LLM，
+/// 把它算进来会给出错误的端点。`.credentials.yaml` **整体不读**。
+pub fn read_dsh(home: &Path) -> Option<EndpointEvidence> {
+    let path = home.join(".dsh").join("settings.yaml");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let mut evidence = EndpointEvidence::new("dsh", "~/.dsh/settings.yaml".to_string());
+    let mut section = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // 顶格 `name:` = 段；缩进的 `key: value` = 段内条目。
+        let indent = line.len() - line.trim_start().len();
+        // YAML 列表项写作 `- key: value`（dsh 的 `models:` 就是），前缀要剥掉，
+        // 否则 `- id: …` 会被当成键名 `- id`，带前缀的模型 id 一个都收不到。
+        let trimmed = trimmed.strip_prefix("- ").unwrap_or(trimmed).trim_start();
+        let (key, value) = match trimmed.split_once(':') {
+            Some((k, v)) => (k.trim(), v.trim().trim_matches('"')),
+            None => continue,
+        };
+        if indent == 0 {
+            section = key.to_string();
+            continue;
+        }
+        let in_llm = section.starts_with("llm-");
+        if in_llm && key == "baseURL" {
+            evidence.push_endpoint(value);
+        } else if in_llm && key == "id" {
+            evidence.observe_model(value);
+        } else if section == "agent-default-model" && key == "provider" {
+            evidence.provider_name = Some(value.to_string());
+        } else if section == "agent-default-model" && key == "model" {
+            evidence.observe_model(value);
+        }
+    }
+    evidence.finish()
+}
+
+/// **workbuddy**：`~/.workbuddy/models.json` 的 `[].url`（可配置多个服务商）。
+/// `apiKey` 与它同一个对象——白名单取键，凭据不进结构。
+pub fn read_workbuddy(home: &Path) -> Option<EndpointEvidence> {
+    let path = home.join(".workbuddy").join("models.json");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let doc: Value = serde_json::from_str(&text).ok()?;
+    let mut evidence = EndpointEvidence::new("workbuddy", "~/.workbuddy/models.json".to_string());
+    for entry in doc.as_array().into_iter().flatten() {
+        if let Some(url) = entry.get("url").and_then(Value::as_str) {
+            evidence.push_endpoint(url);
+        }
+        if let Some(model) = entry.get("model").and_then(Value::as_str) {
+            evidence.observe_model(model);
+        }
+    }
+    evidence.finish()
+}
+
+// **hermes**：`.env` 是凭据文件，§10.1 已定案**整体不读**——hermes 在这里恒为 `None`。
+// 刻意不写 reader 函数，也没有 `read_hermes`：新增宿主时对着 `read_all` 的那张表想一遍
+// "这个宿主的端点在哪个文件、那个文件里还有没有凭据"。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn home(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("av-endpoint-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(home: &Path, rel: &str, body: &str) {
+        let path = home.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// claude：白名单投影；同一个 env 里的令牌绝不进结构（P1）。**穷举解构**是本测试的
+    /// 关键：结构新增字段会在这里编译失败（验收审查 iteration 5 #4：只断言"投影字段里
+    /// 没有令牌"抓不到"结构里多了个令牌字段"）。
+    #[test]
+    fn claude_reads_only_whitelisted_keys_and_never_the_token() {
+        let h = home("claude");
+        write(&h, ".claude/settings.json", r#"{
+          "env": {
+            "ANTHROPIC_BASE_URL": "https://router.shengsuanyun.com/api",
+            "ANTHROPIC_MODEL": "deepseek/deepseek-v4-pro-0813",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek/deepseek-v4-flash",
+            "ANTHROPIC_AUTH_TOKEN": "sk-SECRET-DO-NOT-LEAK",
+            "ANTHROPIC_API_KEY": "sk-ANOTHER-SECRET",
+            "OTHER": "x"
+          }, "model": "sonnet" }"#);
+        let e = read_claude(&h).expect("evidence");
+        let EndpointEvidence {
+            host, base_url, endpoint_host, endpoint_hosts, provider_name, gateway_named_models,
+            evidence_basis, source,
+        } = e;
+        assert_eq!(host, "claude-code");
+        assert_eq!(base_url.as_deref(), Some("https://router.shengsuanyun.com/api"));
+        assert_eq!(endpoint_host.as_deref(), Some("router.shengsuanyun.com"));
+        assert_eq!(endpoint_hosts, vec!["router.shengsuanyun.com"]);
+        assert_eq!(provider_name, None);
+        assert_eq!(gateway_named_models, vec!["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro-0813"]);
+        assert_eq!(evidence_basis, EvidenceBasis::ConfigCurrent);
+        assert!(source.contains("settings.json"));
+        let debug = format!("{:?}", read_claude(&h).unwrap());
+        for forbidden in ["SECRET", "sk-", "AUTH_TOKEN", "API_KEY"] {
+            assert!(!debug.contains(forbidden), "leaked {forbidden}: {debug}");
+        }
+        let _ = std::fs::remove_dir_all(&h);
+    }
+
+    #[test]
+    fn claude_local_settings_override_and_missing_config_is_none() {
+        let h = home("claude-local");
+        assert!(read_claude(&h).is_none(), "no config → None, never a guess");
+        write(&h, ".claude/settings.json", r#"{"env":{"ANTHROPIC_BASE_URL":"https://api.deepseek.com/v1"}}"#);
+        write(&h, ".claude/settings.local.json", r#"{"env":{"ANTHROPIC_BASE_URL":"https://router.shengsuanyun.com/api"}}"#);
+        let e = read_claude(&h).unwrap();
+        assert_eq!(e.endpoint_host.as_deref(), Some("router.shengsuanyun.com"), "local overrides global");
+        let _ = std::fs::remove_dir_all(&h);
+    }
+
+    /// codex：只有 `[model_providers.*]` 段里的 `base_url` 算端点；本机没有这一段 → None。
+    #[test]
+    fn codex_reads_model_providers_section_only() {
+        let h = home("codex");
+        write(&h, ".codex/config.toml", "model = \"gpt-5.6-terra\"\n\n[projects.\"/tmp/x\"]\ntrust_level = \"trusted\"\n");
+        assert!(read_codex(&h).is_none(), "no model_providers → no endpoint evidence");
+        write(&h, ".codex/config.toml", r#"model = "deepseek/deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.example.com/v1"
+env_key = "RELAY_KEY"
+"#);
+        let e = read_codex(&h).unwrap();
+        assert_eq!(e.endpoint_host.as_deref(), Some("relay.example.com"), "only the providers section counts");
+        assert_eq!(e.gateway_named_models, vec!["deepseek/deepseek-v4-flash"]);
+        let _ = std::fs::remove_dir_all(&h);
+    }
+
+    /// pi：`models[].baseUrl` + `models[].id`；`maxTokens` 之类的同对象字段不进结构。
+    #[test]
+    fn pi_reads_model_base_urls_and_ids() {
+        let h = home("pi");
+        write(&h, ".pi/agent/models-store.json", r#"{"openai-codex":{"models":[
+          {"id":"gpt-5.3-codex-spark","name":"Spark","baseUrl":"https://chatgpt.com/backend-api","maxTokens":128000},
+          {"id":"zhipu/glm-5.3","name":"GLM","baseUrl":"https://open.bigmodel.cn/api"}]}}"#);
+        let e = read_pi(&h).unwrap();
+        assert_eq!(e.provider_name.as_deref(), Some("openai-codex"));
+        assert_eq!(e.endpoint_hosts, vec!["chatgpt.com", "open.bigmodel.cn"]);
+        assert_eq!(e.gateway_named_models, vec!["zhipu/glm-5.3"]);
+        let debug = format!("{:?}", e);
+        assert!(!debug.contains("maxTokens"), "{debug}");
+        let _ = std::fs::remove_dir_all(&h);
+    }
+
+    /// dsh：只认 **LLM 段**（`llm-*`）的 baseURL。本机 `web-search-deepseek` 段也带同一个
+    /// 中转基址，但那是搜索不是 LLM——把它算进来会给出错误的端点。
+    #[test]
+    fn dsh_reads_llm_sections_only() {
+        let h = home("dsh");
+        write(&h, ".dsh/settings.yaml", "agent-default-model:\n  provider: deepseek-official\n  model: deepseek-v4-flash\nweb-search-deepseek:\n  baseURL: https://router.shengsuanyun.com/api/v1\nllm-deepseek:\n  models:\n    - id: deepseek-v4-flash\n      name: DeepSeek V4 Flash\n    - id: deepseek/deepseek-v4.1-flash\n      name: Relay Form\n  baseURL: https://api.deepseek.com\n");
+        let e = read_dsh(&h).unwrap();
+        assert_eq!(e.endpoint_host.as_deref(), Some("api.deepseek.com"), "only llm-* sections count");
+        assert_eq!(e.provider_name.as_deref(), Some("deepseek-official"));
+        assert!(!e.endpoint_hosts.contains(&"router.shengsuanyun.com".to_string()));
+        assert_eq!(e.gateway_named_models, vec!["deepseek/deepseek-v4.1-flash"],
+            "a YAML list item is parsed (`- id:`), and only the vendor-prefixed id counts: {e:?}");
+        let _ = std::fs::remove_dir_all(&h);
+    }
+
+    /// workbuddy：多个服务商 → 全部主机都记下来（判定器不替用户在多个端点里挑一个）；
+    /// `apiKey` 与 `url` 同一个对象但绝不进结构。
+    #[test]
+    fn workbuddy_records_every_configured_endpoint_but_no_credentials() {
+        let h = home("workbuddy");
+        write(&h, ".workbuddy/models.json", r#"[{"url":"https://api.minimaxi.com/anthropic","apiKey":"sk-WB-SECRET"},
+          {"url":"https://router.shengsuanyun.com/api","apiKey":"sk-WB-SECRET-2"}]"#);
+        let e = read_workbuddy(&h).unwrap();
+        assert_eq!(e.endpoint_hosts, vec!["api.minimaxi.com", "router.shengsuanyun.com"]);
+        assert_eq!(e.endpoint_host.as_deref(), Some("api.minimaxi.com"), "first configured is the default");
+        let debug = format!("{:?}", e);
+        assert!(!debug.contains("SECRET") && !debug.contains("apiKey"), "{debug}");
+        let _ = std::fs::remove_dir_all(&h);
+    }
+
+    /// 中转标签：注册域可认，公共后缀与 IP **宁可不给标签也不编一个**（验收审查 #1）。
+    #[test]
+    fn relay_label_refuses_public_suffixes_and_ip_literals() {
+        assert_eq!(relay_label_of("router.shengsuanyun.com").as_deref(), Some("shengsuanyun.com"));
+        assert_eq!(relay_label_of("Beta-Router.ShengSuanYun.com.").as_deref(), Some("shengsuanyun.com"));
+        assert_eq!(relay_label_of("relay.foo.com.au").as_deref(), Some("foo.com.au"));
+        assert_eq!(relay_label_of("a.b.example.com.cn").as_deref(), Some("example.com.cn"));
+        assert_eq!(relay_label_of("api.deepseek.com.evil.example").as_deref(), Some("evil.example"));
+        // 以下四条是旧实现的错处：`co.uk` / `0.7` 会被当成付款方名字写进声明。
+        assert_eq!(relay_label_of("relay.co.uk").as_deref(), Some("relay.co.uk"));
+        assert_eq!(relay_label_of("co.uk"), None);
+        assert_eq!(relay_label_of("10.0.0.7"), None);
+        assert_eq!(relay_label_of("localhost"), None);
+    }
+
+    #[test]
+    fn host_of_strips_scheme_userinfo_port_path_and_trailing_dot() {
+        assert_eq!(host_of("HTTPS://User:Pa55@Router.ShengSuanYun.com:443/api/").as_deref(), Some("router.shengsuanyun.com"));
+        assert_eq!(host_of("https://router.shengsuanyun.com./api").as_deref(), Some("router.shengsuanyun.com"));
+        assert_eq!(host_of("not-a-url"), None);
+        assert_eq!(host_of(""), None);
+    }
+}

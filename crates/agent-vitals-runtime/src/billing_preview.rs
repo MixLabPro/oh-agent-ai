@@ -86,7 +86,7 @@ pub fn confirmation_groups(db: &AuthorityDb, month: &str) -> Value {
 pub fn confirmation_groups_with(
     db: &AuthorityDb, month: &str,
     accounts: &std::collections::BTreeMap<String, agent_vitals_provider::AccountEvidence>,
-    endpoints: &std::collections::BTreeMap<String, agent_vitals_hosts::claude_config::ClaudeEndpointConfig>,
+    endpoints: &std::collections::BTreeMap<String, agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence>,
 ) -> Value {
     let mut report = crate::summary::unresolved_billing_groups_in(db, month);
     if report["status"] != json!("ok") {
@@ -157,7 +157,13 @@ pub fn confirmation_groups_with(
         }
     });
     // E 类：workbuddy 是积分制，不是货币——不进待确认列表（规格 §0 表 E）。
-    groups.retain(|group| group["host"] != json!("workbuddy") && group["tokens"].as_i64().unwrap_or(0) > 0);
+    // 积分制宿主（workbuddy）不进金额面：这是**宿主声明**，不是名字比较——
+    // `AttributionProfile::credits_only` 住在 `HostProfile`（§10.6），判定器只读声明。
+    groups.retain(|group| {
+        let host = group["host"].as_str().unwrap_or("");
+        !agent_vitals_domain::host_capability::attribution_profile(host).credits_only
+            && group["tokens"].as_i64().unwrap_or(0) > 0
+    });
     for group in groups.iter_mut() {
         let verdict = auto_verdict(group, accounts, endpoints);
         group["auto_verdict"] = verdict;
@@ -180,31 +186,14 @@ fn account_evidence_by_host() -> std::collections::BTreeMap<String, agent_vitals
     out
 }
 
-/// 本机 Claude Code 的端点配置（`~/.claude/settings.json` 的 env 白名单）。
-/// 只在配置面能读到东西时才有条目——读不到就是 `None`，不猜。
-fn endpoint_evidence_by_host() -> std::collections::BTreeMap<String, agent_vitals_hosts::claude_config::ClaudeEndpointConfig> {
-    let mut out = std::collections::BTreeMap::new();
-    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else { return out; };
-    if let Some(endpoint) = agent_vitals_hosts::claude_config::read_claude_config(&home) {
-        out.insert(endpoint.host.clone(), endpoint);
-    }
-    out
-}
-
-/// 中转的身份标签：取注册域（`router.shengsuanyun.com` → `shengsuanyun.com`）。
-/// 只用于展示与预填，不冒充我们目录里的厂商 id。
-fn relay_label_of(host: &str) -> String {
-    let labels: Vec<&str> = host.trim().trim_end_matches('.').split('.').collect();
-    if labels.len() < 2 {
-        return host.to_string();
-    }
-    let last = labels[labels.len() - 1];
-    let second = labels[labels.len() - 2];
-    let take = if last.len() == 2 && matches!(second, "com" | "net" | "org" | "gov" | "edu") { 3 } else { 2 };
-    if labels.len() < take {
-        return host.to_string();
-    }
-    labels[labels.len() - take..].join(".")
+/// 本机所有宿主的端点/配置证据（A12、§10.2 层②）。读取器在
+/// `agent-vitals-hosts::sources::endpoint_evidence`——判定器不认识任何宿主的文件格式，
+/// 只吃中立结构；每个宿主读不到就是没有条目（不猜）。
+fn endpoint_evidence_by_host() -> std::collections::BTreeMap<String, agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence> {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return Default::default();
+    };
+    agent_vitals_hosts::sources::endpoint_evidence::read_all(&home)
 }
 
 /// 证据里已能说明「走的是官方路由」的 basis（与 `workbench.js::BILLING_ROUTE_KNOWN_OFFICIAL` 同表）。
@@ -219,7 +208,7 @@ const ROUTE_KNOWN_OFFICIAL: [&str; 2] = ["explicit-official-route", "session-nat
 /// 目录里的 L0 厂商和白名单账户证据；`inferred` 永远到不了 determined。
 fn auto_verdict(
     group: &Value, accounts: &std::collections::BTreeMap<String, agent_vitals_provider::AccountEvidence>,
-    endpoints: &std::collections::BTreeMap<String, agent_vitals_hosts::claude_config::ClaudeEndpointConfig>,
+    endpoints: &std::collections::BTreeMap<String, agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence>,
 ) -> Value {
     use agent_vitals_provider::PlanKind;
     let host = group["host"].as_str().unwrap_or("");
@@ -229,20 +218,31 @@ fn auto_verdict(
     let vendor = agent_vitals_domain::attribution::model_vendor(model);
     let vendor_name = vendor.as_ref().map(|v| v.vendor.clone());
     let gateway_named = vendor.as_ref().is_some_and(|v| v.gateway_named);
-    // 配置面证据（claude-code 专有）：会话日志**不记**端点，只有启动配置记。
-    // 基址不是该厂商的官方端点 → 请求经中转。强度 `config-current`(4) 低于会话级，
-    // 所以它只能把「官方还是中转」这一问变成一次**确认**，永远不能单独判 determined。
-    let config_host = endpoints.get(host).and_then(|e| e.endpoint_host.clone());
-    let config_relay = config_host.clone().filter(|h| {
-        vendor_name.as_deref().is_some_and(|v| !agent_vitals_domain::attribution::is_official_endpoint(v, h))
-    });
+    // 配置面证据（跨宿主，A12）：会话日志**不记**端点，只有启动配置记（各宿主读哪个文件
+    // 见 `agent_vitals_hosts::sources::endpoint_evidence`）。配置里的端点都不是该模型厂商的
+    // 官方端点 → 请求经中转。强度 `config-current`(4) 低于会话级，所以它只能把
+    // 「官方还是中转」这一问变成一次**确认**，永远不能单独判 determined。
+    let endpoint = endpoints.get(host);
+    let config_host = endpoint.and_then(|e| e.endpoint_host.clone());
+    let all_hosts: Vec<String> = endpoint.map(|e| e.endpoint_hosts.clone()).unwrap_or_default();
+    let official_for_vendor = |h: &str| {
+        vendor_name.as_deref()
+            .is_some_and(|v| agent_vitals_domain::attribution::is_official_endpoint(v, h))
+    };
+    let relay_hosts: Vec<String> = all_hosts.iter().filter(|h| !official_for_vendor(h)).cloned().collect();
+    // 只有一个端点时才敢指名道姓；配置里列了多个（workbuddy 本机就配了三个）时，
+    // 判定器不替用户挑——它只知道"里面有中转"，不知道这批用量用的是哪一个。
+    let config_relay: Option<String> = match (all_hosts.len(), relay_hosts.len()) {
+        (1, 1) => relay_hosts.first().cloned(),
+        _ => None,
+    };
+    let config_relay_multiple = relay_hosts.len() > 1 && relay_hosts.len() == all_hosts.len();
     // 第二路配置证据（用户 2026-09-16 实测指出）：**官方端点不带厂商 id，中转才需要**——
     // 官方 deepseek 就是 `deepseek-v4.1-flash`，胜算云这类要把 `deepseek/…` 写进模型
     // 映射才路由得动。所以配置里的模型映射只要带 `vendor/model` 前缀，本身就是过一次
     // 网关的痕迹，与基址无关（少了这一路，只换中转不改基址的配置就漏判）。
-    let config_gateway_named = endpoints.get(host)
-        .map(|e| !e.gateway_named_models.is_empty()).unwrap_or(false);
-    let relay_evidence = config_relay.is_some() || config_gateway_named;
+    let config_gateway_named = endpoint.map(|e| !e.gateway_named_models.is_empty()).unwrap_or(false);
+    let relay_evidence = config_relay.is_some() || config_relay_multiple || config_gateway_named;
     let mut basis: Vec<String> = Vec::new();
     // `conflict` = 宿主自报的 provider 与会话级路由证据指的不是同一家。这样的事实本身
     // 就没有归因（emitter 写 `provider_id=null` / `metered_estimate`），判定器更不能拿它
@@ -272,6 +272,9 @@ fn auto_verdict(
         if config_relay.is_some() {
             basis.push("config.endpoint".to_string());
         }
+        if config_relay_multiple {
+            basis.push("config.endpoint.multiple".to_string());
+        }
         if config_gateway_named {
             basis.push("config.gateway_named".to_string());
         }
@@ -288,14 +291,16 @@ fn auto_verdict(
     } else {
         "unknown"
     };
-    // 网关式命名：计费方是中转，不是模型厂商——计费方留空，厂商只作展示。
     // 网关式命名与配置指向的中转：计费方都不是模型厂商。
-    let billing_party = provider.clone().or_else(|| {
-        if route_state == "gateway" { None }
-        // 没有基址时说不出是哪家中转（不猜），只有前缀证据就留空让用户在弹窗里写。
-        else if route_state == "relay_config" { config_relay.as_deref().map(relay_label_of) }
-        else { vendor_name.clone() }
-    });
+    let billing_party = if route_state == "relay_config" {
+        // 经中转时付款方是中转，**绝不能落回宿主自报的模型厂商**（验收审查 iteration 5 #2：
+        // 旧写法 `provider.clone().or_else(…)` 先命中 provider，行里就会出现
+        // "经中转 · 计费方=minimax" 这种自相矛盾的标签）。认不出注册域（IP / 公共后缀）
+        // 或说不出是哪一家时留空，让用户在弹窗里写。
+        config_relay.as_deref().and_then(agent_vitals_hosts::sources::endpoint_evidence::relay_label_of)
+    } else {
+        provider.clone().or_else(|| if route_state == "gateway" { None } else { vendor_name.clone() })
+    };
     let account = accounts.get(host).filter(|a| Some(&a.vendor) == billing_party.as_ref());
     let mut plan = json!(null);
     let (state, relationship_kind, billing_mode) = match (route_state, account.map(|a| a.plan_kind)) {
@@ -310,7 +315,10 @@ fn auto_verdict(
             ("determined", Some("official_api"), Some("metered"))
         }
         // codex：rollout 自报 openai + 账户 chatgpt 登录 → 请求走 ChatGPT 后端，按套餐计。
-        ("provider_reported", Some(PlanKind::Subscription)) if host == "codex" => {
+        // 自报 provider + 账户订阅 → 官方订阅：**只有声明了这条性质的宿主**才走
+        // （codex 的 `model_provider`），不是 `host == "codex"` 的名字判断。
+        ("provider_reported", Some(PlanKind::Subscription))
+            if agent_vitals_domain::host_capability::attribution_profile(host).provider_reported_implies_official => {
             let a = account.unwrap();
             basis.push(format!("account.{}", a.plan_label.clone().unwrap_or_else(|| "subscription".into())));
             plan = json!({ "label": a.plan_label, "channel": a.billing_channel, "anchor_date": a.anchor_date, "source": a.source });
@@ -821,10 +829,12 @@ mod tests {
             rusqlite::params![noon + 2],
         ).unwrap();
         let mut endpoints = std::collections::BTreeMap::new();
-        endpoints.insert("claude-code".to_string(), agent_vitals_hosts::claude_config::ClaudeEndpointConfig {
+        endpoints.insert("claude-code".to_string(), agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence {
             host: "claude-code".to_string(),
             base_url: Some("https://router.shengsuanyun.com/api".to_string()),
             endpoint_host: Some("router.shengsuanyun.com".to_string()),
+            endpoint_hosts: vec!["router.shengsuanyun.com".to_string()],
+            provider_name: None,
             gateway_named_models: vec!["deepseek/deepseek-v4-pro-0813".to_string()],
             evidence_basis: EvidenceBasis::ConfigCurrent,
             source: "~/.claude/settings.json env".to_string(),
@@ -847,14 +857,53 @@ mod tests {
         assert_eq!(official_shape["route_state"], json!("official"), "strong evidence is not overridden by config: {official_shape}");
         assert!(official_shape["basis"].as_array().unwrap().contains(&json!("config.endpoint.conflict")), "{official_shape}");
         assert_eq!(official_shape["config_endpoint"], json!("router.shengsuanyun.com"));
+        // 配置里列了多个端点（workbuddy 本机就配了三个）：只说"里面有中转"，不替用户挑一个
+        // ——计费方留空、依据记 `config.endpoint.multiple`（验收审查 iteration 5 #5）。
+        let multi = agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence {
+            host: "claude-code".to_string(),
+            base_url: Some("https://a.example-relay.com/x".to_string()),
+            endpoint_host: Some("a.example-relay.com".to_string()),
+            endpoint_hosts: vec!["a.example-relay.com".to_string(), "b.example-relay.com".to_string()],
+            provider_name: None,
+            gateway_named_models: Vec::new(),
+            evidence_basis: EvidenceBasis::ConfigCurrent,
+            source: "test".to_string(),
+        };
+        let mut multi_endpoints = std::collections::BTreeMap::new();
+        multi_endpoints.insert("claude-code".to_string(), multi);
+        let multi_report = confirmation_groups_with(&db, "2026-08", &accounts, &multi_endpoints);
+        let multi_verdict = multi_report["groups"].as_array().unwrap().iter()
+            .find(|g| g["model_id"] == json!("deepseek-v4-flash")).unwrap()["auto_verdict"].clone();
+        assert_eq!(multi_verdict["route_state"], json!("relay_config"), "{multi_verdict}");
+        assert_eq!(multi_verdict["billing_party"], json!(null), "never pick one of several configured relays");
+        assert!(multi_verdict["basis"].as_array().unwrap().contains(&json!("config.endpoint.multiple")), "{multi_verdict}");
+        // 经中转时计费方是中转，**不能落回宿主自报的模型厂商**（验收审查 iteration 5 #2：
+        // 旧写法会产出"经中转 · 计费方=minimax"这种自相矛盾的行）。
+        db.conn().execute(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                 observation_kind, provider_id, model_id, event_ts_ms, event_peak, pricing_basis, evidence_basis,
+                 billing_mode, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                 ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES ('f-reported-relay', 'claude-code', 'm', 'sess', 'f-reported-relay', 'token_count',
+                     'minimax', 'MiniMax-M3', ?1, 0, 'metered_estimate', 'missing', 'metered', 1000, 0, 0, 10, 'run', 1, 1)",
+            rusqlite::params![noon + 3],
+        ).unwrap();
+        let reported = confirmation_groups_with(&db, "2026-08", &accounts, &endpoints)["groups"]
+            .as_array().unwrap().iter()
+            .find(|g| g["model_id"] == json!("MiniMax-M3")).unwrap()["auto_verdict"].clone();
+        assert_eq!(reported["route_state"], json!("relay_config"), "{reported}");
+        assert_eq!(reported["billing_party"], json!("shengsuanyun.com"),
+            "the payer is the relay, never the host-reported model vendor: {reported}");
         // 配置是整个宿主一份的（这是"当前配置"的语义，不是逐条的），所以同一宿主下
         // 另一个 deepseek 组同样是 relay_config——这正是我们要的：它不逐模型乱猜。
         assert_eq!(verdict_of("deepseek-v4-pro")["route_state"], json!("relay_config"));
         // 反过来：基址就是该厂商的官方端点时，不能凭空造出中转（同库换一份配置重跑）。
-        let official = agent_vitals_hosts::claude_config::ClaudeEndpointConfig {
+        let official = agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence {
             host: "claude-code".to_string(),
             base_url: Some("https://api.deepseek.com".to_string()),
             endpoint_host: Some("api.deepseek.com".to_string()),
+            endpoint_hosts: vec!["api.deepseek.com".to_string()],
+            provider_name: None,
             gateway_named_models: Vec::new(),
             evidence_basis: EvidenceBasis::ConfigCurrent,
             source: "~/.claude/settings.json env".to_string(),
@@ -863,10 +912,12 @@ mod tests {
         official_endpoints.insert("claude-code".to_string(), official);
         // 只有前缀证据、没有基址：仍判经中转，但**说不出哪一家**（不猜），计费方留空，
         // 等用户在弹窗里写（用户 2026-09-16：官方不带厂商 id，中转才需要）。
-        let prefix_only = agent_vitals_hosts::claude_config::ClaudeEndpointConfig {
+        let prefix_only = agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence {
             host: "claude-code".to_string(),
             base_url: None,
             endpoint_host: None,
+            endpoint_hosts: Vec::new(),
+            provider_name: None,
             gateway_named_models: vec!["deepseek/deepseek-v4.1-flash".to_string()],
             evidence_basis: EvidenceBasis::ConfigCurrent,
             source: "~/.claude/settings.json env".to_string(),

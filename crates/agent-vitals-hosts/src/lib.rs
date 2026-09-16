@@ -48,7 +48,6 @@ pub use hosts::{
     claude_code::sources::quota as claude_quota,
     // 自动归因 A5：账户级证据读取器（白名单键，规格 §7 P1）。
     claude_code::sources::account as claude_account, codex::sources::account as codex_account,
-    claude_code::sources::config as claude_config,
     claude_code::sources as claude_session, codex::sources::usage_fact as codex_usage_fact,
     codex::sources as codex_session, dsh::sources::usage_fact as dsh_usage_fact,
     workbuddy::sources::usage_fact as workbuddy_usage_fact,

@@ -2949,6 +2949,7 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     "host.provider_reported": "宿主自报服务商", "model.gateway_named": "网关式模型命名",
     "response_id.vendor_shape": "响应 ID 与厂商形状一致", "account.api_key": "账户使用 API key",
     "route.conflict": "宿主自报与会话路由证据冲突", "config.endpoint": "配置里的端点", "config.gateway_named": "模型映射带厂商前缀（中转约定）",
+    "config.endpoint.multiple": "配置里列了多个端点（其中至少一个是中转）",
     "config.endpoint.conflict": "⚠ 但这批用量是官方形状，而配置指向中转——两者需你核对",
   }[b] || (b.startsWith("account.") ? "账户套餐 " + b.slice(8) : b))).join(" · ");
   const renderClusterRow = (cluster) => {
