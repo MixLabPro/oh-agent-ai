@@ -2224,7 +2224,7 @@ function syncBillingDeclarationSteps() {
   const kind = billingCurrentRelationship();
   if (effect) effect.textContent = BILLING_RELATIONSHIP_EFFECT[kind] || "";
   if (subscription) subscription.hidden = kind !== "official_subscription";
-  // 订阅：适用范围由程序给——从订阅日到今天——不问起止；按量/组织/中转才有起止。
+  // 订阅：适用范围由程序给——从订阅日起、持续有效——不问起止；按量/组织/中转才有起止。
   const datesRow = document.getElementById("ov-billing-dates-row");
   const anchor = document.getElementById("ov-billing-subscription-anchor");
   const anchorText = document.getElementById("ov-billing-subscription-anchor-text");
@@ -2232,37 +2232,42 @@ function syncBillingDeclarationSteps() {
   const end = document.getElementById("ov-billing-end");
   if (datesRow) datesRow.hidden = kind === "official_subscription";
   if (kind === "official_subscription" && anchor && start && end) {
-    const today = new Date().toISOString().slice(0, 10);
     const value = String(anchor.value || "").trim();
     if (BILLING_DATE_RE.test(value)) {
       start.value = value;
-      end.value = today;
-      // 订阅的适用范围由程序给（锚点 → 今天），「持续有效」在这里没有意义：勾着它会让
-      // 保存发出 null、把订阅声明变成开放期——那是另一个决定，本次不做。切到订阅一律
-      // 撤销勾选并恢复控件。
+      // 订阅是**持续关系**：范围由程序给（订阅日起），结束日留空＝持续有效。
+      // **不能写 today**——那会让声明在月底"到期"：下个月月费凭空归零（订阅费是按月
+      // 付的，概况「订阅月费」直接读它），覆盖也停在上次重算的时刻。2026-09-16 真机：
+      // 声明了 anthropic 20 USD/月，次月概况的订阅月费消失。
       const openEndedBox = document.getElementById("ov-billing-open-ended");
-      if (openEndedBox) openEndedBox.checked = false;
-      end.disabled = false;
+      if (openEndedBox) openEndedBox.checked = true;
+      syncBillingOpenEnded();
       if (typeof syncBillingDateBounds === "function") syncBillingDateBounds();
+      // 「程序写进去的订阅范围」这个事实要记下来：切到按量/组织/中转时按它撤回。
+      // 判据是「程序写过」而不是当前值——按量路径上用户自己勾的「持续有效」不能被
+      // 这里抹掉（同 `anchorApplied` 的教训，验收审查 iteration 4 #1）。
+      target.subscriptionRangeApplied = true;
       target.anchorApplied = Boolean(target.anchorDate && value === target.anchorDate);
-      if (anchorText) anchorText.textContent = "每月 " + Number(value.slice(8, 10)) + " 日扣款 · 适用 " + value + " – 今天（" + today + "）；不用填起止，程序按订阅期归因。";
+      if (anchorText) anchorText.textContent = "每月 " + Number(value.slice(8, 10)) + " 日扣款 · 适用 " + value + " 起（持续有效）；不用填起止，程序按订阅期归因与计费。";
     } else if (anchorText) {
       anchorText.textContent = "填订阅开始（首次扣款）日期，程序按它算适用范围。";
     }
-  } else if (anchor && start && end && target.anchorApplied) {
-    // 离开订阅：撤回**程序**从账户证据写进去的锚点，否则真机锚点 2025-07-20 会变成
-    // 按量声明的 effective_start（验收审查 iteration 3 #5）。判据是「程序写过」这个
-    // 事实，不是值相等——值相等对没有锚点的组恒成立，会在每次 restep 时抹掉用户手改的
-    // 结束日期（同一份审查的 iteration 4 #1）。
+  } else if ((target.subscriptionRangeApplied || target.anchorApplied) && start && end) {
+    // 离开订阅（切到按量/组织/中转）：撤回**程序**写进去的订阅起止与「持续有效」。
+    // 判据是「程序写过」这个事实，不是值相等——值相等对没有锚点的组恒成立，会在每次
+    // restep 时抹掉用户手改的结束日期（验收审查 iteration 4 #1）；锚点本身不撤回，
+    // 真机锚点 2025-07-20 就会变成按量声明的 effective_start（同一份审查 iteration 3 #5）。
+    // 不撤回「持续有效」更糟：用户点了「订阅」再切「按量 API」，日期行重新出现、结束日
+    // 是空的——那是程序刚填的，不是用户选的，等于静默造出一条开放期的按量声明
+    // （2026-09-16 守卫抓到：`end` 空且勾选框仍勾着）。
     // 有意保留的行为：用户亲手改过订阅日期后切到按量，起始日保留用户的值（不再撤回到
     // 组首日）——「只撤回程序写的」是对这条路径的唯一解释，且该字段当时可见、可改。
     if (target.defaultStart) start.value = target.defaultStart;
     if (target.defaultEnd) end.value = target.defaultEnd;
-    // 离开订阅：订阅期里被强行撤销的「持续有效」也一并复原成"可勾可选"，否则回到按量时
-    // 结束日期框会停在被禁用的状态。
     const openEndedBox = document.getElementById("ov-billing-open-ended");
     if (openEndedBox) openEndedBox.checked = false;
     end.disabled = false;
+    target.subscriptionRangeApplied = false;
     target.anchorApplied = false;
   }
   // 只给可见步骤编号：服务商未知时是 1 2 3 4 5，路由已知时是 1 2 3。
@@ -3503,8 +3508,11 @@ function renderSpendCards(daily, monthly, fx, window = { date: statisticsToday()
   // REQ-043：**未录入套餐/付款**时要写「尚未设置套餐或账单」，不能写「无数据」。
   // 「无数据」会被读成「读取失败 / 数据缺失」，而真相是「你还没声明计费方式，
   // 所以没有实付口径可算」——真实困惑案例（2026-09-14）：用户看到本月支出两栏
-  // 都是「无数据」，以为读不到数据，其实是 billing_declarations 与 host_bills
-  // 都为空、只有名义成本可算。三种空态必须分开：
+  // 都是「无数据」，以为读不到数据，其实只有名义成本可算。两栏的来源不同：
+  // 按量费用 = 账单（`host_bills` → metered_actual/host_billed），订阅月费 =
+  // 价目表的 `catalog_2026_09.subscriptions` **加上**用户在「明确计费方式」里声明的
+  // 月费（`billing_declarations`，summary.rs::apply_declared_subscription_fees）。
+  // 三种空态必须分开：
   //   读不到 DTO        → 无数据
   //   本月有用量但未声明 → 尚未设置套餐或账单（指引下一步）
   //   本月没有用量      → 无数据（此时"没声明"不是原因）

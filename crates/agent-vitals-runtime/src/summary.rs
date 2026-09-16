@@ -1240,11 +1240,18 @@ fn apply_subscription_fees(
     by_provider: &mut BTreeMap<String, HostAmount>,
     month: &str,
     cards: &PricingCards,
+    declared: &[DeclaredSubscriptionFee],
 ) {
     let pricing = cards.main.clone();
     for (provider, currency, amount, period_start) in
         agent_vitals_domain::cost::declared_subscriptions(&pricing)
     {
+        // 声明优先：同一 provider 上用户已经在弹窗里声明过月费时，价目表这条让位，
+        // 否则同一笔月费会被两条来源各摊一次（声明的落地见
+        // `apply_declared_subscription_fees`）。
+        if declared.iter().any(|fee| fee.provider == provider) {
+            continue;
+        }
         // 账期未开始不摊（None 理论不可达——declared_subscriptions 已回落
         // reported_at；防御性跳过而不是摊进所有历史）。
         let Some(start) = period_start.as_deref() else {
@@ -1261,38 +1268,116 @@ fn apply_subscription_fees(
             .find(|(_, providers)| providers.contains(&provider.as_str()))
             .map(|(host, _)| host.to_string())
             .unwrap_or_else(|| "unattributed".to_string());
-        let key = format!("{host}/{provider}");
-        let entry = by_provider
-            .entry(key.clone())
-            .or_insert_with(|| HostAmount {
-                host_id: key,
-                amounts_by_basis: BTreeMap::new(),
-                currency: None,
-                has_unresolved: false,
-                evidence_basis: None,
-                pricing_method: None,
-                unresolved_reason: None,
-                freshness: Freshness::unavailable(),
-            });
-        // 同 provider 重复摊的防线不在循环外而在取值语义：declared_
-        // subscriptions 已按「首条」去重（测试钉住），这里每个 provider 恰好
-        // 进一次循环。
-        *entry
-            .amounts_by_basis
-            .entry(BillingBasis::FixedSubscription)
-            .or_insert(0.0) += amount;
-        // 币种合并：零用量纯月费条目（如 glm 无 token 的月份）此前 currency
-        // 为 None，月费会掉进 total_actual_spend 的无币桶——用声明币种补齐；
-        // 与条目既有币种冲突（理论形状：同一 provider 两张币种不同的卡）时
-        // 撤销声明 + unresolved，绝不冒充单币。
-        match &entry.currency {
-            None => entry.currency = Some(currency),
-            Some(c) if *c == currency => {}
-            Some(_) => {
-                entry.currency = None;
-                entry.has_unresolved = true;
-            }
+        add_fixed_subscription_fee(by_provider, &format!("{host}/{provider}"), &currency, amount);
+    }
+}
+
+/// 一条**已声明订阅**的月费（`billing_declarations` 当前态的一行）。
+struct DeclaredSubscriptionFee {
+    host: String,
+    provider: String,
+    currency: String,
+    amount: f64,
+    start_month: String,
+    end_month: Option<String>,
+}
+
+/// 把一笔月费落进 `by_provider` 的 `FixedSubscription` 档。
+///
+/// `HostAmount` 只有一个币种位：零用量纯月费条目（如 glm 无 token 的月份）此前
+/// currency 为 None，月费会掉进 `total_actual_spend` 的无币桶——用声明币种补齐；
+/// 与条目既有币种冲突（理论形状：同一 provider 两张币种不同的卡）时撤销币种 +
+/// unresolved，绝不冒充单币。价目表与用户声明两条来源共用这一份，落地方式必须
+/// 完全一致。
+fn add_fixed_subscription_fee(
+    by_provider: &mut BTreeMap<String, HostAmount>,
+    key: &str,
+    currency: &str,
+    amount: f64,
+) {
+    let entry = by_provider
+        .entry(key.to_string())
+        .or_insert_with(|| HostAmount {
+            host_id: key.to_string(),
+            amounts_by_basis: BTreeMap::new(),
+            currency: None,
+            has_unresolved: false,
+            evidence_basis: None,
+            pricing_method: None,
+            unresolved_reason: None,
+            freshness: Freshness::unavailable(),
+        });
+    *entry
+        .amounts_by_basis
+        .entry(BillingBasis::FixedSubscription)
+        .or_insert(0.0) += amount;
+    match &entry.currency {
+        None => entry.currency = Some(currency.to_string()),
+        Some(c) if c == currency => {}
+        Some(_) => {
+            entry.currency = None;
+            entry.has_unresolved = true;
         }
+    }
+}
+
+/// 当前有效的 `official_subscription` 声明 → 月费行。
+///
+/// 只认「当前态」表 `billing_declarations`：撤销会把它软删（`deleted_at_ms`），
+/// 所以**撤销即停止扣**，不需要第二条撤销路径。`relationship_kind` 只认
+/// `official_subscription`——其余四种按规格只记录关系、不改金额（§3 事实 1）。
+/// 金额或币种缺失（用户在弹窗里勾了「金额暂不清楚」）跳过、不记 0，与
+/// `declared_subscriptions` 对未声明金额的 openai 同一处理。
+fn declared_subscription_fees(
+    db: &agent_vitals_data::authority::AuthorityDb,
+) -> Vec<DeclaredSubscriptionFee> {
+    let Ok(rows) = db.billing_declarations() else { return Vec::new() };
+    let mut out = Vec::new();
+    for (_id, host, provider, kind, _name, amount_minor, currency, start, end, _candidate) in rows {
+        if kind != "official_subscription" { continue; }
+        let (Some(amount_minor), Some(currency)) = (amount_minor, currency) else { continue };
+        if amount_minor <= 0 || currency.trim().is_empty() { continue; }
+        if host.trim().is_empty() || provider.trim().is_empty() { continue; }
+        // chars 而非字节切片：声明混入非 ASCII 时 [..7] 会 panic（与
+        // `apply_subscription_fees` 同一条脏数据纪律）。
+        out.push(DeclaredSubscriptionFee {
+            host,
+            provider,
+            currency,
+            amount: amount_minor as f64 / 100.0,
+            start_month: start.chars().take(7).collect(),
+            end_month: end.map(|end| end.chars().take(7).collect()),
+        });
+    }
+    out
+}
+
+/// 把**用户声明**的订阅月费摊进 `by_provider` 的 `FixedSubscription` 档。
+///
+/// **为什么必须走这里**：`apply_subscription_fees` 只枚举价目表里的
+/// `catalog_2026_09.subscriptions`，而内置价目表没有这一节、设置页也只能写价卡与
+/// 归属——于是用户在「明确计费方式」里填的月费在**任何一个数字上**都不出现
+/// （2026-09-16 真机：声明了 anthropic 20 USD/月，概况「订阅月费」仍写
+/// 「尚未设置套餐或账单」）。`BillingBasis::FixedSubscription` 的定义原话就是
+/// 「**用户声明的**固定订阅费用」，这里把那个来源接上。
+///
+/// 账期纪律与 `apply_subscription_fees` 一致（早于生效月不摊，不凭空造出订阅前的
+/// 支出），**多一条**：有结束月且查询月晚于它就不摊——订阅到期后继续收月费是编造。
+/// 同样只进月、不进日（调用点只在 `monthly_summary`）。
+fn apply_declared_subscription_fees(
+    by_provider: &mut BTreeMap<String, HostAmount>,
+    month: &str,
+    declared: &[DeclaredSubscriptionFee],
+) {
+    for fee in declared {
+        if month < fee.start_month.as_str() { continue; }
+        if fee.end_month.as_deref().is_some_and(|end| month > end) { continue; }
+        add_fixed_subscription_fee(
+            by_provider,
+            &format!("{}/{}", fee.host, fee.provider),
+            &fee.currency,
+            fee.amount,
+        );
     }
 }
 
@@ -1899,7 +1984,15 @@ impl SummaryRepository for SqlSummaryRepository {
             &db, bounds, None, &by_hour_model, &cards,
         ));
         by_provider.extend(claude_provider_amounts_from_days(&claude_days_map, &cards));
-        apply_subscription_fees(&mut by_provider, &query.month, &cards);
+        // 月费两条来源，**声明优先**：价目表 `catalog_2026_09.subscriptions`（随版本
+        // 更新）与用户在「明确计费方式」里声明的订阅（权威库、可撤销）。`declared`
+        // 只取一次，两条路径共用同一份，价目表那条据此跳过同 provider 的重复摊。
+        let declared = match &db {
+            Some(db) => declared_subscription_fees(db),
+            None => Vec::new(),
+        };
+        apply_subscription_fees(&mut by_provider, &query.month, &cards, &declared);
+        apply_declared_subscription_fees(&mut by_provider, &query.month, &declared);
         // Phase 2.8：用户显式录入的宿主账单（WorkBuddy 积分 / 中转对账单…）→
         // by_provider 对应条目的 basis 桶（`data host-bill set`）。
         if let Some(db) = &db {
@@ -2949,6 +3042,184 @@ mod tests {
             let mut other: BTreeMap<String, HostAmount> = BTreeMap::new();
             apply_host_bills(&mut other, &db, "2026-08");
             assert!(other.is_empty());
+        });
+    }
+
+    /// 2026-09-16 真机缺口：用户在「明确计费方式」里填的订阅月费在**任何一个数字上**
+    /// 都不出现——`apply_subscription_fees` 只枚举价目表 `catalog_2026_09.subscriptions`，
+    /// 内置价目表没有这一节、设置页也只能写价卡与归属。这条链把声明的月费接进
+    /// `by_provider` 的 `FixedSubscription` 档，也就是概况「订阅月费」那一行。
+    #[test]
+    fn declared_subscription_fees_reach_by_provider_and_stop_on_revoke() {
+        with_home(|| {
+            let db = seed_authority_db();
+            db.billing_declaration_revision_save(
+                "rev-pro",
+                "decl-pro",
+                None,
+                "claude-code",
+                "anthropic",
+                "official_subscription",
+                Some("Claude Pro"),
+                Some(2_000),
+                Some("USD"),
+                "2025-07-20",
+                None,
+                None,
+                None,
+                &[],
+                1,
+            )
+            .unwrap();
+
+            let declared = declared_subscription_fees(&db);
+            assert_eq!(declared.len(), 1);
+            assert_eq!(declared[0].amount, 20.0, "2000 minor = 20.00");
+            assert_eq!(declared[0].start_month, "2025-07");
+
+            let mut by_provider: BTreeMap<String, HostAmount> = BTreeMap::new();
+            apply_declared_subscription_fees(&mut by_provider, "2026-09", &declared);
+            let entry = by_provider.get("claude-code/anthropic").expect("月费条目");
+            assert_eq!(
+                entry.amounts_by_basis.get(&BillingBasis::FixedSubscription),
+                Some(&20.0)
+            );
+            assert_eq!(entry.currency.as_deref(), Some("USD"));
+
+            // 账期：订阅生效前的月份不摊（不得凭空造出订阅前的支出）。
+            let mut earlier: BTreeMap<String, HostAmount> = BTreeMap::new();
+            apply_declared_subscription_fees(&mut earlier, "2025-06", &declared);
+            assert!(earlier.is_empty(), "订阅生效前不得摊月费");
+
+            // 撤销：软删当前态行 → 月费立即消失（不需要第二条撤销路径）。
+            assert!(db
+                .billing_declaration_revision_revoke("rev-pro-revoke", "decl-pro", "rev-pro", 2)
+                .unwrap());
+            assert!(
+                declared_subscription_fees(&db).is_empty(),
+                "撤销后不得再摊月费"
+            );
+        });
+    }
+
+    /// 三条「不该摊」：金额未声明（弹窗允许勾「金额暂不清楚」）、非订阅关系
+    /// （组织承担只记录关系、不改金额，§3 事实 1）、以及订阅已到期。
+    #[test]
+    fn declared_subscription_fees_skip_incomplete_other_kind_and_ended_rows() {
+        with_home(|| {
+            let db = seed_authority_db();
+            db.billing_declaration_revision_save(
+                "rev-nomoney",
+                "decl-nomoney",
+                None,
+                "claude-code",
+                "anthropic",
+                "official_subscription",
+                None,
+                None,
+                None,
+                "2025-07-20",
+                None,
+                None,
+                None,
+                &[],
+                1,
+            )
+            .unwrap();
+            db.billing_declaration_revision_save(
+                "rev-org",
+                "decl-org",
+                None,
+                "codex",
+                "openai",
+                "organization",
+                None,
+                Some(9_900),
+                Some("CNY"),
+                "2025-01-01",
+                None,
+                None,
+                None,
+                &[],
+                1,
+            )
+            .unwrap();
+            db.billing_declaration_revision_save(
+                "rev-ended",
+                "decl-ended",
+                None,
+                "codex",
+                "openai",
+                "official_subscription",
+                None,
+                Some(2_000),
+                Some("USD"),
+                "2025-01-10",
+                Some("2026-03-05"),
+                None,
+                None,
+                &[],
+                1,
+            )
+            .unwrap();
+
+            let declared = declared_subscription_fees(&db);
+            assert_eq!(declared.len(), 1, "只有 ended 那条是合格的订阅月费");
+            assert_eq!(declared[0].provider, "openai");
+            assert_eq!(declared[0].end_month.as_deref(), Some("2026-03"));
+
+            let mut in_range: BTreeMap<String, HostAmount> = BTreeMap::new();
+            apply_declared_subscription_fees(&mut in_range, "2026-02", &declared);
+            assert!(in_range.contains_key("codex/openai"), "结束月之前照常摊");
+
+            let mut after_end: BTreeMap<String, HostAmount> = BTreeMap::new();
+            apply_declared_subscription_fees(&mut after_end, "2026-04", &declared);
+            assert!(after_end.is_empty(), "到期后继续收月费是编造");
+        });
+    }
+
+    /// **接线**测试（不只是函数）：声明的月费必须出现在 `monthly_summary` 的 DTO 上，
+    /// 因为概况「订阅月费」那一行读的就是它。函数单测只能证明算法对，证明不了它被
+    /// 调用——2026-09-16 的真机缺口正是「算法不存在」，只钉函数会漏掉这一类。
+    #[test]
+    fn monthly_summary_spreads_a_declared_subscription_fee_into_the_dto() {
+        with_home(|| {
+            let db = seed_authority_db();
+            db.billing_declaration_revision_save(
+                "rev-dto",
+                "decl-dto",
+                None,
+                "claude-code",
+                "anthropic",
+                "official_subscription",
+                Some("Claude Pro"),
+                Some(2_000),
+                Some("USD"),
+                "2025-07-20",
+                None,
+                None,
+                None,
+                &[],
+                1,
+            )
+            .unwrap();
+            drop(db);
+            let summary = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery {
+                month: "2026-09".to_string(),
+            });
+            let entry = summary
+                .by_provider
+                .get("claude-code/anthropic")
+                .expect("月费条目");
+            assert_eq!(
+                entry.amounts_by_basis.get(&BillingBasis::FixedSubscription),
+                Some(&20.0)
+            );
+            assert_eq!(
+                summary.total_actual_spend().get("USD"),
+                Some(&20.0),
+                "实际支出的 USD 桶必须含这笔月费"
+            );
         });
     }
 

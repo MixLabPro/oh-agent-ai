@@ -316,13 +316,14 @@ ok(elements["ov-billing-subscription-amount"].value === "20.00" && elements["ov-
   "有旧资产候选时预填其套餐金额/币种供核对");
 elements["ov-billing-subscription-amount"].value = "";
 // 订阅：用户想的是「哪天订的、每月扣多少」——只填订阅日期，适用范围由程序给
-// （订阅日 – 今天），起止日期行不出现（自动归因规格 §4 第 5 步 / §5.2）。
+// （订阅日起、**持续有效**），起止日期行不出现（自动归因规格 §4 第 5 步 / §5.2）。
 ok(elements["ov-billing-dates-row"].hidden === true && elements["ov-billing-subscription-anchor"].value === monthStart
   && elements["ov-billing-subscription-anchor"].max === today
-  && elements["ov-billing-start"].value === monthStart && elements["ov-billing-end"].value === today,
-  "订阅时不问起止：订阅日期默认组首日、上限今天，适用范围 = 订阅日 – 今天");
-ok(elements["ov-billing-subscription-anchor-text"].textContent.includes("每月 1 日扣款") && elements["ov-billing-subscription-anchor-text"].textContent.includes(monthStart + " – 今天"),
-  "订阅日期旁写明扣款日与程序给出的适用范围");
+  && elements["ov-billing-start"].value === monthStart && elements["ov-billing-end"].value === ""
+  && elements["ov-billing-open-ended"].checked === true,
+  "订阅时不问起止：订阅日期默认组首日、上限今天，结束日留空＝持续有效");
+ok(elements["ov-billing-subscription-anchor-text"].textContent.includes("每月 1 日扣款") && elements["ov-billing-subscription-anchor-text"].textContent.includes(monthStart + " 起（持续有效）"),
+  "订阅日期旁写明扣款日与程序给出的适用范围（持续有效，不写「到今天为止」）");
 elements["ov-billing-subscription-anchor"].value = "2999-01-01";
 elements["ov-billing-subscription-anchor"].onchange();
 await elements["ov-billing-save"].onclick();
@@ -336,7 +337,7 @@ ok(elements["ov-billing-preview"].textContent.includes("月费") && !billingCall
 elements["ov-billing-amount-unknown"].checked = true;
 await elements["ov-billing-save"].onclick();
 const previewCall = billingCalls.find((c) => c.command === "billing_candidate_impact_preview");
-ok(previewCall && previewCall.args.effectiveStart === monthStart && previewCall.args.effectiveEnd === today && previewCall.args.relationshipKind === "official_subscription"
+ok(previewCall && previewCall.args.effectiveStart === monthStart && previewCall.args.effectiveEnd === null && previewCall.args.relationshipKind === "official_subscription"
   && previewCall.args.scopes.map((s) => s.scope_value).join(",") === "gpt-5.6-sol,gpt-5.6-luna" && !("windowStartMs" in previewCall.args),
   "预览参数 = 保存参数（宿主/provider/关系/起止日期/批量模型作用域），不传统计月窗口（G2）");
 const previewText = elements["ov-billing-preview"].textContent;
@@ -347,9 +348,9 @@ ok(elements["ov-billing-save"].textContent === "确认并保存声明" && !billi
   "预览后按钮变为「确认并保存声明」，尚未写入");
 await elements["ov-billing-save"].onclick();
 const saveCall = billingCalls.find((c) => c.command === "save_billing_declaration_revision");
-ok(saveCall && saveCall.args.effectiveStart === monthStart && saveCall.args.effectiveEnd === today && saveCall.args.relationshipKind === "official_subscription"
+ok(saveCall && saveCall.args.effectiveStart === monthStart && saveCall.args.effectiveEnd === null && saveCall.args.relationshipKind === "official_subscription"
   && saveCall.args.sourceCandidateId === "candidate-test" && saveCall.args.scopes.length === 2 && saveCall.args.amountMinor === null && saveCall.args.currency === null,
-  "保存参数与预览一致；「金额暂不清楚」写空金额而不补挂牌价（AC09）");
+  "保存参数与预览一致（订阅持久有效，结束日发 null）；「金额暂不清楚」写空金额而不补挂牌价（AC09）");
 ok(saveCall.args.evidenceRef.startsWith("legacy-import-candidate:") && !saveCall.args.evidenceRef.includes("auto:"),
   "手动确认的组不冒充程序判定（evidence_ref 无 auto:）");
 ok(!billingCalls.some((c) => c.command === "enqueue_billing_recalculation"),
@@ -516,9 +517,10 @@ ok(elements["ov-billing-subscription-name"].value === "Claude Pro"
 ok(elements["ov-billing-batch-row"].hidden === false && /将同时处理 2 个模型、32 个会话、4\.7M tokens/.test(elements["ov-billing-batch-text"].textContent),
   "簇内多个模型默认作为一批处理");
 ok(elements["ov-billing-dates-row"].hidden === true && elements["ov-billing-subscription-anchor"].value === "2026-08-20"
-  && elements["ov-billing-start"].value === "2026-08-20" && elements["ov-billing-end"].value === today
+  && elements["ov-billing-start"].value === "2026-08-20" && elements["ov-billing-end"].value === ""
+  && elements["ov-billing-open-ended"].checked === true
   && elements["ov-billing-subscription-anchor-text"].textContent.includes("每月 20 日扣款"),
-  "订阅日期预填账户证据的订阅开始日（早于本月也行），适用范围从该日到今天");
+  "订阅日期预填账户证据的订阅开始日（早于本月也行），适用范围从该日起且持续有效");
 elements["ov-billing-subscription-amount"].value = "20";
 elements["ov-billing-subscription-currency"].value = "USD";
 billingCalls.length = 0;
@@ -526,11 +528,11 @@ await elements["ov-billing-save"].onclick();
 await elements["ov-billing-save"].onclick();
 const autoSave = billingCalls.find((c) => c.command === "save_billing_declaration_revision");
 ok(autoSave && autoSave.args.evidenceRef === "auto:route.session-native+account.Claude Pro;confirmation-group:g-opus,g-sonnet"
-  && autoSave.args.effectiveStart === "2026-08-20" && autoSave.args.effectiveEnd === today
+  && autoSave.args.effectiveStart === "2026-08-20" && autoSave.args.effectiveEnd === null
   && autoSave.args.providerId === "anthropic" && autoSave.args.relationshipKind === "official_subscription"
   && autoSave.args.subscriptionName === "Claude Pro" && autoSave.args.amountMinor === 2000 && autoSave.args.currency === "USD"
   && autoSave.args.scopes.map((s) => s.scope_kind + ":" + s.scope_value).join(",") === "model:claude-opus-5,model:claude-sonnet-5",
-  "一键确认写声明：evidence_ref=auto:<依据>，起止 = 订阅日 – 今天，套餐/月费/两个模型作用域，无 provider:unresolved");
+  "一键确认写声明：evidence_ref=auto:<依据>，范围 = 订阅日起（持续有效）；套餐/月费/两个模型作用域，无 provider:unresolved");
 elements["ov-billing-close"].onclick();
 // 「不对，我来改」：所有步骤重新放出来。
 await clusterRows[1].children[1].children[1].onclick();
@@ -600,6 +602,11 @@ elements["ov-billing-mode"].onchange();
 ok(elements["ov-billing-dates-row"].hidden === false && elements["ov-billing-start"].value === monthStart
   && elements["ov-billing-end"].value === today,
   "#5：切到按量 API 时起始日撤回组自己的首日，锚点不会写进按量声明");
+// 订阅态会把「持续有效」勾上（订阅是持续关系），离开订阅必须一并撤回——否则按量声明的
+// 结束日被静默留空，等于用户没选就得到一条开放期声明（2026-09-16 加订阅分支时守卫抓到）。
+ok(elements["ov-billing-open-ended"].checked === false && elements["ov-billing-end"].value !== ""
+  && elements["ov-billing-end"].disabled === false,
+  "#5：离开订阅时「持续有效」一并撤回，按量声明不会静默变成开放期");
 billingCalls.length = 0;
 await elements["ov-billing-save"].onclick();
 await elements["ov-billing-save"].onclick();

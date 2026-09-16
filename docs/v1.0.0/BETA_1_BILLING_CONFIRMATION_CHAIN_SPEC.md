@@ -1,6 +1,6 @@
 # v1.0.0-beta.1 计费确认主链规格（B06 / B07）
 
-**状态：** v1.3（2026-09-16；按产品决策把声明结束日期改为**选填**——留空＝持续有效、开放到未来，用于「按量充值 / 长期付费，不知道哪天结束」的关系，见 §5.4a 与 D02）。v1.2（2026-09-15；v1.1 全部落地后，按产品决策收敛为「明确计费方式」单一路径：按缺什么问什么、同类组批量、保存→重新归因→重算→各面刷新，见 §5.2a/§5.3a/§5.7 与 §10），作为 Beta 1 P2 / B1-M3「计费闭环」的实现合同  
+**状态：** v1.4（2026-09-16；把用户声明的**订阅月费**接进「实际支出」，订阅改为持续有效，见 §10.3）。v1.3（2026-09-16；按产品决策把声明结束日期改为**选填**——留空＝持续有效、开放到未来，用于「按量充值 / 长期付费，不知道哪天结束」的关系，见 §5.4a 与 D02）。v1.2（2026-09-15；v1.1 全部落地后，按产品决策收敛为「明确计费方式」单一路径：按缺什么问什么、同类组批量、保存→重新归因→重算→各面刷新，见 §5.2a/§5.3a/§5.7 与 §10），作为 Beta 1 P2 / B1-M3「计费闭环」的实现合同  
 **日期：** 2026-09-16  
 **范围编号：** [发布规格](BETA_1_RELEASE_SPEC.md) B06、B07；真机矩阵 T06、T08、T10；[执行计划](BETA_1_EXECUTION_PLAN.md) E201–E208；PRD REQ-017–032、REQ-143–149；AC05、AC09、AC13、AC14、AC26、AC27、AC28  
 **关联文档：** [UAT 2026-09-15](UAT_FULL_2026-09-15.md)、[小闭环 UAT 清单](UAT_SMALL_LOOPS.md)、[总览后端接入规格](BETA_1_OVERVIEW_BACKEND_INTEGRATION_SPEC.md)、[设置页规格](BETA_1_SETTINGS_PAGE_SPEC.md)、[版本冻结记录](BETA_1_VERSION_FREEZE_2026-09-15.md)、[Provider 路由归属规格](../PROVIDER_ROUTE_ATTRIBUTION_SPEC.md)
@@ -53,7 +53,8 @@
 
 ### 2.3 计费边界（发布规格 §3.1，本规格不得放松）
 
-- 声明只改变**归因**（哪些用量在套餐内），永不产生「已付款」：`actual spend` 仍只来自账单/付款记录。
+- 声明只改变**归因**（哪些用量在套餐内），永不产生「已付款」：用量本身不会被声明标成"付过了"，`actual spend` 里的按量档仍只来自账单/付款记录。
+  **但不含订阅月费**（v1.3 澄清）：用户在「明确计费方式」里声明的**月费**是自报的固定支出，按 `BillingBasis::FixedSubscription`（定义原话：「**用户声明的**固定订阅费用」）进入「实际支出」的订阅档——与账单录入的 `metered_actual`/`host_billed` 并列不混。这条与「用量不产生已付款」不矛盾：一个月费是**关系**层的自报固定成本，不是把某批 usage 标成付过。
 - 币种永不相加；金额永远带 `currency` 与 `basis`。
 - `unknown` 不是声明：不写 `billing_declarations`，不入队重算。
 - 原始 `usage_facts` 不因任何声明/撤销/重算而变；守恒用 `data-reimport-verify` 与事实计数对拍。
@@ -351,4 +352,17 @@ skipped 208）、golden 15/15（Python 与 Rust 二进制各一遍）、全部 `
 - **推理修正**：v1.2 把「开放期」当成「自动扩展开关」而选择堵住（§3 事实 3 原文），但重算**没有**任何周期性重跑（`UNIQUE(revision_id)` + 成功即终态 + `recover` 只恢复已排队任务），所以留空既不改写已写归因，也不会自动覆盖后来同步进来的事实。允许之后不会引入「静默扩展」。见 §3 事实 3 的 v1.3 修正与 §5.4a。
 - **改动面**：`lib.rs::validate_desktop_declaration`（空 end 放行；仍拒非法起始、倒置的结束、晚于今天）；`workbench.html` 结束字段文案（「结束（选填）」）＋日期行下的「持续有效（不设结束日期）」勾选框；`workbench.js`（新增 `syncBillingOpenEnded` 作为不设结束日期的唯一入口、保存校验、三处 `invoke` 发 `null`、新增 `billingRangeText` 统一区间文案、`syncBillingDateBounds` 不把清空的字段填回去、作用范围句写「持续有效」、订阅分支强制撤销勾选）。
 - **守卫**：`lib.rs` 单测改名 `desktop_declaration_is_bounded_when_dated_and_open_ended_when_blank`；`verify-workbench-sources.mjs` 新增 5 条断言（默认不勾即保持有界、勾选后字段清空并禁用且作用范围写「持续有效」、勾选经 restep 仍在、预览发 `null`、保存发 `null`），并已确认回退时会红（摘掉勾选框的事件绑定后该段直接抛错）。
-- **留空的边界**（验收别误读）：留空声明的覆盖停在**保存那一刻**已入库的事实，之后同步进来的用量仍按量。对 `official_subscription` 以外的四种 kind，这不影响金额——它们写 `user_declared`，而排除谓词只认 `subscription_covered`。`official_subscription` 的日期控件本来就隐藏、由订阅锚点写成「锚点 – 今天」，本次**未改**：要让订阅持续覆盖未来用量需要一条显式的重跑路径（成功任务终态，`retry` 不收成功任务），**未做，属独立决定**。
+- **留空的边界**（验收别误读）：留空声明的覆盖停在**保存那一刻**已入库的事实，之后同步进来的用量仍按量。对 `official_subscription` 以外的四种 kind，这不影响金额——它们写 `user_declared`，而排除谓词只认 `subscription_covered`。订阅路径当时写成「锚点 – 今天」，**已在 §10.3 改为持续有效**（订阅月费是按月付的，写成今天会让它次月归零）；订阅覆盖未来用量仍需一条显式的重跑路径（成功任务终态，`retry` 不收成功任务），**未做，属独立决定**。
+
+### 10.3 声明的订阅月费进入「实际支出」（2026-09-16，同一分支）
+
+- **决定**：用户在「明确计费方式」里填的**月费**进入 `by_provider` 的 `FixedSubscription` 档，也就是概况「订阅月费」那一行与「实际支出」的订阅档（§2.3 的澄清）。
+- **根因是三处独立断链**（2026-09-16 真机：声明了 anthropic 20 USD/月，概况仍写「尚未设置套餐或账单」）：
+  1. `apply_subscription_fees` 只枚举价目表的 `catalog_2026_09.subscriptions`，而内置 `assets/pricing.json` **没有这一节**（整个文件无 `amount_per_month`）；
+  2. 设置 › 价格目录只能写**价卡**与**归属**（`price_overrides` 的 `cards`/`routes`），写不了订阅——那条路用户也走不通；
+  3. 订阅声明把结束日写成**今天**，即便接上了，月费也会在次月归零。
+  声明行的 `amount_minor`/`currency` 此前**没有任何算钱的消费方**（只有内部 MCP 与「当前计费声明」列表读那张表），所以那 20 USD 在任何数字上都不出现。
+- **改动面**：`summary.rs` 新增 `declared_subscription_fees` + `apply_declared_subscription_fees`，月费落地抽成 `add_fixed_subscription_fee` 供价目表与声明两条来源共用；调用点仍是 `monthly_summary`（`db` 与 `apply_host_bills` 同处可取）。**声明优先**：同一 provider 上价目表那条让位，一笔月费不摊两次。`billing_declarations` 是当前态表、撤销会软删它 → **撤销即停止扣**。
+- **四条边界**（单测钉住）：非 `official_subscription` 不摊（§3 事实 1）；金额或币种缺失不摊、不记 0（弹窗允许「金额暂不清楚」）；早于生效月不摊；晚于结束月不摊（到期后继续收月费是编造）。只进月、不进日。
+- **订阅改为持续有效**：`syncBillingDeclarationSteps` 的订阅分支不再写 `end = today`，改为勾上「持续有效」（结束日留空）。离开订阅（切按量/组织/中转）**必须一并撤回这个勾**——否则按量声明会被静默留成开放期（守卫 `verify-workbench-sources` 的 #5 断言抓到）。
+- **守卫**：`summary.rs` 三条单测，其中一条是**接线**测试（走 `monthly_summary` DTO）——只钉函数会漏掉「函数没被调用」这一类；`verify-workbench-sources.mjs` 的订阅路径断言改判 `effectiveEnd === null`，并新增离开订阅撤回勾选的断言。
