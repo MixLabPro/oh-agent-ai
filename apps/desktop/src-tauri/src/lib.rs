@@ -1356,6 +1356,9 @@ fn show_workbench(app: &AppHandle) {
 /// 分发）；平铺「最近会话」行已删，「recent」id 不再存在。
 fn tab_for_menu_id(id: &str) -> Option<&'static str> {
     match id {
+        // 首行「今日消耗」→ 用量页（今天那格 + 按小时面板就是它的下钻）；此前这个 id
+        // 落进 `_ => None`，点了没有任何反馈（2026-09-17 反馈）。
+        "today_tokens" => Some("calendar"),
         "today" | "daily" | "month" | "budget" | "subscription" => Some("overview"),
         "sync" => Some("sources"),
         _ => None,
@@ -4297,6 +4300,7 @@ mod tests {
             assert_eq!(tab_for_menu_id(id), Some("overview"), "id={id} 应跳总览");
         }
         assert_eq!(tab_for_menu_id("sync"), Some("sources"));
+        assert_eq!(tab_for_menu_id("today_tokens"), Some("calendar"), "首行今日消耗点击要有去处");
         for id in ["workbench", "refresh", "recent", "host:dsh", "session:dsh:0", "nope", ""] {
             assert_eq!(tab_for_menu_id(id), None, "id={id} 不是信息行导航");
         }
