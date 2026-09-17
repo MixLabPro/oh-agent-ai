@@ -12,7 +12,7 @@
 # 与 SCHEMA_VERSION（在 cli.py）无关：工具可以升版而 JSON schema 不变。
 # rust 分支上 Cargo.toml 的 version 必须跟这里一致，否则两个实现无法用同一条
 # `--version` 区分；tests/test_regressions.py 在有 Cargo.toml 时会断言。
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 # 两个子包：skills/（静态 SKILL.md 体检）+ agent/（会话行为/成本审计）。
 #

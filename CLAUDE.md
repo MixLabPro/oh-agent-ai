@@ -296,6 +296,14 @@ is excluded entirely.
 `nominal_vs_actual_cost`（已改名 `cache_counterfactual_cost`——"无缓存反事实"，
 与市场标价差 8~10 倍）让位给 §6.7 口径，不得回用。
 
+**2026-09-17 增补**：第五个量 `metered_declared`（归因估算——用户在计费声明里答过
+「经 X 按量付费」的用量，按 X 的价卡/原厂官方卡估）与 `metered_estimate` 同属估算档、
+不 summable；总览「按量费用」读 `MonthlySummary::metered_view()`（账单 > 归因估算 >
+默认估算，同计费方内取代、跨币分栏），预算 `estimate` profile 已用 = 该视图 + 订阅月费
+按天摊派。归因是**持续生效的规则**（`sync_facts` 末尾 `billing_apply_active_declarations`），
+不是保存时的一次物化。token 面（`tokens_by_host`、日历、小时图、会话列表）恒**全量**，
+只有金额面排除订阅覆盖——两者曾共用一份聚合，订阅声明一生效用量就缩水。
+
 归属的粒度是 **(host, provider)** 而非 host：`HostAmount.amounts_by_basis` 一档
 只有一个数，claude-code 宿主内 anthropic(USD)+minimax(CNY) 同桶跨币相加就是
 编造——所以权威归属在 `MonthlySummary.by_provider`（键 `"host/provider"`，条目

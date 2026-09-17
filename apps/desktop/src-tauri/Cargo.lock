@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "agent-vitals-domain"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "regex",
  "serde_json",
@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "agent-vitals-hosts"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "agent-vitals-domain",
  "agent-vitals-provider",
@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "agent-vitals-menubar"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "agent-vitals-data",
  "agent-vitals-domain",
@@ -69,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "agent-vitals-runtime"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "agent-vitals-data",
  "agent-vitals-domain",

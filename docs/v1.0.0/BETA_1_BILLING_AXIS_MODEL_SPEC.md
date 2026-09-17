@@ -1,6 +1,15 @@
 # v1.0.0-beta.1 计费三轴模型规格（宿主 × 模型 × 计费方/计费机制）
 
 **状态：** v1.0 Draft（2026-09-16）。**问题清单已按真机取证，§7 有 4 个待产品定夺的决策点，未定之前不动代码。**
+
+> **2026-09-17 修订（产品定向，已实装）——本节覆盖下文与 D02 冲突的条款：**
+> 1. **按量/中转声明改金额**：`user_declared` 归因的事实从 `MeteredEstimate` 搬到新档 `MeteredDeclared`，归到声明的计费方名下，价卡按「声明计费方的卡 → 原厂官方卡 → 宿主默认卡」解析；仍是估算档、不 summable。D02「按量声明不改金额」与 R4 **作废**。
+> 2. **KPI「按量费用」三级口径**：`metered_view` = 账单（`metered_actual`/`host_billed`）> 归因估算 > 默认估算，同计费方内取代、跨币分栏，带 `actual/estimate/mixed` 标签（`data_contract.rs`）。
+> 3. **结算币种跟计费方走**：声明的 `settlement` 作用域（schema v15）> 目录卡片币种 > CNY；fallback 估算按 `fx_estimate` 折成结算币并标 `fair-market-fallback-fx`。
+> 4. **声明是持续生效的规则**：每轮 `sync-facts` 末尾把当前有效声明套用到新事实（`billing_apply_active_declarations`）；开放期声明覆盖之后的事实——§3「事实 3」的顾虑作废。作用域默认计费方级，模型清单只在勾「仅限这些模型」时写。
+> 5. **候选与声明一致性**：被有效声明占着的候选恒 `accepted`（reopen 拒绝、同步自愈）。
+> 6. **预算口径**（取代 09-07）：`estimate` profile 已用 = 按量三级口径 + 订阅月费按天摊派。
+> 执行记录见 `crates/agent-vitals-domain/src/domain/data_contract.rs`（MeteredView）、`runtime/src/summary.rs`（declared_provider_amounts）、`runtime/src/budget.rs`。
 **日期：** 2026-09-16
 **范围编号：** [发布规格](BETA_1_RELEASE_SPEC.md) B06、B07
 **关联文档：** [计费确认主链规格](BETA_1_BILLING_CONFIRMATION_CHAIN_SPEC.md)（v1.4）、[自动归因规格](BETA_1_AUTO_ATTRIBUTION_SPEC.md)、[设置页规格](BETA_1_SETTINGS_PAGE_SPEC.md)、[Provider 路由归属规格](../PROVIDER_ROUTE_ATTRIBUTION_SPEC.md)（Draft）、[ATTRIBUTABLE_WASTE §6](../ATTRIBUTABLE_WASTE.md)
