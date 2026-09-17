@@ -28,8 +28,16 @@ fn config_path_at(dh: &Path) -> PathBuf {
 
 const BUDGET_ORIGIN_FILE: &str = "budget-origin.json";
 
-/// 双预算的金额口径选择。估算观察预算只看可解释的名义估算；已确认按量
-/// 支出预算只看真实按量/宿主账单，固定订阅和 API 等价值永不混入。
+/// 双预算的金额口径选择。
+///
+/// - `estimate`（观察预算，总览预算卡读它）= 「按量费用」三级口径（账单 > 归因估算 >
+///   默认估算，`data_contract::metered_view` 的同一条取代规则）——2026-09-17 之前只
+///   读 `MeteredEstimate`，归因把估算搬进 `MeteredDeclared` 后卡片直接归零，用户看到
+///   「¥0 / ¥500」以为没消耗。
+/// - `confirmed`（已确认支出预算）只看真实按量/宿主账单。
+///
+/// 固定订阅和 API 等价值都不在这里——订阅月费按天摊进
+/// [`budget_profiles_status_sql_at`] 的 `subscription_*` 字段，与按量分开报。
 pub fn budget_profile_spent_minor<'a, I>(
     amounts: I,
     profile_id: &str,
@@ -38,22 +46,63 @@ pub fn budget_profile_spent_minor<'a, I>(
 where
     I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
 {
-    let bases: &[agent_vitals_data::projection::BillingBasis] = match profile_id {
-        "estimate" => &[agent_vitals_data::projection::BillingBasis::MeteredEstimate],
-        "confirmed" => &[
-            agent_vitals_data::projection::BillingBasis::MeteredActual,
-            agent_vitals_data::projection::BillingBasis::HostBilled,
-        ],
-        _ => return 0,
-    };
-    let total = amounts
-        .into_iter()
-        .filter(|amount| amount.currency.as_deref() == Some(currency))
-        .flat_map(|amount| amount.amounts_by_basis.iter())
-        .filter(|(basis, _)| bases.contains(basis))
-        .map(|(_, value)| *value)
-        .fold(0.0, |sum, value| sum + value);
+    use agent_vitals_data::projection::BillingBasis;
+    let mut total = 0.0f64;
+    for amount in amounts.into_iter().filter(|a| a.currency.as_deref() == Some(currency)) {
+        let get = |b: BillingBasis| amount.amounts_by_basis.get(&b).copied().unwrap_or(0.0);
+        let actual = get(BillingBasis::MeteredActual) + get(BillingBasis::HostBilled);
+        total += match profile_id {
+            // 同 provider 内账单取代估算，与 metered_view 一致。
+            "estimate" => if actual > 0.0 { actual } else { get(BillingBasis::MeteredDeclared) + get(BillingBasis::MeteredEstimate) },
+            "confirmed" => actual,
+            _ => return 0,
+        };
+    }
     agent_vitals_domain::util::pyround(total * 100.0, 0) as i64
+}
+
+/// 订阅月费在 `currency` 口径下的合计（分）：同币直接加；异币走 `fx_estimate`
+/// 折算并记 `fx_applied`（预算是规划数、估算档，允许 ≈；实付面永远分币）。
+/// 没有折算率的币种跳过并计入 `skipped`（不冒充）。
+pub fn subscription_fees_minor<'a, I>(
+    amounts: I,
+    currency: &str,
+    pricing: &serde_json::Value,
+) -> (i64, bool, Vec<String>)
+where
+    I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
+{
+    use agent_vitals_data::projection::BillingBasis;
+    let mut total = 0.0f64;
+    let mut fx_applied = false;
+    let mut skipped = Vec::new();
+    for amount in amounts {
+        let Some(fee) = amount.amounts_by_basis.get(&BillingBasis::FixedSubscription).copied() else { continue };
+        if fee <= 0.0 { continue; }
+        let Some(cur) = amount.currency.as_deref() else { skipped.push(amount.host_id.clone()); continue };
+        if cur == currency {
+            total += fee;
+        } else if let Some(v) = agent_vitals_domain::cost::to_settlement_currency(fee, cur, currency, pricing) {
+            total += v;
+            fx_applied = true;
+        } else {
+            skipped.push(amount.host_id.clone());
+        }
+    }
+    (agent_vitals_domain::util::pyround(total * 100.0, 0) as i64, fx_applied, skipped)
+}
+
+/// 当月天数 / 今天是第几天（北京日期）——订阅月费按天摊派用。
+fn month_day_progress(today: &str) -> (i64, i64) {
+    let y: i64 = today.get(0..4).and_then(|v| v.parse().ok()).unwrap_or(1970);
+    let m: i64 = today.get(5..7).and_then(|v| v.parse().ok()).unwrap_or(1);
+    let d: i64 = today.get(8..10).and_then(|v| v.parse().ok()).unwrap_or(1);
+    let days_in_month = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 29 } else { 28 },
+    };
+    (days_in_month, d.clamp(1, days_in_month))
 }
 
 pub fn budget_profile_has_unresolved<'a, I>(
@@ -65,7 +114,10 @@ where
     I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
 {
     let relevant = match profile_id {
-        "estimate" => &[agent_vitals_data::projection::BillingBasis::MeteredEstimate][..],
+        "estimate" => &[
+            agent_vitals_data::projection::BillingBasis::MeteredEstimate,
+            agent_vitals_data::projection::BillingBasis::MeteredDeclared,
+        ][..],
         "confirmed" => &[
             agent_vitals_data::projection::BillingBasis::MeteredActual,
             agent_vitals_data::projection::BillingBasis::HostBilled,
@@ -103,10 +155,26 @@ pub fn budget_profiles_status_sql_at(data_home: &Path, month: &str) -> Option<Va
     };
     let values = summary.by_provider.values().collect::<Vec<_>>();
     let daily_values = daily.by_provider.values().collect::<Vec<_>>();
+    // 订阅月费按天摊进观察预算（2026-09-17 产品定向：预算消耗 = 订阅 + 按量的总体，
+    // 否则只有订阅、没有按量的用户预算卡永远 ¥0，看不到自己的消耗）。摊派 =
+    // 月费 × 已过天数 / 当月天数；只进 `estimate` 口径，`confirmed` 仍只认账单。
+    let pricing = crate::price_overrides::merged_main(data_home);
+    let today = crate::clock::today_beijing();
+    let (days_in_month, day_of_month) = month_day_progress(&today);
+    let is_current_month = today.starts_with(month);
+    let elapsed_days = if is_current_month { day_of_month } else { days_in_month };
     let rows = profiles.into_iter().map(|profile| {
         let spent_minor = budget_profile_spent_minor(
             values.iter().copied(), &profile.profile_id, &profile.currency,
         );
+        let (subscription_minor, subscription_fx_applied, subscription_skipped) =
+            subscription_fees_minor(values.iter().copied(), &profile.currency, &pricing);
+        let amortize = profile.profile_id == "estimate" && subscription_minor > 0;
+        let subscription_amortized_minor = if amortize {
+            subscription_minor * elapsed_days / days_in_month
+        } else { 0 };
+        let subscription_daily_minor = if amortize { subscription_minor / days_in_month } else { 0 };
+        let total_spent_minor = spent_minor + subscription_amortized_minor;
         let daily_spent_minor = budget_profile_spent_minor(
             daily_values.iter().copied(), &profile.profile_id, &profile.currency,
         );
@@ -116,11 +184,12 @@ pub fn budget_profiles_status_sql_at(data_home: &Path, month: &str) -> Option<Va
         let daily_has_unresolved = budget_profile_has_unresolved(
             daily_values.iter().copied(), &profile.profile_id, &profile.currency,
         );
-        let ratio_bp = (!has_unresolved && spent_minor > 0)
-            .then(|| spent_minor * 10_000 / profile.monthly_minor);
+        let daily_total_minor = daily_spent_minor + subscription_daily_minor;
+        let ratio_bp = (!has_unresolved && total_spent_minor > 0)
+            .then(|| total_spent_minor * 10_000 / profile.monthly_minor);
         let daily_ratio_bp = profile.daily_minor.and_then(|limit| {
-            (!daily_has_unresolved && daily_spent_minor > 0)
-                .then(|| daily_spent_minor * 10_000 / limit)
+            (!daily_has_unresolved && daily_total_minor > 0)
+                .then(|| daily_total_minor * 10_000 / limit)
         });
         let level = match (has_unresolved, ratio_bp) {
             (true, _) => "incomplete",
@@ -144,11 +213,22 @@ pub fn budget_profiles_status_sql_at(data_home: &Path, month: &str) -> Option<Va
             "daily_minor": profile.daily_minor,
             "warning_ratio_bp": profile.warning_ratio_bp,
             "updated_at_ms": profile.updated_at_ms,
+            // 按量部分（三级口径）；`total_spent_minor` = 按量 + 订阅摊派，ratio 按它算。
             "spent_minor": spent_minor,
+            "metered_spent_minor": spent_minor,
+            "subscription_minor": subscription_minor,
+            "subscription_amortized_minor": subscription_amortized_minor,
+            "subscription_days_elapsed": if amortize { elapsed_days } else { 0 },
+            "days_in_month": days_in_month,
+            "subscription_fx_applied": subscription_fx_applied,
+            "subscription_skipped": subscription_skipped,
+            "total_spent_minor": total_spent_minor,
             "ratio_bp": ratio_bp,
             "level": level,
             "has_unresolved": has_unresolved,
             "daily_spent_minor": daily_spent_minor,
+            "daily_subscription_minor": subscription_daily_minor,
+            "daily_total_minor": daily_total_minor,
             "daily_ratio_bp": daily_ratio_bp,
             "daily_level": daily_level,
             "daily_has_unresolved": daily_has_unresolved,
@@ -842,9 +922,28 @@ mod tests {
                 freshness: Freshness::unavailable(),
             },
         ];
-        assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "CNY"), 12_345);
+        // estimate = 「按量费用」三级口径：claude 的估算 123.45 + dsh 的账单 201.5
+        // （账单条目按账单计，不再按估算）；订阅 999 不进；USD 不跨币。
+        assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "CNY"), 32_495);
         assert_eq!(budget_profile_spent_minor(&amounts, "confirmed", "CNY"), 20_150);
         assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "USD"), 7_700);
+        // 归因估算（MeteredDeclared）同样进 estimate；同条目有账单时被账单取代。
+        amounts[0].amounts_by_basis.insert(BillingBasis::MeteredDeclared, 10.0);
+        assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "CNY"), 33_495);
+        amounts[0].amounts_by_basis.insert(BillingBasis::MeteredActual, 50.0);
+        assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "CNY"), 25_150, "账单取代该条目的两档估算");
+        amounts[0].amounts_by_basis.remove(&BillingBasis::MeteredActual);
+        amounts[0].amounts_by_basis.remove(&BillingBasis::MeteredDeclared);
+        // 订阅月费口径：同币直加，USD 按 fx_estimate 折算并标记。
+        let pricing = agent_vitals_domain::cost::load_pricing();
+        let (fees, fx, skipped) = subscription_fees_minor(amounts.iter(), "CNY", &pricing);
+        assert_eq!((fees, fx, skipped.len()), (99_900, false, 0));
+        amounts[2].amounts_by_basis.insert(BillingBasis::FixedSubscription, 20.0);
+        let rate = pricing["fx_estimate"]["USD_CNY"].as_f64().unwrap();
+        let (fees, fx, _) = subscription_fees_minor(amounts.iter(), "CNY", &pricing);
+        assert_eq!((fees, fx), (99_900 + (20.0 * rate * 100.0).round() as i64, true));
+        assert_eq!(month_day_progress("2026-09-17"), (30, 17));
+        assert_eq!(month_day_progress("2028-02-29"), (29, 29));
         assert!(!budget_profile_has_unresolved(amounts.iter(), "estimate", "CNY"));
         amounts[0].has_unresolved = true;
         assert!(budget_profile_has_unresolved(amounts.iter(), "estimate", "CNY"));

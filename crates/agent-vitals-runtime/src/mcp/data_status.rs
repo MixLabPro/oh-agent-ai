@@ -182,31 +182,87 @@ fn fact_tokens(uncached: i64, cache_read: i64, cache_write: i64, output: i64) ->
 /// 没有这个总量时，前端的占比只能拿「全库未计价 ÷ 本月总量」去算——两个时间
 /// 跨度相除，2026-09-14 实测算出的"少算了约 11%"就是这么来的（1.09B ÷ 9.60B）。
 /// 给出同跨度的分母，占比才有意义。
-fn total_tokens(conn: &Connection) -> i64 {
+/// 「还不知道是哪家服务商」的 token：provider 为 NULL 或路由证据冲突、且用户没在
+/// 计费声明里答过（任意归因种类、当前 saved 修订——否则声明了 shengsuanyun 中转之后
+/// 总览仍喊 5.46B 未归属，2026-09-16 真机）。**WorkBuddy 不计**：它的事实按设计
+/// provider 恒 NULL（平台积分 / 自配 key / 限免请求级不可判，WORKBUDDY_ONBOARDING
+/// §2.1），用户在待确认面板里无从回答，喊它只会产生一条永远关不掉的提示；它已经
+/// 整宿主计在 unpriced 里。
+fn unresolved_tokens(conn: &Connection, window: Option<(i64, i64)>) -> i64 {
     conn.query_row(
-        "SELECT COALESCE(SUM(uncached_input_tokens + cache_read_tokens +
-                cache_write_tokens + output_tokens), 0)
-         FROM usage_facts
-         WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'",
+        &format!(
+            "SELECT COALESCE(SUM(uncached_input_tokens + cache_read_tokens +
+                    cache_write_tokens + output_tokens), 0)
+             FROM usage_facts AS f
+             WHERE f.deleted_at_ms IS NULL
+               AND f.observation_kind != 'legacy_aggregate'
+               AND f.host != 'workbuddy'
+               AND (f.provider_id IS NULL OR EXISTS (
+                    SELECT 1 FROM data_quality_issues AS q
+                    WHERE q.scope_key = f.fact_id
+                      AND q.code = 'conflicting_route_evidence'
+                      AND q.resolved_at_ms IS NULL
+               ))
+               AND NOT EXISTS (
+                    SELECT 1 FROM billing_fact_attributions ba
+                    JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+                    WHERE ba.fact_id = f.fact_id AND br.change_kind = 'saved'
+                      AND br.revision_number = (SELECT MAX(br2.revision_number)
+                        FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+               ){}",
+            window_sql(window).replace("event_ts_ms", "f.event_ts_ms")
+        ),
         [],
         |r| r.get::<_, i64>(0),
     )
     .unwrap_or(0)
 }
 
-fn unpriced_tokens(conn: &Connection, payload: Option<&Value>) -> i64 {
+/// `window = None` 全库；`Some((start, end))` 只看该毫秒窗口（总览的「本月」行）。
+/// 三个指标必须同窗口同谓词，占比才有意义。
+fn window_sql(window: Option<(i64, i64)>) -> String {
+    match window {
+        Some((start, end)) => format!(" AND event_ts_ms IS NOT NULL AND event_ts_ms >= {start} AND event_ts_ms < {end}"),
+        None => String::new(),
+    }
+}
+
+fn total_tokens(conn: &Connection, window: Option<(i64, i64)>) -> i64 {
+    conn.query_row(
+        &format!(
+            "SELECT COALESCE(SUM(uncached_input_tokens + cache_read_tokens +
+                cache_write_tokens + output_tokens), 0)
+             FROM usage_facts
+             WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'{}",
+            window_sql(window)
+        ),
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+}
+
+/// 无价卡 token 的两个口径：`.0` 全部；`.1` 其中**按量**（未被当前订阅声明覆盖）
+/// 的那部分——只有它会让「按量费用」少算。套餐内的无价卡模型（智谱订阅里的 glm-*）
+/// 钱已经在月费里，缺卡只让「按官方价折算」那个参考数偏低，不该用同一条警告吓人
+/// （2026-09-16：用户把归因全做完了，仍看到"715M tokens 没有价格"以为归因没生效）。
+/// 缺价卡的型号清单（[`unpriced_tokens`] 的副产品）：`(host, 该补到哪家的卡, 型号,
+/// tokens, 是否套餐内)`。「补到哪家」= 用户归因的计费方 > 事实自带 provider > 目录
+/// 路由 > 空（不知道）。总览的「查看价格表」落到设置页时，用户要看到的就是这张表
+/// 和每行一个「补这张卡」——不是两张空表单（2026-09-17 反馈）。
+type UnpricedModel = (String, String, String, i64, bool);
+
+fn unpriced_tokens(conn: &Connection, payload: Option<&Value>, window: Option<(i64, i64)>) -> (i64, i64) {
+    let (all, metered, _) = unpriced_tokens_detailed(conn, payload, window);
+    (all, metered)
+}
+
+fn unpriced_tokens_detailed(
+    conn: &Connection, payload: Option<&Value>, window: Option<(i64, i64)>,
+) -> (i64, i64, Vec<UnpricedModel>) {
     let Some(payload) = payload else {
-        return conn
-            .query_row(
-                "SELECT COALESCE(SUM(uncached_input_tokens + cache_read_tokens +
-                        cache_write_tokens + output_tokens), 0)
-                 FROM usage_facts
-                 WHERE deleted_at_ms IS NULL
-                   AND observation_kind != 'legacy_aggregate'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(0);
+        let all = total_tokens(conn, window);
+        return (all, all, Vec::new());
     };
     let main = payload.get("pricing").unwrap_or(payload);
     let codex = payload.get("codex_pricing").unwrap_or(payload);
@@ -216,14 +272,31 @@ fn unpriced_tokens(conn: &Connection, payload: Option<&Value>) -> i64 {
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     let mut total_unpriced = 0i64;
-    let Ok(mut stmt) = conn.prepare(
+    let mut metered_unpriced = 0i64;
+    // (host, card_provider, model) → (tokens, covered)
+    let mut models: std::collections::BTreeMap<(String, String, String), (i64, bool)> = std::collections::BTreeMap::new();
+    let Ok(mut stmt) = conn.prepare(&format!(
         "SELECT host, provider_id, model_id, uncached_input_tokens,
-                cache_read_tokens, cache_write_tokens, output_tokens
+                cache_read_tokens, cache_write_tokens, output_tokens,
+                EXISTS (SELECT 1 FROM billing_fact_attributions ba
+                    JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+                    WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
+                      AND br.change_kind = 'saved'
+                      AND br.revision_number = (SELECT MAX(br2.revision_number)
+                        FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)),
+                (SELECT MIN(bd.provider_id) FROM billing_fact_attributions ba
+                    JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+                    JOIN billing_declarations bd ON bd.declaration_id = br.declaration_id
+                    WHERE ba.fact_id = usage_facts.fact_id
+                      AND br.change_kind = 'saved' AND bd.deleted_at_ms IS NULL
+                      AND br.revision_number = (SELECT MAX(br2.revision_number)
+                        FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id))
          FROM usage_facts
          WHERE deleted_at_ms IS NULL
-           AND observation_kind != 'legacy_aggregate'",
-    ) else {
-        return 0;
+           AND observation_kind != 'legacy_aggregate'{}",
+        window_sql(window)
+    )) else {
+        return (0, 0, Vec::new());
     };
     let Ok(rows) = stmt.query_map([], |r| {
         Ok((
@@ -234,15 +307,30 @@ fn unpriced_tokens(conn: &Connection, payload: Option<&Value>) -> i64 {
             r.get::<_, i64>(4)?,
             r.get::<_, i64>(5)?,
             r.get::<_, i64>(6)?,
+            r.get::<_, bool>(7)?,
+            r.get::<_, Option<String>>(8)?,
         ))
     }) else {
-        return 0;
+        return (0, 0, Vec::new());
     };
     for row in rows.flatten() {
-        let (host, provider, model, uncached, cache_read, cache_write, output) = row;
+        // `declared` = 任意归因种类的声明计费方：订阅覆盖的 glm-* 该补到 zhipu-glm 的卡，
+        // 中转归因的 gpt-* 该补到 shengsuanyun 的卡。
+        let (host, provider, model, uncached, cache_read, cache_write, output, covered, declared) = row;
         let tokens = fact_tokens(uncached, cache_read, cache_write, output);
+        let card_provider = declared.clone()
+            .or_else(|| provider.clone())
+            .or_else(|| model.as_deref().and_then(|m| agent_vitals_domain::cost::billing_route_of(m, main)).map(|(p, _)| p))
+            .unwrap_or_default();
+        let mut count = |t: i64, model_key: &str| {
+            total_unpriced += t;
+            if !covered { metered_unpriced += t; }
+            let slot = models.entry((host.clone(), card_provider.clone(), model_key.to_string())).or_insert((0, true));
+            slot.0 += t;
+            slot.1 &= covered;
+        };
         let Some(model) = model else {
-            total_unpriced += tokens;
+            count(tokens, "<unknown>");
             continue;
         };
         // WorkBuddy（E4b）：事实一律 provider null——平台积分 / 自配 key / 限免
@@ -250,8 +338,20 @@ fn unpriced_tokens(conn: &Connection, payload: Option<&Value>) -> i64 {
         // DSH 价卡（真机 `deepseek-v4-flash` ×62 会命中 deepseek-official 卡，
         // 那是给「路由证据缺失」的 token 借一张别家的价卡）——整宿主计 unpriced。
         if host == "workbuddy" {
-            total_unpriced += tokens;
+            count(tokens, &model);
             continue;
+        }
+        // 用户归因到某计费方的事实：那家的价卡（含设置里补的卡）收录了该模型就算有价
+        // ——与 summary 的归因计价同一条判定（`declared_card_covers`），否则用户在
+        // 价格目录里给胜算云补了卡，总览仍喊"没有价格"。
+        if let Some(declared) = declared.as_deref() {
+            if agent_vitals_domain::cost::declared_card_covers(declared, &model, main) {
+                continue;
+            }
+            // 归因到中转的事实：目录里原厂官方卡也算有价（summary 的归因计价就按它估）。
+            if agent_vitals_domain::cost::official_card_for(&model, main, Some(declared)).is_some() {
+                continue;
+            }
         }
         let priced = if host == "codex" {
             agent_vitals_domain::cost::codex_resolve_entry(&model, "standard", entries).is_some()
@@ -298,10 +398,15 @@ fn unpriced_tokens(conn: &Connection, payload: Option<&Value>) -> i64 {
                 == Some(0)
         };
         if !priced {
-            total_unpriced += tokens;
+            count(tokens, &model);
         }
     }
-    total_unpriced
+    let mut list: Vec<UnpricedModel> = models.into_iter()
+        .filter(|(_, (t, _))| *t > 0)
+        .map(|((host, provider, model), (t, covered))| (host, provider, model, t, covered))
+        .collect();
+    list.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.2.cmp(&b.2)));
+    (total_unpriced, metered_unpriced, list)
 }
 
 /// `PRAGMA integrity_check` 的进程级缓存（2026-09-14 性能取证）。
@@ -474,23 +579,14 @@ pub fn collect_report_at_depth(
     let issues = count("SELECT COUNT(*) FROM data_quality_issues WHERE resolved_at_ms IS NULL");
     let pricing_snapshots = count("SELECT COUNT(*) FROM pricing_snapshots");
     let host_bills = count("SELECT COUNT(*) FROM host_bills WHERE deleted_at_ms IS NULL");
-    let unresolved_tokens = conn
-        .query_row(
-            "SELECT COALESCE(SUM(uncached_input_tokens + cache_read_tokens +
-                    cache_write_tokens + output_tokens), 0)
-             FROM usage_facts AS f
-             WHERE f.deleted_at_ms IS NULL
-               AND f.observation_kind != 'legacy_aggregate'
-               AND (f.provider_id IS NULL OR EXISTS (
-                    SELECT 1 FROM data_quality_issues AS q
-                    WHERE q.scope_key = f.fact_id
-                      AND q.code = 'conflicting_route_evidence'
-                      AND q.resolved_at_ms IS NULL
-               ))",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap_or(0);
+    // 本月同款三指标先算（函数名与下面的局部变量同名，绑定后就遮蔽了）：总览把
+    // 这两条提示渲染在「本月已处理」下面，而待确认面板也只处理当月——全库累计的数
+    // 用户在 UI 里根本消不掉（历史月份的未归因只能靠把声明起始日提前）。本月的数
+    // 才是"你现在能做什么"，全库的数留作历史脚注。
+    let month = crate::clock::current_month_beijing();
+    let month_window = agent_vitals_data::authority_query::beijing_month_bounds_ms(&month);
+    let unresolved_tokens_month = unresolved_tokens(conn, month_window);
+    let unresolved_tokens = unresolved_tokens(conn, None);
     let pricing_latest = conn
         .query_row(
             "SELECT pricing_version, captured_at_ms, source_kind FROM pricing_snapshots
@@ -518,8 +614,11 @@ pub fn collect_report_at_depth(
             payload
         })
     });
-    let unpriced_tokens = unpriced_tokens(conn, pricing_payload.as_ref());
-    let total_tokens = total_tokens(conn);
+    let (unpriced_tokens_month, unpriced_metered_tokens_month, unpriced_models_month) =
+        unpriced_tokens_detailed(conn, pricing_payload.as_ref(), month_window);
+    let (unpriced_tokens, unpriced_metered_tokens) = unpriced_tokens(conn, pricing_payload.as_ref(), None);
+    let total_tokens_month = total_tokens(conn, month_window);
+    let total_tokens = total_tokens(conn, None);
     let pricing_stale = pricing_latest
         .as_ref()
         .map(|(_, captured_at_ms, _)| {
@@ -619,6 +718,19 @@ pub fn collect_report_at_depth(
         "unpriced_tokens": unpriced_tokens,
         // 同跨度的分母（见 total_tokens 的注释）。
         "total_tokens": total_tokens,
+        "month": month,
+        "unresolved_tokens_month": unresolved_tokens_month,
+        "unpriced_tokens_month": unpriced_tokens_month,
+        // 其中按量（未被订阅覆盖）的部分——只有它会让「按量费用」少算；其余只影响
+        // 「按官方价折算」参考数。
+        "unpriced_metered_tokens": unpriced_metered_tokens,
+        "unpriced_metered_tokens_month": unpriced_metered_tokens_month,
+        // 本月缺价卡的型号（按 tokens 降序，最多 20 条）——设置页「价格目录」据此列出
+        // 「补这张卡」清单。`provider` 是该补到哪家的卡；`covered` = 在套餐内（只影响折算参考）。
+        "unpriced_models_month": unpriced_models_month.iter().take(20).map(|(host, provider, model, tokens, covered)| json!({
+            "host": host, "provider": provider, "model": model, "tokens": tokens, "covered": covered,
+        })).collect::<Vec<_>>(),
+        "total_tokens_month": total_tokens_month,
         "host_bills": host_bills,
         "recent_runs": runs,
         "by_host": by_host,
@@ -916,6 +1028,20 @@ mod tests {
         assert_eq!(report["unresolved_tokens"], 1_000);
         assert_eq!(report["unpriced_tokens"], 1_000);
         assert_eq!(report["health"], "warn");
+
+        // 用户在计费声明里把「服务商未知」的这批答成了 shengsuanyun 中转
+        // （user_declared 归因）→ 它不再是「不知道是哪家服务商」。撤销后回到未归属。
+        db.billing_declaration_revision_save(
+            "rev-q", "decl-q", None, "codex", "shengsuanyun", "third_party", None, None, None,
+            "1970-01-01", None, None, None, &[("provider", "unresolved")], 2,
+        ).unwrap();
+        db.billing_recalculation_enqueue("job-q", "decl-q", "rev-q", 3).unwrap();
+        assert!(db.billing_recalculation_run("job-q", 4).unwrap());
+        let report = collect_report(db.conn(), true, false);
+        assert_eq!(report["unresolved_tokens"], 0, "已声明中转的用量不再喊「未归属」");
+        db.billing_declaration_revision_revoke("rev-q-revoke", "decl-q", "rev-q", 5).unwrap();
+        let report = collect_report(db.conn(), true, false);
+        assert_eq!(report["unresolved_tokens"], 1_000);
 
         let _ = std::fs::remove_dir_all(&home);
     }

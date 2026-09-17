@@ -2,7 +2,6 @@
 
 use std::path::Path;
 
-use agent_vitals_data::authority::BudgetProfile;
 use serde_json::{json, Value};
 
 use super::{build_envelope, AuthorityHandle, ToolError, ToolSpec};
@@ -34,90 +33,21 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         return Err(ToolError::new("invalid_argument", format!("invalid `month`: {month} (expect YYYY-MM)")));
     }
     let handle = AuthorityHandle::open(data_home)?;
-    let profiles = read_profiles(handle.conn())?;
-    let summary = {
-        use agent_vitals_data::repository::SummaryRepository;
-        crate::summary::SqlSummaryRepository::at(data_home).monthly_summary(
-            &agent_vitals_data::repository::MonthlySummaryQuery { month: month.clone() },
-        )
-    };
-    let daily = {
-        use agent_vitals_data::repository::SummaryRepository;
-        crate::summary::SqlSummaryRepository::at(data_home).daily_summary(
-            &agent_vitals_data::repository::DailySummaryQuery {
-                date: crate::clock::today_beijing(),
-            },
-        )
-    };
-    let amounts = summary.by_provider.values().collect::<Vec<_>>();
-    let daily_amounts = daily.by_provider.values().collect::<Vec<_>>();
+    // 与桌面 / CLI 同一份计算（`budget::budget_profiles_status_sql_at`）：此前这里手抄了
+    // 一份 spent/ratio/level，订阅摊派与三级按量口径加进去之后 MCP 会和总览卡对不上
+    // （2026-09-17）。
+    let status = crate::budget::budget_profiles_status_sql_at(data_home, &month)
+        .ok_or_else(|| ToolError::new("internal_error", "budget profile status unavailable"))?;
+    let coverage = status.get("coverage").cloned().unwrap_or_else(super::coverage_not_applicable);
     let data = json!({
         "month": month,
-        "profiles": profiles.into_iter().map(|profile| {
-            let spent_minor = crate::budget::budget_profile_spent_minor(
-                amounts.iter().copied(), &profile.profile_id, &profile.currency,
-            );
-            let daily_spent_minor = crate::budget::budget_profile_spent_minor(
-                daily_amounts.iter().copied(), &profile.profile_id, &profile.currency,
-            );
-            let has_unresolved = crate::budget::budget_profile_has_unresolved(
-                amounts.iter().copied(), &profile.profile_id, &profile.currency,
-            );
-            let daily_has_unresolved = crate::budget::budget_profile_has_unresolved(
-                daily_amounts.iter().copied(), &profile.profile_id, &profile.currency,
-            );
-            let ratio_bp = (!has_unresolved && spent_minor > 0)
-                .then(|| spent_minor * 10_000 / profile.monthly_minor);
-            let daily_ratio_bp = profile.daily_minor.and_then(|limit| {
-                (!daily_has_unresolved && daily_spent_minor > 0)
-                    .then(|| daily_spent_minor * 10_000 / limit)
-            });
-            let level = match (has_unresolved, ratio_bp) {
-                (true, _) => "incomplete",
-                (false, Some(r)) if r >= 10_000 => "exceeded",
-                (false, Some(r)) if r >= profile.warning_ratio_bp => "warn",
-                (false, Some(_)) => "ok",
-                (false, None) => "no_data",
-            };
-            let daily_level = match (daily_has_unresolved, daily_ratio_bp) {
-                (true, _) => "incomplete",
-                (false, Some(r)) if r >= 10_000 => "exceeded",
-                (false, Some(r)) if r >= profile.warning_ratio_bp => "warn",
-                (false, Some(_)) => "ok",
-                (false, None) if profile.daily_minor.is_some() => "no_data",
-                (false, None) => "disabled",
-            };
-            json!({
-                "profile_id": profile.profile_id, "currency": profile.currency,
-                "monthly_minor": profile.monthly_minor, "daily_minor": profile.daily_minor,
-                "warning_ratio_bp": profile.warning_ratio_bp, "updated_at_ms": profile.updated_at_ms,
-                "spent_minor": spent_minor, "ratio_bp": ratio_bp, "level": level,
-                "has_unresolved": has_unresolved,
-                "daily_spent_minor": daily_spent_minor,
-                "daily_ratio_bp": daily_ratio_bp, "daily_level": daily_level,
-                "daily_has_unresolved": daily_has_unresolved,
-            })
-        }).collect::<Vec<_>>(),
+        "profiles": status.get("profiles").cloned().unwrap_or_else(|| json!([])),
     });
     Ok(build_envelope(
         handle.conn(), handle.authority_state(), None,
-        summary.coverage.to_json(), Vec::new(), data,
+        coverage, Vec::new(), data,
     ))
 }
-
-fn read_profiles(conn: &rusqlite::Connection) -> Result<Vec<BudgetProfile>, ToolError> {
-    let mut stmt = conn.prepare(
-        "SELECT profile_id, currency, monthly_minor, daily_minor,
-                warning_ratio_bp, updated_at_ms
-         FROM budget_profiles ORDER BY profile_id",
-    ).map_err(|e| ToolError::new("internal_error", format!("budget profile query failed: {e}")))?;
-    let rows = stmt.query_map([], |r| Ok(BudgetProfile {
-        profile_id: r.get(0)?, currency: r.get(1)?, monthly_minor: r.get(2)?,
-        daily_minor: r.get(3)?, warning_ratio_bp: r.get(4)?, updated_at_ms: r.get(5)?,
-    })).map_err(|e| ToolError::new("internal_error", format!("budget profile query failed: {e}")))?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| ToolError::new("internal_error", format!("budget profile query failed: {e}")))
-}
-
 fn valid_month(month: &str) -> bool {
     month.is_ascii() && month.len() == 7 && month.as_bytes().get(4) == Some(&b'-')
         && month[..4].parse::<u16>().is_ok()

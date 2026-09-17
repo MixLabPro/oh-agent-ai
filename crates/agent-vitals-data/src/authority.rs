@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -77,6 +77,13 @@ pub type BillingRecalculationJobRow = (
     String, String, String, String, i64, Option<i64>, Option<i64>, Option<String>, Option<String>,
 );
 pub type BillingRecalculationResultRow = (String, String, i64, i64, i64, Option<i64>, Option<i64>, i64);
+/// [`AuthorityDb::billing_apply_active_declarations`] 的回执：看了几条有效修订、
+/// 新写了几行归因。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BillingApplyReport {
+    pub revisions: usize,
+    pub attributed: usize,
+}
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BillingDeclarationImpactPreview {
     pub fact_count: i64,
@@ -866,6 +873,24 @@ CREATE INDEX billing_declaration_scopes_lookup
   ON billing_declaration_scopes(scope_kind, scope_value, revision_id);
 "#;
 
+/// v15：作用域表再放开一个 kind——`settlement`（结算币种，声明属性而非匹配条件）。
+/// 与 v14 同款重建：scopes 没有被别的表引用，DROP + RENAME 安全。
+const SCHEMA_V15_ADD: &str = r#"
+CREATE TABLE billing_declaration_scopes_v15 (
+  revision_id TEXT NOT NULL REFERENCES billing_declaration_revisions(revision_id) ON DELETE CASCADE,
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('account', 'route', 'model', 'session', 'provider', 'settlement')),
+  scope_value TEXT NOT NULL CHECK (trim(scope_value) <> ''),
+  PRIMARY KEY(revision_id, scope_kind, scope_value)
+);
+INSERT INTO billing_declaration_scopes_v15(revision_id, scope_kind, scope_value)
+  SELECT revision_id, scope_kind, scope_value FROM billing_declaration_scopes;
+DROP INDEX IF EXISTS billing_declaration_scopes_lookup;
+DROP TABLE billing_declaration_scopes;
+ALTER TABLE billing_declaration_scopes_v15 RENAME TO billing_declaration_scopes;
+CREATE INDEX billing_declaration_scopes_lookup
+  ON billing_declaration_scopes(scope_kind, scope_value, revision_id);
+"#;
+
 /// 增量 7.5：v1 base 表之上的 4 个脱敏只读 view。`CREATE VIEW IF NOT EXISTS`
 /// 幂等——在 `ensure_schema` 的「version == SCHEMA_VERSION」分支上执行。
 /// **不**进 `SCHEMA_V1` 主 DDL，避免『v1 库必须重跑 SCHEMA_V1 才能拿 view』
@@ -1056,9 +1081,22 @@ impl AuthorityDb {
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
+            Some(14) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V15_ADD);
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
             Some(13) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V14_ADD);
+                let migration = conn.execute_batch(SCHEMA_V14_ADD).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1071,7 +1109,7 @@ impl AuthorityDb {
             }
             Some(12) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V13_ADD).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
+                let migration = conn.execute_batch(SCHEMA_V13_ADD).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1084,7 +1122,7 @@ impl AuthorityDb {
             }
             Some(11) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V12_ADD).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
+                let migration = conn.execute_batch(SCHEMA_V12_ADD).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1097,7 +1135,7 @@ impl AuthorityDb {
             }
             Some(10) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V11_ADD).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
+                let migration = conn.execute_batch(SCHEMA_V11_ADD).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1110,7 +1148,7 @@ impl AuthorityDb {
             }
             Some(9) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V10_ADD).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
+                let migration = conn.execute_batch(SCHEMA_V10_ADD).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1123,7 +1161,7 @@ impl AuthorityDb {
             }
             Some(8) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V9_ADD).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
+                let migration = conn.execute_batch(SCHEMA_V9_ADD).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1136,7 +1174,7 @@ impl AuthorityDb {
             }
             Some(7) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V8_ADD).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
+                let migration = conn.execute_batch(SCHEMA_V8_ADD).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1149,7 +1187,7 @@ impl AuthorityDb {
             }
             Some(6) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V7_ADD).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
+                let migration = conn.execute_batch(SCHEMA_V7_ADD).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute(
@@ -1165,7 +1203,7 @@ impl AuthorityDb {
             }
             Some(5) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V6_ADD).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
+                let migration = conn.execute_batch(SCHEMA_V6_ADD).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute(
@@ -1184,7 +1222,7 @@ impl AuthorityDb {
             }
             Some(4) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V5_ADD).and_then(|()| conn.execute_batch(SCHEMA_V6_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD));
+                let migration = conn.execute_batch(SCHEMA_V5_ADD).and_then(|()| conn.execute_batch(SCHEMA_V6_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1237,6 +1275,10 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V14_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V15_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -1300,6 +1342,10 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V14_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V15_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -1370,6 +1416,10 @@ impl AuthorityDb {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V15_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
                         conn.execute(
                             "UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
                             rusqlite::params![SCHEMA_VERSION.to_string()],
@@ -1422,6 +1472,7 @@ impl AuthorityDb {
                 conn.execute_batch(SCHEMA_V12_ADD)?;
                 conn.execute_batch(SCHEMA_V13_ADD)?;
                 conn.execute_batch(SCHEMA_V14_ADD)?;
+                conn.execute_batch(SCHEMA_V15_ADD)?;
                 // 增量 7.5：新建库时同步加 4 个脱敏只读 view（spec §8.2 P1-5）。
                 conn.execute_batch(VIEWS_V1)?;
                 conn.execute(
@@ -2235,6 +2286,29 @@ impl AuthorityDb {
     }
 
     /// 活跃声明的稳定读取顺序；金额缺失保持 `None`，不以 0 或价卡代替。
+    /// 有效声明里记录的结算币种：`"host/provider"` → 币种。来自当前 saved 修订的
+    /// `settlement` 作用域行（按量/中转声明的结算币）；同键多条按修订创建时间取最新。
+    pub fn declared_settlement_currencies(&self) -> Result<std::collections::BTreeMap<String, String>, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT bd.host, bd.provider_id, s.scope_value
+             FROM billing_declarations bd
+             JOIN billing_declaration_revisions br ON br.declaration_id = bd.declaration_id
+             JOIN billing_declaration_scopes s ON s.revision_id = br.revision_id
+             WHERE bd.deleted_at_ms IS NULL AND br.change_kind = 'saved'
+               AND s.scope_kind = 'settlement'
+               AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = bd.declaration_id)
+             ORDER BY br.created_at_ms",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+        let mut out = std::collections::BTreeMap::new();
+        for row in rows {
+            let (host, provider, currency) = row?;
+            out.insert(format!("{host}/{provider}"), currency);
+        }
+        Ok(out)
+    }
+
     pub fn billing_declarations(&self) -> Result<Vec<BillingDeclarationRow>, AuthorityError> {
         let mut stmt = self.conn.prepare(
             "SELECT declaration_id, host, provider_id, relationship_kind, subscription_name,
@@ -2268,9 +2342,13 @@ impl AuthorityDb {
              WHERE source_candidate_id = ?1 AND deleted_at_ms IS NOT NULL",
             rusqlite::params![candidate_id],
         )?;
+        // 只有在**没有**有效声明还占着它时才放回 pending——保存路径也会先经过这里，
+        // 若一条有效声明仍持有该候选，把它翻成 pending 就制造了上面说的分裂态。
         self.conn.execute(
             "UPDATE billing_import_candidates SET status = 'pending', resolved_at_ms = NULL
-             WHERE candidate_id = ?1 AND status = 'accepted'",
+             WHERE candidate_id = ?1 AND status = 'accepted'
+               AND NOT EXISTS (SELECT 1 FROM billing_declarations bd
+                   WHERE bd.source_candidate_id = ?1 AND bd.deleted_at_ms IS NULL)",
             rusqlite::params![candidate_id],
         )?;
         Ok(())
@@ -2293,9 +2371,14 @@ impl AuthorityDb {
             (Some(amount), Some(value)) => amount >= 0 && !value.trim().is_empty(),
             _ => false,
         };
+        // `settlement` 不是匹配条件，是声明的**结算币种**（按量/中转声明没有月费栏，
+        // 而 `amount_minor`/`currency` 成对的 CHECK 不允许只填币种）。与
+        // `provider=unresolved` 同一类「挂在作用域表上的声明属性」；选择谓词只认
+        // account/route/model/session/provider，其余 kind 自动忽略。
         let valid_scope = |kind: &str, value: &str| {
             (matches!(kind, "account" | "route" | "model" | "session") && !value.trim().is_empty())
                 || (kind == "provider" && value == "unresolved")
+                || (kind == "settlement" && matches!(value, "CNY" | "USD"))
         };
         if revision_id.is_empty() || declaration_id.is_empty() || host.is_empty() || provider_id.is_empty()
             || !valid_kind || !valid_amount || !valid_billing_boundary(effective_start)
@@ -2603,6 +2686,15 @@ impl AuthorityDb {
     }
 
     fn billing_declaration_matching_fact_ids(&self, revision_id: &str) -> Result<Vec<String>, AuthorityError> {
+        self.billing_declaration_matching_fact_ids_since(revision_id, None)
+    }
+
+    /// 同一条选择谓词，外加「只看 `created_at_ms >= since` 入库的事实」——增量套用
+    /// （[`Self::billing_apply_active_declarations`]）用它避免每轮同步全表扫 N 遍。
+    /// `since = None` 就是重算 job 的全历史口径。
+    fn billing_declaration_matching_fact_ids_since(
+        &self, revision_id: &str, since_created_at_ms: Option<i64>,
+    ) -> Result<Vec<String>, AuthorityError> {
         let revision: (String, String, String, Option<String>) = self.conn.query_row(
             "SELECT host, provider_id, effective_start, effective_end FROM billing_declaration_revisions WHERE revision_id = ?1 AND change_kind = 'saved'",
             rusqlite::params![revision_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -2611,10 +2703,14 @@ impl AuthorityDb {
         let scope_refs = scopes.iter()
             .map(|(_, kind, value)| (kind.as_str(), value.as_str()))
             .collect::<Vec<_>>();
-        let selection = billing_declaration_fact_selection(
+        let mut selection = billing_declaration_fact_selection(
             &revision.0, &revision.1, &revision.2, revision.3.as_deref(), &scope_refs, None,
             ConflictEvidence::Exclude,
         );
+        if let Some(since) = since_created_at_ms {
+            selection.params.push(rusqlite::types::Value::Integer(since));
+            selection.where_sql.push_str(&format!(" AND f.created_at_ms >= ?{}", selection.params.len()));
+        }
         let sql = format!(
             "SELECT f.fact_id {BILLING_DECLARATION_FACT_FROM} WHERE {} ORDER BY f.fact_id",
             selection.where_sql,
@@ -2622,6 +2718,95 @@ impl AuthorityDb {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(selection.params.iter()), |row| row.get(0))?;
         rows.collect::<Result<Vec<String>, _>>().map_err(AuthorityError::from)
+    }
+
+    /// 修订 → 归因种类：订阅移出按量估算（`subscription_covered`），其余只记「用户已答」
+    /// （`user_declared`，D02 不改金额）。重算 job 与增量套用共用，不许各写一份 CASE。
+    fn billing_attribution_kind_of(&self, revision_id: &str) -> Result<String, AuthorityError> {
+        Ok(self.conn.query_row(
+            "SELECT CASE WHEN relationship_kind = 'official_subscription' THEN 'subscription_covered' ELSE 'user_declared' END
+             FROM billing_declaration_revisions WHERE revision_id = ?1",
+            rusqlite::params![revision_id], |row| row.get(0),
+        )?)
+    }
+
+    /// **声明是持续生效的规则，不是一次性物化**（2026-09-16 真机）：用户声明了
+    /// anthropic 订阅「持续有效」、shengsuanyun 中转「持续有效」，重算 job 只给保存
+    /// 那一刻已入库的事实写归因行；之后 `sync-facts` 同步进来的每个新会话都没有
+    /// 归因行 → 待确认面板按「无归因行」把同一组再弹一遍，用户以为声明没保存、
+    /// 又声明一遍（库里 shengsuanyun 重复到 7 条）。
+    ///
+    /// 这里在每轮同步末尾把**当前有效**的修订（声明未软删、最新修订 `saved`、其
+    /// 重算 job 已 `succeeded`——规则已建立）套用到该修订上次归因之后入库的事实。
+    /// 谓词与预览/重算是同一条 `billing_declaration_fact_selection`，只多一个
+    /// `created_at_ms` 水位；归因行挂在该修订原来的 job 上（`UNIQUE(revision_id)`
+    /// 一修订一 job，job 就是「这条规则」的句柄），`created_at_ms` 记录本次套用时间。
+    /// 幂等：`ON CONFLICT DO NOTHING`，水位重叠只会白查不会双写。
+    ///
+    /// 顺序：订阅修订先于其他——选择谓词只排除 `subscription_covered`，同宿主同
+    /// provider 的订阅与按量声明本不该重叠，但若用户两边都声明了，订阅先占位、按量
+    /// 只拿剩下的（与保存顺序无关，结果确定）。
+    ///
+    /// 有 `effective_end` 的声明照旧到期即止（谓词按事件日界定）；开放期声明覆盖
+    /// 之后的事实正是「持续有效」的定义——这条明确取代计费主链规格 §3「事实 3」里
+    /// 「retry 会把之后同步进来的事实扫进订阅覆盖」的顾虑：那是 bug 的描述，不是
+    /// 需求。
+    pub fn billing_apply_active_declarations(
+        &self, now_ms: i64,
+    ) -> Result<BillingApplyReport, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT br.revision_id, j.job_id, j.completed_at_ms
+             FROM billing_declarations bd
+             JOIN billing_declaration_revisions br ON br.declaration_id = bd.declaration_id
+             JOIN billing_recalculation_jobs j ON j.revision_id = br.revision_id
+             WHERE bd.deleted_at_ms IS NULL
+               AND br.change_kind = 'saved'
+               AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = bd.declaration_id)
+               AND j.status = 'succeeded'
+             ORDER BY (br.relationship_kind = 'official_subscription') DESC, br.created_at_ms, br.revision_id",
+        )?;
+        let active: Vec<(String, String, Option<i64>)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+        let mut report = BillingApplyReport::default();
+        for (revision_id, job_id, completed_at_ms) in active {
+            // 水位 = 该修订最近一次归因写入时间；从未命中过事实的修订退到 job 完成时间。
+            // `>=` 而非 `>`：同一毫秒内入库的事实宁可重查一次，也不能漏。
+            let last_applied: Option<i64> = self.conn.query_row(
+                "SELECT MAX(created_at_ms) FROM billing_fact_attributions WHERE revision_id = ?1",
+                rusqlite::params![revision_id], |row| row.get(0),
+            )?;
+            let since = last_applied.or(completed_at_ms).unwrap_or(0);
+            let fact_ids = self.billing_declaration_matching_fact_ids_since(&revision_id, Some(since))?;
+            report.revisions += 1;
+            if fact_ids.is_empty() {
+                continue;
+            }
+            let kind = self.billing_attribution_kind_of(&revision_id)?;
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+            let inserted = (|| -> Result<usize, rusqlite::Error> {
+                let mut n = 0;
+                for fact_id in &fact_ids {
+                    n += self.conn.execute(
+                        "INSERT INTO billing_fact_attributions(fact_id, revision_id, job_id, attribution_kind, created_at_ms)
+                         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(fact_id, revision_id) DO NOTHING",
+                        rusqlite::params![fact_id, revision_id, job_id, kind, now_ms],
+                    )?;
+                }
+                self.conn.execute_batch("COMMIT")?;
+                Ok(n)
+            })();
+            match inserted {
+                Ok(n) => report.attributed += n,
+                Err(error) => {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(error.into());
+                }
+            }
+        }
+        Ok(report)
     }
 
     pub fn billing_recalculation_enqueue(
@@ -2752,18 +2937,14 @@ impl AuthorityDb {
                 return Err(error);
             }
         };
-        let attribution_kind: String = match self.conn.query_row(
-            "SELECT CASE WHEN relationship_kind = 'official_subscription' THEN 'subscription_covered' ELSE 'user_declared' END
-             FROM billing_declaration_revisions WHERE revision_id = ?1",
-            rusqlite::params![revision_id], |row| row.get(0),
-        ) {
+        let attribution_kind = match self.billing_attribution_kind_of(&revision_id) {
             Ok(kind) => kind,
             Err(error) => {
                 let detail = error.to_string();
                 let _ = self.billing_recalculation_set_status(
                     job_id, "failed", Some("attribution_kind_failed"), Some(&detail), now_ms,
                 );
-                return Err(error.into());
+                return Err(error);
             }
         };
         if let Err(error) = self.conn.execute_batch("BEGIN IMMEDIATE") {
@@ -2910,12 +3091,46 @@ impl AuthorityDb {
         candidate_id: &str,
         now_ms: i64,
     ) -> Result<bool, AuthorityError> {
+        // 被一条**有效**声明占着的候选不能单独「重新打开」：候选回到 pending、声明却
+        // 还活着，之后任何对这张候选的新声明都撞「already used by another live
+        // declaration」，而待确认面板又拿它再问一遍（2026-09-16 真机：anthropic
+        // 候选 pending + decl 有效，用户被卡在两个面之间）。要重来就撤销那条声明——
+        // 撤销路径会顺手把候选放回 pending（`release_revoked_candidate_claims`）。
+        if let Some(holder) = self.live_declaration_holding_candidate(candidate_id)? {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(format!(
+                "this legacy package record is the basis of live declaration {holder}; revoke that declaration instead of reopening the record"
+            ))));
+        }
         Ok(self.conn.execute(
             "UPDATE billing_import_candidates
              SET status = 'pending', updated_at_ms = ?2, resolved_at_ms = NULL
              WHERE candidate_id = ?1 AND status IN ('accepted', 'dismissed')",
             rusqlite::params![candidate_id, now_ms],
         )? > 0)
+    }
+
+    fn live_declaration_holding_candidate(&self, candidate_id: &str) -> Result<Option<String>, AuthorityError> {
+        Ok(self.conn.query_row(
+            "SELECT declaration_id FROM billing_declarations
+             WHERE source_candidate_id = ?1 AND deleted_at_ms IS NULL LIMIT 1",
+            rusqlite::params![candidate_id], |row| row.get(0),
+        ).optional()?)
+    }
+
+    /// 候选状态与声明占用的**一致性自愈**：被有效声明占着的候选按定义就是
+    /// `accepted`。历史上「重新打开」不看声明就把候选翻回 pending，留下
+    /// 「候选待确认 + 声明有效」的分裂态；例行同步在这里把它们收回来。只动
+    /// pending→accepted 这一向（accepted→pending 是撤销声明的事，不在这里猜）。
+    pub fn reconcile_candidate_claims(&self, now_ms: i64) -> Result<usize, AuthorityError> {
+        Ok(self.conn.execute(
+            "UPDATE billing_import_candidates
+             SET status = 'accepted', updated_at_ms = ?1, resolved_at_ms = ?1
+             WHERE status = 'pending' AND EXISTS (
+                 SELECT 1 FROM billing_declarations bd
+                 WHERE bd.source_candidate_id = billing_import_candidates.candidate_id
+                   AND bd.deleted_at_ms IS NULL)",
+            rusqlite::params![now_ms],
+        )?)
     }
 
     /// 将先前错误自动导入的旧价表账单撤回。仅匹配专用 evidence 标签，绝不
@@ -3738,6 +3953,153 @@ mod tests {
         assert_eq!(authority.billing_recalculation_recover(16).unwrap(), Vec::<String>::new());
         assert_eq!(authority.billing_recalculation_job("job-failed").unwrap().unwrap().3, "failed");
         assert_eq!(authority.billing_recalculation_jobs_needing_attention().unwrap().len(), 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 2026-09-16 真机：anthropic 订阅声明「持续有效」，重算 job 只覆盖了保存前的
+    /// 22,196 条事实；当晚新会话同步进来 49 条 claude-opus-5 事实没有归因行，待确认
+    /// 面板把同一组再弹一遍。修复：同步末尾把当前有效声明套用到水位之后的新事实。
+    #[test]
+    fn active_declarations_apply_to_facts_synced_after_the_recalculation() {
+        let db = tmp_db("billing-apply-active");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        let day = |d: i64| 1_757_000_000_000 + d * 86_400_000; // 2025-09 附近的北京日
+        let insert = |id: &str, provider: Option<&str>, model: &str, ts: i64, created: i64| {
+            authority.conn().execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                     observation_kind, provider_id, model_id, event_ts_ms, evidence_basis,
+                     uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                     ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, 'claude-code', 'm', ?1, ?1, 'assistant-usage', ?2, ?3, ?4, 'missing',
+                     10, 0, 0, 0, 'apply-run', ?5, ?5)",
+                rusqlite::params![id, provider, model, ts, created],
+            ).unwrap();
+        };
+        authority.conn().execute_batch(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES('apply-run', 1, 'test', 'succeeded', 13);",
+        ).unwrap();
+        // 保存前已入库的事实 → 重算 job 覆盖。
+        insert("f-old", Some("anthropic"), "claude-opus-5", day(1), 100);
+        authority.billing_declaration_revision_save(
+            "rev-sub", "decl-sub", None, "claude-code", "anthropic", "official_subscription",
+            Some("Claude Pro"), Some(2_000), Some("USD"), "2025-07-20", None, None, None,
+            &[("model", "claude-opus-5")], 200,
+        ).unwrap();
+        authority.billing_recalculation_enqueue("job-sub", "decl-sub", "rev-sub", 300).unwrap();
+        assert!(authority.billing_recalculation_run("job-sub", 400).unwrap());
+        // 「计费方待定」的中转声明（provider=unresolved），同样持续有效。
+        insert("g-old", None, "deepseek/deepseek-v4.1-flash", day(1), 100);
+        authority.billing_declaration_revision_save(
+            "rev-relay", "decl-relay", None, "claude-code", "shengsuanyun", "third_party",
+            None, None, None, "2025-09-01", None, None, None,
+            &[("provider", "unresolved"), ("model", "deepseek/deepseek-v4.1-flash")], 500,
+        ).unwrap();
+        authority.billing_recalculation_enqueue("job-relay", "decl-relay", "rev-relay", 600).unwrap();
+        assert!(authority.billing_recalculation_run("job-relay", 700).unwrap());
+        let count = |kind: &str| -> i64 {
+            authority.conn().query_row(
+                "SELECT COUNT(*) FROM billing_fact_attributions WHERE attribution_kind = ?1",
+                [kind], |row| row.get(0),
+            ).unwrap()
+        };
+        assert_eq!((count("subscription_covered"), count("user_declared")), (1, 1));
+
+        // 之后同步进来的新会话：同 scope 的新事实 + 一个不在 scope 的模型 + 一个别的 provider。
+        insert("f-new", Some("anthropic"), "claude-opus-5", day(3), 1_000);
+        insert("f-other-model", Some("anthropic"), "claude-opus-6", day(3), 1_000);
+        insert("g-new", None, "deepseek/deepseek-v4.1-flash", day(3), 1_000);
+        insert("h-known", Some("deepseek-official"), "deepseek/deepseek-v4.1-flash", day(3), 1_000);
+        let report = authority.billing_apply_active_declarations(2_000).unwrap();
+        assert_eq!(report, BillingApplyReport { revisions: 2, attributed: 2 }, "{report:?}");
+        let attributed: Vec<(String, String, String)> = authority.conn().prepare(
+            "SELECT fact_id, job_id, attribution_kind FROM billing_fact_attributions WHERE created_at_ms = 2000 ORDER BY fact_id",
+        ).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
+            .collect::<Result<_, _>>().unwrap();
+        assert_eq!(attributed, vec![
+            ("f-new".to_string(), "job-sub".to_string(), "subscription_covered".to_string()),
+            ("g-new".to_string(), "job-relay".to_string(), "user_declared".to_string()),
+        ], "新事实挂在该修订原来的 job 上；scope 外模型与别的 provider 不动");
+
+        // 幂等：再跑一轮零新增。
+        assert_eq!(authority.billing_apply_active_declarations(3_000).unwrap(),
+            BillingApplyReport { revisions: 2, attributed: 0 });
+
+        // 撤销中转声明后，它不再套用新事实（订阅照常）。
+        authority.billing_declaration_revision_revoke("rev-relay-revoke", "decl-relay", "rev-relay", 3_500).unwrap();
+        insert("f-later", Some("anthropic"), "claude-opus-5", day(5), 4_000);
+        insert("g-later", None, "deepseek/deepseek-v4.1-flash", day(5), 4_000);
+        let report = authority.billing_apply_active_declarations(5_000).unwrap();
+        assert_eq!(report, BillingApplyReport { revisions: 1, attributed: 1 }, "{report:?}");
+        let g_later: i64 = authority.conn().query_row(
+            "SELECT COUNT(*) FROM billing_fact_attributions WHERE fact_id = 'g-later'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(g_later, 0, "撤销后的声明不再是规则");
+
+        // 有 effective_end 的声明到期即止：期外事实不套用。
+        authority.billing_declaration_revision_save(
+            "rev-bounded", "decl-bounded", None, "codex", "openai", "official_subscription",
+            Some("Plus"), Some(2_000), Some("USD"), "2025-09-01", Some("2025-09-03"), None, None, &[], 6_000,
+        ).unwrap();
+        authority.billing_recalculation_enqueue("job-bounded", "decl-bounded", "rev-bounded", 6_100).unwrap();
+        assert!(authority.billing_recalculation_run("job-bounded", 6_200).unwrap());
+        authority.conn().execute(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                 observation_kind, provider_id, model_id, event_ts_ms, uncached_input_tokens,
+                 ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES ('c-late', 'codex', 'm', 'c-late', 'c-late', 'token_count', 'openai', 'gpt-5.6-luna', ?1, 10,
+                 'apply-run', 7000, 7000)",
+            rusqlite::params![day(40)],
+        ).unwrap();
+        let report = authority.billing_apply_active_declarations(8_000).unwrap();
+        assert_eq!(report.attributed, 0, "期外事实不得被扫进订阅覆盖：{report:?}");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 2026-09-16 真机：anthropic 候选被有效声明 decl 占着，用户点了「重新打开」→ 候选回
+    /// pending、声明照旧有效 → 待确认再问一遍，而任何新声明都撞「already used by
+    /// another live declaration」。候选被有效声明占着就是 accepted；重新打开必须指向撤销声明。
+    #[test]
+    fn candidate_held_by_live_declaration_cannot_be_reopened_and_heals_to_accepted() {
+        let db = tmp_db("billing-candidate-claim-consistency");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority.billing_import_candidate_put(
+            "cand-held", "claude-code", "anthropic", "USD", 2_000, "2025-07", "uat", 1,
+        ).unwrap();
+        assert!(authority.billing_declaration_revision_save(
+            "rev-held", "decl-held", None, "claude-code", "anthropic", "official_subscription",
+            Some("Claude Pro"), Some(2_000), Some("USD"), "2025-07-20", None, Some("cand-held"), None, &[], 2,
+        ).unwrap());
+        let status = |id: &str| -> String {
+            authority.conn().query_row(
+                "SELECT status FROM billing_import_candidates WHERE candidate_id = ?1", [id], |r| r.get(0),
+            ).unwrap()
+        };
+        assert_eq!(status("cand-held"), "accepted");
+        let err = authority.billing_import_candidate_reopen("cand-held", 3).unwrap_err().to_string();
+        assert!(err.contains("decl-held") && err.contains("revoke"), "{err}");
+        assert_eq!(status("cand-held"), "accepted", "拒绝重新打开不得半改状态");
+
+        // 复现旧版本留下的分裂态：候选 pending、声明仍有效 → 自愈回 accepted。
+        authority.conn().execute(
+            "UPDATE billing_import_candidates SET status = 'pending' WHERE candidate_id = 'cand-held'", [],
+        ).unwrap();
+        assert_eq!(authority.reconcile_candidate_claims(4).unwrap(), 1);
+        assert_eq!(status("cand-held"), "accepted");
+        assert_eq!(authority.reconcile_candidate_claims(5).unwrap(), 0, "幂等");
+
+        // 第二条新声明再引用同一张候选：保存路径的 release 不得把它翻回 pending。
+        let err = authority.billing_declaration_revision_save(
+            "rev-dup", "decl-dup", None, "claude-code", "anthropic", "official_subscription",
+            None, Some(2_000), Some("USD"), "2025-07-20", None, Some("cand-held"), None, &[], 6,
+        ).unwrap_err().to_string();
+        assert!(err.contains("another live declaration"), "{err}");
+        assert_eq!(status("cand-held"), "accepted");
+
+        // 撤销声明才释放候选；释放后可重新打开/重新声明。
+        assert!(authority.billing_declaration_revision_revoke("rev-held-revoke", "decl-held", "rev-held", 7).unwrap());
+        assert_eq!(status("cand-held"), "pending");
+        assert_eq!(authority.reconcile_candidate_claims(8).unwrap(), 0, "没有有效声明占着，不得把它翻回 accepted");
         let _ = std::fs::remove_file(&db);
     }
 

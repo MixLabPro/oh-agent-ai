@@ -151,13 +151,84 @@ fn first_tier(card: &Value) -> Option<(&str, &Value)> {
 /// `unresolved=true` 表示命中了时变卡但没给峰谷分辨率，`price_claude_map`
 /// 据此把 `pricing_basis` 标成非 catalog，不能让下游误读成账单级精确。
 /// 模型/卡都匹配不上 → None（不臆造）。
-fn price_claude_model(
+/// [`resolve_card_catalog`] 的「优先用户归因的计费方」版：用户在计费声明里说
+/// 这批用量经 `preferred` 按量付费，若该计费方的价卡收录了这个模型就用它的价
+/// （胜算云对 DeepSeek-V4-Pro 的报价 ≠ DeepSeek 官方价），否则退回目录路由
+/// ——「归因以后按照归因的来计算」，价卡缺失时退回官方价是已知近似，调用方
+/// 通过返回的 provider 是否等于 `preferred` 判断走了哪条。
+pub(crate) fn resolve_card_catalog_preferring(
+    model: &str,
+    pricing: &Value,
+    preferred: Option<&str>,
+) -> Option<(String, String, String)> {
+    if let Some(pref) = preferred {
+        for (base, default_currency) in [("/catalog_2026_09/providers", None), ("/providers", Some("CNY"))] {
+            let Some(pv) = pricing.pointer(&format!("{base}/{pref}")) else { continue };
+            let Some(models) = pv.get("models").and_then(|v| v.as_object()) else { continue };
+            if let Some(key) = norm_model_in(model, models) {
+                let currency = pv.get("currency").and_then(|v| v.as_str())
+                    .or(default_currency).unwrap_or("CNY");
+                return Some((pref.to_string(), key, currency.to_string()));
+            }
+        }
+    }
+    resolve_card_catalog(model, pricing)
+}
+
+/// 用户归因的计费方 `provider` 的价卡是否收录了 `model`（收录 → 该模型按它的价、
+/// 它的币种算；未收录 → 调用方退回宿主自己的官方价卡）。
+pub fn declared_card_covers(provider: &str, model: &str, pricing: &Value) -> bool {
+    resolve_card_catalog_preferring(model, pricing, Some(provider))
+        .is_some_and(|(p, _, _)| p == provider)
+}
+
+/// 「原厂官方计价模板」：目录里（优先 `preferred` 计费方的卡，其次按模型名归属到
+/// 原厂的官方卡）能否给 `model` 找到任何一张卡。用户 2026-09-17 的定向——中转转
+/// 的 DeepSeek / MiniMax 型号，没有中转自己的价就**默认按原厂官方价**估，不要
+/// 逼用户手抄六个数；只有目录里哪家都没有的型号（gpt-6-astra）才算真无价。
+/// 返回 `(provider, card_key, currency)`，供调用方标「按 X 官方价估算」。
+pub fn official_card_for(model: &str, pricing: &Value, preferred: Option<&str>) -> Option<(String, String, String)> {
+    resolve_card_catalog_preferring(model, pricing, preferred)
+}
+
+/// [`official_card_for`] 找到的那张卡，折成补卡表单的六个价：
+/// `{input_uncached: {off_peak, peak}, input_cached: {…}, output: {…}}`——平费率卡两格
+/// 同值，峰谷卡原样，档位卡（MiniMax-M3 tiers）取首档（与计价同一条 `first_tier`
+/// 规则）。返回 `(provider, card_key, currency, six_rates)`；找不到 → None。
+/// 给设置页「按原厂官方价预填」用：用户不用手抄，改一下再存就是中转的卡。
+pub fn official_card_body(model: &str, pricing: &Value, preferred: Option<&str>) -> Option<(String, String, String, Value)> {
+    let (provider, key, currency) = resolve_card_catalog_preferring(model, pricing, preferred)?;
+    let card = catalog_card(pricing, &provider, &key)?;
+    let card = match first_tier(card) {
+        Some((_, tier)) => tier,
+        None => card,
+    };
+    let dim = |k: &str| -> Option<Value> {
+        match card.get(k) {
+            Some(v) if v.is_number() => Some(json!({ "off_peak": v, "peak": v })),
+            Some(v) if v.is_object() => Some(json!({
+                "off_peak": v.get("off_peak").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                "peak": v.get("peak").and_then(|x| x.as_f64()).unwrap_or(0.0),
+            })),
+            _ => None,
+        }
+    };
+    let six = json!({
+        "input_uncached": dim("input_uncached")?,
+        "input_cached": dim("input_cached").unwrap_or_else(|| json!({ "off_peak": 0.0, "peak": 0.0 })),
+        "output": dim("output")?,
+    });
+    Some((provider, key, currency, six))
+}
+
+fn price_claude_model_preferring(
     model: &str,
     tokens: &Value,
     pricing: &Value,
     peak_resolved: bool,
+    preferred: Option<&str>,
 ) -> Option<(String, String, f64, Option<String>, bool)> {
-    let (provider, key, currency) = resolve_card_catalog(model, pricing)?;
+    let (provider, key, currency) = resolve_card_catalog_preferring(model, pricing, preferred)?;
     let card = catalog_card(pricing, &provider, &key)?;
     let (label, card) = match first_tier(card) {
         Some((label, tier)) => (Some(label.to_string()), tier),
@@ -201,6 +272,15 @@ fn price_claude_map(
     pricing: &Value,
     peak_resolved: bool,
 ) -> Option<Value> {
+    price_claude_map_preferring(models, pricing, peak_resolved, None)
+}
+
+fn price_claude_map_preferring(
+    models: &serde_json::Map<String, Value>,
+    pricing: &Value,
+    peak_resolved: bool,
+    preferred: Option<&str>,
+) -> Option<Value> {
     let mut cny = 0.0f64;
     let mut usd = 0.0f64;
     let mut unpriced = 0i64;
@@ -210,7 +290,7 @@ fn price_claude_map(
         if tokens.as_object().is_none() {
             continue;
         }
-        match price_claude_model(model, tokens, pricing, peak_resolved) {
+        match price_claude_model_preferring(model, tokens, pricing, peak_resolved, preferred) {
             Some((provider, currency, total, tier, unresolved)) => {
                 if unresolved {
                     any_unresolved = true;
@@ -309,6 +389,13 @@ pub fn claude_session_cost(model_usage: &Value, pricing: &Value) -> Option<Value
 /// `pricing_basis="catalog"`——不再是 v0.6 spec §8 G10 登记过的
 /// `pending v0.7`/`pending v0.6.x` 缺口。
 pub fn claude_day_cost(day: &Value, pricing: &Value) -> Option<Value> {
+    claude_day_cost_preferring(day, pricing, None)
+}
+
+/// [`claude_day_cost`] 的归因版：`preferred` 是用户在计费声明里指定的计费方，
+/// 其价卡收录的模型按它的价算（`per_model[].priced_with == preferred`），
+/// 其余退回目录路由的官方价。
+pub fn claude_day_cost_preferring(day: &Value, pricing: &Value, preferred: Option<&str>) -> Option<Value> {
     let models = match day.get("by_model") {
         Some(wrapped) => wrapped.as_object()?,
         None => day.as_object()?,
@@ -316,7 +403,7 @@ pub fn claude_day_cost(day: &Value, pricing: &Value) -> Option<Value> {
     if models.is_empty() {
         return None;
     }
-    price_claude_map(models, pricing, true)
+    price_claude_map_preferring(models, pricing, true, preferred)
 }
 
 /// 未落入已声明订阅覆盖范围（估算）——v0.7 spec §3 交付矩阵第二行，**provider

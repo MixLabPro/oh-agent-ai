@@ -38,6 +38,31 @@ const HOUR_MS: i64 = 3_600_000;
 // Keep ?1 and ?2 as neutral parameters for the existing EXPLAIN/query-shape
 // contract. Their values are no longer used as a timezone offset or unit.
 macro_rules! local_day_idx { () => { "(CAST(julianday(date(event_ts_ms / 1000, 'unixepoch', 'localtime')) - 2440587.5 AS INTEGER))" }; }
+/// 金额侧的「未被当前 saved 订阅声明覆盖」谓词（`usage_facts` 别名不带前缀）。
+/// 曾是 7 份手抄字面量——`codex_by_hour_provider_model` 漏抄了这一份，结果 codex
+/// 订阅声明覆盖了 26,715 条事实，`codex/openai` 却照样报 $376 按量估算
+/// （2026-09-16 真机）。现在只有这一处定义。
+macro_rules! not_subscription_covered { () => { "AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
+               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
+                 AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                 AND br.change_kind = 'saved')" }; }
+/// 「当前 saved 的 user_declared 归因 → 用户声明的计费方」子查询，别名 `decl`
+/// （`decl.fact_id` / `decl.declared_provider`）。一条事实理论上只被一条有效声明
+/// 答过；两条都答了取 MIN，避免 JOIN 放大行数。金额面据此把已归因事实从
+/// `MeteredEstimate` 改归到声明的 provider（`MeteredDeclared`）——2026-09-16
+/// 「归因以后按照归因的来计算」。
+macro_rules! user_declared_join { () => { "LEFT JOIN (
+               SELECT ba.fact_id, MIN(bd.provider_id) AS declared_provider
+               FROM billing_fact_attributions ba
+               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               JOIN billing_declarations bd ON bd.declaration_id = br.declaration_id
+               WHERE ba.attribution_kind = 'user_declared' AND br.change_kind = 'saved'
+                 AND bd.deleted_at_ms IS NULL
+                 AND br.revision_number = (SELECT MAX(br2.revision_number)
+                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+               GROUP BY ba.fact_id) decl ON decl.fact_id = usage_facts.fact_id" }; }
 macro_rules! local_hour_idx { () => { "((CAST(julianday(date(event_ts_ms / 1000, 'unixepoch', 'localtime')) - 2440587.5 AS INTEGER) * 24) + CAST(strftime('%H', event_ts_ms / 1000, 'unixepoch', 'localtime') AS INTEGER))" }; }
 
 // v0.9.1 测试矩阵 §8 行 8「performance（不枚举原始日志/索引命中）」：所有
@@ -55,12 +80,7 @@ pub(crate) const SQL_PEAKED_DAYS_MAP: &str = concat!("SELECT (", local_day_idx!(
          WHERE host = ?3 AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?4 AND event_ts_ms < ?5
-           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
-               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
-               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
-                 AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
-                 AND br.change_kind = 'saved')
+           ", not_subscription_covered!(), "
          GROUP BY day_idx, model_id, event_peak");
 
 /// [`claude_days`]：claude 实时行级事实的逐日 `{model: 4 桶}`。
@@ -72,13 +92,23 @@ pub(crate) const SQL_CLAUDE_DAYS: &str = concat!("SELECT (", local_day_idx!(), "
          WHERE host = 'claude-code' AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
-               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
-               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
-                 AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
-                 AND br.change_kind = 'saved')
+           ", not_subscription_covered!(), "
          GROUP BY day_idx, model_id");
+
+/// [`claude_declared_days`]：已被用户归因的 claude 事实，按声明的计费方分组，
+/// 每组形状同 `claude_days`。
+pub(crate) const SQL_CLAUDE_DECLARED_DAYS: &str = concat!("SELECT (", local_day_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS day_idx,
+                decl.declared_provider, model_id,
+                SUM(uncached_input_tokens), SUM(cache_read_tokens),
+                SUM(cache_write_tokens), SUM(output_tokens)
+         FROM usage_facts
+         ", user_declared_join!(), "
+         WHERE host = 'claude-code' AND observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?3 AND event_ts_ms < ?4
+           AND decl.fact_id IS NOT NULL
+           ", not_subscription_covered!(), "
+         GROUP BY day_idx, decl.declared_provider, model_id");
 
 /// [`claude_legacy_days`]：claude 深历史聚合（`event_peak=0` 全量行）。
 pub(crate) const SQL_CLAUDE_LEGACY_DAYS: &str = concat!("SELECT (", local_day_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS day_idx,
@@ -100,16 +130,16 @@ pub(crate) const SQL_CODEX_BY_HOUR_MODEL: &str = concat!("SELECT (", local_hour_
          WHERE host = 'codex' AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
-               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
-               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
-                 AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
-                 AND br.change_kind = 'saved')
+           ", not_subscription_covered!(), "
          GROUP BY hour_idx, model_id");
 
 /// [`hourly_by_host_model`] 三宿主 × 模型 × 小时聚合（增量 2 `usage_hourly`
 /// 工具的 SQL 数据源）。从函数体抽出来便于 EXPLAIN QUERY PLAN 测试断言。
+///
+/// **不排除订阅覆盖的事实**：这是 token 视图（`usage_hourly` 只报 token，cost 在
+/// `cost_breakdown`），处理量与「钱归谁」无关——与 `tokens_by_host`/`host_tokens_all`
+/// 同一条纪律；曾带 `not_subscription_covered!` 导致 MCP 小时曲线之和 ≠ `data daily`
+/// 的 tokens_by_host（mcp_smoke Q01-Q03 MISMATCH，2026-09-17）。
 ///
 /// **单宿主** SQL：`host = ?5` 走 `usage_facts_host_time` 索引（与
 /// `codex_by_hour_model` / `claude_days` 同款）。三宿主聚合由 fn 把三个
@@ -128,12 +158,6 @@ pub(crate) const SQL_HOURLY_BY_HOST_MODEL: &str = concat!("SELECT host, COALESCE
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
            AND host = ?5
-           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
-               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
-               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
-                 AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
-                 AND br.change_kind = 'saved')
          GROUP BY host, model_id, local_hour");
 
 pub(crate) const SQL_HOURLY_BY_HOST_PROVIDER: &str = concat!("SELECT host, COALESCE(provider_id, '<unknown>'),
@@ -144,12 +168,6 @@ pub(crate) const SQL_HOURLY_BY_HOST_PROVIDER: &str = concat!("SELECT host, COALE
          WHERE observation_kind != 'legacy_aggregate' AND deleted_at_ms IS NULL
            AND event_ts_ms IS NOT NULL AND event_ts_ms >= ?3 AND event_ts_ms < ?4
            AND host = ?5
-           AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
-               JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
-               WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
-                 AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
-                 AND br.change_kind = 'saved')
          GROUP BY host, provider_id, local_hour");
 
 /// 「确认计费方式」的待确认组（REQ-023：宿主 × provider × 模型 × 路由证据 ×
@@ -430,7 +448,70 @@ pub fn claude_days(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<BTreeMap<String, Value>, AuthorityError> {
-    let mut stmt = conn.prepare(SQL_CLAUDE_DAYS)?;
+    claude_days_with(conn, SQL_CLAUDE_DAYS, start_ms, end_ms)
+}
+
+/// 已被用户归因（user_declared）的 claude 事实，按声明的计费方分组：
+/// `{provider: {day: {model: 4 桶}}}`。它是 [`claude_days`] 的子集（同样排除
+/// legacy_aggregate 与订阅覆盖）——by_provider 用「claude_days − 本函数」得到
+/// 默认估算的那部分，用本函数按声明的计费方计 `MeteredDeclared`。
+pub fn claude_declared_days(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<BTreeMap<String, BTreeMap<String, Value>>, AuthorityError> {
+    let mut stmt = conn.prepare(SQL_CLAUDE_DECLARED_DAYS)?;
+    let rows = stmt.query_map(
+        rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, start_ms, end_ms],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, i64>(6)?,
+            ))
+        },
+    )?;
+    let mut out: BTreeMap<String, BTreeMap<String, Map<String, Value>>> = BTreeMap::new();
+    for row in rows {
+        let (day_idx, provider, model, u, cr, cw, o) = row?;
+        let Some(model) = model else { continue };
+        let bucket = out.entry(provider).or_default()
+            .entry(civil_date_from_days(day_idx)).or_default()
+            .entry(model).or_insert_with(claude_zero_bucket);
+        claude_bucket_add(bucket, u, cr, cw, o);
+    }
+    Ok(out.into_iter().map(|(p, days)| (p, days.into_iter()
+        .map(|(d, m)| (d, Value::Object(m))).collect())).collect())
+}
+
+fn claude_zero_bucket() -> Value {
+    json!({"input_tokens": 0, "cache_read_input_tokens": 0,
+           "cache_creation_input_tokens": 0, "output_tokens": 0})
+}
+
+fn claude_bucket_add(bucket: &mut Value, u: i64, cr: i64, cw: i64, o: i64) {
+    for (key, v) in [
+        ("input_tokens", u),
+        ("cache_read_input_tokens", cr),
+        ("cache_creation_input_tokens", cw),
+        ("output_tokens", o),
+    ] {
+        let cur = bucket.get(key).and_then(Value::as_i64).unwrap_or(0);
+        bucket[key] = json!(cur + v);
+    }
+}
+
+fn claude_days_with(
+    conn: &Connection,
+    sql: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<BTreeMap<String, Value>, AuthorityError> {
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(
         rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, start_ms, end_ms],
         |r| {
@@ -457,19 +538,8 @@ pub fn claude_days(
             .entry(date)
             .or_default()
             .entry(model)
-            .or_insert_with(|| {
-                json!({"input_tokens": 0, "cache_read_input_tokens": 0,
-                   "cache_creation_input_tokens": 0, "output_tokens": 0})
-            });
-        for (key, v) in [
-            ("input_tokens", u),
-            ("cache_read_input_tokens", cr),
-            ("cache_creation_input_tokens", cw),
-            ("output_tokens", o),
-        ] {
-            let cur = bucket.get(key).and_then(Value::as_i64).unwrap_or(0);
-            bucket[key] = json!(cur + v);
-        }
+            .or_insert_with(claude_zero_bucket);
+        claude_bucket_add(bucket, u, cr, cw, o);
     }
     Ok(days
         .into_iter()
@@ -582,29 +652,36 @@ pub fn codex_by_hour_model(
 
 /// Codex facts grouped by provider first, then in the legacy by-hour/model
 /// shape. This keeps provider attribution from being folded into OpenAI costs.
+/// 键 = `(provider, declared)`：`declared = true` 的组是用户归因到该计费方的事实
+/// （`user_declared`，金额面进 `MeteredDeclared`），`false` 是事实自带/目录判定
+/// 的 provider（默认估算）。同一 provider 两种来源分开返回，调用方决定 basis。
 pub fn codex_by_hour_provider_model(
     conn: &Connection,
     start_ms: i64,
     end_ms: i64,
-) -> Result<BTreeMap<String, Value>, AuthorityError> {
+) -> Result<BTreeMap<(String, bool), Value>, AuthorityError> {
     let mut stmt = conn.prepare(
-        concat!("SELECT CAST((", local_hour_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS INTEGER), provider_id, model_id,
+        concat!("SELECT CAST((", local_hour_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS INTEGER),
+                COALESCE(decl.declared_provider, provider_id), decl.fact_id IS NOT NULL, model_id,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens)
          FROM usage_facts
+         ", user_declared_join!(), "
          WHERE host = 'codex' AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-         GROUP BY (", local_hour_idx!(), " + (?1 - ?1) + (?2 - ?2)), provider_id, model_id")
+           ", not_subscription_covered!(), "
+         GROUP BY (", local_hour_idx!(), " + (?1 - ?1) + (?2 - ?2)), COALESCE(decl.declared_provider, provider_id),
+                  decl.fact_id IS NOT NULL, model_id")
     )?;
     let rows = stmt.query_map(rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?,
-            r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?))
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, bool>(2)?, r.get::<_, Option<String>>(3)?,
+            r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?, r.get::<_, i64>(7)?))
     })?;
-    let mut out: BTreeMap<String, BTreeMap<String, Map<String, Value>>> = BTreeMap::new();
+    let mut out: BTreeMap<(String, bool), BTreeMap<String, Map<String, Value>>> = BTreeMap::new();
     for row in rows {
-        let (hour_idx, provider, model, u, cr, cw, o) = row?;
-        let provider = provider.unwrap_or_else(|| "<unknown>".to_string());
+        let (hour_idx, provider, declared, model, u, cr, cw, o) = row?;
+        let provider = (provider.unwrap_or_else(|| "<unknown>".to_string()), declared);
         let Some(model) = model else { continue };
         let key = format!("{}T{:02}", civil_date_from_days(hour_idx.div_euclid(24)), hour_idx.rem_euclid(24));
         let entry = out.entry(provider).or_default().entry(key).or_default();
@@ -615,6 +692,76 @@ pub fn codex_by_hour_provider_model(
         }}));
     }
     Ok(out.into_iter().map(|(p, h)| (p, Value::Object(h.into_iter().map(|(k,v)| (k, Value::Object(v))).collect()))).collect())
+}
+
+/// 一个宿主在窗口内的**全量** 4 桶 token（不排除订阅覆盖的事实）。`tokens_by_host`
+/// 是 L0 感知层分母——「处理了多少 token」与「这些 token 归谁付钱」是两个问题：
+/// 订阅覆盖只把事实移出**金额**面，token 本身照样发生过。此前 tokens_by_host 是从
+/// 金额面同一份聚合（`claude_days` / `codex_by_hour_model` / `peaked_days_map`，
+/// 全部带 `not_subscription_covered!`）顺手取的，codex 订阅声明一生效，本月用量
+/// 就从 2.8B 缩成 569M（2026-09-16 真机）。
+///
+/// 实时 vs `legacy_aggregate` 沿用 `summary::merged_claude_days` 的 **(日, 模型) 级
+/// 选源**：同键实时优先、异键互补（legacy 只取 `event_peak = 0` 的 base 行），
+/// 与账单轴同一条分离纪律（`q_acceptance::separation_discipline_*`）。零事实 →
+/// None（不冒充 0）。
+pub fn host_tokens_all(
+    conn: &Connection,
+    host: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Option<(i64, i64, i64, i64)>, AuthorityError> {
+    let by_day = host_tokens_by_day_all(conn, host, start_ms, end_ms)?;
+    if by_day.is_empty() {
+        return Ok(None);
+    }
+    let mut t = [0i64; 4];
+    for b in by_day.values() {
+        for i in 0..4 { t[i] += b[i]; }
+    }
+    Ok(Some((t[0], t[1], t[2], t[3])))
+}
+
+/// [`host_tokens_all`] 的逐日版：`{YYYY-MM-DD: [u, cr, cw, o]}`，同一条「实时覆盖
+/// legacy、不排除订阅覆盖」的纪律——日历格子的 token 数读它（此前日历读金额面的
+/// `claude_days` / `codex_by_hour_model`，订阅声明一生效格子里的 token 跟着缩水，
+/// 与月总量、小时图对不上）。
+pub fn host_tokens_by_day_all(
+    conn: &Connection,
+    host: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<BTreeMap<String, [i64; 4]>, AuthorityError> {
+    let mut stmt = conn.prepare(concat!(
+        "SELECT (", local_day_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS day_idx,
+                COALESCE(model_id, ''), observation_kind = 'legacy_aggregate',
+                SUM(uncached_input_tokens), SUM(cache_read_tokens),
+                SUM(cache_write_tokens), SUM(output_tokens)
+         FROM usage_facts
+         WHERE host = ?3 AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?4 AND event_ts_ms < ?5
+           AND (observation_kind != 'legacy_aggregate' OR event_peak = 0)
+         GROUP BY day_idx, model_id, observation_kind = 'legacy_aggregate'"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, host, start_ms, end_ms], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?,
+            r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?))
+    })?;
+    // (day, model) → (is_legacy, 4 桶)：实时覆盖 legacy。
+    let mut chosen: BTreeMap<(i64, String), (bool, [i64; 4])> = BTreeMap::new();
+    for row in rows {
+        let (day, model, legacy, u, cr, cw, o) = row?;
+        let slot = chosen.entry((day, model)).or_insert((legacy, [u, cr, cw, o]));
+        if slot.0 && !legacy {
+            *slot = (false, [u, cr, cw, o]);
+        }
+    }
+    let mut out: BTreeMap<String, [i64; 4]> = BTreeMap::new();
+    for ((day, _model), (_, b)) in chosen {
+        let slot = out.entry(civil_date_from_days(day)).or_insert([0; 4]);
+        for i in 0..4 { slot[i] += b[i]; }
+    }
+    Ok(out)
 }
 
 /// coverage 分母版本（Phase 3.3 设计定稿）：三维定义（usage / price / sync）
@@ -1094,6 +1241,10 @@ impl SessionAgg {
 /// 单宿主 SQL（`host = ?1` 命中 `usage_facts_host_time`）。`?4 < 0` = 不按小时
 /// 过滤；否则只算 `bj_hour == ?4` 的事实——**Q04 峰值下钻**要的正是「该小时
 /// 的会话构成」，SUM 因此自动被 WHERE 收窄到那一小时。
+/// 会话是 token/时间视图，**不排除订阅覆盖的事实**——订阅内的会话也发生过；曾排除
+/// 导致订阅声明一生效，会话列表与峰值小时下钻整段空掉（mcp_smoke Q04：峰值小时
+/// 13.8M tokens、构成会话 0 个，2026-09-17）。钱归谁由 `session_billing_buckets`
+/// 的 billing_mode 表达，不靠隐藏会话。
 const SQL_SESSIONS_IN_WINDOW: &str = concat!("SELECT session_key, host,
             MIN(event_ts_ms), MAX(event_ts_ms), COUNT(*),
             SUM(uncached_input_tokens), SUM(cache_read_tokens),
@@ -1108,12 +1259,6 @@ const SQL_SESSIONS_IN_WINDOW: &str = concat!("SELECT session_key, host,
        AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
        AND session_key IS NOT NULL
        AND event_ts_ms >= ?2 AND event_ts_ms < ?3
-       AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
-           JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
-           WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
-             AND br.revision_number = (SELECT MAX(br2.revision_number)
-               FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
-             AND br.change_kind = 'saved')
        AND (?4 < 0 OR (CAST((", local_hour_idx!(), " + (?5 - ?5) + (?6 - ?6)) % 24 AS INTEGER) = ?4))
        AND (?7 IS NULL OR COALESCE(model_id, '<unknown>') = ?7)
        AND (?8 IS NULL OR COALESCE(provider_id, '<unknown>') = ?8)
@@ -2098,6 +2243,55 @@ mod tests {
         assert_eq!(bucket["uncached_input_tokens"], json!(800));
         assert_eq!(bucket["cached_input_tokens"], json!(200));
         assert_eq!(bucket["reasoning_output_tokens"], json!(0));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 2026-09-16 真机：codex openai 订阅声明覆盖了 26,715 条事实，`codex/openai` 却仍报
+    /// $376 按量估算——`codex_by_hour_provider_model` 是唯一漏抄「未被订阅覆盖」谓词的
+    /// 金额侧查询。现在谓词单一来源（`not_subscription_covered!`），这里钉住 provider 轴。
+    #[test]
+    fn codex_by_hour_provider_model_excludes_subscription_covered_facts() {
+        let path = tmp_db("codex-provider-covered");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        let (start, _) = beijing_day_bounds_ms("2026-09-05").unwrap();
+        insert_fact(&db, "f-covered", "codex", Some("gpt-5.6-sol"), "token_count", start + 3_600_000, 0, 800, 0, 0, 0);
+        insert_fact(&db, "f-open", "codex", Some("gpt-5.6-sol"), "token_count", start + 7_200_000, 0, 300, 0, 0, 0);
+        // f-open 走中转（provider 未知，NULL）——真机形状；f-covered 是官方 openai。
+        db.conn().execute("UPDATE usage_facts SET provider_id = 'openai' WHERE fact_id = 'f-covered'", []).unwrap();
+        db.billing_declaration_revision_save(
+            "rev-cx", "decl-cx", None, "codex", "openai", "official_subscription", Some("Plus"),
+            Some(2_000), Some("USD"), "2026-09-01", None, None, None, &[], 2,
+        ).unwrap();
+        db.billing_recalculation_enqueue("job-cx", "decl-cx", "rev-cx", 3).unwrap();
+        // 只把 f-covered 标成订阅覆盖：直接写归因行，模拟作用域只命中一条。
+        db.conn().execute(
+            "UPDATE billing_recalculation_jobs SET status = 'succeeded' WHERE job_id = 'job-cx'", [],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO billing_fact_attributions(fact_id, revision_id, job_id, attribution_kind, created_at_ms)
+             VALUES ('f-covered', 'rev-cx', 'job-cx', 'subscription_covered', 4)", [],
+        ).unwrap();
+        let grouped = codex_by_hour_provider_model(db.conn(), start, start + DAY_MS).unwrap();
+        assert!(!grouped.contains_key(&("openai".to_string(), false)),
+            "订阅覆盖的小时桶不得进入金额面：{grouped:?}");
+        assert_eq!(grouped[&("<unknown>".to_string(), false)]["2026-09-05T02"]["gpt-5.6-sol"]["standard"]["uncached_input_tokens"], json!(300));
+        // 撤销声明 → 覆盖失效 → 事实回到按量估算。
+        db.billing_declaration_revision_revoke("rev-cx-revoke", "decl-cx", "rev-cx", 5).unwrap();
+        let grouped = codex_by_hour_provider_model(db.conn(), start, start + DAY_MS).unwrap();
+        assert_eq!(grouped[&("openai".to_string(), false)]["2026-09-05T01"]["gpt-5.6-sol"]["standard"]["uncached_input_tokens"], json!(800));
+        // 用户把 f-open 归因到中转（user_declared）→ 它离开 openai 默认组、进入
+        // (shengsuanyun, declared=true) 组；金额面据此改计 MeteredDeclared。
+        db.billing_declaration_revision_save(
+            "rev-relay", "decl-relay", None, "codex", "shengsuanyun", "third_party", None, None, None,
+            "2026-09-01", None, None, None, &[("provider", "unresolved")], 6,
+        ).unwrap();
+        db.billing_recalculation_enqueue("job-relay", "decl-relay", "rev-relay", 7).unwrap();
+        assert!(db.billing_recalculation_run("job-relay", 8).unwrap());
+        let grouped = codex_by_hour_provider_model(db.conn(), start, start + DAY_MS).unwrap();
+        let relay = &grouped[&("shengsuanyun".to_string(), true)];
+        assert_eq!(relay["2026-09-05T02"]["gpt-5.6-sol"]["standard"]["uncached_input_tokens"], json!(300));
+        assert!(!grouped.contains_key(&("<unknown>".to_string(), false)),
+            "归因走的事实不得同时留在默认组（双计）");
         let _ = std::fs::remove_file(&path);
     }
 

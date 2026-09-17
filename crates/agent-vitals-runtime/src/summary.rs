@@ -618,6 +618,185 @@ fn claude_provider_amounts_from_days(
         .collect()
 }
 
+/// claude-code `by_provider` 的归因版（2026-09-16「归因以后按照归因的来计算」）：
+/// 用户在计费声明里答过「经 X 按量付费」的事实（`user_declared`）从默认估算里
+/// 拿出来，按 X 计 `MeteredDeclared`——X 的价卡收录该模型就用 X 的价，否则退回
+/// 目录路由的官方价（`pricing_method` 如实标 fallback）。没答过的照旧走
+/// [`claude_provider_amounts_from_days`]（`MeteredEstimate` + unresolved）。
+/// 两部分之和 == 原先的全量估算：declared ⊆ realtime，从合并后的 days 里逐
+/// (日, 模型) 减掉 declared 桶就是 undeclared，不需要第二条 SQL。
+fn claude_provider_amounts_from_sql(
+    db: &Option<agent_vitals_data::authority::AuthorityDb>,
+    bounds: Option<(i64, i64)>,
+    merged_days: &BTreeMap<String, serde_json::Value>,
+    cards: &PricingCards,
+) -> BTreeMap<String, HostAmount> {
+    let declared = match (db, bounds) {
+        (Some(db), Some((start, end))) => {
+            agent_vitals_data::authority_query::claude_declared_days(db.conn(), start, end)
+                .unwrap_or_default()
+        }
+        _ => BTreeMap::new(),
+    };
+    if declared.is_empty() {
+        return claude_provider_amounts_from_days(merged_days, cards);
+    }
+    let mut undeclared = merged_days.clone();
+    for days in declared.values() {
+        subtract_claude_days(&mut undeclared, days);
+    }
+    let settlement = db.as_ref().and_then(|db| db.declared_settlement_currencies().ok()).unwrap_or_default();
+    let mut out = claude_provider_amounts_from_days(&undeclared, cards);
+    for (provider, days) in &declared {
+        let declared_currency = settlement.get(&format!("claude-code/{provider}")).map(String::as_str);
+        for (key, amount) in declared_provider_amounts("claude-code", provider, days, cards, declared_currency) {
+            match out.remove(&key) {
+                Some(existing) => { out.insert(key, merge_host_amounts(existing, amount)); }
+                None => { out.insert(key, amount); }
+            }
+        }
+    }
+    out
+}
+
+/// `days -= declared`，逐 (日, 模型) 四桶相减；减到全零的模型/日整个移除
+/// （空桶会让 `claude_day_cost` 报一个 0 元条目，看起来像"有用量但免费"）。
+fn subtract_claude_days(days: &mut BTreeMap<String, serde_json::Value>, declared: &BTreeMap<String, serde_json::Value>) {
+    for (day, models) in declared {
+        let Some(target) = days.get_mut(day).and_then(|v| v.as_object_mut()) else { continue };
+        let Some(models) = models.as_object() else { continue };
+        for (model, buckets) in models {
+            let Some(slot) = target.get_mut(model).and_then(|v| v.as_object_mut()) else { continue };
+            let mut all_zero = true;
+            for (k, v) in buckets.as_object().into_iter().flatten() {
+                let cur = slot.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+                let next = (cur - v.as_i64().unwrap_or(0)).max(0);
+                slot.insert(k.clone(), json!(next));
+            }
+            for v in slot.values() {
+                if v.as_i64().unwrap_or(0) != 0 { all_zero = false; }
+            }
+            if all_zero { target.remove(model); }
+        }
+        if target.is_empty() { days.remove(day); }
+    }
+}
+
+/// 一个已归因计费方的 claude 条目：逐日 `claude_day_cost_preferring` 计价，金额
+/// 进 `MeteredDeclared`。`priced_with != provider` 的模型走了官方价 fallback，整条
+/// 目标 `fair-market-fallback`；无价卡 / partial 的模型仍标 unresolved。
+///
+/// **按币分条目**：中转一次可能转多家（胜算云同时转 DeepSeek（CNY 卡）与
+/// Anthropic（USD 卡）），fallback 价卡币种不一，而 `HostAmount` 单币——混进一
+/// 条会触发多币冲突、金额整体清空（2026-09-16 真机：`claude-code/shengsuanyun`
+/// 空条目 + no-price-card）。所以计费方卡片币种（无卡默认 CNY）的那份用基础键
+/// `host/provider`，其他币种追加第三段 `host/provider/USD`——消费方只解析前两段
+/// （JS `key.split("/")` 取 host/provider；`apply_host_bills` 等按基础键找）。
+/// 宿主无关的归因计价主体（claude 4 桶日 map 形状）；codex 的归因事实先转成同一
+/// 形状再进来（`codex_declared_provider_amounts`）。
+///
+/// **币种跟计费方走，不跟模型走**（2026-09-16：胜算云是国内公司，转海外模型也按
+/// 人民币结算）。结算币种 = 用户在声明里填的 `declared_currency` > 目录卡片币种 >
+/// CNY。价卡未收录、退回原厂官方卡估出来的外币金额，按 `fx_estimate` 折成结算币
+/// （`pricing_method = fair-market-fallback-fx`，展示带 ≈）；没有该币对折算率时才
+/// 另起 `host/provider/CUR` 条目保留原币。折算只发生在估算档——实付/月费永远分币。
+fn declared_provider_amounts(
+    host: &str,
+    provider: &str,
+    days: &BTreeMap<String, serde_json::Value>,
+    cards: &PricingCards,
+    declared_currency: Option<&str>,
+) -> Vec<(String, HostAmount)> {
+    let pricing = cards.main.clone();
+    let primary_currency = declared_currency
+        .map(str::to_string)
+        .or_else(|| agent_vitals_domain::cost::provider_settlement_currency(provider, &pricing))
+        .unwrap_or_else(|| "CNY".to_string());
+    let mut accs: BTreeMap<String, ProviderAcc> = BTreeMap::new();
+    let mut fallback: BTreeMap<String, bool> = BTreeMap::new();
+    let mut converted: BTreeMap<String, bool> = BTreeMap::new();
+    for (date, day) in days {
+        let report = agent_vitals_domain::cost::claude_day_cost_preferring(day, &pricing, Some(provider));
+        let per_model = report.as_ref().and_then(|r| r.get("per_model")).and_then(|v| v.as_object());
+        let unpriced = report.as_ref().and_then(|r| r.get("unpriced_tokens")).and_then(|v| v.as_i64()).unwrap_or(0);
+        let Some(per_model) = per_model else {
+            // 没有任何模型可计价：有 token 但无价卡 → 挂在主币条目上标 unresolved（不冒充 0）。
+            if agent_vitals_domain::cost::claude_day_total_tokens(day) > 0 {
+                let acc = accs.entry(primary_currency.clone()).or_insert_with(ProviderAcc::new);
+                acc.observe(date);
+                acc.unresolved = true;
+            }
+            continue;
+        };
+        for entry in per_model.values() {
+            let mut total = entry.get("total").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let mut currency = entry.get("currency").and_then(|v| v.as_str()).unwrap_or("CNY").to_string();
+            let is_fallback = entry.get("priced_with").and_then(|v| v.as_str()) != Some(provider);
+            if currency != primary_currency {
+                if let Some(v) = agent_vitals_domain::cost::to_settlement_currency(total, &currency, &primary_currency, &pricing) {
+                    total = v;
+                    currency = primary_currency.clone();
+                    converted.insert(currency.clone(), true);
+                }
+            }
+            let acc = accs.entry(currency.clone()).or_insert_with(ProviderAcc::new);
+            acc.observe(date);
+            acc.add(BillingBasis::MeteredDeclared, &currency, total);
+            if is_fallback {
+                fallback.insert(currency.clone(), true);
+            }
+            if entry.get("pricing_basis").and_then(|v| v.as_str()) == Some("partial") { acc.unresolved = true; }
+        }
+        if unpriced > 0 {
+            let acc = accs.entry(primary_currency.clone()).or_insert_with(ProviderAcc::new);
+            acc.observe(date);
+            acc.unresolved = true;
+        }
+    }
+    accs.into_iter().map(|(currency, acc)| {
+        let key = if currency == primary_currency {
+            format!("{host}/{provider}")
+        } else {
+            format!("{host}/{provider}/{currency}")
+        };
+        let mut h = acc.finish(&key);
+        let is_fallback = fallback.get(&currency).copied().unwrap_or(false);
+        let is_converted = converted.get(&currency).copied().unwrap_or(false);
+        h.pricing_method = Some(match (is_fallback, is_converted) {
+            (true, true) => "fair-market-fallback-fx",
+            (true, false) => "fair-market-fallback",
+            _ => "provider-card",
+        }.to_string());
+        // 归因本身就是用户给的路由证据；unresolved 只剩价卡缺口。
+        h.evidence_basis = Some("user-declared".to_string());
+        h.unresolved_reason = h.has_unresolved.then(|| "no-price-card".to_string());
+        (key, h)
+    }).collect()
+}
+
+/// 同一 `host/provider` 键上两条来源（默认估算 + 归因估算）合并：同币相加各
+/// basis；币种不一致 → 金额表清空 + unresolved（HostAmount 单币纪律）。
+fn merge_host_amounts(mut a: HostAmount, b: HostAmount) -> HostAmount {
+    match (&a.currency, &b.currency) {
+        (Some(x), Some(y)) if x != y => {
+            a.amounts_by_basis.clear();
+            a.currency = None;
+            a.has_unresolved = true;
+            a.unresolved_reason = Some("provider-or-currency-unresolved".to_string());
+            return a;
+        }
+        (None, Some(_)) => a.currency = b.currency.clone(),
+        _ => {}
+    }
+    for (basis, amount) in b.amounts_by_basis {
+        *a.amounts_by_basis.entry(basis).or_insert(0.0) += amount;
+    }
+    a.has_unresolved |= b.has_unresolved;
+    if a.unresolved_reason.is_none() { a.unresolved_reason = b.unresolved_reason; }
+    if matches!(a.freshness.state, FreshnessState::Unavailable) { a.freshness = b.freshness; }
+    a
+}
+
 /// by_provider 的 DSH 条目：声明表里 deepseek-official = metered，官方逐
 /// token 价是真实费率——与 `dsh_host_amount` 的 MeteredActual 判定一致，
 /// 条目即宿主条目的镜像（Host = BillingSource 的宿主，键换名片）。
@@ -1015,11 +1194,24 @@ fn codex_provider_amounts_from_sql(
     };
     let Some(db) = db else { return BTreeMap::new(); };
     let grouped = agent_vitals_data::authority_query::codex_by_hour_provider_model(db.conn(), start, end).unwrap_or_default();
-    let mut out = BTreeMap::new();
-    for (provider, hours) in grouped {
+    let settlement = db.declared_settlement_currencies().unwrap_or_default();
+    let mut out: BTreeMap<String, HostAmount> = BTreeMap::new();
+    for ((provider, declared), hours) in grouped {
         let key = format!("codex/{provider}");
-        if provider == "openai" {
-            out.insert(key, codex_provider_amount_from_hours(&hours, day, cards).0);
+        if declared {
+            let declared_currency = settlement.get(&format!("codex/{provider}")).map(String::as_str);
+            for (k, amount) in codex_declared_provider_amounts(&provider, &hours, day, cards, declared_currency) {
+                match out.remove(&k) {
+                    Some(existing) => { out.insert(k, merge_host_amounts(existing, amount)); }
+                    None => { out.insert(k, amount); }
+                }
+            }
+        } else if provider == "openai" {
+            let amount = codex_provider_amount_from_hours(&hours, day, cards).0;
+            match out.remove(&key) {
+                Some(existing) => { out.insert(key, merge_host_amounts(existing, amount)); }
+                None => { out.insert(key, amount); }
+            }
         } else {
             // Custom/third-party routes are not OpenAI subscription usage, but
             // they still receive a fair-market estimate from the model card.
@@ -1065,6 +1257,110 @@ fn codex_provider_amounts_from_sql(
     out
 }
 
+/// Codex 归因到某计费方的小时事实 → by_provider 条目（可能按币拆成两条）。
+///
+/// 该计费方价卡**收录**的模型按它的价、它的币种算（胜算云的 CNY 卡收录了就是
+/// 人民币）；未收录的模型退回 Codex 唯一的官方价卡（OpenAI，USD），标
+/// `fair-market-fallback`——「中转按量却显示美元」的来源就是这一支：不是币种
+/// 填错了，是胜算云卡没收录 gpt-* 模型，只能按 OpenAI 标价估（2026-09-16）。
+fn codex_declared_provider_amounts(
+    provider: &str,
+    hours: &serde_json::Value,
+    day: Option<&str>,
+    cards: &PricingCards,
+    declared_currency: Option<&str>,
+) -> Vec<(String, HostAmount)> {
+    let pricing = cards.main.clone();
+    let settlement = declared_currency
+        .map(str::to_string)
+        .or_else(|| agent_vitals_domain::cost::provider_settlement_currency(provider, &pricing))
+        .unwrap_or_else(|| "CNY".to_string());
+    // 按「声明卡是否收录」把小时桶拆成两份：收录的转成 claude 4 桶日 map 走归因
+    // 计价；未收录的留在 codex 小时形状走 OpenAI 卡。
+    let mut covered_days: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let mut fallback_hours = serde_json::Map::new();
+    for (hour, models) in hours.as_object().into_iter().flatten() {
+        let Some(models) = models.as_object() else { continue };
+        let date: String = hour.chars().take(10).collect();
+        for (model, speeds) in models {
+            // 声明卡收录 → 按它；否则目录里原厂官方卡（DeepSeek / MiniMax 的 CNY 卡）
+            // → 「按原厂官方价估算」（用户定向 2026-09-17：默认用官方计价模板，不逼人
+            // 手抄）；两者都没有（gpt-*）才退回 Codex 的 OpenAI 卡。
+            if agent_vitals_domain::cost::official_card_for(model, &pricing, Some(provider)).is_some() {
+                let day = covered_days.entry(date.clone()).or_insert_with(|| json!({}));
+                let obj = day.as_object_mut().expect("day map is object");
+                let bucket = obj.entry(model.clone()).or_insert_with(|| json!({
+                    "input_tokens": 0, "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0, "output_tokens": 0}));
+                for b in speeds.as_object().into_iter().flatten().map(|(_, b)| b) {
+                    let g = |k: &str| b.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+                    for (dst, add) in [
+                        ("input_tokens", g("uncached_input_tokens")),
+                        ("cache_read_input_tokens", g("cached_input_tokens")),
+                        ("cache_creation_input_tokens", g("cache_write_input_tokens")),
+                        ("output_tokens", g("output_tokens") + g("reasoning_output_tokens")),
+                    ] {
+                        let cur = bucket.get(dst).and_then(|v| v.as_i64()).unwrap_or(0);
+                        bucket[dst] = json!(cur + add);
+                    }
+                }
+            } else {
+                fallback_hours.entry(hour.clone()).or_insert_with(|| json!({}))
+                    .as_object_mut().expect("hour map is object")
+                    .insert(model.clone(), speeds.clone());
+            }
+        }
+    }
+    let mut out = if covered_days.is_empty() {
+        Vec::new()
+    } else {
+        declared_provider_amounts("codex", provider, &covered_days, cards, Some(settlement.as_str()))
+    };
+    if !fallback_hours.is_empty() {
+        let (priced, _tokens) = codex_host_amount_with_tokens_from_hours(
+            &serde_json::Value::Object(fallback_hours), &serde_json::Value::Null,
+            &serde_json::Value::Null, day, cards,
+        );
+        let usd = priced.amounts_by_basis.values().copied().fold(0.0, |a, b| a + b);
+        // OpenAI 卡是 USD；计费方按别的币结算时折成结算币（估算档才折，带 ≈）。
+        let (estimate, currency, method) =
+            match agent_vitals_domain::cost::to_settlement_currency(usd, "USD", &settlement, &pricing) {
+                Some(v) if settlement != "USD" => (v, settlement.clone(), "fair-market-fallback-fx"),
+                _ => (usd, "USD".to_string(), "fair-market-fallback"),
+            };
+        let mut amounts_by_basis = BTreeMap::new();
+        if estimate > 0.0 {
+            amounts_by_basis.insert(BillingBasis::MeteredDeclared, estimate);
+        }
+        let base_key = format!("codex/{provider}");
+        let amount = HostAmount {
+            host_id: base_key.clone(),
+            amounts_by_basis,
+            currency: Some(currency.clone()),
+            has_unresolved: false,
+            evidence_basis: Some("user-declared".to_string()),
+            pricing_method: Some(method.to_string()),
+            unresolved_reason: None,
+            freshness: day.map(day_freshness).unwrap_or_else(|| priced.freshness.clone()),
+        };
+        // 同币并入主条目；异币（无折算率时）另起第三段键，不跨币相加。
+        match out.iter().position(|(k, _)| k == &base_key) {
+            Some(i) if out[i].1.currency.as_deref() == Some(currency.as_str()) => {
+                let (k, existing) = out.remove(i);
+                out.push((k, merge_host_amounts(existing, amount)));
+            }
+            Some(_) => {
+                let key = format!("{base_key}/{currency}");
+                let mut a = amount;
+                a.host_id = key.clone();
+                out.push((key, a));
+            }
+            None => out.push((base_key, amount)),
+        }
+    }
+    out
+}
+
 fn codex_host_amount_provider_safe(
     db: &Option<agent_vitals_data::authority::AuthorityDb>,
     bounds: Option<(i64, i64)>,
@@ -1074,7 +1370,10 @@ fn codex_host_amount_provider_safe(
 ) -> (HostAmount, HostTokens) {
     let mixed = bounds.and_then(|(start, end)| db.as_ref().and_then(|db| {
         agent_vitals_data::authority_query::codex_by_hour_provider_model(db.conn(), start, end).ok()
-    })).map(|m| m.keys().any(|p| p != "openai")).unwrap_or(false);
+    // 「混合路由」只算**没人认领**的非 openai 组：用户已归因到中转的那部分（declared）
+    // 不再是未知路由，不该让 Codex 整宿主降级成 Partial——否则费用明细里 OpenAI 订阅
+    // 那行挂着「数据不完整」，用户以为归因没生效（2026-09-17）。
+    })).map(|m| m.keys().any(|(p, declared)| p != "openai" && !declared)).unwrap_or(false);
     let (mut amount, tokens) = codex_host_amount_with_tokens_from_hours(
         by_hour_model, &serde_json::Value::Null, &serde_json::Value::Null, day, cards,
     );
@@ -1317,7 +1616,7 @@ fn declared_fee_for_month(
     let applicable = revisions.iter()
         .filter(|r| r.3 == "saved")
         .filter(|r| month_prefix(&r.11).as_str() <= month)
-        .filter(|r| r.12.as_deref().map(month_prefix).is_none_or(|end| month <= end.as_str()))
+        .filter(|r| r.12.as_deref().map(month_prefix).map_or(true, |end| month <= end.as_str()))
         .filter(|r| r.2 == 1 || beijing_month_of_ms(r.15).as_str() <= month)
         .max_by_key(|r| r.2)?;
     let amount_minor = applicable.9?;
@@ -1756,6 +2055,19 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
         }
     }
 
+    // 格子里的 token 数换回**全量**（`host_tokens_by_day_all`）：上面三段的 token 是
+    // 顺着金额面的聚合取的（排除订阅覆盖），钱照那样算是对的，token 不是——订阅内的
+    // token 同样发生过（与 `tokens_by_host` / `hourly_distribution` 同一条纪律）。
+    if let (Some(db), Some((start, end))) = (&db, bounds) {
+        for (host, key) in [("dsh", "dsh_tokens"), ("claude-code", "claude_tokens"), ("codex", "codex_tokens")] {
+            let Ok(by_day) = agent_vitals_data::authority_query::host_tokens_by_day_all(db.conn(), host, start, end)
+            else { continue };
+            for (date, b) in by_day {
+                let e = day_entry(&mut days, &date);
+                e[key] = json!(b[0] + b[1] + b[2] + b[3]);
+            }
+        }
+    }
     // total_tokens 最后统一算（三宿主都已落位）。
     for (_, e) in days.iter_mut() {
         let g = |k: &str| e.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
@@ -1981,6 +2293,41 @@ fn fetch_windowed(
     }
 }
 
+/// `tokens_by_host` 必须是**全量**处理量：金额面的三条聚合（claude_days /
+/// codex_by_hour_model / peaked_days_map）都排除了订阅覆盖的事实——那是「钱归谁」
+/// 的口径；token 是「处理了多少」的口径，订阅内的 token 同样发生过。此前两者
+/// 共用一份聚合，codex 订阅声明一生效，本月用量从 2.8B 缩成 569M（2026-09-16
+/// 真机）。这里用 `host_tokens_all` 把三宿主的 4 桶换回全量；命中率照 domain
+/// 的同一条公式重算。SQL 读不到时保留金额面的数（比冒充 0 诚实）。WorkBuddy
+/// 不在这里：它的 4 桶来自 `workbuddy_host_amount_with_tokens` 自己的全量查询。
+fn restore_full_host_tokens(
+    db: &Option<agent_vitals_data::authority::AuthorityDb>,
+    bounds: Option<(i64, i64)>,
+    tokens_by_host: &mut BTreeMap<String, HostTokens>,
+) {
+    let (Some(db), Some((start, end))) = (db, bounds) else { return };
+    for host in ["dsh", "codex", "claude-code"] {
+        let Ok(Some((u, cr, cw, o))) =
+            agent_vitals_data::authority_query::host_tokens_all(db.conn(), host, start, end)
+        else {
+            continue;
+        };
+        let cache_hit_ratio = agent_vitals_domain::cost::cache_hit_ratio(&json!({
+            "uncached_input_tokens": u,
+            "cached_input_tokens": cr,
+            "cache_write_input_tokens": cw,
+        }));
+        tokens_by_host.insert(host.to_string(), HostTokens {
+            total: u + cr + cw + o,
+            uncached_input: u,
+            cache_read: cr,
+            cache_write: cw,
+            output: o,
+            cache_hit_ratio,
+        });
+    }
+}
+
 impl SummaryRepository for SqlSummaryRepository {
     fn monthly_summary(&self, query: &MonthlySummaryQuery) -> MonthlySummary {
         let db = self.open_db();
@@ -2028,6 +2375,7 @@ impl SummaryRepository for SqlSummaryRepository {
         tokens_by_host.insert("codex".to_string(), codex_tk);
         tokens_by_host.insert("claude-code".to_string(), claude_tk);
         tokens_by_host.insert("workbuddy".to_string(), wb_tk);
+        restore_full_host_tokens(&db, bounds, &mut tokens_by_host);
 
         let mut by_provider = BTreeMap::new();
         by_provider.insert(
@@ -2037,7 +2385,7 @@ impl SummaryRepository for SqlSummaryRepository {
         by_provider.extend(codex_provider_amounts_from_sql(
             &db, bounds, None, &by_hour_model, &cards,
         ));
-        by_provider.extend(claude_provider_amounts_from_days(&claude_days_map, &cards));
+        by_provider.extend(claude_provider_amounts_from_sql(&db, bounds, &claude_days_map, &cards));
         // 月费两条来源，**声明优先**：价目表 `catalog_2026_09.subscriptions`（随版本
         // 更新）与用户在「明确计费方式」里声明的订阅（权威库、可撤销）。`declared`
         // 只取一次，两条路径共用同一份，价目表那条据此跳过同 provider 的重复摊。
@@ -2117,6 +2465,7 @@ impl SummaryRepository for SqlSummaryRepository {
         tokens_by_host.insert("codex".to_string(), codex_tk);
         tokens_by_host.insert("claude-code".to_string(), claude_tk);
         tokens_by_host.insert("workbuddy".to_string(), wb_tk);
+        restore_full_host_tokens(&db, bounds, &mut tokens_by_host);
 
         let mut by_provider = BTreeMap::new();
         by_provider.insert(
@@ -2126,7 +2475,7 @@ impl SummaryRepository for SqlSummaryRepository {
         by_provider.extend(codex_provider_amounts_from_sql(
             &db, bounds, Some(&query.date), &by_hour_model, &cards,
         ));
-        by_provider.extend(claude_provider_amounts_from_days(&claude_days_map, &cards));
+        by_provider.extend(claude_provider_amounts_from_sql(&db, bounds, &claude_days_map, &cards));
 
         let freshness = aggregate_freshness(&by_host);
         let last_observed_at = freshness.last_observed_at.clone();

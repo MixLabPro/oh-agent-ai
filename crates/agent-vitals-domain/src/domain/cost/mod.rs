@@ -26,7 +26,8 @@ use serde_json::{json, Value};
 mod claude;
 mod codex;
 pub use claude::{
-    claude_day_cost, claude_day_total_tokens, claude_session_cost,
+    claude_day_cost, claude_day_cost_preferring, claude_day_total_tokens, claude_session_cost,
+    declared_card_covers, official_card_body, official_card_for,
     claude_subscription_uncovered_estimate,
 };
 pub use codex::{codex_price_bucket, codex_resolve_entry, load_codex_pricing};
@@ -110,8 +111,9 @@ pub fn metered_estimate_minor(
 // 与计价面解耦（无价卡模型 glm-* 也能归属）。2026-09-05。
 mod billing;
 pub use billing::{
-    billing_mode_of, billing_route_of, cache_hit_ratio, declared_subscriptions,
-    subscription_fee_of, BillingMode,
+    billing_mode_of, billing_route_of, cache_hit_ratio, canonical_provider_id,
+    declared_subscriptions, provider_settlement_currency, subscription_fee_of,
+    to_settlement_currency, BillingMode,
 };
 
 const PRICING_JSON: &str = include_str!("../../../../../assets/pricing.json");

@@ -2684,6 +2684,12 @@ session_store={store} fold={fold}"
                         "Facts sync: +{} appended, {} duplicate",
                         report.total_appended, report.total_duplicate
                     );
+                    if report.declarations_applied > 0 {
+                        println!(
+                            "  billing declarations: {} new facts attributed under active rules",
+                            report.declarations_applied
+                        );
+                    }
                     for h in &report.hosts {
                         println!(
                             "  {:<12} seen {} synced {} skipped {} (+{} dup{})",

@@ -402,3 +402,129 @@ fn separation_discipline_realtime_and_legacy_do_not_add() {
         .sum();
     assert_eq!(total, 260, "合并视图两模型互补，不双计不漏计");
 }
+
+/// 2026-09-16 真机：codex 订阅声明覆盖 26,715 条事实后，本月用量从 2.8B 缩成 569M——
+/// `tokens_by_host` 与金额面共用了带「未被订阅覆盖」谓词的聚合。token 是「处理了多少」，
+/// 订阅覆盖只改「钱归谁」：覆盖后 tokens_by_host 不变、金额面的估算消失。
+#[test]
+fn subscription_coverage_moves_money_but_not_tokens() {
+    let env = QEnv::new("cov-tokens");
+    let d = env.day.clone();
+    let s = env.day_start(&d);
+    env.fact("c1", "codex", "gpt-5.6-sol", s + 1_000, 0, 1_000_000, 100_000);
+    env.fact("c2", "codex", "gpt-5.6-sol", s + 2_000, 0, 500_000, 50_000);
+    env.db.conn().execute("UPDATE usage_facts SET provider_id = 'openai'", []).unwrap();
+    let repo = SqlSummaryRepository::new();
+    let before = repo.daily_summary(&DailySummaryQuery { date: d.clone() });
+    assert_eq!(before.tokens_by_host["codex"].total, 1_650_000);
+    assert!(before.by_provider["codex/openai"].amounts_by_basis.contains_key(
+        &agent_vitals_data::projection::BillingBasis::MeteredEstimate));
+
+    // 声明订阅并让重算覆盖全部 codex/openai 事实。
+    env.db.billing_declaration_revision_save(
+        "rev-cov", "decl-cov", None, "codex", "openai", "official_subscription", Some("Plus"),
+        Some(2_000), Some("USD"), "2020-01-01", None, None, None, &[], 2,
+    ).unwrap();
+    env.db.billing_recalculation_enqueue("job-cov", "decl-cov", "rev-cov", 3).unwrap();
+    assert!(env.db.billing_recalculation_run("job-cov", 4).unwrap());
+
+    let after = repo.daily_summary(&DailySummaryQuery { date: d.clone() });
+    assert_eq!(after.tokens_by_host["codex"].total, 1_650_000, "订阅覆盖不改变处理量");
+    // 日粒度没有月费可摊，条目可以整个消失；有条目也不得再带按量估算。
+    let no_estimate = |m: &agent_vitals_data::projection::MonthlySummary| !m.by_provider.get("codex/openai")
+        .is_some_and(|h| h.amounts_by_basis.contains_key(&agent_vitals_data::projection::BillingBasis::MeteredEstimate));
+    assert!(!after.by_provider.get("codex/openai").is_some_and(|h| h.amounts_by_basis.contains_key(
+        &agent_vitals_data::projection::BillingBasis::MeteredEstimate)),
+        "覆盖后的事实不得再按量估算：{:?}", after.by_provider.get("codex/openai"));
+    let month: String = d.chars().take(7).collect();
+    let monthly = repo.monthly_summary(&MonthlySummaryQuery { month });
+    assert_eq!(monthly.tokens_by_host["codex"].total, 1_650_000);
+    assert!(no_estimate(&monthly), "{:?}", monthly.by_provider.get("codex/openai"));
+    assert_eq!(monthly.by_provider["codex/openai"].amounts_by_basis
+        .get(&agent_vitals_data::projection::BillingBasis::FixedSubscription).copied(), Some(20.0),
+        "声明的月费按自报口径计入");
+}
+
+/// 2026-09-16 产品定向「归因以后按照归因的来计算」：中转（provider 未知）的 claude
+/// 用量声明为 shengsuanyun 按量后，金额从目录猜的 `claude-code/deepseek-official`
+/// 默认估算搬到 `claude-code/shengsuanyun` 的归因估算（`metered_declared`），
+/// `metered_view` 据此给出带标签的按量费用；总 token 与估算金额本身不变。
+#[test]
+fn user_declared_relay_usage_moves_from_default_to_declared_estimate() {
+    let env = QEnv::new("declared-relay");
+    let d = env.day.clone();
+    let s = env.day_start(&d);
+    env.fact("r1", "claude-code", "deepseek-v4-pro", s + 1_000, 0, 2_000_000, 200_000);
+    let repo = SqlSummaryRepository::new();
+    let month: String = d.chars().take(7).collect();
+    let before = repo.monthly_summary(&MonthlySummaryQuery { month: month.clone() });
+    let default_entry = &before.by_provider["claude-code/deepseek-official"];
+    let default_amount = default_entry.amounts_by_basis[&agent_vitals_data::projection::BillingBasis::MeteredEstimate];
+    assert!(default_amount > 0.0);
+    let view = before.metered_view();
+    assert_eq!(view["CNY"].default_estimate, default_amount);
+    assert_eq!(view["CNY"].unattributed_providers, vec!["claude-code/deepseek-official".to_string()]);
+
+    env.db.billing_declaration_revision_save(
+        "rev-relay", "decl-relay", None, "claude-code", "shengsuanyun", "third_party", None, None, None,
+        "2020-01-01", None, None, None, &[("provider", "unresolved")], 2,
+    ).unwrap();
+    env.db.billing_recalculation_enqueue("job-relay", "decl-relay", "rev-relay", 3).unwrap();
+    assert!(env.db.billing_recalculation_run("job-relay", 4).unwrap());
+
+    let after = repo.monthly_summary(&MonthlySummaryQuery { month: month.clone() });
+    assert!(after.by_provider.get("claude-code/deepseek-official").map_or(true, |h| h.amounts_by_basis.is_empty()),
+        "归因后默认估算条目不得再持有这批钱：{:?}", after.by_provider.get("claude-code/deepseek-official"));
+    let declared = &after.by_provider["claude-code/shengsuanyun"];
+    let declared_amount = declared.amounts_by_basis[&agent_vitals_data::projection::BillingBasis::MeteredDeclared];
+    assert!((declared_amount - default_amount).abs() < 1e-9, "同一批 token 同一张卡，金额不变：{declared_amount} vs {default_amount}");
+    assert!(!declared.has_unresolved, "路由是用户答的，不再 unresolved");
+    assert_eq!(declared.evidence_basis.as_deref(), Some("user-declared"));
+    let view = after.metered_view();
+    assert_eq!(view["CNY"].declared_estimate, declared_amount);
+    assert_eq!(view["CNY"].default_estimate, 0.0);
+    assert!(view["CNY"].unattributed_providers.is_empty());
+    assert_eq!(after.tokens_by_host["claude-code"].total, before.tokens_by_host["claude-code"].total);
+    // 日视图同样搬家。
+    let daily = repo.daily_summary(&DailySummaryQuery { date: d });
+    assert!(daily.by_provider.contains_key("claude-code/shengsuanyun"));
+}
+
+/// 2026-09-16：币种跟计费方走。胜算云（国内中转，CNY 结算）转的海外模型
+/// （`anthropic/claude-sonnet-5`，原厂卡 USD；codex 的 gpt-*，OpenAI 卡 USD）声明
+/// 归因后，估算按 fx_estimate 折成人民币、标 `fair-market-fallback-fx`，而不是
+/// 一条 CNY 一条 USD 各说各话。
+#[test]
+fn declared_provider_settles_fallback_estimates_in_its_own_currency() {
+    let env = QEnv::new("settlement");
+    let d = env.day.clone();
+    let s = env.day_start(&d);
+    env.fact("s1", "claude-code", "anthropic/claude-sonnet-5", s + 1_000, 0, 1_000_000, 100_000);
+    env.fact("c1", "codex", "openai/gpt-5.6-luna", s + 2_000, 0, 1_000_000, 100_000);
+    for (host, decl, rev) in [("claude-code", "decl-ss-cc", "rev-ss-cc"), ("codex", "decl-ss-cx", "rev-ss-cx")] {
+        env.db.billing_declaration_revision_save(
+            rev, decl, None, host, "shengsuanyun", "third_party", None, None, None,
+            "2020-01-01", None, None, None, &[("provider", "unresolved"), ("settlement", "CNY")], 2,
+        ).unwrap();
+        let job = format!("job-{rev}");
+        env.db.billing_recalculation_enqueue(&job, decl, rev, 3).unwrap();
+        assert!(env.db.billing_recalculation_run(&job, 4).unwrap());
+    }
+    let repo = SqlSummaryRepository::new();
+    let month: String = d.chars().take(7).collect();
+    let m = repo.monthly_summary(&MonthlySummaryQuery { month });
+    let rate = agent_vitals_domain::cost::load_pricing()["fx_estimate"]["USD_CNY"].as_f64().unwrap();
+    for key in ["claude-code/shengsuanyun", "codex/shengsuanyun"] {
+        let h = &m.by_provider[key];
+        assert_eq!(h.currency.as_deref(), Some("CNY"), "{key}: 结算币种是计费方的 CNY，不是模型原厂的 USD");
+        assert_eq!(h.pricing_method.as_deref(), Some("fair-market-fallback-fx"), "{key}");
+        let cny = h.amounts_by_basis[&agent_vitals_data::projection::BillingBasis::MeteredDeclared];
+        assert!(cny > 0.0, "{key}");
+        assert!(!m.by_provider.contains_key(&format!("{key}/USD")), "{key}: 折算后不该再有 USD 分身");
+        // 折算是 USD 估算 × 汇率：把它折回去应等于一份正的 USD 数，且与汇率线性。
+        assert!((cny / rate) > 0.0);
+    }
+    let view = m.metered_view();
+    assert!(!view.contains_key("USD"), "按量视图只剩人民币：{view:?}");
+    assert_eq!(view["CNY"].label, agent_vitals_data::projection::MeteredLabel::Estimate);
+}

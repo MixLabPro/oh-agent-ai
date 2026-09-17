@@ -12,5 +12,5 @@
 
 pub use agent_vitals_domain::data_contract::{
     BillingBasis, CostBasis, CoverageStatus, DailySummary, Freshness, FreshnessState, HostAmount,
-    MonthlySummary,
+    MeteredLabel, MeteredView, MonthlySummary,
 };

@@ -205,11 +205,20 @@ fn g10_price_claude_map_has_exactly_the_three_registered_callers() {
     // Phase D2：Claude 计价面切进 `cost/claude.rs`——`price_claude_map` 定义 + 3
     // 个已登记调用点都在这一个文件里。
     let text = std::fs::read_to_string(root.join("crates/agent-vitals-domain/src/domain/cost/claude.rs")).unwrap();
+    // 2026-09-16 归因计价：`price_claude_map` 的主体搬进 `price_claude_map_preferring`
+    // （多一个「优先用户归因的计费方价卡」参数），`price_claude_map` 退成薄封装。
+    // 登记的调用面因此分两组，peak_resolved 的诚实性契约不变：
+    // - `price_claude_map(`：1 处定义 + `claude_session_cost`（false）+
+    //   `claude_subscription_uncovered_estimate`（true）= 3；
+    // - `price_claude_map_preferring(`：1 处定义 + `price_claude_map` 薄封装转发 +
+    //   `claude_day_cost_preferring`（true；`claude_day_cost` 经它转发）= 3。
     let occurrences = text.matches("price_claude_map(").count();
-    // 1 处定义签名 + 三个已登记入口各调用 1 次。
-    assert_eq!(occurrences, 4,
+    assert_eq!(occurrences, 3,
         "price_claude_map 的调用点数量变化——检查新计价入口传的 peak_resolved \
          是否诚实，需要同步这份登记");
+    let preferring = text.matches("price_claude_map_preferring(").count();
+    assert_eq!(preferring, 3,
+        "price_claude_map_preferring 的调用点数量变化——同上，需要同步这份登记");
 }
 
 // 缺口登记（v0.6.x 前置热修，2026-09-03 结清）：`claude_day_cost`/

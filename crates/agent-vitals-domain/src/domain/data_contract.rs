@@ -42,6 +42,12 @@ pub enum BillingBasis {
     MeteredActual,
     /// 依据价格表的估算——spec §4："不可以"冒充真实账单。
     MeteredEstimate,
+    /// **已归因**的按量估算（2026-09-16 计费三级口径）：用户在计费声明里答过
+    /// 「这批用量经 X 按量付费」，金额仍是价卡 × token 的估算，区别只在**价卡是
+    /// 谁选的**——目录猜的进 `MeteredEstimate`，用户归因的进这一档。它照样不
+    /// summable（估算不冒充实付），但 [`MeteredView`] 里它取代默认估算、被
+    /// `MeteredActual`（账单）取代：`账单 > 归因估算 > 默认估算`。
+    MeteredDeclared,
     /// 宿主提供的账单/credits 消耗，无逐请求 token 归因——spec §4：
     /// "可以按宿主账单口径汇总，不能重标为模型 API 成本"（WorkBuddy 的
     /// credit_json 落在这一档，不是 metered_actual）。
@@ -64,6 +70,7 @@ impl BillingBasis {
             Self::FixedSubscription => "fixed_subscription",
             Self::MeteredActual => "metered_actual",
             Self::MeteredEstimate => "metered_estimate",
+            Self::MeteredDeclared => "metered_declared",
             Self::HostBilled => "host_billed",
             Self::ApiEquivalent => "api_equivalent",
         }
@@ -78,6 +85,7 @@ impl BillingBasis {
         Some(match s {
             "fixed_subscription" => Self::FixedSubscription,
             "metered_actual" => Self::MeteredActual,
+            "metered_declared" => Self::MeteredDeclared,
             "metered_estimate" => Self::MeteredEstimate,
             "host_billed" => Self::HostBilled,
             "api_equivalent" => Self::ApiEquivalent,
@@ -400,6 +408,109 @@ fn actual_spend_by_basis(
     out
 }
 
+/// 「按量费用」KPI 的口径标签：全部来自账单 → `Actual`；全部是估算 →
+/// `Estimate`；两者都有 → `Mixed`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeteredLabel {
+    Actual,
+    Estimate,
+    Mixed,
+}
+
+impl MeteredLabel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Actual => "actual",
+            Self::Estimate => "estimate",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
+/// 一个币种的「按量费用」视图（2026-09-16 产品定向：账单 > 归因估算 > 默认估算，
+/// **同 provider 内取代、跨 provider 同币相加、跨币分栏**）。
+///
+/// 为什么不是把 `MeteredDeclared` 加进 `summable_into_total`：`total_actual_spend`
+/// 的语义是「真实支出」，估算混进去就是编造；KPI 要的是「按量这条线该显示什么
+/// 数」——一个带口径标签的视图，取舍在 domain 做、JS 只格式化。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeteredView {
+    /// 该币种按量行要显示的数（三级取代后的和）。
+    pub amount: f64,
+    /// 其中来自账单（`MeteredActual` + `HostBilled`）的部分。
+    pub actual: f64,
+    /// 其中来自已归因估算（`MeteredDeclared`）的部分。
+    pub declared_estimate: f64,
+    /// 其中来自默认估算（`MeteredEstimate`，目录猜的路由）的部分。
+    pub default_estimate: f64,
+    pub label: MeteredLabel,
+    /// 仍停留在默认估算（未归因）的 `host/provider` 条目——「待归因」提示用。
+    pub unattributed_providers: Vec<String>,
+}
+
+impl MeteredView {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "amount": self.amount,
+            "actual": self.actual,
+            "declared_estimate": self.declared_estimate,
+            "default_estimate": self.default_estimate,
+            "label": self.label.as_str(),
+            "unattributed_providers": self.unattributed_providers,
+        })
+    }
+}
+
+/// 三级取代的实现（月/日共用）。取代在 **provider 条目级**：一个条目同时有
+/// 账单与估算时只取账单（估算两档只进明细）；没有账单时归因估算与默认估算
+/// **不互斥**——同一 provider 可能一部分事实已归因、一部分没有（例如作用域
+/// 只盖了部分模型），两者相加、条目记为「有未归因部分」。零金额不撑桶。
+fn metered_view(by_provider: &BTreeMap<String, HostAmount>) -> BTreeMap<String, MeteredView> {
+    let mut out: BTreeMap<String, MeteredView> = BTreeMap::new();
+    for (key, h) in by_provider {
+        let get = |b: BillingBasis| h.amounts_by_basis.get(&b).copied().unwrap_or(0.0);
+        let actual = get(BillingBasis::MeteredActual) + get(BillingBasis::HostBilled);
+        let declared = get(BillingBasis::MeteredDeclared);
+        let default = get(BillingBasis::MeteredEstimate);
+        if actual == 0.0 && declared == 0.0 && default == 0.0 {
+            continue;
+        }
+        let currency = h.currency.clone().unwrap_or_default();
+        let view = out.entry(currency).or_insert_with(|| MeteredView {
+            amount: 0.0,
+            actual: 0.0,
+            declared_estimate: 0.0,
+            default_estimate: 0.0,
+            label: MeteredLabel::Estimate,
+            unattributed_providers: Vec::new(),
+        });
+        if actual > 0.0 {
+            view.actual += actual;
+            view.amount += actual;
+        } else {
+            view.declared_estimate += declared;
+            view.default_estimate += default;
+            view.amount += declared + default;
+            if default > 0.0 {
+                view.unattributed_providers.push(key.clone());
+            }
+        }
+    }
+    for view in out.values_mut() {
+        let has_estimate = view.declared_estimate > 0.0 || view.default_estimate > 0.0;
+        view.label = match (view.actual > 0.0, has_estimate) {
+            (true, false) => MeteredLabel::Actual,
+            (true, true) => MeteredLabel::Mixed,
+            _ => MeteredLabel::Estimate,
+        };
+    }
+    out
+}
+
+fn metered_view_json(m: &BTreeMap<String, MeteredView>) -> Value {
+    Value::Object(m.iter().map(|(c, v)| (c.clone(), v.to_json())).collect())
+}
+
 fn actual_spend_by_basis_json(m: &BTreeMap<BillingBasis, BTreeMap<String, f64>>) -> Value {
     Value::Object(m.iter().map(|(b, cur)| (b.as_str().to_string(), json!(cur))).collect())
 }
@@ -448,6 +559,11 @@ impl MonthlySummary {
     /// （单测钉住）。
     pub fn actual_spend_by_basis(&self) -> BTreeMap<BillingBasis, BTreeMap<String, f64>> {
         actual_spend_by_basis(&self.by_provider)
+    }
+
+    /// 「按量费用」KPI 视图：账单 > 归因估算 > 默认估算（见 [`MeteredView`]）。
+    pub fn metered_view(&self) -> BTreeMap<String, MeteredView> {
+        metered_view(&self.by_provider)
     }
 
     /// 校验模块头三条不变式，返回违反描述；空 vec = 合规。
@@ -508,6 +624,7 @@ impl MonthlySummary {
             "total_summable": self.total_summable(),
             "total_actual_spend": self.total_actual_spend(),
             "actual_spend_by_basis": actual_spend_by_basis_json(&self.actual_spend_by_basis()),
+            "metered_view": metered_view_json(&self.metered_view()),
             "has_unresolved": self.has_unresolved(),
             "coverage": self.coverage.to_json(),
             "freshness": self.freshness.to_json(),
@@ -573,6 +690,12 @@ impl DailySummary {
         actual_spend_by_basis(&self.by_provider)
     }
 
+    /// 同 [`MonthlySummary::metered_view`]；日粒度没有月账单，所以永远不会出现
+    /// `Actual`——账单按月，不摊到天。
+    pub fn metered_view(&self) -> BTreeMap<String, MeteredView> {
+        metered_view(&self.by_provider)
+    }
+
     pub fn contract_violations(&self) -> Vec<String> {
         let mut violations = Vec::new();
         for host in &self.excluded_hosts {
@@ -621,6 +744,7 @@ impl DailySummary {
             "total_summable": self.total_summable(),
             "total_actual_spend": self.total_actual_spend(),
             "actual_spend_by_basis": actual_spend_by_basis_json(&self.actual_spend_by_basis()),
+            "metered_view": metered_view_json(&self.metered_view()),
             "coverage": self.coverage.to_json(),
             "freshness": self.freshness.to_json(),
             "excluded_hosts": self.excluded_hosts.iter().cloned().collect::<Vec<_>>(),
@@ -689,6 +813,59 @@ mod tests {
         };
         assert_eq!(summary.total_summable(), 0.0);
         assert!(summary.total_summable().is_sign_positive());
+    }
+
+    /// 2026-09-16 产品定向：「按量费用」= 账单 > 归因估算 > 默认估算，同 provider 内
+    /// 取代（账单在就不看估算）、跨 provider 同币相加、跨币分栏；归因估算不进
+    /// `total_actual_spend`（估算不冒充实付）。
+    #[test]
+    fn metered_view_prefers_bill_over_declared_over_default_estimate() {
+        // 有账单的 provider：估算只进明细，不进 amount。
+        let mut billed = host_amount("claude-code/shengsuanyun", BillingBasis::MeteredActual, 452.0);
+        billed.currency = Some("CNY".to_string());
+        billed.amounts_by_basis.insert(BillingBasis::MeteredDeclared, 467.16);
+        // 已归因、无账单：按归因估算显示。
+        let mut declared = host_amount("codex/shengsuanyun", BillingBasis::MeteredDeclared, 132.67);
+        declared.currency = Some("USD".to_string());
+        // 未归因：默认估算，且要点名。
+        let mut unknown = host_amount("claude-code/deepseek-official", BillingBasis::MeteredEstimate, 216.57);
+        unknown.currency = Some("CNY".to_string());
+        // 订阅条目：与按量视图无关。
+        let mut sub = host_amount("claude-code/anthropic", BillingBasis::FixedSubscription, 20.0);
+        sub.currency = Some("USD".to_string());
+        sub.amounts_by_basis.insert(BillingBasis::ApiEquivalent, 114.6);
+        let summary = MonthlySummary {
+            month: "2026-09".to_string(),
+            by_host: BTreeMap::new(),
+            by_provider: BTreeMap::from([
+                ("claude-code/shengsuanyun".to_string(), billed),
+                ("codex/shengsuanyun".to_string(), declared),
+                ("claude-code/deepseek-official".to_string(), unknown),
+                ("claude-code/anthropic".to_string(), sub),
+            ]),
+            tokens_by_host: BTreeMap::new(),
+            coverage: coverage_ok(),
+            freshness: Freshness::unavailable(),
+            excluded_hosts: BTreeSet::new(),
+            last_observed_at: None,
+        };
+        let view = summary.metered_view();
+        let cny = &view["CNY"];
+        assert_eq!((cny.actual, cny.declared_estimate, cny.default_estimate), (452.0, 0.0, 216.57));
+        assert!((cny.amount - 668.57).abs() < 1e-9, "账单取代该 provider 的估算，再与别家默认估算同币相加");
+        assert_eq!(cny.label, MeteredLabel::Mixed);
+        assert_eq!(cny.unattributed_providers, vec!["claude-code/deepseek-official".to_string()]);
+        let usd = &view["USD"];
+        assert_eq!((usd.amount, usd.declared_estimate), (132.67, 132.67));
+        assert_eq!(usd.label, MeteredLabel::Estimate);
+        assert!(usd.unattributed_providers.is_empty());
+        // 归因估算不 summable：真实支出只有账单 + 月费。
+        assert_eq!(summary.total_actual_spend(), BTreeMap::from([("CNY".to_string(), 452.0), ("USD".to_string(), 20.0)]));
+        assert!(!BillingBasis::MeteredDeclared.summable_into_total());
+        assert_eq!(BillingBasis::from_wire("metered_declared"), Some(BillingBasis::MeteredDeclared));
+        let json = summary.to_json();
+        assert_eq!(json["metered_view"]["CNY"]["label"], "mixed");
+        assert_eq!(json["metered_view"]["USD"]["amount"], 132.67);
     }
 
     #[test]

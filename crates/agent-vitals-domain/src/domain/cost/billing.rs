@@ -84,6 +84,73 @@ pub fn billing_route_of(model: &str, pricing: &Value) -> Option<(String, Billing
     None
 }
 
+/// 用户在归因表单里填/程序从端点主机名推出来的计费方 → 目录里的 provider id。
+///
+/// 端点证据给的是主机名（`router.shengsuanyun.com` → 自动判定写成
+/// `shengsuanyun.com`），目录 id 是 `shengsuanyun`；两种写法在库里各存一份就是
+/// 两个 provider（2026-09-16 真机：`shengsuanyun` / `shengsuanyun.com` 混存，
+/// 价卡永远对不上后者）。规则：已经是目录 id 原样返回；否则去掉 `www.`/`api.`/
+/// `router.` 这类主机前缀与 `.com`/`.cn`/`.ai`/`.io`/`.net` 后缀，剩下的主干若是
+/// 目录 id 就归一；都不是就原样保留（不猜——未知计费方本来就该照用户写的存）。
+/// 目录 = 顶层 `providers` + `catalog_2026_09.providers` + `billing_modes`。
+pub fn canonical_provider_id(raw: &str, pricing: &Value) -> String {
+    let raw = raw.trim();
+    let known = |id: &str| -> bool {
+        id != "_doc" && [
+            "/providers", "/catalog_2026_09/providers", "/catalog_2026_09/billing_modes",
+        ].iter().any(|base| pricing.pointer(&format!("{base}/{id}")).is_some())
+    };
+    if raw.is_empty() || known(raw) {
+        return raw.to_string();
+    }
+    let lower = raw.to_ascii_lowercase();
+    let mut stem = lower.as_str();
+    for prefix in ["www.", "api.", "router.", "gateway."] {
+        if let Some(rest) = stem.strip_prefix(prefix) { stem = rest; }
+    }
+    for suffix in [".com.cn", ".com", ".cn", ".ai", ".io", ".net", ".org"] {
+        if let Some(rest) = stem.strip_suffix(suffix) { stem = rest; break; }
+    }
+    if stem != lower && known(stem) {
+        stem.to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
+/// 估算金额换成计费方的**结算币种**（2026-09-16：胜算云是国内公司，海外模型也按
+/// 人民币结算——币种是计费方的属性，不是模型的）。只用于**估算**档（归因估算的
+/// fallback 价卡币种 ≠ 结算币种时），走 `fx_estimate`（`basis=user-set` 的展示
+/// 层折算率）；实付/月费永远分币不折算（ATTRIBUTABLE_WASTE §6.7）。
+/// 同币原样返回；没有该币对的折算率 → None（调用方保留原币种、不冒充）。
+pub fn to_settlement_currency(amount: f64, from: &str, to: &str, pricing: &Value) -> Option<f64> {
+    if from == to {
+        return Some(amount);
+    }
+    let usd_cny = pricing
+        .pointer("/fx_estimate/USD_CNY")
+        .and_then(|v| v.as_f64())
+        .filter(|r| r.is_finite() && *r > 0.0)?;
+    match (from, to) {
+        ("USD", "CNY") => Some(amount * usd_cny),
+        ("CNY", "USD") => Some(amount / usd_cny),
+        _ => None,
+    }
+}
+
+/// 计费方的结算币种：目录卡片声明的 `currency`（`catalog_2026_09.providers` 或
+/// 顶层 `providers`，后者默认 CNY）；目录不认识的计费方 → None，由调用方用用户
+/// 声明的币种或默认值。
+pub fn provider_settlement_currency(provider: &str, pricing: &Value) -> Option<String> {
+    if let Some(pv) = pricing.pointer(&format!("/catalog_2026_09/providers/{provider}")) {
+        return Some(pv.get("currency").and_then(|v| v.as_str()).unwrap_or("CNY").to_string());
+    }
+    if let Some(pv) = pricing.pointer(&format!("/providers/{provider}")) {
+        return Some(pv.get("currency").and_then(|v| v.as_str()).unwrap_or("CNY").to_string());
+    }
+    None
+}
+
 /// 给定 provider 的计费模式——调用方已从 `billing_route_of` 拿到 provider
 /// 时用，不再重复前缀扫描。provider 不在声明表 → Unknown。
 pub fn billing_mode_of(provider: &str, pricing: &Value) -> BillingMode {
@@ -225,6 +292,31 @@ pub fn cache_hit_ratio(tokens: &Value) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn settlement_currency_conversion_only_for_estimates_with_a_known_rate() {
+        let pricing = crate::cost::load_pricing();
+        let rate = pricing["fx_estimate"]["USD_CNY"].as_f64().unwrap();
+        assert_eq!(super::to_settlement_currency(10.0, "USD", "CNY", &pricing), Some(10.0 * rate));
+        assert_eq!(super::to_settlement_currency(71.5, "CNY", "USD", &pricing), Some(71.5 / rate));
+        assert_eq!(super::to_settlement_currency(3.0, "CNY", "CNY", &pricing), Some(3.0));
+        assert_eq!(super::to_settlement_currency(3.0, "EUR", "CNY", &pricing), None, "没有该币对的折算率就不冒充");
+        assert_eq!(super::provider_settlement_currency("shengsuanyun", &pricing).as_deref(), Some("CNY"));
+        assert_eq!(super::provider_settlement_currency("anthropic", &pricing).as_deref(), Some("USD"));
+        assert_eq!(super::provider_settlement_currency("nobody", &pricing), None);
+    }
+
+    #[test]
+    fn canonical_provider_id_folds_endpoint_hostnames_onto_catalog_ids() {
+        let pricing = crate::cost::load_pricing();
+        assert_eq!(super::canonical_provider_id("shengsuanyun.com", &pricing), "shengsuanyun");
+        assert_eq!(super::canonical_provider_id("router.shengsuanyun.com", &pricing), "shengsuanyun");
+        assert_eq!(super::canonical_provider_id("shengsuanyun", &pricing), "shengsuanyun");
+        assert_eq!(super::canonical_provider_id("anthropic", &pricing), "anthropic");
+        // 目录不认识的照原样存，不猜。
+        assert_eq!(super::canonical_provider_id("openrouter.ai", &pricing), "openrouter.ai");
+        assert_eq!(super::canonical_provider_id("  ", &pricing), "");
+    }
+
     use super::*;
     use serde_json::json;
 
