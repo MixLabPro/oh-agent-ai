@@ -25,6 +25,7 @@ mod usage_hourly;
 mod budget_profiles;
 pub(crate) mod cost_breakdown;
 mod control_plane;
+mod price_cards;
 mod data_quality_issues;
 mod workflow_summary;
 #[cfg(feature = "mcp-internal")]
@@ -425,6 +426,7 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         session_detail::spec(),
         session_trace::spec(),
         control_plane::spec(),
+        price_cards::spec(),
         data_quality_issues::spec(),
         workflow_summary::issues_spec(),
         workflow_summary::skills_spec(),
@@ -542,6 +544,7 @@ pub fn dispatch_with_permissions(
         "session_detail" => session_detail::run(args, data_home),
         "session_trace" => session_trace::run(args, data_home),
         "control_plane" => control_plane::run(args, data_home, allow_local_writes),
+        "price_cards" => price_cards::run(args, data_home, allow_local_writes),
         "data_quality_issues" => data_quality_issues::run(args, data_home),
         "issues_summary" => workflow_summary::run_issues(args, data_home),
         "skills_summary" => workflow_summary::run_skills(args, data_home),

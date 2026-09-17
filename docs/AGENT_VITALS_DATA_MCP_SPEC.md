@@ -315,6 +315,7 @@ v1 不实现「钉住旧截面」——需要事务级 snapshot（M2 任务，�
 | `authority_audit` | v0.9.1 internal only | ✅ **落地**：MCP 内只读——实时事实 token 守恒、重复 / 孤儿 / legacy-realtime 混轴、覆盖范围输入校验、`authority_revision` 未来性和已登记质量例外自检；不做重导入。见 §8.1 |
 | `control_plane` | v1.0 local control plane | ✅ 类型化覆盖工作台的来源状态 / 自定义来源 / 排除 / 删除导入数据 / 留存 / 统计时区 / 同步暂停 / 同步执行 / 日月汇总 / 日历 / 小时分布 / Codex 配额 / 价格目录状态与联网策略 / Issue 列表与状态变更；读取安全可用且不返回绝对路径，写入必须显式启动 `data-mcp serve --allow-local-writes`，不提供任意 SQL / URL / 通用文件写入 |
 | `billing_workflow` | v1.0 local control plane | ✅ 仅暴露类型化的候选 / 声明 / 重算 / 账单 / 预算管理动作；读取可用，写入必须显式启动 `data-mcp serve --allow-local-writes`，不提供任意 SQL 或通用写入 |
+| `price_cards` | v1.0 local control plane | ✅ **落地（2026-09-17）**：让 Agent 替用户补价卡——`missing_list`（本月缺卡型号：该补到哪家、tokens、按量还是套餐内，与设置页「本月缺价卡的型号」/ `data-status.unpriced_models_month` 同源）、`card_list`、`card_put` / `card_delete` / `route_put`（与设置页「补一张卡 / 声明归属」同一套 `price_overrides` 写入，六个价必须填齐，半张卡整体拒绝）。**不预置任何未经确认的价格**：仓库里没有的数不能编，Agent 填的卡 `basis=user-set`，展示写「按其价卡估算」而非官方标价。写入需 `--allow-local-writes`。见 §7.12 |
 | `reimport_verify` | v0.9.1（**MCP 外**） | ✅ **落地（`4c7f75b`）**：`agent-vitals data-reimport-verify [--json]`——两临时库各重放（round B 崩溃后重跑），逐宿主 × 北京月比对；不碰生产库。不是 MCP 工具（P1-2）。 |
 | `cost_breakdown` | v0.9.2 | 🔶 **部分落地**：按事实时间选择历史价格版本、`MoneyMinor`、币种/计费口径分离、订阅与 unresolved token 明细已在 MCP；变化因子分解、跨价格版本父层聚合与三消费面 parity 仍待补齐 |
 | `sessions_search` / `session_detail` | v0.9.1（提前） | ✅ **落地（`7c68ab4` + 当前 workflow 收口）**：`session_ref` = HMAC-SHA256(salt, session_key)（salt `<data_home>/.mcp-session-salt` 0600，不进库）；`sessions_in_window` 逐会话聚合 + `session_facts_timeline`；`session_detail` 另返回独立、脱敏的 `workflow_timeline`，不把 workflow 硬归因到 token/cost。 |
@@ -622,6 +623,25 @@ workflow↔token/cost 归因则继续列在 `missing` 中。
 输出：脱敏 issue ID、类别、严重度、影响范围、首次/最近发生时间、出现次数、状态和建议的人类操作。禁止返回可能含路径、Prompt 或密钥的原始 payload。
 
 **实现注记**：`data_quality_issues.detail_json` 继续在本地原样保留用于人工排查；MCP reader 已过一层 **code-aware allowlist 脱敏**，按 `code` 白名单放行已知安全字段，绝不整体回吐 `detail_json`。未知 `code` 只返回 code/count，不放行任何自由文本。
+
+### 7.12 `price_cards`
+
+回答"哪些型号还没有价卡、该补到哪家"，并让 Agent 代填。典型对话：用户对 Claude / Codex
+说"帮我把缺的价卡补上"→ Agent `missing_list` → 去胜算云 / 厂商价格页查报价（Agent 自己的
+网络能力，本工具零网络）→ `card_put` 逐张写入，回执带 `source`（价格出处）供用户核对。
+
+输入：`action` ∈ {missing_list, card_list, card_put, card_delete, route_put}；`card_put` 需
+`provider_id`（目录 id，如 `shengsuanyun`）、`model_id`（与日志一致，命名空间前缀可带）、
+`input_uncached` / `input_cached` / `output` 各 `{off_peak, peak}`（元 / 百万 token；不分峰谷
+两格填同一个数）、可选 `source`。
+
+输出：`missing_list` → `{month, models: [{host, provider, model, tokens, covered}]}`，
+`covered=true` 表示在订阅内、只影响「按官方价折算」参考数，`false` 表示影响按量费用；
+`card_put` → `{changed, provider_id, model_id, basis: "user-set", source}`。
+
+规则：不返回路径 / 原始日志；价卡是**用户提供的价格证据**，不是官方标价；一张卡六个价缺一整体
+拒绝（半张卡会让计价按缺档静默算出看似正常的错数）；`provider_id` 是目录 id，端点主机名
+（`shengsuanyun.com`）由调用方先归一。
 
 ### 7.11 `query_sql_readonly`（内部调试工具——`mcp-internal` feature only）
 
