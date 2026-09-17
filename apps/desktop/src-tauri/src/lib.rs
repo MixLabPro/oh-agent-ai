@@ -159,7 +159,9 @@ fn budget_status_text_at(ov: &Overview, now_secs: i64) -> String {
             let id = row.get("profile_id").and_then(Value::as_str)?;
             let currency = row.get("currency").and_then(Value::as_str)?;
             let level = row.get("level").and_then(Value::as_str)?;
-            let spent = row.get("spent_minor").and_then(Value::as_i64).unwrap_or(0);
+            // 已用 = 按量 + 订阅摊派（total_spent_minor，与总览卡同口径）；旧载荷退回 spent。
+            let spent = row.get("total_spent_minor").or_else(|| row.get("spent_minor"))
+                .and_then(Value::as_i64).unwrap_or(0);
             let limit = row.get("monthly_minor").and_then(Value::as_i64)?;
             let label = if id == "estimate" { "估算" } else { "已确认" };
             let state = match level {
@@ -226,28 +228,18 @@ fn fmt_tokens(n: i64) -> String {
     }
 }
 
-/// 托盘标题：菜单栏里图标旁那一段常驻文字。原设计「托盘展示 今日/本月/预算」里的
-/// 「今日」落在这里（本月/预算在菜单与工作台里，塞标题太长）。**token + 价格都
-/// 显示**：token 是消耗量的直观信号、价格与预算同单位——菜单/工作台只显示价格，标题
-/// 补 token 不重复。数据源与菜单同一份 `read_overview`，不加第四份拷贝；无今日数据
-/// 时诚实显示「—」，不臆造 0。
+/// 托盘标题：菜单栏里图标旁那一段常驻文字。**只放今日 token**（「鸟头 + 64.4M」），
+/// 与工作台「今日消耗」KPI 对齐、同一个数（SQL daily DTO 的 `tokens_by_host`；库缺席
+/// 才退回旧合并）。钱不进标题——用户定向 2026-09-17：状态栏要的是消耗量的直观信号，
+/// 价格在菜单与工作台里看。无今日数据诚实「—」，不臆造 0。
 fn today_title(ov: &Overview) -> String {
-    let money = metered_amount(
-        ov.today.as_ref().and_then(|t| t["total"].as_f64()),
-        claude_currency(&ov.claude_today, "CNY"),
-        claude_currency(&ov.claude_today, "USD"),
-        fx_rate(ov),
-    );
-    let tokens = today_merged_tokens(ov);
-    match money {
-        Some(m) => format!("今日 {} · {}", fmt_tokens(tokens), m),
-        // 今天没有可报的按量钱 → **钱那格**诚实「—」，不臆造 0；但 token 是测到的，
-        // 照常显示。原先这里连 token 一起丢掉（只剩「今日 —」）：既丢了已测量值，
-        // 也让菜单栏那一项短到难以在拥挤的状态区里被认出来（2026-09-14 用户反馈
-        // "状态栏看不到"）。
-        None if tokens > 0 => format!("今日 {} · —", fmt_tokens(tokens)),
-        None => "今日 —".to_string(),
-    }
+    let tokens = today_tokens(ov);
+    if tokens > 0 { fmt_tokens(tokens) } else { "—".to_string() }
+}
+
+/// 今日 token：SQL DTO 优先（与 KPI 同源），否则旧的 DSH state + claude ledger 合并。
+fn today_tokens(ov: &Overview) -> i64 {
+    ov.today_tokens_sql.unwrap_or_else(|| today_merged_tokens(ov))
 }
 
 /// 模型短名：`deepseek/deepseek-v4-pro-0813` → `deepseek-v4-pro-0813`。只砍
@@ -322,6 +314,31 @@ fn metered_amount(
         None if claude_usd > 0.0 => Some(format!("≈{}", fmt_usd(claude_usd))),
         None => None,
     }
+}
+
+/// `metered_view`（`{币种: {amount, actual, declared_estimate, default_estimate, label}}`）
+/// → 托盘一格钱。CNY 为主账，USD 有汇率就折进来（速览层纪律，带 ≈）、没汇率单独
+/// 浮出；全部来自账单才不带 ≈。视图为空（今天/本月没有按量钱：全在套餐内或没用量）
+/// → None，由调用方诚实写「—」。旧载荷（None）也 → None，走旧拼法。
+fn metered_view_text(view: Option<&serde_json::Value>, usd_cny_rate: Option<f64>) -> Option<String> {
+    let view = view?.as_object()?;
+    let get = |cur: &str, k: &str| view.get(cur).and_then(|v| v.get(k)).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+    let label_is_actual = |cur: &str| view.get(cur).and_then(|v| v.get("label")).and_then(serde_json::Value::as_str) == Some("actual");
+    let cny = get("CNY", "amount");
+    let usd = get("USD", "amount");
+    if cny <= 0.0 && usd <= 0.0 {
+        return None;
+    }
+    let mut total = cny;
+    let mut estimate = cny > 0.0 && !label_is_actual("CNY");
+    match (usd > 0.0, usd_cny_rate) {
+        (true, Some(rate)) => { total += usd * rate; estimate = true; }
+        (true, None) if cny <= 0.0 => {
+            return Some(format!("{}{}", if label_is_actual("USD") { "" } else { "≈" }, fmt_usd(usd)));
+        }
+        _ => {}
+    }
+    Some(format!("{}{}", if estimate { "≈" } else { "" }, fmt_money(total)))
 }
 
 /// 速览层混币折算汇率（`Overview.fx.usd_cny`）——None = 价表无 `fx_estimate` 节，
@@ -445,6 +462,24 @@ fn recent_row_text(row: &RecentSessionRow, now_secs: i64) -> String {
 /// today_cost ¥0.12。少了这个门，菜单会同时出现"今日成本：—（无数据）"和
 /// "今日按量预算：¥0.12 / ¥30（0%）"两行自相矛盾的话。
 fn daily_budget_text(ov: &Overview, now_secs: i64) -> Option<String> {
+    // 设置页存了 estimate profile 时，这条 legacy（DSH-only，¥1 默认分母）日预算行
+    // 只会和上面「本月预算」行打架（真机：「今日按量预算 — / ¥1（今日无数据）」挂在
+    // 「预算：估算 CNY 超支 1450.96/500.00」上面）。profile 有日限额就按 profile 报
+    // （已用 = 今日按量 + 订阅日摊），没有日限额就整行不显示。
+    if let Some(profile) = ov.budget_profiles.as_ref()
+        .and_then(|v| v.get("profiles")).and_then(Value::as_array)
+        .and_then(|rows| rows.iter().find(|r| r.get("profile_id").and_then(Value::as_str) == Some("estimate")))
+    {
+        let daily_limit = profile.get("daily_minor").and_then(Value::as_i64)?;
+        if daily_limit <= 0 { return None; }
+        let spent = profile.get("daily_total_minor").or_else(|| profile.get("daily_spent_minor"))
+            .and_then(Value::as_i64).unwrap_or(0);
+        let denom = fmt_money(daily_limit as f64 / 100.0);
+        return Some(match profile.get("daily_ratio_bp").and_then(Value::as_i64) {
+            Some(bp) => format!("今日预算：≈{} / {denom}（{}%）", fmt_money(spent as f64 / 100.0), bp / 100),
+            None => format!("今日预算：— / {denom}（今日无数据）"),
+        });
+    }
     let b = &ov.budget;
     let daily = b.effective_daily_budget?;
     let denom = fmt_money(daily);
@@ -641,21 +676,26 @@ fn build_menu(app: &AppHandle, ov: &Overview) -> tauri::Result<Menu<tauri::Wry>>
 /// 前缀「按量」与日预算/月成本同口径（spec §4）：这些是**按量计费**的钱，不是预算
 /// 卡里那笔评估额。预算行是 DSH-only 的（bottom budget_item + 日预算行），不在这
 /// 两行里——spec §4 按量/套餐按 supplier 分，DSH 预算不管 Claude Code 的流。
+/// 菜单首行「今日消耗」：与标题、工作台 KPI 同一个 token 数（用户定向 2026-09-17：
+/// 今日消耗放首位，钱行其次）。无数据 → 「今日消耗：—」。
+fn today_tokens_row_text(ov: &Overview) -> String {
+    let tokens = today_tokens(ov);
+    if tokens > 0 { format!("今日消耗：{} tokens", fmt_tokens(tokens)) } else { "今日消耗：—".to_string() }
+}
+
 fn money_rows_text(ov: &Overview) -> (String, String) {
-    let today_money = metered_amount(
+    // 2026-09-17 起先读 SQL 的 `metered_view`（账单 > 归因估算 > 默认估算，与工作台
+    // 总览卡同一个数）；库缺席才退回旧的 DSH state + claude ledger 拼法。
+    let today_money = metered_view_text(ov.metered_today.as_ref(), fx_rate(ov)).or_else(|| metered_amount(
         ov.today.as_ref().and_then(|t| t["total"].as_f64()),
         claude_currency(&ov.claude_today, "CNY"),
         claude_currency(&ov.claude_today, "USD"),
         fx_rate(ov),
-    );
+    ));
+    // token 不再挂在这一行（首行「今日消耗」已经是它），这里只剩钱。
     let today_text = match today_money {
-        Some(m) => format!(
-            "今日按量成本：{} · {} tokens",
-            m,
-            fmt_tokens(today_merged_tokens(ov)),
-        ),
-        // 两宿主今天都没有可报的按量钱（DSH 没折到账 + claude 无 CNY/USD 价流）
-        // → 诚实的 —（缺列报缺）。
+        Some(m) => format!("今日按量成本：{m}"),
+        // 今天没有可报的按量钱（全在套餐内 / 没用量）→ 诚实的 —（缺列报缺）。
         None => "今日按量成本：—（无数据）".to_string(),
     };
     // 本月行：同款合并，但 **只显示金额、去掉 `/ ¥600` 分母**（v1.3）。分母是 DSH
@@ -671,12 +711,12 @@ fn money_rows_text(ov: &Overview) -> (String, String) {
     // 非空 ⇔ DSH 本月确实折到过账。month_cost 聚合本身不带日数，不能从
     // `ov.month` 里看。
     let month_has_days = !ov.days.is_empty();
-    let month_money = metered_amount(
+    let month_money = metered_view_text(ov.metered_month.as_ref(), fx_rate(ov)).or_else(|| metered_amount(
         if month_has_days { Some(month_total) } else { None },
         claude_currency(&ov.claude_month, "CNY"),
         claude_currency(&ov.claude_month, "USD"),
         fx_rate(ov),
-    );
+    ));
     // month_money 只在两宿主当月都没有任何按量钱时是 None → ¥0（当月还没花，
     // 「月初 ¥0」是现状不是编造；预算行挂了过期标记兜底）。
     let month_text = format!(
@@ -694,10 +734,13 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
     // 信息几乎不可读；enabled 后文字是系统默认黑。代价是悬停高亮 + 点击会触发
     // MenuEvent——handler 的 `_ => {}` 兜底这些 id，点击什么也不做，只有菜单
     // 关闭。黑字可读 > 不可点态的视觉暗示，值得。
-    let today_item = MenuItem::with_id(app, "today", today_text, true, None::<&str>)?;
+    // 「今日按量成本」行已去掉（用户定向 2026-09-17）：首行只放今日消耗 token，钱看
+    // 本月行与预算行。`today_text` 仍由 money_rows_text 算出并有单测钉住，只是不上菜单。
+    let _ = today_text;
+    let tokens_item = MenuItem::with_id(app, "today_tokens", today_tokens_row_text(ov), true, None::<&str>)?;
     let month_item = MenuItem::with_id(app, "month", month_text, true, None::<&str>)?;
     let budget_item = MenuItem::with_id(app, "budget", budget_text, true, None::<&str>)?;
-    let mut builder = MenuBuilder::new(app).item(&today_item);
+    let mut builder = MenuBuilder::new(app).item(&tokens_item);
     // 日预算：紧跟今日成本，回答"今天这些钱占日额度多少"。缺 alert.json 时整条
     // 不显示——预算行本身已经说了「等预算数据」，不用再空一行。
     if let Some(t) = daily_budget_text(ov, now_secs) {
@@ -2320,6 +2363,157 @@ fn snooze_budget_current_period() -> Result<Value, String> {
     snooze_budget_until(until_ms)
 }
 
+/// 补卡表单的「按原厂官方价预填」：目录里（优先 `provider_id` 自己的卡、其次原厂
+/// 官方卡）找 `model_id` 的六个价。USD 卡按 `fx_estimate` 折成 CNY（表单只收 CNY）
+/// 并如实带出 `converted_from` / `rate`。找不到 → `{found: false}`，不猜。
+#[tauri::command]
+fn official_price_card(provider_id: String, model_id: String) -> Value {
+    let pricing = agent_vitals_runtime::price_overrides::merged_main(&overview::data_home());
+    let preferred = agent_vitals_domain::cost::canonical_provider_id(&provider_id, &pricing);
+    let Some((from_provider, key, currency, mut six)) = agent_vitals_domain::cost::official_card_body(
+        &model_id, &pricing, (!preferred.is_empty()).then_some(preferred.as_str()),
+    ) else {
+        return serde_json::json!({ "found": false });
+    };
+    let mut converted_from = Value::Null;
+    let mut rate = Value::Null;
+    if currency != "CNY" {
+        let Some(r) = pricing.pointer("/fx_estimate/USD_CNY").and_then(Value::as_f64).filter(|_| currency == "USD") else {
+            return serde_json::json!({ "found": false, "reason": format!("official card is in {currency} and no conversion rate is available") });
+        };
+        for dim in ["input_uncached", "input_cached", "output"] {
+            for tariff in ["off_peak", "peak"] {
+                if let Some(v) = six.get(dim).and_then(|d| d.get(tariff)).and_then(Value::as_f64) {
+                    six[dim][tariff] = serde_json::json!((v * r * 10_000.0).round() / 10_000.0);
+                }
+            }
+        }
+        converted_from = serde_json::json!(currency);
+        rate = serde_json::json!(r);
+    }
+    serde_json::json!({
+        "found": true, "provider": from_provider, "card_key": key, "rates": six,
+        "converted_from": converted_from, "rate": rate,
+    })
+}
+
+/// 设置 › MCP 子板块的数据：本机 CLI 路径（与托盘同步用的是同一份解析，
+/// `resolve_binary`）、版本、可用工具清单（直接从运行时的 `tool_specs()` 取——
+/// 页面上的清单不能是手抄的第二份）。CLI 找不到 → `cli_path: null`，页面照实说
+/// 「未找到」而不是给一条不存在的路径。
+#[tauri::command]
+fn mcp_setup_info() -> Value {
+    let cli_path = resolve_binary().map(|p| p.display().to_string());
+    let tools = agent_vitals_runtime::mcp::tool_specs().into_iter().map(|t| serde_json::json!({
+        "name": t.name,
+        "description": t.description,
+    })).collect::<Vec<_>>();
+    serde_json::json!({
+        "cli_path": cli_path,
+        "cli_version": resolved_cli_version(),
+        "data_home": overview::data_home().display().to_string(),
+        "tools": tools,
+    })
+}
+
+/// 设置 › MCP 的可下载 Agent Skill（`SKILL.md`）：接入命令 + 诚实规则 + 工具清单
+/// （运行时 `tool_specs()`，不手抄）+ 常用任务。同一份文本也给「复制全部」用——
+/// 用户把它贴给 Agent 或装成 skill，两条路一个来源。
+fn mcp_skill_markdown() -> String {
+    let bin = resolve_binary().map(|p| p.display().to_string()).unwrap_or_else(|| "/path/to/agent-vitals".to_string());
+    let shell_bin = if bin.contains(' ') { format!("\"{bin}\"") } else { bin.clone() };
+    let tools = agent_vitals_runtime::mcp::tool_specs().into_iter().map(|t| {
+        let first = t.description.split(". ").next().unwrap_or(t.description).trim_end_matches('.');
+        format!("- `{}` — {first}.", t.name)
+    }).collect::<Vec<_>>().join("\n");
+    format!(r#"---
+name: agent-vitals-mcp
+description: Query the user's local Agent Vitals data over MCP — AI tool token usage, spend (bills vs subscriptions vs estimates), budgets, billing attribution, missing price cards, sessions and data quality. Use when the user asks how much they spent on AI coding tools, which provider or model costs most, whether a budget is exceeded, what usage is still unattributed or unpriced, or asks you to fill in price cards. 查询本机 Agent Vitals 的用量、花费、预算、归因与价卡；用户问「这个月 AI 工具花了多少」「哪家最贵」「预算超了没」「哪些用量还没归因/没价卡」「帮我补价卡」时使用。
+---
+
+# Agent Vitals MCP
+
+Agent Vitals runs on the user's machine and reads their AI coding tools' session logs (Claude Code, Codex, DeepSeek Harness, WorkBuddy) into a local SQLite authority. This skill talks to it over MCP. The server is local, zero-network, read-only by default.
+
+## Setup (once)
+
+Claude Code:
+
+```bash
+claude mcp add agent-vitals -- {shell_bin} data-mcp serve --allow-local-writes
+```
+
+Codex CLI (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.agent-vitals]
+command = "{bin}"
+args = ["data-mcp", "serve", "--allow-local-writes"]
+```
+
+Any MCP client (`mcpServers` JSON):
+
+```json
+{{ "mcpServers": {{ "agent-vitals": {{ "command": "{bin}", "args": ["data-mcp", "serve", "--allow-local-writes"] }} }} }}
+```
+
+Drop `--allow-local-writes` for a strictly read-only server. With it, the only writes are typed local actions (price cards, billing declarations, budget settings, source controls) — never SQL, never files, never URLs.
+
+## Ground rules — keep the numbers honest
+
+1. **Three kinds of money, never merged.** `metered_actual` / `host_billed` = real bills; `fixed_subscription` = declared monthly fees; `metered_estimate` / `metered_declared` = price card × tokens. Carry the `≈` / "estimate" label into your answer. Never call an estimate a bill.
+2. **Currencies are never added.** Report CNY and USD side by side. Only the overview's `metered_view` may show a converted `≈` figure, and it says so.
+3. **Gaps are gaps, not zero.** `unresolved`, `unpriced_tokens`, `has_unresolved`, `coverage.partial` mean "unknown". Say so; do not fill with 0.
+4. **Never invent prices.** `price_cards.card_put` only with a real source (a pricing page URL or the user's own statement) recorded in `source`. If you cannot find a price, skip that model and say so.
+5. **Do not read the user's logs or database yourself.** The server already did; everything you need is a tool call. Never suggest SQL or file access.
+6. **Attribution is the user's decision.** `billing_workflow` declarations change what counts as subscription-covered; propose, show the impact preview, and let the user confirm.
+
+## Tools
+
+{tools}
+
+Every response is an envelope with `data`, `coverage`, `freshness` and `warnings`; read `coverage`/`freshness` before quoting a number as current.
+
+## Common tasks
+
+**Monthly spend review** — `control_plane` `monthly_summary` (by provider: subscription fees, metered estimates, unresolved) + `cost_breakdown` for the split; call out the largest line and which lines are estimates. Then `budget_profiles` for budget status (spent = metered three-tier view + subscription fees amortised by day).
+
+**Fill missing price cards** — `price_cards` `missing_list`; for each row with `covered=false`, look up that provider's official price for the model (input / cached input / output, per million tokens, in the provider's settlement currency); `card_put` with `source`. Rows with `covered=true` are inside a subscription and only affect the nominal reference — mention, don't chase.
+
+**Data health** — `data_status` (sync, integrity, `unresolved_tokens_month`, `unpriced_metered_tokens_month`) + `data_quality_issues`; list what needs the user's hand, most valuable first.
+
+**Session drill-down** — `sessions_search` (window / host / model) → `session_detail` / `session_trace` by `session_ref`. Never ask for or echo native session ids or paths.
+
+**Hourly pattern** — `usage_hourly` for one day (tokens only; cost per hour lives in `cost_breakdown`).
+
+## Install this file as a skill
+
+- Claude Code: save as `~/.claude/skills/agent-vitals-mcp/SKILL.md`.
+- Codex: save as `~/.codex/skills/agent-vitals-mcp/SKILL.md`.
+- Other hosts: any skills directory that reads `SKILL.md` frontmatter.
+
+安装后把上面的 MCP 接入命令执行一次即可；skill 只负责教 Agent 怎么用这些工具、怎么诚实地说数字。
+"#, shell_bin = shell_bin, bin = bin, tools = tools)
+}
+
+/// 「复制全部」用：整份 skill 文本。
+#[tauri::command]
+fn mcp_skill_text() -> String {
+    mcp_skill_markdown()
+}
+
+/// 「下载 SKILL.md」：系统保存对话框，默认文件名 SKILL.md。取消 → cancelled。
+#[tauri::command]
+fn export_mcp_skill() -> Result<Value, String> {
+    let Some(path) = rfd::FileDialog::new()
+        .set_file_name("SKILL.md")
+        .save_file() else {
+        return Ok(serde_json::json!({ "status": "cancelled" }));
+    };
+    std::fs::write(&path, mcp_skill_markdown()).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "status": "saved", "file_name": path.file_name().map(|f| f.to_string_lossy().to_string()) }))
+}
+
 #[tauri::command]
 fn clear_budget_snooze() -> Result<Value, String> {
     let data_home = overview::data_home();
@@ -2392,6 +2586,12 @@ fn save_billing_declaration_revision(
     validate_desktop_declaration(
         &relationship_kind, &effective_start, effective_end.as_deref(),
     )?;
+    // 计费方归一到目录 id：程序判定给的是端点主机名（`shengsuanyun.com`），目录是
+    // `shengsuanyun`——两种拼法各存一份就是两个 provider，价卡永远对不上后者
+    // （2026-09-16 真机 9 条重复声明里两种拼法混存）。
+    let provider_id = agent_vitals_domain::cost::canonical_provider_id(
+        &provider_id, &agent_vitals_domain::cost::load_pricing(),
+    );
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
     let db = agent_vitals_data::authority::AuthorityDb::open(
@@ -2503,6 +2703,10 @@ fn billing_candidate_impact_preview(
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
         return serde_json::json!({"status": "unavailable", "reason": "authority database is unavailable"});
     };
+    // 预览范围必须等于写入范围（G2/R1）：provider 归一与保存路径同一条规则。
+    let provider_id = agent_vitals_domain::cost::canonical_provider_id(
+        &provider_id, &agent_vitals_domain::cost::load_pricing(),
+    );
     let scope_refs = scopes.iter()
         .map(|scope| (scope.scope_kind.as_str(), scope.scope_value.as_str()))
         .collect::<Vec<_>>();
@@ -3218,6 +3422,10 @@ pub fn run() {
             snooze_budget_until,
             snooze_budget_current_period,
             clear_budget_snooze,
+            official_price_card,
+            mcp_setup_info,
+            mcp_skill_text,
+            export_mcp_skill,
             save_host_bill,
             save_host_bills,
             host_bills_for_period,
@@ -3539,6 +3747,9 @@ mod tests {
             budget_monthly_cny: Some(600.0),
             budget,
             budget_profiles: None,
+            metered_today: None,
+            metered_month: None,
+            today_tokens_sql: None,
             recent: overview::RecentSession::default(),
             sync: SyncStatus::default(),
             hosts: vec![
@@ -3561,40 +3772,27 @@ mod tests {
     }
 
     #[test]
-    fn today_title_renders_tokens_cost_or_honest_dash() {
+    fn today_title_is_tokens_only_and_aligned_with_kpi() {
+        // 用户定向 2026-09-17：标题 = 「鸟头 + 64.4M」，不带价格；数字与工作台
+        // 「今日消耗」KPI 同源（SQL daily DTO），库缺席退回旧合并。
         let mut ov = ov_with(overview::BudgetAlert::default());
-        assert_eq!(today_title(&ov), "今日 —", "两宿主都无今日账不得臆造 0");
-        // 有 token、没有可报的钱 → token 照常显示，**只有钱那格**是「—」。
-        // 原先这条整段退化成「今日 —」：既丢了已测量的 token，又让菜单栏那一项
-        // 短到在拥挤的状态区里认不出来（2026-09-14 用户反馈"状态栏看不到"）。
-        let mut tokens_only = ov_with(overview::BudgetAlert::default());
-        tokens_only.claude_today_tokens = Some(329_700_000);
-        assert_eq!(today_title(&tokens_only), "今日 329.7M · —",
-            "没钱但有用量时，已测量的 token 不能被一起丢掉");
-        ov.today = Some(serde_json::json!({"total": 12.34, "peak_total": 0.0, "tokens": 1398214}));
-        assert_eq!(today_title(&ov), "今日 1.4M · ¥12.34");
-        // 真机那天（2026-09-02）：DSH 空转 + Claude deepseek 全在账 → 标题必须给
-        // 有数的合并行，绝不能还是「今日 —」（用户报的正是这个——DSH 无数据 ≠
-        // 全局无数据）。
-        let mut cl = ov_with(overview::BudgetAlert::default());
-        cl.claude_today = Some(serde_json::json!({"currency_totals": {"CNY": 37.17, "USD": 0.0}}));
-        cl.claude_today_tokens = Some(188_213_789);
-        assert_eq!(today_title(&cl), "今日 188.2M · ≈¥37.17");
-        // 混合：DSH 实测 + Claude 估并存 → token 合并、¥ 相加带 ≈。
-        let mut mix = ov_with(overview::BudgetAlert::default());
-        mix.today = Some(serde_json::json!({"total": 12.34, "tokens": 1_398_214}));
-        mix.claude_today = Some(serde_json::json!({"currency_totals": {"CNY": 6.0, "USD": 0.0}}));
-        mix.claude_today_tokens = Some(100_000);
-        assert_eq!(today_title(&mix), "今日 1.5M · ≈¥18.34");
-        // 纯 anthropic USD 日、DSH 缺场：有 fx_estimate（ov_with 默认 7.15）→ 折进
-        // ¥ 主账，速览层给一个统一「≈¥」数（原始分币在 DTO 里供 hover）。
-        let mut usd = ov_with(overview::BudgetAlert::default());
-        usd.claude_today = Some(serde_json::json!({"currency_totals": {"CNY": 0.0, "USD": 3.0}}));
-        usd.claude_today_tokens = Some(500_000);
-        assert_eq!(today_title(&usd), "今日 500K · ≈¥21.45", "3 USD × 7.15 折算");
-        // 无 fx_estimate（价表旧版 / 缺节）→ 退回分币旧行为：USD 单独浮出，不折算。
-        usd.fx = None;
-        assert_eq!(today_title(&usd), "今日 500K · ≈$3", "无汇率不折算，USD 原样");
+        assert_eq!(today_title(&ov), "—", "无今日数据不得臆造 0");
+        ov.today_tokens_sql = Some(64_400_000);
+        assert_eq!(today_title(&ov), "64.4M");
+        // 有钱也不进标题。
+        ov.metered_today = Some(serde_json::json!({ "CNY": { "amount": 41.77, "actual": 0.0, "declared_estimate": 41.77, "default_estimate": 0.0, "label": "estimate" } }));
+        assert_eq!(today_title(&ov), "64.4M");
+        assert_eq!(today_tokens_row_text(&ov), "今日消耗：64.4M tokens");
+        // SQL 缺席：退回 DSH state + claude ledger 合并。
+        let mut legacy = ov_with(overview::BudgetAlert::default());
+        legacy.today = Some(serde_json::json!({"total": 12.34, "tokens": 1_398_214}));
+        legacy.claude_today_tokens = Some(100_000);
+        assert_eq!(today_title(&legacy), "1.5M");
+        // SQL 报「今天 0」是事实：标题「—」（不是缺席，但也不摆 0）。
+        let mut zero = ov_with(overview::BudgetAlert::default());
+        zero.today_tokens_sql = Some(0);
+        zero.claude_today_tokens = Some(100_000);
+        assert_eq!(today_title(&zero), "—");
     }
 
     /// 本月订阅行（PM 决策 2026-09-07）：有 CNY 订阅 → 单列「已付、不计入按量
@@ -3724,6 +3922,41 @@ mod tests {
     ///   原始分币）**（PM 决策 2026-09-07 速览层便利，非口径）；**无汇率 → 退回
     ///   旧行为**（USD 不进 ¥ 主账，只在整行没有 ¥ 侧时单独浮出 ≈$）；
     /// · 两币皆无 → None（调用方渲染 —，不摆 ¥0）。
+    /// 2026-09-17：归因把钱搬进 metered_declared 后托盘变「今日 —」——标题/两行改读 SQL
+    /// 的 metered_view，旧拼法只做兜底。
+    #[test]
+    fn metered_view_text_prefers_sql_view_and_marks_estimates() {
+        let r = Some(7.15);
+        let est = serde_json::json!({ "CNY": { "amount": 41.77, "actual": 0.0, "declared_estimate": 41.77, "default_estimate": 0.0, "label": "estimate" } });
+        assert_eq!(metered_view_text(Some(&est), r), Some("≈¥41.77".to_string()));
+        let actual = serde_json::json!({ "CNY": { "amount": 12.34, "actual": 12.34, "declared_estimate": 0.0, "default_estimate": 0.0, "label": "actual" } });
+        assert_eq!(metered_view_text(Some(&actual), r), Some("¥12.34".to_string()));
+        let mixed = serde_json::json!({
+            "CNY": { "amount": 10.0, "actual": 10.0, "declared_estimate": 0.0, "default_estimate": 0.0, "label": "actual" },
+            "USD": { "amount": 2.0, "actual": 0.0, "declared_estimate": 2.0, "default_estimate": 0.0, "label": "estimate" } });
+        assert_eq!(metered_view_text(Some(&mixed), r), Some("≈¥24.3".to_string()), "USD 折进主账后整段带 ≈");
+        let usd_only = serde_json::json!({ "USD": { "amount": 3.0, "actual": 0.0, "declared_estimate": 3.0, "default_estimate": 0.0, "label": "estimate" } });
+        assert_eq!(metered_view_text(Some(&usd_only), None), Some(format!("≈{}", fmt_usd(3.0))), "无汇率时 USD 单独浮出");
+        assert_eq!(metered_view_text(Some(&serde_json::json!({})), r), None, "视图为空 → 调用方写「—」");
+        assert_eq!(metered_view_text(None, r), None, "旧载荷 → 退回旧拼法");
+    }
+
+    /// 设置 › MCP 的 SKILL.md：frontmatter 合法（name/description 两行、`---` 围栏），
+    /// 工具清单来自运行时 `tool_specs()`（每个注册的工具都出现，页面不手抄）。
+    #[test]
+    fn mcp_skill_markdown_has_frontmatter_and_every_tool() {
+        let md = mcp_skill_markdown();
+        assert!(md.starts_with("---\nname: agent-vitals-mcp\ndescription: "), "frontmatter 开头");
+        let fence_end = md[4..].find("\n---\n").expect("frontmatter 围栏闭合") + 4;
+        let front = &md[..fence_end];
+        assert_eq!(front.matches("\ndescription: ").count(), 1);
+        for t in agent_vitals_runtime::mcp::tool_specs() {
+            assert!(md.contains(&format!("- `{}` — ", t.name)), "工具 {} 不在清单里", t.name);
+        }
+        assert!(md.contains("data-mcp serve --allow-local-writes"));
+        assert!(md.contains("Never invent prices"), "诚实规则必须在");
+    }
+
     #[test]
     fn metered_amount_truth_table() {
         let r = Some(7.15); // fx_estimate.USD_CNY
@@ -3785,7 +4018,7 @@ mod tests {
         ov.claude_today_tokens = Some(188_213_789);
         ov.claude_month = Some(serde_json::json!({"currency_totals": {"CNY": 106.1, "USD": 0.0}}));
         let (today, month) = money_rows_text(&ov);
-        assert_eq!(today, "今日按量成本：≈¥37.17 · 188.2M tokens");
+        assert_eq!(today, "今日按量成本：≈¥37.17");
         assert_eq!(month, "本月按量成本：≈¥106.1", "DSH 本月无日键 → 纯 claude 估主导");
         // ② 纯 DSH 日（claude 无 CNY 价流）：实测精度，无 ≈；月行带实测 ¥。
         ov = ov_with(overview::BudgetAlert::default());
@@ -3799,7 +4032,7 @@ mod tests {
             coverage: None,
         }];
         let (today, month) = money_rows_text(&ov);
-        assert_eq!(today, "今日按量成本：¥12.34 · 1.4M tokens");
+        assert_eq!(today, "今日按量成本：¥12.34");
         assert_eq!(month, "本月按量成本：¥612.5", "分母已移除——预算只活在底部预算行");
         // ③ 两宿主今天都无按量钱 → 今日诚实的 —；本月空 → ¥0 兜底。
         let ov = ov_with(overview::BudgetAlert::default());

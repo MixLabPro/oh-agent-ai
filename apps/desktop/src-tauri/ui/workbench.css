@@ -1918,3 +1918,11 @@ summary.detail-section-title {
   .src-list li .fresh { flex: 1 1 100%; text-align: left; }
   .src-list li .pricing-explain { white-space: normal; overflow-wrap: anywhere; }
 }
+
+/* 设置 › MCP：code block + 复制按钮。等宽、可换行（命令带长路径），不横向滚动。 */
+.mcp-block { margin: 10px 0; }
+.mcp-block-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--muted, #6b7280); margin-bottom: 4px; }
+.mcp-code { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--code-bg, rgba(0,0,0,0.05)); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; user-select: text; -webkit-user-select: text; }
+.mcp-tools summary { cursor: pointer; font-size: 13px; margin-top: 8px; }
+.mcp-tools ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }
+.mcp-tools code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }

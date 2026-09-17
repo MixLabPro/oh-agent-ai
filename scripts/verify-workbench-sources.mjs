@@ -56,7 +56,9 @@ function makeEl(id) {
   let htmlValue = "";
   const node = {
     id, children: [], dataset: {}, hidden: false, disabled: false, title: "",
-    classList: { add: (...names) => names.forEach(name => classes.add(name)), contains: name => classes.has(name) },
+    classList: { add: (...names) => names.forEach(name => classes.add(name)), contains: name => classes.has(name),
+      remove: (...names) => names.forEach(name => classes.delete(name)),
+      toggle: (name, force) => { const on = force === undefined ? !classes.has(name) : !!force; on ? classes.add(name) : classes.delete(name); return on; } },
     appendChild(child) { this.children.push(child); return child; },
     append(...children) { this.children.push(...children); },
     focus() { this.focused = true; },
@@ -340,8 +342,11 @@ elements["ov-billing-amount-unknown"].checked = true;
 await elements["ov-billing-save"].onclick();
 const previewCall = billingCalls.find((c) => c.command === "billing_candidate_impact_preview");
 ok(previewCall && previewCall.args.effectiveStart === monthStart && previewCall.args.effectiveEnd === null && previewCall.args.relationshipKind === "official_subscription"
-  && previewCall.args.scopes.map((s) => s.scope_value).join(",") === "gpt-5.6-sol,gpt-5.6-luna" && !("windowStartMs" in previewCall.args),
-  "预览参数 = 保存参数（宿主/provider/关系/起止日期/批量模型作用域），不传统计月窗口（G2）");
+  && previewCall.args.scopes.length === 0 && !("windowStartMs" in previewCall.args),
+  "预览参数 = 保存参数（宿主/provider/关系/起止日期），不传统计月窗口（G2）；持续有效默认计费方级作用域、不写模型清单快照");
+ok(elements["ov-billing-scope-row"].hidden === false && elements["ov-billing-scope-models"].checked === false
+  && elements["ov-billing-scope-models-text"].textContent.includes("仅限这 2 个模型"),
+  "「仅限这些模型」行可见、持续有效时默认不勾（新模型沿用声明）");
 const previewText = elements["ov-billing-preview"].textContent;
 ok(previewText.includes("预计从按量估算中移出") && previewText.includes("19.88") && previewText.includes("保持估算 18K")
   && previewText.includes("仍待确认 900") && previewText.includes("路由证据冲突"),
@@ -351,7 +356,7 @@ ok(elements["ov-billing-save"].textContent === "确认并保存声明" && !billi
 await elements["ov-billing-save"].onclick();
 const saveCall = billingCalls.find((c) => c.command === "save_billing_declaration_revision");
 ok(saveCall && saveCall.args.effectiveStart === monthStart && saveCall.args.effectiveEnd === null && saveCall.args.relationshipKind === "official_subscription"
-  && saveCall.args.sourceCandidateId === "candidate-test" && saveCall.args.scopes.length === 2 && saveCall.args.amountMinor === null && saveCall.args.currency === null,
+  && saveCall.args.sourceCandidateId === "candidate-test" && saveCall.args.scopes.length === 0 && saveCall.args.amountMinor === null && saveCall.args.currency === null,
   "保存参数与预览一致（订阅持久有效，结束日发 null）；「金额暂不清楚」写空金额而不补挂牌价（AC09）");
 ok(saveCall.args.evidenceRef.startsWith("legacy-import-candidate:") && !saveCall.args.evidenceRef.includes("auto:"),
   "手动确认的组不冒充程序判定（evidence_ref 无 auto:）");
@@ -382,8 +387,10 @@ elements["ov-billing-provider"].value = "zhipu-glm";
 elements["ov-billing-route"].value = "official";
 elements["ov-billing-mode"].value = "api";
 elements["ov-billing-mode"].onchange();
-ok(elements["ov-billing-subscription-fields"].hidden === true && elements["ov-billing-relationship-effect"].textContent.includes("金额不变"),
-  "选官方 API 时不展示订阅字段，并说明金额不变");
+ok(elements["ov-billing-subscription-fields"].hidden === true && elements["ov-billing-relationship-effect"].textContent.includes("按官方价卡估算并计入按量费用"),
+  "选官方 API 时不展示订阅字段，并说明按量估算计入按量费用（2026-09-16 三级口径，不再是「金额不变」）");
+ok(elements["ov-billing-settlement-row"].hidden === false && elements["ov-billing-settlement-currency"].value === "CNY",
+  "按量关系显示「结算币种」，zhipu-glm 默认 CNY");
 await elements["ov-billing-save"].onclick();
 const glmPreview = billingCalls.find((c) => c.command === "billing_candidate_impact_preview");
 ok(glmPreview && glmPreview.args.providerId === "zhipu-glm" && glmPreview.args.relationshipKind === "official_api"
@@ -533,8 +540,8 @@ ok(autoSave && autoSave.args.evidenceRef === "auto:route.session-native+account.
   && autoSave.args.effectiveStart === "2026-08-20" && autoSave.args.effectiveEnd === null
   && autoSave.args.providerId === "anthropic" && autoSave.args.relationshipKind === "official_subscription"
   && autoSave.args.subscriptionName === "Claude Pro" && autoSave.args.amountMinor === 2000 && autoSave.args.currency === "USD"
-  && autoSave.args.scopes.map((s) => s.scope_kind + ":" + s.scope_value).join(",") === "model:claude-opus-5,model:claude-sonnet-5",
-  "一键确认写声明：evidence_ref=auto:<依据>，范围 = 订阅日起（持续有效）；套餐/月费/两个模型作用域，无 provider:unresolved");
+  && autoSave.args.scopes.length === 0,
+  "一键确认写声明：evidence_ref=auto:<依据>，范围 = 订阅日起（持续有效）；套餐/月费；计费方级作用域（无模型快照、无 provider:unresolved）");
 elements["ov-billing-close"].onclick();
 // 「不对，我来改」：所有步骤重新放出来。
 await clusterRows[1].children[1].children[1].onclick();
@@ -618,6 +625,34 @@ ok(refCall && refCall.args.evidenceRef === "auto:route.session-native+account.Cl
   "#6：程序判定 + 旧候选同时存在时，auto: 依据链与候选 id 都保留");
 elements["ov-billing-close"].onclick();
 
+// 2026-09-16 真机：anthropic 订阅早已声明（候选 accepted），新会话又进了待确认；弹窗把同一张
+// accepted 候选当 sourceCandidateId 一起保存 → `UNIQUE constraint failed:
+// billing_declarations.source_candidate_id`。accepted 候选不得再挂到组上，只作
+// 「已作为计费声明的依据」独立行。
+billingCalls.length = 0;
+const acceptedReport = JSON.parse(JSON.stringify(clusterReport));
+await sandbox.renderBillingConfirmation(acceptedReport, { status: "ok", candidates: [{ candidate_id: "cand-accepted",
+  host: "claude-code", provider_id: "anthropic", amount_minor: 2000, currency: "USD",
+  billing_period_start: "2026-06-01", status: "accepted" }] });
+if (elements["ov-billing-review-panel"].hidden) await elements["ov-billing-review"].onclick();
+const acceptedRows = elements["ov-billing-review-list"].children;
+ok(!acceptedRows[1].children[0].children.some((c) => c.textContent.includes("来自旧版本套餐记录")),
+  "accepted 候选不再折进有用量的簇行");
+ok(!Array.from(acceptedRows).some((row) => row.children[0] && row.children[0].textContent.includes("cand-accepted"))
+  && acceptedRows.length === 4,
+  "accepted 候选不再在「待明确」里占行（它是某条有效声明的依据，由声明行带出）");
+await acceptedRows[1].children[1].children[0].onclick();
+// 没有候选预填月费，订阅表单要么填金额要么勾「金额暂不清楚」才放行保存。
+elements["ov-billing-subscription-amount"].value = "20";
+elements["ov-billing-subscription-currency"].value = "USD";
+await elements["ov-billing-save"].onclick();
+await elements["ov-billing-save"].onclick();
+const acceptedSave = billingCalls.find((c) => c.command === "save_billing_declaration_revision");
+ok(acceptedSave && acceptedSave.args.sourceCandidateId === null
+  && !String(acceptedSave.args.evidenceRef).includes("cand-accepted"),
+  "从簇行保存的声明不带 accepted 候选的 id（否则 UNIQUE(source_candidate_id) 必炸）");
+elements["ov-billing-close"].onclick();
+
 // A12 端点/配置证据：claude-code 的日志不记端点，配置记（ANTHROPIC_BASE_URL）。基址不是
 // 该厂商官方端点时，行面写清"配置指向哪"，并把 L3 的那一问变成一次确认（形状出处：
 // billing_preview.rs::auto_verdict 的 relay_config 分支 + relay_label_of）。
@@ -653,6 +688,13 @@ const relayPreview = billingCalls.find((c) => c.command === "billing_candidate_i
 ok(relayPreview && relayPreview.args.relationshipKind === "third_party"
   && relayPreview.args.scopes.some((s) => s.scope_kind === "provider" && s.scope_value === "unresolved"),
   "A12：第三方关系仍带 provider:unresolved 作用域（这批事实的 provider_id 是 NULL）");
+// 结算币种跟计费方走：shengsuanyun.com 是国内中转 → 默认 CNY；保存时作为 currency 传、无月费。
+ok(elements["ov-billing-settlement-currency"].value === "CNY", "中转 shengsuanyun.com 的结算币种默认 CNY");
+await elements["ov-billing-save"].onclick();
+const relaySave = billingCalls.find((c) => c.command === "save_billing_declaration_revision");
+ok(relaySave && relaySave.args.currency === null && relaySave.args.amountMinor === null
+  && relaySave.args.scopes.some((s) => s.scope_kind === "settlement" && s.scope_value === "CNY"),
+  "第三方声明保存时带结算币种（scope settlement=CNY；月费与币种列保持成对为空）");
 elements["ov-billing-close"].onclick();
 
 // 验收审查 iteration 7 #3：配置里多个端点时判定器**不点名**，UI 也不许拿"第一个端点"顶上

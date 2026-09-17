@@ -85,9 +85,10 @@ ok(wb.includes('action.textContent = "明确计费方式"') && wb.includes('"查
 // ── vm 执行真实文件 ──
 function makeElement() {
   const classes = new Set();
-  return { textContent: "", innerHTML: "", hidden: false, style: {}, dataset: {},
-    append() {},
-    className: "", title: "", appendChild() {}, setAttribute() {},
+  const children = [];
+  return { textContent: "", innerHTML: "", hidden: false, style: {}, dataset: {}, children,
+    append(...nodes) { children.push(...nodes); },
+    className: "", title: "", appendChild(node) { children.push(node); }, setAttribute() {},
     classList: {
       add: (c) => classes.add(c),
       remove: (c) => classes.delete(c),
@@ -247,6 +248,27 @@ ok(!num("ov-m-nominal").includes("118.00") && !num("ov-m-nominal").includes("20.
 ok(num("ov-m-tokens") === "3.00B tokens", `本月用量行 tokens（got ${num("ov-m-tokens")}）`);
 ok(sub("ov-m-tokens").includes("日均"), `本月用量行附日均（got "${sub("ov-m-tokens")}"）`);
 
+console.log("# renderSpendCards · 按量三级口径（metered_view：账单 > 归因估算 > 默认估算，2026-09-16）");
+// 形状出处：data_contract.rs MonthlySummary::to_json → "metered_view"（metered_view_json）：
+// {币种: {amount, actual, declared_estimate, default_estimate, label, unattributed_providers}}。
+const tierMonthly = { ...monthlyDto, metered_view: {
+  CNY: { amount: 668.57, actual: 452, declared_estimate: 0, default_estimate: 216.57, label: "mixed",
+    unattributed_providers: ["claude-code/deepseek-official"] },
+  USD: { amount: 132.67, actual: 0, declared_estimate: 132.67, default_estimate: 0, label: "estimate", unattributed_providers: [] },
+} };
+const tierDaily = { ...daily, metered_view: {
+  CNY: { amount: 41.77, actual: 0, declared_estimate: 41.77, default_estimate: 0, label: "estimate", unattributed_providers: [] },
+} };
+sandbox.renderSpendCards(tierDaily, tierMonthly);
+ok(num("ov-m-metered") === "≈¥668.57 含估算 + ≈$132.67 估算",
+  `本月按量行按 metered_view 分币显示、估算带标签、混合写「含估算」（got ${num("ov-m-metered")}）`);
+ok(num("ov-m-spend-sub").includes("1 个未归因来源"), `副行点名未归因来源数（got "${num("ov-m-spend-sub")}"）`);
+ok(num("ov-t-metered") === "≈¥41.77 估算", `今日按量行永远是估算（账单按月不摊天；got ${num("ov-t-metered")}）`);
+const tierActual = { ...monthlyDto, metered_view: { CNY: { amount: 242, actual: 242, declared_estimate: 0, default_estimate: 0, label: "actual", unattributed_providers: [] } } };
+sandbox.renderSpendCards(daily, tierActual);
+ok(num("ov-m-metered") === "¥242.00", `全部来自账单时不带估算标签（got ${num("ov-m-metered")}）`);
+sandbox.renderSpendCards(daily, monthlyDto);
+
 console.log("# renderSpendCards · 速览层混币折算（Overview.fx，PM 决策 2026-09-07）");
 // 名义/单位成本：有汇率 + 混币 → 并成一个 ≈¥（原始分币进 hover）。
 // 今日名义 = {USD 1180, CNY 318}；7.15 → cny = 318 + 1180×7.15 = 8755。
@@ -371,6 +393,50 @@ ok(elements["ov-trust-price-text"].textContent.includes("全库累计"),
   "口径写明「全库累计」，不在「本月已处理」底下冒充月度数");
 
 ok(elements["ov-trust-price-text"].textContent.includes("价格表也已过期"), "价格表过期并入价格行");
+// 2026-09-16：新载荷带 *_tokens_month → 主数字用本月口径（待确认面板只处理当月，
+// 用户能消掉的只有本月），全库多出来的那部分作历史脚注、指出"把声明起始日提前"。
+// 形状出处：runtime/src/mcp/data_status.rs collect_report_at_depth →
+// unresolved_tokens_month / unpriced_tokens_month / total_tokens_month。
+const monthStatus = { status: "ok", data: { health: "warn", pricing: { stale: false },
+  unresolved_tokens: 1_550_000_000, unpriced_tokens: 1_190_000_000, total_tokens: 18_000_000_000,
+  unresolved_tokens_month: 0, unpriced_tokens_month: 200_000_000, unpriced_metered_tokens_month: 0,
+  total_tokens_month: 10_000_000_000, month: "2026-09" } };
+sandbox.billingPromptState = { visible: false, pendingTokens: 0 };
+sandbox.renderTrustRows(monthStatus, monthlyDto);
+ok(routeRow.className === "notice ok" && elements["ov-trust-route-text"].textContent.startsWith("本月用量都已归到对应服务商")
+  && elements["ov-trust-route-text"].textContent.includes("历史月份 1.55B") && elements["ov-trust-route-text"].textContent.includes("起始日期提前"),
+  `本月归因完毕 → ok 行，历史未归因只作脚注并给出做法（got "${elements["ov-trust-route-text"].textContent}"）`);
+ok(priceRow.className === "notice ok" && elements["ov-trust-price-text"].textContent.startsWith("本月有 200")
+  && elements["ov-trust-price-text"].textContent.includes("套餐内") && elements["ov-trust-price-text"].textContent.includes("偏低约 2%"),
+  `全部在套餐内的缺价 → ok 行、只说折算参考偏低（got "${elements["ov-trust-price-text"].textContent}"）`);
+const meteredGap = { ...monthStatus, data: { ...monthStatus.data, unpriced_metered_tokens_month: 50_000_000 } };
+sandbox.renderTrustRows(meteredGap, monthlyDto);
+ok(priceRow.className === "notice warn" && elements["ov-trust-price-text"].textContent.startsWith("本月有 50.0M tokens 按量用量")
+  && elements["ov-trust-price-text"].textContent.includes("另有 150.0M tokens 在套餐内"),
+  `按量用量缺价才 warn，并分开说套餐内的部分（got "${elements["ov-trust-price-text"].textContent}"）`);
+const monthWarn = { ...monthStatus, data: { ...monthStatus.data, unresolved_tokens_month: 18_000 } };
+sandbox.renderTrustRows(monthWarn, monthlyDto);
+ok(elements["ov-trust-route-text"].textContent.startsWith("本月有 18K") && elements["ov-trust-route-action"].hidden === false,
+  `本月仍有未归因 → warn 行 + 「去明确」（got "${elements["ov-trust-route-text"].textContent}"）`);
+// 2026-09-17：「查看价格表」落地要有事可做——status 带 unpriced_models_month 时，设置页
+// 「价格目录」列出缺卡型号，每行「补这张卡」把服务商/型号预填进补卡表单。
+el("ov-price-missing"); el("ov-price-missing-list"); el("ov-price-card-provider"); el("ov-price-card-model");
+el("ov-price-card-status"); el("ov-price-uncached-off");
+const missingRows = [];
+elements["ov-price-missing-list"].appendChild = (row) => missingRows.push(row);
+sandbox.renderTrustRows({ ...meteredGap, data: { ...meteredGap.data, unpriced_models_month: [
+  { host: "codex", provider: "shengsuanyun", model: "gpt-6-astra", tokens: 24_500_000, covered: false },
+  { host: "claude-code", provider: "zhipu-glm", model: "glm-5.3-flash", tokens: 371_900_000, covered: true },
+] } }, monthlyDto);
+ok(elements["ov-price-missing"].hidden === false && missingRows.length === 2,
+  `价格目录列出本月缺卡型号（got ${missingRows.length} 行）`);
+const fillBtn = missingRows[0].children ? missingRows[0].children[1] : null;
+ok(!!fillBtn && fillBtn.textContent === "补这张卡", "每行带「补这张卡」");
+if (fillBtn) fillBtn.onclick();
+ok(elements["ov-price-card-provider"].value === "shengsuanyun" && elements["ov-price-card-model"].value === "gpt-6-astra"
+  && elements["ov-price-card-status"].textContent.includes("已预填"),
+  `「补这张卡」预填服务商与型号（got ${elements["ov-price-card-provider"].value} / ${elements["ov-price-card-model"].value}）`);
+sandbox.renderTrustRows(unpricedStatus, monthlyDto);
 // 切掉 total_tokens（旧载荷）→ **不给百分比**，而不是退回用本月总量当分母。
 const legacyShape = { status: "ok", data: { health: "ok", unresolved_tokens: 0,
   unpriced_tokens: 300_000_000, pricing: { stale: false } } };
@@ -556,6 +622,36 @@ await sandbox.renderOverview();
 ok(num("ov-budget-amount") === "¥120 / ¥200", `profile 数字覆盖 legacy（got ${num("ov-budget-amount")}）`);
 ok(!num("ov-budget-sub").includes("legacy_should_not_show"), "不残留 legacy reasons");
 ok(num("ov-budget-sub").includes("60%"), "百分比来自 profile 的 ratio_bp（60%），不是 legacy 的 150%");
+
+console.log("# renderOverview · 预算已用 = 按量三级口径 + 订阅月费按天摊派（2026-09-17）");
+// 形状出处：runtime/src/budget.rs budget_profiles_status_sql_at → metered_spent_minor /
+// subscription_amortized_minor / total_spent_minor / subscription_days_elapsed / days_in_month。
+sandbox.__overview = {
+  ...sandbox.__overview,
+  budget_profiles: { status: "ok", month: "2026-09", profiles: [
+    { profile_id: "estimate", currency: "CNY", monthly_minor: 50000, daily_minor: null, warning_ratio_bp: 8000,
+      spent_minor: 12000, metered_spent_minor: 12000, subscription_minor: 44800, subscription_amortized_minor: 25387,
+      subscription_days_elapsed: 17, days_in_month: 30, subscription_fx_applied: true, total_spent_minor: 37387,
+      ratio_bp: 7477, level: "ok", has_unresolved: false },
+  ] },
+};
+await sandbox.renderOverview();
+ok(num("ov-budget-amount") === "¥373.9 / ¥500", `大字 = 按量 + 订阅摊派（got ${num("ov-budget-amount")}）`);
+ok(num("ov-budget-sub").includes("订阅 ≈¥253.9") && num("ov-budget-sub").includes("已摊 17/30 天") && num("ov-budget-sub").includes("按量 ≈¥120"),
+  `副行拆开订阅摊派（折算标 ≈）与按量（got ${num("ov-budget-sub")}）`);
+// 只有订阅、没有按量：不再是 ¥0。
+sandbox.__overview = {
+  ...sandbox.__overview,
+  budget_profiles: { status: "ok", month: "2026-09", profiles: [
+    { profile_id: "estimate", currency: "CNY", monthly_minor: 50000, daily_minor: null, warning_ratio_bp: 8000,
+      spent_minor: 0, metered_spent_minor: 0, subscription_minor: 16200, subscription_amortized_minor: 9180,
+      subscription_days_elapsed: 17, days_in_month: 30, subscription_fx_applied: false, total_spent_minor: 9180,
+      ratio_bp: 1836, level: "ok", has_unresolved: false },
+  ] },
+};
+await sandbox.renderOverview();
+ok(num("ov-budget-amount") === "¥91.8 / ¥500" && num("ov-budget-sub").includes("订阅 ¥91.8") && !num("ov-budget-sub").includes("按量"),
+  `只有订阅时预算卡反映订阅摊派而不是 ¥0（got ${num("ov-budget-amount")} · ${num("ov-budget-sub")}）`);
 
 console.log("# renderOverview · profile has_unresolved → 「至少已用…仍有未覆盖用量」");
 sandbox.__overview = {

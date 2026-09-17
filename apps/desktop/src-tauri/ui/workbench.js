@@ -192,9 +192,18 @@ const ERR_TEXT = {
   schema_migration_required: "权威数据库需要迁移",
 };
 
+// 计费声明/候选的业务拒绝是 sqlite 层带英文原因串回来的（`authority sqlite: Invalid
+// parameter name: …`），按原因串翻成人话；没命中的照原样给，不吞。
+const BILLING_ERR_TEXT = [
+  ["already used by another live declaration", "这张旧套餐记录已经是另一条有效计费声明的依据；要改就先在「当前计费声明」里撤销那条"],
+  ["revoke that declaration instead of reopening", "这张旧套餐记录是一条有效计费声明的依据，不能单独重新打开；请撤销那条声明"],
+];
 function errText(e) {
   const n = normErr(e);
-  return ERR_TEXT[n.code] || n.message || "未知错误";
+  if (ERR_TEXT[n.code]) return ERR_TEXT[n.code];
+  const msg = n.message || "";
+  const hit = BILLING_ERR_TEXT.find(([needle]) => msg.includes(needle));
+  return hit ? hit[1] : (msg || "未知错误");
 }
 
 function showBanner(id, e, showReload) {
@@ -609,22 +618,34 @@ function renderTrustRows(status, monthly) {
   }
   const d = status.data || {};
   const health = d.health || "ok";
-  const unresolved = Math.max(0, Number(d.unresolved_tokens || 0));
-  const unpriced = Math.max(0, Number(d.unpriced_tokens || 0));
   const total = monthly ? tokensSum(monthly.tokens_by_host).total : null;
-  // `unresolved_tokens` / `unpriced_tokens` 都是**全库累计**，而这两行渲染在
-  // 「本月已处理 …」下面。所以占比的分母必须也是全库总量（`d.total_tokens`）——
-  // 此前拿「本月总量」当分母（2026-09-14 实测算出 1.09B ÷ 9.60B = 11%），
-  // 两个时间跨度相除，百分比没有意义。
-  const allTimeTotal = Math.max(0, Number(d.total_tokens || 0));
+  // 这两行渲染在「本月已处理 …」下面，待确认面板也只处理当月——所以主数字用
+  // **本月**口径（`*_tokens_month`，与 total_tokens_month 同跨度），全库累计只作
+  // 历史脚注。此前主数字是全库累计：用户把当月全部归因完了提示照样亮着，因为
+  // 8 月的中转用量落在声明起始日之前、WorkBuddy 又按设计永远 provider 未知——
+  // 一条在 UI 里永远关不掉的警告（2026-09-16 反馈）。旧载荷没有 *_month 字段时退回
+  // 全库口径（文案也随之写「全库累计」，不冒充本月）。
+  const hasMonth = d.unresolved_tokens_month !== undefined;
+  const unresolvedAll = Math.max(0, Number(d.unresolved_tokens || 0));
+  const unpricedAll = Math.max(0, Number(d.unpriced_tokens || 0));
+  const unresolved = hasMonth ? Math.max(0, Number(d.unresolved_tokens_month || 0)) : unresolvedAll;
+  const unpriced = hasMonth ? Math.max(0, Number(d.unpriced_tokens_month || 0)) : unpricedAll;
+  const scopeWord = hasMonth ? "本月有 " : "全库累计有 ";
+  // 占比分母与分子同跨度（2026-09-14 教训：跨度不同相除，百分比没有意义）。
+  const allTimeTotal = Math.max(0, Number((hasMonth ? d.total_tokens_month : d.total_tokens) || 0));
+  const historyUnresolved = hasMonth ? Math.max(0, unresolvedAll - unresolved) : 0;
+  const historyNote = historyUnresolved > 0
+    ? "（另有历史月份 " + fmtTokens(historyUnresolved) + " tokens 未归因——重新声明时把起始日期提前到那个月即可覆盖）" : "";
   // 路由与缺价：未定 provider 的 token 让按量金额只能是下界。
   if (unresolved > 0) {
     // 同源判定：套餐提示可见且其影响范围盖住了这批 token → 同一件事，一个按钮。
     const sameSource = billingPromptState.visible && billingPromptState.pendingTokens >= unresolved;
     setRow(route, trustRowLevel(health, true),
-      "全库累计有 " + fmtTokens(unresolved) + " tokens 还不知道是哪家服务商的，按量费用可能少算" +
-        (sameSource ? "——在下方「明确计费方式」里补上服务商即可" : ""),
+      scopeWord + fmtTokens(unresolved) + " tokens 还不知道是哪家服务商的，按量费用可能少算" +
+        (sameSource ? "——在下方「明确计费方式」里补上服务商即可" : "") + historyNote,
       sameSource ? null : toClarify);
+  } else if (historyUnresolved > 0) {
+    setRow(route, "ok", "本月用量都已归到对应服务商" + historyNote, null);
   } else if (health !== "ok") {
     setRow(route, trustRowLevel(health, false), "数据检查发现问题（" + health + "），数字可能不完整", toDiagnostics);
   } else {
@@ -634,26 +655,45 @@ function renderTrustRows(status, monthly) {
   const pricingStale = !!(d.pricing && d.pricing.stale);
   if (total === null) {
     setRow(price, "warn", "本月用量暂不可读，无法核对价格完整性" +
-      (unpriced > 0 ? "；全库累计有 " + fmtTokens(unpriced) + " tokens 缺少价格" : "") +
+      (unpriced > 0 ? "；" + scopeWord + fmtTokens(unpriced) + " tokens 缺少价格" : "") +
       (pricingStale ? "；价格表已过期" : ""), toPricing);
   } else if (!(total > 0)) {
     setRow(price, "ok", "本月还没有用量，暂无需核对价格", null);
   } else if (unpriced > 0) {
-    // 分母取同跨度的全库总量；缺这个字段（旧载荷）时**不给百分比**，而不是退回
-    // 拿本月总量去算——那正是这个 bug 的形状。
+    // 分母取同跨度的总量；缺这个字段（旧载荷）时**不给百分比**，而不是退回
+    // 拿别的跨度去算——那正是 2026-09-14 那个 bug 的形状。
     const missing = allTimeTotal > 0 ? Math.max(0, Math.min(1, unpriced / allTimeTotal)) : null;
-    setRow(price, trustRowLevel(health, true),
-      "全库累计有 " + fmtTokens(unpriced) + " tokens 的模型没有价格" +
-        (missing === null ? "" : "，按官方价折算的金额少算了约 " + fmtPct(missing)) +
-        (pricingStale ? "；价格表也已过期" : ""),
-      toPricing);
+    renderPriceMissingList(Array.isArray(d.unpriced_models_month) ? d.unpriced_models_month : []);
+  // 归因 ≠ 价卡：归因回答"谁收钱"，价卡回答"每 M token 多少钱"。无价卡的 token 里
+    // 只有**按量**的那部分会让「按量费用」少算；套餐内的（智谱订阅里的 glm-*）钱已在
+    // 月费里，缺卡只让「按官方价折算」参考数偏低——两种后果不能用同一句警告
+    // （2026-09-16：用户归因全做完了仍被"没有价格"吓到，以为归因没生效）。
+    const meteredField = hasMonth ? d.unpriced_metered_tokens_month : d.unpriced_metered_tokens;
+    const metered = meteredField === undefined ? unpriced : Math.max(0, Number(meteredField || 0));
+    if (metered > 0) {
+      const meteredShare = allTimeTotal > 0 ? Math.max(0, Math.min(1, metered / allTimeTotal)) : null;
+      setRow(price, trustRowLevel(health, true),
+        scopeWord + fmtTokens(metered) + " tokens 按量用量的模型没有价格，按量费用少算了" +
+          (meteredShare === null ? "这部分" : "约 " + fmtPct(meteredShare)) +
+          (unpriced > metered ? "；另有 " + fmtTokens(unpriced - metered) + " tokens 在套餐内、只影响折算参考" : "") +
+          (pricingStale ? "；价格表也已过期" : ""),
+        toPricing);
+    } else {
+      setRow(price, "ok",
+        scopeWord + fmtTokens(unpriced) + " tokens 在套餐内、模型没有价卡：按量费用和月费不受影响，只是「按官方价折算」参考数" +
+          (missing === null ? "偏低" : "偏低约 " + fmtPct(missing)) +
+          (pricingStale ? "；价格表已过期" : "") + "。补一张卡即可校正",
+        toPricing);
+    }
   } else if (pricingStale) {
     setRow(price, trustRowLevel(health, true), "所有模型都有价格，但价格表已过期，按官方价折算的金额可能偏旧", toPricing);
   } else {
     setRow(price, "ok", "所有模型都有价格，按官方价折算没有漏算", toPricing);
   }
-  // 两条都 ✓ → 合成一句，用户不需要读两行。
-  const bothOk = String(route.className).includes("notice ok") && String(price.className).includes("notice ok");
+  // 两条都 ✓ 且都没有话要说 → 合成一句，用户不需要读两行。有脚注的 ok 行（历史
+  // 月份未归因 / 套餐内缺卡）保留各自那句——合成会把脚注吞掉。
+  const bothOk = String(route.className).includes("notice ok") && String(price.className).includes("notice ok")
+    && historyUnresolved === 0 && !(unpriced > 0);
   if (bothOk) {
     setRow(route, "ok", "数据完整：所有用量都已归到服务商，所有模型都有价格", toPricing);
     price.hidden = true;
@@ -968,6 +1008,49 @@ async function renderPriceRouteSettings() {
   };
 }
 
+// 设置 › 价格目录 的「本月缺价卡的型号」清单（形状出处：runtime/src/mcp/data_status.rs
+// `unpriced_models_month`：{host, provider, model, tokens, covered}）。每行「补这张卡」
+// 把服务商/型号预填进补卡表单并把光标放到第一个价格格；provider 为空（目录也认不出
+// 归属）时先引导去「声明归属」。
+function renderPriceMissingList(rows) {
+  const wrap = document.getElementById("ov-price-missing");
+  const list = document.getElementById("ov-price-missing-list");
+  if (!wrap || !list) return;
+  list.textContent = "";
+  wrap.hidden = !rows.length;
+  if (!rows.length) return;
+  for (const r of rows) {
+    const row = document.createElement("div");
+    row.className = "src-custom-row";
+    const text = document.createElement("div");
+    text.className = "src-custom-path";
+    const providerLabel = r.provider ? (PROVIDER_LABEL[r.provider] || r.provider) : "服务商未知";
+    text.textContent = r.model + " · 补到 " + providerLabel + " 的卡 · 本月 " + fmtTokens(Number(r.tokens || 0)) + " tokens · " +
+      (r.covered ? "在套餐内（只影响折算参考）" : "按量（影响按量费用）") + " · 经 " + (HOST_DISPLAY[r.host] || r.host);
+    const fill = document.createElement("button");
+    fill.className = "btn secondary";
+    fill.type = "button";
+    fill.textContent = r.provider ? "补这张卡" : "先声明归属";
+    fill.onclick = () => {
+      if (!r.provider) {
+        const routeModel = document.getElementById("ov-price-route-model");
+        if (routeModel) { routeModel.value = r.model; routeModel.focus && routeModel.focus(); }
+        return;
+      }
+      const provider = document.getElementById("ov-price-card-provider");
+      const model = document.getElementById("ov-price-card-model");
+      const status = document.getElementById("ov-price-card-status");
+      if (provider) provider.value = r.provider;
+      if (model) model.value = r.model;
+      if (status) { status.hidden = false; status.textContent = "已预填 " + providerLabel + " · " + r.model + "，填入六个价格（元/百万 token，不分峰谷就两格填同一个数）后保存。"; }
+      const first = document.getElementById("ov-price-uncached-off");
+      if (first && first.focus) first.focus();
+    };
+    row.append(text, fill);
+    list.appendChild(row);
+  }
+}
+
 async function renderPriceOverrideSettings() {
   const provider = document.getElementById("ov-price-card-provider");
   const model = document.getElementById("ov-price-card-model");
@@ -1025,6 +1108,30 @@ async function renderPriceOverrideSettings() {
 
   if (save.dataset.bound === "1") return;
   save.dataset.bound = "1";
+  const official = document.getElementById("ov-price-card-official");
+  if (official) official.onclick = async () => {
+    status.hidden = false;
+    if (!provider.value.trim() || !model.value.trim()) { status.textContent = "先填服务商与型号，再预填。"; return; }
+    official.disabled = true;
+    try {
+      const r = await invoke("official_price_card", { providerId: provider.value.trim(), modelId: model.value.trim() });
+      if (!r || !r.found) {
+        status.textContent = "目录里没有这个型号的官方卡" + (r && r.reason ? "（" + r.reason + "）" : "") + "，只能手填或让 Agent 经 MCP 查价。";
+        return;
+      }
+      const put = (id, v) => { const el = document.getElementById(id); if (el) el.value = String(v); };
+      put("ov-price-uncached-off", r.rates.input_uncached.off_peak); put("ov-price-uncached-peak", r.rates.input_uncached.peak);
+      put("ov-price-cached-off", r.rates.input_cached.off_peak); put("ov-price-cached-peak", r.rates.input_cached.peak);
+      put("ov-price-output-off", r.rates.output.off_peak); put("ov-price-output-peak", r.rates.output.peak);
+      status.textContent = "已按 " + (PROVIDER_LABEL[r.provider] || r.provider) + " 官方卡（" + r.card_key + "）预填" +
+        (r.converted_from ? "，" + r.converted_from + " 按 ≈" + r.rate + " 折成人民币" : "") +
+        "；这是原厂标价，不是 " + provider.value.trim() + " 的实际价——可直接保存，也可改成实际价再存。";
+    } catch (e) {
+      status.textContent = "预填失败：" + errText(e);
+    } finally {
+      official.disabled = false;
+    }
+  };
   save.onclick = async () => {
     const readDim = (offId, peakId) => {
       const off = Number(document.getElementById(offId).value);
@@ -1109,7 +1216,102 @@ async function loadSettingsData(preloadedOverview) {
     renderStatisticsTimezoneSettings(), renderPricingCatalogSettings(),
     renderAboutDiagnostics(), renderBudgetSettings(preloadedOverview),
     renderQuotaReminderSettings(), renderPriceOverrideSettings(), renderPriceRouteSettings(),
+    renderMcpSettings(),
   ]);
+}
+
+// 设置 › MCP：三段接入配置（Claude Code / Codex / 通用 JSON）+ 三条可复制的
+// prompt + 工具清单。CLI 路径来自 `mcp_setup_info`（与托盘同步同一份 resolve），
+// 找不到 CLI 就明说，不给一条不存在的路径。复制走 navigator.clipboard，不可用时
+// 退回选中文本（用户 ⌘C）。
+function mcpConfigTexts(cliPath) {
+  const bin = cliPath || "/path/to/agent-vitals";
+  const shellBin = bin.includes(" ") ? JSON.stringify(bin) : bin;
+  return {
+    claude: "claude mcp add agent-vitals -- " + shellBin + " data-mcp serve --allow-local-writes",
+    codex: "[mcp_servers.agent-vitals]\ncommand = " + JSON.stringify(bin) + "\nargs = [\"data-mcp\", \"serve\", \"--allow-local-writes\"]",
+    json: JSON.stringify({ mcpServers: { "agent-vitals": { command: bin, args: ["data-mcp", "serve", "--allow-local-writes"] } } }, null, 2),
+  };
+}
+async function copyTextFrom(el) {
+  const text = el ? el.textContent : "";
+  try {
+    if (navigator && navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(text); return true; }
+  } catch (_) { /* 退回选中 */ }
+  try {
+    const range = document.createRange(); range.selectNodeContents(el);
+    const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+  } catch (_) { /* 无 DOM 选区 API */ }
+  return false;
+}
+async function renderMcpSettings() {
+  const status = document.getElementById("ov-mcp-status");
+  if (!status) return;
+  let info = null;
+  try { info = await invoke("mcp_setup_info"); } catch (e) { status.textContent = "读取 MCP 信息失败：" + errText(e); }
+  const cliPath = info && info.cli_path ? String(info.cli_path) : null;
+  status.textContent = cliPath
+    ? "本机 CLI：" + cliPath + (info.cli_version ? "（" + info.cli_version + "）" : "") + " · 数据目录：" + (info.data_home || "")
+    : "未找到 agent-vitals CLI（托盘同步也会失败）——先安装 CLI 或把它放进 PATH，下面的命令里的路径需要你自己替换。";
+  const texts = mcpConfigTexts(cliPath);
+  const put = (id, t) => { const el = document.getElementById(id); if (el) el.textContent = t; };
+  put("ov-mcp-claude", texts.claude); put("ov-mcp-codex", texts.codex); put("ov-mcp-json", texts.json);
+  const tools = document.getElementById("ov-mcp-tools");
+  if (tools) {
+    tools.textContent = "";
+    for (const t of (info && Array.isArray(info.tools) ? info.tools : [])) {
+      const li = document.createElement("li");
+      const code = document.createElement("code"); code.textContent = t.name;
+      li.append(code, document.createTextNode(" — " + String(t.description || "").split(". ")[0]));
+      tools.appendChild(li);
+    }
+  }
+  const skillStatus = document.getElementById("ov-mcp-skill-status");
+  const copyAll = document.getElementById("ov-mcp-copy-all");
+  if (copyAll && copyAll.dataset.bound !== "1") {
+    copyAll.dataset.bound = "1";
+    copyAll.onclick = async () => {
+      copyAll.disabled = true;
+      try {
+        const text = await invoke("mcp_skill_text");
+        let ok = false;
+        try { if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(text); ok = true; } } catch (_) { /* fall through */ }
+        if (skillStatus) { skillStatus.hidden = false; skillStatus.textContent = ok ? "已复制整份说明（约 " + Math.round(text.length / 100) / 10 + "K 字），直接贴给你的 Agent。" : "剪贴板不可用，请改用「下载 SKILL.md」。"; }
+      } catch (e) {
+        if (skillStatus) { skillStatus.hidden = false; skillStatus.textContent = "生成失败：" + errText(e); }
+      } finally { copyAll.disabled = false; }
+    };
+  }
+  const download = document.getElementById("ov-mcp-download-skill");
+  if (download && download.dataset.bound !== "1") {
+    download.dataset.bound = "1";
+    download.onclick = async () => {
+      download.disabled = true;
+      try {
+        const r = await invoke("export_mcp_skill");
+        if (skillStatus) {
+          skillStatus.hidden = false;
+          skillStatus.textContent = r && r.status === "saved"
+            ? "已保存 " + (r.file_name || "SKILL.md") + "。放进 ~/.claude/skills/agent-vitals-mcp/ 即安装。"
+            : "已取消。";
+        }
+      } catch (e) {
+        if (skillStatus) { skillStatus.hidden = false; skillStatus.textContent = "保存失败：" + errText(e); }
+      } finally { download.disabled = false; }
+    };
+  }
+  const panel = document.getElementById("ov-mcp-panel");
+  if (panel && panel.dataset.bound !== "1" && panel.querySelectorAll) {
+    panel.dataset.bound = "1";
+    for (const btn of panel.querySelectorAll("button[data-copy]")) {
+      btn.onclick = async () => {
+        const ok = await copyTextFrom(document.getElementById(btn.dataset.copy));
+        const original = btn.textContent;
+        btn.textContent = ok ? "已复制" : "已选中，按 ⌘C";
+        setTimeout(() => { btn.textContent = original; }, 1500);
+      };
+    }
+  }
 }
 
 async function renderOverview() {
@@ -1236,7 +1438,7 @@ async function renderOverview() {
       // budgetProfileStatusText 同一措辞（"至少已用 X 元，仍有未覆盖用量"）。
       budgetSub.textContent = "至少已用 " + fmtMoney(b.month_cost) + "，仍有未覆盖用量" + tail;
     } else {
-      budgetSub.textContent = "已用 " + fmtPct(b.month_ratio) + tail;
+      budgetSub.textContent = "已用 " + fmtPct(b.month_ratio) + (b.month_cost_breakdown ? " · " + b.month_cost_breakdown : "") + tail;
     }
     // 过期时把警告直接贴在数字旁边，不指望用户往下翻到页尾的 note 才看到——
     // 这条数字本身可能是几天前的旧账（比如日历月翻了页但当天还没有新会话
@@ -1563,10 +1765,23 @@ function adaptEstimateProfileToBudget(profile, legacy) {
     : profile.level === "exceeded" ? "over"
     : (profile.level === "warn" || profile.level === "incomplete") ? "warn"
     : "ok";
+  // 已用 = 按量（三级口径）+ 订阅月费按天摊派（2026-09-17：预算消耗要反映订阅+按量
+  // 的总体，否则只有订阅的用户永远看到 ¥0）。旧载荷没有 total_spent_minor 时退回 spent。
+  const metered = Number(profile.metered_spent_minor ?? profile.spent_minor ?? 0) / 100;
+  const amortized = Number(profile.subscription_amortized_minor || 0) / 100;
+  const total = profile.total_spent_minor != null ? Number(profile.total_spent_minor) / 100 : metered;
+  const parts = [];
+  if (amortized > 0) {
+    parts.push("订阅 " + (profile.subscription_fx_applied ? "≈" : "") + fmtMoney(amortized) +
+      "（月费 " + fmtMoney(Number(profile.subscription_minor || 0) / 100) + " 已摊 " +
+      Number(profile.subscription_days_elapsed || 0) + "/" + Number(profile.days_in_month || 0) + " 天）");
+  }
+  if (metered > 0 || amortized === 0) parts.push("按量 ≈" + fmtMoney(metered));
   return {
     source: "sql", // 与旧版 "sql" 态同义：都是无快照时刻的实时 SQL 计算。
     level,
-    month_cost: Number(profile.spent_minor || 0) / 100,
+    month_cost: total,
+    month_cost_breakdown: parts.join(" + "),
     monthly_cny: monthlyCny,
     month_ratio: profile.ratio_bp != null ? Number(profile.ratio_bp) / 10000 : 0,
     effective_daily_budget: profile.daily_minor != null ? Number(profile.daily_minor) / 100 : null,
@@ -1840,10 +2055,20 @@ function deferBillingReviewPrompt() {
 // 像省了钱。
 const BILLING_RELATIONSHIP_EFFECT = Object.freeze({
   official_subscription: "命中的用量将移出按量估算，进入「订阅覆盖」；填写的月费即按此声明计入「订阅月费」与实际支出（自报口径），之后录到真实账单时以账单为准校准。",
-  official_api: "金额不变——这批用量本来就按官方价估算；保存后记录为已确认依据。",
-  third_party: "Beta 不改变金额：第三方价卡编辑随后续测试版提供，当前仍按官方价估算。",
+  official_api: "命中的用量按官方价卡估算并计入按量费用（估算，带 ≈）；录入账单后以账单为准。",
+  third_party: "命中的用量归到这家计费方名下、按它的价卡估算（价卡没收录的模型按原厂标价折算成结算币种，带 ≈）；录入账单后以账单为准。",
+
   organization: "只改变费用承担者标签；金额与估算状态不变，不等于免费。",
   unknown: "保持按量估算与不确定标记；进入待处理，30 天内不再抢占首屏。",
+});
+
+// 关系种类 → 列表里的短标签（弹窗里的长解释见 BILLING_RELATIONSHIP_EFFECT）。
+const BILLING_RELATIONSHIP_LABEL = Object.freeze({
+  official_subscription: "官方订阅",
+  official_api: "官方 API（按量）",
+  third_party: "经中转 / 第三方（按量）",
+  organization: "组织承担",
+  unknown: "未定",
 });
 
 // 重算任务 error_code → 用户文案（规格 §5.10）。原始 SQLite 错误串不上卡面。
@@ -2067,6 +2292,7 @@ function openBillingDeclaration(target, rows, preset) {
     openEnded.disabled = false;
     syncBillingOpenEnded();
   }
+  syncBillingScopeModels();
   // 组自己的默认起止（切换计费方式时用来撤销程序写进去的订阅锚点，见
   // `syncBillingDeclarationSteps`）。
   billingDeclarationTarget.defaultStart = start.value;
@@ -2190,10 +2416,39 @@ function billingDeclarationScopes() {
   if (!target) return [];
   const scopes = [];
   if (target.missing && target.missing.provider) scopes.push({ scope_kind: "provider", scope_value: "unresolved" });
-  for (const row of billingSelectedRows()) {
-    if (row.model_id && row.model_id !== "<unknown>") scopes.push({ scope_kind: "model", scope_value: row.model_id });
+  // 模型作用域只在用户明确勾了「仅限这些模型」时写：默认按计费方级匹配，之后同
+  // 计费方的新模型名自动沿用（声明是持续生效的规则，不是模型清单快照）。
+  const modelsOnly = document.getElementById("ov-billing-scope-models");
+  if (modelsOnly && modelsOnly.checked) {
+    for (const row of billingSelectedRows()) {
+      if (row.model_id && row.model_id !== "<unknown>") scopes.push({ scope_kind: "model", scope_value: row.model_id });
+    }
+  }
+  // 结算币种（按量/中转/组织承担）：挂在作用域表上的声明属性，不是匹配条件
+  // （数据层 `valid_scope` 认 `settlement`）。月费与币种成对的 CHECK 不允许只填币种，
+  // 所以不走 currency 列。
+  const kind = billingCurrentRelationship();
+  const settlement = document.getElementById("ov-billing-settlement-currency");
+  if (kind !== "official_subscription" && kind !== "unknown" && settlement && settlement.value) {
+    scopes.push({ scope_kind: "settlement", scope_value: settlement.value });
   }
   return scopes;
+}
+
+// 「仅限这些模型」行：有具名模型时才显示；默认 = 有界声明勾上（历史修正只盖看到的
+// 模型）、持续有效不勾（新模型沿用）。`syncBillingOpenEnded` 每次切换时重设默认。
+function syncBillingScopeModels() {
+  const row = document.getElementById("ov-billing-scope-row");
+  const box = document.getElementById("ov-billing-scope-models");
+  const text = document.getElementById("ov-billing-scope-models-text");
+  const openEnded = document.getElementById("ov-billing-open-ended");
+  if (!row || !box || !text) return;
+  const models = billingSelectedRows().map((r) => r.model_id).filter((m) => m && m !== "<unknown>");
+  const unique = Array.from(new Set(models));
+  row.hidden = unique.length === 0;
+  if (!unique.length) { box.checked = false; return; }
+  box.checked = !(openEnded && openEnded.checked);
+  text.textContent = "仅限这 " + unique.length + " 个模型（不勾：该计费方之后出现的新模型也沿用这条声明）";
 }
 
 function billingCurrentRelationship() {
@@ -2224,6 +2479,16 @@ function syncBillingDeclarationSteps() {
   const kind = billingCurrentRelationship();
   if (effect) effect.textContent = BILLING_RELATIONSHIP_EFFECT[kind] || "";
   if (subscription) subscription.hidden = kind !== "official_subscription";
+  // 结算币种：只对非订阅关系问；默认按计费方猜（目录已知币种 → 用它；.com/.cn 之类
+  // 国内域名 → CNY；其余 → CNY）。用户改过就不再覆盖（`settlementTouched`）。
+  const settlementRow = document.getElementById("ov-billing-settlement-row");
+  const settlement = document.getElementById("ov-billing-settlement-currency");
+  if (settlementRow) settlementRow.hidden = kind === "official_subscription" || kind === "unknown";
+  if (settlement && !target.settlementTouched) {
+    const providerInput = document.getElementById("ov-billing-provider");
+    const providerId = (target.missing && target.missing.provider && providerInput ? providerInput.value : target.provider_id) || "";
+    settlement.value = billingDefaultSettlementCurrency(providerId);
+  }
   // 订阅：适用范围由程序给——从订阅日起、持续有效——不问起止；按量/组织/中转才有起止。
   const datesRow = document.getElementById("ov-billing-dates-row");
   const anchor = document.getElementById("ov-billing-subscription-anchor");
@@ -2241,6 +2506,7 @@ function syncBillingDeclarationSteps() {
       // 声明了 anthropic 20 USD/月，次月概况的订阅月费消失。
       const openEndedBox = document.getElementById("ov-billing-open-ended");
       if (openEndedBox) openEndedBox.checked = true;
+      syncBillingScopeModels();
       syncBillingOpenEnded();
       if (typeof syncBillingDateBounds === "function") syncBillingDateBounds();
       // 「程序写进去的订阅范围」这个事实要记下来：切到按量/组织/中转时按它撤回。
@@ -2266,6 +2532,7 @@ function syncBillingDeclarationSteps() {
     if (target.defaultEnd) end.value = target.defaultEnd;
     const openEndedBox = document.getElementById("ov-billing-open-ended");
     if (openEndedBox) openEndedBox.checked = false;
+    syncBillingScopeModels();
     end.disabled = false;
     target.subscriptionRangeApplied = false;
     target.anchorApplied = false;
@@ -2273,7 +2540,7 @@ function syncBillingDeclarationSteps() {
   // 只给可见步骤编号：服务商未知时是 1 2 3 4 5，路由已知时是 1 2 3。
   let step = 0;
   for (const id of ["ov-billing-provider-row", "ov-billing-route-row", "ov-billing-mode-row",
-    "ov-billing-subscription-fields", "ov-billing-dates-row"]) {
+    "ov-billing-settlement-row", "ov-billing-subscription-fields", "ov-billing-dates-row"]) {
     const row = document.getElementById(id);
     if (!row) continue;
     const badge = row.querySelector && row.querySelector(".bd-step");
@@ -2282,6 +2549,18 @@ function syncBillingDeclarationSteps() {
     if (badge) badge.textContent = String(step);
   }
   syncBillingScopeText();
+}
+
+// 计费方 → 默认结算币种。目录里有的用目录（PROVIDER_SETTLEMENT）；带国内域名的
+// 中转（`.com`/`.cn` 结尾的胜算云之类）→ CNY；其余 CNY。这只是表单默认值，保存的
+// 是用户看到并可改的那一项。
+const PROVIDER_SETTLEMENT = Object.freeze({
+  anthropic: "USD", openai: "USD", "deepseek-official": "CNY", shengsuanyun: "CNY",
+  minimax: "CNY", "zhipu-glm": "CNY", moonshot: "CNY",
+});
+function billingDefaultSettlementCurrency(providerId) {
+  const id = String(providerId || "").trim().toLowerCase().replace(/^(www|api|router|gateway)\./, "").replace(/\.(com\.cn|com|cn|ai|io|net|org)$/, "");
+  return PROVIDER_SETTLEMENT[id] || "CNY";
 }
 
 function billingSubscriptionInput() {
@@ -2357,7 +2636,9 @@ function bindBillingDeclarationPanel() {
   if (start) start.onchange = () => { syncBillingDateBounds(); syncBillingScopeText(); resetPreview(); };
   if (end) end.onchange = () => { syncBillingScopeText(); resetPreview(); };
   const openEnded = document.getElementById("ov-billing-open-ended");
-  if (openEnded) openEnded.onchange = () => { syncBillingOpenEnded(); syncBillingScopeText(); resetPreview(); };
+  if (openEnded) openEnded.onchange = () => { syncBillingOpenEnded(); syncBillingScopeModels(); syncBillingScopeText(); resetPreview(); };
+  const settlementSel = document.getElementById("ov-billing-settlement-currency");
+  if (settlementSel) settlementSel.onchange = () => { if (billingDeclarationTarget) billingDeclarationTarget.settlementTouched = true; resetPreview(); };
   const anchor = document.getElementById("ov-billing-subscription-anchor");
   if (anchor) anchor.onchange = restep;
   save.onclick = async () => {
@@ -2851,10 +3132,22 @@ function renderBillingDeclarations(report) {
     const row = document.createElement("div");
     row.className = "billing-review-row";
     const detail = document.createElement("div");
-    const label = declaration.relationship_kind === "official_subscription" ? "官方订阅" :
-      declaration.relationship_kind === "official_api" ? "官方 API" : declaration.relationship_kind;
+    const label = BILLING_RELATIONSHIP_LABEL[declaration.relationship_kind] || declaration.relationship_kind;
+    const settlementScope = (declaration.scopes || []).find((sc) => sc.scope_kind === "settlement");
+    const fee = declaration.amount_minor != null && declaration.currency
+      ? " · " + fmtMinor(Number(declaration.amount_minor), declaration.currency) + "/月"
+      : settlementScope ? " · 按 " + settlementScope.scope_value + " 结算" : "";
     detail.textContent = declaration.host + " · " + declaration.provider_id + " · " + label +
+      (declaration.subscription_name ? " · " + declaration.subscription_name : "") + fee +
       " · " + billingRangeText(declaration.effective_start, declaration.effective_end);
+    // 声明的依据一并带出：从旧版本套餐记录确认来的，标一行灰字；候选本身不再单独成行
+    // （accepted 候选 = 这条声明的依据，撤销声明即释放，没有独立的「重新打开」）。
+    if (declaration.source_candidate_id) {
+      const basis = document.createElement("div");
+      basis.className = "muted";
+      basis.textContent = "依据：旧版本套餐记录（撤销声明即释放该记录）";
+      detail.appendChild(basis);
+    }
     const actions = document.createElement("div");
     actions.className = "billing-review-actions";
     const revoke = document.createElement("button");
@@ -3097,11 +3390,22 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
   const clusters = groupsOk && Array.isArray(groupsReport.clusters) ? groupsReport.clusters : null;
   const candidates = candidatesOk && Array.isArray(candidatesReport.candidates) ? candidatesReport.candidates : [];
   const pendingCandidates = candidates.filter((c) => c.status === "pending");
-  // 候选挂到同宿主同 provider 的第一组；挂不上的当月无用量，单独成行。
+  // **待核对**的候选挂到同宿主同 provider 的第一组；挂不上的当月无用量，单独成行。
+  // 已被某条有效声明采用（accepted）的候选**不能再挂到组上**：组的弹窗会把
+  // `candidate_id` 当 `sourceCandidateId` 一起保存，而一张旧套餐记录只能归一条有效
+  // 声明——2026-09-16 真机：anthropic 订阅早已声明，新会话进了待确认，弹窗又带上
+  // 同一张 accepted 候选 → `UNIQUE constraint failed:
+  // billing_declarations.source_candidate_id`。accepted 候选只走下面的
+  // `resolvedCandidate` 行（「已作为计费声明的依据 · 重新打开」）。
   const rows = groups.map((group) => ({ ...group, candidate: null }));
   const orphanCandidates = [];
   for (const candidate of candidates) {
-    const owner = rows.find((row) => row.host === candidate.host && row.provider_id === candidate.provider_id && !row.candidate);
+    // accepted 候选不是待办也不是历史行：它是某条有效声明的依据，由「当前计费声明」
+    // 那一行自己带出（DTO 的 source_candidate_id / amount），这里不再占位。
+    if (candidate.status === "accepted") continue;
+    const owner = candidate.status === "pending"
+      ? rows.find((row) => row.host === candidate.host && row.provider_id === candidate.provider_id && !row.candidate)
+      : null;
     if (owner) owner.candidate = candidate;
     else orphanCandidates.push(candidate);
   }
@@ -3138,6 +3442,19 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
   prompt.hidden = pendingCount === 0 || deferred;
   billingPromptState = { visible: !prompt.hidden && pendingCount > 0, pendingTokens };
   if (settingsEntry) settingsEntry.hidden = !rows.length;
+  // 标题/按钮跟着待办数走：没有待办时（只剩已忽略的记录）不能再顶着「待确认」的
+  // 标题和实心主按钮——那是 2026-09-16 用户看到的「横幅说待确认、正文说已核对」矛盾。
+  const settingsTitle = document.getElementById("settings-billing-candidates-title");
+  const settingsNotice = document.getElementById("settings-billing-candidates-notice");
+  if (settingsTitle) settingsTitle.textContent = pendingCount ? "有计费方式待确认" : "计费方式已明确";
+  if (settingsNotice && settingsNotice.classList) settingsNotice.classList.toggle("todo", pendingCount > 0);
+  if (settingsOpen) {
+    settingsOpen.textContent = pendingCount ? "查看并处理" : "查看记录";
+    if (settingsOpen.classList) {
+      settingsOpen.classList.toggle("primary", pendingCount > 0);
+      settingsOpen.classList.toggle("secondary", pendingCount === 0);
+    }
+  }
   panel.hidden = !billingReviewOpen;
   list.textContent = "";
   if (!rows.length) {
@@ -3151,7 +3468,7 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
       " tokens、" + pendingSessions + " 个会话" + (amountText ? "，当前已按官方价估算约 " + amountText : "，当前已按官方价估算") +
       (pendingCandidates.length ? "；另有 " + pendingCandidates.length + " 条旧版本套餐记录待核对" : "") +
       "。确认后可区分订阅覆盖和额外按量费用。"
-    : "套餐信息已核对；已核对的套餐不计入实际支出，用量仍按官方价估算。";
+    : "计费方式都已明确；已声明的月费按自报口径计入订阅月费，按量用量按价卡估算。";
   if (!groupsOk || !candidatesOk) copy.textContent += "（部分待确认状态暂不可读，请刷新重试）";
   if (settingsCopy) settingsCopy.textContent = copy.textContent;
   if (settingsOpen && settingsOpen.dataset.bound !== "1") {
@@ -3318,10 +3635,8 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
       const actions = document.createElement("div");
       actions.className = "billing-review-actions";
       if (row.resolvedCandidate) {
-        const accepted = row.candidate.status === "accepted";
         detail.textContent = row.candidate.provider_id + " · " + billingCandidateAmount(row.candidate) +
-          "（" + row.host + "）· " + (accepted ? "已作为计费声明的依据。" : "已忽略：这不是你的套餐。") +
-          "不计入实际支出。";
+          "（" + row.host + "）· 已忽略：这不是你的套餐。";
         const undo = document.createElement("button");
         undo.className = "chip-link";
         undo.textContent = "重新打开";
@@ -3607,6 +3922,33 @@ function meteredSpend(dto) {
   }
   return out;
 }
+// 「按量费用」行的三级口径（domain `metered_view`，2026-09-16 产品定向）：
+// 账单 > 归因估算 > 默认估算，同 provider 内取代、跨币分栏。取舍在 domain，这里
+// 只把每个币种的 {amount, label} 格式化成文案：实付 → 原样；估算 → `≈¥216.57 估算`；
+// 混合 → `≈¥668.57 含估算`。返回 {parts, title, unattributed, allActual}。
+function meteredViewText(dto) {
+  const view = (dto && dto.metered_view) || {};
+  const rank = (c) => (c === "CNY" ? 0 : c === "USD" ? 1 : 2);
+  const entries = Object.entries(view).filter(([, v]) => v && v.amount > 0)
+    .sort((a, b) => rank(a[0]) - rank(b[0]) || (a[0] < b[0] ? -1 : 1));
+  const parts = [];
+  const details = [];
+  const unattributed = new Set();
+  let allActual = entries.length > 0;
+  for (const [c, v] of entries) {
+    const money = fmtCur(v.amount, c || null);
+    if (v.label === "actual") parts.push(money);
+    else if (v.label === "mixed") { parts.push("≈" + money + " 含估算"); allActual = false; }
+    else { parts.push("≈" + money + " 估算"); allActual = false; }
+    const d = [];
+    if (v.actual > 0) d.push("账单 " + fmtCur(v.actual, c || null));
+    if (v.declared_estimate > 0) d.push("已归因估算 " + fmtCur(v.declared_estimate, c || null));
+    if (v.default_estimate > 0) d.push("未归因估算 " + fmtCur(v.default_estimate, c || null));
+    details.push(d.join(" · "));
+    for (const p of (v.unattributed_providers || [])) unattributed.add(p);
+  }
+  return { parts, title: details.join("；"), unattributed: Array.from(unattributed), allActual };
+}
 // 「尚未设置套餐或账单」不是金额，是下一步指引：弱化成灰色小字并可点击跳到
 // 设置 › 计费与套餐（此前与金额同字重同色，比 ¥17015 还抢眼——2026-09-15 反馈）。
 // textContent 保持原文（REQ-043 的断言按文案钉），只加类名 + data-go。
@@ -3617,7 +3959,7 @@ function setAmount(id, text, title) {
   el.textContent = text;
   el.title = title || ""; // 分币展开挂 hover；未传 → 清掉上一轮的
   const setup = text === SETUP_HINT;
-  el.classList.toggle("muted-amt", text === "无数据" || setup);
+  el.classList.toggle("muted-amt", text === "无数据" || text === "今日用量都在套餐内" || setup);
   el.classList.toggle("setup-link", setup);
   if (typeof el.setAttribute !== "function") return;
   if (setup) {
@@ -3647,7 +3989,9 @@ function renderNominalInto(id, nominal, fx) {
 }
 function renderSpendCards(daily, monthly, fx, window = { date: statisticsToday() }) {
   // 本月支出：口径分栏。
-  const mMetered = fmtCurMap(meteredSpend(monthly));
+  // 按量行：三级口径视图（旧 DTO 没有 metered_view 时退回账单口径）。
+  const mView = monthly && monthly.metered_view ? meteredViewText(monthly) : { parts: fmtCurMap(meteredSpend(monthly)), title: "", unattributed: [], allActual: true };
+  const mMetered = mView.parts;
   const mSubscription = fmtCurMap(spendByBasis(monthly, "fixed_subscription"));
   const monthTokens = monthly ? tokensSum(monthly.tokens_by_host).total : 0;
   // REQ-043：**未录入套餐/付款**时要写「尚未设置套餐或账单」，不能写「无数据」。
@@ -3665,7 +4009,8 @@ function renderSpendCards(daily, monthly, fx, window = { date: statisticsToday()
   const spendAbsent = !monthly
     ? "无数据"
     : (noDeclaredSpend && monthTokens > 0) ? "尚未设置套餐或账单" : "无数据";
-  setAmount("ov-m-metered", mMetered.length ? mMetered.join(" + ") : spendAbsent);
+  setAmount("ov-m-metered", mMetered.length ? mMetered.join(" + ") : spendAbsent,
+    mMetered.length ? mView.title + (mView.allActual ? "" : " · 估算按价卡折算，录入账单后以账单为准") : "");
   setAmount("ov-m-subscription", mSubscription.length ? mSubscription.join(" + ") : spendAbsent);
   const mNominal = monthly ? nominalFromByProvider(monthly.by_provider) : {};
   renderNominalInto("ov-m-nominal", mNominal, fx);
@@ -3674,7 +4019,11 @@ function renderSpendCards(daily, monthly, fx, window = { date: statisticsToday()
     spendSub.textContent = !monthly
       ? "本月数据不可用"
       : (mMetered.length || mSubscription.length)
-        ? "按量费用与订阅月费分开计；不同币种不相加"
+        ? (mView.unattributed.length
+          ? "按量费用含 " + mView.unattributed.length + " 个未归因来源的估算；不同币种不相加"
+          : mView.allActual
+            ? "按量费用与订阅月费分开计；不同币种不相加"
+            : "按量费用按归因的价卡估算，录入账单可校准；不同币种不相加")
         : monthTokens > 0
           ? "按官方价折算只是估算；确认套餐或账单后才会出现实付金额"
           : "本月还没有用量记录";
@@ -3684,11 +4033,18 @@ function renderSpendCards(daily, monthly, fx, window = { date: statisticsToday()
   setAmount("ov-t-tokens", daily && tk.total > 0 ? fmtTokens(tk.total) + " tokens" : "无数据");
   const tSub = document.getElementById("ov-t-tokens-sub");
   if (tSub) tSub.textContent = daily && tk.total > 0 ? "今天处理的 token 数（含缓存读写）" : daily ? "今天还没有用量记录" : "今日数据暂不可读，请刷新重试";
-  const tMetered = fmtCurMap(meteredSpend(daily));
+  const tView = daily && daily.metered_view ? meteredViewText(daily) : { parts: fmtCurMap(meteredSpend(daily)), title: "", unattributed: [], allActual: true };
+  const tMetered = tView.parts;
   // 与本月同一套空态区分（REQ-043）：「无数据」只在读不到 DTO 或今天没用量时用。
   const todayTokens = daily ? tokensSum(daily.tokens_by_host).total : 0;
-  const tAbsent = (!daily || todayTokens === 0) ? "无数据" : "尚未设置套餐或账单";
-  setAmount("ov-t-metered", tMetered.length ? tMetered.join(" + ") : tAbsent);
+  // 今天有用量但按量视图为空：要么没声明（提示去设置），要么**全在套餐内**——
+  // 后者不是"尚未设置"，是"今天没花按量的钱"（2026-09-17：订阅覆盖后今日卡仍写
+  // 「尚未设置套餐或账单」，用户以为归因失效）。套餐内的判据 = 月 DTO 有订阅月费。
+  const hasSubscription = !!monthly && fmtCurMap(spendByBasis(monthly, "fixed_subscription")).length > 0;
+  const tAbsent = (!daily || todayTokens === 0) ? "无数据" : hasSubscription ? "今日用量都在套餐内" : "尚未设置套餐或账单";
+  // 日粒度永远是估算：账单按月，不摊到天。
+  setAmount("ov-t-metered", tMetered.length ? tMetered.join(" + ") : tAbsent,
+    tMetered.length ? tView.title + " · 按价卡估算；账单按月校准，不摊到天" : "");
   renderNominalInto("ov-t-nominal", daily ? nominalFromByProvider(daily.by_provider) : {}, fx);
   // 本月用量行：规格 §4 的「已观测 tokens」与「名义成本」——首屏可见，不占卡。
   const mtk = tokensSum(monthly && monthly.tokens_by_host);
@@ -3715,6 +4071,7 @@ const DUAL_LABEL = {
   api_equivalent: "用量按标价折算",
   metered_actual: "按量实付",
   metered_estimate: "按量估算",
+  metered_declared: "按量估算（已归因）",
   host_billed: "宿主账单",
 };
 const FRESH_RANK = { unavailable: 0, fresh: 1, partial: 2, stale: 3 };
@@ -3834,6 +4191,14 @@ function renderDualTrack(monthly) {
       if (b === "metered_estimate") {
         label = r.pricing_methods.has("fair-market") ? "按公允价估算"
           : r.pricing_methods.has("fair-market-fallback") ? "按官方价估算" : "按量估算（上界）";
+      } else if (b === "metered_declared") {
+        // 已归因：按该计费方自己的价卡算写「按其价卡估算」；价卡没收录这些模型时
+        // 退回了官方标价（可能连币种都是官方的），必须写明，否则用户看到中转按
+        // 美元估算会以为填错了币种（2026-09-16）。
+        label = r.pricing_methods.has("fair-market-fallback-fx")
+          ? "已归因 · 价卡未收录，按官方标价 ≈折算成结算币"
+          : r.pricing_methods.has("fair-market-fallback")
+            ? "已归因 · 价卡未收录，按官方标价估算" : "已归因 · 按其价卡估算";
       }
       const cls = b === "metered_actual" || b === "host_billed" ? "measured" : "estimate";
       return `<span class="chip ${cls}">${label} ${fmtCur(v, r.currency || null)}${cls === "estimate" ? "（参考）" : ""}</span>`;
@@ -3988,6 +4353,7 @@ function syncDot(sync) {
 const BASIS_LABEL = {
   metered_actual: { label: "实测", cls: "measured" },
   metered_estimate: { label: "估算", cls: "estimate" },
+  metered_declared: { label: "估算·已归因", cls: "estimate" },
   api_equivalent: { label: "套餐等价·诊断", cls: "diagnostic" },
   fixed_subscription: { label: "订阅", cls: "subscription" },
   host_billed: { label: "宿主账单", cls: "hostbilled" },
@@ -4354,11 +4720,6 @@ async function renderCalendar() {
       cell.classList.add("has-data");
       // 副行：该日耗费，每段带宿主短前缀（审查 UX#6——三段无宿主的钱串只能
       // 靠页脚图例反推，全 USD 时连顺序锚都没有）。口径各异不相加。
-      const costs = [];
-      if ((row.dsh_cost_cny || 0) > 0) costs.push("DSH " + fmtCur(row.dsh_cost_cny, "CNY"));
-      if ((row.claude_cost_cny || 0) > 0) costs.push("CC " + fmtCur(row.claude_cost_cny, "CNY"));
-      if ((row.claude_cost_usd || 0) > 0) costs.push("CC " + fmtCur(row.claude_cost_usd, "USD"));
-      if ((row.codex_cost_usd || 0) > 0) costs.push("CX " + fmtCur(row.codex_cost_usd, "USD"));
       const day = document.createElement("div");
       day.className = "d";
       day.textContent = String(d);
@@ -4376,10 +4737,27 @@ async function renderCalendar() {
         token.textContent = fmtTokens(dayTokens) + " tokens";
         cell.appendChild(token);
       }
-      if (costs.length) {
+      // 副行按显示指标走：Tokens 模式列各宿主的 token（有用量的宿主都在，哪怕钱是
+      // 0——此前只列有钱的宿主，订阅覆盖的日子整行空白，看起来像"没有宿主"，
+      // 2026-09-17 反馈）；成本模式列各宿主的钱，用量在套餐内的写「套餐内」。
+      const hostTokens = [];
+      if ((row.dsh_tokens || 0) > 0) hostTokens.push("DSH " + fmtTokens(row.dsh_tokens));
+      if ((row.claude_tokens || 0) > 0) hostTokens.push("CC " + fmtTokens(row.claude_tokens));
+      if ((row.codex_tokens || 0) > 0) hostTokens.push("CX " + fmtTokens(row.codex_tokens));
+      const costOrPlan = [];
+      if ((row.dsh_tokens || 0) > 0) costOrPlan.push((row.dsh_cost_cny || 0) > 0 ? "DSH " + fmtCur(row.dsh_cost_cny, "CNY") : "DSH 套餐内");
+      if ((row.claude_tokens || 0) > 0) {
+        const parts = [];
+        if ((row.claude_cost_cny || 0) > 0) parts.push(fmtCur(row.claude_cost_cny, "CNY"));
+        if ((row.claude_cost_usd || 0) > 0) parts.push(fmtCur(row.claude_cost_usd, "USD"));
+        costOrPlan.push("CC " + (parts.length ? parts.join(" + ") : "套餐内"));
+      }
+      if ((row.codex_tokens || 0) > 0) costOrPlan.push((row.codex_cost_usd || 0) > 0 ? "CX " + fmtCur(row.codex_cost_usd, "USD") : "CX 套餐内");
+      const subParts = calMetric === "cost" ? costOrPlan : hostTokens;
+      if (subParts.length) {
         const cost = document.createElement("div");
         cost.className = "cost";
-        cost.textContent = costs.join(" + ");
+        cost.textContent = subParts.join(calMetric === "cost" ? " + " : " · ");
         cell.appendChild(cost);
       }
       // tooltip：token 与耗费都按宿主逐行（审查 UX#6：耗费行此前是同一串

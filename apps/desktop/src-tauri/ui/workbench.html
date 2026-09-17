@@ -368,6 +368,7 @@
         <a href="#settings-billing">计费与套餐</a>
         <a href="#settings-budget">预算</a>
         <a href="#settings-data">统计与数据</a>
+        <a href="#settings-mcp">MCP</a>
         <a href="#settings-about">关于与诊断</a>
       </nav>
       <div class="settings-main">
@@ -413,9 +414,9 @@
         <h2>计费与套餐</h2>
         <div class="setting" id="settings-billing-candidates" hidden>
           <!-- 全页唯一实心主按钮：它是待办，不是保存（规格 §5.2）。 -->
-          <div class="notice todo">
+          <div class="notice todo" id="settings-billing-candidates-notice">
             <span class="notice-icon" aria-hidden="true"></span>
-            <div class="notice-text"><strong>有计费方式待确认</strong><div class="notice-sub" id="settings-billing-candidates-copy"></div></div>
+            <div class="notice-text"><strong id="settings-billing-candidates-title">有计费方式待确认</strong><div class="notice-sub" id="settings-billing-candidates-copy"></div></div>
             <div class="notice-actions"><button class="btn primary" id="settings-billing-candidates-open" type="button">查看并处理</button></div>
           </div>
           <section class="billing-review" id="ov-billing-review-panel" hidden role="region" aria-labelledby="ov-billing-review-title">
@@ -445,6 +446,15 @@
           <!-- 批量：默认勾选所有「宿主、未知原因、适用日期相同」的组，一次声明写多条
                model 作用域，一次预览、一个修订、一个重算任务（计费主链规格 v1.2 §5.2a）。
                包含哪些模型必须列出来，用户才知道自己在批量确认什么。 -->
+          <!-- 作用域粒度：声明默认按计费方级匹配（之后同计费方的新模型名也沿用，
+               「持续有效」的本义）；勾上才把模型清单写成 model 作用域——这是保存
+               那一刻的快照，新模型出现就命不中（2026-09-16：用户反复被同一组追问）。 -->
+          <div class="billing-batch" id="ov-billing-scope-row" hidden>
+            <label class="billing-batch-toggle">
+              <input id="ov-billing-scope-models" type="checkbox">
+              <span id="ov-billing-scope-models-text"></span>
+            </label>
+          </div>
           <div class="billing-batch" id="ov-billing-batch-row" hidden>
             <label class="billing-batch-toggle">
               <input id="ov-billing-batch" type="checkbox" checked>
@@ -485,6 +495,19 @@
                   <option value="organization">组织承担</option>
                 </select>
                 <p class="bd-help muted" id="ov-billing-relationship-effect" aria-live="polite"></p>
+              </div>
+            </div>
+            <!-- 结算币种跟计费方走、不跟模型走：胜算云是国内公司，转海外模型也按人民币结算，
+                 价卡未收录的模型退回原厂官方卡（可能是 USD）时按此币种折算估算（带 ≈）。
+                 只对按量 / 中转 / 组织承担显示；订阅的币种在月费那一栏。 -->
+            <div class="bd-row" id="ov-billing-settlement-row" hidden>
+              <div class="bd-label"><span class="bd-step" aria-hidden="true"></span><span>结算币种</span></div>
+              <div class="bd-control">
+                <select id="ov-billing-settlement-currency">
+                  <option value="CNY">人民币 CNY</option>
+                  <option value="USD">美元 USD</option>
+                </select>
+                <p class="bd-help muted" id="ov-billing-settlement-help">这家计费方用什么币向你结算。它的价卡没收录的模型会按原厂标价折算成这个币种（估算，带 ≈）。</p>
               </div>
             </div>
             <div class="bd-row" id="ov-billing-subscription-fields" hidden>
@@ -708,6 +731,13 @@
           <div class="setting-note" id="ov-price-card-intro">
             价目表里没有的型号，可以自己补一张卡；补上后这些用量就能按你填的价折算。
           </div>
+          <!-- 本月缺价卡的型号清单：总览「查看价格表」落到这里时，用户要看到的是
+               "哪几个型号、该补到哪家、补了影响什么"，每行一个「补这张卡」预填表单——
+               而不是两张空表单（2026-09-17 反馈：点了按钮不知道要做什么）。 -->
+          <div id="ov-price-missing" hidden>
+            <div class="setting-note" id="ov-price-missing-intro">本月缺价卡的型号（点「补这张卡」预填下面的表单，再填价格保存）：</div>
+            <div id="ov-price-missing-list" class="src-custom-list"></div>
+          </div>
           <div class="form-row">
             <label><span>服务商</span><input id="ov-price-card-provider" type="text" placeholder="deepseek-official" /></label>
             <label class="grow"><span>型号（与日志里一致）</span><input id="ov-price-card-model" type="text" placeholder="deepseek/deepseek-v4.1-flash" /></label>
@@ -722,6 +752,9 @@
           </div>
           <div class="form-row">
             <button class="btn secondary" id="ov-price-card-save" type="button">保存价卡</button>
+            <!-- 按原厂官方价预填：目录里有这个型号的官方卡（DeepSeek / MiniMax / Anthropic…）
+                 就把六个价填进去，用户改一下或直接存——不逼人手抄（2026-09-17 反馈"太累了"）。 -->
+            <button class="btn secondary" id="ov-price-card-official" type="button">按原厂官方价预填</button>
             <span class="form-receipt" id="ov-price-card-status" hidden role="status"></span>
           </div>
           <div class="setting-note">
@@ -757,6 +790,57 @@
             <button class="btn secondary" id="ov-export-download" type="button" hidden>下载 CSV</button>
           </div>
           <div class="form-receipt block" id="ov-export-preview-content" hidden></div>
+        </div>
+      </section>
+
+      <!-- MCP 子板块：把本机 data-mcp 接进用户自己的 Agent（Claude Code / Codex / 任意
+           MCP 客户端）。每个 code block 一键复制；CLI 路径与工具清单来自 `mcp_setup_info`
+           （运行时 tool_specs()，不手抄）。写操作要显式 --allow-local-writes，页面如实说明。 -->
+      <section class="settings-section" id="settings-mcp">
+        <h2>MCP</h2>
+        <div class="setting" id="ov-mcp-panel">
+          <div class="setting-head">
+            <div class="setting-title">让你的 Agent 读这里的数据</div>
+            <p>本机的 <code>agent-vitals data-mcp serve</code> 是一个 stdio MCP 服务：零网络、只读本机权威库；带 <code>--allow-local-writes</code> 才允许补价卡、改声明这类本地写入。</p>
+          </div>
+          <div class="muted" id="ov-mcp-status" role="status">读取中…</div>
+          <!-- 一步到位：整份 skill 文本（接入命令 + 诚实规则 + 工具清单 + 常用任务）
+               既可复制贴给 Agent，也可存成 SKILL.md 装进 ~/.claude/skills/。 -->
+          <div class="form-row">
+            <button class="btn secondary" id="ov-mcp-copy-all" type="button">复制全部（贴给 Agent）</button>
+            <button class="btn secondary" id="ov-mcp-download-skill" type="button">下载 SKILL.md</button>
+            <span class="form-receipt" id="ov-mcp-skill-status" hidden role="status"></span>
+          </div>
+          <div class="setting-note">SKILL.md 存到 <code>~/.claude/skills/agent-vitals-mcp/</code>（Codex 是 <code>~/.codex/skills/…</code>）即可安装；它教 Agent 怎么用这些工具、怎么诚实地说数字。下面是分段的配置与提示语。</div>
+          <div class="mcp-block">
+            <div class="mcp-block-head"><span>Claude Code（终端执行一次）</span><button class="chip-link" type="button" data-copy="ov-mcp-claude">复制</button></div>
+            <pre class="mcp-code" id="ov-mcp-claude"></pre>
+          </div>
+          <div class="mcp-block">
+            <div class="mcp-block-head"><span>Codex CLI（写入 ~/.codex/config.toml）</span><button class="chip-link" type="button" data-copy="ov-mcp-codex">复制</button></div>
+            <pre class="mcp-code" id="ov-mcp-codex"></pre>
+          </div>
+          <div class="mcp-block">
+            <div class="mcp-block-head"><span>通用 JSON（Claude Desktop / Cursor 等 mcpServers 配置）</span><button class="chip-link" type="button" data-copy="ov-mcp-json">复制</button></div>
+            <pre class="mcp-code" id="ov-mcp-json"></pre>
+          </div>
+          <div class="setting-note">接上之后可以直接对 Agent 说的话（复制即用）：</div>
+          <div class="mcp-block">
+            <div class="mcp-block-head"><span>补价卡</span><button class="chip-link" type="button" data-copy="ov-mcp-prompt-cards">复制</button></div>
+            <pre class="mcp-code" id="ov-mcp-prompt-cards">用 agent-vitals 的 price_cards 工具：先 missing_list 看本月哪些型号缺价卡，对 covered=false 的每一行，去对应服务商（provider 字段）的官方价格页查该型号的输入/缓存命中/输出单价（元/百万 token），用 card_put 逐张写入，source 填价格页链接。查不到就跳过并告诉我，不要编价格。</pre>
+          </div>
+          <div class="mcp-block">
+            <div class="mcp-block-head"><span>本月成本复盘</span><button class="chip-link" type="button" data-copy="ov-mcp-prompt-review">复制</button></div>
+            <pre class="mcp-code" id="ov-mcp-prompt-review">用 agent-vitals 的 control_plane monthly_summary 和 cost_breakdown 看本月支出：按服务商列出订阅月费、按量估算和未归因/无价的 token，指出哪一项占比最大、哪些数字是估算而不是账单，给我三条省钱建议。不要把估算说成实付。</pre>
+          </div>
+          <div class="mcp-block">
+            <div class="mcp-block-head"><span>数据健康检查</span><button class="chip-link" type="button" data-copy="ov-mcp-prompt-status">复制</button></div>
+            <pre class="mcp-code" id="ov-mcp-prompt-status">用 agent-vitals 的 data_status 和 data_quality_issues 检查本机数据：同步是否正常、权威库是否完整、有多少 token 还没归到服务商或没有价卡，把需要我动手的事按优先级列出来。</pre>
+          </div>
+          <details class="mcp-tools">
+            <summary>可用工具清单</summary>
+            <ul id="ov-mcp-tools"></ul>
+          </details>
         </div>
       </section>
 

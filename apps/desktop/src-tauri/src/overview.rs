@@ -354,6 +354,18 @@ pub struct Overview {
     pub budget: BudgetAlert,
     /// 双预算 profile 的实时状态；各 profile 保持独立币种和计费口径。
     pub budget_profiles: Option<Value>,
+    /// 「按量费用」三级口径视图（domain `metered_view`：账单 > 归因估算 > 默认估算，
+    /// 按币分栏），今日 / 本月各一份，来自 SQL 权威库的 daily/monthly DTO——与工作台
+    /// 总览卡同源。托盘标题与「今日/本月按量成本」两行优先读它；此前托盘从 DSH
+    /// state + claude ledger 自己拼钱（`metered_amount`），归因后钱搬进
+    /// `metered_declared` 那条路看不见，菜单栏变成「今日 —」（2026-09-17）。
+    /// None = 库打不开（退回旧拼法）。
+    pub metered_today: Option<Value>,
+    pub metered_month: Option<Value>,
+    /// 今日跨宿主 token 总量（SQL daily DTO `tokens_by_host` 四桶之和，含缓存读写）
+    /// ——与工作台「今日消耗」KPI 同一个数。托盘标题「鸟头 + 64.4M」读它；None =
+    /// 库打不开（退回 DSH state + claude ledger 的旧合并）。
+    pub today_tokens_sql: Option<i64>,
     /// 最近一次折账的会话（oneline.json）。托盘菜单展示「上一次跑完花了多少」。
     pub recent: RecentSession,
     /// 菜单栏同步回路状态（tick 落盘）。前端据此示警/给「立即同步」入口。
@@ -664,6 +676,9 @@ fn read_overview_at(dh: &Path) -> Overview {
         budget_profiles: agent_vitals_runtime::budget::budget_profiles_status_sql_at(
             dh, &cur_month,
         ),
+        metered_today: metered_view_sql(dh, MeteredWindow::Day(&today_beijing())),
+        metered_month: metered_view_sql(dh, MeteredWindow::Month(&cur_month)),
+        today_tokens_sql: today_tokens_sql(dh, &today_beijing()),
         recent: read_recent_session(dh),
         sync: load_sync_status(dh),
         hosts: hosts_snap.hosts,
@@ -677,6 +692,34 @@ fn read_overview_at(dh: &Path) -> Overview {
         fx: fx_estimate(&pricing),
         subscription_cny_month: monthly_cny_subscriptions(dh, &cur_month),
     }
+}
+
+enum MeteredWindow<'a> { Day(&'a str), Month(&'a str) }
+
+/// 今日 token 总量（SQL daily DTO）。库打不开 → None；有库但今天没事实 → Some(0)
+/// （「测到 0」是事实，不是缺席）。
+fn today_tokens_sql(dh: &Path, date: &str) -> Option<i64> {
+    use agent_vitals_data::repository::SummaryRepository;
+    let repo = agent_vitals_runtime::summary::SqlSummaryRepository::at(dh);
+    repo.open_db()?;
+    let daily = repo.daily_summary(&agent_vitals_data::repository::DailySummaryQuery { date: date.to_string() });
+    Some(daily.tokens_by_host.values().map(|t| t.total).sum())
+}
+
+/// SQL 权威库的 `metered_view`（daily/monthly DTO 的同一投影）。库打不开 → None。
+fn metered_view_sql(dh: &Path, window: MeteredWindow<'_>) -> Option<Value> {
+    use agent_vitals_data::repository::SummaryRepository;
+    let repo = agent_vitals_runtime::summary::SqlSummaryRepository::at(dh);
+    repo.open_db()?;
+    let view = match window {
+        MeteredWindow::Day(date) => repo
+            .daily_summary(&agent_vitals_data::repository::DailySummaryQuery { date: date.to_string() })
+            .metered_view(),
+        MeteredWindow::Month(month) => repo
+            .monthly_summary(&agent_vitals_data::repository::MonthlySummaryQuery { month: month.to_string() })
+            .metered_view(),
+    };
+    Some(Value::Object(view.iter().map(|(c, v)| (c.clone(), v.to_json())).collect()))
 }
 
 /// claude-ledger 的逐日 flat 账（`{date: {model: 4 型 snake}}`）→ (今日估报告,
