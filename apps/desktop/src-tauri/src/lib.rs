@@ -1670,6 +1670,11 @@ struct PriceCardInput {
     input_uncached: Value,
     input_cached: Value,
     output: Value,
+    /// 第四维可选（2026-09-17：胜算云把所有非命中输入都记作"写入"，没有这一档的中转
+    /// 卡会把缓存写入静默算成 0）。不给 → 卡里没有这个键，沿用 catalog 平费率；给了
+    /// 必须两档齐全，与三个必填维同一条 sanitize 纪律。
+    #[serde(default)]
+    cache_write: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -3116,15 +3121,19 @@ fn price_cards() -> Value {
 }
 
 /// 写入/替换一张用户补的价卡。三个维度（未命中输入/命中输入/输出）各两档峰谷，
-/// **必须齐全**——半张卡会让计价按缺档静默算出一个看似正常的错数字。
+/// **必须齐全**——半张卡会让计价按缺档静默算出一个看似正常的错数字。第四维
+/// `cache_write` 可选（中转把缓存写入单独计价时才需要）。
 #[tauri::command]
 fn save_price_card(input: PriceCardInput) -> Result<Value, String> {
     let data_home = overview::data_home();
-    let card = serde_json::json!({
+    let mut card = serde_json::json!({
         "input_uncached": input.input_uncached,
         "input_cached": input.input_cached,
         "output": input.output,
     });
+    if let Some(cache_write) = input.cache_write {
+        card["cache_write"] = cache_write;
+    }
     agent_vitals_runtime::price_overrides::save_card(
         &data_home, &input.provider_id, &input.model_id, &card,
     )?;

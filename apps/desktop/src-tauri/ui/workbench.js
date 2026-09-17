@@ -1134,8 +1134,13 @@ async function renderPriceOverrideSettings() {
   };
   save.onclick = async () => {
     const readDim = (offId, peakId) => {
-      const off = Number(document.getElementById(offId).value);
-      const peak = Number(document.getElementById(peakId).value);
+      const offRaw = document.getElementById(offId).value;
+      const peakRaw = document.getElementById(peakId).value;
+      // `Number("")` 是 0，不是 NaN——留空的格子曾经会被当成"填了 0"悄悄通过下面的
+      // 非负校验，而不是被拦下来当半张卡拒绝。先判空串，别把"没填"读成"填了 0"。
+      if (String(offRaw).trim() === "" || String(peakRaw).trim() === "") return null;
+      const off = Number(offRaw);
+      const peak = Number(peakRaw);
       if (!Number.isFinite(off) || off < 0 || !Number.isFinite(peak) || peak < 0) return null;
       return { off_peak: off, peak };
     };
@@ -1144,6 +1149,12 @@ async function renderPriceOverrideSettings() {
       input_cached: readDim("ov-price-cached-off", "ov-price-cached-peak"),
       output: readDim("ov-price-output-off", "ov-price-output-peak"),
     };
+    // 第四维可选：两格都空 → 不设这一档；填了任意一格就必须两格齐全，半档同样拒绝——
+    // 与三个必填维同一条"半张卡不接受"纪律。
+    const cwOffRaw = document.getElementById("ov-price-cachewrite-off").value.trim();
+    const cwPeakRaw = document.getElementById("ov-price-cachewrite-peak").value.trim();
+    const cacheWriteGiven = cwOffRaw !== "" || cwPeakRaw !== "";
+    const cacheWrite = cacheWriteGiven ? readDim("ov-price-cachewrite-off", "ov-price-cachewrite-peak") : undefined;
     status.hidden = false;
     if (!provider.value.trim() || !model.value.trim()) {
       status.textContent = "服务商与型号都要填。";
@@ -1153,11 +1164,16 @@ async function renderPriceOverrideSettings() {
       status.textContent = "六个价格都要填非负数字（半张卡会让计价按缺档算错钱，所以拒绝保存）。";
       return;
     }
+    if (cacheWriteGiven && cacheWrite === null) {
+      status.textContent = "缓存写入两格要么都填非负数字，要么都留空（半档同样会让计价按缺档算错钱）。";
+      return;
+    }
     save.disabled = true;
     try {
       await invoke("save_price_card", { input: {
         provider_id: provider.value.trim(), model_id: model.value.trim(),
         input_uncached: dims.input_uncached, input_cached: dims.input_cached, output: dims.output,
+        ...(cacheWrite ? { cache_write: cacheWrite } : {}),
       } });
       status.textContent = "已保存；相关用量的折算与预算比例会按新价卡重算。";
       await loadCards();
@@ -1338,13 +1354,15 @@ async function renderOverview() {
   renderNoRecordsState(overview.sync, data.sources);
 
   // 预算 —— 读后端权威（level/ratio/snooze/reasons），不重算百分比。口径 =
-  // 跨宿主「按量实付」CNY（PM 决策 2026-09-07）。`source` 两态都是权威：
+  // 「订阅月费按天摊派 + 跨宿主按量费用（三级口径）」（2026-09-17 产品定向，
+  // 取代 09-07 的「按量实付」单口径；见 budget.rs::budget_profiles_status_sql_at）。
+  // `source` 两态都是权威：
   // "alert" = 旧 alert.json 快照（带 generated_at，可能过期）；"sql" = SQL
   // 权威库**实时算**（无快照时刻 → generated_at null，结构上不会过期，新鲜度
   // 归下方「上次同步」行）。Phase 4.3 托盘已切 "sql"，工作台这里此前漏改，
   // 一直落进「等预算数据」兜底（screenshot 事故）。"missing" 才是真降级。
   //
-  // 设置页规格 §8 D1：设置页的「按量费用预算」表单写的是 budget_profiles.estimate
+  // 设置页规格 §8 D1：设置页的「预算（订阅 + 按量）」表单写的是 budget_profiles.estimate
   // （分币），这里原来只读旧 budget_config——两条链路没打通，设置页存的预算
   // 总览卡片看不到。改成优先读 estimate profile，没配置再回落旧链路，
   // 与托盘 lib.rs::budget_status_text_at、系统通知
@@ -1425,8 +1443,12 @@ async function renderOverview() {
     const daysInMonth = new Date(Number(todayKeyB.slice(0, 4)), Number(todayKeyB.slice(5, 7)), 0).getDate();
     const daysLeft = Math.max(0, daysInMonth - Number(todayKeyB.slice(8)));
     const tail = daily + " · 本月剩 " + daysLeft + " 天";
+    // 拆分（订阅摊派 + 按量）在每个已配置态都要出现，不只 ok 态：2026-09-17 截图
+    // 事故——超支态只写「已超预算 ¥958.5」，标题又叫「按量费用」，用户把
+    // ¥1458.5 读成纯按量，其实里面 ¥253.9 是订阅月费摊派。
+    const breakdown = b.month_cost_breakdown ? " · " + b.month_cost_breakdown : "";
     if (b.level === "over") {
-      budgetSub.textContent = "已超预算 " + fmtMoney(Math.max(0, (b.month_cost) - denom)) + tail;
+      budgetSub.textContent = "已超预算 " + fmtMoney(Math.max(0, (b.month_cost) - denom)) + breakdown + tail;
     } else if (b.level === "snoozed") {
       budgetSub.textContent = "提醒已静默" + (b.snoozed_until ? "至 " + b.snoozed_until : "") + tail;
     } else if (b.level === "disabled") {
@@ -1436,9 +1458,9 @@ async function renderOverview() {
       // 百分比），month_ratio 在适配器里兜底成 0——这里绝不能显示「至少已用
       // 0%」，那是在编造精度。改用金额下界，与 settings 页
       // budgetProfileStatusText 同一措辞（"至少已用 X 元，仍有未覆盖用量"）。
-      budgetSub.textContent = "至少已用 " + fmtMoney(b.month_cost) + "，仍有未覆盖用量" + tail;
+      budgetSub.textContent = "至少已用 " + fmtMoney(b.month_cost) + "，仍有未覆盖用量" + breakdown + tail;
     } else {
-      budgetSub.textContent = "已用 " + fmtPct(b.month_ratio) + (b.month_cost_breakdown ? " · " + b.month_cost_breakdown : "") + tail;
+      budgetSub.textContent = "已用 " + fmtPct(b.month_ratio) + breakdown + tail;
     }
     // 过期时把警告直接贴在数字旁边，不指望用户往下翻到页尾的 note 才看到——
     // 这条数字本身可能是几天前的旧账（比如日历月翻了页但当天还没有新会话
@@ -1770,13 +1792,21 @@ function adaptEstimateProfileToBudget(profile, legacy) {
   const metered = Number(profile.metered_spent_minor ?? profile.spent_minor ?? 0) / 100;
   const amortized = Number(profile.subscription_amortized_minor || 0) / 100;
   const total = profile.total_spent_minor != null ? Number(profile.total_spent_minor) / 100 : metered;
+  // 副行只放两项金额（卡片一行放不下摊派细节），摊派规则进 tooltip（reasons）。
   const parts = [];
+  const reasons = [];
   if (amortized > 0) {
-    parts.push("订阅 " + (profile.subscription_fx_applied ? "≈" : "") + fmtMoney(amortized) +
-      "（月费 " + fmtMoney(Number(profile.subscription_minor || 0) / 100) + " 已摊 " +
-      Number(profile.subscription_days_elapsed || 0) + "/" + Number(profile.days_in_month || 0) + " 天）");
+    const fx = profile.subscription_fx_applied ? "≈" : "";
+    parts.push("订阅摊派 " + fx + fmtMoney(amortized));
+    reasons.push("订阅月费 " + fx + fmtMoney(Number(profile.subscription_minor || 0) / 100) + "/月，按已过 " +
+      Number(profile.subscription_days_elapsed || 0) + "/" + Number(profile.days_in_month || 0) + " 天摊派" +
+      (profile.subscription_fx_applied ? "（异币月费按参考汇率折算）" : ""));
   }
+  // 按量恒带 ≈：estimate profile 的按量是三级口径（账单 > 归因估算 > 默认估算），
+  // 归因估算在计费方无价卡时退回原厂官方价（summary.rs `fair-market-fallback-fx`），
+  // 与真实账单可差数倍（2026-09-17 真机：胜算云估 ¥1204.6、实付 ¥316）。
   if (metered > 0 || amortized === 0) parts.push("按量 ≈" + fmtMoney(metered));
+  if (profile.has_unresolved) reasons.push("部分用量无法归属服务商，已用金额是下界");
   return {
     source: "sql", // 与旧版 "sql" 态同义：都是无快照时刻的实时 SQL 计算。
     level,
@@ -1787,7 +1817,7 @@ function adaptEstimateProfileToBudget(profile, legacy) {
     effective_daily_budget: profile.daily_minor != null ? Number(profile.daily_minor) / 100 : null,
     generated_at: null,
     snoozed_until: snoozedActive ? snoozedUntil : null,
-    reasons: profile.has_unresolved ? ["部分用量无法归属服务商，已用金额是下界"] : null,
+    reasons: reasons.length ? reasons : null,
     hasUnresolved: !!profile.has_unresolved,
   };
 }
@@ -1804,21 +1834,31 @@ function budgetProfileStatusText(profile) {
   if (!profile || !profile.level) return "尚未配置此预算口径";
   const currency = profile.currency || "";
   const monthlyLevel = budgetProfileLevelText(profile.level);
+  // 已用 = total_spent_minor（订阅摊派 + 按量），与总览卡、托盘同口径——此前读
+  // 纯按量的 spent_minor，设置页与总览同一预算显示两个不同的「已用」。旧载荷
+  // 没有 total 时退回 spent。有订阅摊派时括号里给拆分。
+  const monthlySpent = profile.total_spent_minor ?? profile.spent_minor;
+  const amortized = Number(profile.subscription_amortized_minor || 0);
+  const monthlyBreakdown = amortized > 0
+    ? "（订阅摊派 " + fmtMinor(amortized, currency) + " + 按量 " +
+      fmtMinor(profile.metered_spent_minor ?? profile.spent_minor ?? 0, currency) + "）"
+    : "";
   // no_data / disabled 是事实状态，不得用 spent_minor 的默认 0 伪装成
   // “已用 0”。incomplete 可以展示已知下界，但要明确仍有未覆盖用量。
   let monthly = "本月：" + monthlyLevel;
   if (profile.level === "incomplete") {
-    monthly += " · 至少已用 " + fmtMinor(profile.spent_minor, currency) + "，仍有未覆盖用量";
+    monthly += " · 至少已用 " + fmtMinor(monthlySpent, currency) + monthlyBreakdown + "，仍有未覆盖用量";
   } else if (!["no_data", "disabled"].includes(profile.level)) {
-    monthly += " · 已用 " + fmtMinor(profile.spent_minor, currency);
+    monthly += " · 已用 " + fmtMinor(monthlySpent, currency) + monthlyBreakdown;
   }
   if (!profile.daily_level || profile.daily_level === "disabled") return monthly;
   const dailyLevel = budgetProfileLevelText(profile.daily_level);
+  const dailySpent = profile.daily_total_minor ?? profile.daily_spent_minor;
   let daily = "；今日：" + dailyLevel;
   if (profile.daily_level === "incomplete") {
-    daily += " · 至少已用 " + fmtMinor(profile.daily_spent_minor, currency) + "，仍有未覆盖用量";
+    daily += " · 至少已用 " + fmtMinor(dailySpent, currency) + "，仍有未覆盖用量";
   } else if (profile.daily_level !== "no_data") {
-    daily += " · 已用 " + fmtMinor(profile.daily_spent_minor, currency);
+    daily += " · 已用 " + fmtMinor(dailySpent, currency);
   }
   return monthly + daily;
 }
@@ -3511,7 +3551,21 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     "config.endpoint.ambiguous": "配置里官方端点与中转同时存在（不确定这批走的是哪一个）",
     "config.endpoint.mixed": "这行里的模型各自配了不同端点（不替它们挑一个）",
     "config.endpoint.conflict": "⚠ 但这批用量是官方形状，而配置指向中转——两者需你核对",
+    // cc-switch 时间线（config-time-bound）：见下方 timelineText 的逐条说明。
+    "config.timeline": "候选含 cc-switch 里配置过的中转",
+    "config.timeline.excluded": "已剔除这批用量之后才建立的中转",
+    "config.timeline.partial": "有中转建立于这批用量中途（前半段不可能经它）",
   }[b] || (b.startsWith("account.") ? "账户套餐 " + b.slice(8) : b))).join(" · ");
+  // 时间线逐条：只讲"排除"与"中途建立"——`possible` 不是证据，不说。2026-09-17 事故：
+  // 胜算云 09-11 深夜才在 cc-switch 里建立，09-09 的 395 次 gpt-5.6-sol 被当前配置建议
+  // 成了胜算云；这一行就是让用户在确认前看到"这批里有 443 条 / 134M tokens 早于它"。
+  const timelineText = (verdict) => (verdict.config_timeline || []).filter((t) => t && (t.relation === "excluded" || t.relation === "partial")).map((t) => {
+    const who = (t.relay_label || t.endpoint_host) + (t.label ? "（cc-switch：" + t.label + "）" : "");
+    const when = t.created_at_ms ? formatStatisticsDateTime(new Date(t.created_at_ms), { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) : "未知时间";
+    if (t.relation === "excluded") return who + " 建立于 " + when + "，晚于这批用量——已排除";
+    const before = t.tokens_before != null ? "，其中 " + Number(t.facts_before || 0) + " 条 / " + fmtTokens(Number(t.tokens_before)) + " tokens 早于它、不可能经它" : "";
+    return who + " 建立于 " + when + "，在这批用量中途" + before + "——确认时请把生效日期设在 " + when.slice(0, 5) + " 之后";
+  });
   const renderClusterRow = (cluster) => {
     const verdict = cluster.auto_verdict || {};
     const rows = clusterRowsOf(cluster);
@@ -3551,6 +3605,12 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     basis.textContent = (verdict.state === "determined" ? "程序判定，依据：" : verdict.state === "one_question" ? "已知：" : "缺少证据：")
       + (basisText(verdict) || "无");
     detail.appendChild(basis);
+    for (const line of timelineText(verdict)) {
+      const note = document.createElement("div");
+      note.className = "muted";
+      note.textContent = "⏱ " + line;
+      detail.appendChild(note);
+    }
     for (const candidate of clusterCandidatesOf(cluster)) {
       const evidence = document.createElement("div");
       evidence.className = "muted";

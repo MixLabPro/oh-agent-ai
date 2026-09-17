@@ -879,3 +879,30 @@ class ClaudeSyncBothTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OverrideCardCacheWriteDimension(unittest.TestCase):
+    """用户补的中转卡可带第四维 `cache_write {off_peak, peak}`（2026-09-17：胜算云把所有
+    非命中输入记作"写入"，gpt-5.6-sol 的写入占那笔钱的 43%）。带 → 与其他三维同一峰谷
+    读法；不带 → catalog 平费率（覆盖卡没有 → 0）。与 Rust
+    `override_card_cache_write_dimension_prices_cache_creation_tokens` 同数字。"""
+
+    def test_cache_write_dimension_prices_cache_creation_tokens(self):
+        from agent_vitals.agent.cost import claude_day_cost, load_pricing
+        pricing = load_pricing()
+        day = {"openai/gpt-5.6-sol": {
+            "input_tokens": 0, "cache_read_input_tokens": 1_000_000,
+            "cache_creation_input_tokens": 1_000_000, "output_tokens": 100_000}}
+        card = {
+            "input_uncached": {"off_peak": 29.310, "peak": 29.310},
+            "input_cached": {"off_peak": 2.343, "peak": 2.343},
+            "output": {"off_peak": 140.885, "peak": 140.885},
+        }
+        pricing["providers"]["shengsuanyun"]["models"]["gpt-5.6-sol"] = dict(card)
+        without = claude_day_cost(day, pricing)["per_model"]["openai/gpt-5.6-sol"]["total"]
+        self.assertAlmostEqual(without, 2.343 + 14.0885, places=9)
+        card["cache_write"] = {"off_peak": 29.310, "peak": 29.310}
+        pricing["providers"]["shengsuanyun"]["models"]["gpt-5.6-sol"] = card
+        with_ = claude_day_cost(day, pricing)["per_model"]["openai/gpt-5.6-sol"]
+        self.assertAlmostEqual(with_["total"], 2.343 + 29.310 + 14.0885, places=9)
+        self.assertEqual(with_["currency"], "CNY")

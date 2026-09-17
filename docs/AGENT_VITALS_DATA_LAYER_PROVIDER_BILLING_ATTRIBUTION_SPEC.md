@@ -74,6 +74,19 @@ Agent Vitals 不直接复制其结论：
 - cc-switch 统一 session history 后也可能无法恢复历史 provider，Agent Vitals
   必须继续保留 unknown/unresolved。
 
+> **2026-09-17 增补：cc-switch 的库现在是一个数据源，不只是调研参考。**
+> `~/.cc-switch/cc-switch.db` 的 `providers.created_at` + `backups/db_backup_*.db`
+> 的 `is_current` 是本机唯一带时间的路由证据（`config-time-bound`(5) 的第一个
+> emitter，`agent-vitals-hosts/src/sources/ccswitch.rs`）。它仍不能恢复"某条会话走了
+> 哪家"（上一条结论不变），但能**排除**"那时还不存在的中转"：真机事故里 codex 的
+> `custom` 会话被当前 `config.toml` 整月建议成胜算云，而胜算云那条 provider 09-11
+> 23:43 才建——09-09~11 的 443 条 gpt-5.6-sol/luna（134M tokens、官方价估 ¥736）不可能
+> 经它，胜算云账单上也确实没有。判定器（`billing_preview::auto_verdict`）据此把
+> 建立晚于事实窗口的中转从候选剔除（`config.timeline.excluded`）、建立于窗口中途的标
+> `partial` 并数出前半段（`tokens_before`），确认列表逐条显示。同一端点在 cc-switch
+> 里的多条（用户起名不同）合并为一条、取最早建立时刻。只读 `base_url` /
+> `env.ANTHROPIC_BASE_URL`，凭据不进结构。
+
 可复用的是分类、字段设计和 probe 思路；不能复用的是“模板命中即账单真值”的
 隐含假设。若复制实质代码或模板，必须保留 MIT 许可证声明与来源版本。
 

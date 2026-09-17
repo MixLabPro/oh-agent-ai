@@ -23,7 +23,7 @@ const MUTATIONS: &[&str] = &["card_put", "card_delete", "route_put"];
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "price_cards",
-        description: "Price-card assistant for Agent Vitals. `missing_list` returns this month's models with no price card (which provider to file the card under, tokens, whether the usage is metered or inside a subscription); `card_list` returns user-supplied cards and routes; `card_put` files a card (CNY per million tokens; six rates: input_uncached/input_cached/output × off_peak/peak — pass the same value twice when the provider has no peak pricing); `card_delete` removes one; `route_put` declares which provider a model prefix belongs to. Cards are user-supplied price evidence (basis=user-set), never official list prices. Mutations require the explicit --allow-local-writes server flag.",
+        description: "Price-card assistant for Agent Vitals. `missing_list` returns this month's models with no price card (which provider to file the card under, tokens, whether the usage is metered or inside a subscription); `card_list` returns user-supplied cards and routes; `card_put` files a card (CNY per million tokens; three required rates: input_uncached/input_cached/output × off_peak/peak — pass the same value twice when the provider has no peak pricing; optional fourth rate `cache_write` for relays that bill cache-write tokens separately from cache-miss input — omit it to keep pricing cache-creation tokens at the catalog's flat rate); `card_delete` removes one; `route_put` declares which provider a model prefix belongs to. Cards are user-supplied price evidence (basis=user-set), never official list prices. Mutations require the explicit --allow-local-writes server flag.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -35,6 +35,7 @@ pub fn spec() -> ToolSpec {
                 "input_uncached": { "type": "object", "properties": { "off_peak": { "type": "number" }, "peak": { "type": "number" } }, "required": ["off_peak", "peak"], "additionalProperties": false },
                 "input_cached": { "type": "object", "properties": { "off_peak": { "type": "number" }, "peak": { "type": "number" } }, "required": ["off_peak", "peak"], "additionalProperties": false },
                 "output": { "type": "object", "properties": { "off_peak": { "type": "number" }, "peak": { "type": "number" } }, "required": ["off_peak", "peak"], "additionalProperties": false },
+                "cache_write": { "type": "object", "description": "Optional fourth dimension. Some relays (e.g. shengsuanyun) bill every cache-miss input token as a full 'write' rather than the catalog's flat cache-write rate — omit this unless the provider's own bill shows that pattern.", "properties": { "off_peak": { "type": "number" }, "peak": { "type": "number" } }, "required": ["off_peak", "peak"], "additionalProperties": false },
                 "source": { "type": ["string", "null"], "description": "Where the price came from (URL or note); recorded in the receipt, not in the card" }
             },
             "required": ["action"],
@@ -82,11 +83,16 @@ pub fn run(args: &Value, data_home: &Path, allow_local_writes: bool) -> Result<V
         "card_put" => {
             let provider = required_string(args, "provider_id")?;
             let model = required_string(args, "model_id")?;
-            let card = json!({
+            let mut card = json!({
                 "input_uncached": args.get("input_uncached").cloned().unwrap_or(Value::Null),
                 "input_cached": args.get("input_cached").cloned().unwrap_or(Value::Null),
                 "output": args.get("output").cloned().unwrap_or(Value::Null),
             });
+            // 第四维可选：不传就不进卡（sanitize_card 把"没有这个键"与"传了半截"分开处理——
+            // 前者是三维卡，后者整卡拒绝）。
+            if let Some(cache_write) = args.get("cache_write") {
+                card["cache_write"] = cache_write.clone();
+            }
             crate::price_overrides::save_card(data_home, provider, model, &card)
                 .map_err(|error| ToolError::new("invalid_argument", error))?;
             json!({
@@ -156,6 +162,37 @@ mod tests {
         assert_eq!(run(&half, &home, true).unwrap_err().code, "invalid_argument");
         let missing = run(&json!({ "action": "missing_list" }), &home, false).unwrap();
         assert!(missing["data"]["models"].is_array());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 2026-09-17 事故的另一半：`sanitize_card` 早就接受可选第四维 `cache_write`
+    /// （胜算云把非命中输入都记作写入），但 Agent 经 MCP 补卡时没有字段可传——本工具是
+    /// 唯一让 Agent 自己把这类中转卡写进去的入口，schema 没开这个口子，公式再对也用不上。
+    /// 钉住：不传 → 三维卡；传 → 与其他三维同一半卡拒绝纪律。
+    #[test]
+    fn card_put_accepts_optional_cache_write_dimension() {
+        let home = tmp_home("cache-write");
+        let without = json!({ "action": "card_put", "provider_id": "shengsuanyun", "model_id": "gpt-5.6-sol",
+            "input_uncached": { "off_peak": 29.310, "peak": 29.310 }, "input_cached": { "off_peak": 2.343, "peak": 2.343 },
+            "output": { "off_peak": 140.885, "peak": 140.885 } });
+        run(&without, &home, true).unwrap();
+        let listed = run(&json!({ "action": "card_list" }), &home, false).unwrap();
+        assert!(listed["data"]["cards"]["shengsuanyun"]["gpt-5.6-sol"].get("cache_write").is_none(),
+            "no cache_write in the call → none in the saved card");
+
+        let with = json!({ "action": "card_put", "provider_id": "shengsuanyun", "model_id": "gpt-5.6-sol",
+            "input_uncached": { "off_peak": 29.310, "peak": 29.310 }, "input_cached": { "off_peak": 2.343, "peak": 2.343 },
+            "output": { "off_peak": 140.885, "peak": 140.885 }, "cache_write": { "off_peak": 29.310, "peak": 29.310 } });
+        run(&with, &home, true).unwrap();
+        let listed = run(&json!({ "action": "card_list" }), &home, false).unwrap();
+        assert_eq!(listed["data"]["cards"]["shengsuanyun"]["gpt-5.6-sol"]["cache_write"],
+            json!({ "off_peak": 29.310, "peak": 29.310 }));
+
+        let broken = json!({ "action": "card_put", "provider_id": "shengsuanyun", "model_id": "gpt-5.6-broken",
+            "input_uncached": { "off_peak": 1.0, "peak": 1.0 }, "input_cached": { "off_peak": 1.0, "peak": 1.0 },
+            "output": { "off_peak": 1.0, "peak": 1.0 }, "cache_write": { "off_peak": 1.0 } });
+        assert_eq!(run(&broken, &home, true).unwrap_err().code, "invalid_argument",
+            "a half cache_write must reject the whole card, same as the three required dimensions");
         let _ = std::fs::remove_dir_all(&home);
     }
 }

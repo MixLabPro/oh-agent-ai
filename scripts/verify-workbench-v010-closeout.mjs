@@ -98,7 +98,7 @@ ok(js.includes('声明它属于哪个服务商后，这批用量才能计入金�
 ok(/id="ov-budget-currency"[^>]*aria-label="预算币种"/.test(html) &&
   /id="ov-budget-monthly-amount"[^>]*aria-label="月预算金额"/.test(html) &&
   /id="ov-budget-daily-amount"[^>]*aria-label="日预算金额"/.test(html),
-  "按量费用预算的币种、月额、日额输入具备无障碍名称");
+  "预算（订阅 + 按量）的币种、月额、日额输入具备无障碍名称");
 ok(html.includes('id="cal-month" type="month" class="cal-month-input" aria-label="选择日历月份"'),
   "Token 日历月份选择器具备无障碍名称");
 

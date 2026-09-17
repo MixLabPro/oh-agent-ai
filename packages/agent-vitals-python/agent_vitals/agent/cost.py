@@ -571,12 +571,18 @@ def _price_claude_model(model, tokens, pricing, *, peak_resolved):
 
     input_t, input_p = m("input_tokens"), mp("input_tokens")
     cread_t, cread_p = m("cache_read_input_tokens"), mp("cache_read_input_tokens")
-    ccreate_t = m("cache_creation_input_tokens")
+    ccreate_t, ccreate_p = m("cache_creation_input_tokens"), mp("cache_creation_input_tokens")
     output_t, output_p = m("output_tokens"), mp("output_tokens")
 
+    # 缓存写入：卡上 `cache_write` 是 `{off_peak, peak}` 对象（用户补的中转卡）→ 与其他
+    # 三维同一峰谷读法；否则走 catalog 的平费率。与 Rust `claude.rs` 同步（2026-09-17）。
+    if isinstance(card.get("cache_write"), dict):
+        cache_write_cost = _priced_field(card, "cache_write", ccreate_t, ccreate_p)
+    else:
+        cache_write_cost = ccreate_t * _cache_write_rate(card)
     total = (_priced_field(card, "input_uncached", input_t, input_p)
              + _priced_field(card, "input_cached", cread_t, cread_p)
-             + ccreate_t * _cache_write_rate(card)
+             + cache_write_cost
              + _priced_field(card, "output", output_t, output_p))
     unresolved = (not peak_resolved) and _card_is_time_varying(card)
     return provider, currency, total, label, unresolved

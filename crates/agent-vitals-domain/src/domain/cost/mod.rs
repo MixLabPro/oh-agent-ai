@@ -1566,6 +1566,33 @@ mod tests {
         );
     }
 
+    /// 用户补的中转卡可带第四维 `cache_write {off_peak, peak}`（2026-09-17：胜算云把所有
+    /// 非命中输入记作"写入"，gpt-5.6-sol 一天 8.9M 写入是那笔钱的 43%）。带这一维 → 与其他
+    /// 三维同一峰谷读法；不带 → 沿用 catalog 平费率（这里的覆盖卡没有 → 0），钉住"半张卡
+    /// 把写入算成 0"这个静默低估正是第四维要堵的洞。数字来自真机账单拟合：
+    /// sol 命中 2.343 / 写入 29.310 / 输出 140.885 元/百万。
+    #[test]
+    fn override_card_cache_write_dimension_prices_cache_creation_tokens() {
+        let mut pricing = load_pricing();
+        let day = serde_json::json!({"openai/gpt-5.6-sol": {
+            "input_tokens": 0, "cache_read_input_tokens": 1_000_000,
+            "cache_creation_input_tokens": 1_000_000, "output_tokens": 100_000}});
+        let mut card = serde_json::json!({
+            "input_uncached": { "off_peak": 29.310, "peak": 29.310 },
+            "input_cached": { "off_peak": 2.343, "peak": 2.343 },
+            "output": { "off_peak": 140.885, "peak": 140.885 },
+        });
+        pricing["providers"]["shengsuanyun"]["models"]["gpt-5.6-sol"] = card.clone();
+        let without = claude_day_cost(&day, &pricing).expect("priced");
+        let total = |r: &serde_json::Value| r["per_model"]["openai/gpt-5.6-sol"]["total"].as_f64().unwrap();
+        assert!((total(&without) - (2.343 + 14.0885)).abs() < 1e-9, "no cache_write dimension → writes priced at 0: {without}");
+        card["cache_write"] = serde_json::json!({ "off_peak": 29.310, "peak": 29.310 });
+        pricing["providers"]["shengsuanyun"]["models"]["gpt-5.6-sol"] = card;
+        let with = claude_day_cost(&day, &pricing).expect("priced");
+        assert!((total(&with) - (2.343 + 29.310 + 14.0885)).abs() < 1e-9, "{with}");
+        assert_eq!(with["per_model"]["openai/gpt-5.6-sol"]["currency"], serde_json::json!("CNY"));
+    }
+
     /// claude_day_cost 对没有任何模型可计价的日子 → None（调用方自己决定
     /// 退回哪种近似，本函数不摆全零结构）。两种空形状（flat {} / by_model 空
     /// 壳）与 null 一律 None——flat 空对象不该因为「变成 flat 了」就报全零账。

@@ -92,7 +92,7 @@
           <div class="sub" id="ov-t-tokens-sub"></div>
         </div>
         <div class="stat budget" id="ov-budget-card" hidden>
-          <div class="label-row"><span class="label" title="只统计按量费用（人民币），不含订阅月费——月费在月初就已固定。">预算（按量费用）</span><button type="button" class="card-link" id="ov-link-budget">调整预算 ›</button></div>
+          <div class="label-row"><span class="label" title="已用 = 订阅月费按已过天数摊派 + 本月按量费用（账单优先，否则按官方价估算）；异币订阅按参考汇率折算。">预算（订阅 + 按量）</span><button type="button" class="card-link" id="ov-link-budget">调整预算 ›</button></div>
           <div class="amount" id="ov-budget-amount">—</div>
           <div class="bar"><div class="fill" id="ov-budget-fill"></div></div>
           <div class="sub" id="ov-budget-sub"></div>
@@ -626,8 +626,8 @@
         <h2>预算</h2>
         <div class="setting" id="ov-budget-settings">
           <div class="setting-head">
-            <div class="setting-title">按量费用预算</div>
-            <p>按官方价折算的本月按量费用达到阈值时提醒你；订阅月费不计入。</p>
+            <div class="setting-title">预算（订阅 + 按量）</div>
+            <p>本月「订阅月费按已过天数摊派 + 按量费用（账单优先，否则按官方价估算）」达到阈值时提醒你。</p>
           </div>
           <div class="notice todo" id="ov-budget-legacy" hidden>
             <span class="notice-icon" aria-hidden="true"></span>
@@ -749,6 +749,14 @@
             <label><span>命中输入 高峰</span><input id="ov-price-cached-peak" type="number" min="0" step="0.01" /></label>
             <label><span>输出 空闲</span><input id="ov-price-output-off" type="number" min="0" step="0.01" /></label>
             <label><span>输出 高峰</span><input id="ov-price-output-peak" type="number" min="0" step="0.01" /></label>
+          </div>
+          <!-- 第四维可选：只有像胜算云这样把非命中输入都记作"写入"单独计价的中转才需要
+               （2026-09-17 真机事故：没有这一档时缓存写入被静默按 0 算，占那笔账单 43%）。
+               留空两格 = 不设这一档，沿用价目表的写入平费率；只填一格视为半档同样拒绝。 -->
+          <div class="form-row">
+            <label><span>缓存写入 空闲（可选）</span><input id="ov-price-cachewrite-off" type="number" min="0" step="0.01" /></label>
+            <label><span>缓存写入 高峰（可选）</span><input id="ov-price-cachewrite-peak" type="number" min="0" step="0.01" /></label>
+            <span class="setting-note">只有中转把缓存写入单独计价（不同于其价目表的写入平费率）时才需要；留空则沿用平费率。</span>
           </div>
           <div class="form-row">
             <button class="btn secondary" id="ov-price-card-save" type="button">保存价卡</button>

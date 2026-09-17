@@ -7,6 +7,9 @@
 pub mod canonical_input;
 // v1.0.0-beta.1 自动归因 A12/§10.2 层②：跨宿主的端点/配置证据读取器。
 pub mod endpoint_evidence;
+// 2026-09-17：cc-switch provider 表 + 每日备份 → `config-time-bound` 时间线证据
+// （第一个产这一档 basis 的 emitter）；`endpoint_evidence::read_all` 把它挂到各宿主。
+pub mod ccswitch;
 
 // 猴子测试（用户拍板）——只活在 test 编译里，不进任何产物。
 #[cfg(test)]

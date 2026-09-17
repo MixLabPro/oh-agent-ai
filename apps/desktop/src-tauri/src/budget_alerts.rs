@@ -121,7 +121,7 @@ fn notify_profiles(app: &AppHandle, data_home: &std::path::Path, profiles: &[ser
             warn_ratio,
         ) {
             candidates.push((day, agent_vitals_runtime::budget_notifications::BudgetAlertScope::Daily,
-                threshold, profile.get("daily_spent_minor").and_then(serde_json::Value::as_i64),
+                threshold, profile.get("daily_total_minor").or_else(|| profile.get("daily_spent_minor")).and_then(serde_json::Value::as_i64),
                 profile.get("daily_minor").and_then(serde_json::Value::as_i64)));
         }
         if let Some(threshold) = threshold_for(
@@ -129,7 +129,8 @@ fn notify_profiles(app: &AppHandle, data_home: &std::path::Path, profiles: &[ser
             warn_ratio,
         ) {
             candidates.push((month, agent_vitals_runtime::budget_notifications::BudgetAlertScope::Monthly,
-                threshold, profile.get("spent_minor").and_then(serde_json::Value::as_i64),
+                // 已用 = 订阅摊派 + 按量（total_spent_minor，与总览卡/托盘同口径）；旧载荷退回 spent。
+                threshold, profile.get("total_spent_minor").or_else(|| profile.get("spent_minor")).and_then(serde_json::Value::as_i64),
                 profile.get("monthly_minor").and_then(serde_json::Value::as_i64)));
         }
         for (period, scope, threshold, _spent, _limit) in candidates {

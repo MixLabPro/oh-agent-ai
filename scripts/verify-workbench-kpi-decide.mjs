@@ -39,9 +39,22 @@ ok(wb.includes("请核对套餐"), ">50× 的「数字异常，请核对套餐�
 ok(wb.includes('b.source !== "alert" && b.source !== "sql"'),
   "预算卡兜底判定同时排除 alert 与 sql（sql 是权威不是缺场）");
 ok(wb.includes("budgetLive"), "source:\"sql\" 走「实时算」新鲜度文案，不说「尚未产出」");
-// 预算口径 = 跨宿主按量实付（PM 决策 2026-09-07）——「仅 DSH」是历史遗留缺陷。
-ok(html.includes("预算（按量费用）") && !html.includes("仅 DSH 实测"),
-  "预算卡标注按量费用，不再写「仅 DSH 实测」");
+// 预算口径 = 订阅月费按天摊派 + 跨宿主按量费用（2026-09-17 产品定向，取代 09-07 的
+// 「按量实付」单口径）。截图事故：后端 total_spent_minor 早已含订阅摊派，标题却还叫
+// 「预算（按量费用）」、tooltip 写「不含订阅月费」，用户把 ¥1458.5 读成纯按量。
+ok(html.includes("预算（订阅 + 按量）") && !html.includes("预算（按量费用）") && !html.includes("不含订阅月费")
+  && !html.includes("订阅月费不计入") && !html.includes("仅 DSH 实测"),
+  "预算卡与设置页标注「订阅 + 按量」口径，不再写按量-only 或「仅 DSH 实测」");
+ok(wb.includes('"已超预算 " + fmtMoney(Math.max(0, (b.month_cost) - denom)) + breakdown + tail'),
+  "超支态副行带订阅摊派 + 按量拆分（不只 ok 态）");
+// cc-switch 时间线（config-time-bound，2026-09-17）：判定器把「这批用量之后才建立的中转」
+// 剔除并标 `config.timeline.*` 依据，行面必须能把它翻译成人话，并把 partial 的切点
+// （facts_before / tokens_before）说出来——否则用户看不到"443 条早于胜算云建立"就点了确认。
+for (const key of ["config.timeline", "config.timeline.excluded", "config.timeline.partial"]) {
+  ok(wb.includes('"' + key + '":'), "basisText 认识 " + key);
+}
+ok(wb.includes("const timelineText = (verdict) =>") && wb.includes("tokens_before") && wb.includes("已排除"),
+  "确认列表逐条渲染 excluded / partial 的时间线说明（含切点 tokens_before）");
 // 组件自设 display 后必须补 [hidden] 规则，否则压过 UA 的 display:none（label[hidden]
 // 事故的重演：2026-09-15 .btn 加 inline-flex 后「加载更多」「截图」「立即同步」全部
 // 在 hidden 态下显形）。
@@ -104,14 +117,18 @@ const el = (id) => (elements[id] ??= makeElement());
 const sessionStorage = new Map();
 sessionStorage.getItem = (key) => sessionStorage.get(key) ?? null;
 sessionStorage.setItem = (key, value) => sessionStorage.set(key, String(value));
+const priceCardCalls = [];
 const sandbox = {
   sessionStorage,
   window: {
     __TAURI__: {
-      core: { invoke: async (cmd) => {
+      core: { invoke: async (cmd, args) => {
         if (cmd === "data_codex_quota") return sandbox.__quota;
         if (cmd === "read_overview") return sandbox.__overview;
         if (cmd === "data_status") return { status: "unavailable", reason: "fixture" };
+        if (cmd === "price_cards") return { cards: {} };
+        if (cmd === "save_price_card") { priceCardCalls.push(args); return { status: "saved" }; }
+        if (cmd === "trigger_sync") return null;
         return null;
       } },
       event: { listen: async () => () => {} },
@@ -152,6 +169,29 @@ ok(sandbox.budgetProfileStatusText({
   level: "ok", spent_minor: 864, currency: "CNY", daily_level: "ok", daily_spent_minor: 321,
 }) === "本月：正常 · 已用 ¥8.64；今日：正常 · 已用 ¥3.21",
   "日预算行同样按分换算");
+// 有订阅摊派时读 total_spent_minor（与总览卡/托盘同口径）并给拆分——形状出处：
+// crates/agent-vitals-runtime/src/budget.rs::budget_profiles_status_sql_at 的 json! 行。
+ok(sandbox.budgetProfileStatusText({
+  level: "exceeded", currency: "CNY", spent_minor: 120460, metered_spent_minor: 120460,
+  subscription_amortized_minor: 25386, total_spent_minor: 145846,
+  daily_level: "ok", daily_spent_minor: 0, daily_subscription_minor: 1493, daily_total_minor: 1493,
+}) === "本月：已超预算 · 已用 ¥1458.46（订阅摊派 ¥253.86 + 按量 ¥1204.60）；今日：正常 · 已用 ¥14.93",
+  "设置页已用 = 订阅摊派 + 按量（total_spent_minor），并列出拆分；今日同样读 daily_total_minor");
+ok(typeof sandbox.adaptEstimateProfileToBudget === "function", "暴露 estimate profile 适配器");
+{
+  const b = sandbox.adaptEstimateProfileToBudget({
+    level: "exceeded", currency: "CNY", monthly_minor: 50000, ratio_bp: 29169,
+    spent_minor: 120460, metered_spent_minor: 120460, subscription_minor: 44800,
+    subscription_amortized_minor: 25386, subscription_days_elapsed: 17, days_in_month: 30,
+    subscription_fx_applied: true, total_spent_minor: 145846,
+  }, null);
+  ok(b && b.level === "over" && Math.abs(b.month_cost - 1458.46) < 1e-9,
+    "总览卡 month_cost = 订阅摊派 + 按量");
+  ok(b && b.month_cost_breakdown === "订阅摊派 ≈¥253.9 + 按量 ≈¥1204.6",
+    "总览卡副行拆分：订阅摊派（异币标 ≈）+ 按量");
+  ok(b && Array.isArray(b.reasons) && b.reasons[0].includes("按已过 17/30 天摊派"),
+    "摊派规则进 tooltip（reasons）而非副行");
+}
 console.log("# 跨宿主面板金额分币（hostAmountsByCurrency）");
 {
   // 形状出处：tauri-mock.js data_monthly_summary 的 by_host / by_provider
@@ -436,6 +476,34 @@ if (fillBtn) fillBtn.onclick();
 ok(elements["ov-price-card-provider"].value === "shengsuanyun" && elements["ov-price-card-model"].value === "gpt-6-astra"
   && elements["ov-price-card-status"].textContent.includes("已预填"),
   `「补这张卡」预填服务商与型号（got ${elements["ov-price-card-provider"].value} / ${elements["ov-price-card-model"].value}）`);
+console.log("# 补卡表单 · 第四维 cache_write 可选（2026-09-17 交付缺口回归）");
+{
+  // sanitize_card / claude.rs 早已接受可选第四维，但表单此前只读三维——这里驱动真实
+  // save.onclick，钉住 cache_write 能从 UI 一路送到 invoke("save_price_card") 的 payload。
+  await sandbox.renderPriceOverrideSettings();
+  const set = (id, v) => { el(id).value = v; };
+  set("ov-price-card-provider", "shengsuanyun"); set("ov-price-card-model", "gpt-5.6-sol");
+  set("ov-price-uncached-off", "29.31"); set("ov-price-uncached-peak", "29.31");
+  set("ov-price-cached-off", "2.343"); set("ov-price-cached-peak", "2.343");
+  set("ov-price-output-off", "140.885"); set("ov-price-output-peak", "140.885");
+  set("ov-price-cachewrite-off", ""); set("ov-price-cachewrite-peak", "");
+  priceCardCalls.length = 0;
+  await el("ov-price-card-save").onclick();
+  ok(priceCardCalls.length === 1 && !("cache_write" in priceCardCalls[0].input),
+    `两格留空 → payload 不带 cache_write（got ${JSON.stringify(priceCardCalls[0])}）`);
+
+  set("ov-price-cachewrite-off", "29.31"); set("ov-price-cachewrite-peak", "29.31");
+  priceCardCalls.length = 0;
+  await el("ov-price-card-save").onclick();
+  ok(priceCardCalls.length === 1 && JSON.stringify(priceCardCalls[0].input.cache_write) === JSON.stringify({ off_peak: 29.31, peak: 29.31 }),
+    `两格都填 → payload 带 cache_write（got ${JSON.stringify(priceCardCalls[0])}）`);
+
+  set("ov-price-cachewrite-off", "29.31"); set("ov-price-cachewrite-peak", "");
+  priceCardCalls.length = 0;
+  await el("ov-price-card-save").onclick();
+  ok(priceCardCalls.length === 0 && el("ov-price-card-status").textContent.includes("缓存写入两格要么都填"),
+    `只填一格 → 拒绝保存并说明原因（got "${el("ov-price-card-status").textContent}"）`);
+}
 sandbox.renderTrustRows(unpricedStatus, monthlyDto);
 // 切掉 total_tokens（旧载荷）→ **不给百分比**，而不是退回用本月总量当分母。
 const legacyShape = { status: "ok", data: { health: "ok", unresolved_tokens: 0,
@@ -637,8 +705,11 @@ sandbox.__overview = {
 };
 await sandbox.renderOverview();
 ok(num("ov-budget-amount") === "¥373.9 / ¥500", `大字 = 按量 + 订阅摊派（got ${num("ov-budget-amount")}）`);
-ok(num("ov-budget-sub").includes("订阅 ≈¥253.9") && num("ov-budget-sub").includes("已摊 17/30 天") && num("ov-budget-sub").includes("按量 ≈¥120"),
+// 副行只放两项金额；摊派规则（月费 × 已过天数 / 当月天数）进 tooltip，卡片一行放不下。
+ok(num("ov-budget-sub").includes("订阅摊派 ≈¥253.9") && num("ov-budget-sub").includes("按量 ≈¥120"),
   `副行拆开订阅摊派（折算标 ≈）与按量（got ${num("ov-budget-sub")}）`);
+ok(sandbox.document.getElementById("ov-budget-sub").title.includes("按已过 17/30 天摊派"),
+  `摊派规则在副行 tooltip（got ${sandbox.document.getElementById("ov-budget-sub").title}）`);
 // 只有订阅、没有按量：不再是 ¥0。
 sandbox.__overview = {
   ...sandbox.__overview,
@@ -650,7 +721,7 @@ sandbox.__overview = {
   ] },
 };
 await sandbox.renderOverview();
-ok(num("ov-budget-amount") === "¥91.8 / ¥500" && num("ov-budget-sub").includes("订阅 ¥91.8") && !num("ov-budget-sub").includes("按量"),
+ok(num("ov-budget-amount") === "¥91.8 / ¥500" && num("ov-budget-sub").includes("订阅摊派 ¥91.8") && !num("ov-budget-sub").includes("按量"),
   `只有订阅时预算卡反映订阅摊派而不是 ¥0（got ${num("ov-budget-amount")} · ${num("ov-budget-sub")}）`);
 
 console.log("# renderOverview · profile has_unresolved → 「至少已用…仍有未覆盖用量」");

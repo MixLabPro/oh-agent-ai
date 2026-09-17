@@ -165,7 +165,8 @@ pub fn confirmation_groups_with(
             && group["tokens"].as_i64().unwrap_or(0) > 0
     });
     for group in groups.iter_mut() {
-        let verdict = auto_verdict(group, accounts, endpoints);
+        let mut verdict = auto_verdict(group, accounts, endpoints);
+        fill_timeline_splits(db, group, &mut verdict, start);
         group["auto_verdict"] = verdict;
     }
     let clusters = clusters_of(groups);
@@ -225,7 +226,52 @@ fn auto_verdict(
     use agent_vitals_hosts::sources::endpoint_evidence::model_tail;
     let endpoint = endpoints.get(host);
     let config_source = endpoint.map(|e| e.source.clone());
-    let all_hosts: Vec<String> = endpoint.map(|e| e.endpoint_hosts.clone()).unwrap_or_default();
+    let live_hosts: Vec<String> = endpoint.map(|e| e.endpoint_hosts.clone()).unwrap_or_default();
+    // 时间线证据（`config-time-bound`，cc-switch 的 provider 表）：这批事实的时间窗
+    // `[first, last]` 与每个中转的建立时刻比——**建立晚于窗口末尾的中转从候选里剔掉**
+    // （它那时不存在，这批用量不可能经它；2026-09-17：胜算云 09-11 深夜才建，09-09 的
+    // 395 次 gpt-5.6-sol 被当前 config.toml 建议成了胜算云）。建立时刻落在窗口**中间**
+    // 的标 `partial`——组是按模型聚的、不按时间切，前半段不可能、后半段可能，判定器
+    // 不替用户切，只把切点带出去（`tokens_before` 在 `confirmation_groups_with` 用库补）。
+    let first_ts = group["first_event_at_ms"].as_i64();
+    let last_ts = group["last_event_at_ms"].as_i64();
+    let timeline = endpoint.map(|e| e.timeline.as_slice()).unwrap_or(&[]);
+    let config_timeline: Vec<Value> = timeline.iter().map(|r| {
+        let relation = match (r.created_at_ms, first_ts, last_ts) {
+            (Some(created), _, Some(last)) if created > last => "excluded",
+            (Some(created), Some(first), Some(last)) if created > first && created <= last => "partial",
+            (Some(_), _, _) => "possible",
+            (None, _, _) => "unknown",
+        };
+        json!({
+            "endpoint_host": r.endpoint_host, "label": r.label, "created_at_ms": r.created_at_ms,
+            "is_current": r.is_current, "active_at_ms": r.active_at_ms, "relation": relation,
+            "relay_label": agent_vitals_hosts::sources::endpoint_evidence::relay_label_of(&r.endpoint_host),
+        })
+    }).collect();
+    let excluded_hosts: Vec<&str> = config_timeline.iter()
+        .filter(|t| t["relation"] == json!("excluded"))
+        .filter_map(|t| t["endpoint_host"].as_str()).collect();
+    // 历史条目只在**没有会话级官方证据**时才补进候选：官方形状的用量（provider 自报 +
+    // session-native）不因为 cc-switch 里配置过中转就多一条 conflict。剔除则无条件——
+    // 当前配置指向一个当时不存在的端点，对官方用量同样不构成矛盾。
+    let timeline_applies = !(provider.is_some() && ROUTE_KNOWN_OFFICIAL.contains(&evidence));
+    let mut all_hosts: Vec<String> = live_hosts.iter()
+        .filter(|h| !excluded_hosts.contains(&h.as_str())).cloned().collect();
+    let mut timeline_added = false;
+    if timeline_applies {
+        for t in &config_timeline {
+            let (Some(h), Some(rel)) = (t["endpoint_host"].as_str(), t["relation"].as_str()) else { continue };
+            if rel != "excluded" && !all_hosts.iter().any(|x| x == h) {
+                all_hosts.push(h.to_string());
+                timeline_added = true;
+            }
+        }
+        all_hosts.sort();
+        all_hosts.dedup();
+    }
+    let live_host_excluded = endpoint.and_then(|e| e.endpoint_host.as_deref())
+        .is_some_and(|h| excluded_hosts.contains(&h));
     // **厂商未知时"官方端点"无从谈起**：`official_for_vendor` 恒 false，会把配置里的每个
     // 端点都算成中转——连 `api.anthropic.com` 也能被当成中转名写进声明（验收审查 iteration 7 #1）。
     let vendor_known = vendor_name.is_some();
@@ -283,8 +329,13 @@ fn auto_verdict(
     // "经中转（api.minimaxi.com）"而按钮写着另一个名字（验收审查 iteration 8 #2）。
     let config_host = model_host.clone().or_else(|| {
         // 逐模型配置没有"宿主级端点"可言——没有条目就**什么都不显示**，不拿第一个配置的
-        // 端点冒充（验收审查 iteration 9 #3）。
-        endpoint.filter(|e| !e.per_model_config).and_then(|e| e.endpoint_host.clone())
+        // 端点冒充（验收审查 iteration 9 #3）。当前端点被时间线剔除时同样不显示它——
+        // 行面写着一个当时不存在的端点就是在说假话；剩下唯一候选时显示那个。
+        if live_host_excluded {
+            config_relay.clone()
+        } else {
+            endpoint.filter(|e| !e.per_model_config).and_then(|e| e.endpoint_host.clone())
+        }
     });
     let mut basis: Vec<String> = Vec::new();
     // `conflict` = 宿主自报的 provider 与会话级路由证据指的不是同一家。这样的事实本身
@@ -339,6 +390,16 @@ fn auto_verdict(
     if config_relay_ambiguous {
         basis.push("config.endpoint.ambiguous".to_string());
     }
+    // 时间线痕迹：剔除了谁、谁只覆盖后半段、候选里有没有历史条目——都要在依据里可见。
+    if !excluded_hosts.is_empty() {
+        basis.push("config.timeline.excluded".to_string());
+    }
+    if config_timeline.iter().any(|t| t["relation"] == json!("partial")) {
+        basis.push("config.timeline.partial".to_string());
+    }
+    if timeline_added {
+        basis.push("config.timeline".to_string());
+    }
     // 网关式命名与配置指向的中转：计费方都不是模型厂商。
     let billing_party = if route_state == "relay_config" {
         // 经中转时付款方是中转，**绝不能落回宿主自报的模型厂商**（验收审查 iteration 5 #2：
@@ -390,6 +451,9 @@ fn auto_verdict(
         // 配置证据原样带出，UI 才能说清"配置指向哪"（不是我们猜的）。
         "config_endpoint": config_host,
         "config_source": config_source,
+        // 时间线（cc-switch）：每个配置过的中转与这批事实时间窗的关系；`partial` 条目的
+        // `tokens_before` / `facts_before` 由 `confirmation_groups_with` 用库补上。
+        "config_timeline": config_timeline,
         "billing_mode": billing_mode,
         "relationship_kind": relationship_kind,
         "plan": plan,
@@ -397,6 +461,79 @@ fn auto_verdict(
         "question": question,
         "basis": basis,
     })
+}
+
+/// `partial` 的时间线条目：数出这组里**早于该中转建立时刻**的事实（它们不可能经它）。
+/// 谓词与组 SQL 共享 `SQL_UNRESOLVED_BILLING_FACT_WHERE`（同一批事实），只把窗口末尾换成
+/// 建立时刻。查不到就留 null，不冒充 0。
+fn fill_timeline_splits(db: &AuthorityDb, group: &Value, verdict: &mut Value, month_start_ms: i64) {
+    let Some(entries) = verdict["config_timeline"].as_array_mut() else { return };
+    for entry in entries.iter_mut() {
+        if entry["relation"] != json!("partial") {
+            continue;
+        }
+        let Some(cutoff) = entry["created_at_ms"].as_i64() else { continue };
+        let sql = format!(
+            "SELECT COUNT(*), COALESCE(SUM(f.uncached_input_tokens + f.cache_read_tokens + f.cache_write_tokens + f.output_tokens), 0)
+             FROM usage_facts f WHERE {} AND f.host = ?3 AND COALESCE(f.provider_id, '<unknown>') = ?4
+               AND COALESCE(f.model_id, '<unknown>') = ?5 AND COALESCE(f.evidence_basis, 'missing') = ?6
+               AND COALESCE(f.pricing_basis, 'unavailable') = ?7",
+            agent_vitals_data::authority_query::SQL_UNRESOLVED_BILLING_FACT_WHERE,
+        );
+        let row: Result<(i64, i64), _> = db.conn().query_row(&sql, rusqlite::params![
+            month_start_ms, cutoff,
+            group["host"].as_str().unwrap_or(""),
+            group["provider_id"].as_str().unwrap_or("<unknown>"),
+            group["model_id"].as_str().unwrap_or("<unknown>"),
+            group["evidence_basis"].as_str().unwrap_or("missing"),
+            group["pricing_basis"].as_str().unwrap_or("unavailable"),
+        ], |r| Ok((r.get(0)?, r.get(1)?)));
+        if let Ok((facts, tokens)) = row {
+            entry["facts_before"] = json!(facts);
+            entry["tokens_before"] = json!(tokens);
+        }
+    }
+}
+
+/// 簇级 `config_timeline`：成员各自的关系合并成一个。**说"整行排除"必须对每个成员都
+/// 成立**——只有全体成员都是 `excluded` 才保留 `excluded`；只要有一个成员证明过排除
+/// （`excluded` 或 `partial`），簇级至少是 `partial`（这一行确有一部分 token 排除了该
+/// 中转，即使不是全部）；都没有排除证据（`possible`/时间未知）才落 `possible`。
+/// `tokens_before` 求和。此前"取最弱"（possible > partial > excluded）会把
+/// `excluded` 与 `possible` 合并成 `possible`，把已经证明排除的那部分 token 的信号
+/// 整个抹掉——落地前用两个模型合一簇、其中一个对候选中转 excluded、另一个 possible
+/// 的场景钉住（`merge_timeline_keeps_partial_exclusion_visible`）。
+fn merge_timeline(into: &mut Value, from: &Value) {
+    let Some(from_rows) = from.as_array() else { return };
+    let has_exclusion = |rel: &str| rel == "excluded" || rel == "partial";
+    let merge_relation = |er: &str, fr: &str| -> &'static str {
+        if er == "excluded" && fr == "excluded" {
+            "excluded"
+        } else if has_exclusion(er) || has_exclusion(fr) {
+            "partial"
+        } else {
+            "possible"
+        }
+    };
+    let mut rows: Vec<Value> = into.as_array().cloned().unwrap_or_default();
+    for f in from_rows {
+        let host = f["endpoint_host"].clone();
+        match rows.iter_mut().find(|r| r["endpoint_host"] == host) {
+            Some(existing) => {
+                let (er, fr) = (existing["relation"].as_str().unwrap_or(""), f["relation"].as_str().unwrap_or(""));
+                existing["relation"] = json!(merge_relation(er, fr));
+                for key in ["tokens_before", "facts_before"] {
+                    if let (Some(a), Some(b)) = (existing[key].as_i64(), f[key].as_i64()) {
+                        existing[key] = json!(a + b);
+                    } else if f[key].is_i64() {
+                        existing[key] = f[key].clone();
+                    }
+                }
+            }
+            None => rows.push(f.clone()),
+        }
+    }
+    *into = json!(rows);
 }
 
 /// 列表行 = `host × 计费方/厂商 × route_state × 判定状态`；模型折进 `models[]`，
@@ -444,6 +581,10 @@ fn clusters_of(groups: &[Value]) -> Vec<Value> {
             "estimated_amounts": group["estimated_amounts"], "group_id": group["group_id"],
         }));
         entry["group_ids"].as_array_mut().unwrap().push(group["group_id"].clone());
+        if entry["group_ids"].as_array().map(|g| g.len()).unwrap_or(0) > 1 {
+            let from = v["config_timeline"].clone();
+            merge_timeline(&mut entry["auto_verdict"]["config_timeline"], &from);
+        }
         endpoints_seen.entry(key.clone()).or_default()
             .insert(v["config_endpoint"].as_str().map(ToOwned::to_owned));
         for field in ["tokens", "session_count", "unpriced_tokens"] {
@@ -917,6 +1058,7 @@ mod tests {
             per_model_config: false,
             provider_name: None,
             gateway_named_models: vec!["deepseek/deepseek-v4-pro-0813".to_string()],
+            timeline: Vec::new(),
             evidence_basis: EvidenceBasis::ConfigCurrent,
             source: "~/.claude/settings.json env".to_string(),
         });
@@ -949,6 +1091,7 @@ mod tests {
             per_model_config: false,
             provider_name: None,
             gateway_named_models: Vec::new(),
+            timeline: Vec::new(),
             evidence_basis: EvidenceBasis::ConfigCurrent,
             source: "test".to_string(),
         };
@@ -1005,6 +1148,7 @@ mod tests {
             per_model_config: false,
             provider_name: None,
             gateway_named_models: Vec::new(),
+            timeline: Vec::new(),
             evidence_basis: EvidenceBasis::ConfigCurrent,
             source: "test".to_string(),
         };
@@ -1051,6 +1195,7 @@ mod tests {
                 "deepseek/deepseek-v4-pro-0813".to_string(),
                 "minimax/MiniMax-M3".to_string(),
             ],
+            timeline: Vec::new(),
             evidence_basis: EvidenceBasis::ConfigCurrent,
             source: "test".to_string(),
         };
@@ -1109,6 +1254,7 @@ mod tests {
             per_model_config: false,
             provider_name: None,
             gateway_named_models: Vec::new(),
+            timeline: Vec::new(),
             evidence_basis: EvidenceBasis::ConfigCurrent,
             source: "~/.claude/settings.json env".to_string(),
         };
@@ -1125,6 +1271,7 @@ mod tests {
             per_model_config: false,
             provider_name: None,
             gateway_named_models: vec!["deepseek/deepseek-v4.1-flash".to_string()],
+            timeline: Vec::new(),
             evidence_basis: EvidenceBasis::ConfigCurrent,
             source: "~/.claude/settings.json env".to_string(),
         };
@@ -1159,5 +1306,164 @@ mod tests {
             json!({"amount_minor": 500, "currency": "CNY", "basis": "metered_estimate"}),
             json!({"amount_minor": 700, "currency": "USD", "basis": "metered_estimate"}),
         ]);
+    }
+
+    /// 2026-09-17 真机事故的回归（cc-switch 时间线，`config-time-bound`）：codex 的
+    /// `custom` 会话在日志层分不出胜算云与 cogfoundry（rollout 只记 `model_provider =
+    /// "custom"`，两家在 cc-switch 里都叫 shengsuanyun），当前 `config.toml` 指向胜算云，
+    /// 整月 `custom` 用量就全被建议成胜算云——其中 09-09 的 395 次 gpt-5.6-sol（官方价估
+    /// ¥736）胜算云账单上一条都没有。cc-switch 的 `providers.created_at` 给出硬下界：
+    /// 胜算云那条 09-11 23:43 才建。钉住三件事：
+    /// 1. 整组早于建立时刻（09-09~10 的 luna）→ 胜算云**剔除**、剩下唯一候选 cogfoundry
+    ///    成为计费方，行面不再显示一个当时不存在的端点；
+    /// 2. 建立时刻落在组的时间窗中间（sol：09-09 三条 + 09-12 一条）→ 标 `partial`，
+    ///    `tokens_before` 数出前半段（判定器不替用户切，只把切点带出去）；
+    /// 3. 官方形状的用量（provider 自报 + session-native）不因为 cc-switch 里配置过中转
+    ///    就多一条 conflict——但当前配置指向的中转若当时不存在，原有的
+    ///    `config.endpoint.conflict` 也不再出现。
+    #[test]
+    fn ccswitch_timeline_excludes_relays_created_after_the_facts() {
+        let home = temp_home("ccswitch-timeline");
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        let (month_start, _) = agent_vitals_data::authority_query::beijing_month_bounds_ms("2026-09").unwrap();
+        let at = |day: i64, hour: i64| month_start + (day - 1) * 86_400_000 + hour * 3_600_000;
+        // 真机：胜算云（网关）created_at = 2026-09-11 23:43:36 北京时间。
+        let ssy_created = at(11, 23) + 43 * 60_000 + 36_000;
+        let cog_created = at(8, 18) + 20 * 60_000;
+        db.conn().execute(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES ('run', 1, 'cli', 'succeeded', 13) ON CONFLICT(run_id) DO NOTHING", [],
+        ).unwrap();
+        let custom = |fact_id: &str, model: &str, ts: i64, tokens: i64| {
+            db.conn().execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                     observation_kind, provider_id, model_id, event_ts_ms, event_peak, pricing_basis, evidence_basis,
+                     billing_mode, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                     ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, 'codex', 'm', 'sess', ?1, 'token_count', NULL, ?2, ?3, 0, 'metered_estimate', 'missing',
+                     'metered', ?4, 0, 0, 0, 'run', 1, 1)",
+                rusqlite::params![fact_id, model, ts, tokens],
+            ).unwrap();
+        };
+        custom("luna-0909", "openai/gpt-5.6-luna", at(9, 11), 1000);
+        custom("luna-0910", "openai/gpt-5.6-luna", at(10, 15), 1000);
+        custom("sol-0909-a", "openai/gpt-5.6-sol", at(9, 11), 1000);
+        custom("sol-0909-b", "openai/gpt-5.6-sol", at(9, 12), 1000);
+        custom("sol-0909-c", "openai/gpt-5.6-sol", at(9, 13), 1000);
+        custom("sol-0912", "openai/gpt-5.6-sol", at(12, 10), 100);
+        // 官方形状（ChatGPT 订阅路径）：provider 自报 openai + session-native，09-09。
+        seed_codex_fact(&db, "official-0909", "gpt-5.6-luna", at(9, 9), 500, 5);
+
+        use agent_vitals_hosts::sources::endpoint_evidence::{EndpointEvidence, RelayRecord};
+        use agent_vitals_provider::{AccountEvidence, EvidenceBasis};
+        let mut endpoints = std::collections::BTreeMap::new();
+        endpoints.insert("codex".to_string(), EndpointEvidence {
+            host: "codex".to_string(),
+            // 当前 config.toml 指向胜算云（同步那一刻的配置）。
+            base_url: Some("https://router.shengsuanyun.com/api/v1".to_string()),
+            endpoint_host: Some("router.shengsuanyun.com".to_string()),
+            endpoint_hosts: vec!["router.shengsuanyun.com".to_string()],
+            model_endpoints: Default::default(),
+            per_model_config: false,
+            provider_name: None,
+            gateway_named_models: Vec::new(),
+            timeline: vec![
+                RelayRecord { endpoint_host: "router.cogfoundry.ai".to_string(), label: "DeepSeek".to_string(),
+                    created_at_ms: Some(cog_created), is_current: false, active_at_ms: vec![at(9, 15)] },
+                RelayRecord { endpoint_host: "router.shengsuanyun.com".to_string(), label: "胜算云（网关）".to_string(),
+                    created_at_ms: Some(ssy_created), is_current: true, active_at_ms: vec![at(12, 15)] },
+            ],
+            evidence_basis: EvidenceBasis::ConfigCurrent,
+            source: "~/.codex/config.toml + ~/.cc-switch/cc-switch.db".to_string(),
+        });
+        let accounts: std::collections::BTreeMap<String, AccountEvidence> = std::collections::BTreeMap::new();
+        let report = confirmation_groups_with(&db, "2026-09", &accounts, &endpoints);
+        let groups = report["groups"].as_array().unwrap();
+        let verdict_of = |model: &str| groups.iter().find(|g| g["model_id"] == json!(model)).unwrap()["auto_verdict"].clone();
+        let relation = |v: &Value, host: &str| v["config_timeline"].as_array().unwrap().iter()
+            .find(|t| t["endpoint_host"] == json!(host)).cloned().expect("timeline entry");
+
+        // 1. 整组早于胜算云建立 → 剔除；cogfoundry 成为唯一候选与计费方。
+        let luna = verdict_of("openai/gpt-5.6-luna");
+        assert_eq!(relation(&luna, "router.shengsuanyun.com")["relation"], json!("excluded"), "{luna}");
+        assert_eq!(relation(&luna, "router.cogfoundry.ai")["relation"], json!("possible"));
+        assert_eq!(luna["route_state"], json!("relay_config"));
+        assert_eq!(luna["billing_party"], json!("cogfoundry.ai"), "the surviving relay is the billing party: {luna}");
+        assert_eq!(luna["config_endpoint"], json!("router.cogfoundry.ai"),
+            "never display the excluded live endpoint as if these facts went through it");
+        let basis = luna["basis"].as_array().unwrap();
+        assert!(basis.contains(&json!("config.timeline.excluded")) && basis.contains(&json!("config.timeline")), "{basis:?}");
+        assert!(!basis.contains(&json!("config.endpoint.multiple")), "one candidate left → not multiple: {basis:?}");
+
+        // 2. 建立时刻落在窗口中间 → partial，前半段的 3 条 / 3000 tokens 数出来；两家都是候选。
+        let sol = verdict_of("openai/gpt-5.6-sol");
+        let ssy = relation(&sol, "router.shengsuanyun.com");
+        assert_eq!(ssy["relation"], json!("partial"), "{sol}");
+        assert_eq!(ssy["facts_before"], json!(3));
+        assert_eq!(ssy["tokens_before"], json!(3000));
+        assert_eq!(sol["billing_party"], json!(null), "two candidates → the judge does not pick: {sol}");
+        let basis = sol["basis"].as_array().unwrap();
+        assert!(basis.contains(&json!("config.endpoint.multiple")) && basis.contains(&json!("config.timeline.partial")), "{basis:?}");
+
+        // 3. 官方形状：时间线不补候选（无 `config.timeline`），且当前配置的中转当时不存在 →
+        //    不再报 `config.endpoint.conflict`。
+        let official = verdict_of("gpt-5.6-luna");
+        assert_eq!(official["route_state"], json!("official"));
+        let basis = official["basis"].as_array().unwrap();
+        assert!(!basis.contains(&json!("config.endpoint.conflict")), "{basis:?}");
+        assert!(!basis.contains(&json!("config.timeline")), "{basis:?}");
+        assert!(basis.contains(&json!("config.timeline.excluded")), "the exclusion itself stays visible: {basis:?}");
+
+        // 簇级：luna 与 sol 的 route_state/计费方不同，本就分簇；簇的 config_timeline 与成员一致。
+        let clusters = report["clusters"].as_array().unwrap();
+        let luna_cluster = clusters.iter().find(|c| c["billing_party"] == json!("cogfoundry.ai")).expect("luna cluster");
+        assert_eq!(relation(&luna_cluster["auto_verdict"], "router.shengsuanyun.com")["relation"], json!("excluded"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 2026-09-17 数据分析师视角审查发现的问题：旧版"取最弱"（possible > partial >
+    /// excluded）会在同簇多模型场景下把已经证明的排除信号整个抹掉——模型甲对候选中转
+    /// A 全部 tokens 都排除（excluded），模型乙对 A 没有排除证据（possible），旧逻辑
+    /// 合并成 `possible`，等于向用户谎称"这一行对 A 完全没有排除证据"，而实际上甲那
+    /// 部分 token 确实证明过排除。正确的合并：只有全体成员都排除才敢说整行 `excluded`；
+    /// 只要有一个成员证明过排除就至少是 `partial`（行里确有一部分被排除，不是全部）；
+    /// 都没有排除证据才是 `possible`。
+    #[test]
+    fn merge_timeline_keeps_partial_exclusion_visible() {
+        let mut into = json!([
+            { "endpoint_host": "router.a.com", "relation": "excluded", "tokens_before": 3000, "facts_before": 3 },
+        ]);
+        let from = json!([{ "endpoint_host": "router.a.com", "relation": "possible" }]);
+        merge_timeline(&mut into, &from);
+        let rows = into.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["relation"], json!("partial"),
+            "excluded+possible must not collapse to possible — that erases a proven exclusion: {rows:?}");
+        assert_eq!(rows[0]["tokens_before"], json!(3000), "possible 一侧没有 tokens_before，求和保留已知一侧");
+
+        // 全体都排除 → 对整行成立才敢说 excluded；tokens_before 累加。
+        let mut both_excluded = json!([
+            { "endpoint_host": "router.a.com", "relation": "excluded", "tokens_before": 3000, "facts_before": 3 },
+        ]);
+        let more_excluded = json!([{ "endpoint_host": "router.a.com", "relation": "excluded", "tokens_before": 500, "facts_before": 1 }]);
+        merge_timeline(&mut both_excluded, &more_excluded);
+        let rows = both_excluded.as_array().unwrap();
+        assert_eq!(rows[0]["relation"], json!("excluded"));
+        assert_eq!(rows[0]["tokens_before"], json!(3500));
+
+        // excluded + partial → partial（partial 本身已经是"部分排除"，与 excluded 合并
+        // 不会变得比 partial 更弱）。
+        let mut with_partial = json!([
+            { "endpoint_host": "router.a.com", "relation": "excluded", "tokens_before": 3000, "facts_before": 3 },
+        ]);
+        let partial = json!([{ "endpoint_host": "router.a.com", "relation": "partial", "tokens_before": 100, "facts_before": 1 }]);
+        merge_timeline(&mut with_partial, &partial);
+        assert_eq!(with_partial.as_array().unwrap()[0]["relation"], json!("partial"));
+
+        // 都没有排除证据 → possible。
+        let mut both_possible = json!([{ "endpoint_host": "router.a.com", "relation": "possible" }]);
+        merge_timeline(&mut both_possible, &json!([{ "endpoint_host": "router.a.com", "relation": "possible" }]));
+        assert_eq!(both_possible.as_array().unwrap()[0]["relation"], json!("possible"));
     }
 }

@@ -169,13 +169,18 @@ fn write(data_home: &Path, root: &Value) -> Result<(), String> {
     std::fs::rename(&temporary, target).map_err(|error| error.to_string())
 }
 
-/// 只保留三个计价维度、每个维度只保留 `off_peak`/`peak` 两个非负有限数。
-/// 任一维度缺失或非法 → 整张卡拒绝（**不做部分接受**：半张卡会让计价按缺档静默
+/// 只保留计价认得的维度、每个维度只保留 `off_peak`/`peak` 两个非负有限数。
+/// 三个必填维度任一缺失或非法 → 整张卡拒绝（**不做部分接受**：半张卡会让计价按缺档静默
 /// 算出一个看似正常的错数字，比没有卡更糟——没有卡至少会诚实地报"未计价"）。
+/// 第四维 `cache_write` **可选**（2026-09-17：胜算云把非命中输入都记作"写入"，中转卡
+/// 没有这一档就把缓存写入算成 0）；给了就必须合法，给了半截同样整卡拒绝。
 fn sanitize_card(card: &Value) -> Result<Value, String> {
-    let dimensions = ["input_uncached", "input_cached", "output"];
+    let dimensions = ["input_uncached", "input_cached", "output", "cache_write"];
     let mut out = serde_json::Map::new();
     for dimension in dimensions {
+        if dimension == "cache_write" && card.get(dimension).is_none() {
+            continue;
+        }
         let entry = card
             .get(dimension)
             .and_then(Value::as_object)
@@ -390,6 +395,24 @@ mod tests {
         // 坏文件之后仍能正常写入（不被坏内容卡住）。
         save_card(&home, "p", "m", &card(1.0)).unwrap();
         assert!(!cards(&home).is_empty());
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// 第四维 `cache_write` 可选：不给 → 卡里没有；给合法 → 原样保留；给半截 → 整卡拒绝
+    /// （与三个必填维一样不做部分接受）。
+    #[test]
+    fn save_card_keeps_optional_cache_write_and_rejects_a_broken_one() {
+        let home = tmp("cache-write");
+        save_card(&home, "p", "plain", &card(1.0)).unwrap();
+        assert!(cards(&home)["p"]["plain"].get("cache_write").is_none());
+        let mut full = card(1.0);
+        full["cache_write"] = json!({ "off_peak": 3.0, "peak": 4.0 });
+        save_card(&home, "p", "full", &full).unwrap();
+        assert_eq!(cards(&home)["p"]["full"]["cache_write"], json!({ "off_peak": 3.0, "peak": 4.0 }));
+        let mut broken = card(1.0);
+        broken["cache_write"] = json!({ "off_peak": 3.0 });
+        assert!(save_card(&home, "p", "broken", &broken).is_err(), "half a cache_write must reject the whole card");
+        assert!(cards(&home)["p"].get("broken").is_none());
         let _ = std::fs::remove_dir_all(home);
     }
 

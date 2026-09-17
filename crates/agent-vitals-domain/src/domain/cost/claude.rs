@@ -247,11 +247,20 @@ fn price_claude_model_preferring(
     let cread_t = m("cache_read_input_tokens");
     let cread_p = mp("cache_read_input_tokens");
     let ccreate_t = m("cache_creation_input_tokens");
+    let ccreate_p = mp("cache_creation_input_tokens");
     let output_t = m("output_tokens");
     let output_p = mp("output_tokens");
+    // 缓存写入：卡上 `cache_write` 是 `{off_peak, peak}` 对象（用户补的中转卡——2026-09-17
+    // 胜算云把所有非命中输入都记作"写入"，sol 的 8.9M 写入是那笔钱的 43%，没有这一档
+    // 的覆盖卡会把它静默算成 0）→ 与其他三维同一峰谷读法；否则走 catalog 的平费率
+    // （`cache_write_1hr` / `cache_write`）。
+    let cache_write_cost = match card.get("cache_write") {
+        Some(v) if v.is_object() => priced_field(card, "cache_write", ccreate_t, ccreate_p),
+        _ => ccreate_t * cache_write_rate(card),
+    };
     let total = priced_field(card, "input_uncached", input_t, input_p)
         + priced_field(card, "input_cached", cread_t, cread_p)
-        + ccreate_t * cache_write_rate(card)
+        + cache_write_cost
         + priced_field(card, "output", output_t, output_p);
     let unresolved = !peak_resolved && card_is_time_varying(card);
     Some((provider, currency, total, label, unresolved))

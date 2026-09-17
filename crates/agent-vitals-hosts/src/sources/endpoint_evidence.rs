@@ -49,8 +49,29 @@ pub struct EndpointEvidence {
     /// 模型映射里带 `vendor/model` 前缀的条目：官方端点不需要厂商 id，中转才需要
     /// （用户 2026-09-16 指出）。
     pub gateway_named_models: Vec<String>,
+    /// **时间线证据**（`config-time-bound`(5)，来自 cc-switch 的 provider 表 + 每日备份，
+    /// 见 `sources/ccswitch.rs`）：这个宿主配置过的每个中转、它**何时建立**、哪些快照里
+    /// 它是当前选中。上面各字段说的是"现在"，这里说的是"曾经存在过什么、从何时起"——
+    /// 判定器据此把「那时还不存在的中转」从候选里剔掉（2026-09-17：胜算云 09-11 深夜
+    /// 才建，09-09 的 395 次 gpt-5.6-sol 不可能经它）。**不进** `endpoint_hosts`：那是
+    /// 当前配置的陈述，把历史条目混进去会让官方形状的用量平白多一条
+    /// `config.endpoint.conflict`。
+    pub timeline: Vec<RelayRecord>,
     pub evidence_basis: EvidenceBasis,
     pub source: String,
+}
+
+/// 一条"配置过的中转"的时间信息。`created_at_ms` 缺失（旧版 cc-switch 没写）时不能
+/// 用于排除，只作展示。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayRecord {
+    pub endpoint_host: String,
+    /// 用户在 cc-switch 里起的名字（只作展示：本机两条不同中转都叫 shengsuanyun）。
+    pub label: String,
+    pub created_at_ms: Option<i64>,
+    pub is_current: bool,
+    /// 每日备份快照里它被选中的时刻（UTC epoch ms，升序去重）。
+    pub active_at_ms: Vec<i64>,
 }
 
 impl EndpointEvidence {
@@ -64,6 +85,7 @@ impl EndpointEvidence {
             per_model_config: false,
             provider_name: None,
             gateway_named_models: Vec::new(),
+            timeline: Vec::new(),
             evidence_basis: EvidenceBasis::ConfigCurrent,
             source,
         }
@@ -103,6 +125,7 @@ impl EndpointEvidence {
     /// 证据是否为空——没有端点也没有前缀痕迹的条目不进判定（不猜）。
     fn has_signal(&self) -> bool {
         !self.endpoint_hosts.is_empty() || !self.gateway_named_models.is_empty() || self.provider_name.is_some()
+            || !self.timeline.is_empty()
     }
 
     fn finish(mut self) -> Option<Self> {
@@ -123,7 +146,7 @@ pub fn model_tail(model: &str) -> &str {
 }
 
 /// 取 URL 的主机名：去 scheme、去路径、去端口（仅全数字）、去尾点、转小写。
-fn host_of(url: &str) -> Option<String> {
+pub(crate) fn host_of(url: &str) -> Option<String> {
     let mut value = url.trim().to_ascii_lowercase();
     if value.is_empty() {
         return None;
@@ -203,6 +226,45 @@ pub fn read_all(home: &Path) -> BTreeMap<String, EndpointEvidence> {
             out.insert(evidence.host.clone(), evidence);
         }
     }
+    // 第二层：cc-switch 的 provider 时间线（`config-time-bound`），按宿主挂到 `timeline`。
+    // 宿主当前没有端点证据（比如 codex 此刻走官方、config.toml 没有 model_providers
+    // 段）也要挂——正是"现在走官方、上周走过中转"的情形需要历史条目来解释。
+    if let Some(cc) = super::ccswitch::read(home) {
+        for (host, records) in cc.relays_by_host {
+            let evidence = out.entry(host.clone()).or_insert_with(|| {
+                let mut e = EndpointEvidence::new(&host, String::new());
+                e.evidence_basis = cc.evidence_basis;
+                e
+            });
+            evidence.source = if evidence.source.is_empty() {
+                cc.source.clone()
+            } else {
+                format!("{} + {}", evidence.source, cc.source)
+            };
+            evidence.timeline = records;
+        }
+    }
+    out
+}
+
+/// codex `config.toml` 里 `[model_providers.*]` 段的全部 `base_url`（按出现顺序）。
+/// TOML 只按行取窄形状（不进 toml 依赖：本 crate 的供应链约束不允许；形状漂移时读不到
+/// 比读错好）。`read_codex` 与 cc-switch 读取器（它存的就是这段 TOML 文本）共用。
+pub(crate) fn codex_toml_base_urls(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_providers = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_providers = line.starts_with("[model_providers.");
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let (key, value) = (key.trim(), value.trim().trim_matches('"'));
+        if in_providers && key == "base_url" && !value.is_empty() {
+            out.push(value.to_string());
+        }
+    }
     out
 }
 
@@ -252,6 +314,9 @@ pub fn read_codex(home: &Path) -> Option<EndpointEvidence> {
     let path = home.join(".codex").join("config.toml");
     let text = std::fs::read_to_string(&path).ok()?;
     let mut evidence = EndpointEvidence::new("codex", "~/.codex/config.toml".to_string());
+    for url in codex_toml_base_urls(&text) {
+        evidence.push_endpoint(&url);
+    }
     let mut in_providers = false;
     for line in text.lines() {
         let line = line.trim();
@@ -261,9 +326,7 @@ pub fn read_codex(home: &Path) -> Option<EndpointEvidence> {
         }
         let Some((key, value)) = line.split_once('=') else { continue };
         let (key, value) = (key.trim(), value.trim().trim_matches('"'));
-        if in_providers && key == "base_url" {
-            evidence.push_endpoint(value);
-        } else if !in_providers && key == "model" {
+        if !in_providers && key == "model" {
             evidence.observe_model(value);
         }
     }
@@ -407,8 +470,9 @@ mod tests {
         let e = read_claude(&h).expect("evidence");
         let EndpointEvidence {
             host, base_url, endpoint_host, endpoint_hosts, model_endpoints, per_model_config,
-            provider_name, gateway_named_models, evidence_basis, source,
+            provider_name, gateway_named_models, timeline, evidence_basis, source,
         } = e;
+        assert!(timeline.is_empty(), "no cc-switch in this HOME → no timeline");
         assert_eq!(host, "claude-code");
         assert_eq!(base_url.as_deref(), Some("https://router.shengsuanyun.com/api"));
         assert_eq!(endpoint_host.as_deref(), Some("router.shengsuanyun.com"));
