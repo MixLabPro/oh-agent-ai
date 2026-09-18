@@ -128,11 +128,21 @@ pub fn build(inp: &ReportInput) -> Report {
     skills_sorted.sort_by_key(|x| (!b(x, "loaded"), -i(x, "tier1_tokens")));
 
     // ── 按宿主的分项 ─────────────────────────────────────
+    // dsh 触发证据的可用性与 trigger_dsh 的判定同口径：有证据且未 degraded 才算
+    // available。degraded 与 trigger_dsh 一样按字符串读（键存在但值为 null 不算
+    // degraded）；host_summaries 不重新解释证据，只接收这个布尔。
+    let dsh_trigger_available = inv
+        .dsh_evidence
+        .as_ref()
+        .map(|e| e.get("degraded").and_then(|d| d.as_str()).is_none())
+        .unwrap_or(false);
     let host_summaries = analysis::host_summaries(
         skills,
         cfg.usage.is_empty(),
         inv.codex.available,
         inv.openclaw.iter().any(|r| r.available),
+        inp.budget,
+        dsh_trigger_available,
     );
 
     let mut out = Map::new();

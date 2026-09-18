@@ -679,6 +679,10 @@ def _main():
                        help="Jaccard threshold for SV401; default: %.2f (shared with overlap)"
                             % DEFAULT_OVERLAP_MIN)
     p_doc.add_argument("--json", help="Write diagnostic JSON instead of a report")
+    p_doc.add_argument("--with-report", action="store_true",
+                       help="Attach the full scan report to the JSON payload as 'report'. "
+                            "A consumer that needs both the SV diagnostics and the host "
+                            "summaries then scans once instead of twice.")
     p_doc.add_argument("--no-snapshot", action="store_true",
                        help="Do not save a snapshot or compare automatically")
     # 省钱方案（诊断 → 治疗方案）：把 scan 报告派生为量化、排序、诚实的动作清单。
