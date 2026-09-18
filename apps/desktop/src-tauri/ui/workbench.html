@@ -13,6 +13,7 @@
       <button class="tab" data-tab="calendar">用量</button>
       <button class="tab" data-tab="sessions">会话</button>
       <button class="tab" data-tab="findings">待处理</button>
+      <button class="tab" data-tab="skills">Skill</button>
       <button class="tab" data-tab="sources">设置</button>
     </nav>
     <span class="wb-head-right">
@@ -359,6 +360,84 @@
       <button id="find-more" class="btn secondary" hidden>加载更多</button>
     </section>
 
+    <!-- ============ Skill 体检（docs/v1.0.0/WORKBENCH_SKILL_HEALTH_TAB_SPEC.md） ============
+         「并列不合并」：默认一屏看全部宿主，每宿主一张摘要卡 + 一份带宿主标签的发现
+         列表（REQ-SK-02）。页头合计只允许四类（宿主数 / 去重 skill 目录数 / 安全发现
+         按严重度含 cited / 结构问题数，REQ-SK-03 穷举）；预算、Tier1、冲突、重叠、
+         僵尸永不出跨宿主单一数字（REQ-SK-01，#sk-totals 字面守卫 §11.1）。
+         分区顺序固定（§4.3）：宿主卡 → 立即处理 → 安全与结构 → 冲突与重叠 →
+         使用证据 → 本次未评估。 -->
+    <section id="tab-skills" class="tabpane">
+      <div class="find-toolbar">
+        <strong>Skill 体检</strong>
+        <label class="sk-host-label">宿主
+          <select id="sk-host">
+            <option value="all">全部</option>
+            <option value="claude-code">Claude Code</option>
+            <option value="codex">Codex</option>
+            <option value="openclaw">OpenClaw</option>
+            <option value="hermes">Hermes</option>
+            <option value="workbuddy">WorkBuddy</option>
+            <option value="dsh">DeepSeek Harness</option>
+          </select>
+        </label>
+        <span class="muted" id="sk-scan-meta"></span>
+        <span class="flex-spacer"></span>
+        <button id="sk-compare" class="btn secondary" hidden>与上次快照对比</button>
+        <button id="sk-export" class="btn secondary" hidden>导出脱敏 JSON</button>
+        <button id="sk-snapshot" class="btn secondary" hidden>存为快照</button>
+        <button id="sk-rescan" class="btn primary" hidden>重新扫描</button>
+        <button id="sk-cancel" class="btn" hidden>取消</button>
+      </div>
+      <div class="find-toolbar">
+        <span class="muted" id="sk-totals"></span>
+        <span class="muted note" id="sk-repro"></span>
+      </div>
+      <div id="sk-error" class="notice danger" hidden role="alert" aria-live="assertive"></div>
+      <div id="sk-empty" class="empty" hidden>
+        尚未扫描。扫描会读取各宿主的 skills 目录，可能需要几秒（Codex 探测要拉起它的
+        app-server）。
+        <button id="sk-start" class="btn primary">开始扫描</button>
+      </div>
+      <div id="sk-scanning" class="muted" hidden>正在遍历宿主根…</div>
+
+      <div class="sk-cards" id="sk-host-cards"></div>
+
+      <div class="panel" id="sk-act-now">
+        <div class="panel-title">立即处理</div>
+        <div id="sk-act-now-empty" class="empty" hidden>没有需要立刻处理的发现</div>
+        <div id="sk-act-now-list" class="sk-rows"></div>
+      </div>
+
+      <div class="panel" id="sk-security">
+        <div class="panel-title">安全与结构</div>
+        <div id="sk-security-empty" class="empty" hidden>没有安全或结构问题</div>
+        <div id="sk-security-list" class="sk-rows"></div>
+      </div>
+
+      <div class="panel" id="sk-conflicts">
+        <div class="panel-title">冲突与重叠</div>
+        <div class="muted note">同一宿主内才存在「谁盖过谁」；跨宿主永不成对。</div>
+        <div id="sk-conflicts-empty" class="empty" hidden>没有同宿主冲突或重叠候选</div>
+        <div id="sk-conflicts-list" class="sk-rows"></div>
+      </div>
+
+      <div class="panel" id="sk-usage">
+        <div class="panel-title">使用证据</div>
+        <div id="sk-usage-empty" class="empty" hidden>没有可判定的使用证据</div>
+        <div id="sk-usage-list" class="sk-rows"></div>
+      </div>
+
+      <div class="panel" id="sk-not-assessed">
+        <div class="panel-title">本次未评估</div>
+        <div class="muted note">这些码工具刻意不判 —— 少说一条而不说明，会被读成「查过、没有」。</div>
+        <div id="sk-not-assessed-list" class="sk-rows"></div>
+      </div>
+
+      <div id="sk-diff-result"></div>
+      <div id="sk-receipt" class="form-receipt" hidden role="status"></div>
+    </section>
+
     <!-- ============ 设置（内部仍沿用 sources 标识以保持导航合同） ============ -->
     <section id="tab-sources" class="tabpane settings-page">
       <!-- 设置页：左栏分区导航 + 主栏五个分区（docs/v1.0.0/BETA_1_SETTINGS_PAGE_SPEC.md §3）。
@@ -699,6 +778,29 @@
             <button class="btn secondary" id="ov-timezone-save" type="button">保存</button>
             <span class="form-receipt" id="ov-timezone-status" hidden role="alert" tabindex="-1"></span>
           </div>
+        </div>
+        <div class="setting" id="settings-skills-scan" aria-labelledby="settings-skills-scan-title">
+          <div class="setting-head">
+            <div class="setting-title" id="settings-skills-scan-title">Skill 体检</div>
+            <p>两项可选的扫描参数。留空 = 沿用 CLI 默认；只影响「Skill」tab 的扫描。</p>
+          </div>
+          <div class="form-row">
+            <label class="grow"><span>agent-vitals 自身 skill 目录（可选）</span>
+              <input id="sk-self-root" type="text" placeholder="例如 ~/.zcode/skills/agent-vitals" aria-describedby="sk-self-root-help" />
+            </label>
+            <button class="btn secondary" id="sk-settings-save" type="button">保存</button>
+            <span class="form-receipt" id="sk-settings-status" hidden role="status"></span>
+          </div>
+          <div class="setting-note" id="sk-self-root-help">
+            工具自身的 SKILL.md 会被安全启发式扫出引用语境命中（cited），这里填目录可整目录排除；
+            不填则照扫（不按名字豁免，靠「疑似引用语境」排序，不免检）。
+          </div>
+          <div class="form-row">
+            <label><span>描述预算覆盖（高级，字符数）</span>
+              <input id="sk-budget-override" type="number" min="1" step="1" placeholder="默认 15000" />
+            </label>
+          </div>
+          <div class="setting-note">影响 SV001 / SV002 的判定阈值；留空 = CLI 默认（Claude Code 15,000 字符）。</div>
         </div>
         <div class="setting" id="ov-pricing-catalog-panel" aria-live="polite">
           <div class="setting-head">

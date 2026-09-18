@@ -729,8 +729,8 @@ for family in ["claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"]
                 else if family == "openclaw" { "configurable" }
                 else { "not-available" },
             "description_budget_detail": budget_detail,
-            "trigger_data": if family == "claude-code" && !usage_empty { "available" }
-                else if family == "dsh" && dsh_trigger_available { "available" }
+            "trigger_data": if (family == "claude-code" && !usage_empty)
+                || (family == "dsh" && dsh_trigger_available) { "available" }
                 else { "not-available" },
         }),
     );

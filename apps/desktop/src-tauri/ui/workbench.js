@@ -428,6 +428,9 @@ async function loadActiveTab() {
   else if (activeTab === "sessions") { if (!sessState.loaded) loadSessions(); }
   // Findings / 数据源同款懒加载（CLI 汇总较重，见 state 注释）。
   else if (activeTab === "findings") { if (!findState.loaded) loadFindings(); }
+  // Skill 体检懒加载：首进只显示「尚未扫描」引导，不自动跑（spec §7 ——
+  // 扫描可能拉起 codex app-server，秒级开销不该在切 tab 时白付）。
+  else if (activeTab === "skills") { if (!skState.loaded && !skState.scanning && !skState.error) showSkillsIntro(); }
   else if (activeTab === "sources") {
     // 设置 tab 里 read_overview 有三个消费方（预算静默态 / 数据源同步行 /
     // 版本诊断的 sync 字段）。以前前两处各拉一次 = 每进一次设置页多跑一遍
@@ -7673,11 +7676,715 @@ async function init() {
   });
   // 日历默认月跟随统计时区今天；本月输入框受 input[type=month] 约束天然合法。
   if (!calMonth) calMonth = statisticsMonth();
+  initSkillsTab();
   renderOverview();
   // 启动 pull：冷启动时（webview 先加载、focus-tab/focus-target emit 早于 listen）
   // 菜单点击的目标在这里命中。apply 后 clear，此后 focus/事件两条路都不会重复应用。
   pullNavTarget();
   pullFocusTarget();
+}
+
+
+// ---------- Skill 体检（docs/v1.0.0/WORKBENCH_SKILL_HEALTH_TAB_SPEC.md）----------
+//
+// 纪律：tab 不重新测量、不重新判定 —— 每一个数字、每一条 SV 发现都从
+// `agent-vitals doctor --json - --with-report --no-snapshot` 的载荷里取
+// （spec §1 判断标准 1「同源」）。前端只做格式化与宿主归属（归属也只用
+// 载荷里已有的字段：冲突条目自带 host、重叠对自带 domain、安全命中按
+// path 回查 report.skills，不自造键）。
+//
+// 「并列不合并」（spec §0/§3.5）：页头只出四类白名单合计（REQ-SK-03）；
+// 预算、Tier1、冲突、重叠、僵尸永不出跨宿主单一数字。每宿主各用各的
+// 预算分母，没有分母的宿主不画预算条。
+
+const SK_HOST_ORDER = ["claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"];
+const SK_HOST_DISPLAY = {
+  "claude-code": "Claude Code",
+  "codex": "Codex",
+  "openclaw": "OpenClaw",
+  "hermes": "Hermes",
+  "workbuddy": "WorkBuddy",
+  "dsh": "DeepSeek Harness",
+};
+// SV 码 → 中文短名（SKILL.md §2 码表 / references/guide.zh-CN.md）。
+// 码永远与人话并列出现，不单独出现裸码（spec §8）。
+const SK_CODE_ZH = {
+  SV001: "描述预算告警",
+  SV002: "描述预算溢出",
+  SV004: "逐条描述截断",
+  SV101: "被更新副本遮蔽",
+  SV102: "冗余副本",
+  SV103: "有意覆盖",
+  SV105: "frontmatter 无效",
+  SV201: "零触发",
+  SV202: "休眠",
+  SV301: "单次触发成本高",
+  SV303: "昂贵且未用",
+  SV401: "重叠候选",
+  SV501: "提示注入模式",
+  SV502: "管道到 shell",
+  SV503: "base64 执行",
+  SV504: "裸 IP 拉取",
+  SV505: "硬编码密钥",
+  SV506: "读取凭据环境变量",
+  SV507: "混淆执行",
+  SV508: "加密压缩包",
+  SV901: "能力不可用",
+  SV902: "skill 不可读",
+};
+// 程序只做词法筛选，语义判断永远是人的工作（SKILL.md §3）：这些码的行动列
+// 固定「需你判断」，不给一键操作（spec §3.6/§6.2/§8）。
+const SK_NEED_JUDGEMENT = "需你判断 · 在终端跑 explain <name>，或让 Agent 跑 /agent-vitals";
+function skNeedsJudgement(code) {
+  return code === "SV401" || code.startsWith("SV5");
+}
+// 宿主无预算时的固定文案（spec §5.4）：不画条，dsh 追加逐条截断提示。
+const SK_NO_BUDGET_TEXT = "该宿主没有描述预算";
+// 预算分母来源标签（与 README 兼容性表同词，spec §6.1）。
+const SK_BUDGET_SOURCE_TEXT = {
+  "configurable": "可配置估算",
+  "official-estimate": "官方 2% 估算",
+};
+
+// Skill 体检状态：首进不自动扫（spec §7 —— codex app-server 拉起是秒级开销，
+// 首屏空转不如让用户点「开始扫描」）。host 变化会按新 host 重新取数
+// （REQ-SK-04：单宿主视图 = doctor --host <h> 的可视化，取数必须带 --host）。
+let skState = { loaded: false, error: false, data: null, scanning: false, host: "all" };
+
+function skFmtNum(n) {
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+function skEl(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text != null) el.textContent = text;
+  return el;
+}
+
+function skHostChip(host) {
+  const chip = skEl("span", "chip", SK_HOST_DISPLAY[host] || host);
+  chip.dataset.host = host;
+  return chip;
+}
+
+// 每条诊断宿主归属：只用载荷已有字段。冲突条目自带 host；重叠对自带
+// domain（= conflict_domain）；其余按 path / name 回查 report.skills。
+// 查不到的码（预算、能力缺失这类聚合项）返回空数组 —— 芯片区留空，
+// 绝不猜一个宿主写上去。
+function skDiagHosts(d, index) {
+  const code = d.code;
+  const ev = d.evidence || {};
+  const hosts = [];
+  const push = (h) => { if (h && !hosts.includes(h)) hosts.push(h); };
+  if (code === "SV101" || code === "SV102" || code === "SV103") {
+    (ev.conflicts || []).forEach((c) => push(c.host));
+  } else if (code === "SV401") {
+    (ev.pairs || []).forEach((p) => push(p.domain));
+  } else if (code.startsWith("SV5")) {
+    (ev.hits || []).forEach((h) => skHostsFor(index, h.path, h.skill).forEach(push));
+  } else if (code === "SV105" || code === "SV902" || code === "SV201" || code === "SV303") {
+    (ev.skills || []).forEach((s) => skHostsFor(index, s.path, s.name).forEach(push));
+  } else if (code === "SV202") {
+    (ev.skills || []).forEach((s) => skHostsFor(index, null, s.name).forEach(push));
+  } else if (code === "SV301") {
+    (ev.skills || []).forEach((s) => skHostsFor(index, s.path, s.name).forEach(push));
+  }
+  return hosts;
+}
+
+// path → 宿主数组（多值）：`~/.agents/skills` 是 dsh 与 openclaw 的共享根，
+// 同一个目录会以两个 host_family 各出现一条 —— 真机实测形状。安全命中按
+// (path, rule, line) 去重后挂**两枚**宿主芯片（spec §3.2 文件类跨宿主去重）。
+function skIndexByPathAndName(report) {
+  const byPath = {};
+  const byName = {};
+  const add = (m, k, v) => {
+    if (!k) return;
+    (m[k] = m[k] || []).push(v);
+  };
+  (report && report.skills || []).forEach((s) => {
+    const fam = s.host_family || s.host;
+    add(byPath, s.path, fam);
+    if (s.name && !(s.name in byName)) byName[s.name] = fam;
+  });
+  Object.keys(byPath).forEach((k) => {
+    byPath[k] = Array.from(new Set(byPath[k]));
+  });
+  return { byPath, byName };
+}
+
+// 一条证据（带 path 或 name）的宿主归属数组。path 多宿主时全部列出。
+function skHostsFor(index, path, name) {
+  if (path && index.byPath[path]) return index.byPath[path];
+  const byName = name ? index.byName[name] : null;
+  return byName ? [byName] : [];
+}
+
+// 安全/结构发现行的收集：安全按 (path, rule, line) 去重（REQ-SK-03 第 3 条
+// 的去重键；同一 SKILL.md 装在两个宿主只有一条），结构取 SV105/SV902 的
+// 每个 path。cited 只改排序（同严重度内沉底）+ 挂「疑似引用语境」标签，
+// 不降级、不隐藏（CLAUDE.md「Security heuristics sort, they never acquit」）。
+function skSecurityRows(payload) {
+  const index = skIndexByPathAndName(payload.report);
+  const sevRank = { critical: 0, high: 1, medium: 2, low: 3, none: 9 };
+  const rows = [];
+  const seen = {};
+  (payload.diagnostics || []).forEach((d) => {
+    if (!d.code.startsWith("SV5")) return;
+    ((d.evidence || {}).hits || []).forEach((h) => {
+      const key = [h.path, h.rule, h.line].join("\u0000");
+      if (seen[key]) return;
+      seen[key] = true;
+      rows.push({
+        kind: "security",
+        path: h.path, rule: h.rule, line: h.line,
+        severity: h.severity, cited: !!h.cited,
+        hosts: skHostsFor(index, h.path, h.skill),
+        rank: sevRank[h.severity] != null ? sevRank[h.severity] : 9,
+      });
+    });
+  });
+  // cited 的命中排同严重度末尾：先按严重度，再按 cited，再按路径稳定。
+  rows.sort((a, b) => a.rank - b.rank || (a.cited - b.cited)
+    || String(a.path).localeCompare(String(b.path)));
+  return rows;
+}
+
+function skStructureRows(payload) {
+  const index = skIndexByPathAndName(payload.report);
+  const rows = [];
+  const seen = {};
+  (payload.diagnostics || []).forEach((d) => {
+    if (d.code !== "SV105" && d.code !== "SV902") return;
+    ((d.evidence || {}).skills || []).forEach((s) => {
+      const key = s.path || s.name;
+      if (seen[key]) return;
+      seen[key] = true;
+      rows.push({
+        kind: "structure",
+        code: d.code,
+        path: key,
+        hosts: skHostsFor(index, s.path, s.name),
+      });
+    });
+  });
+  return rows;
+}
+
+// 页头白名单合计（REQ-SK-03 穷举，新增合计项要先改规格再改这里）：
+// 1) 已扫描 / 未检测到的宿主数；2) 去重 skill 目录数（规范化 path）；
+// 3) 安全发现按严重度（含 cited 计数）；4) 结构问题数。
+// 纯函数：vm 测试拿它与安全分区行数比对（§11.2「页头安全合计 = 行数」）。
+function skillHealthTotals(payload) {
+  const hs = (payload.report && payload.report.host_summaries) || {};
+  const scanned = [], missing = [];
+  SK_HOST_ORDER.forEach((h) => {
+    ((hs[h] || {}).skills_on_disk > 0 ? scanned : missing).push(h);
+  });
+  const dirs = {};
+  ((payload.report && payload.report.skills) || []).forEach((s) => {
+    const p = String(s.path || s.name || "");
+    dirs[p.replace(/\/+$/, "")] = true;
+  });
+  const rows = skSecurityRows(payload);
+  const structure = skStructureRows(payload);
+  const sevRank = { critical: 0, high: 1, medium: 2, low: 3, none: 9 };
+  const worst = rows.reduce((acc, r) => Math.min(acc, r.rank), 9);
+  const severityText = worst === 0 ? "critical"
+    : worst === 1 || worst === 2 ? "warning" : "none";
+  return {
+    scannedHosts: scanned,
+    missingHosts: missing,
+    dirCount: Object.keys(dirs).length,
+    securityRowCount: rows.length,
+    securityCited: rows.filter((r) => r.cited).length,
+    securitySeverity: severityText,
+    securitySeverityRank: worst,
+    structureCount: structure.length,
+  };
+}
+
+function skSeverityChip(sev) {
+  const cls = sev === "critical" || sev === "high" ? "sev critical"
+    : sev === "warning" || sev === "medium" ? "sev warning" : "sev";
+  return skEl("span", cls, sev);
+}
+
+// 一条诊断行：码 + 人话 + 宿主芯片 / 影响 / 行动 / caveat（spec §6.2）。
+// caveat 逐条原样渲染、不折叠不改写（§5.4）。
+function skDiagRow(d, hosts, extraEvidence) {
+  const row = skEl("div", "sk-row");
+  const head = skEl("div", "sk-row-head");
+  const code = skEl("span", "sk-code " + d.severity, d.code);
+  head.append(code);
+  head.append(skEl("span", "sk-row-impact", SK_CODE_ZH[d.code] || d.name || ""));
+  (hosts || []).forEach((h) => head.append(skHostChip(h)));
+  row.append(head);
+  if (d.impact) row.append(skEl("div", "sk-row-line", d.impact));
+  const action = skEl("div", "sk-row-line");
+  if (skNeedsJudgement(d.code)) {
+    action.append(skEl("span", "sk-judgement", "→ " + SK_NEED_JUDGEMENT));
+  } else if (d.recommendation) {
+    action.textContent = "→ 行动：" + d.recommendation;
+  }
+  row.append(action);
+  if (extraEvidence) row.append(extraEvidence);
+  (d.caveats || []).forEach((c) => {
+    row.append(skEl("div", "sk-row-caveat", "! " + c));
+  });
+  return row;
+}
+
+function skEmptyToggle(id, empty) {
+  const el = document.getElementById(id);
+  if (el) el.hidden = !!empty;
+}
+
+// 主渲染入口。payload = skills_doctor_report 的返回（doctor --json 载荷 +
+// desktop_meta）；hostFilter = "all" | 宿主 id。纯 DOM 组装，不取数、不计算
+// 载荷之外的任何量。
+function renderSkillHealth(payload, hostFilter) {
+  const meta = payload.desktop_meta || {};
+  const report = payload.report || {};
+  const index = skIndexByPathAndName(report);
+
+  // ── 页头：扫描时间 · run · 过期标记；复现命令（含 --host 与 run）─────
+  const scanMeta = document.getElementById("sk-scan-meta");
+  scanMeta.textContent = "";
+  if (meta.generated_at_ms) {
+    const dt = new Date(meta.generated_at_ms);
+    const hh = String(dt.getHours()).padStart(2, "0");
+    const mm = String(dt.getMinutes()).padStart(2, "0");
+    const ageH = (Date.now() - meta.generated_at_ms) / 3600000;
+    scanMeta.textContent = "扫描于 " + hh + ":" + mm
+      + (payload.run ? " · run " + payload.run : "")
+      + (ageH > 24 ? " · 可能过期" : "");
+  }
+  const repro = document.getElementById("sk-repro");
+  repro.textContent = "在终端复现：agent-vitals doctor --host "
+    + (hostFilter || "all") + (payload.run ? "（run " + payload.run + "）" : "");
+
+  // ── 宿主选择器灰显：未检测到的宿主注明「未检测到」，不隐藏（§4.2）──
+  const hostSel = document.getElementById("sk-host");
+  const totals = skillHealthTotals(payload);
+  Array.from(hostSel.options).forEach((opt) => {
+    if (opt.value === "all") return;
+    const missing = totals.missingHosts.includes(opt.value);
+    opt.disabled = missing;
+    opt.textContent = (SK_HOST_DISPLAY[opt.value] || opt.value)
+      + (missing ? "（未检测到）" : "");
+  });
+
+  // ── 页头合计（REQ-SK-03 白名单四类；单宿主视图整行隐藏，REQ-SK-04）──
+  const totalsEl = document.getElementById("sk-totals");
+  totalsEl.textContent = "";
+  totalsEl.hidden = hostFilter !== "all";
+  if (hostFilter === "all") {
+    const parts = [];
+    parts.push("已扫描 " + totals.scannedHosts.length + " 个宿主"
+      + (totals.missingHosts.length
+        ? "（" + totals.missingHosts.map((h) => SK_HOST_DISPLAY[h] || h).join("、") + " 未检测到）"
+        : ""));
+    parts.push(totals.dirCount + " 个 skill 目录");
+    if (totals.securityRowCount > 0) {
+      parts.push("安全 " + totals.securityRowCount + " 条（含引用语境 "
+        + totals.securityCited + "）");
+    } else {
+      parts.push("安全 0 条");
+    }
+    parts.push("结构 " + totals.structureCount);
+    totalsEl.textContent = parts.join(" · ");
+  }
+
+  // ── 1. 宿主摘要卡行（§6.1）────────────────────────────────────
+  // 单宿主视图（REQ-SK-04）只渲染该宿主的卡 —— 其余宿主不在本次扫描里，
+  // 给它们画「无发现」就是编数。
+  const cards = document.getElementById("sk-host-cards");
+  cards.textContent = "";
+  SK_HOST_ORDER.forEach((h) => {
+    if (hostFilter !== "all" && h !== hostFilter) return;
+    const hs = (report.host_summaries || {})[h];
+    if (!hs) return;
+    const detected = (hs.skills_on_disk || 0) > 0;
+    const card = skEl("div", "sk-card");
+    const head = skEl("div", "sk-card-head");
+    head.append(skEl("span", "sk-card-title", SK_HOST_DISPLAY[h] || h));
+    if (!detected) {
+      head.append(skEl("span", "chip", "未检测到"));
+      card.append(head);
+      card.append(skEl("div", "sk-card-line muted", "扫描器找过了：本机没有 " + (SK_HOST_DISPLAY[h] || h) + " 的 skills 目录。"));
+      cards.append(card);
+      return;
+    }
+    card.append(head);
+    // 预算条：分母来自该宿主自己的 description_budget_detail；没有预算的
+    // 宿主不画条，写明原因（§5.4），dsh 追加逐条截断提示。
+    const det = hs.description_budget_detail || {};
+    if (det.available && det.budget_chars) {
+      const pct = det.pct_used == null ? 0 : det.pct_used;
+      const bar = skEl("div", "sk-budget-bar");
+      const fill = skEl("div", "sk-budget-fill"
+        + (pct >= 100 ? " over" : pct >= 85 ? " warn" : ""));
+      fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+      bar.append(fill);
+      const line = skEl("div", "sk-card-line");
+      line.append(bar);
+      line.append(skEl("span", "sk-card-line",
+        skFmtNum(det.used_chars) + " / " + skFmtNum(det.budget_chars)
+        + " 字符（" + pct + "%）"));
+      line.append(skEl("span", "muted",
+        "分母：" + (SK_BUDGET_SOURCE_TEXT[det.source] || det.source)));
+      card.append(line);
+    } else {
+      const line = skEl("div", "sk-card-line muted",
+        SK_NO_BUDGET_TEXT + (h === "dsh" ? "（逐条截断见 SV004）" : ""));
+      card.append(line);
+    }
+    // 计数行：运行时核实为 null → 「—」（不冒充 0，§5.4）。
+    const counts = skEl("div", "sk-card-line");
+    counts.append(skEl("span", "sk-card-line",
+      "已加载 " + (hs.unique_discoverable_skills || 0)
+      + " · 磁盘 " + (hs.skills_on_disk || 0)));
+    if (hs.runtime_verified_loaded_skills != null) {
+      counts.append(skEl("span", "sk-card-line",
+        " · 运行时核实 " + hs.runtime_verified_loaded_skills));
+    } else {
+      counts.append(skEl("span", "sk-card-line muted", " · 运行时核实 —"));
+    }
+    card.append(counts);
+    // 该宿主的 warning/critical 计数（§6.1 卡底 ⚠/✕，点击 = 切到该宿主）。
+    // 全部视图：按诊断的宿主归属计数；单宿主视图：载荷里全部诊断都属于
+    // 该宿主（扫描就是 --host <h>）。
+    let warn = 0, crit = 0;
+    (payload.diagnostics || []).forEach((d) => {
+      const mine = hostFilter === "all" ? skDiagHosts(d, index).includes(h) : true;
+      if (!mine) return;
+      if (d.severity === "critical") crit += 1;
+      else if (d.severity === "warning") warn += 1;
+    });
+    const sevLine = skEl("div", "sk-card-line");
+    if (crit) sevLine.append(skEl("span", "sk-code critical", "✕ " + crit));
+    if (warn) sevLine.append(skEl("span", "sk-code warning", (crit ? " · " : "") + "⚠ " + warn));
+    if (!crit && !warn) sevLine.append(skEl("span", "muted", "无 critical / warning"));
+    sevLine.dataset.host = h;
+    card.append(sevLine);
+    cards.append(card);
+  });
+
+  // ── 2. 立即处理（critical + warning，CLI 已按 severity → 码排序）─────
+  const actList = document.getElementById("sk-act-now-list");
+  actList.textContent = "";
+  const actDiags = (payload.diagnostics || []).filter((d) => d.severity === "critical" || d.severity === "warning");
+  skEmptyToggle("sk-act-now-empty", actDiags.length === 0);
+  actDiags.forEach((d) => {
+    actList.append(skDiagRow(d, skDiagHosts(d, index)));
+  });
+
+  // ── 3. 安全与结构（§6.3）：行 = 去重发现；页头合计 = 行数 ────────────
+  const secList = document.getElementById("sk-security-list");
+  secList.textContent = "";
+  const secRows = skSecurityRows(payload);
+  const structRows = skStructureRows(payload);
+  skEmptyToggle("sk-security-empty", secRows.length === 0 && structRows.length === 0);
+  secRows.forEach((r) => {
+    const row = skEl("div", "sk-row");
+    const head = skEl("div", "sk-row-head");
+    head.append(skSeverityChip(r.severity));
+    head.append(skEl("span", "sk-row-impact", r.rule));
+    if (r.cited) head.append(skEl("span", "tag", "疑似引用语境（仅排序，不免检）"));
+    r.hosts.forEach((h) => head.append(skHostChip(h)));
+    row.append(head);
+    row.append(skEl("div", "sk-row-line", r.path + (r.line ? ":" + r.line : "")));
+    secList.append(row);
+  });
+  structRows.forEach((r) => {
+    const row = skEl("div", "sk-row");
+    const head = skEl("div", "sk-row-head");
+    head.append(skEl("span", "sk-code warning", r.code));
+    head.append(skEl("span", "sk-row-impact", SK_CODE_ZH[r.code] || "结构问题"));
+    r.hosts.forEach((h) => head.append(skHostChip(h)));
+    row.append(head);
+    row.append(skEl("div", "sk-row-line", r.path));
+    secList.append(row);
+  });
+
+  // ── 4. 冲突与重叠（§6.4）：按宿主分组，同宿主内才成对 ────────────────
+  const confList = document.getElementById("sk-conflicts-list");
+  confList.textContent = "";
+  const confByHost = {};
+  const confDiags = (payload.diagnostics || [])
+    .filter((d) => ["SV101", "SV102", "SV103"].includes(d.code));
+  confDiags.forEach((d) => {
+    ((d.evidence || {}).conflicts || []).forEach((c) => {
+      const h = c.host || "unknown";
+      (confByHost[h] = confByHost[h] || []).push({ kind: "conflict", c });
+    });
+  });
+  (payload.diagnostics || []).forEach((d) => {
+    if (d.code !== "SV401") return;
+    ((d.evidence || {}).pairs || []).forEach((p) => {
+      const h = p.domain || "unknown";
+      (confByHost[h] = confByHost[h] || []).push({ kind: "pair", p });
+    });
+  });
+  const confHosts = Object.keys(confByHost);
+  skEmptyToggle("sk-conflicts-empty", confHosts.length === 0);
+  confHosts.forEach((h) => {
+    confList.append(skEl("div", "sk-group-title", SK_HOST_DISPLAY[h] || h));
+    confByHost[h].forEach((item) => {
+      if (item.kind === "conflict") {
+        const c = item.c;
+        const line = skEl("div", "sk-row-line sk-pair");
+        const strong = skEl("strong", null, c.name + " 生效");
+        line.append(strong);
+        line.append(skEl("span", null, " ← " + (c.effective || {}).level + " · " + ((c.effective || {}).path || "")));
+        (c.shadowed || []).forEach((sh) => {
+          line.append(skEl("span", "muted", "；被遮蔽 " + sh.level + " · " + sh.path));
+        });
+        confList.append(line);
+      } else {
+        const p = item.p;
+        const line = skEl("div", "sk-row-line sk-pair");
+        line.textContent = p.a + " ↔ " + p.b
+          + "（共享词：" + (p.shared || []).join("、") + " · Jaccard " + p.jaccard + "）";
+        line.append(skEl("span", "sk-judgement", " 需你判断"));
+        confList.append(line);
+      }
+    });
+  });
+
+  // ── 5. 使用证据（§6.5）：只对提供触发数据的宿主列三列 ────────────────
+  const usageList = document.getElementById("sk-usage-list");
+  usageList.textContent = "";
+  const trigBlock = report.trigger_data || {};
+  const hsAll = report.host_summaries || {};
+  const triggerHosts = SK_HOST_ORDER.filter((h) => (
+    (hsAll[h] || {}).skills_on_disk > 0 && (hsAll[h] || {}).trigger_data === "available"));
+  skEmptyToggle("sk-usage-empty", triggerHosts.length === 0);
+  triggerHosts.forEach((h) => {
+    const group = skEl("div", "sk-group-title", SK_HOST_DISPLAY[h] || h);
+    usageList.append(group);
+    // 触发证据只在单宿主扫描时进入载荷（全部视图的顶层 trigger_data 恒
+    // 不可用 —— 那是「没采」，不是「没人用」，绝不冒充 0 条僵尸）。
+    const isThisPayload = (payload.host_selection === h);
+    if (!isThisPayload) {
+      usageList.append(skEl("div", "sk-row-line muted",
+        "触发证据按宿主扫描时才采集（全部视图不提供，不冒充 0）—— 选中该宿主重新扫描可见。"));
+      return;
+    }
+    const zombieDiag = (payload.diagnostics || []).find((d) => d.code === "SV201");
+    const dormantDiag = (payload.diagnostics || []).find((d) => d.code === "SV202");
+    const gate = (trigBlock || {}).zombie_min_age_days;
+    const zombies = ((zombieDiag || {}).evidence || {}).skills || [];
+    const tooNew = (trigBlock || {}).too_new_to_judge || [];
+    const line = skEl("div", "sk-row-line");
+    line.append(skEl("span", null, "零触发 " + zombies.length
+      + " · 休眠 " + (((dormantDiag || {}).evidence || {}).count || 0)));
+    if (tooNew.length) {
+      // too-new 必须带「N 天后可判定」，不得落进僵尸（§6.5）。
+      line.append(skEl("span", "muted", " · 太新不判 " + tooNew.length
+        + (gate ? "（满 " + gate + " 天可判定）" : "")));
+    }
+    usageList.append(line);
+  });
+  if (triggerHosts.length === 0) {
+    usageList.append(skEl("div", "sk-row-line muted", "此扫描没有可用的触发数据宿主。"));
+  }
+
+  // ── 6. 本次未评估（§6.6）：原样列出，不得省略 ────────────────────────
+  const naList = document.getElementById("sk-not-assessed-list");
+  naList.textContent = "";
+  (payload.not_assessed || []).forEach((n) => {
+    const row = skEl("div", "sk-row-line");
+    row.append(skEl("span", "sk-code info", n.code));
+    row.append(skEl("span", null, " " + (SK_CODE_ZH[n.code] || n.name)));
+    row.append(skEl("span", "muted", " —— " + n.reason));
+    naList.append(row);
+  });
+}
+
+// 扫描状态的 UI 切换（spec §7）。
+function setSkillsScanningUI(scanning, hasData) {
+  document.getElementById("sk-scanning").hidden = !scanning;
+  document.getElementById("sk-rescan").hidden = scanning || !hasData;
+  document.getElementById("sk-cancel").hidden = !scanning;
+  document.getElementById("sk-start").disabled = scanning;
+  if (hasData) {
+    document.getElementById("sk-empty").hidden = true;
+    document.getElementById("sk-snapshot").hidden = scanning;
+    document.getElementById("sk-compare").hidden = scanning;
+    document.getElementById("sk-export").hidden = scanning;
+  }
+}
+
+function showSkillsError(message) {
+  const el = document.getElementById("sk-error");
+  el.textContent = "扫描失败：" + message;
+  el.hidden = false;
+}
+
+// 取数 + 渲染。force=true（重新扫描按钮）绕过进程内缓存。
+async function loadSkillsDoctor(force) {
+  if (skState.scanning) return;
+  skState.scanning = true;
+  skState.error = false;
+  document.getElementById("sk-error").hidden = true;
+  setSkillsScanningUI(true, skState.loaded);
+  try {
+    const payload = await invoke("skills_doctor_report", {
+      host: skState.host,
+      force: !!force,
+      selfRoot: skState.selfRoot || null,
+      budget: skState.budget || null,
+    });
+    skState.data = payload;
+    skState.loaded = true;
+    skState.scanning = false;
+    setSkillsScanningUI(false, true);
+    renderSkillHealth(payload, skState.host);
+  } catch (e) {
+    skState.scanning = false;
+    skState.error = true;
+    setSkillsScanningUI(false, skState.loaded);
+    const msg = e && e.error && e.error.message ? e.error.message : String(e);
+    showSkillsError(msg);
+  }
+}
+
+// 与上次快照对比（spec §6.6 / §11.3 闭环）。diff 段只列新增项；「没有基线」
+// 是前置条件缺失，原样报出来，不冒充「没有变化」。
+async function compareSkillsSnapshot() {
+  const box = document.getElementById("sk-diff-result");
+  box.textContent = "";
+  try {
+    const diff = await invoke("skills_diff_latest");
+    const wrap = skEl("div", "panel");
+    wrap.append(skEl("div", "panel-title", "与上次快照的变化（只列新增）"));
+    const added = diff.added_skills || [];
+    const newSec = diff.new_security_findings || [];
+    const newly = diff.newly_judgeable || [];
+    if (!added.length && !newSec.length && !newly.length) {
+      wrap.append(skEl("div", "sk-row-line muted", "相对上次快照没有新增的 skill 或安全命中（这不等于没有变化——其它维度见终端 diff）。"));
+    }
+    if (added.length) {
+      wrap.append(skEl("div", "sk-group-title", "新增 skill " + added.length));
+      added.forEach((a) => {
+        const name = typeof a === "string" ? a : (a.name || JSON.stringify(a));
+        wrap.append(skEl("div", "sk-row-line", "＋ " + name));
+      });
+    }
+    if (newSec.length) {
+      wrap.append(skEl("div", "sk-group-title", "新增安全命中 " + newSec.length));
+      newSec.forEach((s) => wrap.append(skEl("div", "sk-row-line", "＋ " + (typeof s === "string" ? s : JSON.stringify(s)))));
+    }
+    if (newly.length) {
+      wrap.append(skEl("div", "sk-group-title", "跨过年龄闸、首次可判定 " + newly.length));
+    }
+    box.append(wrap);
+  } catch (e) {
+    const msg = e && e.error && e.error.message ? e.error.message : String(e);
+    const wrap = skEl("div", "panel");
+    wrap.append(skEl("div", "panel-title", "与上次快照对比"));
+    wrap.append(skEl("div", "sk-row-line muted", "没有可比的基线：" + msg
+      + "（没有基线 ≠ 没有变化——先「存为快照」，改动后再扫一次即可比较）"));
+    box.append(wrap);
+  }
+}
+
+// 设置页「统计与数据」的两项（self-root / 预算覆盖）：读后端设置落到
+// skState 并回填输入框；selfRoot 透传 --self-root；budget 为空 = CLI 默认
+// （tab 不自造阈值，覆盖只是高级透传，spec §9）。
+async function loadSkillsSettings() {
+  const s = await invoke("skills_scan_settings").catch(() => null);
+  skState.selfRoot = (s && s.self_root) || "";
+  skState.budget = (s && s.budget) || null;
+  const selfEl = document.getElementById("sk-self-root");
+  const budgetEl = document.getElementById("sk-budget-override");
+  if (selfEl) selfEl.value = skState.selfRoot;
+  if (budgetEl) budgetEl.value = skState.budget || "";
+}
+
+// 设置页两项的保存按钮：写后端 → 回执 → 若已扫过则提示重新扫描（参数变了
+// 缓存键也变，下次扫描自动生效，不静默重扫）。
+function wireSkillsSettings() {
+  const saveBtn = document.getElementById("sk-settings-save");
+  if (!saveBtn) return;
+  saveBtn.addEventListener("click", async () => {
+    const status = document.getElementById("sk-settings-status");
+    const selfRoot = (document.getElementById("sk-self-root") || {}).value || "";
+    const budgetRaw = (document.getElementById("sk-budget-override") || {}).value || "";
+    const budget = budgetRaw ? Number(budgetRaw) : null;
+    try {
+      await invoke("save_skills_scan_settings", {
+        selfRoot: selfRoot.trim(),
+        budget: budget != null && Number.isFinite(budget) ? Math.trunc(budget) : null,
+      });
+      skState.selfRoot = selfRoot.trim();
+      skState.budget = budget != null && Number.isFinite(budget) ? Math.trunc(budget) : null;
+      if (status) {
+        status.textContent = "已保存" + (skState.loaded ? " · 重新扫描后生效" : "");
+        status.hidden = false;
+      }
+    } catch (e) {
+      if (status) {
+        status.textContent = "保存失败：" + (e && e.error && e.error.message ? e.error.message : String(e));
+        status.hidden = false;
+      }
+    }
+  });
+}
+
+// 事件绑定（init 时调用一次；元素都在 DOMContentLoaded 之后存在）。
+// tab 首进、尚未扫描：显示「开始扫描」引导，不自动跑（spec §7）。
+function showSkillsIntro() {
+  document.getElementById("sk-empty").hidden = false;
+  document.getElementById("sk-rescan").hidden = true;
+  document.getElementById("sk-snapshot").hidden = true;
+  document.getElementById("sk-compare").hidden = true;
+  document.getElementById("sk-export").hidden = true;
+  document.getElementById("sk-scanning").hidden = true;
+}
+
+function initSkillsTab() {
+  wireSkillsSettings();
+  loadSkillsSettings();
+  document.getElementById("sk-start").addEventListener("click", () => loadSkillsDoctor(true));
+  document.getElementById("sk-rescan").addEventListener("click", () => loadSkillsDoctor(true));
+  document.getElementById("sk-cancel").addEventListener("click", async () => {
+    await invoke("skills_scan_cancel").catch(() => null);
+  });
+  document.getElementById("sk-host").addEventListener("change", (ev) => {
+    skState.host = ev.target.value || "all";
+    if (skState.loaded || skState.data) loadSkillsDoctor();
+  });
+  document.getElementById("sk-snapshot").addEventListener("click", async () => {
+    const btn = document.getElementById("sk-snapshot");
+    btn.disabled = true;
+    try {
+      await invoke("skills_snapshot_save");
+      const receipt = document.getElementById("sk-receipt");
+      receipt.textContent = "已存 · 下次扫描会显示变化";
+      receipt.hidden = false;
+    } catch (e) {
+      showSkillsError("存快照失败：" + (e && e.error && e.error.message ? e.error.message : String(e)));
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  document.getElementById("sk-compare").addEventListener("click", compareSkillsSnapshot);
+  document.getElementById("sk-export").addEventListener("click", async () => {
+    const pick = await invoke("skills_export_pick_path").catch(() => null);
+    if (!pick || pick.status !== "picked") return;
+    try {
+      await invoke("skills_export_redacted", { path: pick.path, selfRoot: skState.selfRoot || null });
+      const receipt = document.getElementById("sk-receipt");
+      receipt.textContent = "已导出（脱敏）：" + pick.path + "（不会自动上传）";
+      receipt.hidden = false;
+    } catch (e) {
+      showSkillsError("导出失败：" + (e && e.error && e.error.message ? e.error.message : String(e)));
+    }
+  });
 }
 
 document.addEventListener("DOMContentLoaded", init);

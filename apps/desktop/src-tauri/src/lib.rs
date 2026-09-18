@@ -780,10 +780,12 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
     // 已经没有任何入口——留着 `toggle_window`/独立 HTML+JS+CSS 就是纯粹的死
     // 代码，一并删除，不留一份没人能打开的界面。
     let workbench_item = MenuItem::with_id(app, "workbench", "打开工作台…", true, None::<&str>)?;
+    let skill_health_item = MenuItem::with_id(app, "skill_health", "Skill 体检", true, None::<&str>)?;
     let refresh_item = MenuItem::with_id(app, "refresh", "立即同步", true, None::<&str>)?;
     let menu = builder
         .separator()
         .item(&workbench_item)
+        .item(&skill_health_item)
         .item(&refresh_item)
         .separator()
         .item(&PredefinedMenuItem::quit(app, Some("退出"))?)
@@ -1361,6 +1363,8 @@ fn tab_for_menu_id(id: &str) -> Option<&'static str> {
         "today_tokens" => Some("calendar"),
         "today" | "daily" | "month" | "budget" | "subscription" => Some("overview"),
         "sync" => Some("sources"),
+        // 托盘「Skill 体检」→ Skill tab（WORKBENCH_SKILL_HEALTH_TAB_SPEC §4.1）。
+        "skill_health" => Some("skills"),
         _ => None,
     }
 }
@@ -3386,6 +3390,8 @@ pub fn run() {
         // R2a 冷构建串行锁：后台预热与用户点击并发 spawn CLI 时，后到者等锁 →
         // 直接命中 cache（见 store.rs StoreBuildLock 注释）。
         .manage(store::StoreBuildLock::new())
+        // Skill 体检 tab 的扫描缓存 + 取消把手（store.rs SkillsScanState 注释）。
+        .manage(store::SkillsScanState::new())
         .on_window_event(|window, event| {
             // 工作台 × 按钮 → 隐藏不销毁。config-created 窗口被 × 关掉会 destroy，
             // 之后 reopen 是 no-op（get_webview_window 返回 None）；hide 保状态——
@@ -3470,6 +3476,14 @@ pub fn run() {
             store::sessions_read,
             store::sessions_findings,
             store::sessions_issues,
+            store::skills_doctor_report,
+            store::skills_scan_cancel,
+            store::skills_snapshot_save,
+            store::skills_diff_latest,
+            store::skills_export_pick_path,
+            store::skills_export_redacted,
+            store::skills_scan_settings,
+            store::save_skills_scan_settings,
             store::issue_transition,
             store::issue_groups_list,
             store::issue_group_instances,
@@ -4310,6 +4324,7 @@ mod tests {
         }
         assert_eq!(tab_for_menu_id("sync"), Some("sources"));
         assert_eq!(tab_for_menu_id("today_tokens"), Some("calendar"), "首行今日消耗点击要有去处");
+        assert_eq!(tab_for_menu_id("skill_health"), Some("skills"), "托盘 Skill 体检点击要有去处");
         for id in ["workbench", "refresh", "recent", "host:dsh", "session:dsh:0", "nope", ""] {
             assert_eq!(tab_for_menu_id(id), None, "id={id} 不是信息行导航");
         }

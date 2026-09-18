@@ -1926,3 +1926,32 @@ summary.detail-section-title {
 .mcp-tools summary { cursor: pointer; font-size: 13px; margin-top: 8px; }
 .mcp-tools ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }
 .mcp-tools code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* ============ Skill 体检 tab（WORKBENCH_SKILL_HEALTH_TAB_SPEC §6）============ */
+/* 宿主摘要卡行：横向排列、窄窗口折行（同总览 KPI 网格的响应式规则）。 */
+.sk-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.sk-card { border: 1px solid color-mix(in srgb, var(--muted) 25%, transparent); border-radius: 10px; padding: 10px 12px; background: var(--panel-bg, transparent); min-width: 0; }
+.sk-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.sk-card-title { font-weight: 600; }
+.sk-card-line { font-size: 12px; line-height: 1.7; min-width: 0; }
+.sk-card-line .muted { font-size: 12px; }
+/* 预算条：分母永远是该宿主自己的；没有预算的宿主不画条（写明原因）。 */
+.sk-budget-bar { position: relative; height: 8px; border-radius: 999px; background: color-mix(in srgb, var(--muted) 20%, transparent); margin: 4px 0 2px; overflow: hidden; }
+.sk-budget-fill { position: absolute; inset: 0 auto 0 0; border-radius: 999px; background: var(--accent); }
+.sk-budget-fill.warn { background: var(--warn); }
+.sk-budget-fill.over { background: var(--danger); }
+/* 发现行：码 + 人话 + 宿主芯片 + 行动。行内的 caveat 前缀 ! 原样展示。 */
+.sk-rows { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.sk-row { border: 1px solid color-mix(in srgb, var(--muted) 22%, transparent); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+.sk-row-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.sk-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; font-size: 12px; }
+.sk-code.critical { color: var(--danger); }
+.sk-code.warning { color: var(--warn); }
+.sk-code.info { color: var(--muted); }
+.sk-row-impact { font-size: 13px; }
+.sk-row-line { font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
+.sk-row-caveat { font-size: 12px; color: var(--warn); margin-top: 2px; overflow-wrap: anywhere; }
+.sk-group-title { font-weight: 600; font-size: 13px; margin: 10px 0 2px; }
+.sk-judgement { font-size: 12px; color: var(--muted); font-style: normal; }
+.sk-pair { font-size: 12px; overflow-wrap: anywhere; }
+.sk-host-select-label { display: inline-flex; align-items: center; gap: 6px; }
