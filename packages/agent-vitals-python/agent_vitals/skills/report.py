@@ -41,7 +41,11 @@ def build_report(inventory, *, host, include_all, budget, codex_fallback_budget,
         "scanned_roots": inventory["scanned_roots"],
         "host_selection": host,
         "host_summaries": build_host_summaries(
-            skills, usage, codex_runtime, openclaw_runtime),
+            skills, usage, codex_runtime, openclaw_runtime, budget,
+            codex_fallback_budget,
+            # 与 Rust report.rs 同口径：有会话日志证据且未 degraded 才算 available。
+            bool(inventory.get("dsh_evidence"))
+            and not (inventory.get("dsh_evidence") or {}).get("degraded")),
         "openclaw_runtime": openclaw_runtime,
         "unreadable_skills": inventory["unreadable_skills"],
         "total_skills_on_disk": len(skills),

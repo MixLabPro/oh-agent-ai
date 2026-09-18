@@ -330,9 +330,18 @@ def build_security(skills):
     }
 
 
-def build_host_summaries(skills, usage, codex_runtime, openclaw_runtime):
+def build_host_summaries(skills, usage, codex_runtime, openclaw_runtime, budget,
+                         codex_fallback_budget, dsh_trigger_available=False):
+    """按宿主的分项。
+
+    `description_budget`（字符串状态）之后追加 `description_budget_detail`
+    （逐宿主数字）：多宿主模式下顶层预算恒不可用（分母不同的量相加就是编造），
+    而按宿主给出自己的 used/budget 是**并列不是合并** —— 每个宿主一条、各用
+    各的分母（与 Rust `analysis::host_summaries` 的 `description_budget_detail`
+    逐字节同构）。没有预算口径的宿主 available=false、数字全 null，绝不冒充 0。
+    """
     summaries = {}
-    for host in ("claude-code", "codex", "openclaw", "hermes", "workbuddy"):
+    for host in ("claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"):
         host_skills = [skill for skill in skills if skill["host_family"] == host]
         loaded = [skill for skill in host_skills if skill["loaded"]]
         discoverable = [skill for skill in host_skills if skill["discoverable"]]
@@ -348,6 +357,30 @@ def build_host_summaries(skills, usage, codex_runtime, openclaw_runtime):
             if host == "openclaw" else False)
         verified_unique = len({(skill["instance_id"], skill["namespace"] or "", skill["name"])
                                for skill in scope if skill["runtime_verified"]})
+        budget_detail_available = host == "claude-code" or (
+            host == "codex" and codex_runtime["available"])
+        if budget_detail_available:
+            is_codex = host == "codex"
+            denom = codex_fallback_budget if is_codex else budget
+            used = sum(len(skill["description"]) + len(skill["name"]) + 4 +
+                       (len(skill["path"]) + 1 if is_codex else 0) for skill in unique)
+            budget_detail = {
+                "available": True,
+                "source": "official-estimate" if is_codex else "configurable",
+                "budget_chars": denom,
+                "used_chars": used,
+                "pct_used": round(used / denom * 100, 1) if denom else None,
+                "counted_skills": len(unique),
+            }
+        else:
+            budget_detail = {
+                "available": False,
+                "source": "configurable" if host == "openclaw" else "not-available",
+                "budget_chars": None,
+                "used_chars": None,
+                "pct_used": None,
+                "counted_skills": None,
+            }
         summaries[host] = {
             "skills_on_disk": len(host_skills),
             "discoverable_skills": len(discoverable),
@@ -361,8 +394,10 @@ def build_host_summaries(skills, usage, codex_runtime, openclaw_runtime):
                                    "official-estimate" if host == "codex" and
                                    codex_runtime["available"] else
                                    "configurable" if host == "openclaw" else "not-available"),
-            "trigger_data": "available" if host == "claude-code" and bool(usage)
-                            else "not-available",
+            "description_budget_detail": budget_detail,
+            "trigger_data": ("available" if host == "claude-code" and bool(usage)
+                             else "available" if host == "dsh" and dsh_trigger_available
+                             else "not-available"),
         }
     return summaries
 
