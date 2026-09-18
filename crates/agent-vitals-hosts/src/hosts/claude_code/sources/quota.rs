@@ -326,8 +326,11 @@ mod tests {
             format!("{}\n{}\n", line("2026-09-13T15:45:00Z", 900, "five_hour"), line("2026-09-12T01:00:00Z", 600, "five_hour")),
         )
         .unwrap();
-        // 文件内取最新（不是最后一行），跨文件也取最新。
-        let scan = scan_claude_quota(&[older.clone(), newer.clone()], SystemTime::now());
+        // 文件内取最新（不是最后一行），跨文件也取最新。`now` 钉在最后一条事件之后：
+        // 窗口计数按 `now − 7 天` 划界，传真实 now 会让钉死的真机日期随时钟滑出 7 天窗
+        // （2026-09-18 合并当天就红了）——事件保持真机形状，判定不随日历漂移。
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_789_315_200); // 2026-09-13T16:00Z
+        let scan = scan_claude_quota(&[older.clone(), newer.clone()], now);
         let got = scan.latest.expect("应取到快照");
         assert_eq!(got.observed_at, "2026-09-13T15:45:00Z");
         // 撞窗计数按 (窗口, 重置时刻) 去重：这里三条事件的 resetsAt 各不相同 → 3。
@@ -359,7 +362,9 @@ mod tests {
             ),
         )
         .unwrap();
-        let scan = scan_claude_quota(std::slice::from_ref(&f), SystemTime::now());
+        // `now` 同样钉在最后一条事件（09-11T14:47Z）之后：四条事件恒在 7 天窗内。
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_789_156_800); // 2026-09-11T20:00Z
+        let scan = scan_claude_quota(std::slice::from_ref(&f), now);
         // 同一 (five_hour, 1000) 出现两次只算一次；窗口类型不同则分开算。
         assert_eq!(scan.windows_recent, 3, "去重后应是 3 个不同窗口，不是 4 条事件");
         let _ = std::fs::remove_dir_all(&dir);
