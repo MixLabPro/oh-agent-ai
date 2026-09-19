@@ -352,6 +352,38 @@ console.log("# r3 预算归因卡 + 行为证据只读（用户反馈 2026-09-19
   const svButtons = (detailRow.firstElementChild.children || [])
     .filter((c) => (c.children || []).some((b) => /稍后|已解决|已确认|不适用|恢复待处理/.test(String(b.textContent || ""))));
   ok(svButtons.length === 0, "行为实例行无状态迁移按钮");
+  // 验收条件 2 的四个补钉：失败文案、马拉松特征、前三截断、预算设置次按钮。
+  sandbox.__matrixFail = "db locked";
+  await sandbox.loadDecisionMatrix();
+  sandbox.__matrixFail = false;
+  ok(textOf(sandbox.budgetAttribution(budgetGroup)).includes("超支归因不可用：对比面读取失败"),
+    "失败当下归因块显示不可用文案（不留'加载中'错误承诺）");
+  await sandbox.loadDecisionMatrix();
+  // 马拉松特征 + 前三截断：注入 4 条 CNY 行，其中一条带 49.8h 会话。
+  const cnyRow = (model, minor, hit, span) => ({
+    host: "claude-code", model_id: model, provider_id: "p", sessions: 2,
+    tokens: { total: 1 }, cache_hit_ratio: hit, has_subscription: false,
+    amounts: [{ amount_minor: minor, currency: "CNY", basis: "metered_estimate" }],
+    top_sessions: span ? [{ session_ref: "sr_x", span_first_ms: 0, span_last_ms: span, tokens_total: 1 }] : [],
+  });
+  const savedRows = sandbox.__matrix.rows;
+  sandbox.__matrix.rows = [
+    cnyRow("a", 9000, 0.9, 0), cnyRow("b", 7000, null, 49.8 * 3600000),
+    cnyRow("c", 5000, 0.8, 0), cnyRow("d", 3000, 0.8, 0),
+  ];
+  sandbox.matrixStateHack = true;
+  const attr2 = sandbox.budgetAttribution(budgetGroup);
+  const attr2Text = textOf(attr2);
+  ok(attr2Text.includes("49.8h 马拉松会话"), "超过 24h 的会话作为特征标注");
+  ok(attr2Text.includes("· a —") && attr2Text.includes("· b —") && attr2Text.includes("· c —") && !attr2Text.includes("· d —"),
+    `前三截断：a/b/c 在、d 不在（got ${attr2Text.replace(/\s+/g, " ").slice(0, 200)}）`);
+  sandbox.__matrix.rows = savedRows;
+  renderTodoListCheck: {
+    sandbox.renderTodoList([budgetGroup]);
+    const todoText = textOf(elements["find-todo-list"]);
+    ok(todoText.includes("预算设置"), "预算设置保留为次级小按钮");
+    ok(todoText.includes("看超在哪"), "主按钮为归因入口");
+  }
   // 非行为且无专属分支的组（如数据质量类）走实例循环，状态迁移保留。
   const detailRow2 = { firstElementChild: sandbox.document.createElement("td") };
   await sandbox.loadIssueGroupInstances({ group_id: "g-dq", rule: "QUOTA_WINDOW" }, detailRow2);

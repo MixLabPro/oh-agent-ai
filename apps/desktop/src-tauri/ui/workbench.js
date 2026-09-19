@@ -4473,7 +4473,7 @@ function hostAmountsByCurrency(hostId, hostRow, byProvider) {
   const out = [];
   const seen = new Set();
   const push = (basis, currency, amount) => {
-    const key = basis + " " + currency;
+    const key = basis + "\x00" + currency;
     if (seen.has(key)) {
       const hit = out.find((e) => e.basis === basis && e.currency === currency);
       hit.amount += amount;
@@ -7251,6 +7251,8 @@ async function loadDecisionMatrix() {
     // 失败与真空数据必须可区分（验收条件 4）：错误明说，不冒充「没有组合」。
     matrixState.error = e && (e.message || e) || "未知错误";
     matrixState.data = null;
+    // 失败当下就把预算卡的「加载中…」换成「归因不可用」，不让错误承诺挂着。
+    if (findState.data) renderTodoList(issueRows());
   }
   renderMatrix();
 }
