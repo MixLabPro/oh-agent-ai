@@ -48,7 +48,9 @@ for (const id of ["sk-host-cards", "sk-act-now", "sk-security", "sk-conflicts", 
 {
   // Skill 分区里不存在任何 禁用/删除 按钮（SKILL.md §5 第一条）。
   const skStart = html.indexOf('id="tab-skills"');
-  const skEnd = html.indexOf('id="tab-sources"');
+  // 分区顺序会随 tab 演进变化（测试 tab 现排在 Skill 与 设置 之间）——
+  // 边界取 Skill 分区之后的下一个 section，而不是硬编码 tab-sources。
+  const skEnd = html.indexOf('section id="tab-', skStart + 1);
   const seg = html.slice(skStart, skEnd);
   for (const word of ["禁用", "删除", "disable", "delete"]) {
     ok(!seg.toLowerCase().includes(word), `Skill 分区不含「${word}」按钮/字样`);

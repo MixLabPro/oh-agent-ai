@@ -466,6 +466,77 @@ pub fn session_key_for(
     }
 }
 
+/// V16 锚点报告——**本地呈现层专属**（CLI `trace-anchors`）：给定 session_key，
+/// 返回该会话 workflow 事件的锚点坐标（native_event_id + 行号/偏移 hints +
+/// 错误分类）与任务意图摘录。不注册进 MCP 工具面（锚点=「去哪找原文」的地图，
+/// 有网 agent 不该拿到）；不解析路径（现场路径解析归本模块其余入口）。缺
+/// V16 数据的旧行如实缺席——不编造坐标。
+pub fn session_anchor_report(
+    conn: &rusqlite::Connection,
+    session_key: &str,
+) -> Result<serde_json::Value, rusqlite::Error> {
+    let mut anchors = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT event_type, capability_id, outcome, error_code, error_class,
+                    native_event_id, source_line, source_byte_offset
+             FROM workflow_events
+             WHERE session_key = ?1 AND event_ts_ms IS NOT NULL
+             ORDER BY event_ts_ms",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![session_key], |row| {
+            // `?` 不能出现在 json! 宏参数里——先读局部再构造。
+            let event_type: String = row.get(0)?;
+            let capability_id: Option<String> = row.get(1)?;
+            let outcome: String = row.get(2)?;
+            let error_code: Option<String> = row.get(3)?;
+            let error_class: Option<String> = row.get(4)?;
+            let native_event_id: Option<String> = row.get(5)?;
+            let source_line: Option<i64> = row.get(6)?;
+            let source_byte_offset: Option<i64> = row.get(7)?;
+            Ok(serde_json::json!({
+                "event_type": event_type,
+                "capability_id": capability_id,
+                "outcome": outcome,
+                "error_code": error_code,
+                "error_class": error_class,
+                "native_event_id": native_event_id,
+                "source_line": source_line,
+                "source_byte_offset": source_byte_offset,
+            }))
+        })?;
+        for row in rows {
+            anchors.push(row?);
+        }
+    }
+    let mut excerpts = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT role, excerpt, provenance, native_event_id
+             FROM session_excerpts WHERE session_key = ?1 ORDER BY ordinal",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![session_key], |row| {
+            let role: String = row.get(0)?;
+            let excerpt: String = row.get(1)?;
+            let provenance: String = row.get(2)?;
+            let native_event_id: String = row.get(3)?;
+            Ok(serde_json::json!({
+                "role": role,
+                "excerpt": excerpt,
+                "provenance": provenance,
+                "native_event_id": native_event_id,
+            }))
+        })?;
+        for row in rows {
+            excerpts.push(row?);
+        }
+    }
+    Ok(serde_json::json!({
+        "anchors": anchors,
+        "excerpts": excerpts,
+    }))
+}
+
 /// 测试与调试辅助：清空某 data_home 的 memo（生产代码不调用——失效由
 /// TTL + 计数器驱动，不靠手动清）。
 pub fn clear_memo(data_home: &Path) {
@@ -626,6 +697,95 @@ mod tests {
             !Arc::ptr_eq(&ga, &gb),
             "按 data_home 键控——不同 home 的 memo 独立"
         );
+    }
+
+    /// V16 锚点报告（CLI `trace-anchors` 的数据面）：形状、时间序、缺证据
+    /// 字段的 null 呈现、摘录按 ordinal 排序——以及「不带锚点的旧行如实
+    /// 缺席」（不编造坐标）。验收 F-B：新公开面必须有库内测试。
+    #[test]
+    fn session_anchor_report_shapes_orders_and_degrades_honestly() {
+        use agent_vitals_data::authority::AuthorityDb;
+        use agent_vitals_domain::contracts::workflow::{SessionExcerpt, WorkflowEvent};
+        use agent_vitals_domain::contracts::r2a::SessionKey;
+        let path = std::env::temp_dir().join(format!(
+            "av-anchors-{}-{}.sqlite3",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("anchor-test", "cli", 1).unwrap();
+        let session_key = SessionKey::new("claude-code", "anc-s1", "default", "ns").ledger_key();
+        let with_anchor = WorkflowEvent {
+            event_id: "workflow:anc:1".to_string(),
+            session_key: Some(session_key.clone()),
+            event_ts_ms: 200,
+            event_type: "tool_finished".to_string(),
+            capability_kind: Some("tool".to_string()),
+            capability_id: Some("Bash".to_string()),
+            capability_version: None,
+            outcome: "failed".to_string(),
+            duration_ms: None,
+            error_fingerprint: None,
+            invocation_fingerprint: None,
+            error_code: None,
+            error_class: None,
+            error_excerpt: Some("Error: boom".to_string()),
+            args_excerpt: None,
+            request_bytes: None,
+            result_bytes: Some(42),
+            native_event_id: Some("call_1".to_string()),
+            source_line: Some(3),
+            source_byte_offset: Some(533),
+        };
+        let mut without_anchor = with_anchor.clone();
+        without_anchor.event_id = "workflow:anc:0".to_string();
+        without_anchor.event_ts_ms = 100;
+        without_anchor.outcome = "unknown".to_string();
+        without_anchor.error_excerpt = None;
+        without_anchor.result_bytes = None;
+        without_anchor.native_event_id = None;
+        without_anchor.source_line = None;
+        without_anchor.source_byte_offset = None;
+        let excerpt = SessionExcerpt {
+            session_key: session_key.clone(),
+            ordinal: 0,
+            role: "user_first".to_string(),
+            excerpt: "帮我修登录页".to_string(),
+            provenance: "verbatim".to_string(),
+            native_event_id: "u1".to_string(),
+        };
+        db.with_immediate_txn(|conn| {
+            let source_id = agent_vitals_data::fact_writer_sql::SqlFactWriter::new(conn, "anchor-test", 1)?
+                .upsert_batch_source("claude-code")?;
+            agent_vitals_data::workflow::insert_events(
+                conn, &[with_anchor, without_anchor], &source_id, "anchor-test", 2)?;
+            agent_vitals_data::workflow::insert_session_excerpts(
+                conn, std::slice::from_ref(&excerpt), &source_id, "anchor-test", 2)
+        }).unwrap();
+        let report = session_anchor_report(db.conn(), &session_key).unwrap();
+        let anchors = report["anchors"].as_array().unwrap();
+        let excerpts = report["excerpts"].as_array().unwrap();
+        assert_eq!(anchors.len(), 2);
+        // 时间升序：无锚点的旧行（ts=100）在前，锚点字段如实为 null。
+        // 报告面只含坐标与分类（error_code/class）；摘录文本在 excerpts 组——
+        // 锚点表不重复携带（分层：坐标归 anchors，内容归 excerpts）。
+        assert_eq!(anchors[0]["native_event_id"], serde_json::Value::Null);
+        assert_eq!(anchors[0]["source_line"], serde_json::Value::Null);
+        assert_eq!(anchors[1]["native_event_id"], json!("call_1"));
+        assert_eq!(anchors[1]["source_line"], json!(3));
+        assert_eq!(anchors[1]["source_byte_offset"], json!(533));
+        assert_eq!(anchors[1]["outcome"], json!("failed"));
+        assert_eq!(excerpts.len(), 1);
+        assert_eq!(excerpts[0]["role"], json!("user_first"));
+        assert_eq!(excerpts[0]["excerpt"], json!("帮我修登录页"));
+        // 不存在的会话：空报告而非错误（诚实缺席）。
+        let missing = session_anchor_report(db.conn(), "no|such|key|here").unwrap();
+        assert!(missing["anchors"].as_array().unwrap().is_empty());
+        assert!(missing["excerpts"].as_array().unwrap().is_empty());
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
     }
 
     #[test]

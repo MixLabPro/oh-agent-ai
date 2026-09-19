@@ -136,6 +136,16 @@ fn workflow_event(
         duration_ms: duration_ms.filter(|value| *value >= 0),
         error_fingerprint,
         invocation_fingerprint,
+        // V16 富化字段：workbuddy 源无结构化错误码证据，不猜、不填。
+        error_code: None,
+        error_class: None,
+        error_excerpt: None,
+        args_excerpt: None,
+        request_bytes: None,
+        result_bytes: None,
+        native_event_id: None,
+        source_line: None,
+        source_byte_offset: None,
     };
     event.validate().ok().map(|_| event)
 }

@@ -1927,6 +1927,10 @@ summary.detail-section-title {
 .mcp-tools ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }
 .mcp-tools code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
+/* 「测试」tab 高级折叠区：tabpane 的 gap 只作用于直接子元素，折叠区内部的
+   嵌套结果面板自己留间距；summary 沿用 panel-title 的弱化样式。 */
+#test-advanced > summary { cursor: pointer; user-select: none; }
+#test-advanced > .panel { margin-top: 10px; }
 /* ============ Skill 体检 tab（WORKBENCH_SKILL_HEALTH_TAB_SPEC §6）============ */
 /* 宿主摘要卡行：横向排列、窄窗口折行（同总览 KPI 网格的响应式规则）。 */
 .sk-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-bottom: 14px; }
@@ -1990,4 +1994,4 @@ summary.detail-section-title {
 }
 .issue-todo-row .issue-todo-head { flex: 1 1 320px; min-width: 0; }
 .issue-todo-row .issue-todo-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.issue-todo-row .issue-todo-instances { flex: 1 1 100%; }
+

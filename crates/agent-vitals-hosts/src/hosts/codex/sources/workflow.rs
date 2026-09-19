@@ -40,7 +40,17 @@ fn add_event(
         outcome: outcome.to_string(),
         duration_ms: duration_ms.filter(|value| *value >= 0),
         error_fingerprint: error,
-        invocation_fingerprint: invocation,
+        invocation_fingerprint: invocation,        // V16 富化字段：本宿主的结构化错误码接入是下一批；不猜、不填
+        // （NULL = 未富化，不编数）。
+        error_code: None,
+        error_class: None,
+        error_excerpt: None,
+        args_excerpt: None,
+        request_bytes: None,
+        result_bytes: None,
+        native_event_id: None,
+        source_line: None,
+        source_byte_offset: None,
     };
     if event.validate().is_ok() { out.push(event); }
 }

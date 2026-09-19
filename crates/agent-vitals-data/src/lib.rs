@@ -36,5 +36,7 @@ pub mod coverage;
 pub mod evidence;
 pub mod projection;
 pub mod repository;
+pub mod route_quality;
 pub mod issues;
+pub mod probe;
 pub mod workflow;

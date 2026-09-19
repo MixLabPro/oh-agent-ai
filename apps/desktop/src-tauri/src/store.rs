@@ -177,6 +177,155 @@ fn read_args(session_ref: &str) -> Vec<String> {
     ]
 }
 
+// ── 「测试」tab（V17 探针面）：三条读命令 + 异步 run 全部 spawn CLI——
+// runner 逻辑不进桌面进程（与 sessions 同一条分层纪律）。run 是分钟级长
+// 任务：起线程跑 CLI、单槽记住最近结果，前端用 ticket 轮询 probe_run_result
+// （job 轮询模式；billing recalculation 先例）。凭据经 CLI 子进程 env 直传，
+// 桌面进程从头到尾不碰 token。
+
+/// 最近 N 次 run 的终态（环形；复审计论的单槽会在「重载页面后旧线程晚到」
+/// 时让新 ticket 永远 running——缓冲多条让晚到的旧结果也能被对上号）。
+static PROBE_RESULTS: std::sync::Mutex<std::collections::VecDeque<(u64, Value)>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+const PROBE_RESULT_KEEP: usize = 8;
+
+fn probe_command(args: &[String]) -> Option<Command> {
+    let mut command = Command::new(crate::resolve_binary()?);
+    command.args(args);
+    command.env("AGENT_VITALS_HOME", crate::overview::data_home());
+    Some(command)
+}
+
+fn probe_error(message: &str) -> Value {
+    serde_json::json!({ "error": { "code": "cancelled", "message": message } })
+}
+
+#[tauri::command]
+pub async fn probe_routes_list() -> Result<Value, Value> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let args: Vec<String> = ["probe", "routes", "--json"].iter().map(|s| s.to_string()).collect();
+        let Some(mut command) = probe_command(&args) else {
+            return Err(probe_error("agent-vitals binary not found"));
+        };
+        let out = command.output().map_err(|e| probe_error(&e.to_string()))?;
+        if !out.status.success() {
+            return Err(probe_error(&String::from_utf8_lossy(&out.stderr)));
+        }
+        serde_json::from_slice(&out.stdout).map_err(|e| probe_error(&e.to_string()))
+    })
+    .await
+    .map_err(|e| probe_error(&e.to_string()))?
+}
+
+/// 「测试」tab v2 默认面（2026-09-20 转向）：被动路线质量报告。读侧聚合，
+/// 不发任何探针请求——spawn CLI `routes-quality --json`，与 probe 命令同款
+/// AGENT_VITALS_HOME 钉死。
+#[tauri::command]
+pub async fn routes_quality(days: u32) -> Result<Value, Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let args: Vec<String> = vec![
+            "routes-quality".to_string(),
+            "--json".to_string(),
+            "--days".to_string(),
+            days.to_string(),
+        ];
+        let Some(mut command) = probe_command(&args) else {
+            return Err(probe_error("agent-vitals binary not found"));
+        };
+        let out = command.output().map_err(|e| probe_error(&e.to_string()))?;
+        if !out.status.success() {
+            return Err(probe_error(&String::from_utf8_lossy(&out.stderr)));
+        }
+        serde_json::from_slice(&out.stdout).map_err(|e| probe_error(&e.to_string()))
+    })
+    .await
+    .map_err(|e| probe_error(&e.to_string()))?
+}
+
+/// 启动一次探针 run（异步）：立即返回 ticket，前端轮询 probe_run_result。
+#[tauri::command]
+pub async fn probe_run_start(
+    route_a: String,
+    route_b: Option<String>,
+    repeats: usize,
+    max_probes: usize,
+) -> Result<Value, Value> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TICKET: AtomicU64 = AtomicU64::new(0);
+    let ticket = TICKET.fetch_add(1, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let mut args: Vec<String> = vec![
+            "probe".into(), "run".into(), "--route-a".into(), route_a,
+            "--repeats".into(), repeats.to_string(),
+            "--max-probes".into(), max_probes.to_string(),
+        ];
+        if let Some(route_b) = &route_b {
+            args.push("--route-b".into());
+            args.push(route_b.clone());
+        }
+        let Some(mut command) = probe_command(&args) else {
+            if let Ok(mut queue) = PROBE_RESULTS.lock() {
+                queue.push_back((ticket, serde_json::json!({
+                    "ticket": ticket, "state": "error",
+                    "message": "agent-vitals binary not found",
+                })));
+            }
+            return;
+        };
+        let outcome = command
+            .output()
+            .ok()
+            .map(|out| {
+                let report: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+                if out.status.success() {
+                    serde_json::json!({ "ticket": ticket, "state": "completed", "report": report })
+                } else {
+                    serde_json::json!({
+                        "ticket": ticket, "state": "error",
+                        "message": String::from_utf8_lossy(&out.stderr).to_string(),
+                    })
+                }
+            })
+            .unwrap_or_else(|| serde_json::json!({
+                "ticket": ticket, "state": "error", "message": "spawn failed",
+            }));
+        if let Ok(mut queue) = PROBE_RESULTS.lock() {
+            if queue.len() >= PROBE_RESULT_KEEP {
+                queue.pop_front();
+            }
+            queue.push_back((ticket, outcome));
+        }
+    });
+    Ok(serde_json::json!({ "ticket": ticket, "state": "running" }))
+}
+
+#[tauri::command]
+pub async fn probe_run_result(ticket: u64) -> Result<Value, Value> {
+    let guard = PROBE_RESULTS.lock().unwrap();
+    match guard.iter().find(|(kept, _)| *kept == ticket) {
+        Some((_, value)) => Ok(value.clone()),
+        None => Ok(serde_json::json!({ "ticket": ticket, "state": "running" })),
+    }
+}
+
+#[tauri::command]
+pub async fn probe_report(run_id: String) -> Result<Value, Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let args: Vec<String> = ["probe", "report", "--run-id", &run_id]
+            .iter().map(|s| s.to_string()).collect();
+        let Some(mut command) = probe_command(&args) else {
+            return Err(probe_error("agent-vitals binary not found"));
+        };
+        let out = command.output().map_err(|e| probe_error(&e.to_string()))?;
+        if !out.status.success() {
+            return Err(probe_error(&String::from_utf8_lossy(&out.stderr)));
+        }
+        serde_json::from_slice(&out.stdout).map_err(|e| probe_error(&e.to_string()))
+    })
+    .await
+    .map_err(|e| probe_error(&e.to_string()))?
+}
+
 /// spawn 二进制并解析 stdout。非零退出 → 若 stderr 是 `{"error":…}` 形状则原样
 /// 透传（类型化错误码不丢）；否则包成 `cancelled`。spawn/解析失败 → `cancelled`。
 fn run_json(mut cmd: Command) -> Result<Value, Value> {

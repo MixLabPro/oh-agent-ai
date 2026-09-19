@@ -9,6 +9,7 @@ dependencies = [
  "agent-vitals-data",
  "agent-vitals-domain",
  "agent-vitals-hosts",
+ "agent-vitals-probe",
  "agent-vitals-runtime",
  "clap",
  "proptest",
@@ -53,6 +54,16 @@ dependencies = [
  "serde_json",
  "vitals-core",
  "walkdir",
+]
+
+[[package]]
+name = "agent-vitals-probe"
+version = "1.4.0"
+dependencies = [
+ "agent-vitals-data",
+ "agent-vitals-domain",
+ "rusqlite",
+ "serde_json",
 ]
 
 [[package]]

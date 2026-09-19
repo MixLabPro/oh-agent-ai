@@ -326,6 +326,15 @@ enum Cmd {
         #[arg(long = "timeline-series")]
         timeline_series: bool,
     },
+    /// V16 anchor report (LOCAL presentation layer only, never an MCP tool):
+    /// given an opaque session_ref, print that session's workflow anchor
+    /// coordinates (native_event_id + line/offset hints + error classes) and
+    /// task-intent excerpts from the authority DB. No paths are resolved here.
+    TraceAnchors {
+        /// Opaque session_ref from `sessions list` / sessions_search.
+        #[arg(long)]
+        session_ref: String,
+    },
     /// Build a TraceGraph for a session returned by `sessions list` without
     /// exposing or accepting a raw source path. This is the public v0.10
     /// drill-down path; `trace <file>` remains a local diagnostic utility.
@@ -752,9 +761,27 @@ enum Cmd {
     /// envelopes. Stateless single call — populates from Codex sources on
     /// demand (Phase 1); DSH (zstd) is reported `source-unavailable`, never an
     /// empty page (§3.3).
+    /// `sessions` — v0.10 read face over the SQL authority（spec §7）。
     Sessions {
         #[command(subcommand)]
         action: SessionsAction,
+    },
+    /// Probe runner for the Test tab (V17): L0 identity probes with three-tier
+    /// verdicts, consent-gated credentials, interleaved paired runs.
+    Probe {
+        #[command(subcommand)]
+        action: ProbeAction,
+    },
+    /// Passive route-quality report for the Test tab v2 (2026-09-20 pivot):
+    /// aggregates RECORDED usage facts by host × model family — actual model
+    /// identity is hard evidence from protocol responses, no probe requests.
+    RoutesQuality {
+        /// Window length in days (default 90).
+        #[arg(long, default_value_t = 90)]
+        days: u32,
+        /// Machine-readable JSON (the workbench face; plain text otherwise).
+        #[arg(long)]
+        json: bool,
     },
     /// Read-only Data Query API surface (v0.9 Stage 0.5, spec §7's suggested
     /// `data coverage`). Goes through the `SummaryRepository` trait to the
@@ -857,6 +884,76 @@ enum DataAction {
 /// - `Navigation`：今日 token 走 SQL 权威库（`authority_day_token_totals`，
 ///   与 r2a_store `sessions_navigation` 同源），`recent[]` 改成
 ///   `mcp::dispatch("sessions_search", {date, limit})`。
+///
+/// Probe runner for the Test tab (WORKBENCH_TEST_TAB_SPEC §6). P1: L0 identity
+/// probes; verdicts come from domain::probe frozen rules.
+#[derive(Subcommand)]
+enum ProbeAction {
+    /// Add a probe route profile (credentials are stored as REFERENCES only —
+    /// 'env:VAR' or 'ccswitch:<provider-row>'; the secret itself never lands in the DB).
+    /// With --from-cc-switch, batch-register every claude relay found in
+    /// ~/.cc-switch (label/endpoint/model/credential-ref are discovered, not typed).
+    RoutesAdd {
+        /// Scan ~/.cc-switch and register every claude relay as a route
+        /// (mutually exclusive with --label/--model/--route-id/--endpoint/--credential-ref).
+        #[arg(long = "from-cc-switch")]
+        from_cc_switch: bool,
+        /// Stable route id (default: derived from label)
+        #[arg(long)]
+        route_id: Option<String>,
+        #[arg(long)]
+        label: Option<String>,
+        /// claude-code | codex (P1 runs claude-code)
+        #[arg(long, default_value = "claude-code")]
+        host_kind: String,
+        /// Official direct connection uses the CLI's own login; a relay endpoint goes here.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Credential reference: 'env:VAR' or 'ccswitch:<provider-row>'
+        #[arg(long = "credential-ref")]
+        credential_ref: Option<String>,
+        /// Model alias requested on this route (identity probe compares it to resolved).
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// List route profiles (with consent state).
+    Routes {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Grant one-time consent for a route's credential to launch probe requests.
+    Consent {
+        #[arg(long)]
+        route_id: String,
+    },
+    /// Run an L0 identity probe (single route, or paired A/B interleaved).
+    Run {
+        #[arg(long = "route-a")]
+        route_a: String,
+        #[arg(long = "route-b")]
+        route_b: Option<String>,
+        /// Repeats per route (paired mode interleaves A/B/A/B…)
+        #[arg(long, default_value_t = 1)]
+        repeats: usize,
+        /// Hard cap on launched probes for this run (P1 budget semantics).
+        #[arg(long = "max-probes", default_value_t = agent_vitals_probe::runner::DEFAULT_MAX_PROBES)]
+        max_probes: usize,
+        /// Explicit claude binary path (default: $AGENT_VITALS_CLAUDE_BIN or PATH).
+        #[arg(long = "claude-bin")]
+        claude_bin: Option<PathBuf>,
+    },
+    /// Show run status (job row; no results).
+    Status {
+        #[arg(long)]
+        run_id: String,
+    },
+    /// Full report for a run: results + verdict with evidence chain.
+    Report {
+        #[arg(long)]
+        run_id: String,
+    },
+}
+
 #[derive(Subcommand)]
 enum SessionsAction {
     /// List sessions active in a statistics-timezone day or month (optional hour drill-down,
@@ -1722,6 +1819,63 @@ session_store={store} fold={fold}"
     // v0.10.0 的公开下钻入口：只收 sessions_search 给出的 opaque session_ref。
     // 它直接复用 runtime MCP dispatcher，因此 SQL facts、价卡成本、canonical
     // evidence 与桌面端/MCP 完全同源；绝不把 caller-supplied path 送进公开接口。
+    if let Some(Cmd::TraceAnchors { session_ref }) = &args.cmd {
+        // 本地呈现层专属（V16 spec §5）：锚点坐标 + 摘录。绝不走 mcp dispatch
+        // ——那是 agent 消费面，锚点=「去哪找原文」的地图不出那个面。
+        let data_home = agent_vitals_runtime::home::data_home();
+        let salt = match agent_vitals_runtime::mcp::session_ref::load_or_create_salt(&data_home) {
+            Ok(salt) => salt,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
+        let db_path = agent_vitals_data::authority::default_authority_path(&data_home);
+        if !db_path.exists() {
+            eprintln!("authority database not found at {}", db_path.display());
+            std::process::exit(2);
+        }
+        let db = match agent_vitals_data::authority::AuthorityDb::open_readonly(&db_path) {
+            Ok(db) => db,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
+        let candidates: Vec<String> = {
+            let mut stmt = match db.conn().prepare("SELECT session_key FROM sessions") {
+                Ok(stmt) => stmt,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(2);
+                }
+            };
+            let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(2);
+                }
+            };
+            rows.filter_map(Result::ok).collect()
+        };
+        let Some(session_key) =
+            agent_vitals_runtime::mcp::session_ref::resolve(&salt, session_ref, candidates)
+        else {
+            eprintln!("session_ref did not match any session on this machine");
+            std::process::exit(2);
+        };
+        match agent_vitals_runtime::trace_service::session_anchor_report(db.conn(), &session_key) {
+            Ok(report) => {
+                println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
     if let Some(Cmd::TraceRef { session_ref, rows_json, timeline_series }) = &args.cmd {
         let output = if *timeline_series { "timeline_series" } else { "graph" };
         let data_home = agent_vitals_runtime::home::data_home();
@@ -3382,6 +3536,306 @@ session_store={store} fold={fold}"
     // 改走 `mcp::dispatch`，envelope 与 MCP `tools/call` 同源；`findings` 仍
     // 走 r2a_store（DSH/Codex findings 来自 session envelope 的 pre-computed
     // 字段），而 session_detail 另外返回 SQL workflow 事件轴。
+    if let Some(Cmd::Probe { action }) = &args.cmd {
+        let data_home = agent_vitals_runtime::home::data_home();
+        let db_path = agent_vitals_data::authority::default_authority_path(&data_home);
+        if !db_path.exists() {
+            eprintln!("authority database not found at {} — run a sync first", db_path.display());
+            std::process::exit(2);
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_millis() as i64)
+            .unwrap_or_default();
+        let db = match agent_vitals_data::authority::AuthorityDb::open(&db_path, now_ms) {
+            Ok(db) => db,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
+        let conn = db.conn();
+        match action {
+            ProbeAction::RoutesAdd { from_cc_switch, route_id, label, host_kind, endpoint, credential_ref, model } => {
+                if *from_cc_switch {
+                    if route_id.is_some() || label.is_some() || endpoint.is_some() || credential_ref.is_some() || model.is_some() {
+                        eprintln!("--from-cc-switch 与 --label/--model/--route-id/--endpoint/--credential-ref 互斥（发现式注册不手填字段）");
+                        std::process::exit(2);
+                    }
+                    let Some(home) = std::env::var_os("HOME") else {
+                        eprintln!("--from-cc-switch 需要 $HOME（cc-switch 库在 ~/.cc-switch）");
+                        std::process::exit(2);
+                    };
+                    let report = match agent_vitals_probe::discover::scan_ccswitch(Path::new(&home)) {
+                        Ok(report) => report,
+                        Err(error) => {
+                            eprintln!("{error}");
+                            std::process::exit(2);
+                        }
+                    };
+                    let mut entries = Vec::new();
+                    for route in &report.routes {
+                        let route_id = agent_vitals_domain::source_identity::fnv1a64_hex(
+                            format!("{}|{host_kind}", route.label).as_bytes(),
+                        );
+                        // 已存在的档案不动（put_route 虽保留 consent，但重复注册
+                        // 会把 updated_at 无意义地刷新；幂等以「存在即跳过」为准）。
+                        let exists: bool = conn
+                            .query_row(
+                                "SELECT 1 FROM probe_routes WHERE route_id = ?1",
+                                rusqlite::params![route_id],
+                                |_| Ok(()),
+                            )
+                            .is_ok();
+                        if exists {
+                            entries.push(serde_json::json!({
+                                "route_id": route_id,
+                                "label": route.label,
+                                "model": route.model,
+                                "endpoint": route.base_url,
+                                "credential_ref": format!("ccswitch:{}", route.provider_row),
+                                "status": "exists",
+                            }));
+                            continue;
+                        }
+                        let stored = agent_vitals_data::probe::ProbeRoute {
+                            route_id: route_id.clone(),
+                            label: route.label.clone(),
+                            host_kind: host_kind.clone(),
+                            endpoint_base_url: Some(route.base_url.clone()),
+                            credential_ref: Some(format!("ccswitch:{}", route.provider_row)),
+                            model_requested: route.model.clone(),
+                            consent_granted_at_ms: None,
+                        };
+                        if let Err(error) = agent_vitals_data::probe::put_route(conn, &stored, now_ms) {
+                            eprintln!("{error}");
+                            std::process::exit(2);
+                        }
+                        entries.push(serde_json::json!({
+                            "route_id": route_id,
+                            "label": route.label,
+                            "model": route.model,
+                            "endpoint": route.base_url,
+                            "credential_ref": format!("ccswitch:{}", route.provider_row),
+                            "status": "added",
+                            "next": format!("agent-vitals probe consent --route-id {route_id}"),
+                        }));
+                    }
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "routes": entries,
+                            "skipped": report.skipped,
+                            "hint": "凭据只存 ccswitch:<provider-row> 引用；consent 逐条显式授予。",
+                        })
+                    );
+                } else {
+                    let (Some(label), Some(model)) = (label.clone(), model.clone()) else {
+                        eprintln!("routes-add 需要 --label 与 --model（或改用 --from-cc-switch 扫描发现）");
+                        std::process::exit(2);
+                    };
+                    let route_id = route_id.clone().unwrap_or_else(|| {
+                        agent_vitals_domain::source_identity::fnv1a64_hex(
+                            format!("{label}|{host_kind}").as_bytes(),
+                        )
+                    });
+                    let route = agent_vitals_data::probe::ProbeRoute {
+                        route_id: route_id.clone(),
+                        label: label.clone(),
+                        host_kind: host_kind.clone(),
+                        endpoint_base_url: endpoint.clone(),
+                        credential_ref: credential_ref.clone(),
+                        model_requested: model.clone(),
+                        consent_granted_at_ms: None,
+                    };
+                    if let Err(error) = agent_vitals_data::probe::put_route(conn, &route, now_ms) {
+                        eprintln!("{error}");
+                        std::process::exit(2);
+                    }
+                    println!(
+                        "{{\"route_id\": \"{route_id}\", \"consent\": \"none\", \"next\": \"agent-vitals probe consent --route-id {route_id}\"}}"
+                    );
+                }
+            }
+            ProbeAction::Routes { json } => {
+                let mut stmt = match conn.prepare(
+                    "SELECT route_id, label, host_kind, endpoint_base_url, credential_ref,
+                            model_requested, consent_granted_at_ms
+                     FROM probe_routes ORDER BY created_at_ms",
+                ) {
+                    Ok(stmt) => stmt,
+                    Err(error) => {
+                        eprintln!("{error}");
+                        std::process::exit(2);
+                    }
+                };
+                let rows = stmt.query_map([], |row| {
+                    Ok(serde_json::json!({
+                        "route_id": row.get::<_, String>(0)?,
+                        "label": row.get::<_, String>(1)?,
+                        "host_kind": row.get::<_, String>(2)?,
+                        "endpoint_base_url": row.get::<_, Option<String>>(3)?,
+                        "credential_ref": row.get::<_, Option<String>>(4)?,
+                        "model_requested": row.get::<_, String>(5)?,
+                        "consent_granted_at_ms": row.get::<_, Option<i64>>(6)?,
+                    }))
+                });
+                let mut routes = Vec::new();
+                match rows {
+                    Ok(rows) => {
+                        for row in rows {
+                            match row {
+                                Ok(value) => routes.push(value),
+                                Err(error) => {
+                                    eprintln!("{error}");
+                                    std::process::exit(2);
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        std::process::exit(2);
+                    }
+                }
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&routes).unwrap_or_default());
+                } else {
+                    for route in &routes {
+                        let consent = if route["consent_granted_at_ms"].is_null() { "未授权" } else { "已授权" };
+                        println!(
+                            "{}\t{}\t{}\t{}\t[{}]",
+                            route["route_id"].as_str().unwrap_or("?"),
+                            route["label"].as_str().unwrap_or("?"),
+                            route["model_requested"].as_str().unwrap_or("?"),
+                            route["credential_ref"].as_str().unwrap_or("官方直连"),
+                            consent,
+                        );
+                    }
+                }
+            }
+            ProbeAction::Consent { route_id } => {
+                if let Err(error) = agent_vitals_data::probe::grant_consent(conn, route_id, now_ms) {
+                    eprintln!("{error}");
+                    std::process::exit(2);
+                }
+                println!("consent granted for route {route_id} (发起探针即代表请求将经过该路线的中转商)");
+            }
+            ProbeAction::Run { route_a, route_b, repeats, max_probes, claude_bin } => {
+                let config = agent_vitals_probe::runner::RunConfig {
+                    route_a: route_a.clone(),
+                    route_b: route_b.clone(),
+                    repeats: *repeats,
+                    max_probes: *max_probes,
+                    claude_bin: claude_bin.clone(),
+                };
+                match agent_vitals_probe::runner::execute(&db, &config, now_ms) {
+                    Ok(run_id) => {
+                        let report = agent_vitals_data::probe::run_report(conn, &run_id)
+                            .ok()
+                            .flatten()
+                            .unwrap_or(serde_json::json!({}));
+                        println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            ProbeAction::Status { run_id } => {
+                match agent_vitals_data::probe::get_run(conn, run_id) {
+                    Ok(Some(run)) => println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                        "run_id": run.run_id, "mode": run.mode, "status": run.status,
+                        "route_a_id": run.route_a_id, "route_b_id": run.route_b_id,
+                        "n_repeats": run.n_repeats,
+                        "started_at_ms": run.started_at_ms, "finished_at_ms": run.finished_at_ms,
+                    })).unwrap_or_default()),
+                    Ok(None) => {
+                        eprintln!("run '{run_id}' not found");
+                        std::process::exit(2);
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            ProbeAction::Report { run_id } => {
+                match agent_vitals_data::probe::run_report(conn, run_id) {
+                    Ok(Some(report)) => println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default()),
+                    Ok(None) => {
+                        eprintln!("run '{run_id}' not found");
+                        std::process::exit(2);
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    if let Some(Cmd::RoutesQuality { days, json }) = &args.cmd {
+        let data_home = agent_vitals_runtime::home::data_home();
+        let db_path = agent_vitals_data::authority::default_authority_path(&data_home);
+        if !db_path.exists() {
+            eprintln!("authority database not found at {} — run a sync first", db_path.display());
+            std::process::exit(2);
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_millis() as i64)
+            .unwrap_or_default();
+        let since_ms = now_ms.saturating_sub((*days as i64) * 86_400_000);
+        let db = match agent_vitals_data::authority::AuthorityDb::open(&db_path, now_ms) {
+            Ok(db) => db,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
+        match agent_vitals_data::route_quality::route_quality_summary(db.conn(), since_ms, now_ms) {
+            Ok(report) => {
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+                } else {
+                    // 人读面：每宿主一段，族行 = 请求占比 + 请求/会话/token。
+                    let text = |value: &serde_json::Value| value.as_str().unwrap_or("?").to_string();
+                    let num = |value: &serde_json::Value| value.as_i64().unwrap_or(0);
+                    for host in report["hosts"].as_array().unwrap_or(&Vec::new()) {
+                        println!("== {}（{} 请求 / {} 会话，近 {} 天）",
+                            text(&host["host"]), num(&host["totals"]["requests"]), num(&host["totals"]["sessions"]), days);
+                        for family in host["families"].as_array().unwrap_or(&Vec::new()) {
+                            println!("  {:<10} {:>5}%  {:>6} 请求  {:>4} 会话  {:>14} tokens  [{}]",
+                                text(&family["family"]),
+                                family["request_share"].as_f64().unwrap_or(0.0),
+                                num(&family["requests"]),
+                                num(&family["sessions"]),
+                                num(&family["tokens_total"]),
+                                text(&family["flag"]),
+                            );
+                            for model in family["models"].as_array().unwrap_or(&Vec::new()) {
+                                println!("      - {:<34} {:>6} 请求  provider={}",
+                                    text(&model["model"]),
+                                    num(&model["requests"]),
+                                    text(&model["provider_raw"]),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
     if let Some(Cmd::Sessions { action }) = &args.cmd {
         let data_home = agent_vitals_runtime::home::data_home();
         match action {

@@ -175,12 +175,17 @@ const TRIGGER_MIGRATION: &str = "migration";
 /// `fact_writer_sql` 的版本重分类路径改写——不升这个号，历史 25k+ 条 claude 事实
 /// 会永远停在 `missing`，列表照旧全部推给用户。
 ///
-/// 版本 4（WORKBENCH_FINDINGS_TAB_SPEC §9.4-①）：claude-code emitter 修复
+/// 版本 4（V16 内容富化，2026-09-19 政策）：claude-code emitter 开始产任务
+/// 意图摘录（`session_excerpts`）与 workflow 富化列（错误/参数摘录、尺寸、
+/// uuid/行号/偏移锚点）。不升这个号，存量 claude 源不重放，182k+ 事件行的
+/// 新列永远 NULL——回填依赖 `insert_events` 的守卫式 upsert（只补 NULL 列）。
+///
+/// 版本 5（WORKBENCH_FINDINGS_TAB_SPEC §9.4-①）：claude-code emitter 修复
 /// skill_finished 的 outcome 信号——skill 的 tool_result 不带 is_error，改读
 /// record 级 `toolUseResult.success`。历史行的纠正走 `insert_events` 的派生列
-/// upsert（provenance 保持原样）；不升这个号，已入库的 unknown outcome 行会
-/// 因源文件指纹未变而永远不被重放触达。
-const PARSER_VERSION: i64 = 4;
+/// upsert（provenance 保持原样）；不升这个号，v4 重放时仍为 unknown 的
+/// skill_finished 行不会因指纹未变而被再次触达。
+const PARSER_VERSION: i64 = 5;
 
 /// 当前事实解析器版本；同步差量必须把它和文件指纹一起比较。
 pub const fn parser_version() -> i64 {
@@ -430,6 +435,7 @@ pub(crate) fn write_flat_facts_with_sources(
     sources: &[(std::path::PathBuf, (u64, u64))],
     facts: &[Value],
     workflow_events: &[WorkflowEvent],
+    session_excerpts: &[agent_vitals_domain::contracts::workflow::SessionExcerpt],
     route_evidence: Option<&agent_vitals_provider::RouteEvidence>,
     runtime_snapshot: Option<RuntimeSnapshotWrite<'_>>,
     now: i64,
@@ -483,6 +489,7 @@ pub(crate) fn write_flat_facts_with_sources(
         }
         if facts.is_empty()
             && workflow_events.is_empty()
+            && session_excerpts.is_empty()
             // MSRV 1.74：`is_none_or` 稳定于 1.82，这里用 `map_or`。
             && runtime_snapshot.as_ref().map_or(true, |write| write.snapshots.is_empty())
         {
@@ -548,7 +555,7 @@ pub(crate) fn write_flat_facts_with_sources(
                 )?;
             }
         }
-        if facts.is_empty() && workflow_events.is_empty() {
+        if facts.is_empty() && workflow_events.is_empty() && session_excerpts.is_empty() {
             return Ok(());
         }
         for fact in facts
@@ -612,6 +619,16 @@ pub(crate) fn write_flat_facts_with_sources(
             agent_vitals_data::workflow::insert_events(
                 conn,
                 workflow_events,
+                &source_id,
+                &run_id,
+                now,
+            )?;
+        }
+        // V16：任务意图摘录与 workflow 事件同一事务落库（同 source/run 归因）。
+        if !session_excerpts.is_empty() {
+            agent_vitals_data::workflow::insert_session_excerpts(
+                conn,
+                session_excerpts,
                 &source_id,
                 &run_id,
                 now,

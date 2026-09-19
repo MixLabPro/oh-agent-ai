@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -891,6 +891,175 @@ CREATE INDEX billing_declaration_scopes_lookup
   ON billing_declaration_scopes(scope_kind, scope_value, revision_id);
 "#;
 
+/// v16（内容富化 + 源锚点：docs/v1.0.0/SCHEMA_V16_V17_ENRICHMENT_PROBE_SPEC.md §2，
+/// DDL 镜像同步进 SQL 权威库 spec §3.8）。workflow_events 补错误分类/摘录/尺寸/
+/// 锚点九列（词表 = domain crate `enrichment::ErrorClass` 的十值闭集），usage_facts
+/// 补 `reasoning_effort` 证据位（effort 被静默调低的被动证据，宿主报了才填），
+/// sessions 补 `probe_run_ref`（探针会话标记，成本视图过滤键）与任务画像占位，
+/// 新表 `session_excerpts` 承载任务意图三段式文本（提取算法 = domain
+/// `enrichment::make_excerpt`，Python 镜像 + 共享向量锁步）。
+///
+/// **为什么不是一条 `SCHEMA_V16_ADD` batch**：v16 是 v9 以来第一个 ALTER-加列式
+/// 增量，而 `stale_v9_stamp_with_later_tables_upgrades_idempotently` 钉住的不变量
+/// 要求增量能在「版本戳陈旧、表已是新形状」的库上重跑——SQLite 没有
+/// `ADD COLUMN IF NOT EXISTS`，加列逐条以 `pragma_table_info` 守卫、建表/索引用
+/// `IF NOT EXISTS`，幂等由此保证。生产路径行为不变（新库逐列本就缺失）。
+/// 旧行新列 NULL = 未富化（源日志重摄取前不得当 0/空串呈现）。出口投影
+/// （MCP / data-export-redacted）不因本迁移放宽一个字节——excerpt 类字段与
+/// 锚点不出这两个面（2026-09-19 数据留存与出口政策）。
+const SCHEMA_V16_COLUMN_DDLS: &[(&str, &str)] = &[
+    ("workflow_events", "error_code TEXT"),
+    (
+        "workflow_events",
+        "error_class TEXT CHECK (error_class IS NULL OR error_class IN (\n    'transport','rate_limit','auth','schema_violation','method_not_found',\n    'timeout','parse','tool_policy','context_overflow','unknown'))",
+    ),
+    ("workflow_events", "error_excerpt TEXT"),
+    ("workflow_events", "args_excerpt TEXT"),
+    ("workflow_events", "request_bytes INTEGER"),
+    ("workflow_events", "result_bytes INTEGER"),
+    ("workflow_events", "native_event_id TEXT"),
+    ("workflow_events", "source_line INTEGER"),
+    ("workflow_events", "source_byte_offset INTEGER"),
+    ("usage_facts", "reasoning_effort TEXT"),
+    ("sessions", "probe_run_ref TEXT"),
+    ("sessions", "task_profile TEXT"),
+    (
+        "sessions",
+        "task_profile_basis TEXT CHECK (task_profile_basis IS NULL OR task_profile_basis IN ('rule_toolmix','user_label','local_model'))",
+    ),
+];
+
+const SCHEMA_V16_CREATE: &str = r#"
+CREATE TABLE IF NOT EXISTS session_excerpts (
+  session_key TEXT NOT NULL REFERENCES sessions(session_key),
+  ordinal INTEGER NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('user_first','user_turn','assistant_final','subagent_task')),
+  excerpt TEXT NOT NULL,
+  provenance TEXT NOT NULL CHECK (provenance IN ('verbatim','truncated','scrubbed')),
+  native_event_id TEXT,
+  source_id TEXT REFERENCES source_files(source_id),
+  ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id),
+  PRIMARY KEY(session_key, ordinal, role)
+);
+CREATE INDEX IF NOT EXISTS session_excerpts_session
+  ON session_excerpts(session_key, ordinal);
+CREATE INDEX IF NOT EXISTS workflow_events_error_class_time
+  ON workflow_events(error_class, event_ts_ms) WHERE error_class IS NOT NULL;
+"#;
+
+/// 幂等应用 v16 增量（见 [`SCHEMA_V16_COLUMN_DDLS`] 的说明）。列已存在则跳过，
+/// 表/索引 `IF NOT EXISTS`——在陈旧版本戳的新形状库上重跑不炸。
+fn apply_schema_v16(conn: &Connection) -> Result<(), rusqlite::Error> {
+    for (table, column_ddl) in SCHEMA_V16_COLUMN_DDLS {
+        let column = column_ddl.split_whitespace().next().unwrap_or_default();
+        // 只把「查无此列」当缺失；真错误（锁/损坏）原样上抛——吞掉会以误导性的
+        // duplicate column 晚爆（Step2 验收 nit）。
+        let present = match conn.query_row(
+            &format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = '{column}'"),
+            [],
+            |_| Ok(true),
+        ) {
+            Ok(present) => present,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(error) => return Err(error),
+        };
+        if !present {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column_ddl};"))?;
+        }
+    }
+    conn.execute_batch(SCHEMA_V16_CREATE)
+}
+
+/// v17（探针面五表：docs/v1.0.0/SCHEMA_V16_V17_ENRICHMENT_PROBE_SPEC.md §4，
+/// 镜像同步进 SQL 权威库 spec §3.9）。与 v16 不同，v17 **全是建表**、无加列——
+/// 全部 `IF NOT EXISTS` 即天然幂等（陈旧版本戳 + 新形状表重放不炸），无需
+/// pragma 守卫。纪律要点：凭据永不入库（`credential_ref` 是 'ccswitch:<row>' /
+/// 'env:VAR' 引用）；题面/判据/canary 串留文件系统（`manifest_ref` + sha256，
+/// 机密待遇）；`consent_granted_at_ms` 为 NULL 时路线不得发起请求；四桶与
+/// usage_facts 同名同义（探针会话两路记账必须对得上，spec §10-7）；金额一律
+/// `*_minor + currency` 分币种。runner 与「测试」tab UI 属后续迭代（spec §13
+/// P2），本迁移只落数据层。
+const SCHEMA_V17_ADD: &str = r#"
+CREATE TABLE IF NOT EXISTS probe_routes (
+  route_id TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  host_kind TEXT NOT NULL CHECK (host_kind IN ('claude-code','codex')),
+  endpoint_base_url TEXT,
+  credential_ref TEXT,
+  model_requested TEXT NOT NULL,
+  consent_granted_at_ms INTEGER,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  UNIQUE(label, host_kind)
+);
+CREATE TABLE IF NOT EXISTS probe_suites (
+  suite_id TEXT PRIMARY KEY,
+  version TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('l0_identity','l0_capability','l1_canary')),
+  manifest_ref TEXT NOT NULL,
+  manifest_sha256 TEXT NOT NULL,
+  rule_version TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  UNIQUE(suite_id, version)
+);
+CREATE TABLE IF NOT EXISTS probe_runs (
+  run_id TEXT PRIMARY KEY,
+  mode TEXT NOT NULL CHECK (mode IN ('single','paired')),
+  route_a_id TEXT NOT NULL REFERENCES probe_routes(route_id),
+  route_b_id TEXT REFERENCES probe_routes(route_id),
+  suite_id TEXT NOT NULL REFERENCES probe_suites(suite_id),
+  n_repeats INTEGER NOT NULL CHECK (n_repeats >= 1),
+  interleave_seed INTEGER,
+  status TEXT NOT NULL CHECK (status IN ('queued','running','completed','failed','budget_stopped')),
+  currency TEXT,
+  cost_budget_minor INTEGER,
+  cost_estimated_minor INTEGER,
+  started_at_ms INTEGER,
+  finished_at_ms INTEGER,
+  lease_owner TEXT,
+  created_at_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS probe_results (
+  result_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES probe_runs(run_id),
+  route_id TEXT NOT NULL REFERENCES probe_routes(route_id),
+  task_id TEXT NOT NULL,
+  repeat_idx INTEGER NOT NULL CHECK (repeat_idx >= 0),
+  outcome TEXT NOT NULL CHECK (outcome IN ('pass','fail','error','timeout')),
+  uncached_input_tokens INTEGER,
+  cache_read_tokens INTEGER,
+  cache_write_tokens INTEGER,
+  output_tokens INTEGER,
+  turns INTEGER,
+  wall_ms INTEGER,
+  ttft_ms INTEGER,
+  requested_model TEXT NOT NULL,
+  resolved_model TEXT,
+  reasoning_effort_requested TEXT,
+  reasoning_effort_reported TEXT,
+  thinking_blocks INTEGER,
+  context_accepted_tokens INTEGER,
+  error_code TEXT,
+  evidence_json TEXT NOT NULL,
+  session_key TEXT REFERENCES sessions(session_key),
+  UNIQUE(run_id, route_id, task_id, repeat_idx)
+);
+CREATE INDEX IF NOT EXISTS probe_results_run
+  ON probe_results(run_id, route_id);
+CREATE TABLE IF NOT EXISTS probe_verdicts (
+  verdict_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES probe_runs(run_id),
+  verdict TEXT NOT NULL CHECK (verdict IN (
+    'confirmed_mismatch','suspected_degradation','no_signal','underpowered','inconclusive_confounded')),
+  statistic_json TEXT NOT NULL,
+  evidence_chain_json TEXT NOT NULL,
+  confounders_json TEXT NOT NULL,
+  rule_version TEXT NOT NULL,
+  decided_at_ms INTEGER NOT NULL,
+  UNIQUE(run_id)
+);
+"#;
+
 /// 增量 7.5：v1 base 表之上的 4 个脱敏只读 view。`CREATE VIEW IF NOT EXISTS`
 /// 幂等——在 `ensure_schema` 的「version == SCHEMA_VERSION」分支上执行。
 /// **不**进 `SCHEMA_V1` 主 DDL，避免『v1 库必须重跑 SCHEMA_V1 才能拿 view』
@@ -1081,9 +1250,35 @@ impl AuthorityDb {
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
+            Some(16) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V17_ADD);
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(15) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = apply_schema_v16(conn).and_then(|()| conn.execute_batch(SCHEMA_V17_ADD));
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
             Some(14) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V15_ADD);
+                let migration = conn.execute_batch(SCHEMA_V15_ADD).and_then(|()| apply_schema_v16(conn)).and_then(|()| conn.execute_batch(SCHEMA_V17_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1096,7 +1291,7 @@ impl AuthorityDb {
             }
             Some(13) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V14_ADD).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
+                let migration = conn.execute_batch(SCHEMA_V14_ADD).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD)).and_then(|()| apply_schema_v16(conn)).and_then(|()| conn.execute_batch(SCHEMA_V17_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1109,7 +1304,7 @@ impl AuthorityDb {
             }
             Some(12) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V13_ADD).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
+                let migration = conn.execute_batch(SCHEMA_V13_ADD).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD)).and_then(|()| apply_schema_v16(conn)).and_then(|()| conn.execute_batch(SCHEMA_V17_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1122,7 +1317,7 @@ impl AuthorityDb {
             }
             Some(11) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V12_ADD).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
+                let migration = conn.execute_batch(SCHEMA_V12_ADD).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD)).and_then(|()| apply_schema_v16(conn)).and_then(|()| conn.execute_batch(SCHEMA_V17_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1135,7 +1330,7 @@ impl AuthorityDb {
             }
             Some(10) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V11_ADD).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
+                let migration = conn.execute_batch(SCHEMA_V11_ADD).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD)).and_then(|()| apply_schema_v16(conn)).and_then(|()| conn.execute_batch(SCHEMA_V17_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1148,7 +1343,7 @@ impl AuthorityDb {
             }
             Some(9) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V10_ADD).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
+                let migration = conn.execute_batch(SCHEMA_V10_ADD).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD)).and_then(|()| apply_schema_v16(conn)).and_then(|()| conn.execute_batch(SCHEMA_V17_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1161,7 +1356,7 @@ impl AuthorityDb {
             }
             Some(8) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V9_ADD).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
+                let migration = conn.execute_batch(SCHEMA_V9_ADD).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD)).and_then(|()| apply_schema_v16(conn)).and_then(|()| conn.execute_batch(SCHEMA_V17_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1174,7 +1369,7 @@ impl AuthorityDb {
             }
             Some(7) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V8_ADD).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
+                let migration = conn.execute_batch(SCHEMA_V8_ADD).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD)).and_then(|()| apply_schema_v16(conn)).and_then(|()| conn.execute_batch(SCHEMA_V17_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1187,7 +1382,7 @@ impl AuthorityDb {
             }
             Some(6) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V7_ADD).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
+                let migration = conn.execute_batch(SCHEMA_V7_ADD).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD)).and_then(|()| apply_schema_v16(conn)).and_then(|()| conn.execute_batch(SCHEMA_V17_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute(
@@ -1203,7 +1398,7 @@ impl AuthorityDb {
             }
             Some(5) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V6_ADD).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
+                let migration = conn.execute_batch(SCHEMA_V6_ADD).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD)).and_then(|()| apply_schema_v16(conn)).and_then(|()| conn.execute_batch(SCHEMA_V17_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute(
@@ -1222,7 +1417,7 @@ impl AuthorityDb {
             }
             Some(4) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = conn.execute_batch(SCHEMA_V5_ADD).and_then(|()| conn.execute_batch(SCHEMA_V6_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD));
+                let migration = conn.execute_batch(SCHEMA_V5_ADD).and_then(|()| conn.execute_batch(SCHEMA_V6_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V7_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V8_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V9_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V10_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V11_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V12_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V13_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V14_ADD)).and_then(|()| conn.execute_batch(SCHEMA_V15_ADD)).and_then(|()| apply_schema_v16(conn)).and_then(|()| conn.execute_batch(SCHEMA_V17_ADD));
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1279,6 +1474,14 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V15_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = apply_schema_v16(conn) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V17_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -1346,6 +1549,14 @@ impl AuthorityDb {
                             return Err(error.into());
                         }
                         if let Err(error) = conn.execute_batch(SCHEMA_V15_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = apply_schema_v16(conn) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V17_ADD) {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
@@ -1420,6 +1631,14 @@ impl AuthorityDb {
                             let _ = conn.execute_batch("ROLLBACK");
                             return Err(error.into());
                         }
+                        if let Err(error) = apply_schema_v16(conn) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
+                        if let Err(error) = conn.execute_batch(SCHEMA_V17_ADD) {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
+                        }
                         conn.execute(
                             "UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
                             rusqlite::params![SCHEMA_VERSION.to_string()],
@@ -1473,6 +1692,8 @@ impl AuthorityDb {
                 conn.execute_batch(SCHEMA_V13_ADD)?;
                 conn.execute_batch(SCHEMA_V14_ADD)?;
                 conn.execute_batch(SCHEMA_V15_ADD)?;
+                apply_schema_v16(conn)?;
+                conn.execute_batch(SCHEMA_V17_ADD)?;
                 // 增量 7.5：新建库时同步加 4 个脱敏只读 view（spec §8.2 P1-5）。
                 conn.execute_batch(VIEWS_V1)?;
                 conn.execute(
@@ -1542,6 +1763,17 @@ impl AuthorityDb {
     pub fn retention_usage_facts(&self, cutoff_ms: i64) -> Result<usize, AuthorityError> {
         Ok(self.conn.execute(
             "DELETE FROM usage_facts WHERE event_ts_ms IS NOT NULL AND event_ts_ms < ?1",
+            rusqlite::params![cutoff_ms],
+        )?)
+    }
+
+    /// V16：`session_excerpts` 随会话活跃月滚动（spec §7）——会话最后活跃时刻
+    /// 早于 cutoff 时该会话的摘录整组删除。与 `retention_usage_facts` 同一趟
+    /// 跑（同一 cutoff），不另起定时；会话行本身不动（软删除语义归 delete 面）。
+    pub fn retention_session_excerpts(&self, cutoff_ms: i64) -> Result<usize, AuthorityError> {
+        Ok(self.conn.execute(
+            "DELETE FROM session_excerpts WHERE session_key IN (
+                 SELECT session_key FROM sessions WHERE last_observed_at_ms < ?1)",
             rusqlite::params![cutoff_ms],
         )?)
     }
@@ -3366,6 +3598,300 @@ mod tests {
             )
             .unwrap();
         assert_eq!(exists, 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn v15_database_upgrades_to_v16_with_null_enrichment_columns() {
+        // 手工搭一个 v15 库（SCHEMA_V1 + V3..V15、版本行钉 15——即 None 建库分支
+        // 的完整前缀），插入旧形状的 workflow_events 行后升级：新列必须全 NULL
+        // （NULL = 未富化，不是 0/空串——spec §0 的不编数纪律），CHECK 词表立即生效。
+        let db = tmp_db("v15-to-v16");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        for batch in [
+            SCHEMA_V3_ADD, SCHEMA_V4_ADD, SCHEMA_V5_ADD, SCHEMA_V6_ADD, SCHEMA_V7_ADD,
+            SCHEMA_V8_ADD, SCHEMA_V9_ADD, SCHEMA_V10_ADD, SCHEMA_V11_ADD, SCHEMA_V12_ADD,
+            SCHEMA_V13_ADD, SCHEMA_V14_ADD, SCHEMA_V15_ADD,
+        ] {
+            conn.execute_batch(batch).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO schema_meta(key, value) VALUES('schema_version', '15')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES('run-v15', 1, 'test', 'succeeded', 15)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, last_observed_at_ms)
+             VALUES('sess-v15', 'claude-code', 'native-1', 'ns', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workflow_events(event_id, session_key, event_ts_ms, event_type, outcome, ingested_run_id, created_at_ms)
+             VALUES('evt-v15', 'sess-v15', 1, 'tool_finished', 'failed', 'run-v15', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key, source_event_id, observation_kind, event_ts_ms, ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES('fact-v15', 'claude-code', 'ns', 'native-1', 'sess-v15', 'evt-1', 'message', 1, 'run-v15', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch("COMMIT;").unwrap();
+        drop(conn);
+
+        let upgraded = AuthorityDb::open(&db, 2_000).unwrap();
+        let version: String = upgraded
+            .conn()
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+
+        // 旧行新列全 NULL——「未富化」既不是 0 也不是空串。三表逐一断言（spec §10-3
+        // 的抽查口径）：workflow_events 九列、sessions 三列、usage_facts.reasoning_effort。
+        let all_null_events: i64 = upgraded
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_events WHERE event_id = 'evt-v15'
+                 AND error_code IS NULL AND error_class IS NULL AND error_excerpt IS NULL
+                 AND args_excerpt IS NULL AND native_event_id IS NULL AND request_bytes IS NULL
+                 AND result_bytes IS NULL AND source_line IS NULL AND source_byte_offset IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(all_null_events, 1, "workflow_events 九个新列必须全 NULL");
+        let all_null_session: i64 = upgraded
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_key = 'sess-v15'
+                 AND probe_run_ref IS NULL AND task_profile IS NULL AND task_profile_basis IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(all_null_session, 1, "sessions 三个新列必须全 NULL");
+        let effort: Option<String> = upgraded
+            .conn()
+            .query_row(
+                "SELECT reasoning_effort FROM usage_facts WHERE fact_id = 'fact-v15'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(effort.is_none(), "reasoning_effort 必须为 NULL（宿主未报）");
+
+        // CHECK 词表：闭集外拒绝、闭集内放行。
+        let rejected = upgraded.conn().execute(
+            "INSERT INTO workflow_events(event_id, session_key, event_ts_ms, event_type, outcome, ingested_run_id, created_at_ms, error_class)
+             VALUES('evt-bad', 'sess-v15', 2, 'tool_finished', 'failed', 'run-v15', 2, 'bogus')",
+            [],
+        );
+        assert!(rejected.is_err(), "error_class 闭集外必须被 CHECK 拒绝");
+        upgraded
+            .conn()
+            .execute(
+                "INSERT INTO workflow_events(event_id, session_key, event_ts_ms, event_type, outcome, ingested_run_id, created_at_ms, error_class)
+                 VALUES('evt-ok', 'sess-v15', 3, 'tool_finished', 'failed', 'run-v15', 3, 'rate_limit')",
+                [],
+            )
+            .unwrap();
+
+        // session_excerpts：role/provenance 词表生效。
+        upgraded
+            .conn()
+            .execute(
+                "INSERT INTO session_excerpts(session_key, ordinal, role, excerpt, provenance, ingested_run_id)
+                 VALUES('sess-v15', 0, 'user_first', '帮我修登录页', 'verbatim', 'run-v15')",
+                [],
+            )
+            .unwrap();
+        let bad_role = upgraded.conn().execute(
+            "INSERT INTO session_excerpts(session_key, ordinal, role, excerpt, provenance, ingested_run_id)
+             VALUES('sess-v15', 1, 'bogus', 'x', 'verbatim', 'run-v15')",
+            [],
+        );
+        assert!(bad_role.is_err(), "role 闭集外必须被 CHECK 拒绝");
+
+        // 其余新列逐表点名（pragma_table_info）。
+        for (table, column) in [
+            ("workflow_events", "error_excerpt"),
+            ("workflow_events", "result_bytes"),
+            ("usage_facts", "reasoning_effort"),
+            ("sessions", "probe_run_ref"),
+            ("sessions", "task_profile_basis"),
+        ] {
+            let present: i64 = upgraded
+                .conn()
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(present, 1, "{table}.{column} 必须存在");
+        }
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn v16_stale_stamp_recreates_probe_tables_idempotently() {
+        // 建一个 v17 库后删掉五张探针表、把版本戳拨回 16——重开走 Some(16)
+        // 分支：IF NOT EXISTS 重建五表，幂等不炸（stale-stamp 不变量的 V17 版）。
+        let db = tmp_db("v16-to-v17");
+        {
+            let seeded = AuthorityDb::open(&db, 1).unwrap();
+            let conn = seeded.conn();
+            conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
+            conn.execute_batch(
+                "DROP TABLE probe_verdicts; DROP INDEX IF EXISTS probe_results_run;
+                 DROP TABLE probe_results; DROP TABLE probe_runs;
+                 DROP TABLE probe_suites; DROP TABLE probe_routes;
+                 UPDATE schema_meta SET value = '16' WHERE key = 'schema_version';",
+            ).unwrap();
+            conn.execute_batch("COMMIT;").unwrap();
+            drop(seeded);
+        }
+        let upgraded = AuthorityDb::open(&db, 2).unwrap();
+        let version: String = upgraded.conn().query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+        for table in ["probe_routes", "probe_suites", "probe_runs", "probe_results", "probe_verdicts"] {
+            let present: i64 = upgraded.conn().query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(present, 1, "{table} 必须被重建");
+        }
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn v17_pure_replay_with_tables_present_is_a_noop() {
+        // 表已存在 + 陈旧戳 16：IF NOT EXISTS 纯重放（v9 幂等不变量的 V17 补钉——
+        // 上一个测试盖的是"表被删后重建"，本测试盖"表都在时空跑"）。
+        let db = tmp_db("v17-replay");
+        {
+            let seeded = AuthorityDb::open(&db, 1).unwrap();
+            seeded.conn().execute(
+                "UPDATE schema_meta SET value = '16' WHERE key = 'schema_version'",
+                [],
+            ).unwrap();
+            drop(seeded);
+        }
+        let reopened = AuthorityDb::open(&db, 2).unwrap();
+        let version: String = reopened.conn().query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+        // 纯重放不炸也不重复建表：probe 表各恰好一份（sqlite_master 计数 = 1）。
+        for table in ["probe_routes", "probe_suites", "probe_runs", "probe_results", "probe_verdicts"] {
+            let count: i64 = reopened.conn().query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(count, 1);
+        }
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn probe_tables_enforce_vocabularies_fk_order_and_uniqueness() {
+        // 词表闭集（host_kind/kind/mode/status/outcome/verdict）、FK 顺序
+        // （run 依赖 route+suite）、verdict 每 run 唯一、consent 语义位可 NULL。
+        let db = tmp_db("v17-vocab");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        let conn = authority.conn();
+        // FK 顺序：没有 route 就建 run → 必须被拒。
+        let bad_fk = conn.execute_batch(
+            "INSERT INTO probe_runs(run_id, mode, route_a_id, suite_id, n_repeats, status, created_at_ms)
+             VALUES('r0','paired','no-route','no-suite',1,'queued',1)",
+        );
+        assert!(bad_fk.is_err(), "run 必须依赖已存在的 route/suite");
+        // 合法链路：route（未授权，consent NULL 是合法存储态——发起请求由
+        // runner 层拒，不是库层）→ suite → run → result → verdict。
+        conn.execute_batch(
+            "INSERT INTO probe_routes(route_id, label, host_kind, model_requested, created_at_ms, updated_at_ms)
+             VALUES('rt1','官方直连','claude-code','claude-sonnet-5',1,1);
+             INSERT INTO probe_suites(suite_id, version, kind, manifest_ref, manifest_sha256, rule_version, created_at_ms)
+             VALUES('l0','1','l0_identity','probe/suites/l0/1/manifest.toml','deadbeef','stat-v1',1);
+             INSERT INTO probe_runs(run_id, mode, route_a_id, suite_id, n_repeats, interleave_seed, status, currency, cost_budget_minor, created_at_ms)
+             VALUES('run1','paired','rt1','l0',3,42,'running','USD',500,1);
+             INSERT INTO probe_results(result_id, run_id, route_id, task_id, repeat_idx, outcome,
+                 requested_model, resolved_model, evidence_json, session_key)
+             VALUES('res1','run1','rt1','identity-echo',0,'pass','claude-sonnet-5','claude-sonnet-5','{}',NULL);",
+        ).unwrap();
+        // 词表拒绝：verdict 闭集外 / mode 闭集外 / outcome 闭集外 / kind 闭集外。
+        for sql in [
+            "INSERT INTO probe_verdicts(verdict_id, run_id, verdict, statistic_json, evidence_chain_json, confounders_json, rule_version, decided_at_ms)
+             VALUES('v-bad','run1','definitely_watered','{}','[]','{}','stat-v1',1)",
+            "INSERT INTO probe_runs(run_id, mode, route_a_id, suite_id, n_repeats, status, created_at_ms)
+             VALUES('r-bad','trio','rt1','l0',1,'queued',1)",
+            "INSERT INTO probe_results(result_id, run_id, route_id, task_id, repeat_idx, outcome, requested_model, evidence_json)
+             VALUES('res-bad','run1','rt1','t',0,'skipped','m','{}')",
+            "INSERT INTO probe_suites(suite_id, version, kind, manifest_ref, manifest_sha256, rule_version, created_at_ms)
+             VALUES('l2','1','l2_public','x','y','z',1)",
+        ] {
+            assert!(conn.execute_batch(sql).is_err(), "闭集外必须被拒：{sql}");
+        }
+        // verdict 每 run 唯一：第二条同 run 必须被拒。
+        conn.execute_batch(
+            "INSERT INTO probe_verdicts(verdict_id, run_id, verdict, statistic_json, evidence_chain_json, confounders_json, rule_version, decided_at_ms)
+             VALUES('v1','run1','suspected_degradation','{}','[]','{}','stat-v1',2);",
+        ).unwrap();
+        let dup = conn.execute_batch(
+            "INSERT INTO probe_verdicts(verdict_id, run_id, verdict, statistic_json, evidence_chain_json, confounders_json, rule_version, decided_at_ms)
+             VALUES('v2','run1','no_signal','{}','[]','{}','stat-v1',3)",
+        );
+        assert!(dup.is_err(), "每个 run 只允许一条 verdict");
+        // results 的 (run_id, route_id, task_id, repeat_idx) 唯一：同槽重插被拒。
+        let dup_result = conn.execute_batch(
+            "INSERT INTO probe_results(result_id, run_id, route_id, task_id, repeat_idx, outcome, requested_model, evidence_json)
+             VALUES('res-dup','run1','rt1','identity-echo',0,'fail','claude-sonnet-5','{}')",
+        );
+        assert!(dup_result.is_err(), "同 (run,route,task,repeat) 槽位不得重复");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn fresh_database_carries_v16_enrichment_schema() {
+        // 新建库直接带 V16（None 分支链尾）——不依赖任何升级路径。
+        let db = tmp_db("fresh-v16");
+        let opened = AuthorityDb::open(&db, 1_000).unwrap();
+        let tables: i64 = opened
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_excerpts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 1);
+        let index: i64 = opened
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'workflow_events_error_class_time'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 1);
         let _ = std::fs::remove_file(&db);
     }
 

@@ -338,6 +338,152 @@ CREATE TABLE host_runtime_snapshots (
 产品读面只从本表读 `codex_quota`，没有可用套餐证据时返回 unavailable，绝不
 回退扫描 `~/.codex`。
 
+### 3.8 v16 内容富化与源锚点（2026-09-19，权威定义 docs/v1.0.0/SCHEMA_V16_V17_ENRICHMENT_PROBE_SPEC.md §2）
+
+2026-09-19「数据留存与出口政策」（AGENTS.md）落地：摄取期不再为隐私销毁分析
+信号，富化进新列/新表、词表用 CHECK 闭集、账务/行为事实表纯度不动。旧行新列
+**NULL = 未富化**（源日志重摄取前不得当 0/空串呈现）；出口投影（MCP /
+`data-export-redacted`）不因本节放宽——excerpt 类字段与锚点字段不出这两个面。
+
+```sql
+ALTER TABLE workflow_events ADD COLUMN error_code TEXT;        -- 'http:429' | 'jsonrpc:-32601' | 'tool:…' | 'host:<raw>'
+ALTER TABLE workflow_events ADD COLUMN error_class TEXT
+  CHECK (error_class IS NULL OR error_class IN (
+    'transport','rate_limit','auth','schema_violation','method_not_found',
+    'timeout','parse','tool_policy','context_overflow','unknown'));
+ALTER TABLE workflow_events ADD COLUMN error_excerpt TEXT;     -- 错误首行截断，仅本地呈现
+ALTER TABLE workflow_events ADD COLUMN args_excerpt TEXT;      -- 参数摘要截断，仅本地呈现
+ALTER TABLE workflow_events ADD COLUMN request_bytes INTEGER;
+ALTER TABLE workflow_events ADD COLUMN result_bytes INTEGER;
+ALTER TABLE workflow_events ADD COLUMN native_event_id TEXT;   -- 宿主原生 id，锚点重定位键
+ALTER TABLE workflow_events ADD COLUMN source_line INTEGER;    -- 加速 hint，自校验
+ALTER TABLE workflow_events ADD COLUMN source_byte_offset INTEGER;
+CREATE INDEX workflow_events_error_class_time
+  ON workflow_events(error_class, event_ts_ms) WHERE error_class IS NOT NULL;
+
+ALTER TABLE usage_facts ADD COLUMN reasoning_effort TEXT;      -- 宿主报了才填；NULL = 未报
+
+ALTER TABLE sessions ADD COLUMN probe_run_ref TEXT;            -- 探针会话标记，成本视图过滤键
+ALTER TABLE sessions ADD COLUMN task_profile TEXT;
+ALTER TABLE sessions ADD COLUMN task_profile_basis TEXT
+  CHECK (task_profile_basis IS NULL OR task_profile_basis IN ('rule_toolmix','user_label','local_model'));
+
+CREATE TABLE session_excerpts (
+  session_key TEXT NOT NULL REFERENCES sessions(session_key),
+  ordinal INTEGER NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('user_first','user_turn','assistant_final','subagent_task')),
+  excerpt TEXT NOT NULL,
+  provenance TEXT NOT NULL CHECK (provenance IN ('verbatim','truncated','scrubbed')),
+  native_event_id TEXT,
+  source_id TEXT REFERENCES source_files(source_id),
+  ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id),
+  PRIMARY KEY(session_key, ordinal, role)
+);
+CREATE INDEX session_excerpts_session ON session_excerpts(session_key, ordinal);
+```
+
+实现注意（`authority.rs`）：v16 是 v9 以来首个 ALTER-加列式增量，为保住
+`stale_v9_stamp_with_later_tables_upgrades_idempotently` 钉住的幂等升级不变量
+（版本戳陈旧、表已新形状的库上重跑不炸），`apply_schema_v16` 逐列以
+`pragma_table_info` 守卫、建表/索引用 `IF NOT EXISTS`——上文的 DDL 是其语义
+镜像。词表与提取算法的单一真相源在 `agent-vitals-domain::enrichment`
+（Python 镜像 `agent_vitals/agent/enrichment.py` + 共享向量
+`fixtures/enrichment/vectors.json` 双侧断言）。
+
+### 3.9 v17 探针面五表（2026-09-19，权威定义 docs/v1.0.0/SCHEMA_V16_V17_ENRICHMENT_PROBE_SPEC.md §4）
+
+「测试」tab 的数据层：`probe_routes`（路线档案：凭据只存**引用**——`ccswitch:<row>` /
+`env:VAR`，`consent_granted_at_ms` 为 NULL 时不得发起请求）、`probe_suites`（题库只存
+manifest 引用 + sha256，题面/判据/canary 串留文件系统按机密待遇）、`probe_runs`（job 行，
+`lease_owner` 沿用 billing recalculation 的文件锁先例；`budget_stopped` 由预算熔断触发）、
+`probe_results`（task × repeat × route；四桶与 `usage_facts` 同名同义，探针会话两路记账
+必须对得上；`resolved_model` 取不到为 NULL 不猜；`evidence_json` 是 B 类判定证据的富存储）、
+`probe_verdicts`（五级判定闭集 + 统计量/证据链/混杂记录 + `rule_version` 可归因到冻结
+统计规则）。全部 `CREATE TABLE IF NOT EXISTS`——无加列、天然幂等，与 v16 的 pragma
+守卫式 `apply_schema_v16` 相比是更简单的增量形态。runner 与判定计算属「测试」tab
+迭代（[WORKBENCH_TEST_TAB_SPEC](v1.0.0/WORKBENCH_TEST_TAB_SPEC.md)），本节只落数据层。
+
+```sql
+CREATE TABLE IF NOT EXISTS probe_routes (
+  route_id TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  host_kind TEXT NOT NULL CHECK (host_kind IN ('claude-code','codex')),
+  endpoint_base_url TEXT,
+  credential_ref TEXT,                       -- 'ccswitch:<row>' | 'env:VAR'：引用，永不存凭据本体
+  model_requested TEXT NOT NULL,
+  consent_granted_at_ms INTEGER,             -- NULL = 未授权，runner 拒绝发起
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  UNIQUE(label, host_kind)
+);
+CREATE TABLE IF NOT EXISTS probe_suites (
+  suite_id TEXT PRIMARY KEY,
+  version TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('l0_identity','l0_capability','l1_canary')),
+  manifest_ref TEXT NOT NULL,
+  manifest_sha256 TEXT NOT NULL,
+  rule_version TEXT NOT NULL,                -- 冻结统计判据版本（判定可归因）
+  created_at_ms INTEGER NOT NULL,
+  UNIQUE(suite_id, version)
+);
+CREATE TABLE IF NOT EXISTS probe_runs (
+  run_id TEXT PRIMARY KEY,
+  mode TEXT NOT NULL CHECK (mode IN ('single','paired')),
+  route_a_id TEXT NOT NULL REFERENCES probe_routes(route_id),
+  route_b_id TEXT REFERENCES probe_routes(route_id),   -- single 模式 NULL
+  suite_id TEXT NOT NULL REFERENCES probe_suites(suite_id),
+  n_repeats INTEGER NOT NULL CHECK (n_repeats >= 1),
+  interleave_seed INTEGER,
+  status TEXT NOT NULL CHECK (status IN ('queued','running','completed','failed','budget_stopped')),
+  currency TEXT,
+  cost_budget_minor INTEGER,
+  cost_estimated_minor INTEGER,
+  started_at_ms INTEGER,
+  finished_at_ms INTEGER,
+  lease_owner TEXT,
+  created_at_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS probe_results (
+  result_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES probe_runs(run_id),
+  route_id TEXT NOT NULL REFERENCES probe_routes(route_id),
+  task_id TEXT NOT NULL,
+  repeat_idx INTEGER NOT NULL CHECK (repeat_idx >= 0),
+  outcome TEXT NOT NULL CHECK (outcome IN ('pass','fail','error','timeout')),
+  uncached_input_tokens INTEGER,             -- 四桶与 usage_facts 同名同义
+  cache_read_tokens INTEGER,
+  cache_write_tokens INTEGER,
+  output_tokens INTEGER,
+  turns INTEGER,
+  wall_ms INTEGER,
+  ttft_ms INTEGER,
+  requested_model TEXT NOT NULL,
+  resolved_model TEXT,                       -- 取不到 = NULL，不猜
+  reasoning_effort_requested TEXT,
+  reasoning_effort_reported TEXT,
+  thinking_blocks INTEGER,
+  context_accepted_tokens INTEGER,
+  error_code TEXT,
+  evidence_json TEXT NOT NULL,               -- B 类判定证据富存储（合成数据，放开存）
+  session_key TEXT REFERENCES sessions(session_key),
+  UNIQUE(run_id, route_id, task_id, repeat_idx)
+);
+CREATE INDEX IF NOT EXISTS probe_results_run
+  ON probe_results(run_id, route_id);
+CREATE TABLE IF NOT EXISTS probe_verdicts (
+  verdict_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES probe_runs(run_id),
+  verdict TEXT NOT NULL CHECK (verdict IN (
+    'confirmed_mismatch','suspected_degradation','no_signal','underpowered','inconclusive_confounded')),
+  statistic_json TEXT NOT NULL,
+  evidence_chain_json TEXT NOT NULL,
+  confounders_json TEXT NOT NULL,
+  rule_version TEXT NOT NULL,
+  decided_at_ms INTEGER NOT NULL,
+  UNIQUE(run_id)
+);
+```
+
 ## 4. SQL 查询模型
 
 不把金额/聚合复制成第二份可变真相。以 `usage_facts`、`host_bills`、价格快照和预算配置为基础建立 repository 查询；复杂查询可使用 SQL view，但 view 不持久化可写状态。

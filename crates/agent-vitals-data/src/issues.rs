@@ -723,6 +723,127 @@ fn usage_growth_groups(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
 
 /// Unified read-only projection across behavior issues and authority-source
 /// problems. Source families remain distinguishable via `source_kind`.
+/// V17 探针判定的 findings 回流（WORKBENCH_TEST_TAB_SPEC §11-P2）：把
+/// `confirmed_mismatch` / `suspected_degradation` 级判定投影成 source_kind=
+/// `probe` 的组。`no_signal`/`underpowered`/`inconclusive_confounded` 是"干净
+/// 结果"不是 finding——不进待处理面。投影只读不写 issue_instances（判定事实
+/// 在 probe_verdicts；可关闭状态机是 P3 接线——本投影的组与 usage_growth
+/// 同为"读面证据"性质）。
+///
+/// 复审修订：① 按 (verdict, host, 路线对, 日桶) 聚合——同日同组合的多次判定
+/// 并成一组（count 累计），否则同 group_id 重复组会撑爆待处理面；② 尊重
+/// from_ms/to_ms 窗口（与 source_issue_groups 同纪律，旧判定会过期）；③ 成对
+/// run 的 object 同时携带 A↔B 双方标签（mismatch 可能是 B 侧——只挂 A 是
+/// 错误归因）；④ sample 从**嵌套**证据链取（runner 存的是 combine 产物：
+/// 外层 chain 的每个条目是单报告，身份证据在其内层 evidence_chain_json[0]）。
+pub fn probe_verdict_groups(
+    conn: &Connection,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
+) -> rusqlite::Result<Vec<Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT v.verdict, v.decided_at_ms, v.rule_version, v.evidence_chain_json,
+                r.run_id, r.mode, r.route_a_id, r.route_b_id
+         FROM probe_verdicts v
+         JOIN probe_runs r ON r.run_id = v.run_id
+         WHERE v.verdict IN ('confirmed_mismatch','suspected_degradation')
+         ORDER BY v.decided_at_ms DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?,
+        ))
+    })?;
+    // 路线标签缓存（route_a/b 各查一次）。
+    let label_of = |conn: &Connection, route_id: &str| -> String {
+        conn.query_row(
+            "SELECT label FROM probe_routes WHERE route_id = ?1",
+            rusqlite::params![route_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| route_id.to_string())
+    };
+    let host_of = |conn: &Connection, route_id: &str| -> String {
+        conn.query_row(
+            "SELECT host_kind FROM probe_routes WHERE route_id = ?1",
+            rusqlite::params![route_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "claude-code".to_string())
+    };
+    // (verdict, host, object, bucket) → (首见, 末见, count, sample)。
+    type ProbeAccum = std::collections::BTreeMap<
+        (String, String, String, String),
+        (i64, i64, usize, Value),
+    >;
+    let mut accum = ProbeAccum::new();
+    for row in rows {
+        let (verdict, decided_at, rule_version, evidence_raw, run_id, mode, route_a, route_b) = row?;
+        if let Some(from) = from_ms {
+            if decided_at < from {
+                continue;
+            }
+        }
+        if let Some(to) = to_ms {
+            if decided_at >= to {
+                continue;
+            }
+        }
+        let label_a = label_of(conn, &route_a);
+        let (host, object) = match &route_b {
+            Some(route_b_id) => {
+                let label_b = label_of(conn, route_b_id);
+                (host_of(conn, &route_a), format!("{label_a}↔{label_b}"))
+            }
+            None => (host_of(conn, &route_a), label_a),
+        };
+        let evidence: Value = serde_json::from_str(&evidence_raw).unwrap_or_else(|_| json!([]));
+        // 嵌套链：外层条目是单报告，身份证据在内层 chain[0]（复审 F2——
+        // 顶层没有 requested/resolved，扁平读取恒 null 是假绿测试的根源）。
+        let identity = evidence
+            .as_array()
+            .and_then(|reports| reports.first())
+            .and_then(|report| report.get("evidence_chain_json"))
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .cloned()
+            .unwrap_or(json!({}));
+        let sample = json!({
+            "run_id": run_id, "verdict": verdict, "rule_version": rule_version,
+            "route_a": object, "mode": mode,
+            "requested": identity.get("requested").cloned().unwrap_or(Value::Null),
+            "resolved": identity.get("resolved").cloned().unwrap_or(Value::Null),
+        });
+        let key = (
+            verdict.clone(),
+            host.clone(),
+            object.clone(),
+            issue_day_bucket(decided_at),
+        );
+        let entry = accum.entry(key).or_insert((
+            decided_at, decided_at, 0, sample,
+        ));
+        entry.0 = entry.0.min(decided_at);
+        entry.1 = entry.1.max(decided_at);
+        entry.2 += 1;
+    }
+    let mut groups = Vec::new();
+    for ((verdict, host, object, _bucket), (first, last, count, sample)) in accum {
+        let severity = if verdict == "confirmed_mismatch" { "critical" } else { "warning" };
+        groups.push(projection_group(
+            "probe", &verdict, &host, &object, "model_identity",
+            last, count, severity, "pending", sample, "diagnostic-only",
+        ));
+        // 首见时刻单独放回（projection_group 只收一个时刻）。
+        if let Some(group) = groups.last_mut() {
+            group["first_seen_at_ms"] = json!(first);
+        }
+    }
+    Ok(groups)
+}
+
 pub fn issue_groups_with_sources(
     conn: &Connection,
     from_ms: Option<i64>,
@@ -734,6 +855,7 @@ pub fn issue_groups_with_sources(
     let mut groups = behavior["groups"].as_array().cloned().unwrap_or_default();
     groups.extend(source_issue_groups(conn, from_ms, to_ms)?);
     groups.extend(usage_growth_groups(conn)?);
+    groups.extend(probe_verdict_groups(conn, from_ms, to_ms)?);
     groups.sort_by(|a, b| b["actionability"].as_f64().partial_cmp(&a["actionability"].as_f64()).unwrap_or(std::cmp::Ordering::Equal)
         .then_with(|| a["group_id"].as_str().cmp(&b["group_id"].as_str())));
     let offset = cursor.and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).min(groups.len());
@@ -1282,6 +1404,61 @@ mod tests {
         assert_eq!(groups[0]["sample_evidence"].as_array().unwrap().len(), 3);
         assert_eq!(groups[0]["first_seen_at_ms"], 1_000);
         assert_eq!(groups[0]["last_seen_at_ms"], 1_003);
+    }
+
+    #[test]
+    fn probe_verdict_groups_surface_only_actionable_verdicts() {
+        // V17 回流（复审定稿版）：① 只有 actionable 判定回流；② sample 从
+        // **嵌套**证据链取（runner 存 combine 产物：外层条目是单报告，身份
+        // 证据在内层 chain[0]——扁平形状是假绿，不复用）；③ 同日同组合聚合
+        // 成一组；④ 窗口过滤生效。
+        let path = std::env::temp_dir().join(format!(
+            "av-probe-findings-{}-{}.sqlite3",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let db = crate::authority::AuthorityDb::open(&path, 1).unwrap();
+        let conn = db.conn();
+        // runner 真实形状：evidence_chain_json = [ {verdict, evidence_chain_json:[{kind:"model_identity", requested, resolved}], route, repeat}, … ]
+        let chain = r#"[{"verdict":"confirmed_mismatch","rule_version":"l0-identity-v1","statistic_json":{},"evidence_chain_json":[{"kind":"model_identity","requested":"m","resolved":"other","matched":false}],"route":"rt1","repeat":0}]"#;
+        conn.execute_batch(&format!(
+            "INSERT INTO probe_routes(route_id, label, host_kind, model_requested, created_at_ms, updated_at_ms)
+             VALUES('rt1','官方直连','claude-code','claude-sonnet-5',1,1);
+             INSERT INTO probe_suites(suite_id, version, kind, manifest_ref, manifest_sha256, rule_version, created_at_ms)
+             VALUES('l0','1','l0_identity','x','h','l0-identity-v1',1);
+             INSERT INTO probe_runs(run_id, mode, route_a_id, suite_id, n_repeats, status, created_at_ms)
+             VALUES('run1','single','rt1','l0',1,'completed',1);
+             INSERT INTO probe_runs(run_id, mode, route_a_id, suite_id, n_repeats, status, created_at_ms)
+             VALUES('run2','single','rt1','l0',1,'completed',1);
+             INSERT INTO probe_runs(run_id, mode, route_a_id, suite_id, n_repeats, status, created_at_ms)
+             VALUES('run3','single','rt1','l0',1,'completed',1);
+             INSERT INTO probe_verdicts(verdict_id, run_id, verdict, statistic_json, evidence_chain_json, confounders_json, rule_version, decided_at_ms)
+             VALUES('v1','run1','confirmed_mismatch','{{}}','{chain}','[]','l0-identity-v1',100);
+             INSERT INTO probe_verdicts(verdict_id, run_id, verdict, statistic_json, evidence_chain_json, confounders_json, rule_version, decided_at_ms)
+             VALUES('v2','run2','confirmed_mismatch','{{}}','{chain}','[]','l0-identity-v1',200);
+             INSERT INTO probe_verdicts(verdict_id, run_id, verdict, statistic_json, evidence_chain_json, confounders_json, rule_version, decided_at_ms)
+             VALUES('v3','run3','no_signal','{{}}','{chain}','[]','l0-identity-v1',300);",
+        )).unwrap();
+        let groups = probe_verdict_groups(conn, None, None).unwrap();
+        assert_eq!(groups.len(), 1, "同日同组合聚成一组，no_signal 不回流：{groups:?}");
+        assert_eq!(groups[0]["source_kind"], json!("probe"));
+        assert_eq!(groups[0]["rule"], json!("confirmed_mismatch"));
+        assert_eq!(groups[0]["severity"], json!("critical"));
+        assert_eq!(groups[0]["count"], json!(2), "两次判定累计");
+        assert_eq!(groups[0]["first_seen_at_ms"], json!(100));
+        assert_eq!(groups[0]["last_seen_at_ms"], json!(200));
+        // 嵌套链取值：顶层没有 requested——只有内层 chain[0] 有。
+        assert_eq!(groups[0]["sample_evidence"][0]["requested"], json!("m"));
+        assert_eq!(groups[0]["sample_evidence"][0]["resolved"], json!("other"));
+        // 窗口：只看 [150, ∞) → 只剩 run2。
+        let windowed = probe_verdict_groups(conn, Some(150), None).unwrap();
+        assert_eq!(windowed.len(), 1);
+        assert_eq!(windowed[0]["count"], json!(1));
+        assert_eq!(windowed[0]["first_seen_at_ms"], json!(200));
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
     }
 
     #[test]
