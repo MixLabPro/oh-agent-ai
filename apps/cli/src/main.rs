@@ -2585,7 +2585,7 @@ session_store={store} fold={fold}"
         manifest,
         machine_namespace,
         write,
-        rows_json,
+        rows_json: _,
     }) = &args.cmd
     {
         // machine_namespace 必传（spec §9）——与 workbuddy/codex 同款纪律：
@@ -2612,11 +2612,7 @@ session_store={store} fold={fold}"
             Path::new(&home),
         ) {
             Ok(payload) => {
-                if *rows_json {
-                    println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
-                } else {
-                    println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
-                }
+                println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
             }
             Err(e) => {
                 eprintln!("plugin-ingest failed: {e}");
