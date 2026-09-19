@@ -367,6 +367,36 @@
          不发探针请求）；主动 L0 探针收进「高级」折叠区（隔离在 cc-switch 型
          机器上不成立，见 spec）。 -->
     <section id="tab-test" class="tabpane">
+      <div class="panel" id="test-active-panel">
+        <div class="panel-title">主动测试：当前路线
+          <span class="panel-title-right note" id="test-current-hint"></span>
+        </div>
+        <div class="form-row">
+          <label class="grow"><span>要测试的模型</span>
+            <input id="test-current-model" type="text" placeholder="如 claude-sonnet-5" />
+          </label>
+          <button id="test-current-btn" class="btn primary" type="button">发起测试</button>
+        </div>
+        <div id="test-current-note" class="muted note">按你当前生效的路线发起 1 条真实请求（不注入、不覆盖——测的就是现在用的配置），10–60 秒出判定。</div>
+        <div id="test-current-status" class="muted" hidden>运行中…（可切走再回来）</div>
+      </div>
+
+      <div class="panel" id="test-report-panel" hidden>
+        <div class="panel-title">测试结果<span class="panel-title-right note" id="test-report-meta"></span></div>
+        <div id="test-report-verdict"></div>
+        <div class="table-wrap">
+          <table class="sess-table">
+            <thead>
+              <tr>
+                <th>路线</th><th>#</th><th>结果</th><th>requested</th><th>resolved</th><th>四桶 in/cr/cw/out</th>
+              </tr>
+            </thead>
+            <tbody id="test-report-body"></tbody>
+          </table>
+        </div>
+        <div class="muted note" id="test-report-foot"></div>
+      </div>
+
       <div class="find-toolbar">
         <span class="muted" id="test-quality-summary"></span>
         <span class="flex-spacer"></span>
@@ -399,21 +429,6 @@
         <div id="test-banner" class="notice danger" hidden role="alert" aria-live="assertive"></div>
         <div id="test-hint" class="muted note"></div>
         <div id="test-run-status" class="muted" hidden>运行中…（L0 单次约 10–60 秒；可切走再回来）</div>
-        <div class="panel" id="test-report-panel" hidden>
-          <div class="panel-title">测试结果<span class="panel-title-right note" id="test-report-meta"></span></div>
-          <div id="test-report-verdict"></div>
-          <div class="table-wrap">
-            <table class="sess-table">
-              <thead>
-                <tr>
-                  <th>路线</th><th>#</th><th>结果</th><th>requested</th><th>resolved</th><th>四桶 in/cr/cw/out</th>
-                </tr>
-              </thead>
-              <tbody id="test-report-body"></tbody>
-            </table>
-          </div>
-          <div class="muted note" id="test-report-foot"></div>
-        </div>
       </details>
     </section>
 <section id="tab-sources" class="tabpane settings-page">

@@ -915,17 +915,31 @@ enum ProbeAction {
         #[arg(long)]
         json: bool,
     },
+    /// Show the CURRENT effective claude route (from ~/.claude/settings.json env,
+    /// whitelisted: base_url + model only — credentials are never read). This is
+    /// the default object of the tab's active test (spec §0 v1.2): test what the
+    /// host actually uses, no isolation injection.
+    Current {
+        #[arg(long)]
+        json: bool,
+    },
     /// Grant one-time consent for a route's credential to launch probe requests.
     Consent {
         #[arg(long)]
         route_id: String,
     },
     /// Run an L0 identity probe (single route, or paired A/B interleaved).
+    /// --route-a current tests the CURRENT effective route (no isolation — the
+    /// host's own settings apply; the honest answer for cc-switch machines).
     Run {
         #[arg(long = "route-a")]
         route_a: String,
         #[arg(long = "route-b")]
         route_b: Option<String>,
+        /// Model override for --route-a current (updates the current-route row;
+        /// ignored for regular routes whose model comes from the profile).
+        #[arg(long)]
+        model: Option<String>,
         /// Repeats per route (paired mode interleaves A/B/A/B…)
         #[arg(long, default_value_t = 1)]
         repeats: usize,
@@ -3549,6 +3563,40 @@ session_store={store} fold={fold}"
             }
         };
         let conn = db.conn();
+        // 「当前路线」行的 ensure（spec §0 v1.2）：无存储凭据、无端点注入——
+        // endpoint 刻意 NULL，让 claude 完全按自己的 settings 发起（测的才是
+        // 「现在生效的路线」）。consent 在建行时即置：该行没有 credential_ref，
+        // consent 门针对的「用存储凭据发起计费请求」不适用；知情动作由调用方
+        // （UI 两击布防 / CLI 用户本人）承担。put_route 冲突时保留既有 consent、
+        // 只刷模型/标签（模型可被 --model 反复改写）。
+        fn ensure_current_route_row(
+            conn: &rusqlite::Connection,
+            model_override: Option<&str>,
+            now_ms: i64,
+        ) -> String {
+            let hint = std::env::var_os("HOME")
+                .as_deref()
+                .map(std::path::Path::new)
+                .and_then(agent_vitals_probe::current_route::read_claude_settings_hint);
+            let model = model_override
+                .map(str::to_string)
+                .or_else(|| hint.as_ref().and_then(|h| h.model.clone()))
+                .unwrap_or_else(|| "claude-sonnet-5".to_string());
+            let route = agent_vitals_data::probe::ProbeRoute {
+                route_id: agent_vitals_probe::current_route::CURRENT_ROUTE_ID.to_string(),
+                label: "当前配置（宿主现在实际使用的路线）".to_string(),
+                host_kind: "claude-code".to_string(),
+                endpoint_base_url: None,
+                credential_ref: None,
+                model_requested: model,
+                consent_granted_at_ms: Some(now_ms),
+            };
+            if let Err(error) = agent_vitals_data::probe::put_route(conn, &route, now_ms) {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+            route.route_id
+        }
         match action {
             ProbeAction::RoutesAdd { from_cc_switch, route_id, label, host_kind, endpoint, credential_ref, model } => {
                 if *from_cc_switch {
@@ -3715,9 +3763,36 @@ session_store={store} fold={fold}"
                 }
                 println!("consent granted for route {route_id} (发起探针即代表请求将经过该路线的中转商)");
             }
-            ProbeAction::Run { route_a, route_b, repeats, max_probes, claude_bin } => {
+            ProbeAction::Current { json } => {
+                let hint = std::env::var_os("HOME")
+                    .as_deref()
+                    .map(std::path::Path::new)
+                    .and_then(agent_vitals_probe::current_route::read_claude_settings_hint);
+                let value = serde_json::json!({
+                    "route_id": agent_vitals_probe::current_route::CURRENT_ROUTE_ID,
+                    "base_url": hint.as_ref().and_then(|h| h.base_url.clone()),
+                    "model": hint.as_ref().and_then(|h| h.model.clone()),
+                    "note": "白名单读取 ~/.claude/settings.json（base_url/model）；凭据不读。",
+                });
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&value).unwrap_or_default());
+                } else {
+                    println!("当前路线：{}", value["base_url"].as_str().unwrap_or("官方直连（无自定义端点）"));
+                    println!("默认模型：{}", value["model"].as_str().unwrap_or("（未配置）"));
+                }
+            }
+            ProbeAction::Run { route_a, route_b, model, repeats, max_probes, claude_bin } => {
+                let route_a = if route_a == "current" {
+                    ensure_current_route_row(conn, model.as_deref(), now_ms)
+                } else {
+                    if model.is_some() {
+                        eprintln!("--model 只与 --route-a current 搭配（普通路线的模型来自档案）");
+                        std::process::exit(2);
+                    }
+                    route_a.clone()
+                };
                 let config = agent_vitals_probe::runner::RunConfig {
-                    route_a: route_a.clone(),
+                    route_a,
                     route_b: route_b.clone(),
                     repeats: *repeats,
                     max_probes: *max_probes,

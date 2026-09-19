@@ -14,6 +14,21 @@ fallback / 请求被改写两类已登记）· [路由归因 spec](../PROVIDER_R
 
 ## 0. 一句话结论
 
+**2026-09-20 转向（v1.1）**：实机验证证明主动探针的路线隔离在 cc-switch 型机器上
+**不成立**——`~/.claude/settings.json` 的 `env` 块由 claude CLI 启动时自注入，优先级
+高于我们注入的进程 env（实测：注入无效主机名仍请求胜算云并 402）；能压住它的
+`--settings` 显式键又要求凭据离开「仅经子进程 env 传递」的红线。**默认面改为被动
+路线质量分析**（`routes-quality`：`usage_facts.model_id` 的实际模型族分布——协议
+响应原样，anthropic 官方不可能返回 deepseek/glm，是硬证据），主动 L0 探针降级为
+「高级」折叠区。用户语言也从「路线 A/B」改为「宿主 × 路线 × 实际模型」：用户关心
+"我用 claude-code 跑的请求，实际拿到的是什么模型、失败了多少"。词表与判定在
+`domain::route_quality`（Rust/Python 对拍 `fixtures/route_quality/vectors.json`）；
+`<synthetic>`（claude 请求失败的本地占位）单列 API 错误、不计任何模型族用量，
+也不得当作 resolved 身份判 mismatch（2026-09-20 误报修复）。原 §1-§12 的主动
+取证设计继续约束折叠区内的探针面。
+
+---
+
 「测试」tab 是仓库第一块**主动取证**能力：用成对对照实验（官方直连 vs 中转路线）+
 证据分级判定，回答"我的模型被降智了吗 / 中转商注水了吗"。两条总纪律：**没有硬证据
 不出「确认」级结论、功效不足如实说**（判定三级见 §4，与 `metered_estimate` 不当账单

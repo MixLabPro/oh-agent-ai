@@ -241,11 +241,31 @@ pub async fn routes_quality(days: u32) -> Result<Value, Value> {
     .map_err(|e| probe_error(&e.to_string()))?
 }
 
+/// 当前生效路线提示（白名单读 settings；「测试」tab 主动测试的默认对象）。
+#[tauri::command]
+pub async fn probe_current_hint() -> Result<Value, Value> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let args: Vec<String> = ["probe", "current", "--json"].iter().map(|s| s.to_string()).collect();
+        let Some(mut command) = probe_command(&args) else {
+            return Err(probe_error("agent-vitals binary not found"));
+        };
+        let out = command.output().map_err(|e| probe_error(&e.to_string()))?;
+        if !out.status.success() {
+            return Err(probe_error(&String::from_utf8_lossy(&out.stderr)));
+        }
+        serde_json::from_slice(&out.stdout).map_err(|e| probe_error(&e.to_string()))
+    })
+    .await
+    .map_err(|e| probe_error(&e.to_string()))?
+}
+
 /// 启动一次探针 run（异步）：立即返回 ticket，前端轮询 probe_run_result。
+/// `model` 仅配合 route_a == "current"（当前路线测试的用户可改模型）。
 #[tauri::command]
 pub async fn probe_run_start(
     route_a: String,
     route_b: Option<String>,
+    model: Option<String>,
     repeats: usize,
     max_probes: usize,
 ) -> Result<Value, Value> {
@@ -261,6 +281,10 @@ pub async fn probe_run_start(
         if let Some(route_b) = &route_b {
             args.push("--route-b".into());
             args.push(route_b.clone());
+        }
+        if let Some(model) = &model {
+            args.push("--model".into());
+            args.push(model.clone());
         }
         let Some(mut command) = probe_command(&args) else {
             if let Ok(mut queue) = PROBE_RESULTS.lock() {

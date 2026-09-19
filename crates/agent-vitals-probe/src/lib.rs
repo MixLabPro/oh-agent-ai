@@ -6,6 +6,7 @@
 //! P1 范围：L0 身份探针；L1 金丝雀与统计判定随 tab P2。
 
 pub mod credentials;
+pub mod current_route;
 pub mod discover;
 pub mod l0;
 pub mod runner;

@@ -3467,6 +3467,7 @@ pub fn run() {
             sync_request_status,
             session_trace,
                 store::probe_routes_list,
+                store::probe_current_hint,
                 store::routes_quality,
             store::probe_run_start,
             store::probe_run_result,

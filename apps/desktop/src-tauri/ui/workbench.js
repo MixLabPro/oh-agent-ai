@@ -7698,6 +7698,7 @@ const testState = { routes: [], ticket: null, polling: null };
 
 async function loadTestTab() {
   loadQualityReport();
+  loadCurrentRouteHint();
   // 高级区路线表每次进入都刷新（轻命令；consent 经 CLI 授予后不能停留在旧态）。
   const loaded = await invoke("probe_routes_list").catch(() => null);
   testState.routes = Array.isArray(loaded) ? loaded : [];
@@ -7705,6 +7706,67 @@ async function loadTestTab() {
   if (loaded === null) {
     showTestNotice("danger", "路线读取失败", "agent-vitals CLI 不可用？重进本页重试。");
   }
+}
+
+// ---------- 主动测试：当前路线（默认对象，spec §0 v1.2） ----------
+
+async function loadCurrentRouteHint() {
+  const hint = await invoke("probe_current_hint").catch(() => null);
+  const label = document.getElementById("test-current-hint");
+  const modelInput = document.getElementById("test-current-model");
+  if (!hint) {
+    label.textContent = "当前路线：读取失败（CLI 不可用？）";
+    return;
+  }
+  const host = (hint.base_url || "").replace(/^https?:\/\//, "").split("/")[0];
+  label.textContent = `当前路线：${host || "官方直连（无自定义端点）"}${hint.model ? ` · 默认模型 ${hint.model}` : ""}`;
+  if (hint.model && !modelInput.value) modelInput.value = hint.model;
+}
+
+let currentTestArmed = false;
+
+async function startCurrentTest() {
+  const button = document.getElementById("test-current-btn");
+  const statusBox = document.getElementById("test-current-status");
+  // 两击布防：第一次点换成确认态（5 秒内有效）——测试花真金白银，知情后才发。
+  if (!currentTestArmed) {
+    currentTestArmed = true;
+    button.textContent = "确认发起（1 条真实请求，按当前路线计费）";
+    setTimeout(() => {
+      currentTestArmed = false;
+      button.textContent = "发起测试";
+    }, 5000);
+    return;
+  }
+  currentTestArmed = false;
+  button.textContent = "发起测试";
+  button.disabled = true;
+  statusBox.hidden = false;
+  const model = document.getElementById("test-current-model").value.trim() || null;
+  const start = await invoke("probe_run_start", {
+    routeA: "current", routeB: null, model, repeats: 1, maxProbes: 1,
+  }).catch((error) => {
+    statusBox.hidden = true;
+    button.disabled = false;
+    showTestNotice("danger", "启动失败", typeof error === "string" ? error : JSON.stringify(error));
+    return null;
+  });
+  if (!start) return;
+  testState.ticket = start.ticket;
+  if (testState.polling) clearInterval(testState.polling);
+  testState.polling = setInterval(async () => {
+    const result = await invoke("probe_run_result", { ticket: testState.ticket }).catch(() => null);
+    if (!result || result.state === "running") return;
+    clearInterval(testState.polling);
+    testState.polling = null;
+    statusBox.hidden = true;
+    button.disabled = false;
+    if (result.state === "error") {
+      showTestNotice("danger", "测试失败", result.message || "未知错误");
+      return;
+    }
+    renderTestReport(result.report);
+  }, 3000);
 }
 
 // ---------- 被动路线质量（默认面） ----------
@@ -7994,6 +8056,7 @@ function renderTestReport(report) {
 
   const body = document.getElementById("test-report-body");
   const routeLabel = (id) => {
+    if (id === "current-claude-code") return "当前配置";
     const route = testState.routes.find((r) => r.route_id === id);
     return route ? route.label : id;
   };
@@ -8026,6 +8089,7 @@ function renderTestReport(report) {
 document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("test-run-btn").addEventListener("click", startTestRun);
   document.getElementById("test-route-a").addEventListener("change", updateTestRunButton);
+  document.getElementById("test-current-btn").addEventListener("click", startCurrentTest);
   document.getElementById("test-quality-reload").addEventListener("click", () => loadQualityReport());
   document.getElementById("test-quality-days").addEventListener("change", () => loadQualityReport());
 });

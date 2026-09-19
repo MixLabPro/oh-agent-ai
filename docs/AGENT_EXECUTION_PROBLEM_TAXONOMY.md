@@ -62,8 +62,8 @@
 | 单会话模型混切 | 切换时点/原因不可见 | `workflow_events` 的 `model_switched` 事件（emitter 已产出，实机 177k 事件在库）+ usage 节点 model_id | 🟡 信号已在库，读面/升格规则待接（TraceGraph `ModelChange` 节点产出仍占位） |
 | 路由到贵端点 | custom 被官方卡 USD 兜底 | 归因线 | ✅ 2026-09-18 合并的时间线判定（cc-switch 证据） |
 | 限流 / 配额耗尽 | 撞窗 | SV607 + `windows_recent`（按 (窗口, 重置时刻) 去重） | ✅ `hosts/claude_code/sources/quota.rs` |
-| 模型降级 fallback | 主模型不可用悄悄换 | `probe_verdicts`（V17 探针面，判定 `confirmed_mismatch/suspected_degradation` 五级） | 🟡 schema 已定稿（V16/V17 spec §4），runner/五表随「测试」tab P1 落地 |
-| 请求被改写 | 中转注入/删改 system prompt、剥 thinking、改参数 | `probe_results` 的 `reasoning_effort_requested vs reported`、thinking_blocks、温度 0 稳定性（V17） | 🟡 同上——被动面另有 `usage_facts.reasoning_effort` 证据位（V16 已落库，宿主报了才填） |
+| 模型降级 fallback | 主模型不可用悄悄换 | **被动面：`usage_facts.model_id` 实际模型族**（`domain::route_quality` 判族，协议响应原样=硬证据）；主动面：`probe_verdicts` 五级判定 | ✅ 被动面已上线（2026-09-20 `routes-quality`，实机：claude-code 近 90 天 50% 请求跑非官方模型族）。主动探针面降为「高级」——隔离在 cc-switch 型机器不成立（settings.json env 压制进程注入，见测试 tab spec §0 v1.1） |
+| 请求被改写 | 中转注入/删改 system prompt、剥 thinking、改参数 | `probe_results` 的 `reasoning_effort_requested vs reported`、thinking_blocks、温度 0 稳定性（V17） | 🟡 主动探针面同上受限——被动面另有 `usage_facts.reasoning_effort` 证据位（V16 已落库，宿主报了才填）；`<synthetic>` 计数（API 失败）已在 routes-quality 单列 |
 
 ## 6. 会话/行为层
 
