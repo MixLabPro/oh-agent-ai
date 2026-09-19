@@ -291,6 +291,49 @@
       <!-- 新鲜度条（WORKBENCH_FINDINGS_TAB_SPEC §4.8）：数字截止时刻 + stale 宿主名单。 -->
       <div id="find-freshness" class="muted note" hidden></div>
 
+      <!-- 计数反馈（WORKBENCH_FINDINGS_TAB_SPEC §3.1/§5.6）：状态迁移后「已处理 1
+           项 · 待处理命中 N → M」，显示数秒后自动收起。 -->
+      <div id="find-receipt" class="form-receipt" hidden role="status"></div>
+
+
+      <!-- 待办区（spec §3.1）：只收「无脑可解决」的项——动作明确、表单预填、
+           点击有结果、可撤销。SV6xx 行为命中是事实不是任务，一律不进这里
+           （§1 判断标准 2 / §8），它们在下方证据区。 -->
+      <div class="panel" id="find-todo">
+        <div class="panel-title">待办</div>
+        <div class="muted note">只收能就地解决的事：动作已预填、点了有结果。行为命中（SV6xx）与只读证据在下方证据区。</div>
+        <div id="find-todo-empty" class="empty" hidden>没有待办。需要决策的行为证据在下方证据区。</div>
+        <div id="find-todo-list" class="sk-rows"></div>
+      </div>
+
+      <!-- ②模型 × Harness 对比（spec §3.2/§4，P2）：决策证据面。金额按币种/口径
+           分列永不相加（§1.5）；浪费率仅 DSH 有证据、未接入恒「—」（§4.2）；
+           行为标记是宿主级聚合（§4.7）。 -->
+      <div class="panel" id="find-matrix">
+        <div class="panel-title">模型 × Harness 对比</div>
+        <div class="muted note">每个组合一行。名义便宜但费 token 的组合在这里露馅；点行展开看四桶 token、贡献会话与宿主级行为标记。</div>
+        <div id="find-matrix-sort" class="muted note"></div>
+        <div id="find-matrix-empty" class="empty" hidden>本月没有可对比的组合（需要有用量事实）。</div>
+        <div class="table-wrap">
+          <table class="sess-table">
+            <thead>
+              <tr>
+                <th>组合</th><th class="num">会话</th><th class="num">token</th>
+                <th class="num">名义成本</th><th class="num">单会话</th>
+                <th class="num">缓存命中</th><th class="num">浪费率</th><th class="num">撞限流</th>
+              </tr>
+            </thead>
+            <tbody id="find-matrix-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 证据区（spec §3.3）：规则命中与分组明细整体降级到这里，默认收起；
+           回答「这个数字是哪些命中构成的」，不承担首屏。 -->
+      <details id="find-evidence-box" class="find-evidence">
+        <summary id="find-evidence-summary">证据明细</summary>
+        <!-- 统计卡与宿主分布是证据面的计数（P2 从首屏移入：首屏只留待办与对比）。
+-->
       <div class="cards cards-4">
         <div class="stat">
           <div class="label">总问题</div>
@@ -314,26 +357,8 @@
         </div>
       </div>
 
-      <!-- 计数反馈（WORKBENCH_FINDINGS_TAB_SPEC §3.1/§5.6）：状态迁移后「已处理 1
-           项 · 待处理命中 N → M」，显示数秒后自动收起。 -->
-      <div id="find-receipt" class="form-receipt" hidden role="status"></div>
 
       <div class="chips" id="find-chips"></div>
-
-      <!-- 待办区（spec §3.1）：只收「无脑可解决」的项——动作明确、表单预填、
-           点击有结果、可撤销。SV6xx 行为命中是事实不是任务，一律不进这里
-           （§1 判断标准 2 / §8），它们在下方证据区。 -->
-      <div class="panel" id="find-todo">
-        <div class="panel-title">待办</div>
-        <div class="muted note">只收能就地解决的事：动作已预填、点了有结果。行为命中（SV6xx）与只读证据在下方证据区。</div>
-        <div id="find-todo-empty" class="empty" hidden>没有待办。需要决策的行为证据在下方证据区。</div>
-        <div id="find-todo-list" class="sk-rows"></div>
-      </div>
-
-      <!-- 证据区（spec §3.3）：规则命中与分组明细整体降级到这里，默认收起；
-           回答「这个数字是哪些命中构成的」，不承担首屏。 -->
-      <details id="find-evidence-box" class="find-evidence">
-        <summary id="find-evidence-summary">证据明细</summary>
         <div class="panel">
           <div class="panel-title">规则级汇总</div>
           <div id="find-rules-empty" class="empty" hidden>暂无发现</div>

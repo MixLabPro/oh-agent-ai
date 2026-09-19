@@ -78,6 +78,13 @@ impl Default for RemedyCandidate {
     fn default() -> Self { remedy_for("<unknown>") }
 }
 
+/// issues 投影的总行数（issue_instances 去重后的组数无关，只数实例行）。
+/// 供桌面端判定「投影全空 = 首次引导」（store.rs `issues_projection_empty`）：
+/// 有任何一行就说明跑过 findings，首屏不再触发 evaluator 刷新。
+pub fn issues_projection_count(conn: &rusqlite::Connection) -> rusqlite::Result<i64> {
+    conn.query_row("SELECT COUNT(*) FROM issue_instances", [], |r| r.get(0))
+}
+
 pub fn remedy_for(issue_type: &str) -> RemedyCandidate {
     match issue_type {
         "retry_loop" => RemedyCandidate { remedy_id: "inspect-retry-policy", diagnostic_only: false },
@@ -887,6 +894,31 @@ pub fn issue_instance(conn: &Connection, issue_id: &str) -> rusqlite::Result<Opt
 mod tests {
     use super::*;
     use crate::authority::AuthorityDb;
+
+    /// §1.6 P1.1：`issues_projection_count` 三态——空表 0（引导放行）、有行 ≥1
+    /// （纯读）、表读不到（损坏库）按空处理（仍引导，不崩）。桌面端
+    /// `issues_projection_empty` 以它为唯一事实源。
+    #[test]
+    fn issues_projection_count_three_states() {
+        let dir = std::env::temp_dir().join(format!("av-issues-count-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = AuthorityDb::open(&dir.join("agent-vitals.sqlite3"), 1_700_000_000_000).unwrap();
+        assert_eq!(issues_projection_count(db.conn()).unwrap(), 0, "空表 → 0（引导放行）");
+        db.conn()
+            .execute(
+                "INSERT INTO issue_instances(issue_id, machine_namespace, host, session_key, issue_type,
+                     instance_fingerprint, status, severity, evaluator_id, evaluator_version,
+                     evidence_fingerprint, opened_at_ms, metadata_json)
+                 VALUES ('i1', 'm', 'codex', NULL, 'SV610', 'fp', 'open', 'warning', 'ev', '1', 'ef', 1, '{}')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(issues_projection_count(db.conn()).unwrap(), 1, "有行 → 1（纯读）");
+        let bare = rusqlite::Connection::open_in_memory().unwrap();
+        assert!(issues_projection_count(&bare).is_err(), "无表的裸库 → 查询错误由调用方按空处理");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn quota_window_issue_is_created_refreshed_and_self_resolves() {

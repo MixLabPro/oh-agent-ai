@@ -1958,6 +1958,11 @@ summary.detail-section-title {
 
 /* ============ 发现 tab P1：待办/证据分区（WORKBENCH_FINDINGS_TAB_SPEC §3）============ */
 /* 证据区整体默认收起：summary 是唯一的开关，不另造 JS 折叠状态。 */
+/* ②模型 × Harness 对比（findings tab P2）：行可点展开，展开行弱底色。 */
+#find-matrix .matrix-row { cursor: pointer; }
+#find-matrix .matrix-row:hover { background: color-mix(in srgb, var(--panel-2) 25%, transparent); }
+#find-matrix .matrix-detail-row td { background: color-mix(in srgb, var(--bg) 55%, var(--panel)); }
+
 .find-evidence { margin: 12px 0; }
 .find-evidence > summary {
   cursor: pointer;

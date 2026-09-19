@@ -29,6 +29,7 @@ pub mod budget;
 pub mod budget_notifications;
 pub mod clock;
 pub mod custom_sources;
+pub mod decision_matrix;
 pub mod home;
 pub mod export;
 pub mod ingest_service;

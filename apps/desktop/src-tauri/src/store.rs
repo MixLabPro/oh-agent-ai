@@ -292,22 +292,49 @@ pub async fn sessions_findings(
     .map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 
-/// v0.11 Issues projection. Refreshes the legacy evaluator once (which also
-/// writes stable issue_instances) then reads the authority tables directly.
+/// issues 投影一行都没有 = 首次引导（库刚建/从未跑过 findings）。这不是
+/// 「缓存冷」——是数据根本不存在，此时放行一次 evaluator 刷新，否则全新
+/// 安装的要一直空到用户自己找到「重载」按钮。有数据（哪怕陈旧）则恒 false。
+fn issues_projection_empty(db: &agent_vitals_data::authority::AuthorityDb) -> bool {
+    agent_vitals_data::issues::issues_projection_count(db.conn()).unwrap_or(0) == 0
+}
+
+/// §1.6 的刷新判定（纯函数，可测）：显式 refresh 恒刷；否则仅投影全空时引导。
+fn should_refresh_evaluator(refresh: bool, bootstrap_needed: bool) -> bool {
+    refresh || bootstrap_needed
+}
+
+/// v0.11 Issues projection. Reads the authority tables directly; the legacy
+/// evaluator refresh (CLI spawn, cold cache scans session logs) only runs on
+/// `refresh=true` (the 重载 button) or first-run bootstrap when the issues
+/// projection is completely empty — WORKBENCH_FINDINGS_TAB_SPEC §1.6：
+/// 首屏只读 authority，重路径只在显式请求。
 #[tauri::command]
 pub async fn sessions_issues(
     state: tauri::State<'_, StoreBuildLock>,
     page_size: Option<usize>,
     cursor: Option<String>,
+    refresh: Option<bool>,
 ) -> Result<Value, Value> {
     let lock = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock.acquire();
-        if let Some(bin) = resolve_binary() {
-            let mut cmd = Command::new(bin);
-            cmd.args(findings_args());
-            cmd.env("AGENT_VITALS_HOME", data_home());
-            let _ = run_json(cmd);
+        let mut refreshed = false;
+        let path = agent_vitals_data::authority::default_authority_path(&data_home());
+        let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+            .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
+        // 引导只在首页读取（cursor 为空）放行：分页与状态迁移后的快速刷新
+        // 都不再触发。`refreshed` 记的是「CLI 真跑成功过」，失败不冒充。
+        let bootstrap_needed = cursor.is_none() && issues_projection_empty(&db);
+        if should_refresh_evaluator(refresh.unwrap_or(false), bootstrap_needed) {
+            if let Some(bin) = resolve_binary() {
+                let mut cmd = Command::new(bin);
+                cmd.args(findings_args());
+                cmd.env("AGENT_VITALS_HOME", data_home());
+                if run_json(cmd).is_ok() {
+                    refreshed = true;
+                }
+            }
         }
         let path = agent_vitals_data::authority::default_authority_path(&data_home());
         let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
@@ -356,7 +383,7 @@ pub async fn sessions_issues(
         Ok(serde_json::json!({
             "totals": { "issues": total_groups, "findings": groups["source_issue_count"], "critical": count("critical"), "warning": count("warning"), "info": count("info"), "sessions": sessions_with, "sessions_total": sessions_with },
             "rules": rules, "issues": rows, "findings": [], "source": "unified_issue_groups",
-            "next_cursor": next_cursor, "source_projection_count": all_groups["source_projection_count"].as_u64().unwrap_or(0) + u64::from(budget_added)
+            "next_cursor": next_cursor, "refreshed": refreshed, "source_projection_count": all_groups["source_projection_count"].as_u64().unwrap_or(0) + u64::from(budget_added)
         }))
     }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
 }
@@ -382,6 +409,20 @@ fn budget_issue_group(budget: &Value) -> Value {
         "category": "budget", "hits": 1, "sessions": 0,
         "read_only": true
     })
+}
+
+/// 「发现」tab ②模型 × Harness 对比的决策面数据（WORKBENCH_FINDINGS_TAB_SPEC
+/// §3.2/§5.2）。只读 authority SQL + 计价管线（复用 cost_breakdown 单一价格
+/// 事实源），无 CLI spawn（§1.6 性能预算）。
+#[tauri::command]
+pub async fn decision_matrix(month: Option<String>) -> Result<Value, Value> {
+    let month = month.unwrap_or_else(crate::overview::current_month_beijing);
+    tauri::async_runtime::spawn_blocking(move || {
+        agent_vitals_runtime::decision_matrix::decision_matrix(&data_home(), &month)
+            .map_err(|e| error_value("decision_matrix_unavailable", &e))
+    })
+    .await
+    .map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 
 /// User-owned Issue state transition. This command only changes the Issue
@@ -1031,6 +1072,18 @@ mod tests {
     #[test]
     fn findings_args_is_fixed() {
         assert_eq!(findings_args(), vec!["sessions", "findings", "--json"]);
+    }
+
+    /// §1.6（P1.1）：首屏有数据不得触发 evaluator（纯 authority 读）；
+    /// 「重载」按钮（refresh=true）恒刷；投影全空（零发现的全新安装）时
+    /// 每个首页读取放行一次刷新——有数据即停，零数据用户每个 app 会话
+    /// 一次，是引导的诚实代价而非无限重试。
+    #[test]
+    fn evaluator_refresh_only_on_explicit_or_bootstrap() {
+        assert!(!should_refresh_evaluator(false, false), "首屏有数据不得触发 evaluator");
+        assert!(should_refresh_evaluator(true, false), "重载按钮恒刷");
+        assert!(should_refresh_evaluator(false, true), "投影全空的首次引导放行");
+        assert!(should_refresh_evaluator(true, true));
     }
 
     /// 错误形状：`cancelled` 的 message 明确（二进制缺失是基础设施失败，不是

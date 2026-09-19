@@ -6695,23 +6695,29 @@ function findingSessionLabel(f) {
   return id ? String(id) : "（无标题）";
 }
 
-async function loadFindings(reset) {
+async function loadFindings(reset, refresh) {
   if (reset) {
     findState = { loaded: true, error: false, data: null, sev: "all", rule: "all", expanded: {}, nextCursor: null, loadingMore: false };
     document.getElementById("find-banner").hidden = true;
   }
   findState.loaded = true;
-  // 同 loadSessions：`sessions_findings` 无分页、必须扫全部会话，冷 cache 时
-  // 是这三个 tab 里最重的一个，没有任何等待反馈时最容易被当成假死。
+  // §1.6 性能预算：默认读侧纯 authority（已同步库的毫秒级查询）；只有「重载」
+  // 按钮（refresh=true）才让后端跑 evaluator 刷新（CLI spawn，冷 cache 扫会话
+  // 日志）。加载文案随之区分，重路径的等待明说，别让快路径背慢文案。
   const loadingEl = document.getElementById("find-loading");
+  loadingEl.textContent = refresh
+    ? "重新汇总中…要扫描会话日志，冷缓存时可能需要几十秒"
+    : "加载中…读取本地汇总";
   loadingEl.hidden = false;
   try {
     // 新鲜度条与汇总并发取（spec §5.4）：它只读 authority 的两格数，失败不吞汇总。
     const [data, fresh] = await Promise.all([
-      invoke("sessions_issues", { pageSize: 50, cursor: null }),
+      invoke("sessions_issues", { pageSize: 50, cursor: null, refresh: !!refresh }),
       invoke("findings_freshness").catch(() => null),
     ]);
     renderFreshness(fresh);
+    // ②对比面首次懒加载（§1.6：纯 authority 读，不阻塞首屏渲染）。
+    if (!matrixState.data) loadDecisionMatrix();
     findState.data = data;
     findState.nextCursor = data && data.next_cursor || null;
     findState.error = false;
@@ -6923,7 +6929,7 @@ function renderFindingsDetail() {
       const detail = document.createElement("tr");
       detail.dataset.issueGroup = f.group_id || "";
       const cell = document.createElement("td");
-      cell.colSpan = 7;
+      cell.colSpan = 8;
       cell.className = "muted";
       cell.textContent = "正在读取原始命中…";
       detail.appendChild(cell);
@@ -7217,6 +7223,228 @@ function showFindReceipt(text) {
   showFindReceipt._t = setTimeout(() => { receipt.hidden = true; }, 6000);
 }
 
+// ── ② 模型 × Harness 对比（spec §3.2/§4，P2）────────────────────────────
+// 决策证据面：金额按币种/口径分列、永不相加（§1.5）；浪费率仅 DSH 有证据、
+// 未接入恒「—」（§4.2，不用 0 冒充）；host_behavior 是宿主级聚合（§4.7）。
+const matrixState = { data: null, expanded: {}, error: null };
+
+async function loadDecisionMatrix() {
+  try {
+    const data = await invoke("decision_matrix", {});
+    matrixState.data = data && Array.isArray(data.rows) ? data : null;
+    matrixState.error = null;
+  } catch (e) {
+    // 失败与真空数据必须可区分（验收条件 4）：错误明说，不冒充「没有组合」。
+    matrixState.error = e && (e.message || e) || "未知错误";
+    matrixState.data = null;
+  }
+  renderMatrix();
+}
+
+function matrixMoney(amount) {
+  const symbol = amount.currency === "USD" ? "$" : amount.currency === "CNY" ? "¥" : (amount.currency || "") + " ";
+  const value = (Number(amount.amount_minor || 0) / 100).toFixed(2);
+  return (amount.basis === "metered_estimate" ? "≈" : "") + symbol + value;
+}
+
+function matrixTokens(n) {
+  const v = Number(n || 0);
+  if (v >= 1e9) return (v / 1e9).toFixed(1) + "B";
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + "K";
+  return String(v);
+}
+
+/// 单位会话成本（同一币种内才可比）：minor ÷ 会话数；无价或零会话 → -1
+/// （排序垫底用，展示层另走「—」）。
+function matrixPerSessionMinor(row, currency) {
+  const amount = (row.amounts || []).find((a) => a.currency === currency);
+  const sessions = Number(row.sessions || 0);
+  if (!amount || !sessions) return -1;
+  return Number(amount.amount_minor || 0) / sessions;
+}
+
+/// §4.6 排序：未计价行恒最前（成本未知比已知贵更值得先看）；订阅行不参与
+/// （月费 ÷ 会话数无决策意义）；可排序行币种唯一才按单位会话成本降序，
+/// 多币种混合时禁用排序并说明——禁止汇率折算排序（FX 只允许 metered_view
+/// 的 ≈ 显示，既有纪律）。
+function sortMatrixRows(rows) {
+  const unpriced = [], sortable = [], subscriptionOnly = [];
+  for (const row of rows) {
+    if ((row.amounts || []).length > 0) sortable.push(row);
+    else if (row.has_subscription) subscriptionOnly.push(row);
+    else unpriced.push(row);
+  }
+  const byTokens = (a, b) => (Number((b.tokens || {}).total || 0)) - (Number((a.tokens || {}).total || 0));
+  const currencies = new Set(sortable.flatMap((r) => (r.amounts || []).map((a) => a.currency)));
+  let note = "";
+  let metricSorted = false;
+  if (currencies.size > 1) {
+    note = "排序暂不可用：待排序行混合 " + [...currencies].join(" / ") + " 币种（不做汇率折算排序，spec §4.6）——中转用量统一为申报口径后启用。";
+    sortable.sort(byTokens);
+  } else if (currencies.size === 1) {
+    const cur = [...currencies][0];
+    sortable.sort((a, b) => matrixPerSessionMinor(b, cur) - matrixPerSessionMinor(a, cur));
+    metricSorted = true;
+  }
+  unpriced.sort(byTokens);
+  subscriptionOnly.sort(byTokens);
+  return { order: unpriced.concat(sortable, subscriptionOnly), note, metricSorted, unpricedCount: unpriced.length };
+}
+
+function matrixRowKey(row) {
+  return row.host + "/" + row.model_id + "/" + row.provider_id;
+}
+
+/// 从②对比面的贡献会话下钻到会话详情（§6.7「查看轨迹」入口）：showSession
+/// 走 sessions_read 的 sr_ 不透明引用，原生会话 id 不出现在前端。
+function openSessionFromMatrix(sess, row) {
+  if (!sess || !sess.session_ref) return;
+  switchTab("sessions");
+  showSession({
+    session_ref: sess.session_ref,
+    title: null,
+    model: row.model_id || null,
+    host_kind: row.host || null,
+  });
+}
+
+function toggleMatrixRow(key, ev) {
+  if (ev && ev.target.closest("a,button")) return;
+  matrixState.expanded[key] = !matrixState.expanded[key];
+  renderMatrix();
+}
+
+function renderMatrix() {
+  const body = document.getElementById("find-matrix-body");
+  const emptyEl = document.getElementById("find-matrix-empty");
+  const sortEl = document.getElementById("find-matrix-sort");
+  if (!body) return;
+  body.textContent = "";
+  const rows = (matrixState.data && matrixState.data.rows) || [];
+  if (matrixState.error) {
+    emptyEl.hidden = false;
+    emptyEl.textContent = "对比面读取失败：" + matrixState.error + "（点上方「重载」可重试）";
+    sortEl.textContent = "";
+    return;
+  }
+  if (!rows.length) {
+    emptyEl.hidden = false;
+    emptyEl.textContent = "本月没有可对比的组合（需要有用量事实）。";
+    sortEl.textContent = "";
+    return;
+  }
+  emptyEl.hidden = true;
+  const sorted = sortMatrixRows(rows);
+  const bits = [];
+  if (sorted.metricSorted) bits.push("排序：浪费调整后单位会话成本（近似 · 仅排序提示，不进账单面）");
+  if (sorted.note) bits.push(sorted.note);
+  if (sorted.unpricedCount) bits.push("成本未知的 " + sorted.unpricedCount + " 行恒排最前");
+  sortEl.textContent = bits.join(" · ");
+
+  const frag = document.createDocumentFragment();
+  for (const row of sorted.order) {
+    const key = matrixRowKey(row);
+    const tr = document.createElement("tr");
+    tr.className = "matrix-row";
+    tr.addEventListener("click", (ev) => toggleMatrixRow(key, ev));
+
+    const comboCell = document.createElement("td");
+    const host = document.createElement("div");
+    host.textContent = row.host + " · " + row.model_id;
+    comboCell.appendChild(host);
+    const tags = document.createElement("div");
+    tags.className = "issue-subline";
+    const tagBits = [row.provider_id];
+    for (const a of row.amounts || []) {
+      if (a.basis === "metered_estimate") tagBits.push("估算");
+      else if (a.basis) tagBits.push(a.basis);
+    }
+    if (row.cost_provider_unresolved) tagBits.push("计价归因未定");
+    if (row.has_subscription) tagBits.push("套餐内");
+    if (!(row.amounts || []).length && !row.has_subscription) tagBits.push("未计价");
+    tags.textContent = tagBits.join(" · ");
+    comboCell.appendChild(tags);
+    tr.appendChild(comboCell);
+
+    const num = (text) => {
+      const td = document.createElement("td");
+      td.className = "num";
+      td.textContent = text;
+      return td;
+    };
+    tr.appendChild(num(String(row.sessions || 0)));
+    tr.appendChild(num(matrixTokens((row.tokens || {}).total)));
+
+    const costTd = num((row.amounts || []).map(matrixMoney).join(" · ") || "—");
+    tr.appendChild(costTd);
+
+    // 单会话：同一币种内才算；无价/订阅/混合 → 「—」（§4.6 订阅行不参与）。
+    const perCur = new Set((row.amounts || []).map((a) => a.currency));
+    let perCell = "—";
+    if (perCur.size === 1 && !row.has_subscription) {
+      const cur = [...perCur][0];
+      const minor = matrixPerSessionMinor(row, cur);
+      if (minor >= 0) perCell = (row.amounts[0].basis === "metered_estimate" ? "≈" : "") +
+        (cur === "USD" ? "$" : "¥") + (minor / 100).toFixed(2);
+    }
+    tr.appendChild(num(perCell));
+
+    const ratio = row.cache_hit_ratio;
+    tr.appendChild(num(ratio == null ? "—" : Math.round(ratio * 100) + "%"));
+    tr.appendChild(num("—")); // 浪费率：仅 DSH，未接入（§4.2），不用 0 冒充
+    // 撞限流（§4.5）：SV607/608 宿主级命中 + 每会话均值；无命中 → 「—」。
+    const pressure = row.limit_pressure;
+    tr.appendChild(num(pressure
+      ? String(pressure.hits) + " 次" + (pressure.per_session != null ? " · ≈" + pressure.per_session + "/会话" : "")
+      : "—"));
+    frag.appendChild(tr);
+
+    if (matrixState.expanded[key]) {
+      const detail = document.createElement("tr");
+      detail.className = "matrix-detail-row";
+      const cell = document.createElement("td");
+      cell.colSpan = 7;
+      const buckets = document.createElement("div");
+      buckets.className = "issue-subline";
+      const t = row.tokens || {};
+      buckets.textContent = "四桶：未缓存输入 " + matrixTokens(t.uncached_input) +
+        " · 缓存读 " + matrixTokens(t.cache_read) + " · 缓存写 " + matrixTokens(t.cache_write) +
+        " · 输出 " + matrixTokens(t.output);
+      cell.appendChild(buckets);
+      const behavior = row.host_behavior || {};
+      if (Object.keys(behavior).length) {
+        const b = document.createElement("div");
+        b.className = "issue-subline";
+        b.textContent = "宿主级证据（spec §4.7，不按模型归组）：" +
+          Object.entries(behavior).map(([rule, count]) => rule + " × " + count).join(" · ");
+        cell.appendChild(b);
+      }
+      for (const sess of row.top_sessions || []) {
+        const line = document.createElement("div");
+        line.className = "issue-subline";
+        const hours = ((sess.span_last_ms - sess.span_first_ms) / 3600000).toFixed(1);
+        line.textContent = "贡献会话 " + String(sess.session_ref || "").slice(0, 14) + "… · 跨度 " + hours + "h（事件跨度近似）· " + matrixTokens(sess.tokens_total) + " token" + (sess.failures > 0 ? " · 失败 " + sess.failures : "");
+        cell.appendChild(line);
+        cell.appendChild(document.createTextNode(" "));
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn sm";
+        btn.textContent = "查看轨迹";
+        btn.addEventListener("click", () => openSessionFromMatrix(sess, row));
+        cell.appendChild(btn);
+      }
+      const notes = document.createElement("div");
+      notes.className = "issue-subline";
+      notes.textContent = ((matrixState.data && matrixState.data.notes) || []).join("；");
+      cell.appendChild(notes);
+      detail.appendChild(cell);
+      frag.appendChild(detail);
+    }
+  }
+  body.appendChild(frag);
+}
+
 async function transitionIssueFromUi(issueId, toStatus) {
   // 迁移前后各读一次 rollup 计数（spec §5.6）：反馈给「已处理 1 项 · 待处理
   // 命中 N → M」。M 不变时如实说明（同组还有开放命中），不假装减了。
@@ -7357,6 +7585,20 @@ function toggleTodoInstances(group, row) {
 
 // 新鲜度条（spec §4.8/§6.5）：数字截止时刻 + stale 宿主名单。数据面 =
 // findings_freshness（runtime data_freshness_report，与 MCP envelope 同源）。
+/// §4.8 时间显示：当日只给 HH:MM；跨日必须带日期（"9月18日 23:43"）——同步
+/// 若是三天前的，光写 23:43 会让用户以为是今天。解析失败退回原串，不猜。
+function freshnessClock(raw) {
+  if (!raw) return "未知";
+  const t = new Date(raw);
+  if (Number.isNaN(t.getTime())) return String(raw);
+  const hm = String(t.getHours()).padStart(2, "0") + ":" + String(t.getMinutes()).padStart(2, "0");
+  const now = new Date();
+  if (t.getFullYear() === now.getFullYear() && t.getMonth() === now.getMonth() && t.getDate() === now.getDate()) {
+    return hm;
+  }
+  return (t.getMonth() + 1) + "月" + t.getDate() + "日 " + hm;
+}
+
 function renderFreshness(fresh) {
   const bar = document.getElementById("find-freshness");
   if (!bar) return;
@@ -7367,7 +7609,7 @@ function renderFreshness(fresh) {
   }
   const f = fresh.freshness || {};
   const parts = [];
-  if (f.last_successful_sync_at) parts.push("数字截至 " + String(f.last_successful_sync_at).slice(11, 16));
+  if (f.last_successful_sync_at) parts.push("数字截至 " + freshnessClock(f.last_successful_sync_at));
   const stale = Array.isArray(f.stale_hosts) ? f.stale_hosts : [];
   if (stale.length) parts.push("超过 24h 未更新：" + stale.join("、"));
   bar.textContent = parts.length ? "新鲜度 · " + parts.join(" · ") : "新鲜度 · 数据完整";
@@ -7856,7 +8098,8 @@ async function init() {
     document.getElementById("sess-detail-view").hidden = true;
     document.getElementById("sess-list-view").hidden = false;
   });
-  document.getElementById("find-reload").addEventListener("click", () => loadFindings(true));
+  // 重载 = 唯一显式触发重路径（evaluator 刷新）的入口（spec §1.6）。
+  document.getElementById("find-reload").addEventListener("click", () => loadFindings(true, true));
   document.getElementById("find-more").addEventListener("click", loadMoreFindings);
   document.getElementById("find-sev").addEventListener("change", (ev) => {
     findState.sev = ev.target.value;

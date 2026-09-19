@@ -19,7 +19,7 @@
 mod data_status;
 mod session_detail;
 mod session_trace;
-mod session_ref;
+pub(crate) mod session_ref;
 mod sessions_search;
 mod usage_hourly;
 mod budget_profiles;

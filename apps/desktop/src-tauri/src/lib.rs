@@ -3492,6 +3492,7 @@ pub fn run() {
             store::sessions_read,
             store::sessions_findings,
             store::sessions_issues,
+            store::decision_matrix,
             findings_freshness,
             store::skills_doctor_report,
             store::skills_scan_cancel,

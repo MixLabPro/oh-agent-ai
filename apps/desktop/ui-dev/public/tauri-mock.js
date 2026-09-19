@@ -663,6 +663,35 @@
         rules: issueGroups.map((group) => ({ rule: group.rule, severity: group.severity, category: group.category, hits: group.hits, sessions: group.sessions })),
         issues: issueGroups, findings: [], source: "browser_mock", next_cursor: null, source_projection_count: 1,
       };
+      case "findings_freshness": return { status: "ok", freshness: { last_successful_sync_at: new Date(Date.now() - 1500000).toISOString(), stale_hosts: ["workbuddy"] } };
+      // Shape: crates/agent-vitals-runtime/src/decision_matrix.rs::decision_matrix
+      // （rows 键 = combo_rows 的 json! 字段；金额按币种分列，mock 同纪律）。
+      case "decision_matrix": return {
+        month: "2026-09",
+        rows: [
+          { host: "codex", model_id: "gpt-6-astra", provider_id: "cogfoundry.ai", sessions: 10,
+            tokens: { uncached_input: 2, cache_read: 3, cache_write: 1, output: 1, total: 7 },
+            cache_hit_ratio: 0.5, has_subscription: false, waste_rate: null,
+            amounts: [], cost_provider_unresolved: false, top_sessions: [], host_behavior: {} },
+          { host: "codex", model_id: "gpt-5.6-terra", provider_id: "shengsuanyun", sessions: 31,
+            tokens: { uncached_input: 1754, cache_read: 34448965, cache_write: 2304878, output: 119195, total: 36875892 },
+            cache_hit_ratio: 0.9363, has_subscription: false, waste_rate: null,
+            amounts: [{ amount_minor: 1408, currency: "USD", basis: "metered_estimate" }],
+            cost_provider_unresolved: true, top_sessions: [], host_behavior: { SV610: 62, SV607: 8 } },
+          { host: "claude-code", model_id: "deepseek-v4-flash-0731", provider_id: "<unknown>", sessions: 12,
+            tokens: { uncached_input: 44432002, cache_read: 12596736, cache_write: 0, output: 13030, total: 57041768 },
+            cache_hit_ratio: 0.2211, has_subscription: false, waste_rate: null,
+            amounts: [{ amount_minor: 6734, currency: "CNY", basis: "metered_estimate" }],
+            cost_provider_unresolved: true,
+            top_sessions: [{ session_ref: "sr_1f7589ece7184a8a8a9bb0c", span_first_ms: Date.now() - 179000000, span_last_ms: Date.now(), tokens_total: 473030189 }],
+            host_behavior: {} },
+          { host: "claude-code", model_id: "glm-5.3", provider_id: "zhipu-glm", sessions: 3,
+            tokens: { uncached_input: 1, cache_read: 2, cache_write: 0, output: 0, total: 3 },
+            cache_hit_ratio: null, has_subscription: true, waste_rate: null,
+            amounts: [], cost_provider_unresolved: false, top_sessions: [], host_behavior: {} },
+        ],
+        notes: ["waste_rate 恒 null：waste 检测器仅 DSH 且尚未接入（spec §4.2，不用 0 冒充）"],
+      };
       case "issue_group_instances": return { group_id: args && args.groupId, instances: issueInstances, next_cursor: null, total_instances: issueInstances.length };
       case "issue_instance_read": return { status: "ok", issue: issueInstances.find((item) => item.issue_id === (args && args.issueId)) || null };
       case "issue_transition": return transitionIssue(args && args.issueId, args && args.toStatus);
