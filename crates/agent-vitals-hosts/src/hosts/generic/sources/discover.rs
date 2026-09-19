@@ -102,6 +102,7 @@ pub fn discover_files(manifest: &PluginManifest, home: &Path) -> Result<Discover
     let mut report = DiscoveryReport::default();
     let mut seen = BTreeSet::new();
     let mut seen_outside = BTreeSet::new();
+    let mut seen_unmatched = BTreeSet::new();
     for root_raw in &manifest.roots {
         let root = expand_tilde_home(root_raw, home);
         let root_canon = root
@@ -135,11 +136,16 @@ pub fn discover_files(manifest: &PluginManifest, home: &Path) -> Result<Discover
                 continue;
             };
             let Some(caps) = manifest.session_pattern.captures(&file_name) else {
-                report.session_unmatched += 1;
+                // 重复 root 会重走同一文件：按绝对路径去重，计数不翻倍。
+                if seen_unmatched.insert(abs.to_path_buf()) {
+                    report.session_unmatched += 1;
+                }
                 continue;
             };
             let Some(session_id) = caps.name("id") else {
-                report.session_unmatched += 1;
+                if seen_unmatched.insert(abs.to_path_buf()) {
+                    report.session_unmatched += 1;
+                }
                 continue;
             };
             if seen.insert(canon) {

@@ -115,7 +115,9 @@ pub fn is_dotted_path(s: &str) -> bool {
 /// 支持前视；两语言必须走同一条扫描规则，不能依赖各自引擎的失败模式。
 pub fn validate_session_pattern(pattern: &str) -> Result<Regex, ManifestError> {
     let field = "session.pattern";
-    for banned in ["(?=", "(?!", "(?<=", "(?<!", "(?'"] {
+    // `(?P=`/`(?#` 是 Python 专属（命名反向引用/注释组），Python re 会编译
+    // 通过而 Rust 引擎报错——必须走显式拒绝，不能依赖引擎失败模式的分歧。
+    for banned in ["(?=", "(?!", "(?<=", "(?<!", "(?'", "(?P=", "(?#"] {
         if pattern.contains(banned) {
             return Err(err(
                 field,
@@ -199,6 +201,11 @@ pub fn parse_manifest(value: serde_json::Value) -> Result<PluginManifest, Manife
     for key in obj.keys() {
         if !known.contains(&key.as_str()) {
             return Err(err(key, "未知字段（schema additionalProperties: false）"));
+        }
+    }
+    if let Some(v) = obj.get("$schema") {
+        if v.as_str().is_none() {
+            return Err(err("$schema", "必须是字符串（schema URL）"));
         }
     }
 
@@ -576,6 +583,8 @@ mod tests {
             "^sess_(?P<id>.+)\\1$",
             "^sess_(?<id>.+)\\.jsonl$",   // 非 ?P 命名组写法
             "^sess_(?P<a>.+)(?P<b>x)$",   // 具名组数量 ≠ 1
+            "^sess_(?P<id>a)(?P=id)$",    // Python 命名反向引用（显式拒绝，不靠引擎分歧）
+            "^sess_(?#c)(?P<id>.+)$",     // Python 注释组
             "^sess_\\.jsonl$",            // 没有具名组
         ] {
             assert!(validate_session_pattern(bad).is_err(), "`{bad}` 应被拒绝");

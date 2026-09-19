@@ -161,7 +161,7 @@ fn host_namespace_is_complete_and_surface_explicit() {
     actual.sort();
     assert_eq!(
         actual,
-        vec!["claude_code", "codex", "dsh", "openclaw", "workbuddy"]
+        vec!["claude_code", "codex", "dsh", "generic", "openclaw", "workbuddy"]
     );
     // v0.8 Phase E7.6：openclaw 是 Skill-Surface-only 宿主——它没有 Session
     // Surface 证据面（不在 host_capability.rs 的 RUNTIME_HOST_IDS 四个"运行时
@@ -169,6 +169,16 @@ fn host_namespace_is_complete_and_surface_explicit() {
     // 探测），没有、也不该有 `sessions/`。其余四个宿主都是运行时宿主，
     // `sessions/mod.rs` 仍然强制存在。
     for host in actual {
+        if host == "generic" {
+            // HOST_MANIFEST_DSL_SPEC：generic 是自描述插件宿主——没有 wire 会话
+            // 证据面（行为面不开放，spec §1），只有 `manifest.rs`（纯）与
+            // `sources/discover.rs`（文件发现）。账面喉咙在 runtime，不入本 crate。
+            assert!(
+                !hosts.join(&host).join("sessions").exists(),
+                "generic 没有 Session Surface 证据面，不该凭空长出 sessions/"
+            );
+            continue;
+        }
         if host == "openclaw" {
             assert!(
                 !hosts.join(&host).join("sessions").exists(),

@@ -21,8 +21,11 @@
     "slug": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]{0,31}$",
-      "not": { "enum": [
-        "claude-code", "codex", "dsh", "workbuddy", "openclaw", "hermes"
+      "not": { "anyOf": [
+        { "enum": [
+          "claude-code", "codex", "dsh", "workbuddy", "openclaw", "hermes"
+        ] },
+        { "pattern": "^plugin-" }
       ] }
     },
     "display": {
