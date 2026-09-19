@@ -204,7 +204,12 @@ pub fn effective_path(def: &RecipeDef, manifest: &PluginManifest, slot: Slot) ->
 }
 
 /// 点路径取值：缺失 → `Value::Null`（类型统一，调用方按 null 处理）。
+/// 空路径短路返回 Null——`"".split('.')` 会产生 `[""]`，否则记录里的 `""`
+/// 键（JSON 合法）会向无默认的槽位（provider_raw 等）静默泄漏值。
 pub fn dotted_get<'a>(record: &'a Value, path: &str) -> &'a Value {
+    if path.is_empty() {
+        return &Value::Null;
+    }
     let mut cur = record;
     for seg in path.split('.') {
         match cur.get(seg) {
@@ -244,7 +249,9 @@ fn is_bool(v: &Value) -> bool {
 }
 
 /// §4.4：event_key 值的 canonical encoding——类型标记 + 长度前缀 +
-/// `event_key.paths` 固定顺序。任一路径缺失/null → None（调用方判 invalid）。
+/// `event_key.paths` 固定顺序。字符串长度前缀是 **UTF-8 字节数**
+/// （`str::len`）；Python twin 必须用 `len(s.encode("utf-8"))`，不是码点数。
+/// 任一路径缺失/null/浮点/对象/数组 → None（调用方判 invalid）。
 pub fn canonical_event_key(
     manifest: &PluginManifest,
     record: &Value,
@@ -684,6 +691,125 @@ mod tests {
                 assert!(excerpt.starts_with('{'));
             }
             other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod parity_and_edge_tests {
+    use super::*;
+    use crate::hosts::generic::manifest::parse_manifest;
+    use serde_json::json;
+
+    fn four_bucket() -> (PluginManifest, &'static RecipeDef) {
+        let m = parse_manifest(json!({
+            "manifest_version": 1, "slug": "t", "display": { "name": "T" },
+            "discovery": { "roots": ["~/r"], "include": ["*.jsonl"] },
+            "source": { "format": "jsonl" },
+            "session": { "from": "filename", "pattern": "^s_(?P<id>.+)\\.jsonl$" },
+            "recipe": "request-usage-four-bucket-v1",
+            "event_key": { "paths": ["id"] }
+        })).unwrap();
+        let def = recipe_def(&m.recipe).unwrap();
+        (m, def)
+    }
+
+    #[test]
+    fn empty_key_in_record_never_leaks_into_pathless_slots() {
+        // openai-total-input 的 cache_write_tokens / anthropic 的 provider_raw
+        // 无默认路径；记录里的 `""` 键不得凭空填充它们。
+        let m = parse_manifest(json!({
+            "manifest_version": 1, "slug": "t", "display": { "name": "T" },
+            "discovery": { "roots": ["~/r"], "include": ["*.jsonl"] },
+            "source": { "format": "jsonl" },
+            "session": { "from": "filename", "pattern": "^s_(?P<id>.+)\\.jsonl$" },
+            "recipe": "request-usage-openai-total-input-v1",
+            "overrides": {
+                "event_ts": "ts", "model_raw": "model",
+                "total_input_tokens": "usage.prompt_tokens",
+                "output_tokens": "usage.completion_tokens"
+            },
+            "event_key": { "paths": ["id"] }
+        })).unwrap();
+        let def = recipe_def(&m.recipe).unwrap();
+        let row = json!({ "": 777, "id": "e1", "ts": "2026-09-19T00:00:00Z",
+            "model": "m", "usage": { "prompt_tokens": 5, "completion_tokens": 1 } });
+        match extract_line(def, &m, &row) {
+            LineVerdict::Emit(c) => {
+                assert_eq!(c.cache_write_tokens, None, "空路径短路，不许吃 `\"\"` 键");
+                assert_eq!(c.cache_read_tokens, None);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn unicode_event_key_uses_utf8_byte_length() {
+        let m = parse_manifest(json!({
+            "manifest_version": 1, "slug": "t", "display": { "name": "T" },
+            "discovery": { "roots": ["~/r"], "include": ["*.jsonl"] },
+            "source": { "format": "jsonl" },
+            "session": { "from": "filename", "pattern": "^s_(?P<id>.+)\\.jsonl$" },
+            "recipe": "request-usage-four-bucket-v1",
+            "event_key": { "paths": ["id"] }
+        })).unwrap();
+        let def = recipe_def(&m.recipe).unwrap();
+        // "会" 是 3 字节：s3:会;
+        let row = json!({ "id": "会", "timestamp": "2026-09-19T00:00:00Z", "model": "m",
+            "usage": { "input_tokens": 1 } });
+        match extract_line(def, &m, &row) {
+            LineVerdict::Emit(c) => assert_eq!(c.source_event_id, "s3:会;"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parity_edge_cases_float_string_and_over_u64() {
+        let (m, def) = four_bucket();
+        // 浮点 token：拒绝（serde_json/Python json 都是 float）。
+        let row = json!({ "id": "e", "timestamp": "2026-09-19T00:00:00Z", "model": "m",
+            "usage": { "input_tokens": 1.5 } });
+        match extract_line(def, &m, &row) {
+            LineVerdict::Invalid { code, .. } => assert_eq!(code, "token_type_mismatch"),
+            other => panic!("{other:?}"),
+        }
+        // 字符串 token：拒绝。
+        let row = json!({ "id": "e", "timestamp": "2026-09-19T00:00:00Z", "model": "m",
+            "usage": { "input_tokens": "12" } });
+        match extract_line(def, &m, &row) {
+            LineVerdict::Invalid { code, .. } => assert_eq!(code, "token_type_mismatch"),
+            other => panic!("{other:?}"),
+        }
+        // 2^64 及一切超大整数：serde_json 解析为 f64（Number 不再是整数）→
+        // token_type_mismatch。Python twin 必须显式复刻该拒绝（json.loads 会
+        // 给精确 int），这是双拍 fixtures 要钉的头号分歧。
+        let row = json!({ "id": "e", "timestamp": "2026-09-19T00:00:00Z", "model": "m",
+            "usage": { "input_tokens": 18446744073709551616.0 } });
+        match extract_line(def, &m, &row) {
+            LineVerdict::Invalid { code, .. } => assert_eq!(code, "token_type_mismatch"),
+            other => panic!("{other:?}"),
+        }
+        // event_key 值是浮点 → invalid。
+        let row = json!({ "id": 1.5, "timestamp": "2026-09-19T00:00:00Z", "model": "m",
+            "usage": { "input_tokens": 1 } });
+        match extract_line(def, &m, &row) {
+            LineVerdict::Invalid { code, .. } => assert_eq!(code, "event_key_missing"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn usage_container_of_wrong_shape_is_skip_and_top_level_main_degenerates() {
+        let (m, def) = four_bucket();
+        // 容器存在但不是 object（显式 null / 数组）：当前规则 = skip（非目标行）。
+        // 规格修订会把这条钉进 §4.3——本测试就是规则的可执行版本。
+        for bad in [json!(null), json!([1, 2]), json!("x")] {
+            let row = json!({ "id": "e", "timestamp": "2026-09-19T00:00:00Z",
+                "model": "m", "usage": bad });
+            assert_eq!(
+                extract_line(def, &m, &row),
+                LineVerdict::Skip { reason: "not_target_record" }
+            );
         }
     }
 }

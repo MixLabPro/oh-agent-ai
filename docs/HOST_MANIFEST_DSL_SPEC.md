@@ -188,7 +188,13 @@ dry-run 拒绝；**已安装 revision 下新发现的文件**若零 target/emit 
 skip 并在报告标黄（宿主更新新增兄弟日志类型是正常演化，不 brick 摄入）；
 已安装 revision 若相对历史基线突降为零，整文件报 schema-drift，不推进
 checkpoint。discriminator 优先使用事件类型等独立字段；不得仅等价于主 token
-路径存在。
+路径存在。P0 判据实现为「主数量槽位有效路径的**父容器**是 JSON object」，
+两条边界钉死：① 容器存在但不是 object（含显式 null / 数组）→ 一律
+`skip(not_target_record)`——形状漂移按无账可记处理，由 format guard 的
+计数监控兜底，不升 invalid；② 主数量槽位覆写为顶层路径（无 `.`）时，父
+容器判据退化为「记录本身是 object」——作者选这种映射等于宣告全文件皆
+目标行型，缺失字段会洪泛成 invalid，这是作者契约而非缺陷。canonical
+event_key 的字符串长度前缀一律是 **UTF-8 字节数**（非码点数）。
 
 ### 4.4 `event_key`
 
