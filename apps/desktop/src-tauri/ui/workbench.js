@@ -7138,6 +7138,16 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
     if (!append) cell.textContent = "";
     const list = data && Array.isArray(data.instances) ? data.instances : [];
     if (list.length === 0 && !append) { cell.textContent = "暂无可展开的原始命中"; return; }
+    // 行为证据（SV6xx / source_kind=behavior）只读（spec §8）：给不可"解决"的
+    // 事实配状态迁移按钮，等于承认这区是工单摆设——只保留"详情"查证入口。
+    const readOnlyEvidence = String(group.rule || "").startsWith("SV6")
+      || group.source_kind === "behavior";
+    if (readOnlyEvidence && !append) {
+      const note = document.createElement("div");
+      note.className = "issue-subline muted";
+      note.textContent = "行为证据 · 只读：命中是「发生了什么」的事实，没有待办语义（spec §8）；决策面在上方对比表。";
+      cell.appendChild(note);
+    }
     for (const instance of list) {
       const line = document.createElement("div");
       line.className = "issue-instance-line";
@@ -7149,13 +7159,15 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
       detailButton.textContent = "详情";
       detailButton.addEventListener("click", () => showIssueInstanceDetail(instance.issue_id, line, instance));
       line.appendChild(detailButton);
-      const currentStatus = issueStatusCanonical(instance.status);
-      for (const [status, label] of issueActionsForStatus(currentStatus)) {
-        const button = el("button", "btn secondary");
-        button.type = "button";
-        button.textContent = label;
-        button.addEventListener("click", () => transitionIssueFromUi(instance.issue_id, status));
-        line.appendChild(button);
+      if (!readOnlyEvidence) {
+        const currentStatus = issueStatusCanonical(instance.status);
+        for (const [status, label] of issueActionsForStatus(currentStatus)) {
+          const button = el("button", "btn secondary");
+          button.type = "button";
+          button.textContent = label;
+          button.addEventListener("click", () => transitionIssueFromUi(instance.issue_id, status));
+          line.appendChild(button);
+        }
       }
       cell.appendChild(line);
     }
@@ -7233,6 +7245,8 @@ async function loadDecisionMatrix() {
     const data = await invoke("decision_matrix", {});
     matrixState.data = data && Array.isArray(data.rows) ? data : null;
     matrixState.error = null;
+    // 预算待办的归因块等这份数据——重画一次待办区把归因补上。
+    if (findState.data) renderTodoList(issueRows());
   } catch (e) {
     // 失败与真空数据必须可区分（验收条件 4）：错误明说，不冒充「没有组合」。
     matrixState.error = e && (e.message || e) || "未知错误";
@@ -7491,8 +7505,9 @@ function todoMainAction(group) {
     } };
   }
   if (group.source_kind === "budget") {
-    return { label: "打开预算设置", run: () => {
-      openSettingsSection("settings-budget", "ov-budget-monthly-amount");
+    return { label: "看超在哪", run: () => {
+      const matrix = document.getElementById("find-matrix");
+      if (matrix && matrix.scrollIntoView) matrix.scrollIntoView({ behavior: "smooth", block: "start" });
     } };
   }
   if (group.source_kind === "billing_candidate" || group.source_kind === "billing_group") {
@@ -7523,6 +7538,55 @@ function todoTitle(group) {
   return group.rule || "待办";
 }
 
+/// 预算待办的归因块（用户反馈 2026-09-19：卡片只给"设置预算范围"，没回答
+/// "为什么超"）。数据全部来自已加载的②对比面：同币种（预算是 CNY）金额行
+/// 按 amount 降序取前三，各带一句特征（缓存命中低 / 马拉松会话）；USD 行
+/// 如实标注"未折算、未计入"（多币种不相加）。②未加载时显示等待文案。
+function budgetAttribution(group) {
+  const box = el("div", "issue-subline muted");
+  const sample = group.sample_evidence && group.sample_evidence[0] || {};
+  const meteredMinor = Number(sample.metered_cny_minor != null ? sample.metered_cny_minor : NaN);
+  const rows = (matrixState.data && matrixState.data.rows) || [];
+  const cnyRows = rows.filter((r) => (r.amounts || []).some((a) => a.currency === "CNY"));
+  const hasUsd = rows.some((r) => (r.amounts || []).some((a) => a.currency === "USD"));
+  if (!matrixState.data) {
+    if (!matrixState.error) box.textContent = "超支归因加载中（对比面数据就绪后自动补上）…";
+    else box.textContent = "超支归因不可用：对比面读取失败（" + matrixState.error + "）";
+    return box;
+  }
+  if (!cnyRows.length) {
+    box.textContent = "超支归因：本月没有已计价的 CNY 组合" + (hasUsd ? "（另有 USD 估算行，未折算不计入）" : "") + "。";
+    return box;
+  }
+  const sumMinor = cnyRows.reduce((acc, r) => acc + Number((r.amounts.find((a) => a.currency === "CNY") || {}).amount_minor || 0), 0);
+  const top = cnyRows.slice().sort((a, b) =>
+    Number((b.amounts.find((x) => x.currency === "CNY") || {}).amount_minor || 0)
+    - Number((a.amounts.find((x) => x.currency === "CNY") || {}).amount_minor || 0)).slice(0, 3);
+  const head = document.createElement("div");
+  head.textContent = "钱主要去了哪（按量已计价部分"
+    + (Number.isFinite(meteredMinor) ? " ¥" + (meteredMinor / 100).toFixed(2) : "")
+    + " 的去向，同币种，前三）：";
+  box.appendChild(head);
+  for (const row of top) {
+    const amount = row.amounts.find((a) => a.currency === "CNY") || {};
+    const share = sumMinor > 0 ? Math.round(Number(amount.amount_minor || 0) / sumMinor * 100) : 0;
+    const traits = [];
+    if (row.cache_hit_ratio != null && row.cache_hit_ratio < 0.5) traits.push("缓存命中 " + Math.round(row.cache_hit_ratio * 100) + "%");
+    const marathon = (row.top_sessions || []).find((sess) => (sess.span_last_ms - sess.span_first_ms) > 24 * 3600000);
+    if (marathon) traits.push("含 " + ((marathon.span_last_ms - marathon.span_first_ms) / 3600000).toFixed(1) + "h 马拉松会话");
+    const line = document.createElement("div");
+    line.textContent = "· " + row.host + " · " + row.model_id + " — ≈¥" + (Number(amount.amount_minor || 0) / 100).toFixed(2)
+      + "（占 " + share + "%）" + (traits.length ? " · " + traits.join(" · ") : "");
+    box.appendChild(line);
+  }
+  if (hasUsd) {
+    const note = document.createElement("div");
+    note.textContent = "另有 USD 估算行未折算、未计入本归因（多币种不相加；统一申报口径后并入）。";
+    box.appendChild(note);
+  }
+  return box;
+}
+
 function renderTodoList(rows) {
   const list = document.getElementById("find-todo-list");
   const emptyEl = document.getElementById("find-todo-empty");
@@ -7544,6 +7608,10 @@ function renderTodoList(rows) {
     scope.textContent = issueScopeLabel(group) + " · " + issueActionLabel(group);
     head.append(scope);
     row.append(head);
+    if (group.source_kind === "budget") {
+      const attr = budgetAttribution(group);
+      if (attr) row.append(attr);
+    }
     const actions = el("div", "issue-todo-actions");
     const main = todoMainAction(group);
     const mainBtn = el("button", "btn primary");
@@ -7551,6 +7619,13 @@ function renderTodoList(rows) {
     mainBtn.textContent = main.label;
     mainBtn.addEventListener("click", main.run);
     actions.append(mainBtn);
+    if (group.source_kind === "budget") {
+      const settingsBtn = el("button", "btn sm");
+      settingsBtn.type = "button";
+      settingsBtn.textContent = "预算设置";
+      settingsBtn.addEventListener("click", () => openSettingsSection("settings-budget", "ov-budget-monthly-amount"));
+      actions.append(settingsBtn);
+    }
     const moreBtn = el("button", "btn secondary");
     moreBtn.type = "button";
     moreBtn.textContent = "明细与状态";

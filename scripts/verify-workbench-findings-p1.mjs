@@ -68,6 +68,7 @@ function makeElement(tag) {
     hidden: false, style: {}, dataset: {}, title: "", className: "", options: [], children,
     append(...nodes) { children.push(...nodes); },
     appendChild(node) { children.push(node); },
+    querySelector: () => null, querySelectorAll: () => [],
     setAttribute() {}, addEventListener() {},
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; }, [Symbol.iterator]: function* () {} },
   };
@@ -93,6 +94,7 @@ const sandbox = {
           return sandbox.__matrix;
         }
         if (cmd === "issue_transition") return { status: "ok" };
+        if (cmd === "issue_group_instances") return sandbox.__instances || { instances: [], next_cursor: null, total_instances: 0 };
         if (cmd === "data_status") return { status: "unavailable", reason: "fixture" };
         return null;
       } },
@@ -314,6 +316,47 @@ console.log("# §4.6〔P2-r2〕单币种排序分支与新增列");
   sandbox.__matrixFail = false;
   ok(domText("find-matrix-empty").includes("对比面读取失败：authority locked"),
     `IPC 失败显示错误而非空态（got ${domText("find-matrix-empty")}）`);
+}
+
+console.log("# r3 预算归因卡 + 行为证据只读（用户反馈 2026-09-19）");
+{
+  // 预算归因：②已加载（上一块跑过 loadDecisionMatrix），flash-0731 是唯一
+  // 带 CNY 金额的特征行（22% 命中 → 特征必须出现在归因里）。
+  // 上一块注入过 __matrixFail 并留下错误态——先成功重载，归因才有数据。
+  await sandbox.loadDecisionMatrix();
+  const budgetGroup = {
+    group_id: "g-budget", rule: "BUDGET_THRESHOLD", source_kind: "budget", severity: "critical",
+    count: 1, sessions: 0, bucket: "2026-09",
+    status_rollup: { open: 0, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 },
+    sample_evidence: [{ level: "exceeded", month: "2026-09", monthly_cny_minor: 50000, metered_cny_minor: 102981 }],
+    remedy: { remedy_id: "review-budget-or-snooze", diagnostic_only: true },
+  };
+  const attr = sandbox.budgetAttribution(budgetGroup);
+  const attrText = textOf(attr);
+  ok(attrText.includes("钱主要去了哪"), "归因块标题在（回答'为什么超'）");
+  ok(attrText.includes("deepseek-v4-flash-0731") && attrText.includes("≈¥67.34"),
+    `归因列出最大 CNY 组合（got ${attrText.slice(0, 160)}）`);
+  ok(attrText.includes("缓存命中 22%"), "低缓存命中作为特征带上卡");
+  ok(attrText.includes("USD 估算行未折算"), "混合币种如实标注未计入");
+  const main = sandbox.todoMainAction(budgetGroup);
+  ok(main.label === "看超在哪", `预算主按钮改为归因入口（got ${main.label}）`);
+  // 行为证据只读：SV 组实例行无状态迁移按钮，非 SV 组保留。
+  sandbox.__instances = { instances: [
+    { issue_id: "sv-i1", evidence: "danger-full-access", status: "open" },
+    { issue_id: "sv-i2", evidence: "allowed-once", status: "open" },
+  ], next_cursor: null, total_instances: 2 };
+  const detailRow = { firstElementChild: sandbox.document.createElement("td") };
+  await sandbox.loadIssueGroupInstances({ group_id: "g-sv", rule: "SV610", source_kind: "behavior" }, detailRow);
+  const svText = textOf(detailRow.firstElementChild);
+  ok(svText.includes("行为证据 · 只读"), `行为组带只读声明（spec §8；got ${svText.slice(0, 120)}）`);
+  const svButtons = (detailRow.firstElementChild.children || [])
+    .filter((c) => (c.children || []).some((b) => /稍后|已解决|已确认|不适用|恢复待处理/.test(String(b.textContent || ""))));
+  ok(svButtons.length === 0, "行为实例行无状态迁移按钮");
+  // 非行为且无专属分支的组（如数据质量类）走实例循环，状态迁移保留。
+  const detailRow2 = { firstElementChild: sandbox.document.createElement("td") };
+  await sandbox.loadIssueGroupInstances({ group_id: "g-dq", rule: "QUOTA_WINDOW" }, detailRow2);
+  const priceText = textOf(detailRow2.firstElementChild);
+  ok(/稍后|已解决|不适用/.test(priceText), `非行为组保留状态迁移（待办语义；got ${priceText.slice(0, 120)}）`);
 }
 
 console.log(failed === 0 ? "\n全部通过" : `\n${failed} 条失败`);
