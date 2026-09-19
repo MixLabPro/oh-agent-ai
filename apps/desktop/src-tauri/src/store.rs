@@ -815,8 +815,25 @@ pub async fn skills_doctor_report(
         if let Some(err) = doctor_exit_error(out.status, &String::from_utf8_lossy(&out.stderr)) {
             return Err(err);
         }
-        let mut payload: Value = serde_json::from_slice(&out.stdout)
-            .map_err(|e| error_value("cancelled", &e.to_string()))?;
+        let mut payload: Value = serde_json::from_slice(&out.stdout).map_err(|e| {
+            // 退出码 0/1 但 stdout 不是合法 JSON：把排障需要的现场全部带上 ——
+            // 实际解析到的二进制（resolve_binary 的候选不止一处）、退出码、
+            // stdout 字节数、stderr 首行。只回一句 serde 的「EOF at column 0」
+            // 会把「stdout 为空」这个最重要的事实藏掉。
+            let stderr_head = String::from_utf8_lossy(&out.stderr);
+            let stderr_head = stderr_head.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            error_value(
+                "cancelled",
+                &format!(
+                    "doctor 输出解析失败（bin: {}，exit: {:?}，stdout {} 字节，stderr 首行: {}）：{}",
+                    bin.display(),
+                    out.status.code(),
+                    out.stdout.len(),
+                    if stderr_head.is_empty() { "（空）" } else { stderr_head },
+                    e,
+                ),
+            )
+        })?;
         let generated_at_ms = now_ms();
         payload["desktop_meta"] = json!({
             "generated_at_ms": generated_at_ms, "from_cache": false, "host": host,
