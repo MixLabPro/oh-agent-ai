@@ -19,7 +19,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-/// 组合键：host × model × provider（provider 缺失归 `<unknown>`，与
+// 组合键：host × model × provider（provider 缺失归 `<unknown>`，与
 /// SQL_UNRESOLVED 的事实层语义一致，不编一个名字）。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Combo {
@@ -30,7 +30,7 @@ struct Combo {
 
 const TOP_SESSIONS_PER_COMBO: usize = 3;
 
-/// 决策面全量数据。`month` 形如 `2026-09`。
+// 决策面全量数据。`month` 形如 `2026-09`。
 pub fn decision_matrix(data_home: &Path, month: &str) -> Result<Value, String> {
     let mut salt_note: Option<String> = None;
     let (start_ms, end_ms) = agent_vitals_data::authority_query::beijing_month_bounds_ms(month)
@@ -140,14 +140,17 @@ pub fn decision_matrix(data_home: &Path, month: &str) -> Result<Value, String> {
     ];
     if let Some(note) = salt_note { notes.push(note); }
     if let Some(note) = cost_note { notes.push(note); }
+    let rows_vec: Vec<&Value> = rows.values().collect();
+    let summary = dig_findings(&rows_vec.iter().map(|v| (*v).clone()).collect::<Vec<_>>());
     Ok(json!({
         "month": month,
-        "rows": rows.values().collect::<Vec<_>>(),
+        "rows": rows_vec,
+        "findings_summary": summary,
         "notes": notes,
     }))
 }
 
-/// (host, model, provider) 分组聚合 + 每组合的 Top 会话挂载。
+// (host, model, provider) 分组聚合 + 每组合的 Top 会话挂载。
 fn combo_rows(
     conn: &rusqlite::Connection,
     start_ms: i64,
@@ -209,7 +212,7 @@ fn combo_rows(
     Ok(out)
 }
 
-/// 每组合贡献 Top-N 会话（按 token 降序）：不透明 session_ref + 跨度 + 贡献量。
+// 每组合贡献 Top-N 会话（按 token 降序）：不透明 session_ref + 跨度 + 贡献量。
 /// 跨度是「事件跨度近似」（spec §4.4），如实命名 span_*_ms。
 fn attach_top_sessions(
     conn: &rusqlite::Connection,
@@ -273,7 +276,7 @@ fn attach_top_sessions(
     Ok(())
 }
 
-/// SV607/608/610 的宿主级聚合（spec §4.7）：按 (host, rule) 计数，挂到该宿主
+// SV607/608/610 的宿主级聚合（spec §4.7）：按 (host, rule) 计数，挂到该宿主
 /// 的每一行作为「宿主级证据」，不做 per-model 归组。
 fn host_behavior_marks(conn: &rusqlite::Connection, start_ms: i64, end_ms: i64) -> BTreeMap<String, Value> {
     let Ok(mut stmt) = conn.prepare(
@@ -297,7 +300,7 @@ fn host_behavior_marks(conn: &rusqlite::Connection, start_ms: i64, end_ms: i64) 
     out.into_iter().map(|(host, rules)| (host, json!(rules))).collect()
 }
 
-/// 宿主级去重会话数（§4.5 撞限流的分母）：一个会话可跨多模型组合，
+// 宿主级去重会话数（§4.5 撞限流的分母）：一个会话可跨多模型组合，
 /// 分母必须按宿主去重，不能把各组合的会话数相加。
 fn host_session_counts(conn: &rusqlite::Connection, start_ms: i64, end_ms: i64) -> BTreeMap<String, i64> {
     let Ok(mut stmt) = conn.prepare(
@@ -317,7 +320,7 @@ fn host_session_counts(conn: &rusqlite::Connection, start_ms: i64, end_ms: i64) 
     queried.flatten().collect()
 }
 
-/// 每会话的工具失败数（workflow_events，code-aware 脱敏后的 outcome）——
+// 每会话的工具失败数（workflow_events，code-aware 脱敏后的 outcome）——
 /// Top 会话行的「失败 X」来自这里，不读原始日志。
 fn session_failure_counts(conn: &rusqlite::Connection, start_ms: i64, end_ms: i64) -> BTreeMap<String, i64> {
     let Ok(mut stmt) = conn.prepare(
@@ -336,7 +339,132 @@ fn session_failure_counts(conn: &rusqlite::Connection, start_ms: i64, end_ms: i6
     queried.flatten().collect()
 }
 
-/// `2026-09` → `("2026-09-01", "2026-09-30")`（cost_breakdown 吃日期串）。
+// ⓪「本月发现」的确定性结论规则（WORKBENCH_FINDINGS_TAB_SPEC §3.0，原型
+/// FINDINGS_TAB_PROTOTYPE.html ⓪ 区）。**规则生成、非 LLM**——每条结论只是
+/// 对 rows 的可复核算术：中位数偏离、跨度阈值、币种一致性。后端只出结构化
+/// 字段（kind + 数字），中文句子由前端模板组装（与 remedy_for→labels 同一条
+/// 「后端出数、前端出话」纪律）。每条规则至多产出一条、全量上限 4 条——
+/// 摘要是抽样报告，不是把表搬进段落。
+fn dig_findings(rows: &[Value]) -> Vec<Value> {
+    let mut out = Vec::new();
+
+    // ── 规则 1（cost_outlier）：同币种内单会话成本 > 2× 中位 且缓存命中低。
+    // 对照行 = 同币种里命中 ≥0.9 的最便宜组合（修复方案的同币种证据）。
+    {
+        let mut by_currency: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
+        for row in rows {
+            for a in row["amounts"].as_array().unwrap_or(&Vec::new()) {
+                if let Some(cur) = a["currency"].as_str() {
+                    by_currency.entry(cur.to_string()).or_default().push(row);
+                    break; // 每行只按首个金额的币种归组（多币种行罕见，归首币种并如实可查）
+                }
+            }
+        }
+        for (cur, group) in by_currency {
+            if group.len() < 2 {
+                continue;
+            }
+            let sessions = |r: &Value| r["sessions"].as_i64().unwrap_or(0);
+            let amount_minor = |r: &Value| r["amounts"].as_array().unwrap_or(&Vec::new())
+                .iter().find(|a| a["currency"].as_str() == Some(cur.as_str()))
+                .and_then(|a| a["amount_minor"].as_i64()).unwrap_or(0);
+            let per_session = |r: &Value| {
+                let s = sessions(r);
+                if s <= 0 { None } else { Some(amount_minor(r) as f64 / s as f64) }
+            };
+            let mut vals: Vec<f64> = group.iter().filter_map(|r| per_session(r)).collect();
+            if vals.len() < 2 {
+                continue;
+            }
+            vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median = vals[vals.len() / 2];
+            if median <= 0.0 {
+                continue;
+            }
+            let outlier = group.iter()
+                .filter(|r| per_session(r).is_some_and(|v| v > 2.0 * median))
+                .max_by(|a, b| per_session(b).partial_cmp(&per_session(a)).unwrap_or(std::cmp::Ordering::Equal));
+            let Some(outlier) = outlier else { continue };
+            let hit = outlier["cache_hit_ratio"].as_f64();
+            // 低命中是「贵在缓存不在单价」断言的前提——命中正常却贵，那是任务重，不归这条管。
+            if !hit.is_some_and(|h| h < 0.5) {
+                continue;
+            }
+            let control = group.iter()
+                .filter(|r| r["cache_hit_ratio"].as_f64().is_some_and(|h| h >= 0.9))
+                .min_by(|a, b| per_session(a).partial_cmp(&per_session(b)).unwrap_or(std::cmp::Ordering::Equal));
+            let Some(control) = control else { continue };
+            let out_ps = per_session(outlier).unwrap_or(0.0);
+            let ctl_ps = per_session(control).unwrap_or(0.0);
+            if ctl_ps <= 0.0 || out_ps < ctl_ps {
+                continue;
+            }
+            let ratio = (out_ps / ctl_ps * 10.0).round() / 10.0;
+            let saving_minor = ((out_ps - ctl_ps) * sessions(outlier) as f64).round() as i64;
+            out.push(json!({
+                "kind": "cost_outlier",
+                "currency": cur,
+                "outlier": { "host": outlier["host"], "model_id": outlier["model_id"], "provider_id": outlier["provider_id"],
+                    "per_session_minor": (out_ps * 100.0).round() as i64, "cache_hit_ratio": hit,
+                    "uncached_tokens": outlier["tokens"]["uncached_input"] },
+                "control": { "host": control["host"], "model_id": control["model_id"],
+                    "per_session_minor": (ctl_ps * 100.0).round() as i64, "cache_hit_ratio": control["cache_hit_ratio"] },
+                "ratio_vs_control": ratio,
+                "saving_minor": saving_minor,
+                "saving_pct": ((1.0 - ctl_ps / out_ps) * 100.0).round() as i64,
+            }));
+            break; // 全表只报最异常的一条
+        }
+    }
+
+    // ── 规则 2（marathon）：Top 会话跨度 > 24h。
+    let marathon_candidates: Vec<(&Value, &Value)> = rows.iter()
+        .filter_map(|r| Some((r, r["top_sessions"].as_array()?)))
+        .flat_map(|(r, list)| list.iter().map(move |s| (r, s)))
+        .collect();
+    if let Some((row, sess)) = marathon_candidates.iter().copied().filter(|(_, s)| {
+        s["span_last_ms"].as_i64().unwrap_or(0) - s["span_first_ms"].as_i64().unwrap_or(0) > 24 * 3_600_000
+    }).max_by_key(|(_, s)| s["span_last_ms"].as_i64().unwrap_or(0) - s["span_first_ms"].as_i64().unwrap_or(0)) {
+        let span_ms = sess["span_last_ms"].as_i64().unwrap_or(0) - sess["span_first_ms"].as_i64().unwrap_or(0);
+        out.push(json!({
+            "kind": "marathon",
+            "session_ref": sess["session_ref"],
+            "span_hours": (span_ms as f64 / 3600000.0 * 10.0).round() / 10.0,
+            "tokens_total": sess["tokens_total"],
+            "failures": sess["failures"],
+            "combo": { "host": row["host"], "model_id": row["model_id"] },
+        }));
+    }
+
+    // ── 规则 3（currency_split）：可计价行币种不唯一 → 排序禁用的口径失真。
+    {
+        let mut currencies: BTreeMap<String, (i64, i64)> = BTreeMap::new(); // currency → (rows, tokens)
+        for row in rows {
+            for a in row["amounts"].as_array().unwrap_or(&Vec::new()) {
+                if let Some(cur) = a["currency"].as_str() {
+                    let e = currencies.entry(cur.to_string()).or_default();
+                    e.0 += 1;
+                    e.1 += row["tokens"]["total"].as_i64().unwrap_or(0);
+                }
+            }
+        }
+        if currencies.len() > 1 {
+            let parts: Vec<String> = currencies.iter()
+                .map(|(cur, (n, tokens))| format!("{cur} {n} 组合/{tokens} token"))
+                .collect();
+            out.push(json!({
+                "kind": "currency_split",
+                "currencies": currencies.keys().cloned().collect::<Vec<_>>(),
+                "detail": parts.join("；"),
+            }));
+        }
+    }
+
+    out.truncate(4);
+    out
+}
+
+// `2026-09` → `("2026-09-01", "2026-09-30")`（cost_breakdown 吃日期串）。
 fn month_day_span(month: &str) -> Result<(String, String), String> {
     let (y, m): (i64, u32) = {
         let mut parts = month.splitn(2, '-');
@@ -426,8 +554,8 @@ mod tests {
             .unwrap();
     }
 
-    /// 分组/命中/订阅标记/宿主级行为标记/Top 会话——空库之外的全部语义。
-    /// 计价合并只验证结构（amounts 数组存在；空 = 无价，不冒充）。
+    // 分组/命中/订阅标记/宿主级行为标记/Top 会话——空库之外的全部语义。
+    // 计价合并只验证结构（amounts 数组存在；空 = 无价，不冒充）。
     #[test]
     fn groups_combos_with_honest_nulls_and_top_sessions() {
         let home = temp_home("rows");
@@ -470,7 +598,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// 输入侧全零 → null 不是 0（spec §1.4；HourlyCell::cache_hit_ratio 同纪律）。
+    // 输入侧全零 → null 不是 0（spec §1.4；HourlyCell::cache_hit_ratio 同纪律）。
     #[test]
     fn zero_input_side_is_null_not_zero() {
         let home = temp_home("null-ratio");
@@ -494,8 +622,8 @@ mod tests {
             .unwrap();
     }
 
-    /// 时间窗是半开区间 [start, end)：恰在 start 计入、恰在 end 排除；
-    /// legacy_aggregate 与软删行不进组合（与 authority_query 既有窗口纪律一致）。
+    // 时间窗是半开区间 [start, end)：恰在 start 计入、恰在 end 排除；
+    // legacy_aggregate 与软删行不进组合（与 authority_query 既有窗口纪律一致）。
     #[test]
     fn window_boundaries_and_exclusion_predicates() {
         let home = temp_home("window");
@@ -524,8 +652,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home2);
     }
 
-    /// 端到端（decision_matrix 本体）：Top 会话带 failures、session_key 被剥离、
-    /// salt 自动创建、撞限流列挂宿主级数据（验收盲区 4/5 的直测）。
+    // 端到端（decision_matrix 本体）：Top 会话带 failures、session_key 被剥离、
+    // salt 自动创建、撞限流列挂宿主级数据（验收盲区 4/5 的直测）。
     #[test]
     fn decision_matrix_end_to_end_top_sessions_and_pressure() {
         let home = temp_home("e2e");
@@ -549,6 +677,76 @@ mod tests {
         assert_eq!(pressure["hits"], json!(1), "SV607 ×1 计入撞限流：{pressure}");
         assert_eq!(pressure["per_session"], json!(1.0), "宿主 1 个去重会话 → 均值 1.0");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    fn dig_row(model: &str, sessions: i64, amount_minor: i64, hit: Option<f64>, top_sessions: Value) -> Value {
+        json!({
+            "host": "claude-code", "model_id": model, "provider_id": "p", "sessions": sessions,
+            "tokens": { "uncached_input": 100, "cache_read": 100, "cache_write": 0, "output": 1, "total": 201 },
+            "cache_hit_ratio": hit, "has_subscription": false, "waste_rate": null,
+            "amounts": [{ "amount_minor": amount_minor, "currency": "CNY", "basis": "metered_estimate" }],
+            "top_sessions": top_sessions, "host_behavior": {},
+        })
+    }
+
+    // ⓪结论规则：成本异常（中位数偏离 + 低命中 + 同币种对照）的算术与诚实缺席。
+    #[test]
+    fn dig_cost_outlier_math_and_honest_absence() {
+        // flash：¥5/会话、命中 0.22；两个正常行 ¥1/会话命中 0.95 → 中位 1.0，
+        // outlier 5.0 > 2×中位 且命中 <0.5，control = 最便宜的高命中行。
+        let rows = vec![
+            dig_row("flash", 12, 6000, Some(0.22), json!([])),
+            dig_row("normal-a", 10, 1000, Some(0.95), json!([])),
+            dig_row("normal-b", 10, 1000, Some(0.96), json!([])),
+        ];
+        let out = dig_findings(&rows);
+        let cost = out.iter().find(|c| c["kind"] == json!("cost_outlier")).expect("cost_outlier emitted");
+        assert_eq!(cost["outlier"]["model_id"], json!("flash"));
+        assert_eq!(cost["control"]["model_id"], json!("normal-a"));
+        assert_eq!(cost["ratio_vs_control"], json!(5.0));
+        // saving = 每会话差（6000/12 − 1000/10 = 400 minor）× outlier 会话数 12。
+        assert_eq!(cost["saving_minor"], json!(4800));
+        assert_eq!(cost["saving_pct"], json!(80));
+
+        // 诚实缺席之一：贵但命中正常（任务重不归这条管）。
+        let rows2 = vec![
+            dig_row("heavy-task", 5, 5000, Some(0.9), json!([])),
+            dig_row("normal-a", 10, 1000, Some(0.95), json!([])),
+            dig_row("normal-b", 10, 1000, Some(0.96), json!([])),
+        ];
+        assert!(dig_findings(&rows2).iter().all(|c| c["kind"] != json!("cost_outlier")),
+            "命中 ≥0.5 的贵行不报成本异常");
+        // 诚实缺席之二：没有高命中的对照行（不能凭空宣称"该换谁"）。
+        let rows3 = vec![
+            dig_row("flash", 12, 6000, Some(0.22), json!([])),
+            dig_row("normal-a", 10, 1000, Some(0.4), json!([])),
+            dig_row("normal-b", 10, 1000, Some(0.5), json!([])),
+        ];
+        assert!(dig_findings(&rows3).iter().all(|c| c["kind"] != json!("cost_outlier")),
+            "无 ≥0.9 命中的对照行 → 不报（修复建议没有证据）");
+    }
+
+    // ⓪结论规则：马拉松（>24h 取最长）与币种失真。
+    #[test]
+    fn dig_marathon_and_currency_split() {
+        let rows = vec![
+            dig_row("a", 2, 1000, Some(0.9), json!([
+                { "session_ref": "sr_short", "span_first_ms": 0, "span_last_ms": 3600000, "tokens_total": 10, "failures": 0 },
+                { "session_ref": "sr_long", "span_first_ms": 0, "span_last_ms": 179_280_000, "tokens_total": 473, "failures": 40 },
+            ])),
+            { let mut r = dig_row("b", 2, 1000, Some(0.9), json!([])); r["amounts"] = json!([{ "amount_minor": 1408, "currency": "USD", "basis": "metered_estimate" }]); r },
+        ];
+        let out = dig_findings(&rows);
+        let marathon = out.iter().find(|c| c["kind"] == json!("marathon")).expect("marathon");
+        assert_eq!(marathon["session_ref"], json!("sr_long"), "取最长跨度的会话");
+        assert_eq!(marathon["span_hours"], json!(49.8), "179_280_000ms = 49.8h（>24h 阈值）");
+        assert_eq!(marathon["failures"], json!(40));
+        let split = out.iter().find(|c| c["kind"] == json!("currency_split")).expect("split");
+        assert_eq!(split["currencies"], json!(["CNY", "USD"]));
+        assert!(split["detail"].as_str().unwrap_or("").contains("USD 1 组合"));
+        // 全 CNY 单币种 → currency_split 缺席。
+        let rows2 = vec![dig_row("a", 2, 1000, Some(0.9), json!([]))];
+        assert!(dig_findings(&rows2).iter().all(|c| c["kind"] != json!("currency_split")));
     }
 
     #[test]

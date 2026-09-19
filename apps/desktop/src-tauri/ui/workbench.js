@@ -6938,6 +6938,7 @@ function renderFindingsDetail() {
     }
   }
   body.appendChild(frag);
+  renderDig();
 }
 
 function issueScopeLabel(group) {
@@ -7325,6 +7326,100 @@ function openSessionFromMatrix(sess, row) {
   });
 }
 
+// ── ⓪ 本月发现（spec §3.0）：把 dig_findings 的结构化结论组装成中文卡。
+/// 后端只出数（kind + 数字），句子在这里拼——与 remedy_for→labels 同一条
+/// 「后端出数、前端出话」纪律。
+function digMoney(minor, currency) {
+  return (currency === "USD" ? "$" : "¥") + (Number(minor || 0) / 100).toFixed(2);
+}
+
+function digCardText(c) {
+  if (c.kind === "cost_outlier") {
+    const o = c.outlier || {}, k = c.control || {};
+    return {
+      title: "最贵的组合贵在缓存纪律，不在单价",
+      why: (o.model_id || "?") + " 单会话 ≈" + digMoney(o.per_session_minor, c.currency)
+        + "，是同币种 " + (k.model_id || "?") + "（≈" + digMoney(k.per_session_minor, c.currency) + "）的 " + c.ratio_vs_control + " 倍；"
+        + "主因缓存命中 " + Math.round((o.cache_hit_ratio || 0) * 100) + "%。切换后命中 "
+        + Math.round((k.cache_hit_ratio || 0) * 100) + "% 的组合已被验证是替代方案。",
+      gain: "该线月省 ≈" + digMoney(c.saving_minor, c.currency) + "（−" + c.saving_pct + "%）",
+      action: { label: "定位到行", run: () => digDrillToRow((o.host || "") + "/" + (o.model_id || "") + "/" + (o.provider_id || "")) },
+    };
+  }
+  if (c.kind === "marathon") {
+    return {
+      title: "一个 " + c.span_hours + " 小时的马拉松会话吃掉 " + matrixTokens(c.tokens_total) + " token",
+      why: "工具失败 " + (c.failures || 0) + " 次仍在跑（" + (c.combo || {}).host + " · " + (c.combo || {}).model_id
+        + "）。当前没有单会话熔断（发现 tab 待拍板 #2），一个会话可以无限烧。",
+      gain: "拆任务 + 单会话熔断",
+      action: { label: "查看会话", run: () => openSessionFromMatrix({ session_ref: c.session_ref }, { host: (c.combo || {}).host, model_id: (c.combo || {}).model_id }) },
+    };
+  }
+  if (c.kind === "currency_split") {
+    return {
+      title: "计价失真让排序整个瘫痪",
+      why: "可计价组合的币种不唯一（" + c.detail + "）——跨币种不可比，②的成本排序因此禁用。把中转用量统一为申报口径后解锁。",
+      gain: "解锁全表排序",
+      action: { label: "去明确计费方式", run: () => {
+        switchTab("overview");
+        const review = document.getElementById("ov-billing-review");
+        if (review && review.click) review.click();
+      } },
+    };
+  }
+  return null;
+}
+
+function digDrillToRow(key) {
+  const tr = document.querySelector('tr[data-matrix-key="' + (String(key).replace(/"/g, '"')) + '"]');
+  if (!tr) return;
+  toggleMatrixRow(key, null);
+  if (tr.scrollIntoView) tr.scrollIntoView({ behavior: "smooth", block: "center" });
+  tr.style.transition = "box-shadow .4s";
+  tr.style.boxShadow = "inset 0 0 0 2px var(--warn)";
+  setTimeout(() => { tr.style.boxShadow = ""; }, 2200);
+}
+
+function renderDig() {
+  const list = document.getElementById("find-dig-list");
+  const emptyEl = document.getElementById("find-dig-empty");
+  if (!list || !emptyEl) return;
+  list.textContent = "";
+  const summary = ((matrixState.data || {}).findings_summary) || [];
+  if (matrixState.error) {
+    emptyEl.hidden = false;
+    emptyEl.textContent = "本月发现读取失败：" + matrixState.error + "（点上方「重载」可重试）";
+    return;
+  }
+  emptyEl.hidden = summary.length > 0;
+  emptyEl.textContent = "本月没有触发结论规则的异常。";
+  for (const c of summary) {
+    const text = digCardText(c);
+    if (!text) continue;
+    const row = el("div", "issue-todo-row");
+    const head = el("div", "issue-todo-head");
+    const title = el("strong", null);
+    title.textContent = text.title;
+    head.append(title);
+    row.append(head);
+    const why = el("div", "issue-subline muted");
+    why.textContent = text.why;
+    row.append(why);
+    const actions = el("div", "issue-todo-actions");
+    const gain = el("span", "issue-subline");
+    gain.style.color = "var(--success)";
+    gain.textContent = text.gain;
+    actions.append(gain);
+    const btn = el("button", "btn primary");
+    btn.type = "button";
+    btn.textContent = text.action.label;
+    btn.addEventListener("click", text.action.run);
+    actions.append(btn);
+    row.append(actions);
+    list.append(row);
+  }
+}
+
 function toggleMatrixRow(key, ev) {
   if (ev && ev.target.closest("a,button")) return;
   matrixState.expanded[key] = !matrixState.expanded[key];
@@ -7359,10 +7454,17 @@ function renderMatrix() {
   sortEl.textContent = bits.join(" · ");
 
   const frag = document.createDocumentFragment();
+  // ⓪结论的异常旗（与 dig_findings 同判据的展示层）：outlier 行挂成本旗，
+  // 低命中行挂命中旗（hit < 0.5 与后端规则一致）。
+  const costOutlierKey = (() => {
+    const c = ((matrixState.data || {}).findings_summary || []).find((x) => x.kind === "cost_outlier");
+    return c && c.outlier ? c.outlier.host + "/" + c.outlier.model_id + "/" + c.outlier.provider_id : null;
+  })();
   for (const row of sorted.order) {
     const key = matrixRowKey(row);
     const tr = document.createElement("tr");
     tr.className = "matrix-row";
+    tr.dataset.matrixKey = key;
     tr.addEventListener("click", (ev) => toggleMatrixRow(key, ev));
 
     const comboCell = document.createElement("td");
@@ -7381,6 +7483,18 @@ function renderMatrix() {
     if (!(row.amounts || []).length && !row.has_subscription) tagBits.push("未计价");
     tags.textContent = tagBits.join(" · ");
     comboCell.appendChild(tags);
+    if (costOutlierKey && key === costOutlierKey) {
+      const flag = document.createElement("span");
+      flag.className = "flag cost";
+      flag.textContent = "单会话成本异常";
+      comboCell.appendChild(flag);
+    }
+    if (row.cache_hit_ratio != null && row.cache_hit_ratio < 0.5) {
+      const flag = document.createElement("span");
+      flag.className = "flag hit";
+      flag.textContent = "命中 " + Math.round(row.cache_hit_ratio * 100) + "%";
+      comboCell.appendChild(flag);
+    }
     tr.appendChild(comboCell);
 
     const num = (text) => {

@@ -262,6 +262,15 @@ console.log("# §3.2/§4.6〔P2〕模型 × Harness 对比面");
         amounts: [], top_sessions: [], host_behavior: {} },
     ],
     notes: ["waste_rate 恒 null：waste 检测器仅 DSH 且尚未接入（spec §4.2，不用 0 冒充）"],
+    findings_summary: [
+      { kind: "cost_outlier", currency: "CNY",
+        outlier: { host: "claude-code", model_id: "deepseek-v4-flash-0731", provider_id: "<unknown>", per_session_minor: 561, cache_hit_ratio: 0.2211, uncached_tokens: 44432002 },
+        control: { host: "claude-code", model_id: "deepseek/deepseek-v4.1-flash", per_session_minor: 120, cache_hit_ratio: 0.997 },
+        ratio_vs_control: 4.7, saving_minor: 5292, saving_pct: 79 },
+      { kind: "marathon", session_ref: "sr_1f7589ece7184a8a8", span_hours: 49.8, tokens_total: 473030189, failures: 40,
+        combo: { host: "claude-code", model_id: "deepseek-v4-flash-0731" } },
+      { kind: "currency_split", currencies: ["CNY", "USD"], detail: "CNY 1 组合/637834281 token；USD 2 组合/48317587 token" },
+    ],
   };
   await sandbox.loadDecisionMatrix();
   const sorted = sandbox.sortMatrixRows(sandbox.__matrix.rows);
@@ -389,6 +398,30 @@ console.log("# r3 预算归因卡 + 行为证据只读（用户反馈 2026-09-19
   await sandbox.loadIssueGroupInstances({ group_id: "g-dq", rule: "QUOTA_WINDOW" }, detailRow2);
   const priceText = textOf(detailRow2.firstElementChild);
   ok(/稍后|已解决|不适用/.test(priceText), `非行为组保留状态迁移（待办语义；got ${priceText.slice(0, 120)}）`);
+}
+
+console.log("# §3.0〔P2-r4〕⓪ 本月发现：确定性结论卡");
+{
+  await sandbox.loadDecisionMatrix();
+  sandbox.renderDig();
+  const digText = domText("find-dig-list");
+  ok(digText.includes("最贵的组合贵在缓存纪律，不在单价"), "成本异常结论卡标题");
+  ok(digText.includes("4.7 倍") && digText.includes("命中 22%"), "断言带数字依据（倍数 + 命中）");
+  ok(digText.includes("该线月省 ≈¥52.92（−79%）"), "收益数字化（每会话差 × 会话数）");
+  ok(digText.includes("49.8 小时的马拉松会话") && digText.includes("失败 40 次仍在跑"), "马拉松结论卡");
+  ok(digText.includes("计价失真让排序整个瘫痪") && digText.includes("CNY 1 组合"), "币种失真结论卡");
+  ok((digText.match(/定位到行|查看会话|去明确计费方式/g) || []).length === 3, "三张卡各带下钻按钮");
+  // ②行的异常旗：outlier 行 + 低命中行
+  const bodyText = domText("find-matrix-body");
+  ok(bodyText.includes("单会话成本异常"), "outlier 行挂成本旗");
+  ok(bodyText.includes("命中 22%"), "低命中行挂命中旗（<50%，与后端规则同判据）");
+  // 诚实缺席：空 summary → 空态文案（走 mock，不碰 vm 的 const 状态）
+  const savedMatrix = sandbox.__matrix;
+  sandbox.__matrix = { month: "2026-09", rows: savedMatrix.rows, findings_summary: [], notes: [] };
+  await sandbox.loadDecisionMatrix();
+  ok(domText("find-dig-empty").includes("没有触发结论规则"), "无结论时显示空态而非空白");
+  sandbox.__matrix = savedMatrix;
+  await sandbox.loadDecisionMatrix();
 }
 
 console.log(failed === 0 ? "\n全部通过" : `\n${failed} 条失败`);

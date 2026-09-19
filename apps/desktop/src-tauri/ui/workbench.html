@@ -296,6 +296,15 @@
       <div id="find-receipt" class="form-receipt" hidden role="status"></div>
 
 
+      <!-- ⓪ 本月发现（spec §3.0）：确定性结论摘要——规则生成，非 LLM。
+           每条 = 断言 + 依据数字 + 收益/动作；点「定位」跳到构成它的②那一行。 -->
+      <div class="panel" id="find-dig">
+        <div class="panel-title">本月发现</div>
+        <div class="muted note">每条结论 = 一句断言 + 它依据的数字 + 能带来什么。规则生成（确定性，非 LLM）。</div>
+        <div id="find-dig-empty" class="empty" hidden>本月没有触发结论规则的异常。</div>
+        <div id="find-dig-list" class="sk-rows"></div>
+      </div>
+
       <!-- 待办区（spec §3.1）：只收「无脑可解决」的项——动作明确、表单预填、
            点击有结果、可撤销。SV6xx 行为命中是事实不是任务，一律不进这里
            （§1 判断标准 2 / §8），它们在下方证据区。 -->
