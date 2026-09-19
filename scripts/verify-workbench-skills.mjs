@@ -248,6 +248,15 @@ sandbox.renderSkillHealth(payloadAll, "all");
     "SV5xx 的 caveat 以 ! 前缀逐条渲染");
   ok(domText("sk-not-assessed-list").includes("SV402") && domText("sk-not-assessed-list").includes("OVERLAP_CONFIRMED"),
     "not_assessed 逐条原样渲染（码 + 名 + 原因）");
+  // 2026-09-19 真机截图回归：占位显隐与行数同向 —— 有发现的分区不得挂着
+  // 「没有…」占位，为空的分区必须显示占位。
+  ok(elements["sk-act-now-empty"].hidden === true,
+    "立即处理有发现 → 空态文案隐藏（不与 SV 行同屏）");
+  ok(elements["sk-security-empty"].hidden === true,
+    "安全与结构有发现 → 空态文案隐藏");
+  ok(domText("sk-usage-list").includes("占位显隐") === false
+    && elements["sk-usage-empty"] != null,
+    "使用证据分区存在");
   // SV401 / SV5xx 行动列 = 需你判断，无按钮（§8）。
   ok(domText("sk-act-now-list").includes("SV401") && domText("sk-act-now-list").includes("需你判断"),
     "SV401 行动列固定「需你判断」");
@@ -266,6 +275,8 @@ sandbox.renderSkillHealth(payloadClaude, "claude-code");
   const repro = domText("sk-repro");
   ok(repro.includes("--host claude-code") && repro.includes(payloadClaude.run),
     "复现命令含 --host <h> 与 run 标记");
+  ok(elements["sk-act-now-empty"].hidden === true,
+    "单宿主视图同样不挂空态占位");
   // 使用证据（§6.5）：claude-code 有触发数据 —— 僵尸 / too-new 分列。
   const usage = domText("sk-usage-list");
   ok(usage.includes("Claude Code"), "使用证据按宿主分组");
