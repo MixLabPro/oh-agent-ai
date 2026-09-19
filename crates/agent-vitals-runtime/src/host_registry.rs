@@ -106,7 +106,11 @@ pub fn plugin_facts_stem(host: &str) -> Option<String> {
     Some(format!("plugin-{slug}.jsonl"))
 }
 
-/// slug 规则与 hosts::generic::manifest 同一词表（防路径穿越的前置闸）。
+/// slug 规则与 `hosts::generic::manifest` 的正则 `^[a-z][a-z0-9-]{0,31}$`
+/// + 保留字表是**同一契约的两份实现**（防路径穿越的前置闸）。
+///
+/// 改动任何一侧必须同步另一侧并补两侧测试——漂移会让「registry 接受、
+/// 落盘拒绝」或反之。
 pub fn plugin_slug_ok(slug: &str) -> bool {
     let mut chars = slug.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_lowercase())

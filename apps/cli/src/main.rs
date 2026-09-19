@@ -455,7 +455,7 @@ enum Cmd {
     /// cache_read = cached, cache_write = 0, output = completion. Provider/route
     /// List validated plugin hosts (HOST_MANIFEST_DSL_SPEC §7.2 registry).
     /// Read-only; broken manifests are reported, never fatal (degradation
-    /// isolation). Mirrors Python `scan.py plugin-list`.
+    /// isolation). Python mirror lands with the parity task.
     PluginList,
     /// Dry-run a plugin manifest (§6.5 首装仪式): discovery + extraction +
     /// fact_id stability + format guard. No writes. With --file, feed fixture
@@ -2565,17 +2565,18 @@ session_store={store} fold={fold}"
             }
             Err(e) => serde_json::json!({ "mode": "validate", "error": e }),
         };
-        if *rows_json {
+        // 退出码与消费语义（验收修复 #1）：硬错误与 gate refusal 一律
+        // exit 2——JSON 模式不豁免，自动化拿「安装成功」当成功。
+        let failed = payload.get("error").is_some()
+            || payload.get("gate").and_then(|v| v.as_str()) != Some("pass");
+        if *rows_json || payload.get("error").is_none() {
             println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
-        } else if let Some(err) = payload.get("error").and_then(|v| v.as_str()) {
+        }
+        if let Some(err) = payload.get("error").and_then(|v| v.as_str()) {
             eprintln!("plugin-validate failed: {err}");
+        }
+        if failed {
             std::process::exit(2);
-        } else {
-            println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
-            let gate = payload.get("gate").and_then(|v| v.as_str()).unwrap_or("refuse");
-            if gate != "pass" {
-                std::process::exit(2);
-            }
         }
         return;
     }

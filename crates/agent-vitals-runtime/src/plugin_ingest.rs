@@ -62,6 +62,10 @@ pub struct PluginRunReport {
     pub models: Vec<String>,
     /// 首装 format guard：整个 corpus 零 emit → false（拒绝安装）。
     pub corpus_has_emit: bool,
+    /// 如实警示（§「发现矛盾报告给上层」）：跨 root 的同一 session id 落在
+    /// 多个 source_profile 下时，JSONL（身份含 profile）与 authority（身份
+    /// UNIQUE 不含 profile）的行数会分歧——这里点名，不静默。
+    pub warnings: Vec<String>,
     #[serde(skip_serializing)]
     pub facts: Vec<Value>,
 }
@@ -338,11 +342,9 @@ pub fn run_plugin(
                 .name("id")
                 .map(|m| m.as_str().to_string())
                 .unwrap_or_default();
-            let parent = abs
-                .parent()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let profile = source_profile_for_root(&manifest.slug, &parent);
+            // fixture 模式 profile 固定（不依赖临时目录绝对路径）——
+            // golden/parity 的逐字节跨机复现前提（验收发现 #3）。
+            let profile = source_profile_for_root(&manifest.slug, "<fixture>");
             units.push((file_name, abs, session_id, profile));
         }
     }
@@ -400,6 +402,25 @@ pub fn run_plugin(
     }
     out.models = models.into_iter().collect();
 
+    // 跨 root 同 session 多 profile 警示（验收发现：JSONL/authority 双层
+    // 分歧必须可见）。
+    {
+        let mut by_session: BTreeMap<&str, std::collections::BTreeSet<&str>> =
+            BTreeMap::new();
+        for (session, profile) in units.iter().map(|(_r, _a, s, p)| (s.as_str(), p.as_str())) {
+            by_session.entry(session).or_default().insert(profile);
+        }
+        for (session, profiles) in &by_session {
+            if profiles.len() > 1 {
+                out.warnings.push(format!(
+                    "session `{session}` 出现在 {} 个 source_profile 下（跨 root）——\
+                     facts JSONL 按 profile 分行，authority 按 host+session 身份去重合并",
+                    profiles.len()
+                ));
+            }
+        }
+    }
+
     // fact_id 稳定性（§6.5）：提取是纯函数，重放两遍 id 序列必须一致。
     let ids_once: Vec<String> = out
         .facts
@@ -440,18 +461,18 @@ pub fn validate_gate(report: &PluginRunReport) -> Result<(), String> {
                     检查 event_key 是否稳定（§6.5）"
             .to_string());
     }
+    if report.failed_files > 0 {
+        return Err(format!(
+            "{} 个文件行数超限整文件失败（§6.4）——调低 limits 或修 recipe",
+            report.failed_files
+        ));
+    }
     if !report.corpus_has_emit {
         return Err(
             "首装 format guard：整个 corpus 零 emit（§4.3）——include 或 recipe \
              discriminator 与数据不匹配"
                 .to_string(),
         );
-    }
-    if report.failed_files > 0 {
-        return Err(format!(
-            "{} 个文件行数超限整文件失败（§6.4）——调低 limits 或修 recipe",
-            report.failed_files
-        ));
     }
     Ok(())
 }

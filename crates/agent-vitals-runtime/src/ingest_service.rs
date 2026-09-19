@@ -231,8 +231,8 @@ pub fn enforce_retention(data_home: &Path, current_month: &str) -> Result<Value,
     );
     let mut out = serde_json::Map::new();
     let mut hosts: Vec<String> = FACT_HOSTS.iter().map(|h| h.to_string()).collect();
-    // 插件宿主：registry 驱动（spec §7.1 #3）——磁盘上有 plugin-*.jsonl 的
-    // 才纳入清理；slug 合法性由文件名反查（facts 文件只能经 facts_path 产生）。
+    // 插件宿主：磁盘驱动（比 registry 扫描更稳——manifest 被删后历史文件
+    // 仍要能被清理）；文件名反查过同一 slug 闸（§7.1 #3）。
     if let Ok(entries) = std::fs::read_dir(data_home.join("facts")) {
         let mut plugin_hosts: Vec<String> = entries
             .flatten()
