@@ -19,7 +19,10 @@
 mod data_status;
 mod session_detail;
 mod session_trace;
-mod session_ref;
+// `session_ref` 的 HMAC 机制不是工具面——pub 是给 CLI 本地 `trace-anchors`
+// （V16 锚点报告，本地呈现层专属）复用 ref 解析用的；工具注册走下面的
+// dispatch，模块可见性与工具面无关。
+pub mod session_ref;
 mod sessions_search;
 mod usage_hourly;
 mod budget_profiles;

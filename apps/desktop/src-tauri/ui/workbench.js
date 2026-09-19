@@ -428,6 +428,8 @@ async function loadActiveTab() {
   else if (activeTab === "sessions") { if (!sessState.loaded) loadSessions(); }
   // Findings / 数据源同款懒加载（CLI 汇总较重，见 state 注释）。
   else if (activeTab === "findings") { if (!findState.loaded) loadFindings(); }
+  // 「测试」tab 懒加载：路线列表是轻命令；报告区按 run 状态渲染。
+  else if (activeTab === "test") { loadTestTab(); }
   else if (activeTab === "sources") {
     // 设置 tab 里 read_overview 有三个消费方（预算静默态 / 数据源同步行 /
     // 版本诊断的 sync 字段）。以前前两处各拉一次 = 每进一次设置页多跑一遍
@@ -4470,7 +4472,7 @@ function hostAmountsByCurrency(hostId, hostRow, byProvider) {
   const out = [];
   const seen = new Set();
   const push = (basis, currency, amount) => {
-    const key = basis + " " + currency;
+    const key = basis + "\u0000" + currency;
     if (seen.has(key)) {
       const hit = out.find((e) => e.basis === basis && e.currency === currency);
       hit.amount += amount;
@@ -7681,3 +7683,349 @@ async function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+
+// ── 「测试」tab v2（2026-09-20 转向）─────────────────────────────────────
+// 默认面 = 被动路线质量报告（宿主 × 实际模型族，来自已入库 usage_facts 的
+// 硬证据——模型串是协议响应原样，anthropic 官方不可能返回 deepseek/glm），
+// 不发任何探针请求。主动 L0 探针收进「高级」折叠区：隔离在 cc-switch 型
+// 机器上不成立（settings.json env 压制进程注入，spec §0 addendum）。
+// 渲染全部 DOM 构建 + textContent（安全纪律，复审 F1）：模型串/摘要字段
+// 来自宿主日志与中转协议响应——正是本 tab 要防的对手，绝不 innerHTML
+// 插值（CSP 为 null 的 webview 里注入即可 invoke 任意 IPC）。
+
+const testState = { routes: [], ticket: null, polling: null };
+
+async function loadTestTab() {
+  loadQualityReport();
+  // 高级区路线表每次进入都刷新（轻命令；consent 经 CLI 授予后不能停留在旧态）。
+  const loaded = await invoke("probe_routes_list").catch(() => null);
+  testState.routes = Array.isArray(loaded) ? loaded : [];
+  renderTestRoutes();
+  if (loaded === null) {
+    showTestNotice("danger", "路线读取失败", "agent-vitals CLI 不可用？重进本页重试。");
+  }
+}
+
+// ---------- 被动路线质量（默认面） ----------
+
+const QUALITY_FAMILY_LABELS = {
+  anthropic: "Claude 系",
+  openai: "GPT 系",
+  deepseek: "DeepSeek",
+  glm: "GLM",
+  minimax: "MiniMax",
+  gemini: "Gemini",
+  qwen: "Qwen",
+  synthetic: "API 错误",
+  unknown: "未识别",
+};
+
+function formatTokens(value) {
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return String(value);
+}
+
+function formatDays(ms) {
+  if (!ms) return "—";
+  return new Date(ms).toLocaleDateString();
+}
+
+async function loadQualityReport() {
+  const days = Number(document.getElementById("test-quality-days").value) || 90;
+  const loading = document.getElementById("test-quality-loading");
+  const banner = document.getElementById("test-quality-banner");
+  loading.hidden = false;
+  banner.hidden = true;
+  const report = await invoke("routes_quality", { days }).catch((error) => {
+    loading.hidden = true;
+    banner.replaceChildren(`路线质量汇总失败：${typeof error === "string" ? error : JSON.stringify(error)}`);
+    banner.hidden = false;
+    return null;
+  });
+  loading.hidden = true;
+  if (!report) return;
+  renderQualityReport(report, days);
+}
+
+function renderQualityReport(report, days) {
+  const hostsBox = document.getElementById("test-quality-hosts");
+  const summaryEl = document.getElementById("test-quality-summary");
+  const foot = document.getElementById("test-quality-foot");
+  hostsBox.replaceChildren();
+  const hosts = Array.isArray(report.hosts) ? report.hosts : [];
+  for (const host of hosts) {
+    hostsBox.append(buildHostQualityPanel(host, days));
+  }
+  summaryEl.textContent = hosts.length === 0
+    ? "窗口内没有用量事实——先等一次同步"
+    : `${hosts.length} 个宿主 · 按协议响应里的实际模型判定`;
+  foot.replaceChildren("判定依据：模型串来自宿主协议响应原样（非推断）。「非官方模型」= 该宿主官方渠道不可能给出的模型族；「API 错误」= 请求失败时宿主写入的本地占位（<synthetic>）。");
+}
+
+function buildHostQualityPanel(host, days) {
+  const panel = document.createElement("div");
+  panel.className = "panel";
+  const title = document.createElement("div");
+  title.className = "panel-title";
+  const titleText = document.createElement("span");
+  titleText.textContent = `${host.host} · 近 ${days} 天 · ${host.totals ? host.totals.requests : 0} 请求 / ${host.totals ? host.totals.sessions : 0} 会话`;
+  title.append(titleText);
+
+  const families = Array.isArray(host.families) ? host.families : [];
+  const nonNative = families.filter((f) => f.flag === "non_native");
+  const apiErrors = families.find((f) => f.flag === "api_error");
+  const nonNativeShare = nonNative.reduce((sum, f) => sum + (f.request_share || 0), 0);
+
+  // 用户语言的结论行（notice 级别与总览通知同一套语义）。
+  const notice = document.createElement("div");
+  if (!host.has_baseline) {
+    notice.className = "notice";
+    notice.append(buildNoticeText("该宿主未登记官方模型基准", "只按模型族展示分布，不做「非官方」判定"));
+  } else if (nonNative.length > 0) {
+    const level = nonNativeShare >= 20 ? "danger" : "warn";
+    notice.className = `notice ${level}`;
+    const names = nonNative.map((f) => QUALITY_FAMILY_LABELS[f.family] || f.family).join(" / ");
+    notice.append(buildNoticeText(
+      `${nonNativeShare.toFixed(1)}% 的请求实际运行在非官方模型上（${names}）`,
+      "依据：这些模型族不可能来自该宿主的官方渠道——响应模型串是协议原样",
+    ));
+  } else {
+    notice.className = "notice ok";
+    notice.append(buildNoticeText("全部请求运行在官方模型族内", "身份面未见注水；行为面（降 effort 等）不在此覆盖"));
+  }
+  if (apiErrors && apiErrors.requests > 0) {
+    const errorNotice = document.createElement("div");
+    errorNotice.className = "notice warn";
+    errorNotice.append(buildNoticeText(
+      `${apiErrors.requests} 次请求失败（API 错误，涉及 ${apiErrors.sessions} 个会话）`,
+      "宿主在请求被拒/断流时写入的本地占位——常见为网关 402/断网",
+    ));
+    panel.append(title, notice, errorNotice);
+  } else {
+    panel.append(title, notice);
+  }
+
+  const wrap = document.createElement("div");
+  wrap.className = "table-wrap";
+  const table = document.createElement("table");
+  table.className = "sess-table";
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["模型族", "判定", "请求占比", "请求", "会话", "tokens", "最近活跃", "实际模型"]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  head.appendChild(headRow);
+  const body = document.createElement("tbody");
+  const flagLabels = { native: "官方族", non_native: "非官方", api_error: "API 错误", no_baseline: "无基准" };
+  for (const family of families) {
+    const row = document.createElement("tr");
+    const models = Array.isArray(family.models) ? family.models : [];
+    const modelNames = models
+      .slice()
+      .sort((a, b) => (b.requests || 0) - (a.requests || 0))
+      .slice(0, 3)
+      .map((m) => m.model)
+      .join("、");
+    for (const value of [
+      QUALITY_FAMILY_LABELS[family.family] || family.family,
+      flagLabels[family.flag] || family.flag,
+      `${family.request_share}%`,
+      family.requests,
+      family.sessions,
+      formatTokens(family.tokens_total || 0),
+      formatDays(family.last_event_ms),
+      modelNames,
+    ]) {
+      const td = document.createElement("td");
+      td.textContent = String(value);
+      row.appendChild(td);
+    }
+    body.appendChild(row);
+  }
+  table.append(head, body);
+  wrap.append(table);
+  panel.append(wrap);
+  return panel;
+}
+
+function buildNoticeText(titleText, subText) {
+  const text = document.createElement("div");
+  text.className = "notice-text";
+  const strong = document.createElement("strong");
+  strong.textContent = titleText;
+  const sub = document.createElement("div");
+  sub.className = "notice-sub";
+  sub.textContent = subText || "";
+  text.append(strong, sub);
+  return text;
+}
+
+function renderTestRoutes() {
+  const selectA = document.getElementById("test-route-a");
+  const selectB = document.getElementById("test-route-b");
+  const hint = document.getElementById("test-hint");
+  if (!selectA || !selectB) return;
+  const optionFor = (route) => {
+    const option = document.createElement("option");
+    option.value = route.route_id;
+    option.textContent = `${route.label} · ${route.model_requested}${route.consent_granted_at_ms ? "" : "（未授权）"}`;
+    return option;
+  };
+  const emptyA = document.createElement("option");
+  emptyA.value = "";
+  emptyA.textContent = "（暂无路线）";
+  const emptyB = document.createElement("option");
+  emptyB.value = "";
+  emptyB.textContent = "（单路体检）";
+  selectA.replaceChildren(emptyA);
+  selectB.replaceChildren(emptyB);
+  for (const route of testState.routes) {
+    selectA.append(optionFor(route));
+    selectB.append(optionFor(route));
+  }
+  if (testState.routes.length > 0) selectA.value = testState.routes[0].route_id;
+  updateTestRunButton();
+  const unconsented = testState.routes.filter((route) => !route.consent_granted_at_ms);
+  hint.textContent = testState.routes.length === 0
+    ? "还没有路线档案：扫描 cc-switch 一键注册 —— agent-vitals probe routes-add --from-cc-switch（官方直连另用 --label 官方直连 --model claude-sonnet-5）"
+    : unconsented.length > 0
+      ? `未授权路线不能发起测试：agent-vitals probe consent --route-id ${unconsented[0].route_id}`
+      : "L0 单次约 10–60 秒、一条 1 轮 echo 请求（订阅内成本≈0）。";
+}
+
+function updateTestRunButton() {
+  const button = document.getElementById("test-run-btn");
+  if (!button) return;
+  const route = testState.routes.find((r) => r.route_id === document.getElementById("test-route-a").value);
+  // 没有路线 / 选中路线未授权 / 正在跑：三种状态都不给点，出错走横幅，不用 alert。
+  button.disabled = !route || !route.consent_granted_at_ms || testState.polling !== null;
+}
+
+function showTestNotice(level, title, sub) {
+  const el = document.getElementById("test-banner");
+  if (!el) return;
+  const icon = document.createElement("span");
+  icon.className = "notice-icon";
+  icon.setAttribute("aria-hidden", "true");
+  const text = document.createElement("div");
+  text.className = "notice-text";
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  const subDiv = document.createElement("div");
+  subDiv.className = "notice-sub";
+  subDiv.textContent = sub || "";
+  text.append(strong, subDiv);
+  el.replaceChildren(icon, text);
+  el.className = "notice " + level;
+  el.hidden = false;
+}
+
+async function startTestRun() {
+  const routeA = document.getElementById("test-route-a").value;
+  if (!routeA) return;
+  const routeB = document.getElementById("test-route-b").value || null;
+  const repeats = Number(document.getElementById("test-repeats").value) || 1;
+  const maxProbes = Math.max(repeats * (routeB ? 2 : 1), 1);
+  const statusBox = document.getElementById("test-run-status");
+  const button = document.getElementById("test-run-btn");
+  button.disabled = true;
+  statusBox.hidden = false;
+  const start = await invoke("probe_run_start", { routeA, routeB, repeats, maxProbes }).catch((error) => {
+    statusBox.hidden = true;
+    updateTestRunButton();
+    showTestNotice("danger", "启动失败", typeof error === "string" ? error : JSON.stringify(error));
+    return null;
+  });
+  if (!start) return;
+  testState.ticket = start.ticket;
+  if (testState.polling) clearInterval(testState.polling);
+  testState.polling = setInterval(async () => {
+    const result = await invoke("probe_run_result", { ticket: testState.ticket }).catch(() => null);
+    if (!result || result.state === "running") return;
+    clearInterval(testState.polling);
+    testState.polling = null;
+    statusBox.hidden = true;
+    updateTestRunButton();
+    if (result.state === "error") {
+      showTestNotice("danger", "探针失败", result.message || "未知错误");
+      return;
+    }
+    renderTestReport(result.report);
+  }, 3000);
+}
+
+function renderTestReport(report) {
+  const panel = document.getElementById("test-report-panel");
+  if (!panel || !report || !report.run) return;
+  // 判定 → notice 级别：确认不符红边 / 疑似·混杂琥珀边 / 无信号灰字 /
+  // 证据不足中性框——与总览通知同一套语义，用户不必重新学。
+  const verdictLabels = {
+    confirmed_mismatch: ["danger", "确认不符", "协议级硬证据：resolved 与 requested 不符"],
+    suspected_degradation: ["warn", "疑似降级", "行为统计显著，但缺身份证据"],
+    no_signal: ["ok", "无信号", "身份一致；不排除行为面注水（需 L1）"],
+    underpowered: ["", "证据不足", "重复次数不够，不足以下结论"],
+    inconclusive_confounded: ["warn", "混杂未排除", "网络/时段/缓存差异未定"],
+  };
+  const [level, title, note] = verdictLabels[report.verdict ? report.verdict.verdict : "underpowered"] || ["", "—", ""];
+  // 有探针没拿到真实响应（如中转 402 被 claude 吞成合成错误）时，no_signal 的
+  // 「身份一致」文案会误导——追加提示把视线引到明细表的 outcome 列。
+  const anyFailed = (report.results || []).some((r) => r.outcome !== "pass");
+  const noteWithFailures = anyFailed ? `${note}（有探针未成功，见明细表 outcome）` : note;
+  const notice = document.createElement("div");
+  notice.className = "notice " + level;
+  const icon = document.createElement("span");
+  icon.className = "notice-icon";
+  icon.setAttribute("aria-hidden", "true");
+  const text = document.createElement("div");
+  text.className = "notice-text";
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  const sub = document.createElement("div");
+  sub.className = "notice-sub";
+  sub.textContent = noteWithFailures;
+  text.append(strong, sub);
+  notice.append(icon, text);
+  document.getElementById("test-report-verdict").replaceChildren(notice);
+
+  const body = document.getElementById("test-report-body");
+  const routeLabel = (id) => {
+    const route = testState.routes.find((r) => r.route_id === id);
+    return route ? route.label : id;
+  };
+  body.replaceChildren();
+  for (const result of report.results || []) {
+    const row = document.createElement("tr");
+    for (const value of [
+      routeLabel(result.route_id), result.repeat_idx, result.outcome,
+      result.requested_model, result.resolved_model ?? "—",
+      `${result.uncached_input_tokens ?? "—"}/${result.cache_read_tokens ?? "—"}/${result.cache_write_tokens ?? "—"}/${result.output_tokens ?? "—"}`,
+    ]) {
+      const td = document.createElement("td");
+      td.textContent = String(value);
+      row.appendChild(td);
+    }
+    body.appendChild(row);
+  }
+
+  document.getElementById("test-report-meta").textContent =
+    `规则 ${report.verdict ? report.verdict.rule_version : "—"} · run ${report.run.run_id}`;
+  const foot = document.getElementById("test-report-foot");
+  const code = document.createElement("code");
+  code.textContent = `agent-vitals probe report --run-id ${report.run.run_id}`;
+  foot.replaceChildren("完整证据链：", code);
+  panel.hidden = false;
+}
+
+// 绑定与 init 同款挂 DOMContentLoaded（顶层直绑会让 KPI 校验脚本的 DOM
+// stub 在模块求值期就撞 addEventListener——repo 的 vm 校验路径依赖这一约定）。
+document.addEventListener("DOMContentLoaded", () => {
+  document.getElementById("test-run-btn").addEventListener("click", startTestRun);
+  document.getElementById("test-route-a").addEventListener("change", updateTestRunButton);
+  document.getElementById("test-quality-reload").addEventListener("click", () => loadQualityReport());
+  document.getElementById("test-quality-days").addEventListener("change", () => loadQualityReport());
+});

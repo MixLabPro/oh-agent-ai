@@ -130,6 +130,9 @@ fn sync_host(
     // Claude 的窗口状态共用这一条路，但各自是独立的 snapshot_kind。
     let mut pending_snapshots: Vec<(&'static str, String, i64)> = Vec::new();
     let mut workflow_events: Vec<WorkflowEvent> = Vec::new();
+    // V16：任务意图摘录（现仅 claude-code emitter 产；其他宿主空集）。
+    let mut session_excerpts: Vec<agent_vitals_domain::contracts::workflow::SessionExcerpt> =
+        Vec::new();
     let mut synced_sources: Vec<(PathBuf, (u64, u64))> = Vec::new();
     // codex 的 emitter 跨文件 `seen` 去重只在**单次调用内**成立（live/
     // archived 同 stem 双收靠它）——差量集必须一批喂进去，逐文件调用会把
@@ -173,7 +176,12 @@ fn sync_host(
         if host == "codex" {
             continue; // 已批量处理
         }
-        let emit: Result<(Vec<Value>, Vec<WorkflowEvent>), String> = match host {
+        type EmitTuple = (
+            Vec<Value>,
+            Vec<WorkflowEvent>,
+            Vec<agent_vitals_domain::contracts::workflow::SessionExcerpt>,
+        );
+        let emit: Result<EmitTuple, String> = match host {
             "claude-code" => {
                 let sid = path
                     .file_stem()
@@ -183,10 +191,10 @@ fn sync_host(
                 agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts(
                     path, ns, "default", &sid,
                 )
-                .map(|r| (r.facts, r.workflow_events))
+                .map(|r| (r.facts, r.workflow_events, r.session_excerpts))
             }
             "dsh" => agent_vitals_hosts::dsh_usage_fact::dsh_session_to_usage_facts(path, ns, None)
-                .map(|r| (r.facts, r.workflow_events)),
+                .map(|r| (r.facts, r.workflow_events, Vec::new())),
             // WorkBuddy：一个 trace 文件 = 一个 source_id（spec WORKBUDDY_ONBOARDING
             // §9E.4 纪律 7 的增量索引就是本函数上方的 source_files 指纹）。emitter
             // 自身按 trace.sessionId 归属，无 sessionId 的 trace 不发事实——那些
@@ -195,14 +203,15 @@ fn sync_host(
                 agent_vitals_hosts::workbuddy_usage_fact::workbuddy_trace_file_to_usage_facts(
                     path, ns, "default",
                 )
-                .map(|r| (r.facts, r.workflow_events))
+                .map(|r| (r.facts, r.workflow_events, Vec::new()))
             }
             other => Err(format!("unknown host `{other}`")),
         };
         match emit {
-            Ok((f, events)) => {
+            Ok((f, events, excerpts)) => {
                 facts.extend(f);
                 workflow_events.extend(events);
+                session_excerpts.extend(excerpts);
                 synced_sources.push((path.clone(), *fp));
             }
             Err(e) => report.errors.push(format!("{}: {e}", path.display())),
@@ -268,6 +277,7 @@ fn sync_host(
             &synced_sources,
             &facts,
             &workflow_events,
+            &session_excerpts,
             None,
             snapshot_write,
             now,
@@ -341,7 +351,9 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
                 retention_months - 1,
             )
             .unwrap_or(0);
-            let ret = db.retention_usage_facts(cutoff);
+            let ret = db
+                .retention_usage_facts(cutoff)
+                .and_then(|_| db.retention_session_excerpts(cutoff));
             let _ = db.finish_run(
                 &run_id,
                 if ret.is_ok() { "succeeded" } else { "failed" },

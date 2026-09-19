@@ -364,6 +364,36 @@ calendar/quota 四个命令——**任何新增的 codex 数据面必须走
   `evaluate_alert_from_state`/`_after_fold`——需先把 `oneline` 重写成「只产
   导航快照」；`sql_authority_enabled` 已冻结其写盘（Phase 4.2），不阻塞纯 SQL 读。
 
+### 数据留存与出口政策（2026-09-19 决策：留存放开、出口收口、无回传钉死）
+
+定位是**以数据体验为中心的离线桌面产品，app 不回传用户数据**。现有出网请求只有
+公开价目目录拉取与版本检查，均不含用户数据；这是受保护前提——新增任何把用户数据
+送出本机的路径（telemetry、带载荷的崩溃上报、云同步）必须先经显式产品评审并同步
+改写本节与 `AGENTS.md` 的同名节。
+
+- **留存放开（摄取期不再销毁信号）**：错误分类码（HTTP 状态、JSON-RPC −32xxx、
+  工具错误词表）、截断摘录（~120 字：错误首行、参数摘要）、尺寸/计数等结构化派生
+  全量入库；指纹（canonical args、`error_fingerprint`）保留但降级为去重/索引键，
+  不再充当分类字段的替代品。内容富化进**新列/新表**并标 `Provenance`——既有
+  事实表契约只经评审过的 golden 更新变动，账务/行为事实表（facts 层）与内容层
+  （enrichment 层）分表，纯度不动。
+- **出口收口（脱敏是呈现期投影）**：MCP 面维持现有红线（issues_summary 的
+  "never expose raw errors or invocation arguments" 等）——本地 agent 是有网消费者，
+  data-mcp 供出的任何内容都可能随 agent 上下文离开本机；导出维持双路径
+  （`data-export-private` 显式、`data-export-redacted` 默认）。脱敏发生在各出口的
+  服务面，**永远不是摄取期丢数据的理由**。
+- **红线字段例外（永不落盘）**：凭据（cc-switch token、API key）在任何我们拥有的
+  库/文件里不落盘；probe/测试功能只允许内存直传子进程 env。金丝雀题面（L1 探针
+  题库）按机密待遇：不进 MCP、不进导出、不进任何 agent 可读面。
+- **原文留源 + 锚点**：宿主原始日志是逐字存储的唯一样本；权威库只存分析增量与
+  锚点（source_id + native event id，行号/偏移做可自校验的加速 hints），不复制
+  全文（GB 级会话）。原文 JSONL 段落查看是**本地呈现层专属能力**：呈现时读取、
+  永不落库、永不进 MCP/导出载荷；宿主轮换掉源日志后诚实降级为「源已过期，仅存
+  库内脱敏投影」，不得静默 404。
+- **本政策不放宽项**：账务诚实纪律（`metered_estimate`、`has_unresolved`、不静默
+  归因）、golden/Python-Rust 字节对等、以及新问题类先在
+  `docs/AGENT_EXECUTION_PROBLEM_TAXONOMY.md` 登记再写 emitter 的规矩。
+
 ### Other invariants with tests behind them
 
 - **Zombie verdicts need an age gate** (`zombie_min_age_days`, default 14).

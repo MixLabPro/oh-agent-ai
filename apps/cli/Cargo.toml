@@ -19,6 +19,8 @@ agent-vitals-domain = { path = "../../crates/agent-vitals-domain" }
 # （spec §3.1 依赖表：apps 只消费 Runtime/Data 的版本化 DTO）。
 agent-vitals-data = { path = "../../crates/agent-vitals-data" }
 agent-vitals-runtime = { path = "../../crates/agent-vitals-runtime", features = ["legacy-r2a"] }
+# V17 探针面 runner（WORKBENCH_TEST_TAB_SPEC §6）：L0 身份探针 + consent/预算。
+agent-vitals-probe = { path = "../../crates/agent-vitals-probe" }
 clap = { version = "4", features = ["derive"] }
 regex = "1"
 serde = { version = "1", features = ["derive"] }

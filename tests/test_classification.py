@@ -70,8 +70,8 @@ PY_AGENT_FAMILY = {
     "behavior", "budget", "canonical_audit", "claude_cost", "claude_evidence",
     "attribution", "claude_session_audit", "claude_usage_fact", "codex_cost", "codex_evidence",
     "codex_session_audit", "codex_usage", "codex_usage_fact", "compaction",
-    "cost", "dsh_evidence", "dsh_usage_fact", "duration", "host_capability", "mcp", "plan",
-    "r2a", "sessions_sql", "skill", "state", "subagent", "takeover", "trajectory", "usage",
+    "cost", "dsh_evidence", "dsh_usage_fact", "duration", "enrichment", "host_capability", "mcp", "plan",
+    "r2a", "route_quality", "sessions_sql", "skill", "state", "subagent", "takeover", "trajectory", "usage",
     "usage_fact", "waste", "workbuddy_evidence", "workbuddy_session_audit",
     "workbuddy_usage_fact",  # spec §9E.5 E4a
 }

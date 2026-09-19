@@ -13,6 +13,7 @@
       <button class="tab" data-tab="calendar">用量</button>
       <button class="tab" data-tab="sessions">会话</button>
       <button class="tab" data-tab="findings">待处理</button>
+      <button class="tab" data-tab="test">测试</button>
       <button class="tab" data-tab="sources">设置</button>
     </nav>
     <span class="wb-head-right">
@@ -360,8 +361,64 @@
     </section>
 
     <!-- ============ 设置（内部仍沿用 sources 标识以保持导航合同） ============ -->
-    <section id="tab-sources" class="tabpane settings-page">
-      <!-- 设置页：左栏分区导航 + 主栏五个分区（docs/v1.0.0/BETA_1_SETTINGS_PAGE_SPEC.md §3）。
+
+    <!-- 「测试」tab v2（2026-09-20 转向，WORKBENCH_TEST_TAB_SPEC §0 addendum）：
+         默认面 = 被动路线质量报告（宿主 × 实际模型族，usage_facts 硬证据，
+         不发探针请求）；主动 L0 探针收进「高级」折叠区（隔离在 cc-switch 型
+         机器上不成立，见 spec）。 -->
+    <section id="tab-test" class="tabpane">
+      <div class="find-toolbar">
+        <span class="muted" id="test-quality-summary"></span>
+        <span class="flex-spacer"></span>
+        <select id="test-quality-days" class="find-select" aria-label="统计窗口">
+          <option value="30">近 30 天</option>
+          <option value="90" selected>近 90 天</option>
+          <option value="365">近 1 年</option>
+        </select>
+        <button id="test-quality-reload" class="btn" title="重新汇总" type="button">重载</button>
+      </div>
+      <div id="test-quality-banner" class="notice danger" hidden role="alert" aria-live="assertive"></div>
+      <div id="test-quality-loading" class="muted" hidden>加载中…按宿主 × 模型族汇总</div>
+      <div id="test-quality-hosts"></div>
+      <div class="muted note" id="test-quality-foot"></div>
+
+      <details class="panel" id="test-advanced">
+        <summary class="panel-title">高级：主动验证（L0 身份探针）——需逐路线授权，且在 cc-switch 路由机上结果可能被宿主设置劫持</summary>
+        <div class="form-row">
+          <label><span>路线 A</span>
+            <select id="test-route-a"></select>
+          </label>
+          <label><span>路线 B（可选，成对交错）</span>
+            <select id="test-route-b"></select>
+          </label>
+          <label><span>重复次数</span>
+            <input id="test-repeats" type="number" min="1" max="6" value="1" />
+          </label>
+          <button id="test-run-btn" class="btn primary" type="button" disabled>运行 L0 探针</button>
+        </div>
+        <div id="test-banner" class="notice danger" hidden role="alert" aria-live="assertive"></div>
+        <div id="test-hint" class="muted note"></div>
+        <div id="test-run-status" class="muted" hidden>运行中…（L0 单次约 10–60 秒；可切走再回来）</div>
+        <div class="panel" id="test-report-panel" hidden>
+          <div class="panel-title">测试结果<span class="panel-title-right note" id="test-report-meta"></span></div>
+          <div id="test-report-verdict"></div>
+          <div class="table-wrap">
+            <table class="sess-table">
+              <thead>
+                <tr>
+                  <th>路线</th><th>#</th><th>结果</th><th>requested</th><th>resolved</th><th>四桶 in/cr/cw/out</th>
+                </tr>
+              </thead>
+              <tbody id="test-report-body"></tbody>
+            </table>
+          </div>
+          <div class="muted note" id="test-report-foot"></div>
+        </div>
+      </details>
+    </section>
+<section id="tab-sources" class="tabpane settings-page">
+      
+<!-- 设置页：左栏分区导航 + 主栏五个分区（docs/v1.0.0/BETA_1_SETTINGS_PAGE_SPEC.md §3）。
            三层结构：分区 h2 → .setting（标题/一句说明/控件行）→ 控件。页头不再自我介绍。 -->
       <nav class="settings-nav" aria-label="设置分区">
         <a href="#settings-sources">数据源</a>

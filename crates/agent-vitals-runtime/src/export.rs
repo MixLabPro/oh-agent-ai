@@ -349,6 +349,40 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// V16 出口收口钉子（2026-09-19 政策）：导出列清单**结构性排除** excerpt
+    /// 类与锚点字段（workflow 富化九列、session_excerpts 全表）。导出面只读
+    /// `usage_facts` 的既定列——新增列必须走「新增映射行 + 重审 redacted 身份
+    /// 白名单」的评审流程（模块头映射表纪律），而不是顺手扩这里。本测试的
+    /// 作用：谁把 excerpt/anchor 字段加进 EXPORT_COLUMNS 或让导出读到
+    /// session_excerpts，这里立刻炸（spec §6 的逐面投影表）。
+    #[test]
+    fn export_surface_structurally_excludes_excerpt_and_anchor_fields() {
+        // spec §6 口径：excerpt 类与锚点字段不出**任何**导出面；error_code/
+        // error_class/task_profile/reasoning_effert 属「未来若进导出需按面分别
+        // 决策」的列（redacted 可留、private 原样），不进本钉子的禁列清单——
+        // 钉子只钉结构性禁止的东西，别把未来要评审的决策提前焊死。
+        for forbidden in [
+            "error_excerpt", "args_excerpt", "native_event_id", "source_line",
+            "source_byte_offset", "session_excerpts",
+        ] {
+            assert!(
+                !EXPORT_COLUMNS.contains(forbidden),
+                "EXPORT_COLUMNS 不得包含 V16 excerpt/锚点字段：{forbidden}"
+            );
+        }
+        // 导出查询只从 usage_facts 取数——整个模块不得读 session_excerpts 表
+        //（FROM 或 JOIN）。needle 运行时拼接：字面量写死会被 include_str! 的
+        // 自扫描匹配到自己。
+        let module_source = include_str!("export.rs");
+        for joiner in ["FROM", "JOIN"] {
+            let needle = [joiner, "session_excerpts"].join(" ");
+            assert!(
+                !module_source.contains(&needle),
+                "导出模块不得以 {joiner} 读取 session_excerpts 表"
+            );
+        }
+    }
+
     fn tmp(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
             "avd-export-{tag}-{}-{}",
