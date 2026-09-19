@@ -269,7 +269,7 @@ console.log("# §3.2/§4.6〔P2〕模型 × Harness 对比面");
         ratio_vs_control: 4.7, saving_minor: 5292, saving_pct: 79 },
       { kind: "marathon", session_ref: "sr_1f7589ece7184a8a8", span_hours: 49.8, tokens_total: 473030189, failures: 40,
         combo: { host: "claude-code", model_id: "deepseek-v4-flash-0731" } },
-      { kind: "currency_split", currencies: ["CNY", "USD"], detail: "CNY 1 组合/637834281 token；USD 2 组合/48317587 token" },
+      { kind: "currency_split", currencies: ["CNY", "USD"], by_currency: { "CNY": { combos: 1, tokens: 637834281 }, "USD": { combos: 2, tokens: 48317587 } } },
     ],
   };
   await sandbox.loadDecisionMatrix();
@@ -409,12 +409,18 @@ console.log("# §3.0〔P2-r4〕⓪ 本月发现：确定性结论卡");
   ok(digText.includes("4.7 倍") && digText.includes("命中 22%"), "断言带数字依据（倍数 + 命中）");
   ok(digText.includes("该线月省 ≈¥52.92（−79%）"), "收益数字化（每会话差 × 会话数）");
   ok(digText.includes("49.8 小时的马拉松会话") && digText.includes("失败 40 次仍在跑"), "马拉松结论卡");
-  ok(digText.includes("计价失真让排序整个瘫痪") && digText.includes("CNY 1 组合"), "币种失真结论卡");
+  ok(digText.includes("计价失真让排序整个瘫痪") && digText.includes("CNY 1 组合/637.8M token"), "币种失真结论卡（中文词组由前端模板组装）");
   ok((digText.match(/定位到行|查看会话|去明确计费方式/g) || []).length === 3, "三张卡各带下钻按钮");
   // ②行的异常旗：outlier 行 + 低命中行
   const bodyText = domText("find-matrix-body");
   ok(bodyText.includes("单会话成本异常"), "outlier 行挂成本旗");
   ok(bodyText.includes("命中 22%"), "低命中行挂命中旗（<50%，与后端规则同判据）");
+  // 加载中 ≠ 没有异常（评审修正：假空态缺陷的钉子）
+  const savedData = sandbox.__matrix;
+  sandbox.__matrix = null;
+  await sandbox.loadDecisionMatrix();
+  ok(domText("find-dig-empty").includes("本月发现生成中"), "matrix 未到时显示生成中，不冒充无异常");
+  sandbox.__matrix = savedData;
   // 诚实缺席：空 summary → 空态文案（走 mock，不碰 vm 的 const 状态）
   const savedMatrix = sandbox.__matrix;
   sandbox.__matrix = { month: "2026-09", rows: savedMatrix.rows, findings_summary: [], notes: [] };

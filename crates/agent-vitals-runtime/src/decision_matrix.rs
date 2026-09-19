@@ -377,6 +377,7 @@ fn dig_findings(rows: &[Value]) -> Vec<Value> {
                 continue;
             }
             vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            // 偶数长度取上中位（vals[len/2]）：偏保守——更难触发 >2×，偏向诚实缺席。
             let median = vals[vals.len() / 2];
             if median <= 0.0 {
                 continue;
@@ -449,13 +450,15 @@ fn dig_findings(rows: &[Value]) -> Vec<Value> {
             }
         }
         if currencies.len() > 1 {
-            let parts: Vec<String> = currencies.iter()
-                .map(|(cur, (n, tokens))| format!("{cur} {n} 组合/{tokens} token"))
+            // 中文词组归前端模板（「后端出数、前端出话」）：这里只给结构化的
+            // by_currency 数字，detail 由 digCardText 组装。
+            let by_currency: serde_json::Map<String, Value> = currencies.iter()
+                .map(|(cur, (n, tokens))| (cur.clone(), json!({ "combos": n, "tokens": tokens })))
                 .collect();
             out.push(json!({
                 "kind": "currency_split",
                 "currencies": currencies.keys().cloned().collect::<Vec<_>>(),
-                "detail": parts.join("；"),
+                "by_currency": by_currency,
             }));
         }
     }
@@ -743,10 +746,26 @@ mod tests {
         assert_eq!(marathon["failures"], json!(40));
         let split = out.iter().find(|c| c["kind"] == json!("currency_split")).expect("split");
         assert_eq!(split["currencies"], json!(["CNY", "USD"]));
-        assert!(split["detail"].as_str().unwrap_or("").contains("USD 1 组合"));
-        // 全 CNY 单币种 → currency_split 缺席。
-        let rows2 = vec![dig_row("a", 2, 1000, Some(0.9), json!([]))];
-        assert!(dig_findings(&rows2).iter().all(|c| c["kind"] != json!("currency_split")));
+        // 结构化字段（中文词组归前端模板）：by_currency 只出数字。
+        assert_eq!(split["by_currency"]["CNY"]["combos"], json!(1));
+        assert_eq!(split["by_currency"]["USD"]["combos"], json!(1));
+        assert!(split.get("detail").is_none(), "后端不再拼中文词组");
+        // 全 CNY 单币种 → currency_split 缺席；短会话 → marathon 缺席。
+        let rows2 = vec![dig_row("a", 2, 1000, Some(0.9), json!([
+            { "session_ref": "sr_short", "span_first_ms": 0, "span_last_ms": 3_600_000, "tokens_total": 5, "failures": 0 },
+        ]))];
+        let out2 = dig_findings(&rows2);
+        assert!(out2.iter().all(|c| c["kind"] != json!("currency_split")));
+        assert!(out2.iter().all(|c| c["kind"] != json!("marathon")), "≤24h 会话不报马拉松");
+        // 偶数长度 median 取上中位：[1.0, 1.0, 1.0, 5.0] → 上中位 1.0（index 2）。
+        let rows4 = vec![
+            dig_row("flash", 12, 6000, Some(0.22), json!([])),
+            dig_row("n1", 10, 1000, Some(0.95), json!([])),
+            dig_row("n2", 10, 1000, Some(0.95), json!([])),
+            dig_row("n3", 10, 1000, Some(0.95), json!([])),
+        ];
+        assert!(dig_findings(&rows4).iter().any(|c| c["kind"] == json!("cost_outlier")),
+            "偶数长度下中位口径不改变本用例的判定");
     }
 
     #[test]

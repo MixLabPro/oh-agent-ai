@@ -6938,7 +6938,6 @@ function renderFindingsDetail() {
     }
   }
   body.appendChild(frag);
-  renderDig();
 }
 
 function issueScopeLabel(group) {
@@ -7330,7 +7329,8 @@ function openSessionFromMatrix(sess, row) {
 /// 后端只出数（kind + 数字），句子在这里拼——与 remedy_for→labels 同一条
 /// 「后端出数、前端出话」纪律。
 function digMoney(minor, currency) {
-  return (currency === "USD" ? "$" : "¥") + (Number(minor || 0) / 100).toFixed(2);
+  const symbol = currency === "USD" ? "$" : currency === "CNY" ? "¥" : (currency || "") + " ";
+  return symbol + (Number(minor || 0) / 100).toFixed(2);
 }
 
 function digCardText(c) {
@@ -7356,9 +7356,12 @@ function digCardText(c) {
     };
   }
   if (c.kind === "currency_split") {
+    const detail = Object.entries(c.by_currency || {})
+      .map(([cur, v]) => cur + " " + v.combos + " 组合/" + matrixTokens(v.tokens) + " token")
+      .join("；");
     return {
       title: "计价失真让排序整个瘫痪",
-      why: "可计价组合的币种不唯一（" + c.detail + "）——跨币种不可比，②的成本排序因此禁用。把中转用量统一为申报口径后解锁。",
+      why: "可计价组合的币种不唯一（" + detail + "）——跨币种不可比，②的成本排序因此禁用。把中转用量统一为申报口径后解锁。",
       gain: "解锁全表排序",
       action: { label: "去明确计费方式", run: () => {
         switchTab("overview");
@@ -7371,13 +7374,18 @@ function digCardText(c) {
 }
 
 function digDrillToRow(key) {
-  const tr = document.querySelector('tr[data-matrix-key="' + (String(key).replace(/"/g, '"')) + '"]');
+  const safe = String(key).replace(/["\\]/g, "");
+  const tr = document.querySelector('tr[data-matrix-key="' + safe + '"]');
   if (!tr) return;
-  toggleMatrixRow(key, null);
-  if (tr.scrollIntoView) tr.scrollIntoView({ behavior: "smooth", block: "center" });
-  tr.style.transition = "box-shadow .4s";
-  tr.style.boxShadow = "inset 0 0 0 2px var(--warn)";
-  setTimeout(() => { tr.style.boxShadow = ""; }, 2200);
+  // 强制展开（不是 toggle）：已展开的行点「定位到行」不能把它收起（对齐原型）。
+  matrixState.expanded[key] = true;
+  renderMatrix();
+  const trAfter = document.querySelector('tr[data-matrix-key="' + safe + '"]');
+  const target = trAfter || tr;
+  if (target.scrollIntoView) target.scrollIntoView({ behavior: "smooth", block: "center" });
+  target.style.transition = "box-shadow .4s";
+  target.style.boxShadow = "inset 0 0 0 2px var(--warn)";
+  setTimeout(() => { target.style.boxShadow = ""; }, 2200);
 }
 
 function renderDig() {
@@ -7385,12 +7393,18 @@ function renderDig() {
   const emptyEl = document.getElementById("find-dig-empty");
   if (!list || !emptyEl) return;
   list.textContent = "";
-  const summary = ((matrixState.data || {}).findings_summary) || [];
   if (matrixState.error) {
     emptyEl.hidden = false;
     emptyEl.textContent = "本月发现读取失败：" + matrixState.error + "（点上方「重载」可重试）";
     return;
   }
+  if (!matrixState.data) {
+    // 加载中 ≠ 没有异常（评审 2026-09-19：把「未加载」陈述成「无异常」是假空态）。
+    emptyEl.hidden = false;
+    emptyEl.textContent = "本月发现生成中…";
+    return;
+  }
+  const summary = (matrixState.data.findings_summary) || [];
   emptyEl.hidden = summary.length > 0;
   emptyEl.textContent = "本月没有触发结论规则的异常。";
   for (const c of summary) {
@@ -7431,6 +7445,8 @@ function renderMatrix() {
   const emptyEl = document.getElementById("find-matrix-empty");
   const sortEl = document.getElementById("find-matrix-sort");
   if (!body) return;
+  // ⓪结论区随本函数一起刷新（放在空行早退之前——加载中/空数据也要更新⓪文案）。
+  renderDig();
   body.textContent = "";
   const rows = (matrixState.data && matrixState.data.rows) || [];
   if (matrixState.error) {
