@@ -167,6 +167,12 @@ enum Cmd {
         /// Write diagnostic JSON instead of a report
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
+        /// Attach the full scan report to the JSON payload as "report". A consumer
+        /// that needs both the SV diagnostics and the host summaries then scans
+        /// once instead of twice (the desktop Skill tab; budget/trigger evidence
+        /// lives in the report, SV codes in the diagnostics).
+        #[arg(long = "with-report", requires = "rows_json")]
+        with_report: bool,
     },
     /// Turn the scan report into a quantified, ranked, honest savings plan
     /// (diagnosis → treatment plan; SKILL.md §4 Recommended disposition as data).
@@ -4629,16 +4635,20 @@ session_store={store} fold={fold}"
                     eprintln!("No snapshot is available for comparison.");
                     std::process::exit(1);
                 }
-                Some(d) => {
-                    if std::fs::write(path, serde_json::to_string_pretty(d).unwrap_or_default())
-                        .is_err()
-                    {
-                        eprintln!("failed to write {}", path.display());
-                        std::process::exit(2);
-                    }
+            Some(d) => {
+                // 与主扫描 / doctor 同语义：`-` 写 stdout（桌面「与上次快照对比」
+                // 的取数路径，不留垃圾文件）。
+                let text = serde_json::to_string_pretty(d).unwrap_or_default();
+                if path == &PathBuf::from("-") {
+                    println!("{text}");
+                } else if std::fs::write(path, &text).is_err() {
+                    eprintln!("failed to write {}", path.display());
+                    std::process::exit(2);
+                } else {
                     println!("Wrote {}", path.display());
-                    return;
                 }
+                return;
+            }
             }
         }
         let gate = doc
@@ -4654,11 +4664,16 @@ session_store={store} fold={fold}"
         std::process::exit(rc);
     }
 
-    if let Some(Cmd::Doctor { min, rows_json }) = &args.cmd {
+    if let Some(Cmd::Doctor {
+        min,
+        rows_json,
+        with_report,
+    }) = &args.cmd
+    {
         if let Some(path) = rows_json {
             let ds = skills::doctor::diagnose(&doc, args.split_threshold, *min);
             let n = ds.len();
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "schema_version": doc.get("schema_version"),
                 "run": util::run_id(&doc),
                 "host_selection": doc.get("host_selection"),
@@ -4667,16 +4682,19 @@ session_store={store} fold={fold}"
                     .map(|(c, n, w)| serde_json::json!({"code": c, "name": n, "reason": w}))
                     .collect::<Vec<_>>(),
             });
-            if std::fs::write(
-                path,
-                serde_json::to_string_pretty(&payload).unwrap_or_default(),
-            )
-            .is_err()
-            {
+            if *with_report {
+                payload["report"] = doc.clone();
+            }
+            // 与主扫描 `--json -` 同语义：stdout 是给调用方的管道，磁盘上不留 "-" 文件。
+            let text = serde_json::to_string_pretty(&payload).unwrap_or_default();
+            if path == &PathBuf::from("-") {
+                println!("{text}");
+            } else if std::fs::write(path, &text).is_err() {
                 eprintln!("failed to write {}", path.display());
                 std::process::exit(2);
+            } else {
+                println!("Wrote {}: {} diagnostics", path.display(), n);
             }
-            println!("Wrote {}: {} diagnostics", path.display(), n);
             return;
         }
         std::process::exit(run_doctor(

@@ -515,3 +515,55 @@ class TestBothImplementationsRenderIdentically(DoctorCase):
         rs = mask(self.run_doctor(cmd=RS_CMD, snapdir=self.tmp / "snap-rs"))
         self.assertEqual(py, rs)
         self.assertIn("✓ Snapshot saved", py, "掩码之后别把整段快照提示也掩没了")
+
+
+class TestDoctorJsonPayload(DoctorCase):
+    """`doctor --json` 载荷契约：`-` 写 stdout、`--with-report` 并入报告本体。
+
+    这条取数路径是桌面工作台「Skill 体检」tab 的唯一来源（WORKBENCH_SKILL_
+    HEALTH_TAB_SPEC §5.1）：tab 一次扫描要同时拿到 SV 码（diagnostics）与
+    host_summaries（report），分两次调用就要扫两遍。形状改动由双实现差分
+    钉死，桌面端的 fixture 再从真实输出捕获。
+    """
+
+    def _payload(self, *extra, cmd=None):
+        out = self.run_doctor("--json", "-", "--no-snapshot", *extra, cmd=cmd)
+        # `doctor --json -` 走的是「不落盘」路径：退出码 0/1 已由 run_doctor 把关
+        return json.loads(out)
+
+    def test_dash_writes_json_to_stdout(self):
+        """`doctor --json -` 与主扫描 `--json -` 同语义：stdout 是 JSON 管道。"""
+        payload = self._payload("--budget", "1")
+        self.assertIn("schema_version", payload)
+        self.assertIn("diagnostics", payload)
+        codes = {d["code"] for d in payload["diagnostics"]}
+        self.assertIn("SV002", codes, "语料压到 --budget 1，诊断列表必须有预算溢出")
+        # `-` 是 stdout 标记，不是文件名：不许在磁盘上留下一个叫 "-" 的垃圾文件
+        self.assertFalse((self.tmp / "workdir" / "-").exists(),
+                         "doctor --json - 不应该创建名为 '-' 的文件")
+
+    def test_with_report_attaches_scan_document(self):
+        payload = self._payload("--with-report")
+        report = payload.get("report")
+        self.assertIsInstance(report, dict, "with-report 必须带 report 本体")
+        # report 是完整扫描文档，不是摘要：诊断消费方要的 host_summaries /
+        # description_budget / skills 都在里面（run 不在文档里 —— 它由 run_id()
+        # 从内容派生，载荷顶层的 run 才是权威）
+        for key in ("host_summaries", "skills", "description_budget",
+                    "cross_host_note"):
+            self.assertIn(key, report)
+        # 无 --with-report 时不带 report（载荷保持最小）
+        self.assertNotIn("report", self._payload())
+
+    @unittest.skipUnless(RS_CMD, "未设 AGENT_VITALS_BIN，跳过双实现比对")
+    def test_json_payload_identical_across_implementations(self):
+        """`doctor --json - --with-report` 载荷逐字节一致（含 report 本体）。"""
+        extra = ["--with-report", "--no-snapshot"]
+        py = self.run_doctor("--json", "-", *extra, cmd=PY_CMD)
+        rs = self.run_doctor("--json", "-", *extra, cmd=RS_CMD)
+        self.assertEqual(py, rs)
+        # 两个实现产出的都真是「带报告的载荷」
+        for text in (py, rs):
+            payload = json.loads(text)
+            self.assertIn("report", payload)
+            self.assertIn("host_summaries", payload["report"])

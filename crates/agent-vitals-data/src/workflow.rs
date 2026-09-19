@@ -16,16 +16,27 @@ use crate::authority::AuthorityError;
 pub struct WorkflowInsertReport {
     pub inserted: usize,
     pub duplicate: usize,
+    /// 重放时**派生列与已存值不同**而被纠正的行数（emitter 升级后由
+    /// `PARSER_VERSION` 重放触达；见 sql_sync 的版本演进注释）。
+    pub corrected: usize,
 }
 
 /// Insert a batch of already-redacted workflow events.
 ///
 /// All events are validated before the first SQL write.  Replay semantics are
-/// two-tier since V16: the base columns stay `INSERT OR IGNORE`（同 event_id
-/// 重放不重复计、原始 provenance 不被改写），while the V16 enrichment columns
-/// back-fill on conflict **only when the stored copy is still NULL and the
-/// replay carries a value**——不升 PARSER_VERSION 的普通重放（值相同）与升版
-/// 后的一次性回填都由此正确处理，且幂等（第二次重放 WHERE 不再命中）。
+/// three-tier since V16 + the outcome-correction fix:
+/// 1. base columns stay `INSERT OR IGNORE`（同 event_id 重放不重复计、原始
+///    provenance 不被改写）；
+/// 2. V16 enrichment columns back-fill on conflict **only when the stored copy
+///    is still NULL and the replay carries a value**（COALESCE 守卫，幂等）；
+/// 3. the **derived** columns (`outcome` / `capability_version` / `duration_ms`
+///    / `error_fingerprint`) are corrected whenever the replayed derivation
+///    differs — the row is a derivation of the source log, so an improved
+///    emitter (see `PARSER_VERSION` replay discipline in sql_sync) must reach
+///    historical rows instead of leaving them at the old derivation forever.
+///
+/// Identity and provenance (`source_id` / `ingested_run_id` / `created_at_ms`)
+/// are never rewritten by replay.
 pub fn insert_events(
     conn: &Connection,
     events: &[WorkflowEvent],
@@ -63,7 +74,8 @@ pub fn insert_events(
     let mut report = WorkflowInsertReport::default();
     for event in events {
         // 先查存在性再分流：`ON CONFLICT DO UPDATE` 的 changes() 分不清「新插入」
-        // 与「回填更新」，报表语义（inserted=新行 / duplicate=重放）会漂。
+        // 与「回填/纠正更新」，报表语义（inserted=新行 / corrected=派生列纠正 /
+        // duplicate=重放无变化）会漂。
         let exists: bool = conn
             .query_row(
                 "SELECT 1 FROM workflow_events WHERE event_id = ?1",
@@ -71,8 +83,8 @@ pub fn insert_events(
                 |_| Ok(true),
             )
             .unwrap_or(false);
-        let changed = if exists {
-            // 回填：只补仍为 NULL 的 V16 列（COALESCE 保首见值），基础列与
+        if exists {
+            // 回填（V16）：只补仍为 NULL 的富化列（COALESCE 保首见值），基础列与
             // provenance 一概不动；全部列已有值时 WHERE 不命中（幂等）。
             conn.execute(
                 "UPDATE workflow_events SET
@@ -107,45 +119,67 @@ pub fn insert_events(
                     event.source_line,
                     event.source_byte_offset,
                 ],
-            )?
-        } else {
-            conn.execute(
-                "INSERT OR IGNORE INTO workflow_events(
-                     event_id, session_key, event_ts_ms, event_type,
-                     capability_kind, capability_id, capability_version, outcome,
-                     duration_ms, error_fingerprint, invocation_fingerprint,
-                     error_code, error_class, error_excerpt, args_excerpt,
-                     request_bytes, result_bytes, native_event_id, source_line, source_byte_offset,
-                     source_id, ingested_run_id, created_at_ms)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+            )?;
+            // 纠正（outcome 修复，spec §9.4-①）：派生列与重放推导不同时改写，
+            // NULL 安全比较（IS NOT），值一致时是纯 no-op，不碰 provenance。
+            let corrected = conn.execute(
+                "UPDATE workflow_events
+                 SET outcome = ?2, capability_version = ?3,
+                     duration_ms = ?4, error_fingerprint = ?5
+                 WHERE event_id = ?1
+                   AND (outcome IS NOT ?2 OR capability_version IS NOT ?3
+                        OR duration_ms IS NOT ?4 OR error_fingerprint IS NOT ?5)",
                 params![
                     event.event_id,
-                    event.session_key,
-                    event.event_ts_ms,
-                    event.event_type,
-                    event.capability_kind,
-                    event.capability_id,
-                    event.capability_version,
                     event.outcome,
+                    event.capability_version,
                     event.duration_ms,
                     event.error_fingerprint,
-                    event.invocation_fingerprint,
-                    event.error_code,
-                    event.error_class,
-                    event.error_excerpt,
-                    event.args_excerpt,
-                    event.request_bytes,
-                    event.result_bytes,
-                    event.native_event_id,
-                    event.source_line,
-                    event.source_byte_offset,
-                    source_id,
-                    run_id,
-                    now_ms,
                 ],
-            )?
-        };
-        if !exists && changed == 1 {
+            )?;
+            if corrected == 1 {
+                report.corrected += 1;
+            } else {
+                report.duplicate += 1;
+            }
+            continue;
+        }
+        let changed = conn.execute(
+            "INSERT OR IGNORE INTO workflow_events(
+                 event_id, session_key, event_ts_ms, event_type,
+                 capability_kind, capability_id, capability_version, outcome,
+                 duration_ms, error_fingerprint, invocation_fingerprint,
+                 error_code, error_class, error_excerpt, args_excerpt,
+                 request_bytes, result_bytes, native_event_id, source_line, source_byte_offset,
+                 source_id, ingested_run_id, created_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+            params![
+                event.event_id,
+                event.session_key,
+                event.event_ts_ms,
+                event.event_type,
+                event.capability_kind,
+                event.capability_id,
+                event.capability_version,
+                event.outcome,
+                event.duration_ms,
+                event.error_fingerprint,
+                event.invocation_fingerprint,
+                event.error_code,
+                event.error_class,
+                event.error_excerpt,
+                event.args_excerpt,
+                event.request_bytes,
+                event.result_bytes,
+                event.native_event_id,
+                event.source_line,
+                event.source_byte_offset,
+                source_id,
+                run_id,
+                now_ms,
+            ],
+        )?;
+        if changed == 1 {
             report.inserted += 1;
         } else {
             report.duplicate += 1;
@@ -360,6 +394,37 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM workflow_events", [], |row| row.get(0))
             .expect("count");
         assert_eq!(count, 1);
+
+        // 重放**派生列不同**的同 id 事件：纠正 outcome，provenance 保持原样
+        // （emitter 升级经 PARSER_VERSION 重放触达历史行的机制，spec §9.4-①）。
+        let corrected_event = WorkflowEvent { outcome: "succeeded".to_string(), ..event.clone() };
+        let third = db
+            .with_immediate_txn(|conn| {
+                insert_events(conn, std::slice::from_ref(&corrected_event), &source_id, "workflow-test", 4)
+            })
+            .expect("correcting replay");
+        assert_eq!(third.corrected, 1);
+        assert_eq!(third.inserted, 0);
+        let (outcome, source, run): (String, String, String) = db
+            .conn()
+            .query_row(
+                "SELECT outcome, source_id, ingested_run_id FROM workflow_events WHERE event_id = ?1",
+                [&event.event_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("row after correction");
+        assert_eq!(outcome, "succeeded", "派生列被重放纠正");
+        assert_eq!(source, source_id, "provenance 不随纠正变化");
+        assert_eq!(run, "workflow-test", "首次接纳的 run_id 保留");
+
+        // 再次原样重放：无变化 → duplicate，不再计 corrected。
+        let fourth = db
+            .with_immediate_txn(|conn| {
+                insert_events(conn, std::slice::from_ref(&corrected_event), &source_id, "workflow-test", 5)
+            })
+            .expect("idempotent replay");
+        assert_eq!(fourth.corrected, 0);
+        assert_eq!(fourth.duplicate, 1);
         let session_count: i64 = db
             .conn()
             .query_row(

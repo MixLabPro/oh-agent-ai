@@ -36,6 +36,22 @@ h2:first-of-type { margin-top: 8px; }
 .note { color: var(--text-dim); font-size: 12px; margin-top: 8px; }
 .note b { color: var(--muted); font-weight: 600; }
 
+/* ⓪ 本月发现（数据挖掘摘要）：结论卡 = 编号 + 断言 + 依据 + 动作/收益 */
+.dig { display: flex; flex-direction: column; gap: 10px; margin-bottom: 6px; }
+.dig-card { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--skill); border-radius: var(--radius); padding: 13px 16px; }
+.dig-card .no { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--skill); color: var(--skill); font-size: 11px; font-weight: 700; margin-right: 8px; }
+.dig-card .head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; font-weight: 600; }
+.dig-card .why { color: var(--muted); font-size: 13px; margin: 2px 0 8px; }
+.dig-card .gain { color: var(--success); font-weight: 600; font-size: 13px; margin-right: 10px; }
+.dig-card .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+/* ② 异常旗：偏离中位数/口径失真的行内标记 */
+.flagbox { display: inline-flex; gap: 4px; margin-top: 3px; flex-wrap: wrap; }
+.flag { display: inline-block; padding: 0 7px; border-radius: 5px; font-size: 10.5px; font-weight: 700; }
+.flag.cost { color: #052e22; background: var(--warn); }
+.flag.hit { color: #052e22; background: var(--danger); }
+.flag.mix { color: var(--text); background: var(--panel-2); }
+tr.flash-hl td { background: color-mix(in srgb, var(--warn) 7%, var(--panel)); }
+
 /* ① 待办卡 */
 .todo-list { display: flex; flex-direction: column; gap: 10px; }
 .todo { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: var(--radius); padding: 14px 16px; }
@@ -107,6 +123,41 @@ details.evidence[open] summary { margin-bottom: 12px; }
   <div class="tab">总览</div><div class="tab">会话</div><div class="tab active">发现</div><div class="tab">来源</div><div class="tab">设置</div>
 </div>
 
+<!-- ══════════════ ⓪ 本月发现（数据挖掘摘要）══════════════ -->
+<h2>⓪ 本月发现 <span class="chip dim">3 条结论 · 规则生成（确定性，非 LLM）· 2026-09-01→18</span></h2>
+<div class="sub">每条 = 一句断言 + 它依据的数字 + 能带来什么。点「定位」跳到构成它的那一行证据。</div>
+<div class="dig">
+
+  <div class="dig-card">
+    <div class="head"><span class="no">1</span>最贵的组合贵在缓存纪律，不在单价 <span class="chip danger">成本异常</span></div>
+    <div class="why">deepseek-v4-flash-0731 单会话 ≈¥5.61，是同宿主 v4.1-flash（≈¥1.20）的 <b>4.7 倍</b>；主因缓存命中 <b>22.1%</b>（全表最低，中位 94%），57M token 里 44.4M 是未缓存重读。同一会话切到 v4.1-flash 后 191 次调用命中 99.5%——修复已被验证。</div>
+    <div class="actions">
+      <span class="gain">该线月省 ≈¥54（−79%）</span>
+      <button class="btn primary" onclick="drillToRow('r1')">定位到行</button>
+      <button class="btn sm" onclick="toast('→ 该场景路由切到 v4.1-flash（原型仅示意）')">怎么改</button>
+    </div>
+  </div>
+
+  <div class="dig-card">
+    <div class="head"><span class="no">2</span>一个 49.8 小时的马拉松会话吃掉 473M token <span class="chip warn">无熔断</span></div>
+    <div class="why">sr_1f7589… 横跨 09-10→09-12，982 次工具调用 40 次失败仍在跑、单会话混用 7 个模型；flash-0731 那一整行（57.0M）几乎全部来自它。它的 Bash 指纹与月度最大重复调用组（20,475 次 / 155 会话）同源——同一个工作模式还在 154 个会话里重复。</div>
+    <div class="actions">
+      <span class="gain">拆任务 + 单会话熔断（待拍板 #2）</span>
+      <button class="btn primary" onclick="toast('→ 会话 tab · 轨迹图 2,199 节点（原型仅示意）')">查看会话</button>
+    </div>
+  </div>
+
+  <div class="dig-card">
+    <div class="head"><span class="no">3</span>计价失真让排序整个瘫痪 <span class="chip warn">口径失真</span></div>
+    <div class="why">codex custom 路由的 48.3M token（terra/sol）按 OpenAI 官方卡 <b>USD</b> 兜底估算，与你的 CNY 申报数（cogfoundry ¥703.91 / 胜算云 ¥248.49）不同币种不可比——②的排序因此禁用，浪费调整成本排不出来。</div>
+    <div class="actions">
+      <span class="gain">解锁全表排序</span>
+      <button class="btn primary" onclick="toast('→ 总览 · 计费确认（待办④，原型仅示意）')">去明确计费方式</button>
+    </div>
+  </div>
+
+</div>
+
 <!-- ══════════════ ① 待办 ══════════════ -->
 <h2>① 待办 <span class="count" id="todo-count">4</span></h2>
 <div class="sub">只收一次点击可解决的事。处理完就消失，行为规则的命中不在这里（它们是②的证据）。</div>
@@ -165,8 +216,8 @@ details.evidence[open] summary { margin-bottom: 12px; }
     <th class="num">缓存命中</th><th class="num">浪费率<span class="chip dim" title="浪费 token / 输入侧 token；waste 检测器仅 DSH 有，本月 DSH 无数据">仅 DSH</span></th>
   </tr></thead>
   <tbody>
-    <tr class="clickable" onclick="toggleRow('r1', event)">
-      <td><span class="host-tag">claude-code</span><span class="model">deepseek-v4-flash-0731</span><br><span class="chip warn">归属未定 · 官方卡兜底</span></td>
+    <tr class="clickable flash-hl" onclick="toggleRow('r1', event)">
+      <td><span class="host-tag">claude-code</span><span class="model">deepseek-v4-flash-0731</span><br><span class="chip warn">归属未定 · 官方卡兜底</span><br><span class="flagbox"><span class="flag cost">单会话 4.7× 中位</span><span class="flag hit">命中 22% · 全表最低</span></span></td>
       <td class="num">12</td><td class="num">57.0M</td>
       <td class="num">≈¥67.34</td><td class="num"><b>≈¥5.61</b></td>
       <td class="num"><span style="color:var(--warn)">22.1%</span><div class="bar bad"><i style="width:22.1%"></i></div></td>
@@ -186,7 +237,7 @@ details.evidence[open] summary { margin-bottom: 12px; }
     </td></tr>
 
     <tr class="clickable" onclick="toggleRow('r2', event)">
-      <td><span class="host-tag">codex</span><span class="model">gpt-5.6-terra</span><br><span class="chip warn">custom · 官方卡兜底 USD</span></td>
+      <td><span class="host-tag">codex</span><span class="model">gpt-5.6-terra</span><br><span class="chip warn">custom · 官方卡兜底 USD</span><br><span class="flagbox"><span class="flag mix">币种失真 · 阻断排序</span></span></td>
       <td class="num">31</td><td class="num">36.9M</td>
       <td class="num">≈$14.08</td><td class="num"><b>≈$0.45</b></td>
       <td class="num">93.7%<div class="bar"><i style="width:93.7%"></i></div></td>
@@ -323,6 +374,19 @@ function toast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
 }
+/// 「本月发现」结论卡 → ②对应行：滚动 + 展开 + 闪烁高亮。
+function drillToRow(id) {
+  const row = document.getElementById(id);
+  const main = row ? row.previousElementSibling : null;
+  if (row) row.hidden = false;
+  if (main && main.scrollIntoView) main.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (main) {
+    main.style.transition = "box-shadow .4s";
+    main.style.boxShadow = "inset 0 0 0 2px var(--warn)";
+    setTimeout(() => { main.style.boxShadow = ""; }, 2200);
+  }
+}
+
 // 直链展开（#demo-open）：验收/分享展开态用
 if (location.hash === '#demo-open') {
   document.getElementById('r1').hidden = false;

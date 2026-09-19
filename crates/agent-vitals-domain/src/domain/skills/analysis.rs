@@ -587,14 +587,25 @@ the session log separates user-explicit invocation \
 ///
 /// **上下文属于各自宿主**，不能把 Codex、Claude Code 等的数值相加后当成
 /// 一个窗口 —— 这与顶层预算在多宿主模式下报 not-available 是同一条理由。
+///
+/// `budget_chars` 是 claude-code 侧生效的描述预算（CLI `--budget`，含默认值）；
+/// `dsh_trigger_available` 由调用方从 DSH 会话日志证据算出（有证据且未 degraded），
+/// 本函数不重复解释证据。
+///
+/// `description_budget`（字符串状态）之后追加了 `description_budget_detail`
+/// （逐宿主数字）：多宿主模式下顶层预算恒不可用（分母不同的量相加就是编造），
+/// 而按宿主给出自己的 used/budget 是**并列不是合并** —— 每个宿主一条、各用
+/// 各的分母。没有预算的宿主 `available:false` 且数字全 null，绝不冒充 0。
 pub fn host_summaries(
     skills: &[Value],
     usage_empty: bool,
     codex_available: bool,
     openclaw_available: bool,
+    budget_chars: i64,
+    dsh_trigger_available: bool,
 ) -> Map<String, Value> {
 let mut host_summaries = Map::new();
-for family in ["claude-code", "codex", "openclaw", "hermes", "workbuddy"] {
+for family in ["claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"] {
     let host_skills: Vec<&Value> = skills
         .iter()
         .filter(|x| s(x, "host_family") == family)
@@ -661,6 +672,44 @@ for family in ["claude-code", "codex", "openclaw", "hermes", "workbuddy"] {
     verified_keys.sort();
     verified_keys.dedup();
 
+    // 逐宿主预算明细。口径与 `budget()` 同一套：name+description+4（Codex 另加
+    // path+1，它的列表带路径），分母是**该宿主自己的**（claude-code 可配置 /
+    // Codex 官方 8k 回退），只在本宿主的 unique 集上累加 —— 不与任何其他宿主
+    // 相加。没有预算口径的宿主（openclaw 的「可配」无实测分母、dsh 逐条截断、
+    // workbuddy/hermes 无此概念）available=false、数字全 null。
+    let budget_detail = if family == "claude-code" || (family == "codex" && codex_available) {
+        let is_codex = family == "codex";
+        let denom = if is_codex { CODEX_FALLBACK_DESC_BUDGET } else { budget_chars };
+        let used: i64 = host_unique
+            .iter()
+            .map(|v| {
+                (chars(v, "description")
+                    + chars(v, "name")
+                    + 4
+                    + if is_codex { chars(v, "path") + 1 } else { 0 }) as i64
+            })
+            .sum();
+        json!({
+            "available": true,
+            "source": if is_codex { "official-estimate" } else { "configurable" },
+            "budget_chars": denom,
+            "used_chars": used,
+            "pct_used": if denom != 0 {
+                json!(pyround(used as f64 / denom as f64 * 100.0, 1))
+            } else { Value::Null },
+            "counted_skills": host_unique.len(),
+        })
+    } else {
+        json!({
+            "available": false,
+            "source": if family == "openclaw" { "configurable" } else { "not-available" },
+            "budget_chars": Value::Null,
+            "used_chars": Value::Null,
+            "pct_used": Value::Null,
+            "counted_skills": Value::Null,
+        })
+    };
+
     host_summaries.insert(
         family.into(),
         json!({
@@ -679,8 +728,10 @@ for family in ["claude-code", "codex", "openclaw", "hermes", "workbuddy"] {
                 else if family == "codex" && codex_available { "official-estimate" }
                 else if family == "openclaw" { "configurable" }
                 else { "not-available" },
-            "trigger_data": if family == "claude-code" && !usage_empty
-                { "available" } else { "not-available" },
+            "description_budget_detail": budget_detail,
+            "trigger_data": if (family == "claude-code" && !usage_empty)
+                || (family == "dsh" && dsh_trigger_available) { "available" }
+                else { "not-available" },
         }),
     );
 }

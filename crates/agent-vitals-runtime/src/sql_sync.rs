@@ -179,7 +179,13 @@ const TRIGGER_MIGRATION: &str = "migration";
 /// 意图摘录（`session_excerpts`）与 workflow 富化列（错误/参数摘录、尺寸、
 /// uuid/行号/偏移锚点）。不升这个号，存量 claude 源不重放，182k+ 事件行的
 /// 新列永远 NULL——回填依赖 `insert_events` 的守卫式 upsert（只补 NULL 列）。
-const PARSER_VERSION: i64 = 4;
+///
+/// 版本 5（WORKBENCH_FINDINGS_TAB_SPEC §9.4-①）：claude-code emitter 修复
+/// skill_finished 的 outcome 信号——skill 的 tool_result 不带 is_error，改读
+/// record 级 `toolUseResult.success`。历史行的纠正走 `insert_events` 的派生列
+/// upsert（provenance 保持原样）；不升这个号，v4 重放时仍为 unknown 的
+/// skill_finished 行不会因指纹未变而被再次触达。
+const PARSER_VERSION: i64 = 5;
 
 /// 当前事实解析器版本；同步差量必须把它和文件指纹一起比较。
 pub const fn parser_version() -> i64 {

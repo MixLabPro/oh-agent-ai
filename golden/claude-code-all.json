@@ -30,6 +30,14 @@
       "unique_discoverable_skills": 26,
       "tier1_total_tokens": 539,
       "description_budget": "available",
+      "description_budget_detail": {
+        "available": true,
+        "source": "configurable",
+        "budget_chars": 15000,
+        "used_chars": 1453,
+        "pct_used": 9.7,
+        "counted_skills": 26
+      },
       "trigger_data": "available"
     },
     "codex": {
@@ -40,6 +48,14 @@
       "unique_discoverable_skills": 0,
       "tier1_total_tokens": 0,
       "description_budget": "not-available",
+      "description_budget_detail": {
+        "available": false,
+        "source": "not-available",
+        "budget_chars": null,
+        "used_chars": null,
+        "pct_used": null,
+        "counted_skills": null
+      },
       "trigger_data": "not-available"
     },
     "openclaw": {
@@ -50,6 +66,14 @@
       "unique_discoverable_skills": 0,
       "tier1_total_tokens": 0,
       "description_budget": "configurable",
+      "description_budget_detail": {
+        "available": false,
+        "source": "configurable",
+        "budget_chars": null,
+        "used_chars": null,
+        "pct_used": null,
+        "counted_skills": null
+      },
       "trigger_data": "not-available"
     },
     "hermes": {
@@ -60,6 +84,14 @@
       "unique_discoverable_skills": 0,
       "tier1_total_tokens": 0,
       "description_budget": "not-available",
+      "description_budget_detail": {
+        "available": false,
+        "source": "not-available",
+        "budget_chars": null,
+        "used_chars": null,
+        "pct_used": null,
+        "counted_skills": null
+      },
       "trigger_data": "not-available"
     },
     "workbuddy": {
@@ -70,6 +102,32 @@
       "unique_discoverable_skills": 0,
       "tier1_total_tokens": 0,
       "description_budget": "not-available",
+      "description_budget_detail": {
+        "available": false,
+        "source": "not-available",
+        "budget_chars": null,
+        "used_chars": null,
+        "pct_used": null,
+        "counted_skills": null
+      },
+      "trigger_data": "not-available"
+    },
+    "dsh": {
+      "skills_on_disk": 0,
+      "discoverable_skills": 0,
+      "runtime_verified_loaded_skills": null,
+      "runtime_verified_unique_skills": null,
+      "unique_discoverable_skills": 0,
+      "tier1_total_tokens": 0,
+      "description_budget": "not-available",
+      "description_budget_detail": {
+        "available": false,
+        "source": "not-available",
+        "budget_chars": null,
+        "used_chars": null,
+        "pct_used": null,
+        "counted_skills": null
+      },
       "trigger_data": "not-available"
     }
   },

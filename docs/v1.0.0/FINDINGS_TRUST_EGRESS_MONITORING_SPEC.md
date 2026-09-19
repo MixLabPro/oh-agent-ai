@@ -6,7 +6,7 @@
 
 **产品定位：** 离线、只读优先、证据驱动的本地 Agent 信任审计；默认不拦截、不上传任何用户数据。
 
-**关联文档：** [Agent 执行问题分类图谱](../AGENT_EXECUTION_PROBLEM_TAXONOMY.md)（第 7 层）、[工作台 Findings 规格](WORKBENCH_FINDINGS_TAB_SPEC.md)、[V16/V17 富化与探针规格](SCHEMA_V16_V17_ENRICHMENT_PROBE_SPEC.md)。
+**关联文档：** [Agent 执行问题分类图谱](../AGENT_EXECUTION_PROBLEM_TAXONOMY.md)（第 7 层）、[工作台 Findings 规格](WORKBENCH_FINDINGS_TAB_SPEC.md)。V16/V17 富化与探针规格尚未进入本分支，相关数据留存纪律在合并该能力时再建立正式链接。
 
 ---
 
@@ -33,11 +33,11 @@
 | 现有能力 | 代码位置 | 本规格的复用方式 |
 |---|---|---|
 | 稳定 Issue 身份、生命周期和状态历史 | `crates/agent-vitals-data/src/issues.rs`；authority `issue_instances` / `issue_status_transitions` | Trust Finding 仍写入统一 Issue authority，不另造第二套 Finding 状态机 |
-| Authority SQLite 与版本化迁移 | `crates/agent-vitals-data/src/authority.rs`，当前 schema v17 | 新观察表走下一版 schema；只存分析增量和证据锚点 |
+| Authority SQLite 与版本化迁移 | `crates/agent-vitals-data/src/authority.rs`，本分支当前 schema v15 | 新观察表必须基于届时最新 schema 顺序迁移；不能预占固定版本号 |
 | 宿主差量摄取 | `crates/agent-vitals-runtime/src/sync_service.rs` | 历史审计适配器复用“发现 → 指纹差量 → authority 事务写入”模式 |
 | Findings 分组、分页、详情 IPC | `apps/desktop/src-tauri/src/store.rs` 的 `sessions_issues`、`issue_group_instances`、`issue_instance_read` | Trust Finding 进入同一查询面；详情增加证据时间线 |
 | 系统通知插件与显式授权先例 | `apps/desktop/src-tauri/src/lib.rs` 的预算/额度提醒 | Trust 实时报警独立开关；仅在用户开启时申请系统通知权限 |
-| 原始日志锚点、本地 UI 与 MCP/导出分面 | V16 enrichments、现行数据留存政策 | 本地详情可按锚点现场复核；MCP/默认导出仅给脱敏聚合 |
+| 原始日志锚点、本地 UI 与 MCP/导出分面 | 现行数据留存政策；V16 enrichments 尚未合入本分支 | 合入锚点能力后本地详情可现场复核；此前只显示脱敏投影，MCP/默认导出仍只给聚合 |
 
 ### 1.2 不能复用或不能混用的能力
 
@@ -173,6 +173,34 @@ expires_at_ms            高频观察的清理时间
 - 已形成 Finding 的关键 observation 在 Finding 打开期间保留；关闭后只保留聚合摘要与不可逆指纹，原始 observation 按保留期清理。
 - consent snapshot 仅在状态变化时写入。
 - 不拥有宿主原始日志；源被轮换后显示“源已过期，仅存脱敏投影”。
+
+### 5.4 Schema 演进顺序（已拍板）
+
+本分支当前 authority schema 为 v15；另一工作区中的 V16 富化与 V17 探针实现尚未形成可合并提交。Trust/Egress 不得抢占 v16，也不得从混合脏工作区直接复制一份平行迁移。
+
+实施顺序固定为：
+
+1. V16/V17 先各自形成可审查、可测试的提交并合入本分支；
+2. Trust/Egress 基于合入后的最新 authority 追加下一版迁移，按当前排布即 v18；
+3. 如果 V16/V17 在合入前发生重新编号，Trust 迁移顺延，代码与文档不依赖硬编码“必须是 18”；
+4. 新库直接创建最新形状，旧库必须逐级通过 v15 → v16 → v17 → Trust；两条路径的 `sqlite_master`、列定义、索引与约束必须等价。
+
+P1 的最小 schema 只增加 `trust_observations` 与 `trust_issue_evidence`。`issue_instances` / `issue_status_transitions` 不加 Trust 专用列；实时传感器需要的 `trust_monitor_state`、`trust_flow_rollups` 延后到 P2 的独立迁移，避免用尚未实现的高频采集需求污染历史审计表面。
+
+所有 `trust_observations` 行必须带 `ingested_run_id REFERENCES sync_runs(run_id)`；来自文件/日志的观察同时带可空 `source_id REFERENCES source_files(source_id)`。实时采集若未来落库，也必须使用具名 `sync_runs.trigger`（如 `trust-monitor`），不能绕过批次审计直接写表。
+
+### 5.5 Issue 安全摘要与删除联动
+
+Trust Finding 继续复用现有 Issue 生命周期，但 `issue_instances.metadata_json` 只允许存以下安全摘要白名单：
+
+- `stage`、`evidence_level`、`confidence`；
+- `scope_classes`、`file_count`、`byte_count`；
+- `destination_class`、`consent_state`；
+- observation 数量、最早/最近观察时间和 coverage 状态。
+
+`actor_id`、`workspace_ref`、具体 hostname、`source_id`、native event/行号/偏移和任何本地路径不得进入 Issue metadata；它们只存在于 `trust_observations`，且只能由本地专用详情命令读取。这样即使现有通用 Issue 分组或 MCP `issues_list` 采样 metadata，也不会把 Trust 原始证据带出本机呈现边界。
+
+迁移不能只建表：同一变更必须扩展 retention 与宿主删除事务。`delete_imported_host_data(host)` 必须先删除 `trust_issue_evidence` 关联，再删除该宿主的 `trust_observations`，最后才可删除 `source_files`；已失去全部证据的 Trust Issue 按 evaluator 规则转为 resolved/expired，不留下悬空外键或仍声称证据存在的开放 Finding。默认导出和 MCP 不注册 trust 表或本地详情命令。
 
 ## 6. 采集架构
 

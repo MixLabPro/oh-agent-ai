@@ -1929,3 +1929,66 @@ summary.detail-section-title {
 
 /* 「测试」tab 高级折叠区：summary 沿用 panel-title 的弱化样式。 */
 #test-advanced > summary { cursor: pointer; user-select: none; }
+/* ============ Skill 体检 tab（WORKBENCH_SKILL_HEALTH_TAB_SPEC §6）============ */
+/* 宿主摘要卡行：横向排列、窄窗口折行（同总览 KPI 网格的响应式规则）。 */
+.sk-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.sk-card { border: 1px solid color-mix(in srgb, var(--muted) 25%, transparent); border-radius: 10px; padding: 10px 12px; background: var(--panel-bg, transparent); min-width: 0; }
+.sk-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.sk-card-title { font-weight: 600; }
+.sk-card-line { font-size: 12px; line-height: 1.7; min-width: 0; }
+.sk-card-line .muted { font-size: 12px; }
+/* 预算条：分母永远是该宿主自己的；没有预算的宿主不画条（写明原因）。 */
+.sk-budget-bar { position: relative; height: 8px; border-radius: 999px; background: color-mix(in srgb, var(--muted) 20%, transparent); margin: 4px 0 2px; overflow: hidden; }
+.sk-budget-fill { position: absolute; inset: 0 auto 0 0; border-radius: 999px; background: var(--accent); }
+.sk-budget-fill.warn { background: var(--warn); }
+.sk-budget-fill.over { background: var(--danger); }
+/* 发现行：码 + 人话 + 宿主芯片 + 行动。行内的 caveat 前缀 ! 原样展示。 */
+.sk-rows { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.sk-row { border: 1px solid color-mix(in srgb, var(--muted) 22%, transparent); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+.sk-row-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.sk-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; font-size: 12px; }
+.sk-code.critical { color: var(--danger); }
+.sk-code.warning { color: var(--warn); }
+.sk-code.info { color: var(--muted); }
+.sk-row-impact { font-size: 13px; }
+.sk-row-line { font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
+.sk-row-caveat { font-size: 12px; color: var(--warn); margin-top: 2px; overflow-wrap: anywhere; }
+.sk-group-title { font-weight: 600; font-size: 13px; margin: 10px 0 2px; }
+.sk-judgement { font-size: 12px; color: var(--muted); font-style: normal; }
+.sk-pair { font-size: 12px; overflow-wrap: anywhere; }
+.sk-host-select-label { display: inline-flex; align-items: center; gap: 6px; }
+
+/* ============ 发现 tab P1：待办/证据分区（WORKBENCH_FINDINGS_TAB_SPEC §3）============ */
+/* 证据区整体默认收起：summary 是唯一的开关，不另造 JS 折叠状态。 */
+/* ⓪结论卡旗标 + ②行内异常旗（findings tab）。 */
+.flag { display: inline-block; padding: 0 7px; border-radius: 5px; font-size: 10.5px; font-weight: 700; margin-left: 6px; }
+.flag.cost { color: #052e22; background: var(--warn); }
+.flag.hit { color: #052e22; background: var(--danger); }
+
+/* ②模型 × Harness 对比（findings tab P2）：行可点展开，展开行弱底色。 */
+#find-matrix .matrix-row { cursor: pointer; }
+#find-matrix .matrix-row:hover { background: color-mix(in srgb, var(--panel-2) 25%, transparent); }
+#find-matrix .matrix-detail-row td { background: color-mix(in srgb, var(--bg) 55%, var(--panel)); }
+
+.find-evidence { margin: 12px 0; }
+.find-evidence > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 8px 2px;
+  color: var(--muted);
+  user-select: none;
+}
+.find-evidence[open] > summary { color: var(--text, inherit); }
+/* 待办行：一句话 + 主按钮 + 明细与状态。占位显隐由 renderTodoList 控制。 */
+.issue-todo-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+  border: 1px solid color-mix(in srgb, var(--muted) 22%, transparent);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.issue-todo-row .issue-todo-head { flex: 1 1 320px; min-width: 0; }
+.issue-todo-row .issue-todo-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }

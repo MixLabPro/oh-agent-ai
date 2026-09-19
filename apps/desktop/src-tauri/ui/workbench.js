@@ -430,6 +430,9 @@ async function loadActiveTab() {
   else if (activeTab === "findings") { if (!findState.loaded) loadFindings(); }
   // 「测试」tab 懒加载：路线列表是轻命令；报告区按 run 状态渲染。
   else if (activeTab === "test") { loadTestTab(); }
+  // Skill 体检懒加载：首进只显示「尚未扫描」引导，不自动跑（spec §7 ——
+  // 扫描可能拉起 codex app-server，秒级开销不该在切 tab 时白付）。
+  else if (activeTab === "skills") { if (!skState.loaded && !skState.scanning && !skState.error) showSkillsIntro(); }
   else if (activeTab === "sources") {
     // 设置 tab 里 read_overview 有三个消费方（预算静默态 / 数据源同步行 /
     // 版本诊断的 sync 字段）。以前前两处各拉一次 = 每进一次设置页多跑一遍
@@ -6694,18 +6697,29 @@ function findingSessionLabel(f) {
   return id ? String(id) : "（无标题）";
 }
 
-async function loadFindings(reset) {
+async function loadFindings(reset, refresh) {
   if (reset) {
     findState = { loaded: true, error: false, data: null, sev: "all", rule: "all", expanded: {}, nextCursor: null, loadingMore: false };
     document.getElementById("find-banner").hidden = true;
   }
   findState.loaded = true;
-  // 同 loadSessions：`sessions_findings` 无分页、必须扫全部会话，冷 cache 时
-  // 是这三个 tab 里最重的一个，没有任何等待反馈时最容易被当成假死。
+  // §1.6 性能预算：默认读侧纯 authority（已同步库的毫秒级查询）；只有「重载」
+  // 按钮（refresh=true）才让后端跑 evaluator 刷新（CLI spawn，冷 cache 扫会话
+  // 日志）。加载文案随之区分，重路径的等待明说，别让快路径背慢文案。
   const loadingEl = document.getElementById("find-loading");
+  loadingEl.textContent = refresh
+    ? "重新汇总中…要扫描会话日志，冷缓存时可能需要几十秒"
+    : "加载中…读取本地汇总";
   loadingEl.hidden = false;
   try {
-    const data = await invoke("sessions_issues", { pageSize: 50, cursor: null });
+    // 新鲜度条与汇总并发取（spec §5.4）：它只读 authority 的两格数，失败不吞汇总。
+    const [data, fresh] = await Promise.all([
+      invoke("sessions_issues", { pageSize: 50, cursor: null, refresh: !!refresh }),
+      invoke("findings_freshness").catch(() => null),
+    ]);
+    renderFreshness(fresh);
+    // ②对比面首次懒加载（§1.6：纯 authority 读，不阻塞首屏渲染）。
+    if (!matrixState.data) loadDecisionMatrix();
     findState.data = data;
     findState.nextCursor = data && data.next_cursor || null;
     findState.error = false;
@@ -6762,6 +6776,7 @@ function renderFindings() {
     foot.textContent = "";
     document.getElementById("find-more").hidden = true;
     empty.hidden = true;
+    renderTodoList([]);
     return;
   }
   banner.hidden = true;
@@ -6795,6 +6810,14 @@ function renderFindings() {
     const c = el("span", "chip" + cls);
     c.textContent = k + " · " + bySrc[k];
     chips.appendChild(c);
+  }
+
+  // 待办区（spec §3.1）：无脑可解决的项；SV6xx 永不进（isTodoGroup 挡）。
+  renderTodoList(rows);
+  const evidenceSummary = document.getElementById("find-evidence-summary");
+  if (evidenceSummary) {
+    evidenceSummary.textContent = "证据明细 · 规则命中 " + rows.length
+      + " 条（行为事实与只读证据，点开筛选/逐条处理）";
   }
 
   // 规则表。
@@ -6908,7 +6931,7 @@ function renderFindingsDetail() {
       const detail = document.createElement("tr");
       detail.dataset.issueGroup = f.group_id || "";
       const cell = document.createElement("td");
-      cell.colSpan = 7;
+      cell.colSpan = 8;
       cell.className = "muted";
       cell.textContent = "正在读取原始命中…";
       detail.appendChild(cell);
@@ -6955,6 +6978,18 @@ function issueActionLabel(group) {
     "reduce-context-window": "建议：检查上下文范围",
     "inspect-usage-change": "建议：查看对应会话",
     "review-budget-or-snooze": "建议：查看预算或静默提醒",
+    // SV601–SV610 专属 remedy 文案（WORKBENCH_FINDINGS_TAB_SPEC §5.1；ID 来自
+    // agent-vitals-data issues.rs::remedy_for 的十个新 match arm）。
+    "review-destructive-shell": "建议：复核破坏性命令",
+    "review-privilege-shell": "建议：复核提权命令",
+    "review-remote-exec": "建议：复核远程执行命令",
+    "review-sensitive-path": "建议：复核敏感路径写入",
+    "narrow-write-scope": "建议：把写入收窄到工作区内",
+    "review-external-fetch": "建议：复核外部地址拉取",
+    "reduce-limit-pressure": "建议：降低撞限流压力",
+    "inspect-timeout-tool": "建议：查看超时的工具",
+    "review-approval-choice": "建议：复核审批选择",
+    "tighten-sandbox-mode": "建议：收紧沙箱权限",
     "diagnostic-only": "建议：查看数据状态",
   };
   return labels[remedy] || "建议：查看详情";
@@ -7105,6 +7140,16 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
     if (!append) cell.textContent = "";
     const list = data && Array.isArray(data.instances) ? data.instances : [];
     if (list.length === 0 && !append) { cell.textContent = "暂无可展开的原始命中"; return; }
+    // 行为证据（SV6xx / source_kind=behavior）只读（spec §8）：给不可"解决"的
+    // 事实配状态迁移按钮，等于承认这区是工单摆设——只保留"详情"查证入口。
+    const readOnlyEvidence = String(group.rule || "").startsWith("SV6")
+      || group.source_kind === "behavior";
+    if (readOnlyEvidence && !append) {
+      const note = document.createElement("div");
+      note.className = "issue-subline muted";
+      note.textContent = "行为证据 · 只读：命中是「发生了什么」的事实，没有待办语义（spec §8）；决策面在上方对比表。";
+      cell.appendChild(note);
+    }
     for (const instance of list) {
       const line = document.createElement("div");
       line.className = "issue-instance-line";
@@ -7116,13 +7161,15 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
       detailButton.textContent = "详情";
       detailButton.addEventListener("click", () => showIssueInstanceDetail(instance.issue_id, line, instance));
       line.appendChild(detailButton);
-      const currentStatus = issueStatusCanonical(instance.status);
-      for (const [status, label] of issueActionsForStatus(currentStatus)) {
-        const button = el("button", "btn secondary");
-        button.type = "button";
-        button.textContent = label;
-        button.addEventListener("click", () => transitionIssueFromUi(instance.issue_id, status));
-        line.appendChild(button);
+      if (!readOnlyEvidence) {
+        const currentStatus = issueStatusCanonical(instance.status);
+        for (const [status, label] of issueActionsForStatus(currentStatus)) {
+          const button = el("button", "btn secondary");
+          button.type = "button";
+          button.textContent = label;
+          button.addEventListener("click", () => transitionIssueFromUi(instance.issue_id, status));
+          line.appendChild(button);
+        }
       }
       cell.appendChild(line);
     }
@@ -7171,13 +7218,610 @@ async function showIssueInstanceDetail(issueId, line, seed) {
   }
 }
 
+// 开放命中总数：各组 status_rollup.open 之和。状态迁移的「待处理 N → M」
+// 以它为口径 —— 组数不因单个实例迁移而变，实例数才是用户心里的「还剩几件」。
+function openHitCount() {
+  let open = 0;
+  for (const g of issueRows()) {
+    open += Number((g.status_rollup || {}).open || 0);
+  }
+  return open;
+}
+
+function showFindReceipt(text) {
+  const receipt = document.getElementById("find-receipt");
+  if (!receipt) return;
+  receipt.textContent = text;
+  receipt.hidden = false;
+  clearTimeout(showFindReceipt._t);
+  showFindReceipt._t = setTimeout(() => { receipt.hidden = true; }, 6000);
+}
+
+// ── ② 模型 × Harness 对比（spec §3.2/§4，P2）────────────────────────────
+// 决策证据面：金额按币种/口径分列、永不相加（§1.5）；浪费率仅 DSH 有证据、
+// 未接入恒「—」（§4.2，不用 0 冒充）；host_behavior 是宿主级聚合（§4.7）。
+const matrixState = { data: null, expanded: {}, error: null };
+
+async function loadDecisionMatrix() {
+  try {
+    const data = await invoke("decision_matrix", {});
+    matrixState.data = data && Array.isArray(data.rows) ? data : null;
+    matrixState.error = null;
+    // 预算待办的归因块等这份数据——重画一次待办区把归因补上。
+    if (findState.data) renderTodoList(issueRows());
+  } catch (e) {
+    // 失败与真空数据必须可区分（验收条件 4）：错误明说，不冒充「没有组合」。
+    matrixState.error = e && (e.message || e) || "未知错误";
+    matrixState.data = null;
+    // 失败当下就把预算卡的「加载中…」换成「归因不可用」，不让错误承诺挂着。
+    if (findState.data) renderTodoList(issueRows());
+  }
+  renderMatrix();
+}
+
+function matrixMoney(amount) {
+  const symbol = amount.currency === "USD" ? "$" : amount.currency === "CNY" ? "¥" : (amount.currency || "") + " ";
+  const value = (Number(amount.amount_minor || 0) / 100).toFixed(2);
+  return (amount.basis === "metered_estimate" ? "≈" : "") + symbol + value;
+}
+
+function matrixTokens(n) {
+  const v = Number(n || 0);
+  if (v >= 1e9) return (v / 1e9).toFixed(1) + "B";
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + "K";
+  return String(v);
+}
+
+/// 单位会话成本（同一币种内才可比）：minor ÷ 会话数；无价或零会话 → -1
+/// （排序垫底用，展示层另走「—」）。
+function matrixPerSessionMinor(row, currency) {
+  const amount = (row.amounts || []).find((a) => a.currency === currency);
+  const sessions = Number(row.sessions || 0);
+  if (!amount || !sessions) return -1;
+  return Number(amount.amount_minor || 0) / sessions;
+}
+
+/// §4.6 排序：未计价行恒最前（成本未知比已知贵更值得先看）；订阅行不参与
+/// （月费 ÷ 会话数无决策意义）；可排序行币种唯一才按单位会话成本降序，
+/// 多币种混合时禁用排序并说明——禁止汇率折算排序（FX 只允许 metered_view
+/// 的 ≈ 显示，既有纪律）。
+function sortMatrixRows(rows) {
+  const unpriced = [], sortable = [], subscriptionOnly = [];
+  for (const row of rows) {
+    if ((row.amounts || []).length > 0) sortable.push(row);
+    else if (row.has_subscription) subscriptionOnly.push(row);
+    else unpriced.push(row);
+  }
+  const byTokens = (a, b) => (Number((b.tokens || {}).total || 0)) - (Number((a.tokens || {}).total || 0));
+  const currencies = new Set(sortable.flatMap((r) => (r.amounts || []).map((a) => a.currency)));
+  let note = "";
+  let metricSorted = false;
+  if (currencies.size > 1) {
+    note = "排序暂不可用：待排序行混合 " + [...currencies].join(" / ") + " 币种（不做汇率折算排序，spec §4.6）——中转用量统一为申报口径后启用。";
+    sortable.sort(byTokens);
+  } else if (currencies.size === 1) {
+    const cur = [...currencies][0];
+    sortable.sort((a, b) => matrixPerSessionMinor(b, cur) - matrixPerSessionMinor(a, cur));
+    metricSorted = true;
+  }
+  unpriced.sort(byTokens);
+  subscriptionOnly.sort(byTokens);
+  return { order: unpriced.concat(sortable, subscriptionOnly), note, metricSorted, unpricedCount: unpriced.length };
+}
+
+function matrixRowKey(row) {
+  return row.host + "/" + row.model_id + "/" + row.provider_id;
+}
+
+/// 从②对比面的贡献会话下钻到会话详情（§6.7「查看轨迹」入口）：showSession
+/// 走 sessions_read 的 sr_ 不透明引用，原生会话 id 不出现在前端。
+function openSessionFromMatrix(sess, row) {
+  if (!sess || !sess.session_ref) return;
+  switchTab("sessions");
+  showSession({
+    session_ref: sess.session_ref,
+    title: null,
+    model: row.model_id || null,
+    host_kind: row.host || null,
+  });
+}
+
+// ── ⓪ 本月发现（spec §3.0）：把 dig_findings 的结构化结论组装成中文卡。
+/// 后端只出数（kind + 数字），句子在这里拼——与 remedy_for→labels 同一条
+/// 「后端出数、前端出话」纪律。
+function digMoney(minor, currency) {
+  const symbol = currency === "USD" ? "$" : currency === "CNY" ? "¥" : (currency || "") + " ";
+  return symbol + (Number(minor || 0) / 100).toFixed(2);
+}
+
+function digCardText(c) {
+  if (c.kind === "cost_outlier") {
+    const o = c.outlier || {}, k = c.control || {};
+    return {
+      title: "最贵的组合贵在缓存纪律，不在单价",
+      why: (o.model_id || "?") + " 单会话 ≈" + digMoney(o.per_session_minor, c.currency)
+        + "，是同币种 " + (k.model_id || "?") + "（≈" + digMoney(k.per_session_minor, c.currency) + "）的 " + c.ratio_vs_control + " 倍；"
+        + "主因缓存命中 " + Math.round((o.cache_hit_ratio || 0) * 100) + "%。切换后命中 "
+        + Math.round((k.cache_hit_ratio || 0) * 100) + "% 的组合已被验证是替代方案。",
+      gain: "该线月省 ≈" + digMoney(c.saving_minor, c.currency) + "（−" + c.saving_pct + "%）",
+      action: { label: "定位到行", run: () => digDrillToRow((o.host || "") + "/" + (o.model_id || "") + "/" + (o.provider_id || "")) },
+    };
+  }
+  if (c.kind === "marathon") {
+    return {
+      title: "一个 " + c.span_hours + " 小时的马拉松会话吃掉 " + matrixTokens(c.tokens_total) + " token",
+      why: "工具失败 " + (c.failures || 0) + " 次仍在跑（" + (c.combo || {}).host + " · " + (c.combo || {}).model_id
+        + "）。当前没有单会话熔断（发现 tab 待拍板 #2），一个会话可以无限烧。",
+      gain: "拆任务 + 单会话熔断",
+      action: { label: "查看会话", run: () => openSessionFromMatrix({ session_ref: c.session_ref }, { host: (c.combo || {}).host, model_id: (c.combo || {}).model_id }) },
+    };
+  }
+  if (c.kind === "currency_split") {
+    const detail = Object.entries(c.by_currency || {})
+      .map(([cur, v]) => cur + " " + v.combos + " 组合/" + matrixTokens(v.tokens) + " token")
+      .join("；");
+    return {
+      title: "计价失真让排序整个瘫痪",
+      why: "可计价组合的币种不唯一（" + detail + "）——跨币种不可比，②的成本排序因此禁用。把中转用量统一为申报口径后解锁。",
+      gain: "解锁全表排序",
+      action: { label: "去明确计费方式", run: () => {
+        switchTab("overview");
+        const review = document.getElementById("ov-billing-review");
+        if (review && review.click) review.click();
+      } },
+    };
+  }
+  return null;
+}
+
+function digDrillToRow(key) {
+  const safe = String(key).replace(/["\\]/g, "");
+  const tr = document.querySelector('tr[data-matrix-key="' + safe + '"]');
+  if (!tr) return;
+  // 强制展开（不是 toggle）：已展开的行点「定位到行」不能把它收起（对齐原型）。
+  matrixState.expanded[key] = true;
+  renderMatrix();
+  const trAfter = document.querySelector('tr[data-matrix-key="' + safe + '"]');
+  const target = trAfter || tr;
+  if (target.scrollIntoView) target.scrollIntoView({ behavior: "smooth", block: "center" });
+  target.style.transition = "box-shadow .4s";
+  target.style.boxShadow = "inset 0 0 0 2px var(--warn)";
+  setTimeout(() => { target.style.boxShadow = ""; }, 2200);
+}
+
+function renderDig() {
+  const list = document.getElementById("find-dig-list");
+  const emptyEl = document.getElementById("find-dig-empty");
+  if (!list || !emptyEl) return;
+  list.textContent = "";
+  if (matrixState.error) {
+    emptyEl.hidden = false;
+    emptyEl.textContent = "本月发现读取失败：" + matrixState.error + "（点上方「重载」可重试）";
+    return;
+  }
+  if (!matrixState.data) {
+    // 加载中 ≠ 没有异常（评审 2026-09-19：把「未加载」陈述成「无异常」是假空态）。
+    emptyEl.hidden = false;
+    emptyEl.textContent = "本月发现生成中…";
+    return;
+  }
+  const summary = (matrixState.data.findings_summary) || [];
+  emptyEl.hidden = summary.length > 0;
+  emptyEl.textContent = "本月没有触发结论规则的异常。";
+  for (const c of summary) {
+    const text = digCardText(c);
+    if (!text) continue;
+    const row = el("div", "issue-todo-row");
+    const head = el("div", "issue-todo-head");
+    const title = el("strong", null);
+    title.textContent = text.title;
+    head.append(title);
+    row.append(head);
+    const why = el("div", "issue-subline muted");
+    why.textContent = text.why;
+    row.append(why);
+    const actions = el("div", "issue-todo-actions");
+    const gain = el("span", "issue-subline");
+    gain.style.color = "var(--success)";
+    gain.textContent = text.gain;
+    actions.append(gain);
+    const btn = el("button", "btn primary");
+    btn.type = "button";
+    btn.textContent = text.action.label;
+    btn.addEventListener("click", text.action.run);
+    actions.append(btn);
+    row.append(actions);
+    list.append(row);
+  }
+}
+
+function toggleMatrixRow(key, ev) {
+  if (ev && ev.target.closest("a,button")) return;
+  matrixState.expanded[key] = !matrixState.expanded[key];
+  renderMatrix();
+}
+
+function renderMatrix() {
+  const body = document.getElementById("find-matrix-body");
+  const emptyEl = document.getElementById("find-matrix-empty");
+  const sortEl = document.getElementById("find-matrix-sort");
+  if (!body) return;
+  // ⓪结论区随本函数一起刷新（放在空行早退之前——加载中/空数据也要更新⓪文案）。
+  renderDig();
+  body.textContent = "";
+  const rows = (matrixState.data && matrixState.data.rows) || [];
+  if (matrixState.error) {
+    emptyEl.hidden = false;
+    emptyEl.textContent = "对比面读取失败：" + matrixState.error + "（点上方「重载」可重试）";
+    sortEl.textContent = "";
+    return;
+  }
+  if (!rows.length) {
+    emptyEl.hidden = false;
+    emptyEl.textContent = "本月没有可对比的组合（需要有用量事实）。";
+    sortEl.textContent = "";
+    return;
+  }
+  emptyEl.hidden = true;
+  const sorted = sortMatrixRows(rows);
+  const bits = [];
+  if (sorted.metricSorted) bits.push("排序：浪费调整后单位会话成本（近似 · 仅排序提示，不进账单面）");
+  if (sorted.note) bits.push(sorted.note);
+  if (sorted.unpricedCount) bits.push("成本未知的 " + sorted.unpricedCount + " 行恒排最前");
+  sortEl.textContent = bits.join(" · ");
+
+  const frag = document.createDocumentFragment();
+  // ⓪结论的异常旗（与 dig_findings 同判据的展示层）：outlier 行挂成本旗，
+  // 低命中行挂命中旗（hit < 0.5 与后端规则一致）。
+  const costOutlierKey = (() => {
+    const c = ((matrixState.data || {}).findings_summary || []).find((x) => x.kind === "cost_outlier");
+    return c && c.outlier ? c.outlier.host + "/" + c.outlier.model_id + "/" + c.outlier.provider_id : null;
+  })();
+  for (const row of sorted.order) {
+    const key = matrixRowKey(row);
+    const tr = document.createElement("tr");
+    tr.className = "matrix-row";
+    tr.dataset.matrixKey = key;
+    tr.addEventListener("click", (ev) => toggleMatrixRow(key, ev));
+
+    const comboCell = document.createElement("td");
+    const host = document.createElement("div");
+    host.textContent = row.host + " · " + row.model_id;
+    comboCell.appendChild(host);
+    const tags = document.createElement("div");
+    tags.className = "issue-subline";
+    const tagBits = [row.provider_id];
+    for (const a of row.amounts || []) {
+      if (a.basis === "metered_estimate") tagBits.push("估算");
+      else if (a.basis) tagBits.push(a.basis);
+    }
+    if (row.cost_provider_unresolved) tagBits.push("计价归因未定");
+    if (row.has_subscription) tagBits.push("套餐内");
+    if (!(row.amounts || []).length && !row.has_subscription) tagBits.push("未计价");
+    tags.textContent = tagBits.join(" · ");
+    comboCell.appendChild(tags);
+    if (costOutlierKey && key === costOutlierKey) {
+      const flag = document.createElement("span");
+      flag.className = "flag cost";
+      flag.textContent = "单会话成本异常";
+      comboCell.appendChild(flag);
+    }
+    if (row.cache_hit_ratio != null && row.cache_hit_ratio < 0.5) {
+      const flag = document.createElement("span");
+      flag.className = "flag hit";
+      flag.textContent = "命中 " + Math.round(row.cache_hit_ratio * 100) + "%";
+      comboCell.appendChild(flag);
+    }
+    tr.appendChild(comboCell);
+
+    const num = (text) => {
+      const td = document.createElement("td");
+      td.className = "num";
+      td.textContent = text;
+      return td;
+    };
+    tr.appendChild(num(String(row.sessions || 0)));
+    tr.appendChild(num(matrixTokens((row.tokens || {}).total)));
+
+    const costTd = num((row.amounts || []).map(matrixMoney).join(" · ") || "—");
+    tr.appendChild(costTd);
+
+    // 单会话：同一币种内才算；无价/订阅/混合 → 「—」（§4.6 订阅行不参与）。
+    const perCur = new Set((row.amounts || []).map((a) => a.currency));
+    let perCell = "—";
+    if (perCur.size === 1 && !row.has_subscription) {
+      const cur = [...perCur][0];
+      const minor = matrixPerSessionMinor(row, cur);
+      if (minor >= 0) perCell = (row.amounts[0].basis === "metered_estimate" ? "≈" : "") +
+        (cur === "USD" ? "$" : "¥") + (minor / 100).toFixed(2);
+    }
+    tr.appendChild(num(perCell));
+
+    const ratio = row.cache_hit_ratio;
+    tr.appendChild(num(ratio == null ? "—" : Math.round(ratio * 100) + "%"));
+    tr.appendChild(num("—")); // 浪费率：仅 DSH，未接入（§4.2），不用 0 冒充
+    // 撞限流（§4.5）：SV607/608 宿主级命中 + 每会话均值；无命中 → 「—」。
+    const pressure = row.limit_pressure;
+    tr.appendChild(num(pressure
+      ? String(pressure.hits) + " 次" + (pressure.per_session != null ? " · ≈" + pressure.per_session + "/会话" : "")
+      : "—"));
+    frag.appendChild(tr);
+
+    if (matrixState.expanded[key]) {
+      const detail = document.createElement("tr");
+      detail.className = "matrix-detail-row";
+      const cell = document.createElement("td");
+      cell.colSpan = 7;
+      const buckets = document.createElement("div");
+      buckets.className = "issue-subline";
+      const t = row.tokens || {};
+      buckets.textContent = "四桶：未缓存输入 " + matrixTokens(t.uncached_input) +
+        " · 缓存读 " + matrixTokens(t.cache_read) + " · 缓存写 " + matrixTokens(t.cache_write) +
+        " · 输出 " + matrixTokens(t.output);
+      cell.appendChild(buckets);
+      const behavior = row.host_behavior || {};
+      if (Object.keys(behavior).length) {
+        const b = document.createElement("div");
+        b.className = "issue-subline";
+        b.textContent = "宿主级证据（spec §4.7，不按模型归组）：" +
+          Object.entries(behavior).map(([rule, count]) => rule + " × " + count).join(" · ");
+        cell.appendChild(b);
+      }
+      for (const sess of row.top_sessions || []) {
+        const line = document.createElement("div");
+        line.className = "issue-subline";
+        const hours = ((sess.span_last_ms - sess.span_first_ms) / 3600000).toFixed(1);
+        line.textContent = "贡献会话 " + String(sess.session_ref || "").slice(0, 14) + "… · 跨度 " + hours + "h（事件跨度近似）· " + matrixTokens(sess.tokens_total) + " token" + (sess.failures > 0 ? " · 失败 " + sess.failures : "");
+        cell.appendChild(line);
+        cell.appendChild(document.createTextNode(" "));
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn sm";
+        btn.textContent = "查看轨迹";
+        btn.addEventListener("click", () => openSessionFromMatrix(sess, row));
+        cell.appendChild(btn);
+      }
+      const notes = document.createElement("div");
+      notes.className = "issue-subline";
+      notes.textContent = ((matrixState.data && matrixState.data.notes) || []).join("；");
+      cell.appendChild(notes);
+      detail.appendChild(cell);
+      frag.appendChild(detail);
+    }
+  }
+  body.appendChild(frag);
+}
+
 async function transitionIssueFromUi(issueId, toStatus) {
+  // 迁移前后各读一次 rollup 计数（spec §5.6）：反馈给「已处理 1 项 · 待处理
+  // 命中 N → M」。M 不变时如实说明（同组还有开放命中），不假装减了。
+  const before = openHitCount();
   try {
     await invoke("issue_transition", { issueId, toStatus, reason: "workbench user action" });
     await loadFindings(true);
+    const after = openHitCount();
+    showFindReceipt("已处理 1 项 · 待处理命中 " + before + " → " + after
+      + (after !== before ? "" : "（该组仍有开放命中）"));
   } catch (e) {
     showBanner("find-banner", e, false);
   }
+}
+
+// ---------- 发现 tab P1：待办/证据两分区（WORKBENCH_FINDINGS_TAB_SPEC §3.1/§3.3）----------
+//
+// 待办准入门槛（spec §1 判断标准 2）：动作明确、表单预填完成、点击后有可见
+// 结果、可撤销 —— 四条全满足才进。做不到的不伪装成任务。SV6xx 行为命中是
+// 「发生了什么」的事实陈述，永不进待办区（§3.1），它们住在证据区。
+
+const TODO_SOURCE_KINDS = new Set(["billing_candidate", "billing_group", "source_failure", "budget"]);
+const TODO_RULES = new Set(["PRICE_COVERAGE", "ROUTE_UNCONFIRMED"]);
+
+function isTodoGroup(group) {
+  if (String(group.rule || "").startsWith("SV6")) return false;
+  return TODO_SOURCE_KINDS.has(group.source_kind) || TODO_RULES.has(group.rule);
+}
+
+// 待办行主按钮：与证据区展开分支同一套预填动作（动作逻辑唯一，不抄第二份）。
+// 预填目标：设置页的价格表单 / 归属声明表单 / 预算设置 / 总览的计费确认面板。
+function todoMainAction(group) {
+  const sample = group.sample_evidence && group.sample_evidence[0] || {};
+  if (group.rule === "ROUTE_UNCONFIRMED") {
+    return { label: "声明归属", run: () => {
+      pendingPriceRoute = { model: sample.model_id || "", provider: "" };
+      openSettingsSection("settings-data", "ov-price-route-model");
+    } };
+  }
+  if (group.rule === "PRICE_COVERAGE") {
+    return { label: "补充价卡", run: () => {
+      pendingPriceCard = { provider: sample.provider_id || "", model: sample.model_id || "" };
+      openSettingsSection("settings-data", "ov-price-card-model");
+    } };
+  }
+  if (group.source_kind === "budget") {
+    return { label: "看超在哪", run: () => {
+      const matrix = document.getElementById("find-matrix");
+      if (matrix && matrix.scrollIntoView) matrix.scrollIntoView({ behavior: "smooth", block: "start" });
+    } };
+  }
+  if (group.source_kind === "billing_candidate" || group.source_kind === "billing_group") {
+    return { label: "明确计费方式", run: () => {
+      switchTab("overview");
+      const review = document.getElementById("ov-billing-review");
+      if (review && review.click) review.click();
+    } };
+  }
+  return { label: "查看数据源", run: () => switchTab("sources") };
+}
+
+// 一句话 = 发生了什么 + 影响多少。主语取样本证据里最能认出这组事的字段。
+function todoTitle(group) {
+  const sample = group.sample_evidence && group.sample_evidence[0] || {};
+  if (group.rule === "PRICE_COVERAGE") return "缺少价卡：" + (sample.model_id || "未知型号");
+  if (group.rule === "ROUTE_UNCONFIRMED") return "归属未确认：" + (sample.model_id || "未知型号");
+  if (group.source_kind === "budget") {
+    const level = sample.level === "exceeded" ? "已超" : "告警";
+    return "预算" + level + "：" + (sample.month || group.bucket || "当月");
+  }
+  if (group.source_kind === "source_failure") {
+    return "数据源读取失败：" + (sample.error_code || sample.code || "未知错误");
+  }
+  if (group.source_kind === "billing_candidate" || group.source_kind === "billing_group") {
+    return "计费方式待明确" + (sample.provider_id ? "：" + sample.provider_id : "");
+  }
+  return group.rule || "待办";
+}
+
+/// 预算待办的归因块（用户反馈 2026-09-19：卡片只给"设置预算范围"，没回答
+/// "为什么超"）。数据全部来自已加载的②对比面：同币种（预算是 CNY）金额行
+/// 按 amount 降序取前三，各带一句特征（缓存命中低 / 马拉松会话）；USD 行
+/// 如实标注"未折算、未计入"（多币种不相加）。②未加载时显示等待文案。
+function budgetAttribution(group) {
+  const box = el("div", "issue-subline muted");
+  const sample = group.sample_evidence && group.sample_evidence[0] || {};
+  const meteredMinor = Number(sample.metered_cny_minor != null ? sample.metered_cny_minor : NaN);
+  const rows = (matrixState.data && matrixState.data.rows) || [];
+  const cnyRows = rows.filter((r) => (r.amounts || []).some((a) => a.currency === "CNY"));
+  const hasUsd = rows.some((r) => (r.amounts || []).some((a) => a.currency === "USD"));
+  if (!matrixState.data) {
+    if (!matrixState.error) box.textContent = "超支归因加载中（对比面数据就绪后自动补上）…";
+    else box.textContent = "超支归因不可用：对比面读取失败（" + matrixState.error + "）";
+    return box;
+  }
+  if (!cnyRows.length) {
+    box.textContent = "超支归因：本月没有已计价的 CNY 组合" + (hasUsd ? "（另有 USD 估算行，未折算不计入）" : "") + "。";
+    return box;
+  }
+  const sumMinor = cnyRows.reduce((acc, r) => acc + Number((r.amounts.find((a) => a.currency === "CNY") || {}).amount_minor || 0), 0);
+  const top = cnyRows.slice().sort((a, b) =>
+    Number((b.amounts.find((x) => x.currency === "CNY") || {}).amount_minor || 0)
+    - Number((a.amounts.find((x) => x.currency === "CNY") || {}).amount_minor || 0)).slice(0, 3);
+  const head = document.createElement("div");
+  head.textContent = "钱主要去了哪（按量已计价部分"
+    + (Number.isFinite(meteredMinor) ? " ¥" + (meteredMinor / 100).toFixed(2) : "")
+    + " 的去向，同币种，前三）：";
+  box.appendChild(head);
+  for (const row of top) {
+    const amount = row.amounts.find((a) => a.currency === "CNY") || {};
+    const share = sumMinor > 0 ? Math.round(Number(amount.amount_minor || 0) / sumMinor * 100) : 0;
+    const traits = [];
+    if (row.cache_hit_ratio != null && row.cache_hit_ratio < 0.5) traits.push("缓存命中 " + Math.round(row.cache_hit_ratio * 100) + "%");
+    const marathon = (row.top_sessions || []).find((sess) => (sess.span_last_ms - sess.span_first_ms) > 24 * 3600000);
+    if (marathon) traits.push("含 " + ((marathon.span_last_ms - marathon.span_first_ms) / 3600000).toFixed(1) + "h 马拉松会话");
+    const line = document.createElement("div");
+    line.textContent = "· " + row.host + " · " + row.model_id + " — ≈¥" + (Number(amount.amount_minor || 0) / 100).toFixed(2)
+      + "（占 " + share + "%）" + (traits.length ? " · " + traits.join(" · ") : "");
+    box.appendChild(line);
+  }
+  if (hasUsd) {
+    const note = document.createElement("div");
+    note.textContent = "另有 USD 估算行未折算、未计入本归因（多币种不相加；统一申报口径后并入）。";
+    box.appendChild(note);
+  }
+  return box;
+}
+
+function renderTodoList(rows) {
+  const list = document.getElementById("find-todo-list");
+  const emptyEl = document.getElementById("find-todo-empty");
+  if (!list || !emptyEl) return;
+  list.textContent = "";
+  const sevRank = { critical: 0, warning: 1, info: 2 };
+  const todos = rows.filter(isTodoGroup).sort((a, b) =>
+    ((sevRank[a.severity] != null ? sevRank[a.severity] : 3)
+      - (sevRank[b.severity] != null ? sevRank[b.severity] : 3))
+    || (Number(b.count || 0) - Number(a.count || 0)));
+  emptyEl.hidden = todos.length > 0;
+  for (const group of todos) {
+    const row = el("div", "issue-todo-row");
+    const head = el("div", "issue-todo-head");
+    const title = el("strong", null);
+    title.textContent = todoTitle(group);
+    head.append(title);
+    const scope = el("div", "issue-subline muted");
+    scope.textContent = issueScopeLabel(group) + " · " + issueActionLabel(group);
+    head.append(scope);
+    row.append(head);
+    if (group.source_kind === "budget") {
+      const attr = budgetAttribution(group);
+      if (attr) row.append(attr);
+    }
+    const actions = el("div", "issue-todo-actions");
+    const main = todoMainAction(group);
+    const mainBtn = el("button", "btn primary");
+    mainBtn.type = "button";
+    mainBtn.textContent = main.label;
+    mainBtn.addEventListener("click", main.run);
+    actions.append(mainBtn);
+    if (group.source_kind === "budget") {
+      const settingsBtn = el("button", "btn sm");
+      settingsBtn.type = "button";
+      settingsBtn.textContent = "预算设置";
+      settingsBtn.addEventListener("click", () => openSettingsSection("settings-budget", "ov-budget-monthly-amount"));
+      actions.append(settingsBtn);
+    }
+    const moreBtn = el("button", "btn secondary");
+    moreBtn.type = "button";
+    moreBtn.textContent = "明细与状态";
+    moreBtn.addEventListener("click", () => toggleTodoInstances(group, row));
+    actions.append(moreBtn);
+    row.append(actions);
+    const holder = el("div", "issue-todo-instances");
+    holder.hidden = true;
+    holder.append(el("div", "muted"));
+    row.append(holder);
+    list.append(row);
+  }
+}
+
+// 待办行的「明细与状态」：复用证据区的实例展开（loadIssueGroupInstances 吃
+// detailRow.firstElementChild 契约，这里给同样结构）。状态迁移按钮在实例行上，
+// 迁移后的计数反馈由 transitionIssueFromUi 统一负责（spec §5.6 纯前端）。
+function toggleTodoInstances(group, row) {
+  const holder = row.querySelector(".issue-todo-instances");
+  const button = row.querySelector(".issue-todo-actions button:nth-child(2)");
+  if (!holder || !button) return;
+  if (holder.hidden) {
+    holder.hidden = false;
+    holder.firstElementChild.textContent = "正在读取原始命中…";
+    button.textContent = "收起";
+    loadIssueGroupInstances(group, holder);
+  } else {
+    holder.hidden = true;
+    button.textContent = "明细与状态";
+  }
+}
+
+// 新鲜度条（spec §4.8/§6.5）：数字截止时刻 + stale 宿主名单。数据面 =
+// findings_freshness（runtime data_freshness_report，与 MCP envelope 同源）。
+/// §4.8 时间显示：当日只给 HH:MM；跨日必须带日期（"9月18日 23:43"）——同步
+/// 若是三天前的，光写 23:43 会让用户以为是今天。解析失败退回原串，不猜。
+function freshnessClock(raw) {
+  if (!raw) return "未知";
+  const t = new Date(raw);
+  if (Number.isNaN(t.getTime())) return String(raw);
+  const hm = String(t.getHours()).padStart(2, "0") + ":" + String(t.getMinutes()).padStart(2, "0");
+  const now = new Date();
+  if (t.getFullYear() === now.getFullYear() && t.getMonth() === now.getMonth() && t.getDate() === now.getDate()) {
+    return hm;
+  }
+  return (t.getMonth() + 1) + "月" + t.getDate() + "日 " + hm;
+}
+
+function renderFreshness(fresh) {
+  const bar = document.getElementById("find-freshness");
+  if (!bar) return;
+  bar.hidden = false;
+  if (!fresh || fresh.status !== "ok") {
+    bar.textContent = "新鲜度未知：数据状态读取失败。";
+    return;
+  }
+  const f = fresh.freshness || {};
+  const parts = [];
+  if (f.last_successful_sync_at) parts.push("数字截至 " + freshnessClock(f.last_successful_sync_at));
+  const stale = Array.isArray(f.stale_hosts) ? f.stale_hosts : [];
+  if (stale.length) parts.push("超过 24h 未更新：" + stale.join("、"));
+  bar.textContent = parts.length ? "新鲜度 · " + parts.join(" · ") : "新鲜度 · 数据完整";
 }
 
 function issueRows() {
@@ -7663,7 +8307,8 @@ async function init() {
     document.getElementById("sess-detail-view").hidden = true;
     document.getElementById("sess-list-view").hidden = false;
   });
-  document.getElementById("find-reload").addEventListener("click", () => loadFindings(true));
+  // 重载 = 唯一显式触发重路径（evaluator 刷新）的入口（spec §1.6）。
+  document.getElementById("find-reload").addEventListener("click", () => loadFindings(true, true));
   document.getElementById("find-more").addEventListener("click", loadMoreFindings);
   document.getElementById("find-sev").addEventListener("change", (ev) => {
     findState.sev = ev.target.value;
@@ -7675,11 +8320,717 @@ async function init() {
   });
   // 日历默认月跟随统计时区今天；本月输入框受 input[type=month] 约束天然合法。
   if (!calMonth) calMonth = statisticsMonth();
+  initSkillsTab();
   renderOverview();
   // 启动 pull：冷启动时（webview 先加载、focus-tab/focus-target emit 早于 listen）
   // 菜单点击的目标在这里命中。apply 后 clear，此后 focus/事件两条路都不会重复应用。
   pullNavTarget();
   pullFocusTarget();
+}
+
+
+// ---------- Skill 体检（docs/v1.0.0/WORKBENCH_SKILL_HEALTH_TAB_SPEC.md）----------
+//
+// 纪律：tab 不重新测量、不重新判定 —— 每一个数字、每一条 SV 发现都从
+// `agent-vitals doctor --json - --with-report --no-snapshot` 的载荷里取
+// （spec §1 判断标准 1「同源」）。前端只做格式化与宿主归属（归属也只用
+// 载荷里已有的字段：冲突条目自带 host、重叠对自带 domain、安全命中按
+// path 回查 report.skills，不自造键）。
+//
+// 「并列不合并」（spec §0/§3.5）：页头只出四类白名单合计（REQ-SK-03）；
+// 预算、Tier1、冲突、重叠、僵尸永不出跨宿主单一数字。每宿主各用各的
+// 预算分母，没有分母的宿主不画预算条。
+
+const SK_HOST_ORDER = ["claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"];
+const SK_HOST_DISPLAY = {
+  "claude-code": "Claude Code",
+  "codex": "Codex",
+  "openclaw": "OpenClaw",
+  "hermes": "Hermes",
+  "workbuddy": "WorkBuddy",
+  "dsh": "DeepSeek Harness",
+};
+// SV 码 → 中文短名（SKILL.md §2 码表 / references/guide.zh-CN.md）。
+// 码永远与人话并列出现，不单独出现裸码（spec §8）。
+const SK_CODE_ZH = {
+  SV001: "描述预算告警",
+  SV002: "描述预算溢出",
+  SV004: "逐条描述截断",
+  SV101: "被更新副本遮蔽",
+  SV102: "冗余副本",
+  SV103: "有意覆盖",
+  SV105: "frontmatter 无效",
+  SV201: "零触发",
+  SV202: "休眠",
+  SV301: "单次触发成本高",
+  SV303: "昂贵且未用",
+  SV401: "重叠候选",
+  SV501: "提示注入模式",
+  SV502: "管道到 shell",
+  SV503: "base64 执行",
+  SV504: "裸 IP 拉取",
+  SV505: "硬编码密钥",
+  SV506: "读取凭据环境变量",
+  SV507: "混淆执行",
+  SV508: "加密压缩包",
+  SV901: "能力不可用",
+  SV902: "skill 不可读",
+};
+// 程序只做词法筛选，语义判断永远是人的工作（SKILL.md §3）：这些码的行动列
+// 固定「需你判断」，不给一键操作（spec §3.6/§6.2/§8）。
+const SK_NEED_JUDGEMENT = "需你判断 · 在终端跑 explain <name>，或让 Agent 跑 /agent-vitals";
+function skNeedsJudgement(code) {
+  return code === "SV401" || code.startsWith("SV5");
+}
+// 宿主无预算时的固定文案（spec §5.4）：不画条，dsh 追加逐条截断提示。
+const SK_NO_BUDGET_TEXT = "该宿主没有描述预算";
+// 预算分母来源标签（与 README 兼容性表同词，spec §6.1）。
+const SK_BUDGET_SOURCE_TEXT = {
+  "configurable": "可配置估算",
+  "official-estimate": "官方 2% 估算",
+};
+
+// Skill 体检状态：首进不自动扫（spec §7 —— codex app-server 拉起是秒级开销，
+// 首屏空转不如让用户点「开始扫描」）。host 变化会按新 host 重新取数
+// （REQ-SK-04：单宿主视图 = doctor --host <h> 的可视化，取数必须带 --host）。
+let skState = { loaded: false, error: false, data: null, scanning: false, host: "all" };
+
+function skFmtNum(n) {
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+function skEl(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text != null) el.textContent = text;
+  return el;
+}
+
+function skHostChip(host) {
+  const chip = skEl("span", "chip", SK_HOST_DISPLAY[host] || host);
+  chip.dataset.host = host;
+  return chip;
+}
+
+// 每条诊断宿主归属：只用载荷已有字段。冲突条目自带 host；重叠对自带
+// domain（= conflict_domain）；其余按 path / name 回查 report.skills。
+// 查不到的码（预算、能力缺失这类聚合项）返回空数组 —— 芯片区留空，
+// 绝不猜一个宿主写上去。
+function skDiagHosts(d, index) {
+  const code = d.code;
+  const ev = d.evidence || {};
+  const hosts = [];
+  const push = (h) => { if (h && !hosts.includes(h)) hosts.push(h); };
+  if (code === "SV101" || code === "SV102" || code === "SV103") {
+    (ev.conflicts || []).forEach((c) => push(c.host));
+  } else if (code === "SV401") {
+    (ev.pairs || []).forEach((p) => push(p.domain));
+  } else if (code.startsWith("SV5")) {
+    (ev.hits || []).forEach((h) => skHostsFor(index, h.path, h.skill).forEach(push));
+  } else if (code === "SV105" || code === "SV902" || code === "SV201" || code === "SV303") {
+    (ev.skills || []).forEach((s) => skHostsFor(index, s.path, s.name).forEach(push));
+  } else if (code === "SV202") {
+    (ev.skills || []).forEach((s) => skHostsFor(index, null, s.name).forEach(push));
+  } else if (code === "SV301") {
+    (ev.skills || []).forEach((s) => skHostsFor(index, s.path, s.name).forEach(push));
+  }
+  return hosts;
+}
+
+// path → 宿主数组（多值）：`~/.agents/skills` 是 dsh 与 openclaw 的共享根，
+// 同一个目录会以两个 host_family 各出现一条 —— 真机实测形状。安全命中按
+// (path, rule, line) 去重后挂**两枚**宿主芯片（spec §3.2 文件类跨宿主去重）。
+function skIndexByPathAndName(report) {
+  const byPath = {};
+  const byName = {};
+  const add = (m, k, v) => {
+    if (!k) return;
+    (m[k] = m[k] || []).push(v);
+  };
+  (report && report.skills || []).forEach((s) => {
+    const fam = s.host_family || s.host;
+    add(byPath, s.path, fam);
+    if (s.name && !(s.name in byName)) byName[s.name] = fam;
+  });
+  Object.keys(byPath).forEach((k) => {
+    byPath[k] = Array.from(new Set(byPath[k]));
+  });
+  return { byPath, byName };
+}
+
+// 一条证据（带 path 或 name）的宿主归属数组。path 多宿主时全部列出。
+function skHostsFor(index, path, name) {
+  if (path && index.byPath[path]) return index.byPath[path];
+  const byName = name ? index.byName[name] : null;
+  return byName ? [byName] : [];
+}
+
+// 安全/结构发现行的收集：安全按 (path, rule, line) 去重（REQ-SK-03 第 3 条
+// 的去重键；同一 SKILL.md 装在两个宿主只有一条），结构取 SV105/SV902 的
+// 每个 path。cited 只改排序（同严重度内沉底）+ 挂「疑似引用语境」标签，
+// 不降级、不隐藏（CLAUDE.md「Security heuristics sort, they never acquit」）。
+function skSecurityRows(payload) {
+  const index = skIndexByPathAndName(payload.report);
+  const sevRank = { critical: 0, high: 1, medium: 2, low: 3, none: 9 };
+  const rows = [];
+  const seen = {};
+  (payload.diagnostics || []).forEach((d) => {
+    if (!d.code.startsWith("SV5")) return;
+    ((d.evidence || {}).hits || []).forEach((h) => {
+      const key = [h.path, h.rule, h.line].join("\u0000");
+      if (seen[key]) return;
+      seen[key] = true;
+      rows.push({
+        kind: "security",
+        path: h.path, rule: h.rule, line: h.line,
+        severity: h.severity, cited: !!h.cited,
+        hosts: skHostsFor(index, h.path, h.skill),
+        rank: sevRank[h.severity] != null ? sevRank[h.severity] : 9,
+      });
+    });
+  });
+  // cited 的命中排同严重度末尾：先按严重度，再按 cited，再按路径稳定。
+  rows.sort((a, b) => a.rank - b.rank || (a.cited - b.cited)
+    || String(a.path).localeCompare(String(b.path)));
+  return rows;
+}
+
+function skStructureRows(payload) {
+  const index = skIndexByPathAndName(payload.report);
+  const rows = [];
+  const seen = {};
+  (payload.diagnostics || []).forEach((d) => {
+    if (d.code !== "SV105" && d.code !== "SV902") return;
+    ((d.evidence || {}).skills || []).forEach((s) => {
+      const key = s.path || s.name;
+      if (seen[key]) return;
+      seen[key] = true;
+      rows.push({
+        kind: "structure",
+        code: d.code,
+        path: key,
+        hosts: skHostsFor(index, s.path, s.name),
+      });
+    });
+  });
+  return rows;
+}
+
+// 页头白名单合计（REQ-SK-03 穷举，新增合计项要先改规格再改这里）：
+// 1) 已扫描 / 未检测到的宿主数；2) 去重 skill 目录数（规范化 path）；
+// 3) 安全发现按严重度（含 cited 计数）；4) 结构问题数。
+// 纯函数：vm 测试拿它与安全分区行数比对（§11.2「页头安全合计 = 行数」）。
+function skillHealthTotals(payload) {
+  const hs = (payload.report && payload.report.host_summaries) || {};
+  const scanned = [], missing = [];
+  SK_HOST_ORDER.forEach((h) => {
+    ((hs[h] || {}).skills_on_disk > 0 ? scanned : missing).push(h);
+  });
+  const dirs = {};
+  ((payload.report && payload.report.skills) || []).forEach((s) => {
+    const p = String(s.path || s.name || "");
+    dirs[p.replace(/\/+$/, "")] = true;
+  });
+  const rows = skSecurityRows(payload);
+  const structure = skStructureRows(payload);
+  const sevRank = { critical: 0, high: 1, medium: 2, low: 3, none: 9 };
+  const worst = rows.reduce((acc, r) => Math.min(acc, r.rank), 9);
+  const severityText = worst === 0 ? "critical"
+    : worst === 1 || worst === 2 ? "warning" : "none";
+  return {
+    scannedHosts: scanned,
+    missingHosts: missing,
+    dirCount: Object.keys(dirs).length,
+    securityRowCount: rows.length,
+    securityCited: rows.filter((r) => r.cited).length,
+    securitySeverity: severityText,
+    securitySeverityRank: worst,
+    structureCount: structure.length,
+  };
+}
+
+function skSeverityChip(sev) {
+  const cls = sev === "critical" || sev === "high" ? "sev critical"
+    : sev === "warning" || sev === "medium" ? "sev warning" : "sev";
+  return skEl("span", cls, sev);
+}
+
+// 一条诊断行：码 + 人话 + 宿主芯片 / 影响 / 行动 / caveat（spec §6.2）。
+// caveat 逐条原样渲染、不折叠不改写（§5.4）。
+function skDiagRow(d, hosts, extraEvidence) {
+  const row = skEl("div", "sk-row");
+  const head = skEl("div", "sk-row-head");
+  const code = skEl("span", "sk-code " + d.severity, d.code);
+  head.append(code);
+  head.append(skEl("span", "sk-row-impact", SK_CODE_ZH[d.code] || d.name || ""));
+  (hosts || []).forEach((h) => head.append(skHostChip(h)));
+  row.append(head);
+  if (d.impact) row.append(skEl("div", "sk-row-line", d.impact));
+  const action = skEl("div", "sk-row-line");
+  if (skNeedsJudgement(d.code)) {
+    action.append(skEl("span", "sk-judgement", "→ " + SK_NEED_JUDGEMENT));
+  } else if (d.recommendation) {
+    action.textContent = "→ 行动：" + d.recommendation;
+  }
+  row.append(action);
+  if (extraEvidence) row.append(extraEvidence);
+  (d.caveats || []).forEach((c) => {
+    row.append(skEl("div", "sk-row-caveat", "! " + c));
+  });
+  return row;
+}
+
+// hasRows=true → 隐藏「没有…」占位。参数按行数语义命名（此前按 isEmpty 传入
+// 却当 hasRows 用，四个分区的占位显隐整体反了 —— 2026-09-19 真机截图回归）。
+function skEmptyToggle(id, hasRows) {
+  const el = document.getElementById(id);
+  if (el) el.hidden = !!hasRows;
+}
+
+// 主渲染入口。payload = skills_doctor_report 的返回（doctor --json 载荷 +
+// desktop_meta）；hostFilter = "all" | 宿主 id。纯 DOM 组装，不取数、不计算
+// 载荷之外的任何量。
+function renderSkillHealth(payload, hostFilter) {
+  const meta = payload.desktop_meta || {};
+  const report = payload.report || {};
+  const index = skIndexByPathAndName(report);
+
+  // ── 页头：扫描时间 · run · 过期标记；复现命令（含 --host 与 run）─────
+  const scanMeta = document.getElementById("sk-scan-meta");
+  scanMeta.textContent = "";
+  if (meta.generated_at_ms) {
+    const dt = new Date(meta.generated_at_ms);
+    const hh = String(dt.getHours()).padStart(2, "0");
+    const mm = String(dt.getMinutes()).padStart(2, "0");
+    const ageH = (Date.now() - meta.generated_at_ms) / 3600000;
+    scanMeta.textContent = "扫描于 " + hh + ":" + mm
+      + (payload.run ? " · run " + payload.run : "")
+      + (ageH > 24 ? " · 可能过期" : "");
+  }
+  const repro = document.getElementById("sk-repro");
+  repro.textContent = "在终端复现：agent-vitals doctor --host "
+    + (hostFilter || "all") + (payload.run ? "（run " + payload.run + "）" : "");
+
+  // ── 宿主选择器灰显：未检测到的宿主注明「未检测到」，不隐藏（§4.2）──
+  const hostSel = document.getElementById("sk-host");
+  const totals = skillHealthTotals(payload);
+  Array.from(hostSel.options).forEach((opt) => {
+    if (opt.value === "all") return;
+    const missing = totals.missingHosts.includes(opt.value);
+    opt.disabled = missing;
+    opt.textContent = (SK_HOST_DISPLAY[opt.value] || opt.value)
+      + (missing ? "（未检测到）" : "");
+  });
+
+  // ── 页头合计（REQ-SK-03 白名单四类；单宿主视图整行隐藏，REQ-SK-04）──
+  const totalsEl = document.getElementById("sk-totals");
+  totalsEl.textContent = "";
+  totalsEl.hidden = hostFilter !== "all";
+  if (hostFilter === "all") {
+    const parts = [];
+    parts.push("已扫描 " + totals.scannedHosts.length + " 个宿主"
+      + (totals.missingHosts.length
+        ? "（" + totals.missingHosts.map((h) => SK_HOST_DISPLAY[h] || h).join("、") + " 未检测到）"
+        : ""));
+    parts.push(totals.dirCount + " 个 skill 目录");
+    if (totals.securityRowCount > 0) {
+      parts.push("安全 " + totals.securityRowCount + " 条（含引用语境 "
+        + totals.securityCited + "）");
+    } else {
+      parts.push("安全 0 条");
+    }
+    parts.push("结构 " + totals.structureCount);
+    totalsEl.textContent = parts.join(" · ");
+  }
+
+  // ── 1. 宿主摘要卡行（§6.1）────────────────────────────────────
+  // 单宿主视图（REQ-SK-04）只渲染该宿主的卡 —— 其余宿主不在本次扫描里，
+  // 给它们画「无发现」就是编数。
+  const cards = document.getElementById("sk-host-cards");
+  cards.textContent = "";
+  SK_HOST_ORDER.forEach((h) => {
+    if (hostFilter !== "all" && h !== hostFilter) return;
+    const hs = (report.host_summaries || {})[h];
+    if (!hs) return;
+    const detected = (hs.skills_on_disk || 0) > 0;
+    const card = skEl("div", "sk-card");
+    const head = skEl("div", "sk-card-head");
+    head.append(skEl("span", "sk-card-title", SK_HOST_DISPLAY[h] || h));
+    if (!detected) {
+      head.append(skEl("span", "chip", "未检测到"));
+      card.append(head);
+      card.append(skEl("div", "sk-card-line muted", "扫描器找过了：本机没有 " + (SK_HOST_DISPLAY[h] || h) + " 的 skills 目录。"));
+      cards.append(card);
+      return;
+    }
+    card.append(head);
+    // 预算条：分母来自该宿主自己的 description_budget_detail；没有预算的
+    // 宿主不画条，写明原因（§5.4），dsh 追加逐条截断提示。
+    const det = hs.description_budget_detail || {};
+    if (det.available && det.budget_chars) {
+      const pct = det.pct_used == null ? 0 : det.pct_used;
+      const bar = skEl("div", "sk-budget-bar");
+      const fill = skEl("div", "sk-budget-fill"
+        + (pct >= 100 ? " over" : pct >= 85 ? " warn" : ""));
+      fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+      bar.append(fill);
+      const line = skEl("div", "sk-card-line");
+      line.append(bar);
+      line.append(skEl("span", "sk-card-line",
+        skFmtNum(det.used_chars) + " / " + skFmtNum(det.budget_chars)
+        + " 字符（" + pct + "%）"));
+      line.append(skEl("span", "muted",
+        "分母：" + (SK_BUDGET_SOURCE_TEXT[det.source] || det.source)));
+      card.append(line);
+    } else {
+      const line = skEl("div", "sk-card-line muted",
+        SK_NO_BUDGET_TEXT + (h === "dsh" ? "（逐条截断见 SV004）" : ""));
+      card.append(line);
+    }
+    // 计数行：运行时核实为 null → 「—」（不冒充 0，§5.4）。
+    const counts = skEl("div", "sk-card-line");
+    counts.append(skEl("span", "sk-card-line",
+      "已加载 " + (hs.unique_discoverable_skills || 0)
+      + " · 磁盘 " + (hs.skills_on_disk || 0)));
+    if (hs.runtime_verified_loaded_skills != null) {
+      counts.append(skEl("span", "sk-card-line",
+        " · 运行时核实 " + hs.runtime_verified_loaded_skills));
+    } else {
+      counts.append(skEl("span", "sk-card-line muted", " · 运行时核实 —"));
+    }
+    card.append(counts);
+    // 该宿主的 warning/critical 计数（§6.1 卡底 ⚠/✕，点击 = 切到该宿主）。
+    // 全部视图：按诊断的宿主归属计数；单宿主视图：载荷里全部诊断都属于
+    // 该宿主（扫描就是 --host <h>）。
+    let warn = 0, crit = 0;
+    (payload.diagnostics || []).forEach((d) => {
+      const mine = hostFilter === "all" ? skDiagHosts(d, index).includes(h) : true;
+      if (!mine) return;
+      if (d.severity === "critical") crit += 1;
+      else if (d.severity === "warning") warn += 1;
+    });
+    const sevLine = skEl("div", "sk-card-line");
+    if (crit) sevLine.append(skEl("span", "sk-code critical", "✕ " + crit));
+    if (warn) sevLine.append(skEl("span", "sk-code warning", (crit ? " · " : "") + "⚠ " + warn));
+    if (!crit && !warn) sevLine.append(skEl("span", "muted", "无 critical / warning"));
+    sevLine.dataset.host = h;
+    card.append(sevLine);
+    cards.append(card);
+  });
+
+  // ── 2. 立即处理（critical + warning，CLI 已按 severity → 码排序）─────
+  const actList = document.getElementById("sk-act-now-list");
+  actList.textContent = "";
+  const actDiags = (payload.diagnostics || []).filter((d) => d.severity === "critical" || d.severity === "warning");
+  skEmptyToggle("sk-act-now-empty", actDiags.length > 0);
+  actDiags.forEach((d) => {
+    actList.append(skDiagRow(d, skDiagHosts(d, index)));
+  });
+
+  // ── 3. 安全与结构（§6.3）：行 = 去重发现；页头合计 = 行数 ────────────
+  const secList = document.getElementById("sk-security-list");
+  secList.textContent = "";
+  const secRows = skSecurityRows(payload);
+  const structRows = skStructureRows(payload);
+  skEmptyToggle("sk-security-empty", secRows.length > 0 || structRows.length > 0);
+  secRows.forEach((r) => {
+    const row = skEl("div", "sk-row");
+    const head = skEl("div", "sk-row-head");
+    head.append(skSeverityChip(r.severity));
+    head.append(skEl("span", "sk-row-impact", r.rule));
+    if (r.cited) head.append(skEl("span", "tag", "疑似引用语境（仅排序，不免检）"));
+    r.hosts.forEach((h) => head.append(skHostChip(h)));
+    row.append(head);
+    row.append(skEl("div", "sk-row-line", r.path + (r.line ? ":" + r.line : "")));
+    secList.append(row);
+  });
+  structRows.forEach((r) => {
+    const row = skEl("div", "sk-row");
+    const head = skEl("div", "sk-row-head");
+    head.append(skEl("span", "sk-code warning", r.code));
+    head.append(skEl("span", "sk-row-impact", SK_CODE_ZH[r.code] || "结构问题"));
+    r.hosts.forEach((h) => head.append(skHostChip(h)));
+    row.append(head);
+    row.append(skEl("div", "sk-row-line", r.path));
+    secList.append(row);
+  });
+
+  // ── 4. 冲突与重叠（§6.4）：按宿主分组，同宿主内才成对 ────────────────
+  const confList = document.getElementById("sk-conflicts-list");
+  confList.textContent = "";
+  const confByHost = {};
+  const confDiags = (payload.diagnostics || [])
+    .filter((d) => ["SV101", "SV102", "SV103"].includes(d.code));
+  confDiags.forEach((d) => {
+    ((d.evidence || {}).conflicts || []).forEach((c) => {
+      const h = c.host || "unknown";
+      (confByHost[h] = confByHost[h] || []).push({ kind: "conflict", c });
+    });
+  });
+  (payload.diagnostics || []).forEach((d) => {
+    if (d.code !== "SV401") return;
+    ((d.evidence || {}).pairs || []).forEach((p) => {
+      const h = p.domain || "unknown";
+      (confByHost[h] = confByHost[h] || []).push({ kind: "pair", p });
+    });
+  });
+  const confHosts = Object.keys(confByHost);
+  skEmptyToggle("sk-conflicts-empty", confHosts.length > 0);
+  confHosts.forEach((h) => {
+    confList.append(skEl("div", "sk-group-title", SK_HOST_DISPLAY[h] || h));
+    confByHost[h].forEach((item) => {
+      if (item.kind === "conflict") {
+        const c = item.c;
+        const line = skEl("div", "sk-row-line sk-pair");
+        const strong = skEl("strong", null, c.name + " 生效");
+        line.append(strong);
+        line.append(skEl("span", null, " ← " + (c.effective || {}).level + " · " + ((c.effective || {}).path || "")));
+        (c.shadowed || []).forEach((sh) => {
+          line.append(skEl("span", "muted", "；被遮蔽 " + sh.level + " · " + sh.path));
+        });
+        confList.append(line);
+      } else {
+        const p = item.p;
+        const line = skEl("div", "sk-row-line sk-pair");
+        line.textContent = p.a + " ↔ " + p.b
+          + "（共享词：" + (p.shared || []).join("、") + " · Jaccard " + p.jaccard + "）";
+        line.append(skEl("span", "sk-judgement", " 需你判断"));
+        confList.append(line);
+      }
+    });
+  });
+
+  // ── 5. 使用证据（§6.5）：只对提供触发数据的宿主列三列 ────────────────
+  const usageList = document.getElementById("sk-usage-list");
+  usageList.textContent = "";
+  const trigBlock = report.trigger_data || {};
+  const hsAll = report.host_summaries || {};
+  const triggerHosts = SK_HOST_ORDER.filter((h) => (
+    (hsAll[h] || {}).skills_on_disk > 0 && (hsAll[h] || {}).trigger_data === "available"));
+  skEmptyToggle("sk-usage-empty", triggerHosts.length > 0);
+  triggerHosts.forEach((h) => {
+    const group = skEl("div", "sk-group-title", SK_HOST_DISPLAY[h] || h);
+    usageList.append(group);
+    // 触发证据只在单宿主扫描时进入载荷（全部视图的顶层 trigger_data 恒
+    // 不可用 —— 那是「没采」，不是「没人用」，绝不冒充 0 条僵尸）。
+    const isThisPayload = (payload.host_selection === h);
+    if (!isThisPayload) {
+      usageList.append(skEl("div", "sk-row-line muted",
+        "触发证据按宿主扫描时才采集（全部视图不提供，不冒充 0）—— 选中该宿主重新扫描可见。"));
+      return;
+    }
+    const zombieDiag = (payload.diagnostics || []).find((d) => d.code === "SV201");
+    const dormantDiag = (payload.diagnostics || []).find((d) => d.code === "SV202");
+    const gate = (trigBlock || {}).zombie_min_age_days;
+    const zombies = ((zombieDiag || {}).evidence || {}).skills || [];
+    const tooNew = (trigBlock || {}).too_new_to_judge || [];
+    const line = skEl("div", "sk-row-line");
+    line.append(skEl("span", null, "零触发 " + zombies.length
+      + " · 休眠 " + (((dormantDiag || {}).evidence || {}).count || 0)));
+    if (tooNew.length) {
+      // too-new 必须带「N 天后可判定」，不得落进僵尸（§6.5）。
+      line.append(skEl("span", "muted", " · 太新不判 " + tooNew.length
+        + (gate ? "（满 " + gate + " 天可判定）" : "")));
+    }
+    usageList.append(line);
+  });
+  if (triggerHosts.length === 0) {
+    usageList.append(skEl("div", "sk-row-line muted", "此扫描没有可用的触发数据宿主。"));
+  }
+
+  // ── 6. 本次未评估（§6.6）：原样列出，不得省略 ────────────────────────
+  const naList = document.getElementById("sk-not-assessed-list");
+  naList.textContent = "";
+  (payload.not_assessed || []).forEach((n) => {
+    const row = skEl("div", "sk-row-line");
+    row.append(skEl("span", "sk-code info", n.code));
+    row.append(skEl("span", null, " " + (SK_CODE_ZH[n.code] || n.name)));
+    row.append(skEl("span", "muted", " —— " + n.reason));
+    naList.append(row);
+  });
+}
+
+// 扫描状态的 UI 切换（spec §7）。
+function setSkillsScanningUI(scanning, hasData) {
+  document.getElementById("sk-scanning").hidden = !scanning;
+  document.getElementById("sk-rescan").hidden = scanning || !hasData;
+  document.getElementById("sk-cancel").hidden = !scanning;
+  document.getElementById("sk-start").disabled = scanning;
+  if (hasData) {
+    document.getElementById("sk-empty").hidden = true;
+    document.getElementById("sk-snapshot").hidden = scanning;
+    document.getElementById("sk-compare").hidden = scanning;
+    document.getElementById("sk-export").hidden = scanning;
+  }
+}
+
+function showSkillsError(message) {
+  const el = document.getElementById("sk-error");
+  el.textContent = "扫描失败：" + message;
+  el.hidden = false;
+}
+
+// 取数 + 渲染。force=true（重新扫描按钮）绕过进程内缓存。
+async function loadSkillsDoctor(force) {
+  if (skState.scanning) return;
+  skState.scanning = true;
+  skState.error = false;
+  document.getElementById("sk-error").hidden = true;
+  setSkillsScanningUI(true, skState.loaded);
+  try {
+    const payload = await invoke("skills_doctor_report", {
+      host: skState.host,
+      force: !!force,
+      selfRoot: skState.selfRoot || null,
+      budget: skState.budget || null,
+    });
+    skState.data = payload;
+    skState.loaded = true;
+    skState.scanning = false;
+    setSkillsScanningUI(false, true);
+    renderSkillHealth(payload, skState.host);
+  } catch (e) {
+    skState.scanning = false;
+    skState.error = true;
+    setSkillsScanningUI(false, skState.loaded);
+    const msg = e && e.error && e.error.message ? e.error.message : String(e);
+    showSkillsError(msg);
+  }
+}
+
+// 与上次快照对比（spec §6.6 / §11.3 闭环）。diff 段只列新增项；「没有基线」
+// 是前置条件缺失，原样报出来，不冒充「没有变化」。
+async function compareSkillsSnapshot() {
+  const box = document.getElementById("sk-diff-result");
+  box.textContent = "";
+  try {
+    const diff = await invoke("skills_diff_latest");
+    const wrap = skEl("div", "panel");
+    wrap.append(skEl("div", "panel-title", "与上次快照的变化（只列新增）"));
+    const added = diff.added_skills || [];
+    const newSec = diff.new_security_findings || [];
+    const newly = diff.newly_judgeable || [];
+    if (!added.length && !newSec.length && !newly.length) {
+      wrap.append(skEl("div", "sk-row-line muted", "相对上次快照没有新增的 skill 或安全命中（这不等于没有变化——其它维度见终端 diff）。"));
+    }
+    if (added.length) {
+      wrap.append(skEl("div", "sk-group-title", "新增 skill " + added.length));
+      added.forEach((a) => {
+        const name = typeof a === "string" ? a : (a.name || JSON.stringify(a));
+        wrap.append(skEl("div", "sk-row-line", "＋ " + name));
+      });
+    }
+    if (newSec.length) {
+      wrap.append(skEl("div", "sk-group-title", "新增安全命中 " + newSec.length));
+      newSec.forEach((s) => wrap.append(skEl("div", "sk-row-line", "＋ " + (typeof s === "string" ? s : JSON.stringify(s)))));
+    }
+    if (newly.length) {
+      wrap.append(skEl("div", "sk-group-title", "跨过年龄闸、首次可判定 " + newly.length));
+    }
+    box.append(wrap);
+  } catch (e) {
+    const msg = e && e.error && e.error.message ? e.error.message : String(e);
+    const wrap = skEl("div", "panel");
+    wrap.append(skEl("div", "panel-title", "与上次快照对比"));
+    wrap.append(skEl("div", "sk-row-line muted", "没有可比的基线：" + msg
+      + "（没有基线 ≠ 没有变化——先「存为快照」，改动后再扫一次即可比较）"));
+    box.append(wrap);
+  }
+}
+
+// 设置页「统计与数据」的两项（self-root / 预算覆盖）：读后端设置落到
+// skState 并回填输入框；selfRoot 透传 --self-root；budget 为空 = CLI 默认
+// （tab 不自造阈值，覆盖只是高级透传，spec §9）。
+async function loadSkillsSettings() {
+  const s = await invoke("skills_scan_settings").catch(() => null);
+  skState.selfRoot = (s && s.self_root) || "";
+  skState.budget = (s && s.budget) || null;
+  const selfEl = document.getElementById("sk-self-root");
+  const budgetEl = document.getElementById("sk-budget-override");
+  if (selfEl) selfEl.value = skState.selfRoot;
+  if (budgetEl) budgetEl.value = skState.budget || "";
+}
+
+// 设置页两项的保存按钮：写后端 → 回执 → 若已扫过则提示重新扫描（参数变了
+// 缓存键也变，下次扫描自动生效，不静默重扫）。
+function wireSkillsSettings() {
+  const saveBtn = document.getElementById("sk-settings-save");
+  if (!saveBtn) return;
+  saveBtn.addEventListener("click", async () => {
+    const status = document.getElementById("sk-settings-status");
+    const selfRoot = (document.getElementById("sk-self-root") || {}).value || "";
+    const budgetRaw = (document.getElementById("sk-budget-override") || {}).value || "";
+    const budget = budgetRaw ? Number(budgetRaw) : null;
+    try {
+      await invoke("save_skills_scan_settings", {
+        selfRoot: selfRoot.trim(),
+        budget: budget != null && Number.isFinite(budget) ? Math.trunc(budget) : null,
+      });
+      skState.selfRoot = selfRoot.trim();
+      skState.budget = budget != null && Number.isFinite(budget) ? Math.trunc(budget) : null;
+      if (status) {
+        status.textContent = "已保存" + (skState.loaded ? " · 重新扫描后生效" : "");
+        status.hidden = false;
+      }
+    } catch (e) {
+      if (status) {
+        status.textContent = "保存失败：" + (e && e.error && e.error.message ? e.error.message : String(e));
+        status.hidden = false;
+      }
+    }
+  });
+}
+
+// 事件绑定（init 时调用一次；元素都在 DOMContentLoaded 之后存在）。
+// tab 首进、尚未扫描：显示「开始扫描」引导，不自动跑（spec §7）。
+function showSkillsIntro() {
+  document.getElementById("sk-empty").hidden = false;
+  document.getElementById("sk-rescan").hidden = true;
+  document.getElementById("sk-snapshot").hidden = true;
+  document.getElementById("sk-compare").hidden = true;
+  document.getElementById("sk-export").hidden = true;
+  document.getElementById("sk-scanning").hidden = true;
+}
+
+function initSkillsTab() {
+  wireSkillsSettings();
+  loadSkillsSettings();
+  document.getElementById("sk-start").addEventListener("click", () => loadSkillsDoctor(true));
+  document.getElementById("sk-rescan").addEventListener("click", () => loadSkillsDoctor(true));
+  document.getElementById("sk-cancel").addEventListener("click", async () => {
+    await invoke("skills_scan_cancel").catch(() => null);
+  });
+  document.getElementById("sk-host").addEventListener("change", (ev) => {
+    skState.host = ev.target.value || "all";
+    if (skState.loaded || skState.data) loadSkillsDoctor();
+  });
+  document.getElementById("sk-snapshot").addEventListener("click", async () => {
+    const btn = document.getElementById("sk-snapshot");
+    btn.disabled = true;
+    try {
+      await invoke("skills_snapshot_save");
+      const receipt = document.getElementById("sk-receipt");
+      receipt.textContent = "已存 · 下次扫描会显示变化";
+      receipt.hidden = false;
+    } catch (e) {
+      showSkillsError("存快照失败：" + (e && e.error && e.error.message ? e.error.message : String(e)));
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  document.getElementById("sk-compare").addEventListener("click", compareSkillsSnapshot);
+  document.getElementById("sk-export").addEventListener("click", async () => {
+    const pick = await invoke("skills_export_pick_path").catch(() => null);
+    if (!pick || pick.status !== "picked") return;
+    try {
+      await invoke("skills_export_redacted", { path: pick.path, selfRoot: skState.selfRoot || null });
+      const receipt = document.getElementById("sk-receipt");
+      receipt.textContent = "已导出（脱敏）：" + pick.path + "（不会自动上传）";
+      receipt.hidden = false;
+    } catch (e) {
+      showSkillsError("导出失败：" + (e && e.error && e.error.message ? e.error.message : String(e)));
+    }
+  });
 }
 
 document.addEventListener("DOMContentLoaded", init);

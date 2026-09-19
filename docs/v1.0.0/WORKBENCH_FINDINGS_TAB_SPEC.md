@@ -3,7 +3,7 @@
 **状态：** Draft v2（2026-09-19）。v1（2026-09-18）基于真机截图与 `workbench.html` / `workbench.js` / `agent-vitals-data` / `agent-vitals-domain` 源码核对；v2 并入十条自查修正（性能预算、排序口径、归组规则、新鲜度呈现、§3.4 拆分、改动面/验收对齐、待拍板清单）与 2026-09-19 实机抽样报告的结论（缓存抖动案例、马拉松会话、指纹跨链）。
 **日期：** 2026-09-19
 **目标版本：** v1.0.0-beta.3（桌面 app `apps/desktop/src-tauri`）
-**关联文档：** [Agent 执行问题分类图谱](../AGENT_EXECUTION_PROBLEM_TAXONOMY.md)（六层问题 × 覆盖状态，②/③每加一列先在那里登记）、[Skill 体检 tab 规格](WORKBENCH_SKILL_HEALTH_TAB_SPEC.md)（§0「并列不合并」白名单纪律、§1.4「不拖慢总览」性能先例沿用）、[设置页规格](BETA_1_SETTINGS_PAGE_SPEC.md)（预填/回执/一屏一个主 CTA 的表单纪律沿用）、[路线单位成本决策](ROUTE_UNIT_COST_DECISION_SPEC.md)、[审计 tab UX 复核](../AUDIT_TAB_UX_REVIEW.md)（第一轮「SV605 误报归零」的验收先例）、[可交互原型](FINDINGS_TAB_PROTOTYPE.html)（2026-09-01→18 真实 MCP 数据；URL 加 `#demo-open` 直达展开态，浏览器直接打开）
+**关联文档：** [Agent 执行问题分类图谱](../AGENT_EXECUTION_PROBLEM_TAXONOMY.md)（七层问题 × 覆盖状态，②/③每加一列先在那里登记）、[本地 Agent 数据访问与出境审计规格](FINDINGS_TRUST_EGRESS_MONITORING_SPEC.md)（Findings 2.0 新证据平面）、[Skill 体检 tab 规格](WORKBENCH_SKILL_HEALTH_TAB_SPEC.md)（§0「并列不合并」白名单纪律、§1.4「不拖慢总览」性能先例沿用）、[设置页规格](BETA_1_SETTINGS_PAGE_SPEC.md)（预填/回执/一屏一个主 CTA 的表单纪律沿用）、[路线单位成本决策](ROUTE_UNIT_COST_DECISION_SPEC.md)、[审计 tab UX 复核](../AUDIT_TAB_UX_REVIEW.md)（第一轮「SV605 误报归零」的验收先例）、[可交互原型](FINDINGS_TAB_PROTOTYPE.html)（2026-09-01→18 真实 MCP 数据；URL 加 `#demo-open` 直达展开态，浏览器直接打开）
 
 ---
 
@@ -65,12 +65,23 @@
 
 ## 3. 三分区设计
 
+### 3.0 本月发现（数据挖掘摘要，2026-09-19 用户反馈落地：「findings 应该是发现问题，类似数据挖掘报告」）
+
+tab 首屏第一区。每条结论 = 一句断言 + 它依据的数字 + 能带来什么（收益/动作），全部由**确定性规则**从②的数据推导（`decision_matrix::dig_findings`：中位数偏离、跨度阈值、币种一致性——**规则生成，非 LLM**，区头明示）。后端只出结构化字段（kind + 数字），中文句子由前端模板组装（与 `remedy_for`→labels 同一条「后端出数、前端出话」纪律）。首批三条规则，每条至多一条、全量上限 4 条：
+
+1. **cost_outlier**：同币种内单会话成本 > 2× 中位 且缓存命中 < 50%，且存在命中 ≥ 90% 的更便宜对照行（修复方案的同币种证据）——缺对照不报，不凭空宣称"该换谁"。收益 = 每会话差 × 会话数。
+2. **marathon**：贡献 Top 会话跨度 > 24h 取最长——带 span/token/失败数与"无单会话熔断"的待拍板回指。
+3. **currency_split**：可计价行币种不唯一 → 排序禁用的口径失真，动作直通"明确计费方式"。
+
+②行内同步挂异常旗（与后端同判据的展示层）：outlier 行「单会话成本异常」、低命中行「命中 N%」。条件不满足时规则**诚实缺席**（空态文案"本月没有触发结论规则的异常"），有测试钉住。
+
 ### 3.1 待办（行动面）
 
 - **准入门槛**（四条全满足才进）：动作明确、表单预填完成、点击后有可见结果、可撤销。
 - 首批成员全部是已验证流程：PRICE_COVERAGE（补价卡，预填 provider/model）、ROUTE_UNCONFIRMED（声明归属）、预算触顶、source_failure（查看数据源）、billing_candidate/group（明确计费方式）。
 - **SV6xx 一律不进**。行为规则命中是"发生了什么"的事实陈述，不是"该做什么"的任务。
 - 每项展示：一句话（发生了什么 + 影响多少）+ 主按钮（预填跳转）+ 状态迁移（稍后/已解决/不适用）。
+- **预算待办必须带归因**（2026-09-19 用户反馈：只给"设置预算范围"没回答"为什么超"）：卡片正文列出同币种已计价部分的前三大组合（各带特征：低缓存命中/马拉松会话），混合币种如实标注未折算未计入；主按钮是「看超在哪」（定位②对比面），预算设置降为次按钮。行为证据行**只读**——状态迁移只保留给有待办语义的组（§8：行为命中没有"解决"语义）。
 - 状态迁移后显示计数反馈：「已处理 1 项，待办 12 → 11」。
 
 ### 3.2 模型 × Harness 对比（决策面）
@@ -86,7 +97,7 @@
 
 现分组表（`renderFindings` 的规则表 + 明细表）整体降级到这里：从②行或「查看全部证据」入口进入，severity/rule 筛选沿用。它回答"这个数字是哪些命中构成的"，不承担首屏。**这是唯一允许走重路径（扫会话日志）的分区**，且仅在显式展开时（§1.6）。
 
-**下钻终点是原始会话（脱敏轨迹）**。链条：②行展开 → 贡献 Top-N 会话（懒加载，按 token 贡献排序，数据面见 §5.3）；③证据行 → 会话详情（`workbench.js` 现有 issue → `showSession` 跳转路径，接进本链即可）；会话详情内可再进 TraceGraph 轨迹视图。服务端能力已备（`sessions_search` / `session_detail` / `session_trace`），本规格只做接线，不新增存储。**v3 修订（2026-09-19 数据留存与出口政策）**：「原始」的边界从「永不是原始 JSONL」改为——**MCP/导出两个服务面永不携带原文**（锚点、excerpt 字段一个字节不出）；**本地呈现层可经锚点查看源日志原文段落**（呈现时读取、永不落库、view 只读不脱敏——对用户本可打开的文件做界面级遮蔽是假安全）。锚点 = `source_id + native_event_id + 行号/偏移`（自校验，漂移按 native id 重扫），读取命令是 CLI 本地面，不注册进 MCP 工具面。
+**下钻终点是原始会话（脱敏轨迹）**。链条：②行展开 → 贡献 Top-N 会话（懒加载，按 token 贡献排序，数据面见 §5.3）；③证据行 → 会话详情（`workbench.js` 现有 issue → `showSession` 跳转路径，接进本链即可）；会话详情内可再进 TraceGraph 轨迹视图。服务端能力已备（`sessions_search` / `session_detail` / `session_trace`），本规格只做接线，不新增存储。**「原始」= 脱敏 workflow timeline + 轨迹图，永不是原始 JSONL / 调用参数 / 原生会话 id**（session_ref 是不透明引用）——与 issues_summary 的 code-aware redaction 同一条隐私边界。
 
 **轨迹图的已知盲区要如实呈现**（2026-09-19 实机核验）：`branch_state` 恒 Live（废弃分支与真实路径不可区分——恰是浪费分析最需要的信号）、`ModelChange` 节点不产出（多模型会话的切换时点只能从 usage 节点侧面看）、turn 级成败无信号源。UI 不得暗示图比数据知道得更多。
 
@@ -94,10 +105,10 @@
 
 轨迹的编号叙事（turn-0…turn-N）对用户太抽象。补一个**本地 workbench 命令** `session_narrative(session_ref)`：复用 `source_paths_for_session`（`trace_service.rs:137`）的现场路径解析 + 适配器重读（不存 path、不新建定位机制；适配器已有 `is_pure_text_user` 等 query 识别信号，只是未带出文本），每 turn 提取用户 query 首条与 AI 回复关键信息（各截断 ~120 字）。
 
-三条信任边界（v3 修订，2026-09-19 政策）：
-1. **摘录已进库**（V16 `session_excerpts`：摄取时按 spec §3 算法生成，scrub+截断，claude 首宿主已产）——叙事层改为**读库为主、源在时锚点增强**；宿主轮换掉源日志后库内摘录仍可回答"这会话在干什么"（轮换悬崖的修复面）。库内摘录永不进 MCP/导出面；
+三条信任边界：
+1. **不进 authority 库**——摘录是呈现时生成的，库保持"计费/行为事实"纯度，不存对话文本；
 2. **不进 MCP 面**——脱敏纪律约束的是 agent 消费面（issues_summary"never expose raw errors or invocation arguments"）；本地 UI 给用户看自己的数据不构成泄露。两个信任层，分开处理；
-3. **诚实降级**——截断文件/非纯文本 turn 显示"该 turn 无可读摘要"，不静默跳过；源已过期的锚点显示「源已过期，仅存库内投影」。
+3. **诚实降级**——截断文件/非纯文本 turn 显示"该 turn 无可读摘要"，不静默跳过。
 
 语义级内容（如"这 turn 在重构代码"的判断）若未来需要，只允许出现在本层（本地、呈现时、可弃），永不落库——与 §4.9 任务画像的 `inferred` 纪律同界。`TraceNodeType::UserTask` 进图（方案 B）留 P2+ 另议，走 spec §2.1 修订。
 
@@ -140,7 +151,8 @@
 ## 7. 分期
 
 - **P1（小，先行）**：remedy 补全 + 待办/证据两分区 + 状态计数反馈 + 新鲜度条。改动面：`issues.rs` 一个 match、workbench.js 渲染重排、`data_status` 轻量接入。**首屏走 authority 聚合，重路径只留给③**。
-- **P2**：决策面对比表（`decision_matrix` IPC + 表格渲染，含贡献 Top 会话懒加载与行为标记宿主级聚合）；指纹跨链展示。
+- **P2**：决策面对比表（`decision_matrix` IPC + 表格渲染，含贡献 Top 会话与失败数、查看轨迹入口、撞限流列（每会话均值）、行为标记宿主级聚合）。
+- **P2 已显式推后至 P3**（2026-09-19 实施时记录）：指纹跨链展示（需要 invocation_fingerprint→组合的宿主级对齐，多模型会话归组歧义同 §4.7）；Top 会话严格懒加载（当前首查一次性带回每组合 3 条，性能无碍）。
 - **P3**：排序启用（依赖待办④统一币种）、③证据行 → 会话详情/TraceGraph 下钻接线、`session_narrative`、任务画像（§9.5）评估、跨度近似升级真耗时口径的评估。
 
 ## 8. 明确不做

@@ -393,15 +393,26 @@ def render_doctor(out, args):
     ds = diagnose(out, args.split_threshold, args.min)
 
     if args.json:
-        Path(args.json).write_text(json.dumps({
+        payload = {
             "schema_version": out.get("schema_version"),
             "run": run_id(out),
             "host_selection": out.get("host_selection"),
             "diagnostics": ds,
             "not_assessed": [{"code": c, "name": n, "reason": why}
                              for c, n, why in NOT_ASSESSED],
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
-        print("Wrote %s: %d diagnostics" % (args.json, len(ds)))
+        }
+        # --with-report：扫描报告本体并入同一份载荷（桌面 Skill tab 一次扫描
+        # 同时拿 SV 码与 host_summaries，免第二遍扫描）。与 Rust
+        # `doctor --with-report` 逐字段对齐。
+        if getattr(args, "with_report", False):
+            payload["report"] = out
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        if args.json == "-":
+            # 与主扫描 `--json -` 同语义：stdout 是给调用方的管道。
+            print(text)
+        else:
+            Path(args.json).write_text(text, encoding="utf-8")
+            print("Wrote %s: %d diagnostics" % (args.json, len(ds)))
         return
 
     b = out.get("description_budget", {}) or {}
