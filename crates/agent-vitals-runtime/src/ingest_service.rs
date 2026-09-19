@@ -37,9 +37,13 @@ use serde_json::Value;
 pub const FACT_HOSTS: [&str; 4] = ["claude-code", "codex", "dsh", "workbuddy"];
 
 /// 单宿主 facts 文件路径。未知宿主 → None（调用方报错，不猜）。
+/// 插件宿主（`plugin:<slug>`）经 slug 校验后落 `plugin-<slug>.jsonl`——
+/// 路径穿越防护语义保留（slug 词表闸在 `host_registry::plugin_facts_stem`，
+/// HOST_MANIFEST_DSL_SPEC §7.2）；`plugin-` 前缀的文件名空间官方宿主永不占用。
 pub fn facts_path(data_home: &Path, host: &str) -> Option<PathBuf> {
     if !FACT_HOSTS.contains(&host) {
-        return None;
+        let stem = crate::host_registry::plugin_facts_stem(host)?;
+        return Some(data_home.join("facts").join(stem));
     }
     Some(data_home.join("facts").join(format!("{host}.jsonl")))
 }
@@ -120,9 +124,10 @@ pub fn ingest_facts(data_home: &Path, facts: &[Value]) -> Result<IngestReport, S
             }
             continue;
         };
-        if !FACT_HOSTS.contains(&host) {
+        if !FACT_HOSTS.contains(&host) && facts_path(data_home, host).is_none() {
             return Err(format!(
-                "unknown host `{host}` (known: {FACT_HOSTS:?}) — refusing to invent a facts file"
+                "unknown host `{host}` (known: {FACT_HOSTS:?} + validated \
+                 plugin:<slug>) — refusing to invent a facts file"
             ));
         }
         grouped.entry(host).or_default().push(fact);
@@ -225,7 +230,25 @@ pub fn enforce_retention(data_home: &Path, current_month: &str) -> Result<Value,
         crate::sql_sync::RETENTION_MONTHS_MINUS_ONE,
     );
     let mut out = serde_json::Map::new();
-    let hosts: Vec<String> = FACT_HOSTS.iter().map(|h| h.to_string()).collect();
+    let mut hosts: Vec<String> = FACT_HOSTS.iter().map(|h| h.to_string()).collect();
+    // 插件宿主：磁盘驱动（比 registry 扫描更稳——manifest 被删后历史文件
+    // 仍要能被清理）；文件名反查过同一 slug 闸（§7.1 #3）。
+    if let Ok(entries) = std::fs::read_dir(data_home.join("facts")) {
+        let mut plugin_hosts: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                let stem = name.strip_prefix("plugin-")?.strip_suffix(".jsonl")?;
+                if crate::host_registry::plugin_facts_stem(&format!("plugin:{stem}")).is_some() {
+                    Some(format!("plugin:{stem}"))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        plugin_hosts.sort();
+        hosts.append(&mut plugin_hosts);
+    }
     for host in hosts {
         let Some(path) = facts_path(data_home, &host) else {
             continue;

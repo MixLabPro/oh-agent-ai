@@ -54,6 +54,8 @@ pub mod sync_control;
 pub mod trace_service;
 pub mod sql_sync;
 pub mod sync_service;
+pub mod host_registry;
+pub mod plugin_ingest;
 pub mod takeover;
 
 /// 进程级环境变量锁 —— `state` / `budget` / `takeover` / `summary` 的

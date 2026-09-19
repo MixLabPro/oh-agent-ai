@@ -36,6 +36,14 @@ pub use hosts::dsh::sessions::{
 };
 pub use hosts::workbuddy::sessions::evidence as workbuddy_evidence;
 
+// 自描述插件宿主（HOST_MANIFEST_DSL_SPEC）：manifest 校验/受限正则子集、
+// recipe 求值与 Candidate DTO 都是纯面；文件发现是 I/O，随 `sources` feature。
+// 喉咙（Candidate → UsageFact、billing 锁、provenance）在 runtime。
+pub use hosts::generic::{candidate as generic_candidate, manifest as generic_manifest,
+    recipe as generic_recipe};
+#[cfg(feature = "sources")]
+pub use hosts::generic::sources::discover as generic_discover;
+
 // D4/D5：宿主会话读取器（I/O，`sources` feature）。二进制 / runtime 经这些扁平
 // 别名取；纯构建 / wasm 关 feature 时它们不存在。
 // v0.9 Stage A：UsageFact emitter 归位（R4 §5.2 scope gap）——wire → fact 的

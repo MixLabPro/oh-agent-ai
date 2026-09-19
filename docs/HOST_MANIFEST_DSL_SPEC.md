@@ -1,7 +1,7 @@
 # HOST_MANIFEST_DSL_SPEC — 自描述宿主（Manifest + Recipe/DSL/Adapter）设计规格
 
-- 版本：v0.3（2026-09-19）
-- 状态：修订待复审。本文件是实施前的抢先设计稿；附录 C 的耦合点清单来自
+- 版本：v0.3.1（2026-09-19）
+- 状态：定稿候选。本文件是实施前的抢先设计稿；附录 C 的耦合点清单来自
   2026-09-19 对当前代码的实测勘察，行号以 `main` 为准。
 - 关联：`AGENT_EXECUTION_PROBLEM_TAXONOMY.md`（行为面为什么不开放的依据）、
   `WORKBENCH_FINDINGS_TAB_SPEC.md`（插件行进入决策矩阵后的展示契约）、
@@ -9,6 +9,15 @@
 
 **变更记录**
 
+- v0.3.1（2026-09-19）：复审补丁（实施前定稿）。① §4.3 format guard 补齐
+  「新发现文件零 target」情形：已安装 revision 下新发现的文件若零
+  target/emit → 计 skip 并在报告标黄，不整文件失败（只有存在历史基线的
+  文件才做突降 drift 检查）；② §4.4 重复 event key 区分：候选行**字节级
+  相同** → 折叠计 duplicate 如实报数，内容不同 → 整文件失败（不静默吞掉
+  语义不变）；③ §6.3 补 `plugin_fact_revisions` 随 13 个月 retention 同步
+  清理；④ §9.3 adapter 行消息 `fact` 更名 `candidate`，与 §9.1 DTO 对齐；
+  ⑤ §10 P-1 加样本数放宽条款（宿主数不足时按文件/行型多样性折算并如实
+  报告）。
 - v0.3（2026-09-19）：**recipe-first**。P0 默认路径改为内置、版本化的
   `recipe` + 纯点路径覆写，用户 manifest 不执行代码；脚本 adapter 降为
   P1.5 开发者模式，必须先解决能力沙箱与离线承诺。新增 `CandidateUsageV1 →
@@ -174,16 +183,26 @@ recipe 先用内置 discriminator 判断记录是否属于本行型：
 
 禁止用“主数量为 null 就 skip”掩盖 schema drift。`skip` 与 `invalid` 分开计数，
 报告最多保留 8 条脱敏问题；只有本地 private preview 可临时显示原始上下文。
-每文件还有 format guard：非空 JSON 记录文件若零 target/零 emit，首装 dry-run
-拒绝；已安装 revision 若相对历史基线突降为零，整文件报 schema-drift，不推进
+每文件还有 format guard：非空 JSON 记录文件若零 target/零 emit，**首装**
+dry-run 拒绝；**已安装 revision 下新发现的文件**若零 target/emit → 计
+skip 并在报告标黄（宿主更新新增兄弟日志类型是正常演化，不 brick 摄入）；
+已安装 revision 若相对历史基线突降为零，整文件报 schema-drift，不推进
 checkpoint。discriminator 优先使用事件类型等独立字段；不得仅等价于主 token
-路径存在。
+路径存在。P0 判据实现为「主数量槽位有效路径的**父容器**是 JSON object」，
+两条边界钉死：① 容器存在但不是 object（含显式 null / 数组）→ 一律
+`skip(not_target_record)`——形状漂移按无账可记处理，由 format guard 的
+计数监控兜底，不升 invalid；② 主数量槽位覆写为顶层路径（无 `.`）时，父
+容器判据退化为「记录本身是 object」——作者选这种映射等于宣告全文件皆
+目标行型，缺失字段会洪泛成 invalid，这是作者契约而非缺陷。canonical
+event_key 的字符串长度前缀一律是 **UTF-8 字节数**（非码点数）。
 
 ### 4.4 `event_key`
 
 `event_key.paths` 提取的值按类型标记、长度前缀和固定顺序做 canonical encoding，
-生成 `source_event_id`。任一路径缺失/null → matched record 为 invalid；同一
-session 内重复 `source_event_id` → 整文件失败，不静默吞掉。最终 `fact_id` 仍由
+生成 `source_event_id`。任一路径缺失/null → matched record 为 invalid。同一
+session 内重复 `source_event_id` 分两类：候选行**字节级相同**（宿主崩溃重写
+同一记录是真实场景）→ 折叠计 `duplicate` 如实报数（与 unaccounted 哨兵同一
+惯例）；内容不同（同 id 不同载荷）→ 整文件失败，不静默吞掉。最终 `fact_id` 仍由
 `build_usage_fact(machine_namespace, host, source_profile, native_session_id,
 source_event_id, observation_kind)` 在本体侧生成，manifest 无权提供或覆盖。
 
@@ -233,11 +252,13 @@ path    := IDENT ("." IDENT | "[" integer "]")*  // 不存在的键/越界 → n
    官方审计」。manifest 无权声明订阅档。
 2. **币种**：P0 阶段插件行不参与金额声明（成本由 pricing catalog join 得出
    estimate）；多币种处理沿用决策矩阵 §4.6 既有规则。
-3. **Provenance**：安装产生不可变 `plugin_revision_id`，绑定
-   `manifest_sha256`、recipe 名称/版本及本体版本；`plugin_revisions` 与
-   `plugin_fact_revisions(fact_id, revision_id)` 持久化事实关联，`adapter_version`
-   只写 recipe 代码版本，不挪作 revision 外键。批报告不能成为唯一 provenance；
-   redacted export/MCP 不暴露本地路径或原文。
+3. **Provenance**：**P0 为逐行 provenance**——每条事实携带
+   `source_revision`（manifest 字节 sha256 前 16 hex）与 `adapter_version`
+   （recipe 代码 id），存于 facts JSONL 与 `usage_facts.source_profile`
+   邻近的身份面；批报告不能成为唯一 provenance。`plugin_revisions` /
+   `plugin_fact_revisions(fact_id, revision_id)` 两张关联表**P1 落地**
+   （随桌面导入向导的 revision 管理一起），届时关联行随 13 个月 retention
+   与 facts 文件同步清理。redacted export/MCP 不暴露本地路径或原文。
 4. **行数上限**：单文件默认 50_000 条目标记录、封顶 500_000；超限 → 整文件
    失败且不推进 checkpoint、不提交部分事实。P0 不做分页，避免“截前 N 行”随
    输入顺序变化造成永久漏账。
@@ -297,7 +318,7 @@ crates/agent-vitals-runtime/src/host_registry.rs
 | hosts crate | 新增 `generic/manifest.rs`、`discover.rs`、`recipe.rs`、`candidate.rs`；DSL `expr.rs` 缓建，adapter 不进 P0 | 中 |
 | runtime | `host_registry.rs` + Candidate→UsageFact 喉咙 + sync 既有双写编排接入 + billing 锁 + revision provenance | 中→大 |
 | CLI | `plugin-list` / `plugin-validate --manifest <p>`（含 dry-run 与 fact_id 稳定性检查）/ `plugin-ingest --manifest <p> [--write]`。**不动** `main.rs:65` 的 `--host` 枚举（那是 sessions 扫描 = 行为面） | 小 |
-| data crate | `usage_facts.host` 无需改；新增不可变 plugin revision 元数据及 fact 关联落点，并更新 schema/migration/export/rebuild | 中 |
+| data crate | `usage_facts.host` 无需改；**P0 零 schema 变更**（provenance 走事实行 `source_revision`）；revision 关联表随 P1 导入向导落地并更新 export/rebuild | 无→中 |
 | Python 对等 | `generic_manifest.py` + `generic_recipe.py` + Candidate 映射 + CLI；与 Rust 共用 fixtures 做字节差分，不宣称天然 parity | 中 |
 | 桌面 UI | workbench.js 宿主名映射兜底：`plugin:<slug>` → manifest.display.name +「插件·未审计」徽标；`SK_HOST_ORDER` 官方序后追加。P1 加导入向导 IPC：`plugin_preview` / `plugin_import` | 小→中 |
 | golden | `golden/host-generic-zcode.json`：manifest + fixture → 分类计数/Candidate/UsageFact/落库行；另有 recipe 边界 fixtures | 小→中 |
@@ -372,7 +393,8 @@ declarations 不得把 `plugin:%` 改成 subscription；必须有 SQL/MCP 回归
 ### 9.3 Adapter 调用契约（P1.5，未承诺）
 
 adapter 若未来开放，只能在默认关闭的开发者模式运行，输出逐行带类型的
-`fact` / `skip` / `invalid` / `summary` 消息，不能用 stderr 承载机器契约。
+`candidate` / `skip` / `invalid` / `summary` 消息（与 §9.1 CandidateUsageV1
+对齐，不与正式 UsageFact 混名），不能用 stderr 承载机器契约。
 发现仍由本体完成；子进程只接收单个已授权文件路径。
 
 - 必须证明网络禁止、只读文件白名单、净化环境与 CWD；
@@ -390,9 +412,12 @@ adapter 若未来开放，只能在默认关闭的开发者模式运行，输出
 - **P-1（recipe feasibility spike）**：不少于 10 个真实宿主的脱敏 fixture；
   定义 CandidateV1、三态、event key、首批 recipe 与双语言 golden；只 dry-run，
   不写 authority。按宿主数和有效 usage 行数报告 recipe-only 覆盖率，目标 ≥80%。
+  样本放宽条款：真实宿主数不足 10 时，允许以文件数/行型多样性折算并**如实
+  报告折算口径**，不得为凑数虚构样本。
 - **P0（安全声明式导入）**：P0-only schema + recipe 注册表/路径覆写 + 正式
-  UsageFact 映射 + revision provenance + 既有 sync 双写编排 + CLI 三命令 +
-  zcode recipe 试点。不执行 adapter，不实现自动样本推断 UI。
+  UsageFact 映射 + 逐行 provenance（`source_revision` = manifest sha256；
+  revision 关联表在 P1）+ 既有 sync 双写编排 + CLI 三命令 + zcode recipe
+  试点。不执行 adapter，不实现自动样本推断 UI。
   AC：① zcode 九月真实 rollout 经 `plugin-ingest --write` 进
   `facts/plugin-zcode.jsonl` 且重跑零追加；② 决策矩阵出现 ZCode 行且带
   `metered_estimate` + 未审计口径；③ Python 兼容实现双跑 golden 字节一致；

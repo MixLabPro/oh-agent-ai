@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "host-manifest-v1.json",
+  "title": "Agent Vitals plugin host manifest (v1, P0)",
+  "description": "Self-describing plugin host manifest. P0 accepts recipe+overrides only; records (DSL, P2) and adapter (sandboxed script, P1.5) are rejected at load time by version/capability negotiation, not by this schema.",
+  "type": "object",
+  "required": [
+    "manifest_version",
+    "slug",
+    "display",
+    "discovery",
+    "source",
+    "session",
+    "recipe",
+    "event_key"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "manifest_version": { "const": 1 },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}$",
+      "not": { "anyOf": [
+        { "enum": [
+          "claude-code", "codex", "dsh", "workbuddy", "openclaw", "hermes"
+        ] },
+        { "pattern": "^plugin-" }
+      ] }
+    },
+    "display": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 24 }
+      }
+    },
+    "discovery": {
+      "type": "object",
+      "required": ["roots", "include"],
+      "additionalProperties": false,
+      "properties": {
+        "roots": {
+          "type": "array", "minItems": 1, "maxItems": 16,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "include": {
+          "type": "array", "minItems": 1, "maxItems": 16,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["format"],
+      "additionalProperties": false,
+      "properties": {
+        "format": { "enum": ["jsonl"] }
+      }
+    },
+    "session": {
+      "type": "object",
+      "required": ["from", "pattern"],
+      "additionalProperties": false,
+      "properties": {
+        "from": { "const": "filename" },
+        "pattern": {
+          "type": "string",
+          "description": "Regex restricted to the portable common subset: literals, char classes, anchors, groups; exactly one named group (?P<id>...). Look-around and backreferences are rejected at install time."
+        }
+      }
+    },
+    "recipe": {
+      "enum": [
+        "request-usage-anthropic-v1",
+        "request-usage-openai-total-input-v1",
+        "request-usage-four-bucket-v1"
+      ]
+    },
+    "overrides": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "event_ts", "model_raw", "provider_raw",
+          "uncached_input_tokens", "total_input_tokens",
+          "cache_read_tokens", "cache_write_tokens",
+          "output_tokens", "provider_request_id"
+        ]
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$",
+        "description": "Pure dotted path into the source record. No expressions, functions, array indices, wildcards, or fallbacks."
+      }
+    },
+    "event_key": {
+      "type": "object",
+      "required": ["paths"],
+      "additionalProperties": false,
+      "properties": {
+        "paths": {
+          "type": "array", "minItems": 1, "maxItems": 8,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$"
+          }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_rows_per_file": {
+          "type": "integer", "minimum": 1, "maximum": 500000
+        }
+      }
+    },
+    "billing": {
+      "type": "object",
+      "required": ["policy"],
+      "additionalProperties": false,
+      "properties": {
+        "policy": { "const": "lock:metered_estimate" }
+      }
+    }
+  }
+}

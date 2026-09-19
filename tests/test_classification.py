@@ -74,6 +74,8 @@ PY_AGENT_FAMILY = {
     "r2a", "route_quality", "sessions_sql", "skill", "state", "subagent", "takeover", "trajectory", "usage",
     "usage_fact", "waste", "workbuddy_evidence", "workbuddy_session_audit",
     "workbuddy_usage_fact",  # spec §9E.5 E4a
+    # HOST_MANIFEST_DSL_SPEC §8.1：generic 插件宿主 twin（validate 只读面）。
+    "generic_manifest", "generic_plugin", "generic_recipe",
 }
 RS_AGENT_FAMILY = {
     "claude_cost",

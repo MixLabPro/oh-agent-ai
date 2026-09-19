@@ -464,13 +464,53 @@ enum Cmd {
         #[arg(long)]
         write: bool,
     },
+    /// List validated plugin hosts (HOST_MANIFEST_DSL_SPEC §7.2 registry).
+    /// Read-only; broken manifests are reported, never fatal (degradation
+    /// isolation). Python mirror lands with the parity task.
+    PluginList,
+    /// Dry-run a plugin manifest (§6.5 首装仪式): discovery + extraction +
+    /// fact_id stability + format guard. No writes. With --file, feed fixture
+    /// files directly (golden/parity mode); otherwise discovery per manifest.
+    /// Mirrors Python `scan.py plugin-validate`.
+    PluginValidate {
+        /// Path to hosts.d/<slug>/manifest.json
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Optional explicit files (fixture mode); discovery otherwise
+        #[arg(long = "file")]
+        files: Vec<PathBuf>,
+        /// machine_namespace for fact identity (fixture mode requires it too)
+        #[arg(long)]
+        machine_namespace: Option<String>,
+        /// Print the full report as JSON to stdout
+        #[arg(long = "json")]
+        rows_json: bool,
+    },
+    /// Ingest a plugin host (§6.5): validate gate -> facts JSONL (exactly-once)
+    /// -> authority dual-write. Rust-only writer (Python grows no writer, same
+    /// rule as workbuddy-usage-facts --write). Rerun-safe on every stage.
+    PluginIngest {
+        /// Path to hosts.d/<slug>/manifest.json (slug must match dir name)
+        #[arg(long)]
+        manifest: PathBuf,
+        /// machine_namespace component of SessionKey — required (spec §9)
+        #[arg(long)]
+        machine_namespace: Option<String>,
+        /// Persist through ingest service + authority
+        #[arg(long)]
+        write: bool,
+        /// Print the full report as JSON to stdout
+        #[arg(long = "json")]
+        rows_json: bool,
+    },
     /// Replay a WorkBuddy home (`~/.workbuddy`) into UsageFact rows — one per
     /// generation span with usage, keyed by trace.sessionId (E4a, spec §9E.5).
     /// Buckets map like Codex's OpenAI-format usage: uncached = prompt − cached,
     /// cache_read = cached, cache_write = 0, output = completion. Provider/route
-    /// are left unresolved on purpose (platform-credit vs self-configured vs
-    /// promo track is per-request and not observable locally, spec §2.1).
-    /// Traces without a sessionId are counted as `unattributed`, never emitted.
+    /// attribution is resolved via the current endpoint hint and left
+    /// unresolved on purpose (platform-credit vs self-configured vs promo
+    /// track is per-request and not observable locally, spec §2.1). Traces
+    /// without a sessionId are counted as `unattributed`, never emitted.
     /// Without --write this is an in-memory, read-only diagnostic, byte-for-byte
     /// mirror of Python `scan.py workbuddy-usage-facts --json -`.
     WorkbuddyUsageFacts {
@@ -2664,6 +2704,100 @@ session_store={store} fold={fold}"
     // event id 按 rollout stem 命名空间——同 stem 的 byte-identical 复本去重、
     // 异 stem 永不误合并。与 Python `scan.py codex-usage-facts --json -` 字节相等
     // （parity 钉测在 tests/test_codex_usage_fact.py）。
+    if let Some(Cmd::PluginList) = &args.cmd {
+        let payload = agent_vitals_runtime::plugin_ingest::plugin_list(
+            &agent_vitals_runtime::home::data_home(),
+        );
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+        return;
+    }
+
+    if let Some(Cmd::PluginValidate {
+        manifest,
+        files,
+        machine_namespace,
+        rows_json,
+    }) = &args.cmd
+    {
+        let ns = machine_namespace.clone().unwrap_or_default();
+        let home = std::env::var("HOME").unwrap_or_default();
+        let result = agent_vitals_runtime::plugin_ingest::run_plugin(
+            manifest,
+            files,
+            &ns,
+            Path::new(&home),
+        );
+        let payload = match result {
+            Ok(mut report) => {
+                let gate = agent_vitals_runtime::plugin_ingest::validate_gate(&report);
+                let facts = std::mem::take(&mut report.facts);
+                serde_json::json!({
+                    "mode": "validate",
+                    "gate": match &gate { Ok(()) => "pass", Err(_) => "refuse" },
+                    "gate_problem": gate.err(),
+                    "report": report,
+                    "facts": facts,
+                })
+            }
+            Err(e) => serde_json::json!({ "mode": "validate", "error": e }),
+        };
+        // 退出码与消费语义（验收修复 #1）：硬错误与 gate refusal 一律
+        // exit 2——JSON 模式不豁免，自动化拿「安装成功」当成功。
+        let failed = payload.get("error").is_some()
+            || payload.get("gate").and_then(|v| v.as_str()) != Some("pass");
+        if *rows_json || payload.get("error").is_none() {
+            println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+        }
+        if let Some(err) = payload.get("error").and_then(|v| v.as_str()) {
+            eprintln!("plugin-validate failed: {err}");
+        }
+        if failed {
+            std::process::exit(2);
+        }
+        return;
+    }
+
+    if let Some(Cmd::PluginIngest {
+        manifest,
+        machine_namespace,
+        write,
+        rows_json: _,
+    }) = &args.cmd
+    {
+        // machine_namespace 必传（spec §9）——与 workbuddy/codex 同款纪律：
+        // CLI 不读 takeover 身份补齐，缺失 exit 2。
+        let Some(ns) = machine_namespace.as_deref().filter(|s| !s.is_empty()) else {
+            eprintln!(
+                "plugin-ingest: --machine-namespace is required \
+                 (v0.7 spec §9: caller-provided; a CLI default would write state)"
+            );
+            std::process::exit(2);
+        };
+        if !*write {
+            eprintln!(
+                "plugin-ingest: pass --write to persist (without it use \
+                 plugin-validate for the read-only dry-run)"
+            );
+            std::process::exit(2);
+        }
+        let home = std::env::var("HOME").unwrap_or_default();
+        match agent_vitals_runtime::plugin_ingest::plugin_ingest_write(
+            manifest,
+            ns,
+            &agent_vitals_runtime::home::data_home(),
+            Path::new(&home),
+        ) {
+            Ok(payload) => {
+                println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+            }
+            Err(e) => {
+                eprintln!("plugin-ingest failed: {e}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
     if let Some(Cmd::WorkbuddyUsageFacts {
         root,
         machine_namespace,

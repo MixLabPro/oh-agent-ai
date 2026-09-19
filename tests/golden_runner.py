@@ -126,6 +126,75 @@ ENV_BY_CASE = {
     "host-dsh-log": {"AGENT_VITALS_DSH_SESSION_LOG": "{root}/session.jsonl"},
 }
 
+# HOST_MANIFEST_DSL_SPEC §8.1：generic 插件宿主 case——**不走** scan.py 的
+# `--json FILE` 扫描器契约，走 `plugin-validate` 的 stdout JSON 契约（Rust /
+# Python 两侧各自实现同一负载，本 runner 负责钉字节）。fixture 文件内联在
+# 这里（语料生成器 generate.py 不掺和），写入隔离 HOME 后 discovery 走
+# manifest 的 `~/data`。
+PLUGIN_FIXTURE_MANIFEST = {
+    "manifest_version": 1,
+    "slug": "zcode",
+    "display": {"name": "ZCode"},
+    "discovery": {"roots": ["~/data"], "include": ["model-io-sess_*.jsonl"]},
+    "source": {"format": "jsonl"},
+    "session": {"from": "filename", "pattern": "^model-io-sess_(?P<id>.+)\\.jsonl$"},
+    "recipe": "request-usage-anthropic-v1",
+    "overrides": {
+        "event_ts": "completedAt",
+        "model_raw": "model.modelId",
+        "provider_raw": "model.providerId",
+        "uncached_input_tokens": "response.providerMetadata.anthropic.usage.input_tokens",
+        "cache_read_tokens": "response.providerMetadata.anthropic.usage.cache_read_input_tokens",
+        "output_tokens": "response.providerMetadata.anthropic.usage.output_tokens",
+        "provider_request_id": "requestId"
+    },
+    "event_key": {"paths": ["requestId", "attempt"]},
+    "billing": {"policy": "lock:metered_estimate"},
+}
+
+
+def _plugin_fixture_row(request_id, attempt, input_tokens):
+    import json as _json
+    return _json.dumps({
+        "requestId": request_id, "attempt": attempt,
+        "completedAt": "2026-09-19T15:18:41.337Z",
+        "model": {"modelId": "GLM-5.3", "providerId": "builtin:bigmodel-coding-plan"},
+        "response": {
+            "usage": {"inputTokens": input_tokens + 5},
+            "providerMetadata": {"anthropic": {"usage": {
+                "input_tokens": input_tokens, "cache_read_input_tokens": 5,
+                "output_tokens": 99,
+            }}},
+        },
+    }, ensure_ascii=False, separators=(",", ":"))
+
+
+PLUGIN_CASES = {
+    "host-generic-zcode": {
+        "args": ["plugin-validate",
+                 "--manifest", "{root}/hosts.d/zcode/manifest.json",
+                 "--machine-namespace", "golden",
+                 "--json"],
+        "files": {
+            "hosts.d/zcode/manifest.json": PLUGIN_FIXTURE_MANIFEST,
+            "data/model-io-sess_aaa.jsonl": "\n".join([
+                _plugin_fixture_row("r1", 1, 100),
+                _plugin_fixture_row("r2", 1, 200),
+                # 无 usage 块（中止请求行）→ skip(not_target_record)。
+                '{"requestId":"x9","attempt":1,"completedAt":"2026-09-19T15:18:41Z"}',
+                # drift：usage 容器在而主数量缺 → invalid（不许伪装成 skip）。
+                '{"requestId":"d1","attempt":1,"completedAt":"2026-09-19T15:18:41.337Z",'
+                '"model":{"modelId":"GLM-5.3"},"response":{"providerMetadata":{"anthropic":{"usage":{"cache_read_input_tokens":5}}}}}',
+                # 坏 JSON 行 → invalid(bad_json)。
+                '{"requestId":"broken"',
+            ]) + "\n",
+            "data/model-io-sess_bbb.jsonl": _plugin_fixture_row("r3", 1, 300) + "\n",
+            # 零 target 文件 → 标黄不失败（§4.3）。
+            "data/model-io-sess_empty.jsonl": '{"foo": 1}\n',
+        },
+    },
+}
+
 # 需要在语料根本身（而不是 workdir）里跑的 case
 CWD_IS_ROOT = {"cwd-is-home"}
 
@@ -278,10 +347,42 @@ def canonicalize(data, root_str, case=None):
     return d
 
 
+def _run_plugin_case(root: Path, name: str):
+    """generic 插件宿主 case：写内联 fixture → 跑 plugin-validate（stdout
+    JSON 契约）→ scrub。退出码非 0 = case 失败（gate refuse / 硬错误）。"""
+    import json as _json
+    root = root.resolve()
+    case = PLUGIN_CASES[name]
+    for rel, content in case["files"].items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, (dict, list)):
+            target.write_text(_json.dumps(content, ensure_ascii=False, indent=2) + "\n",
+                              encoding="utf-8")
+        else:
+            target.write_text(content, encoding="utf-8")
+    root_s = str(root).replace("\\", "/")
+    args = [a.replace("{root}", root_s) for a in case["args"]]
+    env = isolated_home_env(root)
+    r = subprocess.run(SCAN_CMD + args, cwd=str(root), env=env,
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise AssertionError(
+            "plugin-validate 退出码 %d\nstdout: %s\nstderr: %s"
+            % (r.returncode, r.stdout, r.stderr))
+    data = _json.loads(r.stdout)
+    return scrub(data, root_s, set())
+
+
 def produce(tmp: Path):
     """建语料 → 跑全部 case → 返回 {case 名: 归一化后的 JSON}。"""
     results = {}
-    for name, extra, with_cfg in CASES:
+    all_case_names = [c[0] for c in CASES] + list(PLUGIN_CASES.keys())
+    for name in all_case_names:
+        if name in PLUGIN_CASES:
+            results[name] = _run_plugin_case(tmp / name, name)
+            continue
+        extra, with_cfg = next((e, w) for n, e, w in CASES if n == name)
         root = (tmp / name).resolve()
         gen = FIXTURE_GEN_BY_CASE.get(name, GEN)
         subprocess.run([sys.executable, str(gen), "--into", str(root), "--clean"],
@@ -371,17 +472,18 @@ def main():
                 msg += "\n" + first_diff(want, got)
             failed.append((name, msg))
 
-    for name, _, _ in CASES:
+    all_names = [c[0] for c in CASES] + list(PLUGIN_CASES.keys())
+    for name in all_names:
         mark = "✕" if any(f[0] == name for f in failed) else "✓"
         print("%s %s" % (mark, name))
     if failed:
-        print("\n%d/%d 个 case 不一致：" % (len(failed), len(CASES)))
+        print("\n%d/%d 个 case 不一致：" % (len(failed), len(all_names)))
         for name, msg in failed:
             print("  %s: %s" % (name, msg))
         print("\n实现：%s" % " ".join(SCAN_CMD))
         return 1
     print("\n%d 个 case 全部与 golden 逐字节一致（实现：%s）"
-          % (len(CASES), " ".join(SCAN_CMD)))
+          % (len(all_names), " ".join(SCAN_CMD)))
     return 0
 
 
