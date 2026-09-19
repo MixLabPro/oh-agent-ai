@@ -2089,6 +2089,22 @@ fn start_public_pricing_catalog_tick() {
     });
 }
 
+/// 「发现」tab 新鲜度条的数据面（WORKBENCH_FINDINGS_TAB_SPEC §4.8）。
+/// 只读一个数：上次成功同步时刻 + stale 宿主名单（runtime 与 MCP envelope
+/// 同源），DB 打不开就如实报 unavailable，不编一个空名单。
+#[tauri::command]
+fn findings_freshness() -> Value {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    match agent_vitals_data::authority::AuthorityDb::open_readonly(&path) {
+        Ok(db) => serde_json::json!({
+            "status": "ok",
+            "freshness": agent_vitals_runtime::mcp::data_freshness_report(db.conn()),
+        }),
+        Err(_) => serde_json::json!({ "status": "unavailable" }),
+    }
+}
+
 /// 生成用户主动选择保存的脱敏诊断包。只组合现有的状态 DTO；不读取会话正文、
 /// 原始日志、绝对路径或账户标识，也不执行上传。取消保存对用户来说是 no-op。
 #[tauri::command]
@@ -3476,6 +3492,7 @@ pub fn run() {
             store::sessions_read,
             store::sessions_findings,
             store::sessions_issues,
+            findings_freshness,
             store::skills_doctor_report,
             store::skills_scan_cancel,
             store::skills_snapshot_save,

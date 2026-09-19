@@ -374,6 +374,13 @@ pub(crate) fn stale_hosts(conn: &Connection, now_ms: i64) -> Vec<String> {
         .collect()
 }
 
+/// 桌面工作台「发现」tab 新鲜度条的数据面（WORKBENCH_FINDINGS_TAB_SPEC
+/// §4.8/§5.4）。与 MCP envelope 的 `freshness` 同源同形 —— 桌面只要这一格，
+/// 不必取整个 envelope，也不在 desktop 里复述那条 stale SQL（口径唯一）。
+pub fn data_freshness_report(conn: &Connection) -> Value {
+    freshness(conn)
+}
+
 /// spec §6 `freshness`。`stale_hosts` 由最新实时事实折成显式状态，避免只把
 /// 原始 `covered_to` 留给每个 consumer 自己计算而发生口径漂移。
 fn freshness(conn: &Connection) -> Value {

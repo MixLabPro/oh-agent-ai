@@ -83,6 +83,20 @@ pub fn remedy_for(issue_type: &str) -> RemedyCandidate {
         "retry_loop" => RemedyCandidate { remedy_id: "inspect-retry-policy", diagnostic_only: false },
         "context_overflow" => RemedyCandidate { remedy_id: "reduce-context-window", diagnostic_only: false },
         "tool_failure" => RemedyCandidate { remedy_id: "inspect-tool-error", diagnostic_only: false },
+        // family ① 行为规则（SV601–SV610）各配专属 remedy_id
+        // （WORKBENCH_FINDINGS_TAB_SPEC §5.1）。专属 ID 给的是「下一步看哪里」的
+        // 诚实短语，不是可一键完成的工单 —— 行为命中没有「解决」语义，只有
+        // 「采纳与否」的决策语义（spec §8），因此这些组仍不进工作台待办区。
+        "SV601" => RemedyCandidate { remedy_id: "review-destructive-shell", diagnostic_only: false },
+        "SV602" => RemedyCandidate { remedy_id: "review-privilege-shell", diagnostic_only: false },
+        "SV603" => RemedyCandidate { remedy_id: "review-remote-exec", diagnostic_only: false },
+        "SV604" => RemedyCandidate { remedy_id: "review-sensitive-path", diagnostic_only: false },
+        "SV605" => RemedyCandidate { remedy_id: "narrow-write-scope", diagnostic_only: false },
+        "SV606" => RemedyCandidate { remedy_id: "review-external-fetch", diagnostic_only: false },
+        "SV607" => RemedyCandidate { remedy_id: "reduce-limit-pressure", diagnostic_only: false },
+        "SV608" => RemedyCandidate { remedy_id: "inspect-timeout-tool", diagnostic_only: false },
+        "SV609" => RemedyCandidate { remedy_id: "review-approval-choice", diagnostic_only: false },
+        "SV610" => RemedyCandidate { remedy_id: "tighten-sandbox-mode", diagnostic_only: false },
         _ => RemedyCandidate { remedy_id: "diagnostic-only", diagnostic_only: true },
     }
 }
@@ -1013,6 +1027,26 @@ mod tests {
         assert!(!remedy_for("retry_loop").diagnostic_only);
         assert!(remedy_for("future_rule").diagnostic_only);
         assert_eq!(remedy_for("future_rule").remedy_id, "diagnostic-only");
+    }
+
+    /// WORKBENCH_FINDINGS_TAB_SPEC §6.2〔P1〕：SV601–SV610 每条都必须有**专属**、
+    /// 非 diagnostic-only 的 remedy，前端 labels map 的文案等着这个 ID。ID 之间
+    /// 不得撞号 —— 撞号会让两条规则的「下一步」在 UI 上无法区分。
+    #[test]
+    fn every_family1_behavior_rule_has_a_dedicated_remedy() {
+        let codes = [
+            "SV601", "SV602", "SV603", "SV604", "SV605",
+            "SV606", "SV607", "SV608", "SV609", "SV610",
+        ];
+        let mut ids: Vec<&str> = Vec::new();
+        for code in codes {
+            let r = remedy_for(code);
+            assert!(!r.diagnostic_only, "{code} 落到了 diagnostic-only");
+            assert_ne!(r.remedy_id, "diagnostic-only", "{code} 的 remedy_id 是兜底值");
+            assert!(!ids.contains(&r.remedy_id), "remedy_id 撞号：{}", r.remedy_id);
+            ids.push(r.remedy_id);
+        }
+        assert_eq!(ids.len(), 10);
     }
 
     #[test]

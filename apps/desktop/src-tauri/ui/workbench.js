@@ -6706,7 +6706,12 @@ async function loadFindings(reset) {
   const loadingEl = document.getElementById("find-loading");
   loadingEl.hidden = false;
   try {
-    const data = await invoke("sessions_issues", { pageSize: 50, cursor: null });
+    // 新鲜度条与汇总并发取（spec §5.4）：它只读 authority 的两格数，失败不吞汇总。
+    const [data, fresh] = await Promise.all([
+      invoke("sessions_issues", { pageSize: 50, cursor: null }),
+      invoke("findings_freshness").catch(() => null),
+    ]);
+    renderFreshness(fresh);
     findState.data = data;
     findState.nextCursor = data && data.next_cursor || null;
     findState.error = false;
@@ -6763,6 +6768,7 @@ function renderFindings() {
     foot.textContent = "";
     document.getElementById("find-more").hidden = true;
     empty.hidden = true;
+    renderTodoList([]);
     return;
   }
   banner.hidden = true;
@@ -6796,6 +6802,14 @@ function renderFindings() {
     const c = el("span", "chip" + cls);
     c.textContent = k + " · " + bySrc[k];
     chips.appendChild(c);
+  }
+
+  // 待办区（spec §3.1）：无脑可解决的项；SV6xx 永不进（isTodoGroup 挡）。
+  renderTodoList(rows);
+  const evidenceSummary = document.getElementById("find-evidence-summary");
+  if (evidenceSummary) {
+    evidenceSummary.textContent = "证据明细 · 规则命中 " + rows.length
+      + " 条（行为事实与只读证据，点开筛选/逐条处理）";
   }
 
   // 规则表。
@@ -6956,6 +6970,18 @@ function issueActionLabel(group) {
     "reduce-context-window": "建议：检查上下文范围",
     "inspect-usage-change": "建议：查看对应会话",
     "review-budget-or-snooze": "建议：查看预算或静默提醒",
+    // SV601–SV610 专属 remedy 文案（WORKBENCH_FINDINGS_TAB_SPEC §5.1；ID 来自
+    // agent-vitals-data issues.rs::remedy_for 的十个新 match arm）。
+    "review-destructive-shell": "建议：复核破坏性命令",
+    "review-privilege-shell": "建议：复核提权命令",
+    "review-remote-exec": "建议：复核远程执行命令",
+    "review-sensitive-path": "建议：复核敏感路径写入",
+    "narrow-write-scope": "建议：把写入收窄到工作区内",
+    "review-external-fetch": "建议：复核外部地址拉取",
+    "reduce-limit-pressure": "建议：降低撞限流压力",
+    "inspect-timeout-tool": "建议：查看超时的工具",
+    "review-approval-choice": "建议：复核审批选择",
+    "tighten-sandbox-mode": "建议：收紧沙箱权限",
     "diagnostic-only": "建议：查看数据状态",
   };
   return labels[remedy] || "建议：查看详情";
@@ -7172,13 +7198,179 @@ async function showIssueInstanceDetail(issueId, line, seed) {
   }
 }
 
+// 开放命中总数：各组 status_rollup.open 之和。状态迁移的「待处理 N → M」
+// 以它为口径 —— 组数不因单个实例迁移而变，实例数才是用户心里的「还剩几件」。
+function openHitCount() {
+  let open = 0;
+  for (const g of issueRows()) {
+    open += Number((g.status_rollup || {}).open || 0);
+  }
+  return open;
+}
+
+function showFindReceipt(text) {
+  const receipt = document.getElementById("find-receipt");
+  if (!receipt) return;
+  receipt.textContent = text;
+  receipt.hidden = false;
+  clearTimeout(showFindReceipt._t);
+  showFindReceipt._t = setTimeout(() => { receipt.hidden = true; }, 6000);
+}
+
 async function transitionIssueFromUi(issueId, toStatus) {
+  // 迁移前后各读一次 rollup 计数（spec §5.6）：反馈给「已处理 1 项 · 待处理
+  // 命中 N → M」。M 不变时如实说明（同组还有开放命中），不假装减了。
+  const before = openHitCount();
   try {
     await invoke("issue_transition", { issueId, toStatus, reason: "workbench user action" });
     await loadFindings(true);
+    const after = openHitCount();
+    showFindReceipt("已处理 1 项 · 待处理命中 " + before + " → " + after
+      + (after !== before ? "" : "（该组仍有开放命中）"));
   } catch (e) {
     showBanner("find-banner", e, false);
   }
+}
+
+// ---------- 发现 tab P1：待办/证据两分区（WORKBENCH_FINDINGS_TAB_SPEC §3.1/§3.3）----------
+//
+// 待办准入门槛（spec §1 判断标准 2）：动作明确、表单预填完成、点击后有可见
+// 结果、可撤销 —— 四条全满足才进。做不到的不伪装成任务。SV6xx 行为命中是
+// 「发生了什么」的事实陈述，永不进待办区（§3.1），它们住在证据区。
+
+const TODO_SOURCE_KINDS = new Set(["billing_candidate", "billing_group", "source_failure", "budget"]);
+const TODO_RULES = new Set(["PRICE_COVERAGE", "ROUTE_UNCONFIRMED"]);
+
+function isTodoGroup(group) {
+  if (String(group.rule || "").startsWith("SV6")) return false;
+  return TODO_SOURCE_KINDS.has(group.source_kind) || TODO_RULES.has(group.rule);
+}
+
+// 待办行主按钮：与证据区展开分支同一套预填动作（动作逻辑唯一，不抄第二份）。
+// 预填目标：设置页的价格表单 / 归属声明表单 / 预算设置 / 总览的计费确认面板。
+function todoMainAction(group) {
+  const sample = group.sample_evidence && group.sample_evidence[0] || {};
+  if (group.rule === "ROUTE_UNCONFIRMED") {
+    return { label: "声明归属", run: () => {
+      pendingPriceRoute = { model: sample.model_id || "", provider: "" };
+      openSettingsSection("settings-data", "ov-price-route-model");
+    } };
+  }
+  if (group.rule === "PRICE_COVERAGE") {
+    return { label: "补充价卡", run: () => {
+      pendingPriceCard = { provider: sample.provider_id || "", model: sample.model_id || "" };
+      openSettingsSection("settings-data", "ov-price-card-model");
+    } };
+  }
+  if (group.source_kind === "budget") {
+    return { label: "打开预算设置", run: () => {
+      openSettingsSection("settings-budget", "ov-budget-monthly-amount");
+    } };
+  }
+  if (group.source_kind === "billing_candidate" || group.source_kind === "billing_group") {
+    return { label: "明确计费方式", run: () => {
+      switchTab("overview");
+      const review = document.getElementById("ov-billing-review");
+      if (review && review.click) review.click();
+    } };
+  }
+  return { label: "查看数据源", run: () => switchTab("sources") };
+}
+
+// 一句话 = 发生了什么 + 影响多少。主语取样本证据里最能认出这组事的字段。
+function todoTitle(group) {
+  const sample = group.sample_evidence && group.sample_evidence[0] || {};
+  if (group.rule === "PRICE_COVERAGE") return "缺少价卡：" + (sample.model_id || "未知型号");
+  if (group.rule === "ROUTE_UNCONFIRMED") return "归属未确认：" + (sample.model_id || "未知型号");
+  if (group.source_kind === "budget") {
+    const level = sample.level === "exceeded" ? "已超" : "告警";
+    return "预算" + level + "：" + (sample.month || group.bucket || "当月");
+  }
+  if (group.source_kind === "source_failure") {
+    return "数据源读取失败：" + (sample.error_code || sample.code || "未知错误");
+  }
+  if (group.source_kind === "billing_candidate" || group.source_kind === "billing_group") {
+    return "计费方式待明确" + (sample.provider_id ? "：" + sample.provider_id : "");
+  }
+  return group.rule || "待办";
+}
+
+function renderTodoList(rows) {
+  const list = document.getElementById("find-todo-list");
+  const emptyEl = document.getElementById("find-todo-empty");
+  if (!list || !emptyEl) return;
+  list.textContent = "";
+  const sevRank = { critical: 0, warning: 1, info: 2 };
+  const todos = rows.filter(isTodoGroup).sort((a, b) =>
+    ((sevRank[a.severity] != null ? sevRank[a.severity] : 3)
+      - (sevRank[b.severity] != null ? sevRank[b.severity] : 3))
+    || (Number(b.count || 0) - Number(a.count || 0)));
+  emptyEl.hidden = todos.length > 0;
+  for (const group of todos) {
+    const row = el("div", "issue-todo-row");
+    const head = el("div", "issue-todo-head");
+    const title = el("strong", null);
+    title.textContent = todoTitle(group);
+    head.append(title);
+    const scope = el("div", "issue-subline muted");
+    scope.textContent = issueScopeLabel(group) + " · " + issueActionLabel(group);
+    head.append(scope);
+    row.append(head);
+    const actions = el("div", "issue-todo-actions");
+    const main = todoMainAction(group);
+    const mainBtn = el("button", "btn primary");
+    mainBtn.type = "button";
+    mainBtn.textContent = main.label;
+    mainBtn.addEventListener("click", main.run);
+    actions.append(mainBtn);
+    const moreBtn = el("button", "btn secondary");
+    moreBtn.type = "button";
+    moreBtn.textContent = "明细与状态";
+    moreBtn.addEventListener("click", () => toggleTodoInstances(group, row));
+    actions.append(moreBtn);
+    row.append(actions);
+    const holder = el("div", "issue-todo-instances");
+    holder.hidden = true;
+    holder.append(el("div", "muted"));
+    row.append(holder);
+    list.append(row);
+  }
+}
+
+// 待办行的「明细与状态」：复用证据区的实例展开（loadIssueGroupInstances 吃
+// detailRow.firstElementChild 契约，这里给同样结构）。状态迁移按钮在实例行上，
+// 迁移后的计数反馈由 transitionIssueFromUi 统一负责（spec §5.6 纯前端）。
+function toggleTodoInstances(group, row) {
+  const holder = row.querySelector(".issue-todo-instances");
+  const button = row.querySelector(".issue-todo-actions button:nth-child(2)");
+  if (!holder || !button) return;
+  if (holder.hidden) {
+    holder.hidden = false;
+    holder.firstElementChild.textContent = "正在读取原始命中…";
+    button.textContent = "收起";
+    loadIssueGroupInstances(group, holder);
+  } else {
+    holder.hidden = true;
+    button.textContent = "明细与状态";
+  }
+}
+
+// 新鲜度条（spec §4.8/§6.5）：数字截止时刻 + stale 宿主名单。数据面 =
+// findings_freshness（runtime data_freshness_report，与 MCP envelope 同源）。
+function renderFreshness(fresh) {
+  const bar = document.getElementById("find-freshness");
+  if (!bar) return;
+  bar.hidden = false;
+  if (!fresh || fresh.status !== "ok") {
+    bar.textContent = "新鲜度未知：数据状态读取失败。";
+    return;
+  }
+  const f = fresh.freshness || {};
+  const parts = [];
+  if (f.last_successful_sync_at) parts.push("数字截至 " + String(f.last_successful_sync_at).slice(11, 16));
+  const stale = Array.isArray(f.stale_hosts) ? f.stale_hosts : [];
+  if (stale.length) parts.push("超过 24h 未更新：" + stale.join("、"));
+  bar.textContent = parts.length ? "新鲜度 · " + parts.join(" · ") : "新鲜度 · 数据完整";
 }
 
 function issueRows() {
