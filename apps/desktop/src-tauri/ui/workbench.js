@@ -7938,9 +7938,11 @@ function skDiagRow(d, hosts, extraEvidence) {
   return row;
 }
 
-function skEmptyToggle(id, empty) {
+// hasRows=true → 隐藏「没有…」占位。参数按行数语义命名（此前按 isEmpty 传入
+// 却当 hasRows 用，四个分区的占位显隐整体反了 —— 2026-09-19 真机截图回归）。
+function skEmptyToggle(id, hasRows) {
   const el = document.getElementById(id);
-  if (el) el.hidden = !!empty;
+  if (el) el.hidden = !!hasRows;
 }
 
 // 主渲染入口。payload = skills_doctor_report 的返回（doctor --json 载荷 +
@@ -8078,7 +8080,7 @@ function renderSkillHealth(payload, hostFilter) {
   const actList = document.getElementById("sk-act-now-list");
   actList.textContent = "";
   const actDiags = (payload.diagnostics || []).filter((d) => d.severity === "critical" || d.severity === "warning");
-  skEmptyToggle("sk-act-now-empty", actDiags.length === 0);
+  skEmptyToggle("sk-act-now-empty", actDiags.length > 0);
   actDiags.forEach((d) => {
     actList.append(skDiagRow(d, skDiagHosts(d, index)));
   });
@@ -8088,7 +8090,7 @@ function renderSkillHealth(payload, hostFilter) {
   secList.textContent = "";
   const secRows = skSecurityRows(payload);
   const structRows = skStructureRows(payload);
-  skEmptyToggle("sk-security-empty", secRows.length === 0 && structRows.length === 0);
+  skEmptyToggle("sk-security-empty", secRows.length > 0 || structRows.length > 0);
   secRows.forEach((r) => {
     const row = skEl("div", "sk-row");
     const head = skEl("div", "sk-row-head");
@@ -8131,7 +8133,7 @@ function renderSkillHealth(payload, hostFilter) {
     });
   });
   const confHosts = Object.keys(confByHost);
-  skEmptyToggle("sk-conflicts-empty", confHosts.length === 0);
+  skEmptyToggle("sk-conflicts-empty", confHosts.length > 0);
   confHosts.forEach((h) => {
     confList.append(skEl("div", "sk-group-title", SK_HOST_DISPLAY[h] || h));
     confByHost[h].forEach((item) => {
@@ -8163,7 +8165,7 @@ function renderSkillHealth(payload, hostFilter) {
   const hsAll = report.host_summaries || {};
   const triggerHosts = SK_HOST_ORDER.filter((h) => (
     (hsAll[h] || {}).skills_on_disk > 0 && (hsAll[h] || {}).trigger_data === "available"));
-  skEmptyToggle("sk-usage-empty", triggerHosts.length === 0);
+  skEmptyToggle("sk-usage-empty", triggerHosts.length > 0);
   triggerHosts.forEach((h) => {
     const group = skEl("div", "sk-group-title", SK_HOST_DISPLAY[h] || h);
     usageList.append(group);
