@@ -155,7 +155,8 @@ def _extract_file(ctx, source_profile, rel_path, abs_path, session_id, content):
                 # contract 层拒绝如实计数（与 Rust 同款，问题样例 ≤8 条）。
                 report["invalid"] += 1
                 if len(report["invalid_problems"]) < 8:
-                    report["invalid_problems"].append("contract: %s" % e.args[0])
+                    report["invalid_problems"].append(
+                        "contract: %s" % "; ".join(e.args[0]))
             else:
                 facts.append(built)
                 report["emitted"] += 1

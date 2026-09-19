@@ -109,6 +109,11 @@ def _err(field, problem):
     return ManifestError(field, problem)
 
 
+def _rust_debug_list(items):
+    """Rust `{:?}` 的切片 Debug 形状（`["a", "b"]`）——错误串逐字对齐用。"""
+    return "[" + ", ".join('\"%s\"' % i for i in items) + "]"
+
+
 def _string_array(value, field, min_len, max_len):
     if not isinstance(value, list):
         raise _err(field, "必须是字符串数组")
@@ -155,7 +160,10 @@ def parse_manifest(value):
         raise _err("$schema", "必须是字符串（schema URL）")
 
     version = value.get("manifest_version")
-    if not isinstance(version, int) or isinstance(version, bool):
+    # Rust `as_u64`：负数 / bool / >u64 的整数都走「必须是整数 1」分支
+    # （serde_json 对越界整数解析为 f64，as_u64 为 None）——不是版本分支。
+    if (not isinstance(version, int) or isinstance(version, bool)
+            or version < 0 or version > 2 ** 64 - 1):
         raise _err("manifest_version", "必须是整数 1")
     if version != MANIFEST_VERSION:
         raise _err("manifest_version",
@@ -227,7 +235,8 @@ def parse_manifest(value):
     if not isinstance(recipe, str):
         raise _err("recipe", "必须是字符串")
     if recipe not in RECIPE_IDS:
-        raise _err("recipe", "未知 recipe `%s`（已知：%s）" % (recipe, RECIPE_IDS))
+        raise _err("recipe", "未知 recipe `%s`（已知：%s）"
+                   % (recipe, _rust_debug_list(RECIPE_IDS)))
 
     overrides = {}
     raw_overrides = value.get("overrides")
@@ -237,7 +246,7 @@ def parse_manifest(value):
         for k, v in raw_overrides.items():
             if k not in OVERRIDE_SLOTS:
                 raise _err("overrides.%s" % k,
-                           "未知槽位（允许：%s）" % (OVERRIDE_SLOTS,))
+                           "未知槽位（允许：%s）" % _rust_debug_list(OVERRIDE_SLOTS))
             if not isinstance(v, str):
                 raise _err("overrides.%s" % k, "必须是点路径字符串")
             if not is_dotted_path(v):

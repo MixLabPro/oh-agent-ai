@@ -188,3 +188,38 @@ class GateAndE2ETest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ErrorStringEncodingTest(unittest.TestCase):
+    """负路径错误串与 Rust 逐字对齐（验收修复：golden 不覆盖这些分支，
+    用单测钉住，防止 twin 漂移）。"""
+
+    def test_unknown_recipe_uses_rust_debug_shape(self):
+        v = zcode_manifest()
+        v["recipe"] = "nope"
+        with self.assertRaises(ManifestError) as ctx:
+            parse_manifest(v)
+        self.assertIn(
+            '已知：["request-usage-anthropic-v1", '
+            '"request-usage-openai-total-input-v1", '
+            '"request-usage-four-bucket-v1"]',
+            str(ctx.exception))
+
+    def test_negative_version_hits_integer_gate(self):
+        v = zcode_manifest()
+        v["manifest_version"] = -1
+        with self.assertRaises(ManifestError) as ctx:
+            parse_manifest(v)
+        self.assertIn("必须是整数 1", str(ctx.exception))
+        v = zcode_manifest()
+        v["manifest_version"] = 2 ** 64
+        with self.assertRaises(ManifestError) as ctx:
+            parse_manifest(v)
+        self.assertIn("必须是整数 1", str(ctx.exception))
+
+    def test_unknown_override_slot_uses_rust_debug_shape(self):
+        v = zcode_manifest()
+        v["overrides"]["nope"] = "a.b"
+        with self.assertRaises(ManifestError) as ctx:
+            parse_manifest(v)
+        self.assertIn("未知槽位", str(ctx.exception))

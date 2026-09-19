@@ -12,8 +12,6 @@ token 桶算术、canonical event key（UTF-8 字节长前缀）逐字对齐。
   不是码点数。
 """
 
-import sys
-
 from .claude_evidence import parse_iso
 from .generic_manifest import PluginManifest
 
