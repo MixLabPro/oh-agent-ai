@@ -3,7 +3,7 @@
 **状态：** Draft v2（2026-09-19）。v1（2026-09-18）基于真机截图与 `workbench.html` / `workbench.js` / `agent-vitals-data` / `agent-vitals-domain` 源码核对；v2 并入十条自查修正（性能预算、排序口径、归组规则、新鲜度呈现、§3.4 拆分、改动面/验收对齐、待拍板清单）与 2026-09-19 实机抽样报告的结论（缓存抖动案例、马拉松会话、指纹跨链）。
 **日期：** 2026-09-19
 **目标版本：** v1.0.0-beta.3（桌面 app `apps/desktop/src-tauri`）
-**关联文档：** [Agent 执行问题分类图谱](../AGENT_EXECUTION_PROBLEM_TAXONOMY.md)（六层问题 × 覆盖状态，②/③每加一列先在那里登记）、[Skill 体检 tab 规格](WORKBENCH_SKILL_HEALTH_TAB_SPEC.md)（§0「并列不合并」白名单纪律、§1.4「不拖慢总览」性能先例沿用）、[设置页规格](BETA_1_SETTINGS_PAGE_SPEC.md)（预填/回执/一屏一个主 CTA 的表单纪律沿用）、[路线单位成本决策](ROUTE_UNIT_COST_DECISION_SPEC.md)、[审计 tab UX 复核](../AUDIT_TAB_UX_REVIEW.md)（第一轮「SV605 误报归零」的验收先例）、[可交互原型](FINDINGS_TAB_PROTOTYPE.html)（2026-09-01→18 真实 MCP 数据；URL 加 `#demo-open` 直达展开态，浏览器直接打开）
+**关联文档：** [Agent 执行问题分类图谱](../AGENT_EXECUTION_PROBLEM_TAXONOMY.md)（七层问题 × 覆盖状态，②/③每加一列先在那里登记）、[本地 Agent 数据访问与出境审计规格](FINDINGS_TRUST_EGRESS_MONITORING_SPEC.md)（Findings 2.0 新证据平面）、[Skill 体检 tab 规格](WORKBENCH_SKILL_HEALTH_TAB_SPEC.md)（§0「并列不合并」白名单纪律、§1.4「不拖慢总览」性能先例沿用）、[设置页规格](BETA_1_SETTINGS_PAGE_SPEC.md)（预填/回执/一屏一个主 CTA 的表单纪律沿用）、[路线单位成本决策](ROUTE_UNIT_COST_DECISION_SPEC.md)、[审计 tab UX 复核](../AUDIT_TAB_UX_REVIEW.md)（第一轮「SV605 误报归零」的验收先例）、[可交互原型](FINDINGS_TAB_PROTOTYPE.html)（2026-09-01→18 真实 MCP 数据；URL 加 `#demo-open` 直达展开态，浏览器直接打开）
 
 ---
 
