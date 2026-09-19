@@ -174,7 +174,13 @@ const TRIGGER_MIGRATION: &str = "migration";
 /// `provider_id/evidence_basis/route_evidence_id` 只有在源文件被重放时才会经
 /// `fact_writer_sql` 的版本重分类路径改写——不升这个号，历史 25k+ 条 claude 事实
 /// 会永远停在 `missing`，列表照旧全部推给用户。
-const PARSER_VERSION: i64 = 3;
+///
+/// 版本 4（WORKBENCH_FINDINGS_TAB_SPEC §9.4-①）：claude-code emitter 修复
+/// skill_finished 的 outcome 信号——skill 的 tool_result 不带 is_error，改读
+/// record 级 `toolUseResult.success`。历史行的纠正走 `insert_events` 的派生列
+/// upsert（provenance 保持原样）；不升这个号，已入库的 unknown outcome 行会
+/// 因源文件指纹未变而永远不被重放触达。
+const PARSER_VERSION: i64 = 4;
 
 /// 当前事实解析器版本；同步差量必须把它和文件指纹一起比较。
 pub const fn parser_version() -> i64 {

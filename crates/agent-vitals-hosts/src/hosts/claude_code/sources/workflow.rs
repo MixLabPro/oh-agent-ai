@@ -112,13 +112,29 @@ pub fn claude_file_to_workflow_events(
                         None, None, "unknown", None, None);
                 }
                 if let Some(Value::Array(blocks)) = content {
+                    // `toolUseResult` 是 record 级结构化结果：只有这条 user 记录
+                    // 恰好带一个 tool_result 时，它才无歧义地属于该调用（真机
+                    // 16/16 如此；并行工具调用时退回块级信号）。
+                    let single_tool_result = blocks.iter()
+                        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+                        .count() == 1;
                     for (block_index, block) in blocks.iter().enumerate() {
                         if block.get("type").and_then(Value::as_str) != Some("tool_result") { continue; }
                         let call_id = block.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
                         let Some(kind) = calls.get(call_id).cloned() else { continue };
                         let failed = block.get("is_error").and_then(Value::as_bool);
-                        let result = match failed { Some(true) => "failed", Some(false) => "succeeded", None => "unknown" };
-                        let error = (failed == Some(true)).then(|| fingerprint("claude-tool-error"));
+                        let mut result = match failed { Some(true) => "failed", Some(false) => "succeeded", None => "unknown" };
+                        // Skill 的 tool_result **不写 is_error**（bash 恒带，skill
+                        // 实测恒无——2026-09-20 真机 16/16）。Skill 的成败信号在
+                        // record 级 `toolUseResult.success`；两个信号都缺席时保持
+                        // unknown —— 「没看到失败」不折算成成功。
+                        if matches!(kind, CallKind::Skill(_)) && single_tool_result {
+                            if let Some(success) = record.get("toolUseResult")
+                                .and_then(|t| t.get("success")).and_then(Value::as_bool) {
+                                result = if success { "succeeded" } else { "failed" };
+                            }
+                        }
+                        let error = (result == "failed").then(|| fingerprint("claude-tool-error"));
                         match kind {
                             CallKind::Tool(name) => add_event(&mut out, path, *offset, block_index + 1,
                                 &session_key, "tool_finished", time, Some("tool"), Some(name.clone()),
@@ -177,6 +193,44 @@ pub fn claude_file_to_workflow_events(
 mod tests {
     use super::claude_file_to_workflow_events;
     use std::path::PathBuf;
+
+    /// Skill 的 tool_result 不带 is_error（真机 16/16）；成败信号在 record 级
+    /// `toolUseResult.success`（WORKBENCH_FINDINGS_TAB_SPEC §9.4-① 修复）。
+    /// 钉住三态：true → succeeded、false → failed（带错误指纹）、都缺席 →
+    /// unknown（「没看到失败」不得折算成成功）。工具路径不受影响。
+    #[test]
+    fn skill_outcome_reads_tool_use_result_success() {
+        let path = std::env::temp_dir().join(format!("av-claude-skill-{}.jsonl", std::process::id()));
+        std::fs::write(&path, concat!(
+            // skill 加载成功：无 is_error，toolUseResult.success=true
+            r#"{"type":"assistant","timestamp":"2026-08-20T14:27:05.000Z","message":{"content":[{"type":"tool_use","id":"s1","name":"Skill","input":{"skill":"code-review"}}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-08-20T14:27:08.000Z","toolUseResult":{"commandName":"code-review","success":true},"message":{"content":[{"type":"tool_result","tool_use_id":"s1","content":"loaded"}]}}"#, "\n",
+            // skill 失败：无 is_error，toolUseResult.success=false
+            r#"{"type":"assistant","timestamp":"2026-08-20T14:28:00.000Z","message":{"content":[{"type":"tool_use","id":"s2","name":"Skill","input":{"skill":"nope"}}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-08-20T14:28:02.000Z","toolUseResult":{"commandName":"nope","success":false},"message":{"content":[{"type":"tool_result","tool_use_id":"s2","content":"not found"}]}}"#, "\n",
+            // 两个信号都缺席 → unknown
+            r#"{"type":"assistant","timestamp":"2026-08-20T14:29:00.000Z","message":{"content":[{"type":"tool_use","id":"s3","name":"Skill","input":{"skill":"third"}}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-08-20T14:29:02.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"s3","content":"loaded"}]}}"#, "\n",
+            // 工具路径不变：is_error=false → succeeded
+            r#"{"type":"assistant","timestamp":"2026-08-20T14:30:00.000Z","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-08-20T14:30:02.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":false,"content":"ok"}]}}"#, "\n",
+        )).unwrap();
+        let events = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
+        let finished = |skill: &str| events.iter().find(|event|
+            event.event_type == "skill_finished" && event.capability_id.as_deref() == Some(skill)).cloned();
+        assert_eq!(finished("code-review").map(|e| e.outcome).as_deref(), Some("succeeded"));
+        let failed = finished("nope").expect("failed skill event");
+        assert_eq!(failed.outcome, "failed");
+        assert!(failed.error_fingerprint.is_some(), "success=false 的失败要带错误指纹");
+        assert_eq!(finished("third").map(|e| e.outcome).as_deref(), Some("unknown"),
+            "两个信号都缺席时保持 unknown");
+        // safe_label 保留原大小写（"Bash" 合法且 ≤128 → 原样返回）。
+        assert!(events.iter().any(|event| event.event_type == "tool_finished"
+            && event.capability_id.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("bash"))
+            && event.outcome == "succeeded"),
+            "工具路径的 is_error 语义不变");
+        std::fs::remove_file(path).ok();
+    }
 
     #[test]
     fn emits_safe_claude_workflow_events_without_raw_payloads() {
