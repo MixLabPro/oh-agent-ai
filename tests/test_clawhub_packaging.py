@@ -57,6 +57,9 @@ ALLOWED_PACKAGE_FILES = {
         "agent/waste.py",
         "agent/workbuddy_evidence.py", "agent/workbuddy_session_audit.py",
         "agent/workbuddy_usage_fact.py",  # spec §9E.5 E4a
+        # HOST_MANIFEST_DSL_SPEC §8.1：generic 插件宿主 twin。
+        "agent/generic_manifest.py", "agent/generic_plugin.py",
+        "agent/generic_recipe.py",
         # adapters/：宿主适配器
         "adapters/__init__.py", "adapters/claude.py", "adapters/codex.py",
         "adapters/codex_session.py",

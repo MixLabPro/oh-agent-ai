@@ -836,6 +836,28 @@ def _main():
     # source_event_id 按 rollout **stem** 命名空间（2026-09-03 拍板 D′：byte_offset
     # 只在单文件内唯一，逻辑 session 命名会把两份续接 rollout 的同 offset 同形行
     # 误并）。与 Rust 镜像同源字节。
+    # HOST_MANIFEST_DSL_SPEC §8.1：generic 插件宿主 validate 面（只读 dry-run；
+    # Python 不长 writer——plugin-ingest --write 是 Rust-only，与
+    # workbuddy-usage-facts --write 同一条纪律）。负载与 Rust CLI 同键序。
+    p_plugin_validate = sub.add_parser(
+        "plugin-validate",
+        help="Dry-run a plugin manifest (HOST_MANIFEST_DSL_SPEC §6.5): "
+             "discovery + extraction + fact_id stability + format guard; "
+             "read-only, no writes")
+    p_plugin_validate.add_argument(
+        "--manifest", required=True,
+        help="Path to hosts.d/<slug>/manifest.json")
+    p_plugin_validate.add_argument(
+        "--file", action="append", default=None,
+        help="Explicit fixture files (repeatable); discovery per manifest "
+             "roots otherwise")
+    p_plugin_validate.add_argument(
+        "--machine-namespace", default="",
+        help="machine_namespace for fact identity (fixture mode too)")
+    p_plugin_validate.add_argument(
+        "--json", action="store_true",
+        help="Print the full report as JSON to stdout")
+
     # spec §9E.5 E4a：WorkBuddy UsageFact 诊断 CLI——traces → facts，不写盘。
     p_wb_usage_facts = sub.add_parser(
         "workbuddy-usage-facts",
@@ -1483,6 +1505,20 @@ def _main():
                      result.coverage["total_rows"],
                      result.coverage["skip_rows"]))
             print("Attempts: %s" % result.attempts)
+        return
+
+    # HOST_MANIFEST_DSL_SPEC §8.1：plugin-validate handler——只读，负载键序
+    # 与 Rust `plugin-validate --json` 一致（golden parity 面）。
+    if getattr(args, "cmd", None) == "plugin-validate":
+        from agent_vitals.agent import generic_plugin
+        files = [Path(f) for f in args.file] if args.file else []
+        payload = generic_plugin.plugin_validate_payload(
+            args.manifest, files, args.machine_namespace,
+            os.environ.get("HOME", ""))
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        gate = payload.get("gate")
+        if payload.get("error") is not None or gate != "pass":
+            sys.exit(2)
         return
 
     # Stage 2 commit 2：Codex UsageFact 诊断 CLI（v0.7 spec §3 候选 #3，决策
