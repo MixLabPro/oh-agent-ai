@@ -449,10 +449,6 @@ enum Cmd {
         #[arg(long)]
         write: bool,
     },
-    /// Replay a WorkBuddy home (`~/.workbuddy`) into UsageFact rows — one per
-    /// generation span with usage, keyed by trace.sessionId (E4a, spec §9E.5).
-    /// Buckets map like Codex's OpenAI-format usage: uncached = prompt − cached,
-    /// cache_read = cached, cache_write = 0, output = completion. Provider/route
     /// List validated plugin hosts (HOST_MANIFEST_DSL_SPEC §7.2 registry).
     /// Read-only; broken manifests are reported, never fatal (degradation
     /// isolation). Python mirror lands with the parity task.
@@ -479,6 +475,7 @@ enum Cmd {
     /// -> authority dual-write. Rust-only writer (Python grows no writer, same
     /// rule as workbuddy-usage-facts --write). Rerun-safe on every stage.
     PluginIngest {
+        /// Path to hosts.d/<slug>/manifest.json (slug must match dir name)
         #[arg(long)]
         manifest: PathBuf,
         /// machine_namespace component of SessionKey — required (spec §9)
@@ -491,9 +488,14 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: bool,
     },
-    /// are left unresolved on purpose (platform-credit vs self-configured vs
-    /// promo track is per-request and not observable locally, spec §2.1).
-    /// Traces without a sessionId are counted as `unattributed`, never emitted.
+    /// Replay a WorkBuddy home (`~/.workbuddy`) into UsageFact rows — one per
+    /// generation span with usage, keyed by trace.sessionId (E4a, spec §9E.5).
+    /// Buckets map like Codex's OpenAI-format usage: uncached = prompt − cached,
+    /// cache_read = cached, cache_write = 0, output = completion. Provider/route
+    /// attribution is resolved via the current endpoint hint and left
+    /// unresolved on purpose (platform-credit vs self-configured vs promo
+    /// track is per-request and not observable locally, spec §2.1). Traces
+    /// without a sessionId are counted as `unattributed`, never emitted.
     /// Without --write this is an in-memory, read-only diagnostic, byte-for-byte
     /// mirror of Python `scan.py workbuddy-usage-facts --json -`.
     WorkbuddyUsageFacts {

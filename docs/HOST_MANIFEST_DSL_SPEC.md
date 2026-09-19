@@ -252,12 +252,13 @@ path    := IDENT ("." IDENT | "[" integer "]")*  // 不存在的键/越界 → n
    官方审计」。manifest 无权声明订阅档。
 2. **币种**：P0 阶段插件行不参与金额声明（成本由 pricing catalog join 得出
    estimate）；多币种处理沿用决策矩阵 §4.6 既有规则。
-3. **Provenance**：安装产生不可变 `plugin_revision_id`，绑定
-   `manifest_sha256`、recipe 名称/版本及本体版本；`plugin_revisions` 与
-   `plugin_fact_revisions(fact_id, revision_id)` 持久化事实关联，`adapter_version`
-   只写 recipe 代码版本，不挪作 revision 外键。`plugin_fact_revisions` 随
-   13 个月 retention 与 facts 文件同步清理，不留孤儿行。批报告不能成为唯一
-   provenance；redacted export/MCP 不暴露本地路径或原文。
+3. **Provenance**：**P0 为逐行 provenance**——每条事实携带
+   `source_revision`（manifest 字节 sha256 前 16 hex）与 `adapter_version`
+   （recipe 代码 id），存于 facts JSONL 与 `usage_facts.source_profile`
+   邻近的身份面；批报告不能成为唯一 provenance。`plugin_revisions` /
+   `plugin_fact_revisions(fact_id, revision_id)` 两张关联表**P1 落地**
+   （随桌面导入向导的 revision 管理一起），届时关联行随 13 个月 retention
+   与 facts 文件同步清理。redacted export/MCP 不暴露本地路径或原文。
 4. **行数上限**：单文件默认 50_000 条目标记录、封顶 500_000；超限 → 整文件
    失败且不推进 checkpoint、不提交部分事实。P0 不做分页，避免“截前 N 行”随
    输入顺序变化造成永久漏账。
@@ -317,7 +318,7 @@ crates/agent-vitals-runtime/src/host_registry.rs
 | hosts crate | 新增 `generic/manifest.rs`、`discover.rs`、`recipe.rs`、`candidate.rs`；DSL `expr.rs` 缓建，adapter 不进 P0 | 中 |
 | runtime | `host_registry.rs` + Candidate→UsageFact 喉咙 + sync 既有双写编排接入 + billing 锁 + revision provenance | 中→大 |
 | CLI | `plugin-list` / `plugin-validate --manifest <p>`（含 dry-run 与 fact_id 稳定性检查）/ `plugin-ingest --manifest <p> [--write]`。**不动** `main.rs:65` 的 `--host` 枚举（那是 sessions 扫描 = 行为面） | 小 |
-| data crate | `usage_facts.host` 无需改；新增不可变 plugin revision 元数据及 fact 关联落点，并更新 schema/migration/export/rebuild | 中 |
+| data crate | `usage_facts.host` 无需改；**P0 零 schema 变更**（provenance 走事实行 `source_revision`）；revision 关联表随 P1 导入向导落地并更新 export/rebuild | 无→中 |
 | Python 对等 | `generic_manifest.py` + `generic_recipe.py` + Candidate 映射 + CLI；与 Rust 共用 fixtures 做字节差分，不宣称天然 parity | 中 |
 | 桌面 UI | workbench.js 宿主名映射兜底：`plugin:<slug>` → manifest.display.name +「插件·未审计」徽标；`SK_HOST_ORDER` 官方序后追加。P1 加导入向导 IPC：`plugin_preview` / `plugin_import` | 小→中 |
 | golden | `golden/host-generic-zcode.json`：manifest + fixture → 分类计数/Candidate/UsageFact/落库行；另有 recipe 边界 fixtures | 小→中 |
@@ -414,8 +415,9 @@ adapter 若未来开放，只能在默认关闭的开发者模式运行，输出
   样本放宽条款：真实宿主数不足 10 时，允许以文件数/行型多样性折算并**如实
   报告折算口径**，不得为凑数虚构样本。
 - **P0（安全声明式导入）**：P0-only schema + recipe 注册表/路径覆写 + 正式
-  UsageFact 映射 + revision provenance + 既有 sync 双写编排 + CLI 三命令 +
-  zcode recipe 试点。不执行 adapter，不实现自动样本推断 UI。
+  UsageFact 映射 + 逐行 provenance（`source_revision` = manifest sha256；
+  revision 关联表在 P1）+ 既有 sync 双写编排 + CLI 三命令 + zcode recipe
+  试点。不执行 adapter，不实现自动样本推断 UI。
   AC：① zcode 九月真实 rollout 经 `plugin-ingest --write` 进
   `facts/plugin-zcode.jsonl` 且重跑零追加；② 决策矩阵出现 ZCode 行且带
   `metered_estimate` + 未审计口径；③ Python 兼容实现双跑 golden 字节一致；
