@@ -27,7 +27,8 @@
 //! 拿不到锁就 await，避免两份并发打开各算一份。
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::process::Command;
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -773,6 +774,23 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// doctor 子进程的 Command。**stdio 必须显式管道 —— 这是真机空-stdout 事故的修复**：
+/// `Command::spawn()` 默认让子进程**继承父进程**的 stdin/stdout/stderr，而
+/// `Child::wait_with_output()` 只收集显式管道的流。GUI app 经 `open` 启动后
+/// stdout 是 launchd 的黑洞，doctor 的整份报告被写进去，wait_with_output 只
+/// 收到 0 字节（exit Some(0)、stderr 空）。`run_json` 用 `.output()`（默认
+/// 管道）从未踩过；本路径必须 spawn（取消要拿 pid），所以管道要自己声明。
+/// stdin 钉死 null：doctor 不读输入，别让它有机会挂在父进程的终端上。
+fn doctor_command(bin: &Path, args: &[String], home: &Path) -> Command {
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
+        .env("AGENT_VITALS_HOME", home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd
+}
+
 /// Skill 体检取数：一次 doctor 子进程拿 SV 诊断 + 扫描报告（spec §5.1）。
 /// 命中缓存（同 host/self-root/budget）直接返回，`desktop_meta.from_cache=true`；
 /// `force=true`（重新扫描按钮）忽略缓存。
@@ -804,9 +822,7 @@ pub async fn skills_doctor_report(
             return Err(no_binary());
         };
         let args = doctor_args(&host, &self_root, &budget);
-        let mut cmd = Command::new(&bin);
-        cmd.args(&args);
-        cmd.env("AGENT_VITALS_HOME", data_home());
+        let mut cmd = doctor_command(&bin, &args, &data_home());
         let child = cmd.spawn().map_err(|e| error_value("cancelled", &e.to_string()))?;
         *scan.inner().running_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(child.id());
         let out = child.wait_with_output();
@@ -1176,6 +1192,29 @@ mod tests {
                              "message": "agent-vitals binary not found (set AGENT_VITALS_BIN, \
                                          add it to PATH, or place it in the app's \
                                          Contents/Resources/bin/)"}})
+        );
+    }
+
+    /// doctor 的 Command 必须显式管道 stdout/stderr。行为断言：spawn() 默认
+    /// 继承父进程三流，`wait_with_output` 只收集显式管道 —— 不显式声明的话
+    /// 这条测试拿到空 stdout（真机上就是那份「EOF at column 0」事故）。
+    /// Command 没有公开的 stdio 读取器，只能这样钉行为。
+    #[test]
+    fn doctor_command_pipes_output_so_wait_with_output_sees_it() {
+        let mut cmd = doctor_command(
+            Path::new("/bin/echo"),
+            &["doctor-payload-marker".to_string()],
+            Path::new("/tmp"),
+        );
+        let out = cmd
+            .spawn()
+            .expect("spawn echo")
+            .wait_with_output()
+            .expect("wait_with_output");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim_end(),
+            "doctor-payload-marker",
+            "stdout 未被管道捕获 —— doctor_command 丢了 Stdio::piped()"
         );
     }
 
