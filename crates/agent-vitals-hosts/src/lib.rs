@@ -36,10 +36,11 @@ pub use hosts::dsh::sessions::{
 };
 pub use hosts::workbuddy::sessions::evidence as workbuddy_evidence;
 
-// 自描述插件宿主（HOST_MANIFEST_DSL_SPEC）：manifest 校验/受限正则子集是
-// 纯面；文件发现是 I/O，随 `sources` feature。recipe 求值与 Candidate DTO
-// 在 `hosts::generic::{recipe,candidate}`（纯），喉咙在 runtime。
-pub use hosts::generic::manifest as generic_manifest;
+// 自描述插件宿主（HOST_MANIFEST_DSL_SPEC）：manifest 校验/受限正则子集、
+// recipe 求值与 Candidate DTO 都是纯面；文件发现是 I/O，随 `sources` feature。
+// 喉咙（Candidate → UsageFact、billing 锁、provenance）在 runtime。
+pub use hosts::generic::{candidate as generic_candidate, manifest as generic_manifest,
+    recipe as generic_recipe};
 #[cfg(feature = "sources")]
 pub use hosts::generic::sources::discover as generic_discover;
 

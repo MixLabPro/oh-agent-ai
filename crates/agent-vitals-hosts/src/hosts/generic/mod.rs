@@ -11,7 +11,9 @@
 //! `generic` 是「宿主」意义上的目录：它没有自己的 wire 格式，它的 wire 是
 //! 任意宿主的 JSONL，由 manifest 声明映射。
 
+pub mod candidate;
 pub mod manifest;
+pub mod recipe;
 
 #[cfg(feature = "sources")]
 pub mod sources;
