@@ -74,10 +74,15 @@ pub fn acquire(path: &Path, holder: &str, ttl_ms: u64) -> Result<FileLease, Leas
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(LeaseError::Io)?;
     }
+    // 单次取时钟：body 的 acquired_at_ms 与 identity 三元组必须同值——各调
+    // 一次 now_ms() 时，跨毫秒边界的抢占会让 is_mine() 对自己的锁永假，
+    // Drop 静默不删锁文件，同进程下一次 acquire 撞新鲜 TTL（2026-09-21
+    // 独立验证代理在 ingest 测试里抓到的偶发 Held 根因）。
+    let acquired_at = now_ms() as u64;
     let body = serde_json::json!({
         "holder": holder,
         "pid": std::process::id(),
-        "acquired_at_ms": now_ms() as u64,
+        "acquired_at_ms": acquired_at,
         "ttl_ms": ttl_ms,
     });
     let write_lock = |p: &Path| -> Result<(), std::io::Error> {
@@ -94,7 +99,7 @@ pub fn acquire(path: &Path, holder: &str, ttl_ms: u64) -> Result<FileLease, Leas
     let identity = (
         holder.to_string(),
         std::process::id(),
-        now_ms() as u64,
+        acquired_at,
     );
     match write_lock(path) {
         Ok(()) => Ok(FileLease {

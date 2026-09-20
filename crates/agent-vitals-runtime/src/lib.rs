@@ -31,6 +31,7 @@ pub mod clock;
 pub mod custom_sources;
 pub mod decision_matrix;
 pub mod home;
+pub mod events;
 pub mod export;
 pub mod ingest_service;
 pub mod lease;

@@ -22,13 +22,28 @@ const ok = (cond, msg) => {
   else { failed++; console.error("FAIL  " + msg); }
 };
 
-// ── 事件名两处一致（lib.rs 的 FOLD_EVENT ↔ workbench.js 的 listen 参数）──
+// ── 单一 UI 事件出口（EVENT_BUS spec §1.3 / 验收 #5）──
+// 2026-09-21 迭代 1 起，`usage-fold-updated` 与 `sync-status-updated` 双通道
+// 收编为 `app-event`：lib.rs 只 emit 这一个通道（类型在 payload.type），webview
+// 只 listen 这一个入口。
 const lib = readFileSync(`${root}/apps/desktop/src-tauri/src/lib.rs`, "utf8");
 const wb = readFileSync(`${root}/apps/desktop/src-tauri/ui/workbench.js`, "utf8");
-const EVENT = "usage-fold-updated";
-console.log("# 事件名两处一致");
-ok(lib.includes(`"${EVENT}"`), "lib.rs 里定义 `usage-fold-updated`（FOLD_EVENT）");
-ok(wb.includes(`"${EVENT}"`), "workbench.js 里订阅 `usage-fold-updated`（listen 参数）");
+const EVENT = "app-event";
+console.log("# 单一 UI 事件出口");
+ok(lib.includes(`const APP_EVENT: &str = "app-event";`), "lib.rs 定义 APP_EVENT 常量");
+ok(wb.includes(`listen("app-event"`), "workbench.js 只订阅 app-event（listen 参数）");
+ok(!wb.includes(`listen("usage-fold-updated"`) && !wb.includes(`listen("sync-status-updated"`),
+  "旧双通道的 listen 已全部移除");
+ok(!/["']usage-fold-updated["']/.test(lib.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, "")),
+  "旧通道字符串在 lib.rs 代码中不再出现（注释里的历史说明不计）");
+ok(wb.includes(`type === "FoldCompleted"`) && wb.includes(`type === "FactsIngested"`)
+  && wb.includes(`type === "SyncStatusChanged"`) && wb.includes(`type === "TrustMonitorEvent"`)
+  && wb.includes(`type === "TrustMonitorInvalidated"`),
+  "webview 按类型分发（FoldCompleted / FactsIngested / SyncStatusChanged / TrustMonitorEvent / TrustMonitorInvalidated）");
+ok(lib.includes("fn drain_event_bus"), "桌面事件消费入口 drain_event_bus 存在");
+ok(lib.includes('"desktop-ui"'), "消费者注册（desktop-ui）存在");
+ok(/drain_event_bus\(app\);\s*\}/.test(lib.replace(/\n/g, " ")),
+  "sync_tick 尾部调用 drain_event_bus");
 
 // 手动同步轮询的标志：声明 + 置位 + 复位齐全，防止「漏复位把之后的事件全吞掉」。
 ok((wb.match(/manualSyncPolling/g) || []).length >= 4,

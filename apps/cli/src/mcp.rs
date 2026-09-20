@@ -143,6 +143,7 @@ fn handle_tools_call(id: Value, params: &Value, data_home: &std::path::Path, all
     }
     let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
 
+    let started = std::time::Instant::now();
     let (structured, is_error) = match mcp::dispatch_with_permissions(name, &args, data_home, allow_local_writes) {
         Ok(envelope) => (envelope, false),
         Err(err) => {
@@ -150,6 +151,12 @@ fn handle_tools_call(id: Value, params: &Value, data_home: &std::path::Path, all
             (mcp::error_envelope(&err), true)
         }
     };
+    // 审计旁路（EVENT_BUS spec §5 McpToolInvoked）：**同步内联、帧构造之前**
+    // （独立验证勘正的诚实边界）：失败只留 stderr、绝不影响协议帧；但写库最坏
+    // 付一次 busy_timeout（5s）尾延迟——serve 单连接串行 + 本地 WAL 亚毫秒写，
+    // 当前可接受；多连接/远程库化时移后台线程是既定演进项。库不存在则跳过
+    // （**不建库**：serve 在未同步机器上必须照常工作）。
+    audit_tool_call(data_home, name, &args, started.elapsed().as_millis() as i64, !is_error);
     let text = serde_json::to_string_pretty(&structured).unwrap_or_default();
     rpc_ok(
         id,
@@ -175,6 +182,88 @@ fn write_frame(out: &mut impl Write, v: &Value) -> bool {
     out.write_all(line.as_bytes()).is_ok()
         && out.write_all(b"\n").is_ok()
         && out.flush().is_ok()
+}
+
+/// MCP 审计批次：serve 进程 × 权威库各一条（该库首个 tools/call 时 begin_run，
+/// 之后复用）——`event_outbox.ingested_run_id` 的批次归属沿 trust-audit 的
+/// per-invocation run 先例，但按进程聚合，sync_runs 不随调用量增长。**按库
+/// 路径键控**（而非单例 OnceLock）：测试进程会驱动多个临时库，单例会让
+/// run_id 漂到别人的库上、触发外键拒绝。
+static MCP_AUDIT_RUNS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, String>>,
+> = std::sync::OnceLock::new();
+
+/// 进程内调用序号（McpToolInvoked 的 correlation_id 与 event_id 唯一性材料）。
+static MCP_AUDIT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn audit_tool_call(
+    data_home: &std::path::Path,
+    tool: &str,
+    args: &Value,
+    latency_ms: i64,
+    ok: bool,
+) {
+    use agent_vitals_runtime::events::{insert_outbox, AppEvent};
+    let db_path = agent_vitals_data::authority::default_authority_path(data_home);
+    if !db_path.exists() {
+        return; // 未同步机器：无库可写，审计静默跳过（不建库）
+    }
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(
+        &db_path,
+        agent_vitals_runtime::sql_sync::now_ms(),
+    ) else {
+        eprintln!("data-mcp: audit skipped (authority open failed)");
+        return;
+    };
+    let run_id = {
+        let runs = MCP_AUDIT_RUNS.get_or_init(|| {
+            std::sync::Mutex::new(std::collections::HashMap::new())
+        });
+        let mut runs = runs.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(id) = runs.get(&db_path) {
+            id.clone()
+        } else {
+            let id = format!(
+                "mcp-audit:{}-{}",
+                std::process::id(),
+                agent_vitals_runtime::sql_sync::now_ms()
+            );
+            // **成功才缓存**（独立验证发现）：失败时把 id 留在 map 里，外键会让
+            // 本进程后续每次审计 insert 都失败——审计粘性失效到重启。不缓存则
+            // 下一个 tools/call 重试开批次。
+            match db.begin_run(&id, "mcp-audit", agent_vitals_runtime::sql_sync::now_ms()) {
+                Ok(()) => { runs.insert(db_path, id.clone()); id }
+                Err(e) => {
+                    eprintln!("data-mcp: audit run begin failed: {e}");
+                    return;
+                }
+            }
+        }
+    };
+    // 参数只入指纹：**canonical JSON**（递归键排序、Python parity 钉测的
+    // canonical_json）→ fnv1a64。原始参数可能含 agents 传来的敏感值，禁令与
+    // TrustObservation 同源（spec §4.1）。独立验证抓过这里的坑：本 crate 全线
+    // 开着 serde_json 的 preserve_order，to_string 按客户端键序序列化——同参数
+    // 不同键序会得出不同指纹；指纹是持久化数据，canonical 必须一次做对。
+    let mut canonical = String::new();
+    agent_vitals_domain::source_identity::canonical_json(args, &mut canonical);
+    let fingerprint = agent_vitals_domain::source_identity::fnv1a64_hex(canonical.as_bytes());
+    // 调用序号（进程内单调）进 correlation_id：同毫秒、同参数、同延迟的两次
+    // 调用否则会同 event_id 被 INSERT OR IGNORE 静默吞掉——访问日志不允许少计
+    // （独立验证发现）；顺带给消费方一个进程内顺序信号。
+    let seq = MCP_AUDIT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let event = AppEvent::mcp_tool_invoked(
+        tool,
+        &format!("fnv1a64:{fingerprint}"),
+        latency_ms,
+        ok,
+        seq,
+    );
+    if let Err(e) = db.with_immediate_txn(|conn| insert_outbox(conn, &event, &run_id)
+        .map_err(|e| agent_vitals_data::authority::AuthorityError::Sqlite(
+            rusqlite::Error::InvalidParameterName(format!("__audit__:{e}"))))) {
+        eprintln!("data-mcp: audit emit failed: {e}");
+    }
 }
 
 #[cfg(test)]
@@ -219,6 +308,87 @@ mod tests {
         std::fs::create_dir_all(home).unwrap();
         let path = agent_vitals_data::authority::default_authority_path(home);
         agent_vitals_data::authority::AuthorityDb::open(&path, 1_700_000_000_000).unwrap();
+    }
+
+    /// 审计旁路（EVENT_BUS spec §5 McpToolInvoked）：外部 tools/call 在 outbox
+    /// 落一条审计事件——工具/延迟/成败/参数指纹俱全，**原始参数绝不入库**；
+    /// 批次按进程×库一条；未同步（无库）的 home 不建库也不落事件。
+    #[test]
+    fn tools_call_emits_mcp_audit_event_without_raw_args() {
+        let home = tmp_home("audit");
+        seed_empty_db(&home);
+        let reqs = [
+            init(),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                "name": "sessions_search",
+                "arguments": { "from": "2099-01-01", "to": "2099-01-02",
+                                "needle": "SECRETVALUE-should-never-persist" },
+            }}),
+        ];
+        let out = drive(&reqs, &home);
+        assert!(out.len() >= 2);
+        let db = agent_vitals_data::authority::AuthorityDb::open(
+            &agent_vitals_data::authority::default_authority_path(&home),
+            1_700_000_000_000,
+        ).unwrap();
+        // 第二次 tools/call（同工具）：钉「批次按进程聚合」——per-invocation 实现会
+        // 在这里翻成 2 条 run（独立验证指出的弱断言）。
+        // 第二个 drive = 新连接（新 run_loop）：**先 initialize 再调用**——协议层
+        // 会拒绝未初始化的 tools/call，那到不了 dispatch 也不会有审计。
+        let out_more = drive(
+            &[init(), json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": { "name": "sessions_search",
+                            "arguments": { "from": "2099-01-01", "to": "2099-01-02" } },
+            })],
+            &home,
+        );
+        assert_eq!(out_more.len(), 2);
+        let rows: Vec<(String, String)> = db
+            .conn()
+            .prepare(
+                "SELECT producer, payload_json FROM event_outbox \
+                 WHERE event_type = 'McpToolInvoked' ORDER BY rowid",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 2, "两次调用两条审计事件");
+        for (producer, payload) in &rows {
+            assert_eq!(producer, "mcp-serve", "producer 固定 mcp-serve");
+            assert!(payload.contains("sessions_search"), "payload 带工具名: {payload}");
+            assert!(payload.contains("fnv1a64:"), "payload 带参数指纹: {payload}");
+            assert!(payload.contains("\"latency_ms\""), "payload 带延迟: {payload}");
+            assert!(payload.contains("\"ok\":"), "payload 带成败（值如实，可为 false）: {payload}");
+        }
+        // 原文泄漏扫全表（不只审计行——任何事件行都不该带上参数原文）。
+        let all_payloads: String = db.conn().prepare(
+            "SELECT group_concat(payload_json) FROM event_outbox",
+        ).unwrap().query_row([], |r| r.get(0)).unwrap();
+        assert!(!all_payloads.contains("SECRETVALUE"), "原始参数绝不入库");
+        // 两次调用的 correlation_id（调用序号）必须互不相同——event_id 唯一性的
+        // 直接观测（独立验证 minor #4：同毫秒同参数不得互吞）。
+        let correlations: Vec<String> = db.conn().prepare(
+            "SELECT correlation_id FROM event_outbox WHERE event_type = 'McpToolInvoked' ORDER BY rowid",
+        ).unwrap().query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        assert_ne!(correlations[0], correlations[1], "调用序号必须单调");
+        let audit_runs: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM sync_runs WHERE trigger = 'mcp-audit'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(audit_runs, 1, "批次按进程×库恰好一条（两次调用后仍是 1）");
+
+        // 无库 home：不建库、不落事件（serve 在未同步机器必须照常工作）。
+        let bare = tmp_home("audit-bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let out2 = drive(&reqs, &bare);
+        assert!(out2.len() >= 2, "协议帧照常返回");
+        assert!(!agent_vitals_data::authority::default_authority_path(&bare).exists(),
+            "审计不得顺手建库");
+        drop(db);
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&bare);
     }
 
     #[test]

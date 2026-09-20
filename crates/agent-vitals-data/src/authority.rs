@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 22;
+pub const SCHEMA_VERSION: i64 = 23;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -1184,6 +1184,36 @@ ALTER TABLE trust_observations ADD COLUMN evidence_origin TEXT NOT NULL DEFAULT 
 ));
 "#;
 
+/// v23：事件总线的事务性 outbox（AGENT_VITALS_EVENT_BUS_ARCHITECTURE_SPEC §4.2）。
+/// 事件行与它描述的状态变更**同事务**写入；投递进度按 `(event_id, consumer_id)`
+/// 反连接计算——刻意不用 outbox 行上的单一 `delivered` 位：消费者注册面随进程
+/// 不同（CLI 一组、桌面一组），一个进程置位会让另一个进程的消费者永远看不到。
+/// `host` 列可空：宿主域事件（FactsIngested 等）携带，全局事件（计时器等）为
+/// NULL；`delete_imported_host_data` 据此级联清理。
+const SCHEMA_V23_ADD: &str = r#"
+CREATE TABLE IF NOT EXISTS event_outbox (
+  event_id        TEXT PRIMARY KEY,
+  event_type      TEXT NOT NULL,
+  schema_version  INTEGER NOT NULL CHECK (schema_version >= 1),
+  occurred_at_ms  INTEGER NOT NULL CHECK (occurred_at_ms >= 0),
+  host            TEXT,
+  correlation_id  TEXT,
+  producer        TEXT NOT NULL,
+  payload_json    TEXT NOT NULL,
+  ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id),
+  created_at_ms   INTEGER NOT NULL CHECK (created_at_ms >= 0)
+);
+CREATE INDEX IF NOT EXISTS event_outbox_pending
+  ON event_outbox(created_at_ms, event_id);
+CREATE TABLE IF NOT EXISTS event_deliveries (
+  event_id        TEXT NOT NULL,
+  consumer_id     TEXT NOT NULL,
+  delivered_at_ms INTEGER NOT NULL CHECK (delivered_at_ms >= 0),
+  last_error      TEXT,
+  PRIMARY KEY (event_id, consumer_id)
+);
+"#;
+
 fn ensure_schema_v20(conn: &Connection) -> Result<(), AuthorityError> {
     let has_consent_kind: bool = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('trust_observations') WHERE name = 'consent_kind'",
@@ -1398,6 +1428,7 @@ impl AuthorityDb {
                 conn.execute_batch(SCHEMA_V19_ADD)?;
                 conn.execute_batch(SCHEMA_V21_ADD)?;
                 ensure_schema_v22(conn)?;
+                conn.execute_batch(SCHEMA_V23_ADD)?;
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
@@ -1457,6 +1488,20 @@ impl AuthorityDb {
             Some(21) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
                 let migration = ensure_schema_v22(conn);
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(22) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V23_ADD)
+                    .map_err(crate::authority::AuthorityError::from);
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1929,6 +1974,7 @@ impl AuthorityDb {
         ensure_schema_v20(conn)?;
         conn.execute_batch(SCHEMA_V21_ADD)?;
         ensure_schema_v22(conn)?;
+        conn.execute_batch(SCHEMA_V23_ADD)?;
         // 中断批次清扫（§3.1）：任何 running 的批次在下次 open 时标
         // interrupted——它是观测记录，不是可恢复状态（恢复靠幂等重跑）。
         conn.execute(
@@ -2003,6 +2049,35 @@ impl AuthorityDb {
         )?)
     }
 
+    /// v23：事件 outbox 的保留清理（EVENT_BUS spec §4.2 实施勘正版）。
+    ///
+    /// 事件体保留 7 天；**投递记录随事件走**——`event_deliveries` 是反连接的
+    /// 去重账本，事件还活着时删它的 delivery 会让反连接重新发现该事件 =
+    /// 重投递（原 spec 写的「deliveries 独立保留 30 天」是重投递陷阱，勘正）。
+    /// 因此顺序固定：先扫孤儿 delivery（事件已亡）→ 再删到期事件的 delivery →
+    /// 最后删事件本体，全程一事务。
+    pub fn retention_event_outbox(&self, now_ms: i64) -> Result<usize, AuthorityError> {
+        const OUTBOX_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+        let cutoff = now_ms.saturating_sub(OUTBOX_RETENTION_MS);
+        self.with_immediate_txn(|conn| {
+            let orphans = conn.execute(
+                "DELETE FROM event_deliveries WHERE event_id NOT IN
+                   (SELECT event_id FROM event_outbox)",
+                [],
+            )?;
+            let expired = conn.execute(
+                "DELETE FROM event_deliveries WHERE event_id IN
+                   (SELECT event_id FROM event_outbox WHERE created_at_ms < ?1)",
+                rusqlite::params![cutoff],
+            )?;
+            let events = conn.execute(
+                "DELETE FROM event_outbox WHERE created_at_ms < ?1",
+                rusqlite::params![cutoff],
+            )?;
+            Ok(orphans + expired + events)
+        })
+    }
+
     /// V18：按每条 Observation 自己的过期时间清理高频、短保留的信任证据。
     /// `trust_issue_evidence` 由外键级联删除；Issue 本身保留为历史结论，后续
     /// correlator 可据「证据已过期」重新评价，而不在 retention 中绕过状态机。
@@ -2053,6 +2128,14 @@ impl AuthorityDb {
             // 指纹清理，也避免已删除数据继续关联可推断的来源元数据。
             conn.execute("UPDATE usage_facts SET source_id = NULL WHERE host = ?1", [host])?;
             let source_files = conn.execute("DELETE FROM source_files WHERE host = ?1", [host])?;
+            // 事件 outbox 的宿主域行随宿主数据一起清（含投递记录）——已删除
+            // 数据的 FactsIngested 不该再驱动任何消费者（spec §4.2 级联）。
+            conn.execute(
+                "DELETE FROM event_deliveries WHERE event_id IN
+                   (SELECT event_id FROM event_outbox WHERE host = ?1)",
+                [host],
+            )?;
+            conn.execute("DELETE FROM event_outbox WHERE host = ?1", [host])?;
             Ok(HostImportedDataDeletion { facts, sessions, source_files, trust_observations })
         })
     }
@@ -4269,6 +4352,101 @@ mod tests {
         ).unwrap();
         assert_eq!(version, SCHEMA_VERSION.to_string());
         let _ = std::fs::remove_file(&db);
+    }
+
+    /// v22 → v23：事件 outbox 两表在既有库上建立，版本推进；新库直接就有。
+    #[test]
+    fn v22_upgrade_creates_event_outbox_tables() {
+        let db = tmp_db("v22-to-v23-event-outbox");
+        {
+            let seeded = AuthorityDb::open(&db, 1).unwrap();
+            seeded.conn().execute_batch(
+                "DROP TABLE event_outbox;
+                 DROP TABLE IF EXISTS event_deliveries;
+                 UPDATE schema_meta SET value = '22' WHERE key = 'schema_version';",
+            ).unwrap();
+            drop(seeded);
+        }
+        let upgraded = AuthorityDb::open(&db, 2).unwrap();
+        let tables: i64 = upgraded.conn().query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'
+             AND name IN ('event_outbox', 'event_deliveries')",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(tables, 2, "两张事件表都必须建立");
+        let version: String = upgraded.conn().query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 事件级联（spec §4.2）：删除宿主导入数据时，该宿主的 outbox 行与投递
+    /// 记录一起清，不留「已删除数据的事实还在驱动消费者」的悬空。
+    #[test]
+    fn delete_imported_host_data_cascades_event_outbox() {
+        let db = tmp_db("delete-cascades-events");
+        let seeded = AuthorityDb::open(&db, 1).unwrap();
+        seeded.begin_run("run-e", "cli", 1).unwrap();
+        seeded.conn().execute_batch(
+            "INSERT INTO event_outbox(event_id, event_type, schema_version, occurred_at_ms,
+                 host, producer, payload_json, ingested_run_id, created_at_ms)
+             VALUES ('e1', 'FactsIngested', 1, 1, 'zcode', 'sync_service', '{}', 'run-e', 1),
+                    ('e2', 'FactsIngested', 1, 1, 'claude-code', 'sync_service', '{}', 'run-e', 1);
+             INSERT INTO event_deliveries(event_id, consumer_id, delivered_at_ms)
+             VALUES ('e1', 'price-reconcile', 2), ('e2', 'price-reconcile', 2);",
+        ).unwrap();
+        seeded.delete_imported_host_data("zcode", 3).unwrap();
+        let host_events: i64 = seeded.conn().query_row(
+            "SELECT COUNT(*) FROM event_outbox WHERE host = 'zcode'", [], |r| r.get(0),
+        ).unwrap();
+        let other_events: i64 = seeded.conn().query_row(
+            "SELECT COUNT(*) FROM event_outbox WHERE host = 'claude-code'", [], |r| r.get(0),
+        ).unwrap();
+        let dangling: i64 = seeded.conn().query_row(
+            "SELECT COUNT(*) FROM event_deliveries d
+             WHERE NOT EXISTS (SELECT 1 FROM event_outbox o WHERE o.event_id = d.event_id)",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!((host_events, other_events, dangling), (0, 1, 0),
+            "宿主事件清空、他宿主保留、投递记录无悬挂");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// outbox 保留清理的三个判别点（迭代 3，spec §4.2 勘正版）：
+    /// ① 到期事件随其 delivery 一起清；② 活事件的 delivery **永不独死**（反连接
+    /// 重投递陷阱）；③ 孤儿 delivery（事件已亡）被扫。
+    #[test]
+    fn retention_event_outbox_never_deletes_delivery_of_live_event() {
+        let path = tmp_db("outbox-retention");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run-r", "cli", 1).unwrap();
+        let now: i64 = 10_000_000_000;
+        let day = 24 * 60 * 60 * 1000;
+        db.conn().execute_batch(&format!(
+            "INSERT INTO event_outbox(event_id, event_type, schema_version, occurred_at_ms,
+                 producer, payload_json, ingested_run_id, created_at_ms)
+             VALUES ('old', 'FactsIngested', 1, 0, 'sync_service', '{{}}', 'run-r', {}),
+                    ('live', 'FactsIngested', 1, {n}, 'sync_service', '{{}}', 'run-r', {n}),
+                    ('live2', 'FactsIngested', 1, {n}, 'sync_service', '{{}}', 'run-r', {n});
+             INSERT INTO event_deliveries(event_id, consumer_id, delivered_at_ms)
+             VALUES ('old', 'c1', 1), ('live', 'c1', 1),
+                    ('live2', 'c1', 1), ('orphan', 'c1', 1);",
+            now - 8 * day, n = now,
+        )).unwrap();
+        let deleted = db.retention_event_outbox(now + day).unwrap();
+        assert!(deleted >= 3, "old 事件 + 其 delivery + 孤儿 delivery 都要删: {deleted}");
+        let live_delivery: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM event_deliveries WHERE event_id = 'live'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(live_delivery, 1, "活事件的 delivery 必须存活——删了就是重投递");
+        let live_events: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM event_outbox", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(live_events, 2, "未到期事件保留");
+        assert_eq!(db.retention_event_outbox(now + day).unwrap(), 0, "幂等");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

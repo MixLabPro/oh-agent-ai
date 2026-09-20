@@ -351,30 +351,57 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
                 retention_months - 1,
             )
             .unwrap_or(0);
-            let ret = db
-                .retention_usage_facts(cutoff)
-                .and_then(|_| db.retention_session_excerpts(cutoff));
+            let now = crate::sql_sync::now_ms();
+            // 四步各自计数、各自如实报数（独立验证发现：and_then 链只保留尾环
+            // 计数，此前 eprintln 拿它当 facts 数——标签与对象双双错位）。
+            // 失败语义不变：任一步 Err → 整轮 failed、不盖日戳、下轮全量重跑
+            // （四步皆幂等 DELETE，重跑已成功步为 0 行）。
+            let steps: [(&str, Result<usize, agent_vitals_data::authority::AuthorityError>); 4] = [
+                ("usage_facts", db.retention_usage_facts(cutoff)),
+                ("session_excerpts", db.retention_session_excerpts(cutoff)),
+                // v23 事件 outbox 保留 + v18 孤儿接线（retention_trust_observations
+                // 有实现有测试但生产零调用——2026-09-21 迭代 3 发现）。
+                ("event_outbox", db.retention_event_outbox(now)),
+                ("trust_observations", db.retention_trust_observations(now)),
+            ];
+            let failed = steps
+                .iter()
+                .find(|(_, r)| r.is_err())
+                .map(|(name, _)| *name);
+            let summary: Vec<String> = steps
+                .iter()
+                .filter_map(|(name, r)| match r {
+                    Ok(n) if *n > 0 => Some(format!("{name} {n}")),
+                    _ => None,
+                })
+                .collect();
+            if !summary.is_empty() {
+                eprintln!("authority retention ({}mo): {}", retention_months, summary.join(", "));
+            }
             let _ = db.finish_run(
                 &run_id,
-                if ret.is_ok() { "succeeded" } else { "failed" },
-                ret.as_ref()
-                    .err()
-                    .map(|_| "retention_failed".to_string())
-                    .as_deref(),
-                ret.as_ref().err().map(|e| e.to_string()).as_deref(),
+                if failed.is_none() { "succeeded" } else { "failed" },
+                failed.map(|_| "retention_failed".to_string()).as_deref(),
+                None,
                 crate::sql_sync::now_ms(),
             );
-            match ret {
-                Ok(n) => {
+            match failed {
+                None => {
                     crate::state::atomic_write_json(
                         &ret_path,
                         &json!({"last_retention_date": bj_day}),
                     );
-                    if n > 0 {
-                        eprintln!("authority retention: dropped {n} facts ({retention_months}mo)");
-                    }
                 }
-                Err(e) => eprintln!("authority retention failed: {e}"),
+                Some(step) => {
+                    let detail = steps
+                        .iter()
+                        .find_map(|(_, r)| match r {
+                            Err(e) => Some(e.to_string()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    eprintln!("authority retention failed at {step}: {detail}");
+                }
             }
         }
     }
@@ -493,15 +520,39 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
     if let Err(e) = crate::sql_sync::snapshot_current_pricing(&authority) {
         eprintln!("sync-facts warning (pricing snapshot): {e}");
     }
-    // 本地价格发现（零网络）：把"日志里出现了没有价卡的模型"变成「待处理」里的
-    // 一条任务。它与上面那步顺序有关——先落当前价卡快照，判定才用得上最新价卡。
-    // 失败只警告：这是增强信息，不该让整轮同步失败。
-    if let Err(e) = crate::price_discovery::reconcile_unpriced_models(
-        &authority,
-        &crate::clock::current_month_beijing(),
-        crate::sql_sync::now_ms(),
-    ) {
-        eprintln!("sync-facts warning (price discovery): {e}");
+    // 本地价格发现（零网络）改为事件驱动（EVENT_BUS spec §9 P0 验收 #4）：
+    // FactsIngested 已在各宿主写入事务内落 outbox；价卡快照仍显式先行（消费
+    // 者依赖最新价卡做判定），随后一次性 drain——本轮新事件与上次崩溃残留
+    // （deliveries 缺行）同轮补投，顺序与原内联调用等价。
+    {
+        let authority_path = agent_vitals_data::authority::default_authority_path(data_home);
+        let dispatcher = crate::events::Dispatcher::new(vec![
+            crate::events::EventConsumer::new("price-reconcile", move |_event| {
+                // 消费者自持连接（drain 不持事务，spec §6）。打开失败按处理
+                // 失败记账——**不重投本事件**（deliveries 反连接永久排除）；
+                // price-reconcile 忽略事件载荷做全量 reconcile，下一轮
+                // FactsIngested 自然自愈，所以这个语义是安全的。
+                let db = agent_vitals_data::authority::AuthorityDb::open(
+                    &authority_path,
+                    crate::sql_sync::now_ms(),
+                )
+                .map_err(|e| e.to_string())?;
+                crate::price_discovery::reconcile_unpriced_models(
+                    &db,
+                    &crate::clock::current_month_beijing(),
+                    crate::sql_sync::now_ms(),
+                )
+                .map(|_| ())
+            }),
+        ]);
+        match dispatcher.drain(authority.conn()) {
+            Ok(report) if report.failed > 0 || report.skipped > 0 => eprintln!(
+                "sync-facts warning (event dispatch): {} failed, {} skipped",
+                report.failed, report.skipped
+            ),
+            Ok(_) => {}
+            Err(e) => eprintln!("sync-facts warning (event dispatch): {e}"),
+        }
     }
     // 计费声明是持续生效的规则：用户在归因表单里填的「结束时间为空 = 持续有效」
     // 意味着之后同特征的新事实必须自动沿用，而不是每个新会话都回到待确认面板
