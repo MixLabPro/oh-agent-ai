@@ -122,6 +122,11 @@ struct Args {
     #[arg(long = "self-root", global = true)]
     self_root: Option<PathBuf>,
 
+    /// Print the CLI build contract without touching local state. Release packagers use
+    /// this to prove the bundled CLI can open the desktop app's authority schema.
+    #[arg(long = "build-info", global = true, hide = true)]
+    build_info: bool,
+
     /// DSH registry snapshot JSON (probe evidence); when absent, loaded falls back to the session log
     #[arg(long = "runtime-json", global = true)]
     runtime_json: Option<PathBuf>,
@@ -1700,7 +1705,19 @@ fn print_daily_summary_text(s: &agent_vitals_data::projection::DailySummary) {
     );
 }
 
+fn cli_build_info() -> Value {
+    json!({
+        "cli_version": env!("CARGO_PKG_VERSION"),
+        "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
+    })
+}
+
 fn main() {
+    let args = Args::parse();
+    if args.build_info {
+        println!("{}", serde_json::to_string(&cli_build_info()).unwrap_or_default());
+        return;
+    }
     // 统计时区偏好必须在任何 SQLite localtime 查询前应用；缺失配置继续使用 OS 时区。
     if let Err(error) = agent_vitals_runtime::statistics_timezone::apply(
         &agent_vitals_runtime::home::data_home(),
@@ -1708,8 +1725,6 @@ fn main() {
         eprintln!("statistics timezone unavailable: {error}");
         std::process::exit(2);
     }
-    let args = Args::parse();
-
     // Data MCP：本机 stdio server，永不返回（stdin EOF → exit 0）。在扫描
     // 之前短路——它不碰 skill 扫描，只对 SQL 权威库做只读查询。
     if let Some(Cmd::DataMcp { action }) = &args.cmd {
@@ -5432,6 +5447,16 @@ fn print_navigation_summary(env: &Value) {
 #[cfg(test)]
 mod codex_sql_tests {
     use super::*;
+
+    #[test]
+    fn build_info_reports_the_authority_schema_without_opening_local_state() {
+        let info = cli_build_info();
+        assert_eq!(
+            info["authority_schema"],
+            json!(agent_vitals_data::authority::SCHEMA_VERSION)
+        );
+        assert_eq!(info["cli_version"], json!(env!("CARGO_PKG_VERSION")));
+    }
 
     fn fresh_dir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("av-codex-sql-{tag}-{}", std::process::id()));

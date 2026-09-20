@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import path from "node:path";
 
@@ -22,6 +22,7 @@ if (!existsSync(app)) {
 
 const executable = path.join(app, "Contents/MacOS/agent-vitals-menubar");
 const cli = path.join(app, "Contents/Resources/bin/agent-vitals");
+const authoritySource = path.join(repo, "crates/agent-vitals-data/src/authority.rs");
 for (const [label, file] of [["app executable", executable], ["bundled CLI", cli]]) {
   if (existsSync(file)) ok(`${label}: ${path.relative(repo, file)}`);
   else fail(`${label} missing: ${file}`);
@@ -34,6 +35,22 @@ if (existsSync(cli)) {
     else fail("bundled CLI returned an empty version");
   } catch (error) {
     fail(`bundled CLI --version failed: ${error.message}`);
+  }
+}
+
+if (existsSync(cli) && existsSync(authoritySource)) {
+  try {
+    const source = readFileSync(authoritySource, "utf8");
+    const expected = source.match(/pub const SCHEMA_VERSION: i64 = (\d+);/)?.[1];
+    if (!expected) throw new Error("could not read SCHEMA_VERSION from authority source");
+    const info = JSON.parse(execFileSync(cli, ["--build-info"], { encoding: "utf8" }));
+    if (String(info.authority_schema) === expected) {
+      ok(`bundled CLI authority schema: v${expected}`);
+    } else {
+      fail(`bundled CLI authority schema v${info.authority_schema ?? "unknown"} does not match source v${expected}`);
+    }
+  } catch (error) {
+    fail(`bundled CLI build contract failed: ${error.message}`);
   }
 }
 

@@ -26,9 +26,9 @@ cargo tauri icon icons/icon-source.png
 # 开发
 cargo tauri dev
 
-# 出仓：产出 .app / .dmg
-cargo tauri build
-# 产物在 target/release/bundle/ 下
+# 本机真机包：同一 worktree 先构建 CLI、再打包 app、最后验证内置 CLI 的 authority schema
+../../../scripts/build-macos-app.sh
+# 产物在 target/release/bundle/ 下；这是本地 ad-hoc 测试包，不是对外发布包
 ```
 
 ## 发布包安装与恢复
