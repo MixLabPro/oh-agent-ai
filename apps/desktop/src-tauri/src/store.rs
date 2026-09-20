@@ -521,10 +521,33 @@ pub async fn trust_runtime_snapshot(
         let mut cmd = Command::new(&bin);
         cmd.args(["trust", "monitor", "snapshot", "--json"]);
         cmd.env("AGENT_VITALS_HOME", data_home());
-        run_json(cmd)
+        let raw = run_json(cmd)?;
+        Ok(safe_trust_runtime_snapshot(&raw))
     })
     .await
     .map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
+fn safe_trust_runtime_snapshot(raw: &Value) -> Value {
+    let capability = match raw.get("capability").and_then(Value::as_str) {
+        Some("macos_lsof_partial") => "macos_lsof_partial",
+        Some("runtime_sensor_unavailable_on_this_platform") => "runtime_sensor_unavailable_on_this_platform",
+        Some("lsof_unavailable") => "lsof_unavailable",
+        Some("lsof_no_visible_output") => "lsof_no_visible_output",
+        Some("lsof_invalid_output") => "lsof_invalid_output",
+        _ => "unavailable",
+    };
+    let count = |key: &str| safe_matrix_count(raw.get(key), 1_000_000_000).unwrap_or(0);
+    json!({
+        "capability": capability,
+        "candidate_processes": count("candidate_processes"),
+        "observations": count("observations"),
+        "inserted": count("inserted"),
+        "duplicate": count("duplicate"),
+        "findings_upserted": count("findings_upserted"),
+        "notification_candidates": count("notification_candidates"),
+        "evidence_links_added": count("evidence_links_added"),
+    })
 }
 
 /// Trust hot-plug review surface. Agent-facing MCP can only stage proposals;
@@ -1741,6 +1764,24 @@ mod tests {
         assert!(projected["limitations"].as_array().unwrap().iter().any(|item| item == "top_sessions_unavailable"));
         assert_eq!(projected["findings_summary"][0]["currency"], "<unknown>");
         assert_eq!(projected["findings_summary"][0]["combo"]["model_id"], "<unknown>");
+    }
+
+    #[test]
+    fn safe_runtime_snapshot_projection_drops_internal_notification_keys() {
+        let raw = json!({
+            "capability": "macos_lsof_partial", "candidate_processes": 2, "observations": 3,
+            "inserted": 3, "duplicate": 0, "findings_upserted": 1,
+            "notification_candidates": 1, "evidence_links_added": 2,
+            "notification_keys": ["trust_internal_instance_secret"],
+            "path": "/Users/Admin/private", "command": "agent --token secret",
+        });
+        let projected = safe_trust_runtime_snapshot(&raw);
+        assert_eq!(projected["capability"], "macos_lsof_partial");
+        assert_eq!(projected["observations"], 3);
+        assert!(projected.get("notification_keys").is_none());
+        for secret in ["trust_internal_instance_secret", "/Users/Admin/private", "agent --token secret"] {
+            assert!(!projected.to_string().contains(secret), "runtime snapshot secret leaked: {secret}");
+        }
     }
 
     /// list_args 字段集是 v0.9.1 收口后的精简版：旧 CLI 用的 `--model` / `--from`

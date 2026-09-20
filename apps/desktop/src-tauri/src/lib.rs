@@ -1353,14 +1353,22 @@ fn trust_monitor_state_read() -> Value {
             "reason": "monitor_state_unavailable"
         });
     };
+    let capability = match state.capability.as_str() {
+        "not_started" | "available" | "partial" | "unavailable" => state.capability.as_str(),
+        _ => "unavailable",
+    };
+    let last_error_code = match state.last_error_code.as_deref() {
+        Some("sensor_unavailable" | "snapshot_failed" | "sensor_partial" | "authority_unavailable" | "monitor_state_unavailable") => state.last_error_code.as_deref(),
+        _ => None,
+    };
     serde_json::json!({
         "status": "ok",
         "enabled": state.enabled,
         "interval_seconds": state.interval_seconds,
         "notifications_enabled": state.notifications_enabled,
-        "capability": state.capability,
+        "capability": capability,
         "last_success_at_ms": state.last_success_at_ms,
-        "last_error_code": state.last_error_code,
+        "last_error_code": last_error_code,
         "updated_at_ms": state.updated_at_ms,
     })
 }
