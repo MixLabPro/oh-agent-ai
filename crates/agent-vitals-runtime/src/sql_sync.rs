@@ -634,6 +634,22 @@ pub(crate) fn write_flat_facts_with_sources(
                 now,
             )?;
         }
+        // 事件总线（spec §1.2）：FactsIngested 与本批事实**同事务**落 outbox——
+        // 早于此处返回的空批短路（上方 is_empty 分支）不发射；全重复的重放
+        // 也算「同步发生过」，照发（消费者幂等，计数如实进 payload）。
+        crate::events::insert_outbox(
+            conn,
+            &crate::events::AppEvent::facts_ingested(
+                host,
+                &run_id,
+                outcome.inserted + outcome.rejected,
+                outcome.duplicate,
+            ),
+            &run_id,
+        )
+        .map_err(|e| AuthorityError::Sqlite(
+            rusqlite::Error::InvalidParameterName(format!("__event_outbox__:{e}")),
+        ))?;
         Ok(())
     });
 

@@ -493,15 +493,37 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
     if let Err(e) = crate::sql_sync::snapshot_current_pricing(&authority) {
         eprintln!("sync-facts warning (pricing snapshot): {e}");
     }
-    // 本地价格发现（零网络）：把"日志里出现了没有价卡的模型"变成「待处理」里的
-    // 一条任务。它与上面那步顺序有关——先落当前价卡快照，判定才用得上最新价卡。
-    // 失败只警告：这是增强信息，不该让整轮同步失败。
-    if let Err(e) = crate::price_discovery::reconcile_unpriced_models(
-        &authority,
-        &crate::clock::current_month_beijing(),
-        crate::sql_sync::now_ms(),
-    ) {
-        eprintln!("sync-facts warning (price discovery): {e}");
+    // 本地价格发现（零网络）改为事件驱动（EVENT_BUS spec §9 P0 验收 #4）：
+    // FactsIngested 已在各宿主写入事务内落 outbox；价卡快照仍显式先行（消费
+    // 者依赖最新价卡做判定），随后一次性 drain——本轮新事件与上次崩溃残留
+    // （deliveries 缺行）同轮补投，顺序与原内联调用等价。
+    {
+        let authority_path = agent_vitals_data::authority::default_authority_path(data_home);
+        let dispatcher = crate::events::Dispatcher::new(vec![
+            crate::events::EventConsumer::new("price-reconcile", move |_event| {
+                // 消费者自持连接（drain 不持事务，spec §6）；打开失败按处理
+                // 失败记账，下一进程的 drain 重扫补投。
+                let db = agent_vitals_data::authority::AuthorityDb::open(
+                    &authority_path,
+                    crate::sql_sync::now_ms(),
+                )
+                .map_err(|e| e.to_string())?;
+                crate::price_discovery::reconcile_unpriced_models(
+                    &db,
+                    &crate::clock::current_month_beijing(),
+                    crate::sql_sync::now_ms(),
+                )
+                .map(|_| ())
+            }),
+        ]);
+        match dispatcher.drain(authority.conn()) {
+            Ok(report) if report.failed > 0 || report.skipped > 0 => eprintln!(
+                "sync-facts warning (event dispatch): {} failed, {} skipped",
+                report.failed, report.skipped
+            ),
+            Ok(_) => {}
+            Err(e) => eprintln!("sync-facts warning (event dispatch): {e}"),
+        }
     }
     // 计费声明是持续生效的规则：用户在归因表单里填的「结束时间为空 = 持续有效」
     // 意味着之后同特征的新事实必须自动沿用，而不是每个新会话都回到待确认面板

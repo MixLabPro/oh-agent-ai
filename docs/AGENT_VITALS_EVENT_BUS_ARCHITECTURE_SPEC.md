@@ -1,6 +1,6 @@
 # Agent Vitals Runtime Event Bus Architecture Spec
 
-> 状态：**Draft v1.1（2026-09-20）**——v1 经架构评审会话收敛（事件判据、候选盘点、trust 传感器边界、hook 禁区）；v1.1 并入 apalis-sqlite 源码研究成果（§12：hook 叫醒不带货、原子认领、部分索引、约束级幂等、回收留痕五项采纳，依据与出处见该节）；
+> 状态：**Draft v1.2（2026-09-21）**——v1 经架构评审会话收敛；v1.1 并入 apalis-sqlite 源码研究（§12）；v1.2 为 **P0 实施修订**（`feat/runtime-event-bus` worktree）：迁移落位 v23（v22 已被 evidence_origin 占用）、投递进度改为按消费者反连接（§4.2 修订）、drain 为自动提交两段式（§4.3 修订）、CLI 尾部统一 drain 保序（§9-P0 修订）；
 > 前置：v0.9.1 SQL 权威库已冻结（单一事实源 + 幂等重放）；trust P1（`FINDINGS_TRUST_EGRESS_MONITORING_SPEC`）已合入，P2 实时传感器未实施；
 > 目标：为 runtime 引入**最小事件驱动层**——事务性 outbox + 单管道类型化事件——收编既有的内联反应链与缓存失效土办法，并为 trust P2 传感器预留唯一接入通道。
 
@@ -128,19 +128,17 @@ CREATE TABLE event_outbox (
   ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id),
   created_at_ms   INTEGER NOT NULL
 );
--- 待投递集是部分索引（学 apalis-sqlite 的 claimable 形状）：热扫描只碰未投递行，
--- 终态行不进索引，表增长不影响投递延迟。
-CREATE INDEX event_outbox_pending ON event_outbox(created_at_ms)
-  WHERE delivered = 0;
+-- 投递进度按 (event_id, consumer_id) 反连接（见下方实施修订），索引只管扫描序。
+CREATE INDEX event_outbox_pending ON event_outbox(created_at_ms, event_id);
 ```
 
-配套 `event_deliveries(event_id, consumer_id, delivered_at_ms, PRIMARY KEY(event_id, consumer_id))` 记录消费进度；tailer 按 `created_at_ms` 顺序扫未投递行。**retention**：事件体保留 7 天（与 trust 高频 observation 同窗口）；`event_deliveries` 保留 30 天。`delete_imported_host_data(host)` 级联同步清理 outbox 中该宿主 correlation 的行。
+**实施修订（v1.2）**：投递进度不用 outbox 行上的单一 `delivered` 位，而按 `(event_id, consumer_id)` **反连接**计算——消费者注册面随进程不同（CLI 一组、桌面一组），一个进程置位会让另一个进程的消费者永远看不到。因此索引为普通的 `(created_at_ms, event_id)`（终态行靠 retention 清理离开热区），`event_deliveries(event_id, consumer_id, delivered_at_ms, last_error, PRIMARY KEY(event_id, consumer_id))` 记录消费进度。**retention**：事件体保留 7 天（与 trust 高频 observation 同窗口）；`event_deliveries` 保留 30 天。`delete_imported_host_data(host)` 先删该宿主事件的 deliveries 再删 outbox 行（host 为列，全局事件 NULL 不受影响），已由级联测试钉住。
 
 ### 4.3 投递语义
 
-- 快通道（**hook 叫醒，不带货**）：rusqlite `Connection::update_hook` 过滤 `Insert ∧ table=event_outbox` 后只向 dispatcher 发一个**唤醒信号**（不带事件体）——投递仍是一次批量 SQL 扫描。单一数据路径避免"hook 读一行 + fetch 再读一遍"的双读与形状分叉（apalis-sqlite `callback.rs` 的生产验证，见 §12）；
+- 快通道（**hook 叫醒，不带货**）：rusqlite `Connection::update_hook` 过滤 `Insert ∧ table=event_outbox` 后只向 dispatcher 发一个**唤醒信号**（不带事件体）——投递仍是一次批量 SQL 扫描。单一数据路径避免"hook 读一行 + fetch 再读一遍"的双读与形状分叉（apalis-sqlite `callback.rs` 的生产验证，见 §12）。**注意 SQLite 语义**：update_hook 只对**本连接**的写入触发——多进程（CLI 写、桌面投递）下跨连接唤醒靠「事务提交后显式 drain」；P0 即此形态（同步尾部一次 drain，新事件与崩溃残留同轮补投，且保住「价卡快照先行于 price-reconcile 消费者」的原有顺序）；常驻 dispatcher + 同连接 hook 是 P1 桌面接线；
 - 慢通道（轮询兜底）：tailer 每 5 秒或进程启动时扫 outbox 补投；hook 失效（跨进程写入、回调丢失）时轮询保证最终投递；
-- 扫描采用**原子认领形状**（apalis-sqlite `fetch_next.sql` 同款）：单条 `UPDATE … WHERE 事件集子查询 RETURNING *`，认领与状态迁移一步完成，无 SELECT-then-UPDATE 竞态——权威库是多连接的（CLI 与桌面同写），不能假设单写者；
+- 扫描采用**原子认领形状**（apalis-sqlite `fetch_next.sql` 同款思路）：单语句完成认领与状态迁移，无 SELECT-then-UPDATE 竞态。**实施修订（v1.2）**：P0 的 drain 为**自动提交两段式**——反连接查（单语句）→ 调 handler（**自持连接**，drain 不持事务）→ 记账（`INSERT OR REPLACE` deliveries）。消费者可能写库（price-reconcile 建 issue），drain 若持事务会与自己锁死；「先处理、后记账」的崩溃语义（处理成功才记账，崩溃于两者之间=未投递，下轮重扫）不依赖事务包裹；
 - `mpsc::channel(1024)` 有界；满时按 `event_type` 优先级丢弃（audit < maintenance < derived < notification），并计数 `dropped_count`（沿 trust 规格 §6.2 的过载纪律）；
 - **不保证顺序跨事件类型**；同类事件按 `occurred_at_ms` 有序。消费者不得假设跨类型顺序。
 
@@ -191,7 +189,7 @@ fd 表采样（libproc，同 uid，类别化后即丢）───┼─► 聚�
 
 ## 9. 分期
 
-- **P0（基础设施 + 第一个扇出）**：`AppEvent` DTO + `event_outbox`/`event_deliveries` 迁移 + dispatcher（双通道）+ `FactsIngested` 三消费者（price reconcile、配额扫描、issue 评估器）。验收 = 既有内联调用链删除后，行为等价（golden 不变）。
+- **P0（基础设施 + 第一个扇出）**：`AppEvent` DTO + authority v23 迁移（`event_outbox`/`event_deliveries` + 删除级联）+ `Dispatcher`（自动提交两段式 drain，闭集词表双侧校验）+ `FactsIngested` 在 `write_flat_facts_with_sources` 事务内发射 + **price-reconcile 消费者**（原 `sync_service.rs` 内联调用删除，尾部 drain 保序：价卡快照先行）。配额扫描、issue 评估器两消费者随 P1 桌面常驻 dispatcher 接入（P0 的 CLI 单进程形态下它们没有独立运行时机）。验收 = 内联调用链删除后行为等价（golden 不变）+ 崩溃恢复/双投递幂等/词表拒绝单测。
 - **P1（缓存统一 + 审计旁路）**：`AuthorityRevisionAdvanced` 收编三套缓存失效；`McpToolInvoked` 落访问日志；`app-event` 单一 UI 出口收编 `FOLD_EVENT`/`SYNC_STATUS_EVENT`。
 - **P2（时间事件 + trust 接入）**：timer 事件 + expires 清理；trust P2 传感器接入（本规格是其唯一通道）。
 - **P3（可选）**：FSEvents 写事件作为 sync 差量的低延迟触发（指纹差量兜底自愈）。
