@@ -679,6 +679,17 @@
       case "findings_freshness": return { status: "ok", freshness: { state: "stale", last_successful_sync_at: new Date(Date.now() - 1500000).toISOString(), stale_hosts: ["workbuddy"], syncing: false } };
       // Shape: crates/agent-vitals-runtime/src/decision_matrix.rs::decision_matrix
       // （rows 键 = combo_rows 的 json! 字段；金额按币种分列，mock 同纪律）。
+      case "decision_matrix_safe": return {
+        schema_version: "agent-vitals-decision-matrix/v1", status: "ok", month: "2026-09",
+        rows: [{ host: "plugin:zcode", model_id: "glm-5", provider_id: "zhipu", sessions: 4,
+          tokens: { uncached_input: 1200, cache_read: 8800, cache_write: 300, output: 900, total: 11200 },
+          cache_hit_ratio: 0.8544, has_subscription: false, waste_rate: null,
+          amounts: [{ amount_minor: 781, currency: "CNY", basis: "metered_estimate" }],
+          top_sessions: [{ session_ref: "sr_0123456789", span_first_ms: Date.now() - 3600000, span_last_ms: Date.now(), tokens_total: 6400, failures: 2 }],
+          host_behavior: { SV610: 2 }, limit_pressure: { hits: 1, per_session: 0.25 }, cost_provider_unresolved: false }],
+        findings_summary: [{ kind: "marathon", session_ref: "sr_0123456789", span_hours: 25.2, tokens_total: 11200, failures: 2, combo: { host: "plugin:zcode", model_id: "glm-5" } }],
+        limitations: ["waste_rate_unavailable", "host_behavior_host_level", "amounts_currency_separated", "fingerprint_link_deferred"],
+      };
       case "decision_matrix": return {
         month: "2026-09",
         rows: [

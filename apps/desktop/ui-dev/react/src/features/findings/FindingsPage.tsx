@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { readFindings, readFindingsFreshness, type FindingGroup, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
+import { readDecisionMatrix, readFindings, readFindingsFreshness, type DecisionMatrixReport, type FindingGroup, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
+import { DecisionMatrixSection } from "./DecisionMatrixSection";
 
 type SeverityFilter = "all" | "critical" | "warning" | "info";
 
@@ -73,6 +74,9 @@ function FindingRow({ group }: { group: FindingGroup }) {
 export function FindingsPage() {
   const [report, setReport] = useState<FindingsReport | null>(null);
   const [freshness, setFreshness] = useState<FindingsFreshness>({ status: "unavailable", state: "unknown", last_successful_sync_at: null, stale_hosts: [], syncing: false });
+  const [matrix, setMatrix] = useState<DecisionMatrixReport | null>(null);
+  const [matrixLoading, setMatrixLoading] = useState(true);
+  const [matrixError, setMatrixError] = useState<string | null>(null);
   const [loading, setLoading] = useState("正在读取本地发现…");
   const [error, setError] = useState<string | null>(null);
   const [severity, setSeverity] = useState<SeverityFilter>("all");
@@ -84,6 +88,11 @@ export function FindingsPage() {
     void Promise.all([readFindings(), readFindingsFreshness()])
       .then(([nextReport, nextFreshness]) => { setReport(nextReport); setFreshness(nextFreshness); setLoading(""); })
       .catch((reason: unknown) => { setError(reason instanceof Error ? reason.message : "本地发现暂不可用"); setLoading(""); });
+    setMatrixLoading(true);
+    setMatrixError(null);
+    void readDecisionMatrix()
+      .then((nextMatrix) => { setMatrix(nextMatrix); setMatrixLoading(false); })
+      .catch((reason: unknown) => { setMatrixError(reason instanceof Error ? reason.message : "本地对比数据暂不可用"); setMatrixLoading(false); });
   };
 
   useEffect(() => { load(); }, []);
@@ -99,6 +108,7 @@ export function FindingsPage() {
     {error && <div className="error-banner" role="alert">{error} · 当前保留上一次结果</div>}
     {report && <div className="finding-stats" aria-label="发现汇总"><article><span className="eyebrow">发现组</span><strong>{report.totals.issues}</strong><small>{report.totals.sessions} 个受影响会话</small></article><article><span className="eyebrow">高风险</span><strong>{report.totals.critical}</strong><small>需优先查看</small></article><article><span className="eyebrow">待关注</span><strong>{report.totals.warning}</strong><small>可行动或需确认</small></article><article><span className="eyebrow">规则</span><strong>{report.rules.length}</strong><small>本地确定性规则</small></article></div>}
     <section className="finding-section" aria-labelledby="todo-title"><div className="section-heading"><div><p className="eyebrow">行动面</p><h3 id="todo-title">待办</h3></div><span className="count-badge">{todoGroups.length}</span></div>{todoGroups.length ? <div className="finding-list">{todoGroups.map((group) => <FindingRow key={group.group_id} group={group} />)}</div> : <div className="finding-empty"><strong>当前没有可直接处理的待办</strong><p>行为命中不会伪装成任务；它们会保留在下方证据明细中。</p></div>}</section>
+    <DecisionMatrixSection report={matrix} loading={matrixLoading} error={matrixError} />
     <section className="finding-section" aria-labelledby="evidence-title"><div className="section-heading"><div><p className="eyebrow">查证面</p><h3 id="evidence-title">证据明细</h3></div><div className="finding-filters"><label>等级<select value={severity} onChange={(event) => setSeverity(event.target.value as SeverityFilter)}><option value="all">全部</option><option value="critical">高风险</option><option value="warning">需关注</option><option value="info">信息</option></select></label><label>规则<select value={rule} onChange={(event) => setRule(event.target.value)}><option value="all">全部规则</option>{(report?.rules ?? []).map((item) => <option key={item.rule} value={item.rule}>{item.rule}</option>)}</select></label></div></div>{visibleGroups.length ? <div className="finding-list">{visibleGroups.map((group) => <FindingRow key={group.group_id} group={group} />)}</div> : <div className="finding-empty"><strong>{report ? "没有符合当前筛选的证据" : "正在准备证据投影"}</strong><p>{report ? "可切换等级或规则筛选；空结果不代表本机安全。" : "前端只展示脱敏后的本地投影。"}</p></div>}</section>
   </section>;
 }

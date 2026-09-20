@@ -925,6 +925,192 @@ pub async fn decision_matrix(month: Option<String>) -> Result<Value, Value> {
     .map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 
+fn safe_matrix_text(value: &str, max_chars: usize) -> String {
+    let segments_are_ids = value.split('/').count() <= 2
+        && value.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment.chars().next().is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '<')
+                && segment.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '@' | '+' | '<' | '>'))
+        });
+    if value.is_empty()
+        || value.chars().count() > max_chars
+        || value.chars().any(char::is_control)
+        || value.starts_with('/')
+        || value.contains('\\')
+        || value.starts_with("file:")
+        || value.as_bytes().get(1).is_some_and(|ch| *ch == b':' && value.as_bytes()[0].is_ascii_alphabetic())
+        || value.contains("://")
+        || value.contains("..")
+        || !segments_are_ids
+    {
+        "<unknown>".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn safe_matrix_ratio(value: Option<&Value>) -> Option<f64> {
+    let value = value?.as_f64()?;
+    value.is_finite().then_some(value).filter(|value| (0.0..=1.0).contains(value))
+}
+
+fn safe_matrix_count(value: Option<&Value>, max: u64) -> Option<u64> {
+    value.and_then(Value::as_u64).filter(|value| *value <= max)
+}
+
+fn safe_matrix_amount(value: &Value) -> Option<Value> {
+    let row = value.as_object()?;
+    let amount_minor = safe_matrix_count(row.get("amount_minor"), 1_000_000_000_000_000)?;
+    let currency = row.get("currency").and_then(Value::as_str)?;
+    let currency = if currency.len() <= 12 && currency.chars().all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_') {
+        currency.to_string()
+    } else {
+        "<unknown>".to_string()
+    };
+    let basis = match row.get("basis").and_then(Value::as_str).unwrap_or("other") {
+        "metered_actual" | "metered_estimate" | "fixed_subscription" | "api_equivalent" => row["basis"].as_str().unwrap_or("other").to_string(),
+        _ => "other".to_string(),
+    };
+    Some(json!({"amount_minor": amount_minor, "currency": currency, "basis": basis}))
+}
+
+fn safe_matrix_session(value: &Value) -> Option<Value> {
+    let row = value.as_object()?;
+    let session_ref = row.get("session_ref").and_then(Value::as_str)?;
+    if !safe_matrix_session_ref(session_ref) { return None; }
+    let first = safe_matrix_count(row.get("span_first_ms"), 4_102_444_800_000)?;
+    let last = safe_matrix_count(row.get("span_last_ms"), 4_102_444_800_000)?;
+    if first > last { return None; }
+    Some(json!({
+        "session_ref": session_ref,
+        "span_first_ms": first,
+        "span_last_ms": last,
+        "tokens_total": safe_matrix_count(row.get("tokens_total"), 1_000_000_000_000_000).unwrap_or(0),
+        "failures": safe_matrix_count(row.get("failures"), 1_000_000_000).unwrap_or(0),
+    }))
+}
+
+fn safe_matrix_session_ref(value: &str) -> bool {
+    value.starts_with("sr_") && value.len() <= 128 && value[3..].chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+}
+
+fn safe_matrix_row(value: &Value) -> Option<Value> {
+    let row = value.as_object()?;
+    let host = safe_findings_host(row.get("host").and_then(Value::as_str).unwrap_or("generic"));
+    let model = safe_matrix_text(row.get("model_id").and_then(Value::as_str).unwrap_or("<unknown>"), 128);
+    let provider = safe_matrix_text(row.get("provider_id").and_then(Value::as_str).unwrap_or("<unknown>"), 128);
+    let tokens = row.get("tokens").and_then(Value::as_object)?;
+    let token_value = |key: &str| safe_matrix_count(tokens.get(key), 1_000_000_000_000_000).unwrap_or(0);
+    let amounts = row.get("amounts").and_then(Value::as_array).map(|items| items.iter().take(8).filter_map(safe_matrix_amount).collect::<Vec<_>>()).unwrap_or_default();
+    let top_sessions = row.get("top_sessions").and_then(Value::as_array).map(|items| items.iter().take(3).filter_map(safe_matrix_session).collect::<Vec<_>>()).unwrap_or_default();
+    let host_behavior = row.get("host_behavior").and_then(Value::as_object).map(|items| {
+        items.iter().filter_map(|(rule, count)| {
+            if matches!(rule.as_str(), "SV607" | "SV608" | "SV610") {
+                Some((rule.clone(), json!(safe_matrix_count(Some(count), 1_000_000_000).unwrap_or(0))))
+            } else { None }
+        }).collect::<serde_json::Map<_, _>>()
+    }).unwrap_or_default();
+    let limit_pressure = row.get("limit_pressure").and_then(|value| {
+        let pressure = value.as_object()?;
+        let hits = safe_matrix_count(pressure.get("hits"), 1_000_000_000)?;
+        let per_session = pressure.get("per_session").and_then(|value| value.as_f64()).filter(|value| value.is_finite() && *value >= 0.0 && *value <= 1_000_000.0);
+        Some(json!({"hits": hits, "per_session": per_session}))
+    });
+    Some(json!({
+        "host": host,
+        "model_id": model,
+        "provider_id": provider,
+        "sessions": safe_matrix_count(row.get("sessions"), 1_000_000_000).unwrap_or(0),
+        "tokens": {"uncached_input": token_value("uncached_input"), "cache_read": token_value("cache_read"), "cache_write": token_value("cache_write"), "output": token_value("output"), "total": token_value("total")},
+        "cache_hit_ratio": safe_matrix_ratio(row.get("cache_hit_ratio")),
+        "has_subscription": row.get("has_subscription").and_then(Value::as_bool).unwrap_or(false),
+        "waste_rate": safe_matrix_ratio(row.get("waste_rate")),
+        "amounts": amounts,
+        "top_sessions": top_sessions,
+        "host_behavior": host_behavior,
+        "limit_pressure": limit_pressure,
+        "cost_provider_unresolved": row.get("cost_provider_unresolved").and_then(Value::as_bool).unwrap_or(false),
+    }))
+}
+
+fn safe_matrix_summary(value: &Value) -> Option<Value> {
+    let row = value.as_object()?;
+    let kind = match row.get("kind").and_then(Value::as_str)? {
+        "cost_outlier" | "marathon" | "currency_split" => row["kind"].as_str()?.to_string(),
+        _ => return None,
+    };
+    let mut out = serde_json::Map::new();
+    out.insert("kind".to_string(), json!(kind));
+    if let Some(currency) = row.get("currency").and_then(Value::as_str) { out.insert("currency".to_string(), json!(safe_matrix_text(currency, 12))); }
+    if let Some(outlier) = row.get("outlier").and_then(safe_matrix_summary_combo) { out.insert("outlier".to_string(), outlier); }
+    if let Some(control) = row.get("control").and_then(safe_matrix_summary_combo) { out.insert("control".to_string(), control); }
+    for key in ["ratio_vs_control", "saving_pct", "span_hours"] {
+        if let Some(number) = row.get(key).and_then(Value::as_f64).filter(|number| number.is_finite() && *number >= 0.0 && *number <= 1_000_000.0) { out.insert(key.to_string(), json!(number)); }
+    }
+    for key in ["saving_minor", "tokens_total", "failures"] {
+        if let Some(number) = safe_matrix_count(row.get(key), 1_000_000_000_000_000) { out.insert(key.to_string(), json!(number)); }
+    }
+    if let Some(combo) = row.get("combo").and_then(|combo| {
+        let combo = combo.as_object()?;
+        Some(json!({"host": safe_findings_host(combo.get("host").and_then(Value::as_str).unwrap_or("generic")), "model_id": safe_matrix_text(combo.get("model_id").and_then(Value::as_str).unwrap_or("<unknown>"), 128)}))
+    }) { out.insert("combo".to_string(), combo); }
+    if let Some(session_ref) = row.get("session_ref").and_then(Value::as_str).filter(|value| safe_matrix_session_ref(value)) { out.insert("session_ref".to_string(), json!(session_ref)); }
+    if let Some(currencies) = row.get("currencies").and_then(Value::as_array) {
+        out.insert("currencies".to_string(), json!(currencies.iter().filter_map(|value| value.as_str()).take(8).map(|value| safe_matrix_text(value, 12)).collect::<Vec<_>>()));
+    }
+    if let Some(by_currency) = row.get("by_currency").and_then(Value::as_object) {
+        let safe = by_currency.iter().take(8).map(|(currency, value)| {
+            let value = value.as_object();
+            (safe_matrix_text(currency, 12), json!({"combos": safe_matrix_count(value.and_then(|item| item.get("combos")), 1_000_000_000).unwrap_or(0), "tokens": safe_matrix_count(value.and_then(|item| item.get("tokens")), 1_000_000_000_000_000).unwrap_or(0)}))
+        }).collect::<serde_json::Map<_, _>>();
+        out.insert("by_currency".to_string(), Value::Object(safe));
+    }
+    Some(Value::Object(out))
+}
+
+fn safe_matrix_summary_combo(value: &Value) -> Option<Value> {
+    let row = value.as_object()?;
+    Some(json!({
+        "host": safe_findings_host(row.get("host").and_then(Value::as_str).unwrap_or("generic")),
+        "model_id": safe_matrix_text(row.get("model_id").and_then(Value::as_str).unwrap_or("<unknown>"), 128),
+        "provider_id": safe_matrix_text(row.get("provider_id").and_then(Value::as_str).unwrap_or("<unknown>"), 128),
+        "per_session_minor": safe_matrix_count(row.get("per_session_minor"), 1_000_000_000_000_000).unwrap_or(0),
+        "cache_hit_ratio": safe_matrix_ratio(row.get("cache_hit_ratio")),
+        "uncached_tokens": safe_matrix_count(row.get("uncached_tokens"), 1_000_000_000_000_000).unwrap_or(0),
+    }))
+}
+
+fn safe_decision_matrix(raw: &Value) -> Value {
+    let rows = raw.get("rows").and_then(Value::as_array).map(|items| items.iter().take(500).filter_map(safe_matrix_row).collect::<Vec<_>>()).unwrap_or_default();
+    let findings_summary = raw.get("findings_summary").and_then(Value::as_array).map(|items| items.iter().take(4).filter_map(safe_matrix_summary).collect::<Vec<_>>()).unwrap_or_default();
+    let mut limitations = vec!["waste_rate_unavailable", "host_behavior_host_level", "amounts_currency_separated", "fingerprint_link_deferred"];
+    for note in raw.get("notes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+        if note.contains("贡献会话列表不可用") && !limitations.contains(&"top_sessions_unavailable") { limitations.push("top_sessions_unavailable"); }
+        if note.contains("计价管线不可用") && !limitations.contains(&"pricing_unavailable") { limitations.push("pricing_unavailable"); }
+    }
+    json!({
+        "schema_version": "agent-vitals-decision-matrix/v1",
+        "status": "ok",
+        "month": safe_matrix_text(raw.get("month").and_then(Value::as_str).unwrap_or("<unknown>"), 7),
+        "rows": rows,
+        "findings_summary": findings_summary,
+        "limitations": limitations,
+    })
+}
+
+/// Versioned, allow-listed decision matrix for React. The runtime matrix is
+/// already read-only SQL, but this serving face strips notes, native session
+/// keys, and any future free-form fields before crossing into the renderer.
+#[tauri::command]
+pub async fn decision_matrix_safe(month: Option<String>) -> Result<Value, Value> {
+    let month = month.unwrap_or_else(crate::overview::current_month_beijing);
+    tauri::async_runtime::spawn_blocking(move || {
+        let raw = agent_vitals_runtime::decision_matrix::decision_matrix(&data_home(), &month)
+            .map_err(|e| error_value("decision_matrix_unavailable", &e))?;
+        Ok(safe_decision_matrix(&raw))
+    }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
 /// User-owned Issue state transition. This command only changes the Issue
 /// lifecycle in the authority DB; it never edits a host file or executes a
 /// remedy. "acknowledged" is deliberately distinct from "closed".
@@ -1523,6 +1709,38 @@ mod tests {
             "sample_evidence": [],
         });
         assert!(safe_findings_group(&invalid_range).is_none());
+    }
+
+    #[test]
+    fn safe_decision_matrix_projection_is_versioned_and_drops_native_fields() {
+        let raw = json!({
+            "month": "2026-09",
+            "rows": [{
+                "host": "plugin:zcode", "model_id": "/Users/Admin/private", "provider_id": "https://evil.example",
+                "sessions": 2, "tokens": {"uncached_input": 10, "cache_read": 20, "cache_write": 0, "output": 4, "total": 34},
+                "cache_hit_ratio": 0.6667, "has_subscription": false, "waste_rate": null,
+                "amounts": [{"amount_minor": 100, "currency": "CNY", "basis": "metered_estimate", "secret": "/private"}],
+                "top_sessions": [{"session_ref": "sr_0123456789", "session_key": "native-session-secret", "span_first_ms": 10, "span_last_ms": 20, "tokens_total": 34, "failures": 1}],
+                "host_behavior": {"SV610": 2, "EVIL": 99}, "limit_pressure": null,
+                "cost_provider_unresolved": false, "path": "/Users/Admin/private",
+            }],
+            "findings_summary": [{"kind": "marathon", "currency": "C:/Users/Admin/private", "session_ref": "sr_0123456789", "span_hours": 25.0, "tokens_total": 34, "failures": 1, "combo": {"host": "plugin:zcode", "model_id": "file:/tmp/secret", "native": "/private"}}],
+            "notes": ["贡献会话列表不可用（session_ref salt：/private/path）", "raw note secret"],
+        });
+        let projected = safe_decision_matrix(&raw);
+        assert_eq!(projected["schema_version"], "agent-vitals-decision-matrix/v1");
+        assert_eq!(projected["rows"][0]["host"], "plugin:zcode");
+        assert_eq!(projected["rows"][0]["model_id"], "<unknown>");
+        assert_eq!(projected["rows"][0]["provider_id"], "<unknown>");
+        assert_eq!(projected["rows"][0]["host_behavior"]["SV610"], 2);
+        assert!(projected["rows"][0]["host_behavior"].get("EVIL").is_none());
+        assert!(projected.to_string().contains("top_sessions"));
+        for secret in ["native-session-secret", "/Users/Admin/private", "raw note secret", "secret"] {
+            assert!(!projected.to_string().contains(secret), "matrix secret leaked: {secret}");
+        }
+        assert!(projected["limitations"].as_array().unwrap().iter().any(|item| item == "top_sessions_unavailable"));
+        assert_eq!(projected["findings_summary"][0]["currency"], "<unknown>");
+        assert_eq!(projected["findings_summary"][0]["combo"]["model_id"], "<unknown>");
     }
 
     /// list_args 字段集是 v0.9.1 收口后的精简版：旧 CLI 用的 `--model` / `--from`

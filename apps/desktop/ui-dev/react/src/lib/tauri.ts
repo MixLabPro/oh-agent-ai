@@ -102,6 +102,54 @@ export type FindingsFreshness = {
   syncing: boolean;
 };
 
+export type DecisionAmount = { amount_minor: number; currency: string; basis: string };
+export type DecisionTopSession = {
+  session_ref: string;
+  span_first_ms: number;
+  span_last_ms: number;
+  tokens_total: number;
+  failures: number;
+};
+export type DecisionMatrixRow = {
+  host: string;
+  model_id: string;
+  provider_id: string;
+  sessions: number;
+  tokens: { uncached_input: number; cache_read: number; cache_write: number; output: number; total: number };
+  cache_hit_ratio: number | null;
+  has_subscription: boolean;
+  waste_rate: number | null;
+  amounts: DecisionAmount[];
+  top_sessions: DecisionTopSession[];
+  host_behavior: Record<string, number>;
+  limit_pressure: { hits: number; per_session: number | null } | null;
+  cost_provider_unresolved: boolean;
+};
+export type DecisionSummary = {
+  kind: "cost_outlier" | "marathon" | "currency_split";
+  currency?: string;
+  outlier?: { host: string; model_id: string; provider_id: string; per_session_minor: number; cache_hit_ratio: number | null; uncached_tokens: number };
+  control?: { host: string; model_id: string; provider_id: string; per_session_minor: number; cache_hit_ratio: number | null; uncached_tokens: number };
+  ratio_vs_control?: number;
+  saving_minor?: number;
+  saving_pct?: number;
+  session_ref?: string;
+  span_hours?: number;
+  tokens_total?: number;
+  failures?: number;
+  combo?: { host: string; model_id: string };
+  currencies?: string[];
+  by_currency?: Record<string, { combos: number; tokens: number }>;
+};
+export type DecisionMatrixReport = {
+  schema_version: "agent-vitals-decision-matrix/v1";
+  status: "ok";
+  month: string;
+  rows: DecisionMatrixRow[];
+  findings_summary: DecisionSummary[];
+  limitations: string[];
+};
+
 function record(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} DTO 格式不兼容`);
   return value as Record<string, unknown>;
@@ -110,6 +158,25 @@ function record(value: unknown, label: string): Record<string, unknown> {
 function stringField(value: unknown, label: string): string {
   if (typeof value !== "string" || value.length > 256) throw new Error(`${label} DTO 字段不安全`);
   return value;
+}
+
+function decisionLabel(value: unknown, label: string): string {
+  const text = stringField(value, label);
+  const valid = text === "<unknown>" || (/^[A-Za-z0-9][A-Za-z0-9._:@+<>-]{0,127}(\/[A-Za-z0-9][A-Za-z0-9._:@+<>-]{0,127})?$/.test(text) && !text.includes("://") && !text.includes("..") && !text.startsWith("file:") && !/^[A-Za-z]:/.test(text));
+  if (!valid) throw new Error(`${label} DTO 标识不安全`);
+  return text;
+}
+
+function decisionCurrency(value: unknown, label: string): string {
+  const text = stringField(value, label);
+  if (!/^[A-Z0-9_]{1,12}$/.test(text)) throw new Error(`${label} DTO 币种不安全`);
+  return text;
+}
+
+function decisionBasis(value: unknown, label: string): string {
+  const text = stringField(value, label);
+  if (text !== "metered_actual" && text !== "metered_estimate" && text !== "fixed_subscription" && text !== "api_equivalent" && text !== "other") throw new Error(`${label} DTO 计价口径不安全`);
+  return text;
 }
 
 function nullableString(value: unknown, label: string): string | null {
@@ -138,6 +205,11 @@ function requiredBoolean(value: unknown, label: string): boolean {
   return value;
 }
 
+function requiredFiniteNumber(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error(`${label} DTO 数值不安全`);
+  return value;
+}
+
 function safeReference(value: unknown, label: string): string | null {
   const reference = nullableString(value, label);
   if (reference !== null && !/^tr_[A-Za-z0-9_-]{8,128}$/.test(reference)) throw new Error(`${label} DTO 引用格式不安全`);
@@ -156,7 +228,7 @@ function safeHostLabel(value: unknown): string {
   return /^[a-z][a-z0-9_-]{0,31}$/.test(candidate) ? candidate : "generic";
 }
 
-function safeTimestamp(value: unknown, label: string): string | null {
+function safeTimestamp(value: unknown, _label: string): string | null {
   if (value === null || value === undefined || typeof value !== "string") return null;
   const candidate = value;
   // Rust emits RFC3339 timestamps; reject permissive Date.parse inputs so a
@@ -270,6 +342,83 @@ function parseFindingsFreshness(value: unknown): FindingsFreshness {
   return { status: "ok", state, last_successful_sync_at: lastSuccessfulSyncAt, stale_hosts: stale, syncing: freshness.syncing === true };
 }
 
+function boundedRatio(value: unknown, label: string): number | null {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) throw new Error(`${label} DTO 比例不安全`);
+  return value;
+}
+
+function parseDecisionAmount(value: unknown): DecisionAmount {
+  const row = record(value, "decision amount");
+  return { amount_minor: requiredCount(row.amount_minor, "decision amount"), currency: decisionCurrency(row.currency, "decision currency"), basis: decisionBasis(row.basis, "decision basis") };
+}
+
+function parseDecisionSession(value: unknown): DecisionTopSession {
+  const row = record(value, "decision top session");
+  const first = requiredCount(row.span_first_ms, "decision session first");
+  const last = requiredCount(row.span_last_ms, "decision session last");
+  if (first > last) throw new Error("decision session 时间范围不安全");
+  const reference = stringField(row.session_ref, "decision session ref");
+  if (!/^sr_[A-Za-z0-9_-]{8,128}$/.test(reference)) throw new Error("decision session ref 不安全");
+  return { session_ref: reference, span_first_ms: first, span_last_ms: last, tokens_total: requiredCount(row.tokens_total, "decision session tokens"), failures: requiredCount(row.failures, "decision session failures") };
+}
+
+function parseDecisionRow(value: unknown): DecisionMatrixRow {
+  const row = record(value, "decision matrix row");
+  const tokens = record(row.tokens, "decision token buckets");
+  const hostBehavior = record(row.host_behavior, "decision host behavior");
+  const behavior = Object.fromEntries(Object.entries(hostBehavior).filter(([key]) => ["SV607", "SV608", "SV610"].includes(key)).map(([key, item]) => [key, requiredCount(item, `decision ${key}`)]));
+  const rawPressure = row.limit_pressure;
+  let limitPressure: DecisionMatrixRow["limit_pressure"] = null;
+  if (rawPressure !== null && rawPressure !== undefined) {
+    const pressure = record(rawPressure, "decision pressure");
+    limitPressure = { hits: requiredCount(pressure.hits, "decision pressure hits"), per_session: pressure.per_session === null ? null : requiredFiniteNumber(pressure.per_session, "decision pressure per session") };
+  }
+  return {
+    host: safeHostLabel(row.host), model_id: decisionLabel(row.model_id, "decision model"), provider_id: decisionLabel(row.provider_id, "decision provider"),
+    sessions: requiredCount(row.sessions, "decision sessions"),
+    tokens: { uncached_input: requiredCount(tokens.uncached_input, "uncached input"), cache_read: requiredCount(tokens.cache_read, "cache read"), cache_write: requiredCount(tokens.cache_write, "cache write"), output: requiredCount(tokens.output, "output tokens"), total: requiredCount(tokens.total, "total tokens") },
+    cache_hit_ratio: boundedRatio(row.cache_hit_ratio, "cache hit"), has_subscription: requiredBoolean(row.has_subscription, "subscription"), waste_rate: boundedRatio(row.waste_rate, "waste rate"),
+    amounts: requiredArray(row.amounts, "decision amounts").slice(0, 8).map(parseDecisionAmount), top_sessions: requiredArray(row.top_sessions, "decision top sessions").slice(0, 3).map(parseDecisionSession),
+    host_behavior: behavior, limit_pressure: limitPressure, cost_provider_unresolved: requiredBoolean(row.cost_provider_unresolved, "provider resolution"),
+  };
+}
+
+function parseDecisionSummary(value: unknown): DecisionSummary {
+  const row = record(value, "decision summary");
+  const kind = row.kind;
+  if (kind !== "cost_outlier" && kind !== "marathon" && kind !== "currency_split") throw new Error("decision summary 类型不安全");
+  const summary: DecisionSummary = { kind };
+  if (row.currency !== undefined) summary.currency = decisionCurrency(row.currency, "decision currency");
+  if (row.outlier !== undefined) summary.outlier = parseDecisionSummaryCombo(row.outlier);
+  if (row.control !== undefined) summary.control = parseDecisionSummaryCombo(row.control);
+  for (const key of ["ratio_vs_control", "saving_pct", "span_hours"] as const) if (row[key] !== undefined) { if (typeof row[key] !== "number" || !Number.isFinite(row[key]) || row[key] < 0) throw new Error(`decision ${key} 不安全`); summary[key] = row[key]; }
+  for (const key of ["saving_minor", "tokens_total", "failures"] as const) if (row[key] !== undefined) summary[key] = requiredCount(row[key], `decision ${key}`);
+  if (row.session_ref !== undefined) { const reference = stringField(row.session_ref, "decision summary session"); if (!/^sr_[A-Za-z0-9_-]{8,128}$/.test(reference)) throw new Error("decision summary session 不安全"); summary.session_ref = reference; }
+  if (row.combo !== undefined) { const combo = record(row.combo, "decision summary combo"); summary.combo = { host: safeHostLabel(combo.host), model_id: decisionLabel(combo.model_id, "summary model") }; }
+  if (row.currencies !== undefined) summary.currencies = requiredArray(row.currencies, "summary currencies").slice(0, 8).map((item) => decisionCurrency(item, "summary currency"));
+  if (row.by_currency !== undefined) { const source = record(row.by_currency, "summary currency values"); summary.by_currency = Object.fromEntries(Object.entries(source).slice(0, 8).map(([key, item]) => { const value = record(item, "summary currency value"); return [decisionCurrency(key, "summary currency key"), { combos: requiredCount(value.combos, "summary combos"), tokens: requiredCount(value.tokens, "summary tokens") }]; })); }
+  return summary;
+}
+
+function parseDecisionSummaryCombo(value: unknown): NonNullable<DecisionSummary["outlier"]> {
+  const row = record(value, "decision summary combo");
+  return { host: safeHostLabel(row.host), model_id: decisionLabel(row.model_id, "summary model"), provider_id: row.provider_id === undefined ? "<unknown>" : decisionLabel(row.provider_id, "summary provider"), per_session_minor: requiredCount(row.per_session_minor, "summary per session"), cache_hit_ratio: boundedRatio(row.cache_hit_ratio, "summary cache hit"), uncached_tokens: row.uncached_tokens === undefined ? 0 : requiredCount(row.uncached_tokens, "summary uncached") };
+}
+
+function parseDecisionMatrix(value: unknown): DecisionMatrixReport {
+  const root = record(value, "decision matrix");
+  if (root.schema_version !== "agent-vitals-decision-matrix/v1" || root.status !== "ok") throw new Error("decision matrix DTO schema mismatch");
+  const month = stringField(root.month, "decision month");
+  if (!/^\d{4}-\d{2}$/.test(month)) throw new Error("decision month DTO 格式不安全");
+  const rows = requiredArray(root.rows, "decision rows");
+  const summaries = requiredArray(root.findings_summary, "decision summary");
+  const limitations = requiredArray(root.limitations, "decision limitations");
+  const allowedLimitations = new Set(["waste_rate_unavailable", "host_behavior_host_level", "amounts_currency_separated", "fingerprint_link_deferred", "top_sessions_unavailable", "pricing_unavailable"]);
+  if (rows.length > 500 || summaries.length > 4 || limitations.length > 6) throw new Error("decision matrix DTO 数量超限");
+  return { schema_version: "agent-vitals-decision-matrix/v1", status: "ok", month, rows: rows.map(parseDecisionRow), findings_summary: summaries.map(parseDecisionSummary), limitations: limitations.map((item) => { const limitation = stringField(item, "decision limitation"); if (!allowedLimitations.has(limitation)) throw new Error("decision limitation 不安全"); return limitation; }) };
+}
+
 export async function discoverTrust(): Promise<TrustDiscovery> {
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return { candidates: [{ id: "zcode", detected: true, artifact_profile_available: true, coverage_state: "artifact_profile_available" }], profile_errors: [] };
@@ -312,6 +461,17 @@ export async function readFindingsFreshness(): Promise<FindingsFreshness> {
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return { status: "ok", state: "stale", last_successful_sync_at: "2026-09-20T15:00:00+08:00", stale_hosts: ["dsh"], syncing: false };
   return parseFindingsFreshness(await handler("findings_freshness"));
+}
+
+export async function readDecisionMatrix(): Promise<DecisionMatrixReport> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseDecisionMatrix({
+    schema_version: "agent-vitals-decision-matrix/v1", status: "ok", month: "2026-09",
+    rows: [{ host: "plugin:zcode", model_id: "glm-5", provider_id: "zhipu", sessions: 4, tokens: { uncached_input: 1200, cache_read: 8800, cache_write: 300, output: 900, total: 11200 }, cache_hit_ratio: 0.8544, has_subscription: false, waste_rate: null, amounts: [{ amount_minor: 781, currency: "CNY", basis: "metered_estimate" }], top_sessions: [{ session_ref: "sr_0123456789", span_first_ms: 1789891200000, span_last_ms: 1789894800000, tokens_total: 6400, failures: 2 }], host_behavior: { SV610: 2 }, limit_pressure: { hits: 1, per_session: 0.25 }, cost_provider_unresolved: false }],
+    findings_summary: [{ kind: "marathon", session_ref: "sr_0123456789", span_hours: 25.2, tokens_total: 11200, failures: 2, combo: { host: "plugin:zcode", model_id: "glm-5" }}],
+    limitations: ["waste_rate_unavailable", "host_behavior_host_level", "amounts_currency_separated", "fingerprint_link_deferred"],
+  });
+  return parseDecisionMatrix(await handler("decision_matrix_safe", { month: null }));
 }
 
 function globalTauri(): TauriGlobal | undefined {
