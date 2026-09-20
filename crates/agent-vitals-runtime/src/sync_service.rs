@@ -352,35 +352,56 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
             )
             .unwrap_or(0);
             let now = crate::sql_sync::now_ms();
-            let ret = db
-                .retention_usage_facts(cutoff)
-                .and_then(|_| db.retention_session_excerpts(cutoff))
-                // v23 事件总线保留清理 + v18 孤儿接线：retention_trust_observations
-                // 自 v18 就有实现有测试，但生产路径零调用（2026-09-21 迭代 3
-                // 分析发现）——高频 trust 观察的 expires 实际无人清。
-                .and_then(|_| db.retention_event_outbox(now))
-                .and_then(|_| db.retention_trust_observations(now));
+            // 四步各自计数、各自如实报数（独立验证发现：and_then 链只保留尾环
+            // 计数，此前 eprintln 拿它当 facts 数——标签与对象双双错位）。
+            // 失败语义不变：任一步 Err → 整轮 failed、不盖日戳、下轮全量重跑
+            // （四步皆幂等 DELETE，重跑已成功步为 0 行）。
+            let steps: [(&str, Result<usize, agent_vitals_data::authority::AuthorityError>); 4] = [
+                ("usage_facts", db.retention_usage_facts(cutoff)),
+                ("session_excerpts", db.retention_session_excerpts(cutoff)),
+                // v23 事件 outbox 保留 + v18 孤儿接线（retention_trust_observations
+                // 有实现有测试但生产零调用——2026-09-21 迭代 3 发现）。
+                ("event_outbox", db.retention_event_outbox(now)),
+                ("trust_observations", db.retention_trust_observations(now)),
+            ];
+            let failed = steps
+                .iter()
+                .find(|(_, r)| r.is_err())
+                .map(|(name, _)| *name);
+            let summary: Vec<String> = steps
+                .iter()
+                .filter_map(|(name, r)| match r {
+                    Ok(n) if *n > 0 => Some(format!("{name} {n}")),
+                    _ => None,
+                })
+                .collect();
+            if !summary.is_empty() {
+                eprintln!("authority retention ({}mo): {}", retention_months, summary.join(", "));
+            }
             let _ = db.finish_run(
                 &run_id,
-                if ret.is_ok() { "succeeded" } else { "failed" },
-                ret.as_ref()
-                    .err()
-                    .map(|_| "retention_failed".to_string())
-                    .as_deref(),
-                ret.as_ref().err().map(|e| e.to_string()).as_deref(),
+                if failed.is_none() { "succeeded" } else { "failed" },
+                failed.map(|_| "retention_failed".to_string()).as_deref(),
+                None,
                 crate::sql_sync::now_ms(),
             );
-            match ret {
-                Ok(n) => {
+            match failed {
+                None => {
                     crate::state::atomic_write_json(
                         &ret_path,
                         &json!({"last_retention_date": bj_day}),
                     );
-                    if n > 0 {
-                        eprintln!("authority retention: dropped {n} facts ({retention_months}mo)");
-                    }
                 }
-                Err(e) => eprintln!("authority retention failed: {e}"),
+                Some(step) => {
+                    let detail = steps
+                        .iter()
+                        .find_map(|(_, r)| match r {
+                            Err(e) => Some(e.to_string()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    eprintln!("authority retention failed at {step}: {detail}");
+                }
             }
         }
     }
