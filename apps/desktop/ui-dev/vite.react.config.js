@@ -11,7 +11,17 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 // real-app gates described in WORKBENCH_REACT_MIGRATION_SPEC.md.
 export default defineConfig({
   root: path.resolve(here, "react"),
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), {
+    name: "agent-vitals-react-browser-tauri-mock",
+    transformIndexHtml(html, ctx) {
+      if (ctx.bundle) return html;
+      return {
+        html,
+        tags: [{ tag: "script", attrs: { src: "/tauri-mock.js" }, injectTo: "head-prepend" }],
+      };
+    },
+  }],
+  publicDir: path.resolve(here, "public"),
   server: {
     host: "127.0.0.1",
     port: 5174,
