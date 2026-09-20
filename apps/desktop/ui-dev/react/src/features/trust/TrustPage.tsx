@@ -27,6 +27,26 @@ function levelTone(level: string): string {
   return level === "E3" || level === "E4" ? "status-pill-warning" : "";
 }
 
+function evidenceLevelLabel(level: string): string {
+  return ({ E0: "推断", E1: "本地证据", E2: "上传就绪", E3: "网络尝试", E4: "已传输", E5: "远端接收" } as Record<string, string>)[level] ?? "未知等级";
+}
+
+function evidenceStageLabel(stage: string): string {
+  return ({ read_observed: "读取已观察", package_observed: "打包已观察", credential_observed: "凭证已观察", egress_attempted: "出网尝试", egress_transmitted: "出网传输", remote_accepted: "远端已接收" } as Record<string, string>)[stage] ?? "未知阶段";
+}
+
+function evidenceKindLabel(kind: string): string {
+  return ({ file_scope: "文件范围", package: "归档/快照", credential: "上传凭证", connection: "连接", outbound_bytes: "出网字节", remote_ack: "远端回执", consent_state: "同意状态", retry: "重试" } as Record<string, string>)[kind] ?? "未知类别";
+}
+
+function evidenceOriginLabel(origin: string): string {
+  return ({ local_artifact: "本地落盘", client_state_claim: "客户端状态", runtime_process_metadata: "运行时进程", network_metadata: "网络元数据", verified_receipt: "已验证回执", unknown_legacy: "历史来源" } as Record<string, string>)[origin] ?? "未知来源";
+}
+
+function destinationLabel(destination: string | null): string {
+  return ({ vendor_api: "厂商 API", object_storage: "对象存储", telemetry: "遥测", eval: "评测", model_api: "模型 API", unknown: "未知目的地" } as Record<string, string>)[destination ?? ""] ?? "未声明";
+}
+
 function errorMessage(reason: unknown): string {
   const message = reason instanceof Error ? reason.message : "本地 Trust 数据暂不可用";
   return /DTO|格式|字段|引用|计数|schema/i.test(message)
@@ -66,6 +86,7 @@ export function TrustPage() {
   const [monitorFeedback, setMonitorFeedback] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<TrustRuntimeSnapshot | null>(null);
   const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [expandedEvidence, setExpandedEvidence] = useState<string | null>(null);
 
   const discover = () => {
     setLoading("正在发现本机宿主…");
@@ -135,6 +156,7 @@ export function TrustPage() {
   const runAudit = (host: string) => {
     setSelectedHost(host);
     setReport(null);
+    setExpandedEvidence(null);
     setLoading(`正在读取 ${host} 的本地证据…`);
     setError(null);
     void auditTrust(host)
@@ -183,10 +205,16 @@ export function TrustPage() {
           <div className="trust-card-heading"><div><p className="eyebrow">{report.host} · 审计完成</p><h3>{report.evidence.length} 条证据</h3></div><span className="status-pill status-pill-success"><span aria-hidden="true" className="status-dot" />本地结果</span></div>
           <div className="trust-summary"><span>新写入 {report.inserted}</span><span>重复 {report.duplicate}</span><span>Finding 更新 {report.findings_upserted}</span></div>
           {report.evidence.length === 0 ? <div className="mini-empty">没有足够的本地证据形成时间线。当前结果不是“确认安全”。</div> : <ol className="evidence-timeline">
-            {report.evidence.map((item, index) => <li className="evidence-row" key={`${item.collector_id}-${item.observed_at_ms}-${index}`}>
+            {report.evidence.map((item, index) => {
+              const evidenceKey = `${item.collector_id}-${item.observed_at_ms}-${index}`;
+              const isExpanded = expandedEvidence === evidenceKey;
+              return <li className="evidence-row" key={evidenceKey}>
               <div className="evidence-marker" aria-hidden="true" />
-              <div className="evidence-main"><div className="evidence-title"><strong>{item.kind} · {item.stage}</strong><span className={`status-pill ${levelTone(item.evidence_level)}`}>{item.evidence_level}</span></div><p>{localTime(item.observed_at_ms)} · 来源 {item.evidence_origin} · {item.collector_id}</p><p>范围：{item.scope_classes.length ? item.scope_classes.join("、") : "未声明"} · 文件 {item.file_count ?? "—"} · 大小 {bytes(item.byte_count)}</p><p>安全引用：{item.native_event_ref ?? item.workspace_ref ?? "不可用"}</p></div>
-            </li>)}
+              <div className="evidence-main"><div className="evidence-title"><strong>{evidenceKindLabel(item.kind)} · {evidenceStageLabel(item.stage)}</strong><div className="evidence-title-actions"><span className={`status-pill ${levelTone(item.evidence_level)}`} title={evidenceLevelLabel(item.evidence_level)}>{item.evidence_level} · {evidenceLevelLabel(item.evidence_level)}</span><button className="button button-secondary button-small evidence-detail-button" type="button" aria-expanded={isExpanded} aria-controls={`trust-evidence-detail-${index}`} onClick={() => setExpandedEvidence(isExpanded ? null : evidenceKey)}>{isExpanded ? "收起明细" : "查看明细"}</button></div></div><p>{localTime(item.observed_at_ms)} · 来源 {evidenceOriginLabel(item.evidence_origin)} · {item.collector_id}</p><p>范围：{item.scope_classes.length ? item.scope_classes.join("、") : "未声明"} · 文件 {item.file_count ?? "—"} · 大小 {bytes(item.byte_count)}</p><p>安全引用：{item.native_event_ref ?? item.workspace_ref ?? "不可用"}</p>
+                {isExpanded && <div className="evidence-detail" id={`trust-evidence-detail-${index}`} role="region" aria-label="证据明细"><div><span>判定位置</span><strong>{evidenceStageLabel(item.stage)}</strong></div><div><span>证据来源</span><strong>{evidenceOriginLabel(item.evidence_origin)}</strong></div><div><span>目的地类别</span><strong>{destinationLabel(item.destination_class)}</strong></div><div><span>采集器</span><strong>{item.collector_id}</strong></div><div><span>安全引用</span><code>{item.native_event_ref ?? item.workspace_ref ?? "不可用"}</code></div><p>以上字段是本机脱敏投影；它能说明观察到的行为链，不单独证明内容已经传输或被用于训练。</p></div>}
+              </div>
+            </li>;
+            })}
           </ol>}
         </>}
       </section>

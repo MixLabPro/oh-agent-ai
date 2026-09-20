@@ -82,6 +82,14 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .evidence-row:not(:last-child)::before { position: absolute; top: 13px; bottom: 0; left: 4px; width: 1px; background: #d7ebe4; content: ""; }
 .evidence-main { min-width: 0; flex: 1; }
 .evidence-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #25364b; font-size: 12px; }
+.evidence-title-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.evidence-detail-button { padding: 5px 8px; color: #087f62; font-size: 10px; }
+.evidence-detail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 16px; margin-top: 12px; padding: 12px 13px; border: 1px solid #dceee8; border-radius: 9px; color: var(--text-subtle); background: #fbfffd; font-size: 11px; line-height: 1.45; }
+.evidence-detail div { display: grid; gap: 3px; min-width: 0; }
+.evidence-detail span { color: var(--text-muted); font-size: 10px; }
+.evidence-detail strong { overflow: hidden; color: #26384e; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.evidence-detail code { overflow-wrap: anywhere; color: #405875; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+.evidence-detail p { grid-column: 1 / -1; margin-top: 2px; color: var(--text-muted); }
 .trust-monitor-card { margin: 14px 0; padding: 20px; border: 1px solid #cfe9e1; border-radius: 14px; background: linear-gradient(135deg, #fbfffd, #f4fbf8); box-shadow: 0 10px 28px rgb(31 55 80 / 4%); }
 .monitor-copy { max-width: 760px; color: var(--text-subtle); font-size: 12px; line-height: 1.55; }
 .monitor-controls { display: flex; align-items: end; flex-wrap: wrap; gap: 12px 18px; margin-top: 16px; }
@@ -160,6 +168,10 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
   .monitor-controls { align-items: stretch; flex-direction: column; }
   .monitor-field select { width: 100%; }
   .monitor-snapshot { align-items: flex-start; flex-direction: column; }
+  .evidence-title { align-items: flex-start; flex-direction: column; }
+  .evidence-title-actions { justify-content: flex-start; }
+  .evidence-detail { grid-template-columns: 1fr; }
+  .evidence-detail p { grid-column: auto; }
   .findings-page-header { flex-direction: column; }
   .finding-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .finding-row { flex-direction: column; }
