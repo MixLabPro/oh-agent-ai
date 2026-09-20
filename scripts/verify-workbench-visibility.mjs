@@ -90,7 +90,7 @@ const order = ["ov-kpi-row", "ov-decide-card", "ov-usage-strip", "ov-trust-rows"
 ok(order.every((v, i) => v > 0 && (i === 0 || v > order[i - 1])), "首屏顺序：三卡 → 现在该用谁 → 本月用量 → 可信度 → 套餐提示 → 费用明细 → 最近几天（不再折叠）");
 ok(/id="ov-trust-route"[^>]*class="notice warn"|class="notice warn"[^>]*id="ov-trust-route"/.test(ov), "路由行 class = warn（颜色来自 health）");
 ok(!/id="ov-trust-rows"[^>]*compact/.test(ov), "有非 ok 行时可信度不收敛为 compact");
-ok(ovText.includes("确认下方套餐信息即可解决"), "同源 18K：⚠ 行指向套餐提示");
+ok(ovText.includes("明确计费方式") && ovText.includes("计费方式待确认"), "同源 18K：⚠ 行指向唯一的计费方式待办");
 ok((ov.match(/<button(?![^>]*\shidden)[^>]*class="(?=[^"]*\bbtn\b)(?=[^"]*\bprimary\b)[^"]*"/g) || []).length === 1, "全页只有一个可见的实心主按钮（确认套餐信息）");
 // 第三档 CTA：每张卡 / 模块一个安静的入口（预算已配置 → 调整预算；未配置 → 用量行的 设置预算）。
 for (const id of ["ov-link-spend", "ov-link-today", "ov-link-budget", "ov-link-plans", "ov-link-usage", "ov-link-billing", "ov-link-days"]) {
