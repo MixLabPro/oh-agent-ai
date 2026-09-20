@@ -50,6 +50,7 @@ struct ObservationRow {
     observed_at_ms: i64,
     stage: String,
     evidence_level: String,
+    evidence_origin: String,
     scope_classes_json: String,
     destination_class: Option<String>,
     consent_kind: Option<String>,
@@ -83,8 +84,32 @@ fn evidence_rank(value: &str) -> u8 {
     match value { "E5" => 5, "E4" => 4, "E3" => 3, "E2" => 2, "E1" => 1, _ => 0 }
 }
 
-fn confidence(level: &str) -> &'static str {
-    match evidence_rank(level) { 0 => "low", 1 | 2 => "medium", _ => "high" }
+fn effective_level(row: &ObservationRow) -> &str {
+    match (row.evidence_level.as_str(), row.evidence_origin.as_str()) {
+        ("E5", "verified_receipt") => "E5",
+        ("E5", _) => "E2",
+        ("E4", "network_metadata") => "E4",
+        ("E4", _) => "E3",
+        _ => row.evidence_level.as_str(),
+    }
+}
+
+fn confidence(rows: &[ObservationRow], level: &str) -> (&'static str, Vec<&'static str>) {
+    let origins = rows.iter().map(|row| row.evidence_origin.as_str()).collect::<std::collections::BTreeSet<_>>();
+    let verified_receipt = origins.contains("verified_receipt");
+    let network_metadata = origins.contains("network_metadata");
+    let runtime_metadata = origins.contains("runtime_process_metadata");
+    match evidence_rank(level) {
+        5 if verified_receipt => ("high", vec!["verified_receipt"]),
+        5 => ("medium", vec!["unverified_acceptance_claim"]),
+        4 if network_metadata => ("high", vec!["network_metadata"]),
+        4 => ("medium", vec!["transmission_origin_unverified"]),
+        3 if network_metadata && origins.len() >= 2 => ("high", vec!["network_metadata", "independent_support"]),
+        3 if runtime_metadata => ("medium", vec!["runtime_process_correlation"]),
+        3 => ("medium", vec!["network_attempt_origin_unverified"]),
+        1 | 2 => ("medium", vec!["local_structural_evidence"]),
+        _ => ("low", vec!["inferred_or_legacy_evidence"]),
+    }
 }
 
 fn stage_rank(value: &str) -> u8 {
@@ -100,7 +125,7 @@ fn stage_rank(value: &str) -> u8 {
 }
 
 fn max_level<'a>(rows: impl Iterator<Item = &'a ObservationRow>) -> &'a str {
-    rows.max_by_key(|row| evidence_rank(&row.evidence_level)).map(|row| row.evidence_level.as_str()).unwrap_or("E0")
+    rows.max_by_key(|row| evidence_rank(effective_level(row))).map(effective_level).unwrap_or("E0")
 }
 
 fn max_stage<'a>(rows: impl Iterator<Item = &'a ObservationRow>) -> &'a str {
@@ -121,8 +146,12 @@ fn candidates(incident: &Incident) -> Vec<(&'static str, &'static str, Value)> {
     let last = rows.iter().map(|row| row.observed_at_ms).max().unwrap_or(first);
     let level = max_level(rows.iter());
     let stage = max_stage(rows.iter());
+    let origins = rows.iter().map(|row| row.evidence_origin.as_str())
+        .collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+    let (incident_confidence, incident_confidence_reasons) = confidence(rows, level);
     let common = |coverage: &'static str| json!({
-        "stage": stage, "evidence_level": level, "confidence": confidence(level),
+        "stage": stage, "evidence_level": level, "confidence": incident_confidence,
+        "evidence_origins": origins, "confidence_reasons": incident_confidence_reasons,
         "scope_classes": scopes, "observation_count": rows.len(),
         "first_observed_at_ms": first, "last_observed_at_ms": last,
         "incident_bucket": incident.bucket, "coverage": coverage,
@@ -131,25 +160,25 @@ fn candidates(incident: &Incident) -> Vec<(&'static str, &'static str, Value)> {
     if rows.iter().any(|row| row.stage == "package_observed") && scopes.iter().any(|scope| scope == "git_history") {
         out.push(("SV702", "warning", common("local_artifact")));
     }
-    if rows.iter().any(|row| row.consent_state == "disabled" && row.consent_kind.is_some() && evidence_rank(&row.evidence_level) >= 2) {
+    if rows.iter().any(|row| row.consent_state == "disabled" && row.consent_kind.is_some() && evidence_rank(effective_level(row)) >= 2) {
         let level = max_level(rows.iter().filter(|row| row.consent_state == "disabled" && row.consent_kind.is_some()));
         let severity = if evidence_rank(level) >= 3 { "critical" } else { "warning" };
         let mut metadata = common("consent_and_behavior");
         metadata["consent_state"] = json!("disabled");
         metadata["consent_kind"] = json!(rows.iter().find(|row| row.consent_state == "disabled" && row.consent_kind.is_some()).and_then(|row| row.consent_kind.clone()).unwrap_or_else(|| "unknown".to_string()));
         metadata["evidence_level"] = json!(level);
-        metadata["confidence"] = json!(confidence(level));
+        metadata["confidence"] = json!(confidence(rows, level).0);
         out.push(("SV705", severity, metadata));
     }
     let has_upload_prep = rows.iter().any(|row| row.stage == "credential_observed" || row.destination_class.as_deref() == Some("vendor_api"));
-    let has_object_storage = rows.iter().any(|row| row.destination_class.as_deref() == Some("object_storage") && evidence_rank(&row.evidence_level) >= 3 && row.stage != "credential_observed");
+    let has_object_storage = rows.iter().any(|row| row.destination_class.as_deref() == Some("object_storage") && evidence_rank(effective_level(row)) >= 3 && row.stage != "credential_observed");
     if has_upload_prep && has_object_storage {
         let level = max_level(rows.iter().filter(|row| row.destination_class.as_deref() == Some("object_storage")));
         let severity = if evidence_rank(level) >= 4 { "critical" } else { "warning" };
         let mut metadata = common("local_network_metadata");
         metadata["destination_class"] = json!("object_storage");
         metadata["evidence_level"] = json!(level);
-        metadata["confidence"] = json!(confidence(level));
+        metadata["confidence"] = json!(confidence(rows, level).0);
         out.push(("SV709", severity, metadata));
     }
     out
@@ -203,15 +232,15 @@ pub fn correlate_selected(
 ) -> Result<TrustCorrelationReport, AuthorityError> {
     let mut stmt = conn.prepare(
         "SELECT observation_id, machine_namespace, host, actor_id, workspace_ref,
-                observed_at_ms, stage, evidence_level, scope_classes_json,
+                observed_at_ms, stage, evidence_level, evidence_origin, scope_classes_json,
                 destination_class, consent_kind, consent_state
          FROM trust_observations ORDER BY observed_at_ms, observation_id",
     )?;
     let rows = stmt.query_map([], |row| Ok(ObservationRow {
         id: row.get(0)?, machine: row.get(1)?, host: row.get(2)?, actor: row.get(3)?,
         workspace: row.get(4)?, observed_at_ms: row.get(5)?, stage: row.get(6)?,
-        evidence_level: row.get(7)?, scope_classes_json: row.get(8)?,
-        destination_class: row.get(9)?, consent_kind: row.get(10)?, consent_state: row.get(11)?,
+        evidence_level: row.get(7)?, evidence_origin: row.get(8)?, scope_classes_json: row.get(9)?,
+        destination_class: row.get(10)?, consent_kind: row.get(11)?, consent_state: row.get(12)?,
     }))?.collect::<Result<Vec<_>, _>>()?;
     let mut report = TrustCorrelationReport::default();
     for incident in incidents(rows) {
@@ -252,7 +281,7 @@ pub fn correlate_selected(
                 }
             }
             let level_rank = metadata.get("evidence_level").and_then(Value::as_str).map(evidence_rank).unwrap_or(0);
-            let eligible_notification = level_rank >= 4 || (severity == "critical" && confidence(metadata.get("evidence_level").and_then(Value::as_str).unwrap_or("E0")) != "low");
+            let eligible_notification = level_rank >= 4 || (severity == "critical" && metadata.get("confidence").and_then(Value::as_str).unwrap_or("low") != "low");
             let suppressed: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM trust_suppressions
                  WHERE issue_type = ?1 AND revoked_at_ms IS NULL
@@ -351,7 +380,7 @@ mod tests {
         ObservationRow {
             id: id.into(), machine: "m".into(), host: "h".into(), actor: "a".into(),
             workspace: Some("w".into()), observed_at_ms: at, stage: "package_observed".into(),
-            evidence_level: "E1".into(), scope_classes_json: "[]".into(),
+            evidence_level: "E1".into(), evidence_origin: "local_artifact".into(), scope_classes_json: "[]".into(),
             destination_class: None, consent_kind: None, consent_state: "unavailable".into(),
         }
     }
@@ -382,6 +411,22 @@ mod tests {
             bucket: 0, rows: vec![object],
         };
         assert!(!candidates(&incident).iter().any(|(code, _, _)| *code == "SV709"));
+    }
+
+    #[test]
+    fn unverified_legacy_acceptance_cannot_elevate_the_incident_to_e5() {
+        let mut legacy = row("legacy-accepted", 1);
+        legacy.evidence_level = "E5".into();
+        legacy.evidence_origin = "unknown_legacy".into();
+        legacy.scope_classes_json = "[\"git_history\"]".into();
+        let incident = Incident {
+            machine: "m".into(), host: "h".into(), actor: "a".into(), workspace: Some("w".into()),
+            bucket: 0, rows: vec![legacy],
+        };
+        let metadata = candidates(&incident).into_iter().find(|(code, _, _)| *code == "SV702").unwrap().2;
+        assert_eq!(metadata["evidence_level"], "E2");
+        assert_eq!(metadata["confidence"], "medium");
+        assert!(metadata["confidence_reasons"].to_string().contains("local_structural_evidence"));
     }
 
     #[test]
@@ -419,11 +464,13 @@ mod tests {
             conn.execute(
                 "INSERT INTO trust_observations(
                     observation_id, machine_namespace, host, actor_id, actor_kind, observed_at_ms,
-                    observation_kind, stage, evidence_level, workspace_ref, scope_classes_json,
+                    observation_kind, stage, evidence_level, evidence_origin, workspace_ref, scope_classes_json,
                     destination_class, destination_host, consent_kind, consent_state, collector_id,
                     collector_version, provenance_json, ingested_run_id, created_at_ms)
-                 VALUES (?1,'m','zcode','a','sidecar',?4,'connection',?2,?3,'w','[]',?5,NULL,NULL,'unavailable','test','v1','{}','notify-run',?4)",
-                rusqlite::params![id, stage, level, at, if stage == "credential_observed" { "vendor_api" } else { "object_storage" }],
+                 VALUES (?1,'m','zcode','a','sidecar',?4,'connection',?2,?3,?5,'w','[]',?6,NULL,NULL,'unavailable','test','v1','{}','notify-run',?4)",
+                rusqlite::params![id, stage, level, at,
+                    if level == "E5" { "verified_receipt" } else if level == "E4" { "network_metadata" } else { "local_artifact" },
+                    if stage == "credential_observed" { "vendor_api" } else { "object_storage" }],
             ).unwrap();
         };
         insert(db.conn(), "credential", "credential_observed", "E2", 1_000);

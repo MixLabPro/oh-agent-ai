@@ -47,7 +47,7 @@ pub fn stage_spec() -> ToolSpec {
     ToolSpec {
         name: "trust_profile_stage",
         description: "Stage a validated host/Trust manifest for user approval. It cannot activate, scan, or revoke a host.",
-        input_schema: json!({"type":"object","properties":{"manifest":{"type":"object"},"proposal_note":{"type":"string"}},"required":["manifest"],"additionalProperties":false}),
+        input_schema: json!({"type":"object","properties":{"manifest":{"type":"object"}},"required":["manifest"],"additionalProperties":false}),
         output_schema: json!({"type":"object"}),
     }
 }
@@ -69,7 +69,11 @@ pub fn schema() -> Value {
             "required": ["roots", "artifact_terms", "extensions"],
             "roots": "array<string> of ~/ relative paths",
             "artifact_terms": "lowercase token array",
-            "extensions": "dot-prefixed lowercase extension array"
+            "extensions": "dot-prefixed lowercase extension array",
+            "adapter": {"optional": true, "enum": ["generic_artifact_v1", "zcode_checkpoint_v1", "minimax_workspace_index_v1"],
+                "note": "reviewed local adapter identifier only; SQL and commands are not accepted"},
+            "watch_priority": {"optional": true, "enum": ["normal", "enhanced"],
+                "note": "coverage and review scheduling hint only; never changes Finding evidence, severity, or notification eligibility"}
         },
         "activation": "user_approval_only",
         "agent_permissions": ["list", "validate", "stage", "proposal_status"],
@@ -134,6 +138,10 @@ fn safe_manifest_summary(manifest: &Value, state: &str, hash: &str) -> Value {
         "trust_roots_count": trust.and_then(|value| value.get("roots")).and_then(Value::as_array).map_or(0, Vec::len),
         "artifact_terms_count": trust.and_then(|value| value.get("artifact_terms")).and_then(Value::as_array).map_or(0, Vec::len),
         "extensions_count": trust.and_then(|value| value.get("extensions")).and_then(Value::as_array).map_or(0, Vec::len),
+        "trust_adapter": trust.and_then(|value| value.get("adapter")).and_then(Value::as_str)
+            .and_then(generic_manifest::TrustEvidenceAdapter::parse).map(|adapter| adapter.as_str()),
+        "watch_priority": trust.and_then(|value| value.get("watch_priority")).and_then(Value::as_str)
+            .and_then(generic_manifest::TrustWatchPriority::parse).map(|priority| priority.as_str()),
     })
 }
 
@@ -148,14 +156,16 @@ pub fn run_list(data_home: &Path) -> Result<Value, ToolError> {
         Some(json!({"slug": host.slug, "display_name": host.display_name,
             "state": "approved", "manifest_hash": host.manifest_sha256,
             "trust_roots_count": trust.roots.len(), "artifact_terms_count": trust.artifact_terms.len(),
-            "extensions_count": trust.extensions.len()}))
+            "extensions_count": trust.extensions.len(), "trust_adapter": trust.adapter.map(|adapter| adapter.as_str()),
+            "watch_priority": trust.watch_priority.as_str()}))
     }).collect::<Vec<_>>();
     let pending = pending_summaries(data_home)?;
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
     let (local_profiles, local_errors) = crate::trust_audit::profiles(data_home, &home);
     let local = crate::trust_audit::profile_summaries(&local_profiles).into_iter()
         .map(|profile| json!({"slug": profile.id, "display_name": profile.display,
-            "state": "available", "source": profile.source, "capability": profile.capability}))
+            "state": "available", "source": profile.source, "capability": profile.capability, "adapter": profile.adapter,
+            "watch_priority": profile.watch_priority}))
         .collect::<Vec<_>>();
     metadata_response(data_home, json!({"approved": approved, "pending": pending,
         "local_profiles": local, "invalid_plugin_manifests": errors.len(),
@@ -169,7 +179,9 @@ pub fn run_validate(args: &Value, data_home: &Path) -> Result<Value, ToolError> 
     let result = json!({"status":"valid", "slug": slug, "display_name": parsed.display_name,
         "manifest_hash": hash, "trust": {"roots_count": parsed.trust.as_ref().map_or(0, |v| v.roots.len()),
         "artifact_terms_count": parsed.trust.as_ref().map_or(0, |v| v.artifact_terms.len()),
-        "extensions_count": parsed.trust.as_ref().map_or(0, |v| v.extensions.len())},
+        "extensions_count": parsed.trust.as_ref().map_or(0, |v| v.extensions.len()),
+        "adapter": parsed.trust.as_ref().and_then(|v| v.adapter).map(|adapter| adapter.as_str()),
+        "watch_priority": parsed.trust.as_ref().map(|v| v.watch_priority.as_str())},
         "activation": "requires_user_approval"});
     metadata_response(data_home, result)
 }
@@ -196,7 +208,7 @@ pub fn run_stage(args: &Value, data_home: &Path, allow_local_writes: bool) -> Re
     std::fs::write(&temporary, bytes).map_err(|_| ToolError::new("local_write_failed", "could not stage Trust profile"))?;
     std::fs::rename(&temporary, &target).map_err(|_| ToolError::new("local_write_failed", "could not commit Trust profile proposal atomically"))?;
     let result = json!({"status":"staged", "slug":slug, "proposal_ref":format!("proposal_{hash}"), "manifest_hash":hash,
-        "activation":"requires_user_approval", "proposal_note":args.get("proposal_note").and_then(Value::as_str)});
+        "activation":"requires_user_approval"});
     metadata_response(data_home, result)
 }
 
@@ -208,7 +220,7 @@ pub fn run_status(data_home: &Path) -> Result<Value, ToolError> {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
     let (local_profiles, _) = crate::trust_audit::profiles(data_home, &home);
     let local = crate::trust_audit::profile_summaries(&local_profiles).into_iter()
-        .map(|profile| json!({"slug": profile.id, "state": "available", "source": profile.source}))
+        .map(|profile| json!({"slug": profile.id, "state": "available", "source": profile.source, "adapter": profile.adapter, "watch_priority": profile.watch_priority}))
         .collect::<Vec<_>>();
     metadata_response(data_home, json!({"pending": pending_summaries(data_home)?, "approved": approved,
         "local_profiles": local, "history": event_history(data_home)}))

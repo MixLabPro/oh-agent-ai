@@ -1981,6 +1981,43 @@ summary.detail-section-title {
   user-select: none;
 }
 .find-evidence[open] > summary { color: var(--text, inherit); }
+
+/* Trust audit evidence surface: the audit result is a first-class evidence
+   card, not a sentence hidden in a status line. */
+.trust-audit-card {
+  margin: 10px 0 14px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--panel-2));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 92%, var(--accent));
+}
+.trust-audit-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.trust-audit-card h2 { font-size: 16px; line-height: 1.3; margin: 2px 0 4px; }
+.trust-audit-card p { max-width: 720px; }
+.eyebrow { color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.trust-verdict { flex: 0 0 auto; border-radius: 999px; padding: 6px 10px; font-size: 12px; font-weight: 700; }
+.trust-verdict-neutral { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.trust-verdict-danger { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.trust-audit-overview { display: grid; grid-template-columns: repeat(4, minmax(100px, 1fr)); gap: 8px; margin: 14px 0 16px; }
+.trust-audit-stat { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--muted) 22%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--bg) 30%, transparent); }
+.trust-audit-stat strong { font-size: 20px; font-variant-numeric: tabular-nums; }
+.trust-audit-stat span { color: var(--muted); font-size: 11px; }
+.trust-evidence-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
+.trust-evidence-heading h3 { font-size: 13px; }
+.trust-evidence-list { display: grid; gap: 6px; }
+.trust-evidence-row { display: grid; grid-template-columns: 10px 1fr; gap: 10px; padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--muted) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--bg) 24%, transparent); }
+.trust-evidence-marker { width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+.trust-evidence-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.trust-evidence-title span { color: var(--muted); font-size: 12px; }
+.trust-evidence-meta, .trust-evidence-facts { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.trust-evidence-meta { margin-top: 2px; }
+.trust-evidence-facts { margin-top: 4px; color: var(--text-2); }
+.trust-evidence-empty { padding: 14px; color: var(--muted); border: 1px dashed var(--panel-2); border-radius: 8px; }
+@media (max-width: 680px) {
+  .trust-audit-card-head { flex-direction: column; }
+  .trust-audit-overview { grid-template-columns: repeat(2, minmax(100px, 1fr)); }
+  .trust-evidence-heading { align-items: flex-start; flex-direction: column; }
+}
 /* 待办行：一句话 + 主按钮 + 明细与状态。占位显隐由 renderTodoList 控制。 */
 .issue-todo-row {
   display: flex;

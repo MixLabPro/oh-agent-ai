@@ -8,7 +8,7 @@
 //! E3 *attempt* observation; it cannot prove transmitted bytes or remote use.
 
 use agent_vitals_domain::trust::{
-    TrustActorKind, TrustConsentState, TrustEvidenceLevel, TrustObservation,
+    TrustActorKind, TrustConsentState, TrustEvidenceLevel, TrustEvidenceOrigin, TrustObservation,
     TrustObservationKind, TrustStage,
 };
 use crate::trust_identity::TrustIdentity;
@@ -23,6 +23,7 @@ struct ProcessSample {
     command: String,
     has_git_history: bool,
     writes_archive: bool,
+    writes_workspace_index: bool,
     established_connection: bool,
 }
 
@@ -46,11 +47,18 @@ fn is_git_history_path(value: &str) -> bool {
 }
 
 fn is_archive_output(value: &str, fd: &str) -> bool {
-    if !fd.ends_with('w') { return false; }
+    if !fd.ends_with('w') && !fd.ends_with('u') { return false; }
     let path = value.to_ascii_lowercase();
     path.ends_with(".tar") || path.ends_with(".tar.gz") || path.ends_with(".tgz")
         || path.ends_with(".zip") || path.ends_with(".enc")
         || path.contains("snapshot") || path.contains("checkpoint")
+}
+
+fn is_workspace_index_output(value: &str, fd: &str) -> bool {
+    if !fd.ends_with('w') && !fd.ends_with('u') { return false; }
+    let path = value.to_ascii_lowercase();
+    path.contains("/.minimax/v2/sqlite/runtime-state.sqlite")
+        || path.contains("/library/application support/minimax/") && (path.contains("index") || path.contains("manifest"))
 }
 
 fn is_established_connection(value: &str) -> bool {
@@ -76,6 +84,7 @@ fn parse_lsof_fields(raw: &str) -> Vec<ProcessSample> {
             'n' => if let Some(sample) = current.as_mut() {
                 sample.has_git_history |= is_git_history_path(value);
                 sample.writes_archive |= is_archive_output(value, &fd);
+                sample.writes_workspace_index |= is_workspace_index_output(value, &fd);
                 sample.established_connection |= is_established_connection(value);
             },
             _ => {},
@@ -91,20 +100,25 @@ fn observations_from_samples(
     if machine_namespace.is_empty() || observed_at_ms < 0 { return Vec::new(); }
     let minute_bucket = observed_at_ms / 60_000;
     let mut out = Vec::new();
-    for sample in samples.iter().filter(|sample| sample.has_git_history && sample.writes_archive) {
+    for sample in samples.iter().filter(|sample| sample.has_git_history && (sample.writes_archive || sample.writes_workspace_index)) {
         let actor_id = identity.actor_ref(&format!("{}:{}", sample.pid, sample.command));
         let native = identity.event_ref(&format!("runtime:{minute_bucket}:{}", sample.pid));
         out.push(TrustObservation {
             observation_id: format!("runtime_package_{actor_id}_{minute_bucket}"), machine_namespace: machine_namespace.to_string(),
             host: "unattributed-local-agent".to_string(), actor_id: actor_id.clone(), actor_kind: TrustActorKind::Unknown,
             actor_version: None, observed_at_ms, observation_kind: TrustObservationKind::Package,
-            stage: TrustStage::PackageObserved, evidence_level: TrustEvidenceLevel::E1LocalArtifact,
-            workspace_ref: None, scope_classes: vec!["git_history".to_string(), "archive_output".to_string()],
+            stage: TrustStage::PackageObserved, evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::RuntimeProcessMetadata,
+            workspace_ref: None, scope_classes: {
+                let mut scopes = vec!["git_history".to_string()];
+                if sample.writes_archive { scopes.push("archive_output".to_string()); }
+                if sample.writes_workspace_index { scopes.push("workspace_index_state".to_string()); }
+                scopes
+            },
             file_count: None, byte_count: None, destination_class: None, destination_host: None,
             consent_kind: None, consent_state: TrustConsentState::Unavailable, source_id: None, native_event_id: Some(native.clone()),
             source_line: None, source_byte_offset: None, collector_id: "macos-lsof-runtime".to_string(),
             collector_version: "v1".to_string(),
-            provenance: json!({"git_history": true, "archive_output": true, "content_read": false}),
+            provenance: json!({"git_history":true,"archive_output":sample.writes_archive,"workspace_index_state":sample.writes_workspace_index,"content_read":false}),
             expires_at_ms: observed_at_ms.checked_add(RETENTION_MS),
         });
         if sample.established_connection {
@@ -112,13 +126,18 @@ fn observations_from_samples(
                 observation_id: format!("runtime_egress_{actor_id}_{minute_bucket}"), machine_namespace: machine_namespace.to_string(),
                 host: "unattributed-local-agent".to_string(), actor_id, actor_kind: TrustActorKind::Unknown,
                 actor_version: None, observed_at_ms, observation_kind: TrustObservationKind::Connection,
-                stage: TrustStage::EgressAttempted, evidence_level: TrustEvidenceLevel::E3NetworkAttempt,
-                workspace_ref: None, scope_classes: vec!["git_history".to_string(), "archive_output".to_string()],
+                stage: TrustStage::EgressAttempted, evidence_level: TrustEvidenceLevel::E3NetworkAttempt, evidence_origin: TrustEvidenceOrigin::RuntimeProcessMetadata,
+                workspace_ref: None, scope_classes: {
+                    let mut scopes = vec!["git_history".to_string()];
+                    if sample.writes_archive { scopes.push("archive_output".to_string()); }
+                    if sample.writes_workspace_index { scopes.push("workspace_index_state".to_string()); }
+                    scopes
+                },
                 file_count: None, byte_count: None, destination_class: None, destination_host: None,
                 consent_kind: None, consent_state: TrustConsentState::Unavailable, source_id: None, native_event_id: Some(native),
                 source_line: None, source_byte_offset: None, collector_id: "macos-lsof-runtime".to_string(),
                 collector_version: "v1".to_string(),
-                provenance: json!({"git_history": true, "archive_output": true, "established_connection": true, "content_read": false}),
+                provenance: json!({"git_history":true,"archive_output":sample.writes_archive,"workspace_index_state":sample.writes_workspace_index,"established_connection":true,"content_read":false}),
                 expires_at_ms: observed_at_ms.checked_add(RETENTION_MS),
             });
         }
@@ -162,7 +181,7 @@ pub fn snapshot_and_store(
     };
     let identity = TrustIdentity::load_or_create(data_home)?;
     let observations = observations_from_samples(&samples, &identity, machine_namespace, now_ms);
-    let candidate_processes = samples.iter().filter(|sample| sample.has_git_history && sample.writes_archive).count();
+    let candidate_processes = samples.iter().filter(|sample| sample.has_git_history && (sample.writes_archive || sample.writes_workspace_index)).count();
     let authority = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(data_home), now_ms,
     ).map_err(|error| format!("authority_open_failed:{error}"))?;
@@ -222,5 +241,18 @@ mod tests {
         let home = std::env::temp_dir().join(format!("av-trust-runtime-no-package-{}", std::process::id()));
         let identity = TrustIdentity::load_or_create(&home).unwrap();
         assert!(observations_from_samples(&samples, &identity, "machine", 120_000).is_empty());
+    }
+
+    #[test]
+    fn parser_treats_minimax_workspace_index_write_as_a_runtime_package_signal() {
+        let source = "p42\ncMiniMax Code\nf3r\nn/Users/example/project/.git/objects/ab/cd\nf5u\nn/Users/example/.minimax/v2/sqlite/runtime-state.sqlite\nf9u\nnTCP 127.0.0.1:50000->127.0.0.1:7897 (ESTABLISHED)\n";
+        let samples = parse_lsof_fields(source);
+        let home = std::env::temp_dir().join(format!("av-trust-runtime-minimax-{}", std::process::id()));
+        let identity = TrustIdentity::load_or_create(&home).unwrap();
+        let observations = observations_from_samples(&samples, &identity, "machine", 120_000);
+        assert_eq!(observations.len(), 2);
+        assert!(observations.iter().all(|row| row.scope_classes.iter().any(|scope| scope == "workspace_index_state")));
+        assert!(observations.iter().all(|row| row.validate().is_ok()));
+        let _ = std::fs::remove_dir_all(home);
     }
 }

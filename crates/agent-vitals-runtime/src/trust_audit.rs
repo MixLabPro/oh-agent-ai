@@ -7,10 +7,13 @@
 use std::{collections::{BTreeMap, BTreeSet}, path::{Component, Path, PathBuf}, time::SystemTime};
 
 use agent_vitals_domain::trust::{
-    TrustActorKind, TrustConsentState, TrustEvidenceLevel, TrustObservation,
+    TrustActorKind, TrustConsentState, TrustDestinationClass, TrustEvidenceLevel, TrustEvidenceOrigin, TrustObservation,
     TrustObservationKind, TrustStage,
 };
 use crate::trust_identity::TrustIdentity;
+use agent_vitals_hosts::generic_manifest::TrustEvidenceAdapter;
+use agent_vitals_hosts::generic_manifest::TrustWatchPriority;
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use walkdir::WalkDir;
@@ -18,6 +21,7 @@ use walkdir::WalkDir;
 const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const PROFILE_VERSION: u64 = 1;
 const PROFILE_DIRECTORY: &str = "trust-hosts.d";
+const MAX_MINIMAX_STATE_DATABASES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MatchMode { AnyTermOrExtension, TermAndExtension }
@@ -35,6 +39,8 @@ pub struct TrustAuditProfile {
     collector_id: String,
     source: &'static str,
     match_mode: MatchMode,
+    adapter: TrustEvidenceAdapter,
+    watch_priority: TrustWatchPriority,
 }
 
 impl TrustAuditProfile {
@@ -42,27 +48,38 @@ impl TrustAuditProfile {
     #[allow(clippy::too_many_arguments)]
     fn builtin(
         id: &str, display: &str, roots: Vec<PathBuf>, artifact_terms: &[&str],
-        extensions: &[&str], actor_id: &str, collector_id: &str, match_mode: MatchMode,
+        extensions: &[&str], actor_id: &str, collector_id: &str, match_mode: MatchMode, adapter: TrustEvidenceAdapter,
+        watch_priority: TrustWatchPriority,
     ) -> Self {
         Self {
             id: id.to_string(), display: display.to_string(), roots,
             artifact_terms: artifact_terms.iter().map(|v| (*v).to_string()).collect(),
             extensions: extensions.iter().map(|v| (*v).to_string()).collect(),
             actor_id: actor_id.to_string(), collector_id: collector_id.to_string(),
-            source: "built_in", match_mode,
+            source: "built_in", match_mode, adapter, watch_priority,
         }
     }
 
     fn imported(
         home: &Path, id: &str, display: &str,
-        spec: &agent_vitals_hosts::generic_manifest::TrustArtifactProfile,
+        spec: &agent_vitals_hosts::generic_manifest::TrustArtifactProfile, fallback_adapter: TrustEvidenceAdapter,
     ) -> Result<Self, String> {
         let roots = spec.roots.iter().map(|root| expand_profile_root(home, root)).collect::<Result<Vec<_>, _>>()?;
+        // Specialized adapters are capabilities of reviewed built-in hosts,
+        // not claims a dynamically imported manifest may make about itself.
+        // An unknown plugin remains generic E1 coverage until its adapter is
+        // shipped and bound to a verified host identity.
+        let adapter = if fallback_adapter == TrustEvidenceAdapter::GenericArtifactV1 {
+            TrustEvidenceAdapter::GenericArtifactV1
+        } else {
+            spec.adapter.unwrap_or(fallback_adapter)
+        };
         Ok(Self {
             id: id.to_string(), display: display.to_string(), roots,
             artifact_terms: spec.artifact_terms.clone(), extensions: spec.extensions.clone(),
             actor_id: format!("{id}-client"), collector_id: format!("{id}-imported-artifact-metadata"),
             source: "imported_host_manifest", match_mode: MatchMode::TermAndExtension,
+            adapter, watch_priority: spec.watch_priority,
         })
     }
 }
@@ -83,6 +100,8 @@ pub struct TrustProfileSummary {
     pub display: String,
     pub source: String,
     pub capability: String,
+    pub adapter: String,
+    pub watch_priority: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -96,6 +115,25 @@ pub struct TrustAuditReport {
     /// Safe aggregate only: stages and kinds, never raw evidence or paths.
     pub stage_counts: BTreeMap<String, usize>,
     pub observation_kind_counts: BTreeMap<String, usize>,
+    /// Safe, bounded evidence cards for the local UI. References are HMACs;
+    /// raw paths, filenames, contents and credentials never leave the scanner.
+    pub evidence: Vec<TrustEvidenceSummary>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrustEvidenceSummary {
+    pub kind: String,
+    pub stage: String,
+    pub evidence_level: String,
+    pub evidence_origin: String,
+    pub observed_at_ms: i64,
+    pub workspace_ref: Option<String>,
+    pub native_event_ref: Option<String>,
+    pub scope_classes: Vec<String>,
+    pub file_count: Option<i64>,
+    pub byte_count: Option<i64>,
+    pub destination_class: Option<String>,
+    pub collector_id: String,
 }
 
 #[derive(Deserialize)]
@@ -116,7 +154,8 @@ pub fn builtin_profiles(home: &Path) -> Vec<TrustAuditProfile> {
         TrustAuditProfile::builtin(
             "zcode", "ZCode", vec![home.join(".zcode/v2/checkpoints")],
             &["checkpoint", "snapshot"], &[".enc"], "zcode-client",
-            "zcode-checkpoint-metadata", MatchMode::AnyTermOrExtension,
+            "zcode-checkpoint-metadata", MatchMode::AnyTermOrExtension, TrustEvidenceAdapter::ZcodeCheckpointV1,
+            TrustWatchPriority::Enhanced,
         ),
         TrustAuditProfile::builtin(
             "minimax-code", "MiniMax Code", vec![
@@ -124,7 +163,8 @@ pub fn builtin_profiles(home: &Path) -> Vec<TrustAuditProfile> {
                 home.join("Library/Application Support/MiniMax"),
             ], &["snapshot", "checkpoint", "eval"],
             &[".json", ".enc", ".log", ".state"], "minimax-code-client",
-            "minimax-code-artifact-metadata", MatchMode::TermAndExtension,
+            "minimax-code-artifact-metadata", MatchMode::TermAndExtension, TrustEvidenceAdapter::MiniMaxWorkspaceIndexV1,
+            TrustWatchPriority::Normal,
         ),
     ]
 }
@@ -167,6 +207,7 @@ fn parse_profile_file(home: &Path, raw: &[u8]) -> Result<TrustAuditProfile, Stri
         actor_id: format!("{}-client", profile.id), collector_id: format!("{}-artifact-metadata", profile.id),
         id: profile.id, display: profile.display, roots, artifact_terms: profile.artifact_terms,
         extensions: profile.extensions, source: "local_profile", match_mode: MatchMode::TermAndExtension,
+        adapter: TrustEvidenceAdapter::GenericArtifactV1, watch_priority: TrustWatchPriority::Normal,
     })
 }
 
@@ -179,7 +220,9 @@ pub fn profiles(data_home: &Path, home: &Path) -> (Vec<TrustAuditProfile>, Vec<S
     errors.extend(plugin_host_errors.into_iter().map(|_| "plugin_host_manifest_invalid".to_string()));
     for plugin in plugin_hosts {
         let Some(spec) = plugin.trust_profile.as_ref() else { continue; };
-        match TrustAuditProfile::imported(home, &plugin.slug, &plugin.display_name, spec) {
+        let fallback_adapter = loaded.iter().find(|present| present.id == plugin.slug)
+            .map(|present| present.adapter).unwrap_or(TrustEvidenceAdapter::GenericArtifactV1);
+        match TrustAuditProfile::imported(home, &plugin.slug, &plugin.display_name, spec, fallback_adapter) {
             Ok(profile) => {
                 if let Some(index) = loaded.iter().position(|present| present.id == profile.id) {
                     loaded[index] = profile;
@@ -212,6 +255,8 @@ pub fn profile_summaries(profiles: &[TrustAuditProfile]) -> Vec<TrustProfileSumm
     profiles.iter().map(|profile| TrustProfileSummary {
         id: profile.id.clone(), display: profile.display.clone(), source: profile.source.to_string(),
         capability: "historical_artifact_only".to_string(),
+        adapter: profile.adapter.as_str().to_string(),
+        watch_priority: profile.watch_priority.as_str().to_string(),
     }).collect()
 }
 
@@ -282,7 +327,7 @@ fn zcode_manifest_observation(
         machine_namespace: machine_namespace.to_string(), host: profile.id.clone(),
         actor_id: identity.actor_ref(&profile.actor_id), actor_kind: TrustActorKind::Sidecar, actor_version: None,
         observed_at_ms, observation_kind: TrustObservationKind::Package, stage: TrustStage::PackageObserved,
-        evidence_level: TrustEvidenceLevel::E1LocalArtifact, workspace_ref: workspace_ref_for_entry(identity, root, entry),
+        evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref: workspace_ref_for_entry(identity, root, entry),
         scope_classes: scopes.into_iter().collect(), file_count: i64::try_from(files.len()).ok(), byte_count: Some(byte_count),
         destination_class: None, destination_host: None, consent_kind: None, consent_state: TrustConsentState::Unavailable,
         source_id: None, native_event_id: Some(identity.event_ref(&entry.to_string_lossy())), source_line: None, source_byte_offset: None,
@@ -309,8 +354,8 @@ fn zcode_state_observations(
             observation_id: format!("{}_{}", profile.id, identity.event_ref(&format!("{event}#accepted"))),
             machine_namespace: machine_namespace.to_string(), host: profile.id.clone(), actor_id: actor_id.clone(),
             actor_kind: TrustActorKind::Sidecar, actor_version: None, observed_at_ms,
-            observation_kind: TrustObservationKind::RemoteAck, stage: TrustStage::RemoteAccepted,
-            evidence_level: TrustEvidenceLevel::E5Accepted, workspace_ref: workspace_ref.clone(), scope_classes: Vec::new(),
+            observation_kind: TrustObservationKind::RemoteAck, stage: TrustStage::PackageObserved,
+            evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::ClientStateClaim, workspace_ref: workspace_ref.clone(), scope_classes: Vec::new(),
             file_count: None, byte_count: None, destination_class: None, destination_host: None,
             consent_kind: None, consent_state: TrustConsentState::Unavailable, source_id: None,
             native_event_id: Some(identity.event_ref(&event)), source_line: None, source_byte_offset: None,
@@ -325,7 +370,7 @@ fn zcode_state_observations(
             machine_namespace: machine_namespace.to_string(), host: profile.id.clone(), actor_id,
             actor_kind: TrustActorKind::Sidecar, actor_version: None, observed_at_ms,
             observation_kind: TrustObservationKind::Retry, stage: TrustStage::PackageObserved,
-            evidence_level: TrustEvidenceLevel::E1LocalArtifact, workspace_ref, scope_classes: vec!["snapshot_artifact".to_string()],
+            evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref, scope_classes: vec!["snapshot_artifact".to_string()],
             file_count: None, byte_count: None, destination_class: None, destination_host: None,
             consent_kind: None, consent_state: TrustConsentState::Unavailable, source_id: None,
             native_event_id: Some(identity.event_ref(&event)), source_line: None, source_byte_offset: None,
@@ -364,6 +409,127 @@ fn scan_zcode_history(
     observations
 }
 
+/// Read MiniMax's local workspace-index projection, but never retain its
+/// workspace path, archive path, object key, or manifest content.  The schema
+/// has explicit archive/manifest and OSS-key columns; their presence is enough
+/// for a bounded local observation.  Unknown remote-state labels deliberately
+/// do not become a claimed remote acknowledgement.
+fn scan_minimax_workspace_index(
+    profile: &TrustAuditProfile, identity: &TrustIdentity, machine_namespace: &str, fallback_ms: i64,
+) -> Vec<TrustObservation> {
+    if machine_namespace.is_empty() || fallback_ms < 0 { return Vec::new(); }
+    let databases = minimax_state_databases(profile);
+    let mut observations = Vec::new();
+    for database in databases {
+        observations.extend(scan_minimax_workspace_index_database(profile, identity, machine_namespace, fallback_ms, &database));
+    }
+    observations.sort_by(|a, b| a.observation_id.cmp(&b.observation_id));
+    observations.dedup_by(|a, b| a.observation_id == b.observation_id);
+    observations
+}
+
+/// The current database plus a bounded, explicitly named migration-backup
+/// family are historical evidence roots.  Do not walk arbitrary SQLite files:
+/// a client-controlled filename must not expand the audit surface.
+fn minimax_state_databases(profile: &TrustAuditProfile) -> Vec<PathBuf> {
+    let mut databases = Vec::new();
+    for root in &profile.roots {
+        let sqlite = root.join("v2/sqlite");
+        let current = sqlite.join("runtime-state.sqlite");
+        if std::fs::symlink_metadata(&current).ok().is_some_and(|metadata| metadata.file_type().is_file()) {
+            databases.push(current);
+        }
+        let backup_directory = sqlite.join("backups");
+        let Ok(entries) = std::fs::read_dir(backup_directory) else { continue; };
+        let mut backups: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).filter(|path| {
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else { return false };
+            name.starts_with("runtime-state-before-v2-migration-") && name.ends_with(".sqlite")
+                && std::fs::symlink_metadata(path).ok().is_some_and(|metadata| metadata.file_type().is_file())
+        }).collect();
+        backups.sort();
+        databases.extend(backups);
+    }
+    databases.sort();
+    databases.dedup();
+    databases.truncate(MAX_MINIMAX_STATE_DATABASES);
+    databases
+}
+
+fn scan_minimax_workspace_index_database(
+    profile: &TrustAuditProfile, identity: &TrustIdentity, machine_namespace: &str, fallback_ms: i64, database: &Path,
+) -> Vec<TrustObservation> {
+    let Ok(connection) = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX) else {
+        return Vec::new();
+    };
+    let sql = "SELECT workspace_id, workspace_real_path, archive_path IS NOT NULL, manifest_path IS NOT NULL, archive_sha256 IS NOT NULL, manifest_sha256 IS NOT NULL, archive_oss_key IS NOT NULL, manifest_oss_key IS NOT NULL, remote_state, retry_count, index_size_bytes, updated_at_ms FROM local_runtime_workspace_indexing_revisions JOIN local_runtime_workspace_indexing_sessions USING (session_id, workspace_id)";
+    let Ok(mut statement) = connection.prepare(sql) else { return Vec::new() };
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+            row.get::<_, bool>(2)?, row.get::<_, bool>(3)?, row.get::<_, bool>(4)?, row.get::<_, bool>(5)?,
+            row.get::<_, bool>(6)?, row.get::<_, bool>(7)?, row.get::<_, Option<String>>(8)?, row.get::<_, i64>(9)?,
+            row.get::<_, Option<i64>>(10)?, row.get::<_, Option<i64>>(11)?,
+        ))
+    });
+    let Ok(rows) = rows else { return Vec::new() };
+    let actor_id = identity.actor_ref(&profile.actor_id);
+    let database_ref = identity.event_ref(&database.to_string_lossy());
+    let mut observations = Vec::new();
+    for row in rows.flatten() {
+        let (workspace_id, workspace_path, has_archive_path, has_manifest_path, has_archive_hash, has_manifest_hash,
+            has_archive_oss_key, has_manifest_oss_key, remote_state, retry_count, index_size_bytes, updated_at_ms) = row;
+        let workspace_ref = workspace_path.as_deref().filter(|value| !value.is_empty())
+            .map(|value| identity.workspace_ref(Path::new(value)))
+            .or_else(|| Some(identity.event_ref(&format!("minimax-workspace:{workspace_id}"))));
+        let observed_at_ms = updated_at_ms.filter(|value| *value >= 0).unwrap_or(fallback_ms);
+        let native = identity.event_ref(&format!("minimax-index:{database_ref}:{workspace_id}:{observed_at_ms}"));
+        let has_package = has_archive_path || has_manifest_path || has_archive_hash || has_manifest_hash;
+        if has_package {
+            let mut scopes = Vec::new();
+            if has_archive_path || has_archive_hash { scopes.push("workspace_archive".to_string()); }
+            if has_manifest_path || has_manifest_hash { scopes.push("workspace_manifest".to_string()); }
+            observations.push(TrustObservation {
+                observation_id: format!("minimax_package_{native}"), machine_namespace: machine_namespace.to_string(), host: profile.id.clone(),
+                actor_id: actor_id.clone(), actor_kind: TrustActorKind::Main, actor_version: None, observed_at_ms,
+                observation_kind: TrustObservationKind::Package, stage: TrustStage::PackageObserved,
+                evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref: workspace_ref.clone(), scope_classes: scopes,
+                file_count: None, byte_count: index_size_bytes.filter(|value| *value >= 0), destination_class: None, destination_host: None,
+                consent_kind: None, consent_state: TrustConsentState::Unavailable, source_id: None, native_event_id: Some(native.clone()),
+                source_line: None, source_byte_offset: None, collector_id: "minimax-workspace-index".to_string(), collector_version: "v2".to_string(),
+                provenance: json!({"artifact":"workspace_index","archive_recorded":has_archive_path || has_archive_hash,"manifest_recorded":has_manifest_path || has_manifest_hash,"content_read":false}),
+                expires_at_ms: observed_at_ms.checked_add(RETENTION_MS),
+            });
+        }
+        if has_archive_oss_key || has_manifest_oss_key {
+            observations.push(TrustObservation {
+                observation_id: format!("minimax_upload_ready_{native}"), machine_namespace: machine_namespace.to_string(), host: profile.id.clone(),
+                actor_id: actor_id.clone(), actor_kind: TrustActorKind::Main, actor_version: None, observed_at_ms,
+                observation_kind: TrustObservationKind::Credential, stage: TrustStage::CredentialObserved,
+                evidence_level: TrustEvidenceLevel::E2UploadReady, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref: workspace_ref.clone(), scope_classes: Vec::new(),
+                file_count: None, byte_count: None, destination_class: Some(TrustDestinationClass::ObjectStorage), destination_host: None,
+                consent_kind: None, consent_state: TrustConsentState::Unavailable, source_id: None, native_event_id: Some(native.clone()),
+                source_line: None, source_byte_offset: None, collector_id: "minimax-workspace-index".to_string(), collector_version: "v2".to_string(),
+                provenance: json!({"artifact":"workspace_index","archive_object_key_recorded":has_archive_oss_key,"manifest_object_key_recorded":has_manifest_oss_key,"content_read":false}),
+                expires_at_ms: observed_at_ms.checked_add(RETENTION_MS),
+            });
+        }
+        if retry_count > 0 {
+            observations.push(TrustObservation {
+                observation_id: format!("minimax_retry_{native}"), machine_namespace: machine_namespace.to_string(), host: profile.id.clone(),
+                actor_id: actor_id.clone(), actor_kind: TrustActorKind::Main, actor_version: None, observed_at_ms,
+                observation_kind: TrustObservationKind::Retry, stage: TrustStage::PackageObserved,
+                evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref, scope_classes: vec!["workspace_index".to_string()],
+                file_count: None, byte_count: None, destination_class: None, destination_host: None,
+                consent_kind: None, consent_state: TrustConsentState::Unavailable, source_id: None, native_event_id: Some(native),
+                source_line: None, source_byte_offset: None, collector_id: "minimax-workspace-index".to_string(), collector_version: "v2".to_string(),
+                provenance: json!({"artifact":"workspace_index","retry_count":retry_count,"remote_state_recorded":remote_state.is_some(),"content_read":false}),
+                expires_at_ms: observed_at_ms.checked_add(RETENTION_MS),
+            });
+        }
+    }
+    observations
+}
+
 /// Scan one generic profile and emit only E1 package observations. It never
 /// reads file content; hosts with a verified adapter add bounded derivations separately.
 fn scan_generic_history(
@@ -384,7 +550,7 @@ fn scan_generic_history(
                 observation_id: format!("{}_{}", profile.id, path_ref), machine_namespace: machine_namespace.to_string(), host: profile.id.clone(),
                 actor_id: actor_ref, actor_kind: TrustActorKind::Sidecar, actor_version: None,
                 observed_at_ms, observation_kind: TrustObservationKind::Package, stage: TrustStage::PackageObserved,
-                evidence_level: TrustEvidenceLevel::E1LocalArtifact, workspace_ref,
+                evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref,
                 scope_classes: vec!["snapshot_artifact".to_string()], file_count: Some(1), byte_count: i64::try_from(metadata.len()).ok(),
                 destination_class: None, destination_host: None, consent_kind: None, consent_state: TrustConsentState::Unavailable,
                 source_id: None, native_event_id: Some(path_ref), source_line: None, source_byte_offset: None,
@@ -401,8 +567,17 @@ fn scan_generic_history(
 pub fn scan_history(
     profile: &TrustAuditProfile, identity: &TrustIdentity, machine_namespace: &str, observed_at_ms: i64,
 ) -> Vec<TrustObservation> {
-    if profile.id == "zcode" { scan_zcode_history(profile, identity, machine_namespace, observed_at_ms) }
-    else { scan_generic_history(profile, identity, machine_namespace, observed_at_ms) }
+    match profile.adapter {
+        TrustEvidenceAdapter::GenericArtifactV1 => scan_generic_history(profile, identity, machine_namespace, observed_at_ms),
+        TrustEvidenceAdapter::ZcodeCheckpointV1 => scan_zcode_history(profile, identity, machine_namespace, observed_at_ms),
+        TrustEvidenceAdapter::MiniMaxWorkspaceIndexV1 => {
+            let mut observations = scan_generic_history(profile, identity, machine_namespace, observed_at_ms);
+            observations.extend(scan_minimax_workspace_index(profile, identity, machine_namespace, observed_at_ms));
+            observations.sort_by(|a, b| a.observation_id.cmp(&b.observation_id));
+            observations.dedup_by(|a, b| a.observation_id == b.observation_id);
+            observations
+        }
+    }
 }
 
 /// Scan one local client and persist only redacted observations plus derived
@@ -440,6 +615,20 @@ pub fn audit_and_store(
                     *counts.entry(observation.observation_kind.as_str().to_string()).or_insert(0) += 1;
                     counts
                 }),
+                evidence: observations.iter().map(|observation| TrustEvidenceSummary {
+                    kind: observation.observation_kind.as_str().to_string(),
+                    stage: observation.stage.as_str().to_string(),
+                    evidence_level: observation.evidence_level.as_str().to_string(),
+                    evidence_origin: observation.evidence_origin.as_str().to_string(),
+                    observed_at_ms: observation.observed_at_ms,
+                    workspace_ref: observation.workspace_ref.clone(),
+                    native_event_ref: observation.native_event_id.clone(),
+                    scope_classes: observation.scope_classes.clone(),
+                    file_count: observation.file_count,
+                    byte_count: observation.byte_count,
+                    destination_class: observation.destination_class.map(|value| value.as_str().to_string()),
+                    collector_id: observation.collector_id.clone(),
+                }).collect(),
             })
         }
         Err(error) => {
@@ -461,6 +650,7 @@ pub fn findings_summary(data_home: &Path) -> Result<Vec<agent_vitals_data::trust
 #[cfg(test)]
 mod tests {
     use super::{audit_and_store, builtin_profiles, discover_host_candidates, profiles, scan_history};
+    use agent_vitals_hosts::generic_manifest::TrustEvidenceAdapter;
     use crate::trust_identity::TrustIdentity;
 
     #[test]
@@ -501,9 +691,50 @@ mod tests {
         assert_eq!(package.byte_count, Some(10));
         assert!(!package.observation_id.contains("workspace-private"));
         assert!(!package.native_event_id.as_deref().unwrap().contains("opaque.json"));
-        assert!(rows.iter().any(|row| row.stage == agent_vitals_domain::trust::TrustStage::RemoteAccepted
-            && row.evidence_level == agent_vitals_domain::trust::TrustEvidenceLevel::E5Accepted));
+        assert!(rows.iter().any(|row| row.observation_kind == agent_vitals_domain::trust::TrustObservationKind::RemoteAck
+            && row.stage == agent_vitals_domain::trust::TrustStage::PackageObserved
+            && row.evidence_level == agent_vitals_domain::trust::TrustEvidenceLevel::E1LocalArtifact
+            && row.evidence_origin == agent_vitals_domain::trust::TrustEvidenceOrigin::ClientStateClaim));
         assert!(rows.iter().any(|row| row.observation_kind == agent_vitals_domain::trust::TrustObservationKind::Retry));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn minimax_workspace_index_emits_redacted_package_upload_ready_and_retry() {
+        let root = std::env::temp_dir().join(format!("agent-vitals-minimax-index-{}", std::process::id()));
+        let database = root.join(".minimax/v2/sqlite/backups/runtime-state-before-v2-migration-test.sqlite");
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection.execute_batch("\
+            CREATE TABLE local_runtime_workspace_indexing_sessions (
+                session_id TEXT, workspace_id TEXT, workspace_real_path TEXT
+            );
+            CREATE TABLE local_runtime_workspace_indexing_revisions (
+                session_id TEXT, workspace_id TEXT, archive_path TEXT, manifest_path TEXT,
+                archive_sha256 TEXT, manifest_sha256 TEXT, archive_oss_key TEXT, manifest_oss_key TEXT,
+                remote_state TEXT, retry_count INTEGER, index_size_bytes INTEGER, updated_at_ms INTEGER
+            );
+            INSERT INTO local_runtime_workspace_indexing_sessions VALUES ('session-private', 'workspace-private', '/private/company/repository');
+            INSERT INTO local_runtime_workspace_indexing_revisions VALUES (
+                'session-private', 'workspace-private', '/private/tmp/archive.tar.gz', '/private/tmp/manifest.json',
+                'archive-sha', 'manifest-sha', 'opaque-archive-key', 'opaque-manifest-key', 'queued', 2, 1234, 2000
+            );
+        ").unwrap();
+        drop(connection);
+        let profile = builtin_profiles(&root).into_iter().find(|item| item.id() == "minimax-code").unwrap();
+        let identity = TrustIdentity::load_or_create(&root).unwrap();
+        let rows = scan_history(&profile, &identity, "machine-1", 1_000);
+        assert!(rows.iter().any(|row| row.observation_kind == agent_vitals_domain::trust::TrustObservationKind::Package
+            && row.scope_classes.iter().any(|scope| scope == "workspace_archive") && row.byte_count == Some(1234)));
+        assert!(rows.iter().any(|row| row.observation_kind == agent_vitals_domain::trust::TrustObservationKind::Credential
+            && row.evidence_level == agent_vitals_domain::trust::TrustEvidenceLevel::E2UploadReady));
+        assert!(rows.iter().any(|row| row.observation_kind == agent_vitals_domain::trust::TrustObservationKind::Retry));
+        for row in rows {
+            assert!(row.validate().is_ok());
+            assert!(!row.observation_id.contains("private"));
+            assert!(!row.native_event_id.as_deref().unwrap_or_default().contains("private"));
+            assert!(!row.provenance.to_string().contains("opaque"));
+        }
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -557,6 +788,27 @@ mod tests {
         assert!(errors.is_empty());
         let profile = loaded.iter().find(|item| item.id() == "zcode").unwrap();
         assert_eq!(profile.source, "imported_host_manifest");
+        assert_eq!(profile.adapter, TrustEvidenceAdapter::ZcodeCheckpointV1,
+            "legacy imported manifests inherit the replaced built-in adapter");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn unknown_imported_host_cannot_claim_a_specialized_adapter() {
+        let root = std::env::temp_dir().join(format!("agent-vitals-trust-plugin-generic-{}", std::process::id()));
+        let host_dir = root.join("data/hosts.d/unknown-agent");
+        std::fs::create_dir_all(&host_dir).unwrap();
+        std::fs::write(host_dir.join("manifest.json"), r#"{
+            "manifest_version":1,"slug":"unknown-agent","display":{"name":"Unknown Agent"},
+            "discovery":{"roots":["~/.unknown-agent"],"include":["*.jsonl"]},
+            "source":{"format":"jsonl"},"session":{"from":"filename","pattern":"^s_(?P<id>.+)\\.jsonl$"},
+            "recipe":"request-usage-anthropic-v1","event_key":{"paths":["requestId"]},
+            "trust":{"roots":["~/.unknown-agent/cache"],"artifact_terms":["snapshot"],"extensions":[".enc"],"adapter":"minimax_workspace_index_v1"}
+        }"#).unwrap();
+        let (loaded, errors) = profiles(&root.join("data"), &root);
+        assert!(errors.is_empty());
+        let profile = loaded.iter().find(|item| item.id() == "unknown-agent").unwrap();
+        assert_eq!(profile.adapter, TrustEvidenceAdapter::GenericArtifactV1);
         std::fs::remove_dir_all(root).ok();
     }
 

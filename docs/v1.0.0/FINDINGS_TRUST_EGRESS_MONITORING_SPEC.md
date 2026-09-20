@@ -199,7 +199,7 @@ Trust Finding 继续写入 `issue_instances`，`evaluator_id=trust-egress-correl
 
 ### 5.3 元数据、保留与删除
 
-Issue metadata 仅允许：阶段、证据等级、confidence、scope classes、计数、destination class、`consent_kind/state`、Observation 数、最早/最近时间、coverage 状态、incident 状态。不得含 actor、workspace、hostname、source ID、锚点或路径。
+Issue metadata 仅允许：阶段、证据等级、confidence、闭集 `evidence_origins`、闭集 `confidence_reasons`、scope classes、计数、destination class、`consent_kind/state`、Observation 数、最早/最近时间、coverage 状态、incident 状态。不得含 actor、workspace、hostname、source ID、锚点或路径；两个闭集字段不得承载自由文本。
 
 高频 Observation 默认保留 7 天，可选 1/7/30 天；关闭 Finding 后保留脱敏摘要，原 Observation 按保留期清理。删除导入宿主数据时必须先删 evidence link、再删 observation、再删 source，且将失去全部证据的 Trust Finding 诚实转为 expired/resolved。
 

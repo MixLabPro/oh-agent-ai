@@ -48,17 +48,17 @@ pub fn insert_observations(
         let changed = conn.execute(
             "INSERT OR IGNORE INTO trust_observations(
                  observation_id, machine_namespace, host, actor_id, actor_kind, actor_version,
-                 observed_at_ms, observation_kind, stage, evidence_level, workspace_ref,
+                 observed_at_ms, observation_kind, stage, evidence_level, evidence_origin, workspace_ref,
                  scope_classes_json, file_count, byte_count, destination_class, destination_host,
                  consent_kind, consent_state, source_id, native_event_id, source_line, source_byte_offset,
                  collector_id, collector_version, provenance_json, expires_at_ms,
                  ingested_run_id, created_at_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)",
             params![
                 observation.observation_id, observation.machine_namespace, observation.host,
                 observation.actor_id, observation.actor_kind.as_str(), observation.actor_version,
                 observation.observed_at_ms, observation.observation_kind.as_str(), observation.stage.as_str(),
-                observation.evidence_level.as_str(), observation.workspace_ref, scope_classes_json,
+                observation.evidence_level.as_str(), observation.evidence_origin.as_str(), observation.workspace_ref, scope_classes_json,
                 observation.file_count, observation.byte_count,
                 observation.destination_class.map(|value| value.as_str()), observation.destination_host,
                 observation.consent_kind.map(|value| value.as_str()), observation.consent_state.as_str(), observation.source_id, observation.native_event_id,
@@ -102,7 +102,7 @@ pub fn link_issue_evidence(
 /// query, MCP, or export surfaces.
 pub fn issue_timeline(conn: &Connection, issue_id: &str) -> rusqlite::Result<Vec<serde_json::Value>> {
     let mut stmt = conn.prepare(
-        "SELECT observation_kind, stage, evidence_level, observed_at_ms,
+         "SELECT observation_kind, stage, evidence_level, evidence_origin, observed_at_ms,
                 scope_classes_json, destination_class, consent_state,
                 collector_id, collector_version
          FROM trust_issue_evidence link
@@ -111,15 +111,15 @@ pub fn issue_timeline(conn: &Connection, issue_id: &str) -> rusqlite::Result<Vec
          ORDER BY observation.observed_at_ms, observation.observation_id",
     )?;
     let rows = stmt.query_map([issue_id], |row| {
-        let scopes: String = row.get(4)?;
+        let scopes: String = row.get(5)?;
         let scopes = serde_json::from_str::<Vec<String>>(&scopes).unwrap_or_default()
             .into_iter().filter(|scope| !scope.is_empty() && scope.len() <= 64).collect::<Vec<_>>();
         Ok(serde_json::json!({
             "observation_kind": row.get::<_, String>(0)?, "stage": row.get::<_, String>(1)?,
-            "evidence_level": row.get::<_, String>(2)?, "observed_at_ms": row.get::<_, i64>(3)?,
-            "scope_classes": scopes, "destination_class": row.get::<_, Option<String>>(5)?,
-            "consent_state": row.get::<_, String>(6)?, "collector_id": row.get::<_, String>(7)?,
-            "collector_version": row.get::<_, String>(8)?,
+            "evidence_level": row.get::<_, String>(2)?, "evidence_origin": row.get::<_, String>(3)?, "observed_at_ms": row.get::<_, i64>(4)?,
+            "scope_classes": scopes, "destination_class": row.get::<_, Option<String>>(6)?,
+            "consent_state": row.get::<_, String>(7)?, "collector_id": row.get::<_, String>(8)?,
+            "collector_version": row.get::<_, String>(9)?,
         }))
     })?.collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
@@ -129,7 +129,7 @@ pub fn issue_timeline(conn: &Connection, issue_id: &str) -> rusqlite::Result<Vec
 mod tests {
     use super::{insert_observations, issue_timeline, link_issue_evidence};
     use crate::{authority::AuthorityDb, issues::{IssueInput, upsert_issue}};
-    use agent_vitals_domain::trust::{TrustActorKind, TrustConsentState, TrustDestinationClass, TrustEvidenceLevel, TrustObservation, TrustObservationKind, TrustStage};
+    use agent_vitals_domain::trust::{TrustActorKind, TrustConsentState, TrustDestinationClass, TrustEvidenceLevel, TrustEvidenceOrigin, TrustObservation, TrustObservationKind, TrustStage};
     use serde_json::json;
 
     fn tmp_db(name: &str) -> std::path::PathBuf {
@@ -141,7 +141,7 @@ mod tests {
             observation_id: "obs-1".into(), machine_namespace: "machine-1".into(), host: "zcode".into(),
             actor_id: "actor-1".into(), actor_kind: TrustActorKind::Sidecar, actor_version: Some("3.14.0".into()),
             observed_at_ms: 10, observation_kind: TrustObservationKind::Package, stage: TrustStage::PackageObserved,
-            evidence_level: TrustEvidenceLevel::E1LocalArtifact, workspace_ref: Some("ws-1".into()),
+            evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref: Some("ws-1".into()),
             scope_classes: vec!["workspace_current".into(), "git_history".into()], file_count: Some(2), byte_count: Some(3),
             destination_class: Some(TrustDestinationClass::ObjectStorage), destination_host: Some("bucket.example.com".into()),
             consent_kind: None, consent_state: TrustConsentState::Unavailable, source_id: None, native_event_id: Some("manifest-1".into()),

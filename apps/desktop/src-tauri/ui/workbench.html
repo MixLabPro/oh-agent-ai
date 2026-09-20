@@ -304,6 +304,22 @@
       <div id="find-trust-monitor-status" class="muted note" hidden role="status" aria-live="polite"></div>
       <div id="find-trust-profile-status" class="muted note" hidden role="status" aria-live="polite"></div>
       <div id="find-trust-audit-status" class="muted note" hidden role="status" aria-live="polite"></div>
+      <section id="find-trust-audit-card" class="trust-audit-card" hidden aria-labelledby="find-trust-audit-title">
+        <div class="trust-audit-card-head">
+          <div>
+            <div class="eyebrow">本机证据</div>
+            <h2 id="find-trust-audit-title">最近一次历史审计</h2>
+            <p id="find-trust-audit-explanation" class="muted">这里只展示脱敏后的结构化证据，不展示原始路径、文件名或文件内容。</p>
+          </div>
+          <span id="find-trust-audit-verdict" class="trust-verdict trust-verdict-neutral">未形成风险结论</span>
+        </div>
+        <div id="find-trust-audit-overview" class="trust-audit-overview"></div>
+        <div class="trust-evidence-heading">
+          <h3>证据链</h3>
+          <span class="muted note">按采集时间排序 · 引用均为不可逆脱敏引用</span>
+        </div>
+        <div id="find-trust-evidence-list" class="trust-evidence-list"></div>
+      </section>
       <div id="find-trust-profile-proposals" class="notice-list" hidden aria-label="待批准的本地 Agent Profile"></div>
       <div id="find-trust-profile-approved" class="notice-list" hidden aria-label="已启用的本地 Agent Profile"></div>
       <div id="find-trust-suppressions" class="notice-list" hidden aria-label="已忽略的 Trust Finding"></div>
