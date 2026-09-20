@@ -14,7 +14,7 @@
 | 待处理/发现 | `tab-findings` | `features/findings/FindingsPage.tsx` | 已迁移首个垂直切片：安全 Finding 投影、待办、证据明细、决策矩阵和新鲜度 | Phase 2：补事件 smoke test 与旧页数值对照 |
 | 测试 | `tab-test` | `features/test/TestPage.tsx` | 已迁移只读路线质量面：宿主 × 实际模型族、非官方族/API 错误/无基准状态与安全 DTO；主动 probe mutation 仍保留旧页 | Phase 3 后半：补真实 Tauri 对拍，再评估显式 mutation |
 | Skill | `tab-skills` | `features/skills/SkillsPage.tsx` | 未迁移；涉及扫描、取消和导出 | Phase 3 后半：单独审查导出脱敏 |
-| 设置 | `tab-sources` | `features/settings/SettingsPage.tsx` | 未迁移；包含来源、预算、价卡、保留策略和 Trust 设置 | Phase 3：按表单域拆分，逐项保留回执/撤销语义 |
+| 设置 | `tab-sources` | `features/settings/SettingsPage.tsx` | 已迁移首个只读数据源健康切片：动态来源列表、失败原因人话映射、同步状态和 authority 不可用态；暂停/排除/删除等 mutation 仍保留旧页 | Phase 3：迁移数据源安全控制，再拆预算、计费、统计与诊断 |
 
 ## Phase 2 Trust / Findings 边界
 

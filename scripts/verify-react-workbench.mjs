@@ -25,6 +25,7 @@ for (const required of [
   path.join(reactSource, "features/sessions/SessionsPage.tsx"),
   path.join(reactSource, "features/sessions/SessionDetail.tsx"),
   path.join(reactSource, "features/test/TestPage.tsx"),
+  path.join(reactSource, "features/settings/SettingsPage.tsx"),
   path.join(repo, "apps/desktop/src-tauri/src/store.rs"),
   path.join(dist, "index.html"),
 ]) {
@@ -64,6 +65,10 @@ if (source.includes('"sessions_issues"')) fail("React Findings 直接消费 lega
 if (!source.includes('"routes_quality"') || !source.includes("readRouteQuality") || !source.includes("test-quality-host")) fail("React 测试页未使用只读路线质量 DTO");
 if (source.includes('"probe_run_start"')) fail("React 测试页越过 mutation 边界调用主动探针");
 if (!source.includes("只读") || !source.includes("不发请求") || !source.includes("无官方基准")) fail("React 测试页缺少主动探针边界或无基准诚实状态");
+if (!source.includes('"data_source_status"') || !source.includes("readSourceHealth") || !source.includes("settings-source-row")) fail("React 设置未使用安全数据源状态 DTO");
+if (source.includes('"trigger_sync"') || source.includes('"set_sync_paused"') || source.includes('"delete_imported_source_data"')) fail("React 设置首轮越过数据源 mutation 边界");
+if (!source.includes("尚未导入") || !source.includes("没有读取权限") || !source.includes("来源状态暂不可用")) fail("React 设置缺少来源空态、错误映射或不可用态");
+if (!source.includes("Promise.allSettled") || !source.includes("sync_pause_state") || !source.includes("read_overview")) fail("React 设置未保留来源状态的部分失败降级");
 const routeQualityType = source.match(/export type RouteQualityModel[\s\S]*?\};/u)?.[0] || "";
 if (/provider_raw|provider_id|credential_ref|endpoint_base_url/u.test(routeQualityType)) fail("React 路线质量模型投影携带了 provider/credential/endpoint 字段");
 

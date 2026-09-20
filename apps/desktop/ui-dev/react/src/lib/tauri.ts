@@ -62,6 +62,26 @@ export type UsageSourceSummary = {
 
 export type StatisticsTimezone = { timezone: string };
 
+export type SourceConnectionState = "connected" | "needs_attention" | "paused" | "excluded" | "not_detected" | "unknown";
+export type SourceErrorKind = "permission_denied" | "file_missing" | "all_files_failed" | "db_error" | "migration_failed" | "read_failed";
+export type SourceHealthRow = {
+  host: string;
+  connection_state: SourceConnectionState;
+  sessions: number;
+  facts: number;
+  source_count: number;
+  first_event_at_ms: number | null;
+  last_event_at_ms: number | null;
+  last_scanned_at_ms: number | null;
+  failed_sources: number;
+  error_kinds: SourceErrorKind[];
+};
+export type SourceHealthReport = {
+  status: "ok" | "unavailable";
+  sources: SourceHealthRow[];
+  sync: { paused: boolean | null; last_success_at: string | null; state: "ok" | "failed" | "never" | "unavailable" };
+};
+
 export type UsageHour = {
   hour: number;
   dsh_tokens: number | null;
@@ -402,6 +422,12 @@ function nullableCount(value: unknown, label: string): number | null {
   return value;
 }
 
+function nullableSourceTimestampMs(value: unknown, label: string): number | null {
+  const timestamp = nullableCount(value, label);
+  if (timestamp !== null && timestamp > 4_102_444_800_000) throw new Error(`${label} DTO 时间戳超限`);
+  return timestamp;
+}
+
 function requiredArray(value: unknown, label: string): unknown[] {
   if (!Array.isArray(value)) throw new Error(`${label} DTO 缺少数组字段`);
   return value;
@@ -465,6 +491,56 @@ function overviewTimestamp(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)) return null;
   return value;
+}
+
+const sourceStates = ["connected", "needs_attention", "paused", "excluded", "not_detected", "unknown"] as const;
+
+function sourceErrorKind(value: unknown): SourceErrorKind {
+  const raw = typeof value === "string" ? value : "";
+  if (raw === "permission_denied" || raw === "permission") return "permission_denied";
+  if (raw === "file_missing") return "file_missing";
+  if (raw === "all_files_failed") return "all_files_failed";
+  if (raw === "db_error") return "db_error";
+  if (raw === "migration_failed") return "migration_failed";
+  return "read_failed";
+}
+
+function sourceErrorKinds(value: unknown): SourceErrorKind[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.slice(0, 16).map(sourceErrorKind))];
+}
+
+function parseSourceHealth(value: unknown, pauseValue: unknown, overviewValue: unknown): SourceHealthReport {
+  const root = record(value, "source health");
+  const status = boundedEnum(root.status ?? "unavailable", "source health status", ["ok", "unavailable"], "unavailable") as SourceHealthReport["status"];
+  const sources = requiredArray(root.sources, "source health sources");
+  if (sources.length > 32) throw new Error("source health sources 超出上限");
+  const rows = sources.map((item) => {
+    const row = record(item, "source health row");
+    const scan = row.scan == null ? {} : record(row.scan, "source health scan");
+    const log = row.log == null ? {} : record(row.log, "source health log");
+    const scope = row.import_scope == null ? {} : record(row.import_scope, "source health import scope");
+    const failed = row.failed_scope == null ? {} : record(row.failed_scope, "source health failed scope");
+    return {
+      host: safeHostLabel(row.host),
+      connection_state: boundedEnum(row.connection_state ?? "unknown", "source health state", sourceStates, "unknown") as SourceConnectionState,
+      sessions: boundedCount(scope.sessions ?? 0, "source health sessions", 10_000_000),
+      facts: boundedCount(scope.facts ?? 0, "source health facts", 100_000_000),
+      source_count: boundedCount(scan.source_count ?? 0, "source health source count", 1_000_000),
+      first_event_at_ms: nullableSourceTimestampMs(scope.first_event_at_ms, "source health first event"),
+      last_event_at_ms: nullableSourceTimestampMs(scope.last_event_at_ms ?? log.last_event_at_ms, "source health last event"),
+      last_scanned_at_ms: nullableSourceTimestampMs(scan.last_scanned_at_ms, "source health last scan"),
+      failed_sources: boundedCount(failed.sources ?? 0, "source health failed sources", 1_000_000),
+      error_kinds: sourceErrorKinds(failed.error_codes),
+    };
+  }).sort((left, right) => (left.connection_state === "needs_attention" ? -1 : 0) - (right.connection_state === "needs_attention" ? -1 : 0) || left.host.localeCompare(right.host));
+  const pauseRoot = pauseValue == null ? {} : record(pauseValue, "source pause state");
+  const paused = pauseRoot.paused === null || pauseRoot.paused === undefined ? null : requiredBoolean(pauseRoot.paused, "source pause state");
+  const overviewRoot = overviewValue == null ? {} : record(overviewValue, "source sync overview");
+  const sync = overviewRoot.sync == null ? {} : record(overviewRoot.sync, "source sync status");
+  const syncStage = boundedEnum(sync.stage ?? "unknown", "source sync stage", ["complete", "fold", "discover", "resolve", "never", "paused", "unknown"], "unknown");
+  const syncState: SourceHealthReport["sync"]["state"] = status !== "ok" ? "unavailable" : syncStage === "complete" ? "ok" : syncStage === "never" ? "never" : syncStage === "unknown" ? "unavailable" : "failed";
+  return { status, sources: rows, sync: { paused, last_success_at: overviewTimestamp(sync.at), state: syncState } };
 }
 
 function parseOverviewSnapshot(value: unknown): OverviewSnapshot {
@@ -1370,6 +1446,35 @@ export async function readStatisticsTimezone(): Promise<StatisticsTimezone> {
   const timezone = stringField(root.timezone, "statistics timezone");
   try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(); } catch (_) { throw new Error("统计时区不可用"); }
   return { timezone };
+}
+
+export async function readSourceHealth(): Promise<SourceHealthReport> {
+  const fallback = {
+    status: "ok",
+    sources: [
+      { host: "codex", connection_state: "connected", scan: { source_count: 12, last_scanned_at_ms: Date.now() - 3_600_000 }, log: { last_event_at_ms: Date.now() - 3_600_000 }, import_scope: { facts: 42, sessions: 8, first_event_at_ms: Date.now() - 30 * 86_400_000, last_event_at_ms: Date.now() - 3_600_000 }, failed_scope: { sources: 0, error_codes: [] } },
+      { host: "claude-code", connection_state: "needs_attention", scan: { source_count: 4, last_scanned_at_ms: Date.now() - 7_200_000 }, log: { last_event_at_ms: Date.now() - 7_200_000 }, import_scope: { facts: 18, sessions: 3, first_event_at_ms: Date.now() - 20 * 86_400_000, last_event_at_ms: Date.now() - 7_200_000 }, failed_scope: { sources: 1, error_codes: ["permission_denied"] } },
+      { host: "dsh", connection_state: "connected", scan: { source_count: 2, last_scanned_at_ms: Date.now() - 1_800_000 }, log: { last_event_at_ms: Date.now() - 1_800_000 }, import_scope: { facts: 9, sessions: 2, first_event_at_ms: Date.now() - 5 * 86_400_000, last_event_at_ms: Date.now() - 1_800_000 }, failed_scope: { sources: 0, error_codes: [] } },
+      { host: "workbuddy", connection_state: "not_detected", scan: { source_count: 0, last_scanned_at_ms: null }, log: {}, import_scope: { facts: 0, sessions: 0, first_event_at_ms: null, last_event_at_ms: null }, failed_scope: { sources: 0, error_codes: ["vendor_internal_code"] } },
+    ],
+  };
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseSourceHealth(fallback, { status: "ok", paused: false }, { sync: { stage: "complete", at: "2026-09-21 22:00:00" } });
+  try {
+    const [sources, pause, overview] = await Promise.allSettled([
+      handler("data_source_status"),
+      handler("sync_pause_state"),
+      handler("read_overview"),
+    ]);
+    if (sources.status === "rejected") throw new Error("来源状态读取失败");
+    return parseSourceHealth(
+      sources.value,
+      pause.status === "fulfilled" ? pause.value : null,
+      overview.status === "fulfilled" ? overview.value : null,
+    );
+  } catch {
+    throw new Error("来源状态读取失败");
+  }
 }
 
 export async function listen(event: string, handler: (payload: unknown) => void): Promise<Unsubscribe> {

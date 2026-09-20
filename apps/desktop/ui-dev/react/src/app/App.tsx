@@ -5,10 +5,11 @@ import { TrustPage } from "../features/trust/TrustPage";
 import { UsagePage } from "../features/usage/UsagePage";
 import { SessionsPage } from "../features/sessions/SessionsPage";
 import { TestPage } from "../features/test/TestPage";
+import { SettingsPage } from "../features/settings/SettingsPage";
 
 type Overview = OverviewSnapshot;
 
-type Page = "overview" | "usage" | "sessions" | "findings" | "test" | "trust";
+type Page = "overview" | "usage" | "sessions" | "findings" | "test" | "trust" | "settings";
 
 const navigation: Array<{ id: Page; label: string; hint: string }> = [
   { id: "overview", label: "总览", hint: "当前状态" },
@@ -17,6 +18,7 @@ const navigation: Array<{ id: Page; label: string; hint: string }> = [
   { id: "findings", label: "发现", hint: "风险与待办" },
   { id: "test", label: "测试", hint: "路线质量" },
   { id: "trust", label: "Trust", hint: "证据审计" },
+  { id: "settings", label: "设置", hint: "本机配置" },
 ];
 
 function pageFromHash(): Page {
@@ -160,7 +162,7 @@ export function App() {
     <main className="main-content">
       <header className="page-header"><div><p className="eyebrow">Workbench React migration</p><h1>{navigation.find((item) => item.id === page)?.label}</h1></div><div className="header-actions"><StatusPill tone="success">本地运行</StatusPill><button className="button button-secondary" type="button" onClick={() => window.location.reload()}>刷新</button></div></header>
       {error && <div className="error-banner" role="alert">{error} · 当前显示安全的预览状态</div>}
-      {page === "overview" ? <OverviewPage overview={overview} /> : page === "usage" ? <UsagePage /> : page === "sessions" ? <SessionsPage /> : page === "trust" ? <TrustPage /> : page === "test" ? <TestPage /> : <FindingsPage />}
+      {page === "overview" ? <OverviewPage overview={overview} /> : page === "usage" ? <UsagePage /> : page === "sessions" ? <SessionsPage /> : page === "trust" ? <TrustPage /> : page === "test" ? <TestPage /> : page === "settings" ? <SettingsPage /> : <FindingsPage />}
     </main>
   </div></AppErrorBoundary>;
 }
