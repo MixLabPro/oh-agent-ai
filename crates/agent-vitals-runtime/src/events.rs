@@ -258,9 +258,16 @@ impl Dispatcher {
                     row.get::<_, String>(7)?,
                 ))
             })?;
-            for row in rows {
+            // **先完整物化、关游标，再处理**（2026-09-21 真机验证发现）：懒迭代
+            // 会把读快照一直握到 handler 与记账之后——handler 经自持连接提交写入
+            // 后，本连接的快照已过期，record_delivery 从读升级为写会撞
+            // SQLITE_BUSY（busy_timeout 无效：过期快照在游标关闭前永不自愈）。
+            // 物化后每条 INSERT 是独立自动提交事务，且不再边扫边写同一连接。
+            let pending: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            for row in pending {
                 let (event_id, event_type, schema_version, occurred_at_ms, host,
-                     correlation_id, _producer, payload_json) = row?;
+                     correlation_id, _producer, payload_json) = row;
                 // 前向兼容：未来的 schema_version / 词表外类型只跳过并计数，
                 // 不让一条不认识的行卡住整个队列（spec §10.7 的闭集校验是
                 // 「拒绝并计数」，不是崩溃）。
