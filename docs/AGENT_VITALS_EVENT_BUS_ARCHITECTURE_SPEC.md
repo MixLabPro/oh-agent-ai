@@ -1,6 +1,6 @@
 # Agent Vitals Runtime Event Bus Architecture Spec
 
-> 状态：**Draft v1.4（2026-09-21）**（v1.3 基础上：迭代 3 落地 retention——deliveries 独立 TTL 勘正为随事件走、HourTicked/DayRolled 降为保留位、v18 孤儿函数 retention_trust_observations 接线进每日 maintenance）；——v1 收敛、v1.1 并入 apalis-sqlite 研究（§12）、v1.2 为 P0 实施修订（v23 迁移/反连接/两段式 drain/尾部保序）；v1.3 为 **迭代 2 实施修订**：`McpToolInvoked` 的生产者定为 **CLI serve 传输层**而非 `mcp::dispatch`（桌面/CLI 内部自用调用不是审计对象——只有外部 agent 的 `tools/call` 是）；审计批次按**进程×库**一条（`trigger='mcp-audit'`，沿 trust-audit 的 per-invocation run 先例但按进程聚合）；未同步机器无库则跳过且**不建库**；参数只入 fnv1a64 指纹（原始参数禁令 §4.1）；
+> 状态：**Draft v1.5（2026-09-21）**（v1.4 基础上：迭代 4 落地 TrustMonitorEvent——快照传感已在写入事务内发射，correlate 保持同事务内联的裁决与理由，载荷勘正为运行级摘要）；（v1.3 基础上：迭代 3 落地 retention——deliveries 独立 TTL 勘正为随事件走、HourTicked/DayRolled 降为保留位、v18 孤儿函数 retention_trust_observations 接线进每日 maintenance）；——v1 收敛、v1.1 并入 apalis-sqlite 研究（§12）、v1.2 为 P0 实施修订（v23 迁移/反连接/两段式 drain/尾部保序）；v1.3 为 **迭代 2 实施修订**：`McpToolInvoked` 的生产者定为 **CLI serve 传输层**而非 `mcp::dispatch`（桌面/CLI 内部自用调用不是审计对象——只有外部 agent 的 `tools/call` 是）；审计批次按**进程×库**一条（`trigger='mcp-audit'`，沿 trust-audit 的 per-invocation run 先例但按进程聚合）；未同步机器无库则跳过且**不建库**；参数只入 fnv1a64 指纹（原始参数禁令 §4.1）；
 > 前置：v0.9.1 SQL 权威库已冻结（单一事实源 + 幂等重放）；trust P1（`FINDINGS_TRUST_EGRESS_MONITORING_SPEC`）已合入，P2 实时传感器未实施；
 > 目标：为 runtime 引入**最小事件驱动层**——事务性 outbox + 单管道类型化事件——收编既有的内联反应链与缓存失效土办法，并为 trust P2 传感器预留唯一接入通道。
 
@@ -61,7 +61,7 @@
 │  │   ├─ DeclarationSaved / PriceCardSaved                                        │ │
 │  │   ├─ HostSourceFailed{host,error} / SourceRecovered{host}                     │ │
 │  │   ├─ McpToolInvoked{tool, args_fingerprint, latency_ms, ok}   ◄── 审计旁路    │ │
-│  │   ├─ TrustMonitorEvent{actor, stage, evidence_level}          ◄── P2 传感器   │ │
+│  │   ├─ TrustMonitorEvent{run_id, observations, inserted…}        ◄── P2 传感器   │ │
 │  │   └─ HourTicked / DayRolled（statistics_timezone 口径）                       │ │
 │  └─────────────────────────────────────────────────────────────────────────────┘ │
 │                                          ▼                                      │
@@ -155,7 +155,7 @@ CREATE INDEX event_outbox_pending ON event_outbox(created_at_ms, event_id);
 | `HostSourceFailed{host, error_code}` / `SourceRecovered{host}` | sync_service | 源读取失败/恢复 | 通知、MTTR 时序（审计流） |
 | `McpToolInvoked{tool, args_fingerprint, latency_ms, ok}` | CLI serve 传输层（`handle_tools_call`） | 外部 MCP `tools/call` 返回后（旁路） | MCP 访问日志、慢查询/失败率 |
 | `HourTicked` / `DayRolled` | **保留位（未发射）** | — | 迭代 3 分析裁决：所列消费（清理/去重窗口/stale 检查）都是幂等自愈的维护动作——按 now 全量清比按事件滚动更简单可靠，没有消费者需要顺序信号之前不发射（发射无人消费的事件只填 outbox）。有第一个真实消费者时再接线并撤本标注 |
-| `TrustMonitorEvent{actor_id, stage, evidence_level}` | trust P2 传感器（进程外） | 聚合窗口产出 | trust correlate → Finding、通知（§7.2 门槛） |
+| `TrustMonitorEvent{run_id, observations, inserted, findings_upserted}` | trust 传感（快照模式已接线；P2 常驻复用同通道） | 传感运行事务内、有新观察时（迭代 4 勘正：载荷为**运行级批次摘要**，单观察明细在 trust_observations；correlate 保持同事务内联——事件是通知不是指令，拆出去会丢失 correlate 对自身写入的原子可见性） | 桌面 UI 刷新（webview 类型分发）；P2 起通知消费者（§7.2 门槛） |
 
 新增事件类型必须先在本表登记（与分类图谱"先登记后写 emitter"同纪律）。
 

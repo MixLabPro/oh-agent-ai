@@ -37,8 +37,8 @@ ok(!wb.includes(`listen("usage-fold-updated"`) && !wb.includes(`listen("sync-sta
 ok(!/["']usage-fold-updated["']/.test(lib.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, "")),
   "旧通道字符串在 lib.rs 代码中不再出现（注释里的历史说明不计）");
 ok(wb.includes(`type === "FoldCompleted"`) && wb.includes(`type === "FactsIngested"`)
-  && wb.includes(`type === "SyncStatusChanged"`),
-  "webview 按类型分发（FoldCompleted / FactsIngested / SyncStatusChanged）");
+  && wb.includes(`type === "SyncStatusChanged"`) && wb.includes(`type === "TrustMonitorEvent"`),
+  "webview 按类型分发（FoldCompleted / FactsIngested / SyncStatusChanged / TrustMonitorEvent）");
 ok(lib.includes("fn drain_event_bus"), "桌面事件消费入口 drain_event_bus 存在");
 ok(lib.includes('"desktop-ui"'), "消费者注册（desktop-ui）存在");
 ok(/drain_event_bus\(app\);\s*\}/.test(lib.replace(/\n/g, " ")),

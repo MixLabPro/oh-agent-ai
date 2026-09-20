@@ -288,7 +288,8 @@ function subscribeFoldEvent() {
     // 已经（或将）在重拉，跳过避免双拉（负载不携带手动/自动来源，靠按钮
     // handler 置位的 manualSyncPolling 区分，不靠猜）。
     if (manualSyncPolling) return;
-    if (type === "FoldCompleted" || type === "FactsIngested" || type === "SyncStatusChanged") {
+    if (type === "FoldCompleted" || type === "FactsIngested" || type === "SyncStatusChanged"
+      || type === "TrustMonitorEvent") {
       refreshActiveTab();
     }
   }).catch((e) => {

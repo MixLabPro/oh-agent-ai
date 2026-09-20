@@ -192,6 +192,21 @@ pub fn snapshot_and_store(
         let inserted = agent_vitals_data::trust::insert_observations(conn, &observations, &run_id, now_ms)?;
         let ids: Vec<String> = observations.iter().map(|row| row.observation_id.clone()).collect();
         let correlation = agent_vitals_data::trust_correlator::correlate_selected(conn, &ids)?;
+        // 事件总线（迭代 4）：有新观察才发——与写入同事务（spec §1.2）。correlate
+        // 保持内联（它要原子地看到上面 insert 的观察）；事件是"这次传感发生了"
+        // 的事实通知，P2 常驻传感器落地后复用同一通道与载荷形状。
+        if inserted.inserted > 0 {
+            crate::events::insert_outbox(
+                conn,
+                &crate::events::AppEvent::trust_monitor_event(
+                    &run_id, observations.len(), inserted.inserted,
+                    correlation.findings_upserted,
+                ),
+                &run_id,
+            ).map_err(|e| agent_vitals_data::authority::AuthorityError::Sqlite(
+                rusqlite::Error::InvalidParameterName(format!("__trust_event__:{e}")),
+            ))?;
+        }
         Ok((inserted, correlation))
     });
     match write {

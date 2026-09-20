@@ -76,6 +76,30 @@ impl AppEvent {
         }
     }
 
+    /// `TrustMonitorEvent`：一次 trust 传感运行完成（观察已入库、Finding 已
+    /// 评价——correlate **留在同一事务内联**，事件是通知不是指令，拆出去会
+    /// 丢失 correlate 对自身写入的原子可见性）。这是 P2 常驻传感器的既定通道：
+    /// 快照模式（今日）与常驻 watcher（P2）发同一事件，桌面转发/刷新逻辑零
+    /// 改动。载荷为**批次摘要计数**——spec §5 原草图（actor/stage/evidence_level
+    /// 单观察级）勘正：事件是运行级通知，单观察明细在 trust_observations 里。
+    pub fn trust_monitor_event(
+        run_id: &str, observations: usize, inserted: usize, findings_upserted: usize,
+    ) -> Self {
+        Self {
+            event_type: "TrustMonitorEvent",
+            occurred_at_ms: now_ms(),
+            host: None,
+            correlation_id: Some(run_id.to_string()),
+            producer: "trust-runtime-monitor",
+            payload: json!({
+                "run_id": run_id,
+                "observations": observations,
+                "inserted": inserted,
+                "findings_upserted": findings_upserted,
+            }),
+        }
+    }
+
     /// `FactsIngested`：某宿主的事实批次已在权威库事务内落定。
     pub fn facts_ingested(
         host: &str, run_id: &str, inserted: usize, rejected: usize, duplicate: usize,
