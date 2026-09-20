@@ -718,6 +718,176 @@ pub async fn sessions_issues(
     }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 
+// React Findings does not consume `sessions_issues`: that legacy DTO contains
+// source/detail samples and issue identities intended for the old DOM surface.
+// This projection is a versioned, allow-listed serving face.  It is deliberately
+// read-only and never exposes issue/session/source/run identifiers or free-form
+// metadata across the Rust → JS boundary.
+fn safe_findings_rule(value: &str) -> String {
+    const KNOWN: &[&str] = &[
+        "PRICE_COVERAGE", "ROUTE_UNCONFIRMED", "BUDGET_THRESHOLD", "DATA_SOURCE_FAILURE",
+        "BILLING_CONFIRMATION", "USAGE_GROWTH", "QUOTA_WINDOW", "DATA_QUALITY",
+    ];
+    if KNOWN.contains(&value) {
+        return value.to_string();
+    }
+    let is_sv = value.starts_with("SV")
+        && value.len() <= 8
+        && value[2..].chars().all(|ch| ch.is_ascii_digit());
+    if is_sv { value.to_string() } else { "OTHER".to_string() }
+}
+
+fn safe_findings_host(value: &str) -> String {
+    if let Some(slug) = value.strip_prefix("plugin:") {
+        if agent_vitals_runtime::host_registry::plugin_slug_ok(slug) {
+            return value.to_string();
+        }
+        return "generic".to_string();
+    }
+    if value.len() <= 32
+        && !value.is_empty()
+        && value.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-'))
+    {
+        value.to_string()
+    } else {
+        "generic".to_string()
+    }
+}
+
+fn safe_findings_severity(value: &str) -> &'static str {
+    match value { "critical" => "critical", "warning" => "warning", "info" => "info", _ => "unknown" }
+}
+
+fn safe_findings_action_kind(source_kind: &str, rule: &str) -> &'static str {
+    if rule.starts_with("SV") { return "behavior"; }
+    match source_kind {
+        "billing_candidate" | "billing_group" => "billing",
+        "budget" => "budget",
+        "source_failure" => "source",
+        "usage_growth" => "usage",
+        "probe" => "probe",
+        _ => "other",
+    }
+}
+
+fn safe_findings_evidence_class(value: &str) -> &'static str {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("egress") || lower.contains("storage") || lower.contains("network") { "egress" }
+    else if lower.contains("billing") || lower.contains("price") || lower.contains("route") { "billing" }
+    else if lower.contains("source") || lower.contains("quality") { "data_source" }
+    else if lower.contains("trust") || lower.contains("workspace") || lower.contains("repository") { "trust" }
+    else if lower.contains("usage") || lower.contains("growth") { "usage" }
+    else if lower.contains("behavior") || lower.starts_with("sv") { "behavior" }
+    else { "generic" }
+}
+
+fn safe_non_negative(row: &Value, key: &str) -> Option<u64> {
+    row.get(key).and_then(Value::as_u64)
+}
+
+fn safe_findings_group(row: &Value) -> Option<Value> {
+    let group_ref = row.get("group_id").and_then(Value::as_str)?;
+    if !group_ref.starts_with("fnv1a64:") || group_ref.len() != 24
+        || !group_ref[8..].chars().all(|ch| ch.is_ascii_hexdigit())
+    { return None; }
+    let raw_rule = row.get("rule").and_then(Value::as_str).unwrap_or("OTHER");
+    let rule = safe_findings_rule(raw_rule);
+    let source_kind = row.get("source_kind").and_then(Value::as_str).unwrap_or("behavior");
+    let action_kind = safe_findings_action_kind(source_kind, &rule);
+    let evidence_class = safe_findings_evidence_class(row.get("evidence_class").and_then(Value::as_str).unwrap_or(""));
+    let status = row.get("status_rollup").and_then(Value::as_object)?;
+    let count = |name: &str| status.get(name).and_then(Value::as_u64).unwrap_or(0);
+    let count_total = safe_non_negative(row, "count")?;
+    let first = safe_non_negative(row, "first_seen_at_ms")?;
+    let last = safe_non_negative(row, "last_seen_at_ms")?;
+    let sessions = safe_non_negative(row, "sessions_count")?;
+    if first > last || count_total > 1_000_000_000 || sessions > 1_000_000_000 {
+        return None;
+    }
+    let samples = row.get("sample_evidence").and_then(Value::as_array).map(|items| {
+        items.iter().take(3).map(|item| json!({
+            "available": item.as_object().map(|obj| !obj.is_empty()).unwrap_or(false)
+        })).collect::<Vec<_>>()
+    }).unwrap_or_default();
+    // Legacy source projections mark their remedy as diagnostic-only because
+    // they never exposed a safe UI action.  The React serving face keeps the
+    // distinction explicit: billing/budget/source groups are actionable
+    // categories, while behavior/probe/usage groups remain read-only facts.
+    let action_capable = matches!(action_kind, "billing" | "budget" | "source");
+    let read_only = !action_capable;
+    Some(json!({
+        "group_id": group_ref,
+        "rule": rule,
+        "host": safe_findings_host(row.get("host").and_then(Value::as_str).unwrap_or("generic")),
+        "action_kind": action_kind,
+        "evidence_class": evidence_class,
+        "count": count_total,
+        "first_seen_at_ms": first,
+        "last_seen_at_ms": last,
+        "severity": safe_findings_severity(row.get("severity").and_then(Value::as_str).unwrap_or("unknown")),
+        "status_rollup": {"open": count("open"), "later": count("later"), "acknowledged": count("acknowledged"), "resolved": count("resolved"), "not_applicable": count("not_applicable")},
+        "sessions_count": sessions,
+        "sample_evidence": samples,
+        "read_only": read_only,
+        "manual_follow_up": action_capable,
+    }))
+}
+
+fn safe_findings_report(raw: &Value) -> Value {
+    let groups: Vec<Value> = raw.get("groups").and_then(Value::as_array).map(|items| items.iter().filter_map(safe_findings_group).collect()).unwrap_or_default();
+    let mut rules: BTreeMap<String, (String, String, u64, u64)> = BTreeMap::new();
+    let mut critical = 0u64;
+    let mut warning = 0u64;
+    let mut info = 0u64;
+    let mut sessions = 0u64;
+    for group in &groups {
+        let rule = group["rule"].as_str().unwrap_or("OTHER").to_string();
+        let severity = group["severity"].as_str().unwrap_or("unknown").to_string();
+        let hits = group["count"].as_u64().unwrap_or(0);
+        let group_sessions = group["sessions_count"].as_u64().unwrap_or(0);
+        sessions = sessions.saturating_add(group_sessions);
+        match severity.as_str() { "critical" => critical += 1, "warning" => warning += 1, "info" => info += 1, _ => {} }
+        let entry = rules.entry(rule.clone()).or_insert((severity.clone(), group["action_kind"].as_str().unwrap_or("other").to_string(), 0, 0));
+        entry.2 = entry.2.saturating_add(hits);
+        entry.3 = entry.3.saturating_add(group_sessions);
+        if severity == "critical" { entry.0 = severity; }
+    }
+    let rule_rows: Vec<Value> = rules.into_iter().map(|(rule, (severity, category, hits, group_sessions))| json!({
+        "rule": rule, "severity": severity, "category": category, "hits": hits, "sessions": group_sessions
+    })).collect();
+    let next_cursor = raw.get("next_cursor").and_then(Value::as_str).filter(|value| value.chars().all(|ch| ch.is_ascii_digit())).map(str::to_string);
+    let total_groups = raw.get("total_groups").and_then(Value::as_u64).unwrap_or(groups.len() as u64);
+    json!({
+        "schema_version": "agent-vitals-findings/v1",
+        "status": "ok",
+        "totals": {"issues": total_groups, "findings": raw.get("source_issue_count").and_then(Value::as_u64).unwrap_or(0), "critical": critical, "warning": warning, "info": info, "sessions": sessions, "sessions_total": sessions},
+        "rules": rule_rows, "issues": groups, "next_cursor": next_cursor, "refreshed": false,
+    })
+}
+
+/// Versioned safe serving face for the React Findings page.  The legacy
+/// `sessions_issues` command remains for the old DOM surface; this command is
+/// the only allowed React source and never crosses raw samples or identifiers.
+#[tauri::command]
+pub async fn findings_groups_safe(
+    state: tauri::State<'_, StoreBuildLock>,
+    page_size: Option<usize>,
+    cursor: Option<String>,
+) -> Result<Value, Value> {
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let path = agent_vitals_data::authority::default_authority_path(&data_home());
+        let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+            .map_err(|e| error_value("authority_unavailable", &e.to_string()))?;
+        let (from_ms, to_ms) = issue_default_window();
+        let raw = agent_vitals_data::issues::issue_groups_with_sources(
+            db.conn(), Some(from_ms), Some(to_ms), page_size.unwrap_or(50).clamp(1, 100), cursor.as_deref(),
+        ).map_err(|e| error_value("authority_query", &e.to_string()))?;
+        Ok(safe_findings_report(&raw))
+    }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
 fn budget_issue_group(budget: &Value) -> Value {
     let month = budget["month"].as_str().unwrap_or("<unknown>");
     let level = budget["level"].as_str().unwrap_or("warn");
@@ -1280,6 +1450,80 @@ pub async fn skills_export_redacted(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_findings_projection_is_allowlisted_and_drops_nested_sensitive_values() {
+        let raw = json!({
+            "group_id": "fnv1a64:0123456789abcdef",
+            "source_kind": "billing_candidate",
+            "rule": "PRICE_COVERAGE",
+            "host": "minimax-code",
+            "object": "/Users/Admin/project/private.rs",
+            "evidence_class": "billing",
+            "count": 1,
+            "first_seen_at_ms": 10,
+            "last_seen_at_ms": 20,
+            "severity": "warning",
+            "status_rollup": {"open": 1, "later": 0, "acknowledged": 0, "resolved": 0, "not_applicable": 0},
+            "sessions_count": 1,
+            "sample_evidence": [{"issue_id": "fnv1a64:aaaaaaaaaaaaaaaa", "source_id": "source-secret", "run_id": "run-secret", "detail": {"path": "/private", "token": "secret"}}],
+            "remedy": {"remedy_id": "diagnostic-only", "diagnostic_only": true},
+            "nested_detail_json": {"session_key": "native-secret", "command": "tar private"},
+        });
+        let projected = safe_findings_group(&raw).expect("valid safe group");
+        let object = projected.as_object().expect("object projection");
+        let keys: BTreeSet<&str> = object.keys().map(String::as_str).collect();
+        let expected: BTreeSet<&str> = [
+            "group_id", "rule", "host", "action_kind", "evidence_class", "count",
+            "first_seen_at_ms", "last_seen_at_ms", "severity", "status_rollup",
+            "sessions_count", "sample_evidence", "read_only", "manual_follow_up",
+        ].into_iter().collect();
+        assert_eq!(keys, expected);
+        let serialized = projected.to_string();
+        for secret in ["private.rs", "source-secret", "run-secret", "native-secret", "tar private", "secret"] {
+            assert!(!serialized.contains(secret), "sensitive value leaked: {secret}");
+        }
+        assert_eq!(projected["sample_evidence"][0]["available"], true);
+        assert_eq!(projected["action_kind"], "billing");
+    }
+
+    #[test]
+    fn safe_findings_projection_degrades_unknown_enums_to_bounded_values() {
+        let raw = json!({
+            "group_id": "fnv1a64:0123456789abcdef", "source_kind": "unknown-source",
+            "rule": "evil\nrule", "host": "/private/path", "evidence_class": "command --token",
+            "count": 1, "first_seen_at_ms": 1, "last_seen_at_ms": 1, "severity": "evil",
+            "status_rollup": {}, "sessions_count": 0, "sample_evidence": [],
+            "remedy": {"diagnostic_only": true},
+        });
+        let projected = safe_findings_group(&raw).expect("safe group remains visible");
+        assert_eq!(projected["rule"], "OTHER");
+        assert_eq!(projected["host"], "generic");
+        assert_eq!(projected["evidence_class"], "generic");
+        assert_eq!(projected["severity"], "unknown");
+        assert_eq!(projected["action_kind"], "other");
+    }
+
+    #[test]
+    fn safe_findings_projection_preserves_dynamic_plugin_hosts_and_rejects_bad_ranges() {
+        let plugin = json!({
+            "group_id": "fnv1a64:0123456789abcdef", "source_kind": "behavior",
+            "rule": "SV709", "host": "plugin:zcode", "evidence_class": "egress",
+            "count": 1, "first_seen_at_ms": 10, "last_seen_at_ms": 20,
+            "severity": "critical", "status_rollup": {}, "sessions_count": 1,
+            "sample_evidence": [],
+        });
+        assert_eq!(safe_findings_group(&plugin).expect("valid plugin group")["host"], "plugin:zcode");
+
+        let invalid_range = json!({
+            "group_id": "fnv1a64:0123456789abcdef", "source_kind": "behavior",
+            "rule": "SV709", "host": "plugin:../escape", "evidence_class": "egress",
+            "count": 1, "first_seen_at_ms": 20, "last_seen_at_ms": 10,
+            "severity": "critical", "status_rollup": {}, "sessions_count": 1,
+            "sample_evidence": [],
+        });
+        assert!(safe_findings_group(&invalid_range).is_none());
+    }
 
     /// list_args 字段集是 v0.9.1 收口后的精简版：旧 CLI 用的 `--model` / `--from`
     /// / `--to` / `--query` 已删（权威库 sessions_search 不收这四件；list_args 模块头

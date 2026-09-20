@@ -663,7 +663,20 @@
         rules: issueGroups.map((group) => ({ rule: group.rule, severity: group.severity, category: group.category, hits: group.hits, sessions: group.sessions })),
         issues: issueGroups, findings: [], source: "browser_mock", next_cursor: null, source_projection_count: 1,
       };
-      case "findings_freshness": return { status: "ok", freshness: { last_successful_sync_at: new Date(Date.now() - 1500000).toISOString(), stale_hosts: ["workbuddy"] } };
+      case "findings_groups_safe": return {
+        schema_version: "agent-vitals-findings/v1", status: "ok",
+        totals: { issues: 2, findings: 2, critical: 1, warning: 1, info: 0, sessions: 2, sessions_total: 2 },
+        rules: [
+          { rule: "SV709", severity: "critical", category: "behavior", hits: 1, sessions: 1 },
+          { rule: "PRICE_COVERAGE", severity: "warning", category: "billing", hits: 1, sessions: 1 },
+        ],
+        issues: [
+          { group_id: "fnv1a64:0123456789abcdef", action_kind: "behavior", rule: "SV709", host: "plugin:zcode", evidence_class: "egress", count: 1, first_seen_at_ms: Date.now() - 7200000, last_seen_at_ms: Date.now() - 3600000, severity: "critical", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true }], read_only: true, manual_follow_up: false },
+          { group_id: "fnv1a64:1111111111111111", action_kind: "billing", rule: "PRICE_COVERAGE", host: "minimax-code", evidence_class: "billing", count: 1, first_seen_at_ms: Date.now() - 1800000, last_seen_at_ms: Date.now() - 1800000, severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true }], read_only: false, manual_follow_up: true },
+        ],
+        next_cursor: null, refreshed: false,
+      };
+      case "findings_freshness": return { status: "ok", freshness: { state: "stale", last_successful_sync_at: new Date(Date.now() - 1500000).toISOString(), stale_hosts: ["workbuddy"], syncing: false } };
       // Shape: crates/agent-vitals-runtime/src/decision_matrix.rs::decision_matrix
       // （rows 键 = combo_rows 的 json! 字段；金额按币种分列，mock 同纪律）。
       case "decision_matrix": return {

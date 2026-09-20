@@ -18,6 +18,8 @@ for (const required of [
   path.join(ui, "react/index.html"),
   path.join(reactSource, "main.tsx"),
   path.join(reactSource, "lib/tauri.ts"),
+  path.join(reactSource, "features/findings/FindingsPage.tsx"),
+  path.join(repo, "apps/desktop/src-tauri/src/store.rs"),
   path.join(dist, "index.html"),
 ]) {
   if (!fs.existsSync(required)) fail(`缺少 React 迁移产物：${path.relative(repo, required)}`);
@@ -40,6 +42,8 @@ const appSource = sourceFiles
   .map((file) => fs.readFileSync(file, "utf8"))
   .join("\n");
 if (appSource.includes("__TAURI__")) fail("组件绕过 local bridge 直接访问 __TAURI__");
+if (!source.includes('"findings_groups_safe"')) fail("React Findings 未使用版本化安全 DTO command");
+if (source.includes('"sessions_issues"')) fail("React Findings 直接消费 legacy 宽 DTO");
 
 const html = fs.readFileSync(path.join(dist, "index.html"), "utf8");
 if (!html.includes("<div id=\"root\"></div>")) fail("React production entry 缺少 root");
