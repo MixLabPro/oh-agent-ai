@@ -1,6 +1,6 @@
 # Agent Vitals Runtime Event Bus Architecture Spec
 
-> 状态：**Draft v1（2026-09-20）**——设计经 2026-09-20 架构评审会话收敛（事件判据、候选盘点、trust 传感器边界、hook 禁区）；
+> 状态：**Draft v1.1（2026-09-20）**——v1 经架构评审会话收敛（事件判据、候选盘点、trust 传感器边界、hook 禁区）；v1.1 并入 apalis-sqlite 源码研究成果（§12：hook 叫醒不带货、原子认领、部分索引、约束级幂等、回收留痕五项采纳，依据与出处见该节）；
 > 前置：v0.9.1 SQL 权威库已冻结（单一事实源 + 幂等重放）；trust P1（`FINDINGS_TRUST_EGRESS_MONITORING_SPEC`）已合入，P2 实时传感器未实施；
 > 目标：为 runtime 引入**最小事件驱动层**——事务性 outbox + 单管道类型化事件——收编既有的内联反应链与缓存失效土办法，并为 trust P2 传感器预留唯一接入通道。
 
@@ -128,15 +128,20 @@ CREATE TABLE event_outbox (
   ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id),
   created_at_ms   INTEGER NOT NULL
 );
-CREATE INDEX event_outbox_pending ON event_outbox(created_at_ms);
+-- 待投递集是部分索引（学 apalis-sqlite 的 claimable 形状）：热扫描只碰未投递行，
+-- 终态行不进索引，表增长不影响投递延迟。
+CREATE INDEX event_outbox_pending ON event_outbox(created_at_ms)
+  WHERE delivered = 0;
 ```
 
 配套 `event_deliveries(event_id, consumer_id, delivered_at_ms, PRIMARY KEY(event_id, consumer_id))` 记录消费进度；tailer 按 `created_at_ms` 顺序扫未投递行。**retention**：事件体保留 7 天（与 trust 高频 observation 同窗口）；`event_deliveries` 保留 30 天。`delete_imported_host_data(host)` 级联同步清理 outbox 中该宿主 correlation 的行。
 
 ### 4.3 投递语义
 
-- 快通道：`mpsc::channel(1024)` 有界；满时按 `event_type` 优先级丢弃（audit < maintenance < derived < notification），并计数 `dropped_count`（沿 trust 规格 §6.2 的过载纪律）；
-- 慢通道：tailer 每 5 秒或进程启动时扫 outbox 补投；
+- 快通道（**hook 叫醒，不带货**）：rusqlite `Connection::update_hook` 过滤 `Insert ∧ table=event_outbox` 后只向 dispatcher 发一个**唤醒信号**（不带事件体）——投递仍是一次批量 SQL 扫描。单一数据路径避免"hook 读一行 + fetch 再读一遍"的双读与形状分叉（apalis-sqlite `callback.rs` 的生产验证，见 §12）；
+- 慢通道（轮询兜底）：tailer 每 5 秒或进程启动时扫 outbox 补投；hook 失效（跨进程写入、回调丢失）时轮询保证最终投递；
+- 扫描采用**原子认领形状**（apalis-sqlite `fetch_next.sql` 同款）：单条 `UPDATE … WHERE 事件集子查询 RETURNING *`，认领与状态迁移一步完成，无 SELECT-then-UPDATE 竞态——权威库是多连接的（CLI 与桌面同写），不能假设单写者；
+- `mpsc::channel(1024)` 有界；满时按 `event_type` 优先级丢弃（audit < maintenance < derived < notification），并计数 `dropped_count`（沿 trust 规格 §6.2 的过载纪律）；
 - **不保证顺序跨事件类型**；同类事件按 `occurred_at_ms` 有序。消费者不得假设跨类型顺序。
 
 ## 5. 事件词表（首批冻结）
@@ -199,7 +204,8 @@ fd 表采样（libproc，同 uid，类别化后即丢）───┼─► 聚�
 4. P0 完成后 `sync_service.rs:499` 的内联 reconcile 调用消失，price reconcile 由事件驱动，golden 15/16 全绿（行为等价）；
 5. webview 侧只存在 `app-event` 一个 listen 入口；
 6. `delete_imported_host_data` 后无悬空 outbox 行；
-7. 词表外事件类型在 dispatcher 层被拒绝并计数（闭集校验）。
+7. 词表外事件类型在 dispatcher 层被拒绝并计数（闭集校验）；
+8. update_hook 回调被禁用（模拟失效）时，轮询兜底在 5 秒内完成同等投递（§4.3 双通道等价性）。
 
 ## 11. 风险与守卫
 
@@ -210,6 +216,31 @@ fd 表采样（libproc，同 uid，类别化后即丢）───┼─► 聚�
 | 总线蠕变（万物互联） | §7 负面清单 + 词表闭集 + "新事件先登记"纪律 |
 | 消费者拖垮投递 | 有界通道 + 消费者独立任务 + 超时丢弃计数 |
 | 与 Python twin 的关系 | 事件层是 Rust-only 的进程内管道，无 Python twin 需求（parity 边界按 AGENTS.md 计费/skills 核心划定） |
+
+## 12. 参考实现研究：apalis-sqlite（2026-09-20，源码级）
+
+对 [apalis-sqlite v1.0.0-rc.9](https://github.com/apalis-dev/apalis-sqlite)（+ apalis core）做了源码研究。**结论不变：学习参考、不引依赖**（事务所有权在其 storage、sqlx 与 rusqlite 双驱动栈同库、job 竞争消费 ≠ 事实扇出三项硬错配）——但五项技术直接采纳，一项明确不采纳。
+
+### 12.1 采纳（已并入 §4）
+
+| # | 技术 | 出处 | 采纳方式 |
+|---|---|---|---|
+| 1 | **hook 叫醒不带货**：update_hook 回调只发唤醒信号（`Stream<()>`），事件获取恒为批量 SQL——单一数据路径，无双读 | `callback.rs`（`update_hook_callback` 过滤 `Insert ∧ jobs 表` → unbounded mpsc → `HookCallbackListener`） | §4.3 快通道；rusqlite 同款 `update_hook` API，**零新依赖** |
+| 2 | **原子认领**：`UPDATE … WHERE ROWID IN (排序候选子查询) RETURNING *`，认领=状态迁移+锁定一步完成；排序键 `priority DESC, run_at ASC, id ASC` 保证确定性无饥饿 | `queries/backend/fetch_next.sql` | §4.3 tailer 扫描形状 |
+| 3 | **部分索引圈定可认领集**：`… WHERE status='Pending' AND lock_by IS NULL`（另有 Failed 可重试的独立部分索引）——终态行不进索引 | migrations `add_fetch_next_indices` / `add_lock_indices` | §4.2 `event_outbox_pending WHERE delivered = 0` |
+| 4 | **幂等由 DB 约束强制**：`UNIQUE (job_type, idempotency_key)`，生产者侧去重在 schema 层而非应用代码 | migration `idempotency_key` | `event_outbox` 主键 + `event_deliveries` 复合主键（既有设计的同型强化） |
+| 5 | **回收原因留痕**：孤儿任务重置时 `last_result = 'Re-enqueued due to worker heartbeat timeout'`——恢复动作写进数据，可审计 | `reenqueue_orphaned.sql` | 消费失败/补投的 `event_deliveries` 记 `last_error`，验收 6 的诊断面读它 |
+
+### 12.2 不采纳（及其理由）
+
+| 机制 | 理由 |
+|---|---|
+| Workers 心跳表 + 双层孤儿回收（优雅退出精确重置 / `now - last_seen >= N` 超时重置） | 面向多 worker 进程的锁语义；本设计是**单进程 dispatcher + 进程内消费者**，崩溃恢复 = `event_deliveries` 缺行重扫（tailer 下一轮），无需锁与心跳。若未来 dispatcher 多实例化，回来看 `reenqueue_orphaned.sql` |
+| 其周期 `VACUUM` | outbox 保留期 7 天量级小；清理用普通 DELETE，VACUUM 交给既有维护窗口 |
+
+### 12.3 研究修正的一条认知
+
+此前以为 sqlx 不暴露 update hook——**sqlx 0.9 已原生支持**（`sqlx::sqlite::{SqliteOperation, UpdateHookResult}` + pool `lock_handle.set_update_hook`）。这不改变"不引 sqlx"的结论（权威库全栈 rusqlite），但说明该技术路线在两个主流驱动里都是一等公民，长期可用性无虞。
 
 ---
 
