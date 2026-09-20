@@ -1,5 +1,6 @@
 import { Component, useEffect, useState, type ErrorInfo, type ReactNode } from "react";
 import { listen, readOverviewSnapshot, type OverviewSnapshot } from "../lib/tauri";
+import { TrustPage } from "../features/trust/TrustPage";
 
 type Overview = OverviewSnapshot;
 
@@ -120,7 +121,7 @@ export function App() {
     <main className="main-content">
       <header className="page-header"><div><p className="eyebrow">Workbench React migration</p><h1>{navigation.find((item) => item.id === page)?.label}</h1></div><div className="header-actions"><StatusPill tone="success">本地运行</StatusPill><button className="button button-secondary" type="button" onClick={() => window.location.reload()}>刷新</button></div></header>
       {error && <div className="error-banner" role="alert">{error} · 当前显示安全的预览状态</div>}
-      {page === "overview" ? <OverviewPage overview={overview} /> : <FindingsPage trust={page === "trust"} />}
+      {page === "overview" ? <OverviewPage overview={overview} /> : page === "trust" ? <TrustPage /> : <FindingsPage trust={false} />}
     </main>
   </div></AppErrorBoundary>;
 }
