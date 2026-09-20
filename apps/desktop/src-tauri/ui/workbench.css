@@ -598,9 +598,10 @@ button.chip.active {
 
 .notice-list > .notice { margin: 0; }
 
-/* display:flex 会压过 UA 的 [hidden]{display:none}——不加这条，hidden 的通知会
-   渲染成一个空框（无头 Chrome 截图暴露：顶部一条空红框）。 */
-.notice[hidden] { display: none; }
+/* 自设 display 会压过 UA 的 [hidden]{display:none}——不加这条，hidden 的通知会
+   渲染成空框或保留空白间距（无头截图暴露：Findings 顶部出现大块空白）。 */
+.notice[hidden],
+.notice-list[hidden] { display: none; }
 
 /* todo 级的主按钮是全页唯一的实心按钮。 */
 

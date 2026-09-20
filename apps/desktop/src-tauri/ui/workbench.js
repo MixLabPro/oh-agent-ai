@@ -8405,8 +8405,12 @@ async function init() {
     document.getElementById("sess-detail-view").hidden = true;
     document.getElementById("sess-list-view").hidden = false;
   });
-  // 重载 = 唯一显式触发重路径（evaluator 刷新）的入口（spec §1.6）。
-  document.getElementById("find-reload").addEventListener("click", () => loadFindings(true, true));
+  // 重载 = 唯一显式触发重路径（evaluator 刷新）的入口（spec §1.6）。Trust
+  // Profile 可能由 MCP 在窗口打开后暂存；同一次重载必须重新读取控制面，不能让
+  // 用户看到陈旧的「没有待批准」而误以为导入失败。
+  document.getElementById("find-reload").addEventListener("click", async () => {
+    await Promise.all([loadFindings(true, true), loadTrustMonitorConfig(), loadTrustProfileProposals()]);
+  });
   async function loadTrustProfileProposals() {
     const list = document.getElementById("find-trust-profile-proposals");
     const approvedList = document.getElementById("find-trust-profile-approved");
@@ -8515,6 +8519,9 @@ async function init() {
         ? "发现 " + installed.length + " 个本地 Agent，其中 " + gaps.length + " 个尚无历史审计 Profile；这是覆盖缺口，不是风险结论。"
         : "发现 " + installed.length + " 个本地 Agent，均有历史审计 Profile；这不等同于实时网络监测。";
       status.hidden = false;
+      // 覆盖检查是用户最常在 Agent 暂存 Profile 后点击的动作；顺带刷新待审行，
+      // 使本机 MCP 控制面的变更无需重启窗口才可见。
+      await loadTrustProfileProposals();
     } catch (error) {
       showBanner("find-banner", error, false);
     } finally {

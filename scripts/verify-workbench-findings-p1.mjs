@@ -25,6 +25,7 @@ const ok = (cond, msg) => {
 
 const wb = readFileSync(`${root}/apps/desktop/src-tauri/ui/workbench.js`, "utf8");
 const html = readFileSync(`${root}/apps/desktop/src-tauri/ui/workbench.html`, "utf8");
+const css = readFileSync(`${root}/apps/desktop/src-tauri/ui/workbench.css`, "utf8");
 const issuesRs = readFileSync(`${root}/crates/agent-vitals-data/src/issues.rs`, "utf8");
 
 // ── 静态断言（真实文件） ──────────────────────────────────────────────────
@@ -36,6 +37,8 @@ ok(!/<details id="find-evidence-box"[^>]*\bopen\b/.test(html),
   "证据区默认收起（details 无 open 属性）");
 ok(html.includes('id="find-receipt"') && /id="find-receipt"[^>]*role="status"/.test(html),
   "计数反馈元素带 role=status（§9.3 无障碍基线沿用）");
+ok(/\.notice-list\[hidden\]\s*\{\s*display:\s*none;\s*\}/.test(css),
+  "空的 Trust 列表会真正隐藏，不保留 Findings 顶部空白");
 for (const rid of ["review-destructive-shell", "review-privilege-shell", "review-remote-exec",
   "review-sensitive-path", "narrow-write-scope", "review-external-fetch",
   "reduce-limit-pressure", "inspect-timeout-tool", "review-approval-choice",
@@ -52,8 +55,10 @@ ok(wb.includes("sessions_issues") && !/loadActiveTab[\s\S]*?sessions_findings/.t
 ok(wb.includes("invoke(\"sessions_issues\", { pageSize: 50, cursor: null, refresh: !!refresh })"),
   "sessions_issues 请求显式携带 refresh 位（spec §1.6）");
 ok((wb.match(/loadFindings\(true, true\)/g) || []).length === 1
-  && /find-reload"\)\.addEventListener\("click", \(\) => loadFindings\(true, true\)\)/.test(wb),
-  "唯一 refresh=true 调用点是重载按钮（spec §1.6）");
+  && /find-reload"\)\.addEventListener\("click", async \(\) => \{[\s\S]*loadFindings\(true, true\)[\s\S]*loadTrustProfileProposals\(\)/.test(wb),
+  "唯一 refresh=true 调用点是重载按钮，并同步刷新 MCP 暂存 Profile（spec §1.6）");
+ok(/find-trust-coverage"\)\.addEventListener\("click", async \(\) => \{[\s\S]*await loadTrustProfileProposals\(\);/.test(wb),
+  "覆盖检查后刷新 MCP 暂存 Profile，避免显示陈旧空态");
 // transitionIssueFromUi 的 loadFindings(true) 是有意的快速刷新（refresh 缺省
 // = false，纯读）——不算残留；上一条已保证 true 只出自重载按钮。
 
