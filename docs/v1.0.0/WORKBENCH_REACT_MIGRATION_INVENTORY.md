@@ -11,7 +11,7 @@
 | 总览 | `tab-overview` | `features/overview/OverviewPage.tsx` | React 壳有安全占位 DTO；尚未复刻完整月度/宿主/同步卡片 | Phase 3：先迁新鲜度和总览聚合 |
 | 用量 | `tab-calendar` | `features/usage/UsagePage.tsx` | 未迁移，旧页继续提供完整表格 | Phase 3：复用 authority 月/日查询 |
 | 会话 | `tab-sessions` | `features/sessions/SessionsPage.tsx` | 未迁移，旧页继续提供分页和轨迹入口 | Phase 3：轻量列表先行，轨迹按需展开 |
-| 待处理/发现 | `tab-findings` | `features/findings/FindingsPage.tsx` | 已迁移首个垂直切片：安全 Finding 投影、待办、证据明细、决策矩阵和新鲜度 | Phase 2：继续补证据详情/筛选交互 |
+| 待处理/发现 | `tab-findings` | `features/findings/FindingsPage.tsx` | 已迁移首个垂直切片：安全 Finding 投影、待办、证据明细、决策矩阵和新鲜度 | Phase 2：补事件 smoke test 与旧页数值对照 |
 | 测试 | `tab-test` | `features/test/TestPage.tsx` | 未迁移；涉及 probe mutation，保持旧页 | Phase 3 后半：先只读状态，再做显式 mutation |
 | Skill | `tab-skills` | `features/skills/SkillsPage.tsx` | 未迁移；涉及扫描、取消和导出 | Phase 3 后半：单独审查导出脱敏 |
 | 设置 | `tab-sources` | `features/settings/SettingsPage.tsx` | 未迁移；包含来源、预算、价卡、保留策略和 Trust 设置 | Phase 3：按表单域拆分，逐项保留回执/撤销语义 |
@@ -39,6 +39,6 @@
 
 - [x] Phase 0 页面、command、事件和目标归属已列出。
 - [x] Phase 1 React shell、hash route、bridge、Error Boundary、离线 mock 已建立。
-- [ ] Phase 2 Trust/Findings 的证据详情完成（监控控制、一次性快照和事件失效刷新已完成）。
+- [x] Phase 2 Trust/Findings 的证据详情完成（监控控制、一次性快照、事件失效刷新和可展开的安全证据明细已完成；旧页数值对照与真实 `.app` 验收仍属于发布门槛）。
 - [ ] Phase 3 其余五个 tab 完成并通过旧页对照。
 - [ ] Phase 4 `.app` 真机验收、生产 `frontendDist` 切换和旧页面回退窗口关闭。
