@@ -501,8 +501,10 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
         let authority_path = agent_vitals_data::authority::default_authority_path(data_home);
         let dispatcher = crate::events::Dispatcher::new(vec![
             crate::events::EventConsumer::new("price-reconcile", move |_event| {
-                // 消费者自持连接（drain 不持事务，spec §6）；打开失败按处理
-                // 失败记账，下一进程的 drain 重扫补投。
+                // 消费者自持连接（drain 不持事务，spec §6）。打开失败按处理
+                // 失败记账——**不重投本事件**（deliveries 反连接永久排除）；
+                // price-reconcile 忽略事件载荷做全量 reconcile，下一轮
+                // FactsIngested 自然自愈，所以这个语义是安全的。
                 let db = agent_vitals_data::authority::AuthorityDb::open(
                     &authority_path,
                     crate::sql_sync::now_ms(),

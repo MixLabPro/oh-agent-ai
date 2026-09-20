@@ -52,14 +52,22 @@ pub struct AppEvent {
 
 impl AppEvent {
     /// `FactsIngested`：某宿主的事实批次已在权威库事务内落定。
-    pub fn facts_ingested(host: &str, run_id: &str, inserted: usize, duplicate: usize) -> Self {
+    pub fn facts_ingested(
+        host: &str, run_id: &str, inserted: usize, rejected: usize, duplicate: usize,
+    ) -> Self {
         Self {
             event_type: "FactsIngested",
             occurred_at_ms: now_ms(),
             host: Some(host.to_string()),
             correlation_id: Some(run_id.to_string()),
             producer: "sync_service",
-            payload: json!({ "run_id": run_id, "inserted": inserted, "duplicate": duplicate }),
+            // inserted / rejected / duplicate 三个计数分开（独立验证发现：此前
+            // 把 rejected 并进 inserted 是契约漂移——payload 字段名必须与语义
+            // 一致，消费者迟早会读它们）。
+            payload: json!({
+                "run_id": run_id, "inserted": inserted,
+                "rejected": rejected, "duplicate": duplicate,
+            }),
         }
     }
 
@@ -67,9 +75,13 @@ impl AppEvent {
         // 身份 = 类型 + 事实键（时间戳 + correlation + payload 指纹）。同一次
         // 事实（同 run_id、同计数）重放得到同一 event_id → INSERT OR IGNORE
         // 吸收，生产者侧幂等不需要额外协议。
+        // 材料包含 host（独立验证发现）：同类型、同毫秒、同 correlation 的
+        // 两个不同宿主事件必须互不吸收——计时器类事件（correlation 为 NULL）
+        // 尤其依赖这一维度。
         let material = format!(
-            "{}\0{}\0{}\0{}",
+            "{}\0{}\0{}\0{}\0{}",
             self.event_type,
+            self.host.as_deref().unwrap_or(""),
             self.occurred_at_ms,
             self.correlation_id.as_deref().unwrap_or(""),
             self.payload,
@@ -295,7 +307,7 @@ mod tests {
         let path = tmp_db("idem");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        let event = AppEvent::facts_ingested("zcode", &run, 3, 1);
+        let event = AppEvent::facts_ingested("zcode", &run, 3, 0, 1);
         emit(&db, &event, &run);
 
         static CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -320,7 +332,7 @@ mod tests {
         let path = tmp_db("crash");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        let event = AppEvent::facts_ingested("claude-code", &run, 7, 0);
+        let event = AppEvent::facts_ingested("claude-code", &run, 7, 0, 0);
         emit(&db, &event, &run);
         drop(db); // 模拟崩溃：事件已提交、投递未发生
 
@@ -359,7 +371,7 @@ mod tests {
         let path = tmp_db("fail");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        let event = AppEvent::facts_ingested("dsh", &run, 1, 0);
+        let event = AppEvent::facts_ingested("dsh", &run, 1, 0, 0);
         emit(&db, &event, &run);
         let dispatcher = Dispatcher::new(vec![EventConsumer::new("test-failer", |_| Err("boom".to_string()))]);
         let first = dispatcher.drain(db.conn()).expect("drain 1");

@@ -642,7 +642,8 @@ pub(crate) fn write_flat_facts_with_sources(
             &crate::events::AppEvent::facts_ingested(
                 host,
                 &run_id,
-                outcome.inserted + outcome.rejected,
+                outcome.inserted,
+                outcome.rejected,
                 outcome.duplicate,
             ),
             &run_id,

@@ -222,10 +222,11 @@ function showBanner(id, e, showReload) {
 }
 
 // ---------- 事件桥：fold 完成 → 立即重拉当前 tab（Rust 侧 emit，见 lib.rs） ----------
-// Rust `sync_tick` 在 fold 成功落盘后去抖 emit `usage-fold-updated`（200ms 窗口，
-// 负载只有 `{at: unix 秒}`，字段语义见 lib.rs `emit_fold_event`；事件名两处必须
-// 一致）。这里订阅它，收到后重拉当前 tab 的概览数据，让工作台在托盘/外部手动
-// 同步完成的那一刻就刷新，而不是等下一个 5 分钟 tick 或窗口聚焦。
+// Rust `sync_tick` 在 fold 成功落盘后去抖 emit `app-event`（200ms 窗口，
+// payload.type = FoldCompleted、负载 `{type, at}`；事件通道与类型串两处必须
+// 一致，见 lib.rs `emit_fold_event`）。这里订阅单一出口，收到后重拉当前 tab
+// 的概览数据，让工作台在托盘/外部手动同步完成的那一刻就刷新，而不是等下一个
+// 5 分钟 tick 或窗口聚焦。
 //
 // **这不是实时通道的替代，是加速带**：事件丢时（webview 未就绪、emit 早于
 // listen 到达）由 5 分钟 tick / 「立即同步」按钮轮询 / 窗口聚焦兜底——丢一两个
