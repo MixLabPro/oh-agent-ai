@@ -42,6 +42,9 @@ integrations/dsh-client/node_modules/
 integrations/dsh/node_modules/
 node_modules/
 lib/
+# The React Workbench bridge is source, not a generated native library.
+!apps/desktop/ui-dev/react/src/lib/
+!apps/desktop/ui-dev/react/src/lib/**
 
 # Claude Code 会话 scratch（RESUME.md + worktrees 是嵌套 .git 的工作区副本）
 .claude/
