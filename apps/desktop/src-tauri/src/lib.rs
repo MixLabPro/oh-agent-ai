@@ -31,6 +31,7 @@ struct SyncLock(Mutex<()>);
 struct SyncRequests(Mutex<std::collections::BTreeMap<String, bool>>);
 static SYNC_REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
 const SYNC_STATUS_EVENT: &str = "sync-status-updated";
+const TRUST_MONITOR_EVENT: &str = "trust-monitor-updated";
 
 /// 只有还没有任何同步回执的启动才主动拉起工作台。后续启动继续保持菜单栏
 /// 工具的安静行为；首次用户无需先知道菜单栏入口，能直接看到本机解析说明。
@@ -1391,6 +1392,7 @@ fn trust_monitor_record_report(
         Err(_) => ("unavailable", Some("snapshot_failed"), Vec::new()),
     };
     let _ = db.trust_monitor_record_result(capability, Some(now_ms), error_code, now_ms);
+    let _ = app.emit(TRUST_MONITOR_EVENT, serde_json::json!({"kind": "trust_monitor_invalidated"}));
     if notification_keys.is_empty() { return; }
     let Ok(Some(state)) = db.trust_monitor_state_get() else { return };
     if !state.notifications_enabled { return; }

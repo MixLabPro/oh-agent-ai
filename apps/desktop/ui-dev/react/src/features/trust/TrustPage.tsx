@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   auditTrust,
   discoverTrust,
+  listen,
   readTrustMonitorConfig,
   runTrustRuntimeSnapshot,
   saveTrustMonitorConfig,
@@ -87,6 +88,21 @@ export function TrustPage() {
       .catch((reason: unknown) => { if (active) setMonitorFeedback(errorMessage(reason)); })
       .finally(() => { if (active) setMonitorLoading(false); });
     return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let cleanup: (() => void) | null = null;
+    void listen("trust-monitor-updated", () => {
+      if (!active) return;
+      void readTrustMonitorConfig().then((value) => {
+        if (!active) return;
+        setMonitor(value);
+        setMonitorDraft({ enabled: value.enabled, interval_seconds: value.interval_seconds, notifications_enabled: value.notifications_enabled });
+        setMonitorFeedback("实时监测状态已更新；如需查看新证据，请重新审计宿主。");
+      }).catch(() => undefined);
+    }).then((unsubscribe) => { if (active) cleanup = unsubscribe; else unsubscribe(); });
+    return () => { active = false; cleanup?.(); };
   }, []);
 
   const saveMonitor = () => {
