@@ -56,12 +56,16 @@ impl AppEvent {
     /// 的内部自用调用不是审计对象（spec §5 实施修订）。`args_fingerprint`
     /// 是参数的规范化指纹：**原始参数永不落库**（§4.1 禁令，agents 的查询
     /// 参数可能含敏感内容）。
-    pub fn mcp_tool_invoked(tool: &str, args_fingerprint: &str, latency_ms: i64, ok: bool) -> Self {
+    pub fn mcp_tool_invoked(
+        tool: &str, args_fingerprint: &str, latency_ms: i64, ok: bool, call_seq: u64,
+    ) -> Self {
         Self {
             event_type: "McpToolInvoked",
             occurred_at_ms: now_ms(),
             host: None,
-            correlation_id: None,
+            // 进程内调用序号：event_id 唯一性材料（同毫秒同参数的重复调用不得
+            // 互吞——审计日志不允许静默少计）+ 消费方的进程内顺序信号。
+            correlation_id: Some(call_seq.to_string()),
             producer: "mcp-serve",
             payload: json!({
                 "tool": tool,
