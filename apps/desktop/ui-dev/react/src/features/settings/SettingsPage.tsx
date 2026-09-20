@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { listen, readSourceHealth, readSyncRequestStatus, setSyncPaused, triggerSync, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport } from "../../lib/tauri";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { addCustomSourceRoot, listen, pickCustomSourceRoot, readCustomSourceConfig, readSourceHealth, readSyncRequestStatus, removeCustomSourceRoot, setSyncPaused, triggerSync, type CustomSourceReport, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -47,6 +47,12 @@ function sourceLabel(host: string): string {
   return labels[host] ?? host;
 }
 
+function shortenPath(path: string): string {
+  if (path.startsWith("~/")) return path;
+  const parts = path.split(/[\\/]/u).filter(Boolean);
+  return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : path;
+}
+
 function syncActionLabel(state: SourceConnectionState): string | null {
   if (state === "connected") return "同步全部来源";
   if (state === "needs_attention") return "重新同步全部来源";
@@ -70,10 +76,99 @@ function SourceRow({ source, syncing, onSync }: { source: SourceHealthReport["so
   </article>;
 }
 
+type CustomSourceSectionProps = {
+  report: CustomSourceReport | null;
+  loading: boolean;
+  error: string | null;
+  onReload: () => void;
+  onSync: () => Promise<boolean>;
+};
+
+function CustomSourceSection({ report, loading, error, onReload, onSync }: CustomSourceSectionProps) {
+  const [host, setHost] = useState<"codex" | "claude-code" | "dsh">("codex");
+  const [root, setRoot] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const chooseRoot = async () => {
+    setActionError(null);
+    try {
+      const selected = await pickCustomSourceRoot();
+      if (selected) {
+        setRoot(selected);
+        setMessage("已选择目录，请确认工具后添加。");
+      }
+    } catch (reason: unknown) {
+      setActionError(reason instanceof Error ? reason.message : "无法打开目录选择");
+    }
+  };
+
+  const addRoot = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (saving) return;
+    setSaving(true);
+    setActionError(null);
+    setMessage(null);
+    try {
+      const result = await addCustomSourceRoot(host, root.trim());
+      setMessage(result.changed ? "目录已保存，正在同步。" : "该目录已在读取范围内，正在重新同步。");
+      onReload();
+      const synced = await onSync();
+      setMessage(synced ? "目录已保存，同步完成。" : "目录已保存，但本次同步未完成；稍后可重新同步。");
+    } catch (reason: unknown) {
+      setActionError(reason instanceof Error ? reason.message : "添加读取位置失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeRoot = async (source: CustomSourceReport["sources"][number]) => {
+    if (saving) return;
+    setSaving(true);
+    setActionError(null);
+    setMessage(null);
+    try {
+      const result = await removeCustomSourceRoot(source.host, source.root);
+      setMessage(result.changed ? "已移除读取位置；已导入数据仍保留。" : "该目录已不在读取范围内。");
+      onReload();
+    } catch (reason: unknown) {
+      setActionError(reason instanceof Error ? reason.message : "移除读取位置失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return <section className="settings-custom-section" aria-labelledby="settings-custom-title">
+    <div className="settings-section-heading"><div><p className="eyebrow">本机位置</p><h3 id="settings-custom-title">其他读取位置</h3><p>选择包含工具日志的本机文件夹；只会加入本机读取范围。</p></div></div>
+    {error && <div className="error-banner" role="alert">读取位置设置暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={onReload}>重试</button></div>}
+    {loading && <div className="settings-source-state" role="status"><strong>正在读取位置配置</strong><span>不会读取目录内容。</span></div>}
+    {!loading && !error && report?.status === "unavailable" && <div className="settings-source-state"><strong>读取位置设置暂不可用</strong><span>可以稍后重试；已有来源状态不受影响。</span></div>}
+    {!loading && !error && report?.status === "ok" && <>
+      <div className="settings-location-list" aria-label="标准读取位置">
+        {Object.entries(report.locations).filter(([, path]) => path).map(([locationHost, path]) => <div className="settings-location-row" key={locationHost}><strong>{sourceLabel(locationHost)}</strong><span>{shortenPath(path as string)}</span><details><summary>显示完整路径</summary><code>{path}</code></details></div>)}
+      </div>
+      <form className="settings-custom-form" onSubmit={addRoot}>
+        <label><span>工具</span><select value={host} onChange={(event) => setHost(event.target.value as typeof host)}><option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="dsh">DeepSeek Harness</option></select></label>
+        <label className="settings-custom-path"><span>目录</span><input value={root} onChange={(event) => setRoot(event.target.value)} placeholder="/Volumes/…/sessions" autoComplete="off" /></label>
+        <button className="button button-secondary" type="button" onClick={chooseRoot} disabled={saving}>选择文件夹</button>
+        <button className="button button-secondary" type="submit" disabled={saving || !root.trim()}>{saving ? "保存中…" : "添加并同步"}</button>
+      </form>
+      {report.sources.length > 0 && <div className="settings-custom-list" aria-label="已添加读取位置">{report.sources.map((source) => <div className="settings-custom-row" key={`${source.host}:${source.root}`}><div><strong>{sourceLabel(source.host)}</strong><span>{shortenPath(source.root)}</span><details><summary>显示完整路径</summary><code>{source.root}</code></details></div><button className="button button-secondary button-small" type="button" onClick={() => removeRoot(source)} disabled={saving}>移除读取位置</button></div>)}</div>}
+      {report.sources.length === 0 && <p className="settings-custom-empty">尚未添加其他读取位置。</p>}
+    </>}
+    {actionError && <div className="error-banner" role="alert">{actionError}</div>}
+    {message && <p className="settings-custom-message" role="status" aria-live="polite">{message}</p>}
+  </section>;
+}
+
 export function SettingsPage() {
   const [report, setReport] = useState<SourceHealthReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [customReport, setCustomReport] = useState<CustomSourceReport | null>(null);
+  const [customError, setCustomError] = useState<string | null>(null);
+  const [customLoading, setCustomLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [pauseSaving, setPauseSaving] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
@@ -87,8 +182,17 @@ export function SettingsPage() {
     }).finally(() => setLoading(false));
   };
 
-  const runSync = async () => {
-    if (syncing) return;
+  const refreshCustom = () => {
+    setCustomLoading(true);
+    setCustomError(null);
+    void readCustomSourceConfig().then(setCustomReport).catch((reason: unknown) => {
+      setCustomReport(null);
+      setCustomError(reason instanceof Error ? reason.message : "自定义来源配置读取失败");
+    }).finally(() => setCustomLoading(false));
+  };
+
+  const runSync = async (): Promise<boolean> => {
+    if (syncing) return false;
     setSyncing(true);
     setError(null);
     setSyncMessage("同步已发起，正在等待本机回执…");
@@ -100,14 +204,16 @@ export function SettingsPage() {
         if (status.completed) {
           setSyncMessage("同步完成，来源状态已刷新。");
           refresh();
-          return;
+          return true;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 250));
       }
       setSyncMessage("同步仍在后台运行；稍后可重新查看来源状态。");
+      return false;
     } catch (reason: unknown) {
       setSyncMessage(null);
       setError(reason instanceof Error ? reason.message : "同步请求未能完成");
+      return false;
     } finally {
       setSyncing(false);
     }
@@ -130,9 +236,10 @@ export function SettingsPage() {
 
   useEffect(() => {
     refresh();
+    refreshCustom();
     let active = true;
     let cleanups: Array<() => void> = [];
-    Promise.all([listen("sync-status-updated", () => { if (active) refresh(); }), listen("usage-fold-updated", () => { if (active) refresh(); })]).then((unsubscribers) => {
+    Promise.all([listen("sync-status-updated", () => { if (active) { refresh(); refreshCustom(); } }), listen("usage-fold-updated", () => { if (active) { refresh(); refreshCustom(); } })]).then((unsubscribers) => {
       if (active) cleanups = unsubscribers;
       else unsubscribers.forEach((unsubscribe) => unsubscribe());
     });
@@ -157,6 +264,8 @@ export function SettingsPage() {
       {!loading && !error && report?.status === "ok" && <div className="settings-source-list">{report.sources.length ? report.sources.map((source) => <SourceRow key={source.host} source={source} syncing={syncing} onSync={runSync} />) : <div className="settings-source-state"><strong>没有可显示的来源</strong><span>来源注册表暂未返回任何工具。</span></div>}</div>}
       {report && <div className="settings-sync-summary"><span>上次同步：{syncLabel(report)}</span><span>{report.sync.paused === true ? "自动同步已暂停" : report.sync.paused === false ? "自动同步已开启" : "自动同步状态不可用"}</span>{report.sync.paused !== null && <button className="button button-secondary button-small" type="button" onClick={togglePause} disabled={pauseSaving}>{pauseSaving ? "保存中…" : report.sync.paused ? "恢复自动同步" : "暂停自动同步"}</button>} {syncMessage && <small role="status">{syncMessage}</small>}<small>排除和删除已导入数据仍保留在旧工作台，后续单独验收。</small></div>}
     </section>
+
+    <CustomSourceSection report={customReport} loading={customLoading} error={customError} onReload={refreshCustom} onSync={runSync} />
 
     <section className="settings-placeholder" aria-label="其他设置迁移状态"><strong>其他设置正在迁移</strong><span>计费与套餐、预算、统计与数据、关于与诊断会继续沿用旧工作台，待各自完成安全 DTO、保存回执和失败恢复后再切换。</span></section>
   </>;

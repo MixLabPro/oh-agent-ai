@@ -68,6 +68,9 @@ if (!source.includes("只读") || !source.includes("不发请求") || !source.in
 if (!source.includes('"data_source_status"') || !source.includes("readSourceHealth") || !source.includes("settings-source-row")) fail("React 设置未使用安全数据源状态 DTO");
 if (source.includes('"delete_imported_source_data"')) fail("React 设置首轮越过危险数据删除 mutation 边界");
 if (!source.includes("triggerSync") || !source.includes("setSyncPaused") || !source.includes("readSyncRequestStatus")) fail("React 设置缺少同步控制与回执轮询");
+if (!source.includes("readCustomSourceConfig") || !source.includes("addCustomSourceRoot") || !source.includes("removeCustomSourceRoot") || !source.includes("pickCustomSourceRoot")) fail("React 设置缺少自定义读取位置桥接");
+if (!source.includes("显示完整路径") || !source.includes("settings-custom-form")) fail("React 设置缺少本机位置的人机可读路径展示");
+if (!source.includes('status === "unavailable" ? []')) fail("React 设置未隔离自定义位置配置不可用态");
 if (!source.includes("尚未导入") || !source.includes("没有读取权限") || !source.includes("来源状态暂不可用")) fail("React 设置缺少来源空态、错误映射或不可用态");
 if (!source.includes("Promise.allSettled") || !source.includes("sync_pause_state") || !source.includes("read_overview")) fail("React 设置未保留来源状态的部分失败降级");
 const routeQualityType = source.match(/export type RouteQualityModel[\s\S]*?\};/u)?.[0] || "";

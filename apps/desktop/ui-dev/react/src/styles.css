@@ -287,6 +287,20 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .settings-source-state span { font-size: 11px; line-height: 1.55; }
 .settings-sync-summary { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 16px; margin-top: 13px; color: #405875; font-size: 11px; }
 .settings-sync-summary small { color: var(--text-muted); font-size: 10px; }
+.settings-custom-section { padding: 22px 0; border-bottom: 1px solid #e1e8f0; }
+.settings-location-list, .settings-custom-list { display: grid; gap: 7px; margin-bottom: 14px; }
+.settings-location-row, .settings-custom-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 44px; padding: 9px 12px; border: 1px solid #e1e8f0; border-radius: 9px; background: #fff; color: var(--text-subtle); font-size: 11px; }
+.settings-location-row strong, .settings-custom-row strong { min-width: 145px; color: #26384e; font-size: 12px; }
+.settings-location-row > span, .settings-custom-row > div { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-location-row details, .settings-custom-row details { flex: 0 0 auto; color: var(--text-muted); }
+.settings-location-row summary, .settings-custom-row summary { cursor: pointer; }
+.settings-location-row code, .settings-custom-row code { display: block; max-width: 520px; margin-top: 6px; overflow-wrap: anywhere; color: #405875; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; white-space: normal; }
+.settings-custom-form { display: grid; grid-template-columns: 150px minmax(220px, 1fr) auto auto; align-items: end; gap: 10px; margin: 14px 0 16px; }
+.settings-custom-form label { display: grid; gap: 5px; color: var(--text-muted); font-size: 11px; }
+.settings-custom-form select, .settings-custom-form input { width: 100%; min-height: 34px; padding: 7px 9px; border: 1px solid #d9e2ec; border-radius: 7px; background: #fff; color: #26384e; font: inherit; }
+.settings-custom-form input:focus-visible, .settings-custom-form select:focus-visible { border-color: #58b898; outline: 2px solid #cfe9e1; outline-offset: 1px; }
+.settings-custom-message { margin-top: 10px; color: #087f62; font-size: 11px; }
+.settings-custom-empty { margin: 8px 0; color: var(--text-muted); font-size: 11px; }
 .settings-placeholder { display: grid; gap: 6px; margin-top: 20px; padding: 16px; border: 1px solid #e1e8f0; border-radius: 11px; color: var(--text-subtle); background: #fff; }
 .settings-placeholder strong { color: #26384e; font-size: 13px; }
 .settings-placeholder span { font-size: 11px; line-height: 1.55; }
@@ -373,6 +387,12 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
   .settings-source-row { grid-template-columns: 1fr; gap: 8px; }
   .settings-source-scan { text-align: left; }
   .settings-source-action { justify-self: start; }
+  .settings-custom-form { grid-template-columns: 1fr; align-items: stretch; }
+  .settings-custom-form .button { width: 100%; }
+  .settings-location-row, .settings-custom-row { align-items: flex-start; flex-wrap: wrap; }
+  .settings-location-row strong, .settings-custom-row strong { min-width: 120px; }
+  .settings-location-row > span, .settings-custom-row > div { flex-basis: calc(100% - 134px); }
+  .settings-location-row details, .settings-custom-row details { margin-left: 120px; }
   .test-header-actions { width: 100%; justify-content: space-between; align-items: end; }
   .test-header-actions .test-window-field { flex: 1; }
   .test-window-field select { width: 100%; }

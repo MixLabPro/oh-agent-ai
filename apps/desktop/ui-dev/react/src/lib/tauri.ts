@@ -83,6 +83,8 @@ export type SourceHealthReport = {
 };
 
 export type SyncRequestStatus = { completed: boolean; failed: boolean };
+export type CustomSourceRoot = { host: string; root: string };
+export type CustomSourceReport = { status: "ok" | "unavailable"; sources: CustomSourceRoot[]; locations: Record<string, string | null> };
 
 export type UsageHour = {
   hour: number;
@@ -474,6 +476,12 @@ function safeHostLabel(value: unknown): string {
   return /^[a-z][a-z0-9_-]{0,31}$/.test(candidate) ? candidate : "generic";
 }
 
+function safeLocalPath(value: unknown, label: string): string {
+  const path = stringField(value, label);
+  if (path.length > 4096 || /[\u0000-\u001f\u007f]/u.test(path) || !(/^(?:~\/|\/|[A-Za-z]:[\\/]|\\\\)/.test(path))) throw new Error(`${label} DTO 路径不安全`);
+  return path;
+}
+
 function safeMoneyMap(value: unknown, label: string): Record<string, number> {
   if (value === null || value === undefined) return {};
   const source = record(value, label);
@@ -543,6 +551,30 @@ function parseSourceHealth(value: unknown, pauseValue: unknown, overviewValue: u
   const syncStage = boundedEnum(sync.stage ?? "unknown", "source sync stage", ["complete", "fold", "discover", "resolve", "never", "paused", "unknown"], "unknown");
   const syncState: SourceHealthReport["sync"]["state"] = status !== "ok" ? "unavailable" : syncStage === "complete" ? "ok" : syncStage === "never" ? "never" : syncStage === "unknown" ? "unavailable" : "failed";
   return { status, sources: rows, sync: { paused, last_success_at: overviewTimestamp(sync.at), state: syncState } };
+}
+
+function parseCustomSourceReport(value: unknown, locationsValue: unknown): CustomSourceReport {
+  const root = record(value, "custom source roots");
+  const status = boundedEnum(root.status ?? "unavailable", "custom source status", ["ok", "unavailable"], "unavailable") as CustomSourceReport["status"];
+  const rawSources = status === "unavailable" ? [] : requiredArray(root.sources, "custom source roots");
+  if (rawSources.length > 64) throw new Error("custom source roots 超出上限");
+  const sources = rawSources.map((item) => {
+    const row = record(item, "custom source root");
+    const host = safeHostLabel(row.host);
+    if (!["claude-code", "codex", "dsh"].includes(host)) throw new Error("custom source host 不受支持");
+    const rootPath = safeLocalPath(row.root, "custom source root");
+    if (!/^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(rootPath)) throw new Error("custom source root DTO 必须为绝对路径");
+    return { host, root: rootPath };
+  }).sort((left, right) => left.host.localeCompare(right.host) || left.root.localeCompare(right.root));
+  const locationRoot = locationsValue == null ? {} : record(locationsValue, "source read locations");
+  const locations: Record<string, string | null> = {};
+  for (const [host, rawPath] of Object.entries(locationRoot).slice(0, 16)) {
+    const safeHost = safeHostLabel(host);
+    if (!["claude-code", "codex", "dsh"].includes(safeHost)) continue;
+    if (rawPath === null || rawPath === undefined) locations[safeHost] = null;
+    else locations[safeHost] = safeLocalPath(rawPath, "source read location");
+  }
+  return { status, sources, locations };
 }
 
 function parseOverviewSnapshot(value: unknown): OverviewSnapshot {
@@ -1476,6 +1508,71 @@ export async function readSourceHealth(): Promise<SourceHealthReport> {
     );
   } catch {
     throw new Error("来源状态读取失败");
+  }
+}
+
+export async function readCustomSourceConfig(): Promise<CustomSourceReport> {
+  const fallback = { status: "ok", sources: [] };
+  const fallbackLocations = { "claude-code": "~/.claude/projects", codex: "~/.codex/sessions", dsh: "~/.deepseek/sessions" };
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseCustomSourceReport(fallback, fallbackLocations);
+  try {
+    const [roots, locations] = await Promise.allSettled([
+      handler("custom_source_roots"),
+      handler("source_read_locations"),
+    ]);
+    if (roots.status === "rejected") throw new Error("自定义来源配置读取失败");
+    let locationValue: unknown = {};
+    if (locations.status === "fulfilled") {
+      const locationRoot = record(locations.value, "source read locations response");
+      if (locationRoot.status === "ok") locationValue = locationRoot.locations ?? {};
+    }
+    return parseCustomSourceReport(roots.value, locationValue);
+  } catch {
+    throw new Error("自定义来源配置读取失败");
+  }
+}
+
+function validateCustomSourceInput(host: string, root: string): void {
+  if (!["claude-code", "codex", "dsh"].includes(host)) throw new Error("该工具暂不支持自定义位置");
+  if (!/^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(root) || root.length > 4096 || /[\u0000-\u001f\u007f]/u.test(root)) throw new Error("请输入绝对目录路径");
+}
+
+export async function pickCustomSourceRoot(): Promise<string | null> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return "/tmp/agent-vitals-browser-custom-source";
+  try {
+    const value = await handler("pick_custom_source_root");
+    if (value === null || value === undefined) return null;
+    if (typeof value !== "string") throw new Error("目录选择回执无效");
+    validateCustomSourceInput("codex", value);
+    return value;
+  } catch {
+    throw new Error("无法打开目录选择");
+  }
+}
+
+export async function addCustomSourceRoot(host: string, root: string): Promise<{ changed: boolean }> {
+  validateCustomSourceInput(host, root);
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { changed: true };
+  try {
+    const value = record(await handler("add_custom_source_root", { input: { host, root } }), "custom source add result");
+    return { changed: requiredBoolean(value.changed, "custom source add changed") };
+  } catch {
+    throw new Error("添加读取位置失败，请确认目录存在且可读取");
+  }
+}
+
+export async function removeCustomSourceRoot(host: string, root: string): Promise<{ changed: boolean }> {
+  validateCustomSourceInput(host, root);
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { changed: true };
+  try {
+    const value = record(await handler("remove_custom_source_root", { input: { host, root } }), "custom source remove result");
+    return { changed: requiredBoolean(value.changed, "custom source remove changed") };
+  } catch {
+    throw new Error("移除读取位置失败");
   }
 }
 
