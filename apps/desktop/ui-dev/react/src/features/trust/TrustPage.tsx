@@ -1,5 +1,15 @@
 import { useEffect, useState } from "react";
-import { auditTrust, discoverTrust, type TrustAuditReport, type TrustHostCandidate } from "../../lib/tauri";
+import {
+  auditTrust,
+  discoverTrust,
+  readTrustMonitorConfig,
+  runTrustRuntimeSnapshot,
+  saveTrustMonitorConfig,
+  type TrustAuditReport,
+  type TrustHostCandidate,
+  type TrustMonitorConfig,
+  type TrustRuntimeSnapshot,
+} from "../../lib/tauri";
 
 function bytes(value: number | null): string {
   if (value == null) return "—";
@@ -23,6 +33,24 @@ function errorMessage(reason: unknown): string {
     : message;
 }
 
+function capabilityLabel(value: TrustMonitorConfig["capability"]): string {
+  return { not_started: "尚未采集", available: "可用", partial: "部分覆盖", unavailable: "不可用" }[value];
+}
+
+function snapshotCapabilityLabel(value: string): string {
+  return value === "macos_lsof_partial" ? "macOS lsof · 部分覆盖" : value === "runtime_sensor_unavailable_on_this_platform" ? "当前平台无运行时传感器" : "传感器不可用";
+}
+
+function monitorUpdatedAt(value: number | null): string {
+  return value == null ? "尚未写入" : localTime(value);
+}
+
+function monitorReasonLabel(value: TrustMonitorConfig["reason"], error: TrustMonitorConfig["last_error_code"] = null): string {
+  if (value === "authority_unavailable") return "本地 authority 不可用";
+  if (value === "monitor_state_unavailable") return "监测状态尚未初始化";
+  return error === "sensor_unavailable" ? "运行时传感器不可用" : error === "snapshot_failed" ? "最近一次快照失败" : error === "sensor_partial" ? "运行时传感器仅部分覆盖" : "状态不可用";
+}
+
 export function TrustPage() {
   const [candidates, setCandidates] = useState<TrustHostCandidate[]>([]);
   const [profileErrors, setProfileErrors] = useState<string[]>([]);
@@ -30,6 +58,13 @@ export function TrustPage() {
   const [report, setReport] = useState<TrustAuditReport | null>(null);
   const [loading, setLoading] = useState("正在发现本机宿主…");
   const [error, setError] = useState<string | null>(null);
+  const [monitor, setMonitor] = useState<TrustMonitorConfig | null>(null);
+  const [monitorDraft, setMonitorDraft] = useState({ enabled: false, interval_seconds: 30, notifications_enabled: false });
+  const [monitorLoading, setMonitorLoading] = useState(true);
+  const [monitorSaving, setMonitorSaving] = useState(false);
+  const [monitorFeedback, setMonitorFeedback] = useState<string | null>(null);
+  const [snapshot, setSnapshot] = useState<TrustRuntimeSnapshot | null>(null);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
 
   const discover = () => {
     setLoading("正在发现本机宿主…");
@@ -40,6 +75,46 @@ export function TrustPage() {
   };
 
   useEffect(() => { discover(); }, []);
+
+  useEffect(() => {
+    let active = true;
+    void readTrustMonitorConfig()
+      .then((value) => {
+        if (!active) return;
+        setMonitor(value);
+        setMonitorDraft({ enabled: value.enabled, interval_seconds: value.interval_seconds, notifications_enabled: value.notifications_enabled });
+      })
+      .catch((reason: unknown) => { if (active) setMonitorFeedback(errorMessage(reason)); })
+      .finally(() => { if (active) setMonitorLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  const saveMonitor = () => {
+    setMonitorSaving(true);
+    setMonitorFeedback(null);
+    void saveTrustMonitorConfig(monitorDraft)
+      .then((value) => {
+        setMonitor(value);
+        setMonitorDraft({ enabled: value.enabled, interval_seconds: value.interval_seconds, notifications_enabled: value.notifications_enabled });
+        setMonitorFeedback(value.enabled ? "实时监测已开启；只记录本机脱敏元数据。" : "实时监测已关闭；不会在后台采集。");
+      })
+      .catch((reason: unknown) => setMonitorFeedback(`保存失败：${errorMessage(reason)}`))
+      .finally(() => setMonitorSaving(false));
+  };
+
+  const runSnapshot = () => {
+    setSnapshotLoading(true);
+    setMonitorFeedback(null);
+    void runTrustRuntimeSnapshot()
+      .then((value) => {
+        setSnapshot(value);
+        setMonitorFeedback(value.observations > 0
+          ? `快照已记录 ${value.observations} 条脱敏证据；这表示尝试链路，不证明已传输。`
+          : `本次未形成证据（${snapshotCapabilityLabel(value.capability)}）。`);
+      })
+      .catch((reason: unknown) => setMonitorFeedback(`快照失败：${errorMessage(reason)}`))
+      .finally(() => setSnapshotLoading(false));
+  };
 
   const runAudit = (host: string) => {
     setSelectedHost(host);
@@ -59,6 +134,24 @@ export function TrustPage() {
     {loading && <p className="inline-status" role="status">{loading}</p>}
     {error && <div className="error-banner" role="alert">{error}</div>}
     {profileErrors.length > 0 && <div className="callout"><strong>部分宿主配置不可用</strong><span>{profileErrors.length} 条配置警告不会被当作风险结论。</span></div>}
+    <section className="trust-monitor-card" aria-labelledby="trust-monitor-title">
+      <div className="trust-card-heading"><div><p className="eyebrow">Runtime monitor</p><h3 id="trust-monitor-title">实时监测控制</h3></div><span className={`status-pill ${monitor?.status === "ok" && monitor.enabled ? "status-pill-success" : monitor?.status === "unavailable" ? "status-pill-warning" : ""}`}><span aria-hidden="true" className="status-dot" />{monitorLoading ? "读取中" : monitor?.status === "unavailable" ? "无法确认状态" : monitor?.enabled ? "已开启" : "默认关闭"}</span></div>
+      <p className="monitor-copy">监测只在本机运行，采集进程级类型信号；不会读取文件内容、保存路径或上传网络数据。</p>
+      {monitor?.status === "unavailable" && <div className="callout monitor-unavailable" role="status"><strong>监测状态不可用</strong><span>{monitorReasonLabel(monitor.reason, monitor.last_error_code)}；无法确认当前开关，也不会尝试写入设置。</span></div>}
+      <div className="monitor-controls">
+        <label className="monitor-check"><input aria-describedby="trust-monitor-title" type="checkbox" checked={monitorDraft.enabled} onChange={(event) => setMonitorDraft((current) => ({ ...current, enabled: event.target.checked, notifications_enabled: event.target.checked && current.notifications_enabled }))} disabled={monitorLoading || monitorSaving || monitor?.status !== "ok"} /><span>启用后台监测</span></label>
+        <label className="monitor-field"><span>采样间隔</span><select value={monitorDraft.interval_seconds} onChange={(event) => setMonitorDraft((current) => ({ ...current, interval_seconds: Number(event.target.value) }))} disabled={monitorLoading || monitorSaving || monitor?.status !== "ok"}><option value={5}>5 秒</option><option value={10}>10 秒</option><option value={30}>30 秒</option><option value={60}>60 秒</option><option value={300}>5 分钟</option></select></label>
+        <label className="monitor-check"><input type="checkbox" checked={monitorDraft.notifications_enabled} onChange={(event) => setMonitorDraft((current) => ({ ...current, notifications_enabled: event.target.checked }))} disabled={!monitorDraft.enabled || monitorLoading || monitorSaving || monitor?.status !== "ok"} /><span>发现新行为链时通知</span></label>
+        <button className="button button-primary-small" type="button" onClick={saveMonitor} disabled={monitorLoading || monitorSaving || monitor?.status !== "ok"}>{monitorSaving ? "保存中…" : "保存设置"}</button>
+      </div>
+      <div className="monitor-meta"><span>能力：{monitor?.status === "ok" ? capabilityLabel(monitor.capability) : "不可观察"}</span><span>最近状态：{monitor?.last_error_code ? monitorReasonLabel(monitor.reason, monitor.last_error_code) : monitor?.status === "ok" ? "无错误" : "不可观察"}</span><span>更新：{monitorUpdatedAt(monitor?.updated_at_ms ?? null)}</span></div>
+      <div className="monitor-snapshot">
+        <div><strong>一次性进程快照</strong><p>用于立即核对当前是否存在“读 Git 历史 + 写归档/索引”的组合信号。</p></div>
+        <button className="button button-secondary" type="button" onClick={runSnapshot} disabled={snapshotLoading}>{snapshotLoading ? "采集中…" : "立即采集快照"}</button>
+      </div>
+      {snapshot && <div className="snapshot-result" role="status"><strong>{snapshotCapabilityLabel(snapshot.capability)}</strong><span>候选进程 {snapshot.candidate_processes}</span><span>脱敏证据 {snapshot.observations}</span><span>新增 Finding {snapshot.findings_upserted}</span><span>通知候选 {snapshot.notification_candidates}</span></div>}
+      {monitorFeedback && <p className="monitor-feedback" role="status">{monitorFeedback}</p>}
+    </section>
     <div className="trust-layout">
       <section className="trust-card" aria-label="发现的本地宿主">
         <div className="trust-card-heading"><div><p className="eyebrow">覆盖面</p><h3>本机宿主</h3></div><span className="count-badge">{candidates.length}</span></div>

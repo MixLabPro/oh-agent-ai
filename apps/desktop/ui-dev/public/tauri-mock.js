@@ -289,6 +289,16 @@
   };
   const ok = (data) => Promise.resolve(data);
   const emptyReport = (key) => ({ status: "ok", [key]: [] });
+  const trustMonitorConfig = {
+    status: "ok", reason: null, enabled: false, interval_seconds: 30, notifications_enabled: false,
+    capability: "not_started", last_success_at_ms: null, last_error_code: null,
+    updated_at_ms: null, notification_permission: null,
+  };
+  const trustSnapshot = {
+    capability: "macos_lsof_partial", candidate_processes: 1, observations: 2,
+    inserted: 2, duplicate: 0, findings_upserted: 1, notification_candidates: 1,
+    evidence_links_added: 2,
+  };
   async function invoke(command, args) {
     try {
       switch (command) {
@@ -677,6 +687,25 @@
         next_cursor: null, refreshed: false,
       };
       case "findings_freshness": return { status: "ok", freshness: { state: "stale", last_successful_sync_at: new Date(Date.now() - 1500000).toISOString(), stale_hosts: ["workbuddy"], syncing: false } };
+      case "trust_monitor_config": return { ...trustMonitorConfig };
+      case "save_trust_monitor_config": {
+        const enabled = !!(args && args.enabled);
+        const interval = Number(args && args.intervalSeconds);
+        if (!Number.isSafeInteger(interval) || interval < 5 || interval > 3600) throw new Error("interval_seconds must be between 5 and 3600");
+        trustMonitorConfig.enabled = enabled;
+        trustMonitorConfig.interval_seconds = interval;
+        trustMonitorConfig.notifications_enabled = enabled && !!(args && args.notificationsEnabled);
+        trustMonitorConfig.capability = enabled ? "partial" : "not_started";
+        trustMonitorConfig.updated_at_ms = Date.now();
+        trustMonitorConfig.notification_permission = trustMonitorConfig.notifications_enabled ? "granted" : null;
+        return { ...trustMonitorConfig };
+      }
+      case "trust_runtime_snapshot": {
+        trustMonitorConfig.last_success_at_ms = Date.now();
+        trustMonitorConfig.capability = "partial";
+        trustMonitorConfig.updated_at_ms = Date.now();
+        return { ...trustSnapshot };
+      }
       // Shape: crates/agent-vitals-runtime/src/decision_matrix.rs::decision_matrix
       // （rows 键 = combo_rows 的 json! 字段；金额按币种分列，mock 同纪律）。
       case "decision_matrix_safe": return {

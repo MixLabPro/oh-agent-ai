@@ -57,6 +57,32 @@ export type TrustAuditReport = {
 
 export type TrustDiscovery = { candidates: TrustHostCandidate[]; profile_errors: string[] };
 
+export type TrustMonitorCapability = "not_started" | "available" | "partial" | "unavailable";
+export type TrustMonitorConfig = {
+  status: "ok" | "unavailable";
+  reason: "authority_unavailable" | "monitor_state_unavailable" | null;
+  enabled: boolean;
+  interval_seconds: number;
+  notifications_enabled: boolean;
+  capability: TrustMonitorCapability;
+  last_success_at_ms: number | null;
+  last_error_code: "sensor_unavailable" | "snapshot_failed" | "sensor_partial" | "authority_unavailable" | "monitor_state_unavailable" | null;
+  updated_at_ms: number | null;
+  notification_permission: "granted" | "denied" | "unavailable" | null;
+};
+
+export type TrustSnapshotCapability = "macos_lsof_partial" | "runtime_sensor_unavailable_on_this_platform" | "lsof_unavailable" | "lsof_no_visible_output" | "lsof_invalid_output" | "unavailable";
+export type TrustRuntimeSnapshot = {
+  capability: TrustSnapshotCapability;
+  candidate_processes: number;
+  observations: number;
+  inserted: number;
+  duplicate: number;
+  findings_upserted: number;
+  notification_candidates: number;
+  evidence_links_added: number;
+};
+
 export type FindingStatusRollup = {
   open: number;
   later: number;
@@ -200,6 +226,12 @@ function requiredCount(value: unknown, label: string): number {
   return value;
 }
 
+function boundedCount(value: unknown, label: string, maximum = 1_000_000_000): number {
+  const count = requiredCount(value, label);
+  if (count > maximum) throw new Error(`${label} DTO 计数超限`);
+  return count;
+}
+
 function requiredBoolean(value: unknown, label: string): boolean {
   if (typeof value !== "boolean") throw new Error(`${label} DTO 状态不安全`);
   return value;
@@ -228,6 +260,11 @@ function safeHostLabel(value: unknown): string {
   return /^[a-z][a-z0-9_-]{0,31}$/.test(candidate) ? candidate : "generic";
 }
 
+function safeTrustIdentifier(value: unknown, label: string, fallback = "unknown"): string {
+  if (typeof value !== "string" || value.length > 96 || !/^[a-z][a-z0-9_-]{0,95}$/.test(value)) return fallback;
+  return value;
+}
+
 function safeTimestamp(value: unknown, _label: string): string | null {
   if (value === null || value === undefined || typeof value !== "string") return null;
   const candidate = value;
@@ -251,13 +288,13 @@ function parseTrustDiscovery(value: unknown): TrustDiscovery {
     const row = record(item, "trust candidate");
     if (typeof row.detected !== "boolean" || typeof row.artifact_profile_available !== "boolean") throw new Error("trust candidate 状态不安全");
     return {
-      id: stringField(row.id, "trust candidate id"),
+      id: safeHostLabel(row.id),
       detected: row.detected,
       artifact_profile_available: row.artifact_profile_available,
-      coverage_state: stringField(row.coverage_state, "trust coverage state"),
+      coverage_state: boundedEnum(row.coverage_state, "trust coverage state", ["not_detected", "profiled", "detected_unprofiled"], "unknown"),
     };
   });
-  const profileErrors = requiredArray(root.profile_errors, "profile errors").map((item) => stringField(item, "profile error"));
+  const profileErrors = requiredArray(root.profile_errors, "profile errors").slice(0, 16).map((item) => safeTrustIdentifier(item, "profile error", "profile_error_unavailable"));
   return { candidates, profile_errors: profileErrors };
 }
 
@@ -265,15 +302,17 @@ function parseTrustAudit(value: unknown): TrustAuditReport {
   const root = record(value, "trust audit");
   const evidence = requiredArray(root.evidence, "trust evidence").map((item) => {
     const row = record(item, "trust evidence");
-    const scopes = Array.isArray(row.scope_classes) ? row.scope_classes.map((scope) => stringField(scope, "scope class")) : [];
+    const scopes = Array.isArray(row.scope_classes) ? row.scope_classes.slice(0, 16).map((scope) => safeTrustIdentifier(scope, "scope class", "unknown_scope")) : [];
     if (typeof row.observed_at_ms !== "number" || !Number.isSafeInteger(row.observed_at_ms) || row.observed_at_ms < 0) throw new Error("trust evidence timestamp 不安全");
     return {
-      kind: stringField(row.kind, "evidence kind"), stage: stringField(row.stage, "evidence stage"),
-      evidence_level: stringField(row.evidence_level, "evidence level"), evidence_origin: stringField(row.evidence_origin, "evidence origin"),
+      kind: boundedEnum(row.kind, "evidence kind", ["file_scope", "package", "credential", "connection", "outbound_bytes", "remote_ack", "consent_state", "retry"], "unknown"),
+      stage: boundedEnum(row.stage, "evidence stage", ["read_observed", "package_observed", "credential_observed", "egress_attempted", "egress_transmitted", "remote_accepted"], "unknown"),
+      evidence_level: boundedEnum(row.evidence_level, "evidence level", ["E0", "E1", "E2", "E3", "E4", "E5"], "unknown"),
+      evidence_origin: boundedEnum(row.evidence_origin, "evidence origin", ["local_artifact", "client_state_claim", "runtime_process_metadata", "network_metadata", "verified_receipt", "unknown_legacy"], "unknown"),
       observed_at_ms: row.observed_at_ms, workspace_ref: safeReference(row.workspace_ref, "workspace ref"),
       native_event_ref: safeReference(row.native_event_ref, "native event ref"), scope_classes: scopes,
       file_count: nullableCount(row.file_count, "file count"), byte_count: nullableCount(row.byte_count, "byte count"),
-      destination_class: nullableString(row.destination_class, "destination class"), collector_id: stringField(row.collector_id, "collector id"),
+      destination_class: row.destination_class == null ? null : boundedEnum(row.destination_class, "destination class", ["vendor_api", "object_storage", "telemetry", "eval", "model_api", "unknown"], "unknown"), collector_id: safeTrustIdentifier(row.collector_id, "collector id"),
     };
   });
   const count = (name: string) => requiredCount(root[name], name);
@@ -285,6 +324,52 @@ function parseTrustAudit(value: unknown): TrustAuditReport {
     host: stringField(root.host, "trust host"), discovered: count("discovered"), inserted: count("inserted"), duplicate: count("duplicate"),
     findings_upserted: count("findings_upserted"), evidence_links_added: count("evidence_links_added"),
     stage_counts: map("stage_counts"), observation_kind_counts: map("observation_kind_counts"), evidence,
+  };
+}
+
+function nullableTimestampMs(value: unknown, label: string): number | null {
+  if (value === null || value === undefined) return null;
+  return requiredCount(value, label);
+}
+
+function parseTrustMonitorConfig(value: unknown): TrustMonitorConfig {
+  const root = record(value, "trust monitor config");
+  const status = root.status === "ok" ? "ok" : "unavailable";
+  const reason = root.reason === "authority_unavailable" || root.reason === "monitor_state_unavailable" ? root.reason : null;
+  const capability = boundedEnum(root.capability, "trust monitor capability", ["not_started", "available", "partial", "unavailable"], "unavailable") as TrustMonitorCapability;
+  const rawInterval = root.interval_seconds;
+  const interval_seconds = typeof rawInterval === "number" && Number.isSafeInteger(rawInterval) && rawInterval >= 5 && rawInterval <= 3600 ? rawInterval : 30;
+  const rawError = root.last_error_code;
+  const allowedErrors = ["sensor_unavailable", "snapshot_failed", "sensor_partial", "authority_unavailable", "monitor_state_unavailable"] as const;
+  const last_error_code = rawError === null || rawError === undefined ? null : boundedEnum(rawError, "trust monitor error", allowedErrors, "sensor_unavailable") as TrustMonitorConfig["last_error_code"];
+  const rawPermission = root.notification_permission;
+  const notification_permission = rawPermission === null || rawPermission === undefined
+    ? null
+    : boundedEnum(rawPermission, "notification permission", ["granted", "denied", "unavailable"], "unavailable") as TrustMonitorConfig["notification_permission"];
+  return {
+    status, reason,
+    enabled: root.enabled === true,
+    interval_seconds,
+    notifications_enabled: root.notifications_enabled === true,
+    capability,
+    last_success_at_ms: nullableTimestampMs(root.last_success_at_ms, "last monitor success"),
+    last_error_code,
+    updated_at_ms: nullableTimestampMs(root.updated_at_ms, "monitor updated at"),
+    notification_permission,
+  };
+}
+
+function parseTrustRuntimeSnapshot(value: unknown): TrustRuntimeSnapshot {
+  const root = record(value, "trust runtime snapshot");
+  return {
+    capability: boundedEnum(root.capability, "runtime capability", ["macos_lsof_partial", "runtime_sensor_unavailable_on_this_platform", "lsof_unavailable", "lsof_no_visible_output", "lsof_invalid_output"], "unavailable") as TrustSnapshotCapability,
+    candidate_processes: boundedCount(root.candidate_processes, "candidate processes"),
+    observations: boundedCount(root.observations, "runtime observations"),
+    inserted: boundedCount(root.inserted, "runtime inserted"),
+    duplicate: boundedCount(root.duplicate, "runtime duplicate"),
+    findings_upserted: boundedCount(root.findings_upserted, "runtime findings"),
+    notification_candidates: boundedCount(root.notification_candidates, "runtime notifications"),
+    evidence_links_added: boundedCount(root.evidence_links_added, "runtime evidence links"),
   };
 }
 
@@ -441,6 +526,49 @@ export async function auditTrust(host: string): Promise<TrustAuditReport> {
   const reports = Array.isArray(root.reports) ? root.reports : [];
   if (reports.length !== 1) throw new Error("trust audit 未返回单一宿主报告");
   return parseTrustAudit(reports[0]);
+}
+
+export async function readTrustMonitorConfig(): Promise<TrustMonitorConfig> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseTrustMonitorConfig({
+    status: "ok", reason: null, enabled: false, interval_seconds: 30, notifications_enabled: false,
+    capability: "not_started", last_success_at_ms: null, last_error_code: null,
+    updated_at_ms: null, notification_permission: null,
+  });
+  return parseTrustMonitorConfig(await handler("trust_monitor_config"));
+}
+
+export async function saveTrustMonitorConfig(input: {
+  enabled: boolean;
+  interval_seconds: number;
+  notifications_enabled: boolean;
+}): Promise<TrustMonitorConfig> {
+  if (typeof input.enabled !== "boolean" || typeof input.notifications_enabled !== "boolean") {
+    throw new Error("实时监测开关参数不安全");
+  }
+  if (!Number.isSafeInteger(input.interval_seconds) || input.interval_seconds < 5 || input.interval_seconds > 3600) {
+    throw new Error("实时监测间隔必须在 5 秒到 3600 秒之间");
+  }
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseTrustMonitorConfig({
+    status: "ok", reason: null, enabled: input.enabled, interval_seconds: input.interval_seconds,
+    notifications_enabled: input.enabled && input.notifications_enabled, capability: input.enabled ? "partial" : "not_started",
+    last_success_at_ms: null, last_error_code: null, updated_at_ms: Date.now(), notification_permission: null,
+  });
+  return parseTrustMonitorConfig(await handler("save_trust_monitor_config", {
+    enabled: input.enabled,
+    intervalSeconds: input.interval_seconds,
+    notificationsEnabled: input.notifications_enabled,
+  }));
+}
+
+export async function runTrustRuntimeSnapshot(): Promise<TrustRuntimeSnapshot> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseTrustRuntimeSnapshot({
+    capability: "macos_lsof_partial", candidate_processes: 1, observations: 2, inserted: 2,
+    duplicate: 0, findings_upserted: 1, notification_candidates: 1, evidence_links_added: 2,
+  });
+  return parseTrustRuntimeSnapshot(await handler("trust_runtime_snapshot"));
 }
 
 export async function readFindings(): Promise<FindingsReport> {
