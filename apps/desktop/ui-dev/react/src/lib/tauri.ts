@@ -11,6 +11,13 @@ const browserPreview: OverviewSnapshot = {
   findings: 0,
   evidence: 8,
   monitored: false,
+  today_tokens: 374000,
+  today_spend: { CNY: 3.21 },
+  month_spend: { CNY: 57.64, USD: 20 },
+  subscription_cny_month: 49,
+  sync: { ok: true, stage: "complete", at: null },
+  budget: { source: "sql", level: "warn", month_cost: 8.64, monthly_cny: 12, month_ratio: 0.72 },
+  host_rows: [],
 };
 
 export type OverviewSnapshot = {
@@ -19,6 +26,13 @@ export type OverviewSnapshot = {
   findings: number | null;
   evidence: number | null;
   monitored: boolean;
+  today_tokens: number | null;
+  today_spend: Record<string, number>;
+  month_spend: Record<string, number>;
+  subscription_cny_month: number | null;
+  sync: { ok: boolean; stage: string; at: string | null };
+  budget: { source: "sql" | "alert" | "missing"; level: string; month_cost: number | null; monthly_cny: number | null; month_ratio: number | null };
+  host_rows: Array<{ host: string; status: "ready" | "partial" | "unavailable"; today_tokens: number | null; today_sessions: number | null; recent_count: number }>;
 };
 
 export type TrustHostCandidate = {
@@ -258,6 +272,71 @@ function safeHostLabel(value: unknown): string {
   const candidate = value;
   if (/^plugin:[a-z][a-z0-9-]{0,31}$/.test(candidate)) return candidate;
   return /^[a-z][a-z0-9_-]{0,31}$/.test(candidate) ? candidate : "generic";
+}
+
+function safeMoneyMap(value: unknown, label: string): Record<string, number> {
+  if (value === null || value === undefined) return {};
+  const source = record(value, label);
+  return Object.fromEntries(Object.entries(source).slice(0, 8).flatMap(([currency, amount]) => {
+    if (!/^[A-Z0-9_]{1,12}$/.test(currency) || typeof amount !== "number" || !Number.isFinite(amount) || amount < 0 || amount > 1e15) return [];
+    return [[currency, amount]];
+  }));
+}
+
+function nullableMoney(value: unknown, label: string): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1e15) throw new Error(`${label} DTO 金额不安全`);
+  return value;
+}
+
+function overviewTimestamp(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)) return null;
+  return value;
+}
+
+function parseOverviewSnapshot(value: unknown): OverviewSnapshot {
+  const root = record(value, "overview");
+  const syncRow = root.sync == null ? {} : record(root.sync, "overview sync");
+  const syncStage = boundedEnum(syncRow.stage ?? "unknown", "overview sync stage", ["complete", "fold", "discover", "resolve", "never", "paused", "unknown"], "unknown");
+  const syncOk = syncRow.ok === true && syncStage !== "unknown";
+  const syncAt = overviewTimestamp(syncRow.at);
+  const budgetRow = root.budget == null ? {} : record(root.budget, "overview budget");
+  const budgetSource = boundedEnum(budgetRow.source ?? "missing", "overview budget source", ["sql", "alert", "missing"], "missing") as OverviewSnapshot["budget"]["source"];
+  const budgetLevel = boundedEnum(budgetRow.level ?? "unknown", "overview budget level", ["no_budget", "ok", "warn", "over", "snoozed", "disabled", "unknown"], "unknown");
+  const rawHosts = Array.isArray(root.hosts) ? root.hosts : [];
+  const hostRows = rawHosts.slice(0, 16).map((item) => {
+    const row = record(item, "overview host");
+    return {
+      host: safeHostLabel(row.host_kind),
+      status: boundedEnum(row.status, "overview host status", ["ready", "partial", "unavailable"], "unavailable") as OverviewSnapshot["host_rows"][number]["status"],
+      today_tokens: nullableCount(row.today_tokens, "overview host tokens"),
+      today_sessions: nullableCount(row.today_sessions, "overview host sessions"),
+      recent_count: Array.isArray(row.recent) ? Math.min(row.recent.length, 100) : 0,
+    };
+  });
+  const today = root.today == null ? null : record(root.today, "overview today");
+  const month = root.month == null ? null : record(root.month, "overview month");
+  const todaySpend = safeMoneyMap(today?.total_actual_spend, "overview today spend");
+  const monthSpend = safeMoneyMap(month?.total_actual_spend, "overview month spend");
+  const todayTokens = root.today_tokens_sql === null || root.today_tokens_sql === undefined
+    ? null : boundedCount(root.today_tokens_sql, "overview today tokens");
+  const subscription = nullableMoney(root.subscription_cny_month, "overview subscription");
+  const hostCount = rawHosts.length ? Math.min(rawHosts.length, 16) : (root.tokens_by_host && typeof root.tokens_by_host === "object" && !Array.isArray(root.tokens_by_host) ? Math.min(Object.keys(root.tokens_by_host).length, 16) : null);
+  return {
+    freshness: syncAt ? `本地同步 · ${syncAt}` : syncOk ? "本地同步 · 已完成" : "本地同步 · 状态不可用",
+    hosts: hostCount,
+    findings: null,
+    evidence: null,
+    monitored: false,
+    today_tokens: todayTokens,
+    today_spend: todaySpend,
+    month_spend: monthSpend,
+    subscription_cny_month: subscription,
+    sync: { ok: syncOk, stage: syncStage, at: syncAt },
+    budget: { source: budgetSource, level: budgetLevel, month_cost: nullableMoney(budgetRow.month_cost, "overview month cost"), monthly_cny: nullableMoney(budgetRow.monthly_cny, "overview monthly budget"), month_ratio: budgetRow.month_ratio == null ? null : Math.min(requiredFiniteNumber(budgetRow.month_ratio, "overview budget ratio"), 1000) },
+    host_rows: hostRows,
+  };
 }
 
 function safeTrustIdentifier(value: unknown, label: string, fallback = "unknown"): string {
@@ -619,25 +698,7 @@ export async function invoke<T>(command: string, args?: unknown): Promise<T> {
 export async function readOverviewSnapshot(): Promise<OverviewSnapshot> {
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return browserPreview;
-
-  const candidate = await handler("read_overview");
-  if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) {
-    throw new Error("本地 overview DTO 格式不兼容");
-  }
-  const raw = candidate as Record<string, unknown>;
-  const sync = raw.sync as Record<string, unknown> | undefined;
-  const hosts = raw.tokens_by_host && typeof raw.tokens_by_host === "object" && !Array.isArray(raw.tokens_by_host)
-    ? Object.keys(raw.tokens_by_host).length
-    : null;
-  return {
-    freshness: typeof sync?.at === "string" ? `本地 authority · ${sync.at}` : "本地 authority · 时间不可用",
-    hosts,
-    // These fields are intentionally unavailable until their dedicated React
-    // DTOs land. Showing “—” is safer than deriving a Finding from overview.
-    findings: null,
-    evidence: null,
-    monitored: false,
-  };
+  return parseOverviewSnapshot(await handler("read_overview"));
 }
 
 export async function listen(event: string, handler: (payload: unknown) => void): Promise<Unsubscribe> {

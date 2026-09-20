@@ -108,6 +108,15 @@
   const overview = {
     sync: { ok: true, stage: "complete", at: localStamp(new Date()), message: "浏览器样式调试数据" },
     fx: { usd_cny: 7.15, as_of: month },
+    today: dto(374000, { daily: true, date: isoDay }),
+    month: dto(374000, { month }),
+    today_tokens_sql: 374000,
+    subscription_cny_month: 49,
+    hosts: [
+      { host_kind: "codex", status: "ready", today_tokens: 172040, today_sessions: 4, recent: [{ title: "浏览器样式调试会话" }] },
+      { host_kind: "claude-code", status: "partial", today_tokens: 127160, today_sessions: 2, recent: [] },
+      { host_kind: "dsh", status: "ready", today_tokens: 74800, today_sessions: 1, recent: [] },
+    ],
     days: [{ date: isoDay, total: 0 }],
     // 预算分子 = 跨宿主按量实付 CNY = 上面 dto() 的 total_actual_spend.CNY（8.64）。
     // 此前 mock 写 68 → 预算卡「¥68」与本月支出卡「¥8.64」同屏打架（2026-09-01

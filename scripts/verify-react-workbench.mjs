@@ -50,6 +50,7 @@ if (!source.includes('"trust_monitor_config"') || !source.includes('"save_trust_
 if (!source.includes("aria-labelledby=\"trust-monitor-title\"")) fail("React Trust 缺少 monitor 控件可访问标题");
 if (!source.includes("查看明细") || !source.includes("evidence-detail")) fail("React Trust 缺少可展开的证据明细");
 if (!source.includes('"trust-monitor-updated"') || !source.includes('"sync-status-updated"')) fail("React Findings/Trust 缺少事件失效刷新");
+if (!source.includes("today_tokens_sql") || !source.includes("overview-host-panel")) fail("React 总览未消费权威 token/宿主投影");
 if (source.includes('"sessions_issues"')) fail("React Findings 直接消费 legacy 宽 DTO");
 
 const html = fs.readFileSync(path.join(dist, "index.html"), "utf8");
