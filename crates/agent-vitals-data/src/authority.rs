@@ -2049,6 +2049,35 @@ impl AuthorityDb {
         )?)
     }
 
+    /// v23：事件 outbox 的保留清理（EVENT_BUS spec §4.2 实施勘正版）。
+    ///
+    /// 事件体保留 7 天；**投递记录随事件走**——`event_deliveries` 是反连接的
+    /// 去重账本，事件还活着时删它的 delivery 会让反连接重新发现该事件 =
+    /// 重投递（原 spec 写的「deliveries 独立保留 30 天」是重投递陷阱，勘正）。
+    /// 因此顺序固定：先扫孤儿 delivery（事件已亡）→ 再删到期事件的 delivery →
+    /// 最后删事件本体，全程一事务。
+    pub fn retention_event_outbox(&self, now_ms: i64) -> Result<usize, AuthorityError> {
+        const OUTBOX_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+        let cutoff = now_ms.saturating_sub(OUTBOX_RETENTION_MS);
+        self.with_immediate_txn(|conn| {
+            let orphans = conn.execute(
+                "DELETE FROM event_deliveries WHERE event_id NOT IN
+                   (SELECT event_id FROM event_outbox)",
+                [],
+            )?;
+            let expired = conn.execute(
+                "DELETE FROM event_deliveries WHERE event_id IN
+                   (SELECT event_id FROM event_outbox WHERE created_at_ms < ?1)",
+                rusqlite::params![cutoff],
+            )?;
+            let events = conn.execute(
+                "DELETE FROM event_outbox WHERE created_at_ms < ?1",
+                rusqlite::params![cutoff],
+            )?;
+            Ok(orphans + expired + events)
+        })
+    }
+
     /// V18：按每条 Observation 自己的过期时间清理高频、短保留的信任证据。
     /// `trust_issue_evidence` 由外键级联删除；Issue 本身保留为历史结论，后续
     /// correlator 可据「证据已过期」重新评价，而不在 retention 中绕过状态机。
@@ -4382,6 +4411,42 @@ mod tests {
         assert_eq!((host_events, other_events, dangling), (0, 1, 0),
             "宿主事件清空、他宿主保留、投递记录无悬挂");
         let _ = std::fs::remove_file(&db);
+    }
+
+    /// outbox 保留清理的三个判别点（迭代 3，spec §4.2 勘正版）：
+    /// ① 到期事件随其 delivery 一起清；② 活事件的 delivery **永不独死**（反连接
+    /// 重投递陷阱）；③ 孤儿 delivery（事件已亡）被扫。
+    #[test]
+    fn retention_event_outbox_never_deletes_delivery_of_live_event() {
+        let path = tmp_db("outbox-retention");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run-r", "cli", 1).unwrap();
+        let now: i64 = 10_000_000_000;
+        let day = 24 * 60 * 60 * 1000;
+        db.conn().execute_batch(&format!(
+            "INSERT INTO event_outbox(event_id, event_type, schema_version, occurred_at_ms,
+                 producer, payload_json, ingested_run_id, created_at_ms)
+             VALUES ('old', 'FactsIngested', 1, 0, 'sync_service', '{{}}', 'run-r', {}),
+                    ('live', 'FactsIngested', 1, {n}, 'sync_service', '{{}}', 'run-r', {n}),
+                    ('live2', 'FactsIngested', 1, {n}, 'sync_service', '{{}}', 'run-r', {n});
+             INSERT INTO event_deliveries(event_id, consumer_id, delivered_at_ms)
+             VALUES ('old', 'c1', 1), ('live', 'c1', 1),
+                    ('live2', 'c1', 1), ('orphan', 'c1', 1);",
+            now - 8 * day, n = now,
+        )).unwrap();
+        let deleted = db.retention_event_outbox(now + day).unwrap();
+        assert!(deleted >= 3, "old 事件 + 其 delivery + 孤儿 delivery 都要删: {deleted}");
+        let live_delivery: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM event_deliveries WHERE event_id = 'live'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(live_delivery, 1, "活事件的 delivery 必须存活——删了就是重投递");
+        let live_events: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM event_outbox", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(live_events, 2, "未到期事件保留");
+        assert_eq!(db.retention_event_outbox(now + day).unwrap(), 0, "幂等");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

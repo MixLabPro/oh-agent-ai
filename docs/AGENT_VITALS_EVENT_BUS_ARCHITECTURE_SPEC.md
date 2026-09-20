@@ -1,6 +1,6 @@
 # Agent Vitals Runtime Event Bus Architecture Spec
 
-> 状态：**Draft v1.3（2026-09-21）**——v1 收敛、v1.1 并入 apalis-sqlite 研究（§12）、v1.2 为 P0 实施修订（v23 迁移/反连接/两段式 drain/尾部保序）；v1.3 为 **迭代 2 实施修订**：`McpToolInvoked` 的生产者定为 **CLI serve 传输层**而非 `mcp::dispatch`（桌面/CLI 内部自用调用不是审计对象——只有外部 agent 的 `tools/call` 是）；审计批次按**进程×库**一条（`trigger='mcp-audit'`，沿 trust-audit 的 per-invocation run 先例但按进程聚合）；未同步机器无库则跳过且**不建库**；参数只入 fnv1a64 指纹（原始参数禁令 §4.1）；
+> 状态：**Draft v1.4（2026-09-21）**（v1.3 基础上：迭代 3 落地 retention——deliveries 独立 TTL 勘正为随事件走、HourTicked/DayRolled 降为保留位、v18 孤儿函数 retention_trust_observations 接线进每日 maintenance）；——v1 收敛、v1.1 并入 apalis-sqlite 研究（§12）、v1.2 为 P0 实施修订（v23 迁移/反连接/两段式 drain/尾部保序）；v1.3 为 **迭代 2 实施修订**：`McpToolInvoked` 的生产者定为 **CLI serve 传输层**而非 `mcp::dispatch`（桌面/CLI 内部自用调用不是审计对象——只有外部 agent 的 `tools/call` 是）；审计批次按**进程×库**一条（`trigger='mcp-audit'`，沿 trust-audit 的 per-invocation run 先例但按进程聚合）；未同步机器无库则跳过且**不建库**；参数只入 fnv1a64 指纹（原始参数禁令 §4.1）；
 > 前置：v0.9.1 SQL 权威库已冻结（单一事实源 + 幂等重放）；trust P1（`FINDINGS_TRUST_EGRESS_MONITORING_SPEC`）已合入，P2 实时传感器未实施；
 > 目标：为 runtime 引入**最小事件驱动层**——事务性 outbox + 单管道类型化事件——收编既有的内联反应链与缓存失效土办法，并为 trust P2 传感器预留唯一接入通道。
 
@@ -132,7 +132,9 @@ CREATE TABLE event_outbox (
 CREATE INDEX event_outbox_pending ON event_outbox(created_at_ms, event_id);
 ```
 
-**实施修订（v1.2）**：投递进度不用 outbox 行上的单一 `delivered` 位，而按 `(event_id, consumer_id)` **反连接**计算——消费者注册面随进程不同（CLI 一组、桌面一组），一个进程置位会让另一个进程的消费者永远看不到。因此索引为普通的 `(created_at_ms, event_id)`（终态行靠 retention 清理离开热区），`event_deliveries(event_id, consumer_id, delivered_at_ms, last_error, PRIMARY KEY(event_id, consumer_id))` 记录消费进度。**retention**：事件体保留 7 天（与 trust 高频 observation 同窗口）；`event_deliveries` 保留 30 天。`delete_imported_host_data(host)` 先删该宿主事件的 deliveries 再删 outbox 行（host 为列，全局事件 NULL 不受影响），已由级联测试钉住。
+**实施修订（v1.2）**：投递进度不用 outbox 行上的单一 `delivered` 位，而按 `(event_id, consumer_id)` **反连接**计算——消费者注册面随进程不同（CLI 一组、桌面一组），一个进程置位会让另一个进程的消费者永远看不到。因此索引为普通的 `(created_at_ms, event_id)`（终态行靠 retention 清理离开热区），`event_deliveries(event_id, consumer_id, delivered_at_ms, last_error, PRIMARY KEY(event_id, consumer_id))` 记录消费进度。
+
+**retention（v1.4 勘正）**：事件体保留 7 天；**投递记录随事件走**——deliveries 是反连接的去重账本，事件存活期间删它的 delivery 会让反连接重新发现该事件 = 重投递（本稿 v1.1 写的「deliveries 独立保留 30 天」是重投递陷阱，作废）。清理顺序固定：扫孤儿 delivery（事件已亡）→ 删到期事件的 delivery → 删事件本体，一事务。清理挂在每日 maintenance run（`retention_event_outbox`，与 usage_facts/session_excerpts 同一趟），陷阱判别由 `retention_event_outbox_never_deletes_delivery_of_live_event` 钉住。`delete_imported_host_data(host)` 先删该宿主事件的 deliveries 再删 outbox 行（host 为列，全局事件 NULL 不受影响），已由级联测试钉住。
 
 ### 4.3 投递语义
 
@@ -152,7 +154,7 @@ CREATE INDEX event_outbox_pending ON event_outbox(created_at_ms, event_id);
 | `PriceCardSaved{provider, model_fingerprint}` | 桌面 IPC（补卡保存） | 价卡落库 | 未计价重算 |
 | `HostSourceFailed{host, error_code}` / `SourceRecovered{host}` | sync_service | 源读取失败/恢复 | 通知、MTTR 时序（审计流） |
 | `McpToolInvoked{tool, args_fingerprint, latency_ms, ok}` | CLI serve 传输层（`handle_tools_call`） | 外部 MCP `tools/call` 返回后（旁路） | MCP 访问日志、慢查询/失败率 |
-| `HourTicked` / `DayRolled` | timer（statistics_timezone 口径） | 时区日界/时界 | expires 清理、通知去重窗口滚动、价格快照 stale 检查 |
+| `HourTicked` / `DayRolled` | **保留位（未发射）** | — | 迭代 3 分析裁决：所列消费（清理/去重窗口/stale 检查）都是幂等自愈的维护动作——按 now 全量清比按事件滚动更简单可靠，没有消费者需要顺序信号之前不发射（发射无人消费的事件只填 outbox）。有第一个真实消费者时再接线并撤本标注 |
 | `TrustMonitorEvent{actor_id, stage, evidence_level}` | trust P2 传感器（进程外） | 聚合窗口产出 | trust correlate → Finding、通知（§7.2 门槛） |
 
 新增事件类型必须先在本表登记（与分类图谱"先登记后写 emitter"同纪律）。

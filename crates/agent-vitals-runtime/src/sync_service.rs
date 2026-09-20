@@ -351,9 +351,15 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
                 retention_months - 1,
             )
             .unwrap_or(0);
+            let now = crate::sql_sync::now_ms();
             let ret = db
                 .retention_usage_facts(cutoff)
-                .and_then(|_| db.retention_session_excerpts(cutoff));
+                .and_then(|_| db.retention_session_excerpts(cutoff))
+                // v23 事件总线保留清理 + v18 孤儿接线：retention_trust_observations
+                // 自 v18 就有实现有测试，但生产路径零调用（2026-09-21 迭代 3
+                // 分析发现）——高频 trust 观察的 expires 实际无人清。
+                .and_then(|_| db.retention_event_outbox(now))
+                .and_then(|_| db.retention_trust_observations(now));
             let _ = db.finish_run(
                 &run_id,
                 if ret.is_ok() { "succeeded" } else { "failed" },
