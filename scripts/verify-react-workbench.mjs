@@ -69,6 +69,9 @@ if (!source.includes('"data_source_status"') || !source.includes("readSourceHeal
 if (source.includes('"delete_imported_source_data"')) fail("React 设置首轮越过危险数据删除 mutation 边界");
 if (!source.includes("triggerSync") || !source.includes("setSyncPaused") || !source.includes("readSyncRequestStatus")) fail("React 设置缺少同步控制与回执轮询");
 if (!source.includes("readCustomSourceConfig") || !source.includes("addCustomSourceRoot") || !source.includes("removeCustomSourceRoot") || !source.includes("pickCustomSourceRoot")) fail("React 设置缺少自定义读取位置桥接");
+if (!source.includes("readBudgetSettings") || !source.includes("saveBudgetProfile") || !source.includes("snoozeBudgetCurrentPeriod") || !source.includes("clearBudgetSnooze")) fail("React 设置缺少预算状态、保存或静默桥接");
+if (!source.includes("预算（订阅 + 按量）") || !source.includes("80% 和 100%") || !source.includes("warning_ratio_bp: 8000")) fail("React 设置预算未固定新表单与阈值契约");
+if (source.includes('"save_budget_config"') || source.includes('"save_host_bill"')) fail("React 设置越过预算旧配置或账单 mutation 边界");
 if (!source.includes("显示完整路径") || !source.includes("settings-custom-form")) fail("React 设置缺少本机位置的人机可读路径展示");
 if (!source.includes('status === "unavailable" ? []')) fail("React 设置未隔离自定义位置配置不可用态");
 if (!source.includes("尚未导入") || !source.includes("没有读取权限") || !source.includes("来源状态暂不可用")) fail("React 设置缺少来源空态、错误映射或不可用态");

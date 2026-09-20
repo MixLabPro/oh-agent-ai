@@ -572,7 +572,7 @@
         });
         return ok({ status: "saved", updated_at_ms: Date.now(), notification_permission: "granted" });
       }
-      case "budget_profiles_status": return { status: "ok", profiles: Object.values(budgetProfilesState) };
+      case "budget_profiles_status": return { status: "ok", month, profiles: Object.values(budgetProfilesState), coverage: { measured_fields: 1, total_fields: 1 }, freshness: { state: "fresh", last_observed_at: `${isoDay}T00:00:00Z` } };
       case "save_budget_profile": {
         const input = (args && args.input) || {};
         if (!input.profile_id || !Number.isSafeInteger(input.monthly_minor) || input.monthly_minor <= 0) {
@@ -583,7 +583,8 @@
         budgetProfilesState[input.profile_id] = {
           profile_id: input.profile_id, currency: input.currency, monthly_minor: input.monthly_minor,
           daily_minor: input.daily_minor ?? null, warning_ratio_bp: input.warning_ratio_bp,
-          spent_minor: spent, ratio_bp: ratioBp,
+          spent_minor: spent, total_spent_minor: spent, ratio_bp: ratioBp,
+          daily_spent_minor: 0, daily_total_minor: 0, daily_ratio_bp: null,
           level: ratioBp >= 10000 ? "exceeded" : ratioBp >= input.warning_ratio_bp ? "warn" : "ok",
           has_unresolved: false, daily_level: input.daily_minor ? "ok" : "disabled",
         };

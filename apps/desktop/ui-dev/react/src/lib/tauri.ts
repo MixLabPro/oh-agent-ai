@@ -86,6 +86,37 @@ export type SyncRequestStatus = { completed: boolean; failed: boolean };
 export type CustomSourceRoot = { host: string; root: string };
 export type CustomSourceReport = { status: "ok" | "unavailable"; sources: CustomSourceRoot[]; locations: Record<string, string | null> };
 
+export type BudgetLevel = "ok" | "warn" | "exceeded" | "incomplete" | "no_data" | "disabled";
+export type BudgetProfile = {
+  profile_id: "estimate" | "confirmed";
+  currency: string;
+  monthly_minor: number;
+  daily_minor: number | null;
+  warning_ratio_bp: number;
+  spent_minor: number;
+  total_spent_minor: number;
+  ratio_bp: number | null;
+  level: BudgetLevel;
+  daily_spent_minor: number;
+  daily_total_minor: number;
+  daily_ratio_bp: number | null;
+  daily_level: BudgetLevel;
+  has_unresolved: boolean;
+  daily_has_unresolved: boolean;
+  updated_at_ms: number | null;
+  subscription_amortized_minor: number;
+  subscription_skipped: string[];
+};
+export type BudgetSettingsReport = {
+  status: "ok" | "unavailable";
+  month: string | null;
+  estimate: BudgetProfile | null;
+  confirmed: BudgetProfile | null;
+  legacy: { monthly_minor: number; daily_minor: number; warning_ratio_bp: number; origin: "legacy_import" | "user" | "unknown" } | null;
+  snoozed_until_ms: number | null;
+};
+export type BudgetSaveReceipt = { status: "saved"; profile_id: "estimate"; currency: "CNY" | "USD"; notification_permission: "granted" | "denied" | "unavailable" };
+
 export type UsageHour = {
   hour: number;
   dsh_tokens: number | null;
@@ -575,6 +606,102 @@ function parseCustomSourceReport(value: unknown, locationsValue: unknown): Custo
     else locations[safeHost] = safeLocalPath(rawPath, "source read location");
   }
   return { status, sources, locations };
+}
+
+const budgetLevels = ["ok", "warn", "exceeded", "incomplete", "no_data", "disabled"] as const;
+
+function budgetMinor(value: unknown, label: string, nullable = false): number | null {
+  if (nullable && (value === null || value === undefined)) return null;
+  return boundedCount(value, label, Number.MAX_SAFE_INTEGER);
+}
+
+function budgetRatio(value: unknown, label: string): number | null {
+  if (value === null || value === undefined) return null;
+  return boundedCount(value, label, Number.MAX_SAFE_INTEGER);
+}
+
+function budgetCurrency(value: unknown): string {
+  const currency = stringField(value, "budget currency");
+  if (!/^[A-Z]{3}$/.test(currency)) throw new Error("budget currency 不安全");
+  return currency;
+}
+
+function parseBudgetProfile(value: unknown): BudgetProfile {
+  const row = record(value, "budget profile");
+  if (row.profile_id !== "estimate" && row.profile_id !== "confirmed") throw new Error("budget profile id 不受支持");
+  const profileId = row.profile_id as BudgetProfile["profile_id"];
+  const monthly = budgetMinor(row.monthly_minor, "budget monthly amount");
+  if (monthly === null || monthly <= 0) throw new Error("budget monthly amount 不安全");
+  return {
+    profile_id: profileId,
+    currency: budgetCurrency(row.currency),
+    monthly_minor: monthly,
+    daily_minor: budgetMinor(row.daily_minor, "budget daily amount", true),
+    warning_ratio_bp: boundedCount(row.warning_ratio_bp ?? 8000, "budget warning ratio", 10000),
+    spent_minor: budgetMinor(row.spent_minor ?? 0, "budget spent") ?? 0,
+    total_spent_minor: budgetMinor(row.total_spent_minor ?? row.spent_minor ?? 0, "budget total spent") ?? 0,
+    ratio_bp: budgetRatio(row.ratio_bp, "budget ratio"),
+    level: boundedEnum(row.level ?? "no_data", "budget level", budgetLevels, "no_data") as BudgetLevel,
+    daily_spent_minor: budgetMinor(row.daily_spent_minor ?? 0, "budget daily spent") ?? 0,
+    daily_total_minor: budgetMinor(row.daily_total_minor ?? row.daily_spent_minor ?? 0, "budget daily total") ?? 0,
+    daily_ratio_bp: budgetRatio(row.daily_ratio_bp, "budget daily ratio"),
+    daily_level: boundedEnum(row.daily_level ?? (row.daily_minor == null ? "disabled" : "no_data"), "budget daily level", budgetLevels, "no_data") as BudgetLevel,
+    has_unresolved: row.has_unresolved === true,
+    daily_has_unresolved: row.daily_has_unresolved === true,
+    updated_at_ms: nullableTimestampMs(row.updated_at_ms, "budget updated at"),
+    subscription_amortized_minor: budgetMinor(row.subscription_amortized_minor ?? 0, "budget subscription amortized") ?? 0,
+    subscription_skipped: Array.isArray(row.subscription_skipped) ? row.subscription_skipped.slice(0, 16).map((item) => safeHostLabel(item)) : [],
+  };
+}
+
+function parseBudgetProfiles(value: unknown): { status: "ok" | "unavailable"; month: string | null; profiles: BudgetProfile[] } {
+  const root = record(value, "budget profiles");
+  if (root.status === "unavailable") return { status: "unavailable", month: null, profiles: [] };
+  if (root.status !== "ok") throw new Error("budget profiles status 不兼容");
+  const profiles = requiredArray(root.profiles ?? [], "budget profiles");
+  if (profiles.length > 8) throw new Error("budget profiles 超出上限");
+  return {
+    status: "ok",
+    month: root.month == null ? null : safeMonth(root.month, "budget month"),
+    profiles: profiles.map(parseBudgetProfile),
+  };
+}
+
+function parseLegacyBudget(value: unknown): BudgetSettingsReport["legacy"] {
+  const root = record(value, "legacy budget");
+  if (root.status !== "ok") return null;
+  const monthly = budgetMinor(root.monthly_cny_minor, "legacy monthly amount");
+  const daily = budgetMinor(root.daily_cny_minor ?? 0, "legacy daily amount");
+  if (monthly === null || monthly <= 0) return null;
+  const rawOrigin = root.origin;
+  const origin = rawOrigin === "legacy_import" || rawOrigin === "user" ? rawOrigin : "unknown";
+  return { monthly_minor: monthly, daily_minor: daily ?? 0, warning_ratio_bp: boundedCount(root.warning_ratio_bp ?? 8000, "legacy warning ratio", 10000), origin };
+}
+
+function snoozeTimestamp(value: unknown): number | null {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return value;
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+  return null;
+}
+
+function currentBudgetMonth(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit" }).formatToParts(new Date());
+  const year = parts.find((part) => part.type === "year")?.value ?? "1970";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  return `${year}-${month}`;
+}
+
+function parseBudgetSaveReceipt(value: unknown): BudgetSaveReceipt {
+  const root = record(value, "budget save receipt");
+  if (root.status !== "saved") throw new Error("预算保存未确认");
+  if (root.currency !== "CNY" && root.currency !== "USD") throw new Error("budget saved currency 不受支持");
+  const currency = root.currency as BudgetSaveReceipt["currency"];
+  const rawPermission = typeof root.notification_permission === "string" ? root.notification_permission.toLowerCase() : "";
+  const notification_permission = rawPermission === "granted" ? "granted" : rawPermission === "denied" || rawPermission === "prompt" || rawPermission === "restricted" ? "denied" : "unavailable";
+  return { status: "saved", profile_id: "estimate", currency, notification_permission };
 }
 
 function parseOverviewSnapshot(value: unknown): OverviewSnapshot {
@@ -1530,6 +1657,83 @@ export async function readCustomSourceConfig(): Promise<CustomSourceReport> {
     return parseCustomSourceReport(roots.value, locationValue);
   } catch {
     throw new Error("自定义来源配置读取失败");
+  }
+}
+
+export async function readBudgetSettings(): Promise<BudgetSettingsReport> {
+  const fallbackProfiles = {
+    status: "ok", month: currentBudgetMonth(), profiles: [{
+      profile_id: "estimate", currency: "CNY", monthly_minor: 20000, daily_minor: null, warning_ratio_bp: 8000,
+      spent_minor: 864, total_spent_minor: 864, ratio_bp: 432, level: "ok", has_unresolved: false,
+      daily_spent_minor: 0, daily_total_minor: 0, daily_ratio_bp: null, daily_level: "disabled", updated_at_ms: Date.now(), subscription_amortized_minor: 0, subscription_skipped: false,
+    }],
+  };
+  const fallbackLegacy = { status: "ok", monthly_cny_minor: 10000, daily_cny_minor: 500, warning_ratio_bp: 8000, origin: "legacy_import" };
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "ok", month: currentBudgetMonth(), estimate: parseBudgetProfiles(fallbackProfiles).profiles[0] ?? null, confirmed: null, legacy: parseLegacyBudget(fallbackLegacy), snoozed_until_ms: null };
+  const [legacyResult, profilesResult, overviewResult] = await Promise.allSettled([
+    handler("budget_config"),
+    handler("budget_profiles_status", { month: currentBudgetMonth() }),
+    handler("read_overview"),
+  ]);
+  let legacy: BudgetSettingsReport["legacy"] = null;
+  let profiles: { status: "ok" | "unavailable"; month: string | null; profiles: BudgetProfile[] } = { status: "unavailable", month: null, profiles: [] };
+  try {
+    if (legacyResult.status === "fulfilled") legacy = parseLegacyBudget(legacyResult.value);
+    if (profilesResult.status === "fulfilled") profiles = parseBudgetProfiles(profilesResult.value);
+  } catch {
+    throw new Error("预算状态读取失败");
+  }
+  if (legacyResult.status === "rejected" && profilesResult.status === "rejected") throw new Error("预算状态读取失败");
+  let snoozedUntil: number | null = null;
+  if (overviewResult.status === "fulfilled") {
+    const root = record(overviewResult.value, "budget overview");
+    const budget = root.budget == null ? {} : record(root.budget, "budget overview row");
+    snoozedUntil = snoozeTimestamp(budget.snoozed_until);
+  }
+  return {
+    status: profiles.status === "ok" || legacy !== null ? "ok" : "unavailable",
+    month: profiles.month ?? currentBudgetMonth(),
+    estimate: profiles.profiles.find((profile) => profile.profile_id === "estimate") ?? null,
+    confirmed: profiles.profiles.find((profile) => profile.profile_id === "confirmed") ?? null,
+    legacy,
+    snoozed_until_ms: snoozedUntil,
+  };
+}
+
+export async function saveBudgetProfile(input: { currency: "CNY" | "USD"; monthly_minor: number; daily_minor: number | null }): Promise<BudgetSaveReceipt> {
+  if (input.currency !== "CNY" && input.currency !== "USD") throw new Error("预算币种不受支持");
+  if (!Number.isSafeInteger(input.monthly_minor) || input.monthly_minor <= 0 || input.monthly_minor > Number.MAX_SAFE_INTEGER) throw new Error("月预算必须为正数");
+  if (input.daily_minor !== null && (!Number.isSafeInteger(input.daily_minor) || input.daily_minor <= 0 || input.daily_minor > Number.MAX_SAFE_INTEGER)) throw new Error("日预算必须为正数或留空");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved", profile_id: "estimate", currency: input.currency, notification_permission: "granted" };
+  try {
+    return parseBudgetSaveReceipt(await handler("save_budget_profile", { input: { profile_id: "estimate", currency: input.currency, monthly_minor: input.monthly_minor, daily_minor: input.daily_minor, warning_ratio_bp: 8000 } }));
+  } catch {
+    throw new Error("预算保存失败，请稍后重试");
+  }
+}
+
+export async function snoozeBudgetCurrentPeriod(): Promise<number | null> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return Date.now() + 7 * 86_400_000;
+  try {
+    const root = record(await handler("snooze_budget_current_period"), "budget snooze receipt");
+    if (root.status !== "snoozed" && root.status !== "ok") throw new Error("budget snooze not confirmed");
+    return snoozeTimestamp(root.until_ms);
+  } catch {
+    throw new Error("本周期静默失败");
+  }
+}
+
+export async function clearBudgetSnooze(): Promise<void> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return;
+  try {
+    const root = record(await handler("clear_budget_snooze"), "budget clear snooze receipt");
+    if (root.status !== "cleared" && root.status !== "ok") throw new Error("budget clear not confirmed");
+  } catch {
+    throw new Error("恢复预算提醒失败");
   }
 }
 

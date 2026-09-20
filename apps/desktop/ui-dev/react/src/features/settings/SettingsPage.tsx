@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { addCustomSourceRoot, listen, pickCustomSourceRoot, readCustomSourceConfig, readSourceHealth, readSyncRequestStatus, removeCustomSourceRoot, setSyncPaused, triggerSync, type CustomSourceReport, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport } from "../../lib/tauri";
+import { addCustomSourceRoot, clearBudgetSnooze, listen, pickCustomSourceRoot, readBudgetSettings, readCustomSourceConfig, readSourceHealth, readSyncRequestStatus, removeCustomSourceRoot, saveBudgetProfile, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type BudgetSettingsReport, type CustomSourceReport, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -58,6 +58,115 @@ function syncActionLabel(state: SourceConnectionState): string | null {
   if (state === "needs_attention") return "重新同步全部来源";
   if (state === "not_detected") return "扫描全部来源";
   return null;
+}
+
+function decimalToMinor(value: string): number | null {
+  const text = value.trim();
+  if (!/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(text)) return null;
+  const [whole, fraction = ""] = text.split(".");
+  try {
+    const minor = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
+    if (minor <= 0n || minor > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+    return Number(minor);
+  } catch { return null; }
+}
+
+function minorToDecimal(value: number | null, currency: string): string {
+  if (value === null) return "—";
+  const prefix = currency === "USD" ? "$" : currency === "CNY" ? "¥" : `${currency} `;
+  return `${prefix}${(value / 100).toFixed(2)}`;
+}
+
+function budgetStatusLabel(level: string): string {
+  return ({ ok: "正常", warn: "接近预算", exceeded: "已超预算", incomplete: "数据不完整", no_data: "暂无用量", disabled: "未启用" } as Record<string, string>)[level] ?? "状态未知";
+}
+
+function budgetDate(value: number | null): string {
+  if (value === null) return "";
+  return new Date(value).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+type BudgetSectionProps = { report: BudgetSettingsReport | null; loading: boolean; error: string | null; onReload: () => void };
+
+function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps) {
+  const [currency, setCurrency] = useState<"CNY" | "USD">("CNY");
+  const [monthly, setMonthly] = useState("");
+  const [daily, setDaily] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [snoozing, setSnoozing] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const estimate = report?.estimate;
+    if (estimate) {
+      if (estimate.currency === "USD" || estimate.currency === "CNY") setCurrency(estimate.currency);
+      setMonthly((estimate.monthly_minor / 100).toFixed(2));
+      setDaily(estimate.daily_minor === null ? "" : (estimate.daily_minor / 100).toFixed(2));
+    }
+  }, [report?.estimate?.profile_id, report?.estimate?.updated_at_ms]);
+
+  const save = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (saving) return;
+    const monthlyMinor = decimalToMinor(monthly);
+    const dailyMinor = daily.trim() === "" ? null : decimalToMinor(daily);
+    setMessage(null);
+    setActionError(null);
+    if (monthlyMinor === null) { setActionError("请填写正数月预算，最多两位小数。"); return; }
+    if (daily.trim() !== "" && dailyMinor === null) { setActionError("日预算必须为正数，最多两位小数；也可以留空。"); return; }
+    setSaving(true);
+    try {
+      const receipt = await saveBudgetProfile({ currency, monthly_minor: monthlyMinor, daily_minor: dailyMinor });
+      setMessage(`已保存 ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${receipt.notification_permission === "granted" ? "。" : "。系统通知未授权，可在系统设置中开启。"}`);
+      onReload();
+    } catch (reason: unknown) {
+      setActionError(reason instanceof Error ? reason.message : "预算保存失败");
+    } finally { setSaving(false); }
+  };
+
+  const toggleSnooze = async () => {
+    if (snoozing) return;
+    setSnoozing(true); setMessage(null); setActionError(null);
+    try {
+      if (report?.snoozed_until_ms && report.snoozed_until_ms > Date.now()) {
+        await clearBudgetSnooze();
+        setMessage("预算提醒已恢复。");
+      } else {
+        await snoozeBudgetCurrentPeriod();
+        setMessage("预算提醒已静默至本周期结束；统计仍会继续更新。");
+      }
+      onReload();
+    } catch (reason: unknown) { setActionError(reason instanceof Error ? reason.message : "预算提醒设置失败"); }
+    finally { setSnoozing(false); }
+  };
+
+  const estimate = report?.estimate;
+  const unsupportedCurrency = Boolean(estimate && estimate.currency !== "CNY" && estimate.currency !== "USD");
+  const snoozed = report?.snoozed_until_ms !== null && report?.snoozed_until_ms !== undefined && report.snoozed_until_ms > Date.now();
+  const availableReport = report?.status === "ok" ? report : null;
+  return <section className="settings-budget-section" id="settings-budget" aria-labelledby="settings-budget-title">
+    <div className="settings-section-heading"><div><p className="eyebrow">预算</p><h3 id="settings-budget-title">预算（订阅 + 按量）</h3><p>只保存本机预算目标；按量支出与订阅摊派分开计算，达到 80% 和 100% 各提醒一次。</p></div><button className="button button-secondary button-small" type="button" onClick={onReload} disabled={loading}>{loading ? "读取中…" : "重载预算"}</button></div>
+    {error && <div className="error-banner" role="alert">预算状态暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={onReload}>重试</button></div>}
+    {loading && <div className="settings-source-state" role="status"><strong>正在读取预算状态</strong><span>只查询本机 authority，不会上传数据。</span></div>}
+    {!loading && !error && report?.legacy && !estimate && <div className="settings-budget-legacy" role="note"><strong>检测到旧版预算</strong><span>{minorToDecimal(report.legacy.monthly_minor, "CNY")}/月仍在生效；保存下面的新预算后将以估算预算为准，不会自动转换。</span></div>}
+    {!loading && !error && report?.status === "unavailable" && <div className="settings-source-state"><strong>预算状态暂不可用</strong><span>没有足够的本机预算回执；不会显示伪造的 0 元。</span></div>}
+    {!loading && !error && availableReport && <>
+      <form className="settings-budget-form" onSubmit={save}>
+        <label><span>币种</span><select value={currency} onChange={(event) => setCurrency(event.target.value as "CNY" | "USD")} disabled={unsupportedCurrency}><option value="CNY">CNY · 人民币</option><option value="USD">USD · 美元</option></select></label>
+        <label><span>月预算</span><input inputMode="decimal" value={monthly} onChange={(event) => setMonthly(event.target.value)} placeholder="例如 100.00" aria-describedby="settings-budget-help" disabled={unsupportedCurrency} /><small id="settings-budget-help">正数，最多两位小数</small></label>
+        <label><span>日预算（可选）</span><input inputMode="decimal" value={daily} onChange={(event) => setDaily(event.target.value)} placeholder="留空表示不设日预算" disabled={unsupportedCurrency} /></label>
+        <div className="settings-budget-threshold"><span>提醒阈值</span><strong>80% 和 100%</strong><small>固定阈值，各提醒一次</small></div>
+        <button className="button button-primary" type="submit" disabled={saving || unsupportedCurrency}>{saving ? "保存中…" : "保存预算"}</button>
+      </form>
+      {unsupportedCurrency && estimate && <p className="settings-budget-warning" role="note">当前估算预算使用 {estimate.currency}，此页面暂不支持编辑该币种；为避免误覆盖，表单已锁定。</p>}
+      {estimate && <div className="settings-budget-summary"><div><span>当前估算预算</span><strong>{minorToDecimal(estimate.total_spent_minor, estimate.currency)} / {minorToDecimal(estimate.monthly_minor, estimate.currency)}</strong></div><span className={`status-pill status-pill-${estimate.level === "ok" ? "success" : estimate.level === "warn" ? "warning" : estimate.level === "exceeded" ? "danger" : "neutral"}`}>{budgetStatusLabel(estimate.level)}</span>{estimate.has_unresolved && <small className="settings-budget-warning">部分用量仍待确认，金额可能不完整。</small>}</div>}
+      {availableReport.confirmed && <div className="settings-budget-confirmed"><strong>已确认支出预算</strong><span>{minorToDecimal(availableReport.confirmed.total_spent_minor, availableReport.confirmed.currency)} / {minorToDecimal(availableReport.confirmed.monthly_minor, availableReport.confirmed.currency)} · 只读</span></div>}
+      <div className="settings-budget-actions"><div><strong>系统提醒</strong><span>预算达到阈值时发送系统通知；权限状态由系统管理。</span></div><button className="button button-secondary button-small" type="button" onClick={toggleSnooze} disabled={snoozing}>{snoozing ? "处理中…" : snoozed ? "恢复提醒" : "本周期静默提醒"}</button>{snoozed && <small>已静默至 {budgetDate(availableReport.snoozed_until_ms)}</small>}</div>
+    </>}
+    {actionError && <div className="error-banner" role="alert">{actionError}</div>}
+    {message && <p className="settings-budget-message" role="status" aria-live="polite">{message}</p>}
+  </section>;
 }
 
 function SourceRow({ source, syncing, onSync }: { source: SourceHealthReport["sources"][number]; syncing: boolean; onSync: () => void }) {
@@ -172,6 +281,9 @@ export function SettingsPage() {
   const [syncing, setSyncing] = useState(false);
   const [pauseSaving, setPauseSaving] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const [budgetReport, setBudgetReport] = useState<BudgetSettingsReport | null>(null);
+  const [budgetError, setBudgetError] = useState<string | null>(null);
+  const [budgetLoading, setBudgetLoading] = useState(true);
 
   const refresh = () => {
     setLoading(true);
@@ -189,6 +301,15 @@ export function SettingsPage() {
       setCustomReport(null);
       setCustomError(reason instanceof Error ? reason.message : "自定义来源配置读取失败");
     }).finally(() => setCustomLoading(false));
+  };
+
+  const refreshBudget = () => {
+    setBudgetLoading(true);
+    setBudgetError(null);
+    void readBudgetSettings().then(setBudgetReport).catch((reason: unknown) => {
+      setBudgetReport(null);
+      setBudgetError(reason instanceof Error ? reason.message : "预算状态读取失败");
+    }).finally(() => setBudgetLoading(false));
   };
 
   const runSync = async (): Promise<boolean> => {
@@ -237,9 +358,10 @@ export function SettingsPage() {
   useEffect(() => {
     refresh();
     refreshCustom();
+    refreshBudget();
     let active = true;
     let cleanups: Array<() => void> = [];
-    Promise.all([listen("sync-status-updated", () => { if (active) { refresh(); refreshCustom(); } }), listen("usage-fold-updated", () => { if (active) { refresh(); refreshCustom(); } })]).then((unsubscribers) => {
+    Promise.all([listen("sync-status-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); } }), listen("usage-fold-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); } })]).then((unsubscribers) => {
       if (active) cleanups = unsubscribers;
       else unsubscribers.forEach((unsubscribe) => unsubscribe());
     });
@@ -267,6 +389,8 @@ export function SettingsPage() {
 
     <CustomSourceSection report={customReport} loading={customLoading} error={customError} onReload={refreshCustom} onSync={runSync} />
 
-    <section className="settings-placeholder" aria-label="其他设置迁移状态"><strong>其他设置正在迁移</strong><span>计费与套餐、预算、统计与数据、关于与诊断会继续沿用旧工作台，待各自完成安全 DTO、保存回执和失败恢复后再切换。</span></section>
+    <BudgetSection report={budgetReport} loading={budgetLoading} error={budgetError} onReload={refreshBudget} />
+
+    <section className="settings-placeholder" aria-label="其他设置迁移状态"><strong>其他设置正在迁移</strong><span>计费与套餐、统计与数据、关于与诊断会继续沿用旧工作台，待各自完成安全 DTO、保存回执和失败恢复后再切换。</span></section>
   </>;
 }
