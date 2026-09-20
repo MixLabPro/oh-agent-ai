@@ -2,13 +2,15 @@ import { Component, useEffect, useState, type ErrorInfo, type ReactNode } from "
 import { listen, readOverviewSnapshot, type OverviewSnapshot } from "../lib/tauri";
 import { FindingsPage } from "../features/findings/FindingsPage";
 import { TrustPage } from "../features/trust/TrustPage";
+import { UsagePage } from "../features/usage/UsagePage";
 
 type Overview = OverviewSnapshot;
 
-type Page = "overview" | "findings" | "trust";
+type Page = "overview" | "usage" | "findings" | "trust";
 
 const navigation: Array<{ id: Page; label: string; hint: string }> = [
   { id: "overview", label: "总览", hint: "当前状态" },
+  { id: "usage", label: "用量", hint: "按日查看" },
   { id: "findings", label: "发现", hint: "风险与待办" },
   { id: "trust", label: "Trust", hint: "证据审计" },
 ];
@@ -154,7 +156,7 @@ export function App() {
     <main className="main-content">
       <header className="page-header"><div><p className="eyebrow">Workbench React migration</p><h1>{navigation.find((item) => item.id === page)?.label}</h1></div><div className="header-actions"><StatusPill tone="success">本地运行</StatusPill><button className="button button-secondary" type="button" onClick={() => window.location.reload()}>刷新</button></div></header>
       {error && <div className="error-banner" role="alert">{error} · 当前显示安全的预览状态</div>}
-      {page === "overview" ? <OverviewPage overview={overview} /> : page === "trust" ? <TrustPage /> : <FindingsPage />}
+      {page === "overview" ? <OverviewPage overview={overview} /> : page === "usage" ? <UsagePage /> : page === "trust" ? <TrustPage /> : <FindingsPage />}
     </main>
   </div></AppErrorBoundary>;
 }

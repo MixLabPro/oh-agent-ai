@@ -69,7 +69,7 @@
     return {
       ...(daily ? { date: opts.date || isoDay } : { month: opts && opts.month || month }),
       has_unresolved: true,
-      last_observed_at: isoDay,
+      last_observed_at: `${isoDay}T00:00:00Z`,
       tokens_by_host: {
         codex: { total: Math.round(tokens * 0.46), uncached_input: Math.round(tokens * 0.26), cache_read: Math.round(tokens * 0.12), cache_write: Math.round(tokens * 0.03), output: Math.round(tokens * 0.05) },
         "claude-code": { total: Math.round(tokens * 0.34), uncached_input: Math.round(tokens * 0.20), cache_read: Math.round(tokens * 0.08), cache_write: Math.round(tokens * 0.02), output: Math.round(tokens * 0.04) },
@@ -81,15 +81,15 @@
         ? { metered_actual: { CNY: 3.21 } }
         : { fixed_subscription: { CNY: 49, USD: 20 }, metered_actual: { CNY: 8.64 } },
       by_host: {
-        codex: { amounts_by_basis: { api_equivalent: 14.82 }, freshness: { state: "fresh", last_observed_at: isoDay }, has_unresolved: false, pricing_method: "provider-card" },
+        codex: { amounts_by_basis: { api_equivalent: 14.82 }, freshness: { state: "fresh", last_observed_at: `${isoDay}T00:00:00Z` }, has_unresolved: false, pricing_method: "provider-card" },
         // by_host 的 claude-code 条目混币（USD 20 + CNY 49），故不声明 currency（domain 规则：混币条目 currency=None）。
-        "claude-code": { amounts_by_basis: { fixed_subscription: 69, api_equivalent: 56.2 }, freshness: { state: "partial", last_observed_at: isoDay }, has_unresolved: true, pricing_method: "fair-market-fallback", unresolved_reason: "missing-provider-route-evidence" },
-        dsh: { amounts_by_basis: { metered_actual: 8.64 }, freshness: { state: "fresh", last_observed_at: isoDay }, has_unresolved: false, pricing_method: "provider-card" },
+        "claude-code": { amounts_by_basis: { fixed_subscription: 69, api_equivalent: 56.2 }, freshness: { state: "partial", last_observed_at: `${isoDay}T00:00:00Z` }, has_unresolved: true, pricing_method: "fair-market-fallback", unresolved_reason: "missing-provider-route-evidence" },
+        dsh: { amounts_by_basis: { metered_actual: 8.64 }, freshness: { state: "fresh", last_observed_at: `${isoDay}T00:00:00Z` }, has_unresolved: false, pricing_method: "provider-card" },
       },
       coverage: { measured_fields: 3, total_fields: 3, denominator_version: 1 },
       excluded_hosts: [],
       total_summable: daily ? 3.21 : 8.64,
-      freshness: { state: "partial", last_observed_at: isoDay },
+      freshness: { state: "partial", last_observed_at: `${isoDay}T00:00:00Z` },
     };
   }
 
@@ -129,8 +129,8 @@
 
   const calendar = {
     days: {
-      [previousDay]: { total_tokens: 128000, dsh_cost_cny: 2.34, claude_cost_usd: 1.12 },
-      [isoDay]: { total_tokens: 246000, codex_cost_usd: 0.84, dsh_cost_cny: 3.21 },
+      [previousDay]: { dsh_tokens: 64000, claude_tokens: 64000, codex_tokens: 0, total_tokens: 128000, dsh_cost_cny: 2.34, claude_cost_cny: 0, claude_cost_usd: 1.12, codex_cost_usd: 0 },
+      [isoDay]: { dsh_tokens: 52000, claude_tokens: 64000, codex_tokens: 130000, total_tokens: 246000, dsh_cost_cny: 3.21, claude_cost_cny: 0, claude_cost_usd: 0, codex_cost_usd: 0.84 },
     },
   };
 

@@ -21,6 +21,7 @@ for (const required of [
   path.join(reactSource, "features/trust/TrustPage.tsx"),
   path.join(reactSource, "features/findings/FindingsPage.tsx"),
   path.join(reactSource, "features/findings/DecisionMatrixSection.tsx"),
+  path.join(reactSource, "features/usage/UsagePage.tsx"),
   path.join(repo, "apps/desktop/src-tauri/src/store.rs"),
   path.join(dist, "index.html"),
 ]) {
@@ -51,6 +52,8 @@ if (!source.includes("aria-labelledby=\"trust-monitor-title\"")) fail("React Tru
 if (!source.includes("查看明细") || !source.includes("evidence-detail")) fail("React Trust 缺少可展开的证据明细");
 if (!source.includes('"trust-monitor-updated"') || !source.includes('"sync-status-updated"')) fail("React Findings/Trust 缺少事件失效刷新");
 if (!source.includes("today_tokens_sql") || !source.includes("overview-host-panel")) fail("React 总览未消费权威 token/宿主投影");
+if (!source.includes('"read_calendar_month"') || !source.includes('"read_hourly_distribution"') || !source.includes('"data_monthly_summary"') || !source.includes('"statistics_timezone_config"')) fail("React 用量未使用日历/小时/来源/统计时区安全 DTO command");
+if (!source.includes("usage-calendar-grid") || !source.includes("usage-hour-grid") || !source.includes("total_actual_spend") || !source.includes("aria-selected")) fail("React 用量缺少日历、小时、币种或选择状态语义");
 if (source.includes('"sessions_issues"')) fail("React Findings 直接消费 legacy 宽 DTO");
 
 const html = fs.readFileSync(path.join(dist, "index.html"), "utf8");

@@ -35,6 +35,46 @@ export type OverviewSnapshot = {
   host_rows: Array<{ host: string; status: "ready" | "partial" | "unavailable"; today_tokens: number | null; today_sessions: number | null; recent_count: number }>;
 };
 
+export type UsageDay = {
+  date: string;
+  total_tokens: number;
+  dsh_tokens: number;
+  claude_tokens: number;
+  codex_tokens: number;
+  costs: Record<string, number>;
+  cost_lines: Array<{ source: "dsh" | "claude" | "codex"; currency: string; amount: number; basis: "metered_actual" | "metered_estimate" | "api_equivalent" }>;
+};
+
+export type UsageCalendar = {
+  month: string;
+  days: UsageDay[];
+};
+
+export type UsageSourceSummary = {
+  month: string;
+  freshness: "fresh" | "stale" | "partial" | "unavailable" | "unknown";
+  last_observed_at: string | null;
+  coverage: { measured_fields: number; total_fields: number };
+  excluded_hosts: string[];
+  actual_spend: Record<string, number>;
+  spend_by_basis: Record<string, Record<string, number>>;
+};
+
+export type StatisticsTimezone = { timezone: string };
+
+export type UsageHour = {
+  hour: number;
+  dsh_tokens: number | null;
+  claude_tokens: number | null;
+  codex_tokens: number | null;
+};
+
+export type UsageHourly = {
+  date: string;
+  hosts_available: { dsh: string | null; claude: string | null; codex: string | null };
+  hours: UsageHour[];
+};
+
 export type TrustHostCandidate = {
   id: string;
   detected: boolean;
@@ -337,6 +377,116 @@ function parseOverviewSnapshot(value: unknown): OverviewSnapshot {
     budget: { source: budgetSource, level: budgetLevel, month_cost: nullableMoney(budgetRow.month_cost, "overview month cost"), monthly_cny: nullableMoney(budgetRow.monthly_cny, "overview monthly budget"), month_ratio: budgetRow.month_ratio == null ? null : Math.min(requiredFiniteNumber(budgetRow.month_ratio, "overview budget ratio"), 1000) },
     host_rows: hostRows,
   };
+}
+
+function safeMonth(value: unknown, label: string): string {
+  const month = stringField(value, label);
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error(`${label} DTO 月份不安全`);
+  return month;
+}
+
+function safeDate(value: unknown, label: string): string {
+  const date = stringField(value, label);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`${label} DTO 日期不安全`);
+  const parsed = new Date(`${date}T00:00:00Z`);
+  if (Number.isNaN(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== date) throw new Error(`${label} DTO 日期不安全`);
+  return date;
+}
+
+function safeNonNegativeNumber(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1e15) throw new Error(`${label} DTO 数值不安全`);
+  return value;
+}
+
+function safeNullableToken(value: unknown, label: string): number | null {
+  if (value === null || value === undefined) return null;
+  return boundedCount(value, label, 1_000_000_000_000_000);
+}
+
+function parseUsageDay(value: unknown, date: string): UsageDay {
+  const row = record(value, "usage day");
+  const costs: Record<string, number> = {};
+  const rawCosts = [
+    ["dsh", "CNY", row.dsh_cost_cny, "metered_actual"],
+    ["claude", "CNY", row.claude_cost_cny, "metered_estimate"],
+    ["claude", "USD", row.claude_cost_usd, "metered_estimate"],
+    ["codex", "USD", row.codex_cost_usd, "api_equivalent"],
+  ] as const;
+  const costLines = rawCosts.map(([source, currency, rawAmount, basis]) => {
+    const amount = safeNonNegativeNumber(rawAmount, `usage ${source} ${currency} cost`);
+    costs[currency] = (costs[currency] ?? 0) + amount;
+    return { source, currency, amount, basis };
+  }).filter((line) => line.amount > 0);
+  const dshTokens = boundedCount(row.dsh_tokens, "usage dsh tokens", 1_000_000_000_000_000);
+  const claudeTokens = boundedCount(row.claude_tokens, "usage claude tokens", 1_000_000_000_000_000);
+  const codexTokens = boundedCount(row.codex_tokens, "usage codex tokens", 1_000_000_000_000_000);
+  const totalTokens = boundedCount(row.total_tokens, "usage total tokens", 1_000_000_000_000_000);
+  if (totalTokens !== dshTokens + claudeTokens + codexTokens) throw new Error("usage token totals 不守恒");
+  return {
+    date,
+    total_tokens: totalTokens, dsh_tokens: dshTokens, claude_tokens: claudeTokens, codex_tokens: codexTokens, costs, cost_lines: costLines,
+  };
+}
+
+function parseUsageCalendar(value: unknown): UsageCalendar {
+  const root = record(value, "usage calendar");
+  const month = safeMonth(root.month, "usage month");
+  const daysObject = record(root.days, "usage days");
+  const entries = Object.entries(daysObject);
+  if (entries.length > 62) throw new Error("usage days 超出月份范围");
+  const days = entries.map(([date, item]) => {
+    const safe = safeDate(date, "usage day key");
+    if (!safe.startsWith(`${month}-`)) throw new Error("usage day 不属于请求月份");
+    return parseUsageDay(item, safe);
+  });
+  return { month, days: days.sort((left, right) => left.date.localeCompare(right.date)) };
+}
+
+function parseUsageSourceSummary(value: unknown): UsageSourceSummary {
+  const root = record(value, "usage source summary");
+  const month = safeMonth(root.month, "usage summary month");
+  const freshnessRow = record(root.freshness, "usage freshness");
+  const freshness = boundedEnum(freshnessRow.state, "usage freshness state", ["fresh", "stale", "partial", "unavailable"], "unknown") as UsageSourceSummary["freshness"];
+  const coverageRow = record(root.coverage, "usage coverage");
+  const excluded = requiredArray(root.excluded_hosts, "usage excluded hosts").slice(0, 32).map((host) => safeHostLabel(host));
+  const measured = boundedCount(coverageRow.measured_fields, "usage measured fields", 1_000);
+  const total = boundedCount(coverageRow.total_fields, "usage total fields", 1_000);
+  if (measured > total) throw new Error("usage coverage 不守恒");
+  const rawBasis = record(root.actual_spend_by_basis, "usage spend by basis");
+  const spendByBasis: Record<string, Record<string, number>> = {};
+  for (const basis of ["metered_actual", "host_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent", "other"]) {
+    if (rawBasis[basis] !== undefined) spendByBasis[basis] = safeMoneyMap(rawBasis[basis], `usage ${basis} spend`);
+  }
+  return {
+    month,
+    freshness,
+    last_observed_at: safeTimestamp(freshnessRow.last_observed_at, "usage observed at"),
+    coverage: { measured_fields: measured, total_fields: total },
+    excluded_hosts: excluded,
+    actual_spend: safeMoneyMap(root.total_actual_spend, "usage actual spend"),
+    spend_by_basis: spendByBasis,
+  };
+}
+
+function parseUsageHourly(value: unknown): UsageHourly {
+  const root = record(value, "usage hourly");
+  const date = safeDate(root.date, "usage hourly date");
+  const source = record(root.hosts_available, "usage hourly sources");
+  const sourceValue = (key: string): string | null => {
+    if (source[key] === null || source[key] === undefined) return null;
+    const value = boundedEnum(source[key], `usage hourly ${key} source`, ["sql-facts"], "unknown");
+    return value === "sql-facts" ? value : null;
+  };
+  const rawHours = requiredArray(root.hours, "usage hours");
+  if (rawHours.length !== 24) throw new Error("usage hours 必须有 24 个小时");
+  const hours = rawHours.map((item) => {
+    const row = record(item, "usage hour");
+    const hour = requiredCount(row.hour, "usage hour index");
+    if (hour > 23) throw new Error("usage hour index 超出范围");
+    return { hour, dsh_tokens: safeNullableToken(row.dsh_tokens, "usage hourly dsh"), claude_tokens: safeNullableToken(row.claude_tokens, "usage hourly claude"), codex_tokens: safeNullableToken(row.codex_tokens, "usage hourly codex") };
+  }).sort((left, right) => left.hour - right.hour);
+  if (hours.length !== 24 || new Set(hours.map((hour) => hour.hour)).size !== 24) throw new Error("usage hours 必须覆盖 0-23 且不可重复");
+  return { date, hosts_available: { dsh: sourceValue("dsh"), claude: sourceValue("claude"), codex: sourceValue("codex") }, hours };
 }
 
 function safeTrustIdentifier(value: unknown, label: string, fallback = "unknown"): string {
@@ -699,6 +849,48 @@ export async function readOverviewSnapshot(): Promise<OverviewSnapshot> {
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return browserPreview;
   return parseOverviewSnapshot(await handler("read_overview"));
+}
+
+export async function readUsageCalendar(month: string): Promise<UsageCalendar> {
+  const safe = safeMonth(month, "usage month");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseUsageCalendar({ month: safe, days: [] });
+  const parsed = parseUsageCalendar(await handler("read_calendar_month", { month: safe }));
+  if (parsed.month !== safe) throw new Error("usage calendar 返回了错误月份");
+  return parsed;
+}
+
+export async function readUsageSourceSummary(month: string): Promise<UsageSourceSummary> {
+  const safe = safeMonth(month, "usage summary month");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseUsageSourceSummary({
+    month: safe,
+    freshness: { state: "unavailable", last_observed_at: null },
+    coverage: { measured_fields: 0, total_fields: 0 },
+    excluded_hosts: [], total_actual_spend: {}, actual_spend_by_basis: {},
+  });
+  const parsed = parseUsageSourceSummary(await handler("data_monthly_summary", { month: safe }));
+  if (parsed.month !== safe) throw new Error("usage source summary 返回了错误月份");
+  return parsed;
+}
+
+export async function readUsageHourly(date: string): Promise<UsageHourly> {
+  const safe = safeDate(date, "usage hourly date");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseUsageHourly({ date: safe, hosts_available: { dsh: null, claude: null, codex: null }, hours: Array.from({ length: 24 }, (_, hour) => ({ hour, dsh_tokens: null, claude_tokens: null, codex_tokens: null })) });
+  const parsed = parseUsageHourly(await handler("read_hourly_distribution", { date: safe }));
+  if (parsed.date !== safe) throw new Error("usage hourly 返回了错误日期");
+  return parsed;
+}
+
+export async function readStatisticsTimezone(): Promise<StatisticsTimezone> {
+  const fallback = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { timezone: fallback };
+  const root = record(await handler("statistics_timezone_config"), "statistics timezone");
+  const timezone = stringField(root.timezone, "statistics timezone");
+  try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(); } catch (_) { throw new Error("统计时区不可用"); }
+  return { timezone };
 }
 
 export async function listen(event: string, handler: (payload: unknown) => void): Promise<Unsubscribe> {
