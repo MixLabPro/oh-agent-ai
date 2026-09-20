@@ -136,14 +136,26 @@
 
   const sessions = [{
     session_ref: "sr_browser_mock_01",
-    title: "浏览器样式调试会话",
     host: "codex",
-    model_ids: ["gpt-5.6-sol"],
     first_event_at: new Date(Date.now() - 3600000).toISOString(),
     last_event_at: new Date().toISOString(),
-    tokens: { total: 246000 },
+    event_count: 24,
+    model_ids: ["gpt-5.6-sol"],
+    tokens: { uncached_input_tokens: 92000, cache_read_tokens: 128000, cache_write_tokens: 12000, output_tokens: 14000, total: 246000 },
+    peak_tokens: 34000,
     cost_minor: { amount_minor: 84, currency: "USD", basis: "metered_estimate" },
-    cost_status: { state: "estimated", reason: "no-billing-declaration" },
+    cost_status: { state: "estimated", reason: "metered-estimate", has_unresolved: false },
+  }, {
+    session_ref: "sr_browser_mock_02",
+    host: "claude-code",
+    first_event_at: new Date(Date.now() - 7200000).toISOString(),
+    last_event_at: new Date(Date.now() - 5400000).toISOString(),
+    event_count: 12,
+    model_ids: ["deepseek-v4-flash-0731"],
+    tokens: { uncached_input_tokens: 32000, cache_read_tokens: 48000, cache_write_tokens: 8000, output_tokens: 10000, total: 98000 },
+    peak_tokens: 18000,
+    cost_minor: null,
+    cost_status: { state: "unavailable", reason: "no-pricing-snapshot", has_unresolved: true },
   }];
 
   const issueGroups = [
@@ -675,7 +687,11 @@
       //   { plan_type, has_credits, limits: { primary: {...} }, observed_at }（事件的 ISO 时间戳）。
       // Shape: apps/desktop/src-tauri/src/lib.rs:2767 data_codex_quota → crates/agent-vitals-hosts/src/hosts/codex/sessions/usage.rs:191 plan_from_rate_limits.
       case "data_codex_quota": return { plan_type: "Plus", has_credits: false, limits: { primary: { used_percent: 38, window_minutes: 10080, resets_at: Math.floor(Date.now() / 1000) + 7200 } }, observed_at: new Date(Date.now() - 1500000).toISOString() };
-      case "sessions_list": return { data: { sessions, next_cursor: null, has_more: false, window_session_count: sessions.length, window_total_tokens: 246000 } };
+      case "sessions_list": {
+        const continuation = !!(args && args.cursor);
+        const page = continuation ? sessions.slice(1) : sessions.slice(0, 1);
+        return { data: { sessions: page, next_cursor: continuation ? null : "preview-next", has_more: !continuation, window_session_count: sessions.length, window_total_tokens: 344000 } };
+      }
       case "sessions_read": return { data: { session: sessions[0], events: [], findings: [] } };
       case "sessions_issues": return {
         totals: { issues: issueGroups.length, findings: issueGroups.length, critical: 0, warning: issueGroups.length, info: 0, sessions: 1, sessions_total: 1 },

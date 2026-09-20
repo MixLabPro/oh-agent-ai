@@ -198,6 +198,37 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .matrix-chevron { color: #087f62; font-size: 17px; text-align: center; }
 .matrix-detail { display: grid; gap: 7px; padding: 12px 14px 14px; border-top: 1px solid #edf1f5; color: var(--text-subtle); background: #fbfcfe; font-size: 11px; line-height: 1.5; }
 .matrix-detail code { color: #405875; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.sessions-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 18px; }
+.sessions-page-header h2 { margin-top: 4px; font-size: 25px; }
+.sessions-header-actions { display: flex; align-items: center; gap: 9px; }
+.sessions-toolbar { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; padding: 14px; border: 1px solid #e1e8f0; border-radius: 13px; background: #fff; box-shadow: 0 10px 28px rgb(31 55 80 / 3%); }
+.sessions-toolbar label { display: grid; gap: 5px; min-width: 112px; color: var(--text-muted); font-size: 10px; font-weight: 650; }
+.sessions-toolbar input, .sessions-toolbar select { min-height: 35px; min-width: 112px; padding: 7px 8px; border: 1px solid #d5deea; border-radius: 7px; color: #32445d; background: #fff; font: inherit; }
+.sessions-toolbar input::placeholder { color: #9aa8b8; }
+.sessions-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 24px; margin-bottom: 14px; padding: 14px 16px; border: 1px solid #dceee8; border-radius: 12px; color: var(--text-subtle); background: #f7fcfa; }
+.sessions-summary div { display: grid; gap: 3px; min-width: 78px; }
+.sessions-summary strong { color: #087f62; font-size: 21px; font-variant-numeric: tabular-nums; }
+.sessions-summary span, .sessions-summary p { color: var(--text-muted); font-size: 11px; }
+.sessions-summary p { margin-left: auto; }
+.sessions-panel { min-width: 0; padding: 20px; border: 1px solid #e1e8f0; border-radius: 14px; background: #fff; box-shadow: 0 10px 28px rgb(31 55 80 / 4%); }
+.sessions-table-wrap { overflow-x: auto; border: 1px solid #e6edf2; border-radius: 10px; }
+.sessions-table { width: 100%; border-collapse: collapse; min-width: 760px; }
+.sessions-table th { padding: 10px 12px; color: var(--text-muted); border-bottom: 1px solid #e5ebf0; font-size: 10px; font-weight: 700; text-align: left; white-space: nowrap; }
+.sessions-table td { max-width: 240px; padding: 13px 12px; color: #32445d; border-bottom: 1px solid #edf1f5; font-size: 12px; vertical-align: top; }
+.sessions-table tr:last-child td { border-bottom: 0; }
+.sessions-table td:first-child { min-width: 190px; color: #26384e; }
+.sessions-table td strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sessions-table td small { display: block; overflow: hidden; margin-top: 5px; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.sessions-table code, .session-card code { display: block; margin-top: 6px; overflow-wrap: anywhere; color: #7990a5; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; }
+.sessions-state { padding: 42px 18px; border: 1px dashed #dce4ec; border-radius: 10px; color: var(--text-subtle); text-align: center; }
+.sessions-state strong { color: #26384e; font-size: 14px; }
+.sessions-state p { margin-top: 8px; font-size: 11px; line-height: 1.5; }
+.session-cost-state { display: inline-flex; max-width: 170px; overflow: hidden; padding: 4px 7px; border-radius: 999px; color: #526176; background: #f1f4f7; font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.session-cost-estimated { color: #087f62; background: #e8f7f1; }
+.session-cost-subscription { color: #536a8c; background: #eef3fb; }
+.session-cost-unpriced, .session-cost-unavailable { color: #8e5d0e; background: #fff6df; }
+.sessions-more { display: flex; justify-content: center; padding-top: 15px; }
+.sessions-card-list { display: none; }
 
 @media (max-width: 1100px) and (min-width: 801px) {
   .stats-grid, .overview-host-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -207,7 +238,7 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
   body { min-width: 0; }
   .app-shell { grid-template-columns: 1fr; }
   .sidebar { gap: 16px; padding: 14px 16px; border-right: 0; border-bottom: 1px solid #e2e8f0; }
-  .nav-list { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .nav-list { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .nav-item { display: grid; gap: 3px; }
   .sidebar-footer { display: none; }
   .main-content { padding: 24px 16px; }
@@ -230,6 +261,21 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
   .evidence-detail { grid-template-columns: 1fr; }
   .evidence-detail p { grid-column: auto; }
   .findings-page-header { flex-direction: column; }
+  .sessions-page-header { flex-direction: column; }
+  .sessions-header-actions { width: 100%; justify-content: space-between; }
+  .sessions-toolbar { align-items: stretch; }
+  .sessions-toolbar label { flex: 1 1 140px; }
+  .sessions-toolbar input, .sessions-toolbar select { width: 100%; }
+  .sessions-summary p { width: 100%; margin-left: 0; }
+  .sessions-table-wrap { display: none; }
+  .sessions-card-list { display: grid; gap: 9px; }
+  .session-card { padding: 14px; border: 1px solid #e6edf2; border-radius: 10px; }
+  .session-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+  .session-card-heading strong { color: #26384e; font-size: 13px; }
+  .session-card > p { margin-top: 6px; color: var(--text-subtle); font-size: 11px; }
+  .session-card > div:not(.session-card-heading) { display: flex; justify-content: space-between; gap: 12px; margin-top: 11px; color: var(--text-muted); font-size: 11px; }
+  .session-card > div:not(.session-card-heading) strong { color: #087f62; }
+  .session-card > small { display: block; margin-top: 8px; color: var(--text-muted); font-size: 10px; }
   .finding-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .finding-row { flex-direction: column; }
   .finding-row-side { justify-items: start; min-width: 0; width: 100%; }

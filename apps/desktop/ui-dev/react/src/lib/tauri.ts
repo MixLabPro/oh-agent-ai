@@ -75,6 +75,59 @@ export type UsageHourly = {
   hours: UsageHour[];
 };
 
+export type SessionCost = {
+  amount_minor: number;
+  currency: string;
+  basis: "metered_actual" | "metered_estimate" | "fixed_subscription" | "api_equivalent" | "other";
+};
+
+export type SessionCostStatus = {
+  state: "estimated" | "subscription" | "unpriced" | "unavailable";
+  reason: string;
+  has_unresolved: boolean;
+};
+
+export type SessionRow = {
+  session_ref: string;
+  host: string;
+  first_event_at: string | null;
+  last_event_at: string | null;
+  event_count: number;
+  model_ids: string[];
+  tokens: {
+    uncached_input_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    output_tokens: number;
+    total: number;
+  };
+  peak_tokens: number;
+  cost_minor: SessionCost | null;
+  cost_status: SessionCostStatus;
+};
+
+export type SessionsPage = {
+  sessions: SessionRow[];
+  next_cursor: string | null;
+  has_more: boolean;
+  window_session_count: number;
+  window_total_tokens: number;
+  window_label: string | null;
+};
+
+export type SessionsWindow = "month" | "today" | "7d" | "custom";
+export type SessionsCostFilter = "all" | SessionCostStatus["state"];
+export type SessionsFilters = {
+  window: SessionsWindow;
+  month: string;
+  date_from: string;
+  date_to: string;
+  host_kind: string;
+  model: string;
+  provider: string;
+  cost_status: SessionsCostFilter;
+};
+
 export type TrustHostCandidate = {
   id: string;
   detected: boolean;
@@ -489,6 +542,69 @@ function parseUsageHourly(value: unknown): UsageHourly {
   return { date, hosts_available: { dsh: sourceValue("dsh"), claude: sourceValue("claude"), codex: sourceValue("codex") }, hours };
 }
 
+function parseSessionCost(value: unknown, label: string): SessionCost | null {
+  if (value === null || value === undefined) return null;
+  const row = record(value, label);
+  return {
+    amount_minor: boundedCount(row.amount_minor, `${label} amount`, 1_000_000_000_000_000),
+    currency: decisionCurrency(row.currency, `${label} currency`),
+    basis: decisionBasis(row.basis, `${label} basis`) as SessionCost["basis"],
+  };
+}
+
+function parseSessionRow(value: unknown): SessionRow {
+  const row = record(value, "session row");
+  const sessionRef = stringField(row.session_ref, "session ref");
+  if (!/^sr_[A-Za-z0-9_-]{8,128}$/.test(sessionRef)) throw new Error("session ref DTO 引用格式不安全");
+  const tokenRow = record(row.tokens, "session tokens");
+  const uncached = boundedCount(tokenRow.uncached_input_tokens, "session uncached input", 1_000_000_000_000_000);
+  const cacheRead = boundedCount(tokenRow.cache_read_tokens, "session cache read", 1_000_000_000_000_000);
+  const cacheWrite = boundedCount(tokenRow.cache_write_tokens, "session cache write", 1_000_000_000_000_000);
+  const output = boundedCount(tokenRow.output_tokens, "session output", 1_000_000_000_000_000);
+  const total = boundedCount(tokenRow.total, "session total", 1_000_000_000_000_000);
+  if (total !== uncached + cacheRead + cacheWrite + output) throw new Error("session token totals 不守恒");
+  const modelIds = requiredArray(row.model_ids, "session model ids").slice(0, 16).map((model) => decisionLabel(model, "session model"));
+  const costStatus = record(row.cost_status, "session cost status");
+  const state = boundedEnum(costStatus.state, "session cost state", ["estimated", "subscription", "unpriced", "unavailable"], "unavailable") as SessionCostStatus["state"];
+  const reason = boundedEnum(costStatus.reason, "session cost reason", [
+    "no-usage-facts", "subscription-token-usage-is-not-a-per-token-bill", "official-card-fallback-estimate",
+    "metered-estimate", "multiple-provider-costs-require-breakdown", "no-pricing-snapshot", "no-price-card",
+    "cost-unavailable", "cost-query-failed",
+  ], "cost-unavailable");
+  const hasUnresolved = requiredBoolean(costStatus.has_unresolved, "session cost unresolved");
+  return {
+    session_ref: sessionRef,
+    host: safeHostLabel(row.host),
+    first_event_at: safeTimestamp(row.first_event_at, "session first event"),
+    last_event_at: safeTimestamp(row.last_event_at, "session last event"),
+    event_count: boundedCount(row.event_count, "session event count", 1_000_000_000),
+    model_ids: modelIds,
+    tokens: { uncached_input_tokens: uncached, cache_read_tokens: cacheRead, cache_write_tokens: cacheWrite, output_tokens: output, total },
+    peak_tokens: boundedCount(row.peak_tokens, "session peak tokens", 1_000_000_000_000_000),
+    cost_minor: parseSessionCost(row.cost_minor, "session cost"),
+    cost_status: { state, reason, has_unresolved: hasUnresolved },
+  };
+}
+
+function parseSessionsPage(value: unknown): SessionsPage {
+  const root = record(value, "sessions envelope");
+  const data = record(root.data, "sessions data");
+  const rows = requiredArray(data.sessions, "sessions rows");
+  if (rows.length > 500) throw new Error("sessions rows 超出页面上限");
+  const sessions = rows.map(parseSessionRow);
+  const hasMore = requiredBoolean(data.has_more, "sessions has more");
+  const nextCursor = data.next_cursor === null || data.next_cursor === undefined ? null : stringField(data.next_cursor, "sessions cursor");
+  if (nextCursor !== null && (nextCursor.length < 1 || nextCursor.length > 4096)) throw new Error("sessions cursor DTO 不安全");
+  if (hasMore && nextCursor === null) throw new Error("sessions 分页缺少 next_cursor");
+  const windowSessionCount = boundedCount(data.window_session_count, "sessions window count", 10_000_000);
+  const windowTotalTokens = boundedCount(data.window_total_tokens, "sessions window tokens", 1_000_000_000_000_000);
+  if (windowSessionCount < sessions.length) throw new Error("sessions window count 小于当前页");
+  const pageTokens = sessions.reduce((sum, session) => sum + session.tokens.total, 0);
+  if (pageTokens > windowTotalTokens) throw new Error("sessions 当前页 token 超出窗口总量");
+  const window = data.window === null || data.window === undefined ? null : record(data.window, "sessions window");
+  return { sessions, next_cursor: nextCursor, has_more: hasMore, window_session_count: windowSessionCount, window_total_tokens: windowTotalTokens, window_label: window ? nullableString(window.label, "sessions window label") : null };
+}
+
 function safeTrustIdentifier(value: unknown, label: string, fallback = "unknown"): string {
   if (typeof value !== "string" || value.length > 96 || !/^[a-z][a-z0-9_-]{0,95}$/.test(value)) return fallback;
   return value;
@@ -881,6 +997,64 @@ export async function readUsageHourly(date: string): Promise<UsageHourly> {
   const parsed = parseUsageHourly(await handler("read_hourly_distribution", { date: safe }));
   if (parsed.date !== safe) throw new Error("usage hourly 返回了错误日期");
   return parsed;
+}
+
+export async function readSessions(input: {
+  day?: string;
+  month?: string;
+  date_from?: string;
+  date_to?: string;
+  host_kind?: string;
+  model?: string;
+  provider?: string;
+  page_size?: number;
+  cursor?: string | null;
+}): Promise<SessionsPage> {
+  if ((input.date_from === undefined) !== (input.date_to === undefined)) throw new Error("sessions 日期范围必须成对提供");
+  const args: Record<string, unknown> = {};
+  if (input.day !== undefined) args.day = safeDate(input.day, "sessions day");
+  if (input.month !== undefined) args.month = safeMonth(input.month, "sessions month");
+  if (input.date_from !== undefined && input.date_to !== undefined) {
+    const from = safeDate(input.date_from, "sessions date from");
+    const to = safeDate(input.date_to, "sessions date to");
+    if (from > to) throw new Error("sessions 日期范围起点不能晚于终点");
+    args.date_from = from;
+    args.date_to = to;
+  }
+  if (input.host_kind) {
+    const host = safeHostLabel(input.host_kind);
+    if (host === "generic") throw new Error("sessions host filter 不安全");
+    args.host_kind = host;
+  }
+  if (input.model) args.model = decisionLabel(input.model, "sessions model filter");
+  if (input.provider) args.provider = decisionLabel(input.provider, "sessions provider filter");
+  if (input.page_size !== undefined) {
+    if (!Number.isSafeInteger(input.page_size) || input.page_size < 1 || input.page_size > 500) throw new Error("sessions page size 不安全");
+    args.page_size = input.page_size;
+  }
+  if (input.cursor) {
+    if (input.cursor.length > 4096) throw new Error("sessions cursor 不安全");
+    args.cursor = input.cursor;
+  }
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) {
+    const preview = new Date();
+    const iso = preview.toISOString();
+    const sample = {
+      session_ref: "sr_browser_mock_01",
+      host: "codex",
+      first_event_at: new Date(preview.valueOf() - 3_600_000).toISOString(),
+      last_event_at: iso,
+      event_count: 24,
+      model_ids: ["gpt-5.6-sol"],
+      tokens: { uncached_input_tokens: 92000, cache_read_tokens: 128000, cache_write_tokens: 12000, output_tokens: 14000, total: 246000 },
+      peak_tokens: 34000,
+      cost_minor: { amount_minor: 84, currency: "USD", basis: "metered_estimate" },
+      cost_status: { state: "estimated", reason: "metered-estimate", has_unresolved: false },
+    };
+    return parseSessionsPage({ data: { sessions: [sample], next_cursor: null, has_more: false, window_session_count: 1, window_total_tokens: 246000, window: { label: input.month ?? "preview" } } });
+  }
+  return parseSessionsPage(await handler("sessions_list", args));
 }
 
 export async function readStatisticsTimezone(): Promise<StatisticsTimezone> {
