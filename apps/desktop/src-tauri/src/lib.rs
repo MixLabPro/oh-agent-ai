@@ -30,7 +30,10 @@ struct SyncLock(Mutex<()>);
 
 struct SyncRequests(Mutex<std::collections::BTreeMap<String, bool>>);
 static SYNC_REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
-const SYNC_STATUS_EVENT: &str = "sync-status-updated";
+/// 单一 UI 事件出口（EVENT_BUS spec §1.3）：webview 只 listen 这一个通道，
+/// 类型在 payload.type 判别。旧 `sync-status-updated` / `usage-fold-updated`
+/// 双通道已收编（2026-09-21 迭代 1）。
+const APP_EVENT: &str = "app-event";
 
 /// 只有还没有任何同步回执的启动才主动拉起工作台。后续启动继续保持菜单栏
 /// 工具的安静行为；首次用户无需先知道菜单栏入口，能直接看到本机解析说明。
@@ -1071,9 +1074,10 @@ fn run_facts_sync(bin: &std::path::Path) -> Option<String> {
 }
 
 /// fold 完成事件名。与工作台 `src-tauri/ui/workbench.js` 顶部的
-/// `listen("usage-fold-updated", …)` 一一对应——改名/改负载字段必须两处同步改
+/// `listen("app-event", …)` 一一对应——改类型串/负载字段必须两处同步改
 /// （workbench.js 的事件桥注释里反向引用了这个名字与负载）。
-const FOLD_EVENT: &str = "usage-fold-updated";
+const FOLD_EVENT: &str = "app-event";
+const FOLD_EVENT_TYPE: &str = "FoldCompleted";
 
 /// fold 事件去抖窗口：200ms 内多轮同步完成只广播一次。
 const FOLD_EVENT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
@@ -1185,6 +1189,43 @@ fn should_emit_fold_event(status: &SyncStatus) -> bool {
 /// 静默丢弃。这正是「事件桥失败不比现在更差」的兜底面——工作台下一次聚焦、
 /// 5 分钟 tick、或手动同步都会重新拉，丢一两个事件不会让工作台停在旧数据上
 /// 超过一个同步周期。
+/// `SyncStatusChanged` 的 app-event 载荷（类型化信封，spec §1.3）。
+fn sync_status_payload(status: &SyncStatus) -> serde_json::Value {
+    serde_json::json!({
+        "type": "SyncStatusChanged",
+        "ok": status.ok, "stage": status.stage, "message": status.message,
+    })
+}
+
+/// 事件总线消费（EVENT_BUS spec §9-P1）：tick 尾部 drain——CLI 子进程已在
+/// outbox 里落了 FactsIngested 等事实事件，这里以 `desktop-ui` 消费者身份取
+/// 走并转发给 webview 的单一出口。同轮也补投上次崩溃残留（deliveries 缺行）。
+/// 消费者只 emit、不碰库（drain 的自动提交两段式允许 handler 自持资源，但
+/// UI 转发根本不需要）。
+fn drain_event_bus(app: &AppHandle) {
+    use agent_vitals_runtime::events::{Dispatcher, EventConsumer};
+    let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(
+        &path,
+        agent_vitals_runtime::sql_sync::now_ms(),
+    ) else {
+        return; // 库缺席（首装未同步）不是错误——没有事件可投
+    };
+    let app2 = app.clone();
+    let dispatcher = Dispatcher::new(vec![EventConsumer::new("desktop-ui", move |event| {
+        let _ = app2.emit(APP_EVENT, serde_json::json!({
+            "type": event.event_type,
+            "occurred_at_ms": event.occurred_at_ms,
+            "host": event.host,
+            "payload": event.payload,
+        }));
+        Ok(())
+    })]);
+    if let Err(e) = dispatcher.drain(db.conn()) {
+        eprintln!("event-bus drain: {e}");
+    }
+}
+
 fn emit_fold_event(app: &AppHandle) {
     let now = std::time::Instant::now();
     let should_emit = {
@@ -1204,7 +1245,7 @@ fn emit_fold_event(app: &AppHandle) {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let _ = app.emit(FOLD_EVENT, serde_json::json!({ "at": at }));
+        let _ = app.emit(FOLD_EVENT, serde_json::json!({ "type": FOLD_EVENT_TYPE, "at": at }));
     }
 }
 
@@ -1216,18 +1257,14 @@ fn sync_tick(app: &AppHandle) {
         Ok(true) => {
             let status = SyncStatus::ok("paused", "已按你的选择暂停本机解析".into());
             overview::save_sync_status(&status);
-            let _ = app.emit(SYNC_STATUS_EVENT, serde_json::json!({
-                "ok": status.ok, "stage": status.stage, "message": status.message,
-            }));
+            let _ = app.emit(APP_EVENT, sync_status_payload(&status));
             refresh(app);
             return;
         }
         Err(error) => {
             let status = SyncStatus::fail("control", format!("同步控制状态不可读：{error}"));
             overview::save_sync_status(&status);
-            let _ = app.emit(SYNC_STATUS_EVENT, serde_json::json!({
-                "ok": status.ok, "stage": status.stage, "message": status.message,
-            }));
+            let _ = app.emit(APP_EVENT, sync_status_payload(&status));
             refresh(app);
             return;
         }
@@ -1243,9 +1280,7 @@ fn sync_tick(app: &AppHandle) {
     overview::save_sync_status(&status);
     // 首次扫描即使没有新增 facts，也要让已打开的工作台结束“正在整理”的状态。
     // `usage-fold-updated` 只代表有新折账，不能承担这个生命周期事件。
-    let _ = app.emit(SYNC_STATUS_EVENT, serde_json::json!({
-        "ok": status.ok, "stage": status.stage, "message": status.message,
-    }));
+    let _ = app.emit(APP_EVENT, sync_status_payload(&status));
     // 宿主区：sessions navigation（20s 硬超时；失败不覆盖 hosts.json——上一轮
     // 快照继续渲染并自然转 stale，spec §6 决策 5）。
     refresh_hosts();
@@ -1258,6 +1293,9 @@ fn sync_tick(app: &AppHandle) {
     if folded || facts_ready {
         emit_fold_event(app);
     }
+    // 事件总线 drain（P1）：无论本轮是否有新折账——drain 自己知道有没有
+    // （deliveries 反连接），空轮是 no-op；崩溃残留也在此补投。
+    drain_event_bus(app);
 }
 
 /// 按序执行独立导入阶段并保留全部失败原因。成功导入的 facts 即使处于部分

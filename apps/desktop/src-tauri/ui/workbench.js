@@ -277,29 +277,28 @@ async function refreshActiveTab() {
 }
 
 function subscribeFoldEvent() {
-  // listen 返回 Promise<unlisten>；工作台是常驻窗口，订阅一次终身有效，不调
-  // unlisten。失败只警告不重试——轮询兜底在，不需要自愈回路。
-  listen("usage-fold-updated", () => {
-    // 手动轮询在跑时，事件是同一轮 fold 的第二个完成信号——按钮自己的 poll
-    // 已经（或将）在重拉，跳过避免双拉。事件负载只有 at、不携带手动/自动来源，
-    // 这里靠按钮 handler 置位的 manualSyncPolling 区分，不靠猜。
+  // 单一 UI 事件出口（EVENT_BUS spec §1.3）：后端只剩 `app-event` 一个通道，
+  // 类型在 payload.type 里判别。outbox 事件（FactsIngested 等）是持久事实的
+  // 投递；FoldCompleted / SyncStatusChanged 是 tick 的瞬态信号——同一出口、
+  // 同一信封，处理按类型分发。
+  listen("app-event", (event) => {
+    const type = event && event.payload && event.payload.type;
+    // 手动轮询在跑时，事件是同一轮同步的第二个完成信号——按钮自己的 poll
+    // 已经（或将）在重拉，跳过避免双拉（负载不携带手动/自动来源，靠按钮
+    // handler 置位的 manualSyncPolling 区分，不靠猜）。
     if (manualSyncPolling) return;
-    refreshActiveTab();
+    if (type === "FoldCompleted" || type === "FactsIngested" || type === "SyncStatusChanged") {
+      refreshActiveTab();
+    }
   }).catch((e) => {
-    console.warn("[workbench] usage-fold-updated 订阅失败（5 分钟 tick / 手动同步兜底）", e);
+    console.warn("[workbench] app-event 订阅失败（5 分钟 tick / 手动同步兜底）", e);
   });
 }
 
-function subscribeSyncStatusEvent() {
-  // 首次扫描没有新 facts 时同样需要刷新首屏状态；和 fold 事件分离，避免把
-  // “扫描结束但无记录”伪装成一次用量更新。
-  listen("sync-status-updated", () => {
-    if (manualSyncPolling) return;
-    refreshActiveTab();
-  }).catch((e) => {
-    console.warn("[workbench] sync-status-updated 订阅失败（手动刷新可恢复）", e);
-  });
-}
+// SyncStatusChanged 已并入 subscribeFoldEvent 的 app-event 分发（单一出口）；
+// 本函数保留为空操作是为了 init 调用点与订阅注释的可读性——真正的类型语义
+// 在上面那一个 listen 里。
+function subscribeSyncStatusEvent() {}
 
 // 菜单信息行导航（双通路，与 spec §7 深链同构——§7 描述的就是这套持久目标 +
 // 事件通知机制）：
