@@ -4,6 +4,8 @@
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #1c2738;
   background: #f7f9fc;
+  --text-muted: #63748a;
+  --text-subtle: #5f7083;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -19,39 +21,39 @@ button:focus-visible { outline: 2px solid #087f62; outline-offset: 3px; }
 .brand-mark { display: grid; width: 32px; height: 32px; place-items: center; border-radius: 10px; color: #fff; background: #087f62; font: 700 14px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .brand strong, .brand span { display: block; }
 .brand strong { font-size: 15px; }
-.brand div span { margin-top: 3px; color: #7a8799; font-size: 11px; }
+.brand div span { margin-top: 3px; color: var(--text-muted); font-size: 11px; }
 .nav-list { display: grid; gap: 6px; }
 .nav-item { display: flex; align-items: baseline; justify-content: space-between; width: 100%; padding: 11px 12px; border: 1px solid transparent; border-radius: 10px; color: #526176; background: transparent; text-align: left; cursor: pointer; }
 .nav-item:hover { background: #f2f7f6; color: #087f62; }
 .nav-item-active { border-color: #cfe9e1; color: #087f62; background: #eef9f5; font-weight: 650; }
-.nav-item small { color: #9aa6b6; font-size: 10px; font-weight: 400; }
-.sidebar-footer { display: grid; gap: 8px; margin-top: auto; padding: 12px 8px; color: #8a96a7; font-size: 11px; }
+.nav-item small { color: var(--text-muted); font-size: 10px; font-weight: 400; }
+.sidebar-footer { display: grid; gap: 8px; margin-top: auto; padding: 12px 8px; color: var(--text-muted); font-size: 11px; }
 .main-content { min-width: 0; padding: 32px clamp(24px, 4vw, 64px); }
 .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
 h1, h2, p { margin: 0; }
 h1 { font-size: clamp(25px, 3vw, 34px); letter-spacing: -0.04em; }
 h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035em; }
-.eyebrow { color: #7a8799; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.eyebrow { color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .header-actions { display: flex; align-items: center; gap: 10px; }
 .button { border-radius: 8px; padding: 9px 13px; border: 1px solid transparent; cursor: pointer; font-size: 13px; font-weight: 650; }
 .button:disabled { cursor: not-allowed; opacity: .55; }
 .button-secondary { border-color: #d5deea; color: #32445d; background: #fff; }
 .button-secondary:hover:not(:disabled) { border-color: #9ab6ca; background: #f8fbfd; }
-.status-pill { display: inline-flex; align-items: center; gap: 7px; width: fit-content; border-radius: 999px; padding: 6px 9px; color: #637187; background: #f1f4f7; font-size: 11px; font-weight: 650; white-space: nowrap; }
+.status-pill { display: inline-flex; align-items: center; gap: 7px; width: fit-content; border-radius: 999px; padding: 6px 9px; color: #55667c; background: #f1f4f7; font-size: 11px; font-weight: 650; white-space: nowrap; }
 .status-pill-success { color: #087f62; background: #e8f7f1; }
-.status-pill-warning { color: #9a6811; background: #fff6df; }
+.status-pill-warning { color: #8e5d0e; background: #fff6df; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .hero-panel, .info-panel, .empty-state { border: 1px solid #e1e8f0; border-radius: 16px; background: #fff; box-shadow: 0 10px 28px rgb(31 55 80 / 4%); }
 .hero-panel { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: clamp(24px, 4vw, 40px); }
-.hero-copy { max-width: 570px; margin-top: 14px; color: #66758a; line-height: 1.6; }
+.hero-copy { max-width: 570px; margin-top: 14px; color: #5f7083; line-height: 1.6; }
 .stats-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
 .stat-card { min-width: 0; padding: 20px 22px; border: 1px solid #e1e8f0; border-radius: 14px; background: #fff; }
 .stat-value { margin-top: 14px; color: #142238; font-size: 30px; font-weight: 730; letter-spacing: -0.04em; }
-.stat-detail { margin-top: 6px; color: #8290a2; font-size: 12px; }
+.stat-detail { margin-top: 6px; color: var(--text-muted); font-size: 12px; }
 .info-panel { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 14px; padding: 17px 20px; color: #526176; font-size: 13px; }
 .info-panel .eyebrow { margin-bottom: 5px; }
 .empty-state { display: grid; place-items: start; min-height: 280px; padding: clamp(28px, 5vw, 56px); align-content: center; }
-.empty-state > p:not(.eyebrow) { max-width: 600px; margin-top: 12px; color: #66758a; line-height: 1.65; }
+.empty-state > p:not(.eyebrow) { max-width: 600px; margin-top: 12px; color: var(--text-subtle); line-height: 1.65; }
 .callout { display: grid; gap: 4px; margin-top: 24px; padding: 14px 16px; border-left: 3px solid #087f62; color: #637187; background: #f1f8f6; font-size: 12px; }
 .callout strong { color: #26384e; }
 .error-banner { margin-bottom: 16px; padding: 10px 13px; border: 1px solid #f0cfcf; border-radius: 8px; color: #9d3f3f; background: #fff7f7; font-size: 12px; }
@@ -65,11 +67,11 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .host-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px; border: 1px solid #edf1f5; border-radius: 10px; }
 .host-row-selected { border-color: #9bd6c5; background: #f4fbf8; }
 .host-row strong { font-size: 13px; }
-.host-row p, .evidence-main p { margin-top: 4px; color: #8491a1; font-size: 11px; line-height: 1.45; }
+.host-row p, .evidence-main p { margin-top: 4px; color: var(--text-subtle); font-size: 11px; line-height: 1.45; }
 .button-primary-small { padding: 7px 9px; color: #fff; background: #087f62; font-size: 11px; }
 .button-primary-small:hover:not(:disabled) { background: #076a53; }
 .trust-summary { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 14px; color: #65748a; font-size: 11px; }
-.mini-empty { color: #718097; font-size: 12px; line-height: 1.65; }
+.mini-empty { color: var(--text-subtle); font-size: 12px; line-height: 1.65; }
 .mini-empty h3 { margin: 5px 0 0; color: #26384e; font-size: 18px; }
 .mini-empty p { margin-top: 8px; }
 .inline-status { margin: -10px 0 14px; color: #087f62; font-size: 12px; }
