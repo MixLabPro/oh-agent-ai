@@ -268,7 +268,7 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .settings-section-heading h3 { margin-top: 4px; color: #26384e; font-size: 19px; }
 .settings-section-heading p:not(.eyebrow) { margin-top: 6px; color: var(--text-subtle); font-size: 12px; line-height: 1.5; }
 .settings-source-list { display: grid; gap: 9px; }
-.settings-source-row { display: grid; grid-template-columns: minmax(150px, .65fr) minmax(220px, 1.5fr) minmax(150px, .65fr); align-items: center; gap: 16px; min-height: 64px; padding: 12px 14px; border: 1px solid #e1e8f0; border-radius: 11px; background: #fff; transition: border-color .12s ease, background .12s ease; }
+.settings-source-row { display: grid; grid-template-columns: minmax(150px, .6fr) minmax(220px, 1.35fr) minmax(150px, .55fr) auto; align-items: center; gap: 16px; min-height: 64px; padding: 12px 14px; border: 1px solid #e1e8f0; border-radius: 11px; background: #fff; transition: border-color .12s ease, background .12s ease; }
 .settings-source-row:hover, .settings-source-row:focus-visible { border-color: #9bd6c5; background: #fbfffd; outline: none; }
 .settings-source-main { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .settings-source-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: #a4b0bd; }
@@ -281,6 +281,7 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .settings-source-error { color: #9b5c13; font-weight: 650; }
 .settings-source-scan { color: var(--text-subtle); font-size: 11px; text-align: right; white-space: nowrap; }
 .settings-source-scan small { color: var(--text-muted); font-size: 10px; }
+.settings-source-action { justify-self: end; white-space: nowrap; }
 .settings-source-state { display: grid; gap: 6px; min-height: 130px; place-content: center; padding: 22px; border: 1px dashed #dce4ec; border-radius: 11px; color: var(--text-subtle); text-align: center; }
 .settings-source-state strong { color: #26384e; font-size: 14px; }
 .settings-source-state span { font-size: 11px; line-height: 1.55; }
@@ -371,6 +372,7 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
   .settings-section-heading { flex-direction: column; }
   .settings-source-row { grid-template-columns: 1fr; gap: 8px; }
   .settings-source-scan { text-align: left; }
+  .settings-source-action { justify-self: start; }
   .test-header-actions { width: 100%; justify-content: space-between; align-items: end; }
   .test-header-actions .test-window-field { flex: 1; }
   .test-window-field select { width: 100%; }

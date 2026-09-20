@@ -66,7 +66,8 @@ if (!source.includes('"routes_quality"') || !source.includes("readRouteQuality")
 if (source.includes('"probe_run_start"')) fail("React 测试页越过 mutation 边界调用主动探针");
 if (!source.includes("只读") || !source.includes("不发请求") || !source.includes("无官方基准")) fail("React 测试页缺少主动探针边界或无基准诚实状态");
 if (!source.includes('"data_source_status"') || !source.includes("readSourceHealth") || !source.includes("settings-source-row")) fail("React 设置未使用安全数据源状态 DTO");
-if (source.includes('"trigger_sync"') || source.includes('"set_sync_paused"') || source.includes('"delete_imported_source_data"')) fail("React 设置首轮越过数据源 mutation 边界");
+if (source.includes('"delete_imported_source_data"')) fail("React 设置首轮越过危险数据删除 mutation 边界");
+if (!source.includes("triggerSync") || !source.includes("setSyncPaused") || !source.includes("readSyncRequestStatus")) fail("React 设置缺少同步控制与回执轮询");
 if (!source.includes("尚未导入") || !source.includes("没有读取权限") || !source.includes("来源状态暂不可用")) fail("React 设置缺少来源空态、错误映射或不可用态");
 if (!source.includes("Promise.allSettled") || !source.includes("sync_pause_state") || !source.includes("read_overview")) fail("React 设置未保留来源状态的部分失败降级");
 const routeQualityType = source.match(/export type RouteQualityModel[\s\S]*?\};/u)?.[0] || "";

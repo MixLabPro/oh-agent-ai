@@ -82,6 +82,8 @@ export type SourceHealthReport = {
   sync: { paused: boolean | null; last_success_at: string | null; state: "ok" | "failed" | "never" | "unavailable" };
 };
 
+export type SyncRequestStatus = { completed: boolean; failed: boolean };
+
 export type UsageHour = {
   hour: number;
   dsh_tokens: number | null;
@@ -1474,6 +1476,43 @@ export async function readSourceHealth(): Promise<SourceHealthReport> {
     );
   } catch {
     throw new Error("来源状态读取失败");
+  }
+}
+
+export async function triggerSync(): Promise<string> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return "browser-mock-sync";
+  try {
+    const value = await handler("trigger_sync");
+    if (typeof value !== "string" || (value !== "browser-mock-sync" && !/^sync-[A-Za-z0-9_-]{1,64}$/.test(value))) throw new Error("同步请求回执无效");
+    return value;
+  } catch {
+    throw new Error("同步请求未能发起");
+  }
+}
+
+export async function readSyncRequestStatus(requestId: string): Promise<SyncRequestStatus> {
+  if (!/^sync-[A-Za-z0-9_-]{1,64}$/.test(requestId) && requestId !== "browser-mock-sync") throw new Error("同步请求引用无效");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { completed: true, failed: false };
+  try {
+    const value = record(await handler("sync_request_status", { requestId }), "sync request status");
+    const error = value.error;
+    if (error !== undefined && error !== "unknown_request") throw new Error("同步状态返回未知错误");
+    return { completed: requiredBoolean(value.completed, "sync request completed"), failed: error === "unknown_request" };
+  } catch {
+    throw new Error("同步状态读取失败");
+  }
+}
+
+export async function setSyncPaused(paused: boolean): Promise<boolean> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return paused;
+  try {
+    const value = record(await handler("set_sync_paused", { paused }), "sync pause result");
+    return requiredBoolean(value.paused, "sync pause result");
+  } catch {
+    throw new Error("自动同步设置未保存");
   }
 }
 
