@@ -1,6 +1,6 @@
 # Agent Vitals Runtime Event Bus Architecture Spec
 
-> 状态：**Draft v1.2（2026-09-21）**——v1 经架构评审会话收敛；v1.1 并入 apalis-sqlite 源码研究（§12）；v1.2 为 **P0 实施修订**（`feat/runtime-event-bus` worktree）：迁移落位 v23（v22 已被 evidence_origin 占用）、投递进度改为按消费者反连接（§4.2 修订）、drain 为自动提交两段式（§4.3 修订）、CLI 尾部统一 drain 保序（§9-P0 修订）；
+> 状态：**Draft v1.3（2026-09-21）**——v1 收敛、v1.1 并入 apalis-sqlite 研究（§12）、v1.2 为 P0 实施修订（v23 迁移/反连接/两段式 drain/尾部保序）；v1.3 为 **迭代 2 实施修订**：`McpToolInvoked` 的生产者定为 **CLI serve 传输层**而非 `mcp::dispatch`（桌面/CLI 内部自用调用不是审计对象——只有外部 agent 的 `tools/call` 是）；审计批次按**进程×库**一条（`trigger='mcp-audit'`，沿 trust-audit 的 per-invocation run 先例但按进程聚合）；未同步机器无库则跳过且**不建库**；参数只入 fnv1a64 指纹（原始参数禁令 §4.1）；
 > 前置：v0.9.1 SQL 权威库已冻结（单一事实源 + 幂等重放）；trust P1（`FINDINGS_TRUST_EGRESS_MONITORING_SPEC`）已合入，P2 实时传感器未实施；
 > 目标：为 runtime 引入**最小事件驱动层**——事务性 outbox + 单管道类型化事件——收编既有的内联反应链与缓存失效土办法，并为 trust P2 传感器预留唯一接入通道。
 
@@ -151,7 +151,7 @@ CREATE INDEX event_outbox_pending ON event_outbox(created_at_ms, event_id);
 | `DeclarationSaved{scope}` | 桌面 IPC（计费声明保存） | 声明/修订落库 | billing 重算入队、（预留）影响预览 |
 | `PriceCardSaved{provider, model_fingerprint}` | 桌面 IPC（补卡保存） | 价卡落库 | 未计价重算 |
 | `HostSourceFailed{host, error_code}` / `SourceRecovered{host}` | sync_service | 源读取失败/恢复 | 通知、MTTR 时序（审计流） |
-| `McpToolInvoked{tool, args_fingerprint, latency_ms, ok}` | mcp::dispatch | dispatch 返回后（旁路） | MCP 访问日志、慢查询/失败率 |
+| `McpToolInvoked{tool, args_fingerprint, latency_ms, ok}` | CLI serve 传输层（`handle_tools_call`） | 外部 MCP `tools/call` 返回后（旁路） | MCP 访问日志、慢查询/失败率 |
 | `HourTicked` / `DayRolled` | timer（statistics_timezone 口径） | 时区日界/时界 | expires 清理、通知去重窗口滚动、价格快照 stale 检查 |
 | `TrustMonitorEvent{actor_id, stage, evidence_level}` | trust P2 传感器（进程外） | 聚合窗口产出 | trust correlate → Finding、通知（§7.2 门槛） |
 

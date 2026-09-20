@@ -51,6 +51,27 @@ pub struct AppEvent {
 }
 
 impl AppEvent {
+    /// `McpToolInvoked`：一次外部 MCP `tools/call` 完成（审计旁路，
+    /// fire-and-forget）。生产者是 serve 传输层而非 dispatch 本身——桌面/CLI
+    /// 的内部自用调用不是审计对象（spec §5 实施修订）。`args_fingerprint`
+    /// 是参数的规范化指纹：**原始参数永不落库**（§4.1 禁令，agents 的查询
+    /// 参数可能含敏感内容）。
+    pub fn mcp_tool_invoked(tool: &str, args_fingerprint: &str, latency_ms: i64, ok: bool) -> Self {
+        Self {
+            event_type: "McpToolInvoked",
+            occurred_at_ms: now_ms(),
+            host: None,
+            correlation_id: None,
+            producer: "mcp-serve",
+            payload: json!({
+                "tool": tool,
+                "args_fingerprint": args_fingerprint,
+                "latency_ms": latency_ms,
+                "ok": ok,
+            }),
+        }
+    }
+
     /// `FactsIngested`：某宿主的事实批次已在权威库事务内落定。
     pub fn facts_ingested(
         host: &str, run_id: &str, inserted: usize, rejected: usize, duplicate: usize,
