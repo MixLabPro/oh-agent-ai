@@ -1294,6 +1294,108 @@ fn start_refresh_tick(app: AppHandle) {
     });
 }
 
+/// Opt-in Trust runtime monitor. The loop is always installed with the app,
+/// but it is inert until the user enables it through the Findings control. The
+/// sensor only writes redacted, type-level observations to the local authority
+/// DB; it never forwards payloads or asks for elevated permissions.
+fn start_trust_monitor_tick(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut next_run = std::time::Instant::now();
+        loop {
+            let state = trust_monitor_state_read();
+            if state.get("enabled").and_then(Value::as_bool) != Some(true) {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                next_run = std::time::Instant::now();
+                continue;
+            }
+            if std::time::Instant::now() < next_run {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                continue;
+            }
+
+            // Sync and the monitor both touch the authority DB. Avoid making a
+            // user-triggered sync wait behind a sensor pass.
+            let lock = app.state::<SyncLock>();
+            if let Ok(_guard) = lock.0.try_lock() {
+                let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+                let report = agent_vitals_runtime::trust_runtime_monitor::snapshot_and_store(
+                    &overview::data_home(),
+                    &agent_vitals_runtime::takeover::machine_namespace(),
+                    now_ms,
+                );
+                trust_monitor_record_report(&app, report, now_ms);
+            }
+            let interval = state
+                .get("interval_seconds")
+                .and_then(Value::as_i64)
+                .unwrap_or(30)
+                .clamp(5, 3600) as u64;
+            next_run = std::time::Instant::now()
+                + std::time::Duration::from_secs(interval.min(60));
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    });
+}
+
+fn trust_monitor_state_read() -> Value {
+    let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({
+            "status": "unavailable", "enabled": false,
+            "notifications_enabled": false, "capability": "unavailable",
+            "reason": "authority_unavailable"
+        });
+    };
+    let Ok(Some(state)) = db.trust_monitor_state_get() else {
+        return serde_json::json!({
+            "status": "unavailable", "enabled": false,
+            "notifications_enabled": false, "capability": "unavailable",
+            "reason": "monitor_state_unavailable"
+        });
+    };
+    serde_json::json!({
+        "status": "ok",
+        "enabled": state.enabled,
+        "interval_seconds": state.interval_seconds,
+        "notifications_enabled": state.notifications_enabled,
+        "capability": state.capability,
+        "last_success_at_ms": state.last_success_at_ms,
+        "last_error_code": state.last_error_code,
+        "updated_at_ms": state.updated_at_ms,
+    })
+}
+
+fn trust_monitor_record_report(
+    app: &AppHandle,
+    report: Result<agent_vitals_runtime::trust_runtime_monitor::TrustRuntimeSnapshotReport, String>,
+    now_ms: i64,
+) {
+    let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(&path, now_ms) else { return };
+    let (capability, error_code, notification_keys) = match report {
+        Ok(report) if report.capability == "macos_lsof_partial" => {
+            ("partial", None, report.notification_keys)
+        }
+        Ok(report) if report.capability.starts_with("runtime_sensor_unavailable") => {
+            ("unavailable", Some("sensor_unavailable"), report.notification_keys)
+        }
+        Ok(_) => ("partial", Some("sensor_partial"), Vec::new()),
+        Err(_) => ("unavailable", Some("snapshot_failed"), Vec::new()),
+    };
+    let _ = db.trust_monitor_record_result(capability, Some(now_ms), error_code, now_ms);
+    if notification_keys.is_empty() { return; }
+    let Ok(Some(state)) = db.trust_monitor_state_get() else { return };
+    if !state.notifications_enabled { return; }
+    let should_notify = notification_keys.into_iter().any(|key| {
+        db.trust_monitor_claim_alert(&key, now_ms, 15 * 60 * 1000).unwrap_or(false)
+    });
+    if !should_notify { return; }
+    let _ = app.notification().builder()
+        .title("本地 Agent 信任审计")
+        .body("检测到需要复核的本地行为链，请打开 Findings 查看。")
+        .show();
+}
+
 /// 「立即同步」（托盘菜单 / 工作台按钮共用）：受控 tick 一次。跑在后台线程，菜单
 /// 事件处理器不阻塞；互斥锁阻塞等待在途同步结束，保证用户点的这一次真的执行。
 fn sync_now(app: &AppHandle) {
@@ -3125,6 +3227,47 @@ fn save_quota_reminder_config(app: AppHandle, enabled: bool) -> Result<Value, St
     }))
 }
 
+/// Read the explicit Trust runtime monitor state. Monitoring is opt-in and
+/// fail-closed when the local authority DB or sensor capability is unavailable.
+#[tauri::command]
+fn trust_monitor_config() -> Value {
+    trust_monitor_state_read()
+}
+
+/// Persist Trust monitoring controls. Notification permission is requested only
+/// when the user explicitly turns notifications on; disabling the monitor also
+/// disables its notifications so a stale permission cannot create surprises.
+#[tauri::command]
+fn save_trust_monitor_config(
+    app: AppHandle,
+    enabled: bool,
+    interval_seconds: i64,
+    notifications_enabled: bool,
+) -> Result<Value, String> {
+    if !(5..=3600).contains(&interval_seconds) {
+        return Err("interval_seconds must be between 5 and 3600".into());
+    }
+    let notifications_enabled = enabled && notifications_enabled;
+    let notification_permission = notifications_enabled.then(|| {
+        app.notification()
+            .request_permission()
+            .map(|state| format!("{state:?}"))
+            .unwrap_or_else(|_| "unavailable".to_string())
+    });
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
+    let db = agent_vitals_data::authority::AuthorityDb::open(&path, now_ms)
+        .map_err(|_| "authority_unavailable".to_string())?;
+    db.trust_monitor_state_set(enabled, interval_seconds, notifications_enabled, now_ms)
+        .map_err(|_| "monitor_state_save_failed".to_string())?;
+    let mut result = trust_monitor_state_read();
+    if let Value::Object(ref mut object) = result {
+        object.insert("notification_permission".into(),
+            notification_permission.map(Value::String).unwrap_or(Value::Null));
+    }
+    Ok(result)
+}
+
 /// 用户补的价卡（`state/pricing-overrides.json`）。
 ///
 /// **为什么有这一层**：价目表 `assets/pricing.json` 是 `include_str!` 编进二进制的，
@@ -3476,6 +3619,8 @@ pub fn run() {
             data_codex_quota,
             data_claude_quota,
             quota_reminder_config,
+            trust_monitor_config,
+            save_trust_monitor_config,
             price_cards,
             save_price_card,
             delete_price_card,
@@ -3497,6 +3642,19 @@ pub fn run() {
         store::sessions_list,
             store::sessions_read,
             store::sessions_findings,
+            store::trust_audit,
+            store::trust_discover,
+            store::trust_runtime_snapshot,
+            store::trust_profile_list,
+            store::trust_profile_validate,
+            store::trust_profile_stage,
+            store::trust_profile_proposal_status,
+            store::trust_profile_approve,
+            store::trust_profile_reject,
+            store::trust_profile_revoke,
+            store::trust_suppression_create,
+            store::trust_suppression_revoke,
+            store::trust_suppression_list,
             store::sessions_issues,
             store::decision_matrix,
             findings_freshness,
@@ -3578,6 +3736,7 @@ pub fn run() {
                 })
                 .build(app)?;
             start_refresh_tick(app.handle().clone());
+            start_trust_monitor_tick(app.handle().clone());
             let args: Vec<String> = std::env::args().collect();
             if should_show_workbench_on_start(&ov.sync, &args) {
                 show_workbench(app.handle());

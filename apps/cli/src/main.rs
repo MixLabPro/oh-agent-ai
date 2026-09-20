@@ -237,6 +237,12 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
+    /// Local-only Trust/Egress historical audit. Reads artifact metadata only;
+    /// it never uploads data, reads artifact contents, or claims cloud-side use.
+    Trust {
+        #[command(subcommand)]
+        action: TrustAction,
+    },
     /// Fold a DSH session log into navigation snapshots (oneline.json +
     /// sessions.jsonl). Business usage/cost data is written and read only via
     /// the SQL authority. Fenced: state owner must be `rust` (takeover) unless
@@ -468,7 +474,7 @@ enum Cmd {
     /// Read-only; broken manifests are reported, never fatal (degradation
     /// isolation). Python mirror lands with the parity task.
     PluginList,
-    /// Dry-run a plugin manifest (§6.5 首装仪式): discovery + extraction +
+    /// Dry-run a plugin manifest (§6.5 first-install walkthrough): discovery + extraction +
     /// fact_id stability + format guard. No writes. With --file, feed fixture
     /// files directly (golden/parity mode); otherwise discovery per manifest.
     /// Mirrors Python `scan.py plugin-validate`.
@@ -842,6 +848,52 @@ enum Cmd {
     DataMcp {
         #[command(subcommand)]
         action: DataMcpAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum TrustAction {
+    /// Scan a configured Trust artifact profile, write redacted local
+    /// observations, and project supported Findings. `all` scans every valid
+    /// built-in or locally configured profile.
+    Audit {
+        /// Profile id to scan, or all
+        #[arg(long, default_value = "all")]
+        host: String,
+        /// Print the report as JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// List valid local Trust profiles. This reports collection capability, not
+    /// whether a product has performed any data transfer.
+    Profiles {
+        /// Print the report as JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// Discover installed local-agent directories without reading their
+    /// contents. Unprofiled candidates are coverage gaps, never Findings.
+    Discover {
+        /// Print the report as JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// Capture one explicit, low-privilege local-process behavior snapshot.
+    /// This is not a background watcher and cannot prove byte transmission.
+    Monitor {
+        #[command(subcommand)]
+        action: TrustMonitorAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum TrustMonitorAction {
+    /// On supported platforms, correlate concurrent Git-history reads, archive
+    /// writes, and established connections without reading their contents.
+    Snapshot {
+        /// Print the report as JSON to stdout
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1663,6 +1715,89 @@ fn main() {
     if let Some(Cmd::DataMcp { action }) = &args.cmd {
         match action {
             DataMcpAction::Serve { allow_local_writes } => mcp::serve(*allow_local_writes),
+        }
+    }
+
+    // Trust historical audit is a deliberately separate, local-only writer.
+    // It runs before generic skill scanning: a user asking for this diagnostic
+    // must not also trigger unrelated host/file scans.
+    if let Some(Cmd::Trust { action }) = &args.cmd {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            eprintln!("trust: HOME is unavailable");
+            std::process::exit(2);
+        };
+        let data_home = agent_vitals_runtime::home::data_home();
+        let (profiles, profile_errors) = agent_vitals_runtime::trust_audit::profiles(&data_home, &home);
+        match action {
+            TrustAction::Audit { host, json } => {
+                let targets: Vec<_> = if host == "all" {
+                    profiles.iter().collect()
+                } else {
+                    profiles.iter().filter(|profile| profile.id() == host).collect()
+                };
+                if targets.is_empty() {
+                    eprintln!("trust audit: no valid profile `{host}`; run `agent-vitals trust profiles`");
+                    std::process::exit(2);
+                }
+                let machine_namespace = agent_vitals_runtime::takeover::machine_namespace();
+                let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+                let reports = targets.into_iter().map(|target| {
+                    agent_vitals_runtime::trust_audit::audit_and_store(
+                        &data_home, target, &machine_namespace, now_ms,
+                    )
+                }).collect::<Result<Vec<_>, _>>();
+                match reports {
+                    Ok(reports) if *json => println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                        "reports": reports, "profile_errors": profile_errors,
+                    })).unwrap_or_default()),
+                    Ok(reports) => for report in reports {
+                        println!("{}: {} artifacts ({} new, {} duplicate), {} findings", report.host, report.discovered, report.inserted, report.duplicate, report.findings_upserted);
+                    },
+                    Err(error) => { eprintln!("trust audit failed: {error}"); std::process::exit(2); }
+                }
+                return;
+            }
+            TrustAction::Profiles { json } => {
+                let payload = serde_json::json!({
+                    "profiles": agent_vitals_runtime::trust_audit::profile_summaries(&profiles),
+                    "profile_errors": profile_errors,
+                });
+                if *json { println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default()); }
+                else {
+                    for profile in payload["profiles"].as_array().into_iter().flatten() {
+                        println!("{}: {} ({})", profile["id"].as_str().unwrap_or("?"), profile["capability"].as_str().unwrap_or("?"), profile["source"].as_str().unwrap_or("?"));
+                    }
+                    for error in payload["profile_errors"].as_array().into_iter().flatten().filter_map(|item| item.as_str()) {
+                        eprintln!("trust profile warning: {error}");
+                    }
+                }
+                return;
+            }
+            TrustAction::Discover { json } => {
+                let candidates = agent_vitals_runtime::trust_audit::discover_host_candidates(&home, &profiles);
+                let payload = serde_json::json!({"candidates": candidates, "profile_errors": profile_errors});
+                if *json { println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default()); }
+                else {
+                    for candidate in payload["candidates"].as_array().into_iter().flatten() {
+                        println!("{}: {}", candidate["id"].as_str().unwrap_or("?"), candidate["coverage_state"].as_str().unwrap_or("?"));
+                    }
+                }
+                return;
+            }
+            TrustAction::Monitor { action } => match action {
+                TrustMonitorAction::Snapshot { json } => {
+                    let report = agent_vitals_runtime::trust_runtime_monitor::snapshot_and_store(
+                        &data_home, &agent_vitals_runtime::takeover::machine_namespace(),
+                        agent_vitals_runtime::sql_sync::now_ms(),
+                    );
+                    match report {
+                        Ok(report) if *json => println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default()),
+                        Ok(report) => println!("runtime monitor: {} candidate processes, {} observations ({})", report.candidate_processes, report.observations, report.capability),
+                        Err(error) => { eprintln!("trust monitor failed: {error}"); std::process::exit(2); }
+                    }
+                    return;
+                }
+            },
         }
     }
 

@@ -336,15 +336,19 @@ pub fn run_report(conn: &Connection, run_id: &str) -> Result<Option<serde_json::
 mod tests {
     use super::*;
     use crate::authority::AuthorityDb;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn db() -> (AuthorityDb, std::path::PathBuf) {
         let path = std::env::temp_dir().join(format!(
-            "av-probe-store-{}-{}.sqlite3",
+            "av-probe-store-{}-{}-{}.sqlite3",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            DB_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         let authority = AuthorityDb::open(&path, 1).unwrap();
         (authority, path)

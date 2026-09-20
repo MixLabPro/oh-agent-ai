@@ -40,3 +40,5 @@ pub mod route_quality;
 pub mod issues;
 pub mod probe;
 pub mod workflow;
+pub mod trust;
+pub mod trust_correlator;

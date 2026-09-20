@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 21;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -45,6 +45,19 @@ pub fn default_authority_path(data_home: &Path) -> PathBuf {
 /// 以浮点入库（spec §5.3），折算在展示层。
 pub type HostBillRow = (String, String, String, i64, String);
 pub type HostBillDetailRow = (String, String, String, String, i64, String, String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustMonitorState {
+    pub enabled: bool,
+    pub interval_seconds: i64,
+    pub notifications_enabled: bool,
+    pub capability: String,
+    pub last_success_at_ms: Option<i64>,
+    pub last_error_code: Option<String>,
+    pub last_alert_key: Option<String>,
+    pub last_alert_at_ms: Option<i64>,
+    pub updated_at_ms: i64,
+}
 
 /// 用户计费声明的一行：关系本身和付款/账单分开建模。金额可未知，不能以
 /// `host_bills` 的实付金额或公开价卡来填充。
@@ -1060,6 +1073,122 @@ CREATE TABLE IF NOT EXISTS probe_verdicts (
 );
 "#;
 
+/// v18：Finding 2.0 的本地信任观察面。它只存已脱敏的行为增量与本地锚点；
+/// 不存工作区路径、文件名清单、代码/消息、请求体、凭据或签名 URL。
+const SCHEMA_V18_ADD: &str = r#"
+CREATE TABLE IF NOT EXISTS trust_observations (
+  observation_id TEXT PRIMARY KEY,
+  machine_namespace TEXT NOT NULL,
+  host TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  actor_kind TEXT NOT NULL CHECK (actor_kind IN ('main','sidecar','helper','extension','unknown')),
+  actor_version TEXT,
+  observed_at_ms INTEGER NOT NULL CHECK (observed_at_ms >= 0),
+  observation_kind TEXT NOT NULL CHECK (observation_kind IN (
+    'file_scope','package','credential','connection','outbound_bytes','remote_ack','consent_state','retry')),
+  stage TEXT NOT NULL CHECK (stage IN (
+    'read_observed','package_observed','credential_observed','egress_attempted','egress_transmitted','remote_accepted')),
+  evidence_level TEXT NOT NULL CHECK (evidence_level IN ('E0','E1','E2','E3','E4','E5')),
+  workspace_ref TEXT,
+  scope_classes_json TEXT NOT NULL,
+  file_count INTEGER CHECK (file_count IS NULL OR file_count >= 0),
+  byte_count INTEGER CHECK (byte_count IS NULL OR byte_count >= 0),
+  destination_class TEXT CHECK (destination_class IS NULL OR destination_class IN (
+    'vendor_api','object_storage','telemetry','eval','model_api','unknown')),
+  destination_host TEXT,
+  consent_state TEXT NOT NULL CHECK (consent_state IN ('enabled','disabled','unavailable','ambiguous')),
+  source_id TEXT REFERENCES source_files(source_id),
+  native_event_id TEXT,
+  source_line INTEGER CHECK (source_line IS NULL OR source_line >= 0),
+  source_byte_offset INTEGER CHECK (source_byte_offset IS NULL OR source_byte_offset >= 0),
+  collector_id TEXT NOT NULL,
+  collector_version TEXT NOT NULL,
+  provenance_json TEXT NOT NULL,
+  expires_at_ms INTEGER CHECK (expires_at_ms IS NULL OR expires_at_ms >= observed_at_ms),
+  ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id),
+  created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS trust_observations_host_time
+  ON trust_observations(host, observed_at_ms);
+CREATE INDEX IF NOT EXISTS trust_observations_actor_time
+  ON trust_observations(machine_namespace, actor_id, observed_at_ms);
+CREATE INDEX IF NOT EXISTS trust_observations_expiry
+  ON trust_observations(expires_at_ms) WHERE expires_at_ms IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS trust_issue_evidence (
+  issue_id TEXT NOT NULL REFERENCES issue_instances(issue_id) ON DELETE CASCADE,
+  observation_id TEXT NOT NULL REFERENCES trust_observations(observation_id) ON DELETE CASCADE,
+  evidence_role TEXT NOT NULL CHECK (evidence_role IN ('supporting','contradicting','context')),
+  linked_at_ms INTEGER NOT NULL CHECK (linked_at_ms >= 0),
+  PRIMARY KEY(issue_id, observation_id, evidence_role)
+);
+CREATE INDEX IF NOT EXISTS trust_issue_evidence_observation
+  ON trust_issue_evidence(observation_id, issue_id);
+"#;
+
+/// v19：显式 Trust 监测控制面。它只记录开关、能力和类型化错误状态；不记录
+/// 权限原文、进程名、路径、网络端点或通知正文。
+const SCHEMA_V19_ADD: &str = r#"
+CREATE TABLE IF NOT EXISTS trust_monitor_state (
+  config_id INTEGER PRIMARY KEY CHECK (config_id = 1),
+  enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),
+  interval_seconds INTEGER NOT NULL CHECK (interval_seconds BETWEEN 5 AND 3600),
+  notifications_enabled INTEGER NOT NULL CHECK (notifications_enabled IN (0,1)),
+  capability TEXT NOT NULL CHECK (capability IN ('not_started','available','partial','unavailable')),
+  last_success_at_ms INTEGER CHECK (last_success_at_ms IS NULL OR last_success_at_ms >= 0),
+  last_error_code TEXT,
+  last_alert_key TEXT,
+  last_alert_at_ms INTEGER CHECK (last_alert_at_ms IS NULL OR last_alert_at_ms >= 0),
+  updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+);
+INSERT OR IGNORE INTO trust_monitor_state(
+  config_id, enabled, interval_seconds, notifications_enabled, capability, updated_at_ms
+) VALUES (1, 0, 30, 0, 'not_started', 0);
+"#;
+
+/// v20：consent 的状态必须带有明确的开关维度；旧 observation 保留为 NULL，
+/// 只能产生 unavailable/非 critical 结论，不能回填猜测。
+const SCHEMA_V20_ADD: &str = r#"
+ALTER TABLE trust_observations ADD COLUMN consent_kind TEXT CHECK (
+  consent_kind IS NULL OR consent_kind IN ('indexing','telemetry','improvement','privacy','other_declared')
+);
+CREATE INDEX IF NOT EXISTS trust_observations_consent
+  ON trust_observations(consent_kind, consent_state, observed_at_ms);
+"#;
+
+/// v21：通知冷却按稳定 Finding key 分桶。旧的单行状态字段保留作向后兼容，
+/// 但不能让两个不同 Finding 互相抑制。
+const SCHEMA_V21_ADD: &str = r#"
+CREATE TABLE IF NOT EXISTS trust_monitor_alerts (
+  alert_key TEXT PRIMARY KEY,
+  last_alert_at_ms INTEGER NOT NULL CHECK (last_alert_at_ms >= 0),
+  updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+);
+CREATE TABLE IF NOT EXISTS trust_suppressions (
+  suppression_id TEXT PRIMARY KEY,
+  issue_type TEXT NOT NULL,
+  instance_fingerprint TEXT,
+  reason TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+  revoked_at_ms INTEGER CHECK (revoked_at_ms IS NULL OR revoked_at_ms >= created_at_ms)
+);
+CREATE INDEX IF NOT EXISTS trust_suppressions_lookup
+  ON trust_suppressions(issue_type, instance_fingerprint, revoked_at_ms);
+"#;
+
+fn ensure_schema_v20(conn: &Connection) -> Result<(), AuthorityError> {
+    let has_consent_kind: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('trust_observations') WHERE name = 'consent_kind'",
+        [], |row| row.get::<_, i64>(0),
+    )? > 0;
+    if !has_consent_kind {
+        conn.execute_batch(SCHEMA_V20_ADD)?;
+    } else {
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS trust_observations_consent ON trust_observations(consent_kind, consent_state, observed_at_ms);")?;
+    }
+    Ok(())
+}
+
 /// 增量 7.5：v1 base 表之上的 4 个脱敏只读 view。`CREATE VIEW IF NOT EXISTS`
 /// 幂等——在 `ensure_schema` 的「version == SCHEMA_VERSION」分支上执行。
 /// **不**进 `SCHEMA_V1` 主 DDL，避免『v1 库必须重跑 SCHEMA_V1 才能拿 view』
@@ -1118,6 +1247,7 @@ pub struct HostImportedDataDeletion {
     pub facts: usize,
     pub sessions: usize,
     pub source_files: usize,
+    pub trust_observations: usize,
 }
 
 /// 权威库连接。**非 Sync**（rusqlite `Connection` 语义同旧 store）；每线程
@@ -1247,6 +1377,62 @@ impl AuthorityDb {
             Some(v) if v == SCHEMA_VERSION => {
                 // 增量 7.5：脱敏只读 view（`query_sql_readonly` 的来源层屏障）。
                 // 版本无关的只读加法——`CREATE VIEW IF NOT EXISTS` 幂等。
+                conn.execute_batch(SCHEMA_V18_ADD)?;
+                conn.execute_batch(SCHEMA_V19_ADD)?;
+                conn.execute_batch(SCHEMA_V21_ADD)?;
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(17) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V18_ADD)
+                    .and_then(|_| conn.execute_batch(SCHEMA_V19_ADD));
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(18) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V19_ADD);
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(19) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = ensure_schema_v20(conn).and_then(|()| conn.execute_batch(SCHEMA_V21_ADD).map_err(AuthorityError::from));
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(20) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = conn.execute_batch(SCHEMA_V21_ADD);
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
@@ -1704,6 +1890,13 @@ impl AuthorityDb {
                 let _ = now_ms; // v1 建库本身不写业务时间戳（版本行是元数据）
             }
         }
+        // v18/v19 都只有 `CREATE ... IF NOT EXISTS`。历史分支在升级 V1–V17
+        // 后会把 version 直接盖到当前值，故在同一 writer open 内补一次；这也
+        // 修复崩溃恰好发生在旧版链已提交、增量表尚未执行时留下的陈旧版本戳。
+        conn.execute_batch(SCHEMA_V18_ADD)?;
+        conn.execute_batch(SCHEMA_V19_ADD)?;
+        ensure_schema_v20(conn)?;
+        conn.execute_batch(SCHEMA_V21_ADD)?;
         // 中断批次清扫（§3.1）：任何 running 的批次在下次 open 时标
         // interrupted——它是观测记录，不是可恢复状态（恢复靠幂等重跑）。
         conn.execute(
@@ -1778,6 +1971,19 @@ impl AuthorityDb {
         )?)
     }
 
+    /// V18：按每条 Observation 自己的过期时间清理高频、短保留的信任证据。
+    /// `trust_issue_evidence` 由外键级联删除；Issue 本身保留为历史结论，后续
+    /// correlator 可据「证据已过期」重新评价，而不在 retention 中绕过状态机。
+    pub fn retention_trust_observations(&self, now_ms: i64) -> Result<usize, AuthorityError> {
+        self.with_immediate_txn(|conn| {
+            Ok(conn.execute(
+                "DELETE FROM trust_observations
+                 WHERE expires_at_ms IS NOT NULL AND expires_at_ms < ?1",
+                rusqlite::params![now_ms],
+            )?)
+        })
+    }
+
     /// 删除一个宿主由本 App 导入的可见数据。事实和会话采用既有软删除语义，
     /// 使历史计费归因外键仍完整；来源指纹被物理删除，恢复读取后才会重新导入。
     /// 不触及用户手工账单、计费声明、价格快照或任何其他宿主。
@@ -1801,6 +2007,12 @@ impl AuthorityDb {
                 [host],
             )?;
             conn.execute("DELETE FROM host_runtime_snapshots WHERE host = ?1", [host])?;
+            // Trust observation 通过 source_id 间接引用 source_files，必须在源指纹
+            // 清理前先删；关联表由 observation 的 ON DELETE CASCADE 清理。
+            let trust_observations = conn.execute(
+                "DELETE FROM trust_observations WHERE host = ?1",
+                [host],
+            )?;
             // route_evidence 是导入的路由证据；清除其 ID 后再删行，避免已软
             // 删除的事实留下悬挂证据引用。
             conn.execute("UPDATE usage_facts SET route_evidence_id = NULL WHERE host = ?1", [host])?;
@@ -1809,8 +2021,158 @@ impl AuthorityDb {
             // 指纹清理，也避免已删除数据继续关联可推断的来源元数据。
             conn.execute("UPDATE usage_facts SET source_id = NULL WHERE host = ?1", [host])?;
             let source_files = conn.execute("DELETE FROM source_files WHERE host = ?1", [host])?;
-            Ok(HostImportedDataDeletion { facts, sessions, source_files })
+            Ok(HostImportedDataDeletion { facts, sessions, source_files, trust_observations })
         })
+    }
+
+    /// Read the explicit Trust monitor control state. The row is seeded by the
+    /// schema migration, but a missing row still degrades to an unavailable
+    /// state instead of silently enabling monitoring.
+    pub fn trust_monitor_state_get(&self) -> Result<Option<TrustMonitorState>, AuthorityError> {
+        let result = self.conn.query_row(
+            "SELECT enabled, interval_seconds, notifications_enabled, capability,
+                    last_success_at_ms, last_error_code, last_alert_key,
+                    last_alert_at_ms, updated_at_ms
+             FROM trust_monitor_state WHERE config_id = 1",
+            [],
+            |row| Ok(TrustMonitorState {
+                enabled: row.get::<_, i64>(0)? != 0,
+                interval_seconds: row.get(1)?,
+                notifications_enabled: row.get::<_, i64>(2)? != 0,
+                capability: row.get(3)?,
+                last_success_at_ms: row.get(4)?, last_error_code: row.get(5)?,
+                last_alert_key: row.get(6)?, last_alert_at_ms: row.get(7)?, updated_at_ms: row.get(8)?,
+            }),
+        );
+        match result {
+            Ok(state) => Ok(Some(state)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn trust_monitor_state_set(
+        &self, enabled: bool, interval_seconds: i64, notifications_enabled: bool, now_ms: i64,
+    ) -> Result<(), AuthorityError> {
+        if !(5..=3600).contains(&interval_seconds) || now_ms < 0 {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "invalid_trust_monitor_config".to_string(),
+            )));
+        }
+        self.conn.execute(
+            "INSERT INTO trust_monitor_state(
+                config_id, enabled, interval_seconds, notifications_enabled,
+                capability, updated_at_ms)
+             VALUES (1, ?1, ?2, ?3, 'not_started', ?4)
+             ON CONFLICT(config_id) DO UPDATE SET
+                enabled = excluded.enabled, interval_seconds = excluded.interval_seconds,
+                notifications_enabled = excluded.notifications_enabled,
+                capability = 'not_started', last_success_at_ms = NULL,
+                last_error_code = NULL, updated_at_ms = excluded.updated_at_ms",
+            rusqlite::params![enabled as i64, interval_seconds, notifications_enabled as i64, now_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn trust_monitor_record_result(
+        &self, capability: &str, success_at_ms: Option<i64>, error_code: Option<&str>, now_ms: i64,
+    ) -> Result<(), AuthorityError> {
+        if !matches!(capability, "not_started" | "available" | "partial" | "unavailable")
+            || now_ms < 0 || success_at_ms.is_some_and(|value| value < 0)
+        {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "invalid_trust_monitor_result".to_string(),
+            )));
+        }
+        self.conn.execute(
+            "UPDATE trust_monitor_state SET capability = ?1, last_success_at_ms = ?2,
+                    last_error_code = ?3, updated_at_ms = ?4 WHERE config_id = 1",
+            rusqlite::params![capability, success_at_ms, error_code, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Claim a notification key with a cooldown. Returns false when the same
+    /// finding family was already delivered recently, making restart/retry
+    /// behavior idempotent without storing notification text.
+    pub fn trust_monitor_claim_alert(
+        &self, key: &str, now_ms: i64, cooldown_ms: i64,
+    ) -> Result<bool, AuthorityError> {
+        if key.is_empty() || key.len() > 128 || now_ms < 0 || cooldown_ms < 0 {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "invalid_trust_monitor_alert".to_string(),
+            )));
+        }
+        let cutoff_ms = now_ms.saturating_sub(cooldown_ms);
+        let previous = self.conn.query_row(
+            "SELECT last_alert_at_ms FROM trust_monitor_alerts WHERE alert_key = ?1",
+            [key], |row| row.get::<_, i64>(0),
+        ).optional()?;
+        if previous.is_some_and(|at| at > cutoff_ms) {
+            return Ok(false);
+        }
+        self.conn.execute(
+            "INSERT INTO trust_monitor_alerts(alert_key, last_alert_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?2)
+             ON CONFLICT(alert_key) DO UPDATE SET last_alert_at_ms = excluded.last_alert_at_ms,
+             updated_at_ms = excluded.updated_at_ms",
+            rusqlite::params![key, now_ms],
+        )?;
+        // Keep the legacy summary fields populated for old UI builds.  They are
+        // informational only; the table above is the source of cooldown truth.
+        self.conn.execute(
+            "UPDATE trust_monitor_state SET last_alert_key = ?1, last_alert_at_ms = ?2,
+                    updated_at_ms = ?2 WHERE config_id = 1",
+            rusqlite::params![key, now_ms],
+        )?;
+        Ok(true)
+    }
+
+    pub fn trust_suppression_active(
+        &self, issue_type: &str, instance_fingerprint: Option<&str>,
+    ) -> Result<bool, AuthorityError> {
+        let active: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM trust_suppressions
+             WHERE issue_type = ?1 AND revoked_at_ms IS NULL
+               AND (instance_fingerprint IS NULL OR instance_fingerprint = ?2)",
+            rusqlite::params![issue_type, instance_fingerprint], |row| row.get(0),
+        )?;
+        Ok(active > 0)
+    }
+
+    pub fn trust_suppression_set(
+        &self, suppression_id: &str, issue_type: &str, instance_fingerprint: Option<&str>,
+        reason: &str, now_ms: i64,
+    ) -> Result<(), AuthorityError> {
+        if suppression_id.is_empty() || suppression_id.len() > 128 || issue_type.is_empty()
+            || reason.is_empty() || reason.len() > 500 || now_ms < 0
+        {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "invalid_trust_suppression".to_string(),
+            )));
+        }
+        self.conn.execute(
+            "INSERT INTO trust_suppressions(suppression_id, issue_type, instance_fingerprint, reason, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(suppression_id) DO UPDATE SET issue_type=excluded.issue_type,
+             instance_fingerprint=excluded.instance_fingerprint, reason=excluded.reason,
+             revoked_at_ms=NULL",
+            rusqlite::params![suppression_id, issue_type, instance_fingerprint, reason, now_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn trust_suppression_revoke(&self, suppression_id: &str, now_ms: i64) -> Result<bool, AuthorityError> {
+        if suppression_id.is_empty() || now_ms < 0 {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "invalid_trust_suppression".to_string(),
+            )));
+        }
+        Ok(self.conn.execute(
+            "UPDATE trust_suppressions SET revoked_at_ms = ?2
+             WHERE suppression_id = ?1 AND revoked_at_ms IS NULL",
+            rusqlite::params![suppression_id, now_ms],
+        )? == 1)
     }
 
     // ─────── v0.9.1 Phase 3.4：budget_config / budget_snoozes 显式管理 API
@@ -3510,6 +3872,11 @@ mod tests {
                 "billing_recalculation_jobs",
                 "billing_recalculation_results",
                 "billing_fact_attributions",
+                "trust_observations",
+                "trust_issue_evidence",
+                "trust_monitor_state",
+                "trust_monitor_alerts",
+                "trust_suppressions",
             ] {
                 assert!(tables.iter().any(|x| x == t), "缺表 {t}: {tables:?}");
             }
@@ -3779,6 +4146,73 @@ mod tests {
             ).unwrap();
             assert_eq!(present, 1, "{table} 必须被重建");
         }
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn v17_stale_stamp_recreates_trust_tables_idempotently() {
+        // v17 已是 Findings 2.0 的上一版；即使升级中断留下了陈旧戳，重开
+        // 也必须仅补建 v18 两表，不改变已有业务数据。
+        let db = tmp_db("v17-to-v18");
+        {
+            let seeded = AuthorityDb::open(&db, 1).unwrap();
+            seeded.conn().execute_batch(
+                "DROP TABLE trust_issue_evidence;
+                 DROP TABLE trust_observations;
+                 UPDATE schema_meta SET value = '17' WHERE key = 'schema_version';",
+            ).unwrap();
+            drop(seeded);
+        }
+        let upgraded = AuthorityDb::open(&db, 2).unwrap();
+        let version: String = upgraded.conn().query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+        for table in ["trust_observations", "trust_issue_evidence"] {
+            let present: i64 = upgraded.conn().query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(present, 1, "{table} 必须被重建");
+        }
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn v18_upgrade_seeds_trust_monitor_off_and_alert_claim_is_idempotent() {
+        let db = tmp_db("v18-to-v19");
+        {
+            let seeded = AuthorityDb::open(&db, 1).unwrap();
+            seeded.conn().execute_batch(
+                "DROP TABLE trust_monitor_state;
+                 UPDATE schema_meta SET value = '18' WHERE key = 'schema_version';",
+            ).unwrap();
+            drop(seeded);
+        }
+        let upgraded = AuthorityDb::open(&db, 2).unwrap();
+        let state = upgraded.trust_monitor_state_get().unwrap().unwrap();
+        assert!(!state.enabled);
+        assert_eq!(state.interval_seconds, 30);
+        assert!(!state.notifications_enabled);
+        assert_eq!(state.capability, "not_started");
+
+        upgraded.trust_monitor_state_set(true, 5, true, 10).unwrap();
+        upgraded.trust_monitor_record_result("available", Some(11), None, 12).unwrap();
+        let state = upgraded.trust_monitor_state_get().unwrap().unwrap();
+        assert!(state.enabled && state.notifications_enabled);
+        assert_eq!(state.last_success_at_ms, Some(11));
+        assert!(upgraded.trust_monitor_claim_alert("trust-runtime-v1", 20, 100).unwrap());
+        assert!(!upgraded.trust_monitor_claim_alert("trust-runtime-v1", 50, 100).unwrap());
+        assert!(upgraded.trust_monitor_claim_alert("trust-runtime-v1", 121, 100).unwrap());
+        assert!(upgraded.trust_monitor_claim_alert("another-family", 122, 100).unwrap());
+        upgraded.trust_suppression_set("sup-1", "SV709", Some("trust_instance"), "user review", 123).unwrap();
+        assert!(upgraded.trust_suppression_active("SV709", Some("trust_instance")).unwrap());
+        assert!(!upgraded.trust_suppression_active("SV709", Some("other_instance")).unwrap());
+        assert!(upgraded.trust_suppression_revoke("sup-1", 124).unwrap());
+        assert!(!upgraded.trust_suppression_active("SV709", Some("trust_instance")).unwrap());
+        assert!(upgraded.trust_monitor_state_set(false, 60, false, 123).is_ok());
+        assert!(!upgraded.trust_monitor_state_get().unwrap().unwrap().enabled);
+        assert!(upgraded.trust_monitor_state_set(true, 4, false, 124).is_err());
         let _ = std::fs::remove_file(&db);
     }
 
@@ -5044,17 +5478,67 @@ mod tests {
                ('session-codex', 'codex', 'c', 'm', 1), ('session-dsh', 'dsh', 'd', 'm', 1);
              INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key, source_event_id, observation_kind, source_id, ingested_run_id, created_at_ms, updated_at_ms) VALUES
                ('fact-codex', 'codex', 'm', 'c', 'session-codex', 'e1', 'usage', 'source-codex', 'run', 1, 1),
-               ('fact-dsh', 'dsh', 'm', 'd', 'session-dsh', 'e2', 'usage', 'source-dsh', 'run', 1, 1);"
+               ('fact-dsh', 'dsh', 'm', 'd', 'session-dsh', 'e2', 'usage', 'source-dsh', 'run', 1, 1);
+             INSERT INTO trust_observations(
+                 observation_id, machine_namespace, host, actor_id, actor_kind,
+                 observed_at_ms, observation_kind, stage, evidence_level,
+                 scope_classes_json, consent_state, collector_id, collector_version,
+                 provenance_json, ingested_run_id, created_at_ms
+             ) VALUES
+               ('trust-codex', 'm', 'codex', 'actor-codex', 'sidecar', 1, 'package',
+                'package_observed', 'E1', '[]', 'unavailable', 'test', 'v1', '{}', 'run', 1),
+               ('trust-dsh', 'm', 'dsh', 'actor-dsh', 'sidecar', 1, 'package',
+                'package_observed', 'E1', '[]', 'unavailable', 'test', 'v1', '{}', 'run', 1);"
         ).unwrap();
         db.host_bill_put("bill-dsh", "dsh", "deepseek", "2026-09", "metered_actual", 100, "CNY", "user:receipt", 2).unwrap();
-        assert_eq!(db.delete_imported_host_data("codex", 3).unwrap(), HostImportedDataDeletion { facts: 1, sessions: 1, source_files: 1 });
+        assert_eq!(db.delete_imported_host_data("codex", 3).unwrap(), HostImportedDataDeletion { facts: 1, sessions: 1, source_files: 1, trust_observations: 1 });
         let (codex_live, dsh_live, sources): (i64, i64, i64) = db.conn().query_row(
             "SELECT SUM(host = 'codex' AND deleted_at_ms IS NULL), SUM(host = 'dsh' AND deleted_at_ms IS NULL), COUNT(*) FROM usage_facts", [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         ).unwrap();
         assert_eq!((codex_live, dsh_live, sources), (0, 1, 2));
         assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM source_files WHERE host = 'codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM trust_observations WHERE host = 'dsh'", [], |r| r.get::<_, i64>(0)).unwrap(), 1, "other host trust observations remain");
         assert_eq!(db.host_bill_count().unwrap(), 1, "manual bills are not imported source data");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn retention_trust_observations_expires_evidence_links_only() {
+        let path = tmp_db("trust-retention");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run", "test", 1).unwrap();
+        db.with_immediate_txn(|conn| {
+            conn.execute_batch(
+                "INSERT INTO trust_observations(
+                    observation_id, machine_namespace, host, actor_id, actor_kind,
+                    observed_at_ms, observation_kind, stage, evidence_level,
+                    scope_classes_json, consent_state, collector_id, collector_version,
+                    provenance_json, expires_at_ms, ingested_run_id, created_at_ms
+                 ) VALUES
+                    ('expired', 'machine', 'zcode', 'actor', 'sidecar', 1, 'package',
+                     'package_observed', 'E1', '[]', 'unavailable', 'test', 'v1', '{}', 2, 'run', 1),
+                    ('live', 'machine', 'zcode', 'actor', 'sidecar', 1, 'package',
+                     'package_observed', 'E1', '[]', 'unavailable', 'test', 'v1', '{}', NULL, 'run', 1);",
+            )?;
+            let issue_id = crate::issues::upsert_issue(conn, &crate::issues::IssueInput {
+                machine_namespace: "machine", host: "zcode", session_key: None,
+                issue_type: "SV702", instance_fingerprint: "trust-retention", status: "open",
+                severity: "warning", evaluator_id: "trust", evaluator_version: "v1",
+                evidence_fingerprint: "evidence", opened_at_ms: 1, metadata_json: "{}",
+            })?;
+            conn.execute(
+                "INSERT INTO trust_issue_evidence(issue_id, observation_id, evidence_role, linked_at_ms)
+                 VALUES(?1, 'expired', 'supporting', 1)",
+                [issue_id],
+            )?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(db.retention_trust_observations(3).unwrap(), 1);
+        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM trust_observations", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM trust_issue_evidence", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM issue_instances", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(db.retention_trust_observations(3).unwrap(), 0, "重复清理必须幂等");
         let _ = std::fs::remove_file(path);
     }
 

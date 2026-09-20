@@ -1,0 +1,226 @@
+//! Explicit, low-privilege runtime Trust snapshot for otherwise unprofiled
+//! local processes.
+//!
+//! This is deliberately a point-in-time sensor, not a blocker or TLS proxy.
+//! On macOS it consumes `lsof` field output without storing paths, process
+//! names, arguments, endpoints, request bodies, or credentials. A concurrent
+//! Git-history read, archive write, and established connection can support an
+//! E3 *attempt* observation; it cannot prove transmitted bytes or remote use.
+
+use agent_vitals_domain::trust::{
+    TrustActorKind, TrustConsentState, TrustEvidenceLevel, TrustObservation,
+    TrustObservationKind, TrustStage,
+};
+use crate::trust_identity::TrustIdentity;
+use serde::Serialize;
+use serde_json::json;
+
+const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ProcessSample {
+    pid: String,
+    command: String,
+    has_git_history: bool,
+    writes_archive: bool,
+    established_connection: bool,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct TrustRuntimeSnapshotReport {
+    pub capability: String,
+    pub candidate_processes: usize,
+    pub observations: usize,
+    pub inserted: usize,
+    pub duplicate: usize,
+    pub findings_upserted: usize,
+    pub notification_candidates: usize,
+    pub notification_keys: Vec<String>,
+    pub evidence_links_added: usize,
+}
+
+fn is_git_history_path(value: &str) -> bool {
+    let path = value.to_ascii_lowercase();
+    ["/.git/objects", "/.git/lfs", "/.git/logs", "/.git/reflog"]
+        .iter().any(|needle| path.contains(needle))
+}
+
+fn is_archive_output(value: &str, fd: &str) -> bool {
+    if !fd.ends_with('w') { return false; }
+    let path = value.to_ascii_lowercase();
+    path.ends_with(".tar") || path.ends_with(".tar.gz") || path.ends_with(".tgz")
+        || path.ends_with(".zip") || path.ends_with(".enc")
+        || path.contains("snapshot") || path.contains("checkpoint")
+}
+
+fn is_established_connection(value: &str) -> bool {
+    value.starts_with("TCP") && value.contains("->") && value.contains("(ESTABLISHED)")
+}
+
+/// Parse `lsof -Fpcfn` output. This pure boundary makes the platform command
+/// testable while ensuring the raw `n` values never leave this function.
+fn parse_lsof_fields(raw: &str) -> Vec<ProcessSample> {
+    let mut samples = Vec::new();
+    let mut current: Option<ProcessSample> = None;
+    let mut fd = String::new();
+    for line in raw.lines() {
+        let Some((field, value)) = line.chars().next().map(|field| (field, &line[field.len_utf8()..])) else { continue; };
+        match field {
+            'p' => {
+                if let Some(sample) = current.take() { samples.push(sample); }
+                current = Some(ProcessSample { pid: value.to_string(), ..ProcessSample::default() });
+                fd.clear();
+            }
+            'c' => if let Some(sample) = current.as_mut() { sample.command = value.to_string(); },
+            'f' => fd = value.to_string(),
+            'n' => if let Some(sample) = current.as_mut() {
+                sample.has_git_history |= is_git_history_path(value);
+                sample.writes_archive |= is_archive_output(value, &fd);
+                sample.established_connection |= is_established_connection(value);
+            },
+            _ => {},
+        }
+    }
+    if let Some(sample) = current { samples.push(sample); }
+    samples
+}
+
+fn observations_from_samples(
+    samples: &[ProcessSample], identity: &TrustIdentity, machine_namespace: &str, observed_at_ms: i64,
+) -> Vec<TrustObservation> {
+    if machine_namespace.is_empty() || observed_at_ms < 0 { return Vec::new(); }
+    let minute_bucket = observed_at_ms / 60_000;
+    let mut out = Vec::new();
+    for sample in samples.iter().filter(|sample| sample.has_git_history && sample.writes_archive) {
+        let actor_id = identity.actor_ref(&format!("{}:{}", sample.pid, sample.command));
+        let native = identity.event_ref(&format!("runtime:{minute_bucket}:{}", sample.pid));
+        out.push(TrustObservation {
+            observation_id: format!("runtime_package_{actor_id}_{minute_bucket}"), machine_namespace: machine_namespace.to_string(),
+            host: "unattributed-local-agent".to_string(), actor_id: actor_id.clone(), actor_kind: TrustActorKind::Unknown,
+            actor_version: None, observed_at_ms, observation_kind: TrustObservationKind::Package,
+            stage: TrustStage::PackageObserved, evidence_level: TrustEvidenceLevel::E1LocalArtifact,
+            workspace_ref: None, scope_classes: vec!["git_history".to_string(), "archive_output".to_string()],
+            file_count: None, byte_count: None, destination_class: None, destination_host: None,
+            consent_kind: None, consent_state: TrustConsentState::Unavailable, source_id: None, native_event_id: Some(native.clone()),
+            source_line: None, source_byte_offset: None, collector_id: "macos-lsof-runtime".to_string(),
+            collector_version: "v1".to_string(),
+            provenance: json!({"git_history": true, "archive_output": true, "content_read": false}),
+            expires_at_ms: observed_at_ms.checked_add(RETENTION_MS),
+        });
+        if sample.established_connection {
+            out.push(TrustObservation {
+                observation_id: format!("runtime_egress_{actor_id}_{minute_bucket}"), machine_namespace: machine_namespace.to_string(),
+                host: "unattributed-local-agent".to_string(), actor_id, actor_kind: TrustActorKind::Unknown,
+                actor_version: None, observed_at_ms, observation_kind: TrustObservationKind::Connection,
+                stage: TrustStage::EgressAttempted, evidence_level: TrustEvidenceLevel::E3NetworkAttempt,
+                workspace_ref: None, scope_classes: vec!["git_history".to_string(), "archive_output".to_string()],
+                file_count: None, byte_count: None, destination_class: None, destination_host: None,
+                consent_kind: None, consent_state: TrustConsentState::Unavailable, source_id: None, native_event_id: Some(native),
+                source_line: None, source_byte_offset: None, collector_id: "macos-lsof-runtime".to_string(),
+                collector_version: "v1".to_string(),
+                provenance: json!({"git_history": true, "archive_output": true, "established_connection": true, "content_read": false}),
+                expires_at_ms: observed_at_ms.checked_add(RETENTION_MS),
+            });
+        }
+    }
+    out.sort_by(|left, right| left.observation_id.cmp(&right.observation_id));
+    out
+}
+
+#[cfg(target_os = "macos")]
+fn lsof_samples() -> Result<Vec<ProcessSample>, String> {
+    let output = std::process::Command::new("/usr/sbin/lsof")
+        .args(["-n", "-P", "-Fpcfn"])
+        .output()
+        .map_err(|_| "lsof_unavailable".to_string())?;
+    // lsof may exit 1 when it cannot inspect another user's process. Its field
+    // output is still useful for the current user, and the report remains a
+    // partial low-privilege snapshot rather than a claim of full coverage.
+    if output.stdout.is_empty() { return Err("lsof_no_visible_output".to_string()); }
+    let raw = String::from_utf8(output.stdout).map_err(|_| "lsof_invalid_output".to_string())?;
+    Ok(parse_lsof_fields(&raw))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn lsof_samples() -> Result<Vec<ProcessSample>, String> {
+    Err("runtime_sensor_unavailable_on_this_platform".to_string())
+}
+
+/// Capture one explicit local-process snapshot and persist redacted evidence.
+/// It intentionally does not install a watcher, request elevated permission,
+/// show notifications, or run in the background.
+pub fn snapshot_and_store(
+    data_home: &std::path::Path, machine_namespace: &str, now_ms: i64,
+) -> Result<TrustRuntimeSnapshotReport, String> {
+    let samples = match lsof_samples() {
+        Ok(samples) => samples,
+        Err(capability) => return Ok(TrustRuntimeSnapshotReport {
+            capability, candidate_processes: 0, observations: 0, inserted: 0, duplicate: 0,
+            findings_upserted: 0, notification_candidates: 0, evidence_links_added: 0,
+            notification_keys: Vec::new(),
+        }),
+    };
+    let identity = TrustIdentity::load_or_create(data_home)?;
+    let observations = observations_from_samples(&samples, &identity, machine_namespace, now_ms);
+    let candidate_processes = samples.iter().filter(|sample| sample.has_git_history && sample.writes_archive).count();
+    let authority = agent_vitals_data::authority::AuthorityDb::open(
+        &agent_vitals_data::authority::default_authority_path(data_home), now_ms,
+    ).map_err(|error| format!("authority_open_failed:{error}"))?;
+    let run_id = format!("trust-runtime-snapshot:{now_ms}");
+    authority.begin_run(&run_id, "trust-runtime-snapshot", now_ms)
+        .map_err(|error| format!("trust_runtime_run_begin_failed:{error}"))?;
+    let write = authority.with_immediate_txn(|conn| {
+        let inserted = agent_vitals_data::trust::insert_observations(conn, &observations, &run_id, now_ms)?;
+        let ids: Vec<String> = observations.iter().map(|row| row.observation_id.clone()).collect();
+        let correlation = agent_vitals_data::trust_correlator::correlate_selected(conn, &ids)?;
+        Ok((inserted, correlation))
+    });
+    match write {
+        Ok((inserted, correlation)) => {
+            authority.finish_run(&run_id, "succeeded", None, None, now_ms)
+                .map_err(|error| format!("trust_runtime_run_finish_failed:{error}"))?;
+            Ok(TrustRuntimeSnapshotReport {
+                capability: "macos_lsof_partial".to_string(), candidate_processes,
+                observations: observations.len(), inserted: inserted.inserted, duplicate: inserted.duplicate,
+                findings_upserted: correlation.findings_upserted, notification_candidates: correlation.notification_candidates,
+                notification_keys: correlation.notification_keys,
+                evidence_links_added: correlation.evidence_links_added,
+            })
+        }
+        Err(error) => {
+            let _ = authority.finish_run(&run_id, "failed", Some("trust_runtime_write_failed"), Some(&error.to_string()), now_ms);
+            Err(format!("trust_runtime_write_failed:{error}"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{observations_from_samples, parse_lsof_fields};
+    use crate::trust_identity::TrustIdentity;
+
+    #[test]
+    fn parser_correlates_git_archive_and_connection_without_retaining_raw_fields() {
+        let source = "p42\ncprivate-agent\nf3r\nn/Users/example/project/.git/objects/ab/cd\nf5w\nn/private/tmp/workspace-snapshot.enc\nf9u\nnTCP 127.0.0.1:50000->198.51.100.2:443 (ESTABLISHED)\n";
+        let samples = parse_lsof_fields(source);
+        assert_eq!(samples.len(), 1);
+        let home = std::env::temp_dir().join(format!("av-trust-runtime-{}", std::process::id()));
+        let identity = TrustIdentity::load_or_create(&home).unwrap();
+        let observations = observations_from_samples(&samples, &identity, "machine", 120_000);
+        assert_eq!(observations.len(), 2);
+        for observation in observations {
+            assert!(observation.validate().is_ok());
+            assert!(!observation.actor_id.contains("private-agent"));
+            assert!(!observation.provenance.to_string().contains("private"));
+        }
+    }
+
+    #[test]
+    fn parser_does_not_make_a_package_from_an_open_git_file_alone() {
+        let source = "p42\ncgit\nf3r\nn/Users/example/project/.git/objects/ab/cd\nf9u\nnTCP 127.0.0.1:50000->198.51.100.2:443 (ESTABLISHED)\n";
+        let samples = parse_lsof_fields(source);
+        let home = std::env::temp_dir().join(format!("av-trust-runtime-no-package-{}", std::process::id()));
+        let identity = TrustIdentity::load_or_create(&home).unwrap();
+        assert!(observations_from_samples(&samples, &identity, "machine", 120_000).is_empty());
+    }
+}

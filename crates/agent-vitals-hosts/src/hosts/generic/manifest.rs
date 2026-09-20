@@ -84,6 +84,16 @@ pub struct PluginManifest {
     pub event_key_paths: Vec<String>,
     pub max_rows_per_file: u64,
     pub billing_locked: bool,
+    /// Optional local Trust artifact profile. This is a declarative, read-only
+    /// capability; it does not authorize a scanner to read file contents.
+    pub trust: Option<TrustArtifactProfile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustArtifactProfile {
+    pub roots: Vec<String>,
+    pub artifact_terms: Vec<String>,
+    pub extensions: Vec<String>,
 }
 
 /// 从 `~/` 展开后的 roots。保留原始串用于 display；展开在 discovery 做。
@@ -197,6 +207,7 @@ pub fn parse_manifest(value: serde_json::Value) -> Result<PluginManifest, Manife
         "event_key",
         "limits",
         "billing",
+        "trust",
     ];
     for key in obj.keys() {
         if !known.contains(&key.as_str()) {
@@ -417,6 +428,46 @@ pub fn parse_manifest(value: serde_json::Value) -> Result<PluginManifest, Manife
         Some(_) => return Err(err("billing", "必须是 object")),
     }
 
+    let trust = match obj.get("trust") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Object(trust)) => {
+            for key in trust.keys() {
+                if !matches!(key.as_str(), "roots" | "artifact_terms" | "extensions") {
+                    return Err(err(format!("trust.{key}"), "未知字段"));
+                }
+            }
+            let roots = string_array(trust.get("roots"), "trust.roots", 1, 8)?;
+            for (index, root) in roots.iter().enumerate() {
+                let relative = root.strip_prefix("~/").ok_or_else(|| err(
+                    format!("trust.roots[{index}]"), "必须是 ~/ 下的相对路径",
+                ))?;
+                let path = std::path::Path::new(relative);
+                if relative.is_empty() || relative.len() > 240 || path.is_absolute()
+                    || path.components().any(|part| !matches!(part, std::path::Component::Normal(_)))
+                {
+                    return Err(err(format!("trust.roots[{index}]"), "不得是绝对路径或包含 . / .."));
+                }
+            }
+            let artifact_terms = string_array(trust.get("artifact_terms"), "trust.artifact_terms", 1, 8)?;
+            for (index, term) in artifact_terms.iter().enumerate() {
+                if !safe_trust_token(term, 40) {
+                    return Err(err(format!("trust.artifact_terms[{index}]"), "必须是小写枚举 token"));
+                }
+            }
+            let extensions = string_array(trust.get("extensions"), "trust.extensions", 1, 8)?;
+            for (index, extension) in extensions.iter().enumerate() {
+                let Some(suffix) = extension.strip_prefix('.') else {
+                    return Err(err(format!("trust.extensions[{index}]"), "必须是 . 加小写扩展名"));
+                };
+                if !safe_trust_token(suffix, 16) {
+                    return Err(err(format!("trust.extensions[{index}]"), "必须是 . 加小写扩展名"));
+                }
+            }
+            Some(TrustArtifactProfile { roots, artifact_terms, extensions })
+        }
+        Some(_) => return Err(err("trust", "必须是 object")),
+    };
+
     Ok(PluginManifest {
         slug: slug.to_string(),
         display_name: display_name.to_string(),
@@ -428,7 +479,14 @@ pub fn parse_manifest(value: serde_json::Value) -> Result<PluginManifest, Manife
         event_key_paths,
         max_rows_per_file,
         billing_locked,
+        trust,
     })
+}
+
+fn safe_trust_token(value: &str, max_len: usize) -> bool {
+    value.bytes().next().is_some_and(|byte| byte.is_ascii_lowercase())
+        && value.len() <= max_len
+        && value.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn string_array(
@@ -510,6 +568,26 @@ mod tests {
         // 具名组提取走一次真实匹配。
         let caps = m.session_pattern.captures("model-io-sess_abc-123.jsonl").unwrap();
         assert_eq!(caps.name("id").unwrap().as_str(), "abc-123");
+    }
+
+    #[test]
+    fn trust_profile_is_optional_bounded_and_read_only() {
+        let mut value = zcode_manifest();
+        value["trust"] = json!({
+            "roots": ["~/.zcode/v2/checkpoints"],
+            "artifact_terms": ["snapshot", "checkpoint"],
+            "extensions": [".enc"]
+        });
+        let manifest = parse_manifest(value).unwrap();
+        let trust = manifest.trust.unwrap();
+        assert_eq!(trust.roots, ["~/.zcode/v2/checkpoints"]);
+        assert_eq!(trust.artifact_terms, ["snapshot", "checkpoint"]);
+
+        let mut unsafe_value = zcode_manifest();
+        unsafe_value["trust"] = json!({
+            "roots": ["~/../outside"], "artifact_terms": ["snapshot"], "extensions": [".enc"]
+        });
+        assert!(parse_manifest(unsafe_value).is_err(), "Trust roots must stay under HOME");
     }
 
     #[test]

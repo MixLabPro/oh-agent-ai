@@ -124,6 +124,26 @@
       "properties": {
         "policy": { "const": "lock:metered_estimate" }
       }
+    },
+    "trust": {
+      "type": "object",
+      "description": "Optional read-only Trust artifact profile. It never permits content or network-payload access.",
+      "required": ["roots", "artifact_terms", "extensions"],
+      "additionalProperties": false,
+      "properties": {
+        "roots": {
+          "type": "array", "minItems": 1, "maxItems": 8,
+          "items": { "type": "string", "pattern": "^~/.+" }
+        },
+        "artifact_terms": {
+          "type": "array", "minItems": 1, "maxItems": 8,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,39}$" }
+        },
+        "extensions": {
+          "type": "array", "minItems": 1, "maxItems": 8,
+          "items": { "type": "string", "pattern": "^\\.[a-z][a-z0-9_.-]{0,15}$" }
+        }
+      }
     }
   }
 }

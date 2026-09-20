@@ -6990,6 +6990,16 @@ function issueActionLabel(group) {
     "inspect-timeout-tool": "建议：查看超时的工具",
     "review-approval-choice": "建议：复核审批选择",
     "tighten-sandbox-mode": "建议：收紧沙箱权限",
+    "review-workspace-scope": "建议：复核工作区读取范围",
+    "review-repository-history-scope": "建议：复核仓库历史是否进入快照",
+    "review-secondary-session-reporting": "建议：复核会话二次上报设置",
+    "review-tool-payload-egress": "建议：复核工具载荷二次上报设置",
+    "review-consent-control-mismatch": "建议：复核同意开关与实际行为",
+    "review-background-audit-surface": "建议：复核后台组件与审计面",
+    "review-pending-retry-retention": "建议：复核待处理快照与重试策略",
+    "review-remote-egress-control": "建议：复核远程下发的上报控制",
+    "review-object-storage-egress": "建议：复核对象存储直传链路",
+    "review-declared-exclusions": "建议：复核厂商声明的排除范围",
     "diagnostic-only": "建议：查看数据状态",
   };
   return labels[remedy] || "建议：查看详情";
@@ -7161,6 +7171,29 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
       detailButton.textContent = "详情";
       detailButton.addEventListener("click", () => showIssueInstanceDetail(instance.issue_id, line, instance));
       line.appendChild(detailButton);
+      if (/^SV70[1-9]$|^SV710$/.test(String(group.rule || ""))) {
+        const suppressButton = el("button", "btn secondary");
+        suppressButton.type = "button";
+        suppressButton.textContent = "忽略此规则";
+        suppressButton.title = "按规则抑制后续系统通知；Finding 仍保留在历史证据中";
+        suppressButton.addEventListener("click", async () => {
+          if (!window.confirm("忽略 " + group.rule + " 的后续通知？历史 Finding 不会删除。")) return;
+          suppressButton.disabled = true;
+          try {
+            await invoke("trust_suppression_create", {
+              issueType: group.rule,
+              instanceFingerprint: null,
+              reason: "workbench user suppression",
+            });
+            showFindReceipt("已忽略 " + group.rule + " 的后续通知；历史证据仍保留。");
+            await loadFindings(true, false);
+          } catch (error) {
+            showBanner("find-banner", error, false);
+            suppressButton.disabled = false;
+          }
+        });
+        line.appendChild(suppressButton);
+      }
       if (!readOnlyEvidence) {
         const currentStatus = issueStatusCanonical(instance.status);
         for (const [status, label] of issueActionsForStatus(currentStatus)) {
@@ -7204,6 +7237,7 @@ async function showIssueInstanceDetail(issueId, line, seed) {
       evidence: issue && issue.evidence || seed && seed.evidence || null,
       opened_at_ms: issue && issue.opened_at_ms || seed && seed.opened_at_ms || null,
       metadata,
+      trust_timeline: issue && Array.isArray(issue.trust_timeline) ? issue.trust_timeline : null,
     });
   };
   renderDetail(seed);
@@ -8199,6 +8233,70 @@ async function recoverSource(button, host, actionKind) {
   }
 }
 
+async function loadTrustMonitorConfig() {
+  const toggle = document.getElementById("find-trust-monitor-toggle");
+  const interval = document.getElementById("find-trust-monitor-interval");
+  const notify = document.getElementById("find-trust-monitor-notify");
+  const status = document.getElementById("find-trust-monitor-status");
+  if (!toggle || !interval || !notify || !status) return;
+  try {
+    const config = await invoke("trust_monitor_config");
+    const enabled = !!(config && config.enabled);
+    toggle.checked = enabled;
+    notify.checked = !!(config && config.notifications_enabled);
+    notify.disabled = !enabled;
+    if (config && Number.isFinite(Number(config.interval_seconds))) {
+      interval.value = String(config.interval_seconds);
+    }
+    status.hidden = false;
+    status.textContent = config && config.status === "ok"
+      ? (enabled
+        ? "实时监测已开启 · " + (config.capability === "unavailable" ? "传感器不可用" : "仅本机脱敏元数据")
+        : "实时监测未开启")
+      : "实时监测状态不可用（默认关闭）";
+  } catch (_) {
+    toggle.checked = false;
+    notify.checked = false;
+    notify.disabled = true;
+    status.hidden = false;
+    status.textContent = "实时监测状态不可用（默认关闭）";
+  }
+  if (toggle.dataset.bound === "1") return;
+  toggle.dataset.bound = "1";
+  const save = async () => {
+    const enabled = toggle.checked;
+    const notificationsEnabled = notify.checked;
+    toggle.disabled = true;
+    interval.disabled = true;
+    notify.disabled = true;
+    try {
+      const saved = await invoke("save_trust_monitor_config", {
+        enabled,
+        intervalSeconds: Number(interval.value),
+        notificationsEnabled,
+      });
+      notify.checked = !!(saved && saved.notifications_enabled);
+      notify.disabled = !enabled;
+      status.hidden = false;
+      status.textContent = enabled
+        ? "实时监测已开启 · 仅本机脱敏元数据" + (notify.checked ? " · 新行为链将按冷却窗口通知" : "")
+        : "实时监测未开启";
+    } catch (error) {
+      toggle.checked = !enabled;
+      status.hidden = false;
+      status.textContent = "保存失败：" + errText(error);
+      notify.disabled = !toggle.checked;
+    } finally {
+      toggle.disabled = false;
+      interval.disabled = false;
+      notify.disabled = !toggle.checked;
+    }
+  };
+  toggle.addEventListener("change", save);
+  interval.addEventListener("change", save);
+  notify.addEventListener("change", save);
+}
+
 // ---------- 初始化 ----------
 
 async function init() {
@@ -8309,6 +8407,159 @@ async function init() {
   });
   // 重载 = 唯一显式触发重路径（evaluator 刷新）的入口（spec §1.6）。
   document.getElementById("find-reload").addEventListener("click", () => loadFindings(true, true));
+  async function loadTrustProfileProposals() {
+    const list = document.getElementById("find-trust-profile-proposals");
+    const approvedList = document.getElementById("find-trust-profile-approved");
+    const suppressionList = document.getElementById("find-trust-suppressions");
+    const status = document.getElementById("find-trust-profile-status");
+    try {
+      const envelope = await invoke("trust_profile_proposal_status");
+      const data = envelope && envelope.data ? envelope.data : envelope;
+      const pending = Array.isArray(data && data.pending) ? data.pending : [];
+      const approved = Array.isArray(data && data.approved) ? data.approved : [];
+      list.replaceChildren();
+      approvedList.replaceChildren();
+      suppressionList.replaceChildren();
+      list.hidden = pending.length === 0;
+      approvedList.hidden = approved.length === 0;
+      status.hidden = false;
+      status.textContent = pending.length
+        ? "有 " + pending.length + " 个 Agent Profile 待你批准；Agent 不能自行启用。"
+        : "没有待批准的 Agent Profile。";
+      pending.forEach((profile) => {
+        const row = document.createElement("li");
+        row.className = "notice";
+        const label = document.createElement("span");
+        label.className = "notice-text";
+        label.textContent = (profile.display_name || profile.slug || "未知 Profile") + "（" + (profile.slug || "?") + "）";
+        const actions = document.createElement("span");
+        actions.className = "notice-actions";
+        const approve = document.createElement("button");
+        approve.className = "btn secondary";
+        approve.textContent = "批准并启用";
+        approve.addEventListener("click", async () => {
+          approve.disabled = true;
+          try { await invoke("trust_profile_approve", { slug: profile.slug }); await loadTrustProfileProposals(); }
+          catch (error) { showBanner("find-banner", error, false); approve.disabled = false; }
+        });
+        const reject = document.createElement("button");
+        reject.className = "btn secondary";
+        reject.textContent = "拒绝";
+        reject.addEventListener("click", async () => {
+          reject.disabled = true;
+          try { await invoke("trust_profile_reject", { slug: profile.slug }); await loadTrustProfileProposals(); }
+          catch (error) { showBanner("find-banner", error, false); reject.disabled = false; }
+        });
+        actions.append(approve, reject);
+        row.append(label, actions);
+        list.append(row);
+      });
+      approved.forEach((profile) => {
+        const row = document.createElement("li");
+        row.className = "notice";
+        const label = document.createElement("span");
+        label.className = "notice-text";
+        label.textContent = (profile.slug || "未知 Profile") + "（已启用）";
+        const revoke = document.createElement("button");
+        revoke.className = "btn secondary";
+        revoke.textContent = "撤销";
+        revoke.addEventListener("click", async () => {
+          revoke.disabled = true;
+          try { await invoke("trust_profile_revoke", { slug: profile.slug }); await loadTrustProfileProposals(); }
+          catch (error) { showBanner("find-banner", error, false); revoke.disabled = false; }
+        });
+        row.append(label, revoke);
+        approvedList.append(row);
+      });
+      try {
+        const suppressionData = await invoke("trust_suppression_list");
+        const suppressions = Array.isArray(suppressionData && suppressionData.suppressions)
+          ? suppressionData.suppressions.filter((item) => item && !item.revoked_at_ms) : [];
+        suppressionList.hidden = suppressions.length === 0;
+        suppressions.forEach((item) => {
+          const row = document.createElement("li");
+          row.className = "notice";
+          const label = document.createElement("span");
+          label.className = "notice-text";
+          label.textContent = (item.issue_type || "Trust Finding") + "（已忽略后续通知）";
+          const revoke = document.createElement("button");
+          revoke.className = "btn secondary";
+          revoke.textContent = "撤销忽略";
+          revoke.addEventListener("click", async () => {
+            revoke.disabled = true;
+            try { await invoke("trust_suppression_revoke", { suppressionId: item.suppression_id }); await loadTrustProfileProposals(); }
+            catch (error) { showBanner("find-banner", error, false); revoke.disabled = false; }
+          });
+          row.append(label, revoke);
+          suppressionList.append(row);
+        });
+      } catch (_) {
+        suppressionList.hidden = true;
+      }
+    } catch (error) {
+      status.hidden = false;
+      status.textContent = "Profile 待审状态暂不可用。";
+    }
+  }
+  document.getElementById("find-trust-coverage").addEventListener("click", async () => {
+    const button = document.getElementById("find-trust-coverage");
+    const status = document.getElementById("find-trust-coverage-status");
+    button.disabled = true;
+    button.textContent = "检查中…";
+    try {
+      const result = await invoke("trust_discover");
+      const rows = result && Array.isArray(result.candidates) ? result.candidates : [];
+      const installed = rows.filter((row) => row && row.detected);
+      const gaps = installed.filter((row) => row.coverage_state === "detected_unprofiled");
+      status.textContent = gaps.length
+        ? "发现 " + installed.length + " 个本地 Agent，其中 " + gaps.length + " 个尚无历史审计 Profile；这是覆盖缺口，不是风险结论。"
+        : "发现 " + installed.length + " 个本地 Agent，均有历史审计 Profile；这不等同于实时网络监测。";
+      status.hidden = false;
+    } catch (error) {
+      showBanner("find-banner", error, false);
+    } finally {
+      button.disabled = false;
+      button.textContent = "覆盖检查";
+    }
+  });
+  document.getElementById("find-trust-runtime").addEventListener("click", async () => {
+    const button = document.getElementById("find-trust-runtime");
+    const status = document.getElementById("find-trust-coverage-status");
+    button.disabled = true;
+    button.textContent = "采集中…";
+    try {
+      const result = await invoke("trust_runtime_snapshot");
+      const candidates = Number(result && result.candidate_processes || 0);
+      const observations = Number(result && result.observations || 0);
+      const capability = result && result.capability || "unavailable";
+      status.textContent = observations
+        ? "进程快照发现 " + candidates + " 个待复核行为链，已记录 " + observations + " 条脱敏证据；这只表示尝试链路，不证明已传输。"
+        : "进程快照未发现待复核行为链（" + capability + "）。这不是持续监控，也不等同于不存在其他网络行为。";
+      status.hidden = false;
+      if (observations) await loadFindings(true, false);
+    } catch (error) {
+      showBanner("find-banner", error, false);
+    } finally {
+      button.disabled = false;
+      button.textContent = "进程快照";
+    }
+  });
+  document.getElementById("find-trust-audit").addEventListener("click", async () => {
+    const button = document.getElementById("find-trust-audit");
+    button.disabled = true;
+    button.textContent = "扫描中…";
+    try {
+      await invoke("trust_audit", { host: "all" });
+      await loadFindings(true, false);
+    } catch (error) {
+      showBanner("find-banner", error, false);
+    } finally {
+      button.disabled = false;
+      button.textContent = "本地审计";
+    }
+  });
+  await loadTrustMonitorConfig();
+  await loadTrustProfileProposals();
   document.getElementById("find-more").addEventListener("click", loadMoreFindings);
   document.getElementById("find-sev").addEventListener("change", (ev) => {
     findState.sev = ev.target.value;

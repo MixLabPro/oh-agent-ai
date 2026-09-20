@@ -57,6 +57,9 @@ pub mod sync_service;
 pub mod host_registry;
 pub mod plugin_ingest;
 pub mod takeover;
+pub mod trust_audit;
+pub mod trust_identity;
+pub mod trust_runtime_monitor;
 
 /// 进程级环境变量锁 —— `state` / `budget` / `takeover` / `summary` 的
 /// `#[cfg(test)]` 改 `AGENT_VITALS_HOME` 等进程 env，必须串行（模块各自造

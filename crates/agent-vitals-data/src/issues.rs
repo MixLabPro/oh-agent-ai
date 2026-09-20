@@ -104,6 +104,19 @@ pub fn remedy_for(issue_type: &str) -> RemedyCandidate {
         "SV608" => RemedyCandidate { remedy_id: "inspect-timeout-tool", diagnostic_only: false },
         "SV609" => RemedyCandidate { remedy_id: "review-approval-choice", diagnostic_only: false },
         "SV610" => RemedyCandidate { remedy_id: "tighten-sandbox-mode", diagnostic_only: false },
+        // family ② Trust/Egress rules are review guidance, never automatic
+        // remediation. Nothing in an Observation authorizes killing a process,
+        // deleting a snapshot, changing a vendor setting, or blocking a host.
+        "SV701" => RemedyCandidate { remedy_id: "review-workspace-scope", diagnostic_only: false },
+        "SV702" => RemedyCandidate { remedy_id: "review-repository-history-scope", diagnostic_only: false },
+        "SV703" => RemedyCandidate { remedy_id: "review-secondary-session-reporting", diagnostic_only: false },
+        "SV704" => RemedyCandidate { remedy_id: "review-tool-payload-egress", diagnostic_only: false },
+        "SV705" => RemedyCandidate { remedy_id: "review-consent-control-mismatch", diagnostic_only: false },
+        "SV706" => RemedyCandidate { remedy_id: "review-background-audit-surface", diagnostic_only: false },
+        "SV707" => RemedyCandidate { remedy_id: "review-pending-retry-retention", diagnostic_only: false },
+        "SV708" => RemedyCandidate { remedy_id: "review-remote-egress-control", diagnostic_only: false },
+        "SV709" => RemedyCandidate { remedy_id: "review-object-storage-egress", diagnostic_only: false },
+        "SV710" => RemedyCandidate { remedy_id: "review-declared-exclusions", diagnostic_only: false },
         _ => RemedyCandidate { remedy_id: "diagnostic-only", diagnostic_only: true },
     }
 }
@@ -1002,12 +1015,21 @@ pub fn issue_instance(conn: &Connection, issue_id: &str) -> rusqlite::Result<Opt
         |r| {
             let metadata: String = r.get(9)?;
             let metadata = serde_json::from_str::<Value>(&metadata).unwrap_or_else(|_| json!({}));
-            Ok(json!({"issue_id": r.get::<_, String>(0)?, "host_kind": r.get::<_, String>(1)?,
-                "session_key": r.get::<_, Option<String>>(2)?, "rule": r.get::<_, String>(3)?,
+            let issue_id: String = r.get(0)?;
+            let issue_type: String = r.get(3)?;
+            let mut output = json!({"issue_id": issue_id, "host_kind": r.get::<_, String>(1)?,
+                "session_key": r.get::<_, Option<String>>(2)?, "rule": issue_type,
                 "status": r.get::<_, String>(4)?, "severity": r.get::<_, String>(5)?,
                 "evidence": r.get::<_, String>(6)?, "opened_at_ms": r.get::<_, i64>(7)?,
                 "closed_at_ms": r.get::<_, Option<i64>>(8)?, "metadata": metadata,
-                "remedy": {"remedy_id": remedy_for(r.get::<_, String>(3)?.as_str()).remedy_id}}))
+                "remedy": {"remedy_id": remedy_for(&issue_type).remedy_id}});
+            // Trust details are a local redacted timeline. They contain only
+            // stages/levels/classes; no path, actor, hostname, source anchor,
+            // or native event id is exposed through the generic issue DTO.
+            if issue_type.starts_with("SV7") {
+                output["trust_timeline"] = serde_json::to_value(crate::trust::issue_timeline(conn, &issue_id)?).unwrap_or_else(|_| json!([]));
+            }
+            Ok(output)
         },
     ).optional()
 }
@@ -1201,6 +1223,21 @@ mod tests {
             ids.push(r.remedy_id);
         }
         assert_eq!(ids.len(), 10);
+    }
+
+    #[test]
+    fn every_trust_rule_has_a_non_destructive_review_remedy() {
+        let codes = [
+            "SV701", "SV702", "SV703", "SV704", "SV705", "SV706", "SV707", "SV708", "SV709", "SV710",
+        ];
+        let mut ids = Vec::new();
+        for code in codes {
+            let remedy = remedy_for(code);
+            assert!(!remedy.diagnostic_only, "{code} must name a review action");
+            assert!(remedy.remedy_id.starts_with("review-"), "{code} must not propose an automatic fix");
+            assert!(!ids.contains(&remedy.remedy_id), "remedy id collision: {}", remedy.remedy_id);
+            ids.push(remedy.remedy_id);
+        }
     }
 
     #[test]

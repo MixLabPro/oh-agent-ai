@@ -85,15 +85,45 @@
 
 实现契约、证据等级、存储边界与分期见 [Findings 2.0：本地 Agent 数据访问与出境审计规格](v1.0.0/FINDINGS_TRUST_EGRESS_MONITORING_SPEC.md)。
 
+**代码分层（避免把意图当成外传事实）：** Agent 可见命令先由宿主 adapter 写入
+`CanonicalSession.tool_calls`（例如 `crates/agent-vitals-hosts/*/sessions/evidence.rs`），
+再由 `crates/agent-vitals-domain/src/domain/behavior.rs`（SV601–610，单事件）和
+`domain/trajectory.rs`（SV611–614，跨事件序列）做纯函数判断；这里能识别危险 shell、敏感路径、
+内网 URL、重复/失败/审批异常等，也可作为未来 `IntentHint` 的分类层，但不能证明后台上传。
+Trust 侧由 `crates/agent-vitals-runtime/src/trust_audit.rs`（本地 artifact/profile）和
+`trust_runtime_monitor.rs`（macOS 低权限 `lsof` 快照）采集脱敏 Observation，最终由
+`crates/agent-vitals-data/src/trust_correlator.rs` 按 actor/workspace/time window 关联 SV70x。
+二者当前只并列呈现；没有 verified process-group 与 HMAC join 条件时，禁止把 `tar/curl/ossutil`
+等命令升级为“已上传”。
+
+平台能力也必须单独标记：当前 macOS 支持可选 `lsof` 点时快照，Linux 仅支持历史 profile 审计，Windows Trust 侧为 `unavailable`；这些状态不影响 SV601–614 的 Agent 轨迹审计。Windows 的 ETW/WFP 分层实现与发布门槛见 [Windows Trust Runtime 规格](v1.0.0/WINDOWS_TRUST_RUNTIME_SPEC.md)。
+
 | 问题 | 说明 | 信号源 | 现状 |
 |---|---|---|---|
-| **未披露/超范围数据外传** | 未明确告知或未获得对应授权，将工作区、Git 历史、凭据痕迹或全局配置发送到云端/第三方存储 | 进程—文件访问范围；本地快照/清单/状态元数据；进程—域名连接；凭证请求后紧跟大体积 PUT/POST；实际字节数 vs 用户授权范围 | ❌ 无跨进程文件/网络侧信号摄取；SV601–606 只覆盖 Agent 可见行为，不能证明宿主 sidecar 无后台外传 |
-| 超范围本地读取/打包 | 宣称只使用当前文件或对话附件，实际遍历整仓、`.git`、工作区外配置或其他敏感路径 | 文件打开范围与数量；快照 manifest 的路径类别/字节分布；本地加密包体积与 mtime | ❌ 现有工具 trace 看不到宿主进程自身的文件 I/O |
-| 绕过工具/审批面 | 后台 sidecar 或内置模块执行读取和上传，不出现在 Agent 工具列表、工具 trace 或审批次数中 | 进程树/签名；网络连接与 tool invocation 时间线差集；宿主空闲时的持续活动 | ❌ `scope` 恒 `main`，无 sidecar/子进程归属空间 |
-| 隐私开关/授权与实际行为不一致 | 关闭索引、体验优化或数据共享后，相关读取/外传链路仍触发 | 本地设置快照 + 同时段文件/网络行为；版本前后对照 | ❌ 无授权状态与运行时行为的联合判定 |
-| 后台外传重试/滞留 | 上传失败后长期保留快照并自动重试，延长敏感数据的暴露窗口 | pending 文件存活时间；`failure_count`/重试间隔；重复凭证请求；成功确认后的本地清理行为 | ❌ 无客户端后台传输生命周期模型 |
+| **未披露/超范围数据外传** | 未明确告知或未获得对应授权，将工作区、Git 历史、凭据痕迹或全局配置发送到云端/第三方存储 | 进程—文件访问范围；本地快照/清单/状态元数据；进程—域名连接；凭证请求后紧跟大体积 PUT/POST；实际字节数 vs 用户授权范围 | 🟡 Trust runtime 低权限快照 + profile 审计可产 E0–E3；仍缺跨进程字节/accepted 证据；SV601–606 只覆盖 Agent 可见行为 |
+| 超范围本地读取/打包 | 宣称只使用当前文件或对话附件，实际遍历整仓、`.git`、工作区外配置或其他敏感路径 | 文件打开范围与数量；快照 manifest 的路径类别/字节分布；本地加密包体积与 mtime | 🟡 `trust_audit` 可识别已登记宿主的快照 artifact，runtime 可观察同一进程 Git history + archive；未登记宿主和跨进程仍降级 |
+| 绕过工具/审批面 | 后台 sidecar 或内置模块执行读取和上传，不出现在 Agent 工具列表、工具 trace 或审批次数中 | 进程树/签名；网络连接与 tool invocation 时间线差集；宿主空闲时的持续活动 | 🟡 runtime 以 `unattributed-local-agent` 记录可见低权限事实；verified process-group 与 Agent trajectory bridge 尚未实现 |
+| 隐私开关/授权与实际行为不一致 | 关闭索引、体验优化或数据共享后，相关读取/外传链路仍触发 | 本地设置快照 + 同时段文件/网络行为；版本前后对照 | 🟡 profile/adapter 提供 `consent_kind + disabled` 时可产 SV705；缺少明确开关映射时保持 unavailable，不作结论 |
+| 后台外传重试/滞留 | 上传失败后长期保留快照并自动重试，延长敏感数据的暴露窗口 | pending 文件存活时间；`failure_count`/重试间隔；重复凭证请求；成功确认后的本地清理行为 | ❌ 无客户端后台传输生命周期模型（SV706 planned） |
 
 **证据分级：** 只发现本地快照只能判定“已读取/已打包”；凭证请求只能判定“已准备上传”；进程归属的大体积外发或服务端 accepted 记录才可判定“已外传”。任何一级都不自动证明数据被训练、人工查看或转卖。实现时只存储路径类别、字节数、时间、进程归属和域名等分析增量，不复制文件内容、凭据、请求体或快照明文。
+
+### Trust Finding capability matrix (SV701–SV710)
+
+| Finding | 规则与最低证据 | 当前能力 | 允许告警 |
+|---|---|---|---|
+| SV701 | 未知宿主/插件有本地 Trust 观测，但没有可归属 manifest | 🟡 runtime 可记录 E0–E1，归属仍缺 | 否 |
+| SV702 | package + `git_history` scope，至少 E1 | ✅ correlator + fixture | E4/E5 或升级 |
+| SV703 | 工作区/敏感范围超出声明，需 scope 与授权联合证据 | 🟡 schema 原料，规则待补 | 否 |
+| SV704 | 凭据/配置文件被读取，需明确 scope 类别 | 🟡 schema 原料，规则待补 | 否 |
+| SV705 | consent disabled + `consent_kind` + E2+，同 Incident 内行为证据 | ✅ correlator；旧行缺 kind 时降级 | E4/E5 或 critical |
+| SV706 | 本地包滞留/重试生命周期，需 pending 状态时序 | 🟡 元数据可扩展，生命周期采集待补 | 否 |
+| SV707 | 凭证请求后出现 vendor API 行为，需跨事件链 | 🟡 可摄取，独立 Finding 规则待补 | 否 |
+| SV708 | 大体积传输，需 E4+ 进程/字节元数据 | 🟡 runtime 只做低权限采样 | 否 |
+| SV709 | upload preparation 与独立 object-storage 观测同 Incident | ✅ correlator；单一 object-storage 行不会触发 | E4/E5 或 critical |
+| SV710 | remote accepted，需服务端回执/明确 accepted 证据 | ❌ 当前无服务端证据源 | 否 |
+
+Agent 可通过 MCP `trust_profile_schema/list/validate/stage/proposal_status` 协助导入新宿主；`approve/reject/revoke` 仅由本地用户界面执行。动态 manifest 不得把未实现的 SV701–SV710 宣称为已覆盖。
 
 **事件样本（非厂商专用规则）：** 2026-09-18 公开的 ZCode 取证报告展示了“本地工作区快照 → 上传凭证/服务端公钥 → 对象存储大体积 POST”的可观测链路（[ferstar 原始报告](https://blog.ferstar.org/posts/zcode-silent-workspace-snapshot-upload/)）。该事件用于证明此问题类的可检测性，不足以单独证明云端数据的后续用途或删除状态。
 

@@ -60,6 +60,60 @@ const SENSITIVE_READ_COLUMNS: &[(&str, &str)] = &[
     ("workflow_events", "invocation_fingerprint"),
     // budget_snoozes —— `until_ms` 暴露用户 snooze 行为
     ("budget_snoozes", "until_ms"),
+    // trust_observations / trust_issue_evidence —— P1 只用于本地关联；尚未有
+    // 面向 MCP 或导出的安全投影。为避免调用方通过通用只读 SQL 枚举本机
+    // 行为证据，两个表的所有列一律拒绝读取。
+    ("trust_observations", "observation_id"),
+    ("trust_observations", "machine_namespace"),
+    ("trust_observations", "host"),
+    ("trust_observations", "actor_id"),
+    ("trust_observations", "actor_kind"),
+    ("trust_observations", "actor_version"),
+    ("trust_observations", "observed_at_ms"),
+    ("trust_observations", "observation_kind"),
+    ("trust_observations", "stage"),
+    ("trust_observations", "evidence_level"),
+    ("trust_observations", "workspace_ref"),
+    ("trust_observations", "scope_classes_json"),
+    ("trust_observations", "file_count"),
+    ("trust_observations", "byte_count"),
+    ("trust_observations", "destination_class"),
+    ("trust_observations", "destination_host"),
+    ("trust_observations", "consent_state"),
+    ("trust_observations", "consent_kind"),
+    ("trust_observations", "source_id"),
+    ("trust_observations", "native_event_id"),
+    ("trust_observations", "source_line"),
+    ("trust_observations", "source_byte_offset"),
+    ("trust_observations", "collector_id"),
+    ("trust_observations", "collector_version"),
+    ("trust_observations", "provenance_json"),
+    ("trust_observations", "expires_at_ms"),
+    ("trust_observations", "ingested_run_id"),
+    ("trust_observations", "created_at_ms"),
+    ("trust_issue_evidence", "issue_id"),
+    ("trust_issue_evidence", "observation_id"),
+    ("trust_issue_evidence", "evidence_role"),
+    ("trust_issue_evidence", "linked_at_ms"),
+    ("trust_monitor_state", "config_id"),
+    ("trust_monitor_state", "enabled"),
+    ("trust_monitor_state", "interval_seconds"),
+    ("trust_monitor_state", "notifications_enabled"),
+    ("trust_monitor_state", "capability"),
+    ("trust_monitor_state", "last_success_at_ms"),
+    ("trust_monitor_state", "last_error_code"),
+    ("trust_monitor_state", "last_alert_key"),
+    ("trust_monitor_state", "last_alert_at_ms"),
+    ("trust_monitor_state", "updated_at_ms"),
+    ("trust_monitor_alerts", "alert_key"),
+    ("trust_monitor_alerts", "last_alert_at_ms"),
+    ("trust_monitor_alerts", "updated_at_ms"),
+    ("trust_suppressions", "suppression_id"),
+    ("trust_suppressions", "issue_type"),
+    ("trust_suppressions", "instance_fingerprint"),
+    ("trust_suppressions", "reason"),
+    ("trust_suppressions", "created_at_ms"),
+    ("trust_suppressions", "revoked_at_ms"),
 ];
 
 /// 哪些内置函数被禁——`load_extension` 是首要；`random` / `randomblob` 让
@@ -319,6 +373,22 @@ mod tests {
         let ctx = AuthContext { action, database_name: None, accessor: None };
         assert_eq!(authority_callback(ctx), Authorization::Deny);
     }
+
+    #[test]
+    fn deny_read_of_trust_observation_evidence() {
+        for (table_name, column_name) in [
+            ("trust_observations", "destination_host"),
+            ("trust_observations", "provenance_json"),
+            ("trust_issue_evidence", "issue_id"),
+        ] {
+            let ctx = AuthContext {
+                action: AuthAction::Read { table_name, column_name },
+                database_name: None,
+                accessor: None,
+            };
+            assert_eq!(authority_callback(ctx), Authorization::Deny);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -390,6 +460,18 @@ mod integration {
                                      created_at_ms, updated_at_ms)
              VALUES ('f1', 'claude-code', 'ns-1', 'native-1', 'e1', 'assistant-usage', 'src1', 'run1',
                      1700000003000, 100, 200, 50, 25, 1700000003000, 1700000003000)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO trust_observations(
+                 observation_id, machine_namespace, host, actor_id, actor_kind,
+                 observed_at_ms, observation_kind, stage, evidence_level,
+                 scope_classes_json, consent_state, collector_id, collector_version,
+                 provenance_json, ingested_run_id, created_at_ms
+             ) VALUES(
+                 'trust-1', 'ns-1', 'claude-code', 'sidecar-1', 'sidecar', 1700000003000,
+                 'connection', 'egress_attempted', 'E3', '[]', 'unavailable', 'test', 'v1',
+                 '{}', 'run1', 1700000003000)",
             [],
         ).unwrap();
     }
@@ -479,6 +561,30 @@ fn real_select_star_is_denied() {
         .expect_err("SELECT * FROM usage_facts must fail (authorizer deny on sensitive column)");
     let _ = std::fs::remove_dir_all(&home);
 }
+
+    /// Trust 证据尚无安全投影；即使调用方知道表名，也不能经通用只读 SQL
+    /// 读取它。未来若需要展示，必须先新增专用、最小字段的 serving face。
+    #[test]
+    fn real_select_on_trust_evidence_is_denied() {
+        let home = tmp_db("trust-evidence-deny");
+        seed_one_real(&home);
+        let conn = open_authorizer_db(&home);
+        let _ = conn
+            .prepare("SELECT * FROM trust_observations")
+            .expect_err("trust observations must not be exposed through generic SQL");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn real_select_on_trust_monitor_control_is_denied() {
+        let home = tmp_db("trust-monitor-deny");
+        seed_one_real(&home);
+        let conn = open_authorizer_db(&home);
+        let _ = conn
+            .prepare("SELECT * FROM trust_monitor_state")
+            .expect_err("monitor control state must not be exposed through generic SQL");
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     /// `SELECT * FROM v_facts_safe` —— view 里不含敏感列，authorizer 放行；
     /// 响应**没有** `native_session_id` 字段名（脱敏是 view 的责任）。

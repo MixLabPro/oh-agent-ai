@@ -465,6 +465,163 @@ pub async fn sessions_findings(
     .map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 
+/// User-initiated Trust/Egress historical scan.  It deliberately shells out to
+/// the one CLI implementation so the desktop cannot grow a second scanner.
+#[tauri::command]
+pub async fn trust_audit(
+    host: String,
+    state: tauri::State<'_, StoreBuildLock>,
+) -> Result<Value, Value> {
+    if host.len() > 32 || !host.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')) {
+        return Err(error_value("cancelled", "invalid trust audit profile id"));
+    }
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let Some(bin) = resolve_binary() else { return Err(no_binary()); };
+        let mut cmd = Command::new(&bin);
+        cmd.args(["trust", "audit", "--host", &host, "--json"]);
+        cmd.env("AGENT_VITALS_HOME", data_home());
+        run_json(cmd)
+    })
+    .await
+    .map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
+/// User-initiated coverage inventory. It only checks known client root
+/// directories for existence; it neither opens their files nor emits Findings.
+#[tauri::command]
+pub async fn trust_discover(
+    state: tauri::State<'_, StoreBuildLock>,
+) -> Result<Value, Value> {
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let Some(bin) = resolve_binary() else { return Err(no_binary()); };
+        let mut cmd = Command::new(&bin);
+        cmd.args(["trust", "discover", "--json"]);
+        cmd.env("AGENT_VITALS_HOME", data_home());
+        run_json(cmd)
+    })
+    .await
+    .map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
+/// One explicit low-privilege process snapshot for unattributed local-agent
+/// behavior. It is intentionally not a daemon, notification trigger, or
+/// network blocker.
+#[tauri::command]
+pub async fn trust_runtime_snapshot(
+    state: tauri::State<'_, StoreBuildLock>,
+) -> Result<Value, Value> {
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let Some(bin) = resolve_binary() else { return Err(no_binary()); };
+        let mut cmd = Command::new(&bin);
+        cmd.args(["trust", "monitor", "snapshot", "--json"]);
+        cmd.env("AGENT_VITALS_HOME", data_home());
+        run_json(cmd)
+    })
+    .await
+    .map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
+/// Trust hot-plug review surface. Agent-facing MCP can only stage proposals;
+/// these UI commands perform the explicit user decision and are not MCP tools.
+#[tauri::command]
+pub fn trust_profile_list() -> Result<Value, Value> {
+    agent_vitals_runtime::mcp::trust_profiles::run_list(&data_home())
+        .map_err(|error| error_value("trust_profile_unavailable", &error.message))
+}
+
+#[tauri::command]
+pub fn trust_profile_validate(manifest: Value) -> Result<Value, Value> {
+    agent_vitals_runtime::mcp::trust_profiles::run_validate(
+        &serde_json::json!({"manifest": manifest}), &data_home(),
+    ).map_err(|error| error_value("trust_profile_invalid", &error.message))
+}
+
+#[tauri::command]
+pub fn trust_profile_stage(manifest: Value, proposal_note: Option<String>) -> Result<Value, Value> {
+    agent_vitals_runtime::mcp::trust_profiles::run_stage(
+        &serde_json::json!({"manifest": manifest, "proposal_note": proposal_note}),
+        &data_home(), true,
+    ).map_err(|error| error_value("trust_profile_stage_failed", &error.message))
+}
+
+#[tauri::command]
+pub fn trust_profile_proposal_status() -> Result<Value, Value> {
+    agent_vitals_runtime::mcp::trust_profiles::run_status(&data_home())
+        .map_err(|error| error_value("trust_profile_unavailable", &error.message))
+}
+
+#[tauri::command]
+pub fn trust_profile_approve(slug: String) -> Result<Value, Value> {
+    agent_vitals_runtime::mcp::trust_profiles::approve_staged(&data_home(), &slug)
+        .map_err(|error| error_value("trust_profile_approval_failed", &error))
+}
+
+#[tauri::command]
+pub fn trust_profile_reject(slug: String) -> Result<Value, Value> {
+    agent_vitals_runtime::mcp::trust_profiles::reject_staged(&data_home(), &slug)
+        .map_err(|error| error_value("trust_profile_rejection_failed", &error))
+}
+
+#[tauri::command]
+pub fn trust_profile_revoke(slug: String) -> Result<Value, Value> {
+    agent_vitals_runtime::mcp::trust_profiles::revoke_approved(&data_home(), &slug)
+        .map_err(|error| error_value("trust_profile_revoke_failed", &error))
+}
+
+#[tauri::command]
+pub fn trust_suppression_create(
+    issue_type: String,
+    instance_fingerprint: Option<String>,
+    reason: String,
+) -> Result<Value, Value> {
+    if !matches!(issue_type.as_str(), "SV701" | "SV702" | "SV703" | "SV704" | "SV705" | "SV706" | "SV707" | "SV708" | "SV709" | "SV710") {
+        return Err(error_value("invalid_trust_suppression", "unknown Trust Finding type"));
+    }
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    let id = format!("trust-suppression-{}-{}", issue_type, now_ms);
+    let path = agent_vitals_data::authority::default_authority_path(&data_home());
+    let db = agent_vitals_data::authority::AuthorityDb::open(&path, now_ms)
+        .map_err(|_| error_value("authority_unavailable", "authority database unavailable"))?;
+    db.trust_suppression_set(&id, &issue_type, instance_fingerprint.as_deref(), &reason, now_ms)
+        .map_err(|error| error_value("invalid_trust_suppression", &error.to_string()))?;
+    Ok(serde_json::json!({"status":"saved", "suppression_id":id}))
+}
+
+#[tauri::command]
+pub fn trust_suppression_revoke(suppression_id: String) -> Result<Value, Value> {
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home());
+    let db = agent_vitals_data::authority::AuthorityDb::open(&path, now_ms)
+        .map_err(|_| error_value("authority_unavailable", "authority database unavailable"))?;
+    let revoked = db.trust_suppression_revoke(&suppression_id, now_ms)
+        .map_err(|error| error_value("invalid_trust_suppression", &error.to_string()))?;
+    Ok(serde_json::json!({"status": if revoked {"revoked"} else {"not_found"}, "suppression_id":suppression_id}))
+}
+
+#[tauri::command]
+pub fn trust_suppression_list() -> Result<Value, Value> {
+    let path = agent_vitals_data::authority::default_authority_path(&data_home());
+    let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+        .map_err(|_| error_value("authority_unavailable", "authority database unavailable"))?;
+    let mut stmt = db.conn().prepare(
+        "SELECT suppression_id, issue_type, reason, created_at_ms, revoked_at_ms
+         FROM trust_suppressions ORDER BY created_at_ms DESC",
+    ).map_err(|error| error_value("trust_suppression_unavailable", &error.to_string()))?;
+    let rows = stmt.query_map([], |row| Ok(serde_json::json!({
+        "suppression_id": row.get::<_, String>(0)?, "issue_type": row.get::<_, String>(1)?,
+        "reason": row.get::<_, String>(2)?, "created_at_ms": row.get::<_, i64>(3)?,
+        "revoked_at_ms": row.get::<_, Option<i64>>(4)?,
+    }))).map_err(|error| error_value("trust_suppression_unavailable", &error.to_string()))?
+        .collect::<Result<Vec<_>, _>>().map_err(|error| error_value("trust_suppression_unavailable", &error.to_string()))?;
+    Ok(serde_json::json!({"status":"ok", "suppressions":rows}))
+}
+
 /// issues 投影一行都没有 = 首次引导（库刚建/从未跑过 findings）。这不是
 /// 「缓存冷」——是数据根本不存在，此时放行一次 evaluator 刷新，否则全新
 /// 安装的要一直空到用户自己找到「重载」按钮。有数据（哪怕陈旧）则恒 false。

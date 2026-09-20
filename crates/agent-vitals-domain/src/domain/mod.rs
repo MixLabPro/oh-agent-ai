@@ -26,5 +26,6 @@ pub mod subagent;
 pub mod takeover;
 pub mod trace;
 pub mod trajectory;
+pub mod trust;
 pub mod usage;
 pub mod util;

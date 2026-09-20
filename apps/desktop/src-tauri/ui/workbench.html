@@ -285,9 +285,27 @@
       <div class="find-toolbar">
         <span class="muted" id="find-summary"></span>
         <span class="flex-spacer"></span>
+        <button id="find-trust-coverage" class="btn" title="仅检查已知本地 Agent 目录是否存在，不读取文件内容">覆盖检查</button>
+        <button id="find-trust-runtime" class="btn" title="显式采集一次本机进程元数据快照；不读取内容、不常驻监控">进程快照</button>
+        <button id="find-trust-audit" class="btn" title="扫描所有已配置 Trust Profile 的历史快照元数据">本地审计</button>
+        <label class="muted note" title="开启后按间隔在本机采集脱敏进程元数据">
+          <input id="find-trust-monitor-toggle" type="checkbox"> 实时监测
+        </label>
+        <select id="find-trust-monitor-interval" aria-label="实时监测间隔">
+          <option value="5">5 秒</option><option value="30" selected>30 秒</option><option value="60">1 分钟</option>
+        </select>
+        <label class="muted note" title="发现新行为链时显示系统通知">
+          <input id="find-trust-monitor-notify" type="checkbox" disabled> 报警通知
+        </label>
         <button id="find-reload" class="btn" title="重新汇总">重载</button>
       </div>
       <div id="find-banner" class="banner" hidden></div>
+      <div id="find-trust-coverage-status" class="muted note" hidden role="status" aria-live="polite"></div>
+      <div id="find-trust-monitor-status" class="muted note" hidden role="status" aria-live="polite"></div>
+      <div id="find-trust-profile-status" class="muted note" hidden role="status" aria-live="polite"></div>
+      <div id="find-trust-profile-proposals" class="notice-list" hidden aria-label="待批准的本地 Agent Profile"></div>
+      <div id="find-trust-profile-approved" class="notice-list" hidden aria-label="已启用的本地 Agent Profile"></div>
+      <div id="find-trust-suppressions" class="notice-list" hidden aria-label="已忽略的 Trust Finding"></div>
       <div id="find-loading" class="muted" hidden>加载中…跨会话汇总，首次可能需要几十秒，之后会走缓存变快</div>
       <!-- 新鲜度条（WORKBENCH_FINDINGS_TAB_SPEC §4.8）：数字截止时刻 + stale 宿主名单。 -->
       <div id="find-freshness" class="muted note" hidden></div>

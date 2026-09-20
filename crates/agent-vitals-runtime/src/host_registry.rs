@@ -21,6 +21,9 @@ pub struct PluginHost {
     /// manifest 文件字节（规范化前）的 sha256 前 16 hex——provenance revision
     /// 键（§6.3）。
     pub manifest_sha256: String,
+    /// Optional Trust artifact profile from the same validated manifest. It is
+    /// loaded dynamically with the plugin host; no Rust binary rebuild needed.
+    pub trust_profile: Option<generic_manifest::TrustArtifactProfile>,
 }
 
 /// 校验失败条目（不进 registry，但如实上报）。
@@ -91,6 +94,7 @@ pub fn scan_plugin_hosts(data_home: &Path) -> (Vec<PluginHost>, Vec<PluginHostEr
             recipe: manifest.recipe,
             manifest_path,
             manifest_sha256,
+            trust_profile: manifest.trust,
         });
     }
     (hosts, errors)
@@ -165,7 +169,8 @@ mod tests {
                 "source":{"format":"jsonl"},
                 "session":{"from":"filename","pattern":"^s_(?P<id>.+)\\.jsonl$"},
                 "recipe":"request-usage-anthropic-v1",
-                "event_key":{"paths":["requestId"]}}"#,
+                "event_key":{"paths":["requestId"]},
+                "trust":{"roots":["~/.zcode/v2/checkpoints"],"artifact_terms":["snapshot"],"extensions":[".enc"]}}"#,
         )
         .unwrap();
         std::fs::write(bad.join("manifest.json"), r#"{"slug": 42}"#).unwrap();
@@ -174,6 +179,7 @@ mod tests {
         assert_eq!(hosts.len(), 1, "好 manifest 进 registry");
         assert_eq!(hosts[0].slug, "zcode");
         assert_eq!(hosts[0].display_name, "ZCode");
+        assert!(hosts[0].trust_profile.is_some(), "Trust profile must hot-load with plugin host");
         assert_eq!(errors.len(), 1, "坏 manifest 如实上报不拖死别人");
         // 校验顺序钉死为 manifest_version 优先——断言不依赖具体首个错误字段。
         assert!(

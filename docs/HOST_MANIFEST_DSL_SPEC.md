@@ -144,6 +144,7 @@ decision_matrix / UI 逐面审计，不从 `host TEXT` 推导“下游零改动�
 | `limits.max_rows_per_file` | ✗ | 默认 50_000，封顶 500_000 |
 | `billing` | ✗ | 仅接受 `lock:metered_estimate`（写了别的值 = 校验错误；
   该字段的存在意义是让 manifest 作者显式承认这个锁定） |
+| `trust` | ✗ | 可选的只读 Trust artifact profile；声明 `~/` 下的证据根、归档文件名 token 和扩展名。导入后动态接入 Finding 采集，不读取内容、不声明网络外发 |
 
 ## §4 Recipe 提取语义（P0）
 
@@ -553,7 +554,12 @@ manifest capability/version 扩展，不能让当前版本“结构校验通过�
     "provider_request_id": "requestId"
   },
   "event_key": { "paths": ["requestId", "attempt"] },
-  "billing": { "policy": "lock:metered_estimate" }
+  "billing": { "policy": "lock:metered_estimate" },
+  "trust": {
+    "roots": ["~/.zcode/v2/checkpoints"],
+    "artifact_terms": ["snapshot", "checkpoint"],
+    "extensions": [".enc"]
+  }
 }
 ```
 
