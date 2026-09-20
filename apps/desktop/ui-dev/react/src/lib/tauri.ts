@@ -174,6 +174,39 @@ export type SessionsFilters = {
   cost_status: SessionsCostFilter;
 };
 
+export type RouteQualityModel = {
+  model: string;
+  requests: number;
+  tokens_total: number;
+  last_event_ms: number;
+};
+
+export type RouteQualityFamily = {
+  family: "anthropic" | "openai" | "deepseek" | "glm" | "minimax" | "gemini" | "qwen" | "synthetic" | "unknown";
+  flag: "native" | "non_native" | "api_error" | "no_baseline";
+  requests: number;
+  sessions: number;
+  tokens_total: number;
+  last_event_ms: number;
+  request_share: number;
+  models: RouteQualityModel[];
+};
+
+export type RouteQualityHost = {
+  host: string;
+  has_baseline: boolean;
+  native_families: string[];
+  totals: { requests: number; sessions: number };
+  families: RouteQualityFamily[];
+};
+
+export type RouteQualityReport = {
+  since_ms: number;
+  now_ms: number;
+  families_vocabulary: string[];
+  hosts: RouteQualityHost[];
+};
+
 export type TrustHostCandidate = {
   id: string;
   detected: boolean;
@@ -341,7 +374,7 @@ function stringField(value: unknown, label: string): string {
 
 function decisionLabel(value: unknown, label: string): string {
   const text = stringField(value, label);
-  const valid = text === "<unknown>" || (/^[A-Za-z0-9][A-Za-z0-9._:@+<>-]{0,127}(\/[A-Za-z0-9][A-Za-z0-9._:@+<>-]{0,127})?$/.test(text) && !text.includes("://") && !text.includes("..") && !text.startsWith("file:") && !/^[A-Za-z]:/.test(text));
+  const valid = text === "<unknown>" || text === "<synthetic>" || (/^[A-Za-z0-9][A-Za-z0-9._:@+<>-]{0,127}(\/[A-Za-z0-9][A-Za-z0-9._:@+<>-]{0,127})?$/.test(text) && !text.includes("://") && !text.includes("..") && !text.startsWith("file:") && !/^[A-Za-z]:/.test(text));
   if (!valid) throw new Error(`${label} DTO 标识不安全`);
   return text;
 }
@@ -745,6 +778,75 @@ function parseSessionsPage(value: unknown): SessionsPage {
   return { sessions, next_cursor: nextCursor, has_more: hasMore, window_session_count: windowSessionCount, window_total_tokens: windowTotalTokens, window_label: window ? nullableString(window.label, "sessions window label") : null };
 }
 
+const routeFamilies = ["anthropic", "openai", "deepseek", "glm", "minimax", "gemini", "qwen", "synthetic", "unknown"] as const;
+const routeFlags = ["native", "non_native", "api_error", "no_baseline"] as const;
+
+function routeFamily(value: unknown, label: string): RouteQualityFamily["family"] {
+  return boundedEnum(value, label, routeFamilies, "unknown") as RouteQualityFamily["family"];
+}
+
+function routeModel(value: unknown, label: string): string {
+  return decisionLabel(value, label);
+}
+
+function parseRouteQualityModel(value: unknown): RouteQualityModel {
+  const row = record(value, "route quality model");
+  return {
+    model: routeModel(row.model, "route quality model id"),
+    requests: boundedCount(row.requests, "route quality model requests", 1_000_000_000),
+    tokens_total: boundedCount(row.tokens_total, "route quality model tokens", 1_000_000_000_000_000),
+    last_event_ms: boundedCount(row.last_event_ms, "route quality model last event", 9_000_000_000_000),
+  };
+}
+
+function parseRouteQualityFamily(value: unknown): RouteQualityFamily {
+  const row = record(value, "route quality family");
+  const models = requiredArray(row.models, "route quality models");
+  if (models.length > 128) throw new Error("route quality models 超出上限");
+  const share = requiredFiniteNumber(row.request_share, "route quality request share");
+  if (share > 100) throw new Error("route quality request share 超出范围");
+  return {
+    family: routeFamily(row.family, "route quality family name"),
+    flag: boundedEnum(row.flag, "route quality family flag", routeFlags, "no_baseline") as RouteQualityFamily["flag"],
+    requests: boundedCount(row.requests, "route quality family requests", 1_000_000_000),
+    sessions: boundedCount(row.sessions, "route quality family sessions", 1_000_000_000),
+    tokens_total: boundedCount(row.tokens_total, "route quality family tokens", 1_000_000_000_000_000),
+    last_event_ms: boundedCount(row.last_event_ms, "route quality family last event", 9_000_000_000_000),
+    request_share: share,
+    models: models.map(parseRouteQualityModel),
+  };
+}
+
+function parseRouteQuality(value: unknown): RouteQualityReport {
+  const root = record(value, "route quality report");
+  const hosts = requiredArray(root.hosts, "route quality hosts");
+  if (hosts.length > 128) throw new Error("route quality hosts 超出上限");
+  const vocabulary = requiredArray(root.families_vocabulary, "route quality vocabulary").slice(0, 32).map((item) => {
+    const family = stringField(item, "route quality vocabulary item");
+    if (!(routeFamilies as readonly string[]).includes(family)) throw new Error("route quality vocabulary 含未知模型族");
+    return family;
+  });
+  return {
+    since_ms: boundedCount(root.since_ms, "route quality since", 9_000_000_000_000),
+    now_ms: boundedCount(root.now_ms, "route quality now", 9_000_000_000_000),
+    families_vocabulary: vocabulary,
+    hosts: hosts.map((item) => {
+      const row = record(item, "route quality host");
+      const totals = record(row.totals, "route quality totals");
+      const native = requiredArray(row.native_families, "route quality native families").slice(0, 16).map((family) => routeFamily(family, "route quality native family"));
+      const families = requiredArray(row.families, "route quality host families");
+      if (families.length > 32) throw new Error("route quality families 超出上限");
+      return {
+        host: safeHostLabel(row.host),
+        has_baseline: requiredBoolean(row.has_baseline, "route quality baseline"),
+        native_families: native,
+        totals: { requests: boundedCount(totals.requests, "route quality total requests", 1_000_000_000), sessions: boundedCount(totals.sessions, "route quality total sessions", 1_000_000_000) },
+        families: families.map(parseRouteQualityFamily),
+      };
+    }),
+  };
+}
+
 function safeTrustIdentifier(value: unknown, label: string, fallback = "unknown"): string {
   if (typeof value !== "string" || value.length > 96 || !/^[a-z][a-z0-9_-]{0,95}$/.test(value)) return fallback;
   return value;
@@ -1137,6 +1239,41 @@ export async function readUsageHourly(date: string): Promise<UsageHourly> {
   const parsed = parseUsageHourly(await handler("read_hourly_distribution", { date: safe }));
   if (parsed.date !== safe) throw new Error("usage hourly 返回了错误日期");
   return parsed;
+}
+
+export async function readRouteQuality(days: 30 | 90 | 365): Promise<RouteQualityReport> {
+  if (days !== 30 && days !== 90 && days !== 365) throw new Error("路线质量统计窗口不安全");
+  const now = Date.now();
+  const fallback: RouteQualityReport = {
+    since_ms: now - days * 86_400_000,
+    now_ms: now,
+    families_vocabulary: [...routeFamilies],
+    hosts: [{
+      host: "plugin:zcode",
+      has_baseline: true,
+      native_families: ["glm"],
+      totals: { requests: 12, sessions: 3 },
+      families: [{
+        family: "glm", flag: "native", requests: 9, sessions: 3, tokens_total: 18000, last_event_ms: now - 3_600_000, request_share: 75,
+        models: [{ model: "glm-5", requests: 9, tokens_total: 18000, last_event_ms: now - 3_600_000 }],
+      }, {
+        family: "deepseek", flag: "non_native", requests: 2, sessions: 1, tokens_total: 4200, last_event_ms: now - 7_200_000, request_share: 16.7,
+        models: [{ model: "deepseek-v4-flash", requests: 2, tokens_total: 4200, last_event_ms: now - 7_200_000 }],
+      }, {
+        family: "synthetic", flag: "api_error", requests: 1, sessions: 1, tokens_total: 0, last_event_ms: now - 10_800_000, request_share: 8.3,
+        models: [{ model: "<synthetic>", requests: 1, tokens_total: 0, last_event_ms: now - 10_800_000 }],
+      }],
+    }],
+  };
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseRouteQuality(fallback);
+  try {
+    return parseRouteQuality(await handler("routes_quality", { days }));
+  } catch {
+    // Do not surface Rust/CLI diagnostics, local paths, or provider details in
+    // the UI. The desktop log remains the place for operator-level debugging.
+    throw new Error("路线质量报告读取失败");
+  }
 }
 
 export async function readSessions(input: {

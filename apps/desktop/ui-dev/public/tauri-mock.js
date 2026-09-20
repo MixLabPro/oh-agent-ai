@@ -687,6 +687,27 @@
       //   { plan_type, has_credits, limits: { primary: {...} }, observed_at }（事件的 ISO 时间戳）。
       // Shape: apps/desktop/src-tauri/src/lib.rs:2767 data_codex_quota → crates/agent-vitals-hosts/src/hosts/codex/sessions/usage.rs:191 plan_from_rate_limits.
       case "data_codex_quota": return { plan_type: "Plus", has_credits: false, limits: { primary: { used_percent: 38, window_minutes: 10080, resets_at: Math.floor(Date.now() / 1000) + 7200 } }, observed_at: new Date(Date.now() - 1500000).toISOString() };
+      // Shape: crates/agent-vitals-data/src/route_quality.rs:138-186.
+      // 只放合成的模型族事实；credential_ref、endpoint、路径和原始日志不进入 mock。
+      case "routes_quality": {
+        const nowMs = Date.now();
+        return {
+          since_ms: nowMs - Number((args && args.days) || 90) * 86400000,
+          now_ms: nowMs,
+          families_vocabulary: ["anthropic", "openai", "deepseek", "glm", "minimax", "gemini", "qwen", "synthetic", "unknown"],
+          hosts: [{
+            host: "plugin:zcode", has_baseline: true, native_families: ["glm"], totals: { requests: 12, sessions: 3 },
+            families: [
+              { family: "glm", flag: "native", requests: 9, sessions: 3, tokens_total: 18000, last_event_ms: nowMs - 3600000, request_share: 75, models: [{ model: "glm-5", provider_raw: "zhipu", provider_id: "zhipu", requests: 9, tokens_total: 18000, last_event_ms: nowMs - 3600000 }] },
+              { family: "deepseek", flag: "non_native", requests: 2, sessions: 1, tokens_total: 4200, last_event_ms: nowMs - 7200000, request_share: 16.7, models: [{ model: "deepseek-v4-flash", provider_raw: "relay", provider_id: "relay", requests: 2, tokens_total: 4200, last_event_ms: nowMs - 7200000 }] },
+              { family: "synthetic", flag: "api_error", requests: 1, sessions: 1, tokens_total: 0, last_event_ms: nowMs - 10800000, request_share: 8.3, models: [{ model: "<synthetic>", provider_raw: "", provider_id: "", requests: 1, tokens_total: 0, last_event_ms: nowMs - 10800000 }] },
+            ],
+          }, {
+            host: "minimax-code", has_baseline: false, native_families: [], totals: { requests: 4, sessions: 2 },
+            families: [{ family: "minimax", flag: "no_baseline", requests: 4, sessions: 2, tokens_total: 9000, last_event_ms: nowMs - 1800000, request_share: 100, models: [{ model: "MiniMax-M2", provider_raw: "", provider_id: "", requests: 4, tokens_total: 9000, last_event_ms: nowMs - 1800000 }] }],
+          }],
+        };
+      }
       case "sessions_list": {
         const continuation = !!(args && args.cursor);
         const page = continuation ? sessions.slice(1) : sessions.slice(0, 1);

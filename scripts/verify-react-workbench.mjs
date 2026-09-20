@@ -24,6 +24,7 @@ for (const required of [
   path.join(reactSource, "features/usage/UsagePage.tsx"),
   path.join(reactSource, "features/sessions/SessionsPage.tsx"),
   path.join(reactSource, "features/sessions/SessionDetail.tsx"),
+  path.join(reactSource, "features/test/TestPage.tsx"),
   path.join(repo, "apps/desktop/src-tauri/src/store.rs"),
   path.join(dist, "index.html"),
 ]) {
@@ -60,6 +61,11 @@ if (!source.includes('"sessions_list"') || !source.includes("session_ref") || !s
 if (!source.includes("加载更多") || !source.includes("cost_status") || !source.includes("requestInFlight") || !source.includes("pendingRefresh")) fail("React 会话缺少成本状态、分页或竞态保护");
 if (!source.includes('"sessions_read"') || !source.includes("workflow_timeline") || !source.includes("billing_breakdown") || !source.includes("session-detail-panel")) fail("React 会话详情缺少安全摘要、计费桶或脱敏时间线");
 if (source.includes('"sessions_issues"')) fail("React Findings 直接消费 legacy 宽 DTO");
+if (!source.includes('"routes_quality"') || !source.includes("readRouteQuality") || !source.includes("test-quality-host")) fail("React 测试页未使用只读路线质量 DTO");
+if (source.includes('"probe_run_start"')) fail("React 测试页越过 mutation 边界调用主动探针");
+if (!source.includes("只读") || !source.includes("不发请求") || !source.includes("无官方基准")) fail("React 测试页缺少主动探针边界或无基准诚实状态");
+const routeQualityType = source.match(/export type RouteQualityModel[\s\S]*?\};/u)?.[0] || "";
+if (/provider_raw|provider_id|credential_ref|endpoint_base_url/u.test(routeQualityType)) fail("React 路线质量模型投影携带了 provider/credential/endpoint 字段");
 
 const html = fs.readFileSync(path.join(dist, "index.html"), "utf8");
 if (!html.includes("<div id=\"root\"></div>")) fail("React production entry 缺少 root");

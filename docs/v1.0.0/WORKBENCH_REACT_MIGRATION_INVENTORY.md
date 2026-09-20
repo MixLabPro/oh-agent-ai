@@ -12,7 +12,7 @@
 | 用量 | `tab-calendar` | `features/usage/UsagePage.tsx` | 已迁移首个日历切片：安全月份/日历/小时 DTO、按币种成本、来源新鲜度与覆盖状态；完整旧页对照仍待完成 | Phase 3：补齐旧页数字对照与统计时区设置联动 |
 | 会话 | `tab-sessions` | `features/sessions/SessionsPage.tsx` + `features/sessions/SessionDetail.tsx` | 已迁移安全列表和只读详情：筛选、keyset 分页、摘要、计费桶、usage/workflow 脱敏时间线；完整轨迹图和原始报告仍不迁移 | Phase 3：真实 Tauri 对拍与轨迹图安全投影评估 |
 | 待处理/发现 | `tab-findings` | `features/findings/FindingsPage.tsx` | 已迁移首个垂直切片：安全 Finding 投影、待办、证据明细、决策矩阵和新鲜度 | Phase 2：补事件 smoke test 与旧页数值对照 |
-| 测试 | `tab-test` | `features/test/TestPage.tsx` | 未迁移；涉及 probe mutation，保持旧页 | Phase 3 后半：先只读状态，再做显式 mutation |
+| 测试 | `tab-test` | `features/test/TestPage.tsx` | 已迁移只读路线质量面：宿主 × 实际模型族、非官方族/API 错误/无基准状态与安全 DTO；主动 probe mutation 仍保留旧页 | Phase 3 后半：补真实 Tauri 对拍，再评估显式 mutation |
 | Skill | `tab-skills` | `features/skills/SkillsPage.tsx` | 未迁移；涉及扫描、取消和导出 | Phase 3 后半：单独审查导出脱敏 |
 | 设置 | `tab-sources` | `features/settings/SettingsPage.tsx` | 未迁移；包含来源、预算、价卡、保留策略和 Trust 设置 | Phase 3：按表单域拆分，逐项保留回执/撤销语义 |
 
@@ -40,5 +40,5 @@
 - [x] Phase 0 页面、command、事件和目标归属已列出。
 - [x] Phase 1 React shell、hash route、bridge、Error Boundary、离线 mock 已建立。
 - [x] Phase 2 Trust/Findings 的证据详情完成（监控控制、一次性快照、事件失效刷新和可展开的安全证据明细已完成；旧页数值对照与真实 `.app` 验收仍属于发布门槛）。
-- [ ] Phase 3 其余五个 tab 完成并通过旧页对照。
+- [ ] Phase 3 其余四个 tab 完成并通过旧页对照。
 - [ ] Phase 4 `.app` 真机验收、生产 `frontendDist` 切换和旧页面回退窗口关闭。
