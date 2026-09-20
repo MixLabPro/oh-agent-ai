@@ -1,0 +1,53 @@
+#!/usr/bin/env node
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const ui = path.join(repo, "apps/desktop/ui-dev");
+const reactSource = path.join(ui, "react/src");
+const dist = path.join(ui, "dist-react");
+
+function fail(message) {
+  console.error(`FAIL ${message}`);
+  process.exitCode = 1;
+}
+
+for (const required of [
+  path.join(ui, "vite.react.config.js"),
+  path.join(ui, "react/index.html"),
+  path.join(reactSource, "main.tsx"),
+  path.join(reactSource, "lib/tauri.ts"),
+  path.join(dist, "index.html"),
+]) {
+  if (!fs.existsSync(required)) fail(`缺少 React 迁移产物：${path.relative(repo, required)}`);
+}
+
+const sourceFiles = [];
+function walk(directory) {
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const full = path.join(directory, entry.name);
+    if (entry.isDirectory()) walk(full);
+    else if (/\.(ts|tsx|css)$/.test(entry.name)) sourceFiles.push(full);
+  }
+}
+walk(reactSource);
+
+const source = sourceFiles.map((file) => fs.readFileSync(file, "utf8")).join("\n");
+if ((source.match(/https?:\/\//g) || []).length) fail("React 源码包含远端 URL");
+const appSource = sourceFiles
+  .filter((file) => !file.endsWith(path.join("lib", "tauri.ts")))
+  .map((file) => fs.readFileSync(file, "utf8"))
+  .join("\n");
+if (appSource.includes("__TAURI__")) fail("组件绕过 local bridge 直接访问 __TAURI__");
+
+const html = fs.readFileSync(path.join(dist, "index.html"), "utf8");
+if (!html.includes("<div id=\"root\"></div>")) fail("React production entry 缺少 root");
+// React's production runtime contains documentation URLs and SVG namespace
+// strings. The relevant offline gate is that our source does not create a
+// network client or reference an external resource, not that vendor strings
+// are absent from minified output.
+if (/\b(fetch|WebSocket|EventSource|XMLHttpRequest)\s*\(/.test(source)) fail("React source creates an unapproved network client");
+if (/<(?:script|link)[^>]+https?:\/\//i.test(html)) fail("React entry references an external resource");
+
+if (!process.exitCode) console.log("React Workbench contract: OK (isolated build, typed bridge, offline bundle)");

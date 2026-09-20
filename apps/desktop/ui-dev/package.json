@@ -4,10 +4,23 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "dev:react": "vite --config vite.react.config.js --host 127.0.0.1",
     "build": "vite build",
+    "build:react": "vite build --config vite.react.config.js",
+    "verify:react": "npm run build:react && npx tsc -p react/tsconfig.json --noEmit && node ../../../scripts/verify-react-workbench.mjs",
     "verify": "npm run build && node ../../../scripts/verify-workbench-overview-contract.mjs && node ../../../scripts/verify-workbench-v010-closeout.mjs && node ../../../scripts/verify-workbench-visibility.mjs"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
     "vite": "^6.1.0"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.2.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   }
 }

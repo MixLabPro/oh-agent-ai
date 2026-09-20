@@ -12,6 +12,20 @@ npm run dev
 Workbench 页面，并注入 `public/tauri-mock.js`。mock 只用于浏览器中的演示数据和
 交互检查，不会写入本机 Authority 数据库。
 
+React 迁移预览使用隔离入口，不覆盖旧 Workbench：
+
+```bash
+npm run dev:react
+```
+
+如需在 Tauri dev 窗口中验证 React Shell，从 `apps/desktop/src-tauri` 运行：
+
+```bash
+cargo tauri dev --config tauri.react.conf.json
+```
+
+该配置只切换开发 URL；生产 `tauri.conf.json` 和 `frontendDist` 保持不变。
+
 ## 回归检查
 
 ```bash
