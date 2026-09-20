@@ -39,6 +39,31 @@ pub enum TrustEvidenceLevel {
     E5Accepted,
 }
 
+/// Where the local collector obtained an observation.  This describes the
+/// evidence source, not what a remote service did with the data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrustEvidenceOrigin {
+    LocalArtifact,
+    ClientStateClaim,
+    RuntimeProcessMetadata,
+    NetworkMetadata,
+    VerifiedReceipt,
+    UnknownLegacy,
+}
+
+impl TrustEvidenceOrigin {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            TrustEvidenceOrigin::LocalArtifact => "local_artifact",
+            TrustEvidenceOrigin::ClientStateClaim => "client_state_claim",
+            TrustEvidenceOrigin::RuntimeProcessMetadata => "runtime_process_metadata",
+            TrustEvidenceOrigin::NetworkMetadata => "network_metadata",
+            TrustEvidenceOrigin::VerifiedReceipt => "verified_receipt",
+            TrustEvidenceOrigin::UnknownLegacy => "unknown_legacy",
+        }
+    }
+}
+
 impl TrustEvidenceLevel {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -179,6 +204,7 @@ pub struct TrustObservation {
     pub observation_kind: TrustObservationKind,
     pub stage: TrustStage,
     pub evidence_level: TrustEvidenceLevel,
+    pub evidence_origin: TrustEvidenceOrigin,
     pub workspace_ref: Option<String>,
     pub scope_classes: Vec<String>,
     pub file_count: Option<i64>,
@@ -282,7 +308,7 @@ impl TrustObservation {
 
 #[cfg(test)]
 mod tests {
-    use super::{TrustActorKind, TrustConsentState, TrustDestinationClass, TrustEvidenceLevel, TrustObservation, TrustObservationKind, TrustStage};
+    use super::{TrustActorKind, TrustConsentState, TrustDestinationClass, TrustEvidenceLevel, TrustEvidenceOrigin, TrustObservation, TrustObservationKind, TrustStage};
     use serde_json::json;
 
     fn observation() -> TrustObservation {
@@ -291,7 +317,7 @@ mod tests {
             host: "zcode".into(), actor_id: "actor_01".into(), actor_kind: TrustActorKind::Sidecar,
             actor_version: Some("3.14.0".into()), observed_at_ms: 1,
             observation_kind: TrustObservationKind::Package, stage: TrustStage::PackageObserved,
-            evidence_level: TrustEvidenceLevel::E1LocalArtifact, workspace_ref: Some("ws_01".into()),
+            evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref: Some("ws_01".into()),
             scope_classes: vec!["workspace_current".into(), "git_history".into()], file_count: Some(2),
             byte_count: Some(3), destination_class: Some(TrustDestinationClass::ObjectStorage),
             destination_host: Some("bucket.oss-example.com".into()), consent_kind: None, consent_state: TrustConsentState::Unavailable,

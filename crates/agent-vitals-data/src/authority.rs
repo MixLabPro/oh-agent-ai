@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 21;
+pub const SCHEMA_VERSION: i64 = 22;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -1176,6 +1176,14 @@ CREATE INDEX IF NOT EXISTS trust_suppressions_lookup
   ON trust_suppressions(issue_type, instance_fingerprint, revoked_at_ms);
 "#;
 
+/// v22：证据来源是结构化的可信度输入。历史行只能标记为
+/// `unknown_legacy`；不能把没有来源信息的旧记录升级成远端确认。
+const SCHEMA_V22_ADD: &str = r#"
+ALTER TABLE trust_observations ADD COLUMN evidence_origin TEXT NOT NULL DEFAULT 'unknown_legacy' CHECK (evidence_origin IN (
+  'local_artifact','client_state_claim','runtime_process_metadata','network_metadata','verified_receipt','unknown_legacy'
+));
+"#;
+
 fn ensure_schema_v20(conn: &Connection) -> Result<(), AuthorityError> {
     let has_consent_kind: bool = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('trust_observations') WHERE name = 'consent_kind'",
@@ -1186,6 +1194,15 @@ fn ensure_schema_v20(conn: &Connection) -> Result<(), AuthorityError> {
     } else {
         conn.execute_batch("CREATE INDEX IF NOT EXISTS trust_observations_consent ON trust_observations(consent_kind, consent_state, observed_at_ms);")?;
     }
+    Ok(())
+}
+
+fn ensure_schema_v22(conn: &Connection) -> Result<(), AuthorityError> {
+    let has_evidence_origin: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('trust_observations') WHERE name = 'evidence_origin'",
+        [], |row| row.get::<_, i64>(0),
+    )? > 0;
+    if !has_evidence_origin { conn.execute_batch(SCHEMA_V22_ADD)?; }
     Ok(())
 }
 
@@ -1380,6 +1397,7 @@ impl AuthorityDb {
                 conn.execute_batch(SCHEMA_V18_ADD)?;
                 conn.execute_batch(SCHEMA_V19_ADD)?;
                 conn.execute_batch(SCHEMA_V21_ADD)?;
+                ensure_schema_v22(conn)?;
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
@@ -1432,6 +1450,19 @@ impl AuthorityDb {
                         conn.execute_batch("COMMIT")?;
                     }
                     Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error.into()); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(21) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = ensure_schema_v22(conn);
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error); }
                 }
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
@@ -1897,6 +1928,7 @@ impl AuthorityDb {
         conn.execute_batch(SCHEMA_V19_ADD)?;
         ensure_schema_v20(conn)?;
         conn.execute_batch(SCHEMA_V21_ADD)?;
+        ensure_schema_v22(conn)?;
         // 中断批次清扫（§3.1）：任何 running 的批次在下次 open 时标
         // interrupted——它是观测记录，不是可恢复状态（恢复靠幂等重跑）。
         conn.execute(
@@ -4213,6 +4245,29 @@ mod tests {
         assert!(upgraded.trust_monitor_state_set(false, 60, false, 123).is_ok());
         assert!(!upgraded.trust_monitor_state_get().unwrap().unwrap().enabled);
         assert!(upgraded.trust_monitor_state_set(true, 4, false, 124).is_err());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn v21_upgrade_marks_existing_trust_evidence_as_unknown_legacy() {
+        let db = tmp_db("v21-to-v22-evidence-origin");
+        {
+            let seeded = AuthorityDb::open(&db, 1).unwrap();
+            seeded.conn().execute_batch(
+                "ALTER TABLE trust_observations DROP COLUMN evidence_origin;
+                 UPDATE schema_meta SET value = '21' WHERE key = 'schema_version';",
+            ).unwrap();
+            drop(seeded);
+        }
+        let upgraded = AuthorityDb::open(&db, 2).unwrap();
+        let origin: String = upgraded.conn().query_row(
+            "SELECT dflt_value FROM pragma_table_info('trust_observations') WHERE name = 'evidence_origin'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(origin, "'unknown_legacy'");
+        let version: String = upgraded.conn().query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
         let _ = std::fs::remove_file(&db);
     }
 

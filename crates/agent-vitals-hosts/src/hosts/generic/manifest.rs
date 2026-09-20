@@ -94,6 +94,51 @@ pub struct TrustArtifactProfile {
     pub roots: Vec<String>,
     pub artifact_terms: Vec<String>,
     pub extensions: Vec<String>,
+    /// An optional, reviewed local evidence adapter.  Omitted means generic
+    /// filename metadata only; manifests cannot supply SQL or a command.
+    pub adapter: Option<TrustEvidenceAdapter>,
+    /// Coverage scheduling hint only. It never changes evidence confidence,
+    /// severity, Finding creation, or notification eligibility.
+    pub watch_priority: TrustWatchPriority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustWatchPriority { Normal, Enhanced }
+
+impl TrustWatchPriority {
+    pub const fn as_str(self) -> &'static str {
+        match self { Self::Normal => "normal", Self::Enhanced => "enhanced" }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value { "normal" => Some(Self::Normal), "enhanced" => Some(Self::Enhanced), _ => None }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustEvidenceAdapter {
+    GenericArtifactV1,
+    ZcodeCheckpointV1,
+    MiniMaxWorkspaceIndexV1,
+}
+
+impl TrustEvidenceAdapter {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GenericArtifactV1 => "generic_artifact_v1",
+            Self::ZcodeCheckpointV1 => "zcode_checkpoint_v1",
+            Self::MiniMaxWorkspaceIndexV1 => "minimax_workspace_index_v1",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "generic_artifact_v1" => Some(Self::GenericArtifactV1),
+            "zcode_checkpoint_v1" => Some(Self::ZcodeCheckpointV1),
+            "minimax_workspace_index_v1" => Some(Self::MiniMaxWorkspaceIndexV1),
+            _ => None,
+        }
+    }
 }
 
 /// 从 `~/` 展开后的 roots。保留原始串用于 display；展开在 discovery 做。
@@ -432,7 +477,7 @@ pub fn parse_manifest(value: serde_json::Value) -> Result<PluginManifest, Manife
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::Object(trust)) => {
             for key in trust.keys() {
-                if !matches!(key.as_str(), "roots" | "artifact_terms" | "extensions") {
+                if !matches!(key.as_str(), "roots" | "artifact_terms" | "extensions" | "adapter" | "watch_priority") {
                     return Err(err(format!("trust.{key}"), "未知字段"));
                 }
             }
@@ -463,7 +508,19 @@ pub fn parse_manifest(value: serde_json::Value) -> Result<PluginManifest, Manife
                     return Err(err(format!("trust.extensions[{index}]"), "必须是 . 加小写扩展名"));
                 }
             }
-            Some(TrustArtifactProfile { roots, artifact_terms, extensions })
+            let adapter = match trust.get("adapter") {
+                None => None,
+                Some(serde_json::Value::String(value)) => TrustEvidenceAdapter::parse(value)
+                    .map(Some).ok_or_else(|| err("trust.adapter", "不是受支持的受审计 adapter"))?,
+                Some(_) => return Err(err("trust.adapter", "必须是 string")),
+            };
+            let watch_priority = match trust.get("watch_priority") {
+                None => TrustWatchPriority::Normal,
+                Some(serde_json::Value::String(value)) => TrustWatchPriority::parse(value)
+                    .ok_or_else(|| err("trust.watch_priority", "必须是 normal 或 enhanced"))?,
+                Some(_) => return Err(err("trust.watch_priority", "必须是 string")),
+            };
+            Some(TrustArtifactProfile { roots, artifact_terms, extensions, adapter, watch_priority })
         }
         Some(_) => return Err(err("trust", "必须是 object")),
     };
@@ -582,12 +639,38 @@ mod tests {
         let trust = manifest.trust.unwrap();
         assert_eq!(trust.roots, ["~/.zcode/v2/checkpoints"]);
         assert_eq!(trust.artifact_terms, ["snapshot", "checkpoint"]);
+        assert_eq!(trust.adapter, None);
+        assert_eq!(trust.watch_priority, TrustWatchPriority::Normal);
+
+        let mut adapter_value = zcode_manifest();
+        adapter_value["trust"] = json!({
+            "roots": ["~/.zcode/v2/checkpoints"],
+            "artifact_terms": ["snapshot"], "extensions": [".enc"],
+            "adapter": "zcode_checkpoint_v1"
+        });
+        assert_eq!(parse_manifest(adapter_value).unwrap().trust.unwrap().adapter,
+            Some(TrustEvidenceAdapter::ZcodeCheckpointV1));
+
+        let mut enhanced_value = zcode_manifest();
+        enhanced_value["trust"] = json!({
+            "roots": ["~/.zcode/v2/checkpoints"], "artifact_terms": ["snapshot"],
+            "extensions": [".enc"], "watch_priority": "enhanced"
+        });
+        assert_eq!(parse_manifest(enhanced_value).unwrap().trust.unwrap().watch_priority,
+            TrustWatchPriority::Enhanced);
 
         let mut unsafe_value = zcode_manifest();
         unsafe_value["trust"] = json!({
             "roots": ["~/../outside"], "artifact_terms": ["snapshot"], "extensions": [".enc"]
         });
         assert!(parse_manifest(unsafe_value).is_err(), "Trust roots must stay under HOME");
+
+        let mut unsafe_adapter = zcode_manifest();
+        unsafe_adapter["trust"] = json!({
+            "roots": ["~/.zcode/v2/checkpoints"], "artifact_terms": ["snapshot"],
+            "extensions": [".enc"], "adapter": "arbitrary_sql_v1"
+        });
+        assert!(parse_manifest(unsafe_adapter).is_err(), "Trust adapter must stay allowlisted");
     }
 
     #[test]

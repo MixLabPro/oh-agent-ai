@@ -8551,6 +8551,91 @@ async function init() {
       button.textContent = "进程快照";
     }
   });
+  function renderTrustAuditEvidence(reports) {
+    const card = document.getElementById("find-trust-audit-card");
+    const overview = document.getElementById("find-trust-audit-overview");
+    const evidenceList = document.getElementById("find-trust-evidence-list");
+    const verdict = document.getElementById("find-trust-audit-verdict");
+    if (!card || !overview || !evidenceList || !verdict) return;
+    card.hidden = false;
+    overview.replaceChildren();
+    evidenceList.replaceChildren();
+    const safeReports = reports.filter((report) => report && typeof report === "object");
+    const allEvidence = safeReports.flatMap((report) => Array.isArray(report.evidence)
+      ? report.evidence.map((item) => ({ ...item, host: report.host || "宿主" })) : []);
+    const findingCount = safeReports.reduce((sum, report) => sum + Number(report.findings_upserted || 0), 0);
+    verdict.textContent = findingCount ? findingCount + " 个风险 Finding" : "未形成风险结论";
+    verdict.className = "trust-verdict " + (findingCount ? "trust-verdict-danger" : "trust-verdict-neutral");
+    const overviewItems = [
+      ["扫描宿主", String(safeReports.length)],
+      ["结构化证据", String(allEvidence.length)],
+      ["打包/快照", String(allEvidence.filter((item) => item.kind === "package").length)],
+      ["出网尝试", String(allEvidence.filter((item) => item.stage === "egress_attempted" || item.stage === "egress_transmitted").length)],
+    ];
+    overviewItems.forEach(([label, value]) => {
+      const item = document.createElement("div");
+      item.className = "trust-audit-stat";
+      const number = document.createElement("strong");
+      number.textContent = value;
+      const caption = document.createElement("span");
+      caption.textContent = label;
+      item.append(number, caption);
+      overview.append(item);
+    });
+    if (!allEvidence.length) {
+      const empty = document.createElement("div");
+      empty.className = "trust-evidence-empty";
+      empty.textContent = "本次没有可展示的本机证据。";
+      evidenceList.append(empty);
+      return;
+    }
+    const labels = {
+      package: "打包/快照", remote_ack: "客户端状态", retry: "重试", credential: "上传准备",
+      connection: "连接", outbound_bytes: "出网字节", file_scope: "文件范围",
+    };
+    const levelLabels = { E1: "E1 本地结构", E2: "E2 上传准备", E3: "E3 网络尝试", E4: "E4 已传输", E5: "E5 已验证接收" };
+    allEvidence.sort((left, right) => Number(left.observed_at_ms || 0) - Number(right.observed_at_ms || 0));
+    allEvidence.forEach((item) => {
+      const row = document.createElement("article");
+      row.className = "trust-evidence-row";
+      const marker = document.createElement("div");
+      marker.className = "trust-evidence-marker";
+      marker.setAttribute("aria-hidden", "true");
+      const body = document.createElement("div");
+      body.className = "trust-evidence-body";
+      const title = document.createElement("div");
+      title.className = "trust-evidence-title";
+      const host = document.createElement("strong");
+      host.textContent = item.host;
+      const kind = document.createElement("span");
+      kind.textContent = labels[item.kind] || item.kind || "结构化证据";
+      title.append(host, kind);
+      const meta = document.createElement("div");
+      meta.className = "trust-evidence-meta";
+      const time = Number(item.observed_at_ms);
+      const timeLabel = Number.isFinite(time) && time > 0 ? new Date(time).toLocaleString() : "时间不可用";
+      meta.textContent = timeLabel + " · " + (levelLabels[item.evidence_level] || item.evidence_level || "证据等级未知")
+        + " · 来源 " + (item.evidence_origin || "unknown_legacy");
+      const facts = document.createElement("div");
+      facts.className = "trust-evidence-facts";
+      const factValues = [];
+      if (Array.isArray(item.scope_classes) && item.scope_classes.length) factValues.push("范围：" + item.scope_classes.join("、"));
+      if (Number.isFinite(Number(item.file_count))) factValues.push("文件 " + item.file_count + " 个");
+      if (Number.isFinite(Number(item.byte_count))) factValues.push("大小 " + formatBytes(Number(item.byte_count)));
+      if (item.native_event_ref) factValues.push("引用 " + item.native_event_ref);
+      facts.textContent = factValues.join(" · ") || "未提供额外范围信息";
+      body.append(title, meta, facts);
+      row.append(marker, body);
+      evidenceList.append(row);
+    });
+  }
+  function formatBytes(value) {
+    if (!Number.isFinite(value) || value < 0) return "未知大小";
+    if (value < 1024) return value + " B";
+    if (value < 1024 * 1024) return (value / 1024).toFixed(1) + " KB";
+    if (value < 1024 * 1024 * 1024) return (value / (1024 * 1024)).toFixed(1) + " MB";
+    return (value / (1024 * 1024 * 1024)).toFixed(1) + " GB";
+  }
   document.getElementById("find-trust-audit").addEventListener("click", async () => {
     const button = document.getElementById("find-trust-audit");
     const status = document.getElementById("find-trust-audit-status");
@@ -8559,6 +8644,7 @@ async function init() {
     try {
       const result = await invoke("trust_audit", { host: "all" });
       const reports = Array.isArray(result && result.reports) ? result.reports : [];
+      renderTrustAuditEvidence(reports);
       const summary = reports.map((report) => {
         const stages = report && report.stage_counts || {};
         const kinds = report && report.observation_kind_counts || {};

@@ -73,6 +73,7 @@ const SENSITIVE_READ_COLUMNS: &[(&str, &str)] = &[
     ("trust_observations", "observation_kind"),
     ("trust_observations", "stage"),
     ("trust_observations", "evidence_level"),
+    ("trust_observations", "evidence_origin"),
     ("trust_observations", "workspace_ref"),
     ("trust_observations", "scope_classes_json"),
     ("trust_observations", "file_count"),
