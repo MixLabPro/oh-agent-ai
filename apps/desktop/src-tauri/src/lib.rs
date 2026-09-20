@@ -3698,6 +3698,7 @@ pub fn run() {
             store::trust_suppression_list,
             store::sessions_issues,
             store::findings_groups_safe,
+            store::decision_matrix_safe,
             store::decision_matrix,
             findings_freshness,
             store::skills_doctor_report,

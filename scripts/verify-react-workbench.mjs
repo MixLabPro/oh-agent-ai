@@ -19,6 +19,7 @@ for (const required of [
   path.join(reactSource, "main.tsx"),
   path.join(reactSource, "lib/tauri.ts"),
   path.join(reactSource, "features/findings/FindingsPage.tsx"),
+  path.join(reactSource, "features/findings/DecisionMatrixSection.tsx"),
   path.join(repo, "apps/desktop/src-tauri/src/store.rs"),
   path.join(dist, "index.html"),
 ]) {
@@ -43,6 +44,7 @@ const appSource = sourceFiles
   .join("\n");
 if (appSource.includes("__TAURI__")) fail("组件绕过 local bridge 直接访问 __TAURI__");
 if (!source.includes('"findings_groups_safe"')) fail("React Findings 未使用版本化安全 DTO command");
+if (!source.includes('"decision_matrix_safe"')) fail("React Findings 未使用版本化 decision matrix DTO command");
 if (source.includes('"sessions_issues"')) fail("React Findings 直接消费 legacy 宽 DTO");
 
 const html = fs.readFileSync(path.join(dist, "index.html"), "utf8");
