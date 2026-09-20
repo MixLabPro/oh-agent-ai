@@ -4,7 +4,7 @@
 //! correlation model stays vendor-neutral. An installed-but-unprofiled client
 //! is coverage work, never a Finding.
 
-use std::path::{Component, Path, PathBuf};
+use std::{collections::{BTreeMap, BTreeSet}, path::{Component, Path, PathBuf}, time::SystemTime};
 
 use agent_vitals_domain::trust::{
     TrustActorKind, TrustConsentState, TrustEvidenceLevel, TrustObservation,
@@ -93,6 +93,9 @@ pub struct TrustAuditReport {
     pub duplicate: usize,
     pub findings_upserted: usize,
     pub evidence_links_added: usize,
+    /// Safe aggregate only: stages and kinds, never raw evidence or paths.
+    pub stage_counts: BTreeMap<String, usize>,
+    pub observation_kind_counts: BTreeMap<String, usize>,
 }
 
 #[derive(Deserialize)]
@@ -241,9 +244,129 @@ fn artifact_name_matches(profile: &TrustAuditProfile, name: &str) -> bool {
     }
 }
 
-/// Scan one profile and emit only E1 package observations. It is generic over
-/// the profile and never reads file content.
-pub fn scan_history(
+fn observed_at_from_metadata(metadata: &std::fs::Metadata, fallback_ms: i64) -> i64 {
+    metadata.modified().ok().and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or(fallback_ms)
+}
+
+fn workspace_ref_for_entry(identity: &TrustIdentity, root: &Path, entry: &Path) -> Option<String> {
+    let workspace = entry.strip_prefix(root).ok()?.components().next().and_then(|part| match part {
+        Component::Normal(value) => Some(root.join(value)),
+        _ => None,
+    })?;
+    Some(identity.workspace_ref(&workspace))
+}
+
+fn zcode_manifest_observation(
+    profile: &TrustAuditProfile, identity: &TrustIdentity, machine_namespace: &str,
+    root: &Path, entry: &Path, metadata: &std::fs::Metadata, fallback_ms: i64,
+) -> Option<TrustObservation> {
+    let raw = std::fs::read(entry).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    let files = value.get("files")?.as_array()?;
+    let mut scopes = BTreeSet::from(["snapshot_artifact".to_string()]);
+    let mut git_history_entries = 0_i64;
+    let mut byte_count = 0_i64;
+    for file in files {
+        let path = file.get("path").and_then(serde_json::Value::as_str).unwrap_or_default().to_ascii_lowercase();
+        if path == ".git" || path.starts_with(".git/") || path.contains("/.git/") {
+            git_history_entries = git_history_entries.saturating_add(1);
+        }
+        byte_count = byte_count.saturating_add(file.get("sizeBytes").and_then(serde_json::Value::as_i64).unwrap_or(0).max(0));
+    }
+    if git_history_entries > 0 { scopes.insert("git_history".to_string()); }
+    let observed_at_ms = observed_at_from_metadata(metadata, fallback_ms);
+    Some(TrustObservation {
+        observation_id: format!("{}_{}", profile.id, identity.event_ref(&format!("{}#manifest", entry.display()))),
+        machine_namespace: machine_namespace.to_string(), host: profile.id.clone(),
+        actor_id: identity.actor_ref(&profile.actor_id), actor_kind: TrustActorKind::Sidecar, actor_version: None,
+        observed_at_ms, observation_kind: TrustObservationKind::Package, stage: TrustStage::PackageObserved,
+        evidence_level: TrustEvidenceLevel::E1LocalArtifact, workspace_ref: workspace_ref_for_entry(identity, root, entry),
+        scope_classes: scopes.into_iter().collect(), file_count: i64::try_from(files.len()).ok(), byte_count: Some(byte_count),
+        destination_class: None, destination_host: None, consent_kind: None, consent_state: TrustConsentState::Unavailable,
+        source_id: None, native_event_id: Some(identity.event_ref(&entry.to_string_lossy())), source_line: None, source_byte_offset: None,
+        collector_id: "zcode-checkpoint-metadata".to_string(), collector_version: "v2".to_string(),
+        provenance: json!({"artifact":"zcode_manifest","content_read":false,"file_entries":files.len(),"git_history_entries":git_history_entries}),
+        expires_at_ms: observed_at_ms.checked_add(RETENTION_MS),
+    })
+}
+
+fn zcode_state_observations(
+    profile: &TrustAuditProfile, identity: &TrustIdentity, machine_namespace: &str,
+    root: &Path, entry: &Path, metadata: &std::fs::Metadata, fallback_ms: i64,
+) -> Vec<TrustObservation> {
+    let Ok(raw) = std::fs::read(entry) else { return Vec::new() };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&raw) else { return Vec::new() };
+    let observed_at_ms = observed_at_from_metadata(metadata, fallback_ms);
+    let workspace_ref = workspace_ref_for_entry(identity, root, entry);
+    let actor_id = identity.actor_ref(&profile.actor_id);
+    let event = entry.to_string_lossy();
+    let mut out = Vec::new();
+    if value.get("lastAcceptedManifestHash").and_then(serde_json::Value::as_str).is_some()
+        || value.get("lastAcceptedExtraManifestHash").and_then(serde_json::Value::as_str).is_some() {
+        out.push(TrustObservation {
+            observation_id: format!("{}_{}", profile.id, identity.event_ref(&format!("{event}#accepted"))),
+            machine_namespace: machine_namespace.to_string(), host: profile.id.clone(), actor_id: actor_id.clone(),
+            actor_kind: TrustActorKind::Sidecar, actor_version: None, observed_at_ms,
+            observation_kind: TrustObservationKind::RemoteAck, stage: TrustStage::RemoteAccepted,
+            evidence_level: TrustEvidenceLevel::E5Accepted, workspace_ref: workspace_ref.clone(), scope_classes: Vec::new(),
+            file_count: None, byte_count: None, destination_class: None, destination_host: None,
+            consent_kind: None, consent_state: TrustConsentState::Unavailable, source_id: None,
+            native_event_id: Some(identity.event_ref(&event)), source_line: None, source_byte_offset: None,
+            collector_id: "zcode-checkpoint-state".to_string(), collector_version: "v2".to_string(),
+            provenance: json!({"artifact":"zcode_state","accepted_manifest_recorded":true,"content_read":false}),
+            expires_at_ms: observed_at_ms.checked_add(RETENTION_MS),
+        });
+    }
+    if let Some(failure_count) = value.get("failureCount").and_then(serde_json::Value::as_i64).filter(|count| *count > 0) {
+        out.push(TrustObservation {
+            observation_id: format!("{}_{}", profile.id, identity.event_ref(&format!("{event}#retry"))),
+            machine_namespace: machine_namespace.to_string(), host: profile.id.clone(), actor_id,
+            actor_kind: TrustActorKind::Sidecar, actor_version: None, observed_at_ms,
+            observation_kind: TrustObservationKind::Retry, stage: TrustStage::PackageObserved,
+            evidence_level: TrustEvidenceLevel::E1LocalArtifact, workspace_ref, scope_classes: vec!["snapshot_artifact".to_string()],
+            file_count: None, byte_count: None, destination_class: None, destination_host: None,
+            consent_kind: None, consent_state: TrustConsentState::Unavailable, source_id: None,
+            native_event_id: Some(identity.event_ref(&event)), source_line: None, source_byte_offset: None,
+            collector_id: "zcode-checkpoint-state".to_string(), collector_version: "v2".to_string(),
+            provenance: json!({"artifact":"zcode_state","failure_count":failure_count,"content_read":false}),
+            expires_at_ms: observed_at_ms.checked_add(RETENTION_MS),
+        });
+    }
+    out
+}
+
+fn scan_zcode_history(
+    profile: &TrustAuditProfile, identity: &TrustIdentity, machine_namespace: &str, observed_at_ms: i64,
+) -> Vec<TrustObservation> {
+    let mut observations = scan_generic_history(profile, identity, machine_namespace, observed_at_ms);
+    for root in &profile.roots {
+        if !root.is_dir() { continue; }
+        for entry in WalkDir::new(root).follow_links(false).max_depth(5).into_iter().filter_map(Result::ok) {
+            if !entry.file_type().is_file() { continue; }
+            let path = entry.path();
+            let Ok(metadata) = entry.metadata() else { continue; };
+            let relative = path.strip_prefix(root).ok();
+            let is_manifest = relative.is_some_and(|value| value.components().any(|part| part.as_os_str() == "manifests"))
+                && path.extension().and_then(|value| value.to_str()) == Some("json");
+            if is_manifest {
+                if let Some(observation) = zcode_manifest_observation(profile, identity, machine_namespace, root, path, &metadata, observed_at_ms) {
+                    observations.push(observation);
+                }
+            } else if path.file_name().and_then(|value| value.to_str()) == Some("state.json") {
+                observations.extend(zcode_state_observations(profile, identity, machine_namespace, root, path, &metadata, observed_at_ms));
+            }
+        }
+    }
+    observations.sort_by(|a, b| a.observation_id.cmp(&b.observation_id));
+    observations.dedup_by(|a, b| a.observation_id == b.observation_id);
+    observations
+}
+
+/// Scan one generic profile and emit only E1 package observations. It never
+/// reads file content; hosts with a verified adapter add bounded derivations separately.
+fn scan_generic_history(
     profile: &TrustAuditProfile, identity: &TrustIdentity, machine_namespace: &str, observed_at_ms: i64,
 ) -> Vec<TrustObservation> {
     if observed_at_ms < 0 || machine_namespace.is_empty() { return Vec::new(); }
@@ -275,6 +398,13 @@ pub fn scan_history(
     observations
 }
 
+pub fn scan_history(
+    profile: &TrustAuditProfile, identity: &TrustIdentity, machine_namespace: &str, observed_at_ms: i64,
+) -> Vec<TrustObservation> {
+    if profile.id == "zcode" { scan_zcode_history(profile, identity, machine_namespace, observed_at_ms) }
+    else { scan_generic_history(profile, identity, machine_namespace, observed_at_ms) }
+}
+
 /// Scan one local client and persist only redacted observations plus derived
 /// Findings. A failed scan never leaves a partially linked Finding behind.
 pub fn audit_and_store(
@@ -302,6 +432,14 @@ pub fn audit_and_store(
                 host: profile.id.clone(), discovered: observations.len(), inserted: inserted.inserted,
                 duplicate: inserted.duplicate, findings_upserted: correlation.findings_upserted,
                 evidence_links_added: correlation.evidence_links_added,
+                stage_counts: observations.iter().fold(BTreeMap::new(), |mut counts, observation| {
+                    *counts.entry(observation.stage.as_str().to_string()).or_insert(0) += 1;
+                    counts
+                }),
+                observation_kind_counts: observations.iter().fold(BTreeMap::new(), |mut counts, observation| {
+                    *counts.entry(observation.observation_kind.as_str().to_string()).or_insert(0) += 1;
+                    counts
+                }),
             })
         }
         Err(error) => {
@@ -340,6 +478,32 @@ mod tests {
         assert!(rows[0].workspace_ref.is_some());
         assert!(!rows[0].native_event_id.as_deref().unwrap().contains("workspace-private"));
         assert!(rows[0].validate().is_ok());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn zcode_checkpoint_metadata_classifies_git_history_and_local_acceptance_without_paths() {
+        let root = std::env::temp_dir().join(format!("agent-vitals-zcode-state-{}", std::process::id()));
+        let checkpoint = root.join(".zcode/v2/checkpoints/workspace-private");
+        std::fs::create_dir_all(checkpoint.join("manifests")).unwrap();
+        std::fs::write(checkpoint.join("manifests/opaque.json"), r#"{
+            "files":[{"path":"src/main.rs","sizeBytes":3},{"path":".git/objects/ab/cd","sizeBytes":7}]
+        }"#).unwrap();
+        std::fs::write(checkpoint.join("state.json"), r#"{
+            "lastAcceptedManifestHash":"opaque-hash","failureCount":2
+        }"#).unwrap();
+        let profile = builtin_profiles(&root).into_iter().find(|item| item.id() == "zcode").unwrap();
+        let identity = TrustIdentity::load_or_create(&root).unwrap();
+        let rows = scan_history(&profile, &identity, "machine-1", 1_000);
+        let package = rows.iter().find(|row| row.collector_id == "zcode-checkpoint-metadata").unwrap();
+        assert!(package.scope_classes.iter().any(|scope| scope == "git_history"));
+        assert_eq!(package.file_count, Some(2));
+        assert_eq!(package.byte_count, Some(10));
+        assert!(!package.observation_id.contains("workspace-private"));
+        assert!(!package.native_event_id.as_deref().unwrap().contains("opaque.json"));
+        assert!(rows.iter().any(|row| row.stage == agent_vitals_domain::trust::TrustStage::RemoteAccepted
+            && row.evidence_level == agent_vitals_domain::trust::TrustEvidenceLevel::E5Accepted));
+        assert!(rows.iter().any(|row| row.observation_kind == agent_vitals_domain::trust::TrustObservationKind::Retry));
         std::fs::remove_dir_all(root).ok();
     }
 

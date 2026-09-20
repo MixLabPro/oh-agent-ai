@@ -8553,10 +8553,29 @@ async function init() {
   });
   document.getElementById("find-trust-audit").addEventListener("click", async () => {
     const button = document.getElementById("find-trust-audit");
+    const status = document.getElementById("find-trust-audit-status");
     button.disabled = true;
     button.textContent = "扫描中…";
     try {
-      await invoke("trust_audit", { host: "all" });
+      const result = await invoke("trust_audit", { host: "all" });
+      const reports = Array.isArray(result && result.reports) ? result.reports : [];
+      const summary = reports.map((report) => {
+        const stages = report && report.stage_counts || {};
+        const kinds = report && report.observation_kind_counts || {};
+        const parts = [];
+        if (Number(kinds.package || 0)) parts.push(Number(kinds.package) + " 份打包清单");
+        if (Number(stages.remote_accepted || 0)) parts.push(Number(stages.remote_accepted) + " 条客户端记录的接受状态");
+        if (Number(kinds.retry || 0)) parts.push(Number(kinds.retry) + " 条重试状态");
+        if (!parts.length) parts.push(Number(report && report.discovered || 0) + " 条本地证据");
+        return (report && report.host || "宿主") + "：" + parts.join("、")
+          + "；" + (Number(report && report.findings_upserted || 0)
+            ? "已更新 " + Number(report.findings_upserted) + " 个风险 Finding"
+            : "未生成可判定风险 Finding");
+      });
+      status.hidden = false;
+      status.textContent = summary.length
+        ? "历史审计完成 · " + summary.join("；") + "。未生成 Finding 不等于未发生行为，只表示现有本机证据未满足某条风险规则。"
+        : "历史审计完成，但没有可报告的宿主结果。";
       await loadFindings(true, false);
     } catch (error) {
       showBanner("find-banner", error, false);
