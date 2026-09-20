@@ -443,6 +443,50 @@ mod tests {
         cleanup(&path);
     }
 
+    /// 527d480 的回归钉子（终验建议）：handler 经**第二连接**提交写入后，
+    /// drain 连接继续记账——旧实现的懒迭代把读快照握过 handler 提交点，
+    /// record_delivery 的读→写升级撞过期快照 SQLITE_BUSY（busy_timeout 对
+    /// 过期快照无效）；物化实现必须无错通过。真机 2026-09-21 首次暴露。
+    #[test]
+    fn drain_survives_handler_writing_via_second_connection() {
+        let path = tmp_db("wal-snapshot");
+        let db = AuthorityDb::open(&path, 1).expect("open");
+        let run = seed(&db);
+        let event = AppEvent::facts_ingested("codex", &run, 5, 0, 0);
+        emit(&db, &event, &run);
+
+        // handler 自持第二条连接并提交一次真实写入（模拟 price-reconcile
+        // 开自己的 AuthorityDb 写 data_quality_issues 的生产形态）。
+        let writer_path = path.clone();
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new(
+            "second-conn-writer",
+            move |_event| {
+                let writer = AuthorityDb::open(&writer_path, 1_700_000_000_001)
+                    .map_err(|e| e.to_string())?;
+                writer
+                    .begin_run("handler-side-write", "cli", 1_700_000_000_002)
+                    .map_err(|e| e.to_string())
+            },
+        )]);
+        let report = dispatcher
+            .drain(db.conn())
+            .expect("物化 drain 不得因 handler 的第二连接写入而死锁");
+        assert_eq!((report.delivered, report.failed, report.skipped), (1, 0, 0));
+        // 记账与 handler 写入都真实落库。
+        let deliveries: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM event_deliveries WHERE consumer_id = 'second-conn-writer'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(deliveries, 1);
+        let side_write: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM sync_runs WHERE run_id = 'handler-side-write'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(side_write, 1, "handler 的第二连接写入必须可见");
+        drop(db);
+        cleanup(&path);
+    }
+
     fn cleanup(path: &std::path::PathBuf) {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
