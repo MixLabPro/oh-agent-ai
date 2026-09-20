@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { readDecisionMatrix, readFindings, readFindingsFreshness, type DecisionMatrixReport, type FindingGroup, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
+import { listen, readDecisionMatrix, readFindings, readFindingsFreshness, type DecisionMatrixReport, type FindingGroup, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
 import { DecisionMatrixSection } from "./DecisionMatrixSection";
 
 type SeverityFilter = "all" | "critical" | "warning" | "info";
@@ -96,6 +96,14 @@ export function FindingsPage() {
   };
 
   useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    let active = true;
+    let cleanups: Array<() => void> = [];
+    Promise.all(["sync-status-updated", "usage-fold-updated", "trust-monitor-updated"].map((event) => listen(event, () => { if (active) load(); })))
+      .then((unsubscribers) => { if (active) cleanups = unsubscribers; else unsubscribers.forEach((unsubscribe) => unsubscribe()); });
+    return () => { active = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
+  }, []);
 
   const groups = report?.issues ?? [];
   const todoGroups = useMemo(() => groups.filter(isTodo), [groups]);

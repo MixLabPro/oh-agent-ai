@@ -26,7 +26,7 @@
 | 监控配置 | `trust_monitor_config` / `save_trust_monitor_config` | `readTrustMonitorConfig()` / `saveTrustMonitorConfig()` | 已接入；不可观察时 fail-closed |
 | Finding 聚合 | `findings_groups_safe` | `readFindings()` | 已有 versioned safe DTO |
 | 决策矩阵 | `decision_matrix_safe` | `readDecisionMatrix()` | 已有 versioned safe DTO |
-| 事件刷新 | `sync-status-updated` / `usage-fold-updated` | 当前 App 壳只刷新总览 | 待统一为 feature query invalidation |
+| 事件刷新 | `sync-status-updated` / `usage-fold-updated` / `trust-monitor-updated` | Findings/Trust 挂载期间注册并在卸载时清理；payload 只作失效信号 | 已完成首轮 feature invalidation |
 
 ## 安全与可见性约束
 
@@ -39,6 +39,6 @@
 
 - [x] Phase 0 页面、command、事件和目标归属已列出。
 - [x] Phase 1 React shell、hash route、bridge、Error Boundary、离线 mock 已建立。
-- [ ] Phase 2 Trust/Findings 的证据详情和事件失效刷新完成（监控控制与一次性快照已完成）。
+- [ ] Phase 2 Trust/Findings 的证据详情完成（监控控制、一次性快照和事件失效刷新已完成）。
 - [ ] Phase 3 其余五个 tab 完成并通过旧页对照。
 - [ ] Phase 4 `.app` 真机验收、生产 `frontendDist` 切换和旧页面回退窗口关闭。
