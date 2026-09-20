@@ -2194,15 +2194,56 @@ fn start_public_pricing_catalog_tick() {
 /// 「发现」tab 新鲜度条的数据面（WORKBENCH_FINDINGS_TAB_SPEC §4.8）。
 /// 只读一个数：上次成功同步时刻 + stale 宿主名单（runtime 与 MCP envelope
 /// 同源），DB 打不开就如实报 unavailable，不编一个空名单。
+fn findings_freshness_state(report: &Value) -> &'static str {
+    let Some(last) = report.get("last_successful_sync_at").and_then(Value::as_str) else {
+        return "not_yet_synced";
+    };
+    if parse_rfc3339_secs(last).is_none() {
+        return "unknown";
+    }
+    let Some(stale_hosts) = report.get("stale_hosts").and_then(Value::as_array) else {
+        return "unknown";
+    };
+    if stale_hosts.iter().any(|host| !host.is_string()) {
+        return "unknown";
+    }
+    if !stale_hosts.is_empty() {
+        "stale"
+    } else {
+        "fresh"
+    }
+}
+
+fn findings_safe_host_label(value: &Value) -> String {
+    let Some(host) = value.as_str() else { return "generic".to_string(); };
+    if let Some(slug) = host.strip_prefix("plugin:") {
+        if agent_vitals_runtime::host_registry::plugin_slug_ok(slug) {
+            return host.to_string();
+        }
+        return "generic".to_string();
+    }
+    if host.len() <= 32 && !host.is_empty() && host.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-')) {
+        host.to_string()
+    } else {
+        "generic".to_string()
+    }
+}
+
 #[tauri::command]
 fn findings_freshness() -> Value {
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
     match agent_vitals_data::authority::AuthorityDb::open_readonly(&path) {
-        Ok(db) => serde_json::json!({
-            "status": "ok",
-            "freshness": agent_vitals_runtime::mcp::data_freshness_report(db.conn()),
-        }),
+        Ok(db) => {
+            let raw = agent_vitals_runtime::mcp::data_freshness_report(db.conn());
+            let state = findings_freshness_state(&raw);
+            let last = raw.get("last_successful_sync_at").cloned().unwrap_or(Value::Null);
+            let stale_hosts = raw.get("stale_hosts").and_then(Value::as_array).map(|hosts| hosts.iter().map(findings_safe_host_label).collect::<Vec<_>>()).unwrap_or_default();
+            serde_json::json!({
+                "status": "ok",
+                "freshness": {"state": state, "last_successful_sync_at": last, "stale_hosts": stale_hosts, "syncing": false},
+            })
+        }
         Err(_) => serde_json::json!({ "status": "unavailable" }),
     }
 }
@@ -3656,6 +3697,7 @@ pub fn run() {
             store::trust_suppression_revoke,
             store::trust_suppression_list,
             store::sessions_issues,
+            store::findings_groups_safe,
             store::decision_matrix,
             findings_freshness,
             store::skills_doctor_report,
@@ -3754,6 +3796,25 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn findings_freshness_never_calls_missing_sync_complete() {
+        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": null, "stale_hosts": []})), "not_yet_synced");
+        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": "2026-09-20T12:00:00+08:00", "stale_hosts": ["generic"]})), "stale");
+        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": "2026-09-20T12:00:00+08:00", "stale_hosts": []})), "fresh");
+        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": "not-a-timestamp", "stale_hosts": []})), "unknown");
+        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": "2026-09-20T12:00:00+08:00"})), "unknown");
+        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": "2026-09-20T12:00:00+08:00", "stale_hosts": [42]})), "unknown");
+    }
+
+    #[test]
+    fn findings_freshness_host_projection_is_bounded() {
+        assert_eq!(findings_safe_host_label(&serde_json::json!("zcode")), "zcode");
+        assert_eq!(findings_safe_host_label(&serde_json::json!("plugin:zcode")), "plugin:zcode");
+        assert_eq!(findings_safe_host_label(&serde_json::json!("plugin:../escape")), "generic");
+        assert_eq!(findings_safe_host_label(&serde_json::json!("/Users/Admin/private")), "generic");
+        assert_eq!(findings_safe_host_label(&serde_json::json!("host with spaces")), "generic");
+    }
 
     /// 规格 R6：「接受」不再是候选的直接决定——它曾经只翻状态、不归因、不重算，
     /// 用户以为确认了而数字没变。dismiss/reopen 照旧。
