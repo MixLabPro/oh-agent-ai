@@ -23,6 +23,7 @@ for (const required of [
   path.join(reactSource, "features/findings/DecisionMatrixSection.tsx"),
   path.join(reactSource, "features/usage/UsagePage.tsx"),
   path.join(reactSource, "features/sessions/SessionsPage.tsx"),
+  path.join(reactSource, "features/sessions/SessionDetail.tsx"),
   path.join(repo, "apps/desktop/src-tauri/src/store.rs"),
   path.join(dist, "index.html"),
 ]) {
@@ -57,6 +58,7 @@ if (!source.includes('"read_calendar_month"') || !source.includes('"read_hourly_
 if (!source.includes("usage-calendar-grid") || !source.includes("usage-hour-grid") || !source.includes("total_actual_spend") || !source.includes("aria-selected")) fail("React 用量缺少日历、小时、币种或选择状态语义");
 if (!source.includes('"sessions_list"') || !source.includes("session_ref") || !source.includes("sessions-table") || !source.includes("window_session_count")) fail("React 会话未使用安全列表 DTO 或窗口守恒字段");
 if (!source.includes("加载更多") || !source.includes("cost_status") || !source.includes("requestInFlight") || !source.includes("pendingRefresh")) fail("React 会话缺少成本状态、分页或竞态保护");
+if (!source.includes('"sessions_read"') || !source.includes("workflow_timeline") || !source.includes("billing_breakdown") || !source.includes("session-detail-panel")) fail("React 会话详情缺少安全摘要、计费桶或脱敏时间线");
 if (source.includes('"sessions_issues"')) fail("React Findings 直接消费 legacy 宽 DTO");
 
 const html = fs.readFileSync(path.join(dist, "index.html"), "utf8");

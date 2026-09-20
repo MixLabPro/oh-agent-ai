@@ -115,6 +115,52 @@ export type SessionsPage = {
   window_label: string | null;
 };
 
+export type SessionTimelineRow = {
+  event_at: string | null;
+  model_id: string;
+  observation_kind: string;
+  peak: boolean;
+  tokens: SessionRow["tokens"];
+};
+
+export type SessionWorkflowEvent = {
+  event_at: string | null;
+  event_type: string;
+  capability_kind: string | null;
+  capability_id: string | null;
+  capability_version: string | null;
+  outcome: "succeeded" | "failed" | "unknown";
+  duration_ms: number | null;
+  error_fingerprint: string | null;
+  invocation_fingerprint: string | null;
+};
+
+export type SessionBillingBucket = {
+  provider_id: string;
+  provider_raw: string | null;
+  model_id: string;
+  billing_template_id: string | null;
+  billing_mode: string;
+  pricing_basis: string;
+  evidence_basis: string;
+  pricing_version: string | null;
+  pricing_source: string | null;
+  cost_minor: SessionCost | null;
+  peak: boolean;
+  tokens: SessionRow["tokens"];
+  has_unresolved: boolean;
+  unresolved_reason: string | null;
+};
+
+export type SessionDetail = SessionRow & {
+  billing_breakdown: SessionBillingBucket[];
+  timeline: SessionTimelineRow[];
+  workflow_timeline: SessionWorkflowEvent[];
+  workflow_has_more: boolean;
+  has_more: boolean;
+  next_cursor: string | null;
+};
+
 export type SessionsWindow = "month" | "today" | "7d" | "custom";
 export type SessionsCostFilter = "all" | SessionCostStatus["state"];
 export type SessionsFilters = {
@@ -552,26 +598,34 @@ function parseSessionCost(value: unknown, label: string): SessionCost | null {
   };
 }
 
-function parseSessionRow(value: unknown): SessionRow {
-  const row = record(value, "session row");
-  const sessionRef = stringField(row.session_ref, "session ref");
-  if (!/^sr_[A-Za-z0-9_-]{8,128}$/.test(sessionRef)) throw new Error("session ref DTO 引用格式不安全");
-  const tokenRow = record(row.tokens, "session tokens");
-  const uncached = boundedCount(tokenRow.uncached_input_tokens, "session uncached input", 1_000_000_000_000_000);
-  const cacheRead = boundedCount(tokenRow.cache_read_tokens, "session cache read", 1_000_000_000_000_000);
-  const cacheWrite = boundedCount(tokenRow.cache_write_tokens, "session cache write", 1_000_000_000_000_000);
-  const output = boundedCount(tokenRow.output_tokens, "session output", 1_000_000_000_000_000);
-  const total = boundedCount(tokenRow.total, "session total", 1_000_000_000_000_000);
-  if (total !== uncached + cacheRead + cacheWrite + output) throw new Error("session token totals 不守恒");
-  const modelIds = requiredArray(row.model_ids, "session model ids").slice(0, 16).map((model) => decisionLabel(model, "session model"));
-  const costStatus = record(row.cost_status, "session cost status");
+function parseSessionTokens(value: unknown, label: string): SessionRow["tokens"] {
+  const tokenRow = record(value, label);
+  const uncached = boundedCount(tokenRow.uncached_input_tokens, `${label} uncached input`, 1_000_000_000_000_000);
+  const cacheRead = boundedCount(tokenRow.cache_read_tokens, `${label} cache read`, 1_000_000_000_000_000);
+  const cacheWrite = boundedCount(tokenRow.cache_write_tokens, `${label} cache write`, 1_000_000_000_000_000);
+  const output = boundedCount(tokenRow.output_tokens, `${label} output`, 1_000_000_000_000_000);
+  const total = boundedCount(tokenRow.total, `${label} total`, 1_000_000_000_000_000);
+  if (total !== uncached + cacheRead + cacheWrite + output) throw new Error(`${label} token totals 不守恒`);
+  return { uncached_input_tokens: uncached, cache_read_tokens: cacheRead, cache_write_tokens: cacheWrite, output_tokens: output, total };
+}
+
+function parseSessionCostStatus(value: unknown): SessionCostStatus {
+  const costStatus = record(value, "session cost status");
   const state = boundedEnum(costStatus.state, "session cost state", ["estimated", "subscription", "unpriced", "unavailable"], "unavailable") as SessionCostStatus["state"];
   const reason = boundedEnum(costStatus.reason, "session cost reason", [
     "no-usage-facts", "subscription-token-usage-is-not-a-per-token-bill", "official-card-fallback-estimate",
     "metered-estimate", "multiple-provider-costs-require-breakdown", "no-pricing-snapshot", "no-price-card",
     "cost-unavailable", "cost-query-failed",
   ], "cost-unavailable");
-  const hasUnresolved = requiredBoolean(costStatus.has_unresolved, "session cost unresolved");
+  return { state, reason, has_unresolved: requiredBoolean(costStatus.has_unresolved, "session cost unresolved") };
+}
+
+function parseSessionRow(value: unknown): SessionRow {
+  const row = record(value, "session row");
+  const sessionRef = stringField(row.session_ref, "session ref");
+  if (!/^sr_[A-Za-z0-9_-]{8,128}$/.test(sessionRef)) throw new Error("session ref DTO 引用格式不安全");
+  const tokens = parseSessionTokens(row.tokens, "session tokens");
+  const modelIds = requiredArray(row.model_ids, "session model ids").slice(0, 16).map((model) => decisionLabel(model, "session model"));
   return {
     session_ref: sessionRef,
     host: safeHostLabel(row.host),
@@ -579,11 +633,97 @@ function parseSessionRow(value: unknown): SessionRow {
     last_event_at: safeTimestamp(row.last_event_at, "session last event"),
     event_count: boundedCount(row.event_count, "session event count", 1_000_000_000),
     model_ids: modelIds,
-    tokens: { uncached_input_tokens: uncached, cache_read_tokens: cacheRead, cache_write_tokens: cacheWrite, output_tokens: output, total },
+    tokens,
     peak_tokens: boundedCount(row.peak_tokens, "session peak tokens", 1_000_000_000_000_000),
     cost_minor: parseSessionCost(row.cost_minor, "session cost"),
-    cost_status: { state, reason, has_unresolved: hasUnresolved },
+    cost_status: parseSessionCostStatus(row.cost_status),
   };
+}
+
+function safeWorkflowLabel(value: unknown, label: string): string | null {
+  if (value === null || value === undefined) return null;
+  const text = stringField(value, label);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:@+\-]{0,127}$/.test(text) || text.includes("..")) return null;
+  return text;
+}
+
+function safeFingerprint(value: unknown, label: string): string | null {
+  if (value === null || value === undefined) return null;
+  const text = stringField(value, label);
+  return /^fnv1a64:[0-9a-f]{16}$/.test(text) ? text : null;
+}
+
+function safeBillingReason(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  return boundedEnum(value, "session billing reason", [
+    "subscription token usage is not a per-token bill",
+    "no pricing snapshot covers this event time",
+    "no compatible price card for this provider/model bucket",
+    "provider-specific price card unavailable; official-card fallback estimate required",
+  ], "cost-unavailable");
+}
+
+function parseSessionTimeline(value: unknown): SessionTimelineRow {
+  const row = record(value, "session timeline row");
+  return {
+    event_at: safeTimestamp(row.event_at, "session timeline event"),
+    model_id: decisionLabel(row.model_id, "session timeline model"),
+    observation_kind: safeWorkflowLabel(row.observation_kind, "session observation") ?? "unknown",
+    peak: requiredBoolean(row.peak, "session timeline peak"),
+    tokens: parseSessionTokens(row.tokens, "session timeline tokens"),
+  };
+}
+
+function parseSessionWorkflowEvent(value: unknown): SessionWorkflowEvent {
+  const row = record(value, "session workflow event");
+  const eventType = boundedEnum(row.event_type, "session workflow event type", ["task_started", "task_finished", "skill_invoked", "skill_finished", "tool_invoked", "tool_finished", "model_switched"], "unknown");
+  const outcome = boundedEnum(row.outcome, "session workflow outcome", ["succeeded", "failed"], "unknown") as SessionWorkflowEvent["outcome"];
+  const duration = row.duration_ms === null || row.duration_ms === undefined ? null : boundedCount(row.duration_ms, "session workflow duration", 86_400_000);
+  return {
+    event_at: safeTimestamp(row.event_at, "session workflow event time"),
+    event_type: eventType,
+    capability_kind: row.capability_kind === null || row.capability_kind === undefined ? null : boundedEnum(row.capability_kind, "session capability kind", ["skill", "tool", "model", "subagent"], "unknown"),
+    capability_id: safeWorkflowLabel(row.capability_id, "session capability id"),
+    capability_version: safeWorkflowLabel(row.capability_version, "session capability version"),
+    outcome,
+    duration_ms: duration,
+    error_fingerprint: safeFingerprint(row.error_fingerprint, "session error fingerprint"),
+    invocation_fingerprint: safeFingerprint(row.invocation_fingerprint, "session invocation fingerprint"),
+  };
+}
+
+function parseSessionBillingBucket(value: unknown): SessionBillingBucket {
+  const row = record(value, "session billing bucket");
+  return {
+    provider_id: decisionLabel(row.provider_id ?? "<unknown>", "session provider"),
+    provider_raw: row.provider_raw === null || row.provider_raw === undefined ? null : decisionLabel(row.provider_raw, "session provider raw"),
+    model_id: decisionLabel(row.model_id, "session billing model"),
+    billing_template_id: safeWorkflowLabel(row.billing_template_id, "session billing template"),
+    billing_mode: safeWorkflowLabel(row.billing_mode, "session billing mode") ?? "unknown",
+    pricing_basis: safeWorkflowLabel(row.pricing_basis, "session pricing basis") ?? "unavailable",
+    evidence_basis: safeWorkflowLabel(row.evidence_basis, "session evidence basis") ?? "unknown",
+    pricing_version: safeWorkflowLabel(row.pricing_version, "session pricing version"),
+    pricing_source: safeWorkflowLabel(row.pricing_source, "session pricing source"),
+    cost_minor: parseSessionCost(row.cost_minor, "session bucket cost"),
+    peak: requiredBoolean(row.peak, "session billing peak"),
+    tokens: parseSessionTokens(row.tokens, "session billing tokens"),
+    has_unresolved: requiredBoolean(row.has_unresolved, "session billing unresolved"),
+    unresolved_reason: safeBillingReason(row.unresolved_reason),
+  };
+}
+
+function parseSessionDetail(value: unknown): SessionDetail {
+  const root = record(value, "session detail envelope");
+  const data = record(root.data, "session detail data");
+  const base = parseSessionRow(data);
+  const timeline = requiredArray(data.timeline, "session detail timeline").slice(0, 1000).map(parseSessionTimeline);
+  const workflow = requiredArray(data.workflow_timeline, "session workflow timeline").slice(0, 1000).map(parseSessionWorkflowEvent);
+  const billing = requiredArray(data.billing_breakdown, "session billing breakdown").slice(0, 500).map(parseSessionBillingBucket);
+  const hasMore = requiredBoolean(data.has_more, "session detail has more");
+  const nextCursor = data.next_cursor === null || data.next_cursor === undefined ? null : stringField(data.next_cursor, "session detail cursor");
+  if (nextCursor !== null && (nextCursor.length < 1 || nextCursor.length > 4096)) throw new Error("session detail cursor DTO 不安全");
+  if (hasMore && nextCursor === null) throw new Error("session detail 分页缺少 next_cursor");
+  return { ...base, billing_breakdown: billing, timeline, workflow_timeline: workflow, workflow_has_more: requiredBoolean(data.workflow_has_more, "session workflow has more"), has_more: hasMore, next_cursor: nextCursor };
 }
 
 function parseSessionsPage(value: unknown): SessionsPage {
@@ -1055,6 +1195,34 @@ export async function readSessions(input: {
     return parseSessionsPage({ data: { sessions: [sample], next_cursor: null, has_more: false, window_session_count: 1, window_total_tokens: 246000, window: { label: input.month ?? "preview" } } });
   }
   return parseSessionsPage(await handler("sessions_list", args));
+}
+
+export async function readSessionDetail(sessionRef: string, cursor: string | null = null): Promise<SessionDetail> {
+  if (typeof sessionRef !== "string" || !/^sr_[A-Za-z0-9_-]{8,128}$/.test(sessionRef)) throw new Error("session_ref 不安全");
+  const args: Record<string, unknown> = { sessionRef, limit: 200 };
+  if (cursor !== null) {
+    if (typeof cursor !== "string" || cursor.length < 1 || cursor.length > 4096) throw new Error("session detail cursor 不安全");
+    args.cursor = cursor;
+  }
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) {
+    const now = new Date();
+    const makeEvent = (offset: number, total: number, model: string, peak = false): SessionTimelineRow => ({
+      event_at: new Date(now.valueOf() - offset).toISOString(), model_id: model, observation_kind: "assistant-usage", peak,
+      tokens: { uncached_input_tokens: total, cache_read_tokens: 0, cache_write_tokens: 0, output_tokens: 0, total },
+    });
+    const sample = {
+      session_ref: sessionRef, host: "codex", first_event_at: new Date(now.valueOf() - 3_600_000).toISOString(), last_event_at: now.toISOString(),
+      event_count: 24, model_ids: ["gpt-5.6-sol"], tokens: { uncached_input_tokens: 92000, cache_read_tokens: 128000, cache_write_tokens: 12000, output_tokens: 14000, total: 246000 }, peak_tokens: 34000,
+      cost_minor: { amount_minor: 84, currency: "USD", basis: "metered_estimate" }, cost_status: { state: "estimated", reason: "metered-estimate", has_unresolved: false },
+      billing_breakdown: [{ provider_id: "openai", provider_raw: "openai", model_id: "gpt-5.6-sol", billing_template_id: null, billing_mode: "metered", pricing_basis: "metered_estimate", evidence_basis: "explicit-official-route", pricing_version: "preview-v1", pricing_source: "official", cost_minor: { amount_minor: 84, currency: "USD", basis: "metered_estimate" }, peak: true, tokens: { uncached_input_tokens: 92000, cache_read_tokens: 128000, cache_write_tokens: 12000, output_tokens: 14000, total: 246000 }, has_unresolved: false, unresolved_reason: null }],
+      timeline: [makeEvent(3_600_000, 92000, "gpt-5.6-sol"), makeEvent(1_800_000, 154000, "gpt-5.6-sol", true)],
+      workflow_timeline: [{ event_at: new Date(now.valueOf() - 3_500_000).toISOString(), event_type: "tool_finished", capability_kind: "tool", capability_id: "bash", capability_version: null, outcome: "succeeded", duration_ms: 1400, error_fingerprint: null, invocation_fingerprint: null }],
+      workflow_has_more: false, has_more: false, next_cursor: null,
+    };
+    return parseSessionDetail({ data: sample });
+  }
+  return parseSessionDetail(await handler("sessions_read", args));
 }
 
 export async function readStatisticsTimezone(): Promise<StatisticsTimezone> {

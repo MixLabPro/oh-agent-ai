@@ -692,7 +692,18 @@
         const page = continuation ? sessions.slice(1) : sessions.slice(0, 1);
         return { data: { sessions: page, next_cursor: continuation ? null : "preview-next", has_more: !continuation, window_session_count: sessions.length, window_total_tokens: 344000 } };
       }
-      case "sessions_read": return { data: { session: sessions[0], events: [], findings: [] } };
+      case "sessions_read": {
+        const selected = sessions.find((session) => session.session_ref === (args && args.sessionRef)) || sessions[0];
+        const model = selected.model_ids[0] || "<unknown>";
+        const tokens = selected.tokens;
+        return { data: {
+          ...selected,
+          billing_breakdown: [{ provider_id: selected.host === "codex" ? "openai" : "<unknown>", provider_raw: selected.host === "codex" ? "openai" : null, model_id: model, billing_template_id: null, billing_mode: selected.cost_status.state === "subscription" ? "subscription" : "metered", pricing_basis: selected.cost_minor?.basis || "unavailable", evidence_basis: selected.cost_status.has_unresolved ? "missing" : "explicit-official-route", pricing_version: selected.cost_minor ? "preview-v1" : null, pricing_source: selected.cost_minor ? "official" : null, cost_minor: selected.cost_minor, peak: true, tokens, has_unresolved: selected.cost_status.has_unresolved, unresolved_reason: selected.cost_status.has_unresolved ? "no pricing snapshot covers this event time" : null }],
+          timeline: [{ event_at: selected.first_event_at, model_id: model, observation_kind: "assistant-usage", peak: false, tokens: { uncached_input_tokens: tokens.uncached_input_tokens, cache_read_tokens: 0, cache_write_tokens: 0, output_tokens: 0, total: tokens.uncached_input_tokens } }, { event_at: selected.last_event_at, model_id: model, observation_kind: "assistant-usage", peak: true, tokens: { uncached_input_tokens: 0, cache_read_tokens: tokens.cache_read_tokens, cache_write_tokens: tokens.cache_write_tokens, output_tokens: tokens.output_tokens, total: tokens.cache_read_tokens + tokens.cache_write_tokens + tokens.output_tokens } }],
+          workflow_timeline: [{ event_at: selected.last_event_at, event_type: "tool_finished", capability_kind: "tool", capability_id: "bash", capability_version: null, outcome: "succeeded", duration_ms: 1400, error_fingerprint: null, invocation_fingerprint: null }],
+          workflow_has_more: false, has_more: false, next_cursor: null,
+        } };
+      }
       case "sessions_issues": return {
         totals: { issues: issueGroups.length, findings: issueGroups.length, critical: 0, warning: issueGroups.length, info: 0, sessions: 1, sessions_total: 1 },
         rules: issueGroups.map((group) => ({ rule: group.rule, severity: group.severity, category: group.category, hits: group.hits, sessions: group.sessions })),
