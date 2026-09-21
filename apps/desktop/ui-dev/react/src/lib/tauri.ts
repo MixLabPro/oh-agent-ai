@@ -213,6 +213,7 @@ export type BudgetSettingsReport = {
   snoozed_until_ms: number | null;
 };
 export type BudgetSaveReceipt = { status: "saved"; profile_id: "estimate"; currency: "CNY" | "USD"; notification_permission: "granted" | "denied" | "unavailable" };
+export type BudgetDisableReceipt = { status: "disabled"; profile_id: "estimate"; changed: boolean };
 export type NotificationPermission = "granted" | "denied" | "unavailable";
 export type QuotaReminderConfig = { status: "ok" | "unavailable"; enabled: boolean; notification_permission: NotificationPermission | null };
 export type QuotaReminderReceipt = { status: "saved"; enabled: boolean; notification_permission: NotificationPermission };
@@ -893,6 +894,12 @@ function parseBudgetSaveReceipt(value: unknown): BudgetSaveReceipt {
   const rawPermission = typeof root.notification_permission === "string" ? root.notification_permission.toLowerCase() : "";
   const notification_permission = rawPermission === "granted" ? "granted" : rawPermission === "denied" || rawPermission === "prompt" || rawPermission === "restricted" ? "denied" : "unavailable";
   return { status: "saved", profile_id: "estimate", currency, notification_permission };
+}
+
+function parseBudgetDisableReceipt(value: unknown): BudgetDisableReceipt {
+  const root = record(value, "budget disable receipt");
+  if (root.status !== "disabled" || root.profile_id !== "estimate") throw new Error("预算停用未确认");
+  return { status: "disabled", profile_id: "estimate", changed: requiredBoolean(root.changed, "budget disable changed") };
 }
 
 function parseNotificationPermission(value: unknown): NotificationPermission {
@@ -2371,6 +2378,13 @@ export async function saveBudgetProfile(input: { currency: "CNY" | "USD"; monthl
   } catch {
     throw new Error("预算保存失败，请稍后重试");
   }
+}
+
+export async function disableBudgetProfile(): Promise<BudgetDisableReceipt> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "disabled", profile_id: "estimate", changed: true };
+  try { return parseBudgetDisableReceipt(await handler("disable_budget_profile")); }
+  catch { throw new Error("预算停用失败，请稍后重试"); }
 }
 
 export async function readQuotaReminderConfig(): Promise<QuotaReminderConfig> {

@@ -100,8 +100,9 @@ if (!source.includes('"source_host_controls"') || !source.includes("supported_ho
 if (!source.includes('"delete_imported_source_data"') || !source.includes("deleteImportedSourceData") || !source.includes("确认删除") || !source.includes("原始日志未修改") || !source.includes("删除未完成；原始日志未修改")) fail("React 设置缺少二次确认、删除回执或失败保护");
 if (!source.includes("triggerSync") || !source.includes("setSyncPaused") || !source.includes("readSyncRequestStatus")) fail("React 设置缺少同步控制与回执轮询");
 if (!source.includes("readCustomSourceConfig") || !source.includes("addCustomSourceRoot") || !source.includes("removeCustomSourceRoot") || !source.includes("pickCustomSourceRoot")) fail("React 设置缺少自定义读取位置桥接");
-if (!source.includes("readBudgetSettings") || !source.includes("saveBudgetProfile") || !source.includes("snoozeBudgetCurrentPeriod") || !source.includes("clearBudgetSnooze")) fail("React 设置缺少预算状态、保存或静默桥接");
+if (!source.includes("readBudgetSettings") || !source.includes("saveBudgetProfile") || !source.includes("disableBudgetProfile") || !source.includes('"disable_budget_profile"') || !source.includes("snoozeBudgetCurrentPeriod") || !source.includes("clearBudgetSnooze")) fail("React 设置缺少预算状态、保存、停用或静默桥接");
 if (!source.includes("预算（订阅 + 按量）") || !source.includes("80% 和 100%") || !source.includes("warning_ratio_bp: 8000")) fail("React 设置预算未固定新表单与阈值契约");
+if (!source.includes("再次确认停用估算预算") || !source.includes("历史用量与已确认预算保留")) fail("React 设置预算停用缺少二次确认或历史保留语义");
 if (!source.includes("readQuotaReminderConfig") || !source.includes("saveQuotaReminderConfig") || !source.includes('"quota_reminder_config"') || !source.includes('"save_quota_reminder_config"') || !source.includes("Claude Pro 额度窗口提醒") || !source.includes("系统通知未授权") || !source.includes("恢复为关闭并修复配置")) fail("React 设置缺少额度窗口提醒的只读/写入回执、权限状态或损坏配置恢复入口");
 if (source.includes('"save_budget_config"') || source.includes('"save_host_bill"')) fail("React 设置越过预算旧配置或账单 mutation 边界");
 if (!source.includes("readBillingSettings") || !source.includes('"billing_confirmation_groups"') || !source.includes('"host_bills_for_period"')) fail("React 设置缺少计费只读 DTO");

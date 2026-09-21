@@ -612,6 +612,11 @@
         };
         return ok({ status: "saved", profile_id: input.profile_id, currency: input.currency, notification_permission: "granted" });
       }
+      case "disable_budget_profile": {
+        const changed = Boolean(budgetProfilesState.estimate);
+        delete budgetProfilesState.estimate;
+        return ok({ status: "disabled", profile_id: "estimate", changed });
+      }
       case "snooze_budget_current_period": {
         budgetSnoozedUntilMs = Date.parse(month + "-28T23:59:59+08:00");
         return ok({ status: "ok", snoozed_until_ms: budgetSnoozedUntilMs });

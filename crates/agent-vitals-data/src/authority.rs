@@ -2402,6 +2402,21 @@ impl AuthorityDb {
         Ok(())
     }
 
+    /// Remove a user-configured budget profile. Removing the estimate profile
+    /// means "no estimate budget"; it does not alter usage facts, history, or
+    /// the separately-owned confirmed profile.
+    pub fn budget_profile_delete(&self, profile_id: &str) -> Result<bool, AuthorityError> {
+        if profile_id != "estimate" {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "only estimate budget can be disabled".to_string(),
+            )));
+        }
+        Ok(self.conn.execute(
+            "DELETE FROM budget_profiles WHERE profile_id = ?1",
+            rusqlite::params![profile_id],
+        )? > 0)
+    }
+
     /// 读 snooze（`until_ms`）。None = 从未设置；已过期的不清除（判断在
     /// 消费方——「过期自动失效」与 Python 链 `now >= until` 同语义），返回
     /// 原值让消费方比较，避免这里读时钟。
@@ -5882,6 +5897,20 @@ mod tests {
         ]);
         assert!(a.budget_profile_set("estimate", "CN", 1, None, 8_000, 4_000).is_err());
         assert!(a.budget_profile_set("estimate", "USD", 0, None, 8_000, 4_000).is_err());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn deleting_estimate_budget_preserves_confirmed_profile() {
+        let db = tmp_db("budget-disable");
+        let a = AuthorityDb::open(&db, 1_000).unwrap();
+        a.budget_profile_set("estimate", "CNY", 60_000, None, 8_000, 2_000).unwrap();
+        a.budget_profile_set("confirmed", "USD", 10_000, None, 8_000, 2_000).unwrap();
+        assert!(a.budget_profile_delete("estimate").unwrap());
+        assert!(!a.budget_profile_delete("estimate").unwrap());
+        assert_eq!(a.budget_profiles_get().unwrap().len(), 1);
+        assert_eq!(a.budget_profiles_get().unwrap()[0].profile_id, "confirmed");
+        assert!(a.budget_profile_delete("confirmed").is_err());
         let _ = std::fs::remove_file(&db);
     }
 

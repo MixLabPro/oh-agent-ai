@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { addCustomSourceRoot, amendBillingDeclaration, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, listen, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, resolveBillingImportCandidate, retryBillingRecalculation, revokeBillingDeclaration, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
+import { addCustomSourceRoot, amendBillingDeclaration, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, disableBudgetProfile, listen, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, resolveBillingImportCandidate, retryBillingRecalculation, revokeBillingDeclaration, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -434,6 +434,8 @@ function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps)
   const [monthly, setMonthly] = useState("");
   const [daily, setDaily] = useState("");
   const [saving, setSaving] = useState(false);
+  const [disabling, setDisabling] = useState(false);
+  const [disableArmed, setDisableArmed] = useState(false);
   const [snoozing, setSnoozing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -444,6 +446,10 @@ function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps)
       if (estimate.currency === "USD" || estimate.currency === "CNY") setCurrency(estimate.currency);
       setMonthly((estimate.monthly_minor / 100).toFixed(2));
       setDaily(estimate.daily_minor === null ? "" : (estimate.daily_minor / 100).toFixed(2));
+    } else if (report?.status === "ok") {
+      setMonthly("");
+      setDaily("");
+      setDisableArmed(false);
     }
   }, [report?.estimate?.profile_id, report?.estimate?.updated_at_ms]);
 
@@ -482,6 +488,19 @@ function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps)
     finally { setSnoozing(false); }
   };
 
+  const disable = async () => {
+    if (disabling) return;
+    if (!disableArmed) { setDisableArmed(true); setActionError(null); setMessage("再次点击确认停用估算预算；历史用量不会删除，已确认预算不受影响。"); return; }
+    setDisabling(true); setActionError(null); setMessage(null);
+    try {
+      const receipt = await disableBudgetProfile();
+      setDisableArmed(false);
+      setMessage(receipt.changed ? "估算预算已停用；历史用量与已确认预算保留。" : "估算预算本来就未设置；历史用量未改变。");
+      onReload();
+    } catch (reason: unknown) { setActionError(safeUiError(reason, "预算停用失败")); }
+    finally { setDisabling(false); }
+  };
+
   const estimate = report?.estimate;
   const unsupportedCurrency = Boolean(estimate && estimate.currency !== "CNY" && estimate.currency !== "USD");
   const snoozed = report?.snoozed_until_ms !== null && report?.snoozed_until_ms !== undefined && report.snoozed_until_ms > Date.now();
@@ -498,7 +517,7 @@ function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps)
         <label><span>月预算</span><input inputMode="decimal" value={monthly} onChange={(event) => setMonthly(event.target.value)} placeholder="例如 100.00" aria-describedby="settings-budget-help" disabled={unsupportedCurrency} /><small id="settings-budget-help">正数，最多两位小数</small></label>
         <label><span>日预算（可选）</span><input inputMode="decimal" value={daily} onChange={(event) => setDaily(event.target.value)} placeholder="留空表示不设日预算" disabled={unsupportedCurrency} /></label>
         <div className="settings-budget-threshold"><span>提醒阈值</span><strong>80% 和 100%</strong><small>固定阈值，各提醒一次</small></div>
-        <button className="button button-secondary" type="submit" disabled={saving || unsupportedCurrency}>{saving ? "保存中…" : "保存预算"}</button>
+        <div className="settings-budget-form-actions"><button className="button button-secondary" type="submit" disabled={saving || disabling || unsupportedCurrency}>{saving ? "保存中…" : "保存预算"}</button>{estimate && <button className="button button-danger button-small" type="button" onClick={disable} disabled={saving || disabling}>{disabling ? "停用中…" : disableArmed ? "再次确认停用估算预算" : "停用估算预算"}</button>}</div>
       </form>
       {unsupportedCurrency && estimate && <p className="settings-budget-warning" role="note">当前估算预算使用 {estimate.currency}，此页面暂不支持编辑该币种；为避免误覆盖，表单已锁定。</p>}
       {estimate && <div className="settings-budget-summary"><div><span>当前估算预算</span><strong>{minorToDecimal(estimate.total_spent_minor, estimate.currency)} / {minorToDecimal(estimate.monthly_minor, estimate.currency)}</strong></div><span className={`status-pill status-pill-${estimate.level === "ok" ? "success" : estimate.level === "warn" ? "warning" : estimate.level === "exceeded" ? "danger" : "neutral"}`}>{budgetStatusLabel(estimate.level)}</span>{estimate.has_unresolved && <small className="settings-budget-warning">部分用量仍待确认，金额可能不完整。</small>}</div>}

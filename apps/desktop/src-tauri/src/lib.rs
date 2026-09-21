@@ -2515,6 +2515,22 @@ fn save_budget_profile(app: AppHandle, input: BudgetProfileInput) -> Result<Valu
     }))
 }
 
+/// Clear the user-owned estimate budget. This is intentionally a delete rather
+/// than a zero-value profile: the schema requires positive limits, and an
+/// absent profile is the explicit "not configured" state. Usage history and
+/// the separately-owned confirmed profile remain untouched.
+#[tauri::command]
+fn disable_budget_profile() -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+    let db = agent_vitals_data::authority::AuthorityDb::open(&path, now_ms)
+        .map_err(|error| error.to_string())?;
+    let changed = db.budget_profile_delete("estimate")
+        .map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({ "status": "disabled", "profile_id": "estimate", "changed": changed }))
+}
+
 #[tauri::command]
 fn save_budget_config(app: AppHandle, input: BudgetConfigInput) -> Result<Value, String> {
     if input.monthly_cny_minor < 0 || input.daily_cny_minor < 0
@@ -3700,6 +3716,7 @@ pub fn run() {
             budget_config,
             budget_profiles_status,
             save_budget_profile,
+            disable_budget_profile,
             save_budget_config,
             snooze_budget_until,
             snooze_budget_current_period,
