@@ -336,3 +336,153 @@ assert_eq!(classify(&first_seen, Some((100, 1000)), true, args.0, args.1),
         let _ = std::fs::remove_file(&path);
     }
 }
+
+/// P1a 差分门（spec §10.1 验收 #1）：同一 fixture 文件，全量解析 vs 增量解析
+/// （多次追加）产出的 fact_id 集必须逐条一致。这是增量正确性的硬证明。
+#[cfg(test)]
+mod differential_gate_tests {
+    use std::io::Write;
+
+    fn write_jsonl(path: &std::path::Path, lines: &[&str]) {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        for line in lines {
+            writeln!(f, "{line}").unwrap();
+        }
+    }
+
+    fn fact_ids(facts: &[serde_json::Value]) -> Vec<String> {
+        let mut ids: Vec<String> = facts
+            .iter()
+            .filter_map(|f| f.get("fact_id").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// 差分门主体：分三次追加写入，每次增量解析；最后与全量解析比对。
+    #[test]
+    fn differential_gate_full_vs_incremental_fact_id_parity() {
+        let dir = std::env::temp_dir().join(format!(
+            "avd-diff-gate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("session-a.jsonl");
+
+        let batch1 = [
+            r#"{"type":"assistant","uuid":"u1","timestamp":"2026-09-05T10:00:00.000Z","message":{"id":"msg_1","model":"claude-sonnet-5","usage":{"input_tokens":10,"cache_read_input_tokens":20,"cache_creation_input_tokens":5,"output_tokens":3}}}"#,
+            r#"{"type":"user","uuid":"u2","timestamp":"2026-09-05T10:01:00.000Z","message":{"content":[{"type":"text","text":"run"}]}}"#,
+        ];
+        let batch2 = [
+            r#"{"type":"assistant","uuid":"u3","timestamp":"2026-09-05T10:02:00.000Z","message":{"id":"msg_3","model":"claude-sonnet-5","usage":{"input_tokens":15,"cache_read_input_tokens":25,"cache_creation_input_tokens":8,"output_tokens":6}}}"#,
+            r#"{"type":"assistant","uuid":"u4","timestamp":"2026-09-05T10:03:00.000Z","message":{"id":"msg_4","model":"claude-haiku-4","usage":{"input_tokens":5,"output_tokens":2}}}"#,
+        ];
+        let batch3 = [
+            r#"{"type":"user","uuid":"u5","timestamp":"2026-09-05T10:04:00.000Z","message":{"content":[{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"ls"}}]}}"#,
+            r#"{"type":"assistant","uuid":"u6","timestamp":"2026-09-05T10:04:01.000Z","message":{"id":"msg_6","model":"claude-sonnet-5","usage":{"input_tokens":20,"cache_read_input_tokens":30,"output_tokens":10}}}"#,
+        ];
+
+        // 增量路径：逐批追加 + 从上次 offset 续读
+        write_jsonl(&file, &batch1);
+        let (facts1, offset1) = agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts_incremental(
+            &file, "ns", "default", "session-a", 0,
+        ).unwrap();
+        assert!(!facts1.is_empty(), "第一批应有事实");
+        assert!(offset1 > 0, "offset 应推进到第一个完整换行后");
+
+        write_jsonl(&file, &batch2);
+        let (facts2, offset2) = agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts_incremental(
+            &file, "ns", "default", "session-a", offset1,
+        ).unwrap();
+        assert!(offset2 > offset1, "第二批 offset 应继续推进");
+
+        write_jsonl(&file, &batch3);
+        let (facts3, offset3) = agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts_incremental(
+            &file, "ns", "default", "session-a", offset2,
+        ).unwrap();
+        assert!(offset3 > offset2);
+
+        // 合并增量产出
+        let mut incremental_facts = facts1;
+        incremental_facts.extend(facts2);
+        incremental_facts.extend(facts3);
+
+        // 全量路径：一次性读整个文件
+        let full = agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts(
+            &file, "ns", "default", "session-a",
+        ).unwrap();
+
+        // **差分门断言**：fact_id 集逐条一致
+        let incremental_ids = fact_ids(&incremental_facts);
+        let full_ids = fact_ids(&full.facts);
+        assert_eq!(
+            incremental_ids, full_ids,
+            "差分门（spec §10.1）：全量与增量的 fact_id 必须逐条一致\n  增量({}): {:?}\n  全量({}): {:?}",
+            incremental_ids.len(), incremental_ids,
+            full_ids.len(), full_ids,
+        );
+
+        // offset 一致性：最终增量 offset 应等于文件长度（所有行都完整）
+        let file_len = std::fs::metadata(&file).unwrap().len();
+        assert_eq!(offset3, file_len, "全部行处理完后 offset = 文件长度");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 尾部不完整行（in-flight writer）：增量不产事实、offset 不推进到半行。
+    #[test]
+    fn differential_gate_partial_line_left_for_next_round() {
+        let dir = std::env::temp_dir().join(format!(
+            "avd-diff-partial-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("partial.jsonl");
+
+        // 写一行完整的 + 半行（无换行结尾）
+        let complete = r#"{"type":"assistant","uuid":"u1","timestamp":"2026-09-05T10:00:00.000Z","message":{"id":"msg_1","model":"claude-sonnet-5","usage":{"input_tokens":10,"cache_read_input_tokens":2,"cache_creation_input_tokens":1,"output_tokens":3}}}"#;
+        let partial = r#"{"type":"assistant","uuid":"u2","timestamp":"2026-09-05T10:01"#; // 截断
+
+        let mut f = std::fs::File::create(&file).unwrap();
+        writeln!(f, "{complete}").unwrap();
+        write!(f, "{partial}").unwrap(); // 不带换行
+        drop(f);
+
+        let (facts, offset) = agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts_incremental(
+            &file, "ns", "default", "partial", 0,
+        ).unwrap();
+
+        // 只有第一行被处理
+        assert_eq!(facts.len(), 1, "只有完整行产事实");
+        let file_len = std::fs::metadata(&file).unwrap().len();
+        assert!(offset < file_len, "offset 停在完整换行后，不进半行: offset={offset}, len={file_len}");
+
+        // 补全半行 + 换行 → 下轮增量应处理它
+        let mut f2 = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        let tail = r#":00.000Z","message":{"id":"msg_2","model":"claude-sonnet-5","usage":{"input_tokens":5,"cache_read_input_tokens":1,"cache_creation_input_tokens":0,"output_tokens":2}}}"#;
+        let _ = f2.write_all(format!("{tail}
+").as_bytes());
+        drop(f2);
+
+        let (facts2, offset2) = agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts_incremental(
+            &file, "ns", "default", "partial", offset,
+        ).unwrap();
+        assert_eq!(facts2.len(), 1, "补全后的半行在下一轮产出");
+        let file_len2 = std::fs::metadata(&file).unwrap().len();
+        assert_eq!(offset2, file_len2, "全部完成后 offset = 文件长度");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

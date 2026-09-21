@@ -298,6 +298,78 @@ impl Observation {
 /// 一半，与 fold 尾读续折同款「绝不拼半截」）。`BufRead::lines()` 会把无换行
 /// 结尾的末段当成一行——与 Python 语义分叉，故不用它。行首字节偏移在整份
 /// 读取下即绝对文件偏移，直接喂给 derived fallback。
+/// 增量版：从 `from_offset` 续读到 EOF，只解析新行。
+/// 返回 (facts, new_offset)——new_offset 是最后完整换行后的位置（spec §5.2）。
+/// 尾部不完整行（写了一半的 in-flight JSON）留给下轮，不报错。
+/// **差分门验收**：同一文件 full-parse 与 incremental-parse 产出的 fact 集
+/// 必须逐条 fact_id 一致（`agent-vitals-runtime` 的 source_graph 差分测试钉住）。
+pub fn claude_jsonl_to_usage_facts_incremental(
+    path: &Path,
+    machine_namespace: &str,
+    source_profile: &str,
+    native_session_id: &str,
+    from_offset: u64,
+) -> Result<(Vec<Value>, u64), String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("open {}: {}", path.display(), e))?;
+    let file_len = file.metadata()
+        .map_err(|e| format!("stat {}: {}", path.display(), e))?
+        .len();
+    if from_offset >= file_len {
+        return Ok((Vec::new(), from_offset)); // 无增量
+    }
+    file.seek(SeekFrom::Start(from_offset))
+        .map_err(|e| format!("seek {}: {}", path.display(), e))?;
+    let mut buf = Vec::with_capacity((file_len - from_offset) as usize);
+    file.read_to_end(&mut buf)
+        .map_err(|e| format!("read {}: {}", path.display(), e))?;
+
+    // 停在最后完整换行：尾部不完整行是 in-flight writer，留给下轮。
+    let last_newline = buf.iter().rposition(|&b| b == b'\n');
+    let Some(last_nl) = last_newline else {
+        return Ok((Vec::new(), from_offset)); // 没有完整行，全部留给下轮
+    };
+    let complete = &buf[..=last_nl];
+    let new_offset = from_offset + (last_nl + 1) as u64;
+
+    // 解析（复用 parse_claude_usage_row 的逐行循环，但 start 从 0 计——
+    // 行首偏移已在全文件坐标系里，derived_event_id 的 line_offset 需要加上
+    // from_offset 基准才能与全量版一致）。
+    let mut facts = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut start = 0usize;
+    for (i, b) in complete.iter().enumerate() {
+        if *b != b'\n' { continue; }
+        let line = &complete[start..i];
+        let line_offset = start + from_offset as usize; // 全文件坐标
+        let mut line = line;
+        if line.ends_with(b"\r") { line = &line[..line.len() - 1]; }
+        start = i + 1;
+        if line.is_empty() { continue; }
+        let text = String::from_utf8_lossy(line);
+        let rec: Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => continue, // 增量模式：坏行跳过（不报错——全量版已在首
+                                // 轮报过或行本身就是不完整的中间态）
+        };
+        match parse_claude_usage_row(&rec, native_session_id, machine_namespace, source_profile) {
+            Ok(mut obs) => {
+                if obs.identity_basis == "derived-hash" && obs.source_event_id.is_empty() {
+                    obs.source_event_id = derived_event_id(native_session_id, line_offset, &rec);
+                }
+                if seen.contains(&obs.source_event_id) { continue; }
+                seen.insert(obs.source_event_id.clone());
+                if let Some(fact) = obs.to_usage_fact() {
+                    facts.push(fact);
+                }
+            }
+            Err(_) => continue, // 增量模式：非 usage 行跳过
+        }
+    }
+    Ok((facts, new_offset))
+}
+
 pub fn claude_jsonl_to_usage_facts(
     path: &Path,
     machine_namespace: &str,
