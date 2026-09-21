@@ -220,6 +220,7 @@
       recovery_action: { label: "扫描并接入", kind: "scan_and_connect" },
     },
   ];
+  let sourceDataRevision = 0;
   const customRoots = [];
   let retentionMonths = 13;
   let budgetSnoozedUntilMs = null;
@@ -560,7 +561,8 @@
       case "host_bills_for_period": return emptyReport("bills");
       // Shape: apps/desktop/src-tauri/src/lib.rs:2632 data_source_status (json!).
       case "data_source_status": return { status: "ok", sources: sourceStatuses };
-      case "source_host_controls": return { status: "ok", excluded_hosts: sourceStatuses.filter((source) => source.connection_state === "excluded").map((source) => source.host), supported_hosts: ["claude-code", "codex", "dsh"] };
+      case "source_host_controls": return { status: "ok", excluded_hosts: sourceStatuses.filter((source) => source.connection_state === "excluded").map((source) => source.host), supported_hosts: ["claude-code", "codex", "dsh", "workbuddy"] };
+      case "source_data_revision": return { status: "ok", revision: sourceDataRevision };
       case "custom_source_roots": return { status: "ok", sources: customRoots };
       // Shape: crates/agent-vitals-runtime/src/budget.rs:140-152（万分比，8000=80%）；
       // 旧字段名沿用 apps/desktop/src-tauri/src/lib.rs:2142 budget_config()。
@@ -852,9 +854,10 @@
         const source = sourceStatuses.find((item) => item.host === (args && args.host));
         if (!source) throw new Error("source host not found");
         const scope = source.import_scope || {};
-        const result = { facts: Number(scope.facts || 0), sessions: Number(scope.sessions || 0) };
+        const result = { status: "deleted", host: source.host, facts: Number(scope.facts || 0), sessions: Number(scope.sessions || 0), source_files: Number((source.scan && source.scan.source_count) || 0), trust_observations: 0, route_evidence: 0, session_excerpts: 0 };
         source.import_scope = { facts: 0, sessions: 0 };
         source.connection_state = "excluded";
+        sourceDataRevision += 1;
         return ok(result);
       }
       case "pick_custom_source_root": return "/tmp/agent-vitals-browser-custom-source";

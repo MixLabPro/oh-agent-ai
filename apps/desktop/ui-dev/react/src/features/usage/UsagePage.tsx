@@ -178,7 +178,7 @@ export function UsagePage() {
     let active = true;
     const refresh = () => { if (active && timezoneReady) loadMonth(month); };
     let cleanups: Array<() => void> = [];
-    Promise.all([listen("usage-fold-updated", refresh), listen("sync-status-updated", refresh)]).then((unsubscribers) => {
+    Promise.all([listen("usage-fold-updated", refresh), listen("sync-status-updated", refresh), listen("source-data-deleted", refresh)]).then((unsubscribers) => {
       if (active) cleanups = unsubscribers;
       else unsubscribers.forEach((unsubscribe) => unsubscribe());
     });

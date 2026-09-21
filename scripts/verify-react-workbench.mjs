@@ -94,7 +94,7 @@ if (!source.includes("只读") || !source.includes("不发请求") || !source.in
 if (!source.includes('text === "<synthetic>"') || !source.includes('text === "<unknown>"')) fail("React 路线质量未保留合法哨兵模型标识");
 if (!source.includes('"data_source_status"') || !source.includes("readSourceHealth") || !source.includes("settings-source-row")) fail("React 设置未使用安全数据源状态 DTO");
 if (!source.includes('"source_host_controls"') || !source.includes("supported_hosts") || !source.includes('"set_source_host_excluded"') || !source.includes("setSourceHostExcluded") || !source.includes("supportedHosts.includes(source.host)") || !source.includes("停止读取只影响后续同步") || !source.includes("已导入数据未删除")) fail("React 设置缺少来源能力声明、停止/恢复读取的安全回执或边界文案");
-if (source.includes('"delete_imported_source_data"')) fail("React 设置首轮越过危险数据删除 mutation 边界");
+if (!source.includes('"delete_imported_source_data"') || !source.includes("deleteImportedSourceData") || !source.includes("确认删除") || !source.includes("原始日志未修改") || !source.includes("删除未完成；原始日志未修改")) fail("React 设置缺少二次确认、删除回执或失败保护");
 if (!source.includes("triggerSync") || !source.includes("setSyncPaused") || !source.includes("readSyncRequestStatus")) fail("React 设置缺少同步控制与回执轮询");
 if (!source.includes("readCustomSourceConfig") || !source.includes("addCustomSourceRoot") || !source.includes("removeCustomSourceRoot") || !source.includes("pickCustomSourceRoot")) fail("React 设置缺少自定义读取位置桥接");
 if (!source.includes("readBudgetSettings") || !source.includes("saveBudgetProfile") || !source.includes("snoozeBudgetCurrentPeriod") || !source.includes("clearBudgetSnooze")) fail("React 设置缺少预算状态、保存或静默桥接");

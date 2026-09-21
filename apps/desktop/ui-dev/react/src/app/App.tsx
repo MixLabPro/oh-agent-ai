@@ -1,5 +1,5 @@
 import { Component, useEffect, useState, type ErrorInfo, type ReactNode } from "react";
-import { listen, readOverviewSnapshot, type OverviewSnapshot } from "../lib/tauri";
+import { listen, readOverviewSnapshot, readSourceDataRevision, type OverviewSnapshot } from "../lib/tauri";
 import { FindingsPage } from "../features/findings/FindingsPage";
 import { TrustPage } from "../features/trust/TrustPage";
 import { UsagePage } from "../features/usage/UsagePage";
@@ -55,6 +55,23 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let active = true;
+    let lastRevision: number | null = null;
+    const poll = () => {
+      void readSourceDataRevision().then((revision) => {
+        if (!active) return;
+        if (lastRevision !== null && revision !== lastRevision) {
+          window.dispatchEvent(new Event("agent-vitals-source-data-deleted"));
+        }
+        lastRevision = revision;
+      });
+    };
+    poll();
+    const timer = window.setInterval(poll, 5_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
+
+  useEffect(() => {
     if (page !== "overview") return;
     let active = true;
     setError(null);
@@ -63,7 +80,7 @@ export function App() {
       .catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "本地数据暂不可用"); });
     void refresh();
     let cleanups: Array<() => void> = [];
-    Promise.all([listen("usage-fold-updated", refresh), listen("sync-status-updated", refresh)])
+    Promise.all([listen("usage-fold-updated", refresh), listen("sync-status-updated", refresh), listen("source-data-deleted", refresh)])
       .then((unsubscribers) => { if (active) cleanups = unsubscribers; else unsubscribers.forEach((unsubscribe) => unsubscribe()); });
     return () => { active = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
   }, [page]);

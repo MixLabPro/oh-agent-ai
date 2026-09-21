@@ -1889,9 +1889,17 @@ fn remove_custom_source_root(input: CustomSourceRootInput) -> Result<Value, Stri
 fn source_host_controls() -> Value {
     let data_home = overview::data_home();
     match agent_vitals_runtime::source_controls::excluded_hosts(&data_home) {
-        Ok(excluded_hosts) => serde_json::json!({ "status": "ok", "excluded_hosts": excluded_hosts, "supported_hosts": agent_vitals_runtime::source_controls::supported_hosts() }),
+        Ok(excluded_hosts) => serde_json::json!({ "status": "ok", "excluded_hosts": excluded_hosts, "supported_hosts": agent_vitals_runtime::source_controls::supported_hosts_for(&data_home) }),
         Err(error) => serde_json::json!({ "status": "unavailable", "reason": error }),
     }
+}
+
+#[tauri::command(async)]
+fn source_data_revision() -> Value {
+    serde_json::json!({
+        "status": "ok",
+        "revision": agent_vitals_runtime::source_controls::source_data_revision(&overview::data_home()),
+    })
 }
 
 /// 仅工作台本机显示的标准读取目录；不混入 MCP/导出 DTO，避免路径离开桌面。
@@ -1920,24 +1928,27 @@ fn set_source_host_excluded(input: SourceHostControlInput) -> Result<Value, Stri
 }
 
 #[tauri::command]
-fn delete_imported_source_data(host: String) -> Result<Value, String> {
-    if !agent_vitals_runtime::ingest_service::FACT_HOSTS.contains(&host.as_str()) {
-        return Err("source host is not supported".to_string());
-    }
+fn delete_imported_source_data(app: AppHandle, host: String) -> Result<Value, String> {
     let data_home = overview::data_home();
-    // 先禁止未来读取；若数据库清理失败，宁可维持排除也不能让下一次同步
-    // 立即把用户刚要求移除的数据重新导入。
-    agent_vitals_runtime::source_controls::set_host_excluded(&data_home, &host, true)?;
-    let db = agent_vitals_data::authority::AuthorityDb::open(
-        &agent_vitals_data::authority::default_authority_path(&data_home),
-        agent_vitals_runtime::sql_sync::now_ms(),
-    ).map_err(|error| format!("authority database unavailable: {error}"))?;
-    let deleted = db.delete_imported_host_data(&host, agent_vitals_runtime::sql_sync::now_ms())
-        .map_err(|error| format!("delete imported data failed: {error}"))?;
-    Ok(serde_json::json!({
-        "status": "deleted", "host": host, "facts": deleted.facts,
+    // 先禁止未来读取，再在同一宿主租约下清理 authority 投影。
+    let deleted = agent_vitals_runtime::source_controls::delete_imported_source_data(&data_home, &host)?;
+    let receipt = serde_json::json!({
+        "status": "deleted", "host": host.clone(), "facts": deleted.facts,
         "sessions": deleted.sessions, "source_files": deleted.source_files,
-    }))
+        "trust_observations": deleted.trust_observations,
+        "route_evidence": deleted.route_evidence,
+        "session_excerpts": deleted.session_excerpts,
+    });
+    let _ = app.emit(APP_EVENT, serde_json::json!({
+        "type": "SourceDataDeleted", "kind": "source_data_deleted", "host": host.clone(),
+        "facts": deleted.facts, "sessions": deleted.sessions,
+        "source_files": deleted.source_files,
+        "trust_observations": deleted.trust_observations,
+        "route_evidence": deleted.route_evidence,
+        "session_excerpts": deleted.session_excerpts,
+    }));
+    let _ = app.emit("source-data-deleted", serde_json::json!({ "host": host }));
+    Ok(receipt)
 }
 
 #[tauri::command(async)]
@@ -3668,6 +3679,7 @@ pub fn run() {
             add_custom_source_root,
             remove_custom_source_root,
             source_host_controls,
+            source_data_revision,
             source_read_locations,
             set_source_host_excluded,
             delete_imported_source_data,

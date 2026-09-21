@@ -1295,6 +1295,8 @@ pub struct HostImportedDataDeletion {
     pub sessions: usize,
     pub source_files: usize,
     pub trust_observations: usize,
+    pub route_evidence: usize,
+    pub session_excerpts: usize,
 }
 
 /// 权威库连接。**非 Sync**（rusqlite `Connection` 语义同旧 store）；每线程
@@ -2120,10 +2122,17 @@ impl AuthorityDb {
                 "DELETE FROM trust_observations WHERE host = ?1",
                 [host],
             )?;
+            // Task excerpts are a separate projection keyed by session_key;
+            // deleting sessions alone would leave user-visible task text behind.
+            let session_excerpts = conn.execute(
+                "DELETE FROM session_excerpts WHERE session_key IN
+                   (SELECT session_key FROM sessions WHERE host = ?1)",
+                [host],
+            )?;
             // route_evidence 是导入的路由证据；清除其 ID 后再删行，避免已软
             // 删除的事实留下悬挂证据引用。
             conn.execute("UPDATE usage_facts SET route_evidence_id = NULL WHERE host = ?1", [host])?;
-            conn.execute("DELETE FROM route_evidence WHERE host = ?1", [host])?;
+            let route_evidence = conn.execute("DELETE FROM route_evidence WHERE host = ?1", [host])?;
             // 已软删除的事实不再保留源文件关联，避免 source_files 外键阻碍
             // 指纹清理，也避免已删除数据继续关联可推断的来源元数据。
             conn.execute("UPDATE usage_facts SET source_id = NULL WHERE host = ?1", [host])?;
@@ -2136,7 +2145,9 @@ impl AuthorityDb {
                 [host],
             )?;
             conn.execute("DELETE FROM event_outbox WHERE host = ?1", [host])?;
-            Ok(HostImportedDataDeletion { facts, sessions, source_files, trust_observations })
+            Ok(HostImportedDataDeletion {
+                facts, sessions, source_files, trust_observations, route_evidence, session_excerpts,
+            })
         })
     }
 
@@ -5723,14 +5734,32 @@ mod tests {
                ('trust-dsh', 'm', 'dsh', 'actor-dsh', 'sidecar', 1, 'package',
                 'package_observed', 'E1', '[]', 'unavailable', 'test', 'v1', '{}', 'run', 1);"
         ).unwrap();
+        db.conn().execute(
+            "INSERT INTO route_evidence(
+                evidence_id, host, machine_namespace, native_session_id,
+                evidence_basis, observed_at_ms, ingested_run_id
+             ) VALUES ('route-codex', 'codex', 'm', 'c', 'test', 1, 'run')",
+            [],
+        ).unwrap();
+        db.conn().execute(
+            "UPDATE usage_facts SET route_evidence_id = 'route-codex' WHERE fact_id = 'fact-codex'",
+            [],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO session_excerpts(session_key, ordinal, role, excerpt, provenance, ingested_run_id)
+             VALUES ('session-codex', 0, 'user_first', 'redacted', 'scrubbed', 'run')",
+            [],
+        ).unwrap();
         db.host_bill_put("bill-dsh", "dsh", "deepseek", "2026-09", "metered_actual", 100, "CNY", "user:receipt", 2).unwrap();
-        assert_eq!(db.delete_imported_host_data("codex", 3).unwrap(), HostImportedDataDeletion { facts: 1, sessions: 1, source_files: 1, trust_observations: 1 });
+        assert_eq!(db.delete_imported_host_data("codex", 3).unwrap(), HostImportedDataDeletion { facts: 1, sessions: 1, source_files: 1, trust_observations: 1, route_evidence: 1, session_excerpts: 1 });
         let (codex_live, dsh_live, sources): (i64, i64, i64) = db.conn().query_row(
             "SELECT SUM(host = 'codex' AND deleted_at_ms IS NULL), SUM(host = 'dsh' AND deleted_at_ms IS NULL), COUNT(*) FROM usage_facts", [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         ).unwrap();
         assert_eq!((codex_live, dsh_live, sources), (0, 1, 2));
         assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM source_files WHERE host = 'codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM session_excerpts WHERE session_key = 'session-codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM route_evidence WHERE host = 'codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM trust_observations WHERE host = 'dsh'", [], |r| r.get::<_, i64>(0)).unwrap(), 1, "other host trust observations remain");
         assert_eq!(db.host_bill_count().unwrap(), 1, "manual bills are not imported source data");
         let _ = std::fs::remove_file(path);

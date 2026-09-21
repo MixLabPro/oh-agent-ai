@@ -152,7 +152,7 @@ export function SessionsPage() {
     let active = true;
     const refresh = () => { if (active) void fetchFirstPage(); };
     let cleanups: Array<() => void> = [];
-    Promise.all([listen("usage-fold-updated", refresh), listen("sync-status-updated", refresh)])
+    Promise.all([listen("usage-fold-updated", refresh), listen("sync-status-updated", refresh), listen("source-data-deleted", refresh)])
       .then((unsubscribers) => { if (active) cleanups = unsubscribers; else unsubscribers.forEach((unsubscribe) => unsubscribe()); });
     return () => { active = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
   }, [serverKey]);

@@ -143,6 +143,7 @@ export type SourceHealthReport = {
 };
 export type SourceHostControls = { status: "ok" | "unavailable"; excluded_hosts: string[]; supported_hosts: string[] };
 export type SourceHostControlReceipt = { status: "saved"; changed: boolean; excluded: boolean };
+export type DeleteImportedSourceReceipt = { status: "deleted"; host: string; facts: number; sessions: number; source_files: number; trust_observations: number; route_evidence: number; session_excerpts: number };
 
 export type SyncRequestStatus = { completed: boolean; failed: boolean };
 export type CustomSourceRoot = { host: string; root: string };
@@ -2085,6 +2086,17 @@ export async function readSourceHostControls(): Promise<SourceHostControls> {
   try { return parseSourceHostControls(await handler("source_host_controls")); } catch { return { status: "unavailable", excluded_hosts: [], supported_hosts: [] }; }
 }
 
+export async function readSourceDataRevision(): Promise<number> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return 0;
+  try {
+    const root = record(await handler("source_data_revision"), "source data revision");
+    return boundedCount(root.revision, "source data revision", Number.MAX_SAFE_INTEGER);
+  } catch {
+    return 0;
+  }
+}
+
 export async function setSourceHostExcluded(host: string, excluded: boolean): Promise<SourceHostControlReceipt> {
   if (safeHostLabel(host) !== host || host === "generic") throw new Error("source host is not supported");
   const handler = globalTauri()?.core?.invoke;
@@ -2092,6 +2104,15 @@ export async function setSourceHostExcluded(host: string, excluded: boolean): Pr
   const root = record(await handler("set_source_host_excluded", { input: { host, excluded } }), "source host control receipt");
   if (root.status !== "saved" && root.status !== "ok") throw new Error("source host control was not saved");
   return { status: "saved", changed: requiredBoolean(root.changed ?? true, "source host control changed"), excluded: requiredBoolean(root.excluded, "source host control excluded") };
+}
+
+export async function deleteImportedSourceData(host: string): Promise<DeleteImportedSourceReceipt> {
+  if (safeHostLabel(host) !== host || host === "generic") throw new Error("source host is not supported");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "deleted", host, facts: 0, sessions: 0, source_files: 0, trust_observations: 0, route_evidence: 0, session_excerpts: 0 };
+  const root = record(await handler("delete_imported_source_data", { host }), "delete source data receipt");
+  if (root.status !== "deleted" || root.host !== host) throw new Error("delete source data receipt was not confirmed");
+  return { status: "deleted", host, facts: boundedCount(root.facts, "deleted source facts", 100_000_000), sessions: boundedCount(root.sessions, "deleted source sessions", 10_000_000), source_files: boundedCount(root.source_files, "deleted source files", 1_000_000), trust_observations: boundedCount(root.trust_observations, "deleted trust observations", 10_000_000), route_evidence: boundedCount(root.route_evidence, "deleted route evidence", 10_000_000), session_excerpts: boundedCount(root.session_excerpts, "deleted session excerpts", 10_000_000) };
 }
 
 export async function readCustomSourceConfig(): Promise<CustomSourceReport> {
@@ -2398,6 +2419,16 @@ export async function setSyncPaused(paused: boolean): Promise<boolean> {
 
 export async function listen(event: string, handler: (payload: unknown) => void): Promise<Unsubscribe> {
   const listener = globalTauri()?.event?.listen;
-  if (!listener) return () => undefined;
-  return listener(event, handler);
+  if (event !== "source-data-deleted") {
+    if (!listener) return () => undefined;
+    return listener(event, handler);
+  }
+  const windowHandler = () => handler({ source: "revision-poll" });
+  window.addEventListener("agent-vitals-source-data-deleted", windowHandler);
+  if (!listener) return () => window.removeEventListener("agent-vitals-source-data-deleted", windowHandler);
+  const unsubscribeTauri = await listener(event, handler);
+  return () => {
+    window.removeEventListener("agent-vitals-source-data-deleted", windowHandler);
+    unsubscribeTauri();
+  };
 }

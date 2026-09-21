@@ -166,7 +166,7 @@ export function FindingsPage() {
   useEffect(() => {
     let active = true;
     let cleanups: Array<() => void> = [];
-    Promise.all(["sync-status-updated", "usage-fold-updated", "trust-monitor-updated"].map((event) => listen(event, () => { if (active) load(); })))
+    Promise.all(["sync-status-updated", "usage-fold-updated", "trust-monitor-updated", "source-data-deleted"].map((event) => listen(event, () => { if (active) load(); })))
       .then((unsubscribers) => { if (active) cleanups = unsubscribers; else unsubscribers.forEach((unsubscribe) => unsubscribe()); });
     return () => { active = false; requestGeneration.current += 1; cleanups.forEach((unsubscribe) => unsubscribe()); };
   }, []);

@@ -29,6 +29,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// 单次获取的结果。`Held` 携带持有者信息——调用方的错误消息要能回答
@@ -207,6 +208,47 @@ pub struct FileLease {
 }
 
 impl FileLease {
+    /// Keep a long-running host ingest lease alive without changing its
+    /// identity.  The lock body is atomically replaced, so contenders never
+    /// observe a partial renewal.  Dropping the returned guard stops the
+    /// heartbeat before the lease itself is released.
+    pub fn heartbeat(&self, interval: Duration, ttl_ms: u64) -> LeaseHeartbeat {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let path = self.path.clone();
+        let holder = self.holder.clone();
+        let pid = self.pid;
+        let acquired_at_ms = self.acquired_at_ms;
+        let join = std::thread::spawn(move || {
+            while !stop_thread.load(Ordering::Relaxed) {
+                let mut waited = Duration::ZERO;
+                while waited < interval && !stop_thread.load(Ordering::Relaxed) {
+                    let step = (interval - waited).min(Duration::from_millis(100));
+                    std::thread::sleep(step);
+                    waited += step;
+                }
+                if stop_thread.load(Ordering::Relaxed) { break; }
+                let Some(value) = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok()) else { break; };
+                let ours = value.get("holder").and_then(|v| v.as_str()) == Some(holder.as_str())
+                    && value.get("pid").and_then(|v| v.as_u64()) == Some(pid as u64)
+                    && value.get("acquired_at_ms").and_then(|v| v.as_u64()) == Some(acquired_at_ms);
+                if !ours { break; }
+                let body = serde_json::json!({
+                    "holder": holder.clone(), "pid": pid, "acquired_at_ms": acquired_at_ms,
+                    "ttl_ms": ttl_ms.saturating_add(now_ms().saturating_sub(acquired_at_ms as u128) as u64),
+                });
+                let temporary = path.with_extension("renew");
+                if std::fs::write(&temporary, body.to_string()).is_err() || std::fs::rename(&temporary, &path).is_err() {
+                    let _ = std::fs::remove_file(&temporary);
+                    break;
+                }
+            }
+        });
+        LeaseHeartbeat { stop, join: Some(join) }
+    }
+
     /// 锁文件当前是否还是本租约的（acquire 时刻的身份快照三重匹配）。
     /// 读不出/解析失败的锁不是我们的（可能是别人 create 到一半的 body）。
     fn is_mine(&self) -> bool {
@@ -236,6 +278,18 @@ impl FileLease {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+pub struct LeaseHeartbeat {
+    stop: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for LeaseHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(join) = self.join.take() { let _ = join.join(); }
     }
 }
 
@@ -377,6 +431,20 @@ mod tests {
             // 不显式 release——Drop 兜底。
         }
         let next = acquire(&path, "next", 60_000).unwrap();
+        next.release().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn heartbeat_prevents_long_ingest_lease_expiry() {
+        let path = tmp_lock("heartbeat");
+        let lease = acquire(&path, "long-ingest", 80).unwrap();
+        let _heartbeat = lease.heartbeat(Duration::from_millis(20), 80);
+        std::thread::sleep(Duration::from_millis(220));
+        assert!(matches!(acquire(&path, "deleter", 80), Err(LeaseError::Held { .. })));
+        drop(_heartbeat);
+        lease.release().unwrap();
+        let next = acquire(&path, "deleter", 80).unwrap();
         next.release().unwrap();
         let _ = std::fs::remove_file(&path);
     }

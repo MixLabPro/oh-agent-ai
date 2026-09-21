@@ -114,6 +114,23 @@ export function TrustPage() {
   useEffect(() => {
     let active = true;
     let cleanup: (() => void) | null = null;
+    void listen("source-data-deleted", () => {
+      if (!active) return;
+      auditRequest.current += 1;
+      setReport(() => null);
+      setSelectedHost(null);
+      setExpandedEvidence(null);
+      setAuditLoadingHost(null);
+      setMonitorFeedback("来源投影已删除；旧 Trust 报告已清除，请重新发现宿主。");
+      discover();
+    })
+      .then((unsubscribe) => { if (active) cleanup = unsubscribe; else unsubscribe(); });
+    return () => { active = false; cleanup?.(); };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let cleanup: (() => void) | null = null;
     void listen("trust-monitor-updated", () => {
       if (!active) return;
       void readTrustMonitorConfig().then((value) => {

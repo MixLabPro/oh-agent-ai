@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { addCustomSourceRoot, checkForUpdates, clearBudgetSnooze, listen, openTrustedReleasesPage, pickCustomSourceRoot, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, safeUiError, saveBudgetProfile, saveDiagnosticPackage, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
+import { addCustomSourceRoot, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, listen, openTrustedReleasesPage, pickCustomSourceRoot, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, safeUiError, saveBudgetProfile, saveDiagnosticPackage, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -370,13 +370,16 @@ function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps)
   </section>;
 }
 
-function SourceRow({ source, syncing, sourceControlHost, supportedHosts, onSync, onToggleExcluded }: { source: SourceHealthReport["sources"][number]; syncing: boolean; sourceControlHost: string | null; supportedHosts: string[]; onSync: () => void; onToggleExcluded: (source: SourceHealthReport["sources"][number]) => void }) {
+function SourceRow({ source, syncing, sourceControlHost, deleteConfirmHost, deleteBusyHost, supportedHosts, onSync, onToggleExcluded, onRequestDelete, onCancelDelete, onDelete }: { source: SourceHealthReport["sources"][number]; syncing: boolean; sourceControlHost: string | null; deleteConfirmHost: string | null; deleteBusyHost: string | null; supportedHosts: string[]; onSync: () => void; onToggleExcluded: (source: SourceHealthReport["sources"][number]) => void; onRequestDelete: (source: SourceHealthReport["sources"][number]) => void; onCancelDelete: () => void; onDelete: (source: SourceHealthReport["sources"][number]) => void }) {
   const errorText = source.error_kinds.map((kind) => errorLabels[kind]).join("、");
   const imported = source.connection_state === "not_detected" && source.sessions === 0 ? "尚未导入" : `${source.sessions} 个会话 · ${source.facts} 条记录`;
   const label = sourceLabel(source.host);
   const actionLabel = syncActionLabel(source.connection_state);
   const controlLabel = supportedHosts.includes(source.host) ? sourceControlLabel(source.connection_state) : null;
   const controlBusy = sourceControlHost === source.host;
+  const deleteAllowed = supportedHosts.includes(source.host) && (source.facts > 0 || source.sessions > 0);
+  const deleteConfirming = deleteConfirmHost === source.host;
+  const deleteBusy = deleteBusyHost === source.host;
   return <article className="settings-source-row" tabIndex={0} aria-label={`${label}，${stateLabels[source.connection_state]}`}>
     <div className="settings-source-main">
       <div className={`settings-source-dot settings-source-dot-${sourceTone(source.connection_state)}`} aria-hidden="true" />
@@ -384,7 +387,7 @@ function SourceRow({ source, syncing, sourceControlHost, supportedHosts, onSync,
     </div>
     <div className="settings-source-metrics"><span>{imported}</span><span>最近记录：{observedAt(source.last_event_at_ms)}</span>{source.failed_sources > 0 && <span className="settings-source-error">读取失败 · {errorText || "读取失败"}</span>}</div>
     <div className="settings-source-scan">扫描 {source.source_count} 个文件<br /><small>{source.last_scanned_at_ms === null ? "尚未扫描" : `上次扫描 ${observedAt(source.last_scanned_at_ms)}`}</small></div>
-    <div className="settings-source-actions">{controlLabel && <button className="button button-secondary button-small settings-source-action" type="button" onClick={() => onToggleExcluded(source)} disabled={controlBusy || syncing}>{controlBusy ? "保存中…" : controlLabel}</button>}{actionLabel && <button className="button button-secondary button-small settings-source-action" type="button" onClick={onSync} disabled={syncing || controlBusy}>{syncing ? "同步中…" : actionLabel}</button>}</div>
+    <div className="settings-source-actions">{controlLabel && <button className="button button-secondary button-small settings-source-action" type="button" onClick={() => onToggleExcluded(source)} disabled={controlBusy || deleteBusy || syncing}>{controlBusy ? "保存中…" : controlLabel}</button>}{actionLabel && <button className="button button-secondary button-small settings-source-action" type="button" onClick={onSync} disabled={syncing || controlBusy || deleteBusy}>{syncing ? "同步中…" : actionLabel}</button>}{deleteAllowed && !deleteConfirming && <button className="button button-danger button-small settings-source-action" type="button" onClick={() => onRequestDelete(source)} disabled={controlBusy || deleteBusy || syncing}>删除已导入数据…</button>}{deleteConfirming && <div className="settings-source-delete-confirm" role="group" aria-label={`${label} 删除确认`}><strong>确认删除 {source.facts} 条记录和 {source.sessions} 个会话？</strong><span>将清理 App 投影、Trust 观测、路由证据和任务摘录；不会删除原始日志、手工账单或价卡。</span><div><button className="button button-secondary button-small" type="button" onClick={onCancelDelete} disabled={deleteBusy}>取消</button><button className="button button-danger button-small" type="button" onClick={() => onDelete(source)} disabled={deleteBusy}>{deleteBusy ? "删除中…" : "确认删除"}</button></div></div>}</div>
   </article>;
 }
 
@@ -482,6 +485,10 @@ export function SettingsPage() {
   const [sourceControlHost, setSourceControlHost] = useState<string | null>(null);
   const [sourceControlError, setSourceControlError] = useState<string | null>(null);
   const [sourceControlMessage, setSourceControlMessage] = useState<string | null>(null);
+  const [deleteConfirmHost, setDeleteConfirmHost] = useState<string | null>(null);
+  const [deleteBusyHost, setDeleteBusyHost] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteMessage, setDeleteMessage] = useState<string | null>(null);
   const [customReport, setCustomReport] = useState<CustomSourceReport | null>(null);
   const [customError, setCustomError] = useState<string | null>(null);
   const [customLoading, setCustomLoading] = useState(true);
@@ -610,6 +617,23 @@ export function SettingsPage() {
     }
   };
 
+  const deleteSourceData = async (source: SourceHealthReport["sources"][number]) => {
+    if (deleteBusyHost) return;
+    setDeleteBusyHost(source.host);
+    setDeleteError(null);
+    setDeleteMessage(null);
+    try {
+      const receipt = await deleteImportedSourceData(source.host);
+      setDeleteMessage(`已删除 ${receipt.facts} 条记录、${receipt.sessions} 个会话、${receipt.source_files} 个来源文件、${receipt.trust_observations} 条 Trust 观测、${receipt.route_evidence} 条路由证据和 ${receipt.session_excerpts} 条任务摘录；原始日志未修改。`);
+      setDeleteConfirmHost(null);
+      refresh();
+    } catch (reason: unknown) {
+      setDeleteError(`删除未完成；原始日志未修改，请重新查看来源状态后重试。${safeUiError(reason, "请稍后重试")}`);
+    } finally {
+      setDeleteBusyHost(null);
+    }
+  };
+
   useEffect(() => {
     refresh();
     refreshCustom();
@@ -619,7 +643,7 @@ export function SettingsPage() {
     refreshAbout();
     let active = true;
     let cleanups: Array<() => void> = [];
-    Promise.all([listen("sync-status-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); refreshAbout(); } }), listen("usage-fold-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); refreshAbout(); } })]).then((unsubscribers) => {
+    Promise.all([listen("sync-status-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); refreshAbout(); } }), listen("usage-fold-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); refreshAbout(); } }), listen("source-data-deleted", () => { if (active) { refresh(); refreshData(); } })]).then((unsubscribers) => {
       if (active) cleanups = unsubscribers;
       else unsubscribers.forEach((unsubscribe) => unsubscribe());
     });
@@ -641,10 +665,12 @@ export function SettingsPage() {
       {error && <div className="error-banner" role="alert">来源状态暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={refresh}>重试</button></div>}
       <SettingsLoadingState loading={loading} hasData={Boolean(report)} title="来源状态" detail="只查询本机 authority，不会触发同步或读取额外路径。" />
       {report?.status === "unavailable" && <div className="settings-source-state"><strong>来源状态暂不可用</strong><span>本地 authority 无法读取；这不是“没有来源”，请修复数据库或重新同步后再试。</span></div>}
-      {report?.status === "ok" && <div className="settings-source-list">{report.sources.length ? report.sources.map((source) => <SourceRow key={source.host} source={source} syncing={syncing} sourceControlHost={sourceControlHost} supportedHosts={sourceControls?.supported_hosts ?? []} onSync={runSync} onToggleExcluded={toggleSourceExcluded} />) : <div className="settings-source-state"><strong>没有可显示的来源</strong><span>来源注册表暂未返回任何工具。</span></div>}</div>}
+      {report?.status === "ok" && <div className="settings-source-list">{report.sources.length ? report.sources.map((source) => <SourceRow key={source.host} source={source} syncing={syncing} sourceControlHost={sourceControlHost} deleteConfirmHost={deleteConfirmHost} deleteBusyHost={deleteBusyHost} supportedHosts={sourceControls?.supported_hosts ?? []} onSync={runSync} onToggleExcluded={toggleSourceExcluded} onRequestDelete={(item) => { setDeleteError(null); setDeleteMessage(null); setDeleteConfirmHost(item.host); }} onCancelDelete={() => setDeleteConfirmHost(null)} onDelete={deleteSourceData} />) : <div className="settings-source-state"><strong>没有可显示的来源</strong><span>来源注册表暂未返回任何工具。</span></div>}</div>}
       {sourceControlError && <div className="error-banner" role="alert">来源读取控制未保存：{sourceControlError}</div>}
       {sourceControlMessage && <p className="settings-sync-message" role="status" aria-live="polite">{sourceControlMessage}</p>}
-      {report && <div className="settings-sync-summary"><span>上次同步：{syncLabel(report)}</span><span>{report.sync.paused === true ? "自动同步已暂停" : report.sync.paused === false ? "自动同步已开启" : "自动同步状态不可用"}</span>{report.sync.paused !== null && <button className="button button-secondary button-small" type="button" onClick={togglePause} disabled={pauseSaving}>{pauseSaving ? "保存中…" : report.sync.paused ? "恢复自动同步" : "暂停自动同步"}</button>} {syncMessage && <small role="status">{syncMessage}</small>}<small>停止读取只影响后续同步，不删除已导入数据；删除和计费归因仍保留在旧工作台。</small></div>}
+      {deleteError && <div className="error-banner" role="alert">{deleteError}</div>}
+      {deleteMessage && <p className="settings-sync-message" role="status" aria-live="polite">{deleteMessage}</p>}
+      {report && <div className="settings-sync-summary"><span>上次同步：{syncLabel(report)}</span><span>{report.sync.paused === true ? "自动同步已暂停" : report.sync.paused === false ? "自动同步已开启" : "自动同步状态不可用"}</span>{report.sync.paused !== null && <button className="button button-secondary button-small" type="button" onClick={togglePause} disabled={pauseSaving}>{pauseSaving ? "保存中…" : report.sync.paused ? "恢复自动同步" : "暂停自动同步"}</button>} {syncMessage && <small role="status">{syncMessage}</small>}<small>停止读取只影响后续同步；删除只清理 App 投影，计费归因仍保留在旧工作台。</small></div>}
     </section>
 
     <CustomSourceSection report={customReport} loading={customLoading} error={customError} onReload={refreshCustom} onSync={runSync} />
