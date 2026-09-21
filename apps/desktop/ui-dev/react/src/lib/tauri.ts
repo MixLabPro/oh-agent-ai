@@ -228,6 +228,7 @@ export type BillingCandidate = {
   status: "pending" | "accepted" | "dismissed" | "unknown";
   impact: { total_tokens: number; fact_count: number; session_count: number } | null;
 };
+export type BillingCandidateReceipt = { status: "dismissed" | "pending"; changed: boolean };
 export type BillingGroup = {
   group_id: string;
   host: string;
@@ -2426,6 +2427,12 @@ function parseBillingCandidate(value: unknown): BillingCandidate {
   };
 }
 
+function parseBillingCandidateReceipt(value: unknown): BillingCandidateReceipt {
+  const root = record(value, "billing candidate receipt");
+  if (root.status !== "dismissed" && root.status !== "pending") throw new Error("计费候选处置未确认");
+  return { status: root.status, changed: root.changed === true };
+}
+
 function parseBillingGroup(value: unknown): BillingGroup {
   const row = record(value, "billing group");
   const amounts = requiredArray(row.estimated_amounts ?? [], "billing group amounts");
@@ -2504,6 +2511,14 @@ export async function readBillingSettings(): Promise<BillingSettingsReport> {
   const bills = parse(4, "bills", (item) => parseHostBill(item, month));
   const pendingUnavailable = candidates.status === "unavailable" && groups.status === "unavailable";
   return { status: pendingUnavailable ? "unavailable" : "ok", month, candidates_status: candidates.status, groups_status: groups.status, declarations_status: declarations.status, jobs_status: jobs.status, bills_status: bills.status, candidates: candidates.items, groups: groups.items, declarations: declarations.items, jobs: jobs.items, bills: bills.items };
+}
+
+export async function resolveBillingImportCandidate(candidateId: string, decision: "dismiss" | "reopen"): Promise<BillingCandidateReceipt> {
+  if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(candidateId)) throw new Error("计费候选引用不安全");
+  if (decision !== "dismiss" && decision !== "reopen") throw new Error("计费候选处置不受支持");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: decision === "dismiss" ? "dismissed" : "pending", changed: true };
+  return parseBillingCandidateReceipt(await handler("resolve_billing_import_candidate", { candidateId, decision }));
 }
 
 function validateCustomSourceInput(host: string, root: string): void {

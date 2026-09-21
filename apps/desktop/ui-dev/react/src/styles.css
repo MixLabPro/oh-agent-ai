@@ -370,6 +370,7 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .settings-billing-pending, .settings-billing-list { display: grid; gap: 7px; margin: 10px 0 16px; }
 .settings-billing-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 11px 12px; border: 1px solid #e1e8f0; border-radius: 9px; background: #fff; }
 .settings-billing-row small { flex: 0 0 auto; max-width: 180px; color: var(--text-muted); font-size: 10px; text-align: right; }
+.settings-billing-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; flex: 0 0 auto; }
 .settings-setting-label { color: #26384e; font-size: 12px; font-weight: 650; }
 .settings-billing-deferred, .settings-billing-empty, .settings-billing-unavailable { margin: 9px 0; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
 .settings-billing-job-warning { display: grid; gap: 5px; margin: 12px 0; padding: 11px 12px; border: 1px solid #f0cfcf; border-radius: 9px; color: #9d3f3f; background: #fff7f7; font-size: 11px; }
@@ -526,6 +527,7 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
   .settings-notification-card { align-items: flex-start; flex-direction: column; }
   .settings-notification-toggle { width: 100%; justify-content: space-between; }
   .settings-data-grid { grid-template-columns: 1fr; }
+  .settings-billing-row-actions { justify-content: flex-start; }
   .settings-data-card .button { width: 100%; }
   .settings-pricing-meta { display: grid; gap: 6px; }
   .settings-export-actions { display: grid; grid-template-columns: 1fr; }
