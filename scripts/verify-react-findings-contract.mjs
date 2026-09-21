@@ -28,12 +28,34 @@ function loadBridge(invoke) {
   return { bridge: sandbox.module.exports, window: sandbox.window };
 }
 
+function loadFindingsContract() {
+  const built = buildSync({ entryPoints: [path.join(ui, "react/src/features/findings/contract.ts")], bundle: true, format: "cjs", platform: "node", target: "node20", write: false, logLevel: "silent" });
+  const sandbox = { module: { exports: {} }, exports: {}, console: { error() {}, warn() {}, log() {} }, Set, Map };
+  vm.createContext(sandbox);
+  vm.runInContext(built.outputFiles[0].text, sandbox, { filename: "findings-contract.bundle.cjs" });
+  return sandbox.module.exports;
+}
+
 const invoke = loadMock();
 const { bridge, window } = loadBridge(invoke);
+const { mergeFindingsPage } = loadFindingsContract();
 const valid = await bridge.readFindings();
 assert.equal(valid.issues.length, 2);
 assert.equal(valid.issues[0].sample_evidence[0].destination_class, "object_storage");
 assert.equal(valid.issues[0].sample_evidence[0].reference, "fnv1a64:2222222222222222");
+
+const secondPage = structuredClone(valid);
+secondPage.totals = { ...valid.totals, issues: 999, critical: 99 };
+secondPage.rules = [{ ...valid.rules[0], hits: 20 }, { rule: "SV700", severity: "info", category: "behavior", hits: 1, sessions: 1 }];
+secondPage.issues = [{ ...valid.issues[0] }, { ...valid.issues[1], group_id: "fnv1a64:4444444444444444", rule: "SV700" }, { ...valid.issues[1], group_id: "fnv1a64:4444444444444444", rule: "SV700" }];
+secondPage.next_cursor = "100";
+const merged = mergeFindingsPage(valid, secondPage);
+assert.equal(merged.totals.issues, valid.totals.issues, "authority totals remain stable across pages");
+assert.equal(merged.issues.length, 3, "duplicate group is not rendered twice");
+assert.equal(merged.issues.filter((item) => item.group_id === "fnv1a64:4444444444444444").length, 1, "same-page duplicate group is not rendered twice");
+assert.equal(merged.rules.length, 3, "rules are unioned across pages");
+assert.equal(merged.rules.find((item) => item.rule === valid.rules[0].rule)?.hits, 20, "latest rule row wins");
+assert.equal(merged.next_cursor, "100");
 
 let capturedCursor = "unset";
 window.__TAURI__.core.invoke = async (command, args) => {

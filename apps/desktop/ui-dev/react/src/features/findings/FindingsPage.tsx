@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen, readDecisionMatrix, readFindings, readFindingsFreshness, safeUiError, type DecisionMatrixReport, type FindingGroup, type FindingSample, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
 import { DecisionMatrixSection } from "./DecisionMatrixSection";
+import { mergeFindingsPage } from "./contract";
 
 type SeverityFilter = "all" | "critical" | "warning" | "info";
 
@@ -174,14 +175,7 @@ export function FindingsPage() {
     void readFindings(cursor)
       .then((nextReport) => {
         if (requestId !== requestGeneration.current) return;
-        setReport((current) => {
-          if (!current) return nextReport;
-          const known = new Set(current.issues.map((item) => item.group_id));
-          const appended = nextReport.issues.filter((item) => !known.has(item.group_id));
-          const rules = new Map(current.rules.map((item) => [item.rule, item]));
-          nextReport.rules.forEach((item) => rules.set(item.rule, item));
-          return { ...current, rules: Array.from(rules.values()), issues: [...current.issues, ...appended], next_cursor: nextReport.next_cursor };
-        });
+        setReport((current) => mergeFindingsPage(current, nextReport));
         setLoadingMore(false);
       })
       .catch((reason: unknown) => {
