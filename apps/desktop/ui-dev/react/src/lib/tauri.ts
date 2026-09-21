@@ -1812,14 +1812,17 @@ function parseFindings(value: unknown): FindingsReport {
   const root = record(value, "findings report");
   if (root.schema_version !== "agent-vitals-findings/v1" || root.status !== "ok") throw new Error("findings DTO schema mismatch");
   const totals = record(root.totals, "findings totals");
-  const rules = requiredArray(root.rules, "finding rules").map((item) => {
+  const rawRules = requiredArray(root.rules, "finding rules");
+  const rawIssues = requiredArray(root.issues, "finding groups");
+  if (rawRules.length > 128 || rawIssues.length > 100) throw new Error("findings DTO 数量超限");
+  const rules = rawRules.map((item) => {
     const row = record(item, "finding rule");
     return { rule: stringField(row.rule, "rule"), severity: stringField(row.severity, "rule severity"), category: typeof row.category === "string" ? row.category : "—", hits: requiredCount(row.hits, "rule hits"), sessions: requiredCount(row.sessions, "rule sessions") };
   });
   const nextCursor = root.next_cursor == null ? null : stringField(root.next_cursor, "findings cursor");
   return {
     totals: { issues: requiredCount(totals.issues, "issues total"), findings: requiredCount(totals.findings, "findings total"), critical: requiredCount(totals.critical, "critical total"), warning: requiredCount(totals.warning, "warning total"), info: requiredCount(totals.info, "info total"), sessions: requiredCount(totals.sessions, "findings sessions"), sessions_total: requiredCount(totals.sessions_total, "total sessions") },
-    rules, issues: requiredArray(root.issues, "finding groups").map(parseFindingGroup), next_cursor: nextCursor, refreshed: root.refreshed === true,
+    rules, issues: rawIssues.map(parseFindingGroup), next_cursor: nextCursor, refreshed: requiredBoolean(root.refreshed, "findings refreshed"),
   };
 }
 
