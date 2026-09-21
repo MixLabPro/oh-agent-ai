@@ -49,6 +49,7 @@ const source = sourceFiles.map((file) => fs.readFileSync(file, "utf8")).join("\n
 const settingsPage = fs.readFileSync(path.join(reactSource, "features/settings/SettingsPage.tsx"), "utf8");
 const trustPage = fs.readFileSync(path.join(reactSource, "features/trust/TrustPage.tsx"), "utf8");
 const findingsPage = fs.readFileSync(path.join(reactSource, "features/findings/FindingsPage.tsx"), "utf8");
+const decisionMatrix = fs.readFileSync(path.join(reactSource, "features/findings/DecisionMatrixSection.tsx"), "utf8");
 const sessionsPage = fs.readFileSync(path.join(reactSource, "features/sessions/SessionsPage.tsx"), "utf8");
 const sessionDetailPage = fs.readFileSync(path.join(reactSource, "features/sessions/SessionDetail.tsx"), "utf8");
 const usagePage = fs.readFileSync(path.join(reactSource, "features/usage/UsagePage.tsx"), "utf8");
@@ -67,6 +68,7 @@ if (!source.includes('"trust_monitor_config"') || !source.includes('"save_trust_
 if (!source.includes("aria-labelledby=\"trust-monitor-title\"")) fail("React Trust 缺少 monitor 控件可访问标题");
 if (!source.includes("查看明细") || !source.includes("evidence-detail")) fail("React Trust 缺少可展开的证据明细");
 if (!source.includes("查看证据") || !source.includes("finding-evidence-detail") || !source.includes("evidence_level") || !source.includes("上传尝试不等于远端接收、留存或训练")) fail("React Findings 缺少可核验的脱敏证据明细");
+if (!decisionMatrix.includes("hasStaleReport") || !decisionMatrix.includes("上一次对比结果") || !decisionMatrix.includes("窗口：${report.month}") || !decisionMatrix.includes("section-heading-side")) fail("React 决策矩阵刷新未标注旧窗口、旧结果或响应式状态");
 if (!source.includes('"trust-monitor-updated"') || !source.includes('"sync-status-updated"')) fail("React Findings/Trust 缺少事件失效刷新");
 if (!source.includes("safeUiError") || [findingsPage, trustPage, sessionsPage, sessionDetailPage].some((page) => /reason\.message/.test(page))) fail("React Findings/Trust/会话错误面未统一脱敏");
 const unsafeErrorPattern = /(?:setError|setActionError|setExportError|setCustomError|setBudgetError|setBillingError|setDataError|setAboutError|setSourceError)\([^;\n]*reason\.message/u;
