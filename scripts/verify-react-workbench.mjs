@@ -71,6 +71,7 @@ if (!source.includes('"trust-monitor-updated"') || !source.includes('"sync-statu
 if (!source.includes("safeUiError") || [findingsPage, trustPage, sessionsPage, sessionDetailPage].some((page) => /reason\.message/.test(page))) fail("React Findings/Trust/会话错误面未统一脱敏");
 const unsafeErrorPattern = /(?:setError|setActionError|setExportError|setCustomError|setBudgetError|setBillingError|setDataError|setAboutError|setSourceError)\([^;\n]*reason\.message/u;
 if ([usagePage, settingsPage, skillsPage, testPage].some((page) => unsafeErrorPattern.test(page))) fail("React 用量/设置/Skill/测试错误面仍直接渲染底层异常");
+if (testPage.includes("setReport(null)") || !testPage.includes("上一次可读报告") || !testPage.includes("上一次路线质量结果") || !testPage.includes("loading && !report")) fail("React 测试页刷新未保留旧路线质量报告或缺少 stale 状态");
 if (!findingsPage.includes("requestGeneration") || !findingsPage.includes("Promise.allSettled") || !findingsPage.includes("发现新鲜度暂不可用")) fail("React Findings 刷新缺少请求代数或部分失败降级");
 if (!trustPage.includes("auditLoadingHost") || !trustPage.includes("auditRequest") || !trustPage.includes("上一次可读报告") || !trustPage.includes("上一次审计结果") || trustPage.includes("setReport(null)")) fail("React Trust 审计刷新没有保留旧报告、请求代数或仍会清空证据");
 if (!source.includes("today_tokens_sql") || !source.includes("overview-host-panel")) fail("React 总览未消费权威 token/宿主投影");

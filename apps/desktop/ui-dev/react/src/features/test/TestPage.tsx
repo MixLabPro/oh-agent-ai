@@ -98,7 +98,6 @@ export function TestPage() {
       setReport(next);
     }).catch((reason: unknown) => {
       if (current !== generation.current) return;
-      setReport(null);
       setError(safeUiError(reason, "路线质量报告暂不可用"));
     }).finally(() => {
       if (current === generation.current) setLoading(false);
@@ -137,9 +136,11 @@ export function TestPage() {
     </section>
 
     {error && <div className="error-banner" role="alert">路线质量报告不可用：{error}<button className="button button-secondary button-small" type="button" onClick={refresh}>重试</button></div>}
-    {loading && <section className="test-state" role="status"><strong>正在读取路线质量</strong><p>只查询本机 authority 的安全聚合，不会上传数据或发起模型请求。</p></section>}
+    {loading && report && <div className="usage-refresh-status" role="status">正在刷新 {windows.find((window) => window.value === days)?.label} 路线质量；下面暂保留上一次可读报告。</div>}
+    {!loading && error && report && <div className="usage-refresh-status trust-refresh-status-error" role="status">本次刷新未完成；仍展示上一次路线质量结果。</div>}
+    {loading && !report && <section className="test-state" role="status"><strong>正在读取路线质量</strong><p>只查询本机 authority 的安全聚合，不会上传数据或发起模型请求。</p></section>}
     {!loading && !error && report && report.hosts.length === 0 && <section className="test-state"><strong>窗口内没有路线质量事实</strong><p>先完成一次本地同步，再回到这里查看协议响应中的实际模型族。没有事实不等于没有异常。</p></section>}
-    {!loading && !error && report && report.hosts.length > 0 && <div className="test-quality-list">{report.hosts.map((host) => <HostQualityPanel key={host.host} host={host} />)}</div>}
+    {report && report.hosts.length > 0 && <div className="test-quality-list" aria-label={loading || error ? "上一次路线质量结果" : "路线质量结果"} aria-busy={loading || undefined}>{report.hosts.map((host) => <HostQualityPanel key={host.host} host={host} />)}</div>}
     <p className="test-quality-foot">窗口：{windows.find((window) => window.value === days)?.label} · {report ? `截至 ${observedAt(report.now_ms)}` : "尚未读取"} · 质量分析不覆盖 thinking、effort、上下文窗口或网络时延。</p>
   </>;
 }
