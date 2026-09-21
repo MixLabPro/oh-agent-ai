@@ -344,6 +344,8 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .settings-budget-form select, .settings-budget-form input { width: 100%; min-height: 35px; padding: 7px 9px; border: 1px solid #d9e2ec; border-radius: 7px; background: #fff; color: #26384e; font: inherit; }
 .settings-budget-form input:focus-visible, .settings-budget-form select:focus-visible { border-color: #58b898; outline: 2px solid #cfe9e1; outline-offset: 1px; }
 .settings-budget-form-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.skills-diff-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; color: var(--text-muted); font-size: 11px; }
+.skills-diff-summary span { padding: 4px 8px; border: 1px solid #d9e2ec; border-radius: 999px; background: #fff; }
 .settings-budget-threshold strong { color: #26384e; font-size: 13px; }
 .settings-budget-threshold small { color: var(--text-muted); }
 .settings-budget-legacy { display: flex; gap: 10px; align-items: baseline; margin: 12px 0; padding: 11px 12px; border: 1px solid #f1d28b; border-radius: 9px; color: #805b17; background: #fff9e8; font-size: 11px; line-height: 1.5; }

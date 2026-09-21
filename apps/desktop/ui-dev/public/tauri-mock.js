@@ -640,6 +640,7 @@
         };
       }
       case "skills_snapshot_save": return { status: "saved", upload_performed: false };
+      case "skills_diff_latest": return { schema_version: "skills-diff-v1", status: "ok", baseline_available: true, truncated: false, dropped_rows: 0, summary: { added: 1, removed: 0, usage_changed: 1, newly_judgeable: 0, new_overlap_candidates: 0, new_security_findings: 1 }, added_skills: [{ host: "claude-code", name: "browser-preview", namespace: null, instance_id: null }], removed_skills: [], usage_delta: [{ host: "claude-code", name: "browser-preview", namespace: null, instance_id: null, delta: 2, now: 8 }], newly_judgeable: [], new_overlap_candidates: [], new_security_findings: [{ skill: "browser-preview", rule: "SV501", line: 12 }], budget_delta_chars: null, budget_pct_then_now: [null, null], loaded_then_now: [8, 9] };
       case "save_retention_config": {
         const input = (args && args.input) || {};
         if (!Number.isInteger(input.months) || input.months < 1 || input.months > 60) {

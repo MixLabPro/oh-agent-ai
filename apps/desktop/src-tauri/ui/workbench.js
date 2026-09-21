@@ -9274,8 +9274,15 @@ async function compareSkillsSnapshot() {
     const added = diff.added_skills || [];
     const newSec = diff.new_security_findings || [];
     const newly = diff.newly_judgeable || [];
+    const dropped = Number(diff.dropped_rows || 0);
+    if (diff.status === "partial" || diff.truncated || dropped > 0) {
+      wrap.append(skEl("div", "sk-row-line warning",
+        "结果不完整：已丢弃 " + dropped + " 条或达到显示上限，不能据此判断没有变化。"));
+    }
     if (!added.length && !newSec.length && !newly.length) {
-      wrap.append(skEl("div", "sk-row-line muted", "相对上次快照没有新增的 skill 或安全命中（这不等于没有变化——其它维度见终端 diff）。"));
+      wrap.append(skEl("div", "sk-row-line muted", diff.status === "partial"
+        ? "本次结果不完整，未显示新增项不等于没有变化。"
+        : "相对上次快照没有新增的 skill 或安全命中（这不等于没有变化——其它维度见终端 diff）。"));
     }
     if (added.length) {
       wrap.append(skEl("div", "sk-group-title", "新增 skill " + added.length));

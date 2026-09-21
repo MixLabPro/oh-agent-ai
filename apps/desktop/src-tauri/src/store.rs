@@ -27,6 +27,7 @@
 //! 拿不到锁就 await，避免两份并发打开各算一份。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -1640,10 +1641,168 @@ fn skills_snapshot_saved_receipt() -> Value {
     json!({ "status": "saved", "upload_performed": false })
 }
 
+fn safe_skill_diff_label(value: Option<&Value>) -> Option<String> {
+    let text = value?.as_str()?.trim();
+    if text.is_empty()
+        || text.len() > 160
+        || text.chars().any(|ch| ch.is_control())
+        || text.starts_with('/')
+        || text.starts_with('~')
+        || text.contains('/')
+        || text.contains("\\")
+        || text.contains("://")
+        || text.as_bytes().get(1) == Some(&b':')
+    {
+        return None;
+    }
+    Some(text.to_string())
+}
+
+fn safe_skill_diff_identity(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let host = safe_skill_diff_label(object.get("host"))?;
+    let name = safe_skill_diff_label(object.get("name"))?;
+    let mut output = serde_json::Map::new();
+    output.insert("host".into(), Value::String(host));
+    output.insert("name".into(), Value::String(name));
+    if let Some(namespace) = safe_skill_diff_label(object.get("namespace")) {
+        output.insert("namespace".into(), Value::String(namespace));
+    }
+    if let Some(instance_id) = safe_skill_diff_label(object.get("instance_id")) {
+        output.insert("instance_id".into(), Value::String(instance_id));
+    }
+    Some(Value::Object(output))
+}
+
+fn safe_skill_diff_number(value: Option<&Value>, max: i64) -> Option<Value> {
+    let number = value?.as_i64()?;
+    (number.unsigned_abs() <= max as u64).then_some(Value::Number(number.into()))
+}
+
+fn safe_skill_diff_nonnegative_number(value: Option<&Value>, max: i64) -> Option<Value> {
+    let number = value?.as_i64()?;
+    (number >= 0 && number <= max).then_some(Value::Number(number.into()))
+}
+
+const SKILL_DIFF_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+
+fn read_skill_diff_output<R: Read>(mut reader: R) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take((SKILL_DIFF_OUTPUT_LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    let truncated = bytes.len() > SKILL_DIFF_OUTPUT_LIMIT;
+    if truncated {
+        bytes.truncate(SKILL_DIFF_OUTPUT_LIMIT);
+    }
+    Ok((bytes, truncated))
+}
+
+fn safe_skill_diff_report(raw: &Value) -> Option<Value> {
+    let object = raw.as_object()?;
+    let mut output = serde_json::Map::new();
+    output.insert("schema_version".into(), Value::String("skills-diff-v1".into()));
+    output.insert("baseline_available".into(), Value::Bool(true));
+    let mut dropped_rows = 0usize;
+    let mut truncated = false;
+    let mut invalid_optional = false;
+    for key in ["added_skills", "removed_skills"] {
+        let rows = object.get(key)?.as_array()?;
+        truncated |= rows.len() > 256;
+        let safe_rows: Vec<Value> = rows.iter().take(256).filter_map(safe_skill_diff_identity).collect();
+        dropped_rows = dropped_rows.saturating_add(rows.len().saturating_sub(safe_rows.len()));
+        output.insert(key.into(), Value::Array(safe_rows));
+    }
+    let usage = object.get("usage_delta")?.as_array()?;
+    truncated |= usage.len() > 256;
+    let safe_usage: Vec<Value> = usage.iter().take(256).filter_map(|row| {
+        let mut safe = safe_skill_diff_identity(row)?.as_object()?.clone();
+        let object = row.as_object()?;
+        safe.insert("delta".into(), safe_skill_diff_number(object.get("delta"), 1_000_000)?);
+        safe.insert("now".into(), safe_skill_diff_nonnegative_number(object.get("now"), 1_000_000)?);
+        Some(Value::Object(safe))
+    }).collect();
+    dropped_rows = dropped_rows.saturating_add(usage.len().saturating_sub(safe_usage.len()));
+    output.insert("usage_delta".into(), Value::Array(safe_usage));
+    let newly = object.get("newly_judgeable")?.as_array()?;
+    truncated |= newly.len() > 256;
+    let safe_newly: Vec<Value> = newly.iter().take(256).filter_map(|row| {
+        let mut safe = safe_skill_diff_identity(row)?.as_object()?.clone();
+        let object = row.as_object()?;
+        for key in ["usage_count", "installed_days_ago"] {
+            if let Some(number) = safe_skill_diff_nonnegative_number(object.get(key), 100_000) {
+                safe.insert(key.into(), number);
+            } else if object.get(key).is_some() {
+                invalid_optional = true;
+            }
+        }
+        let verdict = object.get("verdict").and_then(Value::as_str);
+        if matches!(verdict, Some("zombie") | Some("alive")) {
+            safe.insert("verdict".into(), Value::String(verdict.unwrap().into()));
+        }
+        Some(Value::Object(safe))
+    }).collect();
+    dropped_rows = dropped_rows.saturating_add(newly.len().saturating_sub(safe_newly.len()));
+    output.insert("newly_judgeable".into(), Value::Array(safe_newly));
+    let overlaps = object.get("new_overlap_candidates")?.as_array()?;
+    truncated |= overlaps.len() > 256;
+    let safe_overlaps: Vec<Value> = overlaps.iter().take(256).filter_map(|pair| {
+        let pair = pair.as_array()?;
+        if pair.len() != 2 { return None; }
+        Some(Value::Array(vec![
+            Value::String(safe_skill_diff_label(pair.first())?),
+            Value::String(safe_skill_diff_label(pair.get(1))?),
+        ]))
+    }).collect();
+    dropped_rows = dropped_rows.saturating_add(overlaps.len().saturating_sub(safe_overlaps.len()));
+    output.insert("new_overlap_candidates".into(), Value::Array(safe_overlaps));
+    let security = object.get("new_security_findings")?.as_array()?;
+    truncated |= security.len() > 256;
+    let safe_security: Vec<Value> = security.iter().take(256).filter_map(|row| {
+        let object = row.as_object()?;
+        let skill = safe_skill_diff_label(object.get("skill"))?;
+        let rule = safe_skill_diff_label(object.get("rule"))?;
+        let line = safe_skill_diff_nonnegative_number(object.get("line"), 1_000_000)?;
+        Some(json!({"skill": skill, "rule": rule, "line": line}))
+    }).collect();
+    dropped_rows = dropped_rows.saturating_add(security.len().saturating_sub(safe_security.len()));
+    output.insert("new_security_findings".into(), Value::Array(safe_security));
+    if let Some(delta) = safe_skill_diff_number(object.get("budget_delta_chars"), 100_000_000) {
+        output.insert("budget_delta_chars".into(), delta);
+    }
+    if let Some(values) = object.get("budget_pct_then_now").and_then(Value::as_array) {
+        let safe_values: Vec<Value> = values.iter().take(2).filter_map(|value| {
+            if value.is_null() { return Some(Value::Null); }
+            let number = value.as_f64()?;
+            (number.is_finite() && number.abs() <= 100_000.0).then_some(json!(number))
+        }).collect();
+        if safe_values.len() == 2 { output.insert("budget_pct_then_now".into(), Value::Array(safe_values)); }
+        else { invalid_optional = true; }
+    }
+    if let Some(values) = object.get("loaded_then_now").and_then(Value::as_array) {
+        let safe_values: Vec<Value> = values.iter().take(2).filter_map(|value| safe_skill_diff_nonnegative_number(Some(value), 1_000_000)).collect();
+        if safe_values.len() == 2 { output.insert("loaded_then_now".into(), Value::Array(safe_values)); }
+        else { invalid_optional = true; }
+    }
+    output.insert("summary".into(), json!({
+        "added": output.get("added_skills").and_then(Value::as_array).map_or(0, Vec::len),
+        "removed": output.get("removed_skills").and_then(Value::as_array).map_or(0, Vec::len),
+        "usage_changed": output.get("usage_delta").and_then(Value::as_array).map_or(0, Vec::len),
+        "newly_judgeable": output.get("newly_judgeable").and_then(Value::as_array).map_or(0, Vec::len),
+        "new_overlap_candidates": output.get("new_overlap_candidates").and_then(Value::as_array).map_or(0, Vec::len),
+        "new_security_findings": output.get("new_security_findings").and_then(Value::as_array).map_or(0, Vec::len),
+    }));
+    output.insert("dropped_rows".into(), json!(dropped_rows));
+    output.insert("truncated".into(), Value::Bool(truncated));
+    output.insert("status".into(), Value::String(if truncated || dropped_rows > 0 || invalid_optional { "partial" } else { "ok" }.into()));
+    Some(Value::Object(output))
+}
+
 /// 「与上次快照对比」：`agent-vitals diff --json -`（无文件参数 → CLI 自动回退
 /// 最新快照；`-` → diff_vs_baseline 块写 stdout）。无基线时 CLI exit 2 且
-/// stderr 首行说明「没有可比较的快照」——那是**前置条件缺失**，透传给前端，
-/// 不冒充「没有变化」（render_diff 的规矩，spec §6.6）。
+/// stderr 只映射为受控错误码；路径、文件名和原始 CLI 输出不进入 WebView。
+/// 没有快照是前置条件缺失，不冒充「没有变化」（render_diff 的规矩，spec §6.6）。
 #[tauri::command]
 pub async fn skills_diff_latest(
     state: tauri::State<'_, StoreBuildLock>,
@@ -1656,20 +1815,34 @@ pub async fn skills_diff_latest(
         };
         let mut cmd = Command::new(&bin);
         cmd.args(vec!["diff", "--json", "-"]);
-        cmd.env("AGENT_VITALS_HOME", data_home());
-        let out = cmd
-            .output()
-            .map_err(|e| error_value("cancelled", &e.to_string()))?;
-        if !out.status.success() {
-            let first = String::from_utf8_lossy(&out.stderr)
-                .lines()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("")
-                .to_string();
-            return Err(error_value("cancelled", &first));
+        cmd.env("AGENT_VITALS_HOME", data_home())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = cmd
+            .spawn()
+            .map_err(|_| error_value("process_unavailable", "Skill 对比进程无法启动"))?;
+        let stdout = child.stdout.take().ok_or_else(|| error_value("process_unavailable", "Skill 对比输出不可读取"))?;
+        let stdout_reader = std::thread::spawn(move || read_skill_diff_output(stdout));
+        let (stdout_bytes, stdout_truncated) = stdout_reader
+            .join()
+            .map_err(|_| error_value("process_unavailable", "Skill 对比输出读取失败"))?
+            .map_err(|_| error_value("process_unavailable", "Skill 对比输出读取失败"))?;
+        if stdout_truncated {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error_value("output_too_large", "Skill 对比结果超过本机安全上限"));
         }
-        serde_json::from_slice(&out.stdout)
-            .map_err(|e| error_value("cancelled", &e.to_string()))
+        let status = child
+            .wait()
+            .map_err(|_| error_value("process_unavailable", "Skill 对比进程状态不可读取"))?;
+        if !status.success() {
+            return Err(error_value("diff_unavailable", "没有可比较的本机 Skill 快照"));
+        }
+        let raw: Value = serde_json::from_slice(&stdout_bytes)
+            .map_err(|_| error_value("diff_unavailable", "Skill 对比结果不可读取"))?;
+        safe_skill_diff_report(&raw)
+            .ok_or_else(|| error_value("diff_unavailable", "Skill 对比结果格式不可用"))
     })
     .await
     .map_err(|e| error_value("cancelled", &e.to_string()))?
@@ -1739,6 +1912,39 @@ mod tests {
         assert_eq!(receipt, json!({ "status": "saved", "upload_performed": false }));
         assert!(receipt.get("output").is_none());
         assert!(receipt.get("path").is_none());
+    }
+
+    #[test]
+    fn skills_diff_projection_drops_paths_and_marks_partial_rows() {
+        let raw = json!({
+            "baseline_file": "/Users/Admin/.agent-vitals/snapshots/private.json",
+            "added_skills": [{"host": "claude-code", "name": "safe-skill", "namespace": null, "instance_id": null}, {"host": "claude-code", "name": "/Users/Admin/private-skill"}],
+            "removed_skills": [],
+            "usage_delta": [],
+            "newly_judgeable": [],
+            "new_overlap_candidates": [],
+            "new_security_findings": [{"skill": "safe-skill", "rule": "SV501", "where": "/Users/Admin/SKILL.md", "line": 12}],
+            "budget_delta_chars": 4,
+            "budget_pct_then_now": [1.0, 2.0],
+            "loaded_then_now": [1, 2],
+        });
+        let projected = safe_skill_diff_report(&raw).expect("safe diff projection");
+        assert_eq!(projected["status"], "partial");
+        assert_eq!(projected["dropped_rows"], 1);
+        assert!(projected.get("baseline_file").is_none());
+        assert!(projected["new_security_findings"][0].get("where").is_none());
+        assert!(!projected.to_string().contains("/Users/Admin"));
+
+        for unsafe_name in ["file:///Users/Admin/private", "C:/Users/Admin/private", "relative/path", "skill /Users/Admin/private"] {
+            let raw = json!({
+                "added_skills": [{"host": "claude-code", "name": unsafe_name}],
+                "removed_skills": [], "usage_delta": [], "newly_judgeable": [],
+                "new_overlap_candidates": [], "new_security_findings": [],
+            });
+            let projected = safe_skill_diff_report(&raw).expect("safe diff projection");
+            assert_eq!(projected["status"], "partial");
+            assert_eq!(projected["dropped_rows"], 1);
+        }
     }
 
     #[test]

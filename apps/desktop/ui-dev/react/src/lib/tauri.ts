@@ -155,6 +155,24 @@ export type UpdateCheckResult = { status: "ok" | "no_release" | "unavailable"; c
 export type SkillHostSummary = { host: string; skills_on_disk: number; discoverable_skills: number; runtime_verified_loaded_skills: number | null; unique_discoverable_skills: number; description_budget: { available: boolean; used_chars: number | null; budget_chars: number | null; pct_used: number | null; source: string | null }; trigger_data: "available" | "unavailable" | "unknown" };
 export type SkillDiagnostic = { code: string; name: string; severity: "critical" | "warning" | "info"; skill: string | null; evidence_count: number; impact: string | null; recommendation: string | null; caveats: string[] };
 export type SkillScanReport = { status: "ok" | "unavailable"; schema_version: string | null; run: string | null; host_selection: string; generated_at_ms: number | null; from_cache: boolean; hosts: SkillHostSummary[]; diagnostics: SkillDiagnostic[]; not_assessed: Array<{ code: string; name: string; reason: string }> };
+export type SkillDiffIdentity = { host: string; name: string; namespace: string | null; instance_id: string | null };
+export type SkillDiffReport = {
+  schema_version: "skills-diff-v1";
+  status: "ok" | "partial";
+  baseline_available: true;
+  truncated: boolean;
+  dropped_rows: number;
+  summary: { added: number; removed: number; usage_changed: number; newly_judgeable: number; new_overlap_candidates: number; new_security_findings: number };
+  added_skills: SkillDiffIdentity[];
+  removed_skills: SkillDiffIdentity[];
+  usage_delta: Array<SkillDiffIdentity & { delta: number; now: number }>;
+  newly_judgeable: Array<SkillDiffIdentity & { usage_count?: number; installed_days_ago?: number; verdict?: "zombie" | "alive" }>;
+  new_overlap_candidates: Array<[string, string]>;
+  new_security_findings: Array<{ skill: string; rule: string; line: number }>;
+  budget_delta_chars: number | null;
+  budget_pct_then_now: [number | null, number | null] | null;
+  loaded_then_now: [number, number] | null;
+};
 export type SkillSnapshotSaveReceipt = { status: "saved"; upload_performed: false };
 
 export type SourceConnectionState = "connected" | "needs_attention" | "paused" | "excluded" | "not_detected" | "unknown";
@@ -662,6 +680,11 @@ function boundedCount(value: unknown, label: string, maximum = 1_000_000_000): n
   const count = requiredCount(value, label);
   if (count > maximum) throw new Error(`${label} DTO 计数超限`);
   return count;
+}
+
+function boundedSignedCount(value: unknown, label: string, maximum = 1_000_000_000): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || Math.abs(value) > maximum) throw new Error(`${label} DTO 有符号计数不安全`);
+  return value;
 }
 
 function requiredBoolean(value: unknown, label: string): boolean {
@@ -1235,6 +1258,41 @@ function parseSkillScan(value: unknown, expectedHost?: string): SkillScanReport 
   const hostSelection = safeSkillText(root.host_selection, "skill host selection") ?? "all";
   if (expectedHost !== undefined && hostSelection !== expectedHost) throw new Error("skill scan host_selection 不匹配");
   return { status: "ok", schema_version: safeVersion(root.schema_version, "skill schema") ?? null, run: safeSkillText(root.run, "skill run"), host_selection: hostSelection, generated_at_ms: meta.generated_at_ms == null ? null : nullableSourceTimestampMs(meta.generated_at_ms, "skill generated at"), from_cache: meta.from_cache === true, hosts, diagnostics, not_assessed: notAssessed };
+}
+
+function parseSkillDiffIdentity(value: unknown): SkillDiffIdentity {
+  const row = record(value, "skill diff identity");
+  return {
+    host: safeSkillText(row.host, "skill diff host") ?? "unknown",
+    name: safeSkillText(row.name, "skill diff name") ?? "未命名 skill",
+    namespace: row.namespace == null ? null : safeSkillText(row.namespace, "skill diff namespace"),
+    instance_id: row.instance_id == null ? null : safeSkillText(row.instance_id, "skill diff instance"),
+  };
+}
+
+function parseSkillDiff(value: unknown): SkillDiffReport {
+  const root = record(value, "skill diff");
+  if (root.schema_version !== "skills-diff-v1" || (root.status !== "ok" && root.status !== "partial") || root.baseline_available !== true) throw new Error("Skill 对比结果不可用");
+  const identityArray = (key: string): SkillDiffIdentity[] => requiredArray(root[key], `skill diff ${key}`).slice(0, 256).map(parseSkillDiffIdentity);
+  const usageDelta = requiredArray(root.usage_delta, "skill diff usage delta").slice(0, 256).map((value) => {
+    const row = record(value, "skill diff usage delta row");
+    return { ...parseSkillDiffIdentity(row), delta: boundedSignedCount(row.delta, "skill diff delta", 1_000_000), now: boundedCount(row.now, "skill diff total", 1_000_000) };
+  });
+  const newlyJudgeable = requiredArray(root.newly_judgeable, "skill diff newly judgeable").slice(0, 256).map((value) => {
+    const row = record(value, "skill diff newly judgeable row");
+    const verdict: "zombie" | "alive" | undefined = row.verdict === "zombie" || row.verdict === "alive" ? row.verdict : undefined;
+    return { ...parseSkillDiffIdentity(row), usage_count: row.usage_count == null ? undefined : boundedCount(row.usage_count, "skill diff usage count", 1_000_000), installed_days_ago: row.installed_days_ago == null ? undefined : boundedCount(row.installed_days_ago, "skill diff age", 100_000), verdict };
+  });
+  const overlap = requiredArray(root.new_overlap_candidates, "skill diff overlap").slice(0, 256).map((value) => {
+    const pair = requiredArray(value, "skill diff overlap pair");
+    if (pair.length !== 2) throw new Error("Skill 对比候选格式不安全");
+    return [safeSkillText(pair[0], "skill diff overlap left") ?? "未命名 skill", safeSkillText(pair[1], "skill diff overlap right") ?? "未命名 skill"] as [string, string];
+  });
+  const findings = requiredArray(root.new_security_findings, "skill diff findings").slice(0, 256).map((value) => { const row = record(value, "skill diff finding"); return { skill: safeSkillText(row.skill, "skill diff finding skill") ?? "未命名 skill", rule: safeSkillText(row.rule, "skill diff finding rule") ?? "unknown", line: boundedCount(row.line, "skill diff finding line", 1_000_000) }; });
+  const budget = root.budget_pct_then_now == null ? null : (() => { const values = requiredArray(root.budget_pct_then_now, "skill diff budget percent"); if (values.length !== 2) throw new Error("Skill 对比预算格式不安全"); return values.map((value) => value == null ? null : Math.min(requiredFiniteNumber(value, "skill diff budget percent"), 100_000)) as [number | null, number | null]; })();
+  const loaded = root.loaded_then_now == null ? null : (() => { const values = requiredArray(root.loaded_then_now, "skill diff loaded count"); if (values.length !== 2) throw new Error("Skill 对比加载数格式不安全"); return values.map((value) => boundedCount(value, "skill diff loaded count", 1_000_000)) as [number, number]; })();
+  const summaryRow = record(root.summary, "skill diff summary");
+  return { schema_version: "skills-diff-v1", status: root.status as "ok" | "partial", baseline_available: true, truncated: requiredBoolean(root.truncated, "skill diff truncated"), dropped_rows: boundedCount(root.dropped_rows, "skill diff dropped rows", 1_000_000), summary: { added: boundedCount(summaryRow.added, "skill diff summary added", 1_000_000), removed: boundedCount(summaryRow.removed, "skill diff summary removed", 1_000_000), usage_changed: boundedCount(summaryRow.usage_changed, "skill diff summary usage", 1_000_000), newly_judgeable: boundedCount(summaryRow.newly_judgeable, "skill diff summary newly judgeable", 1_000_000), new_overlap_candidates: boundedCount(summaryRow.new_overlap_candidates, "skill diff summary overlap", 1_000_000), new_security_findings: boundedCount(summaryRow.new_security_findings, "skill diff summary security", 1_000_000) }, added_skills: identityArray("added_skills"), removed_skills: identityArray("removed_skills"), usage_delta: usageDelta, newly_judgeable: newlyJudgeable, new_overlap_candidates: overlap, new_security_findings: findings, budget_delta_chars: root.budget_delta_chars == null ? null : boundedSignedCount(root.budget_delta_chars, "skill diff budget delta", 100_000_000), budget_pct_then_now: budget, loaded_then_now: loaded };
 }
 
 function parseMonthlyExportSummary(value: unknown): MonthlyExportSummary {
@@ -2236,6 +2294,27 @@ export async function saveSkillsSnapshot(): Promise<SkillSnapshotSaveReceipt> {
     if (code === "no_binary") throw new Error("未找到可用的 agent-vitals CLI；请先修复安装或版本。");
     if (code === "storage_failed") throw new Error("本机快照保存失败；请检查快照目录权限或磁盘空间。");
     throw new Error("Skill 快照保存失败；请确认本机 CLI 可用后重试");
+  }
+}
+
+export async function readSkillsDiff(): Promise<SkillDiffReport> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) {
+    return parseSkillDiff({
+      schema_version: "skills-diff-v1", status: "ok", baseline_available: true, truncated: false, dropped_rows: 0,
+      summary: { added: 1, removed: 0, usage_changed: 1, newly_judgeable: 0, new_overlap_candidates: 0, new_security_findings: 1 },
+      added_skills: [{ host: "claude-code", name: "browser-preview", namespace: null, instance_id: null }], removed_skills: [],
+      usage_delta: [{ host: "claude-code", name: "browser-preview", namespace: null, instance_id: null, delta: 2, now: 8 }], newly_judgeable: [], new_overlap_candidates: [], new_security_findings: [{ skill: "browser-preview", rule: "SV501", line: 12 }], budget_delta_chars: null, budget_pct_then_now: [null, null], loaded_then_now: [8, 9],
+    });
+  }
+  try { return parseSkillDiff(await handler("skills_diff_latest")); }
+  catch (reason: unknown) {
+    const row = reason && typeof reason === "object" ? reason as Record<string, unknown> : {};
+    const detail = row.error && typeof row.error === "object" ? row.error as Record<string, unknown> : row;
+    const code = typeof detail.code === "string" ? detail.code : "";
+    if (code === "diff_unavailable") throw new Error("没有可比较的本机 Skill 快照；请先存为快照。");
+    if (code === "output_too_large") throw new Error("Skill 对比结果过大，已停止显示；请缩小扫描范围后重试。");
+    throw new Error("Skill 对比结果暂不可用；未将原始输出展示到页面。");
   }
 }
 

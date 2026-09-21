@@ -62,6 +62,8 @@ ok(css.includes(".sk-cards") && css.includes(".sk-budget-fill"),
 ok(wb.includes('activeTab === "skills"'), "loadActiveTab 认识 skills tab（懒加载分支）");
 ok(wb.includes("首次进不自动扫") || wb.includes("不自动跑"),
   "首进 tab 不自动扫描（spec §7：codex app-server 拉起是秒级开销）");
+ok(wb.includes('diff.status === "partial"') && wb.includes("结果不完整") && wb.includes("不能据此判断没有变化"),
+  "快照 diff 的 partial/truncated 结果显式提示不可据此判断没有变化");
 
 // ── 真实 CLI 捕获 fixture（spec §5.1 形状来源纪律）────────────────────────
 console.log("# fixture：真实 CLI 输出捕获");
