@@ -86,6 +86,7 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .usage-calendar-selected { border-color: #087f62; box-shadow: 0 0 0 2px #d7f0e7; }
 .usage-calendar-future { background: #f8fafc; }
 .usage-note { margin-top: 12px; color: var(--text-muted); font-size: 11px; line-height: 1.55; }
+.usage-refresh-status { margin: -4px 0 12px; padding: 9px 12px; border: 1px solid #dbe9e4; border-radius: 8px; color: #426b61; background: #f5fbf8; font-size: 11px; line-height: 1.45; }
 .usage-empty { padding: 14px 4px 4px; color: var(--text-subtle); font-size: 12px; line-height: 1.6; }
 .usage-detail-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(260px, .6fr); gap: 14px; margin-top: 14px; }
 .usage-hour-grid { display: grid; grid-template-columns: repeat(24, minmax(13px, 1fr)); align-items: end; gap: 5px; min-height: 88px; padding: 13px 4px 0; border-bottom: 1px solid #e5ebf0; }
