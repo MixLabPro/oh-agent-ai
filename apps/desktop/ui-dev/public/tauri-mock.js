@@ -283,7 +283,13 @@
   // 已被 official_subscription 声明覆盖的组：保存后从组列表消失，撤销后回来
   // （同一谓词在 SQL 里的镜像；见 billing_preview.rs 的 R3 测试）。
   const billingCoveredGroups = new Map();
-  const billingDeclarations = [];
+  // 合成当前订阅声明：用于视觉回归验证“修改订阅/撤销声明”的二次确认和回执。
+  const billingDeclarations = [{
+    declaration_id: "browser-subscription-decl", revision_id: "browser-subscription-rev-1", current_revision_id: "browser-subscription-rev-1",
+    host: "claude-code", provider_id: "anthropic", relationship_kind: "official_subscription", subscription_name: "Claude Pro",
+    amount_minor: 2000, currency: "USD", effective_start: `${month}-01`, effective_end: null, source_candidate_id: null,
+    scopes: [{ scope_kind: "provider", scope_value: "unresolved" }], status: "saved",
+  }];
   const billingDeclarationHistory = [];
   // 合成失败任务：用于浏览器视觉回归验证“失败任务有证据、可重试、旧结果仍可读”。
   // 真实 Tauri 路径始终以 authority 的 billing_recalculation_jobs 为准。
@@ -509,14 +515,13 @@
         if ((args && args.relationshipKind) === "unknown") {
           throw new Error("\"unknown\" is not a billing declaration; keep the group pending instead");
         }
-        if (!(args && args.effectiveEnd)) {
-          throw new Error("effective_end is required: Beta declarations must be bounded to an explicit month range");
-        }
-        if (args.effectiveEnd > month) {
+        if (args && args.effectiveEnd && args.effectiveEnd > isoDay) {
           throw new Error("effective_end must not be later than the current statistics month");
         }
         const candidate = billingCandidates.find((item) => item.candidate_id === (args && args.sourceCandidateId));
         if (candidate) candidate.status = "accepted";
+        const priorIndex = billingDeclarations.findIndex((item) => item.declaration_id === (args && args.declarationId));
+        if (priorIndex >= 0 && args && args.supersedesRevisionId) billingDeclarationHistory.push({ ...billingDeclarations.splice(priorIndex, 1)[0], status: "superseded" });
         billingDeclarations.push({
           declaration_id: args && args.declarationId,
           revision_id: args && args.revisionId,
@@ -528,6 +533,7 @@
           effective_start: args && args.effectiveStart,
           effective_end: args && args.effectiveEnd,
           source_candidate_id: args && args.sourceCandidateId,
+          scopes: (args && args.scopes) || [],
           current_revision_id: args && args.revisionId,
           status: "saved",
         });

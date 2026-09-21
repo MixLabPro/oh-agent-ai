@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { addCustomSourceRoot, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, listen, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, resolveBillingImportCandidate, retryBillingRecalculation, revokeBillingDeclaration, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
+import { addCustomSourceRoot, amendBillingDeclaration, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, listen, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, resolveBillingImportCandidate, retryBillingRecalculation, revokeBillingDeclaration, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -77,6 +77,16 @@ function decimalToMinor(value: string): number | null {
   } catch { return null; }
 }
 
+function decimalToMinorAllowZero(value: string): number | null {
+  const text = value.trim();
+  if (!/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/u.test(text)) return null;
+  const [whole, fraction = ""] = text.split(".");
+  try {
+    const minor = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
+    return minor <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(minor) : null;
+  } catch { return null; }
+}
+
 function minorToDecimal(value: number | null, currency: string): string {
   if (value === null) return "—";
   const prefix = currency === "USD" ? "$" : currency === "CNY" ? "¥" : `${currency} `;
@@ -106,6 +116,10 @@ function billingAmountText(amounts: Array<{ amount_minor: number; currency: stri
 
 function statisticsMonth(timezone?: string): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit" }).format(new Date());
+}
+
+function statisticsDay(timezone?: string): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 }
 
 function pricingStateLabel(state: StatisticsSettingsReport["pricing"]["state"]): string {
@@ -275,6 +289,14 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
   const [revokeBusy, setRevokeBusy] = useState<string | null>(null);
   const [revokeError, setRevokeError] = useState<string | null>(null);
   const [revokeMessage, setRevokeMessage] = useState<string | null>(null);
+  const [amendDeclaration, setAmendDeclaration] = useState<BillingSettingsReport["declarations"][number] | null>(null);
+  const [amendName, setAmendName] = useState("");
+  const [amendAmount, setAmendAmount] = useState("");
+  const [amendCurrency, setAmendCurrency] = useState<"CNY" | "USD">("CNY");
+  const [amendEnd, setAmendEnd] = useState("");
+  const [amendBusy, setAmendBusy] = useState(false);
+  const [amendError, setAmendError] = useState<string | null>(null);
+  const [amendMessage, setAmendMessage] = useState<string | null>(null);
   const pendingGroups = report?.groups ?? [];
   const pendingCandidates = (report?.candidates ?? []).filter((candidate) => candidate.status === "pending");
   const dismissedCandidates = (report?.candidates ?? []).filter((candidate) => candidate.status === "dismissed");
@@ -313,6 +335,27 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
       setRevokeDeclarationId(null); onReload();
     } catch (reason: unknown) { setRevokeError(safeUiError(reason, "计费声明撤销失败")); }
     finally { setRevokeBusy(null); }
+  };
+  const openAmendment = (declaration: BillingSettingsReport["declarations"][number]) => {
+    setAmendDeclaration(declaration); setAmendName(declaration.subscription_name ?? ""); setAmendAmount(declaration.amount_minor === null ? "" : (declaration.amount_minor / 100).toFixed(2)); setAmendCurrency(declaration.currency === "USD" ? "USD" : "CNY"); setAmendEnd(declaration.effective_end ?? ""); setAmendError(null); setAmendMessage(null);
+  };
+  const saveAmendment = async () => {
+    if (!amendDeclaration || amendBusy || !amendDeclaration.current_revision_id) return;
+    setAmendBusy(true); setAmendError(null); setAmendMessage(null);
+    const amountMinor = amendAmount.trim() === "" ? null : decimalToMinorAllowZero(amendAmount);
+    if (amendAmount.trim() !== "" && amountMinor === null) { setAmendError("月费必须是 0 或正数，最多两位小数；留空表示金额暂不清楚。"); setAmendBusy(false); return; }
+    const effectiveEnd = amendEnd.trim() === "" ? null : amendEnd.trim();
+    const currentMonthStart = `${statisticsMonth("Asia/Shanghai")}-01`;
+    const effectiveStart = amendDeclaration.effective_start > currentMonthStart ? amendDeclaration.effective_start : currentMonthStart;
+    if (effectiveEnd !== null && (!/^\d{4}-\d{2}-\d{2}$/u.test(effectiveEnd) || effectiveEnd < effectiveStart || effectiveEnd > statisticsDay("Asia/Shanghai"))) { setAmendError("结束日期必须不早于本次修订起始日且不晚于今天；留空表示持续有效。"); setAmendBusy(false); return; }
+    try {
+      const receipt = await amendBillingDeclaration({ declaration_id: amendDeclaration.declaration_id, supersedes_revision_id: amendDeclaration.current_revision_id, host: amendDeclaration.host, provider_id: amendDeclaration.provider_id, subscription_name: amendName.trim() || null, amount_minor: amountMinor, currency: amountMinor === null ? null : amendCurrency, effective_start: effectiveStart, effective_end: effectiveEnd, source_candidate_id: amendDeclaration.source_candidate_id, scopes: amendDeclaration.scopes });
+      if (receipt.job?.status === "queued") setAmendMessage(`订阅修订已保存（自 ${effectiveStart} 生效），重算任务已入队（${receipt.job.job_id}）；历史月份不变。`);
+      else if (receipt.job?.status === "enqueue_failed") setAmendMessage("订阅修订已保存，但重算没有入队；当前数字仍是旧结果。");
+      else setAmendMessage("订阅修订已保存；历史月份不变。重算状态仍需单独确认。");
+      setAmendDeclaration(null); onReload();
+    } catch (reason: unknown) { setAmendError(safeUiError(reason, "订阅修订保存失败")); }
+    finally { setAmendBusy(false); }
   };
   const openDeclaration = (group: BillingSettingsReport["groups"][number]) => {
     setDeclarationGroup(group); setDeclarationKind("official_api"); setDeclarationImpact(null); setDeclarationError(null); setDeclarationMessage(null);
@@ -360,9 +403,9 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
         </div>}
         {pendingCandidates.map((candidate) => <article className="settings-billing-row" key={candidate.candidate_id}><div><strong>{candidate.provider_id} · {minorToDecimal(candidate.amount_minor, candidate.currency)}/月 · {candidate.host}</strong><span>来自历史套餐记录 · 自 {candidate.billing_period_start} 起{candidate.impact ? ` · ${compactTokens(candidate.impact.total_tokens)} tokens · ${candidate.impact.session_count} 个会话` : ""}</span></div><div className="settings-billing-row-actions"><small>未确认不改变现有估算</small><button className="button button-secondary button-small" type="button" onClick={() => changeCandidate(candidate.candidate_id, "dismiss")} disabled={candidateBusy !== null}>{candidateBusy === candidate.candidate_id ? "保存中…" : "不是我的"}</button></div></article>)}
         {dismissedCandidates.length > 0 && <div className="settings-billing-list"><div className="settings-setting-label">已排除的候选</div>{dismissedCandidates.slice(0, 32).map((candidate) => <article className="settings-billing-row" key={candidate.candidate_id}><div><strong>{candidate.provider_id} · {candidate.host}</strong><span>已标记为不是我的；重新打开后才会回到待确认列表。</span></div><button className="button button-secondary button-small" type="button" onClick={() => changeCandidate(candidate.candidate_id, "reopen")} disabled={candidateBusy !== null}>{candidateBusy === candidate.candidate_id ? "保存中…" : "重新打开"}</button></article>)}</div>}
-        <p className="settings-billing-deferred" role="note">“不是我的/重新打开”只处置候选状态，不改变历史金额。声明保存需要先预览影响；失败/取消重算可在本页重新入队，撤销声明仍保留在旧工作台。</p>
+        <p className="settings-billing-deferred" role="note">“不是我的/重新打开”只处置候选状态，不改变历史金额。声明保存需要先预览影响；失败/取消重算可在本页重新入队，订阅修订和撤销也会保留历史并返回重算回执。</p>
       </div>}
-      {report.declarations_status !== "unavailable" && report.declarations.length > 0 && <div className="settings-billing-list"><div className="settings-setting-label">当前计费声明</div>{report.declarations.slice(0, 32).map((declaration) => <article className="settings-billing-row" key={declaration.declaration_id}><div><strong>{declaration.host} · {declaration.provider_id}</strong><span>{declaration.relationship_kind === "official_subscription" ? "官方订阅" : declaration.relationship_kind === "official_api" ? "官方 API 按量" : declaration.relationship_kind === "organization" ? "组织承担" : declaration.relationship_kind === "third_party" ? "中转或第三方" : "状态未知"} · {declaration.subscription_name ?? "未命名声明"}{declaration.amount_minor !== null && declaration.currency ? ` · ${minorToDecimal(declaration.amount_minor, declaration.currency)}` : ""}</span><small>{declaration.effective_start}{declaration.effective_end ? ` – ${declaration.effective_end}` : " · 持续有效"} · {declaration.scope_count} 个范围</small></div>{declaration.current_revision_id && <button className="button button-secondary button-small" type="button" onClick={() => revokeDeclaration(declaration)} disabled={revokeBusy !== null}>{revokeBusy === declaration.declaration_id ? "撤销中…" : revokeDeclarationId === declaration.declaration_id ? "再次确认撤销" : "撤销声明"}</button>}</article>)}</div>}
+      {report.declarations_status !== "unavailable" && report.declarations.length > 0 && <div className="settings-billing-list"><div className="settings-setting-label">当前计费声明</div>{report.declarations.slice(0, 32).map((declaration) => <article className="settings-billing-row" key={declaration.declaration_id}><div><strong>{declaration.host} · {declaration.provider_id}</strong><span>{declaration.relationship_kind === "official_subscription" ? "官方订阅" : declaration.relationship_kind === "official_api" ? "官方 API 按量" : declaration.relationship_kind === "organization" ? "组织承担" : declaration.relationship_kind === "third_party" ? "中转或第三方" : "状态未知"} · {declaration.subscription_name ?? "未命名声明"}{declaration.amount_minor !== null && declaration.currency ? ` · ${minorToDecimal(declaration.amount_minor, declaration.currency)}` : ""}</span><small>{declaration.effective_start}{declaration.effective_end ? ` – ${declaration.effective_end}` : " · 持续有效"} · {declaration.scope_count} 个范围</small></div><div className="settings-billing-row-actions">{declaration.relationship_kind === "official_subscription" && declaration.current_revision_id && <button className="button button-secondary button-small" type="button" onClick={() => openAmendment(declaration)} disabled={amendBusy || revokeBusy !== null}>修改订阅</button>}{declaration.current_revision_id && <button className="button button-secondary button-small" type="button" onClick={() => revokeDeclaration(declaration)} disabled={revokeBusy !== null || amendBusy}>{revokeBusy === declaration.declaration_id ? "撤销中…" : revokeDeclarationId === declaration.declaration_id ? "再次确认撤销" : "撤销声明"}</button>}</div>{amendDeclaration?.declaration_id === declaration.declaration_id && <div className="settings-billing-amendment" role="group" aria-labelledby={`billing-amendment-${declaration.declaration_id}`}><h4 id={`billing-amendment-${declaration.declaration_id}`}>修改订阅修订</h4><p>新价格自本月起生效，历史月份不变；结束日留空表示持续有效。</p><label><span>套餐名</span><input value={amendName} onChange={(event) => setAmendName(event.target.value)} disabled={amendBusy} /></label><div className="settings-billing-amendment-grid"><label><span>月费（可留空）</span><input inputMode="decimal" value={amendAmount} onChange={(event) => setAmendAmount(event.target.value)} placeholder="留空表示暂不清楚" disabled={amendBusy} /></label><label><span>币种</span><select value={amendCurrency} onChange={(event) => setAmendCurrency(event.target.value as "CNY" | "USD")} disabled={amendBusy || amendAmount.trim() === ""}><option value="CNY">CNY</option><option value="USD">USD</option></select></label><label><span>结束日（可选）</span><input type="date" value={amendEnd} onChange={(event) => setAmendEnd(event.target.value)} disabled={amendBusy} /></label></div><div className="settings-billing-declaration-actions"><button className="button button-primary" type="button" onClick={saveAmendment} disabled={amendBusy}>{amendBusy ? "保存中…" : "保存修订"}</button><button className="button button-secondary" type="button" onClick={() => setAmendDeclaration(null)} disabled={amendBusy}>取消</button></div><small>范围沿用当前声明的 {declaration.scope_count} 个范围，不会扩大到整个服务商。</small></div>}</article>)}</div>}
       {failedJobs.length > 0 && <div className="settings-billing-job-warning" role="alert"><div><strong>有重算任务需要处理</strong><span>任务失败或被取消；当前金额不会被静默替换，旧结果仍可读。</span></div><div className="settings-billing-job-list">{failedJobs.slice(0, 32).map((job) => <article className="settings-billing-job-row" key={job.job_id}><div><strong>{job.job_id}</strong><span>{job.status === "cancelled" ? "已取消" : "重算失败"}{job.error_code ? ` · ${job.error_code}` : ""} · 请求于 {observedAt(job.requested_at_ms)}</span></div><button className="button button-secondary button-small" type="button" onClick={() => retryJob(job.job_id)} disabled={retryJobId !== null}>{retryJobId === job.job_id ? "重新入队中…" : "重试重算"}</button></article>)}</div><small>重试只重新入队，不会删除任务记录；刷新后仍会显示可验证的任务状态。</small></div>}
       {report.bills_status !== "unavailable" && report.bills.length > 0 && <div className="settings-billing-list"><div className="settings-setting-label">已有账单</div>{report.bills.slice(0, 64).map((bill) => <div className="settings-billing-row" key={bill.bill_id}><div><strong>{bill.host} · {bill.provider_id}</strong><span>{minorToDecimal(bill.amount_minor, bill.currency)} · {bill.billing_basis === "fixed_subscription" ? "订阅" : bill.billing_basis === "host_billed" ? "宿主账单" : bill.billing_basis === "metered_actual" ? "按量实付" : "计价口径未知"}</span></div><small>{bill.billing_period} · {bill.has_evidence ? "有来源记录" : "来源未记录"}</small></div>)}</div>}
       {(report.groups_status === "unavailable" || report.candidates_status === "unavailable") && <p className="settings-billing-unavailable" role="alert">待确认计费状态暂不可读，不将不可用误判为空。</p>}
@@ -379,6 +422,8 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
     {retryMessage && <p className="settings-data-message" role="status" aria-live="polite">{retryMessage}</p>}
     {revokeError && <div className="error-banner" role="alert">{revokeError}</div>}
     {revokeMessage && <p className="settings-data-message" role="status" aria-live="polite">{revokeMessage}</p>}
+    {amendError && <div className="error-banner" role="alert">{amendError}</div>}
+    {amendMessage && <p className="settings-data-message" role="status" aria-live="polite">{amendMessage}</p>}
   </section>;
 }
 

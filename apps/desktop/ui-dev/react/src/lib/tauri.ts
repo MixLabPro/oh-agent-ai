@@ -229,7 +229,7 @@ export type BillingCandidate = {
   impact: { total_tokens: number; fact_count: number; session_count: number } | null;
 };
 export type BillingCandidateReceipt = { status: "dismissed" | "pending"; changed: boolean };
-export type BillingScope = { scope_kind: "model" | "provider"; scope_value: string };
+export type BillingScope = { scope_kind: "account" | "route" | "model" | "session" | "provider" | "settlement"; scope_value: string };
 export type BillingImpactBucket = { fact_count: number; session_count: number; tokens: number; unpriced_tokens: number; amounts: BillingAmount[] };
 export type BillingImpactPreview = {
   status: "ok" | "unavailable";
@@ -278,6 +278,8 @@ export type BillingDeclaration = {
   effective_start: string;
   effective_end: string | null;
   current_revision_id: string | null;
+  source_candidate_id: string | null;
+  scopes: BillingScope[];
   scope_count: number;
 };
 export type BillingJob = { job_id: string; status: "queued" | "running" | "failed" | "cancelled" | "succeeded" | "unknown"; error_code: string | null; requested_at_ms: number | null };
@@ -2505,7 +2507,7 @@ function parseBillingDeclarationRevokeReceipt(value: unknown): BillingDeclaratio
 }
 
 function validateBillingScopes(scopes: BillingScope[]): void {
-  if (scopes.length > 128 || scopes.some((scope) => !["model", "provider"].includes(scope.scope_kind) || !scope.scope_value || scope.scope_value.length > 256)) throw new Error("计费声明范围不安全");
+  if (scopes.length > 128 || scopes.some((scope) => !["account", "route", "model", "session", "provider", "settlement"].includes(scope.scope_kind) || !scope.scope_value || scope.scope_value.length > 256)) throw new Error("计费声明范围不安全");
 }
 
 function validateBillingCandidateReference(value: string | null | undefined): void {
@@ -2532,10 +2534,15 @@ function parseBillingGroup(value: unknown): BillingGroup {
 
 function parseBillingDeclaration(value: unknown): BillingDeclaration {
   const row = record(value, "billing declaration");
+  const scopes = requiredArray(row.scopes ?? [], "billing declaration scopes").slice(0, 128).map((item) => {
+    const scope = record(item, "billing declaration scope");
+    if (!["account", "route", "model", "session", "provider", "settlement"].includes(String(scope.scope_kind))) throw new Error("billing declaration scope kind 不受支持");
+    return { scope_kind: scope.scope_kind as BillingScope["scope_kind"], scope_value: decisionLabel(scope.scope_value, "billing declaration scope value") };
+  });
   return {
     declaration_id: decisionLabel(row.declaration_id, "billing declaration id"), host: safeHostLabel(row.host), provider_id: decisionLabel(row.provider_id, "billing declaration provider"), relationship_kind: decisionLabel(row.relationship_kind, "billing relationship"),
     subscription_name: row.subscription_name == null ? null : decisionLabel(row.subscription_name, "billing subscription name"), amount_minor: row.amount_minor == null ? null : boundedCount(row.amount_minor, "billing declaration amount", Number.MAX_SAFE_INTEGER), currency: row.currency == null ? null : billingCurrency(row.currency),
-    effective_start: safeDate(row.effective_start, "billing declaration start"), effective_end: row.effective_end == null ? null : safeDate(row.effective_end, "billing declaration end"), current_revision_id: row.current_revision_id == null ? null : decisionLabel(row.current_revision_id, "billing revision id"), scope_count: Array.isArray(row.scopes) ? Math.min(row.scopes.length, 128) : 0,
+    effective_start: safeDate(row.effective_start, "billing declaration start"), effective_end: row.effective_end == null ? null : safeDate(row.effective_end, "billing declaration end"), current_revision_id: row.current_revision_id == null ? null : decisionLabel(row.current_revision_id, "billing revision id"), source_candidate_id: row.source_candidate_id == null ? null : decisionLabel(row.source_candidate_id, "billing candidate id"), scopes, scope_count: scopes.length,
   };
 }
 
@@ -2636,6 +2643,25 @@ export async function saveBillingDeclaration(input: { revision_id: string; decla
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return { status: "saved", declaration_id: input.declaration_id, revision_id: input.revision_id, changed: true, job: null };
   return parseBillingDeclarationReceipt(await handler("save_billing_declaration_revision", { revisionId: input.revision_id, declarationId: input.declaration_id, supersedesRevisionId: null, host: input.host, providerId: input.provider_id, relationshipKind: input.relationship_kind, subscriptionName: null, amountMinor: null, currency: null, effectiveStart: input.effective_start, effectiveEnd: input.effective_end, sourceCandidateId: input.source_candidate_id ?? null, evidenceRef: input.evidence_ref, scopes: input.scopes }));
+}
+
+export async function amendBillingDeclaration(input: { declaration_id: string; supersedes_revision_id: string; host: string; provider_id: string; subscription_name: string | null; amount_minor: number | null; currency: string | null; effective_start: string; effective_end: string | null; source_candidate_id: string | null; scopes: BillingScope[] }): Promise<BillingDeclarationReceipt> {
+  if (![input.declaration_id, input.supersedes_revision_id].every((value) => /^[A-Za-z0-9_.:-]{1,128}$/.test(value))) throw new Error("计费声明修订引用不安全");
+  if (safeHostLabel(input.host) !== input.host || input.host === "generic") throw new Error("计费声明宿主不安全");
+  decisionLabel(input.provider_id, "计费声明服务商");
+  safeDate(input.effective_start, "计费声明起始日");
+  if (input.effective_end !== null) safeDate(input.effective_end, "计费声明结束日");
+  if (input.subscription_name !== null && (input.subscription_name.length > 256 || /[\u0000-\u001f\u007f]/u.test(input.subscription_name))) throw new Error("套餐名不安全");
+  if (input.amount_minor !== null && (!Number.isSafeInteger(input.amount_minor) || input.amount_minor < 0)) throw new Error("月费必须为非负整数分");
+  if ((input.amount_minor === null) !== (input.currency === null)) throw new Error("月费和币种必须同时填写或同时留空");
+  if (input.currency !== null) billingCurrency(input.currency);
+  validateBillingCandidateReference(input.source_candidate_id);
+  validateBillingScopes(input.scopes);
+  const handler = globalTauri()?.core?.invoke;
+  const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const payload = { revisionId: `rev-amend-${suffix}`, declarationId: input.declaration_id, supersedesRevisionId: input.supersedes_revision_id, host: input.host, providerId: input.provider_id, relationshipKind: "official_subscription", subscriptionName: input.subscription_name, amountMinor: input.amount_minor, currency: input.currency, effectiveStart: input.effective_start, effectiveEnd: input.effective_end, sourceCandidateId: input.source_candidate_id, evidenceRef: `amend:${input.supersedes_revision_id}`, scopes: input.scopes };
+  if (!handler) return { status: "saved", declaration_id: input.declaration_id, revision_id: payload.revisionId, changed: true, job: null };
+  return parseBillingDeclarationReceipt(await handler("save_billing_declaration_revision", payload));
 }
 
 export async function revokeBillingDeclaration(input: { declaration_id: string; supersedes_revision_id: string }): Promise<BillingDeclarationRevokeReceipt> {
