@@ -52,6 +52,7 @@ const findingsPage = fs.readFileSync(path.join(reactSource, "features/findings/F
 const decisionMatrix = fs.readFileSync(path.join(reactSource, "features/findings/DecisionMatrixSection.tsx"), "utf8");
 const sessionsPage = fs.readFileSync(path.join(reactSource, "features/sessions/SessionsPage.tsx"), "utf8");
 const sessionDetailPage = fs.readFileSync(path.join(reactSource, "features/sessions/SessionDetail.tsx"), "utf8");
+const appFile = fs.readFileSync(path.join(reactSource, "app/App.tsx"), "utf8");
 const usagePage = fs.readFileSync(path.join(reactSource, "features/usage/UsagePage.tsx"), "utf8");
 const skillsPage = fs.readFileSync(path.join(reactSource, "features/skills/SkillsPage.tsx"), "utf8");
 const testPage = fs.readFileSync(path.join(reactSource, "features/test/TestPage.tsx"), "utf8");
@@ -71,6 +72,7 @@ if (!source.includes("查看证据") || !source.includes("finding-evidence-detai
 if (!decisionMatrix.includes("hasStaleReport") || !decisionMatrix.includes("上一次对比结果") || !decisionMatrix.includes("窗口：${report.month}") || !decisionMatrix.includes("section-heading-side")) fail("React 决策矩阵刷新未标注旧窗口、旧结果或响应式状态");
 if (!source.includes('"trust-monitor-updated"') || !source.includes('"sync-status-updated"')) fail("React Findings/Trust 缺少事件失效刷新");
 if (!source.includes("safeUiError") || [findingsPage, trustPage, sessionsPage, sessionDetailPage].some((page) => /reason\.message/.test(page))) fail("React Findings/Trust/会话错误面未统一脱敏");
+if (!appFile.includes("safeUiError") || /reason\.message/.test(appFile)) fail("React 壳层错误面未统一脱敏");
 const unsafeErrorPattern = /(?:setError|setActionError|setExportError|setCustomError|setBudgetError|setBillingError|setDataError|setAboutError|setSourceError)\([^;\n]*reason\.message/u;
 if ([usagePage, settingsPage, skillsPage, testPage].some((page) => unsafeErrorPattern.test(page))) fail("React 用量/设置/Skill/测试错误面仍直接渲染底层异常");
 if (!skillsPage.includes("reportStale && scanning") || !skillsPage.includes("未形成新的可判定结果") || !skillsPage.includes("reportMatchesHost") || !source.includes("skill scan host_selection 不匹配") || !skillsPage.includes("保留上一次结果") || skillsPage.includes("setReport(null)")) fail("React Skill 扫描未保留旧报告、隔离宿主或把不可用误判为空结果");

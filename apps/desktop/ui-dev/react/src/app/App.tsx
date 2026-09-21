@@ -1,5 +1,5 @@
 import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
-import { listen, readOverviewDetails, readOverviewSnapshot, readSourceDataRevision, type OverviewDetails, type OverviewSnapshot } from "../lib/tauri";
+import { listen, readOverviewDetails, readOverviewSnapshot, readSourceDataRevision, safeUiError, type OverviewDetails, type OverviewSnapshot } from "../lib/tauri";
 import { FindingsPage } from "../features/findings/FindingsPage";
 import { TrustPage } from "../features/trust/TrustPage";
 import { UsagePage } from "../features/usage/UsagePage";
@@ -82,10 +82,10 @@ export function App() {
       setError(null);
       void readOverviewSnapshot()
         .then((value) => { if (active && requestId === refreshSeq.current) setOverview(value); })
-        .catch((reason: unknown) => { if (active && requestId === refreshSeq.current) setError(reason instanceof Error ? reason.message : "本地数据暂不可用"); });
+        .catch((reason: unknown) => { if (active && requestId === refreshSeq.current) setError(safeUiError(reason, "本地数据暂不可用")); });
       void readOverviewDetails()
         .then((value) => { if (active && requestId === refreshSeq.current) setOverviewDetails(value); })
-        .catch((reason: unknown) => { if (active && requestId === refreshSeq.current) setError(reason instanceof Error ? reason.message : "总览明细暂不可用"); });
+        .catch((reason: unknown) => { if (active && requestId === refreshSeq.current) setError(safeUiError(reason, "总览明细暂不可用")); });
     };
     void refresh();
     let cleanups: Array<() => void> = [];
