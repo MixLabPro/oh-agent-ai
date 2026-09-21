@@ -431,6 +431,16 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .skills-toolbar { display: flex; align-items: end; flex-wrap: wrap; gap: 9px; }
 .skills-toolbar label { display: grid; gap: 5px; color: var(--text-muted); font-size: 11px; }
 .skills-toolbar select { min-width: 150px; min-height: 36px; padding: 7px 9px; border: 1px solid #d5deea; border-radius: 7px; color: #32445d; background: #fff; font: inherit; }
+.skills-settings-panel { display: grid; gap: 10px; margin-bottom: 14px; }
+.skills-settings-panel summary { cursor: pointer; color: #26384e; font-size: 13px; font-weight: 700; }
+.skills-settings-panel summary:focus-visible { outline: 2px solid #58b898; outline-offset: 3px; border-radius: 4px; }
+.skills-settings-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(180px, .65fr); gap: 12px; align-items: end; }
+.skills-settings-grid label { display: grid; gap: 5px; color: var(--text-muted); font-size: 11px; }
+.skills-settings-grid input { width: 100%; min-height: 36px; padding: 7px 9px; border: 1px solid #d5deea; border-radius: 7px; color: #32445d; background: #fff; font: inherit; }
+.skills-settings-grid input:focus-visible { border-color: #58b898; outline: 2px solid #cfe9e1; outline-offset: 1px; }
+.skills-settings-actions { display: flex; grid-column: 1 / -1; align-items: center; flex-wrap: wrap; gap: 10px; }
+.skills-settings-actions > span { color: #087f62; font-size: 11px; line-height: 1.5; }
+.skills-settings-actions .skills-settings-error { color: #9d3f3f; }
 .skills-state { display: grid; gap: 7px; margin-bottom: 14px; padding: 28px 20px; border: 1px dashed #dbe4ec; border-radius: 12px; color: var(--text-subtle); background: #fff; }
 .skills-state strong { color: #26384e; font-size: 14px; }
 .skills-state p, .skills-message { font-size: 11px; line-height: 1.5; }
@@ -564,6 +574,9 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
   .skills-page-header { flex-direction: column; }
   .skills-toolbar { align-items: stretch; width: 100%; flex-direction: column; }
   .skills-toolbar select, .skills-toolbar .button { width: 100%; }
+  .skills-settings-grid { grid-template-columns: 1fr; }
+  .skills-settings-actions { align-items: stretch; flex-direction: column; }
+  .skills-settings-actions .button { width: 100%; }
   .skills-host-grid { grid-template-columns: 1fr; }
   .settings-budget-legacy, .settings-budget-summary, .settings-budget-confirmed, .settings-budget-actions { align-items: flex-start; flex-direction: column; }
   .settings-billing-todo, .settings-billing-row { align-items: stretch; flex-direction: column; }

@@ -177,6 +177,8 @@ export type SkillDiffReport = {
   loaded_then_now: [number, number] | null;
 };
 export type SkillSnapshotSaveReceipt = { status: "saved"; upload_performed: false };
+export type SkillScanSettings = { self_root: string; budget: number | null };
+export type SkillExportReceipt = { status: "saved" | "cancelled"; upload_performed: false };
 
 export type SourceConnectionState = "connected" | "needs_attention" | "paused" | "excluded" | "not_detected" | "unknown";
 export type SourceErrorKind = "permission_denied" | "file_missing" | "all_files_failed" | "db_error" | "migration_failed" | "read_failed";
@@ -2359,6 +2361,72 @@ export async function readSkillsDiff(): Promise<SkillDiffReport> {
     if (code === "diff_unavailable") throw new Error("没有可比较的本机 Skill 快照；请先存为快照。");
     if (code === "output_too_large") throw new Error("Skill 对比结果过大，已停止显示；请缩小扫描范围后重试。");
     throw new Error("Skill 对比结果暂不可用；未将原始输出展示到页面。");
+  }
+}
+
+function safeSkillSettingPath(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length > 2048 || /[\u0000-\u001f\u007f]/u.test(value)) throw new Error(`${label} 不安全`);
+  return value.trim();
+}
+
+function parseSkillScanSettings(value: unknown): SkillScanSettings {
+  const root = record(value, "skills scan settings");
+  const self_root = safeSkillSettingPath(root.self_root ?? "", "skill self root");
+  const rawBudget = root.budget;
+  const budget = rawBudget == null ? null : typeof rawBudget === "number" ? rawBudget : NaN;
+  if (budget !== null && (!Number.isSafeInteger(budget) || budget <= 0 || budget > 10_000_000)) throw new Error("Skill 描述预算不安全");
+  return { self_root, budget: budget as number | null };
+}
+
+function parseSkillExportReceipt(value: unknown): SkillExportReceipt {
+  const root = record(value, "skills export receipt");
+  const status = boundedEnum(root.status, "skills export status", ["saved", "cancelled"], "cancelled") as SkillExportReceipt["status"];
+  if (status === "saved" && root.upload_performed !== false) throw new Error("Skill 导出上传状态不安全");
+  if (status === "cancelled" && root.upload_performed !== false) throw new Error("Skill 导出取消状态不安全");
+  return { status, upload_performed: false };
+}
+
+export async function readSkillsScanSettings(): Promise<SkillScanSettings> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { self_root: "", budget: null };
+  try { return parseSkillScanSettings(await handler("skills_scan_settings")); }
+  catch { throw new Error("Skill 扫描设置暂不可用"); }
+}
+
+export async function saveSkillsScanSettings(selfRoot: string, budget: number | null): Promise<{ status: "saved" }> {
+  const safeRoot = safeSkillSettingPath(selfRoot, "skill self root");
+  if (budget !== null && (!Number.isSafeInteger(budget) || budget <= 0 || budget > 10_000_000)) throw new Error("描述预算必须是 1-10000000 之间的整数");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved" };
+  try {
+    const root = record(await handler("save_skills_scan_settings", { selfRoot: safeRoot, budget }), "skills scan settings receipt");
+    if (root.status !== "saved") throw new Error("Skill 扫描设置保存未确认");
+    return { status: "saved" };
+  } catch (reason: unknown) {
+    const row = reason && typeof reason === "object" ? reason as Record<string, unknown> : {};
+    const detail = row.error && typeof row.error === "object" ? row.error as Record<string, unknown> : row;
+    if (detail.code === "invalid_budget") throw new Error("描述预算必须是正整数");
+    throw new Error("Skill 扫描设置保存失败；请确认本机配置目录可写");
+  }
+}
+
+export async function exportSkillsRedacted(selfRoot: string | null): Promise<SkillExportReceipt> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved", upload_performed: false };
+  try {
+    const picked = record(await handler("skills_export_pick_path"), "skills export path");
+    if (picked.status === "cancelled") return { status: "cancelled", upload_performed: false };
+    if (picked.status !== "picked") throw new Error("Skill 导出路径未确认");
+    const path = safeSkillSettingPath(picked.path, "skills export path");
+    if (!path) throw new Error("Skill 导出路径为空");
+    const root = parseSkillExportReceipt(await handler("skills_export_redacted", { path, selfRoot: selfRoot ? safeSkillSettingPath(selfRoot, "skill self root") : null }));
+    return root;
+  } catch (reason: unknown) {
+    const row = reason && typeof reason === "object" ? reason as Record<string, unknown> : {};
+    const detail = row.error && typeof row.error === "object" ? row.error as Record<string, unknown> : row;
+    if (detail.code === "no_binary") throw new Error("未找到可用的 agent-vitals CLI；请先修复安装或版本。");
+    if (detail.code === "invalid_path") throw new Error("导出路径不可用");
+    throw new Error("Skill 脱敏导出失败；未将原始输出展示到页面");
   }
 }
 
