@@ -250,6 +250,7 @@ export type BillingDeclarationReceipt = {
   changed: boolean;
   job: { job_id: string; status: "queued" | "enqueue_failed"; changed: boolean } | null;
 };
+export type BillingDeclarationRevokeReceipt = { status: "revoked"; declaration_id: string; revision_id: string; changed: boolean };
 export type BillingGroup = {
   group_id: string;
   host: string;
@@ -2497,6 +2498,12 @@ function parseBillingDeclarationReceipt(value: unknown): BillingDeclarationRecei
   return { status: "saved", declaration_id: decisionLabel(root.declaration_id, "billing declaration id"), revision_id: decisionLabel(root.revision_id, "billing revision id"), changed: root.changed === true, job };
 }
 
+function parseBillingDeclarationRevokeReceipt(value: unknown): BillingDeclarationRevokeReceipt {
+  const root = record(value, "billing declaration revoke receipt");
+  if (root.status !== "revoked") throw new Error("计费声明撤销未确认");
+  return { status: "revoked", declaration_id: decisionLabel(root.declaration_id, "billing declaration id"), revision_id: decisionLabel(root.revision_id, "billing revision id"), changed: root.changed === true };
+}
+
 function validateBillingScopes(scopes: BillingScope[]): void {
   if (scopes.length > 128 || scopes.some((scope) => !["model", "provider"].includes(scope.scope_kind) || !scope.scope_value || scope.scope_value.length > 256)) throw new Error("计费声明范围不安全");
 }
@@ -2629,6 +2636,14 @@ export async function saveBillingDeclaration(input: { revision_id: string; decla
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return { status: "saved", declaration_id: input.declaration_id, revision_id: input.revision_id, changed: true, job: null };
   return parseBillingDeclarationReceipt(await handler("save_billing_declaration_revision", { revisionId: input.revision_id, declarationId: input.declaration_id, supersedesRevisionId: null, host: input.host, providerId: input.provider_id, relationshipKind: input.relationship_kind, subscriptionName: null, amountMinor: null, currency: null, effectiveStart: input.effective_start, effectiveEnd: input.effective_end, sourceCandidateId: input.source_candidate_id ?? null, evidenceRef: input.evidence_ref, scopes: input.scopes }));
+}
+
+export async function revokeBillingDeclaration(input: { declaration_id: string; supersedes_revision_id: string }): Promise<BillingDeclarationRevokeReceipt> {
+  if (![input.declaration_id, input.supersedes_revision_id].every((value) => /^[A-Za-z0-9_.:-]{1,128}$/.test(value))) throw new Error("计费声明修订引用不安全");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "revoked", declaration_id: input.declaration_id, revision_id: `revoked-${input.supersedes_revision_id}`, changed: true };
+  const revisionId = `rev-revoke-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return parseBillingDeclarationRevokeReceipt(await handler("revoke_billing_declaration", { revisionId, declarationId: input.declaration_id, supersedesRevisionId: input.supersedes_revision_id }));
 }
 
 function validateCustomSourceInput(host: string, root: string): void {

@@ -284,6 +284,7 @@
   // （同一谓词在 SQL 里的镜像；见 billing_preview.rs 的 R3 测试）。
   const billingCoveredGroups = new Map();
   const billingDeclarations = [];
+  const billingDeclarationHistory = [];
   // 合成失败任务：用于浏览器视觉回归验证“失败任务有证据、可重试、旧结果仍可读”。
   // 真实 Tauri 路径始终以 authority 的 billing_recalculation_jobs 为准。
   const billingJobs = new Map([["browser-failed-recalc", {
@@ -563,11 +564,12 @@
       // Shape: apps/desktop/src-tauri/src/lib.rs:2451 revoke_billing_declaration (json!).
       case "revoke_billing_declaration": {
         const index = billingDeclarations.findIndex((item) => item.declaration_id === (args && args.declarationId));
-        if (index >= 0) billingDeclarations.splice(index, 1);
+        const current = index >= 0 ? billingDeclarations.splice(index, 1)[0] : null;
+        billingDeclarationHistory.push({ ...(current || {}), declaration_id: args && args.declarationId, revision_id: args && args.revisionId, current_revision_id: null, status: "revoked" });
         for (const [groupId, declarationId] of [...billingCoveredGroups.entries()]) {
           if (declarationId === (args && args.declarationId)) billingCoveredGroups.delete(groupId);
         }
-        return { status: "revoked", declaration_id: args && args.declarationId, revision_id: args && args.revisionId };
+        return { status: "revoked", declaration_id: args && args.declarationId, revision_id: args && args.revisionId, changed: index >= 0 };
       }
       case "host_bills_for_period": return emptyReport("bills");
       // Shape: apps/desktop/src-tauri/src/lib.rs:2632 data_source_status (json!).
