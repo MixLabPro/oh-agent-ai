@@ -107,6 +107,7 @@ export function UsagePage() {
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [hourlyError, setHourlyError] = useState<string | null>(null);
   const monthRequest = useRef(0);
+  const mounted = useRef(false);
   const loadedCalendarMonth = useRef<string | null>(null);
   const [hourlyReloadKey, setHourlyReloadKey] = useState(0);
 
@@ -125,7 +126,7 @@ export function UsagePage() {
       setHourlyError(null);
     }
     void Promise.allSettled([readUsageCalendar(requestedMonth), readUsageSourceSummary(requestedMonth)]).then(([calendarResult, sourceResult]) => {
-      if (requestId !== monthRequest.current) return;
+      if (!mounted.current || requestId !== monthRequest.current) return;
       if (calendarResult.status === "fulfilled") {
         setCalendar(calendarResult.value);
         loadedCalendarMonth.current = calendarResult.value.month;
@@ -145,12 +146,20 @@ export function UsagePage() {
       }
       setLoading(false);
     });
-    return () => { if (requestId === monthRequest.current) monthRequest.current += 1; };
   };
 
   useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      monthRequest.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!timezoneReady) return undefined;
-    return loadMonth(month);
+    loadMonth(month);
+    return () => { monthRequest.current += 1; };
   }, [month, timezoneReady]);
 
   useEffect(() => {
