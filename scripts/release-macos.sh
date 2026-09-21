@@ -36,7 +36,7 @@ esac
 [ -n "${APPLE_SIGNING_IDENTITY:-}" ] \
   || die "APPLE_SIGNING_IDENTITY is required (for example: Developer ID Application: Example, Inc. (TEAMID))"
 
-for command in cargo codesign ditto file hdiutil node plutil security shasum xcrun; do
+for command in cargo codesign ditto file hdiutil node npm plutil security shasum xcrun; do
   require_command "$command"
 done
 
@@ -56,6 +56,12 @@ elif [ -n "${APPLE_ID:-}" ] || [ -n "${APPLE_PASSWORD:-}" ] || [ -n "${APPLE_TEA
 else
   echo "release-macos: no notarization credentials supplied; producing a signed-only build"
 fi
+
+echo "release-macos: verifying React shadow bundle"
+(cd "$repo_root/apps/desktop/ui-dev" && npm ci && npm run verify:react)
+
+echo "release-macos: compiling React Tauri shadow candidate (no bundle)"
+(cd "$desktop_dir" && cargo tauri build --config tauri.react.conf.json --no-bundle --debug)
 
 echo "release-macos: building release CLI"
 (cd "$repo_root" && cargo build --release -p agent-vitals)

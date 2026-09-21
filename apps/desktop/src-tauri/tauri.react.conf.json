@@ -1,7 +1,27 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "build": {
+    "frontendDist": "ui-react-dist",
     "beforeDevCommand": "npm --prefix ui-dev run dev:react",
     "devUrl": "http://127.0.0.1:5174/"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "workbench",
+        "title": "agent-vitals 工作台",
+        "url": "index.html",
+        "width": 760,
+        "height": 560,
+        "minWidth": 640,
+        "minHeight": 480,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "center": true,
+        "visible": false,
+        "skipTaskbar": false
+      }
+    ]
   }
 }

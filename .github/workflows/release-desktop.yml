@@ -37,7 +37,18 @@ jobs:
         with:
           ref: ${{ inputs.release_tag || github.ref }}
 
+      - name: Set up Node 20 for React shadow bundle
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/desktop/ui-dev/package-lock.json
+
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify React shadow bundle
+        working-directory: apps/desktop/ui-dev
+        run: npm ci && npm run verify:react
 
       - name: Validate release tag
         shell: bash
@@ -72,6 +83,10 @@ jobs:
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version 2.11.4 --locked
+
+      - name: Compile React Tauri shadow candidate
+        working-directory: apps/desktop/src-tauri
+        run: cargo tauri build --config tauri.react.conf.json --no-bundle --debug
 
       - name: Build signed app and DMG
         working-directory: apps/desktop/src-tauri

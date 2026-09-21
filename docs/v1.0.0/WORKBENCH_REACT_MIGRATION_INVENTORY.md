@@ -39,6 +39,7 @@
 
 - [x] Phase 0 页面、command、事件和目标归属已列出。
 - [x] Phase 1 React shell、hash route、bridge、Error Boundary、离线 mock 已建立。
+- [x] Phase 1 shadow bundle 已输出到 `src-tauri/ui-react-dist`，候选 Tauri 配置和相对资源预检已接入本地/发布构建链；生产入口仍保持旧页面。
 - [x] Phase 2 Trust/Findings 的证据详情完成（监控控制、一次性快照、事件失效刷新和可展开的安全证据明细已完成；旧页数值对照与真实 `.app` 验收仍属于发布门槛）。
 - [x] Phase 2 可信度硬化完成：刷新失败保留旧矩阵/路线质量报告并显示原始窗口；来源停止/恢复读取只对后端声明可控的宿主开放，失败时 fail-closed。
 - [ ] Phase 3 其余四个 tab 完成并通过旧页对照。

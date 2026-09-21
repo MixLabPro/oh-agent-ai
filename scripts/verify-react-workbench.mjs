@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ui = path.join(repo, "apps/desktop/ui-dev");
 const reactSource = path.join(ui, "react/src");
-const dist = path.join(ui, "dist-react");
+const dist = path.join(repo, "apps/desktop/src-tauri/ui-react-dist");
 
 function fail(message) {
   console.error(`FAIL ${message}`);
