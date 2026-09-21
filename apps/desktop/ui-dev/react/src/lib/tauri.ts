@@ -280,6 +280,7 @@ export type BillingDeclaration = {
   scope_count: number;
 };
 export type BillingJob = { job_id: string; status: "queued" | "running" | "failed" | "cancelled" | "succeeded" | "unknown"; error_code: string | null; requested_at_ms: number | null };
+export type BillingJobRetryReceipt = { status: "queued"; job_id: string; changed: boolean };
 export type HostBill = { bill_id: string; host: string; provider_id: string; billing_period: string; billing_basis: string; amount_minor: number; currency: string; has_evidence: boolean };
 export type BillingPanelStatus = "ok" | "partial" | "unavailable";
 export type BillingSettingsReport = { status: "ok" | "unavailable"; month: string; candidates_status: BillingPanelStatus; groups_status: BillingPanelStatus; declarations_status: BillingPanelStatus; jobs_status: BillingPanelStatus; bills_status: BillingPanelStatus; candidates: BillingCandidate[]; groups: BillingGroup[]; declarations: BillingDeclaration[]; jobs: BillingJob[]; bills: HostBill[] };
@@ -2539,6 +2540,12 @@ function parseBillingJob(value: unknown): BillingJob {
   return { job_id: decisionLabel(row.job_id, "billing job id"), status, error_code: row.error_code == null ? null : "重算失败，请重试", requested_at_ms: nullableTimestampMs(row.requested_at_ms, "billing job requested") };
 }
 
+function parseBillingJobRetryReceipt(value: unknown): BillingJobRetryReceipt {
+  const root = record(value, "billing job retry receipt");
+  if (root.status !== "queued") throw new Error("重算重试未入队");
+  return { status: "queued", job_id: decisionLabel(root.job_id, "billing job id"), changed: root.changed === true };
+}
+
 function parseHostBill(value: unknown, billingPeriod: string): HostBill {
   const row = record(value, "host bill");
   return { bill_id: decisionLabel(row.bill_id, "bill id"), host: safeHostLabel(row.host), provider_id: decisionLabel(row.provider_id, "bill provider"), billing_period: row.billing_period == null ? billingPeriod : safeMonth(row.billing_period, "bill period"), billing_basis: billingBasis(row.billing_basis ?? "unknown"), amount_minor: boundedCount(row.amount_minor, "bill amount", Number.MAX_SAFE_INTEGER), currency: billingCurrency(row.currency), has_evidence: typeof row.evidence_ref === "string" && row.evidence_ref.length > 0 };
@@ -2590,6 +2597,13 @@ export async function resolveBillingImportCandidate(candidateId: string, decisio
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return { status: decision === "dismiss" ? "dismissed" : "pending", changed: true };
   return parseBillingCandidateReceipt(await handler("resolve_billing_import_candidate", { candidateId, decision }));
+}
+
+export async function retryBillingRecalculation(jobId: string): Promise<BillingJobRetryReceipt> {
+  if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(jobId)) throw new Error("重算任务引用不安全");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "queued", job_id: jobId, changed: true };
+  return parseBillingJobRetryReceipt(await handler("retry_billing_recalculation", { jobId }));
 }
 
 export async function previewBillingDeclaration(input: { host: string; provider_id: string; relationship_kind: "official_api" | "third_party" | "organization"; effective_start: string; effective_end: string | null; scopes: BillingScope[] }): Promise<BillingImpactPreview> {

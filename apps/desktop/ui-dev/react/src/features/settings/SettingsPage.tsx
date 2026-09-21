@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { addCustomSourceRoot, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, listen, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, resolveBillingImportCandidate, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
+import { addCustomSourceRoot, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, listen, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, resolveBillingImportCandidate, retryBillingRecalculation, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -268,6 +268,9 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
   const [declarationBusy, setDeclarationBusy] = useState<"preview" | "save" | null>(null);
   const [declarationError, setDeclarationError] = useState<string | null>(null);
   const [declarationMessage, setDeclarationMessage] = useState<string | null>(null);
+  const [retryJobId, setRetryJobId] = useState<string | null>(null);
+  const [retryError, setRetryError] = useState<string | null>(null);
+  const [retryMessage, setRetryMessage] = useState<string | null>(null);
   const pendingGroups = report?.groups ?? [];
   const pendingCandidates = (report?.candidates ?? []).filter((candidate) => candidate.status === "pending");
   const dismissedCandidates = (report?.candidates ?? []).filter((candidate) => candidate.status === "dismissed");
@@ -284,6 +287,17 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
     } catch (reason: unknown) {
       setCandidateError(safeUiError(reason, "计费候选处置失败"));
     } finally { setCandidateBusy(null); }
+  };
+  const retryJob = async (jobId: string) => {
+    if (retryJobId) return;
+    setRetryJobId(jobId); setRetryError(null); setRetryMessage(null);
+    try {
+      const receipt = await retryBillingRecalculation(jobId);
+      setRetryMessage(receipt.changed ? `重算任务已重新入队（${receipt.job_id}）；完成前旧结果仍可读。` : `重算任务未发生变化（${receipt.job_id}）；旧结果仍可读。`);
+      onReload();
+    } catch (reason: unknown) {
+      setRetryError(safeUiError(reason, "重算重试失败"));
+    } finally { setRetryJobId(null); }
   };
   const openDeclaration = (group: BillingSettingsReport["groups"][number]) => {
     setDeclarationGroup(group); setDeclarationKind("official_api"); setDeclarationImpact(null); setDeclarationError(null); setDeclarationMessage(null);
@@ -331,10 +345,10 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
         </div>}
         {pendingCandidates.map((candidate) => <article className="settings-billing-row" key={candidate.candidate_id}><div><strong>{candidate.provider_id} · {minorToDecimal(candidate.amount_minor, candidate.currency)}/月 · {candidate.host}</strong><span>来自历史套餐记录 · 自 {candidate.billing_period_start} 起{candidate.impact ? ` · ${compactTokens(candidate.impact.total_tokens)} tokens · ${candidate.impact.session_count} 个会话` : ""}</span></div><div className="settings-billing-row-actions"><small>未确认不改变现有估算</small><button className="button button-secondary button-small" type="button" onClick={() => changeCandidate(candidate.candidate_id, "dismiss")} disabled={candidateBusy !== null}>{candidateBusy === candidate.candidate_id ? "保存中…" : "不是我的"}</button></div></article>)}
         {dismissedCandidates.length > 0 && <div className="settings-billing-list"><div className="settings-setting-label">已排除的候选</div>{dismissedCandidates.slice(0, 32).map((candidate) => <article className="settings-billing-row" key={candidate.candidate_id}><div><strong>{candidate.provider_id} · {candidate.host}</strong><span>已标记为不是我的；重新打开后才会回到待确认列表。</span></div><button className="button button-secondary button-small" type="button" onClick={() => changeCandidate(candidate.candidate_id, "reopen")} disabled={candidateBusy !== null}>{candidateBusy === candidate.candidate_id ? "保存中…" : "重新打开"}</button></article>)}</div>}
-        <p className="settings-billing-deferred" role="note">“不是我的/重新打开”只处置候选状态，不改变历史金额。声明、撤销和重算仍需单独确认，当前仍保留在旧工作台。</p>
+        <p className="settings-billing-deferred" role="note">“不是我的/重新打开”只处置候选状态，不改变历史金额。声明保存需要先预览影响；失败/取消重算可在本页重新入队，撤销声明仍保留在旧工作台。</p>
       </div>}
       {report.declarations_status !== "unavailable" && report.declarations.length > 0 && <div className="settings-billing-list"><div className="settings-setting-label">当前计费声明</div>{report.declarations.slice(0, 32).map((declaration) => <div className="settings-billing-row" key={declaration.declaration_id}><div><strong>{declaration.host} · {declaration.provider_id}</strong><span>{declaration.relationship_kind === "official_subscription" ? "官方订阅" : declaration.relationship_kind === "official_api" ? "官方 API 按量" : declaration.relationship_kind === "organization" ? "组织承担" : declaration.relationship_kind === "third_party" ? "中转或第三方" : "状态未知"} · {declaration.subscription_name ?? "未命名声明"}{declaration.amount_minor !== null && declaration.currency ? ` · ${minorToDecimal(declaration.amount_minor, declaration.currency)}` : ""}</span></div><small>{declaration.effective_start}{declaration.effective_end ? ` – ${declaration.effective_end}` : " · 持续有效"} · {declaration.scope_count} 个范围</small></div>)}</div>}
-      {failedJobs.length > 0 && <div className="settings-billing-job-warning" role="alert"><strong>有重算任务需要处理</strong><span>旧结果仍可读，失败任务需要在旧工作台重试。</span></div>}
+      {failedJobs.length > 0 && <div className="settings-billing-job-warning" role="alert"><div><strong>有重算任务需要处理</strong><span>任务失败或被取消；当前金额不会被静默替换，旧结果仍可读。</span></div><div className="settings-billing-job-list">{failedJobs.slice(0, 32).map((job) => <article className="settings-billing-job-row" key={job.job_id}><div><strong>{job.job_id}</strong><span>{job.status === "cancelled" ? "已取消" : "重算失败"}{job.error_code ? ` · ${job.error_code}` : ""} · 请求于 {observedAt(job.requested_at_ms)}</span></div><button className="button button-secondary button-small" type="button" onClick={() => retryJob(job.job_id)} disabled={retryJobId !== null}>{retryJobId === job.job_id ? "重新入队中…" : "重试重算"}</button></article>)}</div><small>重试只重新入队，不会删除任务记录；刷新后仍会显示可验证的任务状态。</small></div>}
       {report.bills_status !== "unavailable" && report.bills.length > 0 && <div className="settings-billing-list"><div className="settings-setting-label">已有账单</div>{report.bills.slice(0, 64).map((bill) => <div className="settings-billing-row" key={bill.bill_id}><div><strong>{bill.host} · {bill.provider_id}</strong><span>{minorToDecimal(bill.amount_minor, bill.currency)} · {bill.billing_basis === "fixed_subscription" ? "订阅" : bill.billing_basis === "host_billed" ? "宿主账单" : bill.billing_basis === "metered_actual" ? "按量实付" : "计价口径未知"}</span></div><small>{bill.billing_period} · {bill.has_evidence ? "有来源记录" : "来源未记录"}</small></div>)}</div>}
       {(report.groups_status === "unavailable" || report.candidates_status === "unavailable") && <p className="settings-billing-unavailable" role="alert">待确认计费状态暂不可读，不将不可用误判为空。</p>}
       {report.declarations_status === "unavailable" && <p className="settings-billing-unavailable" role="alert">当前计费声明暂不可读。</p>}
@@ -346,6 +360,8 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
     {candidateMessage && <p className="settings-data-message" role="status" aria-live="polite">{candidateMessage}</p>}
     {declarationError && <div className="error-banner" role="alert">{declarationError}</div>}
     {declarationMessage && <p className="settings-data-message" role="status" aria-live="polite">{declarationMessage}</p>}
+    {retryError && <div className="error-banner" role="alert">{retryError}</div>}
+    {retryMessage && <p className="settings-data-message" role="status" aria-live="polite">{retryMessage}</p>}
   </section>;
 }
 

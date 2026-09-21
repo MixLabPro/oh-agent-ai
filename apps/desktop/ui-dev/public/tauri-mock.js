@@ -284,7 +284,11 @@
   // （同一谓词在 SQL 里的镜像；见 billing_preview.rs 的 R3 测试）。
   const billingCoveredGroups = new Map();
   const billingDeclarations = [];
-  const billingJobs = new Map();
+  // 合成失败任务：用于浏览器视觉回归验证“失败任务有证据、可重试、旧结果仍可读”。
+  // 真实 Tauri 路径始终以 authority 的 billing_recalculation_jobs 为准。
+  const billingJobs = new Map([["browser-failed-recalc", {
+    status: "failed", job_id: "browser-failed-recalc", error_code: "重算失败，请重试", requested_at_ms: Date.now() - 3_600_000,
+  }]]);
   let pricingNetworkEnabled = true;
   // Claude Pro 额度窗口提醒的开关；**默认关**（与 runtime 的 quota_reminder 同语义）。
   let quotaReminderEnabled = false;
@@ -435,7 +439,7 @@
           clusters: [...clusters.values()].sort((a, b) => rank(a) - rank(b) || b.tokens - a.tokens) };
       }
       // Shape: apps/desktop/src-tauri/src/lib.rs:2688 billing_recalculation_jobs (json!).
-      case "billing_recalculation_jobs": return { status: "ok", jobs: [] };
+      case "billing_recalculation_jobs": return { status: "ok", jobs: [...billingJobs.values()] };
       // Shape: apps/desktop/src-tauri/src/lib.rs:2423 billing_declarations (json!).
       case "billing_declarations": return { status: "ok", declarations: billingDeclarations };
       // Shape: apps/desktop/src-tauri/src/lib.rs:1558 resolve_billing_import_candidate (json!).

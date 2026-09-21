@@ -380,8 +380,15 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .settings-billing-preview small { color: #8e5d0e; }
 .settings-setting-label { color: #26384e; font-size: 12px; font-weight: 650; }
 .settings-billing-deferred, .settings-billing-empty, .settings-billing-unavailable { margin: 9px 0; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
-.settings-billing-job-warning { display: grid; gap: 5px; margin: 12px 0; padding: 11px 12px; border: 1px solid #f0cfcf; border-radius: 9px; color: #9d3f3f; background: #fff7f7; font-size: 11px; }
+.settings-billing-job-warning { display: grid; gap: 9px; margin: 12px 0; padding: 11px 12px; border: 1px solid #f0cfcf; border-radius: 9px; color: #9d3f3f; background: #fff7f7; font-size: 11px; }
+.settings-billing-job-warning > div:first-child { display: grid; gap: 5px; }
 .settings-billing-job-warning strong { color: #8f3232; }
+.settings-billing-job-list { display: grid; gap: 6px; }
+.settings-billing-job-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 9px; border: 1px solid #f2dada; border-radius: 7px; background: #fff; }
+.settings-billing-job-row > div { display: grid; gap: 3px; min-width: 0; }
+.settings-billing-job-row strong { overflow-wrap: anywhere; font-size: 11px; }
+.settings-billing-job-row span { color: #9d3f3f; font-size: 10px; line-height: 1.4; }
+.settings-billing-job-warning > small { color: #8e5d0e; line-height: 1.45; }
 .settings-data-section { padding: 22px 0; border-bottom: 1px solid #e1e8f0; }
 .settings-data-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
 .settings-data-card { display: grid; gap: 11px; min-width: 0; padding: 15px; border: 1px solid #e1e8f0; border-radius: 10px; background: #fff; }
