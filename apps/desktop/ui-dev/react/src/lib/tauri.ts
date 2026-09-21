@@ -1038,7 +1038,7 @@ function safeSkillText(value: unknown, label: string): string | null {
   return text;
 }
 
-function parseSkillScan(value: unknown): SkillScanReport {
+function parseSkillScan(value: unknown, expectedHost?: string): SkillScanReport {
   const root = record(value, "skill scan");
   const report = root.report == null ? null : record(root.report, "skill scan report");
   const meta = root.desktop_meta == null ? {} : record(root.desktop_meta, "skill scan metadata");
@@ -1062,6 +1062,7 @@ function parseSkillScan(value: unknown): SkillScanReport {
   });
   const notAssessed = requiredArray(root.not_assessed ?? [], "skill not assessed").slice(0, 128).map((raw) => { const row = record(raw, "skill not assessed row"); return { code: safeSkillText(row.code, "skill not assessed code") ?? "unknown", name: safeSkillText(row.name, "skill not assessed name") ?? "未评估规则", reason: safeSkillText(row.reason, "skill not assessed reason") ?? "原因不可用" }; });
   const hostSelection = safeSkillText(root.host_selection, "skill host selection") ?? "all";
+  if (expectedHost !== undefined && hostSelection !== expectedHost) throw new Error("skill scan host_selection 不匹配");
   return { status: "ok", schema_version: safeVersion(root.schema_version, "skill schema") ?? null, run: safeSkillText(root.run, "skill run"), host_selection: hostSelection, generated_at_ms: meta.generated_at_ms == null ? null : nullableSourceTimestampMs(meta.generated_at_ms, "skill generated at"), from_cache: meta.from_cache === true, hosts, diagnostics, not_assessed: notAssessed };
 }
 
@@ -1997,8 +1998,8 @@ export async function readSkillScan(host: string = "all", force = false): Promis
   const now = Date.now();
   const fallback = { schema_version: "1.0", run: "browser-preview", host_selection: host, desktop_meta: { generated_at_ms: now, from_cache: !force, host }, diagnostics: [{ code: "SV501", name: "提示注入模式", severity: "warning", skill: "browser-preview", evidence: { count: 1 }, impact: "发现 1 条需要人工复核的启发式命中。", recommendation: "打开对应 skill 定义后人工复核。", caveats: ["启发式命中不是恶意结论。"] }], not_assessed: [{ code: "SV003", name: "描述长度", reason: "当前宿主没有可辩护的统一阈值。" }], report: { host_summaries: { "claude-code": { skills_on_disk: 12, discoverable_skills: 8, runtime_verified_loaded_skills: null, unique_discoverable_skills: 8, description_budget: "available", description_budget_detail: { available: true, source: "configurable", budget_chars: 15000, used_chars: 4200, pct_used: 28.0 }, trigger_data: "available" } } } };
   const handler = globalTauri()?.core?.invoke;
-  if (!handler) return parseSkillScan(fallback);
-  try { return parseSkillScan(await handler("skills_doctor_report", { host, force })); }
+  if (!handler) return parseSkillScan(fallback, host);
+  try { return parseSkillScan(await handler("skills_doctor_report", { host, force }), host); }
   catch (reason: unknown) {
     const row = reason && typeof reason === "object" ? reason as Record<string, unknown> : {};
     const detail = row.error && typeof row.error === "object" ? row.error as Record<string, unknown> : row;

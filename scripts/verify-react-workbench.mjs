@@ -71,6 +71,7 @@ if (!source.includes('"trust-monitor-updated"') || !source.includes('"sync-statu
 if (!source.includes("safeUiError") || [findingsPage, trustPage, sessionsPage, sessionDetailPage].some((page) => /reason\.message/.test(page))) fail("React Findings/Trust/会话错误面未统一脱敏");
 const unsafeErrorPattern = /(?:setError|setActionError|setExportError|setCustomError|setBudgetError|setBillingError|setDataError|setAboutError|setSourceError)\([^;\n]*reason\.message/u;
 if ([usagePage, settingsPage, skillsPage, testPage].some((page) => unsafeErrorPattern.test(page))) fail("React 用量/设置/Skill/测试错误面仍直接渲染底层异常");
+if (!skillsPage.includes("reportStale && scanning") || !skillsPage.includes("未形成新的可判定结果") || !skillsPage.includes("reportMatchesHost") || !source.includes("skill scan host_selection 不匹配") || !skillsPage.includes("保留上一次结果") || skillsPage.includes("setReport(null)")) fail("React Skill 扫描未保留旧报告、隔离宿主或把不可用误判为空结果");
 if (testPage.includes("setReport(null)") || !testPage.includes("上一次可读报告") || !testPage.includes("上一次路线质量结果") || !testPage.includes("loading && !report")) fail("React 测试页刷新未保留旧路线质量报告或缺少 stale 状态");
 if (!findingsPage.includes("requestGeneration") || !findingsPage.includes("Promise.allSettled") || !findingsPage.includes("发现新鲜度暂不可用")) fail("React Findings 刷新缺少请求代数或部分失败降级");
 if (!trustPage.includes("auditLoadingHost") || !trustPage.includes("auditRequest") || !trustPage.includes("上一次可读报告") || !trustPage.includes("上一次审计结果") || trustPage.includes("setReport(null)")) fail("React Trust 审计刷新没有保留旧报告、请求代数或仍会清空证据");
