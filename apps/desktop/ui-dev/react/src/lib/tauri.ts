@@ -1239,10 +1239,11 @@ function parseSessionBillingBucket(value: unknown): SessionBillingBucket {
   };
 }
 
-function parseSessionDetail(value: unknown): SessionDetail {
+function parseSessionDetail(value: unknown, expectedSessionRef?: string): SessionDetail {
   const root = record(value, "session detail envelope");
   const data = record(root.data, "session detail data");
   const base = parseSessionRow(data);
+  if (expectedSessionRef !== undefined && base.session_ref !== expectedSessionRef) throw new Error("session detail session_ref 不匹配");
   const timeline = requiredArray(data.timeline, "session detail timeline").slice(0, 1000).map(parseSessionTimeline);
   const workflow = requiredArray(data.workflow_timeline, "session workflow timeline").slice(0, 1000).map(parseSessionWorkflowEvent);
   const billing = requiredArray(data.billing_breakdown, "session billing breakdown").slice(0, 500).map(parseSessionBillingBucket);
@@ -1895,9 +1896,9 @@ export async function readSessionDetail(sessionRef: string, cursor: string | nul
       workflow_timeline: [{ event_at: new Date(now.valueOf() - 3_500_000).toISOString(), event_type: "tool_finished", capability_kind: "tool", capability_id: "bash", capability_version: null, outcome: "succeeded", duration_ms: 1400, error_fingerprint: null, invocation_fingerprint: null }],
       workflow_has_more: false, has_more: false, next_cursor: null,
     };
-    return parseSessionDetail({ data: sample });
+    return parseSessionDetail({ data: sample }, sessionRef);
   }
-  return parseSessionDetail(await handler("sessions_read", args));
+  return parseSessionDetail(await handler("sessions_read", args), sessionRef);
 }
 
 export async function readStatisticsTimezone(): Promise<StatisticsTimezone> {

@@ -37,12 +37,14 @@ export function SessionDetail({ row, onBack }: { row: SessionRow; onBack: () => 
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [paginationError, setPaginationError] = useState<string | null>(null);
   const generation = useRef(0);
 
   useEffect(() => {
     const current = ++generation.current;
     setLoading(true);
     setError(null);
+    setPaginationError(null);
     setDetail(null);
     void readSessionDetail(row.session_ref).then((value) => {
       if (generation.current === current) setDetail(value);
@@ -56,11 +58,13 @@ export function SessionDetail({ row, onBack }: { row: SessionRow; onBack: () => 
   const loadMore = async () => {
     if (!detail?.next_cursor || loadingMore) return;
     setLoadingMore(true);
+    setPaginationError(null);
     try {
       const page = await readSessionDetail(row.session_ref, detail.next_cursor);
       setDetail((current) => current ? { ...current, timeline: current.timeline.concat(page.timeline), has_more: page.has_more, next_cursor: page.next_cursor } : current);
+      setPaginationError(null);
     } catch (reason: unknown) {
-      setError(reason instanceof Error ? reason.message : "更多时间线暂不可用");
+      setPaginationError(reason instanceof Error ? reason.message : "更多事实暂不可用");
     } finally {
       setLoadingMore(false);
     }
@@ -71,6 +75,7 @@ export function SessionDetail({ row, onBack }: { row: SessionRow; onBack: () => 
     <p className="section-description session-detail-intro">详情只显示本机 authority 的聚合和脱敏事件；不显示会话正文、命令参数、工作区路径或原生会话 ID。引用：<code>{row.session_ref.slice(0, 18)}…</code></p>
     {loading && <div className="sessions-state" role="status"><strong>正在读取详情</strong><p>正在读取安全的 usage / workflow 时间线。</p></div>}
     {error && <div className="error-banner" role="alert">会话详情不可用：{error}</div>}
+    {paginationError && <div className="error-banner" role="alert">更多事实加载失败：{paginationError}；已有详情仍可用，请重试。</div>}
     {!loading && !detail && !error && <div className="sessions-state"><strong>没有可展示的详情</strong><p>当前引用没有对应的本地 authority 记录。</p></div>}
     {detail && <>
       <section className="session-detail-stats" aria-label="会话摘要"><div><span>事件</span><strong>{detail.event_count}</strong></div><div><span>Tokens</span><strong>{compact(detail.tokens.total)}</strong></div><div><span>成本</span><strong>{costLabel(detail)}</strong><small>{statusLabel(detail)} · {detail.cost_status.reason}</small></div><div><span>时间范围</span><strong>{timeLabel(detail.first_event_at)}</strong><small>至 {timeLabel(detail.last_event_at)}</small></div></section>

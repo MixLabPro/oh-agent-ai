@@ -69,6 +69,7 @@ if (!source.includes("loadedCalendarMonth") || !source.includes("sourceError") |
 if (!source.includes('"sessions_list"') || !source.includes("session_ref") || !source.includes("sessions-table") || !source.includes("window_session_count")) fail("React 会话未使用安全列表 DTO 或窗口守恒字段");
 if (!source.includes("加载更多") || !source.includes("cost_status") || !source.includes("requestInFlight") || !source.includes("pendingRefresh")) fail("React 会话缺少成本状态、分页或竞态保护");
 if (!source.includes('"sessions_read"') || !source.includes("workflow_timeline") || !source.includes("billing_breakdown") || !source.includes("session-detail-panel")) fail("React 会话详情缺少安全摘要、计费桶或脱敏时间线");
+if (!source.includes("session detail session_ref 不匹配") || !source.includes("paginationError") || !source.includes("已有详情仍可用，请重试")) fail("React 会话详情缺少分页错配保护或可重试的局部错误态");
 if (source.includes('"sessions_issues"')) fail("React Findings 直接消费 legacy 宽 DTO");
 if (!source.includes('"routes_quality"') || !source.includes("readRouteQuality") || !source.includes("test-quality-host")) fail("React 测试页未使用只读路线质量 DTO");
 if (source.includes('"probe_run_start"')) fail("React 测试页越过 mutation 边界调用主动探针");
