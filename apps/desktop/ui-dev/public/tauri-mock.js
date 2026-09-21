@@ -20,6 +20,7 @@
 
   const byProvider = {
     "codex/openai": {
+      host_id: "codex",
       currency: "USD",
       amounts_by_basis: { api_equivalent: 14.82 },
       has_unresolved: false,
@@ -27,6 +28,7 @@
       evidence_basis: "route-evidence",
     },
     "claude-code/anthropic": {
+      host_id: "claude-code",
       currency: "USD",
       amounts_by_basis: { fixed_subscription: 20 },
       has_unresolved: true,
@@ -36,6 +38,7 @@
     // 真实场景：MiniMax 订阅 ¥49/月，经 Claude Code 中转使用——与 anthropic 同宿主、
     // 不同服务商、不同币种，必须各占一行、永不相加（CLAUDE.md 的反面教材）。
     "claude-code/minimax": {
+      host_id: "claude-code",
       currency: "CNY",
       amounts_by_basis: { fixed_subscription: 49, api_equivalent: 56.2 },
       has_unresolved: false,
@@ -43,6 +46,7 @@
       evidence_basis: "official-subscription",
     },
     "dsh/deepseek": {
+      host_id: "dsh",
       currency: "CNY",
       amounts_by_basis: { metered_actual: 8.64 },
       has_unresolved: false,
@@ -80,6 +84,9 @@
       actual_spend_by_basis: daily
         ? { metered_actual: { CNY: 3.21 } }
         : { fixed_subscription: { CNY: 49, USD: 20 }, metered_actual: { CNY: 8.64 } },
+      metered_view: daily
+        ? { CNY: { amount: 3.21, actual: 3.21, declared_estimate: 0, default_estimate: 0, label: "actual" } }
+        : { CNY: { amount: 8.64, actual: 8.64, declared_estimate: 0, default_estimate: 0, label: "actual" }, USD: { amount: 0, actual: 0, declared_estimate: 0, default_estimate: 0, label: "estimate" } },
       by_host: {
         codex: { amounts_by_basis: { api_equivalent: 14.82 }, freshness: { state: "fresh", last_observed_at: `${isoDay}T00:00:00Z` }, has_unresolved: false, pricing_method: "provider-card" },
         // by_host 的 claude-code 条目混币（USD 20 + CNY 49），故不声明 currency（domain 规则：混币条目 currency=None）。

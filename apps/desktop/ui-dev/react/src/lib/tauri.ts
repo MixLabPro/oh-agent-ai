@@ -73,6 +73,40 @@ export type UsageSourceSummary = {
   excluded_hosts: string[];
   actual_spend: Record<string, number>;
   spend_by_basis: Record<string, Record<string, number>>;
+  tokens_by_host: Record<string, SummaryHostTokens>;
+  total_tokens: number;
+  metered_view: Record<string, { amount: number; actual: number; declared_estimate: number; default_estimate: number; label: string }>;
+  by_provider: Record<string, SummaryAmount>;
+  has_unresolved: boolean;
+};
+
+export type SummaryHostTokens = {
+  total: number;
+  uncached_input: number;
+  cache_read: number;
+  cache_write: number;
+  output: number;
+  cache_hit_ratio: number | null;
+};
+
+export type SummaryAmount = {
+  host_id: string;
+  amounts_by_basis: Record<string, number>;
+  currency: string | null;
+  has_unresolved: boolean;
+  evidence_basis: string | null;
+  pricing_method: string | null;
+};
+
+export type DailySummary = Omit<UsageSourceSummary, "month"> & { date: string };
+
+export type OverviewDetails = {
+  month: string;
+  date: string;
+  monthly: UsageSourceSummary | null;
+  daily: DailySummary | null;
+  calendar: UsageCalendar | null;
+  errors: string[];
 };
 
 export type StatisticsTimezone = { timezone: string };
@@ -939,9 +973,40 @@ function parseUsageCalendar(value: unknown): UsageCalendar {
   return { month, days: days.sort((left, right) => left.date.localeCompare(right.date)) };
 }
 
-function parseUsageSourceSummary(value: unknown): UsageSourceSummary {
+function parseSummaryHostTokens(value: unknown, label: string): SummaryHostTokens {
+  const row = record(value, label);
+  const total = boundedCount(row.total, `${label} total`, 1_000_000_000_000_000);
+  const uncached = boundedCount(row.uncached_input, `${label} uncached input`, 1_000_000_000_000_000);
+  const cacheRead = boundedCount(row.cache_read, `${label} cache read`, 1_000_000_000_000_000);
+  const cacheWrite = boundedCount(row.cache_write, `${label} cache write`, 1_000_000_000_000_000);
+  const output = boundedCount(row.output, `${label} output`, 1_000_000_000_000_000);
+  if (total !== uncached + cacheRead + cacheWrite + output) throw new Error(`${label} token totals 不守恒`);
+  const ratio = row.cache_hit_ratio === null || row.cache_hit_ratio === undefined ? null : requiredFiniteNumber(row.cache_hit_ratio, `${label} cache hit ratio`);
+  if (ratio !== null && (ratio < 0 || ratio > 1)) throw new Error(`${label} cache hit ratio 不安全`);
+  return { total, uncached_input: uncached, cache_read: cacheRead, cache_write: cacheWrite, output, cache_hit_ratio: ratio };
+}
+
+function parseSummaryAmount(value: unknown, label: string): SummaryAmount {
+  const row = record(value, label);
+  const rawAmounts = record(row.amounts_by_basis ?? {}, `${label} amounts`);
+  const amounts_by_basis: Record<string, number> = {};
+  for (const [basis, amount] of Object.entries(rawAmounts).slice(0, 12)) {
+    if (!/^[a-z][a-z0-9_]{0,31}$/.test(basis)) continue;
+    amounts_by_basis[basis] = safeNonNegativeNumber(amount, `${label} ${basis}`);
+  }
+  const currency = row.currency === null || row.currency === undefined ? null : stringField(row.currency, `${label} currency`);
+  if (currency !== null && !/^[A-Z0-9_]{1,12}$/.test(currency)) throw new Error(`${label} currency 不安全`);
+  return {
+    host_id: safeHostLabel(row.host_id), amounts_by_basis, currency,
+    has_unresolved: row.has_unresolved === true,
+    evidence_basis: row.evidence_basis == null ? null : decisionLabel(row.evidence_basis, `${label} evidence basis`),
+    pricing_method: row.pricing_method == null ? null : decisionLabel(row.pricing_method, `${label} pricing method`),
+  };
+}
+
+function parseSummaryRoot(value: unknown, windowKind: "month" | "date"): UsageSourceSummary | DailySummary {
   const root = record(value, "usage source summary");
-  const month = safeMonth(root.month, "usage summary month");
+  const window = windowKind === "month" ? safeMonth(root.month, "usage summary month") : safeDate(root.date, "usage summary date");
   const freshnessRow = record(root.freshness, "usage freshness");
   const freshness = boundedEnum(freshnessRow.state, "usage freshness state", ["fresh", "stale", "partial", "unavailable"], "unknown") as UsageSourceSummary["freshness"];
   const coverageRow = record(root.coverage, "usage coverage");
@@ -954,15 +1019,48 @@ function parseUsageSourceSummary(value: unknown): UsageSourceSummary {
   for (const basis of ["metered_actual", "host_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent", "other"]) {
     if (rawBasis[basis] !== undefined) spendByBasis[basis] = safeMoneyMap(rawBasis[basis], `usage ${basis} spend`);
   }
-  return {
-    month,
+  const rawTokens = record(root.tokens_by_host ?? {}, "usage tokens by host");
+  const tokens_by_host: Record<string, SummaryHostTokens> = {};
+  for (const [host, item] of Object.entries(rawTokens).slice(0, 64)) tokens_by_host[safeHostLabel(host)] = parseSummaryHostTokens(item, `usage tokens ${host}`);
+  const total_tokens = Object.values(tokens_by_host).reduce((sum, item) => sum + item.total, 0);
+  const rawMetered = record(root.metered_view ?? {}, "usage metered view");
+  const metered_view: UsageSourceSummary["metered_view"] = {};
+  for (const [currency, item] of Object.entries(rawMetered).slice(0, 16)) {
+    const row = record(item, `usage metered ${currency}`);
+    metered_view[currency] = {
+      amount: safeNonNegativeNumber(row.amount, `usage metered ${currency} amount`),
+      actual: safeNonNegativeNumber(row.actual, `usage metered ${currency} actual`),
+      declared_estimate: safeNonNegativeNumber(row.declared_estimate, `usage metered ${currency} declared`),
+      default_estimate: safeNonNegativeNumber(row.default_estimate, `usage metered ${currency} default`),
+      label: decisionLabel(row.label, `usage metered ${currency} label`),
+    };
+  }
+  const rawProviders = record(root.by_provider ?? {}, "usage providers");
+  const by_provider: Record<string, SummaryAmount> = {};
+  for (const [provider, item] of Object.entries(rawProviders).slice(0, 128)) by_provider[provider.slice(0, 128)] = parseSummaryAmount(item, `usage provider ${provider}`);
+  const common = {
     freshness,
     last_observed_at: safeTimestamp(freshnessRow.last_observed_at, "usage observed at"),
     coverage: { measured_fields: measured, total_fields: total },
     excluded_hosts: excluded,
     actual_spend: safeMoneyMap(root.total_actual_spend, "usage actual spend"),
     spend_by_basis: spendByBasis,
+    tokens_by_host, total_tokens, metered_view, by_provider,
+    has_unresolved: root.has_unresolved === true,
   };
+  return windowKind === "month" ? { month: window, ...common } : { date: window, ...common };
+}
+
+function parseUsageSourceSummary(value: unknown): UsageSourceSummary {
+  const parsed = parseSummaryRoot(value, "month");
+  if (!("month" in parsed)) throw new Error("usage summary 月份字段缺失");
+  return parsed;
+}
+
+function parseDailySummary(value: unknown): DailySummary {
+  const parsed = parseSummaryRoot(value, "date");
+  if (!("date" in parsed)) throw new Error("daily summary 日期字段缺失");
+  return parsed;
 }
 
 const freshnessStates = ["fresh", "stale", "partial", "unavailable"] as const;
@@ -1799,6 +1897,36 @@ export async function readUsageSourceSummary(month: string): Promise<UsageSource
   const parsed = parseUsageSourceSummary(await handler("data_monthly_summary", { month: safe }));
   if (parsed.month !== safe) throw new Error("usage source summary 返回了错误月份");
   return parsed;
+}
+
+export async function readDailySummary(date: string): Promise<DailySummary> {
+  const safe = safeDate(date, "daily summary date");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseDailySummary({ date: safe, freshness: { state: "unavailable", last_observed_at: null }, coverage: { measured_fields: 0, total_fields: 0 }, excluded_hosts: [], total_actual_spend: {}, actual_spend_by_basis: {}, tokens_by_host: {}, by_provider: {}, has_unresolved: false });
+  const parsed = parseDailySummary(await handler("data_daily_summary", { date: safe }));
+  if (parsed.date !== safe) throw new Error("daily summary 返回了错误日期");
+  return parsed;
+}
+
+function statisticsMonthAndDate(timezone: string): { month: string; date: string } {
+  const formatter = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" });
+  const parts = formatter.formatToParts(new Date());
+  const year = parts.find((part) => part.type === "year")?.value ?? "1970";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
+  return { month: `${year}-${month}`, date: `${year}-${month}-${day}` };
+}
+
+export async function readOverviewDetails(): Promise<OverviewDetails> {
+  let timezone = "Asia/Shanghai";
+  try { timezone = (await readStatisticsTimezone()).timezone; } catch (_) { /* backend window remains the safe Beijing default */ }
+  const { month, date } = statisticsMonthAndDate(timezone);
+  const results = await Promise.allSettled([readUsageSourceSummary(month), readDailySummary(date), readUsageCalendar(month)]);
+  const errors: string[] = [];
+  const monthly = results[0].status === "fulfilled" ? results[0].value : (errors.push(safeUiError(results[0].reason, "月度汇总暂不可用")), null);
+  const daily = results[1].status === "fulfilled" ? results[1].value : (errors.push(safeUiError(results[1].reason, "今日汇总暂不可用")), null);
+  const calendar = results[2].status === "fulfilled" ? results[2].value : (errors.push(safeUiError(results[2].reason, "日历暂不可用")), null);
+  return { month, date, monthly, daily, calendar, errors };
 }
 
 export async function readUsageHourly(date: string): Promise<UsageHourly> {

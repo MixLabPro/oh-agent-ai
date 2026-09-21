@@ -59,6 +59,11 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .overview-panel h3 { margin: 3px 0 0; color: #26384e; font-size: 17px; }
 .overview-panel-copy { margin-top: 8px; color: var(--text-subtle); font-size: 12px; line-height: 1.5; }
 .overview-host-panel { margin-top: 14px; padding: 20px; border: 1px solid #e1e8f0; border-radius: 14px; background: #fff; box-shadow: 0 10px 28px rgb(31 55 80 / 4%); }
+.overview-recent-panel { display: block; align-items: initial; }
+.overview-recent-list { display: grid; gap: 7px; margin-top: 12px; }
+.overview-recent-row { display: grid; grid-template-columns: 1fr 1fr 1.5fr; gap: 10px; align-items: baseline; padding: 9px 11px; border: 1px solid #e6edf2; border-radius: 9px; background: #fbfcfe; color: #405875; font-size: 11px; }
+.overview-recent-row strong { color: #26384e; font-variant-numeric: tabular-nums; }
+.overview-recent-row small { color: var(--text-subtle); text-align: right; }
 .overview-host-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
 .overview-host-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; padding: 13px 14px; border: 1px solid #e6edf2; border-radius: 10px; }
 .overview-host-row div { display: grid; gap: 5px; min-width: 0; }
@@ -485,6 +490,8 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
   .usage-calendar-cell strong { font-size: 10px; }
   .usage-hour-grid { gap: 2px; }
   .overview-detail-grid, .overview-host-list { grid-template-columns: 1fr; }
+  .overview-recent-row { grid-template-columns: 1fr; gap: 4px; }
+  .overview-recent-row small { text-align: left; }
   .hero-panel, .info-panel, .page-header { flex-direction: column; }
   .trust-page-header { flex-direction: column; }
   .trust-layout { grid-template-columns: 1fr; }

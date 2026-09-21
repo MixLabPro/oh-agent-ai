@@ -79,6 +79,9 @@ if (!findingsPage.includes("requestGeneration") || !findingsPage.includes("Promi
 if (!trustPage.includes("auditLoadingHost") || !trustPage.includes("auditRequest") || !trustPage.includes("上一次可读报告") || !trustPage.includes("上一次审计结果") || trustPage.includes("setReport(null)")) fail("React Trust 审计刷新没有保留旧报告、请求代数或仍会清空证据");
 if (!source.includes("today_tokens_sql") || !source.includes("overview-host-panel")) fail("React 总览未消费权威 token/宿主投影");
 if (!source.includes('if (page !== "overview") return;')) fail("React 总览查询未按可见 tab 生命周期隔离");
+if (!source.includes("readOverviewDetails") || !source.includes("data_daily_summary") || !source.includes("tokens_by_host") || !source.includes("actual_spend_by_basis")) fail("React 总览未消费月度/今日安全 summary DTO");
+if (!source.includes("token totals 不守恒") || !source.includes("cache hit ratio 不安全") || !source.includes("部分总览数据不可用")) fail("React 总览缺少 token 守恒、缓存比率或部分失败可见性");
+if (!source.includes("refreshSeq") || !source.includes("requestId === refreshSeq.current")) fail("React 总览刷新缺少请求代数保护");
 if (!source.includes('"read_calendar_month"') || !source.includes('"read_hourly_distribution"') || !source.includes('"data_monthly_summary"') || !source.includes('"statistics_timezone_config"')) fail("React 用量未使用日历/小时/来源/统计时区安全 DTO command");
 if (!source.includes("usage-calendar-grid") || !source.includes("usage-hour-grid") || !source.includes("total_actual_spend") || !source.includes("aria-selected") || !source.includes("dsh_tokens") || !source.includes("claude_tokens") || !source.includes("codex_tokens") || !source.includes("usage-host-summary") || !source.includes("无已观测数据")) fail("React 用量缺少日历、小时、币种、选择状态、宿主拆分或空数据诚实态");
 if (!source.includes("loadedCalendarMonth") || !source.includes("sourceError") || !source.includes("不会把上一月份来源数据冒充为当前月份") || !source.includes("mounted.current") || !source.includes("monthRequest.current += 1")) fail("React 用量刷新未隔离月份投影、来源失败态或卸载中的请求");

@@ -1,5 +1,5 @@
-import { Component, useEffect, useState, type ErrorInfo, type ReactNode } from "react";
-import { listen, readOverviewSnapshot, readSourceDataRevision, type OverviewSnapshot } from "../lib/tauri";
+import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
+import { listen, readOverviewDetails, readOverviewSnapshot, readSourceDataRevision, type OverviewDetails, type OverviewSnapshot } from "../lib/tauri";
 import { FindingsPage } from "../features/findings/FindingsPage";
 import { TrustPage } from "../features/trust/TrustPage";
 import { UsagePage } from "../features/usage/UsagePage";
@@ -52,7 +52,9 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error
 export function App() {
   const [page, setPage] = useState<Page>(pageFromHash);
   const [overview, setOverview] = useState<OverviewSnapshot | null>(null);
+  const [overviewDetails, setOverviewDetails] = useState<OverviewDetails | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const refreshSeq = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -75,9 +77,16 @@ export function App() {
     if (page !== "overview") return;
     let active = true;
     setError(null);
-    const refresh = () => readOverviewSnapshot()
-      .then((value) => { if (active) setOverview(value); })
-      .catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "本地数据暂不可用"); });
+    const refresh = () => {
+      const requestId = ++refreshSeq.current;
+      setError(null);
+      void readOverviewSnapshot()
+        .then((value) => { if (active && requestId === refreshSeq.current) setOverview(value); })
+        .catch((reason: unknown) => { if (active && requestId === refreshSeq.current) setError(reason instanceof Error ? reason.message : "本地数据暂不可用"); });
+      void readOverviewDetails()
+        .then((value) => { if (active && requestId === refreshSeq.current) setOverviewDetails(value); })
+        .catch((reason: unknown) => { if (active && requestId === refreshSeq.current) setError(reason instanceof Error ? reason.message : "总览明细暂不可用"); });
+    };
     void refresh();
     let cleanups: Array<() => void> = [];
     Promise.all([listen("usage-fold-updated", refresh), listen("sync-status-updated", refresh), listen("source-data-deleted", refresh)])
@@ -107,7 +116,7 @@ export function App() {
     <main className="main-content">
       <header className="page-header"><div><p className="eyebrow">Workbench React migration</p><h1>{navigation.find((item) => item.id === page)?.label}</h1></div><div className="header-actions"><StatusPill tone="success">本地运行</StatusPill><button className="button button-secondary" type="button" onClick={() => window.location.reload()}>刷新</button></div></header>
       {error && <div className="error-banner" role="alert">{error} · 当前显示安全的预览状态</div>}
-      {page === "overview" ? <OverviewPage overview={overview} /> : page === "usage" ? <UsagePage /> : page === "sessions" ? <SessionsPage /> : page === "trust" ? <TrustPage /> : page === "test" ? <TestPage /> : page === "skills" ? <SkillsPage /> : page === "settings" ? <SettingsPage /> : <FindingsPage />}
+      {page === "overview" ? <OverviewPage overview={overview} details={overviewDetails} /> : page === "usage" ? <UsagePage /> : page === "sessions" ? <SessionsPage /> : page === "trust" ? <TrustPage /> : page === "test" ? <TestPage /> : page === "skills" ? <SkillsPage /> : page === "settings" ? <SettingsPage /> : <FindingsPage />}
     </main>
   </div></AppErrorBoundary>;
 }
