@@ -211,6 +211,8 @@ pub struct DispatchReport {
     /// 处理函数返回 Err 的行数——投递照记（带 last_error），下一轮不重试
     /// 本事件（at-least-once 的「至少一次」已满足；重试语义属于消费者）。
     pub failed: usize,
+    /// 其中是重试投递的次数（非首次失败后的再次尝试）。
+    pub retried: usize,
     /// 词表/schema_version 不认识的行（前向兼容：只跳过并计数）。
     pub skipped: usize,
 }
@@ -238,15 +240,22 @@ impl Dispatcher {
         let mut report = DispatchReport::default();
         for consumer in &self.consumers {
             let mut stmt = conn.prepare(
-                "SELECT event_id, event_type, schema_version, occurred_at_ms, host,
-                        correlation_id, producer, payload_json
+                "SELECT o.event_id, o.event_type, o.schema_version, o.occurred_at_ms, o.host,
+                        o.correlation_id, o.producer, o.payload_json,
+                        COALESCE(d.retry_count, 0)
                  FROM event_outbox o
-                 WHERE NOT EXISTS (
-                   SELECT 1 FROM event_deliveries d
-                   WHERE d.event_id = o.event_id AND d.consumer_id = ?1)
+                 LEFT JOIN event_deliveries d
+                   ON d.event_id = o.event_id AND d.consumer_id = ?1
+                 WHERE d.event_id IS NULL
+                    OR (d.last_error IS NOT NULL
+                        AND d.retry_count < ?2
+                        AND COALESCE(d.next_retry_at_ms, 0) <= ?3)
                  ORDER BY o.created_at_ms, o.event_id",
             )?;
-            let rows = stmt.query_map([consumer.consumer_id], |row| {
+            let now = now_ms();
+            let rows = stmt.query_map(
+                rusqlite::params![consumer.consumer_id, MAX_RETRIES, now],
+                |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -256,6 +265,7 @@ impl Dispatcher {
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             })?;
             // **先完整物化、关游标，再处理**（2026-09-21 真机验证发现）：懒迭代
@@ -267,7 +277,7 @@ impl Dispatcher {
             drop(stmt);
             for row in pending {
                 let (event_id, event_type, schema_version, occurred_at_ms, host,
-                     correlation_id, _producer, payload_json) = row;
+                     correlation_id, _producer, payload_json, prior_retries) = row;
                 // 前向兼容：未来的 schema_version / 词表外类型只跳过并计数，
                 // 不让一条不认识的行卡住整个队列（spec §10.7 的闭集校验是
                 // 「拒绝并计数」，不是崩溃）。
@@ -299,6 +309,9 @@ impl Dispatcher {
                     }
                     Err(message) => {
                         report.failed += 1;
+                        if prior_retries > 0 {
+                            report.retried += 1;
+                        }
                         Some(message)
                     }
                 };
@@ -309,6 +322,9 @@ impl Dispatcher {
     }
 }
 
+pub const MAX_RETRIES: i64 = 3;
+const RETRY_BASE_MS: i64 = 30_000; // 30s → 1min → 2min → 穷尽后永久死信
+
 fn record_delivery(
     conn: &Connection,
     event_id: &str,
@@ -316,12 +332,37 @@ fn record_delivery(
     at_ms: i64,
     error: Option<String>,
 ) -> Result<(), rusqlite::Error> {
-    conn.execute(
-        "INSERT OR REPLACE INTO event_deliveries(event_id, consumer_id, delivered_at_ms, last_error)
-         VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![event_id, consumer_id, at_ms, error],
-    )
-    .map(|_| ())
+    match &error {
+        None => conn.execute(
+            "INSERT INTO event_deliveries(event_id, consumer_id, delivered_at_ms, last_error, retry_count, next_retry_at_ms)
+             VALUES (?1, ?2, ?3, NULL, 0, NULL)
+             ON CONFLICT(event_id, consumer_id) DO UPDATE SET
+               delivered_at_ms = excluded.delivered_at_ms,
+               last_error = NULL, retry_count = 0, next_retry_at_ms = NULL",
+            rusqlite::params![event_id, consumer_id, at_ms],
+        ).map(|_| ()),
+        Some(err) => {
+            // 统一走 UPSERT：首插（retry_count 0→1）与重试失败（N→N+1）同一逻辑，
+            // 退避 = at_ms + BASE * 2^(retry_count-1)。穷尽后 next_retry_at_ms = NULL
+            // （永久死信——反连接不再发现，last_error 保留诊断）。
+            let next_retry = at_ms + RETRY_BASE_MS;
+            conn.execute(
+                "INSERT INTO event_deliveries(event_id, consumer_id, delivered_at_ms, last_error, retry_count, next_retry_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5)
+                 ON CONFLICT(event_id, consumer_id) DO UPDATE SET
+                   delivered_at_ms = excluded.delivered_at_ms,
+                   last_error = excluded.last_error,
+                   retry_count = CASE WHEN event_deliveries.retry_count >= ?6
+                     THEN event_deliveries.retry_count
+                     ELSE event_deliveries.retry_count + 1 END,
+                   next_retry_at_ms = CASE WHEN event_deliveries.retry_count + 1 >= ?6
+                     THEN NULL
+                     ELSE ?7 END",
+                rusqlite::params![event_id, consumer_id, at_ms, err,
+                                  next_retry, MAX_RETRIES, next_retry],
+            ).map(|_| ())
+        }
+    }
 }
 
 #[cfg(test)]

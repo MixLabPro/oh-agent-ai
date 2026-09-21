@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 24;
+pub const SCHEMA_VERSION: i64 = 25;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -1214,6 +1214,8 @@ CREATE TABLE IF NOT EXISTS event_deliveries (
   consumer_id     TEXT NOT NULL,
   delivered_at_ms INTEGER NOT NULL CHECK (delivered_at_ms >= 0),
   last_error      TEXT,
+  retry_count     INTEGER NOT NULL DEFAULT 0,
+  next_retry_at_ms INTEGER,
   PRIMARY KEY (event_id, consumer_id)
 );
 "#;
@@ -1234,6 +1236,21 @@ fn ensure_schema_v24(conn: &Connection) -> Result<(), AuthorityError> {
         [], |row| row.get::<_, i64>(0),
     )? > 0;
     if !has_byte_offset { conn.execute_batch(SCHEMA_V24_ADD)?; }
+    Ok(())
+}
+
+/// v25：事件投递的死信/重试列（EVENT_SYSTEM_ARCHITECTURE_ANALYSIS 缺口 1）。
+const SCHEMA_V25_ADD: &str = r#"
+ALTER TABLE event_deliveries ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE event_deliveries ADD COLUMN next_retry_at_ms INTEGER;
+"#;
+
+fn ensure_schema_v25(conn: &Connection) -> Result<(), AuthorityError> {
+    let has_retry: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('event_deliveries') WHERE name = 'retry_count'",
+        [], |row| row.get::<_, i64>(0),
+    )? > 0;
+    if !has_retry { conn.execute_batch(SCHEMA_V25_ADD)?; }
     Ok(())
 }
 
@@ -1453,6 +1470,8 @@ impl AuthorityDb {
                 ensure_schema_v22(conn)?;
                 conn.execute_batch(SCHEMA_V23_ADD)?;
                 ensure_schema_v24(conn)?;
+        ensure_schema_v25(conn)?;
+                ensure_schema_v25(conn)?;
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
@@ -1512,6 +1531,19 @@ impl AuthorityDb {
             Some(21) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
                 let migration = ensure_schema_v22(conn);
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(24) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = ensure_schema_v25(conn);
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -2013,6 +2045,7 @@ impl AuthorityDb {
         ensure_schema_v22(conn)?;
         conn.execute_batch(SCHEMA_V23_ADD)?;
         ensure_schema_v24(conn)?;
+        ensure_schema_v25(conn)?;
         // 中断批次清扫（§3.1）：任何 running 的批次在下次 open 时标
         // interrupted——它是观测记录，不是可恢复状态（恢复靠幂等重跑）。
         conn.execute(
@@ -2095,8 +2128,9 @@ impl AuthorityDb {
     /// 因此顺序固定：先扫孤儿 delivery（事件已亡）→ 再删到期事件的 delivery →
     /// 最后删事件本体，全程一事务。
     pub fn retention_event_outbox(&self, now_ms: i64) -> Result<usize, AuthorityError> {
-        const OUTBOX_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
-        let cutoff = now_ms.saturating_sub(OUTBOX_RETENTION_MS);
+        // 差异化保留（ARCHITECTURE_ANALYSIS 缺口 2）：审计面 90 天、计费关键
+        // 30 天、高频事实 7 天。每个事件按自身类型决定保留期——审计事件
+        // （McpToolInvoked）是安全合规面，7 天太短。
         self.with_immediate_txn(|conn| {
             let orphans = conn.execute(
                 "DELETE FROM event_deliveries WHERE event_id NOT IN
@@ -2105,12 +2139,22 @@ impl AuthorityDb {
             )?;
             let expired = conn.execute(
                 "DELETE FROM event_deliveries WHERE event_id IN
-                   (SELECT event_id FROM event_outbox WHERE created_at_ms < ?1)",
-                rusqlite::params![cutoff],
+                   (SELECT event_id FROM event_outbox WHERE
+                     created_at_ms < ?1 - CASE event_type
+                       WHEN 'McpToolInvoked' THEN 90 * 86400000
+                       WHEN 'DeclarationSaved' THEN 30 * 86400000
+                       WHEN 'PriceCardSaved' THEN 30 * 86400000
+                       ELSE 7 * 86400000 END)",
+                rusqlite::params![now_ms],
             )?;
             let events = conn.execute(
-                "DELETE FROM event_outbox WHERE created_at_ms < ?1",
-                rusqlite::params![cutoff],
+                "DELETE FROM event_outbox WHERE
+                   created_at_ms < ?1 - CASE event_type
+                     WHEN 'McpToolInvoked' THEN 90 * 86400000
+                     WHEN 'DeclarationSaved' THEN 30 * 86400000
+                     WHEN 'PriceCardSaved' THEN 30 * 86400000
+                     ELSE 7 * 86400000 END",
+                rusqlite::params![now_ms],
             )?;
             Ok(orphans + expired + events)
         })
@@ -4521,6 +4565,33 @@ mod tests {
         ).unwrap();
         assert_eq!(dirty_default, "0", "dirty 默认值 0");
         let _ = std::fs::remove_file(&db);
+    }
+
+    /// v24 → v25：event_deliveries 获得重试列。
+    #[test]
+    fn v24_upgrade_adds_event_retry_columns() {
+        let path = tmp_db("v24-to-v25-event-retry");
+        {
+            let seeded = AuthorityDb::open(&path, 1).unwrap();
+            seeded.conn().execute_batch(
+                "ALTER TABLE event_deliveries DROP COLUMN retry_count;
+                 ALTER TABLE event_deliveries DROP COLUMN next_retry_at_ms;
+                 UPDATE schema_meta SET value = '24' WHERE key = 'schema_version';",
+            ).unwrap();
+            drop(seeded);
+        }
+        let upgraded = AuthorityDb::open(&path, 2).unwrap();
+        let cols: i64 = upgraded.conn().query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('event_deliveries')
+             WHERE name IN ('retry_count', 'next_retry_at_ms')",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(cols, 2, "两个重试列都必须建立");
+        let version: String = upgraded.conn().query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
