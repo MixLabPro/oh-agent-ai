@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   auditTrust,
   discoverTrust,
@@ -87,6 +87,8 @@ export function TrustPage() {
   const [snapshot, setSnapshot] = useState<TrustRuntimeSnapshot | null>(null);
   const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [expandedEvidence, setExpandedEvidence] = useState<string | null>(null);
+  const [auditLoadingHost, setAuditLoadingHost] = useState<string | null>(null);
+  const auditRequest = useRef(0);
 
   const discover = () => {
     setLoading("正在发现本机宿主…");
@@ -154,14 +156,16 @@ export function TrustPage() {
   };
 
   const runAudit = (host: string) => {
+    const requestId = ++auditRequest.current;
     setSelectedHost(host);
-    setReport(null);
     setExpandedEvidence(null);
+    setAuditLoadingHost(host);
     setLoading(`正在读取 ${host} 的本地证据…`);
     setError(null);
     void auditTrust(host)
-      .then((result) => { setReport(result); setLoading(""); })
-      .catch((reason: unknown) => { setError(errorMessage(reason)); setLoading(""); });
+      .then((result) => { if (requestId === auditRequest.current) { setReport(result); setLoading(""); } })
+      .catch((reason: unknown) => { if (requestId === auditRequest.current) { setError(errorMessage(reason)); setLoading(""); } })
+      .finally(() => { if (requestId === auditRequest.current) setAuditLoadingHost(null); });
   };
 
   return <section className="trust-page" aria-labelledby="trust-page-title">
@@ -171,6 +175,8 @@ export function TrustPage() {
     </div>
     {loading && <p className="inline-status" role="status">{loading}</p>}
     {error && <div className="error-banner" role="alert">{error}</div>}
+    {auditLoadingHost && report && <div className="trust-refresh-status" role="status">正在刷新 {auditLoadingHost} 的本地证据；下面暂保留上一次可读报告。</div>}
+    {!auditLoadingHost && error && report && <div className="trust-refresh-status trust-refresh-status-error" role="status">本次审计未完成；仍展示 {report.host} 上一次已取得的脱敏证据。</div>}
     {profileErrors.length > 0 && <div className="callout"><strong>部分宿主配置不可用</strong><span>{profileErrors.length} 条配置警告不会被当作风险结论。</span></div>}
     <section className="trust-monitor-card" aria-labelledby="trust-monitor-title">
       <div className="trust-card-heading"><div><p className="eyebrow">Runtime monitor</p><h3 id="trust-monitor-title">实时监测控制</h3></div><span className={`status-pill ${monitor?.status === "ok" && monitor.enabled ? "status-pill-success" : monitor?.status === "unavailable" ? "status-pill-warning" : ""}`}><span aria-hidden="true" className="status-dot" />{monitorLoading ? "读取中" : monitor?.status === "unavailable" ? "无法确认状态" : monitor?.enabled ? "已开启" : "默认关闭"}</span></div>
@@ -202,7 +208,7 @@ export function TrustPage() {
       </section>
       <section className="trust-card" aria-label="Trust 审计结果" aria-live="polite">
         {!report ? <div className="mini-empty"><p className="eyebrow">证据时间线</p><h3>选择宿主开始审计</h3><p>审计只读本机已声明的 profile 路径，并把结果压缩为安全引用、范围、大小与时间。</p></div> : <>
-          <div className="trust-card-heading"><div><p className="eyebrow">{report.host} · 审计完成</p><h3>{report.evidence.length} 条证据</h3></div><span className="status-pill status-pill-success"><span aria-hidden="true" className="status-dot" />本地结果</span></div>
+          <div className="trust-card-heading"><div><p className="eyebrow">{report.host} · {report.host === selectedHost ? "审计完成" : "上一次审计结果"}</p><h3>{report.evidence.length} 条证据</h3></div><span className={`status-pill ${report.host === selectedHost ? "status-pill-success" : "status-pill-warning"}`}><span aria-hidden="true" className="status-dot" />{report.host === selectedHost ? "本地结果" : "旧宿主结果"}</span></div>
           <div className="trust-summary"><span>新写入 {report.inserted}</span><span>重复 {report.duplicate}</span><span>Finding 更新 {report.findings_upserted}</span></div>
           {report.evidence.length === 0 ? <div className="mini-empty">没有足够的本地证据形成时间线。当前结果不是“确认安全”。</div> : <ol className="evidence-timeline">
             {report.evidence.map((item, index) => {

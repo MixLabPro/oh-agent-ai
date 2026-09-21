@@ -47,6 +47,7 @@ walk(reactSource);
 
 const source = sourceFiles.map((file) => fs.readFileSync(file, "utf8")).join("\n");
 const settingsPage = fs.readFileSync(path.join(reactSource, "features/settings/SettingsPage.tsx"), "utf8");
+const trustPage = fs.readFileSync(path.join(reactSource, "features/trust/TrustPage.tsx"), "utf8");
 if ((source.match(/https?:\/\//g) || []).length) fail("React 源码包含远端 URL");
 const appSource = sourceFiles
   .filter((file) => !file.endsWith(path.join("lib", "tauri.ts")))
@@ -61,6 +62,7 @@ if (!source.includes("aria-labelledby=\"trust-monitor-title\"")) fail("React Tru
 if (!source.includes("查看明细") || !source.includes("evidence-detail")) fail("React Trust 缺少可展开的证据明细");
 if (!source.includes("查看证据") || !source.includes("finding-evidence-detail") || !source.includes("evidence_level") || !source.includes("上传尝试不等于远端接收、留存或训练")) fail("React Findings 缺少可核验的脱敏证据明细");
 if (!source.includes('"trust-monitor-updated"') || !source.includes('"sync-status-updated"')) fail("React Findings/Trust 缺少事件失效刷新");
+if (!trustPage.includes("auditLoadingHost") || !trustPage.includes("auditRequest") || !trustPage.includes("上一次可读报告") || !trustPage.includes("上一次审计结果") || trustPage.includes("setReport(null)")) fail("React Trust 审计刷新没有保留旧报告、请求代数或仍会清空证据");
 if (!source.includes("today_tokens_sql") || !source.includes("overview-host-panel")) fail("React 总览未消费权威 token/宿主投影");
 if (!source.includes('if (page !== "overview") return;')) fail("React 总览查询未按可见 tab 生命周期隔离");
 if (!source.includes('"read_calendar_month"') || !source.includes('"read_hourly_distribution"') || !source.includes('"data_monthly_summary"') || !source.includes('"statistics_timezone_config"')) fail("React 用量未使用日历/小时/来源/统计时区安全 DTO command");
