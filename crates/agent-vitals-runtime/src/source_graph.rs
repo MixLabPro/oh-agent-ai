@@ -187,11 +187,25 @@ pub fn dirty_set(conn: &Connection) -> Result<Vec<(String, String)>, rusqlite::E
 
 /// SourceParser trait（spec §5.2 冻结接口）。P0 阶段无实现——所有文件走
 /// 全量路径；P1 起 claude-code 注册首个增量解析器。
-/// `Vec<Value>` 是**与 emit 产出的 flat fact JSON 同构**的——与
-/// `write_flat_facts_with_sources` 的 `facts: &[Value]` 同一形态（sql_sync.rs:436），
-/// 调度器直接把解析结果交给既有写入路径，不需要形状转换。返回的 `u64` 是
-/// 新的续读 offset（**换行边界**，不是 stat size——与 P0 的 full-parse-v0
-/// 语义不同，见 classify 的 F2 注释）。
+/// 解析产出（M2 决议后的冻结形状）：三个面 + 新 offset。
+///
+/// **facts** 是与 emit 产出的 flat fact JSON 同构的 `Vec<Value>`（与
+/// `write_flat_facts_with_sources` 的 `facts: &[Value]` 同一形态）。
+///
+/// **workflow_events / session_excerpts**：增量轮允许通过全文件幂等重扫
+/// 填充（workflow 解析器有跨行状态——tool_use 配对、model_switched——
+/// 真增量需状态传递，成本不成比例；全扫的 event_id 幂等吸收重复）。
+/// 调度器把三个面一并交给既有写入路径。
+///
+/// **new_offset** 是换行边界（不是 stat size——与 P0 full-parse-v0 语义
+/// 不同，见 classify 的 F2 注释）。
+pub struct ParseOutput {
+    pub facts: Vec<Value>,
+    pub workflow_events: Vec<agent_vitals_domain::workflow::WorkflowEvent>,
+    pub session_excerpts: Vec<agent_vitals_domain::contracts::workflow::SessionExcerpt>,
+    pub new_offset: u64,
+}
+
 pub trait SourceParser: Send + Sync {
     fn host(&self) -> &'static str;
     fn parser_id(&self) -> &'static str;
@@ -204,9 +218,9 @@ pub trait SourceParser: Send + Sync {
         &self,
         path: &std::path::Path,
         from_offset: u64,
-    ) -> Result<(Vec<Value>, u64), String>;
+    ) -> Result<ParseOutput, String>;
     /// 全量路径（首见/硬失效/不支持增量）。
-    fn parse_full(&self, path: &std::path::Path) -> Result<(Vec<Value>, u64), String>;
+    fn parse_full(&self, path: &std::path::Path) -> Result<ParseOutput, String>;
 }
 
 #[cfg(test)]

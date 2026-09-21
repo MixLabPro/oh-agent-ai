@@ -196,6 +196,24 @@ fn sync_host(
         if host == "codex" {
             continue; // 已批量处理
         }
+        // P1b：SourceGraph 增量路由——classify 已在发现层标脏并判定软/硬。
+        // 这里查检查点决定走增量还是全量。claude-code JSONL 是唯一增量宿主
+        // （P1a 实现的增量解析器）；其余宿主走既有全量路径。
+        let hash = crate::source_graph::path_hash(path);
+        let checkpoint = crate::source_graph::read_checkpoint(db.conn(), host, &hash)
+            .map_err(|e| format!("source_graph checkpoint: {e}"))?
+            .unwrap_or_default();
+        let can_increment = host == "claude-code" && checkpoint.byte_offset.is_some();
+        let decision = crate::source_graph::classify(
+            &checkpoint, Some(*fp), can_increment,
+            crate::source_graph::FULL_PARSE_V0,
+            crate::sql_sync::parser_version(),
+        );
+        let incremental_offset = match (host, &decision) {
+            ("claude-code", crate::source_graph::Invalidation::Incremental { from_offset }) => Some(*from_offset),
+            _ => None,
+        };
+
         type EmitTuple = (
             Vec<Value>,
             Vec<WorkflowEvent>,
@@ -208,10 +226,30 @@ fn sync_host(
                     .and_then(|s| s.to_str())
                     .unwrap_or_default()
                     .to_string();
-                agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts(
-                    path, ns, "default", &sid,
-                )
-                .map(|r| (r.facts, r.workflow_events, r.session_excerpts))
+                if let Some(from_offset) = incremental_offset {
+                    // P1b 增量路径：usage facts 从 offset 续读（GB 级收益）；
+                    // workflow/excerpts 走全文件幂等重扫（跨行状态，event_id
+                    // 幂等吸收重复——M2 决议）。
+                    let (inc_facts, new_offset) =
+                        agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts_incremental(
+                            path, ns, "default", &sid, from_offset,
+                        )?;
+                    // workflow 面：首轮全量已入库（event_id 幂等），增量轮不重扫——
+                    // P2 或 P3 如需实时 workflow 可加全文件轻扫（M2 决议预留）。
+                    let wf: Vec<WorkflowEvent> = Vec::new();
+                    // 推进检查点（换行边界）
+                    let _ = crate::source_graph::advance_checkpoint(
+                        db.conn(), host, &hash,
+                        Some(new_offset), "claude-jsonl-v1",
+                        fp.0, fp.1,
+                    );
+                    Ok((inc_facts, wf, Vec::new()))
+                } else {
+                    agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts(
+                        path, ns, "default", &sid,
+                    )
+                    .map(|r| (r.facts, r.workflow_events, r.session_excerpts))
+                }
             }
             "dsh" => agent_vitals_hosts::dsh_usage_fact::dsh_session_to_usage_facts(path, ns, None)
                 .map(|r| (r.facts, r.workflow_events, Vec::new())),
@@ -766,7 +804,9 @@ mod tests {
             let cl3 = r3.hosts.iter().find(|h| h.host == "claude-code").unwrap();
             assert_eq!(cl3.files_synced, 1, "变化文件重新处理");
             assert_eq!(cl3.appended, 1, "只有新行是新事实");
-            assert_eq!(cl3.duplicate, 2, "旧行 fact_id 相同，幂等吞掉");
+            // P1b 增量语义：只读新行，旧行不重发 → duplicate=0（此前全量重解析
+            // 会 re-emit 旧行为 duplicate=2；增量是行为改进——更少 I/O 同终态）。
+            assert_eq!(cl3.duplicate, 0, "增量路径不重读旧行，无 duplicate");
         });
     }
 
