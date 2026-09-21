@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { addCustomSourceRoot, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, listen, openTrustedReleasesPage, pickCustomSourceRoot, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, resolveBillingImportCandidate, safeUiError, saveBudgetProfile, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
+import { addCustomSourceRoot, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, listen, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, resolveBillingImportCandidate, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -262,6 +262,12 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
   const [candidateBusy, setCandidateBusy] = useState<string | null>(null);
   const [candidateMessage, setCandidateMessage] = useState<string | null>(null);
   const [candidateError, setCandidateError] = useState<string | null>(null);
+  const [declarationGroup, setDeclarationGroup] = useState<BillingSettingsReport["groups"][number] | null>(null);
+  const [declarationKind, setDeclarationKind] = useState<"official_api" | "third_party" | "organization">("official_api");
+  const [declarationImpact, setDeclarationImpact] = useState<import("../../lib/tauri").BillingImpactPreview | null>(null);
+  const [declarationBusy, setDeclarationBusy] = useState<"preview" | "save" | null>(null);
+  const [declarationError, setDeclarationError] = useState<string | null>(null);
+  const [declarationMessage, setDeclarationMessage] = useState<string | null>(null);
   const pendingGroups = report?.groups ?? [];
   const pendingCandidates = (report?.candidates ?? []).filter((candidate) => candidate.status === "pending");
   const dismissedCandidates = (report?.candidates ?? []).filter((candidate) => candidate.status === "dismissed");
@@ -279,6 +285,39 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
       setCandidateError(safeUiError(reason, "计费候选处置失败"));
     } finally { setCandidateBusy(null); }
   };
+  const openDeclaration = (group: BillingSettingsReport["groups"][number]) => {
+    setDeclarationGroup(group); setDeclarationKind("official_api"); setDeclarationImpact(null); setDeclarationError(null); setDeclarationMessage(null);
+  };
+  const declarationScopes = declarationGroup?.model_id && declarationGroup.model_id !== "<unknown>"
+    ? [{ scope_kind: "model" as const, scope_value: declarationGroup.model_id }]
+    : [{ scope_kind: "provider" as const, scope_value: "unresolved" }];
+  const previewDeclaration = async () => {
+    if (!declarationGroup || declarationBusy) return;
+    setDeclarationBusy("preview"); setDeclarationError(null); setDeclarationMessage(null);
+    try {
+      const impact = await previewBillingDeclaration({ host: declarationGroup.host, provider_id: declarationGroup.provider_id, relationship_kind: declarationKind, effective_start: declarationGroup.effective_start, effective_end: declarationGroup.effective_end, scopes: declarationScopes });
+      setDeclarationImpact(impact);
+    } catch (reason: unknown) { setDeclarationError(safeUiError(reason, "计费影响预览失败")); }
+    finally { setDeclarationBusy(null); }
+  };
+  const saveDeclaration = async () => {
+    if (!declarationGroup || !declarationImpact || declarationBusy) return;
+    setDeclarationBusy("save"); setDeclarationError(null); setDeclarationMessage(null);
+    const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      const receipt = await saveBillingDeclaration({ revision_id: `rev-react-${suffix}`, declaration_id: `decl-react-${suffix}`, host: declarationGroup.host, provider_id: declarationGroup.provider_id, relationship_kind: declarationKind, effective_start: declarationGroup.effective_start, effective_end: declarationGroup.effective_end, source_candidate_id: null, evidence_ref: `react:confirmation-group:${declarationGroup.group_id}`, scopes: declarationScopes });
+      if (receipt.job?.status === "queued") {
+        setDeclarationMessage(`声明已保存，重算任务已入队（${receipt.job.job_id}）；完成前旧结果仍可读。`);
+      } else if (receipt.job?.status === "enqueue_failed") {
+        setDeclarationMessage("声明已保存，但重算没有入队；当前数字仍是旧结果。");
+        setDeclarationError("重算未入队；请到重算状态重试，或在旧工作台处理。声明事实已保留，不会伪装成金额已更新。");
+      } else {
+        setDeclarationMessage("声明已保存；该关系不改变金额。旧结果仍可读。");
+      }
+      setDeclarationGroup(null); setDeclarationImpact(null); onReload();
+    } catch (reason: unknown) { setDeclarationError(safeUiError(reason, "计费声明保存失败")); }
+    finally { setDeclarationBusy(null); }
+  };
   return <section className="settings-billing-section" id="settings-billing" aria-labelledby="settings-billing-title">
     <div className="settings-section-heading"><div><p className="eyebrow">计费与套餐</p><h3 id="settings-billing-title">计费与套餐</h3><p>查看待确认的计费关系、当前声明和已有账单；账单录入仍在旧工作台。</p></div><button className="button button-secondary button-small" type="button" onClick={onReload} disabled={loading}>{loading ? "读取中…" : "重载计费"}</button></div>
     {error && <div className="error-banner" role="alert">待确认状态暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={onReload}>重试</button></div>}
@@ -287,7 +326,9 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
       {hasCandidateHistory && <div className="settings-billing-todo"><div><strong>{hasPending ? "有待确认的计费关系" : "已排除的计费候选"}</strong><span>{hasPending ? `${pendingGroups.length + pendingCandidates.length} 项需要确认；未确认前仍按现有估算展示。` : `${dismissedCandidates.length} 项已排除；可重新打开后再确认。`}</span></div><button className="button button-primary" type="button" onClick={() => setExpanded((value) => !value)}>{expanded ? "收起候选" : "查看候选"}</button></div>}
       {!hasPending && report.groups_status === "ok" && report.candidates_status === "ok" && <p className="settings-billing-empty">当前没有待确认的计费关系。</p>}
       {expanded && <div className="settings-billing-pending" aria-label="待确认的计费关系">
-        {pendingGroups.slice(0, 32).map((group) => <article className="settings-billing-row" key={group.group_id}><div><strong>{group.host} · {group.provider_id} · {group.model_id}</strong><span>{compactTokens(group.tokens)} tokens · {group.session_count} 个会话 · {billingAmountText(group.estimated_amounts)} · {group.evidence_state === "unresolved" ? "部分用量未完成计价" : group.evidence_state === "determined" ? "已有明确线索" : "需要确认计费方式"}</span></div><small>{group.effective_start}{group.effective_end && group.effective_end !== group.effective_start ? ` – ${group.effective_end}` : ""}</small></article>)}
+        {pendingGroups.slice(0, 32).map((group) => <article className="settings-billing-row" key={group.group_id}><div><strong>{group.host} · {group.provider_id} · {group.model_id}</strong><span>{compactTokens(group.tokens)} tokens · {group.session_count} 个会话 · {billingAmountText(group.estimated_amounts)} · {group.evidence_state === "unresolved" ? "部分用量未完成计价" : group.evidence_state === "determined" ? "已有明确线索" : "需要确认计费方式"}</span></div><div className="settings-billing-row-actions"><small>{group.effective_start}{group.effective_end && group.effective_end !== group.effective_start ? ` – ${group.effective_end}` : ""}</small><button className="button button-secondary button-small" type="button" onClick={() => openDeclaration(group)} disabled={declarationBusy !== null}>声明归属…</button></div></article>)}
+        {declarationGroup && <div className="settings-billing-declaration" role="dialog" aria-labelledby="settings-billing-declaration-title"><div className="settings-card-heading"><div><p className="eyebrow">影响预览后保存</p><h4 id="settings-billing-declaration-title">声明 {declarationGroup.host} · {declarationGroup.provider_id} · {declarationGroup.model_id}</h4></div><button className="button button-secondary button-small" type="button" onClick={() => setDeclarationGroup(null)} disabled={declarationBusy !== null}>取消</button></div><label><span>关系</span><select value={declarationKind} onChange={(event) => { setDeclarationKind(event.target.value as typeof declarationKind); setDeclarationImpact(null); }} disabled={declarationBusy !== null}><option value="official_api">官方 API（按量）</option><option value="third_party">中转或第三方</option><option value="organization">组织承担</option></select></label><p className="settings-data-help">范围：{declarationScopes.map((scope) => `${scope.scope_kind}=${scope.scope_value}`).join("、")} · 日期：{declarationGroup.effective_start}{declarationGroup.effective_end ? ` – ${declarationGroup.effective_end}` : " · 持续有效"}</p><div className="settings-billing-declaration-actions"><button className="button button-secondary" type="button" onClick={previewDeclaration} disabled={declarationBusy !== null}>{declarationBusy === "preview" ? "预览中…" : "预览影响"}</button>{declarationImpact && <button className="button button-primary" type="button" onClick={saveDeclaration} disabled={declarationBusy !== null}>{declarationBusy === "save" ? "保存中…" : "确认并保存声明"}</button>}</div>{declarationImpact && <div className="settings-billing-preview" role="status"><strong>将处理 {compactTokens(declarationImpact.moved.tokens)} tokens · {declarationImpact.moved.session_count} 个会话</strong><span>{declarationImpact.changes_amounts ? "该关系可能改变金额归因；保存后会入队重算。" : "该关系不改变金额，只记录用户声明并关闭待确认提示。"}</span>{declarationImpact.pending.tokens > 0 && <small>仍有 {compactTokens(declarationImpact.pending.tokens)} tokens 待确认，不会被强行归因。</small>}</div>}
+        </div>}
         {pendingCandidates.map((candidate) => <article className="settings-billing-row" key={candidate.candidate_id}><div><strong>{candidate.provider_id} · {minorToDecimal(candidate.amount_minor, candidate.currency)}/月 · {candidate.host}</strong><span>来自历史套餐记录 · 自 {candidate.billing_period_start} 起{candidate.impact ? ` · ${compactTokens(candidate.impact.total_tokens)} tokens · ${candidate.impact.session_count} 个会话` : ""}</span></div><div className="settings-billing-row-actions"><small>未确认不改变现有估算</small><button className="button button-secondary button-small" type="button" onClick={() => changeCandidate(candidate.candidate_id, "dismiss")} disabled={candidateBusy !== null}>{candidateBusy === candidate.candidate_id ? "保存中…" : "不是我的"}</button></div></article>)}
         {dismissedCandidates.length > 0 && <div className="settings-billing-list"><div className="settings-setting-label">已排除的候选</div>{dismissedCandidates.slice(0, 32).map((candidate) => <article className="settings-billing-row" key={candidate.candidate_id}><div><strong>{candidate.provider_id} · {candidate.host}</strong><span>已标记为不是我的；重新打开后才会回到待确认列表。</span></div><button className="button button-secondary button-small" type="button" onClick={() => changeCandidate(candidate.candidate_id, "reopen")} disabled={candidateBusy !== null}>{candidateBusy === candidate.candidate_id ? "保存中…" : "重新打开"}</button></article>)}</div>}
         <p className="settings-billing-deferred" role="note">“不是我的/重新打开”只处置候选状态，不改变历史金额。声明、撤销和重算仍需单独确认，当前仍保留在旧工作台。</p>
@@ -303,6 +344,8 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
     </>}
     {candidateError && <div className="error-banner" role="alert">{candidateError}</div>}
     {candidateMessage && <p className="settings-data-message" role="status" aria-live="polite">{candidateMessage}</p>}
+    {declarationError && <div className="error-banner" role="alert">{declarationError}</div>}
+    {declarationMessage && <p className="settings-data-message" role="status" aria-live="polite">{declarationMessage}</p>}
   </section>;
 }
 

@@ -229,6 +229,27 @@ export type BillingCandidate = {
   impact: { total_tokens: number; fact_count: number; session_count: number } | null;
 };
 export type BillingCandidateReceipt = { status: "dismissed" | "pending"; changed: boolean };
+export type BillingScope = { scope_kind: "model" | "provider"; scope_value: string };
+export type BillingImpactBucket = { fact_count: number; session_count: number; tokens: number; unpriced_tokens: number; amounts: BillingAmount[] };
+export type BillingImpactPreview = {
+  status: "ok" | "unavailable";
+  relationship_kind: string;
+  effective_start: string | null;
+  effective_end: string | null;
+  changes_amounts: boolean;
+  moved: BillingImpactBucket;
+  kept: { tokens: number; unpriced_tokens: number; amounts: BillingAmount[] };
+  pending: { fact_count: number; tokens: number; reasons: string[] };
+  first_event_ts_ms: number | null;
+  last_event_ts_ms: number | null;
+};
+export type BillingDeclarationReceipt = {
+  status: "saved";
+  declaration_id: string;
+  revision_id: string;
+  changed: boolean;
+  job: { job_id: string; status: "queued" | "enqueue_failed"; changed: boolean } | null;
+};
 export type BillingGroup = {
   group_id: string;
   host: string;
@@ -2433,6 +2454,56 @@ function parseBillingCandidateReceipt(value: unknown): BillingCandidateReceipt {
   return { status: root.status, changed: root.changed === true };
 }
 
+function parseBillingImpactBucket(value: unknown, label: string): BillingImpactBucket {
+  const row = record(value, label);
+  return {
+    fact_count: boundedCount(row.fact_count ?? 0, `${label} facts`, Number.MAX_SAFE_INTEGER),
+    session_count: boundedCount(row.session_count ?? 0, `${label} sessions`, Number.MAX_SAFE_INTEGER),
+    tokens: boundedCount(row.tokens ?? 0, `${label} tokens`, Number.MAX_SAFE_INTEGER),
+    unpriced_tokens: boundedCount(row.unpriced_tokens ?? 0, `${label} unpriced`, Number.MAX_SAFE_INTEGER),
+    amounts: requiredArray(row.amounts ?? [], `${label} amounts`).slice(0, 16).map(parseBillingAmount),
+  };
+}
+
+function parseBillingImpactPreview(value: unknown): BillingImpactPreview {
+  const root = record(value, "billing impact preview");
+  if (root.status === "unavailable") throw new Error("计费影响预览暂不可用");
+  if (root.status !== "ok") throw new Error("计费影响预览状态不兼容");
+  const kept = record(root.kept ?? {}, "billing impact kept");
+  const pending = record(root.pending ?? {}, "billing impact pending");
+  return {
+    status: "ok",
+    relationship_kind: decisionLabel(root.relationship_kind ?? "unknown", "billing impact relationship"),
+    effective_start: root.effective_start == null ? null : safeDate(root.effective_start, "billing impact start"),
+    effective_end: root.effective_end == null ? null : safeDate(root.effective_end, "billing impact end"),
+    changes_amounts: root.changes_amounts === true,
+    moved: parseBillingImpactBucket(root.moved ?? {}, "billing impact moved"),
+    kept: { tokens: boundedCount(kept.tokens ?? 0, "billing impact kept tokens", Number.MAX_SAFE_INTEGER), unpriced_tokens: boundedCount(kept.unpriced_tokens ?? 0, "billing impact kept unpriced", Number.MAX_SAFE_INTEGER), amounts: requiredArray(kept.amounts ?? [], "billing impact kept amounts").slice(0, 16).map(parseBillingAmount) },
+    pending: { fact_count: boundedCount(pending.fact_count ?? 0, "billing impact pending facts", Number.MAX_SAFE_INTEGER), tokens: boundedCount(pending.tokens ?? 0, "billing impact pending tokens", Number.MAX_SAFE_INTEGER), reasons: requiredArray(pending.reasons ?? [], "billing impact pending reasons").slice(0, 16).map((item) => decisionLabel(item, "billing impact reason")) },
+    first_event_ts_ms: nullableTimestampMs(root.first_event_ts_ms, "billing impact first event"),
+    last_event_ts_ms: nullableTimestampMs(root.last_event_ts_ms, "billing impact last event"),
+  };
+}
+
+function parseBillingDeclarationReceipt(value: unknown): BillingDeclarationReceipt {
+  const root = record(value, "billing declaration receipt");
+  if (root.status !== "saved") throw new Error("计费声明保存未确认");
+  const job = root.job == null ? null : (() => {
+    const row = record(root.job, "billing declaration job");
+    if (row.status !== "queued" && row.status !== "enqueue_failed") throw new Error("计费重算回执状态不兼容");
+    return { job_id: decisionLabel(row.job_id, "billing job id"), status: row.status as "queued" | "enqueue_failed", changed: row.changed === true };
+  })();
+  return { status: "saved", declaration_id: decisionLabel(root.declaration_id, "billing declaration id"), revision_id: decisionLabel(root.revision_id, "billing revision id"), changed: root.changed === true, job };
+}
+
+function validateBillingScopes(scopes: BillingScope[]): void {
+  if (scopes.length > 128 || scopes.some((scope) => !["model", "provider"].includes(scope.scope_kind) || !scope.scope_value || scope.scope_value.length > 256)) throw new Error("计费声明范围不安全");
+}
+
+function validateBillingCandidateReference(value: string | null | undefined): void {
+  if (value !== null && value !== undefined && !/^[A-Za-z0-9_.:-]{1,128}$/.test(value)) throw new Error("计费候选引用不安全");
+}
+
 function parseBillingGroup(value: unknown): BillingGroup {
   const row = record(value, "billing group");
   const amounts = requiredArray(row.estimated_amounts ?? [], "billing group amounts");
@@ -2519,6 +2590,31 @@ export async function resolveBillingImportCandidate(candidateId: string, decisio
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return { status: decision === "dismiss" ? "dismissed" : "pending", changed: true };
   return parseBillingCandidateReceipt(await handler("resolve_billing_import_candidate", { candidateId, decision }));
+}
+
+export async function previewBillingDeclaration(input: { host: string; provider_id: string; relationship_kind: "official_api" | "third_party" | "organization"; effective_start: string; effective_end: string | null; scopes: BillingScope[] }): Promise<BillingImpactPreview> {
+  if (safeHostLabel(input.host) !== input.host || input.host === "generic") throw new Error("计费声明宿主或服务商不安全");
+  decisionLabel(input.provider_id, "计费声明服务商");
+  if (!/^(?:official_api|third_party|organization)$/.test(input.relationship_kind)) throw new Error("计费声明关系不受支持");
+  if (!/^\d{4}-\d{2}(?:-\d{2})?$/.test(input.effective_start) || (input.effective_end !== null && !/^\d{4}-\d{2}(?:-\d{2})?$/.test(input.effective_end))) throw new Error("计费声明日期格式不安全");
+  validateBillingScopes(input.scopes);
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseBillingImpactPreview({ status: "ok", relationship_kind: input.relationship_kind, effective_start: input.effective_start, effective_end: input.effective_end, changes_amounts: false, moved: { fact_count: 0, session_count: 0, tokens: 0, unpriced_tokens: 0, amounts: [] }, kept: { tokens: 0, unpriced_tokens: 0, amounts: [] }, pending: { fact_count: 0, tokens: 0, reasons: [] }, first_event_ts_ms: null, last_event_ts_ms: null });
+  return parseBillingImpactPreview(await handler("billing_candidate_impact_preview", { host: input.host, providerId: input.provider_id, relationshipKind: input.relationship_kind, effectiveStart: input.effective_start, effectiveEnd: input.effective_end, scopes: input.scopes }));
+}
+
+export async function saveBillingDeclaration(input: { revision_id: string; declaration_id: string; host: string; provider_id: string; relationship_kind: "official_api" | "third_party" | "organization"; effective_start: string; effective_end: string | null; source_candidate_id?: string | null; evidence_ref: string; scopes: BillingScope[] }): Promise<BillingDeclarationReceipt> {
+  if (![input.revision_id, input.declaration_id].every((value) => /^[A-Za-z0-9_.:-]{1,128}$/.test(value))) throw new Error("计费声明引用不安全");
+  if (safeHostLabel(input.host) !== input.host || input.host === "generic") throw new Error("计费声明宿主或服务商不安全");
+  decisionLabel(input.provider_id, "计费声明服务商");
+  if (!/^(?:official_api|third_party|organization)$/.test(input.relationship_kind)) throw new Error("计费声明关系不受支持");
+  if (!/^\d{4}-\d{2}(?:-\d{2})?$/.test(input.effective_start) || (input.effective_end !== null && !/^\d{4}-\d{2}(?:-\d{2})?$/.test(input.effective_end))) throw new Error("计费声明日期格式不安全");
+  if (!input.evidence_ref || input.evidence_ref.length > 512) throw new Error("计费声明证据引用不安全");
+  validateBillingScopes(input.scopes);
+  validateBillingCandidateReference(input.source_candidate_id);
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved", declaration_id: input.declaration_id, revision_id: input.revision_id, changed: true, job: null };
+  return parseBillingDeclarationReceipt(await handler("save_billing_declaration_revision", { revisionId: input.revision_id, declarationId: input.declaration_id, supersedesRevisionId: null, host: input.host, providerId: input.provider_id, relationshipKind: input.relationship_kind, subscriptionName: null, amountMinor: null, currency: null, effectiveStart: input.effective_start, effectiveEnd: input.effective_end, sourceCandidateId: input.source_candidate_id ?? null, evidenceRef: input.evidence_ref, scopes: input.scopes }));
 }
 
 function validateCustomSourceInput(host: string, root: string): void {
