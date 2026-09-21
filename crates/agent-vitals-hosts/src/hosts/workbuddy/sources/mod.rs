@@ -64,6 +64,9 @@ pub mod skills;
 pub mod traces;
 // spec §9E.5 E4a：traces → UsageFact（内存 emit，只读诊断）。
 pub mod usage_fact;
+// P3（SourceGraph spec §5）：SourceParser 注册位——显式全量申报（SQLite 行级
+// 差量是 spec §11 非目标），wire 解释在 usage_fact。
+pub mod parser;
 
 /// `~/.workbuddy/`（真实语料实测位置；测试用 isolated_home_env 把 HOME 指到 fixture
 /// root，根就是 `<root>/.workbuddy/`）。main.rs 解析 `HOME`/`USERPROFILE` 传入。

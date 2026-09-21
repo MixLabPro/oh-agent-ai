@@ -21,6 +21,10 @@ pub mod probe;
 pub mod route_quality;
 pub mod skill;
 pub mod skills;
+// SourceGraph 纯策略面（AGENT_VITALS_SOURCE_GRAPH_INFRASTRUCTURE_SPEC §4-§6，
+// P3 从 runtime 下沉）：checkpoint 投影 + classify 软硬判定 + SourceParser
+// 插件位契约——确定性策略住 domain（AGENTS.md 纪律），宿主实现在 hosts。
+pub mod source_graph;
 pub mod state;
 pub mod subagent;
 pub mod takeover;

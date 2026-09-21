@@ -10,6 +10,9 @@ pub mod endpoint_evidence;
 // 2026-09-17：cc-switch provider 表 + 每日备份 → `config-time-bound` 时间线证据
 // （第一个产这一档 basis 的 emitter）；`endpoint_evidence::read_all` 把它挂到各宿主。
 pub mod ccswitch;
+// SourceGraph SourceParser 注册表（spec §5 插件位，P3 宿主铺开）：宿主
+// wire 解释的注册面——runtime 调度器经 descriptor_for/parser_for 查表。
+pub mod parsers;
 
 // 猴子测试（用户拍板）——只活在 test 编译里，不进任何产物。
 #[cfg(test)]

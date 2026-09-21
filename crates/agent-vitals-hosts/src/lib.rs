@@ -26,6 +26,9 @@ pub mod sources;
 
 #[cfg(feature = "sources")]
 pub use sources::canonical_input;
+// SourceParser 注册表（spec §5 插件位，P3）：runtime 调度器的唯一宿主解析入口。
+#[cfg(feature = "sources")]
+pub use sources::parsers;
 
 // Flat compatibility facade——调用方一个 crate 一个入口。
 pub use hosts::claude_code::sessions::usage as claude_code_usage;

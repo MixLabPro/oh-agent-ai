@@ -29,24 +29,8 @@ use serde_json::{json, Value};
 
 /// 单文件指纹（size + mtime 纳秒）——与 `claude_cost` fold checkpoint 同款。
 /// **无时间戳字段**：指纹就是状态，字节确定性由构造保证。
-/// 文件末尾往前扫到最后一个完整换行的位置 + 1（= 全量解析实际处理到的
-/// 位置）。文件无换行 → 0。用于全量路径的检查点——写入换行边界而非
-/// stat size，避免 in-flight 半行场景下增量从行中间起读（B1 修复）。
-fn last_newline_offset(path: &Path) -> Option<u64> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    if len == 0 { return Some(0); }
-    // 从末尾往回读最多 4KB 找换行（JSONL 行通常远短于此）
-    let scan_len = len.min(4096);
-    f.seek(SeekFrom::Start(len - scan_len)).ok()?;
-    let mut buf = vec![0u8; scan_len as usize];
-    f.read_exact(&mut buf).ok()?;
-    // rposition 找最后一个 \n（含 \r\n 剥离）
-    let pos = buf.iter().rposition(|&b| b == b'\n')?;
-    Some(len - scan_len + pos as u64 + 1)
-}
-
+/// （换行边界扫描在 `agent-vitals-hosts::sources::parsers`——P3 起它属于
+/// 解析器注册表，只有增量能力宿主才需要写换行边界检查点。）
 fn fingerprint(path: &Path) -> Option<(u64, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta
@@ -128,15 +112,18 @@ fn sync_host(
     // 发现层只需正确判定 skip（Unchanged） vs 处理（非 Unchanged），
     // 具体增量/全量路由由 emit 层的第二次 classify 决定。
     let expected_version = crate::sql_sync::parser_version();
-    let expected_parser = if host == "claude-code" { "claude-jsonl-v1" } else { crate::source_graph::FULL_PARSE_V0 };
-    let can_increment_discovery = host == "claude-code";
+    // classify 的 expected_parser/can_increment 参数经宿主解析器注册表
+    // （agent-vitals-hosts::sources::parsers，P3 宿主铺开）——runtime 不再
+    // 持有 host 字符串特判。
+    let descriptor = agent_vitals_hosts::parsers::descriptor_for(host);
+    let expected_parser = descriptor.parser_id;
+    let can_increment_discovery = descriptor.can_increment;
     for path in files {
         let fp = fingerprint(&path);
         let hash = crate::source_graph::path_hash(&path);
         let checkpoint = crate::source_graph::read_checkpoint(db.conn(), host, &hash)
             .map_err(|e| format!("source_graph checkpoint: {e}"))?;
         let on_disk = fp;
-        // P0 阶段无增量解析器注册 → can_increment 恒 false。
         let decision = crate::source_graph::classify(
             &checkpoint.unwrap_or_default(),
             on_disk,
@@ -211,27 +198,48 @@ fn sync_host(
         }
     }
     let mut incremental_checkpoints: std::collections::HashMap<String, crate::source_graph::SourceCheckpointOverride> = std::collections::HashMap::new();
+    // 解析路由经宿主注册表（P3 收编，此前 `host == "claude-code"` 字面量
+    // 特判散落两处）。trait 背书的逐文件宿主在这里走 parse_increment/parse_full；
+    // codex 是批 emitter（跨文件 seen 去重 + 整批配额折叠，见上），
+    // 注册表对它只给 descriptor 申报、不给 trait 实现。
+    let registered = agent_vitals_hosts::parsers::parser_for(host);
     for (path, fp) in &dirty {
         if host == "codex" {
             continue; // 已批量处理
         }
-        // P1b：SourceGraph 增量路由——classify 已在发现层标脏并判定软/硬。
-        // 这里查检查点决定走增量还是全量。claude-code JSONL 是唯一增量宿主
-        // （P1a 实现的增量解析器）；其余宿主走既有全量路径。
+        let Some(parser) = registered else {
+            report.errors.push(format!(
+                "{}: host `{host}` has no registered parser",
+                path.display()
+            ));
+            continue;
+        };
+        // P1b/P3：SourceGraph 增量路由——classify 已在发现层标脏并判定软/硬。
+        // 这里查检查点 + 注册表 descriptor 决定走增量还是全量。
         let hash = crate::source_graph::path_hash(path);
         let checkpoint = crate::source_graph::read_checkpoint(db.conn(), host, &hash)
             .map_err(|e| format!("source_graph checkpoint: {e}"))?
             .unwrap_or_default();
-        let can_increment = host == "claude-code" && checkpoint.byte_offset.is_some();
-        let emit_expected_parser = if can_increment { "claude-jsonl-v1" } else { crate::source_graph::FULL_PARSE_V0 };
+        // can_increment = 解析器申报（descriptor）合取检查点已有起读 offset
+        //（trait 缺省判定）；全量申报宿主恒 false。
+        let can_increment = parser.can_increment(&checkpoint);
+        let emit_expected_parser = if can_increment {
+            parser.descriptor().parser_id
+        } else {
+            crate::source_graph::FULL_PARSE_V0
+        };
         let decision = crate::source_graph::classify(
             &checkpoint, Some(*fp), can_increment,
             emit_expected_parser,
             crate::sql_sync::parser_version(),
         );
-        let incremental_offset = match (host, &decision) {
-            ("claude-code", crate::source_graph::Invalidation::Incremental { from_offset }) => Some(*from_offset),
+        let incremental_offset = match &decision {
+            crate::source_graph::Invalidation::Incremental { from_offset } => Some(*from_offset),
             _ => None,
+        };
+        let ctx = crate::source_graph::ParseContext {
+            machine_namespace: ns,
+            source_profile: "default",
         };
 
         type EmitTuple = (
@@ -239,64 +247,34 @@ fn sync_host(
             Vec<WorkflowEvent>,
             Vec<agent_vitals_domain::contracts::workflow::SessionExcerpt>,
         );
-        let emit: Result<EmitTuple, String> = match host {
-            "claude-code" => {
-                let sid = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-                if let Some(from_offset) = incremental_offset {
-                    // P1b 增量路径：usage facts 从 offset 续读（GB 级收益）；
-                    // workflow/excerpts 走全文件幂等重扫（跨行状态，event_id
-                    // 幂等吸收重复——M2 决议）。
-                    let (inc_facts, new_offset) =
-                        agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts_incremental(
-                            path, ns, "default", &sid, from_offset,
-                        )?;
-                    // workflow 面：首轮全量已入库（event_id 幂等），增量轮不重扫——
-                    // P2 或 P3 如需实时 workflow 可加全文件轻扫（M2 决议预留）。
-                    let wf: Vec<WorkflowEvent> = Vec::new();
-                    // M1 修复：检查点推进移到写事务内（通过 checkpoint_overrides
-                    // 穿透给 write_flat_facts_with_sources——此前这里是事务外
-                    // 死写，被写路径的 FULL_PARSE_V0 覆盖，claude-jsonl-v1 标记
-                    // 从不跨 tick 存活）。
+        let emit: Result<EmitTuple, String> = if let Some(from_offset) = incremental_offset {
+            // 增量路径：usage facts 从 offset 续读（GB 级收益）。检查点推进
+            // 随写事务（checkpoint_overrides 穿透 write_flat_facts_with_sources
+            // ——M1 修复：事务外死写会被写路径覆盖，parser_id 从不跨 tick 存活）。
+            parser.parse_increment(&ctx, path, from_offset).map(|out| {
+                incremental_checkpoints.insert(hash.clone(),
+                    crate::source_graph::SourceCheckpointOverride {
+                        parser_id: parser.descriptor().parser_id.to_string(),
+                        byte_offset: Some(out.new_offset),
+                    });
+                (out.facts, out.workflow_events, out.session_excerpts)
+            })
+        } else {
+            // 全量路径（首见/硬失效/全量申报宿主）。增量能力宿主的全量轮也要
+            // 写自己的 parser_id + **换行边界**（不是 stat size）：否则下次
+            // classify 判 parser-id-mismatch，该文件永远进不了增量（F2 死循环
+            // 防线）。全量申报宿主不覆写——写路径按 FULL_PARSE_V0 + stat size
+            // 落（dsh/workbuddy 现状，它们的 offset 无语义）。
+            parser.parse_full(&ctx, path).map(|out| {
+                if parser.descriptor().can_increment {
                     incremental_checkpoints.insert(hash.clone(),
                         crate::source_graph::SourceCheckpointOverride {
-                            parser_id: "claude-jsonl-v1".to_string(),
-                            byte_offset: Some(new_offset),
+                            parser_id: parser.descriptor().parser_id.to_string(),
+                            byte_offset: Some(out.new_offset),
                         });
-                    Ok((inc_facts, wf, Vec::new()))
-                } else {
-                    agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts(
-                        path, ns, "default", &sid,
-                    ).map(|r| {
-                        // 全量路径也写 claude-jsonl-v1 + **换行边界**（不是 stat
-                        // size）：否则 F2 的 parser-id-mismatch 会让该文件永远走
-                        // 不了增量（死循环）。换行边界 = 末尾最后 \n + 1。
-                        let newline_offset = last_newline_offset(path).unwrap_or(0);
-                        incremental_checkpoints.insert(hash.clone(),
-                            crate::source_graph::SourceCheckpointOverride {
-                                parser_id: "claude-jsonl-v1".to_string(),
-                                byte_offset: Some(newline_offset),
-                            });
-                        (r.facts, r.workflow_events, r.session_excerpts)
-                    })
                 }
-            }
-            "dsh" => agent_vitals_hosts::dsh_usage_fact::dsh_session_to_usage_facts(path, ns, None)
-                .map(|r| (r.facts, r.workflow_events, Vec::new())),
-            // WorkBuddy：一个 trace 文件 = 一个 source_id（spec WORKBUDDY_ONBOARDING
-            // §9E.4 纪律 7 的增量索引就是本函数上方的 source_files 指纹）。emitter
-            // 自身按 trace.sessionId 归属，无 sessionId 的 trace 不发事实——那些
-            // 文件同样落指纹（本轮「已处理」），不会每 tick 重读 686MB。
-            "workbuddy" => {
-                agent_vitals_hosts::workbuddy_usage_fact::workbuddy_trace_file_to_usage_facts(
-                    path, ns, "default",
-                )
-                .map(|r| (r.facts, r.workflow_events, Vec::new()))
-            }
-            other => Err(format!("unknown host `{other}`")),
+                (out.facts, out.workflow_events, out.session_excerpts)
+            })
         };
         match emit {
             Ok((f, events, excerpts)) => {

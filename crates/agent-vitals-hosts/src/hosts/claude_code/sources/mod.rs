@@ -43,6 +43,10 @@ pub mod account;
 // v1.0.0-beta.1 自动归因 A12：端点证据已提升为跨宿主读取器
 // （`crate::sources::endpoint_evidence::read_claude`）——判定器不该知道宿主文件格式。
 
+// P3（SourceGraph spec §5）：SourceParser 注册位——trait 形状适配薄壳，
+// wire 解释在 usage_fact。
+pub mod parser;
+
 /// 一个会话文件对 `claude-session` 有用的全部信息（路径本身没有消费者——
 /// 调用方各自从 walk 结果拿路径，这里只携带读出来的元数据）。
 struct FileInfo {

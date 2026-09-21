@@ -22,6 +22,7 @@ use std::path::Path;
 
 use agent_vitals_data::authority::{AuthorityDb, AuthorityError};
 use agent_vitals_data::fact_writer_sql::SqlFactWriter;
+use agent_vitals_domain::source_graph::PARSER_VERSION;
 use agent_vitals_domain::workflow::WorkflowEvent;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
@@ -165,31 +166,13 @@ pub const RETENTION_MONTHS_MINUS_ONE: u32 = 12;
 const TRIGGER_SYNC: &str = "cli";
 const TRIGGER_MIGRATION: &str = "migration";
 
-/// `source_files.parser_version`。版本 2 增加了 workflow_events 的派生提取；
-/// 即使源文件指纹不变，也必须重放一次，才能把历史源补齐到 workflow authority。
-/// 语义与 `usage_fact.rs::CURRENT_SCHEMA_VERSION` 的演进纪律一致。
-///
-/// 版本 3（自动归因规格 A3）：claude-code emitter 开始产 L1 路由证据
-/// （`attribution_version` provider-v0.11 → provider-v1.0-beta.1）。存量事实的
-/// `provider_id/evidence_basis/route_evidence_id` 只有在源文件被重放时才会经
-/// `fact_writer_sql` 的版本重分类路径改写——不升这个号，历史 25k+ 条 claude 事实
-/// 会永远停在 `missing`，列表照旧全部推给用户。
-///
-/// 版本 4（V16 内容富化，2026-09-19 政策）：claude-code emitter 开始产任务
-/// 意图摘录（`session_excerpts`）与 workflow 富化列（错误/参数摘录、尺寸、
-/// uuid/行号/偏移锚点）。不升这个号，存量 claude 源不重放，182k+ 事件行的
-/// 新列永远 NULL——回填依赖 `insert_events` 的守卫式 upsert（只补 NULL 列）。
-///
-/// 版本 5（WORKBENCH_FINDINGS_TAB_SPEC §9.4-①）：claude-code emitter 修复
-/// skill_finished 的 outcome 信号——skill 的 tool_result 不带 is_error，改读
-/// record 级 `toolUseResult.success`。历史行的纠正走 `insert_events` 的派生列
-/// upsert（provenance 保持原样）；不升这个号，v4 重放时仍为 unknown 的
-/// skill_finished 行不会因指纹未变而被再次触达。
-const PARSER_VERSION: i64 = 5;
-
 /// 当前事实解析器版本；同步差量必须把它和文件指纹一起比较。
+///
+/// 常量本体住在 `agent_vitals_domain::source_graph::PARSER_VERSION`（P3 下沉：
+/// `SourceParser::parser_version` 缺省判定与重放纪律必须同一来源，版本演进的
+/// 完整历史注释也在那边）。
 pub const fn parser_version() -> i64 {
-    PARSER_VERSION
+    agent_vitals_domain::source_graph::PARSER_VERSION
 }
 
 /// `finish_run.error_code` 的稳定词（错误细节进 error_detail，code 可机器判）。
