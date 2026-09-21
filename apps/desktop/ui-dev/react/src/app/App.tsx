@@ -131,7 +131,9 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (page !== "overview") return;
     let active = true;
+    setError(null);
     const refresh = () => readOverviewSnapshot()
       .then((value) => { if (active) setOverview(value); })
       .catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "本地数据暂不可用"); });
@@ -140,7 +142,7 @@ export function App() {
     Promise.all([listen("usage-fold-updated", refresh), listen("sync-status-updated", refresh)])
       .then((unsubscribers) => { if (active) cleanups = unsubscribers; else unsubscribers.forEach((unsubscribe) => unsubscribe()); });
     return () => { active = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
-  }, []);
+  }, [page]);
 
   useEffect(() => {
     const onHashChange = () => setPage(pageFromHash());
