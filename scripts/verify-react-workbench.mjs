@@ -19,6 +19,7 @@ for (const required of [
   path.join(reactSource, "main.tsx"),
   path.join(reactSource, "lib/tauri.ts"),
   path.join(reactSource, "components/ui/StatusPill.tsx"),
+  path.join(reactSource, "features/overview/OverviewPage.tsx"),
   path.join(reactSource, "features/trust/TrustPage.tsx"),
   path.join(reactSource, "features/findings/FindingsPage.tsx"),
   path.join(reactSource, "features/findings/DecisionMatrixSection.tsx"),
