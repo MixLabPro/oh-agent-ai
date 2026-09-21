@@ -599,6 +599,19 @@
         return ok({ status: "ok" });
       }
       case "retention_config": return { status: "ok", months: retentionMonths, minimum_months: 1, maximum_months: 60 };
+      case "skills_doctor_report": {
+        const selectedHost = (args && args.host) || "all";
+        const summaryHost = selectedHost === "all" ? "claude-code" : selectedHost;
+        return {
+          schema_version: "1.0",
+          run: "browser-skill-preview",
+          host_selection: selectedHost,
+          desktop_meta: { generated_at_ms: Date.now(), from_cache: false, host: selectedHost },
+          diagnostics: [{ code: "SV501", name: "提示注入模式", severity: "warning", skill: "browser-preview", evidence: { count: 1 }, impact: "发现 1 条需要人工复核的启发式命中。", recommendation: "打开对应 skill 定义后人工复核。", caveats: ["启发式命中不是恶意结论。"] }],
+          not_assessed: [{ code: "SV003", name: "描述长度", reason: "当前宿主没有可辩护的统一阈值。" }],
+          report: { host_summaries: { [summaryHost]: { skills_on_disk: 12, discoverable_skills: 8, runtime_verified_loaded_skills: null, unique_discoverable_skills: 8, description_budget: { available: true, source: "configurable", budget_chars: 15000, used_chars: 4200, pct_used: 28 }, trigger_data: "available" } } }
+        };
+      }
       case "save_retention_config": {
         const input = (args && args.input) || {};
         if (!Number.isInteger(input.months) || input.months < 1 || input.months > 60) {
