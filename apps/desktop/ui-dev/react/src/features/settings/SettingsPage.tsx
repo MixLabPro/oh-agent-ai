@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { addCustomSourceRoot, clearBudgetSnooze, listen, pickCustomSourceRoot, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readSourceHealth, readStatisticsSettings, readSyncRequestStatus, removeCustomSourceRoot, saveBudgetProfile, saveRetentionMonths, saveStatisticsTimezone, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type StatisticsSettingsReport } from "../../lib/tauri";
+import { addCustomSourceRoot, checkForUpdates, clearBudgetSnooze, listen, openTrustedReleasesPage, pickCustomSourceRoot, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readSourceHealth, readStatisticsSettings, readSyncRequestStatus, removeCustomSourceRoot, saveBudgetProfile, saveDiagnosticPackage, saveRetentionMonths, saveStatisticsTimezone, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -199,6 +199,48 @@ function StatisticsDataSection({ report, loading, error, onReload }: StatisticsD
       <div className="settings-data-card settings-export-card"><div className="settings-card-heading"><div><p className="eyebrow">本地导出</p><h4>当前月摘要 CSV</h4></div><span className="status-pill">不含原始会话</span></div><p className="settings-data-help">只导出宿主、服务商、token 汇总、金额口径、覆盖与新鲜度；不含正文、绝对路径、凭据或账户标识。</p><div className="settings-export-actions"><button className="button button-secondary" type="button" onClick={loadExport} disabled={exportLoading}>{exportLoading ? "读取中…" : exportPreview ? "刷新预览" : "预览导出字段"}</button><button className="button button-secondary" type="button" onClick={downloadExport} disabled={!exportSummary || exportSummary.freshness === "unavailable"}>下载 CSV</button></div>{exportError && <p className="settings-data-error" role="alert">{exportError}</p>}{exportPreview && exportSummary && <div className="settings-export-preview" role="status"><strong>{exportSummary.month} · {exportSummary.rows.length} 行</strong><span>字段：统计月份、宿主、服务商、tokens、计价口径、币种、金额、待确认、证据、价格、新鲜度。</span>{exportSummary.freshness === "unavailable" ? <small>摘要来源暂不可用，未生成可判定导出；请先恢复本机 authority。</small> : exportSummary.rows.length === 0 && <small>本月没有可导出的计费行；来源仍然可读。</small>}</div>}</div>
     </>}
     {actionError && <div className="error-banner" role="alert">{actionError}</div>}{message && <p className="settings-data-message" role="status" aria-live="polite">{message}</p>}
+  </section>;
+}
+
+type AboutSectionProps = { report: AboutDiagnosticsReport | null; loading: boolean; error: string | null; onReload: () => void };
+
+function versionText(value: string | null): string { return value ?? "不可用"; }
+
+function AboutSection({ report, loading, error, onReload }: AboutSectionProps) {
+  const [exporting, setExporting] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [opening, setOpening] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [update, setUpdate] = useState<UpdateCheckResult | null>(null);
+
+  const exportDiagnostics = async () => {
+    if (exporting) return;
+    setExporting(true); setActionError(null); setMessage(null);
+    try { const receipt = await saveDiagnosticPackage(); setMessage(receipt.status === "cancelled" ? "已取消保存诊断包。" : "诊断包已保存到你选择的位置；不会自动上传。"); }
+    catch (reason: unknown) { setActionError(reason instanceof Error ? reason.message : "诊断包保存失败"); }
+    finally { setExporting(false); }
+  };
+  const checkUpdates = async () => {
+    if (checking) return;
+    setChecking(true); setActionError(null); setMessage(null);
+    try { const result = await checkForUpdates(); setUpdate(result); setMessage(result.status === "ok" && result.latestTag ? `当前 ${result.currentVersion ?? "未知"} · 最新 ${result.latestTag}；请手动从发布页确认安装。` : result.status === "no_release" ? "当前没有可用的可信发布。" : "版本检查暂不可用。"); }
+    catch (reason: unknown) { setActionError(reason instanceof Error ? reason.message : "版本检查失败"); }
+    finally { setChecking(false); }
+  };
+  const openReleases = async () => {
+    if (opening) return;
+    setOpening(true); setActionError(null);
+    try { await openTrustedReleasesPage(); setMessage("已打开可信发布页；安装需由你手动确认。"); }
+    catch (reason: unknown) { setActionError(reason instanceof Error ? reason.message : "发布页打开失败"); }
+    finally { setOpening(false); }
+  };
+  return <section className="settings-about-section" id="settings-about" aria-labelledby="settings-about-title">
+    <div className="settings-section-heading"><div><p className="eyebrow">关于与诊断</p><h3 id="settings-about-title">关于与诊断</h3><p>版本信息来自本机；诊断包由你主动保存，不含会话正文、绝对路径或账户标识，也不会自动上传。</p></div><button className="button button-secondary button-small" type="button" onClick={onReload} disabled={loading}>{loading ? "读取中…" : "重载诊断"}</button></div>
+    {error && <div className="error-banner" role="alert">版本诊断暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={onReload}>重试</button></div>}
+    {loading && <div className="settings-source-state" role="status"><strong>正在读取版本信息</strong><span>只查询本机状态，不会发起更新检查。</span></div>}
+    {!loading && <div className="settings-about-card"><dl className="settings-version-list"><div><dt>App</dt><dd>{versionText(report?.appVersion ?? null)}</dd></div><div><dt>CLI</dt><dd>{versionText(report?.cliVersion ?? null)}</dd></div><div><dt>Engine</dt><dd>{versionText(report?.engineVersion ?? null)}</dd></div><div><dt>Authority schema</dt><dd>{versionText(report?.authoritySchema ?? null)}</dd></div><div><dt>价格目录</dt><dd>{report?.pricing?.version ? `${report.pricing.version}${report.pricing.capturedAtMs ? ` · ${new Date(report.pricing.capturedAtMs).toLocaleString()}` : ""}` : "暂无快照"}</dd></div><div><dt>统计时区</dt><dd>{report?.statisticsTimezone ?? "不可用"}</dd></div><div><dt>同步</dt><dd>{report?.sync.state === "ok" ? "正常" : report?.sync.state === "needs_attention" ? "需要检查" : "状态未知"}</dd></div></dl><div className="settings-about-actions"><button className="button button-secondary" type="button" onClick={exportDiagnostics} disabled={exporting}>{exporting ? "保存中…" : "保存脱敏诊断包"}</button><button className="button button-secondary" type="button" onClick={checkUpdates} disabled={checking}>{checking ? "检查中…" : "检查新版本"}</button><button className="button button-secondary" type="button" onClick={openReleases} disabled={opening}>{opening ? "打开中…" : "查看发布页"}</button></div>{update && <p className="settings-about-update" role="status">{update.status === "unavailable" ? "版本检查不可用，不会自动安装。" : update.status === "no_release" ? "未找到可用发布。" : `已确认 ${update.latestTag ?? "最新发布"}；不会自动安装。`}</p>}</div>}
+    {actionError && <div className="error-banner" role="alert">{actionError}</div>}{message && <p className="settings-about-message" role="status" aria-live="polite">{message}</p>}
   </section>;
 }
 
@@ -438,6 +480,9 @@ export function SettingsPage() {
   const [dataReport, setDataReport] = useState<StatisticsSettingsReport | null>(null);
   const [dataError, setDataError] = useState<string | null>(null);
   const [dataLoading, setDataLoading] = useState(true);
+  const [aboutReport, setAboutReport] = useState<AboutDiagnosticsReport | null>(null);
+  const [aboutError, setAboutError] = useState<string | null>(null);
+  const [aboutLoading, setAboutLoading] = useState(true);
 
   const refresh = () => {
     setLoading(true);
@@ -482,6 +527,15 @@ export function SettingsPage() {
       setDataReport(null);
       setDataError(reason instanceof Error ? reason.message : "统计设置读取失败");
     }).finally(() => setDataLoading(false));
+  };
+
+  const refreshAbout = () => {
+    setAboutLoading(true);
+    setAboutError(null);
+    void readAboutDiagnostics().then(setAboutReport).catch((reason: unknown) => {
+      setAboutReport(null);
+      setAboutError(reason instanceof Error ? reason.message : "版本诊断读取失败");
+    }).finally(() => setAboutLoading(false));
   };
 
   const runSync = async (): Promise<boolean> => {
@@ -533,9 +587,10 @@ export function SettingsPage() {
     refreshBudget();
     refreshBilling();
     refreshData();
+    refreshAbout();
     let active = true;
     let cleanups: Array<() => void> = [];
-    Promise.all([listen("sync-status-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); } }), listen("usage-fold-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); } })]).then((unsubscribers) => {
+    Promise.all([listen("sync-status-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); refreshAbout(); } }), listen("usage-fold-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); refreshAbout(); } })]).then((unsubscribers) => {
       if (active) cleanups = unsubscribers;
       else unsubscribers.forEach((unsubscribe) => unsubscribe());
     });
@@ -550,7 +605,7 @@ export function SettingsPage() {
       <button className="button button-secondary" type="button" onClick={refresh} disabled={loading}>{loading ? "读取中…" : "重载"}</button>
     </section>
 
-    <nav className="settings-section-nav" aria-label="设置分区"><a className="settings-section-nav-active" href="#settings-sources">数据源</a><a href="#settings-billing">计费与套餐</a><a href="#settings-budget">预算</a><a href="#settings-data">统计与数据</a><span>关于与诊断</span></nav>
+    <nav className="settings-section-nav" aria-label="设置分区"><a className="settings-section-nav-active" href="#settings-sources">数据源</a><a href="#settings-billing">计费与套餐</a><a href="#settings-budget">预算</a><a href="#settings-data">统计与数据</a><a href="#settings-about">关于与诊断</a></nav>
 
     <section className="settings-section" id="settings-sources" aria-labelledby="settings-sources-title">
       <div className="settings-section-heading"><div><p className="eyebrow">数据源</p><h3 id="settings-sources-title">来源健康</h3><p>每个工具独立显示读取状态；来源之间不合并计数。</p></div>{report && <span className={`status-pill status-pill-${attentionCount ? "warning" : "success"}`}>{attentionCount ? `${attentionCount} 个来源需要处理` : "来源状态正常"}</span>}</div>
@@ -569,6 +624,8 @@ export function SettingsPage() {
 
     <StatisticsDataSection report={dataReport} loading={dataLoading} error={dataError} onReload={refreshData} />
 
-    <section className="settings-placeholder" aria-label="其他设置迁移状态"><strong>关于与诊断仍在旧工作台</strong><span>计费与套餐、预算、统计与数据已经切换为安全的本机设置面；账单归因和诊断包等高风险操作仍保留在旧工作台，待单独完成回执与失败恢复验收。</span></section>
+    <AboutSection report={aboutReport} loading={aboutLoading} error={aboutError} onReload={refreshAbout} />
+
+    <section className="settings-placeholder" aria-label="其他设置迁移状态"><strong>高风险操作仍在旧工作台</strong><span>账单归因、导入删除和数据库恢复等会改变历史数据的操作仍保留在旧工作台，待单独完成回执与失败恢复验收。</span></section>
   </>;
 }

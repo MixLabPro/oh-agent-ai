@@ -89,6 +89,20 @@ export type MonthlyExportSummary = {
   excluded_hosts: string[];
 };
 
+export type AboutDiagnosticsReport = {
+  status: "ok" | "unavailable";
+  appVersion: string | null;
+  cliVersion: string | null;
+  engineVersion: string | null;
+  architecture: "x86_64" | "aarch64" | "x86" | "unknown";
+  authoritySchema: string | null;
+  statisticsTimezone: string | null;
+  pricing: { version: string | null; capturedAtMs: number | null } | null;
+  sync: { state: "ok" | "needs_attention" | "unknown" };
+};
+export type DiagnosticExportReceipt = { status: "saved" | "cancelled"; uploadPerformed: false };
+export type UpdateCheckResult = { status: "ok" | "no_release" | "unavailable"; currentVersion: string | null; latestTag: string | null; automaticInstall: false };
+
 export type SourceConnectionState = "connected" | "needs_attention" | "paused" | "excluded" | "not_detected" | "unknown";
 export type SourceErrorKind = "permission_denied" | "file_missing" | "all_files_failed" | "db_error" | "migration_failed" | "read_failed";
 export type SourceHealthRow = {
@@ -949,6 +963,40 @@ function parsePricingCatalogStatus(value: unknown): StatisticsSettingsReport["pr
   const modelCount = root.model_count == null ? null : boundedCount(root.model_count, "pricing catalog model count", 100_000);
   const lastSuccess = root.last_success_at_ms == null ? null : nullableSourceTimestampMs(root.last_success_at_ms, "pricing catalog last success");
   return { status: "ok", state, version, model_count: modelCount, last_success_at_ms: lastSuccess, available: state === "ok" || state === "updated" };
+}
+
+function safeVersion(value: unknown, label: string): string | null {
+  if (value === null || value === undefined) return null;
+  const text = stringField(value, label);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._+:-]*(?: [A-Za-z0-9._+:-]+){0,3}$/.test(text)) throw new Error(`${label} DTO 版本不安全`);
+  return text;
+}
+
+function parseAboutDiagnostics(value: unknown): AboutDiagnosticsReport {
+  const root = record(value, "about diagnostics");
+  if (root.status !== "ok") return { status: "unavailable", appVersion: null, cliVersion: null, engineVersion: null, architecture: "unknown", authoritySchema: null, statisticsTimezone: null, pricing: null, sync: { state: "unknown" } };
+  const architecture = boundedEnum(root.architecture ?? "unknown", "diagnostic architecture", ["x86_64", "aarch64", "x86", "unknown"], "unknown") as AboutDiagnosticsReport["architecture"];
+  const pricing = root.pricing == null ? null : (() => { const row = record(root.pricing, "diagnostic pricing"); return { version: safeVersion(row.version, "diagnostic pricing version"), capturedAtMs: row.captured_at_ms == null ? null : nullableSourceTimestampMs(row.captured_at_ms, "diagnostic pricing timestamp") }; })();
+  const sync = root.sync == null ? { state: "unknown" as const } : (() => { const row = record(root.sync, "diagnostic sync"); return { state: row.ok === true ? "ok" as const : row.ok === false ? "needs_attention" as const : "unknown" as const }; })();
+  return { status: "ok", appVersion: safeVersion(root.app_version, "diagnostic app version"), cliVersion: safeVersion(root.cli_version, "diagnostic cli version"), engineVersion: safeVersion(root.engine_version, "diagnostic engine version"), architecture, authoritySchema: safeVersion(root.authority_schema, "diagnostic authority schema"), statisticsTimezone: root.statistics_timezone == null ? null : validateIanaTimezone(stringField(root.statistics_timezone, "diagnostic timezone")), pricing, sync };
+}
+
+function parseDiagnosticExportReceipt(value: unknown): DiagnosticExportReceipt {
+  const root = record(value, "diagnostic export receipt");
+  const status = boundedEnum(root.status, "diagnostic export status", ["saved", "cancelled"], "cancelled") as DiagnosticExportReceipt["status"];
+  if (status === "saved" && root.upload_performed !== false) throw new Error("诊断包上传状态不安全");
+  if (status === "cancelled" && root.upload_performed !== undefined && root.upload_performed !== false) throw new Error("诊断包取消状态不安全");
+  return { status, uploadPerformed: false };
+}
+
+function parseUpdateCheck(value: unknown): UpdateCheckResult {
+  const root = record(value, "update check");
+  const status = boundedEnum(root.status, "update check status", ["ok", "no_release"], "unavailable") as UpdateCheckResult["status"];
+  const currentVersion = safeVersion(root.current_version, "current version");
+  const latestTag = root.latest_tag == null ? null : stringField(root.latest_tag, "latest release tag");
+  if (latestTag !== null && !/^app-v[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(latestTag)) throw new Error("最新发布标签不安全");
+  if (root.automatic_install !== false) throw new Error("自动安装状态不安全");
+  return { status, currentVersion, latestTag, automaticInstall: false };
 }
 
 function parseMonthlyExportSummary(value: unknown): MonthlyExportSummary {
@@ -1824,6 +1872,33 @@ export async function readMonthlyExportSummary(month: string): Promise<MonthlyEx
   const parsed = parseMonthlyExportSummary(await handler("data_monthly_summary", { month: safe }));
   if (parsed.month !== safe) throw new Error("月度导出返回了错误月份");
   return parsed;
+}
+
+export async function readAboutDiagnostics(): Promise<AboutDiagnosticsReport> {
+  const fallback: AboutDiagnosticsReport = { status: "ok", appVersion: "browser-preview", cliVersion: "browser-preview", engineVersion: "browser-preview", architecture: "unknown", authoritySchema: "browser-preview", statisticsTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC", pricing: { version: "browser-preview", capturedAtMs: Date.now() - 3_600_000 }, sync: { state: "ok" } };
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return fallback;
+  try { return parseAboutDiagnostics(await handler("about_diagnostics")); } catch { return { status: "unavailable", appVersion: null, cliVersion: null, engineVersion: null, architecture: "unknown", authoritySchema: null, statisticsTimezone: null, pricing: null, sync: { state: "unknown" } }; }
+}
+
+export async function saveDiagnosticPackage(): Promise<DiagnosticExportReceipt> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved", uploadPerformed: false };
+  return parseDiagnosticExportReceipt(await handler("export_diagnostic_package"));
+}
+
+export async function checkForUpdates(): Promise<UpdateCheckResult> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "no_release", currentVersion: "browser-preview", latestTag: null, automaticInstall: false };
+  try { return parseUpdateCheck(await handler("check_for_updates")); } catch { return { status: "unavailable", currentVersion: null, latestTag: null, automaticInstall: false }; }
+}
+
+export async function openTrustedReleasesPage(): Promise<{ status: "opened" }> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "opened" };
+  const root = record(await handler("open_trusted_releases_page"), "open releases page");
+  if (root.status !== "opened") throw new Error("发布页打开未确认");
+  return { status: "opened" };
 }
 
 export async function readSourceHealth(): Promise<SourceHealthReport> {
