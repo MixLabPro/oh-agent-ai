@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { addCustomSourceRoot, checkForUpdates, clearBudgetSnooze, listen, openTrustedReleasesPage, pickCustomSourceRoot, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readSourceHealth, readStatisticsSettings, readSyncRequestStatus, removeCustomSourceRoot, saveBudgetProfile, saveDiagnosticPackage, saveRetentionMonths, saveStatisticsTimezone, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
+import { addCustomSourceRoot, checkForUpdates, clearBudgetSnooze, listen, openTrustedReleasesPage, pickCustomSourceRoot, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readSourceHealth, readStatisticsSettings, readSyncRequestStatus, removeCustomSourceRoot, safeUiError, saveBudgetProfile, saveDiagnosticPackage, saveRetentionMonths, saveStatisticsTimezone, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -155,7 +155,7 @@ function StatisticsDataSection({ report, loading, error, onReload }: StatisticsD
     if (!next) { setActionError("请选择或填写有效的 IANA 时区。"); return; }
     setSavingTimezone(true);
     try { const receipt = await saveStatisticsTimezone(next); setTimezone(receipt.timezone); setMessage(`统计时区已保存为 ${receipt.timezone}；用量页会按新的月份边界刷新。`); onReload(); }
-    catch (reason: unknown) { setActionError(reason instanceof Error ? reason.message : "统计时区保存失败"); }
+    catch (reason: unknown) { setActionError(safeUiError(reason, "统计时区保存失败")); }
     finally { setSavingTimezone(false); }
   };
 
@@ -169,7 +169,7 @@ function StatisticsDataSection({ report, loading, error, onReload }: StatisticsD
     if (!Number.isSafeInteger(months) || months < minimum || months > maximum) { setActionError(`保留期必须是 ${minimum}-${maximum} 之间的整数。`); return; }
     setSavingRetention(true);
     try { const receipt = await saveRetentionMonths(months, minimum, maximum); setRetention(String(receipt.months)); setMessage(`本机保留期已保存为 ${receipt.months} 个月；下次维护时才会执行清理。`); onReload(); }
-    catch (reason: unknown) { setActionError(reason instanceof Error ? reason.message : "保留期保存失败"); }
+    catch (reason: unknown) { setActionError(safeUiError(reason, "保留期保存失败")); }
     finally { setSavingRetention(false); }
   };
 
@@ -178,7 +178,7 @@ function StatisticsDataSection({ report, loading, error, onReload }: StatisticsD
     setExportLoading(true); setExportError(null);
     const timezoneForExport = report?.timezone.status === "ok" ? report.timezone.timezone ?? undefined : undefined;
     try { setExportSummary(await readMonthlyExportSummary(statisticsMonth(timezoneForExport))); setExportPreview(true); }
-    catch (reason: unknown) { setExportSummary(null); setExportError(reason instanceof Error ? reason.message : "月度摘要读取失败"); }
+    catch (reason: unknown) { setExportSummary(null); setExportError(safeUiError(reason, "月度摘要读取失败")); }
     finally { setExportLoading(false); }
   };
 
@@ -223,21 +223,21 @@ function AboutSection({ report, loading, error, onReload }: AboutSectionProps) {
     if (exporting) return;
     setExporting(true); setActionError(null); setMessage(null);
     try { const receipt = await saveDiagnosticPackage(); setMessage(receipt.status === "cancelled" ? "已取消保存诊断包。" : "诊断包已保存到你选择的位置；不会自动上传。"); }
-    catch (reason: unknown) { setActionError(reason instanceof Error ? reason.message : "诊断包保存失败"); }
+    catch (reason: unknown) { setActionError(safeUiError(reason, "诊断包保存失败")); }
     finally { setExporting(false); }
   };
   const checkUpdates = async () => {
     if (checking) return;
     setChecking(true); setActionError(null); setMessage(null);
     try { const result = await checkForUpdates(); setUpdate(result); setMessage(result.status === "ok" && result.latestTag ? `当前 ${result.currentVersion ?? "未知"} · 最新 ${result.latestTag}；请手动从发布页确认安装。` : result.status === "no_release" ? "当前没有可用的可信发布。" : "版本检查暂不可用。"); }
-    catch (reason: unknown) { setActionError(reason instanceof Error ? reason.message : "版本检查失败"); }
+    catch (reason: unknown) { setActionError(safeUiError(reason, "版本检查失败")); }
     finally { setChecking(false); }
   };
   const openReleases = async () => {
     if (opening) return;
     setOpening(true); setActionError(null);
     try { await openTrustedReleasesPage(); setMessage("已打开可信发布页；安装需由你手动确认。"); }
-    catch (reason: unknown) { setActionError(reason instanceof Error ? reason.message : "发布页打开失败"); }
+    catch (reason: unknown) { setActionError(safeUiError(reason, "发布页打开失败")); }
     finally { setOpening(false); }
   };
   return <section className="settings-about-section" id="settings-about" aria-labelledby="settings-about-title">
@@ -316,7 +316,7 @@ function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps)
       setMessage(`已保存 ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${receipt.notification_permission === "granted" ? "。" : "。系统通知未授权，可在系统设置中开启。"}`);
       onReload();
     } catch (reason: unknown) {
-      setActionError(reason instanceof Error ? reason.message : "预算保存失败");
+      setActionError(safeUiError(reason, "预算保存失败"));
     } finally { setSaving(false); }
   };
 
@@ -332,7 +332,7 @@ function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps)
         setMessage("预算提醒已静默至本周期结束；统计仍会继续更新。");
       }
       onReload();
-    } catch (reason: unknown) { setActionError(reason instanceof Error ? reason.message : "预算提醒设置失败"); }
+    } catch (reason: unknown) { setActionError(safeUiError(reason, "预算提醒设置失败")); }
     finally { setSnoozing(false); }
   };
 
@@ -404,7 +404,7 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
         setMessage("已选择目录，请确认工具后添加。");
       }
     } catch (reason: unknown) {
-      setActionError(reason instanceof Error ? reason.message : "无法打开目录选择");
+      setActionError(safeUiError(reason, "无法打开目录选择"));
     }
   };
 
@@ -421,7 +421,7 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
       const synced = await onSync();
       setMessage(synced ? "目录已保存，同步完成。" : "目录已保存，但本次同步未完成；稍后可重新同步。");
     } catch (reason: unknown) {
-      setActionError(reason instanceof Error ? reason.message : "添加读取位置失败");
+      setActionError(safeUiError(reason, "添加读取位置失败"));
     } finally {
       setSaving(false);
     }
@@ -437,7 +437,7 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
       setMessage(result.changed ? "已移除读取位置；已导入数据仍保留。" : "该目录已不在读取范围内。");
       onReload();
     } catch (reason: unknown) {
-      setActionError(reason instanceof Error ? reason.message : "移除读取位置失败");
+      setActionError(safeUiError(reason, "移除读取位置失败"));
     } finally {
       setSaving(false);
     }
@@ -493,7 +493,7 @@ export function SettingsPage() {
     setLoading(true);
     setError(null);
     void readSourceHealth().then(setReport).catch((reason: unknown) => {
-      setError(reason instanceof Error ? reason.message : "来源状态读取失败");
+      setError(safeUiError(reason, "来源状态读取失败"));
     }).finally(() => setLoading(false));
   };
 
@@ -501,7 +501,7 @@ export function SettingsPage() {
     setCustomLoading(true);
     setCustomError(null);
     void readCustomSourceConfig().then(setCustomReport).catch((reason: unknown) => {
-      setCustomError(reason instanceof Error ? reason.message : "自定义来源配置读取失败");
+      setCustomError(safeUiError(reason, "自定义来源配置读取失败"));
     }).finally(() => setCustomLoading(false));
   };
 
@@ -509,7 +509,7 @@ export function SettingsPage() {
     setBudgetLoading(true);
     setBudgetError(null);
     void readBudgetSettings().then(setBudgetReport).catch((reason: unknown) => {
-      setBudgetError(reason instanceof Error ? reason.message : "预算状态读取失败");
+      setBudgetError(safeUiError(reason, "预算状态读取失败"));
     }).finally(() => setBudgetLoading(false));
   };
 
@@ -517,7 +517,7 @@ export function SettingsPage() {
     setBillingLoading(true);
     setBillingError(null);
     void readBillingSettings().then(setBillingReport).catch((reason: unknown) => {
-      setBillingError(reason instanceof Error ? reason.message : "计费状态读取失败");
+      setBillingError(safeUiError(reason, "计费状态读取失败"));
     }).finally(() => setBillingLoading(false));
   };
 
@@ -525,7 +525,7 @@ export function SettingsPage() {
     setDataLoading(true);
     setDataError(null);
     void readStatisticsSettings().then(setDataReport).catch((reason: unknown) => {
-      setDataError(reason instanceof Error ? reason.message : "统计设置读取失败");
+      setDataError(safeUiError(reason, "统计设置读取失败"));
     }).finally(() => setDataLoading(false));
   };
 
@@ -533,7 +533,7 @@ export function SettingsPage() {
     setAboutLoading(true);
     setAboutError(null);
     void readAboutDiagnostics().then(setAboutReport).catch((reason: unknown) => {
-      setAboutError(reason instanceof Error ? reason.message : "版本诊断读取失败");
+      setAboutError(safeUiError(reason, "版本诊断读取失败"));
     }).finally(() => setAboutLoading(false));
   };
 
@@ -558,7 +558,7 @@ export function SettingsPage() {
       return false;
     } catch (reason: unknown) {
       setSyncMessage(null);
-      setError(reason instanceof Error ? reason.message : "同步请求未能完成");
+      setError(safeUiError(reason, "同步请求未能完成"));
       return false;
     } finally {
       setSyncing(false);
@@ -574,7 +574,7 @@ export function SettingsPage() {
       setSyncMessage(!report.sync.paused ? "自动同步已暂停。" : "自动同步已恢复。");
       refresh();
     } catch (reason: unknown) {
-      setError(reason instanceof Error ? reason.message : "自动同步设置未保存");
+      setError(safeUiError(reason, "自动同步设置未保存"));
     } finally {
       setPauseSaving(false);
     }

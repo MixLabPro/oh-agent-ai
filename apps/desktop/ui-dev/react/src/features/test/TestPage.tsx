@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { readRouteQuality, type RouteQualityFamily, type RouteQualityHost, type RouteQualityReport } from "../../lib/tauri";
+import { readRouteQuality, safeUiError, type RouteQualityFamily, type RouteQualityHost, type RouteQualityReport } from "../../lib/tauri";
 
 const windows: Array<{ value: 30 | 90 | 365; label: string }> = [
   { value: 30, label: "近 30 天" },
@@ -99,7 +99,7 @@ export function TestPage() {
     }).catch((reason: unknown) => {
       if (current !== generation.current) return;
       setReport(null);
-      setError(reason instanceof Error ? reason.message : "路线质量报告暂不可用");
+      setError(safeUiError(reason, "路线质量报告暂不可用"));
     }).finally(() => {
       if (current === generation.current) setLoading(false);
     });

@@ -51,6 +51,9 @@ const trustPage = fs.readFileSync(path.join(reactSource, "features/trust/TrustPa
 const findingsPage = fs.readFileSync(path.join(reactSource, "features/findings/FindingsPage.tsx"), "utf8");
 const sessionsPage = fs.readFileSync(path.join(reactSource, "features/sessions/SessionsPage.tsx"), "utf8");
 const sessionDetailPage = fs.readFileSync(path.join(reactSource, "features/sessions/SessionDetail.tsx"), "utf8");
+const usagePage = fs.readFileSync(path.join(reactSource, "features/usage/UsagePage.tsx"), "utf8");
+const skillsPage = fs.readFileSync(path.join(reactSource, "features/skills/SkillsPage.tsx"), "utf8");
+const testPage = fs.readFileSync(path.join(reactSource, "features/test/TestPage.tsx"), "utf8");
 if ((source.match(/https?:\/\//g) || []).length) fail("React 源码包含远端 URL");
 const appSource = sourceFiles
   .filter((file) => !file.endsWith(path.join("lib", "tauri.ts")))
@@ -66,6 +69,8 @@ if (!source.includes("查看明细") || !source.includes("evidence-detail")) fai
 if (!source.includes("查看证据") || !source.includes("finding-evidence-detail") || !source.includes("evidence_level") || !source.includes("上传尝试不等于远端接收、留存或训练")) fail("React Findings 缺少可核验的脱敏证据明细");
 if (!source.includes('"trust-monitor-updated"') || !source.includes('"sync-status-updated"')) fail("React Findings/Trust 缺少事件失效刷新");
 if (!source.includes("safeUiError") || [findingsPage, trustPage, sessionsPage, sessionDetailPage].some((page) => /reason\.message/.test(page))) fail("React Findings/Trust/会话错误面未统一脱敏");
+const unsafeErrorPattern = /(?:setError|setActionError|setExportError|setCustomError|setBudgetError|setBillingError|setDataError|setAboutError|setSourceError)\([^;\n]*reason\.message/u;
+if ([usagePage, settingsPage, skillsPage, testPage].some((page) => unsafeErrorPattern.test(page))) fail("React 用量/设置/Skill/测试错误面仍直接渲染底层异常");
 if (!findingsPage.includes("requestGeneration") || !findingsPage.includes("Promise.allSettled") || !findingsPage.includes("发现新鲜度暂不可用")) fail("React Findings 刷新缺少请求代数或部分失败降级");
 if (!trustPage.includes("auditLoadingHost") || !trustPage.includes("auditRequest") || !trustPage.includes("上一次可读报告") || !trustPage.includes("上一次审计结果") || trustPage.includes("setReport(null)")) fail("React Trust 审计刷新没有保留旧报告、请求代数或仍会清空证据");
 if (!source.includes("today_tokens_sql") || !source.includes("overview-host-panel")) fail("React 总览未消费权威 token/宿主投影");

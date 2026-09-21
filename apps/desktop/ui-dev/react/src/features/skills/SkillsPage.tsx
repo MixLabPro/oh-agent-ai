@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { cancelSkillScan, readSkillScan, type SkillScanReport } from "../../lib/tauri";
+import { cancelSkillScan, readSkillScan, safeUiError, type SkillScanReport } from "../../lib/tauri";
 
 const hostLabels: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", dsh: "DeepSeek Harness", openclaw: "OpenClaw", hermes: "Hermes", workbuddy: "WorkBuddy" };
 const severityLabels = { critical: "严重", warning: "警告", info: "提示" } as const;
@@ -21,14 +21,14 @@ export function SkillsPage() {
     cancelRequested.current = false;
     setScanning(true); setUnavailable(false); setError(null); setMessage(null);
     try { const next = await readSkillScan(selectedHost, force); if (next.status === "unavailable") { setReport(null); setUnavailable(true); setMessage("扫描结果暂不可用；没有把不可用误判成空结果。"); } else { setReport(next); setUnavailable(false); setMessage(next.from_cache ? "已读取本机缓存结果；重新扫描会绕过缓存。" : "扫描完成；结果只来自本机 skill 定义。"); } }
-    catch (reason: unknown) { if (cancelRequested.current || reason instanceof Error && reason.message.includes("已取消")) setMessage("扫描已取消；保留上一次结果。"); else setError(reason instanceof Error ? reason.message : "Skill 扫描失败"); }
+    catch (reason: unknown) { const cancelled = cancelRequested.current || reason instanceof Error && /已取消|cancel/i.test(reason.message); if (cancelled) setMessage("扫描已取消；保留上一次结果。"); else setError(safeUiError(reason, "Skill 扫描失败")); }
     finally { setScanning(false); }
   };
   const cancel = async () => {
     if (!scanning) return;
     cancelRequested.current = true;
     try { const result = await cancelSkillScan(); setMessage(result === "cancelled" ? "已请求取消扫描。" : "当前没有可取消的扫描任务。"); }
-    catch (reason: unknown) { setError(reason instanceof Error ? reason.message : "取消扫描失败"); }
+    catch (reason: unknown) { setError(safeUiError(reason, "取消扫描失败")); }
   };
   const hosts = report?.hosts.filter((item) => host === "all" || item.host === host) ?? [];
   const diagnostics = report?.diagnostics.filter((item) => item.severity === "critical" || item.severity === "warning") ?? [];

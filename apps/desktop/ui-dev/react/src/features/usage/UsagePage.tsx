@@ -5,6 +5,7 @@ import {
   readUsageHourly,
   readUsageSourceSummary,
   readStatisticsTimezone,
+  safeUiError,
   type UsageCalendar,
   type UsageDay,
   type UsageHourly,
@@ -137,12 +138,12 @@ export function UsagePage() {
         }
         setHourlyReloadKey((value) => value + 1);
       } else {
-        setError(calendarResult.reason instanceof Error ? calendarResult.reason.message : "用量日历暂不可用");
+        setError(safeUiError(calendarResult.reason, "用量日历暂不可用"));
       }
       if (sourceResult.status === "fulfilled") {
         setSource(sourceResult.value);
       } else {
-        setSourceError(sourceResult.reason instanceof Error ? sourceResult.reason.message : "来源状态暂不可用");
+        setSourceError(safeUiError(sourceResult.reason, "来源状态暂不可用"));
       }
       setLoading(false);
     });
@@ -192,7 +193,7 @@ export function UsagePage() {
     void readUsageHourly(selectedDate).then((value) => {
       if (active) setHourly(value);
     }).catch((reason: unknown) => {
-      if (active) setHourlyError(reason instanceof Error ? reason.message : "小时用量暂不可用");
+      if (active) setHourlyError(safeUiError(reason, "小时用量暂不可用"));
     }).finally(() => { if (active) setHourlyLoading(false); });
     return () => { active = false; };
   }, [selectedDate, hourlyReloadKey]);
