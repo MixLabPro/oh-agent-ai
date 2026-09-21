@@ -19,7 +19,10 @@ path = "src/lib.rs"
 # `SummaryRepository` trait（`agent-vitals-data::repository`）的具体实现
 # 因此住在这里（唯一同时看得到 hosts 与 data 的 crate），不是 data 自己实现
 # （docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md §8.1）。
-# **不加** `notify`/watcher/`tokio`/`chrono`（那是 feature 或纪律禁项，不是结构重构）。
+# `notify`：2026-09-22 产品拍板（P2_WATCHER_PRODUCT_REVIEW.md 方案 A）后解除禁令，
+# 但**只在 `watcher` feature 下引入**（`optional = true`，desktop 显式启用）——
+# 默认构建（CLI / wasm）零该依赖，NoopWatcher 路径照常（Vite 同款，spec §9-P2）。
+# `tokio`/`chrono` 仍是纪律禁项（async 化与双时间口径的入口，未评审不得放开）。
 
 # 内部 MCP 工具门控（增量 7.5 `query_sql_readonly` / 增量 6 `authority_audit`）。
 # 公开构建（默认 feature = []）不含这些工具——spec §8.2 / M0 D4 的承诺。
@@ -35,6 +38,10 @@ path = "src/lib.rs"
 [features]
 mcp-internal = []
 legacy-r2a = []
+# P2 watcher（SourceGraph spec §9-P2）：notify 6.x（macOS FSEvents / Linux
+# inotify）文件事件 → 去抖 → 唤醒 tick 对账 + watch-only 消费者。不开 =
+# NoopWatcher（tick 5min 兜底照常，Vite createNoopWatcher 同款）。
+watcher = ["dep:notify"]
 
 [dependencies]
 agent-vitals-data = { path = "../agent-vitals-data" }
@@ -51,3 +58,6 @@ serde_json = { version = "1", features = ["preserve_order"] }
 regex = "1"
 sha2 = "0.10"
 walkdir = "2"
+# P2 watcher 专用（feature `watcher`，见上）——平台原生后端由 notify 选择
+# （macOS FSEvents / Linux inotify / Windows ReadDirectoryChangesW）。
+notify = { version = "6.1", optional = true }

@@ -1321,7 +1321,11 @@ fn finish_sync_stages(
 /// 重建托盘。启动先跑一轮（托盘一亮就是新数据，不用等 5 分钟）。detached 线程
 /// 即可：Tauri 的 tray 操作线程安全，AppHandle 可跨线程调用。互斥锁保证定时轮
 /// 与「立即同步」不并发叠跑。
-fn start_refresh_tick(app: AppHandle) {
+///
+/// P2 watcher 接线：循环尾部从 `sleep(TICK_PERIOD)` 改为
+/// `recv_timeout(TICK_PERIOD)`——watcher 去抖后 wake 一发，下一轮对账立刻跑；
+/// 没事件时行为与纯 sleep 逐字节一致（周期兜底，spec §7）。
+fn start_refresh_tick(app: AppHandle, wake: std::sync::mpsc::Receiver<()>) {
     std::thread::spawn(move || loop {
         let lock = app.state::<SyncLock>();
         if let Ok(_guard) = lock.0.try_lock() {
@@ -1329,8 +1333,68 @@ fn start_refresh_tick(app: AppHandle) {
         } else {
             eprintln!("[agent-vitals] 同步进行中，跳过本轮");
         }
-        std::thread::sleep(TICK_PERIOD);
+        match wake.recv_timeout(TICK_PERIOD) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // waker 端全部 drop（watcher 线程异常退出）——退回纯周期。
+                std::thread::sleep(TICK_PERIOD);
+            }
+        }
     });
+}
+
+/// P2 watcher（AGENT_VITALS_SOURCE_GRAPH_INFRASTRUCTURE_SPEC §9-P2，方案 A
+/// 2026-09-22 拍板）。源目录（claude/codex/dsh/workbuddy + skills 安装根的
+/// home 相对部分）事件 → 去抖 → 唤醒同步 tick；skills 根同时注册为
+/// watch-only 消费者（失效 Skill 体检的进程内报告缓存）。
+///
+/// 降级纪律：feature `watcher` 未启用、注册表为空、notify 初始化失败——
+/// 全部退回「tick 周期对账」，不装死不报错（spec §1.5 watcher 可插拔）。
+/// trust profile 目录**不**监听：trust 传感自身 2s 轮询已亚秒级，watcher
+/// 无增量（P2_WATCHER_PRODUCT_REVIEW.md 决策记录）。
+fn start_source_watcher(app: &AppHandle) -> std::sync::mpsc::Receiver<()> {
+    use agent_vitals_runtime::ingest::watch::{TickWaker, WakeChannel, WatchRegistry};
+
+    let WakeChannel { waker, receiver } = TickWaker::channel();
+    let mut registry = WatchRegistry::new();
+
+    let user_home = std::path::PathBuf::from(
+        std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default(),
+    );
+    if !user_home.as_os_str().is_empty() {
+        // 事实面源目录——枚举在 runtime（default_source_watch_roots），与
+        // sync_facts 的发现根同一来源；watcher 只是那趟 walk 的「早点跑」
+        // 触发器，不是第二个真相源。
+        for (host, path) in
+            agent_vitals_runtime::ingest::watch::default_source_watch_roots(&user_home)
+        {
+            registry.register_source(host, path);
+        }
+
+        // watch-only：skills 安装根变更 → 失效 Skill 体检报告缓存（下次
+        // 前端刷新必然重扫，不再命中可能过期的快路径）。
+        let skills = app.state::<store::SkillsScanState>().inner().clone();
+        for (host, path) in
+            agent_vitals_runtime::ingest::watch::default_skill_watch_roots(&user_home)
+        {
+            let skills = skills.clone();
+            registry.register_watch_only(
+                &format!("skills:{host}"),
+                path,
+                std::sync::Arc::new(move || skills.invalidate()),
+            );
+        }
+    }
+
+    let handle =
+        agent_vitals_runtime::ingest::watch::spawn_watcher(registry, waker);
+    if handle.is_noop() {
+        eprintln!("[agent-vitals] watcher 未启用（feature 关闭或无根可监听），tick 周期兜底");
+    }
+    receiver
 }
 
 /// Opt-in Trust runtime monitor. The loop is always installed with the app,
@@ -3859,7 +3923,8 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
-            start_refresh_tick(app.handle().clone());
+            let wake = start_source_watcher(app.handle());
+            start_refresh_tick(app.handle().clone(), wake);
             start_trust_monitor_tick(app.handle().clone());
             let args: Vec<String> = std::env::args().collect();
             if should_show_workbench_on_start(&ov.sync, &args) {

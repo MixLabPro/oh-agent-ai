@@ -1,6 +1,6 @@
 # P2 Watcher 产品评审：是否引入 `notify` 依赖
 
-> 状态：**评审准备（2026-09-21）**——本文档为产品决策者提供引入/不引入 `notify` crate 作为文件系统事件监听依赖的证据、量化收益与风险评估。决策后更新状态为"已拍板"并回写 Cargo.toml 注释与 SourceGraph spec §9-P2。
+> 状态：**已拍板（2026-09-22）**——产品所有者选**方案 A**（引入 notify 6.x，feature `watcher` 门控）。实施记录见文末决策记录与 as-built 注记。
 >
 > 请求者：SourceGraph 基础设施迭代（`feat/source-graph` 分支）
 > 决策者：产品所有者
@@ -145,6 +145,30 @@ FSEvents 的 [安全模型注意事项](https://developer.apple.com/documentatio
 
 | 决策 | 签字 | 日期 | 备注 |
 |---|---|---|---|
-| | | | |
+| 方案 A：引入 notify 6.x，feature `watcher` 门控，tick 兜底保留 | 产品所有者（会话内拍板） | 2026-09-22 | runtime `optional = true`；desktop 显式启用；CLI/wasm 默认构建零该依赖 |
+
+## 7. As-built 注记（实施与原案的四点偏差，2026-09-22）
+
+实施位置：`crates/agent-vitals-runtime/src/ingest/watch.rs`（注册表/路由/去抖核 +
+notify 适配器）、`apps/desktop/src-tauri/src/lib.rs::start_source_watcher`（接线）。
+
+1. **watch 事件不直接 `mark_dirty`、watcher 线程不碰权威库**（对 spec §3-P2
+   原案的简化）：tick 的目录 walk + 指纹对账每轮本来就全量 stat（实测 ~3ms），
+   是失效判定的唯一权威；事件只负责「早点唤醒那趟对账」。省掉 watcher 线程
+   开权威库写连接引入的 SQLITE_BUSY 争用面。
+2. **去抖手搓，不引 notify-debouncer-full**：超时驱动单线程（最后一个事件
+   落定后等 `DEBOUNCE=1.2s` 派发一批）。依赖足迹维持评审表承诺的 +3 crate。
+3. **trust profile 目录不监听**：trust 传感自身 2s 轮询已是亚秒级时延，
+   watcher 无增量。spec §9-P2 的 watch-only 清单收敛为 skills 安装根
+   （`scanner::DEFAULT_ROOTS` 的 home 相对部分，变更 → 失效桌面 Skill 体检
+   的进程内报告缓存 `SkillsScanState::invalidate`）。
+4. **FSEvents 规范化路径别名**：macOS 把 `/var/…` 上报为 `/private/var/…`
+   （`std::env::temp_dir` 一类符号链接路径必然发生）。挂载成功后为每个根
+   补 canonicalize 别名，别名映射回同一宿主/回调下标（路由器显式回调索引，
+   追加别名不移动既有下标）。
+
+真机验证（macOS 26 / arm64）：写入被监听目录 → **1.62s 收到 tick 唤醒**
+（`cargo test -p agent-vitals-runtime --features watcher -- --ignored`，
+真实 FS 事件测试因平台时序不进常规门禁，spec §12 允许）。
 
 Sources: [notify-rs GitHub](https://github.com/notify-rs/notify) · [notify on crates.io](https://crates.io/crates/notify/6.1.1) · [docs.rs/notify](https://docs.rs/notify) · [FSEvents security model](https://developer.apple.com/documentation/coreservices/file_system_event_security) · [notify-debouncer-full](https://crates.io/crates/notify-debouncer-full)

@@ -1435,6 +1435,14 @@ impl SkillsScanState {
         same.then(|| (c.payload.clone(), c.generated_at_ms))
     }
 
+    /// watch-only 消费者的失效入口（P2 watcher）：skills 安装根发生文件
+    /// 变更时清掉进程内 doctor 报告缓存——下一次前端刷新必然重扫，而不是
+    /// 命中可能已过期的快路径。只清 `cached`，运行中的子进程不受影响。
+    pub fn invalidate(&self) {
+        let mut g = self.inner().cached.lock().unwrap_or_else(|e| e.into_inner());
+        *g = None;
+    }
+
     fn store(&self, cache: SkillsDoctorCache) -> Arc<Value> {
         let arc = cache.payload.clone();
         *self.inner().cached.lock().unwrap_or_else(|e| e.into_inner()) = Some(cache);

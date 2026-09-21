@@ -149,7 +149,7 @@ pub trait SourceParser: Send + Sync {
 
 - **P0（图谱先行，无 watcher）**：`source_files` 扩展三列；调度器改造——tick 从"全量 walk 目录"变为"查图谱脏集 + 指纹对账"，全量重解析保持（未接增量解析器时所有文件 `can_increment=false`）。**收益：发现层成本归零、watcher 无关的架构落位**。
 - **P1（首个增量解析器）**：`SourceParser` trait + claude-code JSONL 实现（offset 检查点 + 差分门验证）。**收益：GB 级会话解析成本从全量降到增量字节**。
-- **P2（watcher 接入）**：notify + 去抖 + 前缀路由 + skills 目录/trust profile 目录的 watch-only 消费者注册。**收益：发现时延分钟→秒**。
+- **P2（watcher 接入，2026-09-22 已实施）**：notify + 去抖 + 前缀路由 + skills 安装根的 watch-only 消费者注册。**收益：发现时延分钟→秒**。实施：`ingest/watch.rs`（feature `watcher` 门控，不开 = NoopWatcher）；as-built 与原案的四点偏差见 `P2_WATCHER_PRODUCT_REVIEW.md` §7（事件不直接 mark_dirty、去抖手搓、trust 不监听、FSEvents 规范化别名）。
 - **P3（宿主铺开，2026-09-21 实施）**：SourceParser 注册制——trait 下沉 domain、注册表落 hosts（见 §5.2 修订记录）。claude-code 经 trait 注册（增量），dsh/workbuddy 经 trait 注册并**显式申报全量**（zstd/sqlite，§11 非目标）；codex **仅 descriptor 申报**——批 emitter 的三重全文件前缀依赖使中途起读不安全（决议记录见 §5.2），sync 批路径原样保留。调度器的 host 字符串特判删除，解析路由只经注册表查表。
 
 ## 10. 验收标准
