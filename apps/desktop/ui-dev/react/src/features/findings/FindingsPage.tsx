@@ -134,14 +134,18 @@ export function FindingsPage() {
   const [matrixLoading, setMatrixLoading] = useState(true);
   const [matrixError, setMatrixError] = useState<string | null>(null);
   const [loading, setLoading] = useState("正在读取本地发现…");
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [severity, setSeverity] = useState<SeverityFilter>("all");
   const [rule, setRule] = useState("all");
   const requestGeneration = useRef(0);
+  const matrixGeneration = useRef(0);
 
   const load = () => {
     const requestId = ++requestGeneration.current;
+    const matrixRequestId = ++matrixGeneration.current;
     setLoading("正在读取本地发现投影…");
+    setLoadingMore(false);
     setError(null);
     void Promise.allSettled([readFindings(), readFindingsFreshness()])
       .then(([reportResult, freshnessResult]) => {
@@ -157,8 +161,34 @@ export function FindingsPage() {
     setMatrixLoading(true);
     setMatrixError(null);
     void readDecisionMatrix()
-      .then((nextMatrix) => { if (requestId === requestGeneration.current) { setMatrix(nextMatrix); setMatrixLoading(false); } })
-      .catch((reason: unknown) => { if (requestId === requestGeneration.current) { setMatrixError(safeUiError(reason, "本地对比数据暂不可用")); setMatrixLoading(false); } });
+      .then((nextMatrix) => { if (matrixRequestId === matrixGeneration.current) { setMatrix(nextMatrix); setMatrixLoading(false); } })
+      .catch((reason: unknown) => { if (matrixRequestId === matrixGeneration.current) { setMatrixError(safeUiError(reason, "本地对比数据暂不可用")); setMatrixLoading(false); } });
+  };
+
+  const loadMore = () => {
+    const cursor = report?.next_cursor;
+    if (!cursor || loadingMore || Boolean(loading)) return;
+    const requestId = ++requestGeneration.current;
+    setLoadingMore(true);
+    setError(null);
+    void readFindings(cursor)
+      .then((nextReport) => {
+        if (requestId !== requestGeneration.current) return;
+        setReport((current) => {
+          if (!current) return nextReport;
+          const known = new Set(current.issues.map((item) => item.group_id));
+          const appended = nextReport.issues.filter((item) => !known.has(item.group_id));
+          const rules = new Map(current.rules.map((item) => [item.rule, item]));
+          nextReport.rules.forEach((item) => rules.set(item.rule, item));
+          return { ...current, rules: Array.from(rules.values()), issues: [...current.issues, ...appended], next_cursor: nextReport.next_cursor };
+        });
+        setLoadingMore(false);
+      })
+      .catch((reason: unknown) => {
+        if (requestId !== requestGeneration.current) return;
+        setError(`${safeUiError(reason, "更多发现暂不可用")} · 当前保留已读取结果`);
+        setLoadingMore(false);
+      });
   };
 
   useEffect(() => { load(); }, []);
@@ -168,7 +198,7 @@ export function FindingsPage() {
     let cleanups: Array<() => void> = [];
     Promise.all(["sync-status-updated", "usage-fold-updated", "trust-monitor-updated", "source-data-deleted"].map((event) => listen(event, () => { if (active) load(); })))
       .then((unsubscribers) => { if (active) cleanups = unsubscribers; else unsubscribers.forEach((unsubscribe) => unsubscribe()); });
-    return () => { active = false; requestGeneration.current += 1; cleanups.forEach((unsubscribe) => unsubscribe()); };
+    return () => { active = false; requestGeneration.current += 1; matrixGeneration.current += 1; cleanups.forEach((unsubscribe) => unsubscribe()); };
   }, []);
 
   const groups = report?.issues ?? [];
@@ -183,6 +213,6 @@ export function FindingsPage() {
     {report && <div className="finding-stats" aria-label="发现汇总"><article><span className="eyebrow">发现组</span><strong>{report.totals.issues}</strong><small>{report.totals.sessions} 个受影响会话</small></article><article><span className="eyebrow">高风险</span><strong>{report.totals.critical}</strong><small>需优先查看</small></article><article><span className="eyebrow">待关注</span><strong>{report.totals.warning}</strong><small>可行动或需确认</small></article><article><span className="eyebrow">规则</span><strong>{report.rules.length}</strong><small>本地确定性规则</small></article></div>}
     <section className="finding-section" aria-labelledby="todo-title"><div className="section-heading"><div><p className="eyebrow">行动面</p><h3 id="todo-title">待办</h3></div><span className="count-badge">{todoGroups.length}</span></div>{todoGroups.length ? <div className="finding-list">{todoGroups.map((group) => <FindingRow key={group.group_id} group={group} />)}</div> : <div className="finding-empty"><strong>当前没有可直接处理的待办</strong><p>行为命中不会伪装成任务；它们会保留在下方证据明细中。</p></div>}</section>
     <DecisionMatrixSection report={matrix} loading={matrixLoading} error={matrixError} />
-    <section className="finding-section" aria-labelledby="evidence-title"><div className="section-heading"><div><p className="eyebrow">查证面</p><h3 id="evidence-title">证据明细</h3></div><div className="finding-filters"><label>等级<select value={severity} onChange={(event) => setSeverity(event.target.value as SeverityFilter)}><option value="all">全部</option><option value="critical">高风险</option><option value="warning">需关注</option><option value="info">信息</option></select></label><label>规则<select value={rule} onChange={(event) => setRule(event.target.value)}><option value="all">全部规则</option>{(report?.rules ?? []).map((item) => <option key={item.rule} value={item.rule}>{item.rule}</option>)}</select></label></div></div>{visibleGroups.length ? <div className="finding-list">{visibleGroups.map((group) => <FindingRow key={group.group_id} group={group} />)}</div> : <div className="finding-empty"><strong>{report ? "没有符合当前筛选的证据" : "正在准备证据投影"}</strong><p>{report ? "可切换等级或规则筛选；空结果不代表本机安全。" : "前端只展示脱敏后的本地投影。"}</p></div>}</section>
+    <section className="finding-section" aria-labelledby="evidence-title"><div className="section-heading"><div><p className="eyebrow">查证面</p><h3 id="evidence-title">证据明细</h3></div><div className="finding-filters"><label>等级<select value={severity} onChange={(event) => setSeverity(event.target.value as SeverityFilter)}><option value="all">全部</option><option value="critical">高风险</option><option value="warning">需关注</option><option value="info">信息</option></select></label><label>规则<select value={rule} onChange={(event) => setRule(event.target.value)}><option value="all">全部规则</option>{(report?.rules ?? []).map((item) => <option key={item.rule} value={item.rule}>{item.rule}</option>)}</select></label></div></div>{visibleGroups.length ? <div className="finding-list">{visibleGroups.map((group) => <FindingRow key={group.group_id} group={group} />)}</div> : <div className="finding-empty"><strong>{report ? "没有符合当前筛选的证据" : "正在准备证据投影"}</strong><p>{report ? "可切换等级或规则筛选；空结果不代表本机安全。" : "前端只展示脱敏后的本地投影。"}</p></div>}{report?.next_cursor && <div className="finding-pagination"><button className="button button-secondary" type="button" onClick={loadMore} disabled={loadingMore || Boolean(loading)}>{loadingMore ? "正在读取更多…" : "加载更多证据"}</button><span>{loadingMore ? "保持当前已读取结果不变" : "分页读取，不扫描原始日志"}</span></div>}</section>
   </section>;
 }

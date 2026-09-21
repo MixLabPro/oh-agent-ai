@@ -35,6 +35,17 @@ assert.equal(valid.issues.length, 2);
 assert.equal(valid.issues[0].sample_evidence[0].destination_class, "object_storage");
 assert.equal(valid.issues[0].sample_evidence[0].reference, "fnv1a64:2222222222222222");
 
+let capturedCursor = "unset";
+window.__TAURI__.core.invoke = async (command, args) => {
+  capturedCursor = command === "findings_groups_safe" ? args?.cursor : capturedCursor;
+  return invoke(command, args);
+};
+await bridge.readFindings("2");
+assert.equal(capturedCursor, "2");
+await assert.rejects(() => bridge.readFindings("cursor-2"), /分页游标不安全/);
+await assert.rejects(() => bridge.readFindings("x".repeat(257)), /分页游标不安全/);
+window.__TAURI__.core.invoke = invoke;
+
 const original = invoke;
 const override = async (command, args, mutate) => {
   const value = await original(command, args);

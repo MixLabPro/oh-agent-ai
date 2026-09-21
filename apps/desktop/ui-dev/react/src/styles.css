@@ -208,6 +208,8 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .finding-empty { padding: 18px 4px 6px; color: var(--text-subtle); font-size: 12px; line-height: 1.6; }
 .finding-empty strong { display: block; color: #26384e; font-size: 13px; }
 .finding-empty p { margin-top: 5px; }
+.finding-pagination { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px; margin-top: 14px; color: var(--text-subtle); font-size: 11px; text-align: center; }
+.finding-pagination .button { flex: 0 0 auto; }
 .section-description { margin-top: 6px; max-width: 680px; color: var(--text-subtle); font-size: 11px; line-height: 1.5; }
 .decision-summary-list { display: grid; gap: 8px; margin-bottom: 13px; }
 .decision-summary { display: grid; gap: 6px; padding: 13px 14px; border: 1px solid #e5eaf0; border-radius: 10px; background: #fbfcfe; }

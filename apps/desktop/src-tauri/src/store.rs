@@ -952,11 +952,28 @@ fn safe_findings_report(raw: &Value) -> Value {
         entry.3 = entry.3.saturating_add(group_sessions);
         if severity == "critical" { entry.0 = severity; }
     }
-    let rule_rows: Vec<Value> = rules.into_iter().map(|(rule, (severity, category, hits, group_sessions))| json!({
+    let page_rule_rows: Vec<Value> = rules.into_iter().map(|(rule, (severity, category, hits, group_sessions))| json!({
         "rule": rule, "severity": severity, "category": category, "hits": hits, "sessions": group_sessions
     })).collect();
+    let summary_rule_rows = raw.get("summary_rules").and_then(Value::as_array).map(|rows| rows.iter().filter_map(|row| {
+        let raw_rule = row.get("rule").and_then(Value::as_str).unwrap_or("OTHER");
+        let rule = safe_findings_rule(raw_rule);
+        let category = match row.get("category").and_then(Value::as_str).unwrap_or("other") {
+            "behavior" => "behavior", "billing" => "billing", "budget" => "budget", "source" => "source",
+            "usage" => "usage", "probe" => "probe", _ => "other",
+        };
+        let severity = safe_findings_severity(row.get("severity").and_then(Value::as_str).unwrap_or("unknown"));
+        let hits = row.get("hits").and_then(Value::as_u64)?;
+        let group_sessions = row.get("sessions").and_then(Value::as_u64)?;
+        Some(json!({ "rule": rule, "severity": severity, "category": category, "hits": hits.min(1_000_000_000), "sessions": group_sessions.min(1_000_000_000) }))
+    }).collect::<Vec<_>>());
+    let rule_rows = summary_rule_rows.filter(|rows| !rows.is_empty()).unwrap_or(page_rule_rows);
     let next_cursor = raw.get("next_cursor").and_then(Value::as_str).filter(|value| value.chars().all(|ch| ch.is_ascii_digit())).map(str::to_string);
     let total_groups = raw.get("total_groups").and_then(Value::as_u64).unwrap_or(groups.len() as u64);
+    let critical = raw.get("summary_critical").and_then(Value::as_u64).unwrap_or(critical);
+    let warning = raw.get("summary_warning").and_then(Value::as_u64).unwrap_or(warning);
+    let info = raw.get("summary_info").and_then(Value::as_u64).unwrap_or(info);
+    let sessions = raw.get("summary_sessions").and_then(Value::as_u64).unwrap_or(sessions);
     json!({
         "schema_version": "agent-vitals-findings/v1",
         "status": "ok",
@@ -2002,6 +2019,28 @@ mod tests {
         assert_eq!(projected["evidence_class"], "generic");
         assert_eq!(projected["severity"], "unknown");
         assert_eq!(projected["action_kind"], "other");
+    }
+
+    #[test]
+    fn safe_findings_report_keeps_paginated_summary_stable_and_sanitized() {
+        let raw = json!({
+            "groups": [], "total_groups": 101, "source_issue_count": 77,
+            "summary_critical": 4, "summary_warning": 9, "summary_info": 2,
+            "summary_sessions": 33,
+            "summary_rules": [
+                {"rule": "SV709", "severity": "critical", "category": "behavior", "hits": 14, "sessions": 8},
+                {"rule": "evil/path", "severity": "warning", "category": "private", "hits": 99_999_999_999u64, "sessions": 7},
+            ],
+        });
+        let projected = safe_findings_report(&raw);
+        assert_eq!(projected["totals"]["issues"], 101);
+        assert_eq!(projected["totals"]["critical"], 4);
+        assert_eq!(projected["totals"]["sessions"], 33);
+        assert_eq!(projected["rules"][0]["rule"], "SV709");
+        assert_eq!(projected["rules"][1]["rule"], "OTHER");
+        assert_eq!(projected["rules"][1]["category"], "other");
+        assert_eq!(projected["rules"][1]["hits"], 1_000_000_000u64);
+        assert!(!projected.to_string().contains("evil/path"));
     }
 
     #[test]

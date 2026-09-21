@@ -1982,7 +1982,8 @@ export async function runTrustRuntimeSnapshot(): Promise<TrustRuntimeSnapshot> {
   return parseTrustRuntimeSnapshot(await handler("trust_runtime_snapshot"));
 }
 
-export async function readFindings(): Promise<FindingsReport> {
+export async function readFindings(cursor: string | null = null): Promise<FindingsReport> {
+  if (cursor !== null && (typeof cursor !== "string" || !/^\d{1,12}$/.test(cursor))) throw new Error("发现分页游标不安全");
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return parseFindings({
     schema_version: "agent-vitals-findings/v1", status: "ok",
@@ -1993,7 +1994,7 @@ export async function readFindings(): Promise<FindingsReport> {
       { group_id: "fnv1a64:1111111111111111", action_kind: "billing", rule: "PRICE_COVERAGE", host: "minimax-code", evidence_class: "billing", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:3333333333333333", observed_first_at_ms: 1789891200000, observed_last_at_ms: 1789891200000, evidence_level: null, stage: null, evidence_origin: "local_artifact", scope_classes: [], observation_count: 1, file_count: null, byte_count: null, destination_class: null, confidence: "medium" }], read_only: false, manual_follow_up: true },
     ], next_cursor: null, refreshed: false,
   });
-  return parseFindings(await handler("findings_groups_safe", { pageSize: 50, cursor: null }));
+  return parseFindings(await handler("findings_groups_safe", { pageSize: 50, cursor }));
 }
 
 export async function readFindingsFreshness(): Promise<FindingsFreshness> {

@@ -3,6 +3,7 @@
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use jiff::Timestamp;
+use std::collections::BTreeMap;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const EPOCH_SECONDS_CUTOFF: i64 = 100_000_000_000;
@@ -871,12 +872,43 @@ pub fn issue_groups_with_sources(
     groups.extend(probe_verdict_groups(conn, from_ms, to_ms)?);
     groups.sort_by(|a, b| b["actionability"].as_f64().partial_cmp(&a["actionability"].as_f64()).unwrap_or(std::cmp::Ordering::Equal)
         .then_with(|| a["group_id"].as_str().cmp(&b["group_id"].as_str())));
+    let mut critical = 0u64;
+    let mut warning = 0u64;
+    let mut info = 0u64;
+    let mut sessions = 0u64;
+    let mut rules: BTreeMap<String, (String, String, u64, u64)> = BTreeMap::new();
+    for group in &groups {
+        match group["severity"].as_str().unwrap_or("unknown") {
+            "critical" => critical = critical.saturating_add(1),
+            "warning" => warning = warning.saturating_add(1),
+            "info" => info = info.saturating_add(1),
+            _ => {}
+        }
+        sessions = sessions.saturating_add(group["sessions_count"].as_u64().unwrap_or(0));
+        let rule = group["rule"].as_str().unwrap_or("OTHER").to_string();
+        let severity = group["severity"].as_str().unwrap_or("unknown").to_string();
+        let source_kind = group["source_kind"].as_str().unwrap_or("behavior");
+        let category = if rule.starts_with("SV") { "behavior" } else { match source_kind {
+            "billing_candidate" | "billing_group" => "billing",
+            "budget" => "budget", "source_failure" => "source", "usage_growth" => "usage",
+            "probe" => "probe", _ => "other",
+        }}.to_string();
+        let entry = rules.entry(rule).or_insert((severity.clone(), category, 0, 0));
+        entry.2 = entry.2.saturating_add(group["count"].as_u64().unwrap_or(0));
+        entry.3 = entry.3.saturating_add(group["sessions_count"].as_u64().unwrap_or(0));
+        if severity == "critical" { entry.0 = severity; }
+    }
+    let summary_rules: Vec<Value> = rules.into_iter().map(|(rule, (severity, category, hits, group_sessions))| json!({
+        "rule": rule, "severity": severity, "category": category, "hits": hits, "sessions": group_sessions
+    })).collect();
     let offset = cursor.and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).min(groups.len());
     let limit = if page_size == usize::MAX { groups.len() } else { page_size.clamp(1, 500) };
     let end = offset.saturating_add(limit).min(groups.len());
     Ok(json!({"groups": groups[offset..end].to_vec(), "next_cursor": (end < groups.len()).then(|| end.to_string()),
         "total_groups": groups.len(), "source_issue_count": behavior["source_issue_count"].as_u64().unwrap_or(0),
-        "source_projection_count": groups.len().saturating_sub(behavior["total_groups"].as_u64().unwrap_or(0) as usize)}))
+        "source_projection_count": groups.len().saturating_sub(behavior["total_groups"].as_u64().unwrap_or(0) as usize),
+        "summary_critical": critical, "summary_warning": warning, "summary_info": info,
+        "summary_sessions": sessions, "summary_rules": summary_rules}))
 }
 
 /// Build a paginated L0 issue-group projection from the issue authority table.
@@ -1409,6 +1441,10 @@ mod tests {
         let result = issue_groups_with_sources(db.conn(), None, None, 50, None).unwrap();
         let groups = result["groups"].as_array().unwrap();
         assert_eq!(groups.len(), 4);
+        assert_eq!(result["total_groups"], 4);
+        assert!(result["summary_rules"].as_array().unwrap().iter().any(|row| {
+            row["rule"] == "PRICE_COVERAGE" && row["hits"] == 2
+        }));
         let billing_group = groups.iter().find(|g| g["source_kind"] == "billing_group").unwrap();
         assert_eq!(billing_group["rule"], "BILLING_CONFIRMATION");
         assert_eq!(billing_group["object"], "openai:gpt-mystery");
