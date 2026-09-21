@@ -1275,6 +1275,7 @@ function routeModel(value: unknown, label: string): string {
   // same path/URL/control-character exclusions while allowing only brackets
   // as the additional model-specific syntax.
   const text = stringField(value, label);
+  if (text === "<synthetic>" || text === "<unknown>") return text;
   const valid = /^[A-Za-z0-9][A-Za-z0-9._:@+<>\-\[\]]{0,127}(\/[A-Za-z0-9][A-Za-z0-9._:@+<>\-\[\]]{0,127})?$/.test(text)
     && !text.includes("://")
     && !text.includes("..")

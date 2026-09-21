@@ -92,18 +92,21 @@ export function UsagePage() {
   const [loading, setLoading] = useState(true);
   const [hourlyLoading, setHourlyLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sourceError, setSourceError] = useState<string | null>(null);
   const [hourlyError, setHourlyError] = useState<string | null>(null);
   const monthRequest = useRef(0);
+  const loadedCalendarMonth = useRef<string | null>(null);
   const [hourlyReloadKey, setHourlyReloadKey] = useState(0);
 
   const loadMonth = (requestedMonth: string) => {
     const requestId = ++monthRequest.current;
     setLoading(true);
     setError(null);
+    setSourceError(null);
     // Keep the last known projection visible during a refresh. The rendered
     // month below is derived from the returned DTO, so stale data is never
     // presented as if it belonged to the newly requested month.
-    const changingMonth = !calendar || calendar.month !== requestedMonth;
+    const changingMonth = loadedCalendarMonth.current !== requestedMonth;
     if (changingMonth) {
       setSelectedDate(null);
       setHourly(null);
@@ -113,14 +116,21 @@ export function UsagePage() {
       if (requestId !== monthRequest.current) return;
       if (calendarResult.status === "fulfilled") {
         setCalendar(calendarResult.value);
-        const first = calendarResult.value.days.find((day) => day.total_tokens > 0)?.date ?? null;
-        const today = todayDate(timezone);
-        setSelectedDate(first && first <= today ? first : null);
+        loadedCalendarMonth.current = calendarResult.value.month;
+        if (changingMonth) {
+          const first = calendarResult.value.days.find((day) => day.total_tokens > 0)?.date ?? null;
+          const today = todayDate(timezone);
+          setSelectedDate(first && first <= today ? first : null);
+        }
         setHourlyReloadKey((value) => value + 1);
       } else {
         setError(calendarResult.reason instanceof Error ? calendarResult.reason.message : "用量日历暂不可用");
       }
-      if (sourceResult.status === "fulfilled") setSource(sourceResult.value);
+      if (sourceResult.status === "fulfilled") {
+        setSource(sourceResult.value);
+      } else {
+        setSourceError(sourceResult.reason instanceof Error ? sourceResult.reason.message : "来源状态暂不可用");
+      }
       setLoading(false);
     });
     return () => { if (requestId === monthRequest.current) monthRequest.current += 1; };
@@ -174,8 +184,10 @@ export function UsagePage() {
   }, [calendar]);
   const today = todayDate(timezone);
   const displayedMonth = calendar?.month ?? source?.month ?? month;
+  const calendarForDisplayedMonth = calendar?.month === displayedMonth ? calendar : null;
+  const sourceForDisplayedMonth = source?.month === displayedMonth ? source : null;
   const layout = dateParts(displayedMonth);
-  const selectedDay = dayFor(calendar, selectedDate ?? "");
+  const selectedDay = dayFor(calendarForDisplayedMonth, selectedDate ?? "");
   const maxHourTokens = Math.max(1, ...(hourly?.hours.map(hourlyTotal) ?? [1]));
 
   return <>
@@ -189,28 +201,29 @@ export function UsagePage() {
       </div>
     </section>
     {error && <div className="error-banner" role="alert">读取日历失败：{error}</div>}
+    {sourceError && <div className="error-banner" role="alert">读取来源摘要失败：{sourceError}；不会把上一月份来源数据冒充为当前月份。</div>}
     {loading && !calendar && !source && <section className="empty-state" aria-live="polite"><p className="eyebrow">正在读取</p><h3>{monthTitle(month)}用量</h3><p>正在通过本地 authority 获取安全聚合。</p></section>}
     {loading && (calendar || source) && <div className="usage-refresh-status" role="status" aria-live="polite">正在读取 {monthTitle(month)}；保留 {monthTitle(displayedMonth)} 的已知结果。</div>}
     {(calendar || source) && <div aria-busy={loading || undefined}>
       <section className="usage-summary-grid" aria-label="月份汇总">
-        <article className="stat-card"><p className="eyebrow">{monthTitle(displayedMonth)} token</p><p className="stat-value">{totals.tokens ? tokensLabel(totals.tokens) : "—"}</p><p className="stat-detail">{totals.tokens ? "跨宿主可加总" : "该月暂无已测 token"}</p></article>
-        <article className="stat-card"><p className="eyebrow">日历来源口径成本</p><p className="stat-value stat-value-compact">{costsLabel(totals.costs)}</p><p className="stat-detail">{source ? `${spendBasisLabel(source.spend_by_basis)} · 日历不摊订阅月费` : "CNY / USD 分栏，不跨币种相加"}</p></article>
-        <article className="stat-card"><p className="eyebrow">数据新鲜度</p><p className="stat-value stat-value-compact">{source ? freshnessLabel(source.freshness) : "—"}</p><p className="stat-detail">{source?.last_observed_at ? `最后观测 ${source.last_observed_at.slice(0, 10)}` : "来源状态不可用"}</p></article>
+        <article className="stat-card"><p className="eyebrow">{monthTitle(displayedMonth)} token</p><p className="stat-value">{calendarForDisplayedMonth && totals.tokens ? tokensLabel(totals.tokens) : "—"}</p><p className="stat-detail">{calendarForDisplayedMonth && totals.tokens ? "跨宿主可加总" : "该月日历数据不可用"}</p></article>
+        <article className="stat-card"><p className="eyebrow">日历来源口径成本</p><p className="stat-value stat-value-compact">{calendarForDisplayedMonth ? costsLabel(totals.costs) : "—"}</p><p className="stat-detail">{sourceForDisplayedMonth ? `${spendBasisLabel(sourceForDisplayedMonth.spend_by_basis)} · 日历不摊订阅月费` : "当前月份来源摘要不可用"}</p></article>
+        <article className="stat-card"><p className="eyebrow">数据新鲜度</p><p className="stat-value stat-value-compact">{sourceForDisplayedMonth ? freshnessLabel(sourceForDisplayedMonth.freshness) : "—"}</p><p className="stat-detail">{sourceForDisplayedMonth?.last_observed_at ? `最后观测 ${sourceForDisplayedMonth.last_observed_at.slice(0, 10)}` : "当前月份来源状态不可用"}</p></article>
       </section>
       <section className="usage-calendar-panel" aria-labelledby="usage-calendar-title">
-        <div className="section-heading"><div><p className="eyebrow">日历</p><h3 id="usage-calendar-title">{monthTitle(displayedMonth)}</h3></div><span className="count-badge">{calendar?.days.length ?? 0} 天</span></div>
-        {totals.tokens > 0 ? <div className="usage-calendar-grid" role="grid" aria-label={`${monthTitle(displayedMonth)} token 日历`}>
+        <div className="section-heading"><div><p className="eyebrow">日历</p><h3 id="usage-calendar-title">{monthTitle(displayedMonth)}</h3></div><span className="count-badge">{calendarForDisplayedMonth?.days.length ?? 0} 天</span></div>
+        {calendarForDisplayedMonth && totals.tokens > 0 ? <div className="usage-calendar-grid" role="grid" aria-label={`${monthTitle(displayedMonth)} token 日历`}>
           {(["日", "一", "二", "三", "四", "五", "六"] as const).map((day) => <span className="usage-calendar-dow" role="columnheader" key={day}>{day}</span>)}
           {Array.from({ length: layout.leading }, (_, index) => <span className="usage-calendar-cell usage-calendar-blank" aria-hidden="true" key={`blank-${index}`} />)}
           {Array.from({ length: layout.days }, (_, index) => {
             const date = `${displayedMonth}-${String(index + 1).padStart(2, "0")}`;
-            const day = dayFor(calendar, date);
+            const day = dayFor(calendarForDisplayedMonth, date);
             const future = date > today;
             const selected = selectedDate === date;
             const value = metric === "tokens" ? (day ? tokensLabel(day.total_tokens) : "—") : (day ? costsLabel(day.costs) : "—");
             return <button className={`usage-calendar-cell ${day && day.total_tokens > 0 ? "usage-calendar-has-data" : ""} ${selected ? "usage-calendar-selected" : ""} ${future ? "usage-calendar-future" : ""}`} type="button" role="gridcell" key={date} disabled={future} aria-selected={selected} aria-label={`${date}，${value}${future ? "，未来日期" : "，查看小时明细"}`} onClick={() => setSelectedDate(date)}><span>{index + 1}</span><strong>{value}</strong>{metric === "cost" && day && day.total_tokens > 0 && <small>{day.cost_lines.length ? costLinesLabel(day.cost_lines) : `${tokensLabel(day.total_tokens)} tokens`}</small>}</button>;
           })}
-        </div> : <div className="usage-empty">该月没有已测 token。空数据不等于来源不可用，请结合下方覆盖状态判断。</div>}
+        </div> : <div className="usage-empty">{calendarForDisplayedMonth ? "该月没有已测 token。空数据不等于来源不可用，请结合下方覆盖状态判断。" : "该月份日历结果暂不可用；上一份结果未被冒充为当前月份。"}</div>}
         <p className="usage-note">{metric === "tokens" ? "主行 = 当日跨宿主 token 总量；点击过去日期查看小时分布。" : "主行 = 当日成本分币并列；没有成本证据显示“成本不可用”，不等于 ¥0。"}</p>
       </section>
       <section className="usage-detail-grid">
@@ -220,7 +233,7 @@ export function UsagePage() {
           {hourlyError && <p className="usage-empty" role="alert">{hourlyError}</p>}
           {!hourlyLoading && !hourlyError && hourly && <><div className="usage-hour-grid">{hourly.hours.map((hour) => { const total = hourlyTotal(hour); const label = total ? `${String(hour.hour).padStart(2, "0")}:00 · ${tokensLabel(total)} tokens` : `${String(hour.hour).padStart(2, "0")}:00 · 无观测数据`; return <div className={`usage-hour ${total === 0 ? "usage-hour-empty" : ""}`} key={hour.hour} role="img" aria-label={label} title={label}><div className="usage-hour-bar"><span style={{ height: `${Math.max(total ? 4 : 1, Math.round((total / maxHourTokens) * 56))}px` }} /></div><small aria-hidden="true">{String(hour.hour).padStart(2, "0")}</small></div>; })}</div><p className="usage-note">小时空格 = 没有已观测事实，不会用日总量均摊补造；{Object.entries(hourly.hosts_available).map(([host, value]) => `${host}：${sourceLabel(value)}`).join(" · ")}。</p></>}
         </section>
-        <section className="usage-source-panel" aria-labelledby="usage-source-title"><div className="section-heading"><div><p className="eyebrow">来源状态</p><h3 id="usage-source-title">覆盖与新鲜度</h3></div><span className="count-badge">{source ? `${source.coverage.measured_fields}/${source.coverage.total_fields}` : "—"}</span></div>{source ? <dl className="usage-source-list"><div><dt>账单级实付</dt><dd>{Object.keys(source.actual_spend).length ? costsLabel(source.actual_spend) : "无数据"}</dd></div><div><dt>状态</dt><dd>{freshnessLabel(source.freshness)}</dd></div><div><dt>范围外宿主</dt><dd>{source.excluded_hosts.length ? source.excluded_hosts.join("、") : "无"}</dd></div></dl> : <p className="usage-empty">来源状态暂不可用；日历与来源面板独立读取。</p>}</section>
+        <section className="usage-source-panel" aria-labelledby="usage-source-title"><div className="section-heading"><div><p className="eyebrow">来源状态</p><h3 id="usage-source-title">覆盖与新鲜度</h3></div><span className="count-badge">{sourceForDisplayedMonth ? `${sourceForDisplayedMonth.coverage.measured_fields}/${sourceForDisplayedMonth.coverage.total_fields}` : "—"}</span></div>{sourceForDisplayedMonth ? <dl className="usage-source-list"><div><dt>账单级实付</dt><dd>{Object.keys(sourceForDisplayedMonth.actual_spend).length ? costsLabel(sourceForDisplayedMonth.actual_spend) : "无数据"}</dd></div><div><dt>状态</dt><dd>{freshnessLabel(sourceForDisplayedMonth.freshness)}</dd></div><div><dt>范围外宿主</dt><dd>{sourceForDisplayedMonth.excluded_hosts.length ? sourceForDisplayedMonth.excluded_hosts.join("、") : "无"}</dd></div></dl> : <p className="usage-empty">来源状态暂不可用；日历与来源面板独立读取。</p>}</section>
       </section>
     </div>}
   </>;
