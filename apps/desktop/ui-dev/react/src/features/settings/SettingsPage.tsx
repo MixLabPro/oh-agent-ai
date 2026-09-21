@@ -143,6 +143,15 @@ function SettingsLoadingState({ loading, hasData, title, detail }: { loading: bo
   return <div className="settings-source-state" role="status"><strong>{hasData ? `正在刷新${title}` : `正在读取${title}`}</strong><span>{hasData ? "保留上一次可读结果；刷新完成前不会清空页面。" : detail}</span></div>;
 }
 
+function useMountedRef() {
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  return mounted;
+}
+
 type StatisticsDataSectionProps = { report: StatisticsSettingsReport | null; loading: boolean; error: string | null; onReload: () => void };
 
 function StatisticsDataSection({ report, loading, error, onReload }: StatisticsDataSectionProps) {
@@ -157,6 +166,7 @@ function StatisticsDataSection({ report, loading, error, onReload }: StatisticsD
   const [exportLoading, setExportLoading] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportPreview, setExportPreview] = useState(false);
+  const mounted = useMountedRef();
 
   useEffect(() => {
     if (report?.timezone.status === "ok" && report.timezone.timezone) {
@@ -174,9 +184,9 @@ function StatisticsDataSection({ report, loading, error, onReload }: StatisticsD
     setActionError(null); setMessage(null);
     if (!next) { setActionError("请选择或填写有效的 IANA 时区。"); return; }
     setSavingTimezone(true);
-    try { const receipt = await saveStatisticsTimezone(next); setTimezone(receipt.timezone); setMessage(`统计时区已保存为 ${receipt.timezone}；用量页会按新的月份边界刷新。`); onReload(); }
-    catch (reason: unknown) { setActionError(safeUiError(reason, "统计时区保存失败")); }
-    finally { setSavingTimezone(false); }
+    try { const receipt = await saveStatisticsTimezone(next); if (!mounted.current) return; setTimezone(receipt.timezone); setMessage(`统计时区已保存为 ${receipt.timezone}；用量页会按新的月份边界刷新。`); onReload(); }
+    catch (reason: unknown) { if (mounted.current) setActionError(safeUiError(reason, "统计时区保存失败")); }
+    finally { if (mounted.current) setSavingTimezone(false); }
   };
 
   const saveRetention = async (event: FormEvent<HTMLFormElement>) => {
@@ -188,18 +198,18 @@ function StatisticsDataSection({ report, loading, error, onReload }: StatisticsD
     setActionError(null); setMessage(null);
     if (!Number.isSafeInteger(months) || months < minimum || months > maximum) { setActionError(`保留期必须是 ${minimum}-${maximum} 之间的整数。`); return; }
     setSavingRetention(true);
-    try { const receipt = await saveRetentionMonths(months, minimum, maximum); setRetention(String(receipt.months)); setMessage(`本机保留期已保存为 ${receipt.months} 个月；下次维护时才会执行清理。`); onReload(); }
-    catch (reason: unknown) { setActionError(safeUiError(reason, "保留期保存失败")); }
-    finally { setSavingRetention(false); }
+    try { const receipt = await saveRetentionMonths(months, minimum, maximum); if (!mounted.current) return; setRetention(String(receipt.months)); setMessage(`本机保留期已保存为 ${receipt.months} 个月；下次维护时才会执行清理。`); onReload(); }
+    catch (reason: unknown) { if (mounted.current) setActionError(safeUiError(reason, "保留期保存失败")); }
+    finally { if (mounted.current) setSavingRetention(false); }
   };
 
   const loadExport = async () => {
     if (exportLoading) return;
     setExportLoading(true); setExportError(null);
     const timezoneForExport = report?.timezone.status === "ok" ? report.timezone.timezone ?? undefined : undefined;
-    try { setExportSummary(await readMonthlyExportSummary(statisticsMonth(timezoneForExport))); setExportPreview(true); }
-    catch (reason: unknown) { setExportSummary(null); setExportError(safeUiError(reason, "月度摘要读取失败")); }
-    finally { setExportLoading(false); }
+    try { const summary = await readMonthlyExportSummary(statisticsMonth(timezoneForExport)); if (!mounted.current) return; setExportSummary(summary); setExportPreview(true); }
+    catch (reason: unknown) { if (mounted.current) { setExportSummary(null); setExportError(safeUiError(reason, "月度摘要读取失败")); } }
+    finally { if (mounted.current) setExportLoading(false); }
   };
 
   const downloadExport = () => {
@@ -238,27 +248,28 @@ function AboutSection({ report, loading, error, onReload }: AboutSectionProps) {
   const [message, setMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [update, setUpdate] = useState<UpdateCheckResult | null>(null);
+  const mounted = useMountedRef();
 
   const exportDiagnostics = async () => {
     if (exporting) return;
     setExporting(true); setActionError(null); setMessage(null);
-    try { const receipt = await saveDiagnosticPackage(); setMessage(receipt.status === "cancelled" ? "已取消保存诊断包。" : "诊断包已保存到你选择的位置；不会自动上传。"); }
-    catch (reason: unknown) { setActionError(safeUiError(reason, "诊断包保存失败")); }
-    finally { setExporting(false); }
+    try { const receipt = await saveDiagnosticPackage(); if (mounted.current) setMessage(receipt.status === "cancelled" ? "已取消保存诊断包。" : "诊断包已保存到你选择的位置；不会自动上传。"); }
+    catch (reason: unknown) { if (mounted.current) setActionError(safeUiError(reason, "诊断包保存失败")); }
+    finally { if (mounted.current) setExporting(false); }
   };
   const checkUpdates = async () => {
     if (checking) return;
     setChecking(true); setActionError(null); setMessage(null);
-    try { const result = await checkForUpdates(); setUpdate(result); setMessage(result.status === "ok" && result.latestTag ? `当前 ${result.currentVersion ?? "未知"} · 最新 ${result.latestTag}；请手动从发布页确认安装。` : result.status === "no_release" ? "当前没有可用的可信发布。" : "版本检查暂不可用。"); }
-    catch (reason: unknown) { setActionError(safeUiError(reason, "版本检查失败")); }
-    finally { setChecking(false); }
+    try { const result = await checkForUpdates(); if (mounted.current) { setUpdate(result); setMessage(result.status === "ok" && result.latestTag ? `当前 ${result.currentVersion ?? "未知"} · 最新 ${result.latestTag}；请手动从发布页确认安装。` : result.status === "no_release" ? "当前没有可用的可信发布。" : "版本检查暂不可用。"); } }
+    catch (reason: unknown) { if (mounted.current) setActionError(safeUiError(reason, "版本检查失败")); }
+    finally { if (mounted.current) setChecking(false); }
   };
   const openReleases = async () => {
     if (opening) return;
     setOpening(true); setActionError(null);
-    try { await openTrustedReleasesPage(); setMessage("已打开可信发布页；安装需由你手动确认。"); }
-    catch (reason: unknown) { setActionError(safeUiError(reason, "发布页打开失败")); }
-    finally { setOpening(false); }
+    try { await openTrustedReleasesPage(); if (mounted.current) setMessage("已打开可信发布页；安装需由你手动确认。"); }
+    catch (reason: unknown) { if (mounted.current) setActionError(safeUiError(reason, "发布页打开失败")); }
+    finally { if (mounted.current) setOpening(false); }
   };
   return <section className="settings-about-section" id="settings-about" aria-labelledby="settings-about-title">
     <div className="settings-section-heading"><div><p className="eyebrow">关于与诊断</p><h3 id="settings-about-title">关于与诊断</h3><p>版本信息来自本机；诊断包由你主动保存，不含会话正文、绝对路径或账户标识，也不会自动上传。</p></div><button className="button button-secondary button-small" type="button" onClick={onReload} disabled={loading}>{loading ? "读取中…" : "重载诊断"}</button></div>
@@ -297,6 +308,7 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
   const [amendBusy, setAmendBusy] = useState(false);
   const [amendError, setAmendError] = useState<string | null>(null);
   const [amendMessage, setAmendMessage] = useState<string | null>(null);
+  const mounted = useMountedRef();
   const pendingGroups = report?.groups ?? [];
   const pendingCandidates = (report?.candidates ?? []).filter((candidate) => candidate.status === "pending");
   const dismissedCandidates = (report?.candidates ?? []).filter((candidate) => candidate.status === "dismissed");
@@ -308,22 +320,24 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
     setCandidateBusy(candidateId); setCandidateError(null); setCandidateMessage(null);
     try {
       const receipt = await resolveBillingImportCandidate(candidateId, decision);
+      if (!mounted.current) return;
       setCandidateMessage(receipt.changed ? decision === "dismiss" ? "已标记为不是我的；未修改历史金额。" : "已重新打开待确认候选。" : "状态没有变化。保留现有计费结果。");
       onReload();
     } catch (reason: unknown) {
-      setCandidateError(safeUiError(reason, "计费候选处置失败"));
-    } finally { setCandidateBusy(null); }
+      if (mounted.current) setCandidateError(safeUiError(reason, "计费候选处置失败"));
+    } finally { if (mounted.current) setCandidateBusy(null); }
   };
   const retryJob = async (jobId: string) => {
     if (retryJobId) return;
     setRetryJobId(jobId); setRetryError(null); setRetryMessage(null);
     try {
       const receipt = await retryBillingRecalculation(jobId);
+      if (!mounted.current) return;
       setRetryMessage(receipt.changed ? `重算任务已重新入队（${receipt.job_id}）；完成前旧结果仍可读。` : `重算任务未发生变化（${receipt.job_id}）；旧结果仍可读。`);
       onReload();
     } catch (reason: unknown) {
-      setRetryError(safeUiError(reason, "重算重试失败"));
-    } finally { setRetryJobId(null); }
+      if (mounted.current) setRetryError(safeUiError(reason, "重算重试失败"));
+    } finally { if (mounted.current) setRetryJobId(null); }
   };
   const revokeDeclaration = async (declaration: BillingSettingsReport["declarations"][number]) => {
     if (!declaration.current_revision_id || revokeBusy) return;
@@ -331,10 +345,11 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
     setRevokeBusy(declaration.declaration_id); setRevokeError(null); setRevokeMessage(null);
     try {
       const receipt = await revokeBillingDeclaration({ declaration_id: declaration.declaration_id, supersedes_revision_id: declaration.current_revision_id });
+      if (!mounted.current) return;
       setRevokeMessage(receipt.changed ? `已撤销声明（${receipt.declaration_id}）；历史事实保留，未来归因将按未声明状态重算。` : "声明状态没有变化；保留现有历史结果。");
       setRevokeDeclarationId(null); onReload();
-    } catch (reason: unknown) { setRevokeError(safeUiError(reason, "计费声明撤销失败")); }
-    finally { setRevokeBusy(null); }
+    } catch (reason: unknown) { if (mounted.current) setRevokeError(safeUiError(reason, "计费声明撤销失败")); }
+    finally { if (mounted.current) setRevokeBusy(null); }
   };
   const openAmendment = (declaration: BillingSettingsReport["declarations"][number]) => {
     setAmendDeclaration(declaration); setAmendName(declaration.subscription_name ?? ""); setAmendAmount(declaration.amount_minor === null ? "" : (declaration.amount_minor / 100).toFixed(2)); setAmendCurrency(declaration.currency === "USD" ? "USD" : "CNY"); setAmendEnd(declaration.effective_end ?? ""); setAmendError(null); setAmendMessage(null);
@@ -350,12 +365,13 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
     if (effectiveEnd !== null && (!/^\d{4}-\d{2}-\d{2}$/u.test(effectiveEnd) || effectiveEnd < effectiveStart || effectiveEnd > statisticsDay("Asia/Shanghai"))) { setAmendError("结束日期必须不早于本次修订起始日且不晚于今天；留空表示持续有效。"); setAmendBusy(false); return; }
     try {
       const receipt = await amendBillingDeclaration({ declaration_id: amendDeclaration.declaration_id, supersedes_revision_id: amendDeclaration.current_revision_id, host: amendDeclaration.host, provider_id: amendDeclaration.provider_id, subscription_name: amendName.trim() || null, amount_minor: amountMinor, currency: amountMinor === null ? null : amendCurrency, effective_start: effectiveStart, effective_end: effectiveEnd, source_candidate_id: amendDeclaration.source_candidate_id, scopes: amendDeclaration.scopes });
+      if (!mounted.current) return;
       if (receipt.job?.status === "queued") setAmendMessage(`订阅修订已保存（自 ${effectiveStart} 生效），重算任务已入队（${receipt.job.job_id}）；历史月份不变。`);
       else if (receipt.job?.status === "enqueue_failed") setAmendMessage("订阅修订已保存，但重算没有入队；当前数字仍是旧结果。");
       else setAmendMessage("订阅修订已保存；历史月份不变。重算状态仍需单独确认。");
       setAmendDeclaration(null); onReload();
-    } catch (reason: unknown) { setAmendError(safeUiError(reason, "订阅修订保存失败")); }
-    finally { setAmendBusy(false); }
+    } catch (reason: unknown) { if (mounted.current) setAmendError(safeUiError(reason, "订阅修订保存失败")); }
+    finally { if (mounted.current) setAmendBusy(false); }
   };
   const openDeclaration = (group: BillingSettingsReport["groups"][number]) => {
     setDeclarationGroup(group); setDeclarationKind("official_api"); setDeclarationImpact(null); setDeclarationError(null); setDeclarationMessage(null);
@@ -368,9 +384,9 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
     setDeclarationBusy("preview"); setDeclarationError(null); setDeclarationMessage(null);
     try {
       const impact = await previewBillingDeclaration({ host: declarationGroup.host, provider_id: declarationGroup.provider_id, relationship_kind: declarationKind, effective_start: declarationGroup.effective_start, effective_end: declarationGroup.effective_end, scopes: declarationScopes });
-      setDeclarationImpact(impact);
-    } catch (reason: unknown) { setDeclarationError(safeUiError(reason, "计费影响预览失败")); }
-    finally { setDeclarationBusy(null); }
+      if (mounted.current) setDeclarationImpact(impact);
+    } catch (reason: unknown) { if (mounted.current) setDeclarationError(safeUiError(reason, "计费影响预览失败")); }
+    finally { if (mounted.current) setDeclarationBusy(null); }
   };
   const saveDeclaration = async () => {
     if (!declarationGroup || !declarationImpact || declarationBusy) return;
@@ -378,6 +394,7 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
     const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     try {
       const receipt = await saveBillingDeclaration({ revision_id: `rev-react-${suffix}`, declaration_id: `decl-react-${suffix}`, host: declarationGroup.host, provider_id: declarationGroup.provider_id, relationship_kind: declarationKind, effective_start: declarationGroup.effective_start, effective_end: declarationGroup.effective_end, source_candidate_id: null, evidence_ref: `react:confirmation-group:${declarationGroup.group_id}`, scopes: declarationScopes });
+      if (!mounted.current) return;
       if (receipt.job?.status === "queued") {
         setDeclarationMessage(`声明已保存，重算任务已入队（${receipt.job.job_id}）；完成前旧结果仍可读。`);
       } else if (receipt.job?.status === "enqueue_failed") {
@@ -387,8 +404,8 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
         setDeclarationMessage("声明已保存；该关系不改变金额。旧结果仍可读。");
       }
       setDeclarationGroup(null); setDeclarationImpact(null); onReload();
-    } catch (reason: unknown) { setDeclarationError(safeUiError(reason, "计费声明保存失败")); }
-    finally { setDeclarationBusy(null); }
+    } catch (reason: unknown) { if (mounted.current) setDeclarationError(safeUiError(reason, "计费声明保存失败")); }
+    finally { if (mounted.current) setDeclarationBusy(null); }
   };
   return <section className="settings-billing-section" id="settings-billing" aria-labelledby="settings-billing-title">
     <div className="settings-section-heading"><div><p className="eyebrow">计费与套餐</p><h3 id="settings-billing-title">计费与套餐</h3><p>查看待确认的计费关系、当前声明和已有账单；账单录入仍在旧工作台。</p></div><button className="button button-secondary button-small" type="button" onClick={onReload} disabled={loading}>{loading ? "读取中…" : "重载计费"}</button></div>
@@ -439,6 +456,7 @@ function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps)
   const [snoozing, setSnoozing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const mounted = useMountedRef();
 
   useEffect(() => {
     const estimate = report?.estimate;
@@ -465,11 +483,12 @@ function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps)
     setSaving(true);
     try {
       const receipt = await saveBudgetProfile({ currency, monthly_minor: monthlyMinor, daily_minor: dailyMinor });
+      if (!mounted.current) return;
       setMessage(`已保存 ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${receipt.notification_permission === "granted" ? "。" : "。系统通知未授权，可在系统设置中开启。"}`);
       onReload();
     } catch (reason: unknown) {
-      setActionError(safeUiError(reason, "预算保存失败"));
-    } finally { setSaving(false); }
+      if (mounted.current) setActionError(safeUiError(reason, "预算保存失败"));
+    } finally { if (mounted.current) setSaving(false); }
   };
 
   const toggleSnooze = async () => {
@@ -478,14 +497,16 @@ function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps)
     try {
       if (report?.snoozed_until_ms && report.snoozed_until_ms > Date.now()) {
         await clearBudgetSnooze();
+        if (!mounted.current) return;
         setMessage("预算提醒已恢复。");
       } else {
         await snoozeBudgetCurrentPeriod();
+        if (!mounted.current) return;
         setMessage("预算提醒已静默至本周期结束；统计仍会继续更新。");
       }
-      onReload();
-    } catch (reason: unknown) { setActionError(safeUiError(reason, "预算提醒设置失败")); }
-    finally { setSnoozing(false); }
+      if (mounted.current) onReload();
+    } catch (reason: unknown) { if (mounted.current) setActionError(safeUiError(reason, "预算提醒设置失败")); }
+    finally { if (mounted.current) setSnoozing(false); }
   };
 
   const disable = async () => {
@@ -494,11 +515,12 @@ function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps)
     setDisabling(true); setActionError(null); setMessage(null);
     try {
       const receipt = await disableBudgetProfile();
+      if (!mounted.current) return;
       setDisableArmed(false);
       setMessage(receipt.changed ? "估算预算已停用；历史用量与已确认预算保留。" : "估算预算本来就未设置；历史用量未改变。");
       onReload();
-    } catch (reason: unknown) { setActionError(safeUiError(reason, "预算停用失败")); }
-    finally { setDisabling(false); }
+    } catch (reason: unknown) { if (mounted.current) setActionError(safeUiError(reason, "预算停用失败")); }
+    finally { if (mounted.current) setDisabling(false); }
   };
 
   const estimate = report?.estimate;
@@ -535,6 +557,7 @@ function QuotaReminderSection({ config, loading, error, onReload }: QuotaReminde
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const mounted = useMountedRef();
   const available = config?.status === "ok";
 
   const toggle = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -543,11 +566,12 @@ function QuotaReminderSection({ config, loading, error, onReload }: QuotaReminde
     setSaving(true); setActionError(null); setMessage(null);
     try {
       const receipt = await saveQuotaReminderConfig(enabled);
+      if (!mounted.current) return;
       setMessage(receipt.enabled ? receipt.notification_permission === "granted" ? "已开启；额度窗口耗尽时会提醒一次。" : "已开启，但系统通知未授权；可在系统设置中开启。" : "已关闭额度窗口提醒。");
       onReload();
     } catch (reason: unknown) {
-      setActionError(safeUiError(reason, "额度窗口提醒保存失败"));
-    } finally { setSaving(false); }
+      if (mounted.current) setActionError(safeUiError(reason, "额度窗口提醒保存失败"));
+    } finally { if (mounted.current) setSaving(false); }
   };
 
   const repair = async () => {
@@ -555,11 +579,12 @@ function QuotaReminderSection({ config, loading, error, onReload }: QuotaReminde
     setSaving(true); setActionError(null); setMessage(null);
     try {
       const receipt = await saveQuotaReminderConfig(false);
+      if (!mounted.current) return;
       setMessage(receipt.enabled ? "配置仍处于开启状态，请重试。" : "已恢复为关闭，额度窗口提醒配置已修复。定时任务不会被历史数据影响。");
       onReload();
     } catch (reason: unknown) {
-      setActionError(safeUiError(reason, "额度窗口提醒配置修复失败"));
-    } finally { setSaving(false); }
+      if (mounted.current) setActionError(safeUiError(reason, "额度窗口提醒配置修复失败"));
+    } finally { if (mounted.current) setSaving(false); }
   };
 
   return <section className="settings-notification-section" id="settings-notifications" aria-labelledby="settings-notifications-title">
@@ -611,17 +636,19 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const mounted = useMountedRef();
 
   const chooseRoot = async () => {
     setActionError(null);
     try {
       const selected = await pickCustomSourceRoot();
+      if (!mounted.current) return;
       if (selected) {
         setRoot(selected);
         setMessage("已选择目录，请确认工具后添加。");
       }
     } catch (reason: unknown) {
-      setActionError(safeUiError(reason, "无法打开目录选择"));
+      if (mounted.current) setActionError(safeUiError(reason, "无法打开目录选择"));
     }
   };
 
@@ -633,14 +660,15 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
     setMessage(null);
     try {
       const result = await addCustomSourceRoot(host, root.trim());
+      if (!mounted.current) return;
       setMessage(result.changed ? "目录已保存，正在同步。" : "该目录已在读取范围内，正在重新同步。");
       onReload();
       const synced = await onSync();
-      setMessage(synced ? "目录已保存，同步完成。" : "目录已保存，但本次同步未完成；稍后可重新同步。");
+      if (mounted.current) setMessage(synced ? "目录已保存，同步完成。" : "目录已保存，但本次同步未完成；稍后可重新同步。");
     } catch (reason: unknown) {
-      setActionError(safeUiError(reason, "添加读取位置失败"));
+      if (mounted.current) setActionError(safeUiError(reason, "添加读取位置失败"));
     } finally {
-      setSaving(false);
+      if (mounted.current) setSaving(false);
     }
   };
 
@@ -651,12 +679,13 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
     setMessage(null);
     try {
       const result = await removeCustomSourceRoot(source.host, source.root);
+      if (!mounted.current) return;
       setMessage(result.changed ? "已移除读取位置；已导入数据仍保留。" : "该目录已不在读取范围内。");
       onReload();
     } catch (reason: unknown) {
-      setActionError(safeUiError(reason, "移除读取位置失败"));
+      if (mounted.current) setActionError(safeUiError(reason, "移除读取位置失败"));
     } finally {
-      setSaving(false);
+      if (mounted.current) setSaving(false);
     }
   };
 

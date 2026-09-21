@@ -16,6 +16,9 @@ for (const name of ["sourceRequest", "sourceControlsRequest", "customRequest", "
 assert.match(source, /const settingsMounted = useRef\(true\)/, "settings mounted guard missing");
 assert.match(source, /useEffect\(\(\) => \{\s*settingsMounted\.current = true/u, "settings mounted guard is not re-armed for StrictMode effect replay");
 assert.match(source, /settingsMounted\.current = false/, "settings unmount invalidation missing");
+assert.equal((source.match(/const mounted = useMountedRef\(\)/g) ?? []).length, 6, "settings child mounted guards are incomplete");
+assert.match(source, /if \(!mounted\.current\) return;/, "settings child actions do not stop after unmount");
+assert.match(source, /if \(mounted\.current\) set(?:ActionError|Message|Saving|Exporting|Checking|Opening)/, "settings child error/finally state is not guarded");
 
 for (const section of [
   ["sourceRequest", "sourceRequestId = ++sourceRequest.current", "readSourceHealth", "setReport", "setLoading(false)"],
