@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { listen, readDecisionMatrix, readFindings, readFindingsFreshness, safeUiError, type DecisionMatrixReport, type FindingGroup, type FindingSample, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
 import { DecisionMatrixSection } from "./DecisionMatrixSection";
 
@@ -137,18 +137,28 @@ export function FindingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [severity, setSeverity] = useState<SeverityFilter>("all");
   const [rule, setRule] = useState("all");
+  const requestGeneration = useRef(0);
 
   const load = () => {
+    const requestId = ++requestGeneration.current;
     setLoading("正在读取本地发现投影…");
     setError(null);
-    void Promise.all([readFindings(), readFindingsFreshness()])
-      .then(([nextReport, nextFreshness]) => { setReport(nextReport); setFreshness(nextFreshness); setLoading(""); })
-      .catch((reason: unknown) => { setError(safeUiError(reason, "本地发现暂不可用")); setLoading(""); });
+    void Promise.allSettled([readFindings(), readFindingsFreshness()])
+      .then(([reportResult, freshnessResult]) => {
+        if (requestId !== requestGeneration.current) return;
+        const errors: string[] = [];
+        if (reportResult.status === "fulfilled") setReport(reportResult.value);
+        else errors.push(safeUiError(reportResult.reason, "本地发现暂不可用"));
+        if (freshnessResult.status === "fulfilled") setFreshness(freshnessResult.value);
+        else errors.push(safeUiError(freshnessResult.reason, "发现新鲜度暂不可用"));
+        setError(errors.length ? errors.join("；") : null);
+        setLoading("");
+      });
     setMatrixLoading(true);
     setMatrixError(null);
     void readDecisionMatrix()
-      .then((nextMatrix) => { setMatrix(nextMatrix); setMatrixLoading(false); })
-      .catch((reason: unknown) => { setMatrixError(safeUiError(reason, "本地对比数据暂不可用")); setMatrixLoading(false); });
+      .then((nextMatrix) => { if (requestId === requestGeneration.current) { setMatrix(nextMatrix); setMatrixLoading(false); } })
+      .catch((reason: unknown) => { if (requestId === requestGeneration.current) { setMatrixError(safeUiError(reason, "本地对比数据暂不可用")); setMatrixLoading(false); } });
   };
 
   useEffect(() => { load(); }, []);
@@ -158,7 +168,7 @@ export function FindingsPage() {
     let cleanups: Array<() => void> = [];
     Promise.all(["sync-status-updated", "usage-fold-updated", "trust-monitor-updated"].map((event) => listen(event, () => { if (active) load(); })))
       .then((unsubscribers) => { if (active) cleanups = unsubscribers; else unsubscribers.forEach((unsubscribe) => unsubscribe()); });
-    return () => { active = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
+    return () => { active = false; requestGeneration.current += 1; cleanups.forEach((unsubscribe) => unsubscribe()); };
   }, []);
 
   const groups = report?.issues ?? [];
