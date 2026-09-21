@@ -118,6 +118,11 @@ function exportCsv(summary: MonthlyExportSummary): string {
   return [header, ...rows].map((line) => line.map(csvCell).join(",")).join("\n") + "\n";
 }
 
+function SettingsLoadingState({ loading, hasData, title, detail }: { loading: boolean; hasData: boolean; title: string; detail: string }) {
+  if (!loading) return null;
+  return <div className="settings-source-state" role="status"><strong>{hasData ? `正在刷新${title}` : `正在读取${title}`}</strong><span>{hasData ? "保留上一次可读结果；刷新完成前不会清空页面。" : detail}</span></div>;
+}
+
 type StatisticsDataSectionProps = { report: StatisticsSettingsReport | null; loading: boolean; error: string | null; onReload: () => void };
 
 function StatisticsDataSection({ report, loading, error, onReload }: StatisticsDataSectionProps) {
@@ -189,8 +194,8 @@ function StatisticsDataSection({ report, loading, error, onReload }: StatisticsD
   return <section className="settings-data-section" id="settings-data" aria-labelledby="settings-data-title">
     <div className="settings-section-heading"><div><p className="eyebrow">统计与数据</p><h3 id="settings-data-title">统计与数据</h3><p>统计边界、保留期与价格目录状态均来自本机 authority；导出只包含当前月安全摘要。</p></div><button className="button button-secondary button-small" type="button" onClick={onReload} disabled={loading}>{loading ? "读取中…" : "重载统计设置"}</button></div>
     {error && <div className="error-banner" role="alert">统计设置暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={onReload}>重试</button></div>}
-    {loading && <div className="settings-source-state" role="status"><strong>正在读取统计设置</strong><span>只查询本机配置，不会上传数据。</span></div>}
-    {!loading && report && <>
+    <SettingsLoadingState loading={loading} hasData={Boolean(report)} title="统计设置" detail="只查询本机配置，不会上传数据。" />
+    {report && <>
       <div className="settings-data-grid">
         <form className="settings-data-card" onSubmit={saveTimezone} aria-labelledby="settings-timezone-title"><div className="settings-card-heading"><div><p className="eyebrow">统计边界</p><h4 id="settings-timezone-title">统计时区</h4></div>{report.timezone.status === "unavailable" && <span className="status-pill status-pill-warning">暂不可用</span>}</div>{report.timezone.status === "ok" && <><label><span>时区</span><select value={timezone === report.timezone.system_timezone ? "__system__" : timezoneOptions.includes(timezone) ? timezone : timezone ? "__custom__" : ""} onChange={(event) => { const value = event.target.value; setTimezone(value === "__system__" ? report.timezone.system_timezone ?? "UTC" : value); }}><option value="">选择时区</option><option value="__system__">跟随系统（{report.timezone.system_timezone ?? "系统"}）</option>{timezoneOptions.map((option) => <option value={option} key={option}>{option}</option>)}<option value="__custom__">自定义 IANA 时区…</option></select></label>{timezone === "__custom__" && <label><span>自定义时区</span><input value={customTimezone} onChange={(event) => setCustomTimezone(event.target.value)} placeholder="例如 Asia/Shanghai" autoComplete="off" /></label>}<p className="settings-data-help">只改变今天/月的统计边界，不修改宿主原始日志或供应商计价时区。</p><button className="button button-secondary" type="submit" disabled={savingTimezone || !timezone || timezone === "__custom__" && !customTimezone.trim()}>{savingTimezone ? "保存中…" : "保存统计时区"}</button></>}</form>
         <form className="settings-data-card" onSubmit={saveRetention} aria-labelledby="settings-retention-title"><div className="settings-card-heading"><div><p className="eyebrow">本机维护</p><h4 id="settings-retention-title">数据保留期</h4></div>{report.retention.status === "unavailable" && <span className="status-pill status-pill-warning">暂不可用</span>}</div>{report.retention.status === "ok" && <><label><span>保留月数</span><input type="number" min={report.retention.minimum_months ?? 1} max={report.retention.maximum_months ?? 60} step="1" value={retention} onChange={(event) => setRetention(event.target.value)} /></label><p className="settings-data-help">范围 {report.retention.minimum_months}-{report.retention.maximum_months} 个月，保存后不会立即删除；下次本机维护才执行。</p><button className="button button-secondary" type="submit" disabled={savingRetention || !retention}>{savingRetention ? "保存中…" : "保存保留期"}</button></>}</form>
@@ -238,8 +243,8 @@ function AboutSection({ report, loading, error, onReload }: AboutSectionProps) {
   return <section className="settings-about-section" id="settings-about" aria-labelledby="settings-about-title">
     <div className="settings-section-heading"><div><p className="eyebrow">关于与诊断</p><h3 id="settings-about-title">关于与诊断</h3><p>版本信息来自本机；诊断包由你主动保存，不含会话正文、绝对路径或账户标识，也不会自动上传。</p></div><button className="button button-secondary button-small" type="button" onClick={onReload} disabled={loading}>{loading ? "读取中…" : "重载诊断"}</button></div>
     {error && <div className="error-banner" role="alert">版本诊断暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={onReload}>重试</button></div>}
-    {loading && <div className="settings-source-state" role="status"><strong>正在读取版本信息</strong><span>只查询本机状态，不会发起更新检查。</span></div>}
-    {!loading && <div className="settings-about-card"><dl className="settings-version-list"><div><dt>App</dt><dd>{versionText(report?.appVersion ?? null)}</dd></div><div><dt>CLI</dt><dd>{versionText(report?.cliVersion ?? null)}</dd></div><div><dt>Engine</dt><dd>{versionText(report?.engineVersion ?? null)}</dd></div><div><dt>Authority schema</dt><dd>{versionText(report?.authoritySchema ?? null)}</dd></div><div><dt>价格目录</dt><dd>{report?.pricing?.version ? `${report.pricing.version}${report.pricing.capturedAtMs ? ` · ${new Date(report.pricing.capturedAtMs).toLocaleString()}` : ""}` : "暂无快照"}</dd></div><div><dt>统计时区</dt><dd>{report?.statisticsTimezone ?? "不可用"}</dd></div><div><dt>同步</dt><dd>{report?.sync.state === "ok" ? "正常" : report?.sync.state === "needs_attention" ? "需要检查" : "状态未知"}</dd></div></dl><div className="settings-about-actions"><button className="button button-secondary" type="button" onClick={exportDiagnostics} disabled={exporting}>{exporting ? "保存中…" : "保存脱敏诊断包"}</button><button className="button button-secondary" type="button" onClick={checkUpdates} disabled={checking}>{checking ? "检查中…" : "检查新版本"}</button><button className="button button-secondary" type="button" onClick={openReleases} disabled={opening}>{opening ? "打开中…" : "查看发布页"}</button></div>{update && <p className="settings-about-update" role="status">{update.status === "unavailable" ? "版本检查不可用，不会自动安装。" : update.status === "no_release" ? "未找到可用发布。" : `已确认 ${update.latestTag ?? "最新发布"}；不会自动安装。`}</p>}</div>}
+    <SettingsLoadingState loading={loading} hasData={Boolean(report)} title="版本信息" detail="只查询本机状态，不会发起更新检查。" />
+    {report && <div className="settings-about-card"><dl className="settings-version-list"><div><dt>App</dt><dd>{versionText(report.appVersion ?? null)}</dd></div><div><dt>CLI</dt><dd>{versionText(report.cliVersion ?? null)}</dd></div><div><dt>Engine</dt><dd>{versionText(report.engineVersion ?? null)}</dd></div><div><dt>Authority schema</dt><dd>{versionText(report.authoritySchema ?? null)}</dd></div><div><dt>价格目录</dt><dd>{report.pricing?.version ? `${report.pricing.version}${report.pricing.capturedAtMs ? ` · ${new Date(report.pricing.capturedAtMs).toLocaleString()}` : ""}` : "暂无快照"}</dd></div><div><dt>统计时区</dt><dd>{report.statisticsTimezone ?? "不可用"}</dd></div><div><dt>同步</dt><dd>{report.sync.state === "ok" ? "正常" : report.sync.state === "needs_attention" ? "需要检查" : "状态未知"}</dd></div></dl><div className="settings-about-actions"><button className="button button-secondary" type="button" onClick={exportDiagnostics} disabled={exporting}>{exporting ? "保存中…" : "保存脱敏诊断包"}</button><button className="button button-secondary" type="button" onClick={checkUpdates} disabled={checking}>{checking ? "检查中…" : "检查新版本"}</button><button className="button button-secondary" type="button" onClick={openReleases} disabled={opening}>{opening ? "打开中…" : "查看发布页"}</button></div>{update && <p className="settings-about-update" role="status">{update.status === "unavailable" ? "版本检查不可用，不会自动安装。" : update.status === "no_release" ? "未找到可用发布。" : `已确认 ${update.latestTag ?? "最新发布"}；不会自动安装。`}</p>}</div>}
     {actionError && <div className="error-banner" role="alert">{actionError}</div>}{message && <p className="settings-about-message" role="status" aria-live="polite">{message}</p>}
   </section>;
 }
@@ -255,8 +260,8 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
   return <section className="settings-billing-section" id="settings-billing" aria-labelledby="settings-billing-title">
     <div className="settings-section-heading"><div><p className="eyebrow">计费与套餐</p><h3 id="settings-billing-title">计费与套餐</h3><p>查看待确认的计费关系、当前声明和已有账单；账单录入仍在旧工作台。</p></div><button className="button button-secondary button-small" type="button" onClick={onReload} disabled={loading}>{loading ? "读取中…" : "重载计费"}</button></div>
     {error && <div className="error-banner" role="alert">待确认状态暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={onReload}>重试</button></div>}
-    {loading && <div className="settings-source-state" role="status"><strong>正在读取计费状态</strong><span>只查询本机 authority，不会修改归因。</span></div>}
-    {!loading && !error && report && <>
+    <SettingsLoadingState loading={loading} hasData={Boolean(report)} title="计费状态" detail="只查询本机 authority，不会修改归因。" />
+    {report && <>
       {hasPending && <div className="settings-billing-todo"><div><strong>有待确认的计费关系</strong><span>{pendingGroups.length + pendingCandidates.length} 项需要确认；未确认前仍按现有估算展示。</span></div><button className="button button-primary" type="button" onClick={() => setExpanded((value) => !value)}>{expanded ? "收起待确认" : "查看待确认项"}</button></div>}
       {!hasPending && report.groups_status === "ok" && report.candidates_status === "ok" && <p className="settings-billing-empty">当前没有待确认的计费关系。</p>}
       {expanded && <div className="settings-billing-pending" aria-label="待确认的计费关系">
@@ -338,10 +343,10 @@ function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps)
   return <section className="settings-budget-section" id="settings-budget" aria-labelledby="settings-budget-title">
     <div className="settings-section-heading"><div><p className="eyebrow">预算</p><h3 id="settings-budget-title">预算（订阅 + 按量）</h3><p>只保存本机预算目标；按量支出与订阅摊派分开计算，达到 80% 和 100% 各提醒一次。</p></div><button className="button button-secondary button-small" type="button" onClick={onReload} disabled={loading}>{loading ? "读取中…" : "重载预算"}</button></div>
     {error && <div className="error-banner" role="alert">预算状态暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={onReload}>重试</button></div>}
-    {loading && <div className="settings-source-state" role="status"><strong>正在读取预算状态</strong><span>只查询本机 authority，不会上传数据。</span></div>}
-    {!loading && !error && report?.legacy && !estimate && <div className="settings-budget-legacy" role="note"><strong>检测到旧版预算</strong><span>{minorToDecimal(report.legacy.monthly_minor, "CNY")}/月仍在生效；保存下面的新预算后将以估算预算为准，不会自动转换。</span></div>}
-    {!loading && !error && report?.status === "unavailable" && <div className="settings-source-state"><strong>预算状态暂不可用</strong><span>没有足够的本机预算回执；不会显示伪造的 0 元。</span></div>}
-    {!loading && !error && availableReport && <>
+    <SettingsLoadingState loading={loading} hasData={Boolean(report)} title="预算状态" detail="只查询本机 authority，不会上传数据。" />
+    {report?.legacy && !estimate && <div className="settings-budget-legacy" role="note"><strong>检测到旧版预算</strong><span>{minorToDecimal(report.legacy.monthly_minor, "CNY")}/月仍在生效；保存下面的新预算后将以估算预算为准，不会自动转换。</span></div>}
+    {report?.status === "unavailable" && <div className="settings-source-state"><strong>预算状态暂不可用</strong><span>没有足够的本机预算回执；不会显示伪造的 0 元。</span></div>}
+    {availableReport && <>
       <form className="settings-budget-form" onSubmit={save}>
         <label><span>币种</span><select value={currency} onChange={(event) => setCurrency(event.target.value as "CNY" | "USD")} disabled={unsupportedCurrency}><option value="CNY">CNY · 人民币</option><option value="USD">USD · 美元</option></select></label>
         <label><span>月预算</span><input inputMode="decimal" value={monthly} onChange={(event) => setMonthly(event.target.value)} placeholder="例如 100.00" aria-describedby="settings-budget-help" disabled={unsupportedCurrency} /><small id="settings-budget-help">正数，最多两位小数</small></label>
@@ -441,9 +446,9 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
   return <section className="settings-custom-section" aria-labelledby="settings-custom-title">
     <div className="settings-section-heading"><div><p className="eyebrow">本机位置</p><h3 id="settings-custom-title">其他读取位置</h3><p>选择包含工具日志的本机文件夹；只会加入本机读取范围。</p></div></div>
     {error && <div className="error-banner" role="alert">读取位置设置暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={onReload}>重试</button></div>}
-    {loading && <div className="settings-source-state" role="status"><strong>正在读取位置配置</strong><span>不会读取目录内容。</span></div>}
-    {!loading && !error && report?.status === "unavailable" && <div className="settings-source-state"><strong>读取位置设置暂不可用</strong><span>可以稍后重试；已有来源状态不受影响。</span></div>}
-    {!loading && !error && report?.status === "ok" && <>
+    <SettingsLoadingState loading={loading} hasData={Boolean(report)} title="位置配置" detail="不会读取目录内容。" />
+    {report?.status === "unavailable" && <div className="settings-source-state"><strong>读取位置设置暂不可用</strong><span>可以稍后重试；已有来源状态不受影响。</span></div>}
+    {report?.status === "ok" && <>
       <div className="settings-location-list" aria-label="标准读取位置">
         {Object.entries(report.locations).filter(([, path]) => path).map(([locationHost, path]) => <div className="settings-location-row" key={locationHost}><strong>{sourceLabel(locationHost)}</strong><span>{shortenPath(path as string)}</span><details><summary>显示完整路径</summary><code>{path}</code></details></div>)}
       </div>
@@ -488,7 +493,6 @@ export function SettingsPage() {
     setLoading(true);
     setError(null);
     void readSourceHealth().then(setReport).catch((reason: unknown) => {
-      setReport(null);
       setError(reason instanceof Error ? reason.message : "来源状态读取失败");
     }).finally(() => setLoading(false));
   };
@@ -497,7 +501,6 @@ export function SettingsPage() {
     setCustomLoading(true);
     setCustomError(null);
     void readCustomSourceConfig().then(setCustomReport).catch((reason: unknown) => {
-      setCustomReport(null);
       setCustomError(reason instanceof Error ? reason.message : "自定义来源配置读取失败");
     }).finally(() => setCustomLoading(false));
   };
@@ -506,7 +509,6 @@ export function SettingsPage() {
     setBudgetLoading(true);
     setBudgetError(null);
     void readBudgetSettings().then(setBudgetReport).catch((reason: unknown) => {
-      setBudgetReport(null);
       setBudgetError(reason instanceof Error ? reason.message : "预算状态读取失败");
     }).finally(() => setBudgetLoading(false));
   };
@@ -515,7 +517,6 @@ export function SettingsPage() {
     setBillingLoading(true);
     setBillingError(null);
     void readBillingSettings().then(setBillingReport).catch((reason: unknown) => {
-      setBillingReport(null);
       setBillingError(reason instanceof Error ? reason.message : "计费状态读取失败");
     }).finally(() => setBillingLoading(false));
   };
@@ -524,7 +525,6 @@ export function SettingsPage() {
     setDataLoading(true);
     setDataError(null);
     void readStatisticsSettings().then(setDataReport).catch((reason: unknown) => {
-      setDataReport(null);
       setDataError(reason instanceof Error ? reason.message : "统计设置读取失败");
     }).finally(() => setDataLoading(false));
   };
@@ -533,7 +533,6 @@ export function SettingsPage() {
     setAboutLoading(true);
     setAboutError(null);
     void readAboutDiagnostics().then(setAboutReport).catch((reason: unknown) => {
-      setAboutReport(null);
       setAboutError(reason instanceof Error ? reason.message : "版本诊断读取失败");
     }).finally(() => setAboutLoading(false));
   };
@@ -610,9 +609,9 @@ export function SettingsPage() {
     <section className="settings-section" id="settings-sources" aria-labelledby="settings-sources-title">
       <div className="settings-section-heading"><div><p className="eyebrow">数据源</p><h3 id="settings-sources-title">来源健康</h3><p>每个工具独立显示读取状态；来源之间不合并计数。</p></div>{report && <span className={`status-pill status-pill-${attentionCount ? "warning" : "success"}`}>{attentionCount ? `${attentionCount} 个来源需要处理` : "来源状态正常"}</span>}</div>
       {error && <div className="error-banner" role="alert">来源状态暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={refresh}>重试</button></div>}
-      {loading && <div className="settings-source-state" role="status"><strong>正在读取来源状态</strong><span>只查询本机 authority，不会触发同步或读取额外路径。</span></div>}
-      {!loading && !error && report?.status === "unavailable" && <div className="settings-source-state"><strong>来源状态暂不可用</strong><span>本地 authority 无法读取；这不是“没有来源”，请修复数据库或重新同步后再试。</span></div>}
-      {!loading && !error && report?.status === "ok" && <div className="settings-source-list">{report.sources.length ? report.sources.map((source) => <SourceRow key={source.host} source={source} syncing={syncing} onSync={runSync} />) : <div className="settings-source-state"><strong>没有可显示的来源</strong><span>来源注册表暂未返回任何工具。</span></div>}</div>}
+      <SettingsLoadingState loading={loading} hasData={Boolean(report)} title="来源状态" detail="只查询本机 authority，不会触发同步或读取额外路径。" />
+      {report?.status === "unavailable" && <div className="settings-source-state"><strong>来源状态暂不可用</strong><span>本地 authority 无法读取；这不是“没有来源”，请修复数据库或重新同步后再试。</span></div>}
+      {report?.status === "ok" && <div className="settings-source-list">{report.sources.length ? report.sources.map((source) => <SourceRow key={source.host} source={source} syncing={syncing} onSync={runSync} />) : <div className="settings-source-state"><strong>没有可显示的来源</strong><span>来源注册表暂未返回任何工具。</span></div>}</div>}
       {report && <div className="settings-sync-summary"><span>上次同步：{syncLabel(report)}</span><span>{report.sync.paused === true ? "自动同步已暂停" : report.sync.paused === false ? "自动同步已开启" : "自动同步状态不可用"}</span>{report.sync.paused !== null && <button className="button button-secondary button-small" type="button" onClick={togglePause} disabled={pauseSaving}>{pauseSaving ? "保存中…" : report.sync.paused ? "恢复自动同步" : "暂停自动同步"}</button>} {syncMessage && <small role="status">{syncMessage}</small>}<small>排除和删除已导入数据仍保留在旧工作台，后续单独验收。</small></div>}
     </section>
 

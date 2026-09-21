@@ -46,6 +46,7 @@ function walk(directory) {
 walk(reactSource);
 
 const source = sourceFiles.map((file) => fs.readFileSync(file, "utf8")).join("\n");
+const settingsPage = fs.readFileSync(path.join(reactSource, "features/settings/SettingsPage.tsx"), "utf8");
 if ((source.match(/https?:\/\//g) || []).length) fail("React 源码包含远端 URL");
 const appSource = sourceFiles
   .filter((file) => !file.endsWith(path.join("lib", "tauri.ts")))
@@ -92,6 +93,8 @@ if (!source.includes("显示完整路径") || !source.includes("settings-custom-
 if (!source.includes('status === "unavailable" ? []')) fail("React 设置未隔离自定义位置配置不可用态");
 if (!source.includes("尚未导入") || !source.includes("没有读取权限") || !source.includes("来源状态暂不可用")) fail("React 设置缺少来源空态、错误映射或不可用态");
 if (!source.includes("Promise.allSettled") || !source.includes("sync_pause_state") || !source.includes("read_overview")) fail("React 设置未保留来源状态的部分失败降级");
+if (!settingsPage.includes("SettingsLoadingState") || !settingsPage.includes("保留上一次可读结果；刷新完成前不会清空页面。")) fail("React 设置刷新未保留旧数据并明确 stale 状态");
+if (/set(?:Report|CustomReport|BudgetReport|BillingReport|DataReport|AboutReport)\(null\)/u.test(settingsPage)) fail("React 设置刷新失败时清空了已有投影");
 const routeQualityType = source.match(/export type RouteQualityModel[\s\S]*?\};/u)?.[0] || "";
 if (/provider_raw|provider_id|credential_ref|endpoint_base_url/u.test(routeQualityType)) fail("React 路线质量模型投影携带了 provider/credential/endpoint 字段");
 
