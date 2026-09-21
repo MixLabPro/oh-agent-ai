@@ -29,6 +29,24 @@ use serde_json::{json, Value};
 
 /// 单文件指纹（size + mtime 纳秒）——与 `claude_cost` fold checkpoint 同款。
 /// **无时间戳字段**：指纹就是状态，字节确定性由构造保证。
+/// 文件末尾往前扫到最后一个完整换行的位置 + 1（= 全量解析实际处理到的
+/// 位置）。文件无换行 → 0。用于全量路径的检查点——写入换行边界而非
+/// stat size，避免 in-flight 半行场景下增量从行中间起读（B1 修复）。
+fn last_newline_offset(path: &Path) -> Option<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    if len == 0 { return Some(0); }
+    // 从末尾往回读最多 4KB 找换行（JSONL 行通常远短于此）
+    let scan_len = len.min(4096);
+    f.seek(SeekFrom::Start(len - scan_len)).ok()?;
+    let mut buf = vec![0u8; scan_len as usize];
+    f.read_exact(&mut buf).ok()?;
+    // rposition 找最后一个 \n（含 \r\n 剥离）
+    let pos = buf.iter().rposition(|&b| b == b'\n')?;
+    Some(len - scan_len + pos as u64 + 1)
+}
+
 fn fingerprint(path: &Path) -> Option<(u64, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta
@@ -205,9 +223,10 @@ fn sync_host(
             .map_err(|e| format!("source_graph checkpoint: {e}"))?
             .unwrap_or_default();
         let can_increment = host == "claude-code" && checkpoint.byte_offset.is_some();
+        let emit_expected_parser = if can_increment { "claude-jsonl-v1" } else { crate::source_graph::FULL_PARSE_V0 };
         let decision = crate::source_graph::classify(
             &checkpoint, Some(*fp), can_increment,
-            crate::source_graph::FULL_PARSE_V0,
+            emit_expected_parser,
             crate::sql_sync::parser_version(),
         );
         let incremental_offset = match (host, &decision) {
@@ -251,8 +270,18 @@ fn sync_host(
                 } else {
                     agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts(
                         path, ns, "default", &sid,
-                    )
-                    .map(|r| (r.facts, r.workflow_events, r.session_excerpts))
+                    ).map(|r| {
+                        // 全量路径也写 claude-jsonl-v1 + **换行边界**（不是 stat
+                        // size）：否则 F2 的 parser-id-mismatch 会让该文件永远走
+                        // 不了增量（死循环）。换行边界 = 末尾最后 \n + 1。
+                        let newline_offset = last_newline_offset(path).unwrap_or(0);
+                        incremental_checkpoints.insert(hash.clone(),
+                            crate::source_graph::SourceCheckpointOverride {
+                                parser_id: "claude-jsonl-v1".to_string(),
+                                byte_offset: Some(newline_offset),
+                            });
+                        (r.facts, r.workflow_events, r.session_excerpts)
+                    })
                 }
             }
             "dsh" => agent_vitals_hosts::dsh_usage_fact::dsh_session_to_usage_facts(path, ns, None)
