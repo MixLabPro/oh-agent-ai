@@ -859,8 +859,10 @@ export function SettingsPage() {
     setSyncMessage("同步已发起，正在等待本机回执…");
     try {
       const requestId = await triggerSync();
+      if (!settingsMounted.current) return false;
       for (let attempt = 0; attempt < 20; attempt += 1) {
         const status = await readSyncRequestStatus(requestId);
+        if (!settingsMounted.current) return false;
         if (status.failed) throw new Error("同步请求已失效");
         if (status.completed) {
           setSyncMessage("同步完成，来源状态已刷新。");
@@ -872,11 +874,13 @@ export function SettingsPage() {
       setSyncMessage("同步仍在后台运行；稍后可重新查看来源状态。");
       return false;
     } catch (reason: unknown) {
-      setSyncMessage(null);
-      setError(safeUiError(reason, "同步请求未能完成"));
+      if (settingsMounted.current) {
+        setSyncMessage(null);
+        setError(safeUiError(reason, "同步请求未能完成"));
+      }
       return false;
     } finally {
-      setSyncing(false);
+      if (settingsMounted.current) setSyncing(false);
     }
   };
 
@@ -886,12 +890,13 @@ export function SettingsPage() {
     setError(null);
     try {
       const paused = await setSyncPaused(!report.sync.paused);
+      if (!settingsMounted.current) return;
       setSyncMessage(paused ? "自动同步已暂停。" : "自动同步已恢复。");
       refresh();
     } catch (reason: unknown) {
-      setError(safeUiError(reason, "自动同步设置未保存"));
+      if (settingsMounted.current) setError(safeUiError(reason, "自动同步设置未保存"));
     } finally {
-      setPauseSaving(false);
+      if (settingsMounted.current) setPauseSaving(false);
     }
   };
 
@@ -903,12 +908,13 @@ export function SettingsPage() {
     setSourceControlMessage(null);
     try {
       const receipt = await setSourceHostExcluded(source.host, excluded);
+      if (!settingsMounted.current) return;
       setSourceControlMessage(receipt.excluded ? `${sourceLabel(source.host)} 已停止读取；已导入数据未删除。` : `${sourceLabel(source.host)} 已恢复读取；下次同步会重新纳入。`);
       refresh();
     } catch (reason: unknown) {
-      setSourceControlError(safeUiError(reason, "来源读取控制未保存"));
+      if (settingsMounted.current) setSourceControlError(safeUiError(reason, "来源读取控制未保存"));
     } finally {
-      setSourceControlHost(null);
+      if (settingsMounted.current) setSourceControlHost(null);
     }
   };
 
@@ -919,13 +925,14 @@ export function SettingsPage() {
     setDeleteMessage(null);
     try {
       const receipt = await deleteImportedSourceData(source.host);
+      if (!settingsMounted.current) return;
       setDeleteMessage(`已删除 ${receipt.facts} 条记录、${receipt.sessions} 个会话、${receipt.source_files} 个来源文件、${receipt.trust_observations} 条 Trust 观测、${receipt.route_evidence} 条路由证据和 ${receipt.session_excerpts} 条任务摘录；原始日志未修改。`);
       setDeleteConfirmHost(null);
       refresh();
     } catch (reason: unknown) {
-      setDeleteError(`删除未完成；原始日志未修改，请重新查看来源状态后重试。${safeUiError(reason, "请稍后重试")}`);
+      if (settingsMounted.current) setDeleteError(`删除未完成；原始日志未修改，请重新查看来源状态后重试。${safeUiError(reason, "请稍后重试")}`);
     } finally {
-      setDeleteBusyHost(null);
+      if (settingsMounted.current) setDeleteBusyHost(null);
     }
   };
 

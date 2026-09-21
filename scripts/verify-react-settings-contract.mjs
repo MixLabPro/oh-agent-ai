@@ -50,4 +50,15 @@ assert.match(source, /const paused = await setSyncPaused\(!report\.sync\.paused\
 assert.match(source, /setSyncMessage\(paused \? "自动同步已暂停。" : "自动同步已恢复。"\)/, "pause message does not use backend receipt");
 assert.doesNotMatch(source, /await setSyncPaused\([^\n]+\);\s*setSyncMessage\(!report\.sync\.paused/u, "pause message still infers state from stale report");
 
+assert.match(source, /const requestId = await triggerSync\(\);\s*if \(!settingsMounted\.current\) return false;/u, "sync completion does not stop after unmount");
+assert.match(source, /const status = await readSyncRequestStatus\(requestId\);\s*if \(!settingsMounted\.current\) return false;/u, "sync polling does not stop after unmount");
+assert.match(source, /catch \(reason: unknown\) \{\s*if \(settingsMounted\.current\) \{\s*setSyncMessage\(null\);/u, "sync error state is not unmount guarded");
+assert.match(source, /finally \{\s*if \(settingsMounted\.current\) setSyncing\(false\);/u, "sync busy state is not unmount guarded");
+assert.match(source, /const paused = await setSyncPaused\([^\n]+\);\s*if \(!settingsMounted\.current\) return;/u, "pause completion does not stop after unmount");
+assert.match(source, /const receipt = await setSourceHostExcluded\([^\n]+\);\s*if \(!settingsMounted\.current\) return;/u, "source exclusion completion does not stop after unmount");
+assert.match(source, /const receipt = await deleteImportedSourceData\([^\n]+\);\s*if \(!settingsMounted\.current\) return;/u, "source deletion completion does not stop after unmount");
+assert.match(source, /if \(settingsMounted\.current\) setPauseSaving\(false\);/u, "pause busy state is not unmount guarded");
+assert.match(source, /if \(settingsMounted\.current\) setSourceControlHost\(null\);/u, "source exclusion busy state is not unmount guarded");
+assert.match(source, /if \(settingsMounted\.current\) setDeleteBusyHost\(null\);/u, "source deletion busy state is not unmount guarded");
+
 console.log("React Settings contract: OK (per-projection generations, unmount guard, pause receipt)");
