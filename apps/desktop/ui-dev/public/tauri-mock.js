@@ -713,7 +713,7 @@
             host: "plugin:zcode", has_baseline: true, native_families: ["glm"], totals: { requests: 12, sessions: 3 },
             families: [
               { family: "glm", flag: "native", requests: 9, sessions: 3, tokens_total: 18000, last_event_ms: nowMs - 3600000, request_share: 75, models: [{ model: "glm-5", provider_raw: "zhipu", provider_id: "zhipu", requests: 9, tokens_total: 18000, last_event_ms: nowMs - 3600000 }] },
-              { family: "deepseek", flag: "non_native", requests: 2, sessions: 1, tokens_total: 4200, last_event_ms: nowMs - 7200000, request_share: 16.7, models: [{ model: "deepseek-v4-flash", provider_raw: "relay", provider_id: "relay", requests: 2, tokens_total: 4200, last_event_ms: nowMs - 7200000 }] },
+              { family: "deepseek", flag: "non_native", requests: 2, sessions: 1, tokens_total: 4200, last_event_ms: nowMs - 7200000, request_share: 16.7, models: [{ model: "bigmodel/deepseek-v4-flash[1M]", provider_raw: "relay", provider_id: "relay", requests: 2, tokens_total: 4200, last_event_ms: nowMs - 7200000 }] },
               { family: "synthetic", flag: "api_error", requests: 1, sessions: 1, tokens_total: 0, last_event_ms: nowMs - 10800000, request_share: 8.3, models: [{ model: "<synthetic>", provider_raw: "", provider_id: "", requests: 1, tokens_total: 0, last_event_ms: nowMs - 10800000 }] },
             ],
           }, {

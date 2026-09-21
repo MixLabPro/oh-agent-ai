@@ -1268,7 +1268,20 @@ function routeFamily(value: unknown, label: string): RouteQualityFamily["family"
 }
 
 function routeModel(value: unknown, label: string): string {
-  return decisionLabel(value, label);
+  // Route-quality reports preserve the model string from the provider response.
+  // Some real variants use bracketed capability suffixes, e.g. `[1M]`, which
+  // are valid model identifiers but intentionally are not accepted by the
+  // stricter provider/billing label grammar used by decisionLabel(). Keep the
+  // same path/URL/control-character exclusions while allowing only brackets
+  // as the additional model-specific syntax.
+  const text = stringField(value, label);
+  const valid = /^[A-Za-z0-9][A-Za-z0-9._:@+<>\-\[\]]{0,127}(\/[A-Za-z0-9][A-Za-z0-9._:@+<>\-\[\]]{0,127})?$/.test(text)
+    && !text.includes("://")
+    && !text.includes("..")
+    && !text.startsWith("file:")
+    && !/^[A-Za-z]:/.test(text);
+  if (!valid) throw new Error(`${label} DTO 模型标识不安全`);
+  return text;
 }
 
 function parseRouteQualityModel(value: unknown): RouteQualityModel {
