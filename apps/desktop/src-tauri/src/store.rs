@@ -12,7 +12,7 @@
 //!
 //! IPC 面只做参数翻译与 spawn：
 //!   · `sessions_list(day, host_kind, page_size, cursor) -> Result<Value, Value>`
-//!   · `sessions_read(session_ref) -> Result<Value, Value>`
+//!   · `sessions_read(session_ref, page_size?, cursor?) -> Result<Value, Value>`
 //!   · `sessions_findings() -> Result<Value, Value>` —— **保留走 r2a_store**
 //!     （DSH/Codex 行为 findings 来自 envelope 的预计算字段，PR #2.3a 任务
 //!     #19 待 M4 `workflow_events` 工具落地后整体迁 mcp::dispatch；本次 PR
@@ -166,16 +166,26 @@ fn findings_args() -> Vec<String> {
 /// `sessions read` 的 argv。session_ref 是 MCP HMAC 不透明串（`sr_<32hex>`），
 /// 由 list 行的 `data.sessions[].session_ref` 拿——不是原生 session_key（也不该
 /// 是：HMAC 把 native_session_id / machine_namespace 屏蔽到 IPC 之外，避免前
-/// 端读到 §5.1 里钉死的 PII）。无 revision / cursor flag——权威库的 revision 写
-/// 在 envelope 的 `authority_revision` 字段里，不需要 CLI 透传。
-fn read_args(session_ref: &str) -> Vec<String> {
-    vec![
+/// 端读到 §5.1 里钉死的 PII）。分页参数只接受有界 page size 与不透明
+/// cursor，并透传给 CLI；权威库的 revision 仍写在 envelope 的
+/// `authority_revision` 字段里，不需要 IPC 额外携带。
+fn read_args(session_ref: &str, page_size: Option<usize>, cursor: Option<&str>) -> Vec<String> {
+    let mut args = vec![
         "sessions".into(),
         "read".into(),
         "--session-ref".into(),
         session_ref.to_string(),
-        "--json".into(),
-    ]
+    ];
+    if let Some(size) = page_size {
+        args.push("--page-size".into());
+        args.push(size.to_string());
+    }
+    if let Some(value) = cursor {
+        args.push("--cursor".into());
+        args.push(value.to_string());
+    }
+    args.push("--json".into());
+    args
 }
 
 // ── 「测试」tab（V17 探针面）：三条读命令 + 异步 run 全部 spawn CLI——
@@ -427,14 +437,26 @@ pub async fn sessions_list(
 pub async fn sessions_read(
     state: tauri::State<'_, StoreBuildLock>,
     session_ref: String,
+    page_size: Option<usize>,
+    cursor: Option<String>,
 ) -> Result<Value, Value> {
+    if let Some(size) = page_size {
+        if !(1..=1000).contains(&size) {
+            return Err(error_value("invalid-argument", "session detail page size out of range"));
+        }
+    }
+    if let Some(value) = cursor.as_deref() {
+        if value.is_empty() || value.len() > 4096 {
+            return Err(error_value("invalid-argument", "session detail cursor is unsafe"));
+        }
+    }
     let lock = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock.acquire();
         let Some(bin) = resolve_binary() else {
             return Err(no_binary());
         };
-        let args = read_args(&session_ref);
+        let args = read_args(&session_ref, page_size, cursor.as_deref());
         let mut cmd = Command::new(&bin);
         cmd.args(&args);
         cmd.env("AGENT_VITALS_HOME", data_home());
@@ -2255,9 +2277,20 @@ mod tests {
     #[test]
     fn read_args_is_fixed() {
         assert_eq!(
-            read_args("sr_abcdef1234567890"),
+            read_args("sr_abcdef1234567890", None, None),
             vec!["sessions", "read", "--session-ref", "sr_abcdef1234567890",
                  "--json"]
+        );
+    }
+
+    #[test]
+    fn read_args_forwards_detail_pagination() {
+        assert_eq!(
+            read_args("sr_abcdef1234567890", Some(200), Some("opaque-next")),
+            vec![
+                "sessions", "read", "--session-ref", "sr_abcdef1234567890",
+                "--page-size", "200", "--cursor", "opaque-next", "--json"
+            ]
         );
     }
 

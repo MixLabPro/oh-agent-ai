@@ -2191,7 +2191,10 @@ export async function readSessions(input: {
 
 export async function readSessionDetail(sessionRef: string, cursor: string | null = null): Promise<SessionDetail> {
   if (typeof sessionRef !== "string" || !/^sr_[A-Za-z0-9_-]{8,128}$/.test(sessionRef)) throw new Error("session_ref 不安全");
-  const args: Record<string, unknown> = { sessionRef, limit: 200 };
+  // Tauri's sessions_read command translates this field to the CLI's
+  // `--page-size`; keeping the name explicit prevents the old MCP `limit`
+  // spelling from being silently dropped at the desktop boundary.
+  const args: Record<string, unknown> = { sessionRef, page_size: 200 };
   if (cursor !== null) {
     if (typeof cursor !== "string" || cursor.length < 1 || cursor.length > 4096) throw new Error("session detail cursor 不安全");
     args.cursor = cursor;

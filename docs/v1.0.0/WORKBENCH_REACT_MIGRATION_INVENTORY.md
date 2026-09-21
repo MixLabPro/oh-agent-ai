@@ -10,7 +10,7 @@
 |---|---|---|---|---|
 | 总览 | `tab-overview` | `features/overview/OverviewPage.tsx` | 已迁移总览聚合切片：安全 DTO、费用/预算/新鲜度/宿主覆盖、月度/今日 summary、tokens_by_host、按 basis 支出、最近观测日；React bridge 已锁定 token 与按币种 basis 守恒，并覆盖 malformed DTO/独立失败合同；仍需真实 Tauri/旧页截图对照 | Phase 3：完成旧页数字对照与真实 `.app` 验收 |
 | 用量 | `tab-calendar` | `features/usage/UsagePage.tsx` | 已迁移首个日历切片：安全月份/日历/小时 DTO、按币种成本、来源新鲜度与覆盖状态；月份窗口不一致时显式标注并保留来源窗口、完整最后观测时间、未决计费项与覆盖证据；完整旧页对照仍待完成 | Phase 3：补齐旧页数字对照与统计时区设置联动 |
-| 会话 | `tab-sessions` | `features/sessions/SessionsPage.tsx` + `features/sessions/SessionDetail.tsx` | 已迁移安全列表和只读详情：筛选、keyset 分页、摘要、计费桶、usage/workflow 脱敏时间线；完整轨迹图和原始报告仍不迁移 | Phase 3：真实 Tauri 对拍与轨迹图安全投影评估 |
+| 会话 | `tab-sessions` | `features/sessions/SessionsPage.tsx` + `features/sessions/SessionDetail.tsx` | 已迁移安全列表和只读详情：筛选、keyset 分页、摘要、计费桶、usage/workflow 脱敏时间线；详情分页已贯通 React bridge → Tauri → CLI，page size/cursor 有界且有对拍契约；完整轨迹图和原始报告仍不迁移 | Phase 3：真实 Tauri 对拍与轨迹图安全投影评估 |
 | 待处理/发现 | `tab-findings` | `features/findings/FindingsPage.tsx` | 已迁移首个垂直切片：安全 Finding 投影、待办、证据明细、决策矩阵和新鲜度；bridge 拒绝超量 rules/issues、非法 refreshed 和 malformed evidence；证据明细支持数字游标分页，跨页保留稳定汇总并去重，合并规则已抽成可测试纯函数 | Phase 2：补事件 smoke test 与旧页数值对照 |
 | 测试 | `tab-test` | `features/test/TestPage.tsx` | 已迁移只读路线质量面：宿主 × 实际模型族、非官方族/API 错误/无基准状态与安全 DTO；刷新失败保留旧报告并显示原始报告窗口；主动 probe mutation 仍保留旧页 | Phase 3 后半：补真实 Tauri 对拍，再评估显式 mutation |
 | Skill | `tab-skills` | `features/skills/SkillsPage.tsx` | 已迁移安全扫描、显式本机快照和受控快照对比：对比 DTO 仅返回有界宿主/Skill 标签、规则、行号和计数，丢弃基线路径、`where`、description 与 CLI 输出，并标记 partial/truncated；脱敏导出及扫描高级设置仍保留旧页 | Phase 3 后半：真实 CLI 对拍并单独审查导出脱敏 |
