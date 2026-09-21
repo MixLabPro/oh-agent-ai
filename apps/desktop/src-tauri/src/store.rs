@@ -808,6 +808,82 @@ fn safe_non_negative(row: &Value, key: &str) -> Option<u64> {
     row.get(key).and_then(Value::as_u64)
 }
 
+fn safe_findings_sample_enum<'a>(value: Option<&Value>, allowed: &'a [&'a str]) -> Option<&'a str> {
+    let candidate = value.and_then(Value::as_str)?;
+    allowed.iter().find(|item| **item == candidate).copied()
+}
+
+fn safe_findings_sample_count(value: Option<&Value>) -> Option<u64> {
+    value.and_then(Value::as_u64).filter(|count| *count <= 1_000_000_000)
+}
+
+/// Project the small amount of evidence context that is useful on the
+/// Findings page without crossing the raw issue/sample boundary.  In
+/// particular, this never copies `issue_id`, `evidence`, `detail`, paths,
+/// commands, session keys, or arbitrary metadata into the renderer.
+fn safe_findings_sample(
+    item: &Value, group_ref: &str, index: usize, first_seen_at_ms: u64, last_seen_at_ms: u64,
+) -> Value {
+    let object = item.as_object();
+    let metadata = object
+        .and_then(|value| value.get("metadata"))
+        .and_then(Value::as_object);
+    let evidence_level = safe_findings_sample_enum(
+        metadata.and_then(|value| value.get("evidence_level")),
+        &["E0", "E1", "E2", "E3", "E4", "E5"],
+    );
+    let stage = safe_findings_sample_enum(
+        metadata.and_then(|value| value.get("stage")),
+        &["read_observed", "package_observed", "credential_observed", "egress_attempted", "egress_transmitted", "remote_accepted"],
+    );
+    let evidence_origin = safe_findings_sample_enum(
+        metadata.and_then(|value| value.get("evidence_origin")),
+        &["local_artifact", "client_state_claim", "runtime_process_metadata", "network_metadata", "verified_receipt", "unknown_legacy"],
+    );
+    let confidence = safe_findings_sample_enum(
+        metadata.and_then(|value| value.get("confidence")),
+        &["high", "medium", "low"],
+    );
+    let destination_class = safe_findings_sample_enum(
+        metadata.and_then(|value| value.get("destination_class")),
+        &["vendor_api", "object_storage", "telemetry", "eval", "model_api", "unknown"],
+    );
+    let scope_classes = metadata
+        .and_then(|value| value.get("scope_classes"))
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str)
+            .filter(|value| value.len() <= 64 && !value.is_empty() && value.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-')))
+            .take(16).map(str::to_string).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let observed_first_at_ms = metadata
+        .and_then(|value| value.get("first_observed_at_ms"))
+        .and_then(Value::as_u64)
+        .filter(|value| *value >= first_seen_at_ms && *value <= last_seen_at_ms)
+        .unwrap_or(first_seen_at_ms);
+    let observed_last_at_ms = metadata
+        .and_then(|value| value.get("last_observed_at_ms"))
+        .and_then(Value::as_u64)
+        .filter(|value| *value >= observed_first_at_ms && *value <= last_seen_at_ms)
+        .unwrap_or(observed_first_at_ms);
+    let sample_key = format!("{group_ref}\0sample\0{}", index + 1);
+    let sample_ref = format!("fnv1a64:{}", agent_vitals_domain::source_identity::fnv1a64_hex(sample_key.as_bytes()));
+    json!({
+        "available": object.is_some_and(|value| !value.is_empty()),
+        "reference": sample_ref,
+        "observed_first_at_ms": observed_first_at_ms,
+        "observed_last_at_ms": observed_last_at_ms,
+        "evidence_level": evidence_level,
+        "stage": stage,
+        "evidence_origin": evidence_origin,
+        "scope_classes": scope_classes,
+        "observation_count": safe_findings_sample_count(metadata.and_then(|value| value.get("observation_count"))),
+        "file_count": safe_findings_sample_count(metadata.and_then(|value| value.get("file_count"))),
+        "byte_count": safe_findings_sample_count(metadata.and_then(|value| value.get("byte_count"))),
+        "destination_class": destination_class,
+        "confidence": confidence,
+    })
+}
+
 fn safe_findings_group(row: &Value) -> Option<Value> {
     let group_ref = row.get("group_id").and_then(Value::as_str)?;
     if !group_ref.starts_with("fnv1a64:") || group_ref.len() != 24
@@ -828,9 +904,9 @@ fn safe_findings_group(row: &Value) -> Option<Value> {
         return None;
     }
     let samples = row.get("sample_evidence").and_then(Value::as_array).map(|items| {
-        items.iter().take(3).map(|item| json!({
-            "available": item.as_object().map(|obj| !obj.is_empty()).unwrap_or(false)
-        })).collect::<Vec<_>>()
+        items.iter().take(3).enumerate().map(|(index, item)| safe_findings_sample(
+            item, group_ref, index, first, last,
+        )).collect::<Vec<_>>()
     }).unwrap_or_default();
     // Legacy source projections mark their remedy as diagnostic-only because
     // they never exposed a safe UI action.  The React serving face keeps the
@@ -1693,6 +1769,10 @@ mod tests {
             assert!(!serialized.contains(secret), "sensitive value leaked: {secret}");
         }
         assert_eq!(projected["sample_evidence"][0]["available"], true);
+        assert!(projected["sample_evidence"][0]["reference"].as_str().unwrap().starts_with("fnv1a64:"));
+        assert_eq!(projected["sample_evidence"][0]["observed_first_at_ms"], 10);
+        assert_eq!(projected["sample_evidence"][0]["evidence_level"], Value::Null);
+        assert_eq!(projected["sample_evidence"][0]["scope_classes"], json!([]));
         assert_eq!(projected["action_kind"], "billing");
     }
 
@@ -1711,6 +1791,36 @@ mod tests {
         assert_eq!(projected["evidence_class"], "generic");
         assert_eq!(projected["severity"], "unknown");
         assert_eq!(projected["action_kind"], "other");
+    }
+
+    #[test]
+    fn safe_findings_projection_exposes_only_bounded_evidence_context() {
+        let raw = json!({
+            "group_id": "fnv1a64:0123456789abcdef", "source_kind": "behavior",
+            "rule": "SV709", "host": "plugin:zcode", "evidence_class": "egress",
+            "count": 2, "first_seen_at_ms": 10, "last_seen_at_ms": 30,
+            "severity": "critical", "status_rollup": {}, "sessions_count": 1,
+            "sample_evidence": [{"issue_id": "native-secret", "evidence": "secret command",
+                "metadata": {"stage": "egress_attempted", "evidence_level": "E3",
+                    "evidence_origin": "network_metadata", "confidence": "high",
+                    "destination_class": "object_storage", "scope_classes": ["git_history", "/private/path"],
+                    "observation_count": 2, "file_count": 4, "byte_count": 1234,
+                    "first_observed_at_ms": 10, "last_observed_at_ms": 30,
+                    "native_event_id": "native-secret"}}],
+        });
+        let projected = safe_findings_group(&raw).expect("valid safe group");
+        let sample = &projected["sample_evidence"][0];
+        assert_eq!(sample["evidence_level"], "E3");
+        assert_eq!(sample["stage"], "egress_attempted");
+        assert_eq!(sample["destination_class"], "object_storage");
+        assert_eq!(sample["scope_classes"], json!(["git_history"]));
+        assert_eq!(sample["observation_count"], 2);
+        assert_eq!(sample["file_count"], 4);
+        assert_eq!(sample["byte_count"], 1234);
+        let serialized = sample.to_string();
+        for secret in ["native-secret", "secret command", "/private/path"] {
+            assert!(!serialized.contains(secret), "evidence context leaked: {secret}");
+        }
     }
 
     #[test]

@@ -424,6 +424,18 @@ export type FindingStatusRollup = {
 
 export type FindingSample = {
   has_evidence: boolean;
+  reference: string | null;
+  observed_first_at_ms: number | null;
+  observed_last_at_ms: number | null;
+  evidence_level: "E0" | "E1" | "E2" | "E3" | "E4" | "E5" | null;
+  stage: "read_observed" | "package_observed" | "credential_observed" | "egress_attempted" | "egress_transmitted" | "remote_accepted" | null;
+  evidence_origin: "local_artifact" | "client_state_claim" | "runtime_process_metadata" | "network_metadata" | "verified_receipt" | "unknown_legacy" | null;
+  scope_classes: string[];
+  observation_count: number | null;
+  file_count: number | null;
+  byte_count: number | null;
+  destination_class: "vendor_api" | "object_storage" | "telemetry" | "eval" | "model_api" | "unknown" | null;
+  confidence: "high" | "medium" | "low" | null;
 };
 
 export type FindingGroup = {
@@ -1464,7 +1476,29 @@ function parseFindingGroup(value: unknown): FindingGroup {
   const sampleEvidence = rawSamples.map((item) => {
     const sample = record(item, "finding sample");
     if (typeof sample.available !== "boolean") throw new Error("finding sample DTO 状态不安全");
-    return { has_evidence: sample.available };
+    const reference = sample.reference == null ? null : safeHash(sample.reference, "finding sample reference");
+    const optionalTimestamp = (candidate: unknown, label: string): number | null => candidate == null ? null : requiredCount(candidate, label);
+    const optionalEnum = <T extends string>(candidate: unknown, allowed: readonly T[], label: string): T | null => {
+      if (candidate == null) return null;
+      if (typeof candidate !== "string" || !allowed.includes(candidate as T)) throw new Error(`${label} DTO 值不安全`);
+      return candidate as T;
+    };
+    const scopes = Array.isArray(sample.scope_classes) ? sample.scope_classes.slice(0, 16).map((scope) => safeTrustIdentifier(scope, "finding evidence scope", "unknown_scope")) : [];
+    return {
+      has_evidence: sample.available,
+      reference,
+      observed_first_at_ms: optionalTimestamp(sample.observed_first_at_ms, "finding evidence first timestamp"),
+      observed_last_at_ms: optionalTimestamp(sample.observed_last_at_ms, "finding evidence last timestamp"),
+      evidence_level: optionalEnum(sample.evidence_level, ["E0", "E1", "E2", "E3", "E4", "E5"] as const, "finding evidence level"),
+      stage: optionalEnum(sample.stage, ["read_observed", "package_observed", "credential_observed", "egress_attempted", "egress_transmitted", "remote_accepted"] as const, "finding evidence stage"),
+      evidence_origin: optionalEnum(sample.evidence_origin, ["local_artifact", "client_state_claim", "runtime_process_metadata", "network_metadata", "verified_receipt", "unknown_legacy"] as const, "finding evidence origin"),
+      scope_classes: scopes,
+      observation_count: sample.observation_count == null ? null : boundedCount(sample.observation_count, "finding observation count"),
+      file_count: sample.file_count == null ? null : boundedCount(sample.file_count, "finding file count"),
+      byte_count: sample.byte_count == null ? null : boundedCount(sample.byte_count, "finding byte count", Number.MAX_SAFE_INTEGER),
+      destination_class: optionalEnum(sample.destination_class, ["vendor_api", "object_storage", "telemetry", "eval", "model_api", "unknown"] as const, "finding destination class"),
+      confidence: optionalEnum(sample.confidence, ["high", "medium", "low"] as const, "finding confidence"),
+    };
   });
   const count = (name: string) => requiredCount(status[name], name);
   const firstSeen = requiredCount(row.first_seen_at_ms, "finding first seen");
@@ -1661,8 +1695,8 @@ export async function readFindings(): Promise<FindingsReport> {
     totals: { issues: 2, findings: 2, critical: 1, warning: 1, info: 0, sessions: 2, sessions_total: 5 },
     rules: [{ rule: "SV709", severity: "critical", category: "object_storage_egress", hits: 1, sessions: 1 }, { rule: "PRICE_COVERAGE", severity: "warning", category: "billing", hits: 1, sessions: 1 }],
     issues: [
-      { group_id: "fnv1a64:0123456789abcdef", action_kind: "behavior", rule: "SV709", host: "plugin:zcode", evidence_class: "egress", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "critical", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true }], read_only: true, manual_follow_up: false },
-      { group_id: "fnv1a64:1111111111111111", action_kind: "billing", rule: "PRICE_COVERAGE", host: "minimax-code", evidence_class: "billing", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true }], read_only: false, manual_follow_up: true },
+      { group_id: "fnv1a64:0123456789abcdef", action_kind: "behavior", rule: "SV709", host: "plugin:zcode", evidence_class: "egress", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "critical", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:2222222222222222", observed_first_at_ms: 1789891200000, observed_last_at_ms: 1789891200000, evidence_level: "E3", stage: "egress_attempted", evidence_origin: "network_metadata", scope_classes: ["git_history"], observation_count: 1, file_count: null, byte_count: 3145728, destination_class: "object_storage", confidence: "high" }], read_only: true, manual_follow_up: false },
+      { group_id: "fnv1a64:1111111111111111", action_kind: "billing", rule: "PRICE_COVERAGE", host: "minimax-code", evidence_class: "billing", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:3333333333333333", observed_first_at_ms: 1789891200000, observed_last_at_ms: 1789891200000, evidence_level: null, stage: null, evidence_origin: "local_artifact", scope_classes: [], observation_count: 1, file_count: null, byte_count: null, destination_class: null, confidence: "medium" }], read_only: false, manual_follow_up: true },
     ], next_cursor: null, refreshed: false,
   });
   return parseFindings(await handler("findings_groups_safe", { pageSize: 50, cursor: null }));
