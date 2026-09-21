@@ -528,6 +528,102 @@ mod tests {
         cleanup(&path);
     }
 
+    /// FactsIngested 端到端：构造器 → 事务内发射 → outbox 行 → drain → 消费者
+    /// 收到完整载荷 → deliveries 记录。
+    #[test]
+    fn facts_ingested_end_to_end() {
+        let path = tmp_db("e2e-facts");
+        let db = AuthorityDb::open(&path, 1).expect("open");
+        let run = seed(&db);
+        let event = AppEvent::facts_ingested("claude-code", &run, 25, 3, 7);
+        emit(&db, &event, &run);
+
+        // outbox 行断言
+        let (etype, host, payload): (String, Option<String>, String) = db.conn().query_row(
+            "SELECT event_type, host, payload_json FROM event_outbox",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(etype, "FactsIngested");
+        assert_eq!(host.as_deref(), Some("claude-code"));
+        assert!(payload.contains("\"inserted\":25"), "载荷带 inserted: {payload}");
+
+        // 消费者收到
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rx = received.clone();
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("e2e-facts", move |e| {
+            rx.lock().unwrap().push(e.clone());
+            Ok(())
+        })]);
+        let report = dispatcher.drain(db.conn()).unwrap();
+        assert_eq!(report.delivered, 1);
+        let recv = received.lock().unwrap().clone();
+        assert_eq!(recv[0].event_type, "FactsIngested");
+        assert_eq!(recv[0].host.as_deref(), Some("claude-code"));
+        assert_eq!(recv[0].correlation_id.as_deref(), Some(run.as_str()));
+        assert_eq!(recv[0].payload["inserted"], 25);
+        drop(db);
+        cleanup(&path);
+    }
+
+    /// TrustMonitorEvent 端到端：全局事件（host=None）载荷完整到达消费者。
+    #[test]
+    fn trust_monitor_event_end_to_end() {
+        let path = tmp_db("e2e-trust");
+        let db = AuthorityDb::open(&path, 1).expect("open");
+        let run = seed(&db);
+        let event = AppEvent::trust_monitor_event(&run, 5, 3, 2);
+        emit(&db, &event, &run);
+
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rx = received.clone();
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("e2e-trust", move |e| {
+            rx.lock().unwrap().push(e.clone());
+            Ok(())
+        })]);
+        let report = dispatcher.drain(db.conn()).unwrap();
+        assert_eq!(report.delivered, 1);
+        let recv = received.lock().unwrap().clone();
+        assert_eq!(recv[0].event_type, "TrustMonitorEvent");
+        assert_eq!(recv[0].host, None, "全局事件 host=None");
+        assert_eq!(recv[0].payload["observations"], 5);
+        assert_eq!(recv[0].payload["findings_upserted"], 2);
+        drop(db);
+        cleanup(&path);
+    }
+
+    /// 重试穷尽后永久死信：next_retry_at_ms 变 NULL 后反连接不再发现。
+    #[test]
+    fn retry_exhaustion_permanent_dead_letter() {
+        let path = tmp_db("dead-letter");
+        let db = AuthorityDb::open(&path, 1).expect("open");
+        let run = seed(&db);
+        emit(&db, &AppEvent::facts_ingested("dsh", &run, 1, 0, 0), &run);
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("dl", |_| Err("dead".into()))]);
+
+        // 第一次失败 → retry_count=1
+        let r1 = dispatcher.drain(db.conn()).unwrap();
+        assert_eq!(r1.failed, 1);
+
+        // 手动推到穷尽边界，让它吃最后一次重试
+        db.conn().execute(
+            "UPDATE event_deliveries SET retry_count = ?1, next_retry_at_ms = 0 WHERE consumer_id = 'dl'",
+            [MAX_RETRIES - 1],
+        ).unwrap();
+        let r2 = dispatcher.drain(db.conn()).unwrap();
+        assert_eq!(r2.failed, 1, "最后一次重试");
+
+        // 穷尽后 next_retry_at_ms=NULL，不再被反连接发现
+        let next: Option<i64> = db.conn().query_row(
+            "SELECT next_retry_at_ms FROM event_deliveries WHERE consumer_id = 'dl'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert!(next.is_none(), "穷尽后应 NULL，got {next:?}");
+        let r3 = dispatcher.drain(db.conn()).unwrap();
+        assert_eq!((r3.delivered, r3.failed), (0, 0), "永久死信不再投递");
+        drop(db);
+        cleanup(&path);
+    }
+
     fn cleanup(path: &std::path::PathBuf) {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
