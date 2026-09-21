@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateActio
 import {
   listen,
   readSessions,
+  safeUiError,
   type SessionCostStatus,
   type SessionRow,
   type SessionsCostFilter,
@@ -113,6 +114,8 @@ export function SessionsPage() {
     if (requestInFlight.current) {
       pendingRefresh.current = true;
       generation.current += 1;
+      setLoading(true);
+      setError(null);
       return;
     }
     const currentFilters = filtersRef.current;
@@ -120,7 +123,6 @@ export function SessionsPage() {
     requestInFlight.current = true;
     setLoading(true);
     setError(null);
-    setRows([]);
     setNextCursor(null);
     try {
       const page = await readSessions(serverArgs(currentFilters, null));
@@ -131,7 +133,7 @@ export function SessionsPage() {
       setWindowTokens(page.window_total_tokens);
     } catch (reason: unknown) {
       if (currentGeneration !== generation.current) return;
-      setError(reason instanceof Error ? reason.message : "会话数据暂不可用");
+      setError(safeUiError(reason, "会话数据暂不可用"));
       setTotal(null);
       setWindowTokens(null);
     } finally {
@@ -150,7 +152,7 @@ export function SessionsPage() {
     let active = true;
     const refresh = () => { if (active) void fetchFirstPage(); };
     let cleanups: Array<() => void> = [];
-    Promise.all([listen("usage-fold-updated", refresh), listen("sync-status-updated", refresh)])
+    Promise.all([listen("usage-fold-updated", refresh), listen("sync-status-updated", refresh), listen("source-data-deleted", refresh)])
       .then((unsubscribers) => { if (active) cleanups = unsubscribers; else unsubscribers.forEach((unsubscribe) => unsubscribe()); });
     return () => { active = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
   }, [serverKey]);
@@ -158,6 +160,7 @@ export function SessionsPage() {
   const loadMore = async () => {
     if (!nextCursor || loadingMore || requestInFlight.current) return;
     const currentGeneration = generation.current;
+    requestInFlight.current = true;
     setLoadingMore(true);
     try {
       const page = await readSessions(serverArgs(filters, nextCursor));
@@ -170,9 +173,14 @@ export function SessionsPage() {
       setTotal(page.window_session_count);
       setWindowTokens(page.window_total_tokens);
     } catch (reason: unknown) {
-      if (currentGeneration === generation.current) setError(reason instanceof Error ? reason.message : "更多会话暂不可用");
+      if (currentGeneration === generation.current) setError(safeUiError(reason, "更多会话暂不可用"));
     } finally {
-      if (currentGeneration === generation.current) setLoadingMore(false);
+      setLoadingMore(false);
+      requestInFlight.current = false;
+      if (pendingRefresh.current) {
+        pendingRefresh.current = false;
+        void fetchFirstPage();
+      }
     }
   };
 
@@ -203,6 +211,7 @@ export function SessionsPage() {
     </section>
 
     {error && <div className="error-banner" role="alert">会话数据不可用：{error}</div>}
+    {loading && rows.length > 0 && <div className="sessions-refresh-status" role="status" aria-live="polite">正在读取新的筛选窗口，下面暂保留上一份会话结果；完成后会替换为最新数据。</div>}
     <section className="sessions-summary" aria-live="polite">
       <div><strong>{total === null ? "—" : total}</strong><span>窗口会话</span></div>
       <div><strong>{windowTokens === null ? "—" : compact(windowTokens)}</strong><span>窗口 tokens</span></div>
@@ -212,10 +221,10 @@ export function SessionsPage() {
 
     <section className="sessions-panel" aria-labelledby="sessions-list-title">
       <div className="section-heading"><div><p className="eyebrow">安全投影</p><h3 id="sessions-list-title">会话列表</h3></div><span className="count-badge">{nextCursor ? "可继续" : "已加载"}</span></div>
-      {loading ? <div className="sessions-state" role="status"><strong>正在读取会话</strong><p>正在通过本地 authority 汇总当前窗口，不会上传数据。</p></div> : visibleRows.length === 0 ? <div className="sessions-state"><strong>{error ? "无法显示会话" : rows.length ? "没有匹配的计费状态" : "暂无会话"}</strong><p>{error ? "请检查本地数据同步状态后重试。" : "当前筛选窗口没有可展示的安全会话聚合。"}</p></div> : <>
+      {loading && rows.length === 0 ? <div className="sessions-state" role="status"><strong>正在读取会话</strong><p>正在通过本地 authority 汇总当前窗口，不会上传数据。</p></div> : visibleRows.length === 0 ? <div className="sessions-state"><strong>{error ? "无法显示会话" : rows.length ? "没有匹配的计费状态" : "暂无会话"}</strong><p>{error ? "请检查本地数据同步状态后重试。" : "当前筛选窗口没有可展示的安全会话聚合。"}</p></div> : <>
         <div className="sessions-table-wrap"><table className="sessions-table"><thead><tr><th scope="col">会话</th><th scope="col">宿主 · 模型</th><th scope="col">时间</th><th scope="col">Tokens</th><th scope="col">费用</th><th scope="col">状态</th></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.session_ref} className="sessions-table-row-clickable" tabIndex={0} role="button" onClick={() => setSelectedRow(row)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedRow(row); } }}><td><strong>{sessionTitle(row)}</strong><code>{row.session_ref.slice(0, 15)}…</code></td><td>{row.host}<small>{row.model_ids.length ? row.model_ids.join(" · ") : "模型不可用"}</small></td><td>{dateLabel(row.first_event_at)}<small>{row.last_event_at ? `至 ${dateLabel(row.last_event_at)}` : "结束时间不可用"}</small></td><td><strong>{compact(row.tokens.total)}</strong><small>{row.event_count} 个事件 · 峰值 {compact(row.peak_tokens)}</small></td><td><strong>{costLabel(row)}</strong><small>{row.cost_minor ? row.cost_minor.basis : "未计入金额"}</small></td><td><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateLabel(row.cost_status)}</span></td></tr>)}</tbody></table></div>
         <div className="sessions-card-list">{visibleRows.map((row) => <article className="session-card session-card-clickable" key={row.session_ref} tabIndex={0} role="button" onClick={() => setSelectedRow(row)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedRow(row); } }}><div className="session-card-heading"><strong>{sessionTitle(row)}</strong><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateShort(row.cost_status.state)}</span></div><p>{row.host} · {row.model_ids.join(" · ") || "模型不可用"}</p><div><span>{compact(row.tokens.total)} token · {row.event_count} 个事件</span><strong>{costLabel(row)}</strong></div><small>{dateLabel(row.first_event_at)} 至 {dateLabel(row.last_event_at)}</small><code>{row.session_ref.slice(0, 15)}…</code></article>)}</div>
-        {nextCursor && <div className="sessions-more"><button className="button button-secondary" type="button" onClick={() => void loadMore()} disabled={loadingMore}>{loadingMore ? "正在加载…" : "加载更多"}</button></div>}
+        {nextCursor && <div className="sessions-more"><button className="button button-secondary" type="button" onClick={() => void loadMore()} disabled={loadingMore || loading}>{loadingMore ? "正在加载…" : "加载更多"}</button></div>}
       </>}
     </section>
   </>;

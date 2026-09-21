@@ -8,7 +8,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 
 // Phase 1 deliberately has its own config and output. The existing static
 // Workbench remains the production Tauri entry until the React pages pass the
-// real-app gates described in WORKBENCH_REACT_MIGRATION_SPEC.md.
+// real-app gates described in WORKBENCH_REACT_MIGRATION_SPEC.md. The output is
+// placed beside the Tauri config so the candidate config can package exactly
+// what the preflight verifies, without changing the production frontendDist.
 export default defineConfig({
   root: path.resolve(here, "react"),
   plugins: [react(), tailwindcss(), {
@@ -27,8 +29,9 @@ export default defineConfig({
     port: 5174,
     strictPort: true,
   },
+  base: "./",
   build: {
-    outDir: path.resolve(here, "dist-react"),
+    outDir: path.resolve(here, "../src-tauri/ui-react-dist"),
     emptyOutDir: true,
   },
 });

@@ -13,6 +13,12 @@ case "$(uname -s)" in
   *) echo "build-macos-app: this script must run on macOS" >&2; exit 1 ;;
 esac
 
+echo "build-macos-app: verifying React shadow bundle"
+(cd "$repo_root/apps/desktop/ui-dev" && npm ci && npm run verify:react)
+
+echo "build-macos-app: compiling React Tauri shadow candidate (no bundle)"
+(cd "$desktop_dir" && cargo tauri build --config tauri.react.conf.json --no-bundle --debug)
+
 echo "build-macos-app: building bundled CLI"
 (cd "$repo_root" && cargo build --release -p agent-vitals)
 

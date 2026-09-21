@@ -14,6 +14,9 @@ const checks = [
   ["architecture-specific artifact upload", "path: dist/${{ matrix.arch }}"],
   ["tag validation", "release tag must start with app-v"],
   ["pinned Tauri CLI", "tauri-cli --version 2.11.4 --locked"],
+  ["React shadow bundle preflight", "Verify React shadow bundle"],
+  ["React shadow bundle build", "npm ci && npm run verify:react"],
+  ["React Tauri shadow candidate compile", "cargo tauri build --config tauri.react.conf.json --no-bundle --debug"],
   ["noninteractive build", "cargo tauri build --ci --bundles app,dmg"],
   ["build architecture check", "--require-architecture=$EXPECTED_ARCH"],
   ["publish artifact path", "find dist -type d -path \"*-${arch}/agent-vitals.app\""],
@@ -22,6 +25,7 @@ const checks = [
   ["artifact checksums", "shasum -a 256 *.zip *.dmg > SHA256SUMS"],
   ["existing tag only", "gh release create \"$RELEASE_TAG\" --verify-tag"],
   ["publish ref matches tag", "ref: ${{ inputs.release_tag || github.ref }}"],
+  ["pinned Node runtime", "node-version: 20"],
 ];
 
 function occurrences(needle) {

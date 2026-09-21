@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { listen, readDecisionMatrix, readFindings, readFindingsFreshness, type DecisionMatrixReport, type FindingGroup, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { listen, readDecisionMatrix, readFindings, readFindingsFreshness, safeUiError, type DecisionMatrixReport, type FindingGroup, type FindingSample, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
 import { DecisionMatrixSection } from "./DecisionMatrixSection";
 
 type SeverityFilter = "all" | "critical" | "warning" | "info";
@@ -39,6 +39,58 @@ function remedyLabel(group: FindingGroup): string {
   return "需要在设置中处理";
 }
 
+function evidenceLevelLabel(value: FindingSample["evidence_level"]): string {
+  return value === "E0" ? "推断" : value === "E1" ? "本地证据" : value === "E2" ? "上传就绪" : value === "E3" ? "网络尝试" : value === "E4" ? "已传输" : value === "E5" ? "远端接收" : "未知";
+}
+
+function evidenceStageLabel(value: FindingSample["stage"]): string {
+  return value === "read_observed" ? "读取已观察" : value === "package_observed" ? "打包已观察" : value === "credential_observed" ? "凭证已观察" : value === "egress_attempted" ? "出网尝试" : value === "egress_transmitted" ? "出网传输" : value === "remote_accepted" ? "远端已接收" : "未知";
+}
+
+function evidenceOriginLabel(value: FindingSample["evidence_origin"]): string {
+  return value === "local_artifact" ? "本地落盘" : value === "client_state_claim" ? "客户端状态" : value === "runtime_process_metadata" ? "运行时进程" : value === "network_metadata" ? "网络元数据" : value === "verified_receipt" ? "已验证回执" : value === "unknown_legacy" ? "历史来源" : "未知";
+}
+
+function destinationLabel(value: FindingSample["destination_class"]): string {
+  return value === "vendor_api" ? "厂商 API" : value === "object_storage" ? "对象存储" : value === "telemetry" ? "遥测" : value === "eval" ? "评测" : value === "model_api" ? "模型 API" : value === "unknown" ? "未知目的地" : "未声明";
+}
+
+function confidenceLabel(value: FindingSample["confidence"]): string {
+  return value === "high" ? "高" : value === "medium" ? "中" : value === "low" ? "低" : "未知";
+}
+
+function sampleTimeLabel(first: number | null, last: number | null): string {
+  if (first == null) return "观测时间不可用";
+  const start = timeLabel(first);
+  return last != null && last !== first ? `${start} 至 ${timeLabel(last)}` : start;
+}
+
+function sampleBytes(value: number | null): string {
+  if (value == null) return "—";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function FindingEvidenceDetail({ sample, index }: { sample: FindingSample; index: number }) {
+  return <article className="finding-evidence-detail" aria-label={`脱敏证据 ${index + 1}`}>
+    <div className="finding-evidence-detail-header"><strong>脱敏证据 {index + 1}</strong><span className={`status-pill ${sample.has_evidence ? "status-pill-success" : "status-pill-warning"}`}><span aria-hidden="true" className="status-dot" />{sample.has_evidence ? "可用" : "字段不可用"}</span></div>
+    <div className="finding-evidence-grid">
+      <div><span>观测时间</span><strong>{sampleTimeLabel(sample.observed_first_at_ms, sample.observed_last_at_ms)}</strong></div>
+      <div><span>证据等级</span><strong>{sample.evidence_level ? `${sample.evidence_level} · ${evidenceLevelLabel(sample.evidence_level)}` : "未知"}</strong></div>
+      <div><span>观测阶段</span><strong>{evidenceStageLabel(sample.stage)}</strong></div>
+      <div><span>证据来源</span><strong>{evidenceOriginLabel(sample.evidence_origin)}</strong></div>
+      <div><span>作用范围</span><strong>{sample.scope_classes.length ? sample.scope_classes.join("、") : "未声明"}</strong></div>
+      <div><span>目的地类别</span><strong>{destinationLabel(sample.destination_class)}</strong></div>
+      <div><span>观测计数</span><strong>{sample.observation_count ?? "—"}</strong></div>
+      <div><span>文件 / 大小</span><strong>{sample.file_count ?? "—"} / {sampleBytes(sample.byte_count)}</strong></div>
+      <div><span>置信度</span><strong>{confidenceLabel(sample.confidence)}</strong></div>
+      <div><span>安全引用</span><code>{sample.reference ?? "不可用"}</code></div>
+    </div>
+    <p>以上仅为本机脱敏投影；上传尝试不等于远端接收、留存或训练。</p>
+  </article>;
+}
+
 function freshnessLabel(freshness: FindingsFreshness): string {
   if (freshness.status !== "ok") return "新鲜度不可用：本地数据状态读取失败";
   if (freshness.state === "not_yet_synced") return "新鲜度 · 尚未完成过成功同步，不能判定为数据完整";
@@ -58,12 +110,16 @@ function StatusSummary({ group }: { group: FindingGroup }) {
 }
 
 function FindingRow({ group }: { group: FindingGroup }) {
+  const [expanded, setExpanded] = useState(false);
+  const canExpand = group.sample_evidence.length > 0;
   return <article className="finding-row">
     <div className="finding-row-main">
       <div className="finding-row-title"><strong>{group.rule}</strong><span className={severityClass(group.severity)}>{severityLabel(group.severity)}</span></div>
       <p className="finding-row-subtitle">{group.host} · {group.evidence_class}</p>
       <p className="finding-row-copy">{group.count} 次命中 · {group.sessions_count} 个会话 · {timeLabel(group.first_seen_at_ms)} 至 {timeLabel(group.last_seen_at_ms)}</p>
-      <p className="finding-row-copy">{remedyLabel(group)} · {group.sample_evidence.length ? "已有脱敏证据引用" : "证据引用不可用"}</p>
+      <p className="finding-row-copy">{remedyLabel(group)} · {group.sample_evidence.length ? `已有 ${group.sample_evidence.length} 条脱敏证据摘要` : "证据引用不可用"}</p>
+      {canExpand && <button className="button button-secondary button-small finding-evidence-toggle" type="button" aria-expanded={expanded} aria-controls={`finding-evidence-${group.group_id.replace(/[^a-z0-9-]/gi, "-")}`} onClick={() => setExpanded((value) => !value)}>{expanded ? "收起证据" : "查看证据"}</button>}
+      {expanded && <div className="finding-evidence-details" id={`finding-evidence-${group.group_id.replace(/[^a-z0-9-]/gi, "-")}`}>{group.sample_evidence.map((sample, index) => <FindingEvidenceDetail key={sample.reference ?? index} sample={sample} index={index} />)}</div>}
     </div>
     <div className="finding-row-side"><StatusSummary group={group} />
       {group.manual_follow_up && !group.read_only ? <span className="status-pill status-pill-warning"><span aria-hidden="true" className="status-dot" />需要在设置中处理</span> : <span className="status-pill"><span aria-hidden="true" className="status-dot" />只读证据</span>}
@@ -81,18 +137,28 @@ export function FindingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [severity, setSeverity] = useState<SeverityFilter>("all");
   const [rule, setRule] = useState("all");
+  const requestGeneration = useRef(0);
 
   const load = () => {
+    const requestId = ++requestGeneration.current;
     setLoading("正在读取本地发现投影…");
     setError(null);
-    void Promise.all([readFindings(), readFindingsFreshness()])
-      .then(([nextReport, nextFreshness]) => { setReport(nextReport); setFreshness(nextFreshness); setLoading(""); })
-      .catch((reason: unknown) => { setError(reason instanceof Error ? reason.message : "本地发现暂不可用"); setLoading(""); });
+    void Promise.allSettled([readFindings(), readFindingsFreshness()])
+      .then(([reportResult, freshnessResult]) => {
+        if (requestId !== requestGeneration.current) return;
+        const errors: string[] = [];
+        if (reportResult.status === "fulfilled") setReport(reportResult.value);
+        else errors.push(safeUiError(reportResult.reason, "本地发现暂不可用"));
+        if (freshnessResult.status === "fulfilled") setFreshness(freshnessResult.value);
+        else errors.push(safeUiError(freshnessResult.reason, "发现新鲜度暂不可用"));
+        setError(errors.length ? errors.join("；") : null);
+        setLoading("");
+      });
     setMatrixLoading(true);
     setMatrixError(null);
     void readDecisionMatrix()
-      .then((nextMatrix) => { setMatrix(nextMatrix); setMatrixLoading(false); })
-      .catch((reason: unknown) => { setMatrixError(reason instanceof Error ? reason.message : "本地对比数据暂不可用"); setMatrixLoading(false); });
+      .then((nextMatrix) => { if (requestId === requestGeneration.current) { setMatrix(nextMatrix); setMatrixLoading(false); } })
+      .catch((reason: unknown) => { if (requestId === requestGeneration.current) { setMatrixError(safeUiError(reason, "本地对比数据暂不可用")); setMatrixLoading(false); } });
   };
 
   useEffect(() => { load(); }, []);
@@ -100,9 +166,9 @@ export function FindingsPage() {
   useEffect(() => {
     let active = true;
     let cleanups: Array<() => void> = [];
-    Promise.all(["sync-status-updated", "usage-fold-updated", "trust-monitor-updated"].map((event) => listen(event, () => { if (active) load(); })))
+    Promise.all(["sync-status-updated", "usage-fold-updated", "trust-monitor-updated", "source-data-deleted"].map((event) => listen(event, () => { if (active) load(); })))
       .then((unsubscribers) => { if (active) cleanups = unsubscribers; else unsubscribers.forEach((unsubscribe) => unsubscribe()); });
-    return () => { active = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
+    return () => { active = false; requestGeneration.current += 1; cleanups.forEach((unsubscribe) => unsubscribe()); };
   }, []);
 
   const groups = report?.issues ?? [];

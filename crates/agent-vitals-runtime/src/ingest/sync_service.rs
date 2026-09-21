@@ -370,7 +370,9 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
     // 配置损坏时宁可不启动同步，也不能先清理一部分旧事实再报告错误。
     let custom_sources = crate::custom_sources::custom_source_roots(data_home)
         .map_err(|error| format!("custom source configuration failed: {error}"))?;
-    let excluded_hosts = crate::source_controls::excluded_hosts(data_home)
+    // Validate the control file before maintenance writes; the authoritative
+    // decision is re-read under each host lease immediately before import.
+    crate::source_controls::excluded_hosts(data_home)
         .map_err(|error| format!("source controls failed: {error}"))?;
     // **machine_namespace 首建单飞（审查 P2-3）**：machine.json 缺失时两个
     // 进程同时首启（托盘 tick + 外部 cron）会各自生成不同 ns、写各自的
@@ -553,8 +555,24 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
         files.sort();
         files.dedup();
     }
-    batches.retain(|(host, _)| !excluded_hosts.contains(*host));
     for (host, files) in batches {
+        // Serialize each host's ingest with source deletion.  The exclusion
+        // decision is deliberately re-read while holding the same per-host
+        // lease as the delete command; otherwise a concurrent sync could pass
+        // an old exclusion snapshot and re-import data after deletion.
+        let host_lease = crate::lease::acquire_blocking(
+            &crate::source_controls::host_data_lock_path(data_home, host)?,
+            "facts-source-sync",
+            600_000,
+            10_000,
+        )
+        .map_err(|error| format!("source {host} lease: {error}"))?;
+        let _host_heartbeat = host_lease.heartbeat(std::time::Duration::from_secs(30), 600_000);
+        let excluded_hosts = crate::source_controls::excluded_hosts(data_home)
+            .map_err(|error| format!("source controls failed: {error}"))?;
+        if excluded_hosts.contains(host) {
+            continue;
+        }
         let mut r = HostSyncReport {
             host: host.to_string(),
             ..Default::default()

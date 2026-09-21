@@ -86,10 +86,16 @@ function MatrixRow({ row, expanded, detailId, onToggle }: { row: DecisionMatrixR
 export function DecisionMatrixSection({ report, loading, error }: { report: DecisionMatrixReport | null; loading: boolean; error: string | null }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const sorted = useMemo(() => sortRows(report?.rows ?? []), [report]);
+  const hasStaleReport = Boolean(report && (loading || error));
+  const staleMessage = loading
+    ? "正在刷新模型 × Harness 对比；以下暂保留上一次对比结果。"
+    : error && report
+      ? `本次对比未完成；仍展示上一次对比结果（窗口：${report.month}）。`
+      : null;
   return <section className="finding-section matrix-section" aria-labelledby="matrix-title">
-    <div className="section-heading"><div><p className="eyebrow">决策证据面</p><h3 id="matrix-title">模型 × Harness 对比</h3><p className="section-description">成本按币种分栏；未计价、订阅和浪费率未知的组合不会被伪装成可比数字。</p></div><span className="count-badge">{report?.rows.length ?? 0}</span></div>
-    {loading && <p className="inline-status">正在读取 authority 聚合…</p>}
-    {error && <div className="error-banner" role="alert">对比面读取失败：{error} · 待办和证据明细仍可单独查看</div>}
+    <div className="section-heading"><div><p className="eyebrow">决策证据面</p><h3 id="matrix-title">模型 × Harness 对比 {report && <small className="section-meta">窗口 {report.month}</small>}</h3><p className="section-description">成本按币种分栏；未计价、订阅和浪费率未知的组合不会被伪装成可比数字。</p></div><div className="section-heading-side">{hasStaleReport && <span className="status-pill status-pill-warning" aria-label="上一次对比结果"><span aria-hidden="true" className="status-dot" />上一次结果</span>}<span className="count-badge">{report?.rows.length ?? 0}</span></div></div>
+    {loading && <p className="inline-status" aria-busy="true">{staleMessage ?? "正在读取 authority 聚合…"}</p>}
+    {error && <div className="error-banner" role="alert">对比面读取失败：{error} · {staleMessage ?? "待办和证据明细仍可单独查看"}</div>}
     {report && report.findings_summary.length > 0 && <div className="decision-summary-list">{report.findings_summary.map((summary, index) => <article className="decision-summary" key={`${summary.kind}-${index}`}><strong>{summaryTitle(summary)}</strong><p>{summaryBody(summary)}</p>{summary.saving_minor != null && <span>预计差额约 {money(summary.saving_minor, summary.currency ?? "<unknown>", "metered_estimate")} · 仅为决策提示</span>}</article>)}</div>}
     {report && <p className="matrix-sort-note">{sorted.note}{sorted.sorted ? "" : " · 当前按 token 贡献排列"}</p>}
     {report && sorted.rows.length > 0 ? <div className="matrix-list" role="list">{sorted.rows.map((row, index) => { const key = rowKey(row); const detailId = `matrix-detail-${index}`; return <MatrixRow key={key} row={row} detailId={detailId} expanded={Boolean(expanded[key])} onToggle={() => setExpanded((current) => ({ ...current, [key]: !current[key] }))} />; })}</div> : !loading && <div className="finding-empty"><strong>当前没有可对比的组合</strong><p>需要先有 authority 用量事实；空结果不代表本机没有行为。</p></div>}

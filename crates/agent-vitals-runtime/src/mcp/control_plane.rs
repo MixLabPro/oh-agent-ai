@@ -108,7 +108,8 @@ fn read_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, ToolE
         "custom_sources" => json!({ "action": action, "sources": custom_sources(data_home)? }),
         "source_controls" => json!({
             "action": action,
-            "excluded_hosts": crate::source_controls::excluded_hosts(data_home).map_err(local_error)?
+            "excluded_hosts": crate::source_controls::excluded_hosts(data_home).map_err(local_error)?,
+            "supported_hosts": crate::source_controls::supported_hosts_for(data_home)
         }),
         "retention_get" => json!({
             "action": action,
@@ -193,15 +194,14 @@ fn write_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, Tool
         "source_data_delete" => {
             require_confirmation(args, "DELETE_IMPORTED_SOURCE_DATA")?;
             let host = required_string(args, "host")?;
-            let _ = crate::source_controls::set_host_excluded(data_home, host, true)
+            let deleted = crate::source_controls::delete_imported_source_data(data_home, host)
                 .map_err(local_error)?;
-            let path = agent_vitals_data::authority::default_authority_path(data_home);
-            let db = AuthorityDb::open(&path, crate::sql_sync::now_ms()).map_err(authority_error)?;
-            let deleted = db.delete_imported_host_data(host, crate::sql_sync::now_ms())
-                .map_err(authority_error)?;
             json!({ "action": action, "host": host, "excluded": true,
                 "deleted": { "facts": deleted.facts, "sessions": deleted.sessions,
-                    "source_files": deleted.source_files } })
+                    "source_files": deleted.source_files,
+                    "trust_observations": deleted.trust_observations,
+                    "route_evidence": deleted.route_evidence,
+                    "session_excerpts": deleted.session_excerpts } })
         }
         "retention_set" => {
             let months = args.get("months").and_then(Value::as_u64)

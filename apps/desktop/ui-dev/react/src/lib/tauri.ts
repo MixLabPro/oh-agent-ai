@@ -1,5 +1,20 @@
 export type Unsubscribe = () => void;
 
+/** Convert bridge failures into bounded user-facing copy. Raw invoke errors
+ * may contain local paths, command lines, or provider diagnostics and must not
+ * cross the React serving face. Detailed diagnostics stay in the desktop log.
+ */
+export function safeUiError(reason: unknown, fallback: string): string {
+  const message = reason instanceof Error ? reason.message : "";
+  if (!message) return fallback;
+  if (/取消|cancel/i.test(message)) return "操作已取消";
+  if (/DTO|schema|格式|字段|不匹配|不守恒|超出|上限/i.test(message)) return "本地数据格式不兼容，请升级应用或重建投影";
+  if (/权限|permission|access denied|拒绝访问/i.test(message)) return "本地数据读取权限不足";
+  if (/authority|数据库|database|sqlite/i.test(message)) return "本地 authority 暂不可用";
+  if (/日期|月份|参数|引用|cursor|session_ref|filter/i.test(message)) return "筛选或引用参数不可用，请检查后重试";
+  return fallback;
+}
+
 type TauriGlobal = {
   core?: { invoke?: (command: string, args?: unknown) => Promise<unknown> };
   event?: { listen?: (event: string, handler: (payload: unknown) => void) => Promise<Unsubscribe> };
@@ -58,9 +73,88 @@ export type UsageSourceSummary = {
   excluded_hosts: string[];
   actual_spend: Record<string, number>;
   spend_by_basis: Record<string, Record<string, number>>;
+  tokens_by_host: Record<string, SummaryHostTokens>;
+  total_tokens: number;
+  metered_view: Record<string, { amount: number; actual: number; declared_estimate: number; default_estimate: number; label: string }>;
+  by_provider: Record<string, SummaryAmount>;
+  has_unresolved: boolean;
+};
+
+export type SummaryHostTokens = {
+  total: number;
+  uncached_input: number;
+  cache_read: number;
+  cache_write: number;
+  output: number;
+  cache_hit_ratio: number | null;
+};
+
+export type SummaryAmount = {
+  host_id: string;
+  amounts_by_basis: Record<string, number>;
+  currency: string | null;
+  has_unresolved: boolean;
+  evidence_basis: string | null;
+  pricing_method: string | null;
+};
+
+export type DailySummary = Omit<UsageSourceSummary, "month"> & { date: string };
+
+export type OverviewDetails = {
+  month: string;
+  date: string;
+  monthly: UsageSourceSummary | null;
+  daily: DailySummary | null;
+  calendar: UsageCalendar | null;
+  errors: string[];
 };
 
 export type StatisticsTimezone = { timezone: string };
+
+export type StatisticsSettingsReport = {
+  timezone: { status: "ok" | "unavailable"; timezone: string | null; system_timezone: string | null };
+  retention: { status: "ok" | "unavailable"; months: number | null; minimum_months: number | null; maximum_months: number | null };
+  pricing: { status: "ok" | "unavailable"; state: "ok" | "updated" | "failed" | "rejected" | "never_checked" | "skipped" | "unknown"; version: string | null; model_count: number | null; last_success_at_ms: number | null; available: boolean };
+};
+
+export type MonthlyExportRow = {
+  host: string;
+  provider: string | null;
+  tokens: number | null;
+  basis: string | null;
+  currency: string | null;
+  amount: number | null;
+  unresolved: boolean;
+  evidence_basis: string | null;
+  pricing_method: string | null;
+  freshness: UsageSourceSummary["freshness"];
+};
+
+export type MonthlyExportSummary = {
+  month: string;
+  rows: MonthlyExportRow[];
+  coverage: { measured_fields: number; total_fields: number };
+  freshness: UsageSourceSummary["freshness"];
+  excluded_hosts: string[];
+};
+
+export type AboutDiagnosticsReport = {
+  status: "ok" | "unavailable";
+  appVersion: string | null;
+  cliVersion: string | null;
+  engineVersion: string | null;
+  architecture: "x86_64" | "aarch64" | "x86" | "unknown";
+  authoritySchema: string | null;
+  statisticsTimezone: string | null;
+  pricing: { version: string | null; capturedAtMs: number | null } | null;
+  sync: { state: "ok" | "needs_attention" | "unknown" };
+};
+export type DiagnosticExportReceipt = { status: "saved" | "cancelled"; uploadPerformed: false };
+export type UpdateCheckResult = { status: "ok" | "no_release" | "unavailable"; currentVersion: string | null; latestTag: string | null; automaticInstall: false };
+
+export type SkillHostSummary = { host: string; skills_on_disk: number; discoverable_skills: number; runtime_verified_loaded_skills: number | null; unique_discoverable_skills: number; description_budget: { available: boolean; used_chars: number | null; budget_chars: number | null; pct_used: number | null; source: string | null }; trigger_data: "available" | "unavailable" | "unknown" };
+export type SkillDiagnostic = { code: string; name: string; severity: "critical" | "warning" | "info"; skill: string | null; evidence_count: number; impact: string | null; recommendation: string | null; caveats: string[] };
+export type SkillScanReport = { status: "ok" | "unavailable"; schema_version: string | null; run: string | null; host_selection: string; generated_at_ms: number | null; from_cache: boolean; hosts: SkillHostSummary[]; diagnostics: SkillDiagnostic[]; not_assessed: Array<{ code: string; name: string; reason: string }> };
 
 export type SourceConnectionState = "connected" | "needs_attention" | "paused" | "excluded" | "not_detected" | "unknown";
 export type SourceErrorKind = "permission_denied" | "file_missing" | "all_files_failed" | "db_error" | "migration_failed" | "read_failed";
@@ -81,6 +175,9 @@ export type SourceHealthReport = {
   sources: SourceHealthRow[];
   sync: { paused: boolean | null; last_success_at: string | null; state: "ok" | "failed" | "never" | "unavailable" };
 };
+export type SourceHostControls = { status: "ok" | "unavailable"; excluded_hosts: string[]; supported_hosts: string[] };
+export type SourceHostControlReceipt = { status: "saved"; changed: boolean; excluded: boolean };
+export type DeleteImportedSourceReceipt = { status: "deleted"; host: string; facts: number; sessions: number; source_files: number; trust_observations: number; route_evidence: number; session_excerpts: number };
 
 export type SyncRequestStatus = { completed: boolean; failed: boolean };
 export type CustomSourceRoot = { host: string; root: string };
@@ -116,6 +213,81 @@ export type BudgetSettingsReport = {
   snoozed_until_ms: number | null;
 };
 export type BudgetSaveReceipt = { status: "saved"; profile_id: "estimate"; currency: "CNY" | "USD"; notification_permission: "granted" | "denied" | "unavailable" };
+export type BudgetDisableReceipt = { status: "disabled"; profile_id: "estimate"; changed: boolean };
+export type NotificationPermission = "granted" | "denied" | "unavailable";
+export type QuotaReminderConfig = { status: "ok" | "unavailable"; enabled: boolean; notification_permission: NotificationPermission | null };
+export type QuotaReminderReceipt = { status: "saved"; enabled: boolean; notification_permission: NotificationPermission };
+
+export type BillingAmount = { amount_minor: number; currency: string; basis: string };
+export type BillingCandidate = {
+  candidate_id: string;
+  host: string;
+  provider_id: string;
+  currency: string;
+  amount_minor: number;
+  billing_period_start: string;
+  status: "pending" | "accepted" | "dismissed" | "unknown";
+  impact: { total_tokens: number; fact_count: number; session_count: number } | null;
+};
+export type BillingCandidateReceipt = { status: "dismissed" | "pending"; changed: boolean };
+export type BillingScope = { scope_kind: "account" | "route" | "model" | "session" | "provider" | "settlement"; scope_value: string };
+export type BillingImpactBucket = { fact_count: number; session_count: number; tokens: number; unpriced_tokens: number; amounts: BillingAmount[] };
+export type BillingImpactPreview = {
+  status: "ok" | "unavailable";
+  relationship_kind: string;
+  effective_start: string | null;
+  effective_end: string | null;
+  changes_amounts: boolean;
+  moved: BillingImpactBucket;
+  kept: { tokens: number; unpriced_tokens: number; amounts: BillingAmount[] };
+  pending: { fact_count: number; tokens: number; reasons: string[] };
+  first_event_ts_ms: number | null;
+  last_event_ts_ms: number | null;
+};
+export type BillingDeclarationReceipt = {
+  status: "saved";
+  declaration_id: string;
+  revision_id: string;
+  changed: boolean;
+  job: { job_id: string; status: "queued" | "enqueue_failed"; changed: boolean } | null;
+};
+export type BillingDeclarationRevokeReceipt = { status: "revoked"; declaration_id: string; revision_id: string; changed: boolean };
+export type BillingGroup = {
+  group_id: string;
+  host: string;
+  provider_id: string;
+  model_id: string;
+  evidence_basis: string;
+  pricing_basis: string;
+  tokens: number;
+  session_count: number;
+  effective_start: string;
+  effective_end: string | null;
+  estimated_amounts: BillingAmount[];
+  unpriced_tokens: number;
+  unresolved_reason: string | null;
+  evidence_state: "determined" | "needs_input" | "unresolved" | "unknown";
+};
+export type BillingDeclaration = {
+  declaration_id: string;
+  host: string;
+  provider_id: string;
+  relationship_kind: string;
+  subscription_name: string | null;
+  amount_minor: number | null;
+  currency: string | null;
+  effective_start: string;
+  effective_end: string | null;
+  current_revision_id: string | null;
+  source_candidate_id: string | null;
+  scopes: BillingScope[];
+  scope_count: number;
+};
+export type BillingJob = { job_id: string; status: "queued" | "running" | "failed" | "cancelled" | "succeeded" | "unknown"; error_code: string | null; requested_at_ms: number | null };
+export type BillingJobRetryReceipt = { status: "queued"; job_id: string; changed: boolean };
+export type HostBill = { bill_id: string; host: string; provider_id: string; billing_period: string; billing_basis: string; amount_minor: number; currency: string; has_evidence: boolean };
+export type BillingPanelStatus = "ok" | "partial" | "unavailable";
+export type BillingSettingsReport = { status: "ok" | "unavailable"; month: string; candidates_status: BillingPanelStatus; groups_status: BillingPanelStatus; declarations_status: BillingPanelStatus; jobs_status: BillingPanelStatus; bills_status: BillingPanelStatus; candidates: BillingCandidate[]; groups: BillingGroup[]; declarations: BillingDeclaration[]; jobs: BillingJob[]; bills: HostBill[] };
 
 export type UsageHour = {
   hour: number;
@@ -334,6 +506,18 @@ export type FindingStatusRollup = {
 
 export type FindingSample = {
   has_evidence: boolean;
+  reference: string | null;
+  observed_first_at_ms: number | null;
+  observed_last_at_ms: number | null;
+  evidence_level: "E0" | "E1" | "E2" | "E3" | "E4" | "E5" | null;
+  stage: "read_observed" | "package_observed" | "credential_observed" | "egress_attempted" | "egress_transmitted" | "remote_accepted" | null;
+  evidence_origin: "local_artifact" | "client_state_claim" | "runtime_process_metadata" | "network_metadata" | "verified_receipt" | "unknown_legacy" | null;
+  scope_classes: string[];
+  observation_count: number | null;
+  file_count: number | null;
+  byte_count: number | null;
+  destination_class: "vendor_api" | "object_storage" | "telemetry" | "eval" | "model_api" | "unknown" | null;
+  confidence: "high" | "medium" | "low" | null;
 };
 
 export type FindingGroup = {
@@ -584,6 +768,14 @@ function parseSourceHealth(value: unknown, pauseValue: unknown, overviewValue: u
   return { status, sources: rows, sync: { paused, last_success_at: overviewTimestamp(sync.at), state: syncState } };
 }
 
+function parseSourceHostControls(value: unknown): SourceHostControls {
+  const root = record(value, "source host controls");
+  const status = boundedEnum(root.status ?? "unavailable", "source host controls status", ["ok", "unavailable"], "unavailable") as SourceHostControls["status"];
+  const hosts = requiredArray(root.excluded_hosts ?? [], "excluded source hosts").slice(0, 64).map((host) => safeHostLabel(host));
+  const supported = requiredArray(root.supported_hosts ?? [], "supported source hosts").slice(0, 64).map((host) => safeHostLabel(host));
+  return { status, excluded_hosts: [...new Set(hosts.filter((host) => host !== "generic"))], supported_hosts: [...new Set(supported.filter((host) => host !== "generic"))] };
+}
+
 function parseCustomSourceReport(value: unknown, locationsValue: unknown): CustomSourceReport {
   const root = record(value, "custom source roots");
   const status = boundedEnum(root.status ?? "unavailable", "custom source status", ["ok", "unavailable"], "unavailable") as CustomSourceReport["status"];
@@ -704,6 +896,37 @@ function parseBudgetSaveReceipt(value: unknown): BudgetSaveReceipt {
   return { status: "saved", profile_id: "estimate", currency, notification_permission };
 }
 
+function parseBudgetDisableReceipt(value: unknown): BudgetDisableReceipt {
+  const root = record(value, "budget disable receipt");
+  if (root.status !== "disabled" || root.profile_id !== "estimate") throw new Error("预算停用未确认");
+  return { status: "disabled", profile_id: "estimate", changed: requiredBoolean(root.changed, "budget disable changed") };
+}
+
+function parseNotificationPermission(value: unknown): NotificationPermission {
+  if (typeof value !== "string") return "unavailable";
+  const normalized = value.toLowerCase();
+  if (normalized === "granted") return "granted";
+  if (["denied", "prompt", "restricted"].includes(normalized)) return "denied";
+  return "unavailable";
+}
+
+function parseQuotaReminderConfig(value: unknown): QuotaReminderConfig {
+  const root = record(value, "quota reminder config");
+  if (root.status === "unavailable") return { status: "unavailable", enabled: false, notification_permission: null };
+  if (root.status !== "ok") throw new Error("quota reminder config status 不兼容");
+  return {
+    status: "ok",
+    enabled: root.enabled === true,
+    notification_permission: root.notification_permission == null ? null : parseNotificationPermission(root.notification_permission),
+  };
+}
+
+function parseQuotaReminderReceipt(value: unknown): QuotaReminderReceipt {
+  const root = record(value, "quota reminder receipt");
+  if (root.status !== "saved" || typeof root.enabled !== "boolean") throw new Error("额度提醒保存未确认");
+  return { status: "saved", enabled: root.enabled, notification_permission: parseNotificationPermission(root.notification_permission) };
+}
+
 function parseOverviewSnapshot(value: unknown): OverviewSnapshot {
   const root = record(value, "overview");
   const syncRow = root.sync == null ? {} : record(root.sync, "overview sync");
@@ -811,9 +1034,40 @@ function parseUsageCalendar(value: unknown): UsageCalendar {
   return { month, days: days.sort((left, right) => left.date.localeCompare(right.date)) };
 }
 
-function parseUsageSourceSummary(value: unknown): UsageSourceSummary {
+function parseSummaryHostTokens(value: unknown, label: string): SummaryHostTokens {
+  const row = record(value, label);
+  const total = boundedCount(row.total, `${label} total`, 1_000_000_000_000_000);
+  const uncached = boundedCount(row.uncached_input, `${label} uncached input`, 1_000_000_000_000_000);
+  const cacheRead = boundedCount(row.cache_read, `${label} cache read`, 1_000_000_000_000_000);
+  const cacheWrite = boundedCount(row.cache_write, `${label} cache write`, 1_000_000_000_000_000);
+  const output = boundedCount(row.output, `${label} output`, 1_000_000_000_000_000);
+  if (total !== uncached + cacheRead + cacheWrite + output) throw new Error(`${label} token totals 不守恒`);
+  const ratio = row.cache_hit_ratio === null || row.cache_hit_ratio === undefined ? null : requiredFiniteNumber(row.cache_hit_ratio, `${label} cache hit ratio`);
+  if (ratio !== null && (ratio < 0 || ratio > 1)) throw new Error(`${label} cache hit ratio 不安全`);
+  return { total, uncached_input: uncached, cache_read: cacheRead, cache_write: cacheWrite, output, cache_hit_ratio: ratio };
+}
+
+function parseSummaryAmount(value: unknown, label: string): SummaryAmount {
+  const row = record(value, label);
+  const rawAmounts = record(row.amounts_by_basis ?? {}, `${label} amounts`);
+  const amounts_by_basis: Record<string, number> = {};
+  for (const [basis, amount] of Object.entries(rawAmounts).slice(0, 12)) {
+    if (!/^[a-z][a-z0-9_]{0,31}$/.test(basis)) continue;
+    amounts_by_basis[basis] = safeNonNegativeNumber(amount, `${label} ${basis}`);
+  }
+  const currency = row.currency === null || row.currency === undefined ? null : stringField(row.currency, `${label} currency`);
+  if (currency !== null && !/^[A-Z0-9_]{1,12}$/.test(currency)) throw new Error(`${label} currency 不安全`);
+  return {
+    host_id: safeHostLabel(row.host_id), amounts_by_basis, currency,
+    has_unresolved: row.has_unresolved === true,
+    evidence_basis: row.evidence_basis == null ? null : decisionLabel(row.evidence_basis, `${label} evidence basis`),
+    pricing_method: row.pricing_method == null ? null : decisionLabel(row.pricing_method, `${label} pricing method`),
+  };
+}
+
+function parseSummaryRoot(value: unknown, windowKind: "month" | "date"): UsageSourceSummary | DailySummary {
   const root = record(value, "usage source summary");
-  const month = safeMonth(root.month, "usage summary month");
+  const window = windowKind === "month" ? safeMonth(root.month, "usage summary month") : safeDate(root.date, "usage summary date");
   const freshnessRow = record(root.freshness, "usage freshness");
   const freshness = boundedEnum(freshnessRow.state, "usage freshness state", ["fresh", "stale", "partial", "unavailable"], "unknown") as UsageSourceSummary["freshness"];
   const coverageRow = record(root.coverage, "usage coverage");
@@ -826,15 +1080,204 @@ function parseUsageSourceSummary(value: unknown): UsageSourceSummary {
   for (const basis of ["metered_actual", "host_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent", "other"]) {
     if (rawBasis[basis] !== undefined) spendByBasis[basis] = safeMoneyMap(rawBasis[basis], `usage ${basis} spend`);
   }
-  return {
-    month,
+  const rawTokens = record(root.tokens_by_host ?? {}, "usage tokens by host");
+  const tokens_by_host: Record<string, SummaryHostTokens> = {};
+  for (const [host, item] of Object.entries(rawTokens).slice(0, 64)) tokens_by_host[safeHostLabel(host)] = parseSummaryHostTokens(item, `usage tokens ${host}`);
+  const total_tokens = Object.values(tokens_by_host).reduce((sum, item) => sum + item.total, 0);
+  const rawMetered = record(root.metered_view ?? {}, "usage metered view");
+  const metered_view: UsageSourceSummary["metered_view"] = {};
+  for (const [currency, item] of Object.entries(rawMetered).slice(0, 16)) {
+    const row = record(item, `usage metered ${currency}`);
+    metered_view[currency] = {
+      amount: safeNonNegativeNumber(row.amount, `usage metered ${currency} amount`),
+      actual: safeNonNegativeNumber(row.actual, `usage metered ${currency} actual`),
+      declared_estimate: safeNonNegativeNumber(row.declared_estimate, `usage metered ${currency} declared`),
+      default_estimate: safeNonNegativeNumber(row.default_estimate, `usage metered ${currency} default`),
+      label: decisionLabel(row.label, `usage metered ${currency} label`),
+    };
+  }
+  const rawProviders = record(root.by_provider ?? {}, "usage providers");
+  const by_provider: Record<string, SummaryAmount> = {};
+  for (const [provider, item] of Object.entries(rawProviders).slice(0, 128)) by_provider[provider.slice(0, 128)] = parseSummaryAmount(item, `usage provider ${provider}`);
+  const common = {
     freshness,
     last_observed_at: safeTimestamp(freshnessRow.last_observed_at, "usage observed at"),
     coverage: { measured_fields: measured, total_fields: total },
     excluded_hosts: excluded,
     actual_spend: safeMoneyMap(root.total_actual_spend, "usage actual spend"),
     spend_by_basis: spendByBasis,
+    tokens_by_host, total_tokens, metered_view, by_provider,
+    has_unresolved: root.has_unresolved === true,
   };
+  return windowKind === "month" ? { month: window, ...common } : { date: window, ...common };
+}
+
+function parseUsageSourceSummary(value: unknown): UsageSourceSummary {
+  const parsed = parseSummaryRoot(value, "month");
+  if (!("month" in parsed)) throw new Error("usage summary 月份字段缺失");
+  return parsed;
+}
+
+function parseDailySummary(value: unknown): DailySummary {
+  const parsed = parseSummaryRoot(value, "date");
+  if (!("date" in parsed)) throw new Error("daily summary 日期字段缺失");
+  return parsed;
+}
+
+const freshnessStates = ["fresh", "stale", "partial", "unavailable"] as const;
+
+function parseFreshness(value: unknown, label: string): UsageSourceSummary["freshness"] {
+  const row = value == null ? {} : record(value, label);
+  return boundedEnum(row.state ?? "unknown", label, freshnessStates, "unknown") as UsageSourceSummary["freshness"];
+}
+
+function parseStatisticsTimezone(value: unknown): StatisticsSettingsReport["timezone"] {
+  const root = record(value, "statistics timezone");
+  if (root.status === "unavailable") return { status: "unavailable", timezone: null, system_timezone: null };
+  if (root.status !== "ok") throw new Error("statistics timezone status 不兼容");
+  const timezone = stringField(root.timezone, "statistics timezone");
+  const systemTimezone = root.system_timezone == null ? null : stringField(root.system_timezone, "system timezone");
+  try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(); } catch (_) { throw new Error("统计时区不可用"); }
+  if (systemTimezone !== null) {
+    try { new Intl.DateTimeFormat("en-US", { timeZone: systemTimezone }).format(); } catch (_) { throw new Error("系统时区不可用"); }
+  }
+  return { status: "ok", timezone, system_timezone: systemTimezone };
+}
+
+function parseRetentionConfig(value: unknown): StatisticsSettingsReport["retention"] {
+  const root = record(value, "retention config");
+  if (root.status === "unavailable") return { status: "unavailable", months: null, minimum_months: null, maximum_months: null };
+  if (root.status !== "ok") throw new Error("retention config status 不兼容");
+  const months = boundedCount(root.months, "retention months", 120);
+  const minimum = boundedCount(root.minimum_months ?? 1, "retention minimum", 120);
+  const maximum = boundedCount(root.maximum_months ?? 60, "retention maximum", 120);
+  if (minimum < 1 || maximum < minimum || months < minimum || months > maximum) throw new Error("retention config 范围不安全");
+  return { status: "ok", months, minimum_months: minimum, maximum_months: maximum };
+}
+
+const pricingStates = ["ok", "updated", "failed", "rejected", "never_checked", "skipped"] as const;
+
+function parsePricingCatalogStatus(value: unknown): StatisticsSettingsReport["pricing"] {
+  const root = record(value, "pricing catalog status");
+  const state = boundedEnum(root.state ?? "unknown", "pricing catalog state", pricingStates, "unknown") as StatisticsSettingsReport["pricing"]["state"];
+  const version = root.source_version == null ? null : decisionLabel(root.source_version, "pricing catalog version");
+  const modelCount = root.model_count == null ? null : boundedCount(root.model_count, "pricing catalog model count", 100_000);
+  const lastSuccess = root.last_success_at_ms == null ? null : nullableSourceTimestampMs(root.last_success_at_ms, "pricing catalog last success");
+  return { status: "ok", state, version, model_count: modelCount, last_success_at_ms: lastSuccess, available: state === "ok" || state === "updated" };
+}
+
+function safeVersion(value: unknown, label: string): string | null {
+  if (value === null || value === undefined) return null;
+  const text = stringField(value, label);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._+:-]*(?: [A-Za-z0-9._+:-]+){0,3}$/.test(text)) throw new Error(`${label} DTO 版本不安全`);
+  return text;
+}
+
+function parseAboutDiagnostics(value: unknown): AboutDiagnosticsReport {
+  const root = record(value, "about diagnostics");
+  if (root.status !== "ok") return { status: "unavailable", appVersion: null, cliVersion: null, engineVersion: null, architecture: "unknown", authoritySchema: null, statisticsTimezone: null, pricing: null, sync: { state: "unknown" } };
+  const architecture = boundedEnum(root.architecture ?? "unknown", "diagnostic architecture", ["x86_64", "aarch64", "x86", "unknown"], "unknown") as AboutDiagnosticsReport["architecture"];
+  const pricing = root.pricing == null ? null : (() => { const row = record(root.pricing, "diagnostic pricing"); return { version: safeVersion(row.version, "diagnostic pricing version"), capturedAtMs: row.captured_at_ms == null ? null : nullableSourceTimestampMs(row.captured_at_ms, "diagnostic pricing timestamp") }; })();
+  const sync = root.sync == null ? { state: "unknown" as const } : (() => { const row = record(root.sync, "diagnostic sync"); return { state: row.ok === true ? "ok" as const : row.ok === false ? "needs_attention" as const : "unknown" as const }; })();
+  return { status: "ok", appVersion: safeVersion(root.app_version, "diagnostic app version"), cliVersion: safeVersion(root.cli_version, "diagnostic cli version"), engineVersion: safeVersion(root.engine_version, "diagnostic engine version"), architecture, authoritySchema: safeVersion(root.authority_schema, "diagnostic authority schema"), statisticsTimezone: root.statistics_timezone == null ? null : validateIanaTimezone(stringField(root.statistics_timezone, "diagnostic timezone")), pricing, sync };
+}
+
+function parseDiagnosticExportReceipt(value: unknown): DiagnosticExportReceipt {
+  const root = record(value, "diagnostic export receipt");
+  const status = boundedEnum(root.status, "diagnostic export status", ["saved", "cancelled"], "cancelled") as DiagnosticExportReceipt["status"];
+  if (status === "saved" && root.upload_performed !== false) throw new Error("诊断包上传状态不安全");
+  if (status === "cancelled" && root.upload_performed !== undefined && root.upload_performed !== false) throw new Error("诊断包取消状态不安全");
+  return { status, uploadPerformed: false };
+}
+
+function parseUpdateCheck(value: unknown): UpdateCheckResult {
+  const root = record(value, "update check");
+  const status = boundedEnum(root.status, "update check status", ["ok", "no_release"], "unavailable") as UpdateCheckResult["status"];
+  const currentVersion = safeVersion(root.current_version, "current version");
+  const latestTag = root.latest_tag == null ? null : stringField(root.latest_tag, "latest release tag");
+  if (latestTag !== null && !/^app-v[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(latestTag)) throw new Error("最新发布标签不安全");
+  if (root.automatic_install !== false) throw new Error("自动安装状态不安全");
+  return { status, currentVersion, latestTag, automaticInstall: false };
+}
+
+function safeSkillText(value: unknown, label: string): string | null {
+  if (value === null || value === undefined) return null;
+  const text = stringField(value, label);
+  if (/[\u0000-\u001f\u007f]/u.test(text) || text.length > 256) throw new Error(`${label} DTO 文本不安全`);
+  if (/(^|\s)(?:~\/|\/|[A-Za-z]:[\\/]|file:\/\/)/u.test(text)) return "本机路径已省略";
+  return text;
+}
+
+function parseSkillScan(value: unknown, expectedHost?: string): SkillScanReport {
+  const root = record(value, "skill scan");
+  const report = root.report == null ? null : record(root.report, "skill scan report");
+  const meta = root.desktop_meta == null ? {} : record(root.desktop_meta, "skill scan metadata");
+  if (!report) return { status: "unavailable", schema_version: null, run: null, host_selection: "all", generated_at_ms: null, from_cache: false, hosts: [], diagnostics: [], not_assessed: [] };
+  const rawHosts = record(report.host_summaries ?? {}, "skill host summaries");
+  const hosts: SkillHostSummary[] = Object.entries(rawHosts).slice(0, 16).map(([hostKey, raw]) => {
+    const row = record(raw, "skill host summary");
+    const budget = row.description_budget_detail == null ? {} : record(row.description_budget_detail, "skill budget detail");
+    const budgetAvailable = budget.available === true;
+    const used = budget.used_chars == null ? null : boundedCount(budget.used_chars, "skill budget used", 10_000_000);
+    const limit = budget.budget_chars == null ? null : boundedCount(budget.budget_chars, "skill budget limit", 10_000_000);
+    const pct = budget.pct_used == null ? null : Math.min(requiredFiniteNumber(budget.pct_used, "skill budget percent"), 1000);
+    const trigger = boundedEnum(row.trigger_data ?? "unknown", "skill trigger data", ["available", "unavailable"], "unknown") as SkillHostSummary["trigger_data"];
+    return { host: safeHostLabel(hostKey), skills_on_disk: boundedCount(row.skills_on_disk ?? 0, "skills on disk", 10_000_000), discoverable_skills: boundedCount(row.discoverable_skills ?? 0, "discoverable skills", 10_000_000), runtime_verified_loaded_skills: row.runtime_verified_loaded_skills == null ? null : boundedCount(row.runtime_verified_loaded_skills, "runtime verified skills", 10_000_000), unique_discoverable_skills: boundedCount(row.unique_discoverable_skills ?? row.discoverable_skills ?? 0, "unique discoverable skills", 10_000_000), description_budget: { available: budgetAvailable, used_chars: used, budget_chars: limit, pct_used: pct, source: safeSkillText(budget.source, "skill budget source") }, trigger_data: trigger };
+  });
+  const diagnostics = requiredArray(root.diagnostics ?? [], "skill diagnostics").slice(0, 512).map((raw) => {
+    const row = record(raw, "skill diagnostic");
+    const evidence = row.evidence == null ? null : record(row.evidence, "skill evidence");
+    const evidenceCount = evidence?.count != null ? boundedCount(evidence.count, "skill evidence count", 10_000_000) : ["hits", "skills", "pairs"].reduce((sum, key) => sum + (Array.isArray(evidence?.[key]) ? Math.min(evidence?.[key].length ?? 0, 10_000) : 0), 0);
+    return { code: safeSkillText(row.code, "skill diagnostic code") ?? "unknown", name: safeSkillText(row.name, "skill diagnostic name") ?? "未命名规则", severity: boundedEnum(row.severity ?? "info", "skill severity", ["critical", "warning", "info"], "info") as SkillDiagnostic["severity"], skill: safeSkillText(row.skill, "skill diagnostic skill"), evidence_count: evidenceCount, impact: safeSkillText(row.impact, "skill diagnostic impact"), recommendation: safeSkillText(row.recommendation, "skill diagnostic recommendation"), caveats: Array.isArray(row.caveats) ? row.caveats.slice(0, 16).map((item) => safeSkillText(item, "skill caveat") ?? "").filter(Boolean) : [] };
+  });
+  const notAssessed = requiredArray(root.not_assessed ?? [], "skill not assessed").slice(0, 128).map((raw) => { const row = record(raw, "skill not assessed row"); return { code: safeSkillText(row.code, "skill not assessed code") ?? "unknown", name: safeSkillText(row.name, "skill not assessed name") ?? "未评估规则", reason: safeSkillText(row.reason, "skill not assessed reason") ?? "原因不可用" }; });
+  const hostSelection = safeSkillText(root.host_selection, "skill host selection") ?? "all";
+  if (expectedHost !== undefined && hostSelection !== expectedHost) throw new Error("skill scan host_selection 不匹配");
+  return { status: "ok", schema_version: safeVersion(root.schema_version, "skill schema") ?? null, run: safeSkillText(root.run, "skill run"), host_selection: hostSelection, generated_at_ms: meta.generated_at_ms == null ? null : nullableSourceTimestampMs(meta.generated_at_ms, "skill generated at"), from_cache: meta.from_cache === true, hosts, diagnostics, not_assessed: notAssessed };
+}
+
+function parseMonthlyExportSummary(value: unknown): MonthlyExportSummary {
+  const root = record(value, "monthly export summary");
+  const month = safeMonth(root.month, "monthly export month");
+  const coverageRow = record(root.coverage, "monthly export coverage");
+  const measured = boundedCount(coverageRow.measured_fields, "monthly export measured fields", 1_000);
+  const total = boundedCount(coverageRow.total_fields, "monthly export total fields", 1_000);
+  if (measured > total) throw new Error("monthly export coverage 不守恒");
+  const excluded = requiredArray(root.excluded_hosts, "monthly export excluded hosts").slice(0, 32).map((host) => safeHostLabel(host));
+  const freshness = parseFreshness(root.freshness, "monthly export freshness");
+  const byHost = record(root.by_host ?? {}, "monthly export hosts");
+  const tokensByHost = record(root.tokens_by_host ?? {}, "monthly export tokens");
+  const byProvider = record(root.by_provider ?? {}, "monthly export providers");
+  const rows: MonthlyExportRow[] = [];
+  Object.entries(byProvider).slice(0, 128).forEach(([key, raw]) => {
+    const parts = key.split("/");
+    const host = safeHostLabel(parts.shift() ?? "generic");
+    const provider = parts.length ? decisionLabel(parts.join("/"), "monthly export provider") : null;
+    const amount = record(raw, "monthly export provider row");
+    const amounts = record(amount.amounts_by_basis ?? {}, "monthly export provider amounts");
+    const basisEntries = Object.entries(amounts).filter(([, value]) => typeof value === "number" && Number.isFinite(value) && value >= 0).slice(0, 16);
+    const currency = amount.currency == null ? null : decisionCurrency(amount.currency, "monthly export currency");
+    if (!basisEntries.length) basisEntries.push(["other", 0]);
+    basisEntries.forEach(([basis, rawAmount]) => rows.push({
+      host,
+      provider,
+      tokens: null,
+      basis: boundedEnum(basis, "monthly export basis", ["metered_actual", "host_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent", "other"], "other"),
+      currency,
+      amount: safeNonNegativeNumber(rawAmount, "monthly export amount"),
+      unresolved: amount.has_unresolved === true,
+      evidence_basis: amount.evidence_basis == null ? null : decisionLabel(amount.evidence_basis, "monthly export evidence"),
+      pricing_method: amount.pricing_method == null ? null : decisionLabel(amount.pricing_method, "monthly export pricing"),
+      freshness: parseFreshness(amount.freshness, "monthly export provider freshness"),
+    }));
+  });
+  Object.entries(byHost).slice(0, 64).forEach(([hostKey, raw]) => {
+    const host = safeHostLabel(hostKey);
+    const amount = record(raw, "monthly export host row");
+    const tokenRow = tokensByHost[host] == null ? null : record(tokensByHost[host], "monthly export host tokens");
+    rows.push({ host, provider: null, tokens: tokenRow == null ? null : boundedCount(tokenRow.total ?? 0, "monthly export host tokens", 1_000_000_000_000_000), basis: null, currency: amount.currency == null ? null : decisionCurrency(amount.currency, "monthly export currency"), amount: null, unresolved: amount.has_unresolved === true, evidence_basis: null, pricing_method: null, freshness: parseFreshness(amount.freshness, "monthly export host freshness") });
+  });
+  return { month, rows, coverage: { measured_fields: measured, total_fields: total }, freshness, excluded_hosts: excluded };
 }
 
 function parseUsageHourly(value: unknown): UsageHourly {
@@ -982,10 +1425,11 @@ function parseSessionBillingBucket(value: unknown): SessionBillingBucket {
   };
 }
 
-function parseSessionDetail(value: unknown): SessionDetail {
+function parseSessionDetail(value: unknown, expectedSessionRef?: string): SessionDetail {
   const root = record(value, "session detail envelope");
   const data = record(root.data, "session detail data");
   const base = parseSessionRow(data);
+  if (expectedSessionRef !== undefined && base.session_ref !== expectedSessionRef) throw new Error("session detail session_ref 不匹配");
   const timeline = requiredArray(data.timeline, "session detail timeline").slice(0, 1000).map(parseSessionTimeline);
   const workflow = requiredArray(data.workflow_timeline, "session workflow timeline").slice(0, 1000).map(parseSessionWorkflowEvent);
   const billing = requiredArray(data.billing_breakdown, "session billing breakdown").slice(0, 500).map(parseSessionBillingBucket);
@@ -1023,7 +1467,21 @@ function routeFamily(value: unknown, label: string): RouteQualityFamily["family"
 }
 
 function routeModel(value: unknown, label: string): string {
-  return decisionLabel(value, label);
+  // Route-quality reports preserve the model string from the provider response.
+  // Some real variants use bracketed capability suffixes, e.g. `[1M]`, which
+  // are valid model identifiers but intentionally are not accepted by the
+  // stricter provider/billing label grammar used by decisionLabel(). Keep the
+  // same path/URL/control-character exclusions while allowing only brackets
+  // as the additional model-specific syntax.
+  const text = stringField(value, label);
+  if (text === "<synthetic>" || text === "<unknown>") return text;
+  const valid = /^[A-Za-z0-9][A-Za-z0-9._:@+<>\-\[\]]{0,127}(\/[A-Za-z0-9][A-Za-z0-9._:@+<>\-\[\]]{0,127})?$/.test(text)
+    && !text.includes("://")
+    && !text.includes("..")
+    && !text.startsWith("file:")
+    && !/^[A-Za-z]:/.test(text);
+  if (!valid) throw new Error(`${label} DTO 模型标识不安全`);
+  return text;
 }
 
 function parseRouteQualityModel(value: unknown): RouteQualityModel {
@@ -1058,14 +1516,17 @@ function parseRouteQuality(value: unknown): RouteQualityReport {
   const root = record(value, "route quality report");
   const hosts = requiredArray(root.hosts, "route quality hosts");
   if (hosts.length > 128) throw new Error("route quality hosts 超出上限");
+  const sinceMs = boundedCount(root.since_ms, "route quality since", 9_000_000_000_000);
+  const nowMs = boundedCount(root.now_ms, "route quality now", 9_000_000_000_000);
+  if (sinceMs > nowMs) throw new Error("route quality 时间范围不安全");
   const vocabulary = requiredArray(root.families_vocabulary, "route quality vocabulary").slice(0, 32).map((item) => {
     const family = stringField(item, "route quality vocabulary item");
     if (!(routeFamilies as readonly string[]).includes(family)) throw new Error("route quality vocabulary 含未知模型族");
     return family;
   });
   return {
-    since_ms: boundedCount(root.since_ms, "route quality since", 9_000_000_000_000),
-    now_ms: boundedCount(root.now_ms, "route quality now", 9_000_000_000_000),
+    since_ms: sinceMs,
+    now_ms: nowMs,
     families_vocabulary: vocabulary,
     hosts: hosts.map((item) => {
       const row = record(item, "route quality host");
@@ -1202,15 +1663,45 @@ function parseFindingGroup(value: unknown): FindingGroup {
   const status = record(row.status_rollup, "finding status rollup");
   const rawSamples = requiredArray(row.sample_evidence, "finding sample evidence");
   if (rawSamples.length > 3) throw new Error("finding sample evidence 超出上限");
-  const sampleEvidence = rawSamples.map((item) => {
-    const sample = record(item, "finding sample");
-    if (typeof sample.available !== "boolean") throw new Error("finding sample DTO 状态不安全");
-    return { has_evidence: sample.available };
-  });
-  const count = (name: string) => requiredCount(status[name], name);
   const firstSeen = requiredCount(row.first_seen_at_ms, "finding first seen");
   const lastSeen = requiredCount(row.last_seen_at_ms, "finding last seen");
   if (firstSeen > lastSeen) throw new Error("finding 时间范围不安全");
+  const sampleEvidence = rawSamples.map((item) => {
+    const sample = record(item, "finding sample");
+    if (typeof sample.available !== "boolean") throw new Error("finding sample DTO 状态不安全");
+    const reference = sample.reference == null ? null : safeHash(sample.reference, "finding sample reference");
+    const optionalTimestamp = (candidate: unknown, label: string): number | null => {
+      if (candidate == null) return null;
+      const timestamp = requiredCount(candidate, label);
+      if (timestamp > 4_102_444_800_000 || timestamp < firstSeen || timestamp > lastSeen) throw new Error(`${label} DTO 时间范围不安全`);
+      return timestamp;
+    };
+    const optionalEnum = <T extends string>(candidate: unknown, allowed: readonly T[], label: string): T | null => {
+      if (candidate == null) return null;
+      if (typeof candidate !== "string" || !allowed.includes(candidate as T)) throw new Error(`${label} DTO 值不安全`);
+      return candidate as T;
+    };
+    const scopes = Array.isArray(sample.scope_classes) ? sample.scope_classes.slice(0, 16).map((scope) => safeTrustIdentifier(scope, "finding evidence scope", "unknown_scope")) : [];
+    const observedFirst = optionalTimestamp(sample.observed_first_at_ms, "finding evidence first timestamp");
+    const observedLast = optionalTimestamp(sample.observed_last_at_ms, "finding evidence last timestamp");
+    if (observedFirst !== null && observedLast !== null && observedFirst > observedLast) throw new Error("finding evidence 时间范围不安全");
+    return {
+      has_evidence: sample.available,
+      reference,
+      observed_first_at_ms: observedFirst,
+      observed_last_at_ms: observedLast,
+      evidence_level: optionalEnum(sample.evidence_level, ["E0", "E1", "E2", "E3", "E4", "E5"] as const, "finding evidence level"),
+      stage: optionalEnum(sample.stage, ["read_observed", "package_observed", "credential_observed", "egress_attempted", "egress_transmitted", "remote_accepted"] as const, "finding evidence stage"),
+      evidence_origin: optionalEnum(sample.evidence_origin, ["local_artifact", "client_state_claim", "runtime_process_metadata", "network_metadata", "verified_receipt", "unknown_legacy"] as const, "finding evidence origin"),
+      scope_classes: scopes,
+      observation_count: sample.observation_count == null ? null : boundedCount(sample.observation_count, "finding observation count"),
+      file_count: sample.file_count == null ? null : boundedCount(sample.file_count, "finding file count"),
+      byte_count: sample.byte_count == null ? null : boundedCount(sample.byte_count, "finding byte count", Number.MAX_SAFE_INTEGER),
+      destination_class: optionalEnum(sample.destination_class, ["vendor_api", "object_storage", "telemetry", "eval", "model_api", "unknown"] as const, "finding destination class"),
+      confidence: optionalEnum(sample.confidence, ["high", "medium", "low"] as const, "finding confidence"),
+    };
+  });
+  const count = (name: string) => requiredCount(status[name], name);
   return {
     group_id: safeHash(row.group_id, "finding group id"),
     action_kind: boundedEnum(row.action_kind, "finding action kind", ["behavior", "billing", "budget", "source", "usage", "probe", "other"], "other"),
@@ -1402,8 +1893,8 @@ export async function readFindings(): Promise<FindingsReport> {
     totals: { issues: 2, findings: 2, critical: 1, warning: 1, info: 0, sessions: 2, sessions_total: 5 },
     rules: [{ rule: "SV709", severity: "critical", category: "object_storage_egress", hits: 1, sessions: 1 }, { rule: "PRICE_COVERAGE", severity: "warning", category: "billing", hits: 1, sessions: 1 }],
     issues: [
-      { group_id: "fnv1a64:0123456789abcdef", action_kind: "behavior", rule: "SV709", host: "plugin:zcode", evidence_class: "egress", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "critical", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true }], read_only: true, manual_follow_up: false },
-      { group_id: "fnv1a64:1111111111111111", action_kind: "billing", rule: "PRICE_COVERAGE", host: "minimax-code", evidence_class: "billing", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true }], read_only: false, manual_follow_up: true },
+      { group_id: "fnv1a64:0123456789abcdef", action_kind: "behavior", rule: "SV709", host: "plugin:zcode", evidence_class: "egress", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "critical", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:2222222222222222", observed_first_at_ms: 1789891200000, observed_last_at_ms: 1789891200000, evidence_level: "E3", stage: "egress_attempted", evidence_origin: "network_metadata", scope_classes: ["git_history"], observation_count: 1, file_count: null, byte_count: 3145728, destination_class: "object_storage", confidence: "high" }], read_only: true, manual_follow_up: false },
+      { group_id: "fnv1a64:1111111111111111", action_kind: "billing", rule: "PRICE_COVERAGE", host: "minimax-code", evidence_class: "billing", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:3333333333333333", observed_first_at_ms: 1789891200000, observed_last_at_ms: 1789891200000, evidence_level: null, stage: null, evidence_origin: "local_artifact", scope_classes: [], observation_count: 1, file_count: null, byte_count: null, destination_class: null, confidence: "medium" }], read_only: false, manual_follow_up: true },
     ], next_cursor: null, refreshed: false,
   });
   return parseFindings(await handler("findings_groups_safe", { pageSize: 50, cursor: null }));
@@ -1467,6 +1958,36 @@ export async function readUsageSourceSummary(month: string): Promise<UsageSource
   const parsed = parseUsageSourceSummary(await handler("data_monthly_summary", { month: safe }));
   if (parsed.month !== safe) throw new Error("usage source summary 返回了错误月份");
   return parsed;
+}
+
+export async function readDailySummary(date: string): Promise<DailySummary> {
+  const safe = safeDate(date, "daily summary date");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseDailySummary({ date: safe, freshness: { state: "unavailable", last_observed_at: null }, coverage: { measured_fields: 0, total_fields: 0 }, excluded_hosts: [], total_actual_spend: {}, actual_spend_by_basis: {}, tokens_by_host: {}, by_provider: {}, has_unresolved: false });
+  const parsed = parseDailySummary(await handler("data_daily_summary", { date: safe }));
+  if (parsed.date !== safe) throw new Error("daily summary 返回了错误日期");
+  return parsed;
+}
+
+function statisticsMonthAndDate(timezone: string): { month: string; date: string } {
+  const formatter = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" });
+  const parts = formatter.formatToParts(new Date());
+  const year = parts.find((part) => part.type === "year")?.value ?? "1970";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
+  return { month: `${year}-${month}`, date: `${year}-${month}-${day}` };
+}
+
+export async function readOverviewDetails(): Promise<OverviewDetails> {
+  let timezone = "Asia/Shanghai";
+  try { timezone = (await readStatisticsTimezone()).timezone; } catch (_) { /* backend window remains the safe Beijing default */ }
+  const { month, date } = statisticsMonthAndDate(timezone);
+  const results = await Promise.allSettled([readUsageSourceSummary(month), readDailySummary(date), readUsageCalendar(month)]);
+  const errors: string[] = [];
+  const monthly = results[0].status === "fulfilled" ? results[0].value : (errors.push(safeUiError(results[0].reason, "月度汇总暂不可用")), null);
+  const daily = results[1].status === "fulfilled" ? results[1].value : (errors.push(safeUiError(results[1].reason, "今日汇总暂不可用")), null);
+  const calendar = results[2].status === "fulfilled" ? results[2].value : (errors.push(safeUiError(results[2].reason, "日历暂不可用")), null);
+  return { month, date, monthly, daily, calendar, errors };
 }
 
 export async function readUsageHourly(date: string): Promise<UsageHourly> {
@@ -1594,9 +2115,9 @@ export async function readSessionDetail(sessionRef: string, cursor: string | nul
       workflow_timeline: [{ event_at: new Date(now.valueOf() - 3_500_000).toISOString(), event_type: "tool_finished", capability_kind: "tool", capability_id: "bash", capability_version: null, outcome: "succeeded", duration_ms: 1400, error_fingerprint: null, invocation_fingerprint: null }],
       workflow_has_more: false, has_more: false, next_cursor: null,
     };
-    return parseSessionDetail({ data: sample });
+    return parseSessionDetail({ data: sample }, sessionRef);
   }
-  return parseSessionDetail(await handler("sessions_read", args));
+  return parseSessionDetail(await handler("sessions_read", args), sessionRef);
 }
 
 export async function readStatisticsTimezone(): Promise<StatisticsTimezone> {
@@ -1607,6 +2128,116 @@ export async function readStatisticsTimezone(): Promise<StatisticsTimezone> {
   const timezone = stringField(root.timezone, "statistics timezone");
   try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(); } catch (_) { throw new Error("统计时区不可用"); }
   return { timezone };
+}
+
+export async function readStatisticsSettings(): Promise<StatisticsSettingsReport> {
+  const systemTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const fallback: StatisticsSettingsReport = {
+    timezone: { status: "ok", timezone: systemTimezone, system_timezone: systemTimezone },
+    retention: { status: "ok", months: 13, minimum_months: 1, maximum_months: 60 },
+    pricing: { status: "ok", state: "ok", version: "browser-preview", model_count: 7, last_success_at_ms: Date.now() - 3_600_000, available: true },
+  };
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return fallback;
+  const results = await Promise.allSettled([
+    handler("statistics_timezone_config"),
+    handler("retention_config"),
+    handler("public_pricing_catalog_status"),
+  ]);
+  const parseOrUnavailable = <T,>(result: PromiseSettledResult<unknown>, parse: (value: unknown) => T, unavailable: T): T => {
+    if (result.status === "rejected") return unavailable;
+    try { return parse(result.value); } catch { return unavailable; }
+  };
+  return {
+    timezone: parseOrUnavailable(results[0], parseStatisticsTimezone, { status: "unavailable", timezone: null, system_timezone: null }),
+    retention: parseOrUnavailable(results[1], parseRetentionConfig, { status: "unavailable", months: null, minimum_months: null, maximum_months: null }),
+    pricing: parseOrUnavailable(results[2], parsePricingCatalogStatus, { status: "unavailable", state: "unknown", version: null, model_count: null, last_success_at_ms: null, available: false }),
+  };
+}
+
+function validateIanaTimezone(timezone: string): string {
+  if (typeof timezone !== "string" || timezone.length < 1 || timezone.length > 96 || /[\u0000-\u001f\u007f]/u.test(timezone)) throw new Error("统计时区不安全");
+  try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(); } catch (_) { throw new Error("统计时区不可用"); }
+  return timezone;
+}
+
+export async function saveStatisticsTimezone(timezone: string): Promise<{ status: "saved"; timezone: string }> {
+  const safe = validateIanaTimezone(timezone);
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved", timezone: safe };
+  const root = record(await handler("save_statistics_timezone_config", { timezone: safe }), "save statistics timezone");
+  if (root.status !== "saved") throw new Error("统计时区保存未确认");
+  const saved = validateIanaTimezone(stringField(root.timezone, "saved statistics timezone"));
+  return { status: "saved", timezone: saved };
+}
+
+export async function saveRetentionMonths(months: number, minimum = 1, maximum = 60): Promise<{ status: "saved"; months: number }> {
+  if (!Number.isSafeInteger(months) || months < minimum || months > maximum) throw new Error(`保留期必须是 ${minimum}-${maximum} 之间的整数`);
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved", months };
+  const root = record(await handler("save_retention_config", { input: { months } }), "save retention config");
+  if (root.status !== "saved") throw new Error("保留期保存未确认");
+  return { status: "saved", months: boundedCount(root.months, "saved retention months", 120) };
+}
+
+export async function readMonthlyExportSummary(month: string): Promise<MonthlyExportSummary> {
+  const safe = safeMonth(month, "monthly export month");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseMonthlyExportSummary({ month: safe, by_host: {}, by_provider: {}, tokens_by_host: {}, coverage: { measured_fields: 0, total_fields: 0 }, freshness: { state: "unavailable" }, excluded_hosts: [] });
+  const parsed = parseMonthlyExportSummary(await handler("data_monthly_summary", { month: safe }));
+  if (parsed.month !== safe) throw new Error("月度导出返回了错误月份");
+  return parsed;
+}
+
+export async function readAboutDiagnostics(): Promise<AboutDiagnosticsReport> {
+  const fallback: AboutDiagnosticsReport = { status: "ok", appVersion: "browser-preview", cliVersion: "browser-preview", engineVersion: "browser-preview", architecture: "unknown", authoritySchema: "browser-preview", statisticsTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC", pricing: { version: "browser-preview", capturedAtMs: Date.now() - 3_600_000 }, sync: { state: "ok" } };
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return fallback;
+  try { return parseAboutDiagnostics(await handler("about_diagnostics")); } catch { return { status: "unavailable", appVersion: null, cliVersion: null, engineVersion: null, architecture: "unknown", authoritySchema: null, statisticsTimezone: null, pricing: null, sync: { state: "unknown" } }; }
+}
+
+export async function readSkillScan(host: string = "all", force = false): Promise<SkillScanReport> {
+  if (!/^(?:all|[a-z][a-z0-9-]{0,31})$/.test(host)) throw new Error("Skill 宿主筛选不安全");
+  const now = Date.now();
+  const fallback = { schema_version: "1.0", run: "browser-preview", host_selection: host, desktop_meta: { generated_at_ms: now, from_cache: !force, host }, diagnostics: [{ code: "SV501", name: "提示注入模式", severity: "warning", skill: "browser-preview", evidence: { count: 1 }, impact: "发现 1 条需要人工复核的启发式命中。", recommendation: "打开对应 skill 定义后人工复核。", caveats: ["启发式命中不是恶意结论。"] }], not_assessed: [{ code: "SV003", name: "描述长度", reason: "当前宿主没有可辩护的统一阈值。" }], report: { host_summaries: { "claude-code": { skills_on_disk: 12, discoverable_skills: 8, runtime_verified_loaded_skills: null, unique_discoverable_skills: 8, description_budget: "available", description_budget_detail: { available: true, source: "configurable", budget_chars: 15000, used_chars: 4200, pct_used: 28.0 }, trigger_data: "available" } } } };
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseSkillScan(fallback, host);
+  try { return parseSkillScan(await handler("skills_doctor_report", { host, force }), host); }
+  catch (reason: unknown) {
+    const row = reason && typeof reason === "object" ? reason as Record<string, unknown> : {};
+    const detail = row.error && typeof row.error === "object" ? row.error as Record<string, unknown> : row;
+    const code = typeof detail.code === "string" ? detail.code : "";
+    if (code === "no_binary") throw new Error("未找到可用的 agent-vitals CLI；请先修复安装或版本。");
+    if (code === "cancelled") throw new Error("Skill 扫描已取消。");
+    throw new Error("Skill 扫描失败；请确认本机 CLI 可用后重试");
+  }
+}
+
+export async function cancelSkillScan(): Promise<"cancelled" | "not_running"> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return "not_running";
+  try { const result = await handler("skills_scan_cancel"); return result === true ? "cancelled" : "not_running"; }
+  catch { throw new Error("取消 Skill 扫描失败"); }
+}
+
+export async function saveDiagnosticPackage(): Promise<DiagnosticExportReceipt> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved", uploadPerformed: false };
+  return parseDiagnosticExportReceipt(await handler("export_diagnostic_package"));
+}
+
+export async function checkForUpdates(): Promise<UpdateCheckResult> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "no_release", currentVersion: "browser-preview", latestTag: null, automaticInstall: false };
+  try { return parseUpdateCheck(await handler("check_for_updates")); } catch { return { status: "unavailable", currentVersion: null, latestTag: null, automaticInstall: false }; }
+}
+
+export async function openTrustedReleasesPage(): Promise<{ status: "opened" }> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "opened" };
+  const root = record(await handler("open_trusted_releases_page"), "open releases page");
+  if (root.status !== "opened") throw new Error("发布页打开未确认");
+  return { status: "opened" };
 }
 
 export async function readSourceHealth(): Promise<SourceHealthReport> {
@@ -1636,6 +2267,41 @@ export async function readSourceHealth(): Promise<SourceHealthReport> {
   } catch {
     throw new Error("来源状态读取失败");
   }
+}
+
+export async function readSourceHostControls(): Promise<SourceHostControls> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "ok", excluded_hosts: [], supported_hosts: [] };
+  try { return parseSourceHostControls(await handler("source_host_controls")); } catch { return { status: "unavailable", excluded_hosts: [], supported_hosts: [] }; }
+}
+
+export async function readSourceDataRevision(): Promise<number> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return 0;
+  try {
+    const root = record(await handler("source_data_revision"), "source data revision");
+    return boundedCount(root.revision, "source data revision", Number.MAX_SAFE_INTEGER);
+  } catch {
+    return 0;
+  }
+}
+
+export async function setSourceHostExcluded(host: string, excluded: boolean): Promise<SourceHostControlReceipt> {
+  if (safeHostLabel(host) !== host || host === "generic") throw new Error("source host is not supported");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved", changed: true, excluded };
+  const root = record(await handler("set_source_host_excluded", { input: { host, excluded } }), "source host control receipt");
+  if (root.status !== "saved" && root.status !== "ok") throw new Error("source host control was not saved");
+  return { status: "saved", changed: requiredBoolean(root.changed ?? true, "source host control changed"), excluded: requiredBoolean(root.excluded, "source host control excluded") };
+}
+
+export async function deleteImportedSourceData(host: string): Promise<DeleteImportedSourceReceipt> {
+  if (safeHostLabel(host) !== host || host === "generic") throw new Error("source host is not supported");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "deleted", host, facts: 0, sessions: 0, source_files: 0, trust_observations: 0, route_evidence: 0, session_excerpts: 0 };
+  const root = record(await handler("delete_imported_source_data", { host }), "delete source data receipt");
+  if (root.status !== "deleted" || root.host !== host) throw new Error("delete source data receipt was not confirmed");
+  return { status: "deleted", host, facts: boundedCount(root.facts, "deleted source facts", 100_000_000), sessions: boundedCount(root.sessions, "deleted source sessions", 10_000_000), source_files: boundedCount(root.source_files, "deleted source files", 1_000_000), trust_observations: boundedCount(root.trust_observations, "deleted trust observations", 10_000_000), route_evidence: boundedCount(root.route_evidence, "deleted route evidence", 10_000_000), session_excerpts: boundedCount(root.session_excerpts, "deleted session excerpts", 10_000_000) };
 }
 
 export async function readCustomSourceConfig(): Promise<CustomSourceReport> {
@@ -1714,6 +2380,26 @@ export async function saveBudgetProfile(input: { currency: "CNY" | "USD"; monthl
   }
 }
 
+export async function disableBudgetProfile(): Promise<BudgetDisableReceipt> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "disabled", profile_id: "estimate", changed: true };
+  try { return parseBudgetDisableReceipt(await handler("disable_budget_profile")); }
+  catch { throw new Error("预算停用失败，请稍后重试"); }
+}
+
+export async function readQuotaReminderConfig(): Promise<QuotaReminderConfig> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "ok", enabled: false, notification_permission: null };
+  return parseQuotaReminderConfig(await handler("quota_reminder_config"));
+}
+
+export async function saveQuotaReminderConfig(enabled: boolean): Promise<QuotaReminderReceipt> {
+  if (typeof enabled !== "boolean") throw new Error("额度提醒开关参数不安全");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved", enabled, notification_permission: "granted" };
+  return parseQuotaReminderReceipt(await handler("save_quota_reminder_config", { enabled }));
+}
+
 export async function snoozeBudgetCurrentPeriod(): Promise<number | null> {
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return Date.now() + 7 * 86_400_000;
@@ -1735,6 +2421,269 @@ export async function clearBudgetSnooze(): Promise<void> {
   } catch {
     throw new Error("恢复预算提醒失败");
   }
+}
+
+function safeBillingPeriod(value: unknown, label: string, nullable = false): string | null {
+  if (nullable && (value === null || value === undefined || value === "")) return null;
+  const text = stringField(value, label);
+  if (/^\d{4}-(0[1-9]|1[0-2])$/.test(text)) return text;
+  return safeDate(text, label);
+}
+
+function parseBillingAmount(value: unknown): BillingAmount {
+  const row = record(value, "billing amount");
+  return {
+    amount_minor: boundedCount(row.amount_minor, "billing amount", Number.MAX_SAFE_INTEGER),
+    currency: billingCurrency(row.currency),
+    basis: billingBasis(row.basis),
+  };
+}
+
+function billingCurrency(value: unknown): string {
+  const currency = stringField(value, "billing currency");
+  if (!/^[A-Z]{3}$/.test(currency)) throw new Error("billing currency 不安全");
+  return currency;
+}
+
+function billingBasis(value: unknown): string {
+  const basis = stringField(value, "billing basis");
+  return ["metered_actual", "metered_estimate", "fixed_subscription", "host_billed", "api_equivalent", "other"].includes(basis) ? basis : "unknown";
+}
+
+function parseBillingCandidate(value: unknown): BillingCandidate {
+  const row = record(value, "billing candidate");
+  const rawStatus = typeof row.status === "string" ? row.status : "unknown";
+  const status = (["pending", "accepted", "dismissed"] as const).includes(rawStatus as never) ? rawStatus as BillingCandidate["status"] : "unknown";
+  const impact = row.impact == null || record(row.impact, "billing candidate impact").status !== "ok" ? null : (() => {
+    const data = record(row.impact, "billing candidate impact");
+    return { total_tokens: boundedCount(data.total_tokens ?? 0, "candidate impact tokens", Number.MAX_SAFE_INTEGER), fact_count: boundedCount(data.fact_count ?? 0, "candidate impact facts", Number.MAX_SAFE_INTEGER), session_count: boundedCount(data.session_count ?? 0, "candidate impact sessions", Number.MAX_SAFE_INTEGER) };
+  })();
+  return {
+    candidate_id: decisionLabel(row.candidate_id, "billing candidate id"), host: safeHostLabel(row.host), provider_id: decisionLabel(row.provider_id, "billing candidate provider"),
+    currency: billingCurrency(row.currency), amount_minor: boundedCount(row.amount_minor, "billing candidate amount", Number.MAX_SAFE_INTEGER),
+    billing_period_start: safeDate(row.billing_period_start, "billing candidate start") as string,
+    status, impact,
+  };
+}
+
+function parseBillingCandidateReceipt(value: unknown): BillingCandidateReceipt {
+  const root = record(value, "billing candidate receipt");
+  if (root.status !== "dismissed" && root.status !== "pending") throw new Error("计费候选处置未确认");
+  return { status: root.status, changed: root.changed === true };
+}
+
+function parseBillingImpactBucket(value: unknown, label: string): BillingImpactBucket {
+  const row = record(value, label);
+  return {
+    fact_count: boundedCount(row.fact_count ?? 0, `${label} facts`, Number.MAX_SAFE_INTEGER),
+    session_count: boundedCount(row.session_count ?? 0, `${label} sessions`, Number.MAX_SAFE_INTEGER),
+    tokens: boundedCount(row.tokens ?? 0, `${label} tokens`, Number.MAX_SAFE_INTEGER),
+    unpriced_tokens: boundedCount(row.unpriced_tokens ?? 0, `${label} unpriced`, Number.MAX_SAFE_INTEGER),
+    amounts: requiredArray(row.amounts ?? [], `${label} amounts`).slice(0, 16).map(parseBillingAmount),
+  };
+}
+
+function parseBillingImpactPreview(value: unknown): BillingImpactPreview {
+  const root = record(value, "billing impact preview");
+  if (root.status === "unavailable") throw new Error("计费影响预览暂不可用");
+  if (root.status !== "ok") throw new Error("计费影响预览状态不兼容");
+  const kept = record(root.kept ?? {}, "billing impact kept");
+  const pending = record(root.pending ?? {}, "billing impact pending");
+  return {
+    status: "ok",
+    relationship_kind: decisionLabel(root.relationship_kind ?? "unknown", "billing impact relationship"),
+    effective_start: root.effective_start == null ? null : safeDate(root.effective_start, "billing impact start"),
+    effective_end: root.effective_end == null ? null : safeDate(root.effective_end, "billing impact end"),
+    changes_amounts: root.changes_amounts === true,
+    moved: parseBillingImpactBucket(root.moved ?? {}, "billing impact moved"),
+    kept: { tokens: boundedCount(kept.tokens ?? 0, "billing impact kept tokens", Number.MAX_SAFE_INTEGER), unpriced_tokens: boundedCount(kept.unpriced_tokens ?? 0, "billing impact kept unpriced", Number.MAX_SAFE_INTEGER), amounts: requiredArray(kept.amounts ?? [], "billing impact kept amounts").slice(0, 16).map(parseBillingAmount) },
+    pending: { fact_count: boundedCount(pending.fact_count ?? 0, "billing impact pending facts", Number.MAX_SAFE_INTEGER), tokens: boundedCount(pending.tokens ?? 0, "billing impact pending tokens", Number.MAX_SAFE_INTEGER), reasons: requiredArray(pending.reasons ?? [], "billing impact pending reasons").slice(0, 16).map((item) => decisionLabel(item, "billing impact reason")) },
+    first_event_ts_ms: nullableTimestampMs(root.first_event_ts_ms, "billing impact first event"),
+    last_event_ts_ms: nullableTimestampMs(root.last_event_ts_ms, "billing impact last event"),
+  };
+}
+
+function parseBillingDeclarationReceipt(value: unknown): BillingDeclarationReceipt {
+  const root = record(value, "billing declaration receipt");
+  if (root.status !== "saved") throw new Error("计费声明保存未确认");
+  const job = root.job == null ? null : (() => {
+    const row = record(root.job, "billing declaration job");
+    if (row.status !== "queued" && row.status !== "enqueue_failed") throw new Error("计费重算回执状态不兼容");
+    return { job_id: decisionLabel(row.job_id, "billing job id"), status: row.status as "queued" | "enqueue_failed", changed: row.changed === true };
+  })();
+  return { status: "saved", declaration_id: decisionLabel(root.declaration_id, "billing declaration id"), revision_id: decisionLabel(root.revision_id, "billing revision id"), changed: root.changed === true, job };
+}
+
+function parseBillingDeclarationRevokeReceipt(value: unknown): BillingDeclarationRevokeReceipt {
+  const root = record(value, "billing declaration revoke receipt");
+  if (root.status !== "revoked") throw new Error("计费声明撤销未确认");
+  return { status: "revoked", declaration_id: decisionLabel(root.declaration_id, "billing declaration id"), revision_id: decisionLabel(root.revision_id, "billing revision id"), changed: root.changed === true };
+}
+
+function validateBillingScopes(scopes: BillingScope[]): void {
+  if (scopes.length > 128 || scopes.some((scope) => !["account", "route", "model", "session", "provider", "settlement"].includes(scope.scope_kind) || !scope.scope_value || scope.scope_value.length > 256)) throw new Error("计费声明范围不安全");
+}
+
+function validateBillingCandidateReference(value: string | null | undefined): void {
+  if (value !== null && value !== undefined && !/^[A-Za-z0-9_.:-]{1,128}$/.test(value)) throw new Error("计费候选引用不安全");
+}
+
+function parseBillingGroup(value: unknown): BillingGroup {
+  const row = record(value, "billing group");
+  const amounts = requiredArray(row.estimated_amounts ?? [], "billing group amounts");
+  if (amounts.length > 16) throw new Error("billing group amounts 超出上限");
+  const unresolved = boundedCount(row.unpriced_tokens ?? 0, "billing group unpriced tokens", Number.MAX_SAFE_INTEGER) > 0 || typeof row.unresolved_reason === "string";
+  const verdict = row.auto_verdict == null ? null : record(row.auto_verdict, "billing group verdict");
+  const verdictState = verdict?.state;
+  const evidenceState = unresolved ? "unresolved" : verdictState === "determined" ? "determined" : verdictState === "one_question" || verdictState === "needs_input" ? "needs_input" : "unknown";
+  return {
+    group_id: decisionLabel(row.group_id, "billing group id"), host: safeHostLabel(row.host), provider_id: decisionLabel(row.provider_id, "billing group provider"), model_id: row.model_id == null ? "<unknown>" : decisionLabel(row.model_id, "billing group model"),
+    evidence_basis: decisionLabel(row.evidence_basis ?? "unknown", "billing evidence basis"), pricing_basis: decisionLabel(row.pricing_basis ?? "unknown", "billing pricing basis"),
+    tokens: boundedCount(row.tokens ?? 0, "billing group tokens", Number.MAX_SAFE_INTEGER), session_count: boundedCount(row.session_count ?? 0, "billing group sessions", Number.MAX_SAFE_INTEGER),
+    effective_start: safeBillingPeriod(row.effective_start, "billing group start") as string, effective_end: safeBillingPeriod(row.effective_end, "billing group end", true),
+    estimated_amounts: amounts.map(parseBillingAmount), unpriced_tokens: boundedCount(row.unpriced_tokens ?? 0, "billing group unpriced", Number.MAX_SAFE_INTEGER), unresolved_reason: row.unresolved_reason == null ? null : "部分用量尚未完成计价",
+    evidence_state: evidenceState,
+  };
+}
+
+function parseBillingDeclaration(value: unknown): BillingDeclaration {
+  const row = record(value, "billing declaration");
+  const scopes = requiredArray(row.scopes ?? [], "billing declaration scopes").slice(0, 128).map((item) => {
+    const scope = record(item, "billing declaration scope");
+    if (!["account", "route", "model", "session", "provider", "settlement"].includes(String(scope.scope_kind))) throw new Error("billing declaration scope kind 不受支持");
+    return { scope_kind: scope.scope_kind as BillingScope["scope_kind"], scope_value: decisionLabel(scope.scope_value, "billing declaration scope value") };
+  });
+  return {
+    declaration_id: decisionLabel(row.declaration_id, "billing declaration id"), host: safeHostLabel(row.host), provider_id: decisionLabel(row.provider_id, "billing declaration provider"), relationship_kind: decisionLabel(row.relationship_kind, "billing relationship"),
+    subscription_name: row.subscription_name == null ? null : decisionLabel(row.subscription_name, "billing subscription name"), amount_minor: row.amount_minor == null ? null : boundedCount(row.amount_minor, "billing declaration amount", Number.MAX_SAFE_INTEGER), currency: row.currency == null ? null : billingCurrency(row.currency),
+    effective_start: safeDate(row.effective_start, "billing declaration start"), effective_end: row.effective_end == null ? null : safeDate(row.effective_end, "billing declaration end"), current_revision_id: row.current_revision_id == null ? null : decisionLabel(row.current_revision_id, "billing revision id"), source_candidate_id: row.source_candidate_id == null ? null : decisionLabel(row.source_candidate_id, "billing candidate id"), scopes, scope_count: scopes.length,
+  };
+}
+
+function parseBillingJob(value: unknown): BillingJob {
+  const row = record(value, "billing job");
+  const rawStatus = typeof row.status === "string" ? row.status : "unknown";
+  const allowed = ["queued", "running", "failed", "cancelled", "succeeded"] as const;
+  const status = (allowed as readonly string[]).includes(rawStatus) ? rawStatus as BillingJob["status"] : "unknown";
+  return { job_id: decisionLabel(row.job_id, "billing job id"), status, error_code: row.error_code == null ? null : "重算失败，请重试", requested_at_ms: nullableTimestampMs(row.requested_at_ms, "billing job requested") };
+}
+
+function parseBillingJobRetryReceipt(value: unknown): BillingJobRetryReceipt {
+  const root = record(value, "billing job retry receipt");
+  if (root.status !== "queued") throw new Error("重算重试未入队");
+  return { status: "queued", job_id: decisionLabel(root.job_id, "billing job id"), changed: root.changed === true };
+}
+
+function parseHostBill(value: unknown, billingPeriod: string): HostBill {
+  const row = record(value, "host bill");
+  return { bill_id: decisionLabel(row.bill_id, "bill id"), host: safeHostLabel(row.host), provider_id: decisionLabel(row.provider_id, "bill provider"), billing_period: row.billing_period == null ? billingPeriod : safeMonth(row.billing_period, "bill period"), billing_basis: billingBasis(row.billing_basis ?? "unknown"), amount_minor: boundedCount(row.amount_minor, "bill amount", Number.MAX_SAFE_INTEGER), currency: billingCurrency(row.currency), has_evidence: typeof row.evidence_ref === "string" && row.evidence_ref.length > 0 };
+}
+
+function parseBillingList(value: unknown, key: string): { status: "ok" | "unavailable"; items: unknown[] } {
+  const root = record(value, `billing ${key}`);
+  if (root.status === "unavailable") return { status: "unavailable", items: [] };
+  if (root.status !== "ok") throw new Error(`billing ${key} status 不兼容`);
+  const items = requiredArray(root[key], `billing ${key}`);
+  if (items.length > 512) throw new Error(`billing ${key} 超出上限`);
+  return { status: "ok", items };
+}
+
+export async function readBillingSettings(): Promise<BillingSettingsReport> {
+  const month = currentBudgetMonth();
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) {
+    return { status: "ok", month, candidates_status: "ok", groups_status: "ok", declarations_status: "ok", jobs_status: "ok", bills_status: "ok", candidates: [parseBillingCandidate({ candidate_id: "browser-candidate-1", host: "codex", provider_id: "openai", currency: "USD", amount_minor: 2000, billing_period_start: `${month}-01`, status: "pending", impact: { status: "ok", total_tokens: 18000, fact_count: 4, session_count: 1 } })], groups: [], declarations: [], jobs: [], bills: [] };
+  }
+  const results = await Promise.allSettled([
+    handler("billing_import_candidates"), handler("billing_confirmation_groups", { month }), handler("billing_declarations"), handler("billing_recalculation_jobs"), handler("host_bills_for_period", { billingPeriod: month }),
+  ]);
+  const parse = <T,>(index: number, key: string, mapper: (item: unknown) => T): { status: BillingPanelStatus; items: T[] } => {
+    const result = results[index];
+    if (result.status === "rejected") return { status: "unavailable", items: [] };
+    let list: { status: "ok" | "unavailable"; items: unknown[] };
+    try { list = parseBillingList(result.value, key); } catch { return { status: "unavailable", items: [] }; }
+    if (list.status === "unavailable") return { status: "unavailable", items: [] };
+    const items: T[] = [];
+    let rejected = 0;
+    for (const item of list.items) {
+      try { items.push(mapper(item)); } catch { rejected += 1; }
+    }
+    return { status: rejected === 0 ? "ok" : items.length ? "partial" : "unavailable", items };
+  };
+  const candidates = parse(0, "candidates", parseBillingCandidate);
+  const groups = parse(1, "groups", parseBillingGroup);
+  const declarations = parse(2, "declarations", parseBillingDeclaration);
+  const jobs = parse(3, "jobs", parseBillingJob);
+  const bills = parse(4, "bills", (item) => parseHostBill(item, month));
+  const pendingUnavailable = candidates.status === "unavailable" && groups.status === "unavailable";
+  return { status: pendingUnavailable ? "unavailable" : "ok", month, candidates_status: candidates.status, groups_status: groups.status, declarations_status: declarations.status, jobs_status: jobs.status, bills_status: bills.status, candidates: candidates.items, groups: groups.items, declarations: declarations.items, jobs: jobs.items, bills: bills.items };
+}
+
+export async function resolveBillingImportCandidate(candidateId: string, decision: "dismiss" | "reopen"): Promise<BillingCandidateReceipt> {
+  if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(candidateId)) throw new Error("计费候选引用不安全");
+  if (decision !== "dismiss" && decision !== "reopen") throw new Error("计费候选处置不受支持");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: decision === "dismiss" ? "dismissed" : "pending", changed: true };
+  return parseBillingCandidateReceipt(await handler("resolve_billing_import_candidate", { candidateId, decision }));
+}
+
+export async function retryBillingRecalculation(jobId: string): Promise<BillingJobRetryReceipt> {
+  if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(jobId)) throw new Error("重算任务引用不安全");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "queued", job_id: jobId, changed: true };
+  return parseBillingJobRetryReceipt(await handler("retry_billing_recalculation", { jobId }));
+}
+
+export async function previewBillingDeclaration(input: { host: string; provider_id: string; relationship_kind: "official_api" | "third_party" | "organization"; effective_start: string; effective_end: string | null; scopes: BillingScope[] }): Promise<BillingImpactPreview> {
+  if (safeHostLabel(input.host) !== input.host || input.host === "generic") throw new Error("计费声明宿主或服务商不安全");
+  decisionLabel(input.provider_id, "计费声明服务商");
+  if (!/^(?:official_api|third_party|organization)$/.test(input.relationship_kind)) throw new Error("计费声明关系不受支持");
+  if (!/^\d{4}-\d{2}(?:-\d{2})?$/.test(input.effective_start) || (input.effective_end !== null && !/^\d{4}-\d{2}(?:-\d{2})?$/.test(input.effective_end))) throw new Error("计费声明日期格式不安全");
+  validateBillingScopes(input.scopes);
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseBillingImpactPreview({ status: "ok", relationship_kind: input.relationship_kind, effective_start: input.effective_start, effective_end: input.effective_end, changes_amounts: false, moved: { fact_count: 0, session_count: 0, tokens: 0, unpriced_tokens: 0, amounts: [] }, kept: { tokens: 0, unpriced_tokens: 0, amounts: [] }, pending: { fact_count: 0, tokens: 0, reasons: [] }, first_event_ts_ms: null, last_event_ts_ms: null });
+  return parseBillingImpactPreview(await handler("billing_candidate_impact_preview", { host: input.host, providerId: input.provider_id, relationshipKind: input.relationship_kind, effectiveStart: input.effective_start, effectiveEnd: input.effective_end, scopes: input.scopes }));
+}
+
+export async function saveBillingDeclaration(input: { revision_id: string; declaration_id: string; host: string; provider_id: string; relationship_kind: "official_api" | "third_party" | "organization"; effective_start: string; effective_end: string | null; source_candidate_id?: string | null; evidence_ref: string; scopes: BillingScope[] }): Promise<BillingDeclarationReceipt> {
+  if (![input.revision_id, input.declaration_id].every((value) => /^[A-Za-z0-9_.:-]{1,128}$/.test(value))) throw new Error("计费声明引用不安全");
+  if (safeHostLabel(input.host) !== input.host || input.host === "generic") throw new Error("计费声明宿主或服务商不安全");
+  decisionLabel(input.provider_id, "计费声明服务商");
+  if (!/^(?:official_api|third_party|organization)$/.test(input.relationship_kind)) throw new Error("计费声明关系不受支持");
+  if (!/^\d{4}-\d{2}(?:-\d{2})?$/.test(input.effective_start) || (input.effective_end !== null && !/^\d{4}-\d{2}(?:-\d{2})?$/.test(input.effective_end))) throw new Error("计费声明日期格式不安全");
+  if (!input.evidence_ref || input.evidence_ref.length > 512) throw new Error("计费声明证据引用不安全");
+  validateBillingScopes(input.scopes);
+  validateBillingCandidateReference(input.source_candidate_id);
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved", declaration_id: input.declaration_id, revision_id: input.revision_id, changed: true, job: null };
+  return parseBillingDeclarationReceipt(await handler("save_billing_declaration_revision", { revisionId: input.revision_id, declarationId: input.declaration_id, supersedesRevisionId: null, host: input.host, providerId: input.provider_id, relationshipKind: input.relationship_kind, subscriptionName: null, amountMinor: null, currency: null, effectiveStart: input.effective_start, effectiveEnd: input.effective_end, sourceCandidateId: input.source_candidate_id ?? null, evidenceRef: input.evidence_ref, scopes: input.scopes }));
+}
+
+export async function amendBillingDeclaration(input: { declaration_id: string; supersedes_revision_id: string; host: string; provider_id: string; subscription_name: string | null; amount_minor: number | null; currency: string | null; effective_start: string; effective_end: string | null; source_candidate_id: string | null; scopes: BillingScope[] }): Promise<BillingDeclarationReceipt> {
+  if (![input.declaration_id, input.supersedes_revision_id].every((value) => /^[A-Za-z0-9_.:-]{1,128}$/.test(value))) throw new Error("计费声明修订引用不安全");
+  if (safeHostLabel(input.host) !== input.host || input.host === "generic") throw new Error("计费声明宿主不安全");
+  decisionLabel(input.provider_id, "计费声明服务商");
+  safeDate(input.effective_start, "计费声明起始日");
+  if (input.effective_end !== null) safeDate(input.effective_end, "计费声明结束日");
+  if (input.subscription_name !== null && (input.subscription_name.length > 256 || /[\u0000-\u001f\u007f]/u.test(input.subscription_name))) throw new Error("套餐名不安全");
+  if (input.amount_minor !== null && (!Number.isSafeInteger(input.amount_minor) || input.amount_minor < 0)) throw new Error("月费必须为非负整数分");
+  if ((input.amount_minor === null) !== (input.currency === null)) throw new Error("月费和币种必须同时填写或同时留空");
+  if (input.currency !== null) billingCurrency(input.currency);
+  validateBillingCandidateReference(input.source_candidate_id);
+  validateBillingScopes(input.scopes);
+  const handler = globalTauri()?.core?.invoke;
+  const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const payload = { revisionId: `rev-amend-${suffix}`, declarationId: input.declaration_id, supersedesRevisionId: input.supersedes_revision_id, host: input.host, providerId: input.provider_id, relationshipKind: "official_subscription", subscriptionName: input.subscription_name, amountMinor: input.amount_minor, currency: input.currency, effectiveStart: input.effective_start, effectiveEnd: input.effective_end, sourceCandidateId: input.source_candidate_id, evidenceRef: `amend:${input.supersedes_revision_id}`, scopes: input.scopes };
+  if (!handler) return { status: "saved", declaration_id: input.declaration_id, revision_id: payload.revisionId, changed: true, job: null };
+  return parseBillingDeclarationReceipt(await handler("save_billing_declaration_revision", payload));
+}
+
+export async function revokeBillingDeclaration(input: { declaration_id: string; supersedes_revision_id: string }): Promise<BillingDeclarationRevokeReceipt> {
+  if (![input.declaration_id, input.supersedes_revision_id].every((value) => /^[A-Za-z0-9_.:-]{1,128}$/.test(value))) throw new Error("计费声明修订引用不安全");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "revoked", declaration_id: input.declaration_id, revision_id: `revoked-${input.supersedes_revision_id}`, changed: true };
+  const revisionId = `rev-revoke-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return parseBillingDeclarationRevokeReceipt(await handler("revoke_billing_declaration", { revisionId, declarationId: input.declaration_id, supersedesRevisionId: input.supersedes_revision_id }));
 }
 
 function validateCustomSourceInput(host: string, root: string): void {
@@ -1819,6 +2768,16 @@ export async function setSyncPaused(paused: boolean): Promise<boolean> {
 
 export async function listen(event: string, handler: (payload: unknown) => void): Promise<Unsubscribe> {
   const listener = globalTauri()?.event?.listen;
-  if (!listener) return () => undefined;
-  return listener(event, handler);
+  if (event !== "source-data-deleted") {
+    if (!listener) return () => undefined;
+    return listener(event, handler);
+  }
+  const windowHandler = () => handler({ source: "revision-poll" });
+  window.addEventListener("agent-vitals-source-data-deleted", windowHandler);
+  if (!listener) return () => window.removeEventListener("agent-vitals-source-data-deleted", windowHandler);
+  const unsubscribeTauri = await listener(event, handler);
+  return () => {
+    window.removeEventListener("agent-vitals-source-data-deleted", windowHandler);
+    unsubscribeTauri();
+  };
 }

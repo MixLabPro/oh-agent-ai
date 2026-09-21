@@ -20,6 +20,7 @@
 
   const byProvider = {
     "codex/openai": {
+      host_id: "codex",
       currency: "USD",
       amounts_by_basis: { api_equivalent: 14.82 },
       has_unresolved: false,
@@ -27,6 +28,7 @@
       evidence_basis: "route-evidence",
     },
     "claude-code/anthropic": {
+      host_id: "claude-code",
       currency: "USD",
       amounts_by_basis: { fixed_subscription: 20 },
       has_unresolved: true,
@@ -36,6 +38,7 @@
     // 真实场景：MiniMax 订阅 ¥49/月，经 Claude Code 中转使用——与 anthropic 同宿主、
     // 不同服务商、不同币种，必须各占一行、永不相加（CLAUDE.md 的反面教材）。
     "claude-code/minimax": {
+      host_id: "claude-code",
       currency: "CNY",
       amounts_by_basis: { fixed_subscription: 49, api_equivalent: 56.2 },
       has_unresolved: false,
@@ -43,6 +46,7 @@
       evidence_basis: "official-subscription",
     },
     "dsh/deepseek": {
+      host_id: "dsh",
       currency: "CNY",
       amounts_by_basis: { metered_actual: 8.64 },
       has_unresolved: false,
@@ -80,6 +84,9 @@
       actual_spend_by_basis: daily
         ? { metered_actual: { CNY: 3.21 } }
         : { fixed_subscription: { CNY: 49, USD: 20 }, metered_actual: { CNY: 8.64 } },
+      metered_view: daily
+        ? { CNY: { amount: 3.21, actual: 3.21, declared_estimate: 0, default_estimate: 0, label: "actual" } }
+        : { CNY: { amount: 8.64, actual: 8.64, declared_estimate: 0, default_estimate: 0, label: "actual" }, USD: { amount: 0, actual: 0, declared_estimate: 0, default_estimate: 0, label: "estimate" } },
       by_host: {
         codex: { amounts_by_basis: { api_equivalent: 14.82 }, freshness: { state: "fresh", last_observed_at: `${isoDay}T00:00:00Z` }, has_unresolved: false, pricing_method: "provider-card" },
         // by_host 的 claude-code 条目混币（USD 20 + CNY 49），故不声明 currency（domain 规则：混币条目 currency=None）。
@@ -220,6 +227,7 @@
       recovery_action: { label: "扫描并接入", kind: "scan_and_connect" },
     },
   ];
+  let sourceDataRevision = 0;
   const customRoots = [];
   let retentionMonths = 13;
   let budgetSnoozedUntilMs = null;
@@ -275,8 +283,19 @@
   // 已被 official_subscription 声明覆盖的组：保存后从组列表消失，撤销后回来
   // （同一谓词在 SQL 里的镜像；见 billing_preview.rs 的 R3 测试）。
   const billingCoveredGroups = new Map();
-  const billingDeclarations = [];
-  const billingJobs = new Map();
+  // 合成当前订阅声明：用于视觉回归验证“修改订阅/撤销声明”的二次确认和回执。
+  const billingDeclarations = [{
+    declaration_id: "browser-subscription-decl", revision_id: "browser-subscription-rev-1", current_revision_id: "browser-subscription-rev-1",
+    host: "claude-code", provider_id: "anthropic", relationship_kind: "official_subscription", subscription_name: "Claude Pro",
+    amount_minor: 2000, currency: "USD", effective_start: `${month}-01`, effective_end: null, source_candidate_id: null,
+    scopes: [{ scope_kind: "provider", scope_value: "unresolved" }], status: "saved",
+  }];
+  const billingDeclarationHistory = [];
+  // 合成失败任务：用于浏览器视觉回归验证“失败任务有证据、可重试、旧结果仍可读”。
+  // 真实 Tauri 路径始终以 authority 的 billing_recalculation_jobs 为准。
+  const billingJobs = new Map([["browser-failed-recalc", {
+    status: "failed", job_id: "browser-failed-recalc", error_code: "重算失败，请重试", requested_at_ms: Date.now() - 3_600_000,
+  }]]);
   let pricingNetworkEnabled = true;
   // Claude Pro 额度窗口提醒的开关；**默认关**（与 runtime 的 quota_reminder 同语义）。
   let quotaReminderEnabled = false;
@@ -427,7 +446,7 @@
           clusters: [...clusters.values()].sort((a, b) => rank(a) - rank(b) || b.tokens - a.tokens) };
       }
       // Shape: apps/desktop/src-tauri/src/lib.rs:2688 billing_recalculation_jobs (json!).
-      case "billing_recalculation_jobs": return { status: "ok", jobs: [] };
+      case "billing_recalculation_jobs": return { status: "ok", jobs: [...billingJobs.values()] };
       // Shape: apps/desktop/src-tauri/src/lib.rs:2423 billing_declarations (json!).
       case "billing_declarations": return { status: "ok", declarations: billingDeclarations };
       // Shape: apps/desktop/src-tauri/src/lib.rs:1558 resolve_billing_import_candidate (json!).
@@ -496,14 +515,13 @@
         if ((args && args.relationshipKind) === "unknown") {
           throw new Error("\"unknown\" is not a billing declaration; keep the group pending instead");
         }
-        if (!(args && args.effectiveEnd)) {
-          throw new Error("effective_end is required: Beta declarations must be bounded to an explicit month range");
-        }
-        if (args.effectiveEnd > month) {
+        if (args && args.effectiveEnd && args.effectiveEnd > isoDay) {
           throw new Error("effective_end must not be later than the current statistics month");
         }
         const candidate = billingCandidates.find((item) => item.candidate_id === (args && args.sourceCandidateId));
         if (candidate) candidate.status = "accepted";
+        const priorIndex = billingDeclarations.findIndex((item) => item.declaration_id === (args && args.declarationId));
+        if (priorIndex >= 0 && args && args.supersedesRevisionId) billingDeclarationHistory.push({ ...billingDeclarations.splice(priorIndex, 1)[0], status: "superseded" });
         billingDeclarations.push({
           declaration_id: args && args.declarationId,
           revision_id: args && args.revisionId,
@@ -515,11 +533,12 @@
           effective_start: args && args.effectiveStart,
           effective_end: args && args.effectiveEnd,
           source_candidate_id: args && args.sourceCandidateId,
+          scopes: (args && args.scopes) || [],
           current_revision_id: args && args.revisionId,
           status: "saved",
         });
         let job = null;
-        if ((args && args.relationshipKind) === "official_subscription") {
+        if (["official_subscription", "official_api", "third_party", "organization"].includes(args && args.relationshipKind)) {
           const jobId = "billing-" + (args && args.revisionId);
           billingJobs.set(jobId, { status: "succeeded", job_id: jobId });
           const scopes = (args && args.scopes) || [];
@@ -551,15 +570,18 @@
       // Shape: apps/desktop/src-tauri/src/lib.rs:2451 revoke_billing_declaration (json!).
       case "revoke_billing_declaration": {
         const index = billingDeclarations.findIndex((item) => item.declaration_id === (args && args.declarationId));
-        if (index >= 0) billingDeclarations.splice(index, 1);
+        const current = index >= 0 ? billingDeclarations.splice(index, 1)[0] : null;
+        billingDeclarationHistory.push({ ...(current || {}), declaration_id: args && args.declarationId, revision_id: args && args.revisionId, current_revision_id: null, status: "revoked" });
         for (const [groupId, declarationId] of [...billingCoveredGroups.entries()]) {
           if (declarationId === (args && args.declarationId)) billingCoveredGroups.delete(groupId);
         }
-        return { status: "revoked", declaration_id: args && args.declarationId, revision_id: args && args.revisionId };
+        return { status: "revoked", declaration_id: args && args.declarationId, revision_id: args && args.revisionId, changed: index >= 0 };
       }
       case "host_bills_for_period": return emptyReport("bills");
       // Shape: apps/desktop/src-tauri/src/lib.rs:2632 data_source_status (json!).
       case "data_source_status": return { status: "ok", sources: sourceStatuses };
+      case "source_host_controls": return { status: "ok", excluded_hosts: sourceStatuses.filter((source) => source.connection_state === "excluded").map((source) => source.host), supported_hosts: ["claude-code", "codex", "dsh", "workbuddy"] };
+      case "source_data_revision": return { status: "ok", revision: sourceDataRevision };
       case "custom_source_roots": return { status: "ok", sources: customRoots };
       // Shape: crates/agent-vitals-runtime/src/budget.rs:140-152（万分比，8000=80%）；
       // 旧字段名沿用 apps/desktop/src-tauri/src/lib.rs:2142 budget_config()。
@@ -590,6 +612,11 @@
         };
         return ok({ status: "saved", profile_id: input.profile_id, currency: input.currency, notification_permission: "granted" });
       }
+      case "disable_budget_profile": {
+        const changed = Boolean(budgetProfilesState.estimate);
+        delete budgetProfilesState.estimate;
+        return ok({ status: "disabled", profile_id: "estimate", changed });
+      }
       case "snooze_budget_current_period": {
         budgetSnoozedUntilMs = Date.parse(month + "-28T23:59:59+08:00");
         return ok({ status: "ok", snoozed_until_ms: budgetSnoozedUntilMs });
@@ -599,6 +626,19 @@
         return ok({ status: "ok" });
       }
       case "retention_config": return { status: "ok", months: retentionMonths, minimum_months: 1, maximum_months: 60 };
+      case "skills_doctor_report": {
+        const selectedHost = (args && args.host) || "all";
+        const summaryHost = selectedHost === "all" ? "claude-code" : selectedHost;
+        return {
+          schema_version: "1.0",
+          run: "browser-skill-preview",
+          host_selection: selectedHost,
+          desktop_meta: { generated_at_ms: Date.now(), from_cache: false, host: selectedHost },
+          diagnostics: [{ code: "SV501", name: "提示注入模式", severity: "warning", skill: "browser-preview", evidence: { count: 1 }, impact: "发现 1 条需要人工复核的启发式命中。", recommendation: "打开对应 skill 定义后人工复核。", caveats: ["启发式命中不是恶意结论。"] }],
+          not_assessed: [{ code: "SV003", name: "描述长度", reason: "当前宿主没有可辩护的统一阈值。" }],
+          report: { host_summaries: { [summaryHost]: { skills_on_disk: 12, discoverable_skills: 8, runtime_verified_loaded_skills: null, unique_discoverable_skills: 8, description_budget: { available: true, source: "configurable", budget_chars: 15000, used_chars: 4200, pct_used: 28 }, trigger_data: "available" } } }
+        };
+      }
       case "save_retention_config": {
         const input = (args && args.input) || {};
         if (!Number.isInteger(input.months) || input.months < 1 || input.months > 60) {
@@ -700,7 +740,7 @@
             host: "plugin:zcode", has_baseline: true, native_families: ["glm"], totals: { requests: 12, sessions: 3 },
             families: [
               { family: "glm", flag: "native", requests: 9, sessions: 3, tokens_total: 18000, last_event_ms: nowMs - 3600000, request_share: 75, models: [{ model: "glm-5", provider_raw: "zhipu", provider_id: "zhipu", requests: 9, tokens_total: 18000, last_event_ms: nowMs - 3600000 }] },
-              { family: "deepseek", flag: "non_native", requests: 2, sessions: 1, tokens_total: 4200, last_event_ms: nowMs - 7200000, request_share: 16.7, models: [{ model: "deepseek-v4-flash", provider_raw: "relay", provider_id: "relay", requests: 2, tokens_total: 4200, last_event_ms: nowMs - 7200000 }] },
+              { family: "deepseek", flag: "non_native", requests: 2, sessions: 1, tokens_total: 4200, last_event_ms: nowMs - 7200000, request_share: 16.7, models: [{ model: "bigmodel/deepseek-v4-flash[1M]", provider_raw: "relay", provider_id: "relay", requests: 2, tokens_total: 4200, last_event_ms: nowMs - 7200000 }] },
               { family: "synthetic", flag: "api_error", requests: 1, sessions: 1, tokens_total: 0, last_event_ms: nowMs - 10800000, request_share: 8.3, models: [{ model: "<synthetic>", provider_raw: "", provider_id: "", requests: 1, tokens_total: 0, last_event_ms: nowMs - 10800000 }] },
             ],
           }, {
@@ -739,8 +779,8 @@
           { rule: "PRICE_COVERAGE", severity: "warning", category: "billing", hits: 1, sessions: 1 },
         ],
         issues: [
-          { group_id: "fnv1a64:0123456789abcdef", action_kind: "behavior", rule: "SV709", host: "plugin:zcode", evidence_class: "egress", count: 1, first_seen_at_ms: Date.now() - 7200000, last_seen_at_ms: Date.now() - 3600000, severity: "critical", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true }], read_only: true, manual_follow_up: false },
-          { group_id: "fnv1a64:1111111111111111", action_kind: "billing", rule: "PRICE_COVERAGE", host: "minimax-code", evidence_class: "billing", count: 1, first_seen_at_ms: Date.now() - 1800000, last_seen_at_ms: Date.now() - 1800000, severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true }], read_only: false, manual_follow_up: true },
+          { group_id: "fnv1a64:0123456789abcdef", action_kind: "behavior", rule: "SV709", host: "plugin:zcode", evidence_class: "egress", count: 1, first_seen_at_ms: Date.now() - 7200000, last_seen_at_ms: Date.now() - 3600000, severity: "critical", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:2222222222222222", observed_first_at_ms: Date.now() - 7200000, observed_last_at_ms: Date.now() - 3600000, evidence_level: "E3", stage: "egress_attempted", evidence_origin: "network_metadata", scope_classes: ["git_history", "workspace_archive"], observation_count: 2, file_count: null, byte_count: 3145728, destination_class: "object_storage", confidence: "high" }], read_only: true, manual_follow_up: false },
+          { group_id: "fnv1a64:1111111111111111", action_kind: "billing", rule: "PRICE_COVERAGE", host: "minimax-code", evidence_class: "billing", count: 1, first_seen_at_ms: Date.now() - 1800000, last_seen_at_ms: Date.now() - 1800000, severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:3333333333333333", observed_first_at_ms: Date.now() - 1800000, observed_last_at_ms: Date.now() - 1800000, evidence_level: null, stage: null, evidence_origin: "local_artifact", scope_classes: [], observation_count: 1, file_count: null, byte_count: null, destination_class: null, confidence: "medium" }], read_only: false, manual_follow_up: true },
         ],
         next_cursor: null, refreshed: false,
       };
@@ -838,9 +878,10 @@
         const source = sourceStatuses.find((item) => item.host === (args && args.host));
         if (!source) throw new Error("source host not found");
         const scope = source.import_scope || {};
-        const result = { facts: Number(scope.facts || 0), sessions: Number(scope.sessions || 0) };
+        const result = { status: "deleted", host: source.host, facts: Number(scope.facts || 0), sessions: Number(scope.sessions || 0), source_files: Number((source.scan && source.scan.source_count) || 0), trust_observations: 0, route_evidence: 0, session_excerpts: 0 };
         source.import_scope = { facts: 0, sessions: 0 };
         source.connection_state = "excluded";
+        sourceDataRevision += 1;
         return ok(result);
       }
       case "pick_custom_source_root": return "/tmp/agent-vitals-browser-custom-source";

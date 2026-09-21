@@ -24,7 +24,11 @@ npm run dev:react
 cargo tauri dev --config tauri.react.conf.json
 ```
 
-该配置只切换开发 URL；生产 `tauri.conf.json` 和 `frontendDist` 保持不变。
+该配置切换 React 开发 URL，并声明隔离的 `ui-react-dist` 候选产物和
+`index.html` 窗口入口；生产 `tauri.conf.json` 的 `frontendDist: "ui"` 仍保持不变。
+执行 `npm run verify:react` 会把 shadow bundle 写到
+`apps/desktop/src-tauri/ui-react-dist`，并检查所有资源均为相对路径、文件存在且不含
+浏览器 mock。它是 Phase 4 的候选包输入，不代表已经切换生产入口。
 
 ## 回归检查
 
