@@ -104,25 +104,45 @@ fn sync_host(
     // 路径而已（247 个 PathBuf，可忽略），换来的是撞窗计数覆盖完整的 7 天窗口——
     // 只看 dirty 会把"近 7 天撞窗 3 次"报成 1 次，那是拿一个支持不了的数字当结论。
     let host_files: Vec<PathBuf> = files.clone();
+    // P0 Iteration 2（F3 修复）：发现/失效判定走 SourceGraph classify()——
+    // 此前是内联 (size, mtime, parser_version) 三元组比较，classify 的
+    // parser_version/parser_id/dirty 语义零生产调用方（复跑 F3）。现在
+    // classify 是唯一判定入口：软（增量）/硬（全量）/未变（跳过）三路都在
+    // 这一个纯函数里。P0 阶段 can_increment 恒 false——classify 对所有
+    // 变更文件返回 Full，与旧内联行为等价。
+    let expected_version = crate::sql_sync::parser_version();
+    let expected_parser = "full-parse-v0";
     for path in files {
         let fp = fingerprint(&path);
-        let recorded = crate::sql_sync::source_file_fingerprint(db, host, &path)
-            .map_err(|e| format!("source_files fingerprint: {e}"))?;
-        match (fp, recorded) {
-            // 解析器升级即使源文件字节不变也必须重放；fact_id 幂等吸收
-            // 未变事实，新增解析结果会正常写入。
-            (Some(fp), Some((size, mtime, parser_version)))
-                if (size, mtime) == fp
-                    && parser_version == crate::sql_sync::parser_version()
-                    && !runtime_snapshot_backfill_needed =>
-            {
-                report.files_skipped += 1
-            }
-            (Some(fp), _) => dirty.push((path, fp)),
-            (None, _) => report
-                .errors
-                .push(format!("{}: stat failed (vanished?)", path.display())),
+        let hash = crate::source_graph::path_hash(&path);
+        let checkpoint = crate::source_graph::read_checkpoint(db.conn(), host, &hash)
+            .map_err(|e| format!("source_graph checkpoint: {e}"))?;
+        let on_disk = fp;
+        // P0 阶段无增量解析器注册 → can_increment 恒 false。
+        let decision = crate::source_graph::classify(
+            &checkpoint.unwrap_or_default(),
+            on_disk,
+            false, // P0：can_increment 恒 false
+            expected_parser,
+            expected_version,
+        );
+        // codex 配额快照回填需要：即便 Unchanged 也强制走一次
+        if matches!(decision, crate::source_graph::Invalidation::Unchanged)
+            && !runtime_snapshot_backfill_needed
+        {
+            report.files_skipped += 1;
+            continue;
         }
+        let Some(fp) = fp else {
+            report
+                .errors
+                .push(format!("{}: stat failed (vanished?)", path.display()));
+            continue;
+        };
+        // classify 判定非 Unchanged（或回填需要）→ 标脏 + 进处理列表
+        crate::source_graph::mark_dirty(db.conn(), host, &hash)
+            .map_err(|e| format!("source_graph mark_dirty: {e}"))?;
+        dirty.push((path, fp));
     }
 
     let mut facts: Vec<Value> = Vec::new();
