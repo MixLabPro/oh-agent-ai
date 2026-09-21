@@ -355,6 +355,13 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .settings-budget-actions { flex-wrap: wrap; }
 .settings-budget-actions small { width: 100%; color: var(--text-muted); }
 .settings-budget-message { margin-top: 10px; color: #087f62; font-size: 11px; }
+.settings-notification-section { padding: 22px 0; border-bottom: 1px solid #e1e8f0; }
+.settings-notification-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 12px; padding: 14px 16px; border: 1px solid #e1e8f0; border-radius: 10px; background: #fff; }
+.settings-notification-card strong { color: #26384e; font-size: 13px; }
+.settings-notification-help { margin-top: 5px; color: var(--text-subtle); font-size: 11px; line-height: 1.5; }
+.settings-notification-toggle { display: flex; align-items: center; gap: 9px; min-height: 44px; color: #26384e; font-size: 12px; font-weight: 650; white-space: nowrap; }
+.settings-notification-toggle input { width: 18px; height: 18px; accent-color: #087f62; }
+.settings-notification-toggle input:focus-visible { outline: 2px solid #58b898; outline-offset: 2px; }
 .settings-billing-section { padding: 22px 0; border-bottom: 1px solid #e1e8f0; }
 .settings-billing-todo { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 12px 0; padding: 13px 14px; border: 1px solid #f1d28b; border-radius: 10px; background: #fff9e8; }
 .settings-billing-todo div, .settings-billing-row > div { display: grid; gap: 5px; min-width: 0; flex: 1; }
@@ -516,6 +523,8 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
   .settings-custom-form .button { width: 100%; }
   .settings-budget-form { grid-template-columns: 1fr; align-items: stretch; }
   .settings-budget-form .button { width: 100%; }
+  .settings-notification-card { align-items: flex-start; flex-direction: column; }
+  .settings-notification-toggle { width: 100%; justify-content: space-between; }
   .settings-data-grid { grid-template-columns: 1fr; }
   .settings-data-card .button { width: 100%; }
   .settings-pricing-meta { display: grid; gap: 6px; }

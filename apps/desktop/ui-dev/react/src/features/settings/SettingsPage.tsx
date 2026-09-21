@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { addCustomSourceRoot, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, listen, openTrustedReleasesPage, pickCustomSourceRoot, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, safeUiError, saveBudgetProfile, saveDiagnosticPackage, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { addCustomSourceRoot, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, listen, openTrustedReleasesPage, pickCustomSourceRoot, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, safeUiError, saveBudgetProfile, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -370,6 +370,53 @@ function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps)
   </section>;
 }
 
+type QuotaReminderSectionProps = { config: QuotaReminderConfig | null; loading: boolean; error: string | null; onReload: () => void };
+
+function QuotaReminderSection({ config, loading, error, onReload }: QuotaReminderSectionProps) {
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const available = config?.status === "ok";
+
+  const toggle = async (event: ChangeEvent<HTMLInputElement>) => {
+    if (!available || saving) return;
+    const enabled = event.target.checked;
+    setSaving(true); setActionError(null); setMessage(null);
+    try {
+      const receipt = await saveQuotaReminderConfig(enabled);
+      setMessage(receipt.enabled ? receipt.notification_permission === "granted" ? "已开启；额度窗口耗尽时会提醒一次。" : "已开启，但系统通知未授权；可在系统设置中开启。" : "已关闭额度窗口提醒。");
+      onReload();
+    } catch (reason: unknown) {
+      setActionError(safeUiError(reason, "额度窗口提醒保存失败"));
+    } finally { setSaving(false); }
+  };
+
+  const repair = async () => {
+    if (saving) return;
+    setSaving(true); setActionError(null); setMessage(null);
+    try {
+      const receipt = await saveQuotaReminderConfig(false);
+      setMessage(receipt.enabled ? "配置仍处于开启状态，请重试。" : "已恢复为关闭，额度窗口提醒配置已修复。定时任务不会被历史数据影响。");
+      onReload();
+    } catch (reason: unknown) {
+      setActionError(safeUiError(reason, "额度窗口提醒配置修复失败"));
+    } finally { setSaving(false); }
+  };
+
+  return <section className="settings-notification-section" id="settings-notifications" aria-labelledby="settings-notifications-title">
+    <div className="settings-section-heading"><div><p className="eyebrow">系统通知</p><h3 id="settings-notifications-title">Claude Pro 额度窗口提醒</h3><p>默认关闭；启用时才申请系统通知权限。提醒只在本机检测到窗口耗尽时发送，不上传会话内容。</p></div><button className="button button-secondary button-small" type="button" onClick={onReload} disabled={loading}>{loading ? "读取中…" : "重载提醒"}</button></div>
+    {error && <div className="error-banner" role="alert">额度窗口提醒暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={onReload}>重试</button></div>}
+    <SettingsLoadingState loading={loading} hasData={Boolean(config)} title="额度提醒设置" detail="只查询本机开关，不会触发网络请求。" />
+    {config?.status === "unavailable" && <div className="settings-source-state"><strong>额度提醒设置暂不可用</strong><span>配置文件无法读取；不会显示为已开启。可以显式恢复为关闭，只修复这个开关文件。</span><button className="button button-secondary button-small" type="button" onClick={repair} disabled={saving}>{saving ? "修复中…" : "恢复为关闭并修复配置"}</button></div>}
+    <div className="settings-notification-card">
+      <div><strong>窗口耗尽时通知</strong><p className="settings-notification-help">{config?.notification_permission === "denied" ? "系统通知未授权，可在系统设置中开启。" : config?.notification_permission === "granted" ? "系统通知已授权。" : "权限状态未知；保存开关后会由系统决定。"}</p></div>
+      <label className="settings-notification-toggle"><input type="checkbox" checked={config?.enabled === true} onChange={toggle} disabled={!available || saving} aria-label="启用 Claude Pro 额度窗口提醒" /><span>{saving ? "保存中…" : config?.enabled ? "已开启" : "已关闭"}</span></label>
+    </div>
+    {actionError && <div className="error-banner" role="alert">{actionError}</div>}
+    {message && <p className="settings-data-message" role="status" aria-live="polite">{message}</p>}
+  </section>;
+}
+
 function SourceRow({ source, syncing, sourceControlHost, deleteConfirmHost, deleteBusyHost, supportedHosts, onSync, onToggleExcluded, onRequestDelete, onCancelDelete, onDelete }: { source: SourceHealthReport["sources"][number]; syncing: boolean; sourceControlHost: string | null; deleteConfirmHost: string | null; deleteBusyHost: string | null; supportedHosts: string[]; onSync: () => void; onToggleExcluded: (source: SourceHealthReport["sources"][number]) => void; onRequestDelete: (source: SourceHealthReport["sources"][number]) => void; onCancelDelete: () => void; onDelete: (source: SourceHealthReport["sources"][number]) => void }) {
   const errorText = source.error_kinds.map((kind) => errorLabels[kind]).join("、");
   const imported = source.connection_state === "not_detected" && source.sessions === 0 ? "尚未导入" : `${source.sessions} 个会话 · ${source.facts} 条记录`;
@@ -507,6 +554,10 @@ export function SettingsPage() {
   const [aboutReport, setAboutReport] = useState<AboutDiagnosticsReport | null>(null);
   const [aboutError, setAboutError] = useState<string | null>(null);
   const [aboutLoading, setAboutLoading] = useState(true);
+  const [quotaReminder, setQuotaReminder] = useState<QuotaReminderConfig | null>(null);
+  const [quotaReminderError, setQuotaReminderError] = useState<string | null>(null);
+  const [quotaReminderLoading, setQuotaReminderLoading] = useState(true);
+  const quotaReminderRequest = useRef(0);
 
   const refresh = () => {
     setLoading(true);
@@ -555,6 +606,19 @@ export function SettingsPage() {
     void readAboutDiagnostics().then(setAboutReport).catch((reason: unknown) => {
       setAboutError(safeUiError(reason, "版本诊断读取失败"));
     }).finally(() => setAboutLoading(false));
+  };
+
+  const refreshQuotaReminder = () => {
+    const requestId = ++quotaReminderRequest.current;
+    setQuotaReminderLoading(true);
+    setQuotaReminderError(null);
+    void readQuotaReminderConfig().then((next) => {
+      if (requestId === quotaReminderRequest.current) setQuotaReminder(next);
+    }).catch((reason: unknown) => {
+      if (requestId === quotaReminderRequest.current) setQuotaReminderError(safeUiError(reason, "额度窗口提醒读取失败"));
+    }).finally(() => {
+      if (requestId === quotaReminderRequest.current) setQuotaReminderLoading(false);
+    });
   };
 
   const runSync = async (): Promise<boolean> => {
@@ -641,9 +705,10 @@ export function SettingsPage() {
     refreshBilling();
     refreshData();
     refreshAbout();
+    refreshQuotaReminder();
     let active = true;
     let cleanups: Array<() => void> = [];
-    Promise.all([listen("sync-status-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); refreshAbout(); } }), listen("usage-fold-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); refreshAbout(); } }), listen("source-data-deleted", () => { if (active) { refresh(); refreshData(); } })]).then((unsubscribers) => {
+    Promise.all([listen("sync-status-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); refreshAbout(); refreshQuotaReminder(); } }), listen("usage-fold-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); refreshAbout(); refreshQuotaReminder(); } }), listen("source-data-deleted", () => { if (active) { refresh(); refreshData(); refreshQuotaReminder(); } })]).then((unsubscribers) => {
       if (active) cleanups = unsubscribers;
       else unsubscribers.forEach((unsubscribe) => unsubscribe());
     });
@@ -658,7 +723,7 @@ export function SettingsPage() {
       <button className="button button-secondary" type="button" onClick={refresh} disabled={loading}>{loading ? "读取中…" : "重载"}</button>
     </section>
 
-    <nav className="settings-section-nav" aria-label="设置分区"><a className="settings-section-nav-active" href="#settings-sources">数据源</a><a href="#settings-billing">计费与套餐</a><a href="#settings-budget">预算</a><a href="#settings-data">统计与数据</a><a href="#settings-about">关于与诊断</a></nav>
+    <nav className="settings-section-nav" aria-label="设置分区"><a className="settings-section-nav-active" href="#settings-sources">数据源</a><a href="#settings-billing">计费与套餐</a><a href="#settings-budget">预算</a><a href="#settings-notifications">提醒</a><a href="#settings-data">统计与数据</a><a href="#settings-about">关于与诊断</a></nav>
 
     <section className="settings-section" id="settings-sources" aria-labelledby="settings-sources-title">
       <div className="settings-section-heading"><div><p className="eyebrow">数据源</p><h3 id="settings-sources-title">来源健康</h3><p>每个工具独立显示读取状态；来源之间不合并计数。</p></div>{report && <span className={`status-pill status-pill-${attentionCount ? "warning" : "success"}`}>{attentionCount ? `${attentionCount} 个来源需要处理` : "来源状态正常"}</span>}</div>
@@ -678,6 +743,8 @@ export function SettingsPage() {
     <BillingSection report={billingReport} loading={billingLoading} error={billingError} onReload={refreshBilling} />
 
     <BudgetSection report={budgetReport} loading={budgetLoading} error={budgetError} onReload={refreshBudget} />
+
+    <QuotaReminderSection config={quotaReminder} loading={quotaReminderLoading} error={quotaReminderError} onReload={refreshQuotaReminder} />
 
     <StatisticsDataSection report={dataReport} loading={dataLoading} error={dataError} onReload={refreshData} />
 

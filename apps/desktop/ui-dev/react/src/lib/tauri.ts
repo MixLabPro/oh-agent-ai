@@ -213,6 +213,9 @@ export type BudgetSettingsReport = {
   snoozed_until_ms: number | null;
 };
 export type BudgetSaveReceipt = { status: "saved"; profile_id: "estimate"; currency: "CNY" | "USD"; notification_permission: "granted" | "denied" | "unavailable" };
+export type NotificationPermission = "granted" | "denied" | "unavailable";
+export type QuotaReminderConfig = { status: "ok" | "unavailable"; enabled: boolean; notification_permission: NotificationPermission | null };
+export type QuotaReminderReceipt = { status: "saved"; enabled: boolean; notification_permission: NotificationPermission };
 
 export type BillingAmount = { amount_minor: number; currency: string; basis: string };
 export type BillingCandidate = {
@@ -864,6 +867,31 @@ function parseBudgetSaveReceipt(value: unknown): BudgetSaveReceipt {
   const rawPermission = typeof root.notification_permission === "string" ? root.notification_permission.toLowerCase() : "";
   const notification_permission = rawPermission === "granted" ? "granted" : rawPermission === "denied" || rawPermission === "prompt" || rawPermission === "restricted" ? "denied" : "unavailable";
   return { status: "saved", profile_id: "estimate", currency, notification_permission };
+}
+
+function parseNotificationPermission(value: unknown): NotificationPermission {
+  if (typeof value !== "string") return "unavailable";
+  const normalized = value.toLowerCase();
+  if (normalized === "granted") return "granted";
+  if (["denied", "prompt", "restricted"].includes(normalized)) return "denied";
+  return "unavailable";
+}
+
+function parseQuotaReminderConfig(value: unknown): QuotaReminderConfig {
+  const root = record(value, "quota reminder config");
+  if (root.status === "unavailable") return { status: "unavailable", enabled: false, notification_permission: null };
+  if (root.status !== "ok") throw new Error("quota reminder config status 不兼容");
+  return {
+    status: "ok",
+    enabled: root.enabled === true,
+    notification_permission: root.notification_permission == null ? null : parseNotificationPermission(root.notification_permission),
+  };
+}
+
+function parseQuotaReminderReceipt(value: unknown): QuotaReminderReceipt {
+  const root = record(value, "quota reminder receipt");
+  if (root.status !== "saved" || typeof root.enabled !== "boolean") throw new Error("额度提醒保存未确认");
+  return { status: "saved", enabled: root.enabled, notification_permission: parseNotificationPermission(root.notification_permission) };
 }
 
 function parseOverviewSnapshot(value: unknown): OverviewSnapshot {
@@ -2317,6 +2345,19 @@ export async function saveBudgetProfile(input: { currency: "CNY" | "USD"; monthl
   } catch {
     throw new Error("预算保存失败，请稍后重试");
   }
+}
+
+export async function readQuotaReminderConfig(): Promise<QuotaReminderConfig> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "ok", enabled: false, notification_permission: null };
+  return parseQuotaReminderConfig(await handler("quota_reminder_config"));
+}
+
+export async function saveQuotaReminderConfig(enabled: boolean): Promise<QuotaReminderReceipt> {
+  if (typeof enabled !== "boolean") throw new Error("额度提醒开关参数不安全");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved", enabled, notification_permission: "granted" };
+  return parseQuotaReminderReceipt(await handler("save_quota_reminder_config", { enabled }));
 }
 
 export async function snoozeBudgetCurrentPeriod(): Promise<number | null> {

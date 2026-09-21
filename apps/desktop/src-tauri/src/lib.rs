@@ -3303,12 +3303,14 @@ fn data_daily_summary(date: String) -> Value {
 /// Claude Pro 额度提醒的开关（默认关）。
 ///
 /// **为什么自带开关**：系统通知权限必须由一次用户动作触发申请；额度提醒与预算
-/// 提醒是两件事，从不用预算的用户不该因此永远收不到窗口提醒。读不出开关时一律
-/// 按"关"处理（fail-closed）。
+/// 提醒是两件事，从不用预算的用户不该因此永远收不到窗口提醒。文件缺失表示默认关闭；
+/// 文件存在但不可读取则返回 unavailable，让 UI 诚实显示配置损坏，而投递端仍 fail-closed。
 #[tauri::command]
 fn quota_reminder_config() -> Value {
-    let enabled = agent_vitals_runtime::quota_reminder::enabled_or_default(&overview::data_home());
-    serde_json::json!({ "status": "ok", "enabled": enabled })
+    match agent_vitals_runtime::quota_reminder::is_enabled(&overview::data_home()) {
+        Ok(enabled) => serde_json::json!({ "status": "ok", "enabled": enabled }),
+        Err(_) => serde_json::json!({ "status": "unavailable", "enabled": false, "notification_permission": null }),
+    }
 }
 
 /// 写入开关；**打开的那一刻才申请系统通知权限**（REQ-039：权限在用户启用提醒时申请）。
