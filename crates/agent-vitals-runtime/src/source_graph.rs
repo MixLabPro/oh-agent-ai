@@ -102,6 +102,14 @@ pub fn classify(
 /// P0 阶段的解析器标记——sync_host 与 advance_checkpoint 共用（失配会导致
 /// 每 tick 永久全量重扫，已被 sync_is_incremental_across_runs 钉住，但共享
 /// 常量从源头消灭失配面）。P1 增量解析器接入后逐宿主替换为各自 id。
+/// 增量文件的检查点覆写——由 emit 层产、写事务消费（B1 修复：写路径不再
+/// 无条件推 FULL_PARSE_V0 + stat size，而是尊重增量解析器给出的换行边界与
+/// parser_id）。
+pub struct SourceCheckpointOverride {
+    pub parser_id: String,
+    pub byte_offset: Option<u64>,
+}
+
 pub const FULL_PARSE_V0: &str = "full-parse-v0";
 
 pub fn path_hash(path: &std::path::Path) -> String {

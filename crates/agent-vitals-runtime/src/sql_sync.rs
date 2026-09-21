@@ -433,6 +433,7 @@ pub(crate) fn write_flat_facts_with_sources(
     host: &str,
     machine_namespace: &str,
     sources: &[(std::path::PathBuf, (u64, u64))],
+    checkpoint_overrides: &std::collections::HashMap<String, crate::source_graph::SourceCheckpointOverride>,
     facts: &[Value],
     workflow_events: &[WorkflowEvent],
     session_excerpts: &[agent_vitals_domain::contracts::workflow::SessionExcerpt],
@@ -476,16 +477,19 @@ pub(crate) fn write_flat_facts_with_sources(
         }
         for (path, (size_bytes, mtime_ns)) in sources {
             writer.upsert_source_file(host, path, *size_bytes, *mtime_ns, None, PARSER_VERSION)?;
-            // SourceGraph 检查点推进（spec §1.3 / §12）：与事实写入同事务——
-            // 半途崩溃 offset 不动，下轮重读同段，fact_id 吸收。P0 阶段 offset
-            // 推到 size（"已处理到这里"），增量解析器（P1）接管后从此处续读。
-            // F4（复跑发现）：错误上抛——失败方向虽然安全（offset 不动→重读→
-            // fact_id 吸收），但静默吞错会让诊断面看不到。
+            // SourceGraph 检查点推进（spec §1.3 / §12）：与事实写入同事务。
+            // B1 修复：增量文件的检查点用解析器给出的换行边界 + claude-jsonl-v1，
+            // 而非无条件 stat size + FULL_PARSE_V0（后者在 in-flight 半行场景
+            // 会让下轮增量从行中间起读、静默丢事实——复跑 B1）。
             let hash = crate::source_graph::path_hash(path);
+            let (offset, parser_id) = match checkpoint_overrides.get(&hash) {
+                Some(ov) => (ov.byte_offset, ov.parser_id.as_str()),
+                None => (Some(*size_bytes), crate::source_graph::FULL_PARSE_V0),
+            };
             crate::source_graph::advance_checkpoint(
                 conn, host, &hash,
-                Some(*size_bytes),  // P0：全量处理到 EOF
-                crate::source_graph::FULL_PARSE_V0,
+                offset,
+                parser_id,
                 *size_bytes, *mtime_ns,
             ).map_err(AuthorityError::from)?;
             outcome.files_synced += 1;

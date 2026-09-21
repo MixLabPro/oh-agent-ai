@@ -104,14 +104,14 @@ fn sync_host(
     // 路径而已（247 个 PathBuf，可忽略），换来的是撞窗计数覆盖完整的 7 天窗口——
     // 只看 dirty 会把"近 7 天撞窗 3 次"报成 1 次，那是拿一个支持不了的数字当结论。
     let host_files: Vec<PathBuf> = files.clone();
-    // P0 Iteration 2（F3 修复）：发现/失效判定走 SourceGraph classify()——
-    // 此前是内联 (size, mtime, parser_version) 三元组比较，classify 的
-    // parser_version/parser_id/dirty 语义零生产调用方（复跑 F3）。现在
-    // classify 是唯一判定入口：软（增量）/硬（全量）/未变（跳过）三路都在
-    // 这一个纯函数里。P0 阶段 can_increment 恒 false——classify 对所有
-    // 变更文件返回 Full，与旧内联行为等价。
+    // 发现/失效判定走 SourceGraph classify()（F3 修复 + M2 参数对齐）。
+    // 发现层与 emit 层用**同一组 classify 参数**——此前发现层硬编码
+    // can_increment=false 而 emit 层判 true，两次调用结论矛盾（复跑 M2）。
+    // 发现层只需正确判定 skip（Unchanged） vs 处理（非 Unchanged），
+    // 具体增量/全量路由由 emit 层的第二次 classify 决定。
     let expected_version = crate::sql_sync::parser_version();
-    let expected_parser = crate::source_graph::FULL_PARSE_V0;
+    let expected_parser = if host == "claude-code" { "claude-jsonl-v1" } else { crate::source_graph::FULL_PARSE_V0 };
+    let can_increment_discovery = host == "claude-code";
     for path in files {
         let fp = fingerprint(&path);
         let hash = crate::source_graph::path_hash(&path);
@@ -122,7 +122,7 @@ fn sync_host(
         let decision = crate::source_graph::classify(
             &checkpoint.unwrap_or_default(),
             on_disk,
-            false, // P0：can_increment 恒 false
+            can_increment_discovery,
             expected_parser,
             expected_version,
         );
@@ -192,6 +192,7 @@ fn sync_host(
             }
         }
     }
+    let mut incremental_checkpoints: std::collections::HashMap<String, crate::source_graph::SourceCheckpointOverride> = std::collections::HashMap::new();
     for (path, fp) in &dirty {
         if host == "codex" {
             continue; // 已批量处理
@@ -237,12 +238,15 @@ fn sync_host(
                     // workflow 面：首轮全量已入库（event_id 幂等），增量轮不重扫——
                     // P2 或 P3 如需实时 workflow 可加全文件轻扫（M2 决议预留）。
                     let wf: Vec<WorkflowEvent> = Vec::new();
-                    // 推进检查点（换行边界）
-                    let _ = crate::source_graph::advance_checkpoint(
-                        db.conn(), host, &hash,
-                        Some(new_offset), "claude-jsonl-v1",
-                        fp.0, fp.1,
-                    );
+                    // M1 修复：检查点推进移到写事务内（通过 checkpoint_overrides
+                    // 穿透给 write_flat_facts_with_sources——此前这里是事务外
+                    // 死写，被写路径的 FULL_PARSE_V0 覆盖，claude-jsonl-v1 标记
+                    // 从不跨 tick 存活）。
+                    incremental_checkpoints.insert(hash.clone(),
+                        crate::source_graph::SourceCheckpointOverride {
+                            parser_id: "claude-jsonl-v1".to_string(),
+                            byte_offset: Some(new_offset),
+                        });
                     Ok((inc_facts, wf, Vec::new()))
                 } else {
                     agent_vitals_hosts::claude_usage_fact::claude_jsonl_to_usage_facts(
@@ -333,6 +337,7 @@ fn sync_host(
             host,
             ns,
             &synced_sources,
+            &incremental_checkpoints,
             &facts,
             &workflow_events,
             &session_excerpts,

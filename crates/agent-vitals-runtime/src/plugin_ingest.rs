@@ -518,6 +518,7 @@ fn open_authority_and_write(
     let now = crate::sql_sync::now_ms();
     let db = agent_vitals_data::authority::AuthorityDb::open(&authority_path, now)
         .map_err(|e| format!("authority open: {e}"))?;
+    let no_overrides: std::collections::HashMap<String, crate::source_graph::SourceCheckpointOverride> = std::collections::HashMap::new();
     let outcome = crate::sql_sync::write_flat_facts_with_sources(
         &db,
         &report.host,
@@ -530,6 +531,7 @@ fn open_authority_and_write(
         // sources：以事实行为准构建（path, (size, mtime_ns)）由调用方给——
         // P0 简化：文件元数据从报告文件列表反查。
         &source_entries(report),
+        &no_overrides,
         facts,
         &[],
         // session_excerpts：行为面素材，插件宿主不产（行为须官方，spec §1）。
