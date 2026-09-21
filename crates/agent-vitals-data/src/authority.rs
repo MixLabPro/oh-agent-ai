@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 23;
+pub const SCHEMA_VERSION: i64 = 24;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -349,6 +349,10 @@ CREATE TABLE source_files (
   last_seen_at_ms INTEGER NOT NULL,
   last_successful_run_id TEXT REFERENCES sync_runs(run_id),
   last_error_code TEXT,
+  -- SourceGraph 检查点（v24，SOURCE_GRAPH spec §5.1）
+  byte_offset INTEGER,                    -- 增量续读位置；NULL = 首见/不支持
+  parser_id TEXT,                         -- 解析器身份（"claude-jsonl" 等）
+  dirty INTEGER NOT NULL DEFAULT 0,       -- 脏标记（watch/tick 填、调度器清）
   UNIQUE(host, path_hash)
 );
 
@@ -1214,6 +1218,25 @@ CREATE TABLE IF NOT EXISTS event_deliveries (
 );
 "#;
 
+/// v24：SourceGraph 检查点列（AGENT_VITALS_SOURCE_GRAPH_INFRASTRUCTURE_SPEC §5.1）。
+/// `byte_offset` 是增量解析的续读位置——只由解析成功的事务推进；`parser_id`
+/// 标识哪个 SourceParser 负责此文件；`dirty` 是脏标记（watch 事件/tick 填、
+/// 调度器清）。三列都可空：旧文件在首次被 SourceGraph 路径处理前是 NULL。
+const SCHEMA_V24_ADD: &str = r#"
+ALTER TABLE source_files ADD COLUMN byte_offset INTEGER;
+ALTER TABLE source_files ADD COLUMN parser_id TEXT;
+ALTER TABLE source_files ADD COLUMN dirty INTEGER NOT NULL DEFAULT 0;
+"#;
+
+fn ensure_schema_v24(conn: &Connection) -> Result<(), AuthorityError> {
+    let has_byte_offset: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('source_files') WHERE name = 'byte_offset'",
+        [], |row| row.get::<_, i64>(0),
+    )? > 0;
+    if !has_byte_offset { conn.execute_batch(SCHEMA_V24_ADD)?; }
+    Ok(())
+}
+
 fn ensure_schema_v20(conn: &Connection) -> Result<(), AuthorityError> {
     let has_consent_kind: bool = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('trust_observations') WHERE name = 'consent_kind'",
@@ -1429,6 +1452,7 @@ impl AuthorityDb {
                 conn.execute_batch(SCHEMA_V21_ADD)?;
                 ensure_schema_v22(conn)?;
                 conn.execute_batch(SCHEMA_V23_ADD)?;
+                ensure_schema_v24(conn)?;
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
@@ -1488,6 +1512,19 @@ impl AuthorityDb {
             Some(21) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
                 let migration = ensure_schema_v22(conn);
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(23) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = ensure_schema_v24(conn);
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -1975,6 +2012,7 @@ impl AuthorityDb {
         conn.execute_batch(SCHEMA_V21_ADD)?;
         ensure_schema_v22(conn)?;
         conn.execute_batch(SCHEMA_V23_ADD)?;
+        ensure_schema_v24(conn)?;
         // 中断批次清扫（§3.1）：任何 running 的批次在下次 open 时标
         // interrupted——它是观测记录，不是可恢复状态（恢复靠幂等重跑）。
         conn.execute(
@@ -4447,6 +4485,42 @@ mod tests {
         assert_eq!(db.retention_event_outbox(now + day).unwrap(), 0, "幂等");
         drop(db);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// v23 → v24：source_files 获得三个检查点列（byte_offset / parser_id / dirty），
+    /// 既有库升级；新库直接就有；默认值正确（NULL/NULL/0）。
+    #[test]
+    fn v23_upgrade_adds_source_graph_checkpoint_columns() {
+        let db = tmp_db("v23-to-v24-source-graph");
+        {
+            let seeded = AuthorityDb::open(&db, 1).unwrap();
+            seeded.begin_run("run-sg", "cli", 1).unwrap();
+            seeded.conn().execute_batch(
+                "ALTER TABLE source_files DROP COLUMN byte_offset;
+                 ALTER TABLE source_files DROP COLUMN parser_id;
+                 ALTER TABLE source_files DROP COLUMN dirty;
+                 UPDATE schema_meta SET value = '23' WHERE key = 'schema_version';",
+            ).unwrap();
+            drop(seeded);
+        }
+        let upgraded = AuthorityDb::open(&db, 2).unwrap();
+        let cols: i64 = upgraded.conn().query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('source_files')
+             WHERE name IN ('byte_offset', 'parser_id', 'dirty')",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(cols, 3, "三个检查点列都必须建立");
+        let version: String = upgraded.conn().query_row(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+        let dirty_default: String = upgraded.conn().query_row(
+            "SELECT COALESCE(dflt_value,'0')
+             FROM pragma_table_info('source_files') WHERE name = 'dirty'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(dirty_default, "0", "dirty 默认值 0");
+        let _ = std::fs::remove_file(&db);
     }
 
     #[test]

@@ -43,6 +43,7 @@ pub mod retention;
 pub mod session_sources;
 pub mod source_controls;
 pub mod sessions;
+pub mod source_graph;
 pub mod skills;
 pub mod sql_authority;
 pub mod state;
