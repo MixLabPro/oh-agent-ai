@@ -57,19 +57,37 @@ pub fn classify(
     checkpoint: &FileCheckpoint,
     on_disk: Option<(u64, u64)>, // (size, mtime_ns)
     can_increment: bool,
+    expected_parser_id: &str,
+    expected_parser_version: i64,
 ) -> Invalidation {
     let Some((disk_size, disk_mtime)) = on_disk else {
         return Invalidation::Full { reason: "file-vanished" };
     };
+    // F1（P1 接线雷）：parser 升版 → 硬失效，文件字节不变也要全量重放
+    // （spec §6 明文行）。旧代码只比 (size, mtime, dirty)，升级会被 Unchanged 吞。
+    if checkpoint.parser_version != expected_parser_version {
+        return Invalidation::Full { reason: "parser-version-bumped" };
+    }
+    // F2（P1 交接雷）：parser_id 不匹配（含 full-parse-v0 旧行）→ 硬失效。
+    // P0 把 offset 推到 stat size（非换行边界），P1 增量解析器直接按
+    // Incremental 续读会从行中间起读、静默丢事实。硬失效一次让 P1 全量
+    // 重放对齐（fact_id 幂等吸收，代价一次性）。
+    if checkpoint.parser_id.as_deref() != Some(expected_parser_id) {
+        return Invalidation::Full { reason: "parser-id-mismatch" };
+    }
     if disk_size == checkpoint.size_bytes && disk_mtime == checkpoint.mtime_ns
         && !checkpoint.dirty
     {
         return Invalidation::Unchanged;
     }
-    if !can_increment || checkpoint.byte_offset.is_none() {
-        return Invalidation::Full { reason: "parser-cannot-increment" };
+    if !can_increment {
+        return Invalidation::Full { reason: "parser-refused-increment" };
     }
-    let offset = checkpoint.byte_offset.unwrap_or(0);
+    // byte_offset None 但 parser_id 匹配（理论上 P1 接管后不该出现——
+    // advance 总是写 offset；防御性全量处理）。
+    let Some(offset) = checkpoint.byte_offset else {
+        return Invalidation::Full { reason: "first-seen" };
+    };
     if disk_size < offset {
         return Invalidation::Full { reason: "truncated" };
     }
@@ -161,9 +179,16 @@ pub fn dirty_set(conn: &Connection) -> Result<Vec<(String, String)>, rusqlite::E
 
 /// SourceParser trait（spec §5.2 冻结接口）。P0 阶段无实现——所有文件走
 /// 全量路径；P1 起 claude-code 注册首个增量解析器。
+/// `Vec<Value>` 是**与 emit 产出的 flat fact JSON 同构**的——与
+/// `write_flat_facts_with_sources` 的 `facts: &[Value]` 同一形态（sql_sync.rs:436），
+/// 调度器直接把解析结果交给既有写入路径，不需要形状转换。返回的 `u64` 是
+/// 新的续读 offset（**换行边界**，不是 stat size——与 P0 的 full-parse-v0
+/// 语义不同，见 classify 的 F2 注释）。
 pub trait SourceParser: Send + Sync {
     fn host(&self) -> &'static str;
     fn parser_id(&self) -> &'static str;
+    /// 当前解析器版本（classify 的 parser-version 判定输入）。
+    fn parser_version(&self) -> i64;
     /// 增量能力申报（按文件当前状态判定，不许猜测）。
     fn can_increment(&self, state: &FileCheckpoint) -> bool;
     /// 从 offset 读到 EOF、停在最后完整换行。
@@ -206,7 +231,7 @@ mod tests {
         source_id
     }
 
-    /// 软/硬/未变三路判定（spec §6 表的逐行覆盖）。
+    /// 软/硬/未变三路判定（spec §6 表逐行覆盖 + F1/F2 P1 接线雷钉死）。
     #[test]
     fn classify_covers_incremental_full_unchanged() {
         let cp = FileCheckpoint {
@@ -214,31 +239,54 @@ mod tests {
             mtime_ns: 1000,
             byte_offset: Some(100),
             parser_id: Some("jsonl".into()),
+            parser_version: 5,
             dirty: false,
             ..FileCheckpoint::default()
         };
+        let args = ("jsonl", 5i64); // (expected_parser_id, expected_parser_version)
         // 未变（含 dirty=false）
-        assert_eq!(classify(&cp, Some((100, 1000)), true), Invalidation::Unchanged);
+        assert_eq!(classify(&cp, Some((100, 1000)), true, args.0, args.1),
+            Invalidation::Unchanged);
         // 软：size 增长 + can_increment + offset 已建
-        assert_eq!(classify(&cp, Some((200, 2000)), true),
+        assert_eq!(classify(&cp, Some((200, 2000)), true, args.0, args.1),
             Invalidation::Incremental { from_offset: 100 });
         // 硬：size < offset（截断）
-        assert_eq!(classify(&cp, Some((50, 2000)), true),
+        assert_eq!(classify(&cp, Some((50, 2000)), true, args.0, args.1),
             Invalidation::Full { reason: "truncated" });
-        // 硬：can_increment = false
-        assert_eq!(classify(&cp, Some((200, 2000)), false),
-            Invalidation::Full { reason: "parser-cannot-increment" });
+        // 硬：can_increment = false（F5 分拆：与首见不同 reason）
+        assert_eq!(classify(&cp, Some((200, 2000)), false, args.0, args.1),
+            Invalidation::Full { reason: "parser-refused-increment" });
         // 硬：文件消失
-        assert_eq!(classify(&cp, None, true),
+        assert_eq!(classify(&cp, None, true, args.0, args.1),
             Invalidation::Full { reason: "file-vanished" });
-        // 硬：首见（无 offset）
-        let first_seen = FileCheckpoint::default();
-        assert_eq!(classify(&first_seen, Some((100, 1000)), true),
-            Invalidation::Full { reason: "parser-cannot-increment" });
+        // 硬：首见（无 offset，F5 分拆：独立 reason）
+        let first_seen = FileCheckpoint { parser_version: 5, ..FileCheckpoint::default() };
+        // 首见 + 旧库 None 行在 classify 眼里同判 parser-id-mismatch（都是「不知道
+// 谁负责此文件」→ 交给请求者全量处理）；与「有 id 但不是我的」共用同一 reason
+// 语义等价——动作都是全量、由请求者接管。
+assert_eq!(classify(&first_seen, Some((100, 1000)), true, args.0, args.1),
+            Invalidation::Full { reason: "parser-id-mismatch" });
         // dirty=true 即便指纹相同也不算 Unchanged
         let dirty_cp = FileCheckpoint { dirty: true, ..cp.clone() };
-        assert_eq!(classify(&dirty_cp, Some((100, 1000)), true),
+        assert_eq!(classify(&dirty_cp, Some((100, 1000)), true, args.0, args.1),
             Invalidation::Incremental { from_offset: 100 });
+        // F1：parser_version 不匹配 → 硬失效（即便指纹全同、非 dirty）
+        let bumped = FileCheckpoint { parser_version: 4, ..cp.clone() };
+        assert_eq!(classify(&bumped, Some((100, 1000)), true, args.0, args.1),
+            Invalidation::Full { reason: "parser-version-bumped" },
+            "解析器升版必须硬失效，Unchanged 不得吞掉（spec §6 明文行）");
+        // F2：parser_id 不匹配（含 full-parse-v0 旧行）→ 硬失效
+        let v0_row = FileCheckpoint {
+            parser_id: Some("full-parse-v0".into()),
+            ..cp.clone()
+        };
+        assert_eq!(classify(&v0_row, Some((200, 2000)), true, args.0, args.1),
+            Invalidation::Full { reason: "parser-id-mismatch" },
+            "P0 旧行的 offset 是 stat size 非换行边界，增量解析器不得直接续读");
+        // F2 补：parser_id 为 None（旧库 v23 行）同样硬失效
+        let none_id = FileCheckpoint { parser_id: None, ..cp.clone() };
+        assert_eq!(classify(&none_id, Some((200, 2000)), true, args.0, args.1),
+            Invalidation::Full { reason: "parser-id-mismatch" });
     }
 
     /// 检查点往返：写入 → 读回 → 推进 → 脏集查询 → 清零。

@@ -479,13 +479,15 @@ pub(crate) fn write_flat_facts_with_sources(
             // SourceGraph 检查点推进（spec §1.3 / §12）：与事实写入同事务——
             // 半途崩溃 offset 不动，下轮重读同段，fact_id 吸收。P0 阶段 offset
             // 推到 size（"已处理到这里"），增量解析器（P1）接管后从此处续读。
+            // F4（复跑发现）：错误上抛——失败方向虽然安全（offset 不动→重读→
+            // fact_id 吸收），但静默吞错会让诊断面看不到。
             let hash = crate::source_graph::path_hash(path);
-            let _ = crate::source_graph::advance_checkpoint(
+            crate::source_graph::advance_checkpoint(
                 conn, host, &hash,
                 Some(*size_bytes),  // P0：全量处理到 EOF
                 "full-parse-v0",    // P0：未接增量解析器前的标记
                 *size_bytes, *mtime_ns,
-            );
+            ).map_err(AuthorityError::from)?;
             outcome.files_synced += 1;
         }
         if let Some(meta_key) = runtime_snapshot
