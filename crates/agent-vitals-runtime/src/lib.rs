@@ -25,12 +25,13 @@
 //! hosts 又认识 data 的层。
 
 // ── 平台件（crate 根，无领域归属，被所有子目录依赖）──
-pub mod clock;
-pub mod home;
-pub mod state;
-pub mod takeover;
-pub mod statistics_timezone;
-pub mod retention;
+pub mod core;
+pub use core::clock;
+pub use core::home;
+pub use core::state;
+pub use core::takeover;
+pub use core::statistics_timezone;
+pub use core::retention;
 
 // ── billing/ 计费与价格域（旧路径 re-export 垫片保持外部兼容）──
 pub mod billing;
