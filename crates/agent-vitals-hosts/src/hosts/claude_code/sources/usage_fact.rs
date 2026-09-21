@@ -303,6 +303,9 @@ impl Observation {
 /// 尾部不完整行（写了一半的 in-flight JSON）留给下轮，不报错。
 /// **差分门验收**：同一文件 full-parse 与 incremental-parse 产出的 fact 集
 /// 必须逐条 fact_id 一致（`agent-vitals-runtime` 的 source_graph 差分测试钉住）。
+/// 增量版：从 `from_offset` 续读到 EOF，只解析新行（spec §5.2）。
+/// 返回 (facts, new_offset)；new_offset 是换行边界。
+/// 差分门（runtime source_graph）钉住 fact_id 一致性（含 derived-hash 路径）。
 pub fn claude_jsonl_to_usage_facts_incremental(
     path: &Path,
     machine_namespace: &str,
@@ -370,6 +373,8 @@ pub fn claude_jsonl_to_usage_facts_incremental(
     Ok((facts, new_offset))
 }
 
+/// 全量版：整个 JSONL 文件从头解析。与 Python 逐字节 parity（golden 覆盖）。
+/// 产 UsageFactEmitResult（facts + attempts + coverage + workflow_events + excerpts）。
 pub fn claude_jsonl_to_usage_facts(
     path: &Path,
     machine_namespace: &str,

@@ -383,7 +383,14 @@ mod differential_gate_tests {
         ];
         let batch2 = [
             r#"{"type":"assistant","uuid":"u3","timestamp":"2026-09-05T10:02:00.000Z","message":{"id":"msg_3","model":"claude-sonnet-5","usage":{"input_tokens":15,"cache_read_input_tokens":25,"cache_creation_input_tokens":8,"output_tokens":6}}}"#,
-            r#"{"type":"assistant","uuid":"u4","timestamp":"2026-09-05T10:03:00.000Z","message":{"id":"msg_4","model":"claude-haiku-4","usage":{"input_tokens":5,"output_tokens":2}}}"#,
+            // M1（复跑发现）：无 message.id、无 uuid 的 assistant 行——触发
+            // derived_event_id 路径，fact_id 由 (session, line_offset, record)
+            // 派生。增量版的 line_offset = start + from_offset 基准换算是
+            // 全量/增量 fact_id 一致性的关键坐标数学——此前所有 fixture 行
+            // 都有 native id，这条路径零覆盖（差分门会漏掉基准加错的 bug，
+            // 生产后果是同一事件两条 fact_id = 双计）。
+            r#"{"type":"assistant","timestamp":"2026-09-05T10:02:30.000Z","message":{"model":"claude-sonnet-5","usage":{"input_tokens":7,"cache_read_input_tokens":1,"cache_creation_input_tokens":0,"output_tokens":2}}}"#,
+            r#"{"type":"assistant","uuid":"u4","timestamp":"2026-09-05T10:03:00.000Z","message":{"id":"msg_4","model":"claude-haiku-4","usage":{"input_tokens":5,"cache_read_input_tokens":1,"cache_creation_input_tokens":0,"output_tokens":2}}}"#,
         ];
         let batch3 = [
             r#"{"type":"user","uuid":"u5","timestamp":"2026-09-05T10:04:00.000Z","message":{"content":[{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"ls"}}]}}"#,
