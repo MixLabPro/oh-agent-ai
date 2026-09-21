@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateActio
 import {
   listen,
   readSessions,
+  safeUiError,
   type SessionCostStatus,
   type SessionRow,
   type SessionsCostFilter,
@@ -132,7 +133,7 @@ export function SessionsPage() {
       setWindowTokens(page.window_total_tokens);
     } catch (reason: unknown) {
       if (currentGeneration !== generation.current) return;
-      setError(reason instanceof Error ? reason.message : "会话数据暂不可用");
+      setError(safeUiError(reason, "会话数据暂不可用"));
       setTotal(null);
       setWindowTokens(null);
     } finally {
@@ -172,7 +173,7 @@ export function SessionsPage() {
       setTotal(page.window_session_count);
       setWindowTokens(page.window_total_tokens);
     } catch (reason: unknown) {
-      if (currentGeneration === generation.current) setError(reason instanceof Error ? reason.message : "更多会话暂不可用");
+      if (currentGeneration === generation.current) setError(safeUiError(reason, "更多会话暂不可用"));
     } finally {
       setLoadingMore(false);
       requestInFlight.current = false;

@@ -1,5 +1,20 @@
 export type Unsubscribe = () => void;
 
+/** Convert bridge failures into bounded user-facing copy. Raw invoke errors
+ * may contain local paths, command lines, or provider diagnostics and must not
+ * cross the React serving face. Detailed diagnostics stay in the desktop log.
+ */
+export function safeUiError(reason: unknown, fallback: string): string {
+  const message = reason instanceof Error ? reason.message : "";
+  if (!message) return fallback;
+  if (/取消|cancel/i.test(message)) return "操作已取消";
+  if (/DTO|schema|格式|字段|不匹配|不守恒|超出|上限/i.test(message)) return "本地数据格式不兼容，请升级应用或重建投影";
+  if (/权限|permission|access denied|拒绝访问/i.test(message)) return "本地数据读取权限不足";
+  if (/authority|数据库|database|sqlite/i.test(message)) return "本地 authority 暂不可用";
+  if (/日期|月份|参数|引用|cursor|session_ref|filter/i.test(message)) return "筛选或引用参数不可用，请检查后重试";
+  return fallback;
+}
+
 type TauriGlobal = {
   core?: { invoke?: (command: string, args?: unknown) => Promise<unknown> };
   event?: { listen?: (event: string, handler: (payload: unknown) => void) => Promise<Unsubscribe> };

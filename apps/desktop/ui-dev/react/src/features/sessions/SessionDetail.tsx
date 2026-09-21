@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { readSessionDetail, type SessionBillingBucket, type SessionDetail as SessionDetailData, type SessionRow, type SessionWorkflowEvent } from "../../lib/tauri";
+import { readSessionDetail, safeUiError, type SessionBillingBucket, type SessionDetail as SessionDetailData, type SessionRow, type SessionWorkflowEvent } from "../../lib/tauri";
 
 function compact(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
@@ -49,7 +49,7 @@ export function SessionDetail({ row, onBack }: { row: SessionRow; onBack: () => 
     void readSessionDetail(row.session_ref).then((value) => {
       if (generation.current === current) setDetail(value);
     }).catch((reason: unknown) => {
-      if (generation.current === current) setError(reason instanceof Error ? reason.message : "会话详情暂不可用");
+      if (generation.current === current) setError(safeUiError(reason, "会话详情暂不可用"));
     }).finally(() => {
       if (generation.current === current) setLoading(false);
     });
@@ -64,7 +64,7 @@ export function SessionDetail({ row, onBack }: { row: SessionRow; onBack: () => 
       setDetail((current) => current ? { ...current, timeline: current.timeline.concat(page.timeline), has_more: page.has_more, next_cursor: page.next_cursor } : current);
       setPaginationError(null);
     } catch (reason: unknown) {
-      setPaginationError(reason instanceof Error ? reason.message : "更多事实暂不可用");
+      setPaginationError(safeUiError(reason, "更多事实暂不可用"));
     } finally {
       setLoadingMore(false);
     }

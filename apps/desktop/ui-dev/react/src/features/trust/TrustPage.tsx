@@ -6,6 +6,7 @@ import {
   readTrustMonitorConfig,
   runTrustRuntimeSnapshot,
   saveTrustMonitorConfig,
+  safeUiError,
   type TrustAuditReport,
   type TrustHostCandidate,
   type TrustMonitorConfig,
@@ -48,10 +49,7 @@ function destinationLabel(destination: string | null): string {
 }
 
 function errorMessage(reason: unknown): string {
-  const message = reason instanceof Error ? reason.message : "本地 Trust 数据暂不可用";
-  return /DTO|格式|字段|引用|计数|schema/i.test(message)
-    ? "本地 Trust 数据格式不兼容（schema mismatch），请升级应用或重建投影"
-    : message;
+  return safeUiError(reason, "本地 Trust 数据暂不可用");
 }
 
 function capabilityLabel(value: TrustMonitorConfig["capability"]): string {

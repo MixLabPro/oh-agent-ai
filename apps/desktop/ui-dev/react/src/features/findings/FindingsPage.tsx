@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { listen, readDecisionMatrix, readFindings, readFindingsFreshness, type DecisionMatrixReport, type FindingGroup, type FindingSample, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
+import { listen, readDecisionMatrix, readFindings, readFindingsFreshness, safeUiError, type DecisionMatrixReport, type FindingGroup, type FindingSample, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
 import { DecisionMatrixSection } from "./DecisionMatrixSection";
 
 type SeverityFilter = "all" | "critical" | "warning" | "info";
@@ -143,12 +143,12 @@ export function FindingsPage() {
     setError(null);
     void Promise.all([readFindings(), readFindingsFreshness()])
       .then(([nextReport, nextFreshness]) => { setReport(nextReport); setFreshness(nextFreshness); setLoading(""); })
-      .catch((reason: unknown) => { setError(reason instanceof Error ? reason.message : "本地发现暂不可用"); setLoading(""); });
+      .catch((reason: unknown) => { setError(safeUiError(reason, "本地发现暂不可用")); setLoading(""); });
     setMatrixLoading(true);
     setMatrixError(null);
     void readDecisionMatrix()
       .then((nextMatrix) => { setMatrix(nextMatrix); setMatrixLoading(false); })
-      .catch((reason: unknown) => { setMatrixError(reason instanceof Error ? reason.message : "本地对比数据暂不可用"); setMatrixLoading(false); });
+      .catch((reason: unknown) => { setMatrixError(safeUiError(reason, "本地对比数据暂不可用")); setMatrixLoading(false); });
   };
 
   useEffect(() => { load(); }, []);
