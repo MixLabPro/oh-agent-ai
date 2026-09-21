@@ -62,6 +62,33 @@ export type UsageSourceSummary = {
 
 export type StatisticsTimezone = { timezone: string };
 
+export type StatisticsSettingsReport = {
+  timezone: { status: "ok" | "unavailable"; timezone: string | null; system_timezone: string | null };
+  retention: { status: "ok" | "unavailable"; months: number | null; minimum_months: number | null; maximum_months: number | null };
+  pricing: { status: "ok" | "unavailable"; state: "ok" | "updated" | "failed" | "rejected" | "never_checked" | "skipped" | "unknown"; version: string | null; model_count: number | null; last_success_at_ms: number | null; available: boolean };
+};
+
+export type MonthlyExportRow = {
+  host: string;
+  provider: string | null;
+  tokens: number | null;
+  basis: string | null;
+  currency: string | null;
+  amount: number | null;
+  unresolved: boolean;
+  evidence_basis: string | null;
+  pricing_method: string | null;
+  freshness: UsageSourceSummary["freshness"];
+};
+
+export type MonthlyExportSummary = {
+  month: string;
+  rows: MonthlyExportRow[];
+  coverage: { measured_fields: number; total_fields: number };
+  freshness: UsageSourceSummary["freshness"];
+  excluded_hosts: string[];
+};
+
 export type SourceConnectionState = "connected" | "needs_attention" | "paused" | "excluded" | "not_detected" | "unknown";
 export type SourceErrorKind = "permission_denied" | "file_missing" | "all_files_failed" | "db_error" | "migration_failed" | "read_failed";
 export type SourceHealthRow = {
@@ -882,6 +909,92 @@ function parseUsageSourceSummary(value: unknown): UsageSourceSummary {
   };
 }
 
+const freshnessStates = ["fresh", "stale", "partial", "unavailable"] as const;
+
+function parseFreshness(value: unknown, label: string): UsageSourceSummary["freshness"] {
+  const row = value == null ? {} : record(value, label);
+  return boundedEnum(row.state ?? "unknown", label, freshnessStates, "unknown") as UsageSourceSummary["freshness"];
+}
+
+function parseStatisticsTimezone(value: unknown): StatisticsSettingsReport["timezone"] {
+  const root = record(value, "statistics timezone");
+  if (root.status === "unavailable") return { status: "unavailable", timezone: null, system_timezone: null };
+  if (root.status !== "ok") throw new Error("statistics timezone status 不兼容");
+  const timezone = stringField(root.timezone, "statistics timezone");
+  const systemTimezone = root.system_timezone == null ? null : stringField(root.system_timezone, "system timezone");
+  try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(); } catch (_) { throw new Error("统计时区不可用"); }
+  if (systemTimezone !== null) {
+    try { new Intl.DateTimeFormat("en-US", { timeZone: systemTimezone }).format(); } catch (_) { throw new Error("系统时区不可用"); }
+  }
+  return { status: "ok", timezone, system_timezone: systemTimezone };
+}
+
+function parseRetentionConfig(value: unknown): StatisticsSettingsReport["retention"] {
+  const root = record(value, "retention config");
+  if (root.status === "unavailable") return { status: "unavailable", months: null, minimum_months: null, maximum_months: null };
+  if (root.status !== "ok") throw new Error("retention config status 不兼容");
+  const months = boundedCount(root.months, "retention months", 120);
+  const minimum = boundedCount(root.minimum_months ?? 1, "retention minimum", 120);
+  const maximum = boundedCount(root.maximum_months ?? 60, "retention maximum", 120);
+  if (minimum < 1 || maximum < minimum || months < minimum || months > maximum) throw new Error("retention config 范围不安全");
+  return { status: "ok", months, minimum_months: minimum, maximum_months: maximum };
+}
+
+const pricingStates = ["ok", "updated", "failed", "rejected", "never_checked", "skipped"] as const;
+
+function parsePricingCatalogStatus(value: unknown): StatisticsSettingsReport["pricing"] {
+  const root = record(value, "pricing catalog status");
+  const state = boundedEnum(root.state ?? "unknown", "pricing catalog state", pricingStates, "unknown") as StatisticsSettingsReport["pricing"]["state"];
+  const version = root.source_version == null ? null : decisionLabel(root.source_version, "pricing catalog version");
+  const modelCount = root.model_count == null ? null : boundedCount(root.model_count, "pricing catalog model count", 100_000);
+  const lastSuccess = root.last_success_at_ms == null ? null : nullableSourceTimestampMs(root.last_success_at_ms, "pricing catalog last success");
+  return { status: "ok", state, version, model_count: modelCount, last_success_at_ms: lastSuccess, available: state === "ok" || state === "updated" };
+}
+
+function parseMonthlyExportSummary(value: unknown): MonthlyExportSummary {
+  const root = record(value, "monthly export summary");
+  const month = safeMonth(root.month, "monthly export month");
+  const coverageRow = record(root.coverage, "monthly export coverage");
+  const measured = boundedCount(coverageRow.measured_fields, "monthly export measured fields", 1_000);
+  const total = boundedCount(coverageRow.total_fields, "monthly export total fields", 1_000);
+  if (measured > total) throw new Error("monthly export coverage 不守恒");
+  const excluded = requiredArray(root.excluded_hosts, "monthly export excluded hosts").slice(0, 32).map((host) => safeHostLabel(host));
+  const freshness = parseFreshness(root.freshness, "monthly export freshness");
+  const byHost = record(root.by_host ?? {}, "monthly export hosts");
+  const tokensByHost = record(root.tokens_by_host ?? {}, "monthly export tokens");
+  const byProvider = record(root.by_provider ?? {}, "monthly export providers");
+  const rows: MonthlyExportRow[] = [];
+  Object.entries(byProvider).slice(0, 128).forEach(([key, raw]) => {
+    const parts = key.split("/");
+    const host = safeHostLabel(parts.shift() ?? "generic");
+    const provider = parts.length ? decisionLabel(parts.join("/"), "monthly export provider") : null;
+    const amount = record(raw, "monthly export provider row");
+    const amounts = record(amount.amounts_by_basis ?? {}, "monthly export provider amounts");
+    const basisEntries = Object.entries(amounts).filter(([, value]) => typeof value === "number" && Number.isFinite(value) && value >= 0).slice(0, 16);
+    const currency = amount.currency == null ? null : decisionCurrency(amount.currency, "monthly export currency");
+    if (!basisEntries.length) basisEntries.push(["other", 0]);
+    basisEntries.forEach(([basis, rawAmount]) => rows.push({
+      host,
+      provider,
+      tokens: null,
+      basis: boundedEnum(basis, "monthly export basis", ["metered_actual", "host_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent", "other"], "other"),
+      currency,
+      amount: safeNonNegativeNumber(rawAmount, "monthly export amount"),
+      unresolved: amount.has_unresolved === true,
+      evidence_basis: amount.evidence_basis == null ? null : decisionLabel(amount.evidence_basis, "monthly export evidence"),
+      pricing_method: amount.pricing_method == null ? null : decisionLabel(amount.pricing_method, "monthly export pricing"),
+      freshness: parseFreshness(amount.freshness, "monthly export provider freshness"),
+    }));
+  });
+  Object.entries(byHost).slice(0, 64).forEach(([hostKey, raw]) => {
+    const host = safeHostLabel(hostKey);
+    const amount = record(raw, "monthly export host row");
+    const tokenRow = tokensByHost[host] == null ? null : record(tokensByHost[host], "monthly export host tokens");
+    rows.push({ host, provider: null, tokens: tokenRow == null ? null : boundedCount(tokenRow.total ?? 0, "monthly export host tokens", 1_000_000_000_000_000), basis: null, currency: amount.currency == null ? null : decisionCurrency(amount.currency, "monthly export currency"), amount: null, unresolved: amount.has_unresolved === true, evidence_basis: null, pricing_method: null, freshness: parseFreshness(amount.freshness, "monthly export host freshness") });
+  });
+  return { month, rows, coverage: { measured_fields: measured, total_fields: total }, freshness, excluded_hosts: excluded };
+}
+
 function parseUsageHourly(value: unknown): UsageHourly {
   const root = record(value, "usage hourly");
   const date = safeDate(root.date, "usage hourly date");
@@ -1652,6 +1765,65 @@ export async function readStatisticsTimezone(): Promise<StatisticsTimezone> {
   const timezone = stringField(root.timezone, "statistics timezone");
   try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(); } catch (_) { throw new Error("统计时区不可用"); }
   return { timezone };
+}
+
+export async function readStatisticsSettings(): Promise<StatisticsSettingsReport> {
+  const systemTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const fallback: StatisticsSettingsReport = {
+    timezone: { status: "ok", timezone: systemTimezone, system_timezone: systemTimezone },
+    retention: { status: "ok", months: 13, minimum_months: 1, maximum_months: 60 },
+    pricing: { status: "ok", state: "ok", version: "browser-preview", model_count: 7, last_success_at_ms: Date.now() - 3_600_000, available: true },
+  };
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return fallback;
+  const results = await Promise.allSettled([
+    handler("statistics_timezone_config"),
+    handler("retention_config"),
+    handler("public_pricing_catalog_status"),
+  ]);
+  const parseOrUnavailable = <T,>(result: PromiseSettledResult<unknown>, parse: (value: unknown) => T, unavailable: T): T => {
+    if (result.status === "rejected") return unavailable;
+    try { return parse(result.value); } catch { return unavailable; }
+  };
+  return {
+    timezone: parseOrUnavailable(results[0], parseStatisticsTimezone, { status: "unavailable", timezone: null, system_timezone: null }),
+    retention: parseOrUnavailable(results[1], parseRetentionConfig, { status: "unavailable", months: null, minimum_months: null, maximum_months: null }),
+    pricing: parseOrUnavailable(results[2], parsePricingCatalogStatus, { status: "unavailable", state: "unknown", version: null, model_count: null, last_success_at_ms: null, available: false }),
+  };
+}
+
+function validateIanaTimezone(timezone: string): string {
+  if (typeof timezone !== "string" || timezone.length < 1 || timezone.length > 96 || /[\u0000-\u001f\u007f]/u.test(timezone)) throw new Error("统计时区不安全");
+  try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(); } catch (_) { throw new Error("统计时区不可用"); }
+  return timezone;
+}
+
+export async function saveStatisticsTimezone(timezone: string): Promise<{ status: "saved"; timezone: string }> {
+  const safe = validateIanaTimezone(timezone);
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved", timezone: safe };
+  const root = record(await handler("save_statistics_timezone_config", { timezone: safe }), "save statistics timezone");
+  if (root.status !== "saved") throw new Error("统计时区保存未确认");
+  const saved = validateIanaTimezone(stringField(root.timezone, "saved statistics timezone"));
+  return { status: "saved", timezone: saved };
+}
+
+export async function saveRetentionMonths(months: number, minimum = 1, maximum = 60): Promise<{ status: "saved"; months: number }> {
+  if (!Number.isSafeInteger(months) || months < minimum || months > maximum) throw new Error(`保留期必须是 ${minimum}-${maximum} 之间的整数`);
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved", months };
+  const root = record(await handler("save_retention_config", { input: { months } }), "save retention config");
+  if (root.status !== "saved") throw new Error("保留期保存未确认");
+  return { status: "saved", months: boundedCount(root.months, "saved retention months", 120) };
+}
+
+export async function readMonthlyExportSummary(month: string): Promise<MonthlyExportSummary> {
+  const safe = safeMonth(month, "monthly export month");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseMonthlyExportSummary({ month: safe, by_host: {}, by_provider: {}, tokens_by_host: {}, coverage: { measured_fields: 0, total_fields: 0 }, freshness: { state: "unavailable" }, excluded_hosts: [] });
+  const parsed = parseMonthlyExportSummary(await handler("data_monthly_summary", { month: safe }));
+  if (parsed.month !== safe) throw new Error("月度导出返回了错误月份");
+  return parsed;
 }
 
 export async function readSourceHealth(): Promise<SourceHealthReport> {

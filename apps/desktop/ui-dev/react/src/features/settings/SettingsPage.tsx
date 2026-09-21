@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { addCustomSourceRoot, clearBudgetSnooze, listen, pickCustomSourceRoot, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readSourceHealth, readSyncRequestStatus, removeCustomSourceRoot, saveBudgetProfile, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport } from "../../lib/tauri";
+import { addCustomSourceRoot, clearBudgetSnooze, listen, pickCustomSourceRoot, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readSourceHealth, readStatisticsSettings, readSyncRequestStatus, removeCustomSourceRoot, saveBudgetProfile, saveRetentionMonths, saveStatisticsTimezone, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type StatisticsSettingsReport } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -96,6 +96,110 @@ function compactTokens(value: number): string {
 function billingAmountText(amounts: Array<{ amount_minor: number; currency: string }>): string {
   if (!amounts.length) return "暂无可用金额";
   return amounts.map((amount) => minorToDecimal(amount.amount_minor, amount.currency)).join(" + ");
+}
+
+function statisticsMonth(timezone?: string): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit" }).format(new Date());
+}
+
+function pricingStateLabel(state: StatisticsSettingsReport["pricing"]["state"]): string {
+  return ({ ok: "本地价卡可用", updated: "本地价卡已更新", failed: "上次检查失败", rejected: "价卡被拒绝", never_checked: "尚未检查", skipped: "未执行检查", unknown: "状态未知" } as Record<string, string>)[state];
+}
+
+function csvCell(value: string | number | null): string {
+  const text = value === null ? "" : String(value);
+  const safe = /^[=+\-@]/u.test(text) ? `'${text}` : text;
+  return /[",\n]/u.test(safe) ? `"${safe.replaceAll('"', '""')}"` : safe;
+}
+
+function exportCsv(summary: MonthlyExportSummary): string {
+  const header = ["统计月份", "宿主", "服务商", "tokens（宿主汇总）", "计价口径", "币种", "金额", "未定价/待确认", "证据口径", "价格口径", "新鲜度"];
+  const rows = summary.rows.map((row) => [summary.month, row.host, row.provider ?? "宿主汇总", row.tokens, row.basis, row.currency, row.amount === null ? null : row.amount.toFixed(6), row.unresolved ? "是" : "否", row.evidence_basis, row.pricing_method, row.freshness]);
+  return [header, ...rows].map((line) => line.map(csvCell).join(",")).join("\n") + "\n";
+}
+
+type StatisticsDataSectionProps = { report: StatisticsSettingsReport | null; loading: boolean; error: string | null; onReload: () => void };
+
+function StatisticsDataSection({ report, loading, error, onReload }: StatisticsDataSectionProps) {
+  const [timezone, setTimezone] = useState("");
+  const [customTimezone, setCustomTimezone] = useState("");
+  const [retention, setRetention] = useState("");
+  const [savingTimezone, setSavingTimezone] = useState(false);
+  const [savingRetention, setSavingRetention] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [exportSummary, setExportSummary] = useState<MonthlyExportSummary | null>(null);
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportPreview, setExportPreview] = useState(false);
+
+  useEffect(() => {
+    if (report?.timezone.status === "ok" && report.timezone.timezone) {
+      const current = report.timezone.timezone;
+      if (current === report.timezone.system_timezone || timezoneOptions.includes(current)) setTimezone(current);
+      else { setTimezone("__custom__"); setCustomTimezone(current); }
+    }
+    if (report?.retention.status === "ok" && report.retention.months !== null) setRetention(String(report.retention.months));
+  }, [report?.timezone.timezone, report?.retention.months]);
+
+  const saveTimezone = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (savingTimezone) return;
+    const next = timezone === "__custom__" ? customTimezone.trim() : timezone;
+    setActionError(null); setMessage(null);
+    if (!next) { setActionError("请选择或填写有效的 IANA 时区。"); return; }
+    setSavingTimezone(true);
+    try { const receipt = await saveStatisticsTimezone(next); setTimezone(receipt.timezone); setMessage(`统计时区已保存为 ${receipt.timezone}；用量页会按新的月份边界刷新。`); onReload(); }
+    catch (reason: unknown) { setActionError(reason instanceof Error ? reason.message : "统计时区保存失败"); }
+    finally { setSavingTimezone(false); }
+  };
+
+  const saveRetention = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (savingRetention || !report || report.retention.status !== "ok") return;
+    const minimum = report.retention.minimum_months ?? 1;
+    const maximum = report.retention.maximum_months ?? 60;
+    const months = Number(retention);
+    setActionError(null); setMessage(null);
+    if (!Number.isSafeInteger(months) || months < minimum || months > maximum) { setActionError(`保留期必须是 ${minimum}-${maximum} 之间的整数。`); return; }
+    setSavingRetention(true);
+    try { const receipt = await saveRetentionMonths(months, minimum, maximum); setRetention(String(receipt.months)); setMessage(`本机保留期已保存为 ${receipt.months} 个月；下次维护时才会执行清理。`); onReload(); }
+    catch (reason: unknown) { setActionError(reason instanceof Error ? reason.message : "保留期保存失败"); }
+    finally { setSavingRetention(false); }
+  };
+
+  const loadExport = async () => {
+    if (exportLoading) return;
+    setExportLoading(true); setExportError(null);
+    const timezoneForExport = report?.timezone.status === "ok" ? report.timezone.timezone ?? undefined : undefined;
+    try { setExportSummary(await readMonthlyExportSummary(statisticsMonth(timezoneForExport))); setExportPreview(true); }
+    catch (reason: unknown) { setExportSummary(null); setExportError(reason instanceof Error ? reason.message : "月度摘要读取失败"); }
+    finally { setExportLoading(false); }
+  };
+
+  const downloadExport = () => {
+    if (!exportSummary) return;
+    const blob = new Blob(["\uFEFF", exportCsv(exportSummary)], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a"); anchor.href = url; anchor.download = `agent-vitals-${exportSummary.month}-summary.csv`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setMessage(`已生成 ${exportSummary.month} 月度摘要 CSV；文件只在本机下载。`);
+  };
+
+  const timezoneOptions = ["UTC", "Asia/Shanghai", "Asia/Tokyo", "Asia/Singapore", "Europe/London", "America/Los_Angeles", "America/New_York"];
+  return <section className="settings-data-section" id="settings-data" aria-labelledby="settings-data-title">
+    <div className="settings-section-heading"><div><p className="eyebrow">统计与数据</p><h3 id="settings-data-title">统计与数据</h3><p>统计边界、保留期与价格目录状态均来自本机 authority；导出只包含当前月安全摘要。</p></div><button className="button button-secondary button-small" type="button" onClick={onReload} disabled={loading}>{loading ? "读取中…" : "重载统计设置"}</button></div>
+    {error && <div className="error-banner" role="alert">统计设置暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={onReload}>重试</button></div>}
+    {loading && <div className="settings-source-state" role="status"><strong>正在读取统计设置</strong><span>只查询本机配置，不会上传数据。</span></div>}
+    {!loading && report && <>
+      <div className="settings-data-grid">
+        <form className="settings-data-card" onSubmit={saveTimezone} aria-labelledby="settings-timezone-title"><div className="settings-card-heading"><div><p className="eyebrow">统计边界</p><h4 id="settings-timezone-title">统计时区</h4></div>{report.timezone.status === "unavailable" && <span className="status-pill status-pill-warning">暂不可用</span>}</div>{report.timezone.status === "ok" && <><label><span>时区</span><select value={timezone === report.timezone.system_timezone ? "__system__" : timezoneOptions.includes(timezone) ? timezone : timezone ? "__custom__" : ""} onChange={(event) => { const value = event.target.value; setTimezone(value === "__system__" ? report.timezone.system_timezone ?? "UTC" : value); }}><option value="">选择时区</option><option value="__system__">跟随系统（{report.timezone.system_timezone ?? "系统"}）</option>{timezoneOptions.map((option) => <option value={option} key={option}>{option}</option>)}<option value="__custom__">自定义 IANA 时区…</option></select></label>{timezone === "__custom__" && <label><span>自定义时区</span><input value={customTimezone} onChange={(event) => setCustomTimezone(event.target.value)} placeholder="例如 Asia/Shanghai" autoComplete="off" /></label>}<p className="settings-data-help">只改变今天/月的统计边界，不修改宿主原始日志或供应商计价时区。</p><button className="button button-secondary" type="submit" disabled={savingTimezone || !timezone || timezone === "__custom__" && !customTimezone.trim()}>{savingTimezone ? "保存中…" : "保存统计时区"}</button></>}</form>
+        <form className="settings-data-card" onSubmit={saveRetention} aria-labelledby="settings-retention-title"><div className="settings-card-heading"><div><p className="eyebrow">本机维护</p><h4 id="settings-retention-title">数据保留期</h4></div>{report.retention.status === "unavailable" && <span className="status-pill status-pill-warning">暂不可用</span>}</div>{report.retention.status === "ok" && <><label><span>保留月数</span><input type="number" min={report.retention.minimum_months ?? 1} max={report.retention.maximum_months ?? 60} step="1" value={retention} onChange={(event) => setRetention(event.target.value)} /></label><p className="settings-data-help">范围 {report.retention.minimum_months}-{report.retention.maximum_months} 个月，保存后不会立即删除；下次本机维护才执行。</p><button className="button button-secondary" type="submit" disabled={savingRetention || !retention}>{savingRetention ? "保存中…" : "保存保留期"}</button></>}</form>
+      </div>
+      <div className="settings-data-card settings-pricing-card"><div className="settings-card-heading"><div><p className="eyebrow">价格目录</p><h4>公共价格目录（只读）</h4></div>{report.pricing.status === "ok" && <span className={`status-pill status-pill-${report.pricing.available ? "success" : "warning"}`}>{pricingStateLabel(report.pricing.state)}</span>}</div>{report.pricing.status === "unavailable" ? <p className="settings-data-help">本地价格目录状态暂不可读，不显示为已更新。</p> : <div className="settings-pricing-meta"><span>版本：{report.pricing.version ?? "未知"}</span><span>模型：{report.pricing.model_count ?? "未知"}</span><span>最近成功：{report.pricing.last_success_at_ms ? new Date(report.pricing.last_success_at_ms).toLocaleString() : "无"}</span></div>}<p className="settings-data-help">Beta 版本不提供联网开关、检查或更新按钮；本页不会触发网络请求。</p></div>
+      <div className="settings-data-card settings-export-card"><div className="settings-card-heading"><div><p className="eyebrow">本地导出</p><h4>当前月摘要 CSV</h4></div><span className="status-pill">不含原始会话</span></div><p className="settings-data-help">只导出宿主、服务商、token 汇总、金额口径、覆盖与新鲜度；不含正文、绝对路径、凭据或账户标识。</p><div className="settings-export-actions"><button className="button button-secondary" type="button" onClick={loadExport} disabled={exportLoading}>{exportLoading ? "读取中…" : exportPreview ? "刷新预览" : "预览导出字段"}</button><button className="button button-secondary" type="button" onClick={downloadExport} disabled={!exportSummary || exportSummary.freshness === "unavailable"}>下载 CSV</button></div>{exportError && <p className="settings-data-error" role="alert">{exportError}</p>}{exportPreview && exportSummary && <div className="settings-export-preview" role="status"><strong>{exportSummary.month} · {exportSummary.rows.length} 行</strong><span>字段：统计月份、宿主、服务商、tokens、计价口径、币种、金额、待确认、证据、价格、新鲜度。</span>{exportSummary.freshness === "unavailable" ? <small>摘要来源暂不可用，未生成可判定导出；请先恢复本机 authority。</small> : exportSummary.rows.length === 0 && <small>本月没有可导出的计费行；来源仍然可读。</small>}</div>}</div>
+    </>}
+    {actionError && <div className="error-banner" role="alert">{actionError}</div>}{message && <p className="settings-data-message" role="status" aria-live="polite">{message}</p>}
+  </section>;
 }
 
 type BillingSectionProps = { report: BillingSettingsReport | null; loading: boolean; error: string | null; onReload: () => void };
@@ -331,6 +435,9 @@ export function SettingsPage() {
   const [billingReport, setBillingReport] = useState<BillingSettingsReport | null>(null);
   const [billingError, setBillingError] = useState<string | null>(null);
   const [billingLoading, setBillingLoading] = useState(true);
+  const [dataReport, setDataReport] = useState<StatisticsSettingsReport | null>(null);
+  const [dataError, setDataError] = useState<string | null>(null);
+  const [dataLoading, setDataLoading] = useState(true);
 
   const refresh = () => {
     setLoading(true);
@@ -366,6 +473,15 @@ export function SettingsPage() {
       setBillingReport(null);
       setBillingError(reason instanceof Error ? reason.message : "计费状态读取失败");
     }).finally(() => setBillingLoading(false));
+  };
+
+  const refreshData = () => {
+    setDataLoading(true);
+    setDataError(null);
+    void readStatisticsSettings().then(setDataReport).catch((reason: unknown) => {
+      setDataReport(null);
+      setDataError(reason instanceof Error ? reason.message : "统计设置读取失败");
+    }).finally(() => setDataLoading(false));
   };
 
   const runSync = async (): Promise<boolean> => {
@@ -416,9 +532,10 @@ export function SettingsPage() {
     refreshCustom();
     refreshBudget();
     refreshBilling();
+    refreshData();
     let active = true;
     let cleanups: Array<() => void> = [];
-    Promise.all([listen("sync-status-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); } }), listen("usage-fold-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); } })]).then((unsubscribers) => {
+    Promise.all([listen("sync-status-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); } }), listen("usage-fold-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); } })]).then((unsubscribers) => {
       if (active) cleanups = unsubscribers;
       else unsubscribers.forEach((unsubscribe) => unsubscribe());
     });
@@ -433,7 +550,7 @@ export function SettingsPage() {
       <button className="button button-secondary" type="button" onClick={refresh} disabled={loading}>{loading ? "读取中…" : "重载"}</button>
     </section>
 
-    <nav className="settings-section-nav" aria-label="设置分区"><a className="settings-section-nav-active" href="#settings-sources">数据源</a><span>计费与套餐</span><span>预算</span><span>统计与数据</span><span>关于与诊断</span></nav>
+    <nav className="settings-section-nav" aria-label="设置分区"><a className="settings-section-nav-active" href="#settings-sources">数据源</a><a href="#settings-billing">计费与套餐</a><a href="#settings-budget">预算</a><a href="#settings-data">统计与数据</a><span>关于与诊断</span></nav>
 
     <section className="settings-section" id="settings-sources" aria-labelledby="settings-sources-title">
       <div className="settings-section-heading"><div><p className="eyebrow">数据源</p><h3 id="settings-sources-title">来源健康</h3><p>每个工具独立显示读取状态；来源之间不合并计数。</p></div>{report && <span className={`status-pill status-pill-${attentionCount ? "warning" : "success"}`}>{attentionCount ? `${attentionCount} 个来源需要处理` : "来源状态正常"}</span>}</div>
@@ -450,6 +567,8 @@ export function SettingsPage() {
 
     <BudgetSection report={budgetReport} loading={budgetLoading} error={budgetError} onReload={refreshBudget} />
 
-    <section className="settings-placeholder" aria-label="其他设置迁移状态"><strong>其他设置正在迁移</strong><span>计费与套餐、统计与数据、关于与诊断会继续沿用旧工作台，待各自完成安全 DTO、保存回执和失败恢复后再切换。</span></section>
+    <StatisticsDataSection report={dataReport} loading={dataLoading} error={dataError} onReload={refreshData} />
+
+    <section className="settings-placeholder" aria-label="其他设置迁移状态"><strong>关于与诊断仍在旧工作台</strong><span>计费与套餐、预算、统计与数据已经切换为安全的本机设置面；账单归因和诊断包等高风险操作仍保留在旧工作台，待单独完成回执与失败恢复验收。</span></section>
   </>;
 }
