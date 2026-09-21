@@ -26,7 +26,7 @@
 | 监控配置 | `trust_monitor_config` / `save_trust_monitor_config` | `readTrustMonitorConfig()` / `saveTrustMonitorConfig()` | 已接入；不可观察时 fail-closed |
 | Finding 聚合 | `findings_groups_safe` | `readFindings()` | 已有 versioned safe DTO |
 | 决策矩阵 | `decision_matrix_safe` | `readDecisionMatrix()` | 已有 versioned safe DTO |
-| 事件刷新 | `sync-status-updated` / `usage-fold-updated` / `trust-monitor-updated` | Findings/Trust 挂载期间注册并在卸载时清理；payload 只作失效信号 | 已完成首轮 feature invalidation |
+| 事件刷新 | `app-event`（`FoldCompleted` / `FactsIngested` / `SyncStatusChanged` / `TrustMonitorInvalidated` / `SourceDataDeleted`） | React 页面统一通过 `listenAppEvents` 订阅；payload 只作 allowlist 失效信号，外部 MCP/CLI 删除保留 DOM revision-poll fallback；Findings burst 以 150ms 合并刷新；Settings 各投影刷新带 request generation 与卸载守卫 | 已完成统一 feature invalidation 与设置页竞态硬化 |
 
 ## 安全与可见性约束
 

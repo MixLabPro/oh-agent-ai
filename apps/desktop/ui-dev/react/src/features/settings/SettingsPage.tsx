@@ -716,55 +716,98 @@ export function SettingsPage() {
   const [quotaReminder, setQuotaReminder] = useState<QuotaReminderConfig | null>(null);
   const [quotaReminderError, setQuotaReminderError] = useState<string | null>(null);
   const [quotaReminderLoading, setQuotaReminderLoading] = useState(true);
+  const settingsMounted = useRef(true);
+  const sourceRequest = useRef(0);
+  const sourceControlsRequest = useRef(0);
+  const customRequest = useRef(0);
+  const budgetRequest = useRef(0);
+  const billingRequest = useRef(0);
+  const dataRequest = useRef(0);
+  const aboutRequest = useRef(0);
   const quotaReminderRequest = useRef(0);
 
   const refresh = () => {
+    const sourceRequestId = ++sourceRequest.current;
+    const sourceControlsRequestId = ++sourceControlsRequest.current;
     setLoading(true);
     setError(null);
-    void readSourceHostControls().then(setSourceControls).catch(() => setSourceControls(null));
-    void readSourceHealth().then(setReport).catch((reason: unknown) => {
-      setError(safeUiError(reason, "来源状态读取失败"));
-    }).finally(() => setLoading(false));
+    void readSourceHostControls().then((next) => {
+      if (settingsMounted.current && sourceControlsRequestId === sourceControlsRequest.current) setSourceControls(next);
+    }).catch(() => {
+      if (settingsMounted.current && sourceControlsRequestId === sourceControlsRequest.current) setSourceControls(null);
+    });
+    void readSourceHealth().then((next) => {
+      if (settingsMounted.current && sourceRequestId === sourceRequest.current) setReport(next);
+    }).catch((reason: unknown) => {
+      if (settingsMounted.current && sourceRequestId === sourceRequest.current) setError(safeUiError(reason, "来源状态读取失败"));
+    }).finally(() => {
+      if (settingsMounted.current && sourceRequestId === sourceRequest.current) setLoading(false);
+    });
   };
 
   const refreshCustom = () => {
+    const requestId = ++customRequest.current;
     setCustomLoading(true);
     setCustomError(null);
-    void readCustomSourceConfig().then(setCustomReport).catch((reason: unknown) => {
-      setCustomError(safeUiError(reason, "自定义来源配置读取失败"));
-    }).finally(() => setCustomLoading(false));
+    void readCustomSourceConfig().then((next) => {
+      if (settingsMounted.current && requestId === customRequest.current) setCustomReport(next);
+    }).catch((reason: unknown) => {
+      if (settingsMounted.current && requestId === customRequest.current) setCustomError(safeUiError(reason, "自定义来源配置读取失败"));
+    }).finally(() => {
+      if (settingsMounted.current && requestId === customRequest.current) setCustomLoading(false);
+    });
   };
 
   const refreshBudget = () => {
+    const requestId = ++budgetRequest.current;
     setBudgetLoading(true);
     setBudgetError(null);
-    void readBudgetSettings().then(setBudgetReport).catch((reason: unknown) => {
-      setBudgetError(safeUiError(reason, "预算状态读取失败"));
-    }).finally(() => setBudgetLoading(false));
+    void readBudgetSettings().then((next) => {
+      if (settingsMounted.current && requestId === budgetRequest.current) setBudgetReport(next);
+    }).catch((reason: unknown) => {
+      if (settingsMounted.current && requestId === budgetRequest.current) setBudgetError(safeUiError(reason, "预算状态读取失败"));
+    }).finally(() => {
+      if (settingsMounted.current && requestId === budgetRequest.current) setBudgetLoading(false);
+    });
   };
 
   const refreshBilling = () => {
+    const requestId = ++billingRequest.current;
     setBillingLoading(true);
     setBillingError(null);
-    void readBillingSettings().then(setBillingReport).catch((reason: unknown) => {
-      setBillingError(safeUiError(reason, "计费状态读取失败"));
-    }).finally(() => setBillingLoading(false));
+    void readBillingSettings().then((next) => {
+      if (settingsMounted.current && requestId === billingRequest.current) setBillingReport(next);
+    }).catch((reason: unknown) => {
+      if (settingsMounted.current && requestId === billingRequest.current) setBillingError(safeUiError(reason, "计费状态读取失败"));
+    }).finally(() => {
+      if (settingsMounted.current && requestId === billingRequest.current) setBillingLoading(false);
+    });
   };
 
   const refreshData = () => {
+    const requestId = ++dataRequest.current;
     setDataLoading(true);
     setDataError(null);
-    void readStatisticsSettings().then(setDataReport).catch((reason: unknown) => {
-      setDataError(safeUiError(reason, "统计设置读取失败"));
-    }).finally(() => setDataLoading(false));
+    void readStatisticsSettings().then((next) => {
+      if (settingsMounted.current && requestId === dataRequest.current) setDataReport(next);
+    }).catch((reason: unknown) => {
+      if (settingsMounted.current && requestId === dataRequest.current) setDataError(safeUiError(reason, "统计设置读取失败"));
+    }).finally(() => {
+      if (settingsMounted.current && requestId === dataRequest.current) setDataLoading(false);
+    });
   };
 
   const refreshAbout = () => {
+    const requestId = ++aboutRequest.current;
     setAboutLoading(true);
     setAboutError(null);
-    void readAboutDiagnostics().then(setAboutReport).catch((reason: unknown) => {
-      setAboutError(safeUiError(reason, "版本诊断读取失败"));
-    }).finally(() => setAboutLoading(false));
+    void readAboutDiagnostics().then((next) => {
+      if (settingsMounted.current && requestId === aboutRequest.current) setAboutReport(next);
+    }).catch((reason: unknown) => {
+      if (settingsMounted.current && requestId === aboutRequest.current) setAboutError(safeUiError(reason, "版本诊断读取失败"));
+    }).finally(() => {
+      if (settingsMounted.current && requestId === aboutRequest.current) setAboutLoading(false);
+    });
   };
 
   const refreshQuotaReminder = () => {
@@ -772,11 +815,11 @@ export function SettingsPage() {
     setQuotaReminderLoading(true);
     setQuotaReminderError(null);
     void readQuotaReminderConfig().then((next) => {
-      if (requestId === quotaReminderRequest.current) setQuotaReminder(next);
+      if (settingsMounted.current && requestId === quotaReminderRequest.current) setQuotaReminder(next);
     }).catch((reason: unknown) => {
-      if (requestId === quotaReminderRequest.current) setQuotaReminderError(safeUiError(reason, "额度窗口提醒读取失败"));
+      if (settingsMounted.current && requestId === quotaReminderRequest.current) setQuotaReminderError(safeUiError(reason, "额度窗口提醒读取失败"));
     }).finally(() => {
-      if (requestId === quotaReminderRequest.current) setQuotaReminderLoading(false);
+      if (settingsMounted.current && requestId === quotaReminderRequest.current) setQuotaReminderLoading(false);
     });
   };
 
@@ -813,8 +856,8 @@ export function SettingsPage() {
     setPauseSaving(true);
     setError(null);
     try {
-      await setSyncPaused(!report.sync.paused);
-      setSyncMessage(!report.sync.paused ? "自动同步已暂停。" : "自动同步已恢复。");
+      const paused = await setSyncPaused(!report.sync.paused);
+      setSyncMessage(paused ? "自动同步已暂停。" : "自动同步已恢复。");
       refresh();
     } catch (reason: unknown) {
       setError(safeUiError(reason, "自动同步设置未保存"));
@@ -858,6 +901,7 @@ export function SettingsPage() {
   };
 
   useEffect(() => {
+    settingsMounted.current = true;
     refresh();
     refreshCustom();
     refreshBudget();
@@ -878,7 +922,7 @@ export function SettingsPage() {
       if (active) cleanups = [unsubscribe];
       else unsubscribe();
     });
-    return () => { active = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
+    return () => { active = false; settingsMounted.current = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
   }, []);
 
   const attentionCount = useMemo(() => report?.sources.filter((source) => source.connection_state === "needs_attention").length ?? 0, [report]);
