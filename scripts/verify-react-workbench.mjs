@@ -74,7 +74,7 @@ if (!source.includes("safeUiError") || [findingsPage, trustPage, sessionsPage, s
 const unsafeErrorPattern = /(?:setError|setActionError|setExportError|setCustomError|setBudgetError|setBillingError|setDataError|setAboutError|setSourceError)\([^;\n]*reason\.message/u;
 if ([usagePage, settingsPage, skillsPage, testPage].some((page) => unsafeErrorPattern.test(page))) fail("React 用量/设置/Skill/测试错误面仍直接渲染底层异常");
 if (!skillsPage.includes("reportStale && scanning") || !skillsPage.includes("未形成新的可判定结果") || !skillsPage.includes("reportMatchesHost") || !source.includes("skill scan host_selection 不匹配") || !skillsPage.includes("保留上一次结果") || skillsPage.includes("setReport(null)")) fail("React Skill 扫描未保留旧报告、隔离宿主或把不可用误判为空结果");
-if (testPage.includes("setReport(null)") || !testPage.includes("上一次可读报告") || !testPage.includes("上一次路线质量结果") || !testPage.includes("loading && !report")) fail("React 测试页刷新未保留旧路线质量报告或缺少 stale 状态");
+if (testPage.includes("setReport(null)") || !testPage.includes("上一次可读报告") || !testPage.includes("上一次路线质量结果") || !testPage.includes("reportWindow(report)") || !testPage.includes("loading && !report")) fail("React 测试页刷新未保留旧路线质量报告、原始窗口或缺少 stale 状态");
 if (!findingsPage.includes("requestGeneration") || !findingsPage.includes("Promise.allSettled") || !findingsPage.includes("发现新鲜度暂不可用")) fail("React Findings 刷新缺少请求代数或部分失败降级");
 if (!trustPage.includes("auditLoadingHost") || !trustPage.includes("auditRequest") || !trustPage.includes("上一次可读报告") || !trustPage.includes("上一次审计结果") || trustPage.includes("setReport(null)")) fail("React Trust 审计刷新没有保留旧报告、请求代数或仍会清空证据");
 if (!source.includes("today_tokens_sql") || !source.includes("overview-host-panel")) fail("React 总览未消费权威 token/宿主投影");
@@ -88,10 +88,12 @@ if (!source.includes('"sessions_read"') || !source.includes("workflow_timeline")
 if (!source.includes("session detail session_ref 不匹配") || !source.includes("paginationError") || !source.includes("已有详情仍可用，请重试")) fail("React 会话详情缺少分页错配保护或可重试的局部错误态");
 if (source.includes('"sessions_issues"')) fail("React Findings 直接消费 legacy 宽 DTO");
 if (!source.includes('"routes_quality"') || !source.includes("readRouteQuality") || !source.includes("test-quality-host")) fail("React 测试页未使用只读路线质量 DTO");
+if (!source.includes("route quality 时间范围不安全") || !source.includes("reportWindow(report)")) fail("React 路线质量未校验报告时间顺序或未展示原始报告窗口");
 if (source.includes('"probe_run_start"')) fail("React 测试页越过 mutation 边界调用主动探针");
 if (!source.includes("只读") || !source.includes("不发请求") || !source.includes("无官方基准")) fail("React 测试页缺少主动探针边界或无基准诚实状态");
 if (!source.includes('text === "<synthetic>"') || !source.includes('text === "<unknown>"')) fail("React 路线质量未保留合法哨兵模型标识");
 if (!source.includes('"data_source_status"') || !source.includes("readSourceHealth") || !source.includes("settings-source-row")) fail("React 设置未使用安全数据源状态 DTO");
+if (!source.includes('"source_host_controls"') || !source.includes("supported_hosts") || !source.includes('"set_source_host_excluded"') || !source.includes("setSourceHostExcluded") || !source.includes("supportedHosts.includes(source.host)") || !source.includes("停止读取只影响后续同步") || !source.includes("已导入数据未删除")) fail("React 设置缺少来源能力声明、停止/恢复读取的安全回执或边界文案");
 if (source.includes('"delete_imported_source_data"')) fail("React 设置首轮越过危险数据删除 mutation 边界");
 if (!source.includes("triggerSync") || !source.includes("setSyncPaused") || !source.includes("readSyncRequestStatus")) fail("React 设置缺少同步控制与回执轮询");
 if (!source.includes("readCustomSourceConfig") || !source.includes("addCustomSourceRoot") || !source.includes("removeCustomSourceRoot") || !source.includes("pickCustomSourceRoot")) fail("React 设置缺少自定义读取位置桥接");

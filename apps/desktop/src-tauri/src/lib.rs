@@ -1889,7 +1889,7 @@ fn remove_custom_source_root(input: CustomSourceRootInput) -> Result<Value, Stri
 fn source_host_controls() -> Value {
     let data_home = overview::data_home();
     match agent_vitals_runtime::source_controls::excluded_hosts(&data_home) {
-        Ok(excluded_hosts) => serde_json::json!({ "status": "ok", "excluded_hosts": excluded_hosts }),
+        Ok(excluded_hosts) => serde_json::json!({ "status": "ok", "excluded_hosts": excluded_hosts, "supported_hosts": agent_vitals_runtime::source_controls::supported_hosts() }),
         Err(error) => serde_json::json!({ "status": "unavailable", "reason": error }),
     }
 }

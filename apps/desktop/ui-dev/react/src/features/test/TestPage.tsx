@@ -38,6 +38,10 @@ function observedAt(value: number): string {
   return new Date(value).toLocaleString([], { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
+function reportWindow(report: RouteQualityReport): string {
+  return `${observedAt(report.since_ms)} 至 ${observedAt(report.now_ms)}`;
+}
+
 function familyTone(family: RouteQualityFamily["flag"]): "success" | "warning" | "neutral" {
   if (family === "non_native" || family === "api_error") return "warning";
   if (family === "native") return "success";
@@ -136,11 +140,11 @@ export function TestPage() {
     </section>
 
     {error && <div className="error-banner" role="alert">路线质量报告不可用：{error}<button className="button button-secondary button-small" type="button" onClick={refresh}>重试</button></div>}
-    {loading && report && <div className="usage-refresh-status" role="status">正在刷新 {windows.find((window) => window.value === days)?.label} 路线质量；下面暂保留上一次可读报告。</div>}
-    {!loading && error && report && <div className="usage-refresh-status trust-refresh-status-error" role="status">本次刷新未完成；仍展示上一次路线质量结果。</div>}
+    {loading && report && <div className="usage-refresh-status" role="status">正在刷新 {windows.find((window) => window.value === days)?.label} 路线质量；下面暂保留上一次可读报告（报告窗口：{reportWindow(report)}）。</div>}
+    {!loading && error && report && <div className="usage-refresh-status trust-refresh-status-error" role="status">本次刷新未完成；仍展示上一次路线质量结果（报告窗口：{reportWindow(report)}）。</div>}
     {loading && !report && <section className="test-state" role="status"><strong>正在读取路线质量</strong><p>只查询本机 authority 的安全聚合，不会上传数据或发起模型请求。</p></section>}
     {!loading && !error && report && report.hosts.length === 0 && <section className="test-state"><strong>窗口内没有路线质量事实</strong><p>先完成一次本地同步，再回到这里查看协议响应中的实际模型族。没有事实不等于没有异常。</p></section>}
     {report && report.hosts.length > 0 && <div className="test-quality-list" aria-label={loading || error ? "上一次路线质量结果" : "路线质量结果"} aria-busy={loading || undefined}>{report.hosts.map((host) => <HostQualityPanel key={host.host} host={host} />)}</div>}
-    <p className="test-quality-foot">窗口：{windows.find((window) => window.value === days)?.label} · {report ? `截至 ${observedAt(report.now_ms)}` : "尚未读取"} · 质量分析不覆盖 thinking、effort、上下文窗口或网络时延。</p>
+    <p className="test-quality-foot">当前选择：{windows.find((window) => window.value === days)?.label} · {report ? `报告窗口：${reportWindow(report)}` : "尚未读取"} · 质量分析不覆盖 thinking、effort、上下文窗口或网络时延。</p>
   </>;
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { addCustomSourceRoot, checkForUpdates, clearBudgetSnooze, listen, openTrustedReleasesPage, pickCustomSourceRoot, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readSourceHealth, readStatisticsSettings, readSyncRequestStatus, removeCustomSourceRoot, safeUiError, saveBudgetProfile, saveDiagnosticPackage, saveRetentionMonths, saveStatisticsTimezone, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
+import { addCustomSourceRoot, checkForUpdates, clearBudgetSnooze, listen, openTrustedReleasesPage, pickCustomSourceRoot, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, safeUiError, saveBudgetProfile, saveDiagnosticPackage, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -57,6 +57,12 @@ function syncActionLabel(state: SourceConnectionState): string | null {
   if (state === "connected") return "同步全部来源";
   if (state === "needs_attention") return "重新同步全部来源";
   if (state === "not_detected") return "扫描全部来源";
+  return null;
+}
+
+function sourceControlLabel(state: SourceConnectionState): string | null {
+  if (state === "excluded") return "恢复读取";
+  if (state === "connected" || state === "needs_attention" || state === "paused") return "停止读取";
   return null;
 }
 
@@ -364,11 +370,13 @@ function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps)
   </section>;
 }
 
-function SourceRow({ source, syncing, onSync }: { source: SourceHealthReport["sources"][number]; syncing: boolean; onSync: () => void }) {
+function SourceRow({ source, syncing, sourceControlHost, supportedHosts, onSync, onToggleExcluded }: { source: SourceHealthReport["sources"][number]; syncing: boolean; sourceControlHost: string | null; supportedHosts: string[]; onSync: () => void; onToggleExcluded: (source: SourceHealthReport["sources"][number]) => void }) {
   const errorText = source.error_kinds.map((kind) => errorLabels[kind]).join("、");
   const imported = source.connection_state === "not_detected" && source.sessions === 0 ? "尚未导入" : `${source.sessions} 个会话 · ${source.facts} 条记录`;
   const label = sourceLabel(source.host);
   const actionLabel = syncActionLabel(source.connection_state);
+  const controlLabel = supportedHosts.includes(source.host) ? sourceControlLabel(source.connection_state) : null;
+  const controlBusy = sourceControlHost === source.host;
   return <article className="settings-source-row" tabIndex={0} aria-label={`${label}，${stateLabels[source.connection_state]}`}>
     <div className="settings-source-main">
       <div className={`settings-source-dot settings-source-dot-${sourceTone(source.connection_state)}`} aria-hidden="true" />
@@ -376,7 +384,7 @@ function SourceRow({ source, syncing, onSync }: { source: SourceHealthReport["so
     </div>
     <div className="settings-source-metrics"><span>{imported}</span><span>最近记录：{observedAt(source.last_event_at_ms)}</span>{source.failed_sources > 0 && <span className="settings-source-error">读取失败 · {errorText || "读取失败"}</span>}</div>
     <div className="settings-source-scan">扫描 {source.source_count} 个文件<br /><small>{source.last_scanned_at_ms === null ? "尚未扫描" : `上次扫描 ${observedAt(source.last_scanned_at_ms)}`}</small></div>
-    {actionLabel && <button className="button button-secondary button-small settings-source-action" type="button" onClick={onSync} disabled={syncing}>{syncing ? "同步中…" : actionLabel}</button>}
+    <div className="settings-source-actions">{controlLabel && <button className="button button-secondary button-small settings-source-action" type="button" onClick={() => onToggleExcluded(source)} disabled={controlBusy || syncing}>{controlBusy ? "保存中…" : controlLabel}</button>}{actionLabel && <button className="button button-secondary button-small settings-source-action" type="button" onClick={onSync} disabled={syncing || controlBusy}>{syncing ? "同步中…" : actionLabel}</button>}</div>
   </article>;
 }
 
@@ -468,8 +476,12 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
 
 export function SettingsPage() {
   const [report, setReport] = useState<SourceHealthReport | null>(null);
+  const [sourceControls, setSourceControls] = useState<SourceHostControls | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [sourceControlHost, setSourceControlHost] = useState<string | null>(null);
+  const [sourceControlError, setSourceControlError] = useState<string | null>(null);
+  const [sourceControlMessage, setSourceControlMessage] = useState<string | null>(null);
   const [customReport, setCustomReport] = useState<CustomSourceReport | null>(null);
   const [customError, setCustomError] = useState<string | null>(null);
   const [customLoading, setCustomLoading] = useState(true);
@@ -492,6 +504,7 @@ export function SettingsPage() {
   const refresh = () => {
     setLoading(true);
     setError(null);
+    void readSourceHostControls().then(setSourceControls).catch(() => setSourceControls(null));
     void readSourceHealth().then(setReport).catch((reason: unknown) => {
       setError(safeUiError(reason, "来源状态读取失败"));
     }).finally(() => setLoading(false));
@@ -580,6 +593,23 @@ export function SettingsPage() {
     }
   };
 
+  const toggleSourceExcluded = async (source: SourceHealthReport["sources"][number]) => {
+    if (sourceControlHost) return;
+    const excluded = source.connection_state !== "excluded";
+    setSourceControlHost(source.host);
+    setSourceControlError(null);
+    setSourceControlMessage(null);
+    try {
+      const receipt = await setSourceHostExcluded(source.host, excluded);
+      setSourceControlMessage(receipt.excluded ? `${sourceLabel(source.host)} 已停止读取；已导入数据未删除。` : `${sourceLabel(source.host)} 已恢复读取；下次同步会重新纳入。`);
+      refresh();
+    } catch (reason: unknown) {
+      setSourceControlError(safeUiError(reason, "来源读取控制未保存"));
+    } finally {
+      setSourceControlHost(null);
+    }
+  };
+
   useEffect(() => {
     refresh();
     refreshCustom();
@@ -611,8 +641,10 @@ export function SettingsPage() {
       {error && <div className="error-banner" role="alert">来源状态暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={refresh}>重试</button></div>}
       <SettingsLoadingState loading={loading} hasData={Boolean(report)} title="来源状态" detail="只查询本机 authority，不会触发同步或读取额外路径。" />
       {report?.status === "unavailable" && <div className="settings-source-state"><strong>来源状态暂不可用</strong><span>本地 authority 无法读取；这不是“没有来源”，请修复数据库或重新同步后再试。</span></div>}
-      {report?.status === "ok" && <div className="settings-source-list">{report.sources.length ? report.sources.map((source) => <SourceRow key={source.host} source={source} syncing={syncing} onSync={runSync} />) : <div className="settings-source-state"><strong>没有可显示的来源</strong><span>来源注册表暂未返回任何工具。</span></div>}</div>}
-      {report && <div className="settings-sync-summary"><span>上次同步：{syncLabel(report)}</span><span>{report.sync.paused === true ? "自动同步已暂停" : report.sync.paused === false ? "自动同步已开启" : "自动同步状态不可用"}</span>{report.sync.paused !== null && <button className="button button-secondary button-small" type="button" onClick={togglePause} disabled={pauseSaving}>{pauseSaving ? "保存中…" : report.sync.paused ? "恢复自动同步" : "暂停自动同步"}</button>} {syncMessage && <small role="status">{syncMessage}</small>}<small>排除和删除已导入数据仍保留在旧工作台，后续单独验收。</small></div>}
+      {report?.status === "ok" && <div className="settings-source-list">{report.sources.length ? report.sources.map((source) => <SourceRow key={source.host} source={source} syncing={syncing} sourceControlHost={sourceControlHost} supportedHosts={sourceControls?.supported_hosts ?? []} onSync={runSync} onToggleExcluded={toggleSourceExcluded} />) : <div className="settings-source-state"><strong>没有可显示的来源</strong><span>来源注册表暂未返回任何工具。</span></div>}</div>}
+      {sourceControlError && <div className="error-banner" role="alert">来源读取控制未保存：{sourceControlError}</div>}
+      {sourceControlMessage && <p className="settings-sync-message" role="status" aria-live="polite">{sourceControlMessage}</p>}
+      {report && <div className="settings-sync-summary"><span>上次同步：{syncLabel(report)}</span><span>{report.sync.paused === true ? "自动同步已暂停" : report.sync.paused === false ? "自动同步已开启" : "自动同步状态不可用"}</span>{report.sync.paused !== null && <button className="button button-secondary button-small" type="button" onClick={togglePause} disabled={pauseSaving}>{pauseSaving ? "保存中…" : report.sync.paused ? "恢复自动同步" : "暂停自动同步"}</button>} {syncMessage && <small role="status">{syncMessage}</small>}<small>停止读取只影响后续同步，不删除已导入数据；删除和计费归因仍保留在旧工作台。</small></div>}
     </section>
 
     <CustomSourceSection report={customReport} loading={customLoading} error={customError} onReload={refreshCustom} onSync={runSync} />

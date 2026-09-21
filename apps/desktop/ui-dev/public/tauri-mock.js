@@ -560,6 +560,7 @@
       case "host_bills_for_period": return emptyReport("bills");
       // Shape: apps/desktop/src-tauri/src/lib.rs:2632 data_source_status (json!).
       case "data_source_status": return { status: "ok", sources: sourceStatuses };
+      case "source_host_controls": return { status: "ok", excluded_hosts: sourceStatuses.filter((source) => source.connection_state === "excluded").map((source) => source.host), supported_hosts: ["claude-code", "codex", "dsh"] };
       case "custom_source_roots": return { status: "ok", sources: customRoots };
       // Shape: crates/agent-vitals-runtime/src/budget.rs:140-152（万分比，8000=80%）；
       // 旧字段名沿用 apps/desktop/src-tauri/src/lib.rs:2142 budget_config()。

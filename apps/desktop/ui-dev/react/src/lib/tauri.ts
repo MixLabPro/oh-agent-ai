@@ -141,6 +141,8 @@ export type SourceHealthReport = {
   sources: SourceHealthRow[];
   sync: { paused: boolean | null; last_success_at: string | null; state: "ok" | "failed" | "never" | "unavailable" };
 };
+export type SourceHostControls = { status: "ok" | "unavailable"; excluded_hosts: string[]; supported_hosts: string[] };
+export type SourceHostControlReceipt = { status: "saved"; changed: boolean; excluded: boolean };
 
 export type SyncRequestStatus = { completed: boolean; failed: boolean };
 export type CustomSourceRoot = { host: string; root: string };
@@ -699,6 +701,14 @@ function parseSourceHealth(value: unknown, pauseValue: unknown, overviewValue: u
   const syncStage = boundedEnum(sync.stage ?? "unknown", "source sync stage", ["complete", "fold", "discover", "resolve", "never", "paused", "unknown"], "unknown");
   const syncState: SourceHealthReport["sync"]["state"] = status !== "ok" ? "unavailable" : syncStage === "complete" ? "ok" : syncStage === "never" ? "never" : syncStage === "unknown" ? "unavailable" : "failed";
   return { status, sources: rows, sync: { paused, last_success_at: overviewTimestamp(sync.at), state: syncState } };
+}
+
+function parseSourceHostControls(value: unknown): SourceHostControls {
+  const root = record(value, "source host controls");
+  const status = boundedEnum(root.status ?? "unavailable", "source host controls status", ["ok", "unavailable"], "unavailable") as SourceHostControls["status"];
+  const hosts = requiredArray(root.excluded_hosts ?? [], "excluded source hosts").slice(0, 64).map((host) => safeHostLabel(host));
+  const supported = requiredArray(root.supported_hosts ?? [], "supported source hosts").slice(0, 64).map((host) => safeHostLabel(host));
+  return { status, excluded_hosts: [...new Set(hosts.filter((host) => host !== "generic"))], supported_hosts: [...new Set(supported.filter((host) => host !== "generic"))] };
 }
 
 function parseCustomSourceReport(value: unknown, locationsValue: unknown): CustomSourceReport {
@@ -1346,14 +1356,17 @@ function parseRouteQuality(value: unknown): RouteQualityReport {
   const root = record(value, "route quality report");
   const hosts = requiredArray(root.hosts, "route quality hosts");
   if (hosts.length > 128) throw new Error("route quality hosts 超出上限");
+  const sinceMs = boundedCount(root.since_ms, "route quality since", 9_000_000_000_000);
+  const nowMs = boundedCount(root.now_ms, "route quality now", 9_000_000_000_000);
+  if (sinceMs > nowMs) throw new Error("route quality 时间范围不安全");
   const vocabulary = requiredArray(root.families_vocabulary, "route quality vocabulary").slice(0, 32).map((item) => {
     const family = stringField(item, "route quality vocabulary item");
     if (!(routeFamilies as readonly string[]).includes(family)) throw new Error("route quality vocabulary 含未知模型族");
     return family;
   });
   return {
-    since_ms: boundedCount(root.since_ms, "route quality since", 9_000_000_000_000),
-    now_ms: boundedCount(root.now_ms, "route quality now", 9_000_000_000_000),
+    since_ms: sinceMs,
+    now_ms: nowMs,
     families_vocabulary: vocabulary,
     hosts: hosts.map((item) => {
       const row = record(item, "route quality host");
@@ -2064,6 +2077,21 @@ export async function readSourceHealth(): Promise<SourceHealthReport> {
   } catch {
     throw new Error("来源状态读取失败");
   }
+}
+
+export async function readSourceHostControls(): Promise<SourceHostControls> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "ok", excluded_hosts: [], supported_hosts: [] };
+  try { return parseSourceHostControls(await handler("source_host_controls")); } catch { return { status: "unavailable", excluded_hosts: [], supported_hosts: [] }; }
+}
+
+export async function setSourceHostExcluded(host: string, excluded: boolean): Promise<SourceHostControlReceipt> {
+  if (safeHostLabel(host) !== host || host === "generic") throw new Error("source host is not supported");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved", changed: true, excluded };
+  const root = record(await handler("set_source_host_excluded", { input: { host, excluded } }), "source host control receipt");
+  if (root.status !== "saved" && root.status !== "ok") throw new Error("source host control was not saved");
+  return { status: "saved", changed: requiredBoolean(root.changed ?? true, "source host control changed"), excluded: requiredBoolean(root.excluded, "source host control excluded") };
 }
 
 export async function readCustomSourceConfig(): Promise<CustomSourceReport> {

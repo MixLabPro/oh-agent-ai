@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 const SOURCE_CONTROLS_FILE: &str = "source-controls.json";
 const HOSTS: [&str; 3] = ["claude-code", "codex", "dsh"];
 
+pub fn supported_hosts() -> &'static [&'static str] {
+    &HOSTS
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct SourceControls {
     excluded_hosts: BTreeSet<String>,
