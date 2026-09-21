@@ -13,8 +13,8 @@
 | 会话 | `tab-sessions` | `features/sessions/SessionsPage.tsx` + `features/sessions/SessionDetail.tsx` | 已迁移安全列表和只读详情：筛选、keyset 分页、摘要、计费桶、usage/workflow 脱敏时间线；完整轨迹图和原始报告仍不迁移 | Phase 3：真实 Tauri 对拍与轨迹图安全投影评估 |
 | 待处理/发现 | `tab-findings` | `features/findings/FindingsPage.tsx` | 已迁移首个垂直切片：安全 Finding 投影、待办、证据明细、决策矩阵和新鲜度 | Phase 2：补事件 smoke test 与旧页数值对照 |
 | 测试 | `tab-test` | `features/test/TestPage.tsx` | 已迁移只读路线质量面：宿主 × 实际模型族、非官方族/API 错误/无基准状态与安全 DTO；主动 probe mutation 仍保留旧页 | Phase 3 后半：补真实 Tauri 对拍，再评估显式 mutation |
-| Skill | `tab-skills` | `features/skills/SkillsPage.tsx` | 未迁移；涉及扫描、取消和导出 | Phase 3 后半：单独审查导出脱敏 |
-| 设置 | `tab-sources` | `features/settings/SettingsPage.tsx` | 已迁移数据源健康、安全同步控制、其他本机位置、预算估算表单和计费只读面：动态来源列表、失败原因映射、同步回执轮询、路径显式展开、预算状态/80%固定阈值/本周期静默、待确认分组/声明/重算/已有账单；排除/删除、停用预算、通知开关、计费归因写入仍保留旧页 | Phase 3：迁移数据源高风险控制，再拆统计与诊断 |
+| Skill | `tab-skills` | `features/skills/SkillsPage.tsx` | 已迁移首个安全扫描切片：用户触发扫描、宿主筛选、取消、预算摘要、启发式命中与未评估项；快照/对比/脱敏导出及扫描高级设置仍保留旧页 | Phase 3 后半：真实 CLI 对拍并单独审查快照/导出脱敏 |
+| 设置 | `tab-sources` | `features/settings/SettingsPage.tsx` | 已迁移数据源健康、安全同步控制、其他本机位置、预算估算表单、计费只读面、统计与数据、关于与诊断：动态来源列表、失败原因映射、同步回执轮询、路径显式展开、预算状态/80%固定阈值/本周期静默、待确认分组/声明/重算/已有账单、时区/保留期保存、价格目录只读、月度摘要 CSV、版本表/脱敏诊断包/手动更新检查；排除/删除、停用预算、通知开关、计费归因写入、自动更新仍保留旧页 | Phase 3：迁移数据源高风险控制与真实 Tauri 对拍 |
 
 ## Phase 2 Trust / Findings 边界
 

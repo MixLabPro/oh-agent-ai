@@ -25,6 +25,7 @@ for (const required of [
   path.join(reactSource, "features/sessions/SessionsPage.tsx"),
   path.join(reactSource, "features/sessions/SessionDetail.tsx"),
   path.join(reactSource, "features/test/TestPage.tsx"),
+  path.join(reactSource, "features/skills/SkillsPage.tsx"),
   path.join(reactSource, "features/settings/SettingsPage.tsx"),
   path.join(repo, "apps/desktop/src-tauri/src/store.rs"),
   path.join(dist, "index.html"),
@@ -77,6 +78,8 @@ if (["resolve_billing_import_candidate", "save_billing_declaration_revision", "r
 if (!source.includes("readStatisticsSettings") || !source.includes('"retention_config"') || !source.includes('"statistics_timezone_config"') || !source.includes('"public_pricing_catalog_status"')) fail("React 设置缺少统计、保留期或价格目录只读 DTO");
 if (!source.includes("readMonthlyExportSummary") || !source.includes("当前月摘要 CSV") || !source.includes("settings-data-section")) fail("React 设置缺少安全月度摘要导出面");
 if (!source.includes("readAboutDiagnostics") || !source.includes("saveDiagnosticPackage") || !source.includes("checkForUpdates") || !source.includes("openTrustedReleasesPage") || !source.includes("settings-about-section")) fail("React 设置缺少关于与诊断安全桥接");
+if (!source.includes("readSkillScan") || !source.includes("cancelSkillScan") || !source.includes("skills-page-header") || !source.includes('"skills_doctor_report"')) fail("React Skill 页未使用用户触发的安全扫描 DTO");
+if (["skills_snapshot_save", "skills_export_redacted", "skills_export_pick_path", "save_skills_scan_settings", "disable_skill", "delete_skill"].some((command) => appSource.includes(`\"${command}\"`))) fail("React Skill 页越过快照、导出、配置或修改 skill mutation 边界");
 if (["save_public_pricing_catalog_policy", "update_public_pricing_catalog", "delete_retained_data", "clear_retention"].some((command) => appSource.includes(`\"${command}\"`))) fail("React 设置越过价格联网或数据删除 mutation 边界");
 if (!source.includes("显示完整路径") || !source.includes("settings-custom-form")) fail("React 设置缺少本机位置的人机可读路径展示");
 if (!source.includes('status === "unavailable" ? []')) fail("React 设置未隔离自定义位置配置不可用态");

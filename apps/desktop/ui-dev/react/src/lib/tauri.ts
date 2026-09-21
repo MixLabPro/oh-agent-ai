@@ -103,6 +103,10 @@ export type AboutDiagnosticsReport = {
 export type DiagnosticExportReceipt = { status: "saved" | "cancelled"; uploadPerformed: false };
 export type UpdateCheckResult = { status: "ok" | "no_release" | "unavailable"; currentVersion: string | null; latestTag: string | null; automaticInstall: false };
 
+export type SkillHostSummary = { host: string; skills_on_disk: number; discoverable_skills: number; runtime_verified_loaded_skills: number | null; unique_discoverable_skills: number; description_budget: { available: boolean; used_chars: number | null; budget_chars: number | null; pct_used: number | null; source: string | null }; trigger_data: "available" | "unavailable" | "unknown"; warning_count: number; critical_count: number };
+export type SkillDiagnostic = { code: string; name: string; severity: "critical" | "warning" | "info"; skill: string | null; evidence_count: number; impact: string | null; recommendation: string | null; caveats: string[] };
+export type SkillScanReport = { status: "ok" | "unavailable"; schema_version: string | null; run: string | null; host_selection: string; generated_at_ms: number | null; from_cache: boolean; hosts: SkillHostSummary[]; diagnostics: SkillDiagnostic[]; not_assessed: Array<{ code: string; name: string; reason: string }> };
+
 export type SourceConnectionState = "connected" | "needs_attention" | "paused" | "excluded" | "not_detected" | "unknown";
 export type SourceErrorKind = "permission_denied" | "file_missing" | "all_files_failed" | "db_error" | "migration_failed" | "read_failed";
 export type SourceHealthRow = {
@@ -999,6 +1003,41 @@ function parseUpdateCheck(value: unknown): UpdateCheckResult {
   return { status, currentVersion, latestTag, automaticInstall: false };
 }
 
+function safeSkillText(value: unknown, label: string): string | null {
+  if (value === null || value === undefined) return null;
+  const text = stringField(value, label);
+  if (/[\u0000-\u001f\u007f]/u.test(text) || text.length > 256) throw new Error(`${label} DTO 文本不安全`);
+  if (/(^|\s)(?:~\/|\/|[A-Za-z]:[\\/]|file:\/\/)/u.test(text)) return "本机路径已省略";
+  return text;
+}
+
+function parseSkillScan(value: unknown): SkillScanReport {
+  const root = record(value, "skill scan");
+  const report = root.report == null ? null : record(root.report, "skill scan report");
+  const meta = root.desktop_meta == null ? {} : record(root.desktop_meta, "skill scan metadata");
+  if (!report) return { status: "unavailable", schema_version: null, run: null, host_selection: "all", generated_at_ms: null, from_cache: false, hosts: [], diagnostics: [], not_assessed: [] };
+  const rawHosts = record(report.host_summaries ?? {}, "skill host summaries");
+  const hosts: SkillHostSummary[] = Object.entries(rawHosts).slice(0, 16).map(([hostKey, raw]) => {
+    const row = record(raw, "skill host summary");
+    const budget = row.description_budget_detail == null ? {} : record(row.description_budget_detail, "skill budget detail");
+    const budgetAvailable = budget.available === true;
+    const used = budget.used_chars == null ? null : boundedCount(budget.used_chars, "skill budget used", 10_000_000);
+    const limit = budget.budget_chars == null ? null : boundedCount(budget.budget_chars, "skill budget limit", 10_000_000);
+    const pct = budget.pct_used == null ? null : Math.min(requiredFiniteNumber(budget.pct_used, "skill budget percent"), 1000);
+    const trigger = boundedEnum(row.trigger_data ?? "unknown", "skill trigger data", ["available", "unavailable"], "unknown") as SkillHostSummary["trigger_data"];
+    return { host: safeHostLabel(hostKey), skills_on_disk: boundedCount(row.skills_on_disk ?? 0, "skills on disk", 10_000_000), discoverable_skills: boundedCount(row.discoverable_skills ?? 0, "discoverable skills", 10_000_000), runtime_verified_loaded_skills: row.runtime_verified_loaded_skills == null ? null : boundedCount(row.runtime_verified_loaded_skills, "runtime verified skills", 10_000_000), unique_discoverable_skills: boundedCount(row.unique_discoverable_skills ?? row.discoverable_skills ?? 0, "unique discoverable skills", 10_000_000), description_budget: { available: budgetAvailable, used_chars: used, budget_chars: limit, pct_used: pct, source: safeSkillText(budget.source, "skill budget source") }, trigger_data: trigger, warning_count: 0, critical_count: 0 };
+  });
+  const diagnostics = requiredArray(root.diagnostics ?? [], "skill diagnostics").slice(0, 512).map((raw) => {
+    const row = record(raw, "skill diagnostic");
+    const evidence = row.evidence == null ? null : record(row.evidence, "skill evidence");
+    const evidenceCount = evidence?.count != null ? boundedCount(evidence.count, "skill evidence count", 10_000_000) : ["hits", "skills", "pairs"].reduce((sum, key) => sum + (Array.isArray(evidence?.[key]) ? Math.min(evidence?.[key].length ?? 0, 10_000) : 0), 0);
+    return { code: safeSkillText(row.code, "skill diagnostic code") ?? "unknown", name: safeSkillText(row.name, "skill diagnostic name") ?? "未命名规则", severity: boundedEnum(row.severity ?? "info", "skill severity", ["critical", "warning", "info"], "info") as SkillDiagnostic["severity"], skill: safeSkillText(row.skill, "skill diagnostic skill"), evidence_count: evidenceCount, impact: safeSkillText(row.impact, "skill diagnostic impact"), recommendation: safeSkillText(row.recommendation, "skill diagnostic recommendation"), caveats: Array.isArray(row.caveats) ? row.caveats.slice(0, 16).map((item) => safeSkillText(item, "skill caveat") ?? "").filter(Boolean) : [] };
+  });
+  const notAssessed = requiredArray(root.not_assessed ?? [], "skill not assessed").slice(0, 128).map((raw) => { const row = record(raw, "skill not assessed row"); return { code: safeSkillText(row.code, "skill not assessed code") ?? "unknown", name: safeSkillText(row.name, "skill not assessed name") ?? "未评估规则", reason: safeSkillText(row.reason, "skill not assessed reason") ?? "原因不可用" }; });
+  const hostSelection = safeSkillText(root.host_selection, "skill host selection") ?? "all";
+  return { status: "ok", schema_version: safeVersion(root.schema_version, "skill schema") ?? null, run: safeSkillText(root.run, "skill run"), host_selection: hostSelection, generated_at_ms: meta.generated_at_ms == null ? null : nullableSourceTimestampMs(meta.generated_at_ms, "skill generated at"), from_cache: meta.from_cache === true, hosts, diagnostics, not_assessed: notAssessed };
+}
+
 function parseMonthlyExportSummary(value: unknown): MonthlyExportSummary {
   const root = record(value, "monthly export summary");
   const month = safeMonth(root.month, "monthly export month");
@@ -1879,6 +1918,30 @@ export async function readAboutDiagnostics(): Promise<AboutDiagnosticsReport> {
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return fallback;
   try { return parseAboutDiagnostics(await handler("about_diagnostics")); } catch { return { status: "unavailable", appVersion: null, cliVersion: null, engineVersion: null, architecture: "unknown", authoritySchema: null, statisticsTimezone: null, pricing: null, sync: { state: "unknown" } }; }
+}
+
+export async function readSkillScan(host: string = "all", force = false): Promise<SkillScanReport> {
+  if (!/^(?:all|[a-z][a-z0-9-]{0,31})$/.test(host)) throw new Error("Skill 宿主筛选不安全");
+  const now = Date.now();
+  const fallback = { schema_version: "1.0", run: "browser-preview", host_selection: host, desktop_meta: { generated_at_ms: now, from_cache: !force, host }, diagnostics: [{ code: "SV501", name: "提示注入模式", severity: "warning", skill: "browser-preview", evidence: { count: 1 }, impact: "发现 1 条需要人工复核的启发式命中。", recommendation: "打开对应 skill 定义后人工复核。", caveats: ["启发式命中不是恶意结论。"] }], not_assessed: [{ code: "SV003", name: "描述长度", reason: "当前宿主没有可辩护的统一阈值。" }], report: { host_summaries: { "claude-code": { skills_on_disk: 12, discoverable_skills: 8, runtime_verified_loaded_skills: null, unique_discoverable_skills: 8, description_budget: "available", description_budget_detail: { available: true, source: "configurable", budget_chars: 15000, used_chars: 4200, pct_used: 28.0 }, trigger_data: "available" } } } };
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseSkillScan(fallback);
+  try { return parseSkillScan(await handler("skills_doctor_report", { host, force })); }
+  catch (reason: unknown) {
+    const row = reason && typeof reason === "object" ? reason as Record<string, unknown> : {};
+    const detail = row.error && typeof row.error === "object" ? row.error as Record<string, unknown> : row;
+    const code = typeof detail.code === "string" ? detail.code : "";
+    if (code === "no_binary") throw new Error("未找到可用的 agent-vitals CLI；请先修复安装或版本。");
+    if (code === "cancelled") throw new Error("Skill 扫描已取消。");
+    throw new Error("Skill 扫描失败；请确认本机 CLI 可用后重试");
+  }
+}
+
+export async function cancelSkillScan(): Promise<"cancelled" | "not_running"> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return "not_running";
+  try { const result = await handler("skills_scan_cancel"); return result === true ? "cancelled" : "not_running"; }
+  catch { throw new Error("取消 Skill 扫描失败"); }
 }
 
 export async function saveDiagnosticPackage(): Promise<DiagnosticExportReceipt> {
