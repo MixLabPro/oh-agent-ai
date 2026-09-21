@@ -7,6 +7,7 @@ import { SessionsPage } from "../features/sessions/SessionsPage";
 import { TestPage } from "../features/test/TestPage";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { SkillsPage } from "../features/skills/SkillsPage";
+import { StatusPill } from "../components/ui/StatusPill";
 
 type Overview = OverviewSnapshot;
 
@@ -47,10 +48,6 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error
       <button className="button button-secondary" type="button" onClick={() => window.location.reload()}>重新加载</button>
     </section></main>;
   }
-}
-
-function StatusPill({ children, tone = "neutral" }: { children: ReactNode; tone?: "neutral" | "success" | "warning" }) {
-  return <span className={`status-pill status-pill-${tone}`}><span aria-hidden="true" className="status-dot" />{children}</span>;
 }
 
 function StatCard({ label, value, detail }: { label: string; value: string; detail: string }) {

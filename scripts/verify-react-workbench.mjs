@@ -18,6 +18,7 @@ for (const required of [
   path.join(ui, "react/index.html"),
   path.join(reactSource, "main.tsx"),
   path.join(reactSource, "lib/tauri.ts"),
+  path.join(reactSource, "components/ui/StatusPill.tsx"),
   path.join(reactSource, "features/trust/TrustPage.tsx"),
   path.join(reactSource, "features/findings/FindingsPage.tsx"),
   path.join(reactSource, "features/findings/DecisionMatrixSection.tsx"),
@@ -50,6 +51,7 @@ const appSource = sourceFiles
   .map((file) => fs.readFileSync(file, "utf8"))
   .join("\n");
 if (appSource.includes("__TAURI__")) fail("组件绕过 local bridge 直接访问 __TAURI__");
+if (!source.includes("components/ui/StatusPill") || !source.includes("inline-flex items-center")) fail("React 应用壳未使用受控 StatusPill primitive");
 if (!source.includes('"findings_groups_safe"')) fail("React Findings 未使用版本化安全 DTO command");
 if (!source.includes('"decision_matrix_safe"')) fail("React Findings 未使用版本化 decision matrix DTO command");
 if (!source.includes('"trust_monitor_config"') || !source.includes('"save_trust_monitor_config"') || !source.includes('"trust_runtime_snapshot"')) fail("React Trust 未使用版本化 monitor DTO commands");
