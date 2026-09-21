@@ -64,7 +64,7 @@ if (!source.includes('"trust-monitor-updated"') || !source.includes('"sync-statu
 if (!source.includes("today_tokens_sql") || !source.includes("overview-host-panel")) fail("React 总览未消费权威 token/宿主投影");
 if (!source.includes('if (page !== "overview") return;')) fail("React 总览查询未按可见 tab 生命周期隔离");
 if (!source.includes('"read_calendar_month"') || !source.includes('"read_hourly_distribution"') || !source.includes('"data_monthly_summary"') || !source.includes('"statistics_timezone_config"')) fail("React 用量未使用日历/小时/来源/统计时区安全 DTO command");
-if (!source.includes("usage-calendar-grid") || !source.includes("usage-hour-grid") || !source.includes("total_actual_spend") || !source.includes("aria-selected")) fail("React 用量缺少日历、小时、币种或选择状态语义");
+if (!source.includes("usage-calendar-grid") || !source.includes("usage-hour-grid") || !source.includes("total_actual_spend") || !source.includes("aria-selected") || !source.includes("dsh_tokens") || !source.includes("claude_tokens") || !source.includes("codex_tokens") || !source.includes("usage-host-summary") || !source.includes("无已观测数据")) fail("React 用量缺少日历、小时、币种、选择状态、宿主拆分或空数据诚实态");
 if (!source.includes("loadedCalendarMonth") || !source.includes("sourceError") || !source.includes("不会把上一月份来源数据冒充为当前月份")) fail("React 用量刷新未隔离月份投影或来源失败态");
 if (!source.includes('"sessions_list"') || !source.includes("session_ref") || !source.includes("sessions-table") || !source.includes("window_session_count")) fail("React 会话未使用安全列表 DTO 或窗口守恒字段");
 if (!source.includes("加载更多") || !source.includes("cost_status") || !source.includes("requestInFlight") || !source.includes("pendingRefresh")) fail("React 会话缺少成本状态、分页或竞态保护");
