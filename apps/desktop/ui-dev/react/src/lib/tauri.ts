@@ -1473,22 +1473,33 @@ function parseFindingGroup(value: unknown): FindingGroup {
   const status = record(row.status_rollup, "finding status rollup");
   const rawSamples = requiredArray(row.sample_evidence, "finding sample evidence");
   if (rawSamples.length > 3) throw new Error("finding sample evidence 超出上限");
+  const firstSeen = requiredCount(row.first_seen_at_ms, "finding first seen");
+  const lastSeen = requiredCount(row.last_seen_at_ms, "finding last seen");
+  if (firstSeen > lastSeen) throw new Error("finding 时间范围不安全");
   const sampleEvidence = rawSamples.map((item) => {
     const sample = record(item, "finding sample");
     if (typeof sample.available !== "boolean") throw new Error("finding sample DTO 状态不安全");
     const reference = sample.reference == null ? null : safeHash(sample.reference, "finding sample reference");
-    const optionalTimestamp = (candidate: unknown, label: string): number | null => candidate == null ? null : requiredCount(candidate, label);
+    const optionalTimestamp = (candidate: unknown, label: string): number | null => {
+      if (candidate == null) return null;
+      const timestamp = requiredCount(candidate, label);
+      if (timestamp > 4_102_444_800_000 || timestamp < firstSeen || timestamp > lastSeen) throw new Error(`${label} DTO 时间范围不安全`);
+      return timestamp;
+    };
     const optionalEnum = <T extends string>(candidate: unknown, allowed: readonly T[], label: string): T | null => {
       if (candidate == null) return null;
       if (typeof candidate !== "string" || !allowed.includes(candidate as T)) throw new Error(`${label} DTO 值不安全`);
       return candidate as T;
     };
     const scopes = Array.isArray(sample.scope_classes) ? sample.scope_classes.slice(0, 16).map((scope) => safeTrustIdentifier(scope, "finding evidence scope", "unknown_scope")) : [];
+    const observedFirst = optionalTimestamp(sample.observed_first_at_ms, "finding evidence first timestamp");
+    const observedLast = optionalTimestamp(sample.observed_last_at_ms, "finding evidence last timestamp");
+    if (observedFirst !== null && observedLast !== null && observedFirst > observedLast) throw new Error("finding evidence 时间范围不安全");
     return {
       has_evidence: sample.available,
       reference,
-      observed_first_at_ms: optionalTimestamp(sample.observed_first_at_ms, "finding evidence first timestamp"),
-      observed_last_at_ms: optionalTimestamp(sample.observed_last_at_ms, "finding evidence last timestamp"),
+      observed_first_at_ms: observedFirst,
+      observed_last_at_ms: observedLast,
       evidence_level: optionalEnum(sample.evidence_level, ["E0", "E1", "E2", "E3", "E4", "E5"] as const, "finding evidence level"),
       stage: optionalEnum(sample.stage, ["read_observed", "package_observed", "credential_observed", "egress_attempted", "egress_transmitted", "remote_accepted"] as const, "finding evidence stage"),
       evidence_origin: optionalEnum(sample.evidence_origin, ["local_artifact", "client_state_claim", "runtime_process_metadata", "network_metadata", "verified_receipt", "unknown_legacy"] as const, "finding evidence origin"),
@@ -1501,9 +1512,6 @@ function parseFindingGroup(value: unknown): FindingGroup {
     };
   });
   const count = (name: string) => requiredCount(status[name], name);
-  const firstSeen = requiredCount(row.first_seen_at_ms, "finding first seen");
-  const lastSeen = requiredCount(row.last_seen_at_ms, "finding last seen");
-  if (firstSeen > lastSeen) throw new Error("finding 时间范围不安全");
   return {
     group_id: safeHash(row.group_id, "finding group id"),
     action_kind: boundedEnum(row.action_kind, "finding action kind", ["behavior", "billing", "budget", "source", "usage", "probe", "other"], "other"),

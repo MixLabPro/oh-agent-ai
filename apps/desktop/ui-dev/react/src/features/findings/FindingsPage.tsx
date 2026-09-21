@@ -55,6 +55,10 @@ function destinationLabel(value: FindingSample["destination_class"]): string {
   return value === "vendor_api" ? "厂商 API" : value === "object_storage" ? "对象存储" : value === "telemetry" ? "遥测" : value === "eval" ? "评测" : value === "model_api" ? "模型 API" : value === "unknown" ? "未知目的地" : "未声明";
 }
 
+function confidenceLabel(value: FindingSample["confidence"]): string {
+  return value === "high" ? "高" : value === "medium" ? "中" : value === "low" ? "低" : "未知";
+}
+
 function sampleTimeLabel(first: number | null, last: number | null): string {
   if (first == null) return "观测时间不可用";
   const start = timeLabel(first);
@@ -80,7 +84,7 @@ function FindingEvidenceDetail({ sample, index }: { sample: FindingSample; index
       <div><span>目的地类别</span><strong>{destinationLabel(sample.destination_class)}</strong></div>
       <div><span>观测计数</span><strong>{sample.observation_count ?? "—"}</strong></div>
       <div><span>文件 / 大小</span><strong>{sample.file_count ?? "—"} / {sampleBytes(sample.byte_count)}</strong></div>
-      <div><span>置信度</span><strong>{sample.confidence ?? "未知"}</strong></div>
+      <div><span>置信度</span><strong>{confidenceLabel(sample.confidence)}</strong></div>
       <div><span>安全引用</span><code>{sample.reference ?? "不可用"}</code></div>
     </div>
     <p>以上仅为本机脱敏投影；上传尝试不等于远端接收、留存或训练。</p>

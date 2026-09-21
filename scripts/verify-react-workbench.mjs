@@ -57,6 +57,7 @@ if (!source.includes('"decision_matrix_safe"')) fail("React Findings 未使用�
 if (!source.includes('"trust_monitor_config"') || !source.includes('"save_trust_monitor_config"') || !source.includes('"trust_runtime_snapshot"')) fail("React Trust 未使用版本化 monitor DTO commands");
 if (!source.includes("aria-labelledby=\"trust-monitor-title\"")) fail("React Trust 缺少 monitor 控件可访问标题");
 if (!source.includes("查看明细") || !source.includes("evidence-detail")) fail("React Trust 缺少可展开的证据明细");
+if (!source.includes("查看证据") || !source.includes("finding-evidence-detail") || !source.includes("evidence_level") || !source.includes("上传尝试不等于远端接收、留存或训练")) fail("React Findings 缺少可核验的脱敏证据明细");
 if (!source.includes('"trust-monitor-updated"') || !source.includes('"sync-status-updated"')) fail("React Findings/Trust 缺少事件失效刷新");
 if (!source.includes("today_tokens_sql") || !source.includes("overview-host-panel")) fail("React 总览未消费权威 token/宿主投影");
 if (!source.includes('if (page !== "overview") return;')) fail("React 总览查询未按可见 tab 生命周期隔离");
