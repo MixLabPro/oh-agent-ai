@@ -730,6 +730,35 @@ function safeMoneyMap(value: unknown, label: string): Record<string, number> {
   }));
 }
 
+function strictSummaryMoneyMap(value: unknown, label: string): Record<string, number> {
+  if (value === null || value === undefined) return {};
+  const source = record(value, label);
+  const entries = Object.entries(source);
+  if (entries.length > 8) throw new Error(`${label} DTO 币种数量超出上限`);
+  const result: Record<string, number> = {};
+  for (const [currency, amount] of entries) {
+    if (!/^[A-Z0-9_]{1,12}$/.test(currency) || typeof amount !== "number" || !Number.isFinite(amount) || amount < 0 || amount > 1e15) {
+      throw new Error(`${label} DTO 金额不安全`);
+    }
+    result[currency] = amount;
+  }
+  return result;
+}
+
+function assertSummaryMoneyPartition(total: Record<string, number>, byBasis: Record<string, Record<string, number>>): void {
+  const aggregate: Record<string, number> = {};
+  for (const amounts of Object.values(byBasis)) {
+    for (const [currency, amount] of Object.entries(amounts)) aggregate[currency] = (aggregate[currency] ?? 0) + amount;
+  }
+  const currencies = new Set([...Object.keys(total), ...Object.keys(aggregate)]);
+  for (const currency of currencies) {
+    const totalAmount = total[currency] ?? 0;
+    const aggregateAmount = aggregate[currency] ?? 0;
+    const tolerance = Math.max(1e-9, Math.max(Math.abs(totalAmount), Math.abs(aggregateAmount)) * 1e-12);
+    if (Math.abs(totalAmount - aggregateAmount) > tolerance) throw new Error("usage spend by basis 不守恒");
+  }
+}
+
 function nullableMoney(value: unknown, label: string): number | null {
   if (value === null || value === undefined) return null;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1e15) throw new Error(`${label} DTO 金额不安全`);
@@ -1101,8 +1130,12 @@ function parseSummaryRoot(value: unknown, windowKind: "month" | "date"): UsageSo
   if (measured > total) throw new Error("usage coverage 不守恒");
   const rawBasis = record(root.actual_spend_by_basis, "usage spend by basis");
   const spendByBasis: Record<string, Record<string, number>> = {};
-  for (const basis of ["metered_actual", "host_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent", "other"]) {
-    if (rawBasis[basis] !== undefined) spendByBasis[basis] = safeMoneyMap(rawBasis[basis], `usage ${basis} spend`);
+  const allowedBases = ["metered_actual", "host_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent", "other"] as const;
+  for (const basis of Object.keys(rawBasis)) {
+    if (!(allowedBases as readonly string[]).includes(basis)) throw new Error("usage spend basis 不受支持");
+  }
+  for (const basis of allowedBases) {
+    if (rawBasis[basis] !== undefined) spendByBasis[basis] = strictSummaryMoneyMap(rawBasis[basis], `usage ${basis} spend`);
   }
   const rawTokens = record(root.tokens_by_host ?? {}, "usage tokens by host");
   const tokens_by_host: Record<string, SummaryHostTokens> = {};
@@ -1128,11 +1161,12 @@ function parseSummaryRoot(value: unknown, windowKind: "month" | "date"): UsageSo
     last_observed_at: safeTimestamp(freshnessRow.last_observed_at, "usage observed at"),
     coverage: { measured_fields: measured, total_fields: total },
     excluded_hosts: excluded,
-    actual_spend: safeMoneyMap(root.total_actual_spend, "usage actual spend"),
+    actual_spend: strictSummaryMoneyMap(root.total_actual_spend, "usage actual spend"),
     spend_by_basis: spendByBasis,
     tokens_by_host, total_tokens, metered_view, by_provider,
     has_unresolved: root.has_unresolved === true,
   };
+  assertSummaryMoneyPartition(common.actual_spend, common.spend_by_basis);
   return windowKind === "month" ? { month: window, ...common } : { date: window, ...common };
 }
 

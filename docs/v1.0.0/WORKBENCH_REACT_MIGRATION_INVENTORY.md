@@ -8,7 +8,7 @@
 
 | 旧 tab | 旧入口 | React 目标 | 当前状态 | 下一步 |
 |---|---|---|---|---|
-| 总览 | `tab-overview` | `features/overview/OverviewPage.tsx` | 已迁移总览聚合切片：安全 DTO、费用/预算/新鲜度/宿主覆盖、月度/今日 summary、tokens_by_host、按 basis 支出、最近观测日；仍需真实 Tauri/旧页截图对照 | Phase 3：完成旧页数字对照与真实 `.app` 验收 |
+| 总览 | `tab-overview` | `features/overview/OverviewPage.tsx` | 已迁移总览聚合切片：安全 DTO、费用/预算/新鲜度/宿主覆盖、月度/今日 summary、tokens_by_host、按 basis 支出、最近观测日；React bridge 已锁定 token 与按币种 basis 守恒，并覆盖 malformed DTO/独立失败合同；仍需真实 Tauri/旧页截图对照 | Phase 3：完成旧页数字对照与真实 `.app` 验收 |
 | 用量 | `tab-calendar` | `features/usage/UsagePage.tsx` | 已迁移首个日历切片：安全月份/日历/小时 DTO、按币种成本、来源新鲜度与覆盖状态；完整旧页对照仍待完成 | Phase 3：补齐旧页数字对照与统计时区设置联动 |
 | 会话 | `tab-sessions` | `features/sessions/SessionsPage.tsx` + `features/sessions/SessionDetail.tsx` | 已迁移安全列表和只读详情：筛选、keyset 分页、摘要、计费桶、usage/workflow 脱敏时间线；完整轨迹图和原始报告仍不迁移 | Phase 3：真实 Tauri 对拍与轨迹图安全投影评估 |
 | 待处理/发现 | `tab-findings` | `features/findings/FindingsPage.tsx` | 已迁移首个垂直切片：安全 Finding 投影、待办、证据明细、决策矩阵和新鲜度 | Phase 2：补事件 smoke test 与旧页数值对照 |
