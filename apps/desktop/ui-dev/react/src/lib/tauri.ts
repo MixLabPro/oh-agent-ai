@@ -155,6 +155,7 @@ export type UpdateCheckResult = { status: "ok" | "no_release" | "unavailable"; c
 export type SkillHostSummary = { host: string; skills_on_disk: number; discoverable_skills: number; runtime_verified_loaded_skills: number | null; unique_discoverable_skills: number; description_budget: { available: boolean; used_chars: number | null; budget_chars: number | null; pct_used: number | null; source: string | null }; trigger_data: "available" | "unavailable" | "unknown" };
 export type SkillDiagnostic = { code: string; name: string; severity: "critical" | "warning" | "info"; skill: string | null; evidence_count: number; impact: string | null; recommendation: string | null; caveats: string[] };
 export type SkillScanReport = { status: "ok" | "unavailable"; schema_version: string | null; run: string | null; host_selection: string; generated_at_ms: number | null; from_cache: boolean; hosts: SkillHostSummary[]; diagnostics: SkillDiagnostic[]; not_assessed: Array<{ code: string; name: string; reason: string }> };
+export type SkillSnapshotSaveReceipt = { status: "saved"; upload_performed: false };
 
 export type SourceConnectionState = "connected" | "needs_attention" | "paused" | "excluded" | "not_detected" | "unknown";
 export type SourceErrorKind = "permission_denied" | "file_missing" | "all_files_failed" | "db_error" | "migration_failed" | "read_failed";
@@ -2218,6 +2219,24 @@ export async function cancelSkillScan(): Promise<"cancelled" | "not_running"> {
   if (!handler) return "not_running";
   try { const result = await handler("skills_scan_cancel"); return result === true ? "cancelled" : "not_running"; }
   catch { throw new Error("取消 Skill 扫描失败"); }
+}
+
+export async function saveSkillsSnapshot(): Promise<SkillSnapshotSaveReceipt> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status: "saved", upload_performed: false };
+  try {
+    const root = record(await handler("skills_snapshot_save"), "skills snapshot receipt");
+    if (root.status !== "saved") throw new Error("Skill 快照保存未确认");
+    if (root.upload_performed !== false) throw new Error("Skill 快照上传状态不安全");
+    return { status: "saved", upload_performed: false };
+  } catch (reason: unknown) {
+    const row = reason && typeof reason === "object" ? reason as Record<string, unknown> : {};
+    const detail = row.error && typeof row.error === "object" ? row.error as Record<string, unknown> : row;
+    const code = typeof detail.code === "string" ? detail.code : "";
+    if (code === "no_binary") throw new Error("未找到可用的 agent-vitals CLI；请先修复安装或版本。");
+    if (code === "storage_failed") throw new Error("本机快照保存失败；请检查快照目录权限或磁盘空间。");
+    throw new Error("Skill 快照保存失败；请确认本机 CLI 可用后重试");
+  }
 }
 
 export async function saveDiagnosticPackage(): Promise<DiagnosticExportReceipt> {

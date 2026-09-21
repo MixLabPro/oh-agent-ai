@@ -639,6 +639,7 @@
           report: { host_summaries: { [summaryHost]: { skills_on_disk: 12, discoverable_skills: 8, runtime_verified_loaded_skills: null, unique_discoverable_skills: 8, description_budget: { available: true, source: "configurable", budget_chars: 15000, used_chars: 4200, pct_used: 28 }, trigger_data: "available" } } }
         };
       }
+      case "skills_snapshot_save": return { status: "saved", upload_performed: false };
       case "save_retention_config": {
         const input = (args && args.input) || {};
         if (!Number.isInteger(input.months) || input.months < 1 || input.months > 60) {

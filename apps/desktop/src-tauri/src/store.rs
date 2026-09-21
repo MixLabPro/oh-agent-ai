@@ -1608,8 +1608,9 @@ fn snapshot_args() -> Vec<String> {
     vec!["snapshot".into()]
 }
 
-/// 「存为快照」：显式动作（与恒带 --no-snapshot 的扫描分开）。成功回执里带
-/// 子进程的人读输出（"✓ Snapshot saved …"），前端原样展示。
+/// 「存为快照」：显式动作（与恒带 --no-snapshot 的扫描分开）。快照本身是
+/// 未脱敏本机基线，CLI 输出可能包含绝对路径、用户名和 skill 描述；这些内容
+/// 不属于 WebView 合同，因此成功回执只返回状态和“不上传”事实。
 #[tauri::command]
 pub async fn skills_snapshot_save(
     state: tauri::State<'_, StoreBuildLock>,
@@ -1625,22 +1626,18 @@ pub async fn skills_snapshot_save(
         cmd.env("AGENT_VITALS_HOME", data_home());
         let out = cmd
             .output()
-            .map_err(|e| error_value("cancelled", &e.to_string()))?;
+            .map_err(|_| error_value("storage_failed", "snapshot process could not be started"))?;
         if !out.status.success() {
-            let first = String::from_utf8_lossy(&out.stderr)
-                .lines()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("")
-                .to_string();
-            return Err(error_value("cancelled", &format!("agent-vitals snapshot failed: {first}")));
+            return Err(error_value("storage_failed", "snapshot command failed"));
         }
-        Ok(json!({
-            "status": "saved",
-            "output": String::from_utf8_lossy(&out.stdout).trim(),
-        }))
+        Ok(skills_snapshot_saved_receipt())
     })
     .await
     .map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
+fn skills_snapshot_saved_receipt() -> Value {
+    json!({ "status": "saved", "upload_performed": false })
 }
 
 /// 「与上次快照对比」：`agent-vitals diff --json -`（无文件参数 → CLI 自动回退
@@ -1735,6 +1732,14 @@ pub async fn skills_export_redacted(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skills_snapshot_receipt_never_contains_cli_output_or_path() {
+        let receipt = skills_snapshot_saved_receipt();
+        assert_eq!(receipt, json!({ "status": "saved", "upload_performed": false }));
+        assert!(receipt.get("output").is_none());
+        assert!(receipt.get("path").is_none());
+    }
 
     #[test]
     fn safe_findings_projection_is_allowlisted_and_drops_nested_sensitive_values() {
