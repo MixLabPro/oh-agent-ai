@@ -111,7 +111,7 @@ fn sync_host(
     // 这一个纯函数里。P0 阶段 can_increment 恒 false——classify 对所有
     // 变更文件返回 Full，与旧内联行为等价。
     let expected_version = crate::sql_sync::parser_version();
-    let expected_parser = "full-parse-v0";
+    let expected_parser = crate::source_graph::FULL_PARSE_V0;
     for path in files {
         let fp = fingerprint(&path);
         let hash = crate::source_graph::path_hash(&path);

@@ -63,17 +63,20 @@ pub fn classify(
     let Some((disk_size, disk_mtime)) = on_disk else {
         return Invalidation::Full { reason: "file-vanished" };
     };
-    // F1（P1 接线雷）：parser 升版 → 硬失效，文件字节不变也要全量重放
-    // （spec §6 明文行）。旧代码只比 (size, mtime, dirty)，升级会被 Unchanged 吞。
-    if checkpoint.parser_version != expected_parser_version {
-        return Invalidation::Full { reason: "parser-version-bumped" };
-    }
     // F2（P1 交接雷）：parser_id 不匹配（含 full-parse-v0 旧行）→ 硬失效。
     // P0 把 offset 推到 stat size（非换行边界），P1 增量解析器直接按
     // Incremental 续读会从行中间起读、静默丢事实。硬失效一次让 P1 全量
     // 重放对齐（fact_id 幂等吸收，代价一次性）。
+    // **检查顺序**：先于 parser_version——首见文件（id=None, version=0）
+    // 否则会误报 "parser-version-bumped"（复跑发现：reason 是诊断面，
+    // id 缺失比版本不匹配更准确地描述"这是新文件"）。
     if checkpoint.parser_id.as_deref() != Some(expected_parser_id) {
         return Invalidation::Full { reason: "parser-id-mismatch" };
+    }
+    // F1（P1 接线雷）：parser 升版 → 硬失效，文件字节不变也要全量重放
+    // （spec §6 明文行）。旧代码只比 (size, mtime, dirty)，升级会被 Unchanged 吞。
+    if checkpoint.parser_version != expected_parser_version {
+        return Invalidation::Full { reason: "parser-version-bumped" };
     }
     if disk_size == checkpoint.size_bytes && disk_mtime == checkpoint.mtime_ns
         && !checkpoint.dirty
@@ -96,6 +99,11 @@ pub fn classify(
 
 /// path → path_hash（与 sql_sync 的 source_file_fingerprint 同一哈希——
 /// 不暴露本地路径进 SQL 索引）。
+/// P0 阶段的解析器标记——sync_host 与 advance_checkpoint 共用（失配会导致
+/// 每 tick 永久全量重扫，已被 sync_is_incremental_across_runs 钉住，但共享
+/// 常量从源头消灭失配面）。P1 增量解析器接入后逐宿主替换为各自 id。
+pub const FULL_PARSE_V0: &str = "full-parse-v0";
+
 pub fn path_hash(path: &std::path::Path) -> String {
     fnv1a64_hex(path.to_string_lossy().as_bytes())
 }

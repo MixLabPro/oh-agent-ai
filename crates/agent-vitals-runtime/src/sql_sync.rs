@@ -485,7 +485,7 @@ pub(crate) fn write_flat_facts_with_sources(
             crate::source_graph::advance_checkpoint(
                 conn, host, &hash,
                 Some(*size_bytes),  // P0：全量处理到 EOF
-                "full-parse-v0",    // P0：未接增量解析器前的标记
+                crate::source_graph::FULL_PARSE_V0,
                 *size_bytes, *mtime_ns,
             ).map_err(AuthorityError::from)?;
             outcome.files_synced += 1;
