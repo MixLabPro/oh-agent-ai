@@ -527,7 +527,7 @@
           status: "saved",
         });
         let job = null;
-        if ((args && args.relationshipKind) === "official_subscription") {
+        if (["official_subscription", "official_api", "third_party", "organization"].includes(args && args.relationshipKind)) {
           const jobId = "billing-" + (args && args.revisionId);
           billingJobs.set(jobId, { status: "succeeded", job_id: jobId });
           const scopes = (args && args.scopes) || [];
