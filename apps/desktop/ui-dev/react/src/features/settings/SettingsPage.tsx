@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { addCustomSourceRoot, clearBudgetSnooze, listen, pickCustomSourceRoot, readBudgetSettings, readCustomSourceConfig, readSourceHealth, readSyncRequestStatus, removeCustomSourceRoot, saveBudgetProfile, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type BudgetSettingsReport, type CustomSourceReport, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport } from "../../lib/tauri";
+import { addCustomSourceRoot, clearBudgetSnooze, listen, pickCustomSourceRoot, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readSourceHealth, readSyncRequestStatus, removeCustomSourceRoot, saveBudgetProfile, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -86,6 +86,50 @@ function budgetDate(value: number | null): string {
   return new Date(value).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
+function compactTokens(value: number): string {
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return String(value);
+}
+
+function billingAmountText(amounts: Array<{ amount_minor: number; currency: string }>): string {
+  if (!amounts.length) return "暂无可用金额";
+  return amounts.map((amount) => minorToDecimal(amount.amount_minor, amount.currency)).join(" + ");
+}
+
+type BillingSectionProps = { report: BillingSettingsReport | null; loading: boolean; error: string | null; onReload: () => void };
+
+function BillingSection({ report, loading, error, onReload }: BillingSectionProps) {
+  const [expanded, setExpanded] = useState(false);
+  const pendingGroups = report?.groups ?? [];
+  const pendingCandidates = (report?.candidates ?? []).filter((candidate) => candidate.status === "pending");
+  const hasPending = pendingGroups.length > 0 || pendingCandidates.length > 0;
+  const failedJobs = (report?.jobs ?? []).filter((job) => job.status === "failed" || job.status === "cancelled");
+  return <section className="settings-billing-section" id="settings-billing" aria-labelledby="settings-billing-title">
+    <div className="settings-section-heading"><div><p className="eyebrow">计费与套餐</p><h3 id="settings-billing-title">计费与套餐</h3><p>查看待确认的计费关系、当前声明和已有账单；账单录入仍在旧工作台。</p></div><button className="button button-secondary button-small" type="button" onClick={onReload} disabled={loading}>{loading ? "读取中…" : "重载计费"}</button></div>
+    {error && <div className="error-banner" role="alert">待确认状态暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={onReload}>重试</button></div>}
+    {loading && <div className="settings-source-state" role="status"><strong>正在读取计费状态</strong><span>只查询本机 authority，不会修改归因。</span></div>}
+    {!loading && !error && report && <>
+      {hasPending && <div className="settings-billing-todo"><div><strong>有待确认的计费关系</strong><span>{pendingGroups.length + pendingCandidates.length} 项需要确认；未确认前仍按现有估算展示。</span></div><button className="button button-primary" type="button" onClick={() => setExpanded((value) => !value)}>{expanded ? "收起待确认" : "查看待确认项"}</button></div>}
+      {!hasPending && report.groups_status === "ok" && report.candidates_status === "ok" && <p className="settings-billing-empty">当前没有待确认的计费关系。</p>}
+      {expanded && <div className="settings-billing-pending" aria-label="待确认的计费关系">
+        {pendingGroups.slice(0, 32).map((group) => <article className="settings-billing-row" key={group.group_id}><div><strong>{group.host} · {group.provider_id} · {group.model_id}</strong><span>{compactTokens(group.tokens)} tokens · {group.session_count} 个会话 · {billingAmountText(group.estimated_amounts)} · {group.evidence_state === "unresolved" ? "部分用量未完成计价" : group.evidence_state === "determined" ? "已有明确线索" : "需要确认计费方式"}</span></div><small>{group.effective_start}{group.effective_end && group.effective_end !== group.effective_start ? ` – ${group.effective_end}` : ""}</small></article>)}
+        {pendingCandidates.map((candidate) => <article className="settings-billing-row" key={candidate.candidate_id}><div><strong>{candidate.provider_id} · {minorToDecimal(candidate.amount_minor, candidate.currency)}/月 · {candidate.host}</strong><span>来自历史套餐记录 · 自 {candidate.billing_period_start} 起{candidate.impact ? ` · ${compactTokens(candidate.impact.total_tokens)} tokens · ${candidate.impact.session_count} 个会话` : ""}</span></div><small>需要在旧工作台确认</small></article>)}
+        <p className="settings-billing-deferred" role="note">确认、撤销和重算会改变历史用量归因，当前仍在旧工作台执行；React 页面只展示安全只读证据。</p>
+      </div>}
+      {report.declarations_status !== "unavailable" && report.declarations.length > 0 && <div className="settings-billing-list"><div className="settings-setting-label">当前计费声明</div>{report.declarations.slice(0, 32).map((declaration) => <div className="settings-billing-row" key={declaration.declaration_id}><div><strong>{declaration.host} · {declaration.provider_id}</strong><span>{declaration.relationship_kind === "official_subscription" ? "官方订阅" : declaration.relationship_kind === "official_api" ? "官方 API 按量" : declaration.relationship_kind === "organization" ? "组织承担" : declaration.relationship_kind === "third_party" ? "中转或第三方" : "状态未知"} · {declaration.subscription_name ?? "未命名声明"}{declaration.amount_minor !== null && declaration.currency ? ` · ${minorToDecimal(declaration.amount_minor, declaration.currency)}` : ""}</span></div><small>{declaration.effective_start}{declaration.effective_end ? ` – ${declaration.effective_end}` : " · 持续有效"} · {declaration.scope_count} 个范围</small></div>)}</div>}
+      {failedJobs.length > 0 && <div className="settings-billing-job-warning" role="alert"><strong>有重算任务需要处理</strong><span>旧结果仍可读，失败任务需要在旧工作台重试。</span></div>}
+      {report.bills_status !== "unavailable" && report.bills.length > 0 && <div className="settings-billing-list"><div className="settings-setting-label">已有账单</div>{report.bills.slice(0, 64).map((bill) => <div className="settings-billing-row" key={bill.bill_id}><div><strong>{bill.host} · {bill.provider_id}</strong><span>{minorToDecimal(bill.amount_minor, bill.currency)} · {bill.billing_basis === "fixed_subscription" ? "订阅" : bill.billing_basis === "host_billed" ? "宿主账单" : bill.billing_basis === "metered_actual" ? "按量实付" : "计价口径未知"}</span></div><small>{bill.billing_period} · {bill.has_evidence ? "有来源记录" : "来源未记录"}</small></div>)}</div>}
+      {(report.groups_status === "unavailable" || report.candidates_status === "unavailable") && <p className="settings-billing-unavailable" role="alert">待确认计费状态暂不可读，不将不可用误判为空。</p>}
+      {report.declarations_status === "unavailable" && <p className="settings-billing-unavailable" role="alert">当前计费声明暂不可读。</p>}
+      {report.jobs_status === "unavailable" && <p className="settings-billing-unavailable" role="alert">重算状态暂不可读。</p>}
+      {report.bills_status === "unavailable" && <p className="settings-billing-unavailable" role="alert">本月账单暂不可读。</p>}
+      {(report.groups_status === "partial" || report.candidates_status === "partial" || report.declarations_status === "partial" || report.jobs_status === "partial" || report.bills_status === "partial") && <p className="settings-billing-unavailable" role="status">部分计费记录无法读取，已显示可验证的记录。</p>}
+    </>}
+  </section>;
+}
+
 type BudgetSectionProps = { report: BudgetSettingsReport | null; loading: boolean; error: string | null; onReload: () => void };
 
 function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps) {
@@ -157,7 +201,7 @@ function BudgetSection({ report, loading, error, onReload }: BudgetSectionProps)
         <label><span>月预算</span><input inputMode="decimal" value={monthly} onChange={(event) => setMonthly(event.target.value)} placeholder="例如 100.00" aria-describedby="settings-budget-help" disabled={unsupportedCurrency} /><small id="settings-budget-help">正数，最多两位小数</small></label>
         <label><span>日预算（可选）</span><input inputMode="decimal" value={daily} onChange={(event) => setDaily(event.target.value)} placeholder="留空表示不设日预算" disabled={unsupportedCurrency} /></label>
         <div className="settings-budget-threshold"><span>提醒阈值</span><strong>80% 和 100%</strong><small>固定阈值，各提醒一次</small></div>
-        <button className="button button-primary" type="submit" disabled={saving || unsupportedCurrency}>{saving ? "保存中…" : "保存预算"}</button>
+        <button className="button button-secondary" type="submit" disabled={saving || unsupportedCurrency}>{saving ? "保存中…" : "保存预算"}</button>
       </form>
       {unsupportedCurrency && estimate && <p className="settings-budget-warning" role="note">当前估算预算使用 {estimate.currency}，此页面暂不支持编辑该币种；为避免误覆盖，表单已锁定。</p>}
       {estimate && <div className="settings-budget-summary"><div><span>当前估算预算</span><strong>{minorToDecimal(estimate.total_spent_minor, estimate.currency)} / {minorToDecimal(estimate.monthly_minor, estimate.currency)}</strong></div><span className={`status-pill status-pill-${estimate.level === "ok" ? "success" : estimate.level === "warn" ? "warning" : estimate.level === "exceeded" ? "danger" : "neutral"}`}>{budgetStatusLabel(estimate.level)}</span>{estimate.has_unresolved && <small className="settings-budget-warning">部分用量仍待确认，金额可能不完整。</small>}</div>}
@@ -284,6 +328,9 @@ export function SettingsPage() {
   const [budgetReport, setBudgetReport] = useState<BudgetSettingsReport | null>(null);
   const [budgetError, setBudgetError] = useState<string | null>(null);
   const [budgetLoading, setBudgetLoading] = useState(true);
+  const [billingReport, setBillingReport] = useState<BillingSettingsReport | null>(null);
+  const [billingError, setBillingError] = useState<string | null>(null);
+  const [billingLoading, setBillingLoading] = useState(true);
 
   const refresh = () => {
     setLoading(true);
@@ -310,6 +357,15 @@ export function SettingsPage() {
       setBudgetReport(null);
       setBudgetError(reason instanceof Error ? reason.message : "预算状态读取失败");
     }).finally(() => setBudgetLoading(false));
+  };
+
+  const refreshBilling = () => {
+    setBillingLoading(true);
+    setBillingError(null);
+    void readBillingSettings().then(setBillingReport).catch((reason: unknown) => {
+      setBillingReport(null);
+      setBillingError(reason instanceof Error ? reason.message : "计费状态读取失败");
+    }).finally(() => setBillingLoading(false));
   };
 
   const runSync = async (): Promise<boolean> => {
@@ -359,9 +415,10 @@ export function SettingsPage() {
     refresh();
     refreshCustom();
     refreshBudget();
+    refreshBilling();
     let active = true;
     let cleanups: Array<() => void> = [];
-    Promise.all([listen("sync-status-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); } }), listen("usage-fold-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); } })]).then((unsubscribers) => {
+    Promise.all([listen("sync-status-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); } }), listen("usage-fold-updated", () => { if (active) { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); } })]).then((unsubscribers) => {
       if (active) cleanups = unsubscribers;
       else unsubscribers.forEach((unsubscribe) => unsubscribe());
     });
@@ -388,6 +445,8 @@ export function SettingsPage() {
     </section>
 
     <CustomSourceSection report={customReport} loading={customLoading} error={customError} onReload={refreshCustom} onSync={runSync} />
+
+    <BillingSection report={billingReport} loading={billingLoading} error={billingError} onReload={refreshBilling} />
 
     <BudgetSection report={budgetReport} loading={budgetLoading} error={budgetError} onReload={refreshBudget} />
 

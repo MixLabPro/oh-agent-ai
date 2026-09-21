@@ -72,6 +72,8 @@ if (!source.includes("readCustomSourceConfig") || !source.includes("addCustomSou
 if (!source.includes("readBudgetSettings") || !source.includes("saveBudgetProfile") || !source.includes("snoozeBudgetCurrentPeriod") || !source.includes("clearBudgetSnooze")) fail("React 设置缺少预算状态、保存或静默桥接");
 if (!source.includes("预算（订阅 + 按量）") || !source.includes("80% 和 100%") || !source.includes("warning_ratio_bp: 8000")) fail("React 设置预算未固定新表单与阈值契约");
 if (source.includes('"save_budget_config"') || source.includes('"save_host_bill"')) fail("React 设置越过预算旧配置或账单 mutation 边界");
+if (!source.includes("readBillingSettings") || !source.includes('"billing_confirmation_groups"') || !source.includes('"host_bills_for_period"')) fail("React 设置缺少计费只读 DTO");
+if (["resolve_billing_import_candidate", "save_billing_declaration_revision", "revoke_billing_declaration", "retry_billing_recalculation", "save_host_bill", "save_host_bills", "delete_host_bill"].some((command) => appSource.includes(`\"${command}\"`))) fail("React 设置越过计费归因或账单写入 mutation 边界");
 if (!source.includes("显示完整路径") || !source.includes("settings-custom-form")) fail("React 设置缺少本机位置的人机可读路径展示");
 if (!source.includes('status === "unavailable" ? []')) fail("React 设置未隔离自定义位置配置不可用态");
 if (!source.includes("尚未导入") || !source.includes("没有读取权限") || !source.includes("来源状态暂不可用")) fail("React 设置缺少来源空态、错误映射或不可用态");

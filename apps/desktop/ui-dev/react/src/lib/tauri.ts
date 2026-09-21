@@ -117,6 +117,51 @@ export type BudgetSettingsReport = {
 };
 export type BudgetSaveReceipt = { status: "saved"; profile_id: "estimate"; currency: "CNY" | "USD"; notification_permission: "granted" | "denied" | "unavailable" };
 
+export type BillingAmount = { amount_minor: number; currency: string; basis: string };
+export type BillingCandidate = {
+  candidate_id: string;
+  host: string;
+  provider_id: string;
+  currency: string;
+  amount_minor: number;
+  billing_period_start: string;
+  status: "pending" | "accepted" | "dismissed" | "unknown";
+  impact: { total_tokens: number; fact_count: number; session_count: number } | null;
+};
+export type BillingGroup = {
+  group_id: string;
+  host: string;
+  provider_id: string;
+  model_id: string;
+  evidence_basis: string;
+  pricing_basis: string;
+  tokens: number;
+  session_count: number;
+  effective_start: string;
+  effective_end: string | null;
+  estimated_amounts: BillingAmount[];
+  unpriced_tokens: number;
+  unresolved_reason: string | null;
+  evidence_state: "determined" | "needs_input" | "unresolved" | "unknown";
+};
+export type BillingDeclaration = {
+  declaration_id: string;
+  host: string;
+  provider_id: string;
+  relationship_kind: string;
+  subscription_name: string | null;
+  amount_minor: number | null;
+  currency: string | null;
+  effective_start: string;
+  effective_end: string | null;
+  current_revision_id: string | null;
+  scope_count: number;
+};
+export type BillingJob = { job_id: string; status: "queued" | "running" | "failed" | "cancelled" | "succeeded" | "unknown"; error_code: string | null; requested_at_ms: number | null };
+export type HostBill = { bill_id: string; host: string; provider_id: string; billing_period: string; billing_basis: string; amount_minor: number; currency: string; has_evidence: boolean };
+export type BillingPanelStatus = "ok" | "partial" | "unavailable";
+export type BillingSettingsReport = { status: "ok" | "unavailable"; month: string; candidates_status: BillingPanelStatus; groups_status: BillingPanelStatus; declarations_status: BillingPanelStatus; jobs_status: BillingPanelStatus; bills_status: BillingPanelStatus; candidates: BillingCandidate[]; groups: BillingGroup[]; declarations: BillingDeclaration[]; jobs: BillingJob[]; bills: HostBill[] };
+
 export type UsageHour = {
   hour: number;
   dsh_tokens: number | null;
@@ -1735,6 +1780,129 @@ export async function clearBudgetSnooze(): Promise<void> {
   } catch {
     throw new Error("恢复预算提醒失败");
   }
+}
+
+function safeBillingPeriod(value: unknown, label: string, nullable = false): string | null {
+  if (nullable && (value === null || value === undefined || value === "")) return null;
+  const text = stringField(value, label);
+  if (/^\d{4}-(0[1-9]|1[0-2])$/.test(text)) return text;
+  return safeDate(text, label);
+}
+
+function parseBillingAmount(value: unknown): BillingAmount {
+  const row = record(value, "billing amount");
+  return {
+    amount_minor: boundedCount(row.amount_minor, "billing amount", Number.MAX_SAFE_INTEGER),
+    currency: billingCurrency(row.currency),
+    basis: billingBasis(row.basis),
+  };
+}
+
+function billingCurrency(value: unknown): string {
+  const currency = stringField(value, "billing currency");
+  if (!/^[A-Z]{3}$/.test(currency)) throw new Error("billing currency 不安全");
+  return currency;
+}
+
+function billingBasis(value: unknown): string {
+  const basis = stringField(value, "billing basis");
+  return ["metered_actual", "metered_estimate", "fixed_subscription", "host_billed", "api_equivalent", "other"].includes(basis) ? basis : "unknown";
+}
+
+function parseBillingCandidate(value: unknown): BillingCandidate {
+  const row = record(value, "billing candidate");
+  const rawStatus = typeof row.status === "string" ? row.status : "unknown";
+  const status = (["pending", "accepted", "dismissed"] as const).includes(rawStatus as never) ? rawStatus as BillingCandidate["status"] : "unknown";
+  const impact = row.impact == null || record(row.impact, "billing candidate impact").status !== "ok" ? null : (() => {
+    const data = record(row.impact, "billing candidate impact");
+    return { total_tokens: boundedCount(data.total_tokens ?? 0, "candidate impact tokens", Number.MAX_SAFE_INTEGER), fact_count: boundedCount(data.fact_count ?? 0, "candidate impact facts", Number.MAX_SAFE_INTEGER), session_count: boundedCount(data.session_count ?? 0, "candidate impact sessions", Number.MAX_SAFE_INTEGER) };
+  })();
+  return {
+    candidate_id: decisionLabel(row.candidate_id, "billing candidate id"), host: safeHostLabel(row.host), provider_id: decisionLabel(row.provider_id, "billing candidate provider"),
+    currency: billingCurrency(row.currency), amount_minor: boundedCount(row.amount_minor, "billing candidate amount", Number.MAX_SAFE_INTEGER),
+    billing_period_start: safeDate(row.billing_period_start, "billing candidate start") as string,
+    status, impact,
+  };
+}
+
+function parseBillingGroup(value: unknown): BillingGroup {
+  const row = record(value, "billing group");
+  const amounts = requiredArray(row.estimated_amounts ?? [], "billing group amounts");
+  if (amounts.length > 16) throw new Error("billing group amounts 超出上限");
+  const unresolved = boundedCount(row.unpriced_tokens ?? 0, "billing group unpriced tokens", Number.MAX_SAFE_INTEGER) > 0 || typeof row.unresolved_reason === "string";
+  const verdict = row.auto_verdict == null ? null : record(row.auto_verdict, "billing group verdict");
+  const verdictState = verdict?.state;
+  const evidenceState = unresolved ? "unresolved" : verdictState === "determined" ? "determined" : verdictState === "one_question" || verdictState === "needs_input" ? "needs_input" : "unknown";
+  return {
+    group_id: decisionLabel(row.group_id, "billing group id"), host: safeHostLabel(row.host), provider_id: decisionLabel(row.provider_id, "billing group provider"), model_id: row.model_id == null ? "<unknown>" : decisionLabel(row.model_id, "billing group model"),
+    evidence_basis: decisionLabel(row.evidence_basis ?? "unknown", "billing evidence basis"), pricing_basis: decisionLabel(row.pricing_basis ?? "unknown", "billing pricing basis"),
+    tokens: boundedCount(row.tokens ?? 0, "billing group tokens", Number.MAX_SAFE_INTEGER), session_count: boundedCount(row.session_count ?? 0, "billing group sessions", Number.MAX_SAFE_INTEGER),
+    effective_start: safeBillingPeriod(row.effective_start, "billing group start") as string, effective_end: safeBillingPeriod(row.effective_end, "billing group end", true),
+    estimated_amounts: amounts.map(parseBillingAmount), unpriced_tokens: boundedCount(row.unpriced_tokens ?? 0, "billing group unpriced", Number.MAX_SAFE_INTEGER), unresolved_reason: row.unresolved_reason == null ? null : "部分用量尚未完成计价",
+    evidence_state: evidenceState,
+  };
+}
+
+function parseBillingDeclaration(value: unknown): BillingDeclaration {
+  const row = record(value, "billing declaration");
+  return {
+    declaration_id: decisionLabel(row.declaration_id, "billing declaration id"), host: safeHostLabel(row.host), provider_id: decisionLabel(row.provider_id, "billing declaration provider"), relationship_kind: decisionLabel(row.relationship_kind, "billing relationship"),
+    subscription_name: row.subscription_name == null ? null : decisionLabel(row.subscription_name, "billing subscription name"), amount_minor: row.amount_minor == null ? null : boundedCount(row.amount_minor, "billing declaration amount", Number.MAX_SAFE_INTEGER), currency: row.currency == null ? null : billingCurrency(row.currency),
+    effective_start: safeDate(row.effective_start, "billing declaration start"), effective_end: row.effective_end == null ? null : safeDate(row.effective_end, "billing declaration end"), current_revision_id: row.current_revision_id == null ? null : decisionLabel(row.current_revision_id, "billing revision id"), scope_count: Array.isArray(row.scopes) ? Math.min(row.scopes.length, 128) : 0,
+  };
+}
+
+function parseBillingJob(value: unknown): BillingJob {
+  const row = record(value, "billing job");
+  const rawStatus = typeof row.status === "string" ? row.status : "unknown";
+  const allowed = ["queued", "running", "failed", "cancelled", "succeeded"] as const;
+  const status = (allowed as readonly string[]).includes(rawStatus) ? rawStatus as BillingJob["status"] : "unknown";
+  return { job_id: decisionLabel(row.job_id, "billing job id"), status, error_code: row.error_code == null ? null : "重算失败，请重试", requested_at_ms: nullableTimestampMs(row.requested_at_ms, "billing job requested") };
+}
+
+function parseHostBill(value: unknown, billingPeriod: string): HostBill {
+  const row = record(value, "host bill");
+  return { bill_id: decisionLabel(row.bill_id, "bill id"), host: safeHostLabel(row.host), provider_id: decisionLabel(row.provider_id, "bill provider"), billing_period: row.billing_period == null ? billingPeriod : safeMonth(row.billing_period, "bill period"), billing_basis: billingBasis(row.billing_basis ?? "unknown"), amount_minor: boundedCount(row.amount_minor, "bill amount", Number.MAX_SAFE_INTEGER), currency: billingCurrency(row.currency), has_evidence: typeof row.evidence_ref === "string" && row.evidence_ref.length > 0 };
+}
+
+function parseBillingList(value: unknown, key: string): { status: "ok" | "unavailable"; items: unknown[] } {
+  const root = record(value, `billing ${key}`);
+  if (root.status === "unavailable") return { status: "unavailable", items: [] };
+  if (root.status !== "ok") throw new Error(`billing ${key} status 不兼容`);
+  const items = requiredArray(root[key], `billing ${key}`);
+  if (items.length > 512) throw new Error(`billing ${key} 超出上限`);
+  return { status: "ok", items };
+}
+
+export async function readBillingSettings(): Promise<BillingSettingsReport> {
+  const month = currentBudgetMonth();
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) {
+    return { status: "ok", month, candidates_status: "ok", groups_status: "ok", declarations_status: "ok", jobs_status: "ok", bills_status: "ok", candidates: [parseBillingCandidate({ candidate_id: "browser-candidate-1", host: "codex", provider_id: "openai", currency: "USD", amount_minor: 2000, billing_period_start: `${month}-01`, status: "pending", impact: { status: "ok", total_tokens: 18000, fact_count: 4, session_count: 1 } })], groups: [], declarations: [], jobs: [], bills: [] };
+  }
+  const results = await Promise.allSettled([
+    handler("billing_import_candidates"), handler("billing_confirmation_groups", { month }), handler("billing_declarations"), handler("billing_recalculation_jobs"), handler("host_bills_for_period", { billingPeriod: month }),
+  ]);
+  const parse = <T,>(index: number, key: string, mapper: (item: unknown) => T): { status: BillingPanelStatus; items: T[] } => {
+    const result = results[index];
+    if (result.status === "rejected") return { status: "unavailable", items: [] };
+    let list: { status: "ok" | "unavailable"; items: unknown[] };
+    try { list = parseBillingList(result.value, key); } catch { return { status: "unavailable", items: [] }; }
+    if (list.status === "unavailable") return { status: "unavailable", items: [] };
+    const items: T[] = [];
+    let rejected = 0;
+    for (const item of list.items) {
+      try { items.push(mapper(item)); } catch { rejected += 1; }
+    }
+    return { status: rejected === 0 ? "ok" : items.length ? "partial" : "unavailable", items };
+  };
+  const candidates = parse(0, "candidates", parseBillingCandidate);
+  const groups = parse(1, "groups", parseBillingGroup);
+  const declarations = parse(2, "declarations", parseBillingDeclaration);
+  const jobs = parse(3, "jobs", parseBillingJob);
+  const bills = parse(4, "bills", (item) => parseHostBill(item, month));
+  const pendingUnavailable = candidates.status === "unavailable" && groups.status === "unavailable";
+  return { status: pendingUnavailable ? "unavailable" : "ok", month, candidates_status: candidates.status, groups_status: groups.status, declarations_status: declarations.status, jobs_status: jobs.status, bills_status: bills.status, candidates: candidates.items, groups: groups.items, declarations: declarations.items, jobs: jobs.items, bills: bills.items };
 }
 
 function validateCustomSourceInput(host: string, root: string): void {
