@@ -82,24 +82,48 @@ dirty         INTEGER   -- 0/1 脏标记（watch 事件填、调度器清）
 
 指纹三列（size/mtime/parser_version）原样保留且语义不变；`byte_offset` 只由**解析成功**的事务推进（解析半途崩溃 = offset 不动 = 下轮重读同一段，fact_id 吸收重复）。
 
-### 5.2 `SourceParser` trait（runtime 层冻结接口）
+### 5.2 `SourceParser` trait（P3 实施后修订：住 domain，注册表在 hosts）
+
+> **P3 修订记录（2026-09-21）**：trait 原计划住 runtime（"runtime 层冻结接口"）。
+> 实施时发现依赖方向是 runtime → hosts——hosts 要实现 trait 就必须依赖 runtime，
+> 循环。trait 因此下沉 `agent-vitals-domain::source_graph`（纯策略面），宿主实现
+> 住 `agent-vitals-hosts`（每宿主 `sources/parser.rs` 一文件一 impl），调度器经
+> `hosts::sources::parsers::{descriptor_for, parser_for}` 注册表查表——runtime
+> 不再持有 host 字符串特判的解析路由。签名同步重塑：`host()/parser_id()` 合并为
+> `descriptor()`，emitter 必需的 `machine_namespace` 经 `ParseContext` 显式传入
+> （旧签名漏了它，是 P1b 生产接线绕开 trait 的原因之一），全量-only 解析器的
+> `parse_increment` 走缺省拒绝（「解析器谎报」守卫）。
 
 ```rust
+// agent-vitals-domain::source_graph（纯策略面，无 I/O）
+pub struct ParserDescriptor { pub parser_id: &'static str, pub can_increment: bool }
+pub struct ParseContext<'a> { pub machine_namespace: &'a str, pub source_profile: &'a str }
+
 pub trait SourceParser: Send + Sync {
-    fn host(&self) -> &'static str;
-    /// 增量能力申报：按文件当前状态判定，不许猜测（append-only + size ≥ offset
-    /// + 尾行完整 = true；压缩/库文件恒 false）。
-    fn can_increment(&self, state: &FileState) -> bool;
-    /// 从 offset 读到 EOF、停在最后一个完整换行（in-flight 写入纪律沿用
-    /// read_records 现有语义），产出新事实 + 新 offset。
-    fn parse_increment(&self, file: &Path, from_offset: u64)
-        -> Result<ParseOutput, ParserError>;
-    /// 全量路径（首见/硬失效/zstd/sqlite）。
-    fn parse_full(&self, file: &Path) -> Result<ParseOutput, ParserError>;
+    /// 注册行：解析器身份 + 增量能力申报。
+    fn descriptor(&self) -> ParserDescriptor;
+    /// 世代号，缺省 = PARSER_VERSION（与 sql_sync 重放纪律同源）。
+    fn parser_version(&self) -> i64 { PARSER_VERSION }
+    /// 增量能力判定：缺省 = descriptor 申报 **且** 检查点已有起读 offset。
+    fn can_increment(&self, state: &FileCheckpoint) -> bool { ... }
+    /// 从 offset 读到 EOF、停在最后完整换行；缺省拒绝。
+    fn parse_increment(&self, ctx: &ParseContext, path: &Path, from_offset: u64)
+        -> Result<ParseOutput, String> { Err("no incremental path") }
+    /// 全量路径（首见/硬失效/全量申报宿主）。
+    fn parse_full(&self, ctx: &ParseContext, path: &Path) -> Result<ParseOutput, String>;
 }
 ```
 
-禁止：解析器持有或推进 SourceGraph 状态（offset 由 infra 在事务成功后写回）；解析器自行起 watcher。
+**注册面两类（P3 决议）**：trait 背书 = 逐文件语义（claude-code 增量、dsh/workbuddy
+显式全量申报——zstd 帧边界 ≠ 行边界、SQLite 行级差量是 §11 非目标）；仅 descriptor
+申报 = 跨批语义。**codex 归第二类**：它是批 emitter（跨文件 seen 去重 + 整批配额
+折叠），且有三重全文件前缀依赖——fold `last_total_sig` 连续复读去重（中途起读会把
+复读判成新事件：同累计值双计且 fact_id 不同，幂等吸收救不了）、route/provider 状态
+时间线（事件时刻路由证据必须来自文件前缀，丢前缀 = 静默误归因，违反计费诚实）、
+配额快照是整批折叠产物。emit-gate（全扫状态 + 只 emit 新段）是后续可选项，需差分门
+重新验证后才能接管。
+
+禁止：解析器持有或推进 SourceGraph 状态（offset 由 infra 在事务成功后写回）；解析器自行起 watcher；解析器直接调 `insert_outbox`（事件发射是调度器写事务内的职责）。
 
 ## 6. 失效语义（软/硬，映射 Vite §3-4）
 
@@ -126,7 +150,7 @@ pub trait SourceParser: Send + Sync {
 - **P0（图谱先行，无 watcher）**：`source_files` 扩展三列；调度器改造——tick 从"全量 walk 目录"变为"查图谱脏集 + 指纹对账"，全量重解析保持（未接增量解析器时所有文件 `can_increment=false`）。**收益：发现层成本归零、watcher 无关的架构落位**。
 - **P1（首个增量解析器）**：`SourceParser` trait + claude-code JSONL 实现（offset 检查点 + 差分门验证）。**收益：GB 级会话解析成本从全量降到增量字节**。
 - **P2（watcher 接入）**：notify + 去抖 + 前缀路由 + skills 目录/trust profile 目录的 watch-only 消费者注册。**收益：发现时延分钟→秒**。
-- **P3（宿主铺开）**：codex / DSH JSONL 解析器注册（实现 trait 两个方法）；zstd/sqlite 显式申报全量路径。
+- **P3（宿主铺开，2026-09-21 实施）**：SourceParser 注册制——trait 下沉 domain、注册表落 hosts（见 §5.2 修订记录）。claude-code 经 trait 注册（增量），dsh/workbuddy 经 trait 注册并**显式申报全量**（zstd/sqlite，§11 非目标）；codex **仅 descriptor 申报**——批 emitter 的三重全文件前缀依赖使中途起读不安全（决议记录见 §5.2），sync 批路径原样保留。调度器的 host 字符串特判删除，解析路由只经注册表查表。
 
 ## 10. 验收标准
 

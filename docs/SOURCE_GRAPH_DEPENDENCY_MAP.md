@@ -76,10 +76,11 @@ billing/      <- core/*（时间/retention）
 **关键不变量**：`events.rs` 和 `source_graph`（domain 纯策略面 + runtime SQL 封装）
 都是**叶子**（不依赖任何领域目录）——这就是它们能被所有领域安全调用的原因。
 任何新模块如果需要往 outbox 发事件或推检查点，只 import `events.rs` 或
-`source_graph`，不 import 领域模块。**P3 新增不变量**：调度器的宿主解析路由
-只经 `hosts::sources::parsers::{descriptor_for,parser_for}` 查表——runtime
-不允许出现 host 字符串特判的解析路由（`grep '"claude-code"\|"dsh"\|"workbuddy"'
-ingest/sync_service.rs` 只允许出现在宿主产品特性块，如 quota 扫描）。
+`source_graph`，不 import 领域模块。**P3 新增不变量**：调度器的宿主**解析路由**
+（classify 参数、emit 分派）只经 `hosts::sources::parsers::{descriptor_for,parser_for}`
+查表——runtime 不允许出现 host 字符串特判的解析路由。（判定口径：host 字面量
+仍合法出现的位置 = codex 批路径、宿主产品特性块如 claude quota 扫描、发现层
+walk 枚举；**不得**出现的位置 = descriptor/classify/parse 的参数选择处。）
 
 ---
 
