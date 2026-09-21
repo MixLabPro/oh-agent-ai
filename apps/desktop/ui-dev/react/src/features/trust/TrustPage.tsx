@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   auditTrust,
   discoverTrust,
-  listen,
+  listenAppEvents,
   readTrustMonitorConfig,
   runTrustRuntimeSnapshot,
   saveTrustMonitorConfig,
@@ -114,8 +114,8 @@ export function TrustPage() {
   useEffect(() => {
     let active = true;
     let cleanup: (() => void) | null = null;
-    void listen("source-data-deleted", () => {
-      if (!active) return;
+    void listenAppEvents((event) => {
+      if (!active || event.type !== "SourceDataDeleted") return;
       auditRequest.current += 1;
       setReport(() => null);
       setSelectedHost(null);
@@ -131,8 +131,8 @@ export function TrustPage() {
   useEffect(() => {
     let active = true;
     let cleanup: (() => void) | null = null;
-    void listen("trust-monitor-updated", () => {
-      if (!active) return;
+    void listenAppEvents((event) => {
+      if (!active || event.type !== "TrustMonitorInvalidated") return;
       void readTrustMonitorConfig().then((value) => {
         if (!active) return;
         setMonitor(value);

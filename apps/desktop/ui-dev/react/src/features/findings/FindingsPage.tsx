@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { listen, readDecisionMatrix, readFindings, readFindingsFreshness, safeUiError, type DecisionMatrixReport, type FindingGroup, type FindingSample, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
+import { listenAppEvents, readDecisionMatrix, readFindings, readFindingsFreshness, safeUiError, type DecisionMatrixReport, type FindingGroup, type FindingSample, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
 import { DecisionMatrixSection } from "./DecisionMatrixSection";
 import { mergeFindingsPage } from "./contract";
 
@@ -141,6 +141,7 @@ export function FindingsPage() {
   const [rule, setRule] = useState("all");
   const requestGeneration = useRef(0);
   const matrixGeneration = useRef(0);
+  const eventRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = () => {
     const requestId = ++requestGeneration.current;
@@ -190,9 +191,23 @@ export function FindingsPage() {
   useEffect(() => {
     let active = true;
     let cleanups: Array<() => void> = [];
-    Promise.all(["sync-status-updated", "usage-fold-updated", "trust-monitor-updated", "source-data-deleted"].map((event) => listen(event, () => { if (active) load(); })))
-      .then((unsubscribers) => { if (active) cleanups = unsubscribers; else unsubscribers.forEach((unsubscribe) => unsubscribe()); });
-    return () => { active = false; requestGeneration.current += 1; matrixGeneration.current += 1; cleanups.forEach((unsubscribe) => unsubscribe()); };
+    const queueRefresh = () => {
+      if (!active || eventRefreshTimer.current !== null) return;
+      eventRefreshTimer.current = setTimeout(() => {
+        eventRefreshTimer.current = null;
+        if (active) load();
+      }, 150);
+    };
+    void listenAppEvents(queueRefresh)
+      .then((unsubscribe) => { if (active) cleanups = [unsubscribe]; else unsubscribe(); });
+    return () => {
+      active = false;
+      requestGeneration.current += 1;
+      matrixGeneration.current += 1;
+      if (eventRefreshTimer.current !== null) clearTimeout(eventRefreshTimer.current);
+      eventRefreshTimer.current = null;
+      cleanups.forEach((unsubscribe) => unsubscribe());
+    };
   }, []);
 
   const groups = report?.issues ?? [];

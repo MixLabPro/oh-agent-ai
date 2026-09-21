@@ -1,5 +1,8 @@
 export type Unsubscribe = () => void;
 
+export type AppEventType = "FoldCompleted" | "FactsIngested" | "SyncStatusChanged" | "TrustMonitorEvent" | "TrustMonitorInvalidated" | "SourceDataDeleted";
+export type AppEvent = { type: AppEventType };
+
 /** Convert bridge failures into bounded user-facing copy. Raw invoke errors
  * may contain local paths, command lines, or provider diagnostics and must not
  * cross the React serving face. Detailed diagnostics stay in the desktop log.
@@ -2915,6 +2918,41 @@ export async function listen(event: string, handler: (payload: unknown) => void)
   window.addEventListener("agent-vitals-source-data-deleted", windowHandler);
   if (!listener) return () => window.removeEventListener("agent-vitals-source-data-deleted", windowHandler);
   const unsubscribeTauri = await listener(event, handler);
+  return () => {
+    window.removeEventListener("agent-vitals-source-data-deleted", windowHandler);
+    unsubscribeTauri();
+  };
+}
+
+const appEventTypes = new Set<AppEventType>(["FoldCompleted", "FactsIngested", "SyncStatusChanged", "TrustMonitorEvent", "TrustMonitorInvalidated", "SourceDataDeleted"]);
+
+function safeAppEvent(raw: unknown): AppEvent | null {
+  const candidate = raw && typeof raw === "object" && "payload" in raw
+    ? (raw as { payload?: unknown }).payload
+    : raw;
+  if (!candidate || typeof candidate !== "object") return null;
+  const type = (candidate as { type?: unknown }).type;
+  return typeof type === "string" && appEventTypes.has(type as AppEventType) ? { type: type as AppEventType } : null;
+}
+
+/** Subscribe to the single desktop event bus and expose only its allowlisted type. */
+export async function listenAppEvents(handler: (event: AppEvent) => void): Promise<Unsubscribe> {
+  const listener = globalTauri()?.event?.listen;
+  const windowHandler = () => handler({ type: "SourceDataDeleted" });
+  window.addEventListener("agent-vitals-source-data-deleted", windowHandler);
+  if (!listener) return () => window.removeEventListener("agent-vitals-source-data-deleted", windowHandler);
+  let unsubscribeTauri: Unsubscribe = () => undefined;
+  try {
+    unsubscribeTauri = await listener("app-event", (raw) => {
+      const event = safeAppEvent(raw);
+      if (event) handler(event);
+    });
+  } catch {
+    // A desktop event bridge can be unavailable during webview teardown or an
+    // old app/CLI combination. Keep the revision-poll fallback, but make its
+    // cleanup explicit instead of leaking a window listener or rejecting an
+    // otherwise safe page refresh.
+  }
   return () => {
     window.removeEventListener("agent-vitals-source-data-deleted", windowHandler);
     unsubscribeTauri();

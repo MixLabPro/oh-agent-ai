@@ -70,7 +70,7 @@ if (!source.includes("aria-labelledby=\"trust-monitor-title\"")) fail("React Tru
 if (!source.includes("查看明细") || !source.includes("evidence-detail")) fail("React Trust 缺少可展开的证据明细");
 if (!source.includes("查看证据") || !source.includes("finding-evidence-detail") || !source.includes("evidence_level") || !source.includes("上传尝试不等于远端接收、留存或训练")) fail("React Findings 缺少可核验的脱敏证据明细");
 if (!decisionMatrix.includes("hasStaleReport") || !decisionMatrix.includes("上一次对比结果") || !decisionMatrix.includes("窗口：${report.month}") || !decisionMatrix.includes("section-heading-side")) fail("React 决策矩阵刷新未标注旧窗口、旧结果或响应式状态");
-if (!source.includes('"trust-monitor-updated"') || !source.includes('"sync-status-updated"')) fail("React Findings/Trust 缺少事件失效刷新");
+if (!source.includes("listenAppEvents") || !source.includes('"app-event"') || !source.includes("agent-vitals-source-data-deleted") || !findingsPage.includes("eventRefreshTimer") || findingsPage.includes('listen("sync-status-updated"') || findingsPage.includes('listen("usage-fold-updated"') || findingsPage.includes('listen("trust-monitor-updated"') || findingsPage.includes('listen("source-data-deleted"')) fail("React 事件刷新未统一到 app-event 或缺少跨进程删除 fallback");
 if (!source.includes("safeUiError") || [findingsPage, trustPage, sessionsPage, sessionDetailPage].some((page) => /reason\.message/.test(page))) fail("React Findings/Trust/会话错误面未统一脱敏");
 if (!appFile.includes("safeUiError") || /reason\.message/.test(appFile)) fail("React 壳层错误面未统一脱敏");
 const unsafeErrorPattern = /(?:setError|setActionError|setExportError|setCustomError|setBudgetError|setBillingError|setDataError|setAboutError|setSourceError)\([^;\n]*reason\.message/u;
