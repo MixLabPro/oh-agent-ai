@@ -2196,7 +2196,7 @@ class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):
 
     def test_workbuddy_money_cannot_enter_the_summary_dto(self):
         summary_rs = (ROOT / "crates" / "agent-vitals-runtime" / "src"
-                      / "summary.rs").read_text(encoding="utf-8")
+                      / "query" / "summary.rs").read_text(encoding="utf-8")
         self.assertIn("PERMANENTLY_EXCLUDED_HOSTS: &[&str] = &[]", summary_rs)
         # E4b：money 防线内建在 workbuddy 栏构造器里（provider null → basis 恒空），
         # 不再是排除表。

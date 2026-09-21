@@ -24,44 +24,66 @@
 //! 不到这里的 `sessions`/`budget`/`state`，trait 的实现只能落在这个既认识
 //! hosts 又认识 data 的层。
 
-pub mod billing_preview;
-pub mod budget;
-pub mod budget_notifications;
+// ── 平台件（crate 根，无领域归属，被所有子目录依赖）──
 pub mod clock;
-pub mod custom_sources;
-pub mod decision_matrix;
 pub mod home;
-pub mod events;
-pub mod export;
-pub mod ingest_service;
-pub mod lease;
-pub mod mcp;
-pub mod money;
-pub mod pricing_catalog;
-pub mod reimport_verify;
-pub mod retention;
-pub mod session_sources;
-pub mod source_controls;
-pub mod sessions;
-pub mod source_graph;
-pub mod skills;
-pub mod sql_authority;
 pub mod state;
-pub mod statistics_timezone;
-pub mod summary;
-pub mod price_discovery;
-pub mod price_overrides;
-pub mod quota_reminder;
-pub mod sync_control;
-pub mod trace_service;
-pub mod sql_sync;
-pub mod sync_service;
-pub mod host_registry;
-pub mod plugin_ingest;
 pub mod takeover;
-pub mod trust_audit;
-pub mod trust_identity;
-pub mod trust_runtime_monitor;
+pub mod statistics_timezone;
+pub mod retention;
+
+// ── billing/ 计费与价格域（旧路径 re-export 垫片保持外部兼容）──
+pub mod billing;
+pub use billing::budget;
+pub use billing::money;
+pub use billing::billing_preview;
+pub use billing::budget_notifications;
+pub use billing::price_discovery;
+pub use billing::price_overrides;
+pub use billing::pricing_catalog;
+pub use billing::quota_reminder;
+
+// ── ingest/ 同步与入库域 ──
+pub mod ingest;
+pub use ingest::sql_sync;
+pub use ingest::sql_authority;
+pub use ingest::sync_service;
+pub use ingest::sync_control;
+pub use ingest::ingest_service;
+pub use ingest::plugin_ingest;
+pub use ingest::reimport_verify;
+pub use ingest::lease;
+
+// ── query/ 读侧与服务面域 ──
+pub mod query;
+pub use query::summary;
+pub use query::decision_matrix;
+pub use query::trace_service;
+pub use query::export;
+
+// ── trust/ 信任与外传域 ──
+pub mod trust;
+pub use trust::trust_audit;
+pub use trust::trust_identity;
+pub use trust::trust_runtime_monitor;
+
+// ── sources/ 数据源接入编排域 ──
+pub mod sources;
+pub use sources::session_sources;
+pub use sources::custom_sources;
+pub use sources::source_controls;
+pub use sources::host_registry;
+
+// ── 既有子目录 ──
+pub mod mcp;
+pub mod sessions;
+pub mod skills;
+
+// ── 事件总线 ──
+pub mod events;
+
+// ── SourceGraph ──
+pub mod source_graph;
 
 /// 进程级环境变量锁 —— `state` / `budget` / `takeover` / `summary` 的
 /// `#[cfg(test)]` 改 `AGENT_VITALS_HOME` 等进程 env，必须串行（模块各自造

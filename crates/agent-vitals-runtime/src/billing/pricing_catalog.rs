@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn embedded_catalog_is_a_valid_update_candidate() {
-        let result = validate(include_bytes!("../../../assets/pricing.json")).unwrap();
+        let result = validate(include_bytes!("../../../../assets/pricing.json")).unwrap();
         assert!(result.model_count >= 5);
         assert!(result.version.starts_with("public-"));
     }
