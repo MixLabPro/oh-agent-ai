@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateActio
 import {
   listen,
   readSessions,
+  readStatisticsTimezone,
   safeUiError,
   type SessionCostStatus,
   type SessionRow,
@@ -20,25 +21,25 @@ const costStates: Array<{ value: SessionsCostFilter; label: string }> = [
   { value: "unavailable", label: "不可用" },
 ];
 
-function localDate(date = new Date()): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
+const DEFAULT_STATISTICS_TIMEZONE = "Asia/Shanghai";
+
+function dateInTimezone(timezone: string, date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+  const year = parts.find((part) => part.type === "year")?.value ?? "1970";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
   return `${year}-${month}-${day}`;
 }
 
-function localMonth(date = new Date()): string {
-  return localDate(date).slice(0, 7);
+function filtersForTimezone(timezone: string): SessionsFilters {
+  const today = dateInTimezone(timezone);
+  return { window: "month", month: today.slice(0, 7), date_from: shiftDate(today, -6), date_to: today, host_kind: "all", model: "", provider: "", cost_status: "all" };
 }
 
 function shiftDate(date: string, days: number): string {
   const value = new Date(`${date}T00:00:00Z`);
   value.setUTCDate(value.getUTCDate() + days);
   return value.toISOString().slice(0, 10);
-}
-
-function initialFilters(): SessionsFilters {
-  return { window: "month", month: localMonth(), date_from: shiftDate(localDate(), -6), date_to: localDate(), host_kind: "all", model: "", provider: "", cost_status: "all" };
 }
 
 function compact(value: number): string {
@@ -76,11 +77,12 @@ function costLabel(row: SessionRow): string {
   return `${row.cost_minor.currency === "CNY" ? "¥" : `${row.cost_minor.currency} `}${amount.toFixed(2)}`;
 }
 
-function serverArgs(filters: SessionsFilters, cursor: string | null): Parameters<typeof readSessions>[0] {
+function serverArgs(filters: SessionsFilters, cursor: string | null, timezone: string): Parameters<typeof readSessions>[0] {
   const args: Parameters<typeof readSessions>[0] = { page_size: 50, cursor };
   if (filters.window === "month") args.month = filters.month;
-  if (filters.window === "today") args.day = localDate();
-  if (filters.window === "7d") { args.date_from = shiftDate(localDate(), -6); args.date_to = localDate(); }
+  const today = dateInTimezone(timezone);
+  if (filters.window === "today") args.day = today;
+  if (filters.window === "7d") { args.date_from = shiftDate(today, -6); args.date_to = today; }
   if (filters.window === "custom") { args.date_from = filters.date_from; args.date_to = filters.date_to; }
   if (filters.host_kind !== "all") args.host_kind = filters.host_kind;
   if (filters.model.trim()) args.model = filters.model.trim();
@@ -93,7 +95,9 @@ function updateFilter(setFilters: Dispatch<SetStateAction<SessionsFilters>>, key
 }
 
 export function SessionsPage() {
-  const [filters, setFilters] = useState<SessionsFilters>(initialFilters);
+  const [filters, setFilters] = useState<SessionsFilters>(() => filtersForTimezone(DEFAULT_STATISTICS_TIMEZONE));
+  const [statisticsTimezone, setStatisticsTimezone] = useState(DEFAULT_STATISTICS_TIMEZONE);
+  const [timezoneReady, setTimezoneReady] = useState(false);
   const [rows, setRows] = useState<SessionRow[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [total, setTotal] = useState<number | null>(null);
@@ -105,10 +109,22 @@ export function SessionsPage() {
   const generation = useRef(0);
   const requestInFlight = useRef(false);
   const pendingRefresh = useRef(false);
+  const dateFiltersTouched = useRef(false);
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
   const serverKey = useMemo(() => JSON.stringify([filters.window, filters.month, filters.date_from, filters.date_to, filters.host_kind, filters.model, filters.provider]), [filters]);
   const visibleRows = useMemo(() => filters.cost_status === "all" ? rows : rows.filter((row) => row.cost_status.state === filters.cost_status), [filters.cost_status, rows]);
+
+  useEffect(() => {
+    let active = true;
+    void readStatisticsTimezone().catch(() => ({ timezone: DEFAULT_STATISTICS_TIMEZONE })).then(({ timezone }) => {
+      if (!active) return;
+      setStatisticsTimezone(timezone);
+      if (!dateFiltersTouched.current) setFilters(filtersForTimezone(timezone));
+      setTimezoneReady(true);
+    });
+    return () => { active = false; };
+  }, []);
 
   const fetchFirstPage = async () => {
     if (requestInFlight.current) {
@@ -125,7 +141,7 @@ export function SessionsPage() {
     setError(null);
     setNextCursor(null);
     try {
-      const page = await readSessions(serverArgs(currentFilters, null));
+      const page = await readSessions(serverArgs(currentFilters, null, statisticsTimezone));
       if (currentGeneration !== generation.current) return;
       setRows(page.sessions);
       setNextCursor(page.next_cursor);
@@ -146,7 +162,7 @@ export function SessionsPage() {
     }
   };
 
-  useEffect(() => { void fetchFirstPage(); }, [serverKey]);
+  useEffect(() => { if (timezoneReady) void fetchFirstPage(); }, [serverKey, statisticsTimezone, timezoneReady]);
 
   useEffect(() => {
     let active = true;
@@ -155,7 +171,7 @@ export function SessionsPage() {
     Promise.all([listen("usage-fold-updated", refresh), listen("sync-status-updated", refresh), listen("source-data-deleted", refresh)])
       .then((unsubscribers) => { if (active) cleanups = unsubscribers; else unsubscribers.forEach((unsubscribe) => unsubscribe()); });
     return () => { active = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
-  }, [serverKey]);
+  }, [serverKey, statisticsTimezone, timezoneReady]);
 
   const loadMore = async () => {
     if (!nextCursor || loadingMore || requestInFlight.current) return;
@@ -163,7 +179,7 @@ export function SessionsPage() {
     requestInFlight.current = true;
     setLoadingMore(true);
     try {
-      const page = await readSessions(serverArgs(filters, nextCursor));
+      const page = await readSessions(serverArgs(filters, nextCursor, statisticsTimezone));
       if (currentGeneration !== generation.current) return;
       setRows((current) => {
         const known = new Set(current.map((row) => row.session_ref));
@@ -200,9 +216,9 @@ export function SessionsPage() {
     </section>
 
     <section className="sessions-toolbar" aria-label="会话筛选">
-      <label>时间窗口<select value={filters.window} onChange={(event) => updateFilter(setFilters, "window", event.target.value)}><option value="month">按月</option><option value="today">今天</option><option value="7d">最近 7 天</option><option value="custom">自定义</option></select></label>
-      {filters.window === "month" && <label>月份<input type="month" value={filters.month} onChange={(event) => updateFilter(setFilters, "month", event.target.value)} /></label>}
-      {filters.window === "custom" && <><label>开始日期<input type="date" value={filters.date_from} onChange={(event) => updateFilter(setFilters, "date_from", event.target.value)} /></label><label>结束日期<input type="date" value={filters.date_to} onChange={(event) => updateFilter(setFilters, "date_to", event.target.value)} /></label></>}
+      <label>时间窗口<select value={filters.window} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "window", event.target.value); }}><option value="month">按月</option><option value="today">今天</option><option value="7d">最近 7 天</option><option value="custom">自定义</option></select></label>
+      {filters.window === "month" && <label>月份<input type="month" value={filters.month} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "month", event.target.value); }} /></label>}
+      {filters.window === "custom" && <><label>开始日期<input type="date" value={filters.date_from} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "date_from", event.target.value); }} /></label><label>结束日期<input type="date" value={filters.date_to} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "date_to", event.target.value); }} /></label></>}
       <label>宿主<input list="session-host-options" value={filters.host_kind === "all" ? "" : filters.host_kind} placeholder="全部宿主 / 动态宿主" onChange={(event) => updateFilter(setFilters, "host_kind", event.target.value || "all")} /></label>
       <datalist id="session-host-options"><option value="codex" /><option value="claude-code" /><option value="dsh" /><option value="workbuddy" /><option value="zcode" /><option value="minimax-code" /></datalist>
       <label>模型<input value={filters.model} placeholder="可选精确匹配" onChange={(event) => updateFilter(setFilters, "model", event.target.value)} /></label>
