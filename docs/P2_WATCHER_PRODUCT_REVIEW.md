@@ -157,7 +157,10 @@ notify 适配器）、`apps/desktop/src-tauri/src/lib.rs::start_source_watcher`�
    是失效判定的唯一权威；事件只负责「早点唤醒那趟对账」。省掉 watcher 线程
    开权威库写连接引入的 SQLITE_BUSY 争用面。
 2. **去抖手搓，不引 notify-debouncer-full**：超时驱动单线程（最后一个事件
-   落定后等 `DEBOUNCE=1.2s` 派发一批）。依赖足迹维持评审表承诺的 +3 crate。
+   落定后等 `DEBOUNCE=1.2s` 派发一批）。依赖足迹实测（workspace lock）：
+   +5 包（notify、crossbeam-channel、crossbeam-utils、filetime、
+   fsevent-sys）——评审表低估为 +3，验收 L2 订正（libc/bitflags/walkdir
+   为既有依赖）。
 3. **trust profile 目录不监听**：trust 传感自身 2s 轮询已是亚秒级时延，
    watcher 无增量。spec §9-P2 的 watch-only 清单收敛为 skills 安装根
    （`scanner::DEFAULT_ROOTS` 的 home 相对部分，变更 → 失效桌面 Skill 体检

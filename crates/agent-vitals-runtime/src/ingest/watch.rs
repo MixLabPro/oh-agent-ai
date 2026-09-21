@@ -347,7 +347,14 @@ fn spawn_platform_watcher(registry: WatchRegistry, waker: TickWaker) -> WatcherH
                       root_identities: &[(PathBuf, RootIdentity)],
                       path: &Path| {
         match watcher.watch(path, notify::RecursiveMode::Recursive) {
-            Ok(()) => {} // 挂上：调用方不再放回 pending；别名由调用方补
+            Ok(()) => {
+                // 挂载成功：这里才是补规范化别名的正确位置——别名只对
+                // 「已经在听」的流有意义（验收 L1：此前补在失败分支，
+                // 延迟挂载的符号链接路径根会静默退回 tick 兜底）。
+                if let Some((_, identity)) = root_identities.iter().find(|(p, _)| p == path) {
+                    add_canonical_alias(router, identity, path);
+                }
+            }
             Err(e) => {
                 let not_found = matches!(e.kind, notify::ErrorKind::PathNotFound)
                     || matches!(&e.kind, notify::ErrorKind::Io(io)
@@ -355,12 +362,6 @@ fn spawn_platform_watcher(registry: WatchRegistry, waker: TickWaker) -> WatcherH
                 if not_found {
                     pending.push(path.to_path_buf()); // 目录未出现，留待重试
                 } else {
-                    // 挂载成功（或平台性失败）——能 canonicalize 就补别名。
-                    if let Some((_, identity)) =
-                        root_identities.iter().find(|(p, _)| p == path)
-                    {
-                        add_canonical_alias(router, identity, path);
-                    }
                     eprintln!("[agent-vitals] watch {} 失败（该根 tick 兜底）: {e}", path.display());
                 }
             }
