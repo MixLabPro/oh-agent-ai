@@ -1,5 +1,4 @@
 //! 同步与入库域。
-//! 同步与入库域。
 
 
 pub mod ingest_service;
