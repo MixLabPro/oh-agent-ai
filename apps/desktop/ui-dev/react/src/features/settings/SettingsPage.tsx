@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { addCustomSourceRoot, amendBillingDeclaration, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, disableBudgetProfile, listenAppEvents, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, resolveBillingImportCandidate, retryBillingRecalculation, revokeBillingDeclaration, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
+import { fetchWatcherHealth, type WatcherHealthStatus, addCustomSourceRoot, amendBillingDeclaration, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, disableBudgetProfile, listenAppEvents, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, resolveBillingImportCandidate, retryBillingRecalculation, revokeBillingDeclaration, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -631,6 +631,17 @@ type CustomSourceSectionProps = {
 };
 
 function CustomSourceSection({ report, loading, error, onReload, onSync }: CustomSourceSectionProps) {
+  const [watcherHealth, setWatcherHealth] = useState<WatcherHealthStatus | null>(null);
+  useEffect(() => {
+    let active = true;
+    let cleanup: (() => void) | undefined;
+    void fetchWatcherHealth().then((status) => { if (active) setWatcherHealth(status); });
+    void listenAppEvents((event) => {
+      if (!active || event.type !== "WatcherHealthChanged") return;
+      void fetchWatcherHealth().then((status) => { if (active) setWatcherHealth(status); });
+    }).then((unsubscribe) => { if (active) cleanup = unsubscribe; else unsubscribe(); });
+    return () => { active = false; cleanup?.(); };
+  }, []);
   const [host, setHost] = useState<"codex" | "claude-code" | "dsh">("codex");
   const [root, setRoot] = useState("");
   const [saving, setSaving] = useState(false);
@@ -691,6 +702,7 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
 
   return <section className="settings-custom-section" aria-labelledby="settings-custom-title">
     <div className="settings-section-heading"><div><p className="eyebrow">本机位置</p><h3 id="settings-custom-title">其他读取位置</h3><p>选择包含工具日志的本机文件夹；只会加入本机读取范围。</p></div></div>
+    <div className="settings-location-row" role="status" aria-live="polite"><strong>实时监听</strong><span>{watcherStatusLabel(watcherHealth)}</span></div>
     {error && <div className="error-banner" role="alert">读取位置设置暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={onReload}>重试</button></div>}
     <SettingsLoadingState loading={loading} hasData={Boolean(report)} title="位置配置" detail="不会读取目录内容。" />
     {report?.status === "unavailable" && <div className="settings-source-state"><strong>读取位置设置暂不可用</strong><span>可以稍后重试；已有来源状态不受影响。</span></div>}
@@ -710,6 +722,16 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
     {actionError && <div className="error-banner" role="alert">{actionError}</div>}
     {message && <p className="settings-custom-message" role="status" aria-live="polite">{message}</p>}
   </section>;
+}
+
+/** watcher 健康的用户文案（HARDENING spec §5.6）：不指控、不暴露路径；
+ * degraded/unavailable 统一为「定期检查」，periodic fallback 永远在场。 */
+function watcherStatusLabel(health: WatcherHealthStatus | null): string {
+  if (!health) return "状态不可判定 · 定期检查每 5 分钟兜底";
+  if (health.mode === "active" && health.pendingRoots === 0) return "实时监听已启用";
+  if (health.mode === "active" && health.pendingRoots > 0) return `部分可用（${health.pendingRoots} 个根等待） · 其余实时`;
+  if (health.mode === "disabled") return "未启用实时监听 · 定期检查每 5 分钟";
+  return "已降级为定期检查 · 每 5 分钟";
 }
 
 export function SettingsPage() {

@@ -1393,6 +1393,80 @@ fn refresh_watch_topology(app: &AppHandle) {
     }
 }
 
+fn watcher_mode_str(mode: agent_vitals_runtime::ingest::watch::WatcherMode) -> &'static str {
+    use agent_vitals_runtime::ingest::watch::WatcherMode;
+    match mode {
+        WatcherMode::Active => "active",
+        WatcherMode::Degraded => "degraded",
+        WatcherMode::Disabled => "disabled",
+        WatcherMode::Unavailable => "unavailable",
+    }
+}
+
+/// `watcher_health` IPC 的有界 DTO（HARDENING spec §5.6）：闭集枚举 + 计数，
+/// **无路径无原生错误串**。watcher 从未启动（老进程/异常路径）= disabled 快照。
+fn watcher_health_payload(handle: Option<&agent_vitals_runtime::ingest::watch::WatcherHandle>) -> serde_json::Value {
+    let h = handle.map(|w| w.health()).unwrap_or_default();
+    serde_json::json!({
+        "status": "ok",
+        "schema_version": 1,
+        "mode": watcher_mode_str(h.mode),
+        "reason_code": h.reason_code,
+        "topology_revision": h.topology_revision,
+        "facts_roots_registered": h.facts_roots_registered,
+        "facts_roots_attached": h.facts_roots_attached,
+        "cache_roots_registered": h.cache_roots_registered,
+        "cache_roots_attached": h.cache_roots_attached,
+        "pending_roots": h.pending_roots,
+        "last_event_at_ms": h.last_event_at_ms,
+        "last_wake_at_ms": h.last_wake_at_ms,
+        "coalesced_wake_count": h.coalesced_wake_count,
+    })
+}
+
+#[tauri::command]
+fn watcher_health(app: AppHandle) -> Result<serde_json::Value, String> {
+    let supervisor = app.state::<WatcherSupervisor>();
+    let guard = supervisor.0.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(watcher_health_payload(guard.as_ref()))
+}
+
+/// 健康变更巡检（spec §5.6）：2s 读一次快照，**只在 mode/revision/挂载数/
+/// pending/reason 变化时**发 `WatcherHealthChanged`——绝不按文件事件频率发。
+/// 巡检线程读的是进程内 mutex 快照，无 DB 访问。
+fn start_watcher_health_publisher(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        {
+            let supervisor = app.state::<WatcherSupervisor>();
+            let guard = supervisor.0.lock().unwrap_or_else(|e| e.into_inner());
+            let h = guard.as_ref().map(|w| w.health()).unwrap_or_default();
+            let key = (
+                h.mode,
+                h.topology_revision,
+                h.facts_roots_attached,
+                h.cache_roots_attached,
+                h.pending_roots,
+                h.reason_code,
+            );
+            let last = app.state::<std::sync::Mutex<Option<(agent_vitals_runtime::ingest::watch::WatcherMode, u64, u32, u32, u32, Option<&'static str>)>>>();
+            let mut slot = last.lock().unwrap_or_else(|e| e.into_inner());
+            if *slot != Some(key) {
+                *slot = Some(key);
+                let payload = watcher_health_payload(guard.as_ref());
+                let _ = app.emit(APP_EVENT, serde_json::json!({
+                    "type": "WatcherHealthChanged",
+                    "schema_version": 1,
+                    "mode": payload.get("mode").cloned().unwrap_or(serde_json::json!("disabled")),
+                    "topology_revision": payload.get("topology_revision").cloned().unwrap_or(serde_json::json!(0)),
+                    "pending_roots": payload.get("pending_roots").cloned().unwrap_or(serde_json::json!(0)),
+                    "reason_code": payload.get("reason_code").cloned().unwrap_or(serde_json::Value::Null),
+                }));
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    });
+}
+
 fn start_source_watcher(app: &AppHandle)
     -> (std::sync::mpsc::Receiver<()>, agent_vitals_runtime::ingest::watch::WatcherHandle)
 {
@@ -3817,6 +3891,7 @@ pub fn run() {
             pick_custom_source_root,
             add_custom_source_root,
             remove_custom_source_root,
+            watcher_health,
             source_host_controls,
             source_data_revision,
             source_read_locations,
@@ -3982,6 +4057,8 @@ pub fn run() {
                 .build(app)?;
             let (wake, watcher_handle) = start_source_watcher(app.handle());
             app.manage(WatcherSupervisor(std::sync::Mutex::new(Some(watcher_handle))));
+            app.manage::<std::sync::Mutex<Option<(agent_vitals_runtime::ingest::watch::WatcherMode, u64, u32, u32, u32, Option<&'static str>)>>>(std::sync::Mutex::new(None));
+            start_watcher_health_publisher(app.handle().clone());
             start_refresh_tick(app.handle().clone(), wake);
             start_trust_monitor_tick(app.handle().clone());
             let args: Vec<String> = std::env::args().collect();

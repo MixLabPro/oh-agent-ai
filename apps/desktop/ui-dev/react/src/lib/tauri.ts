@@ -1,6 +1,6 @@
 export type Unsubscribe = () => void;
 
-export type AppEventType = "FoldCompleted" | "FactsIngested" | "SyncStatusChanged" | "TrustMonitorEvent" | "TrustMonitorInvalidated" | "SourceDataDeleted";
+export type AppEventType = "FoldCompleted" | "FactsIngested" | "SyncStatusChanged" | "TrustMonitorEvent" | "TrustMonitorInvalidated" | "SourceDataDeleted" | "WatcherHealthChanged";
 export type AppEvent = { type: AppEventType };
 
 /** Convert bridge failures into bounded user-facing copy. Raw invoke errors
@@ -2992,7 +2992,7 @@ export async function listen(event: string, handler: (payload: unknown) => void)
   };
 }
 
-const appEventTypes = new Set<AppEventType>(["FoldCompleted", "FactsIngested", "SyncStatusChanged", "TrustMonitorEvent", "TrustMonitorInvalidated", "SourceDataDeleted"]);
+const appEventTypes = new Set<AppEventType>(["FoldCompleted", "FactsIngested", "SyncStatusChanged", "TrustMonitorEvent", "TrustMonitorInvalidated", "SourceDataDeleted", "WatcherHealthChanged"]);
 
 function safeAppEvent(raw: unknown): AppEvent | null {
   const candidate = raw && typeof raw === "object" && "payload" in raw
@@ -3025,4 +3025,43 @@ export async function listenAppEvents(handler: (event: AppEvent) => void): Promi
     window.removeEventListener("agent-vitals-source-data-deleted", windowHandler);
     unsubscribeTauri();
   };
+}
+
+
+/** watcher 健康的有界 DTO（HARDENING spec §5.6）：闭集枚举 + 计数，无路径。 */
+export type WatcherHealthStatus = {
+  mode: "active" | "degraded" | "disabled" | "unavailable";
+  reasonCode: string | null;
+  topologyRevision: number;
+  pendingRoots: number;
+};
+
+const watcherModes: ReadonlySet<WatcherHealthStatus["mode"]> = new Set(["active", "degraded", "disabled", "unavailable"]);
+
+/** 闭集校验 + 数值限幅：未知枚举/越界计数一律拒绝为 null（degrade，不穿墙）。 */
+export function parseWatcherHealth(raw: unknown): WatcherHealthStatus | null {
+  if (!raw || typeof raw !== "object") return null;
+  const candidate = raw as Record<string, unknown>;
+  const mode = candidate.mode;
+  if (typeof mode !== "string" || !watcherModes.has(mode as WatcherHealthStatus["mode"])) return null;
+  const reasonCode = typeof candidate.reason_code === "string" && candidate.reason_code.length <= 48
+    ? candidate.reason_code
+    : null;
+  const bounded = (value: unknown, max: number): number =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= max ? Math.floor(value) : 0;
+  return {
+    mode: mode as WatcherHealthStatus["mode"],
+    reasonCode,
+    topologyRevision: bounded(candidate.topology_revision, 1_000_000_000),
+    pendingRoots: bounded(candidate.pending_roots, 1_000_000),
+  };
+}
+
+/** 读 watcher 健康（命令不可用/旧进程 = null，页面按「不可判定」渲染）。 */
+export async function fetchWatcherHealth(): Promise<WatcherHealthStatus | null> {
+  try {
+    return parseWatcherHealth(await invoke<unknown>("watcher_health"));
+  } catch {
+    return null;
+  }
 }
