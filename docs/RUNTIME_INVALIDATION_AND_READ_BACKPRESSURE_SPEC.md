@@ -1,6 +1,8 @@
 # Runtime 失效信号与读侧背压 Spec
 
-> 状态：**Draft v1.0（2026-09-22）**——由 `EVENT_PROCESSING_AND_OBSERVABILITY_REVIEW.md`
+> 状态：**Draft v1.1（2026-09-22）**——v1.0 基础上记录 P0 与 P2-memo 的实施修订（§4.1 total_changes
+> 走 SQL 函数、第五处手写事务、全重复重放的 revision 语义；§5.1 `ReadVersion` = revision + 配置指纹，
+> 已接 `calendar_month`）。由 `EVENT_PROCESSING_AND_OBSERVABILITY_REVIEW.md`
 > 的 G1/G2/G7/G8/G9 触发；落地事件总线 spec §9 P1 一直未做的
 > `AuthorityRevisionAdvanced` 收编，并把「事件→UI 放大」的治理从 React 侧移到 runtime 核心。
 > 前置：事件总线 spec v1.5（outbox + Dispatcher 两段式 drain 已落地）；HARDENING spec
@@ -34,7 +36,9 @@ revision 键控 memo + 只读打开 + 有界读闸门，让放大即使发生也
 3. **revision 由一个共享的提交 helper 维护。** 权威库的业务写事务有两类入口：
    `AuthorityDb::with_immediate_txn`（76 个调用点，`authority.rs:3966`）与四个手写
    `BEGIN IMMEDIATE` 的 billing 写路径（`billing_declaration_revision_save` / `_revoke` /
-   `billing_apply_active_declarations` / `billing_recalculation_run`）。两类都改为经
+   `billing_apply_active_declarations` / `billing_recalculation_run`）与
+   `pricing_catalog_snapshot_put`（守卫测试落地时抓出的第五处，`execute("BEGIN IMMEDIATE")`
+   写法躲过了 grep）。两类都改为经
    `commit_advancing_revision(conn)` 提交（§4.1），回滚不加。**允许绕过的站点是闭集**：
    schema 迁移块、`repair_issue_timestamp_units`（一次性修复）、`export.rs` 的只读快照事务
    ——由守卫测试逐一枚举（§10）。不用 SQLite trigger（跨表 trigger 维护成本与 schema 演进
@@ -107,18 +111,29 @@ IPC 读命令 ─▶ ReadGate(permit) ─▶ spawn_blocking ─▶ SqlSummaryRep
   执行 `UPDATE schema_meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'authority_revision'`
   后 `COMMIT`。`with_immediate_txn` 的 `Ok` 分支与四个手写 billing 写路径的 `COMMIT` 语句全部
   替换为调用它；回滚路径不经过它。**只读事务不走这些入口**，读不会推进 revision。
-- **空事务不推进**：是否推进由 `Connection::total_changes()` 在事务前后的差值判定——无增量
-  则不 bump、直接 COMMIT。否则 REVIEW G2 的「无变化 tick 零发射」在核心层就落不下来。测试
+- **空事务不推进**：是否推进由 SQL 函数 `total_changes()` 在事务前后的差值判定（rusqlite
+  0.31 没有 `Connection::total_changes`，不为此升依赖）——无增量则不 bump、直接 COMMIT。
+  `INSERT OR IGNORE` 被吸收的行与纯 SELECT 都不计。否则 REVIEW G2 的「无变化 tick 零发射」在核心层就落不下来。测试
   钉住：`with_immediate_txn(|_| Ok(()))` 后 revision 不变。
 - **记账写不算状态变更**：`begin_run` / `finish_run` / `record_delivery` 都是自动提交单语句，
   不经上述 helper，天然不推进——这是现状，写进 spec 是为了防止将来有人把它们「规范化」进
   `with_immediate_txn`。唯一的例外在 `sql_sync.rs:636`：**全重复重放**当前仍在事实事务内落一
   行 `FactsIngested`（注释明写是故意的，「消费者幂等、计数如实进 payload」），这一行会让
   `total_changes` 非零、revision 被推进、无变化 tick 照样发失效。本 spec **推翻该决策**：
-  `inserted == 0 && rejected == 0` 时不落 outbox 行（与上方空批短路同款），注释与事件总线
-  spec §1.2 同 PR 改写；领域消费者失去的只是「重放发生过」这条通知，而它们本来就对此 no-op。
-- 新增 `AuthorityDb::revision(&self) -> Result<u64, AuthorityError>`，单语句读；`open_readonly`
-  连接同样可读。
+  `inserted == 0 && rejected == 0` 时不落 outbox 行（与上方空批短路同款，**已落地**，
+  `sql_sync.rs` 测试 `all_duplicate_replay_writes_no_facts_ingested_row`）；领域消费者失去的
+  只是「重放发生过」这条通知，而它们本来就对此 no-op。
+- **诚实边界**：全重复重放的事务里 `upsert_session` 仍会更新 `last_observed_at_ms`，所以
+  「源文件变了但没产出新事实」的 tick **仍推进 revision**、仍向展示层发一次失效——这是真实
+  的观测更新，不是噪音。「零发射」保证的准确表述是：**没有任何源文件变化的 tick**（SourceGraph
+  检查点全部命中、根本不进写事务）零发射。把 `last_observed_at_ms` 挪出事实事务是可选的
+  后续优化，不在本 spec 范围。
+- 新增 `AuthorityDb::revision(&self) -> Result<u64, AuthorityError>`（`authority::revision_of(conn)`
+  是自由函数形态），单语句读；`open_readonly` 连接同样可读，缺行按 0。
+- **实施状态（2026-09-22）**：以上全部落地——`SCHEMA_VERSION = 26`、`ensure_schema_v26`、
+  `begin_immediate` / `commit_advancing_revision` / `TxnMark`、五处手写事务接入、
+  `tests/revision_guard.rs` 两条守卫（`BEGIN IMMEDIATE` 站点闭集 + revision 行唯一写者）。
+  `FactsIngested.revision` 字段**未做**（留给 P0 收尾）。
 - `AppEvent::facts_ingested` 增加 `revision: u64` 参数，进 payload（补齐事件总线 spec §5
   声明的 `FactsIngested{host, run_id, revision}`）。生产者在同一事务内先读 revision 再 +1
   会引入顺序依赖，故 payload 携带的是**本事务提交后**的值 = 读到的当前值 + 1；测试钉住
@@ -265,7 +280,16 @@ impl ReadMemo {
 }
 ```
 
-- 进程级单例（`OnceLock`），按 `data_home` 键控（多库并存的测试场景）。
+- **版本坐标不只是 revision（实施修订）。** 核对重查询的真实输入后确认它们不是权威库的纯
+  函数：`PricingCards::current()` 读 `state/pricing-overrides.json`（用户补卡 + 路由；桌面 IPC
+  与 MCP serve 两个写者，后者只读打开权威库、无法推进 revision），统计时区来自进程 `TZ`。
+  所以键中的版本是 `ReadVersion { revision, config }`，`config` = 覆盖文件**内容** fnv1a64
+  （不用 mtime：同秒两次写会漏）+ 时区名，`read_memo::config_fingerprint` 计算。这是方案 2
+  （过渡）；方案 1（补卡/路由迁进权威库、MCP 写路径改经 CLI 子进程写库）仍是长期正确形状，
+  做完后 `config` 退化为只剩时区。新增会影响读结果的文件/环境输入**必须**进指纹函数，
+  `fingerprint_covers_*` 测试逐项钉住。
+- 进程级单例（`OnceLock`），`scope`（data_home）进键（多库并存的测试场景）；测试与需要隔离
+  的调用方可自建 `ReadMemo::with_capacity`。
 - **接入点**：`SqlSummaryRepository` 的重查询——首批 `calendar_month`、`monthly_summary`、
   `daily_summary`、`hourly_distribution`、`day_freshness`、`claude_provider_amounts`、
   `billing_declarations`（REVIEW §1 热栈全部命中）。每个接入点先 `db.revision()`（一条
@@ -278,12 +302,36 @@ impl ReadMemo {
 - 容量：LRU 上限 64 项，超限按插入序淘汰；单项 `Value` 大小不设上限（月历一份几十 KB）。
 - 与 `codex_merged_cached`（时间 memo）的关系：codex 面的数据源是 rollout 文件 fold 而非权威
   库，revision 对它无意义，保留时间 memo；两者并存，各自的键空间不相交。
+- **修订：入口点是五个，不是七个。** `day_freshness` 与 `claude_provider_amounts_from_sql`
+  没有独立 IPC 命令——它们是 `monthly_summary` / `daily_summary` 内部调用的纯函数，在
+  IPC 边界缓存已经把它们的成本一并覆盖，各自再开一层 memo 只会多一次无意义的 `Arc`
+  包装。真正的入口点是 `calendar_month` / `monthly_summary` / `daily_summary` /
+  `hourly_distribution` / `billing_declarations` 五个 Tauri 命令。
+- **实施状态（2026-09-22，全部落地）**：`query/read_memo.rs`（`ReadMemo` / `ReadVersion` /
+  `config_fingerprint` / `MemoStats`）+ 五个入口点全部接入：
+  - `calendar_month`（`calendar_month_memoized`，验收 9.10-9.12，
+    `calendar_month_memo_hits_on_same_version_and_misses_on_every_input_change`）；
+  - `monthly_summary` / `daily_summary`（`SqlSummaryRepository::{monthly,daily}_summary_json_memoized`）
+    与 `hourly_distribution`（`hourly_distribution_memoized`）三者共一条参数变异测试
+    `monthly_daily_hourly_summaries_are_memoized_by_version_and_params`（同版本命中、
+    不同月份/日期各自独立条目、revision 前进后 miss、held Arc 逐字节不变）；
+  - `billing_declarations`（`apps/desktop/src-tauri/src/lib.rs`，params 恒 `""`，
+    直接用 `ReadMemo::global()`——N+1 的 revisions/scopes 子查询成本只在 revision
+    前进时付一次）。
+  `calendar_month` 的 `Arc → Value` 克隆发生在锁外、每次 invoke 一份；零拷贝要 IPC
+  层直接序列化 `Arc<Value>`，是 §5.3 `ReadGate` 之后可选的进一步优化，不在本次范围。
 
 ### 5.2 读路径只读打开与连接复用
 
-- `SqlSummaryRepository::open_db` 拆为 `open_db_rw`（现有语义，仅写入面用）与 `open_db_ro`
-  （`AuthorityDb::open_readonly`，`authority.rs:1381`，不跑 DDL、不跑修复扫描、不取 WAL 写锁）。
-  9 处 `open_db()` 调用点按语义分流；读命令全部走 ro。
+- **修订：`open_db()` 没有写入面调用方需要分流。** 核对确认 `SqlSummaryRepository::open_db`
+  的全部 11 个调用点都是读（`calendar_month` / `monthly_summary` / `daily_summary` /
+  `hourly_distribution` / `codex_quota_snapshot` / `claude_quota_status` /
+  `unresolved_billing_groups` 等）——`SqlSummaryRepository` 本就是查询面 repository，
+  没有 `open_db_rw` 要分流的另一半。于是不拆两个方法，直接把 `open_db()` 的内部实现
+  改成 `open_readonly`（`authority.rs:1381`，不跑 DDL、不跑修复扫描、不取 WAL 写锁），
+  新增 `open_db_ro()` 作为主名、`open_db()` 保留为委托别名（11 个既有调用点不用改名）。
+  **副作用是一次真实的 bug 修复**：旧实现（读写 `open`）会在库缺席时静默建一个空库，
+  这与「权威库不自愈」的既定纪律矛盾；切到只读后库缺席一律返回 `None`，不建文件。
 - `open_readonly` 在库缺席时返回 `database_missing`，读命令按现有「首装未同步」空态渲染，
   不建库（与 MCP serve 同纪律）。
 - `repair_issue_timestamp_units` 只保留在 `open`（写入口）——它本来就是一次性迁移修复，跟着
@@ -293,21 +341,34 @@ impl ReadMemo {
 ### 5.3 有界读闸门与阻塞执行（desktop 层，runtime 提供原语）
 
 ```rust
-pub struct ReadGate { permits: std::sync::Semaphore-equivalent（Mutex<usize> + Condvar，无 tokio） }
+// crates/agent-vitals-runtime/src/query/read_gate.rs
+pub struct ReadGate { capacity: usize, state: Mutex<State>, cond: Condvar } // 无 tokio
 impl ReadGate {
-    pub fn acquire(&self) -> ReadPermit;           // 阻塞
-    pub fn try_acquire(&self) -> Option<ReadPermit>;
+    pub fn new(permits: usize) -> Self;
+    pub fn acquire(&self) -> ReadPermit<'_>;            // 阻塞
+    pub fn try_acquire(&self) -> Option<ReadPermit<'_>>;
+    pub fn stats(&self) -> ReadGateStats;                // { permits, held, waiting }
 }
 ```
 
 - 常量 `HEAVY_READ_PERMITS = 2`（真机 8 核；两路并发足够让工作台四命令并发不串行，又把
   最坏情况钉在 2 核）。
-- desktop 的重读命令改为 `#[tauri::command] async fn` + `tauri::async_runtime::spawn_blocking`
-  包裹同步体，进入 blocking 线程后先 `gate.acquire()`。tokio worker 只等 JoinHandle，不再被
-  SQLite 钉死；update check、价目拉取、`session_trace` 不再饿死。
-- MCP serve 的 `tools/call` 复用同一 `ReadGate`（进程各自实例）。
-- 健康面：`ReadGate` 暴露 `waiting: usize` 与 `held: usize` 计数，进 `watcher_health` 同款
-  健康 DTO（REVIEW P4 的「自看护」在此有了可读信号，不必读 CPU）。
+- **实施状态（2026-09-22）**：`ReadGate` 落地（std `Mutex`+`Condvar`，`ReadPermit` 是
+  `Drop` 释放 + 唤醒一个等待者的 RAII 守卫，不可 `Clone`）。desktop 侧
+  `run_heavy_read<F, R>(f: F) -> R`（`apps/desktop/src-tauri/src/lib.rs`）把闭包丢进
+  `tauri::async_runtime::spawn_blocking`，闭包内先 `heavy_read_gate().acquire()` 再执行；
+  四个事故热栈命令（`data_monthly_summary` / `data_daily_summary` / `read_calendar_month` /
+  `read_hourly_distribution`）从 `fn` 改为 `async fn`，函数体整体过 `run_heavy_read(move || {...}).await`。
+  tokio worker 只等 `JoinHandle`，不再被 SQLite 钉死；update check、价目拉取、
+  `session_trace` 不再饿死。真机单测 `heavy_read_gate_bounds_concurrent_execution`
+  用 6 个线程争抢容量 2 的闸门，记录同时在临界区的峰值 ≤ 2（验收 9.13）。
+- `billing_declarations` 未接入 `ReadGate`：它已在只读连接上、且只读一张几十行的表，
+  不是本次事故的贡献者；接入 `ReadMemo` 已经把它的重复调用成本降到零。
+- MCP serve 的 `tools/call` 复用同一 `ReadGate` 是可选的后续项（P3），未做——MCP serve
+  是独立进程，与桌面进程的并发互不影响，不是本次事故的贡献面。
+- 健康面：`ReadGateStats` 已有 `waiting: usize` 与 `held: usize` 计数；接进
+  `watcher_health` 同款健康 DTO（REVIEW P4 的「自看护」在此有了可读信号，不必读 CPU）
+  是可选的后续项，未做。
 
 ---
 
@@ -342,22 +403,55 @@ impl ReadGate {
 
 ---
 
-## 8. 分期
+## 8. 分期与进度（每阶段测试绿后打勾）
 
-- **P0（revision 标量 + 词表分类）**：schema v26 迁移；`with_immediate_txn` bump；
-  `AuthorityDb::revision`；`FactsIngested.revision`；`EventClass`/`ConsumerRole`/兴趣集 +
-  drain SQL 过滤 + 守卫测试。验收：现有 events.rs 全部测试绿 + 新增 5 条（§9.1-9.5）；
-  golden 15 条不变（outbox 行不进 golden 面，但 `sync-facts` 的 stdout 契约要复核）；§9.15-9.17。
-- **P1（合并型消费者 + Invalidated 发射 + ChangePublisher）**：`CoalescingConsumer`；
-  `desktop-ui` 改写；`Invalidated` app-event；`SyncStatusChanged`/`WatcherHealthChanged` 迁到
-  `ChangePublisher`；`FoldCompleted` 与 `FoldEventDebounce` 退役；React 五处 `seenRevision`。
-  验收：§9.6-9.9；真机 1s/次受控写入 + Settings 页挂载，每 tick UI 事件数 ≤ 2
-  （`Invalidated` + 可能的 `SyncStatusChanged`）。
-- **P2（读侧背压）**：`ReadMemo` 接入七个重查询；`open_db_ro` 分流；`ReadGate` +
-  `spawn_blocking`。验收：§9.10-9.13；真机同压测下稳态 CPU < 15%、tokio worker 无 SQLite 栈帧
-  （`sample` 验证一次，之后靠 `ReadGate` 计数）。
-- **P3（可选）**：MCP serve 轮询 revision 接 `ReadMemo`；诊断包 v2 带 `ReadGate`/memo 命中率
-  快照（与 REVIEW P1 日志系统合并做）。
+打勾规则：该阶段全部条目落地 + 对应验收测试绿 + `cargo test` 工作区全绿 + clippy `-D warnings`
+干净，才在阶段行打勾；条目级勾表示该条落地且其测试绿。
+
+- [x] **P0（revision 标量 + 词表分类）** — 2026-09-22 绿（data 182 / runtime 385 + `revision_guard` 2）
+  - [x] schema v26 迁移 + `ensure_schema_v26`（9.5）
+  - [x] `begin_immediate` / `commit_advancing_revision` / `TxnMark`，`with_immediate_txn` 与五处手写事务接入（9.1 / 9.16）
+  - [x] `AuthorityDb::revision` / `authority::revision_of`（只读连接可读）
+  - [x] `tests/revision_guard.rs`：`BEGIN IMMEDIATE` 站点闭集 + revision 行唯一写者（9.17）
+  - [x] 全重复重放不落 `FactsIngested` outbox 行（9.15）
+  - [x] `FactsIngested.payload.revision`（9.2）
+  - [x] `EventClass` 词表分类、`ConsumerRole` / `ConsumerInterest`、drain SQL 兴趣过滤、构造期 `RoleViolation`（9.3 / 9.4）
+  - [x] golden 15 条不变（Python 套件 1233 通过）
+- [x] **P1（合并型消费者 + Invalidated 发射 + ChangePublisher）** — 2026-09-22 绿
+  （workspace `cargo test` 全绿、clippy 干净、desktop `cargo test --lib` 135 通过、
+  `npm run verify:react` 九项全过、`verify-workbench-fold-bridge.mjs` 通过）
+  - [x] `CoalescingConsumer` + `Coalesced`（无载荷结构保证）+ `DispatchReport.flushed`（9.6 / 9.8 / 9.9）
+  - [x] `Invalidation` + `ChangePublisher<T>` / `publish_if_advanced`（9.7）
+  - [x] 桌面 `desktop-ui` 改为合并型消费者（`ConsumerInterest::presentation()`），
+        flush 读只读连接 revision 发 `Invalidated`（`publish_invalidation`）
+  - [x] `SyncStatusChanged`（`SyncStatusPublisher`）/ `WatcherHealthChanged` 迁到 `ChangePublisher`
+  - [x] `FoldCompleted` / `FoldEventDebounce` / `fold_debounce_step` / `emit_fold_event` 退役
+        （`ui/workbench.js` 确认随 `frontendDist: "ui"` 打包，同 PR 改写订阅与 fold-bridge 契约脚本）
+  - [x] React：`Invalidated` DTO 解析（revision 限幅 + hosts 闭集）、`makeInvalidationGate()`
+        共享闸门接入 App/Usage/Sessions/Findings/Settings 五处、Settings 按类型分流
+        （`SourceDataDeleted` / `SyncStatusChanged` / 失效三分支）
+  - [ ] 真机：1s/次受控写入 + Settings 页挂载，每 tick UI 事件 ≤ 2（留待真机验收）
+- [x] **P2（读侧背压）** — 2026-09-22 绿（workspace `cargo test` 全绿、clippy 干净，
+  desktop `cargo test --lib` 136 通过、`cargo build --release -p agent-vitals` 通过、
+  golden 16/16 逐字节一致）
+  - [x] `ReadMemo` / `ReadVersion` / `config_fingerprint`（原语级测试 9 条）
+  - [x] `calendar_month` 接入（9.10 / 9.11 / 9.12）
+  - [x] `monthly_summary` / `daily_summary` / `hourly_distribution` / `billing_declarations`
+        接入 memo（`monthly_daily_hourly_summaries_are_memoized_by_version_and_params`）
+        —— 修订：`day_freshness` / `claude_provider_amounts_from_sql` 是
+        `monthly_summary`/`daily_summary` 的**内部调用**、没有独立 IPC 入口，
+        在这一层缓存已覆盖它们，不需要各自的 memo（§5.1 措辞据此更新）
+  - [x] `open_db_ro` 分流：`SqlSummaryRepository::open_db` 内部改走
+        `AuthorityDb::open_readonly`（11 个既有调用点无需改名，一处切换全部受益），
+        库缺席不再建库（`open_db_ro_returns_none_without_creating_the_file`，9.14）
+  - [x] `ReadGate`（`crates/agent-vitals-runtime/src/query/read_gate.rs`，std
+        Mutex+Condvar，不引入 tokio）+ 桌面 `run_heavy_read` 用
+        `tauri::async_runtime::spawn_blocking` 接入四个事故热栈命令
+        （`data_monthly_summary` / `data_daily_summary` / `read_calendar_month` /
+        `read_hourly_distribution`，9.13）
+  - [ ] 真机：同压测下稳态 CPU < 15%，tokio worker 无 SQLite 栈帧（留待真机验收）
+- [ ] **P3（可选）**：MCP serve 轮询 revision 接 `ReadMemo`；诊断包 v2 带 `ReadGate`/memo 命中率快照
+  （与 REVIEW P1 日志系统合并做）
 
 ---
 
@@ -389,7 +483,7 @@ impl ReadGate {
 
 | 风险 | 守卫 |
 |---|---|
-| revision bump 漏掉某条手写 `BEGIN IMMEDIATE` 的写路径 | 守卫测试 `begin_immediate_sites_are_enumerated`：grep `agent-vitals-data/src` 与 `agent-vitals-runtime/src` 非测试代码中的 `BEGIN IMMEDIATE` 字面量，命中集合必须等于闭集清单（`with_immediate_txn`、四个 billing 写路径、迁移块、`repair_issue_timestamp_units`）；新增站点要么改走 `with_immediate_txn`，要么同 PR 进清单并说明为何不推进 revision。`unchecked_transaction`（`export.rs` 只读快照）另列只读清单 |
+| revision bump 漏掉某条手写 `BEGIN IMMEDIATE` 的写路径 | 守卫测试 `tests/revision_guard.rs::begin_immediate_sites_are_enumerated`：grep `agent-vitals-data/src` 与 `agent-vitals-runtime/src` 非测试代码中的 `BEGIN IMMEDIATE` 字面量，命中集合必须等于闭集清单（`begin_immediate` helper 本体、`ensure_schema` 迁移块、`repair_issue_timestamp_units`；业务写路径全部经 helper，不在清单里）；新增站点要么改走 `with_immediate_txn`，要么同 PR 进清单并说明为何不推进 revision。`unchecked_transaction`（`export.rs` 只读快照）另列只读清单 |
 | 全重复重放仍推进 revision | §4.1 推翻 `sql_sync.rs:636` 的「全重复也发」决策；测试 9.15 |
 | 展示消费者被人改回逐事件 emit | §4.2 角色约束 + §9.3/9.9 守卫 |
 | `Invalidated` 丢失（webview 未就绪） | 电平语义：页面挂载主动拉 + 重启首轮必发 + 5 分钟周期 tick |

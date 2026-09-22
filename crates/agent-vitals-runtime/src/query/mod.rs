@@ -4,6 +4,8 @@
 
 pub mod decision_matrix;
 pub mod export;
+pub mod read_gate;
+pub mod read_memo;
 pub mod summary;
 pub mod trace_service;
 

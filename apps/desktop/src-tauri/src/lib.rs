@@ -3094,6 +3094,9 @@ fn save_billing_declaration_revision(
 }
 
 /// 读取当前仍有效的计费声明；修订历史由影响预览和重算回执继续追踪。
+///
+/// 经 memo（RUNTIME_INVALIDATION spec §5.1）：无查询参数，`params` 恒为 `""`；
+/// N+1（每条声明再查 revisions/scopes）的成本只在 revision 前进时付一次。
 #[tauri::command(async)]
 fn billing_declarations() -> Value {
     let data_home = overview::data_home();
@@ -3101,6 +3104,17 @@ fn billing_declarations() -> Value {
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
         return serde_json::json!({ "status": "unavailable", "declarations": [] });
     };
+    let value = match agent_vitals_runtime::query::read_memo::ReadVersion::observe(Some(&db), &data_home) {
+        Some(version) => agent_vitals_runtime::query::read_memo::ReadMemo::global().get_or_compute(
+            "billing_declarations", &data_home, "", &version,
+            || billing_declarations_value(&db),
+        ),
+        None => std::sync::Arc::new(billing_declarations_value(&db)),
+    };
+    serde_json::Value::clone(&value)
+}
+
+fn billing_declarations_value(db: &agent_vitals_data::authority::AuthorityDb) -> Value {
     match db.billing_declarations() {
         Ok(rows) => serde_json::json!({ "status": "ok", "declarations": rows.into_iter().map(|row| {
             let (declaration_id, host, provider_id, relationship_kind, subscription_name,
@@ -3504,6 +3518,45 @@ fn merge_source_sync_failure(report: &mut Value, sync: &SyncStatus) {
 }
 
 
+/// 重查询的有界并发闸门 + 阻塞线程池执行（RUNTIME_INVALIDATION spec §5.3）：
+/// `#[tauri::command(async)]` 修饰的**同步**函数体此前直接跑在 tokio worker 上
+/// （`respond_async_serialized` 的 future 里内联执行），N 个并发命令钉死 N 个
+/// worker——本次事故热栈的直接机制。`run_heavy_read` 把闭包搬进
+/// `tauri::async_runtime::spawn_blocking`（阻塞线程池，不占 worker）并在进入前
+/// 拿 `ReadGate` 许可，把最坏情况（`ReadMemo` 全 miss）的并发钉在
+/// `HEAVY_READ_PERMITS`（2）。四个接线点：`data_monthly_summary` /
+/// `data_daily_summary` / `read_calendar_month` / `read_hourly_distribution`——
+/// 本次事故热栈点名的四个符号。
+fn heavy_read_gate() -> &'static agent_vitals_runtime::query::read_gate::ReadGate {
+    static GATE: std::sync::OnceLock<agent_vitals_runtime::query::read_gate::ReadGate> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| {
+        agent_vitals_runtime::query::read_gate::ReadGate::new(
+            agent_vitals_runtime::query::read_gate::HEAVY_READ_PERMITS,
+        )
+    })
+}
+
+/// `f` 在阻塞线程池上、持有一个 `ReadGate` 许可时执行。调用方必须 `.await` ——
+/// 这就是把执行搬出 tokio worker 的机制本身。
+async fn run_heavy_read<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = heavy_read_gate().acquire();
+        f()
+    })
+    .await
+    .unwrap_or_else(|e| {
+        // spawn_blocking 的 JoinError 只在闭包 panic 或运行时关闭时发生；这些查询
+        // 都是幂等只读，重试（下一次 invoke）就是完整的恢复路径，这里不吞错误、
+        // 直接向上传播，让 Tauri 的 IPC 层照常把它变成一次失败的 invoke。
+        panic!("heavy read task join failed: {e}")
+    })
+}
+
 /// v0.9 Stage 0.6 工作台 Data Query API（spec §7 目标态"Tauri 只调
 /// monthly_summary 等 API"）：经 `SummaryRepository` trait 调 runtime 的
 /// repository——Phase 3.5 Tier A 起读 SQL 权威库
@@ -3513,19 +3566,33 @@ fn merge_source_sync_failure(report: &mut Value, sync: &SyncStatus) {
 /// 工作台总览/日历两页的诚实字段（freshness/coverage/excluded_hosts）都从
 /// 这里取，不许前端自己从金额反推"有没有数据"。
 #[tauri::command(async)]
-fn data_monthly_summary(month: String) -> Value {
-    use agent_vitals_data::repository::{MonthlySummaryQuery, SummaryRepository};
-    let repo = agent_vitals_runtime::summary::SqlSummaryRepository::new();
-    repo.monthly_summary(&MonthlySummaryQuery { month }).to_json()
+async fn data_monthly_summary(month: String) -> Value {
+    run_heavy_read(move || {
+        use agent_vitals_data::repository::MonthlySummaryQuery;
+        let repo = agent_vitals_runtime::summary::SqlSummaryRepository::new();
+        let value = repo.monthly_summary_json_memoized(
+            &MonthlySummaryQuery { month },
+            agent_vitals_runtime::query::read_memo::ReadMemo::global(),
+        );
+        Value::clone(&value)
+    })
+    .await
 }
 
 /// v0.9 Stage 0.6 单日版（北京日 YYYY-MM-DD）。与 `data_monthly_summary`
 /// 同一条 trait 路径、同一份 DTO 契约（同为 SQL 权威库读源）。
 #[tauri::command(async)]
-fn data_daily_summary(date: String) -> Value {
-    use agent_vitals_data::repository::{DailySummaryQuery, SummaryRepository};
-    let repo = agent_vitals_runtime::summary::SqlSummaryRepository::new();
-    repo.daily_summary(&DailySummaryQuery { date }).to_json()
+async fn data_daily_summary(date: String) -> Value {
+    run_heavy_read(move || {
+        use agent_vitals_data::repository::DailySummaryQuery;
+        let repo = agent_vitals_runtime::summary::SqlSummaryRepository::new();
+        let value = repo.daily_summary_json_memoized(
+            &DailySummaryQuery { date },
+            agent_vitals_runtime::query::read_memo::ReadMemo::global(),
+        );
+        Value::clone(&value)
+    })
+    .await
 }
 
 /// Claude Pro 额度提醒的开关（默认关）。
@@ -3715,11 +3782,14 @@ fn data_codex_quota() -> Option<Value> {
 /// DSH 零用量月份让 claude/codex 的真实用量在日历上不可见）。每天三宿主
 /// 各自 token + 耗费，钱不跨宿主不跨币合并（口径各异，格子副行分币并列）。
 #[tauri::command(async)]
-fn read_calendar_month(month: String) -> Value {
-    agent_vitals_runtime::summary::calendar_month(
-        &month,
-        &agent_vitals_runtime::summary::codex_home(),
-    )
+async fn read_calendar_month(month: String) -> Value {
+    run_heavy_read(move || {
+        agent_vitals_runtime::summary::calendar_month(
+            &month,
+            &agent_vitals_runtime::summary::codex_home(),
+        )
+    })
+    .await
 }
 
 /// 单日按小时分布（北京小时）——旧 calendar.html「小时格热力」组件接入
@@ -3727,11 +3797,14 @@ fn read_calendar_month(month: String) -> Value {
 /// dsh=今日 today-json / 历史日 facts-index、claude=facts-index（该日
 /// 会话被 ingest 过才有——来源标注让部分覆盖在 UI 上可见）。
 #[tauri::command(async)]
-fn read_hourly_distribution(date: String) -> Value {
-    agent_vitals_runtime::summary::hourly_distribution(
-        &date,
-        &agent_vitals_runtime::summary::codex_home(),
-    )
+async fn read_hourly_distribution(date: String) -> Value {
+    run_heavy_read(move || {
+        agent_vitals_runtime::summary::hourly_distribution(
+            &date,
+            &agent_vitals_runtime::summary::codex_home(),
+        )
+    })
+    .await
 }
 
 /// 工作台「立即同步」按钮：返回本次请求的单调 ID。后台完成后由
@@ -4251,7 +4324,7 @@ mod tests {
     /// （金额值随机器变，形状不随）。
     #[test]
     fn data_monthly_summary_dto_matches_the_frozen_contract_shape() {
-        let d = data_monthly_summary(overview::current_month_beijing());
+        let d = tauri::async_runtime::block_on(data_monthly_summary(overview::current_month_beijing()));
         let keys: Vec<&String> = d["by_host"].as_object().unwrap().keys().collect();
         assert_eq!(keys, ["claude-code", "codex", "dsh", "workbuddy"]);
         assert_eq!(d["excluded_hosts"], serde_json::json!([]));
@@ -4279,11 +4352,37 @@ mod tests {
         // null 分支 = 无证据，同样合法（不得编造）。
     }
 
+    /// RUNTIME_INVALIDATION spec 验收 9.13：`ReadGate` 把并发重查询的执行钉在
+    /// `HEAVY_READ_PERMITS`。三路并发 `spawn_blocking` 争抢一个容量为 2 的闸门，
+    /// 用一把互斥锁记录「同时在临界区里的任务数」的峰值——峰值必须 ≤ 2。
+    #[test]
+    fn heavy_read_gate_bounds_concurrent_execution() {
+        use agent_vitals_runtime::query::read_gate::ReadGate;
+        let gate = std::sync::Arc::new(ReadGate::new(2));
+        let concurrent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handles: Vec<_> = (0..6).map(|_| {
+            let gate = std::sync::Arc::clone(&gate);
+            let concurrent = std::sync::Arc::clone(&concurrent);
+            let peak = std::sync::Arc::clone(&peak);
+            std::thread::spawn(move || {
+                let _permit = gate.acquire();
+                let now = concurrent.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                concurrent.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        }).collect();
+        for h in handles { h.join().unwrap(); }
+        assert!(peak.load(std::sync::atomic::Ordering::SeqCst) <= 2,
+            "concurrent executions under the gate must never exceed its permit count");
+    }
+
     /// Token 日历的跨宿主数据面（真机形状）：本机 2026-09 claude/codex 有
     /// 真实用量（DSH 才全零），日历聚合不得全零；钱的键分币齐全。
     #[test]
     fn read_calendar_month_is_cross_host_not_dsh_only() {
-        let v = read_calendar_month(overview::current_month_beijing());
+        let v = tauri::async_runtime::block_on(read_calendar_month(overview::current_month_beijing()));
         let days = v["days"].as_object().expect("days map");
         let total: i64 = days.values().map(|d| d["total_tokens"].as_i64().unwrap_or(0)).sum();
         assert!(total > 0, "本机 2026-09 claude/codex 有真实用量，日历不得全零（got {total}）");
@@ -4304,14 +4403,14 @@ mod tests {
     #[test]
     fn read_hourly_distribution_matches_calendar_codex_day() {
         let month = overview::current_month_beijing();
-        let cal = read_calendar_month(month.clone());
+        let cal = tauri::async_runtime::block_on(read_calendar_month(month.clone()));
         let days = cal["days"].as_object().expect("days map");
         // 找一个 codex 有用量的日子（本机 2026-09 codex 3.27 亿 token，必有）。
         let (date, day_row) = days.iter()
             .find(|(_, d)| d["codex_tokens"].as_i64().unwrap_or(0) > 0)
             .map(|(k, v)| (k.clone(), v.clone()))
             .expect("本机当月必有 codex 用量日");
-        let v = read_hourly_distribution(date.clone());
+        let v = tauri::async_runtime::block_on(read_hourly_distribution(date.clone()));
         assert_eq!(v["date"], serde_json::json!(date));
         let hours = v["hours"].as_array().expect("hours array");
         assert_eq!(hours.len(), 24, "24 小时全量输出（空小时 = null，不裁剪）");
