@@ -1359,9 +1359,8 @@ struct WatcherSupervisor(std::sync::Mutex<Option<agent_vitals_runtime::ingest::w
 /// 读取的是已提交状态，与 sync 的下一次读取一致。worker 已退出时静默跳过
 /// （周期兜底仍在服务）。
 fn refresh_watch_topology(app: &AppHandle) {
-    let supervisor = app.state::<WatcherSupervisor>();
-    let guard = supervisor.0.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(handle) = guard.as_ref() else { return };
+    // 派生（读两份配置文件）在锁**外**做——supervisor 锁只护住句柄读取与
+    // replace 的发送（验收 I-1：锁内 I/O 会把健康查询与热插拔串行化）。
     let user_home = std::path::PathBuf::from(
         std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
@@ -1370,25 +1369,30 @@ fn refresh_watch_topology(app: &AppHandle) {
     if user_home.as_os_str().is_empty() {
         return;
     }
-    match agent_vitals_runtime::sources::watch_topology::watch_topology(
+    let registry = match agent_vitals_runtime::sources::watch_topology::watch_topology(
         &overview::data_home(),
         &user_home,
     ) {
         Ok(topology) => {
             let skills = app.state::<store::SkillsScanState>().inner().clone();
-            let registry = agent_vitals_runtime::ingest::watch::WatchRegistry::from_topology(
+            agent_vitals_runtime::ingest::watch::WatchRegistry::from_topology(
                 &topology,
                 move |_host| {
                     let skills = skills.clone();
                     std::sync::Arc::new(move || skills.invalidate())
                 },
-            );
-            if let Err(error) = handle.replace(registry) {
-                eprintln!("[agent-vitals] watch 拓扑替换未送达（worker 已退出）: {error}");
-            }
+            )
         }
         Err(error) => {
             eprintln!("[agent-vitals] watch 拓扑派生失败（保持现拓扑）: {error}");
+            return;
+        }
+    };
+    let supervisor = app.state::<WatcherSupervisor>();
+    let guard = supervisor.0.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(handle) = guard.as_ref() {
+        if let Err(error) = handle.replace(registry) {
+            eprintln!("[agent-vitals] watch 拓扑替换未送达（worker 已退出）: {error}");
         }
     }
 }
@@ -1435,35 +1439,45 @@ fn watcher_health(app: AppHandle) -> Result<serde_json::Value, String> {
 /// pending/reason 变化时**发 `WatcherHealthChanged`——绝不按文件事件频率发。
 /// 巡检线程读的是进程内 mutex 快照，无 DB 访问。
 fn start_watcher_health_publisher(app: AppHandle) {
-    std::thread::spawn(move || loop {
-        {
-            let supervisor = app.state::<WatcherSupervisor>();
-            let guard = supervisor.0.lock().unwrap_or_else(|e| e.into_inner());
-            let h = guard.as_ref().map(|w| w.health()).unwrap_or_default();
-            let key = (
-                h.mode,
-                h.topology_revision,
-                h.facts_roots_attached,
-                h.cache_roots_attached,
-                h.pending_roots,
-                h.reason_code,
+    std::thread::spawn(move || {
+        type HealthKey = (
+            agent_vitals_runtime::ingest::watch::WatcherMode,
+            u64,
+            u32,
+            u32,
+            u32,
+            Option<&'static str>,
+        );
+        let mut last: Option<HealthKey> = None;
+        loop {
+            // 快照在 supervisor 锁内取（短持锁、零 I/O），比较与 emit 在锁外
+            // （验收 I-1：持锁 emit 会拖住热插拔）。
+            let snapshot = {
+                let supervisor = app.state::<WatcherSupervisor>();
+                let guard = supervisor.0.lock().unwrap_or_else(|e| e.into_inner());
+                guard.as_ref().map(|w| w.health()).unwrap_or_default()
+            };
+            let key: HealthKey = (
+                snapshot.mode,
+                snapshot.topology_revision,
+                snapshot.facts_roots_attached,
+                snapshot.cache_roots_attached,
+                snapshot.pending_roots,
+                snapshot.reason_code,
             );
-            let last = app.state::<std::sync::Mutex<Option<(agent_vitals_runtime::ingest::watch::WatcherMode, u64, u32, u32, u32, Option<&'static str>)>>>();
-            let mut slot = last.lock().unwrap_or_else(|e| e.into_inner());
-            if *slot != Some(key) {
-                *slot = Some(key);
-                let payload = watcher_health_payload(guard.as_ref());
+            if last != Some(key) {
+                last = Some(key);
                 let _ = app.emit(APP_EVENT, serde_json::json!({
                     "type": "WatcherHealthChanged",
                     "schema_version": 1,
-                    "mode": payload.get("mode").cloned().unwrap_or(serde_json::json!("disabled")),
-                    "topology_revision": payload.get("topology_revision").cloned().unwrap_or(serde_json::json!(0)),
-                    "pending_roots": payload.get("pending_roots").cloned().unwrap_or(serde_json::json!(0)),
-                    "reason_code": payload.get("reason_code").cloned().unwrap_or(serde_json::Value::Null),
+                    "mode": watcher_mode_str(snapshot.mode),
+                    "topology_revision": snapshot.topology_revision,
+                    "pending_roots": snapshot.pending_roots,
+                    "reason_code": snapshot.reason_code,
                 }));
             }
+            std::thread::sleep(std::time::Duration::from_secs(2));
         }
-        std::thread::sleep(std::time::Duration::from_secs(2));
     });
 }
 
@@ -4057,7 +4071,6 @@ pub fn run() {
                 .build(app)?;
             let (wake, watcher_handle) = start_source_watcher(app.handle());
             app.manage(WatcherSupervisor(std::sync::Mutex::new(Some(watcher_handle))));
-            app.manage::<std::sync::Mutex<Option<(agent_vitals_runtime::ingest::watch::WatcherMode, u64, u32, u32, u32, Option<&'static str>)>>>(std::sync::Mutex::new(None));
             start_watcher_health_publisher(app.handle().clone());
             start_refresh_tick(app.handle().clone(), wake);
             start_trust_monitor_tick(app.handle().clone());
@@ -4078,6 +4091,31 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// watcher_health DTO 的形状纪律（HARDENING spec §5.6/§7「desktop IPC」行）：
+    /// 闭集 mode 字符串、原因码来自闭集、**无任何路径/错误串字段**、
+    /// 未启动 watcher 的缺省快照 = disabled。
+    #[test]
+    fn watcher_health_payload_is_bounded_and_path_free() {
+        let payload = watcher_health_payload(None);
+        assert_eq!(payload.get("mode"), Some(&serde_json::json!("disabled")));
+        let allowed_modes = ["active", "degraded", "disabled", "unavailable"];
+        assert!(allowed_modes.contains(&payload.get("mode").and_then(|m| m.as_str()).unwrap_or("")));
+        let serialized = payload.to_string();
+        for forbidden in ["\"path\"", "\"root\"", "error"] {
+            assert!(!serialized.contains(forbidden), "DTO 不得携带 {forbidden}: {serialized}");
+        }
+        // 有句柄时的健康面：字段齐全（desktop 启用 watcher feature，句柄
+        // 非 noop；健康快照由 worker 异步写，这里只钉字段存在性）。
+        use agent_vitals_runtime::ingest::watch::TickWaker;
+        let waker = TickWaker::channel().waker;
+        let registry = agent_vitals_runtime::ingest::watch::WatchRegistry::new();
+        let handle = agent_vitals_runtime::ingest::watch::spawn_watcher(registry, waker);
+        let payload = watcher_health_payload(Some(&handle));
+        for field in ["mode", "schema_version", "topology_revision", "facts_roots_registered", "pending_roots"] {
+            assert!(payload.get(field).is_some(), "缺字段 {field}");
+        }
+    }
 
     #[test]
     fn findings_freshness_never_calls_missing_sync_complete() {

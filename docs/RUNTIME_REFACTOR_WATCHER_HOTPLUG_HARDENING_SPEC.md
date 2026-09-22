@@ -576,6 +576,15 @@ these corrections:
    path as `~/sessions`. Both fixed in the Phase B commit; the parity test and
    a structural guard (no built-in root is ever home or `/`) pin them.
 
+7. **CustomApproved roots may live outside the home directory** — §5.3's
+   "below an allowed per-user application-data prefix" is interpreted per
+   origin: built-in and cache roots must stay under `user_home` (lexical +
+   canonical), while user-approved custom roots may point at external volumes
+   (the spec's non-goal forbids *imported profiles* from watching arbitrary
+   paths, not explicit user additions). `/`, the home root and `..` traversal
+   are rejected for every origin; canonical escape checks still apply where a
+   canonical form exists.
+
 Implementation commits (feat/watcher-hardening):
 - Phase A — one-slot tick wake with coalescing
 - Phase B — runtime-owned watch topology with fail-closed root policy

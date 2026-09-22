@@ -157,6 +157,13 @@ CREATE INDEX event_outbox_pending ON event_outbox(created_at_ms, event_id);
 | `HourTicked` / `DayRolled` | **保留位（未发射）** | — | 迭代 3 分析裁决：所列消费（清理/去重窗口/stale 检查）都是幂等自愈的维护动作——按 now 全量清比按事件滚动更简单可靠，没有消费者需要顺序信号之前不发射（发射无人消费的事件只填 outbox）。有第一个真实消费者时再接线并撤本标注 |
 | `TrustMonitorEvent{run_id, observations, inserted, findings_upserted}` | trust 传感（快照模式已接线；P2 常驻复用同通道） | 传感运行事务内、有新观察时（迭代 4 勘正：载荷为**运行级批次摘要**，单观察明细在 trust_observations；correlate 保持同事务内联——事件是通知不是指令，拆出去会丢失 correlate 对自身写入的原子可见性） | 桌面 UI 刷新（webview 类型分发）；P2 起通知消费者（§7.2 门槛） |
 
+| `WatcherHealthChanged{mode, topology_revision, pending_roots, reason_code}` | 桌面健康巡检线程（2026-09-22，HARDENING spec §5.6） | watcher 模式/修订号/挂载数/pending/原因码变化时（2s 巡检，**绝不按文件事件频率**） | React 设置页（Sources 状态行，`aria-live`） |
+
+> 范围说明：`WatcherHealthChanged` 与 `SyncStatusChanged`/`FoldCompleted`/`SourceDataDeleted`/
+> `TrustMonitorInvalidated` 同属**直发 UI 的 app-event 类型**（桌面进程内经单一
+> `app-event` 通道，不落 outbox）——本表登记其词表以维持「先登记后写 emitter」的
+> 完整性；outbox 侧的闭集校验（`EVENT_TYPES`）不涉及其一。
+
 新增事件类型必须先在本表登记（与分类图谱"先登记后写 emitter"同纪律）。
 
 ## 6. 消费者纪律
