@@ -193,7 +193,11 @@ WatcherHealthChanged 的变化才发——这些模式正确，问题是**没有
   （`sync_tick_inner`，三条内部 return 路径都自动继承，不用在每个分支里
   记得插日志）记 tick 耗时；全部 5 处 `app.emit(APP_EVENT, ..)`
   （Invalidated/SyncStatusChanged/WatcherHealthChanged/TrustMonitorInvalidated/
-  SourceDataDeleted）emit 前都有一条 `log_info`，类型与目标字段都在；watcher
+  SourceDataDeleted）emit 前都有一条 `log_info`，类型与目标字段都在，component
+  统一是 `"emit"`（2026-09-22 真机验收补：WatcherHealthChanged 那处此前落在
+  独立的 `"watcher_health"` component 下，按 `component=="emit"` 检索/计数时
+  会漏掉这一类事件——功能不受影响，纯粹是可观测性上的盲区，跟这份文档整体
+  在治的问题同一类）；watcher
   触发的 5 类子进程 spawn（discover/oneline/claude-sync/sync-facts/sessions
   navigation）成功路径统一经 `log_spawn_success` 记「用时 + 是否有兜底输出」
   （此前只有失败路径留痕，成功路径的耗时完全不可见）；watcher 健康日志顺带

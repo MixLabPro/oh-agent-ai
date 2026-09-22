@@ -1668,10 +1668,15 @@ fn start_watcher_health_publisher(app: AppHandle) {
                 // 才发」形同虚设）——但作为上下文搭在真实跳变的这条日志里免费：
                 // REVIEW P1「watcher wake/冷却命中」要的是「能查」，不是「每次
                 // 都记」，这行本来就只在 mode/reason/topology 真变化时才写。
+                // component 用 "emit"（不是 "watcher_health"）——跟另外 4 处
+                // app.emit 前的埋点同一个 tag，2026-09-22 真机验收发现这行原来
+                // 单起一个 component，按 "emit" 做日志检索/统计时会漏掉这一类
+                // 事件（功能不受影响，纯粹是 grep 不到）。消息体前缀事件类型名，
+                // 与其余 4 处「类型名在前」的格式对齐。
                 agent_vitals_runtime::logging::log_info(
-                    "watcher_health",
+                    "emit",
                     &format!(
-                        "mode={} topology_revision={} pending_roots={} reason={} coalesced_wakes={}",
+                        "WatcherHealthChanged mode={} topology_revision={} pending_roots={} reason={} coalesced_wakes={}",
                         watcher_mode_str(snapshot.mode),
                         snapshot.topology_revision,
                         snapshot.pending_roots,
