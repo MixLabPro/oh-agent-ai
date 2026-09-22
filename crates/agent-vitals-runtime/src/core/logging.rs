@@ -169,9 +169,34 @@ fn write_line(level: Level, component: &str, message: &str) {
     }
 }
 
-/// 仅落文件，不打扰终端——用于「值得留痕但不是异常」的记录（watcher 健康
-/// 状态跳变、子进程成功但带警告输出）。
+/// 极简 `RUST_LOG` 读取——**不是** `tracing`/`env_logger` 那套 `EnvFilter`
+/// （没有 per-target/per-module 级别，没有 `off`/`error`/`warn` 分档），只回答
+/// 一个问题：「`log_info` 要不要也打到 stderr」。值里含 `info`/`debug`/`trace`
+/// （大小写不敏感的子串匹配，`RUST_LOG=agent_vitals=debug`/`RUST_LOG=info`
+/// 都命中）就升级。`log_warn`/`log_error` 不受这个开关影响——它们的 stderr
+/// 可见性是「不因这次改动倒退」的既有承诺，不是可选项。
+///
+/// 每次调用都现读 env（不缓存）——这不是热路径（tick 级频率），现读换来的是
+/// 可测试性：缓存在 `OnceLock` 里的话，同一测试进程里第一个用到它的测试会
+/// 把值锁死，后面想测「关掉再打开」就无解了（`data_home()` 同样不缓存，同一
+/// 个理由）。
+fn stderr_shows_info() -> bool {
+    std::env::var("RUST_LOG")
+        .map(|v| {
+            let v = v.to_ascii_lowercase();
+            v.contains("info") || v.contains("debug") || v.contains("trace")
+        })
+        .unwrap_or(false)
+}
+
+/// 默认仅落文件，不打扰终端——用于「值得留痕但不是异常」的记录（watcher 健康
+/// 状态跳变、子进程成功但带警告输出）。设了 `RUST_LOG=info`（或
+/// `debug`/`trace`）时也打到 stderr——本地调试用，与 REVIEW P1「CLI 侧
+/// `RUST_LOG` 走同一 subscriber」同一个诉求的最小实现。
 pub fn log_info(component: &str, message: &str) {
+    if stderr_shows_info() {
+        eprintln!("[agent-vitals] {component}: {message}");
+    }
     write_line(Level::Info, component, message);
 }
 
@@ -282,5 +307,30 @@ mod tests {
             None => std::env::remove_var("AGENT_VITALS_HOME"),
         }
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `RUST_LOG` 是进程级环境变量——与 `AGENT_VITALS_HOME` 同款，靠
+    /// `crate::ENV_LOCK` 序列化，不能省（否则并行跑的其他测试会看见这个
+    /// 测试留下的值，或反过来）。
+    #[test]
+    fn stderr_shows_info_reads_rust_log_case_insensitively() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("RUST_LOG").ok();
+
+        std::env::remove_var("RUST_LOG");
+        assert!(!stderr_shows_info(), "unset RUST_LOG: info stays file-only");
+
+        std::env::set_var("RUST_LOG", "warn");
+        assert!(!stderr_shows_info(), "RUST_LOG=warn does not elevate info");
+
+        for value in ["info", "INFO", "debug", "agent_vitals_runtime=debug", "trace"] {
+            std::env::set_var("RUST_LOG", value);
+            assert!(stderr_shows_info(), "RUST_LOG={value:?} must elevate info to stderr");
+        }
+
+        match prev {
+            Some(p) => std::env::set_var("RUST_LOG", p),
+            None => std::env::remove_var("RUST_LOG"),
+        }
     }
 }

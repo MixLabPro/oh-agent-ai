@@ -183,16 +183,29 @@ WatcherHealthChanged 的变化才发——这些模式正确，问题是**没有
   经同一个 logging 模块落过库，这里只补它没兜住的部分，不重复）+ watcher
   健康巡检的状态跳变（顺着已有的 `ChangePublisher.publish_if_changed` 判定
   记一条，2s 轮询本身不落日志）。
-- **未做**：诊断包 v2（日志尾 + watcher 健康 + 事件计数快照，含导出脱敏
-  投影）；CLI 侧没有 `RUST_LOG` 等价的等级开关——`log_info` 恒定只落文件、
-  `log_warn`/`log_error` 恒定双出口，没有可调节的过滤器（简单优先，真需要
-  调时再加）；tick 开始/结束耗时、每次 emit 的类型与目标这类更细的链路埋点
-  未打——现有接入点覆盖的是「失败与异常」，不是「正常路径的时序」。
-- **验收（部分达成）**：单测钉住格式化/滚动/写入链路（`core::logging::tests`
-  5 条）；真机 smoke 用仓库内 `fixtures/dsh/complete.jsonl` 跑
-  `agent-vitals oneline --shadow` 触发一次真实 warn，确认同时出现在 stderr
-  与 `<data_home>/logs/app.log`（人工验证，未固化为脚本）；诊断包含日志尾这
-  一条验收未达成（诊断包 v2 未做）。
+- **`RUST_LOG` 等价开关（2026-09-22 补）**：`log_info` 默认只落文件；设
+  `RUST_LOG=info`/`debug`/`trace`（大小写不敏感子串匹配，不是真正的
+  `EnvFilter`——没有 per-target/per-module 级别）时也打到 stderr。
+  `log_warn`/`log_error` 不受这个开关影响，双出口是不因这次改动倒退的既有
+  承诺，不是可选项。每次调用现读 env，不缓存（换可测试性——缓存在
+  `OnceLock` 里的话第一个用到它的测试会把值锁死）。
+- **细粒度链路埋点（2026-09-22 补）**：`sync_tick` 包一层计时壳
+  （`sync_tick_inner`，三条内部 return 路径都自动继承，不用在每个分支里
+  记得插日志）记 tick 耗时；全部 5 处 `app.emit(APP_EVENT, ..)`
+  （Invalidated/SyncStatusChanged/WatcherHealthChanged/TrustMonitorInvalidated/
+  SourceDataDeleted）emit 前都有一条 `log_info`，类型与目标字段都在；watcher
+  触发的 5 类子进程 spawn（discover/oneline/claude-sync/sync-facts/sessions
+  navigation）成功路径统一经 `log_spawn_success` 记「用时 + 是否有兜底输出」
+  （此前只有失败路径留痕，成功路径的耗时完全不可见）；watcher 健康日志顺带
+  带上 `coalesced_wake_count`（不进「变了才发」的 key——涨得太勤，进 key 等于
+  废掉这条纪律——只是搭在真实状态跳变那条日志里免费带出来）。
+- **仍未做**：诊断包 v2（日志尾 + watcher 健康 + 事件计数快照，含导出脱敏
+  投影）——见下方独立记录。
+- **验收（部分达成）**：单测钉住格式化/滚动/写入链路 + `RUST_LOG` 开关
+  （`core::logging::tests` 7 条）；真机 smoke 用仓库内 `fixtures/dsh/
+  complete.jsonl` 跑 `agent-vitals oneline --shadow` 触发一次真实 warn，确认
+  同时出现在 stderr 与 `<data_home>/logs/app.log`（人工验证，未固化为脚本）；
+  诊断包含日志尾这一条验收未达成（诊断包 v2 未做）。
 
 ### P2：刷新语义改造（治 G1）
 

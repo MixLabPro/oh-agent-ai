@@ -871,7 +871,13 @@ fn run_navigation(bin: &Path, day: &str) -> Option<Value> {
                     let _ = stdout.read_to_string(&mut out);
                 }
                 return match serde_json::from_str(&out) {
-                    Ok(value) => Some(value),
+                    Ok(value) => {
+                        agent_vitals_runtime::logging::log_info(
+                            "sync",
+                            &format!("sessions navigation 完成，用时 {:?}", start.elapsed()),
+                        );
+                        Some(value)
+                    }
                     Err(e) => {
                         agent_vitals_runtime::logging::log_warn(
                             "sync",
@@ -1010,6 +1016,7 @@ fn resolve_binary_from(
 /// 场景下这是本次事故复盘（G4）点名的盲区之一：托盘说「discover 失败」，但
 /// 为什么失败，唯一知道答案的那份文本被默默丢了。
 fn run_discover(bin: &Path) -> Option<Value> {
+    let started = std::time::Instant::now();
     let out = match std::process::Command::new(bin).arg("discover").output() {
         Ok(out) => out,
         Err(e) => {
@@ -1029,7 +1036,10 @@ fn run_discover(bin: &Path) -> Option<Value> {
         return None;
     }
     match serde_json::from_slice(&out.stdout) {
-        Ok(value) => Some(value),
+        Ok(value) => {
+            agent_vitals_runtime::logging::log_info("sync", &format!("discover 完成，用时 {:?}", started.elapsed()));
+            Some(value)
+        }
         Err(e) => {
             agent_vitals_runtime::logging::log_warn("sync", &format!("discover 输出不是合法 JSON: {e}"));
             None
@@ -1075,6 +1085,7 @@ fn perform_sync() -> SyncStatus {
     // 与 overview::data_home() 一致（future-proof：哪天 data_home 加 legacy 分支
     // 也不至于把账折到 app 读不到的地方）。
     let home = overview::data_home();
+    let started = std::time::Instant::now();
     let out = std::process::Command::new(&bin)
         .arg("oneline")
         .arg(&path)
@@ -1084,7 +1095,7 @@ fn perform_sync() -> SyncStatus {
         .output();
     match out {
         Ok(o) if o.status.success() => {
-            log_stderr_tail_on_success("oneline", &o.stderr);
+            log_spawn_success("oneline", started, &o.stderr);
             SyncStatus::ok("fold", format!("已折入 {session_id}"))
         }
         Ok(o) => SyncStatus::fail(
@@ -1107,13 +1118,14 @@ fn perform_sync() -> SyncStatus {
 /// 跑没有副作用。owner fencing 与 oneline 同款（本二进制 = rust owner，直跑）。
 fn run_claude_sync(bin: &std::path::Path) -> Option<String> {
     let home = overview::data_home();
+    let started = std::time::Instant::now();
     let out = std::process::Command::new(bin)
         .arg("claude-sync")
         .env("AGENT_VITALS_HOME", &home)
         .output();
     match out {
         Ok(o) if o.status.success() => {
-            log_stderr_tail_on_success("claude-sync", &o.stderr);
+            log_spawn_success("claude-sync", started, &o.stderr);
             None
         }
         Ok(o) => Some(format!(
@@ -1125,20 +1137,25 @@ fn run_claude_sync(bin: &std::path::Path) -> Option<String> {
     }
 }
 
-/// 子进程整体成功（退出码 0）但 stderr 非空时补记一条——**这是本次改进的
-/// 核心一处**：`run_claude_sync`/`run_facts_sync` 此前的 `Ok(o) if
-/// o.status.success() => None` 分支完全不看 `o.stderr`，一次「同步成功但有
-/// 降级警告」（比如 retention 清理失败、某条候选声明冲突）会让托盘诚实地说
-/// 「同步成功」，而警告本身从未落地过。子进程里的 warn 大多已经经
-/// `agent_vitals_runtime::logging` 落过一次库（同一个 `data_home`），这里只在
-/// stderr 里还有它没兜住的内容时才补记，不重复；`log_info` 而不是 `log_warn`——
-/// 子进程自己已经决定过这条是不是值得让终端用户看到（它内部若判定是 warn 会
-/// 自己 `log_warn`，这里只是兜底，不升级严重度）。
-fn log_stderr_tail_on_success(component: &'static str, stderr: &[u8]) {
+/// 子进程成功（退出码 0）时的记账：REVIEW P1「子进程 spawn 与退出码」的一半
+/// （另一半——失败路径——各调用点自己的 `log_warn` 已经覆盖）+ **这是本次改进
+/// 里此前真正的盲区**：`run_claude_sync`/`run_facts_sync`/oneline 原先的
+/// `Ok(o) if o.status.success() => None` 分支完全不看 `o.stderr`，一次「同步
+/// 成功但有降级警告」（比如 retention 清理失败、某条候选声明冲突）会让托盘
+/// 诚实地说「同步成功」，警告本身从未落地过。子进程内部的 warn 大多已经经
+/// `agent_vitals_runtime::logging` 落过一次库（同一个 `data_home`），这里的
+/// stderr 追加只在它没兜住的内容时才补——`log_info` 而不是 `log_warn`：子进程
+/// 自己已经决定过这条是不是值得让终端用户看到，这里只是兜底，不升级严重度。
+fn log_spawn_success(component: &'static str, started: std::time::Instant, stderr: &[u8]) {
     let tail = String::from_utf8_lossy(stderr);
     let tail = tail.trim();
-    if !tail.is_empty() {
-        agent_vitals_runtime::logging::log_info(component, &format!("成功但有输出：{tail}"));
+    if tail.is_empty() {
+        agent_vitals_runtime::logging::log_info(component, &format!("成功，用时 {:?}", started.elapsed()));
+    } else {
+        agent_vitals_runtime::logging::log_info(
+            component,
+            &format!("成功，用时 {:?}，但有输出：{tail}", started.elapsed()),
+        );
     }
 }
 
@@ -1149,13 +1166,14 @@ fn log_stderr_tail_on_success(component: &'static str, stderr: &[u8]) {
 /// 指纹跳过未变文件 + fact_id exactly-once（重跑零变化）。
 fn run_facts_sync(bin: &std::path::Path) -> Option<String> {
     let home = overview::data_home();
+    let started = std::time::Instant::now();
     let out = std::process::Command::new(bin)
         .arg("sync-facts")
         .env("AGENT_VITALS_HOME", &home)
         .output();
     match out {
         Ok(o) if o.status.success() => {
-            log_stderr_tail_on_success("sync-facts", &o.stderr);
+            log_spawn_success("sync-facts", started, &o.stderr);
             None
         }
         Ok(o) => Some(format!(
@@ -1308,6 +1326,10 @@ fn publish_invalidation(app: &AppHandle, hosts: std::collections::BTreeSet<Strin
     publisher.0.publish_if_advanced(
         agent_vitals_runtime::events::Invalidation { revision, hosts },
         |inv| {
+            agent_vitals_runtime::logging::log_info(
+                "emit",
+                &format!("Invalidated revision={} hosts={:?}", inv.revision, inv.hosts),
+            );
             let _ = app.emit(APP_EVENT, serde_json::json!({
                 "type": "Invalidated",
                 "schema_version": 1,
@@ -1323,14 +1345,28 @@ fn publish_sync_status(app: &AppHandle, status: &SyncStatus) {
     let publisher = app.state::<SyncStatusPublisher>();
     let key = (status.ok, status.stage.clone(), status.message.clone());
     publisher.0.publish_if_changed(key, |_| {
+        agent_vitals_runtime::logging::log_info(
+            "emit",
+            &format!("SyncStatusChanged ok={} stage={} ", status.ok, status.stage),
+        );
         let _ = app.emit(APP_EVENT, sync_status_payload(status));
     });
+}
+
+/// `sync_tick_inner` 的计时外壳（REVIEW P1「事件链路打点：tick 开始/结束与
+/// 耗时」）：三条内部 return 路径（paused/控制态不可读/正常流程）都在
+/// `sync_tick_inner` 里，包一层比在每个 return 前插日志更不容易漏——新增一条
+/// 分支自动继承计时，不用记得在新分支里也打点。
+fn sync_tick(app: &AppHandle) {
+    let start = std::time::Instant::now();
+    sync_tick_inner(app);
+    agent_vitals_runtime::logging::log_info("sync", &format!("tick finished in {:?}", start.elapsed()));
 }
 
 /// 一轮同步 + 落盘状态 + 重建托盘。**每一条路径都走到这里**——没有提前 return
 /// 跳过托盘更新的分支（这正是「多数正常路径连 state 重读都不做」的修复：无未折
 /// 会话/二进制缺失/discover 失败也要刷新，把外部更新带进托盘）。
-fn sync_tick(app: &AppHandle) {
+fn sync_tick_inner(app: &AppHandle) {
     match overview::sync_is_paused() {
         Ok(true) => {
             let status = SyncStatus::ok("paused", "已按你的选择暂停本机解析".into());
@@ -1628,14 +1664,19 @@ fn start_watcher_health_publisher(app: AppHandle) {
             // 逻辑——之前的盲区不是巡检太吵，是巡检完全不留痕：出问题时只有
             // 「现在」的一份快照，没有「上一次从哪个状态、什么时候变成现在这样」。
             publisher.publish_if_changed(key, |_| {
+                // `coalesced_wake_count` 不进 key（涨得太勤，进 key 会让「变了
+                // 才发」形同虚设）——但作为上下文搭在真实跳变的这条日志里免费：
+                // REVIEW P1「watcher wake/冷却命中」要的是「能查」，不是「每次
+                // 都记」，这行本来就只在 mode/reason/topology 真变化时才写。
                 agent_vitals_runtime::logging::log_info(
                     "watcher_health",
                     &format!(
-                        "mode={} topology_revision={} pending_roots={} reason={}",
+                        "mode={} topology_revision={} pending_roots={} reason={} coalesced_wakes={}",
                         watcher_mode_str(snapshot.mode),
                         snapshot.topology_revision,
                         snapshot.pending_roots,
                         effective_reason.unwrap_or("none"),
+                        snapshot.coalesced_wake_count,
                     ),
                 );
                 let _ = app.emit(APP_EVENT, serde_json::json!({
@@ -1802,6 +1843,7 @@ fn trust_monitor_record_report(
         Err(_) => ("unavailable", Some("snapshot_failed"), Vec::new()),
     };
     let _ = db.trust_monitor_record_result(capability, Some(now_ms), error_code, now_ms);
+    agent_vitals_runtime::logging::log_info("emit", &format!("TrustMonitorInvalidated capability={capability}"));
     let _ = app.emit(APP_EVENT, serde_json::json!({
         "type": "TrustMonitorInvalidated", "kind": "trust_monitor_invalidated",
     }));
@@ -2319,6 +2361,7 @@ fn delete_imported_source_data(app: AppHandle, host: String) -> Result<Value, St
         "route_evidence": deleted.route_evidence,
         "session_excerpts": deleted.session_excerpts,
     });
+    agent_vitals_runtime::logging::log_info("emit", &format!("SourceDataDeleted host={host}"));
     let _ = app.emit(APP_EVENT, serde_json::json!({
         "type": "SourceDataDeleted", "kind": "source_data_deleted", "host": host.clone(),
         "facts": deleted.facts, "sessions": deleted.sessions,
