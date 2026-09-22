@@ -17,13 +17,15 @@ use tauri_plugin_notification::NotificationExt;
 
 use crate::overview;
 
-pub fn maybe_notify(app: &AppHandle) {
+/// `ov` 由调用方（`sync_tick_inner`）算好传进来——同一份重 SQL 聚合
+/// `refresh()`/`budget_alerts::maybe_notify()` 都要用，不在这里再查一次
+/// （2026-09-23 真机验收：一个 tick 里独立查三遍是当时最大的单项浪费）。
+pub fn maybe_notify(app: &AppHandle, ov: &overview::Overview) {
     let data_home = overview::data_home();
     // 默认关、且读不出开关也当关（用户没明确同意过就不打扰）。
     if !agent_vitals_runtime::quota_reminder::enabled_or_default(&data_home) {
         return;
     }
-    let ov = overview::read_overview();
     // 与预算共用「本周期静默」：用户按下静默就是不想被打扰，换个提醒再烦一次
     // 就违背了那个动作的意图。
     if ov.budget.snoozed_until.is_some() {

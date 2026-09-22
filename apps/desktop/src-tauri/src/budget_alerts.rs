@@ -12,8 +12,11 @@ use crate::overview;
 const ACTION_TYPE: &str = "budget-alert";
 const FOCUS_TAB: &str = "budget";
 
-pub fn maybe_notify(app: &AppHandle) {
-    let overview = overview::read_overview();
+/// `overview` 由调用方（`sync_tick_inner`）算好传进来——2026-09-23 真机验收
+/// 抓到这里曾经自己再调一次 `overview::read_overview()`，跟 `refresh()`
+/// 算的是同一份重 SQL 聚合，一个 tick 里白算两遍（budget_alerts 单独一项
+/// 就要 3.4-3.9s）。这里只读，不重新查。
+pub fn maybe_notify(app: &AppHandle, overview: &overview::Overview) {
     let budget = &overview.budget;
     if budget.source != "sql" || budget.snoozed_until.is_some() {
         return;

@@ -212,7 +212,20 @@ WatcherHealthChanged 的变化才发——这些模式正确，问题是**没有
   paused/控制态不可读/正常流程——都补齐，不只是主路径），`refresh` 正是原
   始事故热栈那批函数（`calendar_month`/`day_freshness`/`claude_provider_
   amounts`/`billing_declarations`）,是头号嫌疑，但补埋点当时还没等到下一次
-  真机复验证实具体是哪一步——留给下一次真机验收核对。
+  真机复验证实具体是哪一步——留给下一次真机验收核对。**同日复验+定位+修复**：
+  下一轮真机复验先把 `refresh` 内部再拆一层（`read_overview()` 查询 vs
+  `set_title`/`build_menu`/`set_menu` 托盘更新），随即发现真正的大头根本不在
+  `refresh` 内部——是 `refresh`/`budget_alerts::maybe_notify`/`quota_alerts::
+  maybe_notify` 三处各自独立调用同一份 `overview::read_overview()`，一个 tick
+  里白算两三遍（`budget_alerts` 单独一项测得 3.4-3.9s）。修复：`sync_tick_
+  inner` 只查一次，三个消费者改成收 `&Overview` 参数而不是自己再查（两条
+  paused/控制态不可读的提前 return 分支各自单独算，不影响主路径去重）。独立
+  general-purpose agent 复核签名等价性、全仓库调用点扫描、`read_overview()`
+  纯读无副作用（安全共享）、build/test/clippy 全绿，判定 PASS。真机复验效果：
+  `budget_alerts` 3.4-3.9s → 0.94-1.14s，`refresh` 2-4s → 1.6-22ms，稳态 tick
+  总耗时从均值 13.1s 降到约 4.4s（约 3 倍）。剩下一个记录但未修的次要发现：
+  `budget_alerts` 去掉 `read_overview()` 后还剩约 1s，是它自己的
+  `budget_profiles_status_sql_at` 查询，不在这次修复范围内。
 - **诊断包 v2（2026-09-22 补，`export_diagnostic_package` → `agent-vitals-
   diagnostic/v2`）**：新增 `observability` 段——日志尾（`read_redacted_tail`，
   最多 200 行，经 `redact_path_like` 脱敏投影，不是原始文件）、watcher 健康

@@ -805,13 +805,20 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
     Ok(menu)
 }
 
-/// 重算 overview 并重建托盘 —— 标题（今日成本）与菜单里的数字不是静态文案，每次
-/// 刷新都重新读 state 文件走 core 折叠。
-fn refresh(app: &AppHandle) {
-    let ov = overview::read_overview();
+/// 重建托盘 —— 标题（今日成本）与菜单里的数字不是静态文案，每次刷新都要用最新
+/// 的 overview 重建。**`ov` 由调用方算好传进来，这里不再自己查**：2026-09-23
+/// 真机验收先把 `refresh` 钉成 `sync_tick_inner` 的头号耗时大头（单次 33.5s，
+/// 占 tick 总时间 82%），往下拆一层才发现真正的大头根本不在 `refresh` 内部
+/// ——是 `refresh`/`budget_alerts::maybe_notify`/`quota_alerts::maybe_notify`
+/// 三处各自独立调用同一份重 SQL 聚合（`overview::read_overview()`，calendar_
+/// month/day_freshness/claude_provider_amounts/billing_declarations，原始
+/// 事故热栈那几个函数），一个 tick 里白算两三遍。查询本身收口到
+/// `sync_tick_inner` 里只调一次，`refresh` 现在只剩「托盘更新」
+/// （`set_title`+`build_menu`+`set_menu`，原生 Cocoa 调用）。
+fn refresh(app: &AppHandle, ov: &overview::Overview) {
     if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_title(Some(today_title(&ov)));
-        if let Ok(menu) = build_menu(app, &ov) {
+        let _ = tray.set_title(Some(today_title(ov)));
+        if let Ok(menu) = build_menu(app, ov) {
             let _ = tray.set_menu(Some(menu));
         }
     }
@@ -1379,6 +1386,15 @@ fn timed(label: &str, f: impl FnOnce()) {
     agent_vitals_runtime::logging::log_info("sync", &format!("{label} 完成，用时 {:?}", start.elapsed()));
 }
 
+/// `timed` 的取值版——`refresh` 要拿 `read_overview()` 的结果接着建菜单，
+/// 不能用只返回 `()` 的 `timed`。
+fn timed_value<T>(label: &str, f: impl FnOnce() -> T) -> T {
+    let start = std::time::Instant::now();
+    let value = f();
+    agent_vitals_runtime::logging::log_info("sync", &format!("{label} 完成，用时 {:?}", start.elapsed()));
+    value
+}
+
 /// 一轮同步 + 落盘状态 + 重建托盘。**每一条路径都走到这里**——没有提前 return
 /// 跳过托盘更新的分支（这正是「多数正常路径连 state 重读都不做」的修复：无未折
 /// 会话/二进制缺失/discover 失败也要刷新，把外部更新带进托盘）。
@@ -1388,14 +1404,16 @@ fn sync_tick_inner(app: &AppHandle) {
             let status = SyncStatus::ok("paused", "已按你的选择暂停本机解析".into());
             overview::save_sync_status(&status);
             publish_sync_status(app, &status);
-            timed("refresh", || refresh(app));
+            let ov = timed_value("read_overview", overview::read_overview);
+            timed("refresh", || refresh(app, &ov));
             return;
         }
         Err(error) => {
             let status = SyncStatus::fail("control", format!("同步控制状态不可读：{error}"));
             overview::save_sync_status(&status);
             publish_sync_status(app, &status);
-            timed("refresh", || refresh(app));
+            let ov = timed_value("read_overview", overview::read_overview);
+            timed("refresh", || refresh(app, &ov));
             return;
         }
         Ok(false) => {}
@@ -1413,9 +1431,14 @@ fn sync_tick_inner(app: &AppHandle) {
     // 宿主区：sessions navigation（20s 硬超时；失败不覆盖 hosts.json——上一轮
     // 快照继续渲染并自然转 stale，spec §6 决策 5）。
     refresh_hosts();
-    timed("refresh", || refresh(app));
-    timed("budget_alerts", || budget_alerts::maybe_notify(app));
-    timed("quota_alerts", || quota_alerts::maybe_notify(app));
+    // 2026-09-23 真机验收：这份 overview 只查一次，`refresh`/`budget_alerts`/
+    // `quota_alerts` 三处共用同一个引用——此前各自独立 `read_overview()`，
+    // 一个 tick 里白算两三遍同一份重 SQL 聚合（budget_alerts 单独一项就是
+    // 3.4-3.9s）。
+    let ov = timed_value("read_overview", overview::read_overview);
+    timed("refresh", || refresh(app, &ov));
+    timed("budget_alerts", || budget_alerts::maybe_notify(app, &ov));
+    timed("quota_alerts", || quota_alerts::maybe_notify(app, &ov));
     // 事件总线 drain：无论本轮是否有新折账——drain 自己知道有没有（deliveries
     // 反连接），空轮是 no-op；崩溃残留也在此补投。desktop-ui 合并型消费者在
     // flush 里发 `Invalidated`（带 hosts）。
@@ -2451,9 +2474,9 @@ fn save_statistics_timezone_config(app: AppHandle, timezone: String) -> Result<V
     let background_app = app.clone();
     std::thread::spawn(move || {
         refresh_hosts();
-        refresh(&background_app);
+        refresh(&background_app, &overview::read_overview());
     });
-    refresh(&app);
+    refresh(&app, &overview::read_overview());
     Ok(serde_json::json!({ "status": "saved", "timezone": saved }))
 }
 
