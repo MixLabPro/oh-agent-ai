@@ -2817,6 +2817,20 @@ fn event_bus_backlog_snapshot(data_home: &Path) -> Value {
     })
 }
 
+/// `data_status()` 报告里的价目表版本号——独立抽成纯函数是因为它 2026-09-22
+/// 真机验收才被抓出来错过一次：`data_status.data.pricing` 的字段是
+/// `latest_version`（`data_status.rs:712`），这里曾经读的是不存在的
+/// `version`，逐次返回 `null`，`export_diagnostic_package` 本体因原生文件
+/// 对话框没法无头跑，组成它的聚合函数（`data_status` 自己）各自测过，唯独
+/// 这行字段抽取的胶水代码从没被单测覆盖过。
+fn diagnostic_pricing_version(status: &Value) -> Value {
+    status.get("data")
+        .and_then(|data| data.get("pricing"))
+        .and_then(|pricing| pricing.get("latest_version"))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
 /// 生成用户主动选择保存的脱敏诊断包。只组合现有的状态 DTO + v2 的可观测性
 /// 聚合（日志尾/watcher 健康/事件总线积压/读侧缓存命中率）；不读取会话正文、
 /// 原始日志（日志尾经脱敏投影，不是原文）、账户标识，也不执行上传。取消
@@ -2839,11 +2853,7 @@ fn export_diagnostic_package(app: AppHandle) -> Result<Value, String> {
             "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
             "query_envelope": agent_vitals_runtime::mcp::ENVELOPE_SCHEMA_VERSION,
             "statistics_timezone": agent_vitals_runtime::clock::statistics_timezone_name(),
-            "pricing": status.get("data")
-                .and_then(|data| data.get("pricing"))
-                .and_then(|pricing| pricing.get("version"))
-                .cloned()
-                .unwrap_or(Value::Null),
+            "pricing": diagnostic_pricing_version(&status),
         },
         "privacy": {
             "contains_session_content": false,
@@ -4474,6 +4484,24 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-09-22 真机验收抓出的字段名 bug：`data_status.data.pricing` 里
+    /// 真实字段是 `latest_version`，读错成 `version` 会让诊断包的
+    /// `versions.pricing` 永远是 `null`，即使价目表数据本身齐全。
+    #[test]
+    fn diagnostic_pricing_version_reads_the_real_field_name() {
+        let status = serde_json::json!({
+            "data": { "pricing": { "latest_version": "abc123", "stale": false } }
+        });
+        assert_eq!(diagnostic_pricing_version(&status), serde_json::json!("abc123"));
+    }
+
+    #[test]
+    fn diagnostic_pricing_version_is_null_when_absent_not_an_error() {
+        assert_eq!(diagnostic_pricing_version(&serde_json::json!({})), Value::Null);
+        let no_pricing_key = serde_json::json!({ "data": {} });
+        assert_eq!(diagnostic_pricing_version(&no_pricing_key), Value::Null);
+    }
 
     fn tmp_home(tag: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(
