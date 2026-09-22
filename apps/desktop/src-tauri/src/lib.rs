@@ -128,6 +128,9 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 /// 「2 × tick」是 spec §6 决策 5 的过期定义，周期改了 stale 窗口跟着改，不能
 /// 两处各写一个 5 分钟）。
 const TICK_PERIOD: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// watcher wake 恰好撞上手动同步或 trust 快照时的短重试窗。不能把已经消费的
+/// 单槽 wake 丢回 5 分钟周期，否则「秒级唤醒」会在锁竞争下静默退化。
+const SYNC_LOCK_RETRY_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// 通用过期判定：`generated_at` 年龄 > window。`stale_from`（预算 5 分钟）与
 /// `hosts_stale_from`（宿主区 2 × tick）共用；「无新鲜度信息」→ 不算过期，
@@ -1331,7 +1334,10 @@ fn start_refresh_tick(app: AppHandle, wake: std::sync::mpsc::Receiver<()>) {
         if let Ok(_guard) = lock.0.try_lock() {
             sync_tick(&app);
         } else {
-            eprintln!("[agent-vitals] 同步进行中，跳过本轮");
+            // 不进入 wait：本轮可能正是 watcher 唤醒；若现在消费掉它再等
+            // TICK_PERIOD，会把低延迟保证丢失。短等后重试，仍不并发写库。
+            std::thread::sleep(SYNC_LOCK_RETRY_PERIOD);
+            continue;
         }
         if agent_vitals_runtime::ingest::watch::wait_for_tick_or_wake(&wake, TICK_PERIOD)
             == agent_vitals_runtime::ingest::watch::TickWait::SenderGone

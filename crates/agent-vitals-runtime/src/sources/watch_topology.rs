@@ -15,6 +15,9 @@
 //!   （外置卷/归档挂载是合法用例），但仍拒绝 `/`、home 根本身与 `..` 穿越。
 //!   spec 非目标禁的是「**导入 profile** 递归监听任意路径」，不是用户显式
 //!   添加的自定义源。
+//! - **Configured**：内置宿主的明确运行时根配置（当前仅 `DSH_HOME`）。它同样
+//!   允许 home 外，但只能由已知内置宿主产生，且受与 CustomApproved 相同的范围
+//!   限制；不能借此让 profile 导入任意根。
 //! - **PluginApproved**：**暂缓**——仓库没有签名插件基建（HOST_MANIFEST_DSL
 //!   无签名面），spec §5.3 的 provenance 行在签名系统落地前不开放 plugin
 //!   origin（评审修正，见 HARDENING spec 修订注记）。
@@ -57,6 +60,7 @@ pub enum WatchRootClass {
 pub enum WatchRootOrigin {
     BuiltIn,
     CustomApproved,
+    Configured,
 }
 
 /// 根被拒的闭集原因（无路径、无原生错误串）。
@@ -141,7 +145,7 @@ pub fn validate_descriptor(
         WatchRootClass::FactsSource => {
             let known = match descriptor.origin {
                 WatchRootOrigin::BuiltIn => is_ingest_host(&descriptor.host),
-                WatchRootOrigin::CustomApproved => {
+                WatchRootOrigin::CustomApproved | WatchRootOrigin::Configured => {
                     CUSTOM_FACTS_HOSTS.contains(&descriptor.host.as_str())
                 }
             };
@@ -170,9 +174,10 @@ pub fn validate_descriptor(
             }
             Ok(())
         }
-        WatchRootOrigin::CustomApproved => {
-            // 用户亲手输入的绝对路径：允许 home 外，但已存在时规范化不得
-            // 落到 `/` 或 canonical home（整盘/整个 home 的监听没有产品语义）。
+        WatchRootOrigin::CustomApproved | WatchRootOrigin::Configured => {
+            // 用户亲手输入或内置宿主显式配置的绝对路径：允许 home 外，但已存在时
+            // 规范化不得落到 `/` 或 canonical home（整盘/整个 home 的监听没有
+            // 产品语义）。
             if let Ok(canonical_root) = path.canonicalize() {
                 if canonical_root == *"/" {
                     return Err(RootRejection::FilesystemRoot);
@@ -197,22 +202,42 @@ pub fn watch_topology(data_home: &Path, user_home: &Path) -> Result<WatchTopolog
     let mut topology = WatchTopology::default();
 
     for (host, path) in default_source_watch_roots(user_home) {
-        topology.descriptors.push(WatchRootDescriptor {
+        // `DSH_HOME` 是 DSH 的显式运行时配置，不能错误套用「内置根均在
+        // user_home 内」的规则。默认 ~/.dsh 仍是 BuiltIn；只有偏离默认值的
+        // 已知 DSH 根才取得 Configured provenance。
+        let origin = if host == "dsh" && path != user_home.join(".dsh") {
+            WatchRootOrigin::Configured
+        } else {
+            WatchRootOrigin::BuiltIn
+        };
+        let descriptor = WatchRootDescriptor {
             host: host.to_string(),
             class: WatchRootClass::FactsSource,
-            origin: WatchRootOrigin::BuiltIn,
+            origin,
             path,
             recursive: true,
-        });
+        };
+        match validate_descriptor(&descriptor, user_home) {
+            Ok(()) => topology.descriptors.push(descriptor),
+            Err(reason) => topology
+                .rejected
+                .push((descriptor.host.clone(), descriptor.path.clone(), reason)),
+        }
     }
     for (host, path) in default_skill_watch_roots(user_home) {
-        topology.descriptors.push(WatchRootDescriptor {
+        let descriptor = WatchRootDescriptor {
             host,
             class: WatchRootClass::CacheOnly,
             origin: WatchRootOrigin::BuiltIn,
             path,
             recursive: true,
-        });
+        };
+        match validate_descriptor(&descriptor, user_home) {
+            Ok(()) => topology.descriptors.push(descriptor),
+            Err(reason) => topology
+                .rejected
+                .push((descriptor.host.clone(), descriptor.path.clone(), reason)),
+        }
     }
 
     for source in custom_source_roots(data_home)? {
@@ -231,13 +256,14 @@ pub fn watch_topology(data_home: &Path, user_home: &Path) -> Result<WatchTopolog
         }
     }
 
-    // 排除的宿主：整宿主移除（内置 + 自定义一起）。读取失败按「无排除」
-    // 处理并继续——排除是收紧操作，读不到时保守做法是不放宽。
-    if let Ok(excluded) = crate::source_controls::excluded_hosts(data_home) {
-        topology
-            .descriptors
-            .retain(|d| !excluded.contains(&d.host));
-    }
+    // 排除的宿主：整宿主移除（内置 + 自定义一起）。控制面读失败不能退化成
+    // 「全部未排除」：那会在启动或热插拔时重新监听用户已经禁止的宿主。
+    // 调用方收到 Err 后保留上一份安全快照（启动时则空注册表 + 周期兜底）。
+    let excluded = crate::source_controls::excluded_hosts(data_home)
+        .map_err(|error| format!("source controls failed: {error}"))?;
+    topology
+        .descriptors
+        .retain(|d| !excluded.contains(&d.host));
 
     topology.descriptors.sort_by(|a, b| a.path.cmp(&b.path));
     topology.descriptors.dedup_by(|a, b| a.path == b.path && a.class == b.class);
@@ -316,7 +342,8 @@ mod tests {
             .iter()
             .all(|d| d.class == WatchRootClass::CacheOnly && d.path.starts_with(&user_home)));
 
-        // 干净配置零拒绝。
+        // 干净配置零拒绝；DSH_HOME 若显式改到 home 外，使用受限的 Configured
+        // provenance，而不是被误当内置根静默丢弃。
         assert!(topology.rejected.is_empty());
         let _ = std::fs::remove_dir_all(data_home);
     }
@@ -359,6 +386,18 @@ mod tests {
         let mut custom_ok = descriptor("/mnt/archive");
         custom_ok.origin = WatchRootOrigin::CustomApproved;
         assert!(validate_descriptor(&custom_ok, &user_home).is_ok());
+
+        // DSH_HOME 这类已知宿主的显式配置可在 home 外，但仍复用相同的
+        // 宽根拒绝策略；它不是给未知 host 打开的旁路。
+        let mut configured = descriptor("/mnt/dsh-state");
+        configured.origin = WatchRootOrigin::Configured;
+        configured.host = "dsh".into();
+        assert!(validate_descriptor(&configured, &user_home).is_ok());
+        configured.host = "not-a-host".into();
+        assert_eq!(
+            validate_descriptor(&configured, &user_home).unwrap_err(),
+            RootRejection::UnsupportedHost,
+        );
     }
 
     /// 符号链接逃逸：BuiltIn 根指向 home 外的真实目录 → CanonicalEscape。
@@ -425,6 +464,20 @@ mod tests {
             !topology.descriptors.iter().any(|d| d.host == "claude-code"),
             "排除的宿主不得留任何监听描述符",
         );
+        let _ = std::fs::remove_dir_all(data_home);
+        let _ = std::fs::remove_dir_all(user_home);
+    }
+
+    /// 排除控制文件不可读/损坏不能按「无排除」继续，否则用户已关闭的宿主会
+    /// 在 watcher 重启或热插拔时重新进入监听集合。
+    #[test]
+    fn invalid_source_controls_fail_topology_closed() {
+        let data_home = data_home_with();
+        let user_home = home();
+        std::fs::create_dir_all(&user_home).unwrap();
+        std::fs::write(data_home.join("state/source-controls.json"), "{").unwrap();
+        let error = watch_topology(&data_home, &user_home).unwrap_err();
+        assert!(error.contains("source controls failed"));
         let _ = std::fs::remove_dir_all(data_home);
         let _ = std::fs::remove_dir_all(user_home);
     }

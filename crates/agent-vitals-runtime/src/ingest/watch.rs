@@ -35,6 +35,11 @@ use notify::Watcher;
 /// ~1s，窗口取 1.2s 吸收同批写入的多条事件；再大只会白白推迟唤醒。
 pub const DEBOUNCE: Duration = Duration::from_millis(1_200);
 
+/// 持续写入时的最长合并窗：普通情况下仍等待最后一个事件后的
+/// [`DEBOUNCE`]，但日志每秒追加不能让「实时」无限退化到 5 分钟 tick。
+/// 到点强制派发一次后开始下一窗；正确性仍由 tick 指纹对账保证。
+pub const MAX_DEBOUNCE: Duration = Duration::from_secs(5);
+
 /// tick 唤醒器：watcher 去抖后 `wake()`；tick 循环用
 /// `wait_for_tick_or_wake(receiver, TICK_PERIOD)` 代替 `sleep`——事件到 →
 /// 立刻醒，没事件 → 照旧按周期醒。feature 无关（无 watcher 时没人 wake，
@@ -465,6 +470,12 @@ mod supervised {
     //! worker 内部状态机（只在 worker 线程内动，无锁）。
     use super::*;
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum RootAttachFailure {
+        PermissionDenied,
+        Other,
+    }
+
     pub(super) struct WorkerState {
         event_tx: std::sync::mpsc::Sender<notify::Result<notify::Event>>,
         watcher: Option<notify::RecommendedWatcher>,
@@ -473,6 +484,7 @@ mod supervised {
         identities: Vec<(PathBuf, RootIdentity)>,
         attached: std::collections::HashSet<PathBuf>,
         pending: Vec<PathBuf>,
+        failed: std::collections::HashMap<PathBuf, RootAttachFailure>,
         revision: u64,
         backend_failed: bool,
         facts_registered: u32,
@@ -491,6 +503,7 @@ mod supervised {
                 identities: Vec::new(),
                 attached: std::collections::HashSet::new(),
                 pending: Vec::new(),
+                failed: std::collections::HashMap::new(),
                 revision: 0,
                 backend_failed: false,
                 facts_registered: 0,
@@ -514,6 +527,7 @@ mod supervised {
             self.backend_failed = false;
             self.attached.clear();
             self.pending.clear();
+            self.failed.clear();
             self.facts_registered = snapshot.sources.len() as u32;
             self.cache_registered = snapshot.watch_only.len() as u32;
             self.router = snapshot.router();
@@ -577,6 +591,15 @@ mod supervised {
                     if not_found {
                         self.pending.push(path.to_path_buf());
                     } else {
+                        let failure = match &e.kind {
+                            notify::ErrorKind::Io(io)
+                                if io.kind() == std::io::ErrorKind::PermissionDenied =>
+                            {
+                                RootAttachFailure::PermissionDenied
+                            }
+                            _ => RootAttachFailure::Other,
+                        };
+                        self.failed.insert(path.to_path_buf(), failure);
                         eprintln!(
                             "[agent-vitals] watch {} 失败（该根 tick 兜底）: {e}",
                             path.display()
@@ -630,6 +653,14 @@ mod supervised {
                 (WatcherMode::Degraded, Some("backend_init_failed"))
             } else if registered == 0 {
                 (WatcherMode::Disabled, Some("no_roots"))
+            } else if self
+                .failed
+                .values()
+                .any(|failure| *failure == RootAttachFailure::PermissionDenied)
+            {
+                (WatcherMode::Degraded, Some("root_permission_denied"))
+            } else if !self.failed.is_empty() {
+                (WatcherMode::Degraded, Some("root_attach_failed"))
             } else if self.attached.is_empty() && !self.pending.is_empty() {
                 (WatcherMode::Degraded, Some("root_pending"))
             } else {
@@ -648,6 +679,50 @@ mod supervised {
             h.last_wake_at_ms = last_wake_at_ms;
             h.coalesced_wake_count = coalesced_wake_count;
         }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn failed_root_health_distinguishes_permission_from_other_attach_errors() {
+            let (event_tx, _event_rx) = std::sync::mpsc::channel();
+            let mut state = WorkerState::new(event_tx);
+            state.facts_registered = 1;
+            let health = Arc::new(std::sync::Mutex::new(WatcherHealth::default()));
+
+            state.failed.insert(PathBuf::from("/tmp/root"), RootAttachFailure::Other);
+            state.publish_health(&health, None, None, 0);
+            let snapshot = health.lock().unwrap().clone();
+            assert_eq!(snapshot.mode, WatcherMode::Degraded);
+            assert_eq!(snapshot.reason_code, Some("root_attach_failed"));
+
+            state.failed.insert(
+                PathBuf::from("/tmp/denied"),
+                RootAttachFailure::PermissionDenied,
+            );
+            state.publish_health(&health, None, None, 0);
+            assert_eq!(
+                health.lock().unwrap().reason_code,
+                Some("root_permission_denied"),
+            );
+        }
+    }
+}
+
+#[cfg(feature = "watcher")]
+fn next_event_wait(
+    batch_started_at: Option<std::time::Instant>,
+    last_routed_event_at: Option<std::time::Instant>,
+) -> Duration {
+    match (batch_started_at, last_routed_event_at) {
+        (Some(started), Some(last)) => {
+            let idle_left = DEBOUNCE.saturating_sub(last.elapsed());
+            let max_left = MAX_DEBOUNCE.saturating_sub(started.elapsed());
+            idle_left.min(max_left)
+        }
+        _ => DEBOUNCE,
     }
 }
 
@@ -669,6 +744,8 @@ fn spawn_platform_watcher(initial: WatchRegistry, waker: TickWaker) -> WatcherHa
             let mut coalesced: u64 = 0;
             let mut last_event: Option<i64> = None;
             let mut last_wake: Option<i64> = None;
+            let mut batch_started_at: Option<std::time::Instant> = None;
+            let mut last_routed_event_at: Option<std::time::Instant> = None;
 
             state.apply(initial);
             state.publish_health(&health_for_worker, last_event, last_wake, coalesced);
@@ -678,6 +755,8 @@ fn spawn_platform_watcher(initial: WatchRegistry, waker: TickWaker) -> WatcherHa
                 match control_rx.try_recv() {
                     Ok(snapshot) => {
                         deb = Debouncer::default(); // 旧拓扑的去抖残留整批丢弃
+                        batch_started_at = None;
+                        last_routed_event_at = None;
                         state.apply(snapshot);
                         state.publish_health(&health_for_worker, last_event, last_wake, coalesced);
                         continue;
@@ -691,14 +770,20 @@ fn spawn_platform_watcher(initial: WatchRegistry, waker: TickWaker) -> WatcherHa
                         return;
                     }
                 }
-                match event_rx.recv_timeout(DEBOUNCE) {
+                let timeout = next_event_wait(batch_started_at, last_routed_event_at);
+                match event_rx.recv_timeout(timeout) {
                     Ok(Ok(event)) => {
+                        let mut routed = false;
                         for path in &event.paths {
                             for hit in state.route(path) {
                                 deb.offer(hit);
+                                routed = true;
                             }
                         }
-                        if !event.paths.is_empty() {
+                        if routed {
+                            let now = std::time::Instant::now();
+                            batch_started_at.get_or_insert(now);
+                            last_routed_event_at = Some(now);
                             last_event = Some(local_now_ms());
                         }
                     }
@@ -711,6 +796,8 @@ fn spawn_platform_watcher(initial: WatchRegistry, waker: TickWaker) -> WatcherHa
                         // 超时双职责：①补挂 pending 根；②去抖窗落定派发。
                         state.retry_pending();
                         let batch = deb.take_batch();
+                        batch_started_at = None;
+                        last_routed_event_at = None;
                         if !batch.hosts.is_empty() {
                             if let WakeOutcome::Coalesced = waker.wake() {
                                 coalesced += 1;
@@ -912,6 +999,23 @@ mod tests {
             TickWait::SenderGone);
     }
 
+    /// 持续写入不能不断重置去抖计时器而饿死实时唤醒；达到最长合并窗时，
+    /// 下一次 wait 必须近乎立即超时并派发当前批次。
+    #[cfg(feature = "watcher")]
+    #[test]
+    fn continuous_events_are_bounded_by_max_debounce() {
+        let now = std::time::Instant::now();
+        assert_eq!(next_event_wait(None, None), DEBOUNCE);
+        let started = now
+            .checked_sub(MAX_DEBOUNCE - Duration::from_millis(20))
+            .unwrap();
+        let wait = next_event_wait(Some(started), Some(now));
+        assert!(
+            wait <= Duration::from_millis(20),
+            "最长合并窗将到期时不得再等完整 idle debounce: {wait:?}",
+        );
+    }
+
     /// feature 关闭 → 恒 noop（NoopWatcher），健康快照 Disabled/
     /// feature_disabled，replace 为无操作成功。
     #[cfg(not(feature = "watcher"))]
@@ -960,7 +1064,9 @@ mod tests {
         let mut registry = WatchRegistry::new();
         registry.register_source("claude-code", dir.clone());
         handle.replace(registry).unwrap();
-        for _ in 0..100 {
+        // macOS FSEvents 首次在 worker 内建流的启动时序可超过 5s；这里验收
+        // 的是 supervisor 的最终替换语义，不把平台建流延迟伪装成逻辑失败。
+        for _ in 0..400 {
             health = handle.health();
             if health.topology_revision >= 2 && health.facts_roots_attached >= 1 { break; }
             std::thread::sleep(Duration::from_millis(50));

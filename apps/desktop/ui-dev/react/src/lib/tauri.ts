@@ -3038,11 +3038,11 @@ export type WatcherHealthStatus = {
 
 const watcherModes: ReadonlySet<WatcherHealthStatus["mode"]> = new Set(["active", "degraded", "disabled", "unavailable"]);
 
-/** 原因码闭集（HARDENING spec §5.5 允许的 8 个）——枚举值与 mode 同纪律：
+/** 原因码闭集（HARDENING spec §5.5 允许的 9 个）——枚举值与 mode 同纪律：
  * 未知一律拒为 null（spec §5.6「reject unrecognized enum values」）。 */
 const watcherReasonCodes: ReadonlySet<string> = new Set([
   "feature_disabled", "no_roots", "home_unavailable", "backend_init_failed",
-  "root_pending", "root_permission_denied", "worker_terminated", "topology_rejected",
+  "root_pending", "root_permission_denied", "root_attach_failed", "worker_terminated", "topology_rejected",
 ]);
 
 /** 闭集校验 + 数值限幅：未知枚举/越界计数一律拒绝为 null（degrade，不穿墙）。 */

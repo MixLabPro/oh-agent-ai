@@ -255,7 +255,7 @@ pub struct WatchRootDescriptor {
     pub key: WatchRootKey,             // stable opaque identifier
     pub host: HostId,                  // validated built-in or plugin slug
     pub class: WatchRootClass,          // FactsSource | CacheOnly
-    pub origin: WatchRootOrigin,        // BuiltIn | CustomApproved | PluginApproved
+    pub origin: WatchRootOrigin,        // BuiltIn | CustomApproved | Configured | PluginApproved
     pub path: PathBuf,                  // runtime-only; never a UI/MCP DTO
     pub recursive: bool,
 }
@@ -276,7 +276,7 @@ Dynamic roots are permitted only when all checks pass:
 
 | Check | Requirement |
 | --- | --- |
-| provenance | descriptor came from a locally approved custom source; plugin manifests are **deferred** — see the review note below |
+| provenance | descriptor is a built-in root, a locally approved custom source, or an explicit built-in-host runtime configuration (`DSH_HOME`); plugin manifests are **deferred** — see the review note below |
 | host identity | slug passes the existing host registry validator |
 | lexical scope | normalized path is below an allowed per-user application-data prefix; `/`, home root and parent traversal are rejected |
 | canonical scope | canonicalized existing roots must remain below the same allowed prefix; a symlink escape is rejected |
@@ -350,7 +350,7 @@ pub struct WatcherHealth {
 
 Allowed reason codes are closed and path-free:
 `feature_disabled`, `no_roots`, `home_unavailable`, `backend_init_failed`,
-`root_pending`, `root_permission_denied`, `worker_terminated`, and
+`root_pending`, `root_permission_denied`, `root_attach_failed`, `worker_terminated`, and
 `topology_rejected`.
 
 The runtime must retain this state only in process memory. It is operational
@@ -584,6 +584,12 @@ these corrections:
    paths, not explicit user additions). `/`, the home root and `..` traversal
    are rejected for every origin; canonical escape checks still apply where a
    canonical form exists.
+8. **Configured roots are a narrow exception, not an import path** — an
+   explicit runtime configuration belonging to a known built-in host (currently
+   only `DSH_HOME`) may use `Configured` provenance and therefore point outside
+   `user_home`. It is subject to the same `/`, home-root, `..`, and known-host
+   checks as `CustomApproved`; imported profiles and arbitrary host manifests
+   cannot create it.
 
 Implementation commits (feat/watcher-hardening):
 - Phase A — one-slot tick wake with coalescing
