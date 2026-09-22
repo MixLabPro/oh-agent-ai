@@ -36,14 +36,22 @@ ok(!wb.includes(`listen("usage-fold-updated"`) && !wb.includes(`listen("sync-sta
   "旧双通道的 listen 已全部移除");
 ok(!/["']usage-fold-updated["']/.test(lib.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, "")),
   "旧通道字符串在 lib.rs 代码中不再出现（注释里的历史说明不计）");
-ok(wb.includes(`type === "FoldCompleted"`) && wb.includes(`type === "FactsIngested"`)
+ok(wb.includes(`type === "Invalidated"`)
   && wb.includes(`type === "SyncStatusChanged"`) && wb.includes(`type === "TrustMonitorEvent"`)
   && wb.includes(`type === "TrustMonitorInvalidated"`),
-  "webview 按类型分发（FoldCompleted / FactsIngested / SyncStatusChanged / TrustMonitorEvent / TrustMonitorInvalidated）");
+  "webview 按类型分发（Invalidated / SyncStatusChanged / TrustMonitorEvent / TrustMonitorInvalidated）");
+// RUNTIME_INVALIDATION spec §4.3/§4.4：领域事件不再逐条透传到 webview；展示层只收
+// 合并后的失效信号。FoldCompleted 已退役。
+ok(!wb.includes(`type === "FoldCompleted"`) && !wb.includes(`type === "FactsIngested"`),
+  "webview 不再按 FoldCompleted / FactsIngested 刷新（领域事件不透传）");
+ok(!lib.includes(`"FoldCompleted"`), "lib.rs 不再发 FoldCompleted");
 ok(lib.includes("fn drain_event_bus"), "桌面事件消费入口 drain_event_bus 存在");
-ok(lib.includes('"desktop-ui"'), "消费者注册（desktop-ui）存在");
-ok(/drain_event_bus\(app\);\s*\}/.test(lib.replace(/\n/g, " ")),
-  "sync_tick 尾部调用 drain_event_bus");
+ok(lib.includes('CoalescingConsumer::new("desktop-ui", ConsumerInterest::presentation()'),
+  "desktop-ui 以合并型 + Presentation 角色注册（结构上拿不到载荷）");
+ok(lib.includes("fn publish_invalidation") && lib.includes("publish_if_advanced"),
+  "Invalidated 经 publish_if_advanced 发射（revision 严格前进才发）");
+ok(/drain_event_bus\(app\);[\s\S]*?publish_invalidation\(app, std::collections::BTreeSet::new\(\)\);\s*\}/.test(lib),
+  "sync_tick 尾部调用 drain_event_bus 后做空 hosts 电平检查");
 
 // 手动同步轮询的标志：声明 + 置位 + 复位齐全，防止「漏复位把之后的事件全吞掉」。
 ok((wb.match(/manualSyncPolling/g) || []).length >= 4,

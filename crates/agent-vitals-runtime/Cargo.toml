@@ -61,3 +61,9 @@ walkdir = "2"
 # P2 watcher 专用（feature `watcher`，见上）——平台原生后端由 notify 选择
 # （macOS FSEvents / Linux inotify / Windows ReadDirectoryChangesW）。
 notify = { version = "6.1", optional = true }
+# 自看护（REVIEW P4）唯一新增依赖：POSIX `getrusage`（`ingest::self_monitor`）
+# 读自身累计 CPU 时间。用 POSIX 标准 API 而非 macOS 专属的 `proc_pidinfo`——
+# 覆盖面更宽，且 `libc` 早已是 tauri 链下来的传递依赖，这里只是把它声明
+# 成直接依赖，没有新拉一条依赖链。`#[cfg(unix)]` 门控，非 unix 平台读不到
+# 就诚实返回 `None`，不编造。
+libc = "0.2"

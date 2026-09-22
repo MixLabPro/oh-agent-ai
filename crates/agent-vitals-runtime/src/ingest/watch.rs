@@ -123,6 +123,37 @@ pub fn wait_for_tick_or_wake(receiver: &Receiver<()>, period: Duration) -> TickW
     }
 }
 
+/// watcher 触发同步的冷却下限（真机 2026-09-22 验收教训）：活动中的 agent
+/// 会话连续追加被监听目录的日志，每个去抖窗都会**合法**唤醒——若每次唤醒
+/// 都执行完整 sync（进程内 overview/tray 的 SQLite 聚合 + 子进程），CPU 会被
+/// 钉满（实测 ~3 核持续）。冷却窗把 watcher 触发的执行率钉到 ≤1/COOLDOWN。
+/// 周期 tick 与手动同步不受影响；空闲后的第一个事件仍即时服务（彼时冷却
+/// 早已过期），持续写入期间的尾批最多延迟一个冷却窗。
+pub const WATCHER_SYNC_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// 冷却判定（纯函数，可单测）：watcher 唤醒到达时，距上次同步完成不足
+/// 冷却窗 → 返回还需睡多久（睡满后照常执行——**不丢弃**最后一批写入）；
+/// 已过窗 → None，立即执行。固定用 [`WATCHER_SYNC_COOLDOWN`] 基线——自看护
+/// （`self_monitor`）需要动态冷却时走 [`cooldown_remaining_with`]。
+pub fn watcher_cooldown_remaining(
+    last_sync_finished_at: std::time::Instant,
+    now: std::time::Instant,
+) -> Option<Duration> {
+    cooldown_remaining_with(WATCHER_SYNC_COOLDOWN, last_sync_finished_at, now)
+}
+
+/// 同 [`watcher_cooldown_remaining`]，冷却窗口是参数而非固定常量——自看护
+/// （REVIEW P4）在持续高 CPU 时把这个值拉长（指数退避，上限 5 分钟），CPU
+/// 回落后收回 [`WATCHER_SYNC_COOLDOWN`] 基线。
+pub fn cooldown_remaining_with(
+    cooldown: Duration,
+    last_sync_finished_at: std::time::Instant,
+    now: std::time::Instant,
+) -> Option<Duration> {
+    let elapsed = now.duration_since(last_sync_finished_at);
+    cooldown.checked_sub(elapsed)
+}
+
 /// watch-only 消费者回调（watcher 线程内执行，必须快——只做内存失效）。
 pub type WatchCallback = Arc<dyn Fn() + Send + Sync>;
 
@@ -566,7 +597,7 @@ mod supervised {
                 Err(e) => {
                     // 后端起不来（罕见）：Degraded + 周期兜底，诚实不装死。
                     self.backend_failed = true;
-                    eprintln!("[agent-vitals] watcher 后端初始化失败，tick 兜底照常: {e}");
+                    crate::core::logging::log_warn("watcher", &format!("后端初始化失败，tick 兜底照常: {e}"));
                 }
             }
         }
@@ -600,9 +631,9 @@ mod supervised {
                             _ => RootAttachFailure::Other,
                         };
                         self.failed.insert(path.to_path_buf(), failure);
-                        eprintln!(
-                            "[agent-vitals] watch {} 失败（该根 tick 兜底）: {e}",
-                            path.display()
+                        crate::core::logging::log_warn(
+                            "watcher",
+                            &format!("watch {} 失败（该根 tick 兜底）: {e}", path.display()),
                         );
                     }
                 }
@@ -790,7 +821,7 @@ fn spawn_platform_watcher(initial: WatchRegistry, waker: TickWaker) -> WatcherHa
                     Ok(Err(e)) => {
                         // in-band 错误（如缓冲溢出）：记日志继续；丢的事件由
                         // tick 指纹对账兜底（SourceGraph spec §12）。
-                        eprintln!("[agent-vitals] watcher 事件错误（tick 兜底）: {e}");
+                        crate::core::logging::log_warn("watcher", &format!("事件错误（tick 兜底）: {e}"));
                     }
                     Err(RecvTimeoutError::Timeout) => {
                         // 超时双职责：①补挂 pending 根；②去抖窗落定派发。
@@ -826,7 +857,7 @@ fn spawn_platform_watcher(initial: WatchRegistry, waker: TickWaker) -> WatcherHa
             health: Some(health),
         },
         Err(e) => {
-            eprintln!("[agent-vitals] watcher 线程启动失败，tick 兜底照常: {e}");
+            crate::core::logging::log_warn("watcher", &format!("线程启动失败，tick 兜底照常: {e}"));
             WatcherHandle { noop: true, control: None, health: None }
         }
     }
@@ -1013,6 +1044,41 @@ mod tests {
         assert!(
             wait <= Duration::from_millis(20),
             "最长合并窗将到期时不得再等完整 idle debounce: {wait:?}",
+        );
+    }
+
+    /// 冷却判定（真机 CPU 事故的回归钉子）：刚同步完 → 要睡接近全窗；
+    /// 过窗 → None 立即执行；单调性——时间越久剩余越少。
+    #[test]
+    fn watcher_cooldown_bounds_execution_rate() {
+        let now = std::time::Instant::now();
+        let just_finished = now - Duration::from_secs(1);
+        assert_eq!(
+            watcher_cooldown_remaining(just_finished, now),
+            Some(Duration::from_secs(29)),
+            "同步完 1 秒后收到唤醒：还需睡 29 秒（睡满不丢弃）",
+        );
+        let long_ago = now - Duration::from_secs(120);
+        assert_eq!(watcher_cooldown_remaining(long_ago, now), None);
+        let mid = now - Duration::from_secs(10);
+        assert_eq!(watcher_cooldown_remaining(mid, now), Some(Duration::from_secs(20)));
+    }
+
+    /// 自看护（`self_monitor`）拉长冷却时走的是同一条判定逻辑，只是窗口值
+    /// 换成动态的——`watcher_cooldown_remaining` 必须等价于
+    /// `cooldown_remaining_with(WATCHER_SYNC_COOLDOWN, ..)`，不是两套独立实现。
+    #[test]
+    fn cooldown_remaining_with_matches_the_fixed_baseline_wrapper() {
+        let now = std::time::Instant::now();
+        let finished = now - Duration::from_secs(10);
+        assert_eq!(
+            cooldown_remaining_with(WATCHER_SYNC_COOLDOWN, finished, now),
+            watcher_cooldown_remaining(finished, now),
+        );
+        // 拉长到 120s 后，同一个「10 秒前完成」在动态窗口下还差 110 秒。
+        assert_eq!(
+            cooldown_remaining_with(Duration::from_secs(120), finished, now),
+            Some(Duration::from_secs(110)),
         );
     }
 

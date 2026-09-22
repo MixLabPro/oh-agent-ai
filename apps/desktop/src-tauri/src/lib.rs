@@ -827,11 +827,14 @@ const NAVIGATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2
 /// spawn `sessions navigation` 并等 stdout，带 20s 硬超时：`try_wait` 50ms 轮询，
 /// 超时 → `child.kill()` + `wait()`（回收，不留僵尸）→ None。非零退出/spawn
 /// 失败/超时一律 None——调用方决定是保留旧快照还是 degraded，这里不编造。
+///
+/// stderr 与 discover 同款 G4 盲区：之前是 `piped()` 了却从未读过，子进程真正
+/// 报的错（比如时区非法、宿主目录不可读）在这三条 `None` 路径里全部消失。
 fn run_navigation(bin: &Path, day: &str) -> Option<Value> {
     let timezone = agent_vitals_runtime::statistics_timezone::timezone_name(&overview::data_home())
         .ok()
         .unwrap_or_else(agent_vitals_runtime::clock::system_timezone_name);
-    let mut child = std::process::Command::new(bin)
+    let mut child = match std::process::Command::new(bin)
         .args([
             "sessions".to_string(),
             "navigation".to_string(),
@@ -847,19 +850,64 @@ fn run_navigation(bin: &Path, day: &str) -> Option<Value> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .ok()?;
+    {
+        Ok(child) => child,
+        Err(e) => {
+            agent_vitals_runtime::logging::log_warn("sync", &format!("sessions navigation spawn 失败: {e}"));
+            return None;
+        }
+    };
     let start = std::time::Instant::now();
     loop {
-        match child.try_wait().ok()? {
-            Some(status) if status.success() => {
-                let mut out = String::new();
-                use std::io::Read;
-                child.stdout.as_mut()?.read_to_string(&mut out).ok()?;
-                return serde_json::from_str(&out).ok();
+        let wait = match child.try_wait() {
+            Ok(wait) => wait,
+            Err(e) => {
+                agent_vitals_runtime::logging::log_warn("sync", &format!("sessions navigation try_wait 失败: {e}"));
+                return None;
             }
-            Some(_) => return None,
+        };
+        match wait {
+            Some(status) if status.success() => {
+                use std::io::Read;
+                let mut out = String::new();
+                if let Some(stdout) = child.stdout.as_mut() {
+                    let _ = stdout.read_to_string(&mut out);
+                }
+                return match serde_json::from_str(&out) {
+                    Ok(value) => {
+                        agent_vitals_runtime::logging::log_info(
+                            "sync",
+                            &format!("sessions navigation 完成，用时 {:?}", start.elapsed()),
+                        );
+                        Some(value)
+                    }
+                    Err(e) => {
+                        agent_vitals_runtime::logging::log_warn(
+                            "sync",
+                            &format!("sessions navigation 输出不是合法 JSON: {e}"),
+                        );
+                        None
+                    }
+                };
+            }
+            Some(status) => {
+                use std::io::Read;
+                let mut err_out = String::new();
+                if let Some(stderr) = child.stderr.as_mut() {
+                    let _ = stderr.read_to_string(&mut err_out);
+                }
+                agent_vitals_runtime::logging::log_warn(
+                    "sync",
+                    &format!("sessions navigation 失败（{status}）：{}", err_out.trim()),
+                );
+                return None;
+            }
             None => {
                 if start.elapsed() > NAVIGATION_TIMEOUT {
+                    agent_vitals_runtime::logging::log_warn(
+                        "sync",
+                        &format!("sessions navigation 超时（{NAVIGATION_TIMEOUT:?}），已 kill"),
+                    );
                     let _ = child.kill();
                     let _ = child.wait();
                     return None;
@@ -963,14 +1011,43 @@ fn resolve_binary_from(
     None
 }
 
-/// 跑 `agent-vitals discover`，解析 stdout JSON。失败 → None（tick 只记日志，
-/// 不让托盘崩）。discover 是只读子命令，不需要 owner 是 rust。
+/// 跑 `agent-vitals discover`，解析 stdout JSON。失败 → None（tick 不 abort，
+/// 只落一条 warn）。discover 是只读子命令，不需要 owner 是 rust。
+///
+/// **之前这里三种失败（spawn 失败 / 非零退出 / stdout 不是合法 JSON）都直接
+/// 折叠成 `None`，子进程的 stderr 被 `.output()` 捕获后从没读过一次**——桌面
+/// 场景下这是本次事故复盘（G4）点名的盲区之一：托盘说「discover 失败」，但
+/// 为什么失败，唯一知道答案的那份文本被默默丢了。
 fn run_discover(bin: &Path) -> Option<Value> {
-    let out = std::process::Command::new(bin).arg("discover").output().ok()?;
+    let started = std::time::Instant::now();
+    let out = match std::process::Command::new(bin).arg("discover").output() {
+        Ok(out) => out,
+        Err(e) => {
+            agent_vitals_runtime::logging::log_warn("sync", &format!("discover spawn 失败: {e}"));
+            return None;
+        }
+    };
     if !out.status.success() {
+        agent_vitals_runtime::logging::log_warn(
+            "sync",
+            &format!(
+                "discover 失败（{}）：{}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        );
         return None;
     }
-    serde_json::from_slice(&out.stdout).ok()
+    match serde_json::from_slice(&out.stdout) {
+        Ok(value) => {
+            agent_vitals_runtime::logging::log_info("sync", &format!("discover 完成，用时 {:?}", started.elapsed()));
+            Some(value)
+        }
+        Err(e) => {
+            agent_vitals_runtime::logging::log_warn("sync", &format!("discover 输出不是合法 JSON: {e}"));
+            None
+        }
+    }
 }
 
 /// 从 discover 报告里取最新未折会话（`unfolded` 已按 mtime 降序，首条即最新）。
@@ -1011,6 +1088,7 @@ fn perform_sync() -> SyncStatus {
     // 与 overview::data_home() 一致（future-proof：哪天 data_home 加 legacy 分支
     // 也不至于把账折到 app 读不到的地方）。
     let home = overview::data_home();
+    let started = std::time::Instant::now();
     let out = std::process::Command::new(&bin)
         .arg("oneline")
         .arg(&path)
@@ -1019,7 +1097,10 @@ fn perform_sync() -> SyncStatus {
         .env("AGENT_VITALS_HOME", &home)
         .output();
     match out {
-        Ok(o) if o.status.success() => SyncStatus::ok("fold", format!("已折入 {session_id}")),
+        Ok(o) if o.status.success() => {
+            log_spawn_success("oneline", started, &o.stderr);
+            SyncStatus::ok("fold", format!("已折入 {session_id}"))
+        }
         Ok(o) => SyncStatus::fail(
             "fold",
             format!(
@@ -1040,18 +1121,44 @@ fn perform_sync() -> SyncStatus {
 /// 跑没有副作用。owner fencing 与 oneline 同款（本二进制 = rust owner，直跑）。
 fn run_claude_sync(bin: &std::path::Path) -> Option<String> {
     let home = overview::data_home();
+    let started = std::time::Instant::now();
     let out = std::process::Command::new(bin)
         .arg("claude-sync")
         .env("AGENT_VITALS_HOME", &home)
         .output();
     match out {
-        Ok(o) if o.status.success() => None,
+        Ok(o) if o.status.success() => {
+            log_spawn_success("claude-sync", started, &o.stderr);
+            None
+        }
         Ok(o) => Some(format!(
             "claude-sync 失败（{}）：{}",
             o.status,
             String::from_utf8_lossy(&o.stderr).trim()
         )),
         Err(e) => Some(format!("claude-sync spawn 失败：{e}")),
+    }
+}
+
+/// 子进程成功（退出码 0）时的记账：REVIEW P1「子进程 spawn 与退出码」的一半
+/// （另一半——失败路径——各调用点自己的 `log_warn` 已经覆盖）+ **这是本次改进
+/// 里此前真正的盲区**：`run_claude_sync`/`run_facts_sync`/oneline 原先的
+/// `Ok(o) if o.status.success() => None` 分支完全不看 `o.stderr`，一次「同步
+/// 成功但有降级警告」（比如 retention 清理失败、某条候选声明冲突）会让托盘
+/// 诚实地说「同步成功」，警告本身从未落地过。子进程内部的 warn 大多已经经
+/// `agent_vitals_runtime::logging` 落过一次库（同一个 `data_home`），这里的
+/// stderr 追加只在它没兜住的内容时才补——`log_info` 而不是 `log_warn`：子进程
+/// 自己已经决定过这条是不是值得让终端用户看到，这里只是兜底，不升级严重度。
+fn log_spawn_success(component: &'static str, started: std::time::Instant, stderr: &[u8]) {
+    let tail = String::from_utf8_lossy(stderr);
+    let tail = tail.trim();
+    if tail.is_empty() {
+        agent_vitals_runtime::logging::log_info(component, &format!("成功，用时 {:?}", started.elapsed()));
+    } else {
+        agent_vitals_runtime::logging::log_info(
+            component,
+            &format!("成功，用时 {:?}，但有输出：{tail}", started.elapsed()),
+        );
     }
 }
 
@@ -1062,12 +1169,16 @@ fn run_claude_sync(bin: &std::path::Path) -> Option<String> {
 /// 指纹跳过未变文件 + fact_id exactly-once（重跑零变化）。
 fn run_facts_sync(bin: &std::path::Path) -> Option<String> {
     let home = overview::data_home();
+    let started = std::time::Instant::now();
     let out = std::process::Command::new(bin)
         .arg("sync-facts")
         .env("AGENT_VITALS_HOME", &home)
         .output();
     match out {
-        Ok(o) if o.status.success() => None,
+        Ok(o) if o.status.success() => {
+            log_spawn_success("sync-facts", started, &o.stderr);
+            None
+        }
         Ok(o) => Some(format!(
             "sync-facts 失败（{}）：{}",
             o.status,
@@ -1080,30 +1191,24 @@ fn run_facts_sync(bin: &std::path::Path) -> Option<String> {
 /// fold 完成事件名。与工作台 `src-tauri/ui/workbench.js` 顶部的
 /// `listen("app-event", …)` 一一对应——改类型串/负载字段必须两处同步改
 /// （workbench.js 的事件桥注释里反向引用了这个名字与负载）。
-const FOLD_EVENT: &str = "app-event";
-const FOLD_EVENT_TYPE: &str = "FoldCompleted";
+/// 展示层失效信号的发布器（RUNTIME_INVALIDATION spec §4.4）：权威 revision 严格
+/// 前进才向 webview 发 `Invalidated`。它取代了 `FoldCompleted` + 200ms 去抖——
+/// 那套是时间去抖（不确定、不可测），这套是电平比较（同 revision 再来一千次也
+/// 只发一次）。tick 线程与「立即同步」共享，故经 `app.manage` 注册。
+struct InvalidationPublisher(
+    agent_vitals_runtime::events::ChangePublisher<agent_vitals_runtime::events::Invalidation>,
+);
 
-/// fold 事件去抖窗口：200ms 内多轮同步完成只广播一次。
-const FOLD_EVENT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
-
-/// fold 完成事件的去抖状态（经 `app.manage` 注册，tick/手动两个线程共享——emit
-/// 在 `sync_tick` 里，tick 与「立即同步」都可能走到，必须是跨线程共享状态）。
-/// 只记「上次广播时刻」：leading-edge 去抖在「是否该发」这件事上是**无状态的**
-/// （距上次 ≥ 窗口就发、< 窗口就吞），不需要 Rust 侧的 pending 标志——「有完成
-/// 被吞、还欠一次重拉」这个 pending 语义在 JS 侧落地（workbench.js 的
-/// `makePullMerger`，`queued` 就是那个真正起作用的 pending 标志）。
-///
-/// 为什么需要去抖：fold 是**整批一次完成**（discover → oneline → 落盘），不是
-/// 高频事件流——去抖不是为削峰，是为「手动点同步 + tick 恰好同时完成」时把两轮
-/// 挨着的完成合并成一次广播，避免工作台对同几毫秒的数据双拉。SyncLock 已经保证
-/// 任意时刻至多一轮同步在跑，但一轮可能在另一轮结束后立刻补位（手动按钮在 tick
-/// 的锁上阻塞、tick 一放锁就抢进去），两轮完成的时间差就是第二轮整轮耗时——
-/// 秒级、通常远超窗口；去抖真正的兜底场景是 oneline 极快（小会话 + 热 CLI）时
-/// 两轮完成挤进 200ms。窗口内再次完成只更新 last_emit，不重复 emit。
-struct FoldEventDebounce(Mutex<Option<std::time::Instant>>);
+/// `SyncStatusChanged` 的「变了才发」发布器（spec §4.5）：ok/stage/message 三元组
+/// 与上次相同就不发。此前每 tick 必发，是 REVIEW G2 的实例之一。页面挂载时都会
+/// 主动 `read_sync_status`，所以「首次扫描要让工作台结束正在整理」由主动拉满足，
+/// 不再依赖每 tick 必发；进程启动后首次仍必发（`last = None`）。
+struct SyncStatusPublisher(
+    agent_vitals_runtime::events::ChangePublisher<(bool, String, String)>,
+);
 
 /// 菜单栏「信息行」点击产生的导航目标（工作台 tab 名）。持久存目标是因为窗口未建/未
-/// 可见时 `emit` 是空操作（`emit_fold_event` 注释，lib.rs:521）——目标要留到工作台下次
+/// 可见时 `emit` 是空操作（`publish_invalidation` 注释）——目标要留到工作台下次
 /// init/focus 时 pull 出来消费；`focus-tab` 事件只是通知，pull 是最终仲裁。工作台 apply
 /// 成功后调 `clear_nav_target` 清除，防陈旧目标在下次 focus 重复应用。
 struct NavTarget(Mutex<Option<String>>);
@@ -1168,31 +1273,6 @@ impl FocusTarget {
 /// 不会停在旧菜单。
 struct HostsCache(Mutex<Vec<HostRow>>);
 
-/// 去抖判定（纯函数，单测钉住）：距上次广播 ≥ 窗口（或从未发过）→ 广播；
-/// < 窗口 → 吞掉（不发，避免工作台双拉）。用「距上次多久」而不是绝对 Instant，
-/// 让单测能自由构造时长（Instant 造不出任意值）。
-fn fold_debounce_step(elapsed: Option<std::time::Duration>) -> bool {
-    match elapsed {
-        None => true,
-        Some(e) => e >= FOLD_EVENT_DEBOUNCE,
-    }
-}
-
-/// 是否该广播 fold 事件：oneline 成功折账（stage=="fold" 且 ok）。「无未折会话」
-/// （stage=="discover"）不是 fold——没有新数据落盘，广播只会让工作台拉一遍旧数字。
-fn should_emit_fold_event(status: &SyncStatus) -> bool {
-    status.ok && status.stage == "fold"
-}
-
-/// fold 成功落盘后广播给工作台（200ms 去抖合并）。负载只有 `at`（fold 完成时刻，
-/// unix 秒）——工作台重拉 `read_overview` 拿权威数据，负载里不放 month/数字，
-/// 最小化。`at` 与 `SyncStatus::at`（北京时间）同源（同一时刻）；JS 侧当前只把
-/// 事件当触发信号、不读负载，字段语义见 workbench.js 的事件桥注释。
-///
-/// **webview 未就绪/没打开时 `emit` 是空操作**：事件发出去了但没有 webview 收到，
-/// 静默丢弃。这正是「事件桥失败不比现在更差」的兜底面——工作台下一次聚焦、
-/// 5 分钟 tick、或手动同步都会重新拉，丢一两个事件不会让工作台停在旧数据上
-/// 超过一个同步周期。
 /// `SyncStatusChanged` 的 app-event 载荷（类型化信封，spec §1.3）。
 fn sync_status_payload(status: &SyncStatus) -> serde_json::Value {
     serde_json::json!({
@@ -1201,13 +1281,16 @@ fn sync_status_payload(status: &SyncStatus) -> serde_json::Value {
     })
 }
 
-/// 事件总线消费（EVENT_BUS spec §9-P1）：tick 尾部 drain——CLI 子进程已在
-/// outbox 里落了 FactsIngested 等事实事件，这里以 `desktop-ui` 消费者身份取
-/// 走并转发给 webview 的单一出口。同轮也补投上次崩溃残留（deliveries 缺行）。
-/// 消费者只 emit、不碰库（drain 的自动提交两段式允许 handler 自持资源，但
-/// UI 转发根本不需要）。
+/// 事件总线消费（EVENT_BUS spec §9-P1 + RUNTIME_INVALIDATION spec §4.3）：tick 尾部
+/// drain——CLI 子进程已在 outbox 里落了 FactsIngested 等事实事件，这里以
+/// `desktop-ui` **合并型**消费者身份取走：逐行记账不变（at-least-once），但副作用
+/// 合并成一次 flush——读当前 revision，经 `InvalidationPublisher` 发至多一条
+/// `Invalidated{revision, hosts}`。展示层结构上拿不到载荷（`Coalesced` 没有那个
+/// 字段），领域事件不再逐条透传给 webview。
+///
+/// 消费者只 emit、不碰 drain 的连接（flush 自开只读连接读 revision，spec §6 自持资源）。
 fn drain_event_bus(app: &AppHandle) {
-    use agent_vitals_runtime::events::{Dispatcher, EventConsumer};
+    use agent_vitals_runtime::events::{CoalescingConsumer, ConsumerInterest, Dispatcher};
     let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(
         &path,
@@ -1216,90 +1299,119 @@ fn drain_event_bus(app: &AppHandle) {
         return; // 库缺席（首装未同步）不是错误——没有事件可投
     };
     let app2 = app.clone();
-    let dispatcher = Dispatcher::new(vec![EventConsumer::new("desktop-ui", move |event| {
-        let _ = app2.emit(APP_EVENT, serde_json::json!({
-            "type": event.event_type,
-            "occurred_at_ms": event.occurred_at_ms,
-            "host": event.host,
-            "payload": event.payload,
-        }));
-        Ok(())
-    })]);
+    let dispatcher = match Dispatcher::with_coalescing(
+        Vec::new(),
+        vec![CoalescingConsumer::new("desktop-ui", ConsumerInterest::presentation(), move |c| {
+            publish_invalidation(&app2, c.hosts);
+        })],
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            agent_vitals_runtime::logging::log_warn("events", &format!("consumer registration: {e}"));
+            return;
+        }
+    };
     if let Err(e) = dispatcher.drain(db.conn()) {
-        eprintln!("event-bus drain: {e}");
+        agent_vitals_runtime::logging::log_warn("events", &format!("drain: {e}"));
     }
 }
 
-fn emit_fold_event(app: &AppHandle) {
-    let now = std::time::Instant::now();
-    let should_emit = {
-        // 先 bind state 再 .lock()：`app.state()` 返回的是临时 State，直接在一句
-        // 里 .lock() 会让 MutexGuard 借用一个即将析构的临时值（E0716）。
-        let deb = app.state::<FoldEventDebounce>();
-        let mut last_emit = deb.0.lock().unwrap_or_else(|e| e.into_inner());
-        let elapsed = last_emit.map(|t| now.duration_since(t));
-        let emit = fold_debounce_step(elapsed);
-        if emit {
-            *last_emit = Some(now);
-        }
-        emit
-    };
-    if should_emit {
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let _ = app.emit(FOLD_EVENT, serde_json::json!({ "type": FOLD_EVENT_TYPE, "at": at }));
-    }
+/// 读当前权威 revision，严格前进才向 webview 发 `Invalidated`。`hosts` 是本轮 drain
+/// 触及的宿主（下界提示；spec §4.4 顺序注记）；不经 outbox 的写（桌面 IPC 的声明/
+/// 价卡保存、`with_immediate_txn` 的任何提交）由 `sync_tick` 尾部的空 hosts 电平检查
+/// 兜住——同 revision 的第二次调用被发布器吞掉，所以两条路径不会双发。
+fn publish_invalidation(app: &AppHandle, hosts: std::collections::BTreeSet<String>) {
+    let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else { return };
+    let Ok(revision) = db.revision() else { return };
+    drop(db);
+    let publisher = app.state::<InvalidationPublisher>();
+    publisher.0.publish_if_advanced(
+        agent_vitals_runtime::events::Invalidation { revision, hosts },
+        |inv| {
+            agent_vitals_runtime::logging::log_info(
+                "emit",
+                &format!("Invalidated revision={} hosts={:?}", inv.revision, inv.hosts),
+            );
+            let _ = app.emit(APP_EVENT, serde_json::json!({
+                "type": "Invalidated",
+                "schema_version": 1,
+                "revision": inv.revision,
+                "hosts": inv.hosts.iter().collect::<Vec<_>>(),
+            }));
+        },
+    );
+}
+
+/// `SyncStatusChanged`：变了才发（spec §4.5）。
+fn publish_sync_status(app: &AppHandle, status: &SyncStatus) {
+    let publisher = app.state::<SyncStatusPublisher>();
+    let key = (status.ok, status.stage.clone(), status.message.clone());
+    publisher.0.publish_if_changed(key, |_| {
+        agent_vitals_runtime::logging::log_info(
+            "emit",
+            &format!("SyncStatusChanged ok={} stage={} ", status.ok, status.stage),
+        );
+        let _ = app.emit(APP_EVENT, sync_status_payload(status));
+    });
+}
+
+/// `sync_tick_inner` 的计时外壳（REVIEW P1「事件链路打点：tick 开始/结束与
+/// 耗时」）：三条内部 return 路径（paused/控制态不可读/正常流程）都在
+/// `sync_tick_inner` 里，包一层比在每个 return 前插日志更不容易漏——新增一条
+/// 分支自动继承计时，不用记得在新分支里也打点。
+fn sync_tick(app: &AppHandle) {
+    let start = std::time::Instant::now();
+    sync_tick_inner(app);
+    agent_vitals_runtime::logging::log_info("sync", &format!("tick finished in {:?}", start.elapsed()));
 }
 
 /// 一轮同步 + 落盘状态 + 重建托盘。**每一条路径都走到这里**——没有提前 return
 /// 跳过托盘更新的分支（这正是「多数正常路径连 state 重读都不做」的修复：无未折
 /// 会话/二进制缺失/discover 失败也要刷新，把外部更新带进托盘）。
-fn sync_tick(app: &AppHandle) {
+fn sync_tick_inner(app: &AppHandle) {
     match overview::sync_is_paused() {
         Ok(true) => {
             let status = SyncStatus::ok("paused", "已按你的选择暂停本机解析".into());
             overview::save_sync_status(&status);
-            let _ = app.emit(APP_EVENT, sync_status_payload(&status));
+            publish_sync_status(app, &status);
             refresh(app);
             return;
         }
         Err(error) => {
             let status = SyncStatus::fail("control", format!("同步控制状态不可读：{error}"));
             overview::save_sync_status(&status);
-            let _ = app.emit(APP_EVENT, sync_status_payload(&status));
+            publish_sync_status(app, &status);
             refresh(app);
             return;
         }
         Ok(false) => {}
     }
     let initial = perform_sync();
-    let folded = should_emit_fold_event(&initial);
     // 一宿主失败不能阻塞其他宿主的导入；共享二进制缺失仍由 resolve 状态报告。
-    let (status, facts_ready) = match resolve_binary() {
+    let (status, _facts_ready) = match resolve_binary() {
         Some(bin) => finish_sync_stages(initial, || run_claude_sync(&bin), || run_facts_sync(&bin)),
         None => (initial, false),
     };
     overview::save_sync_status(&status);
-    // 首次扫描即使没有新增 facts，也要让已打开的工作台结束“正在整理”的状态。
-    // `usage-fold-updated` 只代表有新折账，不能承担这个生命周期事件。
-    let _ = app.emit(APP_EVENT, sync_status_payload(&status));
+    // 「变了才发」：内容相同的 SyncStatus 不再每 tick 重发（REVIEW G2）。工作台
+    // 「正在整理」的生命周期由页面挂载时主动 read_sync_status + 进程首发覆盖。
+    publish_sync_status(app, &status);
     // 宿主区：sessions navigation（20s 硬超时；失败不覆盖 hosts.json——上一轮
     // 快照继续渲染并自然转 stale，spec §6 决策 5）。
     refresh_hosts();
     refresh(app);
     budget_alerts::maybe_notify(app);
     quota_alerts::maybe_notify(app);
-    // DSH fold 或事实同步成功后广播；其他来源的失败不隐藏本轮可用结果。
-    // sync-facts 暂未返回新增计数，因此成功扫描也会刷新；webview 未就绪时由
-    // 下一次加载读取最新结果，事件桥不承担持久化。
-    if folded || facts_ready {
-        emit_fold_event(app);
-    }
-    // 事件总线 drain（P1）：无论本轮是否有新折账——drain 自己知道有没有
-    // （deliveries 反连接），空轮是 no-op；崩溃残留也在此补投。
+    // 事件总线 drain：无论本轮是否有新折账——drain 自己知道有没有（deliveries
+    // 反连接），空轮是 no-op；崩溃残留也在此补投。desktop-ui 合并型消费者在
+    // flush 里发 `Invalidated`（带 hosts）。
     drain_event_bus(app);
+    // 电平检查（spec §4.4）：不经 outbox 的写（DSH oneline 折账落库、桌面 IPC 的
+    // 声明/价卡保存……）也要让 webview 失效——revision 前进才发；上面 flush 已发过
+    // 的同 revision 被发布器吞掉。这取代了旧 `FoldCompleted`（fold 成功 → 200ms 去抖
+    // → 必发）：现在 fold 有没有真的改库由 revision 说了算。
+    publish_invalidation(app, std::collections::BTreeSet::new());
 }
 
 /// 按序执行独立导入阶段并保留全部失败原因。成功导入的 facts 即使处于部分
@@ -1329,21 +1441,48 @@ fn finish_sync_stages(
 /// `recv_timeout(TICK_PERIOD)`——watcher 去抖后 wake 一发，下一轮对账立刻跑；
 /// 没事件时行为与纯 sleep 逐字节一致（周期兜底，spec §7）。
 fn start_refresh_tick(app: AppHandle, wake: std::sync::mpsc::Receiver<()>) {
-    std::thread::spawn(move || loop {
-        let lock = app.state::<SyncLock>();
-        if let Ok(_guard) = lock.0.try_lock() {
-            sync_tick(&app);
-        } else {
-            // 不进入 wait：本轮可能正是 watcher 唤醒；若现在消费掉它再等
-            // TICK_PERIOD，会把低延迟保证丢失。短等后重试，仍不并发写库。
-            std::thread::sleep(SYNC_LOCK_RETRY_PERIOD);
-            continue;
-        }
-        if agent_vitals_runtime::ingest::watch::wait_for_tick_or_wake(&wake, TICK_PERIOD)
-            == agent_vitals_runtime::ingest::watch::TickWait::SenderGone
-        {
-            // waker 端全部 drop（watcher 线程异常退出）——退回纯周期。
-            std::thread::sleep(TICK_PERIOD);
+    std::thread::spawn(move || {
+        // 初值（线程启动时刻）目前总在被下面任何一次成功 try_lock 覆盖后才读到
+        // ——锁被占时走 continue，跳过下面读它的 match 分支。仍然显式初始化成
+        // 「启动时刻」而不是用 Option：这是有意的兜底基线（万一以后改掉
+        // continue、锁竞争分支不再跳过 wait，读到的也该是「最近一次已知活动
+        // 时刻」而不是编译器随便给的占位值）。
+        #[allow(unused_assignments)]
+        let mut last_sync_finished = std::time::Instant::now();
+        loop {
+            let lock = app.state::<SyncLock>();
+            if let Ok(_guard) = lock.0.try_lock() {
+                sync_tick(&app);
+                last_sync_finished = std::time::Instant::now();
+            } else {
+                // 不进入 wait：本轮可能正是 watcher 唤醒；若现在消费掉它再等
+                // TICK_PERIOD，会把低延迟保证丢失。短等后重试，仍不并发写库。
+                std::thread::sleep(SYNC_LOCK_RETRY_PERIOD);
+                continue;
+            }
+            match agent_vitals_runtime::ingest::watch::wait_for_tick_or_wake(&wake, TICK_PERIOD) {
+                agent_vitals_runtime::ingest::watch::TickWait::Woken => {
+                    // 冷却下限（真机 2026-09-22 验收：活动会话连续写入被监听
+                    // 目录，每次唤醒都跑全量 sync 把 CPU 钉到 ~3 核）。睡满
+                    // 剩余冷却再执行——不丢弃最后一批写入；周期/手动路径
+                    // 不受影响。冷却窗口本身是动态的（REVIEW P4 自看护）：
+                    // 平时读到基线 30s，CPU 持续过高时 `start_watcher_health_
+                    // publisher` 已经把它拉长，这里只管读，不管判定。
+                    let cooldown = app.state::<WatcherCooldownOverride>().get();
+                    if let Some(remaining) = agent_vitals_runtime::ingest::watch::cooldown_remaining_with(
+                        cooldown,
+                        last_sync_finished,
+                        std::time::Instant::now(),
+                    ) {
+                        std::thread::sleep(remaining);
+                    }
+                }
+                agent_vitals_runtime::ingest::watch::TickWait::TimedOut => {}
+                agent_vitals_runtime::ingest::watch::TickWait::SenderGone => {
+                    // waker 端全部 drop（watcher 线程异常退出）——退回纯周期。
+                    std::thread::sleep(TICK_PERIOD);
+                }
+            }
         }
     });
 }
@@ -1360,6 +1499,29 @@ fn start_refresh_tick(app: AppHandle, wake: std::sync::mpsc::Receiver<()>) {
 /// 监督者状态：持有 watcher 句柄，源配置变更命令经 [`refresh_watch_topology`]
 /// 提交新拓扑快照（Phase C 热插拔——不重启线程、不重启 app）。
 struct WatcherSupervisor(std::sync::Mutex<Option<agent_vitals_runtime::ingest::watch::WatcherHandle>>);
+
+/// 自看护（REVIEW P4）的动态 watcher 冷却——毫秒存成 `AtomicU64`，是
+/// `start_watcher_health_publisher`（唯一写者，CPU 采样→`SelfMonitor::step`
+/// 后落这里）与 `start_refresh_tick`（唯一读者，每次 `TickWait::Woken` 读一次）
+/// 之间最小的共享面。不用 `Mutex<Duration>`——两边都只做单值读/写，原子够，
+/// 没有必要为一个 u64 拿锁。初值 = 基线冷却，未节流时读到的恒是这个值。
+struct WatcherCooldownOverride(std::sync::atomic::AtomicU64);
+
+impl WatcherCooldownOverride {
+    fn baseline() -> Self {
+        Self(std::sync::atomic::AtomicU64::new(
+            agent_vitals_runtime::ingest::watch::WATCHER_SYNC_COOLDOWN.as_millis() as u64,
+        ))
+    }
+
+    fn get(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.0.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn set(&self, cooldown: std::time::Duration) {
+        self.0.store(cooldown.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 /// 源配置变更后的拓扑刷新（spec Phase C.2）：配置写入提交后再请求替换——
 /// 读取的是已提交状态，与 sync 的下一次读取一致。worker 已退出时静默跳过
@@ -1390,7 +1552,7 @@ fn refresh_watch_topology(app: &AppHandle) {
             )
         }
         Err(error) => {
-            eprintln!("[agent-vitals] watch 拓扑派生失败（保持现拓扑）: {error}");
+            agent_vitals_runtime::logging::log_warn("watch_topology", &format!("派生失败（保持现拓扑）: {error}"));
             return;
         }
     };
@@ -1398,7 +1560,7 @@ fn refresh_watch_topology(app: &AppHandle) {
     let guard = supervisor.0.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(handle) = guard.as_ref() {
         if let Err(error) = handle.replace(registry) {
-            eprintln!("[agent-vitals] watch 拓扑替换未送达（worker 已退出）: {error}");
+            agent_vitals_runtime::logging::log_warn("watch_topology", &format!("替换未送达（worker 已退出）: {error}"));
         }
     }
 }
@@ -1454,8 +1616,39 @@ fn start_watcher_health_publisher(app: AppHandle) {
             u32,
             Option<&'static str>,
         );
-        let mut last: Option<HealthKey> = None;
+        let publisher = agent_vitals_runtime::events::ChangePublisher::<HealthKey>::new();
+        // 自看护（REVIEW P4，G5）：复用这条已有的 2s 巡检骨架读自身 CPU——不另起
+        // 一条线程。`self_monitor`/`prev_cpu_sample` 只属于这个线程，不需要锁。
+        let mut self_monitor = agent_vitals_runtime::ingest::self_monitor::SelfMonitor::new();
+        let mut prev_cpu_sample: Option<(u64, std::time::Instant)> = None;
         loop {
+            if let Some(cur_ns) = agent_vitals_runtime::ingest::self_monitor::process_cpu_time_ns() {
+                let now = std::time::Instant::now();
+                if let Some((prev_ns, prev_at)) = prev_cpu_sample {
+                    let pct = agent_vitals_runtime::ingest::self_monitor::cpu_percent(prev_ns, prev_at, cur_ns, now);
+                    use agent_vitals_runtime::ingest::self_monitor::Transition;
+                    match self_monitor.step(pct, now) {
+                        Transition::Escalated => {
+                            let cooldown = self_monitor.cooldown();
+                            app.state::<WatcherCooldownOverride>().set(cooldown);
+                            agent_vitals_runtime::logging::log_warn(
+                                "self_monitor",
+                                &format!("CPU {pct:.0}% 持续过高，watcher 冷却拉长到 {cooldown:?}"),
+                            );
+                        }
+                        Transition::Recovered => {
+                            let cooldown = self_monitor.cooldown();
+                            app.state::<WatcherCooldownOverride>().set(cooldown);
+                            agent_vitals_runtime::logging::log_info(
+                                "self_monitor",
+                                &format!("CPU 回落，watcher 冷却收回基线 {cooldown:?}"),
+                            );
+                        }
+                        Transition::Unchanged => {}
+                    }
+                }
+                prev_cpu_sample = Some((cur_ns, now));
+            }
             // 快照在 supervisor 锁内取（短持锁、零 I/O），比较与 emit 在锁外
             // （验收 I-1：持锁 emit 会拖住热插拔）。
             let snapshot = {
@@ -1463,25 +1656,55 @@ fn start_watcher_health_publisher(app: AppHandle) {
                 let guard = supervisor.0.lock().unwrap_or_else(|e| e.into_inner());
                 guard.as_ref().map(|w| w.health()).unwrap_or_default()
             };
+            // `throttled` 只在 watcher 自己没有更具体的原因码时才顶上——一个
+            // 真实的 backend 故障比「CPU 高」更值得被看见，不能被节流覆盖掉。
+            let effective_reason = snapshot.reason_code.or_else(|| {
+                self_monitor.is_throttled().then_some("throttled")
+            });
             let key: HealthKey = (
                 snapshot.mode,
                 snapshot.topology_revision,
                 snapshot.facts_roots_attached,
                 snapshot.cache_roots_attached,
                 snapshot.pending_roots,
-                snapshot.reason_code,
+                effective_reason,
             );
-            if last != Some(key) {
-                last = Some(key);
+            // 「变了才发」统一走 runtime 的 ChangePublisher（spec §4.5）——与
+            // SyncStatusChanged / Invalidated 同一原语，不再手写 last 比较。
+            // 2s 轮询本身从不落日志（那才是真正的噪音源）；`publish_if_changed`
+            // 已经判定过「这是不是一次真实跳变」，日志顺着它的判定走，零额外
+            // 逻辑——之前的盲区不是巡检太吵，是巡检完全不留痕：出问题时只有
+            // 「现在」的一份快照，没有「上一次从哪个状态、什么时候变成现在这样」。
+            publisher.publish_if_changed(key, |_| {
+                // `coalesced_wake_count` 不进 key（涨得太勤，进 key 会让「变了
+                // 才发」形同虚设）——但作为上下文搭在真实跳变的这条日志里免费：
+                // REVIEW P1「watcher wake/冷却命中」要的是「能查」，不是「每次
+                // 都记」，这行本来就只在 mode/reason/topology 真变化时才写。
+                // component 用 "emit"（不是 "watcher_health"）——跟另外 4 处
+                // app.emit 前的埋点同一个 tag，2026-09-22 真机验收发现这行原来
+                // 单起一个 component，按 "emit" 做日志检索/统计时会漏掉这一类
+                // 事件（功能不受影响，纯粹是 grep 不到）。消息体前缀事件类型名，
+                // 与其余 4 处「类型名在前」的格式对齐。
+                agent_vitals_runtime::logging::log_info(
+                    "emit",
+                    &format!(
+                        "WatcherHealthChanged mode={} topology_revision={} pending_roots={} reason={} coalesced_wakes={}",
+                        watcher_mode_str(snapshot.mode),
+                        snapshot.topology_revision,
+                        snapshot.pending_roots,
+                        effective_reason.unwrap_or("none"),
+                        snapshot.coalesced_wake_count,
+                    ),
+                );
                 let _ = app.emit(APP_EVENT, serde_json::json!({
                     "type": "WatcherHealthChanged",
                     "schema_version": 1,
                     "mode": watcher_mode_str(snapshot.mode),
                     "topology_revision": snapshot.topology_revision,
                     "pending_roots": snapshot.pending_roots,
-                    "reason_code": snapshot.reason_code,
+                    "reason_code": effective_reason,
                 }));
-            }
+            });
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
     });
@@ -1513,9 +1736,9 @@ fn start_source_watcher(app: &AppHandle)
                 if !topology.rejected.is_empty() {
                     // 只记原因码与数量——被拒路径不进日志（serving-face 纪律
                     // 的本地同款保守）。
-                    eprintln!(
-                        "[agent-vitals] watch 拓扑有 {} 个被拒根（tick 兜底照常）",
-                        topology.rejected.len(),
+                    agent_vitals_runtime::logging::log_info(
+                        "watch_topology",
+                        &format!("有 {} 个被拒根（tick 兜底照常）", topology.rejected.len()),
                     );
                 }
                 let skills = app.state::<store::SkillsScanState>().inner().clone();
@@ -1526,7 +1749,7 @@ fn start_source_watcher(app: &AppHandle)
                 })
             }
             Err(error) => {
-                eprintln!("[agent-vitals] watch 拓派生失败（tick 兜底照常）: {error}");
+                agent_vitals_runtime::logging::log_warn("watch_topology", &format!("派生失败（tick 兜底照常）: {error}"));
                 WatchRegistry::new()
             }
         }
@@ -1535,7 +1758,7 @@ fn start_source_watcher(app: &AppHandle)
     let handle =
         agent_vitals_runtime::ingest::watch::spawn_watcher(registry, waker);
     if handle.is_noop() {
-        eprintln!("[agent-vitals] watcher 未启用（feature 关闭），tick 周期兜底");
+        agent_vitals_runtime::logging::log_info("watcher", "未启用（feature 关闭），tick 周期兜底");
     }
     (receiver, handle)
 }
@@ -1637,6 +1860,7 @@ fn trust_monitor_record_report(
         Err(_) => ("unavailable", Some("snapshot_failed"), Vec::new()),
     };
     let _ = db.trust_monitor_record_result(capability, Some(now_ms), error_code, now_ms);
+    agent_vitals_runtime::logging::log_info("emit", &format!("TrustMonitorInvalidated capability={capability}"));
     let _ = app.emit(APP_EVENT, serde_json::json!({
         "type": "TrustMonitorInvalidated", "kind": "trust_monitor_invalidated",
     }));
@@ -1731,7 +1955,7 @@ fn tab_for_menu_id(id: &str) -> Option<&'static str> {
 /// 菜单信息行点击 → 跳工作台对应 tab。双通路：持久目标（managed state，窗口不可见时
 /// 下次 pull 命中）+ `focus-tab` 事件（窗口已可见时一戳就跳）。**写目标先于 show**——
 /// 避免「emit 早于 listen、show 的 focus 事件又没触发」的窗口期把目标丢掉。块作用域
-/// 先释放锁再 emit（与 `emit_fold_event` 同款 E0716 规避）。
+/// 先释放锁再 emit（与 `publish_invalidation` 同款 E0716 规避）。
 fn focus_tab(app: &AppHandle, tab: &str) {
     {
         let nav = app.state::<NavTarget>();
@@ -2154,6 +2378,7 @@ fn delete_imported_source_data(app: AppHandle, host: String) -> Result<Value, St
         "route_evidence": deleted.route_evidence,
         "session_excerpts": deleted.session_excerpts,
     });
+    agent_vitals_runtime::logging::log_info("emit", &format!("SourceDataDeleted host={host}"));
     let _ = app.emit(APP_EVENT, serde_json::json!({
         "type": "SourceDataDeleted", "kind": "source_data_deleted", "host": host.clone(),
         "facts": deleted.facts, "sessions": deleted.sessions,
@@ -2524,10 +2749,80 @@ fn findings_freshness() -> Value {
     }
 }
 
-/// 生成用户主动选择保存的脱敏诊断包。只组合现有的状态 DTO；不读取会话正文、
-/// 原始日志、绝对路径或账户标识，也不执行上传。取消保存对用户来说是 no-op。
+/// v2 增补（REVIEW P1「诊断包 v2 增补：日志尾（脱敏）+ watcher 健康 + 事件
+/// 计数快照」）：四段都是**聚合**，不是内部状态原样倒出去——watcher 健康本身
+/// 就是闭集词表 + 计数（无路径无原始错误串，见 `WatcherHealth` 自身文档），
+/// 日志尾经 `redact_path_like` 脱敏，事件总线只给计数（`event_deliveries.
+/// last_error` 的具体文本不进来，只数「有没有」）。`ReadGate`/`ReadMemo`
+/// 是导出那一瞬间的快照，`ReadMemo` 的 hits/misses 是进程启动以来的累计。
+fn diagnostic_observability_snapshot(app: &AppHandle) -> Value {
+    let log_tail = agent_vitals_runtime::logging::read_redacted_tail(
+        agent_vitals_runtime::logging::DIAGNOSTIC_TAIL_MAX_LINES,
+    );
+    let watcher_health = {
+        let supervisor = app.state::<WatcherSupervisor>();
+        let guard = supervisor.0.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().map(|w| w.health())
+    };
+    let watcher_health_json = watcher_health.map(|h| serde_json::json!({
+        "mode": watcher_mode_str(h.mode),
+        "topology_revision": h.topology_revision,
+        "facts_roots_attached": h.facts_roots_attached,
+        "cache_roots_attached": h.cache_roots_attached,
+        "pending_roots": h.pending_roots,
+        "coalesced_wake_count": h.coalesced_wake_count,
+        "reason_code": h.reason_code,
+    })).unwrap_or(Value::Null);
+    let cooldown = app.state::<WatcherCooldownOverride>().get();
+    let gate = heavy_read_gate().stats();
+    let memo = agent_vitals_runtime::query::read_memo::ReadMemo::global().stats();
+    serde_json::json!({
+        "log_tail": log_tail,
+        "log_tail_lines": log_tail.len(),
+        "log_tail_max_lines": agent_vitals_runtime::logging::DIAGNOSTIC_TAIL_MAX_LINES,
+        "watcher_health": watcher_health_json,
+        "watcher_cooldown_ms": cooldown.as_millis() as u64,
+        "watcher_cooldown_is_throttled": cooldown > agent_vitals_runtime::ingest::watch::WATCHER_SYNC_COOLDOWN,
+        "read_gate": { "permits": gate.permits, "held": gate.held, "waiting": gate.waiting },
+        "read_memo": { "hits": memo.hits, "misses": memo.misses, "entries": memo.entries },
+        "event_bus": event_bus_backlog_snapshot(&overview::data_home()),
+    })
+}
+
+/// 事件总线积压：outbox 总行数 / deliveries 总行数 / 带 `last_error` 的
+/// deliveries 行数——只数不读内容。库缺席（未同步机器）不是错误，报
+/// `unavailable`，不编造零。`data_home` 是参数而非读全局——纯粹为可测试性：
+/// 注入一个临时目录，不需要碰 `AGENT_VITALS_HOME` 环境变量、不需要新增一把
+/// 跨测试序列化锁（这个文件里其余测试都读真机 data_home，貌似没人当心过
+/// 并行测试互相踩环境变量，这个函数选择不加入那个赌注）。
+fn event_bus_backlog_snapshot(data_home: &Path) -> Value {
+    let path = agent_vitals_data::authority::default_authority_path(data_home);
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({ "status": "unavailable" });
+    };
+    let outbox_rows: i64 = db.conn()
+        .query_row("SELECT COUNT(*) FROM event_outbox", [], |r| r.get(0))
+        .unwrap_or(0);
+    let delivery_rows: i64 = db.conn()
+        .query_row("SELECT COUNT(*) FROM event_deliveries", [], |r| r.get(0))
+        .unwrap_or(0);
+    let delivery_rows_with_last_error: i64 = db.conn()
+        .query_row("SELECT COUNT(*) FROM event_deliveries WHERE last_error IS NOT NULL", [], |r| r.get(0))
+        .unwrap_or(0);
+    serde_json::json!({
+        "status": "ok",
+        "outbox_rows": outbox_rows,
+        "delivery_rows": delivery_rows,
+        "delivery_rows_with_last_error": delivery_rows_with_last_error,
+    })
+}
+
+/// 生成用户主动选择保存的脱敏诊断包。只组合现有的状态 DTO + v2 的可观测性
+/// 聚合（日志尾/watcher 健康/事件总线积压/读侧缓存命中率）；不读取会话正文、
+/// 原始日志（日志尾经脱敏投影，不是原文）、账户标识，也不执行上传。取消
+/// 保存对用户来说是 no-op。
 #[tauri::command]
-fn export_diagnostic_package() -> Result<Value, String> {
+fn export_diagnostic_package(app: AppHandle) -> Result<Value, String> {
     let Some(path) = rfd::FileDialog::new()
         .set_file_name("agent-vitals-diagnostics.json")
         .save_file() else {
@@ -2535,7 +2830,7 @@ fn export_diagnostic_package() -> Result<Value, String> {
     };
     let status = data_status();
     let package = serde_json::json!({
-        "diagnostic_contract": "agent-vitals-diagnostic/v1",
+        "diagnostic_contract": "agent-vitals-diagnostic/v2",
         "versions": {
             "app": env!("CARGO_PKG_VERSION"),
             "cli": resolved_cli_version(),
@@ -2555,6 +2850,10 @@ fn export_diagnostic_package() -> Result<Value, String> {
             "contains_absolute_paths": false,
             "contains_account_identifiers": false,
             "upload_performed": false,
+            // v2 新增字段：日志尾是脱敏投影，不是原始文件内容——本地那份
+            // app.log 允许含路径（2026-09-19 政策：不出机器），这里导出的
+            // 不是它，是经 `redact_path_like` 处理过的版本。
+            "log_tail_is_redacted_projection": true,
         },
         "data_status": status,
         "source_status": data_source_status(),
@@ -2562,6 +2861,7 @@ fn export_diagnostic_package() -> Result<Value, String> {
         "retention": retention_config(),
         "budget": budget_config(),
         "budget_profiles": budget_profiles_status(overview::current_month_beijing()),
+        "observability": diagnostic_observability_snapshot(&app),
     });
     let bytes = serde_json::to_vec_pretty(&package)
         .map_err(|error| format!("diagnostic serialization failed: {error}"))?;
@@ -3097,6 +3397,9 @@ fn save_billing_declaration_revision(
 }
 
 /// 读取当前仍有效的计费声明；修订历史由影响预览和重算回执继续追踪。
+///
+/// 经 memo（RUNTIME_INVALIDATION spec §5.1）：无查询参数，`params` 恒为 `""`；
+/// N+1（每条声明再查 revisions/scopes）的成本只在 revision 前进时付一次。
 #[tauri::command(async)]
 fn billing_declarations() -> Value {
     let data_home = overview::data_home();
@@ -3104,6 +3407,17 @@ fn billing_declarations() -> Value {
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
         return serde_json::json!({ "status": "unavailable", "declarations": [] });
     };
+    let value = match agent_vitals_runtime::query::read_memo::ReadVersion::observe(Some(&db), &data_home) {
+        Some(version) => agent_vitals_runtime::query::read_memo::ReadMemo::global().get_or_compute(
+            "billing_declarations", &data_home, "", &version,
+            || billing_declarations_value(&db),
+        ),
+        None => std::sync::Arc::new(billing_declarations_value(&db)),
+    };
+    serde_json::Value::clone(&value)
+}
+
+fn billing_declarations_value(db: &agent_vitals_data::authority::AuthorityDb) -> Value {
     match db.billing_declarations() {
         Ok(rows) => serde_json::json!({ "status": "ok", "declarations": rows.into_iter().map(|row| {
             let (declaration_id, host, provider_id, relationship_kind, subscription_name,
@@ -3507,6 +3821,45 @@ fn merge_source_sync_failure(report: &mut Value, sync: &SyncStatus) {
 }
 
 
+/// 重查询的有界并发闸门 + 阻塞线程池执行（RUNTIME_INVALIDATION spec §5.3）：
+/// `#[tauri::command(async)]` 修饰的**同步**函数体此前直接跑在 tokio worker 上
+/// （`respond_async_serialized` 的 future 里内联执行），N 个并发命令钉死 N 个
+/// worker——本次事故热栈的直接机制。`run_heavy_read` 把闭包搬进
+/// `tauri::async_runtime::spawn_blocking`（阻塞线程池，不占 worker）并在进入前
+/// 拿 `ReadGate` 许可，把最坏情况（`ReadMemo` 全 miss）的并发钉在
+/// `HEAVY_READ_PERMITS`（2）。四个接线点：`data_monthly_summary` /
+/// `data_daily_summary` / `read_calendar_month` / `read_hourly_distribution`——
+/// 本次事故热栈点名的四个符号。
+fn heavy_read_gate() -> &'static agent_vitals_runtime::query::read_gate::ReadGate {
+    static GATE: std::sync::OnceLock<agent_vitals_runtime::query::read_gate::ReadGate> =
+        std::sync::OnceLock::new();
+    GATE.get_or_init(|| {
+        agent_vitals_runtime::query::read_gate::ReadGate::new(
+            agent_vitals_runtime::query::read_gate::HEAVY_READ_PERMITS,
+        )
+    })
+}
+
+/// `f` 在阻塞线程池上、持有一个 `ReadGate` 许可时执行。调用方必须 `.await` ——
+/// 这就是把执行搬出 tokio worker 的机制本身。
+async fn run_heavy_read<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = heavy_read_gate().acquire();
+        f()
+    })
+    .await
+    .unwrap_or_else(|e| {
+        // spawn_blocking 的 JoinError 只在闭包 panic 或运行时关闭时发生；这些查询
+        // 都是幂等只读，重试（下一次 invoke）就是完整的恢复路径，这里不吞错误、
+        // 直接向上传播，让 Tauri 的 IPC 层照常把它变成一次失败的 invoke。
+        panic!("heavy read task join failed: {e}")
+    })
+}
+
 /// v0.9 Stage 0.6 工作台 Data Query API（spec §7 目标态"Tauri 只调
 /// monthly_summary 等 API"）：经 `SummaryRepository` trait 调 runtime 的
 /// repository——Phase 3.5 Tier A 起读 SQL 权威库
@@ -3516,19 +3869,33 @@ fn merge_source_sync_failure(report: &mut Value, sync: &SyncStatus) {
 /// 工作台总览/日历两页的诚实字段（freshness/coverage/excluded_hosts）都从
 /// 这里取，不许前端自己从金额反推"有没有数据"。
 #[tauri::command(async)]
-fn data_monthly_summary(month: String) -> Value {
-    use agent_vitals_data::repository::{MonthlySummaryQuery, SummaryRepository};
-    let repo = agent_vitals_runtime::summary::SqlSummaryRepository::new();
-    repo.monthly_summary(&MonthlySummaryQuery { month }).to_json()
+async fn data_monthly_summary(month: String) -> Value {
+    run_heavy_read(move || {
+        use agent_vitals_data::repository::MonthlySummaryQuery;
+        let repo = agent_vitals_runtime::summary::SqlSummaryRepository::new();
+        let value = repo.monthly_summary_json_memoized(
+            &MonthlySummaryQuery { month },
+            agent_vitals_runtime::query::read_memo::ReadMemo::global(),
+        );
+        Value::clone(&value)
+    })
+    .await
 }
 
 /// v0.9 Stage 0.6 单日版（北京日 YYYY-MM-DD）。与 `data_monthly_summary`
 /// 同一条 trait 路径、同一份 DTO 契约（同为 SQL 权威库读源）。
 #[tauri::command(async)]
-fn data_daily_summary(date: String) -> Value {
-    use agent_vitals_data::repository::{DailySummaryQuery, SummaryRepository};
-    let repo = agent_vitals_runtime::summary::SqlSummaryRepository::new();
-    repo.daily_summary(&DailySummaryQuery { date }).to_json()
+async fn data_daily_summary(date: String) -> Value {
+    run_heavy_read(move || {
+        use agent_vitals_data::repository::DailySummaryQuery;
+        let repo = agent_vitals_runtime::summary::SqlSummaryRepository::new();
+        let value = repo.daily_summary_json_memoized(
+            &DailySummaryQuery { date },
+            agent_vitals_runtime::query::read_memo::ReadMemo::global(),
+        );
+        Value::clone(&value)
+    })
+    .await
 }
 
 /// Claude Pro 额度提醒的开关（默认关）。
@@ -3718,11 +4085,14 @@ fn data_codex_quota() -> Option<Value> {
 /// DSH 零用量月份让 claude/codex 的真实用量在日历上不可见）。每天三宿主
 /// 各自 token + 耗费，钱不跨宿主不跨币合并（口径各异，格子副行分币并列）。
 #[tauri::command(async)]
-fn read_calendar_month(month: String) -> Value {
-    agent_vitals_runtime::summary::calendar_month(
-        &month,
-        &agent_vitals_runtime::summary::codex_home(),
-    )
+async fn read_calendar_month(month: String) -> Value {
+    run_heavy_read(move || {
+        agent_vitals_runtime::summary::calendar_month(
+            &month,
+            &agent_vitals_runtime::summary::codex_home(),
+        )
+    })
+    .await
 }
 
 /// 单日按小时分布（北京小时）——旧 calendar.html「小时格热力」组件接入
@@ -3730,11 +4100,14 @@ fn read_calendar_month(month: String) -> Value {
 /// dsh=今日 today-json / 历史日 facts-index、claude=facts-index（该日
 /// 会话被 ingest 过才有——来源标注让部分覆盖在 UI 上可见）。
 #[tauri::command(async)]
-fn read_hourly_distribution(date: String) -> Value {
-    agent_vitals_runtime::summary::hourly_distribution(
-        &date,
-        &agent_vitals_runtime::summary::codex_home(),
-    )
+async fn read_hourly_distribution(date: String) -> Value {
+    run_heavy_read(move || {
+        agent_vitals_runtime::summary::hourly_distribution(
+            &date,
+            &agent_vitals_runtime::summary::codex_home(),
+        )
+    })
+    .await
 }
 
 /// 工作台「立即同步」按钮：返回本次请求的单调 ID。后台完成后由
@@ -3872,8 +4245,12 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(SyncLock(Mutex::new(())))
         .manage(SyncRequests(Mutex::new(std::collections::BTreeMap::new())))
-        // fold 事件去抖状态：tick/手动线程共享（见 FoldEventDebounce 注释）。
-        .manage(FoldEventDebounce(Mutex::new(None)))
+        // 失效信号 / 同步状态的「变了才发」发布器：tick 与手动同步线程共享。
+        .manage(InvalidationPublisher(agent_vitals_runtime::events::ChangePublisher::new()))
+        .manage(SyncStatusPublisher(agent_vitals_runtime::events::ChangePublisher::new()))
+        // 自看护（REVIEW P4）动态 watcher 冷却：health publisher 写、refresh
+        // tick 读，见 WatcherCooldownOverride 注释。
+        .manage(WatcherCooldownOverride::baseline())
         // 菜单信息行导航目标：菜单点击 → 工作台（见 NavTarget 注释）。
         .manage(NavTarget(Mutex::new(None)))
         // 会话深链待消费目标（spec §7.2）：菜单 L2 → 工作台详情。与 NavTarget
@@ -4022,7 +4399,7 @@ pub fn run() {
             if let Err(error) = agent_vitals_runtime::statistics_timezone::apply(
                 &overview::data_home(),
             ) {
-                eprintln!("statistics timezone unavailable: {error}");
+                agent_vitals_runtime::logging::log_warn("timezone", &format!("unavailable: {error}"));
             }
             start_public_pricing_catalog_tick();
             // 菜单栏工具：必须在代码里显式 `.accessory`，光靠 Info.plist 的 LSUIElement
@@ -4041,10 +4418,10 @@ pub fn run() {
             ) {
                 Ok(db) => {
                     if let Err(error) = agent_vitals_data::issues::repair_issue_timestamp_units(db.conn()) {
-                        eprintln!("issue timestamp migration failed: {error}");
+                        agent_vitals_runtime::logging::log_warn("migration", &format!("issue timestamp units failed: {error}"));
                     }
                 }
-                Err(error) => eprintln!("issue timestamp migration database unavailable: {error}"),
+                Err(error) => agent_vitals_runtime::logging::log_warn("migration", &format!("issue timestamp units: database unavailable: {error}")),
             }
             let ov = overview::read_overview();
             let menu = build_menu(app.handle(), &ov)?;
@@ -4097,6 +4474,74 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tmp_home(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "avdesk-diag-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// 诊断包 v2 的事件总线积压快照——库缺席报 `unavailable` 不编造零；
+    /// 有数据时三个计数各自独立（outbox 总数 / deliveries 总数 / 带
+    /// `last_error` 的 deliveries 数不能是同一个数字，否则说明查询写错了
+    /// WHERE 子句）。
+    #[test]
+    fn event_bus_backlog_snapshot_counts_without_reading_content() {
+        let home = tmp_home("backlog");
+        assert_eq!(
+            event_bus_backlog_snapshot(&home),
+            serde_json::json!({ "status": "unavailable" }),
+            "missing database must report unavailable, not fabricate zero counts",
+        );
+
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        {
+            let db = agent_vitals_data::authority::AuthorityDb::open(&path, 1).unwrap();
+            db.with_immediate_txn(|conn| {
+                conn.execute(
+                    "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+                     VALUES ('run', 1, 'cli', 'succeeded', 1)", [],
+                )?;
+                for i in 0..3 {
+                    conn.execute(
+                        &format!(
+                            "INSERT INTO event_outbox(event_id, event_type, schema_version, occurred_at_ms,
+                                 host, correlation_id, producer, payload_json, ingested_run_id, created_at_ms)
+                             VALUES ('evt-{i}', 'FactsIngested', 1, 1, 'dsh', 'run', 'sync_service', '{{}}', 'run', 1)"
+                        ),
+                        [],
+                    )?;
+                }
+                // 两条投递记录：一条干净，一条带 last_error——三个计数必须互不相等。
+                conn.execute(
+                    "INSERT INTO event_deliveries(event_id, consumer_id, delivered_at_ms, last_error, retry_count)
+                     VALUES ('evt-0', 'desktop-ui', 1, NULL, 0)", [],
+                )?;
+                conn.execute(
+                    "INSERT INTO event_deliveries(event_id, consumer_id, delivered_at_ms, last_error, retry_count)
+                     VALUES ('evt-1', 'price-reconcile', 1, 'boom', 1)", [],
+                )?;
+                Ok(())
+            }).unwrap();
+        }
+
+        let snapshot = event_bus_backlog_snapshot(&home);
+        assert_eq!(snapshot["status"], "ok");
+        assert_eq!(snapshot["outbox_rows"], 3);
+        assert_eq!(snapshot["delivery_rows"], 2);
+        assert_eq!(snapshot["delivery_rows_with_last_error"], 1);
+        // 脱敏/只数不读的纪律：快照里不能出现 "boom"（那是 last_error 的原文）。
+        assert!(!snapshot.to_string().contains("boom"));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     /// watcher_health DTO 的形状纪律（HARDENING spec §5.6/§7「desktop IPC」行）：
     /// 闭集 mode 字符串、原因码来自闭集、**无任何路径/错误串字段**、
@@ -4253,7 +4698,7 @@ mod tests {
     /// （金额值随机器变，形状不随）。
     #[test]
     fn data_monthly_summary_dto_matches_the_frozen_contract_shape() {
-        let d = data_monthly_summary(overview::current_month_beijing());
+        let d = tauri::async_runtime::block_on(data_monthly_summary(overview::current_month_beijing()));
         let keys: Vec<&String> = d["by_host"].as_object().unwrap().keys().collect();
         assert_eq!(keys, ["claude-code", "codex", "dsh", "workbuddy"]);
         assert_eq!(d["excluded_hosts"], serde_json::json!([]));
@@ -4281,11 +4726,37 @@ mod tests {
         // null 分支 = 无证据，同样合法（不得编造）。
     }
 
+    /// RUNTIME_INVALIDATION spec 验收 9.13：`ReadGate` 把并发重查询的执行钉在
+    /// `HEAVY_READ_PERMITS`。三路并发 `spawn_blocking` 争抢一个容量为 2 的闸门，
+    /// 用一把互斥锁记录「同时在临界区里的任务数」的峰值——峰值必须 ≤ 2。
+    #[test]
+    fn heavy_read_gate_bounds_concurrent_execution() {
+        use agent_vitals_runtime::query::read_gate::ReadGate;
+        let gate = std::sync::Arc::new(ReadGate::new(2));
+        let concurrent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handles: Vec<_> = (0..6).map(|_| {
+            let gate = std::sync::Arc::clone(&gate);
+            let concurrent = std::sync::Arc::clone(&concurrent);
+            let peak = std::sync::Arc::clone(&peak);
+            std::thread::spawn(move || {
+                let _permit = gate.acquire();
+                let now = concurrent.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                concurrent.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        }).collect();
+        for h in handles { h.join().unwrap(); }
+        assert!(peak.load(std::sync::atomic::Ordering::SeqCst) <= 2,
+            "concurrent executions under the gate must never exceed its permit count");
+    }
+
     /// Token 日历的跨宿主数据面（真机形状）：本机 2026-09 claude/codex 有
     /// 真实用量（DSH 才全零），日历聚合不得全零；钱的键分币齐全。
     #[test]
     fn read_calendar_month_is_cross_host_not_dsh_only() {
-        let v = read_calendar_month(overview::current_month_beijing());
+        let v = tauri::async_runtime::block_on(read_calendar_month(overview::current_month_beijing()));
         let days = v["days"].as_object().expect("days map");
         let total: i64 = days.values().map(|d| d["total_tokens"].as_i64().unwrap_or(0)).sum();
         assert!(total > 0, "本机 2026-09 claude/codex 有真实用量，日历不得全零（got {total}）");
@@ -4306,14 +4777,14 @@ mod tests {
     #[test]
     fn read_hourly_distribution_matches_calendar_codex_day() {
         let month = overview::current_month_beijing();
-        let cal = read_calendar_month(month.clone());
+        let cal = tauri::async_runtime::block_on(read_calendar_month(month.clone()));
         let days = cal["days"].as_object().expect("days map");
         // 找一个 codex 有用量的日子（本机 2026-09 codex 3.27 亿 token，必有）。
         let (date, day_row) = days.iter()
             .find(|(_, d)| d["codex_tokens"].as_i64().unwrap_or(0) > 0)
             .map(|(k, v)| (k.clone(), v.clone()))
             .expect("本机当月必有 codex 用量日");
-        let v = read_hourly_distribution(date.clone());
+        let v = tauri::async_runtime::block_on(read_hourly_distribution(date.clone()));
         assert_eq!(v["date"], serde_json::json!(date));
         let hours = v["hours"].as_array().expect("hours array");
         assert_eq!(hours.len(), 24, "24 小时全量输出（空小时 = null，不裁剪）");
@@ -5222,30 +5693,40 @@ mod tests {
         );
     }
 
-    /// 去抖窗口：首轮必发；200ms 内再完成 → 吞掉；窗口外再完成 → 再发。为什么有
-    /// 这个窗口：SyncLock 保证至多一轮同步在跑，但「手动先完成、tick 补位完成」
-    /// 可能挤在 200ms 内（oneline 极快时），不去抖工作台会对同几毫秒的数据双拉。
+    /// RUNTIME_INVALIDATION spec §4.4：`FoldCompleted` 的时间去抖被 revision 电平
+    /// 比较取代。fold 成功但没改库（revision 不动）→ 不发；改了库 → 只发一次；
+    /// 同 revision 的 flush 路径与尾部电平检查两条路径不会双发。
     #[test]
-    fn fold_debounce_coalesces_back_to_back_folds() {
-        let win = FOLD_EVENT_DEBOUNCE;
-        // 首轮：从未发过 → 必发。
-        assert!(fold_debounce_step(None));
-        // 100ms 后又一轮完成 → 窗口内 → 吞掉（不发，避免双拉）。
-        assert!(!fold_debounce_step(Some(win / 2)));
-        // 恰 200ms → 窗口边界，视为窗口外 → 再发。
-        assert!(fold_debounce_step(Some(win)));
-        // 250ms → 再发。
-        assert!(fold_debounce_step(Some(win + win / 2)));
+    fn invalidation_replaces_fold_debounce_with_revision_level_compare() {
+        use agent_vitals_runtime::events::{ChangePublisher, Invalidation};
+        let publisher = ChangePublisher::<Invalidation>::new();
+        let inv = |r: u64, hosts: &[&str]| Invalidation {
+            revision: r, hosts: hosts.iter().map(|h| h.to_string()).collect(),
+        };
+        let mut sent = Vec::new();
+        // drain flush 带 hosts 先发
+        assert!(publisher.publish_if_advanced(inv(7, &["dsh"]), |i| sent.push(i.revision)));
+        // 同 tick 尾部的空 hosts 电平检查：同 revision → 吞
+        assert!(!publisher.publish_if_advanced(inv(7, &[]), |i| sent.push(i.revision)));
+        // 200ms 内的第二轮完成、库没变 → 吞（旧去抖窗的场景，现在靠 revision 判）
+        assert!(!publisher.publish_if_advanced(inv(7, &["dsh"]), |i| sent.push(i.revision)));
+        // 库变了 → 发
+        assert!(publisher.publish_if_advanced(inv(8, &[]), |i| sent.push(i.revision)));
+        assert_eq!(sent, vec![7, 8]);
     }
 
-    /// 只有 fold 成功才广播：「无未折会话」/失败/其他阶段不广播（没有新数据落盘，
-    /// 工作台重拉也是旧数字）。
+    /// SyncStatusChanged 变了才发：同三元组连续两轮只发一次，message 变了再发。
     #[test]
-    fn should_emit_fold_event_only_on_fold_success() {
-        assert!(should_emit_fold_event(&SyncStatus::ok("fold", "已折入 s1".into())));
-        assert!(!should_emit_fold_event(&SyncStatus::ok("discover", "无未折 DSH 会话".into())));
-        assert!(!should_emit_fold_event(&SyncStatus::fail("fold", "oneline 失败".into())));
-        assert!(!should_emit_fold_event(&SyncStatus::default()));
+    fn sync_status_publishes_only_on_change() {
+        use agent_vitals_runtime::events::ChangePublisher;
+        let publisher = ChangePublisher::<(bool, String, String)>::new();
+        let key = |s: &SyncStatus| (s.ok, s.stage.clone(), s.message.clone());
+        let mut n = 0;
+        assert!(publisher.publish_if_changed(key(&SyncStatus::ok("discover", "无未折 DSH 会话".into())), |_| n += 1));
+        assert!(!publisher.publish_if_changed(key(&SyncStatus::ok("discover", "无未折 DSH 会话".into())), |_| n += 1));
+        assert!(publisher.publish_if_changed(key(&SyncStatus::ok("fold", "已折入 s1".into())), |_| n += 1));
+        assert!(publisher.publish_if_changed(key(&SyncStatus::fail("fold", "oneline 失败".into())), |_| n += 1));
+        assert_eq!(n, 3);
     }
 
     #[test]

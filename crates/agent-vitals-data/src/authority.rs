@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 25;
+pub const SCHEMA_VERSION: i64 = 26;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -1254,6 +1254,64 @@ fn ensure_schema_v25(conn: &Connection) -> Result<(), AuthorityError> {
     Ok(())
 }
 
+/// `schema_meta` 里权威 revision 标量的键（RUNTIME_INVALIDATION spec §4.1）。
+pub const AUTHORITY_REVISION_KEY: &str = "authority_revision";
+
+/// v26：权威 revision 标量——每个**改了业务状态**的写事务提交时 +1
+/// （`commit_advancing_revision`）。它是失效信号与读侧 memo 的唯一时钟：
+/// 不是表结构变更，但仍升 SCHEMA_VERSION——旧二进制的写事务不推进它，
+/// 混装（老 CLI + 新 app）会让 memo 静默陈旧；升版让老二进制以
+/// `NewerSchema` 拒绝而不是悄悄写错（spec §4.1「宁可响亮失败」）。
+fn ensure_schema_v26(conn: &Connection) -> Result<(), AuthorityError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_meta(key, value) VALUES(?1, '0')",
+        rusqlite::params![AUTHORITY_REVISION_KEY],
+    )?;
+    Ok(())
+}
+
+/// 读权威 revision（缺行按 0——只读连接打开一个从未被 v26 writer 打开过的
+/// 库时会遇到；writer 的 `open` 总会先补行）。
+pub fn revision_of(conn: &Connection) -> Result<u64, AuthorityError> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = ?1",
+            rusqlite::params![AUTHORITY_REVISION_KEY],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(raw.and_then(|v| v.parse().ok()).unwrap_or(0))
+}
+
+/// 一次写事务的起点标记：`BEGIN IMMEDIATE` + 记下事务前的 `total_changes()`。
+/// 与 [`commit_advancing_revision`] 成对——用 SQL 函数而非 rusqlite API
+/// （0.31 没有 `Connection::total_changes`，不为此升依赖）。
+#[derive(Clone, Copy, Debug)]
+pub struct TxnMark {
+    changes_before: i64,
+}
+
+pub fn begin_immediate(conn: &Connection) -> rusqlite::Result<TxnMark> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let changes_before: i64 = conn.query_row("SELECT total_changes()", [], |r| r.get(0))?;
+    Ok(TxnMark { changes_before })
+}
+
+/// 提交写事务；事务内**有行被改**才推进 revision（spec §4.1「空事务不推进」）。
+/// `total_changes()` 不计 `INSERT OR IGNORE` 被吸收的行与纯 SELECT，所以「查后
+/// 无事可做」的路径提交后 revision 不动——这是 REVIEW G2「无变化 tick 零发射」
+/// 在核心层成立的前提。回滚路径不经此处。
+pub fn commit_advancing_revision(conn: &Connection, mark: TxnMark) -> rusqlite::Result<()> {
+    let changes_after: i64 = conn.query_row("SELECT total_changes()", [], |r| r.get(0))?;
+    if changes_after > mark.changes_before {
+        conn.execute(
+            "UPDATE schema_meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = ?1",
+            rusqlite::params![AUTHORITY_REVISION_KEY],
+        )?;
+    }
+    conn.execute_batch("COMMIT")
+}
+
 fn ensure_schema_v20(conn: &Connection) -> Result<(), AuthorityError> {
     let has_consent_kind: bool = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('trust_observations') WHERE name = 'consent_kind'",
@@ -1472,8 +1530,21 @@ impl AuthorityDb {
                 ensure_schema_v22(conn)?;
                 conn.execute_batch(SCHEMA_V23_ADD)?;
                 ensure_schema_v24(conn)?;
-        ensure_schema_v25(conn)?;
                 ensure_schema_v25(conn)?;
+                ensure_schema_v26(conn)?;
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(25) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = ensure_schema_v26(conn);
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error); }
+                }
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
@@ -2048,6 +2119,7 @@ impl AuthorityDb {
         conn.execute_batch(SCHEMA_V23_ADD)?;
         ensure_schema_v24(conn)?;
         ensure_schema_v25(conn)?;
+        ensure_schema_v26(conn)?;
         // 中断批次清扫（§3.1）：任何 running 的批次在下次 open 时标
         // interrupted——它是观测记录，不是可恢复状态（恢复靠幂等重跑）。
         conn.execute(
@@ -2690,7 +2762,7 @@ impl AuthorityDb {
         captured_at_ms: i64,
         billing_template_id: Option<&str>,
     ) -> Result<(bool, bool), AuthorityError> {
-        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        let mark = begin_immediate(&self.conn)?;
         let result = (|| {
             let catalog_changed = self.provider_catalog_snapshot_put(
                 catalog_version,
@@ -2711,7 +2783,7 @@ impl AuthorityDb {
         })();
         match result {
             Ok(changed) => {
-                self.conn.execute("COMMIT", [])?;
+                commit_advancing_revision(&self.conn, mark)?;
                 Ok(changed)
             }
             Err(error) => {
@@ -3215,7 +3287,7 @@ impl AuthorityDb {
                 "duplicate billing declaration scope".to_string(),
             )));
         }
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let mark = begin_immediate(&self.conn)?;
         let result = (|| -> Result<bool, AuthorityError> {
             let exists: Option<i64> = self.conn.query_row(
                 "SELECT 1 FROM billing_declaration_revisions WHERE revision_id = ?1",
@@ -3320,7 +3392,7 @@ impl AuthorityDb {
             Ok(true)
         })();
         match result {
-            Ok(changed) => { self.conn.execute_batch("COMMIT")?; Ok(changed) }
+            Ok(changed) => { commit_advancing_revision(&self.conn, mark)?; Ok(changed) }
             Err(error) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(error) }
         }
     }
@@ -3334,7 +3406,7 @@ impl AuthorityDb {
                 "invalid billing declaration revoke".to_string(),
             )));
         }
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let mark = begin_immediate(&self.conn)?;
         let result = (|| -> Result<bool, AuthorityError> {
             let exists: Option<i64> = self.conn.query_row(
                 "SELECT 1 FROM billing_declaration_revisions WHERE revision_id = ?1",
@@ -3397,7 +3469,7 @@ impl AuthorityDb {
             Ok(true)
         })();
         match result {
-            Ok(changed) => { self.conn.execute_batch("COMMIT")?; Ok(changed) }
+            Ok(changed) => { commit_advancing_revision(&self.conn, mark)?; Ok(changed) }
             Err(error) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(error) }
         }
     }
@@ -3602,7 +3674,7 @@ impl AuthorityDb {
                 continue;
             }
             let kind = self.billing_attribution_kind_of(&revision_id)?;
-            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+            let mark = begin_immediate(&self.conn)?;
             let inserted = (|| -> Result<usize, rusqlite::Error> {
                 let mut n = 0;
                 for fact_id in &fact_ids {
@@ -3612,7 +3684,7 @@ impl AuthorityDb {
                         rusqlite::params![fact_id, revision_id, job_id, kind, now_ms],
                     )?;
                 }
-                self.conn.execute_batch("COMMIT")?;
+                commit_advancing_revision(&self.conn, mark)?;
                 Ok(n)
             })();
             match inserted {
@@ -3764,13 +3836,16 @@ impl AuthorityDb {
                 return Err(error);
             }
         };
-        if let Err(error) = self.conn.execute_batch("BEGIN IMMEDIATE") {
-            let detail = error.to_string();
-            let _ = self.billing_recalculation_set_status(
-                job_id, "failed", Some("transaction_start_failed"), Some(&detail), now_ms,
-            );
-            return Err(error.into());
-        }
+        let mark = match begin_immediate(&self.conn) {
+            Ok(mark) => mark,
+            Err(error) => {
+                let detail = error.to_string();
+                let _ = self.billing_recalculation_set_status(
+                    job_id, "failed", Some("transaction_start_failed"), Some(&detail), now_ms,
+                );
+                return Err(error.into());
+            }
+        };
         let transaction_result = (|| -> Result<(), rusqlite::Error> {
             self.conn.execute(
                 "INSERT INTO billing_recalculation_results(
@@ -3792,7 +3867,7 @@ impl AuthorityDb {
                 "UPDATE billing_recalculation_jobs SET status = 'succeeded', completed_at_ms = ?2
                  WHERE job_id = ?1 AND status = 'running'", rusqlite::params![job_id, now_ms],
             )?;
-            self.conn.execute_batch("COMMIT")?;
+            commit_advancing_revision(&self.conn, mark)?;
             Ok(())
         })();
         match transaction_result {
@@ -3967,10 +4042,10 @@ impl AuthorityDb {
         &self,
         f: impl FnOnce(&Connection) -> Result<T, AuthorityError>,
     ) -> Result<T, AuthorityError> {
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let mark = begin_immediate(&self.conn)?;
         match f(&self.conn) {
             Ok(v) => {
-                self.conn.execute_batch("COMMIT")?;
+                commit_advancing_revision(&self.conn, mark)?;
                 Ok(v)
             }
             Err(e) => {
@@ -3978,6 +4053,11 @@ impl AuthorityDb {
                 Err(e)
             }
         }
+    }
+
+    /// 权威 revision（spec §4.1）：每个改了业务状态的写事务提交时 +1。
+    pub fn revision(&self) -> Result<u64, AuthorityError> {
+        revision_of(&self.conn)
     }
 
     /// 只读连接访问（查询面在 Phase 3 接 repository；Phase 2 的 writer 也
@@ -6283,4 +6363,105 @@ mod tests {
         assert_eq!(a.host_bill_count().unwrap(), 1, "同键再录 → 复活");
         let _ = std::fs::remove_file(&db);
     }
+
+    // ---- 权威 revision（RUNTIME_INVALIDATION spec §4.1 / 验收 9.1 9.5 9.16）----
+
+    #[test]
+    fn revision_starts_at_zero_and_advances_only_on_real_changes() {
+        let db = tmp_db("revision-basic");
+        let a = AuthorityDb::open(&db, 1).unwrap();
+        assert_eq!(a.revision().unwrap(), 0);
+        // 有行被改 → +1
+        a.with_immediate_txn(|c| {
+            c.execute("INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version) VALUES('r1',1,'cli','running',26)", [])?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(a.revision().unwrap(), 1);
+        // 空事务（只 SELECT）→ 不推进
+        a.with_immediate_txn(|c| {
+            let _: i64 = c.query_row("SELECT COUNT(*) FROM sync_runs", [], |r| r.get(0))?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(a.revision().unwrap(), 1);
+        // INSERT OR IGNORE 被吸收 → 不推进（total_changes 不计被忽略的行）
+        a.with_immediate_txn(|c| {
+            c.execute("INSERT OR IGNORE INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version) VALUES('r1',1,'cli','running',26)", [])?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(a.revision().unwrap(), 1);
+        // 回滚 → 不推进
+        let failed: Result<(), AuthorityError> = a.with_immediate_txn(|c| {
+            c.execute("INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version) VALUES('r2',1,'cli','running',26)", [])?;
+            Err(AuthorityError::Corrupt)
+        });
+        assert!(failed.is_err());
+        assert_eq!(a.revision().unwrap(), 1);
+        let n: i64 = a.conn().query_row("SELECT COUNT(*) FROM sync_runs", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "rollback must undo the row as before");
+        // 记账单语句（自动提交）不经 helper → 不推进
+        a.begin_run("r3", "cli", 5).unwrap();
+        assert_eq!(a.revision().unwrap(), 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn revision_is_readable_from_readonly_connection_and_survives_reopen() {
+        let db = tmp_db("revision-ro");
+        {
+            let a = AuthorityDb::open(&db, 1).unwrap();
+            a.with_immediate_txn(|c| {
+                c.execute("INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version) VALUES('r1',1,'cli','running',26)", [])?;
+                Ok(())
+            }).unwrap();
+        }
+        let ro = AuthorityDb::open_readonly(&db).unwrap();
+        assert_eq!(ro.revision().unwrap(), 1);
+        // writer 重开：迁移尾部 INSERT OR IGNORE 不重置计数
+        let a = AuthorityDb::open(&db, 2).unwrap();
+        assert_eq!(a.revision().unwrap(), 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn migration_v25_to_v26_inserts_revision_row_idempotently() {
+        let db = tmp_db("revision-migrate");
+        {
+            // 造一个 v26 库再把版本戳回 25 且删掉 revision 行，模拟 v25 writer 留下的库。
+            let a = AuthorityDb::open(&db, 1).unwrap();
+            a.conn().execute("UPDATE schema_meta SET value = '25' WHERE key = 'schema_version'", []).unwrap();
+            a.conn().execute("DELETE FROM schema_meta WHERE key = ?1", rusqlite::params![AUTHORITY_REVISION_KEY]).unwrap();
+        }
+        let a = AuthorityDb::open(&db, 2).unwrap();
+        let version: String = a.conn().query_row("SELECT value FROM schema_meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION.to_string());
+        assert_eq!(a.revision().unwrap(), 0);
+        drop(a);
+        let a = AuthorityDb::open(&db, 3).unwrap();
+        let rows: i64 = a.conn().query_row("SELECT COUNT(*) FROM schema_meta WHERE key = ?1", rusqlite::params![AUTHORITY_REVISION_KEY], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn billing_hand_rolled_write_paths_advance_revision() {
+        let db = tmp_db("revision-billing");
+        let a = AuthorityDb::open(&db, 1).unwrap();
+        let r0 = a.revision().unwrap();
+        assert!(a.billing_declaration_revision_save(
+            "rev-a", "decl-a", None, "codex", "openai", "official_subscription", Some("Plus"),
+            Some(1_990), Some("CNY"), "2026-09", None, None, None, &[], 2,
+        ).unwrap());
+        let r1 = a.revision().unwrap();
+        assert_eq!(r1, r0 + 1, "declaration save is a hand-rolled BEGIN IMMEDIATE path");
+        // 同 revision_id 重放：查后无事可做 → 不推进
+        assert!(!a.billing_declaration_revision_save(
+            "rev-a", "decl-a", None, "codex", "openai", "official_subscription", Some("Plus"),
+            Some(1_990), Some("CNY"), "2026-09", None, None, None, &[], 3,
+        ).unwrap());
+        assert_eq!(a.revision().unwrap(), r1);
+        assert!(a.billing_declaration_revision_revoke("rev-revoke", "decl-a", "rev-a", 4).unwrap());
+        assert_eq!(a.revision().unwrap(), r1 + 1, "revoke path advances too");
+        let _ = std::fs::remove_file(&db);
+    }
+
 }

@@ -350,8 +350,17 @@ pub struct WatcherHealth {
 
 Allowed reason codes are closed and path-free:
 `feature_disabled`, `no_roots`, `home_unavailable`, `backend_init_failed`,
-`root_pending`, `root_permission_denied`, `root_attach_failed`, `worker_terminated`, and
-`topology_rejected`.
+`root_pending`, `root_permission_denied`, `root_attach_failed`,
+`worker_terminated`, `topology_rejected`, and `throttled`. `root_attach_failed`
+and `throttled` were added the same day (2026-09-22) on two independent
+branches: `root_attach_failed` distinguishes a non-permission watch-attach
+failure (any I/O error attaching a root other than `PermissionDenied`) from
+`root_permission_denied`; `throttled` is added
+by `EVENT_PROCESSING_AND_OBSERVABILITY_REVIEW.md` P4/G5 — the desktop's
+self-monitor found sustained high self-CPU and stretched the watcher-triggered
+sync cooldown past its baseline (`ingest::self_monitor::SelfMonitor`). It only
+surfaces when the watcher itself has no more specific reason to report; a real
+backend failure is never overwritten by this one.
 
 The runtime must retain this state only in process memory. It is operational
 health, not user analytics; do not persist it to authority SQLite solely for
@@ -590,6 +599,19 @@ these corrections:
    `user_home`. It is subject to the same `/`, home-root, `..`, and known-host
    checks as `CustomApproved`; imported profiles and arbitrary host manifests
    cannot create it.
+
+9. **Watcher-triggered sync execution rate needed a floor (found in
+   real-machine acceptance, 2026-09-22)** — Phase A bounded the wake QUEUE
+   (one pending slot) but nothing bounded the wake-to-execution RATE. An
+   active agent session continuously appends to a watched root, so every
+   1.2s debounce window legitimately wakes the tick, and each wake ran a
+   full sync_tick (in-process overview/tray SQLite aggregation + tray
+   rebuild + child spawns) — measured at a sustained ~3 cores. Fix:
+   `WATCHER_SYNC_COOLDOWN` (30s) in the desktop tick loop. A wake inside
+   the cooldown sleeps out the remainder and then runs (the final batch
+   of writes is served, not dropped); the periodic 5-minute tick and
+   manual syncs are unaffected; the first event after idle is still
+   served in seconds.
 
 Implementation commits (feat/watcher-hardening):
 - Phase A — one-slot tick wake with coalescing

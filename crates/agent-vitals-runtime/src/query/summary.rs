@@ -830,17 +830,41 @@ fn dsh_provider_amount(cost: Option<serde_json::Value>, latest_day: Option<&str>
 /// DTO 上都落 null，区分交给宿主级 `hosts_available`；「无小时轴」与
 /// 「有轴没用量」不在小时粒度上区分（无诚实收益，徒增形状复杂度）。
 pub fn hourly_distribution(date: &str, codex_home: &Path) -> serde_json::Value {
+    let _ = codex_home;
+    let repo = SqlSummaryRepository::new();
+    let value = hourly_distribution_memoized(date, &repo, crate::query::read_memo::ReadMemo::global());
+    serde_json::Value::clone(&value)
+}
+
+/// `hourly_distribution` 的 memo 接线（同 `calendar_month_memoized` 套路）。
+pub fn hourly_distribution_memoized(
+    date: &str,
+    repo: &SqlSummaryRepository,
+    memo: &crate::query::read_memo::ReadMemo,
+) -> std::sync::Arc<serde_json::Value> {
+    let db = repo.open_db();
+    let data_home = repo.data_home_path();
+    match crate::query::read_memo::ReadVersion::observe(db.as_ref(), &data_home) {
+        Some(version) => memo.get_or_compute(
+            "hourly_distribution", &data_home, date, &version,
+            || hourly_distribution_with_db(date, &db),
+        ),
+        None => std::sync::Arc::new(hourly_distribution_with_db(date, &db)),
+    }
+}
+
+fn hourly_distribution_with_db(
+    date: &str,
+    db: &Option<agent_vitals_data::authority::AuthorityDb>,
+) -> serde_json::Value {
     // v0.9.1 Phase 3.5 Tier B：数据源从「today.json + 旧 facts-index + codex
     // fold 三路拼装」整体切换到 SQL 权威库——行级事实本就都在 `usage_facts`
     // （`authority_query::hourly_by_host` 三宿主统一），旧 facts-index 是可
     // 丢弃投影，权威读面没有理由绕它再走一遍 JSONL 重建；today.json/fold
-    // 是禁读清单成员（spec §5.2），product 读面在此全部退役。`codex_home`
-    // 参数保留（签名兼容 Tauri 调用点），SQL 路径不再使用。
-    let _ = codex_home;
-    let db = SqlSummaryRepository::new().open_db();
+    // 是禁读清单成员（spec §5.2），product 读面在此全部退役。
     let bounds = agent_vitals_data::authority_query::beijing_day_bounds_ms(date);
     let by_host: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>> =
-        match (&db, bounds) {
+        match (db, bounds) {
             (Some(db), Some((start, end))) => {
                 agent_vitals_data::authority_query::hourly_by_host(db.conn(), start, end)
                     .unwrap_or_default()
@@ -1940,8 +1964,42 @@ pub fn overview_bundle(data_home: &Path) -> OverviewBundle {
 /// {date: {...}}}`，无数据日字段缺省为 0/缺键——调用方以
 /// `total_tokens == 0` 判定"这天没有用量"。
 pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
-    use serde_json::Value;
     let _ = codex_home; // 签名兼容 Tauri 调用点（3.5 Tier B 切 SQL 后不再读 fold）
+    let repo = SqlSummaryRepository::new();
+    let value = calendar_month_memoized(month, &repo, crate::query::read_memo::ReadMemo::global());
+    // 调用方（Tauri command / CLI）要 owned Value 序列化；Arc 只在 memo 内共享。
+    // 这一次克隆发生在锁外、每次 invoke 一份——可接受；要零拷贝得让 IPC 层直接
+    // 序列化 `Arc<Value>`，留给 ReadGate 接线一并做。
+    serde_json::Value::clone(&value)
+}
+
+/// `calendar_month` 的 memo 接线（RUNTIME_INVALIDATION spec §5.1）：版本 =
+/// 权威 revision + 配置指纹；库缺席不进 memo 直接算。`repo`/`memo` 显式传入是
+/// 为了测试能用临时库与私有 memo（进程级单例在并行测试里会互相污染）。
+pub fn calendar_month_memoized(
+    month: &str,
+    repo: &SqlSummaryRepository,
+    memo: &crate::query::read_memo::ReadMemo,
+) -> std::sync::Arc<serde_json::Value> {
+    let db = repo.open_db();
+    let data_home = repo.data_home_path();
+    match crate::query::read_memo::ReadVersion::observe(db.as_ref(), &data_home) {
+        Some(version) => memo.get_or_compute(
+            "calendar_month",
+            &data_home,
+            month,
+            &version,
+            || calendar_month_with_db(month, &db),
+        ),
+        None => std::sync::Arc::new(calendar_month_with_db(month, &db)),
+    }
+}
+
+fn calendar_month_with_db(
+    month: &str,
+    db: &Option<agent_vitals_data::authority::AuthorityDb>,
+) -> serde_json::Value {
+    use serde_json::Value;
     let mut days: serde_json::Map<String, Value> = serde_json::Map::new();
     fn day_entry<'a>(days: &'a mut serde_json::Map<String, Value>, date: &str) -> &'a mut Value {
         days.entry(date.to_string()).or_insert_with(|| {
@@ -1959,13 +2017,12 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
     // month.json/ledger/fold 全部退出 product 读面（spec §5.2 禁读清单）。
     // 计价函数与旧路径共用同一批核心（priced_day/claude_day_cost/
     // codex_cost_report），格子里的数字只换来源不换算法。
-    let db = SqlSummaryRepository::new().open_db();
     let bounds = agent_vitals_data::authority_query::beijing_month_bounds_ms(month);
-    let (dsh_days, by_hour_model, claude_days_map) = fetch_windowed(&db, bounds);
+    let (dsh_days, by_hour_model, claude_days_map) = fetch_windowed(db, bounds);
 
     // Q13：月末时点的历史价卡（`monthly_summary` 用同一时点——两者对同月折出
     // 的总额必须相等，见 `PricingCards` doc）。
-    let cards = PricingCards::asof(&db, bounds.map(|(_, end)| end));
+    let cards = PricingCards::asof(db, bounds.map(|(_, end)| end));
     let pricing = cards.main.clone();
 
     // DSH：peaked_days_map（8 键含 peak_* + by_model）逐日 priced_day。
@@ -2058,7 +2115,7 @@ pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
     // 格子里的 token 数换回**全量**（`host_tokens_by_day_all`）：上面三段的 token 是
     // 顺着金额面的聚合取的（排除订阅覆盖），钱照那样算是对的，token 不是——订阅内的
     // token 同样发生过（与 `tokens_by_host` / `hourly_distribution` 同一条纪律）。
-    if let (Some(db), Some((start, end))) = (&db, bounds) {
+    if let (Some(db), Some((start, end))) = (db, bounds) {
         for (host, key) in [("dsh", "dsh_tokens"), ("claude-code", "claude_tokens"), ("codex", "codex_tokens")] {
             let Ok(by_day) = agent_vitals_data::authority_query::host_tokens_by_day_all(db.conn(), host, start, end)
             else { continue };
@@ -2179,13 +2236,28 @@ impl SqlSummaryRepository {
         }
     }
 
-    pub fn open_db(&self) -> Option<agent_vitals_data::authority::AuthorityDb> {
-        let data_home = self
-            .data_home
-            .clone()
-            .unwrap_or_else(crate::home::data_home);
+    /// 只读打开（RUNTIME_INVALIDATION spec §5.2）：不跑 DDL、不跑
+    /// `repair_issue_timestamp_units`、不取 WAL 写锁；库缺席 / schema 不匹配都
+    /// 返回 `None`，**绝不建库**——与「权威库不自愈」（v0.9.1 §维护）同纪律。
+    /// `SqlSummaryRepository` 只服务查询面，这是它开库的唯一方式；11 个调用点
+    /// （calendar_month / monthly_summary / daily_summary / hourly_distribution /
+    /// codex_quota_snapshot / claude_quota_status / unresolved_billing_groups 等）
+    /// 全部是读，改这一处即可让它们统一获得只读保护，不必逐点改。
+    pub fn open_db_ro(&self) -> Option<agent_vitals_data::authority::AuthorityDb> {
+        let data_home = self.data_home_path();
         let path = agent_vitals_data::authority::default_authority_path(&data_home);
-        agent_vitals_data::authority::AuthorityDb::open(&path, crate::sql_sync::now_ms()).ok()
+        agent_vitals_data::authority::AuthorityDb::open_readonly(&path).ok()
+    }
+
+    /// 兼容别名：本 repository 上的 `open_db()` 一律只读（见 [`Self::open_db_ro`]）。
+    /// 保留旧名是为了不动 11 个既有调用点的措辞；新代码直接写 `open_db_ro`。
+    pub fn open_db(&self) -> Option<agent_vitals_data::authority::AuthorityDb> {
+        self.open_db_ro()
+    }
+
+    /// 本 repository 的 data_home（参数化优先，否则进程级 `home::data_home()`）。
+    pub fn data_home_path(&self) -> std::path::PathBuf {
+        self.data_home.clone().unwrap_or_else(crate::home::data_home)
     }
 }
 
@@ -2325,6 +2397,45 @@ fn restore_full_host_tokens(
             output: o,
             cache_hit_ratio,
         });
+    }
+}
+
+impl SqlSummaryRepository {
+    /// `monthly_summary` 经 memo（RUNTIME_INVALIDATION spec §5.1，同 `calendar_month_memoized`
+    /// 套路）：`day_freshness` / `claude_provider_amounts_from_sql` 都在 `monthly_summary`
+    /// 内部调用，没有独立 IPC 入口，因此在这一层缓存就覆盖了它们——不需要各自的 memo。
+    pub fn monthly_summary_json_memoized(
+        &self,
+        query: &MonthlySummaryQuery,
+        memo: &crate::query::read_memo::ReadMemo,
+    ) -> std::sync::Arc<serde_json::Value> {
+        let data_home = self.data_home_path();
+        let db = self.open_db();
+        match crate::query::read_memo::ReadVersion::observe(db.as_ref(), &data_home) {
+            Some(version) => memo.get_or_compute(
+                "monthly_summary", &data_home, &query.month, &version,
+                || self.monthly_summary(query).to_json(),
+            ),
+            None => std::sync::Arc::new(self.monthly_summary(query).to_json()),
+        }
+    }
+
+    /// `daily_summary` 经 memo；`params` = date（唯一影响结果的输入，日期本身即
+    /// 规范化字符串）。
+    pub fn daily_summary_json_memoized(
+        &self,
+        query: &DailySummaryQuery,
+        memo: &crate::query::read_memo::ReadMemo,
+    ) -> std::sync::Arc<serde_json::Value> {
+        let data_home = self.data_home_path();
+        let db = self.open_db();
+        match crate::query::read_memo::ReadVersion::observe(db.as_ref(), &data_home) {
+            Some(version) => memo.get_or_compute(
+                "daily_summary", &data_home, &query.date, &version,
+                || self.daily_summary(query).to_json(),
+            ),
+            None => std::sync::Arc::new(self.daily_summary(query).to_json()),
+        }
     }
 }
 
@@ -3202,6 +3313,85 @@ mod tests {
             // total_summable 不受影响（没有钱进来）。
             assert_eq!(monthly.total_summable(), 0.0);
         });
+    }
+
+    /// RUNTIME_INVALIDATION spec 验收 9.10 / 9.11 / 9.12：`calendar_month` 经 memo——
+    /// 同版本重复读零计算；权威写（revision 前进）、补卡文件变更（配置指纹）、
+    /// 不同月份（params）各自 miss；被持有的旧 Arc 不被就地修改。
+    #[test]
+    fn calendar_month_memo_hits_on_same_version_and_misses_on_every_input_change() {
+        use crate::query::read_memo::ReadMemo;
+        let dir = std::env::temp_dir().join(format!(
+            "avr-cal-memo-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        let path = agent_vitals_data::authority::default_authority_path(&dir);
+        let db = agent_vitals_data::authority::AuthorityDb::open(&path, 1).unwrap();
+        let month = "2026-09";
+        let (start, _) = agent_vitals_data::authority_query::beijing_month_bounds_ms(month).unwrap();
+        let seed = |db: &agent_vitals_data::authority::AuthorityDb, fact_id: &str, ts: i64, out: i64| {
+            db.with_immediate_txn(|c| {
+                c.execute(
+                    "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+                     VALUES ('run', 1, 'cli', 'succeeded', 1) ON CONFLICT(run_id) DO NOTHING", [])?;
+                c.execute(
+                    "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                         source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
+                         event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
+                         output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                     VALUES (?1, 'dsh', 'm', 'sess', ?1, 'assistant-usage', NULL, 'deepseek-chat', ?2,
+                         1, 10, 0, 0, ?3, 'run', 1, 1)",
+                    rusqlite::params![fact_id, ts, out],
+                )?;
+                Ok(())
+            }).unwrap();
+        };
+        seed(&db, "f1", start + 3_600_000, 5);
+        drop(db);
+
+        let repo = SqlSummaryRepository::at(&dir);
+        let memo = ReadMemo::with_capacity(8);
+        let first = calendar_month_memoized(month, &repo, &memo);
+        let second = calendar_month_memoized(month, &repo, &memo);
+        assert!(std::sync::Arc::ptr_eq(&first, &second), "same version must hit");
+        assert_eq!(memo.stats().hits, 1);
+        assert_eq!(memo.stats().misses, 1);
+        let tokens_before = first["days"].as_object().unwrap().values()
+            .map(|d| d["dsh_tokens"].as_i64().unwrap_or(0)).sum::<i64>();
+        assert_eq!(tokens_before, 15);
+
+        // 9.12：另一个月份是另一条目。
+        let _ = calendar_month_memoized("2026-08", &repo, &memo);
+        assert_eq!(memo.stats().misses, 2);
+
+        // 9.11：权威写 → revision 前进 → miss；旧 Arc 不变。
+        let db = agent_vitals_data::authority::AuthorityDb::open(&path, 2).unwrap();
+        seed(&db, "f2", start + 7_200_000, 7);
+        drop(db);
+        let third = calendar_month_memoized(month, &repo, &memo);
+        assert!(!std::sync::Arc::ptr_eq(&first, &third));
+        assert_eq!(memo.stats().misses, 3);
+        let tokens_after = third["days"].as_object().unwrap().values()
+            .map(|d| d["dsh_tokens"].as_i64().unwrap_or(0)).sum::<i64>();
+        assert_eq!(tokens_after, 32);
+        assert_eq!(
+            first["days"].as_object().unwrap().values()
+                .map(|d| d["dsh_tokens"].as_i64().unwrap_or(0)).sum::<i64>(),
+            15, "a held Arc must not change under the caller"
+        );
+
+        // 9.12（文件输入）：补卡文件变更 → 配置指纹变 → 同 revision 也 miss。
+        let _ = calendar_month_memoized(month, &repo, &memo);
+        assert_eq!(memo.stats().misses, 3, "sanity: still hitting before the file changes");
+        std::fs::write(
+            dir.join("state").join("pricing-overrides.json"),
+            r#"{"cards":{"deepseek":{"deepseek-chat":{"currency":"CNY","input":99,"output":99}}}}"#,
+        ).unwrap();
+        let _ = calendar_month_memoized(month, &repo, &memo);
+        assert_eq!(memo.stats().misses, 4, "price-card override must invalidate the memo");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4212,4 +4402,113 @@ mod tests {
             assert!(monthly_dsh < 1.0, "便宜快照生效，得 {monthly_dsh}");
         });
     }
+
+    /// RUNTIME_INVALIDATION spec 验收 9.10-9.12：`monthly_summary` / `daily_summary` /
+    /// `hourly_distribution` 各自经 memo——同版本命中、不同参数各自 miss、revision
+    /// 前进后 miss 并拿到新结果。三个入口共用一个临时库和一套 seed 逻辑。
+    #[test]
+    fn monthly_daily_hourly_summaries_are_memoized_by_version_and_params() {
+        use crate::query::read_memo::ReadMemo;
+        use agent_vitals_data::repository::{DailySummaryQuery, MonthlySummaryQuery};
+        let dir = std::env::temp_dir().join(format!(
+            "avr-mdh-memo-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        let path = agent_vitals_data::authority::default_authority_path(&dir);
+        let db = agent_vitals_data::authority::AuthorityDb::open(&path, 1).unwrap();
+        let month = "2026-09";
+        let date = "2026-09-10";
+        let (start, _) = agent_vitals_data::authority_query::beijing_month_bounds_ms(month).unwrap();
+        db.with_immediate_txn(|c| {
+            c.execute(
+                "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+                 VALUES ('run', 1, 'cli', 'succeeded', 1) ON CONFLICT(run_id) DO NOTHING", [])?;
+            c.execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                     source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
+                     event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
+                     output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES ('f1', 'dsh', 'm', 'sess', 'f1', 'assistant-usage', NULL, 'deepseek-chat',
+                     ?1, 1, 10, 0, 0, 5, 'run', 1, 1)",
+                rusqlite::params![start + 3_600_000],
+            )?;
+            Ok(())
+        }).unwrap();
+        drop(db);
+
+        let repo = SqlSummaryRepository::at(&dir);
+        let memo = ReadMemo::with_capacity(8);
+
+        // monthly_summary
+        let m1 = repo.monthly_summary_json_memoized(&MonthlySummaryQuery { month: month.into() }, &memo);
+        let m2 = repo.monthly_summary_json_memoized(&MonthlySummaryQuery { month: month.into() }, &memo);
+        assert!(std::sync::Arc::ptr_eq(&m1, &m2), "same month, same version: hit");
+        let m_other = repo.monthly_summary_json_memoized(&MonthlySummaryQuery { month: "2026-08".into() }, &memo);
+        assert!(!std::sync::Arc::ptr_eq(&m1, &m_other), "different month: independent entry");
+
+        // daily_summary
+        let d1 = repo.daily_summary_json_memoized(&DailySummaryQuery { date: date.into() }, &memo);
+        let d2 = repo.daily_summary_json_memoized(&DailySummaryQuery { date: date.into() }, &memo);
+        assert!(std::sync::Arc::ptr_eq(&d1, &d2), "same date, same version: hit");
+        let d_other = repo.daily_summary_json_memoized(&DailySummaryQuery { date: "2026-09-11".into() }, &memo);
+        assert!(!std::sync::Arc::ptr_eq(&d1, &d_other), "different date: independent entry");
+
+        // hourly_distribution
+        let h1 = hourly_distribution_memoized(date, &repo, &memo);
+        let h2 = hourly_distribution_memoized(date, &repo, &memo);
+        assert!(std::sync::Arc::ptr_eq(&h1, &h2), "same date, same version: hit");
+        let h_other = hourly_distribution_memoized("2026-09-11", &repo, &memo);
+        assert!(!std::sync::Arc::ptr_eq(&h1, &h_other), "different date: independent entry");
+
+        let d1_snapshot = (*d1).clone();
+        let misses_before = memo.stats().misses;
+
+        // revision 前进 → 三个入口各自 miss，旧 Arc 不变。
+        let db = agent_vitals_data::authority::AuthorityDb::open(&path, 2).unwrap();
+        db.with_immediate_txn(|c| {
+            c.execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                     source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
+                     event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
+                     output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES ('f2', 'dsh', 'm', 'sess', 'f2', 'assistant-usage', NULL, 'deepseek-chat',
+                     ?1, 1, 10, 0, 0, 7, 'run', 1, 1)",
+                rusqlite::params![start + 7_200_000],
+            )?;
+            Ok(())
+        }).unwrap();
+        drop(db);
+
+        let m3 = repo.monthly_summary_json_memoized(&MonthlySummaryQuery { month: month.into() }, &memo);
+        let d3 = repo.daily_summary_json_memoized(&DailySummaryQuery { date: date.into() }, &memo);
+        let h3 = hourly_distribution_memoized(date, &repo, &memo);
+        assert!(!std::sync::Arc::ptr_eq(&m1, &m3));
+        assert!(!std::sync::Arc::ptr_eq(&d1, &d3));
+        assert!(!std::sync::Arc::ptr_eq(&h1, &h3));
+        assert_eq!(memo.stats().misses, misses_before + 3);
+        // held Arcs 不被就地修改：d1 的内容与「第二次写入前」的快照逐字节相等。
+        assert_eq!(*d1, d1_snapshot, "the Arc held from before the write must not mutate");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    /// RUNTIME_INVALIDATION spec 验收 9.14：`open_db_ro`（经 `open_db`）在库缺席时
+    /// 返回 `None` 且**不建库文件**——与 v0.9.1「权威库不自愈」同纪律；旧的
+    /// `AuthorityDb::open`（读写）会在这种情况下悄悄建一个空库，这正是要避免的。
+    #[test]
+    fn open_db_ro_returns_none_without_creating_the_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "avr-open-ro-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo = SqlSummaryRepository::at(&dir);
+        assert!(repo.open_db_ro().is_none());
+        let path = agent_vitals_data::authority::default_authority_path(&dir);
+        assert!(!path.exists(), "a read must never create the authority database");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

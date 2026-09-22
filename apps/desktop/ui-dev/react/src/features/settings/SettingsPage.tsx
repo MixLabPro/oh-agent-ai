@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { fetchWatcherHealth, type WatcherHealthStatus, addCustomSourceRoot, amendBillingDeclaration, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, disableBudgetProfile, listenAppEvents, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, resolveBillingImportCandidate, retryBillingRecalculation, revokeBillingDeclaration, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
+import { fetchWatcherHealth, type WatcherHealthStatus, addCustomSourceRoot, amendBillingDeclaration, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, disableBudgetProfile, listenAppEvents, makeInvalidationGate, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, resolveBillingImportCandidate, retryBillingRecalculation, revokeBillingDeclaration, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -728,8 +728,14 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
  * degraded/unavailable 统一为「定期检查」，periodic fallback 永远在场。 */
 function watcherStatusLabel(health: WatcherHealthStatus | null): string {
   if (!health) return "状态不可判定 · 定期检查每 5 分钟兜底";
-  if (health.mode === "active" && health.pendingRoots === 0) return "实时监听已启用";
-  if (health.mode === "active" && health.pendingRoots > 0) return `部分可用（${health.pendingRoots} 个根等待） · 其余实时`;
+  // `throttled` 能与 `mode: "active"` 共存（REVIEW P4 自看护：watcher 后端
+  // 本身没坏，只是本机 CPU 持续偏高，同步节流窗被自动拉长）——如实说明，
+  // 不能让它落进「实时监听已启用」这句话里悄悄消失。
+  const throttledSuffix = health.reasonCode === "throttled" ? " · 本机 CPU 较高，同步节流中" : "";
+  if (health.mode === "active" && health.pendingRoots === 0) return `实时监听已启用${throttledSuffix}`;
+  if (health.mode === "active" && health.pendingRoots > 0) {
+    return `部分可用（${health.pendingRoots} 个根等待） · 其余实时${throttledSuffix}`;
+  }
   if (health.mode === "disabled") return "未启用实时监听 · 定期检查每 5 分钟";
   return "已降级为定期检查 · 每 5 分钟";
 }
@@ -969,11 +975,17 @@ export function SettingsPage() {
     refreshQuotaReminder();
     let active = true;
     let cleanups: Array<() => void> = [];
+    const gate = makeInvalidationGate();
     void listenAppEvents((event) => {
       if (!active) return;
       if (event.type === "SourceDataDeleted") {
         refresh(); refreshData(); refreshQuotaReminder();
-      } else {
+      } else if (event.type === "SyncStatusChanged") {
+        // 同步失败/恢复只体现在数据源健康（sync_runs 是记账写，不推进 revision）。
+        refresh();
+      } else if (gate(event)) {
+        // 权威 revision 前进：预算/计费/数据面/关于页一起重拉——每 tick 至多一次，
+        // 且同 revision 的重复事件被闸门吞掉（RUNTIME_INVALIDATION spec §6）。
         refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); refreshAbout(); refreshQuotaReminder();
       }
     }).then((unsubscribe) => {

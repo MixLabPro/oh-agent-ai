@@ -28,6 +28,7 @@
 pub mod core;
 pub use core::clock;
 pub use core::home;
+pub use core::logging;
 pub use core::state;
 pub use core::takeover;
 pub use core::statistics_timezone;

@@ -37,6 +37,13 @@ callback?.({ payload: { type: "SourceDataDeleted", path: "/private/path" } });
 callback?.({ payload: { type: "WatcherHealthChanged", mode: "active", topology_revision: 2, pending_roots: 0, reason_code: null } });
 callback?.({ payload: { type: "WatcherHealthChanged", mode: "not-a-mode", raw: "/private/path" } });
 callback?.({ payload: { type: "UnknownInternalEvent", secret: "drop" } });
+// RUNTIME_INVALIDATION spec §6：Invalidated 只透 revision（限幅）+ hosts（闭集过滤）。
+callback?.({ payload: { type: "Invalidated", schema_version: 1, revision: 42, hosts: ["dsh", "codex", "/private/path", 7], payload: { secret: "drop" } } });
+callback?.({ payload: { type: "Invalidated", revision: -1, hosts: "not-an-array" } });
+callback?.({ payload: { type: "Invalidated", revision: 1e300 } });
+// 退役类型：领域事件不再透传（spec §4.3）。
+callback?.({ payload: { type: "FoldCompleted", at: 1 } });
+callback?.({ payload: { type: "FactsIngested", host: "dsh", inserted: 3 } });
 callback?.({ payload: "malformed" });
 domCallback?.();
 assert.equal(JSON.stringify(events), JSON.stringify([
@@ -44,6 +51,9 @@ assert.equal(JSON.stringify(events), JSON.stringify([
   { type: "SourceDataDeleted" },
   { type: "WatcherHealthChanged" },
   { type: "WatcherHealthChanged" },
+  { type: "Invalidated", revision: 42, hosts: ["dsh", "codex"] },
+  { type: "Invalidated", hosts: [] },
+  { type: "Invalidated", hosts: [] },
   { type: "SourceDataDeleted" },
 ]));
 unsubscribe();
@@ -59,6 +69,21 @@ assert.equal(JSON.stringify(rejectedEvents), JSON.stringify([{ type: "SourceData
 rejectedUnsubscribe();
 assert.equal(domCallback, null);
 
+// 失效闸门（spec §6）：revision 严格前进才放行；同 revision 重复、其他类型都拒；
+// SourceDataDeleted 恒放行；无 revision 的旧桌面进程保守放行。
+const { makeInvalidationGate } = sandbox.module.exports;
+const gate = makeInvalidationGate();
+assert.equal(gate({ type: "Invalidated", revision: 5, hosts: [] }), true, "first revision refreshes");
+assert.equal(gate({ type: "Invalidated", revision: 5, hosts: ["dsh"] }), false, "same revision swallowed");
+assert.equal(gate({ type: "Invalidated", revision: 4, hosts: [] }), false, "older revision swallowed");
+assert.equal(gate({ type: "Invalidated", revision: 6, hosts: [] }), true, "advance refreshes");
+assert.equal(gate({ type: "SyncStatusChanged" }), false, "status is not data invalidation");
+assert.equal(gate({ type: "WatcherHealthChanged" }), false);
+assert.equal(gate({ type: "TrustMonitorEvent" }), false);
+assert.equal(gate({ type: "SourceDataDeleted" }), true, "deletion always refreshes");
+assert.equal(gate({ type: "Invalidated", hosts: [] }), true, "no revision (old desktop) refreshes conservatively");
+assert.equal(gate({ type: "Invalidated", revision: 6, hosts: [] }), false, "conservative path does not reset seenRevision");
+
 const { parseWatcherHealth } = sandbox.module.exports;
 // vm 跨 realm 对象不做 deepEqual（原型不同）——按本文件惯例用 JSON 串比较。
 assert.equal(
@@ -71,6 +96,13 @@ assert.equal(
   "越界 revision 限幅为 0，mode 与短 reason 照收",
 );
 assert.equal(parseWatcherHealth({ mode: "escalated", topology_revision: 1, pending_roots: 0 }), null, "闭集外 mode 必须拒绝");
+// REVIEW P4 自看护：throttled 是 2026-09-22 新增的第 9 个原因码，且必须能与
+// mode: "active" 共存（watcher 后端没坏，只是 CPU 持续过高）。
+assert.equal(
+  JSON.stringify(parseWatcherHealth({ mode: "active", reason_code: "throttled", topology_revision: 1, pending_roots: 0 })),
+  JSON.stringify({ mode: "active", reasonCode: "throttled", topologyRevision: 1, pendingRoots: 0 }),
+  "throttled 与 active 共存必须被接受",
+);
 assert.equal(
   JSON.stringify(parseWatcherHealth({ mode: "active", reason_code: "/private/raw/path/error" })),
   JSON.stringify({ mode: "active", reasonCode: null, topologyRevision: 0, pendingRoots: 0 }),
@@ -82,8 +114,14 @@ assert.equal(parseWatcherHealth("string"), null);
 const source = readFileSync(path.join(ui, "react/src/features/findings/FindingsPage.tsx"), "utf8");
 assert.ok(source.includes("listenAppEvents"));
 assert.ok(source.includes("eventRefreshTimer"));
+// 五处数据订阅者都经失效闸门（spec §6）；Settings 主 effect 另按类型分流。
+for (const file of ["app/App.tsx", "features/usage/UsagePage.tsx", "features/sessions/SessionsPage.tsx", "features/findings/FindingsPage.tsx", "features/settings/SettingsPage.tsx"]) {
+  const text = readFileSync(path.join(ui, "react/src", file), "utf8");
+  assert.ok(text.includes("makeInvalidationGate()"), `${file} refreshes through the invalidation gate`);
+  assert.ok(!text.includes("listenAppEvents(() => refresh())"), `${file} no longer refreshes on every event`);
+}
 assert.ok(!source.includes('listen("sync-status-updated"'));
 assert.ok(!source.includes('listen("usage-fold-updated"'));
 assert.ok(!source.includes('listen("trust-monitor-updated"'));
 assert.ok(!source.includes('listen("source-data-deleted"'));
-console.log("React event bus contract: OK (app-event allowlist, payload redaction, cleanup, burst queue, watcher-health closed set)");
+console.log("React event bus contract: OK (app-event allowlist, Invalidated revision/hosts, invalidation gate, payload redaction, cleanup, burst queue, watcher-health closed set)");

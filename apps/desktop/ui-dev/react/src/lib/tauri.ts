@@ -1,7 +1,32 @@
 export type Unsubscribe = () => void;
 
-export type AppEventType = "FoldCompleted" | "FactsIngested" | "SyncStatusChanged" | "TrustMonitorEvent" | "TrustMonitorInvalidated" | "SourceDataDeleted" | "WatcherHealthChanged";
-export type AppEvent = { type: AppEventType };
+/** Desktop `app-event` allowlist. `Invalidated` (RUNTIME_INVALIDATION spec §4.4)
+ * replaced `FoldCompleted` + `FactsIngested`: the desktop now publishes one
+ * level-triggered signal per authority-revision advance instead of forwarding
+ * domain events one by one. */
+export type AppEventType = "Invalidated" | "SyncStatusChanged" | "TrustMonitorEvent" | "TrustMonitorInvalidated" | "SourceDataDeleted" | "WatcherHealthChanged";
+/** Only `Invalidated` carries fields across the bridge: a monotonic revision and
+ * the hosts touched by that drain (a lower bound, never an exact set). Every
+ * other type is reduced to its tag — payloads stay on the desktop side. */
+export type AppEvent = { type: AppEventType; revision?: number; hosts?: string[] };
+
+/** Data-refresh gate (spec §6): refresh on `SourceDataDeleted`, and on
+ * `Invalidated` only when its revision strictly advances past what this
+ * subscriber already refreshed for. Same-revision repeats and every other
+ * event type are ignored — a page that needs `SyncStatusChanged` or
+ * `WatcherHealthChanged` subscribes to those explicitly. */
+export function makeInvalidationGate(): (event: AppEvent) => boolean {
+  let seenRevision = -1;
+  return (event) => {
+    if (event.type === "SourceDataDeleted") return true;
+    if (event.type !== "Invalidated") return false;
+    const revision = typeof event.revision === "number" ? event.revision : -1;
+    if (revision < 0) return true; // 无 revision 的旧桌面进程：保守刷新
+    if (revision <= seenRevision) return false;
+    seenRevision = revision;
+    return true;
+  };
+}
 
 /** Convert bridge failures into bounded user-facing copy. Raw invoke errors
  * may contain local paths, command lines, or provider diagnostics and must not
@@ -2992,7 +3017,10 @@ export async function listen(event: string, handler: (payload: unknown) => void)
   };
 }
 
-const appEventTypes = new Set<AppEventType>(["FoldCompleted", "FactsIngested", "SyncStatusChanged", "TrustMonitorEvent", "TrustMonitorInvalidated", "SourceDataDeleted", "WatcherHealthChanged"]);
+const appEventTypes = new Set<AppEventType>(["Invalidated", "SyncStatusChanged", "TrustMonitorEvent", "TrustMonitorInvalidated", "SourceDataDeleted", "WatcherHealthChanged"]);
+
+/** Closed host vocabulary for `Invalidated.hosts` (unknown names are dropped). */
+const invalidationHosts: ReadonlySet<string> = new Set(["claude-code", "codex", "dsh", "workbuddy"]);
 
 function safeAppEvent(raw: unknown): AppEvent | null {
   const candidate = raw && typeof raw === "object" && "payload" in raw
@@ -3000,7 +3028,17 @@ function safeAppEvent(raw: unknown): AppEvent | null {
     : raw;
   if (!candidate || typeof candidate !== "object") return null;
   const type = (candidate as { type?: unknown }).type;
-  return typeof type === "string" && appEventTypes.has(type as AppEventType) ? { type: type as AppEventType } : null;
+  if (typeof type !== "string" || !appEventTypes.has(type as AppEventType)) return null;
+  if (type !== "Invalidated") return { type: type as AppEventType };
+  const record = candidate as Record<string, unknown>;
+  const rawRevision = record.revision;
+  const revision = typeof rawRevision === "number" && Number.isFinite(rawRevision) && rawRevision >= 0 && rawRevision <= Number.MAX_SAFE_INTEGER
+    ? Math.floor(rawRevision)
+    : undefined;
+  const hosts = Array.isArray(record.hosts)
+    ? record.hosts.filter((h): h is string => typeof h === "string" && invalidationHosts.has(h))
+    : [];
+  return revision === undefined ? { type: "Invalidated", hosts } : { type: "Invalidated", revision, hosts };
 }
 
 /** Subscribe to the single desktop event bus and expose only its allowlisted type. */
@@ -3038,11 +3076,16 @@ export type WatcherHealthStatus = {
 
 const watcherModes: ReadonlySet<WatcherHealthStatus["mode"]> = new Set(["active", "degraded", "disabled", "unavailable"]);
 
-/** 原因码闭集（HARDENING spec §5.5 允许的 9 个）——枚举值与 mode 同纪律：
- * 未知一律拒为 null（spec §5.6「reject unrecognized enum values」）。 */
+/** 原因码闭集（HARDENING spec §5.5 允许的 10 个：`root_attach_failed` 与
+ * `throttled` 都是 2026-09-22 同日两条独立分支各自补的）——枚举值与 mode
+ * 同纪律：未知一律拒为 null（spec §5.6「reject unrecognized enum values」）。
+ * `throttled` 与其余 9 个不同的是：它可能与 `mode: "active"` 共存（watcher
+ * 后端本身没坏，只是 CPU 持续过高把同步冷却拉长了，REVIEW P4 自看护）——UI
+ * 文案不能假设 reason_code 非空就等于 watcher 故障。 */
 const watcherReasonCodes: ReadonlySet<string> = new Set([
   "feature_disabled", "no_roots", "home_unavailable", "backend_init_failed",
-  "root_pending", "root_permission_denied", "root_attach_failed", "worker_terminated", "topology_rejected",
+  "root_pending", "root_permission_denied", "root_attach_failed", "worker_terminated",
+  "topology_rejected", "throttled",
 ]);
 
 /** 闭集校验 + 数值限幅：未知枚举/越界计数一律拒绝为 null（degrade，不穿墙）。 */

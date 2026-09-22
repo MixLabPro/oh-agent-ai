@@ -82,6 +82,7 @@ dependencies = [
  "agent-vitals-hosts",
  "agent-vitals-provider",
  "jiff",
+ "libc",
  "notify",
  "regex",
  "rusqlite",

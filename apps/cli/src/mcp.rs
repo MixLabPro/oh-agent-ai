@@ -25,14 +25,20 @@ const SERVER_NAME: &str = "agent-vitals-data";
 /// `agent-vitals data-mcp serve` 的入口。永不返回（stdin EOF → exit 0）。
 pub fn serve(allow_local_writes: bool) -> ! {
     let data_home = agent_vitals_runtime::home::data_home();
-    eprintln!(
+    // 生命周期横幅，不是问题——保留原样直出 stderr（外部 MCP host 常年就是
+    // 这么认这个进程活没活的），同时落一条 info 到文件（本机侧的进程存活
+    // 记录，此前完全没有）。
+    let banner = format!(
         "data-mcp: serving on stdio (protocol {PROTOCOL_VERSION}, data_home {})",
         data_home.display()
     );
+    eprintln!("{banner}");
+    agent_vitals_runtime::logging::log_info("data-mcp", &banner);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     run_loop_with_permissions(stdin.lock(), stdout.lock(), &data_home, allow_local_writes);
     eprintln!("data-mcp: stdin closed, exiting");
+    agent_vitals_runtime::logging::log_info("data-mcp", "stdin closed, exiting");
     std::process::exit(0);
 }
 
@@ -56,7 +62,7 @@ pub(crate) fn run_loop_with_permissions(
         let line = match line {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("data-mcp: stdin read error: {e}");
+                agent_vitals_runtime::logging::log_warn("data-mcp", &format!("stdin read error: {e}"));
                 break;
             }
         };
@@ -147,7 +153,10 @@ fn handle_tools_call(id: Value, params: &Value, data_home: &std::path::Path, all
     let (structured, is_error) = match mcp::dispatch_with_permissions(name, &args, data_home, allow_local_writes) {
         Ok(envelope) => (envelope, false),
         Err(err) => {
-            eprintln!("data-mcp: tool {name} error [{}]: {}", err.code, err.message);
+            agent_vitals_runtime::logging::log_warn(
+                "data-mcp",
+                &format!("tool {name} error [{}]: {}", err.code, err.message),
+            );
             (mcp::error_envelope(&err), true)
         }
     };
@@ -212,7 +221,7 @@ fn audit_tool_call(
         &db_path,
         agent_vitals_runtime::sql_sync::now_ms(),
     ) else {
-        eprintln!("data-mcp: audit skipped (authority open failed)");
+        agent_vitals_runtime::logging::log_warn("data-mcp", "audit skipped (authority open failed)");
         return;
     };
     let run_id = {
@@ -234,7 +243,7 @@ fn audit_tool_call(
             match db.begin_run(&id, "mcp-audit", agent_vitals_runtime::sql_sync::now_ms()) {
                 Ok(()) => { runs.insert(db_path, id.clone()); id }
                 Err(e) => {
-                    eprintln!("data-mcp: audit run begin failed: {e}");
+                    agent_vitals_runtime::logging::log_warn("data-mcp", &format!("audit run begin failed: {e}"));
                     return;
                 }
             }
@@ -262,7 +271,7 @@ fn audit_tool_call(
     if let Err(e) = db.with_immediate_txn(|conn| insert_outbox(conn, &event, &run_id)
         .map_err(|e| agent_vitals_data::authority::AuthorityError::Sqlite(
             rusqlite::Error::InvalidParameterName(format!("__audit__:{e}"))))) {
-        eprintln!("data-mcp: audit emit failed: {e}");
+        agent_vitals_runtime::logging::log_warn("data-mcp", &format!("audit emit failed: {e}"));
     }
 }
 

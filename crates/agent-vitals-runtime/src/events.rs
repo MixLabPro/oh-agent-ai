@@ -22,20 +22,45 @@ use crate::sql_sync::now_ms;
 /// 事件契约版本。与 authority schema 演进纪律同款：只增不删不改语义。
 pub const EVENT_SCHEMA_VERSION: i64 = 1;
 
-/// 闭集词表（spec §5 首批冻结）。写入侧与投递侧双双校验——词表外的
+/// 事件类别（RUNTIME_INVALIDATION spec §4.2）。`Domain` = 业务状态的过去时陈述，
+/// 给领域消费者逐条处理；`Audit` = 审计旁路。**没有 `Invalidation` 类**——失效
+/// 信号不是 outbox 行，它由 drain 末尾读权威 revision 派生（[`Invalidation`]）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventClass {
+    Domain,
+    Audit,
+}
+
+/// 闭集词表（spec §5 首批冻结）+ 类别。写入侧与投递侧双双校验——词表外的
 /// `event_type` 在 insert 时被拒绝，防漂移进无人认识的行。
-pub const EVENT_TYPES: &[&str] = &[
-    "FactsIngested",
-    "AuthorityRevisionAdvanced",
-    "DeclarationSaved",
-    "PriceCardSaved",
-    "HostSourceFailed",
-    "SourceRecovered",
-    "McpToolInvoked",
-    "TrustMonitorEvent",
-    "HourTicked",
-    "DayRolled",
+///
+/// `AuthorityRevisionAdvanced` 是**保留位**（RUNTIME_INVALIDATION spec §4.4）：它若逐次
+/// 落 outbox 就违反「失效信号是派生投影」；留在词表只为不打破闭集校验的历史行。
+pub const EVENT_TYPES: &[(&str, EventClass)] = &[
+    ("FactsIngested", EventClass::Domain),
+    ("AuthorityRevisionAdvanced", EventClass::Domain),
+    ("DeclarationSaved", EventClass::Domain),
+    ("PriceCardSaved", EventClass::Domain),
+    ("HostSourceFailed", EventClass::Domain),
+    ("SourceRecovered", EventClass::Domain),
+    ("McpToolInvoked", EventClass::Audit),
+    ("TrustMonitorEvent", EventClass::Domain),
+    ("HourTicked", EventClass::Domain),
+    ("DayRolled", EventClass::Domain),
 ];
+
+/// 词表查询：类型 → 类别（词表外 = `None`）。
+pub fn event_class(event_type: &str) -> Option<EventClass> {
+    EVENT_TYPES
+        .iter()
+        .find(|(t, _)| *t == event_type)
+        .map(|(_, c)| *c)
+}
+
+/// 词表查询：类型 → `&'static str`（leak-free 地从闭集取回）。
+fn static_type(event_type: &str) -> Option<&'static str> {
+    EVENT_TYPES.iter().find(|(t, _)| *t == event_type).map(|(t, _)| *t)
+}
 
 /// 一条事件的信封（spec §4.1 冻结形状）。
 #[derive(Clone, Debug, PartialEq)]
@@ -101,8 +126,13 @@ impl AppEvent {
     }
 
     /// `FactsIngested`：某宿主的事实批次已在权威库事务内落定。
+    ///
+    /// `revision` = 本事务**提交后**的权威 revision（spec §5 声明的
+    /// `FactsIngested{host, run_id, revision}`）。生产者在事务内读当前值 + 1
+    /// （事务已插入事实，提交必然推进）；领域消费者可据此跳过 ≤ 已处理 revision 的批次。
     pub fn facts_ingested(
-        host: &str, run_id: &str, inserted: usize, rejected: usize, duplicate: usize,
+        host: &str, run_id: &str, revision: u64,
+        inserted: usize, rejected: usize, duplicate: usize,
     ) -> Self {
         Self {
             event_type: "FactsIngested",
@@ -114,7 +144,7 @@ impl AppEvent {
             // 把 rejected 并进 inserted 是契约漂移——payload 字段名必须与语义
             // 一致，消费者迟早会读它们）。
             payload: json!({
-                "run_id": run_id, "inserted": inserted,
+                "run_id": run_id, "revision": revision, "inserted": inserted,
                 "rejected": rejected, "duplicate": duplicate,
             }),
         }
@@ -159,7 +189,7 @@ impl std::fmt::Display for EventError {
 /// 把事件写进调用方持有的事务。**本函数不开事务、不提交**——调用方必须
 /// 在与状态变更相同的 `with_immediate_txn` 里调它（spec §1.2）。
 pub fn insert_outbox(conn: &Connection, event: &AppEvent, run_id: &str) -> Result<(), EventError> {
-    if !EVENT_TYPES.contains(&event.event_type) {
+    if event_class(event.event_type).is_none() {
         return Err(EventError::UnknownType(event.event_type.to_string()));
     }
     conn.execute(
@@ -184,7 +214,113 @@ pub fn insert_outbox(conn: &Connection, event: &AppEvent, run_id: &str) -> Resul
     .map_err(EventError::Db)
 }
 
-/// 一个消费者：稳定 id + 处理函数。处理函数拿到的是**已脱离数据库行**的
+/// 消费者角色（RUNTIME_INVALIDATION spec §4.2）。
+///
+/// - `Domain`：读领域事件载荷，逐条处理（price-reconcile / quota / issue 评估器）；
+/// - `Audit`：读审计事件；
+/// - `Presentation`：展示层。**结构上拿不到载荷**——只能以 [`CoalescingConsumer`]
+///   身份参与 drain，得到「本轮有哪些类型 / 哪些宿主 / 多少条」的合并摘要，
+///   再由 flush 派生失效信号。用 [`EventConsumer`] 声明 `Presentation` 角色在
+///   `Dispatcher::new` 被拒绝。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConsumerRole {
+    Domain,
+    Presentation,
+    Audit,
+}
+
+/// 消费者兴趣集：角色 + 订阅的类型子集（空 = 该角色允许的全部类别）。drain 的反连接
+/// SQL 按此过滤，不再每个消费者扫全表。
+#[derive(Clone, Copy, Debug)]
+pub struct ConsumerInterest {
+    pub role: ConsumerRole,
+    pub types: &'static [&'static str],
+}
+
+impl ConsumerInterest {
+    pub const fn domain(types: &'static [&'static str]) -> Self {
+        Self { role: ConsumerRole::Domain, types }
+    }
+    pub const fn audit(types: &'static [&'static str]) -> Self {
+        Self { role: ConsumerRole::Audit, types }
+    }
+    /// 展示层：无类型子集（它不读载荷，只需要看到 Domain 类的行以合并摘要）。
+    pub const fn presentation() -> Self {
+        Self { role: ConsumerRole::Presentation, types: &[] }
+    }
+
+    fn allowed_class(&self) -> EventClass {
+        match self.role {
+            ConsumerRole::Domain | ConsumerRole::Presentation => EventClass::Domain,
+            ConsumerRole::Audit => EventClass::Audit,
+        }
+    }
+
+    /// 展开为具体类型清单（校验后调用；每项都在词表且属允许类别）。
+    fn resolved_types(&self) -> Vec<&'static str> {
+        if self.types.is_empty() {
+            let class = self.allowed_class();
+            EVENT_TYPES.iter().filter(|(_, c)| *c == class).map(|(t, _)| *t).collect()
+        } else {
+            self.types.iter().filter_map(|t| static_type(t)).collect()
+        }
+    }
+
+    fn validate(&self, coalescing: bool, consumer_id: &str) -> Result<(), RoleViolation> {
+        match self.role {
+            ConsumerRole::Presentation => {
+                if !coalescing {
+                    return Err(RoleViolation {
+                        consumer_id: consumer_id.to_string(),
+                        reason: "presentation consumers never read payloads — register a CoalescingConsumer".into(),
+                    });
+                }
+                if !self.types.is_empty() {
+                    return Err(RoleViolation {
+                        consumer_id: consumer_id.to_string(),
+                        reason: format!("presentation consumers take no type subset (got {:?})", self.types),
+                    });
+                }
+            }
+            ConsumerRole::Domain | ConsumerRole::Audit => {
+                let class = self.allowed_class();
+                for t in self.types {
+                    match event_class(t) {
+                        Some(c) if c == class => {}
+                        Some(c) => {
+                            return Err(RoleViolation {
+                                consumer_id: consumer_id.to_string(),
+                                reason: format!("`{t}` is {c:?}-class, not allowed for {:?} role", self.role),
+                            })
+                        }
+                        None => {
+                            return Err(RoleViolation {
+                                consumer_id: consumer_id.to_string(),
+                                reason: format!("`{t}` is not in the frozen vocabulary"),
+                            })
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 兴趣集与角色的冲突：`Dispatcher::new` 拒绝（spec 验收 9.3）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleViolation {
+    pub consumer_id: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for RoleViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "consumer `{}`: {}", self.consumer_id, self.reason)
+    }
+}
+
+/// 一个消费者：稳定 id + 兴趣集 + 处理函数。处理函数拿到的是**已脱离数据库行**的
 /// 事件投影。**禁止**在处理函数里使用 drain 正在遍历的那条连接——消费者自
 /// 持资源（如按路径自开 AuthorityDb）；drain 在自动提交模式下逐行调用，
 /// 不持事务（spec §6「先处理、后记账」的崩溃语义依赖这一点）。
@@ -192,15 +328,74 @@ pub type EventHandler = Box<dyn Fn(&AppEvent) -> Result<(), String> + Send + Syn
 
 pub struct EventConsumer {
     pub consumer_id: &'static str,
+    pub interest: ConsumerInterest,
     pub handle: EventHandler,
 }
 
 impl EventConsumer {
     pub fn new(
         consumer_id: &'static str,
+        interest: ConsumerInterest,
         handle: impl Fn(&AppEvent) -> Result<(), String> + Send + Sync + 'static,
     ) -> Self {
-        Self { consumer_id, handle: Box::new(handle) }
+        Self { consumer_id, interest, handle: Box::new(handle) }
+    }
+}
+
+/// 一轮 drain 里某个合并型消费者看到的摘要——**没有载荷**。这是展示层拿不到
+/// 领域事件内容的结构保证（不靠评审）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Coalesced {
+    /// 本轮 fold 成功的事件数。
+    pub events: usize,
+    /// 触及的宿主（宿主域事件才有；全局事件不贡献）。
+    pub hosts: std::collections::BTreeSet<String>,
+    /// 触及的事件类型。
+    pub types: std::collections::BTreeSet<&'static str>,
+}
+
+/// 合并型消费者（RUNTIME_INVALIDATION spec §4.3）：drain 内逐事件累积 [`Coalesced`]
+/// （deliveries **仍逐事件记账**，at-least-once 一字不动），drain 结束时若累积到
+/// ≥1 条则调 `flush` **一次**。副作用被合并，投递没有。
+///
+/// flush 在记账之后：崩溃于 flush 前，事件已记账、这轮的合并摘要丢失——对失效
+/// 信号是可接受的（电平语义：下一轮 drain 或页面挂载时的主动拉会重新对齐）；
+/// 反过来先 flush 后记账会在崩溃时重复投递领域事件，不可接受。
+pub type FlushHandler = Box<dyn Fn(Coalesced) + Send + Sync>;
+
+pub struct CoalescingConsumer {
+    pub consumer_id: &'static str,
+    pub interest: ConsumerInterest,
+    pub flush: FlushHandler,
+}
+
+impl CoalescingConsumer {
+    pub fn new(
+        consumer_id: &'static str,
+        interest: ConsumerInterest,
+        flush: impl Fn(Coalesced) + Send + Sync + 'static,
+    ) -> Self {
+        Self { consumer_id, interest, flush: Box::new(flush) }
+    }
+}
+
+enum ConsumerKind {
+    Plain(EventConsumer),
+    Coalescing(CoalescingConsumer),
+}
+
+impl ConsumerKind {
+    fn consumer_id(&self) -> &'static str {
+        match self {
+            ConsumerKind::Plain(c) => c.consumer_id,
+            ConsumerKind::Coalescing(c) => c.consumer_id,
+        }
+    }
+    fn interest(&self) -> ConsumerInterest {
+        match self {
+            ConsumerKind::Plain(c) => c.interest,
+            ConsumerKind::Coalescing(c) => c.interest,
+        }
     }
 }
 
@@ -215,6 +410,8 @@ pub struct DispatchReport {
     pub retried: usize,
     /// 词表/schema_version 不认识的行（前向兼容：只跳过并计数）。
     pub skipped: usize,
+    /// 合并型消费者的 flush 次数（每消费者每轮 ≤ 1）。
+    pub flushed: usize,
 }
 
 /// 事件分发器：按消费者反连接扫描 outbox 并执行。
@@ -223,12 +420,41 @@ pub struct DispatchReport {
 /// 与崩溃残留（deliveries 缺行）在同一轮补齐。唤醒通道与 update_hook 快路
 /// 属于 P1 桌面常驻 dispatcher 的接线，此处不实现（避免无消费者的死线程）。
 pub struct Dispatcher {
-    consumers: Vec<EventConsumer>,
+    consumers: Vec<ConsumerKind>,
 }
 
 impl Dispatcher {
-    pub fn new(consumers: Vec<EventConsumer>) -> Self {
-        Self { consumers }
+    /// 只有领域/审计消费者时的构造（无合并型）。角色与兴趣集在此校验。
+    pub fn new(consumers: Vec<EventConsumer>) -> Result<Self, RoleViolation> {
+        Self::with_coalescing(consumers, Vec::new())
+    }
+
+    /// 领域/审计消费者 + 合并型消费者。
+    pub fn with_coalescing(
+        consumers: Vec<EventConsumer>,
+        coalescing: Vec<CoalescingConsumer>,
+    ) -> Result<Self, RoleViolation> {
+        let mut all = Vec::with_capacity(consumers.len() + coalescing.len());
+        for c in consumers {
+            c.interest.validate(false, c.consumer_id)?;
+            all.push(ConsumerKind::Plain(c));
+        }
+        for c in coalescing {
+            c.interest.validate(true, c.consumer_id)?;
+            all.push(ConsumerKind::Coalescing(c));
+        }
+        Ok(Self { consumers: all })
+    }
+
+    /// 兴趣集展开成 SQL `IN (...)` 字面量列表。值来自闭集词表常量（已校验），
+    /// 不是用户输入，故可以内联；空清单返回 `('')`（匹配不到任何行）。
+    fn types_in_clause(interest: &ConsumerInterest) -> String {
+        let types = interest.resolved_types();
+        if types.is_empty() {
+            return "('')".to_string();
+        }
+        let quoted: Vec<String> = types.iter().map(|t| format!("'{t}'")).collect();
+        format!("({})", quoted.join(", "))
     }
 
     /// 扫描并投递所有 `(event, consumer)` 缺行组合。逐事件逐消费者执行：
@@ -239,22 +465,28 @@ impl Dispatcher {
     pub fn drain(&self, conn: &Connection) -> Result<DispatchReport, rusqlite::Error> {
         let mut report = DispatchReport::default();
         for consumer in &self.consumers {
-            let mut stmt = conn.prepare(
+            let consumer_id = consumer.consumer_id();
+            let interest = consumer.interest();
+            // 兴趣集过滤进 SQL：不订阅的类型连行都不物化、不记账（spec 验收 9.4）。
+            let sql = format!(
                 "SELECT o.event_id, o.event_type, o.schema_version, o.occurred_at_ms, o.host,
                         o.correlation_id, o.producer, o.payload_json,
                         COALESCE(d.retry_count, 0)
                  FROM event_outbox o
                  LEFT JOIN event_deliveries d
                    ON d.event_id = o.event_id AND d.consumer_id = ?1
-                 WHERE d.event_id IS NULL
+                 WHERE o.event_type IN {}
+                   AND (d.event_id IS NULL
                     OR (d.last_error IS NOT NULL
                         AND d.retry_count < ?2
-                        AND COALESCE(d.next_retry_at_ms, 0) <= ?3)
+                        AND COALESCE(d.next_retry_at_ms, 0) <= ?3))
                  ORDER BY o.created_at_ms, o.event_id",
-            )?;
+                Self::types_in_clause(&interest)
+            );
+            let mut stmt = conn.prepare(&sql)?;
             let now = now_ms();
             let rows = stmt.query_map(
-                rusqlite::params![consumer.consumer_id, MAX_RETRIES, now],
+                rusqlite::params![consumer_id, MAX_RETRIES, now],
                 |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -275,34 +507,44 @@ impl Dispatcher {
             // 物化后每条 INSERT 是独立自动提交事务，且不再边扫边写同一连接。
             let pending: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
             drop(stmt);
+            let mut coalesced = Coalesced::default();
             for row in pending {
                 let (event_id, event_type, schema_version, occurred_at_ms, host,
                      correlation_id, _producer, payload_json, prior_retries) = row;
                 // 前向兼容：未来的 schema_version / 词表外类型只跳过并计数，
                 // 不让一条不认识的行卡住整个队列（spec §10.7 的闭集校验是
                 // 「拒绝并计数」，不是崩溃）。
-                if schema_version > EVENT_SCHEMA_VERSION
-                    || !EVENT_TYPES.contains(&event_type.as_str())
-                {
-                    record_delivery(conn, &event_id, consumer.consumer_id, now_ms(),
+                let Some(static_event_type) = static_type(&event_type)
+                    .filter(|_| schema_version <= EVENT_SCHEMA_VERSION)
+                else {
+                    record_delivery(conn, &event_id, consumer_id, now_ms(),
                         Some("skipped: unknown event_type or newer schema_version".to_string()))?;
                     report.skipped += 1;
                     continue;
-                }
-                let event = AppEvent {
-                    // 词表校验已过，leak-free 的 &'static 从闭集取回。
-                    event_type: EVENT_TYPES
-                        .iter()
-                        .find(|t| **t == event_type)
-                        .copied()
-                        .unwrap_or(""),
-                    occurred_at_ms,
-                    host,
-                    correlation_id,
-                    producer: "",
-                    payload: serde_json::from_str(&payload_json).unwrap_or(Value::Null),
                 };
-                let error = match (consumer.handle)(&event) {
+                let error = match consumer {
+                    ConsumerKind::Plain(c) => {
+                        let event = AppEvent {
+                            event_type: static_event_type,
+                            occurred_at_ms,
+                            host,
+                            correlation_id,
+                            producer: "",
+                            payload: serde_json::from_str(&payload_json).unwrap_or(Value::Null),
+                        };
+                        (c.handle)(&event)
+                    }
+                    ConsumerKind::Coalescing(_) => {
+                        // 只累积头部字段；载荷字符串在此被丢弃，永不解析。
+                        coalesced.events += 1;
+                        coalesced.types.insert(static_event_type);
+                        if let Some(h) = host {
+                            coalesced.hosts.insert(h);
+                        }
+                        Ok(())
+                    }
+                };
+                let error = match error {
                     Ok(()) => {
                         report.delivered += 1;
                         None
@@ -315,10 +557,91 @@ impl Dispatcher {
                         Some(message)
                     }
                 };
-                record_delivery(conn, &event_id, consumer.consumer_id, now_ms(), error)?;
+                record_delivery(conn, &event_id, consumer_id, now_ms(), error)?;
+            }
+            if let ConsumerKind::Coalescing(c) = consumer {
+                if coalesced.events > 0 {
+                    (c.flush)(coalesced);
+                    report.flushed += 1;
+                }
             }
         }
         Ok(report)
+    }
+}
+
+// ---- 失效信号与「变了才发」原语（RUNTIME_INVALIDATION spec §4.4 / §4.5）----
+
+/// 展示层的失效信号：权威 revision + 本轮 drain 触及的宿主（**下界**，不是精确集——
+/// drain 时读到的 revision 可能超前于本轮 fold 的事件，spec §4.4 顺序注记）。
+/// 它不是 outbox 行；由 `CoalescingConsumer::flush` 派生、经
+/// [`ChangePublisher::publish_if_advanced`] 发射。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Invalidation {
+    pub revision: u64,
+    pub hosts: std::collections::BTreeSet<String>,
+}
+
+/// 「变了才发」发布器：进程内保存上次发布值，与之不同才调 `emit`。锁内只比较与
+/// 替换，`emit` 在锁外（持锁 emit 会拖住热插拔——HARDENING 验收 I-1）。
+/// 进程启动时 `last = None`，首次必发——正好覆盖「窗口先开、tick 后到」与
+/// 「webview 未就绪时 emit 是空操作」的丢失窗口（重启重发一次无害）。
+pub struct ChangePublisher<T: PartialEq + Clone> {
+    last: std::sync::Mutex<Option<T>>,
+}
+
+impl<T: PartialEq + Clone> Default for ChangePublisher<T> {
+    fn default() -> Self {
+        Self { last: std::sync::Mutex::new(None) }
+    }
+}
+
+impl<T: PartialEq + Clone> ChangePublisher<T> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 与上次发布值不同才 `emit`；返回是否发布。
+    pub fn publish_if_changed(&self, next: T, emit: impl FnOnce(&T)) -> bool {
+        let changed = {
+            let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+            if last.as_ref() == Some(&next) {
+                false
+            } else {
+                *last = Some(next.clone());
+                true
+            }
+        };
+        if changed {
+            emit(&next);
+        }
+        changed
+    }
+
+    /// 上次发布的值（诊断面）。
+    pub fn last(&self) -> Option<T> {
+        self.last.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+impl ChangePublisher<Invalidation> {
+    /// revision **严格前进**才发（`>` 而非 `!=`）。同 revision 再来一次——哪怕 hosts
+    /// 不同——也吞掉：hosts 只是下界提示，revision 才是电平。
+    pub fn publish_if_advanced(&self, next: Invalidation, emit: impl FnOnce(&Invalidation)) -> bool {
+        let advanced = {
+            let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+            match last.as_ref() {
+                Some(prev) if prev.revision >= next.revision => false,
+                _ => {
+                    *last = Some(next.clone());
+                    true
+                }
+            }
+        };
+        if advanced {
+            emit(&next);
+        }
+        advanced
     }
 }
 
@@ -404,14 +727,12 @@ mod tests {
         let path = tmp_db("idem");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        let event = AppEvent::facts_ingested("zcode", &run, 3, 0, 1);
+        let event = AppEvent::facts_ingested("zcode", &run, 1, 3, 0, 1);
         emit(&db, &event, &run);
 
         static CALLS: AtomicUsize = AtomicUsize::new(0);
-        let dispatcher = Dispatcher::new(vec![EventConsumer::new(
-            "test-counter",
-            |_| { CALLS.fetch_add(1, Ordering::SeqCst); Ok(()) },
-        )]);
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("test-counter", ConsumerInterest::domain(&[]), |_| { CALLS.fetch_add(1, Ordering::SeqCst); Ok(()) },
+        )]).expect("valid interest");
         let first = dispatcher.drain(db.conn()).expect("drain 1");
         let second = dispatcher.drain(db.conn()).expect("drain 2");
         assert_eq!((first.delivered, first.failed, first.skipped), (1, 0, 0));
@@ -429,12 +750,12 @@ mod tests {
         let path = tmp_db("crash");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        let event = AppEvent::facts_ingested("claude-code", &run, 7, 0, 0);
+        let event = AppEvent::facts_ingested("claude-code", &run, 1, 7, 0, 0);
         emit(&db, &event, &run);
         drop(db); // 模拟崩溃：事件已提交、投递未发生
 
         let db2 = AuthorityDb::open(&path, 1).expect("reopen");
-        let dispatcher = Dispatcher::new(vec![EventConsumer::new("test-recovery", |_| Ok(()))]);
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("test-recovery", ConsumerInterest::domain(&[]), |_| Ok(()))]).expect("valid interest");
         let report = dispatcher.drain(db2.conn()).expect("recover");
         assert_eq!(report.delivered, 1, "崩溃残留事件由重开后的 drain 补投");
         drop(db2);
@@ -468,9 +789,9 @@ mod tests {
         let path = tmp_db("fail");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        let event = AppEvent::facts_ingested("dsh", &run, 1, 0, 0);
+        let event = AppEvent::facts_ingested("dsh", &run, 1, 1, 0, 0);
         emit(&db, &event, &run);
-        let dispatcher = Dispatcher::new(vec![EventConsumer::new("test-failer", |_| Err("boom".to_string()))]);
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("test-failer", ConsumerInterest::domain(&[]), |_| Err("boom".to_string()))]).expect("valid interest");
         let first = dispatcher.drain(db.conn()).expect("drain 1");
         let second = dispatcher.drain(db.conn()).expect("drain 2");
         assert_eq!((first.delivered, first.failed), (0, 1));
@@ -493,22 +814,20 @@ mod tests {
         let path = tmp_db("wal-snapshot");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        let event = AppEvent::facts_ingested("codex", &run, 5, 0, 0);
+        let event = AppEvent::facts_ingested("codex", &run, 1, 5, 0, 0);
         emit(&db, &event, &run);
 
         // handler 自持第二条连接并提交一次真实写入（模拟 price-reconcile
         // 开自己的 AuthorityDb 写 data_quality_issues 的生产形态）。
         let writer_path = path.clone();
-        let dispatcher = Dispatcher::new(vec![EventConsumer::new(
-            "second-conn-writer",
-            move |_event| {
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("second-conn-writer", ConsumerInterest::domain(&[]), move |_event| {
                 let writer = AuthorityDb::open(&writer_path, 1_700_000_000_001)
                     .map_err(|e| e.to_string())?;
                 writer
                     .begin_run("handler-side-write", "cli", 1_700_000_000_002)
                     .map_err(|e| e.to_string())
             },
-        )]);
+        )]).expect("valid interest");
         let report = dispatcher
             .drain(db.conn())
             .expect("物化 drain 不得因 handler 的第二连接写入而死锁");
@@ -535,7 +854,7 @@ mod tests {
         let path = tmp_db("e2e-facts");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        let event = AppEvent::facts_ingested("claude-code", &run, 25, 3, 7);
+        let event = AppEvent::facts_ingested("claude-code", &run, 1, 25, 3, 7);
         emit(&db, &event, &run);
 
         // outbox 行断言
@@ -550,10 +869,10 @@ mod tests {
         // 消费者收到
         let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let rx = received.clone();
-        let dispatcher = Dispatcher::new(vec![EventConsumer::new("e2e-facts", move |e| {
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("e2e-facts", ConsumerInterest::domain(&[]), move |e| {
             rx.lock().unwrap().push(e.clone());
             Ok(())
-        })]);
+        })]).expect("valid interest");
         let report = dispatcher.drain(db.conn()).unwrap();
         assert_eq!(report.delivered, 1);
         let recv = received.lock().unwrap().clone();
@@ -576,10 +895,10 @@ mod tests {
 
         let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let rx = received.clone();
-        let dispatcher = Dispatcher::new(vec![EventConsumer::new("e2e-trust", move |e| {
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("e2e-trust", ConsumerInterest::domain(&[]), move |e| {
             rx.lock().unwrap().push(e.clone());
             Ok(())
-        })]);
+        })]).expect("valid interest");
         let report = dispatcher.drain(db.conn()).unwrap();
         assert_eq!(report.delivered, 1);
         let recv = received.lock().unwrap().clone();
@@ -597,8 +916,8 @@ mod tests {
         let path = tmp_db("dead-letter");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        emit(&db, &AppEvent::facts_ingested("dsh", &run, 1, 0, 0), &run);
-        let dispatcher = Dispatcher::new(vec![EventConsumer::new("dl", |_| Err("dead".into()))]);
+        emit(&db, &AppEvent::facts_ingested("dsh", &run, 1, 1, 0, 0), &run);
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("dl", ConsumerInterest::domain(&[]), |_| Err("dead".into()))]).expect("valid interest");
 
         // 第一次失败 → retry_count=1
         let r1 = dispatcher.drain(db.conn()).unwrap();
@@ -629,4 +948,160 @@ mod tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
     }
+
+    // ---- RUNTIME_INVALIDATION spec §4.2–§4.5（验收 9.3 9.4 9.6 9.7 9.8 9.9）----
+
+    /// 9.3：展示层角色用普通消费者、或声明 Domain 类型子集 → 构造期拒绝。
+    #[test]
+    fn presentation_consumer_cannot_subscribe_domain_events() {
+        let plain = Dispatcher::new(vec![EventConsumer::new(
+            "ui-plain", ConsumerInterest::presentation(), |_| Ok(()),
+        )]);
+        assert!(plain.is_err(), "presentation role must not read payloads via EventConsumer");
+
+        let subset = Dispatcher::with_coalescing(vec![], vec![CoalescingConsumer::new(
+            "ui-subset",
+            ConsumerInterest { role: ConsumerRole::Presentation, types: &["FactsIngested"] },
+            |_| {},
+        )]);
+        assert!(subset.is_err(), "presentation role takes no type subset");
+
+        let audit_wants_domain = Dispatcher::new(vec![EventConsumer::new(
+            "audit-x", ConsumerInterest::audit(&["FactsIngested"]), |_| Ok(()),
+        )]);
+        assert!(audit_wants_domain.is_err(), "audit role cannot subscribe Domain-class types");
+
+        let unknown = Dispatcher::new(vec![EventConsumer::new(
+            "dom-x", ConsumerInterest::domain(&["NotAType"]), |_| Ok(()),
+        )]);
+        assert!(unknown.is_err());
+
+        let ok = Dispatcher::with_coalescing(
+            vec![EventConsumer::new("dom", ConsumerInterest::domain(&["FactsIngested"]), |_| Ok(()))],
+            vec![CoalescingConsumer::new("ui", ConsumerInterest::presentation(), |_| {})],
+        );
+        assert!(ok.is_ok());
+    }
+
+    /// 9.4：兴趣集过滤在 SQL 层——不订阅的类型零投递、零记账。
+    #[test]
+    fn interest_filter_skips_unsubscribed_types_without_bookkeeping() {
+        let path = tmp_db("interest");
+        let db = AuthorityDb::open(&path, 1).expect("open");
+        let run = seed(&db);
+        emit(&db, &AppEvent::facts_ingested("dsh", &run, 1, 1, 0, 0), &run);
+        emit(&db, &AppEvent::trust_monitor_event(&run, 2, 2, 0), &run);
+
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new(
+            "only-trust", ConsumerInterest::domain(&["TrustMonitorEvent"]),
+            |e| { assert_eq!(e.event_type, "TrustMonitorEvent"); SEEN.fetch_add(1, Ordering::SeqCst); Ok(()) },
+        )]).expect("valid");
+        let report = dispatcher.drain(db.conn()).expect("drain");
+        assert_eq!(report.delivered, 1);
+        assert_eq!(SEEN.load(Ordering::SeqCst), 1);
+        let deliveries: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM event_deliveries WHERE consumer_id = 'only-trust'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(deliveries, 1, "the FactsIngested row must not even be bookkept for this consumer");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 9.6：合成 1000 条 FactsIngested 一轮 drain → flush 恰 1 次，deliveries 1000 行，
+    /// hosts 为合成宿主集。9.9：flush 拿到的摘要结构上没有载荷。
+    #[test]
+    fn coalescing_consumer_flushes_once_per_drain_with_hosts_and_no_payload() {
+        let path = tmp_db("coalesce");
+        let db = AuthorityDb::open(&path, 1).expect("open");
+        let run = seed(&db);
+        let hosts = ["claude-code", "codex", "dsh", "workbuddy"];
+        db.with_immediate_txn(|conn| {
+            for i in 0..1000u64 {
+                let host = hosts[(i % 4) as usize];
+                let mut e = AppEvent::facts_ingested(host, &run, i, 1, 0, 0);
+                e.occurred_at_ms = 1_000 + i as i64; // 身份材料含时间戳，保证 1000 条互不吸收
+                e.payload["secret-marker"] = json!("SENSITIVE-PAYLOAD");
+                insert_outbox(conn, &e, &run).map_err(db_err)?;
+            }
+            Ok(())
+        }).expect("emit 1000");
+
+        let flushes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Coalesced>::new()));
+        let sink = std::sync::Arc::clone(&flushes);
+        let dispatcher = Dispatcher::with_coalescing(vec![], vec![CoalescingConsumer::new(
+            "desktop-ui", ConsumerInterest::presentation(),
+            move |c| sink.lock().unwrap().push(c),
+        )]).expect("valid");
+        let report = dispatcher.drain(db.conn()).expect("drain");
+        assert_eq!((report.delivered, report.flushed), (1000, 1));
+        let got = flushes.lock().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].events, 1000);
+        let expect: std::collections::BTreeSet<String> = hosts.iter().map(|h| h.to_string()).collect();
+        assert_eq!(got[0].hosts, expect);
+        assert_eq!(got[0].types.iter().copied().collect::<Vec<_>>(), vec!["FactsIngested"]);
+        // 9.9：结构保证——`Coalesced` 的 Debug 输出里不可能出现载荷字段。
+        assert!(!format!("{:?}", got[0]).contains("SENSITIVE-PAYLOAD"));
+        let deliveries: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM event_deliveries WHERE consumer_id = 'desktop-ui'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(deliveries, 1000);
+        drop(got); // 同线程再锁 std Mutex 会死锁
+        // 第二轮 drain：无新事件 → 不 flush。
+        let again = dispatcher.drain(db.conn()).expect("drain 2");
+        assert_eq!((again.delivered, again.flushed), (0, 0));
+        assert_eq!(flushes.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 9.8：合并型消费者与普通消费者混排，普通消费者一条失败不影响合并型的
+    /// flush；每条各自记账。
+    #[test]
+    fn coalescing_flush_is_independent_of_plain_consumer_failures() {
+        let path = tmp_db("coalesce-mixed");
+        let db = AuthorityDb::open(&path, 1).expect("open");
+        let run = seed(&db);
+        emit(&db, &AppEvent::facts_ingested("dsh", &run, 1, 1, 0, 0), &run);
+        emit(&db, &AppEvent::facts_ingested("codex", &run, 2, 1, 0, 0), &run);
+        static FLUSHED: AtomicUsize = AtomicUsize::new(0);
+        let dispatcher = Dispatcher::with_coalescing(
+            vec![EventConsumer::new("failer", ConsumerInterest::domain(&[]), |e| {
+                if e.host.as_deref() == Some("codex") { Err("boom".into()) } else { Ok(()) }
+            })],
+            vec![CoalescingConsumer::new("ui", ConsumerInterest::presentation(), |c| {
+                assert_eq!(c.events, 2);
+                FLUSHED.fetch_add(1, Ordering::SeqCst);
+            })],
+        ).expect("valid");
+        let report = dispatcher.drain(db.conn()).expect("drain");
+        assert_eq!((report.delivered, report.failed, report.flushed), (3, 1, 1));
+        assert_eq!(FLUSHED.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 9.7：revision 未前进不发；前进才发；首发必发。
+    #[test]
+    fn invalidation_publishes_only_when_revision_advances() {
+        let publisher = ChangePublisher::<Invalidation>::new();
+        let inv = |r: u64| Invalidation { revision: r, hosts: Default::default() };
+        let mut emitted = Vec::new();
+        assert!(publisher.publish_if_advanced(inv(5), |i| emitted.push(i.revision)));
+        assert!(!publisher.publish_if_advanced(inv(5), |i| emitted.push(i.revision)), "same revision: swallowed");
+        assert!(!publisher.publish_if_advanced(inv(4), |i| emitted.push(i.revision)), "older: swallowed");
+        assert!(publisher.publish_if_advanced(inv(6), |i| emitted.push(i.revision)));
+        assert_eq!(emitted, vec![5, 6]);
+        assert_eq!(publisher.last().map(|i| i.revision), Some(6));
+    }
+
+    #[test]
+    fn change_publisher_emits_on_first_and_on_difference_only() {
+        let publisher = ChangePublisher::<(bool, String)>::new();
+        let mut n = 0;
+        assert!(publisher.publish_if_changed((true, "ok".into()), |_| n += 1));
+        assert!(!publisher.publish_if_changed((true, "ok".into()), |_| n += 1));
+        assert!(publisher.publish_if_changed((false, "ok".into()), |_| n += 1));
+        assert!(publisher.publish_if_changed((true, "ok".into()), |_| n += 1), "flip back is a change");
+        assert_eq!(n, 3);
+    }
+
 }
