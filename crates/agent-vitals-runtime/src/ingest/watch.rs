@@ -571,7 +571,7 @@ mod supervised {
                 Err(e) => {
                     // 后端起不来（罕见）：Degraded + 周期兜底，诚实不装死。
                     self.backend_failed = true;
-                    eprintln!("[agent-vitals] watcher 后端初始化失败，tick 兜底照常: {e}");
+                    crate::core::logging::log_warn("watcher", &format!("后端初始化失败，tick 兜底照常: {e}"));
                 }
             }
         }
@@ -596,9 +596,9 @@ mod supervised {
                     if not_found {
                         self.pending.push(path.to_path_buf());
                     } else {
-                        eprintln!(
-                            "[agent-vitals] watch {} 失败（该根 tick 兜底）: {e}",
-                            path.display()
+                        crate::core::logging::log_warn(
+                            "watcher",
+                            &format!("watch {} 失败（该根 tick 兜底）: {e}", path.display()),
                         );
                     }
                 }
@@ -724,7 +724,7 @@ fn spawn_platform_watcher(initial: WatchRegistry, waker: TickWaker) -> WatcherHa
                     Ok(Err(e)) => {
                         // in-band 错误（如缓冲溢出）：记日志继续；丢的事件由
                         // tick 指纹对账兜底（SourceGraph spec §12）。
-                        eprintln!("[agent-vitals] watcher 事件错误（tick 兜底）: {e}");
+                        crate::core::logging::log_warn("watcher", &format!("事件错误（tick 兜底）: {e}"));
                     }
                     Err(RecvTimeoutError::Timeout) => {
                         // 超时双职责：①补挂 pending 根；②去抖窗落定派发。
@@ -758,7 +758,7 @@ fn spawn_platform_watcher(initial: WatchRegistry, waker: TickWaker) -> WatcherHa
             health: Some(health),
         },
         Err(e) => {
-            eprintln!("[agent-vitals] watcher 线程启动失败，tick 兜底照常: {e}");
+            crate::core::logging::log_warn("watcher", &format!("线程启动失败，tick 兜底照常: {e}"));
             WatcherHandle { noop: true, control: None, health: None }
         }
     }

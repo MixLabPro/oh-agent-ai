@@ -2,6 +2,7 @@
 
 pub mod clock;
 pub mod home;
+pub mod logging;
 pub mod retention;
 pub mod state;
 pub mod statistics_timezone;

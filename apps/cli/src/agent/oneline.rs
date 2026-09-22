@@ -68,7 +68,10 @@ pub fn oneline(
     // 3. cost
     let pricing = crate::agent::cost::load_pricing();
     let cost = crate::agent::cost::cost_report(&audit.usage, &pricing).unwrap_or_else(|| {
-        eprintln!("warning: cost_report returned None (no usage samples to price)");
+        agent_vitals_runtime::logging::log_warn(
+            "oneline",
+            "cost_report returned None (no usage samples to price)",
+        );
         json!({"total": 0, "peak_total": 0, "unpriced_tokens": 0, "currency": "CNY"})
     });
 

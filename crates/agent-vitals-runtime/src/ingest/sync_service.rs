@@ -448,7 +448,10 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
                 })
                 .collect();
             if !summary.is_empty() {
-                eprintln!("authority retention ({}mo): {}", retention_months, summary.join(", "));
+                crate::core::logging::log_info(
+                    "sync_service",
+                    &format!("authority retention ({retention_months}mo): {}", summary.join(", ")),
+                );
             }
             let _ = db.finish_run(
                 &run_id,
@@ -472,7 +475,10 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
                             _ => None,
                         })
                         .unwrap_or_default();
-                    eprintln!("authority retention failed at {step}: {detail}");
+                    crate::core::logging::log_warn(
+                        "sync_service",
+                        &format!("authority retention failed at {step}: {detail}"),
+                    );
                 }
             }
         }
@@ -594,19 +600,22 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
         &authority,
         crate::sql_sync::now_ms(),
     ) {
-        eprintln!("sync-facts warning (legacy subscriptions): {e}");
+        crate::core::logging::log_warn("sync_service", &format!("legacy subscriptions: {e}"));
     }
     // 候选状态与声明占用的一致性自愈（候选被有效声明占着 = accepted）；旧版本的
     // 「重新打开」留下的分裂态在这里收口，否则待确认面板反复问、新声明反复撞
     // 「already used by another live declaration」。
     match authority.reconcile_candidate_claims(crate::sql_sync::now_ms()) {
-        Ok(n) if n > 0 => eprintln!("billing candidates: re-marked {n} record(s) accepted (held by live declarations)"),
+        Ok(n) if n > 0 => crate::core::logging::log_info(
+            "sync_service",
+            &format!("billing candidates: re-marked {n} record(s) accepted (held by live declarations)"),
+        ),
         Ok(_) => {}
-        Err(e) => eprintln!("sync-facts warning (candidate claims): {e}"),
+        Err(e) => crate::core::logging::log_warn("sync_service", &format!("candidate claims: {e}")),
     }
     // Phase 2.8：落当前价格快照（§5.3）。幂等——价卡不变则无新版本。
     if let Err(e) = crate::sql_sync::snapshot_current_pricing(&authority) {
-        eprintln!("sync-facts warning (pricing snapshot): {e}");
+        crate::core::logging::log_warn("sync_service", &format!("pricing snapshot: {e}"));
     }
     // 本地价格发现（零网络）改为事件驱动（EVENT_BUS spec §9 P0 验收 #4）：
     // FactsIngested 已在各宿主写入事务内落 outbox；价卡快照仍显式先行（消费
@@ -638,12 +647,12 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
         ])
         .expect("price-reconcile interest is a static Domain-class subset");
         match dispatcher.drain(authority.conn()) {
-            Ok(report) if report.failed > 0 || report.skipped > 0 => eprintln!(
-                "sync-facts warning (event dispatch): {} failed, {} skipped",
-                report.failed, report.skipped
+            Ok(report) if report.failed > 0 || report.skipped > 0 => crate::core::logging::log_warn(
+                "sync_service",
+                &format!("event dispatch: {} failed, {} skipped", report.failed, report.skipped),
             ),
             Ok(_) => {}
-            Err(e) => eprintln!("sync-facts warning (event dispatch): {e}"),
+            Err(e) => crate::core::logging::log_warn("sync_service", &format!("event dispatch: {e}")),
         }
     }
     // 计费声明是持续生效的规则：用户在归因表单里填的「结束时间为空 = 持续有效」
@@ -663,13 +672,16 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
             Ok(applied) => {
                 report.declarations_applied = applied.attributed;
                 if applied.attributed > 0 {
-                    eprintln!(
-                        "billing declarations: attributed {} new facts under {} active rule(s)",
-                        applied.attributed, applied.revisions
+                    crate::core::logging::log_info(
+                        "sync_service",
+                        &format!(
+                            "billing declarations: attributed {} new facts under {} active rule(s)",
+                            applied.attributed, applied.revisions
+                        ),
                     );
                 }
             }
-            Err(e) => eprintln!("sync-facts warning (billing declarations): {e}"),
+            Err(e) => crate::core::logging::log_warn("sync_service", &format!("billing declarations: {e}")),
         }
     }
     Ok(report)

@@ -7,7 +7,14 @@
 >
 > 关联：`RUNTIME_REFACTOR_WATCHER_HOTPLUG_HARDENING_SPEC.md` §11.8（本次事故的
 > as-built 记录）、`AGENT_VITALS_EVENT_BUS_ARCHITECTURE_SPEC.md`（事件总线契约）、
-> `AGENT_VITALS_SOURCE_GRAPH_INFRASTRUCTURE_SPEC.md`（watcher 架构）。
+> `AGENT_VITALS_SOURCE_GRAPH_INFRASTRUCTURE_SPEC.md`（watcher 架构）、
+> `RUNTIME_INVALIDATION_AND_READ_BACKPRESSURE_SPEC.md`（本文 §5 P2/P3 对应的
+> G1/G2 治理已在那份 spec 落地）。
+>
+> **2026-09-22 增补**：§5 P1（日志系统）已落地——不是原文建议的 `tracing`，
+> 是一个手写的最小文件日志（`core/logging.rs`），细节见 §5 P1 段落更新；
+> §0/§2.2 下面的「日志系统事实上不存在」「42 个 stderr 打点」是当时的快照，
+> 不再是现状，保留原文供事故复盘的时间线完整，不回填改写。
 
 ---
 
@@ -145,17 +152,43 @@ WatcherHealthChanged 的变化才发——这些模式正确，问题是**没有
 
 ### P1：日志系统（先做——它是发现其余一切问题的前提）
 
-- `tracing` + `tracing-subscriber`，分层：runtime/desktop 各自初始化；
-- **落盘**：`~/.agent-vitals/logs/app.log`（滚动 5×2MB，保留 ~10MB）——
-  本地文件允许路径与细节（不出机器）；**导出面（诊断包）做脱敏投影**
-  （沿用 2026-09-19 政策的 per-face 纪律）；
-- 事件链路打点（info 级）：tick 开始/结束与耗时、每次 emit 的类型与
-  目标、watcher wake/冷却命中、子进程 spawn 与退出码；
-- 诊断包 v2 增补：日志尾（脱敏后）+ watcher 健康 + 事件计数快照；
-- CLI 侧 `RUST_LOG` 走同一 subscriber（dev 用）。
-- **验收**：复现一次写入→刷新，`log show`-equivalent（`tail app.log`）
-  能看到完整链路时间线；诊断包含上述增补项；默认等级 info 下日志量
-  < 1MB/天（空转场景）。
+**已落地（2026-09-22，`crates/agent-vitals-runtime/src/core/logging.rs`），但不是
+`tracing`。** 这批调用点是 tick 级频率，不是热路径，评审原文自己的取舍
+（「不为日志引入 tokio/async，std 线程 + 环形缓冲足够」）推到底就是：连线程
+都不需要，一把 `Mutex` 同步写足够——与仓库其余「手写而不是拉包」的纪律
+（civil 日期数学、FNV 哈希）同款，没有引入 `tracing`/`tracing-subscriber`。
+
+- **落盘**：`~/.agent-vitals/logs/app.log`，滚动 5×2MB（`rotation_plan` 纯函数
+  钉住改名序列，`format_line` 钉住换行转义与超长截断）——本地文件允许路径与
+  细节（不出机器）；**导出面脱敏仍未做**（诊断包 v2 见下）；
+- **双出口**：`log_warn`/`log_error` 同时 `eprintln!`（CLI 终端用户不因这次
+  改动失去现在能看到的东西）+ 落文件；`log_info` 只落文件，不给 CLI 终端添
+  之前没有的噪音；
+- **接入点**（本轮全部转换，`grep eprintln!` 在这些文件里归零）：
+  `ingest/watch.rs` 4 处（watcher 后端初始化/线程启动/事件错误/watch 单根
+  失败——本次 CPU 事故唯一的过程证据来源，此前完全不落盘）；
+  `ingest/sync_service.rs` 11 处（retention/candidate/pricing/event
+  dispatch/billing declarations 的 warn 与 info）；
+  `apps/cli/src/agent/oneline.rs` 1 处；
+  桌面 `lib.rs` 10 处原生 `eprintln!`（event-bus/watch 拓扑/timezone/issue
+  时间戳迁移）+ **`run_discover`/`run_navigation` 两处此前用 `.output().ok()?`
+  /只读 stdout、子进程 stderr 从未读过一次的盲区**（现在 spawn 失败/非零
+  退出/JSON 解析失败/超时四条路径都落一条 warn，带 stderr 尾）+
+  **`run_claude_sync`/`run_facts_sync`/oneline 三处「子进程整体成功但 stderr
+  非空」的盲区**（`log_stderr_tail_on_success` 兜底：子进程内部的 warn 已经
+  经同一个 logging 模块落过库，这里只补它没兜住的部分，不重复）+ watcher
+  健康巡检的状态跳变（顺着已有的 `ChangePublisher.publish_if_changed` 判定
+  记一条，2s 轮询本身不落日志）。
+- **未做**：诊断包 v2（日志尾 + watcher 健康 + 事件计数快照，含导出脱敏
+  投影）；CLI 侧没有 `RUST_LOG` 等价的等级开关——`log_info` 恒定只落文件、
+  `log_warn`/`log_error` 恒定双出口，没有可调节的过滤器（简单优先，真需要
+  调时再加）；tick 开始/结束耗时、每次 emit 的类型与目标这类更细的链路埋点
+  未打——现有接入点覆盖的是「失败与异常」，不是「正常路径的时序」。
+- **验收（部分达成）**：单测钉住格式化/滚动/写入链路（`core::logging::tests`
+  5 条）；真机 smoke 用仓库内 `fixtures/dsh/complete.jsonl` 跑
+  `agent-vitals oneline --shadow` 触发一次真实 warn，确认同时出现在 stderr
+  与 `<data_home>/logs/app.log`（人工验证，未固化为脚本）；诊断包含日志尾这
+  一条验收未达成（诊断包 v2 未做）。
 
 ### P2：刷新语义改造（治 G1）
 

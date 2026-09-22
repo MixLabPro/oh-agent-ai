@@ -824,11 +824,14 @@ const NAVIGATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2
 /// spawn `sessions navigation` 并等 stdout，带 20s 硬超时：`try_wait` 50ms 轮询，
 /// 超时 → `child.kill()` + `wait()`（回收，不留僵尸）→ None。非零退出/spawn
 /// 失败/超时一律 None——调用方决定是保留旧快照还是 degraded，这里不编造。
+///
+/// stderr 与 discover 同款 G4 盲区：之前是 `piped()` 了却从未读过，子进程真正
+/// 报的错（比如时区非法、宿主目录不可读）在这三条 `None` 路径里全部消失。
 fn run_navigation(bin: &Path, day: &str) -> Option<Value> {
     let timezone = agent_vitals_runtime::statistics_timezone::timezone_name(&overview::data_home())
         .ok()
         .unwrap_or_else(agent_vitals_runtime::clock::system_timezone_name);
-    let mut child = std::process::Command::new(bin)
+    let mut child = match std::process::Command::new(bin)
         .args([
             "sessions".to_string(),
             "navigation".to_string(),
@@ -844,19 +847,58 @@ fn run_navigation(bin: &Path, day: &str) -> Option<Value> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .ok()?;
+    {
+        Ok(child) => child,
+        Err(e) => {
+            agent_vitals_runtime::logging::log_warn("sync", &format!("sessions navigation spawn 失败: {e}"));
+            return None;
+        }
+    };
     let start = std::time::Instant::now();
     loop {
-        match child.try_wait().ok()? {
-            Some(status) if status.success() => {
-                let mut out = String::new();
-                use std::io::Read;
-                child.stdout.as_mut()?.read_to_string(&mut out).ok()?;
-                return serde_json::from_str(&out).ok();
+        let wait = match child.try_wait() {
+            Ok(wait) => wait,
+            Err(e) => {
+                agent_vitals_runtime::logging::log_warn("sync", &format!("sessions navigation try_wait 失败: {e}"));
+                return None;
             }
-            Some(_) => return None,
+        };
+        match wait {
+            Some(status) if status.success() => {
+                use std::io::Read;
+                let mut out = String::new();
+                if let Some(stdout) = child.stdout.as_mut() {
+                    let _ = stdout.read_to_string(&mut out);
+                }
+                return match serde_json::from_str(&out) {
+                    Ok(value) => Some(value),
+                    Err(e) => {
+                        agent_vitals_runtime::logging::log_warn(
+                            "sync",
+                            &format!("sessions navigation 输出不是合法 JSON: {e}"),
+                        );
+                        None
+                    }
+                };
+            }
+            Some(status) => {
+                use std::io::Read;
+                let mut err_out = String::new();
+                if let Some(stderr) = child.stderr.as_mut() {
+                    let _ = stderr.read_to_string(&mut err_out);
+                }
+                agent_vitals_runtime::logging::log_warn(
+                    "sync",
+                    &format!("sessions navigation 失败（{status}）：{}", err_out.trim()),
+                );
+                return None;
+            }
             None => {
                 if start.elapsed() > NAVIGATION_TIMEOUT {
+                    agent_vitals_runtime::logging::log_warn(
+                        "sync",
+                        &format!("sessions navigation 超时（{NAVIGATION_TIMEOUT:?}），已 kill"),
+                    );
                     let _ = child.kill();
                     let _ = child.wait();
                     return None;
@@ -960,14 +1002,39 @@ fn resolve_binary_from(
     None
 }
 
-/// 跑 `agent-vitals discover`，解析 stdout JSON。失败 → None（tick 只记日志，
-/// 不让托盘崩）。discover 是只读子命令，不需要 owner 是 rust。
+/// 跑 `agent-vitals discover`，解析 stdout JSON。失败 → None（tick 不 abort，
+/// 只落一条 warn）。discover 是只读子命令，不需要 owner 是 rust。
+///
+/// **之前这里三种失败（spawn 失败 / 非零退出 / stdout 不是合法 JSON）都直接
+/// 折叠成 `None`，子进程的 stderr 被 `.output()` 捕获后从没读过一次**——桌面
+/// 场景下这是本次事故复盘（G4）点名的盲区之一：托盘说「discover 失败」，但
+/// 为什么失败，唯一知道答案的那份文本被默默丢了。
 fn run_discover(bin: &Path) -> Option<Value> {
-    let out = std::process::Command::new(bin).arg("discover").output().ok()?;
+    let out = match std::process::Command::new(bin).arg("discover").output() {
+        Ok(out) => out,
+        Err(e) => {
+            agent_vitals_runtime::logging::log_warn("sync", &format!("discover spawn 失败: {e}"));
+            return None;
+        }
+    };
     if !out.status.success() {
+        agent_vitals_runtime::logging::log_warn(
+            "sync",
+            &format!(
+                "discover 失败（{}）：{}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        );
         return None;
     }
-    serde_json::from_slice(&out.stdout).ok()
+    match serde_json::from_slice(&out.stdout) {
+        Ok(value) => Some(value),
+        Err(e) => {
+            agent_vitals_runtime::logging::log_warn("sync", &format!("discover 输出不是合法 JSON: {e}"));
+            None
+        }
+    }
 }
 
 /// 从 discover 报告里取最新未折会话（`unfolded` 已按 mtime 降序，首条即最新）。
@@ -1016,7 +1083,10 @@ fn perform_sync() -> SyncStatus {
         .env("AGENT_VITALS_HOME", &home)
         .output();
     match out {
-        Ok(o) if o.status.success() => SyncStatus::ok("fold", format!("已折入 {session_id}")),
+        Ok(o) if o.status.success() => {
+            log_stderr_tail_on_success("oneline", &o.stderr);
+            SyncStatus::ok("fold", format!("已折入 {session_id}"))
+        }
         Ok(o) => SyncStatus::fail(
             "fold",
             format!(
@@ -1042,13 +1112,33 @@ fn run_claude_sync(bin: &std::path::Path) -> Option<String> {
         .env("AGENT_VITALS_HOME", &home)
         .output();
     match out {
-        Ok(o) if o.status.success() => None,
+        Ok(o) if o.status.success() => {
+            log_stderr_tail_on_success("claude-sync", &o.stderr);
+            None
+        }
         Ok(o) => Some(format!(
             "claude-sync 失败（{}）：{}",
             o.status,
             String::from_utf8_lossy(&o.stderr).trim()
         )),
         Err(e) => Some(format!("claude-sync spawn 失败：{e}")),
+    }
+}
+
+/// 子进程整体成功（退出码 0）但 stderr 非空时补记一条——**这是本次改进的
+/// 核心一处**：`run_claude_sync`/`run_facts_sync` 此前的 `Ok(o) if
+/// o.status.success() => None` 分支完全不看 `o.stderr`，一次「同步成功但有
+/// 降级警告」（比如 retention 清理失败、某条候选声明冲突）会让托盘诚实地说
+/// 「同步成功」，而警告本身从未落地过。子进程里的 warn 大多已经经
+/// `agent_vitals_runtime::logging` 落过一次库（同一个 `data_home`），这里只在
+/// stderr 里还有它没兜住的内容时才补记，不重复；`log_info` 而不是 `log_warn`——
+/// 子进程自己已经决定过这条是不是值得让终端用户看到（它内部若判定是 warn 会
+/// 自己 `log_warn`，这里只是兜底，不升级严重度）。
+fn log_stderr_tail_on_success(component: &'static str, stderr: &[u8]) {
+    let tail = String::from_utf8_lossy(stderr);
+    let tail = tail.trim();
+    if !tail.is_empty() {
+        agent_vitals_runtime::logging::log_info(component, &format!("成功但有输出：{tail}"));
     }
 }
 
@@ -1064,7 +1154,10 @@ fn run_facts_sync(bin: &std::path::Path) -> Option<String> {
         .env("AGENT_VITALS_HOME", &home)
         .output();
     match out {
-        Ok(o) if o.status.success() => None,
+        Ok(o) if o.status.success() => {
+            log_stderr_tail_on_success("sync-facts", &o.stderr);
+            None
+        }
         Ok(o) => Some(format!(
             "sync-facts 失败（{}）：{}",
             o.status,
@@ -1193,12 +1286,12 @@ fn drain_event_bus(app: &AppHandle) {
     ) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("event-bus consumer registration: {e}");
+            agent_vitals_runtime::logging::log_warn("events", &format!("consumer registration: {e}"));
             return;
         }
     };
     if let Err(e) = dispatcher.drain(db.conn()) {
-        eprintln!("event-bus drain: {e}");
+        agent_vitals_runtime::logging::log_warn("events", &format!("drain: {e}"));
     }
 }
 
@@ -1317,7 +1410,7 @@ fn start_refresh_tick(app: AppHandle, wake: std::sync::mpsc::Receiver<()>) {
                 sync_tick(&app);
                 last_sync_finished = std::time::Instant::now();
             } else {
-                eprintln!("[agent-vitals] 同步进行中，跳过本轮");
+                agent_vitals_runtime::logging::log_warn("sync", "同步进行中，跳过本轮");
             }
             match agent_vitals_runtime::ingest::watch::wait_for_tick_or_wake(&wake, TICK_PERIOD) {
                 agent_vitals_runtime::ingest::watch::TickWait::Woken => {
@@ -1386,7 +1479,7 @@ fn refresh_watch_topology(app: &AppHandle) {
             )
         }
         Err(error) => {
-            eprintln!("[agent-vitals] watch 拓扑派生失败（保持现拓扑）: {error}");
+            agent_vitals_runtime::logging::log_warn("watch_topology", &format!("派生失败（保持现拓扑）: {error}"));
             return;
         }
     };
@@ -1394,7 +1487,7 @@ fn refresh_watch_topology(app: &AppHandle) {
     let guard = supervisor.0.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(handle) = guard.as_ref() {
         if let Err(error) = handle.replace(registry) {
-            eprintln!("[agent-vitals] watch 拓扑替换未送达（worker 已退出）: {error}");
+            agent_vitals_runtime::logging::log_warn("watch_topology", &format!("替换未送达（worker 已退出）: {error}"));
         }
     }
 }
@@ -1469,7 +1562,21 @@ fn start_watcher_health_publisher(app: AppHandle) {
             );
             // 「变了才发」统一走 runtime 的 ChangePublisher（spec §4.5）——与
             // SyncStatusChanged / Invalidated 同一原语，不再手写 last 比较。
+            // 2s 轮询本身从不落日志（那才是真正的噪音源）；`publish_if_changed`
+            // 已经判定过「这是不是一次真实跳变」，日志顺着它的判定走，零额外
+            // 逻辑——之前的盲区不是巡检太吵，是巡检完全不留痕：出问题时只有
+            // 「现在」的一份快照，没有「上一次从哪个状态、什么时候变成现在这样」。
             publisher.publish_if_changed(key, |_| {
+                agent_vitals_runtime::logging::log_info(
+                    "watcher_health",
+                    &format!(
+                        "mode={} topology_revision={} pending_roots={} reason={}",
+                        watcher_mode_str(snapshot.mode),
+                        snapshot.topology_revision,
+                        snapshot.pending_roots,
+                        snapshot.reason_code.unwrap_or("none"),
+                    ),
+                );
                 let _ = app.emit(APP_EVENT, serde_json::json!({
                     "type": "WatcherHealthChanged",
                     "schema_version": 1,
@@ -1510,9 +1617,9 @@ fn start_source_watcher(app: &AppHandle)
                 if !topology.rejected.is_empty() {
                     // 只记原因码与数量——被拒路径不进日志（serving-face 纪律
                     // 的本地同款保守）。
-                    eprintln!(
-                        "[agent-vitals] watch 拓扑有 {} 个被拒根（tick 兜底照常）",
-                        topology.rejected.len(),
+                    agent_vitals_runtime::logging::log_info(
+                        "watch_topology",
+                        &format!("有 {} 个被拒根（tick 兜底照常）", topology.rejected.len()),
                     );
                 }
                 let skills = app.state::<store::SkillsScanState>().inner().clone();
@@ -1523,7 +1630,7 @@ fn start_source_watcher(app: &AppHandle)
                 })
             }
             Err(error) => {
-                eprintln!("[agent-vitals] watch 拓派生失败（tick 兜底照常）: {error}");
+                agent_vitals_runtime::logging::log_warn("watch_topology", &format!("派生失败（tick 兜底照常）: {error}"));
                 WatchRegistry::new()
             }
         }
@@ -1532,7 +1639,7 @@ fn start_source_watcher(app: &AppHandle)
     let handle =
         agent_vitals_runtime::ingest::watch::spawn_watcher(registry, waker);
     if handle.is_noop() {
-        eprintln!("[agent-vitals] watcher 未启用（feature 关闭），tick 周期兜底");
+        agent_vitals_runtime::logging::log_info("watcher", "未启用（feature 关闭），tick 周期兜底");
     }
     (receiver, handle)
 }
@@ -4093,7 +4200,7 @@ pub fn run() {
             if let Err(error) = agent_vitals_runtime::statistics_timezone::apply(
                 &overview::data_home(),
             ) {
-                eprintln!("statistics timezone unavailable: {error}");
+                agent_vitals_runtime::logging::log_warn("timezone", &format!("unavailable: {error}"));
             }
             start_public_pricing_catalog_tick();
             // 菜单栏工具：必须在代码里显式 `.accessory`，光靠 Info.plist 的 LSUIElement
@@ -4112,10 +4219,10 @@ pub fn run() {
             ) {
                 Ok(db) => {
                     if let Err(error) = agent_vitals_data::issues::repair_issue_timestamp_units(db.conn()) {
-                        eprintln!("issue timestamp migration failed: {error}");
+                        agent_vitals_runtime::logging::log_warn("migration", &format!("issue timestamp units failed: {error}"));
                     }
                 }
-                Err(error) => eprintln!("issue timestamp migration database unavailable: {error}"),
+                Err(error) => agent_vitals_runtime::logging::log_warn("migration", &format!("issue timestamp units: database unavailable: {error}")),
             }
             let ov = overview::read_overview();
             let menu = build_menu(app.handle(), &ov)?;
