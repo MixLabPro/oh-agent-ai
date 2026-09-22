@@ -118,6 +118,25 @@ pub fn wait_for_tick_or_wake(receiver: &Receiver<()>, period: Duration) -> TickW
     }
 }
 
+/// watcher 触发同步的冷却下限（真机 2026-09-22 验收教训）：活动中的 agent
+/// 会话连续追加被监听目录的日志，每个去抖窗都会**合法**唤醒——若每次唤醒
+/// 都执行完整 sync（进程内 overview/tray 的 SQLite 聚合 + 子进程），CPU 会被
+/// 钉满（实测 ~3 核持续）。冷却窗把 watcher 触发的执行率钉到 ≤1/COOLDOWN。
+/// 周期 tick 与手动同步不受影响；空闲后的第一个事件仍即时服务（彼时冷却
+/// 早已过期），持续写入期间的尾批最多延迟一个冷却窗。
+pub const WATCHER_SYNC_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// 冷却判定（纯函数，可单测）：watcher 唤醒到达时，距上次同步完成不足
+/// 冷却窗 → 返回还需睡多久（睡满后照常执行——**不丢弃**最后一批写入）；
+/// 已过窗 → None，立即执行。
+pub fn watcher_cooldown_remaining(
+    last_sync_finished_at: std::time::Instant,
+    now: std::time::Instant,
+) -> Option<Duration> {
+    let elapsed = now.duration_since(last_sync_finished_at);
+    WATCHER_SYNC_COOLDOWN.checked_sub(elapsed)
+}
+
 /// watch-only 消费者回调（watcher 线程内执行，必须快——只做内存失效）。
 pub type WatchCallback = Arc<dyn Fn() + Send + Sync>;
 
@@ -910,6 +929,23 @@ mod tests {
         // SenderGone 是粘性的：后续等待继续报同一结果，循环形状稳定。
         assert_eq!(wait_for_tick_or_wake(&receiver, Duration::from_millis(1)),
             TickWait::SenderGone);
+    }
+
+    /// 冷却判定（真机 CPU 事故的回归钉子）：刚同步完 → 要睡接近全窗；
+    /// 过窗 → None 立即执行；单调性——时间越久剩余越少。
+    #[test]
+    fn watcher_cooldown_bounds_execution_rate() {
+        let now = std::time::Instant::now();
+        let just_finished = now - Duration::from_secs(1);
+        assert_eq!(
+            watcher_cooldown_remaining(just_finished, now),
+            Some(Duration::from_secs(29)),
+            "同步完 1 秒后收到唤醒：还需睡 29 秒（睡满不丢弃）",
+        );
+        let long_ago = now - Duration::from_secs(120);
+        assert_eq!(watcher_cooldown_remaining(long_ago, now), None);
+        let mid = now - Duration::from_secs(10);
+        assert_eq!(watcher_cooldown_remaining(mid, now), Some(Duration::from_secs(20)));
     }
 
     /// feature 关闭 → 恒 noop（NoopWatcher），健康快照 Disabled/

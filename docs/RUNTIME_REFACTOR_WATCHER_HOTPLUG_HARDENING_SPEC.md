@@ -585,6 +585,19 @@ these corrections:
    are rejected for every origin; canonical escape checks still apply where a
    canonical form exists.
 
+8. **Watcher-triggered sync execution rate needed a floor (found in
+   real-machine acceptance, 2026-09-22)** — Phase A bounded the wake QUEUE
+   (one pending slot) but nothing bounded the wake-to-execution RATE. An
+   active agent session continuously appends to a watched root, so every
+   1.2s debounce window legitimately wakes the tick, and each wake ran a
+   full sync_tick (in-process overview/tray SQLite aggregation + tray
+   rebuild + child spawns) — measured at a sustained ~3 cores. Fix:
+   `WATCHER_SYNC_COOLDOWN` (30s) in the desktop tick loop. A wake inside
+   the cooldown sleeps out the remainder and then runs (the final batch
+   of writes is served, not dropped); the periodic 5-minute tick and
+   manual syncs are unaffected; the first event after idle is still
+   served in seconds.
+
 Implementation commits (feat/watcher-hardening):
 - Phase A — one-slot tick wake with coalescing
 - Phase B — runtime-owned watch topology with fail-closed root policy

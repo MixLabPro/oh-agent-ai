@@ -1326,18 +1326,37 @@ fn finish_sync_stages(
 /// `recv_timeout(TICK_PERIOD)`——watcher 去抖后 wake 一发，下一轮对账立刻跑；
 /// 没事件时行为与纯 sleep 逐字节一致（周期兜底，spec §7）。
 fn start_refresh_tick(app: AppHandle, wake: std::sync::mpsc::Receiver<()>) {
-    std::thread::spawn(move || loop {
-        let lock = app.state::<SyncLock>();
-        if let Ok(_guard) = lock.0.try_lock() {
-            sync_tick(&app);
-        } else {
-            eprintln!("[agent-vitals] 同步进行中，跳过本轮");
-        }
-        if agent_vitals_runtime::ingest::watch::wait_for_tick_or_wake(&wake, TICK_PERIOD)
-            == agent_vitals_runtime::ingest::watch::TickWait::SenderGone
-        {
-            // waker 端全部 drop（watcher 线程异常退出）——退回纯周期。
-            std::thread::sleep(TICK_PERIOD);
+    std::thread::spawn(move || {
+        let mut last_sync_finished = std::time::Instant::now();
+        loop {
+            let lock = app.state::<SyncLock>();
+            if let Ok(_guard) = lock.0.try_lock() {
+                sync_tick(&app);
+                last_sync_finished = std::time::Instant::now();
+            } else {
+                eprintln!("[agent-vitals] 同步进行中，跳过本轮");
+            }
+            match agent_vitals_runtime::ingest::watch::wait_for_tick_or_wake(&wake, TICK_PERIOD) {
+                agent_vitals_runtime::ingest::watch::TickWait::Woken => {
+                    // 冷却下限（真机 2026-09-22 验收：活动会话连续写入被监听
+                    // 目录，每次唤醒都跑全量 sync 把 CPU 钉到 ~3 核）。睡满
+                    // 剩余冷却再执行——不丢弃最后一批写入；周期/手动路径
+                    // 不受影响。
+                    if let Some(remaining) =
+                        agent_vitals_runtime::ingest::watch::watcher_cooldown_remaining(
+                            last_sync_finished,
+                            std::time::Instant::now(),
+                        )
+                    {
+                        std::thread::sleep(remaining);
+                    }
+                }
+                agent_vitals_runtime::ingest::watch::TickWait::TimedOut => {}
+                agent_vitals_runtime::ingest::watch::TickWait::SenderGone => {
+                    // waker 端全部 drop（watcher 线程异常退出）——退回纯周期。
+                    std::thread::sleep(TICK_PERIOD);
+                }
+            }
         }
     });
 }
