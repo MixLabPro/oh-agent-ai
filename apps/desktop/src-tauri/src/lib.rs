@@ -1417,13 +1417,15 @@ fn start_refresh_tick(app: AppHandle, wake: std::sync::mpsc::Receiver<()>) {
                     // 冷却下限（真机 2026-09-22 验收：活动会话连续写入被监听
                     // 目录，每次唤醒都跑全量 sync 把 CPU 钉到 ~3 核）。睡满
                     // 剩余冷却再执行——不丢弃最后一批写入；周期/手动路径
-                    // 不受影响。
-                    if let Some(remaining) =
-                        agent_vitals_runtime::ingest::watch::watcher_cooldown_remaining(
-                            last_sync_finished,
-                            std::time::Instant::now(),
-                        )
-                    {
+                    // 不受影响。冷却窗口本身是动态的（REVIEW P4 自看护）：
+                    // 平时读到基线 30s，CPU 持续过高时 `start_watcher_health_
+                    // publisher` 已经把它拉长，这里只管读，不管判定。
+                    let cooldown = app.state::<WatcherCooldownOverride>().get();
+                    if let Some(remaining) = agent_vitals_runtime::ingest::watch::cooldown_remaining_with(
+                        cooldown,
+                        last_sync_finished,
+                        std::time::Instant::now(),
+                    ) {
                         std::thread::sleep(remaining);
                     }
                 }
@@ -1449,6 +1451,29 @@ fn start_refresh_tick(app: AppHandle, wake: std::sync::mpsc::Receiver<()>) {
 /// 监督者状态：持有 watcher 句柄，源配置变更命令经 [`refresh_watch_topology`]
 /// 提交新拓扑快照（Phase C 热插拔——不重启线程、不重启 app）。
 struct WatcherSupervisor(std::sync::Mutex<Option<agent_vitals_runtime::ingest::watch::WatcherHandle>>);
+
+/// 自看护（REVIEW P4）的动态 watcher 冷却——毫秒存成 `AtomicU64`，是
+/// `start_watcher_health_publisher`（唯一写者，CPU 采样→`SelfMonitor::step`
+/// 后落这里）与 `start_refresh_tick`（唯一读者，每次 `TickWait::Woken` 读一次）
+/// 之间最小的共享面。不用 `Mutex<Duration>`——两边都只做单值读/写，原子够，
+/// 没有必要为一个 u64 拿锁。初值 = 基线冷却，未节流时读到的恒是这个值。
+struct WatcherCooldownOverride(std::sync::atomic::AtomicU64);
+
+impl WatcherCooldownOverride {
+    fn baseline() -> Self {
+        Self(std::sync::atomic::AtomicU64::new(
+            agent_vitals_runtime::ingest::watch::WATCHER_SYNC_COOLDOWN.as_millis() as u64,
+        ))
+    }
+
+    fn get(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.0.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn set(&self, cooldown: std::time::Duration) {
+        self.0.store(cooldown.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 /// 源配置变更后的拓扑刷新（spec Phase C.2）：配置写入提交后再请求替换——
 /// 读取的是已提交状态，与 sync 的下一次读取一致。worker 已退出时静默跳过
@@ -1544,7 +1569,38 @@ fn start_watcher_health_publisher(app: AppHandle) {
             Option<&'static str>,
         );
         let publisher = agent_vitals_runtime::events::ChangePublisher::<HealthKey>::new();
+        // 自看护（REVIEW P4，G5）：复用这条已有的 2s 巡检骨架读自身 CPU——不另起
+        // 一条线程。`self_monitor`/`prev_cpu_sample` 只属于这个线程，不需要锁。
+        let mut self_monitor = agent_vitals_runtime::ingest::self_monitor::SelfMonitor::new();
+        let mut prev_cpu_sample: Option<(u64, std::time::Instant)> = None;
         loop {
+            if let Some(cur_ns) = agent_vitals_runtime::ingest::self_monitor::process_cpu_time_ns() {
+                let now = std::time::Instant::now();
+                if let Some((prev_ns, prev_at)) = prev_cpu_sample {
+                    let pct = agent_vitals_runtime::ingest::self_monitor::cpu_percent(prev_ns, prev_at, cur_ns, now);
+                    use agent_vitals_runtime::ingest::self_monitor::Transition;
+                    match self_monitor.step(pct, now) {
+                        Transition::Escalated => {
+                            let cooldown = self_monitor.cooldown();
+                            app.state::<WatcherCooldownOverride>().set(cooldown);
+                            agent_vitals_runtime::logging::log_warn(
+                                "self_monitor",
+                                &format!("CPU {pct:.0}% 持续过高，watcher 冷却拉长到 {cooldown:?}"),
+                            );
+                        }
+                        Transition::Recovered => {
+                            let cooldown = self_monitor.cooldown();
+                            app.state::<WatcherCooldownOverride>().set(cooldown);
+                            agent_vitals_runtime::logging::log_info(
+                                "self_monitor",
+                                &format!("CPU 回落，watcher 冷却收回基线 {cooldown:?}"),
+                            );
+                        }
+                        Transition::Unchanged => {}
+                    }
+                }
+                prev_cpu_sample = Some((cur_ns, now));
+            }
             // 快照在 supervisor 锁内取（短持锁、零 I/O），比较与 emit 在锁外
             // （验收 I-1：持锁 emit 会拖住热插拔）。
             let snapshot = {
@@ -1552,13 +1608,18 @@ fn start_watcher_health_publisher(app: AppHandle) {
                 let guard = supervisor.0.lock().unwrap_or_else(|e| e.into_inner());
                 guard.as_ref().map(|w| w.health()).unwrap_or_default()
             };
+            // `throttled` 只在 watcher 自己没有更具体的原因码时才顶上——一个
+            // 真实的 backend 故障比「CPU 高」更值得被看见，不能被节流覆盖掉。
+            let effective_reason = snapshot.reason_code.or_else(|| {
+                self_monitor.is_throttled().then_some("throttled")
+            });
             let key: HealthKey = (
                 snapshot.mode,
                 snapshot.topology_revision,
                 snapshot.facts_roots_attached,
                 snapshot.cache_roots_attached,
                 snapshot.pending_roots,
-                snapshot.reason_code,
+                effective_reason,
             );
             // 「变了才发」统一走 runtime 的 ChangePublisher（spec §4.5）——与
             // SyncStatusChanged / Invalidated 同一原语，不再手写 last 比较。
@@ -1574,7 +1635,7 @@ fn start_watcher_health_publisher(app: AppHandle) {
                         watcher_mode_str(snapshot.mode),
                         snapshot.topology_revision,
                         snapshot.pending_roots,
-                        snapshot.reason_code.unwrap_or("none"),
+                        effective_reason.unwrap_or("none"),
                     ),
                 );
                 let _ = app.emit(APP_EVENT, serde_json::json!({
@@ -1583,7 +1644,7 @@ fn start_watcher_health_publisher(app: AppHandle) {
                     "mode": watcher_mode_str(snapshot.mode),
                     "topology_revision": snapshot.topology_revision,
                     "pending_roots": snapshot.pending_roots,
-                    "reason_code": snapshot.reason_code,
+                    "reason_code": effective_reason,
                 }));
             });
             std::thread::sleep(std::time::Duration::from_secs(2));
@@ -4052,6 +4113,9 @@ pub fn run() {
         // 失效信号 / 同步状态的「变了才发」发布器：tick 与手动同步线程共享。
         .manage(InvalidationPublisher(agent_vitals_runtime::events::ChangePublisher::new()))
         .manage(SyncStatusPublisher(agent_vitals_runtime::events::ChangePublisher::new()))
+        // 自看护（REVIEW P4）动态 watcher 冷却：health publisher 写、refresh
+        // tick 读，见 WatcherCooldownOverride 注释。
+        .manage(WatcherCooldownOverride::baseline())
         // 菜单信息行导航目标：菜单点击 → 工作台（见 NavTarget 注释）。
         .manage(NavTarget(Mutex::new(None)))
         // 会话深链待消费目标（spec §7.2）：菜单 L2 → 工作台详情。与 NavTarget

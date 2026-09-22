@@ -350,8 +350,13 @@ pub struct WatcherHealth {
 
 Allowed reason codes are closed and path-free:
 `feature_disabled`, `no_roots`, `home_unavailable`, `backend_init_failed`,
-`root_pending`, `root_permission_denied`, `worker_terminated`, and
-`topology_rejected`.
+`root_pending`, `root_permission_denied`, `worker_terminated`,
+`topology_rejected`, and `throttled` (added 2026-09-22,
+`EVENT_PROCESSING_AND_OBSERVABILITY_REVIEW.md` P4/G5: the desktop's
+self-monitor found sustained high self-CPU and stretched the watcher-triggered
+sync cooldown past its baseline — `ingest::self_monitor::SelfMonitor`. It only
+surfaces when the watcher itself has no more specific reason to report;
+a real backend failure is never overwritten by this one).
 
 The runtime must retain this state only in process memory. It is operational
 health, not user analytics; do not persist it to authority SQLite solely for

@@ -728,8 +728,14 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
  * degraded/unavailable 统一为「定期检查」，periodic fallback 永远在场。 */
 function watcherStatusLabel(health: WatcherHealthStatus | null): string {
   if (!health) return "状态不可判定 · 定期检查每 5 分钟兜底";
-  if (health.mode === "active" && health.pendingRoots === 0) return "实时监听已启用";
-  if (health.mode === "active" && health.pendingRoots > 0) return `部分可用（${health.pendingRoots} 个根等待） · 其余实时`;
+  // `throttled` 能与 `mode: "active"` 共存（REVIEW P4 自看护：watcher 后端
+  // 本身没坏，只是本机 CPU 持续偏高，同步节流窗被自动拉长）——如实说明，
+  // 不能让它落进「实时监听已启用」这句话里悄悄消失。
+  const throttledSuffix = health.reasonCode === "throttled" ? " · 本机 CPU 较高，同步节流中" : "";
+  if (health.mode === "active" && health.pendingRoots === 0) return `实时监听已启用${throttledSuffix}`;
+  if (health.mode === "active" && health.pendingRoots > 0) {
+    return `部分可用（${health.pendingRoots} 个根等待） · 其余实时${throttledSuffix}`;
+  }
   if (health.mode === "disabled") return "未启用实时监听 · 定期检查每 5 分钟";
   return "已降级为定期检查 · 每 5 分钟";
 }

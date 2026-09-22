@@ -209,11 +209,36 @@ WatcherHealthChanged 的变化才发——这些模式正确，问题是**没有
 
 ### P4：自看护（治 G5）
 
-- 健康巡检线程（复用 2s publisher 的骨架）读自身 CPU（`proc_pidinfo`）；
-  超 50% 持续 30s → 记 warn 日志 + 自动延长 watcher 冷却（指数退避，
-  上限 5min）+ WatcherHealth 增加 `throttled` 原因码；UI 文案如实呈现。
-- **验收**：注入式单测（伪造 CPU 读数）触发节流与恢复；真机写入风暴
-  下稳态 CPU 有硬顶。
+**已落地（2026-09-22，`crates/agent-vitals-runtime/src/ingest/self_monitor.rs`）**，
+一处偏离原文：读 CPU 用 POSIX `getrusage(RUSAGE_SELF)`，不是 macOS 专属的
+`proc_pidinfo`——两者都能拿到本进程累计 CPU 时间，前者是标准 API、Linux
+也覆盖，`libc` crate 已有现成绑定，没有理由多绑一层 mach 层代码换同一个数字。
+
+- `SelfMonitor`（纯状态机，`step(cpu_pct, now: Instant)`）：阈值 50%（真机基线
+  空闲 0%/活跃 ~8%/事故峰值 284%，50% 留够余量不误报又远低于事故量级）持续
+  30s → 冷却翻倍，同一个 30s 窗口内不重复翻倍，封顶 5 分钟；跌破阈值持续 30s
+  → 冷却收回 30s 基线。状态跳变（`Transition::Escalated`/`Recovered`）才记
+  日志，2s 轮询本身不落盘（复用 `start_watcher_health_publisher` 已有的骨架，
+  没起新线程）。
+- 冷却窗口从 `watch::WATCHER_SYNC_COOLDOWN` 常量改为运行期共享值
+  （`WatcherCooldownOverride`，desktop `AtomicU64`，health-publisher 写、
+  refresh-tick 读）；`watch.rs` 新增 `cooldown_remaining_with(cooldown, ..)`，
+  原 `watcher_cooldown_remaining` 收窄成它在固定基线上的薄封装，两者用同一
+  测试钉住等价。
+- `WatcherHealth` 的 `reason_code` 闭集从 8 个扩到 9 个（`throttled`，
+  HARDENING spec §5.5 + React `watcherReasonCodes` 同步更新）——**只在
+  watcher 自己没有更具体原因码时才顶上**（`snapshot.reason_code.or_else(||
+  throttled…)`），一次真实的 backend 故障不会被「CPU 高」盖过去；`throttled`
+  可以与 `mode: "active"` 共存（watcher 后端没坏，只是同步被节流），
+  `watcherStatusLabel` 据此在文案里加一句「本机 CPU 较高，同步节流中」，
+  不让它消失在「实时监听已启用」这句话里。
+- **验收**：`self_monitor` 8 条单测（注入 CPU 序列：低位不动、短暂尖峰不升级、
+  持续升级两档、封顶不再升级、二次跌落打断恢复计时器、`cpu_percent` 的两个
+  边界）+ 1 条真实 `getrusage` 调用测试（只断言单调不减，不断言具体数值）；
+  `cooldown_remaining_with` 与固定基线封装的等价性测试。**真机写入风暴下稳态
+  CPU 有硬顶未验证**——需要真机跑一次真实的持续高 CPU 场景，确认冷却确实被
+  拉长、恢复后确实收回，单测只能验证状态机本身，不能验证它接进真实进程后
+  的端到端行为。
 
 ### 明确不做（纪律）
 

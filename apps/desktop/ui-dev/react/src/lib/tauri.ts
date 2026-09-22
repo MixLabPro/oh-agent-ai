@@ -3076,11 +3076,15 @@ export type WatcherHealthStatus = {
 
 const watcherModes: ReadonlySet<WatcherHealthStatus["mode"]> = new Set(["active", "degraded", "disabled", "unavailable"]);
 
-/** 原因码闭集（HARDENING spec §5.5 允许的 8 个）——枚举值与 mode 同纪律：
- * 未知一律拒为 null（spec §5.6「reject unrecognized enum values」）。 */
+/** 原因码闭集（HARDENING spec §5.5 允许的 9 个，`throttled` 2026-09-22 补，
+ * REVIEW P4 自看护）——枚举值与 mode 同纪律：未知一律拒为 null（spec §5.6
+ * 「reject unrecognized enum values」）。`throttled` 与其余 8 个不同的是：
+ * 它可能与 `mode: "active"` 共存（watcher 后端本身没坏，只是 CPU 持续过高
+ * 把同步冷却拉长了）——UI 文案不能假设 reason_code 非空就等于 watcher 故障。 */
 const watcherReasonCodes: ReadonlySet<string> = new Set([
   "feature_disabled", "no_roots", "home_unavailable", "backend_init_failed",
   "root_pending", "root_permission_denied", "worker_terminated", "topology_rejected",
+  "throttled",
 ]);
 
 /** 闭集校验 + 数值限幅：未知枚举/越界计数一律拒绝为 null（degrade，不穿墙）。 */

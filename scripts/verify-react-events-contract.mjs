@@ -96,6 +96,13 @@ assert.equal(
   "越界 revision 限幅为 0，mode 与短 reason 照收",
 );
 assert.equal(parseWatcherHealth({ mode: "escalated", topology_revision: 1, pending_roots: 0 }), null, "闭集外 mode 必须拒绝");
+// REVIEW P4 自看护：throttled 是 2026-09-22 新增的第 9 个原因码，且必须能与
+// mode: "active" 共存（watcher 后端没坏，只是 CPU 持续过高）。
+assert.equal(
+  JSON.stringify(parseWatcherHealth({ mode: "active", reason_code: "throttled", topology_revision: 1, pending_roots: 0 })),
+  JSON.stringify({ mode: "active", reasonCode: "throttled", topologyRevision: 1, pendingRoots: 0 }),
+  "throttled 与 active 共存必须被接受",
+);
 assert.equal(
   JSON.stringify(parseWatcherHealth({ mode: "active", reason_code: "/private/raw/path/error" })),
   JSON.stringify({ mode: "active", reasonCode: null, topologyRevision: 0, pendingRoots: 0 }),

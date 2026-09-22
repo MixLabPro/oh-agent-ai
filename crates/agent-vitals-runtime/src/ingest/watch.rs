@@ -128,13 +128,25 @@ pub const WATCHER_SYNC_COOLDOWN: Duration = Duration::from_secs(30);
 
 /// 冷却判定（纯函数，可单测）：watcher 唤醒到达时，距上次同步完成不足
 /// 冷却窗 → 返回还需睡多久（睡满后照常执行——**不丢弃**最后一批写入）；
-/// 已过窗 → None，立即执行。
+/// 已过窗 → None，立即执行。固定用 [`WATCHER_SYNC_COOLDOWN`] 基线——自看护
+/// （`self_monitor`）需要动态冷却时走 [`cooldown_remaining_with`]。
 pub fn watcher_cooldown_remaining(
     last_sync_finished_at: std::time::Instant,
     now: std::time::Instant,
 ) -> Option<Duration> {
+    cooldown_remaining_with(WATCHER_SYNC_COOLDOWN, last_sync_finished_at, now)
+}
+
+/// 同 [`watcher_cooldown_remaining`]，冷却窗口是参数而非固定常量——自看护
+/// （REVIEW P4）在持续高 CPU 时把这个值拉长（指数退避，上限 5 分钟），CPU
+/// 回落后收回 [`WATCHER_SYNC_COOLDOWN`] 基线。
+pub fn cooldown_remaining_with(
+    cooldown: Duration,
+    last_sync_finished_at: std::time::Instant,
+    now: std::time::Instant,
+) -> Option<Duration> {
     let elapsed = now.duration_since(last_sync_finished_at);
-    WATCHER_SYNC_COOLDOWN.checked_sub(elapsed)
+    cooldown.checked_sub(elapsed)
 }
 
 /// watch-only 消费者回调（watcher 线程内执行，必须快——只做内存失效）。
@@ -946,6 +958,24 @@ mod tests {
         assert_eq!(watcher_cooldown_remaining(long_ago, now), None);
         let mid = now - Duration::from_secs(10);
         assert_eq!(watcher_cooldown_remaining(mid, now), Some(Duration::from_secs(20)));
+    }
+
+    /// 自看护（`self_monitor`）拉长冷却时走的是同一条判定逻辑，只是窗口值
+    /// 换成动态的——`watcher_cooldown_remaining` 必须等价于
+    /// `cooldown_remaining_with(WATCHER_SYNC_COOLDOWN, ..)`，不是两套独立实现。
+    #[test]
+    fn cooldown_remaining_with_matches_the_fixed_baseline_wrapper() {
+        let now = std::time::Instant::now();
+        let finished = now - Duration::from_secs(10);
+        assert_eq!(
+            cooldown_remaining_with(WATCHER_SYNC_COOLDOWN, finished, now),
+            watcher_cooldown_remaining(finished, now),
+        );
+        // 拉长到 120s 后，同一个「10 秒前完成」在动态窗口下还差 110 秒。
+        assert_eq!(
+            cooldown_remaining_with(Duration::from_secs(120), finished, now),
+            Some(Duration::from_secs(110)),
+        );
     }
 
     /// feature 关闭 → 恒 noop（NoopWatcher），健康快照 Disabled/
