@@ -22,20 +22,45 @@ use crate::sql_sync::now_ms;
 /// 事件契约版本。与 authority schema 演进纪律同款：只增不删不改语义。
 pub const EVENT_SCHEMA_VERSION: i64 = 1;
 
-/// 闭集词表（spec §5 首批冻结）。写入侧与投递侧双双校验——词表外的
+/// 事件类别（RUNTIME_INVALIDATION spec §4.2）。`Domain` = 业务状态的过去时陈述，
+/// 给领域消费者逐条处理；`Audit` = 审计旁路。**没有失效信号类**——失效通知不是
+/// outbox 行，它由后续阶段基于权威 revision 派生（不在本文件）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventClass {
+    Domain,
+    Audit,
+}
+
+/// 闭集词表（spec §5 首批冻结）+ 类别。写入侧与投递侧双双校验——词表外的
 /// `event_type` 在 insert 时被拒绝，防漂移进无人认识的行。
-pub const EVENT_TYPES: &[&str] = &[
-    "FactsIngested",
-    "AuthorityRevisionAdvanced",
-    "DeclarationSaved",
-    "PriceCardSaved",
-    "HostSourceFailed",
-    "SourceRecovered",
-    "McpToolInvoked",
-    "TrustMonitorEvent",
-    "HourTicked",
-    "DayRolled",
+///
+/// `AuthorityRevisionAdvanced` 是**保留位**（RUNTIME_INVALIDATION spec §4.4）：它若逐次
+/// 落 outbox 就违反「失效信号是派生投影」；留在词表只为不打破闭集校验的历史行。
+pub const EVENT_TYPES: &[(&str, EventClass)] = &[
+    ("FactsIngested", EventClass::Domain),
+    ("AuthorityRevisionAdvanced", EventClass::Domain),
+    ("DeclarationSaved", EventClass::Domain),
+    ("PriceCardSaved", EventClass::Domain),
+    ("HostSourceFailed", EventClass::Domain),
+    ("SourceRecovered", EventClass::Domain),
+    ("McpToolInvoked", EventClass::Audit),
+    ("TrustMonitorEvent", EventClass::Domain),
+    ("HourTicked", EventClass::Domain),
+    ("DayRolled", EventClass::Domain),
 ];
+
+/// 词表查询：类型 → 类别（词表外 = `None`）。
+pub fn event_class(event_type: &str) -> Option<EventClass> {
+    EVENT_TYPES
+        .iter()
+        .find(|(t, _)| *t == event_type)
+        .map(|(_, c)| *c)
+}
+
+/// 词表查询：类型 → `&'static str`（leak-free 地从闭集取回）。
+fn static_type(event_type: &str) -> Option<&'static str> {
+    EVENT_TYPES.iter().find(|(t, _)| *t == event_type).map(|(t, _)| *t)
+}
 
 /// 一条事件的信封（spec §4.1 冻结形状）。
 #[derive(Clone, Debug, PartialEq)]
@@ -101,8 +126,13 @@ impl AppEvent {
     }
 
     /// `FactsIngested`：某宿主的事实批次已在权威库事务内落定。
+    ///
+    /// `revision` = 本事务**提交后**的权威 revision（spec §5 声明的
+    /// `FactsIngested{host, run_id, revision}`）。生产者在事务内读当前值 + 1
+    /// （事务已插入事实，提交必然推进）；领域消费者可据此跳过 ≤ 已处理 revision 的批次。
     pub fn facts_ingested(
-        host: &str, run_id: &str, inserted: usize, rejected: usize, duplicate: usize,
+        host: &str, run_id: &str, revision: u64,
+        inserted: usize, rejected: usize, duplicate: usize,
     ) -> Self {
         Self {
             event_type: "FactsIngested",
@@ -114,7 +144,7 @@ impl AppEvent {
             // 把 rejected 并进 inserted 是契约漂移——payload 字段名必须与语义
             // 一致，消费者迟早会读它们）。
             payload: json!({
-                "run_id": run_id, "inserted": inserted,
+                "run_id": run_id, "revision": revision, "inserted": inserted,
                 "rejected": rejected, "duplicate": duplicate,
             }),
         }
@@ -159,7 +189,7 @@ impl std::fmt::Display for EventError {
 /// 把事件写进调用方持有的事务。**本函数不开事务、不提交**——调用方必须
 /// 在与状态变更相同的 `with_immediate_txn` 里调它（spec §1.2）。
 pub fn insert_outbox(conn: &Connection, event: &AppEvent, run_id: &str) -> Result<(), EventError> {
-    if !EVENT_TYPES.contains(&event.event_type) {
+    if event_class(event.event_type).is_none() {
         return Err(EventError::UnknownType(event.event_type.to_string()));
     }
     conn.execute(
@@ -184,7 +214,106 @@ pub fn insert_outbox(conn: &Connection, event: &AppEvent, run_id: &str) -> Resul
     .map_err(EventError::Db)
 }
 
-/// 一个消费者：稳定 id + 处理函数。处理函数拿到的是**已脱离数据库行**的
+/// 消费者角色（RUNTIME_INVALIDATION spec §4.2）。
+///
+/// - `Domain`：读领域事件载荷，逐条处理（price-reconcile / quota / issue 评估器）；
+/// - `Audit`：读审计事件；
+/// - `Presentation`：展示层角色，**预留**——本阶段用 [`EventConsumer`] 声明
+///   `Presentation` 角色一律在 `Dispatcher::new` 被拒绝（它结构上不该读任何领域
+///   事件载荷）；合并型消费者接口（让它以摘要形式参与 drain）在后续阶段接入。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConsumerRole {
+    Domain,
+    Presentation,
+    Audit,
+}
+
+/// 消费者兴趣集：角色 + 订阅的类型子集（空 = 该角色允许的全部类别）。drain 的反连接
+/// SQL 按此过滤，不再每个消费者扫全表。
+#[derive(Clone, Copy, Debug)]
+pub struct ConsumerInterest {
+    pub role: ConsumerRole,
+    pub types: &'static [&'static str],
+}
+
+impl ConsumerInterest {
+    pub const fn domain(types: &'static [&'static str]) -> Self {
+        Self { role: ConsumerRole::Domain, types }
+    }
+    pub const fn audit(types: &'static [&'static str]) -> Self {
+        Self { role: ConsumerRole::Audit, types }
+    }
+    /// 展示层：无类型子集（它不读载荷，只需要看到 Domain 类的行以合并摘要）。
+    pub const fn presentation() -> Self {
+        Self { role: ConsumerRole::Presentation, types: &[] }
+    }
+
+    fn allowed_class(&self) -> EventClass {
+        match self.role {
+            ConsumerRole::Domain | ConsumerRole::Presentation => EventClass::Domain,
+            ConsumerRole::Audit => EventClass::Audit,
+        }
+    }
+
+    /// 展开为具体类型清单（校验后调用；每项都在词表且属允许类别）。
+    fn resolved_types(&self) -> Vec<&'static str> {
+        if self.types.is_empty() {
+            let class = self.allowed_class();
+            EVENT_TYPES.iter().filter(|(_, c)| *c == class).map(|(t, _)| *t).collect()
+        } else {
+            self.types.iter().filter_map(|t| static_type(t)).collect()
+        }
+    }
+
+    fn validate(&self, consumer_id: &str) -> Result<(), RoleViolation> {
+        match self.role {
+            ConsumerRole::Presentation => {
+                // 本阶段没有合并型消费者接口——展示层角色一律不可通过
+                // `EventConsumer` 注册（它结构上不该读任何领域事件载荷）。
+                return Err(RoleViolation {
+                    consumer_id: consumer_id.to_string(),
+                    reason: "presentation consumers never read payloads via EventConsumer".into(),
+                });
+            }
+            ConsumerRole::Domain | ConsumerRole::Audit => {
+                let class = self.allowed_class();
+                for t in self.types {
+                    match event_class(t) {
+                        Some(c) if c == class => {}
+                        Some(c) => {
+                            return Err(RoleViolation {
+                                consumer_id: consumer_id.to_string(),
+                                reason: format!("`{t}` is {c:?}-class, not allowed for {:?} role", self.role),
+                            })
+                        }
+                        None => {
+                            return Err(RoleViolation {
+                                consumer_id: consumer_id.to_string(),
+                                reason: format!("`{t}` is not in the frozen vocabulary"),
+                            })
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 兴趣集与角色的冲突：`Dispatcher::new` 拒绝（spec 验收 9.3）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleViolation {
+    pub consumer_id: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for RoleViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "consumer `{}`: {}", self.consumer_id, self.reason)
+    }
+}
+
+/// 一个消费者：稳定 id + 兴趣集 + 处理函数。处理函数拿到的是**已脱离数据库行**的
 /// 事件投影。**禁止**在处理函数里使用 drain 正在遍历的那条连接——消费者自
 /// 持资源（如按路径自开 AuthorityDb）；drain 在自动提交模式下逐行调用，
 /// 不持事务（spec §6「先处理、后记账」的崩溃语义依赖这一点）。
@@ -192,15 +321,17 @@ pub type EventHandler = Box<dyn Fn(&AppEvent) -> Result<(), String> + Send + Syn
 
 pub struct EventConsumer {
     pub consumer_id: &'static str,
+    pub interest: ConsumerInterest,
     pub handle: EventHandler,
 }
 
 impl EventConsumer {
     pub fn new(
         consumer_id: &'static str,
+        interest: ConsumerInterest,
         handle: impl Fn(&AppEvent) -> Result<(), String> + Send + Sync + 'static,
     ) -> Self {
-        Self { consumer_id, handle: Box::new(handle) }
+        Self { consumer_id, interest, handle: Box::new(handle) }
     }
 }
 
@@ -227,8 +358,23 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
-    pub fn new(consumers: Vec<EventConsumer>) -> Self {
-        Self { consumers }
+    /// 构造分发器：每个消费者的角色 + 兴趣集在此校验（spec 验收 9.3）。
+    pub fn new(consumers: Vec<EventConsumer>) -> Result<Self, RoleViolation> {
+        for c in &consumers {
+            c.interest.validate(c.consumer_id)?;
+        }
+        Ok(Self { consumers })
+    }
+
+    /// 兴趣集展开成 SQL `IN (...)` 字面量列表。值来自闭集词表常量（已校验），
+    /// 不是用户输入，故可以内联；空清单返回 `('')`（匹配不到任何行）。
+    fn types_in_clause(interest: &ConsumerInterest) -> String {
+        let types = interest.resolved_types();
+        if types.is_empty() {
+            return "('')".to_string();
+        }
+        let quoted: Vec<String> = types.iter().map(|t| format!("'{t}'")).collect();
+        format!("({})", quoted.join(", "))
     }
 
     /// 扫描并投递所有 `(event, consumer)` 缺行组合。逐事件逐消费者执行：
@@ -239,22 +385,28 @@ impl Dispatcher {
     pub fn drain(&self, conn: &Connection) -> Result<DispatchReport, rusqlite::Error> {
         let mut report = DispatchReport::default();
         for consumer in &self.consumers {
-            let mut stmt = conn.prepare(
+            let consumer_id = consumer.consumer_id;
+            let interest = consumer.interest;
+            // 兴趣集过滤进 SQL：不订阅的类型连行都不物化、不记账（spec 验收 9.4）。
+            let sql = format!(
                 "SELECT o.event_id, o.event_type, o.schema_version, o.occurred_at_ms, o.host,
                         o.correlation_id, o.producer, o.payload_json,
                         COALESCE(d.retry_count, 0)
                  FROM event_outbox o
                  LEFT JOIN event_deliveries d
                    ON d.event_id = o.event_id AND d.consumer_id = ?1
-                 WHERE d.event_id IS NULL
+                 WHERE o.event_type IN {}
+                   AND (d.event_id IS NULL
                     OR (d.last_error IS NOT NULL
                         AND d.retry_count < ?2
-                        AND COALESCE(d.next_retry_at_ms, 0) <= ?3)
+                        AND COALESCE(d.next_retry_at_ms, 0) <= ?3))
                  ORDER BY o.created_at_ms, o.event_id",
-            )?;
+                Self::types_in_clause(&interest)
+            );
+            let mut stmt = conn.prepare(&sql)?;
             let now = now_ms();
             let rows = stmt.query_map(
-                rusqlite::params![consumer.consumer_id, MAX_RETRIES, now],
+                rusqlite::params![consumer_id, MAX_RETRIES, now],
                 |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -281,21 +433,16 @@ impl Dispatcher {
                 // 前向兼容：未来的 schema_version / 词表外类型只跳过并计数，
                 // 不让一条不认识的行卡住整个队列（spec §10.7 的闭集校验是
                 // 「拒绝并计数」，不是崩溃）。
-                if schema_version > EVENT_SCHEMA_VERSION
-                    || !EVENT_TYPES.contains(&event_type.as_str())
-                {
-                    record_delivery(conn, &event_id, consumer.consumer_id, now_ms(),
+                let Some(static_event_type) = static_type(&event_type)
+                    .filter(|_| schema_version <= EVENT_SCHEMA_VERSION)
+                else {
+                    record_delivery(conn, &event_id, consumer_id, now_ms(),
                         Some("skipped: unknown event_type or newer schema_version".to_string()))?;
                     report.skipped += 1;
                     continue;
-                }
+                };
                 let event = AppEvent {
-                    // 词表校验已过，leak-free 的 &'static 从闭集取回。
-                    event_type: EVENT_TYPES
-                        .iter()
-                        .find(|t| **t == event_type)
-                        .copied()
-                        .unwrap_or(""),
+                    event_type: static_event_type,
                     occurred_at_ms,
                     host,
                     correlation_id,
@@ -315,7 +462,7 @@ impl Dispatcher {
                         Some(message)
                     }
                 };
-                record_delivery(conn, &event_id, consumer.consumer_id, now_ms(), error)?;
+                record_delivery(conn, &event_id, consumer_id, now_ms(), error)?;
             }
         }
         Ok(report)
@@ -404,14 +551,12 @@ mod tests {
         let path = tmp_db("idem");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        let event = AppEvent::facts_ingested("zcode", &run, 3, 0, 1);
+        let event = AppEvent::facts_ingested("zcode", &run, 1, 3, 0, 1);
         emit(&db, &event, &run);
 
         static CALLS: AtomicUsize = AtomicUsize::new(0);
-        let dispatcher = Dispatcher::new(vec![EventConsumer::new(
-            "test-counter",
-            |_| { CALLS.fetch_add(1, Ordering::SeqCst); Ok(()) },
-        )]);
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("test-counter", ConsumerInterest::domain(&[]), |_| { CALLS.fetch_add(1, Ordering::SeqCst); Ok(()) },
+        )]).expect("valid interest");
         let first = dispatcher.drain(db.conn()).expect("drain 1");
         let second = dispatcher.drain(db.conn()).expect("drain 2");
         assert_eq!((first.delivered, first.failed, first.skipped), (1, 0, 0));
@@ -429,12 +574,12 @@ mod tests {
         let path = tmp_db("crash");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        let event = AppEvent::facts_ingested("claude-code", &run, 7, 0, 0);
+        let event = AppEvent::facts_ingested("claude-code", &run, 1, 7, 0, 0);
         emit(&db, &event, &run);
         drop(db); // 模拟崩溃：事件已提交、投递未发生
 
         let db2 = AuthorityDb::open(&path, 1).expect("reopen");
-        let dispatcher = Dispatcher::new(vec![EventConsumer::new("test-recovery", |_| Ok(()))]);
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("test-recovery", ConsumerInterest::domain(&[]), |_| Ok(()))]).expect("valid interest");
         let report = dispatcher.drain(db2.conn()).expect("recover");
         assert_eq!(report.delivered, 1, "崩溃残留事件由重开后的 drain 补投");
         drop(db2);
@@ -468,9 +613,9 @@ mod tests {
         let path = tmp_db("fail");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        let event = AppEvent::facts_ingested("dsh", &run, 1, 0, 0);
+        let event = AppEvent::facts_ingested("dsh", &run, 1, 1, 0, 0);
         emit(&db, &event, &run);
-        let dispatcher = Dispatcher::new(vec![EventConsumer::new("test-failer", |_| Err("boom".to_string()))]);
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("test-failer", ConsumerInterest::domain(&[]), |_| Err("boom".to_string()))]).expect("valid interest");
         let first = dispatcher.drain(db.conn()).expect("drain 1");
         let second = dispatcher.drain(db.conn()).expect("drain 2");
         assert_eq!((first.delivered, first.failed), (0, 1));
@@ -493,22 +638,20 @@ mod tests {
         let path = tmp_db("wal-snapshot");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        let event = AppEvent::facts_ingested("codex", &run, 5, 0, 0);
+        let event = AppEvent::facts_ingested("codex", &run, 1, 5, 0, 0);
         emit(&db, &event, &run);
 
         // handler 自持第二条连接并提交一次真实写入（模拟 price-reconcile
         // 开自己的 AuthorityDb 写 data_quality_issues 的生产形态）。
         let writer_path = path.clone();
-        let dispatcher = Dispatcher::new(vec![EventConsumer::new(
-            "second-conn-writer",
-            move |_event| {
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("second-conn-writer", ConsumerInterest::domain(&[]), move |_event| {
                 let writer = AuthorityDb::open(&writer_path, 1_700_000_000_001)
                     .map_err(|e| e.to_string())?;
                 writer
                     .begin_run("handler-side-write", "cli", 1_700_000_000_002)
                     .map_err(|e| e.to_string())
             },
-        )]);
+        )]).expect("valid interest");
         let report = dispatcher
             .drain(db.conn())
             .expect("物化 drain 不得因 handler 的第二连接写入而死锁");
@@ -535,7 +678,7 @@ mod tests {
         let path = tmp_db("e2e-facts");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        let event = AppEvent::facts_ingested("claude-code", &run, 25, 3, 7);
+        let event = AppEvent::facts_ingested("claude-code", &run, 1, 25, 3, 7);
         emit(&db, &event, &run);
 
         // outbox 行断言
@@ -550,10 +693,10 @@ mod tests {
         // 消费者收到
         let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let rx = received.clone();
-        let dispatcher = Dispatcher::new(vec![EventConsumer::new("e2e-facts", move |e| {
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("e2e-facts", ConsumerInterest::domain(&[]), move |e| {
             rx.lock().unwrap().push(e.clone());
             Ok(())
-        })]);
+        })]).expect("valid interest");
         let report = dispatcher.drain(db.conn()).unwrap();
         assert_eq!(report.delivered, 1);
         let recv = received.lock().unwrap().clone();
@@ -576,10 +719,10 @@ mod tests {
 
         let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let rx = received.clone();
-        let dispatcher = Dispatcher::new(vec![EventConsumer::new("e2e-trust", move |e| {
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("e2e-trust", ConsumerInterest::domain(&[]), move |e| {
             rx.lock().unwrap().push(e.clone());
             Ok(())
-        })]);
+        })]).expect("valid interest");
         let report = dispatcher.drain(db.conn()).unwrap();
         assert_eq!(report.delivered, 1);
         let recv = received.lock().unwrap().clone();
@@ -597,8 +740,8 @@ mod tests {
         let path = tmp_db("dead-letter");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        emit(&db, &AppEvent::facts_ingested("dsh", &run, 1, 0, 0), &run);
-        let dispatcher = Dispatcher::new(vec![EventConsumer::new("dl", |_| Err("dead".into()))]);
+        emit(&db, &AppEvent::facts_ingested("dsh", &run, 1, 1, 0, 0), &run);
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new("dl", ConsumerInterest::domain(&[]), |_| Err("dead".into()))]).expect("valid interest");
 
         // 第一次失败 → retry_count=1
         let r1 = dispatcher.drain(db.conn()).unwrap();
@@ -629,4 +772,56 @@ mod tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
     }
+
+    // ---- RUNTIME_INVALIDATION spec §4.2（验收 9.3 9.4）----
+
+    /// 9.3：展示层角色一律拒绝（本阶段没有合并型消费者接口）；Audit 角色不能订阅
+    /// Domain 类型；词表外类型拒绝；合法的 Domain 兴趣正常构造。
+    #[test]
+    fn presentation_consumer_cannot_subscribe_domain_events() {
+        let plain = Dispatcher::new(vec![EventConsumer::new(
+            "ui-plain", ConsumerInterest::presentation(), |_| Ok(()),
+        )]);
+        assert!(plain.is_err(), "presentation role must not read payloads via EventConsumer");
+
+        let audit_wants_domain = Dispatcher::new(vec![EventConsumer::new(
+            "audit-x", ConsumerInterest::audit(&["FactsIngested"]), |_| Ok(()),
+        )]);
+        assert!(audit_wants_domain.is_err(), "audit role cannot subscribe Domain-class types");
+
+        let unknown = Dispatcher::new(vec![EventConsumer::new(
+            "dom-x", ConsumerInterest::domain(&["NotAType"]), |_| Ok(()),
+        )]);
+        assert!(unknown.is_err());
+
+        let ok = Dispatcher::new(vec![EventConsumer::new(
+            "dom", ConsumerInterest::domain(&["FactsIngested"]), |_| Ok(()),
+        )]);
+        assert!(ok.is_ok());
+    }
+
+    /// 9.4：兴趣集过滤在 SQL 层——不订阅的类型零投递、零记账。
+    #[test]
+    fn interest_filter_skips_unsubscribed_types_without_bookkeeping() {
+        let path = tmp_db("interest");
+        let db = AuthorityDb::open(&path, 1).expect("open");
+        let run = seed(&db);
+        emit(&db, &AppEvent::facts_ingested("dsh", &run, 1, 1, 0, 0), &run);
+        emit(&db, &AppEvent::trust_monitor_event(&run, 2, 2, 0), &run);
+
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+        let dispatcher = Dispatcher::new(vec![EventConsumer::new(
+            "only-trust", ConsumerInterest::domain(&["TrustMonitorEvent"]),
+            |e| { assert_eq!(e.event_type, "TrustMonitorEvent"); SEEN.fetch_add(1, Ordering::SeqCst); Ok(()) },
+        )]).expect("valid");
+        let report = dispatcher.drain(db.conn()).expect("drain");
+        assert_eq!(report.delivered, 1);
+        assert_eq!(SEEN.load(Ordering::SeqCst), 1);
+        let deliveries: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM event_deliveries WHERE consumer_id = 'only-trust'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(deliveries, 1, "the FactsIngested row must not even be bookkept for this consumer");
+        let _ = std::fs::remove_file(&path);
+    }
+
 }

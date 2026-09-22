@@ -634,22 +634,34 @@ pub(crate) fn write_flat_facts_with_sources(
             )?;
         }
         // 事件总线（spec §1.2）：FactsIngested 与本批事实**同事务**落 outbox——
-        // 早于此处返回的空批短路（上方 is_empty 分支）不发射；全重复的重放
-        // 也算「同步发生过」，照发（消费者幂等，计数如实进 payload）。
-        crate::events::insert_outbox(
-            conn,
-            &crate::events::AppEvent::facts_ingested(
-                host,
+        // 早于此处返回的空批短路（上方 is_empty 分支）不发射。
+        //
+        // **全重复重放也不发射**（RUNTIME_INVALIDATION spec §4.1，推翻此前
+        // 「全重复也算同步发生过、照发」的决策）：领域消费者对 inserted=0 的
+        // 批次本来就 no-op，而那一行 outbox 本身会让事务非空、推进权威 revision，
+        // 让「源文件变了但没产出任何新事实」的 tick 照样向展示层发失效。
+        // `rejected > 0` 仍发——数据质量问题是 issue 评估器要看的状态变化。
+        if outcome.inserted > 0 || outcome.rejected > 0 {
+            // 载荷里的 revision = 本事务提交后的值：事务已有行变更，
+            // `commit_advancing_revision` 必然 +1（spec §4.1）。
+            let revision_after_commit =
+                agent_vitals_data::authority::revision_of(conn)? + 1;
+            crate::events::insert_outbox(
+                conn,
+                &crate::events::AppEvent::facts_ingested(
+                    host,
+                    &run_id,
+                    revision_after_commit,
+                    outcome.inserted,
+                    outcome.rejected,
+                    outcome.duplicate,
+                ),
                 &run_id,
-                outcome.inserted,
-                outcome.rejected,
-                outcome.duplicate,
-            ),
-            &run_id,
-        )
-        .map_err(|e| AuthorityError::Sqlite(
-            rusqlite::Error::InvalidParameterName(format!("__event_outbox__:{e}")),
-        ))?;
+            )
+            .map_err(|e| AuthorityError::Sqlite(
+                rusqlite::Error::InvalidParameterName(format!("__event_outbox__:{e}")),
+            ))?;
+        }
         Ok(())
     });
 
@@ -1279,6 +1291,60 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1, "重复迁移不重复插入");
         std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// RUNTIME_INVALIDATION spec 验收 9.15：同一批事实重放，第一次落 FactsIngested
+    /// 并推进 revision；第二次全重复——不落 outbox 行、FactsIngested 计数不变。
+    /// revision 因 `upsert_session.last_observed_at_ms` 仍会前进（源文件确实变过，
+    /// 这是诚实的观测更新），本测试钉的是 outbox 面。
+    #[test]
+    fn all_duplicate_replay_writes_no_facts_ingested_row() {
+        use agent_vitals_domain::usage_fact::build_usage_fact;
+
+        let home = tmp_home("replay-dup");
+        let db = open_db(&home);
+        let mut fields = serde_json::Map::new();
+        fields.insert("machine_namespace".into(), serde_json::json!("ns-dup"));
+        fields.insert("host".into(), serde_json::json!("claude-code"));
+        fields.insert("source_profile".into(), serde_json::json!("default"));
+        fields.insert("native_session_id".into(), serde_json::json!("sess-dup"));
+        fields.insert("source_event_id".into(), serde_json::json!("evt-dup"));
+        fields.insert("observation_kind".into(), serde_json::json!("assistant-usage"));
+        fields.insert("event_ts_utc".into(), serde_json::json!("2026-09-06T10:00:00.000Z"));
+        fields.insert("model_raw".into(), serde_json::json!("claude-sonnet-5"));
+        fields.insert("uncached_input_tokens".into(), serde_json::json!(10));
+        fields.insert("output_tokens".into(), serde_json::json!(4));
+        let fact = build_usage_fact(&fields).unwrap();
+        let outbox_rows = |db: &agent_vitals_data::authority::AuthorityDb| -> i64 {
+            db.conn().query_row(
+                "SELECT COUNT(*) FROM event_outbox WHERE event_type = 'FactsIngested'",
+                [], |r| r.get(0),
+            ).unwrap()
+        };
+
+        let no_overrides = std::collections::HashMap::new();
+        let write = |now: i64| {
+            write_flat_facts_with_sources(
+                &db, "claude-code", "ns-dup", &[], &no_overrides,
+                std::slice::from_ref(&fact), &[], &[], None, None, now,
+            )
+        };
+        let first = write(1_000).unwrap();
+        assert_eq!((first.inserted, first.duplicate), (1, 0));
+        assert_eq!(outbox_rows(&db), 1);
+        let rev_after_first = db.revision().unwrap();
+        assert!(rev_after_first >= 1);
+        // 验收 9.2：载荷里的 revision == 提交后的权威 revision。
+        let payload: String = db.conn().query_row(
+            "SELECT payload_json FROM event_outbox WHERE event_type = 'FactsIngested'", [], |r| r.get(0),
+        ).unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["revision"].as_u64(), Some(rev_after_first));
+
+        let second = write(2_000).unwrap();
+        assert_eq!((second.inserted, second.duplicate), (0, 1));
+        assert_eq!(outbox_rows(&db), 1, "all-duplicate replay must not add a FactsIngested row");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

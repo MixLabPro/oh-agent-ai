@@ -1204,7 +1204,7 @@ fn sync_status_payload(status: &SyncStatus) -> serde_json::Value {
 /// 消费者只 emit、不碰库（drain 的自动提交两段式允许 handler 自持资源，但
 /// UI 转发根本不需要）。
 fn drain_event_bus(app: &AppHandle) {
-    use agent_vitals_runtime::events::{Dispatcher, EventConsumer};
+    use agent_vitals_runtime::events::{ConsumerInterest, Dispatcher, EventConsumer};
     let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(
         &path,
@@ -1213,15 +1213,25 @@ fn drain_event_bus(app: &AppHandle) {
         return; // 库缺席（首装未同步）不是错误——没有事件可投
     };
     let app2 = app.clone();
-    let dispatcher = Dispatcher::new(vec![EventConsumer::new("desktop-ui", move |event| {
-        let _ = app2.emit(APP_EVENT, serde_json::json!({
-            "type": event.event_type,
-            "occurred_at_ms": event.occurred_at_ms,
-            "host": event.host,
-            "payload": event.payload,
-        }));
-        Ok(())
-    })]);
+    let dispatcher = match Dispatcher::new(vec![EventConsumer::new(
+        "desktop-ui",
+        ConsumerInterest::presentation(),
+        move |event: &agent_vitals_runtime::events::AppEvent| {
+            let _ = app2.emit(APP_EVENT, serde_json::json!({
+                "type": event.event_type,
+                "occurred_at_ms": event.occurred_at_ms,
+                "host": event.host,
+                "payload": event.payload,
+            }));
+            Ok(())
+        },
+    )]) {
+        Ok(dispatcher) => dispatcher,
+        Err(violation) => {
+            eprintln!("event-bus dispatcher rejected desktop-ui consumer: {violation}");
+            return;
+        }
+    };
     if let Err(e) = dispatcher.drain(db.conn()) {
         eprintln!("event-bus drain: {e}");
     }

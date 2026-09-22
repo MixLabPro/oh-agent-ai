@@ -615,7 +615,10 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
     {
         let authority_path = agent_vitals_data::authority::default_authority_path(data_home);
         let dispatcher = crate::events::Dispatcher::new(vec![
-            crate::events::EventConsumer::new("price-reconcile", move |_event| {
+            crate::events::EventConsumer::new(
+                "price-reconcile",
+                crate::events::ConsumerInterest::domain(&["FactsIngested", "PriceCardSaved"]),
+                move |_event| {
                 // 消费者自持连接（drain 不持事务，spec §6）。打开失败按处理
                 // 失败记账——**不重投本事件**（deliveries 反连接永久排除）；
                 // price-reconcile 忽略事件载荷做全量 reconcile，下一轮
@@ -632,7 +635,8 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
                 )
                 .map(|_| ())
             }),
-        ]);
+        ])
+        .expect("price-reconcile interest is a static Domain-class subset");
         match dispatcher.drain(authority.conn()) {
             Ok(report) if report.failed > 0 || report.skipped > 0 => eprintln!(
                 "sync-facts warning (event dispatch): {} failed, {} skipped",
