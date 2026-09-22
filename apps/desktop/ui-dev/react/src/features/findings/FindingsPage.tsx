@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { listenAppEvents, readDecisionMatrix, readFindings, readFindingsFreshness, safeUiError, type DecisionMatrixReport, type FindingGroup, type FindingSample, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
+import { listenAppEvents, makeInvalidationGate, readDecisionMatrix, readFindings, readFindingsFreshness, safeUiError, type DecisionMatrixReport, type FindingGroup, type FindingSample, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
 import { DecisionMatrixSection } from "./DecisionMatrixSection";
 import { mergeFindingsPage } from "./contract";
 
@@ -198,7 +198,10 @@ export function FindingsPage() {
         if (active) load();
       }, 150);
     };
-    void listenAppEvents(queueRefresh)
+    const gate = makeInvalidationGate();
+    // Findings 读 issue 表：数据失效（含 TrustMonitorEvent 之后的 revision 前进）才重拉；
+    // 150ms 合并窗保留，兜同一 tick 内 Invalidated + SourceDataDeleted 相邻到达。
+    void listenAppEvents((event) => { if (gate(event)) queueRefresh(); })
       .then((unsubscribe) => { if (active) cleanups = [unsubscribe]; else unsubscribe(); });
     return () => {
       active = false;

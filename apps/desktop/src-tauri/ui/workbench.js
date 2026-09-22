@@ -221,12 +221,13 @@ function showBanner(id, e, showReload) {
   }
 }
 
-// ---------- 事件桥：fold 完成 → 立即重拉当前 tab（Rust 侧 emit，见 lib.rs） ----------
-// Rust `sync_tick` 在 fold 成功落盘后去抖 emit `app-event`（200ms 窗口，
-// payload.type = FoldCompleted、负载 `{type, at}`；事件通道与类型串两处必须
-// 一致，见 lib.rs `emit_fold_event`）。这里订阅单一出口，收到后重拉当前 tab
-// 的概览数据，让工作台在托盘/外部手动同步完成的那一刻就刷新，而不是等下一个
-// 5 分钟 tick 或窗口聚焦。
+// ---------- 事件桥：权威库失效 → 立即重拉当前 tab（Rust 侧 emit，见 lib.rs） ----------
+// Rust `sync_tick` 尾部在权威 revision **严格前进**时 emit `app-event`
+// （payload.type = Invalidated、负载 `{type, revision, hosts}`；RUNTIME_INVALIDATION
+// spec §4.4，取代了旧 FoldCompleted 的 200ms 时间去抖）。这里订阅单一出口，收到后
+// 重拉当前 tab 的概览数据，让工作台在托盘/外部手动同步完成的那一刻就刷新，而不是
+// 等下一个 5 分钟 tick 或窗口聚焦。领域事件（FactsIngested 等）不再逐条透传到
+// webview——展示层只收合并后的失效信号，每 tick 至多一条。
 //
 // **这不是实时通道的替代，是加速带**：事件丢时（webview 未就绪、emit 早于
 // listen 到达）由 5 分钟 tick / 「立即同步」按钮轮询 / 窗口聚焦兜底——丢一两个
@@ -279,16 +280,16 @@ async function refreshActiveTab() {
 
 function subscribeFoldEvent() {
   // 单一 UI 事件出口（EVENT_BUS spec §1.3）：后端只剩 `app-event` 一个通道，
-  // 类型在 payload.type 里判别。outbox 事件（FactsIngested 等）是持久事实的
-  // 投递；FoldCompleted / SyncStatusChanged 是 tick 的瞬态信号——同一出口、
-  // 同一信封，处理按类型分发。
+  // 类型在 payload.type 里判别。Invalidated 是权威库失效信号（revision 前进才发，
+  // 每 tick ≤ 1 条）；SyncStatusChanged 是变了才发的同步状态；Trust 两类是传感面
+  // 的瞬态信号——同一出口、同一信封，处理按类型分发。
   listen("app-event", (event) => {
     const type = event && event.payload && event.payload.type;
     // 手动轮询在跑时，事件是同一轮同步的第二个完成信号——按钮自己的 poll
     // 已经（或将）在重拉，跳过避免双拉（负载不携带手动/自动来源，靠按钮
     // handler 置位的 manualSyncPolling 区分，不靠猜）。
     if (manualSyncPolling) return;
-    if (type === "FoldCompleted" || type === "FactsIngested" || type === "SyncStatusChanged"
+    if (type === "Invalidated" || type === "SyncStatusChanged"
       || type === "TrustMonitorEvent" || type === "TrustMonitorInvalidated") {
       refreshActiveTab();
     }

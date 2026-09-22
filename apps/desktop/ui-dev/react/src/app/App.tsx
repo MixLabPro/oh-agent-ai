@@ -1,5 +1,5 @@
 import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
-import { listenAppEvents, readOverviewDetails, readOverviewSnapshot, readSourceDataRevision, safeUiError, type OverviewDetails, type OverviewSnapshot } from "../lib/tauri";
+import { listenAppEvents, makeInvalidationGate, readOverviewDetails, readOverviewSnapshot, readSourceDataRevision, safeUiError, type OverviewDetails, type OverviewSnapshot } from "../lib/tauri";
 import { FindingsPage } from "../features/findings/FindingsPage";
 import { TrustPage } from "../features/trust/TrustPage";
 import { UsagePage } from "../features/usage/UsagePage";
@@ -89,7 +89,10 @@ export function App() {
     };
     void refresh();
     let cleanups: Array<() => void> = [];
-    void listenAppEvents(() => refresh())
+    // 总览壳层：数据失效（revision 前进）或同步状态变化才重拉；WatcherHealth /
+    // Trust 类事件与总览无关，不再触发这里的两个 invoke。
+    const gate = makeInvalidationGate();
+    void listenAppEvents((event) => { if (gate(event) || event.type === "SyncStatusChanged") refresh(); })
       .then((unsubscribe) => { if (active) cleanups = [unsubscribe]; else unsubscribe(); });
     return () => { active = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
   }, [page]);

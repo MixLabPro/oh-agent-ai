@@ -1077,30 +1077,24 @@ fn run_facts_sync(bin: &std::path::Path) -> Option<String> {
 /// fold 完成事件名。与工作台 `src-tauri/ui/workbench.js` 顶部的
 /// `listen("app-event", …)` 一一对应——改类型串/负载字段必须两处同步改
 /// （workbench.js 的事件桥注释里反向引用了这个名字与负载）。
-const FOLD_EVENT: &str = "app-event";
-const FOLD_EVENT_TYPE: &str = "FoldCompleted";
+/// 展示层失效信号的发布器（RUNTIME_INVALIDATION spec §4.4）：权威 revision 严格
+/// 前进才向 webview 发 `Invalidated`。它取代了 `FoldCompleted` + 200ms 去抖——
+/// 那套是时间去抖（不确定、不可测），这套是电平比较（同 revision 再来一千次也
+/// 只发一次）。tick 线程与「立即同步」共享，故经 `app.manage` 注册。
+struct InvalidationPublisher(
+    agent_vitals_runtime::events::ChangePublisher<agent_vitals_runtime::events::Invalidation>,
+);
 
-/// fold 事件去抖窗口：200ms 内多轮同步完成只广播一次。
-const FOLD_EVENT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
-
-/// fold 完成事件的去抖状态（经 `app.manage` 注册，tick/手动两个线程共享——emit
-/// 在 `sync_tick` 里，tick 与「立即同步」都可能走到，必须是跨线程共享状态）。
-/// 只记「上次广播时刻」：leading-edge 去抖在「是否该发」这件事上是**无状态的**
-/// （距上次 ≥ 窗口就发、< 窗口就吞），不需要 Rust 侧的 pending 标志——「有完成
-/// 被吞、还欠一次重拉」这个 pending 语义在 JS 侧落地（workbench.js 的
-/// `makePullMerger`，`queued` 就是那个真正起作用的 pending 标志）。
-///
-/// 为什么需要去抖：fold 是**整批一次完成**（discover → oneline → 落盘），不是
-/// 高频事件流——去抖不是为削峰，是为「手动点同步 + tick 恰好同时完成」时把两轮
-/// 挨着的完成合并成一次广播，避免工作台对同几毫秒的数据双拉。SyncLock 已经保证
-/// 任意时刻至多一轮同步在跑，但一轮可能在另一轮结束后立刻补位（手动按钮在 tick
-/// 的锁上阻塞、tick 一放锁就抢进去），两轮完成的时间差就是第二轮整轮耗时——
-/// 秒级、通常远超窗口；去抖真正的兜底场景是 oneline 极快（小会话 + 热 CLI）时
-/// 两轮完成挤进 200ms。窗口内再次完成只更新 last_emit，不重复 emit。
-struct FoldEventDebounce(Mutex<Option<std::time::Instant>>);
+/// `SyncStatusChanged` 的「变了才发」发布器（spec §4.5）：ok/stage/message 三元组
+/// 与上次相同就不发。此前每 tick 必发，是 REVIEW G2 的实例之一。页面挂载时都会
+/// 主动 `read_sync_status`，所以「首次扫描要让工作台结束正在整理」由主动拉满足，
+/// 不再依赖每 tick 必发；进程启动后首次仍必发（`last = None`）。
+struct SyncStatusPublisher(
+    agent_vitals_runtime::events::ChangePublisher<(bool, String, String)>,
+);
 
 /// 菜单栏「信息行」点击产生的导航目标（工作台 tab 名）。持久存目标是因为窗口未建/未
-/// 可见时 `emit` 是空操作（`emit_fold_event` 注释，lib.rs:521）——目标要留到工作台下次
+/// 可见时 `emit` 是空操作（`publish_invalidation` 注释）——目标要留到工作台下次
 /// init/focus 时 pull 出来消费；`focus-tab` 事件只是通知，pull 是最终仲裁。工作台 apply
 /// 成功后调 `clear_nav_target` 清除，防陈旧目标在下次 focus 重复应用。
 struct NavTarget(Mutex<Option<String>>);
@@ -1165,31 +1159,6 @@ impl FocusTarget {
 /// 不会停在旧菜单。
 struct HostsCache(Mutex<Vec<HostRow>>);
 
-/// 去抖判定（纯函数，单测钉住）：距上次广播 ≥ 窗口（或从未发过）→ 广播；
-/// < 窗口 → 吞掉（不发，避免工作台双拉）。用「距上次多久」而不是绝对 Instant，
-/// 让单测能自由构造时长（Instant 造不出任意值）。
-fn fold_debounce_step(elapsed: Option<std::time::Duration>) -> bool {
-    match elapsed {
-        None => true,
-        Some(e) => e >= FOLD_EVENT_DEBOUNCE,
-    }
-}
-
-/// 是否该广播 fold 事件：oneline 成功折账（stage=="fold" 且 ok）。「无未折会话」
-/// （stage=="discover"）不是 fold——没有新数据落盘，广播只会让工作台拉一遍旧数字。
-fn should_emit_fold_event(status: &SyncStatus) -> bool {
-    status.ok && status.stage == "fold"
-}
-
-/// fold 成功落盘后广播给工作台（200ms 去抖合并）。负载只有 `at`（fold 完成时刻，
-/// unix 秒）——工作台重拉 `read_overview` 拿权威数据，负载里不放 month/数字，
-/// 最小化。`at` 与 `SyncStatus::at`（北京时间）同源（同一时刻）；JS 侧当前只把
-/// 事件当触发信号、不读负载，字段语义见 workbench.js 的事件桥注释。
-///
-/// **webview 未就绪/没打开时 `emit` 是空操作**：事件发出去了但没有 webview 收到，
-/// 静默丢弃。这正是「事件桥失败不比现在更差」的兜底面——工作台下一次聚焦、
-/// 5 分钟 tick、或手动同步都会重新拉，丢一两个事件不会让工作台停在旧数据上
-/// 超过一个同步周期。
 /// `SyncStatusChanged` 的 app-event 载荷（类型化信封，spec §1.3）。
 fn sync_status_payload(status: &SyncStatus) -> serde_json::Value {
     serde_json::json!({
@@ -1198,13 +1167,16 @@ fn sync_status_payload(status: &SyncStatus) -> serde_json::Value {
     })
 }
 
-/// 事件总线消费（EVENT_BUS spec §9-P1）：tick 尾部 drain——CLI 子进程已在
-/// outbox 里落了 FactsIngested 等事实事件，这里以 `desktop-ui` 消费者身份取
-/// 走并转发给 webview 的单一出口。同轮也补投上次崩溃残留（deliveries 缺行）。
-/// 消费者只 emit、不碰库（drain 的自动提交两段式允许 handler 自持资源，但
-/// UI 转发根本不需要）。
+/// 事件总线消费（EVENT_BUS spec §9-P1 + RUNTIME_INVALIDATION spec §4.3）：tick 尾部
+/// drain——CLI 子进程已在 outbox 里落了 FactsIngested 等事实事件，这里以
+/// `desktop-ui` **合并型**消费者身份取走：逐行记账不变（at-least-once），但副作用
+/// 合并成一次 flush——读当前 revision，经 `InvalidationPublisher` 发至多一条
+/// `Invalidated{revision, hosts}`。展示层结构上拿不到载荷（`Coalesced` 没有那个
+/// 字段），领域事件不再逐条透传给 webview。
+///
+/// 消费者只 emit、不碰 drain 的连接（flush 自开只读连接读 revision，spec §6 自持资源）。
 fn drain_event_bus(app: &AppHandle) {
-    use agent_vitals_runtime::events::{ConsumerInterest, Dispatcher, EventConsumer};
+    use agent_vitals_runtime::events::{CoalescingConsumer, ConsumerInterest, Dispatcher};
     let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(
         &path,
@@ -1213,22 +1185,15 @@ fn drain_event_bus(app: &AppHandle) {
         return; // 库缺席（首装未同步）不是错误——没有事件可投
     };
     let app2 = app.clone();
-    let dispatcher = match Dispatcher::new(vec![EventConsumer::new(
-        "desktop-ui",
-        ConsumerInterest::presentation(),
-        move |event: &agent_vitals_runtime::events::AppEvent| {
-            let _ = app2.emit(APP_EVENT, serde_json::json!({
-                "type": event.event_type,
-                "occurred_at_ms": event.occurred_at_ms,
-                "host": event.host,
-                "payload": event.payload,
-            }));
-            Ok(())
-        },
-    )]) {
-        Ok(dispatcher) => dispatcher,
-        Err(violation) => {
-            eprintln!("event-bus dispatcher rejected desktop-ui consumer: {violation}");
+    let dispatcher = match Dispatcher::with_coalescing(
+        Vec::new(),
+        vec![CoalescingConsumer::new("desktop-ui", ConsumerInterest::presentation(), move |c| {
+            publish_invalidation(&app2, c.hosts);
+        })],
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("event-bus consumer registration: {e}");
             return;
         }
     };
@@ -1237,27 +1202,36 @@ fn drain_event_bus(app: &AppHandle) {
     }
 }
 
-fn emit_fold_event(app: &AppHandle) {
-    let now = std::time::Instant::now();
-    let should_emit = {
-        // 先 bind state 再 .lock()：`app.state()` 返回的是临时 State，直接在一句
-        // 里 .lock() 会让 MutexGuard 借用一个即将析构的临时值（E0716）。
-        let deb = app.state::<FoldEventDebounce>();
-        let mut last_emit = deb.0.lock().unwrap_or_else(|e| e.into_inner());
-        let elapsed = last_emit.map(|t| now.duration_since(t));
-        let emit = fold_debounce_step(elapsed);
-        if emit {
-            *last_emit = Some(now);
-        }
-        emit
-    };
-    if should_emit {
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let _ = app.emit(FOLD_EVENT, serde_json::json!({ "type": FOLD_EVENT_TYPE, "at": at }));
-    }
+/// 读当前权威 revision，严格前进才向 webview 发 `Invalidated`。`hosts` 是本轮 drain
+/// 触及的宿主（下界提示；spec §4.4 顺序注记）；不经 outbox 的写（桌面 IPC 的声明/
+/// 价卡保存、`with_immediate_txn` 的任何提交）由 `sync_tick` 尾部的空 hosts 电平检查
+/// 兜住——同 revision 的第二次调用被发布器吞掉，所以两条路径不会双发。
+fn publish_invalidation(app: &AppHandle, hosts: std::collections::BTreeSet<String>) {
+    let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else { return };
+    let Ok(revision) = db.revision() else { return };
+    drop(db);
+    let publisher = app.state::<InvalidationPublisher>();
+    publisher.0.publish_if_advanced(
+        agent_vitals_runtime::events::Invalidation { revision, hosts },
+        |inv| {
+            let _ = app.emit(APP_EVENT, serde_json::json!({
+                "type": "Invalidated",
+                "schema_version": 1,
+                "revision": inv.revision,
+                "hosts": inv.hosts.iter().collect::<Vec<_>>(),
+            }));
+        },
+    );
+}
+
+/// `SyncStatusChanged`：变了才发（spec §4.5）。
+fn publish_sync_status(app: &AppHandle, status: &SyncStatus) {
+    let publisher = app.state::<SyncStatusPublisher>();
+    let key = (status.ok, status.stage.clone(), status.message.clone());
+    publisher.0.publish_if_changed(key, |_| {
+        let _ = app.emit(APP_EVENT, sync_status_payload(status));
+    });
 }
 
 /// 一轮同步 + 落盘状态 + 重建托盘。**每一条路径都走到这里**——没有提前 return
@@ -1268,45 +1242,44 @@ fn sync_tick(app: &AppHandle) {
         Ok(true) => {
             let status = SyncStatus::ok("paused", "已按你的选择暂停本机解析".into());
             overview::save_sync_status(&status);
-            let _ = app.emit(APP_EVENT, sync_status_payload(&status));
+            publish_sync_status(app, &status);
             refresh(app);
             return;
         }
         Err(error) => {
             let status = SyncStatus::fail("control", format!("同步控制状态不可读：{error}"));
             overview::save_sync_status(&status);
-            let _ = app.emit(APP_EVENT, sync_status_payload(&status));
+            publish_sync_status(app, &status);
             refresh(app);
             return;
         }
         Ok(false) => {}
     }
     let initial = perform_sync();
-    let folded = should_emit_fold_event(&initial);
     // 一宿主失败不能阻塞其他宿主的导入；共享二进制缺失仍由 resolve 状态报告。
-    let (status, facts_ready) = match resolve_binary() {
+    let (status, _facts_ready) = match resolve_binary() {
         Some(bin) => finish_sync_stages(initial, || run_claude_sync(&bin), || run_facts_sync(&bin)),
         None => (initial, false),
     };
     overview::save_sync_status(&status);
-    // 首次扫描即使没有新增 facts，也要让已打开的工作台结束“正在整理”的状态。
-    // `usage-fold-updated` 只代表有新折账，不能承担这个生命周期事件。
-    let _ = app.emit(APP_EVENT, sync_status_payload(&status));
+    // 「变了才发」：内容相同的 SyncStatus 不再每 tick 重发（REVIEW G2）。工作台
+    // 「正在整理」的生命周期由页面挂载时主动 read_sync_status + 进程首发覆盖。
+    publish_sync_status(app, &status);
     // 宿主区：sessions navigation（20s 硬超时；失败不覆盖 hosts.json——上一轮
     // 快照继续渲染并自然转 stale，spec §6 决策 5）。
     refresh_hosts();
     refresh(app);
     budget_alerts::maybe_notify(app);
     quota_alerts::maybe_notify(app);
-    // DSH fold 或事实同步成功后广播；其他来源的失败不隐藏本轮可用结果。
-    // sync-facts 暂未返回新增计数，因此成功扫描也会刷新；webview 未就绪时由
-    // 下一次加载读取最新结果，事件桥不承担持久化。
-    if folded || facts_ready {
-        emit_fold_event(app);
-    }
-    // 事件总线 drain（P1）：无论本轮是否有新折账——drain 自己知道有没有
-    // （deliveries 反连接），空轮是 no-op；崩溃残留也在此补投。
+    // 事件总线 drain：无论本轮是否有新折账——drain 自己知道有没有（deliveries
+    // 反连接），空轮是 no-op；崩溃残留也在此补投。desktop-ui 合并型消费者在
+    // flush 里发 `Invalidated`（带 hosts）。
     drain_event_bus(app);
+    // 电平检查（spec §4.4）：不经 outbox 的写（DSH oneline 折账落库、桌面 IPC 的
+    // 声明/价卡保存……）也要让 webview 失效——revision 前进才发；上面 flush 已发过
+    // 的同 revision 被发布器吞掉。这取代了旧 `FoldCompleted`（fold 成功 → 200ms 去抖
+    // → 必发）：现在 fold 有没有真的改库由 revision 说了算。
+    publish_invalidation(app, std::collections::BTreeSet::new());
 }
 
 /// 按序执行独立导入阶段并保留全部失败原因。成功导入的 facts 即使处于部分
@@ -1477,7 +1450,7 @@ fn start_watcher_health_publisher(app: AppHandle) {
             u32,
             Option<&'static str>,
         );
-        let mut last: Option<HealthKey> = None;
+        let publisher = agent_vitals_runtime::events::ChangePublisher::<HealthKey>::new();
         loop {
             // 快照在 supervisor 锁内取（短持锁、零 I/O），比较与 emit 在锁外
             // （验收 I-1：持锁 emit 会拖住热插拔）。
@@ -1494,8 +1467,9 @@ fn start_watcher_health_publisher(app: AppHandle) {
                 snapshot.pending_roots,
                 snapshot.reason_code,
             );
-            if last != Some(key) {
-                last = Some(key);
+            // 「变了才发」统一走 runtime 的 ChangePublisher（spec §4.5）——与
+            // SyncStatusChanged / Invalidated 同一原语，不再手写 last 比较。
+            publisher.publish_if_changed(key, |_| {
                 let _ = app.emit(APP_EVENT, serde_json::json!({
                     "type": "WatcherHealthChanged",
                     "schema_version": 1,
@@ -1504,7 +1478,7 @@ fn start_watcher_health_publisher(app: AppHandle) {
                     "pending_roots": snapshot.pending_roots,
                     "reason_code": snapshot.reason_code,
                 }));
-            }
+            });
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
     });
@@ -1754,7 +1728,7 @@ fn tab_for_menu_id(id: &str) -> Option<&'static str> {
 /// 菜单信息行点击 → 跳工作台对应 tab。双通路：持久目标（managed state，窗口不可见时
 /// 下次 pull 命中）+ `focus-tab` 事件（窗口已可见时一戳就跳）。**写目标先于 show**——
 /// 避免「emit 早于 listen、show 的 focus 事件又没触发」的窗口期把目标丢掉。块作用域
-/// 先释放锁再 emit（与 `emit_fold_event` 同款 E0716 规避）。
+/// 先释放锁再 emit（与 `publish_invalidation` 同款 E0716 规避）。
 fn focus_tab(app: &AppHandle, tab: &str) {
     {
         let nav = app.state::<NavTarget>();
@@ -3895,8 +3869,9 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(SyncLock(Mutex::new(())))
         .manage(SyncRequests(Mutex::new(std::collections::BTreeMap::new())))
-        // fold 事件去抖状态：tick/手动线程共享（见 FoldEventDebounce 注释）。
-        .manage(FoldEventDebounce(Mutex::new(None)))
+        // 失效信号 / 同步状态的「变了才发」发布器：tick 与手动同步线程共享。
+        .manage(InvalidationPublisher(agent_vitals_runtime::events::ChangePublisher::new()))
+        .manage(SyncStatusPublisher(agent_vitals_runtime::events::ChangePublisher::new()))
         // 菜单信息行导航目标：菜单点击 → 工作台（见 NavTarget 注释）。
         .manage(NavTarget(Mutex::new(None)))
         // 会话深链待消费目标（spec §7.2）：菜单 L2 → 工作台详情。与 NavTarget
@@ -5245,30 +5220,40 @@ mod tests {
         );
     }
 
-    /// 去抖窗口：首轮必发；200ms 内再完成 → 吞掉；窗口外再完成 → 再发。为什么有
-    /// 这个窗口：SyncLock 保证至多一轮同步在跑，但「手动先完成、tick 补位完成」
-    /// 可能挤在 200ms 内（oneline 极快时），不去抖工作台会对同几毫秒的数据双拉。
+    /// RUNTIME_INVALIDATION spec §4.4：`FoldCompleted` 的时间去抖被 revision 电平
+    /// 比较取代。fold 成功但没改库（revision 不动）→ 不发；改了库 → 只发一次；
+    /// 同 revision 的 flush 路径与尾部电平检查两条路径不会双发。
     #[test]
-    fn fold_debounce_coalesces_back_to_back_folds() {
-        let win = FOLD_EVENT_DEBOUNCE;
-        // 首轮：从未发过 → 必发。
-        assert!(fold_debounce_step(None));
-        // 100ms 后又一轮完成 → 窗口内 → 吞掉（不发，避免双拉）。
-        assert!(!fold_debounce_step(Some(win / 2)));
-        // 恰 200ms → 窗口边界，视为窗口外 → 再发。
-        assert!(fold_debounce_step(Some(win)));
-        // 250ms → 再发。
-        assert!(fold_debounce_step(Some(win + win / 2)));
+    fn invalidation_replaces_fold_debounce_with_revision_level_compare() {
+        use agent_vitals_runtime::events::{ChangePublisher, Invalidation};
+        let publisher = ChangePublisher::<Invalidation>::new();
+        let inv = |r: u64, hosts: &[&str]| Invalidation {
+            revision: r, hosts: hosts.iter().map(|h| h.to_string()).collect(),
+        };
+        let mut sent = Vec::new();
+        // drain flush 带 hosts 先发
+        assert!(publisher.publish_if_advanced(inv(7, &["dsh"]), |i| sent.push(i.revision)));
+        // 同 tick 尾部的空 hosts 电平检查：同 revision → 吞
+        assert!(!publisher.publish_if_advanced(inv(7, &[]), |i| sent.push(i.revision)));
+        // 200ms 内的第二轮完成、库没变 → 吞（旧去抖窗的场景，现在靠 revision 判）
+        assert!(!publisher.publish_if_advanced(inv(7, &["dsh"]), |i| sent.push(i.revision)));
+        // 库变了 → 发
+        assert!(publisher.publish_if_advanced(inv(8, &[]), |i| sent.push(i.revision)));
+        assert_eq!(sent, vec![7, 8]);
     }
 
-    /// 只有 fold 成功才广播：「无未折会话」/失败/其他阶段不广播（没有新数据落盘，
-    /// 工作台重拉也是旧数字）。
+    /// SyncStatusChanged 变了才发：同三元组连续两轮只发一次，message 变了再发。
     #[test]
-    fn should_emit_fold_event_only_on_fold_success() {
-        assert!(should_emit_fold_event(&SyncStatus::ok("fold", "已折入 s1".into())));
-        assert!(!should_emit_fold_event(&SyncStatus::ok("discover", "无未折 DSH 会话".into())));
-        assert!(!should_emit_fold_event(&SyncStatus::fail("fold", "oneline 失败".into())));
-        assert!(!should_emit_fold_event(&SyncStatus::default()));
+    fn sync_status_publishes_only_on_change() {
+        use agent_vitals_runtime::events::ChangePublisher;
+        let publisher = ChangePublisher::<(bool, String, String)>::new();
+        let key = |s: &SyncStatus| (s.ok, s.stage.clone(), s.message.clone());
+        let mut n = 0;
+        assert!(publisher.publish_if_changed(key(&SyncStatus::ok("discover", "无未折 DSH 会话".into())), |_| n += 1));
+        assert!(!publisher.publish_if_changed(key(&SyncStatus::ok("discover", "无未折 DSH 会话".into())), |_| n += 1));
+        assert!(publisher.publish_if_changed(key(&SyncStatus::ok("fold", "已折入 s1".into())), |_| n += 1));
+        assert!(publisher.publish_if_changed(key(&SyncStatus::fail("fold", "oneline 失败".into())), |_| n += 1));
+        assert_eq!(n, 3);
     }
 
     #[test]

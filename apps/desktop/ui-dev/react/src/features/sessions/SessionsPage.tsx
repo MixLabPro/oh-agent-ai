@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import {
   listenAppEvents,
+  makeInvalidationGate,
   readSessions,
   readStatisticsTimezone,
   safeUiError,
@@ -168,7 +169,8 @@ export function SessionsPage() {
     let active = true;
     const refresh = () => { if (active) void fetchFirstPage(); };
     let cleanups: Array<() => void> = [];
-    void listenAppEvents(() => refresh())
+    const gate = makeInvalidationGate();
+    void listenAppEvents((event) => { if (gate(event)) refresh(); })
       .then((unsubscribe) => { if (active) cleanups = [unsubscribe]; else unsubscribe(); });
     return () => { active = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
   }, [serverKey, statisticsTimezone, timezoneReady]);

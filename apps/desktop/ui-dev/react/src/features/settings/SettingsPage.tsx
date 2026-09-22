@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { fetchWatcherHealth, type WatcherHealthStatus, addCustomSourceRoot, amendBillingDeclaration, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, disableBudgetProfile, listenAppEvents, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, resolveBillingImportCandidate, retryBillingRecalculation, revokeBillingDeclaration, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
+import { fetchWatcherHealth, type WatcherHealthStatus, addCustomSourceRoot, amendBillingDeclaration, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, disableBudgetProfile, listenAppEvents, makeInvalidationGate, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, removeCustomSourceRoot, resolveBillingImportCandidate, retryBillingRecalculation, revokeBillingDeclaration, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
 
 const stateLabels: Record<SourceConnectionState, string> = {
   connected: "已连接",
@@ -969,11 +969,17 @@ export function SettingsPage() {
     refreshQuotaReminder();
     let active = true;
     let cleanups: Array<() => void> = [];
+    const gate = makeInvalidationGate();
     void listenAppEvents((event) => {
       if (!active) return;
       if (event.type === "SourceDataDeleted") {
         refresh(); refreshData(); refreshQuotaReminder();
-      } else {
+      } else if (event.type === "SyncStatusChanged") {
+        // 同步失败/恢复只体现在数据源健康（sync_runs 是记账写，不推进 revision）。
+        refresh();
+      } else if (gate(event)) {
+        // 权威 revision 前进：预算/计费/数据面/关于页一起重拉——每 tick 至多一次，
+        // 且同 revision 的重复事件被闸门吞掉（RUNTIME_INVALIDATION spec §6）。
         refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); refreshAbout(); refreshQuotaReminder();
       }
     }).then((unsubscribe) => {

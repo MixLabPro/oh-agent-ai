@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   listenAppEvents,
+  makeInvalidationGate,
   readUsageCalendar,
   readUsageHourly,
   readUsageSourceSummary,
@@ -178,7 +179,8 @@ export function UsagePage() {
     let active = true;
     const refresh = () => { if (active && timezoneReady) loadMonth(month); };
     let cleanups: Array<() => void> = [];
-    void listenAppEvents(() => refresh()).then((unsubscribe) => {
+    const gate = makeInvalidationGate();
+    void listenAppEvents((event) => { if (gate(event)) refresh(); }).then((unsubscribe) => {
       if (active) cleanups = [unsubscribe];
       else unsubscribe();
     });
