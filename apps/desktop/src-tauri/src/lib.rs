@@ -1333,13 +1333,12 @@ fn start_refresh_tick(app: AppHandle, wake: std::sync::mpsc::Receiver<()>) {
         } else {
             eprintln!("[agent-vitals] 同步进行中，跳过本轮");
         }
-        match wake.recv_timeout(TICK_PERIOD) {
-            Ok(()) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+        match agent_vitals_runtime::ingest::watch::wait_for_tick_or_wake(&wake, TICK_PERIOD) {
+            agent_vitals_runtime::ingest::watch::TickWait::SenderGone => {
                 // waker 端全部 drop（watcher 线程异常退出）——退回纯周期。
                 std::thread::sleep(TICK_PERIOD);
             }
+            _ => {}
         }
     });
 }

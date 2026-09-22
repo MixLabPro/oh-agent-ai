@@ -23,11 +23,8 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-#[cfg(not(feature = "watcher"))]
-use std::sync::mpsc::Receiver;
-#[cfg(feature = "watcher")]
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,12 +36,33 @@ use notify::Watcher;
 pub const DEBOUNCE: Duration = Duration::from_millis(1_200);
 
 /// tick 唤醒器：watcher 去抖后 `wake()`；tick 循环用
-/// `receiver.recv_timeout(TICK_PERIOD)` 代替 `sleep`——事件到 → 立刻醒，
-/// 没事件 → 照旧按周期醒。feature 无关（无 watcher 时没人 wake，行为
-/// 与纯 sleep 完全一致）。
+/// `wait_for_tick_or_wake(receiver, TICK_PERIOD)` 代替 `sleep`——事件到 →
+/// 立刻醒，没事件 → 照旧按周期醒。feature 无关（无 watcher 时没人 wake，
+/// 行为与纯 sleep 完全一致）。
+///
+/// **单槽合并（HARDENING spec §5.1 / 不变量 3）**：通道是 `sync_channel(1)`
+/// ——同一时刻至多一个 pending wake。持续写入的活动期里，去抖窗产出的
+/// 多余唤醒在满槽上合并（`WakeOutcome::Coalesced`），不排队：每次 tick
+/// 都是全拓扑指纹对账，事件基数没有语义，后到的 sweep 覆盖先到的。
+/// 修复对象是 P0：无界 `mpsc::channel` 会让活动结束后的陈旧唤醒排成
+/// 一列空 tick（CPU/子进程抖动 + 跳轮噪声）。
 #[derive(Clone)]
 pub struct TickWaker {
-    tx: Sender<()>,
+    tx: SyncSender<()>,
+    coalesced: Arc<AtomicU64>,
+}
+
+/// `wake()` 的诊断结果。调用方**不**据此分支（合并/排队对行为等价），
+/// 只允许累计进程内健康计数（HARDENING spec §5.1）。
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum WakeOutcome {
+    /// 信号入槽（当前无 pending wake）。
+    Queued,
+    /// 槽已满——本次唤醒与 pending 的那次合并。
+    Coalesced,
+    /// 接收端已全部 drop（tick 循环不在了）。不 panic；周期兜底随之失效，
+    /// 但那意味着进程本来就要退出。
+    ReceiverGone,
 }
 
 pub struct WakeChannel {
@@ -54,13 +72,49 @@ pub struct WakeChannel {
 
 impl TickWaker {
     pub fn channel() -> WakeChannel {
-        let (tx, receiver) = std::sync::mpsc::channel();
-        WakeChannel { waker: TickWaker { tx }, receiver }
+        let (tx, receiver) = std::sync::mpsc::sync_channel(1);
+        let waker = TickWaker { tx, coalesced: Arc::new(AtomicU64::new(0)) };
+        WakeChannel { waker, receiver }
     }
 
-    pub fn wake(&self) {
-        // 满了/断开都无所谓：tick 周期本身就是兜底，唤醒只是加速。
-        let _ = self.tx.send(());
+    pub fn wake(&self) -> WakeOutcome {
+        match self.tx.try_send(()) {
+            Ok(()) => WakeOutcome::Queued,
+            Err(std::sync::mpsc::TrySendError::Full(())) => {
+                self.coalesced.fetch_add(1, Ordering::Relaxed);
+                WakeOutcome::Coalesced
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(())) => WakeOutcome::ReceiverGone,
+        }
+    }
+
+    /// 进程内诊断计数：被合并掉的唤醒次数（喂 Phase D 的健康 DTO；
+    /// 只留内存，不落库——HARDENING spec §5.5）。
+    pub fn coalesced_count(&self) -> u64 {
+        self.coalesced.load(Ordering::Relaxed)
+    }
+}
+
+/// tick 循环的一次等待结果（feature 无关的纯等待原语，抽出为可注入
+/// helper 是为了把「wake 时序 vs 阻塞中的 sync」的排序测试从 Tauri
+/// 应用里解放出来——HARDENING spec Phase A.3）。
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum TickWait {
+    /// 消费到一个 pending wake——立刻跑下一轮对账。
+    Woken,
+    /// 等满周期——照常跑下一轮。
+    TimedOut,
+    /// 发送端全部 drop——退回纯周期 sleep 的形状（调用方补一个周期
+    /// 等待再循环，行为与无 watcher 时逐字节一致）。
+    SenderGone,
+}
+
+/// 等 wake 或等满周期。桌面 tick 循环的唯一等待原语。
+pub fn wait_for_tick_or_wake(receiver: &Receiver<()>, period: Duration) -> TickWait {
+    match receiver.recv_timeout(period) {
+        Ok(()) => TickWait::Woken,
+        Err(RecvTimeoutError::Timeout) => TickWait::TimedOut,
+        Err(RecvTimeoutError::Disconnected) => TickWait::SenderGone,
     }
 }
 
@@ -403,7 +457,8 @@ fn spawn_platform_watcher(registry: WatchRegistry, waker: TickWaker) -> WatcherH
 
                         let batch = deb.take_batch();
                         if !batch.hosts.is_empty() {
-                            waker.wake();
+                            // 结果只进计数，不分支（合并 = 行为等价）。
+                            let _ = waker.wake();
                         }
                         for i in batch.watch_only {
                             if let Some(cb) = callbacks.get(i) {
@@ -513,15 +568,70 @@ mod tests {
         assert_eq!(default_skill_watch_roots(&home), roots);
     }
 
-    /// waker：wake 落进 receiver；断开/满不影响调用方。
+    /// waker：wake 落进 receiver；断开/满不影响调用方。单槽语义下第二个
+    /// wake 是 Coalesced——try_recv 只剩一个 pending。
     #[test]
     fn tick_waker_delivers_and_never_panics() {
         let WakeChannel { waker, receiver } = TickWaker::channel();
-        waker.wake();
-        waker.wake();
-        assert_eq!(receiver.try_recv(), Ok(()));
+        assert_eq!(waker.wake(), WakeOutcome::Queued);
+        assert_eq!(waker.wake(), WakeOutcome::Coalesced);
         assert_eq!(receiver.try_recv(), Ok(()));
         assert!(receiver.try_recv().is_err());
+    }
+
+    /// Phase A 出口判据（HARDENING spec §6）：模拟「sync 阻塞中」——
+    /// 10,000 次 wake 无人接收，只允许留下**一个** pending；后续全部
+    /// 报告 Coalesced；合并计数如实累计；内存有界（单槽结构保证）。
+    #[test]
+    fn wake_pressure_coalesces_to_single_pending() {
+        let WakeChannel { waker, receiver } = TickWaker::channel();
+        let mut queued = 0u32;
+        let mut coalesced = 0u32;
+        for _ in 0..10_000 {
+            match waker.wake() {
+                WakeOutcome::Queued => queued += 1,
+                WakeOutcome::Coalesced => coalesced += 1,
+                WakeOutcome::ReceiverGone => panic!("接收端活着不得报 ReceiverGone"),
+            }
+        }
+        assert_eq!(queued, 1, "只有第一个 wake 入槽");
+        assert_eq!(coalesced, 9_999);
+        assert_eq!(waker.coalesced_count(), 9_999, "诊断计数与结果一致");
+        assert_eq!(receiver.recv_timeout(Duration::from_millis(0)), Ok(()),
+            "恰好一个 pending");
+        assert!(receiver.try_recv().is_err(), "没有第二个排队信号");
+    }
+
+    /// Phase A.3 排序（HARDENING spec §6「ordering」）：阻塞中的 sync 期间
+    /// 大量 wake → 恢复后**一次** Woken，之后等满周期（不是 N 次连醒）。
+    #[test]
+    fn wait_helper_orders_blocked_sync_into_one_followup() {
+        let WakeChannel { waker, receiver } = TickWaker::channel();
+        for _ in 0..5_000 {
+            let _ = waker.wake();
+        }
+        assert_eq!(
+            wait_for_tick_or_wake(&receiver, Duration::from_millis(5)),
+            TickWait::Woken,
+        );
+        assert_eq!(
+            wait_for_tick_or_wake(&receiver, Duration::from_millis(20)),
+            TickWait::TimedOut,
+            "合并后不得有第二次 pending 唤醒",
+        );
+    }
+
+    /// Phase A.4 兜底（HARDENING spec §6「fallback」）：发送端全部 drop →
+    /// SenderGone，调用方退回纯周期等待；不 panic。
+    #[test]
+    fn wait_helper_sender_drop_falls_back_to_periodic() {
+        let WakeChannel { waker, receiver } = TickWaker::channel();
+        drop(waker);
+        assert_eq!(wait_for_tick_or_wake(&receiver, Duration::from_millis(1)),
+            TickWait::SenderGone);
+        // SenderGone 是粘性的：后续等待继续报同一结果，循环形状稳定。
+        assert_eq!(wait_for_tick_or_wake(&receiver, Duration::from_millis(1)),
+            TickWait::SenderGone);
     }
 
     /// 空注册表 → noop 句柄（两种 feature 态都成立）。
