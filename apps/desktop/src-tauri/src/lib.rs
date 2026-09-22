@@ -1356,37 +1356,44 @@ fn start_source_watcher(app: &AppHandle) -> std::sync::mpsc::Receiver<()> {
     use agent_vitals_runtime::ingest::watch::{TickWaker, WakeChannel, WatchRegistry};
 
     let WakeChannel { waker, receiver } = TickWaker::channel();
-    let mut registry = WatchRegistry::new();
 
     let user_home = std::path::PathBuf::from(
         std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_default(),
     );
-    if !user_home.as_os_str().is_empty() {
-        // 事实面源目录——枚举在 runtime（default_source_watch_roots），与
-        // sync_facts 的发现根同一来源；watcher 只是那趟 walk 的「早点跑」
-        // 触发器，不是第二个真相源。
-        for (host, path) in
-            agent_vitals_runtime::ingest::watch::default_source_watch_roots(&user_home)
-        {
-            registry.register_source(host, path);
+    // Phase B：监听根由 runtime 拓扑投影唯一决定（内置 + 已批准自定义源 +
+    // skills 缓存根，同一份 ingest 配置派生）——desktop 不再自建清单。
+    // 拓扑读失败按「空注册表」降级（NoopWatcher + 周期兜底），不装死。
+    let registry = if user_home.as_os_str().is_empty() {
+        WatchRegistry::new()
+    } else {
+        match agent_vitals_runtime::sources::watch_topology::watch_topology(
+            &overview::data_home(),
+            &user_home,
+        ) {
+            Ok(topology) => {
+                if !topology.rejected.is_empty() {
+                    // 只记原因码与数量——被拒路径不进日志（serving-face 纪律
+                    // 的本地同款保守）。
+                    eprintln!(
+                        "[agent-vitals] watch 拓扑有 {} 个被拒根（tick 兜底照常）",
+                        topology.rejected.len(),
+                    );
+                }
+                let skills = app.state::<store::SkillsScanState>().inner().clone();
+                WatchRegistry::from_topology(&topology, move |host| {
+                    let skills = skills.clone();
+                    let _ = host;
+                    std::sync::Arc::new(move || skills.invalidate())
+                })
+            }
+            Err(error) => {
+                eprintln!("[agent-vitals] watch 拓派生失败（tick 兜底照常）: {error}");
+                WatchRegistry::new()
+            }
         }
-
-        // watch-only：skills 安装根变更 → 失效 Skill 体检报告缓存（下次
-        // 前端刷新必然重扫，不再命中可能过期的快路径）。
-        let skills = app.state::<store::SkillsScanState>().inner().clone();
-        for (host, path) in
-            agent_vitals_runtime::ingest::watch::default_skill_watch_roots(&user_home)
-        {
-            let skills = skills.clone();
-            registry.register_watch_only(
-                &format!("skills:{host}"),
-                path,
-                std::sync::Arc::new(move || skills.invalidate()),
-            );
-        }
-    }
+    };
 
     let handle =
         agent_vitals_runtime::ingest::watch::spawn_watcher(registry, waker);
@@ -1976,7 +1983,9 @@ fn source_read_locations() -> Value {
         "status": "ok",
         "locations": {
             "claude-code": home.join(".claude").join("projects").to_string_lossy(),
-            "codex": agent_vitals_runtime::summary::codex_home().join("sessions").to_string_lossy(),
+            // Phase B：codex 读取位置此前显示为 ~/sessions（codex_home() 返回 home 根，
+// 直接 join 的历史笔误）——真实发现根在 ~/.codex 下。
+            "codex": home.join(".codex").join("sessions").to_string_lossy(),
             "dsh": dsh.map(|path| path.to_string_lossy().into_owned()),
         }
     })

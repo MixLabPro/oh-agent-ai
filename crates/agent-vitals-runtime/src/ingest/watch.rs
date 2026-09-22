@@ -298,7 +298,10 @@ pub fn default_skill_watch_roots(user_home: &Path) -> Vec<(String, PathBuf)> {
 pub fn default_source_watch_roots(user_home: &Path) -> Vec<(&'static str, PathBuf)> {
     let mut roots: Vec<(&'static str, PathBuf)> = vec![
         ("claude-code", user_home.join(".claude").join("projects")),
-        ("codex", crate::summary::codex_home()),
+        // Phase B 修正（拓扑 parity 测试抓到）：此前误用 codex_home() 的返回值
+        // ——它是 home 根本身（~），等于递归监听整个 home。真实发现根是
+        // ~/.codex 下的 sessions + archived_sessions（codex_rollout_files）。
+        ("codex", user_home.join(".codex")),
         (
             "workbuddy",
             agent_vitals_hosts::workbuddy_session::workbuddy_root(user_home),
@@ -308,6 +311,34 @@ pub fn default_source_watch_roots(user_home: &Path) -> Vec<(&'static str, PathBu
         roots.push(("dsh", dsh));
     }
     roots
+}
+
+impl WatchRegistry {
+    /// 从拓扑快照构造（Phase B）：FactsSource → 源根（唤醒 tick）；
+    /// CacheOnly → watch-only（`cache_callback` 按描述符产回调——desktop
+    /// 用它接 SkillsScanState 失效）。被拒项不进注册表（调用方已拿 rejected）。
+    pub fn from_topology(
+        topology: &crate::sources::watch_topology::WatchTopology,
+        cache_callback: impl Fn(&str) -> WatchCallback,
+    ) -> Self {
+        let mut registry = WatchRegistry::new();
+        for descriptor in &topology.descriptors {
+            match descriptor.class {
+                crate::sources::watch_topology::WatchRootClass::FactsSource => {
+                    registry.register_source(&descriptor.host, descriptor.path.clone());
+                }
+                crate::sources::watch_topology::WatchRootClass::CacheOnly => {
+                    let callback = cache_callback(&descriptor.host);
+                    registry.register_watch_only(
+                        &format!("cache:{}", descriptor.host),
+                        descriptor.path.clone(),
+                        callback,
+                    );
+                }
+            }
+        }
+        registry
+    }
 }
 
 /// watcher 句柄。`is_noop()` = feature 关闭（或注册表为空），什么都没起。
@@ -548,6 +579,20 @@ mod tests {
         assert_eq!(batch.watch_only, vec![2]);
         assert!(deb.take_batch() == WatchBatch::default(), "take 后清空");
         assert!(deb.is_empty());
+    }
+
+    /// 结构守卫（Phase B）：内置事实根绝不等于 home 根或 /——P2 版的
+    /// codex 根 bug（误监听整个 home）就是这一类，parity 断言 + 此守卫
+    /// 双钉。
+    #[test]
+    fn builtin_facts_roots_are_never_home_or_filesystem_root() {
+        let user_home = PathBuf::from("/home/u");
+        for (host, path) in default_source_watch_roots(&user_home) {
+            assert_ne!(path, user_home, "{host} 不得监听整个 home");
+            assert_ne!(path, PathBuf::from("/"), "{host} 不得监听文件系统根");
+            assert!(path.starts_with(&user_home) || host == "dsh",
+                "{host} 的根 {path:?} 应在 home 下（dsh 环境配置除外）");
+        }
     }
 
     /// skills 根派生：只收 home 相对根、展开 ~、排序去重；`./` 项目根
