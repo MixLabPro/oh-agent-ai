@@ -149,7 +149,7 @@ CREATE INDEX event_outbox_pending ON event_outbox(created_at_ms, event_id);
 | 事件 | 生产者 | 触发时机 | 首批消费者 |
 |---|---|---|---|
 | `FactsIngested{host, run_id, revision}` | sync_service / plugin_ingest | 某宿主事实批次事务提交 | price reconcile、配额窗口扫描、issue 评估器、（P2）trust correlate |
-| `AuthorityRevisionAdvanced{revision}` | authority 写入面（含 billing 重算完成） | 权威 revision 前进 | webview 缓存重验、托盘重算、进程内缓存失效 |
+| `AuthorityRevisionAdvanced{revision}` | **保留位（无生产者，2026-09-22 修订）**——`RUNTIME_INVALIDATION_AND_READ_BACKPRESSURE_SPEC.md` §4.1/§4.4 裁定：revision 的逐次推进是**派生投影**，不逐条落 outbox（那会把写放大带回总线）；UI 失效走 `ChangePublisher` 直发 `Invalidated{revision, hosts}`（仅 revision 严格前进时），词表仍登记本行以维持闭集稳定 | —（经直发 `Invalidated` 信号服务 webview/tray） |
 | `DeclarationSaved{scope}` | 桌面 IPC（计费声明保存） | 声明/修订落库 | billing 重算入队、（预留）影响预览 |
 | `PriceCardSaved{provider, model_fingerprint}` | 桌面 IPC（补卡保存） | 价卡落库 | 未计价重算 |
 | `HostSourceFailed{host, error_code}` / `SourceRecovered{host}` | sync_service | 源读取失败/恢复 | 通知、MTTR 时序（审计流） |
@@ -172,7 +172,8 @@ CREATE INDEX event_outbox_pending ON event_outbox(created_at_ms, event_id);
 2. 幂等：处理前查 `event_deliveries`，处理后登记——重复到达为 no-op；
 3. 消费者崩溃不影响投递（tailer 下轮补投），投递失败不阻塞生产者；
 4. 派生重算类消费者产出仍走各自的事务写入（如 issue upsert 的既有幂等键），事件层不新增第二种写路径；
-5. 通知类消费者实现去重窗口（trust 规格 §7.2：24h 内同 Finding 去重，除非阶段/严重度/证据等级升级）。
+5. 通知类消费者实现去重窗口（trust 规格 §7.2：24h 内同 Finding 去重，除非阶段/严重度/证据等级升级）；
+6. **展示层消费者刷新必须经 revision 单调门**（2026-09-22 增补，CPU 风暴教训）：Presentation 角色不得逐事件触发重取——`CoalescingConsumer` 整轮合并 + webview 侧 `Invalidated` revision 门面是强制形状；新增页面接入必须走 `makeInvalidationGate()` 同款门，禁止回到「任意事件→立即全量刷新」的直推路径（`RUNTIME_INVALIDATION_AND_READ_BACKPRESSURE_SPEC.md` §6）。
 
 ## 7. 明确不上总线的面（负面清单）
 
