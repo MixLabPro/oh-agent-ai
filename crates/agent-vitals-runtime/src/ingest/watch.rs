@@ -341,182 +341,415 @@ impl WatchRegistry {
     }
 }
 
-/// watcher 句柄。`is_noop()` = feature 关闭（或注册表为空），什么都没起。
+/// watcher 运行模式（spec §5.5）。闭集；Phase D 的 DTO 原样映射。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WatcherMode {
+    /// 原生监听运行中（可能有 pending 根——看 `pending_roots`）。
+    Active,
+    /// 后端初始化失败或全部根 pending——周期兜底服务中。
+    Degraded,
+    /// 无根可监听（空拓扑）或 feature 关闭。
+    Disabled,
+    /// worker 已退出（supervisor 被 drop 之后的稳态）。
+    Unavailable,
+}
+
+/// watcher 健康快照（spec §5.5）。**只存在于进程内存**——运维健康不是
+/// 用户数据，不落 authority SQLite；字段无路径无原始错误串（不变量 6）。
+#[derive(Clone, Debug)]
+pub struct WatcherHealth {
+    pub mode: WatcherMode,
+    /// 拓扑修订号（每次快照替换 +1，单调）。
+    pub topology_revision: u64,
+    pub facts_roots_registered: u32,
+    pub facts_roots_attached: u32,
+    pub cache_roots_registered: u32,
+    pub cache_roots_attached: u32,
+    pub pending_roots: u32,
+    pub last_event_at_ms: Option<i64>,
+    pub last_wake_at_ms: Option<i64>,
+    pub coalesced_wake_count: u64,
+    /// 闭集原因码（spec §5.5 允许的 8 个之一）。
+    pub reason_code: Option<&'static str>,
+}
+
+impl Default for WatcherHealth {
+    fn default() -> Self {
+        WatcherHealth {
+            mode: WatcherMode::Disabled,
+            topology_revision: 0,
+            facts_roots_registered: 0,
+            facts_roots_attached: 0,
+            cache_roots_registered: 0,
+            cache_roots_attached: 0,
+            pending_roots: 0,
+            last_event_at_ms: None,
+            last_wake_at_ms: None,
+            coalesced_wake_count: 0,
+            reason_code: None,
+        }
+    }
+}
+
+/// 一个监听根在路由器里的身份（快照重建与别名追加时用）。
+#[cfg(feature = "watcher")]
+#[derive(Clone)]
+enum RootIdentity {
+    Source(String),
+    WatchOnly(usize),
+}
+
+#[cfg(feature = "watcher")]
+fn add_canonical_alias(router: &mut WatchRouter, identity: &RootIdentity, path: &Path) {
+    let Ok(canon) = path.canonicalize() else { return };
+    if canon == path {
+        return;
+    }
+    match identity {
+        RootIdentity::Source(host) => router.add_source_alias(host, canon),
+        RootIdentity::WatchOnly(i) => router.add_watch_only_alias(*i, canon),
+    }
+}
+
+#[cfg(feature = "watcher")]
+fn local_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// watcher 句柄：监督者（supervisor）的客户端面。`replace` 提交新的拓扑
+/// 快照（spec §5.4——快照不可变、替换串行于 worker、重建式实现）；drop
+/// 句柄 = 关停信号（worker 在下一个循环边界退出，无清理动作）。
 pub struct WatcherHandle {
-    pub noop: bool,
+    noop: bool,
+    control: Option<std::sync::mpsc::Sender<WatchRegistry>>,
+    health: Option<Arc<std::sync::Mutex<WatcherHealth>>>,
 }
 
 impl WatcherHandle {
-    /// join 留给进程退出（daemon 线程不 join——桌面 app 生命周期即
-    /// watcher 生命周期，无优雅停机需求）。
     pub fn is_noop(&self) -> bool {
         self.noop
     }
+
+    /// 热插拔：换一份完整拓扑快照。noop 句柄（feature 关闭）= 无操作成功。
+    pub fn replace(&self, registry: WatchRegistry) -> Result<(), String> {
+        match &self.control {
+            None => Ok(()),
+            Some(tx) => tx.send(registry).map_err(|e| e.to_string()),
+        }
+    }
+
+    /// 健康快照（feature 关闭 → 恒 Disabled/feature_disabled）。
+    pub fn health(&self) -> WatcherHealth {
+        match &self.health {
+            None => WatcherHealth {
+                reason_code: Some("feature_disabled"),
+                ..WatcherHealth::default()
+            },
+            Some(h) => h.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        }
+    }
 }
 
-/// 启动 watcher。注册表为空或 feature `watcher` 关闭 → 返回 noop 句柄，
-/// 零线程零依赖（NoopWatcher 语义）。
+/// 启动监督式 watcher（spec §5.4）。feature `watcher` 关闭 → NoopWatcher
+/// （Vite createNoopWatcher 同款：零线程零依赖，tick 周期照常）；开启 →
+/// 单 worker 线程 + 控制通道，初始快照即刻应用，后续 `replace` 热替换。
 pub fn spawn_watcher(registry: WatchRegistry, waker: TickWaker) -> WatcherHandle {
-    if registry.is_empty() {
-        return WatcherHandle { noop: true };
-    }
     spawn_platform_watcher(registry, waker)
 }
 
 #[cfg(feature = "watcher")]
-fn spawn_platform_watcher(registry: WatchRegistry, waker: TickWaker) -> WatcherHandle {
-    let (event_tx, event_rx) = std::sync::mpsc::channel();
-    let mut watcher = match notify::RecommendedWatcher::new(event_tx, notify::Config::default()) {
-        Ok(w) => w,
-        Err(e) => {
-            // 平台监听器起不来（罕见）——tick 兜底，诚实降级不装死。
-            eprintln!("[agent-vitals] watcher 初始化失败，tick 兜底照常: {e}");
-            return WatcherHandle { noop: true };
-        }
-    };
-    // 路由器挂 RwLock：挂载成功时补规范化路径别名（FSEvents 上报
-    // /private/var/...，注册用的是 /var/...——std::env::temp_dir 一类
-    // 符号链接路径上必然发生）。别名映射回同一宿主/回调下标。
-    let router = Arc::new(std::sync::RwLock::new(registry.router()));
-    let callbacks: Vec<WatchCallback> =
-        registry.watch_only.iter().map(|(_, _, cb)| Arc::clone(cb)).collect();
+mod supervised {
+    //! worker 内部状态机（只在 worker 线程内动，无锁）。
+    use super::*;
 
-    // 根 → (宿主 或 回调下标) 的身份表，供别名追加。
-    let mut root_identities: Vec<(PathBuf, RootIdentity)> = Vec::new();
-    for (host, path) in &registry.sources {
-        root_identities.push((path.clone(), RootIdentity::Source(host.clone())));
-    }
-    for (i, (_, path, _)) in registry.watch_only.iter().enumerate() {
-        root_identities.push((path.clone(), RootIdentity::WatchOnly(i)));
+    pub(super) struct WorkerState {
+        event_tx: std::sync::mpsc::Sender<notify::Result<notify::Event>>,
+        watcher: Option<notify::RecommendedWatcher>,
+        router: WatchRouter,
+        callbacks: Vec<WatchCallback>,
+        identities: Vec<(PathBuf, RootIdentity)>,
+        attached: std::collections::HashSet<PathBuf>,
+        pending: Vec<PathBuf>,
+        revision: u64,
+        backend_failed: bool,
+        facts_registered: u32,
+        cache_registered: u32,
     }
 
-    /// 一个监听根在路由器里的身份（别名追加时用）。
-    #[derive(Clone)]
-    enum RootIdentity {
-        Source(String),
-        WatchOnly(usize),
-    }
-
-    fn add_canonical_alias(
-        router: &std::sync::RwLock<WatchRouter>,
-        identity: &RootIdentity,
-        path: &Path,
-    ) {
-        let Ok(canon) = path.canonicalize() else { return };
-        if canon == path {
-            return;
-        }
-        if let Ok(mut r) = router.write() {
-            match identity {
-                RootIdentity::Source(host) => r.add_source_alias(host, canon),
-                RootIdentity::WatchOnly(i) => r.add_watch_only_alias(*i, canon),
+    impl WorkerState {
+        pub(super) fn new(
+            event_tx: std::sync::mpsc::Sender<notify::Result<notify::Event>>,
+        ) -> Self {
+            WorkerState {
+                event_tx,
+                watcher: None,
+                router: WatchRegistry::new().router(),
+                callbacks: Vec::new(),
+                identities: Vec::new(),
+                attached: std::collections::HashSet::new(),
+                pending: Vec::new(),
+                revision: 0,
+                backend_failed: false,
+                facts_registered: 0,
+                cache_registered: 0,
             }
         }
-    }
 
-    // pending = 还没挂上的根（注册时目录不存在，或 NotFound）。挂上的
-    // 根移出 pending，绝不重复 watch（重复挂 = 重复事件）。每轮超时把
-    // pending 全部重试一遍；永久失败的根打一次日志后放弃（tick 兜底）。
-    let mut roots: Vec<PathBuf> = registry.sources.iter().map(|(_, p)| p.clone()).collect();
-    roots.extend(registry.watch_only.iter().map(|(_, p, _)| p.clone()));
-    roots.sort();
-    roots.dedup();
-    // 首轮就把已存在根的规范化别名挂上（目录存在 → canonicalize 成功）。
-    for (path, identity) in &root_identities {
-        add_canonical_alias(&router, identity, path);
-    }
+        fn identity_of(&self, path: &Path) -> Option<RootIdentity> {
+            self.identities
+                .iter()
+                .find(|(p, _)| p == path)
+                .map(|(_, id)| id.clone())
+        }
 
-    let try_attach = |watcher: &mut notify::RecommendedWatcher,
-                      pending: &mut Vec<PathBuf>,
-                      router: &std::sync::RwLock<WatchRouter>,
-                      root_identities: &[(PathBuf, RootIdentity)],
-                      path: &Path| {
-        match watcher.watch(path, notify::RecursiveMode::Recursive) {
-            Ok(()) => {
-                // 挂载成功：这里才是补规范化别名的正确位置——别名只对
-                // 「已经在听」的流有意义（验收 L1：此前补在失败分支，
-                // 延迟挂载的符号链接路径根会静默退回 tick 兜底）。
-                if let Some((_, identity)) = root_identities.iter().find(|(p, _)| p == path) {
-                    add_canonical_alias(router, identity, path);
+        /// 应用一份拓扑快照：drop 旧原生 watcher（停全部 watch）→ 重建 →
+        /// 全量挂载。**路由表先换**——旧 watcher 的在途事件撞上新表，
+        /// 被移除的根立即停止路由（spec §5.4）。
+        pub(super) fn apply(&mut self, snapshot: WatchRegistry) {
+            self.revision += 1;
+            self.watcher = None; // drop = 停止全部既有 watch
+            self.backend_failed = false;
+            self.attached.clear();
+            self.pending.clear();
+            self.facts_registered = snapshot.sources.len() as u32;
+            self.cache_registered = snapshot.watch_only.len() as u32;
+            self.router = snapshot.router();
+            self.callbacks = snapshot.watch_only.iter().map(|(_, _, cb)| Arc::clone(cb)).collect();
+            self.identities = snapshot
+                .sources
+                .iter()
+                .map(|(host, p)| (p.clone(), RootIdentity::Source(host.clone())))
+                .chain(
+                    snapshot
+                        .watch_only
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (_, p, _))| (p.clone(), RootIdentity::WatchOnly(i))),
+                )
+                .collect();
+
+            let mut roots: Vec<PathBuf> =
+                snapshot.sources.iter().map(|(_, p)| p.clone()).collect();
+            roots.extend(snapshot.watch_only.iter().map(|(_, p, _)| p.clone()));
+            roots.sort();
+            roots.dedup();
+            if roots.is_empty() {
+                return;
+            }
+            match notify::RecommendedWatcher::new(
+                self.event_tx.clone(),
+                notify::Config::default(),
+            ) {
+                Ok(mut native) => {
+                    for path in &roots {
+                        self.try_attach(&mut native, path);
+                    }
+                    self.watcher = Some(native);
+                }
+                Err(e) => {
+                    // 后端起不来（罕见）：Degraded + 周期兜底，诚实不装死。
+                    self.backend_failed = true;
+                    eprintln!("[agent-vitals] watcher 后端初始化失败，tick 兜底照常: {e}");
                 }
             }
-            Err(e) => {
-                let not_found = matches!(e.kind, notify::ErrorKind::PathNotFound)
-                    || matches!(&e.kind, notify::ErrorKind::Io(io)
-                        if io.kind() == std::io::ErrorKind::NotFound);
-                if not_found {
-                    pending.push(path.to_path_buf()); // 目录未出现，留待重试
-                } else {
-                    eprintln!("[agent-vitals] watch {} 失败（该根 tick 兜底）: {e}", path.display());
+        }
+
+        /// 挂一个根（仅在原生 watcher 存在时有意义）。成功 → attached +
+        /// 规范化别名；目录未出现 → pending 留待重试；其他失败 → 该根
+        /// 交给 tick 兜底（日志一次）。
+        pub(super) fn try_attach(&mut self, native: &mut notify::RecommendedWatcher, path: &Path) {
+            match native.watch(path, notify::RecursiveMode::Recursive) {
+                Ok(()) => {
+                    // 挂载成功才是补规范化别名的位置（FSEvents 上报
+                    // /private/var/...，注册可能用符号链接路径）。
+                    if let Some(identity) = self.identity_of(path) {
+                        add_canonical_alias(&mut self.router, &identity, path);
+                    }
+                    self.attached.insert(path.to_path_buf());
+                }
+                Err(e) => {
+                    let not_found = matches!(e.kind, notify::ErrorKind::PathNotFound)
+                        || matches!(&e.kind, notify::ErrorKind::Io(io)
+                            if io.kind() == std::io::ErrorKind::NotFound);
+                    if not_found {
+                        self.pending.push(path.to_path_buf());
+                    } else {
+                        eprintln!(
+                            "[agent-vitals] watch {} 失败（该根 tick 兜底）: {e}",
+                            path.display()
+                        );
+                    }
                 }
             }
         }
-    };
 
-    std::thread::Builder::new()
+        pub(super) fn retry_pending(&mut self) {
+            let old = std::mem::take(&mut self.pending);
+            let Some(mut native) = self.watcher.take() else { return };
+            for path in &old {
+                self.try_attach(&mut native, path);
+            }
+            self.watcher = Some(native);
+        }
+
+        pub(super) fn route(&self, path: &Path) -> Vec<RouteHit> {
+            self.router.route(path)
+        }
+
+        pub(super) fn callbacks(&self) -> &[WatchCallback] {
+            &self.callbacks
+        }
+
+        /// 把状态投影进健康快照（worker 侧唯一写者）。
+        pub(super) fn publish_health(
+            &self,
+            health: &Arc<std::sync::Mutex<WatcherHealth>>,
+            last_event_at_ms: Option<i64>,
+            last_wake_at_ms: Option<i64>,
+            coalesced_wake_count: u64,
+        ) {
+            let facts_attached = self
+                .identities
+                .iter()
+                .filter(|(p, id)| {
+                    matches!(id, RootIdentity::Source(_)) && self.attached.contains(p)
+                })
+                .count() as u32;
+            let cache_attached = self
+                .identities
+                .iter()
+                .filter(|(p, id)| {
+                    matches!(id, RootIdentity::WatchOnly(_)) && self.attached.contains(p)
+                })
+                .count() as u32;
+            let registered = self.facts_registered + self.cache_registered;
+            let (mode, reason) = if self.backend_failed {
+                (WatcherMode::Degraded, Some("backend_init_failed"))
+            } else if registered == 0 {
+                (WatcherMode::Disabled, Some("no_roots"))
+            } else if self.attached.is_empty() && !self.pending.is_empty() {
+                (WatcherMode::Degraded, Some("root_pending"))
+            } else {
+                (WatcherMode::Active, None)
+            };
+            let mut h = health.lock().unwrap_or_else(|e| e.into_inner());
+            h.mode = mode;
+            h.reason_code = reason;
+            h.topology_revision = self.revision;
+            h.facts_roots_registered = self.facts_registered;
+            h.facts_roots_attached = facts_attached;
+            h.cache_roots_registered = self.cache_registered;
+            h.cache_roots_attached = cache_attached;
+            h.pending_roots = self.pending.len() as u32;
+            h.last_event_at_ms = last_event_at_ms;
+            h.last_wake_at_ms = last_wake_at_ms;
+            h.coalesced_wake_count = coalesced_wake_count;
+        }
+    }
+}
+
+#[cfg(feature = "watcher")]
+fn spawn_platform_watcher(initial: WatchRegistry, waker: TickWaker) -> WatcherHandle {
+    let (control_tx, control_rx) = std::sync::mpsc::channel::<WatchRegistry>();
+    let health = Arc::new(std::sync::Mutex::new(WatcherHealth::default()));
+    let health_for_worker = Arc::clone(&health);
+
+    let spawned = std::thread::Builder::new()
         .name("source-watcher".into())
         .spawn(move || {
+            // 事件通道：worker 持一份 keepalive——原生 watcher 按快照重建，
+            // 通道只在 worker 退出时断（Disconnected = 防御性出口）。
+            let (event_tx, event_rx) = std::sync::mpsc::channel();
+            let _keepalive = event_tx.clone();
+            let mut state = supervised::WorkerState::new(event_tx.clone());
             let mut deb = Debouncer::default();
-            let mut pending: Vec<PathBuf> = Vec::new();
-            // 开轮先挂一遍已存在的根（不等第一个超时窗）。
-            for path in &roots {
-                try_attach(&mut watcher, &mut pending, &router, &root_identities, path);
-            }
+            let mut coalesced: u64 = 0;
+            let mut last_event: Option<i64> = None;
+            let mut last_wake: Option<i64> = None;
+
+            state.apply(initial);
+            state.publish_health(&health_for_worker, last_event, last_wake, coalesced);
+
             loop {
+                // 控制通道优先：快照替换（热插拔）不等事件窗。
+                match control_rx.try_recv() {
+                    Ok(snapshot) => {
+                        deb = Debouncer::default(); // 旧拓扑的去抖残留整批丢弃
+                        state.apply(snapshot);
+                        state.publish_health(&health_for_worker, last_event, last_wake, coalesced);
+                        continue;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // supervisor drop（应用关停）——退出，无清理动作。
+                        let mut h = health_for_worker.lock().unwrap_or_else(|e| e.into_inner());
+                        h.mode = WatcherMode::Unavailable;
+                        h.reason_code = Some("worker_terminated");
+                        return;
+                    }
+                }
                 match event_rx.recv_timeout(DEBOUNCE) {
                     Ok(Ok(event)) => {
-                        let guard = router.read().unwrap_or_else(|e| e.into_inner());
                         for path in &event.paths {
-                            for hit in guard.route(path) {
+                            for hit in state.route(path) {
                                 deb.offer(hit);
                             }
                         }
+                        if !event.paths.is_empty() {
+                            last_event = Some(local_now_ms());
+                        }
                     }
                     Ok(Err(e)) => {
-                        // in-band 错误（如环形缓冲溢出）：记日志继续；丢的
-                        // 事件由 tick 指纹对账兜底（spec §12），正确性不依赖。
+                        // in-band 错误（如缓冲溢出）：记日志继续；丢的事件由
+                        // tick 指纹对账兜底（SourceGraph spec §12）。
                         eprintln!("[agent-vitals] watcher 事件错误（tick 兜底）: {e}");
                     }
                     Err(RecvTimeoutError::Timeout) => {
-                       
-                        // 超时双职责：①补挂 pending 根（目录晚于 app 启动
-                        // 出现的场景）；②去抖窗落定派发一批。
-                        let old = std::mem::take(&mut pending);
-                        for path in &old {
-                            try_attach(&mut watcher, &mut pending, &router, &root_identities, path);
-                        }
-
+                        // 超时双职责：①补挂 pending 根；②去抖窗落定派发。
+                        state.retry_pending();
                         let batch = deb.take_batch();
                         if !batch.hosts.is_empty() {
-                            // 结果只进计数，不分支（合并 = 行为等价）。
-                            let _ = waker.wake();
+                            if let WakeOutcome::Coalesced = waker.wake() {
+                                coalesced += 1;
+                            }
+                            last_wake = Some(local_now_ms());
                         }
                         for i in batch.watch_only {
-                            if let Some(cb) = callbacks.get(i) {
+                            if let Some(cb) = state.callbacks().get(i) {
                                 cb();
                             }
                         }
+                        state.publish_health(&health_for_worker, last_event, last_wake, coalesced);
                     }
                     Err(RecvTimeoutError::Disconnected) => {
-                        // 事件通道断开（不会发生——RecommendedWatcher 由本
-                        // 线程持住）；真发生时线程退出，tick 兜底接管。
+                        // keepalive 在手时不会发生；防御性退出。
                         return;
                     }
                 }
             }
-        })
-        .map(|_| WatcherHandle { noop: false })
-        .unwrap_or_else(|e| {
+        });
+
+    match spawned {
+        Ok(_) => WatcherHandle {
+            noop: false,
+            control: Some(control_tx),
+            health: Some(health),
+        },
+        Err(e) => {
             eprintln!("[agent-vitals] watcher 线程启动失败，tick 兜底照常: {e}");
-            WatcherHandle { noop: true }
-        })
+            WatcherHandle { noop: true, control: None, health: None }
+        }
+    }
 }
 
 #[cfg(not(feature = "watcher"))]
-fn spawn_platform_watcher(_registry: WatchRegistry, _waker: TickWaker) -> WatcherHandle {
+fn spawn_platform_watcher(_initial: WatchRegistry, _waker: TickWaker) -> WatcherHandle {
     // NoopWatcher（Vite server/index.ts createNoopWatcher 同款）：无
     // notify 依赖、无线程；tick 周期发现照常（spec §1.5 可插拔条款）。
-    WatcherHandle { noop: true }
+    WatcherHandle { noop: true, control: None, health: None }
 }
 
 #[cfg(test)]
@@ -679,12 +912,75 @@ mod tests {
             TickWait::SenderGone);
     }
 
-    /// 空注册表 → noop 句柄（两种 feature 态都成立）。
+    /// feature 关闭 → 恒 noop（NoopWatcher），健康快照 Disabled/
+    /// feature_disabled，replace 为无操作成功。
+    #[cfg(not(feature = "watcher"))]
     #[test]
-    fn empty_registry_is_noop() {
+    fn feature_off_is_noop_with_disabled_health() {
         let WakeChannel { waker, receiver: _ } = TickWaker::channel();
         let handle = spawn_watcher(WatchRegistry::new(), waker);
-        assert!(handle.is_noop(), "空注册表不得起线程");
+        assert!(handle.is_noop());
+        let health = handle.health();
+        assert_eq!(health.mode, WatcherMode::Disabled);
+        assert_eq!(health.reason_code, Some("feature_disabled"));
+        assert!(handle.replace(WatchRegistry::new()).is_ok(), "noop 句柄的 replace 无操作成功");
+    }
+
+    /// 监督生命周期（HARDENING spec §6「dynamic lifecycle」行，Phase C）：
+    /// 空拓扑启动 → Disabled/no_roots；replace 换上真实根 → Active、
+    /// attached=1、revision=2；再换回空 → 回 Disabled。全程不重启线程
+    /// （同一句柄三次状态转移）。只断言**附件集与修订号**（确定性），
+    /// 事件唤醒走真机 ignored 测试。
+    #[cfg(feature = "watcher")]
+    #[test]
+    fn supervised_lifecycle_matches_topology_revisions() {
+        let dir = std::env::temp_dir().join(format!(
+            "avd-watch-sup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let WakeChannel { waker, receiver: _ } = TickWaker::channel();
+
+        let handle = spawn_watcher(WatchRegistry::new(), waker.clone());
+        assert!(!handle.is_noop(), "监督式 watcher 无根也保持 worker 在岗（热插拔前提）");
+        let mut health = handle.health();
+        for _ in 0..50 {
+            health = handle.health();
+            if health.topology_revision >= 1 { break; }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(health.topology_revision, 1, "初始快照 revision=1");
+        assert_eq!(health.mode, WatcherMode::Disabled, "空拓扑 = Disabled");
+        assert_eq!(health.reason_code, Some("no_roots"));
+
+        let mut registry = WatchRegistry::new();
+        registry.register_source("claude-code", dir.clone());
+        handle.replace(registry).unwrap();
+        for _ in 0..100 {
+            health = handle.health();
+            if health.topology_revision >= 2 && health.facts_roots_attached >= 1 { break; }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(health.topology_revision, 2, "替换后 revision 单调 +1");
+        assert_eq!(health.mode, WatcherMode::Active);
+        assert_eq!(health.facts_roots_attached, 1, "临时目录存在，挂载即成功");
+        assert_eq!(health.pending_roots, 0);
+
+        handle.replace(WatchRegistry::new()).unwrap();
+        for _ in 0..100 {
+            health = handle.health();
+            if health.topology_revision >= 3 { break; }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(health.topology_revision, 3);
+        assert_eq!(health.mode, WatcherMode::Disabled, "换回空拓扑回到 Disabled");
+        assert_eq!(health.facts_roots_registered, 0);
+        drop(handle); // 关停信号；线程自行退出
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 真实 FS 事件端到端（macOS FSEvents / Linux inotify）：注册临时

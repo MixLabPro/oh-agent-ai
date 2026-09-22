@@ -1333,12 +1333,11 @@ fn start_refresh_tick(app: AppHandle, wake: std::sync::mpsc::Receiver<()>) {
         } else {
             eprintln!("[agent-vitals] 同步进行中，跳过本轮");
         }
-        match agent_vitals_runtime::ingest::watch::wait_for_tick_or_wake(&wake, TICK_PERIOD) {
-            agent_vitals_runtime::ingest::watch::TickWait::SenderGone => {
-                // waker 端全部 drop（watcher 线程异常退出）——退回纯周期。
-                std::thread::sleep(TICK_PERIOD);
-            }
-            _ => {}
+        if agent_vitals_runtime::ingest::watch::wait_for_tick_or_wake(&wake, TICK_PERIOD)
+            == agent_vitals_runtime::ingest::watch::TickWait::SenderGone
+        {
+            // waker 端全部 drop（watcher 线程异常退出）——退回纯周期。
+            std::thread::sleep(TICK_PERIOD);
         }
     });
 }
@@ -1352,7 +1351,51 @@ fn start_refresh_tick(app: AppHandle, wake: std::sync::mpsc::Receiver<()>) {
 /// 全部退回「tick 周期对账」，不装死不报错（spec §1.5 watcher 可插拔）。
 /// trust profile 目录**不**监听：trust 传感自身 2s 轮询已亚秒级，watcher
 /// 无增量（P2_WATCHER_PRODUCT_REVIEW.md 决策记录）。
-fn start_source_watcher(app: &AppHandle) -> std::sync::mpsc::Receiver<()> {
+/// 监督者状态：持有 watcher 句柄，源配置变更命令经 [`refresh_watch_topology`]
+/// 提交新拓扑快照（Phase C 热插拔——不重启线程、不重启 app）。
+struct WatcherSupervisor(std::sync::Mutex<Option<agent_vitals_runtime::ingest::watch::WatcherHandle>>);
+
+/// 源配置变更后的拓扑刷新（spec Phase C.2）：配置写入提交后再请求替换——
+/// 读取的是已提交状态，与 sync 的下一次读取一致。worker 已退出时静默跳过
+/// （周期兜底仍在服务）。
+fn refresh_watch_topology(app: &AppHandle) {
+    let supervisor = app.state::<WatcherSupervisor>();
+    let guard = supervisor.0.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(handle) = guard.as_ref() else { return };
+    let user_home = std::path::PathBuf::from(
+        std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default(),
+    );
+    if user_home.as_os_str().is_empty() {
+        return;
+    }
+    match agent_vitals_runtime::sources::watch_topology::watch_topology(
+        &overview::data_home(),
+        &user_home,
+    ) {
+        Ok(topology) => {
+            let skills = app.state::<store::SkillsScanState>().inner().clone();
+            let registry = agent_vitals_runtime::ingest::watch::WatchRegistry::from_topology(
+                &topology,
+                move |_host| {
+                    let skills = skills.clone();
+                    std::sync::Arc::new(move || skills.invalidate())
+                },
+            );
+            if let Err(error) = handle.replace(registry) {
+                eprintln!("[agent-vitals] watch 拓扑替换未送达（worker 已退出）: {error}");
+            }
+        }
+        Err(error) => {
+            eprintln!("[agent-vitals] watch 拓扑派生失败（保持现拓扑）: {error}");
+        }
+    }
+}
+
+fn start_source_watcher(app: &AppHandle)
+    -> (std::sync::mpsc::Receiver<()>, agent_vitals_runtime::ingest::watch::WatcherHandle)
+{
     use agent_vitals_runtime::ingest::watch::{TickWaker, WakeChannel, WatchRegistry};
 
     let WakeChannel { waker, receiver } = TickWaker::channel();
@@ -1398,9 +1441,9 @@ fn start_source_watcher(app: &AppHandle) -> std::sync::mpsc::Receiver<()> {
     let handle =
         agent_vitals_runtime::ingest::watch::spawn_watcher(registry, waker);
     if handle.is_noop() {
-        eprintln!("[agent-vitals] watcher 未启用（feature 关闭或无根可监听），tick 周期兜底");
+        eprintln!("[agent-vitals] watcher 未启用（feature 关闭），tick 周期兜底");
     }
-    receiver
+    (receiver, handle)
 }
 
 /// Opt-in Trust runtime monitor. The loop is always installed with the app,
@@ -1938,20 +1981,23 @@ fn pick_custom_source_root() -> Option<String> {
 }
 
 #[tauri::command]
-fn add_custom_source_root(input: CustomSourceRootInput) -> Result<Value, String> {
+fn add_custom_source_root(app: AppHandle, input: CustomSourceRootInput) -> Result<Value, String> {
     let data_home = overview::data_home();
     let changed = agent_vitals_runtime::custom_sources::add_custom_source_root(
         &data_home, &input.host, Path::new(&input.root),
     )?;
+    // 配置已提交——新批准的自定义源即时获得秒级监听（Phase C 热插拔）。
+    refresh_watch_topology(&app);
     Ok(serde_json::json!({ "status": "saved", "changed": changed }))
 }
 
 #[tauri::command]
-fn remove_custom_source_root(input: CustomSourceRootInput) -> Result<Value, String> {
+fn remove_custom_source_root(app: AppHandle, input: CustomSourceRootInput) -> Result<Value, String> {
     let data_home = overview::data_home();
     let changed = agent_vitals_runtime::custom_sources::remove_custom_source_root(
         &data_home, &input.host, Path::new(&input.root),
     )?;
+    refresh_watch_topology(&app);
     Ok(serde_json::json!({ "status": "removed", "changed": changed }))
 }
 
@@ -1992,10 +2038,12 @@ fn source_read_locations() -> Value {
 }
 
 #[tauri::command]
-fn set_source_host_excluded(input: SourceHostControlInput) -> Result<Value, String> {
+fn set_source_host_excluded(app: AppHandle, input: SourceHostControlInput) -> Result<Value, String> {
     let changed = agent_vitals_runtime::source_controls::set_host_excluded(
         &overview::data_home(), &input.host, input.excluded,
     )?;
+    // 配置已提交——监听拓扑即时跟上（排除 = 移除该宿主全部监听根）。
+    refresh_watch_topology(&app);
     Ok(serde_json::json!({ "status": "saved", "changed": changed, "excluded": input.excluded }))
 }
 
@@ -2004,6 +2052,7 @@ fn delete_imported_source_data(app: AppHandle, host: String) -> Result<Value, St
     let data_home = overview::data_home();
     // 先禁止未来读取，再在同一宿主租约下清理 authority 投影。
     let deleted = agent_vitals_runtime::source_controls::delete_imported_source_data(&data_home, &host)?;
+    refresh_watch_topology(&app);
     let receipt = serde_json::json!({
         "status": "deleted", "host": host.clone(), "facts": deleted.facts,
         "sessions": deleted.sessions, "source_files": deleted.source_files,
@@ -3931,7 +3980,8 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
-            let wake = start_source_watcher(app.handle());
+            let (wake, watcher_handle) = start_source_watcher(app.handle());
+            app.manage(WatcherSupervisor(std::sync::Mutex::new(Some(watcher_handle))));
             start_refresh_tick(app.handle().clone(), wake);
             start_trust_monitor_tick(app.handle().clone());
             let args: Vec<String> = std::env::args().collect();
