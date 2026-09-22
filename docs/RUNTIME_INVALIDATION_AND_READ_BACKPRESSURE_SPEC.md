@@ -450,7 +450,7 @@ impl ReadGate {
         （`data_monthly_summary` / `data_daily_summary` / `read_calendar_month` /
         `read_hourly_distribution`，9.13）
   - [ ] 真机：同压测下稳态 CPU < 15%，tokio worker 无 SQLite 栈帧（留待真机验收）
-- [x] **P3（可选）**——部分落地 + 一项勘正（2026-09-22）
+- [x] **P3（可选）**——全部落地，其中一项是勘正而非实现（2026-09-22）
   - [x] MCP serve 接 `ReadMemo`：`control_plane.rs` 的 `daily_summary`/
         `monthly_summary` 两个 action 此前直接调裸 trait 方法，绕过了 P2 已经
         接好的 memo；改走 `_json_memoized`（`calendar_month`/`hourly_distribution`
@@ -466,8 +466,11 @@ impl ReadGate {
         跨进程并发（多个 MCP host 各起一个 serve）不是 `ReadGate` 能管的——
         那是进程内静态信号量，管不到别的进程；这一层的保护已经是 P2 的
         `open_db_ro`（只读连接，不抢写锁）+ SQLite 自己的 WAL/`busy_timeout`。
-  - [ ] 诊断包 v2（日志尾 + watcher 健康 + 事件计数/`ReadGate`/`ReadMemo` 命中率
-        快照，含导出脱敏）：未做
+  - [x] 诊断包 v2（2026-09-22，`apps/desktop/src-tauri/src/lib.rs`
+        `diagnostic_observability_snapshot` + `event_bus_backlog_snapshot`）：
+        日志尾（脱敏）+ watcher 健康 + `ReadGate`/`ReadMemo` 命中率快照 +
+        事件总线积压计数，详见 `EVENT_PROCESSING_AND_OBSERVABILITY_REVIEW.md`
+        P1 段——那份文档是这块工作的权威记录，这里不重复
 
 ---
 

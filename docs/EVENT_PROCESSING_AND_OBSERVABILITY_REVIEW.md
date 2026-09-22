@@ -199,13 +199,33 @@ WatcherHealthChanged 的变化才发——这些模式正确，问题是**没有
   （此前只有失败路径留痕，成功路径的耗时完全不可见）；watcher 健康日志顺带
   带上 `coalesced_wake_count`（不进「变了才发」的 key——涨得太勤，进 key 等于
   废掉这条纪律——只是搭在真实状态跳变那条日志里免费带出来）。
-- **仍未做**：诊断包 v2（日志尾 + watcher 健康 + 事件计数快照，含导出脱敏
-  投影）——见下方独立记录。
-- **验收（部分达成）**：单测钉住格式化/滚动/写入链路 + `RUST_LOG` 开关
-  （`core::logging::tests` 7 条）；真机 smoke 用仓库内 `fixtures/dsh/
-  complete.jsonl` 跑 `agent-vitals oneline --shadow` 触发一次真实 warn，确认
-  同时出现在 stderr 与 `<data_home>/logs/app.log`（人工验证，未固化为脚本）；
-  诊断包含日志尾这一条验收未达成（诊断包 v2 未做）。
+- **诊断包 v2（2026-09-22 补，`export_diagnostic_package` → `agent-vitals-
+  diagnostic/v2`）**：新增 `observability` 段——日志尾（`read_redacted_tail`，
+  最多 200 行，经 `redact_path_like` 脱敏投影，不是原始文件）、watcher 健康
+  快照（闭集词表 + 计数，本就无路径无原始错误串）、自看护节流态（当前冷却
+  值 + 是否已拉长）、`ReadGate`/`ReadMemo` 命中率快照、事件总线积压（outbox
+  总行数/deliveries 总行数/带 `last_error` 的行数——**只数不读内容**，
+  `last_error` 的具体文本不进诊断包）。`privacy` 块新增
+  `log_tail_is_redacted_projection: true`，明说这段是投影不是原文，
+  `contains_absolute_paths: false` 的既有承诺没有降级。
+  `event_bus_backlog_snapshot(data_home: &Path)` 特意收窄成参数注入而非读
+  `overview::data_home()` 全局——这个文件里其余测试一直读真机数据、互相之间
+  没上锁，新函数选择不加入那个赌注，直接可测。
+- **脱敏纪律**：`redact_path_like` 不是通用路径检测，是「已知最常见敏感子串
+  替换」——精确替换 `home`（本仓库几乎所有路径的前缀）+ 兜底扫
+  `/Users/<name>`/`/home/<name>`/`C:\Users\<name>` 前缀（覆盖用户手选的
+  自定义 source root 或引用了别的账户路径的消息），与 Python 扫描器
+  `--redact-names`（先收集姓名、最长优先替换）同一纪律：宁可保守多删，
+  不可能查全。
+- **验收**：单测钉住格式化/滚动/写入链路 + `RUST_LOG` 开关 + 脱敏两道（精确
+  home 前缀、兜底跨用户前缀）+ 尾行截取（`core::logging::tests` 11 条）；
+  `event_bus_backlog_snapshot` 单测钉住库缺席报 `unavailable`（不编造零）、
+  三个计数互不相同、`last_error` 原文不进快照；真机 smoke 用仓库内
+  `fixtures/dsh/complete.jsonl` 跑 `agent-vitals oneline --shadow` 触发一次
+  真实 warn，确认同时出现在 stderr 与 `<data_home>/logs/app.log`（人工验证，
+  未固化为脚本）。`export_diagnostic_package` 整体因原生文件对话框
+  （`rfd::FileDialog`）无法无头运行——组成它的每个聚合函数已单独测过，
+  整体走查靠真机手动导出一次核对（留待真机验收）。
 
 ### P2：刷新语义改造（治 G1）
 

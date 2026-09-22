@@ -213,6 +213,69 @@ pub fn log_error(component: &str, message: &str) {
     write_line(Level::Error, component, message);
 }
 
+// ---- 诊断包导出面（REVIEW P1「诊断包 v2 增补：日志尾…含导出脱敏」）----
+//
+// 本地文件本身允许含路径与细节（2026-09-19 政策：不出机器）；这份日志的
+// 消息里确实有——`watch {path} 失败`、子进程 stderr 透传，都可能带绝对路径。
+// 导出面必须做脱敏投影，这两个函数就是那层投影，只在导出时调用，从不影响
+// 落盘内容本身。
+
+/// 最长一次脱敏读取的行数——诊断包要的是"最近发生了什么"，不是完整历史；
+/// 5×2MB 的滚动窗口顶格也就几万行，几百行的尾巴够看清一次事故的时间线。
+pub const DIAGNOSTIC_TAIL_MAX_LINES: usize = 200;
+
+/// 路径脱敏（纯函数，独立于文件系统）：不是通用路径检测，是「已知最常见的
+/// 敏感子串替换」——与 Python 扫描器 `--redact-names`（先收集姓名、最长优先
+/// 替换）同一纪律，宁可保守多删，不可能查全。两道：
+/// 1. 精确替换 `home`（本仓库几乎所有路径都在 `~/.agent-vitals`/`~/.claude`/
+///    `~/.codex` 之类的 home 子目录下，这一道覆盖绝大多数情况）；
+/// 2. 兜底扫 `/Users/<name>`、`/home/<name>`、`C:\Users\<name>` 前缀（覆盖
+///    「用户手选了 home 之外的自定义 source root」或「消息里引用了别的账户
+///    路径」——只替换到用户名这一段，后面的相对路径留着：诊断价值在
+///    「哪个子系统」，不在「谁的机器」）。
+pub fn redact_path_like(text: &str, home: &std::path::Path) -> String {
+    let mut out = text.to_string();
+    if let Some(home_str) = home.to_str() {
+        if !home_str.is_empty() {
+            out = out.replace(home_str, "~");
+        }
+    }
+    out = redact_user_prefix(&out, "/Users/");
+    out = redact_user_prefix(&out, "/home/");
+    out = redact_user_prefix(&out, r"C:\Users\");
+    out
+}
+
+/// 把 `text` 里每个 `prefix<username><分隔符或结尾>` 替换成 `~<分隔符或结尾>`——
+/// 用户名段整体丢弃，分隔符之后的相对路径原样保留。
+fn redact_user_prefix(text: &str, prefix: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(idx) = rest.find(prefix) {
+        result.push_str(&rest[..idx]);
+        result.push('~');
+        let after_prefix = &rest[idx + prefix.len()..];
+        let name_end = after_prefix.find(['/', '\\', ' ', '\n', '\t']).unwrap_or(after_prefix.len());
+        rest = &after_prefix[name_end..];
+    }
+    result.push_str(rest);
+    result
+}
+
+/// 读日志文件最后 `max_lines` 行并逐行脱敏——诊断包导出唯一调用点。文件
+/// 缺席/打不开返回空 vec（不是错误：新装机器本来就没有日志，诊断包照样能
+/// 生成，只是这一节是空的，不编造）。整份文件读进内存再取尾——日志滚动上限
+/// 2MB，不值得为这个体量写流式 tail 算法。
+pub fn read_redacted_tail(max_lines: usize) -> Vec<String> {
+    let Ok(content) = std::fs::read_to_string(log_path()) else {
+        return Vec::new();
+    };
+    let home = crate::core::home::host_dir();
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].iter().map(|line| redact_path_like(line, &home)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +395,90 @@ mod tests {
             Some(p) => std::env::set_var("RUST_LOG", p),
             None => std::env::remove_var("RUST_LOG"),
         }
+    }
+
+    #[test]
+    fn redact_path_like_strips_the_configured_home_prefix() {
+        let home = PathBuf::from("/Users/alice");
+        let text = "watch /Users/alice/.claude/projects/demo 失败（该根 tick 兜底）: no such file";
+        let redacted = redact_path_like(text, &home);
+        assert_eq!(redacted, "watch ~/.claude/projects/demo 失败（该根 tick 兜底）: no such file");
+        assert!(!redacted.contains("alice"));
+    }
+
+    #[test]
+    fn redact_path_like_catches_foreign_unix_and_windows_user_prefixes() {
+        // home 是 /Users/alice，但消息里引用了另一个账户的路径（比如一个
+        // 手选的自定义 source root）——精确替换救不了这种，靠兜底前缀扫。
+        let home = PathBuf::from("/Users/alice");
+        let text = "custom source /Users/bob/shared/logs rejected; also see /home/carol/data and C:\\Users\\dave\\logs";
+        let redacted = redact_path_like(text, &home);
+        assert_eq!(
+            redacted,
+            "custom source ~/shared/logs rejected; also see ~/data and ~\\logs",
+        );
+        for leaked in ["bob", "carol", "dave"] {
+            assert!(!redacted.contains(leaked), "{leaked} must not survive redaction: {redacted}");
+        }
+    }
+
+    #[test]
+    fn redact_path_like_is_a_noop_on_text_with_no_paths() {
+        let home = PathBuf::from("/Users/alice");
+        let text = "sync-facts: +88113 appended, 0 duplicate";
+        assert_eq!(redact_path_like(text, &home), text);
+    }
+
+    #[test]
+    fn read_redacted_tail_returns_empty_without_a_log_file() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tmp_home("tail-missing");
+        let prev = std::env::var("AGENT_VITALS_HOME").ok();
+        std::env::set_var("AGENT_VITALS_HOME", &home);
+        assert_eq!(read_redacted_tail(DIAGNOSTIC_TAIL_MAX_LINES), Vec::<String>::new());
+        match prev {
+            Some(p) => std::env::set_var("AGENT_VITALS_HOME", p),
+            None => std::env::remove_var("AGENT_VITALS_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn read_redacted_tail_caps_at_max_lines_and_redacts_every_line() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tmp_home("tail-cap");
+        let prev_home_env = std::env::var("AGENT_VITALS_HOME").ok();
+        let prev_real_home = std::env::var("HOME").ok();
+        std::env::set_var("AGENT_VITALS_HOME", &home);
+        // `HOME` 决定 `read_redacted_tail` 拿来脱敏的前缀——单独设成 home 本身，
+        // 让写进日志文件的绝对路径行必须被这次读取擦掉。
+        std::env::set_var("HOME", &home);
+        let path = home.join("logs").join("app.log");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let home_display = home.display().to_string();
+        let mut file = OpenOptions::new().create(true).append(true).open(&path).unwrap();
+        for i in 0..10 {
+            file.write_all(format!("line {i} touches {home_display}/logs/app.log\n").as_bytes()).unwrap();
+        }
+        drop(file);
+        let tail = read_redacted_tail(3);
+        assert_eq!(tail.len(), 3, "must cap at max_lines, not return the whole file");
+        assert_eq!(tail, vec![
+            "line 7 touches ~/logs/app.log",
+            "line 8 touches ~/logs/app.log",
+            "line 9 touches ~/logs/app.log",
+        ]);
+        for line in &tail {
+            assert!(!line.contains(&home_display), "raw home path must not survive redaction: {line}");
+        }
+        match prev_home_env {
+            Some(p) => std::env::set_var("AGENT_VITALS_HOME", p),
+            None => std::env::remove_var("AGENT_VITALS_HOME"),
+        }
+        match prev_real_home {
+            Some(p) => std::env::set_var("HOME", p),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

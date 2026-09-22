@@ -54,7 +54,11 @@ where
     data_home_from(get_env, home).join("snapshots")
 }
 
-fn host_dir() -> PathBuf {
+/// `pub(crate)`——诊断包导出（`core::logging::redact_path_like`）需要「用户
+/// 真实 home 目录字符串」来脱敏日志尾，不是 `data_home()`（那是
+/// `~/.agent-vitals`，一个子目录，不是要擦掉的那个前缀本身）。仍然是唯一
+/// 一处读 `HOME`/`USERPROFILE`——不许诊断包那边再长一份。
+pub(crate) fn host_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();

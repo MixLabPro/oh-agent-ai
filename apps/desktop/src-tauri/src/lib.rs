@@ -2732,10 +2732,80 @@ fn findings_freshness() -> Value {
     }
 }
 
-/// 生成用户主动选择保存的脱敏诊断包。只组合现有的状态 DTO；不读取会话正文、
-/// 原始日志、绝对路径或账户标识，也不执行上传。取消保存对用户来说是 no-op。
+/// v2 增补（REVIEW P1「诊断包 v2 增补：日志尾（脱敏）+ watcher 健康 + 事件
+/// 计数快照」）：四段都是**聚合**，不是内部状态原样倒出去——watcher 健康本身
+/// 就是闭集词表 + 计数（无路径无原始错误串，见 `WatcherHealth` 自身文档），
+/// 日志尾经 `redact_path_like` 脱敏，事件总线只给计数（`event_deliveries.
+/// last_error` 的具体文本不进来，只数「有没有」）。`ReadGate`/`ReadMemo`
+/// 是导出那一瞬间的快照，`ReadMemo` 的 hits/misses 是进程启动以来的累计。
+fn diagnostic_observability_snapshot(app: &AppHandle) -> Value {
+    let log_tail = agent_vitals_runtime::logging::read_redacted_tail(
+        agent_vitals_runtime::logging::DIAGNOSTIC_TAIL_MAX_LINES,
+    );
+    let watcher_health = {
+        let supervisor = app.state::<WatcherSupervisor>();
+        let guard = supervisor.0.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().map(|w| w.health())
+    };
+    let watcher_health_json = watcher_health.map(|h| serde_json::json!({
+        "mode": watcher_mode_str(h.mode),
+        "topology_revision": h.topology_revision,
+        "facts_roots_attached": h.facts_roots_attached,
+        "cache_roots_attached": h.cache_roots_attached,
+        "pending_roots": h.pending_roots,
+        "coalesced_wake_count": h.coalesced_wake_count,
+        "reason_code": h.reason_code,
+    })).unwrap_or(Value::Null);
+    let cooldown = app.state::<WatcherCooldownOverride>().get();
+    let gate = heavy_read_gate().stats();
+    let memo = agent_vitals_runtime::query::read_memo::ReadMemo::global().stats();
+    serde_json::json!({
+        "log_tail": log_tail,
+        "log_tail_lines": log_tail.len(),
+        "log_tail_max_lines": agent_vitals_runtime::logging::DIAGNOSTIC_TAIL_MAX_LINES,
+        "watcher_health": watcher_health_json,
+        "watcher_cooldown_ms": cooldown.as_millis() as u64,
+        "watcher_cooldown_is_throttled": cooldown > agent_vitals_runtime::ingest::watch::WATCHER_SYNC_COOLDOWN,
+        "read_gate": { "permits": gate.permits, "held": gate.held, "waiting": gate.waiting },
+        "read_memo": { "hits": memo.hits, "misses": memo.misses, "entries": memo.entries },
+        "event_bus": event_bus_backlog_snapshot(&overview::data_home()),
+    })
+}
+
+/// 事件总线积压：outbox 总行数 / deliveries 总行数 / 带 `last_error` 的
+/// deliveries 行数——只数不读内容。库缺席（未同步机器）不是错误，报
+/// `unavailable`，不编造零。`data_home` 是参数而非读全局——纯粹为可测试性：
+/// 注入一个临时目录，不需要碰 `AGENT_VITALS_HOME` 环境变量、不需要新增一把
+/// 跨测试序列化锁（这个文件里其余测试都读真机 data_home，貌似没人当心过
+/// 并行测试互相踩环境变量，这个函数选择不加入那个赌注）。
+fn event_bus_backlog_snapshot(data_home: &Path) -> Value {
+    let path = agent_vitals_data::authority::default_authority_path(data_home);
+    let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
+        return serde_json::json!({ "status": "unavailable" });
+    };
+    let outbox_rows: i64 = db.conn()
+        .query_row("SELECT COUNT(*) FROM event_outbox", [], |r| r.get(0))
+        .unwrap_or(0);
+    let delivery_rows: i64 = db.conn()
+        .query_row("SELECT COUNT(*) FROM event_deliveries", [], |r| r.get(0))
+        .unwrap_or(0);
+    let delivery_rows_with_last_error: i64 = db.conn()
+        .query_row("SELECT COUNT(*) FROM event_deliveries WHERE last_error IS NOT NULL", [], |r| r.get(0))
+        .unwrap_or(0);
+    serde_json::json!({
+        "status": "ok",
+        "outbox_rows": outbox_rows,
+        "delivery_rows": delivery_rows,
+        "delivery_rows_with_last_error": delivery_rows_with_last_error,
+    })
+}
+
+/// 生成用户主动选择保存的脱敏诊断包。只组合现有的状态 DTO + v2 的可观测性
+/// 聚合（日志尾/watcher 健康/事件总线积压/读侧缓存命中率）；不读取会话正文、
+/// 原始日志（日志尾经脱敏投影，不是原文）、账户标识，也不执行上传。取消
+/// 保存对用户来说是 no-op。
 #[tauri::command]
-fn export_diagnostic_package() -> Result<Value, String> {
+fn export_diagnostic_package(app: AppHandle) -> Result<Value, String> {
     let Some(path) = rfd::FileDialog::new()
         .set_file_name("agent-vitals-diagnostics.json")
         .save_file() else {
@@ -2743,7 +2813,7 @@ fn export_diagnostic_package() -> Result<Value, String> {
     };
     let status = data_status();
     let package = serde_json::json!({
-        "diagnostic_contract": "agent-vitals-diagnostic/v1",
+        "diagnostic_contract": "agent-vitals-diagnostic/v2",
         "versions": {
             "app": env!("CARGO_PKG_VERSION"),
             "cli": resolved_cli_version(),
@@ -2763,6 +2833,10 @@ fn export_diagnostic_package() -> Result<Value, String> {
             "contains_absolute_paths": false,
             "contains_account_identifiers": false,
             "upload_performed": false,
+            // v2 新增字段：日志尾是脱敏投影，不是原始文件内容——本地那份
+            // app.log 允许含路径（2026-09-19 政策：不出机器），这里导出的
+            // 不是它，是经 `redact_path_like` 处理过的版本。
+            "log_tail_is_redacted_projection": true,
         },
         "data_status": status,
         "source_status": data_source_status(),
@@ -2770,6 +2844,7 @@ fn export_diagnostic_package() -> Result<Value, String> {
         "retention": retention_config(),
         "budget": budget_config(),
         "budget_profiles": budget_profiles_status(overview::current_month_beijing()),
+        "observability": diagnostic_observability_snapshot(&app),
     });
     let bytes = serde_json::to_vec_pretty(&package)
         .map_err(|error| format!("diagnostic serialization failed: {error}"))?;
@@ -4382,6 +4457,74 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tmp_home(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "avdesk-diag-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// 诊断包 v2 的事件总线积压快照——库缺席报 `unavailable` 不编造零；
+    /// 有数据时三个计数各自独立（outbox 总数 / deliveries 总数 / 带
+    /// `last_error` 的 deliveries 数不能是同一个数字，否则说明查询写错了
+    /// WHERE 子句）。
+    #[test]
+    fn event_bus_backlog_snapshot_counts_without_reading_content() {
+        let home = tmp_home("backlog");
+        assert_eq!(
+            event_bus_backlog_snapshot(&home),
+            serde_json::json!({ "status": "unavailable" }),
+            "missing database must report unavailable, not fabricate zero counts",
+        );
+
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        {
+            let db = agent_vitals_data::authority::AuthorityDb::open(&path, 1).unwrap();
+            db.with_immediate_txn(|conn| {
+                conn.execute(
+                    "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+                     VALUES ('run', 1, 'cli', 'succeeded', 1)", [],
+                )?;
+                for i in 0..3 {
+                    conn.execute(
+                        &format!(
+                            "INSERT INTO event_outbox(event_id, event_type, schema_version, occurred_at_ms,
+                                 host, correlation_id, producer, payload_json, ingested_run_id, created_at_ms)
+                             VALUES ('evt-{i}', 'FactsIngested', 1, 1, 'dsh', 'run', 'sync_service', '{{}}', 'run', 1)"
+                        ),
+                        [],
+                    )?;
+                }
+                // 两条投递记录：一条干净，一条带 last_error——三个计数必须互不相等。
+                conn.execute(
+                    "INSERT INTO event_deliveries(event_id, consumer_id, delivered_at_ms, last_error, retry_count)
+                     VALUES ('evt-0', 'desktop-ui', 1, NULL, 0)", [],
+                )?;
+                conn.execute(
+                    "INSERT INTO event_deliveries(event_id, consumer_id, delivered_at_ms, last_error, retry_count)
+                     VALUES ('evt-1', 'price-reconcile', 1, 'boom', 1)", [],
+                )?;
+                Ok(())
+            }).unwrap();
+        }
+
+        let snapshot = event_bus_backlog_snapshot(&home);
+        assert_eq!(snapshot["status"], "ok");
+        assert_eq!(snapshot["outbox_rows"], 3);
+        assert_eq!(snapshot["delivery_rows"], 2);
+        assert_eq!(snapshot["delivery_rows_with_last_error"], 1);
+        // 脱敏/只数不读的纪律：快照里不能出现 "boom"（那是 last_error 的原文）。
+        assert!(!snapshot.to_string().contains("boom"));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     /// watcher_health DTO 的形状纪律（HARDENING spec §5.6/§7「desktop IPC」行）：
     /// 闭集 mode 字符串、原因码来自闭集、**无任何路径/错误串字段**、
