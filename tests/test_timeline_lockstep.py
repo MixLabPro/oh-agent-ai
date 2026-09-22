@@ -16,6 +16,13 @@
 # `.cjs` 后缀让 esbuild 按 CommonJS 解析，UMD 的导出才活过来。源文件本身保持
 # UMD（工作台 `<script src>` + node `require` + 内联 eval 三路都要），扩展名只
 # 在 dsh-client 这份副本上变，不影响「字节一致」。
+#
+# **2026-09-22：`dsh-client` 已拆成独立仓库（`dsh-agent-vitals-audit`），不再
+# 是本仓库的一部分。** `timeline-shared.cjs` 这份副本连同 dsh-client 一起搬走
+# 了，本仓库摸不到它——同步纪律见那个仓库 README「来源与同步义务」一节：
+# 改了 `apps/desktop/src-tauri/ui/timeline.js` 之后要手动 `cp` 过去，不再有
+# 测试兜底忘记这一步。这条测试原样保留、skip 而不是删除：万一哪天又把
+# dsh-client 的某个 fork/副本放回本仓库同一个相对路径下，它立刻原样生效。
 
 import unittest
 from pathlib import Path
@@ -24,7 +31,14 @@ REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "apps" / "desktop" / "src-tauri" / "ui" / "timeline.js"
 DSH_COPY = REPO / "integrations" / "dsh-client" / "src" / "client" / "timeline-shared.cjs"
 
+_dsh_client_present = (REPO / "integrations" / "dsh-client").is_dir()
 
+
+@unittest.skipUnless(
+    _dsh_client_present,
+    "integrations/dsh-client/ 已拆成独立仓库 dsh-agent-vitals-audit——"
+    "timeline-shared.cjs 副本不在本仓库了，手动同步纪律见那个仓库的 README",
+)
 class TimelineSharedCopyLockstepTests(unittest.TestCase):
     """dsh-client 的 timeline-shared.cjs 是 apps/desktop/src-tauri/ui/timeline.js 的运行时
     副本（timeline.ts 适配器经它调 buildGeometry/nearestPoint），应逐字节相同——

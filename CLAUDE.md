@@ -16,10 +16,19 @@ wasm-bindgen. The "no network, no third-party supply chain" constraint still hol
 what is *distributed* as the in-host skill: a skill that audits skills for supply-chain
 risk cannot itself pull third-party code at scan time.
 
-There is also a **DeepSeek Harness (DSH) integration**: `dsh/` (the installable profile
-bundle) and `integrations/dsh-client/` (a dual-face plugin whose host half folds session events
-through the Rust behavior rules compiled to wasm, and whose client half renders an
-「审计」tab). See `docs/DSH_INTEGRATION.md` and `docs/AGENT_BEHAVIOR_AUDIT.md`.
+There is also a **DeepSeek Harness (DSH) integration**: `integrations/dsh/` (the installable
+profile bundle, still in this repo — no build, no deps; the `dsh/` name is a leftover from
+before Phase E1 moved it under `integrations/`). The other half, the dual-face audit
+plugin whose host half folds session events through the Rust behavior rules compiled to wasm
+and whose client half renders a 「审计」tab, was **extracted to a standalone repository,
+`dsh-agent-vitals-audit`, on 2026-09-22** (its `npm` toolchain depends on private
+`@deepseek-ai/*` packages that can't be resolved from this environment/CI, and it was never
+actually coupled to this repo's Cargo/Python builds). This repo still owns the wasm crate that
+plugin consumes (`crates/agent-vitals-wasm/`) and the price table it reads a build-time copy
+of (`assets/pricing.json`); syncing those into the standalone repo after a change is now a
+manual step documented in that repo's README, not something this repo's tests catch. See
+`docs/DSH_INTEGRATION.md` and `docs/AGENT_BEHAVIOR_AUDIT.md` for the design (now describing a
+cross-repo architecture, not a single-repo one).
 
 Documentation is bilingual. `SKILL.md` (the agent-facing instructions) is English, with
 `references/guide.zh-CN.md` as the complete Chinese equivalent; `README.md` is English
@@ -74,15 +83,16 @@ packages/agent-vitals-python/
                             #   产物镜像同一相对结构（packages/agent-vitals-python/agent_vitals/），
                             #   scan.py 的一份 sys.path 逻辑在源仓库和打包产物里都成立
 scripts/probe_logs.py       # legacy fallback (not in the default flow)
-assets/                      # v0.8 Phase E5：Rust/Python/dsh-client 三方共读的资产，
-                            #   不是 Python 包私有数据——pricing.json/codex_pricing.json/
-                            #   templates/{calendar,codex_session}.html。Tauri icons/ 不在
-                            #   这里（留 apps/desktop/src-tauri/icons/，工具约定）
+assets/                      # v0.8 Phase E5：Rust/Python/dsh-agent-vitals-audit（外部仓库）
+                            #   三方共读的资产，不是 Python 包私有数据——pricing.json/
+                            #   codex_pricing.json/templates/{calendar,codex_session}.html。
+                            #   Tauri icons/ 不在这里（留 apps/desktop/src-tauri/icons/，工具约定）
 SKILL.md                    # agent-facing driver: routes to doctor, names the SV codes
 references/                 # hosts.md (per-host evidence), judgment.md, guide.zh-CN.md
 docs/                       # design docs (ENGINEERING, DSH_INTEGRATION, AGENT_BEHAVIOR_AUDIT, …)
 integrations/dsh/           # DSH-1 profile bundle (registers agent-vitals as a DSH skill) — moved here in Phase E1
-integrations/dsh-client/    # dual-face audit plugin (host projection + wasm + client tab) — moved here in Phase E1
+                            #   （dsh-client 曾是这里的邻居，2026-09-22 拆到独立仓库
+                            #   dsh-agent-vitals-audit，见「What this repo is」一节）
 apps/desktop/src-tauri/     # 菜单栏 app（Tauri 2，**独立 workspace**，Phase E2 从根移进 apps/desktop/）：
                             #   托盘 + 工作台（总览 KPI 行/双轨账/决策卡、Token 日历）。
                             #   金钱与计价委托 domain::cost，跨宿主查询走 runtime 的
@@ -196,7 +206,9 @@ cargo build --release                       # the CLI binary
 # wasm — build the audit_events wasm + JS glue into crates/agent-vitals-wasm/pkg/
 cargo install wasm-pack                     # one-time
 (cd crates/agent-vitals-wasm && wasm-pack build --target web)
-#   then copy pkg/agent_vitals_wasm.js + pkg/agent_vitals_wasm_bg.wasm into integrations/dsh-client/
+#   then copy pkg/agent_vitals_wasm.js + pkg/agent_vitals_wasm_bg.wasm into the standalone
+#   dsh-agent-vitals-audit repo (extracted 2026-09-22 — no longer integrations/dsh-client/
+#   in this repo; see that repo's README for the exact destination path)
 
 # scanner CLI (Python implementation; the Rust binary is the same surface)
 python3 scripts/scan.py                     # scan, print JSON to stdout
@@ -421,6 +433,11 @@ in-host skill form and cross-language readers. See `docs/ENGINEERING.md` §6.8.
 
 ### DSH audit: computation is host-side
 
+**This whole section describes the standalone `dsh-agent-vitals-audit` repo** (extracted from
+`integrations/dsh-client/` on 2026-09-22), kept here because the design still governs how this
+repo's wasm crate and price table must be shaped to stay consumable by it — every
+`integrations/dsh-client/...` path below is now a path in *that* repo, not this one.
+
 The browser cannot read raw session events (the client `SessionFace` only exposes
 projections, and approval/sandbox events are log-only). So behavior findings are
 computed on the **host** via a `sessionProjections` projection whose `view` calls the
@@ -545,8 +562,9 @@ trade-off, and add a regression test whose docstring says what actually broke.
 When a rule changes, it changes in **three places that must stay in lockstep**: the Rust
 domain crate (`crates/agent-vitals-domain/`, imported as `agent_vitals_domain::*`), the
 Python implementation (`packages/agent-vitals-python/agent_vitals/agent/behavior.py`), and — for anything the
-DSH audit tab uses — the wasm crate (rebuild + re-copy the `.wasm` into
-`integrations/dsh-client/`). The differential golden guard
+DSH audit tab uses — the wasm crate (rebuild + re-copy the `.wasm` into the standalone
+`dsh-agent-vitals-audit` repo — see its README; no longer `integrations/dsh-client/` in this
+repo, extracted 2026-09-22). The differential golden guard
 catches Python↔Rust drift; the wasm↔CLI drift is caught only by re-running the wasm build
 against the same fixtures, so verify that manually. The **trajectory detectors** (`trajectory.rs` ↔ `trajectory.py` ↔ wasm `audit_events` 合并 ↔ dsh 提取的 `turn/start·step/start·turn/end·step/end` 边界信号) are the same lockstep. The **cost fold** (`usage.rs` ↔
 `usage.py` ↔ wasm `token_by_model` ↔ dsh adapter `usage_events`) is the same three-way
@@ -575,8 +593,8 @@ the Python mirror stays read-only diagnostic.
 **"Which events carry usage" is one predicate, and it was duplicated twelve times.** It
 lives in `usage.rs::usage_sample` (the authority), mirrored in `usage.py::_usage_sample`,
 and gated *earlier* by the DSH adapter (`dsh.rs`/`dsh.py::is_usage_event`) and *earlier
-still* by eight `apply()` filters in `integrations/dsh-client/src/host/index.ts` (now collapsed into one
-`carriesUsage()` helper). Each layer runs before the next, so **fixing the authority alone
+still* by eight `apply()` filters in `src/host/index.ts` of the standalone `dsh-agent-vitals-audit`
+repo (now collapsed into one `carriesUsage()` helper). Each layer runs before the next, so **fixing the authority alone
 fixes nothing** — an event dropped by the adapter never reaches the fold, and one dropped by
 a projection's `apply()` never reaches wasm. That is exactly how `compaction/summary`'s real
 token spend (it carries `data.usage` *and* its own `model`/`provider`, which differ from the
@@ -656,27 +674,33 @@ Query a historical month with `state.read_month("YYYY-MM")` /
 `agent-vitals state months` enumerates what has data. The computation (`token_by_date_model`,
 `priced_day`) is in agent-vitals-domain / `cost.py` precisely so the Tauri menu bar and any future
 month-query surface reuse it rather than growing a fourth copy. The DeepSeek **price
-table** lives only in `assets/pricing.json` (CLI 两侧读它；`integrations/dsh-client/
-pricing.json` 是 build 时复制出的运行时份，宿主 `costReport` 投影读它；`styles/index.ts`
-另内嵌一份仅供展示用的模型短名副本——三处由 `tests/test_pricing_lockstep.py` 守）;
+table** lives only in `assets/pricing.json` (CLI 两侧读它；直到 2026-09-22，`integrations/
+dsh-client/pricing.json` 是 build 时复制出的运行时份、`styles/index.ts` 另内嵌一份仅供
+展示用的模型短名副本——三处由 `tests/test_pricing_lockstep.py` 守。dsh-client 拆成独立
+仓库 `dsh-agent-vitals-audit` 后，那两份副本活在那个仓库里，`test_pricing_lockstep.py`
+在本仓库摸不到 dsh-client 目录时优雅跳过，不再是硬失败——同步纪律见那个仓库 README）;
 prices are business data, not rules — they change without a golden `--update`. The
 **cost computation itself** (`cost_report`) is a fourth lockstep, one level up from the
 price table: `crates/agent-vitals-domain/src/domain/cost/mod.rs` ↔ `packages/agent-vitals-python/agent_vitals/agent/cost.py`
-↔ `integrations/dsh-client/src/host/index.ts::costReportFrom` all implement the same
-peak/off-peak-split pricing math over `{by_model, sequence}`; the CLI two-language parity
-is caught by `test_cli_matrix.py`'s `both()` differential, the TS mirror by
-`integrations/dsh-client/scripts/verify-host.mjs` asserting real numbers against the checked-in
-`pricing.json`. (2026-08: cost 从二进制 `src/agent/cost.rs` 迁进 domain crate —— preflight
+↔ `src/host/index.ts::costReportFrom` in the standalone `dsh-agent-vitals-audit` repo all
+implement the same peak/off-peak-split pricing math over `{by_model, sequence}`; the CLI
+two-language parity is caught by `test_cli_matrix.py`'s `both()` differential, the TS mirror
+by that repo's own `scripts/verify-host.mjs` asserting real numbers against its checked-in
+`pricing.json` copy. (2026-08: cost 从二进制 `src/agent/cost.rs` 迁进 domain crate —— preflight
 Phase 0-1 —— 二进制侧退成 `pub use` 薄封装；`priced_day` 一并进 core
 （`cost.rs::priced_day` ↔ `cost.py::priced_day`，`tests/test_cost_priced_day.py` 交叉锁定），
 Tauri 菜单栏与未来按月查询 surface 直接 `use agent_vitals_domain::cost`，不长第四份拷贝。)
 
 Scan output must never be committed — `.gitignore` covers `skill-scan*.json`, `scan-*.json`,
-`*.scan.json`, and now also the npm `node_modules/` of `dsh/`/`integrations/dsh-client/`. The committed
-`integrations/dsh-client/agent_vitals_wasm_bg.wasm` and `integrations/dsh-client/pricing.json` are the deliberate
-build-artifact exceptions: the host plugin `readFileSync`s both at runtime (the wasm binary
-and the price table `costReport` prices against), `wasm-opt` is disabled so the wasm build
-needs no network, and `pricing.json` is a plain `cp` from `assets/pricing.json`
-— re-copy it by hand whenever the source changes; `tests/test_pricing_lockstep.py`'s
-`HostPricingCopyLockstepTests` byte-compares them so a forgotten copy fails loudly instead
-of silently pricing off stale numbers.
+`*.scan.json`, and the npm `node_modules/` of `integrations/dsh/` (that ignore line for
+`integrations/dsh-client/` is now dead weight left over from before the 2026-09-22 extraction —
+harmless, but there is nothing left under that path to ignore). What used to be the committed
+`integrations/dsh-client/agent_vitals_wasm_bg.wasm` and `integrations/dsh-client/pricing.json`
+build-artifact exceptions (the host plugin `readFileSync`s both at runtime — the wasm binary
+and the price table `costReport` prices against — `wasm-opt` disabled so the wasm build needs
+no network, `pricing.json` a plain `cp` from `assets/pricing.json`) now live as the equivalent
+committed files in the standalone `dsh-agent-vitals-audit` repo; re-copy them by hand there
+whenever this repo's source changes — `tests/test_pricing_lockstep.py`'s
+`HostPricingCopyLockstepTests` used to byte-compare them and fail loudly on a forgotten copy,
+but it can no longer see that repo's copy, so it now skips instead. The forgotten-copy failure
+mode this test used to catch is real again; there is no automated guard for it anymore.

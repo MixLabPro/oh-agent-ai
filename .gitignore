@@ -37,8 +37,8 @@ target/
 # 它是仓库内容的副本，提交进来只会和源文件不同步。
 /dist/
 
-# npm 包（dsh/ 与 dsh-client/）的本地依赖
-integrations/dsh-client/node_modules/
+# npm 包（dsh/）的本地依赖。dsh-client/ 2026-09-22 拆到独立仓库
+# dsh-agent-vitals-audit，这条 ignore 规则随目录一起搬走了。
 integrations/dsh/node_modules/
 node_modules/
 lib/
