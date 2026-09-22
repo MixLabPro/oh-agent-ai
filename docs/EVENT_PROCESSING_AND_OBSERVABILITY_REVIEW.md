@@ -202,7 +202,17 @@ WatcherHealthChanged 的变化才发——这些模式正确，问题是**没有
   navigation）成功路径统一经 `log_spawn_success` 记「用时 + 是否有兜底输出」
   （此前只有失败路径留痕，成功路径的耗时完全不可见）；watcher 健康日志顺带
   带上 `coalesced_wake_count`（不进「变了才发」的 key——涨得太勤，进 key 等于
-  废掉这条纪律——只是搭在真实状态跳变那条日志里免费带出来）。
+  废掉这条纪律——只是搭在真实状态跳变那条日志里免费带出来）。**2026-09-23
+  补第二层**：真机验收持续跑了半小时后，`tick finished in` 从基线的几十
+  毫秒稳定涨到 7-13s（27 次 tick，均值 13.1s，占墙钟时间 22%），但 4 个子
+  进程 spawn 的耗时加起来只占 2-5s——缺口在 `sync_tick_inner` 尾部那串进程内
+  直调（`refresh`/`budget_alerts::maybe_notify`/`quota_alerts::maybe_notify`/
+  `drain_event_bus`/`publish_invalidation`），当时全都没有单独计时，只能盯
+  着总数猜。补了个 `timed(label, f)` 单步计时包装（三条 `refresh` 调用点——
+  paused/控制态不可读/正常流程——都补齐，不只是主路径），`refresh` 正是原
+  始事故热栈那批函数（`calendar_month`/`day_freshness`/`claude_provider_
+  amounts`/`billing_declarations`）,是头号嫌疑，但补埋点当时还没等到下一次
+  真机复验证实具体是哪一步——留给下一次真机验收核对。
 - **诊断包 v2（2026-09-22 补，`export_diagnostic_package` → `agent-vitals-
   diagnostic/v2`）**：新增 `observability` 段——日志尾（`read_redacted_tail`，
   最多 200 行，经 `redact_path_like` 脱敏投影，不是原始文件）、watcher 健康

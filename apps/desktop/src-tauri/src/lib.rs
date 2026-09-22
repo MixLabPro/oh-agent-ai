@@ -1366,6 +1366,19 @@ fn sync_tick(app: &AppHandle) {
     agent_vitals_runtime::logging::log_info("sync", &format!("tick finished in {:?}", start.elapsed()));
 }
 
+/// 单步计时包装：只覆盖 `sync_tick_inner` 尾部那串进程内直调（`refresh`/
+/// `budget_alerts`/`quota_alerts`/`drain_event_bus`/`publish_invalidation`）——
+/// 子进程 spawn 那 4 步（discover/claude-sync/sync-facts/sessions navigation）
+/// 各自早已有独立计时日志，不用这层再包一次。2026-09-22 真机验收发现总 tick
+/// 耗时（`tick finished in`）从基线的几十毫秒涨到稳定 7-13s，但子进程耗时加
+/// 起来只占 2-5s——缺口就在这几步进程内直调上，此前没有任何一步单独计时，
+/// 只能盯着总数猜；这层补上之后缺口该在哪一步就能直接读出来，不用再猜。
+fn timed(label: &str, f: impl FnOnce()) {
+    let start = std::time::Instant::now();
+    f();
+    agent_vitals_runtime::logging::log_info("sync", &format!("{label} 完成，用时 {:?}", start.elapsed()));
+}
+
 /// 一轮同步 + 落盘状态 + 重建托盘。**每一条路径都走到这里**——没有提前 return
 /// 跳过托盘更新的分支（这正是「多数正常路径连 state 重读都不做」的修复：无未折
 /// 会话/二进制缺失/discover 失败也要刷新，把外部更新带进托盘）。
@@ -1375,14 +1388,14 @@ fn sync_tick_inner(app: &AppHandle) {
             let status = SyncStatus::ok("paused", "已按你的选择暂停本机解析".into());
             overview::save_sync_status(&status);
             publish_sync_status(app, &status);
-            refresh(app);
+            timed("refresh", || refresh(app));
             return;
         }
         Err(error) => {
             let status = SyncStatus::fail("control", format!("同步控制状态不可读：{error}"));
             overview::save_sync_status(&status);
             publish_sync_status(app, &status);
-            refresh(app);
+            timed("refresh", || refresh(app));
             return;
         }
         Ok(false) => {}
@@ -1400,18 +1413,18 @@ fn sync_tick_inner(app: &AppHandle) {
     // 宿主区：sessions navigation（20s 硬超时；失败不覆盖 hosts.json——上一轮
     // 快照继续渲染并自然转 stale，spec §6 决策 5）。
     refresh_hosts();
-    refresh(app);
-    budget_alerts::maybe_notify(app);
-    quota_alerts::maybe_notify(app);
+    timed("refresh", || refresh(app));
+    timed("budget_alerts", || budget_alerts::maybe_notify(app));
+    timed("quota_alerts", || quota_alerts::maybe_notify(app));
     // 事件总线 drain：无论本轮是否有新折账——drain 自己知道有没有（deliveries
     // 反连接），空轮是 no-op；崩溃残留也在此补投。desktop-ui 合并型消费者在
     // flush 里发 `Invalidated`（带 hosts）。
-    drain_event_bus(app);
+    timed("drain_event_bus", || drain_event_bus(app));
     // 电平检查（spec §4.4）：不经 outbox 的写（DSH oneline 折账落库、桌面 IPC 的
     // 声明/价卡保存……）也要让 webview 失效——revision 前进才发；上面 flush 已发过
     // 的同 revision 被发布器吞掉。这取代了旧 `FoldCompleted`（fold 成功 → 200ms 去抖
     // → 必发）：现在 fold 有没有真的改库由 revision 说了算。
-    publish_invalidation(app, std::collections::BTreeSet::new());
+    timed("publish_invalidation", || publish_invalidation(app, std::collections::BTreeSet::new()));
 }
 
 /// 按序执行独立导入阶段并保留全部失败原因。成功导入的 facts 即使处于部分
