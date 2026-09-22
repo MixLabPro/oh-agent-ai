@@ -450,8 +450,24 @@ impl ReadGate {
         （`data_monthly_summary` / `data_daily_summary` / `read_calendar_month` /
         `read_hourly_distribution`，9.13）
   - [ ] 真机：同压测下稳态 CPU < 15%，tokio worker 无 SQLite 栈帧（留待真机验收）
-- [ ] **P3（可选）**：MCP serve 轮询 revision 接 `ReadMemo`；诊断包 v2 带 `ReadGate`/memo 命中率快照
-  （与 REVIEW P1 日志系统合并做）
+- [x] **P3（可选）**——部分落地 + 一项勘正（2026-09-22）
+  - [x] MCP serve 接 `ReadMemo`：`control_plane.rs` 的 `daily_summary`/
+        `monthly_summary` 两个 action 此前直接调裸 trait 方法，绕过了 P2 已经
+        接好的 memo；改走 `_json_memoized`（`calendar_month`/`hourly_distribution`
+        两个 action 早就通过 `crate::summary::calendar_month`/`hourly_distribution`
+        自由函数间接命中 memo，不用改）。测试
+        `daily_and_monthly_summary_actions_are_memo_wired_and_shape_stable`
+        钉住两次调用的 `data` 字段逐字节相等（envelope 外层的 `generated_at`
+        每次都新，比较范围收在 `data`）。
+  - [x] **勘正：MCP serve 复用 `ReadGate` 不适用，不是没做。** `apps/cli/src/
+        mcp.rs` 模块头就写着「单连接串行」——一行读完整处理完才读下一行，
+        `dispatch_with_permissions` 不起线程，同一个 serve 进程内**没有并发**
+        可言。`ReadGate` 是并发调节阀，接一个从不并发的调用点等于什么都不做。
+        跨进程并发（多个 MCP host 各起一个 serve）不是 `ReadGate` 能管的——
+        那是进程内静态信号量，管不到别的进程；这一层的保护已经是 P2 的
+        `open_db_ro`（只读连接，不抢写锁）+ SQLite 自己的 WAL/`busy_timeout`。
+  - [ ] 诊断包 v2（日志尾 + watcher 健康 + 事件计数/`ReadGate`/`ReadMemo` 命中率
+        快照，含导出脱敏）：未做
 
 ---
 

@@ -8,7 +8,6 @@
 use std::path::{Path, PathBuf};
 
 use agent_vitals_data::authority::AuthorityDb;
-use agent_vitals_data::repository::SummaryRepository;
 use serde_json::{json, Value};
 
 use super::{build_envelope, coverage_not_applicable, AuthorityHandle, ToolError, ToolSpec};
@@ -121,16 +120,27 @@ fn read_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, ToolE
         }),
         "sync_state" => json!({ "action": action, "sync": sync_state(data_home)? }),
         "daily_summary" => {
+            // 经 memo（RUNTIME_INVALIDATION spec §5.1）——一次 `data-mcp serve`
+            // 进程可能在同一次对话里被同一个 agent 反复问同一天的账，serve 是
+            // 单连接串行（无并发可言，`ReadGate` 在这个进程里无事可做——
+            // spec §5.3 已记这条勘正），但重复查询本身值得省：同 revision 下
+            // 第二次问直接返回缓存值。
             let date = required_string(args, "date")?;
             let summary = crate::summary::SqlSummaryRepository::at(data_home)
-                .daily_summary(&agent_vitals_data::repository::DailySummaryQuery { date: date.to_owned() });
-            json!({ "action": action, "date": date, "summary": summary.to_json() })
+                .daily_summary_json_memoized(
+                    &agent_vitals_data::repository::DailySummaryQuery { date: date.to_owned() },
+                    crate::query::read_memo::ReadMemo::global(),
+                );
+            json!({ "action": action, "date": date, "summary": Value::clone(&summary) })
         }
         "monthly_summary" => {
             let month = required_string(args, "month")?;
             let summary = crate::summary::SqlSummaryRepository::at(data_home)
-                .monthly_summary(&agent_vitals_data::repository::MonthlySummaryQuery { month: month.to_owned() });
-            json!({ "action": action, "month": month, "summary": summary.to_json() })
+                .monthly_summary_json_memoized(
+                    &agent_vitals_data::repository::MonthlySummaryQuery { month: month.to_owned() },
+                    crate::query::read_memo::ReadMemo::global(),
+                );
+            json!({ "action": action, "month": month, "summary": Value::clone(&summary) })
         }
         "calendar_month" => {
             let month = required_string(args, "month")?;
@@ -392,5 +402,74 @@ fn authority_error(error: agent_vitals_data::authority::AuthorityError) -> ToolE
         agent_vitals_data::authority::AuthorityError::NewerSchema { found, supported } => ToolError::new("schema_too_new", format!("authority schema v{found} is newer than supported v{supported}")),
         agent_vitals_data::authority::AuthorityError::OlderSchema { found } => ToolError::new("schema_migration_required", format!("authority schema v{found} is older than supported")),
         other => ToolError::new("internal_error", other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_vitals_data::authority::AuthorityDb;
+
+    fn tmp_home(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "avmcp-cp-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(p.join("state")).unwrap();
+        p
+    }
+
+    fn seed_fact(db: &AuthorityDb, fact_id: &str, event_ts_ms: i64) {
+        db.conn().execute(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES ('run', 1, 'cli', 'succeeded', 1) ON CONFLICT(run_id) DO NOTHING",
+            [],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                 source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
+                 event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
+                 output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES (?1, 'dsh', 'm', 'sess', ?1, 'assistant-usage', NULL, 'deepseek-chat',
+                 ?2, 1, 10, 0, 0, 5, 'run', 1, 1)",
+            rusqlite::params![fact_id, event_ts_ms],
+        ).unwrap();
+    }
+
+    /// `daily_summary`/`monthly_summary` control-plane actions must route through
+    /// the memoized `SqlSummaryRepository` methods (RUNTIME_INVALIDATION spec
+    /// §5.1) rather than the raw trait methods — this pins the wiring itself
+    /// (shape unchanged, repeat calls agree byte-for-byte) since nothing else in
+    /// the MCP test surface exercised these two actions before.
+    #[test]
+    fn daily_and_monthly_summary_actions_are_memo_wired_and_shape_stable() {
+        let home = tmp_home("summary");
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        let month = "2026-09";
+        let date = "2026-09-10";
+        let (start, _) = agent_vitals_data::authority_query::beijing_month_bounds_ms(month).unwrap();
+        seed_fact(&db, "f1", start + 3_600_000);
+        drop(db);
+
+        // envelope 的 `generated_at` 每次都新——比较范围收在 `data`（真正
+        // 经 memo 的那部分）：memo 命中时两次调用的 summary 必须逐字节相等。
+        let daily1 = run(&json!({ "action": "daily_summary", "date": date }), &home, false).unwrap();
+        let daily2 = run(&json!({ "action": "daily_summary", "date": date }), &home, false).unwrap();
+        assert_eq!(daily1["data"], daily2["data"], "repeat calls must agree byte-for-byte");
+        assert!(daily1["data"]["summary"]["tokens_by_host"].is_object(), "must be the full DTO shape, not a stub");
+        assert_eq!(daily1["data"]["date"], date);
+
+        let monthly1 = run(&json!({ "action": "monthly_summary", "month": month }), &home, false).unwrap();
+        let monthly2 = run(&json!({ "action": "monthly_summary", "month": month }), &home, false).unwrap();
+        assert_eq!(monthly1["data"], monthly2["data"], "repeat calls must agree byte-for-byte");
+        assert!(monthly1["data"]["summary"]["by_host"].is_object(), "must be the full DTO shape, not a stub");
+        assert_eq!(monthly1["data"]["month"], month);
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

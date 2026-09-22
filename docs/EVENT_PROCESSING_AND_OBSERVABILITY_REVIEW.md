@@ -169,7 +169,11 @@ WatcherHealthChanged 的变化才发——这些模式正确，问题是**没有
   失败——本次 CPU 事故唯一的过程证据来源，此前完全不落盘）；
   `ingest/sync_service.rs` 11 处（retention/candidate/pricing/event
   dispatch/billing declarations 的 warn 与 info）；
-  `apps/cli/src/agent/oneline.rs` 1 处；
+  `apps/cli/src/agent/oneline.rs` 1 处；`apps/cli/src/mcp.rs`（Data MCP
+  server，2026-09-22 补）5 处（stdin 读错误/tool 错误/审计三处），生命周期
+  横幅两处保留原样直出 stderr、同时补一条 `log_info`（外部 MCP host 靠这两行
+  文本判活；这是本文当初没写进 P1 清单的一处，MCP server 的 stderr 能否被
+  host 留存不可控，本地这份文件是唯一能保证留下来的副本）；
   桌面 `lib.rs` 10 处原生 `eprintln!`（event-bus/watch 拓扑/timezone/issue
   时间戳迁移）+ **`run_discover`/`run_navigation` 两处此前用 `.output().ok()?`
   /只读 stdout、子进程 stderr 从未读过一次的盲区**（现在 spawn 失败/非零
