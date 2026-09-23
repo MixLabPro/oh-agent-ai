@@ -414,8 +414,11 @@ Python 套件零漂移，才打勾。R1 无 Rust 改动，另需真机 bundle �
 - [ ] **R2（读路径硬保护）** — F2 + F3
   - [x] read_overview async + run_heavy_read + 双检查 + memo 收口（93256dc；
     并发 ≤2/防陈旧/跨 home 隔离测试钉住；desktop 141 绿 + clippy -D 干净）
-  - [ ] budget_profiles 改走 memoized summary；MonthlySummaryMemo 并入 ReadMemo
-  - [ ] budget_profiles 输出等价测试；并发 ≤2 计算测试
+  - [x] budget_profiles 复用 memoized 输入（from_parts 拆分 + assembly 共享
+    monthly Arc/shared_daily；逐字节等价测试钉住——按等价落法未做 Value 往返，
+    ReadMemo 保持 Value 型，typed 部件由 desktop 侧 MonthlySummaryMemo 供给）
+  - [x] budget_profiles 输出等价测试；并发 ≤2 计算测试（93256dc + 本提交；
+    workspace 43 套件 + desktop 141 + golden 16 + Python 1233 全绿）
 - [ ] **R3（发射侧纪律）** — F4 + F5
   - [ ] 簿记判据共用函数 + 静默提交 + revision_guard 闭集更新
   - [ ] 簿记读方闭集守卫测试
