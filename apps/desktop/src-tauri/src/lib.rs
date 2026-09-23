@@ -1478,7 +1478,7 @@ fn sync_tick_light(
         publish_invalidation(app, hosts_for_invalidation)
     });
     if tray_due {
-        let ov = timed_value("read_overview", overview::read_overview);
+        let ov = timed_value("read_overview", overview_snapshot_typed_sync);
         timed("refresh", || refresh(app, &ov));
         agent_vitals_runtime::logging::log_info(
             "sync",
@@ -1532,7 +1532,7 @@ fn sync_tick_inner(app: &AppHandle) {
             let status = SyncStatus::ok("paused", "已按你的选择暂停本机解析".into());
             overview::save_sync_status(&status);
             publish_sync_status(app, &status);
-            let ov = timed_value("read_overview", overview::read_overview);
+            let ov = timed_value("read_overview", overview_snapshot_typed_sync);
             timed("refresh", || refresh(app, &ov));
             return;
         }
@@ -1540,7 +1540,7 @@ fn sync_tick_inner(app: &AppHandle) {
             let status = SyncStatus::fail("control", format!("同步控制状态不可读：{error}"));
             overview::save_sync_status(&status);
             publish_sync_status(app, &status);
-            let ov = timed_value("read_overview", overview::read_overview);
+            let ov = timed_value("read_overview", overview_snapshot_typed_sync);
             timed("refresh", || refresh(app, &ov));
             return;
         }
@@ -1563,7 +1563,7 @@ fn sync_tick_inner(app: &AppHandle) {
     // `quota_alerts` 三处共用同一个引用——此前各自独立 `read_overview()`，
     // 一个 tick 里白算两三遍同一份重 SQL 聚合（budget_alerts 单独一项就是
     // 3.4-3.9s）。
-    let ov = timed_value("read_overview", overview::read_overview);
+    let ov = timed_value("read_overview", overview_snapshot_typed_sync);
     timed("refresh", || refresh(app, &ov));
     timed("budget_alerts", || budget_alerts::maybe_notify(app, &ov));
     timed("quota_alerts", || quota_alerts::maybe_notify(app, &ov));
@@ -2229,30 +2229,144 @@ fn focus_session_target(app: &AppHandle, target: WorkbenchTarget) {
 /// 没有理由为一份没有入口、内容更少的旧界面继续维护 `toggle_window`/
 /// `hide_window`/一份独立的 HTML+JS+CSS。命令名留作 `read_overview` 不改，
 /// 只是现在唯一的调用方是工作台。
-/// `read_overview` IPC 的 revision 备忘（LIGHT-PATH spec §5.3）：同
-/// authority revision 直接复用上次序列化结果。风暴期 React 按 Invalidated
-/// 事件懒刷新——同一 revision 的连续 invoke 不再各自重跑 2.2s 级聚合。
-/// 进程内存、单条（最新覆盖）、无持久化（HARDENING §5.5 同款纪律）。
-struct OverviewMemo(std::sync::Mutex<Option<(u64, Value)>>);
+///
+/// `read_overview` IPC 的 revision 备忘（LIGHT-PATH spec §5.3 → REFRESH_STORM
+/// R2 收口）：同 authority revision 直接复用上次序列化结果；槽键含 data_home
+/// （并行测试的 tmp 目录互不串槽，`MonthlySummaryMemo` 同款纪律）。进程内存、
+/// 单条（最新覆盖）、无持久化（HARDENING §5.5 同款纪律）。R2 起从 managed
+/// State 改为进程单例：IPC 路径的 `spawn_blocking` 闭包要 'static，State 的
+/// 借用进不去；托盘/tick 的四处直调点（`overview::read_overview()`）收口到
+/// 同一槽——此前它们各自全量重算且完全绕过备忘（2026-09-23 风暴的放大器之一）。
+/// IPC 路径经 `run_heavy_read`：ReadGate 2 permits + **拿到许可后双检查**——
+/// 同 revision 突发 N 个并发 invoke 的实际全量计算 ≤ `HEAVY_READ_PERMITS`
+/// （不引入 per-key single-flight，背压 spec §5.1 裁决）。
+struct OverviewMemoEntry {
+    revision: u64,
+    data_home: String,
+    /// 托盘/菜单面：类型化快照，Arc 零拷贝共享。
+    overview: std::sync::Arc<overview::Overview>,
+    /// IPC 面：预序列化结果（同 revision 的连续 invoke 不再重跑 2.2s 级聚合，
+    /// 也不重复序列化）。
+    value: Value,
+}
 
-#[tauri::command(async)]
-fn read_overview(memo: tauri::State<OverviewMemo>) -> Value {
-    let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
-    let revision = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
-        .ok()
-        .and_then(|db| db.revision().ok());
-    let Some(revision) = revision else {
-        // revision 读不到（库不存在/只读失败）——按现状全量算，不缓存。
-        return serde_json::to_value(overview::read_overview()).unwrap_or(Value::Null);
-    };
-    if let Some((r, v)) = memo.0.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-        if r == revision {
-            return v;
+struct OverviewMemo {
+    slot: std::sync::Mutex<Option<OverviewMemoEntry>>,
+    hits: std::sync::atomic::AtomicU64,
+    computed: std::sync::atomic::AtomicU64,
+}
+
+fn overview_memo() -> &'static OverviewMemo {
+    static MEMO: std::sync::OnceLock<OverviewMemo> = std::sync::OnceLock::new();
+    MEMO.get_or_init(|| OverviewMemo {
+        slot: std::sync::Mutex::new(None),
+        hits: std::sync::atomic::AtomicU64::new(0),
+        computed: std::sync::atomic::AtomicU64::new(0),
+    })
+}
+
+/// 槽命中：revision 与 data_home 都一致才算同一条目。锁内只做查/比对/clone
+/// （ReadMemo 同款锁纪律），计数走原子量不占锁。
+fn overview_memo_get(revision: u64, data_home: &str) -> Option<(std::sync::Arc<overview::Overview>, Value)> {
+    let guard = overview_memo().slot.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = guard.as_ref() {
+        if entry.revision == revision && entry.data_home == data_home {
+            overview_memo()
+                .hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Some((std::sync::Arc::clone(&entry.overview), entry.value.clone()));
         }
     }
-    let value = serde_json::to_value(overview::read_overview()).unwrap_or(Value::Null);
-    *memo.0.lock().unwrap_or_else(|e| e.into_inner()) = Some((revision, value.clone()));
-    value
+    None
+}
+
+/// 写回（防陈旧）：同 data_home 且槽内 revision ≥ 本次——排队期间别人已写了
+/// 更新的结果——则不覆盖；不同 data_home（切库/并行测试）按单槽最新覆盖语义
+/// 直接替换。
+fn overview_memo_put(revision: u64, data_home: String, ov: std::sync::Arc<overview::Overview>, value: Value) {
+    let mut guard = overview_memo().slot.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(existing) = guard.as_ref() {
+        if existing.revision >= revision && existing.data_home == data_home {
+            return;
+        }
+    }
+    *guard = Some(OverviewMemoEntry { revision, data_home, overview: ov, value });
+}
+
+fn authority_revision_at(path: &std::path::Path) -> Option<u64> {
+    agent_vitals_data::authority::AuthorityDb::open_readonly(path)
+        .ok()
+        .and_then(|db| db.revision().ok())
+}
+
+/// 计算并写回。调用方必须已在 ReadGate 许可下（IPC 排队路径），或托盘路径的
+/// try_acquire 直算豁免。入口先做双检查——排队期间首个完成者可能已写回同
+/// revision 结果，直接命中返回（这就是并发 miss 收敛为 ≤ permits 次的机制）。
+fn overview_snapshot_compute(revision: u64, data_home: String) -> (std::sync::Arc<overview::Overview>, Value) {
+    if let Some(hit) = overview_memo_get(revision, &data_home) {
+        return hit;
+    }
+    let ov = std::sync::Arc::new(overview::read_overview());
+    let value = serde_json::to_value(ov.as_ref()).unwrap_or(Value::Null);
+    overview_memo_put(revision, data_home, std::sync::Arc::clone(&ov), value.clone());
+    let computed = overview_memo()
+        .computed
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
+    let hits = overview_memo().hits.load(std::sync::atomic::Ordering::Relaxed);
+    agent_vitals_runtime::logging::log_info(
+        "read_overview",
+        &format!("备忘重算 revision={revision}（累计 computed={computed} hits={hits}）"),
+    );
+    (ov, value)
+}
+
+/// 同步入口（托盘 / tick 线程上下文，四处直调点收口到这里）：不排队——
+/// `try_acquire` 有许可就守闸门（与 IPC 共享 2 permits，常态下互斥）；占满也
+/// 直算（托盘每 300s 一刷，不能被 IPC 风暴饿死），直算仍读写同一备忘槽，
+/// 与 IPC 路径共享去重收益。
+fn overview_snapshot_typed_sync() -> std::sync::Arc<overview::Overview> {
+    let dh = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&dh);
+    let Some(revision) = authority_revision_at(&path) else {
+        // revision 读不到（库不存在/只读失败）——按现状全量算，不缓存。
+        return std::sync::Arc::new(overview::read_overview());
+    };
+    let data_home = dh.display().to_string();
+    if let Some((ov, _)) = overview_memo_get(revision, &data_home) {
+        return ov;
+    }
+    let _permit = heavy_read_gate().try_acquire();
+    overview_snapshot_compute(revision, data_home).0
+}
+
+/// IPC 异步入口：搬出 tokio worker（`run_heavy_read`）+ ReadGate 排队 + 双检查。
+async fn overview_snapshot_value_async() -> Value {
+    overview_snapshot_value_async_at(overview::data_home()).await
+}
+
+/// `overview_snapshot_value_async` 的 data_home 注入变体——测试用 tmp home 直接
+/// 调这里，不碰进程级 env（desktop 测试并行跑在同一进程，`AGENT_VITALS_HOME`
+/// 的设置/清理会与读真机数据的既有测试竞态）。
+async fn overview_snapshot_value_async_at(dh: std::path::PathBuf) -> Value {
+    let path = agent_vitals_data::authority::default_authority_path(&dh);
+    let Some(revision) = authority_revision_at(&path) else {
+        // 库不可开：按现状全量算，不缓存。仍在阻塞池跑（降级路径同样可能不轻）。
+        return run_heavy_read(move || {
+            serde_json::to_value(overview::read_overview()).unwrap_or(Value::Null)
+        })
+        .await;
+    };
+    let data_home = dh.display().to_string();
+    if let Some((_, value)) = overview_memo_get(revision, &data_home) {
+        return value;
+    }
+    run_heavy_read(move || overview_snapshot_compute(revision, data_home).1).await
+}
+
+#[tauri::command(async)]
+async fn read_overview() -> Value {
+    overview_snapshot_value_async().await
 }
 
 /// 工作台总览的权威质量状态。金额仍由 summary DTO 提供；这里仅转发
@@ -2668,9 +2782,9 @@ fn save_statistics_timezone_config(app: AppHandle, timezone: String) -> Result<V
     let background_app = app.clone();
     std::thread::spawn(move || {
         refresh_hosts();
-        refresh(&background_app, &overview::read_overview());
+        refresh(&background_app, overview_snapshot_typed_sync().as_ref());
     });
-    refresh(&app, &overview::read_overview());
+    refresh(&app, overview_snapshot_typed_sync().as_ref());
     Ok(serde_json::json!({ "status": "saved", "timezone": saved }))
 }
 
@@ -3983,7 +4097,7 @@ fn data_source_status() -> Value {
             }
         }
     }
-    merge_source_sync_failure(&mut report, &overview::read_overview().sync);
+    merge_source_sync_failure(&mut report, &overview_snapshot_typed_sync().sync);
     if matches!(overview::sync_is_paused(), Ok(true)) {
         if let Some(sources) = report.get_mut("sources").and_then(Value::as_array_mut) {
             for source in sources {
@@ -4503,7 +4617,6 @@ pub fn run() {
         .manage(store::StoreBuildLock::new())
         // Skill 体检 tab 的扫描缓存 + 取消把手（store.rs SkillsScanState 注释）。
         .manage(store::SkillsScanState::new())
-        .manage(OverviewMemo(std::sync::Mutex::new(None)))
         .on_window_event(|window, event| {
             // 工作台 × 按钮 → 隐藏不销毁。config-created 窗口被 × 关掉会 destroy，
             // 之后 reopen 是 no-op（get_webview_window 返回 None）；hide 保状态——
@@ -4664,8 +4777,8 @@ pub fn run() {
                 }
                 Err(error) => agent_vitals_runtime::logging::log_warn("migration", &format!("issue timestamp units: database unavailable: {error}")),
             }
-            let ov = overview::read_overview();
-            let menu = build_menu(app.handle(), &ov)?;
+            let ov = overview_snapshot_typed_sync();
+            let menu = build_menu(app.handle(), ov.as_ref())?;
             TrayIconBuilder::with_id("main")
                 .icon(tray_template_icon()?)
                 .icon_as_template(true)
@@ -4752,6 +4865,84 @@ mod tests {
         assert_eq!(diagnostic_pricing_version(&serde_json::json!({})), Value::Null);
         let no_pricing_key = serde_json::json!({ "data": {} });
         assert_eq!(diagnostic_pricing_version(&no_pricing_key), Value::Null);
+    }
+
+    /// R2 备忘并发与防陈旧（REFRESH_STORM spec §9 R2 行）。两个断言族：
+    /// - 8 路并发同 revision 走**异步入口**（`run_heavy_read` + ReadGate 2
+    ///   permits + 拿到许可后双检查）——实际全量计算 ∈ [1,
+    ///   HEAVY_READ_PERMITS]，其余排队后命中；8 份返回值逐字节一致。这是
+    ///   「同 revision 突发 N 个并发 invoke 的实际计算 ≤ permits」契约的钉子。
+    /// - 写回防陈旧（槽内 revision ≥ 本次不覆盖）与跨 data_home 隔离（并行
+    ///   测试 tmp 目录互不串槽，`MonthlySummaryMemo` 同款键纪律）。
+    ///
+    /// env：不碰进程级变量——直接调 `overview_snapshot_value_async_at` 注入
+    /// tmp home；其余 desktop 测试都显式传 home，互不影响。
+    #[test]
+    fn overview_memo_concurrency_and_stale_guard() {
+        let home = tmp_home("ovmemo");
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        {
+            let db = agent_vitals_data::authority::AuthorityDb::open(&path, 1).unwrap();
+            db.with_immediate_txn(|conn| {
+                conn.execute(
+                    "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+                     VALUES ('ovmemo', 1, 'cli', 'succeeded', 1)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        let revision = authority_revision_at(&path).expect("写入后 revision 必可读");
+        assert!(revision >= 1, "含行变更的事务必须推进 revision");
+
+        let computed_before = overview_memo()
+            .computed
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let thread_home = home.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                tauri::async_runtime::block_on(overview_snapshot_value_async_at(thread_home))
+            }));
+        }
+        let mut values = Vec::new();
+        for (i, handle) in handles.into_iter().enumerate() {
+            values.push(handle.join().unwrap_or_else(|_| panic!("并发读 #{i} 不得 panic")));
+        }
+        let first = &values[0];
+        assert!(!first.is_null(), "空库降级也必须返回投影对象，不是 Null");
+        for (i, value) in values.iter().enumerate() {
+            assert_eq!(value, first, "并发同 revision 的 #{i} 号返回必须与首份一致");
+        }
+        let permits = agent_vitals_runtime::query::read_gate::HEAVY_READ_PERMITS as u64;
+        let computed_delta =
+            overview_memo().computed.load(std::sync::atomic::Ordering::Relaxed) - computed_before;
+        assert!(
+            (1..=permits).contains(&computed_delta),
+            "8 路并发同 revision 的实际计算次数必须 ∈ [1, {permits}]，实测 {computed_delta}"
+        );
+
+        // ② 防陈旧 + 跨 home：直接操纵槽（单槽语义），用标记值区分覆盖与否。
+        let data_home = home.display().to_string();
+        let (ov, value) = overview_memo_get(revision, &data_home)
+            .expect("并发阶段计算后槽内必有值");
+        assert!(
+            overview_memo_get(revision, "/nonexistent/other-home").is_none(),
+            "跨 data_home 不得串槽"
+        );
+        let stale_marker = serde_json::json!({ "stale": true });
+        overview_memo_put(revision - 1, data_home.clone(), std::sync::Arc::clone(&ov), stale_marker);
+        let (_, after_stale) = overview_memo_get(revision, &data_home).expect("槽仍应是新 revision");
+        assert_eq!(after_stale, value, "旧 revision 写回不得覆盖新值");
+        let advance_marker = serde_json::json!({ "advance": true });
+        overview_memo_put(revision + 1, data_home.clone(), ov, advance_marker.clone());
+        let (_, after_advance) =
+            overview_memo_get(revision + 1, &data_home).expect("前进写回应生效");
+        assert_eq!(after_advance, advance_marker, "更新的 revision 写回必须生效");
     }
 
     fn tmp_home(tag: &str) -> std::path::PathBuf {
