@@ -191,6 +191,42 @@ pub enum TickKind {
     Light(std::collections::BTreeSet<String>),
 }
 
+/// pending 根的重试起始间隔（收敛调查 §4/P4：此前每个 1.2s 去抖超时都对
+/// 不存在的目录重试挂载，macOS 上每次尝试都生灭一个 FSEventStream 线程——
+/// 空闲实测 0.3% 一核的纯浪费。目录晚于启动出现是分钟级事件，秒级重试
+/// 没有收益。
+pub const PENDING_RETRY_BASE: Duration = Duration::from_secs(30);
+
+/// 退避上限：目录若真会出现，5 分钟内必被看到；更久不存在的根继续等，
+/// tick 指纹对账始终兜底（watcher 只是加速器）。
+pub const PENDING_RETRY_MAX: Duration = Duration::from_secs(300);
+
+/// 一个待重试的挂载根 + 它的退避计划（纯数据，双态可测）。
+#[derive(Debug, Clone)]
+pub struct PendingRoot {
+    pub path: std::path::PathBuf,
+    /// 下一次允许重试的时刻；之前到点的重试轮应跳过它。
+    pub next_retry_at: std::time::Instant,
+    /// 当前退避间隔（指数翻倍，封顶 [`PENDING_RETRY_MAX`]）。
+    pub interval: Duration,
+}
+
+impl PendingRoot {
+    pub fn new(path: std::path::PathBuf, now: std::time::Instant) -> Self {
+        PendingRoot { path, next_retry_at: now + PENDING_RETRY_BASE, interval: PENDING_RETRY_BASE }
+    }
+
+    pub fn due(&self, now: std::time::Instant) -> bool {
+        now >= self.next_retry_at
+    }
+
+    /// 重试失败后的升级：间隔翻倍封顶，下次尝试相应推迟。
+    pub fn escalate(&mut self, now: std::time::Instant) {
+        self.interval = (self.interval * 2).min(PENDING_RETRY_MAX);
+        self.next_retry_at = now + self.interval;
+    }
+}
+
 /// watcher 触发同步的冷却下限（真机 2026-09-22 验收教训）：活动中的 agent
 /// 会话连续追加被监听目录的日志，每个去抖窗都会**合法**唤醒——若每次唤醒
 /// 都执行完整 sync（进程内 overview/tray 的 SQLite 聚合 + 子进程），CPU 会被
@@ -582,7 +618,7 @@ mod supervised {
         callbacks: Vec<WatchCallback>,
         identities: Vec<(PathBuf, RootIdentity)>,
         attached: std::collections::HashSet<PathBuf>,
-        pending: Vec<PathBuf>,
+        pending: Vec<PendingRoot>,
         failed: std::collections::HashMap<PathBuf, RootAttachFailure>,
         revision: u64,
         backend_failed: bool,
@@ -657,8 +693,9 @@ mod supervised {
                 notify::Config::default(),
             ) {
                 Ok(mut native) => {
+                    let now = std::time::Instant::now();
                     for path in &roots {
-                        self.try_attach(&mut native, path);
+                        self.try_attach(&mut native, path, now);
                     }
                     self.watcher = Some(native);
                 }
@@ -673,7 +710,7 @@ mod supervised {
         /// 挂一个根（仅在原生 watcher 存在时有意义）。成功 → attached +
         /// 规范化别名；目录未出现 → pending 留待重试；其他失败 → 该根
         /// 交给 tick 兜底（日志一次）。
-        pub(super) fn try_attach(&mut self, native: &mut notify::RecommendedWatcher, path: &Path) {
+        pub(super) fn try_attach(&mut self, native: &mut notify::RecommendedWatcher, path: &Path, now: std::time::Instant) {
             match native.watch(path, notify::RecursiveMode::Recursive) {
                 Ok(()) => {
                     // 挂载成功才是补规范化别名的位置（FSEvents 上报
@@ -688,7 +725,8 @@ mod supervised {
                         || matches!(&e.kind, notify::ErrorKind::Io(io)
                             if io.kind() == std::io::ErrorKind::NotFound);
                     if not_found {
-                        self.pending.push(path.to_path_buf());
+                        // 新 pending 从基线间隔起（P4 退避；首个重试在 30s 后）。
+                        self.pending.push(PendingRoot::new(path.to_path_buf(), now));
                     } else {
                         let failure = match &e.kind {
                             notify::ErrorKind::Io(io)
@@ -708,11 +746,28 @@ mod supervised {
             }
         }
 
-        pub(super) fn retry_pending(&mut self) {
+        pub(super) fn retry_pending(&mut self, now: std::time::Instant) {
             let old = std::mem::take(&mut self.pending);
-            let Some(mut native) = self.watcher.take() else { return };
-            for path in &old {
-                self.try_attach(&mut native, path);
+            let Some(mut native) = self.watcher.take() else {
+                self.pending = old;
+                return;
+            };
+            for entry in old {
+                if !entry.due(now) {
+                    // 退避未到——本轮跳过（P4：消灭每 1.2s 的线程生灭）。
+                    self.pending.push(entry);
+                    continue;
+                }
+                let probe = entry;
+                self.try_attach(&mut native, &probe.path, now);
+                // try_attach 仍 NotFound 时以基线间隔 push 回来——把间隔
+                // 升级为上一轮的翻倍（封顶 MAX）。
+                if let Some(requeued) =
+                    self.pending.iter_mut().rev().find(|p| p.path == probe.path)
+                {
+                    requeued.interval = probe.interval;
+                    requeued.escalate(now);
+                }
             }
             self.watcher = Some(native);
         }
@@ -893,7 +948,7 @@ fn spawn_platform_watcher(initial: WatchRegistry, waker: TickWaker) -> WatcherHa
                     }
                     Err(RecvTimeoutError::Timeout) => {
                         // 超时双职责：①补挂 pending 根；②去抖窗落定派发。
-                        state.retry_pending();
+                        state.retry_pending(std::time::Instant::now());
                         let batch = deb.take_batch();
                         batch_started_at = None;
                         last_routed_event_at = None;
@@ -1030,6 +1085,28 @@ mod tests {
         assert_eq!(claude.1, home.join(".claude/skills"));
         // 幂等：再派生一次结果一致
         assert_eq!(default_skill_watch_roots(&home), roots);
+    }
+
+    /// P4 退避语义（收敛调查 §4）：新 pending 首个重试在 30s 后；未到点
+    /// `due=false`；每次失败翻倍、封顶 300s。
+    #[test]
+    fn pending_root_backoff_schedules_and_escalates() {
+        let now = std::time::Instant::now();
+        let mut root = PendingRoot::new(std::path::PathBuf::from("/tmp/absent"), now);
+        assert!(!root.due(now + PENDING_RETRY_BASE - Duration::from_millis(1)),
+            "基线间隔内不得重试");
+        assert!(root.due(now + PENDING_RETRY_BASE));
+        assert_eq!(root.interval, PENDING_RETRY_BASE);
+
+        // 失败升级：30 → 60 → 120 → 240 → 300（封顶）
+        let mut t = now + PENDING_RETRY_BASE;
+        for expect in [60, 120, 240, 300, 300] {
+            root.escalate(t);
+            assert_eq!(root.interval.as_secs(), expect, "翻倍封顶于 300s");
+            assert!(!root.due(t + root.interval - Duration::from_millis(1)));
+            t += root.interval;
+            assert!(root.due(t));
+        }
     }
 
     /// waker：首批宿主入槽 = Queued，后续并入 = Coalesced；wait 取走集合

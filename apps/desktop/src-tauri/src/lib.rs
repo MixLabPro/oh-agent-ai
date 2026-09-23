@@ -1403,10 +1403,12 @@ fn publish_sync_status(app: &AppHandle, status: &SyncStatus) {
 /// 耗时」）：三条内部 return 路径（paused/控制态不可读/正常流程）都在
 /// `sync_tick_inner` 里，包一层比在每个 return 前插日志更不容易漏——新增一条
 /// 分支自动继承计时，不用记得在新分支里也打点。
-/// 托盘刷新的最小间隔（轻 tick 节流，LIGHT-PATH spec §5.3）：持续写入期间
-/// 托盘数字最多每 60 秒重算一次（read_overview ~2s 是最重的常规单步）；
-/// 重 tick 无条件刷，行为与现状一致。
-const TRAY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+/// 托盘刷新的最小间隔（轻 tick 节流）。**收敛调查 §3.3（P2）**：60s 与轻
+/// tick 的涌现间隔（冷却 30s + tick 自身耗时 → 实测 61–82s）失配——间隔恒
+/// ≥ 窗口，节流形同虚设（实测 17/20 轻 tick 都跑了 read_overview，2.5–21.9s）。
+/// 修正为与 `TICK_PERIOD` 对齐：托盘新鲜度回到重 tick 的 5 分钟口径（不是
+/// 新增滞后）；关系由 `tray_refresh_interval_respects_tick_regime` 断言钉死。
+const TRAY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// 连续轻 tick 达到该次数即强制升级重 tick（LIGHT-PATH spec §5.2 排序规则，
 /// 防饥饿——另一条规则是 `TICK_PERIOD` 到期，谁先到算谁）。
@@ -4712,6 +4714,26 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    /// 收敛调查 §5.2.1（P2a）：托盘节流窗与轻 tick 节奏的隐含耦合变成会红的
+    /// 测试——窗口必须骑在重 tick 周期上（≥ TICK_PERIOD），且显著大于轻 tick
+    /// 的最小可达间隔（WATCHER_SYNC_COOLDOWN + 一次典型轻 tick 的预算）。
+    /// 60s 时代这条测试是红的（60 < 300）；改回任何过小取值会立刻再红。
+    #[test]
+    fn tray_refresh_interval_respects_tick_regime() {
+        use std::time::Duration;
+        let cooldown =
+            agent_vitals_runtime::ingest::watch::WATCHER_SYNC_COOLDOWN;
+        let light_tick_typical = Duration::from_secs(10);
+        assert!(
+            TRAY_REFRESH_INTERVAL >= TICK_PERIOD,
+            "托盘节流窗必须 ≥ 重 tick 周期（骑重 tick 口径）: {TRAY_REFRESH_INTERVAL:?} < {TICK_PERIOD:?}"
+        );
+        assert!(
+            TRAY_REFRESH_INTERVAL > cooldown + light_tick_typical,
+            "托盘节流窗必须显著大于轻 tick 最小可达间隔（冷却 + 典型耗时）:              {TRAY_REFRESH_INTERVAL:?} <= {cooldown:?} + {light_tick_typical:?}"
+        );
+    }
+
     use super::*;
 
     /// 2026-09-22 真机验收抓出的字段名 bug：`data_status.data.pricing` 里

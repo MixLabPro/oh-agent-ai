@@ -576,7 +576,26 @@ pub fn read_overview() -> Overview {
 
 /// 参数化的组装入口——数据根由调用方指定，单测往临时目录写 month.json/today.json
 /// 就能端到端验证组装（读文件 → core 折叠 → 展示 JSON），不必碰真实环境变量。
+/// `read_overview` 的软预算（收敛调查 §8）：超 5s 记 WARN 并点名最慢段
+/// （P3 观测面——基线 p50 2.17s、峰值 31.9s，总耗时段级分解进日志）。
+const READ_OVERVIEW_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn read_overview_at(dh: &Path) -> Overview {
+    let t_total = std::time::Instant::now();
+    let mut slowest = ("none", std::time::Duration::ZERO);
+    let note = |name: &str, d: std::time::Duration, slowest: &mut (&'static str, std::time::Duration)| {
+        agent_vitals_runtime::logging::log_info(
+            "read_overview",
+            &format!("{name} 完成，用时 {d:?}"),
+        );
+        if d > slowest.1 {
+            *slowest = (match name {
+                "budget_sql" => "budget_sql",
+                "assembly" => "assembly",
+                _ => "bundle",
+            }, d);
+        }
+    };
     let pricing = load_pricing();
     let today = today_beijing();
     let cur_month = current_month_beijing();
@@ -612,7 +631,9 @@ fn read_overview_at(dh: &Path) -> Overview {
 
     // 预算卡：SQL 权威库实时算（跨宿主按量 CNY 口径），天生按当月窗——
     // 旧 alert.json 快照的月份漂移校正整段删除（见 budget_alert_from_sql doc）。
+    let t_budget = std::time::Instant::now();
     let budget = budget_alert_from_sql(dh);
+    note("budget_sql", t_budget.elapsed(), &mut slowest);
 
     // 多宿主导航快照：读一次 hosts.json，拆成 hosts + generated_at 两个字段
     //（后者供托盘判 stale）。**不做任何排序**——快照的 dsh→codex 序是数据层的
@@ -666,7 +687,11 @@ fn read_overview_at(dh: &Path) -> Overview {
         (uncovered, savings)
     };
 
-    Overview {
+    // P3 组装段：包住尾部全部零散 SQL（budget_profiles / metered×2 /
+    // today_tokens / recent / sync / fx / subscriptions）——它们此前没有
+    // 任何一段有计时，是 2.2s 基线最后一块未观测面。
+    let t_asm = std::time::Instant::now();
+    let overview = Overview {
         data_home: dh.display().to_string(),
         today: today_val,
         month,
@@ -691,7 +716,19 @@ fn read_overview_at(dh: &Path) -> Overview {
         month_savings,
         fx: fx_estimate(&pricing),
         subscription_cny_month: monthly_cny_subscriptions(dh, &cur_month),
+    };
+    note("assembly", t_asm.elapsed(), &mut slowest);
+    let total = t_total.elapsed();
+    if total >= READ_OVERVIEW_BUDGET {
+        agent_vitals_runtime::logging::log_warn(
+            "read_overview",
+            &format!(
+                "read_overview 超预算（{total:?} ≥ {:?}），最慢段: {} {:?}（段级明细见 INFO 日志）",
+                READ_OVERVIEW_BUDGET, slowest.0, slowest.1
+            ),
+        );
     }
+    overview
 }
 
 enum MeteredWindow<'a> { Day(&'a str), Month(&'a str) }

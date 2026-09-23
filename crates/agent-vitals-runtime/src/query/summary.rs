@@ -1935,19 +1935,36 @@ pub struct OverviewBundle {
 pub fn overview_bundle(data_home: &Path) -> OverviewBundle {
     let today_key = crate::clock::today_beijing();
     let month = crate::clock::current_month_beijing();
+    let t_open = std::time::Instant::now();
     let bounds = agent_vitals_data::authority_query::beijing_month_bounds_ms(&month);
     let db = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(data_home),
         crate::sql_sync::now_ms(),
     )
     .ok();
+    // P3 子计时（收敛调查 §2.4）：SQL 面隔离实测全部亚百毫秒，2.2s 基线的
+    // 构成只能靠段级观测定位——open / dsh SQL / claude SQL 三段。
+    crate::core::logging::log_info(
+        "read_overview",
+        &format!("bundle open 完成，用时 {:?}", t_open.elapsed()),
+    );
     let (dsh_days, claude_days) = match (&db, bounds) {
         (Some(db), Some((start, end))) => {
             let conn = db.conn();
+            let t_sql = std::time::Instant::now();
             let dsh = agent_vitals_data::authority_query::peaked_days_map(conn, "dsh", start, end)
                 .unwrap_or_else(|_| json!({}));
+            crate::core::logging::log_info(
+                "read_overview",
+                &format!("bundle dsh_sql 完成，用时 {:?}", t_sql.elapsed()),
+            );
+            let t_claude = std::time::Instant::now();
             let claude: serde_json::Map<String, serde_json::Value> =
                 merged_claude_days(conn, start, end).into_iter().collect();
+            crate::core::logging::log_info(
+                "read_overview",
+                &format!("bundle claude_sql 完成，用时 {:?}", t_claude.elapsed()),
+            );
             (dsh, serde_json::Value::Object(claude))
         }
         _ => (json!({}), json!({})),
