@@ -278,10 +278,13 @@ let renderedRevision = -1;
 let pendingRevision = -1;
 let forceRefresh = false;
 
-// 只读测试钩子（R1 手测/风暴注入用）：devtools 断言锁存单调性与拉取次数。
+// 只读测试钩子（R1 手测/风暴注入用）：devtools 断言锁存单调性与拉取轮数
+// （pulls = 实际开始的拉取轮数，即 §7.4-6 要断言的「总拉取次数」）。
+let pullRounds = 0;
 window.__wbRefresh = {
   get renderedRevision() { return renderedRevision; },
   get pendingRevision() { return pendingRevision; },
+  get pulls() { return pullRounds; },
 };
 
 // 合并的「重拉当前 tab」入口：事件桥与手点都走这里。只刷两个便宜页
@@ -294,15 +297,29 @@ window.__wbRefresh = {
 async function refreshActiveTab(force) {
   if (force === true) forceRefresh = true;
   if (!wbPull.fire()) return;
+  pullRounds += 1;
   for (;;) {
-    if (forceRefresh || pendingRevision > renderedRevision) {
-      if (activeTab === "overview") await renderOverview();
-      else if (activeTab === "calendar") await renderCalendar();
-      renderedRevision = pendingRevision;
-      forceRefresh = false;
+    // 消费在 await 之前完成：本轮只认领它开启时已通知的 revision 与 force 请求，
+    // 期间新到的留给尾随轮。欠认领安全（宁可多一次尾随拉取），不越权认领
+    // 读取窗口开启之后才到达的 revision，也不吞在飞期间的 force。
+    const revAtStart = pendingRevision;
+    const forceNow = forceRefresh;
+    forceRefresh = false;
+    const shouldPull = forceNow || revAtStart > renderedRevision;
+    const refreshable = activeTab === "overview" || activeTab === "calendar";
+    if (shouldPull && refreshable) {
+      try {
+        if (activeTab === "overview") await renderOverview();
+        else await renderCalendar();
+        // 仅成功渲染才认领（Math.max 欠认领）；异常保持锁存原值，下一事件重试。
+        renderedRevision = Math.max(renderedRevision, revAtStart);
+      } catch (e) {
+        console.warn("[workbench] 重拉渲染失败，保持锁存待下一事件重试", e);
+      }
     }
     // done() 只知「期间又有触发」，不知「该触发是否已被本轮覆盖」——被锁存
-    // 覆盖的迟到事件直接释放出队，不再补拉。
+    // 覆盖的迟到事件直接释放出队，不再补拉。try/catch 保证异常路径也走到这里，
+    // running 永不泄漏（渲染一次 reject 不能永久卡死刷新）。
     if (!wbPull.done()) break;
     if (!forceRefresh && pendingRevision <= renderedRevision) { wbPull.release(); break; }
   }

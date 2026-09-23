@@ -23,14 +23,18 @@ export type AppEvent = { type: AppEventType; revision?: number; hosts?: string[]
  * must not suppress the full `Invalidated` fan-out that may still be in flight. */
 export function makeInvalidationGate(): (event: AppEvent) => boolean {
   let seenRevision = -1;
+  // NaN 不是合法 revision：按缺失处理（保守刷新/比较侧视分支），与出货路径的
+  // Number.isFinite 守卫同口径。
+  const validRevision = (value: unknown): number =>
+    typeof value === "number" && Number.isFinite(value) ? value : -1;
   return (event) => {
     if (event.type === "SourceDataDeleted") {
-      const revision = typeof event.revision === "number" ? event.revision : -1;
+      const revision = validRevision(event.revision);
       if (revision < 0) return true; // 真删除/旧桥：保守刷新
       return revision > seenRevision; // 只比较，不推进水位
     }
     if (event.type !== "Invalidated") return false;
-    const revision = typeof event.revision === "number" ? event.revision : -1;
+    const revision = validRevision(event.revision);
     if (revision < 0) return true; // 无 revision 的旧桌面进程：保守刷新
     if (revision <= seenRevision) return false;
     seenRevision = revision;
