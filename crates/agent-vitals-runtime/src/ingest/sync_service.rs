@@ -137,8 +137,13 @@ fn scan_claude_quota_cached(
     }
     let scan: QuotaScan =
         scan_claude_quota_from_contributions(contributions.iter(), now);
+    // 缓存落盘是纯性能优化，任何 I/O 故障（磁盘满/只读目录）都不得拖垮同步
+    // ——best-effort 写，失败则本轮不缓存（下轮重解析），评审 P2-2。
     if let Ok(value) = serde_json::to_value(&fresh) {
-        crate::state::atomic_write_json(&cache_path, &value);
+        let tmp = cache_path.with_extension("json.tmp");
+        if std::fs::write(&tmp, value.to_string()).is_ok() {
+            let _ = std::fs::rename(&tmp, &cache_path);
+        }
     }
     scan
 }
@@ -926,13 +931,22 @@ mod tests {
         assert_eq!(cached2, full2, "部分失效后必须与全量扫一致");
         assert_ne!(cached2.latest, full.latest, "fixture 前后必须有差异，防止假对拍");
 
-        // recent-floor 滑动：把 now 推到 8 天后——全部命中滑出窗，windows_recent
-        // 必须归零（缓存不冻结 floor）；latest 保持（latest 本就不过滤）。
+        // recent-floor 滑动：把 now 推到 8 天后，同时把文件 mtime 也拨到
+        // 「future - 1 天」——保持 mtime 窗内（否则两路都被 mtime 窗筛掉、
+        // 空转对拍，评审 P2-1），贡献非空而 observed_at 已滑出 recent floor。
+        // windows_recent 必须归零（缓存不冻结 floor）；latest 保持（不过滤）。
         let future = now + std::time::Duration::from_secs(8 * 24 * 3600);
+        let future_mtime = std::time::SystemTime::now() + std::time::Duration::from_secs(7 * 24 * 3600);
+        for path in &files {
+            let file = std::fs::File::options().append(true).open(path).unwrap();
+            file.set_modified(future_mtime).unwrap();
+        }
         let full_future = agent_vitals_hosts::claude_quota::scan_claude_quota(&files, future);
+        assert!(full_future.latest.is_some(), "mtime 仍在窗内，贡献必须非空（防空转腿）");
         let cached_future = scan_claude_quota_cached(&home, &files, future);
         assert_eq!(cached_future, full_future, "floor 滑动后必须与全量扫一致");
         assert_eq!(cached_future.windows_recent, 0, "滑出窗的命中不得因缓存冻结而计入");
+        assert!(cached_future.latest.is_some(), "latest 不过滤，滑窗后仍保持");
 
         let _ = std::fs::remove_dir_all(&home);
     }

@@ -2410,6 +2410,12 @@ fn overview_snapshot_compute(revision: u64, data_home: String) -> (std::sync::Ar
 /// `try_acquire` 有许可就守闸门（与 IPC 共享 2 permits，常态下互斥）；占满也
 /// 直算（托盘每 300s 一刷，不能被 IPC 风暴饿死），直算仍读写同一备忘槽，
 /// 与 IPC 路径共享去重收益。
+///
+/// **同 revision 扇出必须串行**（真机 2026-09-24 soak 抓出）：托盘启动/重建
+/// 会在 1-2 秒内并发调本函数 3-5 次（菜单构建、标题、tick 尾部），try_acquire
+/// 的「不饿死」豁免让它们各自全量重算同一 revision——自造风暴。锁内二次
+/// 检查备忘：首个计算者写回后，其余等待者直接命中（不是 per-key 条件变量，
+/// 是同步路径的单把粗粒度串行锁；阻塞上界 = 一次计算）。
 fn overview_snapshot_typed_sync() -> std::sync::Arc<overview::Overview> {
     let dh = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&dh);
@@ -2418,6 +2424,12 @@ fn overview_snapshot_typed_sync() -> std::sync::Arc<overview::Overview> {
         return std::sync::Arc::new(overview::read_overview());
     };
     let data_home = dh.display().to_string();
+    if let Some((ov, _)) = overview_memo_get(revision, &data_home) {
+        return ov;
+    }
+    static SYNC_COMPUTE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serial = SYNC_COMPUTE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // 锁内双检查：等待期间首个计算者可能已写回同 revision 结果。
     if let Some((ov, _)) = overview_memo_get(revision, &data_home) {
         return ov;
     }
