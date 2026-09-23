@@ -429,7 +429,11 @@ pub(crate) fn write_flat_facts_with_sources(
         .map_err(|e| format!("begin_run {run_id}: {e}"))?;
 
     let mut outcome = SqlSyncOutcome::default();
-    let result: Result<(), AuthorityError> = db.with_immediate_txn(|conn| {
+    // R3-F4（REFRESH_STORM）：事实性裁决与 outbox 压制（下方 inserted/rejected
+    // 门）同源——任何事实 / 工作流事件 / 摘录 / 新路由证据 / 快照写入（配额
+    // 窗口载荷本身随时间滑动，是用户可见状态）→ 推进 revision；纯簿记轮
+    // （仅 checkpoint / last_seen / 心跳）→ 静默提交，不发失效。
+    let result: Result<(), AuthorityError> = db.with_immediate_txn_decided(|conn| {
         let writer = SqlFactWriter::new(conn, &run_id, now)?;
         if let Some(route) = route_evidence {
             let evidence_key = format!(
@@ -492,7 +496,11 @@ pub(crate) fn write_flat_facts_with_sources(
             // MSRV 1.74：`is_none_or` 稳定于 1.82，这里用 `map_or`。
             && runtime_snapshot.as_ref().map_or(true, |write| write.snapshots.is_empty())
         {
-            return Ok(());
+            // 纯簿记短路（R3-F4）：到此只写过 source_files / checkpoint /
+            // backfill 标记。backfill 是一次性迁移标记，路由证据是事实性
+            // 归因依据——两者任一在场都按事实性提交；否则静默。
+            return Ok(((), route_evidence.is_some()
+                || runtime_snapshot.as_ref().and_then(|write| write.backfill_marker).is_some()));
         }
         let source_id = writer.upsert_batch_source(host)?;
         // Route evidence is session-native and belongs to the fact that
@@ -555,7 +563,9 @@ pub(crate) fn write_flat_facts_with_sources(
             }
         }
         if facts.is_empty() && workflow_events.is_empty() && session_excerpts.is_empty() {
-            return Ok(());
+            // 能过上面那条短路还到这里 = 本轮有快照写入或 backfill：快照载荷
+            // （配额滚动窗口）是用户可见状态，按事实性提交（R3-F4 裁决）。
+            return Ok(((), true));
         }
         for fact in facts
             .iter()
@@ -641,6 +651,11 @@ pub(crate) fn write_flat_facts_with_sources(
         // 批次本来就 no-op，而那一行 outbox 本身会让事务非空、推进权威 revision，
         // 让「源文件变了但没产出任何新事实」的 tick 照样向展示层发失效。
         // `rejected > 0` 仍发——数据质量问题是 issue 评估器要看的状态变化。
+        //
+        // R3-F4（REFRESH_STORM，2026-09-23）把同一判据延伸到 revision 本身：
+        // 全重复重放此前虽不落 outbox，但事务里的 upsert 心跳行照旧推 revision
+        // （P0 时代「事务非空、推进是接受的」口径作废）——现在按簿记静默提交，
+        // 终裁见函数尾部的事实性谓词。
         if outcome.inserted > 0 || outcome.rejected > 0 {
             // 载荷里的 revision = 本事务提交后的值：事务已有行变更，
             // `commit_advancing_revision` 必然 +1（spec §4.1）。
@@ -662,7 +677,18 @@ pub(crate) fn write_flat_facts_with_sources(
                 rusqlite::Error::InvalidParameterName(format!("__event_outbox__:{e}")),
             ))?;
         }
-        Ok(())
+        // R3-F4 事实性终裁：outbox 已按 inserted/rejected 压制；这里对齐同一
+        // 谓词并补上「有输入但全重复」之外的事实性输入（工作流 / 摘录 / 路由
+        // 证据 / 快照）。全重复重放（inserted=0 且 rejected=0）按簿记静默——
+        // upsert 的 last_seen/updated_at 心跳照常落库。
+        Ok(((), outcome.inserted > 0
+            || outcome.rejected > 0
+            || !workflow_events.is_empty()
+            || !session_excerpts.is_empty()
+            || route_evidence.is_some()
+            || runtime_snapshot.as_ref().is_some_and(|write| {
+                !write.snapshots.is_empty() || write.backfill_marker.is_some()
+            })))
     });
 
     match result {
@@ -1089,6 +1115,91 @@ mod tests {
             "run_id 后缀应为毫秒时间戳: {id}"
         );
         assert!(new_run_id("migration").starts_with("migration:"));
+    }
+
+    /// R3-F4（REFRESH_STORM）：revision 只在事实性变更时前进。四个断言族：
+    /// - 纯簿记轮（文件 mtime 变化、零事实、无快照）静默提交——revision 不动，
+    ///   checkpoint 照常持久化（否则下轮重复解析）；
+    /// - 簿记轮幂等：连跑两轮 revision 都不动；
+    /// - 事实轮：revision +1 且 FactsIngested 落 outbox（P0 语义保持）；
+    /// - 全重复重放：不推 revision、不加 outbox（outbox 压制判据延伸到
+    ///   revision 本身；upsert 心跳行照常落库）。
+    #[test]
+    fn bookkeeping_round_commits_silently_while_facts_advance() {
+        let home = tmp_home("f4-silent");
+        let db = open_db(&home);
+        let r0 = db.revision().unwrap();
+        let no_overrides = std::collections::HashMap::new();
+
+        // ① 纯簿记：只有源文件心跳 + checkpoint。
+        let src = home.join("sessions").join("a.jsonl");
+        let sources = vec![(src.clone(), (123_u64, 456_u64))];
+        let outcome = write_flat_facts_with_sources(
+            &db, "codex", "m", &sources, &no_overrides,
+            &[], &[], &[], None, None, 1_000,
+        )
+        .unwrap();
+        assert_eq!(outcome.files_synced, 1);
+        assert_eq!(db.revision().unwrap(), r0, "纯簿记事务不得推进 revision");
+        let hash = crate::source_graph::path_hash(&src);
+        let checkpoint = crate::source_graph::read_checkpoint(db.conn(), "codex", &hash)
+            .unwrap()
+            .expect("checkpoint 必须照常持久化");
+        assert_eq!(checkpoint.byte_offset, Some(123));
+
+        // ② 再来一轮纯簿记（mtime 变了、仍零事实）：幂等静默。
+        write_flat_facts_with_sources(
+            &db, "codex", "m", &[(src, (123, 999))], &no_overrides,
+            &[], &[], &[], None, None, 2_000,
+        )
+        .unwrap();
+        assert_eq!(db.revision().unwrap(), r0, "簿记轮幂等：revision 仍不动");
+
+        // ③ 事实轮：revision +1，FactsIngested 落 outbox。
+        let fact = serde_json::json!({
+            "host": "claude-code", "machine_namespace": "m", "source_profile": "default",
+            "native_session_id": "s1", "source_event_id": "e1",
+            "observation_kind": "token_count",
+            "event_ts_utc": "2026-09-23T01:02:03Z", "model_id": "claude-opus-4",
+            "uncached_input_tokens": 100, "cache_read_tokens": 50,
+            "cache_write_tokens": 10, "output_tokens": 5,
+        });
+        let claude_src = home.join("sessions").join("b.jsonl");
+        let outcome = write_flat_facts_with_sources(
+            &db, "claude-code", "m", &[(claude_src.clone(), (10, 10))], &no_overrides,
+            std::slice::from_ref(&fact), &[], &[], None, None, 3_000,
+        )
+        .unwrap();
+        assert_eq!(outcome.inserted, 1);
+        assert_eq!(db.revision().unwrap(), r0 + 1, "事实轮必须推进 revision");
+        let outbox: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM event_outbox WHERE event_type = 'FactsIngested'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(outbox, 1, "事实轮落一条 FactsIngested");
+
+        // ④ 全重复重放：不推 revision、不加 outbox。
+        let outcome = write_flat_facts_with_sources(
+            &db, "claude-code", "m", &[(claude_src, (10, 20))], &no_overrides,
+            std::slice::from_ref(&fact), &[], &[], None, None, 4_000,
+        )
+        .unwrap();
+        assert_eq!(outcome.inserted, 0);
+        assert_eq!(outcome.duplicate, 1);
+        assert_eq!(db.revision().unwrap(), r0 + 1, "全重复重放按簿记静默");
+        let outbox2: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM event_outbox WHERE event_type = 'FactsIngested'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(outbox2, 1, "全重复重放不追加 outbox 行");
     }
 
     #[test]

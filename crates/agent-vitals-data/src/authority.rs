@@ -4055,6 +4055,36 @@ impl AuthorityDb {
         }
     }
 
+    /// R3-F4（REFRESH_STORM）：簿记事务——闭包在事务内自行裁决「本轮是否
+    /// 事实性」并随值返回。事实性 false → COMMIT **不经** `commit_advancing_
+    /// revision`（revision 不动），行照常持久化：checkpoint / source_files
+    /// last_seen / 快照心跳必须落库（否则下轮重复解析、孤儿误判），但纯
+    /// 簿记不是业务状态变更，不得向展示层发失效（「文件变了但零新事实」的
+    /// 唤醒轮此前照样推 revision、发 Invalidated）。事实性判据与 outbox 的
+    /// FactsIngested 压制谓词同源（sql_sync 统一计算，见 `write_flat_facts_
+    /// with_sources` 尾部）；revision 行唯一写者纪律不变——静默路径不写
+    /// revision 行（revision_guard 的 only-writer 测试覆盖）。
+    pub fn with_immediate_txn_decided<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<(T, bool), AuthorityError>,
+    ) -> Result<T, AuthorityError> {
+        let mark = begin_immediate(&self.conn)?;
+        match f(&self.conn) {
+            Ok((value, advance)) => {
+                if advance {
+                    commit_advancing_revision(&self.conn, mark)?;
+                } else {
+                    self.conn.execute_batch("COMMIT")?;
+                }
+                Ok(value)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     /// 权威 revision（spec §4.1）：每个改了业务状态的写事务提交时 +1。
     pub fn revision(&self) -> Result<u64, AuthorityError> {
         revision_of(&self.conn)
