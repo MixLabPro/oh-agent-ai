@@ -615,6 +615,11 @@ enum Cmd {
         /// Output the sync report as JSON
         #[arg(long = "json")]
         rows_json: bool,
+        /// Targeted sync (LIGHT-PATH spec §5.2): only run these hosts'
+        /// batches (comma-separated, e.g. `--hosts claude-code,codex`).
+        /// Absent = all hosts (default, byte-identical to the old form).
+        #[arg(long = "hosts")]
+        hosts: Option<String>,
     },
     /// One-time import of the legacy facts JSONL into the SQL authority DB
     /// (spec 6.2.1: JSONL is the highest-fidelity migration source; same
@@ -3127,9 +3132,16 @@ session_store={store} fold={fold}"
 
     // sync-facts（Stage B 遗留收口）：三宿主例行 ingest——退休路径第 ① 步。
     // 托盘 tick 未来也调这一条（不各自长文件枚举）。
-    if let Some(Cmd::SyncFacts { rows_json }) = &args.cmd {
-        match agent_vitals_runtime::sync_service::sync_facts(
+    if let Some(Cmd::SyncFacts { rows_json, hosts }) = &args.cmd {
+        let only_hosts: Option<std::collections::BTreeSet<String>> = hosts.as_ref().map(|list| {
+            list.split(',')
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty())
+                .collect()
+        });
+        match agent_vitals_runtime::sync_service::sync_facts_filtered(
             &agent_vitals_runtime::home::data_home(),
+            only_hosts.as_ref(),
         ) {
             Ok(report) => {
                 if *rows_json {

@@ -366,6 +366,17 @@ fn sync_host(
 /// 例行同步入口（`ingest_service::FACT_HOSTS` 全部宿主）。幂等：重复调用第二次
 /// 基本全 skipped / duplicate。
 pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
+    sync_facts_filtered(data_home, None)
+}
+
+/// 定向同步入口（LIGHT-PATH spec §5.2）：`only` 给出时只跑这些宿主的批
+/// （批级过滤——codex 的整批语义在 `sync_host` 之内，不受影响）。`None` =
+/// 全宿主，行为与 [`sync_facts`] 逐字节一致。被过滤掉的宿主不 acquire
+/// lease、不产生 HostSyncReport（对账责任整体留给周期重 tick）。
+pub fn sync_facts_filtered(
+    data_home: &Path,
+    only: Option<&std::collections::BTreeSet<String>>,
+) -> Result<SyncReport, String> {
     // 读取范围决定本轮会接触哪些本地数据，必须在任何维护写入之前完整校验。
     // 配置损坏时宁可不启动同步，也不能先清理一部分旧事实再报告错误。
     let custom_sources = crate::custom_sources::custom_source_roots(data_home)
@@ -566,6 +577,11 @@ pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
         // decision is deliberately re-read while holding the same per-host
         // lease as the delete command; otherwise a concurrent sync could pass
         // an old exclusion snapshot and re-import data after deletion.
+        if let Some(only) = only {
+            if !only.contains(host) {
+                continue;
+            }
+        }
         let host_lease = crate::lease::acquire_blocking(
             &crate::source_controls::host_data_lock_path(data_home, host)?,
             "facts-source-sync",

@@ -815,12 +815,41 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
 /// 事故热栈那几个函数），一个 tick 里白算两三遍。查询本身收口到
 /// `sync_tick_inner` 里只调一次，`refresh` 现在只剩「托盘更新」
 /// （`set_title`+`build_menu`+`set_menu`，原生 Cocoa 调用）。
+/// 单次 refresh 的软预算（LIGHT-PATH spec §5.4）：只观测不改行为——超预算
+/// 记 WARN 并点名最慢子步，为上轮 33.5s 爆炸的根因归因提供观测面。
+const REFRESH_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn refresh(app: &AppHandle, ov: &overview::Overview) {
+    let t0 = std::time::Instant::now();
+    let mut slowest = ("none", std::time::Duration::ZERO);
     if let Some(tray) = app.tray_by_id("main") {
+        let s = std::time::Instant::now();
         let _ = tray.set_title(Some(today_title(ov)));
+        let d = s.elapsed();
+        if d > slowest.1 {
+            slowest = ("set_title", d);
+        }
+        let s = std::time::Instant::now();
         if let Ok(menu) = build_menu(app, ov) {
             let _ = tray.set_menu(Some(menu));
         }
+        let d = s.elapsed();
+        if d > slowest.1 {
+            slowest = ("build_menu+set_menu", d);
+        }
+    }
+    let total = t0.elapsed();
+    if total >= REFRESH_BUDGET {
+        agent_vitals_runtime::logging::log_warn(
+            "sync",
+            &format!(
+                "refresh 超预算（{:?} ≥ {:?}），最慢子步: {} {:?}",
+                total,
+                REFRESH_BUDGET,
+                slowest.0,
+                slowest.1
+            ),
+        );
     }
 }
 
@@ -1174,13 +1203,20 @@ fn log_spawn_success(component: &'static str, started: std::time::Instant, stder
 /// tick 是 facts 平面的生产驱动源。best-effort 同 claude-sync：失败留痕不
 /// abort（facts 是新增平面，state 链照常刷新）。幂等双保险：checkpoint
 /// 指纹跳过未变文件 + fact_id exactly-once（重跑零变化）。
-fn run_facts_sync(bin: &std::path::Path) -> Option<String> {
+fn run_facts_sync(bin: &std::path::Path, hosts: Option<&std::collections::BTreeSet<String>>) -> Option<String> {
     let home = overview::data_home();
     let started = std::time::Instant::now();
-    let out = std::process::Command::new(bin)
-        .arg("sync-facts")
-        .env("AGENT_VITALS_HOME", &home)
-        .output();
+    let mut cmd = std::process::Command::new(bin);
+    cmd.arg("sync-facts");
+    if let Some(set) = hosts {
+        // LIGHT-PATH spec §5.2：定向同步只跑被唤醒宿主的批。CLI 侧过滤
+        // 发生在批级别（codex 整批语义不破）。
+        let list: Vec<String> = set.iter().cloned().collect();
+        if !list.is_empty() {
+            cmd.arg("--hosts").arg(list.join(","));
+        }
+    }
+    let out = cmd.env("AGENT_VITALS_HOME", &home).output();
     match out {
         Ok(o) if o.status.success() => {
             log_spawn_success("sync-facts", started, &o.stderr);
@@ -1367,10 +1403,100 @@ fn publish_sync_status(app: &AppHandle, status: &SyncStatus) {
 /// 耗时」）：三条内部 return 路径（paused/控制态不可读/正常流程）都在
 /// `sync_tick_inner` 里，包一层比在每个 return 前插日志更不容易漏——新增一条
 /// 分支自动继承计时，不用记得在新分支里也打点。
+/// 托盘刷新的最小间隔（轻 tick 节流，LIGHT-PATH spec §5.3）：持续写入期间
+/// 托盘数字最多每 60 秒重算一次（read_overview ~2s 是最重的常规单步）；
+/// 重 tick 无条件刷，行为与现状一致。
+const TRAY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 连续轻 tick 达到该次数即强制升级重 tick（LIGHT-PATH spec §5.2 排序规则，
+/// 防饥饿——另一条规则是 `TICK_PERIOD` 到期，谁先到算谁）。
+const LIGHT_TICKS_PER_HEAVY: u32 = 16;
+
+/// 重 tick：全宿主对账 + 全部投影（5 分钟周期 / 防饥饿升级 / 轻路径失败
+/// 升级 / 手动同步）。与升级前行为逐项一致。
 fn sync_tick(app: &AppHandle) {
     let start = std::time::Instant::now();
     sync_tick_inner(app);
     agent_vitals_runtime::logging::log_info("sync", &format!("tick finished in {:?}", start.elapsed()));
+}
+
+/// 轻 tick（LIGHT-PATH spec §5.2）：唤醒驱动的定向同步。只跑被唤醒宿主的
+/// 批；跳过 navigation 子进程 / read_overview / alerts（对账责任整体留给
+/// 5 分钟重 tick）。**任一步失败即升级重 tick**（spec 不变量 5：轻失败
+/// 不得等于本轮没对账）。`tray_due` = 距上次托盘重建超过
+/// [`TRAY_REFRESH_INTERVAL`]；返回本轮是否刷新了托盘（调用方推进节流钟）。
+fn sync_tick_light(
+    app: &AppHandle,
+    hosts: &std::collections::BTreeSet<String>,
+    tray_due: bool,
+) -> bool {
+    if overview::sync_is_paused() == Ok(true) {
+        // 暂停态无事可做；状态面留给重 tick 的既有分支（paused 分支照常
+        // 每 5 分钟重写一次状态）。
+        return false;
+    }
+    let t0 = std::time::Instant::now();
+    let Some(bin) = resolve_binary() else {
+        agent_vitals_runtime::logging::log_warn("sync", "轻 tick 升级重 tick：resolve 失败");
+        sync_tick(app);
+        return true;
+    };
+    let mut failures: Vec<String> = Vec::new();
+    if hosts.contains("dsh") {
+        let status = perform_sync();
+        if !status.ok {
+            failures.push(format!("dsh: {}", status.message));
+        }
+    }
+    if hosts.contains("claude-code") {
+        if let Some(error) = run_claude_sync(&bin) {
+            failures.push(format!("claude-sync: {error}"));
+        }
+    }
+    if let Some(error) = run_facts_sync(&bin, Some(hosts)) {
+        failures.push(format!("sync-facts: {error}"));
+    }
+    if !failures.is_empty() {
+        agent_vitals_runtime::logging::log_warn(
+            "sync",
+            &format!("轻 tick 失败，升级重 tick: {failures:?}"),
+        );
+        sync_tick(app);
+        return true;
+    }
+    let status = SyncStatus::ok(
+        "light",
+        format!("定向同步 {:?}", hosts.iter().collect::<Vec<_>>()),
+    );
+    overview::save_sync_status(&status);
+    publish_sync_status(app, &status);
+    timed("drain_event_bus", || drain_event_bus(app));
+    let hosts_for_invalidation = hosts.clone();
+    timed("publish_invalidation", || {
+        publish_invalidation(app, hosts_for_invalidation)
+    });
+    if tray_due {
+        let ov = timed_value("read_overview", overview::read_overview);
+        timed("refresh", || refresh(app, &ov));
+        agent_vitals_runtime::logging::log_info(
+            "sync",
+            &format!(
+                "轻 tick 完成（{} 个宿主，含托盘节流刷新），用时 {:?}",
+                hosts.len(),
+                t0.elapsed()
+            ),
+        );
+        return true;
+    }
+    agent_vitals_runtime::logging::log_info(
+        "sync",
+        &format!(
+            "轻 tick 完成（{} 个宿主），用时 {:?}",
+            hosts.len(),
+            t0.elapsed()
+        ),
+    );
+    false
 }
 
 /// 单步计时包装：只覆盖 `sync_tick_inner` 尾部那串进程内直调（`refresh`/
@@ -1421,7 +1547,7 @@ fn sync_tick_inner(app: &AppHandle) {
     let initial = perform_sync();
     // 一宿主失败不能阻塞其他宿主的导入；共享二进制缺失仍由 resolve 状态报告。
     let (status, _facts_ready) = match resolve_binary() {
-        Some(bin) => finish_sync_stages(initial, || run_claude_sync(&bin), || run_facts_sync(&bin)),
+        Some(bin) => finish_sync_stages(initial, || run_claude_sync(&bin), || run_facts_sync(&bin, None)),
         None => (initial, false),
     };
     overview::save_sync_status(&status);
@@ -1476,19 +1602,50 @@ fn finish_sync_stages(
 /// P2 watcher 接线：循环尾部从 `sleep(TICK_PERIOD)` 改为
 /// `recv_timeout(TICK_PERIOD)`——watcher 去抖后 wake 一发，下一轮对账立刻跑；
 /// 没事件时行为与纯 sleep 逐字节一致（周期兜底，spec §7）。
-fn start_refresh_tick(app: AppHandle, wake: std::sync::mpsc::Receiver<()>) {
+fn start_refresh_tick(
+    app: AppHandle,
+    slot: std::sync::Arc<agent_vitals_runtime::ingest::watch::WakeSlot>,
+) {
+    use agent_vitals_runtime::ingest::watch::{wait_for_wake, TickWait};
     std::thread::spawn(move || {
         // 初值（线程启动时刻）目前总在被下面任何一次成功 try_lock 覆盖后才读到
         // ——锁被占时走 continue，跳过下面读它的 match 分支。仍然显式初始化成
-        // 「启动时刻」而不是用 Option：这是有意的兜底基线（万一以后改掉
-        // continue、锁竞争分支不再跳过 wait，读到的也该是「最近一次已知活动
-        // 时刻」而不是编译器随便给的占位值）。
+        // 「启动时刻」而不是用 Option：这是有意的兜底基线。
         #[allow(unused_assignments)]
         let mut last_sync_finished = std::time::Instant::now();
+        let mut last_heavy = std::time::Instant::now();
+        let mut last_tray = std::time::Instant::now();
+        let mut light_run = 0u32;
+        // 上一次唤醒带来的待同步宿主；None = 本轮走重 tick。
+        let mut pending: Option<std::collections::BTreeSet<String>> = None;
         loop {
+            // 轻/重决策（LIGHT-PATH spec §5.2 排序规则）：连续轻 tick 达限
+            // 或距上次重 tick 满 TICK_PERIOD → 强制重（防饥饿，谁先到算谁）。
+            let heavy_due = light_run >= LIGHT_TICKS_PER_HEAVY
+                || last_heavy.elapsed() >= TICK_PERIOD;
+            let kind = match pending.take() {
+                Some(hosts) if !heavy_due => {
+                    agent_vitals_runtime::ingest::watch::TickKind::Light(hosts)
+                }
+                _ => agent_vitals_runtime::ingest::watch::TickKind::Heavy,
+            };
             let lock = app.state::<SyncLock>();
             if let Ok(_guard) = lock.0.try_lock() {
-                sync_tick(&app);
+                match &kind {
+                    agent_vitals_runtime::ingest::watch::TickKind::Heavy => {
+                        sync_tick(&app);
+                        last_heavy = std::time::Instant::now();
+                        last_tray = last_heavy;
+                        light_run = 0;
+                    }
+                    agent_vitals_runtime::ingest::watch::TickKind::Light(hosts) => {
+                        let tray_due = last_tray.elapsed() >= TRAY_REFRESH_INTERVAL;
+                        if sync_tick_light(&app, hosts, tray_due) {
+                            last_tray = std::time::Instant::now();
+                        }
+                        light_run += 1;
+                    }
+                }
                 last_sync_finished = std::time::Instant::now();
             } else {
                 // 不进入 wait：本轮可能正是 watcher 唤醒；若现在消费掉它再等
@@ -1496,14 +1653,11 @@ fn start_refresh_tick(app: AppHandle, wake: std::sync::mpsc::Receiver<()>) {
                 std::thread::sleep(SYNC_LOCK_RETRY_PERIOD);
                 continue;
             }
-            match agent_vitals_runtime::ingest::watch::wait_for_tick_or_wake(&wake, TICK_PERIOD) {
-                agent_vitals_runtime::ingest::watch::TickWait::Woken => {
-                    // 冷却下限（真机 2026-09-22 验收：活动会话连续写入被监听
-                    // 目录，每次唤醒都跑全量 sync 把 CPU 钉到 ~3 核）。睡满
-                    // 剩余冷却再执行——不丢弃最后一批写入；周期/手动路径
-                    // 不受影响。冷却窗口本身是动态的（REVIEW P4 自看护）：
-                    // 平时读到基线 30s，CPU 持续过高时 `start_watcher_health_
-                    // publisher` 已经把它拉长，这里只管读，不管判定。
+            match wait_for_wake(&slot, TICK_PERIOD) {
+                TickWait::Woken(hosts) => {
+                    // 冷却下限（真机 2026-09-22 验收）：睡满剩余冷却再执行
+                    // ——不丢弃最后一批写入；周期/手动路径不受影响。冷却窗
+                    // 本身是动态的（REVIEW P4 自看护）。
                     let cooldown = app.state::<WatcherCooldownOverride>().get();
                     if let Some(remaining) = agent_vitals_runtime::ingest::watch::cooldown_remaining_with(
                         cooldown,
@@ -1512,11 +1666,12 @@ fn start_refresh_tick(app: AppHandle, wake: std::sync::mpsc::Receiver<()>) {
                     ) {
                         std::thread::sleep(remaining);
                     }
+                    // 冷却期间可能又有唤醒进槽；wait 已取走一批，槽里可能
+                    // 还留有后续宿主——下一轮 wait 会再取，不在此处纺锤。
+                    pending = Some(hosts);
                 }
-                agent_vitals_runtime::ingest::watch::TickWait::TimedOut => {}
-                agent_vitals_runtime::ingest::watch::TickWait::SenderGone => {
-                    // waker 端全部 drop（watcher 线程异常退出）——退回纯周期。
-                    std::thread::sleep(TICK_PERIOD);
+                TickWait::TimedOut => {
+                    // 周期到 → 下一轮 heavy_due 必然成立（last_heavy 已满周期）。
                 }
             }
         }
@@ -1747,11 +1902,15 @@ fn start_watcher_health_publisher(app: AppHandle) {
 }
 
 fn start_source_watcher(app: &AppHandle)
-    -> (std::sync::mpsc::Receiver<()>, agent_vitals_runtime::ingest::watch::WatcherHandle)
+    -> (
+        std::sync::Arc<agent_vitals_runtime::ingest::watch::WakeSlot>,
+        agent_vitals_runtime::ingest::watch::WatcherHandle,
+    )
 {
-    use agent_vitals_runtime::ingest::watch::{TickWaker, WakeChannel, WatchRegistry};
+    use agent_vitals_runtime::ingest::watch::{TickWaker, WatchRegistry};
 
-    let WakeChannel { waker, receiver } = TickWaker::channel();
+    let channel = TickWaker::channel();
+    let slot = channel.slot_arc();
 
     let user_home = std::path::PathBuf::from(
         std::env::var("HOME")
@@ -1792,11 +1951,11 @@ fn start_source_watcher(app: &AppHandle)
     };
 
     let handle =
-        agent_vitals_runtime::ingest::watch::spawn_watcher(registry, waker);
+        agent_vitals_runtime::ingest::watch::spawn_watcher(registry, channel.waker);
     if handle.is_noop() {
         agent_vitals_runtime::logging::log_info("watcher", "未启用（feature 关闭），tick 周期兜底");
     }
-    (receiver, handle)
+    (slot, handle)
 }
 
 /// Opt-in Trust runtime monitor. The loop is always installed with the app,
@@ -2056,9 +2215,30 @@ fn focus_session_target(app: &AppHandle, target: WorkbenchTarget) {
 /// 没有理由为一份没有入口、内容更少的旧界面继续维护 `toggle_window`/
 /// `hide_window`/一份独立的 HTML+JS+CSS。命令名留作 `read_overview` 不改，
 /// 只是现在唯一的调用方是工作台。
+/// `read_overview` IPC 的 revision 备忘（LIGHT-PATH spec §5.3）：同
+/// authority revision 直接复用上次序列化结果。风暴期 React 按 Invalidated
+/// 事件懒刷新——同一 revision 的连续 invoke 不再各自重跑 2.2s 级聚合。
+/// 进程内存、单条（最新覆盖）、无持久化（HARDENING §5.5 同款纪律）。
+struct OverviewMemo(std::sync::Mutex<Option<(u64, Value)>>);
+
 #[tauri::command(async)]
-fn read_overview() -> Value {
-    serde_json::to_value(overview::read_overview()).unwrap_or(Value::Null)
+fn read_overview(memo: tauri::State<OverviewMemo>) -> Value {
+    let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
+    let revision = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+        .ok()
+        .and_then(|db| db.revision().ok());
+    let Some(revision) = revision else {
+        // revision 读不到（库不存在/只读失败）——按现状全量算，不缓存。
+        return serde_json::to_value(overview::read_overview()).unwrap_or(Value::Null);
+    };
+    if let Some((r, v)) = memo.0.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        if r == revision {
+            return v;
+        }
+    }
+    let value = serde_json::to_value(overview::read_overview()).unwrap_or(Value::Null);
+    *memo.0.lock().unwrap_or_else(|e| e.into_inner()) = Some((revision, value.clone()));
+    value
 }
 
 /// 工作台总览的权威质量状态。金额仍由 summary DTO 提供；这里仅转发
@@ -4309,6 +4489,7 @@ pub fn run() {
         .manage(store::StoreBuildLock::new())
         // Skill 体检 tab 的扫描缓存 + 取消把手（store.rs SkillsScanState 注释）。
         .manage(store::SkillsScanState::new())
+        .manage(OverviewMemo(std::sync::Mutex::new(None)))
         .on_window_event(|window, event| {
             // 工作台 × 按钮 → 隐藏不销毁。config-created 窗口被 × 关掉会 destroy，
             // 之后 reopen 是 no-op（get_webview_window 返回 None）；hide 保状态——

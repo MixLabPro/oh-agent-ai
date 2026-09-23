@@ -157,10 +157,12 @@ impl WakeSlot {
 
 ### 5.3 托盘捷径与 read_overview 备忘
 
-**`read_overview_tray()`（新，runtime::query）**：只查托盘三数字
-（今日 / 本月 / 预算水位）的窄 SQL——不产 calendar 逐日行、不产 hosts
-分解。目标量级 ≤50ms。输出与全量 `read_overview` 的对应字段**同值**
-（用一条测试钉住：同 DB 状态下三数字逐字段相等）。
+**As-built 修订（2026-09-23 实施时）**：托盘三数字依赖 claude 月度天数
+（`merged_claude_days`）——砍掉它预算水位就不对了，「窄 SQL」省不出
+预期量级，反而多一条同值漂移面。改为**托盘节流 + revision 备忘**：轻
+tick 的托盘刷新限频 `TRAY_REFRESH_INTERVAL=60s`（重 tick 无条件刷，行为
+与现状一致），配合 §5.3 的 IPC revision 备忘，同一 revision 只算一次。
+窄 SQL 查询留作 Phase D 观测数据证明 read_overview 内部分布后再议。
 
 **IPC 侧 revision 备忘**：`read_overview` 命令（React 懒刷新路径）按
 authority revision 键控单条缓存——revision 未变直接返回上次结果。缓存
