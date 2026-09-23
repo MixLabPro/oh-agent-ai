@@ -36,6 +36,7 @@ export function safeUiError(reason: unknown, fallback: string): string {
   const message = reason instanceof Error ? reason.message : "";
   if (!message) return fallback;
   if (/取消|cancel/i.test(message)) return "操作已取消";
+  if (/proposal changed|profile changed|reload before|review the latest scope/i.test(message)) return "Profile 已更新；请重新检查最新授权范围后再操作";
   if (/DTO|schema|格式|字段|不匹配|不守恒|超出|上限/i.test(message)) return "本地数据格式不兼容，请升级应用或重建投影";
   if (/权限|permission|access denied|拒绝访问/i.test(message)) return "本地数据读取权限不足";
   if (/authority|数据库|database|sqlite/i.test(message)) return "本地 authority 暂不可用";
@@ -518,6 +519,41 @@ export type TrustAuditReport = {
 };
 
 export type TrustDiscovery = { candidates: TrustHostCandidate[]; profile_errors: string[] };
+
+export type TrustProfileScopePreview = {
+  roots_count: number;
+  root_classes: Array<"git_metadata" | "workspace_or_project" | "home_relative_app_data">;
+  covers_workspace_or_project: boolean;
+  may_include_git_metadata: boolean;
+  home_relative_only: true;
+};
+
+export type TrustSourceScopePreview = {
+  roots_count: number;
+  root_classes: Array<"filesystem_root" | "parent_traversal" | "home_directory" | "home_relative" | "absolute_home_path" | "absolute_system_path" | "relative_path">;
+  covers_workspace_or_project: boolean;
+  may_include_git_metadata: boolean;
+  covers_full_filesystem: boolean;
+  may_leave_home_directory: boolean;
+};
+
+export type TrustProfileSummary = {
+  slug: string;
+  display_name: string;
+  state: "pending" | "invalid" | "approved";
+  manifest_hash: string;
+  discovery_include_count: number;
+  trust_roots_count: number;
+  artifact_terms_count: number;
+  extensions_count: number;
+  trust_adapter: "generic_artifact_v1" | "zcode_checkpoint_v1" | "minimax_workspace_index_v1" | null;
+  watch_priority: "normal" | "enhanced" | null;
+  source_scope_preview: TrustSourceScopePreview | null;
+  trust_scope_preview: TrustProfileScopePreview | null;
+};
+
+export type TrustProfileStatus = { pending: TrustProfileSummary[]; approved: TrustProfileSummary[] };
+export type TrustSuppression = { suppression_id: string; issue_type: string; created_at_ms: number; revoked_at_ms: number | null };
 
 export type TrustMonitorCapability = "not_started" | "available" | "partial" | "unavailable";
 export type TrustMonitorConfig = {
@@ -1706,6 +1742,124 @@ function parseTrustDiscovery(value: unknown): TrustDiscovery {
   return { candidates, profile_errors: profileErrors };
 }
 
+function trustCommandData(value: unknown, label: string): Record<string, unknown> {
+  const envelope = record(value, `${label} envelope`);
+  return envelope.data === undefined ? envelope : record(envelope.data, `${label} data`);
+}
+
+function parseTrustProfileSummary(value: unknown, expectedState: TrustProfileSummary["state"] | null): TrustProfileSummary {
+  const row = record(value, "Trust profile summary");
+  const slug = stringField(row.slug, "Trust profile slug");
+  const displayName = stringField(row.display_name, "Trust profile display name");
+  const manifestHash = stringField(row.manifest_hash, "Trust profile hash");
+  if (!/^[a-z][a-z0-9-]{0,31}$/.test(slug) || displayName.length > 48 || !/^[0-9a-f]{16}$/.test(manifestHash)) throw new Error("Trust profile summary 标识不安全");
+  const state = row.state;
+  if (state !== "pending" && state !== "invalid" && state !== "approved") throw new Error("Trust profile state 不安全");
+  if (expectedState !== null && state !== expectedState) throw new Error("Trust profile state 不匹配");
+  const boolField = (item: unknown, label: string): boolean => {
+    if (typeof item !== "boolean") throw new Error(`${label} DTO 状态不安全`);
+    return item;
+  };
+  let sourceScopePreview: TrustSourceScopePreview | null = null;
+  if (row.source_scope_preview !== null && row.source_scope_preview !== undefined) {
+    const scope = record(row.source_scope_preview, "Trust source scope preview");
+    const classes = requiredArray(scope.root_classes, "Trust source root classes");
+    if (classes.length > 16) throw new Error("Trust source root classes 超出上限");
+    const allowedClasses = new Set(["filesystem_root", "parent_traversal", "home_directory", "home_relative", "absolute_home_path", "absolute_system_path", "relative_path"]);
+    const rootClasses = classes.map((item) => {
+      if (typeof item !== "string" || !allowedClasses.has(item)) throw new Error("Trust source root class 不安全");
+      return item as TrustSourceScopePreview["root_classes"][number];
+    });
+    sourceScopePreview = {
+      roots_count: boundedCount(scope.roots_count, "Trust source roots", 16),
+      root_classes: rootClasses,
+      covers_workspace_or_project: boolField(scope.covers_workspace_or_project, "Trust source workspace coverage"),
+      may_include_git_metadata: boolField(scope.may_include_git_metadata, "Trust source Git coverage"),
+      covers_full_filesystem: boolField(scope.covers_full_filesystem, "Trust source filesystem coverage"),
+      may_leave_home_directory: boolField(scope.may_leave_home_directory, "Trust source home boundary"),
+    };
+  }
+  let trustScopePreview: TrustProfileScopePreview | null = null;
+  if (row.trust_scope_preview !== null && row.trust_scope_preview !== undefined) {
+    const scope = record(row.trust_scope_preview, "Trust profile scope preview");
+    const rootsCount = boundedCount(scope.roots_count, "Trust profile preview roots", 8);
+    const classes = requiredArray(scope.root_classes, "Trust profile root classes");
+    if (classes.length > 3) throw new Error("Trust profile root classes 超出上限");
+    const allowedClasses = new Set(["git_metadata", "workspace_or_project", "home_relative_app_data"]);
+    const rootClasses = classes.map((item) => {
+      if (typeof item !== "string" || !allowedClasses.has(item)) throw new Error("Trust profile root class 不安全");
+      return item as TrustProfileScopePreview["root_classes"][number];
+    });
+    if (scope.home_relative_only !== true || state === "invalid") throw new Error("Trust profile scope must belong to a valid home-relative proposal");
+    trustScopePreview = {
+      roots_count: rootsCount,
+      root_classes: rootClasses,
+      covers_workspace_or_project: boolField(scope.covers_workspace_or_project, "Trust profile workspace coverage"),
+      may_include_git_metadata: boolField(scope.may_include_git_metadata, "Trust profile Git coverage"),
+      home_relative_only: true,
+    };
+  }
+  if (state !== "invalid" && (!sourceScopePreview || !trustScopePreview)) throw new Error("valid Trust profile is missing a scope preview");
+  if (state === "invalid" && (sourceScopePreview || trustScopePreview)) throw new Error("invalid Trust profile cannot carry an approval scope preview");
+  const adapterValue = row.trust_adapter === null ? null : boundedEnum(row.trust_adapter, "Trust profile adapter", ["generic_artifact_v1", "zcode_checkpoint_v1", "minimax_workspace_index_v1"], "unknown");
+  if (adapterValue === "unknown") throw new Error("Trust profile adapter 不安全");
+  const adapter = adapterValue as TrustProfileSummary["trust_adapter"];
+  const priorityValue = row.watch_priority === null ? null : boundedEnum(row.watch_priority, "Trust profile watch priority", ["normal", "enhanced"], "unknown");
+  if (priorityValue === "unknown") throw new Error("Trust profile watch priority 不安全");
+  const priority = priorityValue as TrustProfileSummary["watch_priority"];
+  return {
+    slug,
+    display_name: displayName,
+    state,
+    manifest_hash: manifestHash,
+    discovery_include_count: boundedCount(row.discovery_include_count, "Trust profile include patterns", 16),
+    trust_roots_count: boundedCount(row.trust_roots_count, "Trust profile roots", 8),
+    artifact_terms_count: boundedCount(row.artifact_terms_count, "Trust profile artifact terms", 8),
+    extensions_count: boundedCount(row.extensions_count, "Trust profile extensions", 8),
+    trust_adapter: adapter,
+    watch_priority: priority,
+    source_scope_preview: sourceScopePreview,
+    trust_scope_preview: trustScopePreview,
+  };
+}
+
+function parseTrustProfileStatus(value: unknown): TrustProfileStatus {
+  const root = trustCommandData(value, "Trust profile status");
+  const pending = requiredArray(root.pending, "Trust pending profiles");
+  const approved = requiredArray(root.approved, "Trust approved profiles");
+  if (pending.length > 64 || approved.length > 128) throw new Error("Trust profile 数量超出上限");
+  const pendingProfiles = pending.map((item) => parseTrustProfileSummary(item, null));
+  if (pendingProfiles.some((item) => item.state !== "pending" && item.state !== "invalid")) throw new Error("Trust pending profile state 不匹配");
+  return {
+    pending: pendingProfiles,
+    approved: approved.map((item) => parseTrustProfileSummary(item, "approved")),
+  };
+}
+
+function parseTrustSuppressions(value: unknown): TrustSuppression[] {
+  const root = record(value, "Trust suppressions");
+  if (root.status !== "ok") throw new Error("Trust suppression status 不可用");
+  const rows = requiredArray(root.suppressions, "Trust suppressions");
+  if (rows.length > 256) throw new Error("Trust suppression 数量超出上限");
+  return rows.map((item) => {
+    const row = record(item, "Trust suppression");
+    const id = stringField(row.suppression_id, "Trust suppression id");
+    const issueType = stringField(row.issue_type, "Trust suppression issue");
+    if (!/^trust-suppression-SV70[1-9]-\d{1,20}$|^trust-suppression-SV710-\d{1,20}$/.test(id) || !/^SV70[1-9]$|^SV710$/.test(issueType)) throw new Error("Trust suppression 标识不安全");
+    const created = boundedCount(row.created_at_ms, "Trust suppression created", 4_102_444_800_000);
+    const revoked = row.revoked_at_ms === null ? null : boundedCount(row.revoked_at_ms, "Trust suppression revoked", 4_102_444_800_000);
+    return { suppression_id: id, issue_type: issueType, created_at_ms: created, revoked_at_ms: revoked };
+  });
+}
+
+function parseTrustProfileReceipt(value: unknown, expectedStatus: string): { status: string; slug: string } {
+  const root = trustCommandData(value, "Trust profile receipt");
+  const status = stringField(root.status, "Trust profile receipt status");
+  const slug = stringField(root.slug, "Trust profile receipt slug");
+  if (status !== expectedStatus || !/^[a-z][a-z0-9-]{0,31}$/.test(slug)) throw new Error("Trust profile receipt 不安全");
+  return { status, slug };
+}
+
 function parseTrustAudit(value: unknown): TrustAuditReport {
   const root = record(value, "trust audit");
   const evidence = requiredArray(root.evidence, "trust evidence").map((item) => {
@@ -1949,6 +2103,63 @@ export async function discoverTrust(): Promise<TrustDiscovery> {
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return { candidates: [{ id: "zcode", detected: true, artifact_profile_available: true, coverage_state: "artifact_profile_available" }], profile_errors: [] };
   return parseTrustDiscovery(await handler("trust_discover"));
+}
+
+export async function readTrustProfileStatus(): Promise<TrustProfileStatus> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { pending: [], approved: [] };
+  return parseTrustProfileStatus(await handler("trust_profile_proposal_status"));
+}
+
+async function trustProfileDecision(command: "trust_profile_approve" | "trust_profile_reject" | "trust_profile_revoke", slug: string, manifestHash: string, status: "approved" | "rejected" | "revoked"): Promise<{ status: string; slug: string }> {
+  if (!/^[a-z][a-z0-9-]{0,31}$/.test(slug) || !/^[0-9a-f]{16}$/.test(manifestHash)) throw new Error("Trust profile decision reference is invalid");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return { status, slug };
+  return parseTrustProfileReceipt(await handler(command, { slug, manifestHash }), status);
+}
+
+export function approveTrustProfile(profile: TrustProfileSummary): Promise<{ status: string; slug: string }> {
+  return trustProfileDecision("trust_profile_approve", profile.slug, profile.manifest_hash, "approved");
+}
+
+export function rejectTrustProfile(profile: TrustProfileSummary): Promise<{ status: string; slug: string }> {
+  return trustProfileDecision("trust_profile_reject", profile.slug, profile.manifest_hash, "rejected");
+}
+
+export function revokeTrustProfile(profile: TrustProfileSummary): Promise<{ status: string; slug: string }> {
+  return trustProfileDecision("trust_profile_revoke", profile.slug, profile.manifest_hash, "revoked");
+}
+
+export async function readTrustSuppressions(): Promise<TrustSuppression[]> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return [];
+  return parseTrustSuppressions(await handler("trust_suppression_list"));
+}
+
+export async function revokeTrustSuppression(suppressionId: string): Promise<"revoked" | "not_found"> {
+  if (!/^trust-suppression-SV70[1-9]-\d{1,20}$|^trust-suppression-SV710-\d{1,20}$/.test(suppressionId)) throw new Error("Trust suppression reference is invalid");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return "revoked";
+  const root = trustCommandData(await handler("trust_suppression_revoke", { suppressionId }), "Trust suppression receipt");
+  const status = stringField(root.status, "Trust suppression receipt status");
+  const id = stringField(root.suppression_id, "Trust suppression receipt id");
+  if ((status !== "revoked" && status !== "not_found") || id !== suppressionId) throw new Error("Trust suppression receipt 不安全");
+  return status;
+}
+
+export async function createTrustSuppression(issueType: string): Promise<string> {
+  if (!/^SV70[1-9]$|^SV710$/.test(issueType)) throw new Error("Trust issue type is invalid");
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return `preview-${issueType}`;
+  const root = trustCommandData(await handler("trust_suppression_create", {
+    issueType,
+    instanceFingerprint: null,
+    reason: "React Workbench user suppression",
+  }), "Trust suppression receipt");
+  const status = stringField(root.status, "Trust suppression receipt status");
+  const id = stringField(root.suppression_id, "Trust suppression receipt id");
+  if (status !== "saved" || !/^trust-suppression-SV70[1-9]-\d{1,20}$|^trust-suppression-SV710-\d{1,20}$/.test(id)) throw new Error("Trust suppression receipt 不安全");
+  return id;
 }
 
 export async function auditTrust(host: string): Promise<TrustAuditReport> {

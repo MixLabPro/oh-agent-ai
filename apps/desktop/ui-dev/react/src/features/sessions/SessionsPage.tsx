@@ -23,6 +23,7 @@ const costStates: Array<{ value: SessionsCostFilter; label: string }> = [
 ];
 
 const DEFAULT_STATISTICS_TIMEZONE = "Asia/Shanghai";
+type SessionNavigationTarget = { type: "sessionDetail"; session_ref: string; host_kind: string } | { type: "sessionList"; host_kind: string | null };
 
 function dateInTimezone(timezone: string, date = new Date()): string {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
@@ -95,7 +96,7 @@ function updateFilter(setFilters: Dispatch<SetStateAction<SessionsFilters>>, key
   setFilters((current) => ({ ...current, [key]: value } as SessionsFilters));
 }
 
-export function SessionsPage() {
+export function SessionsPage({ navigationTarget = null, onNavigationTargetApplied }: { navigationTarget?: SessionNavigationTarget | null; onNavigationTargetApplied?: () => void }) {
   const [filters, setFilters] = useState<SessionsFilters>(() => filtersForTimezone(DEFAULT_STATISTICS_TIMEZONE));
   const [statisticsTimezone, setStatisticsTimezone] = useState(DEFAULT_STATISTICS_TIMEZONE);
   const [timezoneReady, setTimezoneReady] = useState(false);
@@ -104,6 +105,7 @@ export function SessionsPage() {
   const [total, setTotal] = useState<number | null>(null);
   const [windowTokens, setWindowTokens] = useState<number | null>(null);
   const [selectedRow, setSelectedRow] = useState<SessionRow | null>(null);
+  const [selectedSessionRef, setSelectedSessionRef] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -117,11 +119,19 @@ export function SessionsPage() {
   const visibleRows = useMemo(() => filters.cost_status === "all" ? rows : rows.filter((row) => row.cost_status.state === filters.cost_status), [filters.cost_status, rows]);
 
   useEffect(() => {
+    if (!navigationTarget) return;
+    setSelectedRow(null);
+    setFilters((current) => ({ ...current, host_kind: navigationTarget.host_kind || "all" }));
+    setSelectedSessionRef(navigationTarget.type === "sessionDetail" ? navigationTarget.session_ref : null);
+    onNavigationTargetApplied?.();
+  }, [navigationTarget, onNavigationTargetApplied]);
+
+  useEffect(() => {
     let active = true;
     void readStatisticsTimezone().catch(() => ({ timezone: DEFAULT_STATISTICS_TIMEZONE })).then(({ timezone }) => {
       if (!active) return;
       setStatisticsTimezone(timezone);
-      if (!dateFiltersTouched.current) setFilters(filtersForTimezone(timezone));
+      if (!dateFiltersTouched.current) setFilters((current) => ({ ...filtersForTimezone(timezone), host_kind: current.host_kind }));
       setTimezoneReady(true);
     });
     return () => { active = false; };
@@ -202,7 +212,8 @@ export function SessionsPage() {
     }
   };
 
-  if (selectedRow) return <SessionDetail row={selectedRow} onBack={() => setSelectedRow(null)} />;
+  if (selectedRow) return <SessionDetail row={selectedRow} sessionRef={selectedRow.session_ref} onBack={() => setSelectedRow(null)} />;
+  if (selectedSessionRef) return <SessionDetail row={null} sessionRef={selectedSessionRef} hostKind={filters.host_kind} onBack={() => setSelectedSessionRef(null)} />;
 
   return <>
     <section className="sessions-page-header">

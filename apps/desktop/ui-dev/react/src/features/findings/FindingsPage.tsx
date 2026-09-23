@@ -1,12 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { listenAppEvents, makeInvalidationGate, readDecisionMatrix, readFindings, readFindingsFreshness, safeUiError, type DecisionMatrixReport, type FindingGroup, type FindingSample, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
+import { createTrustSuppression, listenAppEvents, makeInvalidationGate, readDecisionMatrix, readFindings, readFindingsFreshness, safeUiError, type DecisionMatrixReport, type FindingGroup, type FindingSample, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
 import { DecisionMatrixSection } from "./DecisionMatrixSection";
 import { mergeFindingsPage } from "./contract";
 
 type SeverityFilter = "all" | "critical" | "warning" | "info";
-
-const TODO_SOURCE_KINDS = new Set(["billing", "budget", "source"]);
-const TODO_RULES = new Set(["PRICE_COVERAGE", "ROUTE_UNCONFIRMED"]);
 
 function timeLabel(value: number): string {
   const date = new Date(value);
@@ -28,16 +25,15 @@ function severityClass(value: string): string {
 }
 
 function isTodo(group: FindingGroup): boolean {
-  if (group.rule.startsWith("SV6")) return false;
-  return TODO_SOURCE_KINDS.has(group.action_kind) || TODO_RULES.has(group.rule);
+  return group.manual_follow_up && !group.read_only && ["billing", "budget", "source"].includes(group.action_kind);
 }
 
 function remedyLabel(group: FindingGroup): string {
-  if (group.read_only || group.rule.startsWith("SV6") || group.rule.startsWith("SV7")) return "只读证据，不提供自动修复";
-  if (group.rule === "PRICE_COVERAGE") return "需要补充价卡";
-  if (group.rule === "ROUTE_UNCONFIRMED") return "需要确认归属";
-  if (group.action_kind === "budget") return "需要查看预算归因";
-  return "需要在设置中处理";
+  if (group.read_only || !group.manual_follow_up) return "只读证据，不提供设置操作";
+  if (group.action_kind === "billing") return "需要复核计费与套餐";
+  if (group.action_kind === "budget") return "需要复核预算";
+  if (group.action_kind === "source") return "需要复核数据源";
+  return "需要人工复核";
 }
 
 function evidenceLevelLabel(value: FindingSample["evidence_level"]): string {
@@ -110,16 +106,35 @@ function StatusSummary({ group }: { group: FindingGroup }) {
   </div>;
 }
 
-function FindingRow({ group }: { group: FindingGroup }) {
+function FindingRow({ group, onNavigateToAction }: { group: FindingGroup; onNavigateToAction?: (actionKind: string) => void }) {
   const [expanded, setExpanded] = useState(false);
+  const [suppressionBusy, setSuppressionBusy] = useState(false);
+  const [suppressionMessage, setSuppressionMessage] = useState<string | null>(null);
   const canExpand = group.sample_evidence.length > 0;
+  const canSuppressNotifications = /^SV70[1-9]$|^SV710$/.test(group.rule);
+  const suppressNotifications = async () => {
+    if (!window.confirm(`忽略 ${group.rule} 的后续系统通知？\n\n这是按规则全局忽略，不是仅忽略当前证据。历史 Finding 与证据不会删除；可在 Trust 页面随时恢复通知。`)) return;
+    setSuppressionBusy(true);
+    setSuppressionMessage(null);
+    try {
+      await createTrustSuppression(group.rule);
+      setSuppressionMessage("后续通知已忽略；历史证据保留，可在 Trust 页面恢复。");
+    } catch (reason: unknown) {
+      setSuppressionMessage(safeUiError(reason, "通知抑制未保存"));
+    } finally {
+      setSuppressionBusy(false);
+    }
+  };
   return <article className="finding-row">
     <div className="finding-row-main">
       <div className="finding-row-title"><strong>{group.rule}</strong><span className={severityClass(group.severity)}>{severityLabel(group.severity)}</span></div>
       <p className="finding-row-subtitle">{group.host} · {group.evidence_class}</p>
       <p className="finding-row-copy">{group.count} 次命中 · {group.sessions_count} 个会话 · {timeLabel(group.first_seen_at_ms)} 至 {timeLabel(group.last_seen_at_ms)}</p>
       <p className="finding-row-copy">{remedyLabel(group)} · {group.sample_evidence.length ? `已有 ${group.sample_evidence.length} 条脱敏证据摘要` : "证据引用不可用"}</p>
+      {group.manual_follow_up && !group.read_only && onNavigateToAction && <button className="button button-secondary button-small finding-evidence-toggle" type="button" onClick={() => onNavigateToAction(group.action_kind)}>打开相关设置</button>}
       {canExpand && <button className="button button-secondary button-small finding-evidence-toggle" type="button" aria-expanded={expanded} aria-controls={`finding-evidence-${group.group_id.replace(/[^a-z0-9-]/gi, "-")}`} onClick={() => setExpanded((value) => !value)}>{expanded ? "收起证据" : "查看证据"}</button>}
+      {canSuppressNotifications && <button className="button button-secondary button-small finding-evidence-toggle" type="button" onClick={() => void suppressNotifications()} disabled={suppressionBusy}>{suppressionBusy ? "保存抑制…" : "忽略此规则的后续通知"}</button>}
+      {suppressionMessage && <p className="finding-suppression-feedback" role="status">{suppressionMessage}</p>}
       {expanded && <div className="finding-evidence-details" id={`finding-evidence-${group.group_id.replace(/[^a-z0-9-]/gi, "-")}`}>{group.sample_evidence.map((sample, index) => <FindingEvidenceDetail key={sample.reference ?? index} sample={sample} index={index} />)}</div>}
     </div>
     <div className="finding-row-side"><StatusSummary group={group} />
@@ -128,7 +143,7 @@ function FindingRow({ group }: { group: FindingGroup }) {
   </article>;
 }
 
-export function FindingsPage() {
+export function FindingsPage({ onNavigateToAction }: { onNavigateToAction?: (actionKind: string) => void }) {
   const [report, setReport] = useState<FindingsReport | null>(null);
   const [freshness, setFreshness] = useState<FindingsFreshness>({ status: "unavailable", state: "unknown", last_successful_sync_at: null, stale_hosts: [], syncing: false });
   const [matrix, setMatrix] = useState<DecisionMatrixReport | null>(null);
@@ -223,8 +238,8 @@ export function FindingsPage() {
     {loading && <p className="inline-status" role="status">{loading}</p>}
     {error && <div className="error-banner" role="alert">{error} · 当前保留上一次结果</div>}
     {report && <div className="finding-stats" aria-label="发现汇总"><article><span className="eyebrow">发现组</span><strong>{report.totals.issues}</strong><small>{report.totals.sessions} 个受影响会话</small></article><article><span className="eyebrow">高风险</span><strong>{report.totals.critical}</strong><small>需优先查看</small></article><article><span className="eyebrow">待关注</span><strong>{report.totals.warning}</strong><small>可行动或需确认</small></article><article><span className="eyebrow">规则</span><strong>{report.rules.length}</strong><small>本地确定性规则</small></article></div>}
-    <section className="finding-section" aria-labelledby="todo-title"><div className="section-heading"><div><p className="eyebrow">行动面</p><h3 id="todo-title">待办</h3></div><span className="count-badge">{todoGroups.length}</span></div>{todoGroups.length ? <div className="finding-list">{todoGroups.map((group) => <FindingRow key={group.group_id} group={group} />)}</div> : <div className="finding-empty"><strong>当前没有可直接处理的待办</strong><p>行为命中不会伪装成任务；它们会保留在下方证据明细中。</p></div>}</section>
+    <section className="finding-section" aria-labelledby="todo-title"><div className="section-heading"><div><p className="eyebrow">行动面</p><h3 id="todo-title">待办</h3></div><span className="count-badge">{todoGroups.length}</span></div>{todoGroups.length ? <div className="finding-list">{todoGroups.map((group) => <FindingRow key={group.group_id} group={group} onNavigateToAction={onNavigateToAction} />)}</div> : <div className="finding-empty"><strong>当前没有可直接处理的待办</strong><p>行为命中不会伪装成任务；它们会保留在下方证据明细中。</p></div>}</section>
     <DecisionMatrixSection report={matrix} loading={matrixLoading} error={matrixError} />
-    <section className="finding-section" aria-labelledby="evidence-title"><div className="section-heading"><div><p className="eyebrow">查证面</p><h3 id="evidence-title">证据明细</h3></div><div className="finding-filters"><label>等级<select value={severity} onChange={(event) => setSeverity(event.target.value as SeverityFilter)}><option value="all">全部</option><option value="critical">高风险</option><option value="warning">需关注</option><option value="info">信息</option></select></label><label>规则<select value={rule} onChange={(event) => setRule(event.target.value)}><option value="all">全部规则</option>{(report?.rules ?? []).map((item) => <option key={item.rule} value={item.rule}>{item.rule}</option>)}</select></label></div></div>{visibleGroups.length ? <div className="finding-list">{visibleGroups.map((group) => <FindingRow key={group.group_id} group={group} />)}</div> : <div className="finding-empty"><strong>{report ? "没有符合当前筛选的证据" : "正在准备证据投影"}</strong><p>{report ? "可切换等级或规则筛选；空结果不代表本机安全。" : "前端只展示脱敏后的本地投影。"}</p></div>}{report?.next_cursor && <div className="finding-pagination"><button className="button button-secondary" type="button" onClick={loadMore} disabled={loadingMore || Boolean(loading)}>{loadingMore ? "正在读取更多…" : "加载更多证据"}</button><span>{loadingMore ? "保持当前已读取结果不变" : "分页读取，不扫描原始日志"}</span></div>}</section>
+    <section className="finding-section" aria-labelledby="evidence-title"><div className="section-heading"><div><p className="eyebrow">查证面</p><h3 id="evidence-title">证据明细</h3></div><div className="finding-filters"><label>等级<select value={severity} onChange={(event) => setSeverity(event.target.value as SeverityFilter)}><option value="all">全部</option><option value="critical">高风险</option><option value="warning">需关注</option><option value="info">信息</option></select></label><label>规则<select value={rule} onChange={(event) => setRule(event.target.value)}><option value="all">全部规则</option>{(report?.rules ?? []).map((item) => <option key={item.rule} value={item.rule}>{item.rule}</option>)}</select></label></div></div>{visibleGroups.length ? <div className="finding-list">{visibleGroups.map((group) => <FindingRow key={group.group_id} group={group} onNavigateToAction={onNavigateToAction} />)}</div> : <div className="finding-empty"><strong>{report ? "没有符合当前筛选的证据" : "正在准备证据投影"}</strong><p>{report ? "可切换等级或规则筛选；空结果不代表本机安全。" : "前端只展示脱敏后的本地投影。"}</p></div>}{report?.next_cursor && <div className="finding-pagination"><button className="button button-secondary" type="button" onClick={loadMore} disabled={loadingMore || Boolean(loading)}>{loadingMore ? "正在读取更多…" : "加载更多证据"}</button><span>{loadingMore ? "保持当前已读取结果不变" : "分页读取，不扫描原始日志"}</span></div>}</section>
   </section>;
 }

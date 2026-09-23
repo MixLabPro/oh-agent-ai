@@ -66,6 +66,11 @@ if (!source.includes("components/ui/StatusPill") || !source.includes("inline-fle
 if (!source.includes('"findings_groups_safe"')) fail("React Findings 未使用版本化安全 DTO command");
 if (!source.includes('"decision_matrix_safe"')) fail("React Findings 未使用版本化 decision matrix DTO command");
 if (!source.includes('"trust_monitor_config"') || !source.includes('"save_trust_monitor_config"') || !source.includes('"trust_runtime_snapshot"')) fail("React Trust 未使用版本化 monitor DTO commands");
+if (!source.includes('"trust_profile_proposal_status"') || !source.includes('"trust_profile_approve"') || !source.includes('"trust_profile_reject"') || !source.includes('"trust_profile_revoke"') || !source.includes('"trust_suppression_list"') || !source.includes('"trust_suppression_revoke"')) fail("React Trust 未接通 Profile 授权与通知抑制生命周期");
+if (!trustPage.includes("profileApprovalIsSafe") || !trustPage.includes("清单版本") || !trustPage.includes("source_scope_preview") || !trustPage.includes("trust_scope_preview")) fail("React Trust Profile 批准缺少脱敏范围预览或哈希确认");
+if (!trustPage.includes("无法安全预览，已禁用批准") || !trustPage.includes("历史证据保留") || !trustPage.includes("Trust 通知抑制")) fail("React Trust 未明确不可观察授权范围、撤销边界或 suppression 控制");
+if (!findingsPage.includes("group.manual_follow_up && !group.read_only") || !findingsPage.includes("onNavigateToAction(group.action_kind)") || !appFile.includes("settings-billing") || !appFile.includes("settings-budget") || !appFile.includes("settings-sources")) fail("React Findings 待办缺少安全 action_kind 到设置分区的导航");
+if (!appFile.includes('value.startsWith("settings-")') || !appFile.includes('return "settings"')) fail("设置分区 hash 未映射回设置页，点击设置内锚点会丢失当前页面");
 if (!source.includes("aria-labelledby=\"trust-monitor-title\"")) fail("React Trust 缺少 monitor 控件可访问标题");
 if (!source.includes("查看明细") || !source.includes("evidence-detail")) fail("React Trust 缺少可展开的证据明细");
 if (!source.includes("查看证据") || !source.includes("finding-evidence-detail") || !source.includes("evidence_level") || !source.includes("上传尝试不等于远端接收、留存或训练")) fail("React Findings 缺少可核验的脱敏证据明细");

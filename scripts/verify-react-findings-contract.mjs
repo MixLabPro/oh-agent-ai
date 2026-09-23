@@ -39,6 +39,16 @@ function loadFindingsContract() {
 const invoke = loadMock();
 const { bridge, window } = loadBridge(invoke);
 const { mergeFindingsPage } = loadFindingsContract();
+const findingsSource = readFileSync(path.join(ui, "react/src/features/findings/FindingsPage.tsx"), "utf8");
+const appSource = readFileSync(path.join(ui, "react/src/app/App.tsx"), "utf8");
+const settingsSource = readFileSync(path.join(ui, "react/src/features/settings/SettingsPage.tsx"), "utf8");
+assert.match(findingsSource, /group\.manual_follow_up\s*&&\s*!group\.read_only/);
+assert.doesNotMatch(findingsSource, /TODO_RULES|TODO_SOURCE_KINDS|PRICE_COVERAGE|ROUTE_UNCONFIRMED/);
+assert.match(findingsSource, /onNavigateToAction\(group\.action_kind\)/);
+assert.match(appSource, /actionKind === "billing"[\s\S]*settings-billing/);
+assert.match(appSource, /actionKind === "budget"[\s\S]*settings-budget/);
+assert.match(appSource, /actionKind === "source"[\s\S]*settings-sources/);
+assert.match(settingsSource, /getElementById\(focusSection\)/);
 const valid = await bridge.readFindings();
 assert.equal(valid.issues.length, 2);
 assert.equal(valid.issues[0].sample_evidence[0].destination_class, "object_storage");
@@ -96,4 +106,4 @@ withOverride((value) => { value.issues[0].sample_evidence[0].observed_first_at_m
 await assert.rejects(() => bridge.readFindings(), /时间范围不安全/);
 restore();
 
-console.log("React Findings contract: OK (safe DTO, bounded collections, malformed rejection)");
+console.log("React Findings contract: OK (safe DTO, bounded collections, malformed rejection, action-kind navigation)");

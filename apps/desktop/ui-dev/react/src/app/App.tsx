@@ -1,5 +1,5 @@
-import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
-import { listenAppEvents, makeInvalidationGate, readOverviewDetails, readOverviewSnapshot, readSourceDataRevision, safeUiError, type OverviewDetails, type OverviewSnapshot } from "../lib/tauri";
+import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
+import { invoke, listen, listenAppEvents, makeInvalidationGate, readOverviewDetails, readOverviewSnapshot, readSourceDataRevision, safeUiError, type OverviewDetails, type OverviewSnapshot } from "../lib/tauri";
 import { FindingsPage } from "../features/findings/FindingsPage";
 import { TrustPage } from "../features/trust/TrustPage";
 import { UsagePage } from "../features/usage/UsagePage";
@@ -11,6 +11,8 @@ import { OverviewPage } from "../features/overview/OverviewPage";
 import { StatusPill } from "../components/ui/StatusPill";
 
 type Page = "overview" | "usage" | "sessions" | "findings" | "test" | "trust" | "skills" | "settings";
+type SettingSection = "settings-sources" | "settings-billing" | "settings-budget";
+type SessionNavigationTarget = { type: "sessionDetail"; session_ref: string; host_kind: string } | { type: "sessionList"; host_kind: string | null };
 
 const navigation: Array<{ id: Page; label: string; hint: string }> = [
   { id: "overview", label: "总览", hint: "当前状态" },
@@ -23,8 +25,25 @@ const navigation: Array<{ id: Page; label: string; hint: string }> = [
   { id: "settings", label: "设置", hint: "本机配置" },
 ];
 
+function isPage(value: unknown): value is Page {
+  return typeof value === "string" && navigation.some((item) => item.id === value);
+}
+
+function parseSessionNavigationTarget(value: unknown): SessionNavigationTarget | null {
+  if (!value || typeof value !== "object") return null;
+  const target = value as Record<string, unknown>;
+  if (target.type === "sessionDetail" && typeof target.session_ref === "string" && /^sr_[A-Za-z0-9_-]{8,128}$/.test(target.session_ref) && typeof target.host_kind === "string") {
+    return { type: "sessionDetail", session_ref: target.session_ref, host_kind: target.host_kind };
+  }
+  if (target.type === "sessionList" && (target.host_kind === null || typeof target.host_kind === "string")) {
+    return { type: "sessionList", host_kind: target.host_kind as string | null };
+  }
+  return null;
+}
+
 function pageFromHash(): Page {
   const value = window.location.hash.replace(/^#\/?/, "");
+  if (value === "settings" || value.startsWith("settings-")) return "settings";
   return navigation.some((item) => item.id === value) ? value as Page : "overview";
 }
 
@@ -54,7 +73,76 @@ export function App() {
   const [overview, setOverview] = useState<OverviewSnapshot | null>(null);
   const [overviewDetails, setOverviewDetails] = useState<OverviewDetails | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [sessionTarget, setSessionTarget] = useState<SessionNavigationTarget | null>(null);
+  const [focusSettingSection, setFocusSettingSection] = useState<SettingSection | null>(null);
   const refreshSeq = useRef(0);
+
+  const applyMenuTarget = useCallback(async () => {
+    try {
+      const tab: unknown = await invoke("peek_nav_target");
+      const sectionTarget = tab === "settings#settings-budget" ? "settings-budget"
+        : tab === "settings#settings-billing" ? "settings-billing"
+        : tab === "settings#settings-sources" ? "settings-sources" : null;
+      const page = sectionTarget ? "settings" : tab;
+      if (isPage(page)) {
+        window.location.hash = page;
+        setPage(page);
+        setFocusSettingSection(sectionTarget as SettingSection | null);
+        await invoke("clear_nav_target");
+      }
+    } catch (reason: unknown) {
+      console.warn("[workbench-react] 菜单页面目标读取失败", reason);
+    }
+    try {
+      const value: unknown = await invoke("peek_focus_target");
+      const target = parseSessionNavigationTarget(value);
+      if (!target) return;
+      setSessionTarget(target);
+      window.location.hash = "sessions";
+      setPage("sessions");
+    } catch (reason: unknown) {
+      console.warn("[workbench-react] 菜单会话目标读取失败", reason);
+    }
+  }, []);
+
+  const clearSessionTarget = useCallback(() => {
+    setSessionTarget(null);
+    void invoke("clear_focus_target").catch((reason: unknown) => console.warn("[workbench-react] 菜单会话目标清理失败", reason));
+  }, []);
+
+  const clearSettingSectionTarget = useCallback(() => setFocusSettingSection(null), []);
+
+  const navigateToFindingAction = useCallback((actionKind: string) => {
+    const target: SettingSection | null = actionKind === "budget" ? "settings-budget"
+      : actionKind === "billing" ? "settings-billing"
+      : actionKind === "source" ? "settings-sources" : null;
+    if (!target) return;
+    setFocusSettingSection(target);
+    navigate("settings");
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const cleanups: Array<() => void> = [];
+    const subscribe = (event: string) => listen(event, () => { if (active) void applyMenuTarget(); }).then((unsubscribe) => {
+      if (active) cleanups.push(unsubscribe);
+      else unsubscribe();
+    }).catch((reason: unknown) => console.warn(`[workbench-react] ${event} 订阅失败，持久目标仍可在窗口恢复时读取`, reason));
+    void Promise.all([subscribe("focus-tab"), subscribe("focus-target")]).then(() => {
+      // Subscribe before the cold-start pull so a menu click racing app startup is
+      // either observed by the listener or still present in the persistent slot.
+      if (active) void applyMenuTarget();
+    });
+    const onVisible = () => { if (document.visibilityState === "visible") void applyMenuTarget(); };
+    window.addEventListener("focus", applyMenuTarget);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      active = false;
+      cleanups.forEach((unsubscribe) => unsubscribe());
+      window.removeEventListener("focus", applyMenuTarget);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [applyMenuTarget]);
 
   useEffect(() => {
     let active = true;
@@ -119,7 +207,7 @@ export function App() {
     <main className="main-content">
       <header className="page-header"><div><p className="eyebrow">Workbench React migration</p><h1>{navigation.find((item) => item.id === page)?.label}</h1></div><div className="header-actions"><StatusPill tone="success">本地运行</StatusPill><button className="button button-secondary" type="button" onClick={() => window.location.reload()}>刷新</button></div></header>
       {error && <div className="error-banner" role="alert">{error} · 当前显示安全的预览状态</div>}
-      {page === "overview" ? <OverviewPage overview={overview} details={overviewDetails} /> : page === "usage" ? <UsagePage /> : page === "sessions" ? <SessionsPage /> : page === "trust" ? <TrustPage /> : page === "test" ? <TestPage /> : page === "skills" ? <SkillsPage /> : page === "settings" ? <SettingsPage /> : <FindingsPage />}
+      {page === "overview" ? <OverviewPage overview={overview} details={overviewDetails} /> : page === "usage" ? <UsagePage /> : page === "sessions" ? <SessionsPage navigationTarget={sessionTarget} onNavigationTargetApplied={clearSessionTarget} /> : page === "trust" ? <TrustPage /> : page === "test" ? <TestPage /> : page === "skills" ? <SkillsPage /> : page === "settings" ? <SettingsPage focusSection={focusSettingSection} onSectionFocused={clearSettingSectionTarget} /> : <FindingsPage onNavigateToAction={navigateToFindingAction} />}
     </main>
   </div></AppErrorBoundary>;
 }

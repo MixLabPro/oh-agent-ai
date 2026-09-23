@@ -339,6 +339,15 @@
     inserted: 2, duplicate: 0, findings_upserted: 1, notification_candidates: 1,
     evidence_links_added: 2,
   };
+  const trustProfileSummary = {
+    slug: "sample-agent", display_name: "示例 Agent", state: "pending", manifest_hash: "0123456789abcdef",
+    discovery_include_count: 1, trust_roots_count: 1, artifact_terms_count: 2, extensions_count: 1,
+    trust_adapter: "generic_artifact_v1", watch_priority: "normal",
+    source_scope_preview: { roots_count: 1, root_classes: ["home_relative"], covers_workspace_or_project: true, may_include_git_metadata: false, covers_full_filesystem: false, may_leave_home_directory: false },
+    trust_scope_preview: { roots_count: 1, root_classes: ["home_relative_app_data"], covers_workspace_or_project: false, may_include_git_metadata: false, home_relative_only: true },
+  };
+  const trustProfileState = { pending: [{ ...trustProfileSummary }], approved: [] };
+  const trustSuppressions = [{ suppression_id: "trust-suppression-SV709-1780000000000", issue_type: "SV709", created_at_ms: Date.now() - 86400000, revoked_at_ms: null }];
   async function invoke(command, args) {
     try {
       switch (command) {
@@ -788,6 +797,42 @@
       };
       case "findings_freshness": return { status: "ok", freshness: { state: "stale", last_successful_sync_at: new Date(Date.now() - 1500000).toISOString(), stale_hosts: ["workbuddy"], syncing: false } };
       case "trust_monitor_config": return { ...trustMonitorConfig };
+      case "trust_discover": return { candidates: [{ id: "sample-agent", detected: true, artifact_profile_available: true, coverage_state: "profiled" }], profile_errors: [] };
+      case "trust_profile_proposal_status": return { status: "ok", authority_state: "ready", data: { pending: trustProfileState.pending, approved: trustProfileState.approved, history: [] } };
+      case "trust_profile_approve": {
+        const index = trustProfileState.pending.findIndex((profile) => profile.slug === (args && args.slug) && profile.manifest_hash === (args && args.manifestHash));
+        if (index < 0) throw new Error("proposal changed");
+        const [profile] = trustProfileState.pending.splice(index, 1);
+        profile.state = "approved";
+        trustProfileState.approved.push(profile);
+        return { status: "ok", data: { status: "approved", slug: profile.slug, manifest_hash: profile.manifest_hash } };
+      }
+      case "trust_profile_reject": {
+        const index = trustProfileState.pending.findIndex((profile) => profile.slug === (args && args.slug) && profile.manifest_hash === (args && args.manifestHash));
+        if (index < 0) throw new Error("proposal changed");
+        const [profile] = trustProfileState.pending.splice(index, 1);
+        return { status: "ok", data: { status: "rejected", slug: profile.slug } };
+      }
+      case "trust_profile_revoke": {
+        const index = trustProfileState.approved.findIndex((profile) => profile.slug === (args && args.slug) && profile.manifest_hash === (args && args.manifestHash));
+        if (index < 0) throw new Error("profile changed");
+        const [profile] = trustProfileState.approved.splice(index, 1);
+        return { status: "ok", data: { status: "revoked", slug: profile.slug } };
+      }
+      case "trust_suppression_list": return { status: "ok", suppressions: trustSuppressions };
+      case "trust_suppression_create": {
+        const issueType = args && args.issueType;
+        if (!/^SV70[1-9]$|^SV710$/.test(issueType)) throw new Error("unknown Trust Finding type");
+        const suppressionId = `trust-suppression-${issueType}-${Date.now()}`;
+        trustSuppressions.unshift({ suppression_id: suppressionId, issue_type: issueType, created_at_ms: Date.now(), revoked_at_ms: null });
+        return { status: "saved", suppression_id: suppressionId };
+      }
+      case "trust_suppression_revoke": {
+        const row = trustSuppressions.find((item) => item.suppression_id === (args && args.suppressionId));
+        if (!row || row.revoked_at_ms !== null) return { status: "not_found", suppression_id: args && args.suppressionId };
+        row.revoked_at_ms = Date.now();
+        return { status: "revoked", suppression_id: row.suppression_id };
+      }
       case "save_trust_monitor_config": {
         const enabled = !!(args && args.enabled);
         const interval = Number(args && args.intervalSeconds);

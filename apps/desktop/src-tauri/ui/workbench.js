@@ -348,15 +348,15 @@ async function pullFocusTarget() {
   }
   if (!t) return;
   try {
-    if (t.type === "sessionDetail" && t.session_key) {
+    if (t.type === "sessionDetail" && t.session_ref) {
       switchTab("sessions");
       // showSession 摘要即时渲染，envelope 异步补齐——导航已生效即可 clear，
       // 不等 sessions_read（冷 cache 30s+，等它会让深链目标滞留整轮）。
       showSession({
-        session_key: t.session_key,
+        session_ref: t.session_ref,
         title: null,
         model: null,
-        host_kind: t.session_key.host_kind || null,
+        host: t.host_kind || null,
       });
     } else if (t.type === "sessionList") {
       sessFilter = t.host_kind || "all";
@@ -403,6 +403,12 @@ let findState = { loaded: false, error: false, data: null, sev: "all", rule: "al
 let srcState = { loaded: false, error: false, sources: null, sync: null, paused: false };
 
 function switchTab(name) {
+  // Menu state uses canonical React route IDs. Keep the legacy shell adapter so
+  // tray navigation remains functional until this shell is retired.
+  const focusBudgetSection = name === "settings#settings-budget";
+  if (focusBudgetSection) name = "settings";
+  if (name === "usage") name = "calendar";
+  else if (name === "settings") name = "sources";
   activeTab = name;
   document.querySelectorAll(".tab").forEach((t) => {
     t.classList.toggle("active", t.dataset.tab === name);
@@ -412,7 +418,13 @@ function switchTab(name) {
   });
   // Return the loading promise so deep links can wait for the target tab's
   // async render before calculating its scroll position.
-  return loadActiveTab();
+  const load = loadActiveTab();
+  if (focusBudgetSection) {
+    void load.then(() => window.requestAnimationFrame(() => {
+      document.getElementById("settings-budget")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }));
+  }
+  return load;
 }
 
 async function loadActiveTab() {
@@ -8439,27 +8451,43 @@ async function init() {
         ? "有 " + pending.length + " 个 Agent Profile 待你批准；Agent 不能自行启用。"
         : "没有待批准的 Agent Profile。";
       pending.forEach((profile) => {
+        const sourceScope = profile.source_scope_preview;
+        const trustScope = profile.trust_scope_preview;
+        const safeRootClasses = ["home_relative", "home_directory", "absolute_home_path"];
+        const canApprove = profile.state === "pending" && /^[0-9a-f]{16}$/.test(String(profile.manifest_hash || ""))
+          && sourceScope && trustScope && sourceScope.roots_count > 0 && trustScope.roots_count > 0
+          && !sourceScope.covers_full_filesystem && !sourceScope.may_leave_home_directory
+          && Array.isArray(sourceScope.root_classes) && sourceScope.root_classes.every((value) => safeRootClasses.includes(value))
+          && trustScope.home_relative_only === true;
+        const scopeText = sourceScope && trustScope
+          ? "日志根 " + sourceScope.roots_count + "（" + (sourceScope.root_classes || []).join("、") + "），匹配模式 " + (profile.discovery_include_count || 0)
+            + "；Trust 根 " + trustScope.roots_count + "（" + (trustScope.root_classes || []).join("、") + "），词项/扩展名 " + (profile.artifact_terms_count || 0) + "/" + (profile.extensions_count || 0)
+          : "授权范围无法安全预览";
         const row = document.createElement("li");
         row.className = "notice";
         const label = document.createElement("span");
         label.className = "notice-text";
-        label.textContent = (profile.display_name || profile.slug || "未知 Profile") + "（" + (profile.slug || "?") + "）";
+        label.textContent = (profile.display_name || profile.slug || "未知 Profile") + "（" + (profile.slug || "?") + "） · " + scopeText + " · 清单 " + (profile.manifest_hash || "不可用");
         const actions = document.createElement("span");
         actions.className = "notice-actions";
         const approve = document.createElement("button");
         approve.className = "btn secondary";
         approve.textContent = "批准并启用";
+        approve.disabled = !canApprove;
+        approve.title = canApprove ? "批准前将再次确认脱敏范围摘要" : "范围无法安全预览或超出用户目录，不能在此批准";
         approve.addEventListener("click", async () => {
+          if (!canApprove || !window.confirm("批准并启用 " + (profile.display_name || profile.slug) + "？\n\n" + scopeText + "\n\n只显示路径类别，不显示本机路径；该动作将按清单哈希 " + profile.manifest_hash + " 再次校验。匹配词仅显示数量，范围摘要不代表实际读取文件清单。")) return;
           approve.disabled = true;
-          try { await invoke("trust_profile_approve", { slug: profile.slug }); await loadTrustProfileProposals(); }
+          try { await invoke("trust_profile_approve", { slug: profile.slug, manifestHash: profile.manifest_hash }); await loadTrustProfileProposals(); }
           catch (error) { showBanner("find-banner", error, false); approve.disabled = false; }
         });
         const reject = document.createElement("button");
         reject.className = "btn secondary";
         reject.textContent = "拒绝";
         reject.addEventListener("click", async () => {
+          if (!window.confirm("拒绝 " + (profile.display_name || profile.slug) + "？该操作绑定清单哈希 " + (profile.manifest_hash || "不可用") + "，仅移除待批准提案。")) return;
           reject.disabled = true;
-          try { await invoke("trust_profile_reject", { slug: profile.slug }); await loadTrustProfileProposals(); }
+          try { await invoke("trust_profile_reject", { slug: profile.slug, manifestHash: profile.manifest_hash }); await loadTrustProfileProposals(); }
           catch (error) { showBanner("find-banner", error, false); reject.disabled = false; }
         });
         actions.append(approve, reject);
@@ -8471,13 +8499,19 @@ async function init() {
         row.className = "notice";
         const label = document.createElement("span");
         label.className = "notice-text";
-        label.textContent = (profile.slug || "未知 Profile") + "（已启用）";
+        const sourceScope = profile.source_scope_preview;
+        const trustScope = profile.trust_scope_preview;
+        const scopeText = sourceScope && trustScope
+          ? "日志根 " + sourceScope.roots_count + "（" + (sourceScope.root_classes || []).join("、") + "），Trust 根 " + trustScope.roots_count + "（" + (trustScope.root_classes || []).join("、") + "）"
+          : "范围摘要暂不可用";
+        label.textContent = (profile.display_name || profile.slug || "未知 Profile") + "（已启用） · " + scopeText + " · 清单 " + (profile.manifest_hash || "不可用");
         const revoke = document.createElement("button");
         revoke.className = "btn secondary";
         revoke.textContent = "撤销";
         revoke.addEventListener("click", async () => {
+          if (!window.confirm("撤销 " + (profile.display_name || profile.slug) + "？清单哈希 " + (profile.manifest_hash || "不可用") + "。撤销会停用 Profile，但不会删除已生成的本机证据。")) return;
           revoke.disabled = true;
-          try { await invoke("trust_profile_revoke", { slug: profile.slug }); await loadTrustProfileProposals(); }
+          try { await invoke("trust_profile_revoke", { slug: profile.slug, manifestHash: profile.manifest_hash }); await loadTrustProfileProposals(); }
           catch (error) { showBanner("find-banner", error, false); revoke.disabled = false; }
         });
         row.append(label, revoke);

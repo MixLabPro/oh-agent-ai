@@ -9,6 +9,7 @@ const dist = path.join(repo, "apps/desktop/src-tauri/ui-react-dist");
 const index = path.join(dist, "index.html");
 const productionConfig = JSON.parse(readFileSync(path.join(repo, "apps/desktop/src-tauri/tauri.conf.json"), "utf8"));
 const candidateConfig = JSON.parse(readFileSync(path.join(repo, "apps/desktop/src-tauri/tauri.react.conf.json"), "utf8"));
+const legacyConfig = JSON.parse(readFileSync(path.join(repo, "apps/desktop/src-tauri/tauri.legacy.conf.json"), "utf8"));
 
 function fail(message) {
   console.error(`FAIL ${message}`);
@@ -20,10 +21,15 @@ if (!existsSync(index)) {
   process.exit(1);
 }
 
-if (productionConfig.build?.frontendDist !== "ui") fail("production Tauri frontendDist changed before Phase 4");
+if (productionConfig.build?.frontendDist !== "ui-react-dist") fail("production Tauri frontendDist must point to the React bundle");
 if (candidateConfig.build?.frontendDist !== "ui-react-dist") fail("React candidate frontendDist must be ui-react-dist");
+if (legacyConfig.build?.frontendDist !== "ui") fail("legacy fallback frontendDist must remain ui");
+const productionWindow = productionConfig.app?.windows?.find((window) => window.label === "workbench");
 const candidateWindow = candidateConfig.app?.windows?.find((window) => window.label === "workbench");
+const legacyWindow = legacyConfig.app?.windows?.find((window) => window.label === "workbench");
+if (productionWindow?.url !== "index.html") fail("production window must open React index.html");
 if (candidateWindow?.url !== "index.html") fail("React candidate window must open index.html");
+if (legacyWindow?.url !== "workbench.html") fail("legacy fallback window must open workbench.html");
 
 const html = readFileSync(index, "utf8");
 if (!html.includes('<div id="root"></div>')) fail("React shadow bundle missing root");

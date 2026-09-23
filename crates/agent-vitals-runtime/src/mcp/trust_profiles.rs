@@ -130,11 +130,21 @@ fn safe_manifest_summary(manifest: &Value, state: &str, hash: &str) -> Value {
     let display = manifest.get("display").and_then(Value::as_object)
         .and_then(|value| value.get("name")).and_then(Value::as_str).unwrap_or("unknown");
     let trust = manifest.get("trust").and_then(Value::as_object);
+    let roots = trust.and_then(|value| value.get("roots")).and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let source_roots = manifest.get("discovery").and_then(Value::as_object)
+        .and_then(|value| value.get("roots")).and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let include_count = manifest.get("discovery").and_then(Value::as_object)
+        .and_then(|value| value.get("include")).and_then(Value::as_array).map_or(0, Vec::len);
     json!({
         "slug": slug,
         "display_name": display,
         "state": state,
         "manifest_hash": hash,
+        "discovery_include_count": include_count,
         "trust_roots_count": trust.and_then(|value| value.get("roots")).and_then(Value::as_array).map_or(0, Vec::len),
         "artifact_terms_count": trust.and_then(|value| value.get("artifact_terms")).and_then(Value::as_array).map_or(0, Vec::len),
         "extensions_count": trust.and_then(|value| value.get("extensions")).and_then(Value::as_array).map_or(0, Vec::len),
@@ -142,6 +152,71 @@ fn safe_manifest_summary(manifest: &Value, state: &str, hash: &str) -> Value {
             .and_then(generic_manifest::TrustEvidenceAdapter::parse).map(|adapter| adapter.as_str()),
         "watch_priority": trust.and_then(|value| value.get("watch_priority")).and_then(Value::as_str)
             .and_then(generic_manifest::TrustWatchPriority::parse).map(|priority| priority.as_str()),
+        "source_scope_preview": if state == "invalid" { Value::Null } else { source_scope_preview(&source_roots) },
+        "trust_scope_preview": if state == "invalid" { Value::Null } else { trust_scope_preview(&roots) },
+    })
+}
+
+fn source_scope_preview(roots: &[String]) -> Value {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut classes = std::collections::BTreeSet::new();
+    let mut covers_workspace = false;
+    let mut may_include_git = false;
+    let mut covers_full_filesystem = false;
+    for root in roots {
+        let expanded = if let Some(relative) = root.strip_prefix("~/") {
+            PathBuf::from("~").join(relative)
+        } else if root == "~" {
+            PathBuf::from("~")
+        } else {
+            PathBuf::from(root)
+        };
+        let components = root.replace('\\', "/").split('/').map(str::to_ascii_lowercase).collect::<Vec<_>>();
+        let has_parent = components.iter().any(|part| part == "..");
+        let full_root = root == "/" || root == "\\";
+        let class = if full_root { covers_full_filesystem = true; "filesystem_root" }
+            else if has_parent { "parent_traversal" }
+            else if root == "~" { "home_directory" }
+            else if root.starts_with("~/") { "home_relative" }
+            else if Path::new(root).is_absolute() && home.as_ref().is_some_and(|base| expanded.starts_with(base)) { "absolute_home_path" }
+            else if Path::new(root).is_absolute() { "absolute_system_path" }
+            else { "relative_path" };
+        classes.insert(class);
+        may_include_git |= components.iter().any(|part| matches!(part.as_str(), ".git" | "git" | "objects" | "lfs"));
+        covers_workspace |= components.iter().any(|part| matches!(part.as_str(), "workspace" | "workspaces" | "worktree" | "worktrees" | "project" | "projects" | "repo" | "repos" | "repositories"));
+    }
+    let outside_home = classes.iter().any(|class| matches!(*class, "filesystem_root" | "parent_traversal" | "absolute_system_path" | "relative_path"));
+    json!({
+        "roots_count": roots.len(),
+        "root_classes": classes.into_iter().collect::<Vec<_>>(),
+        "covers_workspace_or_project": covers_workspace,
+        "may_include_git_metadata": may_include_git,
+        "covers_full_filesystem": covers_full_filesystem,
+        "may_leave_home_directory": outside_home,
+    })
+}
+
+/// Return coarse path classes only. Trust roots are validated as `~/`-relative;
+/// neither the path nor the manifest is exposed to the renderer.
+fn trust_scope_preview(roots: &[String]) -> Value {
+    let mut classes = std::collections::BTreeSet::new();
+    let mut covers_workspace = false;
+    let mut may_include_git = false;
+    for root in roots {
+        let relative = root.strip_prefix("~/").unwrap_or("");
+        let segments = relative.split('/').map(str::to_ascii_lowercase).collect::<Vec<_>>();
+        let git = segments.iter().any(|part| matches!(part.as_str(), ".git" | "git" | "objects" | "lfs"));
+        let workspace = segments.iter().any(|part| matches!(part.as_str(), "workspace" | "workspaces" | "worktree" | "worktrees" | "project" | "projects" | "repo" | "repos" | "repositories"));
+        may_include_git |= git;
+        covers_workspace |= workspace;
+        classes.insert(if git { "git_metadata" } else if workspace { "workspace_or_project" } else { "home_relative_app_data" });
+    }
+    json!({
+        "roots_count": roots.len(),
+        "root_classes": classes.into_iter().collect::<Vec<_>>(),
+        "covers_workspace_or_project": covers_workspace,
+        "may_include_git_metadata": may_include_git,
+        "home_relative_only": true,
     })
 }
 
@@ -215,7 +290,15 @@ pub fn run_stage(args: &Value, data_home: &Path, allow_local_writes: bool) -> Re
 pub fn run_status(data_home: &Path) -> Result<Value, ToolError> {
     let (hosts, _) = crate::host_registry::scan_plugin_hosts(data_home);
     let approved = hosts.into_iter().filter(|host| host.trust_profile.is_some())
-        .map(|host| json!({"slug": host.slug, "state": "approved", "manifest_hash": host.manifest_sha256}))
+        .map(|host| {
+            let manifest = std::fs::read(&host.manifest_path).ok().filter(|bytes| raw_manifest_hash(bytes) == host.manifest_sha256)
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+            manifest.map(|value| safe_manifest_summary(&value, "approved", &host.manifest_sha256))
+                .unwrap_or_else(|| json!({"slug":host.slug, "display_name":host.display_name, "state":"approved",
+                    "manifest_hash":host.manifest_sha256, "discovery_include_count":0, "trust_roots_count":0, "artifact_terms_count":0,
+                    "extensions_count":0, "trust_adapter":null, "watch_priority":null,
+                    "source_scope_preview":null, "trust_scope_preview":null}))
+        })
         .collect::<Vec<_>>();
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"));
     let (local_profiles, _) = crate::trust_audit::profiles(data_home, &home);
@@ -260,11 +343,12 @@ fn pending_summaries(data_home: &Path) -> Result<Vec<Value>, ToolError> {
 /// UI-only approval primitive. MCP deliberately has no dispatch route to this
 /// function. The pending file is atomically installed as a normal host
 /// manifest, after revalidation, and then removed from the proposal queue.
-pub fn approve_staged(data_home: &Path, slug: &str) -> Result<Value, String> {
+pub fn approve_staged(data_home: &Path, slug: &str, expected_manifest_hash: &str) -> Result<Value, String> {
     if !agent_vitals_runtime_slug_ok(slug) { return Err("invalid Trust profile slug".to_string()); }
     let pending = proposal_dir(data_home).join(format!("{slug}.json"));
     let bytes = std::fs::read(&pending).map_err(|_| "proposal not found".to_string())?;
     let manifest: Value = serde_json::from_slice(&bytes).map_err(|_| "proposal is invalid JSON".to_string())?;
+    if manifest_hash(&manifest) != expected_manifest_hash { return Err("proposal changed; review the latest scope before approving".to_string()); }
     let (parsed, _) = validate_manifest(&manifest).map_err(|error| error.message)?;
     if parsed.slug != slug { return Err("proposal slug mismatch".to_string()); }
     let host_dir = data_home.join("hosts.d").join(slug);
@@ -274,12 +358,16 @@ pub fn approve_staged(data_home: &Path, slug: &str) -> Result<Value, String> {
     std::fs::rename(&temporary, host_dir.join("manifest.json")).map_err(|_| "could not commit host manifest atomically".to_string())?;
     std::fs::remove_file(pending).map_err(|_| "host activated but proposal cleanup failed".to_string())?;
     record_event(data_home, "approved", slug);
-    Ok(json!({"status":"approved", "slug":slug, "manifest_hash":manifest_hash(&manifest)}))
+    Ok(json!({"status":"approved", "slug":slug, "manifest_hash":raw_manifest_hash(&bytes)}))
 }
 
-pub fn reject_staged(data_home: &Path, slug: &str) -> Result<Value, String> {
+pub fn reject_staged(data_home: &Path, slug: &str, expected_manifest_hash: &str) -> Result<Value, String> {
     if !agent_vitals_runtime_slug_ok(slug) { return Err("invalid Trust profile slug".to_string()); }
-    std::fs::remove_file(proposal_dir(data_home).join(format!("{slug}.json"))).map_err(|_| "proposal not found".to_string())?;
+    let pending = proposal_dir(data_home).join(format!("{slug}.json"));
+    let bytes = std::fs::read(&pending).map_err(|_| "proposal not found".to_string())?;
+    let manifest: Value = serde_json::from_slice(&bytes).map_err(|_| "proposal is invalid JSON".to_string())?;
+    if manifest_hash(&manifest) != expected_manifest_hash { return Err("proposal changed; review the latest scope before rejecting".to_string()); }
+    std::fs::remove_file(pending).map_err(|_| "proposal not found".to_string())?;
     record_event(data_home, "rejected", slug);
     Ok(json!({"status":"rejected", "slug":slug}))
 }
@@ -287,10 +375,13 @@ pub fn reject_staged(data_home: &Path, slug: &str) -> Result<Value, String> {
 /// UI-only revocation. Moving the approved directory out of `hosts.d` keeps a
 /// recoverable local copy while making the host disappear from the active
 /// registry on the next scan.
-pub fn revoke_approved(data_home: &Path, slug: &str) -> Result<Value, String> {
+pub fn revoke_approved(data_home: &Path, slug: &str, expected_manifest_hash: &str) -> Result<Value, String> {
     if !agent_vitals_runtime_slug_ok(slug) { return Err("invalid Trust profile slug".to_string()); }
     let active = data_home.join("hosts.d").join(slug);
     if !active.exists() { return Err("approved profile not found".to_string()); }
+    let manifest_bytes = std::fs::read(active.join("manifest.json"))
+        .map_err(|_| "approved profile manifest is unavailable".to_string())?;
+    if raw_manifest_hash(&manifest_bytes) != expected_manifest_hash { return Err("approved profile changed; reload before revoking".to_string()); }
     let revoked_root = data_home.join("hosts-revoked");
     std::fs::create_dir_all(&revoked_root).map_err(|_| "could not create revoked profile store".to_string())?;
     let destination = revoked_root.join(slug);
@@ -298,6 +389,11 @@ pub fn revoke_approved(data_home: &Path, slug: &str) -> Result<Value, String> {
     std::fs::rename(active, destination).map_err(|_| "could not revoke Trust profile atomically".to_string())?;
     record_event(data_home, "revoked", slug);
     Ok(json!({"status":"revoked", "slug":slug}))
+}
+
+fn raw_manifest_hash(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn agent_vitals_runtime_slug_ok(slug: &str) -> bool {
@@ -376,12 +472,50 @@ mod tests {
         assert_eq!(run_stage(&args, &home, false).unwrap_err().code, "permission_denied");
         let staged = run_stage(&args, &home, true).unwrap();
         assert_eq!(staged["data"]["status"], "staged");
+        let status = run_status(&home).unwrap();
+        let pending = &status["data"]["pending"][0];
+        assert_eq!(pending["source_scope_preview"]["root_classes"][0], "home_relative");
+        assert_eq!(pending["trust_scope_preview"]["home_relative_only"], true);
+        assert_eq!(pending["discovery_include_count"], 1);
+        assert!(!status.to_string().contains("~/minimax"), "scope preview must not expose local paths");
         assert!(!home.join("hosts.d/minimax-code/manifest.json").exists());
-        let approved = approve_staged(&home, "minimax-code").unwrap();
+        let proposal_hash = staged["data"]["manifest_hash"].as_str().unwrap();
+        let approved = approve_staged(&home, "minimax-code", proposal_hash).unwrap();
         assert_eq!(approved["status"], "approved");
         assert!(home.join("hosts.d/minimax-code/manifest.json").exists());
-        revoke_approved(&home, "minimax-code").unwrap();
+        revoke_approved(&home, "minimax-code", approved["manifest_hash"].as_str().unwrap()).unwrap();
         assert!(!home.join("hosts.d/minimax-code").exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn profile_scope_preview_flags_roots_that_cannot_be_safely_approved() {
+        let home = seeded_home("broad-scope");
+        let mut proposed = manifest();
+        proposed["discovery"]["roots"] = json!(["/"]);
+        run_stage(&json!({"manifest": proposed}), &home, true).unwrap();
+        let status = run_status(&home).unwrap();
+        let preview = &status["data"]["pending"][0]["source_scope_preview"];
+        assert_eq!(preview["covers_full_filesystem"], true);
+        assert_eq!(preview["may_leave_home_directory"], true);
+        assert_eq!(preview["root_classes"][0], "filesystem_root");
+        assert!(!status.to_string().contains("\"/\""), "raw source roots must not enter the status DTO");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn stale_profile_decisions_are_rejected() {
+        let home = seeded_home("stale-decision");
+        let staged = run_stage(&json!({"manifest": manifest()}), &home, true).unwrap();
+        let old_hash = staged["data"]["manifest_hash"].as_str().unwrap().to_string();
+        let path = home.join(PENDING_DIR).join("minimax-code.json");
+        let mut changed = manifest();
+        changed["trust"]["watch_priority"] = json!("enhanced");
+        std::fs::write(&path, serde_json::to_vec_pretty(&changed).unwrap()).unwrap();
+        assert!(approve_staged(&home, "minimax-code", &old_hash).unwrap_err().contains("proposal changed"));
+        assert!(reject_staged(&home, "minimax-code", &old_hash).unwrap_err().contains("proposal changed"));
+        assert!(!home.join("hosts.d/minimax-code/manifest.json").exists());
+        assert!(path.exists(), "stale reject must not delete the changed proposal");
         let _ = std::fs::remove_dir_all(&home);
     }
 }

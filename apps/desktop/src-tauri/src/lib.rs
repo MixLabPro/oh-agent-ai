@@ -1250,7 +1250,7 @@ struct SyncStatusPublisher(
     agent_vitals_runtime::events::ChangePublisher<(bool, String, String)>,
 );
 
-/// 菜单栏「信息行」点击产生的导航目标（工作台 tab 名）。持久存目标是因为窗口未建/未
+/// 菜单栏「信息行」点击产生的导航目标（React canonical page ID）。持久存目标是因为窗口未建/未
 /// 可见时 `emit` 是空操作（`publish_invalidation` 注释）——目标要留到工作台下次
 /// init/focus 时 pull 出来消费；`focus-tab` 事件只是通知，pull 是最终仲裁。工作台 apply
 /// 成功后调 `clear_nav_target` 清除，防陈旧目标在下次 focus 重复应用。
@@ -1265,24 +1265,7 @@ struct NavTarget(Mutex<Option<String>>);
 #[serde(tag = "type", rename_all = "camelCase")]
 enum WorkbenchTarget {
     SessionList { host_kind: Option<String> },
-    SessionDetail { session_key: SessionKeyJson },
-}
-
-/// core `SessionKey::to_json()` 的 4 字段镜像（spec §7.1）。**两处与 spec 代码块
-/// 字面不同，都是 prose/字节契约压过字面，理由写死在这里防回退**：
-/// · 不加 `rename_all = "camelCase"`——`to_json()` 发 snake_case 键，前端把同一
-///   对象原样回传 `sessions_read`（store.rs 透传 `--session-key`），而
-///   `SessionKey::from_json` 只认 4 个 snake_case 键；camelCase 会让回传打到
-///   解析不了的对象上（not-found）。
-/// · 字段用非 Option `String`——`to_json()` 恒发 4 个 string（`from_json` 也只要
-///   string，任一缺/非 string → None）。Option 会让 null 反序列化通过、序列化回
-///   null，回传时 from_json 失败——类型自己堵死这条路，比运行时检查诚实。
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-struct SessionKeyJson {
-    host_kind: String,
-    native_id: String,
-    source_profile: String,
-    machine_namespace: String,
+    SessionDetail { session_ref: String, host_kind: String },
 }
 
 /// 会话深链的待消费目标（spec §7.2）：菜单 L2 点击 → `focus_session` 覆盖式存入、
@@ -2094,6 +2077,12 @@ fn sync_now(app: &AppHandle) {
 
 fn sync_now_tracked(app: &AppHandle, request_id: Option<String>) {
     let app = app.clone();
+    // 托盘菜单点击会立即关闭，但同步在后台可能持续数十秒。把状态栏标题临时
+    // 改为明确的进行中状态；sync_tick 完成时 refresh() 会恢复今日 token 标题，
+    // 同时重建菜单里的成功/失败状态。工作台按钮另有自己的进度文案。
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_title(Some("同步中…"));
+    }
     std::thread::spawn(move || {
         let lock = app.state::<SyncLock>();
         let _guard = lock.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -2152,9 +2141,9 @@ fn tab_for_menu_id(id: &str) -> Option<&'static str> {
     match id {
         // 首行「今日消耗」→ 用量页（今天那格 + 按小时面板就是它的下钻）；此前这个 id
         // 落进 `_ => None`，点了没有任何反馈（2026-09-17 反馈）。
-        "today_tokens" => Some("calendar"),
+        "today_tokens" => Some("usage"),
         "today" | "daily" | "month" | "budget" | "subscription" => Some("overview"),
-        "sync" => Some("sources"),
+        "sync" => Some("settings"),
         // 托盘「Skill 体检」→ Skill tab（WORKBENCH_SKILL_HEALTH_TAB_SPEC §4.1）。
         "skill_health" => Some("skills"),
         _ => None,
@@ -2175,19 +2164,18 @@ fn focus_tab(app: &AppHandle, tab: &str) {
     let _ = app.emit("focus-tab", tab);
 }
 
-/// 系统预算提醒的唯一点击目标。只接受预算页，避免通知 payload 变成任意
+/// 系统预算提醒的唯一点击目标。导航到设置页预算分区，避免通知 payload 变成任意
 /// 工作台导航入口；写目标先于显示，工作台隐藏时也能在下次聚焦时消费。
 #[tauri::command]
 fn focus_budget_from_notification(app: AppHandle) -> Result<(), String> {
-    focus_tab(&app, "budget");
+    focus_tab(&app, "settings#settings-budget");
     Ok(())
 }
 
 /// 动态菜单 id → 会话深链目标（spec §9.2 #12）。纯函数，单测钉住映射：
-/// · `session:{kind}:{i}` → 该宿主第 i 行 recent 的 `SessionDetail`。session_key
-///   从 hosts.json 里 `SessionKey::to_json()` 形状的 Value 反序列化——失败即该行
-///   key 不完整/形状漂移 → None，不发一个回传不了的目标（L2 行仍渲染，只是
-///   点了不动，比跳到 not-found 详情诚实）。
+/// · `session:{kind}:{i}` → 该宿主第 i 行 recent 的 `SessionDetail`。CLI v2 的导航
+///   投影通过兼容字段 `session_key` 携带不透明 `session_ref`；只接受安全引用，
+///   不把 native session key 跨 IPC 边界传给 UI。
 /// · `host:{kind}` → `SessionList{host_kind: Some(kind)}`（v1 点击子菜单本身不产
 ///   事件，发射点留给「查看全部会话」回归，§7.1）。
 /// · 禁用 id（`session:unavailable:{kind}` / `session:none:{kind}` /
@@ -2204,11 +2192,23 @@ fn workbench_target_for_menu_id(id: &str, hosts: &[HostRow]) -> Option<Workbench
         ("session", k) => {
             let i: usize = parts.next()?.parse().ok()?;
             let row = hosts.iter().find(|r| r.host_kind == k)?;
-            let session_key = serde_json::from_value(row.recent.get(i)?.session_key.clone()).ok()?;
-            Some(WorkbenchTarget::SessionDetail { session_key })
+            let session_ref = row.recent.get(i)?.session_key.as_str()?;
+            if !is_safe_session_ref(session_ref) {
+                return None;
+            }
+            Some(WorkbenchTarget::SessionDetail {
+                session_ref: session_ref.to_string(),
+                host_kind: k.to_string(),
+            })
         }
         _ => None,
     }
+}
+
+fn is_safe_session_ref(value: &str) -> bool {
+    let Some(suffix) = value.strip_prefix("sr_") else { return false };
+    (8..=128).contains(&suffix.len())
+        && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 /// 会话深链的核心动作（spec §7.2 的 focus_session 语义）：**覆盖式**存入
@@ -5635,15 +5635,15 @@ mod tests {
     }
 
     #[test]
-    /// 信息行点击 → 工作台 tab 的映射钉死。today/daily/month/budget 都是总览页的
-    /// 数字，sync 是数据源页；workbench/refresh 不是导航行；`recent` 已随平铺行
+    /// 信息行点击 → React canonical page 的映射钉死。today/daily/month/budget 都是总览页的
+    /// 数字，sync 是设置页；workbench/refresh 不是导航行；`recent` 已随平铺行
     /// 删除（宿主导航的 L2 深链走 WorkbenchTarget，不走 tab 映射）。
     fn tab_for_menu_id_maps_info_rows_to_workbench_tabs() {
         for id in ["today", "daily", "month", "budget", "subscription"] {
             assert_eq!(tab_for_menu_id(id), Some("overview"), "id={id} 应跳总览");
         }
-        assert_eq!(tab_for_menu_id("sync"), Some("sources"));
-        assert_eq!(tab_for_menu_id("today_tokens"), Some("calendar"), "首行今日消耗点击要有去处");
+        assert_eq!(tab_for_menu_id("sync"), Some("settings"));
+        assert_eq!(tab_for_menu_id("today_tokens"), Some("usage"), "首行今日消耗点击要有去处");
         assert_eq!(tab_for_menu_id("skill_health"), Some("skills"), "托盘 Skill 体检点击要有去处");
         for id in ["workbench", "refresh", "recent", "host:dsh", "session:dsh:0", "nope", ""] {
             assert_eq!(tab_for_menu_id(id), None, "id={id} 不是信息行导航");
@@ -6021,14 +6021,7 @@ mod tests {
     /// 一层薄壳，语义直接钉在 slot 上。
     #[test]
     fn focus_target_peek_persists_clear_resets_and_set_overwrites() {
-        let a = WorkbenchTarget::SessionDetail {
-            session_key: SessionKeyJson {
-                host_kind: "dsh".into(),
-                native_id: "s1".into(),
-                source_profile: "work".into(),
-                machine_namespace: "mac-a".into(),
-            },
-        };
+        let a = WorkbenchTarget::SessionDetail { session_ref: "sr_0123456789".into(), host_kind: "dsh".into() };
         let b = WorkbenchTarget::SessionList { host_kind: Some("codex".into()) };
         let slot = FocusTarget(Mutex::new(None));
         // 未设置 → None。
@@ -6045,39 +6038,18 @@ mod tests {
         assert_eq!(slot.peek(), None);
     }
 
-    /// spec §9.2 #11 serde round-trip：外层 `type` tag + camelCase 变体名
-    /// （sessionDetail/sessionList）；`session_key` 字段名保持 snake_case，内层
-    /// 4 键与 core `SessionKey::to_json()` **字节一致**（键序也是契约，
-    /// `r2a.rs::to_json` 注释）——回传 sessions_read 的前提，见 SessionKeyJson
-    /// 注释里「两处偏离 spec 代码块」的说明。
+    /// serde round-trip：路由目标只含安全的不透明 session_ref 与宿主类型，
+    /// 不泄露 native session key；外层 `type` tag 使用 camelCase 变体名。
     #[test]
-    fn workbench_target_serde_round_trip_camelcase_tag_snakecase_key() {
-        let key = SessionKeyJson {
-            host_kind: "dsh".into(),
-            native_id: "s1".into(),
-            source_profile: "work".into(),
-            machine_namespace: "mac-a".into(),
-        };
-        // 内层与 core to_json 逐字节一致（字符串比较钉住键序）。
-        let core_key =
-            agent_vitals_domain::r2a::SessionKey::new("dsh", "s1", "work", "mac-a");
-        assert_eq!(
-            serde_json::to_string(&key).unwrap(),
-            serde_json::to_string(&core_key.to_json()).unwrap()
-        );
-        // 外层：type tag + camelCase 变体名 + snake_case 字段名。
-        let detail = WorkbenchTarget::SessionDetail { session_key: key };
+    fn workbench_target_serde_round_trip_uses_opaque_session_ref() {
+        let detail = WorkbenchTarget::SessionDetail { session_ref: "sr_0123456789".into(), host_kind: "dsh".into() };
         let v = serde_json::to_value(&detail).unwrap();
         assert_eq!(
             v,
             serde_json::json!({
                 "type": "sessionDetail",
-                "session_key": {
-                    "host_kind": "dsh",
-                    "native_id": "s1",
-                    "source_profile": "work",
-                    "machine_namespace": "mac-a",
-                }
+                "session_ref": "sr_0123456789",
+                "host_kind": "dsh"
             })
         );
         // round-trip 闭合：同一 JSON 解析回原目标。
@@ -6091,8 +6063,8 @@ mod tests {
         assert_eq!(back, list);
     }
 
-    /// spec §9.2 #12 动态菜单 id → WorkbenchTarget 映射：`session:{kind}:{i}` →
-    /// SessionDetail（key 与行内一致）；`host:{kind}` → SessionList；禁用 id
+    /// 动态菜单 id → WorkbenchTarget 映射：`session:{kind}:{i}` →
+    /// SessionDetail（不透明 ref 与行内一致）；`host:{kind}` → SessionList；禁用 id
     /// （unavailable/none/stale）→ None（禁用项点不到，事件即便到达也不该有
     /// 目标）；越界索引/未知宿主 → None。
     #[test]
@@ -6106,10 +6078,7 @@ mod tests {
                 today_sessions: Some(2),
                 recent: vec![
                     RecentSessionRow {
-                        session_key: serde_json::json!({
-                            "host_kind": "dsh", "native_id": "s1",
-                            "source_profile": "work", "machine_namespace": "mac-a",
-                        }),
+                        session_key: serde_json::json!("sr_0123456789"),
                         title: Some("title".into()),
                         date: Some("2026-09-01".into()),
                         model: Some("m".into()),
@@ -6128,10 +6097,11 @@ mod tests {
             },
             HostRow::unavailable("codex"),
         ];
-        // 正常 L2 → SessionDetail，key 原样带出。
+        // 正常 L2 → SessionDetail，不透明 ref 原样带出。
         match workbench_target_for_menu_id("session:dsh:0", &hosts) {
-            Some(WorkbenchTarget::SessionDetail { session_key }) => {
-                assert_eq!(session_key.native_id, "s1");
+            Some(WorkbenchTarget::SessionDetail { session_ref, host_kind }) => {
+                assert_eq!(session_ref, "sr_0123456789");
+                assert_eq!(host_kind, "dsh");
             }
             other => panic!("session:dsh:0 应映射 SessionDetail，得 {other:?}"),
         }

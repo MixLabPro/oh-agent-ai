@@ -740,7 +740,7 @@ function watcherStatusLabel(health: WatcherHealthStatus | null): string {
   return "已降级为定期检查 · 每 5 分钟";
 }
 
-export function SettingsPage() {
+export function SettingsPage({ focusSection = null, onSectionFocused }: { focusSection?: "settings-sources" | "settings-billing" | "settings-budget" | null; onSectionFocused?: () => void }) {
   const [report, setReport] = useState<SourceHealthReport | null>(null);
   const [sourceControls, setSourceControls] = useState<SourceHostControls | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -782,6 +782,15 @@ export function SettingsPage() {
   const dataRequest = useRef(0);
   const aboutRequest = useRef(0);
   const quotaReminderRequest = useRef(0);
+
+  useEffect(() => {
+    if (!focusSection) return;
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById(focusSection)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      onSectionFocused?.();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusSection, onSectionFocused]);
 
   const refresh = () => {
     const sourceRequestId = ++sourceRequest.current;

@@ -32,7 +32,7 @@ function bucketCost(bucket: SessionBillingBucket): string {
   return costLabel(bucket);
 }
 
-export function SessionDetail({ row, onBack }: { row: SessionRow; onBack: () => void }) {
+export function SessionDetail({ row, sessionRef, hostKind, onBack }: { row: SessionRow | null; sessionRef: string; hostKind?: string; onBack: () => void }) {
   const [detail, setDetail] = useState<SessionDetailData | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -46,21 +46,21 @@ export function SessionDetail({ row, onBack }: { row: SessionRow; onBack: () => 
     setError(null);
     setPaginationError(null);
     setDetail(null);
-    void readSessionDetail(row.session_ref).then((value) => {
+    void readSessionDetail(sessionRef).then((value) => {
       if (generation.current === current) setDetail(value);
     }).catch((reason: unknown) => {
       if (generation.current === current) setError(safeUiError(reason, "会话详情暂不可用"));
     }).finally(() => {
       if (generation.current === current) setLoading(false);
     });
-  }, [row.session_ref]);
+  }, [sessionRef]);
 
   const loadMore = async () => {
     if (!detail?.next_cursor || loadingMore) return;
     setLoadingMore(true);
     setPaginationError(null);
     try {
-      const page = await readSessionDetail(row.session_ref, detail.next_cursor);
+      const page = await readSessionDetail(sessionRef, detail.next_cursor);
       setDetail((current) => current ? { ...current, timeline: current.timeline.concat(page.timeline), has_more: page.has_more, next_cursor: page.next_cursor } : current);
       setPaginationError(null);
     } catch (reason: unknown) {
@@ -71,8 +71,8 @@ export function SessionDetail({ row, onBack }: { row: SessionRow; onBack: () => 
   };
 
   return <>
-    <div className="session-detail-header"><button className="button button-secondary" type="button" onClick={onBack}>← 返回会话列表</button><div><p className="eyebrow">安全会话详情</p><h2>{row.host} 会话</h2></div><span className="status-pill"><span aria-hidden="true" className="status-dot" />只读投影</span></div>
-    <p className="section-description session-detail-intro">详情只显示本机 authority 的聚合和脱敏事件；不显示会话正文、命令参数、工作区路径或原生会话 ID。引用：<code>{row.session_ref.slice(0, 18)}…</code></p>
+    <div className="session-detail-header"><button className="button button-secondary" type="button" onClick={onBack}>← 返回会话列表</button><div><p className="eyebrow">安全会话详情</p><h2>{row?.host ?? detail?.host ?? hostKind ?? "会话"} 会话</h2></div><span className="status-pill"><span aria-hidden="true" className="status-dot" />只读投影</span></div>
+    <p className="section-description session-detail-intro">详情只显示本机 authority 的聚合和脱敏事件；不显示会话正文、命令参数、工作区路径或原生会话 ID。引用：<code>{sessionRef.slice(0, 18)}…</code></p>
     {loading && <div className="sessions-state" role="status"><strong>正在读取详情</strong><p>正在读取安全的 usage / workflow 时间线。</p></div>}
     {error && <div className="error-banner" role="alert">会话详情不可用：{error}</div>}
     {paginationError && <div className="error-banner" role="alert">更多事实加载失败：{paginationError}；已有详情仍可用，请重试。</div>}

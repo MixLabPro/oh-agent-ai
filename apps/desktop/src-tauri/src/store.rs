@@ -603,20 +603,20 @@ pub fn trust_profile_proposal_status() -> Result<Value, Value> {
 }
 
 #[tauri::command]
-pub fn trust_profile_approve(slug: String) -> Result<Value, Value> {
-    agent_vitals_runtime::mcp::trust_profiles::approve_staged(&data_home(), &slug)
+pub fn trust_profile_approve(slug: String, manifest_hash: String) -> Result<Value, Value> {
+    agent_vitals_runtime::mcp::trust_profiles::approve_staged(&data_home(), &slug, &manifest_hash)
         .map_err(|error| error_value("trust_profile_approval_failed", &error))
 }
 
 #[tauri::command]
-pub fn trust_profile_reject(slug: String) -> Result<Value, Value> {
-    agent_vitals_runtime::mcp::trust_profiles::reject_staged(&data_home(), &slug)
+pub fn trust_profile_reject(slug: String, manifest_hash: String) -> Result<Value, Value> {
+    agent_vitals_runtime::mcp::trust_profiles::reject_staged(&data_home(), &slug, &manifest_hash)
         .map_err(|error| error_value("trust_profile_rejection_failed", &error))
 }
 
 #[tauri::command]
-pub fn trust_profile_revoke(slug: String) -> Result<Value, Value> {
-    agent_vitals_runtime::mcp::trust_profiles::revoke_approved(&data_home(), &slug)
+pub fn trust_profile_revoke(slug: String, manifest_hash: String) -> Result<Value, Value> {
+    agent_vitals_runtime::mcp::trust_profiles::revoke_approved(&data_home(), &slug, &manifest_hash)
         .map_err(|error| error_value("trust_profile_revoke_failed", &error))
 }
 

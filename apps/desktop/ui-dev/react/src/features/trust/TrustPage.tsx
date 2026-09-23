@@ -1,9 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import {
   auditTrust,
+  approveTrustProfile,
+  rejectTrustProfile,
   discoverTrust,
   listenAppEvents,
+  readTrustProfileStatus,
+  readTrustSuppressions,
   readTrustMonitorConfig,
+  revokeTrustProfile,
+  revokeTrustSuppression,
   runTrustRuntimeSnapshot,
   saveTrustMonitorConfig,
   safeUiError,
@@ -11,6 +17,9 @@ import {
   type TrustHostCandidate,
   type TrustMonitorConfig,
   type TrustRuntimeSnapshot,
+  type TrustProfileSummary,
+  type TrustProfileStatus,
+  type TrustSuppression,
 } from "../../lib/tauri";
 
 function bytes(value: number | null): string {
@@ -70,6 +79,39 @@ function monitorReasonLabel(value: TrustMonitorConfig["reason"], error: TrustMon
   return error === "sensor_unavailable" ? "运行时传感器不可用" : error === "snapshot_failed" ? "最近一次快照失败" : error === "sensor_partial" ? "运行时传感器仅部分覆盖" : "状态不可用";
 }
 
+function rootClassLabel(value: string): string {
+  return ({
+    git_metadata: "Git 元数据目录线索",
+    workspace_or_project: "工作区 / 项目目录线索",
+    home_relative_app_data: "用户目录下的应用数据",
+    filesystem_root: "文件系统根目录",
+    parent_traversal: "包含父目录跳转",
+    home_directory: "整个用户目录",
+    home_relative: "用户目录内相对路径",
+    absolute_home_path: "用户目录内绝对路径",
+    absolute_system_path: "用户目录外绝对路径",
+    relative_path: "相对工作目录路径",
+  } as Record<string, string>)[value] ?? "未知路径类别";
+}
+
+function profileApprovalIsSafe(profile: TrustProfileSummary): boolean {
+  const source = profile.source_scope_preview;
+  const trust = profile.trust_scope_preview;
+  if (!source || !trust || !source.roots_count || !trust.roots_count) return false;
+  if (source.covers_full_filesystem || source.may_leave_home_directory) return false;
+  return source.root_classes.every((item) => ["home_relative", "home_directory", "absolute_home_path"].includes(item))
+    && trust.root_classes.every((item) => item === "home_relative_app_data" || item === "workspace_or_project" || item === "git_metadata");
+}
+
+function profileScopeText(profile: TrustProfileSummary): string {
+  const source = profile.source_scope_preview;
+  const trust = profile.trust_scope_preview;
+  if (!source || !trust) return "无法生成完整的安全范围预览。";
+  const sourceClasses = source.root_classes.map(rootClassLabel).join("、") || "无可识别类别";
+  const trustClasses = trust.root_classes.map(rootClassLabel).join("、") || "无可识别类别";
+  return `日志来源 ${source.roots_count} 个根目录（${sourceClasses}），${profile.discovery_include_count} 个文件匹配模式；Trust 扫描 ${trust.roots_count} 个根目录（${trustClasses}），${profile.artifact_terms_count} 个文件名词项、${profile.extensions_count} 个扩展名。`;
+}
+
 export function TrustPage() {
   const [candidates, setCandidates] = useState<TrustHostCandidate[]>([]);
   const [profileErrors, setProfileErrors] = useState<string[]>([]);
@@ -86,6 +128,14 @@ export function TrustPage() {
   const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [expandedEvidence, setExpandedEvidence] = useState<string | null>(null);
   const [auditLoadingHost, setAuditLoadingHost] = useState<string | null>(null);
+  const [profileStatus, setProfileStatus] = useState<TrustProfileStatus>({ pending: [], approved: [] });
+  const [suppressions, setSuppressions] = useState<TrustSuppression[]>([]);
+  const [controlsLoading, setControlsLoading] = useState(true);
+  const [controlsError, setControlsError] = useState<string | null>(null);
+  const [controlsFeedback, setControlsFeedback] = useState<string | null>(null);
+  const [profileAction, setProfileAction] = useState<string | null>(null);
+  const [suppressionAction, setSuppressionAction] = useState<string | null>(null);
+  const controlsRequest = useRef(0);
   const auditRequest = useRef(0);
 
   const discover = () => {
@@ -96,7 +146,71 @@ export function TrustPage() {
       .catch((reason: unknown) => { setError(errorMessage(reason)); setLoading(""); });
   };
 
-  useEffect(() => { discover(); }, []);
+  const loadTrustControls = async () => {
+    const requestId = ++controlsRequest.current;
+    setControlsLoading(true);
+    setControlsError(null);
+    const [profiles, rules] = await Promise.allSettled([readTrustProfileStatus(), readTrustSuppressions()]);
+    if (requestId !== controlsRequest.current) return;
+    const errors: string[] = [];
+    if (profiles.status === "fulfilled") setProfileStatus(profiles.value);
+    else errors.push(safeUiError(profiles.reason, "Profile 授权状态暂不可用"));
+    if (rules.status === "fulfilled") setSuppressions(rules.value);
+    else errors.push(safeUiError(rules.reason, "Trust 通知抑制状态暂不可用"));
+    setControlsError(errors.length ? errors.join("；") : null);
+    setControlsLoading(false);
+  };
+
+  useEffect(() => { discover(); void loadTrustControls(); }, []);
+
+  useEffect(() => () => { controlsRequest.current += 1; }, []);
+
+  const refreshTrustPage = () => {
+    discover();
+    void loadTrustControls();
+  };
+
+  const decideProfile = async (profile: TrustProfileSummary, action: "approve" | "reject" | "revoke") => {
+    if (action === "approve" && !profileApprovalIsSafe(profile)) {
+      setControlsFeedback("该 Profile 的授权范围无法安全预览或超出用户目录；为避免盲目授权，React 暂不允许批准。请修正为用户目录内的明确根路径后重新暂存。");
+      return;
+    }
+    const actionLabel = action === "approve" ? "批准并启用" : action === "reject" ? "拒绝提案" : "撤销启用";
+    const safetyNote = action === "approve"
+      ? `\n\n范围预览：${profileScopeText(profile)}\n这里只展示路径类别，不展示本机路径；批准后该宿主可被本机同步读取。清单版本：${profile.manifest_hash}。`
+      : `\n\n目标：${profile.display_name}（${profile.slug}）\n清单版本：${profile.manifest_hash}。${action === "revoke" ? "撤销会停用 Profile，但不会删除已产生的本机证据。" : "拒绝只移除待批准提案。"}`;
+    if (!window.confirm(`确定${actionLabel} ${profile.display_name}？${safetyNote}`)) return;
+    const actionKey = `${action}:${profile.slug}`;
+    setProfileAction(actionKey);
+    setControlsFeedback(null);
+    try {
+      if (action === "approve") await approveTrustProfile(profile);
+      else if (action === "reject") await rejectTrustProfile(profile);
+      else await revokeTrustProfile(profile);
+      setControlsFeedback(`${profile.display_name}：${action === "approve" ? "已批准并启用" : action === "reject" ? "已拒绝" : "已撤销；历史证据保留"}。`);
+      discover();
+      await loadTrustControls();
+    } catch (reason: unknown) {
+      setControlsFeedback(`操作未完成：${safeUiError(reason, "本机 Profile 操作失败")}`);
+    } finally {
+      setProfileAction(null);
+    }
+  };
+
+  const revokeSuppression = async (suppression: TrustSuppression) => {
+    if (!window.confirm(`恢复 ${suppression.issue_type} 的后续系统通知？历史 Finding 不会改变。`)) return;
+    setSuppressionAction(suppression.suppression_id);
+    setControlsFeedback(null);
+    try {
+      const status = await revokeTrustSuppression(suppression.suppression_id);
+      setControlsFeedback(status === "revoked" ? `${suppression.issue_type} 后续通知已恢复。` : "该通知抑制已不存在；列表已刷新。");
+      await loadTrustControls();
+    } catch (reason: unknown) {
+      setControlsFeedback(`撤销失败：${safeUiError(reason, "Trust 通知设置暂不可用")}`);
+    } finally {
+      setSuppressionAction(null);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -186,13 +300,57 @@ export function TrustPage() {
   return <section className="trust-page" aria-labelledby="trust-page-title">
     <div className="trust-page-header">
       <div><p className="eyebrow">Trust / 证据链</p><h2 id="trust-page-title">本地 Agent 出境审计</h2><p className="hero-copy">只读发现与审计。前端只接收已脱敏的证据投影，不读取原始工作区。</p></div>
-      <button className="button button-secondary" type="button" onClick={discover} disabled={Boolean(loading)}>重新发现</button>
+      <button className="button button-secondary" type="button" onClick={refreshTrustPage} disabled={Boolean(loading) || controlsLoading}>重新发现</button>
     </div>
     {loading && <p className="inline-status" role="status">{loading}</p>}
     {error && <div className="error-banner" role="alert">{error}</div>}
     {auditLoadingHost && report && <div className="trust-refresh-status" role="status">正在刷新 {auditLoadingHost} 的本地证据；下面暂保留上一次可读报告。</div>}
     {!auditLoadingHost && error && report && <div className="trust-refresh-status trust-refresh-status-error" role="status">本次审计未完成；仍展示 {report.host} 上一次已取得的脱敏证据。</div>}
     {profileErrors.length > 0 && <div className="callout"><strong>部分宿主配置不可用</strong><span>{profileErrors.length} 条配置警告不会被当作风险结论。</span></div>}
+    <section className="trust-control-card" aria-labelledby="trust-profile-controls-title">
+      <div className="trust-card-heading"><div><p className="eyebrow">本机 UI 授权</p><h3 id="trust-profile-controls-title">宿主 Profile 与通知抑制</h3></div><button className="button button-secondary button-small" type="button" onClick={() => void loadTrustControls()} disabled={controlsLoading || profileAction !== null || suppressionAction !== null}>{controlsLoading ? "读取中…" : "刷新授权状态"}</button></div>
+      <p className="trust-control-copy">Agent / MCP 可以暂存 Profile，但不能代替你批准、拒绝或撤销。审批会按清单哈希再次核对；已生成的历史 Trust 证据不会随撤销删除。</p>
+      {controlsError && <div className="error-banner" role="alert">{controlsError} · 当前保留上次读取结果</div>}
+      {controlsFeedback && <p className="monitor-feedback" role="status">{controlsFeedback}</p>}
+      <div className="trust-control-columns">
+        <section className="trust-control-group" aria-labelledby="trust-pending-title">
+          <div className="trust-control-group-heading"><h4 id="trust-pending-title">待批准 Profile</h4><span className="count-badge">{profileStatus.pending.length}</span></div>
+          {profileStatus.pending.length === 0 ? <p className="trust-control-empty">没有待批准的 Profile；这不表示本机 Agent 风险为零。</p> : profileStatus.pending.map((profile) => {
+            const canApprove = profile.state === "pending" && profileApprovalIsSafe(profile);
+            return <article className={`trust-profile-row ${profile.state === "invalid" ? "trust-profile-row-invalid" : ""}`} key={`${profile.slug}:${profile.manifest_hash}`}>
+              <div className="trust-profile-heading"><div><strong>{profile.display_name}</strong><span>{profile.slug} · {profile.state === "invalid" ? "清单无效" : "等待你决定"}</span></div><code title="确认绑定的清单版本">{profile.manifest_hash}</code></div>
+              {profile.state === "invalid" ? <p className="trust-profile-warning">该提案无法通过当前 schema 校验。范围不可安全预览；你可以拒绝，但不能批准。</p> : <>
+                <p className="trust-profile-scope">日志读取范围：{profile.source_scope_preview ? `${profile.source_scope_preview.roots_count} 个根目录 · ${profile.source_scope_preview.root_classes.map(rootClassLabel).join("、") || "无可识别类别"} · ${profile.discovery_include_count} 个文件匹配模式` : "不可安全预览"}</p>
+                <p className="trust-profile-scope">Trust 元数据扫描：{profile.trust_scope_preview ? `${profile.trust_scope_preview.roots_count} 个根目录 · ${profile.trust_scope_preview.root_classes.map(rootClassLabel).join("、") || "无可识别类别"} · ${profile.artifact_terms_count} 个文件名词项 · ${profile.extensions_count} 个扩展名` : "不可安全预览"}</p>
+                {(profile.source_scope_preview?.covers_full_filesystem || profile.source_scope_preview?.may_leave_home_directory || profile.source_scope_preview?.may_include_git_metadata || profile.trust_scope_preview?.may_include_git_metadata) && <p className="trust-profile-warning">范围包含文件系统宽路径或 Git 元数据线索。路径名类别不是实际文件清单；请仔细核对授权确认内容。</p>}
+                <small className="trust-profile-disclaimer">只显示脱敏路径类别，不显示绝对路径或 manifest 原文；匹配词仅显示数量。范围类别是路径名线索，不证明实际读取了哪些文件。</small>
+              </>}
+              <div className="trust-profile-actions">
+                <button className="button button-primary-small" type="button" onClick={() => void decideProfile(profile, "approve")} disabled={!canApprove || profileAction !== null || controlsLoading}>{profileAction === `approve:${profile.slug}` ? "批准中…" : "批准并启用"}</button>
+                <button className="button button-secondary button-small" type="button" onClick={() => void decideProfile(profile, "reject")} disabled={profileAction !== null || controlsLoading}>{profileAction === `reject:${profile.slug}` ? "拒绝中…" : "拒绝"}</button>
+                {!canApprove && profile.state === "pending" && <span className="trust-profile-warning-inline">范围无法安全预览，已禁用批准</span>}
+              </div>
+            </article>;
+          })}
+        </section>
+        <section className="trust-control-group" aria-labelledby="trust-approved-title">
+          <div className="trust-control-group-heading"><h4 id="trust-approved-title">已启用 Profile</h4><span className="count-badge">{profileStatus.approved.length}</span></div>
+          {profileStatus.approved.length === 0 ? <p className="trust-control-empty">目前没有已启用的动态 Profile。</p> : profileStatus.approved.map((profile) => <article className="trust-profile-row" key={`${profile.slug}:${profile.manifest_hash}`}>
+            <div className="trust-profile-heading"><div><strong>{profile.display_name}</strong><span>{profile.slug} · 已启用</span></div><code title="撤销绑定的当前清单版本">{profile.manifest_hash}</code></div>
+            <p className="trust-profile-scope">{profileScopeText(profile)}</p>
+            {(profile.source_scope_preview?.may_leave_home_directory || profile.source_scope_preview?.may_include_git_metadata || profile.trust_scope_preview?.may_include_git_metadata) && <p className="trust-profile-warning">当前授权涉及宽路径或 Git 元数据线索。</p>}
+            <div className="trust-profile-actions"><button className="button button-secondary button-small" type="button" onClick={() => void decideProfile(profile, "revoke")} disabled={profileAction !== null || controlsLoading}>{profileAction === `revoke:${profile.slug}` ? "撤销中…" : "撤销启用"}</button></div>
+          </article>)}
+        </section>
+      </div>
+      <section className="trust-control-group trust-suppression-group" aria-labelledby="trust-suppression-title">
+        <div className="trust-control-group-heading"><div><h4 id="trust-suppression-title">Trust 通知抑制</h4><p>恢复通知只影响后续提醒，不改变或删除历史 Finding。</p></div><span className="count-badge">{suppressions.length}</span></div>
+        {suppressions.length === 0 ? <p className="trust-control-empty">没有已记录的 Trust 通知抑制。</p> : <ul className="trust-suppression-list">{suppressions.map((suppression) => <li key={suppression.suppression_id}>
+          <div><strong>{suppression.issue_type}</strong><span>{new Date(suppression.created_at_ms).toLocaleString("zh-CN")} · {suppression.revoked_at_ms === null ? "后续通知已忽略" : "通知已恢复"}</span></div>
+          {suppression.revoked_at_ms === null && <button className="button button-secondary button-small" type="button" onClick={() => void revokeSuppression(suppression)} disabled={suppressionAction !== null || controlsLoading}>{suppressionAction === suppression.suppression_id ? "恢复中…" : "恢复通知"}</button>}
+        </li>)}</ul>}
+      </section>
+    </section>
     <section className="trust-monitor-card" aria-labelledby="trust-monitor-title">
       <div className="trust-card-heading"><div><p className="eyebrow">Runtime monitor</p><h3 id="trust-monitor-title">实时监测控制</h3></div><span className={`status-pill ${monitor?.status === "ok" && monitor.enabled ? "status-pill-success" : monitor?.status === "unavailable" ? "status-pill-warning" : ""}`}><span aria-hidden="true" className="status-dot" />{monitorLoading ? "读取中" : monitor?.status === "unavailable" ? "无法确认状态" : monitor?.enabled ? "已开启" : "默认关闭"}</span></div>
       <p className="monitor-copy">监测只在本机运行，采集进程级类型信号；不会读取文件内容、保存路径或上传网络数据。</p>

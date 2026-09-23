@@ -4,9 +4,9 @@
   "version": "1.0.0-beta.2",
   "identifier": "com.mixlabpro.agent-vitals",
   "build": {
-    "frontendDist": "ui",
-    "beforeDevCommand": "npm --prefix ui-dev run dev",
-    "devUrl": "http://127.0.0.1:5173/workbench.html"
+    "frontendDist": "ui-react-dist",
+    "beforeDevCommand": "npm --prefix ui-dev run dev:react",
+    "devUrl": "http://127.0.0.1:5174/"
   },
   "app": {
     "withGlobalTauri": true,
@@ -14,7 +14,7 @@
       {
         "label": "workbench",
         "title": "agent-vitals 工作台",
-        "url": "workbench.html",
+        "url": "index.html",
         "width": 760,
         "height": 560,
         "minWidth": 640,
