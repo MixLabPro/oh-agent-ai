@@ -344,6 +344,65 @@ pub fn host_rows_from_navigation(snap: &Value) -> Vec<HostRow> {
         .collect()
 }
 
+/// `monthly_summary` 的 typed revision 备忘（收敛调查 §2 assembly 段治理，
+/// 2026-09-23）：monthly 全量（月窗 SQL × ~11 条 + provider 折叠）实测 3.6s
+/// 冷 / 2.5s+ 热，而托盘/菜单只需要它的 `metered_view` 投影。同 authority
+/// revision 直接复用上次的 `Arc<MonthlySummary>`——空闲态（revision 不动）
+/// 托盘刷新近零成本；活跃态每次 revision 前进重算一次（300s 节流下 ≈1.2%
+/// 占空比）。镜像 lib.rs `OverviewMemo` 的模式：进程内存、单条、无持久化。
+pub struct MonthlySummaryMemo(
+    pub std::sync::Mutex<Option<(u64, std::sync::Arc<agent_vitals_data::projection::MonthlySummary>)>>,
+);
+
+/// 进程单例：`read_overview_at` 是自由函数且调用点众多（sync tick / IPC /
+/// 测试），穿透传参的改动面不成比例；静态 OnceLock 与 lib.rs 里 managed 的
+/// `OverviewMemo` 语义一致（进程内存、单条、无持久化）。
+static MONTHLY_MEMO: std::sync::OnceLock<MonthlySummaryMemo> = std::sync::OnceLock::new();
+
+fn monthly_memo() -> &'static MonthlySummaryMemo {
+    MONTHLY_MEMO.get_or_init(|| MonthlySummaryMemo(std::sync::Mutex::new(None)))
+}
+
+impl MonthlySummaryMemo {
+    /// 命中或计算。revision 读取失败 → 视为必 miss（每次全量），与
+    /// `OverviewMemo` 的降级语义一致。
+    pub fn get_or_compute(
+        &self,
+        dh: &Path,
+        month: &str,
+    ) -> Option<std::sync::Arc<agent_vitals_data::projection::MonthlySummary>> {
+        let revision = agent_vitals_data::authority::AuthorityDb::open_readonly(
+            &agent_vitals_data::authority::default_authority_path(dh),
+        )
+        .ok()
+        .and_then(|db| db.revision().ok());
+        let Some(revision) = revision else {
+            let fresh = monthly_summary_arc(dh, month)?;
+            return Some(fresh);
+        };
+        {
+            let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((r, cached)) = guard.as_ref() {
+                if *r == revision {
+                    return Some(std::sync::Arc::clone(cached));
+                }
+            }
+        }
+        let fresh = monthly_summary_arc(dh, month)?;
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some((revision, std::sync::Arc::clone(&fresh)));
+        Some(fresh)
+    }
+}
+
+fn monthly_summary_arc(dh: &Path, month: &str) -> Option<std::sync::Arc<agent_vitals_data::projection::MonthlySummary>> {
+    use agent_vitals_data::repository::SummaryRepository;
+    let repo = agent_vitals_runtime::summary::SqlSummaryRepository::at(dh);
+    repo.open_db()?;
+    Some(std::sync::Arc::new(
+        repo.monthly_summary(&agent_vitals_data::repository::MonthlySummaryQuery { month: month.to_string() }),
+    ))
+}
+
 #[derive(Serialize)]
 pub struct Overview {
     pub data_home: String,
@@ -702,6 +761,15 @@ fn read_overview_at(dh: &Path) -> Overview {
     // today_tokens / recent / sync / fx / subscriptions）——它们此前没有
     // 任何一段有计时，是 2.2s 基线最后一块未观测面。
     let t_asm = std::time::Instant::now();
+    use agent_vitals_data::repository::SummaryRepository;
+    let shared_daily = {
+        let repo = agent_vitals_runtime::summary::SqlSummaryRepository::at(dh);
+        repo.open_db().map(|_| {
+            repo.daily_summary(&agent_vitals_data::repository::DailySummaryQuery {
+                date: today_beijing(),
+            })
+        })
+    };
     let overview = Overview {
         data_home: dh.display().to_string(),
         today: today_val,
@@ -712,9 +780,19 @@ fn read_overview_at(dh: &Path) -> Overview {
         budget_profiles: agent_vitals_runtime::budget::budget_profiles_status_sql_at(
             dh, &cur_month,
         ),
-        metered_today: metered_view_sql(dh, MeteredWindow::Day(&today_beijing())),
-        metered_month: metered_view_sql(dh, MeteredWindow::Month(&cur_month)),
-        today_tokens_sql: today_tokens_sql(dh, &today_beijing()),
+        // assembly 段治理（收敛调查 §2）：此前三字段各自 SqlSummaryRepository
+        // + open_db + 完整 summary——daily 被算了两遍（metered Day 与
+        // today_tokens 同日同查询）；monthly 全量 3.6s 无任何缓存。现在
+        // 共享一次 daily 计算，monthly 走 revision 备忘。
+        metered_today: shared_daily
+            .as_ref()
+            .map(|d| metered_view_json(d.metered_view())),
+        metered_month: monthly_memo()
+            .get_or_compute(dh, &cur_month)
+            .map(|m| metered_view_json(m.metered_view())),
+        today_tokens_sql: shared_daily
+            .as_ref()
+            .map(|d| d.tokens_by_host.values().map(|t| t.total).sum()),
         recent: read_recent_session(dh),
         sync: load_sync_status(dh),
         hosts: hosts_snap.hosts,
@@ -742,33 +820,14 @@ fn read_overview_at(dh: &Path) -> Overview {
     overview
 }
 
-enum MeteredWindow<'a> { Day(&'a str), Month(&'a str) }
-
-/// 今日 token 总量（SQL daily DTO）。库打不开 → None；有库但今天没事实 → Some(0)
-/// （「测到 0」是事实，不是缺席）。
-fn today_tokens_sql(dh: &Path, date: &str) -> Option<i64> {
-    use agent_vitals_data::repository::SummaryRepository;
-    let repo = agent_vitals_runtime::summary::SqlSummaryRepository::at(dh);
-    repo.open_db()?;
-    let daily = repo.daily_summary(&agent_vitals_data::repository::DailySummaryQuery { date: date.to_string() });
-    Some(daily.tokens_by_host.values().map(|t| t.total).sum())
-}
 
 /// SQL 权威库的 `metered_view`（daily/monthly DTO 的同一投影）。库打不开 → None。
-fn metered_view_sql(dh: &Path, window: MeteredWindow<'_>) -> Option<Value> {
-    use agent_vitals_data::repository::SummaryRepository;
-    let repo = agent_vitals_runtime::summary::SqlSummaryRepository::at(dh);
-    repo.open_db()?;
-    let view = match window {
-        MeteredWindow::Day(date) => repo
-            .daily_summary(&agent_vitals_data::repository::DailySummaryQuery { date: date.to_string() })
-            .metered_view(),
-        MeteredWindow::Month(month) => repo
-            .monthly_summary(&agent_vitals_data::repository::MonthlySummaryQuery { month: month.to_string() })
-            .metered_view(),
-    };
-    Some(Value::Object(view.iter().map(|(c, v)| (c.clone(), v.to_json())).collect()))
+/// `BTreeMap<String, MeteredView>` → IPC JSON（与原 `metered_view_sql` 的
+/// 映射逐字节同形）。
+fn metered_view_json(view: std::collections::BTreeMap<String, agent_vitals_domain::data_contract::MeteredView>) -> Value {
+    Value::Object(view.iter().map(|(c, v)| (c.clone(), v.to_json())).collect())
 }
+
 
 /// claude-ledger 的逐日 flat 账（`{date: {model: 4 型 snake}}`）→ (今日估报告,
 /// 当月聚合, 今日 token 总量)。纯函数——today/cur_month 由调用方注入，单测不碰
