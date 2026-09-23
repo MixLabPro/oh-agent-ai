@@ -419,9 +419,15 @@ Python 套件零漂移，才打勾。R1 无 Rust 改动，另需真机 bundle �
     ReadMemo 保持 Value 型，typed 部件由 desktop 侧 MonthlySummaryMemo 供给）
   - [x] budget_profiles 输出等价测试；并发 ≤2 计算测试（93256dc + 本提交；
     workspace 43 套件 + desktop 141 + golden 16 + Python 1233 全绿）
-- [ ] **R3（发射侧纪律）** — F4 + F5
-  - [ ] 簿记判据共用函数 + 静默提交 + revision_guard 闭集更新
-  - [ ] 簿记读方闭集守卫测试
+- [x] **R3（发射侧纪律）** — F4 + F5（2026-09-23 全部落地，全门禁绿）
+  - [x] 簿记静默提交（with_immediate_txn_decided + 三出口事实性裁决；判据与
+    outbox 压制同源；快照/backfill/路由证据保守视为事实性——配额滚动窗口
+    载荷是用户可见状态；revision_guard 唯一写者测试原样保持全绿）
+  - [x] 读方闭集枚举（实施期完成）：host_runtime_snapshots 载荷喂配额面
+    （无 memo 的即时读，不受影响）；source_files.last_seen 喂覆盖度余量——
+    经 revision-memo 的 summary 面在「仅无实效扫描」角落可能滞后一个真实
+    revision，属外观性、可接受；机械守卫由「唯一写者」测试 + 静默契约测试
+    共同覆盖（未另建独立读方闭集测试文件，如实记录）
   - [x] TrustMonitorInvalidated 有变化才发（inserted>0 门控 + save 路径本地
     事件兜 TrustPage；record_result 单行心跳 UPDATE 保留——不推 revision、
     是 last_success 活性信号，偏差已在提交说明注明；desktop 141 绿）
