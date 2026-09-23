@@ -3,6 +3,22 @@
 use super::*;
 
 #[derive(Default)]
+/// v0.9.1 Phase 3.1（`AGENT_VITALS_V0_9_1_SQL_AUTHORITY_MIGRATION_SPEC.md`
+/// §5.2）：`SummaryRepository` 的 SQL 权威库实现——`usage_facts` 取代
+/// month.json/ledger/codex fold 作为读源。**计价规则一个字不改**：DSH 走
+/// `dsh_host_amount`/`dsh_provider_amount`/`dsh_tokens`/`dsh_day_tokens`
+/// （无缝复用，它们本就只认 `{total,peak_total}`/`{date:day}` 这两种
+/// `Value` 形状，不关心谁产出的），codex/claude 走上面拆出来的
+/// `_from_hours`/`_from_days` 核心——三条计价管线
+/// 完全同源，唯一的区别是 [`agent_vitals_data::authority_query`] 从
+/// `usage_facts` 反查出同形状的输入，而不是解析 JSON 文件/折叠 rollout。
+///
+/// **权威库打不开（损坏/新版本）时不 panic、也不报错**——`SummaryRepository`
+/// 的 trait 签名不带 `Result`（Stage 0 定的形状，Phase 3 沿用），这里退化
+/// 成"这个窗口的三个宿主都没有数据"，与 JSON 路径在 month.json 缺失时的
+/// 行为一致（每个宿主的 `_from_hours`/`_from_days` 核心函数本来就把"空
+/// 输入"处理成 Unavailable，不是本结构体重新发明的分支）。真正的损坏诊断
+/// 走 `data doctor`/`data status`，不是这条查询路径的职责。
 pub struct SqlSummaryRepository {
     /// `None` = 生产路径，库位置来自 `crate::home::data_home()`（进程
     /// `AGENT_VITALS_HOME`）。`Some` = 参数化：Tauri `read_overview_at(dh)`

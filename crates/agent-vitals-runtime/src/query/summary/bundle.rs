@@ -73,6 +73,17 @@ fn hourly_distribution_with_db(
     })
 }
 
+/// Token 日历的逐日跨宿主数据（v0.9 Stage D——日历此前只画 DSH 日轴，
+/// 2026-09 实测：DSH 全零月让 57 亿 token 的 claude/codex 用量在日历上
+/// 完全不可见，用户看到一片空白）。
+///
+/// 每天三宿主各自计量 + 计价，**钱不跨宿主不跨币合并**（口径各异：DSH
+/// 实测、claude relay 估算、codex 等价标价——格子副行分币并列，主行是
+/// 托盘 `read_overview` 的 SQL 权威数据面（Phase 4 §5.2：菜单栏不再直读
+/// `state/{today,month,claude-ledger}.json`）。开库一次，返回三份与旧 state
+/// JSON **同形**的原始数据，供 Tauri 侧的 core 折叠函数（`today_cost` /
+/// `month_cost` / `claude_estimates` / `rollup_by_model`）消费——不重写任何
+/// 计价。与 `calendar_month` / `hourly_distribution` 同层同源。
 pub struct OverviewBundle {
     /// DSH 今日桶（`month.json` days 单日同形：8 桶 + `by_model`）或 None
     /// （今日无 DSH 用量——不是「花了 0」）。

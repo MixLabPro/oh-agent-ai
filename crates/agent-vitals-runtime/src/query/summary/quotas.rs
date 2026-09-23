@@ -2,6 +2,17 @@
 
 use super::*;
 
+/// Codex 当前配额快照（决策卡「现在该用谁」的唯一正向余量源）。
+///
+/// **为什么是独立函数而不是塞进 summary**：plan 是"当前状态"的单快照、不按
+/// 日期分桶（`hosts/codex/sessions/usage.rs` 的 doc），塞进月/日窗口 DTO 会
+/// 把"此刻余量"伪装成窗口数据。宿主字段由 Codex adapter 解析和校验；这里
+/// 只从权威库读取 adapter 产出的快照，不二次解释：`{"plan_type", "has_credits",
+/// "limits": {"primary": {"used_percent", "window_minutes", "resets_at"}},
+/// "observed_at"}`——**窗口条在 `limits.primary` 之下、不在顶层**（审查 #1：
+/// doc 曾写错为顶层 `primary`，前端与 verify stub 被同一个错误期望误导，
+/// 决策卡整条失效）。无 rollout / 无 plan 事件 → None（无 ChatGPT 订阅
+/// 证据，不得编造余量）。
 pub fn codex_quota_snapshot(home: &Path) -> Option<serde_json::Value> {
     // 签名保留给 Tauri 调用点；配额现由同步管线写入 authority，产品读面不得
     // 回退扫描 ~/.codex rollout（库缺记录就诚实 None）。
