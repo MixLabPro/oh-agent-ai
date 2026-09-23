@@ -83,17 +83,117 @@ pub(crate) const SQL_PEAKED_DAYS_MAP: &str = concat!("SELECT (", local_day_idx!(
            ", not_subscription_covered!(), "
          GROUP BY day_idx, model_id, event_peak");
 
-/// [`claude_days`]：claude 实时行级事实的逐日 `{model: 4 桶}`。
-pub(crate) const SQL_CLAUDE_DAYS: &str = concat!("SELECT (", local_day_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS day_idx,
+/// 计费窗口聚合的粒度：逐日或逐北京小时。与 [`BillingSource`] 正交。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BillingGrain {
+    Day,
+    Hour,
+}
+
+/// 计费窗口的事实来源选择：
+/// - `Realtime`：行级实时事实（`observation_kind != 'legacy_aggregate'`）
+///   加排除当前 saved 订阅覆盖（`not_subscription_covered`——钱归订阅的事实
+///   不得再进按量口径）；
+/// - `LegacyAggregate`：深历史聚合行（`kind = 'legacy_aggregate' 加
+///   `event_peak = 0`，峰行已在实时侧计过）——不带订阅过滤（legacy 深历史
+///   早于任何订阅声明）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BillingSource {
+    Realtime,
+    LegacyAggregate,
+}
+
+/// 一次计费窗口查询（AGENTS.md 数据完整性看守的计费面对偶：token 视图有
+/// host-agnostic 的 [`hourly_by_host_model`]，计费视图此前每个宿主各抄一份
+/// SQL——`codex_by_hour_model` / `claude_days` / `claude_legacy_days` 三份的
+/// WHERE 仅差 host 字面量与粒度。本查询把它收敛为参数；**新增宿主的计费
+/// 日/时视图 = 调这里，不再新写 SQL**）。
+#[derive(Clone, Copy, Debug)]
+pub struct BillingWindowQuery<'a> {
+    pub host: &'a str,
+    pub grain: BillingGrain,
+    pub source: BillingSource,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+/// 计费窗口聚合的一行：`(day|hour 索引, 模型, 四桶 SUM)`。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BillingWindowRow {
+    /// Day 粒度 = 自 civil 纪元的天序号；Hour 粒度 = 天序号 × 24 + 北京小时。
+    pub idx: i64,
+    pub model: Option<String>,
+    pub uncached_input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub output_tokens: i64,
+}
+
+/// 构建 [`BillingWindowQuery`] 的 SQL（`pub(crate)` 供 EXPLAIN QUERY PLAN
+/// 断言共用同一字符串——零漂移纪律沿袭 `SQL_*` const 时代的注释）。
+pub(crate) fn billing_window_sql(q: &BillingWindowQuery<'_>) -> String {
+    let idx_expr = match q.grain {
+        BillingGrain::Day => local_day_idx!(),
+        BillingGrain::Hour => local_hour_idx!(),
+    };
+    let (source_filter, sub_filter) = match q.source {
+        BillingSource::Realtime => (
+            "observation_kind != 'legacy_aggregate'",
+            not_subscription_covered!(),
+        ),
+        BillingSource::LegacyAggregate => (
+            "observation_kind = 'legacy_aggregate' AND event_peak = 0",
+            "",
+        ),
+    };
+    format!(
+        "SELECT ({idx_expr} + (?1 - ?1) + (?2 - ?2)) AS idx,
                 model_id,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens)
          FROM usage_facts
-         WHERE host = 'claude-code' AND observation_kind != 'legacy_aggregate'
+         WHERE host = ?5 AND {source_filter}
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-           ", not_subscription_covered!(), "
-         GROUP BY day_idx, model_id");
+           {sub_filter}
+         GROUP BY idx, model_id",
+        idx_expr = idx_expr,
+        source_filter = source_filter,
+        sub_filter = sub_filter,
+    )
+}
+
+/// 通用计费窗口聚合（四桶 SUM，按粒度 × 模型分组）。参数布局
+/// `?1=北京偏移 ?2=粒度毫秒 ?3/?4=窗口 ?5=host`——host 走参数绑定，
+/// 与 [`hourly_by_host_model`] 同款（单宿主 `host = ?` 命中
+/// `usage_facts_host_time` 部分索引）。
+pub fn billing_window_tokens(
+    conn: &Connection,
+    q: &BillingWindowQuery<'_>,
+) -> Result<Vec<BillingWindowRow>, AuthorityError> {
+    let sql = billing_window_sql(q);
+    let grain_ms = match q.grain {
+        BillingGrain::Day => DAY_MS,
+        BillingGrain::Hour => HOUR_MS,
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![BEIJING_OFFSET_MS, grain_ms, q.start_ms, q.end_ms, q.host],
+            |r| {
+                Ok(BillingWindowRow {
+                    idx: r.get(0)?,
+                    model: r.get(1)?,
+                    uncached_input_tokens: r.get(2)?,
+                    cache_read_tokens: r.get(3)?,
+                    cache_write_tokens: r.get(4)?,
+                    output_tokens: r.get(5)?,
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
 
 /// [`claude_declared_days`]：已被用户归因的 claude 事实，按声明的计费方分组，
 /// 每组形状同 `claude_days`。
@@ -109,29 +209,6 @@ pub(crate) const SQL_CLAUDE_DECLARED_DAYS: &str = concat!("SELECT (", local_day_
            AND decl.fact_id IS NOT NULL
            ", not_subscription_covered!(), "
          GROUP BY day_idx, decl.declared_provider, model_id");
-
-/// [`claude_legacy_days`]：claude 深历史聚合（`event_peak=0` 全量行）。
-pub(crate) const SQL_CLAUDE_LEGACY_DAYS: &str = concat!("SELECT (", local_day_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS day_idx,
-                model_id,
-                SUM(uncached_input_tokens), SUM(cache_read_tokens),
-                SUM(cache_write_tokens), SUM(output_tokens)
-         FROM usage_facts
-         WHERE host = 'claude-code' AND observation_kind = 'legacy_aggregate'
-           AND event_peak = 0 AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
-           AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-         GROUP BY day_idx, model_id");
-
-/// [`codex_by_hour_model`]：codex 实时行级事实的逐北京小时 `{model: 5 桶}`。
-pub(crate) const SQL_CODEX_BY_HOUR_MODEL: &str = concat!("SELECT (", local_hour_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS hour_idx,
-                model_id,
-                SUM(uncached_input_tokens), SUM(cache_read_tokens),
-                SUM(cache_write_tokens), SUM(output_tokens)
-         FROM usage_facts
-         WHERE host = 'codex' AND observation_kind != 'legacy_aggregate'
-           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
-           AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-           ", not_subscription_covered!(), "
-         GROUP BY hour_idx, model_id");
 
 /// [`hourly_by_host_model`] 三宿主 × 模型 × 小时聚合（增量 2 `usage_hourly`
 /// 工具的 SQL 数据源）。从函数体抽出来便于 EXPLAIN QUERY PLAN 测试断言。
@@ -448,7 +525,16 @@ pub fn claude_days(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<BTreeMap<String, Value>, AuthorityError> {
-    claude_days_with(conn, SQL_CLAUDE_DAYS, start_ms, end_ms)
+    // 通用计费窗口（host=claude-code × Day × Realtime）——SQL 不再各宿主
+    // 手抄；输出折叠形状与历史逐字节一致（parity 测试钉住）。
+    let rows = billing_window_tokens(conn, &BillingWindowQuery {
+        host: "claude-code",
+        grain: BillingGrain::Day,
+        source: BillingSource::Realtime,
+        start_ms,
+        end_ms,
+    })?;
+    Ok(fold_billing_days(rows))
 }
 
 /// 已被用户归因（user_declared）的 claude 事实，按声明的计费方分组：
@@ -505,47 +591,24 @@ fn claude_bucket_add(bucket: &mut Value, u: i64, cr: i64, cw: i64, o: i64) {
     }
 }
 
-fn claude_days_with(
-    conn: &Connection,
-    sql: &str,
-    start_ms: i64,
-    end_ms: i64,
-) -> Result<BTreeMap<String, Value>, AuthorityError> {
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(
-        rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, start_ms, end_ms],
-        |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?,
-            ))
-        },
-    )?;
+/// [`BillingWindowRow`]（Day 粒度）→ claude-ledger 形状的逐日 map。GROUP BY
+/// 后 (日, 模型) 键唯一——insert 与累加等价；无模型行诚实略过（与历史两版
+/// 折叠的联合语义一致）。
+fn fold_billing_days(rows: Vec<BillingWindowRow>) -> BTreeMap<String, Value> {
     let mut days: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
     for row in rows {
-        let (day_idx, model, u, cr, cw, o) = row?;
-        // 无模型归属的行没有落点：claude_day_cost 按模型键计价，不知道
-        // "unknown" 该归到哪张卡——与 `claude_provider_amounts` 现有的
-        // unresolved 兜底一致，这里先诚实略过（真实 claude 事实恒有
-        // model_raw，见 hosts/claude_code/sources/usage_fact.rs）。
+        let BillingWindowRow { idx, model, uncached_input_tokens: u, cache_read_tokens: cr, cache_write_tokens: cw, output_tokens: o } = row;
         let Some(model) = model else { continue };
-        let date = civil_date_from_days(day_idx);
-        let bucket = days
-            .entry(date)
-            .or_default()
-            .entry(model)
-            .or_insert_with(claude_zero_bucket);
-        claude_bucket_add(bucket, u, cr, cw, o);
+        let date = civil_date_from_days(idx);
+        days.entry(date).or_default().insert(
+            model,
+            json!({"input_tokens": u, "cache_read_input_tokens": cr,
+                   "cache_creation_input_tokens": cw, "output_tokens": o}),
+        );
     }
-    Ok(days
-        .into_iter()
-        .map(|(d, m)| (d, Value::Object(m)))
-        .collect())
+    days.into_iter().map(|(d, m)| (d, Value::Object(m))).collect()
 }
+
 
 /// claude 深历史聚合（`observation_kind='legacy_aggregate'`，spec §6.2.3）：
 /// 只读 `event_peak=0` 行（`legacy_import::build_legacy_fact` 的"全量"行；
@@ -557,35 +620,15 @@ pub fn claude_legacy_days(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<BTreeMap<String, Value>, AuthorityError> {
-    let mut stmt = conn.prepare(SQL_CLAUDE_LEGACY_DAYS)?;
-    let rows = stmt.query_map(
-        rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, start_ms, end_ms],
-        |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?,
-            ))
-        },
-    )?;
-    let mut days: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
-    for row in rows {
-        let (day_idx, model, u, cr, cw, o) = row?;
-        let Some(model) = model else { continue };
-        let date = civil_date_from_days(day_idx);
-        days.entry(date).or_default().insert(
-            model,
-            json!({"input_tokens": u, "cache_read_input_tokens": cr,
-                   "cache_creation_input_tokens": cw, "output_tokens": o}),
-        );
-    }
-    Ok(days
-        .into_iter()
-        .map(|(d, m)| (d, Value::Object(m)))
-        .collect())
+    // 通用计费窗口（host=claude-code × Day × LegacyAggregate）。
+    let rows = billing_window_tokens(conn, &BillingWindowQuery {
+        host: "claude-code",
+        grain: BillingGrain::Day,
+        source: BillingSource::LegacyAggregate,
+        start_ms,
+        end_ms,
+    })?;
+    Ok(fold_billing_days(rows))
 }
 
 /// codex 的实时行级事实 → `by_hour_model` 形状（`{"YYYY-MM-DDTHH":
@@ -606,23 +649,19 @@ pub fn codex_by_hour_model(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<Value, AuthorityError> {
-    let mut stmt = conn.prepare(SQL_CODEX_BY_HOUR_MODEL)?;
-    let rows = stmt.query_map(
-        rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms],
-        |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?,
-            ))
-        },
-    )?;
+    // 通用计费窗口（host=codex × Hour × Realtime）——SQL 收敛；speeds 折叠
+    // 形状（codex 折叠器的 wire 形状）留在本函数，属合法宿主差异。
+    let rows = billing_window_tokens(conn, &BillingWindowQuery {
+        host: "codex",
+        grain: BillingGrain::Hour,
+        source: BillingSource::Realtime,
+        start_ms,
+        end_ms,
+    })?;
     let mut hours: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
     for row in rows {
-        let (hour_idx, model, u, cr, cw, o) = row?;
+        let (hour_idx, model, u, cr, cw, o) =
+            (row.idx, row.model, row.uncached_input_tokens, row.cache_read_tokens, row.cache_write_tokens, row.output_tokens);
         let Some(model) = model else { continue };
         let day_idx = hour_idx.div_euclid(24);
         let hour_of_day = hour_idx.rem_euclid(24);
@@ -2623,6 +2662,166 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// 通用计费窗口收敛的 parity 钉子：下方三段 SQL 是**冻结的历史原文**
+    /// （收敛前 `SQL_CLAUDE_DAYS` / `SQL_CLAUDE_LEGACY_DAYS` /
+    /// `SQL_CODEX_BY_HOUR_MODEL` 的逐字节拷贝）。富 fixture（实时/legacy/
+    /// 峰行 legacy/订阅覆盖/已删除/无模型/窗外）上，新路径（通用
+    /// `billing_window_tokens` + 折叠）与冻结原文的输出必须**逐字节相等**
+    /// ——任何人改坏构建器的 WHERE/GROUP BY 语义，这里立刻红。
+    #[test]
+    fn billing_window_unification_is_byte_identical_to_frozen_sql() {
+        let path = tmp_db("billing-parity");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        let (s, e) = beijing_day_bounds_ms("2026-09-05").unwrap();
+        let mid = s + 3_600_000;
+
+        // 实时（两行同 (日,模型) → SUM 合并；一行无模型 → 折叠略过）
+        insert_fact(&db, "r1", "claude-code", Some("m1"), "turn", s + 1_000, 0, 10, 20, 5, 3);
+        insert_fact(&db, "r2", "claude-code", Some("m1"), "turn", s + 2_000, 0, 1, 2, 0, 0);
+        insert_fact(&db, "r3", "claude-code", None, "turn", s + 2_500, 0, 7, 0, 0, 0);
+        // legacy 全量行（进 legacy 视图）+ legacy 峰行（两边都不进）
+        insert_fact(&db, "l1", "claude-code", Some("m2"), "legacy_aggregate", s + 3_000, 0, 100, 0, 0, 40);
+        insert_fact(&db, "l2", "claude-code", Some("m2"), "legacy_aggregate", s + 3_100, 1, 999, 999, 999, 999);
+        // 已删除（两边都不进）
+        insert_fact(&db, "d1", "claude-code", Some("m1"), "turn", s + 4_000, 0, 50, 0, 0, 0);
+        db.conn()
+            .execute("UPDATE usage_facts SET deleted_at_ms = 1 WHERE fact_id = 'd1'", [])
+            .unwrap();
+        // 窗外
+        insert_fact(&db, "w1", "claude-code", Some("m1"), "turn", e + 1_000, 0, 9, 9, 9, 9);
+        // codex 同款实时/legacy 各一
+        insert_fact(&db, "c1", "codex", Some("gpt-x"), "turn", mid, 0, 4, 5, 6, 7);
+        insert_fact(&db, "c2", "codex", Some("gpt-x"), "legacy_aggregate", mid, 0, 1, 1, 1, 1);
+
+        // 订阅覆盖一条 claude 实时事实（r2 之外再插一条并被 saved 声明覆盖）
+        insert_fact(&db, "sc1", "claude-code", Some("m1"), "turn", s + 5_000, 0, 500, 0, 0, 0);
+        db.billing_declaration_revision_save(
+            "rev-par", "decl-par", None, "claude-code", "anthropic", "official_subscription",
+            Some("Max"), None, None, "2026-09-01", None, None, None, &[], 2,
+        ).unwrap();
+        db.billing_recalculation_enqueue("job-par", "decl-par", "rev-par", 3).unwrap();
+        db.conn().execute(
+            "UPDATE billing_recalculation_jobs SET status = 'succeeded' WHERE job_id = 'job-par'", [],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO billing_fact_attributions(fact_id, revision_id, job_id, attribution_kind, created_at_ms)
+             VALUES ('sc1', 'rev-par', 'job-par', 'subscription_covered', 4)", [],
+        ).unwrap();
+
+        // ── 冻结原文（收敛前的逐字节拷贝；只许随本测试退役，不许改）──
+        const FROZEN_CLAUDE_DAYS: &str = concat!("SELECT (", local_day_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS day_idx,
+                model_id,
+                SUM(uncached_input_tokens), SUM(cache_read_tokens),
+                SUM(cache_write_tokens), SUM(output_tokens)
+         FROM usage_facts
+         WHERE host = 'claude-code' AND observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?3 AND event_ts_ms < ?4
+           ", not_subscription_covered!(), "
+         GROUP BY day_idx, model_id");
+        const FROZEN_CLAUDE_LEGACY_DAYS: &str = concat!("SELECT (", local_day_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS day_idx,
+                model_id,
+                SUM(uncached_input_tokens), SUM(cache_read_tokens),
+                SUM(cache_write_tokens), SUM(output_tokens)
+         FROM usage_facts
+         WHERE host = 'claude-code' AND observation_kind = 'legacy_aggregate'
+           AND event_peak = 0 AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?3 AND event_ts_ms < ?4
+         GROUP BY day_idx, model_id");
+        const FROZEN_CODEX_BY_HOUR_MODEL: &str = concat!("SELECT (", local_hour_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS hour_idx,
+                model_id,
+                SUM(uncached_input_tokens), SUM(cache_read_tokens),
+                SUM(cache_write_tokens), SUM(output_tokens)
+         FROM usage_facts
+         WHERE host = 'codex' AND observation_kind != 'legacy_aggregate'
+           AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+           AND event_ts_ms >= ?3 AND event_ts_ms < ?4
+           ", not_subscription_covered!(), "
+         GROUP BY hour_idx, model_id");
+
+        let fold_sql = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> serde_json::Value {
+            let mut stmt = db.conn().prepare(sql).unwrap();
+            let rows = stmt.query_map(params, |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            }).unwrap();
+            let mut out: BTreeMap<String, serde_json::Map<String, Value>> = BTreeMap::new();
+            for row in rows {
+                let (idx, model, u, cr, cw, o) = row.unwrap();
+                let Some(model) = model else { continue };
+                out.entry(format!("{idx}")).or_default().insert(
+                    model,
+                    json!({"input_tokens": u, "cache_read_input_tokens": cr,
+                           "cache_creation_input_tokens": cw, "output_tokens": o}),
+                );
+            }
+            serde_json::to_value(&out).unwrap()
+        };
+
+        let day_p: [&dyn rusqlite::ToSql; 4] = [&BEIJING_OFFSET_MS, &DAY_MS, &s, &e];
+        let hour_p: [&dyn rusqlite::ToSql; 4] = [&BEIJING_OFFSET_MS, &HOUR_MS, &s, &e];
+
+        // 行级对拍（聚合行本身）+ 折叠后对拍（公共函数输出 vs 冻结 SQL 手折）
+        let new_days = claude_days(db.conn(), s, e).unwrap();
+        let frozen_days = fold_sql(FROZEN_CLAUDE_DAYS, &day_p);
+        // 冻结版按 idx 键；新版按 civil 日期键——把冻结版也换算成日期键对拍。
+        let frozen_days_dated: serde_json::Map<String, Value> = frozen_days
+            .as_object().unwrap().iter()
+            .map(|(idx, v)| {
+                let days = idx.parse::<i64>().unwrap();
+                (civil_date_from_days(days), v.clone())
+            })
+            .collect();
+        assert_eq!(
+            serde_json::to_value(&new_days).unwrap(),
+            serde_json::Value::Object(frozen_days_dated),
+            "claude_days 新旧必须逐字节一致"
+        );
+
+        let new_legacy = claude_legacy_days(db.conn(), s, e).unwrap();
+        let frozen_legacy = fold_sql(FROZEN_CLAUDE_LEGACY_DAYS, &day_p);
+        let frozen_legacy_dated: serde_json::Map<String, Value> = frozen_legacy
+            .as_object().unwrap().iter()
+            .map(|(idx, v)| {
+                let days = idx.parse::<i64>().unwrap();
+                (civil_date_from_days(days), v.clone())
+            })
+            .collect();
+        assert_eq!(
+            serde_json::to_value(&new_legacy).unwrap(),
+            serde_json::Value::Object(frozen_legacy_dated),
+            "claude_legacy_days 新旧必须逐字节一致"
+        );
+
+        // codex：新旧各自按 hour_idx 折成 (idx, model, 四桶) 集合对拍（折叠
+        // 形状是宿主 wire 面，聚合语义对拍在行级）。
+        let new_rows = billing_window_tokens(db.conn(), &BillingWindowQuery {
+            host: "codex", grain: BillingGrain::Hour,
+            source: BillingSource::Realtime, start_ms: s, end_ms: e,
+        }).unwrap();
+        let new_set: Vec<(i64, Option<String>, i64, i64, i64, i64)> = new_rows
+            .into_iter()
+            .map(|r| (r.idx, r.model, r.uncached_input_tokens, r.cache_read_tokens, r.cache_write_tokens, r.output_tokens))
+            .collect();
+        let mut stmt = db.conn().prepare(FROZEN_CODEX_BY_HOUR_MODEL).unwrap();
+        let frozen_set: Vec<(i64, Option<String>, i64, i64, i64, i64)> = stmt
+            .query_map(hour_p, |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            }).unwrap().map(Result::unwrap).collect();
+        assert_eq!(new_set, frozen_set, "codex 计费小时聚合新旧必须行级一致");
+        // 关键语义抽查：订阅覆盖与峰行确实被各自的过滤器排除。
+        assert!(new_set.iter().all(|(_, _, u, _, _, _)| *u != 999),
+            "峰行/订阅覆盖行不得混入");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// v0.9.1 测试矩阵 §8 行 8「performance（不枚举原始日志/索引命中）」。
     ///
     /// SQL 权威库的整个存在理由是「查询不枚举原始日志」——每个窗口化聚合
@@ -2694,9 +2893,6 @@ mod tests {
                 .collect();
             rows.join(" | ")
         };
-
-        let day_params: [&dyn rusqlite::ToSql; 4] = [&BEIJING_OFFSET_MS, &DAY_MS, &s, &end];
-        let hour_params: [&dyn rusqlite::ToSql; 4] = [&BEIJING_OFFSET_MS, &HOUR_MS, &s, &end];
         let peak_params: [&dyn rusqlite::ToSql; 5] =
             [&BEIJING_OFFSET_MS, &DAY_MS, &"dsh", &s, &end];
         let page_after_ts = i64::MIN;
@@ -2717,11 +2913,26 @@ mod tests {
         let host_window_params: [&dyn rusqlite::ToSql; 5] =
             [&BEIJING_OFFSET_MS, &DAY_MS, &"workbuddy", &s, &end];
 
+        // 通用计费窗口（取代三份宿主手抄 SQL）：直接 EXPLAIN 构建器产物——
+        // 零漂移性质从「共享 const」升级为「测的就是运行时用的那条 SQL」。
+        let billing_day_params: [&dyn rusqlite::ToSql; 5] =
+            [&BEIJING_OFFSET_MS, &DAY_MS, &s, &end, &"claude-code"];
+        let billing_hour_params: [&dyn rusqlite::ToSql; 5] =
+            [&BEIJING_OFFSET_MS, &HOUR_MS, &s, &end, &"codex"];
         for (name, sql, params) in [
             ("peaked_days_map", SQL_PEAKED_DAYS_MAP, &peak_params[..]),
-            ("claude_days", SQL_CLAUDE_DAYS, &day_params[..]),
-            ("claude_legacy_days", SQL_CLAUDE_LEGACY_DAYS, &day_params[..]),
-            ("codex_by_hour_model", SQL_CODEX_BY_HOUR_MODEL, &hour_params[..]),
+            ("billing_day(claude)", &billing_window_sql(&BillingWindowQuery {
+                host: "claude-code", grain: BillingGrain::Day,
+                source: BillingSource::Realtime, start_ms: s, end_ms: end,
+            }), &billing_day_params[..]),
+            ("billing_day(claude,legacy)", &billing_window_sql(&BillingWindowQuery {
+                host: "claude-code", grain: BillingGrain::Day,
+                source: BillingSource::LegacyAggregate, start_ms: s, end_ms: end,
+            }), &billing_day_params[..]),
+            ("billing_hour(codex)", &billing_window_sql(&BillingWindowQuery {
+                host: "codex", grain: BillingGrain::Hour,
+                source: BillingSource::Realtime, start_ms: s, end_ms: end,
+            }), &billing_hour_params[..]),
             ("hourly_by_host_model", SQL_HOURLY_BY_HOST_MODEL, &hourly_h_params[..]),
             ("facts_page_window", SQL_FACTS_PAGE_WINDOW, &page_params[..]),
             ("sessions_in_window", SQL_SESSIONS_IN_WINDOW, &sessions_params[..]),
