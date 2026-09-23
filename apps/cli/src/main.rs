@@ -3133,12 +3133,17 @@ session_store={store} fold={fold}"
     // sync-facts（Stage B 遗留收口）：三宿主例行 ingest——退休路径第 ① 步。
     // 托盘 tick 未来也调这一条（不各自长文件枚举）。
     if let Some(Cmd::SyncFacts { rows_json, hosts }) = &args.cmd {
-        let only_hosts: Option<std::collections::BTreeSet<String>> = hosts.as_ref().map(|list| {
-            list.split(',')
-                .map(|h| h.trim().to_string())
-                .filter(|h| !h.is_empty())
-                .collect()
-        });
+        let only_hosts: Option<std::collections::BTreeSet<String>> = hosts
+            .as_ref()
+            .map(|list| {
+                list.split(',')
+                    .map(|h| h.trim().to_string())
+                    .filter(|h| !h.is_empty())
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            // 空集合 = 过滤掉一切 = no-op 同步——手敲 `--hosts ""` 的守卫：
+            // 视同未给参（全宿主），与桌面侧的防呆一致。
+            .filter(|set| !set.is_empty());
         match agent_vitals_runtime::sync_service::sync_facts_filtered(
             &agent_vitals_runtime::home::data_home(),
             only_hosts.as_ref(),

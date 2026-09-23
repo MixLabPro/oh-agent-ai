@@ -502,26 +502,46 @@ pub fn sync_facts_filtered(
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_default(),
     );
+    // 定向同步（LIGHT-PATH §5.2，验收 #2）：walk 也按宿主裁剪——非唤醒宿主
+    // 不付目录遍历成本（stat 对账与解析本来就在后面的批过滤里跳过，但目录
+    // walk 本身每宿主几百次 stat，不裁剪的话轻 tick 的发现面仍是全宿主）。
+    let wanted = |host: &str| only.map_or(true, |set| set.contains(host));
     let mut batches: Vec<(&str, Vec<PathBuf>)> = vec![
         (
             "claude-code",
-            agent_vitals_hosts::claude_session::claude_project_files(&user_home),
+            if wanted("claude-code") {
+                agent_vitals_hosts::claude_session::claude_project_files(&user_home)
+            } else {
+                Vec::new()
+            },
         ),
         (
             "codex",
-            agent_vitals_hosts::codex_session::codex_rollout_files(&crate::summary::codex_home()),
+            if wanted("codex") {
+                agent_vitals_hosts::codex_session::codex_rollout_files(&crate::summary::codex_home())
+            } else {
+                Vec::new()
+            },
         ),
         (
             "dsh",
-            crate::home::dsh_home()
-                .map(|d| crate::sessions::discovery::dsh_session_files(&d))
-                .unwrap_or_default(),
+            if wanted("dsh") {
+                crate::home::dsh_home()
+                    .map(|d| crate::sessions::discovery::dsh_session_files(&d))
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            },
         ),
         (
             "workbuddy",
-            agent_vitals_hosts::workbuddy_traces::workbuddy_trace_files(
-                &agent_vitals_hosts::workbuddy_session::workbuddy_root(&user_home),
-            ),
+            if wanted("workbuddy") {
+                agent_vitals_hosts::workbuddy_traces::workbuddy_trace_files(
+                    &agent_vitals_hosts::workbuddy_session::workbuddy_root(&user_home),
+                )
+            } else {
+                Vec::new()
+            },
         ),
     ];
     let mut discovery_errors: Vec<(String, String)> = Vec::new();

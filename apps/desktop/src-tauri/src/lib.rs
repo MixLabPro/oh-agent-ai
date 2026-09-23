@@ -1429,17 +1429,17 @@ fn sync_tick_light(
     app: &AppHandle,
     hosts: &std::collections::BTreeSet<String>,
     tray_due: bool,
-) -> bool {
+) -> (bool, bool) {
     if overview::sync_is_paused() == Ok(true) {
         // 暂停态无事可做；状态面留给重 tick 的既有分支（paused 分支照常
         // 每 5 分钟重写一次状态）。
-        return false;
+        return (false, false);
     }
     let t0 = std::time::Instant::now();
     let Some(bin) = resolve_binary() else {
         agent_vitals_runtime::logging::log_warn("sync", "轻 tick 升级重 tick：resolve 失败");
         sync_tick(app);
-        return true;
+        return (true, true);
     };
     let mut failures: Vec<String> = Vec::new();
     if hosts.contains("dsh") {
@@ -1462,7 +1462,7 @@ fn sync_tick_light(
             &format!("轻 tick 失败，升级重 tick: {failures:?}"),
         );
         sync_tick(app);
-        return true;
+        return (true, true);
     }
     let status = SyncStatus::ok(
         "light",
@@ -1486,7 +1486,7 @@ fn sync_tick_light(
                 t0.elapsed()
             ),
         );
-        return true;
+        return (true, false);
     }
     agent_vitals_runtime::logging::log_info(
         "sync",
@@ -1496,7 +1496,7 @@ fn sync_tick_light(
             t0.elapsed()
         ),
     );
-    false
+    (false, false)
 }
 
 /// 单步计时包装：只覆盖 `sync_tick_inner` 尾部那串进程内直调（`refresh`/
@@ -1621,16 +1621,18 @@ fn start_refresh_tick(
         loop {
             // 轻/重决策（LIGHT-PATH spec §5.2 排序规则）：连续轻 tick 达限
             // 或距上次重 tick 满 TICK_PERIOD → 强制重（防饥饿，谁先到算谁）。
-            let heavy_due = light_run >= LIGHT_TICKS_PER_HEAVY
-                || last_heavy.elapsed() >= TICK_PERIOD;
-            let kind = match pending.take() {
-                Some(hosts) if !heavy_due => {
-                    agent_vitals_runtime::ingest::watch::TickKind::Light(hosts)
-                }
-                _ => agent_vitals_runtime::ingest::watch::TickKind::Heavy,
-            };
             let lock = app.state::<SyncLock>();
             if let Ok(_guard) = lock.0.try_lock() {
+                // pending.take() 只在拿到锁之后——锁被占的 continue 路径上
+                // 不得丢弃宿主集合（验收 #3：否则重试轮退化成重 tick）。
+                let heavy_due = light_run >= LIGHT_TICKS_PER_HEAVY
+                    || last_heavy.elapsed() >= TICK_PERIOD;
+                let kind = match pending.take() {
+                    Some(hosts) if !heavy_due => {
+                        agent_vitals_runtime::ingest::watch::TickKind::Light(hosts)
+                    }
+                    _ => agent_vitals_runtime::ingest::watch::TickKind::Heavy,
+                };
                 match &kind {
                     agent_vitals_runtime::ingest::watch::TickKind::Heavy => {
                         sync_tick(&app);
@@ -1640,10 +1642,20 @@ fn start_refresh_tick(
                     }
                     agent_vitals_runtime::ingest::watch::TickKind::Light(hosts) => {
                         let tray_due = last_tray.elapsed() >= TRAY_REFRESH_INTERVAL;
-                        if sync_tick_light(&app, hosts, tray_due) {
-                            last_tray = std::time::Instant::now();
+                        let (tray_refreshed, escalated) =
+                            sync_tick_light(&app, hosts, tray_due);
+                        if escalated {
+                            // 升级已实跑全量重 tick——防饥饿时钟同步推进
+                            //（验收 #4：否则 light_run 失真，重 tick 被推迟）。
+                            last_heavy = std::time::Instant::now();
+                            last_tray = last_heavy;
+                            light_run = 0;
+                        } else {
+                            if tray_refreshed {
+                                last_tray = std::time::Instant::now();
+                            }
+                            light_run += 1;
                         }
-                        light_run += 1;
                     }
                 }
                 last_sync_finished = std::time::Instant::now();

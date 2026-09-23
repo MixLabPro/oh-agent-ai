@@ -143,8 +143,8 @@ impl WakeSlot {
 | discover + stat 对账 | 仅被唤醒宿主的批 | **全宿主**（正确性权威） |
 | `sync_host`（解析+计价+写入） | 仅被唤醒宿主 | 全宿主 |
 | `refresh_hosts`（navigation 子进程） | 跳过 | 跑 |
-| `read_overview` | 跳过（见 §5.3 托盘捷径） | 跑 |
-| `refresh`（托盘） | 仅 `read_overview_tray()`（§5.3） | 跑（吃全量 ov） |
+| `read_overview` | 跳过（托盘节流到期时才跑，§5.3） | 跑 |
+| `refresh`（托盘） | 仅当距上次刷新 ≥60s（节流，§5.3 As-built） | 跑（吃全量 ov） |
 | `budget_alerts` / `quota_alerts` | 跳过 | 跑 |
 | `drain_event_bus` | **跑**（事实落库 → 价格对账/UI 失效必须即时） | 跑 |
 | `publish_invalidation` | 跑（按被唤醒宿主的集合） | 跑 |
@@ -205,7 +205,7 @@ Invalidated；UI 的宿主区数据走 FactsIngested 驱动的既有刷新路径
 1. `sync_tick` 按 §5.2 表路由；`sync_facts` 增加宿主过滤参数（默认全集，
    CLI 不变）；
 2. 轻 tick 失败升级重 tick + WARN；
-3. 托盘捷径 `read_overview_tray()` + 同值测试。
+3. 托盘节流（60s）——窄 SQL 查询经 As-built 修订改为节流 + revision 备忘（§5.3）。
 
 **Exit**：注入式 step-recorder 测试——轻 tick 的步骤集合恰为表定义务；
 重 tick 步骤序列与现状**逐项相等**（字节兼容的机械证明）。
@@ -232,7 +232,7 @@ Invalidated；UI 的宿主区数据走 FactsIngested 驱动的既有刷新路径
 | 升级规则 | 注入时钟穷举轻/重切换 | 轻连发 16 次或 5 分钟到 → 重 |
 | 路由 | step-recorder 轻/重 tick | 轻集合 = §5.2 义务；重序列 = 现状逐项 |
 | 宿主过滤 | `sync_facts(hosts=["claude-code"])` | 只跑该宿主批；codex 批完整（既有 fixture 差分） |
-| 托盘捷径 | `read_overview_tray` 同值 | 与全量 ov 三数字逐字段相等 |
+| 托盘节流 | 轻 tick 步骤集合 step-recorder | 与 §5.2 义务一致；60s 内至多一次 read_overview |
 | 备忘 | 同 revision 连续 IPC | 一次计算 |
 | 回落 | 轻 tick 注入 Err | 本轮升级重 tick + WARN |
 | 原生后端 | macOS FSEvents 写测试（`--ignored`） | 秒级唤醒不变 |
