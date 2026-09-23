@@ -405,13 +405,15 @@ Python 套件零漂移，才打勾。R1 无 Rust 改动，另需真机 bundle �
 
 - [ ] **R1（UI 触发面收敛，止血主力）** — F1
   - [x] workbench.js 触发集收窄 + per-revision 锁存 + 测试钩子（2026-09-23，
-    `feat/refresh-storm-fix`；npm run verify + verify:react 全绿）
+    `feat/refresh-storm-fix` 4faec8b + 验收修复 02c3f15；vm 沙箱实测评审发现的
+    P1 死锁/P1 越权认领/P2 force 吞掉已修；fold-bridge 契约更新到收窄触发集）
   - [x] React：SourceDataDeleted 带 revision 进 gate（gate 契约测试扩展钉住
     「只比较不推进水位」）；SettingsPage 按类型分发在 HEAD 已就位，SourceDataDeleted
     分支接入 gate
   - [ ] 真机手测清单（§7.4）通过
 - [ ] **R2（读路径硬保护）** — F2 + F3
-  - [ ] read_overview async + run_heavy_read + 双检查 + memo 收口
+  - [x] read_overview async + run_heavy_read + 双检查 + memo 收口（93256dc；
+    并发 ≤2/防陈旧/跨 home 隔离测试钉住；desktop 141 绿 + clippy -D 干净）
   - [ ] budget_profiles 改走 memoized summary；MonthlySummaryMemo 并入 ReadMemo
   - [ ] budget_profiles 输出等价测试；并发 ≤2 计算测试
 - [ ] **R3（发射侧纪律）** — F4 + F5
