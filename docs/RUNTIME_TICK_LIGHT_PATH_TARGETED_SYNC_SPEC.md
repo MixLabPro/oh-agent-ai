@@ -163,7 +163,7 @@ impl WakeSlot {
 | `sync_host`（解析+计价+写入） | 仅被唤醒宿主 | 全宿主 |
 | `refresh_hosts`（navigation 子进程） | 跳过 | 跑 |
 | `read_overview` | 跳过（托盘节流到期时才跑，§5.3） | 跑 |
-| `refresh`（托盘） | 仅当距上次刷新 ≥60s（节流，§5.3 As-built） | 跑（吃全量 ov） |
+| `refresh`（托盘） | 仅当距上次刷新 ≥300s（节流，§5.3 As-built + 收敛调查 P2 修正） | 跑（吃全量 ov） |
 | `budget_alerts` / `quota_alerts` | 跳过 | 跑 |
 | `drain_event_bus` | **跑**（事实落库 → 价格对账/UI 失效必须即时） | 跑 |
 | `publish_invalidation` | 跑（按被唤醒宿主的集合） | 跑 |
@@ -179,8 +179,10 @@ impl WakeSlot {
 **As-built 修订（2026-09-23 实施时）**：托盘三数字依赖 claude 月度天数
 （`merged_claude_days`）——砍掉它预算水位就不对了，「窄 SQL」省不出
 预期量级，反而多一条同值漂移面。改为**托盘节流 + revision 备忘**：轻
-tick 的托盘刷新限频 `TRAY_REFRESH_INTERVAL=60s`（重 tick 无条件刷，行为
-与现状一致），配合 §5.3 的 IPC revision 备忘，同一 revision 只算一次。
+tick 的托盘刷新限频 `TRAY_REFRESH_INTERVAL=300s`（重 tick 无条件刷；初始
+取 60s，2026-09-23 收敛调查 §3.3/P2 修正为 300s——60s 与轻 tick 涌现间隔
+失配，实测 17/20 节流失效，关系由常量断言测试钉死），配合 §5.3 的 IPC
+revision 备忘，同一 revision 只算一次。
 窄 SQL 查询留作 Phase D 观测数据证明 read_overview 内部分布后再议。
 
 **revision 备忘的挂点：`overview::read_overview()` 函数本身，不是某一个
@@ -229,7 +231,7 @@ Invalidated；UI 的宿主区数据走 FactsIngested 驱动的既有刷新路径
 1. `sync_tick` 按 §5.2 表路由；`sync_facts` 增加宿主过滤参数（默认全集，
    CLI 不变）；
 2. 轻 tick 失败升级重 tick + WARN；
-3. 托盘节流（60s）——窄 SQL 查询经 As-built 修订改为节流 + revision 备忘（§5.3）。
+3. 托盘节流（300s，2026-09-23 P2 修正）——窄 SQL 查询经 As-built 修订改为节流 + revision 备忘（§5.3）。
 
 **Exit**：注入式 step-recorder 测试——轻 tick 的步骤集合恰为表定义务；
 重 tick 步骤序列与现状**逐项相等**（字节兼容的机械证明）。
@@ -261,7 +263,7 @@ revision 内连续调用只触发一次真实聚合（跨命令命中，不只�
 | 升级规则 | 注入时钟穷举轻/重切换 | 轻连发 16 次或 5 分钟到 → 重 |
 | 路由 | step-recorder 轻/重 tick | 轻集合 = §5.2 义务；重序列 = 现状逐项 |
 | 宿主过滤 | `sync_facts(hosts=["claude-code"])` | 只跑该宿主批；codex 批完整（既有 fixture 差分） |
-| 托盘节流 | 轻 tick 步骤集合 step-recorder | 与 §5.2 义务一致；60s 内至多一次 read_overview |
+| 托盘节流 | 轻 tick 步骤集合 step-recorder | 与 §5.2 义务一致；300s 内至多一次 read_overview（常量关系断言已落地） |
 | 备忘 | 同 revision 连续 IPC | 一次计算 |
 | 回落 | 轻 tick 注入 Err | 本轮升级重 tick + WARN |
 | 原生后端 | macOS FSEvents 写测试（`--ignored`） | 秒级唤醒不变 |

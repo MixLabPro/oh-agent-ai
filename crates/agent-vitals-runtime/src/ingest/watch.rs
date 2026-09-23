@@ -211,6 +211,20 @@ pub struct PendingRoot {
     pub interval: Duration,
 }
 
+/// 重试失败后的重入队升级（纯函数，验收 #3 直测）：`try_attach` 以基线
+/// 间隔把仍 NotFound 的路径 push 回 pending——本函数把该新条目的间隔恢复为
+/// 上一轮的值再翻倍（30→60→120→240→300 封顶），而不是从基线重新数。
+pub fn requeue_escalated(
+    pending: &mut [PendingRoot],
+    probe: &PendingRoot,
+    now: std::time::Instant,
+) {
+    if let Some(requeued) = pending.iter_mut().rev().find(|p| p.path == probe.path) {
+        requeued.interval = probe.interval;
+        requeued.escalate(now);
+    }
+}
+
 impl PendingRoot {
     pub fn new(path: std::path::PathBuf, now: std::time::Instant) -> Self {
         PendingRoot { path, next_retry_at: now + PENDING_RETRY_BASE, interval: PENDING_RETRY_BASE }
@@ -760,14 +774,9 @@ mod supervised {
                 }
                 let probe = entry;
                 self.try_attach(&mut native, &probe.path, now);
-                // try_attach 仍 NotFound 时以基线间隔 push 回来——把间隔
-                // 升级为上一轮的翻倍（封顶 MAX）。
-                if let Some(requeued) =
-                    self.pending.iter_mut().rev().find(|p| p.path == probe.path)
-                {
-                    requeued.interval = probe.interval;
-                    requeued.escalate(now);
-                }
+                // try_attach 仍 NotFound 时以基线间隔 push 回来——升级为
+                // 上一轮的翻倍（封顶 MAX；纯函数，有直测）。
+                requeue_escalated(&mut self.pending, &probe, now);
             }
             self.watcher = Some(native);
         }
@@ -1085,6 +1094,40 @@ mod tests {
         assert_eq!(claude.1, home.join(".claude/skills"));
         // 幂等：再派生一次结果一致
         assert_eq!(default_skill_watch_roots(&home), roots);
+    }
+
+    /// 验收 #3：retry_pending 的 interval 继承粘合（requeue_escalated）——
+    /// try_attach 以基线重入队后，间隔必须从上一轮翻倍而不是从基线数。
+    #[test]
+    fn requeue_escalated_doubles_from_previous_interval() {
+        let now = std::time::Instant::now();
+        // 上一轮 interval=60（已经升级过一次）的探针；try_attach 模拟重入队
+        // （基线 30 的全新条目）。
+        let probe = PendingRoot {
+            path: std::path::PathBuf::from("/tmp/absent"),
+            next_retry_at: now,
+            interval: Duration::from_secs(60),
+        };
+        let mut pending = vec![PendingRoot::new(std::path::PathBuf::from("/tmp/absent"), now)];
+        requeue_escalated(&mut pending, &probe, now);
+        assert_eq!(pending[0].interval, Duration::from_secs(120),
+            "从上一轮 60s 翻倍到 120s，不是从基线 30s 数起");
+        assert_eq!(pending[0].next_retry_at, now + Duration::from_secs(120));
+
+        // 探针已在 300 封顶：重入队后仍 300。
+        let capped = PendingRoot {
+            path: std::path::PathBuf::from("/tmp/absent"),
+            next_retry_at: now,
+            interval: PENDING_RETRY_MAX,
+        };
+        requeue_escalated(&mut pending, &capped, now);
+        assert_eq!(pending[0].interval, PENDING_RETRY_MAX);
+
+        // 挂载成功（未重入队）——无操作，不炸。
+        let mut attached_only = vec![PendingRoot::new(std::path::PathBuf::from("/tmp/other"), now)];
+        requeue_escalated(&mut attached_only, &probe, now);
+        assert_eq!(attached_only.len(), 1);
+        assert_eq!(attached_only[0].interval, PENDING_RETRY_BASE, "无关路径不受影响");
     }
 
     /// P4 退避语义（收敛调查 §4）：新 pending 首个重试在 30s 后；未到点

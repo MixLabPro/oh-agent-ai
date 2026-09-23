@@ -605,7 +605,18 @@ fn read_overview_at(dh: &Path) -> Overview {
     // 与旧 state JSON 同形，喂**同一批** core 折叠函数（today_cost / month_cost
     // / claude_estimates / rollup_by_model），不重写任何计价。SQL 按北京月窗查，
     // 旧「month.json 停在上个月被当本月」的漂移（2026-09-01 事故）结构上不可能。
-    let bundle = agent_vitals_runtime::summary::overview_bundle(dh);
+    let (bundle, bundle_timings) =
+        agent_vitals_runtime::summary::overview_bundle_timed(dh);
+    // bundle 三段进「最慢段」竞争（验收 #2：真凶在 bundle 时点名也要准）。
+    if bundle_timings.open_ms > slowest.1.as_millis() {
+        slowest = ("bundle_open", std::time::Duration::from_millis(bundle_timings.open_ms as u64));
+    }
+    if bundle_timings.dsh_sql_ms > slowest.1.as_millis() {
+        slowest = ("bundle_dsh_sql", std::time::Duration::from_millis(bundle_timings.dsh_sql_ms as u64));
+    }
+    if bundle_timings.claude_sql_ms > slowest.1.as_millis() {
+        slowest = ("bundle_claude_sql", std::time::Duration::from_millis(bundle_timings.claude_sql_ms as u64));
+    }
 
     // 今日：SQL 的 DSH 今日桶（按北京日 key 查出，天生就是「今天」的——无
     // 旧 today.json 的 date-stale 问题）。无 DSH 今日用量 → None（不是「花了 0」）。
@@ -719,7 +730,7 @@ fn read_overview_at(dh: &Path) -> Overview {
     };
     note("assembly", t_asm.elapsed(), &mut slowest);
     let total = t_total.elapsed();
-    if total >= READ_OVERVIEW_BUDGET {
+    if total > READ_OVERVIEW_BUDGET {
         agent_vitals_runtime::logging::log_warn(
             "read_overview",
             &format!(

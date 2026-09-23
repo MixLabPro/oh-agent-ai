@@ -1932,7 +1932,21 @@ pub struct OverviewBundle {
     pub claude_month_days: serde_json::Value,
 }
 
+/// bundle 三段的耗时（P3 观测面；供调用方把 bundle 段纳入「最慢段」点名）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BundleTimings {
+    pub open_ms: u128,
+    pub dsh_sql_ms: u128,
+    pub claude_sql_ms: u128,
+}
+
+/// 兼容入口：不带计时的既有形状。
 pub fn overview_bundle(data_home: &Path) -> OverviewBundle {
+    overview_bundle_timed(data_home).0
+}
+
+/// 带段级计时的组装入口（P3，收敛调查 §2.4）。
+pub fn overview_bundle_timed(data_home: &Path) -> (OverviewBundle, BundleTimings) {
     let today_key = crate::clock::today_beijing();
     let month = crate::clock::current_month_beijing();
     let t_open = std::time::Instant::now();
@@ -1944,16 +1958,19 @@ pub fn overview_bundle(data_home: &Path) -> OverviewBundle {
     .ok();
     // P3 子计时（收敛调查 §2.4）：SQL 面隔离实测全部亚百毫秒，2.2s 基线的
     // 构成只能靠段级观测定位——open / dsh SQL / claude SQL 三段。
+    let open_elapsed = t_open.elapsed();
     crate::core::logging::log_info(
         "read_overview",
-        &format!("bundle open 完成，用时 {:?}", t_open.elapsed()),
+        &format!("bundle open 完成，用时 {open_elapsed:?}"),
     );
+    let mut timings = BundleTimings { open_ms: open_elapsed.as_millis(), ..Default::default() };
     let (dsh_days, claude_days) = match (&db, bounds) {
         (Some(db), Some((start, end))) => {
             let conn = db.conn();
             let t_sql = std::time::Instant::now();
             let dsh = agent_vitals_data::authority_query::peaked_days_map(conn, "dsh", start, end)
                 .unwrap_or_else(|_| json!({}));
+            timings.dsh_sql_ms = t_sql.elapsed().as_millis();
             crate::core::logging::log_info(
                 "read_overview",
                 &format!("bundle dsh_sql 完成，用时 {:?}", t_sql.elapsed()),
@@ -1961,6 +1978,7 @@ pub fn overview_bundle(data_home: &Path) -> OverviewBundle {
             let t_claude = std::time::Instant::now();
             let claude: serde_json::Map<String, serde_json::Value> =
                 merged_claude_days(conn, start, end).into_iter().collect();
+            timings.claude_sql_ms = t_claude.elapsed().as_millis();
             crate::core::logging::log_info(
                 "read_overview",
                 &format!("bundle claude_sql 完成，用时 {:?}", t_claude.elapsed()),
@@ -1970,11 +1988,14 @@ pub fn overview_bundle(data_home: &Path) -> OverviewBundle {
         _ => (json!({}), json!({})),
     };
     let dsh_today = dsh_days.get(&today_key).cloned();
-    OverviewBundle {
-        dsh_today,
-        dsh_month_days: dsh_days,
-        claude_month_days: claude_days,
-    }
+    (
+        OverviewBundle {
+            dsh_today,
+            dsh_month_days: dsh_days,
+            claude_month_days: claude_days,
+        },
+        timings,
+    )
 }
 
 /// token 总量，token 才是跨宿主可加的量）。返回 `{"month", "days":
