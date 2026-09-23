@@ -274,7 +274,7 @@ revision 内连续调用只触发一次真实聚合（跨命令命中，不只�
 ## 8. Observability / privacy
 
 - tick 分类（light/heavy）进 tick 完成日志行；轻 tick 记被同步宿主集合；
-- `read_overview_tray` 与备忘命中/未命中计数：进程内存 + 日志，不进
+- `read_overview` 托盘节流与备忘命中/未命中计数：进程内存 + 日志，不进
   authority DB、不进导出面、不上传；
 - 唤醒槽内宿主集合只在进程内存（宿主 slug 本就不是敏感面，但同样不进
   IPC DTO——UI 已有的宿主标签来自既有 surface）。
