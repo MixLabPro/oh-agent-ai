@@ -437,11 +437,12 @@ Python 套件零漂移，才打勾。R1 无 Rust 改动，另需真机 bundle �
   （lsof_spawn/parse/open/txn_insert/correlate/outbox_emit 单行 INFO）+
   interval 上限收敛（60s 硬顶移除，5..=3600 全域）；门控三行测试钉住
 - [ ] **R5（轻 tick 减负）** — F7a → F7b → F7c（各自独立打勾）
-  - [ ] F7a quota 指纹跳过——**延后**（2026-09-24 实施期发现）：`windows_recent`
-    撞窗计数聚合 7 天窗内全部文件（含未变文件），脏文件子集扫描必然漏计；
-    需按文件指纹的聚合缓存 + spec 自要求的对拍测试，非小改
-  - [ ] F7b codex 单趟 walk——**延后**：需 hosts crate 四个适配器的
-    错误收集型 `*_files()` API 变体
+  - [x] F7a quota 指纹缓存（09c8533 + 2074b7b）：贡献粒度拆分 + (size,mtime)
+    指纹缓存 + floor 在合并处按当前时间施加（不随缓存冻结）；对拍测试钉住
+    冷/暖/变更/floor 滑动四腿（滑动腿经评审修复后真实非空）；缓存写 best-effort
+  - [x] F7b codex 单趟 walk（09c8533）：`codex_rollout_files_with_errors` 单趟
+    产出清单+错误，主路径与自定义源换用，错误面按唤醒裁剪（codex 未唤醒零
+    walk）；等价测试钉住。claude/dsh/workbuddy 的双 walk 遗留（评审 P3-7）
   - [x] F7c 收尾日节流（99e2c86）：legacy 订阅迁移 + 价格快照改为
     `.daily-bookkeeping.json` 日戳节流（retention 同款范式，失败不盖戳）；
     候选/声明一致性保持每 tick（计费正确性链路）
@@ -519,6 +520,17 @@ R6 前置的 §7.5 soak（trust 开启）验证。观测 ~9 分钟（含本会�
 §7.1 完整 30 分钟量化门（trust 开启 + overview 停留）与 §7.4 手测清单
 （含托盘图标目视确认）留待用户下一次带 trust 的常规使用中完成；本次
 bundle 进程稳定运行 9+ 分钟无 ERROR。
+
+### 7.7 trust 开启 soak（2026-09-24 00:25–00:35，F7a/F7b bundle + 评审修复前）
+
+| 门 | 实测 | 判定 |
+|---|---|---|
+| correlate ≤50ms/轮（R6 前置） | **13–57µs**（千倍余量） | ✅ R6 前置「相关器成本实测钉住」满足 |
+| 六段基线（P1 决策门数据） | lsof_spawn 385–760ms 占比 >95%，其余全部 µs–ms 级 | 分期 B（lsof -i 预筛）价值确认 |
+| 轻 tick | 365–698ms | ✅ |
+| Invalidated | 0（revision 6 分钟仅 488→489 一次） | ✅ F4/F7c 生效 |
+| assembly 暖态（trust 开启） | p50 ≈5–7s | ⚠️ 超 §7.1 门（≤2.5s）——**§5 增量月汇总 tripwire（p95>4s）在真机数据上触发**，是下一级杠杆 |
+| 启动扇出 | 1.4s 内同 revision 5 次计算 | ✅ 已修（2074b7b 串行锁），运行中 bundle 未含此修复 |
 
 ## 8. 风险与守卫
 
