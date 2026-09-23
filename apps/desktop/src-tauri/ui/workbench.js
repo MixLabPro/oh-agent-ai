@@ -4119,8 +4119,13 @@ function renderSpendCards(daily, monthly, fx, window = { date: statisticsToday()
   setAmount("ov-m-tokens", monthly && mtk.total > 0 ? fmtTokens(mtk.total) + " tokens" : "无数据");
   const mtkSub = document.getElementById("ov-m-tokens-sub");
   if (mtkSub) {
+    const perHost = Object.entries(monthly && monthly.tokens_by_host || {})
+      .filter(([, t]) => t && t.total > 0)
+      .sort((a, b) => b[1].total - a[1].total)
+      .map(([host, t]) => (HOST_DISPLAY[host] || host) + " " + fmtTokens(t.total));
     mtkSub.textContent = monthly && mtk.total > 0
       ? "日均 " + fmtTokens(Math.round(mtk.total / dayOfMonth)) + "（含缓存读写）"
+        + (perHost.length ? " · " + perHost.join(" · ") : "")
       : monthly ? "本月还没有用量记录" : "本月用量暂不可读，请刷新重试";
   }
 }
@@ -4428,6 +4433,7 @@ const BASIS_LABEL = {
 // id 顺序：DTO 给的 BTreeMap 键序就是事实序（白盒契约：白盒降级是从这点
 // 开始的——以后 summary 给排序时删这里）。
 const HOST_DISPLAY = {
+  "zcode": "ZCode",
   "dsh": "DeepSeek Harness",
   "claude-code": "Claude Code",
   "codex": "Codex",
