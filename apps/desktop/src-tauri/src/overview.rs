@@ -350,9 +350,17 @@ pub fn host_rows_from_navigation(snap: &Value) -> Vec<HostRow> {
 /// revision 直接复用上次的 `Arc<MonthlySummary>`——空闲态（revision 不动）
 /// 托盘刷新近零成本；活跃态每次 revision 前进重算一次（300s 节流下 ≈1.2%
 /// 占空比）。镜像 lib.rs `OverviewMemo` 的模式：进程内存、单条、无持久化。
-pub struct MonthlySummaryMemo(
-    pub std::sync::Mutex<Option<(u64, std::sync::Arc<agent_vitals_data::projection::MonthlySummary>)>>,
+/// 键 = (revision, month, data_home)。month 必须进键：月初翻页而 revision
+/// 静止（整夜空闲无写）时，缺它会把上月的 metered_view 当本月供出——验收
+/// 抓出的窄窗口回退。data_home 进键：单例被并行测试共享时不同 tmp 目录
+/// 不得互相污染（read_memo 纪律：params 必须含影响结果的全部输入）。
+pub type MonthlyMemoEntry = (
+    MemoKey,
+    std::sync::Arc<agent_vitals_data::projection::MonthlySummary>,
 );
+pub type MemoKey = (u64, String, String);
+
+pub struct MonthlySummaryMemo(pub std::sync::Mutex<Option<MonthlyMemoEntry>>);
 
 /// 进程单例：`read_overview_at` 是自由函数且调用点众多（sync tick / IPC /
 /// 测试），穿透传参的改动面不成比例；静态 OnceLock 与 lib.rs 里 managed 的
@@ -380,16 +388,18 @@ impl MonthlySummaryMemo {
             let fresh = monthly_summary_arc(dh, month)?;
             return Some(fresh);
         };
+        let key = (revision, month.to_string(), dh.display().to_string());
         {
             let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((r, cached)) = guard.as_ref() {
-                if *r == revision {
+            if let Some((k, cached)) = guard.as_ref() {
+                if *k == key {
                     return Some(std::sync::Arc::clone(cached));
                 }
             }
         }
         let fresh = monthly_summary_arc(dh, month)?;
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some((revision, std::sync::Arc::clone(&fresh)));
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((key, std::sync::Arc::clone(&fresh)));
         Some(fresh)
     }
 }
