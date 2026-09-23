@@ -4064,6 +4064,12 @@ impl AuthorityDb {
     /// FactsIngested 压制谓词同源（sql_sync 统一计算，见 `write_flat_facts_
     /// with_sources` 尾部）；revision 行唯一写者纪律不变——静默路径不写
     /// revision 行（revision_guard 的 only-writer 测试覆盖）。
+    ///
+    /// **不变量（F4 验收评审穷举确认）**：outbox 发射 ⟹ inserted>0 ∨ rejected>0
+    /// ⟹ 必有真实行写入 ⟹ total_changes>0 ⟹ +1 必发生——即 FactsIngested 载荷
+    /// 里的 `revision_after_commit = 当前 + 1` 在任何可达路径上都不谎报；
+    /// 反向的「谓词说事实性、total_changes 说零」组合（路由证据全吸收 / 快照
+    /// 全被时间守卫排除，且 sources 为空）在两个生产调用方下不可达。
     pub fn with_immediate_txn_decided<T>(
         &self,
         f: impl FnOnce(&Connection) -> Result<(T, bool), AuthorityError>,

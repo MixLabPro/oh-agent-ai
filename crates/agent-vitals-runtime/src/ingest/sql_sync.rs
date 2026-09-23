@@ -347,7 +347,32 @@ pub struct SqlSyncOutcome {
     pub inserted: usize,
     pub duplicate: usize,
     pub rejected: usize,
+    /// 重复路径的归因状态变更（富集/纠错/冲突收敛）——改喂 ReadMemo 面的
+    /// 业务列（评审 P2-1）。
+    pub enriched: usize,
+    /// workflow 事件本轮实际新插/纠正的行数（评审 P3-2：按插入结果而非输入
+    /// 非空判事实性——全重复的 workflow 重放不推 revision）。
+    pub workflow_changed: usize,
+    /// 任务摘录本轮实际新插的行数（同上）。
+    pub excerpts_changed: usize,
     pub errors: Vec<String>,
+}
+
+/// 新事实 / 质量问题：`FactsIngested` outbox 的发射条件
+/// （RUNTIME_INVALIDATION P0 裁决，不变）。与 [`outcome_is_factual`] 共用
+/// 定义点（评审 P3-3：单一判据源，杜绝漂移）。
+fn outcome_has_new_facts(outcome: &SqlSyncOutcome) -> bool {
+    outcome.inserted > 0 || outcome.rejected > 0
+}
+
+/// R3-F4 事实性谓词（revision 推进条件）：新事实之外，归因富集/纠错改喂
+/// memo 面的业务列，workflow/excerpt 落库同样是状态变更。路由证据与快照
+/// 写入腿在闭包出口处并入（它们是参数不是 outcome）。
+fn outcome_is_factual(outcome: &SqlSyncOutcome) -> bool {
+    outcome_has_new_facts(outcome)
+        || outcome.enriched > 0
+        || outcome.workflow_changed > 0
+        || outcome.excerpts_changed > 0
 }
 
 /// SQL 权威库中的源文件指纹。例行同步用它决定是否需要重解析；没有行就是 dirty。
@@ -623,19 +648,22 @@ pub(crate) fn write_flat_facts_with_sources(
             outcome.inserted += report.inserted;
             outcome.duplicate += report.duplicate;
             outcome.rejected += report.rejected;
+            outcome.enriched += report.enriched;
         }
         if !workflow_events.is_empty() {
-            agent_vitals_data::workflow::insert_events(
+            let workflow_report = agent_vitals_data::workflow::insert_events(
                 conn,
                 workflow_events,
                 &source_id,
                 &run_id,
                 now,
             )?;
+            outcome.workflow_changed =
+                workflow_report.inserted + workflow_report.corrected;
         }
         // V16：任务意图摘录与 workflow 事件同一事务落库（同 source/run 归因）。
         if !session_excerpts.is_empty() {
-            agent_vitals_data::workflow::insert_session_excerpts(
+            outcome.excerpts_changed = agent_vitals_data::workflow::insert_session_excerpts(
                 conn,
                 session_excerpts,
                 &source_id,
@@ -656,7 +684,9 @@ pub(crate) fn write_flat_facts_with_sources(
         // 全重复重放此前虽不落 outbox，但事务里的 upsert 心跳行照旧推 revision
         // （P0 时代「事务非空、推进是接受的」口径作废）——现在按簿记静默提交，
         // 终裁见函数尾部的事实性谓词。
-        if outcome.inserted > 0 || outcome.rejected > 0 {
+        // R3-F4 修订（评审 P2-1/P3-2/P3-3）：outbox 门与事实性终裁共用
+        // outcome_has_new_facts / outcome_is_factual——单一判据源。
+        if outcome_has_new_facts(&outcome) {
             // 载荷里的 revision = 本事务提交后的值：事务已有行变更，
             // `commit_advancing_revision` 必然 +1（spec §4.1）。
             let revision_after_commit =
@@ -677,14 +707,11 @@ pub(crate) fn write_flat_facts_with_sources(
                 rusqlite::Error::InvalidParameterName(format!("__event_outbox__:{e}")),
             ))?;
         }
-        // R3-F4 事实性终裁：outbox 已按 inserted/rejected 压制；这里对齐同一
-        // 谓词并补上「有输入但全重复」之外的事实性输入（工作流 / 摘录 / 路由
-        // 证据 / 快照）。全重复重放（inserted=0 且 rejected=0）按簿记静默——
-        // upsert 的 last_seen/updated_at 心跳照常落库。
-        Ok(((), outcome.inserted > 0
-            || outcome.rejected > 0
-            || !workflow_events.is_empty()
-            || !session_excerpts.is_empty()
+        // R3-F4 事实性终裁：新事实之外补上归因富集（改 memo 面业务列）与
+        // workflow/excerpt 实际落库行数；路由证据与快照腿在参数侧并入。
+        // 全重复且零富集的重放按簿记静默——upsert 的 last_seen/updated_at
+        // 心跳照常落库。
+        Ok(((), outcome_is_factual(&outcome)
             || route_evidence.is_some()
             || runtime_snapshot.as_ref().is_some_and(|write| {
                 !write.snapshots.is_empty() || write.backfill_marker.is_some()
@@ -1200,6 +1227,101 @@ mod tests {
             )
             .unwrap();
         assert_eq!(outbox2, 1, "全重复重放不追加 outbox 行");
+    }
+
+    /// R3-F4 评审 P3-7 补场景：快照轮与拒收轮都推 revision；富集轮（P2-1）
+    /// ——存量事实的 NULL 归因列被重放填上——inserted=0 也必须推 revision，
+    /// 否则 ReadMemo 四面会端旧归因直到下一个无关事实轮。
+    #[test]
+    fn snapshot_rejection_and_enrichment_rounds_advance_revision() {
+        let home = tmp_home("f4-extra");
+        let db = open_db(&home);
+        let no_overrides = std::collections::HashMap::new();
+        let r0 = db.revision().unwrap();
+
+        // ① 快照轮（零事实）：配额滚动窗口载荷是用户可见状态 → 推进。
+        let src = home.join("q.jsonl");
+        let snapshot = RuntimeSnapshotWrite {
+            snapshots: vec![RuntimeQuotaSnapshot {
+                snapshot_kind: "codex_quota",
+                payload_json: "{\"window\":1}",
+                observed_at_ms: 7_000,
+            }],
+            backfill_marker: None,
+        };
+        write_flat_facts_with_sources(
+            &db, "codex", "m", &[(src, (5, 5))], &no_overrides,
+            &[], &[], &[], None, Some(snapshot), 5_000,
+        )
+        .unwrap();
+        assert_eq!(db.revision().unwrap(), r0 + 1, "快照写入轮必须推进 revision");
+
+        // ② 拒收轮：缺 native_session_id → rejected>0 → 推进 + outbox。
+        let r1 = db.revision().unwrap();
+        let bad = serde_json::json!({
+            "host": "claude-code", "machine_namespace": "m", "source_profile": "default",
+            "source_event_id": "e-bad", "observation_kind": "token_count",
+            "event_ts_utc": "2026-09-23T01:02:03Z", "model_id": "claude-opus-4",
+            "uncached_input_tokens": 1, "output_tokens": 1,
+        });
+        let outcome = write_flat_facts_with_sources(
+            &db, "claude-code", "m", &[(home.join("bad.jsonl"), (1, 1))], &no_overrides,
+            std::slice::from_ref(&bad), &[], &[], None, None, 6_000,
+        )
+        .unwrap();
+        assert!(outcome.rejected > 0, "缺 native_session_id 必须计拒收");
+        assert_eq!(db.revision().unwrap(), r1 + 1, "拒收轮必须推进 revision");
+
+        // ③ 富集轮（P2-1）：先落一条无归因的事实（provider 列 NULL），
+        // 再以带 provider_id 的同源事实重放——inserted=0、duplicate=1，
+        // 但 COALESCE 富集改了喂 memo 面的业务列 → 必须推 revision。
+        let r2 = db.revision().unwrap();
+        let base = serde_json::json!({
+            "host": "claude-code", "machine_namespace": "m", "source_profile": "default",
+            "native_session_id": "s-enrich", "source_event_id": "e-enrich",
+            "observation_kind": "token_count",
+            "event_ts_utc": "2026-09-23T01:02:04Z", "model_id": "claude-opus-4",
+            "uncached_input_tokens": 7, "cache_read_tokens": 0,
+            "cache_write_tokens": 0, "output_tokens": 3,
+        });
+        write_flat_facts_with_sources(
+            &db, "claude-code", "m", &[(home.join("enrich.jsonl"), (1, 1))], &no_overrides,
+            std::slice::from_ref(&base), &[], &[], None, None, 7_000,
+        )
+        .unwrap();
+        assert_eq!(db.revision().unwrap(), r2 + 1, "首插轮推进");
+        let r3 = db.revision().unwrap();
+        let enriched_replay = serde_json::json!({
+            "host": "claude-code", "machine_namespace": "m", "source_profile": "default",
+            "native_session_id": "s-enrich", "source_event_id": "e-enrich",
+            "observation_kind": "token_count",
+            "event_ts_utc": "2026-09-23T01:02:04Z", "model_id": "claude-opus-4",
+            "uncached_input_tokens": 7, "cache_read_tokens": 0,
+            "cache_write_tokens": 0, "output_tokens": 3,
+            "provider_id": "anthropic",
+        });
+        let outcome = write_flat_facts_with_sources(
+            &db, "claude-code", "m", &[(home.join("enrich.jsonl"), (1, 2))], &no_overrides,
+            std::slice::from_ref(&enriched_replay), &[], &[], None, None, 8_000,
+        )
+        .unwrap();
+        assert_eq!(outcome.inserted, 0);
+        assert_eq!(outcome.duplicate, 1);
+        assert!(outcome.enriched > 0, "NULL 归因列被填上必须计 enriched");
+        assert_eq!(
+            db.revision().unwrap(),
+            r3 + 1,
+            "富集轮必须推进 revision（memo 面读到的归因变了）"
+        );
+        let provider: Option<String> = db
+            .conn()
+            .query_row(
+                "SELECT provider_id FROM usage_facts WHERE source_event_id = 'e-enrich'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(provider.as_deref(), Some("anthropic"), "富集确实落库");
     }
 
     #[test]
