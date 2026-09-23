@@ -639,12 +639,20 @@ pub fn sync_facts_filtered(
         for (slug, result) in crate::plugin_ingest::ingest_installed(&ns, data_home, &user_home_for_plugins) {
             match result {
                 Ok(payload) => {
-                    let appended = payload.get("appended").and_then(Value::as_i64).unwrap_or(0);
+                    // 验收修正：appended 在 ingest.hosts[0]（IngestReport 嵌套层），
+                    // 顶层无此键——此前恒读 0，成功再摄取完全不可见。
+                    let appended = payload["ingest"]["hosts"]
+                        .as_array()
+                        .and_then(|hosts| hosts.first())
+                        .and_then(|h| h.get("appended"))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0);
                     if appended > 0 {
                         crate::core::logging::log_info(
                             "sync",
                             &format!("plugin:{slug} 再摄取 +{appended} 条"),
                         );
+                        report.total_appended += appended as usize;
                     }
                 }
                 Err(error) => {
