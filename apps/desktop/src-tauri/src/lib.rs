@@ -28,6 +28,49 @@ use overview::{HostRow, HostsSnapshot, Overview, RecentSessionRow, SyncStatus};
 /// 为了防重复写，是防两轮并发白白各折一遍 + 两次托盘重建。
 struct SyncLock(Mutex<()>);
 
+/// R4-P0（TRUST_SENSOR_OPTIMIZATION spec §4.1）：宿主最近活动时刻表。watcher
+/// 唤醒时刷新（LIGHT-PATH 的唤醒槽天然携带「哪个宿主刚有写入」）；trust 传感
+/// tick 到点据此门控——冷却窗内无活跃宿主且空闲确认窗未到 → 整轮跳过（不
+/// lsof、不开库、不发事件）。进程内存、无持久化；条目按时限裁剪有界。
+struct HostActivityTable(std::sync::Mutex<std::collections::BTreeMap<String, std::time::Instant>>);
+
+/// 门控冷却窗：活动时刻在此窗内的宿主算「活跃」。
+const TRUST_ACTIVITY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(120);
+/// 空闲确认窗：兜底「活动表漏记」（app 重启后表为空等），到期强制校准一轮。
+const TRUST_IDLE_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
+
+impl HostActivityTable {
+    fn mark(&self, hosts: impl IntoIterator<Item = impl AsRef<str>>) {
+        let now = std::time::Instant::now();
+        let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        for host in hosts {
+            guard.insert(host.as_ref().to_string(), now);
+        }
+        // 有界：只保留冷却窗 + 空闲确认窗内的条目。
+        let horizon = TRUST_ACTIVITY_COOLDOWN + TRUST_IDLE_CONFIRM_WINDOW;
+        guard.retain(|_, at| now.duration_since(*at) < horizon);
+    }
+
+    fn any_active_within(&self, window: std::time::Duration) -> bool {
+        let now = std::time::Instant::now();
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .any(|at| now.duration_since(*at) < window)
+    }
+}
+
+/// R4-P0 门控决策（纯函数，测试钉住 spec §6 门控三行）：候选集为空且距上次
+/// 真实采样不足空闲确认窗 → 跳过。任何一者不满足（有活跃宿主 / 确认窗到期
+/// / 从未采样过——首启校准）→ 执行。
+fn trust_gate_should_sample(
+    any_active_in_cooldown: bool,
+    since_last_sample: std::time::Duration,
+) -> bool {
+    any_active_in_cooldown || since_last_sample >= TRUST_IDLE_CONFIRM_WINDOW
+}
+
 struct SyncRequests(Mutex<std::collections::BTreeMap<String, bool>>);
 static SYNC_REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
 /// 单一 UI 事件出口（EVENT_BUS spec §1.3）：webview 只 listen 这一个通道，
@@ -1461,7 +1504,7 @@ fn sync_tick_light(
         publish_invalidation(app, hosts_for_invalidation)
     });
     if tray_due {
-        let ov = timed_value("read_overview", overview::read_overview);
+        let ov = timed_value("read_overview", overview_snapshot_typed_sync);
         timed("refresh", || refresh(app, &ov));
         agent_vitals_runtime::logging::log_info(
             "sync",
@@ -1515,7 +1558,7 @@ fn sync_tick_inner(app: &AppHandle) {
             let status = SyncStatus::ok("paused", "已按你的选择暂停本机解析".into());
             overview::save_sync_status(&status);
             publish_sync_status(app, &status);
-            let ov = timed_value("read_overview", overview::read_overview);
+            let ov = timed_value("read_overview", overview_snapshot_typed_sync);
             timed("refresh", || refresh(app, &ov));
             return;
         }
@@ -1523,7 +1566,7 @@ fn sync_tick_inner(app: &AppHandle) {
             let status = SyncStatus::fail("control", format!("同步控制状态不可读：{error}"));
             overview::save_sync_status(&status);
             publish_sync_status(app, &status);
-            let ov = timed_value("read_overview", overview::read_overview);
+            let ov = timed_value("read_overview", overview_snapshot_typed_sync);
             timed("refresh", || refresh(app, &ov));
             return;
         }
@@ -1546,7 +1589,7 @@ fn sync_tick_inner(app: &AppHandle) {
     // `quota_alerts` 三处共用同一个引用——此前各自独立 `read_overview()`，
     // 一个 tick 里白算两三遍同一份重 SQL 聚合（budget_alerts 单独一项就是
     // 3.4-3.9s）。
-    let ov = timed_value("read_overview", overview::read_overview);
+    let ov = timed_value("read_overview", overview_snapshot_typed_sync);
     timed("refresh", || refresh(app, &ov));
     timed("budget_alerts", || budget_alerts::maybe_notify(app, &ov));
     timed("quota_alerts", || quota_alerts::maybe_notify(app, &ov));
@@ -1652,6 +1695,9 @@ fn start_refresh_tick(
             }
             match wait_for_wake(&slot, TICK_PERIOD) {
                 TickWait::Woken(hosts) => {
+                    // R4-P0：watcher 唤醒 = 该宿主刚有写入——刷新 trust 门控的
+                    // 活动时刻表（TRUST_SENSOR_OPTIMIZATION spec §4.1）。
+                    app.state::<HostActivityTable>().mark(&hosts);
                     // 冷却下限（真机 2026-09-22 验收）：睡满剩余冷却再执行
                     // ——不丢弃最后一批写入；周期/手动路径不受影响。冷却窗
                     // 本身是动态的（REVIEW P4 自看护）。
@@ -1962,11 +2008,17 @@ fn start_source_watcher(app: &AppHandle)
 fn start_trust_monitor_tick(app: AppHandle) {
     std::thread::spawn(move || {
         let mut next_run = std::time::Instant::now();
+        // R4-P0 门控状态：上次真实采样时刻（首启立即校准一轮）与跳过轮的
+        // 小时聚合日志（spec §11：跳过轮不全静默）。
+        let mut last_sampled_at = std::time::Instant::now();
+        let mut skipped_since_log: u64 = 0;
+        let mut last_skip_log = std::time::Instant::now();
         loop {
             let state = trust_monitor_state_read();
             if state.get("enabled").and_then(Value::as_bool) != Some(true) {
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 next_run = std::time::Instant::now();
+                last_sampled_at = std::time::Instant::now();
                 continue;
             }
             if std::time::Instant::now() < next_run {
@@ -1974,25 +2026,49 @@ fn start_trust_monitor_tick(app: AppHandle) {
                 continue;
             }
 
-            // Sync and the monitor both touch the authority DB. Avoid making a
-            // user-triggered sync wait behind a sensor pass.
-            let lock = app.state::<SyncLock>();
-            if let Ok(_guard) = lock.0.try_lock() {
-                let now_ms = agent_vitals_runtime::sql_sync::now_ms();
-                let report = agent_vitals_runtime::trust_runtime_monitor::snapshot_and_store(
-                    &overview::data_home(),
-                    &agent_vitals_runtime::takeover::machine_namespace(),
-                    now_ms,
-                );
-                trust_monitor_record_report(&app, report, now_ms);
+            // R4-P0 活动门控（TRUST_SENSOR_OPTIMIZATION spec §4.1）：冷却窗内
+            // 无活跃宿主且空闲确认窗未到 → 整轮跳过——不 lsof、不开库、不发
+            // 事件、不碰 SyncLock。空闲确认窗到期强制校准一轮，兜活动表漏记。
+            let gate = trust_gate_should_sample(
+                app.state::<HostActivityTable>()
+                    .any_active_within(TRUST_ACTIVITY_COOLDOWN),
+                last_sampled_at.elapsed(),
+            );
+            if !gate {
+                skipped_since_log += 1;
+                if last_skip_log.elapsed() >= std::time::Duration::from_secs(3600) {
+                    agent_vitals_runtime::logging::log_info(
+                        "trust_sensor",
+                        &format!(
+                            "活动门控：过去一小时跳过 {skipped_since_log} 轮空闲传感（零 lsof / 零库访问 / 零事件）"
+                        ),
+                    );
+                    skipped_since_log = 0;
+                    last_skip_log = std::time::Instant::now();
+                }
+            } else {
+                // Sync and the monitor both touch the authority DB. Avoid making a
+                // user-triggered sync wait behind a sensor pass.
+                let lock = app.state::<SyncLock>();
+                if let Ok(_guard) = lock.0.try_lock() {
+                    last_sampled_at = std::time::Instant::now();
+                    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+                    let report = agent_vitals_runtime::trust_runtime_monitor::snapshot_and_store(
+                        &overview::data_home(),
+                        &agent_vitals_runtime::takeover::machine_namespace(),
+                        now_ms,
+                    );
+                    trust_monitor_record_report(&app, report, now_ms);
+                };
             }
             let interval = state
                 .get("interval_seconds")
                 .and_then(Value::as_i64)
                 .unwrap_or(30)
                 .clamp(5, 3600) as u64;
-            next_run = std::time::Instant::now()
-                + std::time::Duration::from_secs(interval.min(60));
+            // R4-F6：interval 上限收敛——P0 门控下空闲零开销，5..=3600 全程
+            // 安全（此前硬顶 60s 与设置界面的允许域 5..=3600 矛盾）。
+            next_run = std::time::Instant::now() + std::time::Duration::from_secs(interval);
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
     });
@@ -2041,21 +2117,30 @@ fn trust_monitor_record_report(
 ) {
     let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(&path, now_ms) else { return };
-    let (capability, error_code, notification_keys) = match report {
+    let (capability, error_code, notification_keys, inserted) = match report {
         Ok(report) if report.capability == "macos_lsof_partial" => {
-            ("partial", None, report.notification_keys)
+            ("partial", None, report.notification_keys, report.inserted)
         }
         Ok(report) if report.capability.starts_with("runtime_sensor_unavailable") => {
-            ("unavailable", Some("sensor_unavailable"), report.notification_keys)
+            ("unavailable", Some("sensor_unavailable"), report.notification_keys, report.inserted)
         }
-        Ok(_) => ("partial", Some("sensor_partial"), Vec::new()),
-        Err(_) => ("unavailable", Some("snapshot_failed"), Vec::new()),
+        Ok(report) => ("partial", Some("sensor_partial"), Vec::new(), report.inserted),
+        Err(_) => ("unavailable", Some("snapshot_failed"), Vec::new(), 0),
     };
     let _ = db.trust_monitor_record_result(capability, Some(now_ms), error_code, now_ms);
-    agent_vitals_runtime::logging::log_info("emit", &format!("TrustMonitorInvalidated capability={capability}"));
-    let _ = app.emit(APP_EVENT, serde_json::json!({
-        "type": "TrustMonitorInvalidated", "kind": "trust_monitor_invalidated",
-    }));
+    // R3-F5（REFRESH_STORM）：「有新观察才发」——与 outbox `TrustMonitorEvent` 的
+    // inserted>0 判据、core 层零发射纪律（authority REVIEW G2）对齐。此前每轮
+    // 心跳都 emit（实测 1462 次/天），而 R1 后页面刷新已不消费该事件；唯一
+    // 剩余消费者（React TrustPage 的配置重读）由 save_trust_monitor_config 保存
+    // 成功后的本地事件覆盖。注：`trust_monitor_record_result` 的每轮单行
+    // autocommit UPDATE 保留——它不推进 revision，是「传感器活着」的健康面
+    // 信号（last_success_at_ms），不是失效信号。
+    if inserted > 0 {
+        agent_vitals_runtime::logging::log_info("emit", &format!("TrustMonitorInvalidated capability={capability} inserted={inserted}"));
+        let _ = app.emit(APP_EVENT, serde_json::json!({
+            "type": "TrustMonitorInvalidated", "kind": "trust_monitor_invalidated",
+        }));
+    }
     if notification_keys.is_empty() { return; }
     let Ok(Some(state)) = db.trust_monitor_state_get() else { return };
     if !state.notifications_enabled { return; }
@@ -2229,30 +2314,156 @@ fn focus_session_target(app: &AppHandle, target: WorkbenchTarget) {
 /// 没有理由为一份没有入口、内容更少的旧界面继续维护 `toggle_window`/
 /// `hide_window`/一份独立的 HTML+JS+CSS。命令名留作 `read_overview` 不改，
 /// 只是现在唯一的调用方是工作台。
-/// `read_overview` IPC 的 revision 备忘（LIGHT-PATH spec §5.3）：同
-/// authority revision 直接复用上次序列化结果。风暴期 React 按 Invalidated
-/// 事件懒刷新——同一 revision 的连续 invoke 不再各自重跑 2.2s 级聚合。
-/// 进程内存、单条（最新覆盖）、无持久化（HARDENING §5.5 同款纪律）。
-struct OverviewMemo(std::sync::Mutex<Option<(u64, Value)>>);
+///
+/// `read_overview` IPC 的 revision 备忘（LIGHT-PATH spec §5.3 → REFRESH_STORM
+/// R2 收口）：同 authority revision 直接复用上次序列化结果；槽键含 data_home
+/// （并行测试的 tmp 目录互不串槽，`MonthlySummaryMemo` 同款纪律）。进程内存、
+/// 单条（最新覆盖）、无持久化（HARDENING §5.5 同款纪律）。R2 起从 managed
+/// State 改为进程单例：IPC 路径的 `spawn_blocking` 闭包要 'static，State 的
+/// 借用进不去；托盘/tick 的四处直调点（`overview::read_overview()`）收口到
+/// 同一槽——此前它们各自全量重算且完全绕过备忘（2026-09-23 风暴的放大器之一）。
+/// IPC 路径经 `run_heavy_read`：ReadGate 2 permits + **拿到许可后双检查**——
+/// 同 revision 突发 N 个并发 invoke 的实际全量计算 ≤ `HEAVY_READ_PERMITS`
+/// （不引入 per-key single-flight，背压 spec §5.1 裁决）。
+struct OverviewMemoEntry {
+    revision: u64,
+    data_home: String,
+    /// 托盘/菜单面：类型化快照，Arc 零拷贝共享。
+    overview: std::sync::Arc<overview::Overview>,
+    /// IPC 面：预序列化结果（同 revision 的连续 invoke 不再重跑 2.2s 级聚合，
+    /// 也不重复序列化）。
+    value: Value,
+}
 
-#[tauri::command(async)]
-fn read_overview(memo: tauri::State<OverviewMemo>) -> Value {
-    let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
-    let revision = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
-        .ok()
-        .and_then(|db| db.revision().ok());
-    let Some(revision) = revision else {
-        // revision 读不到（库不存在/只读失败）——按现状全量算，不缓存。
-        return serde_json::to_value(overview::read_overview()).unwrap_or(Value::Null);
-    };
-    if let Some((r, v)) = memo.0.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-        if r == revision {
-            return v;
+struct OverviewMemo {
+    slot: std::sync::Mutex<Option<OverviewMemoEntry>>,
+    hits: std::sync::atomic::AtomicU64,
+    computed: std::sync::atomic::AtomicU64,
+}
+
+fn overview_memo() -> &'static OverviewMemo {
+    static MEMO: std::sync::OnceLock<OverviewMemo> = std::sync::OnceLock::new();
+    MEMO.get_or_init(|| OverviewMemo {
+        slot: std::sync::Mutex::new(None),
+        hits: std::sync::atomic::AtomicU64::new(0),
+        computed: std::sync::atomic::AtomicU64::new(0),
+    })
+}
+
+/// 槽命中：revision 与 data_home 都一致才算同一条目。锁内只做查/比对/clone
+/// （ReadMemo 同款锁纪律），计数走原子量不占锁。
+fn overview_memo_get(revision: u64, data_home: &str) -> Option<(std::sync::Arc<overview::Overview>, Value)> {
+    let guard = overview_memo().slot.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = guard.as_ref() {
+        if entry.revision == revision && entry.data_home == data_home {
+            overview_memo()
+                .hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Some((std::sync::Arc::clone(&entry.overview), entry.value.clone()));
         }
     }
-    let value = serde_json::to_value(overview::read_overview()).unwrap_or(Value::Null);
-    *memo.0.lock().unwrap_or_else(|e| e.into_inner()) = Some((revision, value.clone()));
-    value
+    None
+}
+
+/// 写回（防陈旧）：同 data_home 且槽内 revision ≥ 本次——排队期间别人已写了
+/// 更新的结果——则不覆盖；不同 data_home（切库/并行测试）按单槽最新覆盖语义
+/// 直接替换。
+fn overview_memo_put(revision: u64, data_home: String, ov: std::sync::Arc<overview::Overview>, value: Value) {
+    let mut guard = overview_memo().slot.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(existing) = guard.as_ref() {
+        if existing.revision >= revision && existing.data_home == data_home {
+            return;
+        }
+    }
+    *guard = Some(OverviewMemoEntry { revision, data_home, overview: ov, value });
+}
+
+fn authority_revision_at(path: &std::path::Path) -> Option<u64> {
+    agent_vitals_data::authority::AuthorityDb::open_readonly(path)
+        .ok()
+        .and_then(|db| db.revision().ok())
+}
+
+/// 计算并写回。调用方必须已在 ReadGate 许可下（IPC 排队路径），或托盘路径的
+/// try_acquire 直算豁免。入口先做双检查——排队期间首个完成者可能已写回同
+/// revision 结果，直接命中返回（这就是并发 miss 收敛为 ≤ permits 次的机制）。
+fn overview_snapshot_compute(revision: u64, data_home: String) -> (std::sync::Arc<overview::Overview>, Value) {
+    if let Some(hit) = overview_memo_get(revision, &data_home) {
+        return hit;
+    }
+    let ov = std::sync::Arc::new(overview::read_overview());
+    let value = serde_json::to_value(ov.as_ref()).unwrap_or(Value::Null);
+    overview_memo_put(revision, data_home, std::sync::Arc::clone(&ov), value.clone());
+    let computed = overview_memo()
+        .computed
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
+    let hits = overview_memo().hits.load(std::sync::atomic::Ordering::Relaxed);
+    agent_vitals_runtime::logging::log_info(
+        "read_overview",
+        &format!("备忘重算 revision={revision}（累计 computed={computed} hits={hits}）"),
+    );
+    (ov, value)
+}
+
+/// 同步入口（托盘 / tick 线程上下文，四处直调点收口到这里）：不排队——
+/// `try_acquire` 有许可就守闸门（与 IPC 共享 2 permits，常态下互斥）；占满也
+/// 直算（托盘每 300s 一刷，不能被 IPC 风暴饿死），直算仍读写同一备忘槽，
+/// 与 IPC 路径共享去重收益。
+///
+/// **同 revision 扇出必须串行**（真机 2026-09-24 soak 抓出）：托盘启动/重建
+/// 会在 1-2 秒内并发调本函数 3-5 次（菜单构建、标题、tick 尾部），try_acquire
+/// 的「不饿死」豁免让它们各自全量重算同一 revision——自造风暴。锁内二次
+/// 检查备忘：首个计算者写回后，其余等待者直接命中（不是 per-key 条件变量，
+/// 是同步路径的单把粗粒度串行锁；阻塞上界 = 一次计算）。
+fn overview_snapshot_typed_sync() -> std::sync::Arc<overview::Overview> {
+    let dh = overview::data_home();
+    let path = agent_vitals_data::authority::default_authority_path(&dh);
+    let Some(revision) = authority_revision_at(&path) else {
+        // revision 读不到（库不存在/只读失败）——按现状全量算，不缓存。
+        return std::sync::Arc::new(overview::read_overview());
+    };
+    let data_home = dh.display().to_string();
+    if let Some((ov, _)) = overview_memo_get(revision, &data_home) {
+        return ov;
+    }
+    static SYNC_COMPUTE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serial = SYNC_COMPUTE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // 锁内双检查：等待期间首个计算者可能已写回同 revision 结果。
+    if let Some((ov, _)) = overview_memo_get(revision, &data_home) {
+        return ov;
+    }
+    let _permit = heavy_read_gate().try_acquire();
+    overview_snapshot_compute(revision, data_home).0
+}
+
+/// IPC 异步入口：搬出 tokio worker（`run_heavy_read`）+ ReadGate 排队 + 双检查。
+async fn overview_snapshot_value_async() -> Value {
+    overview_snapshot_value_async_at(overview::data_home()).await
+}
+
+/// `overview_snapshot_value_async` 的 data_home 注入变体——测试用 tmp home 直接
+/// 调这里，不碰进程级 env（desktop 测试并行跑在同一进程，`AGENT_VITALS_HOME`
+/// 的设置/清理会与读真机数据的既有测试竞态）。
+async fn overview_snapshot_value_async_at(dh: std::path::PathBuf) -> Value {
+    let path = agent_vitals_data::authority::default_authority_path(&dh);
+    let Some(revision) = authority_revision_at(&path) else {
+        // 库不可开：按现状全量算，不缓存。仍在阻塞池跑（降级路径同样可能不轻）。
+        return run_heavy_read(move || {
+            serde_json::to_value(overview::read_overview()).unwrap_or(Value::Null)
+        })
+        .await;
+    };
+    let data_home = dh.display().to_string();
+    if let Some((_, value)) = overview_memo_get(revision, &data_home) {
+        return value;
+    }
+    run_heavy_read(move || overview_snapshot_compute(revision, data_home).1).await
+}
+
+#[tauri::command(async)]
+async fn read_overview() -> Value {
+    overview_snapshot_value_async().await
 }
 
 /// 工作台总览的权威质量状态。金额仍由 summary DTO 提供；这里仅转发
@@ -2668,9 +2879,9 @@ fn save_statistics_timezone_config(app: AppHandle, timezone: String) -> Result<V
     let background_app = app.clone();
     std::thread::spawn(move || {
         refresh_hosts();
-        refresh(&background_app, &overview::read_overview());
+        refresh(&background_app, overview_snapshot_typed_sync().as_ref());
     });
-    refresh(&app, &overview::read_overview());
+    refresh(&app, overview_snapshot_typed_sync().as_ref());
     Ok(serde_json::json!({ "status": "saved", "timezone": saved }))
 }
 
@@ -3983,7 +4194,7 @@ fn data_source_status() -> Value {
             }
         }
     }
-    merge_source_sync_failure(&mut report, &overview::read_overview().sync);
+    merge_source_sync_failure(&mut report, &overview_snapshot_typed_sync().sync);
     if matches!(overview::sync_is_paused(), Ok(true)) {
         if let Some(sources) = report.get_mut("sources").and_then(Value::as_array_mut) {
             for source in sources {
@@ -4207,6 +4418,11 @@ fn save_trust_monitor_config(
         object.insert("notification_permission".into(),
             notification_permission.map(Value::String).unwrap_or(Value::Null));
     }
+    // R3-F5：传感轮的 TrustMonitorInvalidated 已改为「有新观察才发」，配置被他处
+    // 修改后的 TrustPage 重读场景由这里兜——保存成功即发一条（本地、用户动作驱动）。
+    let _ = app.emit(APP_EVENT, serde_json::json!({
+        "type": "TrustMonitorInvalidated", "kind": "trust_monitor_invalidated",
+    }));
     Ok(result)
 }
 
@@ -4484,6 +4700,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .manage(SyncLock(Mutex::new(())))
+        .manage(HostActivityTable(std::sync::Mutex::new(
+            std::collections::BTreeMap::new(),
+        )))
         .manage(SyncRequests(Mutex::new(std::collections::BTreeMap::new())))
         // 失效信号 / 同步状态的「变了才发」发布器：tick 与手动同步线程共享。
         .manage(InvalidationPublisher(agent_vitals_runtime::events::ChangePublisher::new()))
@@ -4503,7 +4722,6 @@ pub fn run() {
         .manage(store::StoreBuildLock::new())
         // Skill 体检 tab 的扫描缓存 + 取消把手（store.rs SkillsScanState 注释）。
         .manage(store::SkillsScanState::new())
-        .manage(OverviewMemo(std::sync::Mutex::new(None)))
         .on_window_event(|window, event| {
             // 工作台 × 按钮 → 隐藏不销毁。config-created 窗口被 × 关掉会 destroy，
             // 之后 reopen 是 no-op（get_webview_window 返回 None）；hide 保状态——
@@ -4664,8 +4882,8 @@ pub fn run() {
                 }
                 Err(error) => agent_vitals_runtime::logging::log_warn("migration", &format!("issue timestamp units: database unavailable: {error}")),
             }
-            let ov = overview::read_overview();
-            let menu = build_menu(app.handle(), &ov)?;
+            let ov = overview_snapshot_typed_sync();
+            let menu = build_menu(app.handle(), ov.as_ref())?;
             TrayIconBuilder::with_id("main")
                 .icon(tray_template_icon()?)
                 .icon_as_template(true)
@@ -4714,6 +4932,41 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    /// R4-P0 活动门控（TRUST_SENSOR_OPTIMIZATION spec §6 门控三行 + 活动表
+    /// 行为）：空闲跳过、活跃立即恢复、确认窗到期强制校准；表条目按时限
+    /// 裁剪有界。
+    #[test]
+    fn trust_activity_gate_skips_idle_and_forces_calibration() {
+        use std::time::Duration;
+        // 活动表空 + 空闲确认窗内 → 不采样。
+        assert!(!trust_gate_should_sample(false, Duration::from_secs(60)));
+        // 活动表刚刷新 → 立即恢复采样。
+        assert!(trust_gate_should_sample(true, Duration::from_secs(0)));
+        assert!(trust_gate_should_sample(true, Duration::from_secs(3_600)));
+        // 空闲确认窗到期 → 强制校准轮执行（兜活动表漏记）。
+        assert!(trust_gate_should_sample(false, TRUST_IDLE_CONFIRM_WINDOW));
+        assert!(trust_gate_should_sample(false, TRUST_IDLE_CONFIRM_WINDOW + Duration::from_secs(1)));
+
+        let table = HostActivityTable(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+        assert!(!table.any_active_within(TRUST_ACTIVITY_COOLDOWN), "空表不算活跃");
+        table.mark(["claude-code"]);
+        assert!(table.any_active_within(TRUST_ACTIVITY_COOLDOWN), "刚标记必须活跃");
+        // 过期条目不再算活跃（用比冷却窗更长的 elapsed 模拟）。
+        {
+            let mut guard = table.0.lock().unwrap();
+            for at in guard.values_mut() {
+                *at = std::time::Instant::now()
+                    - (TRUST_ACTIVITY_COOLDOWN + TRUST_IDLE_CONFIRM_WINDOW);
+            }
+        }
+        assert!(!table.any_active_within(TRUST_ACTIVITY_COOLDOWN), "过期条目不算活跃");
+        // 重新标记后，超时限的旧条目被裁剪（表有界）。
+        table.mark(["codex"]);
+        let guard = table.0.lock().unwrap();
+        assert_eq!(guard.len(), 1, "裁剪后只剩活跃条目");
+        assert!(guard.contains_key("codex"));
+    }
+
     /// 收敛调查 §5.2.1（P2a）：托盘节流窗与轻 tick 节奏的隐含耦合变成会红的
     /// 测试——窗口必须骑在重 tick 周期上（≥ TICK_PERIOD），且显著大于轻 tick
     /// 的最小可达间隔（WATCHER_SYNC_COOLDOWN + 一次典型轻 tick 的预算）。
@@ -4752,6 +5005,84 @@ mod tests {
         assert_eq!(diagnostic_pricing_version(&serde_json::json!({})), Value::Null);
         let no_pricing_key = serde_json::json!({ "data": {} });
         assert_eq!(diagnostic_pricing_version(&no_pricing_key), Value::Null);
+    }
+
+    /// R2 备忘并发与防陈旧（REFRESH_STORM spec §9 R2 行）。两个断言族：
+    /// - 8 路并发同 revision 走**异步入口**（`run_heavy_read` + ReadGate 2
+    ///   permits + 拿到许可后双检查）——实际全量计算 ∈ [1,
+    ///   HEAVY_READ_PERMITS]，其余排队后命中；8 份返回值逐字节一致。这是
+    ///   「同 revision 突发 N 个并发 invoke 的实际计算 ≤ permits」契约的钉子。
+    /// - 写回防陈旧（槽内 revision ≥ 本次不覆盖）与跨 data_home 隔离（并行
+    ///   测试 tmp 目录互不串槽，`MonthlySummaryMemo` 同款键纪律）。
+    ///
+    /// env：不碰进程级变量——直接调 `overview_snapshot_value_async_at` 注入
+    /// tmp home；其余 desktop 测试都显式传 home，互不影响。
+    #[test]
+    fn overview_memo_concurrency_and_stale_guard() {
+        let home = tmp_home("ovmemo");
+        let path = agent_vitals_data::authority::default_authority_path(&home);
+        {
+            let db = agent_vitals_data::authority::AuthorityDb::open(&path, 1).unwrap();
+            db.with_immediate_txn(|conn| {
+                conn.execute(
+                    "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+                     VALUES ('ovmemo', 1, 'cli', 'succeeded', 1)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        let revision = authority_revision_at(&path).expect("写入后 revision 必可读");
+        assert!(revision >= 1, "含行变更的事务必须推进 revision");
+
+        let computed_before = overview_memo()
+            .computed
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let thread_home = home.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                tauri::async_runtime::block_on(overview_snapshot_value_async_at(thread_home))
+            }));
+        }
+        let mut values = Vec::new();
+        for (i, handle) in handles.into_iter().enumerate() {
+            values.push(handle.join().unwrap_or_else(|_| panic!("并发读 #{i} 不得 panic")));
+        }
+        let first = &values[0];
+        assert!(!first.is_null(), "空库降级也必须返回投影对象，不是 Null");
+        for (i, value) in values.iter().enumerate() {
+            assert_eq!(value, first, "并发同 revision 的 #{i} 号返回必须与首份一致");
+        }
+        let permits = agent_vitals_runtime::query::read_gate::HEAVY_READ_PERMITS as u64;
+        let computed_delta =
+            overview_memo().computed.load(std::sync::atomic::Ordering::Relaxed) - computed_before;
+        assert!(
+            (1..=permits).contains(&computed_delta),
+            "8 路并发同 revision 的实际计算次数必须 ∈ [1, {permits}]，实测 {computed_delta}"
+        );
+
+        // ② 防陈旧 + 跨 home：直接操纵槽（单槽语义），用标记值区分覆盖与否。
+        let data_home = home.display().to_string();
+        let (ov, value) = overview_memo_get(revision, &data_home)
+            .expect("并发阶段计算后槽内必有值");
+        assert!(
+            overview_memo_get(revision, "/nonexistent/other-home").is_none(),
+            "跨 data_home 不得串槽"
+        );
+        let stale_marker = serde_json::json!({ "stale": true });
+        overview_memo_put(revision - 1, data_home.clone(), std::sync::Arc::clone(&ov), stale_marker);
+        let (_, after_stale) = overview_memo_get(revision, &data_home).expect("槽仍应是新 revision");
+        assert_eq!(after_stale, value, "旧 revision 写回不得覆盖新值");
+        let advance_marker = serde_json::json!({ "advance": true });
+        overview_memo_put(revision + 1, data_home.clone(), ov, advance_marker.clone());
+        let (_, after_advance) =
+            overview_memo_get(revision + 1, &data_home).expect("前进写回应生效");
+        assert_eq!(after_advance, advance_marker, "更新的 revision 写回必须生效");
     }
 
     fn tmp_home(tag: &str) -> std::path::PathBuf {

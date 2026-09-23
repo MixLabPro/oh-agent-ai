@@ -987,7 +987,9 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
     const gate = makeInvalidationGate();
     void listenAppEvents((event) => {
       if (!active) return;
-      if (event.type === "SourceDataDeleted") {
+      if (event.type === "SourceDataDeleted" && gate(event)) {
+        // R1：轮询合成的事件带 revision，已被 Invalidated 覆盖的同 revision 重复
+        // 被 gate 吞掉；真删除（无 revision）仍无条件放行。
         refresh(); refreshData(); refreshQuotaReminder();
       } else if (event.type === "SyncStatusChanged") {
         // 同步失败/恢复只体现在数据源健康（sync_runs 是记账写，不推进 revision）。

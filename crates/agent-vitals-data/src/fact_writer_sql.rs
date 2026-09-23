@@ -23,6 +23,12 @@ pub struct SqlInsertReport {
     pub inserted: usize,
     pub duplicate: usize,
     pub rejected: usize,
+    /// 重复路径上的**归因状态变更**行数（REFRESH_STORM R3-F4 评审 P2-1）：
+    /// 重分类 UPDATE / 干净重放收敛冲突 / COALESCE 富集把 NULL 归因列填上。
+    /// 这些写入不改事实身份（inserted=0），但真的会改喂 ReadMemo 四面
+    /// （monthly/daily/calendar/hourly）的 provider/billing 业务列——调用方
+    /// 的事实性/revision 谓词必须把它当状态变更计入。
+    pub enriched: usize,
 }
 
 /// SQL 事实写入器。绑定 sync_runs 批次与注入时钟。
@@ -463,7 +469,10 @@ impl<'a> SqlFactWriter<'a> {
                 ],
             )?;
             if n == 0 {
-                let (reclassification, attribution_conflict): (bool, bool) = self
+                // 第三个分量 = COALESCE 富集是否会真的填上 NULL 归因列
+                // （评审 P2-1：这种写入改喂 ReadMemo 面的业务列，必须计入
+                // report.enriched，否则全重复重放轮会静默提交、memo 面端旧归因）。
+                let (reclassification, attribution_conflict, null_fill): (bool, bool, bool) = self
                     .conn
                     .query_row(
                         "SELECT provider_id, provider_raw, billing_source, billing_mode,
@@ -503,11 +512,16 @@ impl<'a> SqlFactWriter<'a> {
                                 .iter()
                                 .zip(incoming[..6].iter())
                                 .any(|(old, new)| old.is_some() && new.is_some() && old != new);
-                            Ok((reclassification, !reclassification && conflict))
+                            let null_fill = existing
+                                .iter()
+                                .zip(incoming.iter())
+                                .any(|(old, new)| old.is_none() && new.is_some());
+                            Ok((reclassification, !reclassification && conflict, null_fill))
                         },
                     )
-                    .unwrap_or((false, false));
+                    .unwrap_or((false, false, false));
                 if reclassification {
+                    report.enriched += 1;
                     self.conn.execute(
                         "UPDATE usage_facts SET provider_id = ?2, provider_raw = ?3,
                            billing_source = ?4, billing_mode = ?5, pricing_basis = ?6,
@@ -538,7 +552,7 @@ impl<'a> SqlFactWriter<'a> {
                     // 误关（REQ-083：不静默抹证据）。幂等：重复重发无副作用。
                     // 由陈旧二进制产生的残留冲突由此自然收敛，不需手工 SQL
                     // （2026-09-12 真机 306 条即此形态）。
-                    self.conn.execute(
+                    let resolved = self.conn.execute(
                         "UPDATE data_quality_issues SET resolved_at_ms = ?2
                          WHERE scope_key = ?1 AND resolved_at_ms IS NULL",
                         rusqlite::params![
@@ -549,10 +563,16 @@ impl<'a> SqlFactWriter<'a> {
                             self.now_ms
                         ],
                     )?;
+                    if resolved > 0 {
+                        report.enriched += 1;
+                    }
                 }
                 // A replay may discover stronger provider evidence for an
                 // already stored fact. Enrich nullable attribution columns by
                 // fact_id without changing the immutable fact identity.
+                if null_fill {
+                    report.enriched += 1;
+                }
                 self.conn.execute(
                     "UPDATE usage_facts SET
                        provider_id = COALESCE(provider_id, ?2),

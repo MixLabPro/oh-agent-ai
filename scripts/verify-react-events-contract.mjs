@@ -83,6 +83,12 @@ assert.equal(gate({ type: "TrustMonitorEvent" }), false);
 assert.equal(gate({ type: "SourceDataDeleted" }), true, "deletion always refreshes");
 assert.equal(gate({ type: "Invalidated", hosts: [] }), true, "no revision (old desktop) refreshes conservatively");
 assert.equal(gate({ type: "Invalidated", revision: 6, hosts: [] }), false, "conservative path does not reset seenRevision");
+// R1（REFRESH_STORM spec §4.1）：轮询合成的 SourceDataDeleted 带 revision——只比较、
+// 不推进水位（各订阅者对不同事件类型的刷新集不同，外来信号不得吞掉 Invalidated 全量扇出）。
+assert.equal(gate({ type: "SourceDataDeleted", revision: 6 }), false, "poll synthesis covered by watermark is swallowed");
+assert.equal(gate({ type: "SourceDataDeleted", revision: 7 }), true, "newer poll synthesis refreshes");
+assert.equal(gate({ type: "Invalidated", revision: 7, hosts: [] }), true, "deletion does not advance watermark (full fan still runs)");
+assert.equal(gate({ type: "Invalidated", revision: 7, hosts: [] }), false, "and the watermark advances only via Invalidated");
 
 const { parseWatcherHealth } = sandbox.module.exports;
 // vm 跨 realm 对象不做 deepEqual（原型不同）——按本文件惯例用 JSON 串比较。

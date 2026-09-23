@@ -260,38 +260,99 @@ function makePullMerger() {
       running = false;
       return false;
     },
+    // 释放在途位而不补拉：排队触发已被 revision 锁存覆盖时出队用（R1）。
+    release() {
+      running = false;
+      queued = false;
+    },
   };
 }
 
 const wbPull = makePullMerger();
+
+// R1 per-revision 锁存（REFRESH_STORM spec §4.1）：事件只对「尚未渲染的 revision」
+// 触发重拉。renderedRevision = 已渲染的权威 revision；pendingRevision = 已通知未
+// 渲染的最大值；forceRefresh = 无 revision 语义的信号（SyncStatusChanged/显式动作）
+// 请求至少一拉。锁存拦「同 revision 重复」，wbPull 拦「在飞重复」，两者正交。
+let renderedRevision = -1;
+let pendingRevision = -1;
+let forceRefresh = false;
+
+// 只读测试钩子（R1 手测/风暴注入用）：devtools 断言锁存单调性与拉取轮数
+// （pulls = 实际开始的拉取轮数，即 §7.4-6 要断言的「总拉取次数」）。
+let pullRounds = 0;
+window.__wbRefresh = {
+  get renderedRevision() { return renderedRevision; },
+  get pendingRevision() { return pendingRevision; },
+  get pulls() { return pullRounds; },
+};
 
 // 合并的「重拉当前 tab」入口：事件桥与手点都走这里。只刷两个便宜页
 // （overview/calendar）：sessions/findings/sources 是懒加载的重活（spawn 二进制、
 // 几十秒），fold 事件不该把用户正在看的分页/筛选搅掉——与聚焦刷新同一口径。
 // 普通 tab 切换由 loadActiveTab() 负责首进加载；日历同一月份命中缓存，事件桥
 // 和显式刷新仍会直接走到这里。
-async function refreshActiveTab() {
+// force=true（切 tab/刷新按钮/窗口聚焦/价卡更新等显式动作）保证至少一拉，
+// 不受 revision 锁存影响；事件驱动路径（无参调用）只对未渲染 revision 拉取。
+async function refreshActiveTab(force) {
+  if (force === true) forceRefresh = true;
   if (!wbPull.fire()) return;
-  do {
-    if (activeTab === "overview") await renderOverview();
-    else if (activeTab === "calendar") await renderCalendar();
-  } while (wbPull.done());
+  pullRounds += 1;
+  for (;;) {
+    // 消费在 await 之前完成：本轮只认领它开启时已通知的 revision 与 force 请求，
+    // 期间新到的留给尾随轮。欠认领安全（宁可多一次尾随拉取），不越权认领
+    // 读取窗口开启之后才到达的 revision，也不吞在飞期间的 force。
+    const revAtStart = pendingRevision;
+    const forceNow = forceRefresh;
+    forceRefresh = false;
+    const shouldPull = forceNow || revAtStart > renderedRevision;
+    const refreshable = activeTab === "overview" || activeTab === "calendar";
+    if (shouldPull && refreshable) {
+      try {
+        if (activeTab === "overview") await renderOverview();
+        else await renderCalendar();
+        // 仅成功渲染才认领（Math.max 欠认领）；异常保持锁存原值，下一事件重试。
+        renderedRevision = Math.max(renderedRevision, revAtStart);
+      } catch (e) {
+        console.warn("[workbench] 重拉渲染失败，保持锁存待下一事件重试", e);
+      }
+    }
+    // done() 只知「期间又有触发」，不知「该触发是否已被本轮覆盖」——被锁存
+    // 覆盖的迟到事件直接释放出队，不再补拉。try/catch 保证异常路径也走到这里，
+    // running 永不泄漏（渲染一次 reject 不能永久卡死刷新）。
+    if (!wbPull.done()) break;
+    if (!forceRefresh && pendingRevision <= renderedRevision) { wbPull.release(); break; }
+  }
 }
 
 function subscribeFoldEvent() {
   // 单一 UI 事件出口（EVENT_BUS spec §1.3）：后端只剩 `app-event` 一个通道，
   // 类型在 payload.type 里判别。Invalidated 是权威库失效信号（revision 前进才发，
-  // 每 tick ≤ 1 条）；SyncStatusChanged 是变了才发的同步状态；Trust 两类是传感面
-  // 的瞬态信号——同一出口、同一信封，处理按类型分发。
+  // 每 tick ≤ 1 条）；SyncStatusChanged 是变了才发的同步状态。Trust 两类是传感面
+  // 的瞬态信号，不是数据失效（REFRESH_STORM spec R1 / 背压 spec §6：交给按类型
+  // 过滤的局部消费者）——它们不触发页面级重拉；trust 活跃轮有新观察时写事务
+  // 推进 revision，Invalidated 自然会来，数据新鲜度不丢。
   listen("app-event", (event) => {
-    const type = event && event.payload && event.payload.type;
+    const payload = event && event.payload;
+    const type = payload && payload.type;
     // 手动轮询在跑时，事件是同一轮同步的第二个完成信号——按钮自己的 poll
     // 已经（或将）在重拉，跳过避免双拉（负载不携带手动/自动来源，靠按钮
     // handler 置位的 manualSyncPolling 区分，不靠猜）。
     if (manualSyncPolling) return;
-    if (type === "Invalidated" || type === "SyncStatusChanged"
-      || type === "TrustMonitorEvent" || type === "TrustMonitorInvalidated") {
-      refreshActiveTab();
+    if (type === "SyncStatusChanged") {
+      refreshActiveTab(true);
+      return;
+    }
+    if (type === "Invalidated") {
+      const revision = Number(payload.revision);
+      if (Number.isFinite(revision) && revision >= 0) {
+        if (revision <= renderedRevision) return; // 已渲染，锁存吞掉
+        pendingRevision = Math.max(pendingRevision, revision);
+        refreshActiveTab();
+      } else {
+        // revision 缺失/非法：fail-open，保底一拉（不污染锁存值）。
+        refreshActiveTab(true);
+      }
     }
   }).catch((e) => {
     console.warn("[workbench] app-event 订阅失败（5 分钟 tick / 手动同步兜底）", e);
@@ -432,10 +493,10 @@ async function loadActiveTab() {
   // wbPull：否则连续点刷新或频繁切回窗口仍会绕开事件桥的合并器，重叠查询同一
   // 份 SQL 数据。sessions/findings/sources 保留各自的懒加载语义，不进这里。
   if (activeTab === "overview") {
-    await refreshActiveTab();
+    await refreshActiveTab(true);
   }
   else if (activeTab === "calendar") {
-    if (calendarLoadedMonth !== calMonth) await refreshActiveTab();
+    if (calendarLoadedMonth !== calMonth) await refreshActiveTab(true);
   }
   // 会话页懒加载：首进一次，之后只在「重载列表 / 加载更多」时拉。切 tab 不重拉
   // 也不追加——反复 overview↔sessions 切着看，分页游标不能被一次切换吞掉一页。
@@ -469,7 +530,7 @@ window.addEventListener("focus", () => {
   // pull 切 tab 后又按旧 activeTab 刷新。
   pullNavTarget();
   pullFocusTarget();
-  refreshActiveTab();
+  refreshActiveTab(true);
 });
 
 // 可见性恢复（隐藏/显示、切走再切回）也是「窗口变得可见」——`show()` 后 focus
@@ -3093,7 +3154,7 @@ async function renderPricingCatalogSettings() {
     status.textContent = "正在检查公共价格目录…不会上传本地数据。";
     try {
       render(await invoke("update_public_pricing_catalog"));
-      await refreshActiveTab();
+      await refreshActiveTab(true);
     } catch (e) {
       try { render(await invoke("public_pricing_catalog_status")); } catch (_) {}
       status.textContent += "（" + errText(e) + "）";

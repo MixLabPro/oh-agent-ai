@@ -147,7 +147,7 @@ fn observations_from_samples(
 }
 
 #[cfg(target_os = "macos")]
-fn lsof_samples() -> Result<Vec<ProcessSample>, String> {
+fn lsof_raw() -> Result<String, String> {
     let output = std::process::Command::new("/usr/sbin/lsof")
         .args(["-n", "-P", "-Fpcfn"])
         .output()
@@ -156,13 +156,36 @@ fn lsof_samples() -> Result<Vec<ProcessSample>, String> {
     // output is still useful for the current user, and the report remains a
     // partial low-privilege snapshot rather than a claim of full coverage.
     if output.stdout.is_empty() { return Err("lsof_no_visible_output".to_string()); }
-    let raw = String::from_utf8(output.stdout).map_err(|_| "lsof_invalid_output".to_string())?;
-    Ok(parse_lsof_fields(&raw))
+    String::from_utf8(output.stdout).map_err(|_| "lsof_invalid_output".to_string())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn lsof_samples() -> Result<Vec<ProcessSample>, String> {
+fn lsof_raw() -> Result<String, String> {
     Err("runtime_sensor_unavailable_on_this_platform".to_string())
+}
+
+/// P3 六段子计时（TRUST_SENSOR_OPTIMIZATION spec §4.4，与 read_overview 的
+/// 段级计时同款手法）：`lsof_spawn / lsof_parse / open / txn_insert /
+/// correlate / outbox_emit`，单行 INFO——burst 分解有数据面，P1/P2 的效果
+/// 验证与回归有基线（空轮也打点，便于区分「门控跳过」与「跑了但空」）。
+#[derive(Debug, Default)]
+pub struct SensorSegments {
+    pub lsof_spawn: std::time::Duration,
+    pub lsof_parse: std::time::Duration,
+    pub open: std::time::Duration,
+    pub txn_insert: std::time::Duration,
+    pub correlate: std::time::Duration,
+    pub outbox_emit: std::time::Duration,
+}
+
+impl SensorSegments {
+    pub fn log_line(&self, total: std::time::Duration) -> String {
+        format!(
+            "trust 传感六段 lsof_spawn={:?} lsof_parse={:?} open={:?} txn_insert={:?} correlate={:?} outbox_emit={:?} total={:?}",
+            self.lsof_spawn, self.lsof_parse, self.open, self.txn_insert,
+            self.correlate, self.outbox_emit, total
+        )
+    }
 }
 
 /// Capture one explicit local-process snapshot and persist redacted evidence.
@@ -171,31 +194,45 @@ fn lsof_samples() -> Result<Vec<ProcessSample>, String> {
 pub fn snapshot_and_store(
     data_home: &std::path::Path, machine_namespace: &str, now_ms: i64,
 ) -> Result<TrustRuntimeSnapshotReport, String> {
-    let samples = match lsof_samples() {
-        Ok(samples) => samples,
+    let t_total = std::time::Instant::now();
+    let mut seg = SensorSegments::default();
+    let t = std::time::Instant::now();
+    let raw = match lsof_raw() {
+        Ok(raw) => raw,
         Err(capability) => return Ok(TrustRuntimeSnapshotReport {
             capability, candidate_processes: 0, observations: 0, inserted: 0, duplicate: 0,
             findings_upserted: 0, notification_candidates: 0, evidence_links_added: 0,
             notification_keys: Vec::new(),
         }),
     };
+    seg.lsof_spawn = t.elapsed();
+    let t = std::time::Instant::now();
+    let samples = parse_lsof_fields(&raw);
+    seg.lsof_parse = t.elapsed();
     let identity = TrustIdentity::load_or_create(data_home)?;
     let observations = observations_from_samples(&samples, &identity, machine_namespace, now_ms);
     let candidate_processes = samples.iter().filter(|sample| sample.has_git_history && (sample.writes_archive || sample.writes_workspace_index)).count();
+    let t = std::time::Instant::now();
     let authority = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(data_home), now_ms,
     ).map_err(|error| format!("authority_open_failed:{error}"))?;
     let run_id = format!("trust-runtime-snapshot:{now_ms}");
     authority.begin_run(&run_id, "trust-runtime-snapshot", now_ms)
         .map_err(|error| format!("trust_runtime_run_begin_failed:{error}"))?;
+    seg.open = t.elapsed();
     let write = authority.with_immediate_txn(|conn| {
+        let t = std::time::Instant::now();
         let inserted = agent_vitals_data::trust::insert_observations(conn, &observations, &run_id, now_ms)?;
+        seg.txn_insert = t.elapsed();
         let ids: Vec<String> = observations.iter().map(|row| row.observation_id.clone()).collect();
+        let t = std::time::Instant::now();
         let correlation = agent_vitals_data::trust_correlator::correlate_selected(conn, &ids)?;
+        seg.correlate = t.elapsed();
         // 事件总线（迭代 4）：有新观察才发——与写入同事务（spec §1.2）。correlate
         // 保持内联（它要原子地看到上面 insert 的观察）；事件是"这次传感发生了"
         // 的事实通知，P2 常驻传感器落地后复用同一通道与载荷形状。
         if inserted.inserted > 0 {
+            let t = std::time::Instant::now();
             crate::events::insert_outbox(
                 conn,
                 &crate::events::AppEvent::trust_monitor_event(
@@ -206,10 +243,11 @@ pub fn snapshot_and_store(
             ).map_err(|e| agent_vitals_data::authority::AuthorityError::Sqlite(
                 rusqlite::Error::InvalidParameterName(format!("__trust_event__:{e}")),
             ))?;
+            seg.outbox_emit = t.elapsed();
         }
         Ok((inserted, correlation))
     });
-    match write {
+    let report = match write {
         Ok((inserted, correlation)) => {
             authority.finish_run(&run_id, "succeeded", None, None, now_ms)
                 .map_err(|error| format!("trust_runtime_run_finish_failed:{error}"))?;
@@ -225,7 +263,9 @@ pub fn snapshot_and_store(
             let _ = authority.finish_run(&run_id, "failed", Some("trust_runtime_write_failed"), Some(&error.to_string()), now_ms);
             Err(format!("trust_runtime_write_failed:{error}"))
         }
-    }
+    };
+    crate::logging::log_info("trust_sensor", &seg.log_line(t_total.elapsed()));
+    report
 }
 
 #[cfg(test)]

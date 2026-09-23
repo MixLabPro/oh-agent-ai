@@ -15,6 +15,7 @@ path = "src/lib.rs"
 agent-vitals-domain = { path = "../agent-vitals-domain" }
 agent-vitals-provider = { path = "../agent-vitals-provider" }
 regex = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 vitals-core = { path = "../vitals-core" }
 # v0.8 Phase D4/D5：宿主 I/O 读取器依赖——**只在 `sources` feature 下链入**

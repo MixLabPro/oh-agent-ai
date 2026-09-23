@@ -36,10 +36,21 @@ ok(!wb.includes(`listen("usage-fold-updated"`) && !wb.includes(`listen("sync-sta
   "旧双通道的 listen 已全部移除");
 ok(!/["']usage-fold-updated["']/.test(lib.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, "")),
   "旧通道字符串在 lib.rs 代码中不再出现（注释里的历史说明不计）");
-ok(wb.includes(`type === "Invalidated"`)
-  && wb.includes(`type === "SyncStatusChanged"`) && wb.includes(`type === "TrustMonitorEvent"`)
-  && wb.includes(`type === "TrustMonitorInvalidated"`),
-  "webview 按类型分发（Invalidated / SyncStatusChanged / TrustMonitorEvent / TrustMonitorInvalidated）");
+ok(wb.includes(`type === "Invalidated"`) && wb.includes(`type === "SyncStatusChanged"`),
+  "webview 按类型分发（Invalidated / SyncStatusChanged）");
+// REFRESH_STORM R1（背压 spec §6 纪律落到出货 UI）：Trust 瞬态信号是传感面信号，
+// 不是数据失效——不触发页面级刷新；trust 活跃轮的失效由 revision 前进覆盖。
+ok(!wb.includes(`type === "TrustMonitorEvent"`) && !wb.includes(`type === "TrustMonitorInvalidated"`),
+  "Trust 瞬态信号不再出现在页面级刷新触发集");
+ok(wb.includes(`type === "SyncStatusChanged") {
+      refreshActiveTab(true);`),
+  "SyncStatusChanged 无 revision 语义：force 语义保底一拉");
+// R1 锁存原语：迟到的同 revision 事件出队不补拉；渲染异常不泄漏 running；
+// 欠认领（只认领本轮开启时已通知的 revision）。
+ok(wb.includes("release() {"), "makePullMerger 提供 release()（迟到事件出队，防 running 泄漏）");
+ok(wb.includes("renderedRevision = Math.max(renderedRevision, revAtStart);"),
+  "锁存欠认领：只认领本轮开启时已通知的 revision（在飞期间新到的留给尾随轮）");
+ok(wb.includes("重拉渲染失败"), "渲染异常被捕获（异常路径仍走到 done()/release()，刷新不死锁）");
 // RUNTIME_INVALIDATION spec §4.3/§4.4：领域事件不再逐条透传到 webview；展示层只收
 // 合并后的失效信号。FoldCompleted 已退役。
 ok(!wb.includes(`type === "FoldCompleted"`) && !wb.includes(`type === "FactsIngested"`),
@@ -50,8 +61,8 @@ ok(lib.includes('CoalescingConsumer::new("desktop-ui", ConsumerInterest::present
   "desktop-ui 以合并型 + Presentation 角色注册（结构上拿不到载荷）");
 ok(lib.includes("fn publish_invalidation") && lib.includes("publish_if_advanced"),
   "Invalidated 经 publish_if_advanced 发射（revision 严格前进才发）");
-ok(/drain_event_bus\(app\);[\s\S]*?publish_invalidation\(app, std::collections::BTreeSet::new\(\)\);\s*\}/.test(lib),
-  "sync_tick 尾部调用 drain_event_bus 后做空 hosts 电平检查");
+ok(/timed\("drain_event_bus", \|\| drain_event_bus\(app\)\);[\s\S]{0,200}timed\("publish_invalidation", \|\| \{[\s\S]{0,150}publish_invalidation\(app, hosts_for_invalidation\)/.test(lib),
+  "sync_tick 尾部调用 drain_event_bus 后做 revision 电平检查（P3 timed 包装形态）");
 
 // 手动同步轮询的标志：声明 + 置位 + 复位齐全，防止「漏复位把之后的事件全吞掉」。
 ok((wb.match(/manualSyncPolling/g) || []).length >= 4,

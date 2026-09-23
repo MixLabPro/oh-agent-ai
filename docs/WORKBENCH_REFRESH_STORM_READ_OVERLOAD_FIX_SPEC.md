@@ -404,19 +404,48 @@ Python 套件零漂移，才打勾。R1 无 Rust 改动，另需真机 bundle �
 （`cargo tauri build --bundles app` + `open .app`，**绝不裸跑二进制**）。
 
 - [ ] **R1（UI 触发面收敛，止血主力）** — F1
-  - [ ] workbench.js 触发集收窄 + per-revision 锁存 + 测试钩子
-  - [ ] React：SourceDataDeleted 带 revision 进 gate；SettingsPage 7 连发批合并
+  - [x] workbench.js 触发集收窄 + per-revision 锁存 + 测试钩子（2026-09-23，
+    `feat/refresh-storm-fix` 4faec8b + 验收修复 02c3f15；vm 沙箱实测评审发现的
+    P1 死锁/P1 越权认领/P2 force 吞掉已修；fold-bridge 契约更新到收窄触发集）
+  - [x] React：SourceDataDeleted 带 revision 进 gate（gate 契约测试扩展钉住
+    「只比较不推进水位」）；SettingsPage 按类型分发在 HEAD 已就位，SourceDataDeleted
+    分支接入 gate
   - [ ] 真机手测清单（§7.4）通过
 - [ ] **R2（读路径硬保护）** — F2 + F3
-  - [ ] read_overview async + run_heavy_read + 双检查 + memo 收口
-  - [ ] budget_profiles 改走 memoized summary；MonthlySummaryMemo 并入 ReadMemo
-  - [ ] budget_profiles 输出等价测试；并发 ≤2 计算测试
-- [ ] **R3（发射侧纪律）** — F4 + F5
-  - [ ] 簿记判据共用函数 + 静默提交 + revision_guard 闭集更新
-  - [ ] 簿记读方闭集守卫测试
-  - [ ] TrustMonitorInvalidated 有变化才发
-- [ ] **R4（trust 传感分期 A）** — F6（trust spec P0+P3 + interval 收敛）
+  - [x] read_overview async + run_heavy_read + 双检查 + memo 收口（93256dc；
+    并发 ≤2/防陈旧/跨 home 隔离测试钉住；desktop 141 绿 + clippy -D 干净）
+  - [x] budget_profiles 复用 memoized 输入（from_parts 拆分 + assembly 共享
+    monthly Arc/shared_daily；逐字节等价测试钉住——按等价落法未做 Value 往返，
+    ReadMemo 保持 Value 型，typed 部件由 desktop 侧 MonthlySummaryMemo 供给）
+  - [x] budget_profiles 输出等价测试；并发 ≤2 计算测试（93256dc + 本提交；
+    workspace 43 套件 + desktop 141 + golden 16 + Python 1233 全绿）
+- [x] **R3（发射侧纪律）** — F4 + F5（2026-09-23 全部落地，全门禁绿）
+  - [x] 簿记静默提交（with_immediate_txn_decided + 三出口事实性裁决；判据与
+    outbox 压制同源；快照/backfill/路由证据保守视为事实性——配额滚动窗口
+    载荷是用户可见状态；revision_guard 唯一写者测试原样保持全绿）
+  - [x] 读方闭集枚举（实施期完成）：host_runtime_snapshots 载荷喂配额面
+    （无 memo 的即时读，不受影响）；source_files.last_seen 喂覆盖度余量——
+    经 revision-memo 的 summary 面在「仅无实效扫描」角落可能滞后一个真实
+    revision，属外观性、可接受；机械守卫由「唯一写者」测试 + 静默契约测试
+    共同覆盖（未另建独立读方闭集测试文件，如实记录）
+  - [x] TrustMonitorInvalidated 有变化才发（inserted>0 门控 + save 路径本地
+    事件兜 TrustPage；record_result 单行心跳 UPDATE 保留——不推 revision、
+    是 last_success 活性信号，偏差已在提交说明注明；desktop 141 绿）
+- [x] **R4（trust 传感分期 A）** — F6（acb4a86，2026-09-24）：P0 活动门控
+  （HostActivityTable 由 watcher 唤醒槽刷新；冷却窗 120s + 空闲确认窗 10min；
+  跳过轮零 lsof/零库/零事件/零锁 + 小时聚合日志）+ P3 六段子计时
+  （lsof_spawn/parse/open/txn_insert/correlate/outbox_emit 单行 INFO）+
+  interval 上限收敛（60s 硬顶移除，5..=3600 全域）；门控三行测试钉住
 - [ ] **R5（轻 tick 减负）** — F7a → F7b → F7c（各自独立打勾）
+  - [x] F7a quota 指纹缓存（09c8533 + 2074b7b）：贡献粒度拆分 + (size,mtime)
+    指纹缓存 + floor 在合并处按当前时间施加（不随缓存冻结）；对拍测试钉住
+    冷/暖/变更/floor 滑动四腿（滑动腿经评审修复后真实非空）；缓存写 best-effort
+  - [x] F7b codex 单趟 walk（09c8533）：`codex_rollout_files_with_errors` 单趟
+    产出清单+错误，主路径与自定义源换用，错误面按唤醒裁剪（codex 未唤醒零
+    walk）；等价测试钉住。claude/dsh/workbuddy 的双 walk 遗留（评审 P3-7）
+  - [x] F7c 收尾日节流（99e2c86）：legacy 订阅迁移 + 价格快照改为
+    `.daily-bookkeeping.json` 日戳节流（retention 同款范式，失败不盖戳）；
+    候选/声明一致性保持每 tick（计费正确性链路）
 - [ ] **R6（trust 默认开启 rollout）** — F8；**前置：R1–R4 全部打勾 + 相关器成本钉住
   （P2 落地或 ≤50ms/轮实测）+ §7.5 soak 通过**
   - [ ] R6a：`enabled_source` 列 + 迁移 + save 路径置 user + 一次性询问条幅 + 知情文案
@@ -472,6 +501,36 @@ Python 套件零漂移，才打勾。R1 无 Rust 改动，另需真机 bundle �
 
 产品无遥测（数据保留政策），这道 soak 是默认开启前**唯一**的回归防线——不允许以
 「发出去再看」替代。
+
+### 7.6 真机验收记录（2026-09-24 00:28–00:37 本地，feat/refresh-storm-fix bundle）
+
+环境：worktree bundle `open` 启动（AGENTS.md 纪律，未裸跑）；trust 本机处于
+关闭态（enabled=0）——门控/六段路径未在真机触发，由单元测试钉住，留待
+R6 前置的 §7.5 soak（trust 开启）验证。观测 ~9 分钟（含本会话自身负载）：
+
+| 指标 | 旧基线（2026-09-23 风暴） | 本次实测 | 判定 |
+|---|---|---|---|
+| 轻 tick 用时 | 7.1–9.3s | **386–405ms** | ✅ ~20× |
+| budget_sql 段 | 574ms–2.2s | **4.4–20ms** | ✅ F3 复用生效 |
+| assembly 段 | p50 5.09s / max 40s | 暖态 824ms；冷态首几轮 3.8–5.5s | ✅ 趋势达标（样本少，p50 待长测） |
+| Invalidated | 88/h（任意活动期） | **0**（多轮 tick 零推进） | ✅ F4 直接可见 |
+| 超 5s WARN | 188 次/2h | 1 次（暖机期） | ✅ |
+| 备忘计数 | — | 每 revision computed≈1（并发去重生效） | ✅ R2 可观测 |
+
+§7.1 完整 30 分钟量化门（trust 开启 + overview 停留）与 §7.4 手测清单
+（含托盘图标目视确认）留待用户下一次带 trust 的常规使用中完成；本次
+bundle 进程稳定运行 9+ 分钟无 ERROR。
+
+### 7.7 trust 开启 soak（2026-09-24 00:25–00:35，F7a/F7b bundle + 评审修复前）
+
+| 门 | 实测 | 判定 |
+|---|---|---|
+| correlate ≤50ms/轮（R6 前置） | **13–57µs**（千倍余量） | ✅ R6 前置「相关器成本实测钉住」满足 |
+| 六段基线（P1 决策门数据） | lsof_spawn 385–760ms 占比 >95%，其余全部 µs–ms 级 | 分期 B（lsof -i 预筛）价值确认 |
+| 轻 tick | 365–698ms | ✅ |
+| Invalidated | 0（revision 6 分钟仅 488→489 一次） | ✅ F4/F7c 生效 |
+| assembly 暖态（trust 开启） | p50 ≈5–7s | ⚠️ 超 §7.1 门（≤2.5s）——**§5 增量月汇总 tripwire（p95>4s）在真机数据上触发**，是下一级杠杆 |
+| 启动扇出 | 1.4s 内同 revision 5 次计算 | ✅ 已修（2074b7b 串行锁），运行中 bundle 未含此修复 |
 
 ## 8. 风险与守卫
 

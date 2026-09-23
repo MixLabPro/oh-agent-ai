@@ -10,17 +10,31 @@ export type AppEventType = "Invalidated" | "SyncStatusChanged" | "TrustMonitorEv
  * other type is reduced to its tag — payloads stay on the desktop side. */
 export type AppEvent = { type: AppEventType; revision?: number; hosts?: string[] };
 
-/** Data-refresh gate (spec §6): refresh on `SourceDataDeleted`, and on
- * `Invalidated` only when its revision strictly advances past what this
- * subscriber already refreshed for. Same-revision repeats and every other
- * event type are ignored — a page that needs `SyncStatusChanged` or
- * `WatcherHealthChanged` subscribes to those explicitly. */
+/** Data-refresh gate (spec §6 + REFRESH_STORM R1): refresh on `SourceDataDeleted`
+ * (revision-carrying poll syntheses compare against the watermark; real deletions
+ * and legacy events without a revision stay unconditional), and on `Invalidated`
+ * only when its revision strictly advances past what this subscriber already
+ * refreshed for. Same-revision repeats and every other event type are ignored —
+ * a page that needs `SyncStatusChanged` or `WatcherHealthChanged` subscribes to
+ * those explicitly.
+ *
+ * `SourceDataDeleted` compares but never advances the watermark: subscribers
+ * refresh different field sets per event type, so a poll-synthesised deletion
+ * must not suppress the full `Invalidated` fan-out that may still be in flight. */
 export function makeInvalidationGate(): (event: AppEvent) => boolean {
   let seenRevision = -1;
+  // NaN 不是合法 revision：按缺失处理（保守刷新/比较侧视分支），与出货路径的
+  // Number.isFinite 守卫同口径。
+  const validRevision = (value: unknown): number =>
+    typeof value === "number" && Number.isFinite(value) ? value : -1;
   return (event) => {
-    if (event.type === "SourceDataDeleted") return true;
+    if (event.type === "SourceDataDeleted") {
+      const revision = validRevision(event.revision);
+      if (revision < 0) return true; // 真删除/旧桥：保守刷新
+      return revision > seenRevision; // 只比较，不推进水位
+    }
     if (event.type !== "Invalidated") return false;
-    const revision = typeof event.revision === "number" ? event.revision : -1;
+    const revision = validRevision(event.revision);
     if (revision < 0) return true; // 无 revision 的旧桌面进程：保守刷新
     if (revision <= seenRevision) return false;
     seenRevision = revision;
@@ -3255,7 +3269,17 @@ function safeAppEvent(raw: unknown): AppEvent | null {
 /** Subscribe to the single desktop event bus and expose only its allowlisted type. */
 export async function listenAppEvents(handler: (event: AppEvent) => void): Promise<Unsubscribe> {
   const listener = globalTauri()?.event?.listen;
-  const windowHandler = () => handler({ type: "SourceDataDeleted" });
+  // R1：5s 轮询合成的窗口事件带 detail.revision（App.tsx dispatch 的 CustomEvent），
+  // 让 gate 能按水位吞掉与 Invalidated 同 revision 的重复刷新；无 detail 的
+  // 旧派发保持无 revision 语义（gate 保守放行）。
+  const windowHandler = (raw?: Event) => {
+    const detail = raw ? (raw as CustomEvent<{ revision?: unknown }>).detail : undefined;
+    const rawRevision = detail && typeof detail === "object" ? detail.revision : undefined;
+    const revision = typeof rawRevision === "number" && Number.isFinite(rawRevision) && rawRevision >= 0 && rawRevision <= Number.MAX_SAFE_INTEGER
+      ? Math.floor(rawRevision)
+      : undefined;
+    handler(revision === undefined ? { type: "SourceDataDeleted" } : { type: "SourceDataDeleted", revision });
+  };
   window.addEventListener("agent-vitals-source-data-deleted", windowHandler);
   if (!listener) return () => window.removeEventListener("agent-vitals-source-data-deleted", windowHandler);
   let unsubscribeTauri: Unsubscribe = () => undefined;

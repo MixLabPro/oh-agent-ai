@@ -37,6 +37,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "ruzstd",
+ "serde",
  "serde_json",
  "vitals-core",
  "walkdir",
