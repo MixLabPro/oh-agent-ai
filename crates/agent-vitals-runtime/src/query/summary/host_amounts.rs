@@ -1427,6 +1427,52 @@ pub(crate) fn fetch_windowed(
 /// 真机）。这里用 `host_tokens_all` 把三宿主的 4 桶换回全量；命中率照 domain
 /// 的同一条公式重算。SQL 读不到时保留金额面的数（比冒充 0 诚实）。WorkBuddy
 /// 不在这里：它的 4 桶来自 `workbuddy_host_amount_with_tokens` 自己的全量查询。
+/// 插件宿主（`plugin:<slug>`）的 tokens 行（zcode 宿主接入收尾，2026-09-23）。
+/// **只有处理量、没有金额**——与 workbuddy 上线时同一条 L0 纪律（§9E.5：
+/// 处理量必须可见，金额等 billing 声明面）；`host_tokens_all` 是 host 参数化
+/// 的通用查询，天然覆盖任意 host 值。已安装 manifest 才有行（hosts.d 是
+/// 机器本地配置，测试/golden 的 fixture data_home 下扫描结果为空——输出
+/// 零漂移）。
+pub(crate) fn plugin_tokens_by_host(
+    data_home: &std::path::Path,
+    db: &Option<agent_vitals_data::authority::AuthorityDb>,
+    bounds: Option<(i64, i64)>,
+) -> Vec<(String, HostTokens)> {
+    let (Some(db), Some((start, end))) = (db, bounds) else {
+        return Vec::new();
+    };
+    let (hosts, errors) = crate::host_registry::scan_plugin_hosts(data_home);
+    for e in errors {
+        crate::core::logging::log_warn(
+            "summary",
+            &format!("plugin manifest {} 解析失败: {}", e.manifest_path.display(), e.problem),
+        );
+    }
+    let mut out = Vec::new();
+    for h in hosts {
+        let host_label = format!("plugin:{}", h.slug);
+        let Ok(Some((u, cr, cw, o))) =
+            agent_vitals_data::authority_query::host_tokens_all(db.conn(), &host_label, start, end)
+        else {
+            continue;
+        };
+        let cache_hit_ratio = agent_vitals_domain::cost::cache_hit_ratio(&json!({
+            "uncached_input_tokens": u,
+            "cached_input_tokens": cr,
+            "cache_write_input_tokens": cw,
+        }));
+        out.push((host_label, HostTokens {
+            total: u + cr + cw + o,
+            uncached_input: u,
+            cache_read: cr,
+            cache_write: cw,
+            output: o,
+            cache_hit_ratio,
+        }));
+    }
+    out
+}
+
 pub(crate) fn restore_full_host_tokens(
     db: &Option<agent_vitals_data::authority::AuthorityDb>,
     bounds: Option<(i64, i64)>,

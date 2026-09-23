@@ -629,6 +629,34 @@ pub fn sync_facts_filtered(
         report.total_duplicate += r.duplicate;
         report.hosts.push(r);
     }
+
+    // 插件宿主周期再摄取（zcode 接入收尾，2026-09-23）：只在全量路径跑
+    // （定向过滤只针对内置宿主批）；exactly-once 由 fact_id 幂等兜底，
+    // 单 manifest 失败隔离进 errors 不拖垮整轮。首装 format guard 挡
+    // 「include/recipe 与数据不匹配」的 manifest（零 emit 拒写）。
+    if only.is_none() {
+        let user_home_for_plugins = user_home.clone();
+        for (slug, result) in crate::plugin_ingest::ingest_installed(&ns, data_home, &user_home_for_plugins) {
+            match result {
+                Ok(payload) => {
+                    let appended = payload.get("appended").and_then(Value::as_i64).unwrap_or(0);
+                    if appended > 0 {
+                        crate::core::logging::log_info(
+                            "sync",
+                            &format!("plugin:{slug} 再摄取 +{appended} 条"),
+                        );
+                    }
+                }
+                Err(error) => {
+                    report.hosts.push(HostSyncReport {
+                        host: format!("plugin:{slug}"),
+                        errors: vec![error],
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
     // v1.0 升级闭环：旧个人订阅若存在于历史价卡快照，先落为本地 host_bills。
     // 正常桌面同步也会经过这里，用户无需手动执行 CLI 迁移；失败只警告，不能
     // 阻断三宿主事实导入。

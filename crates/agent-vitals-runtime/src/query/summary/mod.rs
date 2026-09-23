@@ -169,7 +169,7 @@ pub use repository::SqlSummaryRepository;
 // 跨子模块共享的内部项经本层中转（子模块只 `use super::*`，看不见兄弟的
 // 名字空间）：宿主折叠产物给 bundle/repository，计费政策应用给 repository。
 pub(crate) use host_amounts::{
-    claude_host_amount_with_tokens_from_days, codex_host_amount_provider_safe,
+    claude_host_amount_with_tokens_from_days, codex_host_amount_provider_safe, plugin_tokens_by_host,
     codex_provider_amounts_from_sql,
     dsh_day_tokens, dsh_host_amount, dsh_provider_amount, dsh_tokens,
     degrade_claude_freshness_if_legacy_backed, fetch_windowed, merged_claude_days,

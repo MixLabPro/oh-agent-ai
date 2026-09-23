@@ -1,6 +1,77 @@
 
 
 use super::*;
+
+/// zcode 宿主接入收尾（2026-09-23）：插件宿主 tokens 可见性 + 零漂移守卫。
+/// hosts.d 是机器本地配置——空 data_home 下扫描为空，monthly/daily 输出与
+/// 接入前逐字节一致（golden 双世界钉的是同一性质）。
+#[test]
+fn plugin_tokens_by_host_lists_installed_and_stays_silent_when_absent() {
+    use agent_vitals_data::repository::SummaryRepository;
+    let dir = std::env::temp_dir().join(format!(
+        "av-plugin-tk-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let data_home = dir.join("dh");
+    let user_home = dir.join("home");
+    std::fs::create_dir_all(data_home.join("hosts.d/zcode")).unwrap();
+    std::fs::create_dir_all(user_home.join("rollout")).unwrap();
+    std::fs::write(
+        data_home.join("hosts.d/zcode/manifest.json"),
+        r#"{"manifest_version":1,"slug":"zcode","display":{"name":"ZCode"},
+            "discovery":{"roots":["{HOME}/rollout"],"include":["*.jsonl"]},
+            "source":{"format":"jsonl"},
+            "session":{"from":"filename","pattern":"^model-io-sess_(?P<id>.+)\\.jsonl$"},
+            "recipe":"request-usage-four-bucket-v1",
+            "event_key":{"paths":["requestId","attempt"]},
+            "billing":{"policy":"lock:metered_estimate"},
+            "overrides":{"event_ts":"completedAt","model_raw":"model.modelId",
+              "uncached_input_tokens":"u.input_tokens","cache_read_tokens":"u.cache_read_input_tokens",
+              "cache_write_tokens":"u.cache_write_input_tokens","output_tokens":"u.output_tokens",
+              "provider_request_id":"requestId"}}"#.replace("{HOME}", user_home.to_str().unwrap()),
+    )
+    .unwrap();
+    std::fs::write(
+        user_home.join("rollout/model-io-sess_tk1.jsonl"),
+        concat!("{", r#""requestId":"r1","attempt":1,"completedAt":"2026-09-23T05:39:16.711Z","model":{"modelId":"GLM-5.3"},"u":{"input_tokens":10,"cache_read_input_tokens":20,"cache_write_input_tokens":0,"output_tokens":3}"#, "}\n"),
+    )
+    .unwrap();
+
+    // 走正式 ingest（exactly-once + authority 落库），再验 tokens 可见性。
+    let results = crate::plugin_ingest::ingest_installed("ns-tk", &data_home, &user_home);
+    assert_eq!(results.len(), 1, "恰一个已装 manifest: {results:?}");
+    let (slug, res) = &results[0];
+    assert_eq!(slug, "zcode", "首条必须是成功条目而非 manifest 错误: {res:?}");
+    let payload = res.as_ref().expect("ingest 成功");
+    let appended = payload["ingest"]["hosts"][0]["appended"].as_i64();
+    assert_eq!(appended, Some(1), "首装一条：{payload}");
+    let _ = appended;
+
+    let repo = SqlSummaryRepository::at(&data_home);
+    let monthly = repo.monthly_summary(&MonthlySummaryQuery { month: "2026-09".into() });
+    let tk = monthly.tokens_by_host.get("plugin:zcode")
+        .expect("插件宿主 tokens 必须可见（L0 处理量纪律）");
+    assert_eq!(tk.total, 33, "10+20+0+3");
+    assert_eq!(tk.uncached_input, 10);
+    assert_eq!(tk.cache_read, 20);
+    assert!(!monthly.by_host.contains_key("plugin:zcode"),
+        "金额面不入（billing 声明前 L0 纪律）");
+
+    // 幂等重放：duplicate 吸收，tokens 不变。
+    let _ = crate::plugin_ingest::ingest_installed("ns-tk", &data_home, &user_home);
+    let monthly2 = repo.monthly_summary(&MonthlySummaryQuery { month: "2026-09".into() });
+    assert_eq!(monthly2.tokens_by_host.get("plugin:zcode").unwrap().total, 33);
+
+    // 零漂移守卫：无 hosts.d 的 data_home → 插件面静默缺席。
+    let bare = dir.join("bare");
+    std::fs::create_dir_all(&bare).unwrap();
+    let repo_bare = SqlSummaryRepository::at(&bare);
+    let m_bare = repo_bare.monthly_summary(&MonthlySummaryQuery { month: "2026-09".into() });
+    assert!(!m_bare.tokens_by_host.contains_key("plugin:zcode"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
 use serde_json::json;
 
 fn with_home<F: FnOnce()>(f: F) {

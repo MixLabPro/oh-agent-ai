@@ -568,6 +568,32 @@ fn source_entries(report: &PluginRunReport) -> Vec<(PathBuf, (u64, u64))> {
     entries
 }
 
+/// 周期再摄取（zcode 宿主接入收尾，2026-09-23）：对**已安装**的全部插件
+/// manifest 逐个执行 [`plugin_ingest_write`]——exactly-once 由事实层
+/// fact_id 幂等兜底（重放 = duplicate 计数，不双计）。单 manifest 失败
+/// 隔离为 Err 条目（坏 manifest 不得拖垮整轮 sync，tick 兜底语义）。
+/// 返回 (slug, 摘要 or 错误) 列表供调用方记入 report.errors/log。
+pub fn ingest_installed(
+    ns: &str,
+    data_home: &Path,
+    user_home: &Path,
+) -> Vec<(String, Result<Value, String>)> {
+    let (hosts, errors) = scan_plugin_hosts(data_home);
+    let mut out = Vec::new();
+    for e in errors {
+        out.push((
+            e.manifest_path.to_string_lossy().to_string(),
+            Err(format!("manifest 解析失败: {}", e.problem)),
+        ));
+    }
+    for h in hosts {
+        let result = plugin_ingest_write(&h.manifest_path, ns, data_home, user_home)
+            .map_err(|e| format!("plugin_ingest_write: {e}"));
+        out.push((h.slug.clone(), result));
+    }
+    out
+}
+
 /// plugin-list 的负载：registry 内容 + 坏 manifest 报错。
 pub fn plugin_list(data_home: &Path) -> Value {
     let (hosts, errors) = scan_plugin_hosts(data_home);

@@ -153,6 +153,10 @@ impl SummaryRepository for SqlSummaryRepository {
         tokens_by_host.insert("claude-code".to_string(), claude_tk);
         tokens_by_host.insert("workbuddy".to_string(), wb_tk);
         restore_full_host_tokens(&db, bounds, &mut tokens_by_host);
+        // 插件宿主 tokens（zcode 接入收尾）：处理量可见、金额不入（L0 纪律）。
+        for (label, tk) in plugin_tokens_by_host(&self.data_home_path(), &db, bounds) {
+            tokens_by_host.insert(label, tk);
+        }
 
         let mut by_provider = BTreeMap::new();
         by_provider.insert(
@@ -243,6 +247,10 @@ impl SummaryRepository for SqlSummaryRepository {
         tokens_by_host.insert("claude-code".to_string(), claude_tk);
         tokens_by_host.insert("workbuddy".to_string(), wb_tk);
         restore_full_host_tokens(&db, bounds, &mut tokens_by_host);
+        // 插件宿主 tokens（zcode 接入收尾）：与 monthly 同款——处理量可见、金额不入。
+        for (label, tk) in plugin_tokens_by_host(&self.data_home_path(), &db, bounds) {
+            tokens_by_host.insert(label, tk);
+        }
 
         let mut by_provider = BTreeMap::new();
         by_provider.insert(
