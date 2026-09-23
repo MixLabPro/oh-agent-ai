@@ -518,7 +518,7 @@ pub fn sync_facts_filtered(
         (
             "codex",
             if wanted("codex") {
-                agent_vitals_hosts::codex_session::codex_rollout_files(&crate::summary::codex_home())
+                agent_vitals_hosts::codex_session::codex_rollout_files(&crate::home::codex_home())
             } else {
                 Vec::new()
             },
@@ -554,7 +554,7 @@ pub fn sync_facts_filtered(
     );
     collect_discovery_errors(
         "codex",
-        agent_vitals_hosts::codex_session::codex_rollout_walk_errors(&crate::summary::codex_home()),
+        agent_vitals_hosts::codex_session::codex_rollout_walk_errors(&crate::home::codex_home()),
     );
     if let Some(dsh_home) = crate::home::dsh_home() {
         collect_discovery_errors("dsh", crate::sessions::discovery::dsh_session_walk_errors(&dsh_home));

@@ -2195,8 +2195,13 @@ class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):
     workbuddy 的会话适配器里。"""
 
     def test_workbuddy_money_cannot_enter_the_summary_dto(self):
-        summary_rs = (ROOT / "crates" / "agent-vitals-runtime" / "src"
-                      / "query" / "summary.rs").read_text(encoding="utf-8")
+        # 2026-09-23 summary.rs 目录化为 query/summary/{mod,host_amounts,…}——
+        # 路径钉随之扫整个目录（断言语义零变化）。
+        summary_dir = (ROOT / "crates" / "agent-vitals-runtime" / "src"
+                       / "query" / "summary")
+        summary_rs = "\n".join(
+            p.read_text(encoding="utf-8") for p in sorted(summary_dir.glob("*.rs"))
+            if p.name != "tests.rs")
         self.assertIn("PERMANENTLY_EXCLUDED_HOSTS: &[&str] = &[]", summary_rs)
         # E4b：money 防线内建在 workbuddy 栏构造器里（provider null → basis 恒空），
         # 不再是排除表。

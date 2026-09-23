@@ -78,6 +78,19 @@ pub fn snapshot_dir() -> PathBuf {
 
 /// `<DSH_HOME>` 根：`DSH_HOME` env → `~/.dsh` 缺省（与 `integrations/dsh-client/src/host/
 /// index.ts::sessionsRoot()` 同默认）。`DSH_HOME` 未设且 `HOME` 也未知 → `None`。
+/// `codex_home()`：rollout 根的解析与 CLI `codex-cost` handler 同一条
+/// （`HOME` → `USERPROFILE` → 空串；空串 join 出的相对路径不存在 → 枚举为
+/// 空 → Unavailable，绝不报错）。pub：src-tauri 的 `data_codex_quota`/
+/// `read_calendar_month` 复用同一条解析（审查 #4——此前 lib.rs 各自手写
+/// HOME-only，漏 USERPROFILE 回落，Windows 桌面端静默假 Unavailable）。
+pub fn codex_home() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default(),
+    )
+}
+
 pub fn dsh_home() -> Option<PathBuf> {
     if let Some(h) = std::env::var_os("DSH_HOME") {
         return Some(PathBuf::from(h));

@@ -145,16 +145,16 @@ fn read_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, ToolE
         "calendar_month" => {
             let month = required_string(args, "month")?;
             json!({ "action": action, "month": month,
-                "calendar": crate::summary::calendar_month(month, &crate::summary::codex_home()) })
+                "calendar": crate::summary::calendar_month(month, &crate::home::codex_home()) })
         }
         "hourly_distribution" => {
             let date = required_string(args, "date")?;
             json!({ "action": action, "date": date,
-                "distribution": crate::summary::hourly_distribution(date, &crate::summary::codex_home()) })
+                "distribution": crate::summary::hourly_distribution(date, &crate::home::codex_home()) })
         }
         "codex_quota" => json!({
             "action": action,
-            "quota": crate::summary::codex_quota_snapshot(&crate::summary::codex_home())
+            "quota": crate::summary::codex_quota_snapshot(&crate::home::codex_home())
         }),
         "pricing_catalog_status" => json!({
             "action": action,
