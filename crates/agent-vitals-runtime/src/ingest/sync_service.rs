@@ -668,11 +668,38 @@ pub fn sync_facts_filtered(
     // v1.0 升级闭环：旧个人订阅若存在于历史价卡快照，先落为本地 host_bills。
     // 正常桌面同步也会经过这里，用户无需手动执行 CLI 迁移；失败只警告，不能
     // 阻断三宿主事实导入。
-    if let Err(e) = crate::sql_sync::migrate_legacy_subscription_snapshots(
-        &authority,
-        crate::sql_sync::now_ms(),
-    ) {
-        crate::core::logging::log_warn("sync_service", &format!("legacy subscriptions: {e}"));
+    // R5-F7c（REFRESH_STORM）：迁移与价格快照都是幂等重活（遍历全部快照
+    // JSON / 事务写），此前每 tick 无条件跑——改为按日节流（retention 的
+    // `.authority-retention.json` 同款范式：state 文件记日戳，失败不盖戳、
+    // 静默顺延到下一 tick 重跑）。候选/声明一致性自愈仍每 tick（计费正确性
+    // 链路，spec §4.7 裁决）。
+    let daily_bookkeeping_due = {
+        let bj_day = crate::clock::today_beijing();
+        let stamp_path = data_home.join("facts").join(".daily-bookkeeping.json");
+        let last: Option<String> = crate::state::read_json(&stamp_path)
+            .and_then(|v| v.get("last_run_date").and_then(Value::as_str).map(String::from));
+        !matches!(&last, Some(d) if d == &bj_day)
+    };
+    if daily_bookkeeping_due {
+        let mut bookkeeping_ok = true;
+        if let Err(e) = crate::sql_sync::migrate_legacy_subscription_snapshots(
+            &authority,
+            crate::sql_sync::now_ms(),
+        ) {
+            bookkeeping_ok = false;
+            crate::core::logging::log_warn("sync_service", &format!("legacy subscriptions: {e}"));
+        }
+        // Phase 2.8：落当前价格快照（§5.3）。幂等——价卡不变则无新版本。
+        if let Err(e) = crate::sql_sync::snapshot_current_pricing(&authority) {
+            bookkeeping_ok = false;
+            crate::core::logging::log_warn("sync_service", &format!("pricing snapshot: {e}"));
+        }
+        if bookkeeping_ok {
+            crate::state::atomic_write_json(
+                &data_home.join("facts").join(".daily-bookkeeping.json"),
+                &serde_json::json!({ "last_run_date": crate::clock::today_beijing() }),
+            );
+        }
     }
     // 候选状态与声明占用的一致性自愈（候选被有效声明占着 = accepted）；旧版本的
     // 「重新打开」留下的分裂态在这里收口，否则待确认面板反复问、新声明反复撞
@@ -684,10 +711,6 @@ pub fn sync_facts_filtered(
         ),
         Ok(_) => {}
         Err(e) => crate::core::logging::log_warn("sync_service", &format!("candidate claims: {e}")),
-    }
-    // Phase 2.8：落当前价格快照（§5.3）。幂等——价卡不变则无新版本。
-    if let Err(e) = crate::sql_sync::snapshot_current_pricing(&authority) {
-        crate::core::logging::log_warn("sync_service", &format!("pricing snapshot: {e}"));
     }
     // 本地价格发现（零网络）改为事件驱动（EVENT_BUS spec §9 P0 验收 #4）：
     // FactsIngested 已在各宿主写入事务内落 outbox；价卡快照仍显式先行（消费
