@@ -46,6 +46,7 @@ fn adapters_dependency_budget_is_pure_and_one_way() {
         "agent-vitals-domain",
         "agent-vitals-provider",
         "regex",
+        "serde",
         "serde_json",
         "vitals-core",
     ] {
@@ -65,6 +66,10 @@ fn adapters_dependency_budget_is_pure_and_one_way() {
             "agent-vitals-domain",
             "agent-vitals-provider",
             "regex",
+            // serde（derive，纯）：R5-F7a 的 quota 贡献缓存需要 QuotaSnapshot/
+            // QuotaFileContribution 过 JSON 往返——无 I/O、无新外部 crate
+            // （serde 已在工作区树内），按纯依赖登记。
+            "serde",
             "serde_json",
             "vitals-core",
         ]

@@ -261,6 +261,50 @@ pub fn codex_rollout_walk_errors(home: &Path) -> Vec<String> {
     errors
 }
 
+/// 单趟版本（REFRESH_STORM R5-F7b）：一次 walk 同时产出文件清单与遍历错误。
+/// `codex_rollout_files` 与 `codex_rollout_walk_errors` 各自走一遍 `~/.codex`
+/// （真机 2.96 万文件 × 2 趟/轻 tick）；清单与错误来自同一次遍历时天然一致
+/// （不会出现「清单轮看到了、错误轮没看到」的中间态）。排序/过滤语义与
+/// `codex_rollout_files` 逐字节一致（全局路径字符串序、rollout-*.jsonl）；
+/// 缺失根不报错、根元数据不可读时报错——错误语义与
+/// `codex_rollout_walk_errors` 一致。
+pub fn codex_rollout_files_with_errors(home: &Path) -> (Vec<PathBuf>, Vec<String>) {
+    let entries: [(&str, &str); 2] = [("live", "sessions"), ("archived", "archived_sessions")];
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for (_kind, rel) in entries {
+        let root = home.join(".codex").join(rel);
+        match std::fs::metadata(&root) {
+            Ok(metadata) if metadata.is_dir() => {
+                for entry in walkdir::WalkDir::new(&root).into_iter() {
+                    match entry {
+                        Ok(e) => {
+                            if !e.file_type().is_file() {
+                                continue;
+                            }
+                            let name = e.file_name().to_string_lossy();
+                            if name.starts_with("rollout-") && name.ends_with(".jsonl") {
+                                files.push(e.into_path());
+                            }
+                        }
+                        Err(error) => {
+                            let path = error.path().unwrap_or(&root);
+                            errors.push(format!("{}: {error}", path.display()));
+                        }
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                errors.push(format!("{}: {error}", root.display()));
+            }
+            Err(_) => {}
+        }
+    }
+    files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    (files, errors)
+}
+
 /// 纯解析：把 `session_index.jsonl` 折成 `{id: thread_name}` 映射。与 Python
 /// `scripts/agent_vitals/adapters/codex_session.py::parse_session_index` 对齐。
 ///
@@ -319,6 +363,47 @@ pub fn read_session_index(home: &Path) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R5-F7b 对拍：单趟版本的文件清单与 `codex_rollout_files` 逐字节一致
+    /// （同全局路径序）、错误集与 `codex_rollout_walk_errors` 一致；缺失根
+    /// 不报错。
+    #[test]
+    fn codex_rollout_files_with_errors_matches_the_two_walk_functions() {
+        let home = std::env::temp_dir().join(format!(
+            "av-f7b-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for rel in ["sessions", "archived_sessions"] {
+            std::fs::create_dir_all(home.join(".codex").join(rel)).unwrap();
+        }
+        // 两个根各放一个合法 rollout + 一个非 rollout 文件（应被过滤）+ 一个
+        // 嵌套目录里的合法文件（walk 深度语义）。
+        for (rel, id) in [("sessions", "aaa"), ("archived_sessions", "zzz")] {
+            let root = home.join(".codex").join(rel);
+            std::fs::write(root.join(format!("rollout-{id}.jsonl")), "x").unwrap();
+            std::fs::write(root.join("notes.txt"), "x").unwrap();
+            let nested = root.join("sub");
+            std::fs::create_dir_all(&nested).unwrap();
+            std::fs::write(nested.join("rollout-nested.jsonl"), "x").unwrap();
+        }
+        let (files, errors) = codex_rollout_files_with_errors(&home);
+        assert_eq!(files, codex_rollout_files(&home), "单趟清单必须与清单函数逐字节一致");
+        assert_eq!(errors, codex_rollout_walk_errors(&home), "单趟错误必须与错误函数一致");
+        assert_eq!(files.len(), 4, "两个 rollout + 一个嵌套 × 两个根；非 rollout 过滤");
+        // 全局路径序：archived 在 sessions 前。
+        assert!(files[0].to_string_lossy().contains("archived_sessions"));
+
+        // 缺失根：清单空、零错误。
+        let missing = home.join("no-such-home");
+        let (files, errors) = codex_rollout_files_with_errors(&missing);
+        assert!(files.is_empty());
+        assert!(errors.is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     fn meta_line(id: &str, mode: &str, cli: &str) -> String {
         format!(

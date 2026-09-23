@@ -70,6 +70,79 @@ pub struct SyncReport {
     pub declarations_applied: usize,
 }
 
+/// R5-F7a（REFRESH_STORM）：按文件指纹的配额扫描缓存。quota 的重活在
+/// 「逐行解析 7 天窗内全部会话文件」（真机 541 文件/828MB，每 tick 与脏文件
+/// 无关地全量重解析）；缓存 `(size, mtime_ns)` 未变文件的解析贡献，未变文件
+/// 零解析。**合并语义与全量扫逐字节一致**（对拍测试钉住）：7 天 recent-floor
+/// 按当前时间在合并处施加（`scan_claude_quota_from_contributions`），不随
+/// 缓存冻结。state 文件 `facts/.claude-quota-cache.json`，条目裁剪到本轮
+/// 文件集（滑出 7 天 mtime 窗的文件自然出局）；mtime 读不到的文件指纹记 0、
+/// 永不命中缓存（与全量扫的「mtime 读不到照扫」同态度）。
+fn scan_claude_quota_cached(
+    data_home: &Path,
+    files: &[PathBuf],
+    now: std::time::SystemTime,
+) -> agent_vitals_hosts::claude_quota::QuotaScan {
+    use agent_vitals_hosts::claude_quota::{
+        scan_claude_quota_from_contributions, quota_contribution_from_file,
+        QuotaFileContribution, QuotaScan, QUOTA_SCAN_WINDOW,
+    };
+    use std::collections::BTreeMap;
+
+    #[derive(serde::Serialize, serde::Deserialize, Clone)]
+    struct CachedQuotaEntry {
+        size: u64,
+        mtime_ns: u64,
+        contribution: QuotaFileContribution,
+    }
+    type CacheMap = BTreeMap<String, CachedQuotaEntry>;
+
+    let cache_path = data_home.join("facts").join(".claude-quota-cache.json");
+    let cache: CacheMap = crate::state::read_json(&cache_path)
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    let cutoff = now.checked_sub(QUOTA_SCAN_WINDOW);
+    let mut fresh: CacheMap = BTreeMap::new();
+    let mut contributions: Vec<QuotaFileContribution> = Vec::new();
+    for path in files {
+        let Ok(meta) = std::fs::metadata(path) else { continue };
+        let in_window = match (cutoff, meta.modified()) {
+            (Some(cutoff), Ok(modified)) => modified >= cutoff,
+            // mtime 读不到 → 照扫（与全量扫同态度）。
+            _ => true,
+        };
+        if !in_window {
+            continue;
+        }
+        let key = path.display().to_string();
+        let size = meta.len();
+        let mtime_ns = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        if mtime_ns != 0 {
+            if let Some(entry) = cache.get(&key) {
+                if entry.size == size && entry.mtime_ns == mtime_ns {
+                    contributions.push(entry.contribution.clone());
+                    fresh.insert(key, entry.clone());
+                    continue;
+                }
+            }
+        }
+        let contribution = quota_contribution_from_file(path);
+        fresh.insert(key, CachedQuotaEntry { size, mtime_ns, contribution: contribution.clone() });
+        contributions.push(contribution);
+    }
+    let scan: QuotaScan =
+        scan_claude_quota_from_contributions(contributions.iter(), now);
+    if let Ok(value) = serde_json::to_value(&fresh) {
+        crate::state::atomic_write_json(&cache_path, &value);
+    }
+    scan
+}
+
 /// 对单个宿主执行「发现 → SQL 差量 → emit → authority 写入」。
 /// `emit` 的宿主差异收敛在这个闭包里：输入差量文件集，输出事实批（或
 /// 逐文件错误）。
@@ -77,6 +150,7 @@ fn sync_host(
     host: &str,
     ns: &str,
     db: &agent_vitals_data::authority::AuthorityDb,
+    data_home: &Path,
     files: Vec<PathBuf>,
     report: &mut HostSyncReport,
 ) -> Result<(), String> {
@@ -293,10 +367,7 @@ fn sync_host(
     // 窗口状态是"越新越准"的观察，空值覆盖反而会把已有证据抹掉，过期与否交给
     // 状态机按 `resets_at` 判。
     if host == "claude-code" {
-        let scan = agent_vitals_hosts::claude_quota::scan_claude_quota(
-            &host_files,
-            std::time::SystemTime::now(),
-        );
+        let scan = scan_claude_quota_cached(data_home, &host_files, std::time::SystemTime::now());
         // 待处理任务：窗口耗尽 → 建一条；重置或不再有证据 → 自动解决。与快照
         // 同一轮推进，所以「窗口一重置，任务自己从列表里消失」不需要额外机制。
         let exhausted = scan.latest.as_ref().and_then(|snapshot| {
@@ -506,6 +577,14 @@ pub fn sync_facts_filtered(
     // 不付目录遍历成本（stat 对账与解析本来就在后面的批过滤里跳过，但目录
     // walk 本身每宿主几百次 stat，不裁剪的话轻 tick 的发现面仍是全宿主）。
     let wanted = |host: &str| only.map_or(true, |set| set.contains(host));
+    // R5-F7b（REFRESH_STORM）：codex 清单与错误同一次遍历（此前两个函数各自
+    // walk 一遍 ~/.codex，真机 2.96 万文件 × 2 趟/轻 tick）；且错误面同样按
+    // 唤醒裁剪——codex 未唤醒时一趟都不走（此前 *_walk_errors 不看 wanted）。
+    let (codex_files, codex_walk_errors) = if wanted("codex") {
+        agent_vitals_hosts::codex_session::codex_rollout_files_with_errors(&crate::home::codex_home())
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let mut batches: Vec<(&str, Vec<PathBuf>)> = vec![
         (
             "claude-code",
@@ -515,14 +594,7 @@ pub fn sync_facts_filtered(
                 Vec::new()
             },
         ),
-        (
-            "codex",
-            if wanted("codex") {
-                agent_vitals_hosts::codex_session::codex_rollout_files(&crate::home::codex_home())
-            } else {
-                Vec::new()
-            },
-        ),
+        ("codex", codex_files),
         (
             "dsh",
             if wanted("dsh") {
@@ -552,10 +624,7 @@ pub fn sync_facts_filtered(
         "claude-code",
         agent_vitals_hosts::claude_session::claude_project_walk_errors(&user_home),
     );
-    collect_discovery_errors(
-        "codex",
-        agent_vitals_hosts::codex_session::codex_rollout_walk_errors(&crate::home::codex_home()),
-    );
+    collect_discovery_errors("codex", codex_walk_errors);
     if let Some(dsh_home) = crate::home::dsh_home() {
         collect_discovery_errors("dsh", crate::sessions::discovery::dsh_session_walk_errors(&dsh_home));
     }
@@ -619,7 +688,7 @@ pub fn sync_facts_filtered(
             host: host.to_string(),
             ..Default::default()
         };
-        sync_host(host, &ns, &authority, files, &mut r)?;
+        sync_host(host, &ns, &authority, data_home, files, &mut r)?;
         for (error_host, error) in &discovery_errors {
             if error_host == host {
                 r.errors.push(format!("discovery: {error}"));
@@ -812,6 +881,60 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    /// R5-F7a 对拍（spec §4.7 测试要求）：缓存路径与全量扫在任何状态变迁下
+    /// 逐字段一致——冷缓存（全解析）、暖缓存（全命中）、内容变更（部分失效）、
+    /// 以及 recent-floor 随时间滑动（旧命中滑出 7 天窗后不计入，不因缓存冻结）。
+    #[test]
+    fn quota_scan_cached_matches_full_scan_across_state_changes() {
+        let home = tmp_home("f7a");
+        std::fs::create_dir_all(home.join("facts")).unwrap();
+        let line = |ts: &str, resets: i64, window: &str| {
+            format!(
+                r#"{{"type":"assistant","uuid":"u1","timestamp":"{ts}","quotaLimits":{{"status":"rejected","resetsAt":{resets},"unifiedRateLimitFallbackAvailable":false,"rateLimitType":"{window}","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false}}}}"#
+            )
+        };
+        let write_file = |name: &str, lines: &[String]| {
+            let path = home.join(format!("{name}.jsonl"));
+            std::fs::write(&path, lines.join("\n")).unwrap();
+            path
+        };
+        let mut files = vec![
+            write_file("a", &[line("2026-09-20T10:00:00.000Z", 1789300000, "five_hour")]),
+            write_file("b", &[line("2026-09-21T11:00:00.000Z", 1789400000, "seven_day")]),
+            write_file("plain", &[r#"{"type":"assistant","timestamp":"2026-09-21T00:00:00Z"}"#.to_string()]),
+        ];
+        let now = std::time::SystemTime::now();
+
+        // 冷缓存：缓存路径 == 全量基准。
+        let full = agent_vitals_hosts::claude_quota::scan_claude_quota(&files, now);
+        let cached = scan_claude_quota_cached(&home, &files, now);
+        assert_eq!(cached, full, "冷缓存必须与全量扫一致");
+        assert!(cached.latest.is_some(), "fixture 必须产出快照，防止空对空");
+        assert!(cached.windows_recent >= 2, "两个窗口命中都应计入");
+
+        // 暖缓存（全部命中缓存，零解析）：结果不变，且缓存文件已落盘。
+        let cached_again = scan_claude_quota_cached(&home, &files, now);
+        assert_eq!(cached_again, full, "暖缓存必须与全量扫一致");
+        assert!(home.join("facts").join(".claude-quota-cache.json").exists());
+
+        // 内容变更：a 换成更新的快照 → 缓存失效重解析，仍与全量一致。
+        files[0] = write_file("a", &[line("2026-09-22T12:00:00.000Z", 1789500000, "five_hour")]);
+        let full2 = agent_vitals_hosts::claude_quota::scan_claude_quota(&files, now);
+        let cached2 = scan_claude_quota_cached(&home, &files, now);
+        assert_eq!(cached2, full2, "部分失效后必须与全量扫一致");
+        assert_ne!(cached2.latest, full.latest, "fixture 前后必须有差异，防止假对拍");
+
+        // recent-floor 滑动：把 now 推到 8 天后——全部命中滑出窗，windows_recent
+        // 必须归零（缓存不冻结 floor）；latest 保持（latest 本就不过滤）。
+        let future = now + std::time::Duration::from_secs(8 * 24 * 3600);
+        let full_future = agent_vitals_hosts::claude_quota::scan_claude_quota(&files, future);
+        let cached_future = scan_claude_quota_cached(&home, &files, future);
+        assert_eq!(cached_future, full_future, "floor 滑动后必须与全量扫一致");
+        assert_eq!(cached_future.windows_recent, 0, "滑出窗的命中不得因缓存冻结而计入");
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// 一份最小 claude 会话（两条 usage 行）。

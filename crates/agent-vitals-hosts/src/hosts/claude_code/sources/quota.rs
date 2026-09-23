@@ -24,6 +24,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// 只读最近这些天内改动过的会话文件（理由见模块 doc）。
@@ -37,7 +38,7 @@ const WINDOW_SEVEN_DAY: &str = "seven_day";
 ///
 /// `status` 只有 `"rejected"` 是已观察到的取值；未知状态**不产出快照**（宁可不显示，
 /// 也不猜一个「还剩多少」）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaudeQuotaSnapshot {
     /// 事件时刻（原始 RFC3339 字符串，与宿主日志逐字一致）。
     pub observed_at: String,
@@ -215,20 +216,91 @@ pub struct QuotaScan {
     pub windows_recent: usize,
 }
 
-/// 跨文件取最新：只扫 `now - QUOTA_SCAN_WINDOW` 之后改动过的文件。
-///
-/// 读失败的文件跳过（`None`）而不是让整轮同步失败——窗口状态是增强信息，
-/// 一个读不动的会话文件不该拖垮事实同步（与 `budget_alerts` 对预算快照的态度一致）。
-pub fn scan_claude_quota(files: &[PathBuf], now: SystemTime) -> QuotaScan {
-    let cutoff = now.checked_sub(QUOTA_SCAN_WINDOW);
+/// 一次撞窗命中（REFRESH_STORM R5-F7a 缓存的原始记录）。**不含任何时间过滤**：
+/// recent-floor（`now - 7 天`）在合并时按**当前**时间施加，不随缓存冻结——
+/// 否则已滑出窗口的命中会被缓存一直算进 `windows_recent`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuotaWindowHit {
+    pub rate_limit_type: String,
+    pub resets_at: i64,
+    pub observed_at_secs: i64,
+}
+
+/// 单文件的配额贡献：F7a 指纹缓存的最小单元。`latest` 不过滤（跨文件取
+/// observed_at 最大），`window_hits` 全量记录（合并时按当前 floor 过滤去重）。
+/// 读失败的文件 → 空贡献（不拖垮事实同步，语义与全量扫一致）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuotaFileContribution {
+    pub window_hits: Vec<QuotaWindowHit>,
+    pub latest: Option<ClaudeQuotaSnapshot>,
+}
+
+/// 解析单个会话文件的配额贡献（逐行，与原 `scan_claude_quota` 的单文件循环
+/// 体逐字节同语义）。
+pub fn quota_contribution_from_file(path: &Path) -> QuotaFileContribution {
+    let mut out = QuotaFileContribution::default();
+    for snapshot in quota_snapshots_from_file(path) {
+        out.window_hits.push(QuotaWindowHit {
+            rate_limit_type: snapshot.rate_limit_type.clone(),
+            resets_at: snapshot.resets_at,
+            observed_at_secs: snapshot.observed_at_secs,
+        });
+        if out
+            .latest
+            .as_ref()
+            .map_or(true, |cur| snapshot.observed_at_secs >= cur.observed_at_secs)
+        {
+            out.latest = Some(snapshot);
+        }
+    }
+    out
+}
+
+/// 合并各文件贡献 → `QuotaScan`（纯函数）。窗口命中按**当前** now 的 7 天
+/// floor 过滤后按 (type, resets_at) 去重计数；latest 取 observed_at 最大。
+pub fn scan_claude_quota_from_contributions<'a>(
+    contributions: impl Iterator<Item = &'a QuotaFileContribution>,
+    now: SystemTime,
+) -> QuotaScan {
     let now_secs = now
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let recent_floor = now_secs.saturating_sub(QUOTA_SCAN_WINDOW.as_secs() as i64);
-
     let mut scan = QuotaScan::default();
     let mut seen_windows: std::collections::BTreeSet<(String, i64)> = std::collections::BTreeSet::new();
+    for contribution in contributions {
+        for hit in &contribution.window_hits {
+            if hit.observed_at_secs >= recent_floor {
+                seen_windows.insert((hit.rate_limit_type.clone(), hit.resets_at));
+            }
+        }
+        if let Some(snapshot) = &contribution.latest {
+            if scan
+                .latest
+                .as_ref()
+                // `map_or(true, ..)` 而不是 `is_none_or`：后者稳定于 1.82，
+                // 本 crate 的 MSRV 是 1.74（clippy::incompatible_msrv 会拦）。
+                .map_or(true, |cur| snapshot.observed_at_secs >= cur.observed_at_secs)
+            {
+                scan.latest = Some(snapshot.clone());
+            }
+        }
+    }
+    scan.windows_recent = seen_windows.len();
+    scan
+}
+
+/// 跨文件取最新：只扫 `now - QUOTA_SCAN_WINDOW` 之后改动过的文件。
+///
+/// 读失败的文件跳过（`None`）而不是让整轮同步失败——窗口状态是增强信息，
+/// 一个读不动的会话文件不该拖垮事实同步（与 `budget_alerts` 对预算快照的态度一致）。
+/// R5-F7a：内部改为「逐文件贡献 → 合并」，与缓存路径（sync_service
+/// `scan_claude_quota_cached`）同一条合并语义；本函数保留为全量基准，
+/// 对拍测试钉住两条路一致。
+pub fn scan_claude_quota(files: &[PathBuf], now: SystemTime) -> QuotaScan {
+    let cutoff = now.checked_sub(QUOTA_SCAN_WINDOW);
+    let mut contributions: Vec<QuotaFileContribution> = Vec::new();
     for path in files {
         if let (Some(cutoff), Ok(meta)) = (cutoff, std::fs::metadata(path)) {
             match meta.modified() {
@@ -239,23 +311,9 @@ pub fn scan_claude_quota(files: &[PathBuf], now: SystemTime) -> QuotaScan {
                 _ => continue,
             }
         }
-        for snapshot in quota_snapshots_from_file(path) {
-            if snapshot.observed_at_secs >= recent_floor {
-                seen_windows.insert((snapshot.rate_limit_type.clone(), snapshot.resets_at));
-            }
-            if scan
-                .latest
-                .as_ref()
-                // `map_or(true, ..)` 而不是 `is_none_or`：后者稳定于 1.82，
-                // 本 crate 的 MSRV 是 1.74（clippy::incompatible_msrv 会拦）。
-                .map_or(true, |cur| snapshot.observed_at_secs >= cur.observed_at_secs)
-            {
-                scan.latest = Some(snapshot);
-            }
-        }
+        contributions.push(quota_contribution_from_file(path));
     }
-    scan.windows_recent = seen_windows.len();
-    scan
+    scan_claude_quota_from_contributions(contributions.iter(), now)
 }
 
 #[cfg(test)]
