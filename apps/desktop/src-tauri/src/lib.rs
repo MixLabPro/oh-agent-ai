@@ -2058,21 +2058,30 @@ fn trust_monitor_record_report(
 ) {
     let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(&path, now_ms) else { return };
-    let (capability, error_code, notification_keys) = match report {
+    let (capability, error_code, notification_keys, inserted) = match report {
         Ok(report) if report.capability == "macos_lsof_partial" => {
-            ("partial", None, report.notification_keys)
+            ("partial", None, report.notification_keys, report.inserted)
         }
         Ok(report) if report.capability.starts_with("runtime_sensor_unavailable") => {
-            ("unavailable", Some("sensor_unavailable"), report.notification_keys)
+            ("unavailable", Some("sensor_unavailable"), report.notification_keys, report.inserted)
         }
-        Ok(_) => ("partial", Some("sensor_partial"), Vec::new()),
-        Err(_) => ("unavailable", Some("snapshot_failed"), Vec::new()),
+        Ok(report) => ("partial", Some("sensor_partial"), Vec::new(), report.inserted),
+        Err(_) => ("unavailable", Some("snapshot_failed"), Vec::new(), 0),
     };
     let _ = db.trust_monitor_record_result(capability, Some(now_ms), error_code, now_ms);
-    agent_vitals_runtime::logging::log_info("emit", &format!("TrustMonitorInvalidated capability={capability}"));
-    let _ = app.emit(APP_EVENT, serde_json::json!({
-        "type": "TrustMonitorInvalidated", "kind": "trust_monitor_invalidated",
-    }));
+    // R3-F5（REFRESH_STORM）：「有新观察才发」——与 outbox `TrustMonitorEvent` 的
+    // inserted>0 判据、core 层零发射纪律（authority REVIEW G2）对齐。此前每轮
+    // 心跳都 emit（实测 1462 次/天），而 R1 后页面刷新已不消费该事件；唯一
+    // 剩余消费者（React TrustPage 的配置重读）由 save_trust_monitor_config 保存
+    // 成功后的本地事件覆盖。注：`trust_monitor_record_result` 的每轮单行
+    // autocommit UPDATE 保留——它不推进 revision，是「传感器活着」的健康面
+    // 信号（last_success_at_ms），不是失效信号。
+    if inserted > 0 {
+        agent_vitals_runtime::logging::log_info("emit", &format!("TrustMonitorInvalidated capability={capability} inserted={inserted}"));
+        let _ = app.emit(APP_EVENT, serde_json::json!({
+            "type": "TrustMonitorInvalidated", "kind": "trust_monitor_invalidated",
+        }));
+    }
     if notification_keys.is_empty() { return; }
     let Ok(Some(state)) = db.trust_monitor_state_get() else { return };
     if !state.notifications_enabled { return; }
@@ -4321,6 +4330,11 @@ fn save_trust_monitor_config(
         object.insert("notification_permission".into(),
             notification_permission.map(Value::String).unwrap_or(Value::Null));
     }
+    // R3-F5：传感轮的 TrustMonitorInvalidated 已改为「有新观察才发」，配置被他处
+    // 修改后的 TrustPage 重读场景由这里兜——保存成功即发一条（本地、用户动作驱动）。
+    let _ = app.emit(APP_EVENT, serde_json::json!({
+        "type": "TrustMonitorInvalidated", "kind": "trust_monitor_invalidated",
+    }));
     Ok(result)
 }
 
