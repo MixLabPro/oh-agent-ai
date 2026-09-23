@@ -28,6 +28,49 @@ use overview::{HostRow, HostsSnapshot, Overview, RecentSessionRow, SyncStatus};
 /// 为了防重复写，是防两轮并发白白各折一遍 + 两次托盘重建。
 struct SyncLock(Mutex<()>);
 
+/// R4-P0（TRUST_SENSOR_OPTIMIZATION spec §4.1）：宿主最近活动时刻表。watcher
+/// 唤醒时刷新（LIGHT-PATH 的唤醒槽天然携带「哪个宿主刚有写入」）；trust 传感
+/// tick 到点据此门控——冷却窗内无活跃宿主且空闲确认窗未到 → 整轮跳过（不
+/// lsof、不开库、不发事件）。进程内存、无持久化；条目按时限裁剪有界。
+struct HostActivityTable(std::sync::Mutex<std::collections::BTreeMap<String, std::time::Instant>>);
+
+/// 门控冷却窗：活动时刻在此窗内的宿主算「活跃」。
+const TRUST_ACTIVITY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(120);
+/// 空闲确认窗：兜底「活动表漏记」（app 重启后表为空等），到期强制校准一轮。
+const TRUST_IDLE_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
+
+impl HostActivityTable {
+    fn mark(&self, hosts: impl IntoIterator<Item = impl AsRef<str>>) {
+        let now = std::time::Instant::now();
+        let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        for host in hosts {
+            guard.insert(host.as_ref().to_string(), now);
+        }
+        // 有界：只保留冷却窗 + 空闲确认窗内的条目。
+        let horizon = TRUST_ACTIVITY_COOLDOWN + TRUST_IDLE_CONFIRM_WINDOW;
+        guard.retain(|_, at| now.duration_since(*at) < horizon);
+    }
+
+    fn any_active_within(&self, window: std::time::Duration) -> bool {
+        let now = std::time::Instant::now();
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .any(|at| now.duration_since(*at) < window)
+    }
+}
+
+/// R4-P0 门控决策（纯函数，测试钉住 spec §6 门控三行）：候选集为空且距上次
+/// 真实采样不足空闲确认窗 → 跳过。任何一者不满足（有活跃宿主 / 确认窗到期
+/// / 从未采样过——首启校准）→ 执行。
+fn trust_gate_should_sample(
+    any_active_in_cooldown: bool,
+    since_last_sample: std::time::Duration,
+) -> bool {
+    any_active_in_cooldown || since_last_sample >= TRUST_IDLE_CONFIRM_WINDOW
+}
+
 struct SyncRequests(Mutex<std::collections::BTreeMap<String, bool>>);
 static SYNC_REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
 /// 单一 UI 事件出口（EVENT_BUS spec §1.3）：webview 只 listen 这一个通道，
@@ -1669,6 +1712,9 @@ fn start_refresh_tick(
             }
             match wait_for_wake(&slot, TICK_PERIOD) {
                 TickWait::Woken(hosts) => {
+                    // R4-P0：watcher 唤醒 = 该宿主刚有写入——刷新 trust 门控的
+                    // 活动时刻表（TRUST_SENSOR_OPTIMIZATION spec §4.1）。
+                    app.state::<HostActivityTable>().mark(&hosts);
                     // 冷却下限（真机 2026-09-22 验收）：睡满剩余冷却再执行
                     // ——不丢弃最后一批写入；周期/手动路径不受影响。冷却窗
                     // 本身是动态的（REVIEW P4 自看护）。
@@ -1979,11 +2025,17 @@ fn start_source_watcher(app: &AppHandle)
 fn start_trust_monitor_tick(app: AppHandle) {
     std::thread::spawn(move || {
         let mut next_run = std::time::Instant::now();
+        // R4-P0 门控状态：上次真实采样时刻（首启立即校准一轮）与跳过轮的
+        // 小时聚合日志（spec §11：跳过轮不全静默）。
+        let mut last_sampled_at = std::time::Instant::now();
+        let mut skipped_since_log: u64 = 0;
+        let mut last_skip_log = std::time::Instant::now();
         loop {
             let state = trust_monitor_state_read();
             if state.get("enabled").and_then(Value::as_bool) != Some(true) {
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 next_run = std::time::Instant::now();
+                last_sampled_at = std::time::Instant::now();
                 continue;
             }
             if std::time::Instant::now() < next_run {
@@ -1991,25 +2043,49 @@ fn start_trust_monitor_tick(app: AppHandle) {
                 continue;
             }
 
-            // Sync and the monitor both touch the authority DB. Avoid making a
-            // user-triggered sync wait behind a sensor pass.
-            let lock = app.state::<SyncLock>();
-            if let Ok(_guard) = lock.0.try_lock() {
-                let now_ms = agent_vitals_runtime::sql_sync::now_ms();
-                let report = agent_vitals_runtime::trust_runtime_monitor::snapshot_and_store(
-                    &overview::data_home(),
-                    &agent_vitals_runtime::takeover::machine_namespace(),
-                    now_ms,
-                );
-                trust_monitor_record_report(&app, report, now_ms);
+            // R4-P0 活动门控（TRUST_SENSOR_OPTIMIZATION spec §4.1）：冷却窗内
+            // 无活跃宿主且空闲确认窗未到 → 整轮跳过——不 lsof、不开库、不发
+            // 事件、不碰 SyncLock。空闲确认窗到期强制校准一轮，兜活动表漏记。
+            let gate = trust_gate_should_sample(
+                app.state::<HostActivityTable>()
+                    .any_active_within(TRUST_ACTIVITY_COOLDOWN),
+                last_sampled_at.elapsed(),
+            );
+            if !gate {
+                skipped_since_log += 1;
+                if last_skip_log.elapsed() >= std::time::Duration::from_secs(3600) {
+                    agent_vitals_runtime::logging::log_info(
+                        "trust_sensor",
+                        &format!(
+                            "活动门控：过去一小时跳过 {skipped_since_log} 轮空闲传感（零 lsof / 零库访问 / 零事件）"
+                        ),
+                    );
+                    skipped_since_log = 0;
+                    last_skip_log = std::time::Instant::now();
+                }
+            } else {
+                // Sync and the monitor both touch the authority DB. Avoid making a
+                // user-triggered sync wait behind a sensor pass.
+                let lock = app.state::<SyncLock>();
+                if let Ok(_guard) = lock.0.try_lock() {
+                    last_sampled_at = std::time::Instant::now();
+                    let now_ms = agent_vitals_runtime::sql_sync::now_ms();
+                    let report = agent_vitals_runtime::trust_runtime_monitor::snapshot_and_store(
+                        &overview::data_home(),
+                        &agent_vitals_runtime::takeover::machine_namespace(),
+                        now_ms,
+                    );
+                    trust_monitor_record_report(&app, report, now_ms);
+                };
             }
             let interval = state
                 .get("interval_seconds")
                 .and_then(Value::as_i64)
                 .unwrap_or(30)
                 .clamp(5, 3600) as u64;
-            next_run = std::time::Instant::now()
-                + std::time::Duration::from_secs(interval.min(60));
+            // R4-F6：interval 上限收敛——P0 门控下空闲零开销，5..=3600 全程
+            // 安全（此前硬顶 60s 与设置界面的允许域 5..=3600 矛盾）。
+            next_run = std::time::Instant::now() + std::time::Duration::from_secs(interval);
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
     });
@@ -4612,6 +4688,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .manage(SyncLock(Mutex::new(())))
+        .manage(HostActivityTable(std::sync::Mutex::new(
+            std::collections::BTreeMap::new(),
+        )))
         .manage(SyncRequests(Mutex::new(std::collections::BTreeMap::new())))
         // 失效信号 / 同步状态的「变了才发」发布器：tick 与手动同步线程共享。
         .manage(InvalidationPublisher(agent_vitals_runtime::events::ChangePublisher::new()))
@@ -4841,6 +4920,41 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    /// R4-P0 活动门控（TRUST_SENSOR_OPTIMIZATION spec §6 门控三行 + 活动表
+    /// 行为）：空闲跳过、活跃立即恢复、确认窗到期强制校准；表条目按时限
+    /// 裁剪有界。
+    #[test]
+    fn trust_activity_gate_skips_idle_and_forces_calibration() {
+        use std::time::Duration;
+        // 活动表空 + 空闲确认窗内 → 不采样。
+        assert!(!trust_gate_should_sample(false, Duration::from_secs(60)));
+        // 活动表刚刷新 → 立即恢复采样。
+        assert!(trust_gate_should_sample(true, Duration::from_secs(0)));
+        assert!(trust_gate_should_sample(true, Duration::from_secs(3_600)));
+        // 空闲确认窗到期 → 强制校准轮执行（兜活动表漏记）。
+        assert!(trust_gate_should_sample(false, TRUST_IDLE_CONFIRM_WINDOW));
+        assert!(trust_gate_should_sample(false, TRUST_IDLE_CONFIRM_WINDOW + Duration::from_secs(1)));
+
+        let table = HostActivityTable(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+        assert!(!table.any_active_within(TRUST_ACTIVITY_COOLDOWN), "空表不算活跃");
+        table.mark(["claude-code"]);
+        assert!(table.any_active_within(TRUST_ACTIVITY_COOLDOWN), "刚标记必须活跃");
+        // 过期条目不再算活跃（用比冷却窗更长的 elapsed 模拟）。
+        {
+            let mut guard = table.0.lock().unwrap();
+            for at in guard.values_mut() {
+                *at = std::time::Instant::now()
+                    - (TRUST_ACTIVITY_COOLDOWN + TRUST_IDLE_CONFIRM_WINDOW);
+            }
+        }
+        assert!(!table.any_active_within(TRUST_ACTIVITY_COOLDOWN), "过期条目不算活跃");
+        // 重新标记后，超时限的旧条目被裁剪（表有界）。
+        table.mark(["codex"]);
+        let guard = table.0.lock().unwrap();
+        assert_eq!(guard.len(), 1, "裁剪后只剩活跃条目");
+        assert!(guard.contains_key("codex"));
+    }
+
     /// 收敛调查 §5.2.1（P2a）：托盘节流窗与轻 tick 节奏的隐含耦合变成会红的
     /// 测试——窗口必须骑在重 tick 周期上（≥ TICK_PERIOD），且显著大于轻 tick
     /// 的最小可达间隔（WATCHER_SYNC_COOLDOWN + 一次典型轻 tick 的预算）。
