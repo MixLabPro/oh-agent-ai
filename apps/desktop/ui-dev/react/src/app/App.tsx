@@ -63,7 +63,10 @@ export function App() {
       void readSourceDataRevision().then((revision) => {
         if (!active) return;
         if (lastRevision !== null && revision !== lastRevision) {
-          window.dispatchEvent(new Event("agent-vitals-source-data-deleted"));
+          // R1：携带 revision 的 CustomEvent——listenAppEvents 透传给 gate，
+          // 与 Invalidated 同 revision 的重复刷新被水位吞掉（此前是无条件
+          // 二次全量刷新）。真删除语义不受影响（无 revision 时保守放行）。
+          window.dispatchEvent(new CustomEvent("agent-vitals-source-data-deleted", { detail: { revision } }));
         }
         lastRevision = revision;
       });

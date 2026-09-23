@@ -404,8 +404,11 @@ Python 套件零漂移，才打勾。R1 无 Rust 改动，另需真机 bundle �
 （`cargo tauri build --bundles app` + `open .app`，**绝不裸跑二进制**）。
 
 - [ ] **R1（UI 触发面收敛，止血主力）** — F1
-  - [ ] workbench.js 触发集收窄 + per-revision 锁存 + 测试钩子
-  - [ ] React：SourceDataDeleted 带 revision 进 gate；SettingsPage 7 连发批合并
+  - [x] workbench.js 触发集收窄 + per-revision 锁存 + 测试钩子（2026-09-23，
+    `feat/refresh-storm-fix`；npm run verify + verify:react 全绿）
+  - [x] React：SourceDataDeleted 带 revision 进 gate（gate 契约测试扩展钉住
+    「只比较不推进水位」）；SettingsPage 按类型分发在 HEAD 已就位，SourceDataDeleted
+    分支接入 gate
   - [ ] 真机手测清单（§7.4）通过
 - [ ] **R2（读路径硬保护）** — F2 + F3
   - [ ] read_overview async + run_heavy_read + 双检查 + memo 收口
