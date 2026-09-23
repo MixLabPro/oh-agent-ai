@@ -32,9 +32,11 @@ sync_tick（重，现状唯一形态）
 ├─ claude-sync / discover        ~40–330ms（walk + stat 全宿主全文件）
 ├─ sync-facts                    1–3.4s（每宿主批：stat 对账 + 脏文件解析 + 计价）
 ├─ refresh_hosts                 0.3–0.7s（spawn `sessions navigation` 子进程，20s 硬超时）
-├─ read_overview                 0.5–2.2s（重 SQL 聚合；e0b9f07 起每 tick 一次）
-├─ refresh                       ~21ms（托盘三数字重建，吃 ov）
-├─ budget_alerts / quota_alerts  0.85–3.5s / µs
+├─ read_overview                 0.5–29.8s（重 SQL 聚合；e0b9f07 起每 tick 一次；
+│                                冷启动/大量积压时单条即可到 30s 量级，见 §1.2 更新）
+├─ refresh                       1.7–22ms（`e0b9f07` 后只剩托盘三数字重建，吃 ov）
+├─ budget_alerts / quota_alerts  0.94–1.14s / µs（`e0b9f07` 后的现状值；修复前
+│                                单独一项是 3.4–3.9s，两者不是同一批次，不可比大小）
 ├─ drain_event_bus               5–12ms（outbox → price-reconcile + app-event）
 └─ publish_invalidation          ~1ms
 ```
@@ -43,10 +45,22 @@ sync_tick（重，现状唯一形态）
 
 - 单宿主（claude-code）持续写 transcript → tick 从 5 分钟周期被压到
   **约 1 次/分钟**，每次 7–10s 多线程；
-- `refresh` 两次爆炸到 **33.5s / 32.5s**（正常 21ms，~1000 倍）——
-  `e0b9f07`（三倍 read_overview 归一）已合入但**未在真实风暴中复测**；
-- `self_monitor` 按设计介入（冷却 30s→60→120s），零 ERROR，无失控；
-- 单槽唤醒当时已在位——排除积压假设，负载是真实工作量。
+- `refresh` 两次爆炸到 **33.5s**（正常 21ms，~1000 倍）——当时 `refresh`
+  内部还直接调 `read_overview()`，`e0b9f07` 拆分之前二者是同一个数字；
+  **另一条 32.5s 是修复后某轮 `tick finished in` 的总耗时，不是 `refresh`
+  自己**（同一轮里 `refresh` 已经只有 7.3ms，大头在 `read_overview` 单条
+  就吃了 29.8s——冷重启后首次聚合追平积压，量级符合预期，不是新的异常）；
+- `self_monitor` 按设计介入，**本次实测到的冷却拉长止步 60s**（三次真实
+  escalate 全部是 30s→60s，都在下一轮恢复到 30s 基线，没有一次连续到
+  120s——冷却翻倍上限 300s 是设计能力，不是这次观测到的数值，两者不要混）；
+  零 ERROR，无失控；
+- 单槽唤醒当时已在位——排除积压假设，负载是真实工作量；
+- **2026-09-23 更新**：`e0b9f07`（三倍 `read_overview` 归一）已合入且已
+  真机复测——稳态下 `refresh` 1.6–22ms、`budget_alerts` 0.94–1.14s、
+  tick 总耗时均值 13.1s → ~4.4s（约 3 倍），独立 general-purpose agent
+  复核 PASS。**但复测是在正常活跃负载下做的，不是在昨晚同等量级的持续
+  写入风暴场景下**——Phase D 的验收项 2（"重度会话下 `refresh` 全程
+  ms 级、无预算告警"）严格说仍待一次真正的风暴场景复验才算关闭。
 
 ### 1.3 规模化论证
 
@@ -72,7 +86,12 @@ churn）和 `read_overview` 重聚合（每 tick 一次，最大常规单步）�
 
 **P3（read_overview 重复计算面在 IPC 侧）**：风暴期间 React 按 Invalidated
 事件懒刷新，每次 IPC `read_overview` 都重算 2.2s 级聚合——同一 revision
-的连续刷新没有备忘。
+的连续刷新没有备忘。**2026-09-23 复核发现范围比这里写的更宽**：
+`overview::read_overview()` 除了 IPC 命令 `read_overview`（`lib.rs:2059-
+2062`）之外，还有 `data_source_status()`（`lib.rs:3792`）也独立整份重算
+只为取 `.sync` 一个字段——同一份重聚合至少两个 IPC 命令各自触发一次。
+`lib.rs:4472`（app 启动建初始托盘）也调用它，但那是一次性的，不算重复
+计算面，不需要收编。
 
 ## 3. Goals / Non-goals
 
@@ -164,7 +183,12 @@ tick 的托盘刷新限频 `TRAY_REFRESH_INTERVAL=60s`（重 tick 无条件刷�
 与现状一致），配合 §5.3 的 IPC revision 备忘，同一 revision 只算一次。
 窄 SQL 查询留作 Phase D 观测数据证明 read_overview 内部分布后再议。
 
-**IPC 侧 revision 备忘**：`read_overview` 命令（React 懒刷新路径）按
+**revision 备忘的挂点：`overview::read_overview()` 函数本身，不是某一个
+IPC 命令**（2026-09-23 调整——原方案挂在 `read_overview` 这一个 Tauri
+命令外面，但 §3 P3 已更新为至少两个 IPC 命令+`sync_tick_inner` 共三类
+调用方独立触发同一份聚合；缓存挂在函数入口，`read_overview` 命令、
+`data_source_status()`、`sync_tick_inner` 的共享 `ov` 全部透明受益，
+以后新增调用方也自动覆盖，不用每加一个命令就手动接一次缓存）：按
 authority revision 键控单条缓存——revision 未变直接返回上次结果。缓存
 进程内存、单条（最新覆盖）、无持久化。轻 tick 不算全量 ov 意味着轻 tick
 后 UI 刷新会miss 备忘（revision 变了）→ 按 §5.2 轻 tick 本就不产全量
@@ -212,11 +236,16 @@ Invalidated；UI 的宿主区数据走 FactsIngested 驱动的既有刷新路径
 
 ### Phase C — read_overview revision 备忘
 
-1. IPC `read_overview` 加单条 revision 键控缓存；
+1. 缓存挂在 `overview::read_overview()` 函数入口（见 §5.3 2026-09-23
+   调整），不是包在 `read_overview` 这一个 IPC 命令外面——`data_source_
+   status()` 与 `sync_tick_inner` 的共享 `ov` 计算走同一个函数，自动
+   一起受益；
 2. 缓存正确性测试（revision 变更必 miss、同 revision 必 hit、进程内无
    持久化）。
 
-**Exit**：风暴重放测试（连续 N 个同 revision Invalidated）只算一次。
+**Exit**：风暴重放测试（连续 N 个同 revision Invalidated）只算一次；
+额外钉一条——`data_source_status()` 与 `read_overview` 命令在同一
+revision 内连续调用只触发一次真实聚合（跨命令命中，不只是同命令内）。
 
 ### Phase D — refresh 可观测
 
