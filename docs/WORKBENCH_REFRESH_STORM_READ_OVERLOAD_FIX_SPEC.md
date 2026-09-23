@@ -422,7 +422,9 @@ Python 套件零漂移，才打勾。R1 无 Rust 改动，另需真机 bundle �
 - [ ] **R3（发射侧纪律）** — F4 + F5
   - [ ] 簿记判据共用函数 + 静默提交 + revision_guard 闭集更新
   - [ ] 簿记读方闭集守卫测试
-  - [ ] TrustMonitorInvalidated 有变化才发
+  - [x] TrustMonitorInvalidated 有变化才发（inserted>0 门控 + save 路径本地
+    事件兜 TrustPage；record_result 单行心跳 UPDATE 保留——不推 revision、
+    是 last_success 活性信号，偏差已在提交说明注明；desktop 141 绿）
 - [ ] **R4（trust 传感分期 A）** — F6（trust spec P0+P3 + interval 收敛）
 - [ ] **R5（轻 tick 减负）** — F7a → F7b → F7c（各自独立打勾）
 - [ ] **R6（trust 默认开启 rollout）** — F8；**前置：R1–R4 全部打勾 + 相关器成本钉住
