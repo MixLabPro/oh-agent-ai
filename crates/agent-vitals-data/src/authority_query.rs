@@ -2707,6 +2707,16 @@ mod tests {
             "INSERT INTO billing_fact_attributions(fact_id, revision_id, job_id, attribution_kind, created_at_ms)
              VALUES ('sc1', 'rev-par', 'job-par', 'subscription_covered', 4)", [],
         ).unwrap();
+        // 验收补边（b161c4c 复核）：被 saved 声明覆盖的 **legacy** 事实——
+        // 生产可达（声明事实选择不过滤 observation_kind），且它是
+        // 「LegacyAggregate 分支必须**不带**订阅谓词」这一语义的钉子：
+        // 谁给 legacy 分支误加 not_subscription_covered，本事实会从新路径
+        // 消失而冻结原文保留——parity 立刻红。
+        insert_fact(&db, "scl1", "claude-code", Some("m3"), "legacy_aggregate", s + 6_000, 0, 77, 1, 2, 3);
+        db.conn().execute(
+            "INSERT INTO billing_fact_attributions(fact_id, revision_id, job_id, attribution_kind, created_at_ms)
+             VALUES ('scl1', 'rev-par', 'job-par', 'subscription_covered', 5)", [],
+        ).unwrap();
 
         // ── 冻结原文（收敛前的逐字节拷贝；只许随本测试退役，不许改）──
         const FROZEN_CLAUDE_DAYS: &str = concat!("SELECT (", local_day_idx!(), " + (?1 - ?1) + (?2 - ?2)) AS day_idx,
