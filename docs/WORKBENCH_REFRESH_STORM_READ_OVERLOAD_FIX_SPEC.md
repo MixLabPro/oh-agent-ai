@@ -431,8 +431,20 @@ Python 套件零漂移，才打勾。R1 无 Rust 改动，另需真机 bundle �
   - [x] TrustMonitorInvalidated 有变化才发（inserted>0 门控 + save 路径本地
     事件兜 TrustPage；record_result 单行心跳 UPDATE 保留——不推 revision、
     是 last_success 活性信号，偏差已在提交说明注明；desktop 141 绿）
-- [ ] **R4（trust 传感分期 A）** — F6（trust spec P0+P3 + interval 收敛）
+- [x] **R4（trust 传感分期 A）** — F6（acb4a86，2026-09-24）：P0 活动门控
+  （HostActivityTable 由 watcher 唤醒槽刷新；冷却窗 120s + 空闲确认窗 10min；
+  跳过轮零 lsof/零库/零事件/零锁 + 小时聚合日志）+ P3 六段子计时
+  （lsof_spawn/parse/open/txn_insert/correlate/outbox_emit 单行 INFO）+
+  interval 上限收敛（60s 硬顶移除，5..=3600 全域）；门控三行测试钉住
 - [ ] **R5（轻 tick 减负）** — F7a → F7b → F7c（各自独立打勾）
+  - [ ] F7a quota 指纹跳过——**延后**（2026-09-24 实施期发现）：`windows_recent`
+    撞窗计数聚合 7 天窗内全部文件（含未变文件），脏文件子集扫描必然漏计；
+    需按文件指纹的聚合缓存 + spec 自要求的对拍测试，非小改
+  - [ ] F7b codex 单趟 walk——**延后**：需 hosts crate 四个适配器的
+    错误收集型 `*_files()` API 变体
+  - [x] F7c 收尾日节流（99e2c86）：legacy 订阅迁移 + 价格快照改为
+    `.daily-bookkeeping.json` 日戳节流（retention 同款范式，失败不盖戳）；
+    候选/声明一致性保持每 tick（计费正确性链路）
 - [ ] **R6（trust 默认开启 rollout）** — F8；**前置：R1–R4 全部打勾 + 相关器成本钉住
   （P2 落地或 ≤50ms/轮实测）+ §7.5 soak 通过**
   - [ ] R6a：`enabled_source` 列 + 迁移 + save 路径置 user + 一次性询问条幅 + 知情文案
@@ -488,6 +500,25 @@ Python 套件零漂移，才打勾。R1 无 Rust 改动，另需真机 bundle �
 
 产品无遥测（数据保留政策），这道 soak 是默认开启前**唯一**的回归防线——不允许以
 「发出去再看」替代。
+
+### 7.6 真机验收记录（2026-09-24 00:28–00:37 本地，feat/refresh-storm-fix bundle）
+
+环境：worktree bundle `open` 启动（AGENTS.md 纪律，未裸跑）；trust 本机处于
+关闭态（enabled=0）——门控/六段路径未在真机触发，由单元测试钉住，留待
+R6 前置的 §7.5 soak（trust 开启）验证。观测 ~9 分钟（含本会话自身负载）：
+
+| 指标 | 旧基线（2026-09-23 风暴） | 本次实测 | 判定 |
+|---|---|---|---|
+| 轻 tick 用时 | 7.1–9.3s | **386–405ms** | ✅ ~20× |
+| budget_sql 段 | 574ms–2.2s | **4.4–20ms** | ✅ F3 复用生效 |
+| assembly 段 | p50 5.09s / max 40s | 暖态 824ms；冷态首几轮 3.8–5.5s | ✅ 趋势达标（样本少，p50 待长测） |
+| Invalidated | 88/h（任意活动期） | **0**（多轮 tick 零推进） | ✅ F4 直接可见 |
+| 超 5s WARN | 188 次/2h | 1 次（暖机期） | ✅ |
+| 备忘计数 | — | 每 revision computed≈1（并发去重生效） | ✅ R2 可观测 |
+
+§7.1 完整 30 分钟量化门（trust 开启 + overview 停留）与 §7.4 手测清单
+（含托盘图标目视确认）留待用户下一次带 trust 的常规使用中完成；本次
+bundle 进程稳定运行 9+ 分钟无 ERROR。
 
 ## 8. 风险与守卫
 
