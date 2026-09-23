@@ -413,6 +413,33 @@ fn monthly_summary_arc(dh: &Path, month: &str) -> Option<std::sync::Arc<agent_vi
     ))
 }
 
+/// assembly 专用（REFRESH_STORM R2-F3）：summary / daily 复用本段已算好的
+/// memoized monthly 与 shared_daily，profiles 走一条只读连接读取——
+/// `budget_profiles_status_sql_at` 内部的第二次全量 monthly + daily 现算
+/// （月窗 SQL × ~11 条 ×2）不再发生。输出与 sql_at 逐字节等价
+/// （runtime tests `budget_profiles_from_parts_matches_sql_at` 钉住）。
+/// 降级语义：库打不开（summary/daily 任一缺席或 profiles 读不到）→ None，
+/// 与 sql_at 在 `AuthorityDb::open` 失败时返回 None 对齐——差异仅在"库文件
+/// 不存在"的边角：sql_at 的写模式 open 会顺带建库并给出默认 profile DTO，
+/// 这里如实返回 None（读路径不该有建库副作用）。
+fn budget_profiles_reuse_parts(
+    dh: &Path,
+    month: &str,
+    summary: Option<&agent_vitals_data::projection::MonthlySummary>,
+    daily: Option<&agent_vitals_data::projection::DailySummary>,
+) -> Option<Value> {
+    let summary = summary?;
+    let daily = daily?;
+    let db = agent_vitals_data::authority::AuthorityDb::open_readonly(
+        &agent_vitals_data::authority::default_authority_path(dh),
+    )
+    .ok()?;
+    let profiles = db.budget_profiles_get().ok()?;
+    agent_vitals_runtime::budget::budget_profiles_status_from_parts(
+        dh, month, profiles, summary, daily,
+    )
+}
+
 #[derive(Serialize)]
 pub struct Overview {
     pub data_home: String,
@@ -780,6 +807,9 @@ fn read_overview_at(dh: &Path) -> Overview {
             })
         })
     };
+    // R2-F3：monthly 取一次，metered_month 与 budget_profiles 共用同一个
+    // `Arc`——budget_profiles 内部不再第二次全量现算 monthly + daily。
+    let monthly_summary_arc = monthly_memo().get_or_compute(dh, &cur_month);
     let overview = Overview {
         data_home: dh.display().to_string(),
         today: today_val,
@@ -787,8 +817,11 @@ fn read_overview_at(dh: &Path) -> Overview {
         days,
         budget_monthly_cny: budget.monthly_cny.or_else(|| monthly_budget_cny(dh)),
         budget,
-        budget_profiles: agent_vitals_runtime::budget::budget_profiles_status_sql_at(
-            dh, &cur_month,
+        budget_profiles: budget_profiles_reuse_parts(
+            dh,
+            &cur_month,
+            monthly_summary_arc.as_deref(),
+            shared_daily.as_ref(),
         ),
         // assembly 段治理（收敛调查 §2）：此前三字段各自 SqlSummaryRepository
         // + open_db + 完整 summary——daily 被算了两遍（metered Day 与
@@ -797,8 +830,8 @@ fn read_overview_at(dh: &Path) -> Overview {
         metered_today: shared_daily
             .as_ref()
             .map(|d| metered_view_json(d.metered_view())),
-        metered_month: monthly_memo()
-            .get_or_compute(dh, &cur_month)
+        metered_month: monthly_summary_arc
+            .as_ref()
             .map(|m| metered_view_json(m.metered_view())),
         today_tokens_sql: shared_daily
             .as_ref()

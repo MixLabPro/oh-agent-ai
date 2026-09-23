@@ -153,6 +153,22 @@ pub fn budget_profiles_status_sql_at(data_home: &Path, month: &str) -> Option<Va
             },
         )
     };
+    budget_profiles_status_from_parts(data_home, month, profiles, &summary, &daily)
+}
+
+/// [`budget_profiles_status_sql_at`] 的纯计算部分（REFRESH_STORM R2-F3 拆分）：
+/// profiles / summary / daily 由调用方供。桌面 assembly 路径复用本段已算好的
+/// memoized monthly 与 shared_daily——此前 sql_at 在 assembly 里第二次全量现算
+/// 一整份 monthly + daily（月窗 SQL × ~11 条 ×2），是 assembly 段最大的单点
+/// 重复计算；CLI / MCP / 独立调用仍走 sql_at 的全量现算。两条路输出**逐字节
+/// 等价**（tests `budget_profiles_from_parts_matches_sql_at` 钉住）。
+pub fn budget_profiles_status_from_parts(
+    data_home: &Path,
+    month: &str,
+    profiles: Vec<agent_vitals_data::authority::BudgetProfile>,
+    summary: &agent_vitals_data::projection::MonthlySummary,
+    daily: &agent_vitals_data::projection::DailySummary,
+) -> Option<Value> {
     let values = summary.by_provider.values().collect::<Vec<_>>();
     let daily_values = daily.by_provider.values().collect::<Vec<_>>();
     // 订阅月费按天摊进观察预算（2026-09-17 产品定向：预算消耗 = 订阅 + 按量的总体，
