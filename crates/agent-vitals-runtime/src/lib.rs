@@ -1,30 +1,23 @@
-//! `agent-vitals-runtime` —— Agent Vitals 的**非宿主**本机机器（arch v3.1 §4.2）。
+//! `agent-vitals-runtime` —— Agent Vitals 本机运行时的**门面**（W3，2026-09-24）。
 //!
-//! 装：唯一 `HomeResolver`（`home`）、读时钟的日期 helper（`clock`）、state store /
-//! ledger（`state` / `budget` / `takeover`）、Skill/Session service 编排
-//! （`session_sources`——把 `hosts::<h>::sources` 产出交给 `hosts::<h>::sessions` /
-//! `domain`）。**不装**规则计算（`agent-vitals-domain`）、不装宿主 wire 解释
-//! （`agent-vitals-hosts`）。
+//! 本 crate 不再有自己的实现：runtime 按层拆成 6 个 crate，这里原样 re-export 全部模块与
+//! 扁平别名，CLI / 桌面 / 测试的 `agent_vitals_runtime::X` 路径一个不变。新代码可以直接
+//! 依赖需要的那一层，编译面更小。
 //!
-//! v0.8：D7 落 `home`；D6 迁 `clock` / `state` / `budget` / `takeover` /
-//! `session_sources`；E7.4 迁 `skills::snapshot`（Skill Surface 的本机快照
-//! 读写——本机 fs 状态，与 `state`/`budget`/`takeover` 同类，是 runtime 的
-//! 天然归属，不是 hosts 的 sources/，因为它不认识任何宿主）。
+//! | 层 | crate | 模块 |
+//! |---|---|---|
+//! | L0–L1 | `agent-vitals-runtime-core` | core（home/clock/lease/state/…）、pricing、source_graph、envelope、events、skills |
+//! | L2–L3 | `agent-vitals-query` | sources、sessions（宿主适配薄封装）、query（summary/trace/export/…） |
+//! | L4 | `agent-vitals-billing` | billing（预算、计费预览、价格发现、额度提醒） |
+//! | L5 | `agent-vitals-ingest` | ingest（同步、进程内引擎、tick 调度、watcher、findings 评估） |
+//! | L5 | `agent-vitals-trust` | trust（Trust / Egress 审计） |
+//! | L6 | `agent-vitals-mcp` | mcp（Data MCP 工具，出口面） |
 //!
-//! v0.9 Stage 0.3：`sessions`（`docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md`
-//! §6）——`r2a_store` 的 6 文件依赖闭包（`SessionStore` 缓存/checkpoint、
-//! codex 成本折叠、codex 会话审计、DSH discovery、behavior I/O 入口、claude
-//! ledger 读取）逐文件从 `apps/cli` 搬进来，落 spec §5.2"CLI 不再拥有宿主
-//! wire 解释或事实写入"的门槛。W8（2026-09-24）删除了 `r2a_store` 本体
-//! （SessionStore 缓存 / 旧 list/read/findings/navigation），findings 生产改由
-//! `ingest::findings_eval` 在同步后增量评估。
-//!
-//! v0.9 Stage 0.4：`summary`——`agent-vitals-data::repository::
-//! SummaryRepository` 的 Stage 0 实现（`docs/AGENT_VITALS_V0_9_STAGE0_
-//! RESEARCH.md` §8）。这是本 crate**新增依赖 `agent-vitals-data`**的唯一
-//! 理由：spec §3.1 的依赖表把 `agent-vitals-data` 限定在只依赖 domain，够
-//! 不到这里的 `sessions`/`budget`/`state`，trait 的实现只能落在这个既认识
-//! hosts 又认识 data 的层。
+//! 只能依赖严格更低层：crate 之间由 Cargo 保证，crate 内部由
+//! `tests/module_layering.rs` 钉住。宿主 wire 解释在 `agent-vitals-hosts`（含会话宿主
+//! 注册表 `sources::session_hosts`），纯规则在 `agent-vitals-domain`。
+//! 历史（v0.8 D6/D7、v0.9 Stage 0.3/0.4、W8 删除 r2a）见 git log 与
+//! docs/ARCHITECTURE_OPTIMIZATION_GUIDE.md。
 
 // ── 地基层 L0–L1（W3 拆到 `agent-vitals-runtime-core`，这里原样 re-export，
 //    外部 `agent_vitals_runtime::{core, clock, lease, envelope, …}` 路径不变）──
@@ -87,5 +80,5 @@ pub use sources::source_controls;
 pub use sources::host_registry;
 
 // ── 既有子目录 ──
-pub mod mcp;
+pub use agent_vitals_mcp::mcp;
 pub use agent_vitals_query::sessions;

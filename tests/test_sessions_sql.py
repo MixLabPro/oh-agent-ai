@@ -19,7 +19,7 @@
 
 设计依据：
 - sessions_sql.py 文件头 1-31 行（wrapper 落地 + byte-mirror 承诺）
-- crates/agent-vitals-runtime/src/mcp/sessions_search.rs:267-396（同形 Rust 测试）
+- crates/agent-vitals-mcp/src/mcp/sessions_search.rs:267-396（同形 Rust 测试）
 - crates/agent-vitals-data/src/authority.rs:107-289（v2 schema DDL）
 """
 
@@ -239,7 +239,7 @@ def _add_fact(conn, fact_id: str, host: str, session_key: str,
 # ────────────────────────────────────────────────────────────────────────
 
 class SessionRefHmacTests(unittest.TestCase):
-    """mirror crates/agent-vitals-runtime/src/query/session_ref.rs（W3 从 mcp/ 移来）。
+    """mirror crates/agent-vitals-query/src/query/session_ref.rs（W3 从 mcp/ 移来）。
 
     钉住：
     1. ref 形如 `sr_<32 hex>`（HMAC-SHA256 截前 16 字节）
@@ -317,7 +317,7 @@ class SessionRefHmacTests(unittest.TestCase):
 # ────────────────────────────────────────────────────────────────────────
 
 class CursorRoundtripTests(unittest.TestCase):
-    """mirror crates/agent-vitals-runtime/src/mcp/sessions_search.rs:375-396
+    """mirror crates/agent-vitals-mcp/src/mcp/sessions_search.rs:375-396
     `parse_search_cursor_roundtrip_and_errors` + session_detail 同款测试。
 
     钉住 cursor 格式 `<total>:<key_len>:<key>` / `<ts>:<fid_len>:<fid>`

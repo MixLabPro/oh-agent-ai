@@ -8,7 +8,7 @@ const read = (path) => readFileSync(`${root}/${path}`, "utf8");
 const js = read("apps/desktop/src-tauri/ui/workbench.js");
 const html = read("apps/desktop/src-tauri/ui/workbench.html");
 const lib = read("apps/desktop/src-tauri/src/lib.rs");
-const runtime = read("crates/agent-vitals-runtime/src/mcp/mod.rs");
+const runtime = read("crates/agent-vitals-mcp/src/mcp/mod.rs");
 let failed = 0;
 const ok = (condition, message) => {
   if (condition) console.log("  ok  " + message);
@@ -440,7 +440,7 @@ ok(elements["ov-billing-recalculation-panel"].hidden === false &&
   "重算失败状态显示旧结果可用、error_code 人话与重试按钮，原始错误串不上卡面（§5.10）");
 
 // ---- 三态确认列表（自动归因规格 §5.1；形状出处：
-// crates/agent-vitals-runtime/src/billing_preview.rs::auto_verdict / clusters_of）----
+// crates/agent-vitals-billing/src/billing/billing_preview.rs::auto_verdict / clusters_of）----
 // 后端带 `clusters` 时：程序判定 → 一键确认；差一问 → 选项在行内；需补充 → 弹窗。
 // 模型折进 models[]，旧的逐模型行只在没有 clusters 的旧后端上出现。
 const clusterModel = (model_id, tokens, session_count, group_id, amounts) => ({ model_id, tokens, session_count, group_id, estimated_amounts: amounts });

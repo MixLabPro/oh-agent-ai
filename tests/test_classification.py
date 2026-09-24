@@ -198,6 +198,7 @@ class ClassificationGuardTests(unittest.TestCase):
         """
         gone = [
             ROOT / "crates" / "agent-vitals-runtime" / "src" / "sessions" / "r2a_store.rs",
+            ROOT / "crates" / "agent-vitals-query" / "src" / "sessions" / "r2a_store.rs",
             ROOT / "crates" / "agent-vitals-domain" / "src" / "contracts" / "r2a.rs",
             ROOT / "packages" / "agent-vitals-python" / "agent_vitals" / "agent" / "r2a.py",
         ]
@@ -210,8 +211,8 @@ class ClassificationGuardTests(unittest.TestCase):
             self.assertNotIn("legacy-r2a", toml.read_text(encoding="utf-8"),
                              f"{toml.relative_to(ROOT)} 不得再声明/启用 legacy-r2a")
         self.assertTrue(
-            (ROOT / "crates" / "agent-vitals-runtime" / "src" / "ingest" / "findings_eval.rs").exists(),
-            "findings 的生产者必须在同步路径上（ingest/findings_eval.rs）",
+            (ROOT / "crates" / "agent-vitals-ingest" / "src" / "ingest" / "findings_eval.rs").exists(),
+            "findings 的生产者必须在同步路径上（agent-vitals-ingest 的 ingest/findings_eval.rs）",
         )
 
 

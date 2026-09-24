@@ -27,7 +27,7 @@ path = "src/lib.rs"
 # 公开构建（默认 feature = []）不含这些工具——spec §8.2 / M0 D4 的承诺。
 # 调试 Agent 用 `cargo run --features mcp-internal -- data-mcp serve`。
 [features]
-mcp-internal = []
+mcp-internal = ["agent-vitals-mcp/mcp-internal"]
 # P2 watcher（SourceGraph spec §9-P2）：notify 6.x（macOS FSEvents / Linux
 # inotify）文件事件 → 去抖 → 唤醒 tick 对账 + watch-only 消费者。不开 =
 # NoopWatcher（tick 5min 兜底照常，Vite createNoopWatcher 同款）。
@@ -35,6 +35,7 @@ watcher = ["agent-vitals-ingest/watcher"]
 
 [dependencies]
 agent-vitals-runtime-core = { path = "../agent-vitals-runtime-core" }
+agent-vitals-mcp = { path = "../agent-vitals-mcp" }
 agent-vitals-trust = { path = "../agent-vitals-trust" }
 agent-vitals-ingest = { path = "../agent-vitals-ingest" }
 agent-vitals-billing = { path = "../agent-vitals-billing" }

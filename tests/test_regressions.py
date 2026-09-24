@@ -2196,12 +2196,14 @@ class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):
 
     def test_workbuddy_money_cannot_enter_the_summary_dto(self):
         # 2026-09-23 summary.rs 目录化为 query/summary/{mod,host_amounts,…}——
-        # 路径钉随之扫整个目录（断言语义零变化）。
-        summary_dir = (ROOT / "crates" / "agent-vitals-runtime" / "src"
+        # 路径钉随之扫整个目录（断言语义零变化）。W3（2026-09-24）query 层拆成
+        # agent-vitals-query crate。
+        summary_dir = (ROOT / "crates" / "agent-vitals-query" / "src"
                        / "query" / "summary")
-        summary_rs = "\n".join(
-            p.read_text(encoding="utf-8") for p in sorted(summary_dir.glob("*.rs"))
-            if p.name != "tests.rs")
+        sources = [p for p in sorted(summary_dir.glob("*.rs")) if p.name != "tests.rs"]
+        # 目录搬走时 glob 为空、拼出空串——否定断言会静默通过。先钉住读到了文件。
+        self.assertTrue(sources, f"summary 源文件找不到：{summary_dir}")
+        summary_rs = "\n".join(p.read_text(encoding="utf-8") for p in sources)
         self.assertIn("PERMANENTLY_EXCLUDED_HOSTS: &[&str] = &[]", summary_rs)
         # E4b：money 防线内建在 workbuddy 栏构造器里（provider null → basis 恒空），
         # 不再是排除表。

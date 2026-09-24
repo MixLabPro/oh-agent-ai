@@ -1,4 +1,4 @@
-"""Python mirror of `crates/agent-vitals-runtime/src/mcp/{sessions_search,
+"""Python mirror of `crates/agent-vitals-mcp/src/mcp/{sessions_search,
 session_detail,session_ref}.rs` —— v0.9.1 PR #4.5 落地。
 
 CLI Python 侧 `packages/agent-vitals-python/agent_vitals/cli.py:1606-1644`

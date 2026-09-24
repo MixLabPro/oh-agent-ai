@@ -66,21 +66,23 @@ crates/agent-vitals-hosts/ # v0.8：一个 crate 装所有宿主的 wire 适配�
                             #   hosts/<h>/sessions/=会话证据（纯，wasm 可链）：claude_code/codex/workbuddy evidence、
                             #   Codex usage fold、canonical_usage、Phase D1 起的 DSH evidence/audit/compaction/waste。
                             #   hosts/<h>/{sources/（I/O，feature-gated）,skills/,capability.rs}=D4/D5 填。依赖 domain。
-crates/agent-vitals-runtime/ # v0.8 Phase D6/D7：非宿主本机机器。home（唯一 HomeResolver：
-                            #   data_home/snapshot_dir/DSH_HOME）· clock（读时钟的北京日期）· state/budget/takeover
-                            #   （state store + ledger）· session_sources（service 接线）。依赖 domain + hosts。
-                            #   sessions/（v0.9 Stage 0.3）：r2a_store 的 SessionStore 缓存/checkpoint、
-                            #   codex 成本折叠/会话审计、DSH discovery、behavior I/O 入口、claude ledger
-                            #   只读取值——整体从 apps/cli/src/agent/ 迁来，落 spec §5.2「CLI 不再拥有宿主
-                            #   wire 解释或事实写入」门槛（docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md §6）。
-                            #   **W3 分层（2026-09-24）**：模块只能依赖严格更低层——L2 sources/sessions ·
-                            #   L3 query · L4 billing · L5 ingest/trust · L6 mcp（L0–L1 在 runtime-core）。
-                            #   `tests/module_layering.rs` 钉住；内部代码写真实路径（`crate::clock::now_ms`，
-                            #   不写兼容别名 `crate::sql_sync::now_ms`——后者只留给 crate 外部调用方）。
-crates/agent-vitals-runtime-core/ # W3 从 runtime 拆出的地基层（L0 core/pricing/source_graph ·
-                            #   L1 envelope/events/skills）：时钟、home、lease、SQL 权威标记、宿主词表、价卡、
-                            #   MCP/查询共用的工具协议（ToolError/AuthorityHandle/build_envelope）、outbox。
-                            #   runtime 原样 re-export，外部 `agent_vitals_runtime::X` 路径不变。
+                            #   W3：`sources::session_hosts` 会话宿主注册表（根 / 枚举 / findings 评估 / trace 定位），
+                            #   runtime 遍历它、不按宿主名分支；接新宿主 = 加一行 + 写 hosts/<h>/sources 实现。
+crates/agent-vitals-runtime/ # **门面**（W3，2026-09-24）：自身无实现，原样 re-export 下面 6 个层 crate 的全部
+                            #   模块与扁平别名，外部 `agent_vitals_runtime::X` 路径不变。`watcher` / `mcp-internal`
+                            #   feature 只做转发。只能依赖严格更低层：crate 间由 Cargo 保证，crate 内由
+                            #   `tests/module_layering.rs` 钉住（扫整个 runtime 家族）；内部代码写真实路径
+                            #   （`crate::clock::now_ms`，不写兼容别名 `crate::sql_sync::now_ms`）。
+crates/agent-vitals-runtime-core/ # L0 core（home/clock/lease/state/SQL 权威标记/宿主词表）· pricing · source_graph
+                            #   · L1 envelope（MCP/查询共用工具协议）· events（outbox）· skills。
+crates/agent-vitals-query/  # L2 sources（源配置/插件宿主/监听拓扑）· sessions（宿主适配的 runtime 薄封装：
+                            #   供给时钟/时区/价卡）· L3 query（summary 仓储/trace/export/决策矩阵/读缓存）。
+crates/agent-vitals-billing/ # L4 billing：预算、计费预览与归因、价格发现、额度提醒。
+crates/agent-vitals-ingest/ # L5 写入侧：sync_service（发现走 hosts 会话宿主注册表）、engine（进程内同步，
+                            #   桌面 tick 与 CLI `sync-facts` 共用）、scheduler（tick 轻/重调度状态机，有单测）、
+                            #   findings_eval（同步后增量评估行为 findings → issue_instances）、watch、保留滚动。
+crates/agent-vitals-trust/  # L5 Trust / Egress 审计（与 ingest 同层互不依赖）。
+crates/agent-vitals-mcp/    # L6 Data MCP 工具应用层——出口面，脱敏红线在这里审（传输层在 apps/cli/src/mcp.rs）。
 crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over domain + hosts (audit_events), built with wasm-pack
 scripts/scan.py             # thin entrypoint; stays here (documented `python3 scripts/scan.py`
                             #   command, and what the ClawHub package ships at scripts/scan.py) —
