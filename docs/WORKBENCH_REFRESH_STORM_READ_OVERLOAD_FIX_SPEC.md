@@ -448,7 +448,10 @@ Python 套件零漂移，才打勾。R1 无 Rust 改动，另需真机 bundle �
     候选/声明一致性保持每 tick（计费正确性链路）
 - [ ] **R6（trust 默认开启 rollout）** — F8；**前置：R1–R4 全部打勾 + 相关器成本钉住
   （P2 落地或 ≤50ms/轮实测）+ §7.5 soak 通过**
-  - [ ] R6a：`enabled_source` 列 + 迁移 + save 路径置 user + 一次性询问条幅 + 知情文案
+  - [x] R6a（2a2856a，2026-09-24）：schema v27 enabled_source 四态 + save 置
+    user + dismiss 命令 + React TrustPage 三选条幅（三要素文案）；重开库
+    迁移不覆写 user/dismissed 的三态测试钉住；**未翻任何默认**（R6c 仍以
+    §7.5 soak 为前置）
   - [ ] R6b：§7.5 soak 量化门在发布候选上通过
   - [ ] R6c：全新库 schema 默认翻转 `enabled=1`（存量库仅询问，永不静默）
 
