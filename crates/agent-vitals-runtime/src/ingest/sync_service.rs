@@ -747,7 +747,7 @@ pub fn sync_facts_filtered(
             let (sessions, errors) = match *host {
                 "dsh" => findings_eval::evaluate_dsh(changed),
                 "claude-code" => findings_eval::evaluate_claude(changed, all_files),
-                _ => findings_eval::evaluate_codex(&crate::home::codex_home(), changed, all_files),
+                _ => findings_eval::evaluate_codex(&crate::home::codex_home(), data_home, changed, all_files),
             };
             eval.errors.extend(errors);
             if sessions.is_empty() {
