@@ -660,3 +660,19 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }
+
+/* R6a（REFRESH_STORM）：trust 默认开启 rollout 的一次性知情询问条幅。 */
+.trust-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-accent, #d7c48a);
+  border-radius: 10px;
+  background: var(--surface-raised, rgba(255, 255, 255, 0.04));
+}
+.trust-banner p { margin: 0; font-size: 13px; line-height: 1.6; }
+.trust-banner-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.button-ghost { background: transparent; border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.18)); color: var(--text-secondary, #b8b8b8); }
+.button-ghost:hover:not(:disabled) { color: var(--text-primary, #eee); border-color: rgba(255, 255, 255, 0.32); }

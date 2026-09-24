@@ -581,6 +581,8 @@ export type TrustMonitorConfig = {
   last_error_code: "sensor_unavailable" | "snapshot_failed" | "sensor_partial" | "authority_unavailable" | "monitor_state_unavailable" | null;
   updated_at_ms: number | null;
   notification_permission: "granted" | "denied" | "unavailable" | null;
+  /** R6a 知情同意四态：legacy_default 待询问 / default 出厂开（R6c 起）/ user 显式选择 / dismissed 永不再问。 */
+  enabled_source: "legacy_default" | "default" | "user" | "dismissed";
 };
 
 export type TrustSnapshotCapability = "macos_lsof_partial" | "runtime_sensor_unavailable_on_this_platform" | "lsof_unavailable" | "lsof_no_visible_output" | "lsof_invalid_output" | "unavailable";
@@ -1922,6 +1924,12 @@ function parseTrustMonitorConfig(value: unknown): TrustMonitorConfig {
   const notification_permission = rawPermission === null || rawPermission === undefined
     ? null
     : boundedEnum(rawPermission, "notification permission", ["granted", "denied", "unavailable"], "unavailable") as TrustMonitorConfig["notification_permission"];
+  const enabled_source = boundedEnum(
+    root.enabled_source ?? "legacy_default",
+    "trust monitor enabled source",
+    ["legacy_default", "default", "user", "dismissed"],
+    "legacy_default",
+  ) as TrustMonitorConfig["enabled_source"];
   return {
     status, reason,
     enabled: root.enabled === true,
@@ -1932,6 +1940,7 @@ function parseTrustMonitorConfig(value: unknown): TrustMonitorConfig {
     last_error_code,
     updated_at_ms: nullableTimestampMs(root.updated_at_ms, "monitor updated at"),
     notification_permission,
+    enabled_source,
   };
 }
 
@@ -2199,7 +2208,7 @@ export async function readTrustMonitorConfig(): Promise<TrustMonitorConfig> {
   if (!handler) return parseTrustMonitorConfig({
     status: "ok", reason: null, enabled: false, interval_seconds: 30, notifications_enabled: false,
     capability: "not_started", last_success_at_ms: null, last_error_code: null,
-    updated_at_ms: null, notification_permission: null,
+    updated_at_ms: null, notification_permission: null, enabled_source: "legacy_default",
   });
   return parseTrustMonitorConfig(await handler("trust_monitor_config"));
 }
@@ -2226,6 +2235,17 @@ export async function saveTrustMonitorConfig(input: {
     intervalSeconds: input.interval_seconds,
     notificationsEnabled: input.notifications_enabled,
   }));
+}
+
+/** R6a：询问条幅的「稍后」——dismiss 后永不再问；enabled 保持不动。 */
+export async function dismissTrustMonitorPrompt(): Promise<TrustMonitorConfig> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return parseTrustMonitorConfig({
+    status: "ok", reason: null, enabled: false, interval_seconds: 30, notifications_enabled: false,
+    capability: "not_started", last_success_at_ms: null, last_error_code: null,
+    updated_at_ms: Date.now(), notification_permission: null, enabled_source: "dismissed",
+  });
+  return parseTrustMonitorConfig(await handler("trust_monitor_dismiss"));
 }
 
 export async function runTrustRuntimeSnapshot(): Promise<TrustRuntimeSnapshot> {

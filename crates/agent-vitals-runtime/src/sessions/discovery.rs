@@ -121,39 +121,14 @@ pub fn dsh_session_walk_errors(dsh_home: &Path) -> Vec<String> {
 /// session.jsonl.zstd 两个文件名、follow_links(false)）；缺失根不报错、根
 /// 元数据不可读时报错——错误语义与 `dsh_session_walk_errors` 一致。
 pub fn dsh_session_files_with_errors(dsh_home: &Path) -> (Vec<PathBuf>, Vec<String>) {
-    let root = dsh_home.join("sessions");
-    let mut files: Vec<PathBuf> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-    match std::fs::metadata(&root) {
-        Ok(metadata) if metadata.is_dir() => {
-            for entry in walkdir::WalkDir::new(&root)
-                .follow_links(false)
-                .into_iter()
-            {
-                match entry {
-                    Ok(e) => {
-                        if !e.file_type().is_file() {
-                            continue;
-                        }
-                        let n = e.file_name().to_string_lossy();
-                        if n == "session.jsonl" || n == "session.jsonl.zstd" {
-                            files.push(e.into_path());
-                        }
-                    }
-                    Err(error) => {
-                        let path = error.path().unwrap_or(&root);
-                        errors.push(format!("{}: {error}", path.display()));
-                    }
-                }
-            }
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-            errors.push(format!("{}: {error}", root.display()));
-        }
-        Err(_) => {}
-    }
-    files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    let (mut files, errors) = agent_vitals_hosts::sources::walk_util::walk_files_with_errors(
+        &dsh_home.join("sessions"),
+        |e| {
+            let n = e.file_name().to_string_lossy();
+            n == "session.jsonl" || n == "session.jsonl.zstd"
+        },
+    );
+    agent_vitals_hosts::sources::walk_util::sort_by_path_string(&mut files);
     (files, errors)
 }
 

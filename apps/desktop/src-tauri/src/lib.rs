@@ -2098,9 +2098,16 @@ fn trust_monitor_state_read() -> Value {
         Some("sensor_unavailable" | "snapshot_failed" | "sensor_partial" | "authority_unavailable" | "monitor_state_unavailable") => state.last_error_code.as_deref(),
         _ => None,
     };
+    // R6a：知情同意四态闭集（legacy_default 待询问 / default 出厂开（R6c 起）/
+    // user 显式选择 / dismissed 永不再问）——前端据此决定一次性条幅。
+    let enabled_source = match state.enabled_source.as_str() {
+        "legacy_default" | "default" | "user" | "dismissed" => state.enabled_source.as_str(),
+        _ => "legacy_default",
+    };
     serde_json::json!({
         "status": "ok",
         "enabled": state.enabled,
+        "enabled_source": enabled_source,
         "interval_seconds": state.interval_seconds,
         "notifications_enabled": state.notifications_enabled,
         "capability": capability,
@@ -4387,6 +4394,20 @@ fn trust_monitor_config() -> Value {
     trust_monitor_state_read()
 }
 
+/// R6a（REFRESH_STORM）：询问条幅的「稍后」——dismiss 后前端永不再弹，
+/// enabled 保持不动（显式开/关走 save_trust_monitor_config，置 `user`）。
+#[tauri::command(async)]
+fn trust_monitor_dismiss(app: AppHandle) -> Result<Value, String> {
+    let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
+    let db = agent_vitals_data::authority::AuthorityDb::open(&path, agent_vitals_runtime::sql_sync::now_ms())
+        .map_err(|_| "authority_unavailable".to_string())?;
+    db.trust_monitor_dismiss().map_err(|_| "monitor_state_save_failed".to_string())?;
+    let _ = app.emit(APP_EVENT, serde_json::json!({
+        "type": "TrustMonitorInvalidated", "kind": "trust_monitor_invalidated",
+    }));
+    Ok(trust_monitor_state_read())
+}
+
 /// Persist Trust monitoring controls. Notification permission is requested only
 /// when the user explicitly turns notifications on; disabling the monitor also
 /// disables its notifications so a stale permission cannot create surprises.
@@ -4795,6 +4816,7 @@ pub fn run() {
             quota_reminder_config,
             trust_monitor_config,
             save_trust_monitor_config,
+        trust_monitor_dismiss,
             price_cards,
             save_price_card,
             delete_price_card,

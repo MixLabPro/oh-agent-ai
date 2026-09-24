@@ -11,7 +11,7 @@ import {
   revokeTrustProfile,
   revokeTrustSuppression,
   runTrustRuntimeSnapshot,
-  saveTrustMonitorConfig,
+  dismissTrustMonitorPrompt, saveTrustMonitorConfig,
   safeUiError,
   type TrustAuditReport,
   type TrustHostCandidate,
@@ -257,6 +257,36 @@ export function TrustPage() {
     return () => { active = false; cleanup?.(); };
   }, []);
 
+  // R6a（REFRESH_STORM）：一次性知情询问——仅 enabled_source === 'legacy_default'
+  // （迁移前存量库、从未显式选择过）时展示；任何选择都离开该态（开启/保持
+  // 关闭 → user，稍后 → dismissed 永不再问）。三要素文案：本机进程观察 /
+  // 仅本地存 7 天 / 零网络外发。
+  const askEnable = async () => {
+    setMonitorSaving(true);
+    try {
+      const value = await saveTrustMonitorConfig({ enabled: true, interval_seconds: monitorDraft.interval_seconds, notifications_enabled: false });
+      setMonitor(value);
+      setMonitorFeedback(value.enabled ? "实时监测已开启；只记录本机脱敏元数据。" : "实时监测已关闭；不会在后台采集。");
+    } catch (reason: unknown) { setMonitorFeedback(`保存失败：${errorMessage(reason)}`); }
+    finally { setMonitorSaving(false); }
+  };
+  const askDisable = async () => {
+    setMonitorSaving(true);
+    try {
+      const value = await saveTrustMonitorConfig({ enabled: false, interval_seconds: monitorDraft.interval_seconds, notifications_enabled: false });
+      setMonitor(value);
+      setMonitorFeedback("已保持默认关闭；之后可从下面的开关随时打开。");
+    } catch (reason: unknown) { setMonitorFeedback(`保存失败：${errorMessage(reason)}`); }
+    finally { setMonitorSaving(false); }
+  };
+  const askLater = async () => {
+    try {
+      const value = await dismissTrustMonitorPrompt();
+      setMonitor(value);
+      setMonitorFeedback("已跳过本次询问，不再自动弹出；可从设置随时开启。");
+    } catch (reason: unknown) { setMonitorFeedback(`操作失败：${errorMessage(reason)}`); }
+  };
+
   const saveMonitor = () => {
     setMonitorSaving(true);
     setMonitorFeedback(null);
@@ -352,7 +382,17 @@ export function TrustPage() {
       </section>
     </section>
     <section className="trust-monitor-card" aria-labelledby="trust-monitor-title">
-      <div className="trust-card-heading"><div><p className="eyebrow">Runtime monitor</p><h3 id="trust-monitor-title">实时监测控制</h3></div><span className={`status-pill ${monitor?.status === "ok" && monitor.enabled ? "status-pill-success" : monitor?.status === "unavailable" ? "status-pill-warning" : ""}`}><span aria-hidden="true" className="status-dot" />{monitorLoading ? "读取中" : monitor?.status === "unavailable" ? "无法确认状态" : monitor?.enabled ? "已开启" : "默认关闭"}</span></div>
+      <div className="trust-card-heading"><div><p className="eyebrow">Runtime monitor</p><h3 id="trust-monitor-title">实时监测控制</h3></div>
+      {monitor?.status === "ok" && monitor.enabled_source === "legacy_default" && (
+        <div className="trust-banner" role="note" data-testid="trust-rollout-ask">
+          <p><strong>信任监测可以默认开启。</strong>它观察本机 agent 进程的活动链（git 历史 / 归档写入 / 网络连接），证据仅保存在本机、7 天后自动过期，不上传任何数据。</p>
+          <div className="trust-banner-actions">
+            <button className="button button-primary-small" type="button" onClick={askEnable} disabled={monitorSaving}>开启</button>
+            <button className="button button-secondary" type="button" onClick={askDisable} disabled={monitorSaving}>保持关闭</button>
+            <button className="button button-ghost" type="button" onClick={askLater} disabled={monitorSaving}>稍后</button>
+          </div>
+        </div>
+      )}<span className={`status-pill ${monitor?.status === "ok" && monitor.enabled ? "status-pill-success" : monitor?.status === "unavailable" ? "status-pill-warning" : ""}`}><span aria-hidden="true" className="status-dot" />{monitorLoading ? "读取中" : monitor?.status === "unavailable" ? "无法确认状态" : monitor?.enabled ? "已开启" : "默认关闭"}</span></div>
       <p className="monitor-copy">监测只在本机运行，采集进程级类型信号；不会读取文件内容、保存路径或上传网络数据。</p>
       {monitor?.status === "unavailable" && <div className="callout monitor-unavailable" role="status"><strong>监测状态不可用</strong><span>{monitorReasonLabel(monitor.reason, monitor.last_error_code)}；无法确认当前开关，也不会尝试写入设置。</span></div>}
       <div className="monitor-controls">

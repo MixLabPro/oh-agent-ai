@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 26;
+pub const SCHEMA_VERSION: i64 = 27;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -49,6 +49,8 @@ pub type HostBillDetailRow = (String, String, String, String, i64, String, Strin
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustMonitorState {
     pub enabled: bool,
+    /// R6a 知情同意标记（v27）：legacy_default / default / user / dismissed。
+    pub enabled_source: String,
     pub interval_seconds: i64,
     pub notifications_enabled: bool,
     pub capability: String,
@@ -1270,6 +1272,25 @@ fn ensure_schema_v26(conn: &Connection) -> Result<(), AuthorityError> {
     Ok(())
 }
 
+/// v27（REFRESH_STORM R6a）：`trust_monitor_state.enabled_source` 标记列——
+/// trust 默认开启 rollout 的知情同意基座。四态：`legacy_default`（迁移前
+/// 存量库，待询问）/ `default`（R6c 翻转后的全新库出厂值）/ `user`（用户
+/// 显式保存过，任何迁移永不覆写）/ `dismissed`（询问被「稍后」，永不再问
+/// 且保持关）。本版**不翻默认**：fresh 种子行与存量行都是 `legacy_default`
+/// + enabled=0；翻默认是 R6c（前置：§7.5 24h soak），届时只改种子行。
+fn ensure_schema_v27(conn: &Connection) -> Result<(), AuthorityError> {
+    let has_source: bool = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('trust_monitor_state') WHERE name = 'enabled_source'",
+        [], |row| row.get::<_, i64>(0),
+    )? > 0;
+    if !has_source {
+        conn.execute_batch(
+            "ALTER TABLE trust_monitor_state ADD COLUMN enabled_source TEXT NOT NULL DEFAULT 'legacy_default';",
+        )?;
+    }
+    Ok(())
+}
+
 /// 读权威 revision（缺行按 0——只读连接打开一个从未被 v26 writer 打开过的
 /// 库时会遇到；writer 的 `open` 总会先补行）。
 pub fn revision_of(conn: &Connection) -> Result<u64, AuthorityError> {
@@ -1532,12 +1553,28 @@ impl AuthorityDb {
                 ensure_schema_v24(conn)?;
                 ensure_schema_v25(conn)?;
                 ensure_schema_v26(conn)?;
+                ensure_schema_v27(conn)?;
                 conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
                 conn.execute_batch(VIEWS_V1)?;
             }
             Some(25) => {
                 conn.execute_batch("BEGIN IMMEDIATE")?;
-                let migration = ensure_schema_v26(conn);
+                // 版本戳直接盖到 SCHEMA_VERSION，故本臂必须含 25→当前的全部迁移
+                //（v26 revision 标量 + v27 enabled_source 列）。
+                let migration = ensure_schema_v26(conn).and_then(|_| ensure_schema_v27(conn));
+                match migration {
+                    Ok(()) => {
+                        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
+                        conn.execute_batch("COMMIT")?;
+                    }
+                    Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error); }
+                }
+                conn.execute_batch("DROP VIEW IF EXISTS v_facts_safe;")?;
+                conn.execute_batch(VIEWS_V1)?;
+            }
+            Some(26) => {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let migration = ensure_schema_v27(conn);
                 match migration {
                     Ok(()) => {
                         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'", rusqlite::params![SCHEMA_VERSION.to_string()])?;
@@ -2120,6 +2157,7 @@ impl AuthorityDb {
         ensure_schema_v24(conn)?;
         ensure_schema_v25(conn)?;
         ensure_schema_v26(conn)?;
+        ensure_schema_v27(conn)?;
         // 中断批次清扫（§3.1）：任何 running 的批次在下次 open 时标
         // interrupted——它是观测记录，不是可恢复状态（恢复靠幂等重跑）。
         conn.execute(
@@ -2312,7 +2350,7 @@ impl AuthorityDb {
         let result = self.conn.query_row(
             "SELECT enabled, interval_seconds, notifications_enabled, capability,
                     last_success_at_ms, last_error_code, last_alert_key,
-                    last_alert_at_ms, updated_at_ms
+                    last_alert_at_ms, updated_at_ms, enabled_source
              FROM trust_monitor_state WHERE config_id = 1",
             [],
             |row| Ok(TrustMonitorState {
@@ -2322,6 +2360,7 @@ impl AuthorityDb {
                 capability: row.get(3)?,
                 last_success_at_ms: row.get(4)?, last_error_code: row.get(5)?,
                 last_alert_key: row.get(6)?, last_alert_at_ms: row.get(7)?, updated_at_ms: row.get(8)?,
+                enabled_source: row.get(9)?,
             }),
         );
         match result {
@@ -2342,14 +2381,25 @@ impl AuthorityDb {
         self.conn.execute(
             "INSERT INTO trust_monitor_state(
                 config_id, enabled, interval_seconds, notifications_enabled,
-                capability, updated_at_ms)
-             VALUES (1, ?1, ?2, ?3, 'not_started', ?4)
+                capability, updated_at_ms, enabled_source)
+             VALUES (1, ?1, ?2, ?3, 'not_started', ?4, 'user')
              ON CONFLICT(config_id) DO UPDATE SET
                 enabled = excluded.enabled, interval_seconds = excluded.interval_seconds,
                 notifications_enabled = excluded.notifications_enabled,
                 capability = 'not_started', last_success_at_ms = NULL,
-                last_error_code = NULL, updated_at_ms = excluded.updated_at_ms",
+                last_error_code = NULL, updated_at_ms = excluded.updated_at_ms,
+                enabled_source = 'user'",
             rusqlite::params![enabled as i64, interval_seconds, notifications_enabled as i64, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// R6a（REFRESH_STORM，v27）：询问条幅的「稍后」——dismiss 后永不再问，
+    /// enabled 保持原值（真要开仍可从设置页显式打开，那会置回 `user`）。
+    pub fn trust_monitor_dismiss(&self) -> Result<(), AuthorityError> {
+        self.conn.execute(
+            "UPDATE trust_monitor_state SET enabled_source = 'dismissed' WHERE config_id = 1",
+            [],
         )?;
         Ok(())
     }
@@ -4155,6 +4205,46 @@ impl AuthorityDb {
 
 #[cfg(test)]
 mod tests {
+    /// R6a（REFRESH_STORM，v27）：enabled_source 四态的迁移不变量——
+    /// 全新/迁移库种子 `legacy_default`；显式保存置 `user` 且重开库（迁移重跑）
+    /// 不覆写；dismiss 置 `dismissed` 且不被后续 record_result 心跳冲掉。
+    #[test]
+    fn trust_monitor_enabled_source_migration_tri_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "av-v27-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.sqlite3");
+        {
+            let db = AuthorityDb::open(&path, 1).unwrap();
+            let state = db.trust_monitor_state_get().unwrap().expect("seed row");
+            assert_eq!(state.enabled_source, "legacy_default", "R6a 未翻默认：种子必须 legacy_default");
+            assert!(!state.enabled, "R6a 未翻默认：enabled 保持 0");
+            db.trust_monitor_state_set(true, 30, false, 2).unwrap();
+            assert_eq!(db.trust_monitor_state_get().unwrap().unwrap().enabled_source, "user");
+            db.trust_monitor_record_result("partial", Some(3), None, 3).unwrap();
+            assert_eq!(db.trust_monitor_state_get().unwrap().unwrap().enabled_source, "user",
+                "传感心跳不得覆写 user");
+        }
+        // 重开（迁移/补跑链重执行）：user 保持。
+        {
+            let db = AuthorityDb::open(&path, 4).unwrap();
+            assert_eq!(db.trust_monitor_state_get().unwrap().unwrap().enabled_source, "user",
+                "迁移不得覆写显式选择");
+            db.trust_monitor_dismiss().unwrap();
+            assert_eq!(db.trust_monitor_state_get().unwrap().unwrap().enabled_source, "dismissed");
+            db.trust_monitor_record_result("partial", Some(5), None, 5).unwrap();
+            assert_eq!(db.trust_monitor_state_get().unwrap().unwrap().enabled_source, "dismissed",
+                "dismissed 同样不被心跳覆写");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     fn tmp_db(tag: &str) -> PathBuf {

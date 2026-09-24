@@ -161,35 +161,11 @@ pub fn claude_project_walk_errors(home: &Path) -> Vec<String> {
 /// 路径字符串序、extension == jsonl）；缺失根不报错、根元数据不可读时报错
 /// ——错误语义与 `claude_project_walk_errors` 一致。
 pub fn claude_project_files_with_errors(home: &Path) -> (Vec<PathBuf>, Vec<String>) {
-    let root = home.join(".claude").join("projects");
-    let mut files: Vec<PathBuf> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-    match std::fs::metadata(&root) {
-        Ok(metadata) if metadata.is_dir() => {
-            for entry in walkdir::WalkDir::new(&root).into_iter() {
-                match entry {
-                    Ok(e) => {
-                        if !e.file_type().is_file() {
-                            continue;
-                        }
-                        if e.path().extension().map(|x| x == "jsonl").unwrap_or(false) {
-                            files.push(e.into_path());
-                        }
-                    }
-                    Err(error) => {
-                        let path = error.path().unwrap_or(&root);
-                        errors.push(format!("{}: {error}", path.display()));
-                    }
-                }
-            }
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-            errors.push(format!("{}: {error}", root.display()));
-        }
-        Err(_) => {}
-    }
-    files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    let (mut files, errors) = crate::sources::walk_util::walk_files_with_errors(
+        &home.join(".claude").join("projects"),
+        |e| e.path().extension().map(|x| x == "jsonl").unwrap_or(false),
+    );
+    crate::sources::walk_util::sort_by_path_string(&mut files);
     (files, errors)
 }
 

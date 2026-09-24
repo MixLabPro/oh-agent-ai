@@ -273,35 +273,17 @@ pub fn codex_rollout_files_with_errors(home: &Path) -> (Vec<PathBuf>, Vec<String
     let mut files: Vec<PathBuf> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     for (_kind, rel) in entries {
-        let root = home.join(".codex").join(rel);
-        match std::fs::metadata(&root) {
-            Ok(metadata) if metadata.is_dir() => {
-                for entry in walkdir::WalkDir::new(&root).into_iter() {
-                    match entry {
-                        Ok(e) => {
-                            if !e.file_type().is_file() {
-                                continue;
-                            }
-                            let name = e.file_name().to_string_lossy();
-                            if name.starts_with("rollout-") && name.ends_with(".jsonl") {
-                                files.push(e.into_path());
-                            }
-                        }
-                        Err(error) => {
-                            let path = error.path().unwrap_or(&root);
-                            errors.push(format!("{}: {error}", path.display()));
-                        }
-                    }
-                }
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                errors.push(format!("{}: {error}", root.display()));
-            }
-            Err(_) => {}
-        }
+        let (mut part, part_errors) = crate::sources::walk_util::walk_files_with_errors(
+            &home.join(".codex").join(rel),
+            |e| {
+                let name = e.file_name().to_string_lossy();
+                name.starts_with("rollout-") && name.ends_with(".jsonl")
+            },
+        );
+        files.append(&mut part);
+        errors.extend(part_errors);
     }
-    files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    crate::sources::walk_util::sort_by_path_string(&mut files);
     (files, errors)
 }
 
