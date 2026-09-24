@@ -39,7 +39,7 @@ fn plugin_tokens_by_host_lists_installed_and_stays_silent_when_absent() {
     .unwrap();
 
     // 走正式 ingest（exactly-once + authority 落库），再验 tokens 可见性。
-    let results = agent_vitals_runtime::ingest::plugin_ingest::ingest_installed("ns-tk", &data_home, &user_home);
+    let results = agent_vitals_ingest::plugin_ingest::ingest_installed("ns-tk", &data_home, &user_home);
     assert_eq!(results.len(), 1, "恰一个已装 manifest: {results:?}");
     let (slug, res) = &results[0];
     assert_eq!(slug, "zcode", "首条必须是成功条目而非 manifest 错误: {res:?}");
@@ -59,7 +59,7 @@ fn plugin_tokens_by_host_lists_installed_and_stays_silent_when_absent() {
         "金额面不入（billing 声明前 L0 纪律）");
 
     // 幂等重放：duplicate 吸收，tokens 不变。
-    let _ = agent_vitals_runtime::ingest::plugin_ingest::ingest_installed("ns-tk", &data_home, &user_home);
+    let _ = agent_vitals_ingest::plugin_ingest::ingest_installed("ns-tk", &data_home, &user_home);
     let monthly2 = repo.monthly_summary(&MonthlySummaryQuery { month: "2026-09".into() });
     assert_eq!(monthly2.tokens_by_host.get("plugin:zcode").unwrap().total, 33);
 

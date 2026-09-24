@@ -19,9 +19,8 @@ path = "src/lib.rs"
 # `SummaryRepository` trait（`agent-vitals-data::repository`）的具体实现
 # 因此住在这里（唯一同时看得到 hosts 与 data 的 crate），不是 data 自己实现
 # （docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md §8.1）。
-# `notify`：2026-09-22 产品拍板（P2_WATCHER_PRODUCT_REVIEW.md 方案 A）后解除禁令，
-# 但**只在 `watcher` feature 下引入**（`optional = true`，desktop 显式启用）——
-# 默认构建（CLI / wasm）零该依赖，NoopWatcher 路径照常（Vite 同款，spec §9-P2）。
+# `notify` / `libc`：W3 起只在 `agent-vitals-ingest` 里（watcher / self_monitor 的家），
+# 本门面的 `watcher` feature 只做转发。
 # `tokio`/`chrono` 仍是纪律禁项（async 化与双时间口径的入口，未评审不得放开）。
 
 # 内部 MCP 工具门控（增量 7.5 `query_sql_readonly` / 增量 6 `authority_audit`）。
@@ -32,10 +31,11 @@ mcp-internal = []
 # P2 watcher（SourceGraph spec §9-P2）：notify 6.x（macOS FSEvents / Linux
 # inotify）文件事件 → 去抖 → 唤醒 tick 对账 + watch-only 消费者。不开 =
 # NoopWatcher（tick 5min 兜底照常，Vite createNoopWatcher 同款）。
-watcher = ["dep:notify"]
+watcher = ["agent-vitals-ingest/watcher"]
 
 [dependencies]
 agent-vitals-runtime-core = { path = "../agent-vitals-runtime-core" }
+agent-vitals-ingest = { path = "../agent-vitals-ingest" }
 agent-vitals-billing = { path = "../agent-vitals-billing" }
 agent-vitals-query = { path = "../agent-vitals-query" }
 agent-vitals-data = { path = "../agent-vitals-data" }
@@ -52,12 +52,3 @@ serde_json = { version = "1", features = ["preserve_order"] }
 regex = "1"
 sha2 = "0.10"
 walkdir = "2"
-# P2 watcher 专用（feature `watcher`，见上）——平台原生后端由 notify 选择
-# （macOS FSEvents / Linux inotify / Windows ReadDirectoryChangesW）。
-notify = { version = "6.1", optional = true }
-# 自看护（REVIEW P4）唯一新增依赖：POSIX `getrusage`（`ingest::self_monitor`）
-# 读自身累计 CPU 时间。用 POSIX 标准 API 而非 macOS 专属的 `proc_pidinfo`——
-# 覆盖面更宽，且 `libc` 早已是 tauri 链下来的传递依赖，这里只是把它声明
-# 成直接依赖，没有新拉一条依赖链。`#[cfg(unix)]` 门控，非 unix 平台读不到
-# 就诚实返回 `None`，不编造。
-libc = "0.2"

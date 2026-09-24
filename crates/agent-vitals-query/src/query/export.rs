@@ -430,7 +430,7 @@ mod tests {
     /// 保证库内形状与真实 ingest 完全一致（形状来源纪律：先读产生方）。
     fn seed(home: &Path, host: &str, ns: &str, facts: &[Value]) {
         let db = open_db(home);
-        let r = agent_vitals_runtime::ingest::sql_sync::write_flat_facts_to_authority(&db, host, ns, facts, 1_500)
+        let r = agent_vitals_ingest::sql_sync::write_flat_facts_to_authority(&db, host, ns, facts, 1_500)
             .unwrap();
         assert_eq!(r.inserted, facts.len(), "种子事实必须全部入库");
     }

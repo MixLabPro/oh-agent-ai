@@ -29,6 +29,6 @@ walkdir = "2"
 
 [dev-dependencies]
 # 两个端到端测试（summary 插件宿主、export 种子）要走真实 ingest 写入再读——
-# ingest 在本 crate 之上，dev-dependency 成环是 Cargo 允许的：跨边界的只有 data 层
+# ingest 在本 crate 之上（agent-vitals-ingest），dev-dependency 成环是 Cargo 允许的：跨边界的只有 data 层
 # 类型（AuthorityDb），ENV_LOCK 在 runtime-core，不会出现同一 crate 两份类型。
-agent-vitals-runtime = { path = "../agent-vitals-runtime" }
+agent-vitals-ingest = { path = "../agent-vitals-ingest" }

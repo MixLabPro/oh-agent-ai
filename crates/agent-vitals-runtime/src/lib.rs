@@ -56,7 +56,7 @@ pub use pricing::pricing_catalog;
 pub use billing::quota_reminder;
 
 // ── ingest/ 同步与入库域 ──
-pub mod ingest;
+pub use agent_vitals_ingest::ingest;
 pub use ingest::sql_sync;
 pub use core::sql_authority;
 pub use ingest::sync_service;
