@@ -140,11 +140,26 @@ fn crate_refs(code: &str) -> Vec<String> {
     out
 }
 
-/// 本守卫覆盖的 crate：runtime 本体 + W3 拆出的地基 crate（L0–L1 之间同样有
-/// 方向——`core` 不许依赖 `envelope`/`events`/`skills`，Cargo 管不到 crate 内部）。
+/// 本守卫覆盖的 crate：runtime 门面 + W3 拆出的各层 crate。crate 之间的方向由 Cargo
+/// 保证；**crate 内部**的层（如 runtime-core 里 L0 `core` 不许依赖 L1 `envelope`，
+/// query crate 里 L2 `sources` 不许依赖 L3 `query`）只有这个守卫管。
+const RUNTIME_FAMILY: &[&str] = &[
+    "agent-vitals-runtime",
+    "agent-vitals-runtime-core",
+    "agent-vitals-query",
+    "agent-vitals-billing",
+    "agent-vitals-ingest",
+    "agent-vitals-trust",
+    "agent-vitals-mcp",
+];
+
 fn src_dirs() -> Vec<std::path::PathBuf> {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    vec![manifest.join("src"), manifest.join("../agent-vitals-runtime-core/src")]
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    RUNTIME_FAMILY
+        .iter()
+        .map(|name| crates.join(name).join("src"))
+        .filter(|dir| dir.join("lib.rs").is_file())
+        .collect()
 }
 
 #[test]

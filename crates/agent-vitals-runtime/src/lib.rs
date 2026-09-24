@@ -67,7 +67,7 @@ pub use ingest::reimport_verify;
 pub use core::lease;
 
 // ── query/ 读侧与服务面域 ──
-pub mod query;
+pub use agent_vitals_query::query;
 pub use query::summary;
 pub use query::decision_matrix;
 pub use query::trace_service;
@@ -80,7 +80,7 @@ pub use trust::trust_identity;
 pub use trust::trust_runtime_monitor;
 
 // ── sources/ 数据源接入编排域 ──
-pub mod sources;
+pub use agent_vitals_query::sources;
 pub use sources::session_sources;
 pub use sources::custom_sources;
 pub use sources::source_controls;
@@ -88,4 +88,4 @@ pub use sources::host_registry;
 
 // ── 既有子目录 ──
 pub mod mcp;
-pub mod sessions;
+pub use agent_vitals_query::sessions;

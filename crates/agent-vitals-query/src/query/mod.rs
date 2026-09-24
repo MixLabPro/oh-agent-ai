@@ -2,7 +2,7 @@
 //! 读侧与服务面域。
 
 
-pub(crate) mod cost_breakdown;
+pub mod cost_breakdown;
 pub mod decision_matrix;
 pub mod export;
 pub mod read_gate;

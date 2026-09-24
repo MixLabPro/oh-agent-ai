@@ -93,14 +93,14 @@ impl Tokens {
     }
 }
 
-pub(crate) struct WindowResult {
-    pub(crate) rows: Vec<Value>,
-    pub(crate) total_tokens: i64,
-    pub(crate) priced_tokens: i64,
-    pub(crate) unresolved_tokens: i64,
-    pub(crate) subscription_tokens: i64,
+pub struct WindowResult {
+    pub rows: Vec<Value>,
+    pub total_tokens: i64,
+    pub priced_tokens: i64,
+    pub unresolved_tokens: i64,
+    pub subscription_tokens: i64,
     /// `{amount_minor, currency, basis}` rows — never combined across currency or basis.
-    pub(crate) amounts: Vec<Value>,
+    pub amounts: Vec<Value>,
     pub(crate) max_event_ms: Option<i64>,
     pub(crate) has_unresolved: bool,
 }
@@ -234,7 +234,7 @@ fn collect_window(
 /// 「移出估算 ¥X」与 MCP `cost_breakdown` 的桶金额必须逐位相等（规格 R5），
 /// 所以不许第二套价格查询。`where_sql` 可引用 `f`（usage_facts）与 `r`
 /// （route_evidence，按 `evidence_id` 主键左连，无扇出）。
-pub(crate) fn price_fact_selection(
+pub fn price_fact_selection(
     conn: &rusqlite::Connection,
     where_sql: &str,
     params: &[rusqlite::types::Value],

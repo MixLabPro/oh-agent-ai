@@ -778,8 +778,8 @@ mod tests {
     fn unknown_host_is_rejected_at_the_service_layer_too() {
         // 服务层自己也拒一遍（双保险）：TRACE_HOSTS 与 ingest 的 FACT_HOSTS
         // 同表，新增宿主必须两处同步。
-        assert_eq!(TRACE_HOSTS.len(), crate::ingest_service::FACT_HOSTS.len());
-        for h in crate::ingest_service::FACT_HOSTS {
+        assert_eq!(TRACE_HOSTS.len(), crate::core::fact_hosts::FACT_HOSTS.len());
+        for h in crate::core::fact_hosts::FACT_HOSTS {
             assert!(TRACE_HOSTS.contains(&h), "{h} in FACT_HOSTS but not TRACE_HOSTS");
         }
     }
