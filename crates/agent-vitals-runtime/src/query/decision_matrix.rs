@@ -60,7 +60,7 @@ pub fn decision_matrix(data_home: &Path, month: &str) -> Result<Value, String> {
     // 记下 (host, model)，让这些组合按「订阅覆盖」而非「未计价」呈现（验收条件 2：
     // has_subscription 的原始 billing_mode 与申报归因的口径缝隙）。
     let mut subscription_covered: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
-    let cost_result = crate::mcp::cost_breakdown::run(&cost_args, data_home);
+    let cost_result = crate::query::cost_breakdown::run(&cost_args, data_home);
     if let Err(e) = &cost_result {
         cost_note = Some(format!("计价管线不可用（{e}）：金额列按未计价显示，与真无价不可区分，请重试"));
     }
@@ -255,13 +255,13 @@ fn attach_top_sessions(
             .or_default()
             .push((tokens, session_key, first, last));
     }
-    let salt = crate::mcp::session_ref::load_or_create_salt(data_home)
+    let salt = crate::query::session_ref::load_or_create_salt(data_home)
         .map_err(|e| format!("session_ref salt: {e}"))?;
     for (combo, mut sessions) in per_combo {
         sessions.sort_by_key(|(tokens, _, _, _)| std::cmp::Reverse(*tokens));
         let top: Vec<Value> = sessions.iter().take(TOP_SESSIONS_PER_COMBO).map(|(tokens, key, first, last)| {
             json!({
-                "session_ref": crate::mcp::session_ref::session_ref(&salt, key),
+                "session_ref": crate::query::session_ref::session_ref(&salt, key),
                 // session_key 只在进程内做 failures 对齐，不进 UI（前端只拿 sr_ 引用）。
                 "session_key": key,
                 "span_first_ms": first, "span_last_ms": last,

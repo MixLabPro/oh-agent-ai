@@ -15,7 +15,7 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use super::ToolError;
+use crate::envelope::ToolError;
 
 const SALT_FILE: &str = ".mcp-session-salt";
 const SALT_LEN: usize = 32;

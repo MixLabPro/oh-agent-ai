@@ -1689,7 +1689,7 @@ fn pricing_cards_asof_falls_back_to_current_when_no_snapshot() {
 
         let db = seed_authority_db();
         // 快照表为空 → asof 任何时点都退当前卡。
-        let got = PricingCards::asof(&Some(db), Some(crate::sql_sync::now_ms()));
+        let got = PricingCards::asof(&Some(db), Some(crate::clock::now_ms()));
         assert_eq!(got.main, cur.main);
         assert_eq!(got.codex, cur.codex);
     });
@@ -1738,7 +1738,7 @@ fn monthly_summary_replays_historical_pricing_snapshot() {
             "codex_pricing": crate::sessions::codex_cost::load_codex_pricing(),
         })
         .to_string();
-        db.pricing_snapshot_put("v-now", "test", &snap_now, crate::sql_sync::now_ms())
+        db.pricing_snapshot_put("v-now", "test", &snap_now, crate::clock::now_ms())
             .unwrap();
         drop(db);
 

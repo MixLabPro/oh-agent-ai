@@ -12,7 +12,7 @@ use std::path::Path;
 use agent_vitals_domain::data_contract::MoneyMinor;
 use serde_json::{json, Value};
 
-use super::{build_envelope, AuthorityHandle, ToolError, ToolSpec};
+use crate::envelope::{build_envelope, AuthorityHandle, ToolError, ToolSpec};
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -161,10 +161,10 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let status = if current.has_unresolved { "partial" } else { "complete" };
     let coverage = json!({
         "status": status,
-        "requested_from": super::ms_to_rfc3339_beijing(start_ms),
-        "requested_to": super::ms_to_rfc3339_beijing(end_ms),
-        "covered_from": super::ms_to_rfc3339_beijing(start_ms),
-        "covered_to": super::ms_to_rfc3339_beijing(end_ms),
+        "requested_from": crate::envelope::ms_to_rfc3339_beijing(start_ms),
+        "requested_to": crate::envelope::ms_to_rfc3339_beijing(end_ms),
+        "covered_from": crate::envelope::ms_to_rfc3339_beijing(start_ms),
+        "covered_to": crate::envelope::ms_to_rfc3339_beijing(end_ms),
         "missing_hosts": [],
         "priced_tokens": current.priced_tokens,
         "unresolved_tokens": current.unresolved_tokens,

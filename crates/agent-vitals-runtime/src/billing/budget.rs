@@ -136,7 +136,7 @@ where
 pub fn budget_profiles_status_sql_at(data_home: &Path, month: &str) -> Option<Value> {
     let db = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(data_home),
-        crate::sql_sync::now_ms(),
+        crate::clock::now_ms(),
     ).ok()?;
     let profiles = db.budget_profiles_get().ok()?;
     let summary = {
@@ -510,7 +510,7 @@ fn render_budget_month(month: &str, result: Option<&Value>) -> String {
 pub fn month_cost_sql(month: &str) -> Option<Value> {
     let db = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
-        crate::sql_sync::now_ms(),
+        crate::clock::now_ms(),
     )
     .ok()?;
     let (start, end) = agent_vitals_data::authority_query::beijing_month_bounds_ms(month)?;
@@ -530,7 +530,7 @@ pub fn month_cost_sql(month: &str) -> Option<Value> {
 pub fn budget_config_sql(data_home: &Path) -> Value {
     match agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(data_home),
-        crate::sql_sync::now_ms(),
+        crate::clock::now_ms(),
     ) {
         Ok(db) => {
             seed_budget_config_from_legacy(data_home, &db);
@@ -656,7 +656,7 @@ fn seed_budget_config_from_legacy(
     let m_minor = agent_vitals_domain::util::pyround(m * 100.0, 0) as i64;
     let d_minor = agent_vitals_domain::util::pyround(d * 100.0, 0) as i64;
     let bp = agent_vitals_domain::util::pyround(warn_ratio.unwrap_or(0.8) * 10_000.0, 0) as i64;
-    let saved = db.budget_config_set(m_minor, d_minor, bp, crate::sql_sync::now_ms())
+    let saved = db.budget_config_set(m_minor, d_minor, bp, crate::clock::now_ms())
         .is_ok();
     if saved {
         let _ = write_budget_config_origin(data_home, "legacy_import");
@@ -693,7 +693,7 @@ pub fn budget_status_sql(month: &str) -> Option<Value> {
 pub fn budget_status_sql_at(data_home: &Path, month: &str) -> Option<Value> {
     let db = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(data_home),
-        crate::sql_sync::now_ms(),
+        crate::clock::now_ms(),
     )
     .ok()?;
     seed_budget_config_from_legacy(data_home, &db);
@@ -730,7 +730,7 @@ pub fn budget_status_sql_at(data_home: &Path, month: &str) -> Option<Value> {
     let spent_minor = agent_vitals_domain::util::pyround(metered_cny_f64 * 100.0, 0) as i64;
 
     // snooze：snoozes 行存在且 until_ms > now → 抑制告警输出标记。
-    let now_ms = crate::sql_sync::now_ms();
+    let now_ms = crate::clock::now_ms();
     let snooze_until = db
         .budget_snooze_get()
         .ok()
@@ -825,7 +825,7 @@ pub fn evaluate_alert_from_sql(data_home: &Path) -> Value {
 
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(data_home),
-        crate::sql_sync::now_ms(),
+        crate::clock::now_ms(),
     ) else {
         // 库打不开时既没有成本证据也没有预算证据；用默认配置只借用稳定输出
         // shape，随后清空全部预算判断字段。
@@ -892,10 +892,10 @@ pub fn budget_snooze_set_sql(until_iso: &str) -> Result<i64, String> {
         .ok_or_else(|| format!("unparseable --until `{until_iso}` (want YYYY-MM-DDTHH:MM:SS)"))?;
     let db = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
-        crate::sql_sync::now_ms(),
+        crate::clock::now_ms(),
     )
     .map_err(|e| e.to_string())?;
-    let now = crate::sql_sync::now_ms();
+    let now = crate::clock::now_ms();
     db.budget_snooze_set(until_ms, now)
         .map_err(|e| e.to_string())?;
     Ok(until_ms)
@@ -1361,7 +1361,7 @@ mod tests {
             }
             let db = agent_vitals_data::authority::AuthorityDb::open(
                 &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
-                crate::sql_sync::now_ms(),
+                crate::clock::now_ms(),
             )
             .unwrap();
             db.budget_config_set(monthly_minor, 3_000, 8_000, 1)
@@ -1383,7 +1383,7 @@ mod tests {
         // fresh_budget_env 拿进程级 ENV_LOCK，_guard 活着时再调就是自己锁
         // 自己（本测试第一版挂死的直接原因，sample 栈钉在
         // pthread_mutex_lock_wait 上）。
-        let far = crate::sql_sync::now_ms() + 86_400_000;
+        let far = crate::clock::now_ms() + 86_400_000;
         {
             let (_guard, db, month) = fresh_budget_env("snooze");
             db.budget_config_set(60_000, 3_000, 8_000, 1).unwrap();
@@ -1399,7 +1399,7 @@ mod tests {
         {
             let (_guard, db, month) = fresh_budget_env("snooze2");
             db.budget_config_set(60_000, 3_000, 8_000, 1).unwrap();
-            db.budget_snooze_set(crate::sql_sync::now_ms() - 1_000, 1)
+            db.budget_snooze_set(crate::clock::now_ms() - 1_000, 1)
                 .unwrap();
             drop(db);
             let v = budget_status_sql(&month).unwrap();
@@ -1590,7 +1590,7 @@ mod tests {
         );
         db.budget_config_set(100, 50, 8_000, 1).unwrap();
         // 远未来 snooze（now + 1 天）。
-        db.budget_snooze_set(crate::sql_sync::now_ms() + 86_400_000, 1)
+        db.budget_snooze_set(crate::clock::now_ms() + 86_400_000, 1)
             .unwrap();
         drop(db);
         let a = evaluate_alert_from_sql(&dir);
@@ -1603,7 +1603,7 @@ mod tests {
             1,
         )
         .unwrap();
-        db.budget_snooze_set(crate::sql_sync::now_ms() - 1_000, 1)
+        db.budget_snooze_set(crate::clock::now_ms() - 1_000, 1)
             .unwrap();
         drop(db);
         let a = evaluate_alert_from_sql(&dir);

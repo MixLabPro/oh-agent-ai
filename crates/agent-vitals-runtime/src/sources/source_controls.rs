@@ -70,10 +70,10 @@ pub fn delete_imported_source_data(
     }
     let db = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(data_home),
-        crate::sql_sync::now_ms(),
+        crate::clock::now_ms(),
     )
     .map_err(|error| format!("authority database unavailable: {error}"))?;
-    let deleted = db.delete_imported_host_data(host, crate::sql_sync::now_ms())
+    let deleted = db.delete_imported_host_data(host, crate::clock::now_ms())
         .map_err(|error| format!("delete imported data failed: {error}"))?;
     // Best-effort cross-process invalidation marker.  The Tauri event is the
     // fast path; this marker lets an already-open desktop notice an MCP delete.

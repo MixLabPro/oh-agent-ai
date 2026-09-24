@@ -35,26 +35,27 @@ pub use core::statistics_timezone;
 pub use core::retention;
 
 // ── billing/ 计费与价格域（旧路径 re-export 垫片保持外部兼容）──
+pub mod pricing;
 pub mod billing;
 pub use billing::budget;
-pub use billing::money;
+pub use pricing::money;
 pub use billing::billing_preview;
 pub use billing::budget_notifications;
 pub use billing::price_discovery;
-pub use billing::price_overrides;
-pub use billing::pricing_catalog;
+pub use pricing::price_overrides;
+pub use pricing::pricing_catalog;
 pub use billing::quota_reminder;
 
 // ── ingest/ 同步与入库域 ──
 pub mod ingest;
 pub use ingest::sql_sync;
-pub use ingest::sql_authority;
+pub use core::sql_authority;
 pub use ingest::sync_service;
 pub use ingest::sync_control;
 pub use ingest::ingest_service;
 pub use ingest::plugin_ingest;
 pub use ingest::reimport_verify;
-pub use ingest::lease;
+pub use core::lease;
 
 // ── query/ 读侧与服务面域 ──
 pub mod query;
@@ -77,6 +78,7 @@ pub use sources::source_controls;
 pub use sources::host_registry;
 
 // ── 既有子目录 ──
+pub mod envelope;
 pub mod mcp;
 pub mod sessions;
 pub mod skills;

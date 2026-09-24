@@ -5,9 +5,9 @@
 pub mod billing_preview;
 pub mod budget;
 pub mod budget_notifications;
-pub mod money;
+pub use crate::pricing::money;
 pub mod price_discovery;
-pub mod price_overrides;
-pub mod pricing_catalog;
+pub use crate::pricing::price_overrides;
+pub use crate::pricing::pricing_catalog;
 pub mod quota_reminder;
 

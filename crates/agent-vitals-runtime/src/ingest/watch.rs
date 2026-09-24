@@ -429,43 +429,9 @@ impl Debouncer {
     }
 }
 
-/// skills 安装根（`scanner::DEFAULT_ROOTS` 里 home 相对的那部分）→
-/// watch-only 注册用。`./` 开头的项目本地根**不监听**：桌面 app 的
-/// cwd 无产品语义，监听它会做出随启动目录变化的怪行为。
-pub fn default_skill_watch_roots(user_home: &Path) -> Vec<(String, PathBuf)> {
-    let mut out = Vec::new();
-    for (host, root) in crate::skills::scanner::DEFAULT_ROOTS.iter() {
-        let Some(rel) = root.strip_prefix("~/") else {
-            continue; // "./…" 项目本地根跳过
-        };
-        out.push((host.to_string(), user_home.join(rel)));
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-/// 四宿主事实面的监听根——**与 `sync_facts` 的发现根同一来源**
-/// （ingest/sync_service.rs 的 batches 枚举）：watcher 只是那趟 walk 的
-/// 「早点跑」触发器，不是第二个真相源。根不存在也返回（注册进 pending，
-/// watcher 超时循环补挂）。
-pub fn default_source_watch_roots(user_home: &Path) -> Vec<(&'static str, PathBuf)> {
-    let mut roots: Vec<(&'static str, PathBuf)> = vec![
-        ("claude-code", user_home.join(".claude").join("projects")),
-        // Phase B 修正（拓扑 parity 测试抓到）：此前误用 codex_home() 的返回值
-        // ——它是 home 根本身（~），等于递归监听整个 home。真实发现根是
-        // ~/.codex 下的 sessions + archived_sessions（codex_rollout_files）。
-        ("codex", user_home.join(".codex")),
-        (
-            "workbuddy",
-            agent_vitals_hosts::workbuddy_session::workbuddy_root(user_home),
-        ),
-    ];
-    if let Some(dsh) = crate::home::dsh_home() {
-        roots.push(("dsh", dsh));
-    }
-    roots
-}
+/// 兼容路径：两个默认监听根函数 W3 挪进 `sources::watch_topology`（它们只描述
+/// 「监听哪些根」，是源配置；此前放在这里让 `sources ↔ ingest` 互相引用成环）。
+pub use crate::sources::watch_topology::{default_skill_watch_roots, default_source_watch_roots};
 
 impl WatchRegistry {
     /// 从拓扑快照构造（Phase B）：FactsSource → 源根（唤醒 tick）；

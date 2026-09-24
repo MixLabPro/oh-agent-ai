@@ -122,7 +122,7 @@ fn tmp_dir() -> std::path::PathBuf {
 
 /// spec §8.1.2 / Q12。返回一份机器可读报告（`verified` + 差异分类）。
 pub fn run(data_home: &Path) -> Result<Value, String> {
-    let now_ms = crate::sql_sync::now_ms();
+    let now_ms = crate::clock::now_ms();
     let tmp = tmp_dir();
     let out = run_inner(data_home, &tmp, now_ms);
     let _ = std::fs::remove_dir_all(&tmp); // 无论成败都清理

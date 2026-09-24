@@ -99,6 +99,15 @@ pub fn yesterday_system() -> String {
     format_zoned_date(date)
 }
 
+/// 注入时钟（Phase 1.5）：runtime 是唯一读时钟层。W3 从 `ingest::sql_sync`
+/// 下沉到这里——它是全 crate 最底层的依赖，不能挂在写入侧模块上。
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

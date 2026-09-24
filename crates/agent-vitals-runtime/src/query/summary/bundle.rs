@@ -118,7 +118,7 @@ pub fn overview_bundle_timed(data_home: &Path) -> (OverviewBundle, BundleTimings
     let bounds = agent_vitals_data::authority_query::beijing_month_bounds_ms(&month);
     let db = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(data_home),
-        crate::sql_sync::now_ms(),
+        crate::clock::now_ms(),
     )
     .ok();
     // P3 子计时（收敛调查 §2.4）：SQL 面隔离实测全部亚百毫秒，2.2s 基线的
@@ -367,7 +367,7 @@ pub fn codex_merged_from_sql(data_home: &Path) -> (serde_json::Value, Option<Str
     // （全 DDL），之后就分不清「从没同步」和「同步了但 codex 无用量」。
     let missing = !path.exists();
     let by_hour_model =
-        match agent_vitals_data::authority::AuthorityDb::open(&path, crate::sql_sync::now_ms()) {
+        match agent_vitals_data::authority::AuthorityDb::open(&path, crate::clock::now_ms()) {
             Ok(db) => {
                 agent_vitals_data::authority_query::codex_by_hour_model(db.conn(), 0, i64::MAX)
                     .unwrap_or_else(|_| json!({}))

@@ -260,8 +260,8 @@ fn write_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, Tool
                 return Err(ToolError::new("invalid_argument", "reason is too long"));
             }
             let path = agent_vitals_data::authority::default_authority_path(data_home);
-            let db = AuthorityDb::open(&path, crate::sql_sync::now_ms()).map_err(authority_error)?;
-            let now = crate::sql_sync::now_ms();
+            let db = AuthorityDb::open(&path, crate::clock::now_ms()).map_err(authority_error)?;
+            let now = crate::clock::now_ms();
             let evidence = format!("mcp-user-action:{to_status}");
             let fingerprint = format!("mcp-transition:{issue_id}:{to_status}:{reason}");
             let transition_id = db.with_immediate_txn(|conn| {
@@ -371,7 +371,7 @@ fn save_pricing_catalog_policy(data_home: &Path, network_enabled: bool) -> Resul
 }
 
 fn issue_window(args: &Value) -> (Option<i64>, Option<i64>) {
-    let now = crate::sql_sync::now_ms();
+    let now = crate::clock::now_ms();
     (
         args.get("from_ms").and_then(Value::as_i64).or_else(|| Some(now.saturating_sub(30 * 24 * 60 * 60 * 1000))),
         args.get("to_ms").and_then(Value::as_i64).or_else(|| Some(now.saturating_add(1))),

@@ -101,7 +101,7 @@ pub fn run(_args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let known_hosts = report["by_host"]
         .as_object()
         .is_some_and(|hosts| !hosts.is_empty());
-    let stale_hosts = stale_hosts(&conn, crate::sql_sync::now_ms());
+    let stale_hosts = stale_hosts(&conn, crate::clock::now_ms());
     let coverage = if known_hosts {
         json!({
             "status": if stale_hosts.is_empty() { "complete" } else { "partial" },
@@ -622,7 +622,7 @@ pub fn collect_report_at_depth(
     let pricing_stale = pricing_latest
         .as_ref()
         .map(|(_, captured_at_ms, _)| {
-            crate::sql_sync::now_ms().saturating_sub(*captured_at_ms) > 30 * 24 * 60 * 60 * 1_000
+            crate::clock::now_ms().saturating_sub(*captured_at_ms) > 30 * 24 * 60 * 60 * 1_000
         })
         .unwrap_or(true);
 
@@ -1105,7 +1105,7 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let path = agent_vitals_data::authority::default_authority_path(&home);
         let db = AuthorityDb::open(&path, 1_700_000_000_000).unwrap();
-        let now = crate::sql_sync::now_ms();
+        let now = crate::clock::now_ms();
         let old = now - super::super::FRESHNESS_STALE_AFTER_MS - 1;
         let conn = db.conn();
         conn.execute(

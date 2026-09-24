@@ -1634,7 +1634,7 @@ fn persist_findings_as_issues(
 ) {
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(&crate::home::data_home()),
-        crate::sql_sync::now_ms(),
+        crate::clock::now_ms(),
     ) else { return };
     // Migrate rows written by older host adapters before the projection reads
     // them.  This is idempotent and keeps the `_ms` column plus metadata.time
@@ -1652,7 +1652,7 @@ fn persist_findings_as_issues(
             let evidence_fingerprint = format!("fnv1a64:{}", agent_vitals_domain::source_identity::fnv1a64_hex(evidence.as_bytes()));
             let opened_at_ms = finding.time
                 .map(agent_vitals_data::issues::to_epoch_ms)
-                .unwrap_or_else(crate::sql_sync::now_ms);
+                .unwrap_or_else(crate::clock::now_ms);
             let metadata = serde_json::json!({
                 "category": finding.category,
                 "tool_name": finding.tool_name,
@@ -1688,7 +1688,7 @@ fn persist_findings_as_issues(
                 ).ok();
                 if matches!(status.as_deref(), Some("closed" | "wontfix" | "acknowledged")) {
                     agent_vitals_data::issues::transition_issue(
-                        conn, &issue_id, "open", crate::sql_sync::now_ms(),
+                        conn, &issue_id, "open", crate::clock::now_ms(),
                         "reappeared", "legacy-finding", &evidence_fingerprint,
                         "legacy-finding", "v0.11", &fingerprint,
                     ).map_err(agent_vitals_data::authority::AuthorityError::Sqlite)?;
@@ -1697,7 +1697,7 @@ fn persist_findings_as_issues(
             });
         }
         let _ = db.with_immediate_txn(|conn| {
-            close_missing_legacy_issues(conn, entry, &current_issue_ids, crate::sql_sync::now_ms())
+            close_missing_legacy_issues(conn, entry, &current_issue_ids, crate::clock::now_ms())
                 .map_err(agent_vitals_data::authority::AuthorityError::Sqlite)
         });
     }

@@ -72,7 +72,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let model_conservation_delta = realtime_tokens.saturating_sub(model_axis_tokens).max(model_axis_tokens.saturating_sub(realtime_tokens));
     let open_quality = scalar(conn, "SELECT COUNT(*) FROM data_quality_issues WHERE resolved_at_ms IS NULL", &[])?;
     let future_revisions = scalar(conn, &format!(
-        "SELECT COUNT(*) FROM sync_runs WHERE status = 'succeeded' AND COALESCE(completed_at_ms, started_at_ms) > {}", crate::sql_sync::now_ms()), &[])?;
+        "SELECT COUNT(*) FROM sync_runs WHERE status = 'succeeded' AND COALESCE(completed_at_ms, started_at_ms) > {}", crate::clock::now_ms()), &[])?;
     let mixed_legacy_groups = scalar(conn, &format!(
         "SELECT COUNT(*) FROM (SELECT host, COALESCE(source_profile, '') p, date(event_ts_ms / 1000, 'unixepoch') d, MAX(CASE WHEN observation_kind = 'legacy_aggregate' THEN 1 ELSE 0 END) legacy, MAX(CASE WHEN observation_kind != 'legacy_aggregate' THEN 1 ELSE 0 END) realtime FROM usage_facts WHERE deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL AND {} GROUP BY host, p, d HAVING legacy = 1 AND realtime = 1)", scope.clause), &scope.params)?;
 

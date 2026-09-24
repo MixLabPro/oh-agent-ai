@@ -152,8 +152,8 @@ fn write_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, Tool
     if !path.exists() {
         return Err(ToolError::new("database_missing", "authority DB does not exist; mutation mode does not create a database"));
     }
-    let db = AuthorityDb::open(&path, crate::sql_sync::now_ms()).map_err(authority_error)?;
-    let now = crate::sql_sync::now_ms();
+    let db = AuthorityDb::open(&path, crate::clock::now_ms()).map_err(authority_error)?;
+    let now = crate::clock::now_ms();
     let data = match action {
         "candidate_put" => {
             let id = required_string(args, "candidate_id")?;

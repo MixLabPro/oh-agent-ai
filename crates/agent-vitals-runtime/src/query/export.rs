@@ -91,7 +91,7 @@ fn open_authority(
 ) -> Result<agent_vitals_data::authority::AuthorityDb, String> {
     agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(data_home),
-        crate::sql_sync::now_ms(),
+        crate::clock::now_ms(),
     )
     .map_err(|e| format!("authority open: {e}"))
 }
@@ -262,7 +262,7 @@ pub fn export_private(data_home: &Path, out_dir: &Path) -> Result<usize, String>
         .unchecked_transaction()
         .map_err(|e| format!("authority snapshot: {e}"))?;
     let mut files = 0usize;
-    for host in crate::ingest_service::FACT_HOSTS {
+    for host in crate::core::fact_hosts::FACT_HOSTS {
         let fields = host_rows(&tx, host)?;
         if fields.is_empty() {
             // 旧行为沿用：无数据的宿主不出文件（JSONL 时代 = 该宿主文件不存在）。
@@ -320,7 +320,7 @@ pub fn export_redacted(data_home: &Path, out_dir: &Path) -> Result<(usize, usize
         .map_err(|e| format!("authority snapshot: {e}"))?;
     let mut files = 0usize;
     let mut total = 0usize;
-    for host in crate::ingest_service::FACT_HOSTS {
+    for host in crate::core::fact_hosts::FACT_HOSTS {
         let fields = host_rows(&tx, host)?;
         if fields.is_empty() {
             continue;

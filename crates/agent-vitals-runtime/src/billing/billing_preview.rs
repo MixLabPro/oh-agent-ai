@@ -13,7 +13,7 @@ use agent_vitals_data::authority::{
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-use crate::mcp::cost_breakdown::{price_fact_selection, WindowResult};
+use crate::query::cost_breakdown::{price_fact_selection, WindowResult};
 
 /// 非 `official_subscription` 的关系在 Beta 不改变金额：预览仍返回三组数字，
 /// 但 `moved` 的金额恒空并带 `changes_amounts: false`，UI 必须照实显示。
@@ -729,7 +729,7 @@ mod tests {
         ).unwrap(), 0, "preview must not persist anything");
 
         let breakdown_args = json!({"from": "2026-08-01", "to": "2026-08-31"});
-        let before = crate::mcp::cost_breakdown::run(&breakdown_args, &home).unwrap();
+        let before = crate::query::cost_breakdown::run(&breakdown_args, &home).unwrap();
         let before_rows = before["data"]["breakdown"].as_array().unwrap().clone();
         let before_metered: i64 = amounts_of(&before_rows, "metered").values().sum();
         assert_eq!(before_metered, moved_usd + kept_usd, "preview moved + kept == whole metered window");
@@ -742,7 +742,7 @@ mod tests {
         assert!(db.billing_recalculation_run("job-r5", 4).unwrap());
         drop(db);
 
-        let after = crate::mcp::cost_breakdown::run(&breakdown_args, &home).unwrap();
+        let after = crate::query::cost_breakdown::run(&breakdown_args, &home).unwrap();
         let after_rows = after["data"]["breakdown"].as_array().unwrap().clone();
         let after_metered: i64 = amounts_of(&after_rows, "metered").values().sum();
         assert_eq!(after_metered, kept_usd, "what stays metered is exactly the preview's kept amount");

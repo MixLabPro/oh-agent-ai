@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 
 use agent_vitals_domain::source_identity::fnv1a64_hex;
-use crate::sql_sync::now_ms;
+use crate::clock::now_ms;
 
 /// 事件契约版本。与 authority schema 演进纪律同款：只增不删不改语义。
 pub const EVENT_SCHEMA_VERSION: i64 = 1;

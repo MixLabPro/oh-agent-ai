@@ -515,7 +515,7 @@ fn open_authority_and_write(
     facts: &[Value],
 ) -> Result<Value, String> {
     let authority_path = agent_vitals_data::authority::default_authority_path(data_home);
-    let now = crate::sql_sync::now_ms();
+    let now = crate::clock::now_ms();
     let db = agent_vitals_data::authority::AuthorityDb::open(&authority_path, now)
         .map_err(|e| format!("authority open: {e}"))?;
     let no_overrides: std::collections::HashMap<String, crate::source_graph::SourceCheckpointOverride> = std::collections::HashMap::new();

@@ -27,13 +27,11 @@ use agent_vitals_domain::workflow::WorkflowEvent;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 
-/// 注入时钟（Phase 1.5）：runtime 是唯一读时钟层。
-pub fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+/// 兼容路径：`now_ms` 已下沉到 `core::clock`（W3 解环——events / trust /
+/// sources / sessions / query 都只为读个时钟就依赖了 ingest，拆 crate 时
+/// 每一条都会成为环）。外部 78 处 `agent_vitals_runtime::sql_sync::now_ms`
+/// 照旧可用；runtime 内部一律写 `crate::clock::now_ms`（`tests/module_layering.rs` 钉住）。
+pub use crate::core::clock::now_ms;
 
 /// 生成 run_id（幂等重跑 = 同来源同时段同 id；首版用 `{trigger}:{unix_ms}`）。
 pub fn new_run_id(trigger: &str) -> String {

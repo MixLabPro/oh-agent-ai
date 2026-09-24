@@ -160,7 +160,7 @@ fn sync_host(
     report: &mut HostSyncReport,
 ) -> Result<(), String> {
     report.files_seen = files.len();
-    let now = crate::sql_sync::now_ms();
+    let now = crate::clock::now_ms();
     // schema v2 新增了 Codex 当前配额快照。升级已有权威库时，旧 source_files
     // 指纹会让所有 rollout 都被跳过，因而必须强制重放一次，不能把「日志未变」
     // 误当成「新派生状态已经存在」。没有 rate_limits 的历史也只重放一次：同一
@@ -480,11 +480,11 @@ pub fn sync_facts_filtered(
     // 回落 JSON checkpoint 或旧 ingest 链，否则会制造「看似同步成功、SQL 未写」。
     let authority = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(data_home),
-        crate::sql_sync::now_ms(),
+        crate::clock::now_ms(),
     )
     .map_err(|e| format!("authority open failed: {e}"))?;
     if let Err(e) =
-        crate::sql_sync::migrate_json_checkpoint(&authority, data_home, crate::sql_sync::now_ms())
+        crate::sql_sync::migrate_json_checkpoint(&authority, data_home, crate::clock::now_ms())
     {
         return Err(format!("checkpoint migration failed: {e}"));
     }
@@ -502,7 +502,7 @@ pub fn sync_facts_filtered(
             // 保留滚动也是写入 → maintenance run（spec §5.4「记录 maintenance
             // run」）+ 事务；失败不盖日戳（审查 P2：静默顺延 24h 是劣化）。
             let run_id = crate::sql_sync::new_run_id("maintenance");
-            let _ = db.begin_run(&run_id, "maintenance", crate::sql_sync::now_ms());
+            let _ = db.begin_run(&run_id, "maintenance", crate::clock::now_ms());
             let retention_months = crate::retention::retention_months(data_home)
                 .map_err(|error| format!("retention configuration failed: {error}"))?;
             let cutoff = crate::sql_sync::retention_cutoff_ms(
@@ -510,7 +510,7 @@ pub fn sync_facts_filtered(
                 retention_months - 1,
             )
             .unwrap_or(0);
-            let now = crate::sql_sync::now_ms();
+            let now = crate::clock::now_ms();
             // 四步各自计数、各自如实报数（独立验证发现：and_then 链只保留尾环
             // 计数，此前 eprintln 拿它当 facts 数——标签与对象双双错位）。
             // 失败语义不变：任一步 Err → 整轮 failed、不盖日戳、下轮全量重跑
@@ -545,7 +545,7 @@ pub fn sync_facts_filtered(
                 if failed.is_none() { "succeeded" } else { "failed" },
                 failed.map(|_| "retention_failed".to_string()).as_deref(),
                 None,
-                crate::sql_sync::now_ms(),
+                crate::clock::now_ms(),
             );
             match failed {
                 None => {
@@ -748,7 +748,7 @@ pub fn sync_facts_filtered(
         let mut bookkeeping_ok = true;
         if let Err(e) = crate::sql_sync::migrate_legacy_subscription_snapshots(
             &authority,
-            crate::sql_sync::now_ms(),
+            crate::clock::now_ms(),
         ) {
             bookkeeping_ok = false;
             crate::core::logging::log_warn("sync_service", &format!("legacy subscriptions: {e}"));
@@ -768,7 +768,7 @@ pub fn sync_facts_filtered(
     // 候选状态与声明占用的一致性自愈（候选被有效声明占着 = accepted）；旧版本的
     // 「重新打开」留下的分裂态在这里收口，否则待确认面板反复问、新声明反复撞
     // 「already used by another live declaration」。
-    match authority.reconcile_candidate_claims(crate::sql_sync::now_ms()) {
+    match authority.reconcile_candidate_claims(crate::clock::now_ms()) {
         Ok(n) if n > 0 => crate::core::logging::log_info(
             "sync_service",
             &format!("billing candidates: re-marked {n} record(s) accepted (held by live declarations)"),
@@ -793,13 +793,13 @@ pub fn sync_facts_filtered(
                 // FactsIngested 自然自愈，所以这个语义是安全的。
                 let db = agent_vitals_data::authority::AuthorityDb::open(
                     &authority_path,
-                    crate::sql_sync::now_ms(),
+                    crate::clock::now_ms(),
                 )
                 .map_err(|e| e.to_string())?;
                 crate::price_discovery::reconcile_unpriced_models(
                     &db,
                     &crate::clock::current_month_beijing(),
-                    crate::sql_sync::now_ms(),
+                    crate::clock::now_ms(),
                 )
                 .map(|_| ())
             }),
@@ -827,7 +827,7 @@ pub fn sync_facts_filtered(
             60_000,
             5_000,
         );
-        match authority.billing_apply_active_declarations(crate::sql_sync::now_ms()) {
+        match authority.billing_apply_active_declarations(crate::clock::now_ms()) {
             Ok(applied) => {
                 report.declarations_applied = applied.attributed;
                 if applied.attributed > 0 {
@@ -851,7 +851,7 @@ pub fn sync_facts_filtered(
 /// re-reads unchanged rollout files and preserves idempotent fact identities.
 pub fn force_codex_provider_replay(data_home: &Path) -> Result<SyncReport, String> {
     let path = agent_vitals_data::authority::default_authority_path(data_home);
-    let db = agent_vitals_data::authority::AuthorityDb::open(&path, crate::sql_sync::now_ms())
+    let db = agent_vitals_data::authority::AuthorityDb::open(&path, crate::clock::now_ms())
         .map_err(|e| format!("open authority for replay: {e}"))?;
     db.with_immediate_txn(|conn| {
         conn.execute(
@@ -1030,7 +1030,7 @@ mod tests {
             assert!(r1.total_appended > 0);
             let db = agent_vitals_data::authority::AuthorityDb::open(
                 &agent_vitals_data::authority::default_authority_path(&data),
-                crate::sql_sync::now_ms(),
+                crate::clock::now_ms(),
             )
             .unwrap();
             let (quota, _) = db
@@ -1084,7 +1084,7 @@ mod tests {
             let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
             let db = agent_vitals_data::authority::AuthorityDb::open(
                 &agent_vitals_data::authority::default_authority_path(&data),
-                crate::sql_sync::now_ms(),
+                crate::clock::now_ms(),
             ).unwrap();
             let month = crate::clock::current_month_beijing();
             let payload = serde_json::json!({"pricing": {"catalog_2026_09": {
@@ -1099,7 +1099,7 @@ mod tests {
             sync_facts(&data).unwrap();
             let candidates = agent_vitals_data::authority::AuthorityDb::open(
                 &agent_vitals_data::authority::default_authority_path(&data),
-                crate::sql_sync::now_ms(),
+                crate::clock::now_ms(),
             ).unwrap().pending_billing_import_candidates().unwrap();
             assert!(candidates.iter().any(|(_id, host, provider, currency, amount, start, status)| {
                 host == "claude-code" && provider == "minimax"
@@ -1116,7 +1116,7 @@ mod tests {
             sync_facts(&data).unwrap();
             let db = agent_vitals_data::authority::AuthorityDb::open(
                 &agent_vitals_data::authority::default_authority_path(&data),
-                crate::sql_sync::now_ms(),
+                crate::clock::now_ms(),
             )
             .unwrap();
 
@@ -1172,7 +1172,7 @@ mod tests {
 
             let db = agent_vitals_data::authority::AuthorityDb::open(
                 &agent_vitals_data::authority::default_authority_path(&data),
-                crate::sql_sync::now_ms(),
+                crate::clock::now_ms(),
             )
             .unwrap();
             let path_hash = agent_vitals_domain::source_identity::fnv1a64_hex(
@@ -1213,7 +1213,7 @@ mod tests {
             assert!(!cl.errors.is_empty(), "坏文件必须出现在 errors 里");
             let db = agent_vitals_data::authority::AuthorityDb::open(
                 &agent_vitals_data::authority::default_authority_path(&data),
-                crate::sql_sync::now_ms(),
+                crate::clock::now_ms(),
             )
             .unwrap();
             let n: i64 = db
@@ -1255,7 +1255,7 @@ mod tests {
             crate::retention::save_retention_months(&data, 1).unwrap();
             let db = agent_vitals_data::authority::AuthorityDb::open(
                 &agent_vitals_data::authority::default_authority_path(&data),
-                crate::sql_sync::now_ms(),
+                crate::clock::now_ms(),
             ).unwrap();
             db.begin_run("retention-test", "test", 1).unwrap();
             let cutoff = crate::sql_sync::retention_cutoff_ms(

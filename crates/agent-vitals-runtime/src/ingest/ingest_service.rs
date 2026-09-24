@@ -31,10 +31,8 @@ use std::path::{Path, PathBuf};
 use agent_vitals_data::evidence::{AppendError, AppendOutcome, FactWriter, replay, retain};
 use serde_json::Value;
 
-/// 事实宿主封闭词表（与四个 emitter 的 `host` stamp 同源；`trace_service::
-/// TRACE_HOSTS` / `reimport_verify::HOSTS` / `summary::WIRED_HOSTS` 与本表同步
-/// 维护——加宿主四处一起改）。
-pub const FACT_HOSTS: [&str; 4] = ["claude-code", "codex", "dsh", "workbuddy"];
+/// 兼容路径：词表本体在 `core::fact_hosts`（W3 解环——query 读它不该依赖 ingest）。
+pub use crate::core::fact_hosts::FACT_HOSTS;
 
 /// 单宿主 facts 文件路径。未知宿主 → None（调用方报错，不猜）。
 /// 插件宿主（`plugin:<slug>`）经 slug 校验后落 `plugin-<slug>.jsonl`——
