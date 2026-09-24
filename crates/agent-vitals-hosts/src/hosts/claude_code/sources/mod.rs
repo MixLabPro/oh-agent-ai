@@ -46,6 +46,8 @@ pub mod account;
 // P3（SourceGraph spec §5）：SourceParser 注册位——trait 形状适配薄壳，
 // wire 解释在 usage_fact。
 pub mod parser;
+/// W3：会话级行为 findings 评估（注册表 `sources::session_hosts` 的 Claude 条目）。
+pub mod findings;
 
 /// 一个会话文件对 `claude-session` 有用的全部信息（路径本身没有消费者——
 /// 调用方各自从 walk 结果拿路径，这里只携带读出来的元数据）。

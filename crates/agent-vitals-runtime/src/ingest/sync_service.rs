@@ -238,7 +238,9 @@ fn sync_host(
         dirty.push((path, fp));
     }
 
-    if crate::ingest::findings_eval::EVALUATED_HOSTS.contains(&host) {
+    if agent_vitals_hosts::sources::session_hosts::session_host(host)
+        .is_some_and(|h| h.findings.is_some())
+    {
         report.findings_candidates = dirty.iter().map(|(p, _)| p.clone()).collect();
     }
     let mut facts: Vec<Value> = Vec::new();
@@ -599,68 +601,37 @@ pub fn sync_facts_filtered(
     // 541 文件 × 2 趟同款）；且错误面同样按唤醒裁剪——宿主未唤醒时一趟都不走
     // （此前各 *_walk_errors 不看 wanted）。claude/dsh/workbuddy 是 F7b 从 codex
     // 推广的同款（模板提交 09c8533）。
-    let (codex_files, codex_walk_errors) = if wanted("codex") {
-        agent_vitals_hosts::codex_session::codex_rollout_files_with_errors(&crate::home::codex_home())
-    } else {
-        (Vec::new(), Vec::new())
+    // W3：宿主的「根在哪、根下怎么枚举」来自 hosts 的会话宿主注册表，这里不再按宿主名
+    // 分支。注册表顺序即批次顺序（claude-code → codex → dsh → workbuddy，同步报告
+    // `hosts[]` 顺序不变）；错误也是先四个内置根、再自定义源根（与原逐宿主写法同序）。
+    let dsh_home = crate::home::dsh_home();
+    let roots = agent_vitals_hosts::sources::session_hosts::HostRoots {
+        user_home: &user_home,
+        dsh_home: dsh_home.as_deref(),
     };
-    let (claude_files, claude_walk_errors) = if wanted("claude-code") {
-        agent_vitals_hosts::claude_session::claude_project_files_with_errors(&user_home)
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    // dsh_home 未配置 → (空清单, 空错误)：无根不报错，同原语义。
-    let (dsh_files, dsh_walk_errors) = if wanted("dsh") {
-        crate::home::dsh_home()
-            .map(|d| crate::sessions::discovery::dsh_session_files_with_errors(&d))
-            .unwrap_or((Vec::new(), Vec::new()))
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    let (workbuddy_files, workbuddy_walk_errors) = if wanted("workbuddy") {
-        agent_vitals_hosts::workbuddy_traces::workbuddy_trace_files_with_errors(
-            &agent_vitals_hosts::workbuddy_session::workbuddy_root(&user_home),
-        )
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    let mut batches: Vec<(&str, Vec<PathBuf>)> = vec![
-        ("claude-code", claude_files),
-        ("codex", codex_files),
-        ("dsh", dsh_files),
-        ("workbuddy", workbuddy_files),
-    ];
+    let registry = &agent_vitals_hosts::sources::session_hosts::SESSION_HOSTS;
+    let mut batches: Vec<(&str, Vec<PathBuf>)> = Vec::with_capacity(registry.len());
     let mut discovery_errors: Vec<(String, String)> = Vec::new();
-    let mut collect_discovery_errors = |host: &str, errors: Vec<String>| {
-        discovery_errors.extend(errors.into_iter().map(|error| (host.to_string(), error)));
-    };
-    collect_discovery_errors("claude-code", claude_walk_errors);
-    collect_discovery_errors("codex", codex_walk_errors);
-    collect_discovery_errors("dsh", dsh_walk_errors);
-    collect_discovery_errors("workbuddy", workbuddy_walk_errors);
-    for source in custom_sources {
-        let files = match source.host.as_str() {
-            "claude-code" => {
-                let (files, errors) =
-                    agent_vitals_hosts::claude_session::claude_project_files_with_errors(Path::new(&source.root));
-                collect_discovery_errors("claude-code", errors);
-                files
-            }
-            "codex" => {
-                let (files, errors) =
-                    agent_vitals_hosts::codex_session::codex_rollout_files_with_errors(Path::new(&source.root));
-                collect_discovery_errors("codex", errors);
-                files
-            }
-            "dsh" => {
-                let (files, errors) =
-                    crate::sessions::discovery::dsh_session_files_with_errors(Path::new(&source.root));
-                collect_discovery_errors("dsh", errors);
-                files
-            }
-            _ => continue,
+    for host in registry.iter() {
+        // 根未知（如 DSH_HOME 与 HOME 都没有）→ 空清单、无错误：无根不报错，同原语义。
+        let (files, errors) = match (wanted(host.id), (host.default_root)(&roots)) {
+            (true, Some(root)) => (host.files_under)(&root),
+            _ => (Vec::new(), Vec::new()),
         };
-        if let Some((_, batch)) = batches.iter_mut().find(|(host, _)| *host == source.host) {
+        discovery_errors.extend(errors.into_iter().map(|error| (host.id.to_string(), error)));
+        batches.push((host.id, files));
+    }
+    // 自定义源根：原实现不看 `wanted`（未唤醒宿主的自定义根也会遍历，批次随后被
+    // `only` 过滤）。W3 只做结构迁移，行为原样保留。
+    for source in custom_sources {
+        let Some(host) = agent_vitals_hosts::sources::session_hosts::session_host(&source.host)
+            .filter(|host| host.accepts_custom_roots)
+        else {
+            continue;
+        };
+        let (files, errors) = (host.files_under)(Path::new(&source.root));
+        discovery_errors.extend(errors.into_iter().map(|error| (host.id.to_string(), error)));
+        if let Some((_, batch)) = batches.iter_mut().find(|(id, _)| *id == host.id) {
             batch.extend(files);
         }
     }
@@ -681,7 +652,11 @@ pub fn sync_facts_filtered(
         .optional()
         .map_err(|e| format!("read findings backfill marker: {e}"))?
         .is_none();
-    let mut findings_work: Vec<(&'static str, Vec<PathBuf>, Vec<PathBuf>)> = Vec::new();
+    let mut findings_work: Vec<(
+        &'static agent_vitals_hosts::sources::session_hosts::SessionHost,
+        Vec<PathBuf>,
+        Vec<PathBuf>,
+    )> = Vec::new();
     for (host, files) in batches {
         // Serialize each host's ingest with source deletion.  The exclusion
         // decision is deliberately re-read while holding the same per-host
@@ -709,10 +684,8 @@ pub fn sync_facts_filtered(
             host: host.to_string(),
             ..Default::default()
         };
-        let evaluated_host = crate::ingest::findings_eval::EVALUATED_HOSTS
-            .iter()
-            .find(|h| **h == host)
-            .copied();
+        let evaluated_host = agent_vitals_hosts::sources::session_hosts::session_host(host)
+            .filter(|h| h.findings.is_some());
         let all_files = if evaluated_host.is_some() { files.clone() } else { Vec::new() };
         sync_host(host, &ns, &authority, data_home, files, &mut r)?;
         if let Some(eval_host) = evaluated_host {
@@ -740,15 +713,21 @@ pub fn sync_facts_filtered(
         use crate::ingest::findings_eval;
         let mut eval = findings_eval::EvalReport::default();
         let mut all_persisted = true;
-        for (host, changed, all_files) in &findings_work {
+        // 价卡（内置 + 用户覆盖）一轮只加载一次，各宿主评估共用。
+        let pricing = crate::price_overrides::merged_main(data_home);
+        let codex_index_cache = data_home.join("facts").join(".codex-session-index.json");
+        let ctx = agent_vitals_hosts::sources::session_hosts::FindingsCtx {
+            roots,
+            codex_index_cache: &codex_index_cache,
+            pricing: &pricing,
+        };
+        for (session_host, changed, all_files) in &findings_work {
+            let host = session_host.id;
+            let Some(evaluate) = session_host.findings else { continue };
             if changed.is_empty() {
                 continue;
             }
-            let (sessions, errors) = match *host {
-                "dsh" => findings_eval::evaluate_dsh(changed),
-                "claude-code" => findings_eval::evaluate_claude(changed, all_files),
-                _ => findings_eval::evaluate_codex(&crate::home::codex_home(), data_home, changed, all_files),
-            };
+            let (sessions, errors) = evaluate(&ctx, changed, all_files);
             eval.errors.extend(errors);
             if sessions.is_empty() {
                 continue;
@@ -762,7 +741,7 @@ pub fn sync_facts_filtered(
             .map_err(|error| format!("findings {host} lease: {error}"))?;
             if crate::source_controls::excluded_hosts(data_home)
                 .map_err(|error| format!("source controls failed: {error}"))?
-                .contains(*host)
+                .contains(host)
             {
                 continue;
             }

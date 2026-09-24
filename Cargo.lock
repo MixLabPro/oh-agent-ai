@@ -48,6 +48,7 @@ version = "1.4.0"
 dependencies = [
  "agent-vitals-domain",
  "agent-vitals-provider",
+ "jiff",
  "regex",
  "rusqlite",
  "ruzstd",

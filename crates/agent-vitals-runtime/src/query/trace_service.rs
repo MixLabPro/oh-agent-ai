@@ -139,40 +139,14 @@ fn source_paths_for_session(
     dsh_root: &Path,
     key: &SessionKey,
 ) -> Result<Vec<PathBuf>, TraceLookupError> {
-    let paths: Vec<PathBuf> = match key.host_kind.as_str() {
-        "claude-code" => agent_vitals_hosts::claude_session::claude_project_files(host_home)
-            .into_iter()
-            .filter(|path| {
-                path.file_stem().and_then(|s| s.to_str()) == Some(key.native_id.as_str())
-            })
-            .collect(),
-        "codex" => agent_vitals_hosts::codex_session::codex_rollout_files(host_home)
-            .into_iter()
-            .filter(|path| {
-                crate::sessions::codex_session_audit::codex_session_id_of(path) == key.native_id
-            })
-            .collect(),
-        "dsh" => crate::sessions::discovery::dsh_session_files(dsh_root)
-            .into_iter()
-            .filter(|path| {
-                agent_vitals_hosts::canonical_input::dsh_native_session_id_for_path(path)
-                    .ok()
-                    .as_deref()
-                    == Some(key.native_id.as_str())
-            })
-            .collect(),
-        // WorkBuddy（E4b）：源是整个 `<HOME>/.workbuddy/` 根（db + audit-log +
-        // traces 三面按 session_id join），不是单个文件——传 HOME，`canonical_input`
-        // 的 workbuddy 分派按这个约定解析根。根目录不存在 → 空 → SourceUnavailable。
-        "workbuddy" => {
-            if agent_vitals_hosts::workbuddy_session::workbuddy_root(host_home).is_dir() {
-                vec![host_home.to_path_buf()]
-            } else {
-                Vec::new()
-            }
-        }
-        other => return Err(TraceLookupError::UnknownHost(other.to_string())),
+    // W3：各宿主「怎么在根下找到这个会话的源」来自 hosts 的会话宿主注册表。
+    let host = agent_vitals_hosts::sources::session_hosts::session_host(&key.host_kind)
+        .ok_or_else(|| TraceLookupError::UnknownHost(key.host_kind.clone()))?;
+    let roots = agent_vitals_hosts::sources::session_hosts::HostRoots {
+        user_home: host_home,
+        dsh_home: Some(dsh_root),
     };
+    let paths = (host.session_sources)(&roots, &key.native_id);
     if paths.is_empty() {
         return Err(TraceLookupError::SourceUnavailable(
             "no matching source remains under this host's configured directory".to_string(),

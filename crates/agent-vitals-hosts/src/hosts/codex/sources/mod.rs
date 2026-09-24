@@ -33,6 +33,12 @@ pub mod skills;
 pub mod route_evidence;
 // v1.0.0-beta.1 自动归因 A5：账户级证据（只读 auth.json 的 auth_mode）。
 pub mod account;
+/// W3：Codex 计价 + 人读渲染（原 runtime `sessions/codex_cost.rs`）。
+pub mod cost;
+/// W3：Codex 单会话审计组合（原 runtime `sessions/codex_session_audit.rs`）。
+pub mod session_audit;
+/// W3：会话级行为 findings 评估（注册表 `sources::session_hosts` 的 Codex 条目）。
+pub mod findings;
 
 // v0.9 Stage A emitter 归位（R4 §5.2）：UsageFact emitter 从二进制
 // apps/cli/src/agent/ 迁来——读文件 → 读内存，仍属 I/O 层。
