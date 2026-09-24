@@ -296,6 +296,64 @@ pub fn workbuddy_trace_walk_errors(root: &Path) -> Vec<String> {
     errors
 }
 
+/// 单趟版本（REFRESH_STORM R5-F7b 推广）：一次两层 read_dir 同时产出文件清单
+/// 与遍历错误。`workbuddy_trace_files` 与 `workbuddy_trace_walk_errors` 各自扫
+/// 一遍 `<root>/traces`；清单与错误来自同一次遍历时天然一致。排序/过滤语义与
+/// `workbuddy_trace_files` 逐字节一致（全局路径字符串序、trace_*.json、pid 目
+/// 录级）；错误文案与 `workbuddy_trace_walk_errors` 逐字节一致（外层条目错误
+/// 记 tdir、内层错误记 pid 目录）；缺失根不报错、根元数据不可读时报错。
+pub fn workbuddy_trace_files_with_errors(root: &Path) -> (Vec<PathBuf>, Vec<String>) {
+    let tdir = workbuddy_traces_root(root);
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut errors = Vec::new();
+    match std::fs::metadata(&tdir) {
+        Ok(metadata) if metadata.is_dir() => {
+            match std::fs::read_dir(&tdir) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let entry = match entry {
+                            Ok(entry) => entry,
+                            Err(error) => {
+                                errors.push(format!("{}: {error}", tdir.display()));
+                                continue;
+                            }
+                        };
+                        let path = entry.path();
+                        if !path.is_dir() { continue; }
+                        match std::fs::read_dir(&path) {
+                            Ok(inner) => {
+                                for f in inner {
+                                    match f {
+                                        Ok(f) => {
+                                            let fp = f.path();
+                                            let name = fp.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                                            if fp.is_file() && name.starts_with("trace_") && name.ends_with(".json") {
+                                                files.push(fp);
+                                            }
+                                        }
+                                        Err(error) => {
+                                            errors.push(format!("{}: {error}", path.display()));
+                                        }
+                                    }
+                                }
+                            }
+                            Err(error) => errors.push(format!("{}: {error}", path.display())),
+                        }
+                    }
+                }
+                Err(error) => errors.push(format!("{}: {error}", tdir.display())),
+            }
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            errors.push(format!("{}: {error}", tdir.display()));
+        }
+        Err(_) => {}
+    }
+    files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    (files, errors)
+}
+
 /// shape 面：读一个 trace 文件。Err 的三种文案与 `TracesRead::degraded` 的原因串
 /// 同一词表（`unreadable` / `malformed: not JSON` / `malformed: no …`）——全量读
 /// 把它们收进 degraded，逐文件同步把它们当该文件的错误上呈并留待下次重试。
@@ -409,4 +467,48 @@ pub fn traces_probe_json(read: &TracesRead, session_id: &str) -> Value {
             "decode_failures": decode_failures_mine,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R5-F7b 对拍：单趟版本的文件清单与 `workbuddy_trace_files` 逐字节一致
+    /// （同全局路径序）、错误集与 `workbuddy_trace_walk_errors` 一致；缺失根
+    /// 不报错。
+    #[test]
+    fn workbuddy_trace_files_with_errors_matches_the_two_walk_functions() {
+        let root = std::env::temp_dir().join(format!(
+            "av-f7b-wb-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let tdir = workbuddy_traces_root(&root);
+        let p1 = tdir.join("pid-1");
+        let p2 = tdir.join("pid-2");
+        std::fs::create_dir_all(&p1).unwrap();
+        std::fs::create_dir_all(&p2).unwrap();
+        std::fs::write(p1.join("trace_a.json"), "x").unwrap();
+        std::fs::write(p1.join("notes.txt"), "x").unwrap();
+        // pid 目录层的一个游离 json 文件（不在 pid 目录里的不收）。
+        std::fs::write(tdir.join("trace_stray.json"), "x").unwrap();
+        std::fs::write(p2.join("trace_b.json"), "x").unwrap();
+
+        let (files, errors) = workbuddy_trace_files_with_errors(&root);
+        assert_eq!(files, workbuddy_trace_files(&root), "单趟清单必须与清单函数逐字节一致");
+        assert_eq!(errors, workbuddy_trace_walk_errors(&root), "单趟错误必须与错误函数一致");
+        assert_eq!(files.len(), 2, "pid-1 与 pid-2 各一个 trace；txt 与游离 json 过滤");
+        // 全局路径字符串序：pid-1 在 pid-2 前。
+        assert!(files[0].to_string_lossy().contains("pid-1"));
+
+        // 缺失根：清单空、零错误。
+        let missing = root.join("no-such-root");
+        let (files, errors) = workbuddy_trace_files_with_errors(&missing);
+        assert!(files.is_empty());
+        assert!(errors.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

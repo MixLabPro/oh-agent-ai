@@ -154,6 +154,45 @@ pub fn claude_project_walk_errors(home: &Path) -> Vec<String> {
     errors
 }
 
+/// 单趟版本（REFRESH_STORM R5-F7b 推广）：一次 walk 同时产出文件清单与遍历
+/// 错误。`claude_project_files` 与 `claude_project_walk_errors` 各自走一遍
+/// `~/.claude/projects`（真机 541 文件 × 2 趟/轻 tick）；清单与错误来自同一次
+/// 遍历时天然一致。排序/过滤语义与 `claude_project_files` 逐字节一致（全局
+/// 路径字符串序、extension == jsonl）；缺失根不报错、根元数据不可读时报错
+/// ——错误语义与 `claude_project_walk_errors` 一致。
+pub fn claude_project_files_with_errors(home: &Path) -> (Vec<PathBuf>, Vec<String>) {
+    let root = home.join(".claude").join("projects");
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    match std::fs::metadata(&root) {
+        Ok(metadata) if metadata.is_dir() => {
+            for entry in walkdir::WalkDir::new(&root).into_iter() {
+                match entry {
+                    Ok(e) => {
+                        if !e.file_type().is_file() {
+                            continue;
+                        }
+                        if e.path().extension().map(|x| x == "jsonl").unwrap_or(false) {
+                            files.push(e.into_path());
+                        }
+                    }
+                    Err(error) => {
+                        let path = error.path().unwrap_or(&root);
+                        errors.push(format!("{}: {error}", path.display()));
+                    }
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            errors.push(format!("{}: {error}", root.display()));
+        }
+        Err(_) => {}
+    }
+    files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    (files, errors)
+}
+
 /// `~/.claude/projects` 根的存在性报告（r2a store 的 `source_statuses["claude-code"]`
 /// 与 menubar 的 `host_has_source` 都靠它判「该宿主有数据源」——roots 缺席时绝不能
 /// 报「0 会话」冒充「没有 Claude Code」）。镜像 `codex_session_roots_report`：单根
@@ -544,6 +583,43 @@ mod tests {
         );
         assert_eq!(rules["SV613"]["count"], json!(1));
         assert_eq!(audit["summary"]["findings_total"], json!(1));
+    }
+
+    // ── locate：单趟 walk 对拍（R5-F7b 推广） ─────────────────────────────────
+
+    /// R5-F7b 对拍：单趟版本的文件清单与 `claude_project_files` 逐字节一致
+    /// （同全局路径序）、错误集与 `claude_project_walk_errors` 一致；缺失根
+    /// 不报错。
+    #[test]
+    fn claude_project_files_with_errors_matches_the_two_walk_functions() {
+        let home = temp_home("f7b");
+        let root = home.join(".claude").join("projects");
+        let a = root.join("proj-a");
+        let b = root.join("proj-b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("s1.jsonl"), "x").unwrap();
+        std::fs::write(a.join("notes.txt"), "x").unwrap();
+        std::fs::write(a.join("meta.json"), "x").unwrap();
+        let nested = a.join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("s2.jsonl"), "x").unwrap();
+        std::fs::write(b.join("s3.jsonl"), "x").unwrap();
+
+        let (files, errors) = claude_project_files_with_errors(&home);
+        assert_eq!(files, claude_project_files(&home), "单趟清单必须与清单函数逐字节一致");
+        assert_eq!(errors, claude_project_walk_errors(&home), "单趟错误必须与错误函数一致");
+        assert_eq!(files.len(), 3, "proj-a 两条（含嵌套）+ proj-b 一条；非 jsonl 扩展名过滤");
+        // 全局路径字符串序：proj-a 的两条在前。
+        assert!(files[0].to_string_lossy().contains("proj-a"));
+        assert!(files[2].to_string_lossy().contains("proj-b"));
+
+        // 缺失根：清单空、零错误。
+        let missing = home.join("no-such-home");
+        let (files, errors) = claude_project_files_with_errors(&missing);
+        assert!(files.is_empty());
+        assert!(errors.is_empty());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     // ── claude_session_list / render ─────────────────────────────────────────

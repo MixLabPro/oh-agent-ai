@@ -114,6 +114,49 @@ pub fn dsh_session_walk_errors(dsh_home: &Path) -> Vec<String> {
     errors
 }
 
+/// 单趟版本（REFRESH_STORM R5-F7b 推广）：一次 walk 同时产出文件清单与遍历
+/// 错误。`dsh_session_files` 与 `dsh_session_walk_errors` 各自走一遍
+/// `<DSH_HOME>/sessions`；清单与错误来自同一次遍历时天然一致。排序/过滤语义
+/// 与 `dsh_session_files` 逐字节一致（全局路径字符串序、只收 session.jsonl /
+/// session.jsonl.zstd 两个文件名、follow_links(false)）；缺失根不报错、根
+/// 元数据不可读时报错——错误语义与 `dsh_session_walk_errors` 一致。
+pub fn dsh_session_files_with_errors(dsh_home: &Path) -> (Vec<PathBuf>, Vec<String>) {
+    let root = dsh_home.join("sessions");
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    match std::fs::metadata(&root) {
+        Ok(metadata) if metadata.is_dir() => {
+            for entry in walkdir::WalkDir::new(&root)
+                .follow_links(false)
+                .into_iter()
+            {
+                match entry {
+                    Ok(e) => {
+                        if !e.file_type().is_file() {
+                            continue;
+                        }
+                        let n = e.file_name().to_string_lossy();
+                        if n == "session.jsonl" || n == "session.jsonl.zstd" {
+                            files.push(e.into_path());
+                        }
+                    }
+                    Err(error) => {
+                        let path = error.path().unwrap_or(&root);
+                        errors.push(format!("{}: {error}", path.display()));
+                    }
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            errors.push(format!("{}: {error}", root.display()));
+        }
+        Err(_) => {}
+    }
+    files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    (files, errors)
+}
+
 /// DSH 会话根集合的存在性报告 —— 与 `codex_session_roots_report` 同级：
 /// 存在性 + 计数 + 字节量，**绝不报错**（根缺席 → `exists=false` 零填充，不猜
 /// 路径、不把缺席当 0 条真数据）。
@@ -604,6 +647,38 @@ mod tests {
         let (fake, _av) = fake_root(&t);
         assert_eq!(dsh_session_files(&fake), Vec::<PathBuf>::new());
         assert_eq!(dsh_session_files(&fake.join("no-sessions-root")), Vec::<PathBuf>::new());
+    }
+
+    /// R5-F7b 对拍：单趟版本的文件清单与 `dsh_session_files` 逐字节一致（同
+    /// 全局路径序）、错误集与 `dsh_session_walk_errors` 一致；缺失根不报错。
+    #[test]
+    fn dsh_session_files_with_errors_matches_the_two_walk_functions() {
+        let _env = env_lock();
+        let t = tmp_case();
+        let (fake, _av) = fake_root(&t);
+        let s1 = fake.join("sessions").join("--proj-a--").join("session-uuid-1");
+        let s2 = fake.join("sessions").join("--proj-b--").join("session-uuid-2");
+        std::fs::create_dir_all(&s1).unwrap();
+        std::fs::create_dir_all(&s2).unwrap();
+        std::fs::write(s1.join("session.jsonl"), "{}").unwrap();
+        std::fs::write(s1.join("junk.txt"), "x").unwrap();
+        // 嵌套深一层（walk 深度语义）+ zstd 形式也要收。
+        let deep = s2.join("nested").join("session-uuid-3");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("session.jsonl.zstd"), b"\x28\xb5\x2f\xfd").unwrap();
+
+        let (files, errors) = dsh_session_files_with_errors(&fake);
+        assert_eq!(files, dsh_session_files(&fake), "单趟清单必须与清单函数逐字节一致");
+        assert_eq!(errors, dsh_session_walk_errors(&fake), "单趟错误必须与错误函数一致");
+        assert_eq!(files.len(), 2, "裸 jsonl + zstd 各一；junk 过滤");
+        // 全局路径字符串序：--proj-a-- 在 --proj-b-- 前。
+        assert!(files[0].to_string_lossy().contains("--proj-a--"));
+
+        // 缺失根：清单空、零错误。
+        let (files, errors) = dsh_session_files_with_errors(&fake.join("no-such-root"));
+        assert!(files.is_empty());
+        assert!(errors.is_empty());
+        let _ = std::fs::remove_dir_all(&t);
     }
 
     #[test]

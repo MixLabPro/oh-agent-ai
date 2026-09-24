@@ -582,79 +582,69 @@ pub fn sync_facts_filtered(
     // 不付目录遍历成本（stat 对账与解析本来就在后面的批过滤里跳过，但目录
     // walk 本身每宿主几百次 stat，不裁剪的话轻 tick 的发现面仍是全宿主）。
     let wanted = |host: &str| only.map_or(true, |set| set.contains(host));
-    // R5-F7b（REFRESH_STORM）：codex 清单与错误同一次遍历（此前两个函数各自
-    // walk 一遍 ~/.codex，真机 2.96 万文件 × 2 趟/轻 tick）；且错误面同样按
-    // 唤醒裁剪——codex 未唤醒时一趟都不走（此前 *_walk_errors 不看 wanted）。
+    // R5-F7b（REFRESH_STORM）：四个内置宿主的清单与错误同一次遍历（此前每宿主
+    // 两个函数各自 walk 一遍——codex 真机 2.96 万文件 × 2 趟/轻 tick，claude
+    // 541 文件 × 2 趟同款）；且错误面同样按唤醒裁剪——宿主未唤醒时一趟都不走
+    // （此前各 *_walk_errors 不看 wanted）。claude/dsh/workbuddy 是 F7b 从 codex
+    // 推广的同款（模板提交 09c8533）。
     let (codex_files, codex_walk_errors) = if wanted("codex") {
         agent_vitals_hosts::codex_session::codex_rollout_files_with_errors(&crate::home::codex_home())
     } else {
         (Vec::new(), Vec::new())
     };
+    let (claude_files, claude_walk_errors) = if wanted("claude-code") {
+        agent_vitals_hosts::claude_session::claude_project_files_with_errors(&user_home)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    // dsh_home 未配置 → (空清单, 空错误)：无根不报错，同原语义。
+    let (dsh_files, dsh_walk_errors) = if wanted("dsh") {
+        crate::home::dsh_home()
+            .map(|d| crate::sessions::discovery::dsh_session_files_with_errors(&d))
+            .unwrap_or((Vec::new(), Vec::new()))
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let (workbuddy_files, workbuddy_walk_errors) = if wanted("workbuddy") {
+        agent_vitals_hosts::workbuddy_traces::workbuddy_trace_files_with_errors(
+            &agent_vitals_hosts::workbuddy_session::workbuddy_root(&user_home),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let mut batches: Vec<(&str, Vec<PathBuf>)> = vec![
-        (
-            "claude-code",
-            if wanted("claude-code") {
-                agent_vitals_hosts::claude_session::claude_project_files(&user_home)
-            } else {
-                Vec::new()
-            },
-        ),
+        ("claude-code", claude_files),
         ("codex", codex_files),
-        (
-            "dsh",
-            if wanted("dsh") {
-                crate::home::dsh_home()
-                    .map(|d| crate::sessions::discovery::dsh_session_files(&d))
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            },
-        ),
-        (
-            "workbuddy",
-            if wanted("workbuddy") {
-                agent_vitals_hosts::workbuddy_traces::workbuddy_trace_files(
-                    &agent_vitals_hosts::workbuddy_session::workbuddy_root(&user_home),
-                )
-            } else {
-                Vec::new()
-            },
-        ),
+        ("dsh", dsh_files),
+        ("workbuddy", workbuddy_files),
     ];
     let mut discovery_errors: Vec<(String, String)> = Vec::new();
     let mut collect_discovery_errors = |host: &str, errors: Vec<String>| {
         discovery_errors.extend(errors.into_iter().map(|error| (host.to_string(), error)));
     };
-    collect_discovery_errors(
-        "claude-code",
-        agent_vitals_hosts::claude_session::claude_project_walk_errors(&user_home),
-    );
+    collect_discovery_errors("claude-code", claude_walk_errors);
     collect_discovery_errors("codex", codex_walk_errors);
-    if let Some(dsh_home) = crate::home::dsh_home() {
-        collect_discovery_errors("dsh", crate::sessions::discovery::dsh_session_walk_errors(&dsh_home));
-    }
-    collect_discovery_errors(
-        "workbuddy",
-        agent_vitals_hosts::workbuddy_traces::workbuddy_trace_walk_errors(
-            &agent_vitals_hosts::workbuddy_session::workbuddy_root(&user_home),
-        ),
-    );
+    collect_discovery_errors("dsh", dsh_walk_errors);
+    collect_discovery_errors("workbuddy", workbuddy_walk_errors);
     for source in custom_sources {
         let files = match source.host.as_str() {
             "claude-code" => {
-                let root = Path::new(&source.root);
-                collect_discovery_errors("claude-code", agent_vitals_hosts::claude_session::claude_project_walk_errors(root));
-                agent_vitals_hosts::claude_session::claude_project_files(root)
+                let (files, errors) =
+                    agent_vitals_hosts::claude_session::claude_project_files_with_errors(Path::new(&source.root));
+                collect_discovery_errors("claude-code", errors);
+                files
             }
             "codex" => {
-                let root = Path::new(&source.root);
-                collect_discovery_errors("codex", agent_vitals_hosts::codex_session::codex_rollout_walk_errors(root));
-                agent_vitals_hosts::codex_session::codex_rollout_files(root)
+                let (files, errors) =
+                    agent_vitals_hosts::codex_session::codex_rollout_files_with_errors(Path::new(&source.root));
+                collect_discovery_errors("codex", errors);
+                files
             }
             "dsh" => {
-                let root = Path::new(&source.root);
-                collect_discovery_errors("dsh", crate::sessions::discovery::dsh_session_walk_errors(root));
-                crate::sessions::discovery::dsh_session_files(root)
+                let (files, errors) =
+                    crate::sessions::discovery::dsh_session_files_with_errors(Path::new(&source.root));
+                collect_discovery_errors("dsh", errors);
+                files
             }
             _ => continue,
         };
