@@ -9,7 +9,10 @@
 //! （R2 修订 3：避免把 CLI 与 Tauri 强制做成同构产品）。本轮登记
 //! `cli.sessions` 一个 surface 的两个维度：
 //!
-//! - `session_store`：`r2a_store.rs::SessionStore::<host>` 构造器是否存在。
+//! - `session_store`：原义「`r2a_store.rs::SessionStore::<host>` 构造器是否存在」。
+//!   W8（2026-09-24）r2a_store 已删，sessions list/read 走 SQL 权威库；本字段仍是
+//!   core `HOSTS` 跨语言契约（`hosts --json` 逐字节对账）的一部分，语义待重定义
+//!   为「sessions 面是否覆盖该宿主」——改它要连 Python 与 golden 一起动，另做。
 //! - `fold`：`sessions_navigation`（同文件）是否为该宿主折了当日 token——
 //!   dsh 读 `state.json`、codex 折全量 rollout、claude-code 读 ledger，三条
 //!   路径各不相同（**不是**统一的函数入口，§2.2 明文不建 trait），本表只
@@ -44,7 +47,7 @@
 /// "这个二进制是否真接了"）。
 pub struct HostRuntimeRegistration {
     pub host_id: &'static str,
-    /// `r2a_store.rs::SessionStore::<host>` 构造器是否存在。
+    /// 原义：`r2a_store.rs::SessionStore::<host>` 构造器是否存在（W8 后待重定义，见文件头）。
     pub session_store: bool,
     /// `sessions_navigation` 是否为该宿主折了当日 token（对应 core
     /// `HostProfile.fold: Option<FoldOutput>` 的存在性，不区分具体

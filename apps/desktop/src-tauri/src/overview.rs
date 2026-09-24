@@ -1504,7 +1504,7 @@ mod tests {
     /// 不出它了。
     #[test]
     fn hosts_save_then_read_round_trips() {
-        use agent_vitals_domain::r2a::SessionKey;
+        use agent_vitals_domain::session_key::SessionKey;
         let tmp = std::env::temp_dir().join("sv-menubar-hosts-roundtrip-test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("state")).unwrap();

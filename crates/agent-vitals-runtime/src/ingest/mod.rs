@@ -1,6 +1,7 @@
 //! 同步与入库域。
 
 
+pub mod findings_eval;
 pub mod ingest_service;
 /// 兼容路径：writer lease 是基础设施（sources / billing 也要拿锁），W3 下沉到 `core::lease`。
 pub use crate::core::lease;

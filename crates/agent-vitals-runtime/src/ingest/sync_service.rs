@@ -57,6 +57,10 @@ pub struct HostSyncReport {
     pub sql_inserted: Option<usize>,
     pub sql_duplicate: Option<usize>,
     pub errors: Vec<String>,
+    /// W8：本轮 SourceGraph 判脏的源文件（只 dsh/codex 填）——findings 评估器
+    /// 的增量输入。不进 JSON：路径不出本机报告面。
+    #[serde(skip)]
+    pub findings_candidates: Vec<PathBuf>,
 }
 
 /// 三宿主例行同步报告。
@@ -68,6 +72,11 @@ pub struct SyncReport {
     /// 本轮同步末尾按当前有效计费声明新写的归因行数
     /// （`AuthorityDb::billing_apply_active_declarations`）。
     pub declarations_applied: usize,
+    /// W8：同步后的行为 findings 评估（`ingest::findings_eval`）。None = 本轮
+    /// 没有需要评估的 DSH/Codex 会话。评估错误在这里，不混进宿主 `errors`
+    /// （后者的语义是「该文件没写进 authority、下轮重试」）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behavior_findings: Option<crate::ingest::findings_eval::EvalReport>,
 }
 
 /// R5-F7a（REFRESH_STORM）：按文件指纹的配额扫描缓存。quota 的重活在
@@ -229,6 +238,9 @@ fn sync_host(
         dirty.push((path, fp));
     }
 
+    if crate::ingest::findings_eval::EVALUATED_HOSTS.contains(&host) {
+        report.findings_candidates = dirty.iter().map(|(p, _)| p.clone()).collect();
+    }
     let mut facts: Vec<Value> = Vec::new();
     // 本轮要落库的宿主实时快照（kind, payload, observed_at_ms）。Codex 的配额与
     // Claude 的窗口状态共用这一条路，但各自是独立的 snapshot_kind。
@@ -656,6 +668,20 @@ pub fn sync_facts_filtered(
         files.sort();
         files.dedup();
     }
+    // W8：findings 评估的输入在宿主循环里收集、循环后在锁外算（见 findings_eval）。
+    // 回填标记缺失 = 升级后首轮：全部会话评估一次（它们在 SourceGraph 眼里是
+    // Unchanged，不回填就永远停在 r2a 最后一次运行的样子）。
+    let findings_backfill = authority
+        .conn()
+        .query_row(
+            "SELECT 1 FROM schema_meta WHERE key = ?1",
+            [crate::ingest::findings_eval::BACKFILL_META_KEY],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|e| format!("read findings backfill marker: {e}"))?
+        .is_none();
+    let mut findings_work: Vec<(&'static str, Vec<PathBuf>, Vec<PathBuf>)> = Vec::new();
     for (host, files) in batches {
         // Serialize each host's ingest with source deletion.  The exclusion
         // decision is deliberately re-read while holding the same per-host
@@ -683,7 +709,20 @@ pub fn sync_facts_filtered(
             host: host.to_string(),
             ..Default::default()
         };
+        let evaluated_host = crate::ingest::findings_eval::EVALUATED_HOSTS
+            .iter()
+            .find(|h| **h == host)
+            .copied();
+        let all_files = if evaluated_host.is_some() { files.clone() } else { Vec::new() };
         sync_host(host, &ns, &authority, data_home, files, &mut r)?;
+        if let Some(eval_host) = evaluated_host {
+            let changed = if findings_backfill {
+                all_files.clone()
+            } else {
+                std::mem::take(&mut r.findings_candidates)
+            };
+            findings_work.push((eval_host, changed, all_files));
+        }
         for (error_host, error) in &discovery_errors {
             if error_host == host {
                 r.errors.push(format!("discovery: {error}"));
@@ -692,6 +731,88 @@ pub fn sync_facts_filtered(
         report.total_appended += r.appended;
         report.total_duplicate += r.duplicate;
         report.hosts.push(r);
+    }
+
+    // W8：行为 findings 评估。规则计算在锁外（DSH 解压 + 审计、Codex 解析都慢，
+    // CLAUDE.md「临界区必须短」）；写库每宿主一个短临界区，并在锁内重读排除
+    // 名单——与上面的摄取同一把宿主锁，删除数据源与评估写入不会交错。
+    if findings_work.iter().any(|(_, changed, _)| !changed.is_empty()) {
+        use crate::ingest::findings_eval;
+        let mut eval = findings_eval::EvalReport::default();
+        let mut all_persisted = true;
+        for (host, changed, all_files) in &findings_work {
+            if changed.is_empty() {
+                continue;
+            }
+            let (sessions, errors) = match *host {
+                "dsh" => findings_eval::evaluate_dsh(changed),
+                "claude-code" => findings_eval::evaluate_claude(changed, all_files),
+                _ => findings_eval::evaluate_codex(&crate::home::codex_home(), changed, all_files),
+            };
+            eval.errors.extend(errors);
+            if sessions.is_empty() {
+                continue;
+            }
+            let _lease = crate::lease::acquire_blocking(
+                &crate::source_controls::host_data_lock_path(data_home, host)?,
+                "findings-eval",
+                600_000,
+                10_000,
+            )
+            .map_err(|error| format!("findings {host} lease: {error}"))?;
+            if crate::source_controls::excluded_hosts(data_home)
+                .map_err(|error| format!("source controls failed: {error}"))?
+                .contains(*host)
+            {
+                continue;
+            }
+            // r2a 每轮都先修旧行的秒/毫秒单位（幂等），评估器沿用。
+            if let Err(error) = agent_vitals_data::issues::repair_issue_timestamp_units(authority.conn()) {
+                eval.errors.push(format!("issue timestamp migration: {error}"));
+            }
+            let now = crate::clock::now_ms();
+            for session in &sessions {
+                // 计数先记在局部，事务成功才并入——回滚的会话不能被报成已写。
+                let mut local = findings_eval::EvalReport::default();
+                let result = authority.with_immediate_txn(|conn| {
+                    findings_eval::persist(conn, &ns, session, now, &mut local)
+                        .map_err(agent_vitals_data::authority::AuthorityError::Sqlite)
+                });
+                match result {
+                    Ok(()) => {
+                        eval.sessions_evaluated += local.sessions_evaluated;
+                        eval.findings_upserted += local.findings_upserted;
+                        eval.reopened += local.reopened;
+                        eval.closed += local.closed;
+                    }
+                    Err(error) => {
+                        all_persisted = false;
+                        eval.errors.push(format!(
+                            "findings persist {host}/{}: {error}",
+                            session.native_id
+                        ));
+                    }
+                }
+            }
+        }
+        // 回填标记只在全宿主路径、且没有写库失败时落：定向同步只评估了部分宿主，
+        // 写失败的会话下轮还得重评。单文件读失败不阻塞——那个文件变了自然重评。
+        if findings_backfill && only.is_none() && all_persisted {
+            authority
+                .conn()
+                .execute(
+                    "INSERT OR REPLACE INTO schema_meta(key, value) VALUES(?1, '1')",
+                    [findings_eval::BACKFILL_META_KEY],
+                )
+                .map_err(|e| format!("write findings backfill marker: {e}"))?;
+        }
+        if !eval.errors.is_empty() {
+            crate::core::logging::log_warn(
+                "sync_service",
+                &format!("behavior findings: {} error(s), first: {}", eval.errors.len(), eval.errors[0]),
+            );
+        }
+        report.behavior_findings = Some(eval);
     }
 
     // 插件宿主周期再摄取（zcode 接入收尾，2026-09-23）：只在全量路径跑
@@ -1011,6 +1132,64 @@ mod tests {
         }
         std::env::remove_var("AGENT_VITALS_HOME");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// W8：行为 findings 由同步产出（取代 r2a `sessions findings`）。钉三件事：
+    /// 1) 首轮（回填标记缺失）评估全部 DSH 会话、落 issue、写标记；
+    /// 2) 源未变的下一轮不再评估（增量，不是每 tick 全量）；
+    /// 3) 删标记重跑 = 再回填一次，issue 原地命中不新增（幂等身份）。
+    #[test]
+    fn sync_evaluates_behavior_findings_incrementally_with_one_time_backfill() {
+        with_isolated_home(|home| {
+            let dir = home.join(".dsh/sessions/--Users-alice-projects-demo--/agent-1");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::copy(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/dsh/behavior.jsonl"),
+                dir.join("session.jsonl"),
+            )
+            .unwrap();
+            let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
+            let issues = |data: &Path| -> (i64, i64) {
+                let db = agent_vitals_data::authority::AuthorityDb::open(
+                    &agent_vitals_data::authority::default_authority_path(data),
+                    crate::clock::now_ms(),
+                )
+                .unwrap();
+                let n: i64 = db.conn().query_row(
+                    "SELECT COUNT(*) FROM issue_instances
+                     WHERE host='dsh' AND session_key='sess-behavior-0001' AND evaluator_id='legacy-finding'",
+                    [], |r| r.get(0)).unwrap();
+                let marker: i64 = db.conn().query_row(
+                    "SELECT COUNT(*) FROM schema_meta WHERE key=?1",
+                    [crate::ingest::findings_eval::BACKFILL_META_KEY], |r| r.get(0)).unwrap();
+                (n, marker)
+            };
+
+            let r1 = sync_facts(&data).unwrap();
+            let eval = r1.behavior_findings.as_ref().expect("首轮必须评估");
+            assert!(eval.errors.is_empty(), "{:?}", eval.errors);
+            assert_eq!(eval.sessions_evaluated, 1);
+            let (n1, marker) = issues(&data);
+            assert!(n1 > 0, "behavior.jsonl 必须产出行为 issue");
+            assert_eq!(marker, 1, "回填标记落库");
+            assert_eq!(eval.findings_upserted as i64, n1);
+
+            let r2 = sync_facts(&data).unwrap();
+            assert!(r2.behavior_findings.is_none(), "源未变 → 不评估");
+
+            let db = agent_vitals_data::authority::AuthorityDb::open(
+                &agent_vitals_data::authority::default_authority_path(&data),
+                crate::clock::now_ms(),
+            )
+            .unwrap();
+            db.conn()
+                .execute("DELETE FROM schema_meta WHERE key=?1", [crate::ingest::findings_eval::BACKFILL_META_KEY])
+                .unwrap();
+            drop(db);
+            let r3 = sync_facts(&data).unwrap();
+            assert_eq!(r3.behavior_findings.as_ref().unwrap().sessions_evaluated, 1, "删标记 → 再回填");
+            assert_eq!(issues(&data), (n1, 1), "同一身份原地命中，不新增");
+        });
     }
 
     #[test]

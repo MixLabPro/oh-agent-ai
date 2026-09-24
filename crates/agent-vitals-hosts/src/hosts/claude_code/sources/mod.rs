@@ -315,6 +315,14 @@ fn claude_audit_projection(evidence: &ClaudeEvidence) -> Value {
 ///
 /// 输出键序是字节一致的一部分（Python 镜像逐字节对齐），不能重排。
 pub fn claude_session_audit_json(home: &Path, session_id: &str) -> Option<Value> {
+    claude_session_audit_json_for_files(session_id, &claude_project_files(home))
+}
+
+/// 同 [`claude_session_audit_json`]，只看调用方给的候选文件（仍按 session_id
+/// 过滤，多给无害）。W8：runtime 的同步后 findings 评估器每个 tick 跑，Claude 的
+/// session_id 就是文件 stem，调用方按 stem 精确预筛即可，不必每个会话全量遍历
+/// `~/.claude/projects`。候选须是 `claude_project_files` 同一路径序（字符串序）。
+pub fn claude_session_audit_json_for_files(session_id: &str, candidates: &[PathBuf]) -> Option<Value> {
     let mut records: Vec<Value> = Vec::new();
     // `files` = 全部匹配文件（路径序，r2a store 用它做 v2 cache 指纹增量失效——
     // 与 codex 载荷的 `files` 键同语义，`extract_summary` 不用为 claude 长分支）；
@@ -323,11 +331,11 @@ pub fn claude_session_audit_json(home: &Path, session_id: &str) -> Option<Value>
     let mut file: Option<PathBuf> = None;
     let mut first: Option<String> = None;
     let mut last: Option<String> = None;
-    for path in claude_project_files(home) {
-        let info = file_info(&path);
+    for path in candidates {
+        let info = file_info(path);
         if info.session_id == session_id {
             file = Some(path.clone());
-            files.push(path);
+            files.push(path.clone());
             // 跨文件按路径序拼接（resume 理论情况）；first/last 取全局 min/max。
             if first.is_none() {
                 first = info.first.clone();

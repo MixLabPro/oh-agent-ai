@@ -186,7 +186,7 @@ fn turn_timeline_of(items: &[Value], audit: &Value) -> Value {
 }
 
 /// 单个源文件 → 它所属的逻辑 session_id。R2a SessionStore 的增量缓存
-/// （`r2a_store.rs`）用它判定"新出现/内容变了的文件属于哪个 session"——代价只
+/// （W8 起是 `ingest::findings_eval`）用它判定"内容变了的文件属于哪个 session"——代价只
 /// 落在这一个文件上（`file_info` 的一次解析），不是重新扫全部 rollout 文件。
 pub fn codex_session_id_of(path: &Path) -> String {
     file_info(path).session_id
@@ -279,10 +279,26 @@ pub fn codex_session_list(home: &Path) -> Value {
 ///
 /// 与 Python `codex_session_audit.py::codex_session_audit_json` 逐字节对齐。
 pub fn codex_session_audit_json(home: &Path, session_id: &str) -> Option<Value> {
+    codex_session_audit_json_for_files(home, session_id, &codex_rollout_files(home))
+}
+
+/// 同 [`codex_session_audit_json`]，但只解析调用方给的候选文件（仍按 session_id
+/// 过滤，候选多给无害）。
+///
+/// W8：同步后的 findings 评估器（`ingest::findings_eval`）每个 tick 都要跑，
+/// 若沿用「扫全部 rollout 再过滤」，每个有变化的会话都付一次全量解析——正是
+/// CLAUDE.md 记的 codex 全量 fold 卡顿事故形状。评估器按文件名里的 session uuid
+/// 预筛同会话的 live/archived 兄弟文件再调这里。候选必须是 `codex_rollout_files`
+/// 同一全局路径序（「最后一个文件 = 当前状态」依赖它）。
+pub fn codex_session_audit_json_for_files(
+    home: &Path,
+    session_id: &str,
+    candidates: &[PathBuf],
+) -> Option<Value> {
     let index = read_session_index(home);
     let mut files: Vec<FileInfo> = Vec::new();
-    for path in codex_rollout_files(home) {
-        let info = file_info(&path);
+    for path in candidates {
+        let info = file_info(path);
         if info.session_id == session_id {
             files.push(info);
         }

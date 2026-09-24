@@ -3296,7 +3296,7 @@ fn export_diagnostic_package(app: AppHandle) -> Result<Value, String> {
         "versions": {
             "app": env!("CARGO_PKG_VERSION"),
             "cli": resolved_cli_version(),
-            "engine": agent_vitals_domain::r2a::ENGINE_VERSION,
+            "engine": agent_vitals_domain::session_key::ENGINE_VERSION,
             "architecture": std::env::consts::ARCH,
             "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
             "query_envelope": agent_vitals_runtime::mcp::ENVELOPE_SCHEMA_VERSION,
@@ -3347,7 +3347,7 @@ fn about_diagnostics() -> Value {
         "status": "ok",
         "app_version": env!("CARGO_PKG_VERSION"),
         "cli_version": resolved_cli_version(),
-        "engine_version": agent_vitals_domain::r2a::ENGINE_VERSION,
+        "engine_version": agent_vitals_domain::session_key::ENGINE_VERSION,
         "architecture": std::env::consts::ARCH,
         "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
         "statistics_timezone": agent_vitals_runtime::clock::statistics_timezone_name(),

@@ -873,7 +873,7 @@ mod tests {
     use agent_vitals_data::authority::{AuthorityDb, default_authority_path};
     use agent_vitals_data::fact_writer_sql::SqlFactWriter;
     use agent_vitals_data::workflow::insert_events;
-    use agent_vitals_domain::contracts::r2a::SessionKey;
+    use agent_vitals_domain::contracts::session_key::SessionKey;
     use agent_vitals_domain::workflow::WorkflowEvent;
     use serde_json::json;
 

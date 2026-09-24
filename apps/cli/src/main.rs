@@ -979,10 +979,9 @@ enum DataAction {
 ///   —— 参数名与 MCP 输入 schema 一致；`--day` 与 `--month` 二选一。
 /// - `Read`：`mcp::session_detail(session_ref, limit?, cursor?)` —— `session_ref`
 ///   是 MCP 返回的 HMAC（`sr_<32hex>`），不是原生 session key。
-/// - `Findings`：**仍走 `r2a_store::sessions_findings`**——DSH / Codex 行为
-///   findings 来自 session envelope 的 `findings` / `audit.findings` 字段
-///   （DSH wire 事件预先在 ingest 阶段算好）。`session_detail` 的 usage
-///   时间线与已落 authority 的 workflow 时间线是两个独立轴，成本不做硬归因。
+/// - `Findings`：先 `sync_facts`（行为 findings 由同步后的
+///   `ingest::findings_eval` 对变更的 DSH / Codex 会话增量评估），再读权威库
+///   issue 分组——与桌面 Findings 页同一数据源。W8 起 r2a_store 已删除。
 /// - `Navigation`：今日 token 走 SQL 权威库（`authority_day_token_totals`，
 ///   与 r2a_store `sessions_navigation` 同源），`recent[]` 改成
 ///   `mcp::dispatch("sessions_search", {date, limit})`。
@@ -1129,11 +1128,11 @@ enum SessionsAction {
         #[arg(long)]
         json: bool,
     },
-    /// Aggregate findings across ALL sessions (DSH + Codex + claude-code),
-    /// rule-level rollup. **Pre-computed findings**（DSH wire 事件在 ingest
-    /// 阶段评估、存进 envelope）——不是从 usage_facts 实时 fold。
+    /// Sync, then list findings from the authority database (all history),
+    /// grouped by rule. Behavior findings are evaluated during sync for changed
+    /// DSH / Codex sessions; this is the same source the workbench Findings page reads.
     Findings {
-        /// Print the versioned rollup DTO as JSON to stdout
+        /// Print the grouped findings JSON to stdout
         #[arg(long)]
         json: bool,
     },
@@ -1717,6 +1716,54 @@ fn cli_build_info() -> Value {
     })
 }
 
+/// `sessions findings` 的读取面：**全部历史**的 issue 组。不套桌面 Findings 页的
+/// 30 天窗——r2a 时代这条命令就汇总所有会话，issue 的 `opened_at_ms` 又取
+/// finding 发生时刻，套窗会让老会话的发现凭空消失（fixture 测试抓到）。JSON 原样
+/// 给 `issue_groups_with_sources` 的投影并加版本号；人读输出只给规则级汇总。
+fn print_findings(data_home: &Path, json_out: bool) {
+    let path = agent_vitals_data::authority::default_authority_path(data_home);
+    let db = match agent_vitals_data::authority::AuthorityDb::open_readonly(&path) {
+        Ok(db) => db,
+        Err(error) => {
+            eprintln!("authority database unavailable at {}: {error}", path.display());
+            std::process::exit(2);
+        }
+    };
+    let raw = match agent_vitals_data::issues::issue_groups_with_sources(db.conn(), None, None, usize::MAX, None) {
+        Ok(raw) => raw,
+        Err(error) => {
+            eprintln!("findings query failed: {error}");
+            std::process::exit(2);
+        }
+    };
+    if json_out {
+        let mut dto = serde_json::Map::new();
+        dto.insert("schema_version".into(), Value::String("agent-vitals-findings/v2".into()));
+        if let Value::Object(fields) = raw {
+            dto.extend(fields);
+        }
+        println!("{}", serde_json::to_string_pretty(&Value::Object(dto)).unwrap_or_default());
+        return;
+    }
+    println!(
+        "findings: {} group(s) · critical {} · warning {} · info {}",
+        raw["total_groups"].as_u64().unwrap_or(0),
+        raw["summary_critical"].as_u64().unwrap_or(0),
+        raw["summary_warning"].as_u64().unwrap_or(0),
+        raw["summary_info"].as_u64().unwrap_or(0),
+    );
+    for rule in raw["summary_rules"].as_array().into_iter().flatten() {
+        println!(
+            "  {:<10} {:<9} {:<9} hits {:>5}  sessions {:>4}",
+            rule["rule"].as_str().unwrap_or(""),
+            rule["severity"].as_str().unwrap_or(""),
+            rule["category"].as_str().unwrap_or(""),
+            rule["hits"].as_u64().unwrap_or(0),
+            rule["sessions"].as_u64().unwrap_or(0),
+        );
+    }
+}
+
 fn main() {
     let args = Args::parse();
     if args.build_info {
@@ -2145,7 +2192,7 @@ session_store={store} fold={fold}"
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
-        let key = agent_vitals_domain::contracts::r2a::SessionKey::new(
+        let key = agent_vitals_domain::contracts::session_key::SessionKey::new(
             host,
             &native_id,
             source_profile,
@@ -3848,9 +3895,9 @@ session_store={store} fold={fold}"
     }
 
     // v0.9.1 SQL 权威库收口（PR #2）：`sessions list` / `read` / `navigation`
-    // 改走 `mcp::dispatch`，envelope 与 MCP `tools/call` 同源；`findings` 仍
-    // 走 r2a_store（DSH/Codex findings 来自 session envelope 的 pre-computed
-    // 字段），而 session_detail 另外返回 SQL workflow 事件轴。
+    // 改走 `mcp::dispatch`，envelope 与 MCP `tools/call` 同源；`findings` 读权威库
+    // issue 分组（W8：由同步后的 findings_eval 产出），session_detail 另外返回
+    // SQL workflow 事件轴。
     if let Some(Cmd::Probe { action }) = &args.cmd {
         let data_home = agent_vitals_runtime::home::data_home();
         let db_path = agent_vitals_data::authority::default_authority_path(&data_home);
@@ -4305,16 +4352,14 @@ session_store={store} fold={fold}"
                 dispatch_sessions("session_detail", Value::Object(args), *json, &data_home);
             }
             SessionsAction::Findings { json } => {
-                // findings 仍是 session envelope 的预计算投影；workflow 事件轴
-                // 已由 session_detail 通过 authority 读取。
-                let home = std::env::var("HOME")
-                    .or_else(|_| std::env::var("USERPROFILE"))
-                    .unwrap_or_default();
-                let home_path = Path::new(&home);
-                agent_vitals_runtime::sessions::r2a_store::sessions_findings(
-                    home_path,
-                    *json,
-                );
+                // W8：行为 findings 唯一生产者是同步后的评估器（ingest::findings_eval，
+                // 取代 r2a SessionStore）。先同步一轮——只用 CLI、不开桌面的用户也要拿到
+                // 最新评估；再读权威库的 issue 组，与 React Findings 页同一数据源。
+                // 同步失败不阻断读：已落库的评估仍是真实数据，失败如实上 stderr。
+                if let Err(error) = agent_vitals_runtime::sync_service::sync_facts(&data_home) {
+                    eprintln!("sync before findings failed (showing last evaluated findings): {error}");
+                }
+                print_findings(&data_home, *json);
             }
             SessionsAction::Navigation {
                 day,

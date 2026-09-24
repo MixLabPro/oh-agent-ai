@@ -199,7 +199,7 @@ pub fn audit_session_log(path: &Path) -> Option<Audit> {
 
 /// 20 键行为审计载荷（`behavior --json` 的输出形状 + cost/pre_fork_cost）。DSH
 /// SessionReport 的 `session` 载荷就是这份（R2a §2.4，不复用第二套字段名）。
-/// main.rs 的 `behavior --json` 与 r2a_store 的 DSH population 共用它。
+/// main.rs 的 `behavior --json` 与同步后的 findings 评估（`ingest::findings_eval`）共用它。
 ///
 /// 键序 = 字节一致的一部分，**不能重排**（与 Python cli.py 的 `json.dumps` 逐字节
 /// 对齐）：findings → usage → requests → context → compaction → waste → cost →

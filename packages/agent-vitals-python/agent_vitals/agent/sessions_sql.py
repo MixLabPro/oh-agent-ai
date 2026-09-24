@@ -12,8 +12,8 @@ timezone / coverage / freshness / warnings / data` 顶层 + data 形状
 last_event_at / event_count / model_ids / identity_kind / tokens{4 桶 +
 total} / peak_tokens / cost_minor`）。
 
-Rust 镜像层（`crates/agent-vitals-runtime/src/sessions/r2a_store.rs`）
-已 behind `legacy-r2a` feature gate（PR #4 commit abd5abb）。本 wrapper
+Rust 镜像层（旧 `crates/agent-vitals-runtime/src/sessions/r2a_store.rs`）
+W8（2026-09-24）已整体删除（此前 behind `legacy-r2a` feature gate）。本 wrapper
 是 sessions 路径的**新唯一** Python 实现：`legacy-r2a` PR #5 删 r2a_store
 + r2a.py 时,本文件连同 cli.py dispatch + tests/test_cli_matrix.py 字节对
 账一起接管,Python CLI 不再有回退 jsonl 路径可走。

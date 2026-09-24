@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
-use agent_vitals_domain::contracts::r2a::SessionKey;
+use agent_vitals_domain::contracts::session_key::SessionKey;
 use agent_vitals_domain::contracts::source_identity::{canonical_json, fnv1a64_hex};
 use agent_vitals_domain::contracts::trace_graph::{
     BranchState, TraceGraph, TraceNode, TraceNodeType, TraceStatus,
@@ -706,7 +706,7 @@ mod tests {
     fn session_anchor_report_shapes_orders_and_degrades_honestly() {
         use agent_vitals_data::authority::AuthorityDb;
         use agent_vitals_domain::contracts::workflow::{SessionExcerpt, WorkflowEvent};
-        use agent_vitals_domain::contracts::r2a::SessionKey;
+        use agent_vitals_domain::contracts::session_key::SessionKey;
         let path = std::env::temp_dir().join(format!(
             "av-anchors-{}-{}.sqlite3",
             std::process::id(),

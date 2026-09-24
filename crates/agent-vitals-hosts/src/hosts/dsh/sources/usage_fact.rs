@@ -10,7 +10,7 @@
 //!
 //! **本模块不解释任何 DSH wire shape**——读/解码（`super::read_session_text`）、
 //! reshape（`parse_session_log`）、身份与 profile（`sessions::header` 的
-//! `dsh_header`/`dsh_source_profile`，runtime r2a_store 是同一实现的 re-export）、
+//! `dsh_header`/`dsh_source_profile`，runtime findings 评估器共用同一实现）、
 //! 逐槽观测（core `usage::dsh_usage_observations`）、残差
 //! 折叠（`usage::usage_fold_checkpoint`）、UsageFact 契约（core
 //! `usage_fact::build_usage_fact`）全部复用，一行新解释都不写。**emit surface =

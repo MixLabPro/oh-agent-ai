@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use agent_vitals_domain::contracts::r2a::SessionKey;
+use agent_vitals_domain::contracts::session_key::SessionKey;
 use agent_vitals_domain::workflow::WorkflowEvent;
 use serde_json::Value;
 

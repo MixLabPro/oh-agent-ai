@@ -15,7 +15,9 @@
 //! §6）——`r2a_store` 的 6 文件依赖闭包（`SessionStore` 缓存/checkpoint、
 //! codex 成本折叠、codex 会话审计、DSH discovery、behavior I/O 入口、claude
 //! ledger 读取）逐文件从 `apps/cli` 搬进来，落 spec §5.2"CLI 不再拥有宿主
-//! wire 解释或事实写入"的门槛。
+//! wire 解释或事实写入"的门槛。W8（2026-09-24）删除了 `r2a_store` 本体
+//! （SessionStore 缓存 / 旧 list/read/findings/navigation），findings 生产改由
+//! `ingest::findings_eval` 在同步后增量评估。
 //!
 //! v0.9 Stage 0.4：`summary`——`agent-vitals-data::repository::
 //! SummaryRepository` 的 Stage 0 实现（`docs/AGENT_VITALS_V0_9_STAGE0_

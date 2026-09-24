@@ -2,7 +2,7 @@
 //! CLI、wasm 构建和 Tauri 菜单栏共用。
 //!
 //! - `contracts/` — 宿主无关词表（`evidence`/`host_capability`/`source_identity`/
-//!   `usage_fact`/`r2a`）：身份与序列化事实形状，只依赖 `serde_json`、不解释任何
+//!   `usage_fact`/`session_key`）：身份与序列化事实形状，只依赖 `serde_json`、不解释任何
 //!   宿主 wire、不碰 I/O。纯净度由 `tests/dependency_budget.rs` 的
 //!   `contracts_module_stays_vocabulary_only` 钉住。
 //! - `domain/` — 跨宿主业务计算（behavior/trajectory/cost/usage/detectors/plan/…）。
@@ -25,7 +25,7 @@ pub mod domain;
 
 // 词表扁平别名——`domain/*.rs` 与 `compatibility/*.rs` 用 `crate::evidence` /
 // `crate::host_capability` 等引契约。
-pub use contracts::{billing, evidence, host_capability, r2a, source_identity, trace_graph, usage_fact, workflow};
+pub use contracts::{billing, evidence, host_capability, session_key, source_identity, trace_graph, usage_fact, workflow};
 
 // domain 计算模块的扁平别名——Phase C 迁出前 `agent_vitals_domain::behavior::*` 等。
 pub use domain::{
