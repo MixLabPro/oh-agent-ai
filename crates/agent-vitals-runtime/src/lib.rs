@@ -74,7 +74,7 @@ pub use query::trace_service;
 pub use query::export;
 
 // ── trust/ 信任与外传域 ──
-pub mod trust;
+pub use agent_vitals_trust::trust;
 pub use trust::trust_audit;
 pub use trust::trust_identity;
 pub use trust::trust_runtime_monitor;

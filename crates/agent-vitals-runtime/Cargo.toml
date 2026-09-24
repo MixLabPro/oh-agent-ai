@@ -35,6 +35,7 @@ watcher = ["agent-vitals-ingest/watcher"]
 
 [dependencies]
 agent-vitals-runtime-core = { path = "../agent-vitals-runtime-core" }
+agent-vitals-trust = { path = "../agent-vitals-trust" }
 agent-vitals-ingest = { path = "../agent-vitals-ingest" }
 agent-vitals-billing = { path = "../agent-vitals-billing" }
 agent-vitals-query = { path = "../agent-vitals-query" }

@@ -139,6 +139,7 @@ dependencies = [
  "agent-vitals-provider",
  "agent-vitals-query",
  "agent-vitals-runtime-core",
+ "agent-vitals-trust",
  "jiff",
  "regex",
  "rusqlite",
@@ -157,6 +158,21 @@ dependencies = [
  "agent-vitals-hosts",
  "jiff",
  "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "walkdir",
+]
+
+[[package]]
+name = "agent-vitals-trust"
+version = "1.4.0"
+dependencies = [
+ "agent-vitals-data",
+ "agent-vitals-domain",
+ "agent-vitals-hosts",
+ "agent-vitals-query",
  "rusqlite",
  "serde",
  "serde_json",
