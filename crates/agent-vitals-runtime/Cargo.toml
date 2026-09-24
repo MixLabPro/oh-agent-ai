@@ -44,6 +44,7 @@ legacy-r2a = []
 watcher = ["dep:notify"]
 
 [dependencies]
+agent-vitals-runtime-core = { path = "../agent-vitals-runtime-core" }
 agent-vitals-data = { path = "../agent-vitals-data" }
 # data 质量表的参数化写入（sql_sync 的 missing_sid issue）——同版本 0.31
 rusqlite = { version = "0.31", features = ["bundled"] }

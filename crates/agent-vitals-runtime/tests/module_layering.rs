@@ -47,6 +47,11 @@ fn flat_aliases(lib_rs: &str) -> BTreeMap<String, String> {
         let Some(rest) = rest.strip_suffix(';') else { continue };
         let mut parts = rest.split("::");
         if let (Some(top), Some(leaf), None) = (parts.next(), parts.next(), parts.next()) {
+            // `pub use agent_vitals_runtime_core::envelope;` 是跨 crate 的原样
+            // re-export，不是别名——名字本身就是那个模块。
+            if top.starts_with("agent_vitals") {
+                continue;
+            }
             out.insert(leaf.to_string(), top.to_string());
         }
     }
@@ -135,20 +140,32 @@ fn crate_refs(code: &str) -> Vec<String> {
     out
 }
 
+/// 本守卫覆盖的 crate：runtime 本体 + W3 拆出的地基 crate（L0–L1 之间同样有
+/// 方向——`core` 不许依赖 `envelope`/`events`/`skills`，Cargo 管不到 crate 内部）。
+fn src_dirs() -> Vec<std::path::PathBuf> {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    vec![manifest.join("src"), manifest.join("../agent-vitals-runtime-core/src")]
+}
+
 #[test]
 fn runtime_modules_depend_only_on_lower_layers() {
-    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for src_dir in src_dirs() {
+        check_layering(&src_dir);
+    }
+}
+
+fn check_layering(src_dir: &Path) {
     let lib_rs = std::fs::read_to_string(src_dir.join("lib.rs")).unwrap();
     let aliases = flat_aliases(&lib_rs);
 
     let mut violations = Vec::new();
-    for entry in walkdir::WalkDir::new(&src_dir) {
+    for entry in walkdir::WalkDir::new(src_dir) {
         let entry = entry.unwrap();
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        let rel = path.strip_prefix(&src_dir).unwrap();
+        let rel = path.strip_prefix(src_dir).unwrap();
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         if rel_str == "lib.rs" || rel_str.ends_with("/tests.rs") {
             continue;
@@ -184,10 +201,13 @@ fn runtime_modules_depend_only_on_lower_layers() {
 
 #[test]
 fn layer_table_covers_every_top_level_module() {
-    let lib_rs = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
-    )
-    .unwrap();
+    for src_dir in src_dirs() {
+        let lib_rs = std::fs::read_to_string(src_dir.join("lib.rs")).unwrap();
+        assert_modules_registered(&lib_rs);
+    }
+}
+
+fn assert_modules_registered(lib_rs: &str) {
     for line in lib_rs.lines() {
         let Some(rest) = line.trim().strip_prefix("pub mod ") else { continue };
         let module = rest.trim_end_matches(';').trim();

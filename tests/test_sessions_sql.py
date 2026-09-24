@@ -239,7 +239,7 @@ def _add_fact(conn, fact_id: str, host: str, session_key: str,
 # ────────────────────────────────────────────────────────────────────────
 
 class SessionRefHmacTests(unittest.TestCase):
-    """mirror crates/agent-vitals-runtime/src/mcp/session_ref.rs。
+    """mirror crates/agent-vitals-runtime/src/query/session_ref.rs（W3 从 mcp/ 移来）。
 
     钉住：
     1. ref 形如 `sr_<32 hex>`（HMAC-SHA256 截前 16 字节）

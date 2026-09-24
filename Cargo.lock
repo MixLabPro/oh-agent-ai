@@ -82,9 +82,26 @@ dependencies = [
  "agent-vitals-domain",
  "agent-vitals-hosts",
  "agent-vitals-provider",
+ "agent-vitals-runtime-core",
  "jiff",
  "libc",
  "notify",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "walkdir",
+]
+
+[[package]]
+name = "agent-vitals-runtime-core"
+version = "1.4.0"
+dependencies = [
+ "agent-vitals-data",
+ "agent-vitals-domain",
+ "agent-vitals-hosts",
+ "jiff",
  "regex",
  "rusqlite",
  "serde",

@@ -24,8 +24,16 @@
 //! 不到这里的 `sessions`/`budget`/`state`，trait 的实现只能落在这个既认识
 //! hosts 又认识 data 的层。
 
-// ── 平台件（crate 根，无领域归属，被所有子目录依赖）──
-pub mod core;
+// ── 地基层 L0–L1（W3 拆到 `agent-vitals-runtime-core`，这里原样 re-export，
+//    外部 `agent_vitals_runtime::{core, clock, lease, envelope, …}` 路径不变）──
+pub use agent_vitals_runtime_core::core;
+pub use agent_vitals_runtime_core::envelope;
+pub use agent_vitals_runtime_core::events;
+pub use agent_vitals_runtime_core::pricing;
+pub use agent_vitals_runtime_core::skills;
+pub use agent_vitals_runtime_core::source_graph;
+#[doc(hidden)]
+pub use agent_vitals_runtime_core::ENV_LOCK;
 pub use core::clock;
 pub use core::home;
 pub use core::logging;
@@ -35,7 +43,6 @@ pub use core::statistics_timezone;
 pub use core::retention;
 
 // ── billing/ 计费与价格域（旧路径 re-export 垫片保持外部兼容）──
-pub mod pricing;
 pub mod billing;
 pub use billing::budget;
 pub use pricing::money;
@@ -78,19 +85,5 @@ pub use sources::source_controls;
 pub use sources::host_registry;
 
 // ── 既有子目录 ──
-pub mod envelope;
 pub mod mcp;
 pub mod sessions;
-pub mod skills;
-
-// ── 事件总线 ──
-pub mod events;
-
-// ── SourceGraph ──
-pub mod source_graph;
-
-/// 进程级环境变量锁 —— `state` / `budget` / `takeover` / `summary` 的
-/// `#[cfg(test)]` 改 `AGENT_VITALS_HOME` 等进程 env，必须串行（模块各自造
-/// 局部锁只能串行本模块，跨模块并行还是踩）。
-#[doc(hidden)]
-pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

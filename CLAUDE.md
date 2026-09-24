@@ -73,6 +73,14 @@ crates/agent-vitals-runtime/ # v0.8 Phase D6/D7：非宿主本机机器。home�
                             #   codex 成本折叠/会话审计、DSH discovery、behavior I/O 入口、claude ledger
                             #   只读取值——整体从 apps/cli/src/agent/ 迁来，落 spec §5.2「CLI 不再拥有宿主
                             #   wire 解释或事实写入」门槛（docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md §6）。
+                            #   **W3 分层（2026-09-24）**：模块只能依赖严格更低层——L2 sources/sessions ·
+                            #   L3 query · L4 billing · L5 ingest/trust · L6 mcp（L0–L1 在 runtime-core）。
+                            #   `tests/module_layering.rs` 钉住；内部代码写真实路径（`crate::clock::now_ms`，
+                            #   不写兼容别名 `crate::sql_sync::now_ms`——后者只留给 crate 外部调用方）。
+crates/agent-vitals-runtime-core/ # W3 从 runtime 拆出的地基层（L0 core/pricing/source_graph ·
+                            #   L1 envelope/events/skills）：时钟、home、lease、SQL 权威标记、宿主词表、价卡、
+                            #   MCP/查询共用的工具协议（ToolError/AuthorityHandle/build_envelope）、outbox。
+                            #   runtime 原样 re-export，外部 `agent_vitals_runtime::X` 路径不变。
 crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over domain + hosts (audit_events), built with wasm-pack
 scripts/scan.py             # thin entrypoint; stays here (documented `python3 scripts/scan.py`
                             #   command, and what the ClawHub package ships at scripts/scan.py) —

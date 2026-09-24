@@ -179,10 +179,11 @@ class ClassificationGuardTests(unittest.TestCase):
 
         v0.8 Phase E7.5：inventory.rs 从 apps/cli/src/skills/ 迁进
         agent-vitals-runtime/src/skills/（跨宿主编排，依赖 E7.6 的四个宿主
-        适配器都已是库 crate 模块）。
+        适配器都已是库 crate 模块）。W3（2026-09-24）随地基层整体拆进
+        agent-vitals-runtime-core/src/skills/。
         """
         inventory = (
-            ROOT / "crates" / "agent-vitals-runtime" / "src" / "skills" / "inventory.rs"
+            ROOT / "crates" / "agent-vitals-runtime-core" / "src" / "skills" / "inventory.rs"
         ).read_text(encoding="utf-8")
         self.assertNotIn("read_session_evidence", inventory)
         self.assertIn("SessionEvidenceInput", inventory)

@@ -46,7 +46,7 @@ impl std::fmt::Display for ToolError {
 }
 
 /// [`AuthorityDb::open_readonly`] 的 typed 错误 → spec §11 码。
-pub(crate) fn map_open_error(e: AuthorityError) -> ToolError {
+pub fn map_open_error(e: AuthorityError) -> ToolError {
     match e {
         AuthorityError::MissingFile => ToolError::new(
             "database_missing",
@@ -101,7 +101,7 @@ impl AuthorityHandle {
     }
 }
 
-pub(crate) fn authority_state_for(data_home: &Path) -> &'static str {
+pub fn authority_state_for(data_home: &Path) -> &'static str {
     if crate::sql_authority::is_enabled(data_home) {
         "enabled"
     } else {
@@ -153,7 +153,7 @@ pub fn coverage_not_applicable() -> Value {
 /// - 传了 == 当前最新成功 run → `Ok(())`；
 /// - 传了、存在、但 != 最新（drift）→ push `snapshot_drift` warning，`Ok(())`（返回当前数据）；
 /// - 传了但从没这个 run（或一次成功同步都没有）→ `Err(invalid_argument)`。
-pub(crate) fn check_as_of_run_id(
+pub fn check_as_of_run_id(
     conn: &Connection,
     args: &Value,
     warnings: &mut Vec<Value>,
@@ -234,7 +234,7 @@ pub fn error_envelope(err: &ToolError) -> Value {
     })
 }
 
-pub(crate) fn schema_version(conn: &Connection) -> i64 {
+pub fn schema_version(conn: &Connection) -> i64 {
     conn.query_row(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'",
         [],
@@ -254,7 +254,7 @@ pub(crate) fn schema_version(conn: &Connection) -> i64 {
 /// `event_ts_ms` 是北京日 12:00 代表点；混进去会把 `max_observed_at`
 /// 推到 `covered_to` 之后，破坏 spec §6.1「本次答案基于哪一批已提交
 /// 数据」的不变量。这条过滤与 `per_host_breakdown` / `hourly_by_host` 同。
-pub(crate) fn authority_revision(conn: &Connection, max_observed_at_ms: Option<i64>) -> Value {
+pub fn authority_revision(conn: &Connection, max_observed_at_ms: Option<i64>) -> Value {
     let last = conn
         .query_row(
             "SELECT run_id, COALESCE(completed_at_ms, started_at_ms)
@@ -289,12 +289,12 @@ pub(crate) fn authority_revision(conn: &Connection, max_observed_at_ms: Option<i
 /// `data_status` 及所有标准 envelope 的活跃数据新鲜度阈值。它回答的是「该
 /// 宿主最近一条实时 usage 事实是否已超过一天」；最近一次扫描时间另由
 /// `data.by_host.*.last_seen_at` 表示，二者不能混为一谈。
-pub(crate) const FRESHNESS_STALE_AFTER_MS: i64 = 24 * 60 * 60 * 1_000;
+pub const FRESHNESS_STALE_AFTER_MS: i64 = 24 * 60 * 60 * 1_000;
 
 /// 返回存在于实时事实或扫描源中的宿主，且其最后一条实时 usage fact 已超过
 /// 24 小时（没有任何实时事实同样视为 stale）。顺序由 SQL 固定为 host 升序，
 /// 以保证 CLI / MCP envelope 可逐字节对账。
-pub(crate) fn stale_hosts(conn: &Connection, now_ms: i64) -> Vec<String> {
+pub fn stale_hosts(conn: &Connection, now_ms: i64) -> Vec<String> {
     let mut stmt = match conn.prepare(
         "SELECT host, MAX(event_ts_ms) AS last_fact_at_ms
          FROM usage_facts
@@ -337,7 +337,7 @@ pub fn data_freshness_report(conn: &Connection) -> Value {
 
 /// spec §6 `freshness`。`stale_hosts` 由最新实时事实折成显式状态，避免只把
 /// 原始 `covered_to` 留给每个 consumer 自己计算而发生口径漂移。
-pub(crate) fn freshness(conn: &Connection) -> Value {
+pub fn freshness(conn: &Connection) -> Value {
     let last = conn
         .query_row(
             "SELECT MAX(COALESCE(completed_at_ms, started_at_ms))
@@ -355,7 +355,7 @@ pub(crate) fn freshness(conn: &Connection) -> Value {
 
 /// epoch ms → RFC 3339，使用系统统计时区（spec §6.3）。供应商价格时间
 /// 仍由价格快照的事件绝对时间决定，不读取这个显示时区。
-pub(crate) fn ms_to_rfc3339_beijing(ms: i64) -> String {
+pub fn ms_to_rfc3339_beijing(ms: i64) -> String {
     Timestamp::from_millisecond(ms)
         .unwrap_or(Timestamp::UNIX_EPOCH)
         .to_zoned(crate::clock::statistics_timezone())
