@@ -147,43 +147,7 @@ pub(crate) fn load_sync_status(dh: &Path) -> SyncStatus {
         .unwrap_or_default()
 }
 
-/// 最近一次被折账的会话（`state/oneline.json`，`oneline` 写链每次结算末尾落盘）。
-/// **纯展示，不参与任何汇总**——今日/本月的钱来自 today.json/month.json，这里只是
-/// 「上一次跑完的那个会话花了多少」，是个独立问题：刚跑完一个会话的人第一时间想
-/// 知道的就是它，而不用打开工作台翻会话列表。
-///
-/// 字段全部 Option + `present`：文件缺场（一次 oneline 都没跑过）与「跑过但某个
-/// 字段是 null」是两回事，前者整条不显示，后者显示已知部分。不拿缺失字段当 0。
-#[derive(Serialize, Default)]
-pub struct RecentSession {
-    pub present: bool,
-    pub model: Option<String>,
-    pub tokens_total: Option<i64>,
-    pub cost_cny: Option<f64>,
-    pub findings_total: Option<i64>,
-    pub findings_max_severity: Option<String>,
-    /// 这次结算的落盘时刻——与 alert.json 的 `generated_at` 同源同刻（两者都由
-    /// 同一次 `oneline` 末尾写出），展示层判新鲜度可以复用同一个阈值。
-    pub generated_at: Option<String>,
-}
 
-/// 读 `state/oneline.json`。缺场/解析失败 → `present: false`（不是全零结构）。
-fn read_recent_session(dh: &Path) -> RecentSession {
-    let Some(v) = read_json(&dh.join("state").join("oneline.json")) else {
-        return RecentSession::default();
-    };
-    RecentSession {
-        present: true,
-        model: v.get("model").and_then(|x| x.as_str().map(String::from)),
-        tokens_total: v.get("tokens_total").and_then(|x| x.as_i64()),
-        cost_cny: v.get("cost_cny").and_then(|x| x.as_f64()),
-        findings_total: v.get("findings_total").and_then(|x| x.as_i64()),
-        findings_max_severity: v
-            .get("findings_max_severity")
-            .and_then(|x| x.as_str().map(String::from)),
-        generated_at: v.get("generated_at").and_then(|x| x.as_str().map(String::from)),
-    }
-}
 
 /// 多宿主导航行（spec §5.3）：`sessions navigation` 的宿主快照在托盘侧的落盘
 /// 形状。tick 每次查询完写 `state/hosts.json`，`read_overview` 附带返回——托盘
@@ -462,8 +426,6 @@ pub struct Overview {
     /// ——与工作台「今日消耗」KPI 同一个数。托盘标题「鸟头 + 64.4M」读它；None =
     /// 库打不开（退回 DSH state + claude ledger 的旧合并）。
     pub today_tokens_sql: Option<i64>,
-    /// 最近一次折账的会话（oneline.json）。托盘菜单展示「上一次跑完花了多少」。
-    pub recent: RecentSession,
     /// 菜单栏同步回路状态（tick 落盘）。前端据此示警/给「立即同步」入口。
     pub sync: SyncStatus,
     /// 多宿主导航行（tick 落盘 hosts.json）。托盘据此渲染 L1 宿主行 + L2 最近会话。
@@ -508,38 +470,16 @@ pub struct Overview {
     pub subscription_cny_month: Option<f64>,
 }
 
-/// 数据根（镜像 `paths.py::data_home` / `snapshot.rs::data_home_from` 的优先序）：
-/// `AGENT_VITALS_HOME` → `SKILL_VITALS_HOME` → `~/.agent-vitals`（已存在或 legacy
-/// 不存在时）→ `~/.skill-vitals`。
+/// 数据根：直接用 runtime 的唯一 `HomeResolver`（`AGENT_VITALS_HOME` →
+/// `SKILL_VITALS_HOME` → `~/.agent-vitals`（已存在或 legacy 不存在）→ `~/.skill-vitals`）。
+///
+/// W3：此前这里是一份手写拷贝，且已和 runtime 分叉（全空白 env 当未设、不回落
+/// `USERPROFILE`）。同步改为进程内调用后，同步内部（如 `machine_namespace()`）读的是
+/// runtime 的解析——两份不一致就会把事实写到托盘读不到的根，所以只留一份。
 pub fn data_home() -> PathBuf {
-    data_home_from(
-        &|k| match std::env::var(k) {
-            Ok(v) if !v.trim().is_empty() => Some(v),
-            _ => None,
-        },
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()),
-    )
+    agent_vitals_runtime::home::data_home()
 }
 
-/// 纯函数版数据根选择——env 源由调用方注入，单测不用碰真实环境变量。
-/// 与 `snapshot.rs::data_home_from` 同一组分支（那边有 4 条同值测试）。
-fn data_home_from<F>(get_env: &F, home: PathBuf) -> PathBuf
-where
-    F: Fn(&str) -> Option<String>,
-{
-    for var in ["AGENT_VITALS_HOME", "SKILL_VITALS_HOME"] {
-        if let Some(path) = get_env(var) {
-            return PathBuf::from(path);
-        }
-    }
-    let current = home.join(".agent-vitals");
-    let legacy = home.join(".skill-vitals");
-    if current.exists() || !legacy.exists() {
-        current
-    } else {
-        legacy
-    }
-}
 
 /// 北京时区（UTC+8，无夏令时）今天 → `YYYY-MM-DD`。算法逐字段镜像二进制
 /// `codex_cost.rs::civil_from_unix_secs`（Howard Hinnant 的 civil_from_days，
@@ -836,7 +776,6 @@ fn read_overview_at(dh: &Path) -> Overview {
         today_tokens_sql: shared_daily
             .as_ref()
             .map(|d| d.tokens_by_host.values().map(|t| t.total).sum()),
-        recent: read_recent_session(dh),
         sync: load_sync_status(dh),
         hosts: hosts_snap.hosts,
         hosts_generated_at: hosts_snap.generated_at,
@@ -1079,7 +1018,7 @@ mod tests {
         };
         // AGENT_VITALS_HOME 优先于 SKILL_VITALS_HOME。
         assert_eq!(
-            data_home_from(&get, tmp.clone()),
+            agent_vitals_runtime::home::data_home_from(&get, tmp.clone()),
             tmp.join("explicit-a")
         );
         // 只设 SKILL_VITALS_HOME → 用它。
@@ -1087,18 +1026,18 @@ mod tests {
             "SKILL_VITALS_HOME" => Some(tmp.join("explicit-b").to_string_lossy().into_owned()),
             _ => None,
         };
-        assert_eq!(data_home_from(&get_b, tmp.clone()), tmp.join("explicit-b"));
+        assert_eq!(agent_vitals_runtime::home::data_home_from(&get_b, tmp.clone()), tmp.join("explicit-b"));
         // 无 env：~/.agent-vitals 存在 → 用它。
         std::fs::create_dir_all(tmp.join(".agent-vitals")).unwrap();
         let none = |_: &str| None;
-        assert_eq!(data_home_from(&none, tmp.clone()), tmp.join(".agent-vitals"));
+        assert_eq!(agent_vitals_runtime::home::data_home_from(&none, tmp.clone()), tmp.join(".agent-vitals"));
         // 无 env、~/.agent-vitals 不存在、~/.skill-vitals 存在 → 用 legacy。
         std::fs::remove_dir_all(tmp.join(".agent-vitals")).unwrap();
         std::fs::create_dir_all(tmp.join(".skill-vitals")).unwrap();
-        assert_eq!(data_home_from(&none, tmp.clone()), tmp.join(".skill-vitals"));
+        assert_eq!(agent_vitals_runtime::home::data_home_from(&none, tmp.clone()), tmp.join(".skill-vitals"));
         // 两个都不存在 → 默认 ~/.agent-vitals。
         std::fs::remove_dir_all(tmp.join(".skill-vitals")).unwrap();
-        assert_eq!(data_home_from(&none, tmp.clone()), tmp.join(".agent-vitals"));
+        assert_eq!(agent_vitals_runtime::home::data_home_from(&none, tmp.clone()), tmp.join(".agent-vitals"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
