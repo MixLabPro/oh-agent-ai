@@ -45,7 +45,7 @@ pub use core::statistics_timezone;
 pub use core::retention;
 
 // ── billing/ 计费与价格域（旧路径 re-export 垫片保持外部兼容）──
-pub mod billing;
+pub use agent_vitals_billing::billing;
 pub use billing::budget;
 pub use pricing::money;
 pub use billing::billing_preview;
