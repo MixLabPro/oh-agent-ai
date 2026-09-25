@@ -358,6 +358,18 @@
       case "read_overview": return { ...overview, budget: { ...overview.budget,
         snoozed_until: budgetSnoozedUntilMs ? new Date(budgetSnoozedUntilMs).toISOString() : null },
         budget_profiles: { status: "ok", month, profiles: Object.values(budgetProfilesState) } };
+      // Composite Overview read, matching the backend's authority-revision bracket.
+      case "read_overview_details_snapshot": {
+        const requestedMonth = args && args.month || month;
+        const requestedDate = args && args.date || isoDay;
+        return {
+          month: requestedMonth, date: requestedDate,
+          monthly: dto(374000, { month: requestedMonth }),
+          daily: dto(246000, { daily: true, date: requestedDate }),
+          calendar: { month: requestedMonth, days: requestedMonth === month ? calendar.days : {} },
+          authority_revision: 42, is_consistent: true, errors: [],
+        };
+      }
       // Shape: crates/agent-vitals-domain/src/domain/data_contract.rs:607 DailySummary::to_json.
       case "data_daily_summary": return dto(246000, { daily: true, date: args && args.date });
       // Shape: crates/agent-vitals-domain/src/domain/data_contract.rs:494 MonthlySummary::to_json.
@@ -765,6 +777,17 @@
         const page = continuation ? sessions.slice(1) : sessions.slice(0, 1);
         return { data: { sessions: page, next_cursor: continuation ? null : "preview-next", has_more: !continuation, window_session_count: sessions.length, window_total_tokens: 344000 } };
       }
+      case "session_trace": {
+        // Synthetic preview only; production invokes the existing local authority.
+        if (args.output === "graph") return { data: { coverage: { total_nodes: 9, total_edges: 8, missing_parent: 0, missing_time: 0, missing_status: 0 } } };
+        return { data: {
+          linearization: "leaf",
+          points: [2, 4, null, 1, 5, 3].map((value, index) => ({ ordinal: index, task_id: String(index + 1), values: { tool_call_count: value } })),
+          series: [{ name: "tool_call_count", cumulative: false }],
+          events: [{ ordinal: 1, kind: "tool", label: "工具调用", severity: "info" }, { ordinal: 4, kind: "risk", label: "工具失败", severity: "critical" }],
+          unplaced_events: 1,
+        } };
+      }
       case "sessions_read": {
         const selected = sessions.find((session) => session.session_ref === (args && args.sessionRef)) || sessions[0];
         const model = selected.model_ids[0] || "<unknown>";
@@ -797,6 +820,7 @@
       };
       case "findings_freshness": return { status: "ok", freshness: { state: "stale", last_successful_sync_at: new Date(Date.now() - 1500000).toISOString(), stale_hosts: ["workbuddy"], syncing: false } };
       case "trust_monitor_config": return { ...trustMonitorConfig };
+      case "trust_evidence_read": return { host: args && args.host || null, count: 0, evidence: [], next_cursor: null, source: "browser_mock" };
       case "trust_discover": return { candidates: [{ id: "sample-agent", detected: true, artifact_profile_available: true, coverage_state: "profiled" }], profile_errors: [] };
       case "trust_profile_proposal_status": return { status: "ok", authority_state: "ready", data: { pending: trustProfileState.pending, approved: trustProfileState.approved, history: [] } };
       case "trust_profile_approve": {

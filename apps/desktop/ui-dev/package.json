@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "verify:desktop-shell": "node ../../../scripts/verify-react-desktop-shell.mjs",
     "dev:react": "vite --config vite.react.config.js --host 127.0.0.1",
     "build": "vite build",
     "build:react": "vite build --config vite.react.config.js",

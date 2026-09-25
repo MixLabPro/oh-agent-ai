@@ -11,6 +11,14 @@ import { fileURLToPath } from "node:url";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ui = path.join(repo, "apps/desktop/ui-dev");
+const sessionsSource = readFileSync(path.join(ui, "react/src/features/sessions/SessionsPage.tsx"), "utf8");
+const detailSource = readFileSync(path.join(ui, "react/src/features/sessions/SessionDetail.tsx"), "utf8");
+assert.match(sessionsSource, /sessions-workspace-selected/, "selecting a session must open the desktop inspector beside the list");
+assert.match(sessionsSource, /rows\.find\(\(row\) => row\.session_ref === selectedSessionRef\)/, "selection must resolve against refreshed rows by stable session_ref");
+assert.doesNotMatch(sessionsSource, /useState<SessionRow \| null>/, "the inspector must not retain a stale row object across list refreshes");
+assert.match(sessionsSource, /refreshKey=\{detailRefreshKey\}/, "list invalidation must also refresh the selected inspector");
+assert.match(detailSource, /\[sessionRef, refreshKey\]/, "detail query must rerun when its parent refresh revision changes");
+assert.match(detailSource, /setLoadingMore\(false\)/, "detail refresh must release an in-flight pagination button");
 const uiRequire = createRequire(path.join(ui, "package.json"));
 const { buildSync } = uiRequire("esbuild");
 
@@ -57,6 +65,18 @@ const detailPage = await bridge.readSessionDetail("sr_browser_mock_01", "detail-
 assert.equal(calls.at(-1).args.cursor, "detail-next");
 assert.equal(detailPage.session_ref, detail.session_ref);
 
+// The authority detail contract does not include the search row's peak_tokens.
+// A valid detail must not be rejected or silently given a fabricated peak of 0.
+const withoutListOnlyPeak = loadBridge(async (command, args) => {
+  const value = await originalInvoke(command, args);
+  if (command !== "sessions_read") return value;
+  const copy = structuredClone(value);
+  delete copy.data.peak_tokens;
+  return copy;
+});
+const detailWithoutPeak = await withoutListOnlyPeak.readSessionDetail("sr_browser_mock_01");
+assert.equal(Object.hasOwn(detailWithoutPeak, "peak_tokens"), false);
+
 await assert.rejects(() => bridge.readSessions({ date_from: "2026-09-10" }), /成对/);
 await assert.rejects(() => bridge.readSessions({ date_from: "2026-09-11", date_to: "2026-09-10" }), /起点不能晚于终点/);
 await assert.rejects(() => bridge.readSessionDetail("native-session-id"), /session_ref 不安全/);
@@ -70,4 +90,4 @@ const malformed = async (command, args) => {
 const malformedBridge = loadBridge(malformed);
 await assert.rejects(() => malformedBridge.readSessionDetail("sr_browser_mock_01"), /分页缺少 next_cursor/);
 
-console.log("React Sessions contract: OK (list/detail pagination forwarding, safe filters, malformed rejection)");
+console.log("React Sessions contract: OK (split inspector, stable selection, list/detail pagination, safe filters, malformed rejection)");

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ToolbarActions } from "../../components/ui/ToolbarActions";
 import {
   auditTrust,
   approveTrustProfile,
@@ -7,6 +8,7 @@ import {
   listenAppEvents,
   readTrustProfileStatus,
   readTrustSuppressions,
+  readTrustEvidence,
   readTrustMonitorConfig,
   revokeTrustProfile,
   revokeTrustSuppression,
@@ -14,6 +16,7 @@ import {
   dismissTrustMonitorPrompt, saveTrustMonitorConfig,
   safeUiError,
   type TrustAuditReport,
+  type TrustEvidence,
   type TrustHostCandidate,
   type TrustMonitorConfig,
   type TrustRuntimeSnapshot,
@@ -117,6 +120,11 @@ export function TrustPage() {
   const [profileErrors, setProfileErrors] = useState<string[]>([]);
   const [selectedHost, setSelectedHost] = useState<string | null>(null);
   const [report, setReport] = useState<TrustAuditReport | null>(null);
+  const [evidenceHistory, setEvidenceHistory] = useState<TrustEvidence[]>([]);
+  const [evidenceCursor, setEvidenceCursor] = useState<string | null>(null);
+  const [evidenceLoading, setEvidenceLoading] = useState(true);
+  const [evidenceLoadingMore, setEvidenceLoadingMore] = useState(false);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const [loading, setLoading] = useState("正在发现本机宿主…");
   const [error, setError] = useState<string | null>(null);
   const [monitor, setMonitor] = useState<TrustMonitorConfig | null>(null);
@@ -133,10 +141,13 @@ export function TrustPage() {
   const [controlsLoading, setControlsLoading] = useState(true);
   const [controlsError, setControlsError] = useState<string | null>(null);
   const [controlsFeedback, setControlsFeedback] = useState<string | null>(null);
+  const [profileConfirmation, setProfileConfirmation] = useState<{ action: "approve" | "reject" | "revoke"; slug: string; manifestHash: string } | null>(null);
+  const [profileFeedback, setProfileFeedback] = useState<{ section: "pending" | "approved"; error: boolean; message: string } | null>(null);
   const [profileAction, setProfileAction] = useState<string | null>(null);
   const [suppressionAction, setSuppressionAction] = useState<string | null>(null);
   const controlsRequest = useRef(0);
   const auditRequest = useRef(0);
+  const evidenceRequest = useRef(0);
 
   const discover = () => {
     setLoading("正在发现本机宿主…");
@@ -151,7 +162,7 @@ export function TrustPage() {
     setControlsLoading(true);
     setControlsError(null);
     const [profiles, rules] = await Promise.allSettled([readTrustProfileStatus(), readTrustSuppressions()]);
-    if (requestId !== controlsRequest.current) return;
+    if (requestId !== controlsRequest.current) return false;
     const errors: string[] = [];
     if (profiles.status === "fulfilled") setProfileStatus(profiles.value);
     else errors.push(safeUiError(profiles.reason, "Profile 授权状态暂不可用"));
@@ -159,9 +170,29 @@ export function TrustPage() {
     else errors.push(safeUiError(rules.reason, "Trust 通知抑制状态暂不可用"));
     setControlsError(errors.length ? errors.join("；") : null);
     setControlsLoading(false);
+    return profiles.status === "fulfilled";
   };
 
-  useEffect(() => { discover(); void loadTrustControls(); }, []);
+  const refreshEvidenceHistory = async (cursor: string | null = null, append = false) => {
+    const requestId = ++evidenceRequest.current;
+    if (append) setEvidenceLoadingMore(true); else setEvidenceLoading(true);
+    setEvidenceError(null);
+    try {
+      const history = await readTrustEvidence(null, 200, cursor);
+      if (requestId !== evidenceRequest.current) return;
+      setEvidenceHistory((current) => append ? current.concat(history.evidence) : history.evidence);
+      setEvidenceCursor(history.next_cursor);
+    } catch (reason: unknown) {
+      if (requestId === evidenceRequest.current) setEvidenceError(errorMessage(reason));
+    } finally {
+      if (requestId === evidenceRequest.current) {
+        setEvidenceLoading(false);
+        setEvidenceLoadingMore(false);
+      }
+    }
+  };
+
+  useEffect(() => { discover(); void loadTrustControls(); void refreshEvidenceHistory(); }, []);
 
   useEffect(() => () => { controlsRequest.current += 1; }, []);
 
@@ -170,28 +201,38 @@ export function TrustPage() {
     void loadTrustControls();
   };
 
-  const decideProfile = async (profile: TrustProfileSummary, action: "approve" | "reject" | "revoke") => {
+  const requestProfileDecision = (profile: TrustProfileSummary, action: "approve" | "reject" | "revoke") => {
+    const section = action === "revoke" ? "approved" : "pending";
     if (action === "approve" && !profileApprovalIsSafe(profile)) {
-      setControlsFeedback("该 Profile 的授权范围无法安全预览或超出用户目录；为避免盲目授权，React 暂不允许批准。请修正为用户目录内的明确根路径后重新暂存。");
+      setProfileFeedback({ section, error: true, message: "该 Profile 的授权范围无法安全预览或超出用户目录；请修正为用户目录内的明确根路径后重新暂存。" });
       return;
     }
-    const actionLabel = action === "approve" ? "批准并启用" : action === "reject" ? "拒绝提案" : "撤销启用";
-    const safetyNote = action === "approve"
-      ? `\n\n范围预览：${profileScopeText(profile)}\n这里只展示路径类别，不展示本机路径；批准后该宿主可被本机同步读取。清单版本：${profile.manifest_hash}。`
-      : `\n\n目标：${profile.display_name}（${profile.slug}）\n清单版本：${profile.manifest_hash}。${action === "revoke" ? "撤销会停用 Profile，但不会删除已产生的本机证据。" : "拒绝只移除待批准提案。"}`;
-    if (!window.confirm(`确定${actionLabel} ${profile.display_name}？${safetyNote}`)) return;
+    setProfileFeedback(null);
+    setProfileConfirmation({ action, slug: profile.slug, manifestHash: profile.manifest_hash });
+  };
+
+  const decideProfile = async (profile: TrustProfileSummary, action: "approve" | "reject" | "revoke") => {
+    const section = action === "revoke" ? "approved" : "pending";
+    if (profileConfirmation?.action !== action || profileConfirmation.slug !== profile.slug || profileConfirmation.manifestHash !== profile.manifest_hash) {
+      setProfileFeedback({ section, error: true, message: "清单版本已变化，请刷新授权状态后重新确认。" });
+      setProfileConfirmation(null);
+      return;
+    }
     const actionKey = `${action}:${profile.slug}`;
     setProfileAction(actionKey);
-    setControlsFeedback(null);
+    setProfileConfirmation(null);
+    setProfileFeedback({ section, error: false, message: `正在${action === "approve" ? "批准" : action === "reject" ? "拒绝" : "撤销"} ${profile.display_name}…` });
     try {
       if (action === "approve") await approveTrustProfile(profile);
       else if (action === "reject") await rejectTrustProfile(profile);
       else await revokeTrustProfile(profile);
-      setControlsFeedback(`${profile.display_name}：${action === "approve" ? "已批准并启用" : action === "reject" ? "已拒绝" : "已撤销；历史证据保留"}。`);
       discover();
-      await loadTrustControls();
+      const refreshed = await loadTrustControls();
+      setProfileFeedback({ section, error: !refreshed, message: refreshed
+        ? `${profile.display_name}：${action === "approve" ? "已批准并启用" : action === "reject" ? "已拒绝" : "已撤销启用；历史证据保留"}。`
+        : `${profile.display_name} 的操作已完成，但授权列表刷新失败；请点击“刷新授权状态”核对。` });
     } catch (reason: unknown) {
-      setControlsFeedback(`操作未完成：${safeUiError(reason, "本机 Profile 操作失败")}`);
+      setProfileFeedback({ section, error: true, message: `操作未完成：${safeUiError(reason, "本机 Profile 操作失败")}` });
     } finally {
       setProfileAction(null);
     }
@@ -236,6 +277,8 @@ export function TrustPage() {
       setExpandedEvidence(null);
       setAuditLoadingHost(null);
       setMonitorFeedback("来源投影已删除；旧 Trust 报告已清除，请重新发现宿主。");
+      setEvidenceHistory([]);
+      void refreshEvidenceHistory();
       discover();
     })
       .then((unsubscribe) => { if (active) cleanup = unsubscribe; else unsubscribe(); });
@@ -247,11 +290,15 @@ export function TrustPage() {
     let cleanup: (() => void) | null = null;
     void listenAppEvents((event) => {
       if (!active || event.type !== "TrustMonitorInvalidated") return;
+      setReport(null);
+      setSelectedHost(null);
+      setExpandedEvidence(null);
+      void refreshEvidenceHistory();
       void readTrustMonitorConfig().then((value) => {
         if (!active) return;
         setMonitor(value);
         setMonitorDraft({ enabled: value.enabled, interval_seconds: value.interval_seconds, notifications_enabled: value.notifications_enabled });
-        setMonitorFeedback("实时监测状态已更新；如需查看新证据，请重新审计宿主。");
+        setMonitorFeedback("实时监测状态与历史证据已刷新；历史读取不会重新扫描宿主目录。");
       }).catch(() => undefined);
     }).then((unsubscribe) => { if (active) cleanup = unsubscribe; else unsubscribe(); });
     return () => { active = false; cleanup?.(); };
@@ -266,7 +313,8 @@ export function TrustPage() {
     try {
       const value = await saveTrustMonitorConfig({ enabled: true, interval_seconds: monitorDraft.interval_seconds, notifications_enabled: false });
       setMonitor(value);
-      setMonitorFeedback(value.enabled ? "实时监测已开启；只记录本机脱敏元数据。" : "实时监测已关闭；不会在后台采集。");
+      setMonitorDraft({ enabled: value.enabled, interval_seconds: value.interval_seconds, notifications_enabled: value.notifications_enabled });
+      setMonitorFeedback(value.enabled ? "后台监测已开启，正在安排首次采样。" : "后台监测已关闭；不会在后台采集。");
     } catch (reason: unknown) { setMonitorFeedback(`保存失败：${errorMessage(reason)}`); }
     finally { setMonitorSaving(false); }
   };
@@ -275,6 +323,7 @@ export function TrustPage() {
     try {
       const value = await saveTrustMonitorConfig({ enabled: false, interval_seconds: monitorDraft.interval_seconds, notifications_enabled: false });
       setMonitor(value);
+      setMonitorDraft({ enabled: value.enabled, interval_seconds: value.interval_seconds, notifications_enabled: value.notifications_enabled });
       setMonitorFeedback("已保持默认关闭；之后可从下面的开关随时打开。");
     } catch (reason: unknown) { setMonitorFeedback(`保存失败：${errorMessage(reason)}`); }
     finally { setMonitorSaving(false); }
@@ -287,16 +336,21 @@ export function TrustPage() {
     } catch (reason: unknown) { setMonitorFeedback(`操作失败：${errorMessage(reason)}`); }
   };
 
-  const saveMonitor = () => {
+  const saveMonitor = (next: { enabled: boolean; interval_seconds: number; notifications_enabled: boolean }) => {
+    if (monitorSaving || monitor?.status !== "ok") return;
+    setMonitorDraft(next);
     setMonitorSaving(true);
-    setMonitorFeedback(null);
-    void saveTrustMonitorConfig(monitorDraft)
+    setMonitorFeedback("正在应用监测设置…");
+    void saveTrustMonitorConfig(next)
       .then((value) => {
         setMonitor(value);
         setMonitorDraft({ enabled: value.enabled, interval_seconds: value.interval_seconds, notifications_enabled: value.notifications_enabled });
-        setMonitorFeedback(value.enabled ? "实时监测已开启；只记录本机脱敏元数据。" : "实时监测已关闭；不会在后台采集。");
+        setMonitorFeedback(value.enabled ? "后台监测已开启，正在安排首次采样。" : "后台监测已关闭；不会在后台采集。");
       })
-      .catch((reason: unknown) => setMonitorFeedback(`保存失败：${errorMessage(reason)}`))
+      .catch((reason: unknown) => {
+        if (monitor) setMonitorDraft({ enabled: monitor.enabled, interval_seconds: monitor.interval_seconds, notifications_enabled: monitor.notifications_enabled });
+        setMonitorFeedback(`保存失败：${errorMessage(reason)}`);
+      })
       .finally(() => setMonitorSaving(false));
   };
 
@@ -306,6 +360,9 @@ export function TrustPage() {
     void runTrustRuntimeSnapshot()
       .then((value) => {
         setSnapshot(value);
+        setReport(null);
+        setSelectedHost(null);
+        void refreshEvidenceHistory();
         setMonitorFeedback(value.observations > 0
           ? `快照已记录 ${value.observations} 条脱敏证据；这表示尝试链路，不证明已传输。`
           : `本次未形成证据（${snapshotCapabilityLabel(value.capability)}）。`);
@@ -322,21 +379,25 @@ export function TrustPage() {
     setLoading(`正在读取 ${host} 的本地证据…`);
     setError(null);
     void auditTrust(host)
-      .then((result) => { if (requestId === auditRequest.current) { setReport(result); setLoading(""); } })
+      .then(async (result) => { if (requestId === auditRequest.current) { setReport(result); setLoading(""); await refreshEvidenceHistory(); } })
       .catch((reason: unknown) => { if (requestId === auditRequest.current) { setError(errorMessage(reason)); setLoading(""); } })
       .finally(() => { if (requestId === auditRequest.current) setAuditLoadingHost(null); });
   };
 
+  const displayedEvidence = report?.evidence ?? evidenceHistory;
+
   return <section className="trust-page" aria-labelledby="trust-page-title">
-    <div className="trust-page-header">
-      <div><p className="eyebrow">Trust / 证据链</p><h2 id="trust-page-title">本地 Agent 出境审计</h2><p className="hero-copy">只读发现与审计。前端只接收已脱敏的证据投影，不读取原始工作区。</p></div>
+    <h2 id="trust-page-title" className="visually-hidden">本地 Agent 出境审计</h2>
+    <ToolbarActions>
       <button className="button button-secondary" type="button" onClick={refreshTrustPage} disabled={Boolean(loading) || controlsLoading}>重新发现</button>
-    </div>
+    </ToolbarActions>
     {loading && <p className="inline-status" role="status">{loading}</p>}
     {error && <div className="error-banner" role="alert">{error}</div>}
     {auditLoadingHost && report && <div className="trust-refresh-status" role="status">正在刷新 {auditLoadingHost} 的本地证据；下面暂保留上一次可读报告。</div>}
     {!auditLoadingHost && error && report && <div className="trust-refresh-status trust-refresh-status-error" role="status">本次审计未完成；仍展示 {report.host} 上一次已取得的脱敏证据。</div>}
     {profileErrors.length > 0 && <div className="callout"><strong>部分宿主配置不可用</strong><span>{profileErrors.length} 条配置警告不会被当作风险结论。</span></div>}
+    <details className="trust-control-disclosure">
+      <summary>宿主 Profile 与通知控制 <span>{profileStatus.pending.length} 待批准 · {profileStatus.approved.length} 已启用</span></summary>
     <section className="trust-control-card" aria-labelledby="trust-profile-controls-title">
       <div className="trust-card-heading"><div><p className="eyebrow">本机 UI 授权</p><h3 id="trust-profile-controls-title">宿主 Profile 与通知抑制</h3></div><button className="button button-secondary button-small" type="button" onClick={() => void loadTrustControls()} disabled={controlsLoading || profileAction !== null || suppressionAction !== null}>{controlsLoading ? "读取中…" : "刷新授权状态"}</button></div>
       <p className="trust-control-copy">Agent / MCP 可以暂存 Profile，但不能代替你批准、拒绝或撤销。审批会按清单哈希再次核对；已生成的历史 Trust 证据不会随撤销删除。</p>
@@ -345,6 +406,7 @@ export function TrustPage() {
       <div className="trust-control-columns">
         <section className="trust-control-group" aria-labelledby="trust-pending-title">
           <div className="trust-control-group-heading"><h4 id="trust-pending-title">待批准 Profile</h4><span className="count-badge">{profileStatus.pending.length}</span></div>
+          {profileFeedback?.section === "pending" && <p className={`trust-profile-feedback ${profileFeedback.error ? "trust-profile-feedback-error" : ""}`} role={profileFeedback.error ? "alert" : "status"}>{profileFeedback.message}</p>}
           {profileStatus.pending.length === 0 ? <p className="trust-control-empty">没有待批准的 Profile；这不表示本机 Agent 风险为零。</p> : profileStatus.pending.map((profile) => {
             const canApprove = profile.state === "pending" && profileApprovalIsSafe(profile);
             return <article className={`trust-profile-row ${profile.state === "invalid" ? "trust-profile-row-invalid" : ""}`} key={`${profile.slug}:${profile.manifest_hash}`}>
@@ -356,20 +418,29 @@ export function TrustPage() {
                 <small className="trust-profile-disclaimer">只显示脱敏路径类别，不显示绝对路径或 manifest 原文；匹配词仅显示数量。范围类别是路径名线索，不证明实际读取了哪些文件。</small>
               </>}
               <div className="trust-profile-actions">
-                <button className="button button-primary-small" type="button" onClick={() => void decideProfile(profile, "approve")} disabled={!canApprove || profileAction !== null || controlsLoading}>{profileAction === `approve:${profile.slug}` ? "批准中…" : "批准并启用"}</button>
-                <button className="button button-secondary button-small" type="button" onClick={() => void decideProfile(profile, "reject")} disabled={profileAction !== null || controlsLoading}>{profileAction === `reject:${profile.slug}` ? "拒绝中…" : "拒绝"}</button>
+                <button className="button button-primary-small" type="button" onClick={() => requestProfileDecision(profile, "approve")} disabled={!canApprove || profileAction !== null || controlsLoading}>{profileAction === `approve:${profile.slug}` ? "批准中…" : "批准并启用"}</button>
+                <button className="button button-secondary button-small" type="button" onClick={() => requestProfileDecision(profile, "reject")} disabled={profileAction !== null || controlsLoading}>{profileAction === `reject:${profile.slug}` ? "拒绝中…" : "拒绝"}</button>
                 {!canApprove && profile.state === "pending" && <span className="trust-profile-warning-inline">范围无法安全预览，已禁用批准</span>}
               </div>
+              {profileConfirmation?.slug === profile.slug && profileConfirmation.manifestHash === profile.manifest_hash && profileConfirmation.action !== "revoke" && <div className="trust-profile-confirm" role="group" aria-label={`${profile.display_name} 操作确认`}>
+                <p><strong>确认{profileConfirmation.action === "approve" ? "批准并启用" : "拒绝"} {profile.display_name}？</strong> {profileConfirmation.action === "approve" ? `${profileScopeText(profile)}批准后该宿主可被本机同步读取。` : "拒绝只移除待批准提案。"}清单版本：{profile.manifest_hash}。</p>
+                <div className="trust-profile-actions"><button className="button button-primary-small" type="button" onClick={() => void decideProfile(profile, profileConfirmation.action)} disabled={profileAction !== null || controlsLoading}>确认{profileConfirmation.action === "approve" ? "批准" : "拒绝"}</button><button className="button button-secondary button-small" type="button" onClick={() => { setProfileConfirmation(null); setProfileFeedback({ section: "pending", error: false, message: "已取消；Profile 未改变。" }); }}>取消</button></div>
+              </div>}
             </article>;
           })}
         </section>
         <section className="trust-control-group" aria-labelledby="trust-approved-title">
           <div className="trust-control-group-heading"><h4 id="trust-approved-title">已启用 Profile</h4><span className="count-badge">{profileStatus.approved.length}</span></div>
+          {profileFeedback?.section === "approved" && <p className={`trust-profile-feedback ${profileFeedback.error ? "trust-profile-feedback-error" : ""}`} role={profileFeedback.error ? "alert" : "status"}>{profileFeedback.message}</p>}
           {profileStatus.approved.length === 0 ? <p className="trust-control-empty">目前没有已启用的动态 Profile。</p> : profileStatus.approved.map((profile) => <article className="trust-profile-row" key={`${profile.slug}:${profile.manifest_hash}`}>
             <div className="trust-profile-heading"><div><strong>{profile.display_name}</strong><span>{profile.slug} · 已启用</span></div><code title="撤销绑定的当前清单版本">{profile.manifest_hash}</code></div>
             <p className="trust-profile-scope">{profileScopeText(profile)}</p>
             {(profile.source_scope_preview?.may_leave_home_directory || profile.source_scope_preview?.may_include_git_metadata || profile.trust_scope_preview?.may_include_git_metadata) && <p className="trust-profile-warning">当前授权涉及宽路径或 Git 元数据线索。</p>}
-            <div className="trust-profile-actions"><button className="button button-secondary button-small" type="button" onClick={() => void decideProfile(profile, "revoke")} disabled={profileAction !== null || controlsLoading}>{profileAction === `revoke:${profile.slug}` ? "撤销中…" : "撤销启用"}</button></div>
+            <div className="trust-profile-actions"><button className="button button-secondary button-small" type="button" onClick={() => requestProfileDecision(profile, "revoke")} disabled={profileAction !== null || controlsLoading}>{profileAction === `revoke:${profile.slug}` ? "撤销中…" : "撤销启用"}</button></div>
+            {profileConfirmation?.action === "revoke" && profileConfirmation.slug === profile.slug && profileConfirmation.manifestHash === profile.manifest_hash && <div className="trust-profile-confirm" role="group" aria-label={`${profile.display_name} 撤销确认`}>
+              <p><strong>确认撤销 {profile.display_name}？</strong> 撤销将停用此 Profile，不会删除历史 Trust 证据。清单版本：{profile.manifest_hash}。</p>
+              <div className="trust-profile-actions"><button className="button button-primary-small" type="button" onClick={() => void decideProfile(profile, "revoke")} disabled={profileAction !== null || controlsLoading}>确认撤销</button><button className="button button-secondary button-small" type="button" onClick={() => { setProfileConfirmation(null); setProfileFeedback({ section: "approved", error: false, message: "已取消；Profile 仍处于启用状态。" }); }}>取消</button></div>
+            </div>}
           </article>)}
         </section>
       </div>
@@ -381,8 +452,10 @@ export function TrustPage() {
         </li>)}</ul>}
       </section>
     </section>
+    </details>
     <section className="trust-monitor-card" aria-labelledby="trust-monitor-title">
       <div className="trust-card-heading"><div><p className="eyebrow">Runtime monitor</p><h3 id="trust-monitor-title">实时监测控制</h3></div>
+      <span className={`status-pill ${monitor?.status === "ok" && monitor.enabled ? "status-pill-success" : monitor?.status === "unavailable" ? "status-pill-warning" : ""}`}><span aria-hidden="true" className="status-dot" />{monitorLoading ? "读取中" : monitor?.status === "unavailable" ? "无法确认状态" : monitor?.enabled ? "已开启" : "默认关闭"}</span></div>
       {monitor?.status === "ok" && monitor.enabled_source === "legacy_default" && (
         <div className="trust-banner" role="note" data-testid="trust-rollout-ask">
           <p><strong>信任监测可以默认开启。</strong>它观察本机 agent 进程的活动链（git 历史 / 归档写入 / 网络连接），证据仅保存在本机、7 天后自动过期，不上传任何数据。</p>
@@ -392,16 +465,14 @@ export function TrustPage() {
             <button className="button button-ghost" type="button" onClick={askLater} disabled={monitorSaving}>稍后</button>
           </div>
         </div>
-      )}<span className={`status-pill ${monitor?.status === "ok" && monitor.enabled ? "status-pill-success" : monitor?.status === "unavailable" ? "status-pill-warning" : ""}`}><span aria-hidden="true" className="status-dot" />{monitorLoading ? "读取中" : monitor?.status === "unavailable" ? "无法确认状态" : monitor?.enabled ? "已开启" : "默认关闭"}</span></div>
-      <p className="monitor-copy">监测只在本机运行，采集进程级类型信号；不会读取文件内容、保存路径或上传网络数据。</p>
+      )}
+      <p className="monitor-copy">开启后尽快采集首轮快照，随后结合宿主活动在后台巡检。采样可能错过短暂行为；仅记录本机进程级类型信号，不读取文件内容、保存路径或上传网络数据。</p>
       {monitor?.status === "unavailable" && <div className="callout monitor-unavailable" role="status"><strong>监测状态不可用</strong><span>{monitorReasonLabel(monitor.reason, monitor.last_error_code)}；无法确认当前开关，也不会尝试写入设置。</span></div>}
       <div className="monitor-controls">
-        <label className="monitor-check"><input aria-describedby="trust-monitor-title" type="checkbox" checked={monitorDraft.enabled} onChange={(event) => setMonitorDraft((current) => ({ ...current, enabled: event.target.checked, notifications_enabled: event.target.checked && current.notifications_enabled }))} disabled={monitorLoading || monitorSaving || monitor?.status !== "ok"} /><span>启用后台监测</span></label>
-        <label className="monitor-field"><span>采样间隔</span><select value={monitorDraft.interval_seconds} onChange={(event) => setMonitorDraft((current) => ({ ...current, interval_seconds: Number(event.target.value) }))} disabled={monitorLoading || monitorSaving || monitor?.status !== "ok"}><option value={5}>5 秒</option><option value={10}>10 秒</option><option value={30}>30 秒</option><option value={60}>60 秒</option><option value={300}>5 分钟</option></select></label>
-        <label className="monitor-check"><input type="checkbox" checked={monitorDraft.notifications_enabled} onChange={(event) => setMonitorDraft((current) => ({ ...current, notifications_enabled: event.target.checked }))} disabled={!monitorDraft.enabled || monitorLoading || monitorSaving || monitor?.status !== "ok"} /><span>发现新行为链时通知</span></label>
-        <button className="button button-primary-small" type="button" onClick={saveMonitor} disabled={monitorLoading || monitorSaving || monitor?.status !== "ok"}>{monitorSaving ? "保存中…" : "保存设置"}</button>
+        <label className="monitor-check"><input aria-describedby="trust-monitor-title" type="checkbox" checked={monitorDraft.enabled} onChange={(event) => saveMonitor({ ...monitorDraft, enabled: event.target.checked, notifications_enabled: event.target.checked && monitorDraft.notifications_enabled })} disabled={monitorLoading || monitorSaving || monitor?.status !== "ok"} /><span>启用后台监测</span></label>
+        <label className="monitor-check"><input type="checkbox" checked={monitorDraft.notifications_enabled} onChange={(event) => saveMonitor({ ...monitorDraft, notifications_enabled: event.target.checked })} disabled={!monitorDraft.enabled || monitorLoading || monitorSaving || monitor?.status !== "ok"} /><span>发现新行为链时通知</span></label>
       </div>
-      <div className="monitor-meta"><span>能力：{monitor?.status === "ok" ? capabilityLabel(monitor.capability) : "不可观察"}</span><span>最近状态：{monitor?.last_error_code ? monitorReasonLabel(monitor.reason, monitor.last_error_code) : monitor?.status === "ok" ? "无错误" : "不可观察"}</span><span>更新：{monitorUpdatedAt(monitor?.updated_at_ms ?? null)}</span></div>
+      <div className="monitor-meta"><span>能力：{monitor?.status === "ok" ? monitor.enabled && monitor.capability === "not_started" ? "首次采样中" : capabilityLabel(monitor.capability) : "不可观察"}</span><span>最近状态：{monitor?.last_error_code ? monitorReasonLabel(monitor.reason, monitor.last_error_code) : monitor?.status === "ok" ? "无错误" : "不可观察"}</span><span>更新：{monitorUpdatedAt(monitor?.updated_at_ms ?? null)}</span></div>
       <div className="monitor-snapshot">
         <div><strong>一次性进程快照</strong><p>用于立即核对当前是否存在“读 Git 历史 + 写归档/索引”的组合信号。</p></div>
         <button className="button button-secondary" type="button" onClick={runSnapshot} disabled={snapshotLoading}>{snapshotLoading ? "采集中…" : "立即采集快照"}</button>
@@ -420,11 +491,12 @@ export function TrustPage() {
         </div>}
       </section>
       <section className="trust-card" aria-label="Trust 审计结果" aria-live="polite">
-        {!report ? <div className="mini-empty"><p className="eyebrow">证据时间线</p><h3>选择宿主开始审计</h3><p>审计只读本机已声明的 profile 路径，并把结果压缩为安全引用、范围、大小与时间。</p></div> : <>
-          <div className="trust-card-heading"><div><p className="eyebrow">{report.host} · {report.host === selectedHost ? "审计完成" : "上一次审计结果"}</p><h3>{report.evidence.length} 条证据</h3></div><span className={`status-pill ${report.host === selectedHost ? "status-pill-success" : "status-pill-warning"}`}><span aria-hidden="true" className="status-dot" />{report.host === selectedHost ? "本地结果" : "旧宿主结果"}</span></div>
-          <div className="trust-summary"><span>新写入 {report.inserted}</span><span>重复 {report.duplicate}</span><span>Finding 更新 {report.findings_upserted}</span></div>
-          {report.evidence.length === 0 ? <div className="mini-empty">没有足够的本地证据形成时间线。当前结果不是“确认安全”。</div> : <ol className="evidence-timeline">
-            {report.evidence.map((item, index) => {
+          <div className="trust-card-heading"><div><p className="eyebrow">{report ? `${report.host} · ${report.host === selectedHost ? "刚完成审计" : "上一次审计结果"}` : "历史本地证据"}</p><h3>{displayedEvidence.length}{evidenceCursor && !report ? "+" : ""} 条证据</h3></div><div className="trust-evidence-actions"><span className={`status-pill ${report ? "status-pill-success" : ""}`}><span aria-hidden="true" className="status-dot" />{report ? "本地结果" : "只读历史"}</span><button className="button button-secondary button-small" type="button" onClick={() => { setReport(null); setSelectedHost(null); void refreshEvidenceHistory(); }} disabled={evidenceLoading}>{evidenceLoading ? "读取中…" : "刷新历史"}</button></div></div>
+          {report && <div className="trust-summary"><span>新写入 {report.inserted}</span><span>重复 {report.duplicate}</span><span>Finding 更新 {report.findings_upserted}</span></div>}
+          {evidenceError && <div className="error-banner" role="alert">历史证据暂不可用：{evidenceError}</div>}
+          {evidenceLoading && <p className="inline-status" role="status">正在读取已保存的本机证据…</p>}
+          {!evidenceLoading && displayedEvidence.length === 0 ? <div className="mini-empty">{report ? "没有足够的本地证据形成时间线。当前结果不是“确认安全”。" : "尚无已保存的 Trust 证据。这里不会自动扫描；选择宿主并点击“本地审计”开始采集。"}</div> : <ol className="evidence-timeline">
+            {displayedEvidence.map((item, index) => {
               const evidenceKey = `${item.collector_id}-${item.observed_at_ms}-${index}`;
               const isExpanded = expandedEvidence === evidenceKey;
               return <li className="evidence-row" key={evidenceKey}>
@@ -435,7 +507,8 @@ export function TrustPage() {
             </li>;
             })}
           </ol>}
-        </>}
+          {evidenceCursor && !report && <div className="sessions-more"><button className="button button-secondary" type="button" onClick={() => void refreshEvidenceHistory(evidenceCursor, true)} disabled={evidenceLoadingMore}>{evidenceLoadingMore ? "正在读取更早证据…" : `载入更早证据（已显示 ${evidenceHistory.length} 条）`}</button></div>}
+
       </section>
     </div>
   </section>;

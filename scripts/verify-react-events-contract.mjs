@@ -33,6 +33,7 @@ const events = [];
 const unsubscribe = await listenAppEvents((event) => events.push(event));
 assert.equal(subscribed, "app-event");
 callback?.({ payload: { type: "SyncStatusChanged", secret: "must-not-cross" } });
+callback?.({ payload: { type: "HostNavigationChanged", path: "/private/path" } });
 callback?.({ payload: { type: "SourceDataDeleted", path: "/private/path" } });
 callback?.({ payload: { type: "WatcherHealthChanged", mode: "active", topology_revision: 2, pending_roots: 0, reason_code: null } });
 callback?.({ payload: { type: "WatcherHealthChanged", mode: "not-a-mode", raw: "/private/path" } });
@@ -48,6 +49,7 @@ callback?.({ payload: "malformed" });
 domCallback?.();
 assert.equal(JSON.stringify(events), JSON.stringify([
   { type: "SyncStatusChanged" },
+  { type: "HostNavigationChanged" },
   { type: "SourceDataDeleted" },
   { type: "WatcherHealthChanged" },
   { type: "WatcherHealthChanged" },
@@ -78,6 +80,7 @@ assert.equal(gate({ type: "Invalidated", revision: 5, hosts: ["dsh"] }), false, 
 assert.equal(gate({ type: "Invalidated", revision: 4, hosts: [] }), false, "older revision swallowed");
 assert.equal(gate({ type: "Invalidated", revision: 6, hosts: [] }), true, "advance refreshes");
 assert.equal(gate({ type: "SyncStatusChanged" }), false, "status is not data invalidation");
+assert.equal(gate({ type: "HostNavigationChanged" }), false, "overview refreshes navigation explicitly");
 assert.equal(gate({ type: "WatcherHealthChanged" }), false);
 assert.equal(gate({ type: "TrustMonitorEvent" }), false);
 assert.equal(gate({ type: "SourceDataDeleted" }), true, "deletion always refreshes");

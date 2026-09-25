@@ -136,6 +136,80 @@ pub struct TrustEvidenceSummary {
     pub collector_id: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrustEvidenceHistoryPage {
+    pub evidence: Vec<TrustEvidenceSummary>,
+    pub next_cursor: Option<String>,
+}
+
+/// Read a bounded, redacted projection of persisted Trust observations.
+/// This is deliberately separate from `audit_and_store`: opening the Trust
+/// page never walks host directories. No paths, contents, destination hosts,
+/// provenance JSON, or source anchors cross this local UI query face.
+pub fn read_evidence_history(data_home: &Path, host: Option<&str>, limit: usize, cursor: Option<&str>) -> Result<TrustEvidenceHistoryPage, String> {
+    let now_ms = crate::sql_sync::now_ms();
+    read_evidence_history_at(data_home, host, limit, cursor, now_ms)
+}
+
+fn read_evidence_history_at(data_home: &Path, host: Option<&str>, limit: usize, cursor: Option<&str>, now_ms: i64) -> Result<TrustEvidenceHistoryPage, String> {
+    if !(1..=500).contains(&limit) { return Err("trust evidence limit out of range".into()); }
+    if let Some(host) = host {
+        if host.is_empty() || host.len() > 32 || !host.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')) {
+            return Err("trust evidence host is invalid".into());
+        }
+    }
+    let parsed_cursor = cursor.map(parse_evidence_cursor).transpose()?;
+    if parsed_cursor.as_ref().is_some_and(|value| value.1.as_deref() != host) {
+        return Err("trust evidence cursor does not match host filter".into());
+    }
+    let path = agent_vitals_data::authority::default_authority_path(data_home);
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| format!("trust evidence authority read failed: {error}"))?;
+    conn.busy_timeout(std::time::Duration::from_secs(2)).map_err(|error| error.to_string())?;
+    let sql = "SELECT observation_id, observation_kind, stage, evidence_level, evidence_origin, observed_at_ms,
+                      workspace_ref, native_event_id, scope_classes_json, file_count, byte_count,
+                      destination_class, collector_id
+               FROM trust_observations
+               WHERE (expires_at_ms IS NULL OR expires_at_ms >= ?1)
+                 AND (?2 IS NULL OR host = ?2)
+                 AND (?3 IS NULL OR observed_at_ms < ?4 OR (observed_at_ms = ?4 AND observation_id < ?5))
+               ORDER BY observed_at_ms DESC, observation_id DESC LIMIT ?6";
+    let mut statement = conn.prepare(sql).map_err(|error| error.to_string())?;
+    let rows = statement.query_map(rusqlite::params![now_ms, host, cursor, parsed_cursor.as_ref().map(|value| value.0), parsed_cursor.as_ref().map(|value| value.2.as_str()), (limit + 1) as i64], |row| {
+        let raw_scopes: String = row.get(8)?;
+        let scope_classes = serde_json::from_str::<Vec<String>>(&raw_scopes).unwrap_or_default()
+            .into_iter().filter(|value| !value.is_empty() && value.len() <= 64).take(16).collect();
+        Ok((row.get::<_, String>(0)?, TrustEvidenceSummary {
+            kind: row.get(1)?, stage: row.get(2)?, evidence_level: row.get(3)?, evidence_origin: row.get(4)?,
+            observed_at_ms: row.get(5)?, workspace_ref: row.get(6)?, native_event_ref: row.get(7)?, scope_classes,
+            file_count: row.get(9)?, byte_count: row.get(10)?, destination_class: row.get(11)?, collector_id: row.get(12)?,
+        }))
+    }).map_err(|error| error.to_string())?;
+    let mut rows = rows.collect::<Result<Vec<_>, _>>().map_err(|error| format!("trust evidence query failed: {error}"))?;
+    let has_more = rows.len() > limit;
+    if has_more { rows.pop(); }
+    let next_cursor = if has_more {
+        rows.last().map(|(id, item)| format!("{}:{}:{id}", item.observed_at_ms, host.unwrap_or("")))
+    } else { None };
+    Ok(TrustEvidenceHistoryPage { evidence: rows.into_iter().map(|(_, item)| item).collect(), next_cursor })
+}
+
+fn parse_evidence_cursor(cursor: &str) -> Result<(i64, Option<String>, String), String> {
+    if cursor.len() > 320 { return Err("trust evidence cursor is invalid".into()); }
+    let mut parts = cursor.splitn(3, ':');
+    let timestamp = parts.next().ok_or_else(|| "trust evidence cursor is invalid".to_string())?;
+    let host = parts.next().ok_or_else(|| "trust evidence cursor is invalid".to_string())?;
+    let observation_id = parts.next().ok_or_else(|| "trust evidence cursor is invalid".to_string())?;
+    let timestamp = timestamp.parse::<i64>().map_err(|_| "trust evidence cursor is invalid".to_string())?;
+    if !host.is_empty() && (host.len() > 32 || !host.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_'))) {
+        return Err("trust evidence cursor is invalid".into());
+    }
+    if timestamp < 0 || observation_id.is_empty() || observation_id.len() > 256 || !observation_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')) {
+        return Err("trust evidence cursor is invalid".into());
+    }
+    Ok((timestamp, (!host.is_empty()).then(|| host.to_string()), observation_id.to_string()))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileFile {
@@ -649,9 +723,10 @@ pub fn findings_summary(data_home: &Path) -> Result<Vec<agent_vitals_data::trust
 
 #[cfg(test)]
 mod tests {
-    use super::{audit_and_store, builtin_profiles, discover_host_candidates, profiles, scan_history};
+    use super::{audit_and_store, builtin_profiles, discover_host_candidates, profiles, read_evidence_history, read_evidence_history_at, scan_history, RETENTION_MS};
     use agent_vitals_hosts::generic_manifest::TrustEvidenceAdapter;
     use crate::trust_identity::TrustIdentity;
+    use rusqlite::Connection;
 
     #[test]
     fn zcode_scan_is_read_only_and_path_redacted() {
@@ -823,6 +898,47 @@ mod tests {
         assert_eq!((first.discovered, first.inserted, first.duplicate), (1, 1, 0));
         let second = audit_and_store(&data, &profile, "machine-1", 11).unwrap();
         assert_eq!((second.discovered, second.inserted, second.duplicate), (1, 0, 1));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn evidence_history_is_bounded_read_only_and_host_filterable() {
+        let root = std::env::temp_dir().join(format!("agent-vitals-trust-history-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".zcode/v2/checkpoints/x")).unwrap();
+        std::fs::write(root.join(".zcode/v2/checkpoints/x/snapshot.enc"), b"snapshot").unwrap();
+        std::fs::write(root.join(".zcode/v2/checkpoints/x/snapshot-2.enc"), b"snapshot-2").unwrap();
+        let data = root.join("data");
+        let profile = builtin_profiles(&root).into_iter().find(|item| item.id() == "zcode").unwrap();
+        audit_and_store(&data, &profile, "machine-1", 10).unwrap();
+
+        let all = read_evidence_history_at(&data, None, 10, None, 10).unwrap().evidence;
+        assert!(!all.is_empty());
+        assert!(all.iter().all(|row| row.workspace_ref.as_deref().map_or(true, |value| value.starts_with("tr_"))));
+        assert!(read_evidence_history_at(&data, Some("not-installed"), 10, None, 10).unwrap().evidence.is_empty());
+        let first_page = read_evidence_history_at(&data, None, 1, None, 10).unwrap();
+        let cursor = first_page.next_cursor.expect("second page must exist");
+        let second_page = read_evidence_history_at(&data, None, 1, Some(&cursor), 10).unwrap();
+        assert_eq!(first_page.evidence.len(), 1);
+        assert_eq!(second_page.evidence.len(), 1);
+        assert_ne!(first_page.evidence[0].native_event_ref, second_page.evidence[0].native_event_ref);
+        assert!(second_page.next_cursor.is_none());
+        assert!(read_evidence_history_at(&data, Some("zcode"), 1, Some(&cursor), 10).is_err(), "cursor from all-host query must not be reused with a host filter");
+        let host_page = read_evidence_history_at(&data, Some("zcode"), 1, None, 10).unwrap();
+        if let Some(host_cursor) = host_page.next_cursor {
+            assert!(read_evidence_history_at(&data, None, 1, Some(&host_cursor), 10).is_err(), "host-filtered cursor must not be reused without its filter");
+            assert!(read_evidence_history_at(&data, Some("minimax-code"), 1, Some(&host_cursor), 10).is_err(), "host-filtered cursor must not be reused for another host");
+            assert!(read_evidence_history_at(&data, Some("zcode"), 1, Some(&host_cursor), 10).is_ok(), "cursor remains valid with its originating host filter");
+        }
+        assert!(read_evidence_history(&data, None, 0, None).is_err());
+        assert!(read_evidence_history(&data, Some("../private"), 10, None).is_err());
+        assert_eq!(read_evidence_history_at(&data, None, 10, None, 10 + RETENTION_MS).unwrap().evidence.len(), all.len(), "evidence remains available through the exact expiry millisecond");
+        assert!(read_evidence_history_at(&data, None, 10, None, 11 + RETENTION_MS).unwrap().evidence.is_empty(), "expired evidence must be excluded after the retention boundary");
+
+        // Re-open with a writable connection to prove the UI query did not
+        // migrate or mutate the authority as a side effect.
+        let writable = Connection::open(agent_vitals_data::authority::default_authority_path(&data)).unwrap();
+        let count: i64 = writable.query_row("SELECT COUNT(*) FROM trust_observations", [], |row| row.get(0)).unwrap();
+        assert_eq!(count as usize, all.len());
         std::fs::remove_dir_all(root).ok();
     }
 }

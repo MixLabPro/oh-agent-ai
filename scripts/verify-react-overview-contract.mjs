@@ -12,6 +12,13 @@ import { fileURLToPath } from "node:url";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ui = path.join(repo, "apps/desktop/ui-dev");
+const overviewPage = readFileSync(path.join(ui, "react/src/features/overview/OverviewPage.tsx"), "utf8");
+const appPage = readFileSync(path.join(ui, "react/src/app/App.tsx"), "utf8");
+assert.doesNotMatch(overviewPage, /overview\.(today_spend|month_spend)/, "cost cards must use authority daily/monthly summaries, not legacy DSH overview fields");
+assert.doesNotMatch(overviewPage, /className="hero-panel"|把运行状态变成可理解的证据/, "overview should lead with useful metrics instead of a decorative hero card");
+assert.doesNotMatch(appPage, /Workbench React migration/i, "migration placeholder title must not appear in the product UI");
+assert.doesNotMatch(appPage, /工作台预览/, "production navigation must not call itself a preview");
+assert.match(appPage, /<h1 className="visually-hidden">总览<\/h1>/, "compact overview still needs an accessible page heading");
 const uiRequire = createRequire(path.join(ui, "package.json"));
 const { buildSync } = uiRequire("esbuild");
 
@@ -45,6 +52,33 @@ function loadBridge(invoke) {
   vm.createContext(sandbox);
   vm.runInContext(built.outputFiles[0].text, sandbox, { filename: "tauri-bridge.bundle.cjs" });
   return { bridge: sandbox.module.exports, window: sandbox.window };
+}
+
+function loadCacheHitMetric() {
+  const built = buildSync({
+    entryPoints: [path.join(ui, "react/src/features/overview/cacheHit.ts")],
+    bundle: true,
+    format: "cjs",
+    platform: "node",
+    target: "node20",
+    write: false,
+    logLevel: "silent",
+  });
+  const sandbox = { module: { exports: {} }, exports: {}, require: uiRequire, Object };
+  vm.createContext(sandbox);
+  vm.runInContext(built.outputFiles[0].text, sandbox, { filename: "overview-cache-hit.bundle.cjs" });
+  return sandbox.module.exports.todayCacheHitRatio;
+}
+
+function loadSpendCards() {
+  const built = buildSync({
+    entryPoints: [path.join(ui, "react/src/features/overview/spendCards.ts")],
+    bundle: true, format: "cjs", platform: "node", target: "node20", write: false, logLevel: "silent",
+  });
+  const sandbox = { module: { exports: {} }, exports: {}, require: uiRequire, Date, Object };
+  vm.createContext(sandbox);
+  vm.runInContext(built.outputFiles[0].text, sandbox, { filename: "overview-spend-cards.bundle.cjs" });
+  return sandbox.module.exports;
 }
 
 function currentWindow() {
@@ -87,10 +121,35 @@ const calendar = await bridge.readUsageCalendar(month);
 assert.equal(monthly.month, month);
 assert.equal(daily.date, date);
 assert.equal(calendar.month, month);
+const detailsSnapshot = await bridge.readOverviewDetails();
+assert.equal(detailsSnapshot.month, month);
+assert.equal(detailsSnapshot.date, date);
+assert.equal(detailsSnapshot.authority_revision, 42);
+assert.equal(detailsSnapshot.is_consistent, true);
+assert.equal(detailsSnapshot.errors.length, 0);
 assertTokenPartition(monthly);
 assertTokenPartition(daily);
 assertMoneyPartition(monthly);
 assertMoneyPartition(daily);
+const todayCacheHitRatio = loadCacheHitMetric();
+const expectedInput = Object.values(daily.tokens_by_host).reduce((sum, host) => sum + host.uncached_input + host.cache_read + host.cache_write, 0);
+const expectedRead = Object.values(daily.tokens_by_host).reduce((sum, host) => sum + host.cache_read, 0);
+assert.equal(todayCacheHitRatio(daily), expectedInput > 0 ? expectedRead / expectedInput : null);
+assert.equal(todayCacheHitRatio({ ...daily, tokens_by_host: { a: { total: 110, uncached_input: 10, cache_read: 90, cache_write: 0, output: 10 }, b: { total: 1010, uncached_input: 900, cache_read: 100, cache_write: 0, output: 10 } } }), 190 / 1100);
+assert.equal(todayCacheHitRatio({ ...daily, tokens_by_host: { a: { total: 10, uncached_input: 0, cache_read: 0, cache_write: 0, output: 10 } } }), null);
+assert.equal(todayCacheHitRatio({ ...daily, freshness: "unavailable" }), null);
+const { todaySpendCard, monthSpendCard } = loadSpendCards();
+const pricedMonth = { ...monthly, month: "2026-09", freshness: "fresh", actual_spend: { CNY: 182.55, USD: 40 }, spend_by_basis: { fixed_subscription: { CNY: 162, USD: 40 }, host_billed: { CNY: 20.55 } }, metered_view: { CNY: { amount: 100, actual: 20.55, declared_estimate: 79.45, default_estimate: 0, label: "mixed" } } };
+const pricedDay = { ...daily, date: "2026-09-24", freshness: "fresh", actual_spend: {}, metered_view: { CNY: { amount: 80, actual: 0, declared_estimate: 80, default_estimate: 0, label: "estimate" } } };
+assert.equal(monthSpendCard(pricedMonth).value, "¥182.55");
+assert.match(monthSpendCard(pricedMonth).detail, /\$40\.00/);
+assert.equal(todaySpendCard(pricedDay, pricedMonth).value, "¥5.40");
+assert.match(todaySpendCard(pricedDay, pricedMonth).detail, /\$1\.33/);
+assert.match(todaySpendCard(pricedDay, pricedMonth).detail, /非当日扣款/);
+assert.match(todaySpendCard(pricedDay, pricedMonth).detail, /按量估算未计入实付/);
+assert.equal(todaySpendCard(pricedDay, { ...pricedMonth, month: "2026-08" }).value, "—", "wrong month must not allocate subscriptions");
+assert.equal(todaySpendCard({ ...pricedDay, freshness: "unavailable" }, pricedMonth).value, "—", "unavailable daily summary must not fabricate a daily amount");
+assert.equal(todaySpendCard({ ...pricedDay, actual_spend: { CNY: 2 } }, pricedMonth).value, "¥7.40", "known daily metered charges add to the subscription allocation");
 for (const day of calendar.days) assert.equal(day.total_tokens, day.dsh_tokens + day.claude_tokens + day.codex_tokens);
 
 const originalInvoke = fixtureInvoke;
@@ -164,16 +223,22 @@ withOverride(async (command, args) => {
 await assert.rejects(() => bridge.readUsageSourceSummary(month), /错误月份|月份/);
 restore();
 
-for (const failedCommand of ["data_monthly_summary", "data_daily_summary", "read_calendar_month"]) {
-  withOverride(async (command, args) => command === failedCommand
-    ? Promise.reject(new Error("database unavailable"))
-    : originalInvoke(command, args));
-  const details = await bridge.readOverviewDetails();
-  assert.equal(details.monthly === null, failedCommand === "data_monthly_summary");
-  assert.equal(details.daily === null, failedCommand === "data_daily_summary");
-  assert.equal(details.calendar === null, failedCommand === "read_calendar_month");
-  assert.equal(details.errors.length, 1);
-  restore();
-}
+withOverride(async (command, args) => {
+  const result = await originalInvoke(command, args);
+  if (command !== "read_overview_details_snapshot") return result;
+  return { ...result, is_consistent: false, errors: ["revision changed during query"] };
+});
+const inconsistent = await bridge.readOverviewDetails();
+assert.equal(inconsistent.is_consistent, false);
+assert.equal(inconsistent.authority_revision, 42);
+assert.match(inconsistent.errors[0], /快照暂不可用/);
+restore();
 
-console.log("React Overview/Usage contract: OK (real bridge parser, mock DTOs, malformed rejection, independent degradation)");
+withOverride(async (command, args) => {
+  const result = await originalInvoke(command, args);
+  return command === "read_overview_details_snapshot" ? { ...result, month: "1900-01" } : result;
+});
+await assert.rejects(() => bridge.readOverviewDetails(), /窗口与请求不一致/);
+restore();
+
+console.log("React Overview/Usage contract: OK (revision-consistent snapshot, mock DTOs, malformed rejection, honest degradation)");

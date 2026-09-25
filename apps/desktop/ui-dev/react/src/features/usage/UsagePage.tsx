@@ -12,6 +12,7 @@ import {
   type UsageHourly,
   type UsageSourceSummary,
 } from "../../lib/tauri";
+import { ToolbarActions } from "../../components/ui/ToolbarActions";
 
 type Metric = "tokens" | "cost";
 
@@ -224,15 +225,15 @@ export function UsagePage() {
   const maxHourTokens = Math.max(1, ...(hourly?.hours.map(hourlyTotal) ?? [1]));
 
   return <>
-    <section className="usage-header" aria-labelledby="usage-title">
-      <div><p className="eyebrow">Tokens · 成本 · 覆盖</p><h2 id="usage-title">用量日历</h2><p className="section-description">按统计月份查看跨宿主 token；金额按币种和来源口径分栏，不把估算当作账单。</p></div>
+    <h2 id="usage-title" className="visually-hidden">用量日历</h2>
+    <ToolbarActions>
       <div className="usage-toolbar">
         <button className="button button-secondary" type="button" aria-label="上个月" onClick={() => setMonth((value) => shiftMonth(value, -1))}>‹</button>
         <input className="usage-month" type="month" aria-label="选择统计月份" value={month} onChange={(event) => setMonth(event.target.value || currentMonth(timezone))} />
         <button className="button button-secondary" type="button" aria-label="下个月" disabled={month >= currentMonth(timezone)} onClick={() => setMonth((value) => shiftMonth(value, 1))}>›</button>
         <label className="usage-metric">显示<select aria-label="日历显示指标" value={metric} onChange={(event) => setMetric(event.target.value as Metric)}><option value="tokens">Tokens</option><option value="cost">成本</option></select></label>
       </div>
-    </section>
+    </ToolbarActions>
     {error && <div className="error-banner" role="alert">读取日历失败：{error}</div>}
     {sourceError && <div className="error-banner" role="alert">读取来源摘要失败：{sourceError}；不会把上一月份来源数据冒充为当前月份。</div>}
     {loading && !calendar && !source && <section className="empty-state" aria-live="polite"><p className="eyebrow">正在读取</p><h3>{monthTitle(month)}用量</h3><p>正在通过本地 authority 获取安全聚合。</p></section>}

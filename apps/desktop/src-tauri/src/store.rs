@@ -511,6 +511,39 @@ pub async fn trust_audit(
     .map_err(|e| error_value("cancelled", &e.to_string()))?
 }
 
+/// Read the bounded, redacted Trust evidence projection from the local
+/// authority. Unlike trust_audit this command never scans client directories.
+#[tauri::command]
+pub async fn trust_evidence_read(
+    host: Option<String>,
+    limit: Option<usize>,
+    cursor: Option<String>,
+    state: tauri::State<'_, StoreBuildLock>,
+) -> Result<Value, Value> {
+    if let Some(value) = host.as_deref() {
+        if value.is_empty() || value.len() > 32 || !value.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')) {
+            return Err(error_value("invalid-argument", "invalid trust evidence host"));
+        }
+    }
+    let limit = limit.unwrap_or(200);
+    if !(1..=500).contains(&limit) { return Err(error_value("invalid-argument", "trust evidence limit out of range")); }
+    if cursor.as_ref().is_some_and(|value| value.is_empty() || value.len() > 320 || !value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))) {
+        return Err(error_value("invalid-argument", "trust evidence cursor is invalid"));
+    }
+    let lock = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock.acquire();
+        let Some(bin) = resolve_binary() else { return Err(no_binary()); };
+        let limit_text = limit.to_string();
+        let mut cmd = Command::new(&bin);
+        cmd.args(["trust", "evidence", "--limit", &limit_text, "--json"]);
+        if let Some(host) = host.as_deref() { cmd.args(["--host", host]); }
+        if let Some(cursor) = cursor.as_deref() { cmd.args(["--cursor", cursor]); }
+        cmd.env("AGENT_VITALS_HOME", data_home());
+        run_json(cmd)
+    }).await.map_err(|e| error_value("cancelled", &e.to_string()))?
+}
+
 /// User-initiated coverage inventory. It only checks known client root
 /// directories for existence; it neither opens their files nor emits Findings.
 #[tauri::command]

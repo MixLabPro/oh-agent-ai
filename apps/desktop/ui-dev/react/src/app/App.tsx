@@ -70,6 +70,12 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error
 
 export function App() {
   const [page, setPage] = useState<Page>(pageFromHash);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem("workbench.sidebarCollapsed") === "true"; } catch { return false; }
+  });
+  const [overviewRefresh, setOverviewRefresh] = useState(0);
+  const [overviewRefreshing, setOverviewRefreshing] = useState(false);
+  const nativeMac = /Mac/.test(navigator.platform) && "__TAURI_INTERNALS__" in window;
   const [overview, setOverview] = useState<OverviewSnapshot | null>(null);
   const [overviewDetails, setOverviewDetails] = useState<OverviewDetails | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -171,22 +177,26 @@ export function App() {
     const refresh = () => {
       const requestId = ++refreshSeq.current;
       setError(null);
-      void readOverviewSnapshot()
+      setOverviewRefreshing(true);
+      const snapshotRequest = readOverviewSnapshot()
         .then((value) => { if (active && requestId === refreshSeq.current) setOverview(value); })
         .catch((reason: unknown) => { if (active && requestId === refreshSeq.current) setError(safeUiError(reason, "本地数据暂不可用")); });
-      void readOverviewDetails()
+      const detailsRequest = readOverviewDetails()
         .then((value) => { if (active && requestId === refreshSeq.current) setOverviewDetails(value); })
         .catch((reason: unknown) => { if (active && requestId === refreshSeq.current) setError(safeUiError(reason, "总览明细暂不可用")); });
+      void Promise.allSettled([snapshotRequest, detailsRequest]).then(() => {
+        if (active && requestId === refreshSeq.current) setOverviewRefreshing(false);
+      });
     };
     void refresh();
     let cleanups: Array<() => void> = [];
     // 总览壳层：数据失效（revision 前进）或同步状态变化才重拉；WatcherHealth /
     // Trust 类事件与总览无关，不再触发这里的两个 invoke。
     const gate = makeInvalidationGate();
-    void listenAppEvents((event) => { if (gate(event) || event.type === "SyncStatusChanged") refresh(); })
+    void listenAppEvents((event) => { if (gate(event) || event.type === "SyncStatusChanged" || event.type === "HostNavigationChanged") refresh(); })
       .then((unsubscribe) => { if (active) cleanups = [unsubscribe]; else unsubscribe(); });
     return () => { active = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
-  }, [page]);
+  }, [page, overviewRefresh]);
 
   useEffect(() => {
     const onHashChange = () => setPage(pageFromHash());
@@ -199,17 +209,35 @@ export function App() {
     setPage(next);
   };
 
-  return <AppErrorBoundary><div className="app-shell">
-    <aside className="sidebar" aria-label="主导航">
-      <div className="brand"><span className="brand-mark" aria-hidden="true">av</span><div><strong>agent-vitals</strong><span>工作台预览</span></div></div>
+  const headerStatus = page === "overview"
+    ? overview === null ? { tone: "neutral" as const, label: "读取中" } : overview.sync.ok ? { tone: "success" as const, label: "本地同步正常" } : { tone: "warning" as const, label: "同步需检查" }
+    : { tone: "success" as const, label: "本地运行" };
+
+  const toggleSidebar = () => {
+    const next = !sidebarCollapsed;
+    setSidebarCollapsed(next);
+    try { localStorage.setItem("workbench.sidebarCollapsed", String(next)); } catch { /* presentation preference only */ }
+  };
+
+  return <AppErrorBoundary><div className={`app-shell desktop-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${nativeMac ? "native-mac" : ""}`}>
+    <header className="desktop-toolbar" data-tauri-drag-region>
+      <button className="button button-secondary sidebar-toggle" type="button" aria-label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"} aria-expanded={!sidebarCollapsed} aria-controls="workbench-sidebar" onClick={toggleSidebar}><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor"/><path d="M6 3v10" stroke="currentColor"/></svg></button>
+      <span className="desktop-toolbar-title" data-tauri-drag-region>{navigation.find((item) => item.id === page)?.label}</span>
+      <span className="desktop-drag-space" data-tauri-drag-region />
+      <div id="desktop-toolbar-actions" className="desktop-toolbar-actions">
+        {page === "overview" && <div className="header-actions"><StatusPill tone={headerStatus.tone}>{headerStatus.label}</StatusPill><button className="button button-secondary" type="button" disabled={overviewRefreshing} onClick={() => setOverviewRefresh((value) => value + 1)}>{overviewRefreshing ? "刷新中…" : "刷新"}</button></div>}
+      </div>
+    </header>
+    <aside id="workbench-sidebar" className="sidebar" aria-label="主导航" hidden={sidebarCollapsed}>
+      <div className="brand"><span className="brand-mark" aria-hidden="true">av</span><div><strong>agent-vitals</strong><span>本地工作台</span></div></div>
       <nav className="nav-list">
-        {navigation.map((item) => <button key={item.id} className={`nav-item ${page === item.id ? "nav-item-active" : ""}`} aria-current={page === item.id ? "page" : undefined} type="button" onClick={() => navigate(item.id)}><span>{item.label}</span><small>{item.hint}</small></button>)}
+        {navigation.map((item) => <button key={item.id} title={item.hint} className={`nav-item ${page === item.id ? "nav-item-active" : ""}`} aria-current={page === item.id ? "page" : undefined} type="button" onClick={() => navigate(item.id)}><span>{item.label}</span></button>)}
       </nav>
       <div className="sidebar-footer"><StatusPill>离线优先</StatusPill><span>所有数据留在本机</span></div>
     </aside>
     <main className="main-content">
-      <header className="page-header"><div><p className="eyebrow">Workbench React migration</p><h1>{navigation.find((item) => item.id === page)?.label}</h1></div><div className="header-actions"><StatusPill tone="success">本地运行</StatusPill><button className="button button-secondary" type="button" onClick={() => window.location.reload()}>刷新</button></div></header>
-      {error && <div className="error-banner" role="alert">{error} · 当前显示安全的预览状态</div>}
+      {page === "overview" ? <h1 className="visually-hidden">总览</h1> : <h1 className="visually-hidden">{navigation.find((item) => item.id === page)?.label}</h1>}
+      {page === "overview" && error && <div className="error-banner" role="alert">{error} · 如有历史结果则保留显示，未用模拟数据替代</div>}
       {page === "overview" ? <OverviewPage overview={overview} details={overviewDetails} /> : page === "usage" ? <UsagePage /> : page === "sessions" ? <SessionsPage navigationTarget={sessionTarget} onNavigationTargetApplied={clearSessionTarget} /> : page === "trust" ? <TrustPage /> : page === "test" ? <TestPage /> : page === "skills" ? <SkillsPage /> : page === "settings" ? <SettingsPage focusSection={focusSettingSection} onSectionFocused={clearSettingSectionTarget} /> : <FindingsPage onNavigateToAction={navigateToFindingAction} />}
     </main>
   </div></AppErrorBoundary>;

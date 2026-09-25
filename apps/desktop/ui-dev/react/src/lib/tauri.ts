@@ -4,7 +4,7 @@ export type Unsubscribe = () => void;
  * replaced `FoldCompleted` + `FactsIngested`: the desktop now publishes one
  * level-triggered signal per authority-revision advance instead of forwarding
  * domain events one by one. */
-export type AppEventType = "Invalidated" | "SyncStatusChanged" | "TrustMonitorEvent" | "TrustMonitorInvalidated" | "SourceDataDeleted" | "WatcherHealthChanged";
+export type AppEventType = "Invalidated" | "SyncStatusChanged" | "HostNavigationChanged" | "TrustMonitorEvent" | "TrustMonitorInvalidated" | "SourceDataDeleted" | "WatcherHealthChanged";
 /** Only `Invalidated` carries fields across the bridge: a monotonic revision and
  * the hosts touched by that drain (a lower bound, never an exact set). Every
  * other type is reduced to its tag — payloads stay on the desktop side. */
@@ -149,6 +149,8 @@ export type OverviewDetails = {
   monthly: UsageSourceSummary | null;
   daily: DailySummary | null;
   calendar: UsageCalendar | null;
+  authority_revision: number | null;
+  is_consistent: boolean;
   errors: string[];
 };
 
@@ -443,7 +445,7 @@ export type SessionBillingBucket = {
   unresolved_reason: string | null;
 };
 
-export type SessionDetail = SessionRow & {
+export type SessionDetail = Omit<SessionRow, "peak_tokens"> & {
   billing_breakdown: SessionBillingBucket[];
   timeline: SessionTimelineRow[];
   workflow_timeline: SessionWorkflowEvent[];
@@ -530,6 +532,13 @@ export type TrustAuditReport = {
   stage_counts: Record<string, number>;
   observation_kind_counts: Record<string, number>;
   evidence: TrustEvidence[];
+};
+
+export type TrustEvidenceHistory = {
+  host: string | null;
+  count: number;
+  evidence: TrustEvidence[];
+  next_cursor: string | null;
 };
 
 export type TrustDiscovery = { candidates: TrustHostCandidate[]; profile_errors: string[] };
@@ -1065,7 +1074,7 @@ function parseQuotaReminderReceipt(value: unknown): QuotaReminderReceipt {
 function parseOverviewSnapshot(value: unknown): OverviewSnapshot {
   const root = record(value, "overview");
   const syncRow = root.sync == null ? {} : record(root.sync, "overview sync");
-  const syncStage = boundedEnum(syncRow.stage ?? "unknown", "overview sync stage", ["complete", "fold", "discover", "resolve", "never", "paused", "unknown"], "unknown");
+  const syncStage = boundedEnum(syncRow.stage ?? "unknown", "overview sync stage", ["complete", "fold", "discover", "resolve", "never", "paused", "partial", "light", "control", "facts", "unknown"], "unknown");
   const syncOk = syncRow.ok === true && syncStage !== "unknown";
   const syncAt = overviewTimestamp(syncRow.at);
   const budgetRow = root.budget == null ? {} : record(root.budget, "overview budget");
@@ -1508,7 +1517,7 @@ function parseSessionCostStatus(value: unknown): SessionCostStatus {
   return { state, reason, has_unresolved: requiredBoolean(costStatus.has_unresolved, "session cost unresolved") };
 }
 
-function parseSessionRow(value: unknown): SessionRow {
+function parseSessionBase(value: unknown): Omit<SessionRow, "peak_tokens"> {
   const row = record(value, "session row");
   const sessionRef = stringField(row.session_ref, "session ref");
   if (!/^sr_[A-Za-z0-9_-]{8,128}$/.test(sessionRef)) throw new Error("session ref DTO 引用格式不安全");
@@ -1522,10 +1531,14 @@ function parseSessionRow(value: unknown): SessionRow {
     event_count: boundedCount(row.event_count, "session event count", 1_000_000_000),
     model_ids: modelIds,
     tokens,
-    peak_tokens: boundedCount(row.peak_tokens, "session peak tokens", 1_000_000_000_000_000),
     cost_minor: parseSessionCost(row.cost_minor, "session cost"),
     cost_status: parseSessionCostStatus(row.cost_status),
   };
+}
+
+function parseSessionRow(value: unknown): SessionRow {
+  const row = record(value, "session row");
+  return { ...parseSessionBase(row), peak_tokens: boundedCount(row.peak_tokens, "session peak tokens", 1_000_000_000_000_000) };
 }
 
 function safeWorkflowLabel(value: unknown, label: string): string | null {
@@ -1603,7 +1616,9 @@ function parseSessionBillingBucket(value: unknown): SessionBillingBucket {
 function parseSessionDetail(value: unknown, expectedSessionRef?: string): SessionDetail {
   const root = record(value, "session detail envelope");
   const data = record(root.data, "session detail data");
-  const base = parseSessionRow(data);
+  // session_detail intentionally has no peak_tokens aggregate; that field only
+  // belongs to sessions_search rows. Do not reject a valid detail or invent 0.
+  const base = parseSessionBase(data);
   if (expectedSessionRef !== undefined && base.session_ref !== expectedSessionRef) throw new Error("session detail session_ref 不匹配");
   const timeline = requiredArray(data.timeline, "session detail timeline").slice(0, 1000).map(parseSessionTimeline);
   const workflow = requiredArray(data.workflow_timeline, "session workflow timeline").slice(0, 1000).map(parseSessionWorkflowEvent);
@@ -1876,9 +1891,7 @@ function parseTrustProfileReceipt(value: unknown, expectedStatus: string): { sta
   return { status, slug };
 }
 
-function parseTrustAudit(value: unknown): TrustAuditReport {
-  const root = record(value, "trust audit");
-  const evidence = requiredArray(root.evidence, "trust evidence").map((item) => {
+function parseTrustEvidence(item: unknown): TrustEvidence {
     const row = record(item, "trust evidence");
     const scopes = Array.isArray(row.scope_classes) ? row.scope_classes.slice(0, 16).map((scope) => safeTrustIdentifier(scope, "scope class", "unknown_scope")) : [];
     if (typeof row.observed_at_ms !== "number" || !Number.isSafeInteger(row.observed_at_ms) || row.observed_at_ms < 0) throw new Error("trust evidence timestamp 不安全");
@@ -1892,7 +1905,11 @@ function parseTrustAudit(value: unknown): TrustAuditReport {
       file_count: nullableCount(row.file_count, "file count"), byte_count: nullableCount(row.byte_count, "byte count"),
       destination_class: row.destination_class == null ? null : boundedEnum(row.destination_class, "destination class", ["vendor_api", "object_storage", "telemetry", "eval", "model_api", "unknown"], "unknown"), collector_id: safeTrustIdentifier(row.collector_id, "collector id"),
     };
-  });
+}
+
+function parseTrustAudit(value: unknown): TrustAuditReport {
+  const root = record(value, "trust audit");
+  const evidence = requiredArray(root.evidence, "trust evidence").map(parseTrustEvidence);
   const count = (name: string) => requiredCount(root[name], name);
   const map = (name: string) => {
     const source = record(root[name], name);
@@ -2203,6 +2220,23 @@ export async function auditTrust(host: string): Promise<TrustAuditReport> {
   return parseTrustAudit(reports[0]);
 }
 
+export async function readTrustEvidence(host: string | null = null, limit = 200, cursor: string | null = null): Promise<TrustEvidenceHistory> {
+  if (host !== null && !/^[a-z][a-z0-9_-]{0,31}$/.test(host)) throw new Error("宿主标识不安全");
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error("Trust 证据读取范围不安全");
+  const handler = globalTauri()?.core?.invoke;
+  if (cursor !== null && (cursor.length > 320 || !/^[A-Za-z0-9_.:-]+$/.test(cursor))) throw new Error("Trust 证据游标不安全");
+  if (!handler) return { host, count: 0, evidence: [], next_cursor: null };
+  const result = record(await handler("trust_evidence_read", { host, limit, cursor }), "trust evidence history");
+  const evidence = requiredArray(result.evidence, "trust evidence history evidence").map((item) => parseTrustEvidence(item));
+  const count = requiredCount(result.count, "trust evidence history count");
+  if (count !== evidence.length) throw new Error("Trust 证据数量与记录不一致");
+  const returnedHost = result.host === null ? null : stringField(result.host, "trust evidence history host");
+  if (returnedHost !== host) throw new Error("Trust 证据宿主范围不一致");
+  const next_cursor = result.next_cursor == null ? null : result.next_cursor;
+  if (next_cursor !== null && (typeof next_cursor !== "string" || next_cursor.length > 320 || !/^[A-Za-z0-9_.:-]+$/.test(next_cursor))) throw new Error("Trust 证据游标不安全");
+  return { host: returnedHost, count, evidence, next_cursor };
+}
+
 export async function readTrustMonitorConfig(): Promise<TrustMonitorConfig> {
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return parseTrustMonitorConfig({
@@ -2354,12 +2388,30 @@ export async function readOverviewDetails(): Promise<OverviewDetails> {
   let timezone = "Asia/Shanghai";
   try { timezone = (await readStatisticsTimezone()).timezone; } catch (_) { /* backend window remains the safe Beijing default */ }
   const { month, date } = statisticsMonthAndDate(timezone);
+  const handler = globalTauri()?.core?.invoke;
+  if (handler) {
+    const root = record(await handler("read_overview_details_snapshot", { month, date }), "overview details snapshot");
+    if (safeMonth(root.month, "overview snapshot month") !== month || safeDate(root.date, "overview snapshot date") !== date) throw new Error("总览快照窗口与请求不一致");
+    const authority_revision = root.authority_revision == null ? null : boundedCount(root.authority_revision, "overview authority revision", Number.MAX_SAFE_INTEGER);
+    const is_consistent = requiredBoolean(root.is_consistent, "overview snapshot consistency");
+    const errors = requiredArray(root.errors, "overview snapshot errors").slice(0, 8).map((error) => safeUiError(error, "总览数据快照暂不可用"));
+    if (!is_consistent && errors.length === 0) errors.push("总览数据可能跨越多个权威版本，请刷新重试");
+    return {
+      month, date,
+      monthly: root.monthly == null ? null : parseUsageSourceSummary(root.monthly),
+      daily: root.daily == null ? null : parseDailySummary(root.daily),
+      calendar: root.calendar == null ? null : parseUsageCalendar(root.calendar),
+      authority_revision, is_consistent, errors,
+    };
+  }
+  // Standalone browser preview has no authority revision API. Keep its isolated
+  // projections usable but label the result as unverified, never as consistent.
   const results = await Promise.allSettled([readUsageSourceSummary(month), readDailySummary(date), readUsageCalendar(month)]);
-  const errors: string[] = [];
+  const errors: string[] = ["浏览器预览未连接 authority，无法校验跨面板数据版本"];
   const monthly = results[0].status === "fulfilled" ? results[0].value : (errors.push(safeUiError(results[0].reason, "月度汇总暂不可用")), null);
   const daily = results[1].status === "fulfilled" ? results[1].value : (errors.push(safeUiError(results[1].reason, "今日汇总暂不可用")), null);
   const calendar = results[2].status === "fulfilled" ? results[2].value : (errors.push(safeUiError(results[2].reason, "日历暂不可用")), null);
-  return { month, date, monthly, daily, calendar, errors };
+  return { month, date, monthly, daily, calendar, authority_revision: null, is_consistent: false, errors };
 }
 
 export async function readUsageHourly(date: string): Promise<UsageHourly> {
@@ -3262,7 +3314,7 @@ export async function listen(event: string, handler: (payload: unknown) => void)
   };
 }
 
-const appEventTypes = new Set<AppEventType>(["Invalidated", "SyncStatusChanged", "TrustMonitorEvent", "TrustMonitorInvalidated", "SourceDataDeleted", "WatcherHealthChanged"]);
+const appEventTypes = new Set<AppEventType>(["Invalidated", "SyncStatusChanged", "HostNavigationChanged", "TrustMonitorEvent", "TrustMonitorInvalidated", "SourceDataDeleted", "WatcherHealthChanged"]);
 
 /** Closed host vocabulary for `Invalidated.hosts` (unknown names are dropped). */
 const invalidationHosts: ReadonlySet<string> = new Set(["claude-code", "codex", "dsh", "workbuddy"]);

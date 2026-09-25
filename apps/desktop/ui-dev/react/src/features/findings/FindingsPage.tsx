@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createTrustSuppression, listenAppEvents, makeInvalidationGate, readDecisionMatrix, readFindings, readFindingsFreshness, safeUiError, type DecisionMatrixReport, type FindingGroup, type FindingSample, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
 import { DecisionMatrixSection } from "./DecisionMatrixSection";
 import { mergeFindingsPage } from "./contract";
+import { ToolbarActions } from "../../components/ui/ToolbarActions";
 
 type SeverityFilter = "all" | "critical" | "warning" | "info";
 
@@ -233,7 +234,8 @@ export function FindingsPage({ onNavigateToAction }: { onNavigateToAction?: (act
   const visibleGroups = useMemo(() => groups.filter((group) => (severity === "all" || group.severity === severity) && (rule === "all" || group.rule === rule)), [groups, rule, severity]);
 
   return <section className="findings-page" aria-labelledby="findings-page-title">
-    <div className="findings-page-header"><div><p className="eyebrow">Findings / 发现证据</p><h2 id="findings-page-title">风险与待办</h2><p className="hero-copy">先看能行动的事，再查看只读证据。没有 Finding 不等于没有行为，只表示当前证据未满足判定条件。</p></div><div className="header-actions"><button className="button button-secondary" type="button" onClick={load} disabled={Boolean(loading)}>重新读取</button></div></div>
+    <h2 id="findings-page-title" className="visually-hidden">风险与待办</h2>
+    <ToolbarActions><button className="button button-secondary" type="button" onClick={load} disabled={Boolean(loading)}>重新读取</button></ToolbarActions>
     <div className="freshness-bar" role="status">{freshnessLabel(freshness)}</div>
     {loading && <p className="inline-status" role="status">{loading}</p>}
     {error && <div className="error-banner" role="alert">{error} · 当前保留上一次结果</div>}

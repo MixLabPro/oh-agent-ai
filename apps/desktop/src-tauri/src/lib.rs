@@ -65,10 +65,11 @@ impl HostActivityTable {
 /// 真实采样不足空闲确认窗 → 跳过。任何一者不满足（有活跃宿主 / 确认窗到期
 /// / 从未采样过——首启校准）→ 执行。
 fn trust_gate_should_sample(
+    initial_sample_pending: bool,
     any_active_in_cooldown: bool,
     since_last_sample: std::time::Duration,
 ) -> bool {
-    any_active_in_cooldown || since_last_sample >= TRUST_IDLE_CONFIRM_WINDOW
+    initial_sample_pending || any_active_in_cooldown || since_last_sample >= TRUST_IDLE_CONFIRM_WINDOW
 }
 
 struct SyncRequests(Mutex<std::collections::BTreeMap<String, bool>>);
@@ -1003,7 +1004,7 @@ fn run_navigation(bin: &Path, day: &str) -> Option<Value> {
 /// 而不是整块消失或摆 0。二进制缺失同样静默（顶层钱行有自己的降级文案，宿主
 /// 区上一轮快照继续服务）。单飞由 SyncLock 保证——只在 sync_tick 里被调用，
 /// tick 与「立即同步」都持锁。
-fn refresh_hosts() {
+fn refresh_hosts(app: &AppHandle) {
     let Some(bin) = resolve_binary() else { return };
     let Some(snap) = run_navigation(&bin, &overview::today_beijing()) else {
         return;
@@ -1019,6 +1020,8 @@ fn refresh_hosts() {
             hosts,
         },
     );
+    // hosts.json 与 authority revision 独立；只靠事实失效事件会让 React 保留旧宿主卡。
+    let _ = app.emit(APP_EVENT, serde_json::json!({ "type": "HostNavigationChanged" }));
 }
 
 /// `agent-vitals` 二进制解析：`AGENT_VITALS_BIN` env 覆盖 → 与自身同目录 / 兄弟
@@ -1584,7 +1587,7 @@ fn sync_tick_inner(app: &AppHandle) {
     publish_sync_status(app, &status);
     // 宿主区：sessions navigation（20s 硬超时；失败不覆盖 hosts.json——上一轮
     // 快照继续渲染并自然转 stale，spec §6 决策 5）。
-    refresh_hosts();
+    refresh_hosts(app);
     // 2026-09-23 真机验收：这份 overview 只查一次，`refresh`/`budget_alerts`/
     // `quota_alerts` 三处共用同一个引用——此前各自独立 `read_overview()`，
     // 一个 tick 里白算两三遍同一份重 SQL 聚合（budget_alerts 单独一项就是
@@ -2008,9 +2011,11 @@ fn start_source_watcher(app: &AppHandle)
 fn start_trust_monitor_tick(app: AppHandle) {
     std::thread::spawn(move || {
         let mut next_run = std::time::Instant::now();
-        // R4-P0 门控状态：上次真实采样时刻（首启立即校准一轮）与跳过轮的
+        // R4-P0 门控状态：上次真实采样时刻与跳过轮的
         // 小时聚合日志（spec §11：跳过轮不全静默）。
         let mut last_sampled_at = std::time::Instant::now();
+        // 首启或再次开启后的首轮必须真实采样；SyncLock 忙时保留待采标记。
+        let mut initial_sample_pending = true;
         let mut skipped_since_log: u64 = 0;
         let mut last_skip_log = std::time::Instant::now();
         loop {
@@ -2019,6 +2024,7 @@ fn start_trust_monitor_tick(app: AppHandle) {
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 next_run = std::time::Instant::now();
                 last_sampled_at = std::time::Instant::now();
+                initial_sample_pending = true;
                 continue;
             }
             if std::time::Instant::now() < next_run {
@@ -2030,6 +2036,7 @@ fn start_trust_monitor_tick(app: AppHandle) {
             // 无活跃宿主且空闲确认窗未到 → 整轮跳过——不 lsof、不开库、不发
             // 事件、不碰 SyncLock。空闲确认窗到期强制校准一轮，兜活动表漏记。
             let gate = trust_gate_should_sample(
+                initial_sample_pending,
                 app.state::<HostActivityTable>()
                     .any_active_within(TRUST_ACTIVITY_COOLDOWN),
                 last_sampled_at.elapsed(),
@@ -2052,6 +2059,7 @@ fn start_trust_monitor_tick(app: AppHandle) {
                 let lock = app.state::<SyncLock>();
                 if let Ok(_guard) = lock.0.try_lock() {
                     last_sampled_at = std::time::Instant::now();
+                    initial_sample_pending = false;
                     let now_ms = agent_vitals_runtime::sql_sync::now_ms();
                     let report = agent_vitals_runtime::trust_runtime_monitor::snapshot_and_store(
                         &overview::data_home(),
@@ -2068,7 +2076,9 @@ fn start_trust_monitor_tick(app: AppHandle) {
                 .clamp(5, 3600) as u64;
             // R4-F6：interval 上限收敛——P0 门控下空闲零开销，5..=3600 全程
             // 安全（此前硬顶 60s 与设置界面的允许域 5..=3600 矛盾）。
-            next_run = std::time::Instant::now() + std::time::Duration::from_secs(interval);
+            next_run = std::time::Instant::now() + std::time::Duration::from_secs(
+                if initial_sample_pending { 2 } else { interval }
+            );
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
     });
@@ -2134,15 +2144,18 @@ fn trust_monitor_record_report(
         Ok(report) => ("partial", Some("sensor_partial"), Vec::new(), report.inserted),
         Err(_) => ("unavailable", Some("snapshot_failed"), Vec::new(), 0),
     };
-    let _ = db.trust_monitor_record_result(capability, Some(now_ms), error_code, now_ms);
-    // R3-F5（REFRESH_STORM）：「有新观察才发」——与 outbox `TrustMonitorEvent` 的
-    // inserted>0 判据、core 层零发射纪律（authority REVIEW G2）对齐。此前每轮
-    // 心跳都 emit（实测 1462 次/天），而 R1 后页面刷新已不消费该事件；唯一
-    // 剩余消费者（React TrustPage 的配置重读）由 save_trust_monitor_config 保存
-    // 成功后的本地事件覆盖。注：`trust_monitor_record_result` 的每轮单行
+    let status_changed = db.trust_monitor_state_get().ok().flatten()
+        .map(|previous| previous.capability != capability || previous.last_error_code.as_deref() != error_code)
+        .unwrap_or(true);
+    if db.trust_monitor_record_result(capability, Some(now_ms), error_code, now_ms).is_err() {
+        return;
+    }
+    // 有新观察或能力状态变化才通知 UI；首轮即使没有证据，也要让“尚未采集”
+    // 变为“部分可观察”。稳定心跳不 emit，避免刷新风暴。
+    // 注：`trust_monitor_record_result` 的每轮单行
     // autocommit UPDATE 保留——它不推进 revision，是「传感器活着」的健康面
     // 信号（last_success_at_ms），不是失效信号。
-    if inserted > 0 {
+    if inserted > 0 || status_changed {
         agent_vitals_runtime::logging::log_info("emit", &format!("TrustMonitorInvalidated capability={capability} inserted={inserted}"));
         let _ = app.emit(APP_EVENT, serde_json::json!({
             "type": "TrustMonitorInvalidated", "kind": "trust_monitor_invalidated",
@@ -2335,11 +2348,33 @@ fn focus_session_target(app: &AppHandle, target: WorkbenchTarget) {
 struct OverviewMemoEntry {
     revision: u64,
     data_home: String,
+    state_stamp: OverviewStateStamp,
     /// 托盘/菜单面：类型化快照，Arc 零拷贝共享。
     overview: std::sync::Arc<overview::Overview>,
     /// IPC 面：预序列化结果（同 revision 的连续 invoke 不再重跑 2.2s 级聚合，
     /// 也不重复序列化）。
     value: Value,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct OverviewStateStamp {
+    hosts: Option<(u128, u64)>,
+    sync: Option<(u128, u64)>,
+}
+
+fn overview_file_stamp(path: &Path) -> Option<(u128, u64)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?
+        .duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    Some((modified, metadata.len()))
+}
+
+fn overview_state_stamp(data_home: &str) -> OverviewStateStamp {
+    let state = Path::new(data_home).join("state");
+    OverviewStateStamp {
+        hosts: overview_file_stamp(&state.join("hosts.json")),
+        sync: overview_file_stamp(&state.join("last-sync.json")),
+    }
 }
 
 struct OverviewMemo {
@@ -2360,9 +2395,10 @@ fn overview_memo() -> &'static OverviewMemo {
 /// 槽命中：revision 与 data_home 都一致才算同一条目。锁内只做查/比对/clone
 /// （ReadMemo 同款锁纪律），计数走原子量不占锁。
 fn overview_memo_get(revision: u64, data_home: &str) -> Option<(std::sync::Arc<overview::Overview>, Value)> {
+    let state_stamp = overview_state_stamp(data_home);
     let guard = overview_memo().slot.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(entry) = guard.as_ref() {
-        if entry.revision == revision && entry.data_home == data_home {
+        if entry.revision == revision && entry.data_home == data_home && entry.state_stamp == state_stamp {
             overview_memo()
                 .hits
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2375,14 +2411,24 @@ fn overview_memo_get(revision: u64, data_home: &str) -> Option<(std::sync::Arc<o
 /// 写回（防陈旧）：同 data_home 且槽内 revision ≥ 本次——排队期间别人已写了
 /// 更新的结果——则不覆盖；不同 data_home（切库/并行测试）按单槽最新覆盖语义
 /// 直接替换。
+#[cfg(test)]
 fn overview_memo_put(revision: u64, data_home: String, ov: std::sync::Arc<overview::Overview>, value: Value) {
+    let state_stamp = overview_state_stamp(&data_home);
+    overview_memo_put_at(revision, data_home, ov, value, state_stamp);
+}
+
+fn overview_memo_put_at(revision: u64, data_home: String, ov: std::sync::Arc<overview::Overview>, value: Value, state_stamp: OverviewStateStamp) {
+    if overview_state_stamp(&data_home) != state_stamp {
+        return;
+    }
     let mut guard = overview_memo().slot.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = guard.as_ref() {
-        if existing.revision >= revision && existing.data_home == data_home {
+        if existing.data_home == data_home &&
+            (existing.revision > revision || existing.revision == revision && existing.state_stamp == state_stamp) {
             return;
         }
     }
-    *guard = Some(OverviewMemoEntry { revision, data_home, overview: ov, value });
+    *guard = Some(OverviewMemoEntry { revision, data_home, state_stamp, overview: ov, value });
 }
 
 fn authority_revision_at(path: &std::path::Path) -> Option<u64> {
@@ -2398,9 +2444,10 @@ fn overview_snapshot_compute(revision: u64, data_home: String) -> (std::sync::Ar
     if let Some(hit) = overview_memo_get(revision, &data_home) {
         return hit;
     }
+    let state_stamp = overview_state_stamp(&data_home);
     let ov = std::sync::Arc::new(overview::read_overview());
     let value = serde_json::to_value(ov.as_ref()).unwrap_or(Value::Null);
-    overview_memo_put(revision, data_home, std::sync::Arc::clone(&ov), value.clone());
+    overview_memo_put_at(revision, data_home, std::sync::Arc::clone(&ov), value.clone(), state_stamp);
     let computed = overview_memo()
         .computed
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -2885,7 +2932,7 @@ fn save_statistics_timezone_config(app: AppHandle, timezone: String) -> Result<V
     // then rebuild the tray from the newly written snapshot.
     let background_app = app.clone();
     std::thread::spawn(move || {
-        refresh_hosts();
+        refresh_hosts(&background_app);
         refresh(&background_app, overview_snapshot_typed_sync().as_ref());
     });
     refresh(&app, overview_snapshot_typed_sync().as_ref());
@@ -4356,6 +4403,46 @@ async fn data_daily_summary(date: String) -> Value {
     .await
 }
 
+/// Workbench Overview query bundle. These panels are a single logical view,
+/// so bracket all three SQL projections with the same authority revision. If
+/// an ingest commits during the read, retry once; if writes remain active,
+/// return the final values with `is_consistent = false` instead of claiming a
+/// cross-revision snapshot.
+#[tauri::command(async)]
+async fn read_overview_details_snapshot(month: String, date: String) -> Value {
+    run_heavy_read(move || {
+        overview_details_snapshot_at(overview::data_home(), &month, &date)
+    }).await
+}
+
+fn overview_details_snapshot_at(data_home: std::path::PathBuf, month: &str, date: &str) -> Value {
+    use agent_vitals_data::repository::{DailySummaryQuery, MonthlySummaryQuery};
+    let path = agent_vitals_data::authority::default_authority_path(&data_home);
+    let repo = agent_vitals_runtime::summary::SqlSummaryRepository::at(data_home);
+    let memo = agent_vitals_runtime::query::read_memo::ReadMemo::global();
+    let mut result = Value::Null;
+    for attempt in 0..2 {
+        let revision_before = authority_revision_at(&path);
+        let monthly = repo.monthly_summary_json_memoized(&MonthlySummaryQuery { month: month.to_string() }, memo);
+        let daily = repo.daily_summary_json_memoized(&DailySummaryQuery { date: date.to_string() }, memo);
+        let calendar = agent_vitals_runtime::summary::calendar_month_memoized(month, &repo, memo);
+        let revision_after = authority_revision_at(&path);
+        let is_consistent = revision_before.is_some() && revision_before == revision_after;
+        result = serde_json::json!({
+            "month": month,
+            "date": date,
+            "monthly": monthly.as_ref(),
+            "daily": daily.as_ref(),
+            "calendar": calendar.as_ref(),
+            "authority_revision": revision_after,
+            "is_consistent": is_consistent,
+            "errors": if is_consistent { Vec::<String>::new() } else { vec!["汇总期间数据发生变化或权威库不可用，当前结果可能跨 revision".to_string()] },
+        });
+        if is_consistent || attempt == 1 { break; }
+    }
+    result
+}
+
 /// Claude Pro 额度提醒的开关（默认关）。
 ///
 /// **为什么自带开关**：系统通知权限必须由一次用户动作触发申请；额度提醒与预算
@@ -4811,6 +4898,7 @@ pub fn run() {
             data_source_status,
             data_monthly_summary,
             data_daily_summary,
+            read_overview_details_snapshot,
             data_codex_quota,
             data_claude_quota,
             quota_reminder_config,
@@ -4839,6 +4927,7 @@ pub fn run() {
             store::sessions_read,
             store::sessions_findings,
             store::trust_audit,
+            store::trust_evidence_read,
             store::trust_discover,
             store::trust_runtime_snapshot,
             store::trust_profile_list,
@@ -4954,6 +5043,25 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn overview_details_snapshot_reports_one_stable_authority_revision() {
+        let root = std::env::temp_dir().join(format!("agent-vitals-overview-snapshot-{}", std::process::id()));
+        let path = agent_vitals_data::authority::default_authority_path(&root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _db = agent_vitals_data::authority::AuthorityDb::open(&path, agent_vitals_runtime::sql_sync::now_ms()).unwrap();
+        let result = overview_details_snapshot_at(root.clone(), "2026-09", "2026-09-24");
+        assert_eq!(result["month"], "2026-09");
+        assert_eq!(result["date"], "2026-09-24");
+        assert_eq!(result["is_consistent"], true);
+        assert!(result["authority_revision"].as_u64().is_some());
+        assert!(result["monthly"].is_object());
+        assert!(result["daily"].is_object());
+        assert!(result["calendar"].is_object());
+        assert!(result["errors"].as_array().unwrap().is_empty());
+        drop(_db);
+        std::fs::remove_dir_all(root).ok();
+    }
+
     /// R4-P0 活动门控（TRUST_SENSOR_OPTIMIZATION spec §6 门控三行 + 活动表
     /// 行为）：空闲跳过、活跃立即恢复、确认窗到期强制校准；表条目按时限
     /// 裁剪有界。
@@ -4961,13 +5069,14 @@ mod tests {
     fn trust_activity_gate_skips_idle_and_forces_calibration() {
         use std::time::Duration;
         // 活动表空 + 空闲确认窗内 → 不采样。
-        assert!(!trust_gate_should_sample(false, Duration::from_secs(60)));
+        assert!(!trust_gate_should_sample(false, false, Duration::from_secs(60)));
+        assert!(trust_gate_should_sample(true, false, Duration::from_secs(0)), "开启后首轮立即采样");
         // 活动表刚刷新 → 立即恢复采样。
-        assert!(trust_gate_should_sample(true, Duration::from_secs(0)));
-        assert!(trust_gate_should_sample(true, Duration::from_secs(3_600)));
+        assert!(trust_gate_should_sample(false, true, Duration::from_secs(0)));
+        assert!(trust_gate_should_sample(false, true, Duration::from_secs(3_600)));
         // 空闲确认窗到期 → 强制校准轮执行（兜活动表漏记）。
-        assert!(trust_gate_should_sample(false, TRUST_IDLE_CONFIRM_WINDOW));
-        assert!(trust_gate_should_sample(false, TRUST_IDLE_CONFIRM_WINDOW + Duration::from_secs(1)));
+        assert!(trust_gate_should_sample(false, false, TRUST_IDLE_CONFIRM_WINDOW));
+        assert!(trust_gate_should_sample(false, false, TRUST_IDLE_CONFIRM_WINDOW + Duration::from_secs(1)));
 
         let table = HostActivityTable(std::sync::Mutex::new(std::collections::BTreeMap::new()));
         assert!(!table.any_active_within(TRUST_ACTIVITY_COOLDOWN), "空表不算活跃");
@@ -5102,9 +5211,17 @@ mod tests {
         assert_eq!(after_stale, value, "旧 revision 写回不得覆盖新值");
         let advance_marker = serde_json::json!({ "advance": true });
         overview_memo_put(revision + 1, data_home.clone(), ov, advance_marker.clone());
-        let (_, after_advance) =
+        let (ov, after_advance) =
             overview_memo_get(revision + 1, &data_home).expect("前进写回应生效");
         assert_eq!(after_advance, advance_marker, "更新的 revision 写回必须生效");
+
+        // 宿主和同步快照独立于 authority revision 更新，必须使同 revision 缓存失效。
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        std::fs::write(home.join("state/hosts.json"), "{} ").unwrap();
+        assert!(overview_memo_get(revision + 1, &data_home).is_none(), "宿主快照变化必须失效");
+        overview_memo_put(revision + 1, data_home.clone(), ov, advance_marker);
+        std::fs::write(home.join("state/last-sync.json"), "{} ").unwrap();
+        assert!(overview_memo_get(revision + 1, &data_home).is_none(), "同步状态变化必须失效");
     }
 
     fn tmp_home(tag: &str) -> std::path::PathBuf {

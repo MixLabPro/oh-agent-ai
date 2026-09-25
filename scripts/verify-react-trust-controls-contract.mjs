@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
@@ -10,6 +11,15 @@ const ui = path.join(repo, "apps/desktop/ui-dev");
 const uiRequire = createRequire(path.join(ui, "package.json"));
 const { buildSync } = uiRequire("esbuild");
 const source = path.join(ui, "react/src/lib/tauri.ts");
+const trustPage = fs.readFileSync(path.join(ui, "react/src/features/trust/TrustPage.tsx"), "utf8");
+assert.match(trustPage, /readTrustEvidence\(null, 200, cursor\)/, "Trust page must load persisted evidence through the read-only history API");
+assert.match(trustPage, /宿主 Profile 与通知控制/, "less-frequent profile controls must be disclosed behind a secondary section");
+assert.match(trustPage, /尚无已保存的 Trust 证据/, "empty history must clearly distinguish no evidence from no risk");
+assert.match(trustPage, /event\.type !== "TrustMonitorInvalidated"\) return;\s+setReport\(null\)/, "monitor invalidation must reveal refreshed persisted history instead of pinning a stale audit report");
+assert.match(trustPage, /onClick=\{\(\) => requestProfileDecision\(profile, "revoke"\)\}/, "revoke must first show an in-page confirmation");
+assert.match(trustPage, /role="group" aria-label=\{`\$\{profile\.display_name\} 撤销确认`\}/, "revoke confirmation must be adjacent to its profile");
+assert.match(trustPage, /profileFeedback\?\.section === "approved"/, "revoke outcome must be visible in the approved-profile section");
+assert.doesNotMatch(trustPage.slice(trustPage.indexOf("const requestProfileDecision"), trustPage.indexOf("const revokeSuppression")), /window\.confirm/, "profile decisions must not rely on native confirmation dialogs");
 const built = buildSync({ entryPoints: [source], bundle: true, format: "cjs", platform: "node", target: "node20", write: false, logLevel: "silent" });
 
 const pending = {
@@ -65,6 +75,39 @@ assert.equal(await bridge.createTrustSuppression("SV709"), "trust-suppression-SV
 assert.deepEqual(calls.filter((call) => call.command.startsWith("trust_profile_") && call.command !== "trust_profile_proposal_status").map((call) => call.args.manifestHash), [pending.manifest_hash, pending.manifest_hash, approved.manifest_hash], "every profile mutation must be pinned to the viewed manifest hash");
 await assert.rejects(() => bridge.approveTrustProfile({ ...profiles.pending[0], manifest_hash: "bad" }), /reference is invalid/);
 await assert.rejects(() => bridge.createTrustSuppression("SV999"), /issue type is invalid/);
+
+const evidenceDto = {
+  kind: "package", stage: "package_observed", evidence_level: "E1", evidence_origin: "local_artifact", observed_at_ms: 1780000000000,
+  workspace_ref: "tr_workspace123", native_event_ref: null, scope_classes: ["git_history"], file_count: 2, byte_count: 4096,
+  destination_class: "object_storage", collector_id: "generic_artifact_v1", raw_path: "/private/path/never-expose",
+};
+const longValidCursor = `1780000000000:${"a".repeat(32)}:${"b".repeat(256)}`;
+assert.ok(longValidCursor.length > 256 && longValidCursor.length <= 320, "fixture exercises the upper cursor contract beyond generic string DTO limits");
+const evidenceCalls = [];
+const evidenceBridge = (() => {
+  const sandbox = { module: { exports: {} }, exports: {}, require: uiRequire, console: { error() {}, warn() {}, log() {} }, Intl, Date, Math, Promise, setTimeout, clearTimeout, window: { __TAURI__: { core: { invoke: async (command, args) => {
+    evidenceCalls.push({ command, args });
+    return { host: null, count: 1, next_cursor: longValidCursor, source: "authority_readonly", evidence: [evidenceDto] };
+  } } } } };
+  vm.createContext(sandbox);
+  vm.runInContext(built.outputFiles[0].text, sandbox, { filename: "tauri-trust-history.bundle.cjs" });
+  return sandbox.module.exports;
+})();
+const history = await evidenceBridge.readTrustEvidence(null, 200);
+assert.equal(history.count, 1);
+assert.equal(history.evidence[0].kind, "package");
+assert.equal("raw_path" in history.evidence[0], false, "history parser must discard raw path fields");
+assert.equal(evidenceCalls[0].command, "trust_evidence_read");
+assert.equal(evidenceCalls[0].args.host, null);
+assert.equal(evidenceCalls[0].args.limit, 200);
+assert.equal(evidenceCalls[0].args.cursor, null);
+assert.equal(history.next_cursor, longValidCursor, "history parser must accept the full 320-character cursor contract");
+await evidenceBridge.readTrustEvidence(null, 200, history.next_cursor);
+assert.equal(evidenceCalls[1].args.cursor, history.next_cursor, "opaque history cursor must be forwarded unchanged");
+await assert.rejects(() => evidenceBridge.readTrustEvidence(null, 200, "../../private"), /游标不安全/);
+assert.match(trustPage, /载入更早证据/);
+await assert.rejects(() => evidenceBridge.readTrustEvidence("../private", 200), /宿主标识不安全/);
+await assert.rejects(() => evidenceBridge.readTrustEvidence(null, 501), /读取范围不安全/);
 
 const malformed = async (command) => command === "trust_profile_proposal_status"
   ? { status: "ok", data: { pending: [{ ...pending, source_scope_preview: { ...pending.source_scope_preview, root_classes: ["/Users/private"] } }], approved: [] } }

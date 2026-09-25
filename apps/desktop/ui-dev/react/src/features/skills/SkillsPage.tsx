@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { cancelSkillScan, exportSkillsRedacted, readSkillsDiff, readSkillsScanSettings, readSkillScan, safeUiError, saveSkillsScanSettings, saveSkillsSnapshot, type SkillDiffReport, type SkillScanReport } from "../../lib/tauri";
+import { ToolbarActions } from "../../components/ui/ToolbarActions";
 
 const hostLabels: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", dsh: "DeepSeek Harness", openclaw: "OpenClaw", hermes: "Hermes", workbuddy: "WorkBuddy" };
 const severityLabels = { critical: "严重", warning: "警告", info: "提示" } as const;
@@ -60,7 +61,7 @@ export function SkillsPage() {
   const saveSnapshot = async () => {
     if (snapshotBusy || scanning || !report) return;
     setSnapshotBusy(true); setError(null); setMessage(null);
-    try { await saveSkillsSnapshot(); if (mounted.current) setMessage("已存为本机快照；下次扫描可用于对比。不会上传或修改 skill。"); }
+    try { await saveSkillsSnapshot(); if (mounted.current) setMessage("已存为本机快照；快照未脱敏，包含路径和 Skill 描述，请勿直接分享。不会上传或修改 skill。"); }
     catch (reason: unknown) { if (mounted.current) setError(safeUiError(reason, "Skill 快照保存失败")); }
     finally { if (mounted.current) setSnapshotBusy(false); }
   };
@@ -110,7 +111,18 @@ export function SkillsPage() {
   const diagnostics = report?.diagnostics.filter((item) => item.severity === "critical" || item.severity === "warning") ?? [];
   const hostOptions = Array.from(new Set([...Object.keys(hostLabels), ...(report?.hosts.map((item) => item.host) ?? [])])).sort();
   return <>
-    <section className="skills-page-header" aria-labelledby="skills-title"><div><p className="eyebrow">本机定义 · 启发式审计</p><h2 id="skills-title">Skill 体检</h2><p className="section-description">扫描只在你点击后运行，不会自动修改、禁用或删除 skill；启发式命中需要人工判断。存为快照只写本机，快照未脱敏，包含绝对路径、用户名、skill 名和完整描述；不要直接分享快照文件。</p></div><div className="skills-toolbar"><label><span>宿主</span><select value={host} onChange={(event) => { const next = event.target.value; setHost(next); if (report && !scanning) void scan(true, next); }} disabled={scanning || snapshotBusy || diffLoading || exportBusy}><option value="all">全部宿主</option>{hostOptions.map((value) => <option value={value} key={value}>{hostLabel(value)}</option>)}</select></label>{report && !scanning && <><button className="button button-secondary" type="button" onClick={() => void scan(true)} disabled={snapshotBusy || diffLoading || exportBusy}>重新扫描</button><button className="button button-secondary" type="button" onClick={() => void saveSnapshot()} disabled={snapshotBusy || diffLoading || exportBusy}>{snapshotBusy ? "保存中…" : "存为快照"}</button><button className="button button-secondary" type="button" onClick={() => void compareSnapshot()} disabled={snapshotBusy || diffLoading || exportBusy}>{diffLoading ? "对比中…" : "与上次快照对比"}</button><button className="button button-secondary" type="button" onClick={() => void exportRedacted()} disabled={snapshotBusy || diffLoading || exportBusy}>{exportBusy ? "导出中…" : "导出脱敏 JSON"}</button></>}{!report && !scanning && <button className="button button-secondary" type="button" onClick={() => void scan(true)}>开始扫描</button>}{scanning && <button className="button button-secondary" type="button" onClick={() => void cancel()}>取消扫描</button>}</div></section>
+    <h2 id="skills-title" className="visually-hidden">Skill 体检</h2>
+    <ToolbarActions><div className="skills-toolbar">
+      <label><span>宿主</span><select value={host} onChange={(event) => { const next = event.target.value; setHost(next); if (report && !scanning) void scan(true, next); }} disabled={scanning || snapshotBusy || diffLoading || exportBusy}><option value="all">全部宿主</option>{hostOptions.map((value) => <option value={value} key={value}>{hostLabel(value)}</option>)}</select></label>
+      {report && !scanning && <button className="button button-secondary" type="button" onClick={() => void scan(true)} disabled={snapshotBusy || diffLoading || exportBusy}>重新扫描</button>}
+      {!report && !scanning && <button className="button button-secondary" type="button" onClick={() => void scan(true)}>开始扫描</button>}
+      {scanning && <button className="button button-secondary" type="button" onClick={() => void cancel()}>取消扫描</button>}
+    </div></ToolbarActions>
+    {report && !scanning && <div className="skills-result-actions" aria-label="扫描结果操作">
+      <button className="button button-secondary" type="button" onClick={() => void saveSnapshot()} disabled={snapshotBusy || diffLoading || exportBusy} title="本机快照包含绝对路径、用户名及 Skill 描述，请勿直接分享快照文件。">{snapshotBusy ? "保存中…" : "存为快照"}</button>
+      <button className="button button-secondary" type="button" onClick={() => void compareSnapshot()} disabled={snapshotBusy || diffLoading || exportBusy}>{diffLoading ? "对比中…" : "与上次快照对比"}</button>
+      <button className="button button-secondary" type="button" onClick={() => void exportRedacted()} disabled={snapshotBusy || diffLoading || exportBusy}>{exportBusy ? "导出中…" : "导出脱敏 JSON"}</button>
+    </div>}
     <details className="skills-panel skills-settings-panel">
       <summary>高级扫描设置</summary>
       <p className="skills-note">只影响下一次 Skill 扫描。留空使用 CLI 默认值；保存不会修改或上传任何 skill。</p>

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { readRouteQuality, safeUiError, type RouteQualityFamily, type RouteQualityHost, type RouteQualityReport } from "../../lib/tauri";
+import { ToolbarActions } from "../../components/ui/ToolbarActions";
 
 const windows: Array<{ value: 30 | 90 | 365; label: string }> = [
   { value: 30, label: "近 30 天" },
@@ -122,10 +123,10 @@ export function TestPage() {
   }, [report]);
 
   return <>
-    <section className="test-page-header">
-      <div><p className="eyebrow">被动路线质量</p><h2>测试</h2><p className="section-description">从已记录的协议响应中核对“宿主 × 实际模型族”。这页不会发起真实请求，也不会读取凭据。</p></div>
+    <h2 id="test-page-title" className="visually-hidden">测试</h2>
+    <ToolbarActions>
       <div className="test-header-actions"><label className="test-window-field"><span>统计窗口</span><select value={days} onChange={(event) => setDays(Number(event.target.value) as 30 | 90 | 365)}>{windows.map((window) => <option key={window.value} value={window.value}>{window.label}</option>)}</select></label><button className="button button-secondary" type="button" onClick={refresh} disabled={loading}>{loading ? "读取中…" : "重载"}</button></div>
-    </section>
+    </ToolbarActions>
 
     <section className="test-evidence-callout" aria-label="测试页证据边界">
       <div><p className="eyebrow">证据边界</p><h3>先看已经发生的请求，再决定是否做主动探针</h3><p>判定依据是宿主日志中协议响应返回的实际模型串；模型族与官方基准不一致时，只报告“非官方模型族”证据，不直接断言偷换或训练。主动 L0/L1 探针仍在旧工作台的高级区，需单独确认成本与凭据授权。</p></div>

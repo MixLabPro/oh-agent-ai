@@ -13,6 +13,8 @@ import {
   type SessionsWindow,
 } from "../../lib/tauri";
 import { SessionDetail } from "./SessionDetail";
+import { Button, DateInput, Field, FilterBar, SelectInput, TextInput } from "../../components/ui/FormControls";
+import { ToolbarActions } from "../../components/ui/ToolbarActions";
 
 const costStates: Array<{ value: SessionsCostFilter; label: string }> = [
   { value: "all", label: "全部计费状态" },
@@ -23,7 +25,31 @@ const costStates: Array<{ value: SessionsCostFilter; label: string }> = [
 ];
 
 const DEFAULT_STATISTICS_TIMEZONE = "Asia/Shanghai";
+const SESSIONS_VIEW_STATE_KEY = "agent-vitals.sessions-view.v1";
 type SessionNavigationTarget = { type: "sessionDetail"; session_ref: string; host_kind: string } | { type: "sessionList"; host_kind: string | null };
+
+function loadSessionsViewState(): { filters: SessionsFilters; selectedSessionRef: string | null } | null {
+  try {
+    const raw = window.sessionStorage.getItem(SESSIONS_VIEW_STATE_KEY);
+    if (!raw) return null;
+    const value = JSON.parse(raw) as { filters?: Partial<SessionsFilters>; selectedSessionRef?: unknown };
+    const filters = value.filters;
+    if (!filters || !["month", "today", "7d", "custom"].includes(filters.window ?? "") || !["all", "estimated", "subscription", "unpriced", "unavailable"].includes(filters.cost_status ?? "")) return null;
+    const fallback = filtersForTimezone(DEFAULT_STATISTICS_TIMEZONE);
+    const date = (item: unknown, backup: string) => typeof item === "string" && /^\d{4}-\d{2}-\d{2}$/.test(item) ? item : backup;
+    return {
+      filters: {
+        ...fallback, ...filters,
+        month: typeof filters.month === "string" && /^\d{4}-\d{2}$/.test(filters.month) ? filters.month : fallback.month,
+        date_from: date(filters.date_from, fallback.date_from), date_to: date(filters.date_to, fallback.date_to),
+        host_kind: typeof filters.host_kind === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(filters.host_kind) ? filters.host_kind : "all",
+        model: typeof filters.model === "string" ? filters.model.slice(0, 120) : "",
+        provider: typeof filters.provider === "string" ? filters.provider.slice(0, 120) : "",
+      } as SessionsFilters,
+      selectedSessionRef: typeof value.selectedSessionRef === "string" && /^sr_[A-Za-z0-9_-]{8,128}$/.test(value.selectedSessionRef) ? value.selectedSessionRef : null,
+    };
+  } catch { return null; }
+}
 
 function dateInTimezone(timezone: string, date = new Date()): string {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
@@ -97,30 +123,33 @@ function updateFilter(setFilters: Dispatch<SetStateAction<SessionsFilters>>, key
 }
 
 export function SessionsPage({ navigationTarget = null, onNavigationTargetApplied }: { navigationTarget?: SessionNavigationTarget | null; onNavigationTargetApplied?: () => void }) {
-  const [filters, setFilters] = useState<SessionsFilters>(() => filtersForTimezone(DEFAULT_STATISTICS_TIMEZONE));
+  const initialViewState = useMemo(() => loadSessionsViewState(), []);
+  const [filters, setFilters] = useState<SessionsFilters>(() => initialViewState?.filters ?? filtersForTimezone(DEFAULT_STATISTICS_TIMEZONE));
   const [statisticsTimezone, setStatisticsTimezone] = useState(DEFAULT_STATISTICS_TIMEZONE);
   const [timezoneReady, setTimezoneReady] = useState(false);
   const [rows, setRows] = useState<SessionRow[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [total, setTotal] = useState<number | null>(null);
   const [windowTokens, setWindowTokens] = useState<number | null>(null);
-  const [selectedRow, setSelectedRow] = useState<SessionRow | null>(null);
-  const [selectedSessionRef, setSelectedSessionRef] = useState<string | null>(null);
+  const [selectedSessionRef, setSelectedSessionRef] = useState<string | null>(() => initialViewState?.selectedSessionRef ?? null);
+  const [detailRefreshKey, setDetailRefreshKey] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
   const requestInFlight = useRef(false);
   const pendingRefresh = useRef(false);
-  const dateFiltersTouched = useRef(false);
+  const dateFiltersTouched = useRef(Boolean(initialViewState));
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
+  useEffect(() => {
+    try { window.sessionStorage.setItem(SESSIONS_VIEW_STATE_KEY, JSON.stringify({ filters, selectedSessionRef })); } catch { /* Optional UI preference; authority data remains unaffected. */ }
+  }, [filters, selectedSessionRef]);
   const serverKey = useMemo(() => JSON.stringify([filters.window, filters.month, filters.date_from, filters.date_to, filters.host_kind, filters.model, filters.provider]), [filters]);
   const visibleRows = useMemo(() => filters.cost_status === "all" ? rows : rows.filter((row) => row.cost_status.state === filters.cost_status), [filters.cost_status, rows]);
 
   useEffect(() => {
     if (!navigationTarget) return;
-    setSelectedRow(null);
     setFilters((current) => ({ ...current, host_kind: navigationTarget.host_kind || "all" }));
     setSelectedSessionRef(navigationTarget.type === "sessionDetail" ? navigationTarget.session_ref : null);
     onNavigationTargetApplied?.();
@@ -138,6 +167,7 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
   }, []);
 
   const fetchFirstPage = async () => {
+    setDetailRefreshKey((value) => value + 1);
     if (requestInFlight.current) {
       pendingRefresh.current = true;
       generation.current += 1;
@@ -212,32 +242,29 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
     }
   };
 
-  if (selectedRow) return <SessionDetail row={selectedRow} sessionRef={selectedRow.session_ref} onBack={() => setSelectedRow(null)} />;
-  if (selectedSessionRef) return <SessionDetail row={null} sessionRef={selectedSessionRef} hostKind={filters.host_kind} onBack={() => setSelectedSessionRef(null)} />;
+  const selectedRow = rows.find((row) => row.session_ref === selectedSessionRef) ?? null;
 
-  return <>
-    <section className="sessions-page-header">
-      <div>
-        <p className="eyebrow">本地会话索引</p>
-        <h2>会话</h2>
-        <p className="section-description">只显示本机 authority 的安全聚合：宿主、时间、模型、token 和计费状态。不会把会话正文、路径或原生会话 ID 放入页面。</p>
-      </div>
+  return <div className={`sessions-workspace ${selectedSessionRef ? "sessions-workspace-selected" : ""}`}>
+    <main className="sessions-list-pane">
+    <>
+    <h1 className="visually-hidden">会话</h1>
+    <ToolbarActions>
       <div className="sessions-header-actions">
         <span className="status-pill"><span aria-hidden="true" className="status-dot" />安全列表</span>
-        <button className="button button-secondary" type="button" onClick={() => void fetchFirstPage()} disabled={loading}>刷新</button>
+        <Button type="button" onClick={() => void fetchFirstPage()} disabled={loading}>刷新</Button>
       </div>
-    </section>
+    </ToolbarActions>
 
-    <section className="sessions-toolbar" aria-label="会话筛选">
-      <label>时间窗口<select value={filters.window} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "window", event.target.value); }}><option value="month">按月</option><option value="today">今天</option><option value="7d">最近 7 天</option><option value="custom">自定义</option></select></label>
-      {filters.window === "month" && <label>月份<input type="month" value={filters.month} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "month", event.target.value); }} /></label>}
-      {filters.window === "custom" && <><label>开始日期<input type="date" value={filters.date_from} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "date_from", event.target.value); }} /></label><label>结束日期<input type="date" value={filters.date_to} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "date_to", event.target.value); }} /></label></>}
-      <label>宿主<input list="session-host-options" value={filters.host_kind === "all" ? "" : filters.host_kind} placeholder="全部宿主 / 动态宿主" onChange={(event) => updateFilter(setFilters, "host_kind", event.target.value || "all")} /></label>
+    <FilterBar aria-label="会话筛选" data-window={filters.window}>
+      <Field label="时间窗口" htmlFor="sessions-window"><SelectInput id="sessions-window" value={filters.window} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "window", event.target.value); }}><option value="month">按月</option><option value="today">今天</option><option value="7d">最近 7 天</option><option value="custom">自定义</option></SelectInput></Field>
+      {filters.window === "month" && <Field label="月份" htmlFor="sessions-month"><DateInput id="sessions-month" type="month" value={filters.month} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "month", event.target.value); }} /></Field>}
+      {filters.window === "custom" && <><Field label="开始日期" htmlFor="sessions-date-from"><DateInput id="sessions-date-from" type="date" value={filters.date_from} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "date_from", event.target.value); }} /></Field><Field label="结束日期" htmlFor="sessions-date-to"><DateInput id="sessions-date-to" type="date" value={filters.date_to} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "date_to", event.target.value); }} /></Field></>}
+      <Field label="宿主" htmlFor="sessions-host"><TextInput id="sessions-host" list="session-host-options" value={filters.host_kind === "all" ? "" : filters.host_kind} placeholder="全部宿主 / 动态宿主" onChange={(event) => updateFilter(setFilters, "host_kind", event.target.value || "all")} /></Field>
       <datalist id="session-host-options"><option value="codex" /><option value="claude-code" /><option value="dsh" /><option value="workbuddy" /><option value="zcode" /><option value="minimax-code" /></datalist>
-      <label>模型<input value={filters.model} placeholder="可选精确匹配" onChange={(event) => updateFilter(setFilters, "model", event.target.value)} /></label>
-      <label>服务商<input value={filters.provider} placeholder="可选精确匹配" onChange={(event) => updateFilter(setFilters, "provider", event.target.value)} /></label>
-      <label>计费状态<select value={filters.cost_status} onChange={(event) => updateFilter(setFilters, "cost_status", event.target.value)}>{costStates.map((state) => <option key={state.value} value={state.value}>{state.label}</option>)}</select></label>
-    </section>
+      <Field label="模型" htmlFor="sessions-model"><TextInput id="sessions-model" value={filters.model} placeholder="可选精确匹配" onChange={(event) => updateFilter(setFilters, "model", event.target.value)} /></Field>
+      <Field label="服务商" htmlFor="sessions-provider"><TextInput id="sessions-provider" value={filters.provider} placeholder="可选精确匹配" onChange={(event) => updateFilter(setFilters, "provider", event.target.value)} /></Field>
+      <Field label="计费状态" htmlFor="sessions-cost"><SelectInput id="sessions-cost" value={filters.cost_status} onChange={(event) => updateFilter(setFilters, "cost_status", event.target.value)}>{costStates.map((state) => <option key={state.value} value={state.value}>{state.label}</option>)}</SelectInput></Field>
+    </FilterBar>
 
     {error && <div className="error-banner" role="alert">会话数据不可用：{error}</div>}
     {loading && rows.length > 0 && <div className="sessions-refresh-status" role="status" aria-live="polite">正在读取新的筛选窗口，下面暂保留上一份会话结果；完成后会替换为最新数据。</div>}
@@ -245,16 +272,19 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
       <div><strong>{total === null ? "—" : total}</strong><span>窗口会话</span></div>
       <div><strong>{windowTokens === null ? "—" : compact(windowTokens)}</strong><span>窗口 tokens</span></div>
       <div><strong>{visibleRows.length}</strong><span>{filters.cost_status === "all" ? "当前页" : "当前页匹配"}</span></div>
-      <p>当前加载 {rows.length} 条 · 成本不跨币种相加</p>
+      <p>已加载 {rows.length} 条 · 成本按币种分别计算</p>
     </section>
 
     <section className="sessions-panel" aria-labelledby="sessions-list-title">
       <div className="section-heading"><div><p className="eyebrow">安全投影</p><h3 id="sessions-list-title">会话列表</h3></div><span className="count-badge">{nextCursor ? "可继续" : "已加载"}</span></div>
       {loading && rows.length === 0 ? <div className="sessions-state" role="status"><strong>正在读取会话</strong><p>正在通过本地 authority 汇总当前窗口，不会上传数据。</p></div> : visibleRows.length === 0 ? <div className="sessions-state"><strong>{error ? "无法显示会话" : rows.length ? "没有匹配的计费状态" : "暂无会话"}</strong><p>{error ? "请检查本地数据同步状态后重试。" : "当前筛选窗口没有可展示的安全会话聚合。"}</p></div> : <>
-        <div className="sessions-table-wrap"><table className="sessions-table"><thead><tr><th scope="col">会话</th><th scope="col">宿主 · 模型</th><th scope="col">时间</th><th scope="col">Tokens</th><th scope="col">费用</th><th scope="col">状态</th></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.session_ref} className="sessions-table-row-clickable" tabIndex={0} role="button" onClick={() => setSelectedRow(row)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedRow(row); } }}><td><strong>{sessionTitle(row)}</strong><code>{row.session_ref.slice(0, 15)}…</code></td><td>{row.host}<small>{row.model_ids.length ? row.model_ids.join(" · ") : "模型不可用"}</small></td><td>{dateLabel(row.first_event_at)}<small>{row.last_event_at ? `至 ${dateLabel(row.last_event_at)}` : "结束时间不可用"}</small></td><td><strong>{compact(row.tokens.total)}</strong><small>{row.event_count} 个事件 · 峰值 {compact(row.peak_tokens)}</small></td><td><strong>{costLabel(row)}</strong><small>{row.cost_minor ? row.cost_minor.basis : "未计入金额"}</small></td><td><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateLabel(row.cost_status)}</span></td></tr>)}</tbody></table></div>
-        <div className="sessions-card-list">{visibleRows.map((row) => <article className="session-card session-card-clickable" key={row.session_ref} tabIndex={0} role="button" onClick={() => setSelectedRow(row)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedRow(row); } }}><div className="session-card-heading"><strong>{sessionTitle(row)}</strong><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateShort(row.cost_status.state)}</span></div><p>{row.host} · {row.model_ids.join(" · ") || "模型不可用"}</p><div><span>{compact(row.tokens.total)} token · {row.event_count} 个事件</span><strong>{costLabel(row)}</strong></div><small>{dateLabel(row.first_event_at)} 至 {dateLabel(row.last_event_at)}</small><code>{row.session_ref.slice(0, 15)}…</code></article>)}</div>
-        {nextCursor && <div className="sessions-more"><button className="button button-secondary" type="button" onClick={() => void loadMore()} disabled={loadingMore || loading}>{loadingMore ? "正在加载…" : "加载更多"}</button></div>}
+        <div className="sessions-table-wrap"><table className="sessions-table"><thead><tr><th scope="col">会话</th><th scope="col">宿主 · 模型</th><th scope="col">时间</th><th scope="col">Tokens</th><th scope="col">费用</th><th scope="col">状态</th></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.session_ref} className={`sessions-table-row-clickable ${row.session_ref === selectedSessionRef ? "sessions-row-selected" : ""}`} tabIndex={0} role="button" aria-pressed={row.session_ref === selectedSessionRef} onClick={() => setSelectedSessionRef(row.session_ref)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedSessionRef(row.session_ref); } }}><td><strong>{sessionTitle(row)}</strong><code>{row.session_ref.slice(0, 15)}…</code></td><td>{row.host}<small>{row.model_ids.length ? row.model_ids.join(" · ") : "模型不可用"}</small></td><td>{dateLabel(row.first_event_at)}<small>{row.last_event_at ? `至 ${dateLabel(row.last_event_at)}` : "结束时间不可用"}</small></td><td><strong>{compact(row.tokens.total)}</strong><small>{row.event_count} 个事件 · 峰值 {compact(row.peak_tokens)}</small></td><td><strong>{costLabel(row)}</strong><small>{row.cost_minor ? row.cost_minor.basis : "未计入金额"}</small></td><td><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateLabel(row.cost_status)}</span></td></tr>)}</tbody></table></div>
+        <div className="sessions-card-list">{visibleRows.map((row) => <article className={`session-card session-card-clickable ${row.session_ref === selectedSessionRef ? "sessions-row-selected" : ""}`} key={row.session_ref} tabIndex={0} role="button" aria-pressed={row.session_ref === selectedSessionRef} onClick={() => setSelectedSessionRef(row.session_ref)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedSessionRef(row.session_ref); } }}><div className="session-card-heading"><strong>{sessionTitle(row)}</strong><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateShort(row.cost_status.state)}</span></div><p>{row.host} · {row.model_ids.join(" · ") || "模型不可用"}</p><div><span>{compact(row.tokens.total)} token · {row.event_count} 个事件</span><strong>{costLabel(row)}</strong></div><small>{dateLabel(row.first_event_at)} 至 {dateLabel(row.last_event_at)}</small><code>{row.session_ref.slice(0, 15)}…</code></article>)}</div>
+        {nextCursor && <div className="sessions-more"><Button type="button" onClick={() => void loadMore()} busy={loadingMore} disabled={loading}>{loadingMore ? "正在加载…" : "加载更多"}</Button></div>}
       </>}
     </section>
-  </>;
+    </>
+    </main>
+    {selectedSessionRef && <aside className="sessions-inspector" aria-label="会话检查器"><SessionDetail row={selectedRow} sessionRef={selectedSessionRef} hostKind={filters.host_kind} refreshKey={detailRefreshKey} onBack={() => setSelectedSessionRef(null)} /></aside>}
+  </div>;
 }

@@ -874,6 +874,21 @@ enum TrustAction {
         #[arg(long)]
         json: bool,
     },
+    /// Read already persisted redacted Trust observations without scanning hosts.
+    Evidence {
+        /// Optional profile id filter.
+        #[arg(long)]
+        host: Option<String>,
+        /// Maximum most-recent evidence rows (1..=500).
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+        /// Opaque cursor returned by the previous page.
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// List valid local Trust profiles. This reports collection capability, not
     /// whether a product has performed any data transfer.
     Profiles {
@@ -1774,6 +1789,18 @@ fn main() {
                         println!("{}: {} artifacts ({} new, {} duplicate), {} findings", report.host, report.discovered, report.inserted, report.duplicate, report.findings_upserted);
                     },
                     Err(error) => { eprintln!("trust audit failed: {error}"); std::process::exit(2); }
+                }
+                return;
+            }
+            TrustAction::Evidence { host, limit, cursor, json } => {
+                match agent_vitals_runtime::trust_audit::read_evidence_history(&data_home, host.as_deref(), *limit, cursor.as_deref()) {
+                    Ok(page) => {
+                        let count = page.evidence.len();
+                        let payload = serde_json::json!({ "host": host, "evidence": page.evidence, "count": count, "next_cursor": page.next_cursor, "source": "authority_readonly" });
+                        if *json { println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default()); }
+                        else { println!("{} persisted evidence rows", count); }
+                    }
+                    Err(error) => { eprintln!("trust evidence read failed: {error}"); std::process::exit(2); }
                 }
                 return;
             }
@@ -5349,10 +5376,18 @@ fn sessions_navigation_v2(day_key: &str, timezone: &str, recent_n: usize, json_o
 
     // today_tokens：单次只读事务，逐 host 从 SQL 聚合出来。
     let sql_totals = agent_vitals_data::authority_query::day_token_totals_by_host(&data_home, day_key);
-    let mut hosts: Vec<Value> = Vec::with_capacity(3);
-    for host in ["dsh", "codex", "claude-code"] {
+    // 导航宿主与可控来源共用动态注册表；保留原三宿主的菜单顺序，
+    // 再追加 WorkBuddy 与热插拔插件。历史使用事实不依赖会话文件是否仍在。
+    let mut host_ids = vec!["dsh".to_string(), "codex".to_string(), "claude-code".to_string()];
+    for host in agent_vitals_runtime::source_controls::supported_hosts_for(&data_home) {
+        if !host_ids.contains(&host) {
+            host_ids.push(host);
+        }
+    }
+    let mut hosts: Vec<Value> = Vec::with_capacity(host_ids.len());
+    for host in host_ids {
         let today_tokens = match sql_totals.as_ref() {
-            Some(rows) => match rows.get(host) {
+            Some(rows) => match rows.get(&host) {
                 Some(v) => json!({ "value": v, "basis": "sql-facts", "coverage": "complete" }),
                 None => json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null }),
             },
@@ -5364,7 +5399,7 @@ fn sessions_navigation_v2(day_key: &str, timezone: &str, recent_n: usize, json_o
         search_args.insert("date".into(), Value::String(day_key.to_string()));
         search_args.insert(
             "hosts".into(),
-            Value::Array(vec![Value::String(host.to_string())]),
+            Value::Array(vec![Value::String(host.clone())]),
         );
         search_args.insert(
             "limit".into(),
@@ -5401,7 +5436,9 @@ fn sessions_navigation_v2(day_key: &str, timezone: &str, recent_n: usize, json_o
                 .collect::<Vec<_>>(),
             Err(_) => Vec::new(), // 单宿主失败 → 该宿主行降级，不污染其他宿主
         };
-        let status = if today_tokens.get("value").and_then(Value::as_i64).is_some() {
+        let status = if sql_totals.is_none() {
+            "unavailable"
+        } else if today_tokens.get("value").and_then(Value::as_i64).is_some() {
             "ready"
         } else {
             "partial"
@@ -5411,9 +5448,8 @@ fn sessions_navigation_v2(day_key: &str, timezone: &str, recent_n: usize, json_o
         let today_sessions = agent_vitals_data::authority_query::day_session_count(
             &data_home,
             day_key,
-            host,
-        )
-        .unwrap_or(0);
+            &host,
+        );
         hosts.push(json!({
             "host_kind": host,
             "status": status,

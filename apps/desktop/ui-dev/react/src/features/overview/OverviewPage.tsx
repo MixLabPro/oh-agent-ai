@@ -1,18 +1,13 @@
 import { StatusPill } from "../../components/ui/StatusPill";
 import type { OverviewDetails, OverviewSnapshot, SummaryHostTokens } from "../../lib/tauri";
+import { todayCacheHitRatio } from "./cacheHit";
+import { monthSpendCard, todaySpendCard } from "./spendCards";
 
 function tokensLabel(value: number | null): string {
   if (value == null) return "—";
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
   return String(value);
-}
-
-function moneyLabel(values: Record<string, number>): string {
-  const entries = Object.entries(values);
-  if (!entries.length) return "—";
-  const [currency, amount] = entries[0];
-  return `${currency === "CNY" ? "¥" : currency + " "}${amount.toFixed(2)}`;
 }
 
 function moneyDetail(values: Record<string, number>): string {
@@ -57,6 +52,10 @@ function hostStatusLabel(status: OverviewSnapshot["host_rows"][number]["status"]
   return ({ ready: "可用", partial: "部分覆盖", unavailable: "不可用" } as Record<typeof status, string>)[status];
 }
 
+function syncStageLabel(stage: string): string {
+  return ({ complete: "完成", fold: "会话折账", discover: "来源发现", resolve: "CLI 检查", never: "尚未同步", paused: "已暂停", partial: "部分失败", light: "定向同步", control: "同步控制", facts: "事实导入", unknown: "状态未知" } as Record<string, string>)[stage] ?? "状态未知";
+}
+
 function StatCard({ label, value, detail }: { label: string; value: string; detail: string }) {
   return <article className="stat-card">
     <p className="eyebrow">{label}</p>
@@ -68,21 +67,18 @@ function StatCard({ label, value, detail }: { label: string; value: string; deta
 export function OverviewPage({ overview, details }: { overview: OverviewSnapshot | null; details: OverviewDetails | null }) {
   if (!overview) return <section className="empty-state" aria-live="polite"><p className="eyebrow">正在读取</p><h2>准备工作台数据</h2><p>正在通过本地 IPC 获取状态。</p></section>;
   const budgetTone = overview.budget.level === "over" ? "warning" : overview.budget.level === "warn" ? "warning" : overview.budget.level === "ok" ? "success" : "neutral";
+  const measuredHosts = details?.monthly && details.monthly.freshness !== "unavailable" && details.monthly.freshness !== "unknown"
+    ? Object.values(details.monthly.tokens_by_host).filter((host) => host.total > 0).length : null;
+  const cacheHit = todayCacheHitRatio(details?.daily ?? null);
+  const todaySpend = todaySpendCard(details?.daily ?? null, details?.monthly ?? null);
+  const monthSpend = monthSpendCard(details?.monthly ?? null);
   return <>
     {details?.errors.length ? <div className="error-banner" role="status">部分总览数据不可用：{details.errors.join("；")}。已保留可用分区，未用 0 代替未知。</div> : null}
-    <section className="hero-panel">
-      <div>
-        <p className="eyebrow">本地工作台 · 数据概览</p>
-        <h2>把运行状态变成可理解的证据</h2>
-        <p className="hero-copy">数据来自本机 authority；React 只呈现安全投影，不读取原始日志、路径或工作区内容。</p>
-      </div>
-      <StatusPill tone={overview.sync.ok ? "success" : "warning"}>{overview.sync.ok ? "本地同步正常" : "同步状态需检查"}</StatusPill>
-    </section>
     <section className="stats-grid" aria-label="工作台状态">
-      <StatCard label="今日消耗" value={tokensLabel(overview.today_tokens)} detail={overview.today_tokens == null ? "暂无今日权威数据" : "tokens · 含缓存读写"} />
-      <StatCard label="今日费用" value={moneyLabel(overview.today_spend)} detail={moneyDetail(overview.today_spend)} />
-      <StatCard label="本月费用" value={moneyLabel(overview.month_spend)} detail={moneyDetail(overview.month_spend)} />
-      <StatCard label="已覆盖宿主" value={overview.hosts == null ? "—" : String(overview.hosts)} detail={overview.hosts == null ? "覆盖数据不可用" : "本机已发现的 Agent"} />
+      <StatCard label="今日消耗" value={tokensLabel(overview.today_tokens)} detail={overview.today_tokens == null ? "暂无今日权威数据" : cacheHit == null ? "暂无缓存命中率" : `平均缓存命中率 ${(cacheHit * 100).toFixed(2)}%`} />
+      <StatCard label="今日已知成本" value={todaySpend.value} detail={todaySpend.detail} />
+      <StatCard label="本月已知支出" value={monthSpend.value} detail={monthSpend.detail} />
+      <StatCard label="本月有用量宿主" value={measuredHosts == null ? "—" : String(measuredHosts)} detail={measuredHosts == null ? "月度覆盖数据不可用" : "已观测到 token 的宿主"} />
     </section>
     <section className="overview-detail-grid" aria-label="月度和今日权威汇总">
       <section className="info-panel overview-panel">
@@ -109,7 +105,7 @@ export function OverviewPage({ overview, details }: { overview: OverviewSnapshot
         <StatusPill tone={budgetTone}>{budgetStatusLabel(overview.budget.level)}</StatusPill>
       </section>
       <section className="info-panel overview-panel" aria-labelledby="overview-sync-title">
-        <div><p className="eyebrow">数据新鲜度</p><h3 id="overview-sync-title">{overview.freshness}</h3><p className="overview-panel-copy">同步阶段：{overview.sync.stage} · 订阅月费：{overview.subscription_cny_month == null ? "—" : `¥${overview.subscription_cny_month.toFixed(2)}`}</p></div>
+        <div><p className="eyebrow">数据新鲜度</p><h3 id="overview-sync-title">{overview.freshness}</h3><p className="overview-panel-copy">同步阶段：{syncStageLabel(overview.sync.stage)} · 订阅月费：{overview.subscription_cny_month == null ? "—" : `¥${overview.subscription_cny_month.toFixed(2)}`}</p></div>
         <button className="button button-secondary" type="button" onClick={() => { window.location.hash = "trust"; }}>查看 Trust</button>
       </section>
     </div>

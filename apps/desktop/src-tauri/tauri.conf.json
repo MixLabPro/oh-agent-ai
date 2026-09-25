@@ -5,6 +5,7 @@
   "identifier": "com.mixlabpro.agent-vitals",
   "build": {
     "frontendDist": "ui-react-dist",
+    "beforeBuildCommand": "node ../../scripts/prepare-desktop-bundle.mjs",
     "beforeDevCommand": "npm --prefix ui-dev run dev:react",
     "devUrl": "http://127.0.0.1:5174/"
   },
@@ -15,13 +16,15 @@
         "label": "workbench",
         "title": "agent-vitals 工作台",
         "url": "index.html",
-        "width": 760,
-        "height": 560,
+        "width": 1100,
+        "height": 760,
         "minWidth": 640,
         "minHeight": 480,
         "resizable": true,
         "fullscreen": false,
         "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
         "center": true,
         "visible": false,
         "skipTaskbar": false
@@ -33,7 +36,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "resources": {
       "../../../target/release/agent-vitals": "bin/agent-vitals"
     },
