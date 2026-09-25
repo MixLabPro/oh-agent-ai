@@ -1093,189 +1093,6 @@ fn resolve_binary_from(
     None
 }
 
-/// 跑 `agent-vitals discover`，解析 stdout JSON。失败 → None（tick 不 abort，
-/// 只落一条 warn）。discover 是只读子命令，不需要 owner 是 rust。
-///
-/// **之前这里三种失败（spawn 失败 / 非零退出 / stdout 不是合法 JSON）都直接
-/// 折叠成 `None`，子进程的 stderr 被 `.output()` 捕获后从没读过一次**——桌面
-/// 场景下这是本次事故复盘（G4）点名的盲区之一：托盘说「discover 失败」，但
-/// 为什么失败，唯一知道答案的那份文本被默默丢了。
-fn run_discover(bin: &Path) -> Option<Value> {
-    let started = std::time::Instant::now();
-    let out = match std::process::Command::new(bin).arg("discover").output() {
-        Ok(out) => out,
-        Err(e) => {
-            agent_vitals_runtime::logging::log_warn("sync", &format!("discover spawn 失败: {e}"));
-            return None;
-        }
-    };
-    if !out.status.success() {
-        agent_vitals_runtime::logging::log_warn(
-            "sync",
-            &format!(
-                "discover 失败（{}）：{}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-        );
-        return None;
-    }
-    match serde_json::from_slice(&out.stdout) {
-        Ok(value) => {
-            agent_vitals_runtime::logging::log_info("sync", &format!("discover 完成，用时 {:?}", started.elapsed()));
-            Some(value)
-        }
-        Err(e) => {
-            agent_vitals_runtime::logging::log_warn("sync", &format!("discover 输出不是合法 JSON: {e}"));
-            None
-        }
-    }
-}
-
-/// 从 discover 报告里取最新未折会话（`unfolded` 已按 mtime 降序，首条即最新）。
-/// 返回 (path, session_id)；报告为空 → None。
-fn latest_unfolded(report: &Value) -> Option<(String, String)> {
-    let first = report.get("unfolded")?.as_array()?.first()?;
-    let path = first.get("path")?.as_str()?.to_string();
-    let sid = first.get("session_id").and_then(Value::as_str).unwrap_or("").to_string();
-    Some((path, sid))
-}
-
-/// 一轮同步的实际工作：发现最新未折 DSH 会话 → spawn `agent-vitals oneline` 折进
-/// state → 返回本轮 `SyncStatus`。**每一类结局都返回一条可落盘的状态**——不是只
-/// 进 stderr。oneline 的写链本身有 fencing + exactly-once，这里不在 spawn 之外
-/// 再叠一层保险。
-fn perform_sync() -> SyncStatus {
-    let Some(bin) = resolve_binary() else {
-        return SyncStatus::fail(
-            "resolve",
-            "未找到 agent-vitals 二进制（设 AGENT_VITALS_BIN、加入 PATH，或放进 app 的 Contents/Resources/bin/）".into(),
-        );
-    };
-    let Some(report) = run_discover(&bin) else {
-        return SyncStatus::fail("discover", "agent-vitals discover 失败".into());
-    };
-    let Some((path, session_id)) = latest_unfolded(&report) else {
-        // 无未折会话不是失败——是「没活干」的正常态；但 tick 仍要 refresh，把
-        // 外部/手动改过的 state 重读进托盘。
-        return SyncStatus::ok(
-            "discover",
-            format!(
-                "无未折 DSH 会话（bare={}, zstd_only={}）",
-                report["bare_jsonl"], report["zstd_only"]
-            ),
-        );
-    };
-    // 折进 app 自己的数据根——子进程继承其余环境，这里显式钉死 AGENT_VITALS_HOME
-    // 与 overview::data_home() 一致（future-proof：哪天 data_home 加 legacy 分支
-    // 也不至于把账折到 app 读不到的地方）。
-    let home = overview::data_home();
-    let started = std::time::Instant::now();
-    let out = std::process::Command::new(&bin)
-        .arg("oneline")
-        .arg(&path)
-        .arg("--session-id")
-        .arg(&session_id)
-        .env("AGENT_VITALS_HOME", &home)
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            log_spawn_success("oneline", started, &o.stderr);
-            SyncStatus::ok("fold", format!("已折入 {session_id}"))
-        }
-        Ok(o) => SyncStatus::fail(
-            "fold",
-            format!(
-                "oneline 失败（{}）：{}",
-                o.status,
-                String::from_utf8_lossy(&o.stderr).trim()
-            ),
-        ),
-        Err(e) => SyncStatus::fail("fold", format!("oneline spawn 失败：{e}")),
-    }
-}
-
-/// Claude 账尾折（tick 顺序 §8：DSH discover/oneline → `claude-sync` → 宿主区
-/// 刷新）。best-effort：返回 `None` = 成功、`Some(错误)` = 失败——失败不 abort
-/// tick（claude-code 宿主行照常刷新：ledger 缺当日 → null 三元组，诚实形态），
-/// 但 SyncStatus 必须留痕，托盘说「同步成功」时用户有权认为 claude-code 行的
-/// 数字也是新的。claude-sync 幂等（size/mtime 指纹，重跑零变化），每轮 tick 都
-/// 跑没有副作用。owner fencing 与 oneline 同款（本二进制 = rust owner，直跑）。
-fn run_claude_sync(bin: &std::path::Path) -> Option<String> {
-    let home = overview::data_home();
-    let started = std::time::Instant::now();
-    let out = std::process::Command::new(bin)
-        .arg("claude-sync")
-        .env("AGENT_VITALS_HOME", &home)
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            log_spawn_success("claude-sync", started, &o.stderr);
-            None
-        }
-        Ok(o) => Some(format!(
-            "claude-sync 失败（{}）：{}",
-            o.status,
-            String::from_utf8_lossy(&o.stderr).trim()
-        )),
-        Err(e) => Some(format!("claude-sync spawn 失败：{e}")),
-    }
-}
-
-/// 子进程成功（退出码 0）时的记账：REVIEW P1「子进程 spawn 与退出码」的一半
-/// （另一半——失败路径——各调用点自己的 `log_warn` 已经覆盖）+ **这是本次改进
-/// 里此前真正的盲区**：`run_claude_sync`/`run_facts_sync`/oneline 原先的
-/// `Ok(o) if o.status.success() => None` 分支完全不看 `o.stderr`，一次「同步
-/// 成功但有降级警告」（比如 retention 清理失败、某条候选声明冲突）会让托盘
-/// 诚实地说「同步成功」，警告本身从未落地过。子进程内部的 warn 大多已经经
-/// `agent_vitals_runtime::logging` 落过一次库（同一个 `data_home`），这里的
-/// stderr 追加只在它没兜住的内容时才补——`log_info` 而不是 `log_warn`：子进程
-/// 自己已经决定过这条是不是值得让终端用户看到，这里只是兜底，不升级严重度。
-fn log_spawn_success(component: &'static str, started: std::time::Instant, stderr: &[u8]) {
-    let tail = String::from_utf8_lossy(stderr);
-    let tail = tail.trim();
-    if tail.is_empty() {
-        agent_vitals_runtime::logging::log_info(component, &format!("成功，用时 {:?}", started.elapsed()));
-    } else {
-        agent_vitals_runtime::logging::log_info(
-            component,
-            &format!("成功，用时 {:?}，但有输出：{tail}", started.elapsed()),
-        );
-    }
-}
-
-/// Facts 例行 ingest（tick 顺序：DSH discover/oneline → claude-sync →
-/// `sync-facts` → 宿主区刷新）——退休路径第 ① 步的「常态化」半步：托盘
-/// tick 是 facts 平面的生产驱动源。best-effort 同 claude-sync：失败留痕不
-/// abort（facts 是新增平面，state 链照常刷新）。幂等双保险：checkpoint
-/// 指纹跳过未变文件 + fact_id exactly-once（重跑零变化）。
-fn run_facts_sync(bin: &std::path::Path, hosts: Option<&std::collections::BTreeSet<String>>) -> Option<String> {
-    let home = overview::data_home();
-    let started = std::time::Instant::now();
-    let mut cmd = std::process::Command::new(bin);
-    cmd.arg("sync-facts");
-    if let Some(set) = hosts {
-        // LIGHT-PATH spec §5.2：定向同步只跑被唤醒宿主的批。CLI 侧过滤
-        // 发生在批级别（codex 整批语义不破）。
-        let list: Vec<String> = set.iter().cloned().collect();
-        if !list.is_empty() {
-            cmd.arg("--hosts").arg(list.join(","));
-        }
-    }
-    let out = cmd.env("AGENT_VITALS_HOME", &home).output();
-    match out {
-        Ok(o) if o.status.success() => {
-            log_spawn_success("sync-facts", started, &o.stderr);
-            None
-        }
-        Ok(o) => Some(format!(
-            "sync-facts 失败（{}）：{}",
-            o.status,
-            String::from_utf8_lossy(&o.stderr).trim()
-        )),
-        Err(e) => Some(format!("sync-facts spawn 失败：{e}")),
-    }
-}
 
 /// fold 完成事件名。与工作台 `src-tauri/ui/workbench.js` 顶部的
 /// `listen("app-event", …)` 一一对应——改类型串/负载字段必须两处同步改
@@ -1467,37 +1284,32 @@ fn sync_tick_light(
         return (false, false);
     }
     let t0 = std::time::Instant::now();
-    let Some(bin) = resolve_binary() else {
-        agent_vitals_runtime::logging::log_warn("sync", "轻 tick 升级重 tick：resolve 失败");
-        sync_tick(app);
-        return (true, true);
+    // W3：进程内同步（runtime `ingest::engine`），不再 spawn `discover`/`oneline`/
+    // `claude-sync`/`sync-facts`。三个遗留步骤的产物已无读取方（见 engine 模块文档）。
+    let run = agent_vitals_runtime::ingest::engine::run_sync(&overview::data_home(), Some(hosts));
+    let report = match run {
+        agent_vitals_runtime::ingest::engine::SyncRun::Paused => return (false, false),
+        agent_vitals_runtime::ingest::engine::SyncRun::Completed(report) => report,
+        other => {
+            // spec 不变量 5：轻失败不得等于本轮没对账 → 升级重 tick。
+            agent_vitals_runtime::logging::log_warn(
+                "sync",
+                &format!("轻 tick 失败，升级重 tick: {other:?}"),
+            );
+            sync_tick(app);
+            return (true, true);
+        }
     };
-    let mut failures: Vec<String> = Vec::new();
-    if hosts.contains("dsh") {
-        let status = perform_sync();
-        if !status.ok {
-            failures.push(format!("dsh: {}", status.message));
-        }
-    }
-    if hosts.contains("claude-code") {
-        if let Some(error) = run_claude_sync(&bin) {
-            failures.push(format!("claude-sync: {error}"));
-        }
-    }
-    if let Some(error) = run_facts_sync(&bin, Some(hosts)) {
-        failures.push(format!("sync-facts: {error}"));
-    }
-    if !failures.is_empty() {
-        agent_vitals_runtime::logging::log_warn(
-            "sync",
-            &format!("轻 tick 失败，升级重 tick: {failures:?}"),
-        );
-        sync_tick(app);
-        return (true, true);
-    }
+    // 成功一律上报 `complete`：React 的同步状态只认 `complete` 为正常（boundedEnum
+    // 白名单），此前轻 tick 报 `light`、重 tick 报 `discover`/`fold`，每次成功都被
+    // 数据源页显示成失败。
     let status = SyncStatus::ok(
-        "light",
-        format!("定向同步 {:?}", hosts.iter().collect::<Vec<_>>()),
+        "complete",
+        format!(
+            "定向同步 {:?} · {}",
+            hosts.iter().collect::<Vec<_>>(),
+            agent_vitals_runtime::ingest::engine::summarize(&report)
+        ),
     );
     overview::save_sync_status(&status);
     publish_sync_status(app, &status);
@@ -1555,32 +1367,37 @@ fn timed_value<T>(label: &str, f: impl FnOnce() -> T) -> T {
 /// 一轮同步 + 落盘状态 + 重建托盘。**每一条路径都走到这里**——没有提前 return
 /// 跳过托盘更新的分支（这正是「多数正常路径连 state 重读都不做」的修复：无未折
 /// 会话/二进制缺失/discover 失败也要刷新，把外部更新带进托盘）。
-fn sync_tick_inner(app: &AppHandle) {
-    match overview::sync_is_paused() {
-        Ok(true) => {
-            let status = SyncStatus::ok("paused", "已按你的选择暂停本机解析".into());
-            overview::save_sync_status(&status);
-            publish_sync_status(app, &status);
-            let ov = timed_value("read_overview", overview_snapshot_typed_sync);
-            timed("refresh", || refresh(app, &ov));
-            return;
+/// 引擎结果 → 托盘 / 工作台的同步状态。成功一律 `complete`（React 白名单里唯一的
+/// 正常态，见 `sync_tick_light` 注释）；宿主级文件错误不算整轮失败（与 CLI 退出码 0
+/// 同义），但如实写进 message。
+fn status_from_run(run: &agent_vitals_runtime::ingest::engine::SyncRun) -> SyncStatus {
+    use agent_vitals_runtime::ingest::engine::{summarize, SyncRun};
+    match run {
+        SyncRun::Paused => SyncStatus::ok("paused", "已按你的选择暂停本机解析".into()),
+        SyncRun::ControlUnreadable(error) => {
+            SyncStatus::fail("control", format!("同步控制状态不可读：{error}"))
         }
-        Err(error) => {
-            let status = SyncStatus::fail("control", format!("同步控制状态不可读：{error}"));
-            overview::save_sync_status(&status);
-            publish_sync_status(app, &status);
-            let ov = timed_value("read_overview", overview_snapshot_typed_sync);
-            timed("refresh", || refresh(app, &ov));
-            return;
-        }
-        Ok(false) => {}
+        SyncRun::Completed(report) => SyncStatus::ok("complete", summarize(report)),
+        SyncRun::Failed(error) => SyncStatus::fail("facts", error.clone()),
     }
-    let initial = perform_sync();
-    // 一宿主失败不能阻塞其他宿主的导入；共享二进制缺失仍由 resolve 状态报告。
-    let (status, _facts_ready) = match resolve_binary() {
-        Some(bin) => finish_sync_stages(initial, || run_claude_sync(&bin), || run_facts_sync(&bin, None)),
-        None => (initial, false),
-    };
+}
+
+fn sync_tick_inner(app: &AppHandle) {
+    // W3：进程内同步引擎（暂停判定也在引擎里）。遗留的 discover/oneline/claude-sync
+    // 三步已移除——产物（oneline.json / sessions.jsonl / claude-fold.json）无读取方。
+    let run = agent_vitals_runtime::ingest::engine::run_sync(&overview::data_home(), None);
+    let status = status_from_run(&run);
+    if matches!(
+        run,
+        agent_vitals_runtime::ingest::engine::SyncRun::Paused
+            | agent_vitals_runtime::ingest::engine::SyncRun::ControlUnreadable(_)
+    ) {
+        overview::save_sync_status(&status);
+        publish_sync_status(app, &status);
+        let ov = timed_value("read_overview", overview_snapshot_typed_sync);
+        timed("refresh", || refresh(app, &ov));
+        return;
+    }
     overview::save_sync_status(&status);
     // 「变了才发」：内容相同的 SyncStatus 不再每 tick 重发（REVIEW G2）。工作台
     // 「正在整理」的生命周期由页面挂载时主动 read_sync_status + 进程首发覆盖。
@@ -1607,23 +1424,6 @@ fn sync_tick_inner(app: &AppHandle) {
     timed("publish_invalidation", || publish_invalidation(app, std::collections::BTreeSet::new()));
 }
 
-/// 按序执行独立导入阶段并保留全部失败原因。成功导入的 facts 即使处于部分
-/// 失败的一轮，也需要通知工作台读取新结果。
-fn finish_sync_stages(
-    initial: SyncStatus,
-    claude: impl FnOnce() -> Option<String>,
-    facts: impl FnOnce() -> Option<String>,
-) -> (SyncStatus, bool) {
-    let mut failures = Vec::new();
-    if !initial.ok { failures.push(format!("{}: {}", initial.stage, initial.message)); }
-    if let Some(err) = claude() { failures.push(format!("claude-sync: {err}")); }
-    let facts_error = facts();
-    let facts_ready = facts_error.is_none();
-    if let Some(err) = facts_error { failures.push(format!("sync-facts: {err}")); }
-    let status = if failures.is_empty() { initial }
-        else { SyncStatus::fail("partial", failures.join("；")) };
-    (status, facts_ready)
-}
 
 /// 每 5 分钟一轮：发现最新未折 DSH 会话 → spawn `agent-vitals oneline` 折账 →
 /// 重建托盘。启动先跑一轮（托盘一亮就是新数据，不用等 5 分钟）。detached 线程
@@ -1637,59 +1437,37 @@ fn start_refresh_tick(
     app: AppHandle,
     slot: std::sync::Arc<agent_vitals_runtime::ingest::watch::WakeSlot>,
 ) {
-    use agent_vitals_runtime::ingest::watch::{wait_for_wake, TickWait};
+    use agent_vitals_runtime::ingest::scheduler::{LightOutcome, SchedulerConfig, TickScheduler};
+    use agent_vitals_runtime::ingest::watch::{wait_for_wake, TickKind, TickWait};
     std::thread::spawn(move || {
-        // 初值（线程启动时刻）目前总在被下面任何一次成功 try_lock 覆盖后才读到
-        // ——锁被占时走 continue，跳过下面读它的 match 分支。仍然显式初始化成
-        // 「启动时刻」而不是用 Option：这是有意的兜底基线。
-        #[allow(unused_assignments)]
-        let mut last_sync_finished = std::time::Instant::now();
-        let mut last_heavy = std::time::Instant::now();
-        let mut last_tray = std::time::Instant::now();
-        let mut light_run = 0u32;
-        // 上一次唤醒带来的待同步宿主；None = 本轮走重 tick。
-        let mut pending: Option<std::collections::BTreeSet<String>> = None;
+        // W3：轻/重决策、防饥饿、托盘节流、唤醒冷却都在 runtime 的纯状态机里（有单测，
+        // 规则与此前本闭包逐条等价）；这里只剩线程、锁、等待唤醒和 UI 副作用。
+        let mut scheduler = TickScheduler::new(
+            SchedulerConfig {
+                tick_period: TICK_PERIOD,
+                light_ticks_per_heavy: LIGHT_TICKS_PER_HEAVY,
+                tray_refresh_interval: TRAY_REFRESH_INTERVAL,
+            },
+            std::time::Instant::now(),
+        );
         loop {
-            // 轻/重决策（LIGHT-PATH spec §5.2 排序规则）：连续轻 tick 达限
-            // 或距上次重 tick 满 TICK_PERIOD → 强制重（防饥饿，谁先到算谁）。
             let lock = app.state::<SyncLock>();
             if let Ok(_guard) = lock.0.try_lock() {
-                // pending.take() 只在拿到锁之后——锁被占的 continue 路径上
-                // 不得丢弃宿主集合（验收 #3：否则重试轮退化成重 tick）。
-                let heavy_due = light_run >= LIGHT_TICKS_PER_HEAVY
-                    || last_heavy.elapsed() >= TICK_PERIOD;
-                let kind = match pending.take() {
-                    Some(hosts) if !heavy_due => {
-                        agent_vitals_runtime::ingest::watch::TickKind::Light(hosts)
-                    }
-                    _ => agent_vitals_runtime::ingest::watch::TickKind::Heavy,
-                };
-                match &kind {
-                    agent_vitals_runtime::ingest::watch::TickKind::Heavy => {
+                // plan 只在拿到锁之后调用——锁被占的重试路径上宿主集合不丢（验收 #3）。
+                let plan = scheduler.plan(std::time::Instant::now());
+                match &plan.kind {
+                    TickKind::Heavy => {
                         sync_tick(&app);
-                        last_heavy = std::time::Instant::now();
-                        last_tray = last_heavy;
-                        light_run = 0;
+                        scheduler.heavy_finished(std::time::Instant::now());
                     }
-                    agent_vitals_runtime::ingest::watch::TickKind::Light(hosts) => {
-                        let tray_due = last_tray.elapsed() >= TRAY_REFRESH_INTERVAL;
-                        let (tray_refreshed, escalated) =
-                            sync_tick_light(&app, hosts, tray_due);
-                        if escalated {
-                            // 升级已实跑全量重 tick——防饥饿时钟同步推进
-                            //（验收 #4：否则 light_run 失真，重 tick 被推迟）。
-                            last_heavy = std::time::Instant::now();
-                            last_tray = last_heavy;
-                            light_run = 0;
-                        } else {
-                            if tray_refreshed {
-                                last_tray = std::time::Instant::now();
-                            }
-                            light_run += 1;
-                        }
+                    TickKind::Light(hosts) => {
+                        let (tray_refreshed, escalated) = sync_tick_light(&app, hosts, plan.tray_due);
+                        scheduler.light_finished(
+                            LightOutcome { tray_refreshed, escalated },
+                            std::time::Instant::now(),
+                        );
                     }
                 }
-                last_sync_finished = std::time::Instant::now();
             } else {
                 // 不进入 wait：本轮可能正是 watcher 唤醒；若现在消费掉它再等
                 // TICK_PERIOD，会把低延迟保证丢失。短等后重试，仍不并发写库。
@@ -1701,23 +1479,15 @@ fn start_refresh_tick(
                     // R4-P0：watcher 唤醒 = 该宿主刚有写入——刷新 trust 门控的
                     // 活动时刻表（TRUST_SENSOR_OPTIMIZATION spec §4.1）。
                     app.state::<HostActivityTable>().mark(&hosts);
-                    // 冷却下限（真机 2026-09-22 验收）：睡满剩余冷却再执行
-                    // ——不丢弃最后一批写入；周期/手动路径不受影响。冷却窗
-                    // 本身是动态的（REVIEW P4 自看护）。
+                    // 冷却下限（真机 2026-09-22 验收）：睡满剩余冷却再执行——不丢弃最后
+                    // 一批写入；冷却窗本身是动态的（REVIEW P4 自看护）。
                     let cooldown = app.state::<WatcherCooldownOverride>().get();
-                    if let Some(remaining) = agent_vitals_runtime::ingest::watch::cooldown_remaining_with(
-                        cooldown,
-                        last_sync_finished,
-                        std::time::Instant::now(),
-                    ) {
+                    if let Some(remaining) = scheduler.woken(hosts, cooldown, std::time::Instant::now()) {
                         std::thread::sleep(remaining);
                     }
-                    // 冷却期间可能又有唤醒进槽；wait 已取走一批，槽里可能
-                    // 还留有后续宿主——下一轮 wait 会再取，不在此处纺锤。
-                    pending = Some(hosts);
                 }
                 TickWait::TimedOut => {
-                    // 周期到 → 下一轮 heavy_due 必然成立（last_heavy 已满周期）。
+                    // 周期到 → 下一轮 plan 必然判重（上次重 tick 已满周期）。
                 }
             }
         }
@@ -3343,7 +3113,7 @@ fn export_diagnostic_package(app: AppHandle) -> Result<Value, String> {
         "versions": {
             "app": env!("CARGO_PKG_VERSION"),
             "cli": resolved_cli_version(),
-            "engine": agent_vitals_domain::r2a::ENGINE_VERSION,
+            "engine": agent_vitals_domain::session_key::ENGINE_VERSION,
             "architecture": std::env::consts::ARCH,
             "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
             "query_envelope": agent_vitals_runtime::mcp::ENVELOPE_SCHEMA_VERSION,
@@ -3394,7 +3164,7 @@ fn about_diagnostics() -> Value {
         "status": "ok",
         "app_version": env!("CARGO_PKG_VERSION"),
         "cli_version": resolved_cli_version(),
-        "engine_version": agent_vitals_domain::r2a::ENGINE_VERSION,
+        "engine_version": agent_vitals_domain::session_key::ENGINE_VERSION,
         "architecture": std::env::consts::ARCH,
         "authority_schema": agent_vitals_data::authority::SCHEMA_VERSION,
         "statistics_timezone": agent_vitals_runtime::clock::statistics_timezone_name(),
@@ -4418,14 +4188,14 @@ async fn read_overview_details_snapshot(month: String, date: String) -> Value {
 fn overview_details_snapshot_at(data_home: std::path::PathBuf, month: &str, date: &str) -> Value {
     use agent_vitals_data::repository::{DailySummaryQuery, MonthlySummaryQuery};
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
-    let repo = agent_vitals_runtime::summary::SqlSummaryRepository::at(data_home);
+    let repo = agent_vitals_runtime::query::summary::SqlSummaryRepository::at(data_home);
     let memo = agent_vitals_runtime::query::read_memo::ReadMemo::global();
     let mut result = Value::Null;
     for attempt in 0..2 {
         let revision_before = authority_revision_at(&path);
         let monthly = repo.monthly_summary_json_memoized(&MonthlySummaryQuery { month: month.to_string() }, memo);
         let daily = repo.daily_summary_json_memoized(&DailySummaryQuery { date: date.to_string() }, memo);
-        let calendar = agent_vitals_runtime::summary::calendar_month_memoized(month, &repo, memo);
+        let calendar = agent_vitals_runtime::query::summary::calendar_month_memoized(month, &repo, memo);
         let revision_after = authority_revision_at(&path);
         let is_consistent = revision_before.is_some() && revision_before == revision_after;
         result = serde_json::json!({
@@ -5048,7 +4818,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("agent-vitals-overview-snapshot-{}", std::process::id()));
         let path = agent_vitals_data::authority::default_authority_path(&root);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let _db = agent_vitals_data::authority::AuthorityDb::open(&path, agent_vitals_runtime::sql_sync::now_ms()).unwrap();
+        let _db = agent_vitals_data::authority::AuthorityDb::open(&path, agent_vitals_runtime::core::clock::now_ms()).unwrap();
         let result = overview_details_snapshot_at(root.clone(), "2026-09", "2026-09-24");
         assert_eq!(result["month"], "2026-09");
         assert_eq!(result["date"], "2026-09-24");
@@ -5366,20 +5136,26 @@ mod tests {
         assert!(validate_desktop_declaration("organization", "2026-09-01", Some("2026-09-15")).is_ok());
     }
 
+
+    /// W3：同步状态映射。成功必须是 `complete`（React 唯一认的正常态）；宿主级文件
+    /// 错误不让整轮失败但要写进 message；整轮失败 / 暂停 / 开关不可读各有阶段名。
     #[test]
-    fn independent_sync_stages_continue_after_source_failure() {
-        let called = std::cell::RefCell::new(Vec::new());
-        let (status, ready) = finish_sync_stages(
-            SyncStatus::fail("discover", "DSH unavailable".into()),
-            || { called.borrow_mut().push("claude"); Some("permission denied".into()) },
-            || { called.borrow_mut().push("facts"); None },
-        );
-        assert_eq!(*called.borrow(), vec!["claude", "facts"]);
-        assert!(!status.ok);
-        assert_eq!(status.stage, "partial");
-        assert!(status.message.contains("DSH unavailable"));
-        assert!(status.message.contains("permission denied"));
-        assert!(ready);
+    fn sync_status_maps_engine_outcomes() {
+        use agent_vitals_runtime::ingest::engine::SyncRun;
+        use agent_vitals_runtime::ingest::sync_service::{HostSyncReport, SyncReport};
+        let ok = status_from_run(&SyncRun::Completed(SyncReport { total_appended: 2, ..Default::default() }));
+        assert!(ok.ok);
+        assert_eq!((ok.stage.as_str(), ok.message.as_str()), ("complete", "新增 2 条"));
+        let mut report = SyncReport::default();
+        report.hosts.push(HostSyncReport { host: "dsh".into(), errors: vec!["x".into()], ..Default::default() });
+        let partial = status_from_run(&SyncRun::Completed(report));
+        assert!(partial.ok, "宿主级文件错误不让整轮失败");
+        assert!(partial.message.contains("1 个文件读取失败"));
+        let failed = status_from_run(&SyncRun::Failed("disk full".into()));
+        assert!(!failed.ok);
+        assert_eq!((failed.stage.as_str(), failed.message.as_str()), ("facts", "disk full"));
+        assert_eq!(status_from_run(&SyncRun::Paused).stage, "paused");
+        assert!(!status_from_run(&SyncRun::ControlUnreadable("io".into())).ok);
     }
 
     #[test]
@@ -5389,27 +5165,6 @@ mod tests {
         assert!(!should_show_first_value_workspace(&SyncStatus::fail("partial", "disk full".into())));
     }
 
-    #[test]
-    fn independent_sync_stages_retain_facts_failure() {
-        let (status, ready) = finish_sync_stages(
-            SyncStatus::ok("discover", "no DSH records".into()),
-            || None,
-            || Some("disk full".into()),
-        );
-        assert!(!status.ok);
-        assert!(status.message.contains("sync-facts: disk full"));
-        assert!(!ready);
-    }
-
-    #[test]
-    fn independent_sync_stages_preserve_success_status() {
-        let (status, ready) = finish_sync_stages(
-            SyncStatus::ok("fold", "imported".into()), || None, || None,
-        );
-        assert!(status.ok);
-        assert_eq!(status.stage, "fold");
-        assert!(ready);
-    }
 
     #[test]
     fn source_status_applies_real_scanner_failure_only_to_named_host() {
@@ -5566,7 +5321,6 @@ mod tests {
             metered_today: None,
             metered_month: None,
             today_tokens_sql: None,
-            recent: overview::RecentSession::default(),
             sync: SyncStatus::default(),
             hosts: vec![
                 overview::HostRow::unavailable("dsh"),
@@ -6308,31 +6062,6 @@ mod tests {
         );
     }
 
-    /// 解析 `agent-vitals discover` 的报告：unfolded 首条（mtime 最新）= 要折的。
-    #[test]
-    fn latest_unfolded_takes_first_row() {
-        let report = serde_json::json!({
-            "bare_jsonl": 2,
-            "zstd_only": 0,
-            "unfolded": [
-                {"path": "/dsh/s/b/sess-bbb/session.jsonl", "session_id": "sess-bbb"},
-                {"path": "/dsh/s/b/sess-aaa/session.jsonl", "session_id": "sess-aaa"},
-            ],
-        });
-        assert_eq!(
-            latest_unfolded(&report),
-            Some(("/dsh/s/b/sess-bbb/session.jsonl".into(), "sess-bbb".into()))
-        );
-    }
-
-    /// 空报告（没发现未折会话）→ None，tick 走「没有可折」分支不硬折。
-    #[test]
-    fn latest_unfolded_empty_is_none() {
-        let empty = serde_json::json!({"bare_jsonl": 0, "zstd_only": 58, "unfolded": []});
-        assert_eq!(latest_unfolded(&empty), None);
-        let missing = serde_json::json!({"bare_jsonl": 0});
-        assert_eq!(latest_unfolded(&missing), None);
-    }
 
     /// days_from_civil 锚点：2026-08-27T00:00Z = 1787788800 秒（= 20692 天）。与
     /// overview.rs 的 civil_from_unix_secs 互为逆运算，锚点对上了两个方向都信得过。

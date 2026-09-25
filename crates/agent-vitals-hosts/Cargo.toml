@@ -26,9 +26,12 @@ vitals-core = { path = "../vitals-core" }
 ruzstd = { version = "0.8", optional = true }
 walkdir = { version = "2", optional = true }
 rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+# W3：Codex 额度重置时间的人读文本（`codex/sources/cost.rs`）要做时区换算；时区由
+# 调用方传入，本 crate 不读系统时区。只在 `sources` 下链入，wasm 不拉。
+jiff = { version = "0.2", optional = true }
 
 [features]
 # 宿主 I/O 面（`hosts/<h>/sources/`）：文件定位、读取、解压、sqlite。二进制 /
 # runtime 开它；wasm 与纯构建关它。误把需要 gated dep 的 I/O 写进 `sessions/` →
 # 纯构建编译失败（§4.3 第 1 条）。
-sources = ["dep:ruzstd", "dep:walkdir", "dep:rusqlite"]
+sources = ["dep:ruzstd", "dep:walkdir", "dep:rusqlite", "dep:jiff"]

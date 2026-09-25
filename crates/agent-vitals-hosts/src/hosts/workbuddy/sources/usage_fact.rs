@@ -37,7 +37,7 @@ use agent_vitals_provider::resolve_billing_attribution;
 use serde_json::{json, Map, Value};
 
 use agent_vitals_domain::source_identity::fnv1a64_hex;
-use agent_vitals_domain::contracts::r2a::SessionKey;
+use agent_vitals_domain::contracts::session_key::SessionKey;
 use agent_vitals_domain::workflow::WorkflowEvent;
 
 use super::traces::{

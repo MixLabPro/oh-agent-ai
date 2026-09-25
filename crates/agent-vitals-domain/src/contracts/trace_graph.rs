@@ -32,7 +32,7 @@ use std::fmt;
 use serde_json::{json, Value};
 
 use crate::contracts::evidence::Provenance;
-use crate::contracts::r2a::SessionKey;
+use crate::contracts::session_key::SessionKey;
 
 // ────────────────────────── 节点/边类型：封闭词表 ──────────────────────────
 

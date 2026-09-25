@@ -55,7 +55,9 @@ fn adapters_dependency_budget_is_pure_and_one_way() {
     // feature-gated I/O 读取器依赖：允许，但必须 `optional`（`[features] sources`
     // 才链入）——`[dependencies]` 里带 `optional = true` 的行 `dependency_keys`
     // 照常切出 key，这里只把它们从「未知依赖」白名单里放行。
-    let io_optional = ["ruzstd", "rusqlite", "walkdir"];
+    // `jiff`（W3）：Codex 额度重置时间的时区换算（`codex/sources/cost.rs`）。不是 I/O，
+    // 但同样只在 `sources` 下链入——时区由调用方传入，本 crate 仍不读系统时区。
+    let io_optional = ["ruzstd", "rusqlite", "walkdir", "jiff"];
     let forbidden_deps = ["agent-vitals", "agent-vitals-wasm", "tauri", "notify", "tokio", "reqwest"];
     for key in &actual {
         assert!(

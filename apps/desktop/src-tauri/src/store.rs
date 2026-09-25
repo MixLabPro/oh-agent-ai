@@ -13,10 +13,9 @@
 //! IPC 面只做参数翻译与 spawn：
 //!   · `sessions_list(day, host_kind, page_size, cursor) -> Result<Value, Value>`
 //!   · `sessions_read(session_ref, page_size?, cursor?) -> Result<Value, Value>`
-//!   · `sessions_findings() -> Result<Value, Value>` —— **保留走 r2a_store**
-//!     （DSH/Codex 行为 findings 来自 envelope 的预计算字段，PR #2.3a 任务
-//!     #19 待 M4 `workflow_events` 工具落地后整体迁 mcp::dispatch；本次 PR
-//!     只迁移 list/read/navigation 三路，findings 子命令 argv 不变）。
+//!   · `sessions_findings() -> Result<Value, Value>` —— spawn `sessions findings`：
+//!     先同步（行为 findings 由同步后的 `ingest::findings_eval` 增量评估），再读
+//!     权威库 issue 分组。W8（2026-09-24）起不再经 r2a_store（已删除）。
 //! 错误码原样透传：`not-found` / `permission` / `stale-revision` /
 //! `schema-mismatch` / `source-unavailable` / `cancelled`。二进制缺失/ spawn 失败
 //! 这类**基础设施失败**也用 `cancelled`（code 集固定，不另造新码）。

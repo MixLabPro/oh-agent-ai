@@ -4,7 +4,7 @@
 //! fixture，跨 crate 传 domain 类型的 inline lib test 会撞
 //! `multiple versions of crate`。
 
-use agent_vitals_domain::contracts::r2a::SessionKey;
+use agent_vitals_domain::contracts::session_key::SessionKey;
 use agent_vitals_domain::contracts::trace_graph::{BranchState, TraceEdgeType, TraceNodeType, TraceStatus};
 use agent_vitals_domain::domain::trace::build_trace_graph;
 use agent_vitals_hosts::dsh_evidence::build_dsh_evidence;

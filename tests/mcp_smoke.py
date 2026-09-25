@@ -515,7 +515,7 @@ def main():
     # ── S5 sessions_search / session_detail 三消费面 parity ──────────────
     # spec §6 + PR #2：MCP `tools/call`、CLI `sessions search/detail --json`、
     # Tauri IPC `sessions_list/read` 三者必须产出**逐字节相同的 envelope**。
-    # envelope schema 见 crates/agent-vitals-runtime/src/mcp/mod.rs::build_envelope
+    # envelope schema 见 crates/agent-vitals-mcp/src/mcp/mod.rs::build_envelope
     # （= `result.structuredContent`）。CLI `--json` 直接打 envelope，MCP 包一层
     # JSON-RPC，剥 `result.structuredContent` 后形状相等。
     #

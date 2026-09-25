@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use crate::contracts::evidence::{CanonicalSession, Provenance, TimelineEntry};
-use crate::contracts::r2a::SessionKey;
+use crate::contracts::session_key::SessionKey;
 use crate::contracts::source_identity::{canonical_json, fnv1a64_hex};
 use crate::contracts::trace_graph::{
     BranchState, TraceCoverage, TraceEdge, TraceEdgeType, TraceGraph, TraceNode, TraceNodeType,

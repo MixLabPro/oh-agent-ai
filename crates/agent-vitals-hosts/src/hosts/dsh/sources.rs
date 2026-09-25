@@ -29,6 +29,12 @@ pub mod usage_fact;
 // P3（SourceGraph spec §5）：SourceParser 注册位——显式全量申报（zstd 帧
 // 边界 ≠ 行边界，spec §11 非目标），wire 解释在 usage_fact。
 pub mod parser;
+/// W3：行为审计 I/O 入口（原 runtime `sessions/behavior.rs`）。
+pub mod behavior;
+/// W3：DSH 会话文件枚举 / workspace 索引（原 runtime `sessions/discovery.rs` 的纯部分）。
+pub mod discovery;
+/// W3：会话级行为 findings 评估（注册表 `sources::session_hosts` 的 DSH 条目）。
+pub mod findings;
 
 /// DSH 自述 `SESSION_FORMAT_VERSION` 恒为 0、不作兼容承诺；不相符即降级。
 /// 它是头行 `version` 字段，不是 SQLite 后端的 `PRAGMA user_version`（那是表结构版本）。

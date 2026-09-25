@@ -7,7 +7,7 @@
 
 use agent_vitals_domain::contracts::workflow::SessionExcerpt;
 use agent_vitals_domain::workflow::WorkflowEvent;
-use agent_vitals_domain::contracts::r2a::SessionKey;
+use agent_vitals_domain::contracts::session_key::SessionKey;
 use rusqlite::{Connection, params};
 
 use crate::authority::AuthorityError;
@@ -257,7 +257,7 @@ pub fn has_events(conn: &Connection) -> Result<bool, AuthorityError> {
 #[cfg(test)]
 mod tests {
     use super::insert_events;
-    use agent_vitals_domain::contracts::r2a::SessionKey;
+    use agent_vitals_domain::contracts::session_key::SessionKey;
     use agent_vitals_domain::workflow::WorkflowEvent;
     use crate::authority::AuthorityDb;
     use crate::fact_writer_sql::SqlFactWriter;

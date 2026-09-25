@@ -3,9 +3,9 @@
 //! v0.9 Stage A emitter 归位（R4 §5.2 scope gap）：这两个纯函数原住
 //! `agent_vitals_runtime::sessions::r2a_store`，但 DSH UsageFact emitter 搬进
 //! hosts 后依赖方向不许回头（hosts ← runtime 是单向的），所以下沉到会话证据
-//! 纯层（wasm 可链）。runtime 的 `r2a_store` 现在 re-export 同一实现——
-//! identity/attribution 判读仍然只有一份（Python 侧 emitter 复用
-//! `r2a.py::dsh_header`，同一条纪律）。
+//! 纯层（wasm 可链）。identity/attribution 判读只有这一份：runtime 的
+//! findings 评估器（`ingest::findings_eval`）直接调它；Python 镜像在
+//! `adapters/dsh_source_profile.py`（W8 前住 `r2a.py`，r2a 已删）。
 
 use serde_json::Value;
 

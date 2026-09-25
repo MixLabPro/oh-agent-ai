@@ -6,7 +6,7 @@
 pub mod evidence;
 pub mod billing;
 pub mod host_capability;
-pub mod r2a;
+pub mod session_key;
 pub mod source_identity;
 pub mod trace_graph;
 pub mod usage_fact;

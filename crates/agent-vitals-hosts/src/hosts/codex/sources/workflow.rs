@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use agent_vitals_domain::contracts::r2a::SessionKey;
+use agent_vitals_domain::contracts::session_key::SessionKey;
 use agent_vitals_domain::source_identity::fnv1a64_hex;
 use agent_vitals_domain::workflow::WorkflowEvent;
 use serde_json::Value;

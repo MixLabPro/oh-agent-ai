@@ -13,6 +13,8 @@ pub mod ccswitch;
 // SourceGraph SourceParser 注册表（spec §5 插件位，P3 宿主铺开）：宿主
 // wire 解释的注册面——runtime 调度器经 descriptor_for/parser_for 查表。
 pub mod parsers;
+/// W3：会话宿主注册表（根 / 枚举 / findings 评估），runtime 遍历它而不按宿主名分支。
+pub mod session_hosts;
 pub mod walk_util;
 
 // 猴子测试（用户拍板）——只活在 test 编译里，不进任何产物。

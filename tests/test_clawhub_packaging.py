@@ -50,7 +50,7 @@ ALLOWED_PACKAGE_FILES = {
         "agent/enrichment.py",
         "agent/host_capability.py",
         "agent/mcp.py",
-        "agent/plan.py", "agent/r2a.py", "agent/route_quality.py", "agent/sessions_sql.py",
+        "agent/plan.py", "agent/route_quality.py", "agent/sessions_sql.py",
         "agent/skill.py", "agent/state.py",
         "agent/subagent.py",
         "agent/takeover.py",
@@ -133,6 +133,19 @@ class ClawHubPackagingTests(unittest.TestCase):
         self.assertIn("AGENT_VITALS_DISABLE_OPENCLAW_RUNTIME=1", workflow)
         # tag 与 __version__ 脱钩过六个版本，发布前必须校验。
         self.assertIn("Version mismatch", workflow)
+
+    def test_workflow_file_allowlist_equals_test_allowlist(self):
+        """两份白名单必须**集合相等**。
+
+        文件头注释一直要求「两处一起改」，但没有任何断言比对它们：到 2026-09-24
+        workflow 已漏掉 6 个真实存在的模块（dsh_source_profile / generic_* /
+        route_quality / sessions_sql），打包 job 一跑就会在「Unexpected file」
+        上失败——而本文件全绿（W8 删 r2a.py 时顺手发现）。
+        """
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        match = re.search(r'case "\$path" in\s*\n\s*([^\n]+?)\)\n', workflow)
+        self.assertIsNotNone(match, "package-clawhub.yml 的 case 白名单行找不到")
+        self.assertEqual(set(match.group(1).split("|")), {p.as_posix() for p in ALLOWED_PACKAGE_FILES})
 
     def test_cli_version_is_a_single_plain_semver_source(self):
         """ClawHub 的版本取自 tag，CLI 的取自这里；两者曾各走各的。

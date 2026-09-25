@@ -6,7 +6,7 @@ Python 实现；Rust 镜像 `src/agent/dsh_usage_fact.rs`。Python↔Rust stdout
 由 `tests/test_dsh_usage_fact.py` 钉住。
 
 **本模块不解释任何 DSH wire shape**——读/解码（`adapters/dsh.py::read_session_text`）、
-reshape（`parse_session_log`）、身份与 profile（`r2a.py::dsh_header` /
+reshape（`parse_session_log`）、身份与 profile（`adapters/dsh_source_profile.py::dsh_header` /
 `dsh_source_profile`）、逐槽观测（`usage.py::dsh_usage_observations`）、残差折叠
 （`usage_fold_checkpoint`）、UsageFact 契约（`usage_fact.build_usage_fact`）全部复用，
 一行新解释都不写。**emit surface = 共享 observer 的相邻槽**：每条 `DshUsageObservation`
@@ -33,8 +33,7 @@ from typing import NamedTuple, Optional
 from ..adapters.dsh import read_session_text, parse_session_log
 from ..util import post_fork
 from ..source_identity import fnv1a64_hex
-from .r2a import dsh_header  # noqa: F401  (PR #5 后改回独立 import)
-from ..adapters.dsh_source_profile import dsh_source_profile
+from ..adapters.dsh_source_profile import dsh_header, dsh_source_profile
 from .usage import dsh_usage_observations, usage_fold_checkpoint
 from .usage_fact import build_usage_fact
 

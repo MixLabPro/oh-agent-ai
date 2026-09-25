@@ -104,7 +104,7 @@ fn session_key(
     native_session_id: &str,
     source_profile: Option<&str>,
 ) -> String {
-    agent_vitals_domain::contracts::r2a::SessionKey::new(
+    agent_vitals_domain::contracts::session_key::SessionKey::new(
         host,
         native_session_id,
         source_profile.unwrap_or("default"),

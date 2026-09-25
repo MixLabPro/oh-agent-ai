@@ -71,7 +71,7 @@ PY_AGENT_FAMILY = {
     "attribution", "claude_session_audit", "claude_usage_fact", "codex_cost", "codex_evidence",
     "codex_session_audit", "codex_usage", "codex_usage_fact", "compaction",
     "cost", "dsh_evidence", "dsh_usage_fact", "duration", "enrichment", "host_capability", "mcp", "plan",
-    "r2a", "route_quality", "sessions_sql", "skill", "state", "subagent", "takeover", "trajectory", "usage",
+    "route_quality", "sessions_sql", "skill", "state", "subagent", "takeover", "trajectory", "usage",
     "usage_fact", "waste", "workbuddy_evidence", "workbuddy_session_audit",
     "workbuddy_usage_fact",  # spec §9E.5 E4a
     # HOST_MANIFEST_DSL_SPEC §8.1：generic 插件宿主 twin（validate 只读面）。
@@ -179,96 +179,40 @@ class ClassificationGuardTests(unittest.TestCase):
 
         v0.8 Phase E7.5：inventory.rs 从 apps/cli/src/skills/ 迁进
         agent-vitals-runtime/src/skills/（跨宿主编排，依赖 E7.6 的四个宿主
-        适配器都已是库 crate 模块）。
+        适配器都已是库 crate 模块）。W3（2026-09-24）随地基层整体拆进
+        agent-vitals-runtime-core/src/skills/。
         """
         inventory = (
-            ROOT / "crates" / "agent-vitals-runtime" / "src" / "skills" / "inventory.rs"
+            ROOT / "crates" / "agent-vitals-runtime-core" / "src" / "skills" / "inventory.rs"
         ).read_text(encoding="utf-8")
         self.assertNotIn("read_session_evidence", inventory)
         self.assertIn("SessionEvidenceInput", inventory)
 
-    def test_python_r2a_module_carries_legacy_marker(self):
-        """v0.9.1 PR #4：r2a.py 加 `__legacy_r2a__ = True` 模块标记——
+    def test_r2a_legacy_session_store_is_gone(self):
+        """W8（2026-09-24）：r2a（legacy SessionStore）整体删除，不许悄悄长回来。
 
-        钉住两件事：
-        1. PR #5 删 r2a.py 前**不能**让 marker 静默消失（否则 `tests/
-           test_clawhub_packaging.py` 的 allowlist 会失去「为什么还在
-           agent family」的依据，变成历史包袱）
-        2. 任何把 `__legacy_r2a__` 改回 `False` / 删掉的尝试会立刻红，
-           因为 PR #5 的退出路径需要它存在作为最后一道 gate 信号
+        它曾是行为 findings 写进 issue 表的唯一生产者，却只在旧 DOM 的「重载」
+        按钮上触发——React 切换后 Findings 停在 09-20 无人察觉。生产者已改为
+        同步后的 `ingest/findings_eval.rs`；这里钉住旧入口的每一处残留都不在：
+        Rust 模块、domain 契约、feature gate、CLI 的 feature 启用、Python 镜像。
         """
-        import importlib
-        r2a_mod = importlib.import_module("agent_vitals.agent.r2a")
+        gone = [
+            ROOT / "crates" / "agent-vitals-runtime" / "src" / "sessions" / "r2a_store.rs",
+            ROOT / "crates" / "agent-vitals-query" / "src" / "sessions" / "r2a_store.rs",
+            ROOT / "crates" / "agent-vitals-domain" / "src" / "contracts" / "r2a.rs",
+            ROOT / "packages" / "agent-vitals-python" / "agent_vitals" / "agent" / "r2a.py",
+        ]
+        for path in gone:
+            self.assertFalse(path.exists(), f"{path.relative_to(ROOT)} 已随 W8 删除，不得恢复")
+        for toml in (
+            ROOT / "crates" / "agent-vitals-runtime" / "Cargo.toml",
+            ROOT / "apps" / "cli" / "Cargo.toml",
+        ):
+            self.assertNotIn("legacy-r2a", toml.read_text(encoding="utf-8"),
+                             f"{toml.relative_to(ROOT)} 不得再声明/启用 legacy-r2a")
         self.assertTrue(
-            getattr(r2a_mod, "__legacy_r2a__", False),
-            "r2a.py must carry __legacy_r2a__ = True (v0.9.1 PR #4); "
-            "PR #5 删 r2a.py 前不能让它消失"
-        )
-
-    def test_runtime_r2a_store_under_legacy_feature_gate(self):
-        """v0.9.1 PR #4：r2a_store.rs 整文件 behind `legacy-r2a` feature。
-
-        钉住三层：
-        1. `[features]` 段声明 `legacy-r2a = []`
-        2. `sessions/mod.rs` 用 `#[cfg(feature = "legacy-r2a")] pub mod r2a_store;`
-           gate（feature 关时整个 module 不编入）
-        3. 文件头有 DEPRECATED banner——下次有人路过能立刻看到退出路径
-        """
-        toml = (
-            ROOT / "crates" / "agent-vitals-runtime" / "Cargo.toml"
-        ).read_text(encoding="utf-8")
-        # 用简单的行内子串匹配（assertRegex 的 MULTILINE 行为容易踩坑——
-        # `^` 默认锚字符串起点，而 `legacy-r2a` 不在第一行就 false-fail）。
-        # 我们只关心「feature 被声明」，具体格式不锁。
-        self.assertIn(
-            "legacy-r2a = []",
-            toml,
-            msg="agent-vitals-runtime/Cargo.toml 必须声明 legacy-r2a feature "
-                "(v0.9.1 PR #4)，缺失 → r2a_store.rs 不再可被 CLI 显式 enable",
-        )
-
-        mod = (
-            ROOT / "crates" / "agent-vitals-runtime" / "src" / "sessions" / "mod.rs"
-        ).read_text(encoding="utf-8")
-        # 钉住两件事：cfg 行 + r2a_store 行。两者跨行（rustfmt 不强制合并
-        # attribute + item），分两条 assertIn。
-        self.assertIn(
-            "#[cfg(feature = \"legacy-r2a\")]",
-            mod,
-            "sessions/mod.rs 必须有 `#[cfg(feature = \"legacy-r2a\")]` "
-            "attribute 在 r2a_store 模块声明之前",
-        )
-        self.assertIn(
-            "pub mod r2a_store;",
-            mod,
-            "sessions/mod.rs 必须仍然声明 `pub mod r2a_store;`（behind feature）",
-        )
-
-        r2a_store = (
-            ROOT / "crates" / "agent-vitals-runtime" / "src" / "sessions" / "r2a_store.rs"
-        ).read_text(encoding="utf-8")
-        self.assertIn(
-            "DEPRECATED",
-            r2a_store[:600],
-            "r2a_store.rs 文件头 600 字符内必须有 DEPRECATED banner",
-        )
-
-    def test_cli_cargo_enables_legacy_r2a_feature(self):
-        """v0.9.1 PR #4：`apps/cli/Cargo.toml` 必须显式 enable legacy-r2a。
-
-        钉住 CLI `SessionsAction::Findings`（r2a_store 唯一仍被 Rust
-        引用的入口，task #19 等 M4 `workflow_events` 落地后切
-        mcp::dispatch）能继续 build——runtime 默认 feature 不开 legacy-r2a
-        时,只有 CLI 显式 enable 才能保持本次升级无回退。
-        """
-        cli_toml = (
-            ROOT / "apps" / "cli" / "Cargo.toml"
-        ).read_text(encoding="utf-8")
-        self.assertIn(
-            "features = [\"legacy-r2a\"]",
-            cli_toml,
-            "apps/cli/Cargo.toml 必须显式 enable legacy-r2a feature "
-            "(v0.9.1 PR #4)：CLI SessionsAction::Findings 仍在 r2a_store 上",
+            (ROOT / "crates" / "agent-vitals-ingest" / "src" / "ingest" / "findings_eval.rs").exists(),
+            "findings 的生产者必须在同步路径上（agent-vitals-ingest 的 ingest/findings_eval.rs）",
         )
 
 
