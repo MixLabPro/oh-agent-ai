@@ -216,9 +216,12 @@ pub fn billing_declaration_fact_selection(
            AND COALESCE(f.billing_mode, 'unknown') != 'subscription'
            AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
                JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
                WHERE ba.fact_id = f.fact_id AND ba.attribution_kind = 'subscription_covered'
                  AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                   FROM billing_declaration_revisions br2
+                   LEFT JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                   WHERE br2.declaration_id = br.declaration_id AND (br2.change_kind = 'revoked' OR bj2.job_id IS NOT NULL))
                  AND br.change_kind = 'saved')",
     );
     where_sql.push_str(match conflicts {
@@ -3171,8 +3174,10 @@ impl AuthorityDb {
         effective_start: &str, effective_end: Option<&str>, source_candidate_id: Option<&str>,
         evidence_ref: Option<&str>, now_ms: i64,
     ) -> Result<bool, AuthorityError> {
+        // "Still uncertain" is a review decision, not a billing relationship.
+        // Keep its candidate pending instead of publishing a misleading revision.
         let valid_kind = matches!(relationship_kind,
-            "official_subscription" | "official_api" | "third_party" | "organization" | "unknown");
+            "official_subscription" | "official_api" | "third_party" | "organization");
         let valid_amount = match (amount_minor, currency) {
             (None, None) => true,
             (Some(amount), Some(currency)) => amount >= 0 && !currency.trim().is_empty(),
@@ -3232,11 +3237,14 @@ impl AuthorityDb {
             "SELECT bd.host, bd.provider_id, s.scope_value
              FROM billing_declarations bd
              JOIN billing_declaration_revisions br ON br.declaration_id = bd.declaration_id
+             JOIN billing_recalculation_jobs bj ON bj.revision_id = br.revision_id AND bj.status = 'succeeded'
              JOIN billing_declaration_scopes s ON s.revision_id = br.revision_id
              WHERE bd.deleted_at_ms IS NULL AND br.change_kind = 'saved'
                AND s.scope_kind = 'settlement'
                AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = bd.declaration_id)
+                   FROM billing_declaration_revisions br2
+                   LEFT JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                   WHERE br2.declaration_id = bd.declaration_id AND (br2.change_kind = 'revoked' OR bj2.job_id IS NOT NULL))
              ORDER BY br.created_at_ms",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
@@ -3304,7 +3312,7 @@ impl AuthorityDb {
         scopes: &[(&str, &str)], now_ms: i64,
     ) -> Result<bool, AuthorityError> {
         let valid_kind = matches!(relationship_kind,
-            "official_subscription" | "official_api" | "third_party" | "organization" | "unknown");
+            "official_subscription" | "official_api" | "third_party" | "organization");
         let valid_amount = match (amount_minor, currency) {
             (None, None) => true,
             (Some(amount), Some(value)) => amount >= 0 && !value.trim().is_empty(),
@@ -3701,7 +3709,9 @@ impl AuthorityDb {
              WHERE bd.deleted_at_ms IS NULL
                AND br.change_kind = 'saved'
                AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = bd.declaration_id)
+                   FROM billing_declaration_revisions br2
+                   LEFT JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                   WHERE br2.declaration_id = bd.declaration_id AND (br2.change_kind = 'revoked' OR bj2.job_id IS NOT NULL))
                AND j.status = 'succeeded'
              ORDER BY (br.relationship_kind = 'official_subscription') DESC, br.created_at_ms, br.revision_id",
         )?;
@@ -3858,7 +3868,9 @@ impl AuthorityDb {
         let job = self.billing_recalculation_job(job_id)?;
         let Some((_, _, revision_id, status, _, _, _, _, _)) = job else { return Ok(false); };
         if status != "queued" { return Ok(false); }
-        self.billing_recalculation_set_status(job_id, "running", None, None, now_ms)?;
+        if !self.billing_recalculation_set_status(job_id, "running", None, None, now_ms)? {
+            return Ok(false);
+        }
         let preview = match self.billing_declaration_impact_preview(&revision_id, None) {
             Ok(value) => value,
             Err(error) => {
@@ -5670,6 +5682,25 @@ mod tests {
         assert!(authority.billing_declaration_revision_revoke("rev-held-revoke", "decl-held", "rev-held", 7).unwrap());
         assert_eq!(status("cand-held"), "pending");
         assert_eq!(authority.reconcile_candidate_claims(8).unwrap(), 0, "没有有效声明占着，不得把它翻回 accepted");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn uncertain_candidate_stays_pending_without_a_declaration() {
+        let db = tmp_db("billing-uncertain-candidate");
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority.billing_import_candidate_put(
+            "cand-uncertain", "codex", "openai", "USD", 2_000, "2026-09", "test", 1,
+        ).unwrap();
+        assert!(authority.billing_declaration_revision_save(
+            "rev-uncertain", "decl-uncertain", None, "codex", "openai", "unknown",
+            None, None, None, "2026-09-01", None, Some("cand-uncertain"), None, &[], 2,
+        ).is_err());
+        let status: String = authority.conn().query_row(
+            "SELECT status FROM billing_import_candidates WHERE candidate_id = 'cand-uncertain'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(status, "pending");
+        assert_eq!(authority.billing_declaration_revisions("decl-uncertain").unwrap().len(), 0);
         let _ = std::fs::remove_file(&db);
     }
 

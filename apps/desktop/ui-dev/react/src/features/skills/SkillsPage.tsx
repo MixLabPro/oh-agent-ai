@@ -106,19 +106,20 @@ export function SkillsPage() {
       if (mounted.current) setExportBusy(false);
     }
   };
-  const reportMatchesHost = report?.host_selection === host;
-  const hosts = report && reportMatchesHost ? report.hosts.filter((item) => host === "all" || item.host === host) : report?.hosts ?? [];
+  const hosts = report?.hosts.filter((item) => host === "all" || item.host === host) ?? [];
+  const reportMatchesHost = Boolean(report && (host === "all" ? report.host_selection === "all" : report.host_selection === "all" || report.host_selection === host));
+  const selectedHostNotScanned = Boolean(report && !reportMatchesHost);
   const diagnostics = report?.diagnostics.filter((item) => item.severity === "critical" || item.severity === "warning") ?? [];
   const hostOptions = Array.from(new Set([...Object.keys(hostLabels), ...(report?.hosts.map((item) => item.host) ?? [])])).sort();
   return <>
     <h2 id="skills-title" className="visually-hidden">Skill 体检</h2>
     <ToolbarActions><div className="skills-toolbar">
-      <label><span>宿主</span><select value={host} onChange={(event) => { const next = event.target.value; setHost(next); if (report && !scanning) void scan(true, next); }} disabled={scanning || snapshotBusy || diffLoading || exportBusy}><option value="all">全部宿主</option>{hostOptions.map((value) => <option value={value} key={value}>{hostLabel(value)}</option>)}</select></label>
+      <label><span>宿主</span><select value={host} onChange={(event) => setHost(event.target.value)} disabled={scanning || snapshotBusy || diffLoading || exportBusy}><option value="all">全部宿主</option>{hostOptions.map((value) => <option value={value} key={value}>{hostLabel(value)}</option>)}</select></label>
       {report && !scanning && <button className="button button-secondary" type="button" onClick={() => void scan(true)} disabled={snapshotBusy || diffLoading || exportBusy}>重新扫描</button>}
       {!report && !scanning && <button className="button button-secondary" type="button" onClick={() => void scan(true)}>开始扫描</button>}
       {scanning && <button className="button button-secondary" type="button" onClick={() => void cancel()}>取消扫描</button>}
     </div></ToolbarActions>
-    {report && !scanning && <div className="skills-result-actions" aria-label="扫描结果操作">
+    {report && reportMatchesHost && !scanning && <div className="skills-result-actions" aria-label="扫描结果操作">
       <button className="button button-secondary" type="button" onClick={() => void saveSnapshot()} disabled={snapshotBusy || diffLoading || exportBusy} title="本机快照包含绝对路径、用户名及 Skill 描述，请勿直接分享快照文件。">{snapshotBusy ? "保存中…" : "存为快照"}</button>
       <button className="button button-secondary" type="button" onClick={() => void compareSnapshot()} disabled={snapshotBusy || diffLoading || exportBusy}>{diffLoading ? "对比中…" : "与上次快照对比"}</button>
       <button className="button button-secondary" type="button" onClick={() => void exportRedacted()} disabled={snapshotBusy || diffLoading || exportBusy}>{exportBusy ? "导出中…" : "导出脱敏 JSON"}</button>
@@ -135,7 +136,8 @@ export function SkillsPage() {
     {error && <div className="error-banner" role="alert">{error}</div>}{scanning && <section className="skills-state" role="status"><strong>正在扫描 Skill 定义…</strong><p>扫描可能需要几秒；不会写入快照或修改 skill 文件。</p></section>}{message && <p className="skills-message" role="status">{message}</p>}
     {unavailable && !scanning && <section className="skills-state" role="status"><strong>扫描结果暂不可用</strong><p>{report ? "本次没有拿到新的可判定结果，下面仍展示上一次扫描。" : "本次没有拿到可判定的本机结果；请检查宿主状态后重试。"}不可用不等于空结果，也不等于安全。</p></section>}
     {!report && !unavailable && !scanning && !error && <section className="skills-state"><strong>尚未扫描</strong><p>首次进入不会自动扫描。点击“开始扫描”后，页面会展示预算、启发式命中和未评估项。</p></section>}
-    {report && <>
+    {selectedHostNotScanned && <div className="usage-refresh-status" role="status">这份扫描未覆盖{host === "all" ? "全部宿主" : ` ${hostLabel(host)}`}；点击“重新扫描”获取当前范围结果。旧报告不用于当前范围判断。</div>}
+    {report && reportMatchesHost && <>
       {reportStale && scanning && <div className="usage-refresh-status" role="status">正在刷新 Skill 扫描；下面暂保留上一次可读结果，未用于当前宿主判定。</div>}
       {reportStale && !scanning && (error || unavailable) && <div className="usage-refresh-status trust-refresh-status-error" role="status">本次 Skill 扫描未形成新的可判定结果；以下为上一次结果，未用于当前宿主判定。</div>}
       <section className="skills-summary" aria-label="扫描摘要"><span>{reportStale ? "上一次扫描结果" : `run：${report.run ?? "未知"}`}</span><span>宿主：{report.host_selection}</span><span>{report.hosts.length} 个宿主摘要</span><span>{report.diagnostics.length} 条诊断</span><span>{report.from_cache ? "来自缓存" : reportStale ? "上一份结果" : "本次扫描"}</span></section>

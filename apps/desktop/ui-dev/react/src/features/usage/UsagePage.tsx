@@ -86,11 +86,6 @@ function hostTokenLines(day: UsageDay | undefined): string {
   return lines.length ? lines.join(" · ") : "无已观测宿主";
 }
 
-function hostTotalLabel(value: number, total: number): string {
-  if (total === 0) return "无已观测数据";
-  return value > 0 ? tokensLabel(value) : "未观测";
-}
-
 function hourlyTotal(hour: UsageHourly["hours"][number]): number {
   return (hour.dsh_tokens ?? 0) + (hour.claude_tokens ?? 0) + (hour.codex_tokens ?? 0);
 }
@@ -203,14 +198,9 @@ export function UsagePage() {
 
   const totals = useMemo(() => {
     const tokens = calendar?.days.reduce((sum, day) => sum + day.total_tokens, 0) ?? 0;
-    const hostTokens = calendar?.days.reduce((sum, day) => ({
-      dsh: sum.dsh + day.dsh_tokens,
-      claude: sum.claude + day.claude_tokens,
-      codex: sum.codex + day.codex_tokens,
-    }), { dsh: 0, claude: 0, codex: 0 }) ?? { dsh: 0, claude: 0, codex: 0 };
     const costs: Record<string, number> = {};
     calendar?.days.forEach((day) => Object.entries(day.costs).forEach(([currency, amount]) => { costs[currency] = (costs[currency] ?? 0) + amount; }));
-    return { tokens, hostTokens, costs };
+    return { tokens, costs };
   }, [calendar]);
   const today = todayDate(timezone);
   const displayedMonth = calendar?.month ?? source?.month ?? month;
@@ -219,6 +209,9 @@ export function UsagePage() {
   // only combine matching windows; the source panel below can still show a
   // successfully-read older/newer source window with an explicit label.
   const sourceForDisplayedMonth = source?.month === displayedMonth ? source : null;
+  const displayedTokens = sourceForDisplayedMonth?.total_tokens ?? (calendarForDisplayedMonth ? totals.tokens : null);
+  const hostTokens = sourceForDisplayedMonth ? Object.entries(sourceForDisplayedMonth.tokens_by_host)
+    .filter(([, value]) => value.total > 0).sort((a, b) => b[1].total - a[1].total) : [];
   const sourceForPanel = source;
   const layout = dateParts(displayedMonth);
   const selectedDay = dayFor(calendarForDisplayedMonth, selectedDate ?? "");
@@ -240,11 +233,11 @@ export function UsagePage() {
     {loading && (calendar || source) && <div className="usage-refresh-status" role="status" aria-live="polite">正在读取 {monthTitle(month)}；保留 {monthTitle(displayedMonth)} 的已知结果。</div>}
     {(calendar || source) && <div aria-busy={loading || undefined}>
       <section className="usage-summary-grid" aria-label="月份汇总">
-        <article className="stat-card"><p className="eyebrow">{monthTitle(displayedMonth)} token</p><p className="stat-value">{calendarForDisplayedMonth && totals.tokens ? tokensLabel(totals.tokens) : "—"}</p><p className="stat-detail">{calendarForDisplayedMonth && totals.tokens ? "跨宿主可加总" : "该月日历数据不可用"}</p></article>
+        <article className="stat-card"><p className="eyebrow">{monthTitle(displayedMonth)} token</p><p className="stat-value">{displayedTokens !== null ? tokensLabel(displayedTokens) : "—"}</p><p className="stat-detail">{sourceForDisplayedMonth ? "按来源摘要跨宿主加总" : calendarForDisplayedMonth ? "仅日历已覆盖宿主；来源摘要不可用" : "该月用量数据不可用"}</p></article>
         <article className="stat-card"><p className="eyebrow">{calendarForDisplayedMonth ? `${monthTitle(displayedMonth)} 日历来源口径成本` : "来源口径成本"}</p><p className="stat-value stat-value-compact">{calendarForDisplayedMonth ? costsLabel(totals.costs) : "—"}</p><p className="stat-detail">{sourceForDisplayedMonth ? `${spendBasisLabel(sourceForDisplayedMonth.spend_by_basis)} · 日历不摊订阅月费` : "当前月份来源摘要不可用或尚未对齐"}</p></article>
         <article className="stat-card"><p className="eyebrow">{sourceForDisplayedMonth ? `${monthTitle(sourceForDisplayedMonth.month)} 数据新鲜度` : "数据新鲜度"}</p><p className="stat-value stat-value-compact">{sourceForDisplayedMonth ? freshnessLabel(sourceForDisplayedMonth.freshness) : "—"}</p><p className="stat-detail">{sourceForDisplayedMonth?.last_observed_at ? `最后观测 ${sourceForDisplayedMonth.last_observed_at}` : "当前月份来源状态不可用或尚未对齐"}</p></article>
       </section>
-      <section className="usage-host-summary" aria-label="月份宿主 token 拆分"><div><span>DSH</span><strong>{calendarForDisplayedMonth ? hostTotalLabel(totals.hostTokens.dsh, totals.tokens) : "—"}</strong></div><div><span>Claude Code</span><strong>{calendarForDisplayedMonth ? hostTotalLabel(totals.hostTokens.claude, totals.tokens) : "—"}</strong></div><div><span>Codex</span><strong>{calendarForDisplayedMonth ? hostTotalLabel(totals.hostTokens.codex, totals.tokens) : "—"}</strong></div><p>宿主拆分只展示已观测 token；月度总量仍以权威日历为准，不把不同计费口径合并。</p></section>
+      <section className="usage-host-summary" aria-label="月份宿主 token 拆分">{hostTokens.length ? hostTokens.map(([host, value]) => <div key={host}><span>{host === "claude-code" ? "Claude Code" : host === "dsh" ? "DSH" : host === "codex" ? "Codex" : host}</span><strong>{tokensLabel(value.total)}</strong></div>) : <div><span>宿主拆分</span><strong>—</strong></div>}<p>来自 {monthTitle(displayedMonth)} 来源摘要的已观测 token；与上方日历为独立投影，未对齐时不混用。</p></section>
       <section className="usage-calendar-panel" aria-labelledby="usage-calendar-title">
         <div className="section-heading"><div><p className="eyebrow">日历</p><h3 id="usage-calendar-title">{monthTitle(displayedMonth)}</h3></div><span className="count-badge">{calendarForDisplayedMonth?.days.length ?? 0} 天</span></div>
         {calendarForDisplayedMonth && totals.tokens > 0 ? <div className="usage-calendar-grid" role="grid" aria-label={`${monthTitle(displayedMonth)} token 日历`}>
@@ -259,7 +252,7 @@ export function UsagePage() {
             return <button className={`usage-calendar-cell ${day && day.total_tokens > 0 ? "usage-calendar-has-data" : ""} ${selected ? "usage-calendar-selected" : ""} ${future ? "usage-calendar-future" : ""}`} type="button" role="gridcell" key={date} disabled={future} aria-selected={selected} aria-label={`${date}，${value}${day && metric === "tokens" ? `，宿主拆分 ${hostTokenLines(day)}` : ""}${future ? "，未来日期" : "，查看小时明细"}`} onClick={() => setSelectedDate(date)}><span>{index + 1}</span><strong>{value}</strong>{metric === "tokens" && day && day.total_tokens > 0 && <small className="usage-host-breakdown">{hostTokenLines(day)}</small>}{metric === "cost" && day && day.total_tokens > 0 && <small>{day.cost_lines.length ? costLinesLabel(day.cost_lines) : `${tokensLabel(day.total_tokens)} tokens`}</small>}</button>;
           })}
         </div> : <div className="usage-empty">{calendarForDisplayedMonth ? "该月没有已测 token。空数据不等于来源不可用，请结合下方覆盖状态判断。" : "该月份日历结果暂不可用；上一份结果未被冒充为当前月份。"}</div>}
-        <p className="usage-note">{metric === "tokens" ? "主行 = 当日跨宿主 token 总量；点击过去日期查看小时分布。" : "主行 = 当日成本分币并列；没有成本证据显示“成本不可用”，不等于 ¥0。"}</p>
+        <p className="usage-note">{metric === "tokens" ? "主行 = 日历已覆盖宿主的当日 token；月度来源摘要可能包含更多宿主。点击过去日期查看小时分布。" : "主行 = 当日成本分币并列；没有成本证据显示“成本不可用”，不等于 ¥0。"}</p>
       </section>
       <section className="usage-detail-grid">
         <section className="usage-hourly-panel" aria-labelledby="usage-hourly-title">

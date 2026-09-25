@@ -44,9 +44,12 @@ macro_rules! local_day_idx { () => { "(CAST(julianday(date(event_ts_ms / 1000, '
 /// （2026-09-16 真机）。现在只有这一处定义。
 macro_rules! not_subscription_covered { () => { "AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
                JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
                WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
                  AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                   FROM billing_declaration_revisions br2
+                   LEFT JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                   WHERE br2.declaration_id = br.declaration_id AND (br2.change_kind = 'revoked' OR bj2.job_id IS NOT NULL))
                  AND br.change_kind = 'saved')" }; }
 /// 「当前 saved 的 user_declared 归因 → 用户声明的计费方」子查询，别名 `decl`
 /// （`decl.fact_id` / `decl.declared_provider`）。一条事实理论上只被一条有效声明
@@ -57,11 +60,14 @@ macro_rules! user_declared_join { () => { "LEFT JOIN (
                SELECT ba.fact_id, MIN(bd.provider_id) AS declared_provider
                FROM billing_fact_attributions ba
                JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+               JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
                JOIN billing_declarations bd ON bd.declaration_id = br.declaration_id
                WHERE ba.attribution_kind = 'user_declared' AND br.change_kind = 'saved'
                  AND bd.deleted_at_ms IS NULL
                  AND br.revision_number = (SELECT MAX(br2.revision_number)
-                   FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                   FROM billing_declaration_revisions br2
+                   LEFT JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                   WHERE br2.declaration_id = br.declaration_id AND (br2.change_kind = 'revoked' OR bj2.job_id IS NOT NULL))
                GROUP BY ba.fact_id) decl ON decl.fact_id = usage_facts.fact_id" }; }
 macro_rules! local_hour_idx { () => { "((CAST(julianday(date(event_ts_ms / 1000, 'unixepoch', 'localtime')) - 2440587.5 AS INTEGER) * 24) + CAST(strftime('%H', event_ts_ms / 1000, 'unixepoch', 'localtime') AS INTEGER))" }; }
 
@@ -265,10 +271,12 @@ pub const SQL_UNRESOLVED_BILLING_FACT_WHERE: &str =
        AND COALESCE(f.billing_mode, 'unknown') != 'subscription'
        AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
            JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+           JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
            WHERE ba.fact_id = f.fact_id
              AND br.revision_number = (SELECT MAX(br2.revision_number)
                FROM billing_declaration_revisions br2
-               WHERE br2.declaration_id = br.declaration_id)
+               LEFT JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+               WHERE br2.declaration_id = br.declaration_id AND (br2.change_kind = 'revoked' OR bj2.job_id IS NOT NULL))
              AND br.change_kind = 'saved')
        AND (COALESCE(f.pricing_basis, 'unavailable') = 'metered_estimate'
             OR COALESCE(f.evidence_basis, 'missing') != 'explicit-official-route')";
@@ -286,10 +294,12 @@ pub const SQL_UNRESOLVED_BILLING_GROUPS: &str = concat!(
        AND COALESCE(f.billing_mode, 'unknown') != 'subscription'
        AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
            JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+           JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
            WHERE ba.fact_id = f.fact_id
              AND br.revision_number = (SELECT MAX(br2.revision_number)
                FROM billing_declaration_revisions br2
-               WHERE br2.declaration_id = br.declaration_id)
+               LEFT JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+               WHERE br2.declaration_id = br.declaration_id AND (br2.change_kind = 'revoked' OR bj2.job_id IS NOT NULL))
              AND br.change_kind = 'saved')
        AND (COALESCE(f.pricing_basis, 'unavailable') = 'metered_estimate'
             OR COALESCE(f.evidence_basis, 'missing') != 'explicit-official-route')",
@@ -1472,17 +1482,21 @@ pub fn session_billing_buckets(
     // tables. Keep their scalar billing_mode path, while production databases use
     // the latest saved subscription attribution as the authoritative session view.
     let has_fact_attributions: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master
-         WHERE type = 'table' AND name = 'billing_fact_attributions')",
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'billing_fact_attributions')
+         AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'billing_declaration_revisions')
+         AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'billing_recalculation_jobs')",
         [],
         |row| row.get(0),
     )?;
     let billing_mode_expr = if has_fact_attributions {
         "CASE WHEN EXISTS (SELECT 1 FROM billing_fact_attributions ba
                     JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+                    JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
                     WHERE ba.fact_id = f.fact_id AND ba.attribution_kind = 'subscription_covered'
                       AND br.revision_number = (SELECT MAX(br2.revision_number)
-                        FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                        FROM billing_declaration_revisions br2
+                        LEFT JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                        WHERE br2.declaration_id = br.declaration_id AND (br2.change_kind = 'revoked' OR bj2.job_id IS NOT NULL))
                       AND br.change_kind = 'saved')
              THEN 'subscription' ELSE COALESCE(f.billing_mode, 'unknown') END"
     } else {
@@ -3433,6 +3447,28 @@ mod tests {
         assert_eq!(buckets.len(), 1);
         assert_eq!(buckets[0]["billing_mode"], "subscription");
         assert_eq!(session_cost_minor(db.conn(), skey).unwrap(), None);
+        db.conn().execute(
+            "INSERT INTO billing_declaration_revisions(
+                revision_id, declaration_id, revision_number, change_kind, host, provider_id,
+                relationship_kind, effective_start, created_at_ms)
+             VALUES ('rev-derived-pending', 'decl-derived', 2, 'saved', 'codex', 'openai',
+                     'official_subscription', '2026-09', 2)", [],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO billing_recalculation_jobs(job_id, declaration_id, revision_id, status, requested_at_ms)
+             VALUES ('job-derived-pending', 'decl-derived', 'rev-derived-pending', 'queued', 2)", [],
+        ).unwrap();
+        assert_eq!(session_billing_buckets(db.conn(), skey).unwrap()[0]["billing_mode"], "subscription");
+        db.conn().execute("UPDATE billing_recalculation_jobs SET status = 'failed' WHERE job_id = 'job-derived-pending'", []).unwrap();
+        assert_eq!(session_cost_minor(db.conn(), skey).unwrap(), None);
+        db.conn().execute(
+            "INSERT INTO billing_declaration_revisions(
+                revision_id, declaration_id, revision_number, change_kind, host, provider_id,
+                relationship_kind, effective_start, created_at_ms)
+             VALUES ('rev-derived-revoked', 'decl-derived', 3, 'revoked', 'codex', 'openai',
+                     'official_subscription', '2026-09', 3)", [],
+        ).unwrap();
+        assert_ne!(session_billing_buckets(db.conn(), skey).unwrap()[0]["billing_mode"], "subscription");
         let _ = std::fs::remove_file(&path);
     }
 

@@ -241,15 +241,20 @@ pub fn price_fact_selection(
     group_by: &[String],
 ) -> Result<WindowResult, ToolError> {
     let has_attributions: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='billing_fact_attributions')",
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='billing_fact_attributions')
+         AND EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='billing_declaration_revisions')
+         AND EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='billing_recalculation_jobs')",
         [], |row| row.get(0),
     ).map_err(|e| ToolError::new("internal_error", format!("cost attribution capability check failed: {e}")))?;
     let billing_mode_expr = if has_attributions {
         "CASE WHEN EXISTS (SELECT 1 FROM billing_fact_attributions ba
              JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+             JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
              WHERE ba.fact_id = f.fact_id AND ba.attribution_kind = 'subscription_covered'
                AND br.revision_number = (SELECT MAX(br2.revision_number)
-                 FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                 FROM billing_declaration_revisions br2
+                 LEFT JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                 WHERE br2.declaration_id = br.declaration_id AND (br2.change_kind = 'revoked' OR bj2.job_id IS NOT NULL))
                AND br.change_kind = 'saved')
           THEN 'subscription' ELSE COALESCE(f.billing_mode, 'unknown') END"
     } else {

@@ -206,9 +206,12 @@ fn unresolved_tokens(conn: &Connection, window: Option<(i64, i64)>) -> i64 {
                AND NOT EXISTS (
                     SELECT 1 FROM billing_fact_attributions ba
                     JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+                    JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
                     WHERE ba.fact_id = f.fact_id AND br.change_kind = 'saved'
                       AND br.revision_number = (SELECT MAX(br2.revision_number)
-                        FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)
+                        FROM billing_declaration_revisions br2
+                        LEFT JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                        WHERE br2.declaration_id = br.declaration_id AND (br2.change_kind = 'revoked' OR bj2.job_id IS NOT NULL))
                ){}",
             window_sql(window).replace("event_ts_ms", "f.event_ts_ms")
         ),
@@ -280,17 +283,23 @@ fn unpriced_tokens_detailed(
                 cache_read_tokens, cache_write_tokens, output_tokens,
                 EXISTS (SELECT 1 FROM billing_fact_attributions ba
                     JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+                    JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
                     WHERE ba.fact_id = usage_facts.fact_id AND ba.attribution_kind = 'subscription_covered'
                       AND br.change_kind = 'saved'
                       AND br.revision_number = (SELECT MAX(br2.revision_number)
-                        FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id)),
+                        FROM billing_declaration_revisions br2
+                        LEFT JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                        WHERE br2.declaration_id = br.declaration_id AND (br2.change_kind = 'revoked' OR bj2.job_id IS NOT NULL))),
                 (SELECT MIN(bd.provider_id) FROM billing_fact_attributions ba
                     JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
+                    JOIN billing_recalculation_jobs bj ON bj.job_id = ba.job_id AND bj.status = 'succeeded'
                     JOIN billing_declarations bd ON bd.declaration_id = br.declaration_id
                     WHERE ba.fact_id = usage_facts.fact_id
                       AND br.change_kind = 'saved' AND bd.deleted_at_ms IS NULL
                       AND br.revision_number = (SELECT MAX(br2.revision_number)
-                        FROM billing_declaration_revisions br2 WHERE br2.declaration_id = br.declaration_id))
+                        FROM billing_declaration_revisions br2
+                        LEFT JOIN billing_recalculation_jobs bj2 ON bj2.revision_id = br2.revision_id AND bj2.status = 'succeeded'
+                        WHERE br2.declaration_id = br.declaration_id AND (br2.change_kind = 'revoked' OR bj2.job_id IS NOT NULL)))
          FROM usage_facts
          WHERE deleted_at_ms IS NULL
            AND observation_kind != 'legacy_aggregate'{}",

@@ -774,6 +774,7 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
   const [quotaReminder, setQuotaReminder] = useState<QuotaReminderConfig | null>(null);
   const [quotaReminderError, setQuotaReminderError] = useState<string | null>(null);
   const [quotaReminderLoading, setQuotaReminderLoading] = useState(true);
+  const [activeSection, setActiveSection] = useState(() => window.location.hash.startsWith("#settings-") ? window.location.hash.slice(1) : "settings-sources");
   const settingsMounted = useRef(true);
   const sourceRequest = useRef(0);
   const sourceControlsRequest = useRef(0);
@@ -786,12 +787,21 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
 
   useEffect(() => {
     if (!focusSection) return;
+    setActiveSection(focusSection);
     const frame = window.requestAnimationFrame(() => {
       document.getElementById(focusSection)?.scrollIntoView({ behavior: "smooth", block: "start" });
       onSectionFocused?.();
     });
     return () => window.cancelAnimationFrame(frame);
   }, [focusSection, onSectionFocused]);
+
+  useEffect(() => {
+    const updateActiveSection = () => {
+      if (window.location.hash.startsWith("#settings-")) setActiveSection(window.location.hash.slice(1));
+    };
+    window.addEventListener("hashchange", updateActiveSection);
+    return () => window.removeEventListener("hashchange", updateActiveSection);
+  }, []);
 
   const refresh = () => {
     const sourceRequestId = ++sourceRequest.current;
@@ -1008,14 +1018,16 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
   }, []);
 
   const attentionCount = useMemo(() => report?.sources.filter((source) => source.connection_state === "needs_attention").length ?? 0, [report]);
+  const reloadAll = () => { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); refreshAbout(); refreshQuotaReminder(); };
+  const sections = [["settings-sources", "数据源"], ["settings-billing", "计费与套餐"], ["settings-budget", "预算"], ["settings-notifications", "提醒"], ["settings-data", "统计与数据"], ["settings-about", "关于与诊断"]] as const;
 
   return <>
     <h2 id="settings-title" className="visually-hidden">数据源与本机配置</h2>
     <ToolbarActions>
-      <button className="button button-secondary" type="button" onClick={refresh} disabled={loading}>{loading ? "读取中…" : "重载"}</button>
+      <button className="button button-secondary" type="button" onClick={reloadAll} disabled={loading || customLoading || budgetLoading || billingLoading || dataLoading || aboutLoading || quotaReminderLoading}>重载全部</button>
     </ToolbarActions>
 
-    <nav className="settings-section-nav" aria-label="设置分区"><a className="settings-section-nav-active" href="#settings-sources">数据源</a><a href="#settings-billing">计费与套餐</a><a href="#settings-budget">预算</a><a href="#settings-notifications">提醒</a><a href="#settings-data">统计与数据</a><a href="#settings-about">关于与诊断</a></nav>
+    <nav className="settings-section-nav" aria-label="设置分区">{sections.map(([id, label]) => <a key={id} className={activeSection === id ? "settings-section-nav-active" : undefined} href={`#${id}`} aria-current={activeSection === id ? "location" : undefined} onClick={() => setActiveSection(id)}>{label}</a>)}</nav>
 
     <section className="settings-section" id="settings-sources" aria-labelledby="settings-sources-title">
       <div className="settings-section-heading"><div><p className="eyebrow">数据源</p><h3 id="settings-sources-title">来源健康</h3><p>每个工具独立显示读取状态；来源之间不合并计数。</p></div>{report && <span className={`status-pill status-pill-${attentionCount ? "warning" : "success"}`}>{attentionCount ? `${attentionCount} 个来源需要处理` : "来源状态正常"}</span>}</div>
