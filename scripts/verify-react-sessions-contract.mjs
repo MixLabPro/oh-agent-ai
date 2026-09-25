@@ -91,3 +91,25 @@ const malformedBridge = loadBridge(malformed);
 await assert.rejects(() => malformedBridge.readSessionDetail("sr_browser_mock_01"), /分页缺少 next_cursor/);
 
 console.log("React Sessions contract: OK (split inspector, stable selection, list/detail pagination, safe filters, malformed rejection)");
+
+// Session trace geometry under a production-style CommonJS wrapper. timeline.js is UMD: when
+// `module.exports` exists (Vite production build, esbuild cjs) it exports instead of setting
+// `self.TimelineGeometry`. SessionTrace used to read only the global, so every trace in the
+// packaged app rendered as "轨迹暂不可用" while the backend returned a valid series.
+{
+  const built = buildSync({
+    entryPoints: [path.join(ui, "react/src/features/sessions/SessionTrace.tsx")],
+    bundle: true, format: "cjs", platform: "node", target: "node20", write: false, logLevel: "silent",
+    loader: { ".css": "empty" }, external: ["react", "react/jsx-runtime", "react-dom"],
+  });
+  const sandbox = { module: { exports: {} }, exports: {}, require: uiRequire, console: { error() {}, warn() {}, log() {} }, Math, Number, Object, Array, JSON, String, window: {} };
+  vm.createContext(sandbox);
+  vm.runInContext(built.outputFiles[0].text, sandbox, { filename: "session-trace.bundle.cjs" });
+  assert.equal(sandbox.window.TimelineGeometry, undefined, "precondition: no global geometry, as in the packaged app");
+  const svg = sandbox.module.exports.traceMarkup({
+    points: [{ ordinal: 0, values: { tool_call_count: 0 } }, { ordinal: 1, values: { tool_call_count: 3 } }, { ordinal: 2, values: { tool_call_count: 1 } }],
+    events: [], series: [{ name: "tool_call_count" }], unplaced_events: 0,
+  });
+  assert.match(svg, /<svg/, "trace must render from the module export when no global TimelineGeometry exists");
+}
+console.log("React session trace geometry: OK (module export under CommonJS wrapper)");

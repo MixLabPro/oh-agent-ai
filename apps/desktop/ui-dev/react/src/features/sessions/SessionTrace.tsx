@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import "../../../../../src-tauri/ui/timeline.js";
+import * as timelineModule from "../../../../../src-tauri/ui/timeline.js";
 import { invoke, safeUiError } from "../../lib/tauri";
 import "./session-trace.css";
 
@@ -14,13 +14,24 @@ type Geometry = { buildTimeline: (spec: Series & { width: number; height: number
 
 // The existing shared renderer escapes text/attributes. Only its generated SVG
 // is inserted, never HTML supplied by the bridge. Geometry remains single-source.
+/// timeline.js 是 UMD：有 `module.exports` 就导出，否则才挂 `self.TimelineGeometry`。生产构建里
+/// Vite 把它当 CommonJS 包一层（`module.exports` 存在）→ 走导出分支，全局从来不设；只读
+/// `window.TimelineGeometry` 在打包后的 app 里恒为 undefined，轨迹图永远「暂不可用」。
+/// 开发服务器按 ESM 直出、没有 `module` → 走全局分支。两条都认，都没有就明说。
+function timelineGeometry(): Geometry {
+  const exported = (timelineModule as { default?: Geometry }).default;
+  const geometry = exported?.buildTimeline ? exported : (window as unknown as { TimelineGeometry?: Geometry }).TimelineGeometry;
+  if (!geometry?.buildTimeline) throw new Error("Timeline geometry unavailable");
+  return geometry;
+}
+
 export function traceMarkup(series: Series): string {
   if (!Array.isArray(series.points) || !Array.isArray(series.events) || !Array.isArray(series.series)) throw new Error("Invalid trace");
   for (const point of series.points) {
     if (!Number.isFinite(point.ordinal) || !point.values || Object.values(point.values).some(value => value !== null && (typeof value !== "number" || !Number.isFinite(value)))) throw new Error("Invalid trace point");
   }
   if (series.events.some(event => !Number.isFinite(event.ordinal))) throw new Error("Invalid trace event");
-  const geometry = (window as unknown as { TimelineGeometry: Geometry }).TimelineGeometry;
+  const geometry = timelineGeometry();
   return geometry.buildTimeline({ points: series.points, events: series.events, series: series.series, unplaced_events: series.unplaced_events, width: 800, height: 240, classPrefix: "session-trace" });
 }
 
