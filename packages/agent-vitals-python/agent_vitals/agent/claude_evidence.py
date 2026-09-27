@@ -249,16 +249,81 @@ def normalize_tool(name, input_value):
     return canonical, _canonical_string(input_value)
 
 
-def is_pure_text_user(content):
-    """§8 问 4：user 事件的 `message.content` 是不是「新 human prompt」——字符串
-    （纯文本）或数组但不含 `tool_result` 块 → 是 turn 根；含 `tool_result` →
-    当前工具循环的续写。**这是根的判据，不是 `parentUuid`**（模块文档：真机 886
-    vs 8）。"""
+def _text_content(content):
+    """字符串或全 text 块且非空（首回合的历史判据）。镜像 Rust
+    `sessions::turns::text_content`。"""
     if isinstance(content, str):
-        return True
+        return content.strip() != ""
     if isinstance(content, list):
-        return not any(is_tool_result_block(b) for b in content)
+        return len(content) > 0 and all(
+            isinstance(b, dict) and b.get("type") == "text"
+            and isinstance(b.get("text"), str) and b.get("text").strip() != ""
+            for b in content)
     return False
+
+
+def _user_prompt_text(content):
+    """用户文本：字符串，或不含 tool_result 块的数组里 text 块的拼接。"""
+    if isinstance(content, str):
+        return content if content.strip() else None
+    if isinstance(content, list):
+        if any(is_tool_result_block(b) for b in content):
+            return None
+        parts = [b.get("text") for b in content
+                 if isinstance(b, dict) and b.get("type") == "text"
+                 and isinstance(b.get("text"), str) and b.get("text").strip()]
+        text = "".join(parts)
+        return text if text.strip() else None
+    return None
+
+
+_HOST_ECHO = ("<task-notification", "<local-command-stdout", "<local-command-stderr",
+              "<local-command-caveat", "<bash-input", "<bash-stdout", "<bash-stderr",
+              "[Request interrupted")
+_SETTINGS_ONLY = frozenset(("model", "effort", "clear", "compact", "fast", "config", "cost",
+                            "status", "help", "login", "logout", "permissions", "context",
+                            "memory", "resume", "exit"))
+
+
+def turn_signal(record, has_turn):
+    """user 记录的回合信号：`"request"` / `"interrupt"` / `"other"`。镜像 Rust
+    `hosts::claude_code::sessions::turns::turn_signal`——evidence 与 workflow 共用
+    的唯一判据（此前本函数的前身 `is_pure_text_user` 把 skill 正文注入、
+    `<task-notification>`、中断标记都算成新 turn）。首回合沿用历史判据
+    `_text_content`（workflow 的 task_started event_id 依赖它）；其后排除 meta
+    注入、压缩摘要、宿主回灌与只改设置的斜杠命令。"""
+    message = record.get("message") if isinstance(record, dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if record.get("isSidechain") is True:
+        return "other"
+    if not has_turn:
+        return "request" if _text_content(content) else "other"
+    text = _user_prompt_text(content)
+    if text is None:
+        return "other"
+    text = text.lstrip()
+    if text.startswith("[Request interrupted"):
+        return "interrupt"
+    if record.get("isMeta") is True or record.get("isCompactSummary") is True \
+            or not _text_content(content):
+        return "other"
+    if text.startswith(_HOST_ECHO):
+        return "other"
+    if text.startswith("<command-name>/"):
+        rest = text[len("<command-name>/"):]
+        command = ""
+        for ch in rest:
+            if ch == "<" or ch.isspace():
+                break
+            command += ch
+        if command in _SETTINGS_ONLY:
+            return "other"
+    return "request"
+
+
+def is_turn_root(record, has_turn):
+    """§8 问 4：user 事件是不是 turn 根（按内容判，不是 `parentUuid`）。"""
+    return turn_signal(record, has_turn) == "request"
 
 
 def is_tool_result_block(b):
@@ -389,7 +454,7 @@ def _populate_claude_timelines(records):
         if typ == "user":
             content = message.get("content") if message is not None else None
             if not is_sidechain:
-                if is_pure_text_user(content):
+                if is_turn_root(record, next_turn > 0):
                     # 新 turn 根：flush 上一个、开新的。根**不**推进上一个 turn
                     # 的 last_seq（上一个 turn 到根**之前**的最后一个事件为止）。
                     if pending is not None:
@@ -454,6 +519,7 @@ def _derive_coverage(records, turns_len):
     unknown = []
     usage_ids = set()
     step_ids = set()
+    prompts = 0
 
     for record in records:
         typ = record.get("type") if isinstance(record, dict) else None
@@ -476,8 +542,9 @@ def _derive_coverage(records, turns_len):
 
         if typ == "user":
             content = message.get("content") if message is not None else None
-            if not is_sidechain and is_pure_text_user(content):
-                # 纯文本 user = 真人 human prompt（与 codex 的 UserPrompts 同义）。
+            if not is_sidechain and is_turn_root(record, prompts > 0):
+                # turn 根 = 真人 human prompt（与 codex 的 UserPrompts 同义）。
+                prompts += 1
                 _bump(coverage, "UserPrompts", "measured")
             if isinstance(content, list):
                 for blk in content:

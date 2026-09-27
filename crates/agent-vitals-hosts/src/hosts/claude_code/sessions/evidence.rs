@@ -125,15 +125,13 @@ fn normalize_tool(name: &str, input: Option<&Value>) -> (String, String) {
 
 // ────────────────────────── §8 turn 重建：内容判定 ──────────────────────────
 
-/// §8 问 4：user 事件的 `message.content` 是不是「新 human prompt」——字符串（纯
-/// 文本）或数组但不含 `tool_result` 块 → 是 turn 根；含 `tool_result` → 当前工具
-/// 循环的续写。**这是根的判据，不是 `parentUuid`**（模块文档：真机 886 vs 8）。
-fn is_pure_text_user(content: Option<&Value>) -> bool {
-    match content {
-        Some(Value::String(_)) => true,
-        Some(Value::Array(items)) => !items.iter().any(is_tool_result_block),
-        _ => false,
-    }
+/// §8 问 4：user 事件是不是「新 human prompt」（turn 根）。判据按**内容**，
+/// 不是 `parentUuid`（模块文档：真机 886 vs 8）；具体规则与 workflow 的
+/// `task_started` 共用 `sessions::turns::turn_signal` 一份（此前这里是「字符串
+/// 或不含 tool_result 的数组」，把 skill 正文注入、`<task-notification>`、
+/// 中断标记都算成新 turn，与消耗诊断的回合数对不上）。
+fn is_turn_root(record: &Value, has_turn: bool) -> bool {
+    super::turns::turn_signal(record, has_turn) == agent_vitals_domain::session_semantics::UserTurnSignal::Request
 }
 
 fn is_tool_result_block(b: &Value) -> bool {
@@ -323,13 +321,11 @@ pub(crate) fn populate_claude_timelines(
         let is_sidechain = record.get("isSidechain").and_then(Value::as_bool).unwrap_or(false);
         let seq = rec_idx as i64;
         let time = record.get("timestamp").and_then(|v| v.as_str()).and_then(parse_iso).map(|(s, _)| s);
-        let message = record.get("message");
 
         match typ {
             "user" => {
-                let content = message.and_then(|m| m.get("content"));
                 if !is_sidechain {
-                    if is_pure_text_user(content) {
+                    if is_turn_root(record, next_turn > 0) {
                         // 新 turn 根：flush 上一个、开新的。根**不**推进上一个 turn
                         // 的 last_seq（上一个 turn 到根**之前**的最后一个事件为止）。
                         if let Some(p) = pending.take() {
@@ -415,6 +411,7 @@ fn derive_coverage(records: &[Value], turns_len: usize) -> (SignalSet, Coverage,
     let mut unknown: Vec<String> = Vec::new();
     let mut usage_ids: HashSet<&str> = HashSet::new();
     let mut step_ids: HashSet<&str> = HashSet::new();
+    let mut prompts: usize = 0;
 
     for record in records {
         let Some(typ) = record.get("type").and_then(Value::as_str) else {
@@ -440,8 +437,9 @@ fn derive_coverage(records: &[Value], turns_len: usize) -> (SignalSet, Coverage,
         match typ {
             "user" => {
                 let content = message.and_then(|m| m.get("content"));
-                if !is_sidechain && is_pure_text_user(content) {
-                    // 纯文本 user = 真人 human prompt（与 codex 的 UserPrompts 同义）。
+                if !is_sidechain && is_turn_root(record, prompts > 0) {
+                    // turn 根 = 真人 human prompt（与 codex 的 UserPrompts 同义）。
+                    prompts += 1;
                     bump(&mut coverage, Signal::UserPrompts, Bucket::Measured, 1);
                 }
                 if let Some(Value::Array(items)) = content {

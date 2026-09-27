@@ -15,15 +15,20 @@ use std::path::Path;
 
 use agent_vitals_domain::contracts::session_key::SessionKey;
 use agent_vitals_domain::contracts::workflow::SessionExcerpt;
+use agent_vitals_domain::session_semantics::{
+    fingerprint, invocation_fingerprint, iso_to_epoch_ms, safe_label, ModelSwitchTracker, TurnTracker, TurnTransition,
+};
 use agent_vitals_domain::source_identity::fnv1a64_hex;
 use agent_vitals_domain::workflow::WorkflowEvent;
 use agent_vitals_domain::{enrichment::{ExcerptRole, make_excerpt}};
 use serde_json::Value;
 
-use crate::workflow_utils::{fingerprint, iso_to_epoch_ms, safe_label};
+use crate::hosts::claude_code::sessions::turns::{turn_signal, user_prompt_text};
 
+/// tool_use id → 调用种类 + 调用指纹。指纹在 tool_use 处按参数算好，随 id 带到
+/// tool_result——结果块里没有参数，不在这里记就配不上。
 #[derive(Clone)]
-enum CallKind { Tool(String), Skill(String) }
+enum CallKind { Tool(String, String), Skill(String) }
 
 /// 一个事件的 V16 富化载荷。claude 源没有结构化错误码——`error_code/class`
 /// 恒 `None`（见模块 doc 的「不从文本猜码」），摘录与尺寸按 policy 保留。
@@ -73,44 +78,6 @@ fn add_event(
         source_byte_offset: Some(anchor_offset),
     };
     if event.validate().is_ok() { out.push(event); }
-}
-
-/// task_started 的判据（保持历史语义不动——event_id 依赖 offset/ordinal，
-/// 放宽谓词会改变既有事件的产出时点）：字符串或全 text 块且非空。
-fn text_content(content: Option<&Value>) -> bool {
-    match content {
-        Some(Value::String(value)) => !value.trim().is_empty(),
-        Some(Value::Array(values)) => !values.is_empty() && values.iter().all(|value| {
-            value.get("type").and_then(Value::as_str) == Some("text")
-                && value.get("text").and_then(Value::as_str).is_some_and(|text| !text.trim().is_empty())
-        }),
-        _ => false,
-    }
-}
-
-/// 摘录取材谓词（`is_pure_text_user` 语义）：字符串，或数组但不含 `tool_result`
-/// 块（允许 image 等非文本块共存，只取 text 块）。返回拼接后的用户文本。
-fn user_prompt_text(content: Option<&Value>) -> Option<String> {
-    match content {
-        Some(Value::String(value)) => {
-            (!value.trim().is_empty()).then(|| value.clone())
-        }
-        Some(Value::Array(values)) => {
-            if values.iter().any(|value| value.get("type").and_then(Value::as_str) == Some("tool_result")) {
-                return None;
-            }
-            let mut text = String::new();
-            for value in values {
-                if value.get("type").and_then(Value::as_str) == Some("text") {
-                    if let Some(part) = value.get("text").and_then(Value::as_str) {
-                        if !part.trim().is_empty() { text.push_str(part); }
-                    }
-                }
-            }
-            (!text.trim().is_empty()).then_some(text)
-        }
-        _ => None,
-    }
 }
 
 /// assistant 消息的可读文本（content 字符串或 text 块拼接）——`assistant_final`
@@ -233,8 +200,10 @@ pub fn claude_file_to_workflow_events(
     let mut out = Vec::new();
     let mut excerpts = Vec::new();
     let mut calls: HashMap<String, CallKind> = HashMap::new();
-    let mut previous_model: Option<String> = None;
+    let mut models = ModelSwitchTracker::default();
     let mut task_started: Option<(usize, i64)> = None;
+    // 回合语义（开回合、中断至多一次）在 domain；这里只喂 wire 翻译出的信号。
+    let mut turns = TurnTracker::default();
     let mut user_prompt_seen = false;
     let mut last_assistant: Option<(String, String)> = None; // (uuid, 文本)
     // 摘录序号 = 会话内生产顺序（每 push 一次 +1）。不用记录位置序：同一记录里
@@ -249,10 +218,21 @@ pub fn claude_file_to_workflow_events(
             "user" => {
                 let message = value.get("message");
                 let content = message.and_then(|value| value.get("content"));
-                if text_content(content) && task_started.is_none() {
-                    task_started = time.map(|v| (*offset, v));
-                    add_event(&mut out, path, *offset, *offset as i64, *line, 0, &session_key, "task_started", time,
-                        None, None, "unknown", None, None, record_uuid(value), Enrichment::default());
+                // 回合（G6）：判据是 `sessions::turns::turn_signal`（与 evidence 共用
+                // 一份）。首回合沿用历史判据，event_id 不变。
+                match turns.observe(turn_signal(value, task_started.is_some())) {
+                    TurnTransition::Opened { .. } => {
+                        if task_started.is_none() {
+                            task_started = time.map(|v| (*offset, v));
+                        }
+                        add_event(&mut out, path, *offset, *offset as i64, *line, 0, &session_key, "task_started", time,
+                            None, None, "unknown", None, None, record_uuid(value), Enrichment::default());
+                    }
+                    // ordinal 1：与同 offset 的其他事件（task_started 用 0、工具结果
+                    // 用块序 + 1——中断记录不带 tool_result 块）互不碰撞。
+                    TurnTransition::Cancelled => add_event(&mut out, path, *offset, *offset as i64, *line, 1, &session_key,
+                        "task_finished", time, None, None, "cancelled", None, None, record_uuid(value), Enrichment::default()),
+                    TurnTransition::None => {}
                 }
                 // 任务意图摘录：首条纯文本用户消息 = user_first，其后 = user_turn。
                 // isSidechain 守卫：sidechain 是子代理自己的会话流，混进主会话
@@ -306,9 +286,9 @@ pub fn claude_file_to_workflow_events(
                             }
                         }
                         match kind {
-                            CallKind::Tool(name) => add_event(&mut out, path, *offset, *offset as i64, *line, block_index + 1,
-                                &session_key, "tool_finished", time, Some("tool"), Some(name.clone()),
-                                result, error, Some(fingerprint(&format!("claude-tool:{name}"))),
+                            CallKind::Tool(name, invocation) => add_event(&mut out, path, *offset, *offset as i64, *line, block_index + 1,
+                                &session_key, "tool_finished", time, Some("tool"), Some(name),
+                                result, error, Some(invocation),
                                 Some(call_id), enrich),
                             CallKind::Skill(name) => add_event(&mut out, path, *offset, *offset as i64, *line, block_index + 1,
                                 &session_key, "skill_finished", time, Some("skill"), Some(name),
@@ -322,12 +302,11 @@ pub fn claude_file_to_workflow_events(
                 let message = value.get("message");
                 if let Some(model) = message.and_then(|value| value.get("model")).and_then(Value::as_str) {
                     let model = safe_label(model);
-                    if previous_model.as_deref().is_some_and(|previous| previous != model) {
+                    if models.observe(&model) {
                         add_event(&mut out, path, *offset, *offset as i64, *line, 0, &session_key, "model_switched", time,
-                            Some("model"), Some(model.clone()), "succeeded", None, None,
+                            Some("model"), Some(model), "succeeded", None, None,
                             record_uuid(value), Enrichment::default());
                     }
-                    previous_model = Some(model);
                 }
                 if !sidechain {
                     if let Some(text) = message
@@ -376,10 +355,11 @@ pub fn claude_file_to_workflow_events(
                                 Some(fingerprint("claude-skill-invocation")), Some(call_id), enrich);
                         } else {
                             let name = safe_label(raw_name);
-                            calls.insert(call_id.to_string(), CallKind::Tool(name.clone()));
+                            let invocation = invocation_fingerprint("claude", &name, input);
+                            calls.insert(call_id.to_string(), CallKind::Tool(name.clone(), invocation.clone()));
                             add_event(&mut out, path, *offset, *offset as i64, *line, block_index + 1, &session_key,
-                                "tool_invoked", time, Some("tool"), Some(name.clone()), "unknown", None,
-                                Some(fingerprint(&format!("claude-tool:{name}"))), Some(call_id), enrich);
+                                "tool_invoked", time, Some("tool"), Some(name), "unknown", None,
+                                Some(invocation), Some(call_id), enrich);
                         }
                     }
                 }
@@ -610,4 +590,99 @@ mod tests {
         assert_eq!(sub.native_event_id, "a1");
         std::fs::remove_file(path).ok();
     }
+
+    fn emit(name: &str, lines: &[&str]) -> Vec<agent_vitals_domain::workflow::WorkflowEvent> {
+        let path = std::env::temp_dir().join(format!("av-claude-{name}-{}.jsonl", std::process::id()));
+        std::fs::write(&path, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        let (events, _) = claude_file_to_workflow_events(&PathBuf::from(&path), "machine", "default", "s1").unwrap();
+        std::fs::remove_file(path).ok();
+        events
+    }
+
+    /// G6：此前整个会话只有首条用户消息产 `task_started`（真机 293 个会话共
+    /// 299 个），「定位消耗区间」无从谈起。每条用户新请求开一个回合；宿主回灌、
+    /// meta 注入、压缩摘要、只改设置的斜杠命令、子代理对话都不算。
+    #[test]
+    fn each_user_request_opens_a_turn_but_host_echoes_do_not() {
+        let events = emit("turns", &[
+            r#"{"type":"user","timestamp":"2026-09-01T10:00:00.000Z","uuid":"u1","message":{"content":"first request"}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:01:00.000Z","uuid":"m1","isMeta":true,"message":{"content":"Base directory for this skill: ..."}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:02:00.000Z","uuid":"t1","message":{"content":"<task-notification>\n<task-id>x</task-id>"}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:03:00.000Z","uuid":"c1","message":{"content":"<local-command-stdout>ok</local-command-stdout>"}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:04:00.000Z","uuid":"c2","message":{"content":"<command-name>/model</command-name>\n<command-args>opus</command-args>"}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:05:00.000Z","uuid":"s1","isSidechain":true,"message":{"content":"subagent prompt"}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:06:00.000Z","uuid":"k1","isCompactSummary":true,"message":{"content":"This session is being continued..."}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:07:00.000Z","uuid":"b1","message":{"content":"<bash-input>ls</bash-input>"}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:08:00.000Z","uuid":"u2","message":{"content":[{"type":"text","text":"second request"}]}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:09:00.000Z","uuid":"g1","message":{"content":"<command-name>/goal</command-name>\n<command-args>ship it</command-args>"}}"#,
+        ]);
+        let starts: Vec<i64> = events.iter().filter(|e| e.event_type == "task_started").map(|e| e.event_ts_ms).collect();
+        assert_eq!(starts.len(), 3, "first request / second request / goal command：{starts:?}");
+        let natives: Vec<&str> = events.iter().filter(|e| e.event_type == "task_started")
+            .filter_map(|e| e.native_event_id.as_deref()).collect();
+        assert_eq!(natives, ["u1", "u2", "g1"]);
+    }
+
+    /// 首回合的 event_id 与 G6 之前一致——存量库里那一行重放后仍是同一行，
+    /// 不会留下旧 id 的孤儿（首回合保留历史谓词的原因）。
+    #[test]
+    fn first_turn_keeps_its_historical_event_id() {
+        let lines = [
+            r#"{"type":"user","timestamp":"2026-09-01T10:00:00.000Z","uuid":"u1","message":{"content":"<command-name>/model</command-name>"}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:01:00.000Z","uuid":"u2","message":{"content":"real request"}}"#,
+        ];
+        let events = emit("first-id", &lines);
+        let starts: Vec<&str> = events.iter().filter(|e| e.event_type == "task_started")
+            .filter_map(|e| e.native_event_id.as_deref()).collect();
+        // 历史谓词只看「非空文本」：设置命令也开了首回合；其后的真实请求开第二个。
+        assert_eq!(starts, ["u1", "u2"]);
+        let path = std::env::temp_dir().join(format!("av-claude-first-id-{}.jsonl", std::process::id()));
+        let expected = super::event_id(&path, 0, 0, "task_started");
+        assert!(events.iter().any(|e| e.event_type == "task_started" && e.event_id == expected));
+    }
+
+    /// 用户中断当前回合 → 该回合产一条 `task_finished{cancelled}`（每回合至多
+    /// 一条）；spec §11.1 的「主动取消」样本此前在 claude 上一个都没有。
+    #[test]
+    fn user_interrupt_marks_the_turn_cancelled_once() {
+        let events = emit("interrupt", &[
+            r#"{"type":"user","timestamp":"2026-09-01T10:00:00.000Z","uuid":"u1","message":{"content":"do a thing"}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:00:30.000Z","uuid":"i1","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:00:31.000Z","uuid":"i2","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:01:00.000Z","uuid":"u2","message":{"content":"do another"}}"#,
+        ]);
+        let cancelled: Vec<&str> = events.iter()
+            .filter(|e| e.event_type == "task_finished" && e.outcome == "cancelled")
+            .filter_map(|e| e.native_event_id.as_deref()).collect();
+        assert_eq!(cancelled, ["i1"]);
+        assert_eq!(events.iter().filter(|e| e.event_type == "task_started").count(), 2,
+            "中断标记不开新回合");
+        let ids: std::collections::HashSet<&str> = events.iter().map(|e| e.event_id.as_str()).collect();
+        assert_eq!(ids.len(), events.len(), "event_id 不得碰撞");
+    }
+
+    /// 调用指纹区分参数：此前只编码工具名，同一会话里两条不同的 Bash 命令
+    /// 各失败一次就被算成「同一调用重复失败」。键序不同的同一参数视为同一调用。
+    #[test]
+    fn invocation_fingerprint_distinguishes_arguments() {
+        let events = emit("fp", &[
+            r#"{"type":"user","timestamp":"2026-09-01T10:00:00.000Z","uuid":"u1","message":{"content":"go"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-09-01T10:00:01.000Z","uuid":"a1","message":{"model":"m","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"npm test","timeout":5}}]}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:00:02.000Z","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"c1","is_error":true,"content":"fail"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-09-01T10:00:03.000Z","uuid":"a2","message":{"model":"m","content":[{"type":"tool_use","id":"c2","name":"Bash","input":{"timeout":5,"command":"npm test"}}]}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:00:04.000Z","uuid":"r2","message":{"content":[{"type":"tool_result","tool_use_id":"c2","is_error":true,"content":"fail"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-09-01T10:00:05.000Z","uuid":"a3","message":{"model":"m","content":[{"type":"tool_use","id":"c3","name":"Bash","input":{"command":"ls"}}]}}"#,
+            r#"{"type":"user","timestamp":"2026-09-01T10:00:06.000Z","uuid":"r3","message":{"content":[{"type":"tool_result","tool_use_id":"c3","is_error":true,"content":"fail"}]}}"#,
+        ]);
+        let fps: Vec<&str> = events.iter().filter(|e| e.event_type == "tool_finished")
+            .filter_map(|e| e.invocation_fingerprint.as_deref()).collect();
+        assert_eq!(fps.len(), 3);
+        assert_eq!(fps[0], fps[1], "同一参数（键序不同）= 同一调用");
+        assert_ne!(fps[0], fps[2], "不同命令 = 不同调用");
+        let invoked: Vec<&str> = events.iter().filter(|e| e.event_type == "tool_invoked")
+            .filter_map(|e| e.invocation_fingerprint.as_deref()).collect();
+        assert_eq!(invoked, fps, "invoked 与 finished 同指纹（重试链按它配对）");
+        assert!(fps.iter().all(|fp| !fp.contains("npm")), "指纹不携带参数原文");
+    }
+
 }

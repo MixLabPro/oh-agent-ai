@@ -1474,6 +1474,47 @@ pub fn all_session_keys(conn: &Connection) -> Result<Vec<String>, AuthorityError
 /// 层复制价格规则；调用方可将每个独立桶交给 domain 成本引擎。分组中保留
 /// `provider_raw`，因为无法安全归一化的 custom 路由仍必须可见，不能并入
 /// `<unknown>` 或 OpenAI。
+/// 一个计费桶（同宿主、模型、provider、峰谷档）喂给
+/// `agent_vitals_domain::cost::metered_estimate_minor` 的用量形状。会话成本分桶
+/// 与会话消耗诊断的回合名义成本（`query::session_insights`）共用这一份——
+/// 两处的桶形状一旦分叉，同一会话的两个金额就会对不上。
+/// `tokens` = `[uncached_input, cache_read, cache_write, output]`。
+pub fn billing_bucket_usage_json(
+    host: &str,
+    model_id: &str,
+    provider_id: Option<&str>,
+    peak: bool,
+    tokens: [i64; 4],
+) -> Value {
+    let [uncached, cache_read, cache_write, output] = tokens;
+    let at_peak = |value: i64| if peak { value } else { 0 };
+    if host == "claude-code" {
+        json!({"by_model": { model_id: {
+            "input_tokens": uncached, "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_write, "output_tokens": output,
+            "peak_input_tokens": at_peak(uncached),
+            "peak_cache_read_input_tokens": at_peak(cache_read),
+            "peak_cache_creation_input_tokens": at_peak(cache_write),
+            "peak_output_tokens": at_peak(output),
+        }}})
+    } else if host == "codex" {
+        json!({"by_model": { model_id: {
+            "uncached_input_tokens": uncached, "cached_input_tokens": cache_read,
+            "cache_write_input_tokens": cache_write, "output_tokens": output,
+            "reasoning_output_tokens": 0,
+        }}})
+    } else {
+        json!({"by_model": { model_id: {
+            "uncached_input_tokens": uncached, "cache_read_tokens": cache_read,
+            "cache_write_tokens": cache_write, "output_tokens": output,
+            "peak_uncached_input_tokens": at_peak(uncached),
+            "peak_cache_read_tokens": at_peak(cache_read),
+            "peak_cache_write_tokens": at_peak(cache_write),
+            "peak_output_tokens": at_peak(output),
+        }}, "providers": { model_id: provider_id }})
+    }
+}
+
 pub fn session_billing_buckets(
     conn: &Connection,
     session_key: &str,
@@ -1540,31 +1581,10 @@ pub fn session_billing_buckets(
         let (host, provider_id, provider_raw, model_id, template_id, billing_mode, pricing_basis,
             evidence_basis, peak, pricing_version, pricing_payload, uncached, cache_read,
             cache_write, output, last_event_ms) = row?;
-        let usage = if host == "claude-code" {
-            json!({"by_model": { model_id.clone(): {
-                "input_tokens": uncached, "cache_read_input_tokens": cache_read,
-                "cache_creation_input_tokens": cache_write, "output_tokens": output,
-                "peak_input_tokens": if peak != 0 { uncached } else { 0 },
-                "peak_cache_read_input_tokens": if peak != 0 { cache_read } else { 0 },
-                "peak_cache_creation_input_tokens": if peak != 0 { cache_write } else { 0 },
-                "peak_output_tokens": if peak != 0 { output } else { 0 },
-            }}})
-        } else if host == "codex" {
-            json!({"by_model": { model_id.clone(): {
-                "uncached_input_tokens": uncached, "cached_input_tokens": cache_read,
-                "cache_write_input_tokens": cache_write, "output_tokens": output,
-                "reasoning_output_tokens": 0,
-            }}})
-        } else {
-            json!({"by_model": { model_id.clone(): {
-                "uncached_input_tokens": uncached, "cache_read_tokens": cache_read,
-                "cache_write_tokens": cache_write, "output_tokens": output,
-                "peak_uncached_input_tokens": if peak != 0 { uncached } else { 0 },
-                "peak_cache_read_tokens": if peak != 0 { cache_read } else { 0 },
-                "peak_cache_write_tokens": if peak != 0 { cache_write } else { 0 },
-                "peak_output_tokens": if peak != 0 { output } else { 0 },
-            }}, "providers": { model_id.clone(): provider_id.clone() }})
-        };
+        let usage = billing_bucket_usage_json(
+            &host, &model_id, provider_id.as_deref(), peak != 0,
+            [uncached, cache_read, cache_write, output],
+        );
         let cost_minor = if billing_mode == "subscription" {
             None
         } else {

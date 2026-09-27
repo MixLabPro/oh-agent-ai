@@ -40,7 +40,15 @@ use crate::contracts::workflow::{SessionExcerpt, WorkflowEvent};
 /// record 级 `toolUseResult.success`。历史行的纠正走 `insert_events` 的派生列
 /// upsert（provenance 保持原样）；不升这个号，v4 重放时仍为 unknown 的
 /// skill_finished 行不会因指纹未变而被再次触达。
-pub const PARSER_VERSION: i64 = 5;
+///
+/// 版本 6（SESSION_TRACE_DIAGNOSTICS_SPEC r6 P0）：claude-code 每条用户请求开
+/// 一个回合（此前整个会话只有首条 `task_started`，G6），用户中断产
+/// `task_finished{cancelled}`；claude / codex 的 `invocation_fingerprint` 从
+/// 「工具名」改为「工具名 + 规范化参数」（存量行经 `insert_events` 的派生列
+/// 纠正改写）；claude 增量轮开始重扫 workflow（此前增量轮不产 workflow，活跃
+/// 会话尾部的工具结果与回合永远缺席）。不升这个号，存量源不重放，上述三点
+/// 都只对新文件生效。
+pub const PARSER_VERSION: i64 = 6;
 
 /// P0 阶段的解析器标记——sync_host 与 advance_checkpoint 共用（失配会导致
 /// 每 tick 永久全量重扫，已被 sync_is_incremental_across_runs 钉住，但共享

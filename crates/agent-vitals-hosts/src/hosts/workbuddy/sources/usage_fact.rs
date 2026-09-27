@@ -158,7 +158,7 @@ fn workflow_from_trace(
     let Some(native_session_id) = trace.session_id.as_deref() else { return Vec::new() };
     let session_key = SessionKey::new("workbuddy", native_session_id, source_profile, machine_namespace).ledger_key();
     let mut events = Vec::new();
-    let mut previous_model: Option<String> = None;
+    let mut models = agent_vitals_domain::session_semantics::ModelSwitchTracker::default();
     for span in &trace.spans {
         let span_id = if span.span_id.is_empty() { "<missing-span>" } else { span.span_id.as_str() };
         let event_hash = |kind: &str| format!(
@@ -215,13 +215,12 @@ fn workflow_from_trace(
         for usage in &span.usages {
             let Some(model) = usage.model.as_deref() else { continue };
             let model = workflow_label(model);
-            if previous_model.as_deref().is_some_and(|previous| previous != model) {
+            if models.observe(&model) {
                 if let Some(event) = workflow_event(
                     event_hash("model_switched"), session_key.clone(), started, "model_switched",
-                    Some("model"), Some(model.clone()), "succeeded", None, None, None,
+                    Some("model"), Some(model), "succeeded", None, None, None,
                 ) { events.push(event); }
             }
-            previous_model = Some(model);
         }
     }
     events

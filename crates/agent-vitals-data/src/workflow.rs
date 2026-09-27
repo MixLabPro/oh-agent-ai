@@ -122,19 +122,26 @@ pub fn insert_events(
             )?;
             // 纠正（outcome 修复，spec §9.4-①）：派生列与重放推导不同时改写，
             // NULL 安全比较（IS NOT），值一致时是纯 no-op，不碰 provenance。
+            // invocation_fingerprint 也是派生列（PARSER_VERSION 6）：它曾只编码
+            // 工具名，「同一调用重复失败」于是退化成「同一工具失败过两次」；改成
+            // 工具 + 参数后，存量行靠这里在重放时纠正——不进这个集合，旧行永远
+            // 停在工具名级指纹，和新行混着分组。
             let corrected = conn.execute(
                 "UPDATE workflow_events
                  SET outcome = ?2, capability_version = ?3,
-                     duration_ms = ?4, error_fingerprint = ?5
+                     duration_ms = ?4, error_fingerprint = ?5,
+                     invocation_fingerprint = ?6
                  WHERE event_id = ?1
                    AND (outcome IS NOT ?2 OR capability_version IS NOT ?3
-                        OR duration_ms IS NOT ?4 OR error_fingerprint IS NOT ?5)",
+                        OR duration_ms IS NOT ?4 OR error_fingerprint IS NOT ?5
+                        OR invocation_fingerprint IS NOT ?6)",
                 params![
                     event.event_id,
                     event.outcome,
                     event.capability_version,
                     event.duration_ms,
                     event.error_fingerprint,
+                    event.invocation_fingerprint,
                 ],
             )?;
             if corrected == 1 {
@@ -425,6 +432,28 @@ mod tests {
             .expect("idempotent replay");
         assert_eq!(fourth.corrected, 0);
         assert_eq!(fourth.duplicate, 1);
+
+        // PARSER_VERSION 6：调用指纹从「工具名」改为「工具名 + 参数」，存量行
+        // 靠重放纠正——不进纠正集合的话旧行永远停在工具名级指纹。
+        let refingerprinted = WorkflowEvent {
+            invocation_fingerprint: Some("fnv1a64:args-level".to_string()),
+            ..corrected_event.clone()
+        };
+        let fifth = db
+            .with_immediate_txn(|conn| {
+                insert_events(conn, std::slice::from_ref(&refingerprinted), &source_id, "workflow-test", 6)
+            })
+            .expect("fingerprint correction");
+        assert_eq!(fifth.corrected, 1);
+        let fingerprint: Option<String> = db
+            .conn()
+            .query_row(
+                "SELECT invocation_fingerprint FROM workflow_events WHERE event_id = ?1",
+                [&event.event_id],
+                |row| row.get(0),
+            )
+            .expect("fingerprint after correction");
+        assert_eq!(fingerprint.as_deref(), Some("fnv1a64:args-level"));
         let session_count: i64 = db
             .conn()
             .query_row(

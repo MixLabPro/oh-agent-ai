@@ -29,28 +29,9 @@ fn stable_id(session_id: &str, ordinal: usize, event_type: &str, event: &Value) 
     )
 }
 
-fn fingerprint(label: &str) -> String {
-    format!(
-        "fnv1a64:{}",
-        agent_vitals_domain::source_identity::fnv1a64_hex(label.as_bytes())
-    )
-}
-
-/// Keep capability identifiers human-readable when they are ordinary names;
-/// hash anything that looks like a free-form value so a malformed host payload
-/// cannot smuggle a path, command, or prompt into the authority table.
-fn safe_label(value: &str) -> String {
-    let valid = !value.is_empty()
-        && value.len() <= 128
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte));
-    if valid {
-        value.to_string()
-    } else {
-        fingerprint(value)
-    }
-}
+// `fingerprint` / `safe_label` 是宿主无关的规则，唯一实现在
+// `session_semantics`（此前这里有一份逐字相同的私有副本）。
+use agent_vitals_domain::session_semantics::{fingerprint, safe_label, ModelSwitchTracker};
 
 fn capability_id(event: &Value) -> Option<String> {
     event
@@ -314,7 +295,7 @@ pub fn from_events(
         }
     }
 
-    let mut previous_model: Option<String> = None;
+    let mut models = ModelSwitchTracker::default();
     for (ordinal, event) in usage_events.iter().enumerate() {
         if event.get("type").and_then(Value::as_str) != Some("request/header") {
             continue;
@@ -324,7 +305,7 @@ pub fn from_events(
             .and_then(Value::as_str)
             .map(safe_label);
         if let Some(model) = model {
-            if previous_model.as_deref().is_some_and(|previous| previous != model) {
+            if models.observe(&model) {
                 push_event(
                     &mut out,
                     native_session_id,
@@ -334,14 +315,13 @@ pub fn from_events(
                     "model_switched",
                     event,
                     Some("model"),
-                    Some(model.clone()),
+                    Some(model),
                     "succeeded",
                     None,
                     None,
                     None,
                 );
             }
-            previous_model = Some(model);
         }
     }
 

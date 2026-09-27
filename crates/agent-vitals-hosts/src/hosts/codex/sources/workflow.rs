@@ -10,11 +10,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use agent_vitals_domain::contracts::session_key::SessionKey;
+use agent_vitals_domain::session_semantics::{fingerprint, iso_to_epoch_ms, safe_label, ModelSwitchTracker};
 use agent_vitals_domain::source_identity::fnv1a64_hex;
 use agent_vitals_domain::workflow::WorkflowEvent;
 use serde_json::Value;
 
-use crate::workflow_utils::{fingerprint, iso_to_epoch_ms, safe_label};
 use super::parse_codex_session_log;
 
 fn event_id(path: &Path, ordinal: usize, event_type: &str) -> String {
@@ -67,21 +67,30 @@ fn command_name(item: &Value) -> Option<String> {
         .map(safe_label)
 }
 
+/// 调用参数取材（指纹公式在 `session_semantics::invocation_fingerprint`）：
+/// CommandExecution 取 `command` 数组，Legacy 调用取 `arguments` / `input`。
+fn invocation_fingerprint(name: &str, item: &Value) -> String {
+    let args = item.get("command").filter(|value| value.is_array())
+        .or_else(|| item.get("arguments"))
+        .or_else(|| item.get("input"));
+    agent_vitals_domain::session_semantics::invocation_fingerprint("codex", name, args)
+}
+
 fn is_skill(name: &str) -> bool {
     matches!(name.to_ascii_lowercase().as_str(), "skill" | "skills")
         || name.to_ascii_lowercase().starts_with("skill/")
 }
 
 #[allow(clippy::too_many_arguments)]
-fn completed_item(item: &Value, has_command_execution: bool, calls: &mut HashMap<String, String>,
+fn completed_item(item: &Value, has_command_execution: bool, calls: &mut HashMap<String, (String, String)>,
     out: &mut Vec<WorkflowEvent>, path: &Path, ordinal: usize, session_key: &str,
     timestamp: Option<&str>) {
     let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
     if item_type == "CommandExecution" {
         let Some(name) = command_name(item) else { return };
-        let invocation = Some(fingerprint(&format!("codex-tool:{name}")));
+        let invocation = Some(invocation_fingerprint(&name, item));
         let item_id = item.get("id").and_then(Value::as_str).unwrap_or("");
-        if !item_id.is_empty() { calls.insert(item_id.to_string(), name.clone()); }
+        if !item_id.is_empty() { calls.insert(item_id.to_string(), (name.clone(), invocation.clone().unwrap_or_default())); }
         add_event(out, path, ordinal, session_key, "tool_invoked", timestamp, Some("tool"),
             Some(name.clone()), "unknown", None, invocation.clone(), None);
         let exit_code = item.get("exit_code").and_then(Value::as_i64);
@@ -95,9 +104,9 @@ fn completed_item(item: &Value, has_command_execution: bool, calls: &mut HashMap
     }
     if has_command_execution { return; }
     let Some(name) = item_name(item) else { return };
-    let invocation = Some(fingerprint(&format!("codex-tool:{name}")));
+    let invocation = Some(invocation_fingerprint(&name, item));
     let call_id = item.get("tool_call_id").and_then(Value::as_str).unwrap_or("");
-    if !call_id.is_empty() { calls.insert(call_id.to_string(), name.clone()); }
+    if !call_id.is_empty() { calls.insert(call_id.to_string(), (name.clone(), invocation.clone().unwrap_or_default())); }
     if is_skill(&name) {
         add_event(out, path, ordinal, session_key, "skill_invoked", timestamp, Some("skill"),
             Some(name), "unknown", None, invocation, None);
@@ -130,7 +139,7 @@ pub fn codex_file_to_workflow_events(
     });
     let mut out = Vec::new();
     let mut calls = HashMap::new();
-    let mut previous_model: Option<String> = None;
+    let mut models = ModelSwitchTracker::default();
     for (ordinal, item) in items.iter().enumerate() {
         let timestamp = item.get("timestamp").and_then(Value::as_str);
         let top = item.get("type").and_then(Value::as_str).unwrap_or("");
@@ -139,11 +148,10 @@ pub fn codex_file_to_workflow_events(
         if top == "turn_context" {
             if let Some(model) = payload.get("model").and_then(Value::as_str) {
                 let model = safe_label(model);
-                if previous_model.as_deref().is_some_and(|previous| previous != model) {
+                if models.observe(&model) {
                     add_event(&mut out, path, ordinal, &session_key, "model_switched", timestamp,
-                        Some("model"), Some(model.clone()), "succeeded", None, None, None);
+                        Some("model"), Some(model), "succeeded", None, None, None);
                 }
-                previous_model = Some(model);
             }
         }
         if top == "event_msg" {
@@ -174,8 +182,8 @@ pub fn codex_file_to_workflow_events(
                 }
                 "custom_tool_call_output" | "function_call_output" | "tool_search_output" => {
                     let call_id = payload.get("call_id").and_then(Value::as_str).unwrap_or("");
-                    let Some(name) = calls.get(call_id).cloned() else { continue };
-                    let invocation = Some(fingerprint(&format!("codex-tool:{name}")));
+                    let Some((name, invocation)) = calls.get(call_id).cloned() else { continue };
+                    let invocation = Some(invocation);
                     add_event(&mut out, path, ordinal, &session_key, "tool_finished", timestamp,
                         Some("tool"), Some(name), "unknown", None, invocation, None);
                 }
@@ -208,6 +216,27 @@ mod tests {
         assert!(events.iter().all(|event| event.validate().is_ok()));
         let debug = format!("{events:?}");
         assert!(!debug.contains("/Users/private"));
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 调用指纹区分命令参数（PARSER_VERSION 6）：此前 `codex-tool:bash` 一个
+    /// 指纹覆盖所有 shell 命令，「同一调用重复失败」无从谈起。
+    #[test]
+    fn command_execution_fingerprint_includes_the_command() {
+        let path = std::env::temp_dir().join(format!("av-codex-fp-{}.jsonl", std::process::id()));
+        let item = |id: &str, cmd: &str| format!(
+            r#"{{"type":"event_msg","timestamp":"2026-07-25T11:20:02.000Z","payload":{{"type":"item_completed","item":{{"type":"CommandExecution","id":"{id}","command":["bash","-c","{cmd}"],"exit_code":1}}}}}}"#);
+        let text = [
+            r#"{"type":"session_meta","timestamp":"2026-07-25T11:19:35.404Z","payload":{"session_id":"s1"}}"#.to_string(),
+            item("a", "npm test"), item("b", "npm test"), item("c", "ls"),
+        ].join("\n") + "\n";
+        std::fs::write(&path, text).unwrap();
+        let events = codex_file_to_workflow_events(&path, "machine", "default").unwrap();
+        let fps: Vec<&str> = events.iter().filter(|e| e.event_type == "tool_finished")
+            .filter_map(|e| e.invocation_fingerprint.as_deref()).collect();
+        assert_eq!(fps.len(), 3);
+        assert_eq!(fps[0], fps[1]);
+        assert_ne!(fps[0], fps[2]);
         std::fs::remove_file(path).ok();
     }
 }

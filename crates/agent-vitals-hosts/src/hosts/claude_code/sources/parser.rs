@@ -7,8 +7,12 @@
 //! 事件发射是调度器（写事务内）的职责（SOURCE_GRAPH_DEPENDENCY_MAP 纪律表）。
 //!
 //! 增量纪律：`parse_increment` 从检查点 offset 续读到 EOF、停在最后完整
-//! 换行；workflow / session_excerpts 增量轮不重扫（M2 决议：跨行状态使真
-//! 增量成本不成比例，首轮全量已入库，event_id 幂等吸收）。全量轮也写
+//! 换行。workflow / session_excerpts 增量轮**整文件重扫**（PARSER_VERSION 6
+//! 起；M2 当初决议「增量轮不重扫」，结果是首轮全量之后追加的工具结果、回合、
+//! 模型切换永远不入库——真机 9 个活跃会话的 2527 次调用落在 workflow 覆盖之外，
+//! 会话诊断恰恰最关心这些尾部）。跨行状态（tool_use→tool_result 配对、回合、
+//! 模型）让「从 offset 续扫」不成立，整文件重扫靠 event_id 幂等吸收重复；
+//! 代价是活跃会话每轮多读一次文件（真机 p99 37MB、最大 130MB）。全量轮也写
 //! 换行边界 offset（不是 stat size）——F2 死循环防线：写 stat size 会让
 //! 增量从行中间起读。
 
@@ -19,6 +23,7 @@ use agent_vitals_domain::source_graph::{
 };
 
 use super::usage_fact::{claude_jsonl_to_usage_facts, claude_jsonl_to_usage_facts_incremental};
+use super::workflow::claude_file_to_workflow_events;
 
 /// claude-code JSONL 会话日志（append-only）。P1a 增量解析器的注册位。
 pub struct ClaudeCodeParser;
@@ -66,10 +71,13 @@ impl SourceParser for ClaudeCodeParser {
         let (facts, new_offset) = claude_jsonl_to_usage_facts_incremental(
             path, ctx.machine_namespace, ctx.source_profile, &sid, from_offset,
         )?;
+        let (workflow_events, session_excerpts) = claude_file_to_workflow_events(
+            path, ctx.machine_namespace, ctx.source_profile, &sid,
+        )?;
         Ok(ParseOutput {
             facts,
-            workflow_events: Vec::new(),
-            session_excerpts: Vec::new(),
+            workflow_events,
+            session_excerpts,
             new_offset,
         })
     }
@@ -185,8 +193,16 @@ mod tests {
         write_jsonl(&file, &batch2);
         let inc2 = parser.parse_increment(&ctx(), &file, full1.new_offset).unwrap();
         assert!(inc2.new_offset > full1.new_offset, "第二批 offset 应继续推进");
-        assert!(inc2.workflow_events.is_empty() && inc2.session_excerpts.is_empty(),
-            "增量轮不重扫 workflow/excerpts（M2 决议）");
+        // PARSER_VERSION 6：增量轮整文件重扫 workflow——追加段里的用户请求
+        // 必须产出回合事件，且与全量同 event_id（幂等吸收的前提）。
+        let full2 = parser.parse_full(&ctx(), &file).unwrap();
+        let ids = |events: &[agent_vitals_domain::workflow::WorkflowEvent]| {
+            let mut ids: Vec<String> = events.iter().map(|e| e.event_id.clone()).collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(ids(&inc2.workflow_events), ids(&full2.workflow_events),
+            "增量轮的 workflow 事件必须与同一时刻的全量逐条一致");
 
         write_jsonl(&file, &batch3);
         let inc3 = parser.parse_increment(&ctx(), &file, inc2.new_offset).unwrap();
