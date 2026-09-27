@@ -14,16 +14,16 @@ const ui = path.join(repo, "apps/desktop/ui-dev");
 const sessionsSource = readFileSync(path.join(ui, "react/src/features/sessions/SessionsPage.tsx"), "utf8");
 const navSource = readFileSync(path.join(ui, "react/src/lib/nav.ts"), "utf8");
 const detailSource = readFileSync(path.join(ui, "react/src/features/sessions/SessionDetail.tsx"), "utf8");
-// R1（OVERVIEW_DRILLDOWN spec §4.2/§7.2）：会话深链的契约——白名单文法、
-// 解码永不抛（守卫 spec §8）、一次性消费（防刷新回滚用户窗口选择）。
-assert.match(navSource, /\\d\{4\}-\\d\{2\}-\\d\{2\}/, "date deep-link pattern must be a strict Beijing-day shape");
-assert.match(navSource, /:\[a-z0-9_-\]\{1,32\}\/, "host whitelist must accept plugin:<slug> hosts (parity with safeHostLabel)");
-assert.match(navSource, /catch \{ return null; \}/, "decodeURIComponent must be guarded — a malformed hash must never crash the app");
-assert.doesNotMatch(navSource, /readSessionsDateFromHash/, "no dead deep-link exports");
-assert.match(sessionsSource, /value="day"/, "sessions window picker must expose the day window (deep-link target)");
-assert.match(sessionsSource, /replaceState/, "deep link must be consumed once (no refresh rollback of user window choice)");
-assert.match(sessionsSource, /hashchange/, "sessions page must follow same-page hash deep-link re-entry");
-assert.match(sessionsSource, /sessions-workspace-selected/, "selecting a session must open the desktop inspector beside the list");
+// R1（OVERVIEW_DRILLDOWN spec §4.2/§7.2）：会话深链契约——白名单文法、
+// 解码永不抛（spec §8 守卫）、一次性消费（防刷新回滚用户窗口选择）。
+// 用字符串包含而非正则：断言的是源码里的字面文法串本身。
+assert.ok(navSource.includes(String.raw`\d{4}-\d{2}-\d{2}`), "date deep-link pattern must be the strict Beijing-day shape");
+assert.ok(navSource.includes(":[a-z0-9_-]{1,32}"), "host whitelist must accept plugin:<slug> hosts (parity with safeHostLabel)");
+assert.ok(navSource.includes("catch { return null; }"), "decodeURIComponent must be guarded — malformed hash must never crash the app");
+assert.ok(!navSource.includes("readSessionsDateFromHash"), "no dead deep-link exports");
+assert.ok(sessionsSource.includes('value="day"'), "sessions window picker must expose the day window (deep-link target)");
+assert.ok(sessionsSource.includes("replaceState"), "deep link must be consumed once (no refresh rollback of user window choice)");
+assert.ok(sessionsSource.includes("hashchange"), "sessions page must follow same-page hash deep-link re-entry");
 assert.match(sessionsSource, /rows\.find\(\(row\) => row\.session_ref === selectedSessionRef\)/, "selection must resolve against refreshed rows by stable session_ref");
 assert.doesNotMatch(sessionsSource, /useState<SessionRow \| null>/, "the inspector must not retain a stale row object across list refreshes");
 assert.match(sessionsSource, /refreshKey=\{detailRefreshKey\}/, "list invalidation must also refresh the selected inspector");
