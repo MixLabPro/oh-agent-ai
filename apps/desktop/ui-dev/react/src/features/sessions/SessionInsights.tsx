@@ -110,11 +110,18 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
   modeRef.current = mode;
   const [history, setHistory] = useState<{ mode: Mode; cursor: number }[]>([]);
   const [cursor, setCursor] = useState(1);
-  const [win, setWin] = useState<{ view: [number, number]; focusKey: string } | null>(null);
-  // 证据请求的代次：会话切换或刷新后，迟到的旧响应不得写进新缓存。
-  const evGeneration = useRef(0);
+  const [win, setWin] = useState<{ view: [number, number]; navKey: string } | null>(null);
+  // 导航计数：每次点诊断 / 回合 / 方向键 +1。同一诊断再点一次也算新导航（缩略图拖走后
+  // 按 Esc 或「下一处」要能把它带回视野）。
+  const [nav, setNav] = useState(0);
+  const lastView = useRef<[number, number] | null>(null);
+  // 数据代次：同一会话刷新后 +1。证据缓存按代次校验（旧值先照常显示、后台重取，
+  // 不闪「正在读取」）；迟到的旧响应不得覆盖新值。
+  const [dataGen, setDataGen] = useState(0);
+  const dataGenRef = useRef(0);
+  const [refreshFailed, setRefreshFailed] = useState(false);
   const [width, setWidth] = useState(800);
-  const [evidence, setEvidence] = useState<Record<string, SessionTraceEvidence | "loading" | "error">>({});
+  const [evidence, setEvidence] = useState<Record<string, { value: SessionTraceEvidence | "loading" | "error"; gen: number }>>({});
   const chartBox = useRef<HTMLDivElement | null>(null);
 
   // 换会话才清空；同一会话的后台刷新（每次同步都会触发）保留当前视图与选择，
@@ -123,14 +130,15 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
   useEffect(() => {
     let active = true;
     const sameSession = loadedRef.current === sessionRef;
-    evGeneration.current += 1;
-    setEvidence({});
-    if (!sameSession) { setData(null); setMode(null); setHistory([]); setWin(null); }
+    if (!sameSession) { setData(null); setMode(null); setHistory([]); setWin(null); setEvidence({}); lastView.current = null; }
     setError(null);
     void readSessionInsights(sessionRef).then(insights => {
       if (!active) return;
       loadedRef.current = sessionRef;
       setData({ ref: sessionRef, insights });
+      setRefreshFailed(false);
+      dataGenRef.current += 1;
+      setDataGen(dataGenRef.current);
       const current = modeRef.current;
       if (!(sameSession && current && modeStillValid(current, insights))) {
         setHistory([]);
@@ -138,7 +146,11 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
         else { const s = insights.axis.steps.find(x => x.notes.length)?.index ?? 1; setCursor(s); setMode({ kind: "step", step: s }); }
       }
       setCursor(c => Math.min(Math.max(1, c), Math.max(1, insights.axis.steps.length)));
-    }).catch((reason: unknown) => { if (active && !sameSession) setError(safeUiError(reason, "消耗诊断暂不可用")); });
+    }).catch((reason: unknown) => {
+      if (!active) return;
+      // 首次加载失败 → 整块报错；刷新失败 → 保留旧数据并提示（不静默吞掉）。
+      if (sameSession) setRefreshFailed(true); else setError(safeUiError(reason, "消耗诊断暂不可用"));
+    });
     return () => { active = false; };
   }, [sessionRef, refreshKey, retry]);
 
@@ -161,9 +173,10 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
     if (mode.kind === "calls") return [mode.from, mode.to];
     return [cursor, cursor];
   }, [insights, mode, cursor]);
-  const focusKey = mode ? `${mode.kind}:${mode.kind === "diag" ? mode.diag : mode.kind === "calls" ? `${mode.from}-${mode.to}` : cursor}` : "none";
-  const view: [number, number] = resolveWindow(steps.length, maxVisible, win, focusKey, focus[0], focus[1]);
-  const setUserWindow = (next: [number, number]) => setWin({ view: next, focusKey });
+  const navKey = String(nav);
+  const view: [number, number] = resolveWindow(steps.length, maxVisible, win, navKey, focus[0], focus[1], lastView.current);
+  lastView.current = view;
+  const setUserWindow = (next: [number, number]) => setWin({ view: next, navKey });
 
   // 需要原始证据的模式按需加载（按区间缓存）。
   const evidenceRange: [number, number] | null = (() => {
@@ -177,17 +190,24 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
   const evKey = evidenceRange ? `${mode?.kind === "safety" ? "safety" : "calls"}:${evidenceRange[0]}-${evidenceRange[1]}` : null;
   const includeCalls = mode?.kind !== "safety";
   useEffect(() => {
-    if (!evKey || !evidenceRange || evidence[evKey]) return;
-    const generation = evGeneration.current;
-    setEvidence(e => ({ ...e, [evKey]: "loading" }));
-    void readSessionTraceEvidence(sessionRef, evidenceRange[0], evidenceRange[1], includeCalls)
-      .then(v => { if (generation === evGeneration.current) setEvidence(e => ({ ...e, [evKey]: v })); })
-      .catch(() => { if (generation === evGeneration.current) setEvidence(e => ({ ...e, [evKey]: "error" })); });
-  }, [evKey, evidence]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!evKey || !evidenceRange) return;
+    const entry = evidence[evKey];
+    if (entry && (entry.gen >= dataGen || entry.value === "loading")) return;
+    const generation = dataGen;
+    const ref = sessionRef;
+    // 首次读取显示「正在读取」；刷新后的重取保留旧值直到新值到达。
+    if (!entry) setEvidence(e => ({ ...e, [evKey]: { value: "loading", gen: generation } }));
+    const settle = (value: SessionTraceEvidence | "error") => {
+      if (generation !== dataGenRef.current || ref !== loadedRef.current) return;
+      setEvidence(e => ({ ...e, [evKey]: { value, gen: generation } }));
+    };
+    void readSessionTraceEvidence(sessionRef, evidenceRange[0], evidenceRange[1], includeCalls).then(settle).catch(() => settle("error"));
+  }, [evKey, evidence, dataGen]); // eslint-disable-line react-hooks/exhaustive-deps
   const retryEvidence = () => { if (evKey) setEvidence(e => { const next = { ...e }; delete next[evKey]; return next; }); };
-  const ev = evKey ? evidence[evKey] : undefined;
+  const ev = evKey ? evidence[evKey]?.value : undefined;
 
   const go = (next: Mode, push = true) => {
+    setNav(n => n + 1);
     if (push && mode) setHistory(h => [...h, { mode, cursor }].slice(-20));
     if (!push) setHistory([]);
     setMode(next);
@@ -199,6 +219,7 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
     if (!prev) return;
     setMode(prev.mode);
     setCursor(prev.cursor);
+    setNav(n => n + 1);
     setHistory(history.slice(0, -1));
   };
 
@@ -222,6 +243,7 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
 
   return <section className="session-detail-panel session-insights" aria-label="消耗诊断">
     <div className="section-heading"><div><p className="eyebrow">消耗诊断</p><h3>这次会话的消耗集中在哪里</h3></div><span className="count-badge">{steps.length} 个{unit}</span></div>
+    {refreshFailed && <p className="insights-refresh-failed" role="status">刷新失败，显示的是上一次的结果。<button type="button" className="link" onClick={() => setRetry(v => v + 1)}>重试</button></p>}
 
     <dl className="insights-summary">
       <div><dt>{unit}</dt><dd className="num">{steps.length}</dd></div>
@@ -508,7 +530,8 @@ function Inspector({ insights, mode, unit, ev, go, retry }: { insights: SessionI
     if (d.kind === "repeated_failure") {
       const fails = evData?.failures ?? [];
       const byKey = new Map<string, typeof fails>();
-      for (const f of fails) { const k = f.invocation_key ?? `${f.capability_id}`; byKey.set(k, [...(byKey.get(k) ?? []), f]); }
+      // 没有分组键（旧日志的工具名级指纹已被服务端置空）就不能说「相同调用」：每次失败自成一组。
+      for (const f of fails) { const k = f.invocation_key ?? `ts:${f.ts_ms}:${f.step}`; byKey.set(k, [...(byKey.get(k) ?? []), f]); }
       const top = [...byKey.values()].sort((a, b) => b.length - a.length)[0] ?? [];
       const first = top[0];
       return <div className="insights-insp">
@@ -517,7 +540,7 @@ function Inspector({ insights, mode, unit, ev, go, retry }: { insights: SessionI
         {loading && <p className="muted">正在读取错误摘要…</p>}
         {evErr && <p className="muted">错误摘要暂不可用。{retryButton}</p>}
         {first && <><dl className="kv"><dt>调用</dt><dd className="num wrap">{first.capability_id ?? "工具"} · {first.args_excerpt ?? "—"}</dd></dl>
-          <div><p className="muted">错误摘要（{top.length} 次{top.length > 1 ? "相同调用" : ""}）</p><pre className="insights-excerpt">{(first.error_excerpt ?? "（没有记录错误文本）").split("\n")[0]}</pre><LocalNote /></div>
+          <div><p className="muted">{top.length > 1 && first.invocation_key ? `错误摘要（${top.length} 次相同调用）` : "错误摘要（其中一次）"}</p><pre className="insights-excerpt">{(first.error_excerpt ?? "（没有记录错误文本）").split("\n")[0]}</pre><LocalNote /></div>
           <div className="insights-acts"><button type="button" className="button button-primary" onClick={() => go({ kind: "failure", step: first.step ?? d.steps.from, ts: first.ts_ms })}>查看一次失败</button><button type="button" className="button button-secondary" onClick={() => go({ kind: "calls", from: d.steps.from, to: d.steps.to })}>查看相关调用</button></div>
           <ul className="insights-list">{fails.slice(0, 30).map((f, i) => <li key={i}><button type="button" className="row" onClick={() => go({ kind: "failure", step: f.step ?? d.steps.from, ts: f.ts_ms })}><span className="fail">✕</span><span>{unit} {f.step} · {f.capability_id ?? "工具"}</span><span className="num muted">{clock(f.ts_ms)}</span></button></li>)}</ul></>}
         {rm && <div className="insights-note"><b>建议</b> {rm[0]}<br /><span className="muted">这几个{unit}共输入 {fmtTokens(d.impact.tokens)} tokens，不代表都能省下来。</span></div>}

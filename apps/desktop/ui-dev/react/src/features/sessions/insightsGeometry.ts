@@ -43,20 +43,23 @@ export function chartWindow(total: number, maxVisible: number, current: [number,
   return [start, start + span - 1];
 }
 
-/// 窗口的状态机：用户在缩略图上拖动/翻页设定的窗口，在**选择没变**之前一直有效；
-/// 选择变了才按新焦点重新定位。此前每次渲染都按焦点重算，窗口一拖就被拽回当前
-/// 诊断（验收 Major）。`focusKey` 标识「当前选择」（诊断序号 / 回合号等）。
+/// 窗口的状态机：用户在缩略图上拖动/翻页设定的窗口，在**没有新的导航动作**之前
+/// 一直有效（此前每次渲染都按焦点重算，窗口一拖就被拽回当前诊断）。有新的导航
+/// 动作（`navKey` 变了：点诊断、点回合、方向键）时按新焦点定位，但**焦点已在当前
+/// 视图内就不动**（`last` = 上一次实际显示的窗口；否则点一下可见的柱子整图就会重新
+/// 居中，方向键会拖着整图一格一格走）。
 export function resolveWindow(
   total: number, maxVisible: number,
-  user: { view: [number, number]; focusKey: string } | null,
-  focusKey: string, from: number, to: number,
+  user: { view: [number, number]; navKey: string } | null,
+  navKey: string, from: number, to: number,
+  last: [number, number] | null,
 ): [number, number] {
   if (total <= maxVisible) return [1, Math.max(1, total)];
-  if (user && user.focusKey === focusKey && user.view[1] - user.view[0] + 1 === maxVisible) {
+  if (user && user.navKey === navKey && user.view[1] - user.view[0] + 1 === maxVisible) {
     const start = Math.max(1, Math.min(total - maxVisible + 1, user.view[0]));
     return [start, start + maxVisible - 1];
   }
-  return chartWindow(total, maxVisible, null, from, to);
+  return chartWindow(total, maxVisible, last, from, to);
 }
 
 /// 诊断底带的行分配：同一行内区间不重叠，最多 `maxRows` 行；放不下的仍放进最后

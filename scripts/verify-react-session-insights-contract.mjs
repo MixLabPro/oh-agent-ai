@@ -21,6 +21,10 @@ const ui = path.join(repo, "apps/desktop/ui-dev");
 const uiRequire = createRequire(path.join(ui, "package.json"));
 const { buildSync } = uiRequire("esbuild");
 
+// 真实诊断也要过文案检查（在第 3 节加载组件后才有 diagText，这里先登记，最后统一检）。
+const pendingCopyChecks = [];
+function view_copy_check(d) { pendingCopyChecks.push(d); }
+
 function load(entry, globals = {}) {
   const built = buildSync({
     entryPoints: [path.join(ui, entry)], bundle: true, format: "cjs", platform: "node", target: "node20", write: false, logLevel: "silent",
@@ -79,8 +83,15 @@ const golden = JSON.parse(readFileSync(path.join(repo, "fixtures/session_insight
 const real = bridge.parseSessionInsights(golden);
 assert.equal(real.axis.leading_step, true);
 assert.ok(real.axis.steps.some(s => s.ended_at_ms === null), "缺 ended_at_ms 的步被接受为 null");
-assert.equal(real.session.nominal_cost_reason, "no_pricing_snapshot");
-assert.equal(real.diagnostics[0].kind, "repeated_failure");
+assert.deepEqual([...new Set(real.diagnostics.map(d => d.kind))].sort(), ["high_uncached_input", "input_growth", "repeated_failure"], "金样覆盖三类诊断");
+assert.ok(real.session.nominal_cost && real.axis.steps.some(s => s.nominal_cost), "金样带名义成本");
+assert.ok(real.axis.steps.some(s => s.outcome === "cancelled") && real.axis.steps.some(s => s.notes.length), "金样带回合结果与说明");
+for (const d of real.diagnostics) view_copy_check(d);
+const perCall = bridge.parseSessionInsights(JSON.parse(readFileSync(path.join(repo, "fixtures/session_insights/insights_envelope_per_call.json"), "utf8")));
+assert.equal(perCall.axis.fallback, "few_turn_starts");
+assert.equal(perCall.lanes.tools.state, "unavailable");
+assert.equal(perCall.lanes.tools.reason, "no_data_in_session");
+assert.equal(perCall.session.nominal_cost_reason, "no_pricing_snapshot", "无价格快照时说明原因");
 const long = await bridge.readSessionInsights("sr_browser_mock_02");
 assert.equal(long.axis.steps.length, 420, "长会话样本");
 assert.ok(long.axis.steps.some(s => s.ended_at_ms === null));
@@ -117,12 +128,15 @@ for (const total of [5, 40, 420, 2447]) {
     }
   }
 }
-// 缩略图设定的窗口在选择不变时保持（此前每次渲染都被拽回当前诊断）。
+// 缩略图设定的窗口在没有新导航动作时保持（此前每次渲染都被拽回当前诊断）。
 const maxV = geo.maxVisibleSteps(700);
 const userView = [300, 299 + maxV];
-assert.deepEqual([...geo.resolveWindow(440, maxV, { view: userView, focusKey: "diag:0" }, "diag:0", 18, 20)], userView, "选择没变：保留用户窗口");
-const moved = geo.resolveWindow(440, maxV, { view: userView, focusKey: "diag:0" }, "diag:1", 18, 20);
-assert.ok(moved[0] <= 18 && 20 <= moved[1], "选择变了：窗口移到新焦点");
+assert.deepEqual([...geo.resolveWindow(440, maxV, { view: userView, navKey: "7" }, "7", 18, 20, userView)], userView, "没有新导航：保留用户窗口");
+const moved = geo.resolveWindow(440, maxV, { view: userView, navKey: "7" }, "8", 18, 20, userView);
+assert.ok(moved[0] <= 18 && 20 <= moved[1], "新导航到视野外的焦点：窗口移过去");
+// 回归（确认轮）：点一下已在视野内的柱子不得让整图重新居中。
+const clickVisible = geo.resolveWindow(440, maxV, { view: userView, navKey: "7" }, "8", 310, 310, userView);
+assert.deepEqual([...clickVisible], userView, "焦点已在视野内：窗口不动");
 // 诊断底带：每条都有行；同一行（最后一行溢出除外）不重叠。
 const ranges = Array.from({ length: 43 }, (_, i) => ({ from: 1 + (i * 7) % 400, to: 3 + (i * 7) % 400 }));
 const rows = geo.packBands(ranges, 6);
@@ -149,6 +163,10 @@ for (const d of insights.diagnostics) {
   if (d.cause === "unknown") assert.equal(t.chip[1], "原因未明");
   if (d.cause === "evidence") assert.equal(t.chip[1], "有错误摘要");
 }
+for (const d of pendingCopyChecks) {
+  const t = view.diagText(d, unit);
+  assert.doesNotMatch(`${t.title}${t.fact}${t.why}`, /多付|可节省|浪费|省下|\$|¥|NaN|undefined/, `真实诊断文案：${t.title}`);
+}
 const growth = view.diagText(insights.diagnostics.find(d => d.kind === "input_growth"), unit);
 assert.match(growth.title, /增长 3\.2 倍/, "输入增长的标题是测得的事实");
 assert.match(growth.why, /尚不能确定/, "原因单列并说明不确定");
@@ -156,6 +174,7 @@ const source = readFileSync(path.join(ui, "react/src/features/sessions/SessionIn
 assert.ok(!source.includes("estimated_amount"), "诊断不读金额（r6 移除 estimated_amount）");
 assert.ok(!source.includes("比全部命中多"), "不写「比全部命中多约 $X」");
 assert.ok(source.includes("仅在本机显示，不进入导出和 MCP"), "摘录旁固定标注本机专属");
+assert.ok(source.includes("f.invocation_key ?? `ts:"), "没有分组键的失败不得按工具名并成「相同调用」");
 assert.equal(view.fmtTokens(1_832_000), "183 万");
 assert.equal(view.fmtMoney({ amounts: [{ amount_minor: 612, currency: "USD" }, { amount_minor: 900, currency: "CNY" }], coverage: "partial" }), "$6.12 + ¥9.00（部分调用无价卡）");
 console.log("Session insights copy: OK (fact/cause split, no waste or money wording in diagnostics)");

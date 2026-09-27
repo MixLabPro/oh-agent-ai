@@ -331,47 +331,122 @@ mod insights_tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// 跨语言形状金样：真实 MCP 输出（合成种子，不含本机数据）落在
-    /// `fixtures/session_insights/insights_envelope.json`，TS 契约脚本
-    /// （scripts/verify-react-session-insights-contract.mjs）用同一份文件喂桥的解析器。
-    /// 此前前端只拿手写 mock 测，mock 总带 `ended_at_ms`，真实输出省略它时一半会话
-    /// 被解析器拒绝（验收 blocker）。更新：`UPDATE_INSIGHTS_FIXTURE=1 cargo test -p agent-vitals-mcp golden`。
-    #[test]
-    fn insights_golden_fixture_matches_the_rust_output() {
-        let home = tmp_home("golden");
-        let sref = seed(&home);
-        // 覆盖可选键缺席的形状：首回合前的调用（前导步）、一个没有任何测量的空回合。
-        let db = AuthorityDb::open(&agent_vitals_data::authority::default_authority_path(&home), 1).unwrap();
-        db.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key,
-                 source_event_id, observation_kind, model_id, event_ts_ms, event_peak,
-                 uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
-                 ingested_run_id, created_at_ms, updated_at_ms)
-             VALUES ('early', 'claude-code', 'ns', 'priv-ins-01', ?1, 'early', 'assistant-usage', 'claude-sonnet-5', ?2, 0,
-                     900, 0, 30000, 100, 'run', 1, 1)",
-            rusqlite::params![SKEY, T0 - 5 * MIN],
-        ).unwrap();
-        db.conn().execute(
-            "INSERT INTO workflow_events(event_id, session_key, event_ts_ms, event_type, outcome, ingested_run_id, created_at_ms)
-             VALUES ('empty-turn', ?1, ?2, 'task_started', 'unknown', 'run', 1)",
-            rusqlite::params![SKEY, T0 + 12 * 2 * MIN + 30 * MIN],
-        ).unwrap();
-        drop(db);
-        let mut env = insights(&home, &sref);
-        // envelope 里与环境相关的字段（生成时间、权威库状态）不进金样。
-        let data = env["data"].take();
-        let golden = json!({ "data": data });
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/session_insights/insights_envelope.json");
-        let rendered = serde_json::to_string_pretty(&golden).unwrap() + "\n";
+    fn write_or_check(name: &str, golden: &Value) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/session_insights").join(name);
+        let rendered = serde_json::to_string_pretty(golden).unwrap() + "\n";
         if std::env::var("UPDATE_INSIGHTS_FIXTURE").is_ok() {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, &rendered).unwrap();
         }
         let expected = std::fs::read_to_string(&path).expect("golden fixture missing — run with UPDATE_INSIGHTS_FIXTURE=1");
         assert_eq!(rendered, expected, "insights 形状变了：确认是有意的，再更新金样并同改 lib/sessionInsights.ts");
+    }
+
+    fn fact(db: &AuthorityDb, id: &str, ts: i64, model: &str, read: i64, write: i64, unc: i64) {
+        db.conn().execute(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key,
+                 source_event_id, observation_kind, model_id, event_ts_ms, event_peak,
+                 uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                 ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES (?1, 'claude-code', 'ns', 'priv-ins-01', ?2, ?1, 'assistant-usage', ?3, ?4, 0, ?5, ?6, ?7, 400, 'run', 1, 1)",
+            rusqlite::params![id, SKEY, model, ts, unc, read, write],
+        ).unwrap();
+    }
+
+    fn turn(db: &AuthorityDb, id: &str, ts: i64) {
+        db.conn().execute(
+            "INSERT INTO workflow_events(event_id, session_key, event_ts_ms, event_type, outcome, ingested_run_id, created_at_ms)
+             VALUES (?1, ?2, ?3, 'task_started', 'unknown', 'run', 1)",
+            rusqlite::params![id, SKEY, ts],
+        ).unwrap();
+    }
+
+    /// 跨语言形状金样：真实 MCP 输出（合成种子，不含本机数据）落在
+    /// `fixtures/session_insights/`，TS 契约脚本（scripts/verify-react-session-insights-contract.mjs）
+    /// 用同一份文件喂桥的解析器。此前前端只拿手写 mock 测，mock 总带 `ended_at_ms`，
+    /// 真实输出省略它时一半会话被解析器拒绝（验收 blocker）；确认轮又指出金样只覆盖了
+    /// 一小部分形状——这里的种子要让三类诊断、名义成本、回合结果、说明、前导步、空回合
+    /// 都出现。更新：`UPDATE_INSIGHTS_FIXTURE=1 cargo test -p agent-vitals-mcp golden`。
+    #[test]
+    fn insights_golden_fixture_matches_the_rust_output() {
+        let home = tmp_home("golden");
+        let sref = seed(&home);
+        let db = AuthorityDb::open(&agent_vitals_data::authority::default_authority_path(&home), 1).unwrap();
+        // 价格快照（早于所有调用）→ 回合与会话的名义成本。
+        let payload = json!({ "pricing": agent_vitals_domain::cost::load_pricing() }).to_string();
+        db.conn().execute(
+            "INSERT INTO pricing_snapshots(pricing_version, captured_at_ms, source_kind, payload_json) VALUES ('golden-v1', ?1, 'test', ?2)",
+            rusqlite::params![T0 - 86_400_000, payload],
+        ).unwrap();
+        // 首回合前的调用 → 前导步。
+        fact(&db, "early", T0 - 5 * MIN, "claude-sonnet-5", 0, 30_000, 900);
+        // 一个没有任何测量的空回合（缺 ended_at_ms / hit_rate / idle_before_ms）。
+        turn(&db, "empty-turn", T0 + 12 * 2 * MIN + 30 * MIN);
+        // 回合 8–9 基线不稳后的高未命中（unexplained）：把这两个回合的调用改成低命中。
+        db.conn().execute(
+            "UPDATE usage_facts SET cache_read_tokens = 5000, cache_write_tokens = 40000, uncached_input_tokens = 5000
+             WHERE event_ts_ms >= ?1 AND event_ts_ms < ?2",
+            rusqlite::params![T0 + 7 * 2 * MIN, T0 + 9 * 2 * MIN],
+        ).unwrap();
+        db.conn().execute(
+            "UPDATE usage_facts SET cache_read_tokens = 30000, cache_write_tokens = 10000, uncached_input_tokens = 10000
+             WHERE event_ts_ms >= ?1 AND event_ts_ms < ?2",
+            rusqlite::params![T0 + 6 * 2 * MIN + 2_500, T0 + 7 * 2 * MIN],
+        ).unwrap();
+        // 长空闲后的低命中（说明，不进清单）+ 其后 12 个回合的单次输入持续增长。
+        let base = T0 + 90 * MIN;
+        for k in 0..12i64 {
+            let ts = base + k * 2 * MIN;
+            turn(&db, &format!("g{k}"), ts);
+            let size = 40_000 + k * 12_000;
+            if k == 0 {
+                fact(&db, &format!("g{k}a"), ts + 1_000, "claude-sonnet-5", 0, size - 500, 500);
+            } else {
+                fact(&db, &format!("g{k}a"), ts + 1_000, "claude-sonnet-5", size - 1_000, 500, 500);
+            }
+        }
+        // 一个被中断的回合（回合结果 cancelled）。
+        db.conn().execute(
+            "INSERT INTO workflow_events(event_id, session_key, event_ts_ms, event_type, outcome, ingested_run_id, created_at_ms)
+             VALUES ('cancel', ?1, ?2, 'task_finished', 'cancelled', 'run', 1)",
+            rusqlite::params![SKEY, T0 + 2 * 2 * MIN + 30_000],
+        ).unwrap();
+        drop(db);
+        let mut env = insights(&home, &sref);
+        // envelope 里与环境相关的字段（生成时间、权威库状态）不进金样。
+        let golden = json!({ "data": env["data"].take() });
+        write_or_check("insights_envelope.json", &golden);
         let d = &golden["data"];
+        let kinds: std::collections::BTreeSet<&str> = d["diagnostics"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds.len(), 3, "金样必须覆盖三类诊断：{kinds:?}");
         assert_eq!(d["axis"]["leading_step"], true);
-        assert!(d["axis"]["steps"].as_array().unwrap().iter().any(|s| s.get("ended_at_ms").is_none()), "金样必须包含可选键缺席的步");
+        let steps = d["axis"]["steps"].as_array().unwrap();
+        assert!(steps.iter().any(|s| s.get("ended_at_ms").is_none()), "金样必须包含可选键缺席的步");
+        assert!(steps.iter().any(|s| s["outcome"] == "cancelled"));
+        assert!(steps.iter().any(|s| !s["notes"].as_array().unwrap().is_empty()));
+        assert!(steps.iter().any(|s| s.get("nominal_cost").is_some()));
+        assert!(d["session"].get("nominal_cost").is_some());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 第二份金样：没有回合事件、没有工具结果的会话——按调用铺开（`fallback` 为字符串）、
+    /// 工具泳道不可用并带原因、无价格快照时的 `nominal_cost_reason`。
+    #[test]
+    fn insights_golden_fixture_per_call_axis() {
+        let home = tmp_home("golden-percall");
+        let sref = seed(&home);
+        let db = AuthorityDb::open(&agent_vitals_data::authority::default_authority_path(&home), 1).unwrap();
+        db.conn().execute("DELETE FROM workflow_events", []).unwrap();
+        db.conn().execute("DELETE FROM issue_instances", []).unwrap();
+        db.conn().execute("DELETE FROM usage_facts WHERE fact_id NOT IN ('f1','f2','f3','f4','f5')", []).unwrap();
+        drop(db);
+        let mut env = insights(&home, &sref);
+        let golden = json!({ "data": env["data"].take() });
+        write_or_check("insights_envelope_per_call.json", &golden);
+        let d = &golden["data"];
+        assert_eq!(d["axis"]["fallback"], "few_turn_starts");
+        assert_eq!(d["lanes"]["tools"]["state"], "unavailable");
+        assert_eq!(d["session"]["nominal_cost_reason"], "no_pricing_snapshot");
         let _ = std::fs::remove_dir_all(&home);
     }
 }
