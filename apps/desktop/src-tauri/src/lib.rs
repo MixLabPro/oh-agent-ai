@@ -4500,10 +4500,10 @@ async fn session_trace(
 /// 专属**——不走 `mcp::dispatch`，那是 agent 消费面，摘录不出那个面（与 CLI
 /// `trace-anchors` 同一信任域）。`from`/`to` 为 1 基步号（含两端）。
 #[tauri::command]
-async fn session_trace_evidence(session_ref: String, from: usize, to: usize) -> Value {
+async fn session_trace_evidence(session_ref: String, from: usize, to: usize, include_calls: Option<bool>) -> Value {
     let data_home = overview::data_home();
     tauri::async_runtime::spawn_blocking(move || {
-        match agent_vitals_runtime::query::session_insights::session_trace_evidence_for_ref(&data_home, &session_ref, from, to) {
+        match agent_vitals_runtime::query::session_insights::session_trace_evidence_for_ref(&data_home, &session_ref, from, to, include_calls.unwrap_or(true)) {
             Ok(v) => serde_json::json!({ "data": v }),
             Err(e) => serde_json::json!({ "error": { "code": e.split(':').next().unwrap_or("internal_error"), "message": e } }),
         }

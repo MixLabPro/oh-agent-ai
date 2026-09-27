@@ -17,7 +17,8 @@ export type StepNote = { explanation: "possible_cache_expiry" | "after_model_cha
 export type InsightStep = {
   index: number;
   started_at_ms: number;
-  ended_at_ms: number;
+  /// 这一步没有任何测量时服务端省略（§6.2）。
+  ended_at_ms: number | null;
   outcome: "succeeded" | "failed" | "cancelled" | "unknown" | null;
   idle_before_ms: number | null;
   input: { cache_read: number; cache_write: number; uncached_input: number };
@@ -150,7 +151,7 @@ function parseStep(value: unknown, position: number): InsightStep {
   return {
     index,
     started_at_ms: count(s.started_at_ms, "step.started_at_ms"),
-    ended_at_ms: count(s.ended_at_ms, "step.ended_at_ms"),
+    ended_at_ms: optCount(s.ended_at_ms, "step.ended_at_ms"),
     outcome: s.outcome === undefined || s.outcome === null ? null : oneOf(s.outcome, "step.outcome", ["succeeded", "failed", "cancelled", "unknown"] as const),
     idle_before_ms: optCount(s.idle_before_ms, "step.idle_before_ms"),
     input: inputBuckets(s.input, "step.input"),
@@ -272,7 +273,9 @@ export async function readSessionInsights(sessionRef: string): Promise<SessionIn
 }
 
 /// 本地证据（摘录）：只在本机呈现，永不上送。`from`/`to` 为 1 基步号（含两端）。
-export async function readSessionTraceEvidence(sessionRef: string, from: number, to: number): Promise<SessionTraceEvidence> {
+/// `includeCalls = false`：只要失败与安全提醒（安全视图跨整个会话，逐次调用可能上万条）。
+export async function readSessionTraceEvidence(sessionRef: string, from: number, to: number, includeCalls = true): Promise<SessionTraceEvidence> {
   if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1 || to < from) throw new Error("证据区间不安全");
-  return parseSessionTraceEvidence(await invoke<unknown>("session_trace_evidence", { sessionRef: safeRef(sessionRef), from, to }));
+  if (includeCalls && to - from > 5_000) throw new Error("证据区间过大");
+  return parseSessionTraceEvidence(await invoke<unknown>("session_trace_evidence", { sessionRef: safeRef(sessionRef), from, to, includeCalls }));
 }

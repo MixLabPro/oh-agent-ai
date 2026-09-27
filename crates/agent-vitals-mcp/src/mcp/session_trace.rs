@@ -330,4 +330,48 @@ mod insights_tests {
         assert!(!text.contains("/Users/"), "路径出现在 insights");
         let _ = std::fs::remove_dir_all(&home);
     }
+
+    /// 跨语言形状金样：真实 MCP 输出（合成种子，不含本机数据）落在
+    /// `fixtures/session_insights/insights_envelope.json`，TS 契约脚本
+    /// （scripts/verify-react-session-insights-contract.mjs）用同一份文件喂桥的解析器。
+    /// 此前前端只拿手写 mock 测，mock 总带 `ended_at_ms`，真实输出省略它时一半会话
+    /// 被解析器拒绝（验收 blocker）。更新：`UPDATE_INSIGHTS_FIXTURE=1 cargo test -p agent-vitals-mcp golden`。
+    #[test]
+    fn insights_golden_fixture_matches_the_rust_output() {
+        let home = tmp_home("golden");
+        let sref = seed(&home);
+        // 覆盖可选键缺席的形状：首回合前的调用（前导步）、一个没有任何测量的空回合。
+        let db = AuthorityDb::open(&agent_vitals_data::authority::default_authority_path(&home), 1).unwrap();
+        db.conn().execute(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key,
+                 source_event_id, observation_kind, model_id, event_ts_ms, event_peak,
+                 uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                 ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES ('early', 'claude-code', 'ns', 'priv-ins-01', ?1, 'early', 'assistant-usage', 'claude-sonnet-5', ?2, 0,
+                     900, 0, 30000, 100, 'run', 1, 1)",
+            rusqlite::params![SKEY, T0 - 5 * MIN],
+        ).unwrap();
+        db.conn().execute(
+            "INSERT INTO workflow_events(event_id, session_key, event_ts_ms, event_type, outcome, ingested_run_id, created_at_ms)
+             VALUES ('empty-turn', ?1, ?2, 'task_started', 'unknown', 'run', 1)",
+            rusqlite::params![SKEY, T0 + 12 * 2 * MIN + 30 * MIN],
+        ).unwrap();
+        drop(db);
+        let mut env = insights(&home, &sref);
+        // envelope 里与环境相关的字段（生成时间、权威库状态）不进金样。
+        let data = env["data"].take();
+        let golden = json!({ "data": data });
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/session_insights/insights_envelope.json");
+        let rendered = serde_json::to_string_pretty(&golden).unwrap() + "\n";
+        if std::env::var("UPDATE_INSIGHTS_FIXTURE").is_ok() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &rendered).unwrap();
+        }
+        let expected = std::fs::read_to_string(&path).expect("golden fixture missing — run with UPDATE_INSIGHTS_FIXTURE=1");
+        assert_eq!(rendered, expected, "insights 形状变了：确认是有意的，再更新金样并同改 lib/sessionInsights.ts");
+        let d = &golden["data"];
+        assert_eq!(d["axis"]["leading_step"], true);
+        assert!(d["axis"]["steps"].as_array().unwrap().iter().any(|s| s.get("ended_at_ms").is_none()), "金样必须包含可选键缺席的步");
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }

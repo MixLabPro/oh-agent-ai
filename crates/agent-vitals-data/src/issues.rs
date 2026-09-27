@@ -118,6 +118,12 @@ pub fn remedy_for(issue_type: &str) -> RemedyCandidate {
         "SV708" => RemedyCandidate { remedy_id: "review-remote-egress-control", diagnostic_only: false },
         "SV709" => RemedyCandidate { remedy_id: "review-object-storage-egress", diagnostic_only: false },
         "SV710" => RemedyCandidate { remedy_id: "review-declared-exclusions", diagnostic_only: false },
+        // 会话消耗诊断（SESSION_TRACE_DIAGNOSTICS_SPEC §7.5）：诊断不落 issue 表，
+        // 但 remedy_id 与 Findings 共用这一份目录（`query::session_insights` 的测试
+        // 钉住 domain 产出的 remedy_id 与这里一致）。
+        "high_uncached_input" => RemedyCandidate { remedy_id: "inspect-uncached-input", diagnostic_only: false },
+        "input_growth" => RemedyCandidate { remedy_id: "review-context-growth", diagnostic_only: false },
+        "repeated_failure" => RemedyCandidate { remedy_id: "inspect-repeated-failure", diagnostic_only: false },
         _ => RemedyCandidate { remedy_id: "diagnostic-only", diagnostic_only: true },
     }
 }

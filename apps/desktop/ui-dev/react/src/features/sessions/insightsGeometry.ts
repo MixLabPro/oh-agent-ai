@@ -43,6 +43,37 @@ export function chartWindow(total: number, maxVisible: number, current: [number,
   return [start, start + span - 1];
 }
 
+/// 窗口的状态机：用户在缩略图上拖动/翻页设定的窗口，在**选择没变**之前一直有效；
+/// 选择变了才按新焦点重新定位。此前每次渲染都按焦点重算，窗口一拖就被拽回当前
+/// 诊断（验收 Major）。`focusKey` 标识「当前选择」（诊断序号 / 回合号等）。
+export function resolveWindow(
+  total: number, maxVisible: number,
+  user: { view: [number, number]; focusKey: string } | null,
+  focusKey: string, from: number, to: number,
+): [number, number] {
+  if (total <= maxVisible) return [1, Math.max(1, total)];
+  if (user && user.focusKey === focusKey && user.view[1] - user.view[0] + 1 === maxVisible) {
+    const start = Math.max(1, Math.min(total - maxVisible + 1, user.view[0]));
+    return [start, start + maxVisible - 1];
+  }
+  return chartWindow(total, maxVisible, null, from, to);
+}
+
+/// 诊断底带的行分配：同一行内区间不重叠，最多 `maxRows` 行；放不下的仍放进最后
+/// 一行（允许重叠）——**任何诊断都有带**（§8.3 诊断标记不抽稀）。返回每条诊断的行号。
+export function packBands(ranges: { from: number; to: number }[], maxRows = 6): number[] {
+  const rowsEnd: number[] = [];
+  return ranges.map(r => {
+    for (let row = 0; row < rowsEnd.length; row += 1) {
+      if (r.from > rowsEnd[row]) { rowsEnd[row] = r.to; return row; }
+    }
+    if (rowsEnd.length < maxRows) { rowsEnd.push(r.to); return rowsEnd.length - 1; }
+    const last = maxRows - 1;
+    rowsEnd[last] = Math.max(rowsEnd[last], r.to);
+    return last;
+  });
+}
+
 /// 窗口内的柱位与缝隙。窗口首步前的空闲不画缝（它在窗口之外）。
 export function layoutSteps(steps: GeoStep[], window: [number, number], plotLeft: number, plotWidth: number): Layout {
   const visible = steps.slice(window[0] - 1, window[1]);

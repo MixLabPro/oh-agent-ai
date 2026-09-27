@@ -340,6 +340,12 @@ pub fn session_insights(conn: &Connection, session_key: &str, host: &str) -> rus
 /// 区间内每次失败的错误/参数摘录、逐次调用、安全提醒的命令摘要。
 /// `from`/`to` 为 1 基回合号（含两端），与 `insights.axis.steps[].index` 同一坐标。
 pub fn session_trace_evidence(conn: &Connection, session_key: &str, from: usize, to: usize) -> rusqlite::Result<Value> {
+    session_trace_evidence_with(conn, session_key, from, to, true)
+}
+
+/// `include_calls = false`：只要失败与安全提醒（检查器的安全视图跨整个会话，逐次
+/// 调用可能上万条，没有必要搬）。
+pub fn session_trace_evidence_with(conn: &Connection, session_key: &str, from: usize, to: usize, include_calls: bool) -> rusqlite::Result<Value> {
     let calls = load_calls(conn, session_key)?;
     let events = load_events(conn, session_key)?;
     let plain: Vec<InsightCall> = calls.iter().map(|c| c.call.clone()).collect();
@@ -348,7 +354,7 @@ pub fn session_trace_evidence(conn: &Connection, session_key: &str, from: usize,
 
     let mut calls_out = Vec::new();
     for (row, step) in calls.iter().zip(steps.iter()) {
-        if !in_range(*step) {
+        if !include_calls || !in_range(*step) {
             continue;
         }
         let c = &row.call;
@@ -380,12 +386,16 @@ pub fn session_trace_evidence(conn: &Connection, session_key: &str, from: usize,
         if !in_range(step) {
             continue;
         }
+        let raw_capability: Option<String> = r.get(1)?;
+        // 旧的工具名级指纹不是「同一调用」的证据（与 insights 同一规则，验收 finding）。
+        let key: Option<String> = r.get::<_, Option<String>>(3)?
+            .filter(|fp| !is_tool_level_fingerprint(fp, raw_capability.as_deref()));
         failures.push(json!({
             "step": step.map(|s| s + 1),
             "ts_ms": ts,
-            "capability_id": capability_label(r.get::<_, Option<String>>(1)?),
+            "capability_id": capability_label(raw_capability),
             // 分组键只在本地面出现，供检查器把「同一调用」的几次失败归到一起。
-            "invocation_key": r.get::<_, Option<String>>(3)?,
+            "invocation_key": key,
             "error_excerpt": r.get::<_, Option<String>>(4)?,
             "args_excerpt": r.get::<_, Option<String>>(5)?,
         }));
@@ -433,8 +443,10 @@ pub fn session_trace_evidence_for_ref(
     session_ref: &str,
     from: usize,
     to: usize,
+    include_calls: bool,
 ) -> Result<Value, String> {
-    if from == 0 || to < from || to - from > 5_000 {
+    // 逐次调用有量的上限；不带调用时（安全视图）允许跨整个会话。
+    if from == 0 || to < from || (include_calls && to - from > 5_000) {
         return Err("invalid_argument: step range".to_string());
     }
     let salt = super::session_ref::load_or_create_salt(data_home).map_err(|e| format!("{}: session salt", e.code))?;
@@ -445,5 +457,40 @@ pub fn session_trace_evidence_for_ref(
         .map_err(|_| "internal_error: session keys".to_string())?;
     let session_key = super::session_ref::resolve(&salt, session_ref, keys)
         .ok_or_else(|| "invalid_argument: unknown session_ref".to_string())?;
-    session_trace_evidence(db.conn(), &session_key, from, to).map_err(|_| "internal_error: evidence query".to_string())
+    session_trace_evidence_with(db.conn(), &session_key, from, to, include_calls).map_err(|_| "internal_error: evidence query".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use agent_vitals_domain::session_insights::{build_insights, InsightCall, InsightEvent, InsightsConfig};
+
+    /// remedy 目录只有一份（`agent_vitals_data::issues::remedy_for`，Findings 页在用）：
+    /// domain 诊断产出的 remedy_id 必须与目录对 kind 的映射一致。
+    #[test]
+    fn diagnostic_remedy_ids_come_from_the_shared_catalog() {
+        let mut calls = Vec::new();
+        let mut events = Vec::new();
+        for t in 0..14i64 {
+            let ts = 1_000_000 + t * 120_000;
+            events.push(InsightEvent::TaskStarted { ts_ms: ts });
+            let size = 30_000 + t * 9_000;
+            let (read, write) = if (6..=8).contains(&t) { (1_000, size) } else { (size - 100, 50) };
+            for k in 0..3 {
+                calls.push(InsightCall { ts_ms: ts + 1_000 + k * 1_000, model_id: Some("m".into()), cache_read: read, cache_write: write, uncached_input: 50, output: 10 });
+            }
+            if t == 10 {
+                for k in 0..2 {
+                    events.push(InsightEvent::ToolFinished { ts_ms: ts + 500 + k, capability_id: Some("Bash".into()), outcome: "failed".into(), invocation_fingerprint: Some("fp".into()), has_error_excerpt: true });
+                }
+            }
+        }
+        let v = build_insights(&calls, &events, &[], &InsightsConfig::default());
+        let diags = v["diagnostics"].as_array().unwrap();
+        let kinds: std::collections::BTreeSet<&str> = diags.iter().map(|d| d["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds.len(), 3, "fixture 应覆盖三类诊断：{kinds:?}");
+        for d in diags {
+            let kind = d["kind"].as_str().unwrap();
+            assert_eq!(d["remedy_id"].as_str().unwrap(), agent_vitals_data::issues::remedy_for(kind).remedy_id, "{kind}");
+        }
+    }
 }

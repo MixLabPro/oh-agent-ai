@@ -1,0 +1,425 @@
+{
+  "data": {
+    "schema_version": 1,
+    "axis": {
+      "unit": "turn",
+      "turn_starts": 13,
+      "leading_step": true,
+      "fallback": null,
+      "steps": [
+        {
+          "index": 1,
+          "started_at_ms": 1789999700000,
+          "input": {
+            "cache_read": 0,
+            "cache_write": 30000,
+            "uncached_input": 900
+          },
+          "output": 100,
+          "input_peak": 30900,
+          "calls": 1,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1789999700000,
+          "hit_rate": 0.0
+        },
+        {
+          "index": 2,
+          "started_at_ms": 1790000000000,
+          "input": {
+            "cache_read": 147000,
+            "cache_write": 1500,
+            "uncached_input": 1500
+          },
+          "output": 2400,
+          "input_peak": 50000,
+          "calls": 3,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790000003000,
+          "idle_before_ms": 301000,
+          "hit_rate": 0.98
+        },
+        {
+          "index": 3,
+          "started_at_ms": 1790000120000,
+          "input": {
+            "cache_read": 147000,
+            "cache_write": 1500,
+            "uncached_input": 1500
+          },
+          "output": 2400,
+          "input_peak": 50000,
+          "calls": 3,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790000123000,
+          "idle_before_ms": 118000,
+          "hit_rate": 0.98
+        },
+        {
+          "index": 4,
+          "started_at_ms": 1790000240000,
+          "input": {
+            "cache_read": 147000,
+            "cache_write": 1500,
+            "uncached_input": 1500
+          },
+          "output": 2400,
+          "input_peak": 50000,
+          "calls": 3,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790000243000,
+          "idle_before_ms": 118000,
+          "hit_rate": 0.98
+        },
+        {
+          "index": 5,
+          "started_at_ms": 1790000360000,
+          "input": {
+            "cache_read": 147000,
+            "cache_write": 1500,
+            "uncached_input": 1500
+          },
+          "output": 2400,
+          "input_peak": 50000,
+          "calls": 3,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790000363000,
+          "idle_before_ms": 118000,
+          "hit_rate": 0.98
+        },
+        {
+          "index": 6,
+          "started_at_ms": 1790000480000,
+          "input": {
+            "cache_read": 147000,
+            "cache_write": 1500,
+            "uncached_input": 1500
+          },
+          "output": 2400,
+          "input_peak": 50000,
+          "calls": 3,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 2,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790000483000,
+          "idle_before_ms": 118000,
+          "hit_rate": 0.98
+        },
+        {
+          "index": 7,
+          "started_at_ms": 1790000600000,
+          "input": {
+            "cache_read": 147000,
+            "cache_write": 1500,
+            "uncached_input": 1500
+          },
+          "output": 2400,
+          "input_peak": 50000,
+          "calls": 3,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790000603000,
+          "idle_before_ms": 118000,
+          "hit_rate": 0.98
+        },
+        {
+          "index": 8,
+          "started_at_ms": 1790000720000,
+          "input": {
+            "cache_read": 147000,
+            "cache_write": 1500,
+            "uncached_input": 1500
+          },
+          "output": 2400,
+          "input_peak": 50000,
+          "calls": 3,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790000723000,
+          "idle_before_ms": 118000,
+          "hit_rate": 0.98
+        },
+        {
+          "index": 9,
+          "started_at_ms": 1790000840000,
+          "input": {
+            "cache_read": 147000,
+            "cache_write": 1500,
+            "uncached_input": 1500
+          },
+          "output": 2400,
+          "input_peak": 50000,
+          "calls": 3,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790000843000,
+          "idle_before_ms": 118000,
+          "hit_rate": 0.98
+        },
+        {
+          "index": 10,
+          "started_at_ms": 1790000960000,
+          "input": {
+            "cache_read": 147000,
+            "cache_write": 1500,
+            "uncached_input": 1500
+          },
+          "output": 2400,
+          "input_peak": 50000,
+          "calls": 3,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790000963000,
+          "idle_before_ms": 118000,
+          "hit_rate": 0.98
+        },
+        {
+          "index": 11,
+          "started_at_ms": 1790001080000,
+          "input": {
+            "cache_read": 147000,
+            "cache_write": 1500,
+            "uncached_input": 1500
+          },
+          "output": 2400,
+          "input_peak": 50000,
+          "calls": 3,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790001083000,
+          "idle_before_ms": 118000,
+          "hit_rate": 0.98
+        },
+        {
+          "index": 12,
+          "started_at_ms": 1790001200000,
+          "input": {
+            "cache_read": 147000,
+            "cache_write": 1500,
+            "uncached_input": 1500
+          },
+          "output": 2400,
+          "input_peak": 50000,
+          "calls": 3,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790001203000,
+          "idle_before_ms": 118000,
+          "hit_rate": 0.98
+        },
+        {
+          "index": 13,
+          "started_at_ms": 1790001320000,
+          "input": {
+            "cache_read": 147000,
+            "cache_write": 1500,
+            "uncached_input": 1500
+          },
+          "output": 2400,
+          "input_peak": 50000,
+          "calls": 3,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790001323000,
+          "idle_before_ms": 118000,
+          "hit_rate": 0.98
+        },
+        {
+          "index": 14,
+          "started_at_ms": 1790003240000,
+          "input": {
+            "cache_read": 0,
+            "cache_write": 0,
+            "uncached_input": 0
+          },
+          "output": 0,
+          "input_peak": 0,
+          "calls": 0,
+          "model_ids": [],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": []
+        }
+      ],
+      "unplaced": {
+        "usage_facts": 0,
+        "workflow_events": 0
+      }
+    },
+    "session": {
+      "calls": 37,
+      "input": {
+        "cache_read": 1764000,
+        "cache_write": 48000,
+        "uncached_input": 18900
+      },
+      "output": 28900,
+      "nominal_cost_reason": "no_pricing_snapshot"
+    },
+    "diagnostics": [
+      {
+        "kind": "repeated_failure",
+        "steps": {
+          "from": 6,
+          "to": 6
+        },
+        "fact": {
+          "failures": 2,
+          "steps_hit": 1,
+          "capability_id": "Bash",
+          "same_invocation": true,
+          "groups": 1
+        },
+        "impact": {
+          "tokens": 150000,
+          "share_of_session_input": 0.0819
+        },
+        "cause": "evidence",
+        "evidence": [
+          "error_excerpt"
+        ],
+        "context_notes": [],
+        "remedy_id": "inspect-repeated-failure"
+      }
+    ],
+    "safety": {
+      "count": 1,
+      "critical": 1,
+      "rules": [
+        {
+          "rule": "SV601",
+          "severity": "critical",
+          "count": 1,
+          "steps": [
+            4
+          ]
+        }
+      ]
+    },
+    "quality": {
+      "legacy_fingerprints": 0
+    },
+    "lanes": {
+      "consumption": {
+        "state": "available",
+        "coverage": 1.0
+      },
+      "tools": {
+        "state": "available",
+        "coverage": 1.0
+      }
+    },
+    "host": "claude-code"
+  }
+}

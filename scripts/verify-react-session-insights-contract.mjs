@@ -73,7 +73,22 @@ assert.throws(() => bridge.parseSessionInsights({ error: { code: "internal_error
 const evBase = await mockInvoke("session_trace_evidence", { from: 18, to: 20 });
 const longExcerpt = JSON.parse(JSON.stringify(evBase)); longExcerpt.data.failures[0].error_excerpt = "x".repeat(5000);
 assert.throws(() => bridge.parseSessionTraceEvidence(longExcerpt), /摘录不安全/);
-console.log("Session insights bridge: OK (mock parses, evidence via local command, malformed rejected)");
+// 真实形状金样（Rust 测试 insights_golden_fixture_matches_the_rust_output 产出）：前端解析器必须
+// 接受真实输出——此前只测手写 mock，mock 总带 ended_at_ms，真实输出省略它时一半会话被拒。
+const golden = JSON.parse(readFileSync(path.join(repo, "fixtures/session_insights/insights_envelope.json"), "utf8"));
+const real = bridge.parseSessionInsights(golden);
+assert.equal(real.axis.leading_step, true);
+assert.ok(real.axis.steps.some(s => s.ended_at_ms === null), "缺 ended_at_ms 的步被接受为 null");
+assert.equal(real.session.nominal_cost_reason, "no_pricing_snapshot");
+assert.equal(real.diagnostics[0].kind, "repeated_failure");
+const long = await bridge.readSessionInsights("sr_browser_mock_02");
+assert.equal(long.axis.steps.length, 420, "长会话样本");
+assert.ok(long.axis.steps.some(s => s.ended_at_ms === null));
+const safetyOnly = await bridge.readSessionTraceEvidence("sr_browser_mock_01", 1, 420, false);
+assert.equal(calls.at(-1).args.includeCalls, false, "安全视图不搬逐次调用");
+assert.equal(safetyOnly.calls.length, 0);
+await assert.rejects(() => bridge.readSessionTraceEvidence("sr_browser_mock_01", 1, 9000), /证据区间过大/);
+console.log("Session insights bridge: OK (real golden + mock parse, evidence via local command, malformed rejected)");
 
 // ── 2. 几何 ──
 const geo = load("react/src/features/sessions/insightsGeometry.ts");
@@ -101,6 +116,21 @@ for (const total of [5, 40, 420, 2447]) {
       assert.equal(band.kind === "visible", intersects, `band visibility for ${JSON.stringify(range)} in ${view}`);
     }
   }
+}
+// 缩略图设定的窗口在选择不变时保持（此前每次渲染都被拽回当前诊断）。
+const maxV = geo.maxVisibleSteps(700);
+const userView = [300, 299 + maxV];
+assert.deepEqual([...geo.resolveWindow(440, maxV, { view: userView, focusKey: "diag:0" }, "diag:0", 18, 20)], userView, "选择没变：保留用户窗口");
+const moved = geo.resolveWindow(440, maxV, { view: userView, focusKey: "diag:0" }, "diag:1", 18, 20);
+assert.ok(moved[0] <= 18 && 20 <= moved[1], "选择变了：窗口移到新焦点");
+// 诊断底带：每条都有行；同一行（最后一行溢出除外）不重叠。
+const ranges = Array.from({ length: 43 }, (_, i) => ({ from: 1 + (i * 7) % 400, to: 3 + (i * 7) % 400 }));
+const rows = geo.packBands(ranges, 6);
+assert.equal(rows.length, 43, "43 条诊断都有带");
+assert.ok(rows.every(r => r >= 0 && r < 6));
+for (let r = 0; r < 5; r += 1) {
+  const inRow = ranges.filter((_, i) => rows[i] === r).sort((a, b) => a.from - b.from);
+  for (let k = 1; k < inRow.length; k += 1) assert.ok(inRow[k].from > inRow[k - 1].to, `row ${r} overlaps`);
 }
 assert.equal(geo.niceCeil(640_000), 800_000);
 assert.equal(geo.niceCeil(1), 1);
