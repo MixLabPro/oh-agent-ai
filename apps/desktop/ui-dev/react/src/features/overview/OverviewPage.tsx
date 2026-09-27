@@ -98,7 +98,9 @@ function OverviewFindingsStrip() {
           <li key={item.group_id} className={`overview-finding severity-${item.severity}`}>
             <span className="finding-rule">{item.rule}</span>
             <small>{item.host} · {item.count} 例 · {item.sessions_count} 个会话</small>
-            <a className="inline-drill" href={sessionsHostHref(item.host)}>去看会话 <span aria-hidden="true">→</span></a>
+            {item.sessions_count > 0 && item.host !== "generic" && item.host !== "all" && item.host
+              ? <a className="inline-drill" href={sessionsHostHref(item.host)}>去看会话 <span aria-hidden="true">→</span></a>
+              : null}
           </li>
         ))}
       </ul>
@@ -137,8 +139,8 @@ export function OverviewPage({ overview, details }: { overview: OverviewSnapshot
       <div className="overview-host-list">{Object.entries(details.monthly.tokens_by_host).map(([host, tokens]) => <article className="overview-host-row" key={host}><div><strong>{host}</strong><span>{hostTokensLabel(tokens)}</span></div><b>{tokens.total ? tokensLabel(tokens.total) : "—"} token</b></article>)}</div>
       <p className="overview-empty">币种和账单口径仅按 basis 分栏；估算、订阅和等价标价不会跨币种相加。</p>
     </section>}
+    <OverviewFindingsStrip />
     {details?.calendar && <section className="info-panel overview-recent-panel" aria-labelledby="overview-recent-title">
-      <OverviewFindingsStrip />
       <div className="section-heading"><div><p className="eyebrow">最近观测日</p><h3 id="overview-recent-title">{details.calendar.month}</h3></div><span className="count-badge">{details.calendar.days.length} 天</span></div>
       <div className="overview-recent-list">{details.calendar.days.slice(-5).reverse().map((day) => <a className="overview-recent-row overview-drill" key={day.date} href={sessionsDateHref(day.date)} title={`查看 ${day.date} 的会话`}><span>{day.date}</span><strong>{tokensLabel(day.total_tokens)} tokens</strong><small>{moneyDetail(day.costs)}</small></a>)}</div>
     </section>}

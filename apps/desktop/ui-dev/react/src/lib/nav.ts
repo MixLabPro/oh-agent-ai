@@ -1,12 +1,17 @@
 /**
  * 站内深链（OVERVIEW_DRILLDOWN spec R1）：异常 → 会话的一键穿透。
- * 页面路由仍是 App 的 hash 路由；本模块只约定 `#sessions?date=YYYY-MM-DD`
- * 这一种带参形态——参数白名单只有 date（北京日），识别即校验，不认识的一律
- * 返回 null（页面保持默认视图，不猜）。
+ * 页面路由仍是 App 的 hash 路由；本模块约定 `#sessions?date=YYYY-MM-DD` 与
+ * `#sessions?host=<host>` 两种参数（可组合），白名单识别即校验，不认识的
+ * 一律丢弃（页面保持默认视图，解码失败也不抛——守卫 spec §8）。
  */
 
 const SESSIONS_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-const SESSIONS_HOST_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
+// 与桥接层 safeHostLabel 同文法：真实宿主（claude-code）+ plugin:<slug>。
+const SESSIONS_HOST_PATTERN = /^[a-z][a-z0-9_-]{0,31}(:[a-z0-9_-]{1,32})?$/;
+
+function safeDecode(value: string): string | null {
+  try { return decodeURIComponent(value); } catch { return null; }
+}
 
 export function sessionsDateHref(date: string): string {
   return `#sessions?date=${encodeURIComponent(date)}`;
@@ -24,21 +29,10 @@ export function readSessionsDeepLinkFromHash(): SessionsDeepLink {
   const out: SessionsDeepLink = { date: null, host: null };
   for (const pair of query.split("&")) {
     const [key, raw] = pair.split("=");
-    const value = decodeURIComponent(raw ?? "");
+    const value = raw === undefined ? null : safeDecode(raw);
+    if (value === null) continue;
     if (key === "date" && SESSIONS_DATE_PATTERN.test(value)) out.date = value;
     if (key === "host" && SESSIONS_HOST_PATTERN.test(value)) out.host = value;
   }
   return out;
-}
-
-/** 读当前 hash 的会话日期参数；无参/非法 → null（视图回默认，不抛错）。 */
-export function readSessionsDateFromHash(): string | null {
-  const query = window.location.hash.split("?")[1] ?? "";
-  for (const pair of query.split("&")) {
-    const [key, raw] = pair.split("=");
-    if (key !== "date") continue;
-    const value = decodeURIComponent(raw ?? "");
-    return SESSIONS_DATE_PATTERN.test(value) ? value : null;
-  }
-  return null;
 }

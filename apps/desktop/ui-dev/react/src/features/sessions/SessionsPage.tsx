@@ -129,14 +129,38 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
   const initialViewState = useMemo(() => loadSessionsViewState(), []);
   // R1 深链（OVERVIEW_DRILLDOWN spec §4.2）：#sessions?date=…&host=… 优先于
   // 恢复的 view-state——深链是用户此刻的意图；切换窗口控件即离开 day 态。
-  const [filters, setFilters] = useState<SessionsFilters>(() => {
-    const deep = readSessionsDeepLinkFromHash();
-    const base = initialViewState?.filters ?? filtersForTimezone(DEFAULT_STATISTICS_TIMEZONE);
+  // date 与 host 可组合（同时过滤）。**一次性消费**：应用后立即 replaceState
+  // 去掉 query——否则 F5 会用旧深链压回用户后来切好的窗口（验收 P2-1）。
+  const deepLinkToFilters = (base: SessionsFilters, deep: ReturnType<typeof readSessionsDeepLinkFromHash>): SessionsFilters => {
     if (!deep.date && !deep.host) return base;
-    return deep.date
-      ? { ...base, window: "day", day: deep.date }
-      : { ...base, host_kind: deep.host ?? base.host_kind };
+    let next: SessionsFilters = deep.date ? { ...base, window: "day" as const, day: deep.date } : base;
+    if (deep.host) next = { ...next, host_kind: deep.host };
+    return next;
+  };
+  const consumeDeepLink = () => {
+    if (window.location.hash.includes("?")) {
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#sessions`);
+    }
+  };
+  const [filters, setFilters] = useState<SessionsFilters>(() => {
+    const base = initialViewState?.filters ?? filtersForTimezone(DEFAULT_STATISTICS_TIMEZONE);
+    const next = deepLinkToFilters(base, readSessionsDeepLinkFromHash());
+    if (next !== base) consumeDeepLink();
+    return next;
   });
+  // 同页 hash 变化（侧栏重点「会话」/同页深链再进入）：重读深链参数——
+  // 裸 #sessions 不动现有过滤；带新参数则应用并消费（验收 P2-2）。
+  useEffect(() => {
+    const onHashChange = () => {
+      const deep = readSessionsDeepLinkFromHash();
+      if (deep.date || deep.host) {
+        setFilters((current) => deepLinkToFilters(current, deep));
+        consumeDeepLink();
+      }
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
   const [statisticsTimezone, setStatisticsTimezone] = useState(DEFAULT_STATISTICS_TIMEZONE);
   const [timezoneReady, setTimezoneReady] = useState(false);
   const [rows, setRows] = useState<SessionRow[]>([]);

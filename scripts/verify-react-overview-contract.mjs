@@ -17,6 +17,15 @@ const appPage = readFileSync(path.join(ui, "react/src/app/App.tsx"), "utf8");
 assert.doesNotMatch(overviewPage, /overview\.(today_spend|month_spend)/, "cost cards must use authority daily/monthly summaries, not legacy DSH overview fields");
 assert.doesNotMatch(overviewPage, /className="hero-panel"|把运行状态变成可理解的证据/, "overview should lead with useful metrics instead of a decorative hero card");
 assert.doesNotMatch(appPage, /Workbench React migration/i, "migration placeholder title must not appear in the product UI");
+
+// R2（OVERVIEW_DRILLDOWN spec §4.3/§7.2）：内嵌发现条的契约——存在性、
+// 两态诚实降级、「去看会话」路径只给可过滤宿主且有会话证据的项（决策 #3）。
+assert.match(overviewPage, /function OverviewFindingsStrip/, "overview must render the inline findings strip");
+assert.match(overviewPage, /发现服务暂不可用/, "findings strip must state unavailability honestly");
+assert.match(overviewPage, /当前没有需要注意的事项/, "findings strip must have an honest empty state");
+assert.match(overviewPage, /item\.sessions_count > 0 && item\.host !== "generic" && item\.host !== "all"/, "evidence link only for filterable hosts with session evidence");
+assert.match(overviewPage, /readFindings\(null\)/, "strip reads the existing safe findings projection (no new payload path)");
+assert.match(overviewPage, /sessionsDateHref|sessionsHostHref/, "drill-down links go through the whitelisted nav helper");
 assert.doesNotMatch(appPage, /工作台预览/, "production navigation must not call itself a preview");
 assert.match(appPage, /<h1 className="visually-hidden">总览<\/h1>/, "compact overview still needs an accessible page heading");
 const uiRequire = createRequire(path.join(ui, "package.json"));
