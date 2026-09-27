@@ -31,8 +31,12 @@
 //      `∑count === eventsIn` 恒成立。抽掉一次 rm -rf 不行。
 
 (function (root, factory) {
-  if (typeof module === "object" && module.exports) module.exports = factory();
-  else root.TimelineGeometry = factory();
+  var geometry = factory();
+  if (typeof module === "object" && module.exports) module.exports = geometry;
+  // Always publish the global too: the React workbench is bundled by Vite into one
+  // CommonJS wrapper whose `module.exports` exists, so an either/or UMD never set
+  // `self.TimelineGeometry` and every session trace rendered as unavailable.
+  if (root) root.TimelineGeometry = geometry;
 })(typeof self !== "undefined" ? self : this, function () {
   "use strict";
 

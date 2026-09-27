@@ -21,4 +21,8 @@ assert.match(css, /\.native-mac \.desktop-toolbar \{ padding-left: 84px;/);
 assert.match(css, /\.desktop-shell \.nav-list \{ grid-template-columns: 1fr;/);
 assert.match(css, /\.desktop-shell \.sidebar\[hidden\] \{ display: none;/);
 assert.match(read('apps/desktop/ui-dev/react/src/main.tsx'), /import "\.\/desktop-shell.css"/);
+// WebKit ignores height/border/padding on <select> unless appearance is reset; without this
+// the unified control frame only applied to inputs (selects stayed small native popups).
+const controlsCss = read('apps/desktop/ui-dev/react/src/styles/components.css');
+assert.match(controlsCss, /\.desktop-shell select,\s*\n\.desktop-shell select\.av-control \{[^}]*-webkit-appearance: none;[^}]*appearance: none;[^}]*background-image: url\(/, 'selects must drop native appearance and draw their own chevron');
 console.log('PASS desktop shell contract (native appearance still requires bundled-app UAT)');

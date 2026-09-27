@@ -14,6 +14,21 @@
   line-height: 20px;
 }
 .desktop-shell .av-control { width: 100%; }
+/* WKWebView (WebKit) draws <select> as a native menulist and ignores height, border and
+   padding until appearance is reset, so the unified frame above only reached <input>:
+   selects rendered as small native popup buttons beside 32px inputs. Reset it and draw
+   our own chevron (the native one goes away with the appearance). */
+.desktop-shell select,
+.desktop-shell select.av-control {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2.5 3.75 5 6.25l2.5-2.5' fill='none' stroke='%2363748a' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 10px 10px;
+  text-overflow: ellipsis;
+}
 .desktop-shell :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="color"]):not([type="hidden"]), select):focus-visible,
 .desktop-shell .av-control:focus-visible {
   outline: 2px solid var(--ui-accent);
