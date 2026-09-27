@@ -3,7 +3,7 @@
     "schema_version": 1,
     "axis": {
       "unit": "turn",
-      "turn_starts": 25,
+      "turn_starts": 33,
       "leading_step": true,
       "fallback": null,
       "steps": [
@@ -906,6 +906,291 @@
             "coverage": "full",
             "basis": "nominal"
           }
+        },
+        {
+          "index": 27,
+          "started_at_ms": 1790012000000,
+          "input": {
+            "cache_read": 58000,
+            "cache_write": 1000,
+            "uncached_input": 1000
+          },
+          "output": 400,
+          "input_peak": 60000,
+          "calls": 1,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790012001000,
+          "idle_before_ms": 5280000,
+          "hit_rate": 0.9667,
+          "nominal_cost": {
+            "amounts": [
+              {
+                "amount_minor": 3,
+                "currency": "USD"
+              }
+            ],
+            "coverage": "full",
+            "basis": "nominal"
+          }
+        },
+        {
+          "index": 28,
+          "started_at_ms": 1790012120000,
+          "input": {
+            "cache_read": 58000,
+            "cache_write": 1000,
+            "uncached_input": 1000
+          },
+          "output": 400,
+          "input_peak": 60000,
+          "calls": 1,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790012121000,
+          "idle_before_ms": 120000,
+          "hit_rate": 0.9667,
+          "nominal_cost": {
+            "amounts": [
+              {
+                "amount_minor": 3,
+                "currency": "USD"
+              }
+            ],
+            "coverage": "full",
+            "basis": "nominal"
+          }
+        },
+        {
+          "index": 29,
+          "started_at_ms": 1790012240000,
+          "input": {
+            "cache_read": 58000,
+            "cache_write": 1000,
+            "uncached_input": 1000
+          },
+          "output": 400,
+          "input_peak": 60000,
+          "calls": 1,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790012241000,
+          "idle_before_ms": 120000,
+          "hit_rate": 0.9667,
+          "nominal_cost": {
+            "amounts": [
+              {
+                "amount_minor": 3,
+                "currency": "USD"
+              }
+            ],
+            "coverage": "full",
+            "basis": "nominal"
+          }
+        },
+        {
+          "index": 30,
+          "started_at_ms": 1790012360000,
+          "input": {
+            "cache_read": 58000,
+            "cache_write": 1000,
+            "uncached_input": 1000
+          },
+          "output": 400,
+          "input_peak": 60000,
+          "calls": 1,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790012361000,
+          "idle_before_ms": 120000,
+          "hit_rate": 0.9667,
+          "nominal_cost": {
+            "amounts": [
+              {
+                "amount_minor": 3,
+                "currency": "USD"
+              }
+            ],
+            "coverage": "full",
+            "basis": "nominal"
+          }
+        },
+        {
+          "index": 31,
+          "started_at_ms": 1790012480000,
+          "input": {
+            "cache_read": 58000,
+            "cache_write": 1000,
+            "uncached_input": 1000
+          },
+          "output": 400,
+          "input_peak": 60000,
+          "calls": 1,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790012481000,
+          "idle_before_ms": 120000,
+          "hit_rate": 0.9667,
+          "nominal_cost": {
+            "amounts": [
+              {
+                "amount_minor": 3,
+                "currency": "USD"
+              }
+            ],
+            "coverage": "full",
+            "basis": "nominal"
+          }
+        },
+        {
+          "index": 32,
+          "started_at_ms": 1790012600000,
+          "input": {
+            "cache_read": 58000,
+            "cache_write": 1000,
+            "uncached_input": 1000
+          },
+          "output": 400,
+          "input_peak": 60000,
+          "calls": 1,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790012601000,
+          "idle_before_ms": 120000,
+          "hit_rate": 0.9667,
+          "nominal_cost": {
+            "amounts": [
+              {
+                "amount_minor": 3,
+                "currency": "USD"
+              }
+            ],
+            "coverage": "full",
+            "basis": "nominal"
+          }
+        },
+        {
+          "index": 33,
+          "started_at_ms": 1790012720000,
+          "input": {
+            "cache_read": 20000,
+            "cache_write": 90000,
+            "uncached_input": 10000
+          },
+          "output": 800,
+          "input_peak": 60000,
+          "calls": 2,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [],
+          "ended_at_ms": 1790012722000,
+          "idle_before_ms": 120000,
+          "hit_rate": 0.1667,
+          "nominal_cost": {
+            "amounts": [
+              {
+                "amount_minor": 59,
+                "currency": "USD"
+              }
+            ],
+            "coverage": "full",
+            "basis": "nominal"
+          }
+        },
+        {
+          "index": 34,
+          "started_at_ms": 1790013200000,
+          "input": {
+            "cache_read": 10000,
+            "cache_write": 45000,
+            "uncached_input": 5000
+          },
+          "output": 400,
+          "input_peak": 60000,
+          "calls": 1,
+          "model_ids": [
+            "claude-sonnet-5"
+          ],
+          "tools": {
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "unknown": 0
+          },
+          "notes": [
+            {
+              "explanation": "possible_cache_expiry",
+              "calls": 1
+            }
+          ],
+          "ended_at_ms": 1790013201000,
+          "idle_before_ms": 479000,
+          "hit_rate": 0.1667,
+          "nominal_cost": {
+            "amounts": [
+              {
+                "amount_minor": 29,
+                "currency": "USD"
+              }
+            ],
+            "coverage": "full",
+            "basis": "nominal"
+          }
         }
       ],
       "unplaced": {
@@ -914,17 +1199,17 @@
       }
     },
     "session": {
-      "calls": 49,
+      "calls": 58,
       "input": {
-        "cache_read": 2702000,
-        "cache_write": 339500,
-        "uncached_input": 61400
+        "cache_read": 3080000,
+        "cache_write": 480500,
+        "uncached_input": 82400
       },
-      "output": 34000,
+      "output": 37600,
       "nominal_cost": {
         "amounts": [
           {
-            "amount_minor": 354,
+            "amount_minor": 462,
             "currency": "USD"
           }
         ],
@@ -948,7 +1233,7 @@
         },
         "impact": {
           "tokens": 150000,
-          "share_of_session_input": 0.0483
+          "share_of_session_input": 0.0412
         },
         "cause": "evidence",
         "evidence": [
@@ -970,7 +1255,7 @@
         },
         "impact": {
           "tokens": 1272000,
-          "share_of_session_input": 0.4099
+          "share_of_session_input": 0.3492
         },
         "cause": "unknown",
         "evidence": [],
@@ -989,12 +1274,39 @@
         },
         "impact": {
           "tokens": 270000,
-          "share_of_session_input": 0.087
+          "share_of_session_input": 0.0741
         },
         "explanation": "unexplained",
         "cause": "unknown",
         "evidence": [],
         "context_notes": [],
+        "remedy_id": "inspect-uncached-input"
+      },
+      {
+        "kind": "high_uncached_input",
+        "steps": {
+          "from": 33,
+          "to": 34
+        },
+        "fact": {
+          "calls": 2,
+          "uncached_tokens": 100000,
+          "hit_before": 0.9667,
+          "hit_after": 0.1667
+        },
+        "impact": {
+          "tokens": 100000,
+          "share_of_session_input": 0.0275
+        },
+        "explanation": "hit_rate_drop",
+        "cause": "unknown",
+        "evidence": [],
+        "context_notes": [
+          {
+            "explanation": "possible_cache_expiry",
+            "calls": 1
+          }
+        ],
         "remedy_id": "inspect-uncached-input"
       }
     ],

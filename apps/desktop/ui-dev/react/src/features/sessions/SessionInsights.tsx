@@ -120,6 +120,8 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
   const [dataGen, setDataGen] = useState(0);
   const dataGenRef = useRef(0);
   const [refreshFailed, setRefreshFailed] = useState(false);
+  const inflight = useRef(new Set<string>());
+  const sessionToken = useRef(0);
   const [width, setWidth] = useState(800);
   const [evidence, setEvidence] = useState<Record<string, { value: SessionTraceEvidence | "loading" | "error"; gen: number }>>({});
   const chartBox = useRef<HTMLDivElement | null>(null);
@@ -130,7 +132,7 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
   useEffect(() => {
     let active = true;
     const sameSession = loadedRef.current === sessionRef;
-    if (!sameSession) { setData(null); setMode(null); setHistory([]); setWin(null); setEvidence({}); lastView.current = null; }
+    if (!sameSession) { sessionToken.current += 1; inflight.current.clear(); setData(null); setMode(null); setHistory([]); setWin(null); setEvidence({}); lastView.current = null; }
     setError(null);
     void readSessionInsights(sessionRef).then(insights => {
       if (!active) return;
@@ -142,6 +144,7 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
       const current = modeRef.current;
       if (!(sameSession && current && modeStillValid(current, insights))) {
         setHistory([]);
+        setNav(n => n + 1);
         if (insights.diagnostics.length) { setCursor(insights.diagnostics[0].steps.from); setMode({ kind: "diag", diag: 0 }); }
         else { const s = insights.axis.steps.find(x => x.notes.length)?.index ?? 1; setCursor(s); setMode({ kind: "step", step: s }); }
       }
@@ -189,17 +192,29 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
   })();
   const evKey = evidenceRange ? `${mode?.kind === "safety" ? "safety" : "calls"}:${evidenceRange[0]}-${evidenceRange[1]}` : null;
   const includeCalls = mode?.kind !== "safety";
+  // 证据缓存（确认轮 finding）：
+  // - 是否要取只看「这一代数据有没有这条的新值」，在途与否用 `inflight`（键 = 条目@代次）判断，
+  //   不看 value === "loading"——否则首读在途时来一次同步，旧响应被丢弃后条目永远停在 loading；
+  // - 会话令牌 `sessionToken` 在换会话时立即 +1，旧会话的迟到响应不会写进新会话的缓存；
+  // - 刷新后的重取失败时保留旧的有效值（只把代次推进，避免反复重试）。
   useEffect(() => {
     if (!evKey || !evidenceRange) return;
     const entry = evidence[evKey];
-    if (entry && (entry.gen >= dataGen || entry.value === "loading")) return;
+    if (entry && entry.gen >= dataGen) return;
+    const flightKey = `${evKey}@${dataGen}`;
+    if (inflight.current.has(flightKey)) return;
+    inflight.current.add(flightKey);
     const generation = dataGen;
-    const ref = sessionRef;
-    // 首次读取显示「正在读取」；刷新后的重取保留旧值直到新值到达。
-    if (!entry) setEvidence(e => ({ ...e, [evKey]: { value: "loading", gen: generation } }));
+    const token = sessionToken.current;
+    if (!entry || entry.value === "loading" || entry.value === "error") setEvidence(e => ({ ...e, [evKey]: { value: "loading", gen: entry?.gen ?? -1 } }));
     const settle = (value: SessionTraceEvidence | "error") => {
-      if (generation !== dataGenRef.current || ref !== loadedRef.current) return;
-      setEvidence(e => ({ ...e, [evKey]: { value, gen: generation } }));
+      inflight.current.delete(flightKey);
+      if (token !== sessionToken.current || generation !== dataGenRef.current) return;
+      setEvidence(e => {
+        const previous = e[evKey]?.value;
+        const keep = value === "error" && previous !== undefined && typeof previous === "object";
+        return { ...e, [evKey]: { value: keep ? previous : value, gen: generation } };
+      });
     };
     void readSessionTraceEvidence(sessionRef, evidenceRange[0], evidenceRange[1], includeCalls).then(settle).catch(() => settle("error"));
   }, [evKey, evidence, dataGen]); // eslint-disable-line react-hooks/exhaustive-deps

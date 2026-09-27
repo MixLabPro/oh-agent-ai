@@ -405,6 +405,20 @@ mod insights_tests {
                 fact(&db, &format!("g{k}a"), ts + 1_000, "claude-sonnet-5", size - 1_000, 500, 500);
             }
         }
+        // 命中率下降（有基线）+ 区间内一次长空闲后的低命中 → `hit_rate_drop` 诊断带
+        // `hit_before/hit_after` 与非空 `context_notes`（确认轮：金样此前缺这两种形状）。
+        let drop_at = T0 + 200 * MIN;
+        for k in 0..6i64 {
+            let ts = drop_at + k * 2 * MIN;
+            turn(&db, &format!("d{k}"), ts);
+            fact(&db, &format!("d{k}a"), ts + 1_000, "claude-sonnet-5", 58_000, 1_000, 1_000);
+        }
+        let low = drop_at + 6 * 2 * MIN;
+        turn(&db, "dlow", low);
+        fact(&db, "dlow1", low + 1_000, "claude-sonnet-5", 10_000, 45_000, 5_000);
+        fact(&db, "dlow2", low + 2_000, "claude-sonnet-5", 10_000, 45_000, 5_000);
+        turn(&db, "dlow-idle", low + 8 * MIN);
+        fact(&db, "dlow3", low + 8 * MIN + 1_000, "claude-sonnet-5", 10_000, 45_000, 5_000);
         // 一个被中断的回合（回合结果 cancelled）。
         db.conn().execute(
             "INSERT INTO workflow_events(event_id, session_key, event_ts_ms, event_type, outcome, ingested_run_id, created_at_ms)
@@ -426,6 +440,10 @@ mod insights_tests {
         assert!(steps.iter().any(|s| !s["notes"].as_array().unwrap().is_empty()));
         assert!(steps.iter().any(|s| s.get("nominal_cost").is_some()));
         assert!(d["session"].get("nominal_cost").is_some());
+        let drop_diag = d["diagnostics"].as_array().unwrap().iter()
+            .find(|x| x["explanation"] == "hit_rate_drop").expect("金样必须有 hit_rate_drop 诊断");
+        assert!(drop_diag["fact"].get("hit_before").is_some() && drop_diag["fact"].get("hit_after").is_some());
+        assert!(!drop_diag["context_notes"].as_array().unwrap().is_empty(), "金样必须有非空 context_notes");
         let _ = std::fs::remove_dir_all(&home);
     }
 
