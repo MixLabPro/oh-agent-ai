@@ -995,12 +995,22 @@ mod tests {
             std::fs::write(&path, lines.join("\n")).unwrap();
             path
         };
-        let mut files = vec![
-            write_file("a", &[line("2026-09-20T10:00:00.000Z", 1789300000, "five_hour")]),
-            write_file("b", &[line("2026-09-21T11:00:00.000Z", 1789400000, "seven_day")]),
-            write_file("plain", &[r#"{"type":"assistant","timestamp":"2026-09-21T00:00:00Z"}"#.to_string()]),
-        ];
+        // 时间戳相对「现在」生成：此前写死 2026-09-20/21，而 windows_recent 的窗口是
+        // now 往前 7 天——到 2026-09-27 fixture 自己滑出窗，本测试在无任何代码改动时
+        // 开始失败（时间炸弹）。
         let now = std::time::SystemTime::now();
+        let ago = |hours: i64| -> (String, i64) {
+            let ts = jiff::Timestamp::try_from(now).unwrap() - jiff::SignedDuration::from_hours(hours);
+            (ts.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(), ts.as_second() + 5 * 3600)
+        };
+        let (ts_a, resets_a) = ago(48);
+        let (ts_b, resets_b) = ago(24);
+        let (ts_plain, _) = ago(36);
+        let mut files = vec![
+            write_file("a", &[line(&ts_a, resets_a, "five_hour")]),
+            write_file("b", &[line(&ts_b, resets_b, "seven_day")]),
+            write_file("plain", &[format!(r#"{{"type":"assistant","timestamp":"{ts_plain}"}}"#)]),
+        ];
 
         // 冷缓存：缓存路径 == 全量基准。
         let full = agent_vitals_hosts::claude_quota::scan_claude_quota(&files, now);
@@ -1015,7 +1025,8 @@ mod tests {
         assert!(home.join("facts").join(".claude-quota-cache.json").exists());
 
         // 内容变更：a 换成更新的快照 → 缓存失效重解析，仍与全量一致。
-        files[0] = write_file("a", &[line("2026-09-22T12:00:00.000Z", 1789500000, "five_hour")]);
+        let (ts_a2, resets_a2) = ago(12);
+        files[0] = write_file("a", &[line(&ts_a2, resets_a2, "five_hour")]);
         let full2 = agent_vitals_hosts::claude_quota::scan_claude_quota(&files, now);
         let cached2 = scan_claude_quota_cached(&home, &files, now);
         assert_eq!(cached2, full2, "部分失效后必须与全量扫一致");
