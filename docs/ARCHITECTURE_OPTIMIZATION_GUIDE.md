@@ -344,6 +344,33 @@ crates/agent-vitals-runtime/         # 过渡期门面：pub use 以上各 crate
 
 ---
 
+### W10 [P2] domain 去宿主化：会话语义只定义一次
+
+**背景（2026-09-27 盘点）**：`agent-vitals-domain` 的职责是宿主无关规则，但仍有按宿主名写死的
+分支；反过来，`agent-vitals-hosts` 里有本该宿主无关的会话语义被每个宿主各写一份。
+
+**已完成（会话消耗诊断 P0 顺手收口）**：
+- 新增 `domain::session_semantics`：`fingerprint` / `safe_label` / `iso_to_epoch_ms` / `outcome` /
+  `session_span`（原 `hosts::workflow_utils`，dsh 另有逐字副本）、`invocation_fingerprint`
+  （原 claude / codex 各一份）、`ModelSwitchTracker`（原四个宿主各一段 `previous_model` 比较）、
+  `UserTurnSignal` + `TurnTracker`（回合语义）。`hosts::workflow_utils` 退为 re-export。
+- Claude 的回合判据收成一份 `hosts::claude_code::sessions::turns::turn_signal`，evidence（SV612、
+  调用树、UserPrompts 覆盖）与 workflow（`task_started`）共用；Python 镜像
+  `claude_evidence.turn_signal`，`tests/test_claude_turns.py` 钉住。此前两处结论不同，同一会话在调用树
+  与消耗诊断里回合数对不上。
+
+**待做（按宿主名分支的 domain 代码）**：
+
+| 位置 | 现状 | 目标 |
+|---|---|---|
+| `domain/cost/mod.rs::metered_estimate_minor` | `host == "codex" / "claude-code"` 选价卡与桶形状 | 调用方传入规范化的四桶 + 价卡目录；宿主差异留在 hosts 的 usage 适配 |
+| `domain/usage.rs`（`SOURCE_CODEX`、`canonical_tokens` 按 source 选形状） | 按来源切换 token 桶字段名 | 宿主适配器先产规范桶，domain 只折叠规范桶 |
+| `domain/canonical_audit.rs` | 按宿主 id 决定 SV607/608 降级 | 由宿主能力声明（`host_capability`）驱动，不认宿主名 |
+
+**完成标准**：`agent-vitals-domain/tests/dependency_budget.rs` 增加一条守卫——`src/domain/` 生产代码
+（`#[cfg(test)]` 之外）不出现宿主名字面量（`"claude-code"`、`"codex"`、`"dsh"`、`"workbuddy"`），
+以上三处迁完后打开。
+
 ### W9 [P2] 拆大文件与整理文档
 
 1. `crates/agent-vitals-data/src/authority.rs`（业务代码约 4,200 行）拆成 `authority/{schema.rs, migrations.rs, writers.rs, readers.rs, mod.rs}`；
