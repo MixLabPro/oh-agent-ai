@@ -4495,6 +4495,23 @@ async fn session_trace(
     .unwrap_or_else(|_| serde_json::json!({"error": {"code": "cancelled", "message": "join error"}}))
 }
 
+/// 会话消耗诊断检查器的原始证据（SESSION_TRACE_DIAGNOSTICS_SPEC r6 §8.4、§10）：
+/// 区间内每次失败的错误/参数摘录、逐次调用、安全提醒命令摘要。**本地呈现层
+/// 专属**——不走 `mcp::dispatch`，那是 agent 消费面，摘录不出那个面（与 CLI
+/// `trace-anchors` 同一信任域）。`from`/`to` 为 1 基步号（含两端）。
+#[tauri::command]
+async fn session_trace_evidence(session_ref: String, from: usize, to: usize) -> Value {
+    let data_home = overview::data_home();
+    tauri::async_runtime::spawn_blocking(move || {
+        match agent_vitals_runtime::query::session_insights::session_trace_evidence_for_ref(&data_home, &session_ref, from, to) {
+            Ok(v) => serde_json::json!({ "data": v }),
+            Err(e) => serde_json::json!({ "error": { "code": e.split(':').next().unwrap_or("internal_error"), "message": e } }),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| serde_json::json!({"error": {"code": "cancelled", "message": "join error"}}))
+}
+
 /// 工作台 pull：**非破坏性**读导航目标（窗口未建/未可见时菜单点击的目标留在这里，等
 /// init/focus 时消费；`peek` 不消费，apply 成功后由 `clear_nav_target` 显式清）。
 #[tauri::command]
@@ -4684,6 +4701,7 @@ pub fn run() {
             trigger_sync,
             sync_request_status,
             session_trace,
+            session_trace_evidence,
                 store::probe_routes_list,
                 store::probe_current_hint,
                 store::routes_quality,

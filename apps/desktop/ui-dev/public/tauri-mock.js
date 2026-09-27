@@ -68,6 +68,45 @@
     "dsh/deepseek": { ...byProvider["dsh/deepseek"], amounts_by_basis: { metered_actual: 3.21 } },
   };
 
+  // 会话消耗诊断的合成样本：40 个回合，一段原因未明的高未命中（12–14）、一段同一调用
+  // 反复失败（18–20，带错误摘要）、一段输入增长（2–16），第 22 回合前长空闲、第 30 回合换模型。
+  function mockInsights() {
+    const steps = [];
+    let ts = 1789000000000;
+    for (let i = 1; i <= 40; i += 1) {
+      const idle = i === 22 ? 47 * 60000 : 30000;
+      ts += idle + 60000;
+      const peak = i <= 16 ? 30000 + i * 7000 : 100000 + (i % 5) * 4000;
+      const low = i >= 12 && i <= 14;
+      const read = low ? 20000 * 3 : peak * 3 - 1500, write = low ? 66000 : 1200, unc = low ? 27000 : 300;
+      const notes = i === 22 ? [{ explanation: "possible_cache_expiry", calls: 1 }] : i === 30 ? [{ explanation: "after_model_change", calls: 1 }] : [];
+      const step = { index: i, started_at_ms: ts, ended_at_ms: ts + 45000, idle_before_ms: i === 1 ? undefined : idle,
+        input: { cache_read: read, cache_write: write, uncached_input: unc }, output: 2700, input_peak: peak,
+        hit_rate: Math.round(read / (read + write + unc) * 10000) / 10000, calls: 3,
+        model_ids: [i < 30 ? "claude-sonnet-5" : "claude-opus-5-5"],
+        tools: { succeeded: 4 + (i % 6), failed: i >= 18 && i <= 20 ? 1 : 0, cancelled: 0, unknown: 0 }, notes,
+        nominal_cost: { amounts: [{ amount_minor: 12 + (i % 7), currency: "USD" }], coverage: "full" } };
+      if (i === 33) step.outcome = "cancelled";
+      if (step.idle_before_ms === undefined) delete step.idle_before_ms;
+      steps.push(step);
+    }
+    const input = steps.reduce((a, s) => ({ cache_read: a.cache_read + s.input.cache_read, cache_write: a.cache_write + s.input.cache_write, uncached_input: a.uncached_input + s.input.uncached_input }), { cache_read: 0, cache_write: 0, uncached_input: 0 });
+    const total = input.cache_read + input.cache_write + input.uncached_input;
+    const share = (tokens) => Math.round(tokens / total * 10000) / 10000;
+    return {
+      schema_version: 1, host: "claude-code",
+      axis: { unit: "turn", turn_starts: 40, steps, unplaced: { usage_facts: 0, workflow_events: 0 } },
+      session: { calls: 120, input, output: 108000, nominal_cost: { amounts: [{ amount_minor: 612, currency: "USD" }], coverage: "full" } },
+      diagnostics: [
+        { kind: "repeated_failure", steps: { from: 18, to: 20 }, fact: { failures: 3, steps_hit: 3, capability_id: "Bash", same_invocation: true, groups: 1 }, impact: { tokens: 900000, share_of_session_input: share(900000) }, cause: "evidence", evidence: ["error_excerpt"], context_notes: [], remedy_id: "inspect-repeated-failure" },
+        { kind: "input_growth", steps: { from: 2, to: 16 }, fact: { peak_from: 44000, peak_to: 142000, ratio: 3.23 }, impact: { tokens: 3200000, share_of_session_input: share(3200000) }, cause: "unknown", evidence: [], context_notes: [], remedy_id: "review-context-growth" },
+        { kind: "high_uncached_input", steps: { from: 12, to: 14 }, fact: { calls: 9, uncached_tokens: 279000 }, impact: { tokens: 279000, share_of_session_input: share(279000) }, explanation: "unexplained", cause: "unknown", evidence: [], context_notes: [], remedy_id: "inspect-uncached-input" },
+      ],
+      safety: { count: 1, critical: 1, rules: [{ rule: "SV601", severity: "critical", count: 1, steps: [7] }] },
+      lanes: { consumption: { state: "available", coverage: 1 }, tools: { state: "available", coverage: 1 } },
+    };
+  }
+
   function dto(tokens, opts) {
     const daily = !!(opts && opts.daily);
     return {
@@ -779,6 +818,9 @@
       }
       case "session_trace": {
         // Synthetic preview only; production invokes the existing local authority.
+        // 形状出处：crates/agent-vitals-domain/src/domain/session_insights.rs::build_insights
+        // + crates/agent-vitals-query/src/query/session_insights.rs::session_insights。
+        if (args.output === "insights") return { data: mockInsights() };
         if (args.output === "graph") return { data: { coverage: { total_nodes: 9, total_edges: 8, missing_parent: 0, missing_time: 0, missing_status: 0 } } };
         return { data: {
           linearization: "leaf",
@@ -787,6 +829,17 @@
           events: [{ ordinal: 1, kind: "tool", label: "工具调用", severity: "info" }, { ordinal: 4, kind: "risk", label: "工具失败", severity: "critical" }],
           unplaced_events: 1,
         } };
+      }
+      case "session_trace_evidence": {
+        // 形状出处：crates/agent-vitals-query/src/query/session_insights.rs::session_trace_evidence。
+        const from = args.from, to = args.to;
+        const calls = [], failures = [], safety = [];
+        for (let step = from; step <= to && step <= 40; step += 1) {
+          for (let k = 0; k < 3; k += 1) calls.push({ step, ts_ms: 1789000000000 + step * 120000 + k * 9000, model_id: step < 30 ? "claude-sonnet-5" : "claude-opus-5-5", input: { cache_read: 30000 + step * 900, cache_write: step >= 12 && step <= 14 ? 22000 : 400, uncached_input: step >= 12 && step <= 14 ? 9000 : 300 }, output: 900 });
+          if (step >= 18 && step <= 20) failures.push({ step, ts_ms: 1789000000000 + step * 120000 + 5000, capability_id: "Bash", invocation_key: "fnv1a64:preview", error_excerpt: "Error: Cannot find module 'vitest/config'", args_excerpt: '{"command":"npx vitest run"}' });
+        }
+        if (from <= 7 && to >= 7) safety.push({ rule: "SV601", severity: "critical", step: 7, tool: "bash", summary: "rm -rf ./dist-old" });
+        return { data: { steps: { from, to }, calls, failures, safety, local_only: true } };
       }
       case "sessions_read": {
         const selected = sessions.find((session) => session.session_ref === (args && args.sessionRef)) || sessions[0];
