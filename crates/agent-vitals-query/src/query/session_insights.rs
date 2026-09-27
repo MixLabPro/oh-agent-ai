@@ -17,8 +17,9 @@ use std::collections::BTreeMap;
 
 use agent_vitals_data::authority_query::billing_bucket_usage_json;
 use agent_vitals_domain::session_insights::{
-    build_insights, call_steps, InsightCall, InsightEvent, InsightSafety, InsightsConfig,
+    build_insights, call_steps, AxisPlan, InsightCall, InsightEvent, InsightSafety, InsightsConfig,
 };
+use agent_vitals_domain::session_semantics::fingerprint;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
@@ -69,6 +70,25 @@ struct EventRows {
     events: Vec<InsightEvent>,
     tool_finished: usize,
     tool_known: usize,
+    /// 仍是工具名级旧指纹的失败行（源日志已被宿主清理、无法重放纠正）。
+    legacy_fingerprints: usize,
+}
+
+/// 能力名进 insights 前的最后一道：像路径的（含 `/`，如 codex 的 `/bin/zsh`）只留
+/// 末段——§10 禁止路径出 MCP。`vendor/model` 形状的能力名在工具位不存在。
+fn capability_label(value: Option<String>) -> Option<String> {
+    value.map(|v| match v.rsplit_once('/') {
+        Some((_, tail)) if !tail.is_empty() => tail.to_string(),
+        _ => v,
+    })
+}
+
+/// PARSER_VERSION 6 之前的调用指纹只编码工具名。源日志还在的会话已被重放纠正；
+/// 源日志已被宿主清理的会话永远停在旧值——把它当「同一调用」会把「Bash 失败过
+/// 两次」报成「同一调用重复失败」（验收：7,296 行、124 个会话）。识别出来当作未知。
+fn is_tool_level_fingerprint(fp: &str, capability: Option<&str>) -> bool {
+    let Some(cap) = capability else { return false };
+    ["claude", "codex"].iter().any(|tag| fp == fingerprint(&format!("{tag}-tool:{cap}")))
 }
 
 fn load_events(conn: &Connection, session_key: &str) -> rusqlite::Result<EventRows> {
@@ -80,7 +100,7 @@ fn load_events(conn: &Connection, session_key: &str) -> rusqlite::Result<EventRo
            AND event_type IN ('task_started', 'task_finished', 'tool_finished', 'model_switched')
          ORDER BY event_ts_ms, event_id",
     )?;
-    let mut out = EventRows { events: Vec::new(), tool_finished: 0, tool_known: 0 };
+    let mut out = EventRows { events: Vec::new(), tool_finished: 0, tool_known: 0, legacy_fingerprints: 0 };
     let mut rows = stmt.query(params![session_key])?;
     while let Some(r) = rows.next()? {
         let ts_ms: i64 = r.get(0)?;
@@ -95,11 +115,19 @@ fn load_events(conn: &Connection, session_key: &str) -> rusqlite::Result<EventRo
                 if outcome != "unknown" {
                     out.tool_known += 1;
                 }
+                let raw_capability: Option<String> = r.get(2)?;
+                let mut invocation: Option<String> = r.get(4)?;
+                if invocation.as_deref().is_some_and(|fp| is_tool_level_fingerprint(fp, raw_capability.as_deref())) {
+                    if outcome == "failed" {
+                        out.legacy_fingerprints += 1;
+                    }
+                    invocation = None;
+                }
                 InsightEvent::ToolFinished {
                     ts_ms,
-                    capability_id: r.get(2)?,
+                    capability_id: capability_label(raw_capability),
                     outcome,
-                    invocation_fingerprint: r.get(4)?,
+                    invocation_fingerprint: invocation,
                     has_error_excerpt: r.get(5)?,
                 }
             }
@@ -245,10 +273,25 @@ pub fn session_insights(conn: &Connection, session_key: &str, host: &str) -> rus
     let plain: Vec<InsightCall> = calls.iter().map(|c| c.call.clone()).collect();
     let mut data = build_insights(&plain, &events.events, &safety, &InsightsConfig::default());
 
-    // 名义成本：按回合分组计价，挂到回合与会话上（诊断不带金额，r6）。
+    // 名义成本：按回合分组计价挂到回合上；会话合计另按会话级分组计价（不是回合
+    // 金额之和——每组各自取整会累积误差，小于半分的组还会被抹成 0），且覆盖所有
+    // 调用（含落不到任何回合的）。诊断不带金额（r6）。
     let steps = call_steps(&plain, &events.events);
     let mut acc = NominalAccumulator { groups: BTreeMap::new() };
+    let mut session_acc = NominalAccumulator { groups: BTreeMap::new() };
     for (row, step) in calls.iter().zip(steps.iter()) {
+        let session_key_group = (
+            usize::MAX,
+            row.call.model_id.clone().unwrap_or_else(|| "<unknown>".to_string()),
+            row.provider_id.clone(),
+            row.peak,
+            row.pricing_version.clone(),
+        );
+        let totals = session_acc.groups.entry(session_key_group).or_insert([0; 4]);
+        totals[0] += row.call.uncached_input;
+        totals[1] += row.call.cache_read;
+        totals[2] += row.call.cache_write;
+        totals[3] += row.call.output;
         let Some(step) = step else { continue };
         let key = (
             *step,
@@ -263,7 +306,8 @@ pub fn session_insights(conn: &Connection, session_key: &str, host: &str) -> rus
         tokens[2] += row.call.cache_write;
         tokens[3] += row.call.output;
     }
-    let Priced { per_step, session: session_money, session_partial } = price_groups(conn, host, &acc)?;
+    let Priced { per_step, .. } = price_groups(conn, host, &acc)?;
+    let Priced { session: session_money, session_partial, .. } = price_groups(conn, host, &session_acc)?;
     if let Some(steps_json) = data["axis"]["steps"].as_array_mut() {
         for (i, step) in steps_json.iter_mut().enumerate() {
             if let Some((money, partial)) = per_step.get(&i) {
@@ -273,9 +317,16 @@ pub fn session_insights(conn: &Connection, session_key: &str, host: &str) -> rus
             }
         }
     }
-    if let Some(v) = money_json(&session_money, session_partial) {
-        data["session"]["nominal_cost"] = v;
+    match money_json(&session_money, session_partial) {
+        Some(v) => data["session"]["nominal_cost"] = v,
+        None if !calls.is_empty() => {
+            // 缺金额时说清原因（§8.5「暂无可用计价依据」）。
+            let reason = if calls.iter().any(|c| c.pricing_version.is_none()) { "no_pricing_snapshot" } else { "no_price_card" };
+            data["session"]["nominal_cost_reason"] = json!(reason);
+        }
+        None => {}
     }
+    data["quality"] = json!({ "legacy_fingerprints": events.legacy_fingerprints });
 
     data["lanes"] = json!({
         "consumption": lane(calls.len(), calls.len(), "no_data_in_session"),
@@ -310,23 +361,10 @@ pub fn session_trace_evidence(conn: &Connection, session_key: &str, from: usize,
         }));
     }
 
-    // 回合落点与 insights 同一规则：按 task_started 边界。
-    let mut starts: Vec<i64> = events.events.iter().filter_map(|e| match e {
-        InsightEvent::TaskStarted { ts_ms } => Some(*ts_ms),
-        _ => None,
-    }).collect();
-    starts.sort_unstable();
-    starts.dedup();
-    let step_of = |ts: i64| -> Option<usize> {
-        if starts.len() <= 1 {
-            // 按调用计的轴（与 domain 同一退化规则）：落到不晚于它的最后一次调用。
-            let pos = plain.partition_point(|c| c.ts_ms <= ts);
-            (pos > 0).then(|| pos - 1)
-        } else {
-            let pos = starts.partition_point(|b| *b <= ts);
-            (pos > 0).then(|| pos - 1)
-        }
-    };
+    // 回合落点与 insights 同一规则（`AxisPlan`，domain 里只有一份）。
+    let call_ts: Vec<i64> = plain.iter().map(|c| c.ts_ms).collect();
+    let plan = AxisPlan::new(&call_ts, &events.events);
+    let step_of = |ts: i64| plan.step_of(ts);
 
     let mut stmt = conn.prepare(
         "SELECT event_ts_ms, capability_id, outcome, invocation_fingerprint, error_excerpt, args_excerpt
@@ -345,7 +383,7 @@ pub fn session_trace_evidence(conn: &Connection, session_key: &str, from: usize,
         failures.push(json!({
             "step": step.map(|s| s + 1),
             "ts_ms": ts,
-            "capability_id": r.get::<_, Option<String>>(1)?,
+            "capability_id": capability_label(r.get::<_, Option<String>>(1)?),
             // 分组键只在本地面出现，供检查器把「同一调用」的几次失败归到一起。
             "invocation_key": r.get::<_, Option<String>>(3)?,
             "error_excerpt": r.get::<_, Option<String>>(4)?,
@@ -385,4 +423,27 @@ pub fn session_trace_evidence(conn: &Connection, session_key: &str, from: usize,
 
 fn round4(v: f64) -> f64 {
     (v * 10_000.0).round() / 10_000.0
+}
+
+/// 桌面检查器的入口（**本地呈现层专属**）：`session_ref` → 本机权威库只读打开 →
+/// [`session_trace_evidence`]。不经 MCP dispatch，也不注册为 MCP 工具（spec §10）。
+/// 错误只给出类别，不回显引用或路径。
+pub fn session_trace_evidence_for_ref(
+    data_home: &std::path::Path,
+    session_ref: &str,
+    from: usize,
+    to: usize,
+) -> Result<Value, String> {
+    if from == 0 || to < from || to - from > 5_000 {
+        return Err("invalid_argument: step range".to_string());
+    }
+    let salt = super::session_ref::load_or_create_salt(data_home).map_err(|e| format!("{}: session salt", e.code))?;
+    let path = agent_vitals_data::authority::default_authority_path(data_home);
+    let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+        .map_err(|_| "authority_unavailable".to_string())?;
+    let keys = agent_vitals_data::authority_query::all_session_keys(db.conn())
+        .map_err(|_| "internal_error: session keys".to_string())?;
+    let session_key = super::session_ref::resolve(&salt, session_ref, keys)
+        .ok_or_else(|| "invalid_argument: unknown session_ref".to_string())?;
+    session_trace_evidence(db.conn(), &session_key, from, to).map_err(|_| "internal_error: evidence query".to_string())
 }

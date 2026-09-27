@@ -107,6 +107,23 @@ pub fn session_ref(salt: &[u8; SALT_LEN], session_key: &str) -> String {
     s
 }
 
+/// 调用指纹等「可被离线穷举验证」的单向值在 MCP 面上的伪名：`ik_` +
+/// `hex(HMAC(salt, "fp:" + value)[..12])`。
+///
+/// 为什么需要：PARSER_VERSION 6 起 `invocation_fingerprint` 是「工具名 + 规范化参数」
+/// 的**无盐** fnv1a64——有网 agent 拿到它，就能离线验证一条猜测的命令（例如
+/// `cat ~/.ssh/id_rsa`）是否在本机跑过（验收 finding）。加安装级盐后只剩「同一安装内
+/// 相同值得同一伪名」这一分组用途。
+pub fn pseudonym(salt: &[u8; SALT_LEN], value: &str) -> String {
+    let mac = hmac_sha256(salt, format!("fp:{value}").as_bytes());
+    let mut s = String::with_capacity(3 + 24);
+    s.push_str("ik_");
+    for b in &mac[..12] {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 /// 在候选 `session_key` 集里找出 `session_ref(salt, k) == target` 的那个。
 /// `None` = 没有匹配（salt 轮换过 / 不是本机的 ref / 会话已 soft-delete）。
 pub fn resolve<I: IntoIterator<Item = String>>(

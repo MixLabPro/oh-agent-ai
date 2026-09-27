@@ -61,9 +61,13 @@ fn item_name(item: &Value) -> Option<String> {
         .map(safe_label)
 }
 
+/// 可执行文件名只取末段（`/bin/zsh` → `zsh`）：`safe_label` 允许 `/`，路径会原样
+/// 进权威表并经 insights 出 MCP（§10 禁止路径，验收 finding）。
 fn command_name(item: &Value) -> Option<String> {
     item.get("command").and_then(Value::as_array)
         .and_then(|command| command.first()).and_then(Value::as_str)
+        .map(|program| program.rsplit('/').next().unwrap_or(program))
+        .filter(|program| !program.is_empty())
         .map(safe_label)
 }
 
@@ -225,7 +229,7 @@ mod tests {
     fn command_execution_fingerprint_includes_the_command() {
         let path = std::env::temp_dir().join(format!("av-codex-fp-{}.jsonl", std::process::id()));
         let item = |id: &str, cmd: &str| format!(
-            r#"{{"type":"event_msg","timestamp":"2026-07-25T11:20:02.000Z","payload":{{"type":"item_completed","item":{{"type":"CommandExecution","id":"{id}","command":["bash","-c","{cmd}"],"exit_code":1}}}}}}"#);
+            r#"{{"type":"event_msg","timestamp":"2026-07-25T11:20:02.000Z","payload":{{"type":"item_completed","item":{{"type":"CommandExecution","id":"{id}","command":["/bin/zsh","-c","{cmd}"],"exit_code":1}}}}}}"#);
         let text = [
             r#"{"type":"session_meta","timestamp":"2026-07-25T11:19:35.404Z","payload":{"session_id":"s1"}}"#.to_string(),
             item("a", "npm test"), item("b", "npm test"), item("c", "ls"),
@@ -237,6 +241,8 @@ mod tests {
         assert_eq!(fps.len(), 3);
         assert_eq!(fps[0], fps[1]);
         assert_ne!(fps[0], fps[2]);
+        assert!(events.iter().all(|e| e.capability_id.as_deref().is_none_or(|c| !c.contains('/'))),
+            "能力名不得是路径");
         std::fs::remove_file(path).ok();
     }
 }

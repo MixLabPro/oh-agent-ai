@@ -169,6 +169,8 @@ struct Step {
     index: usize,
     started_at_ms: i64,
     last_activity_ms: i64,
+    /// 这一步里有没有任何测量（调用或事件）；没有就不给 `ended_at_ms`（§6.2 缺键）。
+    active: bool,
     outcome: Option<String>,
     idle_before_ms: Option<i64>,
     cache_read: i64,
@@ -188,6 +190,7 @@ impl Step {
             index,
             started_at_ms,
             last_activity_ms: started_at_ms,
+            active: false,
             outcome: None,
             idle_before_ms: None,
             cache_read: 0,
@@ -239,6 +242,72 @@ fn cause_rank(cause: &str) -> u8 {
     }
 }
 
+/// 横轴方案——`build_insights`、`call_steps` 与查询层的本地证据共用一份，落点
+/// 规则只写一次（验收发现三处各算各的迟早漂移）。
+///
+/// - 回合 = [本次 task_started, 下一次 task_started)。
+/// - 只有 0–1 个回合起点 → 按调用铺开：一根柱子什么也定位不了（真机常见于宿主
+///   已轮换掉源日志、G6 之前只记了首回合的旧 Claude 会话）。
+/// - 首个回合起点之前的调用：过半 → 按调用铺开（真机 6 个 codex 会话有 2,815 次
+///   调用落在首个 task_started 之前，按回合画会让 88% 的会话从轴上消失）；否则补一个
+///   「首回合之前」的前导步，**不丢任何调用**。
+#[derive(Clone, Debug, PartialEq)]
+pub struct AxisPlan {
+    pub unit: AxisUnit,
+    /// 每一步的起点（升序）；按调用铺开时是每次调用的时间。
+    pub bounds: Vec<i64>,
+    /// 原始回合起点数（去重后）。
+    pub turn_starts: usize,
+    /// 是否补了「首回合之前」的前导步（回合轴下的第 1 步）。
+    pub leading_step: bool,
+    /// 按调用铺开的原因：`few_turn_starts` / `most_calls_before_first_turn`。
+    pub fallback: Option<&'static str>,
+}
+
+impl AxisPlan {
+    /// `call_ts` 必须升序。
+    pub fn new(call_ts: &[i64], events: &[InsightEvent]) -> AxisPlan {
+        let mut starts: Vec<i64> = events
+            .iter()
+            .filter_map(|e| match e {
+                InsightEvent::TaskStarted { ts_ms } => Some(*ts_ms),
+                _ => None,
+            })
+            .collect();
+        starts.sort_unstable();
+        starts.dedup();
+        let per_call = |fallback| AxisPlan {
+            unit: AxisUnit::AssistantCall,
+            bounds: call_ts.to_vec(),
+            turn_starts: starts.len(),
+            leading_step: false,
+            fallback: Some(fallback),
+        };
+        if starts.len() <= 1 {
+            return per_call("few_turn_starts");
+        }
+        let before = call_ts.partition_point(|t| *t < starts[0]);
+        if before * 2 > call_ts.len() {
+            return per_call("most_calls_before_first_turn");
+        }
+        let turn_starts = starts.len();
+        let leading_step = before > 0;
+        let mut bounds = Vec::with_capacity(starts.len() + 1);
+        if leading_step {
+            bounds.push(call_ts[0]);
+        }
+        bounds.extend(starts);
+        AxisPlan { unit: AxisUnit::Turn, bounds, turn_starts, leading_step, fallback: None }
+    }
+
+    /// 时间点落在哪一步（0 基）；早于第一步 → `None`。按调用铺开时是「不晚于它的
+    /// 最后一次调用」（调用自身请用 `call_steps`，同毫秒调用按序号各占一步）。
+    pub fn step_of(&self, ts: i64) -> Option<usize> {
+        let pos = self.bounds.partition_point(|b| *b <= ts);
+        (pos > 0).then(|| pos - 1)
+    }
+}
+
 /// 构建会话诊断（`insights` 的 axis / diagnostics / safety 三块；`lanes` 与
 /// 名义成本由调用方补）。输入顺序无要求——本函数按时间戳稳定排序。
 pub fn build_insights(
@@ -252,32 +321,12 @@ pub fn build_insights(
     let mut events: Vec<InsightEvent> = events.to_vec();
     events.sort_by_key(InsightEvent::ts_ms);
 
-    let mut starts: Vec<i64> = events
-        .iter()
-        .filter_map(|e| match e {
-            InsightEvent::TaskStarted { ts_ms } => Some(*ts_ms),
-            _ => None,
-        })
-        .collect();
-    starts.dedup();
-    // 只有 0–1 个回合起点时按调用铺开：一根柱子什么也定位不了。真机常见于宿主
-    // 已轮换掉源日志的旧 Claude 会话（G6 之前只记了首回合、无法重放）和真正只有
-    // 一个回合的长会话。
-    let unit = if starts.len() <= 1 { AxisUnit::AssistantCall } else { AxisUnit::Turn };
-
-    // ── 回合区间与落点 ──
-    // 回合 = [本次 task_started, 下一次 task_started)；无回合事件时每次调用一步。
-    // 早于首回合的调用 / 事件计入 unplaced，不硬塞进第一回合。
-    let bounds: Vec<i64> = match unit {
-        AxisUnit::Turn => starts.clone(),
-        AxisUnit::AssistantCall => calls.iter().map(|c| c.ts_ms).collect(),
-    };
-    // 最后一个 <= ts 的起点所在的步。
-    let step_of = |ts: i64| -> Option<usize> {
-        let pos = bounds.partition_point(|b| *b <= ts);
-        (pos > 0).then(|| pos - 1)
-    };
-    let mut steps: Vec<Step> = bounds
+    let call_ts: Vec<i64> = calls.iter().map(|c| c.ts_ms).collect();
+    let plan = AxisPlan::new(&call_ts, &events);
+    let unit = plan.unit;
+    let step_of = |ts: i64| plan.step_of(ts);
+    let mut steps: Vec<Step> = plan
+        .bounds
         .iter()
         .enumerate()
         .map(|(i, ts)| Step::new(i + 1, *ts))
@@ -311,6 +360,7 @@ pub fn build_insights(
             step.output += call.output;
             step.input_peak = step.input_peak.max(call.input());
             step.last_activity_ms = step.last_activity_ms.max(call.ts_ms);
+            step.active = true;
             if let Some(model) = call.model_id.as_deref() {
                 if !step.model_ids.iter().any(|m| m == model) {
                     step.model_ids.push(model.to_string());
@@ -329,6 +379,9 @@ pub fn build_insights(
         };
         let step = &mut steps[s];
         step.last_activity_ms = step.last_activity_ms.max(event.ts_ms());
+        if !matches!(event, InsightEvent::TaskStarted { .. }) {
+            step.active = true;
+        }
         match event {
             InsightEvent::TaskFinished { outcome, .. } if unit == AxisUnit::Turn => {
                 // 一个回合里既有「会话结束」式的 unknown，又有中断的 cancelled
@@ -372,7 +425,8 @@ pub fn build_insights(
         } else if slump_start.is_none() {
             slump_start = Some(i);
         }
-        if i < cfg.skip_first_calls || call.input() < cfg.min_call_input || !is_low {
+        // `i == 0` 恒跳过（下面要读上一次调用）；配置成 0 也不会越界。
+        if i < cfg.skip_first_calls.max(1) || call.input() < cfg.min_call_input || !is_low {
             continue;
         }
         let run_start = slump_start.unwrap_or(i);
@@ -443,7 +497,10 @@ pub fn build_insights(
             }
             let base = &calls[first.saturating_sub(cfg.drop_baseline_calls)..first];
             let before = mean(base.iter().filter_map(InsightCall::hit_rate));
-            let after = mean(listed.iter().filter_map(|i| calls[*i].hit_rate()));
+            // 只平均归为「命中下降」的那些调用（区间里的 unexplained 不掺进来）。
+            let after = mean(
+                interval.iter().filter(|(_, e)| *e == UncachedExplanation::HitRateDrop).filter_map(|(i, _)| calls[*i].hit_rate()),
+            );
             fact["hit_before"] = json!(round4(before));
             fact["hit_after"] = json!(round4(after));
         }
@@ -489,10 +546,15 @@ pub fn build_insights(
             && run_max >= cfg.growth_min_peak
             && run_max as f64 / first as f64 >= cfg.growth_min_ratio
         {
-            // 区间终点取达到最大值的那一回合：之后的持平不算「增长」。
+            // 区间终点取达到最大值的那一回合：之后的持平不算「增长」；起点取终点之前
+            // 最后一个最低点：之前的平台期不算「增长」（验收：20 个平稳回合 + 一段
+            // 增长曾报 from = 1，impact 把平台期也算进去）。
             let peak_at = (start..=end).rev().find(|j| with_calls[*j].input_peak == run_max).unwrap_or(end);
-            let run = &with_calls[start..=peak_at];
-            if run.len() >= cfg.growth_min_steps {
+            let low = with_calls[start..=peak_at].iter().map(|s| s.input_peak).min().unwrap_or(first);
+            let rise = (start..=peak_at).rev().find(|j| with_calls[*j].input_peak == low).unwrap_or(start);
+            let first = with_calls[rise].input_peak;
+            let run = &with_calls[rise..=peak_at];
+            if run.len() >= cfg.growth_min_steps && first > 0 && run_max as f64 / first as f64 >= cfg.growth_min_ratio {
                 let tokens: i64 = run.iter().map(|s| s.input()).sum();
                 diagnostics.push(json!({
                     "kind": "input_growth",
@@ -570,20 +632,23 @@ pub fn build_insights(
             by_tool.entry(tool).or_default().push(i);
         }
     }
+    // 贪心扫描出**每一段**达标的窗口（互不重叠）：初版只留一个最大窗口，同一工具
+    // 在第 10 与第 200 回合各有一段连续失败时只报了其中一段（验收 finding）。
     for members in by_tool.into_values() {
-        let mut window: Vec<usize> = Vec::new();
-        let mut best: Vec<usize> = Vec::new();
-        for m in members {
-            window.push(m);
-            while failures[window[0]].step + cfg.repeat_tool_window_steps <= failures[m].step {
-                window.remove(0);
+        let mut i = 0;
+        while i < members.len() {
+            let mut j = i;
+            while j + 1 < members.len()
+                && failures[members[j + 1]].step < failures[members[i]].step + cfg.repeat_tool_window_steps
+            {
+                j += 1;
             }
-            if window.len() > best.len() {
-                best = window.clone();
+            if j + 1 - i >= cfg.repeat_same_tool {
+                groups.push(members[i..=j].to_vec());
+                i = j + 1;
+            } else {
+                i += 1;
             }
-        }
-        if best.len() >= cfg.repeat_same_tool {
-            groups.push(best);
         }
     }
     // 回合范围重叠的组合并成一条：同一段里几个调用各自反复失败，用户要看的是
@@ -675,7 +740,9 @@ pub fn build_insights(
             "unit": unit.as_str(),
             // 回合起点数：unit=assistant_call 时区分「宿主没有回合」(0) 与「只记到
             // 一个回合」(1)，前端据此说明为什么按调用展示。
-            "turn_starts": starts.len(),
+            "turn_starts": plan.turn_starts,
+            "leading_step": plan.leading_step,
+            "fallback": plan.fallback,
             "steps": steps_json,
             "unplaced": { "usage_facts": unplaced_calls, "workflow_events": unplaced_events },
         },
@@ -698,23 +765,13 @@ pub fn build_insights(
 pub fn call_steps(calls: &[InsightCall], events: &[InsightEvent]) -> Vec<Option<usize>> {
     let mut order: Vec<usize> = (0..calls.len()).collect();
     order.sort_by_key(|i| calls[*i].ts_ms);
-    let mut starts: Vec<i64> = events
-        .iter()
-        .filter_map(|e| match e {
-            InsightEvent::TaskStarted { ts_ms } => Some(*ts_ms),
-            _ => None,
-        })
-        .collect();
-    starts.sort_unstable();
-    starts.dedup();
+    let call_ts: Vec<i64> = order.iter().map(|i| calls[*i].ts_ms).collect();
+    let plan = AxisPlan::new(&call_ts, events);
     let mut out = vec![None; calls.len()];
     for (rank, i) in order.into_iter().enumerate() {
-        // 与 `build_insights` 同一退化规则：0–1 个回合起点按调用铺开。
-        out[i] = if starts.len() <= 1 {
-            Some(rank)
-        } else {
-            let pos = starts.partition_point(|b| *b <= calls[i].ts_ms);
-            (pos > 0).then(|| pos - 1)
+        out[i] = match plan.unit {
+            AxisUnit::AssistantCall => Some(rank),
+            AxisUnit::Turn => plan.step_of(calls[i].ts_ms),
         };
     }
     out
@@ -724,7 +781,6 @@ fn step_json(step: &Step, unit: AxisUnit) -> Value {
     let mut out = json!({
         "index": step.index,
         "started_at_ms": step.started_at_ms,
-        "ended_at_ms": step.last_activity_ms,
         "input": {
             "cache_read": step.cache_read,
             "cache_write": step.cache_write,
@@ -742,6 +798,9 @@ fn step_json(step: &Step, unit: AxisUnit) -> Value {
         },
         "notes": step.notes.iter().map(|(k, n)| json!({ "explanation": k, "calls": n })).collect::<Vec<_>>(),
     });
+    if step.active {
+        out["ended_at_ms"] = json!(step.last_activity_ms);
+    }
     if let Some(idle) = step.idle_before_ms {
         out["idle_before_ms"] = json!(idle);
     }
@@ -811,16 +870,17 @@ mod tests {
     }
 
     #[test]
-    fn calls_land_in_half_open_turn_intervals_and_early_calls_are_unplaced() {
+    fn calls_land_in_half_open_turn_intervals_and_early_calls_get_a_leading_step() {
         let calls = vec![call(50, "m", 0, 0, 10), call(100, "m", 0, 0, 10), call(199, "m", 0, 0, 10), call(200, "m", 0, 0, 10)];
         let v = build(&calls, &[started(100), started(200)]);
         assert_eq!(v["axis"]["unit"], "turn");
         let steps = v["axis"]["steps"].as_array().unwrap();
-        assert_eq!(steps.len(), 2);
-        assert_eq!(steps[0]["calls"], 2, "边界 100 属于回合 1，199 仍在回合 1");
-        assert_eq!(steps[1]["calls"], 1, "边界 200 属于回合 2");
-        assert_eq!(v["axis"]["unplaced"]["usage_facts"], 1, "早于首回合的调用不硬塞");
-        assert_eq!(call_steps(&calls, &[started(100), started(200)]), vec![None, Some(0), Some(0), Some(1)]);
+        assert_eq!(steps.len(), 3, "首回合前的调用进前导步，不丢");
+        assert_eq!(steps[0]["calls"], 1);
+        assert_eq!(steps[1]["calls"], 2, "边界 100 属于回合 1，199 仍在回合 1");
+        assert_eq!(steps[2]["calls"], 1, "边界 200 属于回合 2");
+        assert_eq!(v["axis"]["unplaced"]["usage_facts"], 0);
+        assert_eq!(call_steps(&calls, &[started(100), started(200)]), vec![Some(0), Some(1), Some(1), Some(2)]);
     }
 
     #[test]
@@ -983,6 +1043,69 @@ mod tests {
         let v = build(&calls, &events);
         assert_eq!(v["diagnostics"][0]["steps"], json!({"from": 16, "to": 18}));
         assert_eq!(v["diagnostics"][0]["fact"]["failures"], 2);
+    }
+
+    #[test]
+    fn calls_before_the_first_turn_get_a_leading_step_or_a_per_call_axis() {
+        // 1 次调用在首回合前、6 次在回合内 → 补前导步，不丢调用。
+        let mut calls = vec![call(50, "m", 0, 0, 10)];
+        for t in 0..3 { calls.push(call(100 + t, "m", 0, 0, 10)); calls.push(call(200 + t, "m", 0, 0, 10)); }
+        let v = build(&calls, &[started(100), started(200)]);
+        assert_eq!(v["axis"]["unit"], "turn");
+        assert_eq!(v["axis"]["leading_step"], true);
+        assert_eq!(v["axis"]["steps"].as_array().unwrap().len(), 3);
+        assert_eq!(v["axis"]["steps"][0]["calls"], 1);
+        assert_eq!(v["axis"]["unplaced"]["usage_facts"], 0);
+        // 过半调用在首回合前 → 按调用铺开。
+        let mut calls: Vec<InsightCall> = (0..10).map(|i| call(i, "m", 0, 0, 10)).collect();
+        calls.push(call(100, "m", 0, 0, 10));
+        calls.push(call(200, "m", 0, 0, 10));
+        let v = build(&calls, &[started(100), started(200)]);
+        assert_eq!(v["axis"]["unit"], "assistant_call");
+        assert_eq!(v["axis"]["fallback"], "most_calls_before_first_turn");
+        assert_eq!(v["axis"]["steps"].as_array().unwrap().len(), 12);
+    }
+
+    #[test]
+    fn every_burst_of_one_tool_is_reported() {
+        let (calls, mut events) = healthy(30, 1_000_000);
+        let at = |turn: i64| 1_000_000 + turn * 2 * MIN + 500;
+        for (turn, fp) in [(2, "a"), (3, "b"), (4, "c"), (20, "d"), (21, "e"), (22, "f")] {
+            events.push(failed(at(turn), "Bash", fp, false));
+        }
+        let v = build(&calls, &events);
+        let ranges: Vec<Value> = v["diagnostics"].as_array().unwrap().iter().map(|d| d["steps"].clone()).collect();
+        assert_eq!(ranges.len(), 2, "{ranges:?}");
+    }
+
+    #[test]
+    fn growth_starts_at_the_last_low_point_not_the_flat_lead_in() {
+        let mut calls = Vec::new();
+        let mut events = Vec::new();
+        for t in 0..30i64 {
+            let ts = 1_000_000 + t * 2 * MIN;
+            events.push(started(ts));
+            let size = if t < 15 { 30_000 } else { 30_000 + (t - 14) * 8_000 };
+            calls.push(call(ts + 1_000, "m", size - 100, 50, 50));
+        }
+        let v = build(&calls, &events);
+        let d = v["diagnostics"].as_array().unwrap().iter().find(|d| d["kind"] == "input_growth").expect("growth");
+        assert_eq!(d["steps"]["from"], 15, "平台期（回合 1–14）不算增长");
+        assert_eq!(d["steps"]["to"], 30);
+    }
+
+    #[test]
+    fn skip_first_calls_zero_does_not_panic() {
+        let cfg = InsightsConfig { skip_first_calls: 0, ..InsightsConfig::default() };
+        let calls = vec![call(1, "m", 0, 40_000, 10_000), call(2, "m", 0, 40_000, 10_000)];
+        let _ = build_insights(&calls, &[], &[], &cfg);
+    }
+
+    #[test]
+    fn a_step_without_measurements_has_no_end_time() {
+        let v = build(&[call(250, "m", 0, 0, 10)], &[started(100), started(200)]);
+        assert!(v["axis"]["steps"][0].get("ended_at_ms").is_none(), "回合 1 没有任何测量");
+        assert!(v["axis"]["steps"][1].get("ended_at_ms").is_some());
     }
 
     #[test]

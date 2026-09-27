@@ -292,7 +292,9 @@ def turn_signal(record, has_turn):
     `<task-notification>`、中断标记都算成新 turn）。首回合沿用历史判据
     `_text_content`（workflow 的 task_started event_id 依赖它）；其后排除 meta
     注入、压缩摘要、宿主回灌与只改设置的斜杠命令。"""
-    message = record.get("message") if isinstance(record, dict) else None
+    if not isinstance(record, dict):
+        return "other"
+    message = record.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if record.get("isSidechain") is True:
         return "other"
@@ -304,8 +306,9 @@ def turn_signal(record, has_turn):
     text = text.lstrip()
     if text.startswith("[Request interrupted"):
         return "interrupt"
-    if record.get("isMeta") is True or record.get("isCompactSummary") is True \
-            or not _text_content(content):
+    # 后续回合允许 text + image 混合（贴图的请求也是新请求）；_user_prompt_text
+    # 已排除 tool_result 数组并要求非空文本。
+    if record.get("isMeta") is True or record.get("isCompactSummary") is True:
         return "other"
     if text.startswith(_HOST_ECHO):
         return "other"

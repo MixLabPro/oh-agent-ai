@@ -46,8 +46,10 @@ use crate::contracts::workflow::{SessionExcerpt, WorkflowEvent};
 /// `task_finished{cancelled}`；claude / codex 的 `invocation_fingerprint` 从
 /// 「工具名」改为「工具名 + 规范化参数」（存量行经 `insert_events` 的派生列
 /// 纠正改写）；claude 增量轮开始重扫 workflow（此前增量轮不产 workflow，活跃
-/// 会话尾部的工具结果与回合永远缺席）。不升这个号，存量源不重放，上述三点
-/// 都只对新文件生效。
+/// 会话尾部的工具结果与回合永远缺席）；codex 的能力名取可执行文件末段
+/// （`/bin/zsh` → `zsh`，路径不进权威表）。重放时 `insert_events` 的派生列纠正
+/// 连带改写 `invocation_fingerprint` / `event_ts_ms` / `capability_id` / 锚点。
+/// 不升这个号，存量源不重放，上述各点都只对新文件生效。
 pub const PARSER_VERSION: i64 = 6;
 
 /// P0 阶段的解析器标记——sync_host 与 advance_checkpoint 共用（失配会导致

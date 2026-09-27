@@ -1,6 +1,6 @@
 # 会话消耗诊断设计规格（Session Consumption Diagnostics）
 
-> 状态：草案 r6，2026-09-27。
+> 状态：草案 r7，2026-09-28（P0 + P1 数据面已实现：`967a66e` 及其后续提交）。
 > - r1–r3：以查询时构建的 `TraceGraph` 为数据源，宿主覆盖逐步核实。
 > - r4：数据源改为权威库标准化投影；通用横轴为回合。
 > - **r5：按产品评审收敛**——目标从「5 秒指出为什么变贵 / 出错 / 变危险」收敛为「**快速定位值得关注的
@@ -11,6 +11,10 @@
 >   排序改为有直接证据的在前；诊断不再给金额，会话级金额改为含输出、按调用模型计价的名义成本；解释文案
 >   去掉排除式与断言式结论；诊断列表改为紧凑、单条展开；检查器随选择切换并直达证据；补长会话浏览与窄窗口
 >   抽屉（§7、§8 重写）。
+> - **r7：按实现与两轮 Agent 验收回写**——§6.2 契约改为实际形状（多币种名义成本、
+>   `turn_starts` / `leading_step` / `fallback` / `quality` 等字段）；§4 回合判据与
+>   首回合前的调用；§7 实现中的阈值调整与已知偏差；§10 调用指纹出口伪名化；§8.3
+>   最小柱宽 7px、窄面板改用容器查询。
 >
 > 关系：入口由 `docs/OVERVIEW_DRILLDOWN_AND_INLINE_FINDINGS_SPEC.md`（总览 → 会话穿透）提供，本文负责
 > 进入会话之后的部分。几何沿用唯一一份 `apps/desktop/src-tauri/ui/timeline.js`；
@@ -88,7 +92,7 @@
 
 | 口径 | 定义 | 说明 |
 |---|---|---|
-| 回合 | 由 `workflow_events` 的 `task_started` 界定：一次用户请求到助手完成 | 区间 `[本次 task_started, 下一次 task_started)`，最后一个到会话末尾。无回合事件时退为「每次助手调用一步」 |
+| 回合 | 由 `workflow_events` 的 `task_started` 界定：一次用户请求到助手完成 | 区间 `[本次 task_started, 下一次 task_started)`，最后一个到会话末尾。只有 0–1 个回合起点、或过半调用早于首个回合起点时，退为「每次助手调用一步」；少量调用早于首回合时补一个前导步，不丢调用（实现：`session_insights::AxisPlan`，三处共用） |
 | 助手调用 | `usage_facts` 一行（四个原生宿主 `observation_kind = assistant-usage`） | 一个回合内可有多次调用 |
 | 回合输入消耗 | 回合内所有调用的 `cache_read + cache_write + uncached_input` 之和 | **累计处理量**，不是上下文大小 |
 | 单次输入规模 | 一次调用的 `cache_read + cache_write + uncached_input` | 日志口径下的输入规模；回合内取峰值 `input_peak` |
@@ -102,6 +106,13 @@
 语义）。修复为每条用户文本请求开一个回合。event_id 以 offset 派生，新增回合事件不影响既有事件 id，
 但既有 `task_finished` 的时点会变，须评估 `workflow_summary` 等消费者并同改；Python 镜像同步。
 **不修则 Claude Code 整个会话只有一步，「定位消耗区间」无法成立。**
+
+**已实现（r7）**：判据是 `hosts::claude_code::sessions::turns::turn_signal`，evidence（SV612、调用树、
+UserPrompts 覆盖）与 workflow 共用一份，Python 镜像 `claude_evidence.turn_signal`。首回合沿用历史判据
+（event_id 不变）；其后排除 `isSidechain` / `isMeta` / `isCompactSummary`、宿主回灌（`<task-notification>`、
+`<local-command-*>`、`<bash-*>`）与只改设置的斜杠命令；贴图的请求（text + image）算新回合；
+`[Request interrupted…` 产 `task_finished{cancelled}`（每回合至多一次）。本机重放：claude 回合
+299 → 1,754，取消 86。源日志已被宿主清理的旧会话无法重放，仍只有首回合，按调用铺开。
 
 ---
 
@@ -152,40 +163,63 @@
 
 ### 6.2 形状
 
+实现：`agent-vitals-domain::session_insights::build_insights`（axis / session / diagnostics / safety）+
+`agent-vitals-query::session_insights::session_insights`（lanes / host / 名义成本 / quality）。
+
 ```jsonc
 {
   "schema_version": 1,
+  "host": "claude-code",
   "axis": {
     "unit": "turn",                       // "turn" | "assistant_call"
+    "turn_starts": 102,                   // 去重后的回合起点数
+    "leading_step": false,                // 回合轴的第 1 步是否是「首回合之前」补出的前导步
+    "fallback": null,                     // 按调用铺开的原因："few_turn_starts" | "most_calls_before_first_turn"
     "steps": [
       {
-        "index": 12,
+        "index": 12,                      // 1 基、连续
         "started_at_ms": 1789564610000,
-        "ended_at_ms": 1789564702000,     // 缺测量则缺键
-        "outcome": "succeeded",           // 回合结果；unit=assistant_call 时缺键
-        "idle_before_ms": 412000,         // 与上一回合最后一次调用的间隔
-        "input": { "cache_read": 1203344, "cache_write": 5120, "uncached_input": 812 },  // 回合累计
+        "ended_at_ms": 1789564702000,     // 这一步没有任何测量时缺键
+        "outcome": "cancelled",           // 回合结果（succeeded/failed/cancelled/unknown）；按调用铺开或无结果时缺键
+        "idle_before_ms": 412000,         // 本步第一次调用与上一次调用的间隔；无调用时缺键
+        "input": { "cache_read": 1203344, "cache_write": 5120, "uncached_input": 812 },  // 本步累计
         "output": 18230,
-        "input_peak": 180211,             // 回合内单次输入规模峰值
-        "hit_rate": 0.995,                // 回合内 cache_read 之和 / 输入之和
+        "input_peak": 180211,             // 本步单次输入规模峰值
+        "hit_rate": 0.995,                // 本步 cache_read 之和 / 输入之和；无输入时缺键
         "calls": 7,
         "model_ids": ["claude-sonnet-5"],
         "tools": { "succeeded": 44, "failed": 1, "cancelled": 0, "unknown": 0 },
-        "nominal_cost": { "value": 0.42, "currency": "USD", "coverage": "full" }   // 无价卡缺键；部分覆盖 "partial"
+        "notes": [{ "explanation": "possible_cache_expiry", "calls": 1 }],   // 不进清单的说明（§7.1）
+        "nominal_cost": { "amounts": [{ "amount_minor": 42, "currency": "USD" }], "coverage": "full", "basis": "nominal" }
       }
     ],
     "unplaced": { "usage_facts": 0, "workflow_events": 0 }
   },
+  "session": {
+    "calls": 1087,
+    "input": { "cache_read": 0, "cache_write": 0, "uncached_input": 0 },
+    "output": 0,
+    "nominal_cost": { "amounts": [/* 多币种分栏，永不相加 */], "coverage": "partial", "basis": "nominal" },
+    "nominal_cost_reason": "no_pricing_snapshot"   // 无金额时才有："no_pricing_snapshot" | "no_price_card"
+  },
   "lanes": {
-    "consumption": { "state": "available" },
-    "tools": { "state": "available" }
+    "consumption": { "state": "available", "coverage": 1.0 },
+    "tools": { "state": "unavailable", "reason": "no_data_in_session" }
   },
   "diagnostics": [ /* §7.4 */ ],
-  "safety": { "count": 33, "critical": 30, "rules": [{ "rule": "SV601", "severity": "critical", "count": 30 }] }
+  "safety": { "count": 33, "critical": 30, "rules": [{ "rule": "SV601", "severity": "critical", "count": 30, "steps": [3, 9] }] },
+  "quality": { "legacy_fingerprints": 20 }   // 仍是工具名级旧指纹的失败次数（见 §7.3）
 }
 ```
 
 约定：缺键不出现；数字都在宿主侧算好；不下发自然语言（前端按 `kind` / `explanation` / `remedy_id` 选文案）。
+名义成本：回合级按（回合 × 模型 × provider × 峰谷 × 价格快照）分组计价；会话合计**另按会话级分组计价**
+（不是回合金额之和——逐组取整会累积误差），覆盖所有调用；价格快照最早只到 2026-09-09，更早的调用无
+金额并给 `nominal_cost_reason`，不计 0。
+
+本地证据（**不经 MCP**）：Tauri 命令 `session_trace_evidence(session_ref, from, to)` →
+`query::session_insights::session_trace_evidence`，返回区间内逐次调用、每次失败的错误/参数摘录与分组键、
+安全提醒命令摘要。
 
 ### 6.3 可用性与原因
 
@@ -247,6 +281,22 @@ r5 的单一 `evidence_strength` 把两者混在一起：「输入增长」是�
 - **原因确定度**：本机能读到错误摘录时为 `evidence`（错误摘要就是可直接查看的证据），否则 `unknown`。
   失败原因分类待 G8；首发不替用户归纳原因，只把错误摘要摆到眼前。
 - **影响**：失败次数；这些失败所在回合的输入 tokens（文案「不代表都能省下来」）。
+
+### 7.3a 实现中的调整与已知偏差（r7，待 §11.1 标注校准）
+
+| 项 | 规格原文 | 实现 | 理由 |
+|---|---|---|---|
+| 调用指纹 | 「相同 `invocation_fingerprint`」 | 指纹改为「工具名 + 规范化参数」（PARSER_VERSION 6）；源日志已清理、无法重放的旧行仍是工具名级，识别后按「未知」处理并计入 `quality.legacy_fingerprints` | 旧指纹只编码工具名，「同一调用重复失败」退化成「同一工具失败过两次」（claude 119 组 → 27 组） |
+| 同一调用重复失败 | 失败 ≥ 2 次 | 同指纹的失败相隔 > 5 个回合即切成不同串；回合范围重叠的多组合并为一条（`fact.groups`） | 真机有同一命令相隔 300 回合各失败一次；一个回合里 10 组并列诊断 |
+| 同一工具反复失败 | 3 回合内 ≥ 3 次 | 贪心扫出每一段互不重叠的窗口 | 只报最大窗口会漏掉第二段 |
+| 输入增长 | ≥ 10 回合、≥ 3 倍 | 另加峰值 ≥ 10 万 tokens；只在回合轴上判；区间起点取最后一个低点 | 上下文随对话累积是常态，按调用铺开时几乎全中；平台期不算增长 |
+| 高未命中 | 未写下限 | 区间未命中输入 ≥ 会话输入 1% 才进清单 | 占比 0.09% 的条目对消耗无意义 |
+| 模型切换说明 | 本回合或上一回合有 `model_switched` | 本次调用与上一次调用之间换了模型（或其间有 `model_switched`） | 更精确；按回合判会把整回合的未命中都归给切换 |
+| SV611 佐证 | 并入重复失败 | 未并入 | SV611 在 Codex 上是 bash 子集判定，与指纹级分组口径不一，待统一 |
+| `fact` 扩展字段 | — | `same_invocation`、`groups`（重复失败）、`hit_before` / `hit_after`（命中下降，后者只平均归为下降的调用） | 前端文案需要 |
+
+真机 20 个标注候选（2026-09-28 本机重放）：健康会话 0 条诊断；Codex 上「同一工具 3 回合内失败 3 次」
+仍偏多（单会话最多 45 条，界面只展示前 3 条），待标注后调阈值。
 
 ### 7.4 诊断条目形状
 
@@ -315,7 +365,9 @@ r5 的单一 `evidence_strength` 把两者混在一起：「输入增长」是�
 
 - 诊断列表每条默认一行标题 + 一行事实；**只展开当前选中的一条**（原因 + 建议）。不靠缩小字号塞信息。
 - 安全提醒放在摘要栏右端（数量 + 查看），与成本诊断分开，不占诊断名额。
-- 轨迹与检查器左右相邻；窗口宽 ≤ 980px 时检查器改为底部详情抽屉（可关闭），不排到页面最底部。
+- 轨迹与检查器左右相邻；面板宽 ≤ 820px 时（按**容器**宽度判断，不按视口——会话详情在工作台里是
+  约 460px 的侧栏）检查器紧随轨迹之下。r6 设想的底部悬浮抽屉不采用：面板本身在侧栏里，fixed 定位会
+  盖住会话列表。
 - 无诊断时：「在当前可分析的数据中，未发现达到提示条件的消耗异常。」下一行列检查范围（三类诊断）与
   「未达到提示条件」的记录（如失败回合、长空闲），这些仍标在轨迹上。不写「没有持续增长」这类强结论。
 
@@ -336,6 +388,7 @@ r5 的单一 `evidence_strength` 把两者混在一起：「输入增长」是�
 
 回合数超过「每柱至少约 10px」可容纳的数量时：
 
+- 最小柱宽 7px（r7；原 ~10px 在工作台约 460px 的详情侧栏里 40 个回合就要开窗口）。
 - 主图只显示一个窗口；顶部加**全程缩略图**（按像素聚合，取窗口内最大值，未命中占比 > 50% 的列用警示色；
   诊断区间在缩略图底部标出），点击或拖动选择窗口。
 - 提供「上一处 / 下一处诊断」；选中诊断或回合时窗口自动移到能看见它的位置。
@@ -400,6 +453,10 @@ r5 的单一 `evidence_strength` 把两者混在一起：「输入增长」是�
   命令 / 参数文本、路径、原生会话 id、findings 的 `evidence`。
 - 检查器里的错误摘录只能走本地呈现层专属通道（参照 `trace-anchors`：LOCAL presentation layer only,
   never an MCP tool），不进入 `insights`。
+- r7：调用指纹改为参数级后，无盐 fnv1a64 可被离线穷举验证（猜一条命令即可确认是否执行过）。
+  `session_detail.workflow_timeline[].invocation_fingerprint` 与 `issues_summary` 的调用类 `fingerprint`
+  改为安装级加盐伪名（`ik_…`，`query::session_ref::pseudonym`）。能力名中的路径（codex 的 `/bin/zsh`）
+  在 emitter 取末段，insights 出口再兜一次。
 
 ---
 

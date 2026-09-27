@@ -1470,10 +1470,6 @@ pub fn all_session_keys(conn: &Connection) -> Result<Vec<String>, AuthorityError
     rows.collect::<Result<_, _>>().map_err(AuthorityError::from)
 }
 
-/// v0.12 会话成本的可追溯分桶。这里仅聚合权威事实及其计费归属，不在 data
-/// 层复制价格规则；调用方可将每个独立桶交给 domain 成本引擎。分组中保留
-/// `provider_raw`，因为无法安全归一化的 custom 路由仍必须可见，不能并入
-/// `<unknown>` 或 OpenAI。
 /// 一个计费桶（同宿主、模型、provider、峰谷档）喂给
 /// `agent_vitals_domain::cost::metered_estimate_minor` 的用量形状。会话成本分桶
 /// 与会话消耗诊断的回合名义成本（`query::session_insights`）共用这一份——
@@ -1515,6 +1511,10 @@ pub fn billing_bucket_usage_json(
     }
 }
 
+/// v0.12 会话成本的可追溯分桶。这里仅聚合权威事实及其计费归属，不在 data
+/// 层复制价格规则；调用方可将每个独立桶交给 domain 成本引擎。分组中保留
+/// `provider_raw`，因为无法安全归一化的 custom 路由仍必须可见，不能并入
+/// `<unknown>` 或 OpenAI。
 pub fn session_billing_buckets(
     conn: &Connection,
     session_key: &str,

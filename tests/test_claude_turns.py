@@ -42,6 +42,10 @@ class ClaudeTurnSignalTests(unittest.TestCase):
         for record in others:
             self.assertEqual(turn_signal(record, True), "other", record)
         self.assertEqual(turn_signal(user("fix the bug"), True), "request")
+        self.assertEqual(turn_signal(user([{"type": "text", "text": "分析这张图 [Image #1]"}, {"type": "image", "source": {}}]), True),
+                         "request", "贴图的请求也开回合")
+        self.assertEqual(turn_signal(user([{"type": "image", "source": {}}]), True), "other")
+        self.assertEqual(turn_signal("not a dict", True), "other")
         self.assertEqual(turn_signal(user("<command-name>/goal</command-name>"), True), "request")
         self.assertEqual(
             turn_signal(user([{"type": "text", "text": "[Request interrupted by user]"}]), True), "interrupt")

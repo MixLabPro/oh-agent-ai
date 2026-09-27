@@ -126,15 +126,28 @@ pub fn insert_events(
             // 工具名，「同一调用重复失败」于是退化成「同一工具失败过两次」；改成
             // 工具 + 参数后，存量行靠这里在重放时纠正——不进这个集合，旧行永远
             // 停在工具名级指纹，和新行混着分组。
+            //
+            // event_ts_ms / capability_id / 锚点同理（验收）：claude 增量轮整文件重扫后，
+            // 会话末尾的 `task_finished` 每轮以同一 id、新时间重发——不纠正就永远停在首次
+            // 入库的时间（真机 15/214 行落后最后一次调用超过 1 小时）；codex 的能力名曾是
+            // `/bin/zsh` 这类路径，改成末段后存量行也要跟上。锚点只在新值非空时改写
+            // （COALESCE），不让不产锚点的 emitter 抹掉已有坐标。
             let corrected = conn.execute(
                 "UPDATE workflow_events
                  SET outcome = ?2, capability_version = ?3,
                      duration_ms = ?4, error_fingerprint = ?5,
-                     invocation_fingerprint = ?6
+                     invocation_fingerprint = ?6, event_ts_ms = ?7, capability_id = ?8,
+                     native_event_id = COALESCE(?9, native_event_id),
+                     source_line = COALESCE(?10, source_line),
+                     source_byte_offset = COALESCE(?11, source_byte_offset)
                  WHERE event_id = ?1
                    AND (outcome IS NOT ?2 OR capability_version IS NOT ?3
                         OR duration_ms IS NOT ?4 OR error_fingerprint IS NOT ?5
-                        OR invocation_fingerprint IS NOT ?6)",
+                        OR invocation_fingerprint IS NOT ?6 OR event_ts_ms IS NOT ?7
+                        OR capability_id IS NOT ?8
+                        OR COALESCE(?9, native_event_id) IS NOT native_event_id
+                        OR COALESCE(?10, source_line) IS NOT source_line
+                        OR COALESCE(?11, source_byte_offset) IS NOT source_byte_offset)",
                 params![
                     event.event_id,
                     event.outcome,
@@ -142,6 +155,11 @@ pub fn insert_events(
                     event.duration_ms,
                     event.error_fingerprint,
                     event.invocation_fingerprint,
+                    event.event_ts_ms,
+                    event.capability_id,
+                    event.native_event_id,
+                    event.source_line,
+                    event.source_byte_offset,
                 ],
             )?;
             if corrected == 1 {
@@ -454,6 +472,19 @@ mod tests {
             )
             .expect("fingerprint after correction");
         assert_eq!(fingerprint.as_deref(), Some("fnv1a64:args-level"));
+
+        // 会话末尾的 task_finished 每轮以同一 id、新时间重发（claude 增量轮整文件重扫）：
+        // 时间也是派生列，必须跟着纠正，不能停在首次入库的时刻。
+        let later = WorkflowEvent { event_ts_ms: refingerprinted.event_ts_ms + 3_600_000, ..refingerprinted.clone() };
+        let sixth = db
+            .with_immediate_txn(|conn| insert_events(conn, std::slice::from_ref(&later), &source_id, "workflow-test", 7))
+            .expect("timestamp correction");
+        assert_eq!(sixth.corrected, 1);
+        let ts: i64 = db
+            .conn()
+            .query_row("SELECT event_ts_ms FROM workflow_events WHERE event_id = ?1", [&event.event_id], |row| row.get(0))
+            .expect("ts after correction");
+        assert_eq!(ts, later.event_ts_ms);
         let session_count: i64 = db
             .conn()
             .query_row(

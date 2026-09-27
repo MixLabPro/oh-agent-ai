@@ -555,6 +555,7 @@ pub fn run_issues(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let limit = limit_arg(args)?;
     let mut warnings = Vec::new();
     let handle = AuthorityHandle::open(data_home)?;
+    let salt = super::session_ref::load_or_create_salt(data_home)?;
     check_as_of_run_id(handle.conn(), args, &mut warnings)?;
 
     let mut filter_sql = String::new();
@@ -630,6 +631,13 @@ pub fn run_issues(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     while let Some(row) = rows.next().map_err(|e| ToolError::new("internal_error", format!("issues summary row failed: {e}")))? {
         let category: String = row.get(0).map_err(|e| ToolError::new("internal_error", format!("issues summary row failed: {e}")))?;
         let safe_key: String = row.get(1).map_err(|e| ToolError::new("internal_error", format!("issues summary row failed: {e}")))?;
+        // 非 error_fingerprint 类别的键可能是参数级调用指纹（可被离线穷举验证）：
+        // 出 MCP 前换成安装级加盐伪名。能力名 / 事件类型原样保留。
+        let safe_key = if category != "error_fingerprint" && safe_key.starts_with("fnv1a64:") {
+            super::session_ref::pseudonym(&salt, &safe_key)
+        } else {
+            safe_key
+        };
         let occurrences: i64 = row.get(2).unwrap_or(0);
         let sessions: i64 = row.get(3).unwrap_or(0);
         let first_ms: i64 = row.get(4).unwrap_or(0);

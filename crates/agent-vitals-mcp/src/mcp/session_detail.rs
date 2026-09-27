@@ -222,7 +222,8 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
                 "outcome": outcome,
                 "duration_ms": duration_ms,
                 "error_fingerprint": error_fingerprint,
-                "invocation_fingerprint": invocation_fingerprint,
+                // 参数级指纹可被离线穷举验证：只给安装级加盐伪名（分组用途不变）。
+                "invocation_fingerprint": invocation_fingerprint.map(|fp| super::session_ref::pseudonym(&salt, &fp)),
             }));
         }
     }
@@ -369,6 +370,9 @@ mod tests {
         assert_eq!(workflow.len(), 2);
         assert_eq!(workflow[1]["event_type"], "tool_finished");
         assert_eq!(workflow[1]["outcome"], "failed");
+        // 参数级调用指纹可被离线穷举验证：只出安装级加盐伪名。
+        let ik = workflow[1]["invocation_fingerprint"].as_str().unwrap();
+        assert!(ik.starts_with("ik_") && !ik.contains("cafebabe"), "{ik}");
         assert_eq!(d["workflow_has_more"], false);
         let txt = env.to_string();
         assert!(!txt.contains("priv-abc-99"), "原生 id 泄漏: {txt}");

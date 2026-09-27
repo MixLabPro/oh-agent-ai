@@ -292,4 +292,42 @@ mod insights_tests {
         assert_eq!(d["lanes"]["tools"], json!({"state": "unavailable", "reason": "no_data_in_session"}));
         let _ = std::fs::remove_dir_all(&home);
     }
+
+    /// 旧的工具名级指纹（源日志已清理、无法重放纠正）不能当成「同一调用」；
+    /// 路径形状的能力名只留末段（§10）。
+    #[test]
+    fn legacy_fingerprints_are_not_same_call_and_paths_are_trimmed() {
+        let home = tmp_home("legacy");
+        let sref = seed(&home);
+        let db = AuthorityDb::open(&agent_vitals_data::authority::default_authority_path(&home), 1).unwrap();
+        let legacy = agent_vitals_domain::session_semantics::fingerprint("claude-tool:Bash");
+        for (i, turn) in [7i64, 8].iter().enumerate() {
+            db.conn().execute(
+                "INSERT INTO workflow_events(event_id, session_key, event_ts_ms, event_type, capability_kind, capability_id,
+                     outcome, invocation_fingerprint, ingested_run_id, created_at_ms)
+                 VALUES (?1, ?2, ?3, 'tool_finished', 'tool', 'Bash', 'failed', ?4, 'run', 1)",
+                rusqlite::params![format!("legacy{i}"), SKEY, T0 + turn * 2 * MIN + 700, legacy],
+            ).unwrap();
+        }
+        for (i, turn) in [9i64, 9, 10].iter().enumerate() {
+            db.conn().execute(
+                "INSERT INTO workflow_events(event_id, session_key, event_ts_ms, event_type, capability_kind, capability_id,
+                     outcome, invocation_fingerprint, ingested_run_id, created_at_ms)
+                 VALUES (?1, ?2, ?3, 'tool_finished', 'tool', '/bin/zsh', 'failed', ?4, 'run', 1)",
+                rusqlite::params![format!("zsh{i}"), SKEY, T0 + turn * 2 * MIN + 800 + i as i64, format!("fnv1a64:zsh{i}")],
+            ).unwrap();
+        }
+        drop(db);
+        let env = insights(&home, &sref);
+        let d = &env["data"];
+        assert_eq!(d["quality"]["legacy_fingerprints"], 2);
+        let kinds: Vec<(&str, i64)> = d["diagnostics"].as_array().unwrap().iter()
+            .map(|x| (x["fact"]["capability_id"].as_str().unwrap_or(""), x["steps"]["from"].as_i64().unwrap())).collect();
+        assert!(!kinds.iter().any(|(_, from)| *from == 8), "两次旧指纹失败不得报成同一调用：{kinds:?}");
+        assert!(kinds.iter().any(|(cap, _)| *cap == "zsh"), "{kinds:?}");
+        let text = env.to_string();
+        assert!(!text.contains("/bin/"), "路径出现在 insights：{text}");
+        assert!(!text.contains("/Users/"), "路径出现在 insights");
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }

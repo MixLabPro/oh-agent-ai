@@ -89,7 +89,10 @@ pub(crate) fn turn_signal(record: &Value, has_turn: bool) -> UserTurnSignal {
     if text.starts_with("[Request interrupted") {
         return UserTurnSignal::Interrupt;
     }
-    if flag("isMeta") || flag("isCompactSummary") || !text_content(content) {
+    // 后续回合不要求「全是 text 块」：贴图的请求（text + image 块）也是新请求——
+    // 验收发现真机 76 条这样的 prompt 被并进了上一回合。`user_prompt_text` 已排除
+    // tool_result 数组并要求非空文本。
+    if flag("isMeta") || flag("isCompactSummary") {
         return UserTurnSignal::Other;
     }
     if HOST_ECHO.iter().any(|prefix| text.starts_with(prefix)) {
@@ -136,6 +139,12 @@ mod tests {
             assert_eq!(turn_signal(record, true), UserTurnSignal::Other, "{record}");
         }
         assert_eq!(turn_signal(&user(json!("fix the bug")), true), UserTurnSignal::Request);
+        assert_eq!(
+            turn_signal(&user(json!([{"type": "text", "text": "分析这张图 [Image #1]"}, {"type": "image", "source": {}}])), true),
+            UserTurnSignal::Request,
+            "贴图的请求也开回合"
+        );
+        assert_eq!(turn_signal(&user(json!([{"type": "image", "source": {}}])), true), UserTurnSignal::Other, "只有图、没有文本");
         assert_eq!(turn_signal(&user(json!("<command-name>/goal</command-name>")), true), UserTurnSignal::Request);
         assert_eq!(turn_signal(&user(json!([{"type": "text", "text": "[Request interrupted by user]"}])), true), UserTurnSignal::Interrupt);
     }
