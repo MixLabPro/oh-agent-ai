@@ -1,5 +1,7 @@
+import { useEffect, useState } from "react";
 import { StatusPill } from "../../components/ui/StatusPill";
-import type { OverviewDetails, OverviewSnapshot, SummaryHostTokens } from "../../lib/tauri";
+import { readFindings, type FindingGroup, type OverviewDetails, type OverviewSnapshot, type SummaryHostTokens } from "../../lib/tauri";
+import { sessionsDateHref, sessionsHostHref } from "../../lib/nav";
 import { todayCacheHitRatio } from "./cacheHit";
 import { monthSpendCard, todaySpendCard } from "./spendCards";
 
@@ -64,6 +66,46 @@ function StatCard({ label, value, detail }: { label: string; value: string; deta
   </article>;
 }
 
+
+/**
+ * R2（OVERVIEW_DRILLDOWN spec §4.3）：总览内嵌发现条——画布首发承诺
+ * 「发现作为相关页面中的事项呈现」的落地。只读 findings_groups_safe 的
+ * 既有脱敏投影（零新载荷字段），top 3；每项给「去看证据」的可达路径
+ * （宿主会话深链）。两态诚实降级：服务不可用如实说，零发现是诚实空态。
+ */
+function OverviewFindingsStrip() {
+  const [state, setState] = useState<"loading" | "ok" | "unavailable">("loading");
+  const [items, setItems] = useState<FindingGroup[]>([]);
+  useEffect(() => {
+    let active = true;
+    void readFindings(null)
+      .then((report) => { if (active) { setItems(report.issues.slice(0, 3)); setState("ok"); } })
+      .catch(() => { if (active) setState("unavailable"); });
+    return () => { active = false; };
+  }, []);
+  if (state === "loading") return null;
+  if (state === "unavailable") {
+    return <section className="info-panel overview-findings" aria-labelledby="overview-findings-title"><p id="overview-findings-title" className="overview-findings-note">发现服务暂不可用；稍后随刷新重试。</p></section>;
+  }
+  if (items.length === 0) {
+    return <section className="info-panel overview-findings" aria-labelledby="overview-findings-title"><p id="overview-findings-title" className="overview-findings-note">当前没有需要注意的事项。发现随每次同步重新评估。</p></section>;
+  }
+  return (
+    <section className="info-panel overview-findings" aria-labelledby="overview-findings-title">
+      <div className="section-heading"><p className="eyebrow">发现</p><h3 id="overview-findings-title">需要注意</h3></div>
+      <ul className="overview-findings-list">
+        {items.map((item) => (
+          <li key={item.group_id} className={`overview-finding severity-${item.severity}`}>
+            <span className="finding-rule">{item.rule}</span>
+            <small>{item.host} · {item.count} 例 · {item.sessions_count} 个会话</small>
+            <a className="inline-drill" href={sessionsHostHref(item.host)}>去看会话 <span aria-hidden="true">→</span></a>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export function OverviewPage({ overview, details }: { overview: OverviewSnapshot | null; details: OverviewDetails | null }) {
   if (!overview) return <section className="empty-state" aria-live="polite"><p className="eyebrow">正在读取</p><h2>准备工作台数据</h2><p>正在通过本地 IPC 获取状态。</p></section>;
   const budgetTone = overview.budget.level === "over" ? "warning" : overview.budget.level === "warn" ? "warning" : overview.budget.level === "ok" ? "success" : "neutral";
@@ -96,8 +138,9 @@ export function OverviewPage({ overview, details }: { overview: OverviewSnapshot
       <p className="overview-empty">币种和账单口径仅按 basis 分栏；估算、订阅和等价标价不会跨币种相加。</p>
     </section>}
     {details?.calendar && <section className="info-panel overview-recent-panel" aria-labelledby="overview-recent-title">
+      <OverviewFindingsStrip />
       <div className="section-heading"><div><p className="eyebrow">最近观测日</p><h3 id="overview-recent-title">{details.calendar.month}</h3></div><span className="count-badge">{details.calendar.days.length} 天</span></div>
-      <div className="overview-recent-list">{details.calendar.days.slice(-5).reverse().map((day) => <div className="overview-recent-row" key={day.date}><span>{day.date}</span><strong>{tokensLabel(day.total_tokens)} tokens</strong><small>{moneyDetail(day.costs)}</small></div>)}</div>
+      <div className="overview-recent-list">{details.calendar.days.slice(-5).reverse().map((day) => <a className="overview-recent-row overview-drill" key={day.date} href={sessionsDateHref(day.date)} title={`查看 ${day.date} 的会话`}><span>{day.date}</span><strong>{tokensLabel(day.total_tokens)} tokens</strong><small>{moneyDetail(day.costs)}</small></a>)}</div>
     </section>}
     <div className="overview-detail-grid">
       <section className="info-panel overview-panel" aria-labelledby="overview-budget-title">
@@ -111,7 +154,7 @@ export function OverviewPage({ overview, details }: { overview: OverviewSnapshot
     </div>
     <section className="overview-host-panel" aria-labelledby="overview-host-title">
       <div className="section-heading"><div><p className="eyebrow">宿主覆盖</p><h3 id="overview-host-title">本机 Agent 状态</h3></div><span className="count-badge">{overview.host_rows.length ? overview.host_rows.length : overview.hosts == null ? "—" : overview.hosts}</span></div>
-      {overview.host_rows.length ? <div className="overview-host-list">{overview.host_rows.map((host) => <article className="overview-host-row" key={host.host}><div><strong>{host.host}</strong><span>{host.today_sessions == null ? "会话不可用" : `${host.today_sessions} 个会话`} · {hostStatusLabel(host.status)}</span></div><b>{tokensLabel(host.today_tokens)} token</b></article>)}</div> : <p className="overview-empty">宿主快照尚未生成。没有快照不等于没有宿主，打开 Trust 可重新发现。</p>}
+      {overview.host_rows.length ? <div className="overview-host-list">{overview.host_rows.map((host) => <a className="overview-host-row overview-drill" key={host.host} href={sessionsHostHref(host.host)} title={`查看 ${host.host} 的会话`}><div><strong>{host.host}</strong><span>{host.today_sessions == null ? "会话不可用" : `${host.today_sessions} 个会话`} · {hostStatusLabel(host.status)}</span></div><b>{tokensLabel(host.today_tokens)} token</b></a>)}</div> : <p className="overview-empty">宿主快照尚未生成。没有快照不等于没有宿主，打开 Trust 可重新发现。</p>}
     </section>
   </>;
 }

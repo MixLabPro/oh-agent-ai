@@ -12,6 +12,7 @@ import {
   type UsageHourly,
   type UsageSourceSummary,
 } from "../../lib/tauri";
+import { sessionsDateHref } from "../../lib/nav";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
 
 type Metric = "tokens" | "cost";
@@ -256,7 +257,7 @@ export function UsagePage() {
       </section>
       <section className="usage-detail-grid">
         <section className="usage-hourly-panel" aria-labelledby="usage-hourly-title">
-          <div className="section-heading"><div><p className="eyebrow">小时明细</p><h3 id="usage-hourly-title">{selectedDate ? `${selectedDate}${selectedDate === today ? " · 今天" : ""}` : "选择一个日期"}</h3></div>{selectedDay && <span className="count-badge">{tokensLabel(dayTokens(selectedDay))}</span>}</div>
+          <div className="section-heading"><div><p className="eyebrow">小时明细</p><h3 id="usage-hourly-title">{selectedDate ? `${selectedDate}${selectedDate === today ? " · 今天" : ""}` : "选择一个日期"}</h3></div><div className="heading-side">{selectedDay && <span className="count-badge">{tokensLabel(dayTokens(selectedDay))}</span>}{selectedDate && <a className="inline-drill" href={sessionsDateHref(selectedDate)}>该日会话 <span aria-hidden="true">→</span></a>}</div></div>
           {hourlyLoading && <p className="usage-empty">正在读取小时事实…</p>}
           {hourlyError && <p className="usage-empty" role="alert">{hourlyError}</p>}
           {!hourlyLoading && !hourlyError && hourly && <><div className="usage-hour-grid">{hourly.hours.map((hour) => { const total = hourlyTotal(hour); const label = total ? `${String(hour.hour).padStart(2, "0")}:00 · ${tokensLabel(total)} tokens` : `${String(hour.hour).padStart(2, "0")}:00 · 无观测数据`; return <div className={`usage-hour ${total === 0 ? "usage-hour-empty" : ""}`} key={hour.hour} role="img" aria-label={label} title={label}><div className="usage-hour-bar"><span style={{ height: `${Math.max(total ? 4 : 1, Math.round((total / maxHourTokens) * 56))}px` }} /></div><small aria-hidden="true">{String(hour.hour).padStart(2, "0")}</small></div>; })}</div><p className="usage-note">小时空格 = 没有已观测事实，不会用日总量均摊补造；{Object.entries(hourly.hosts_available).map(([host, value]) => `${host}：${sourceLabel(value)}`).join(" · ")}。</p></>}

@@ -12,6 +12,7 @@ import {
   type SessionsPage as SessionsPageData,
   type SessionsWindow,
 } from "../../lib/tauri";
+import { readSessionsDeepLinkFromHash } from "../../lib/nav";
 import { SessionDetail } from "./SessionDetail";
 import { Button, DateInput, Field, FilterBar, SelectInput, TextInput } from "../../components/ui/FormControls";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
@@ -34,13 +35,14 @@ function loadSessionsViewState(): { filters: SessionsFilters; selectedSessionRef
     if (!raw) return null;
     const value = JSON.parse(raw) as { filters?: Partial<SessionsFilters>; selectedSessionRef?: unknown };
     const filters = value.filters;
-    if (!filters || !["month", "today", "7d", "custom"].includes(filters.window ?? "") || !["all", "estimated", "subscription", "unpriced", "unavailable"].includes(filters.cost_status ?? "")) return null;
+    if (!filters || !["month", "today", "7d", "day", "custom"].includes(filters.window ?? "") || !["all", "estimated", "subscription", "unpriced", "unavailable"].includes(filters.cost_status ?? "")) return null;
     const fallback = filtersForTimezone(DEFAULT_STATISTICS_TIMEZONE);
     const date = (item: unknown, backup: string) => typeof item === "string" && /^\d{4}-\d{2}-\d{2}$/.test(item) ? item : backup;
     return {
       filters: {
         ...fallback, ...filters,
         month: typeof filters.month === "string" && /^\d{4}-\d{2}$/.test(filters.month) ? filters.month : fallback.month,
+        day: date(filters.day, fallback.day),
         date_from: date(filters.date_from, fallback.date_from), date_to: date(filters.date_to, fallback.date_to),
         host_kind: typeof filters.host_kind === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(filters.host_kind) ? filters.host_kind : "all",
         model: typeof filters.model === "string" ? filters.model.slice(0, 120) : "",
@@ -61,7 +63,7 @@ function dateInTimezone(timezone: string, date = new Date()): string {
 
 function filtersForTimezone(timezone: string): SessionsFilters {
   const today = dateInTimezone(timezone);
-  return { window: "month", month: today.slice(0, 7), date_from: shiftDate(today, -6), date_to: today, host_kind: "all", model: "", provider: "", cost_status: "all" };
+  return { window: "month", month: today.slice(0, 7), day: today, date_from: shiftDate(today, -6), date_to: today, host_kind: "all", model: "", provider: "", cost_status: "all" };
 }
 
 function shiftDate(date: string, days: number): string {
@@ -110,6 +112,7 @@ function serverArgs(filters: SessionsFilters, cursor: string | null, timezone: s
   if (filters.window === "month") args.month = filters.month;
   const today = dateInTimezone(timezone);
   if (filters.window === "today") args.day = today;
+  if (filters.window === "day") args.day = filters.day;
   if (filters.window === "7d") { args.date_from = shiftDate(today, -6); args.date_to = today; }
   if (filters.window === "custom") { args.date_from = filters.date_from; args.date_to = filters.date_to; }
   if (filters.host_kind !== "all") args.host_kind = filters.host_kind;
@@ -124,7 +127,16 @@ function updateFilter(setFilters: Dispatch<SetStateAction<SessionsFilters>>, key
 
 export function SessionsPage({ navigationTarget = null, onNavigationTargetApplied }: { navigationTarget?: SessionNavigationTarget | null; onNavigationTargetApplied?: () => void }) {
   const initialViewState = useMemo(() => loadSessionsViewState(), []);
-  const [filters, setFilters] = useState<SessionsFilters>(() => initialViewState?.filters ?? filtersForTimezone(DEFAULT_STATISTICS_TIMEZONE));
+  // R1 深链（OVERVIEW_DRILLDOWN spec §4.2）：#sessions?date=…&host=… 优先于
+  // 恢复的 view-state——深链是用户此刻的意图；切换窗口控件即离开 day 态。
+  const [filters, setFilters] = useState<SessionsFilters>(() => {
+    const deep = readSessionsDeepLinkFromHash();
+    const base = initialViewState?.filters ?? filtersForTimezone(DEFAULT_STATISTICS_TIMEZONE);
+    if (!deep.date && !deep.host) return base;
+    return deep.date
+      ? { ...base, window: "day", day: deep.date }
+      : { ...base, host_kind: deep.host ?? base.host_kind };
+  });
   const [statisticsTimezone, setStatisticsTimezone] = useState(DEFAULT_STATISTICS_TIMEZONE);
   const [timezoneReady, setTimezoneReady] = useState(false);
   const [rows, setRows] = useState<SessionRow[]>([]);
@@ -145,7 +157,7 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
   useEffect(() => {
     try { window.sessionStorage.setItem(SESSIONS_VIEW_STATE_KEY, JSON.stringify({ filters, selectedSessionRef })); } catch { /* Optional UI preference; authority data remains unaffected. */ }
   }, [filters, selectedSessionRef]);
-  const serverKey = useMemo(() => JSON.stringify([filters.window, filters.month, filters.date_from, filters.date_to, filters.host_kind, filters.model, filters.provider]), [filters]);
+  const serverKey = useMemo(() => JSON.stringify([filters.window, filters.month, filters.day, filters.date_from, filters.date_to, filters.host_kind, filters.model, filters.provider]), [filters]);
   const visibleRows = useMemo(() => filters.cost_status === "all" ? rows : rows.filter((row) => row.cost_status.state === filters.cost_status), [filters.cost_status, rows]);
 
   useEffect(() => {
@@ -256,7 +268,8 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
     </ToolbarActions>
 
     <FilterBar aria-label="会话筛选" data-window={filters.window}>
-      <Field label="时间窗口" htmlFor="sessions-window"><SelectInput id="sessions-window" value={filters.window} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "window", event.target.value); }}><option value="month">按月</option><option value="today">今天</option><option value="7d">最近 7 天</option><option value="custom">自定义</option></SelectInput></Field>
+      <Field label="时间窗口" htmlFor="sessions-window"><SelectInput id="sessions-window" value={filters.window} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "window", event.target.value); }}><option value="month">按月</option><option value="today">今天</option><option value="7d">最近 7 天</option><option value="day">单日</option><option value="custom">自定义</option></SelectInput></Field>
+      {filters.window === "day" && <Field label="日期" htmlFor="sessions-day"><DateInput id="sessions-day" type="date" value={filters.day} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "day", event.target.value); }} /></Field>}
       {filters.window === "month" && <Field label="月份" htmlFor="sessions-month"><DateInput id="sessions-month" type="month" value={filters.month} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "month", event.target.value); }} /></Field>}
       {filters.window === "custom" && <><Field label="开始日期" htmlFor="sessions-date-from"><DateInput id="sessions-date-from" type="date" value={filters.date_from} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "date_from", event.target.value); }} /></Field><Field label="结束日期" htmlFor="sessions-date-to"><DateInput id="sessions-date-to" type="date" value={filters.date_to} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "date_to", event.target.value); }} /></Field></>}
       <Field label="宿主" htmlFor="sessions-host"><TextInput id="sessions-host" list="session-host-options" value={filters.host_kind === "all" ? "" : filters.host_kind} placeholder="全部宿主 / 动态宿主" onChange={(event) => updateFilter(setFilters, "host_kind", event.target.value || "all")} /></Field>

@@ -693,3 +693,20 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .trust-banner-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .button-ghost { background: transparent; border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.18)); color: var(--text-secondary, #b8b8b8); }
 .button-ghost:hover:not(:disabled) { color: var(--text-primary, #eee); border-color: rgba(255, 255, 255, 0.32); }
+
+/* R1 深链（OVERVIEW_DRILLDOWN）：总览日行/宿主行链到会话页，用量页小时面板的「该日会话」。 */
+.overview-drill { text-decoration: none; color: inherit; transition: background 120ms ease; }
+.overview-drill:hover, .overview-drill:focus-visible { background: var(--surface-raised, rgba(255, 255, 255, 0.05)); border-radius: 8px; outline: none; }
+.inline-drill { font-size: 13px; color: var(--accent, #7ab98a); text-decoration: none; white-space: nowrap; }
+.inline-drill:hover, .inline-drill:focus-visible { text-decoration: underline; }
+.heading-side { display: flex; align-items: center; gap: 10px; }
+
+/* R2 内嵌发现条（OVERVIEW_DRILLDOWN）：总览页「需要注意」区。 */
+.overview-findings-note { margin: 0; font-size: 13px; color: var(--text-secondary, #b8b8b8); }
+.overview-findings-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.overview-finding { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.overview-finding .finding-rule { font-weight: 600; }
+.overview-finding.severity-critical .finding-rule::before { content: "●"; color: #e06c5e; margin-right: 6px; }
+.overview-finding.severity-warning .finding-rule::before { content: "●"; color: #d7a94a; margin-right: 6px; }
+.overview-finding.severity-info .finding-rule::before { content: "●"; color: #7ab98a; margin-right: 6px; }
+.overview-finding small { color: var(--text-secondary, #b8b8b8); }

@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Agent Vitals · 智能体监测（本地版）——看清 AI 编程的用量与账单，数据不出本机。在 Mac 上查看 Claude Code、Codex 用量、成本估算与高消耗会话。MIT 开源，会话数据不上传。">
+  <meta name="theme-color" content="#f6f8f5">
+  <meta property="og:image" content="assets/app-icon.png">
+  <meta property="og:title" content="Agent Vitals · 智能体监测（本地版）—— 看清 AI 编程的用量与账单，数据不出本机">
+  <meta property="og:description" content="看清 Claude Code、Codex 的用量与账单，找到高消耗会话。本地处理，MIT 开源。">
+  <title>Agent Vitals · 智能体监测（本地版）—— 看清 AI 编程的用量与账单</title>
+  <link rel="icon" href="assets/app-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到内容</a>
+  <header class="site-header">
+    <div class="nav-shell">
+      <a class="brand" href="#" aria-label="Agent Vitals 首页"><img src="assets/app-icon.png" width="32" height="32" alt=""><span>agent<span class="brand-light">vitals</span><span class="brand-dot">.</span></span></a>
+      <nav aria-label="主导航"><a href="#how-it-works">如何帮你</a><a href="#privacy">隐私</a><a href="#faq">常见问题</a></nav>
+      <a class="button button-small button-dark" href="#download">获取 macOS 版 <span aria-hidden="true">↗</span></a>
+    </div>
+  </header>
+  <main id="main">
+    <section class="hero section-shell" aria-labelledby="hero-title">
+      <a class="release-note" href="#download"><span class="status-dot"></span> 为 AI 编程而生的本地成本助手 <span aria-hidden="true">↗</span></a>
+      <h1 id="hero-title">AI 编程，<br class="mobile-break"><span class="hero-emphasis">少花冤枉钱。</span></h1>
+      <p class="hero-description">代码交给 AI，成本心里有数。<br>看清 Claude Code、Codex 的用量与成本，找到值得检查的高消耗会话。</p>
+      <div class="hero-actions"><a class="button button-green" href="#download"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4"/></svg>获取 macOS 测试版</a><a class="button button-text" href="#demo"><span class="play-icon" aria-hidden="true">▶</span> 先看看它怎么工作</a></div>
+      <div class="hero-assurances"><span><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>会话数据不上传</span><span><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>MIT 开源</span><span><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>无需提供 API Key</span></div>
+
+      <div class="product-stage" id="demo">
+        <div class="demo-caption"><span><span class="status-dot"></span> 一个窗口，看清你的 AI 编程用量</span><span>交互示意 · 示例数据</span></div>
+        <div class="app-window">
+          <div class="app-toolbar"><span class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></span><span class="window-name">Agent Vitals</span><span class="window-local"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>仅在本机</span></div>
+          <div class="app-body">
+            <aside class="app-sidebar" aria-label="演示页面"><div class="workspace-name"><img src="assets/app-icon.png" width="27" height="27" alt="">我的工作空间</div><div class="app-nav-item selected"><span aria-hidden="true">◫</span>总览</div><div class="app-nav-item"><span aria-hidden="true">▥</span>用量</div><div class="app-nav-item"><span aria-hidden="true">☷</span>会话</div><div class="sidebar-bottom"><span class="status-dot"></span>本地数据 · 已整理</div></aside>
+            <div class="app-content">
+              <div class="app-heading"><div><span class="app-eyebrow">让每一笔支出都有依据</span><h2>你的 AI 编程账本</h2></div><div class="segmented" role="group" aria-label="演示时间范围"><button type="button" data-period="week" aria-pressed="false">本周</button><button type="button" data-period="month" aria-pressed="true">本月</button></div></div>
+              <div class="demo-stats" aria-live="polite"><div><span>已观测 Token</span><strong id="demo-tokens">127.4<span>M</span></strong><small id="demo-sessions">42 个会话 · 2 个工具</small></div><div><span>按量成本估算 <span class="info-dot" title="根据可用价格计算，不代表实际扣款。">i</span></span><strong id="demo-cost"><span>¥</span>38.60</strong><small>估算金额，非实际账单</small></div><div><span>缓存命中率</span><strong id="demo-cache">96.8<span>%</span></strong><small>缓存读取 / 输入 Token</small></div></div>
+              <div class="chart-heading"><h3>用量趋势</h3><div class="chart-legend"><span><i></i>Claude Code</span><span><i></i>Codex</span></div></div>
+              <div class="chart" role="img" aria-label="本月示例用量趋势，柱状图中绿色为 Claude Code、浅绿色为 Codex"><div class="chart-grid"><span>16M</span><span>8M</span><span>0</span></div><div id="chart-bars" class="chart-bars"></div></div>
+              <div class="chart-axis"><span id="axis-start">09.01</span><span id="axis-middle">09.15</span><span id="axis-end">09.28</span></div>
+              <div class="demo-insight"><span class="insight-symbol" aria-hidden="true">↗</span><div><strong>从高消耗会话开始检查</strong><p id="demo-session-note">示例会话消耗 18.6M Token，查看它的组成与变化。</p></div><button type="button" class="inline-link" id="inspect-session">查看示例 <span aria-hidden="true">→</span></button></div>
+            </div>
+          </div>
+        </div>
+        <div class="stage-footnote"><span>不必翻遍日志。让分散的使用记录，变成看得懂的数字。</span><span class="mono">LOCAL FIRST. ALWAYS.</span></div>
+      </div>
+      <div class="host-strip"><span>为每天使用这些工具的你设计</span><div><span class="host-name"><span class="host-symbol claude" aria-hidden="true">✳</span>Claude Code</span><span class="host-name"><span class="host-symbol codex" aria-hidden="true">⌘</span>Codex</span><span class="host-further">更多来源，持续适配中 <span aria-hidden="true">↗</span></span></div></div>
+    </section>
+
+    <section class="section-shell benefits" id="how-it-works" aria-labelledby="benefits-title">
+      <div class="section-intro"><span class="eyebrow">从“用了多少”到“为什么这么多”</span><h2 id="benefits-title">你负责创造。<br>我们帮你看清消耗。</h2><p>每次打开，都更了解自己的 AI 使用。<br>先看懂，再决定哪里值得调整。</p></div>
+      <div class="benefit-grid">
+        <article class="benefit"><span class="feature-number">01 / 汇总</span><div class="mini-visual mini-tools" aria-hidden="true"><span class="mini-tool">✳</span><span class="merge-line"></span><span class="mini-ledger">一个账本<span>Claude Code + Codex</span></span><span class="merge-line"></span><span class="mini-tool">⌘</span></div><h3>几个工具，一起看。</h3><p>把分散的用量放在同一个视图。按日期、工具和会话查看，知道消耗发生在哪里。</p></article>
+        <article class="benefit"><span class="feature-number">02 / 解释</span><div class="mini-visual mini-cost"><div><span>按量估算</span><b>¥38.60</b></div><span class="cost-divider">≠</span><div><span>实际扣款</span><b class="muted">待确认</b></div><small>示例 · 口径明确，心里有底</small></div><h3>估算和账单，分清楚。</h3><p>看懂金额的计算依据。缺少价格或计费信息时明确提示，让每个数字都有边界。</p></article>
+        <article class="benefit"><span class="feature-number">03 / 定位</span><div class="mini-visual mini-session" aria-hidden="true"><div><span>会话 A</span><i style="--bar:84%"></i><b>18.6M</b></div><div><span>会话 B</span><i style="--bar:48%"></i><b>10.2M</b></div><div><span>会话 C</span><i style="--bar:24%"></i><b>5.4M</b></div><small>示例数据</small></div><h3>找到值得检查的那一次。</h3><p>查看高消耗会话和轨迹，在用量与事件之间找到线索，为下一次调整提供依据。</p></article>
+      </div>
+    </section>
+
+    <section class="privacy section-shell" id="privacy" aria-labelledby="privacy-title">
+      <div class="privacy-panel"><div class="privacy-copy"><span class="eyebrow">你的电脑，就是数据的边界</span><h2 id="privacy-title">账可以看清。<br>隐私不必让步。</h2><p>代码、提示词和会话记录留在你的电脑上。<br>本机分析，源代码可查，让信任有据可依。</p><a class="inline-link" href="https://github.com/MixLabPro/agent-vitals" target="_blank" rel="noopener noreferrer">查看 GitHub 源码 <span aria-hidden="true">↗</span></a></div><div class="privacy-proof"><div class="privacy-line"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg><div><h3>会话数据，本地处理</h3><p>不上传代码、提示词或使用记录。</p></div></div><div class="privacy-line"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5-6 7 6 7m8-14 6 7-6 7m-3-16-2 18"/></svg><div><h3>MIT 开源，可检查实现</h3><p>读取什么、怎样计算，都有代码可循。</p></div></div><div class="privacy-line"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5v14"/><circle cx="12" cy="12" r="9"/></svg><div><h3>不知道的，明确告诉你</h3><p>未知不等于零，估算不冒充真实账单。</p></div></div><p class="network-note">公共价格更新与版本检查可能联网，不携带用户会话数据。</p></div></div>
+    </section>
+
+    <section class="section-shell faq-section" id="faq" aria-labelledby="faq-title"><div><span class="eyebrow">下载前，你可能想知道</span><h2 id="faq-title">把疑问说清楚。</h2><p>少一点猜测，多一点确定。</p></div><div class="faq-list">
+      <details><summary>它真的能帮我省钱吗？<span aria-hidden="true">+</span></summary><p>Agent Vitals 帮你看清用量与成本、定位高消耗会话，为调整提供依据。实际能否省钱取决于你的计费方式与后续行动。固定订阅下，减少 Token 不一定减少账单；我们不承诺自动省钱或固定节省比例。</p></details>
+      <details><summary>显示的金额就是我实际付的钱吗？<span aria-hidden="true">+</span></summary><p>不一定。按量估算来自可用的用量和价格信息，不能直接视为扣款。订阅、估算与有依据的已知支出需要分别理解；价格、路由或账单缺失时会保留未知状态。</p></details>
+      <details><summary>需要提供 API Key 或上传日志吗？<span aria-hidden="true">+</span></summary><p>不需要提供 API Key，也不需要上传日志。桌面应用在本机读取受支持工具已有的使用记录；遇到系统权限限制时，可能需要你授权读取对应位置。</p></details>
+      <details><summary>支持哪些电脑和编程工具？<span aria-hidden="true">+</span></summary><p>当前提供 macOS 测试版，面向 Claude Code、Codex 等本机日志来源。不同工具和版本的记录字段可能不同，统计与轨迹覆盖会有所差异。请在发布页确认当前安装包的系统要求、芯片架构与支持说明。</p></details>
+      <details><summary>第一次打开没有数据怎么办？<span aria-hidden="true">+</span></summary><p>请先确认受支持的编程工具已有本地使用记录，再检查应用中的数据源状态和读取权限。没有日志、没有权限和暂未同步是不同状态，不会用虚构数据代替你的结果。</p></details>
+      <details><summary>软件是否开源？<span aria-hidden="true">+</span></summary><p>是的，源代码采用 MIT 许可证。你可以在 GitHub 查看代码、许可证和发行说明，也可以提交问题与反馈。网页中的数字为演示数据，不是用户统计或节省承诺。</p></details>
+    </div></section>
+
+    <section class="download-section" id="download" aria-labelledby="download-title"><div class="section-shell download-inner"><div class="download-icon"><img src="assets/app-icon.png" width="68" height="68" alt="Agent Vitals 应用图标"></div><span class="eyebrow">下一次打开 AI，让成本也清清楚楚</span><h2 id="download-title">让每一笔 AI 支出，<br>花得更值得。</h2><p>从看清你自己的用量开始。</p><a class="button button-green" href="https://github.com/MixLabPro/agent-vitals/releases?q=app-v&amp;expanded=true" target="_blank" rel="noopener noreferrer"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4"/></svg>前往下载 macOS 测试版 <span aria-hidden="true">↗</span></a><small>前往 GitHub 发布页选择安装包，并查看系统要求与安装说明。</small></div></section>
+  </main>
+  <footer class="section-shell site-footer"><a class="brand" href="#"><img src="assets/app-icon.png" width="26" height="26" alt=""><span>agent<span class="brand-light">vitals</span><span class="brand-dot">.</span></span></a><span>Agent Vitals · 智能体监测（本地版）—— 数据不出本机</span><div><a href="https://github.com/MixLabPro/agent-vitals/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT License ↗</a><a href="https://github.com/MixLabPro/agent-vitals/issues" target="_blank" rel="noopener noreferrer">反馈 ↗</a><span>© 2026 Mixlab</span></div></footer>
+
+  <dialog id="session-dialog" aria-labelledby="dialog-title"><div class="dialog-top"><span class="eyebrow">交互示意 · 示例数据</span><button class="close-button" type="button" aria-label="关闭示例">×</button></div><h2 id="dialog-title">看清一次高消耗会话</h2><p>下面是虚构会话的 Token 组成，用来说明你可以检查什么。</p><div class="session-breakdown"><div><span>缓存读取</span><strong>16.8M</strong><i style="--size:90%;--color:var(--green)"></i></div><div><span>未缓存输入</span><strong>1.2M</strong><i style="--size:7%;--color:#86b7a0"></i></div><div><span>输出</span><strong>0.6M</strong><i style="--size:3%;--color:#c5ddc6"></i></div></div><div class="dialog-note"><strong>消耗高，未必意味着费用高。</strong><p>缓存和计费方式会影响金额。先看组成与价格依据，再判断是否需要调整；这里不计算“已节省金额”。</p></div><button class="button button-green dialog-done" type="button">明白了</button></dialog>
+</body>
+</html>

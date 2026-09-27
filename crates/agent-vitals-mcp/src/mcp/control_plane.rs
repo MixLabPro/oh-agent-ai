@@ -145,12 +145,12 @@ fn read_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, ToolE
         "calendar_month" => {
             let month = required_string(args, "month")?;
             json!({ "action": action, "month": month,
-                "calendar": crate::summary::calendar_month(month, &crate::home::codex_home()) })
+                "calendar": crate::summary::calendar_month(month) })
         }
         "hourly_distribution" => {
             let date = required_string(args, "date")?;
             json!({ "action": action, "date": date,
-                "distribution": crate::summary::hourly_distribution(date, &crate::home::codex_home()) })
+                "distribution": crate::summary::hourly_distribution(date) })
         }
         "codex_quota" => json!({
             "action": action,

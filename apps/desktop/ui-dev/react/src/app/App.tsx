@@ -42,7 +42,9 @@ function parseSessionNavigationTarget(value: unknown): SessionNavigationTarget |
 }
 
 function pageFromHash(): Page {
-  const value = window.location.hash.replace(/^#\/?/, "");
+  // R1 深链：hash 可带 query（#sessions?date=…）——页面判定只看路径段，
+  // query 由目标页自行解析（lib/nav.ts 白名单）。
+  const value = window.location.hash.replace(/^#\/?/, "").split("?")[0];
   if (value === "settings" || value.startsWith("settings-")) return "settings";
   return navigation.some((item) => item.id === value) ? value as Page : "overview";
 }

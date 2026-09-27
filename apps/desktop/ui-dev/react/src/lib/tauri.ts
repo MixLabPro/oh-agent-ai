@@ -454,11 +454,13 @@ export type SessionDetail = Omit<SessionRow, "peak_tokens"> & {
   next_cursor: string | null;
 };
 
-export type SessionsWindow = "month" | "today" | "7d" | "custom";
+export type SessionsWindow = "month" | "today" | "7d" | "day" | "custom";
 export type SessionsCostFilter = "all" | SessionCostStatus["state"];
 export type SessionsFilters = {
   window: SessionsWindow;
   month: string;
+  /** R1 深链的单日窗（#sessions?date=YYYY-MM-DD）：北京日，serverArgs → args.day。 */
+  day: string;
   date_from: string;
   date_to: string;
   host_kind: string;

@@ -2,8 +2,7 @@
 
 use super::*;
 
-pub fn hourly_distribution(date: &str, codex_home: &Path) -> serde_json::Value {
-    let _ = codex_home;
+pub fn hourly_distribution(date: &str) -> serde_json::Value {
     let repo = SqlSummaryRepository::new();
     let value = hourly_distribution_memoized(date, &repo, crate::query::read_memo::ReadMemo::global());
     serde_json::Value::clone(&value)
@@ -166,8 +165,7 @@ pub fn overview_bundle_timed(data_home: &Path) -> (OverviewBundle, BundleTimings
 /// token 总量，token 才是跨宿主可加的量）。返回 `{"month", "days":
 /// {date: {...}}}`，无数据日字段缺省为 0/缺键——调用方以
 /// `total_tokens == 0` 判定"这天没有用量"。
-pub fn calendar_month(month: &str, codex_home: &Path) -> serde_json::Value {
-    let _ = codex_home; // 签名兼容 Tauri 调用点（3.5 Tier B 切 SQL 后不再读 fold）
+pub fn calendar_month(month: &str) -> serde_json::Value {
     let repo = SqlSummaryRepository::new();
     let value = calendar_month_memoized(month, &repo, crate::query::read_memo::ReadMemo::global());
     // 调用方（Tauri command / CLI）要 owned Value 序列化；Arc 只在 memo 内共享。

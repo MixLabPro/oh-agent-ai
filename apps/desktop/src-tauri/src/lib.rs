@@ -4423,23 +4423,20 @@ async fn read_calendar_month(month: String) -> Value {
     run_heavy_read(move || {
         agent_vitals_runtime::summary::calendar_month(
             &month,
-            &agent_vitals_runtime::summary::codex_home(),
         )
     })
     .await
 }
 
-/// 单日按小时分布（北京小时）——旧 calendar.html「小时格热力」组件接入
-/// 工作台。来源矩阵见 `summary::hourly_distribution`：codex=fold 全量、
-/// dsh=今日 today-json / 历史日 facts-index、claude=facts-index（该日
-/// 会话被 ingest 过才有——来源标注让部分覆盖在 UI 上可见）。
+/// 单日按小时分布（北京小时）——三宿主统一（v0.9.1 Phase 3.5 Tier B 起）：
+/// `usage_facts` 行级事实按北京小时聚合（`authority_query::hourly_by_host`），
+/// dsh / codex / claude-code 一视同仁；`hosts_available` 如实标注每宿主在场
+/// 与否（`sql-facts`），库打不开 = 全宿主缺席。旧「codex=fold、claude=facts-index
+/// 部分覆盖」的三路拼装与 `codex_home` 参数已随 Tier B 退役（R0 化石清理）。
 #[tauri::command(async)]
 async fn read_hourly_distribution(date: String) -> Value {
     run_heavy_read(move || {
-        agent_vitals_runtime::summary::hourly_distribution(
-            &date,
-            &agent_vitals_runtime::summary::codex_home(),
-        )
+        agent_vitals_runtime::summary::hourly_distribution(&date)
     })
     .await
 }
@@ -5279,7 +5276,7 @@ mod tests {
     /// 同一天的 codex_tokens 来自同一 fold 的 by_model——小时和 ≤ 日总量
     /// （无时间样本的量只在 by_model，usage.rs 头注释），且来源标注合法。
     #[test]
-    fn read_hourly_distribution_matches_calendar_codex_day() {
+    fn read_hourly_distribution_matches_authority_facts_day() {
         let month = overview::current_month_beijing();
         let cal = tauri::async_runtime::block_on(read_calendar_month(month.clone()));
         let days = cal["days"].as_object().expect("days map");

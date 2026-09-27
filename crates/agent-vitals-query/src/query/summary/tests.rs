@@ -1819,7 +1819,7 @@ fn calendar_and_monthly_agree_on_dsh_under_pricing_replay() {
             .copied()
             .expect("DSH 按量档");
 
-        let cal = calendar_month(past, &codex_home());
+        let cal = calendar_month(past);
         let cal_dsh: f64 = cal["days"]
             .as_object()
             .unwrap()
