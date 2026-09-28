@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { safeUiError } from "../../lib/tauri";
 import {
   readSessionInsights, readSessionTraceEvidence,
@@ -378,7 +378,7 @@ function TooltipBox({ x, y, chartWidth, content }: { x: number; y: number; chart
   const style: CSSProperties = { top: Math.max(0, y - 6), ...(flip ? { right: chartWidth - x + 12 } : { left: x + 12 }) };
   return <div className="insights-tip" style={style} role="tooltip">
     {content.title && <b>{content.title}</b>}
-    {content.rows && <dl>{content.rows.map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>}
+    {content.rows && <dl>{content.rows.map(([k, v]) => <Fragment key={k}><dt>{k}</dt><dd>{v}</dd></Fragment>)}</dl>}
     {content.lines?.map(l => <p key={l}>{l}</p>)}
   </div>;
 }
@@ -389,9 +389,11 @@ function stepTip(st: InsightStep, unit: string): TipContent {
   const total = inputOf(st);
   const rows: [string, string][] = [
     ["输入合计", fmtTokens(total)],
-    ["缓存读取 / 写入 / 未缓存", `${fmtTokens(st.input.cache_read)} / ${fmtTokens(st.input.cache_write)} / ${fmtTokens(st.input.uncached_input)}`],
+    ["读取", fmtTokens(st.input.cache_read)],
+    ["写入", fmtTokens(st.input.cache_write)],
+    ["未缓存", fmtTokens(st.input.uncached_input)],
     ["命中率", st.hit_rate != null ? fmtPct(st.hit_rate) : "—"],
-    ["单次输入峰值", fmtTokens(st.input_peak)],
+    ["单次峰值", fmtTokens(st.input_peak)],
     ["调用", String(st.calls)],
   ];
   if (st.tools.succeeded + st.tools.failed + st.tools.cancelled + st.tools.unknown > 0) {
