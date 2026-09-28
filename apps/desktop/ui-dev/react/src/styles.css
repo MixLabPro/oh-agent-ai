@@ -263,16 +263,21 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .matrix-detail code { color: #405875; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .sessions-page-header { display: flex; align-items: center; justify-content: flex-end; min-height: 32px; margin-bottom: 10px; }
 .sessions-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
-/* 选中会话后详情栏承载消耗诊断图表，比列表更需要横向空间——原先列表 1.15fr
-   对详情 .85fr 反而把图表挤到 ~500px，回合多、有空闲缝隙时刻度文字互相压字
-   （2026-09-28 真机反馈）。列表本身有横向滚动兜底（.sessions-table-wrap），
-   详情栏没有，所以份额反过来给详情栏。 */
-.sessions-workspace-selected { grid-template-columns: minmax(320px, .8fr) minmax(680px, 1.5fr); }
 .sessions-list-pane { min-width: 0; container-type: inline-size; }
-.sessions-inspector { position: sticky; top: 12px; min-width: 0; max-height: calc(100vh - 88px); overflow: auto; padding: 12px; border: 1px solid #dbe4ee; border-radius: 13px; background: #fff; box-shadow: 0 8px 24px rgb(31 55 80 / 6%); }
-.sessions-inspector .session-detail-page { margin: 0; padding: 0; }
-.sessions-inspector .session-detail-header { position: sticky; top: -12px; z-index: 1; padding: 10px 0; background: #fff; }
 .sessions-row-selected { background: #eef8f4 !important; box-shadow: inset 3px 0 #078763; }
+/* 详情是叠在列表上一层的浮层，不是并排列的第二栏——并排（或窄屏下的上下堆叠）
+   让用户看不出点一行之后发生了什么（2026-09-29 真机反馈）。右侧抽屉给图表类
+   密集内容比居中对话框更多可用宽高；backdrop 点击/Esc 关闭见 SessionsPage.tsx。 */
+.sessions-overlay-backdrop { position: fixed; inset: 0; z-index: 40; background: rgb(20 32 46 / 42%); animation: sessions-overlay-fade .16s ease-out; }
+.sessions-overlay-panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 41; display: flex; flex-direction: column; width: min(1200px, 94vw); border-left: 1px solid #dbe4ee; background: #fff; box-shadow: -12px 0 32px rgb(31 55 80 / 14%); animation: sessions-overlay-slide-in .18s ease-out; }
+.sessions-overlay-bar { display: flex; justify-content: flex-end; padding: 8px 10px; border-bottom: 1px solid #edf1f5; }
+.sessions-overlay-close { width: 30px; height: 30px; border: 1px solid #dbe4ee; border-radius: 8px; background: #fff; color: #40536a; font-size: 17px; line-height: 1; cursor: pointer; }
+.sessions-overlay-close:hover { background: #f8fbfd; }
+.sessions-overlay-body { flex: 1; min-height: 0; overflow: auto; padding: 4px 16px 16px; }
+.sessions-overlay-body .session-detail-page { margin: 0; padding: 0; }
+@media (prefers-reduced-motion: reduce) { .sessions-overlay-backdrop, .sessions-overlay-panel { animation: none; } }
+@keyframes sessions-overlay-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes sessions-overlay-slide-in { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 .trust-page { display: flex; flex-direction: column; }
 .trust-page-header { order: 0; }
 .trust-layout { order: 2; }
@@ -561,8 +566,6 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 
 @media (max-width: 1100px) and (min-width: 801px) {
   .stats-grid, .overview-host-list, .test-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .sessions-workspace-selected { grid-template-columns: minmax(0, 1fr); }
-  .sessions-inspector { position: static; max-height: none; }
 }
 
 @media (max-width: 800px) {
@@ -588,8 +591,7 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
   .page-header-overview { flex-direction: row; }
   .trust-page-header { flex-direction: column; }
   .trust-layout { grid-template-columns: 1fr; }
-  .sessions-workspace-selected { grid-template-columns: minmax(0, 1fr); }
-  .sessions-inspector { position: static; max-height: none; }
+  .sessions-overlay-panel { width: 100vw; }
   .trust-control-columns { grid-template-columns: 1fr; }
   .trust-profile-heading { flex-direction: column; }
   .trust-suppression-list li { align-items: flex-start; flex-direction: column; }

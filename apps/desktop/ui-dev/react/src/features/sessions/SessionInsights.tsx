@@ -252,6 +252,9 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
       const next = Math.min(steps.length, Math.max(1, cursor + (e.key === "ArrowRight" ? 1 : -1)));
       go({ kind: "step", step: next }, false);
     } else if (e.key === "Escape" && diags.length) {
+      // 详情浮层自己也用 Esc 关闭（SessionsPage.tsx）；图表的 Esc 是「回到当前诊断」，
+      // 冒泡上去会在 SVG 有焦点时把浮层一起关掉，两个 Esc 语义打架。
+      e.stopPropagation();
       go({ kind: "diag", diag: selectedDiag >= 0 ? selectedDiag : 0 }, false);
     }
   };

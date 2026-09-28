@@ -175,6 +175,27 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
   const generation = useRef(0);
   const requestInFlight = useRef(false);
   const pendingRefresh = useRef(false);
+  // 详情现在是叠在列表上一层的浮层（不是并排列布局）：记住触发它的那一行，
+  // 关闭时把焦点还回去；打开时锁住背景滚动、Esc 与点击背景都能关（2026-09-29
+  // 真机反馈：并排列布局让用户看不出「点了一行之后发生了什么」）。
+  const detailTriggerRef = useRef<HTMLElement | null>(null);
+  const closeSessionDetail = () => {
+    setSelectedSessionRef(null);
+    detailTriggerRef.current?.focus();
+  };
+  const openSessionDetail = (ref: string, trigger: HTMLElement) => {
+    detailTriggerRef.current = trigger;
+    setSelectedSessionRef(ref);
+  };
+  useEffect(() => {
+    if (!selectedSessionRef) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") closeSessionDetail(); };
+    document.addEventListener("keydown", onKey);
+    return () => { document.body.style.overflow = previousOverflow; document.removeEventListener("keydown", onKey); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSessionRef]);
   const dateFiltersTouched = useRef(Boolean(initialViewState));
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
@@ -280,7 +301,7 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
 
   const selectedRow = rows.find((row) => row.session_ref === selectedSessionRef) ?? null;
 
-  return <div className={`sessions-workspace ${selectedSessionRef ? "sessions-workspace-selected" : ""}`}>
+  return <div className="sessions-workspace">
     <main className="sessions-list-pane">
     <>
     <h1 className="visually-hidden">会话</h1>
@@ -315,13 +336,19 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
     <section className="sessions-panel" aria-labelledby="sessions-list-title">
       <div className="section-heading"><div><p className="eyebrow">安全投影</p><h3 id="sessions-list-title">会话列表</h3></div><span className="count-badge">{nextCursor ? "可继续" : "已加载"}</span></div>
       {loading && rows.length === 0 ? <div className="sessions-state" role="status"><strong>正在读取会话</strong><p>正在通过本地 authority 汇总当前窗口，不会上传数据。</p></div> : visibleRows.length === 0 ? <div className="sessions-state"><strong>{error ? "无法显示会话" : rows.length ? "没有匹配的计费状态" : "暂无会话"}</strong><p>{error ? "请检查本地数据同步状态后重试。" : "当前筛选窗口没有可展示的安全会话聚合。"}</p></div> : <>
-        <div className="sessions-table-wrap"><table className="sessions-table"><thead><tr><th scope="col">会话</th><th scope="col">宿主 · 模型</th><th scope="col">时间</th><th scope="col">Tokens</th><th scope="col">费用</th><th scope="col">状态</th></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.session_ref} className={`sessions-table-row-clickable ${row.session_ref === selectedSessionRef ? "sessions-row-selected" : ""}`} tabIndex={0} role="button" aria-pressed={row.session_ref === selectedSessionRef} onClick={() => setSelectedSessionRef(row.session_ref)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedSessionRef(row.session_ref); } }}><td><strong>{sessionTitle(row)}</strong><code>{row.session_ref.slice(0, 15)}…</code></td><td>{row.host}<small>{row.model_ids.length ? row.model_ids.join(" · ") : "模型不可用"}</small></td><td>{dateLabel(row.first_event_at)}<small>{row.last_event_at ? `至 ${dateLabel(row.last_event_at)}` : "结束时间不可用"}</small></td><td><strong>{compact(row.tokens.total)}</strong><small>{row.event_count} 个事件 · 峰值 {compact(row.peak_tokens)}</small></td><td><strong>{costLabel(row)}</strong><small>{row.cost_minor ? row.cost_minor.basis : "未计入金额"}</small></td><td><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateLabel(row.cost_status)}</span></td></tr>)}</tbody></table></div>
-        <div className="sessions-card-list">{visibleRows.map((row) => <article className={`session-card session-card-clickable ${row.session_ref === selectedSessionRef ? "sessions-row-selected" : ""}`} key={row.session_ref} tabIndex={0} role="button" aria-pressed={row.session_ref === selectedSessionRef} onClick={() => setSelectedSessionRef(row.session_ref)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedSessionRef(row.session_ref); } }}><div className="session-card-heading"><strong>{sessionTitle(row)}</strong><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateShort(row.cost_status.state)}</span></div><p>{row.host} · {row.model_ids.join(" · ") || "模型不可用"}</p><div><span>{compact(row.tokens.total)} token · {row.event_count} 个事件</span><strong>{costLabel(row)}</strong></div><small>{dateLabel(row.first_event_at)} 至 {dateLabel(row.last_event_at)}</small><code>{row.session_ref.slice(0, 15)}…</code></article>)}</div>
+        <div className="sessions-table-wrap"><table className="sessions-table"><thead><tr><th scope="col">会话</th><th scope="col">宿主 · 模型</th><th scope="col">时间</th><th scope="col">Tokens</th><th scope="col">费用</th><th scope="col">状态</th></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.session_ref} className={`sessions-table-row-clickable ${row.session_ref === selectedSessionRef ? "sessions-row-selected" : ""}`} tabIndex={0} role="button" aria-pressed={row.session_ref === selectedSessionRef} onClick={(event) => openSessionDetail(row.session_ref, event.currentTarget)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openSessionDetail(row.session_ref, event.currentTarget); } }}><td><strong>{sessionTitle(row)}</strong><code>{row.session_ref.slice(0, 15)}…</code></td><td>{row.host}<small>{row.model_ids.length ? row.model_ids.join(" · ") : "模型不可用"}</small></td><td>{dateLabel(row.first_event_at)}<small>{row.last_event_at ? `至 ${dateLabel(row.last_event_at)}` : "结束时间不可用"}</small></td><td><strong>{compact(row.tokens.total)}</strong><small>{row.event_count} 个事件 · 峰值 {compact(row.peak_tokens)}</small></td><td><strong>{costLabel(row)}</strong><small>{row.cost_minor ? row.cost_minor.basis : "未计入金额"}</small></td><td><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateLabel(row.cost_status)}</span></td></tr>)}</tbody></table></div>
+        <div className="sessions-card-list">{visibleRows.map((row) => <article className={`session-card session-card-clickable ${row.session_ref === selectedSessionRef ? "sessions-row-selected" : ""}`} key={row.session_ref} tabIndex={0} role="button" aria-pressed={row.session_ref === selectedSessionRef} onClick={(event) => openSessionDetail(row.session_ref, event.currentTarget)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openSessionDetail(row.session_ref, event.currentTarget); } }}><div className="session-card-heading"><strong>{sessionTitle(row)}</strong><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateShort(row.cost_status.state)}</span></div><p>{row.host} · {row.model_ids.join(" · ") || "模型不可用"}</p><div><span>{compact(row.tokens.total)} token · {row.event_count} 个事件</span><strong>{costLabel(row)}</strong></div><small>{dateLabel(row.first_event_at)} 至 {dateLabel(row.last_event_at)}</small><code>{row.session_ref.slice(0, 15)}…</code></article>)}</div>
         {nextCursor && <div className="sessions-more"><Button type="button" onClick={() => void loadMore()} busy={loadingMore} disabled={loading}>{loadingMore ? "正在加载…" : "加载更多"}</Button></div>}
       </>}
     </section>
     </>
     </main>
-    {selectedSessionRef && <aside className="sessions-inspector" aria-label="会话检查器"><SessionDetail row={selectedRow} sessionRef={selectedSessionRef} hostKind={filters.host_kind} refreshKey={detailRefreshKey} onBack={() => setSelectedSessionRef(null)} /></aside>}
+    {selectedSessionRef && <>
+      <div className="sessions-overlay-backdrop" onClick={closeSessionDetail} />
+      <div className="sessions-overlay-panel" role="dialog" aria-modal="true" aria-label="会话详情">
+        <div className="sessions-overlay-bar"><button type="button" className="sessions-overlay-close" onClick={closeSessionDetail} aria-label="关闭详情">×</button></div>
+        <div className="sessions-overlay-body"><SessionDetail row={selectedRow} sessionRef={selectedSessionRef} hostKind={filters.host_kind} refreshKey={detailRefreshKey} onBack={closeSessionDetail} /></div>
+      </div>
+    </>}
   </div>;
 }
