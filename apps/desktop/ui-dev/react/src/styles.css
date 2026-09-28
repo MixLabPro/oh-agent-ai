@@ -263,7 +263,11 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .matrix-detail code { color: #405875; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .sessions-page-header { display: flex; align-items: center; justify-content: flex-end; min-height: 32px; margin-bottom: 10px; }
 .sessions-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
-.sessions-workspace-selected { grid-template-columns: minmax(440px, 1.15fr) minmax(360px, .85fr); }
+/* 选中会话后详情栏承载消耗诊断图表，比列表更需要横向空间——原先列表 1.15fr
+   对详情 .85fr 反而把图表挤到 ~500px，回合多、有空闲缝隙时刻度文字互相压字
+   （2026-09-28 真机反馈）。列表本身有横向滚动兜底（.sessions-table-wrap），
+   详情栏没有，所以份额反过来给详情栏。 */
+.sessions-workspace-selected { grid-template-columns: minmax(320px, .8fr) minmax(680px, 1.5fr); }
 .sessions-list-pane { min-width: 0; container-type: inline-size; }
 .sessions-inspector { position: sticky; top: 12px; min-width: 0; max-height: calc(100vh - 88px); overflow: auto; padding: 12px; border: 1px solid #dbe4ee; border-radius: 13px; background: #fff; box-shadow: 0 8px 24px rgb(31 55 80 / 6%); }
 .sessions-inspector .session-detail-page { margin: 0; padding: 0; }
