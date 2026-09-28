@@ -7,7 +7,8 @@
 // - 窗口恒包含当前焦点；
 // - 长空闲（> 30 分钟）折叠成固定宽度的缝隙，且只出现在窗口内；
 // - 柱位单调、落在绘图区内；
-// - 空闲缝隙的文字标签不互相压字（图标不抽稀，只有文字按间距取舍）。
+// - 空闲缝隙的文字标签不互相压字（图标不抽稀，只有文字按间距取舍）；
+// - 窗口外的诊断分组永不丢失：visible/offLeft/offRight 三组的并集恒等于全体。
 
 export const LONG_IDLE_MS = 30 * 60 * 1000;
 export const GAP_WIDTH = 22;
@@ -152,4 +153,24 @@ export function placeGapLabels(xs: number[], minSpacingPx = 46): boolean[] {
     lastShownX = x;
     return true;
   });
+}
+
+/// 按 `bandFor` 的结果把诊断分成三组：窗口内、窗口左侧外、窗口右侧外。
+///
+/// 为什么要单独分组：窗口外的诊断在图上**没有真实横坐标**（左侧外的一律画在
+/// `PAD_L`，右侧外的一律画在右边界），`packBands` 按「区间重叠才需要分行」
+/// 复用同一行——这对有真实横坐标的窗口内诊断是对的，但窗口外的诊断即使各自
+/// 的真实回合区间毫不重叠，画出来也在同一个 x，仍然会叠在一起（真机 444 回合
+/// 的会话，20+ 条窗口外诊断挤成一团数字，2026-09-29 反馈）。调用方据此对
+/// 窗口内诊断单独跑 `packBands`，窗口外诊断按各自方向单独编号或折叠成一条摘要。
+export function groupBandVisibility(bands: Band[]): { visible: number[]; offLeft: number[]; offRight: number[] } {
+  const visible: number[] = [];
+  const offLeft: number[] = [];
+  const offRight: number[] = [];
+  bands.forEach((b, i) => {
+    if (b.kind === "visible") visible.push(i);
+    else if (b.side === "left") offLeft.push(i);
+    else offRight.push(i);
+  });
+  return { visible, offLeft, offRight };
 }

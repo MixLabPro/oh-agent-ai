@@ -146,6 +146,20 @@ for (let r = 0; r < 5; r += 1) {
   const inRow = ranges.filter((_, i) => rows[i] === r).sort((a, b) => a.from - b.from);
   for (let k = 1; k < inRow.length; k += 1) assert.ok(inRow[k].from > inRow[k - 1].to, `row ${r} overlaps`);
 }
+// 窗口外的诊断分组：并集恒等于全体（不丢），且窗口内/外的判定与 bandFor 一致
+// （真机 444 回合的会话有 20+ 条窗口外诊断，原先全挤在同一个位置——2026-09-29）。
+{
+  const view = [50, 90];
+  const layout = geo.layoutSteps(Array.from({ length: 444 }, (_, i) => ({ index: i + 1, idle_before_ms: null })), view, 52, 600);
+  const ranges = [{ from: 1, to: 5 }, { from: 200, to: 205 }, { from: 60, to: 65 }, { from: 300, to: 301 }, { from: 350, to: 355 }];
+  const bands = ranges.map(r => geo.bandFor(r, view, layout));
+  const g = geo.groupBandVisibility(bands);
+  const all = [...g.visible, ...g.offLeft, ...g.offRight].sort((a, b) => a - b);
+  assert.deepEqual(all, [0, 1, 2, 3, 4], "并集覆盖全部诊断，不丢一条");
+  assert.deepEqual([...g.visible], [2], "只有回合 60–65 与窗口 50–90 相交");
+  assert.deepEqual([...g.offLeft], [0], "回合 1–5 在窗口左侧外");
+  assert.deepEqual([...g.offRight], [1, 3, 4], "回合 200+ 都在窗口右侧外");
+}
 assert.equal(geo.niceCeil(640_000), 800_000);
 // 空闲缝隙标签不互相压字（真机反馈：114 回合的会话有 7 处长空闲，原先每处都画
 // 完整文字，挨得近的几处叠成一团读不出来）。图标不抽稀，只有文字按间距取舍。

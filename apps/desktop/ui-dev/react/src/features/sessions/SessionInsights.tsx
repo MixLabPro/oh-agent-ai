@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { safeUiError } from "../../lib/tauri";
 import {
   readSessionInsights, readSessionTraceEvidence,
   type InsightDiagnostic, type InsightStep, type NominalCost, type SessionInsights, type SessionTraceEvidence,
 } from "../../lib/sessionInsights";
-import { bandFor, GAP_WIDTH, layoutSteps, maxVisibleSteps, miniColumns, niceCeil, packBands, placeGapLabels, resolveWindow, tickStep } from "./insightsGeometry";
+import { bandFor, GAP_WIDTH, groupBandVisibility, layoutSteps, maxVisibleSteps, miniColumns, niceCeil, packBands, placeGapLabels, resolveWindow, tickStep } from "./insightsGeometry";
 import "./session-insights.css";
 
 // 会话消耗诊断（SESSION_TRACE_DIAGNOSTICS_SPEC r6 §8）：摘要 → 紧凑诊断列表 →
@@ -362,6 +362,54 @@ function Legend({ insights, unit }: { insights: SessionInsights; unit: string })
   </div>;
 }
 
+// ─────────────────────────── 悬浮提示 ───────────────────────────
+// 图表的每个可交互元素（回合列、诊断带、空闲缝隙、说明图标、窗口外指示）都用
+// 同一套悬浮提示：鼠标移上去看关键数字，点击才改变选择——「看」与「选」分开，
+// 不用点开检查器也能扫一眼数据；键盘用户走已有的方向键 + 检查器路径，信息量
+// 不比悬浮少，所以提示本身不需要单独可聚焦（纯指针增强）。
+
+type TipContent = { title?: string; rows?: [string, string][]; lines?: string[] };
+
+/// 悬浮提示定位用「图表自身坐标」（viewBox 单位）——SVG 是 1:1 铺满其容器宽度
+/// 渲染的（`width` prop 就是容器实测宽度），所以坐标可以直接当 CSS px 用，不用
+/// 另外换算；靠近右边界时翻到左侧，避免被容器裁掉。
+function TooltipBox({ x, y, chartWidth, content }: { x: number; y: number; chartWidth: number; content: TipContent }) {
+  const flip = x > chartWidth - 210;
+  const style: CSSProperties = { top: Math.max(0, y - 6), ...(flip ? { right: chartWidth - x + 12 } : { left: x + 12 }) };
+  return <div className="insights-tip" style={style} role="tooltip">
+    {content.title && <b>{content.title}</b>}
+    {content.rows && <dl>{content.rows.map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>}
+    {content.lines?.map(l => <p key={l}>{l}</p>)}
+  </div>;
+}
+
+/// 一个回合列的悬浮内容：把四条泳道（消耗/峰值/工具/说明）汇总成一份，不用
+/// 逐条悬浮——一次看到这一列的关键数字。
+function stepTip(st: InsightStep, unit: string): TipContent {
+  const total = inputOf(st);
+  const rows: [string, string][] = [
+    ["输入合计", fmtTokens(total)],
+    ["缓存读取 / 写入 / 未缓存", `${fmtTokens(st.input.cache_read)} / ${fmtTokens(st.input.cache_write)} / ${fmtTokens(st.input.uncached_input)}`],
+    ["命中率", st.hit_rate != null ? fmtPct(st.hit_rate) : "—"],
+    ["单次输入峰值", fmtTokens(st.input_peak)],
+    ["调用", String(st.calls)],
+  ];
+  if (st.tools.succeeded + st.tools.failed + st.tools.cancelled + st.tools.unknown > 0) {
+    rows.push(["工具", `成功 ${st.tools.succeeded} · 失败 ${st.tools.failed} · 取消 ${st.tools.cancelled}`]);
+  }
+  const lines: string[] = [];
+  if (st.outcome === "failed") lines.push("这个回合以失败结束。");
+  if (st.outcome === "cancelled") lines.push("这个回合被用户中断。");
+  for (const n of st.notes) lines.push(NOTE_TEXT[n.explanation]);
+  return { title: `${unit} ${st.index}`, rows, lines };
+}
+
+/// 一条诊断的悬浮内容（窗口内的带、窗口外的单条、折叠摘要里的一行都用它）。
+function bandTip(d: InsightDiagnostic, i: number, unit: string): TipContent {
+  const t = diagText(d, unit);
+  return { title: `${i + 1}. ${t.title}`, lines: [`${unit} ${d.steps.from}–${d.steps.to}`, t.fact] };
+}
+
 function MiniMap({ steps, diags, view, width, maxVisible, onWindow, onJump, unit }: { steps: InsightStep[]; diags: InsightDiagnostic[]; view: [number, number]; width: number; maxVisible: number; onWindow: (w: [number, number]) => void; onJump: (dir: number) => void; unit: string }) {
   const plotW = width - PAD_L - PAD_R;
   const H = 34;
@@ -399,10 +447,38 @@ function Chart({ insights, view, width, cursor, mode, unit, onStep, onDiag, onKe
   const plotW = width - PAD_L - PAD_R;
   const layout = layoutSteps(steps, view, PAD_L, plotW);
   const yTop = 20, hBar = 150, bandRow = 11;
-  // 每行只占 11px，真机会话诊断数可能超过默认上限（114 回合的会话有 8 条，短
-  // 区间挤在一起时 6 行不够，被迫叠在最后一行——多给几行成本很小。
-  const bandRows = packBands(diags.map(d => d.steps), 10);
-  const bandsH = diags.length ? (Math.max(...bandRows) + 1) * bandRow + 10 : 6;
+  const [tip, setTip] = useState<{ x: number; y: number; content: TipContent } | null>(null);
+  const hoverTip = (e: ReactMouseEvent, content: TipContent) => {
+    const target = e.currentTarget as unknown as SVGGraphicsElement;
+    const svg = target.ownerSVGElement ?? (target as unknown as SVGSVGElement);
+    const rect = svg.getBoundingClientRect();
+    // viewBox 与实测宽度 1:1（见组件顶部说明），按比例把屏幕坐标换回 viewBox 坐标。
+    const scale = width / rect.width;
+    setTip({ x: (e.clientX - rect.left) * scale, y: (e.clientY - rect.top) * scale, content });
+  };
+  const hideTip = () => setTip(null);
+
+  // 诊断带分三组（`groupBandVisibility`）：窗口内的用 `packBands` 按真实横坐标
+  // 避免重叠；窗口外的没有真实横坐标（一律画在左右边界），`packBands` 的「不
+  // 重叠就复用同一行」在这里会让互不相关的诊断叠在同一点——真机 444 回合的
+  // 会话有 20+ 条窗口外诊断，原先全挤成一团数字（2026-09-29 反馈）。窗口外
+  // 每侧 ≤4 条时各给一行单独编号；更多时折叠成一条「N 条 ›」摘要，悬浮看列表，
+  // 点击跳到离窗口最近的一条——不丢数据，只是不逐条占用行。
+  const bandOf = diags.map(d => bandFor(d.steps, view, layout));
+  const { visible: visibleIdx, offLeft: offLeftIdx, offRight: offRightIdx } = groupBandVisibility(bandOf);
+  const OFFSCREEN_INDIVIDUAL_MAX = 4;
+  const visibleRows = packBands(visibleIdx.map(i => diags[i].steps), 10);
+  const visibleRowCount = visibleIdx.length ? Math.max(...visibleRows) + 1 : 0;
+  const offLeftIndividually = offLeftIdx.length > 0 && offLeftIdx.length <= OFFSCREEN_INDIVIDUAL_MAX;
+  const offRightIndividually = offRightIdx.length > 0 && offRightIdx.length <= OFFSCREEN_INDIVIDUAL_MAX;
+  const offLeftRows = offLeftIndividually ? offLeftIdx.length : (offLeftIdx.length > 0 ? 1 : 0);
+  const offRightRows = offRightIndividually ? offRightIdx.length : (offRightIdx.length > 0 ? 1 : 0);
+  const rowOf = new Map<number, number>();
+  visibleIdx.forEach((gi, k) => rowOf.set(gi, visibleRows[k]));
+  if (offLeftIndividually) offLeftIdx.forEach((gi, k) => rowOf.set(gi, visibleRowCount + k));
+  if (offRightIndividually) offRightIdx.forEach((gi, k) => rowOf.set(gi, visibleRowCount + k));
+  const totalRows = visibleRowCount + Math.max(offLeftRows, offRightRows);
+  const bandsH = diags.length ? totalRows * bandRow + 10 : 6;
   const yBand = yTop + hBar + 8, yPeak = yBand + bandsH + 12, hPeak = 58, yTools = yPeak + hPeak + 16, hTools = 40, yAxis = yTools + hTools + 6, H = yAxis + 22;
   const maxT = niceCeil(Math.max(1, ...steps.map(inputOf)));
   const maxP = niceCeil(Math.max(1, ...steps.map(s => s.input_peak)));
@@ -426,74 +502,125 @@ function Chart({ insights, view, width, cursor, mode, unit, onStep, onDiag, onKe
     path += `${brk ? "M" : "L"}${(s.x + s.w / 2).toFixed(1)} ${yP(st.input_peak).toFixed(1)}`;
     broken = false;
   });
-  return <svg className="insights-chart" viewBox={`0 0 ${width} ${H}`} tabIndex={0} role="img" onKeyDown={onKey}
-    aria-label={`每${unit}输入消耗、单次输入峰值与工具结果，显示 ${view[0]}–${view[1]}，共 ${steps.length} 个${unit}`}>
-    <defs>
-      <pattern id="ins-hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" className="hatch-bg" /><line x1="0" y1="0" x2="0" y2="5" className="hatch-line" /></pattern>
-      <pattern id="ins-off" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="7" height="7" className="off-bg" /><line x1="0" y1="0" x2="0" y2="7" className="off-line" /></pattern>
-    </defs>
-    {selBand?.kind === "visible" && <rect x={selBand.x} y={yTop - 8} width={selBand.w} height={yAxis - yTop + 8} className="sel" />}
-    {cur && <rect x={cur.x} y={yTop - 8} width={cur.w} height={yAxis - yTop + 8} className={sel ? "cursor-outline" : "sel"} />}
-    {[0, 0.5, 1].map(f => <g key={f}><line x1={PAD_L} x2={width - PAD_R} y1={yB(maxT * f)} y2={yB(maxT * f)} className="grid" /><text x={PAD_L - 6} y={yB(maxT * f) + 3.5} textAnchor="end" className="tnum">{f ? fmtTokens(maxT * f) : "0"}</text></g>)}
-    <text x={PAD_L} y={yTop - 10} className="lane">每{unit}输入消耗（累计）</text>
-    {layout.slots.map(s => {
-      const st = steps[s.index - 1];
-      const x = s.x + (s.w - bw) / 2;
-      let y = yTop + hBar;
-      const segs: [number, string][] = [[st.input.cache_read, "read"], [st.input.cache_write, "write"], [st.input.uncached_input, "unc"]];
-      return <g key={s.index}>
-        {segs.map(([v, cls]) => { const h = v / maxT * hBar; if (h <= 0) return null; y -= h; return <rect key={cls} x={x} y={y} width={bw} height={h} className={`bar ${cls}`} />; })}
-        {st.notes.map((n, j) => { const cx = s.x + s.w / 2, cy = yB(inputOf(st)) - 9 - j * 12; return n.explanation === "possible_cache_expiry"
-          ? <g key={j} className="note-icon"><circle cx={cx} cy={cy} r={4.5} /><path d={`M${cx} ${cy - 2.4}V${cy}l1.8 1.2`} /></g>
-          : <rect key={j} x={cx - 4} y={cy - 4} width={8} height={8} transform={`rotate(45 ${cx} ${cy})`} className="note-icon" />; })}
-      </g>;
-    })}
-    {(() => { const showGapLabel = placeGapLabels(layout.gaps.map(g => g.x)); return layout.gaps.map((g, gi) => {
-      const label = `空闲 ${Math.round(g.idleMs / 60_000)} 分`;
-      return <g key={g.beforeIndex} className="gap">
-        <title>{label}</title>
-        <rect x={g.x} y={yTop - 4} width={GAP_WIDTH} height={yAxis - yTop + 4} fill="transparent" />
-        <path d={`M${g.x + 8} ${yTop}l3 5l-3 5l3 5M${g.x + 12} ${yTop}l3 5l-3 5l3 5`} />
-        <line x1={g.x + 11} x2={g.x + 11} y1={yTop + 18} y2={yAxis} />
-        {showGapLabel[gi] && <text x={g.x + 17} y={yTop + 8} className="tnum">{label}</text>}
-      </g>;
-    }); })()}
-    {diags.length > 0 && <line x1={PAD_L} x2={width - PAD_R} y1={yBand - 3} y2={yBand - 3} className="axis" />}
-    {diags.map((d, i) => {
-      const b = bandFor(d.steps, view, layout);
-      const y = yBand + bandRows[i] * bandRow + 2;
-      if (b.kind === "offscreen") return <text key={i} x={b.side === "left" ? PAD_L : width - PAD_R} y={y + 6} textAnchor={b.side === "left" ? "start" : "end"} className="tnum faint">{b.side === "left" ? `‹ ${i + 1}` : `${i + 1} ›`}</text>;
-      const on = mode?.kind === "diag" && mode.diag === i;
-      return <g key={i} className={`band band-${d.kind}${d.cause === "evidence" ? " solid" : " dashed"}${on ? " on" : ""}`} onClick={() => onDiag(i)}>
-        <rect x={b.x + 1} y={y} width={Math.max(3, b.w - 2)} height={6} rx={3} />
-        <text x={b.x - 4} y={y + 6} textAnchor="end" className="tnum band-num">{i + 1}</text>
-        <rect x={b.x} y={y - 3} width={b.w} height={12} className="hit" />
-      </g>;
-    })}
-    <text x={PAD_L} y={yPeak - 4} className="lane">单次输入峰值</text>
-    {[0, 1].map(f => <g key={f}><line x1={PAD_L} x2={width - PAD_R} y1={yP(maxP * f)} y2={yP(maxP * f)} className="grid" /><text x={width - PAD_R + 6} y={yP(maxP * f) + 3.5} className="tnum">{f ? fmtTokens(maxP) : "0"}</text></g>)}
-    <path d={path} className="peak-line" />
-    {cur && steps[cur.index - 1].calls > 0 && <circle cx={cur.x + cur.w / 2} cy={yP(steps[cur.index - 1].input_peak)} r={3.2} className="peak-dot" />}
-    <text x={PAD_L} y={yTools - 4} className="lane">工具结果</text>
-    {!toolsOk ? <g><rect x={PAD_L} y={yTools} width={plotW} height={hTools} rx={3} fill="url(#ins-off)" /><text x={PAD_L + plotW / 2} y={yTools + hTools / 2 + 4} textAnchor="middle" className="muted-text">未记录 · {LANE_REASON[insights.lanes.tools.reason ?? ""] ?? "原因未知"}</text></g>
-      : layout.slots.map(s => {
-        const t = steps[s.index - 1].tools;
+  // 每回合的点击/悬浮目标分成上下两段（柱状消耗 / 峰值+工具+横轴），中间让开诊断带
+  // 那一条窄带——诊断带自己的点击面在下面单独画，两段满高的话会盖在诊断带上面，
+  // 点上去选中的其实是回合而不是诊断（这条带一直没生效，只是有列表按钮兜底才没
+  // 被发现；2026-09-29 设计交互时顺手修）。
+  const gutterTop = yBand - 4, gutterBottom = yPeak - 10;
+
+  return <div className="insights-chart-wrap">
+    <svg className="insights-chart" viewBox={`0 0 ${width} ${H}`} tabIndex={0} role="img" onKeyDown={onKey}
+      aria-label={`每${unit}输入消耗、单次输入峰值与工具结果，显示 ${view[0]}–${view[1]}，共 ${steps.length} 个${unit}`}>
+      <defs>
+        <pattern id="ins-hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" className="hatch-bg" /><line x1="0" y1="0" x2="0" y2="5" className="hatch-line" /></pattern>
+        <pattern id="ins-off" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="7" height="7" className="off-bg" /><line x1="0" y1="0" x2="0" y2="7" className="off-line" /></pattern>
+      </defs>
+      {selBand?.kind === "visible" && <rect x={selBand.x} y={yTop - 8} width={selBand.w} height={yAxis - yTop + 8} className="sel" />}
+      {cur && <rect x={cur.x} y={yTop - 8} width={cur.w} height={yAxis - yTop + 8} className={sel ? "cursor-outline" : "sel"} />}
+      {[0, 0.5, 1].map(f => <g key={f}><line x1={PAD_L} x2={width - PAD_R} y1={yB(maxT * f)} y2={yB(maxT * f)} className="grid" /><text x={PAD_L - 6} y={yB(maxT * f) + 3.5} textAnchor="end" className="tnum">{f ? fmtTokens(maxT * f) : "0"}</text></g>)}
+      <text x={PAD_L} y={yTop - 10} className="lane">每{unit}输入消耗（累计）</text>
+      {layout.slots.map(s => {
+        const st = steps[s.index - 1];
         const x = s.x + (s.w - bw) / 2;
-        let y = yTools + hTools;
-        const segs: [number, string][] = [[t.succeeded, "tool-ok"], [t.unknown, "tool-unknown"], [t.cancelled, "tool-cancel"], [t.failed, "tool-fail"]];
-        return <g key={s.index}>{segs.map(([n, cls]) => { if (!n) return null; const h = Math.max(cls === "tool-fail" ? 5 : 0, n / maxN * hTools); y -= h; return <rect key={cls} x={x} y={y} width={bw} height={h} className={cls} fill={cls === "tool-fail" ? "url(#ins-hatch)" : undefined} />; })}</g>;
+        let y = yTop + hBar;
+        const segs: [number, string][] = [[st.input.cache_read, "read"], [st.input.cache_write, "write"], [st.input.uncached_input, "unc"]];
+        return <g key={s.index}>
+          {segs.map(([v, cls]) => { const h = v / maxT * hBar; if (h <= 0) return null; y -= h; return <rect key={cls} x={x} y={y} width={bw} height={h} className={`bar ${cls}`} />; })}
+          {st.notes.map((n, j) => { const cx = s.x + s.w / 2, cy = yB(inputOf(st)) - 9 - j * 12; return n.explanation === "possible_cache_expiry"
+            ? <g key={j} className="note-icon"><circle cx={cx} cy={cy} r={4.5} /><path d={`M${cx} ${cy - 2.4}V${cy}l1.8 1.2`} /></g>
+            : <rect key={j} x={cx - 4} y={cy - 4} width={8} height={8} transform={`rotate(45 ${cx} ${cy})`} className="note-icon" />; })}
+        </g>;
       })}
-    <line x1={PAD_L} x2={width - PAD_R} y1={yAxis} y2={yAxis} className="axis" />
-    {layout.slots.map(s => {
-      const st = steps[s.index - 1];
-      const cx = s.x + s.w / 2;
-      return <g key={s.index}>
-        {(s.index === 1 || s.index % step === 0) && <text x={cx} y={yAxis + 15} textAnchor="middle" className="tnum">{s.index}</text>}
-        {(st.outcome === "failed" || st.outcome === "cancelled") && <circle cx={cx} cy={yAxis} r={3.2} className={`outcome-${st.outcome}`} />}
-        <rect x={s.x} y={yTop - 8} width={s.w} height={yAxis - yTop + 8} className="hit" onClick={() => onStep(s.index)}><title>{`${unit} ${s.index}`}</title></rect>
-      </g>;
-    })}
-  </svg>;
+      {(() => { const showGapLabel = placeGapLabels(layout.gaps.map(g => g.x)); return layout.gaps.map((g, gi) => {
+        const label = `空闲 ${Math.round(g.idleMs / 60_000)} 分`;
+        const content: TipContent = { lines: [label, `${unit} ${g.beforeIndex} 之前`] };
+        return <g key={g.beforeIndex} className="gap" onMouseMove={e => hoverTip(e, content)} onMouseLeave={hideTip}>
+          <rect className="hit" x={g.x} y={yTop - 4} width={GAP_WIDTH} height={yAxis - yTop + 4} />
+          <path d={`M${g.x + 8} ${yTop}l3 5l-3 5l3 5M${g.x + 12} ${yTop}l3 5l-3 5l3 5`} />
+          <line x1={g.x + 11} x2={g.x + 11} y1={yTop + 18} y2={yAxis} />
+          {showGapLabel[gi] && <text x={g.x + 17} y={yTop + 8} className="tnum">{label}</text>}
+        </g>;
+      }); })()}
+      {diags.length > 0 && <line x1={PAD_L} x2={width - PAD_R} y1={yBand - 3} y2={yBand - 3} className="axis" />}
+      {visibleIdx.map(i => {
+        const d = diags[i];
+        const b = bandOf[i];
+        if (b.kind !== "visible") return null;
+        const y = yBand + (rowOf.get(i) ?? 0) * bandRow + 2;
+        const on = mode?.kind === "diag" && mode.diag === i;
+        const content = bandTip(d, i, unit);
+        return <g key={i} className={`band band-${d.kind}${d.cause === "evidence" ? " solid" : " dashed"}${on ? " on" : ""}`}
+          onClick={() => onDiag(i)} onMouseMove={e => hoverTip(e, content)} onMouseLeave={hideTip}>
+          <rect x={b.x + 1} y={y} width={Math.max(3, b.w - 2)} height={6} rx={3} />
+          <text x={b.x - 4} y={y + 6} textAnchor="end" className="tnum band-num">{i + 1}</text>
+          <rect x={b.x} y={y - 3} width={b.w} height={12} className="hit" />
+        </g>;
+      })}
+      {(["left", "right"] as const).map(side => {
+        const idx = side === "left" ? offLeftIdx : offRightIdx;
+        const individually = side === "left" ? offLeftIndividually : offRightIndividually;
+        if (idx.length === 0) return null;
+        const x = side === "left" ? PAD_L : width - PAD_R;
+        const anchor = side === "left" ? "start" : "end";
+        if (individually) {
+          return idx.map(i => {
+            const d = diags[i];
+            const y = yBand + (rowOf.get(i) ?? 0) * bandRow + 2;
+            const content = bandTip(d, i, unit);
+            return <g key={i} onClick={() => onDiag(i)} onMouseMove={e => hoverTip(e, content)} onMouseLeave={hideTip} style={{ cursor: "pointer" }}>
+              <rect className="hit" x={side === "left" ? x - 2 : x - 34} y={y - 3} width={36} height={12} />
+              <text x={x} y={y + 6} textAnchor={anchor} className="tnum faint">{side === "left" ? `‹ ${i + 1}` : `${i + 1} ›`}</text>
+            </g>;
+          });
+        }
+        // 折叠摘要：悬浮看清单，点击跳到离当前窗口最近的一条（左侧取 to 最大的，
+        // 右侧取 from 最小的）。
+        const nearest = idx.reduce((best, i) => {
+          const cmp = side === "left" ? diags[i].steps.to - diags[best].steps.to : diags[best].steps.from - diags[i].steps.from;
+          return cmp > 0 ? i : best;
+        }, idx[0]);
+        const y = yBand + visibleRowCount * bandRow + 2;
+        const content: TipContent = {
+          title: `窗口外还有 ${idx.length} 条`,
+          lines: idx.slice(0, 12).map(i => { const t = diagText(diags[i], unit); return `${i + 1}. ${unit} ${diags[i].steps.from}–${diags[i].steps.to} · ${t.title}`; })
+            .concat(idx.length > 12 ? [`……还有 ${idx.length - 12} 条`] : []),
+        };
+        return <g key={side} className="band-summary" onClick={() => onDiag(nearest)} onMouseMove={e => hoverTip(e, content)} onMouseLeave={hideTip}>
+          <rect className="hit" x={side === "left" ? x - 2 : x - 40} y={y - 4} width={42} height={14} />
+          <rect x={side === "left" ? x : x - 34} y={y - 3} width={34} height={12} rx={6} className="band-summary-pill" />
+          <text x={side === "left" ? x + 17 : x - 17} y={y + 6} textAnchor="middle" className="tnum band-summary-text">{side === "left" ? `‹${idx.length}` : `${idx.length}›`}</text>
+        </g>;
+      })}
+      <text x={PAD_L} y={yPeak - 4} className="lane">单次输入峰值</text>
+      {[0, 1].map(f => <g key={f}><line x1={PAD_L} x2={width - PAD_R} y1={yP(maxP * f)} y2={yP(maxP * f)} className="grid" /><text x={width - PAD_R + 6} y={yP(maxP * f) + 3.5} className="tnum">{f ? fmtTokens(maxP) : "0"}</text></g>)}
+      <path d={path} className="peak-line" />
+      {cur && steps[cur.index - 1].calls > 0 && <circle cx={cur.x + cur.w / 2} cy={yP(steps[cur.index - 1].input_peak)} r={3.2} className="peak-dot" />}
+      <text x={PAD_L} y={yTools - 4} className="lane">工具结果</text>
+      {!toolsOk ? <g><rect x={PAD_L} y={yTools} width={plotW} height={hTools} rx={3} fill="url(#ins-off)" /><text x={PAD_L + plotW / 2} y={yTools + hTools / 2 + 4} textAnchor="middle" className="muted-text">未记录 · {LANE_REASON[insights.lanes.tools.reason ?? ""] ?? "原因未知"}</text></g>
+        : layout.slots.map(s => {
+          const t = steps[s.index - 1].tools;
+          const x = s.x + (s.w - bw) / 2;
+          let y = yTools + hTools;
+          const segs: [number, string][] = [[t.succeeded, "tool-ok"], [t.unknown, "tool-unknown"], [t.cancelled, "tool-cancel"], [t.failed, "tool-fail"]];
+          return <g key={s.index}>{segs.map(([n, cls]) => { if (!n) return null; const h = Math.max(cls === "tool-fail" ? 5 : 0, n / maxN * hTools); y -= h; return <rect key={cls} x={x} y={y} width={bw} height={h} className={cls} fill={cls === "tool-fail" ? "url(#ins-hatch)" : undefined} />; })}</g>;
+        })}
+      <line x1={PAD_L} x2={width - PAD_R} y1={yAxis} y2={yAxis} className="axis" />
+      {layout.slots.map(s => {
+        const st = steps[s.index - 1];
+        const cx = s.x + s.w / 2;
+        const content = stepTip(st, unit);
+        return <g key={s.index}>
+          {(s.index === 1 || s.index % step === 0) && <text x={cx} y={yAxis + 15} textAnchor="middle" className="tnum">{s.index}</text>}
+          {(st.outcome === "failed" || st.outcome === "cancelled") && <circle cx={cx} cy={yAxis} r={3.2} className={`outcome-${st.outcome}`} />}
+          <rect x={s.x} y={yTop - 8} width={s.w} height={gutterTop - (yTop - 8)} className="hit"
+            onClick={() => onStep(s.index)} onMouseMove={e => hoverTip(e, content)} onMouseLeave={hideTip} />
+          <rect x={s.x} y={gutterBottom} width={s.w} height={yAxis + 8 - gutterBottom} className="hit"
+            onClick={() => onStep(s.index)} onMouseMove={e => hoverTip(e, content)} onMouseLeave={hideTip} />
+        </g>;
+      })}
+    </svg>
+    {tip && <TooltipBox x={tip.x} y={tip.y} chartWidth={width} content={tip.content} />}
+  </div>;
 }
 
 function Buckets({ input, noWrite }: { input: { cache_read: number; cache_write: number; uncached_input: number }; noWrite: boolean }) {

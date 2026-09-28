@@ -65,6 +65,14 @@
 .insights-chart { outline: none; }
 .insights-chart:focus-visible, .insights-mini:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
 .insights-mini { cursor: pointer; touch-action: none; margin-bottom: 4px; }
+.insights-chart-wrap { position: relative; }
+.insights-tip { position: absolute; z-index: 30; max-width: 230px; padding: 7px 10px; border: 1px solid var(--ui-border); border-radius: 7px; background: var(--ui-surface); box-shadow: 0 6px 18px rgba(20, 30, 40, .16); font-size: 11.5px; line-height: 1.5; pointer-events: none; }
+.insights-tip b { display: block; margin-bottom: 3px; font-size: 12px; }
+.insights-tip dl { display: grid; grid-template-columns: auto auto; gap: 1px 12px; margin: 0; }
+.insights-tip dt { color: var(--ui-muted); white-space: nowrap; }
+.insights-tip dd { margin: 0; font-family: ui-monospace, Menlo, monospace; text-align: right; white-space: nowrap; }
+.insights-tip p { margin: 2px 0 0; color: var(--ui-muted); }
+.insights-tip p:first-of-type { margin-top: 4px; }
 .insights-chart text, .insights-mini text { font-size: 11px; fill: var(--ui-muted); }
 .insights-chart .tnum, .insights-mini .tnum { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; }
 .insights-chart .faint { fill: var(--ins-faint); }
@@ -80,8 +88,12 @@
 .insights-chart .gap path, .insights-chart .gap line { stroke: var(--ins-faint); fill: none; }
 .insights-chart .gap line { stroke-dasharray: 2 3; }
 .insights-chart .band { cursor: pointer; }
-.insights-chart .band .hit, .insights-chart .hit { fill: transparent; }
+.insights-chart .band .hit, .insights-chart .hit { fill: transparent; cursor: pointer; }
+.insights-chart .hit:hover { fill: rgba(41, 45, 52, .045); }
 .insights-chart .band-num { font-weight: 600; fill: var(--ui-text); }
+.insights-chart .band-summary-pill { fill: var(--ui-text); opacity: .85; }
+.insights-chart .band-summary:hover .band-summary-pill { opacity: 1; }
+.insights-chart .band-summary-text { fill: var(--ui-surface); font-weight: 600; }
 .insights-chart .band.solid rect:first-child { stroke: none; opacity: .85; }
 .insights-chart .band.dashed rect:first-child { fill: var(--ui-surface); stroke-width: 1.1; stroke-dasharray: 3 2; }
 .insights-chart .band.on rect:first-child { opacity: 1; stroke-width: 1.8; }

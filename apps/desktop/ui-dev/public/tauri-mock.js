@@ -112,6 +112,13 @@
         { kind: "repeated_failure", steps: { from: 18, to: 20 }, fact: { failures: 3, steps_hit: 3, capability_id: "Bash", same_invocation: true, groups: 1 }, impact: { tokens: 900000, share_of_session_input: share(900000) }, cause: "evidence", evidence: ["error_excerpt"], context_notes: [], remedy_id: "inspect-repeated-failure" },
         { kind: "input_growth", steps: { from: 2, to: 16 }, fact: { peak_from: 44000, peak_to: 142000, ratio: 3.23 }, impact: { tokens: 3200000, share_of_session_input: share(3200000) }, cause: "unknown", evidence: [], context_notes: [], remedy_id: "review-context-growth" },
         { kind: "high_uncached_input", steps: { from: 12, to: 14 }, fact: { calls: 9, uncached_tokens: 279000 }, impact: { tokens: 279000, share_of_session_input: share(279000) }, explanation: "unexplained", cause: "unknown", evidence: [], context_notes: [], remedy_id: "inspect-uncached-input" },
+        // 分散在整个 420 回合里的一串「同一调用反复失败」：默认窗口只显示前 ~90 回合时
+        // 大多数落在窗口外——真机 444 回合的会话有 20+ 条窗口外诊断挤在一起（原始
+        // bug），用于验证「≤4 条单独编号 / 更多折叠成摘要」的折叠逻辑（2026-09-29）。
+        ...(total > 100 ? Array.from({ length: 17 }, (_, k) => {
+          const from = 95 + k * 19;
+          return { kind: "repeated_failure", steps: { from, to: from + 2 }, fact: { failures: 2 + (k % 3), steps_hit: 2, capability_id: k % 2 ? "Edit" : "Bash", same_invocation: k % 3 !== 0, groups: k % 3 === 0 ? 2 : 1 }, impact: { tokens: 40000 * (k + 1), share_of_session_input: share(40000 * (k + 1)) }, cause: k % 4 ? "evidence" : "unknown", evidence: k % 4 ? ["error_excerpt"] : [], context_notes: [], remedy_id: "inspect-repeated-failure" };
+        }) : []),
       ],
       safety: { count: 1, critical: 1, rules: [{ rule: "SV601", severity: "critical", count: 1, steps: [7] }] },
       lanes: { consumption: { state: "available", coverage: 1 }, tools: { state: "available", coverage: 1 } },
