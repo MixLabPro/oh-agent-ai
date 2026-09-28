@@ -4,7 +4,7 @@ import {
   readSessionInsights, readSessionTraceEvidence,
   type InsightDiagnostic, type InsightStep, type NominalCost, type SessionInsights, type SessionTraceEvidence,
 } from "../../lib/sessionInsights";
-import { bandFor, layoutSteps, maxVisibleSteps, miniColumns, niceCeil, packBands, resolveWindow, tickStep } from "./insightsGeometry";
+import { bandFor, GAP_WIDTH, layoutSteps, maxVisibleSteps, miniColumns, niceCeil, packBands, placeGapLabels, resolveWindow, tickStep } from "./insightsGeometry";
 import "./session-insights.css";
 
 // 会话消耗诊断（SESSION_TRACE_DIAGNOSTICS_SPEC r6 §8）：摘要 → 紧凑诊断列表 →
@@ -399,7 +399,9 @@ function Chart({ insights, view, width, cursor, mode, unit, onStep, onDiag, onKe
   const plotW = width - PAD_L - PAD_R;
   const layout = layoutSteps(steps, view, PAD_L, plotW);
   const yTop = 20, hBar = 150, bandRow = 11;
-  const bandRows = packBands(diags.map(d => d.steps));
+  // 每行只占 11px，真机会话诊断数可能超过默认上限（114 回合的会话有 8 条，短
+  // 区间挤在一起时 6 行不够，被迫叠在最后一行——多给几行成本很小。
+  const bandRows = packBands(diags.map(d => d.steps), 10);
   const bandsH = diags.length ? (Math.max(...bandRows) + 1) * bandRow + 10 : 6;
   const yBand = yTop + hBar + 8, yPeak = yBand + bandsH + 12, hPeak = 58, yTools = yPeak + hPeak + 16, hTools = 40, yAxis = yTools + hTools + 6, H = yAxis + 22;
   const maxT = niceCeil(Math.max(1, ...steps.map(inputOf)));
@@ -446,7 +448,16 @@ function Chart({ insights, view, width, cursor, mode, unit, onStep, onDiag, onKe
           : <rect key={j} x={cx - 4} y={cy - 4} width={8} height={8} transform={`rotate(45 ${cx} ${cy})`} className="note-icon" />; })}
       </g>;
     })}
-    {layout.gaps.map(g => <g key={g.beforeIndex} className="gap"><path d={`M${g.x + 8} ${yTop}l3 5l-3 5l3 5M${g.x + 12} ${yTop}l3 5l-3 5l3 5`} /><line x1={g.x + 11} x2={g.x + 11} y1={yTop + 18} y2={yAxis} /><text x={g.x + 17} y={yTop + 8} className="tnum">空闲 {Math.round(g.idleMs / 60_000)} 分</text></g>)}
+    {(() => { const showGapLabel = placeGapLabels(layout.gaps.map(g => g.x)); return layout.gaps.map((g, gi) => {
+      const label = `空闲 ${Math.round(g.idleMs / 60_000)} 分`;
+      return <g key={g.beforeIndex} className="gap">
+        <title>{label}</title>
+        <rect x={g.x} y={yTop - 4} width={GAP_WIDTH} height={yAxis - yTop + 4} fill="transparent" />
+        <path d={`M${g.x + 8} ${yTop}l3 5l-3 5l3 5M${g.x + 12} ${yTop}l3 5l-3 5l3 5`} />
+        <line x1={g.x + 11} x2={g.x + 11} y1={yTop + 18} y2={yAxis} />
+        {showGapLabel[gi] && <text x={g.x + 17} y={yTop + 8} className="tnum">{label}</text>}
+      </g>;
+    }); })()}
     {diags.length > 0 && <line x1={PAD_L} x2={width - PAD_R} y1={yBand - 3} y2={yBand - 3} className="axis" />}
     {diags.map((d, i) => {
       const b = bandFor(d.steps, view, layout);

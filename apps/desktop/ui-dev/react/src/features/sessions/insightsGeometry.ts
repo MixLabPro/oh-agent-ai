@@ -6,7 +6,8 @@
 // - 诊断区间与失败标记**永不因抽稀或窗口而消失**：窗口外的区间给出方向标记；
 // - 窗口恒包含当前焦点；
 // - 长空闲（> 30 分钟）折叠成固定宽度的缝隙，且只出现在窗口内；
-// - 柱位单调、落在绘图区内。
+// - 柱位单调、落在绘图区内；
+// - 空闲缝隙的文字标签不互相压字（图标不抽稀，只有文字按间距取舍）。
 
 export const LONG_IDLE_MS = 30 * 60 * 1000;
 export const GAP_WIDTH = 22;
@@ -137,4 +138,18 @@ export function miniColumns(values: { input: number; miss: number }[], plotWidth
     if (best >= 0) out.push({ x: c, value: best, warn });
   }
   return out;
+}
+
+/// 空闲缝隙的文字标签放置：真实长会话里长空闲经常连续出现（本机 114 回合的
+/// claude-code 会话有 7 处），每处都画完整的「空闲 N 分」会互相压字，读不出任何
+/// 一条（2026-09-28 真机反馈）。图标（沙漏 + 竖线）**每处都画，不抽稀**；文字
+/// 只在与上一条已显示文字的横向距离足够时才画。被跳过的仍能通过图标的 `<title>`
+/// 悬浮查看完整时长。`minSpacingPx` 是「空闲 NN 分」这类标签的保守宽度估计。
+export function placeGapLabels(xs: number[], minSpacingPx = 46): boolean[] {
+  let lastShownX = -Infinity;
+  return xs.map(x => {
+    if (x - lastShownX < minSpacingPx) return false;
+    lastShownX = x;
+    return true;
+  });
 }

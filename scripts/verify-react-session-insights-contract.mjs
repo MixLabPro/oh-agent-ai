@@ -147,6 +147,16 @@ for (let r = 0; r < 5; r += 1) {
   for (let k = 1; k < inRow.length; k += 1) assert.ok(inRow[k].from > inRow[k - 1].to, `row ${r} overlaps`);
 }
 assert.equal(geo.niceCeil(640_000), 800_000);
+// 空闲缝隙标签不互相压字（真机反馈：114 回合的会话有 7 处长空闲，原先每处都画
+// 完整文字，挨得近的几处叠成一团读不出来）。图标不抽稀，只有文字按间距取舍。
+{
+  const dense = [100, 122, 144, 166, 500, 522];
+  const shown = geo.placeGapLabels(dense);
+  assert.equal(shown.length, dense.length, "每个缝隙都有取舍结果，不抽稀");
+  assert.deepEqual(shown, [true, false, false, true, true, false], "只有间距足够时才显示文字");
+  const wide = [0, 200, 400];
+  assert.deepEqual(geo.placeGapLabels(wide), [true, true, true], "间距充足时全部显示");
+}
 assert.equal(geo.niceCeil(1), 1);
 assert.ok(geo.tickStep(3) * 3 >= 34, "刻度间隔至少 34px");
 const mini = geo.miniColumns([{ input: 10, miss: 9 }, { input: 5, miss: 0 }], 1);

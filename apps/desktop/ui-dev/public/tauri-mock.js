@@ -76,7 +76,10 @@
     const steps = [];
     let ts = 1789000000000;
     for (let i = 1; i <= total; i += 1) {
-      const idle = i === 22 ? 47 * 60000 : 30000;
+      // 一处孤立长空闲（22）+ 一串密集长空闲（60,63,66,70,80,90：真机 114 回合的
+      // claude-code 会话有 7 处相邻长空闲，原先每处都画完整文字会互相压字）。
+      const DENSE_IDLE = new Set([60, 63, 66, 70, 80, 90]);
+      const idle = i === 22 ? 47 * 60000 : DENSE_IDLE.has(i) ? (35 + i) * 60000 : 30000;
       ts += idle + 60000;
       const peak = i <= 16 ? 30000 + i * 7000 : 100000 + (i % 5) * 4000;
       const low = i >= 12 && i <= 14;
