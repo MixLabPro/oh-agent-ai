@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ui = path.join(repo, "apps/desktop/ui-dev");
 const overviewPage = readFileSync(path.join(ui, "react/src/features/overview/OverviewPage.tsx"), "utf8");
+const decisionArea = readFileSync(path.join(ui, "react/src/features/overview/DecisionArea.tsx"), "utf8");
 const appPage = readFileSync(path.join(ui, "react/src/app/App.tsx"), "utf8");
 assert.doesNotMatch(overviewPage, /overview\.(today_spend|month_spend)/, "cost cards must use authority daily/monthly summaries, not legacy DSH overview fields");
 assert.doesNotMatch(overviewPage, /className="hero-panel"|把运行状态变成可理解的证据/, "overview should lead with useful metrics instead of a decorative hero card");
@@ -251,3 +252,21 @@ await assert.rejects(() => bridge.readOverviewDetails(), /窗口与请求不一�
 restore();
 
 console.log("React Overview/Usage contract: OK (revision-consistent snapshot, mock DTOs, malformed rejection, honest degradation)");
+
+// 决策区（DECISION_AREA_REACT_PORT spec R4）：移植组件的存在性、措辞闭集与诚实红线。
+assert.match(decisionArea, /值回月风|值回月费/, "payback chip wording present");
+assert.match(decisionArea, /没用够（只值回月费的/, "underused warning wording present");
+assert.match(decisionArea, /数字异常/, "anomaly guard wording present");
+assert.match(decisionArea, /读不到套餐额度/, "codex unreadable fallback present");
+assert.match(decisionArea, /尚未设置套餐或账单/, "unset-fee empty state present");
+assert.match(decisionArea, /api_equivalent/, "dual track reads the nominal API equivalent basis");
+assert.match(decisionArea, /名义 API 等价（参考）/, "nominal equivalent labeled as reference");
+assert.match(decisionArea, /非付款验证/, "declared-fee caveat present");
+assert.match(decisionArea, /href="#settings"/, "unset-fee guidance links into settings");
+// 剥注释（块+行）：红线针对代码与文案本身，不针对讨论红线的注释。
+const decisionAreaCode = decisionArea.replace(/\/\*[\s\S]*?\*\//g, "").split("\n").map((line) => line.split("//")[0]).join("\n");
+assert.doesNotMatch(decisionAreaCode, /可节省|省下|亏了/, "no savings/loss claims in decision area");
+assert.doesNotMatch(decisionAreaCode, /(claude|Claude)[\s\S]{0,120}used_percent/, "claude branch must never touch used_percent (§8.3.2 never-a-percentage)");
+assert.match(decisionArea, /永无「剩余 N%」|永无百分比|永不显示百分比/, "never-a-percentage red line documented in source");
+assert.match(decisionArea, /Date\.now\(\) - observed <= 24 \* 60 \* 60 \* 1000/, "codex 24h staleness guard ported");
+assert.match(overviewPage, /<DecisionArea monthly=/, "overview mounts the decision area");

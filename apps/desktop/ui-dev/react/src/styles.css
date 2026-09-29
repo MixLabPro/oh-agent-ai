@@ -723,3 +723,23 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .session-detail-refresh-note { margin: 0 0 12px; padding: 8px 12px; border: 1px solid #f0dcb4; border-radius: 8px; background: #fdf7ea; color: #7a5a1c; font-size: 12px; }
 .session-detail-stats small.session-cost-note { white-space: normal; line-height: 1.45; }
 .session-detail-stats small.session-cost-note-warn { color: #9a6412; }
+
+/* 决策区（DECISION_AREA_REACT_PORT）：套餐窗口卡 + 值回双轨。 */
+.decision-area { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin-top: 14px; }
+.decision-note { color: var(--text-secondary, #b8b8b8); font-size: 12px; }
+.decision-quota-list, .decision-payback-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.decision-quota-list li, .decision-payback-list li { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.decision-src { font-weight: 600; min-width: 90px; }
+.decision-quota-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.decision-quota-line b.danger, .decision-quota-line b:has(+ .danger) { color: #e06c5e; }
+.meter { display: inline-block; width: 90px; height: 6px; border-radius: 3px; background: rgba(255,255,255,0.12); overflow: hidden; }
+.meter-fill { display: block; height: 100%; background: #7ab98a; }
+.meter-fill.danger { background: #e06c5e; }
+.danger { color: #e06c5e; }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid rgba(255,255,255,0.14); }
+.sub-chip { background: rgba(122,185,138,0.10); }
+.diag-chip { background: rgba(215,169,74,0.10); }
+.muted-chip { color: var(--text-secondary, #b8b8b8); }
+.warn-chip { color: #f4c95d; border-color: rgba(244,201,93,0.4); }
+.ok-chip { color: #7ab98a; border-color: rgba(122,185,138,0.4); }
+.decision-payback-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }

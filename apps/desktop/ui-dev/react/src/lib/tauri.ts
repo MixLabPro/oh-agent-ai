@@ -2783,6 +2783,64 @@ export async function openTrustedReleasesPage(): Promise<{ status: "opened" }> {
   return { status: "opened" };
 }
 
+// ── 决策区桥接（DECISION_AREA_REACT_PORT spec R1）：两个既有 quota IPC 的
+// 严格解析包装。畸形 DTO 抛错（进组件错误态），无 Tauri 桥（浏览器预览）
+// 返回 null = 不可用——与既有桥降级同纪律，不静默编数。
+
+export type CodexQuotaWindow = {
+  plan_type: string | null;
+  used_percent: number;
+  resets_at: number;
+  observed_at: string;
+};
+
+export type ClaudeQuotaState =
+  | { state: "unknown"; observed_at: string | null; windows_recent: number; last_resets_at: number | null; last_window: string | null }
+  | { state: "exhausted"; window: string; window_label: string | null; resets_at: number; observed_at: string | null; windows_recent: number };
+
+function parseCodexQuota(value: unknown): CodexQuotaWindow {
+  const root = record(value, "codex quota snapshot");
+  const limits = record(root.limits ?? null, "codex quota limits");
+  const primary = record(limits.primary ?? null, "codex quota primary window");
+  const used = boundedCount(primary.used_percent, "codex used_percent", 100);
+  if (!Number.isFinite(used) || used < 0 || used > 100) throw new Error("codex used_percent 越界");
+  const resets = boundedCount(primary.resets_at, "codex resets_at", 4_102_444_800);
+  if (!Number.isSafeInteger(resets) || resets <= 0) throw new Error("codex resets_at 不安全");
+  const observed = nullableString(root.observed_at, "codex quota observed_at");
+  if (observed === null || !Number.isFinite(Date.parse(observed))) throw new Error("codex quota observed_at 不可解析");
+  const planType = nullableString(root.plan_type, "codex plan_type");
+  return { plan_type: planType === null ? null : planType.slice(0, 64), used_percent: used, resets_at: resets, observed_at: observed };
+}
+
+function parseClaudeQuota(value: unknown): ClaudeQuotaState {
+  const root = record(value, "claude quota state");
+  const observed = nullableString(root.observed_at, "claude quota observed_at");
+  const windowsRecent = boundedCount(root.windows_recent, "claude windows_recent", 100_000);
+  if (root.state === "exhausted") {
+    const resets = boundedCount(root.resets_at, "claude resets_at", 4_102_444_800);
+    if (!Number.isSafeInteger(resets) || resets <= 0) throw new Error("claude resets_at 不安全");
+    const window = nullableString(root.window, "claude window") ?? "five_hour";
+    const label = nullableString(root.window_label, "claude window_label");
+    return { state: "exhausted", window: window.slice(0, 32), window_label: label === null ? null : label.slice(0, 32), resets_at: resets, observed_at: observed, windows_recent: windowsRecent };
+  }
+  if (root.state !== "unknown") throw new Error("claude quota state 越界");
+  const lastResets = root.last_resets_at === null || root.last_resets_at === undefined ? null : boundedCount(root.last_resets_at, "claude last_resets_at", 4_102_444_800);
+  const lastWindow = nullableString(root.last_window, "claude last_window");
+  return { state: "unknown", observed_at: observed, windows_recent: windowsRecent, last_resets_at: lastResets, last_window: lastWindow === null ? null : lastWindow.slice(0, 32) };
+}
+
+export async function readCodexQuota(): Promise<CodexQuotaWindow | null> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return null;
+  return parseCodexQuota(await handler("data_codex_quota"));
+}
+
+export async function readClaudeQuota(): Promise<ClaudeQuotaState | null> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return null;
+  return parseClaudeQuota(await handler("data_claude_quota"));
+}
+
 export async function readSourceHealth(): Promise<SourceHealthReport> {
   const fallback = {
     status: "ok",
