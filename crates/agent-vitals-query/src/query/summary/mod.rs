@@ -97,11 +97,21 @@ impl PricingCards {
                 // （有价卡快照就用它），只在 `current()` 合并等于用户补的卡对
                 // 当月不生效——而那恰恰是用户补卡时想看效果的月份。
                 let mut main = main.clone();
-                crate::price_overrides::apply_to_main(&mut main, &crate::home::data_home());
-                Self {
-                    main,
-                    codex: codex.clone(),
+                let mut codex = codex.clone();
+                // 每日同步叠加层只补这份历史快照里当时没有的卡（新模型发布到价卡
+                // 上线之间的用量）；已有的卡保持快照当时的价——厂商调价不改写历史。
+                if let Some(overlay) = db
+                    .latest_pricing_sync_overlay()
+                    .ok()
+                    .flatten()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                {
+                    agent_vitals_domain::cost::sync_overlay::fill_missing_from_sync_overlay(
+                        &mut main, &mut codex, &overlay,
+                    );
                 }
+                crate::price_overrides::apply_to_main(&mut main, &crate::home::data_home());
+                Self { main, codex }
             }
             // 老快照只存了一半 → 整体退当前卡，不半用（半用会让 DSH 按历史卡、
             // codex 按当前卡，跨宿主总额失去单一时点语义）。

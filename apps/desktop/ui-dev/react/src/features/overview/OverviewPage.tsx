@@ -4,6 +4,7 @@ import { readFindings, type FindingGroup, type OverviewDetails, type OverviewSna
 import { sessionsDateHref, sessionsHostHref } from "../../lib/nav";
 import { todayCacheHitRatio } from "./cacheHit";
 import { monthSpendCard, todaySpendCard } from "./spendCards";
+import { DecisionArea } from "./DecisionArea";
 
 function tokensLabel(value: number | null): string {
   if (value == null) return "—";
@@ -139,6 +140,7 @@ export function OverviewPage({ overview, details }: { overview: OverviewSnapshot
       <div className="overview-host-list">{Object.entries(details.monthly.tokens_by_host).map(([host, tokens]) => <article className="overview-host-row" key={host}><div><strong>{host}</strong><span>{hostTokensLabel(tokens)}</span></div><b>{tokens.total ? tokensLabel(tokens.total) : "—"} token</b></article>)}</div>
       <p className="overview-empty">币种和账单口径仅按 basis 分栏；估算、订阅和等价标价不会跨币种相加。</p>
     </section>}
+    <DecisionArea monthly={details?.monthly ?? null} />
     <OverviewFindingsStrip />
     {details?.calendar && <section className="info-panel overview-recent-panel" aria-labelledby="overview-recent-title">
       <div className="section-heading"><div><p className="eyebrow">最近观测日</p><h3 id="overview-recent-title">{details.calendar.month}</h3></div><span className="count-badge">{details.calendar.days.length} 天</span></div>

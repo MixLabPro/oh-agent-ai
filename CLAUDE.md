@@ -347,6 +347,26 @@ calendar/quota 四个命令——**任何新增的 codex 数据面必须走
 方接入 wire 数据前，先读产生方的 fold/序列化代码或 fixture 钉形状；`.mjs` stub
 必须注明形状出处（函数+行号），形状变更同一 PR 同改。
 
+### 价卡每日同步（2026-09-29）
+
+底表 `assets/pricing.json` + `codex_pricing.json` 仍由维护者手工维护、编译进二进制、被
+金额测试钉着——**CI 不改底表**。每日同步只写叠加层 `assets/pricing-sync.json`：
+`.github/workflows/pricing-sync.yml` 每天跑 `scripts/pricing_sync.py`，比对 models.dev /
+LiteLLM / OpenRouter 三个公开 JSON 源（不爬 HTML），一个字段 ≥2 源一致才采用，只取原厂
+条目（不取 Azure/Bedrock 路由价）；归零或相对底表 >5 倍的变动不发布（进 `rejected`）。
+用户定的「全部自动发布」：有变化直接提交 main。DeepSeek / MiniMax（人民币底表、峰谷/分档）
+不在同步范围。
+
+app 端：每 6 小时拉一次叠加层（`validate_sync_overlay` 校验）→ `sql_sync::snapshot_with_sync_overlay`
+把叠加层原文（`provider_catalog_snapshots`，来源 `public-sync-overlay`）与「底表 + 叠加层」
+完整快照（`pricing_snapshots`，`catalog_version` 引用叠加层）同一事务入库。两条合并规则
+（`domain::cost::sync_overlay`）不能混用：**新快照覆盖**（改价只对之后的用量生效，厂商
+调价不改写历史）；**读历史快照只补缺卡**（新模型发布到价卡上线之间的用量，已有价不动；
+会话计费桶标 `pricing_source = "backfilled"`）。叠加层存库不存文件：历史回补在只拿得到
+`Connection` 的查询里读它。模型名匹配是「精确 > 最长前缀，且剩余部分不能是新版本号/档位」
+（`norm_model_in` ↔ `cost.py::_norm_model_in`，对照表 `tests/test_cost_model_match.py`）——
+旧的「第一个前缀命中」让 claude-opus-5-5 吃到 claude-opus-5 的卡且永不报缺价。
+
 ### v0.9.1 数据面维护（SQL 权威库操作面；Phase 4.3 后）
 
 - **布局**：`<data_home>/facts/<host>.jsonl`（append-only 权威源，宿主封闭

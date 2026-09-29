@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ui = path.join(repo, "apps/desktop/ui-dev");
 const overviewPage = readFileSync(path.join(ui, "react/src/features/overview/OverviewPage.tsx"), "utf8");
+const decisionArea = readFileSync(path.join(ui, "react/src/features/overview/DecisionArea.tsx"), "utf8");
 const appPage = readFileSync(path.join(ui, "react/src/app/App.tsx"), "utf8");
 assert.doesNotMatch(overviewPage, /overview\.(today_spend|month_spend)/, "cost cards must use authority daily/monthly summaries, not legacy DSH overview fields");
 assert.doesNotMatch(overviewPage, /className="hero-panel"|把运行状态变成可理解的证据/, "overview should lead with useful metrics instead of a decorative hero card");
@@ -251,3 +252,40 @@ await assert.rejects(() => bridge.readOverviewDetails(), /窗口与请求不一�
 restore();
 
 console.log("React Overview/Usage contract: OK (revision-consistent snapshot, mock DTOs, malformed rejection, honest degradation)");
+
+// 决策区（DECISION_AREA_REACT_PORT spec R4）：移植组件的存在性、措辞闭集与诚实红线。
+assert.match(decisionArea, /值回月费/, "payback chip wording present");
+assert.match(decisionArea, /没用够（只值回月费的/, "underused warning wording present");
+assert.match(decisionArea, /数字异常/, "anomaly guard wording present");
+assert.match(decisionArea, /读不到套餐额度/, "codex unreadable fallback present");
+assert.match(decisionArea, /尚未设置套餐或账单/, "unset-fee empty state present");
+assert.match(decisionArea, /api_equivalent/, "dual track reads the nominal API equivalent basis");
+assert.match(decisionArea, /名义 API 等价（参考）/, "nominal equivalent labeled as reference");
+assert.match(decisionArea, /非付款验证/, "declared-fee caveat present");
+// 剥注释（块+行）：红线针对代码与文案本身，不针对讨论红线的注释。
+const decisionAreaCode = decisionArea.replace(/\/\*[\s\S]*?\*\//g, "").split("\n").map((line) => line.split("//")[0]).join("\n");
+assert.doesNotMatch(decisionAreaCode, /可节省|省下|亏了/, "no savings/loss claims in decision area");
+assert.doesNotMatch(decisionAreaCode, /(claude|Claude)[\s\S]{0,120}used_percent/, "claude branch must never touch used_percent (§8.3.2 never-a-percentage)");
+assert.match(decisionArea, /永无「剩余 N%」|永无百分比|永不显示百分比/, "never-a-percentage red line documented in source");
+assert.match(decisionArea, /Date\.now\(\) - observed <= 24 \* 60 \* 60 \* 1000/, "codex 24h staleness guard ported");
+assert.match(overviewPage, /<DecisionArea monthly=/, "overview mounts the decision area");
+assert.match(decisionArea, /窗口状态未知（近期无撞窗记录）/, "claude no-snapshot state shown honestly, not as unreadable");
+assert.match(decisionArea, /claudeNoSnapshot/, "no-snapshot wording key present");
+assert.match(decisionArea, /snapshotAt/, "snapshot timestamp surfaced");
+assert.match(decisionArea, /href="#settings-billing"/, "unset-fee guidance targets the billing anchor");
+assert.match(decisionArea, /paybackRows/, "provider+currency merge implemented (groupByProvider semantics)");
+assert.match(decisionArea, /groupByProvider 语义|provider\+currency 合并/, "merge semantics documented");
+
+// 负向自测（spec §7.3）：--self-test 时对内存副本注入两类违规，断言必须各自变红。
+if (process.argv.includes("--self-test")) {
+  const stripComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, "");
+  const mutations = [
+    ["banned savings wording", (src) => src.replace('<b className="danger">', '<b data-x="可节省" className="danger">', 1), /可节省|省下|亏了/],
+    ["claude branch touches used_percent", (src) => src.replace("function QuotaWindowCard() {", "const claudeBadUsedPercent = codex ? codex.used_percent : null;\nfunction QuotaWindowCard() {", 1), /(claude|Claude)[\s\S]{0,120}used_percent/],
+  ];
+  for (const [name, mutate, probe] of mutations) {
+    const mutated = stripComments(mutate(decisionArea));
+    if (!probe.test(mutated)) { console.error(`self-test FAILED: injection '${name}' did not trip the tripwire`); process.exit(1); }
+  }
+  console.log("decision-area negative self-tests: OK (both injections trip)");
+}

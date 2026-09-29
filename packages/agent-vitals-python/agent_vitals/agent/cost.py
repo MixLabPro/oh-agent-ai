@@ -65,10 +65,43 @@ def _norm_model_in(model, cards):
     """`deepseek/deepseek-v4-pro-0813` → 价格卡键 `deepseek-v4-pro`，在**指定
     供应商的表里**匹配；匹配不上返回 None（不臆造）。"""
     seg = str(model).split("/")[-1]
-    for key in cards:
-        if seg == key or seg.startswith(key):
-            return key
-    return None
+    if seg in cards:
+        return seg
+    # 最长前缀而非「第一个命中」：旧写法让 claude-opus-5-5 吃到 claude-opus-5 的卡，
+    # 且因「有卡」永远不报缺价（2026-09-29 真机）。与 Rust `cost/mod.rs::norm_model_in` 对等。
+    hits = [key for key in cards if seg.startswith(key) and _suffix_is_same_model(seg[len(key):])]
+    if not hits:
+        return None
+    return max(hits, key=len)
+
+
+_TIERS = frozenset({"pro", "mini", "nano", "max", "lite", "flash", "flashx", "air", "turbo",
+                    "plus", "ultra", "prime", "fast", "code", "codex"})
+
+
+def _suffix_is_same_model(rest):
+    """前缀之后剩下的部分是否仍指同一模型：日期快照、发布标记、模式标注是；新的
+    版本号（-5、.1）、档位（-pro、-flash…）、紧贴的字母数字（glm-5 → glm-5v）不是。
+    与 Rust `suffix_is_same_model` 逐条对应。"""
+    if not rest:
+        return True
+    first = rest[0]
+    if first.isascii() and first.isalnum():
+        return False
+    if first == ".":
+        return not (len(rest) > 1 and rest[1].isascii() and rest[1].isdigit())
+    if first in "-_":
+        token = ""
+        for c in rest[1:]:
+            if c in "-_.":
+                break
+            token += c
+        token = token.lower()
+        if token and len(token) <= 2 and all(c.isascii() and c.isdigit() for c in token):
+            return False
+        if token in _TIERS:
+            return False
+    return True
 
 
 def _resolve_card(model, provider, pricing):

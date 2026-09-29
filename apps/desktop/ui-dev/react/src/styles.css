@@ -269,7 +269,9 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
    让用户看不出点一行之后发生了什么（2026-09-29 真机反馈）。右侧抽屉给图表类
    密集内容比居中对话框更多可用宽高；backdrop 点击/Esc 关闭见 SessionsPage.tsx。 */
 .sessions-overlay-backdrop { position: fixed; inset: 0; z-index: 40; background: rgb(20 32 46 / 42%); animation: sessions-overlay-fade .16s ease-out; }
-.sessions-overlay-panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 41; display: flex; flex-direction: column; width: min(1200px, 94vw); border-left: 1px solid #dbe4ee; background: #fff; box-shadow: -12px 0 32px rgb(31 55 80 / 14%); animation: sessions-overlay-slide-in .18s ease-out; }
+/* 左缘贴住侧栏右缘（窄窗口）或留出宽屏余量：之前 width: 94vw 在窄窗口下留一条 6vw 的缝，
+   侧栏被切成「ag」「所有数据…」这样的半截字。 */
+.sessions-overlay-panel { position: fixed; top: 0; right: 0; bottom: 0; left: max(var(--shell-sidebar-w, 0px), calc(100vw - 1200px)); z-index: 41; display: flex; flex-direction: column; border-left: 1px solid #dbe4ee; background: #fff; box-shadow: -12px 0 32px rgb(31 55 80 / 14%); animation: sessions-overlay-slide-in .18s ease-out; }
 .sessions-overlay-bar { display: flex; justify-content: flex-end; padding: 8px 10px; border-bottom: 1px solid #edf1f5; }
 .sessions-overlay-close { width: 30px; height: 30px; border: 1px solid #dbe4ee; border-radius: 8px; background: #fff; color: #40536a; font-size: 17px; line-height: 1; cursor: pointer; }
 .sessions-overlay-close:hover { background: #f8fbfd; }
@@ -591,7 +593,7 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
   .page-header-overview { flex-direction: row; }
   .trust-page-header { flex-direction: column; }
   .trust-layout { grid-template-columns: 1fr; }
-  .sessions-overlay-panel { width: 100vw; }
+  .sessions-overlay-panel { left: var(--shell-sidebar-w, 0px); }
   .trust-control-columns { grid-template-columns: 1fr; }
   .trust-profile-heading { flex-direction: column; }
   .trust-suppression-list li { align-items: flex-start; flex-direction: column; }
@@ -717,3 +719,27 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .overview-finding.severity-info .finding-rule::before { content: "●"; color: #7ab98a; margin-right: 6px; }
 .overview-finding.severity-unknown .finding-rule::before { content: "●"; color: var(--text-secondary, #b8b8b8); margin-right: 6px; }
 .overview-finding small { color: var(--text-secondary, #b8b8b8); }
+
+.session-detail-refresh-note { margin: 0 0 12px; padding: 8px 12px; border: 1px solid #f0dcb4; border-radius: 8px; background: #fdf7ea; color: #7a5a1c; font-size: 12px; }
+.session-detail-stats small.session-cost-note { white-space: normal; line-height: 1.45; }
+.session-detail-stats small.session-cost-note-warn { color: #9a6412; }
+
+/* 决策区（DECISION_AREA_REACT_PORT）：套餐窗口卡 + 值回双轨。 */
+.decision-area { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin-top: 14px; }
+.decision-note { color: var(--text-secondary, #b8b8b8); font-size: 12px; }
+.decision-quota-list, .decision-payback-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.decision-quota-list li, .decision-payback-list li { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.decision-src { font-weight: 600; min-width: 90px; }
+.decision-quota-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.decision-quota-line b.danger, .decision-quota-line b:has(+ .danger) { color: #e06c5e; }
+.meter { display: inline-block; width: 90px; height: 6px; border-radius: 3px; background: rgba(255,255,255,0.12); overflow: hidden; }
+.meter-fill { display: block; height: 100%; background: #7ab98a; }
+.meter-fill.danger { background: #e06c5e; }
+.danger { color: #e06c5e; }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid rgba(255,255,255,0.14); }
+.sub-chip { background: rgba(122,185,138,0.10); }
+.diag-chip { background: rgba(215,169,74,0.10); }
+.muted-chip { color: var(--text-secondary, #b8b8b8); }
+.warn-chip { color: #f4c95d; border-color: rgba(244,201,93,0.4); }
+.ok-chip { color: #7ab98a; border-color: rgba(122,185,138,0.4); }
+.decision-payback-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }

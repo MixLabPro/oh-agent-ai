@@ -796,6 +796,10 @@ function safeReference(value: unknown, label: string): string | null {
   return reference;
 }
 
+const SESSION_PRICING_BASES = ["metered_estimate", "metered_actual", "metered_declared", "fixed_subscription", "host_billed", "api_equivalent", "unavailable"] as const;
+/// `backfilled`：当时快照没有这个模型的卡，用事后每日同步到的价卡补算（只补缺卡）。
+const SESSION_PRICING_SOURCES = ["official", "fallback_official", "backfilled"] as const;
+
 function boundedEnum(value: unknown, label: string, allowed: readonly string[], fallback: string): string {
   const candidate = stringField(value, label);
   return allowed.includes(candidate) ? candidate : fallback;
@@ -1603,10 +1607,15 @@ function parseSessionBillingBucket(value: unknown): SessionBillingBucket {
     model_id: decisionLabel(row.model_id, "session billing model"),
     billing_template_id: safeWorkflowLabel(row.billing_template_id, "session billing template"),
     billing_mode: safeWorkflowLabel(row.billing_mode, "session billing mode") ?? "unknown",
-    pricing_basis: safeWorkflowLabel(row.pricing_basis, "session pricing basis") ?? "unavailable",
+    // 这两个字段是后端的封闭枚举，而且值里有下划线：之前走 safeWorkflowLabel（不允许
+    // 下划线），`metered_estimate` / `fallback_official` 被静默丢成 unavailable / null，
+    // 计费归因表里有金额的桶也显示「无可用价格」。
+    pricing_basis: boundedEnum(row.pricing_basis ?? "unavailable", "session pricing basis", SESSION_PRICING_BASES, "unavailable"),
     evidence_basis: safeWorkflowLabel(row.evidence_basis, "session evidence basis") ?? "unknown",
     pricing_version: safeWorkflowLabel(row.pricing_version, "session pricing version"),
-    pricing_source: safeWorkflowLabel(row.pricing_source, "session pricing source"),
+    pricing_source: row.pricing_source === null || row.pricing_source === undefined
+      ? null
+      : boundedEnum(row.pricing_source, "session pricing source", SESSION_PRICING_SOURCES, "unknown"),
     cost_minor: parseSessionCost(row.cost_minor, "session bucket cost"),
     peak: requiredBoolean(row.peak, "session billing peak"),
     tokens: parseSessionTokens(row.tokens, "session billing tokens"),
@@ -2772,6 +2781,66 @@ export async function openTrustedReleasesPage(): Promise<{ status: "opened" }> {
   const root = record(await handler("open_trusted_releases_page"), "open releases page");
   if (root.status !== "opened") throw new Error("发布页打开未确认");
   return { status: "opened" };
+}
+
+// ── 决策区桥接（DECISION_AREA_REACT_PORT spec R1）：两个既有 quota IPC 的
+// 严格解析包装。畸形 DTO 抛错（进组件错误态），无 Tauri 桥（浏览器预览）
+// 返回 null = 不可用——与既有桥降级同纪律，不静默编数。
+
+export type CodexQuotaWindow = {
+  plan_type: string | null;
+  used_percent: number;
+  resets_at: number;
+  observed_at: string;
+};
+
+export type ClaudeQuotaState =
+  | { state: "unknown"; observed_at: string | null; windows_recent: number; last_resets_at: number | null; last_window: string | null }
+  | { state: "exhausted"; window: string; window_label: string | null; resets_at: number; observed_at: string | null; windows_recent: number };
+
+function parseCodexQuota(value: unknown): CodexQuotaWindow {
+  const root = record(value, "codex quota snapshot");
+  const limits = record(root.limits ?? null, "codex quota limits");
+  const primary = record(limits.primary ?? null, "codex quota primary window");
+  // used_percent 是 float 契约（adapter 保留小数，usage.rs:207-215）——
+  // 必须用有限数校验 + 显式上界，不得走整数门（评审 P1-1）。
+  const used = requiredFiniteNumber(primary.used_percent, "codex used_percent");
+  if (used > 100) throw new Error("codex used_percent 越界");
+  const resets = boundedCount(primary.resets_at, "codex resets_at", 4_102_444_800);
+  if (!Number.isSafeInteger(resets) || resets <= 0) throw new Error("codex resets_at 不安全");
+  const observed = nullableString(root.observed_at, "codex quota observed_at");
+  if (observed === null || !Number.isFinite(Date.parse(observed))) throw new Error("codex quota observed_at 不可解析");
+  const planType = nullableString(root.plan_type, "codex plan_type");
+  return { plan_type: planType === null ? null : planType.slice(0, 64), used_percent: used, resets_at: resets, observed_at: observed };
+}
+
+function parseClaudeQuota(value: unknown): ClaudeQuotaState {
+  const root = record(value, "claude quota state");
+  const observed = nullableString(root.observed_at, "claude quota observed_at");
+  const windowsRecent = boundedCount(root.windows_recent, "claude windows_recent", 100_000);
+  if (root.state === "exhausted") {
+    const resets = boundedCount(root.resets_at, "claude resets_at", 4_102_444_800);
+    if (!Number.isSafeInteger(resets) || resets <= 0) throw new Error("claude resets_at 不安全");
+    const window = nullableString(root.window, "claude window") ?? "five_hour";
+    const label = nullableString(root.window_label, "claude window_label");
+    return { state: "exhausted", window: window.slice(0, 32), window_label: label === null ? null : label.slice(0, 32), resets_at: resets, observed_at: observed, windows_recent: windowsRecent };
+  }
+  if (root.state !== "unknown") throw new Error("claude quota state 越界");
+  const lastResets = root.last_resets_at === null || root.last_resets_at === undefined ? null : boundedCount(root.last_resets_at, "claude last_resets_at", 4_102_444_800);
+  const lastWindow = nullableString(root.last_window, "claude last_window");
+  return { state: "unknown", observed_at: observed, windows_recent: windowsRecent, last_resets_at: lastResets, last_window: lastWindow === null ? null : lastWindow.slice(0, 32) };
+}
+
+export async function readCodexQuota(): Promise<CodexQuotaWindow | null> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return null;
+  return parseCodexQuota(await handler("data_codex_quota"));
+}
+
+export async function readClaudeQuota(): Promise<ClaudeQuotaState | null> {
+  const handler = globalTauri()?.core?.invoke;
+  if (!handler) return null;
+  return parseClaudeQuota(await handler("data_claude_quota"));
 }
 
 export async function readSourceHealth(): Promise<SourceHealthReport> {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "../../../../../src-tauri/ui/timeline.js";
 import { invoke, safeUiError } from "../../lib/tauri";
 import "./session-trace.css";
@@ -38,10 +38,14 @@ export function SessionTrace({ sessionRef, refreshKey }: { sessionRef: string; r
   const [metric, setMetric] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  // 后台同步每轮都会 bump refreshKey：同一会话刷新时保留旧图（result 按 ref 校验，
+  // 换会话时旧值自然不显示），不先清空——否则详情浮层每轮同步都闪一次空白。
+  const hasResultRef = useRef<string | null>(null);
+  hasResultRef.current = result?.ref ?? null;
   useEffect(() => {
     let active = true;
-    setResult(null);
-    setError(null);
+    const sameSession = hasResultRef.current === sessionRef;
+    if (!sameSession) setError(null);
     const graph = invoke<Envelope<{ coverage?: Record<string, number> }>>("session_trace", { sessionRef, output: "graph" }).catch(() => null);
     void invoke<Envelope<Series>>("session_trace", { sessionRef, output: "timeline_series" }).then(async envelope => {
       if (envelope.error || !envelope.data) throw new Error("Trace unavailable");
@@ -49,9 +53,9 @@ export function SessionTrace({ sessionRef, refreshKey }: { sessionRef: string; r
       traceMarkup(data);
       const graphResult = await graph;
       const coverage = graphResult?.error ? undefined : graphResult?.data?.coverage;
-      if (active) setResult({ ref: sessionRef, data, count: data.points.length, unplaced: data.unplaced_events ?? 0,
-        coverage: coverage ? `节点 ${coverage.total_nodes ?? "—"} · 缺父 ${coverage.missing_parent ?? "—"} · 缺时 ${coverage.missing_time ?? "—"} · 缺状态 ${coverage.missing_status ?? "—"}` : "轨迹覆盖率不可用" });
-    }).catch((reason: unknown) => { if (active) setError(safeUiError(reason, "轨迹暂不可用")); });
+      if (active) { setError(null); setResult({ ref: sessionRef, data, count: data.points.length, unplaced: data.unplaced_events ?? 0,
+        coverage: coverage ? `节点 ${coverage.total_nodes ?? "—"} · 缺父 ${coverage.missing_parent ?? "—"} · 缺时 ${coverage.missing_time ?? "—"} · 缺状态 ${coverage.missing_status ?? "—"}` : "轨迹覆盖率不可用" }); }
+    }).catch((reason: unknown) => { if (active && !sameSession) setError(safeUiError(reason, "轨迹暂不可用")); });
     return () => { active = false; };
   }, [sessionRef, refreshKey, retry]);
   const current = result?.ref === sessionRef ? result : null;

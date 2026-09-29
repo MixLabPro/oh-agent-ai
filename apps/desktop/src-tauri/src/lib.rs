@@ -2709,8 +2709,15 @@ fn save_statistics_timezone_config(app: AppHandle, timezone: String) -> Result<V
     Ok(serde_json::json!({ "status": "saved", "timezone": saved }))
 }
 
+/// 每日同步叠加层（`.github/workflows/pricing-sync.yml` 每天生成）。app 拉到后与
+/// 内置底表合并成完整快照入库；旧链路拉的是完整 `pricing.json` 且只存它一份，
+/// 快照里没有 `codex_pricing`，开启更新后 codex 用量会全部算不出金额。
 const PUBLIC_PRICING_CATALOG_URL: &str =
-    "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/assets/pricing.json";
+    "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/assets/pricing-sync.json";
+/// 6 小时而非 24 小时：CI 每天发布一次叠加层，24 小时的检查间隔叠上发布时间
+/// 会让新模型的价卡最晚拖近两天才到。拉的是本仓库十几 KB 的静态文件、不带任何
+/// 用户数据，多检查几次没有隐私代价。
+const PRICING_CHECK_INTERVAL_MS: i64 = 6 * 60 * 60 * 1000;
 const PRICING_UPDATE_STATUS_FILE: &str = "pricing-catalog-update.json";
 const PRICING_UPDATE_POLICY_FILE: &str = "pricing-catalog-policy.json";
 
@@ -2840,7 +2847,7 @@ async fn update_public_pricing_catalog_internal(enforce_schedule: bool) -> Resul
         && (status.next_check_at_ms.is_some_and(|next| now < next)
             || status
                 .last_checked_at_ms
-                .is_some_and(|last| now.saturating_sub(last) < 24 * 60 * 60 * 1000))
+                .is_some_and(|last| now.saturating_sub(last) < PRICING_CHECK_INTERVAL_MS))
     {
         return Ok(serde_json::json!({ "status": "skipped", "reason": "daily_check_window" }));
     }
@@ -2907,34 +2914,27 @@ async fn update_public_pricing_catalog_internal(enforce_schedule: bool) -> Resul
             "public pricing response exceeds 2 MiB limit".into(),
         );
     }
-    let validated = match agent_vitals_runtime::pricing_catalog::validate(&bytes) {
+    let validated = match agent_vitals_runtime::pricing_catalog::validate_sync_overlay(&bytes) {
         Ok(validated) => validated,
         Err(reason) => return fail_pricing_catalog_update(&data_home, &mut status, "rejected", reason),
     };
     let authority_path = agent_vitals_data::authority::default_authority_path(&data_home);
     let db = agent_vitals_data::authority::AuthorityDb::open(&authority_path, now)
         .map_err(|e| format!("open authority database failed: {e}"))?;
-    db.pricing_catalog_snapshot_put(
-        &validated.version,
-        &validated.version,
-        "public-maintainer-https",
-        &validated.canonical_json,
-        now,
-        None,
-    )
-    .map_err(|e| format!("save public catalog and pricing atomically failed: {e}"))?;
+    agent_vitals_runtime::sql_sync::snapshot_with_sync_overlay(&db, &validated)
+        .map_err(|e| format!("save sync overlay and pricing snapshot atomically failed: {e}"))?;
     status.state = "ok".into();
     status.last_success_at_ms = Some(now);
     status.source_version = Some(validated.version.clone());
-    status.model_count = Some(validated.model_count);
+    status.model_count = Some(validated.card_count);
     status.failure_count = 0;
-    status.next_check_at_ms = Some(now.saturating_add(24 * 60 * 60 * 1000));
+    status.next_check_at_ms = Some(now.saturating_add(PRICING_CHECK_INTERVAL_MS));
     write_pricing_catalog_status(&data_home, &status)?;
     Ok(serde_json::json!({
         "status": "updated",
         "source_url": PUBLIC_PRICING_CATALOG_URL,
         "source_version": validated.version,
-        "model_count": validated.model_count,
+        "model_count": validated.card_count,
         "last_success_at_ms": now,
     }))
 }

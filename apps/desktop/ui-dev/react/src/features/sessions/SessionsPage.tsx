@@ -14,6 +14,7 @@ import {
 } from "../../lib/tauri";
 import { readSessionsDeepLinkFromHash } from "../../lib/nav";
 import { SessionDetail } from "./SessionDetail";
+import { costReasonText, formatCost } from "./costSummary";
 import { Button, DateInput, Field, FilterBar, SelectInput, TextInput } from "../../components/ui/FormControls";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
 
@@ -94,7 +95,7 @@ function sessionTitle(row: SessionRow): string {
 
 function costStateLabel(status: SessionCostStatus): string {
   const labels: Record<SessionCostStatus["state"], string> = { estimated: "估算", subscription: "订阅", unpriced: "缺价", unavailable: "不可用" };
-  return `${labels[status.state]} · ${status.reason}`;
+  return `${labels[status.state]} · ${costReasonText(status)}`;
 }
 
 function costStateShort(state: SessionCostStatus["state"]): string {
@@ -102,9 +103,7 @@ function costStateShort(state: SessionCostStatus["state"]): string {
 }
 
 function costLabel(row: SessionRow): string {
-  if (!row.cost_minor) return "—";
-  const amount = row.cost_minor.amount_minor / 100;
-  return `${row.cost_minor.currency === "CNY" ? "¥" : `${row.cost_minor.currency} `}${amount.toFixed(2)}`;
+  return formatCost(row.cost_minor) ?? "—";
 }
 
 function serverArgs(filters: SessionsFilters, cursor: string | null, timezone: string): Parameters<typeof readSessions>[0] {

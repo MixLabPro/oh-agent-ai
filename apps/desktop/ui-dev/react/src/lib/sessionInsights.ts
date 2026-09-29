@@ -43,6 +43,15 @@ export type InsightDiagnostic = {
   evidence: string[];
   context_notes: { explanation: string; calls: number }[];
   remedy_id: string;
+  failure_exposure?: {
+    affected_input_tokens: number;
+    nominal_amounts: Array<{ amount_minor: number; currency: string; billing_basis: "nominal" }>;
+    coverage: "full" | "partial" | "unavailable";
+    unpriced_tokens: number;
+    granularity: "affected-turns";
+    reason: null | "no_pricing_snapshot" | "no_price_card";
+    disclaimer: string;
+  };
 };
 export type LaneReason = "not_recorded_by_host" | "not_ingested" | "no_data_in_session";
 export type Lane = { state: "available" | "partial" | "unavailable"; coverage: number | null; reason: LaneReason | null };
@@ -196,6 +205,33 @@ function parseDiagnostic(value: unknown, steps: number): InsightDiagnostic {
       return { explanation: label(o.explanation, "context_note"), calls: count(o.calls, "context_note.calls") };
     }),
     remedy_id: oneOf(d.remedy_id, "diagnostic.remedy_id", ["inspect-uncached-input", "review-context-growth", "inspect-repeated-failure"] as const),
+    failure_exposure: parseFailureExposure(d.failure_exposure),
+  };
+}
+
+/// WASTE S1：失败区间成本暴露（仅 repeated_failure）。闭集校验同严格纪律；
+/// 免责声明必须与服务端常量逐字一致（契约钉住的口径红线）。
+function parseFailureExposure(value: unknown): InsightDiagnostic["failure_exposure"] {
+  if (value === undefined || value === null) return undefined;
+  const e = obj(value, "failure_exposure");
+  const amounts = arr(e.nominal_amounts, "failure_exposure.nominal_amounts", 8).map((a) => {
+    const o = obj(a, "failure_exposure amount");
+    return {
+      amount_minor: count(o.amount_minor, "failure_exposure.amount_minor"),
+      currency: label(o.currency, "failure_exposure.currency"),
+      billing_basis: oneOf(o.billing_basis, "failure_exposure.billing_basis", ["nominal"] as const),
+    };
+  });
+  const disclaimer = label(e.disclaimer, "failure_exposure.disclaimer");
+  if (disclaimer !== "相关回合含正常工作；不是浪费、可节省额或实付账单") throw new Error("failure_exposure 免责声明与契约不一致");
+  return {
+    affected_input_tokens: count(e.affected_input_tokens, "failure_exposure.tokens"),
+    nominal_amounts: amounts,
+    coverage: oneOf(e.coverage, "failure_exposure.coverage", ["full", "partial", "unavailable"] as const),
+    unpriced_tokens: count(e.unpriced_tokens, "failure_exposure.unpriced_tokens"),
+    granularity: oneOf(e.granularity, "failure_exposure.granularity", ["affected-turns"] as const),
+    reason: e.reason === null || e.reason === undefined ? null : oneOf(e.reason, "failure_exposure.reason", ["no_pricing_snapshot", "no_price_card"] as const),
+    disclaimer,
   };
 }
 

@@ -61,6 +61,92 @@ pub fn validate(raw: &[u8]) -> Result<ValidatedCatalog, String> {
     })
 }
 
+/// 每日同步叠加层的 schema 标识（`scripts/pricing_sync.py` 的 `SCHEMA`）。
+pub const SYNC_OVERLAY_SCHEMA: &str = "agent-vitals-pricing-sync/v1";
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidatedSyncOverlay {
+    pub overlay: Value,
+    pub canonical_json: String,
+    /// `sync-<fnv>`：内容指纹，同一份叠加层重复拉取得到同一个版本（幂等）。
+    pub version: String,
+    pub card_count: usize,
+}
+
+/// 校验每日同步叠加层（`assets/pricing-sync.json`）。与 [`validate`] 同样把公共
+/// 输入当不可信数据：大小、重复键、非负价格都查。叠加层可以一张卡都没有
+/// （三源与底表完全一致的那天），这不是错误——但 schema 标识必须对得上，
+/// 防止把完整目录或别的 JSON 误当叠加层合并进去。
+pub fn validate_sync_overlay(raw: &[u8]) -> Result<ValidatedSyncOverlay, String> {
+    if raw.len() > MAX_CATALOG_BYTES {
+        return Err(format!("sync overlay exceeds {} byte limit", MAX_CATALOG_BYTES));
+    }
+    let value: Value = serde_json::from_slice(raw).map_err(|e| format!("invalid JSON: {e}"))?;
+    reject_duplicate_keys(raw)?;
+    let root = value
+        .as_object()
+        .ok_or_else(|| "sync overlay root must be an object".to_string())?;
+    if root.get("schema").and_then(Value::as_str) != Some(SYNC_OVERLAY_SCHEMA) {
+        return Err(format!("sync overlay schema must be {SYNC_OVERLAY_SCHEMA}"));
+    }
+    validate_non_negative(&value, "root")?;
+    if let Some(sources) = root.get("sources") {
+        let sources = sources.as_object().ok_or_else(|| "sources must be an object".to_string())?;
+        for (name, url) in sources {
+            if !url.as_str().is_some_and(|u| u.starts_with("https://")) {
+                return Err(format!("source {name} is not HTTPS"));
+            }
+        }
+    }
+    let mut card_count = 0;
+    if let Some(catalog) = root.get("catalog") {
+        card_count += validate_providers(catalog, "catalog")?;
+    }
+    if let Some(entries) = root.get("codex_entries") {
+        let entries = entries
+            .as_array()
+            .ok_or_else(|| "codex_entries must be an array".to_string())?;
+        for (index, entry) in entries.iter().enumerate() {
+            validate_codex_entry(entry, &format!("codex_entries[{index}]"))?;
+            card_count += 1;
+        }
+    }
+    let mut canonical = String::new();
+    canonical_json(&value, &mut canonical);
+    let version = format!("sync-{}", fnv1a64_hex(canonical.as_bytes()));
+    Ok(ValidatedSyncOverlay { overlay: value, canonical_json: canonical, version, card_count })
+}
+
+/// codex 价表条目：价格是字符串形式的非负小数（与 `assets/codex_pricing.json` 同形）。
+fn validate_codex_entry(entry: &Value, path: &str) -> Result<(), String> {
+    let entry = entry.as_object().ok_or_else(|| format!("{path} must be an object"))?;
+    let prefix = entry.get("modelPrefix").and_then(Value::as_str).unwrap_or("");
+    if prefix.trim().is_empty() {
+        return Err(format!("{path}.modelPrefix is required"));
+    }
+    if entry.get("speed").and_then(Value::as_str).map_or(true, str::is_empty) {
+        return Err(format!("{path}.speed is required"));
+    }
+    for required in ["uncachedInputUsdPerMTok", "outputUsdPerMTok"] {
+        if !entry.contains_key(required) {
+            return Err(format!("{path}.{required} is required"));
+        }
+    }
+    for (key, value) in entry {
+        if !key.ends_with("UsdPerMTok") {
+            continue;
+        }
+        let ok = value
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .is_some_and(|v| v.is_finite() && v >= 0.0);
+        if !ok {
+            return Err(format!("{path}.{key} must be a non-negative decimal string"));
+        }
+    }
+    Ok(())
+}
+
 fn reject_duplicate_keys(raw: &[u8]) -> Result<(), String> {
     let mut scanner = JsonKeyScanner { raw, pos: 0 };
     scanner.parse_value("root")?;
@@ -375,5 +461,37 @@ mod tests {
         let result = validate(include_bytes!("../../../../assets/pricing.json")).unwrap();
         assert!(result.model_count >= 5);
         assert!(result.version.starts_with("public-"));
+    }
+
+    /// CI（.github/workflows/pricing-sync.yml）提交前跑这条：每日同步能发布的
+    /// 文件，app 一定收得下。否则用户每天拉到的都是被拒收的叠加层，等于没同步。
+    #[test]
+    fn committed_sync_overlay_is_accepted_by_the_app() {
+        let result = validate_sync_overlay(include_bytes!("../../../../assets/pricing-sync.json")).unwrap();
+        assert!(result.version.starts_with("sync-"));
+        let again = validate_sync_overlay(include_bytes!("../../../../assets/pricing-sync.json")).unwrap();
+        assert_eq!(result.version, again.version, "同一份叠加层版本必须稳定（幂等写入依赖它）");
+    }
+
+    #[test]
+    fn sync_overlay_requires_its_schema_marker() {
+        // 完整目录不能被当成叠加层合并进来
+        assert!(validate_sync_overlay(include_bytes!("../../../../assets/pricing.json")).is_err());
+        assert!(validate_sync_overlay(br#"{"schema":"agent-vitals-pricing-sync/v1"}"#).is_ok());
+    }
+
+    #[test]
+    fn sync_overlay_rejects_bad_codex_entries() {
+        let ok = br#"{"schema":"agent-vitals-pricing-sync/v1","codex_entries":[{"modelPrefix":"gpt-6-luna","speed":"standard","uncachedInputUsdPerMTok":"0.1","outputUsdPerMTok":"0.5"}]}"#;
+        assert_eq!(validate_sync_overlay(ok).unwrap().card_count, 1);
+        for bad in [
+            br#"{"schema":"agent-vitals-pricing-sync/v1","codex_entries":[{"modelPrefix":"","speed":"standard","uncachedInputUsdPerMTok":"1","outputUsdPerMTok":"1"}]}"#.as_slice(),
+            br#"{"schema":"agent-vitals-pricing-sync/v1","codex_entries":[{"modelPrefix":"m","speed":"standard","uncachedInputUsdPerMTok":"-1","outputUsdPerMTok":"1"}]}"#.as_slice(),
+            br#"{"schema":"agent-vitals-pricing-sync/v1","codex_entries":[{"modelPrefix":"m","speed":"standard","uncachedInputUsdPerMTok":"abc","outputUsdPerMTok":"1"}]}"#.as_slice(),
+            br#"{"schema":"agent-vitals-pricing-sync/v1","codex_entries":[{"modelPrefix":"m","speed":"standard","uncachedInputUsdPerMTok":"1"}]}"#.as_slice(),
+            br#"{"schema":"agent-vitals-pricing-sync/v1","sources":{"x":"http://insecure"}}"#.as_slice(),
+        ] {
+            assert!(validate_sync_overlay(bad).is_err(), "{}", String::from_utf8_lossy(bad));
+        }
     }
 }

@@ -201,4 +201,20 @@ assert.ok(source.includes("仅在本机显示，不进入导出和 MCP"), "摘�
 assert.ok(source.includes("f.invocation_key ?? `ts:"), "没有分组键的失败不得按工具名并成「相同调用」");
 assert.equal(view.fmtTokens(1_832_000), "183 万");
 assert.equal(view.fmtMoney({ amounts: [{ amount_minor: 612, currency: "USD" }, { amount_minor: 900, currency: "CNY" }], coverage: "partial" }), "$6.12 + ¥9.00（部分调用无价卡）");
+// WASTE S1（修订 spec §4.1）：失败区间成本暴露——只对这个明确标注的字段放开金额，
+// 断言口径标签、降级与免责声明同屏可见；diagText 的金额禁令（上方 186/192）不变。
+assert.ok(source.includes("涉及回合输入"), "exposure block labels affected-turn input");
+assert.ok(source.includes("相关回合名义成本估算"), "exposure amount carries the nominal-estimate label");
+assert.ok(source.includes("insights-disclaimer"), "exposure disclaimer rendered in-place");
+assert.ok(source.includes("这段时间还没有价目快照") && source.includes("这些模型没有价卡"), "no-amount degradation reasons rendered");
+assert.ok(source.includes("unpriced_tokens"), "unpriced tokens surfaced on partial coverage");
+const bridgeSource = readFileSync(path.join(ui, "react/src/lib/sessionInsights.ts"), "utf8");
+assert.ok(bridgeSource.includes("failure_exposure"), "bridge parses failure_exposure");
+assert.ok(bridgeSource.includes("相关回合含正常工作；不是浪费、可节省额或实付账单"), "bridge pins the disclaimer constant");
+const exposureDiag = real.diagnostics.find(d => d.kind === "repeated_failure"); // golden 路径（mock 不含 exposure）
+assert.ok(exposureDiag && exposureDiag.failure_exposure, "golden repeated_failure carries failure_exposure through the bridge");
+assert.ok(exposureDiag.failure_exposure.coverage === "full" && exposureDiag.failure_exposure.nominal_amounts.length > 0, "golden exercises the fully-priced path (Rust-computed values)");
+const mockExposure = insights.diagnostics.find(d => d.kind === "repeated_failure");
+assert.ok(mockExposure?.failure_exposure?.coverage === "partial" && mockExposure.failure_exposure.unpriced_tokens > 0, "mock exercises the partial+unpriced path");
+assert.ok(!source.includes("estimated_amount"), "诊断不读金额（r6 移除 estimated_amount）——保持");
 console.log("Session insights copy: OK (fact/cause split, no waste or money wording in diagnostics)");

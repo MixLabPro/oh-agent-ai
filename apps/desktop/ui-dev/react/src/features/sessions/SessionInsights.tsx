@@ -57,6 +57,11 @@ const LANE_REASON: Record<string, string> = {
   no_data_in_session: "这个会话没有",
 };
 
+/// 回合区间文案：起止相同时只写一个数（真机截图里「回合 17–17」读起来像笔误）。
+export function stepRange(unit: string, from: number, to: number): string {
+  return from === to ? `${unit} ${from}` : `${unit} ${from}–${to}`;
+}
+
 export type DiagText = { title: string; chip: [string, string]; fact: string; why: string };
 
 export function diagText(d: InsightDiagnostic, unit: string): DiagText {
@@ -70,7 +75,7 @@ export function diagText(d: InsightDiagnostic, unit: string): DiagText {
     const fact = f.same_invocation
       ? `${tool} 调用（参数相同）在 ${num("steps_hit")} 个${unit}里失败 ${num("failures")} 次。`
       : `${tool} 等调用在 ${num("steps_hit")} 个${unit}里共失败 ${num("failures")} 次。`;
-    const why = d.cause === "evidence" ? "错误摘要见证据。失败原因分类尚未接入。" : "没有可查看的错误摘录，失败原因未明。";
+    const why = d.cause === "evidence" ? "失败时留下了错误摘要，选中这条后，检查面板里可以读到原文。" : "没有可查看的错误摘录，失败原因未明。";
     return { title, chip, fact, why };
   }
   if (d.kind === "input_growth") {
@@ -331,7 +336,7 @@ function emptyNotes(insights: SessionInsights, unit: string): string {
 function summaryLines(insights: SessionInsights, unit: string): string[] {
   const all = inputOf(insights.session);
   const lines = [`共 ${insights.axis.steps.length} 个${unit}，输入 ${fmtTokens(all)} tokens，缓存命中率 ${all ? fmtPct(insights.session.input.cache_read / all) : "—"}。`];
-  insights.diagnostics.forEach((d, i) => { const t = diagText(d, unit); lines.push(`诊断 ${i + 1}：${unit} ${d.steps.from}–${d.steps.to}，${t.title}。${t.fact}原因：${t.why}`); });
+  insights.diagnostics.forEach((d, i) => { const t = diagText(d, unit); lines.push(`诊断 ${i + 1}：${stepRange(unit, d.steps.from, d.steps.to)}，${t.title}。${t.fact}原因：${t.why}`); });
   for (const s of insights.axis.steps) for (const n of s.notes) lines.push(`${unit} ${s.index}：${n.calls} 次调用发生在${NOTE_TEXT[n.explanation]}。`);
   if (insights.lanes.tools.state === "unavailable") lines.push(`工具结果：未记录（${LANE_REASON[insights.lanes.tools.reason ?? ""] ?? "原因未知"}）。`);
   if (insights.quality.legacy_fingerprints) lines.push(`${insights.quality.legacy_fingerprints} 次失败来自已清理的旧日志，无法按参数区分是不是同一调用。`);
@@ -344,7 +349,7 @@ function DiagRow({ d, i, unit, open, onSelect }: { d: InsightDiagnostic; i: numb
   return <div className={`insights-diag${open ? " on" : ""}`} role="listitem">
     <button type="button" className="insights-diag-sum" aria-expanded={open} onClick={onSelect}>
       <span className="insights-num">{i + 1}</span>
-      <span className="insights-diag-title"><b>{t.title}</b><span className="num muted">{unit} {d.steps.from}–{d.steps.to}</span><span className={`insights-chip ${t.chip[0]}`}>{t.chip[1]}</span></span>
+      <span className="insights-diag-title"><b>{t.title}</b><span className="num muted">{stepRange(unit, d.steps.from, d.steps.to)}</span><span className={`insights-chip ${t.chip[0]}`}>{t.chip[1]}</span></span>
       <span className="insights-chev" aria-hidden="true">{open ? "▾" : "▸"}</span>
       <span className="insights-diag-fact">{t.fact}</span>
     </button>
@@ -376,8 +381,13 @@ type TipContent = { title?: string; rows?: [string, string][]; lines?: string[] 
 /// 悬浮提示定位用「图表自身坐标」（viewBox 单位）——SVG 是 1:1 铺满其容器宽度
 /// 渲染的（`width` prop 就是容器实测宽度），所以坐标可以直接当 CSS px 用，不用
 /// 另外换算；靠近右边界时翻到左侧，避免被容器裁掉。
+/// 提示框可能的最大外宽：session-insights.css `.insights-tip` 的 max-width 260
+/// + 左右内边距 20 + 边框 2。翻转判断要按它加上 12px 鼠标偏移算，否则宽内容
+/// 贴右边界时会被容器裁掉。改 CSS 的 max-width 时同步改这里。
+const TIP_MAX_WIDTH = 282;
+
 function TooltipBox({ x, y, chartWidth, content }: { x: number; y: number; chartWidth: number; content: TipContent }) {
-  const flip = x > chartWidth - 210;
+  const flip = x + 12 + TIP_MAX_WIDTH > chartWidth;
   const style: CSSProperties = { top: Math.max(0, y - 6), ...(flip ? { right: chartWidth - x + 12 } : { left: x + 12 }) };
   return <div className="insights-tip" style={style} role="tooltip">
     {content.title && <b>{content.title}</b>}
@@ -400,7 +410,9 @@ function stepTip(st: InsightStep, unit: string): TipContent {
     ["调用", String(st.calls)],
   ];
   if (st.tools.succeeded + st.tools.failed + st.tools.cancelled + st.tools.unknown > 0) {
-    rows.push(["工具", `成功 ${st.tools.succeeded} · 失败 ${st.tools.failed} · 取消 ${st.tools.cancelled}`]);
+    // 拆成三行短数值：合成一行「成功 31 · 失败 1 · 取消 0」在值列里 nowrap，
+    // 比提示框 max-width 还宽，真机上整列数字被撑出框外（与缓存三桶拆行同理）
+    rows.push(["工具成功", String(st.tools.succeeded)], ["工具失败", String(st.tools.failed)], ["工具取消", String(st.tools.cancelled)]);
   }
   const lines: string[] = [];
   if (st.outcome === "failed") lines.push("这个回合以失败结束。");
@@ -412,7 +424,7 @@ function stepTip(st: InsightStep, unit: string): TipContent {
 /// 一条诊断的悬浮内容（窗口内的带、窗口外的单条、折叠摘要里的一行都用它）。
 function bandTip(d: InsightDiagnostic, i: number, unit: string): TipContent {
   const t = diagText(d, unit);
-  return { title: `${i + 1}. ${t.title}`, lines: [`${unit} ${d.steps.from}–${d.steps.to}`, t.fact] };
+  return { title: `${i + 1}. ${t.title}`, lines: [stepRange(unit, d.steps.from, d.steps.to), t.fact] };
 }
 
 function MiniMap({ steps, diags, view, width, maxVisible, onWindow, onJump, unit }: { steps: InsightStep[]; diags: InsightDiagnostic[]; view: [number, number]; width: number; maxVisible: number; onWindow: (w: [number, number]) => void; onJump: (dir: number) => void; unit: string }) {
@@ -587,7 +599,7 @@ function Chart({ insights, view, width, cursor, mode, unit, onStep, onDiag, onKe
         const y = yBand + visibleRowCount * bandRow + 2;
         const content: TipContent = {
           title: `窗口外还有 ${idx.length} 条`,
-          lines: idx.slice(0, 12).map(i => { const t = diagText(diags[i], unit); return `${i + 1}. ${unit} ${diags[i].steps.from}–${diags[i].steps.to} · ${t.title}`; })
+          lines: idx.slice(0, 12).map(i => { const t = diagText(diags[i], unit); return `${i + 1}. ${stepRange(unit, diags[i].steps.from, diags[i].steps.to)} · ${t.title}`; })
             .concat(idx.length > 12 ? [`……还有 ${idx.length - 12} 条`] : []),
         };
         return <g key={side} className="band-summary" onClick={() => onDiag(nearest)} onMouseMove={e => hoverTip(e, content)} onMouseLeave={hideTip}>
@@ -684,7 +696,7 @@ function Inspector({ insights, mode, unit, ev, go, retry }: { insights: SessionI
     const t = diagText(d, unit);
     const rm = REMEDY[d.remedy_id];
     const L = steps.slice(d.steps.from - 1, d.steps.to);
-    const rangeLabel = `${unit} ${d.steps.from}–${d.steps.to}`;
+    const rangeLabel = stepRange(unit, d.steps.from, d.steps.to);
     if (d.kind === "repeated_failure") {
       const fails = evData?.failures ?? [];
       const byKey = new Map<string, typeof fails>();
@@ -702,6 +714,26 @@ function Inspector({ insights, mode, unit, ev, go, retry }: { insights: SessionI
           <div className="insights-acts"><button type="button" className="button button-primary" onClick={() => go({ kind: "failure", step: first.step ?? d.steps.from, ts: first.ts_ms })}>查看一次失败</button><button type="button" className="button button-secondary" onClick={() => go({ kind: "calls", from: d.steps.from, to: d.steps.to })}>查看相关调用</button></div>
           <ul className="insights-list">{fails.slice(0, 30).map((f, i) => <li key={i}><button type="button" className="row" onClick={() => go({ kind: "failure", step: f.step ?? d.steps.from, ts: f.ts_ms })}><span className="fail">✕</span><span>{unit} {f.step} · {f.capability_id ?? "工具"}</span><span className="num muted">{clock(f.ts_ms)}</span></button></li>)}</ul></>}
         {rm && <div className="insights-note"><b>建议</b> {rm[0]}<br /><span className="muted">这几个{unit}共输入 {fmtTokens(d.impact.tokens)} tokens，不代表都能省下来。</span></div>}
+        {d.failure_exposure && (
+          <dl className="kv insights-exposure">
+            <dt>涉及回合输入</dt><dd className="num">{fmtTokens(d.failure_exposure.affected_input_tokens)} tokens</dd>
+            {d.failure_exposure.nominal_amounts.length > 0 ? (
+              <>
+                <dt>相关回合名义成本估算</dt>
+                <dd className="num">
+                  {d.failure_exposure.nominal_amounts.map(a => `${a.currency === "USD" ? "$" : a.currency === "CNY" ? "¥" : `${a.currency} `}${(a.amount_minor / 100).toFixed(2)}`).join(" + ")}
+                  {d.failure_exposure.coverage === "partial" && `（部分调用无价卡；未计价 ${fmtTokens(d.failure_exposure.unpriced_tokens)} tokens）`}
+                </dd>
+              </>
+            ) : (
+              <>
+                <dt>相关回合名义成本</dt>
+                <dd className="num">{d.failure_exposure.reason === "no_pricing_snapshot" ? "这段时间还没有价目快照" : "这些模型没有价卡"}</dd>
+              </>
+            )}
+            <dd className="muted insights-disclaimer">{d.failure_exposure.disclaimer}。名义成本按官方标价、含输出、不扣订阅；不保证与会话名义成本可相加。</dd>
+          </dl>
+        )}
       </div>;
     }
     if (d.kind === "input_growth") {
