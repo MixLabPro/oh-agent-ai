@@ -1511,6 +1511,28 @@ pub fn billing_bucket_usage_json(
     }
 }
 
+/// 按历史快照计价；快照里当时没有这个模型的卡、而每日同步叠加层后来补上了
+/// 时，用补过缺卡的快照再算一次（`fill_missing_in_snapshot` 只补缺卡、不改已有
+/// 价，厂商调价不会改写历史）。返回 `(金额, 是否靠回补才算出来)`。
+pub fn price_with_sync_backfill(
+    host: &str,
+    usage: &Value,
+    snapshot_payload: Option<&str>,
+    sync_overlay: Option<&Value>,
+) -> (Option<agent_vitals_domain::data_contract::MoneyMinor>, bool) {
+    let Some(mut snapshot) = snapshot_payload.and_then(|p| serde_json::from_str::<Value>(p).ok()) else {
+        return (None, false);
+    };
+    if let Some(cost) = agent_vitals_domain::cost::metered_estimate_minor(host, usage, &snapshot) {
+        return (Some(cost), false);
+    }
+    let Some(overlay) = sync_overlay else { return (None, false) };
+    agent_vitals_domain::cost::sync_overlay::fill_missing_in_snapshot(&mut snapshot, overlay);
+    let cost = agent_vitals_domain::cost::metered_estimate_minor(host, usage, &snapshot);
+    let backfilled = cost.is_some();
+    (cost, backfilled)
+}
+
 /// v0.12 会话成本的可追溯分桶。这里仅聚合权威事实及其计费归属，不在 data
 /// 层复制价格规则；调用方可将每个独立桶交给 domain 成本引擎。分组中保留
 /// `provider_raw`，因为无法安全归一化的 custom 路由仍必须可见，不能并入
@@ -1576,6 +1598,9 @@ pub fn session_billing_buckets(
             r.get::<_, i64>(14)?, r.get::<_, i64>(15)?,
         ))
     })?;
+    // 每日同步叠加层：历史快照里当时没有的卡用它补（只补缺卡，已有价不动）。
+    let sync_overlay: Option<Value> = crate::authority::latest_pricing_sync_overlay(conn)?
+        .and_then(|raw| serde_json::from_str(&raw).ok());
     let mut buckets = Vec::new();
     for row in rows {
         let (host, provider_id, provider_raw, model_id, template_id, billing_mode, pricing_basis,
@@ -1585,18 +1610,22 @@ pub fn session_billing_buckets(
             &host, &model_id, provider_id.as_deref(), peak != 0,
             [uncached, cache_read, cache_write, output],
         );
-        let cost_minor = if billing_mode == "subscription" {
-            None
+        let (cost_minor, backfilled) = if billing_mode == "subscription" {
+            (None, false)
         } else {
-            pricing_payload.as_deref().and_then(|payload| {
-                serde_json::from_str::<Value>(payload).ok().and_then(|snapshot| {
-                    agent_vitals_domain::cost::metered_estimate_minor(&host, &usage, &snapshot)
-                })
-            }).map(|cost| cost.to_json())
+            price_with_sync_backfill(&host, &usage, pricing_payload.as_deref(), sync_overlay.as_ref())
         };
-        let pricing_source = if cost_minor.is_some() {
-            if evidence_basis == "explicit-official-route" { Some("official") } else { Some("fallback_official") }
-        } else { None };
+        let cost_minor = cost_minor.map(|cost| cost.to_json());
+        // 补录的金额单独标出：它用的是事后才到的价卡，不是事件发生时就有的价格。
+        let pricing_source = if cost_minor.is_none() {
+            None
+        } else if backfilled {
+            Some("backfilled")
+        } else if evidence_basis == "explicit-official-route" {
+            Some("official")
+        } else {
+            Some("fallback_official")
+        };
         let unresolved_reason = if billing_mode == "subscription" {
             Some("subscription token usage is not a per-token bill".to_string())
         } else if pricing_payload.is_none() {
@@ -3276,6 +3305,56 @@ mod tests {
         assert_eq!(buckets[1]["pricing_version"], "old");
         assert_eq!(session_cost_minor(db.conn(), key).unwrap().unwrap().amount_minor, 1350,
             "¥4.50 old card + ¥9.00 new card, never reprice both at the latest card");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 2026-09-29 用户定的回补口径：每日同步到的价卡只补历史快照里**当时没有**的
+    /// 模型（gpt-6 发布当天到价卡上线之间的用量），已有价的**不改**——叠加层里
+    /// gpt-5.6-luna 改成了两倍价，历史金额仍按当时快照。补出来的金额标 `backfilled`。
+    #[test]
+    fn sync_overlay_backfills_missing_cards_but_never_reprices_history() {
+        let path = tmp_db("sync-backfill");
+        let db = AuthorityDb::open(&path, 1).unwrap();
+        db.begin_run("run", "cli", 1).unwrap();
+        let (day_start, _) = beijing_day_bounds_ms("2026-09-23").unwrap();
+        let skey = "skey-sync-backfill";
+        db.conn().execute(
+            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+             VALUES (?1, 'codex', 'native-backfill', 'm', 'default', 1)",
+            rusqlite::params![skey],
+        ).unwrap();
+        for (id, model) in [("f-old", "gpt-5.6-luna"), ("f-new", "gpt-6-luna")] {
+            db.conn().execute(
+                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                     session_key, source_event_id, observation_kind, provider_id, model_id,
+                     event_ts_ms, event_peak, uncached_input_tokens, output_tokens,
+                     ingested_run_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, 'codex', 'm', 'native-backfill', ?2, ?1, 'token_count', 'openai', ?3,
+                         ?4, 0, 1000000, 1000000, 'run', 1, 1)",
+                rusqlite::params![id, skey, model, day_start + 3_600_000],
+            ).unwrap();
+        }
+        let historical = r#"{"pricing": {}, "codex_pricing": {"entries": [{
+            "modelPrefix": "gpt-5.6-luna", "speed": "standard",
+            "uncachedInputUsdPerMTok": "0.2", "outputUsdPerMTok": "1.2"}]}}"#;
+        db.pricing_snapshot_put("v-hist", "embedded-assets", historical, day_start - DAY_MS).unwrap();
+
+        // 用量发生一天后，每日同步到来：新增 gpt-6-luna，并把 gpt-5.6-luna 改成两倍价
+        let overlay = r#"{"schema":"agent-vitals-pricing-sync/v1","codex_entries":[
+            {"modelPrefix":"gpt-5.6-luna","speed":"standard","uncachedInputUsdPerMTok":"0.4","outputUsdPerMTok":"2.4"},
+            {"modelPrefix":"gpt-6-luna","speed":"standard","uncachedInputUsdPerMTok":"0.1","outputUsdPerMTok":"0.5"}]}"#;
+        db.pricing_sync_overlay_put("sync-1", overlay, "v-merged", r#"{"pricing":{},"codex_pricing":{"entries":[]}}"#,
+            day_start + DAY_MS).unwrap();
+
+        let buckets = session_billing_buckets(db.conn(), skey).unwrap();
+        let by_model = |m: &str| buckets.iter().find(|b| b["model_id"] == m).unwrap().clone();
+        let old = by_model("gpt-5.6-luna");
+        assert_eq!(old["cost_minor"]["amount_minor"], 140, "$0.2 + $1.2：按当时快照，叠加层的改价不改写历史");
+        assert_ne!(old["pricing_source"], "backfilled");
+        let new = by_model("gpt-6-luna");
+        assert_eq!(new["cost_minor"]["amount_minor"], 60, "$0.1 + $0.5：当时缺卡，用事后同步到的价卡补上");
+        assert_eq!(new["pricing_source"], "backfilled");
+        assert_eq!(new["pricing_version"], "v-hist", "补录不改变事件所属的价格版本");
         let _ = std::fs::remove_file(&path);
     }
 

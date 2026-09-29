@@ -313,6 +313,10 @@ pub fn price_fact_selection(
     let mut subscription_tokens = 0i64;
     let mut max_event_ms = None;
     let mut has_unresolved = false;
+    let sync_overlay: Option<Value> = agent_vitals_data::authority::latest_pricing_sync_overlay(conn)
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
     for (key, tokens) in buckets {
         let total = tokens.total();
         total_tokens += total;
@@ -327,8 +331,11 @@ pub fn price_fact_selection(
             let payload = query_payload_for_bucket(conn, &key)?;
             if let Some(payload) = payload {
                 let usage = usage_json(&key.host, &key.model, &tokens);
-                amount = serde_json::from_str::<Value>(&payload).ok()
-                    .and_then(|snapshot| agent_vitals_domain::cost::metered_estimate_minor(&key.host, &usage, &snapshot));
+                // 当时快照没有这个模型的卡、每日同步后来补上了 → 用补过缺卡的快照计价
+                // （只补缺卡，已有价不动）。
+                amount = agent_vitals_data::authority_query::price_with_sync_backfill(
+                    &key.host, &usage, Some(&payload), sync_overlay.as_ref(),
+                ).0;
                 if amount.is_none() {
                     unresolved_reason = Some("no compatible price card for this provider/model bucket");
                 } else if key.evidence_basis != "explicit-official-route" {

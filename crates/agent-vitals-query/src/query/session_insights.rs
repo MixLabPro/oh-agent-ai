@@ -217,6 +217,8 @@ fn price_groups(
     acc: &NominalAccumulator,
 ) -> rusqlite::Result<Priced> {
     let mut snapshots: BTreeMap<String, Option<Value>> = BTreeMap::new();
+    let sync_overlay: Option<Value> = agent_vitals_data::authority::latest_pricing_sync_overlay(conn)?
+        .and_then(|raw| serde_json::from_str(&raw).ok());
     let mut per_step: BTreeMap<usize, (Money, bool)> = BTreeMap::new();
     for ((step, model, provider, peak, version), tokens) in &acc.groups {
         let snapshot = match version {
@@ -229,7 +231,14 @@ fn price_groups(
                             |r| r.get(0),
                         )
                         .optional()?;
-                    snapshots.insert(version.clone(), payload.and_then(|p| serde_json::from_str(&p).ok()));
+                    // 每日同步叠加层只补这份历史快照当时没有的卡；已有价不动。
+                    let snapshot = payload.and_then(|p| serde_json::from_str::<Value>(&p).ok()).map(|mut snap| {
+                        if let Some(overlay) = &sync_overlay {
+                            agent_vitals_domain::cost::sync_overlay::fill_missing_in_snapshot(&mut snap, overlay);
+                        }
+                        snap
+                    });
+                    snapshots.insert(version.clone(), snapshot);
                 }
                 snapshots[version].as_ref()
             }

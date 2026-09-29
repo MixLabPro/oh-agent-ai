@@ -796,6 +796,10 @@ function safeReference(value: unknown, label: string): string | null {
   return reference;
 }
 
+const SESSION_PRICING_BASES = ["metered_estimate", "metered_actual", "metered_declared", "fixed_subscription", "host_billed", "api_equivalent", "unavailable"] as const;
+/// `backfilled`：当时快照没有这个模型的卡，用事后每日同步到的价卡补算（只补缺卡）。
+const SESSION_PRICING_SOURCES = ["official", "fallback_official", "backfilled"] as const;
+
 function boundedEnum(value: unknown, label: string, allowed: readonly string[], fallback: string): string {
   const candidate = stringField(value, label);
   return allowed.includes(candidate) ? candidate : fallback;
@@ -1603,10 +1607,15 @@ function parseSessionBillingBucket(value: unknown): SessionBillingBucket {
     model_id: decisionLabel(row.model_id, "session billing model"),
     billing_template_id: safeWorkflowLabel(row.billing_template_id, "session billing template"),
     billing_mode: safeWorkflowLabel(row.billing_mode, "session billing mode") ?? "unknown",
-    pricing_basis: safeWorkflowLabel(row.pricing_basis, "session pricing basis") ?? "unavailable",
+    // 这两个字段是后端的封闭枚举，而且值里有下划线：之前走 safeWorkflowLabel（不允许
+    // 下划线），`metered_estimate` / `fallback_official` 被静默丢成 unavailable / null，
+    // 计费归因表里有金额的桶也显示「无可用价格」。
+    pricing_basis: boundedEnum(row.pricing_basis ?? "unavailable", "session pricing basis", SESSION_PRICING_BASES, "unavailable"),
     evidence_basis: safeWorkflowLabel(row.evidence_basis, "session evidence basis") ?? "unknown",
     pricing_version: safeWorkflowLabel(row.pricing_version, "session pricing version"),
-    pricing_source: safeWorkflowLabel(row.pricing_source, "session pricing source"),
+    pricing_source: row.pricing_source === null || row.pricing_source === undefined
+      ? null
+      : boundedEnum(row.pricing_source, "session pricing source", SESSION_PRICING_SOURCES, "unknown"),
     cost_minor: parseSessionCost(row.cost_minor, "session bucket cost"),
     peak: requiredBoolean(row.peak, "session billing peak"),
     tokens: parseSessionTokens(row.tokens, "session billing tokens"),

@@ -80,6 +80,9 @@ ALLOWED_ASSETS_FILES = {
     Path(name) for name in (
         "pricing.json", "codex_pricing.json", "attribution_signatures.json",
         "templates/calendar.html", "templates/codex_session.html",
+        # 每日同步叠加层（.github/workflows/pricing-sync.yml 生成）：只供桌面 app
+        # 联网拉取后与内置底表合并。Python 技能不联网、只读底表，打包工作流不带它。
+        "pricing-sync.json",
     )
 }
 ALLOWED_ASSETS_DIRS = {Path("templates")}

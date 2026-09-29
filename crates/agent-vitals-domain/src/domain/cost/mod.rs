@@ -25,6 +25,8 @@ use serde_json::{json, Value};
 // 语义零改。扁平 re-export 保 `agent_vitals_domain::cost::claude_*` 路径不变。
 mod claude;
 mod codex;
+/// 每日同步价卡叠加层与底表的合并规则（覆盖 / 只补缺卡两种，见模块文档）。
+pub mod sync_overlay;
 pub use claude::{
     claude_day_cost, claude_day_cost_preferring, claude_day_total_tokens, claude_session_cost,
     declared_card_covers, official_card_body, official_card_for,
@@ -163,12 +165,52 @@ fn models_of<'a>(pricing: &'a Value, provider: &str) -> Option<&'a serde_json::M
 /// 的表里**匹配；匹配不上返回 None（不臆造）。
 fn norm_model_in(model: &str, cards: &serde_json::Map<String, Value>) -> Option<String> {
     let seg = model.rsplit('/').next().unwrap_or(model);
-    for key in cards.keys() {
-        if seg == key || seg.starts_with(key.as_str()) {
-            return Some(key.clone());
+    if cards.contains_key(seg) {
+        return Some(seg.to_string());
+    }
+    // 最长前缀，而非「第一个命中」：旧写法按键序取第一个，`claude-opus-5-5`
+    // 被 `claude-opus-5` 的卡吃掉（2026-09-29 真机：6.3 亿 token 按 Opus 5 的
+    // $5/$25 计，官方是 $4/$20、缓存读取贵了 2.5 倍），而且因为「有卡」，缺价
+    // 信号永远不会出现，没人知道要补卡。
+    cards
+        .keys()
+        .filter(|key| seg.starts_with(key.as_str()) && suffix_is_same_model(&seg[key.len()..]))
+        .max_by_key(|key| key.len())
+        .cloned()
+}
+
+/// 前缀匹配后剩下的部分是否仍指同一个模型。日期快照（`-0731`、`-20251001`）、
+/// 发布标记（`-ga-260813`）、模式标注（`-thinking`、`[1m]`）是同一模型；新的
+/// 版本号（`-5`、`.1`）、档位（`-pro`、`-mini`、`-flash`…）或紧贴的字母数字
+/// （`glm-5` → `glm-5v-turbo`）是另一个模型——宁可未计价，也不借别的模型的卡。
+/// 与 Python `cost.py::_suffix_is_same_model` 逐条对应。
+fn suffix_is_same_model(rest: &str) -> bool {
+    const TIERS: [&str; 15] = [
+        "pro", "mini", "nano", "max", "lite", "flash", "flashx", "air", "turbo", "plus", "ultra",
+        "prime", "fast", "code", "codex",
+    ];
+    let mut chars = rest.chars();
+    let Some(first) = chars.next() else { return true };
+    if first.is_ascii_alphanumeric() {
+        return false;
+    }
+    if first == '.' {
+        return !chars.next().is_some_and(|c| c.is_ascii_digit());
+    }
+    if first == '-' || first == '_' {
+        let token: String = rest[1..]
+            .chars()
+            .take_while(|c| *c != '-' && *c != '_' && *c != '.')
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if !token.is_empty() && token.len() <= 2 && token.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        if TIERS.contains(&token.as_str()) {
+            return false;
         }
     }
-    None
+    true
 }
 
 /// 计价依据：用了这个供应商自己的报价，还是回落到原厂报价。
@@ -1395,6 +1437,31 @@ mod tests {
     /// 目录解析命中面：catalog 平费率卡（claude-opus-5 → anthropic/USD）、
     /// 顶层 deepseek 卡（`[1M]`/`-0813` 变体 → deepseek-official/CNY——前缀
     /// 匹配键是短的、模型是长的，无需剥离代码）、moonshot 斜杠模型；
+    /// 模型名 → 价卡键的匹配表。与 Python `tests/test_cost_model_match.py` 的
+    /// `CASES` 逐行相同——两边任何一行漂移，就会出现同一会话两种语言两个价。
+    #[test]
+    fn norm_model_in_prefers_exact_then_longest_same_model_prefix() {
+        let cases: [(&str, &[&str], Option<&str>); 12] = [
+            ("claude-opus-5-5", &["claude-opus-5"], None),
+            ("claude-opus-5-5", &["claude-opus-5", "claude-opus-5-5"], Some("claude-opus-5-5")),
+            ("claude-opus-5-20260401", &["claude-opus-5"], Some("claude-opus-5")),
+            ("deepseek-v4-flash-0731", &["deepseek-v4-flash"], Some("deepseek-v4-flash")),
+            ("deepseek-v4-pro-ga-260813", &["deepseek-v4-pro"], Some("deepseek-v4-pro")),
+            ("deepseek/deepseek-v4-pro-0813", &["deepseek-v4-pro"], Some("deepseek-v4-pro")),
+            ("gpt-5.1", &["gpt-5"], None),
+            ("gpt-6-luna-pro", &["gpt-6-luna"], None),
+            ("glm-5v-turbo", &["glm-5"], None),
+            ("claude-sonnet-5[1m]", &["claude-sonnet-5"], Some("claude-sonnet-5")),
+            ("MiniMax-M3", &["MiniMax-M", "MiniMax-M3"], Some("MiniMax-M3")),
+            ("deepseek-v4-flash-0731", &["deepseek-v4", "deepseek-v4-flash"], Some("deepseek-v4-flash")),
+        ];
+        for (model, keys, want) in cases {
+            let cards: serde_json::Map<String, Value> =
+                keys.iter().map(|k| (k.to_string(), json!({"output": 1}))).collect();
+            assert_eq!(norm_model_in(model, &cards).as_deref(), want, "{model} in {keys:?}");
+        }
+    }
+
     /// `<synthetic>` 与任意未知模型 → None。
     #[test]
     fn resolve_card_catalog_hits_and_misses() {

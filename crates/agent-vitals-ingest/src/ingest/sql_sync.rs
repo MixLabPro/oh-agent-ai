@@ -44,33 +44,70 @@ pub fn new_run_id(trigger: &str) -> String {
 /// 吸收（返回 `false`）。`data-migrate` / `sync-facts` 每次调用一次，DB 里
 /// 总有当前版本 + 历次运行留下的历史版本（Q13：调价日前后重放正确版本，
 /// 消费面 `authority::pricing_snapshot_asof`）。
+///
+/// 库里有每日同步叠加层时一并叠上（覆盖式，见 `domain::cost::sync_overlay`）：
+/// app 升级带来新的内置底表时，这里会落一份更新的快照；若不叠叠加层，它会
+/// 成为「最新」而把同步到的新卡与改价挤掉，直到下次拉取（最长一天）。
 pub fn snapshot_current_pricing(db: &AuthorityDb) -> Result<bool, AuthorityError> {
-    let combined = serde_json::json!({
-        "pricing": agent_vitals_domain::cost::load_pricing(),
-        "codex_pricing": crate::sessions::codex_cost::load_codex_pricing(),
-    });
-    let mut canon = String::new();
-    agent_vitals_domain::source_identity::canonical_json(&combined, &mut canon);
-    let version = agent_vitals_domain::source_identity::fnv1a64_hex(canon.as_bytes());
+    let overlay: Option<Value> = db
+        .latest_pricing_sync_overlay()?
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    let (canon, version) = combined_pricing(overlay.as_ref());
     let catalog_version = format!("bc1-{version}");
+    let source_kind = if overlay.is_some() { "embedded-assets+sync-overlay" } else { "embedded-assets" };
     let now = now_ms();
     db.with_immediate_txn(|conn| {
         conn.execute(
             "INSERT INTO provider_catalog_snapshots(
                catalog_version, captured_at_ms, source_kind, snapshot_id, payload_json)
-             VALUES (?1, ?2, 'embedded-assets', ?3, ?4)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(catalog_version) DO NOTHING",
-            rusqlite::params![catalog_version, now, catalog_version, canon],
+            rusqlite::params![catalog_version, now, source_kind, catalog_version, canon],
         )?;
         let changed = conn.execute(
             "INSERT INTO pricing_snapshots(
                pricing_version, captured_at_ms, source_kind, payload_json, catalog_version, billing_template_id)
-             VALUES (?1, ?2, 'embedded-assets', ?3, ?4, NULL)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL)
              ON CONFLICT(pricing_version) DO NOTHING",
-            rusqlite::params![version, now, canon, catalog_version],
+            rusqlite::params![version, now, source_kind, canon, catalog_version],
         )?;
         Ok(changed > 0)
     })
+}
+
+/// app 拉到新的每日同步叠加层后调用：叠加层原文与「内置底表 + 叠加层」的完整
+/// 快照在同一事务里入库。快照形状与 [`snapshot_current_pricing`] 完全一致
+/// （`{pricing, codex_pricing}`）——此前公共目录只存了 `pricing.json`，codex 计价
+/// 读不到 `codex_pricing`，一开启价格更新之后的 codex 用量就全部算不出金额。
+/// 返回是否落了新的价格快照（内容与已有版本相同时幂等返回 `false`）。
+pub fn snapshot_with_sync_overlay(
+    db: &AuthorityDb,
+    overlay: &crate::pricing_catalog::ValidatedSyncOverlay,
+) -> Result<bool, AuthorityError> {
+    let (canon, version) = combined_pricing(Some(&overlay.overlay));
+    let (_, pricing_changed) = db.pricing_sync_overlay_put(
+        &overlay.version,
+        &overlay.canonical_json,
+        &version,
+        &canon,
+        now_ms(),
+    )?;
+    Ok(pricing_changed)
+}
+
+/// 内置底表（可选叠上同步叠加层）→ `(canonical_json, pricing_version)`。版本是
+/// 内容指纹：叠加层没带来任何变化时与纯底表版本相同，重复写入自然幂等。
+fn combined_pricing(overlay: Option<&Value>) -> (String, String) {
+    let mut pricing = agent_vitals_domain::cost::load_pricing();
+    let mut codex = crate::sessions::codex_cost::load_codex_pricing();
+    if let Some(overlay) = overlay {
+        agent_vitals_domain::cost::sync_overlay::merge_sync_overlay(&mut pricing, &mut codex, overlay);
+    }
+    let combined = serde_json::json!({ "pricing": pricing, "codex_pricing": codex });
+    let mut canon = String::new();
+    agent_vitals_domain::source_identity::canonical_json(&combined, &mut canon);
+    let version = agent_vitals_domain::source_identity::fnv1a64_hex(canon.as_bytes());
+    (canon, version)
 }
 
 /// 将升级前价格快照中错误混入的个人订阅声明，迁移为本地、待确认的候选。
@@ -1336,6 +1373,39 @@ mod tests {
         ).unwrap();
         assert_eq!(row.1, row.2);
         assert_eq!(row.1, format!("bc1-{}", row.0));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// 2026-09-29：公共目录旧链路只存 `pricing.json`，快照里没有 `codex_pricing`，
+    /// 一开启价格更新之后的 codex 用量全部算不出金额。叠加层链路落的快照必须
+    /// 与内置快照同形，并且叠上同步来的新卡。
+    #[test]
+    fn sync_overlay_snapshot_keeps_codex_pricing_and_adds_synced_cards() {
+        let home = tmp_home("pricing-sync-overlay");
+        let db = open_db(&home);
+        assert!(snapshot_current_pricing(&db).unwrap());
+        let raw = br#"{"schema":"agent-vitals-pricing-sync/v1",
+            "catalog":{"anthropic":{"currency":"USD","models":{"claude-opus-5-5":{"input_uncached":4,"input_cached":0.2,"output":20}}}},
+            "codex_entries":[{"modelPrefix":"gpt-6-luna","speed":"standard","uncachedInputUsdPerMTok":"0.1","cacheReadUsdPerMTok":"0.01","outputUsdPerMTok":"0.5"}]}"#;
+        let overlay = crate::pricing_catalog::validate_sync_overlay(raw).unwrap();
+        assert!(snapshot_with_sync_overlay(&db, &overlay).unwrap(), "新卡 → 新版本");
+        assert!(!snapshot_with_sync_overlay(&db, &overlay).unwrap(), "同一份叠加层重复拉取幂等");
+
+        let (payload, catalog_version, source): (String, String, String) = db.conn().query_row(
+            "SELECT payload_json, catalog_version, source_kind FROM pricing_snapshots
+             ORDER BY captured_at_ms DESC, rowid DESC LIMIT 1",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        let v: Value = serde_json::from_str(&payload).unwrap();
+        assert!(v["codex_pricing"]["entries"].as_array().unwrap().iter()
+            .any(|e| e["modelPrefix"] == "gpt-6-luna"), "codex 新卡进了快照");
+        assert!(v["codex_pricing"]["entries"].as_array().unwrap().len() > 1, "底表 codex 卡没丢");
+        assert_eq!(v["pricing"]["catalog_2026_09"]["providers"]["anthropic"]["models"]["claude-opus-5-5"]["output"], 20);
+        assert_eq!(catalog_version, overlay.version, "快照可追溯到生成它的叠加层");
+        assert_eq!(source, agent_vitals_data::authority::PRICING_SYNC_OVERLAY_SOURCE);
+
+        // 之后的日常同步（或 app 升级后）写内置快照时叠同一份叠加层：内容相同 → 不产生新版本
+        assert!(!snapshot_current_pricing(&db).unwrap());
         std::fs::remove_dir_all(&home).unwrap();
     }
 

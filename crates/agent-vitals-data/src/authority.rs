@@ -40,6 +40,22 @@ pub fn default_authority_path(data_home: &Path) -> PathBuf {
     data_home.join("agent-vitals.sqlite3")
 }
 
+/// 每日同步叠加层在 `provider_catalog_snapshots` / `pricing_snapshots` 里的来源标记。
+pub const PRICING_SYNC_OVERLAY_SOURCE: &str = "public-sync-overlay";
+
+/// 最近一次入库的同步叠加层原文。自由函数版本给只拿得到 `Connection` 的查询
+/// 用（历史回补在 `authority_query` 里按会话计价时需要它）。
+pub fn latest_pricing_sync_overlay(conn: &Connection) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT payload_json FROM provider_catalog_snapshots
+         WHERE source_kind = ?1
+         ORDER BY captured_at_ms DESC, catalog_version DESC LIMIT 1",
+        rusqlite::params![PRICING_SYNC_OVERLAY_SOURCE],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
 /// `host_bills_for_period` 的一行：`(host, provider_id, billing_basis,
 /// amount_minor, currency)`。`amount_minor` 是最小货币单位整数——金额从不
 /// 以浮点入库（spec §5.3），折算在展示层。
@@ -2844,6 +2860,58 @@ impl AuthorityDb {
                 Err(error)
             }
         }
+    }
+
+    /// 每日同步叠加层入库：叠加层原文进 `provider_catalog_snapshots`（来源
+    /// [`PRICING_SYNC_OVERLAY_SOURCE`]），「底表 + 叠加层」合并出的完整快照进
+    /// `pricing_snapshots` 并以 `catalog_version` 引用它——「这份价格快照由哪份
+    /// 叠加层生成」可追溯。两行同一事务：只落其一会让下次同步读到的叠加层与
+    /// 实际计价用的快照对不上。
+    ///
+    /// 为什么叠加层也存库而不是存成本地文件：权威库是唯一数据源，历史回补
+    /// （只补缺卡）要在查询里读它，备份/导出也天然带上它。
+    pub fn pricing_sync_overlay_put(
+        &self,
+        overlay_version: &str,
+        overlay_json: &str,
+        pricing_version: &str,
+        merged_payload_json: &str,
+        captured_at_ms: i64,
+    ) -> Result<(bool, bool), AuthorityError> {
+        let mark = begin_immediate(&self.conn)?;
+        let result = (|| {
+            let overlay_changed = self.provider_catalog_snapshot_put(
+                overlay_version,
+                overlay_version,
+                PRICING_SYNC_OVERLAY_SOURCE,
+                overlay_json,
+                captured_at_ms,
+            )?;
+            let pricing_changed = self.pricing_snapshot_put_with_provenance(
+                pricing_version,
+                PRICING_SYNC_OVERLAY_SOURCE,
+                merged_payload_json,
+                captured_at_ms,
+                Some(overlay_version),
+                None,
+            )?;
+            Ok::<_, AuthorityError>((overlay_changed, pricing_changed))
+        })();
+        match result {
+            Ok(changed) => {
+                commit_advancing_revision(&self.conn, mark)?;
+                Ok(changed)
+            }
+            Err(error) => {
+                let _ = self.conn.execute("ROLLBACK", []);
+                Err(error)
+            }
+        }
+    }
+
+    /// 最近一次入库的同步叠加层原文（没有则 `None`）。
+    pub fn latest_pricing_sync_overlay(&self) -> Result<Option<String>, AuthorityError> {
+        Ok(latest_pricing_sync_overlay(&self.conn)?)
     }
 
     /// 落入一个模板定义。更新合同必须使用新的 template id；这里不接受覆盖。
