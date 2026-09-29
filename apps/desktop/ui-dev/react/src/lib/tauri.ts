@@ -2802,8 +2802,10 @@ function parseCodexQuota(value: unknown): CodexQuotaWindow {
   const root = record(value, "codex quota snapshot");
   const limits = record(root.limits ?? null, "codex quota limits");
   const primary = record(limits.primary ?? null, "codex quota primary window");
-  const used = boundedCount(primary.used_percent, "codex used_percent", 100);
-  if (!Number.isFinite(used) || used < 0 || used > 100) throw new Error("codex used_percent 越界");
+  // used_percent 是 float 契约（adapter 保留小数，usage.rs:207-215）——
+  // 必须用有限数校验 + 显式上界，不得走整数门（评审 P1-1）。
+  const used = requiredFiniteNumber(primary.used_percent, "codex used_percent");
+  if (used > 100) throw new Error("codex used_percent 越界");
   const resets = boundedCount(primary.resets_at, "codex resets_at", 4_102_444_800);
   if (!Number.isSafeInteger(resets) || resets <= 0) throw new Error("codex resets_at 不安全");
   const observed = nullableString(root.observed_at, "codex quota observed_at");
