@@ -204,11 +204,13 @@ struct NominalAccumulator {
 /// 币种 → 最小货币单位金额。
 type Money = BTreeMap<String, i64>;
 
-/// 计价结果：每回合（金额, 是否部分未计价）、会话合计、会话是否部分未计价。
+/// 计价结果：每回合（金额, 是否部分未计价）、会话合计、会话是否部分未计价、
+/// 逐回合未计价 token 四桶之和（无快照/无价卡导致 None 的组，WASTE S1）。
 struct Priced {
     per_step: BTreeMap<usize, (Money, bool)>,
     session: Money,
     session_partial: bool,
+    unpriced: BTreeMap<usize, i64>,
 }
 
 fn price_groups(
@@ -220,6 +222,7 @@ fn price_groups(
     let sync_overlay: Option<Value> = agent_vitals_data::authority::latest_pricing_sync_overlay(conn)?
         .and_then(|raw| serde_json::from_str(&raw).ok());
     let mut per_step: BTreeMap<usize, (Money, bool)> = BTreeMap::new();
+    let mut unpriced: BTreeMap<usize, i64> = BTreeMap::new();
     for ((step, model, provider, peak, version), tokens) in &acc.groups {
         let snapshot = match version {
             Some(version) => {
@@ -249,7 +252,10 @@ fn price_groups(
         let entry = per_step.entry(*step).or_insert_with(|| (Money::new(), false));
         match money {
             Some(m) => *entry.0.entry(m.currency).or_default() += m.amount_minor,
-            None if tokens.iter().any(|t| *t > 0) => entry.1 = true,
+            None if tokens.iter().any(|t| *t > 0) => {
+                entry.1 = true;
+                *unpriced.entry(*step).or_default() += tokens.iter().sum::<i64>();
+            }
             None => {}
         }
     }
@@ -261,7 +267,55 @@ fn price_groups(
         }
         session_partial |= *partial;
     }
-    Ok(Priced { per_step, session, session_partial })
+    Ok(Priced { per_step, session, session_partial, unpriced })
+}
+
+/// WASTE S1（spec §4.1 修订版）：单会话失败区间成本暴露——对 repeated_failure
+/// 命中回合的既有名义计价做区间聚合。**不是浪费金额**：affected_input_tokens 含
+/// 正常工作；金额是名义口径（官方标价、不扣订阅、含输出），逐组取整规则与回合
+/// 展示一致，因此不保证与会话名义成本可相加。跨币分栏不相加；未计价 token
+/// 如实单列，绝不按 0 价入金额。
+fn failure_exposure_json(
+    from_step: usize,
+    to_step: usize,
+    affected_input_tokens: i64,
+    per_step: &BTreeMap<usize, (Money, bool)>,
+    unpriced: &BTreeMap<usize, i64>,
+    any_unversioned: bool,
+) -> Value {
+    let mut amounts: Money = Money::new();
+    let mut unpriced_tokens: i64 = 0;
+    let mut any_partial = false;
+    for step in from_step.saturating_sub(1)..to_step {
+        if let Some((money, partial)) = per_step.get(&step) {
+            any_partial |= *partial;
+            for (currency, amount) in money {
+                *amounts.entry(currency.clone()).or_default() += amount;
+            }
+        }
+        if let Some(tokens) = unpriced.get(&step) {
+            unpriced_tokens += tokens;
+        }
+    }
+    let (coverage, reason) = if amounts.is_empty() {
+        // 无任何可用金额（区间无计价组，或组全部未计价）→ 不可用并给原因。
+        ("unavailable", if any_unversioned { "no_pricing_snapshot" } else { "no_price_card" })
+    } else if any_partial || unpriced_tokens > 0 {
+        ("partial", "")
+    } else {
+        ("full", "")
+    };
+    json!({
+        "affected_input_tokens": affected_input_tokens,
+        "nominal_amounts": amounts.iter().map(|(currency, amount)| json!({
+            "amount_minor": amount, "currency": currency, "billing_basis": "nominal",
+        })).collect::<Vec<_>>(),
+        "coverage": coverage,
+        "unpriced_tokens": unpriced_tokens,
+        "granularity": "affected-turns",
+        "reason": if reason.is_empty() { Value::Null } else { json!(reason) },
+        "disclaimer": "相关回合含正常工作；不是浪费、可节省额或实付账单",
+    })
 }
 
 fn money_json(money: &Money, partial: bool) -> Option<Value> {
@@ -315,7 +369,8 @@ pub fn session_insights(conn: &Connection, session_key: &str, host: &str) -> rus
         tokens[2] += row.call.cache_write;
         tokens[3] += row.call.output;
     }
-    let Priced { per_step, .. } = price_groups(conn, host, &acc)?;
+    let Priced { per_step, unpriced, .. } = price_groups(conn, host, &acc)?;
+    let any_unversioned = calls.iter().any(|c| c.pricing_version.is_none());
     let Priced { session: session_money, session_partial, .. } = price_groups(conn, host, &session_acc)?;
     if let Some(steps_json) = data["axis"]["steps"].as_array_mut() {
         for (i, step) in steps_json.iter_mut().enumerate() {
@@ -334,6 +389,24 @@ pub fn session_insights(conn: &Connection, session_key: &str, host: &str) -> rus
             data["session"]["nominal_cost_reason"] = json!(reason);
         }
         None => {}
+    }
+    // WASTE S1：仅 repeated_failure 挂失败区间成本暴露（r6 红线的有限修订，
+    // 措辞与降级由契约钉住；其余诊断不带金额）。
+    if let Some(list) = data["diagnostics"].as_array_mut() {
+        for item in list.iter_mut() {
+            if item.get("kind").and_then(Value::as_str) != Some("repeated_failure") {
+                continue;
+            }
+            let (from, to) = (
+                item["steps"]["from"].as_u64().unwrap_or(0) as usize,
+                item["steps"]["to"].as_u64().unwrap_or(0) as usize,
+            );
+            if from == 0 || to == 0 {
+                continue;
+            }
+            let tokens = item["impact"]["tokens"].as_i64().unwrap_or(0);
+            item["failure_exposure"] = failure_exposure_json(from, to, tokens, &per_step, &unpriced, any_unversioned);
+        }
     }
     data["quality"] = json!({ "legacy_fingerprints": events.legacy_fingerprints });
 
@@ -471,6 +544,50 @@ pub fn session_trace_evidence_for_ref(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn money(entries: &[(&str, i64)]) -> Money {
+        entries.iter().map(|(c, a)| (c.to_string(), *a)).collect()
+    }
+
+    /// WASTE S1：failure_exposure 的三态、跨币分栏与未计价单列。
+    #[test]
+    fn failure_exposure_full_partial_unavailable_and_currencies() {
+        let mut per_step = BTreeMap::new();
+        per_step.insert(5usize, (money(&[("CNY", 1200), ("USD", 340)]), false));
+        per_step.insert(6usize, (money(&[("CNY", 800)]), true));
+        let mut unpriced = BTreeMap::new();
+        unpriced.insert(6usize, 9000i64);
+
+        // 全覆盖：from/to 命中且无未计价。
+        let v = failure_exposure_json(6, 6, 150000, &per_step, &BTreeMap::new(), false);
+        assert_eq!(v["coverage"], "full");
+        assert_eq!(v["unpriced_tokens"], 0);
+        assert_eq!(v["reason"], serde_json::Value::Null);
+        assert_eq!(v["granularity"], "affected-turns");
+        assert_eq!(v["disclaimer"], "相关回合含正常工作；不是浪费、可节省额或实付账单");
+        let amounts = v["nominal_amounts"].as_array().unwrap();
+        assert_eq!(amounts.len(), 2, "跨币分栏");
+        assert!(amounts.iter().any(|a| a["currency"] == "CNY" && a["amount_minor"] == 1200 && a["billing_basis"] == "nominal"));
+
+        // 部分：混入未计价回合 → partial + unpriced_tokens 单列，不按 0 价入金额。
+        let v = failure_exposure_json(6, 7, 230000, &per_step, &unpriced, false);
+        assert_eq!(v["coverage"], "partial");
+        assert_eq!(v["unpriced_tokens"], 9000);
+        let amounts = v["nominal_amounts"].as_array().unwrap();
+        assert!(amounts.iter().any(|a| a["currency"] == "USD" && a["amount_minor"] == 340));
+
+        // 区间外无数据 → unavailable + 原因（无快照优先于无价卡）。
+        let v = failure_exposure_json(40, 41, 0, &per_step, &unpriced, true);
+        assert_eq!(v["coverage"], "unavailable");
+        assert_eq!(v["reason"], "no_pricing_snapshot");
+        let v = failure_exposure_json(40, 41, 0, &per_step, &unpriced, false);
+        assert_eq!(v["reason"], "no_price_card");
+        // 金额缺席时 nominal_amounts 必为空数组，不是 0。
+        assert_eq!(v["nominal_amounts"].as_array().unwrap().len(), 0);
+    }
+
+
     use agent_vitals_domain::session_insights::{build_insights, InsightCall, InsightEvent, InsightsConfig};
 
     /// remedy 目录只有一份（`agent_vitals_data::issues::remedy_for`，Findings 页在用）：

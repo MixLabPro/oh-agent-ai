@@ -714,6 +714,26 @@ function Inspector({ insights, mode, unit, ev, go, retry }: { insights: SessionI
           <div className="insights-acts"><button type="button" className="button button-primary" onClick={() => go({ kind: "failure", step: first.step ?? d.steps.from, ts: first.ts_ms })}>查看一次失败</button><button type="button" className="button button-secondary" onClick={() => go({ kind: "calls", from: d.steps.from, to: d.steps.to })}>查看相关调用</button></div>
           <ul className="insights-list">{fails.slice(0, 30).map((f, i) => <li key={i}><button type="button" className="row" onClick={() => go({ kind: "failure", step: f.step ?? d.steps.from, ts: f.ts_ms })}><span className="fail">✕</span><span>{unit} {f.step} · {f.capability_id ?? "工具"}</span><span className="num muted">{clock(f.ts_ms)}</span></button></li>)}</ul></>}
         {rm && <div className="insights-note"><b>建议</b> {rm[0]}<br /><span className="muted">这几个{unit}共输入 {fmtTokens(d.impact.tokens)} tokens，不代表都能省下来。</span></div>}
+        {d.failure_exposure && (
+          <dl className="kv insights-exposure">
+            <dt>涉及回合输入</dt><dd className="num">{fmtTokens(d.failure_exposure.affected_input_tokens)} tokens</dd>
+            {d.failure_exposure.nominal_amounts.length > 0 ? (
+              <>
+                <dt>相关回合名义成本估算</dt>
+                <dd className="num">
+                  {d.failure_exposure.nominal_amounts.map(a => `${a.currency === "USD" ? "$" : a.currency === "CNY" ? "¥" : `${a.currency} `}${(a.amount_minor / 100).toFixed(2)}`).join(" + ")}
+                  {d.failure_exposure.coverage === "partial" && `（部分调用无价卡；未计价 ${fmtTokens(d.failure_exposure.unpriced_tokens)} tokens）`}
+                </dd>
+              </>
+            ) : (
+              <>
+                <dt>相关回合名义成本</dt>
+                <dd className="num">{d.failure_exposure.reason === "no_pricing_snapshot" ? "这段时间还没有价目快照" : "这些模型没有价卡"}</dd>
+              </>
+            )}
+            <dd className="muted insights-disclaimer">{d.failure_exposure.disclaimer}。名义成本按官方标价、含输出、不扣订阅；不保证与会话名义成本可相加。</dd>
+          </dl>
+        )}
       </div>;
     }
     if (d.kind === "input_growth") {

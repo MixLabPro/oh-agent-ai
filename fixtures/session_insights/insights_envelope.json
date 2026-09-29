@@ -1240,7 +1240,22 @@
           "error_excerpt"
         ],
         "context_notes": [],
-        "remedy_id": "inspect-repeated-failure"
+        "remedy_id": "inspect-repeated-failure",
+        "failure_exposure": {
+          "affected_input_tokens": 150000,
+          "nominal_amounts": [
+            {
+              "amount_minor": 9,
+              "currency": "USD",
+              "billing_basis": "nominal"
+            }
+          ],
+          "coverage": "full",
+          "unpriced_tokens": 0,
+          "granularity": "affected-turns",
+          "reason": null,
+          "disclaimer": "相关回合含正常工作；不是浪费、可节省额或实付账单"
+        }
       },
       {
         "kind": "input_growth",
