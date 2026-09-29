@@ -254,7 +254,9 @@ fn price_groups(
             Some(m) => *entry.0.entry(m.currency).or_default() += m.amount_minor,
             None if tokens.iter().any(|t| *t > 0) => {
                 entry.1 = true;
-                *unpriced.entry(*step).or_default() += tokens.iter().sum::<i64>();
+                // 与 affected_input_tokens 同基：三桶输入（不含 output），同屏
+                // 相邻的两个 token 数必须统计同一宇宙（评审 P3-4）。
+                *unpriced.entry(*step).or_default() += tokens[0] + tokens[1] + tokens[2];
             }
             None => {}
         }
@@ -275,6 +277,9 @@ fn price_groups(
 /// 正常工作；金额是名义口径（官方标价、不扣订阅、含输出），逐组取整规则与回合
 /// 展示一致，因此不保证与会话名义成本可相加。跨币分栏不相加；未计价 token
 /// 如实单列，绝不按 0 价入金额。
+/// reason 词表故意收窄为 no_pricing_snapshot|no_price_card（评审 P3-3 记录）：
+/// 本管线 basis 钉死 nominal、不碰路由/订阅，spec 词表的 route_unresolved/
+/// subscription_covered 在此不可达；桥接闭集同款收窄，未来扩展须同改两处。
 fn failure_exposure_json(
     from_step: usize,
     to_step: usize,
@@ -390,8 +395,8 @@ pub fn session_insights(conn: &Connection, session_key: &str, host: &str) -> rus
         }
         None => {}
     }
-    // WASTE S1：仅 repeated_failure 挂失败区间成本暴露（r6 红线的有限修订，
-    // 措辞与降级由契约钉住；其余诊断不带金额）。
+    // WASTE S1（r8 有限例外）：仅 repeated_failure 挂失败区间成本暴露——
+    // 措辞与降级由契约钉住；其余诊断仍不带金额。
     if let Some(list) = data["diagnostics"].as_array_mut() {
         for item in list.iter_mut() {
             if item.get("kind").and_then(Value::as_str) != Some("repeated_failure") {
@@ -405,7 +410,25 @@ pub fn session_insights(conn: &Connection, session_key: &str, host: &str) -> rus
                 continue;
             }
             let tokens = item["impact"]["tokens"].as_i64().unwrap_or(0);
-            item["failure_exposure"] = failure_exposure_json(from, to, tokens, &per_step, &unpriced, any_unversioned);
+            // reason 用区间级证据（评审 P3-2）：区间内的组全部有版本 → 无价卡；
+            // 区间含无版本组 → 无快照；区间完全没有组 → 回退会话级判定
+            // （失败模型调用整行缺失的现实，spec §1 已承认）。
+            let mut range_has_groups = false;
+            let mut range_unversioned = false;
+            for (key, _) in acc.groups.range((
+                std::ops::Bound::Included((from.saturating_sub(1), String::new(), None, false, None)),
+                std::ops::Bound::Unbounded,
+            )) {
+                if key.0 >= to {
+                    break;
+                }
+                range_has_groups = true;
+                if key.4.is_none() {
+                    range_unversioned = true;
+                }
+            }
+            let reason_unversioned = if range_has_groups { range_unversioned } else { any_unversioned };
+            item["failure_exposure"] = failure_exposure_json(from, to, tokens, &per_step, &unpriced, reason_unversioned);
         }
     }
     data["quality"] = json!({ "legacy_fingerprints": events.legacy_fingerprints });

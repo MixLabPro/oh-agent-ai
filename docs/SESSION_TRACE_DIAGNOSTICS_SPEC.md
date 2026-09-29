@@ -38,6 +38,18 @@
 
 ---
 
+### r8 有限例外（WASTE_ATTRIBUTION_SPEC §4.1，2026-09-30）：失败区间成本暴露
+
+r6「诊断条目不含金额」红线**不撤销**，新增一个有边界的例外：仅 `repeated_failure`
+诊断可携带 `failure_exposure`——命中回合输入 tokens 与这些回合的**名义成本暴露**
+（官方标价、含输出、不扣订阅，逐组取整与回合展示一致），字段名与措辞钉死：
+`affected_input_tokens`（含正常工作）、`coverage: full|partial|unavailable`、
+`unpriced_tokens`（不按 0 计）、`granularity: "affected-turns"`、固定免责声明
+「相关回合含正常工作；不是浪费、可节省额或实付账单」。它**不是浪费金额**：
+ATTRIBUTABLE_WASTE 的 confirmed/opportunity 分子不变；其他诊断
+（high_uncached_input / input_growth）仍不带金额；diagText 文案禁令不变
+（金额只出现在 Inspector 的明确标注块）。名义暴露不保证与会话名义成本可相加。
+
 ## 1. 背景
 
 ### 1.1 现状
