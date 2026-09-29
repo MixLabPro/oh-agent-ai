@@ -36,12 +36,15 @@
 .insights-diag-title b { font-weight: 600; }
 .insights-diag-fact { grid-column: 2; font-size: 13px; color: var(--ui-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .insights-diag.on .insights-diag-fact { white-space: normal; }
-.insights-chev { color: var(--ins-faint); font-size: 12px; }
+.insights-chev { color: var(--ui-muted); font-size: 16px; line-height: 1; padding: 2px 4px; }
+.insights-diag-sum:hover .insights-chev { color: var(--ui-text); }
 .insights-diag-more { padding: 0 14px 12px 46px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .insights-diag-more p { margin: 0; max-width: 72ch; }
 .insights-diag-more .lbl { color: var(--ui-muted); margin-right: 6px; }
 .insights-chip { display: inline-flex; font-size: 12px; padding: 0 8px; border-radius: 999px; border: 1px solid var(--ui-border); white-space: nowrap; }
-.insights-chip.ev { background: var(--ui-text); border-color: var(--ui-text); color: #fff; }
+/* 三级证据感：有证据（浅绿实底）> 可能（实线框）> 未明（虚线、弱色）。有证据的原先是黑底白字，
+   比诊断标题还抢眼——排序已经把它放在最前，标签不需要再喊一遍。 */
+.insights-chip.ev { background: #e3f4ec; border-color: #9fd3bb; color: #0b6b4f; font-weight: 600; }
 .insights-chip.maybe { background: var(--ui-surface); border-color: var(--ui-text); }
 .insights-chip.unk { background: var(--ui-surface); border-style: dashed; color: var(--ui-muted); }
 .insights-more summary { padding: 8px 14px; font-size: 12.5px; color: var(--ui-muted); cursor: pointer; border-top: 1px solid var(--ins-line-soft); }
@@ -66,11 +69,12 @@
 .insights-chart:focus-visible, .insights-mini:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 2px; }
 .insights-mini { cursor: pointer; touch-action: none; margin-bottom: 4px; }
 .insights-chart-wrap { position: relative; }
-.insights-tip { position: absolute; z-index: 30; max-width: 230px; padding: 7px 10px; border: 1px solid var(--ui-border); border-radius: 7px; background: var(--ui-surface); box-shadow: 0 6px 18px rgba(20, 30, 40, .16); font-size: 11.5px; line-height: 1.5; pointer-events: none; }
+.insights-tip { position: absolute; z-index: 30; width: max-content; max-width: 260px; padding: 7px 10px; border: 1px solid var(--ui-border); border-radius: 7px; background: var(--ui-surface); box-shadow: 0 6px 18px rgba(20, 30, 40, .16); font-size: 11.5px; line-height: 1.5; pointer-events: none; }
 .insights-tip b { display: block; margin-bottom: 3px; font-size: 12px; }
-.insights-tip dl { display: grid; grid-template-columns: auto auto; align-items: baseline; column-gap: 14px; row-gap: 3px; margin: 0; }
+.insights-tip dl { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; column-gap: 14px; row-gap: 3px; margin: 0; }
 .insights-tip dt { color: var(--ui-muted); white-space: nowrap; }
-.insights-tip dd { margin: 0; font-family: ui-monospace, Menlo, monospace; text-align: right; white-space: nowrap; }
+/* 值列允许换行：再长的值也只会折行，不会撑出框（max-width 是硬上限） */
+.insights-tip dd { margin: 0; font-family: ui-monospace, Menlo, monospace; text-align: right; overflow-wrap: anywhere; }
 .insights-tip p { margin: 2px 0 0; color: var(--ui-muted); }
 .insights-tip p:first-of-type { margin-top: 4px; }
 .insights-chart text, .insights-mini text { font-size: 11px; fill: var(--ui-muted); }

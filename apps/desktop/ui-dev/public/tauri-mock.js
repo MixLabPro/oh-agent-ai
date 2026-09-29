@@ -220,7 +220,30 @@
     peak_tokens: 18000,
     cost_minor: null,
     cost_status: { state: "unavailable", reason: "no-pricing-snapshot", has_unresolved: true },
+  }, {
+    // 订阅为主 + 少数模型缺价（2026-09-29 真机 codex 会话的缩小版）：4 个模型被订阅声明覆盖，
+    // gpt-6-luna / gpt-6-sol 不在声明范围且无价卡 → 后端给 unpriced / no-price-card。
+    // 形状出处：crates/agent-vitals-data/src/authority_query.rs::session_billing_buckets
+    // 与 ::session_cost_view（billing_mode 经订阅归因改写为 "subscription"，cost_minor 为 null）。
+    session_ref: "sr_browser_mock_03",
+    host: "codex",
+    first_event_at: new Date(Date.now() - 9 * 86400000).toISOString(),
+    last_event_at: new Date(Date.now() - 600000).toISOString(),
+    event_count: 8506,
+    model_ids: ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra", "gpt-6-luna", "gpt-6-sol"],
+    tokens: { uncached_input_tokens: 38000000, cache_read_tokens: 1241000000, cache_write_tokens: 0, output_tokens: 2630000, total: 1281630000 },
+    peak_tokens: 420000,
+    cost_minor: null,
+    cost_status: { state: "unpriced", reason: "no-price-card", has_unresolved: true },
   }];
+  // 按会话引用单独放：会话行的解析器拒绝未知字段，不能把 mock 专用数据塞进行对象。
+  const mockBillingBreakdowns = {
+    sr_browser_mock_03: [
+      ["gpt-5.6-luna", "subscription", 924600000], ["gpt-5.6-terra", "subscription", 98200000],
+      ["gpt-5.6-sol", "subscription", 14900000], ["gpt-6-astra", "subscription", 24400000],
+      ["gpt-6-luna", "metered", 109100000], ["gpt-6-sol", "metered", 110300000],
+    ],
+  };
 
   const issueGroups = [
     {
@@ -830,9 +853,12 @@
         };
       }
       case "sessions_list": {
-        const continuation = !!(args && args.cursor);
-        const page = continuation ? sessions.slice(1) : sessions.slice(0, 1);
-        return { data: { sessions: page, next_cursor: continuation ? null : "preview-next", has_more: !continuation, window_session_count: sessions.length, window_total_tokens: 344000 } };
+        // 一页一条：第一页 → preview-next → preview-next-2（第三页是「订阅为主 + 缺价」样例）
+        const cursor = args && args.cursor;
+        const pageIndex = cursor === "preview-next-2" ? 2 : cursor ? 1 : 0;
+        const page = sessions.slice(pageIndex, pageIndex + 1);
+        const next = pageIndex + 1 < sessions.length ? (pageIndex === 0 ? "preview-next" : "preview-next-2") : null;
+        return { data: { sessions: page, next_cursor: next, has_more: next !== null, window_session_count: sessions.length, window_total_tokens: sessions.reduce((sum, session) => sum + session.tokens.total, 0) } };
       }
       case "session_trace": {
         // Synthetic preview only; production invokes the existing local authority.
@@ -870,7 +896,7 @@
         const tokens = selected.tokens;
         return { data: {
           ...selected,
-          billing_breakdown: [{ provider_id: selected.host === "codex" ? "openai" : "<unknown>", provider_raw: selected.host === "codex" ? "openai" : null, model_id: model, billing_template_id: null, billing_mode: selected.cost_status.state === "subscription" ? "subscription" : "metered", pricing_basis: selected.cost_minor?.basis || "unavailable", evidence_basis: selected.cost_status.has_unresolved ? "missing" : "explicit-official-route", pricing_version: selected.cost_minor ? "preview-v1" : null, pricing_source: selected.cost_minor ? "official" : null, cost_minor: selected.cost_minor, peak: true, tokens, has_unresolved: selected.cost_status.has_unresolved, unresolved_reason: selected.cost_status.has_unresolved ? "no pricing snapshot covers this event time" : null }],
+          billing_breakdown: mockBillingBreakdowns[selected.session_ref] ? mockBillingBreakdowns[selected.session_ref].map(([model_id, billing_mode, total]) => ({ provider_id: "openai", provider_raw: "openai", model_id, billing_template_id: null, billing_mode, pricing_basis: "metered_estimate", evidence_basis: "missing", pricing_version: "preview-v1", pricing_source: null, cost_minor: null, peak: false, tokens: { uncached_input_tokens: 0, cache_read_tokens: total, cache_write_tokens: 0, output_tokens: 0, total }, has_unresolved: billing_mode !== "subscription", unresolved_reason: billing_mode === "subscription" ? "subscription token usage is not a per-token bill" : "no compatible price card for this provider/model bucket" })) : [{ provider_id: selected.host === "codex" ? "openai" : "<unknown>", provider_raw: selected.host === "codex" ? "openai" : null, model_id: model, billing_template_id: null, billing_mode: selected.cost_status.state === "subscription" ? "subscription" : "metered", pricing_basis: selected.cost_minor?.basis || "unavailable", evidence_basis: selected.cost_status.has_unresolved ? "missing" : "explicit-official-route", pricing_version: selected.cost_minor ? "preview-v1" : null, pricing_source: selected.cost_minor ? "official" : null, cost_minor: selected.cost_minor, peak: true, tokens, has_unresolved: selected.cost_status.has_unresolved, unresolved_reason: selected.cost_status.has_unresolved ? "no pricing snapshot covers this event time" : null }],
           timeline: [{ event_at: selected.first_event_at, model_id: model, observation_kind: "assistant-usage", peak: false, tokens: { uncached_input_tokens: tokens.uncached_input_tokens, cache_read_tokens: 0, cache_write_tokens: 0, output_tokens: 0, total: tokens.uncached_input_tokens } }, { event_at: selected.last_event_at, model_id: model, observation_kind: "assistant-usage", peak: true, tokens: { uncached_input_tokens: 0, cache_read_tokens: tokens.cache_read_tokens, cache_write_tokens: tokens.cache_write_tokens, output_tokens: tokens.output_tokens, total: tokens.cache_read_tokens + tokens.cache_write_tokens + tokens.output_tokens } }],
           workflow_timeline: [{ event_at: selected.last_event_at, event_type: "tool_finished", capability_kind: "tool", capability_id: "bash", capability_version: null, outcome: "succeeded", duration_ms: 1400, error_fingerprint: null, invocation_fingerprint: null }],
           workflow_has_more: false, has_more: false, next_cursor: null,
