@@ -118,35 +118,14 @@ pub fn canonical_provider_id(raw: &str, pricing: &Value) -> String {
     }
 }
 
-/// 估算金额换成计费方的**结算币种**（2026-09-16：胜算云是国内公司，海外模型也按
-/// 人民币结算——币种是计费方的属性，不是模型的）。只用于**估算**档（归因估算的
-/// fallback 价卡币种 ≠ 结算币种时），走 `fx_estimate`（`basis=user-set` 的展示
-/// 层折算率）；实付/月费永远分币不折算（ATTRIBUTABLE_WASTE §6.7）。
-/// 同币原样返回；没有该币对的折算率 → None（调用方保留原币种、不冒充）。
-pub fn to_settlement_currency(amount: f64, from: &str, to: &str, pricing: &Value) -> Option<f64> {
-    if from == to {
-        return Some(amount);
-    }
-    let usd_cny = pricing
-        .pointer("/fx_estimate/USD_CNY")
-        .and_then(|v| v.as_f64())
-        .filter(|r| r.is_finite() && *r > 0.0)?;
-    match (from, to) {
-        ("USD", "CNY") => Some(amount * usd_cny),
-        ("CNY", "USD") => Some(amount / usd_cny),
-        _ => None,
-    }
-}
-
-/// 计费方的结算币种：目录卡片声明的 `currency`（`catalog_2026_09.providers` 或
-/// 顶层 `providers`，后者默认 CNY）；目录不认识的计费方 → None，由调用方用用户
-/// 声明的币种或默认值。
-pub fn provider_settlement_currency(provider: &str, pricing: &Value) -> Option<String> {
+/// 目录价卡的**报价币种**，只用于价卡分组，不能推断用户结算币种。
+/// 缺显式币种的旧卡返回 None，不能因供应商或模型地区默认 CNY。
+pub fn provider_quote_currency(provider: &str, pricing: &Value) -> Option<String> {
     if let Some(pv) = pricing.pointer(&format!("/catalog_2026_09/providers/{provider}")) {
-        return Some(pv.get("currency").and_then(|v| v.as_str()).unwrap_or("CNY").to_string());
+        return pv.get("currency").and_then(|v| v.as_str()).map(str::to_string);
     }
     if let Some(pv) = pricing.pointer(&format!("/providers/{provider}")) {
-        return Some(pv.get("currency").and_then(|v| v.as_str()).unwrap_or("CNY").to_string());
+        return pv.get("currency").and_then(|v| v.as_str()).map(str::to_string);
     }
     None
 }
@@ -293,16 +272,12 @@ pub fn cache_hit_ratio(tokens: &Value) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn settlement_currency_conversion_only_for_estimates_with_a_known_rate() {
+    fn quote_currency_requires_explicit_catalog_currency() {
         let pricing = crate::cost::load_pricing();
-        let rate = pricing["fx_estimate"]["USD_CNY"].as_f64().unwrap();
-        assert_eq!(super::to_settlement_currency(10.0, "USD", "CNY", &pricing), Some(10.0 * rate));
-        assert_eq!(super::to_settlement_currency(71.5, "CNY", "USD", &pricing), Some(71.5 / rate));
-        assert_eq!(super::to_settlement_currency(3.0, "CNY", "CNY", &pricing), Some(3.0));
-        assert_eq!(super::to_settlement_currency(3.0, "EUR", "CNY", &pricing), None, "没有该币对的折算率就不冒充");
-        assert_eq!(super::provider_settlement_currency("shengsuanyun", &pricing).as_deref(), Some("CNY"));
-        assert_eq!(super::provider_settlement_currency("anthropic", &pricing).as_deref(), Some("USD"));
-        assert_eq!(super::provider_settlement_currency("nobody", &pricing), None);
+        assert_eq!(super::provider_quote_currency("shengsuanyun", &pricing).as_deref(), Some("CNY"));
+        assert_eq!(super::provider_quote_currency("anthropic", &pricing).as_deref(), Some("USD"));
+        assert_eq!(super::provider_quote_currency("nobody", &pricing), None);
+        assert_eq!(super::provider_quote_currency("legacy", &serde_json::json!({"providers": {"legacy": {"models": {}}}})), None);
     }
 
     #[test]

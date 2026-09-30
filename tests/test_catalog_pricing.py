@@ -56,6 +56,14 @@ class CatalogResolveCase(unittest.TestCase):
         self.assertIsNone(_resolve_card_catalog("<synthetic>", self.pricing))
         self.assertIsNone(_resolve_card_catalog("some/unknown-model", self.pricing))
 
+    def test_missing_quote_currency_is_not_guessed_from_provider(self):
+        from agent_vitals.agent.cost import _resolve_card_catalog
+
+        pricing = {"providers": {"legacy": {"models": {"legacy-model": {
+            "input_uncached": 1, "input_cached": 0, "output": 1,
+        }}}}}
+        self.assertIsNone(_resolve_card_catalog("legacy-model", pricing))
+
 
 class ClaudeSessionCostCase(unittest.TestCase):
     """夹具与 cost.rs::tests 的同名测试同数（互守，见文件头）。"""

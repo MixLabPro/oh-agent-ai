@@ -471,9 +471,8 @@ def cost_block(usage, pricing):
 def _resolve_card_catalog(model, pricing):
     """目录卡解析：在 `catalog_2026_09.providers.*` 找模型卡 → 找不到再在顶层
     `providers.*`（deepseek 官方 ¥ 卡；catalog 的 _doc 明说 deepseek 不重复收）
-    找。返回 (供应商键, 模型卡键, 币种)——币种取目录卡的 `currency` 字段；顶层
-    providers 段没有币种字段、整段是 ¥，默认 "CNY"（写死在 pricing.json 结构
-    里的真实约定，不是拍脑袋）。前缀匹配与 `_norm_model_in` 同一条规则：
+    找。返回 (供应商键, 模型卡键, 币种)——两层都要求显式 `currency`；
+    缺币种的卡不得按 CNY 猜价。前缀匹配与 `_norm_model_in` 同一条规则：
     `deepseek-v4-pro[1M]`/`deepseek-v4-pro-0813` 都落 `deepseek-v4-pro`——键是
     短的、模型是长的，**无需为 `[1M]` 变体写剥离代码**。但注意：`[1M]` 档的
     官方价不在任何价表里，按 pro 卡折是记录在案的近似（ee969d0c 有 3.5M in /
@@ -483,14 +482,17 @@ def _resolve_card_catalog(model, pricing):
         models = (pv or {}).get("models") or {}
         key = _norm_model_in(model, models)
         if key is not None:
-            currency = (pv or {}).get("currency") or "CNY"
-            return provider, key, currency
+            currency = (pv or {}).get("currency")
+            if currency:
+                return provider, key, currency
     top = pricing.get("providers") or {}
     for provider, pv in top.items():
         models = (pv or {}).get("models") or {}
         key = _norm_model_in(model, models)
         if key is not None:
-            return provider, key, "CNY"
+            currency = (pv or {}).get("currency")
+            if currency:
+                return provider, key, currency
     return None
 
 

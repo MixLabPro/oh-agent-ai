@@ -4,6 +4,7 @@
   "providers": {
     "deepseek-official": {
       "label": "DeepSeek 原厂",
+      "currency": "CNY",
       "_note": "deepseek-v4.1-flash 是网关/转售带命名空间的写法（真机语料 2026-09-14 实测 deepseek/deepseek-v4.1-flash），norm_model_in 会砍掉 `deepseek/` 前缀但不会把 `4.1` 折成 `4`，所以必须显式登记，否则该 id 落 no-price-card、这些用量的名义成本整栏为空。它按官方中文定价页（2026-09-14 核实）的 Flash 价填：缓存命中 0.02/0.04、缓存未命中 1/2、输出 4/8（元/百万 token）。\n\n⚠️ 已知未同步项：同页脚注（1）说明旧名 deepseek-v4-flash 对应的模型已下线、请求由 DeepSeek-V4.1-Flash 提供服务并按 Flash 价格计费——也就是说 deepseek-v4-flash 本应与上面同价，但本表的 deepseek-v4-flash 仍是 2026-08-30 采集的旧值（1.5/3.0、4.5/9.0），与 v4.1-flash 不一致。这次只补了缺失的 id，**没有**动已存在的键：改它会重算所有 deepseek-v4-flash 用量的估算，并让 37 个钉死金额的测试（Rust domain::cost 17 个 + Python 20 个）需要同步更新，应作为单独一次价格同步来做。",
       "models": {
         "deepseek-v4-flash": {
@@ -25,6 +26,7 @@
     },
     "shengsuanyun": {
       "label": "胜算云",
+      "currency": "CNY",
       "_note": "取自胜算云 DeepSeek-V4-Pro-0813 供应商页。该页列了两条上游线路，输入/输出价完全相同，只有缓存读取价差 3 倍：DeepSeek 线路 0.15/0.30，Ali 线路 0.45/0.90。日志里只记录到 provider=shengsuanyun，看不出实际走了哪条，这里按 DeepSeek 线路配置——若确认常走 Ali，把 input_cached 改成 0.45/0.90 即可，其余不用动。",
       "models": {
         "deepseek-v4-pro": {

@@ -544,11 +544,9 @@ fn subtract_claude_days(days: &mut BTreeMap<String, serde_json::Value>, declared
 /// 宿主无关的归因计价主体（claude 4 桶日 map 形状）；codex 的归因事实先转成同一
 /// 形状再进来（`codex_declared_provider_amounts`）。
 ///
-/// **币种跟计费方走，不跟模型走**（2026-09-16：胜算云是国内公司，转海外模型也按
-/// 人民币结算）。结算币种 = 用户在声明里填的 `declared_currency` > 目录卡片币种 >
-/// CNY。价卡未收录、退回原厂官方卡估出来的外币金额，按 `fx_estimate` 折成结算币
-/// （`pricing_method = fair-market-fallback-fx`，展示带 ≈）；没有该币对折算率时才
-/// 另起 `host/provider/CUR` 条目保留原币。折算只发生在估算档——实付/月费永远分币。
+/// 结算币种仅来自用户声明；目录价卡只证明报价币种，不证明用户付款币种。
+/// 退回原厂价卡时保留其报价原币种，并按币拆成 `host/provider/CUR` 条目。
+/// 历史估算不得在查询时按可变的 `fx_estimate` 折算。
 fn declared_provider_amounts(
     host: &str,
     provider: &str,
@@ -557,13 +555,13 @@ fn declared_provider_amounts(
     declared_currency: Option<&str>,
 ) -> Vec<(String, HostAmount)> {
     let pricing = cards.main.clone();
+    // 基础键沿用 provider 价卡币种以兼容下游键匹配；这不是结算币种证据。
     let primary_currency = declared_currency
         .map(str::to_string)
-        .or_else(|| agent_vitals_domain::cost::provider_settlement_currency(provider, &pricing))
-        .unwrap_or_else(|| "CNY".to_string());
+        .or_else(|| agent_vitals_domain::cost::provider_quote_currency(provider, &pricing))
+        .unwrap_or_else(|| "unknown".to_string());
     let mut accs: BTreeMap<String, ProviderAcc> = BTreeMap::new();
     let mut fallback: BTreeMap<String, bool> = BTreeMap::new();
-    let mut converted: BTreeMap<String, bool> = BTreeMap::new();
     for (date, day) in days {
         let report = agent_vitals_domain::cost::claude_day_cost_preferring(day, &pricing, Some(provider));
         let per_model = report.as_ref().and_then(|r| r.get("per_model")).and_then(|v| v.as_object());
@@ -578,16 +576,9 @@ fn declared_provider_amounts(
             continue;
         };
         for entry in per_model.values() {
-            let mut total = entry.get("total").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let mut currency = entry.get("currency").and_then(|v| v.as_str()).unwrap_or("CNY").to_string();
+            let total = entry.get("total").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let currency = entry.get("currency").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
             let is_fallback = entry.get("priced_with").and_then(|v| v.as_str()) != Some(provider);
-            if currency != primary_currency {
-                if let Some(v) = agent_vitals_domain::cost::to_settlement_currency(total, &currency, &primary_currency, &pricing) {
-                    total = v;
-                    currency = primary_currency.clone();
-                    converted.insert(currency.clone(), true);
-                }
-            }
             let acc = accs.entry(currency.clone()).or_insert_with(ProviderAcc::new);
             acc.observe(date);
             acc.add(BillingBasis::MeteredDeclared, &currency, total);
@@ -610,12 +601,7 @@ fn declared_provider_amounts(
         };
         let mut h = acc.finish(&key);
         let is_fallback = fallback.get(&currency).copied().unwrap_or(false);
-        let is_converted = converted.get(&currency).copied().unwrap_or(false);
-        h.pricing_method = Some(match (is_fallback, is_converted) {
-            (true, true) => "fair-market-fallback-fx",
-            (true, false) => "fair-market-fallback",
-            _ => "provider-card",
-        }.to_string());
+        h.pricing_method = Some(if is_fallback { "fair-market-fallback" } else { "provider-card" }.to_string());
         // 归因本身就是用户给的路由证据；unresolved 只剩价卡缺口。
         h.evidence_basis = Some("user-declared".to_string());
         h.unresolved_reason = h.has_unresolved.then(|| "no-price-card".to_string());
@@ -1073,10 +1059,11 @@ fn codex_declared_provider_amounts(
     declared_currency: Option<&str>,
 ) -> Vec<(String, HostAmount)> {
     let pricing = cards.main.clone();
-    let settlement = declared_currency
+    // 这里只决定基础键的币种，不以目录卡币种证明用户结算币种。
+    let primary_currency = declared_currency
         .map(str::to_string)
-        .or_else(|| agent_vitals_domain::cost::provider_settlement_currency(provider, &pricing))
-        .unwrap_or_else(|| "CNY".to_string());
+        .or_else(|| agent_vitals_domain::cost::provider_quote_currency(provider, &pricing))
+        .unwrap_or_else(|| "unknown".to_string());
     // 按「声明卡是否收录」把小时桶拆成两份：收录的转成 claude 4 桶日 map 走归因
     // 计价；未收录的留在 codex 小时形状走 OpenAI 卡。
     let mut covered_days: BTreeMap<String, serde_json::Value> = BTreeMap::new();
@@ -1116,7 +1103,7 @@ fn codex_declared_provider_amounts(
     let mut out = if covered_days.is_empty() {
         Vec::new()
     } else {
-        declared_provider_amounts("codex", provider, &covered_days, cards, Some(settlement.as_str()))
+        declared_provider_amounts("codex", provider, &covered_days, cards, Some(primary_currency.as_str()))
     };
     if !fallback_hours.is_empty() {
         let (priced, _tokens) = codex_host_amount_with_tokens_from_hours(
@@ -1124,12 +1111,8 @@ fn codex_declared_provider_amounts(
             &serde_json::Value::Null, day, cards,
         );
         let usd = priced.amounts_by_basis.values().copied().fold(0.0, |a, b| a + b);
-        // OpenAI 卡是 USD；计费方按别的币结算时折成结算币（估算档才折，带 ≈）。
-        let (estimate, currency, method) =
-            match agent_vitals_domain::cost::to_settlement_currency(usd, "USD", &settlement, &pricing) {
-                Some(v) if settlement != "USD" => (v, settlement.clone(), "fair-market-fallback-fx"),
-                _ => (usd, "USD".to_string(), "fair-market-fallback"),
-            };
+        // OpenAI 卡是 USD；结算币不同或未知也不能用当前汇率改写历史估算。
+        let (estimate, currency, method) = (usd, "USD".to_string(), "fair-market-fallback");
         let mut amounts_by_basis = BTreeMap::new();
         if estimate > 0.0 {
             amounts_by_basis.insert(BillingBasis::MeteredDeclared, estimate);
@@ -1145,13 +1128,19 @@ fn codex_declared_provider_amounts(
             unresolved_reason: None,
             freshness: day.map(day_freshness).unwrap_or_else(|| priced.freshness.clone()),
         };
-        // 同币并入主条目；异币（无折算率时）另起第三段键，不跨币相加。
+        // 同币并入主条目；异币另起第三段键，不跨币相加。
         match out.iter().position(|(k, _)| k == &base_key) {
             Some(i) if out[i].1.currency.as_deref() == Some(currency.as_str()) => {
                 let (k, existing) = out.remove(i);
                 out.push((k, merge_host_amounts(existing, amount)));
             }
             Some(_) => {
+                let key = format!("{base_key}/{currency}");
+                let mut a = amount;
+                a.host_id = key.clone();
+                out.push((key, a));
+            }
+            None if currency != primary_currency => {
                 let key = format!("{base_key}/{currency}");
                 let mut a = amount;
                 a.host_id = key.clone();
@@ -1501,3 +1490,32 @@ pub(crate) fn restore_full_host_tokens(
     }
 }
 
+#[cfg(test)]
+mod fx_regression_tests {
+    use super::*;
+
+    #[test]
+    fn declared_fallback_estimate_does_not_follow_current_fx() {
+        let mut cards = PricingCards {
+            main: agent_vitals_domain::cost::load_pricing(),
+            codex: crate::sessions::codex_cost::load_codex_pricing(),
+        };
+        let days = BTreeMap::from([(
+            "2026-09-24".to_string(),
+            json!({"anthropic/claude-sonnet-5": {
+                "input_tokens": 1_000_000,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 100_000
+            }}),
+        )]);
+        cards.main["fx_estimate"]["USD_CNY"] = json!(6.8);
+        let first = declared_provider_amounts("claude-code", "shengsuanyun", &days, &cards, Some("CNY"));
+        cards.main["fx_estimate"]["USD_CNY"] = json!(7.5);
+        let later = declared_provider_amounts("claude-code", "shengsuanyun", &days, &cards, Some("CNY"));
+        assert_eq!(first, later);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, "claude-code/shengsuanyun/USD");
+        assert_eq!(first[0].1.currency.as_deref(), Some("USD"));
+    }
+}

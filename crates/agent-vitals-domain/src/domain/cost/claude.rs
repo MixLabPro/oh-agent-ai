@@ -29,9 +29,8 @@ use super::{get_i64, model_short, norm_model_in};
 
 /// 目录卡解析：在 `catalog_2026_09.providers.*` 找模型卡 → 找不到再在顶层
 /// `providers.*`（deepseek 官方 ¥ 卡；catalog 的 _doc 明说 deepseek 不重复收）
-/// 找。返回 (供应商键, 模型卡键, 币种)——币种取目录卡的 `currency` 字段；顶层
-/// providers 段没有币种字段、整段是 ¥，默认 "CNY"（写死在 pricing.json 结构
-/// 里的真实约定，不是拍脑袋）。前缀匹配与 `norm_model_in` 同一条规则：
+/// 找。返回 (供应商键, 模型卡键, 币种)——两层都必须有显式 `currency`；
+/// 缺币种的卡不得按 CNY 猜价。前缀匹配与 `norm_model_in` 同一条规则：
 /// `deepseek-v4-pro[1M]`/`deepseek-v4-pro-0813` 都落 `deepseek-v4-pro`——键是
 /// 短的、模型是长的，**无需为 `[1M]` 变体写剥离代码**（审阅复核）。但注意：
 /// `[1M]` 档的官方价不在任何价表里，按 pro 卡折是记录在案的近似（ee969d0c 有
@@ -46,7 +45,7 @@ pub(crate) fn resolve_card_catalog(model: &str, pricing: &Value) -> Option<(Stri
                 continue;
             };
             if let Some(key) = norm_model_in(model, models) {
-                let currency = pv.get("currency").and_then(|v| v.as_str()).unwrap_or("CNY");
+                let Some(currency) = pv.get("currency").and_then(|v| v.as_str()) else { continue };
                 return Some((provider.clone(), key, currency.to_string()));
             }
         }
@@ -60,7 +59,8 @@ pub(crate) fn resolve_card_catalog(model: &str, pricing: &Value) -> Option<(Stri
                 continue;
             };
             if let Some(key) = norm_model_in(model, models) {
-                return Some((provider.clone(), key, "CNY".to_string()));
+                let Some(currency) = pv.get("currency").and_then(|v| v.as_str()) else { continue };
+                return Some((provider.clone(), key, currency.to_string()));
             }
         }
     }
@@ -162,12 +162,11 @@ pub(crate) fn resolve_card_catalog_preferring(
     preferred: Option<&str>,
 ) -> Option<(String, String, String)> {
     if let Some(pref) = preferred {
-        for (base, default_currency) in [("/catalog_2026_09/providers", None), ("/providers", Some("CNY"))] {
+        for base in ["/catalog_2026_09/providers", "/providers"] {
             let Some(pv) = pricing.pointer(&format!("{base}/{pref}")) else { continue };
             let Some(models) = pv.get("models").and_then(|v| v.as_object()) else { continue };
             if let Some(key) = norm_model_in(model, models) {
-                let currency = pv.get("currency").and_then(|v| v.as_str())
-                    .or(default_currency).unwrap_or("CNY");
+                let Some(currency) = pv.get("currency").and_then(|v| v.as_str()) else { continue };
                 return Some((pref.to_string(), key, currency.to_string()));
             }
         }
@@ -502,4 +501,3 @@ pub fn claude_day_total_tokens(day: &Value) -> i64 {
     }
     total
 }
-
