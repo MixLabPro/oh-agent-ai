@@ -1,6 +1,8 @@
 # Landing 价值优先改造 Spec（真实证据先行 · 海外首发）
 
-> 状态：**Draft v1.1（2026-09-30，评审修订；未实施）**。
+> 状态：**v1.2 可实施（2026-09-30）**。v1.1 → v1.2：补 §1.5 i18n 依赖与分波
+> 发布（W1 不等会话诊断英文化）、英文页 URL 结构、Hero 时态修正、仅 macOS
+> 披露、首发观测信号；发布门截图清单按波次拆分。
 > 触发：landing 重构版（`8a050094`）复查后的营销/增长分析 + 「Reddit 用户只认
 > 你能产出什么、是否响应他们的痛点」的定位校准。重构版在事实精度、
 > 无客户端分析脚本、
@@ -52,6 +54,40 @@ hero 用已有会话诊断能回答的问题开场；三组真机证据分别展
 
 ---
 
+## 1.5 与产品 i18n 的依赖、分波发布（v1.2 新增）
+
+**依赖事实（2026-09-30 盘点，`530645d6` 之后）**：landing 的英文真截图只能
+拍已英文化的界面。`US_LAUNCH_I18N_TASKS.md` 任务 1–7 均「进行中」、任务 8
+验收「待做」，P0 仍阻断美区正式发布。按页面粗查 React 源码中文残留行数
+（含注释，仅作量级参考）：
+
+| 页面 | 中文残留 | landing 用途 | 可截英文图？ |
+|---|---|---|---|
+| 总览 `OverviewPage` / 用量 `UsagePage` | 3–4（多为注释） | Hero、B2 | 可，需实拍确认 |
+| 会话列表/详情 `SessionsPage` / `SessionDetail` | 7–11 | B2 落点、B3 | 主路径已接入，需实拍确认 |
+| 会话诊断 `SessionInsights` / `SessionTrace` | 197 / 14 | **B1** | **否** |
+| 设置 / Trust / Findings | 75 / 122 / 61 | 不上首页 | 否 |
+| 原生托盘菜单 | 主要行已英文化，未 bundle 验收 | tray 图 | 待 bundle 实拍 |
+
+**分波规则**（landing 不等 i18n 全量完成，但每张图只在其界面英文化后才上）：
+
+- **W1（首发）**：Hero 用总览/用量真图（`hero-overview.png`）；B2、B3 真图；
+  托盘图。B1 位不留占位、不留空卡：以文字卡陈述「会话诊断：定位重复失败
+  区间（英文界面即将推出）」，不放中文截图冒充。
+- **W2**：`SessionInsights`/`SessionTrace` 英文化并通过 i18n 契约后，补 B1
+  真图并把 Hero 可选换为诊断图（`hero-diagnostics.png`）。
+- 中文页不受分波限制，可在 W1 即用中文真图上齐 B1。
+- 美区正式发布（i18n A01–A15 验收）与 landing W1 解耦：W1 页面标注
+  「macOS beta」，不宣称正式版。
+
+**`verify-landing.mjs` 配套改动**：`required` 由单一清单改为按波次与语言
+分组（`--wave w1|w2`，默认 w1）；W1 英文必需 `hero-overview.png`、
+`b2-usage-to-session.png`、`b3-billing-scope.png`、`tray.png`，W2 追加
+`b1-repeated-failure.png`、`hero-diagnostics.png`。截图按语言分目录
+`assets/shots/{en,zh}/`。W1 还需断言 B1 文字卡不含 `<img>`。
+
+---
+
 ## 2. 现状与缺陷（证据）
 
 | # | 缺陷 | 证据（website/landing/index.html） |
@@ -98,7 +134,12 @@ FAQ         补真实商业边界与经复核的竞品差异
 
 ### 4.2 L1 · Hero 痛语言 + 真截图位（工期待截图脱敏与动线确认）
 
-1. Hero 备选：H1 `Agent 还在运行，哪次会话已反复失败？`；副句：
+1. Hero 备选：H1 `哪次 Agent 会话在反复失败？`（v1.1 的「Agent 还在运行」
+   是实时语感，产品是事后离线分析，与撤回「实时止血」的原则冲突，已改）；
+   W1 若 Hero 图是总览，H1 可用 `你的 Agent 用量花在了哪些会话上？`，
+   问句须与所配截图一致。英文候选：`Where did your agent sessions actually
+   go?` / `Which agent session kept failing — and what did it cost?`（后者
+   仅 W2 可用），由母语审校定稿。副句：
    `在 Mac 上查看受支持 Agent 的用量、计费依据和失败区间，回到会话轨迹
    核对证据。Sessions 不上传云端。` 英文版需按目标用户语感重写，
    不是机械翻译。不得用「额度 40 分钟烧完」暗示尚不能证明的额度归因。
@@ -130,6 +171,16 @@ FAQ         补真实商业边界与经复核的竞品差异
 受支持宿主、首次无数据/权限不足的处理方法。不要展示尚不存在的
 `agent-vitals vitals`、brew tap 或 `install.sh`。
 
+**URL 结构**：英文为根 `website/landing/index.html`（`lang="en"`，海外分享
+链接落点），中文迁至 `website/landing/zh/index.html`；两页互设
+`<link rel="alternate" hreflang="en|zh-CN|x-default">`，页头放显式语言切换
+链接（纯静态，不做浏览器语言自动跳转）。资产共享 `assets/`，截图按语言分
+目录。`og:image` / `og:locale` 各页各自设置。
+
+**平台披露**：下载区与 FAQ 首条写明「目前仅 macOS（Apple Silicon/Intel 以
+Release 实际为准）；Linux/Windows 暂无」，并给 GitHub issue 链接收集需求——
+这也是不引入分析脚本时唯一的需求信号来源。
+
 ### 4.5 L4 · 后续可选项目：CLI、分发与渠道实验
 
 CLI 摘要命令属于产品功能，需要另立只读语义、口径、空库降级与 Rust/Python
@@ -151,11 +202,13 @@ GitHub Releases 的实际下载或安装。若要实验双 Hero，先定义基�
 
 ## 6. 分期与进度（每阶段验收绿后打勾）
 
-- [ ] **L0 工程底座**：契约脚本、页脚准确隐私声明、FAQ 已定事项
+- [~] **L0 工程底座**：契约脚本已落地（`461e09ce`）；待改按波次/语言分组
+  （§1.5）、页脚准确隐私声明、FAQ 已定事项
 - [ ] **L1 Hero**：可由实物回答的问题 + 经人审的真截图 + 真分享卡
-- [ ] **L2 三组证据**：产品动线与截图逐项验收，边界与口径同屏
-- [ ] **L3 海外承接**：英文页面/截图/安装说明及真实可用下载入口
-- [ ] **发布门**：Hero + 三组证据真机素材、动线、隐私/a11y/移动端回归
+- [ ] **L2 证据组**：W1 做 B2/B3（真图）+ B1 文字卡；边界与口径同屏
+- [ ] **L3 海外承接**：英文根页 + `zh/` 中文页 + hreflang + 仅 macOS 披露
+- [ ] **W1 发布门**：`verify-landing --wave w1` 绿 + 动线/隐私/a11y/移动端回归
+- [ ] **W2**：会话诊断英文化后补 B1 真图（依赖 i18n 任务 4）
 - [ ] **L4 后续独立决策**：CLI、安装分发、渠道归因/双钩实验；不阻塞首发
 
 ## 7. 验收标准
@@ -167,6 +220,11 @@ GitHub Releases 的实际下载或安装。若要实验双 Hero，先定义基�
 3. 发布门记录每张图的界面、版本、口径标签、隐私人审与目标动线。
 4. 既有页面纪律回归：mock 标注、a11y（skip-link/aria/reduced-motion）、
    深色适配不回退。
+5. B1 边界说明（「涉及 Token ≠ 浪费/可节省」）与截图同屏、字号不小于正文，
+   逐图人审。
+6. **首发观测信号**（不引入追踪）：发布前记录 GitHub Release 下载数与
+   stars 基线，发布后 7/30 天对比，并统计新增平台需求 issue；结果写回
+   landing README。这是方向信号，不是归因结论。
 
 ## 8. 风险与守卫
 
