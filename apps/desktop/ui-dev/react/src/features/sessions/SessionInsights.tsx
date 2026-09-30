@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { safeUiError } from "../../lib/tauri";
-import { message, resolvedLanguage } from "../../lib/i18n";
+import { message, resolvedLanguage, useLanguage, type MessageKey } from "../../lib/i18n";
 import {
   readSessionInsights, readSessionTraceEvidence,
   type InsightDiagnostic, type InsightStep, type NominalCost, type SessionInsights, type SessionTraceEvidence,
@@ -14,7 +14,20 @@ import "./session-insights.css";
 
 // ─────────────────────────── 文案与格式 ───────────────────────────
 
+// 本文件的文案在调用时按应用语言解析（不是模块加载时定死），SessionInsightsPanel 用
+// useLanguage() 订阅切换；纯函数（diagText / fmtTokens）与测试用同一条路径。
+const tx = (key: MessageKey, params: Record<string, string | number> = {}): string => message(key, resolvedLanguage(), params);
+const isEn = (): boolean => resolvedLanguage() === "en";
+/** 英文按数量取复数（1 turn / 3 turns）；中文量词不变。 */
+const uN = (unit: string, n: number): string => (isEn() && n !== 1 ? `${unit}s` : unit);
+
 export function fmtTokens(n: number): string {
+  if (isEn()) {
+    if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+    if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
+    if (n >= 1e4) return `${(n / 1e3).toFixed(1)}K`;
+    return String(Math.round(n));
+  }
   if (n >= 1e8) return `${(n / 1e8).toFixed(2)} 亿`;
   if (n >= 1e6) return `${Math.round(n / 1e4)} 万`;
   if (n >= 1e4) return `${(n / 1e4).toFixed(1)} 万`;
@@ -24,12 +37,12 @@ export function fmtPct(v: number): string {
   return `${(v * 100).toFixed(v < 0.1 ? 1 : 0)}%`;
 }
 export function fmtDuration(ms: number): string {
-  if (ms >= 3_600_000) return `${(ms / 3_600_000).toFixed(1)} 小时`;
-  if (ms >= 60_000) return `${Math.round(ms / 60_000)} 分钟`;
-  return `${Math.round(ms / 1000)} 秒`;
+  if (ms >= 3_600_000) return tx("ins.durHours", { n: (ms / 3_600_000).toFixed(1) });
+  if (ms >= 60_000) return tx("ins.durMinutes", { n: Math.round(ms / 60_000) });
+  return tx("ins.durSeconds", { n: Math.round(ms / 1000) });
 }
 function clock(ms: number): string {
-  return new Date(ms).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+  return new Date(ms).toLocaleTimeString(isEn() ? "en-US" : "zh-CN", { hour: "2-digit", minute: "2-digit", hour12: isEn() });
 }
 export function fmtMoney(cost: NominalCost | null): string | null {
   if (!cost || cost.amounts.length === 0) return null;
@@ -47,24 +60,20 @@ export function fmtMoney(cost: NominalCost | null): string | null {
 const inputOf = (s: { input: { cache_read: number; cache_write: number; uncached_input: number } }) => s.input.cache_read + s.input.cache_write + s.input.uncached_input;
 const missOf = (s: { input: { cache_write: number; uncached_input: number } }) => s.input.cache_write + s.input.uncached_input;
 
-const REMEDY: Record<string, [string, string]> = {
-  "inspect-repeated-failure": ["先弄清这个调用为什么失败，再让助手重试。", "这几个回合的消耗不代表都能省下来。"],
-  "review-context-growth": ["看看会话里有没有与当前任务无关的内容；任务确实变了，可以拆成新会话。", "新开会话会丢掉已有上下文，不建议一律这样做。"],
-  "inspect-uncached-input": ["查看这段调用的模型和输入规模有没有变化。", "不保证能降低消耗。"],
+const REMEDY_KEYS: Record<string, [MessageKey, MessageKey]> = {
+  "inspect-repeated-failure": ["ins.remedy.fail.a", "ins.remedy.fail.b"],
+  "review-context-growth": ["ins.remedy.growth.a", "ins.remedy.growth.b"],
+  "inspect-uncached-input": ["ins.remedy.uncached.a", "ins.remedy.uncached.b"],
 };
-const NOTE_TEXT: Record<string, string> = {
-  possible_cache_expiry: "长时间空闲之后，缓存可能已过期",
-  after_model_change: "模型切换之后，可能影响缓存复用",
-};
+const remedyOf = (id: string): [string, string] | undefined => { const keys = REMEDY_KEYS[id]; return keys ? [tx(keys[0]), tx(keys[1])] : undefined; };
+const NOTE_KEYS: Record<string, MessageKey> = { possible_cache_expiry: "ins.note.idle", after_model_change: "ins.note.model" };
+const noteText = (explanation: string): string | undefined => (NOTE_KEYS[explanation] ? tx(NOTE_KEYS[explanation]) : undefined);
 /// 线格式里没有缓存写入字段的宿主（codex / workbuddy 的用量只有 cached / uncached 两档）：
 /// 图例写「宿主不报告」，与「测到为 0」分开（§8.2）。
 const HOSTS_WITHOUT_CACHE_WRITE = new Set(["codex", "workbuddy"]);
 
-const LANE_REASON: Record<string, string> = {
-  not_recorded_by_host: "宿主没有记录",
-  not_ingested: "还没有接入",
-  no_data_in_session: "这个会话没有",
-};
+const LANE_KEYS: Record<string, MessageKey> = { not_recorded_by_host: "ins.lane.host", not_ingested: "ins.lane.notIngested", no_data_in_session: "ins.lane.none" };
+const laneReason = (reason: string | null | undefined): string => (LANE_KEYS[reason ?? ""] ? tx(LANE_KEYS[reason ?? ""]) : tx("ins.reasonUnknown"));
 
 /// 回合区间文案：起止相同时只写一个数（真机截图里「回合 17–17」读起来像笔误）。
 export function stepRange(unit: string, from: number, to: number): string {
@@ -76,31 +85,31 @@ export type DiagText = { title: string; chip: [string, string]; fact: string; wh
 export function diagText(d: InsightDiagnostic, unit: string): DiagText {
   const f = d.fact;
   const num = (k: string) => (typeof f[k] === "number" ? (f[k] as number) : 0);
-  const chip: [string, string] = d.cause === "evidence" ? ["ev", "有错误摘要"] : d.cause === "possible" ? ["maybe", "可能原因"] : ["unk", "原因未明"];
+  const chip: [string, string] = d.cause === "evidence" ? ["ev", tx("ins.chipEvidence")] : d.cause === "possible" ? ["maybe", tx("ins.chipPossible")] : ["unk", tx("ins.chipUnknown")];
   if (d.kind === "repeated_failure") {
-    const tool = typeof f.capability_id === "string" ? f.capability_id : "工具";
+    const tool = typeof f.capability_id === "string" ? f.capability_id : tx("ins.tool");
     const groups = num("groups");
-    const title = f.same_invocation ? `同一调用失败 ${num("failures")} 次` : groups > 1 ? `${groups} 个调用反复失败，共 ${num("failures")} 次` : `${tool} 反复失败 ${num("failures")} 次`;
+    const title = f.same_invocation ? tx("ins.titleSameCall", { n: num("failures") }) : groups > 1 ? tx("ins.titleGroups", { groups, n: num("failures") }) : tx("ins.titleTool", { tool, n: num("failures") });
     const fact = f.same_invocation
-      ? `${tool} 调用（参数相同）在 ${num("steps_hit")} 个${unit}里失败 ${num("failures")} 次。`
-      : `${tool} 等调用在 ${num("steps_hit")} 个${unit}里共失败 ${num("failures")} 次。`;
-    const why = d.cause === "evidence" ? "失败时留下了错误摘要，选中这条后，检查面板里可以读到原文。" : "没有可查看的错误摘录，失败原因未明。";
+      ? tx("ins.factSameArgs", { tool, steps: num("steps_hit"), unit: uN(unit, num("steps_hit")), n: num("failures") })
+      : tx("ins.factManyCalls", { tool, steps: num("steps_hit"), unit: uN(unit, num("steps_hit")), n: num("failures") });
+    const why = d.cause === "evidence" ? tx("ins.whyEvidence") : tx("ins.whyNoExcerpt");
     return { title, chip, fact, why };
   }
   if (d.kind === "input_growth") {
     return {
-      title: `单次输入峰值增长 ${num("ratio").toFixed(1)} 倍`, chip,
-      fact: `单次调用输入从 ${fmtTokens(num("peak_from"))} 涨到 ${fmtTokens(num("peak_to"))} tokens，这段占本会话输入 ${fmtPct(d.impact.share_of_session_input)}。`,
-      why: "尚不能确定是否包含不必要的上下文，也可能是任务本身需要。",
+      title: tx("ins.titleGrowth", { ratio: num("ratio").toFixed(1) }), chip,
+      fact: tx("ins.factGrowth", { from: fmtTokens(num("peak_from")), to: fmtTokens(num("peak_to")), share: fmtPct(d.impact.share_of_session_input) }),
+      why: tx("ins.whyGrowth"),
     };
   }
   const drop = d.explanation === "hit_rate_drop";
-  let fact = `${num("calls")} 次调用未命中缓存的输入 ${fmtTokens(num("uncached_tokens"))} tokens，占本会话输入 ${fmtPct(d.impact.share_of_session_input)}。`;
-  if (drop) fact += ` 命中率从 ${fmtPct(num("hit_before"))} 降到 ${fmtPct(num("hit_after"))}。`;
-  let why = "该区间未观察到长时间中断或模型切换，当前记录不足以解释未命中原因。";
-  const notes = d.context_notes.filter(n => NOTE_TEXT[n.explanation]).map(n => `${n.calls} 次发生在${NOTE_TEXT[n.explanation]}`);
-  if (notes.length) why += ` 另有 ${notes.join("，")}，不计入这条。`;
-  return { title: drop ? "缓存命中率下降" : "高未命中输入", chip, fact, why };
+  let fact = tx("ins.factUncached", { calls: num("calls"), tokens: fmtTokens(num("uncached_tokens")), share: fmtPct(d.impact.share_of_session_input) });
+  if (drop) fact += tx("ins.factHitDrop", { from: fmtPct(num("hit_before")), to: fmtPct(num("hit_after")) });
+  let why = tx("ins.whyUncached");
+  const notes = d.context_notes.filter(n => noteText(n.explanation)).map(n => tx("ins.noteHappened", { calls: n.calls, note: noteText(n.explanation) ?? "" }));
+  if (notes.length) why += tx("ins.whyNotes", { notes: notes.join(isEn() ? "; " : "，") });
+  return { title: drop ? tx("ins.titleHitDrop") : tx("ins.titleHighUncached"), chip, fact, why };
 }
 
 // ─────────────────────────── 组件 ───────────────────────────
@@ -116,6 +125,7 @@ const PAD_L = 52;
 const PAD_R = 52;
 
 export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: string; refreshKey: number }) {
+  useLanguage();
   const [data, setData] = useState<{ ref: string; insights: SessionInsights } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
@@ -166,7 +176,7 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
     }).catch((reason: unknown) => {
       if (!active) return;
       // 首次加载失败 → 整块报错；刷新失败 → 保留旧数据并提示（不静默吞掉）。
-      if (sameSession) setRefreshFailed(true); else setError(safeUiError(reason, "消耗诊断暂不可用"));
+      if (sameSession) setRefreshFailed(true); else setError(safeUiError(reason, tx("ins.unavailable")));
     });
     return () => { active = false; };
   }, [sessionRef, refreshKey, retry]);
@@ -181,7 +191,7 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
 
   const insights = data?.ref === sessionRef ? data.insights : null;
   const steps = insights?.axis.steps ?? [];
-  const unit = insights?.axis.unit === "turn" ? "回合" : "调用";
+  const unit = tx(insights?.axis.unit === "turn" ? "ins.unitTurn" : "ins.unitCall");
   const plotW = width - PAD_L - PAD_R;
   const maxVisible = maxVisibleSteps(plotW);
   const focus: [number, number] = useMemo(() => {
@@ -252,8 +262,8 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
     setHistory(history.slice(0, -1));
   };
 
-  if (error) return <section className="session-detail-panel session-insights" aria-label="消耗诊断"><div role="alert"><p>消耗诊断暂不可用：{error}；下方事实时间线仍可查看。</p><button className="button button-secondary" onClick={() => setRetry(v => v + 1)}>重试</button></div></section>;
-  if (!insights) return <section className="session-detail-panel session-insights" aria-label="消耗诊断"><p role="status">正在分析这次会话的消耗…</p></section>;
+  if (error) return <section className="session-detail-panel session-insights" aria-label={tx("ins.ariaDiag")}><div role="alert"><p>{tx("ins.unavailableErr", { error })}</p><button className="button button-secondary" onClick={() => setRetry(v => v + 1)}>{tx("ins.retry")}</button></div></section>;
+  if (!insights) return <section className="session-detail-panel session-insights" aria-label={tx("ins.ariaDiag")}><p role="status">{tx("ins.analyzing")}</p></section>;
 
   const all = inputOf(insights.session);
   const diags = insights.diagnostics;
@@ -273,27 +283,27 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
     }
   };
 
-  return <section className="session-detail-panel session-insights" aria-label="消耗诊断">
-    <div className="section-heading"><div><p className="eyebrow">消耗诊断</p><h3>这次会话的消耗集中在哪里</h3></div><span className="count-badge">{steps.length} 个{unit}</span></div>
-    {refreshFailed && <p className="insights-refresh-failed" role="status">刷新失败，显示的是上一次的结果。<button type="button" className="link" onClick={() => setRetry(v => v + 1)}>重试</button></p>}
+  return <section className="session-detail-panel session-insights" aria-label={tx("ins.ariaDiag")}>
+    <div className="section-heading"><div><p className="eyebrow">{tx("ins.ariaDiag")}</p><h3>{tx("ins.heading")}</h3></div><span className="count-badge">{tx("ins.countBadge", { n: steps.length, unit: uN(unit, steps.length) })}</span></div>
+    {refreshFailed && <p className="insights-refresh-failed" role="status">{tx("ins.refreshFailed")}<button type="button" className="link" onClick={() => setRetry(v => v + 1)}>{tx("ins.retry")}</button></p>}
 
     <dl className="insights-summary">
       <div><dt>{unit}</dt><dd className="num">{steps.length}</dd></div>
-      <div><dt>调用</dt><dd className="num">{insights.session.calls}</dd></div>
-      <div><dt>输入 / 输出</dt><dd className="num">{fmtTokens(all)} / {fmtTokens(insights.session.output)}</dd></div>
-      <div><dt>缓存命中率</dt><dd className="num">{all ? fmtPct(insights.session.input.cache_read / all) : "—"}</dd></div>
-      <div><dt>名义成本</dt><dd>{money ? <><span className="num">{money}</span><small>按调用模型的官方价估算，含输出，非账单</small></> : <><span className="muted">暂无可用计价依据</span><small>{insights.session.nominal_cost_reason === "no_pricing_snapshot" ? "这段时间还没有价目快照" : insights.session.nominal_cost_reason === "no_price_card" ? "这些模型没有价卡" : ""}</small></>}</dd></div>
-      <div className="insights-safety"><dt>安全提醒</dt><dd>{insights.safety.count ? <button className="insights-safety-btn" type="button" onClick={() => go({ kind: "safety" })}><b className="num">{insights.safety.count}</b> 条 · 查看</button> : <span className="muted">未发现</span>}</dd></div>
+      <div><dt>{tx("ins.calls")}</dt><dd className="num">{insights.session.calls}</dd></div>
+      <div><dt>{tx("ins.inOut")}</dt><dd className="num">{fmtTokens(all)} / {fmtTokens(insights.session.output)}</dd></div>
+      <div><dt>{tx("ins.hitRate")}</dt><dd className="num">{all ? fmtPct(insights.session.input.cache_read / all) : "—"}</dd></div>
+      <div><dt>{tx("ins.nominal")}</dt><dd>{money ? <><span className="num">{money}</span><small>{tx("ins.nominalNote")}</small></> : <><span className="muted">{tx("ins.noPricing")}</span><small>{insights.session.nominal_cost_reason === "no_pricing_snapshot" ? tx("ins.noSnapshot") : insights.session.nominal_cost_reason === "no_price_card" ? tx("ins.noPriceCard") : ""}</small></>}</dd></div>
+      <div className="insights-safety"><dt>{tx("ins.safety")}</dt><dd>{insights.safety.count ? <button className="insights-safety-btn" type="button" onClick={() => go({ kind: "safety" })}><b className="num">{insights.safety.count}</b> {tx("ins.itemsView")}</button> : <span className="muted">{tx("ins.none")}</span>}</dd></div>
     </dl>
 
-    <div className="insights-diags" role="list" aria-label="值得关注">
+    <div className="insights-diags" role="list" aria-label={tx("ins.attention")}>
       {diags.length === 0 ? <div className="insights-empty">
-        <b>在当前可分析的数据中，未发现达到提示条件的消耗异常。</b>
-        <p>检查了：高未命中输入、单次输入峰值增长、同一调用重复失败。{emptyNotes(insights, unit)}</p>
+        <b>{tx("ins.emptyTitle")}</b>
+        <p>{tx("ins.checked")}{emptyNotes(insights, unit)}</p>
       </div> : <>
-        <div className="insights-diags-head"><span>值得关注</span><span>{diags.length} 条 · 有直接证据的排前面</span></div>
+        <div className="insights-diags-head"><span>{tx("ins.attention")}</span><span>{tx("ins.diagHead", { n: diags.length })}</span></div>
         {diags.slice(0, 3).map((d, i) => <DiagRow key={i} d={d} i={i} unit={unit} open={selectedDiag === i} onSelect={() => go({ kind: "diag", diag: i }, false)} />)}
-        {diags.length > 3 && <details className="insights-more"><summary>还有 {diags.length - 3} 条</summary>{diags.slice(3).map((d, k) => <DiagRow key={k + 3} d={d} i={k + 3} unit={unit} open={selectedDiag === k + 3} onSelect={() => go({ kind: "diag", diag: k + 3 }, false)} />)}</details>}
+        {diags.length > 3 && <details className="insights-more"><summary>{tx("ins.moreItems", { n: diags.length - 3 })}</summary>{diags.slice(3).map((d, k) => <DiagRow key={k + 3} d={d} i={k + 3} unit={unit} open={selectedDiag === k + 3} onSelect={() => go({ kind: "diag", diag: k + 3 }, false)} />)}</details>}
       </>}
     </div>
 
@@ -304,11 +314,11 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
         {steps.length > maxVisible && <MiniMap steps={steps} diags={diags} view={view} width={width} maxVisible={maxVisible} onWindow={setUserWindow} unit={unit} onJump={dir => { if (!diags.length) return; const i = selectedDiag >= 0 ? (selectedDiag + dir + diags.length) % diags.length : 0; go({ kind: "diag", diag: i }, false); }} />}
         <Chart insights={insights} view={view} width={width} cursor={cursor} mode={mode} unit={unit}
           onStep={s => go({ kind: "step", step: s }, false)} onDiag={i => go({ kind: "diag", diag: i }, false)} onKey={onKey} />
-        <p className="insights-hint">点击任一列查看详情 · ← → 逐个移动 · Esc 回到当前诊断</p>
-        <details className="insights-sum"><summary>文字摘要</summary><ul>{summaryLines(insights, unit).map((t, i) => <li key={i}>{t}</li>)}</ul></details>
+        <p className="insights-hint">{tx("ins.hint")}</p>
+        <details className="insights-sum"><summary>{tx("ins.textSummary")}</summary><ul>{summaryLines(insights, unit).map((t, i) => <li key={i}>{t}</li>)}</ul></details>
       </div>
-      <aside className="insights-inspector" aria-live="polite" aria-label="详情">
-        {history.length > 0 && <div className="insights-inspector-bar"><button className="insights-back" type="button" onClick={back}>‹ 返回</button></div>}
+      <aside className="insights-inspector" aria-live="polite" aria-label={tx("ins.details")}>
+        {history.length > 0 && <div className="insights-inspector-bar"><button className="insights-back" type="button" onClick={back}>{tx("ins.back")}</button></div>}
         {mode && <Inspector insights={insights} mode={mode} unit={unit} ev={ev} go={go} retry={retryEvidence} />}
       </aside>
     </div>
@@ -317,9 +327,9 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
 
 function axisNote(insights: SessionInsights): string | null {
   const a = insights.axis;
-  if (a.fallback === "few_turn_starts") return a.turn_starts === 0 ? "这个会话没有回合记录，横轴按助手调用逐次排列。" : "这个会话只记录到一个回合（旧会话的源日志可能已被宿主清理），横轴按助手调用逐次排列。";
-  if (a.fallback === "most_calls_before_first_turn") return "这个会话的大部分调用发生在第一个回合记录之前，横轴按助手调用逐次排列。";
-  if (a.leading_step) return "第 1 个回合是「首个回合记录之前」的调用，单独列出，不丢数据。";
+  if (a.fallback === "few_turn_starts") return tx(a.turn_starts === 0 ? "ins.axisNoTurns" : "ins.axisOneTurn");
+  if (a.fallback === "most_calls_before_first_turn") return tx("ins.axisMostBefore");
+  if (a.leading_step) return tx("ins.axisLeading");
   return null;
 }
 
@@ -336,25 +346,25 @@ function emptyNotes(insights: SessionInsights, unit: string): string {
   const cancelled = insights.axis.steps.filter(s => s.outcome === "cancelled").length;
   const idle = insights.axis.steps.filter(s => s.notes.some(n => n.explanation === "possible_cache_expiry")).map(s => s.index);
   const bits: string[] = [];
-  if (failed) bits.push(`${failed} 个${unit}以失败结束`);
-  if (cancelled) bits.push(`${cancelled} 个${unit}被中断`);
-  if (idle.length) bits.push(`${unit} ${idle.slice(0, 3).join("、")}${idle.length > 3 ? " 等" : ""} 前有长时间空闲`);
-  return bits.length ? ` 另有 ${bits.join("，")}，未达到提示条件，仍标在轨迹上。` : "";
+  if (failed) bits.push(tx("ins.endedFailed", { n: failed, unit: uN(unit, failed) }));
+  if (cancelled) bits.push(tx("ins.endedCancelled", { n: cancelled, unit: uN(unit, cancelled) }));
+  if (idle.length) bits.push(tx("ins.idleBefore", { unit, list: idle.slice(0, 3).join(isEn() ? ", " : "、") + (idle.length > 3 ? (isEn() ? " and more" : " 等") : "") }));
+  return bits.length ? tx("ins.emptyExtra", { bits: bits.join(isEn() ? "; " : "，") }) : "";
 }
 
 function summaryLines(insights: SessionInsights, unit: string): string[] {
   const all = inputOf(insights.session);
-  const lines = [`共 ${insights.axis.steps.length} 个${unit}，输入 ${fmtTokens(all)} tokens，缓存命中率 ${all ? fmtPct(insights.session.input.cache_read / all) : "—"}。`];
-  insights.diagnostics.forEach((d, i) => { const t = diagText(d, unit); lines.push(`诊断 ${i + 1}：${stepRange(unit, d.steps.from, d.steps.to)}，${t.title}。${t.fact}原因：${t.why}`); });
-  for (const s of insights.axis.steps) for (const n of s.notes) lines.push(`${unit} ${s.index}：${n.calls} 次调用发生在${NOTE_TEXT[n.explanation]}。`);
-  if (insights.lanes.tools.state === "unavailable") lines.push(`工具结果：未记录（${LANE_REASON[insights.lanes.tools.reason ?? ""] ?? "原因未知"}）。`);
-  if (insights.quality.legacy_fingerprints) lines.push(`${insights.quality.legacy_fingerprints} 次失败来自已清理的旧日志，无法按参数区分是不是同一调用。`);
+  const lines = [tx("ins.sumTotal", { n: insights.axis.steps.length, unit: uN(unit, insights.axis.steps.length), input: fmtTokens(all), rate: all ? fmtPct(insights.session.input.cache_read / all) : "—" })];
+  insights.diagnostics.forEach((d, i) => { const t = diagText(d, unit); lines.push(tx("ins.sumDiag", { i: i + 1, range: stepRange(unit, d.steps.from, d.steps.to), title: t.title, fact: t.fact, why: t.why })); });
+  for (const s of insights.axis.steps) for (const n of s.notes) lines.push(tx("ins.sumNote", { unit, index: s.index, calls: n.calls, note: noteText(n.explanation) ?? "" }));
+  if (insights.lanes.tools.state === "unavailable") lines.push(tx("ins.sumTools", { reason: laneReason(insights.lanes.tools.reason) }));
+  if (insights.quality.legacy_fingerprints) lines.push(tx("ins.sumLegacy", { n: insights.quality.legacy_fingerprints }));
   return lines.slice(0, 200);
 }
 
 function DiagRow({ d, i, unit, open, onSelect }: { d: InsightDiagnostic; i: number; unit: string; open: boolean; onSelect: () => void }) {
   const t = diagText(d, unit);
-  const rm = REMEDY[d.remedy_id];
+  const rm = remedyOf(d.remedy_id);
   return <div className={`insights-diag${open ? " on" : ""}`} role="listitem">
     <button type="button" className="insights-diag-sum" aria-expanded={open} onClick={onSelect}>
       <span className="insights-num">{i + 1}</span>
@@ -362,20 +372,20 @@ function DiagRow({ d, i, unit, open, onSelect }: { d: InsightDiagnostic; i: numb
       <span className="insights-chev" aria-hidden="true">{open ? "▾" : "▸"}</span>
       <span className="insights-diag-fact">{t.fact}</span>
     </button>
-    {open && <div className="insights-diag-more"><p><span className="lbl">原因</span>{t.why}</p>{rm && <p><span className="lbl">建议</span>{rm[0]} <span className="muted">{rm[1]}</span></p>}</div>}
+    {open && <div className="insights-diag-more"><p><span className="lbl">{tx("ins.cause")}</span>{t.why}</p>{rm && <p><span className="lbl">{tx("ins.advice")}</span>{rm[0]} <span className="muted">{rm[1]}</span></p>}</div>}
   </div>;
 }
 
 function Legend({ insights, unit }: { insights: SessionInsights; unit: string }) {
   const writes = insights.session.input.cache_write > 0;
   return <div className="insights-legend">
-    <span><i className="sw read" />缓存读取</span>
-    <span className={writes ? "" : "off"}><i className="sw write" />{writes ? "缓存写入" : HOSTS_WITHOUT_CACHE_WRITE.has(insights.host) ? "缓存写入（宿主不报告）" : "缓存写入（本会话为 0）"}</span>
-    <span><i className="sw unc" />未缓存输入</span>
-    <span><i className="sw line" />单次输入峰值</span>
-    <span><i className="sw fail" />工具失败</span>
-    <span>◷ 长空闲后</span><span>◇ 模型切换</span>
-    <span className="muted">横轴：{unit}</span>
+    <span><i className="sw read" />{tx("ins.cacheRead")}</span>
+    <span className={writes ? "" : "off"}><i className="sw write" />{tx(writes ? "ins.cacheWrite" : HOSTS_WITHOUT_CACHE_WRITE.has(insights.host) ? "ins.cacheWriteNoReport" : "ins.cacheWriteZero")}</span>
+    <span><i className="sw unc" />{tx("ins.uncachedInput")}</span>
+    <span><i className="sw line" />{tx("ins.peakInput")}</span>
+    <span><i className="sw fail" />{tx("ins.toolFailed")}</span>
+    <span>{tx("ins.legendIdle")}</span><span>{tx("ins.legendModel")}</span>
+    <span className="muted">{tx("ins.axisLabel", { unit })}</span>
   </div>;
 }
 
@@ -410,23 +420,23 @@ function TooltipBox({ x, y, chartWidth, content }: { x: number; y: number; chart
 function stepTip(st: InsightStep, unit: string): TipContent {
   const total = inputOf(st);
   const rows: [string, string][] = [
-    ["输入合计", fmtTokens(total)],
-    ["读取", fmtTokens(st.input.cache_read)],
-    ["写入", fmtTokens(st.input.cache_write)],
-    ["未缓存", fmtTokens(st.input.uncached_input)],
-    ["命中率", st.hit_rate != null ? fmtPct(st.hit_rate) : "—"],
-    ["单次峰值", fmtTokens(st.input_peak)],
-    ["调用", String(st.calls)],
+    [tx("ins.rowInputTotal"), fmtTokens(total)],
+    [tx("ins.rowRead"), fmtTokens(st.input.cache_read)],
+    [tx("ins.rowWrite"), fmtTokens(st.input.cache_write)],
+    [tx("ins.rowUncached"), fmtTokens(st.input.uncached_input)],
+    [tx("ins.rowHit"), st.hit_rate != null ? fmtPct(st.hit_rate) : "—"],
+    [tx("ins.rowPeak"), fmtTokens(st.input_peak)],
+    [tx("ins.calls"), String(st.calls)],
   ];
   if (st.tools.succeeded + st.tools.failed + st.tools.cancelled + st.tools.unknown > 0) {
     // 拆成三行短数值：合成一行「成功 31 · 失败 1 · 取消 0」在值列里 nowrap，
     // 比提示框 max-width 还宽，真机上整列数字被撑出框外（与缓存三桶拆行同理）
-    rows.push(["工具成功", String(st.tools.succeeded)], ["工具失败", String(st.tools.failed)], ["工具取消", String(st.tools.cancelled)]);
+    rows.push([tx("ins.toolOk"), String(st.tools.succeeded)], [tx("ins.toolFailed"), String(st.tools.failed)], [tx("ins.toolCancelled"), String(st.tools.cancelled)]);
   }
   const lines: string[] = [];
-  if (st.outcome === "failed") lines.push("这个回合以失败结束。");
-  if (st.outcome === "cancelled") lines.push("这个回合被用户中断。");
-  for (const n of st.notes) lines.push(NOTE_TEXT[n.explanation]);
+  if (st.outcome === "failed") lines.push(tx("ins.turnFailed"));
+  if (st.outcome === "cancelled") lines.push(tx("ins.turnCancelled"));
+  for (const n of st.notes) lines.push(noteText(n.explanation) ?? "");
   return { title: `${unit} ${st.index}`, rows, lines };
 }
 
@@ -453,8 +463,8 @@ function MiniMap({ steps, diags, view, width, maxVisible, onWindow, onJump, unit
     onWindow([s, s + maxVisible - 1]);
   };
   return <>
-    <div className="insights-nav"><span>显示 {unit} {view[0]}–{view[1]}，共 {steps.length} 个</span><span className="sp" />{diags.length > 0 && <><button type="button" className="button button-secondary" onClick={() => onJump(-1)}>‹ 上一处诊断</button><button type="button" className="button button-secondary" onClick={() => onJump(1)}>下一处诊断 ›</button></>}</div>
-    <svg ref={svg} className="insights-mini" viewBox={`0 0 ${width} ${H}`} role="slider" aria-label="全程缩略图" aria-valuemin={1} aria-valuemax={steps.length} aria-valuenow={view[0]} tabIndex={0}
+    <div className="insights-nav"><span>{tx("ins.showing", { unit, from: view[0], to: view[1], total: steps.length })}</span><span className="sp" />{diags.length > 0 && <><button type="button" className="button button-secondary" onClick={() => onJump(-1)}>{tx("ins.prevDiag")}</button><button type="button" className="button button-secondary" onClick={() => onJump(1)}>{tx("ins.nextDiag")}</button></>}</div>
+    <svg ref={svg} className="insights-mini" viewBox={`0 0 ${width} ${H}`} role="slider" aria-label={tx("ins.miniAria")} aria-valuemin={1} aria-valuemax={steps.length} aria-valuenow={view[0]} tabIndex={0}
       onPointerDown={e => { drag.current = true; (e.target as Element).setPointerCapture?.(e.pointerId); at(e.clientX); }}
       onPointerMove={e => { if (drag.current) at(e.clientX); }} onPointerUp={() => { drag.current = false; }} onPointerCancel={() => { drag.current = false; }}
       onKeyDown={e => { if (e.key === "ArrowRight" || e.key === "ArrowLeft") { e.preventDefault(); const d = e.key === "ArrowRight" ? Math.ceil(maxVisible / 2) : -Math.ceil(maxVisible / 2); const s = Math.max(1, Math.min(steps.length - maxVisible + 1, view[0] + d)); onWindow([s, s + maxVisible - 1]); } }}>
@@ -462,7 +472,7 @@ function MiniMap({ steps, diags, view, width, maxVisible, onWindow, onJump, unit
       {cols.map(c => { const h = c.value / maxV * (H - 12); return <rect key={c.x} x={PAD_L + c.x} y={H - 10 - h} width={1} height={h} className={c.warn ? "mini-warn" : "mini-col"} />; })}
       {diags.map((d, i) => <rect key={i} x={PAD_L + (d.steps.from - 1) * px} y={H - 6} width={Math.max(3, (d.steps.to - d.steps.from + 1) * px)} height={4} rx={2} className={`band-${d.kind}`} />)}
       <rect x={PAD_L + (view[0] - 1) * px} y={0.5} width={(view[1] - view[0] + 1) * px} height={H - 9} rx={2} className="mini-window" />
-      <text x={PAD_L - 6} y={H / 2} textAnchor="end" className="tnum">全程</text>
+      <text x={PAD_L - 6} y={H / 2} textAnchor="end" className="tnum">{tx("ins.whole")}</text>
     </svg>
   </>;
 }
@@ -536,7 +546,7 @@ function Chart({ insights, view, width, cursor, mode, unit, onStep, onDiag, onKe
 
   return <div className="insights-chart-wrap">
     <svg className="insights-chart" viewBox={`0 0 ${width} ${H}`} tabIndex={0} role="img" onKeyDown={onKey}
-      aria-label={`每${unit}输入消耗、单次输入峰值与工具结果，显示 ${view[0]}–${view[1]}，共 ${steps.length} 个${unit}`}>
+      aria-label={tx("ins.chartAria", { unit, from: view[0], to: view[1], total: steps.length, units: uN(unit, steps.length) })}>
       <defs>
         <pattern id="ins-hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" className="hatch-bg" /><line x1="0" y1="0" x2="0" y2="5" className="hatch-line" /></pattern>
         <pattern id="ins-off" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="7" height="7" className="off-bg" /><line x1="0" y1="0" x2="0" y2="7" className="off-line" /></pattern>
@@ -544,7 +554,7 @@ function Chart({ insights, view, width, cursor, mode, unit, onStep, onDiag, onKe
       {selBand?.kind === "visible" && <rect x={selBand.x} y={yTop - 8} width={selBand.w} height={yAxis - yTop + 8} className="sel" />}
       {cur && <rect x={cur.x} y={yTop - 8} width={cur.w} height={yAxis - yTop + 8} className={sel ? "cursor-outline" : "sel"} />}
       {[0, 0.5, 1].map(f => <g key={f}><line x1={PAD_L} x2={width - PAD_R} y1={yB(maxT * f)} y2={yB(maxT * f)} className="grid" /><text x={PAD_L - 6} y={yB(maxT * f) + 3.5} textAnchor="end" className="tnum">{f ? fmtTokens(maxT * f) : "0"}</text></g>)}
-      <text x={PAD_L} y={yTop - 10} className="lane">每{unit}输入消耗（累计）</text>
+      <text x={PAD_L} y={yTop - 10} className="lane">{tx("ins.laneInput", { unit })}</text>
       {layout.slots.map(s => {
         const st = steps[s.index - 1];
         const x = s.x + (s.w - bw) / 2;
@@ -558,8 +568,8 @@ function Chart({ insights, view, width, cursor, mode, unit, onStep, onDiag, onKe
         </g>;
       })}
       {(() => { const showGapLabel = placeGapLabels(layout.gaps.map(g => g.x)); return layout.gaps.map((g, gi) => {
-        const label = `空闲 ${Math.round(g.idleMs / 60_000)} 分`;
-        const content: TipContent = { lines: [label, `${unit} ${g.beforeIndex} 之前`] };
+        const label = tx("ins.idleMin", { n: Math.round(g.idleMs / 60_000) });
+        const content: TipContent = { lines: [label, tx("ins.beforeIndex", { unit, n: g.beforeIndex })] };
         return <g key={g.beforeIndex} className="gap" onMouseMove={e => hoverTip(e, content)} onMouseLeave={hideTip}>
           <rect className="hit" x={g.x} y={yTop - 4} width={GAP_WIDTH} height={yAxis - yTop + 4} />
           <path d={`M${g.x + 8} ${yTop}l3 5l-3 5l3 5M${g.x + 12} ${yTop}l3 5l-3 5l3 5`} />
@@ -607,9 +617,9 @@ function Chart({ insights, view, width, cursor, mode, unit, onStep, onDiag, onKe
         }, idx[0]);
         const y = yBand + visibleRowCount * bandRow + 2;
         const content: TipContent = {
-          title: `窗口外还有 ${idx.length} 条`,
+          title: tx("ins.outsideWindow", { n: idx.length }),
           lines: idx.slice(0, 12).map(i => { const t = diagText(diags[i], unit); return `${i + 1}. ${stepRange(unit, diags[i].steps.from, diags[i].steps.to)} · ${t.title}`; })
-            .concat(idx.length > 12 ? [`……还有 ${idx.length - 12} 条`] : []),
+            .concat(idx.length > 12 ? [tx("ins.andMore", { n: idx.length - 12 })] : []),
         };
         return <g key={side} className="band-summary" onClick={() => onDiag(nearest)} onMouseMove={e => hoverTip(e, content)} onMouseLeave={hideTip}>
           <rect className="hit" x={side === "left" ? x - 2 : x - 40} y={y - 4} width={42} height={14} />
@@ -617,12 +627,12 @@ function Chart({ insights, view, width, cursor, mode, unit, onStep, onDiag, onKe
           <text x={side === "left" ? x + 17 : x - 17} y={y + 6} textAnchor="middle" className="tnum band-summary-text">{side === "left" ? `‹${idx.length}` : `${idx.length}›`}</text>
         </g>;
       })}
-      <text x={PAD_L} y={yPeak - 4} className="lane">单次输入峰值</text>
+      <text x={PAD_L} y={yPeak - 4} className="lane">{tx("ins.peakInput")}</text>
       {[0, 1].map(f => <g key={f}><line x1={PAD_L} x2={width - PAD_R} y1={yP(maxP * f)} y2={yP(maxP * f)} className="grid" /><text x={width - PAD_R + 6} y={yP(maxP * f) + 3.5} className="tnum">{f ? fmtTokens(maxP) : "0"}</text></g>)}
       <path d={path} className="peak-line" />
       {cur && steps[cur.index - 1].calls > 0 && <circle cx={cur.x + cur.w / 2} cy={yP(steps[cur.index - 1].input_peak)} r={3.2} className="peak-dot" />}
-      <text x={PAD_L} y={yTools - 4} className="lane">工具结果</text>
-      {!toolsOk ? <g><rect x={PAD_L} y={yTools} width={plotW} height={hTools} rx={3} fill="url(#ins-off)" /><text x={PAD_L + plotW / 2} y={yTools + hTools / 2 + 4} textAnchor="middle" className="muted-text">未记录 · {LANE_REASON[insights.lanes.tools.reason ?? ""] ?? "原因未知"}</text></g>
+      <text x={PAD_L} y={yTools - 4} className="lane">{tx("ins.toolResults")}</text>
+      {!toolsOk ? <g><rect x={PAD_L} y={yTools} width={plotW} height={hTools} rx={3} fill="url(#ins-off)" /><text x={PAD_L + plotW / 2} y={yTools + hTools / 2 + 4} textAnchor="middle" className="muted-text">{tx("ins.notRecordedDot", { reason: laneReason(insights.lanes.tools.reason) })}</text></g>
         : layout.slots.map(s => {
           const t = steps[s.index - 1].tools;
           const x = s.x + (s.w - bw) / 2;
@@ -653,14 +663,14 @@ function Buckets({ input, noWrite }: { input: { cache_read: number; cache_write:
   const a = Math.max(1, input.cache_read + input.cache_write + input.uncached_input);
   return <div className="insights-buckets">
     <div className="bar-track"><span className="read" style={{ width: `${input.cache_read / a * 100}%` }} /><span className="write" style={{ width: `${input.cache_write / a * 100}%` }} /><span className="unc" style={{ width: `${input.uncached_input / a * 100}%` }} /></div>
-    <div className="brow"><i className="sw read" />缓存读取<span className="num">{fmtTokens(input.cache_read)}</span></div>
-    <div className="brow"><i className="sw write" />缓存写入<span className="num">{noWrite ? "未记录到" : fmtTokens(input.cache_write)}</span></div>
-    <div className="brow"><i className="sw unc" />未缓存输入<span className="num">{fmtTokens(input.uncached_input)}</span></div>
+    <div className="brow"><i className="sw read" />{tx("ins.cacheRead")}<span className="num">{fmtTokens(input.cache_read)}</span></div>
+    <div className="brow"><i className="sw write" />{tx("ins.cacheWrite")}<span className="num">{noWrite ? tx("ins.notRecorded") : fmtTokens(input.cache_write)}</span></div>
+    <div className="brow"><i className="sw unc" />{tx("ins.uncachedInput")}<span className="num">{fmtTokens(input.uncached_input)}</span></div>
   </div>;
 }
 
 function LocalNote() {
-  return <p className="insights-local">仅在本机显示，不进入导出和 MCP。</p>;
+  return <p className="insights-local">{tx("ins.localOnly")}</p>;
 }
 
 function Inspector({ insights, mode, unit, ev, go, retry }: { insights: SessionInsights; mode: Mode; unit: string; ev: SessionTraceEvidence | "loading" | "error" | undefined; go: (m: Mode, push?: boolean) => void; retry: () => void }) {
@@ -670,32 +680,32 @@ function Inspector({ insights, mode, unit, ev, go, retry }: { insights: SessionI
   const loading = ev === "loading" || ev === undefined;
   const evErr = ev === "error";
   const evData = typeof ev === "object" ? ev : null;
-  const retryButton = <button type="button" className="link" onClick={retry}>重试</button>;
+  const retryButton = <button type="button" className="link" onClick={retry}>{tx("ins.retry")}</button>;
 
   if (mode.kind === "safety") {
     return <div className="insights-insp">
-      <h4>安全提醒</h4><p className="muted">{insights.safety.count} 条，与消耗诊断分开统计</p>
-      <ul className="insights-list">{insights.safety.rules.map(r => <li key={r.rule}><span className="num fail">{r.rule}</span> {r.count} 条{r.steps.length ? <> · {r.steps.slice(0, 8).map(s => <button key={s} type="button" className="link" onClick={() => go({ kind: "step", step: s })}>{unit} {s}</button>)}</> : null}</li>)}</ul>
-      {evData ? <ul className="insights-list">{evData.safety.slice(0, 50).map((s, i) => <li key={i}><span className="num fail">{s.rule}</span> <span className="num">{s.summary ?? "—"}</span>{s.step ? <button type="button" className="link" onClick={() => go({ kind: "step", step: s.step as number })}>{unit} {s.step}</button> : null}</li>)}</ul> : evErr ? <p className="muted">命令摘要暂不可用。{retryButton}</p> : <p className="muted">正在读取命令摘要…</p>}
+      <h4>{tx("ins.safety")}</h4><p className="muted">{tx("ins.safetyCount", { n: insights.safety.count })}</p>
+      <ul className="insights-list">{insights.safety.rules.map(r => <li key={r.rule}><span className="num fail">{r.rule}</span> {tx("ins.itemsN", { n: r.count })}{r.steps.length ? <> · {r.steps.slice(0, 8).map(s => <button key={s} type="button" className="link" onClick={() => go({ kind: "step", step: s })}>{unit} {s}</button>)}</> : null}</li>)}</ul>
+      {evData ? <ul className="insights-list">{evData.safety.slice(0, 50).map((s, i) => <li key={i}><span className="num fail">{s.rule}</span> <span className="num">{s.summary ?? "—"}</span>{s.step ? <button type="button" className="link" onClick={() => go({ kind: "step", step: s.step as number })}>{unit} {s.step}</button> : null}</li>)}</ul> : evErr ? <p className="muted">{tx("ins.cmdUnavailable")}{retryButton}</p> : <p className="muted">{tx("ins.readingCmd")}</p>}
       <LocalNote />
     </div>;
   }
 
   if (mode.kind === "calls") {
     return <div className="insights-insp">
-      <h4>逐次调用 · {unit} {mode.from}{mode.to !== mode.from ? `–${mode.to}` : ""}</h4>
-      {evData ? <CallsTable ev={evData} unit={unit} /> : evErr ? <p className="muted">逐次调用暂不可用。{retryButton}</p> : <p className="muted">正在读取…</p>}
+      <h4>{tx("ins.perCall")} · {unit} {mode.from}{mode.to !== mode.from ? `–${mode.to}` : ""}</h4>
+      {evData ? <CallsTable ev={evData} unit={unit} /> : evErr ? <p className="muted">{tx("ins.perCallUnavailable")}{retryButton}</p> : <p className="muted">{tx("ins.reading")}</p>}
     </div>;
   }
 
   if (mode.kind === "failure") {
     const f = evData?.failures.find(x => x.ts_ms === mode.ts && x.step === mode.step);
     return <div className="insights-insp">
-      <h4>{f?.capability_id ?? "工具"} 调用失败</h4><p className="muted num">{unit} {mode.step} · {clock(mode.ts)}</p>
-      {f ? <><dl className="kv"><dt>参数摘要</dt><dd className="num wrap">{f.args_excerpt ?? "—"}</dd></dl><div><p className="muted">错误摘录</p><pre className="insights-excerpt">{f.error_excerpt ?? "（没有记录错误文本）"}</pre><LocalNote /></div></>
-        : loading ? <p className="muted">正在读取…</p> : <p className="muted">这次失败的证据暂不可用。{evErr ? retryButton : null}</p>}
-      <p className="muted">退出码与调用树不在这里：宿主没有结构化错误码（失败原因分类待接入）；调用顺序见下方「工具调用序列」。</p>
-      <div className="insights-acts"><button type="button" className="button button-secondary" onClick={() => go({ kind: "step", step: mode.step })}>查看该{unit}</button></div>
+      <h4>{f?.capability_id ?? tx("ins.tool")} {tx("ins.callFailed")}</h4><p className="muted num">{unit} {mode.step} · {clock(mode.ts)}</p>
+      {f ? <><dl className="kv"><dt>{tx("ins.argsSummary")}</dt><dd className="num wrap">{f.args_excerpt ?? "—"}</dd></dl><div><p className="muted">{tx("ins.errorExcerpt")}</p><pre className="insights-excerpt">{f.error_excerpt ?? tx("ins.noErrorText")}</pre><LocalNote /></div></>
+        : loading ? <p className="muted">{tx("ins.reading")}</p> : <p className="muted">{tx("ins.failEvidenceUnavailable")}{evErr ? retryButton : null}</p>}
+      <p className="muted">{tx("ins.exitNote")}</p>
+      <div className="insights-acts"><button type="button" className="button button-secondary" onClick={() => go({ kind: "step", step: mode.step })}>{tx("ins.viewThis", { unit })}</button></div>
     </div>;
   }
 
@@ -703,7 +713,7 @@ function Inspector({ insights, mode, unit, ev, go, retry }: { insights: SessionI
     const d = insights.diagnostics[mode.diag];
     if (!d) return null;
     const t = diagText(d, unit);
-    const rm = REMEDY[d.remedy_id];
+    const rm = remedyOf(d.remedy_id);
     const L = steps.slice(d.steps.from - 1, d.steps.to);
     const rangeLabel = stepRange(unit, d.steps.from, d.steps.to);
     if (d.kind === "repeated_failure") {
@@ -715,32 +725,32 @@ function Inspector({ insights, mode, unit, ev, go, retry }: { insights: SessionI
       const first = top[0];
       return <div className="insights-insp">
         <h4>{t.title}</h4><p className="muted num">{rangeLabel}</p>
-        <div className="insights-big num">{typeof d.fact.failures === "number" ? d.fact.failures : 0} 次<small>{d.fact.same_invocation ? "相同调用失败" : "调用失败"}</small></div>
-        {loading && <p className="muted">正在读取错误摘要…</p>}
-        {evErr && <p className="muted">错误摘要暂不可用。{retryButton}</p>}
-        {first && <><dl className="kv"><dt>调用</dt><dd className="num wrap">{first.capability_id ?? "工具"} · {first.args_excerpt ?? "—"}</dd></dl>
-          <div><p className="muted">{top.length > 1 && first.invocation_key ? `错误摘要（${top.length} 次相同调用）` : "错误摘要（其中一次）"}</p><pre className="insights-excerpt">{(first.error_excerpt ?? "（没有记录错误文本）").split("\n")[0]}</pre><LocalNote /></div>
-          <div className="insights-acts"><button type="button" className="button button-primary" onClick={() => go({ kind: "failure", step: first.step ?? d.steps.from, ts: first.ts_ms })}>查看一次失败</button><button type="button" className="button button-secondary" onClick={() => go({ kind: "calls", from: d.steps.from, to: d.steps.to })}>查看相关调用</button></div>
-          <ul className="insights-list">{fails.slice(0, 30).map((f, i) => <li key={i}><button type="button" className="row" onClick={() => go({ kind: "failure", step: f.step ?? d.steps.from, ts: f.ts_ms })}><span className="fail">✕</span><span>{unit} {f.step} · {f.capability_id ?? "工具"}</span><span className="num muted">{clock(f.ts_ms)}</span></button></li>)}</ul></>}
-        {rm && <div className="insights-note"><b>建议</b> {rm[0]}<br /><span className="muted">这几个{unit}共输入 {fmtTokens(d.impact.tokens)} tokens，不代表都能省下来。</span></div>}
+        <div className="insights-big num">{tx("ins.timesN", { n: typeof d.fact.failures === "number" ? d.fact.failures : 0 })}<small>{d.fact.same_invocation ? tx("ins.sameCallFailed") : tx("ins.callFailedShort")}</small></div>
+        {loading && <p className="muted">{tx("ins.readingErr")}</p>}
+        {evErr && <p className="muted">{tx("ins.errSummaryUnavailable")}{retryButton}</p>}
+        {first && <><dl className="kv"><dt>{tx("ins.calls")}</dt><dd className="num wrap">{first.capability_id ?? tx("ins.tool")} · {first.args_excerpt ?? "—"}</dd></dl>
+          <div><p className="muted">{top.length > 1 && first.invocation_key ? tx("ins.errSummaryN", { n: top.length }) : tx("ins.errSummaryOne")}</p><pre className="insights-excerpt">{(first.error_excerpt ?? tx("ins.noErrorText")).split("\n")[0]}</pre><LocalNote /></div>
+          <div className="insights-acts"><button type="button" className="button button-primary" onClick={() => go({ kind: "failure", step: first.step ?? d.steps.from, ts: first.ts_ms })}>{tx("ins.viewOneFailure")}</button><button type="button" className="button button-secondary" onClick={() => go({ kind: "calls", from: d.steps.from, to: d.steps.to })}>{tx("ins.viewRelated")}</button></div>
+          <ul className="insights-list">{fails.slice(0, 30).map((f, i) => <li key={i}><button type="button" className="row" onClick={() => go({ kind: "failure", step: f.step ?? d.steps.from, ts: f.ts_ms })}><span className="fail">✕</span><span>{unit} {f.step} · {f.capability_id ?? tx("ins.tool")}</span><span className="num muted">{clock(f.ts_ms)}</span></button></li>)}</ul></>}
+        {rm && <div className="insights-note"><b>{tx("ins.advice")}</b> {rm[0]}<br /><span className="muted">{tx("ins.notAllSaved", { unit: uN(unit, d.steps.to - d.steps.from + 1), tokens: fmtTokens(d.impact.tokens) })}</span></div>}
         {d.failure_exposure && (
           <dl className="kv insights-exposure">
-            <dt>涉及回合输入</dt><dd className="num">{fmtTokens(d.failure_exposure.affected_input_tokens)} tokens</dd>
+            <dt>{tx("ins.expInput")}</dt><dd className="num">{fmtTokens(d.failure_exposure.affected_input_tokens)} tokens</dd>
             {d.failure_exposure.nominal_amounts.length > 0 ? (
               <>
-                <dt>相关回合名义成本估算</dt>
+                <dt>{tx("ins.expEstimate")}</dt>
                 <dd className="num">
                   {d.failure_exposure.nominal_amounts.map(a => `${a.currency === "USD" ? "$" : a.currency === "CNY" ? "¥" : `${a.currency} `}${(a.amount_minor / 100).toFixed(2)}`).join(" + ")}
-                  {d.failure_exposure.coverage === "partial" && `（部分调用无价卡；未计价 ${fmtTokens(d.failure_exposure.unpriced_tokens)} tokens）`}
+                  {d.failure_exposure.coverage === "partial" && tx("ins.expPartial", { tokens: fmtTokens(d.failure_exposure.unpriced_tokens) })}
                 </dd>
               </>
             ) : (
               <>
-                <dt>相关回合名义成本</dt>
-                <dd className="num">{d.failure_exposure.reason === "no_pricing_snapshot" ? "这段时间还没有价目快照" : "这些模型没有价卡"}</dd>
+                <dt>{tx("ins.expCost")}</dt>
+                <dd className="num">{d.failure_exposure.reason === "no_pricing_snapshot" ? tx("ins.noSnapshot") : tx("ins.noPriceCard")}</dd>
               </>
             )}
-            <dd className="muted insights-disclaimer">{d.failure_exposure.disclaimer}。名义成本按官方标价、含输出、不扣订阅；不保证与会话名义成本可相加。</dd>
+            <dd className="muted insights-disclaimer">{tx("ins.expDisclaimer")}</dd>
           </dl>
         )}
       </div>;
@@ -749,12 +759,12 @@ function Inspector({ insights, mode, unit, ev, go, retry }: { insights: SessionI
       const topStep = L.reduce((m, s) => (s.input_peak > m.input_peak ? s : m), L[0]);
       return <div className="insights-insp">
         <h4>{t.title}</h4><p className="muted num">{rangeLabel}</p>
-        <div className="insights-big num">{(typeof d.fact.ratio === "number" ? d.fact.ratio : 0).toFixed(1)}×<small>单次输入峰值</small></div>
-        <dl className="kv"><dt>起点</dt><dd className="num">{fmtTokens(Number(d.fact.peak_from ?? 0))}（{unit} {d.steps.from}）</dd><dt>终点</dt><dd className="num">{fmtTokens(Number(d.fact.peak_to ?? 0))}（{unit} {d.steps.to}）</dd><dt>区间调用</dt><dd className="num">{L.reduce((a, s) => a + s.calls, 0)}</dd><dt>占本会话输入</dt><dd className="num">{fmtPct(d.impact.share_of_session_input)}</dd></dl>
+        <div className="insights-big num">{(typeof d.fact.ratio === "number" ? d.fact.ratio : 0).toFixed(1)}×<small>{tx("ins.peakInput")}</small></div>
+        <dl className="kv"><dt>{tx("ins.from")}</dt><dd className="num">{fmtTokens(Number(d.fact.peak_from ?? 0))}（{unit} {d.steps.from}）</dd><dt>{tx("ins.to")}</dt><dd className="num">{fmtTokens(Number(d.fact.peak_to ?? 0))}（{unit} {d.steps.to}）</dd><dt>{tx("ins.rangeCalls")}</dt><dd className="num">{L.reduce((a, s) => a + s.calls, 0)}</dd><dt>{tx("ins.shareInput")}</dt><dd className="num">{fmtPct(d.impact.share_of_session_input)}</dd></dl>
         <Spark values={L.map(s => s.input_peak)} />
-        <div className="insights-note"><b>原因</b> {t.why}</div>
-        <div className="insights-acts"><button type="button" className="button button-primary" onClick={() => go({ kind: "step", step: topStep.index })}>查看峰值最大的{unit}</button><button type="button" className="button button-secondary" onClick={() => go({ kind: "calls", from: d.steps.from, to: d.steps.to })}>查看逐次调用</button></div>
-        {rm && <div className="insights-note"><b>建议</b> {rm[0]}<br /><span className="muted">{rm[1]}</span></div>}
+        <div className="insights-note"><b>{tx("ins.cause")}</b> {t.why}</div>
+        <div className="insights-acts"><button type="button" className="button button-primary" onClick={() => go({ kind: "step", step: topStep.index })}>{tx("ins.viewPeak", { unit })}</button><button type="button" className="button button-secondary" onClick={() => go({ kind: "calls", from: d.steps.from, to: d.steps.to })}>{tx("ins.viewPerCall")}</button></div>
+        {rm && <div className="insights-note"><b>{tx("ins.advice")}</b> {rm[0]}<br /><span className="muted">{rm[1]}</span></div>}
       </div>;
     }
     const rangeInput = L.reduce((a, s) => a + inputOf(s), 0);
@@ -762,12 +772,12 @@ function Inspector({ insights, mode, unit, ev, go, retry }: { insights: SessionI
     const restInput = all - rangeInput;
     return <div className="insights-insp">
       <h4>{t.title}</h4><p className="muted num">{rangeLabel}</p>
-      <div className="insights-big num">{fmtTokens(Number(d.fact.uncached_tokens ?? 0))}<small>未命中缓存的输入（tokens）</small></div>
-      <dl className="kv"><dt>区间命中率</dt><dd className="num">{rangeInput ? fmtPct(rangeRead / rangeInput) : "—"}</dd><dt>会话其余部分</dt><dd className="num">{restInput > 0 ? fmtPct((insights.session.input.cache_read - rangeRead) / restInput) : "—"}</dd><dt>占本会话输入</dt><dd className="num">{fmtPct(d.impact.share_of_session_input)}</dd></dl>
-      <ul className="insights-list">{L.slice(0, 40).map(s => <li key={s.index}><button type="button" className="row" onClick={() => go({ kind: "step", step: s.index })}><span className="num">{unit} {s.index}</span><span className="muted">{s.idle_before_ms != null ? `空闲 ${fmtDuration(s.idle_before_ms)}` : ""} · {s.model_ids.join("→")}</span><span className="num">{s.hit_rate != null ? fmtPct(s.hit_rate) : "—"}</span></button></li>)}</ul>
-      <div className="insights-note"><b>原因</b> {t.why}</div>
-      <div className="insights-acts"><button type="button" className="button button-primary" onClick={() => go({ kind: "calls", from: d.steps.from, to: d.steps.to })}>查看逐次调用</button></div>
-      {rm && <div className="insights-note"><b>建议</b> {rm[0]}<br /><span className="muted">{rm[1]}</span></div>}
+      <div className="insights-big num">{fmtTokens(Number(d.fact.uncached_tokens ?? 0))}<small>{tx("ins.uncachedTokens")}</small></div>
+      <dl className="kv"><dt>{tx("ins.rangeHit")}</dt><dd className="num">{rangeInput ? fmtPct(rangeRead / rangeInput) : "—"}</dd><dt>{tx("ins.restOfSession")}</dt><dd className="num">{restInput > 0 ? fmtPct((insights.session.input.cache_read - rangeRead) / restInput) : "—"}</dd><dt>{tx("ins.shareInput")}</dt><dd className="num">{fmtPct(d.impact.share_of_session_input)}</dd></dl>
+      <ul className="insights-list">{L.slice(0, 40).map(s => <li key={s.index}><button type="button" className="row" onClick={() => go({ kind: "step", step: s.index })}><span className="num">{unit} {s.index}</span><span className="muted">{s.idle_before_ms != null ? tx("ins.idleFor", { d: fmtDuration(s.idle_before_ms) }) : ""} · {s.model_ids.join("→")}</span><span className="num">{s.hit_rate != null ? fmtPct(s.hit_rate) : "—"}</span></button></li>)}</ul>
+      <div className="insights-note"><b>{tx("ins.cause")}</b> {t.why}</div>
+      <div className="insights-acts"><button type="button" className="button button-primary" onClick={() => go({ kind: "calls", from: d.steps.from, to: d.steps.to })}>{tx("ins.viewPerCall")}</button></div>
+      {rm && <div className="insights-note"><b>{tx("ins.advice")}</b> {rm[0]}<br /><span className="muted">{rm[1]}</span></div>}
     </div>;
   }
 
@@ -779,24 +789,24 @@ function Inspector({ insights, mode, unit, ev, go, retry }: { insights: SessionI
   const fails = evData?.failures ?? [];
   return <div className="insights-insp">
     <h4>{unit} {s.index}</h4>
-    <p className="muted num">{clock(s.started_at_ms)} 开始{s.ended_at_ms != null ? ` · 用时 ${fmtDuration(Math.max(0, s.ended_at_ms - s.started_at_ms))}` : " · 没有测量"}{s.idle_before_ms != null ? ` · 之前空闲 ${fmtDuration(s.idle_before_ms)}` : ""}</p>
+    <p className="muted num">{tx("ins.startedAt", { time: clock(s.started_at_ms) })}{s.ended_at_ms != null ? tx("ins.tookDur", { d: fmtDuration(Math.max(0, s.ended_at_ms - s.started_at_ms)) }) : tx("ins.notMeasured")}{s.idle_before_ms != null ? tx("ins.idleBeforeDur", { d: fmtDuration(s.idle_before_ms) }) : ""}</p>
     <dl className="kv">
-      <dt>输入 / 输出</dt><dd className="num">{fmtTokens(a)} / {fmtTokens(s.output)}</dd>
-      <dt>调用</dt><dd className="num">{s.calls}</dd>
-      <dt>单次输入峰值</dt><dd className="num">{fmtTokens(s.input_peak)}</dd>
-      <dt>缓存命中率</dt><dd className="num">{s.hit_rate != null ? fmtPct(s.hit_rate) : "—"}</dd>
-      <dt>模型</dt><dd className="wrap">{s.model_ids.join(" → ") || "—"}</dd>
-      {s.outcome && <><dt>结果</dt><dd>{({ succeeded: "完成", failed: "失败", cancelled: "被中断", unknown: "未知" } as const)[s.outcome]}</dd></>}
-      <dt>名义成本</dt><dd className="num">{cost ?? "暂无可用计价依据"}</dd>
+      <dt>{tx("ins.inOut")}</dt><dd className="num">{fmtTokens(a)} / {fmtTokens(s.output)}</dd>
+      <dt>{tx("ins.calls")}</dt><dd className="num">{s.calls}</dd>
+      <dt>{tx("ins.peakInput")}</dt><dd className="num">{fmtTokens(s.input_peak)}</dd>
+      <dt>{tx("ins.hitRate")}</dt><dd className="num">{s.hit_rate != null ? fmtPct(s.hit_rate) : "—"}</dd>
+      <dt>{tx("ins.model")}</dt><dd className="wrap">{s.model_ids.join(" → ") || "—"}</dd>
+      {s.outcome && <><dt>{tx("ins.outcome")}</dt><dd>{tx(({ succeeded: "ins.outSucceeded", failed: "ins.outFailed", cancelled: "ins.outCancelled", unknown: "ins.outUnknown" } as const)[s.outcome])}</dd></>}
+      <dt>{tx("ins.nominal")}</dt><dd className="num">{cost ?? tx("ins.noPricing")}</dd>
     </dl>
-    {cost && <p className="insights-local">按每次调用的模型、以官方价估算，含输出，不是账单。</p>}
-    {s.notes.map((n, i) => <div key={i} className="insights-note warn">{n.calls} 次调用发生在{NOTE_TEXT[n.explanation]}。</div>)}
+    {cost && <p className="insights-local">{tx("ins.nominalNote2")}</p>}
+    {s.notes.map((n, i) => <div key={i} className="insights-note warn">{tx("ins.callsHappened", { calls: n.calls, note: noteText(n.explanation) ?? "" })}</div>)}
     <Buckets input={s.input} noWrite={noWrite} />
     {insights.lanes.tools.state === "unavailable"
-      ? <p className="muted">工具结果：未记录（{LANE_REASON[insights.lanes.tools.reason ?? ""] ?? "原因未知"}）</p>
-      : <dl className="kv"><dt>工具成功</dt><dd className="num">{s.tools.succeeded}</dd><dt>失败</dt><dd className={`num${s.tools.failed ? " fail" : ""}`}>{s.tools.failed}</dd><dt>取消</dt><dd className="num">{s.tools.cancelled}</dd><dt>结果未知</dt><dd className="num">{s.tools.unknown}</dd></dl>}
-    {fails.length > 0 && <><ul className="insights-list">{fails.slice(0, 20).map((f, i) => <li key={i}><button type="button" className="row bad" onClick={() => go({ kind: "failure", step: s.index, ts: f.ts_ms })}><span className="fail">✕</span><span className="num">{f.capability_id ?? "工具"}：{(f.error_excerpt ?? "").split("\n")[0].slice(0, 60) || "失败"}</span><span>›</span></button></li>)}</ul><LocalNote /></>}
-    <div className="insights-acts"><button type="button" className="button button-secondary" onClick={() => go({ kind: "calls", from: s.index, to: s.index })}>查看逐次调用</button></div>
+      ? <p className="muted">{tx("ins.sumTools", { reason: laneReason(insights.lanes.tools.reason) })}</p>
+      : <dl className="kv"><dt>{tx("ins.toolOk")}</dt><dd className="num">{s.tools.succeeded}</dd><dt>{tx("ins.failedLabel")}</dt><dd className={`num${s.tools.failed ? " fail" : ""}`}>{s.tools.failed}</dd><dt>{tx("ins.cancelledLabel")}</dt><dd className="num">{s.tools.cancelled}</dd><dt>{tx("ins.resultUnknown")}</dt><dd className="num">{s.tools.unknown}</dd></dl>}
+    {fails.length > 0 && <><ul className="insights-list">{fails.slice(0, 20).map((f, i) => <li key={i}><button type="button" className="row bad" onClick={() => go({ kind: "failure", step: s.index, ts: f.ts_ms })}><span className="fail">✕</span><span className="num">{f.capability_id ?? tx("ins.tool")}：{(f.error_excerpt ?? "").split("\n")[0].slice(0, 60) || tx("ins.outFailed")}</span><span>›</span></button></li>)}</ul><LocalNote /></>}
+    <div className="insights-acts"><button type="button" className="button button-secondary" onClick={() => go({ kind: "calls", from: s.index, to: s.index })}>{tx("ins.viewPerCall")}</button></div>
   </div>;
 }
 
@@ -805,7 +815,7 @@ function CallsTable({ ev, unit }: { ev: SessionTraceEvidence; unit: string }) {
   let prev = -1;
   let k = 0;
   return <>
-    <div className="insights-calls-wrap"><table className="insights-calls"><thead><tr><th>{unit} · 调用</th><th>模型</th><th>输入</th><th>命中</th><th>输出</th></tr></thead><tbody>
+    <div className="insights-calls-wrap"><table className="insights-calls"><thead><tr><th>{unit} · {tx("ins.calls")}</th><th>{tx("ins.model")}</th><th>{tx("ins.input")}</th><th>{tx("ins.hit")}</th><th>{tx("ins.output")}</th></tr></thead><tbody>
       {ev.calls.slice(0, 2000).map((c, i) => {
         if (c.step !== prev) { prev = c.step ?? -1; k = 0; }
         k += 1;
@@ -814,7 +824,7 @@ function CallsTable({ ev, unit }: { ev: SessionTraceEvidence; unit: string }) {
         return <tr key={i} className={a >= 10_000 && hit < 0.5 ? "low" : ""}><td className="num">{c.step}·{k}{failedAt.has(c.step) && k === 1 ? " ✕" : ""}</td><td>{(c.model_id ?? "—").replace("claude-", "")}</td><td className="num">{fmtTokens(a)}</td><td className="num">{a ? fmtPct(hit) : "—"}</td><td className="num">{fmtTokens(c.output)}</td></tr>;
       })}
     </tbody></table></div>
-    <p className="insights-local">橙底：命中率低于 50% 且输入 ≥ 1 万；✕：该{unit}内有工具失败。</p>
+    <p className="insights-local">{tx("ins.callsLegend", { unit })}</p>
   </>;
 }
 

@@ -178,8 +178,12 @@ assert.deepEqual(JSON.parse(JSON.stringify(mini)), [{ x: 0, value: 10, warn: tru
 console.log("Session insights geometry: OK (windows contain focus, bands never dropped, slots in bounds)");
 
 // ── 3. 文案 ──
-const view = load("react/src/features/sessions/SessionInsights.tsx", { self: {} });
+// 文案随应用语言解析：测试固定中文（localStorage 偏好），英文另有下方断言。
+const zhStorage = { getItem: () => "zh-Hans", setItem() {} };
+const view = load("react/src/features/sessions/SessionInsights.tsx", { self: {}, localStorage: zhStorage });
+const viewEn = load("react/src/features/sessions/SessionInsights.tsx", { self: {}, localStorage: { getItem: () => "en", setItem() {} } });
 const unit = "回合";
+const i18nSource = readFileSync(path.join(ui, "react/src/lib/i18n.ts"), "utf8");
 for (const d of insights.diagnostics) {
   const t = view.diagText(d, unit);
   const text = `${t.title}${t.fact}${t.why}`;
@@ -197,15 +201,20 @@ assert.match(growth.why, /尚不能确定/, "原因单列并说明不确定");
 const source = readFileSync(path.join(ui, "react/src/features/sessions/SessionInsights.tsx"), "utf8");
 assert.ok(!source.includes("estimated_amount"), "诊断不读金额（r6 移除 estimated_amount）");
 assert.ok(!source.includes("比全部命中多"), "不写「比全部命中多约 $X」");
-assert.ok(source.includes("仅在本机显示，不进入导出和 MCP"), "摘录旁固定标注本机专属");
+assert.ok(source.includes("ins.localOnly") && i18nSource.includes("仅在本机显示，不进入导出和 MCP") && i18nSource.includes("never included in exports or MCP"), "摘录旁固定标注本机专属（中英）");
 assert.ok(source.includes("f.invocation_key ?? `ts:"), "没有分组键的失败不得按工具名并成「相同调用」");
 assert.equal(view.fmtTokens(1_832_000), "183 万");
+assert.equal(viewEn.fmtTokens(1_832_000), "1.83M", "英文用 K/M/B，不出现「万」");
+for (const d of insights.diagnostics) {
+  const t = viewEn.diagText(d, "turn");
+  assert.doesNotMatch(`${t.title}${t.fact}${t.why}${t.chip[1]}`, /[\u4e00-\u9fff]|NaN|undefined/, `英文诊断文案不得含中文：${t.title}`);
+}
 // WASTE S1（修订 spec §4.1）：失败区间成本暴露——只对这个明确标注的字段放开金额，
 // 断言口径标签、降级与免责声明同屏可见；diagText 的金额禁令（上方 186/192）不变。
-assert.ok(source.includes("涉及回合输入"), "exposure block labels affected-turn input");
-assert.ok(source.includes("相关回合名义成本估算"), "exposure amount carries the nominal-estimate label");
+assert.ok(source.includes("ins.expInput") && i18nSource.includes("涉及回合输入"), "exposure block labels affected-turn input");
+assert.ok(source.includes("ins.expEstimate") && i18nSource.includes("相关回合名义成本估算"), "exposure amount carries the nominal-estimate label");
 assert.ok(source.includes("insights-disclaimer"), "exposure disclaimer rendered in-place");
-assert.ok(source.includes("这段时间还没有价目快照") && source.includes("这些模型没有价卡"), "no-amount degradation reasons rendered");
+assert.ok(source.includes("ins.noSnapshot") && source.includes("ins.noPriceCard") && i18nSource.includes("这段时间还没有价目快照") && i18nSource.includes("这些模型没有价卡"), "no-amount degradation reasons rendered");
 assert.ok(source.includes("unpriced_tokens"), "unpriced tokens surfaced on partial coverage");
 const bridgeSource = readFileSync(path.join(ui, "react/src/lib/sessionInsights.ts"), "utf8");
 assert.ok(bridgeSource.includes("failure_exposure"), "bridge parses failure_exposure");

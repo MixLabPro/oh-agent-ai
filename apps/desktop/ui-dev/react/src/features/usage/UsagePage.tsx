@@ -14,7 +14,7 @@ import {
 } from "../../lib/tauri";
 import { sessionsDateHref } from "../../lib/nav";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
-import { formatMajorMoney, message, useLanguage, type MessageKey } from "../../lib/i18n";
+import { formatMajorMoney, message, resolvedLanguage, useLanguage, type MessageKey } from "../../lib/i18n";
 
 type Metric = "tokens" | "cost";
 
@@ -54,9 +54,12 @@ function spendBasisLabel(spend: UsageSourceSummary["spend_by_basis"]): string {
   return lines.length ? lines.join(" · ") : message("usage.noBillAmount");
 }
 
+// 日期/星期跟应用语言而非系统区域：系统是中文、应用选 English 时曾显示「2026年9月」「周日」。
+function appLocale(): string { return resolvedLanguage() === "en" ? "en-US" : "zh-CN"; }
+
 function monthTitle(month: string): string {
   const [year, index] = month.split("-").map(Number);
-  return new Intl.DateTimeFormat(undefined, { year: "numeric", month: "long", timeZone: "UTC" }).format(new Date(Date.UTC(year, index - 1, 15)));
+  return new Intl.DateTimeFormat(appLocale(), { year: "numeric", month: "long", timeZone: "UTC" }).format(new Date(Date.UTC(year, index - 1, 15)));
 }
 
 function sourceLabel(value: string | null): string {
@@ -202,7 +205,16 @@ export function UsagePage() {
     const tokens = calendar?.days.reduce((sum, day) => sum + day.total_tokens, 0) ?? 0;
     const costs: Record<string, number> = {};
     calendar?.days.forEach((day) => Object.entries(day.costs).forEach(([currency, amount]) => { costs[currency] = (costs[currency] ?? 0) + amount; }));
-    return { tokens, costs };
+    // 按 (币种, 口径) 分列：claude 的 metered_estimate 与 codex 的 api_equivalent
+    // 同为 USD 但口径不同，相加成一个数（曾显示 USD 151.70）就是编造。
+    const byBasis = new Map<string, { currency: string; basis: string; amount: number }>();
+    calendar?.days.forEach((day) => day.cost_lines.forEach((line) => {
+      const key = `${line.currency}|${line.basis}`;
+      const entry = byBasis.get(key) ?? { currency: line.currency, basis: line.basis, amount: 0 };
+      entry.amount += line.amount;
+      byBasis.set(key, entry);
+    }));
+    return { tokens, costs, byBasis: [...byBasis.values()].filter((entry) => entry.amount > 0) };
   }, [calendar]);
   const today = todayDate(timezone);
   const displayedMonth = calendar?.month ?? source?.month ?? month;
@@ -236,14 +248,14 @@ export function UsagePage() {
     {(calendar || source) && <div aria-busy={loading || undefined}>
       <section className="usage-summary-grid" aria-label={message("usage.summary", language)}>
         <article className="stat-card"><p className="eyebrow">{monthTitle(displayedMonth)} tokens</p><p className="stat-value">{displayedTokens !== null ? tokensLabel(displayedTokens) : "—"}</p><p className="stat-detail">{message(sourceForDisplayedMonth ? "usage.sourceAggregate" : calendarForDisplayedMonth ? "usage.calendarCoverageOnly" : "usage.monthUnavailable", language)}</p></article>
-        <article className="stat-card"><p className="eyebrow">{calendarForDisplayedMonth ? message("usage.calendarCost", language, { month: monthTitle(displayedMonth) }) : message("usage.sourceCost", language)}</p><p className="stat-value stat-value-compact">{calendarForDisplayedMonth ? costsLabel(totals.costs) : "—"}</p><p className="stat-detail">{sourceForDisplayedMonth ? `${spendBasisLabel(sourceForDisplayedMonth.spend_by_basis)} · ${message("usage.calendarNoSubscription", language)}` : message("usage.sourceUnaligned", language)}</p></article>
+        <article className="stat-card"><p className="eyebrow">{calendarForDisplayedMonth ? message("usage.calendarCost", language, { month: monthTitle(displayedMonth) }) : message("usage.sourceCost", language)}</p><p className="stat-value stat-value-compact">{calendarForDisplayedMonth ? (totals.byBasis.length ? totals.byBasis.map((entry) => `${formatMajorMoney(entry.amount, entry.currency)} (${message(`usage.basis.${entry.basis}` as MessageKey)})`).join(" · ") : message("usage.noCost")) : "—"}</p><p className="stat-detail">{sourceForDisplayedMonth ? `${spendBasisLabel(sourceForDisplayedMonth.spend_by_basis)} · ${message("usage.calendarNoSubscription", language)}` : message("usage.sourceUnaligned", language)}</p></article>
         <article className="stat-card"><p className="eyebrow">{sourceForDisplayedMonth ? message("usage.monthFreshness", language, { month: monthTitle(sourceForDisplayedMonth.month) }) : message("usage.freshness", language)}</p><p className="stat-value stat-value-compact">{sourceForDisplayedMonth ? freshnessLabel(sourceForDisplayedMonth.freshness) : "—"}</p><p className="stat-detail">{sourceForDisplayedMonth?.last_observed_at ? message("usage.lastObserved", language, { date: sourceForDisplayedMonth.last_observed_at }) : message("usage.sourceStateUnaligned", language)}</p></article>
       </section>
       <section className="usage-host-summary" aria-label={message("usage.hostBreakdown", language)}>{hostTokens.length ? hostTokens.map(([host, value]) => <div key={host}><span>{host === "claude-code" ? "Claude Code" : host === "dsh" ? "DSH" : host === "codex" ? "Codex" : host}</span><strong>{tokensLabel(value.total)}</strong></div>) : <div><span>{message("usage.hostBreakdownShort", language)}</span><strong>—</strong></div>}<p>{message("usage.hostBreakdownNote", language, { month: monthTitle(displayedMonth) })}</p></section>
       <section className="usage-calendar-panel" aria-labelledby="usage-calendar-title">
         <div className="section-heading"><div><p className="eyebrow">{message("usage.calendar", language)}</p><h3 id="usage-calendar-title">{monthTitle(displayedMonth)}</h3></div><span className="count-badge">{message("count.days", language, { count: calendarForDisplayedMonth?.days.length ?? 0 })}</span></div>
         {calendarForDisplayedMonth && totals.tokens > 0 ? <div className="usage-calendar-grid" role="grid" aria-label={message("usage.calendarGrid", language, { month: monthTitle(displayedMonth) })}>
-          {Array.from({ length: 7 }, (_, day) => new Intl.DateTimeFormat(undefined, { weekday: "short", timeZone: "UTC" }).format(new Date(Date.UTC(2026, 0, 4 + day)))).map((day, index) => <span className="usage-calendar-dow" role="columnheader" key={index}>{day}</span>)}
+          {Array.from({ length: 7 }, (_, day) => new Intl.DateTimeFormat(appLocale(), { weekday: "short", timeZone: "UTC" }).format(new Date(Date.UTC(2026, 0, 4 + day)))).map((day, index) => <span className="usage-calendar-dow" role="columnheader" key={index}>{day}</span>)}
           {Array.from({ length: layout.leading }, (_, index) => <span className="usage-calendar-cell usage-calendar-blank" aria-hidden="true" key={`blank-${index}`} />)}
           {Array.from({ length: layout.days }, (_, index) => {
             const date = `${displayedMonth}-${String(index + 1).padStart(2, "0")}`;

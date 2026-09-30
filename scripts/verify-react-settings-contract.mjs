@@ -47,7 +47,7 @@ const sourceBody = source.slice(sourceStart, sourceEnd);
 assert.match(sourceBody, /sourceControlsRequestId === sourceControlsRequest\.current/, "source controls read is not generation guarded");
 assert.match(sourceBody, /sourceRequestId === sourceRequest\.current/, "source health read is not generation guarded");
 assert.match(source, /const paused = await setSyncPaused\(!report\.sync\.paused\)/, "pause receipt is not captured");
-assert.match(source, /setSyncMessage\(paused \? "自动同步已暂停。" : "自动同步已恢复。"\)/, "pause message does not use backend receipt");
+assert.match(source, /setSyncMessage\(message\(paused \? "sx\.autoPausedMsg" : "sx\.autoResumedMsg", language\)\)/, "pause message does not use backend receipt");
 assert.doesNotMatch(source, /await setSyncPaused\([^\n]+\);\s*setSyncMessage\(!report\.sync\.paused/u, "pause message still infers state from stale report");
 
 assert.match(source, /const requestId = await triggerSync\(\);\s*if \(!settingsMounted\.current\) return false;/u, "sync completion does not stop after unmount");

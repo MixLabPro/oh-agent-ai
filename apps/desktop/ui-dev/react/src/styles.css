@@ -395,11 +395,14 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .settings-custom-message { margin-top: 10px; color: #087f62; font-size: 11px; }
 .settings-custom-empty { margin: 8px 0; color: var(--text-muted); font-size: 11px; }
 .settings-budget-section { padding: 22px 0; border-bottom: 1px solid #e1e8f0; }
-.settings-budget-form { display: grid; grid-template-columns: repeat(3, minmax(130px, 1fr)) minmax(150px, 1fr) auto; align-items: end; gap: 10px; margin: 14px 0; padding: 14px; border: 1px solid #e1e8f0; border-radius: 10px; background: #fbfcfd; }
+.settings-budget-form { display: grid; grid-template-columns: repeat(3, minmax(130px, 1fr)) minmax(150px, 1fr) auto; align-items: start; gap: 10px; margin: 14px 0; padding: 14px; border: 1px solid #e1e8f0; border-radius: 10px; background: #fbfcfd; }
 .settings-budget-form label, .settings-budget-threshold { display: grid; gap: 5px; color: var(--text-muted); font-size: 11px; }
 .settings-budget-form select, .settings-budget-form input { width: 100%; min-height: 35px; padding: 7px 9px; border: 1px solid #d9e2ec; border-radius: 7px; background: #fff; color: #26384e; font: inherit; }
 .settings-budget-form input:focus-visible, .settings-budget-form select:focus-visible { border-color: #58b898; outline: 2px solid #cfe9e1; outline-offset: 1px; }
 .settings-budget-form-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* 表单顶对齐后：说明小字只在个别列出现，不再把该列输入框顶高；按钮下移一个标签行高，与输入框同一水平线。 */
+.settings-budget-form-actions { margin-top: 16px; min-height: 35px; }
+.settings-budget-threshold strong { display: flex; align-items: center; min-height: 35px; }
 .skills-diff-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; color: var(--text-muted); font-size: 11px; }
 .skills-diff-summary span { padding: 4px 8px; border: 1px solid #d9e2ec; border-radius: 999px; background: #fff; }
 .settings-budget-threshold strong { color: #26384e; font-size: 13px; }
@@ -617,7 +620,7 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
   .settings-custom-form { grid-template-columns: 1fr; align-items: stretch; }
   .settings-custom-form .button { width: 100%; }
   .settings-budget-form { grid-template-columns: 1fr; align-items: stretch; }
-  .settings-budget-form-actions { flex-direction: column; align-items: stretch; }
+  .settings-budget-form-actions { flex-direction: column; align-items: stretch; margin-top: 0; }
   .settings-budget-form-actions .button { width: 100%; }
   .settings-notification-card { align-items: flex-start; flex-direction: column; }
   .settings-notification-toggle { width: 100%; justify-content: space-between; }
@@ -725,6 +728,9 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .session-detail-stats small.session-cost-note-warn { color: #9a6412; }
 
 /* 决策区（DECISION_AREA_REACT_PORT）：套餐窗口卡 + 值回双轨。 */
+/* .info-panel 是横向 flex（提示条用）：决策卡的标题与列表被并排，标题只分到一条窄列，
+   中文被挤成竖排。卡内改纵向堆叠。 */
+.decision-area .info-panel { display: block; margin-top: 0; }
 .decision-area { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin-top: 14px; }
 .decision-note { color: var(--text-secondary, #b8b8b8); font-size: 12px; }
 .decision-quota-list, .decision-payback-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }

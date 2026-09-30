@@ -17,11 +17,11 @@ function observedAt(value: number | null): string {
   return new Date(value).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
-function syncLabel(report: SourceHealthReport): string {
-  if (report.sync.state === "ok") return report.sync.last_success_at ? `成功 · ${report.sync.last_success_at.slice(0, 16)}` : "成功";
-  if (report.sync.state === "never") return "尚未同步";
-  if (report.sync.state === "failed") return "部分来源读取失败";
-  return "状态暂不可用";
+function syncLabel(report: SourceHealthReport, language: AppLanguage): string {
+  if (report.sync.state === "ok") return report.sync.last_success_at ? message("sx.syncOkAt", language, { at: report.sync.last_success_at.slice(0, 16) }) : message("sx.syncOk", language);
+  if (report.sync.state === "never") return message("sx.syncNever", language);
+  if (report.sync.state === "failed") return message("sx.syncFailed", language);
+  return message("sx.syncUnknown", language);
 }
 
 function sourceTone(state: SourceConnectionState): "success" | "warning" | "neutral" {
@@ -666,6 +666,8 @@ type CustomSourceSectionProps = {
 };
 
 function CustomSourceSection({ report, loading, error, onReload, onSync }: CustomSourceSectionProps) {
+  const language = useLanguage();
+  const tr = (key: MessageKey, parameters: Record<string, string | number> = {}) => translate(key, language, parameters);
   const [watcherHealth, setWatcherHealth] = useState<WatcherHealthStatus | null>(null);
   useEffect(() => {
     let active = true;
@@ -691,7 +693,7 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
       if (!mounted.current) return;
       if (selected) {
         setRoot(selected);
-        setMessage("已选择目录，请确认工具后添加。");
+        setMessage(tr("sx.folderChosen"));
       }
     } catch (reason: unknown) {
       if (mounted.current) setActionError(safeUiError(reason, "无法打开目录选择"));
@@ -707,10 +709,10 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
     try {
       const result = await addCustomSourceRoot(host, root.trim());
       if (!mounted.current) return;
-      setMessage(result.changed ? "目录已保存，正在同步。" : "该目录已在读取范围内，正在重新同步。");
+      setMessage(tr(result.changed ? "sx.folderSavedSyncing" : "sx.folderAlreadySyncing"));
       onReload();
       const synced = await onSync();
-      if (mounted.current) setMessage(synced ? "目录已保存，同步完成。" : "目录已保存，但本次同步未完成；稍后可重新同步。");
+      if (mounted.current) setMessage(tr(synced ? "sx.folderSyncDone" : "sx.folderSyncPending"));
     } catch (reason: unknown) {
       if (mounted.current) setActionError(safeUiError(reason, "添加读取位置失败"));
     } finally {
@@ -726,7 +728,7 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
     try {
       const result = await removeCustomSourceRoot(source.host, source.root);
       if (!mounted.current) return;
-      setMessage(result.changed ? "已移除读取位置；已导入数据仍保留。" : "该目录已不在读取范围内。");
+      setMessage(tr(result.changed ? "sx.removed" : "sx.notInScope"));
       onReload();
     } catch (reason: unknown) {
       if (mounted.current) setActionError(safeUiError(reason, "移除读取位置失败"));
@@ -736,23 +738,23 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
   };
 
   return <section className="settings-custom-section" aria-labelledby="settings-custom-title">
-    <div className="settings-section-heading"><div><p className="eyebrow">本机位置</p><h3 id="settings-custom-title">其他读取位置</h3><p>选择包含工具日志的本机文件夹；只会加入本机读取范围。</p></div></div>
-    <div className="settings-location-row" role="status" aria-live="polite"><strong>实时监听</strong><span>{watcherStatusLabel(watcherHealth)}</span></div>
-    {error && <div className="error-banner" role="alert">读取位置设置暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={onReload}>重试</button></div>}
-    <SettingsLoadingState loading={loading} hasData={Boolean(report)} title="位置配置" detail="不会读取目录内容。" />
-    {report?.status === "unavailable" && <div className="settings-source-state"><strong>读取位置设置暂不可用</strong><span>可以稍后重试；已有来源状态不受影响。</span></div>}
+    <div className="settings-section-heading"><div><p className="eyebrow">{tr("sx.locEyebrow")}</p><h3 id="settings-custom-title">{tr("sx.locTitle")}</h3><p>{tr("sx.locDesc")}</p></div></div>
+    <div className="settings-location-row" role="status" aria-live="polite"><strong>{tr("sx.liveWatch")}</strong><span>{watcherStatusLabel(watcherHealth, language)}</span></div>
+    {error && <div className="error-banner" role="alert">{tr("sx.locUnavailableErr", { error })}<button className="button button-secondary button-small" type="button" onClick={onReload}>{tr("sx.retry")}</button></div>}
+    <SettingsLoadingState loading={loading} hasData={Boolean(report)} title={tr("sx.locConfig")} detail={tr("sx.locNoRead")} />
+    {report?.status === "unavailable" && <div className="settings-source-state"><strong>{tr("sx.locUnavailable")}</strong><span>{tr("sx.locUnavailableHelp")}</span></div>}
     {report?.status === "ok" && <>
-      <div className="settings-location-list" aria-label="标准读取位置">
-        {Object.entries(report.locations).filter(([, path]) => path).map(([locationHost, path]) => <div className="settings-location-row" key={locationHost}><strong>{sourceLabel(locationHost)}</strong><span>{shortenPath(path as string)}</span><details><summary>显示完整路径</summary><code>{path}</code></details></div>)}
+      <div className="settings-location-list" aria-label={tr("sx.stdLocations")}>
+        {Object.entries(report.locations).filter(([, path]) => path).map(([locationHost, path]) => <div className="settings-location-row" key={locationHost}><strong>{sourceLabel(locationHost)}</strong><span>{shortenPath(path as string)}</span><details><summary>{tr("sx.showPath")}</summary><code>{path}</code></details></div>)}
       </div>
       <form className="settings-custom-form" onSubmit={addRoot}>
-        <label><span>工具</span><select value={host} onChange={(event) => setHost(event.target.value as typeof host)}><option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="dsh">DeepSeek Harness</option></select></label>
-        <label className="settings-custom-path"><span>目录</span><input value={root} onChange={(event) => setRoot(event.target.value)} placeholder="/Volumes/…/sessions" autoComplete="off" /></label>
-        <button className="button button-secondary" type="button" onClick={chooseRoot} disabled={saving}>选择文件夹</button>
-        <button className="button button-secondary" type="submit" disabled={saving || !root.trim()}>{saving ? "保存中…" : "添加并同步"}</button>
+        <label><span>{tr("sx.tool")}</span><select value={host} onChange={(event) => setHost(event.target.value as typeof host)}><option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="dsh">DeepSeek Harness</option></select></label>
+        <label className="settings-custom-path"><span>{tr("sx.folder")}</span><input value={root} onChange={(event) => setRoot(event.target.value)} placeholder="/Volumes/…/sessions" autoComplete="off" /></label>
+        <button className="button button-secondary" type="button" onClick={chooseRoot} disabled={saving}>{tr("sx.chooseFolder")}</button>
+        <button className="button button-secondary" type="submit" disabled={saving || !root.trim()}>{saving ? tr("sx.saving") : tr("sx.addSync")}</button>
       </form>
-      {report.sources.length > 0 && <div className="settings-custom-list" aria-label="已添加读取位置">{report.sources.map((source) => <div className="settings-custom-row" key={`${source.host}:${source.root}`}><div><strong>{sourceLabel(source.host)}</strong><span>{shortenPath(source.root)}</span><details><summary>显示完整路径</summary><code>{source.root}</code></details></div><button className="button button-secondary button-small" type="button" onClick={() => removeRoot(source)} disabled={saving}>移除读取位置</button></div>)}</div>}
-      {report.sources.length === 0 && <p className="settings-custom-empty">尚未添加其他读取位置。</p>}
+      {report.sources.length > 0 && <div className="settings-custom-list" aria-label={tr("sx.addedLocations")}>{report.sources.map((source) => <div className="settings-custom-row" key={`${source.host}:${source.root}`}><div><strong>{sourceLabel(source.host)}</strong><span>{shortenPath(source.root)}</span><details><summary>{tr("sx.showPath")}</summary><code>{source.root}</code></details></div><button className="button button-secondary button-small" type="button" onClick={() => removeRoot(source)} disabled={saving}>{tr("sx.removeLocation")}</button></div>)}</div>}
+      {report.sources.length === 0 && <p className="settings-custom-empty">{tr("sx.noneAdded")}</p>}
     </>}
     {actionError && <div className="error-banner" role="alert">{actionError}</div>}
     {message && <p className="settings-custom-message" role="status" aria-live="polite">{message}</p>}
@@ -761,18 +763,18 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
 
 /** watcher 健康的用户文案（HARDENING spec §5.6）：不指控、不暴露路径；
  * degraded/unavailable 统一为「定期检查」，periodic fallback 永远在场。 */
-function watcherStatusLabel(health: WatcherHealthStatus | null): string {
-  if (!health) return "状态不可判定 · 定期检查每 5 分钟兜底";
+function watcherStatusLabel(health: WatcherHealthStatus | null, language: AppLanguage): string {
+  if (!health) return message("sx.watchUnknown", language);
   // `throttled` 能与 `mode: "active"` 共存（REVIEW P4 自看护：watcher 后端
   // 本身没坏，只是本机 CPU 持续偏高，同步节流窗被自动拉长）——如实说明，
   // 不能让它落进「实时监听已启用」这句话里悄悄消失。
-  const throttledSuffix = health.reasonCode === "throttled" ? " · 本机 CPU 较高，同步节流中" : "";
-  if (health.mode === "active" && health.pendingRoots === 0) return `实时监听已启用${throttledSuffix}`;
+  const throttledSuffix = health.reasonCode === "throttled" ? message("sx.watchThrottled", language) : "";
+  if (health.mode === "active" && health.pendingRoots === 0) return message("sx.watchActive", language) + throttledSuffix;
   if (health.mode === "active" && health.pendingRoots > 0) {
-    return `部分可用（${health.pendingRoots} 个根等待） · 其余实时${throttledSuffix}`;
+    return message("sx.watchPartial", language, { count: health.pendingRoots }) + throttledSuffix;
   }
-  if (health.mode === "disabled") return "未启用实时监听 · 定期检查每 5 分钟";
-  return "已降级为定期检查 · 每 5 分钟";
+  if (health.mode === "disabled") return message("sx.watchOff", language);
+  return message("sx.watchDegraded", language);
 }
 
 export function SettingsPage({ focusSection = null, onSectionFocused }: { focusSection?: "settings-sources" | "settings-billing" | "settings-budget" | null; onSectionFocused?: () => void }) {
@@ -939,22 +941,22 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
     if (syncing) return false;
     setSyncing(true);
     setError(null);
-    setSyncMessage("同步已发起，正在等待本机回执…");
+    setSyncMessage(message("sx.syncStarted", language));
     try {
       const requestId = await triggerSync();
       if (!settingsMounted.current) return false;
       for (let attempt = 0; attempt < 20; attempt += 1) {
         const status = await readSyncRequestStatus(requestId);
         if (!settingsMounted.current) return false;
-        if (status.failed) throw new Error("同步请求已失效");
+        if (status.failed) throw new Error("sync request expired");
         if (status.completed) {
-          setSyncMessage("同步完成，来源状态已刷新。");
+          setSyncMessage(message("sx.syncDone", language));
           refresh();
           return true;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 250));
       }
-      setSyncMessage("同步仍在后台运行；稍后可重新查看来源状态。");
+      setSyncMessage(message("sx.syncBackground", language));
       return false;
     } catch (reason: unknown) {
       if (settingsMounted.current) {
@@ -974,7 +976,7 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
     try {
       const paused = await setSyncPaused(!report.sync.paused);
       if (!settingsMounted.current) return;
-      setSyncMessage(paused ? "自动同步已暂停。" : "自动同步已恢复。");
+      setSyncMessage(message(paused ? "sx.autoPausedMsg" : "sx.autoResumedMsg", language));
       refresh();
     } catch (reason: unknown) {
       if (settingsMounted.current) setError(safeUiError(reason, "自动同步设置未保存"));
@@ -992,7 +994,7 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
     try {
       const receipt = await setSourceHostExcluded(source.host, excluded);
       if (!settingsMounted.current) return;
-      setSourceControlMessage(receipt.excluded ? `${sourceLabel(source.host)} 已停止读取；已导入数据未删除。` : `${sourceLabel(source.host)} 已恢复读取；下次同步会重新纳入。`);
+      setSourceControlMessage(message(receipt.excluded ? "sx.readStopped" : "sx.readResumed", language, { host: sourceLabel(source.host) }));
       refresh();
     } catch (reason: unknown) {
       if (settingsMounted.current) setSourceControlError(safeUiError(reason, "来源读取控制未保存"));
@@ -1009,11 +1011,11 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
     try {
       const receipt = await deleteImportedSourceData(source.host);
       if (!settingsMounted.current) return;
-      setDeleteMessage(`已删除 ${receipt.facts} 条记录、${receipt.sessions} 个会话、${receipt.source_files} 个来源文件、${receipt.trust_observations} 条 Trust 观测、${receipt.route_evidence} 条路由证据和 ${receipt.session_excerpts} 条任务摘录；原始日志未修改。`);
+      setDeleteMessage(message("sx.deleted", language, { facts: receipt.facts, sessions: receipt.sessions, files: receipt.source_files, trust: receipt.trust_observations, routes: receipt.route_evidence, excerpts: receipt.session_excerpts }));
       setDeleteConfirmHost(null);
       refresh();
     } catch (reason: unknown) {
-      if (settingsMounted.current) setDeleteError(`删除未完成；原始日志未修改，请重新查看来源状态后重试。${safeUiError(reason, "请稍后重试")}`);
+      if (settingsMounted.current) setDeleteError(`${message("sx.deleteFailed", language)} ${safeUiError(reason, message("sx.tryLater", language))}`);
     } finally {
       if (settingsMounted.current) setDeleteBusyHost(null);
     }
@@ -1054,10 +1056,10 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
 
   const attentionCount = useMemo(() => report?.sources.filter((source) => source.connection_state === "needs_attention").length ?? 0, [report]);
   const reloadAll = () => { refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); refreshAbout(); refreshQuotaReminder(); };
-  const sections = [["settings-sources", "数据源"], ["settings-billing", "计费与套餐"], ["settings-budget", "预算"], ["settings-notifications", "提醒"], ["settings-data", "统计与数据"], ["settings-about", "关于与诊断"]] as const;
+  const sections = [["settings-sources", message("sx.navSources", language)], ["settings-billing", message("sx.navBilling", language)], ["settings-budget", message("sx.navBudget", language)], ["settings-notifications", message("sx.navAlerts", language)], ["settings-data", message("sx.navData", language)], ["settings-about", message("sx.navAbout", language)]] as const;
 
   return <>
-    <h2 id="settings-title" className="visually-hidden">数据源与本机配置</h2>
+    <h2 id="settings-title" className="visually-hidden">{message("sx.pageTitle", language)}</h2>
     <section className="settings-data-card" aria-labelledby="settings-language-title">
       <div className="settings-card-heading"><div><p className="eyebrow">{message("language.title", language)}</p><h3 id="settings-language-title">{message("language.title", language)}</h3></div></div>
       <p className="settings-data-help">{message("language.description", language)}</p>
@@ -1068,22 +1070,22 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
       </select></label>
     </section>
     <ToolbarActions>
-      <button className="button button-secondary" type="button" onClick={reloadAll} disabled={loading || customLoading || budgetLoading || billingLoading || dataLoading || aboutLoading || quotaReminderLoading}>重载全部</button>
+      <button className="button button-secondary" type="button" onClick={reloadAll} disabled={loading || customLoading || budgetLoading || billingLoading || dataLoading || aboutLoading || quotaReminderLoading}>{message("sx.reloadAll", language)}</button>
     </ToolbarActions>
 
-    <nav className="settings-section-nav" aria-label="设置分区">{sections.map(([id, label]) => <a key={id} className={activeSection === id ? "settings-section-nav-active" : undefined} href={`#${id}`} aria-current={activeSection === id ? "location" : undefined} onClick={() => setActiveSection(id)}>{label}</a>)}</nav>
+    <nav className="settings-section-nav" aria-label={message("sx.sectionsAria", language)}>{sections.map(([id, label]) => <a key={id} className={activeSection === id ? "settings-section-nav-active" : undefined} href={`#${id}`} aria-current={activeSection === id ? "location" : undefined} onClick={() => setActiveSection(id)}>{label}</a>)}</nav>
 
     <section className="settings-section" id="settings-sources" aria-labelledby="settings-sources-title">
-      <div className="settings-section-heading"><div><p className="eyebrow">数据源</p><h3 id="settings-sources-title">来源健康</h3><p>每个工具独立显示读取状态；来源之间不合并计数。</p></div>{report && <span className={`status-pill status-pill-${attentionCount ? "warning" : "success"}`}>{attentionCount ? `${attentionCount} 个来源需要处理` : "来源状态正常"}</span>}</div>
-      {error && <div className="error-banner" role="alert">来源状态暂不可用：{error}<button className="button button-secondary button-small" type="button" onClick={refresh}>重试</button></div>}
-      <SettingsLoadingState loading={loading} hasData={Boolean(report)} title="来源状态" detail="只查询本机 authority，不会触发同步或读取额外路径。" />
-      {report?.status === "unavailable" && <div className="settings-source-state"><strong>来源状态暂不可用</strong><span>本地 authority 无法读取；这不是“没有来源”，请修复数据库或重新同步后再试。</span></div>}
-      {report?.status === "ok" && <div className="settings-source-list">{report.sources.length ? report.sources.map((source) => <SourceRow key={source.host} source={source} syncing={syncing} sourceControlHost={sourceControlHost} deleteConfirmHost={deleteConfirmHost} deleteBusyHost={deleteBusyHost} supportedHosts={sourceControls?.supported_hosts ?? []} onSync={runSync} onToggleExcluded={toggleSourceExcluded} onRequestDelete={(item) => { setDeleteError(null); setDeleteMessage(null); setDeleteConfirmHost(item.host); }} onCancelDelete={() => setDeleteConfirmHost(null)} onDelete={deleteSourceData} />) : <div className="settings-source-state"><strong>没有可显示的来源</strong><span>来源注册表暂未返回任何工具。</span></div>}</div>}
-      {sourceControlError && <div className="error-banner" role="alert">来源读取控制未保存：{sourceControlError}</div>}
+      <div className="settings-section-heading"><div><p className="eyebrow">{message("sx.navSources", language)}</p><h3 id="settings-sources-title">{message("sx.srcTitle", language)}</h3><p>{message("sx.srcDesc", language)}</p></div>{report && <span className={`status-pill status-pill-${attentionCount ? "warning" : "success"}`}>{attentionCount ? message("sx.srcAttention", language, { count: attentionCount }) : message("sx.srcOk", language)}</span>}</div>
+      {error && <div className="error-banner" role="alert">{message("sx.srcUnavailableErr", language, { error })}<button className="button button-secondary button-small" type="button" onClick={refresh}>{message("sx.retry", language)}</button></div>}
+      <SettingsLoadingState loading={loading} hasData={Boolean(report)} title={message("sx.srcStatusName", language)} detail={message("sx.srcQueryOnly", language)} />
+      {report?.status === "unavailable" && <div className="settings-source-state"><strong>{message("sx.srcUnavailable", language)}</strong><span>{message("sx.srcUnavailableHelp", language)}</span></div>}
+      {report?.status === "ok" && <div className="settings-source-list">{report.sources.length ? report.sources.map((source) => <SourceRow key={source.host} source={source} syncing={syncing} sourceControlHost={sourceControlHost} deleteConfirmHost={deleteConfirmHost} deleteBusyHost={deleteBusyHost} supportedHosts={sourceControls?.supported_hosts ?? []} onSync={runSync} onToggleExcluded={toggleSourceExcluded} onRequestDelete={(item) => { setDeleteError(null); setDeleteMessage(null); setDeleteConfirmHost(item.host); }} onCancelDelete={() => setDeleteConfirmHost(null)} onDelete={deleteSourceData} />) : <div className="settings-source-state"><strong>{message("sx.noSources", language)}</strong><span>{message("sx.noSourcesHelp", language)}</span></div>}</div>}
+      {sourceControlError && <div className="error-banner" role="alert">{message("sx.ctrlUnsaved", language, { error: sourceControlError })}</div>}
       {sourceControlMessage && <p className="settings-sync-message" role="status" aria-live="polite">{sourceControlMessage}</p>}
       {deleteError && <div className="error-banner" role="alert">{deleteError}</div>}
       {deleteMessage && <p className="settings-sync-message" role="status" aria-live="polite">{deleteMessage}</p>}
-      {report && <div className="settings-sync-summary"><span>上次同步：{syncLabel(report)}</span><span>{report.sync.paused === true ? "自动同步已暂停" : report.sync.paused === false ? "自动同步已开启" : "自动同步状态不可用"}</span>{report.sync.paused !== null && <button className="button button-secondary button-small" type="button" onClick={togglePause} disabled={pauseSaving}>{pauseSaving ? "保存中…" : report.sync.paused ? "恢复自动同步" : "暂停自动同步"}</button>} {syncMessage && <small role="status">{syncMessage}</small>}<small>停止读取只影响后续同步；删除只清理 App 投影，计费归因仍保留在旧工作台。</small></div>}
+      {report && <div className="settings-sync-summary"><span>{message("sx.lastSync", language, { value: syncLabel(report, language) })}</span><span>{message(report.sync.paused === true ? "sx.autoPaused" : report.sync.paused === false ? "sx.autoOn" : "sx.autoUnknown", language)}</span>{report.sync.paused !== null && <button className="button button-secondary button-small" type="button" onClick={togglePause} disabled={pauseSaving}>{pauseSaving ? message("sx.saving", language) : message(report.sync.paused ? "sx.autoResume" : "sx.autoPause", language)}</button>} {syncMessage && <small role="status">{syncMessage}</small>}<small>{message("sx.stopNote", language)}</small></div>}
     </section>
 
     <CustomSourceSection report={customReport} loading={customLoading} error={customError} onReload={refreshCustom} onSync={runSync} />
@@ -1098,6 +1100,6 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
 
     <AboutSection report={aboutReport} loading={aboutLoading} error={aboutError} onReload={refreshAbout} />
 
-    <section className="settings-placeholder" aria-label="其他设置迁移状态"><strong>高风险操作仍在旧工作台</strong><span>账单归因、导入删除和数据库恢复等会改变历史数据的操作仍保留在旧工作台，待单独完成回执与失败恢复验收。</span></section>
+    <section className="settings-placeholder" aria-label={message("sx.legacyAria", language)}><strong>{message("sx.legacyTitle", language)}</strong><span>{message("sx.legacyBody", language)}</span></section>
   </>;
 }

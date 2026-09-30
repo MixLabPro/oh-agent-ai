@@ -131,9 +131,9 @@ if (!source.includes("readSkillScan") || !source.includes("cancelSkillScan") || 
 if (!skillsPage.includes("导出脱敏 JSON") || !skillsPage.includes("高级扫描设置") || !skillsPage.includes("hostOptions") || !skillsPage.includes("不会自动上传")) fail("React Skill 页缺少脱敏导出、高级设置或动态宿主体验");
 if (["skills_export_redacted", "skills_export_pick_path", "save_skills_scan_settings", "disable_skill", "delete_skill"].some((command) => appSource.includes(`\"${command}\"`))) fail("React Skill 页越过导出、配置或修改 skill mutation 边界");
 if (["save_public_pricing_catalog_policy", "update_public_pricing_catalog", "delete_retained_data", "clear_retention"].some((command) => appSource.includes(`\"${command}\"`))) fail("React 设置越过价格联网或数据删除 mutation 边界");
-if (!source.includes("显示完整路径") || !source.includes("settings-custom-form")) fail("React 设置缺少本机位置的人机可读路径展示");
+if (!source.includes("sx.showPath") || !source.includes("settings-custom-form")) fail("React 设置缺少本机位置的人机可读路径展示");
 if (!source.includes('status === "unavailable" ? []')) fail("React 设置未隔离自定义位置配置不可用态");
-if (!source.includes("尚未导入") || !source.includes("没有读取权限") || !source.includes("来源状态暂不可用")) fail("React 设置缺少来源空态、错误映射或不可用态");
+if (!source.includes("尚未导入") || !source.includes("没有读取权限") || !source.includes("sx.srcUnavailable")) fail("React 设置缺少来源空态、错误映射或不可用态");
 if (!source.includes("Promise.allSettled") || !source.includes("sync_pause_state") || !source.includes("read_overview")) fail("React 设置未保留来源状态的部分失败降级");
 if (!settingsPage.includes("SettingsLoadingState") || !settingsPage.includes('message("settings.loadingRetain", language)')) fail("React 设置刷新未保留旧数据并明确 stale 状态");
 if (/set(?:Report|CustomReport|BudgetReport|BillingReport|DataReport|AboutReport)\(null\)/u.test(settingsPage)) fail("React 设置刷新失败时清空了已有投影");

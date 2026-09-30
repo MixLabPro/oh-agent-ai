@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { resolvedLanguage, useLanguage } from "../../lib/i18n";
 import { readClaudeQuota, readCodexQuota, type ClaudeQuotaState, type CodexQuotaWindow, type UsageSourceSummary } from "../../lib/tauri";
 
 /**
@@ -15,9 +16,12 @@ import { readClaudeQuota, readCodexQuota, type ClaudeQuotaState, type CodexQuota
  * - 「无配额事件」≠「读不到」：Claude 无快照时按 unknown 态如实展示（评审 P2-2）。
  */
 
-// 双语局部映射：i18n 目录（us-launch）落地后整体迁入；zh 默认。
+// 双语局部映射：i18n 目录整体迁入前的过渡。语言取应用偏好（resolvedLanguage），
+// 不取 navigator.language——后者是系统语言且模块加载时定死，用户在设置里选了
+// English 这块仍是中文（美区验收截图抓到的）。t() 每次调用时解析，组件用
+// useLanguage() 订阅切换。
 type Lang = "zh" | "en";
-const lang: Lang = typeof navigator !== "undefined" && /^en/i.test(navigator.language) ? "en" : "zh";
+const currentLang = (): Lang => (resolvedLanguage() === "en" ? "en" : "zh");
 const D = {
   cardTitle: { zh: "现在该用谁", en: "Who to use now" },
   cardEyebrow: { zh: "套餐窗口", en: "Plan windows" },
@@ -53,15 +57,18 @@ const D = {
   unattributed: { zh: "未归属", en: "unattributed" },
   noCurrency: { zh: "（币种未声明）", en: "(currency undeclared)" },
 } as const;
-const t = (key: keyof typeof D) => D[key][lang];
+const t = (key: keyof typeof D) => D[key][currentLang()];
 
-const PROVIDER_LABEL: Record<string, string> = {
-  anthropic: "Anthropic", minimax: "MiniMax", "zhipu-glm": "智谱 GLM",
-  openai: "OpenAI", deepseek: "DeepSeek", "deepseek-official": "DeepSeek 官方",
-  shengsuanyun: "胜算云", unknown: t("unknownProvider"), unattributed: t("unattributed"),
-  "<unknown>": t("unknownProvider"),
+const providerLabel = (id: string): string => {
+  const zh = currentLang() === "zh";
+  const labels: Record<string, string> = {
+    anthropic: "Anthropic", minimax: "MiniMax", "zhipu-glm": zh ? "智谱 GLM" : "Zhipu GLM",
+    openai: "OpenAI", deepseek: "DeepSeek", "deepseek-official": zh ? "DeepSeek 官方" : "DeepSeek (official)",
+    shengsuanyun: zh ? "胜算云" : "Shengsuanyun", unknown: t("unknownProvider"), unattributed: t("unattributed"),
+    "<unknown>": t("unknownProvider"),
+  };
+  return labels[id] ?? id;
 };
-const providerLabel = (id: string) => PROVIDER_LABEL[id] ?? id;
 
 // 旧版 window_label 缺场时的回退按 window 推，不得写死单一尺度（周窗差 33 倍）。
 function windowFallbackLabel(window: string): string {
@@ -92,6 +99,7 @@ function codexUsable(q: CodexQuotaWindow | null): q is CodexQuotaWindow {
 }
 
 function QuotaWindowCard() {
+  useLanguage();
   const [codex, setCodex] = useState<CodexQuotaWindow | null>(null);
   const [claude, setClaude] = useState<ClaudeQuotaState | null>(null);
   useEffect(() => {
@@ -108,7 +116,7 @@ function QuotaWindowCard() {
       <div className="section-heading"><div><p className="eyebrow">{t("cardEyebrow")}</p><h3 id="decision-quota-title">{t("cardTitle")}</h3></div><small className="decision-note">{snapshotAt ? `${t("snapshotNote")} · ${snapshotAt}` : t("snapshotNote")}</small></div>
       <ul className="decision-quota-list">
         <li>
-          <span className="decision-src">Codex{codex?.plan_type ? `（${codex.plan_type}）` : ""}</span>
+          <span className="decision-src">Codex{codex?.plan_type ? ` (${codex.plan_type})` : ""}</span>
           {usable && remain != null ? (
             <span className="decision-quota-line">
               <span className="meter" role="img" aria-label={`${t("remain")} ${remain.toFixed(0)}%`}><span className={`meter-fill${remain < 15 ? " danger" : ""}`} style={{ width: `${remain}%` }} /></span>
@@ -124,7 +132,7 @@ function QuotaWindowCard() {
           ) : claude?.state === "unknown" ? (
             <span className="decision-quota-line">
               <b>{t("claudeNoSnapshot")}</b>
-              {claude.windows_recent > 0 ? <small>· {t("windowsRecent")} {claude.windows_recent} 次</small> : null}
+              {claude.windows_recent > 0 ? <small>· {t("windowsRecent")} {claude.windows_recent}{currentLang() === "zh" ? " 次" : ""}</small> : null}
               {claude.last_resets_at && claude.last_resets_at * 1000 < Date.now() ? <small>· {t("lastReset")} {fmtClock(claude.last_resets_at)} {t("resetAt")}</small> : null}
             </span>
           ) : <span className="decision-quota-line"><b>{t("claudeNoSnapshot")}</b></span>}
@@ -166,6 +174,7 @@ function paybackRows(monthly: UsageSourceSummary): PaybackRow[] {
 }
 
 function PaybackDualTrack({ monthly }: { monthly: UsageSourceSummary | null }) {
+  useLanguage();
   const rows = monthly ? paybackRows(monthly) : [];
   return (
     <section className="info-panel decision-payback" aria-labelledby="decision-payback-title">
@@ -176,7 +185,7 @@ function PaybackDualTrack({ monthly }: { monthly: UsageSourceSummary | null }) {
       <ul className="decision-payback-list">
         {rows.map((row) => (
           <li key={`${row.provider}|${row.currency ?? ""}`}>
-            <span className="decision-src">{providerLabel(row.provider)}{row.hosts.length > 1 ? <small>（{t("viaHost")} {row.hosts.join("、")}）</small> : null}</span>
+            <span className="decision-src">{providerLabel(row.provider)}{row.hosts.length > 1 ? <small>{currentLang() === "zh" ? "（" : "("}{t("viaHost")} {row.hosts.join(currentLang() === "zh" ? "、" : ", ")}{currentLang() === "zh" ? "）" : ")"}</small> : null}</span>
             <span className="decision-payback-line">
               {row.fee > 0 ? <span className="chip sub-chip">{t("fixedFee")} {fmtMoney(row.fee, row.currency)}</span> : null}
               {row.listEq > 0 ? <span className="chip diag-chip">{t("listEqRef")} {fmtMoney(row.listEq, row.currency)}</span> : null}
@@ -201,6 +210,7 @@ function PaybackDualTrack({ monthly }: { monthly: UsageSourceSummary | null }) {
 }
 
 export function DecisionArea({ monthly }: { monthly: UsageSourceSummary | null }) {
+  useLanguage();
   return (
     <div className="decision-area">
       <QuotaWindowCard />

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import "../../../../../src-tauri/ui/timeline.js";
 import { invoke, safeUiError } from "../../lib/tauri";
+import { message, resolvedLanguage, useLanguage } from "../../lib/i18n";
 import "./session-trace.css";
 
 type Series = {
@@ -34,6 +35,7 @@ export function traceMarkup(series: Series): string {
 }
 
 export function SessionTrace({ sessionRef, refreshKey }: { sessionRef: string; refreshKey: number }) {
+  const language = useLanguage();
   const [result, setResult] = useState<{ ref: string; data: Series; count: number; unplaced: number; coverage: string } | null>(null);
   const [metric, setMetric] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -54,20 +56,21 @@ export function SessionTrace({ sessionRef, refreshKey }: { sessionRef: string; r
       const graphResult = await graph;
       const coverage = graphResult?.error ? undefined : graphResult?.data?.coverage;
       if (active) { setError(null); setResult({ ref: sessionRef, data, count: data.points.length, unplaced: data.unplaced_events ?? 0,
-        coverage: coverage ? `节点 ${coverage.total_nodes ?? "—"} · 缺父 ${coverage.missing_parent ?? "—"} · 缺时 ${coverage.missing_time ?? "—"} · 缺状态 ${coverage.missing_status ?? "—"}` : "轨迹覆盖率不可用" }); }
-    }).catch((reason: unknown) => { if (active && !sameSession) setError(safeUiError(reason, "轨迹暂不可用")); });
+        coverage: coverage ? message("trace.coverage", resolvedLanguage(), { nodes: coverage.total_nodes ?? "—", parent: coverage.missing_parent ?? "—", time: coverage.missing_time ?? "—", status: coverage.missing_status ?? "—" }) : message("trace.coverageNA", resolvedLanguage()) }); }
+    }).catch((reason: unknown) => { if (active && !sameSession) setError(safeUiError(reason, message("trace.unavailable", resolvedLanguage()))); });
     return () => { active = false; };
   }, [sessionRef, refreshKey, retry]);
   const current = result?.ref === sessionRef ? result : null;
   const selected = current?.data.series.find(item => item.name === metric) ?? current?.data.series[0];
-  const labels: Record<string, string> = { tool_call_count: "工具调用次数", input: "输入 tokens", output: "输出 tokens", context: "上下文 tokens", cache: "缓存 tokens" };
-  return <section className="session-detail-panel session-trace-panel" aria-label="会话轨迹图">
-    <div className="section-heading"><h3>会话轨迹图</h3>{current && <span className="count-badge">{current.count} 个轮次</span>}</div>
-    {error ? <div role="alert"><p>{error}；下方事实和行为事件仍可查看。</p><button className="button button-secondary" onClick={() => setRetry(value => value + 1)}>重试轨迹</button></div> : !current ? <p role="status">正在加载轨迹…</p> : <>
-      {selected && <label className="session-trace-metric">指标 <select aria-label="轨迹指标" value={selected.name} onChange={event => setMetric(event.target.value)}>{current.data.series.map(item => <option key={item.name} value={item.name}>{labels[item.name] ?? item.name}</option>)}</select></label>}
+  const tr = (key: Parameters<typeof message>[0], parameters: Record<string, string | number> = {}) => message(key, language, parameters);
+  const labels: Record<string, string> = { tool_call_count: tr("trace.mToolCalls"), input: tr("trace.mInput"), output: tr("trace.mOutput"), context: tr("trace.mContext"), cache: tr("trace.mCache") };
+  return <section className="session-detail-panel session-trace-panel" aria-label={tr("trace.title")}>
+    <div className="section-heading"><h3>{tr("trace.title")}</h3>{current && <span className="count-badge">{tr("trace.rounds", { n: current.count })}</span>}</div>
+    {error ? <div role="alert"><p>{tr("trace.errNote", { error })}</p><button className="button button-secondary" onClick={() => setRetry(value => value + 1)}>{tr("trace.retry")}</button></div> : !current ? <p role="status">{tr("trace.loading")}</p> : <>
+      {selected && <label className="session-trace-metric">{tr("trace.metric")} <select aria-label={tr("trace.metricAria")} value={selected.name} onChange={event => setMetric(event.target.value)}>{current.data.series.map(item => <option key={item.name} value={item.name}>{labels[item.name] ?? item.name}</option>)}</select></label>}
       <div className="session-trace-scroll" dangerouslySetInnerHTML={{ __html: traceMarkup({ ...current.data, series: selected ? [selected] : [] }) }} />
-      <p className="session-detail-note">按记录轮次排列 · 缺失测量保留缺口 · 标记表示工具事件，红色表示失败</p>
-      <p className="session-detail-note">{current.coverage} · {current.unplaced} 个事件无法定位到轮次</p>
+      <p className="session-detail-note">{tr("trace.note")}</p>
+      <p className="session-detail-note">{current.coverage} · {tr("trace.unplaced", { n: current.unplaced })}</p>
     </>}
   </section>;
 }
