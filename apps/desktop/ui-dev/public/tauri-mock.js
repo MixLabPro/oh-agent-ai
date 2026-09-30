@@ -193,9 +193,12 @@
     data_home: "浏览器调试模式",
   };
 
+  // 月界守卫：每月 1 日 previousDay 会落入上月，而桥的 parseUsageCalendar 拒绝
+  // 不属于请求月份的 day——只在与 isoDay 同月时才进日历（2026-10-01 契约全红事故）。
+  const previousDayInMonth = previousDay.slice(0, 7) === month ? { [previousDay]: { dsh_tokens: 64000, claude_tokens: 64000, codex_tokens: 0, total_tokens: 128000, dsh_cost_cny: 2.34, claude_cost_cny: 0, claude_cost_usd: 1.12, codex_cost_usd: 0 } } : {};
   const calendar = {
     days: {
-      [previousDay]: { dsh_tokens: 64000, claude_tokens: 64000, codex_tokens: 0, total_tokens: 128000, dsh_cost_cny: 2.34, claude_cost_cny: 0, claude_cost_usd: 1.12, codex_cost_usd: 0 },
+      ...previousDayInMonth,
       [isoDay]: { dsh_tokens: 52000, claude_tokens: 64000, codex_tokens: 130000, total_tokens: 246000, dsh_cost_cny: 3.21, claude_cost_cny: 0, claude_cost_usd: 0, codex_cost_usd: 0.84 },
     },
   };
