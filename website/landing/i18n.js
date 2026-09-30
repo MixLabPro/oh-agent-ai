@@ -38,7 +38,7 @@
       "demo.trend": "Usage trend", "demo.legend.flag": "consecutive failures",
       "demo.chart.aria": "Simulated usage trend",
       "demo.insight.title": "Start with the sessions that keep failing",
-      "demo.insight.note": "Sample session burned 18.6M tokens; the same call failed 3 times in a row.",
+      "demo.insight.note": "Sample session used 18.6M tokens; the same call failed 3 times in a row.",
       "demo.inspect": "View trace →",
       "how.eyebrow": "From delivered results to a checkable process",
       "how.title": "Agents do the work.<br>You need to know how.",

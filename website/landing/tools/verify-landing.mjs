@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import path from "node:path";
+import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 
 const landing = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -41,6 +42,31 @@ assert.ok(/估算金额，非实际账单|不能直接视为扣款|estimate, not
 assert.ok(html.includes("右键 → 打开") || html.includes("right-click → Open"), "未公证测试版的右键打开指引必须在场（双语词表）");
 assert.ok(/本地|本机|不上传|on-device|never leave your Mac|never uploaded/.test(html), "本地处理主张必须在场（双语词表）");
 console.log("诚实文案: OK（示意标注 / 估算口径 / 右键打开指引 / 本地主张）");
+
+// ── 2b. 演示脚本行为守卫 ──
+// 回归：b1621514 把 app.js 误删成 2 行，静态检查全绿而页面的周期切换/图表/弹窗/动效开关全坏。
+// 不引入 jsdom（零依赖）：语法可解析 + 必需交互接线在场 + 脚本引用的每个选择器在页面里都存在。
+const appJs = readFileSync(path.join(landing, "app.js"), "utf8");
+new vm.Script(appJs, { filename: "app.js" }); // 语法错误直接抛出
+for (const needle of ["renderPeriod", "showModal", "motion-paused", "#chart-bars", "data-period", "selectEvent"]) {
+  assert.ok(appJs.includes(needle), `app.js 缺少演示交互接线：${needle}（是否被误删？）`);
+}
+assert.ok(appJs.split("\n").length >= 60, "app.js 行数异常偏少，疑似被截断");
+for (const [, id] of appJs.matchAll(/querySelector\('#([\w-]+)'\)/g)) {
+  assert.ok(html.includes(`id="${id}"`), `app.js 引用了页面里不存在的 #${id}`);
+}
+// 英文页：可见文本之外的 aria 属性也不得残留中文（屏幕阅读器会读出来）。
+// data-i18n-aria 的默认值由 i18n.js 覆盖，同样要求英文。
+const cjk = /[㐀-鿿]/;
+const aria = [...html.matchAll(/aria-label="([^"]*)"/g)].map((m) => m[1]).filter((v) => cjk.test(v));
+assert.deepEqual(aria, [], `英文页 aria-label 不得含中文：${aria.join(" | ")}`);
+console.log("演示脚本: OK（可解析 / 交互接线在场 / 选择器均存在 / aria 无中文残留）");
+
+// ── 2c. 禁用词（LANDING_VALUE_FIRST_SPEC §0.6.5）：我们不产出/不支持的承诺 ──
+const i18nText = readFileSync(path.join(landing, "i18n.js"), "utf8");
+const banned = [/health score/i, /\bwasted\b|waste detected|estimated waste/i, /real-?time/i, /\bintervene\b/i, /auto-?fix/i, /\bburned\b/i, /saves? you/i, /framework-agnostic/i, /LangGraph|CrewAI|AutoGen/i, /cargo install/i, /agent-vitals (audit|inspect)/i];
+for (const re of banned) assert.ok(!re.test(html) && !re.test(i18nText), `页面含禁用承诺词：${re}`);
+console.log("禁用词: OK（无评分/浪费/实时/干预/框架无关/不存在的命令）");
 
 // ── 3. 真截图发布门 ──
 const shotsDir = path.join(landing, "assets", "shots");
