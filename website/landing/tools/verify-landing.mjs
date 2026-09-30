@@ -22,7 +22,9 @@ const all = [html, css, ...jsFiles].join("\n");
 
 const externalScripts = [...html.matchAll(/<script[^>]+src=["']([^"']+)["']/g)].map((m) => m[1]).filter((src) => /^https?:\/\//.test(src));
 assert.deepEqual(externalScripts, [], `不得加载第三方脚本（found: ${externalScripts.join(", ")}）`);
-const externalLinks = [...html.matchAll(/<(?:link|img)[^>]+(?:href|src)=["']([^"']+)["']/g)].map((m) => m[1]).filter((src) => /^https?:\/\//.test(src));
+const externalLinks = [...html.matchAll(/<(?:link|img)[^>]+(?:href|src)=["']([^"']+)["']/g)]
+  .filter(([full]) => !/rel=["'][^"']*alternate/.test(full))
+  .map((m) => m[1]).filter((src) => /^https?:\/\//.test(src));
 assert.deepEqual(externalLinks, [], `静态资源不得外链（found: ${externalLinks.join(", ")}）`);
 assert.ok(!/@import\s+url\(/.test(css), "CSS 不得 @import 外链");
 assert.ok(!/fetch\(|XMLHttpRequest|sendBeacon|new Image\(\)\.src\s*=/.test(all), "不得有网络请求/信标代码");
@@ -34,10 +36,10 @@ for (const href of anchorHrefs) {
 console.log("零网络审计: OK（无第三方脚本/字体/追踪，外链仅 GitHub）");
 
 // ── 2. 诚实文案在场 ──
-assert.ok(html.includes("交互示意") || html.includes("示例数据") || html.includes("模拟数据"), "演示区必须标注示意/模拟数据");
-assert.ok(html.includes("估算金额，非实际账单") || html.includes("不能直接视为扣款"), "金额必须带估算口径标注");
-assert.ok(html.includes("右键 → 打开"), "未公证测试版的右键打开指引必须在场");
-assert.ok(/本地|本机|不上传/.test(html), "本地处理主张必须在场");
+assert.ok(/交互示意|示例数据|模拟数据|Sample data|simulated/.test(html), "演示区必须标注示意/模拟数据（双语词表）");
+assert.ok(/估算金额，非实际账单|不能直接视为扣款|estimate, not a bill|not charges/.test(html), "金额必须带估算口径标注（双语词表）");
+assert.ok(html.includes("右键 → 打开") || html.includes("right-click → Open"), "未公证测试版的右键打开指引必须在场（双语词表）");
+assert.ok(/本地|本机|不上传|on-device|never leave your Mac|never uploaded/.test(html), "本地处理主张必须在场（双语词表）");
 console.log("诚实文案: OK（示意标注 / 估算口径 / 右键打开指引 / 本地主张）");
 
 // ── 3. 真截图发布门 ──
@@ -50,6 +52,14 @@ if (missing.length > 0 && !allowMissingShots) {
   console.error("捕获方式见 assets/shots/README.md（托盘打开工作台后 Cmd+Shift+4）");
   process.exit(1);
 }
+// 双语（2026-10-01 i18n）：默认英文 + zh 可切。
+assert.equal(html.match(/<html lang="en">/)?.[0], '<html lang="en">', "默认语言必须英文");
+assert.ok(html.includes('hreflang="zh"') && html.includes('hreflang="en"'), "hreflang 双语声明在场");
+assert.ok(html.includes('data-lang-switch="zh"'), "默认面上必须给中文切换入口");
+assert.ok(html.includes('data-i18n='), "i18n 替换键已挂载");
+const i18nSource = readFileSync(path.join(landing, "i18n.js"), "utf8");
+assert.ok(!/fetch\(|XMLHttpRequest|sendBeacon/.test(i18nSource), "i18n 脚本零网络");
+assert.ok(!/document\.cookie/.test(i18nSource), "语言偏好不得用 Cookie（localStorage 本地）");
 console.log(missing.length === 0
   ? "真截图发布门: OK（5 张真机截图齐备）"
   : `真截图发布门: GATE-OPEN（--allow-missing-shots 开发模式，缺 ${missing.length} 张）`);
