@@ -26,13 +26,34 @@ pub fn yesterday_beijing() -> String {
 /// 统计使用的系统 IANA 时区。Jiff 读取 macOS/Linux 的系统设置，并处理
 /// `TZ` 覆盖、夏令时和历史偏移；供应商价格规则不得调用这个值来改写价卡。
 pub fn system_timezone_name() -> String {
-    TimeZone::system().iana_name().unwrap_or("UTC").to_string()
+    os_timezone_name().unwrap_or_else(|| "UTC".to_string())
 }
 
 /// True when the OS timezone cannot be represented by an IANA identifier.
 /// Callers may show the UTC fallback rather than silently presenting it as a user choice.
 pub fn system_timezone_fallback() -> bool {
-    TimeZone::system().iana_name().is_none()
+    os_timezone_name().is_none()
+}
+
+/// 操作系统真实时区，**不受进程内 `TZ` 影响**。`statistics_timezone::apply`
+/// 启动时会把用户偏好写进 `TZ`，而 jiff 的 `TimeZone::system()` 优先读 `TZ`——
+/// 曾因此「跟随系统」显示的是已保存的偏好（存过一次 UTC 就永远显示 UTC，
+/// 系统实为 Asia/Shanghai），循环取值。unix 上直接解析 `/etc/localtime`
+/// 软链；读不到再退回 jiff。
+fn os_timezone_name() -> Option<String> {
+    #[cfg(unix)]
+    {
+        if let Ok(target) = std::fs::read_link("/etc/localtime") {
+            let text = target.to_string_lossy();
+            if let Some(idx) = text.find("zoneinfo/") {
+                let name = &text[idx + "zoneinfo/".len()..];
+                if TimeZone::get(name).is_ok() {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+    TimeZone::system().iana_name().map(str::to_string)
 }
 
 /// 统计时区：优先使用启动时由 statistics_timezone::apply 写入的 IANA
@@ -136,6 +157,19 @@ mod tests {
         let t = today_beijing();
         assert!(y.len() == 10 && y.as_bytes()[4] == b'-' && y.as_bytes()[7] == b'-');
         assert!(y < t, "yesterday {y} should sort strictly before today {t}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn system_timezone_comes_from_os_link_not_process_tz() {
+        // 回归：apply() 把已保存偏好写进 TZ 后，「跟随系统」曾回显该偏好而非 OS 时区。
+        // 不改 TZ（全局状态会让并行测试互相污染）：断言有 /etc/localtime 时以它为准。
+        if let Ok(target) = std::fs::read_link("/etc/localtime") {
+            let text = target.to_string_lossy().to_string();
+            if let Some(idx) = text.find("zoneinfo/") {
+                assert_eq!(system_timezone_name(), &text[idx + "zoneinfo/".len()..]);
+            }
+        }
     }
 
     #[test]
