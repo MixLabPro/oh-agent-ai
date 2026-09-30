@@ -101,6 +101,9 @@ fn tray_template_icon() -> tauri::Result<tauri::image::Image<'static>> {
 /// 金额修剪 + 符号（`fmt_money`/`fmt_usd` 共享）。尾零与小数点只修剪、不做进位
 /// 取舍——精度由上面的档位决定。与 core `cost.rs::format_money` 同 spec。
 fn fmt_currency(x: f64, symbol: &str) -> String {
+    if x > 0.0 && x < 0.01 {
+        return format!("<{symbol}0.01");
+    }
     let s = if x >= 100.0 { format!("{x:.1}") } else { format!("{x:.2}") };
     let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
     format!("{symbol}{s}")
@@ -200,7 +203,12 @@ fn stale_from(generated_at: Option<&str>, now_secs: i64) -> bool {
 /// now 由调用方注入（`build_menu` 读一次系统时钟，整个菜单的所有行共用同一个
 /// "现在"——各行分别读钟会让同一次重建里的新鲜度判定互相不一致），单测因此不用
 /// 碰系统时钟。
+#[cfg(test)]
 fn budget_status_text_at(ov: &Overview, now_secs: i64) -> String {
+    budget_status_text_at_localized(ov, now_secs, NativeUiLanguage::Chinese)
+}
+
+fn budget_status_text_at_localized(ov: &Overview, now_secs: i64, language: NativeUiLanguage) -> String {
     if let Some(rows) = ov.budget_profiles.as_ref()
         .and_then(|v| v.get("profiles"))
         .and_then(Value::as_array)
@@ -214,20 +222,24 @@ fn budget_status_text_at(ov: &Overview, now_secs: i64) -> String {
             let spent = row.get("total_spent_minor").or_else(|| row.get("spent_minor"))
                 .and_then(Value::as_i64).unwrap_or(0);
             let limit = row.get("monthly_minor").and_then(Value::as_i64)?;
-            let label = if id == "estimate" { "估算" } else { "已确认" };
+            let label = if id == "estimate" {
+                native_label(language, "Estimated", "估算")
+            } else {
+                native_label(language, "Confirmed", "已确认")
+            };
             let state = match level {
-                "exceeded" => "超支",
-                "warn" => "接近",
-                "incomplete" => "部分覆盖",
-                "no_data" => "无数据",
-                "disabled" => "未启用",
-                _ => "正常",
+                "exceeded" => native_label(language, "exceeded", "超支"),
+                "warn" => native_label(language, "near limit", "接近"),
+                "incomplete" => native_label(language, "partial coverage", "部分覆盖"),
+                "no_data" => native_label(language, "no data", "无数据"),
+                "disabled" => native_label(language, "disabled", "未启用"),
+                _ => native_label(language, "within limit", "正常"),
             };
             Some(format!("{label} {currency} {state} {spent:.2}/{limit:.2}",
                 spent = spent as f64 / 100.0, limit = limit as f64 / 100.0))
-        }).collect::<Vec<_>>().join("；");
+        }).collect::<Vec<_>>().join(native_label(language, "; ", "；"));
         if !summary.is_empty() {
-            return format!("预算：{summary}");
+            return format!("{}{summary}", native_label(language, "Budget: ", "预算："));
         }
     }
     let b = &ov.budget;
@@ -235,32 +247,47 @@ fn budget_status_text_at(ov: &Overview, now_secs: i64) -> String {
     // 与它同屏显示的必须一致；缺场才退回 config。
     let denom = b.monthly_cny.or(ov.budget_monthly_cny);
     let mc = fmt_money(b.month_cost.unwrap_or(0.0));
-    let denom_money = denom.map(fmt_money).unwrap_or_else(|| "未设置".into());
+    let denom_money = denom.map(fmt_money).unwrap_or_else(|| native_label(language, "not set", "未设置").into());
     let base = match (b.source.as_str(), b.level.as_deref()) {
-        ("missing", _) => "预算：等预算数据（跑一次 oneline）".to_string(),
-        (_, Some("no_budget")) => "预算：未设置（成本仍按实际口径统计）".to_string(),
-        (_, Some("over")) => format!("🚨 预算超支：{mc}（月 {denom_money}）"),
+        ("missing", _) => native_label(language, "Budget: waiting for budget data (run a sync)", "预算：等预算数据（跑一次 oneline）").to_string(),
+        (_, Some("no_budget")) => native_label(language, "Budget: not set (costs are still tracked)", "预算：未设置（成本仍按实际口径统计）").to_string(),
+        (_, Some("over")) => match language {
+            NativeUiLanguage::English => format!("🚨 Budget exceeded: {mc} (monthly {denom_money})"),
+            NativeUiLanguage::Chinese => format!("🚨 预算超支：{mc}（月 {denom_money}）"),
+        },
         (_, Some("snoozed")) => match &b.snoozed_until {
-            Some(u) => format!("🔕 预算静默至 {u}"),
-            None => "🔕 预算已静默".to_string(),
+            Some(u) => match language {
+                NativeUiLanguage::English => format!("🔕 Budget alerts snoozed until {u}"),
+                NativeUiLanguage::Chinese => format!("🔕 预算静默至 {u}"),
+            },
+            None => native_label(language, "🔕 Budget alerts snoozed", "🔕 预算已静默").to_string(),
         },
         (_, Some("warn")) => {
             // 百分比来自 alert.json 的 month_ratio，不是 (budget - spent)/budget。
             let pct = b.month_ratio.unwrap_or(0.0) * 100.0;
-            format!("⚠️ 预算 {pct:.0}%：{mc} / {denom_money}")
+            match language {
+                NativeUiLanguage::English => format!("⚠️ Budget {pct:.0}%: {mc} / {denom_money}"),
+                NativeUiLanguage::Chinese => format!("⚠️ 预算 {pct:.0}%：{mc} / {denom_money}"),
+            }
         }
-        (_, Some("disabled")) => "预算已禁用".to_string(),
+        (_, Some("disabled")) => native_label(language, "Budget disabled", "预算已禁用").to_string(),
         // ok 或未知 level：显示权威数值本身，不添油加醋。
-        _ => format!("✓ 预算：{mc} / {denom_money}"),
+        _ => match language {
+            NativeUiLanguage::English => format!("✓ Budget: {mc} / {denom_money}"),
+            NativeUiLanguage::Chinese => format!("✓ 预算：{mc} / {denom_money}"),
+        },
     };
     // 健康 ≠ 新鲜度（规格 R1）：数据过期时主入口不得呈现「正常」。✓ 是「一切正常」
     // 语义，stale 时绝不显示它——换成明确的过期标记；over/warn/snoozed 本身有非正常
     // 语义、仍要显示，但带过期后缀，避免「过期还绿」。
     if stale_from(b.generated_at.as_deref(), now_secs) {
         if base.starts_with('✓') {
-            format!("⚠ 预算（数据过期）：{mc} / {denom_money}")
+            match language {
+                NativeUiLanguage::English => format!("⚠ Budget (stale data): {mc} / {denom_money}"),
+                NativeUiLanguage::Chinese => format!("⚠ 预算（数据过期）：{mc} / {denom_money}"),
+            }
         } else {
-            format!("{base}（数据过期）")
+            format!("{base}{}", native_label(language, " (stale data)", "（数据过期）"))
         }
     } else {
         base
@@ -327,75 +354,40 @@ fn claude_currency(claude: &Option<Value>, key: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// 合并按量总账的一行金额主段（v1.3，MENUBAR spec §3.1/§4）：`Σ 按量流`，CNY 主币。
-///
-/// 输入：`dsh_cny` = DSH 的**实测** ¥（今日账在 → Some，含 0 = 测到 0 元；今日缺场
-/// → None，不是 0）；`claude_cny`/`claude_usd` = Claude Code 的 catalog 折算估
-/// （来自 `claude_currency`）。
-///
-/// 合并口径：**CNY 主账 = dsh(实) + claude(估) 相加**，任何 claude CNY 估分量并入
-/// → 整段前缀 `≈`。为什么弃用 v1.2 的「¥ 实 + ` · Claude 估 ≈¥A`」追加列：顶层行
-/// 被用户当作「今天按量花了多少钱」读，真机那天 DSH 空转、钱全在 Claude Code 的
-/// deepseek 流上，追加列呈出 `¥0 · Claude 估 ≈¥37.17`——读数像「真没花钱」。合并
-/// 后估占主导就写 `≈¥37.17`，`≈` 即诚实标注；纯 DSH 段（claude 无 CNY 价流）保持
-/// 实测精度、不带 ≈，一笔实测 ¥ 不被标成估。
-///
-/// anthropic USD 流：**有汇率估算时按 `usd_cny_rate` 折进 ¥ 主账**（整段带 `≈`，
-/// hover 里前端把 `¥X` 展开回 `$A 折 + ¥B`）——这是 PM 决策 2026-09-07 的速览层
-/// 便利，`fx_estimate` 是估算不是口径，预算/导出/对账仍分币。**无汇率**（价表无
-/// `fx_estimate` 节）时退回旧行为：USD 不进 ¥ 主账（混币不能相加），只在整行完全
-/// 没有 ¥ 侧时单独浮出 `≈$B`（measured 不消失）。两币皆无 → None：调用方渲染
-/// —，不摆 `¥0`（缺列报缺）。
-fn metered_amount(
-    dsh_cny: Option<f64>,
-    claude_cny: f64,
-    claude_usd: f64,
-    usd_cny_rate: Option<f64>,
-) -> Option<String> {
-    // USD 折算分量：仅当有汇率且确有 USD 流。无汇率 → None，USD 走旧的
-    // 「只在没有任何 ¥ 侧时单独浮出」路径。
-    let usd_as_cny = usd_cny_rate.filter(|_| claude_usd > 0.0).map(|r| claude_usd * r);
-    // 估算 ¥ 分量 = claude 的 CNY 估 + USD 折算。任一非零 → 整段带 `≈`。
-    let cny_est = claude_cny + usd_as_cny.unwrap_or(0.0);
-    let has_est = cny_est > 0.0;
-    match dsh_cny {
-        Some(d) if has_est => Some(format!("≈{}", fmt_money(d + cny_est))),
-        Some(d) => Some(fmt_money(d)), // 纯 DSH 实测（无估算分量；无汇率时 USD 在此被丢弃——旧纪律）
-        None if has_est => Some(format!("≈{}", fmt_money(cny_est))),
-        None if claude_usd > 0.0 => Some(format!("≈{}", fmt_usd(claude_usd))),
-        None => None,
+/// 旧载荷的菜单兜底：同币种的 DSH 观测值与 Claude 估算可相加，但 USD 始终单列。
+/// 有估算分量的币种加 `≈`；无数据返回 None，不把缺价或缺汇率解释成零。
+fn metered_amount(dsh_cny: Option<f64>, claude_cny: f64, claude_usd: f64) -> Option<String> {
+    let mut parts = Vec::new();
+    let claude_cny = if claude_cny.is_finite() && claude_cny > 0.0 { claude_cny } else { 0.0 };
+    if let Some(d) = dsh_cny.filter(|v| v.is_finite()) {
+        let cny = d + claude_cny;
+        parts.push(format!("{}CNY {}", if claude_cny > 0.0 { "≈" } else { "" }, fmt_money(cny)));
+    } else if claude_cny > 0.0 {
+        parts.push(format!("≈CNY {}", fmt_money(claude_cny)));
     }
+    if claude_usd.is_finite() && claude_usd > 0.0 {
+        parts.push(format!("≈USD {}", fmt_usd(claude_usd)));
+    }
+    if parts.is_empty() { None } else { Some(parts.join(" · ")) }
 }
 
 /// `metered_view`（`{币种: {amount, actual, declared_estimate, default_estimate, label}}`）
-/// → 托盘一格钱。CNY 为主账，USD 有汇率就折进来（速览层纪律，带 ≈）、没汇率单独
-/// 浮出；全部来自账单才不带 ≈。视图为空（今天/本月没有按量钱：全在套餐内或没用量）
-/// → None，由调用方诚实写「—」。旧载荷（None）也 → None，走旧拼法。
-fn metered_view_text(view: Option<&serde_json::Value>, usd_cny_rate: Option<f64>) -> Option<String> {
+/// → 托盘一格钱。逐币种独立显示，`label` 为估算的币种单独带 `≈`；不再使用 FX
+/// 合成一个看似可加的主账。视图为空 → None；旧载荷（None）走上面的兼容兜底。
+fn metered_view_text(view: Option<&serde_json::Value>) -> Option<String> {
     let view = view?.as_object()?;
-    let get = |cur: &str, k: &str| view.get(cur).and_then(|v| v.get(k)).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-    let label_is_actual = |cur: &str| view.get(cur).and_then(|v| v.get("label")).and_then(serde_json::Value::as_str) == Some("actual");
-    let cny = get("CNY", "amount");
-    let usd = get("USD", "amount");
-    if cny <= 0.0 && usd <= 0.0 {
-        return None;
+    let mut parts = Vec::new();
+    for (currency, value) in view {
+        let Some(amount) = value.get("amount").and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0) else { continue };
+        let approximate = value.get("label").and_then(Value::as_str) != Some("actual");
+        let formatted = match currency.as_str() {
+            "CNY" => fmt_money(amount),
+            "USD" => fmt_usd(amount),
+            _ => amount.to_string(),
+        };
+        parts.push(format!("{}{currency} {formatted}", if approximate { "≈" } else { "" }));
     }
-    let mut total = cny;
-    let mut estimate = cny > 0.0 && !label_is_actual("CNY");
-    match (usd > 0.0, usd_cny_rate) {
-        (true, Some(rate)) => { total += usd * rate; estimate = true; }
-        (true, None) if cny <= 0.0 => {
-            return Some(format!("{}{}", if label_is_actual("USD") { "" } else { "≈" }, fmt_usd(usd)));
-        }
-        _ => {}
-    }
-    Some(format!("{}{}", if estimate { "≈" } else { "" }, fmt_money(total)))
-}
-
-/// 速览层混币折算汇率（`Overview.fx.usd_cny`）——None = 价表无 `fx_estimate` 节，
-/// 折算不发生、退回分币旧行为。
-fn fx_rate(ov: &Overview) -> Option<f64> {
-    ov.fx.as_ref().and_then(|f| f.get("usd_cny")).and_then(serde_json::Value::as_f64)
+    if parts.is_empty() { None } else { Some(parts.join(" · ")) }
 }
 
 /// 今日合并 token（v1.3）：DSH 当日实测 + Claude Code 当日 ledger（core
@@ -411,13 +403,21 @@ fn today_merged_tokens(ov: &Overview) -> i64 {
 /// 测量字段都缺 → 单个 `· —`（unavailable 降级矩阵的形态）；只缺一个 → 该槽
 /// 位「—」另一个照常。`today_partial`（覆盖率 partial）→ token 加 `≈` 前缀：
 /// 快照的 coverage 是保守下界标注，渲染成精确值就是编造。
+#[cfg(test)]
 fn host_row_text(row: &HostRow) -> String {
+    host_row_text_localized(row, NativeUiLanguage::Chinese)
+}
+
+fn host_row_text_localized(row: &HostRow, language: NativeUiLanguage) -> String {
     let name = host_display_name(&row.host_kind);
     let token_part = row.today_tokens.map(|t| {
         let s = fmt_tokens(t);
         if row.today_partial { format!("≈{s}") } else { s }
     });
-    let sess_part = row.today_sessions.map(|n| format!("{n} 会话"));
+    let sess_part = row.today_sessions.map(|n| match language {
+        NativeUiLanguage::English => format!("{n} {}", if n == 1 { "session" } else { "sessions" }),
+        NativeUiLanguage::Chinese => format!("{n} 会话"),
+    });
     let middle = match (token_part, sess_part) {
         (Some(t), Some(s)) => format!("{t} · {s}"),
         (Some(t), None) => format!("{t} · —"),
@@ -512,7 +512,12 @@ fn recent_row_text(row: &RecentSessionRow, now_secs: i64) -> String {
 /// today.json 停在 08-31（`ov.today` 正确地为 None），alert.json 停在 08-30 报
 /// today_cost ¥0.12。少了这个门，菜单会同时出现"今日成本：—（无数据）"和
 /// "今日按量预算：¥0.12 / ¥30（0%）"两行自相矛盾的话。
+#[cfg(test)]
 fn daily_budget_text(ov: &Overview, now_secs: i64) -> Option<String> {
+    daily_budget_text_localized(ov, now_secs, NativeUiLanguage::Chinese)
+}
+
+fn daily_budget_text_localized(ov: &Overview, now_secs: i64, language: NativeUiLanguage) -> Option<String> {
     // 设置页存了 estimate profile 时，这条 legacy（DSH-only，¥1 默认分母）日预算行
     // 只会和上面「本月预算」行打架（真机：「今日按量预算 — / ¥1（今日无数据）」挂在
     // 「预算：估算 CNY 超支 1450.96/500.00」上面）。profile 有日限额就按 profile 报
@@ -527,8 +532,14 @@ fn daily_budget_text(ov: &Overview, now_secs: i64) -> Option<String> {
             .and_then(Value::as_i64).unwrap_or(0);
         let denom = fmt_money(daily_limit as f64 / 100.0);
         return Some(match profile.get("daily_ratio_bp").and_then(Value::as_i64) {
-            Some(bp) => format!("今日预算：≈{} / {denom}（{}%）", fmt_money(spent as f64 / 100.0), bp / 100),
-            None => format!("今日预算：— / {denom}（今日无数据）"),
+            Some(bp) => match language {
+                NativeUiLanguage::English => format!("Today’s budget: ≈{} / {denom} ({}%)", fmt_money(spent as f64 / 100.0), bp / 100),
+                NativeUiLanguage::Chinese => format!("今日预算：≈{} / {denom}（{}%）", fmt_money(spent as f64 / 100.0), bp / 100),
+            },
+            None => match language {
+                NativeUiLanguage::English => format!("Today’s budget: — / {denom} (no data)"),
+                NativeUiLanguage::Chinese => format!("今日预算：— / {denom}（今日无数据）"),
+            },
         });
     }
     let b = &ov.budget;
@@ -536,28 +547,66 @@ fn daily_budget_text(ov: &Overview, now_secs: i64) -> Option<String> {
     let denom = fmt_money(daily);
     let fresh = !stale_from(b.generated_at.as_deref(), now_secs);
     if ov.today.is_none() {
-        return Some(format!("今日按量预算：— / {denom}（今日无数据）"));
+        return Some(match language {
+            NativeUiLanguage::English => format!("Today’s metered budget: — / {denom} (no data)"),
+            NativeUiLanguage::Chinese => format!("今日按量预算：— / {denom}（今日无数据）"),
+        });
     }
     if !fresh {
-        return Some(format!("今日按量预算：— / {denom}（数据过期，未重新评估）"));
+        return Some(match language {
+            NativeUiLanguage::English => format!("Today’s metered budget: — / {denom} (stale; not reevaluated)"),
+            NativeUiLanguage::Chinese => format!("今日按量预算：— / {denom}（数据过期，未重新评估）"),
+        });
     }
     match (b.today_cost, b.ratio) {
         (Some(c), Some(r)) => {
-            Some(format!("今日按量预算：{} / {denom}（{:.0}%）", fmt_money(c), r * 100.0))
+            Some(match language {
+                NativeUiLanguage::English => format!("Today’s metered budget: {} / {denom} ({:.0}%)", fmt_money(c), r * 100.0),
+                NativeUiLanguage::Chinese => format!("今日按量预算：{} / {denom}（{:.0}%）", fmt_money(c), r * 100.0),
+            })
         }
         // alert.json 在场且新鲜，但这两个字段是 null——`evaluate()` 对"今日无
         // 数据"就是这么落盘的。不拿 null 当 0。
-        _ => Some(format!("今日按量预算：— / {denom}（今日无数据）")),
+        _ => Some(match language {
+            NativeUiLanguage::English => format!("Today’s metered budget: — / {denom} (no data)"),
+            NativeUiLanguage::Chinese => format!("今日按量预算：— / {denom}（今日无数据）"),
+        }),
     }
 }
 
-/// 本月订阅行：`本月订阅：¥232（已付，不计入按量预算）`，或 None（无订阅 →
-/// 整行不显示，不摆「¥0」）。PM 决策 2026-09-07：订阅是月初已付的常数，**单
-/// 列**在预算行下方——让用户看得见这笔钱、但知道它不是按量预算的闸门（摊进
-/// 每 5 分钟刷新的告警分子只会让月初凭空涨一截然后整月杵着）。
+/// 本月固定订阅记录逐币种展示；本地声明/记录不是付款凭证。权威库在场且为空时
+/// 不退回旧 CNY 字段；旧载荷只有 CNY 时保留兼容行，但同样不声称已付款。
+#[cfg(test)]
 fn subscription_line_text(ov: &Overview) -> Option<String> {
+    subscription_line_text_localized(ov, NativeUiLanguage::Chinese)
+}
+
+fn subscription_line_text_localized(ov: &Overview, language: NativeUiLanguage) -> Option<String> {
+    if let Some(totals) = &ov.subscription_month_by_currency {
+        let amounts = totals.iter().filter(|(_, minor)| **minor > 0).map(|(currency, minor)| {
+            if currency == "USD" || currency == "CNY" {
+                let symbol = if currency == "USD" { "$" } else { "¥" };
+                let whole = minor / 100;
+                let cents = minor % 100;
+                if cents == 0 {
+                    format!("{currency} {symbol}{whole}")
+                } else {
+                    format!("{currency} {symbol}{whole}.{cents:02}")
+                }
+            } else {
+                format!("{currency} {minor} {}", native_label(language, "minor units (precision unavailable)", "最小单位（精度未知）"))
+            }
+        }).collect::<Vec<_>>().join(" · ");
+        if amounts.is_empty() { return None; }
+        return Some(format!("{}{amounts}{}",
+            native_label(language, "Recorded subscription: ", "已记录订阅："),
+            native_label(language, " (not payment-verified; excluded from metered budget)", "（非付款凭证，不计入按量预算）")));
+    }
     let cny = ov.subscription_cny_month?;
-    Some(format!("本月订阅：{}（已付，不计入按量预算）", fmt_money(cny)))
+    Some(match language {
+        NativeUiLanguage::English => format!("Recorded subscription: CNY {} (not payment-verified; excluded from metered budget)", fmt_money(cny)),
+        NativeUiLanguage::Chinese => format!("已记录订阅：CNY {}（非付款凭证，不计入按量预算）", fmt_money(cny)),
+    })
 }
 
 /// 同步状态一行：**成功也显示**，不是只在失败时才出现。
@@ -566,21 +615,31 @@ fn subscription_line_text(ov: &Overview) -> Option<String> {
 /// 那个「（数据过期）」后缀更直白，也覆盖了预算行不涉及的部分（今日/本月/最近
 /// 会话都来自同一轮 tick）。原来只在 `!ok` 时显示，成功时菜单里没有任何时间戳，
 /// 用户没法区分"数字是刚更新的"和"app 静默卡住半天了"。
+#[cfg(test)]
 fn sync_line_text(sync: &SyncStatus) -> String {
+    sync_line_text_localized(sync, NativeUiLanguage::Chinese)
+}
+
+fn sync_line_text_localized(sync: &SyncStatus, language: NativeUiLanguage) -> String {
     if !sync.ok {
         return if sync.stage == "never" {
-            "尚未同步".to_string()
+            native_label(language, "Not synced yet", "尚未同步").to_string()
         } else {
-            format!("⚠ 上次同步失败：{}", sync.message)
+            match language {
+                NativeUiLanguage::English => "⚠ Last sync failed; see Settings for details".to_string(),
+                NativeUiLanguage::Chinese => format!("⚠ 上次同步失败：{}", sync.message),
+            }
         };
     }
     // `at` 是北京时间 `YYYY-MM-DD HH:MM:SS`，菜单只要 HH:MM。成功形态加
     // 「（DSH 折叠 + Claude 账）」后缀（spec §4）：同步回路折 DSH 会话 + 尾折
     // Claude 账（2026-09-02 起，tick 顺序见 sync_tick），Codex 没有同步循环——
     // 时间戳的覆盖范围必须说清楚，不能让人以为它是全宿主的新鲜度。
-    match sync.at.as_deref().and_then(|s| s.get(11..16)) {
-        Some(hhmm) => format!("上次同步：{hhmm} 成功（DSH 折叠 + Claude 账）"),
-        None => "上次同步：成功（DSH 折叠 + Claude 账）".to_string(),
+    match (language, sync.at.as_deref().and_then(|s| s.get(11..16))) {
+        (NativeUiLanguage::English, Some(hhmm)) => format!("Last sync: {hhmm} succeeded (DSH folding + Claude usage)"),
+        (NativeUiLanguage::English, None) => "Last sync: succeeded (DSH folding + Claude usage)".to_string(),
+        (NativeUiLanguage::Chinese, Some(hhmm)) => format!("上次同步：{hhmm} 成功（DSH 折叠 + Claude 账）"),
+        (NativeUiLanguage::Chinese, None) => "上次同步：成功（DSH 折叠 + Claude 账）".to_string(),
     }
 }
 
@@ -604,23 +663,33 @@ enum MenuRow {
 ///   这里只按序渲染）。
 /// stale（spec §6 决策 5）→ 每个宿主子菜单底部禁用项「数据更新于 hh:mm ·
 /// 可能已过期」（hh:mm 是北京时刻，`generated_at` UTC 转北京渲染）。
+#[cfg(test)]
 fn host_menu_rows(
     hosts: &[HostRow],
     generated_at: Option<&str>,
     now_secs: i64,
+) -> Vec<MenuRow> {
+    host_menu_rows_localized(hosts, generated_at, now_secs, NativeUiLanguage::Chinese)
+}
+
+fn host_menu_rows_localized(
+    hosts: &[HostRow],
+    generated_at: Option<&str>,
+    now_secs: i64,
+    language: NativeUiLanguage,
 ) -> Vec<MenuRow> {
     let mut out = Vec::new();
     for row in hosts {
         let mut l2 = if row.status == "unavailable" {
             vec![MenuRow::Item {
                 id: format!("session:unavailable:{}", row.host_kind),
-                text: "会话数据暂不可用".into(),
+                text: native_label(language, "Session data unavailable", "会话数据暂不可用").into(),
                 enabled: false,
             }]
         } else if row.recent.is_empty() {
             vec![MenuRow::Item {
                 id: format!("session:none:{}", row.host_kind),
-                text: "尚无会话".into(),
+                text: native_label(language, "No sessions yet", "尚无会话").into(),
                 enabled: false,
             }]
         } else {
@@ -638,18 +707,20 @@ fn host_menu_rows(
             l2.push(MenuRow::Item {
                 id: format!("session:stale:{}", row.host_kind),
                 text: format!(
-                    "数据更新于 {} · 可能已过期",
+                    "{}{}{}",
+                    native_label(language, "Updated at ", "数据更新于 "),
                     generated_at
                         .and_then(parse_rfc3339_secs)
                         .map(beijing_hhmm)
-                        .unwrap_or_else(|| "??:??".into())
+                        .unwrap_or_else(|| "??:??".into()),
+                    native_label(language, " · may be stale", " · 可能已过期")
                 ),
                 enabled: false,
             });
         }
         out.push(MenuRow::Submenu {
             id: format!("host:{}", row.host_kind),
-            text: host_row_text(row),
+            text: host_row_text_localized(row, language),
             rows: l2,
         });
     }
@@ -713,41 +784,41 @@ fn build_menu(app: &AppHandle, ov: &Overview) -> tauri::Result<Menu<tauri::Wry>>
 /// 账卡两行（今日/本月按量成本）的文案。纯函数拆出来给 build_menu 拼行、给单测钉
 /// 每一格——用户最先看到的菜单文案不能只靠人工核对。
 ///
-/// v1.3 起钱段 = **合并按量总账**（`metered_amount`：DSH 实测 + Claude catalog 估
-/// 的 CNY 相加，估分量并入就标 ≈），不是 v1.2 的 DSH-only + 追加「Claude 估」列。
-/// 为什么弃追加列：真机那天 DSH 空转、钱全在 Claude Code 的 deepseek 流上，v1.2
-/// 呈现成「¥0 · Claude 估 ≈¥37.17」，顶层行读起来像真没花钱——用户以为「按量成本
-/// 无数据」是坏的。合并后估占主导就写 `≈¥37.17`，`≈` 即诚实标注。
-///
-/// 今日行 = 钱 + token 量（两者不是一回事——缓存命中率变化时钱不动 token 动，只
-/// 报钱会让"今天明明干了很多活却几乎没花钱"看起来像没数据；标题 `today_title` 里
-/// 本来就是并排显示，菜单第一行跟它对齐）。token 同源合并 `today_merged_tokens`。
-/// 本月行只显示金额（同款合并）。
-///
-/// 前缀「按量」与日预算/月成本同口径（spec §4）：这些是**按量计费**的钱，不是预算
-/// 卡里那笔评估额。预算行是 DSH-only 的（bottom budget_item + 日预算行），不在这
-/// 两行里——spec §4 按量/套餐按 supplier 分，DSH 预算不管 Claude Code 的流。
-/// 菜单首行「今日消耗」：与标题、工作台 KPI 同一个 token 数（用户定向 2026-09-17：
-/// 今日消耗放首位，钱行其次）。无数据 → 「今日消耗：—」。
+/// SQL `metered_view` 优先，同币种三级取代规则由 domain 决定；旧载荷才读取 DSH
+/// 与 Claude 账。菜单首行是今日 token，金额行保留币种与估算标记，绝不跨币相加。
+#[cfg(test)]
 fn today_tokens_row_text(ov: &Overview) -> String {
-    let tokens = today_tokens(ov);
-    if tokens > 0 { format!("今日消耗：{} tokens", fmt_tokens(tokens)) } else { "今日消耗：—".to_string() }
+    today_tokens_row_text_localized(ov, NativeUiLanguage::Chinese)
 }
 
+fn today_tokens_row_text_localized(ov: &Overview, language: NativeUiLanguage) -> String {
+    let tokens = today_tokens(ov);
+    let label = native_label(language, "Today’s usage: ", "今日消耗：");
+    if tokens > 0 { format!("{label}{} tokens", fmt_tokens(tokens)) } else { format!("{label}—") }
+}
+
+#[cfg(test)]
 fn money_rows_text(ov: &Overview) -> (String, String) {
+    money_rows_text_localized(ov, NativeUiLanguage::Chinese)
+}
+
+fn money_rows_text_localized(ov: &Overview, language: NativeUiLanguage) -> (String, String) {
     // 2026-09-17 起先读 SQL 的 `metered_view`（账单 > 归因估算 > 默认估算，与工作台
     // 总览卡同一个数）；库缺席才退回旧的 DSH state + claude ledger 拼法。
-    let today_money = metered_view_text(ov.metered_today.as_ref(), fx_rate(ov)).or_else(|| metered_amount(
-        ov.today.as_ref().and_then(|t| t["total"].as_f64()),
-        claude_currency(&ov.claude_today, "CNY"),
-        claude_currency(&ov.claude_today, "USD"),
-        fx_rate(ov),
-    ));
+    let today_money = if ov.metered_today.is_some() {
+        metered_view_text(ov.metered_today.as_ref())
+    } else {
+        metered_amount(
+            ov.today.as_ref().and_then(|t| t["total"].as_f64()),
+            claude_currency(&ov.claude_today, "CNY"),
+            claude_currency(&ov.claude_today, "USD"),
+        )
+    };
     // token 不再挂在这一行（首行「今日消耗」已经是它），这里只剩钱。
     let today_text = match today_money {
-        Some(m) => format!("今日按量成本：{m}"),
+        Some(m) => format!("{}{m}", native_label(language, "Today’s metered cost: ", "今日按量成本：")),
         // 今天没有可报的按量钱（全在套餐内 / 没用量）→ 诚实的 —（缺列报缺）。
-        None => "今日按量成本：—（无数据）".to_string(),
+        None => native_label(language, "Today’s metered cost: — (no data)", "今日按量成本：—（无数据）").to_string(),
     };
     // 本月行：同款合并，但 **只显示金额、去掉 `/ ¥600` 分母**（v1.3）。分母是 DSH
     // 预算——合并后 ¥ 主账已跨宿主，拿 DSH 预算给整个合并总账当分母是把「本月花
@@ -762,25 +833,28 @@ fn money_rows_text(ov: &Overview) -> (String, String) {
     // 非空 ⇔ DSH 本月确实折到过账。month_cost 聚合本身不带日数，不能从
     // `ov.month` 里看。
     let month_has_days = !ov.days.is_empty();
-    let month_money = metered_view_text(ov.metered_month.as_ref(), fx_rate(ov)).or_else(|| metered_amount(
-        if month_has_days { Some(month_total) } else { None },
-        claude_currency(&ov.claude_month, "CNY"),
-        claude_currency(&ov.claude_month, "USD"),
-        fx_rate(ov),
-    ));
-    // month_money 只在两宿主当月都没有任何按量钱时是 None → ¥0（当月还没花，
-    // 「月初 ¥0」是现状不是编造；预算行挂了过期标记兜底）。
-    let month_text = format!(
-        "本月按量成本：{}",
-        month_money.unwrap_or_else(|| fmt_money(month_total)),
-    );
+    let month_money = if ov.metered_month.is_some() {
+        metered_view_text(ov.metered_month.as_ref())
+    } else {
+        metered_amount(
+            if month_has_days { Some(month_total) } else { None },
+            claude_currency(&ov.claude_month, "CNY"),
+            claude_currency(&ov.claude_month, "USD"),
+        )
+    };
+    // 两侧都没有当月可报金额时不能凭空给出 CNY 0；缺列报缺。
+    let month_text = match month_money {
+        Some(m) => format!("{}{m}", native_label(language, "Monthly metered cost: ", "本月按量成本：")),
+        None => native_label(language, "Monthly metered cost: — (no data)", "本月按量成本：—（无数据）").to_string(),
+    };
     (today_text, month_text)
 }
 
 /// 参数化版——now 由调用方注入，单测钉住每一行文案不用碰系统时钟。
 fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result<Menu<tauri::Wry>> {
-    let (today_text, month_text) = money_rows_text(ov);
-    let budget_text = budget_status_text_at(ov, now_secs);
+    let language = native_ui_language();
+    let (today_text, month_text) = money_rows_text_localized(ov, language);
+    let budget_text = budget_status_text_at_localized(ov, now_secs, language);
     // 信息行一律 enabled=true：macOS 对 disabled 菜单项强制灰色渲染，作为常驻
     // 信息几乎不可读；enabled 后文字是系统默认黑。代价是悬停高亮 + 点击会触发
     // MenuEvent——handler 的 `_ => {}` 兜底这些 id，点击什么也不做，只有菜单
@@ -788,13 +862,13 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
     // 「今日按量成本」行已去掉（用户定向 2026-09-17）：首行只放今日消耗 token，钱看
     // 本月行与预算行。`today_text` 仍由 money_rows_text 算出并有单测钉住，只是不上菜单。
     let _ = today_text;
-    let tokens_item = MenuItem::with_id(app, "today_tokens", today_tokens_row_text(ov), true, None::<&str>)?;
+    let tokens_item = MenuItem::with_id(app, "today_tokens", today_tokens_row_text_localized(ov, language), true, None::<&str>)?;
     let month_item = MenuItem::with_id(app, "month", month_text, true, None::<&str>)?;
     let budget_item = MenuItem::with_id(app, "budget", budget_text, true, None::<&str>)?;
     let mut builder = MenuBuilder::new(app).item(&tokens_item);
     // 日预算：紧跟今日成本，回答"今天这些钱占日额度多少"。缺 alert.json 时整条
     // 不显示——预算行本身已经说了「等预算数据」，不用再空一行。
-    if let Some(t) = daily_budget_text(ov, now_secs) {
+    if let Some(t) = daily_budget_text_localized(ov, now_secs, language) {
         builder = builder.item(&MenuItem::with_id(app, "daily", t, true, None::<&str>)?);
     }
     builder = builder.item(&month_item);
@@ -806,12 +880,11 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
     builder = append_menu_rows(
         builder,
         app,
-        &host_menu_rows(&ov.hosts, ov.hosts_generated_at.as_deref(), now_secs),
+        &host_menu_rows_localized(&ov.hosts, ov.hosts_generated_at.as_deref(), now_secs, language),
     )?;
     builder = builder.separator().item(&budget_item);
-    // 本月订阅（PM 决策 2026-09-07）：紧跟按量预算行，单列——「已付、不计入
-    // 按量预算」。无订阅 → 整行不显示。
-    if let Some(t) = subscription_line_text(ov) {
+    // 本月订阅记录紧跟预算行，逐币种显示，明确不是付款凭证。无订阅不显示。
+    if let Some(t) = subscription_line_text_localized(ov, language) {
         builder = builder.item(&MenuItem::with_id(app, "subscription", t, true, None::<&str>)?);
     }
     // 同步状态常驻（成功也显示）——托盘是主入口，"数字是什么时候的"必须在这里
@@ -819,7 +892,7 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
     builder = builder.item(&MenuItem::with_id(
         app,
         "sync",
-        sync_line_text(&ov.sync),
+        sync_line_text_localized(&ov.sync, language),
         true,
         None::<&str>,
     )?);
@@ -830,16 +903,16 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
     // 大多数状态栏图标一样统一弹菜单（右键的专属"弹面板"手势也删），面板到此
     // 已经没有任何入口——留着 `toggle_window`/独立 HTML+JS+CSS 就是纯粹的死
     // 代码，一并删除，不留一份没人能打开的界面。
-    let workbench_item = MenuItem::with_id(app, "workbench", "打开工作台…", true, None::<&str>)?;
-    let skill_health_item = MenuItem::with_id(app, "skill_health", "Skill 体检", true, None::<&str>)?;
-    let refresh_item = MenuItem::with_id(app, "refresh", "立即同步", true, None::<&str>)?;
+    let workbench_item = MenuItem::with_id(app, "workbench", native_label(language, "Open workspace…", "打开工作台…"), true, None::<&str>)?;
+    let skill_health_item = MenuItem::with_id(app, "skill_health", native_label(language, "Skill audit", "Skill 体检"), true, None::<&str>)?;
+    let refresh_item = MenuItem::with_id(app, "refresh", native_label(language, "Sync now", "立即同步"), true, None::<&str>)?;
     let menu = builder
         .separator()
         .item(&workbench_item)
         .item(&skill_health_item)
         .item(&refresh_item)
         .separator()
-        .item(&PredefinedMenuItem::quit(app, Some("退出"))?)
+        .item(&PredefinedMenuItem::quit(app, Some(native_label(language, "Quit", "退出")))?)
         .build()?;
     // HostsCache：深链分发的映射依据（spec §9.2 #12）——缓存必须等于刚构建的
     // 菜单用的宿主行，否则 `session:{kind}:{i}` 会查到错行。写在这里而不是
@@ -1938,9 +2011,10 @@ fn trust_monitor_record_report(
         db.trust_monitor_claim_alert(&key, now_ms, 15 * 60 * 1000).unwrap_or(false)
     });
     if !should_notify { return; }
+    let language = native_ui_language();
     let _ = app.notification().builder()
-        .title("本地 Agent 信任审计")
-        .body("检测到需要复核的本地行为链，请打开 Findings 查看。")
+        .title(native_label(language, "Local agent trust audit", "本地 Agent 信任审计"))
+        .body(native_label(language, "A local activity chain needs review. Open Findings to inspect it.", "检测到需要复核的本地行为链，请打开 Findings 查看。"))
         .show();
 }
 
@@ -1956,7 +2030,7 @@ fn sync_now_tracked(app: &AppHandle, request_id: Option<String>) {
     // 改为明确的进行中状态；sync_tick 完成时 refresh() 会恢复今日 token 标题，
     // 同时重建菜单里的成功/失败状态。工作台按钮另有自己的进度文案。
     if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_title(Some("同步中…"));
+        let _ = tray.set_title(Some(native_label(native_ui_language(), "Syncing…", "同步中…")));
     }
     std::thread::spawn(move || {
         let lock = app.state::<SyncLock>();
@@ -2685,6 +2759,7 @@ fn statistics_timezone_config() -> Value {
             "status": "ok",
             "timezone": timezone,
             "system_timezone": agent_vitals_runtime::clock::system_timezone_name(),
+            "system_timezone_fallback": agent_vitals_runtime::clock::system_timezone_fallback(),
         }),
         Err(error) => serde_json::json!({ "status": "unavailable", "reason": error }),
     }
@@ -2707,6 +2782,82 @@ fn save_statistics_timezone_config(app: AppHandle, timezone: String) -> Result<V
     });
     refresh(&app, overview_snapshot_typed_sync().as_ref());
     Ok(serde_json::json!({ "status": "saved", "timezone": saved }))
+}
+
+const UI_LANGUAGE_CONFIG_FILE: &str = "ui-language.json";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeUiLanguage { English, Chinese }
+
+fn language_from_system_list(text: &str) -> NativeUiLanguage {
+    let first = text.split(['\"', '\'']).nth(1).unwrap_or("");
+    if first.to_ascii_lowercase().starts_with("zh") { NativeUiLanguage::Chinese }
+    else { NativeUiLanguage::English }
+}
+
+fn system_ui_language() -> NativeUiLanguage {
+    #[cfg(target_os = "macos")]
+    if let Ok(output) = std::process::Command::new("/usr/bin/defaults")
+        .args(["read", "-g", "AppleLanguages"]).output() {
+        if output.status.success() {
+            return language_from_system_list(&String::from_utf8_lossy(&output.stdout));
+        }
+    }
+    let locale = std::env::var("LANG").unwrap_or_default();
+    if locale.to_ascii_lowercase().starts_with("zh") { NativeUiLanguage::Chinese }
+    else { NativeUiLanguage::English }
+}
+
+fn native_ui_language() -> NativeUiLanguage {
+    match ui_language_preference().as_deref() {
+        Ok("en") => NativeUiLanguage::English,
+        Ok("zh-Hans") => NativeUiLanguage::Chinese,
+        _ => system_ui_language(),
+    }
+}
+
+fn native_label(language: NativeUiLanguage, english: &'static str, chinese: &'static str) -> &'static str {
+    match language { NativeUiLanguage::English => english, NativeUiLanguage::Chinese => chinese }
+}
+
+fn ui_language_preference() -> Result<String, String> {
+    let path = overview::data_home().join("state").join(UI_LANGUAGE_CONFIG_FILE);
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok("system".to_string()),
+        Err(error) => return Err(format!("UI language preference unreadable: {error}")),
+    };
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|error| format!("UI language preference invalid: {error}"))?;
+    let language = value.get("language").and_then(Value::as_str)
+        .ok_or_else(|| "UI language preference missing language".to_string())?;
+    match language {
+        "system" | "en" | "zh-Hans" => Ok(language.to_string()),
+        _ => Err("UI language preference unsupported".to_string()),
+    }
+}
+
+#[tauri::command]
+fn ui_language_config() -> Result<Value, String> {
+    let path = overview::data_home().join("state").join(UI_LANGUAGE_CONFIG_FILE);
+    Ok(serde_json::json!({ "status": "ok", "language": ui_language_preference()?, "has_preference": path.exists() }))
+}
+
+#[tauri::command]
+fn save_ui_language_config(app: AppHandle, language: String) -> Result<Value, String> {
+    if !matches!(language.as_str(), "system" | "en" | "zh-Hans") {
+        return Err("unsupported UI language preference".to_string());
+    }
+    let directory = overview::data_home().join("state");
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let temporary = directory.join("ui-language.json.tmp");
+    let target = directory.join(UI_LANGUAGE_CONFIG_FILE);
+    let contents = serde_json::to_vec(&serde_json::json!({ "language": language }))
+        .map_err(|error| error.to_string())?;
+    std::fs::write(&temporary, contents).map_err(|error| error.to_string())?;
+    std::fs::rename(&temporary, target).map_err(|error| error.to_string())?;
+    refresh(&app, overview_snapshot_typed_sync().as_ref());
+    Ok(serde_json::json!({ "status": "saved", "language": language }))
 }
 
 /// 每日同步叠加层（`.github/workflows/pricing-sync.yml` 每天生成）。app 拉到后与
@@ -3401,37 +3552,26 @@ fn snooze_budget_current_period() -> Result<Value, String> {
     snooze_budget_until(until_ms)
 }
 
-/// 补卡表单的「按原厂官方价预填」：目录里（优先 `provider_id` 自己的卡、其次原厂
-/// 官方卡）找 `model_id` 的六个价。USD 卡按 `fx_estimate` 折成 CNY（表单只收 CNY）
-/// 并如实带出 `converted_from` / `rate`。找不到 → `{found: false}`，不猜。
+/// 补卡表单的「按原厂官方价预填」：当前旧表单只接受 CNY 价卡。
+/// 找到非 CNY 官方卡时必须拒绝预填，不能按可变 FX 自动生成 CNY 用户价卡。
 #[tauri::command]
 fn official_price_card(provider_id: String, model_id: String) -> Value {
     let pricing = agent_vitals_runtime::price_overrides::merged_main(&overview::data_home());
     let preferred = agent_vitals_domain::cost::canonical_provider_id(&provider_id, &pricing);
-    let Some((from_provider, key, currency, mut six)) = agent_vitals_domain::cost::official_card_body(
+    let Some((from_provider, key, currency, six)) = agent_vitals_domain::cost::official_card_body(
         &model_id, &pricing, (!preferred.is_empty()).then_some(preferred.as_str()),
     ) else {
         return serde_json::json!({ "found": false });
     };
-    let mut converted_from = Value::Null;
-    let mut rate = Value::Null;
     if currency != "CNY" {
-        let Some(r) = pricing.pointer("/fx_estimate/USD_CNY").and_then(Value::as_f64).filter(|_| currency == "USD") else {
-            return serde_json::json!({ "found": false, "reason": format!("official card is in {currency} and no conversion rate is available") });
-        };
-        for dim in ["input_uncached", "input_cached", "output"] {
-            for tariff in ["off_peak", "peak"] {
-                if let Some(v) = six.get(dim).and_then(|d| d.get(tariff)).and_then(Value::as_f64) {
-                    six[dim][tariff] = serde_json::json!((v * r * 10_000.0).round() / 10_000.0);
-                }
-            }
-        }
-        converted_from = serde_json::json!(currency);
-        rate = serde_json::json!(r);
+        return serde_json::json!({
+            "found": false,
+            "reason": format!("official card is in {currency}; the current form only supports CNY and cannot infer a conversion"),
+        });
     }
     serde_json::json!({
         "found": true, "provider": from_provider, "card_key": key, "rates": six,
-        "converted_from": converted_from, "rate": rate,
+        "currency": currency,
     })
 }
 
@@ -4649,6 +4789,8 @@ pub fn run() {
             save_retention_config,
             statistics_timezone_config,
             save_statistics_timezone_config,
+            ui_language_config,
+            save_ui_language_config,
             public_pricing_catalog_status,
             save_public_pricing_catalog_policy,
             update_public_pricing_catalog,
@@ -4828,6 +4970,24 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn official_usd_card_is_not_silently_converted_into_cny_form() {
+        let result = super::official_price_card(
+            "anthropic".to_string(),
+            "anthropic/claude-sonnet-5".to_string(),
+        );
+        assert_eq!(result["found"], false);
+        assert!(result["reason"].as_str().unwrap_or("").contains("only supports CNY"));
+    }
+    #[test]
+    fn native_menu_language_follows_first_system_language() {
+        assert_eq!(language_from_system_list("(\n    \"en-US\",\n    \"zh-Hans\"\n)"), NativeUiLanguage::English);
+        assert_eq!(language_from_system_list("(\n    \"zh-Hans-CN\",\n    \"en-US\"\n)"), NativeUiLanguage::Chinese);
+        assert_eq!(language_from_system_list("(\n    \"de-DE\"\n)"), NativeUiLanguage::English);
+        assert_eq!(native_label(NativeUiLanguage::English, "Sync now", "立即同步"), "Sync now");
+        assert_eq!(native_label(NativeUiLanguage::Chinese, "Sync now", "立即同步"), "立即同步");
+    }
+
     #[test]
     fn overview_details_snapshot_reports_one_stable_authority_revision() {
         let root = std::env::temp_dir().join(format!("agent-vitals-overview-snapshot-{}", std::process::id()));
@@ -5353,6 +5513,7 @@ mod tests {
             // 速览层混币折算按此汇率。`fx: None` 的降级路径由专门用例钉。
             fx: Some(serde_json::json!({"usd_cny": 7.15, "as_of": "2026-09"})),
             subscription_cny_month: None,
+            subscription_month_by_currency: None,
         }
     }
 
@@ -5380,19 +5541,34 @@ mod tests {
         assert_eq!(today_title(&zero), "—");
     }
 
-    /// 本月订阅行（PM 决策 2026-09-07）：有 CNY 订阅 → 单列「已付、不计入按量
-    /// 预算」；无订阅 → None（整行不显示，不摆 ¥0）。
+    /// 旧 CNY 字段兼容：有记录但不宣称已付款；无订阅不摆 ¥0。
     #[test]
-    fn subscription_line_shows_paid_note_or_hides() {
+    fn subscription_line_shows_recorded_note_or_hides() {
         let mut ov = ov_with(overview::BudgetAlert::default());
         assert_eq!(subscription_line_text(&ov), None, "无订阅 → 整行不显示");
         ov.subscription_cny_month = Some(232.0);
         assert_eq!(
             subscription_line_text(&ov).unwrap(),
-            "本月订阅：¥232（已付，不计入按量预算）"
+            "已记录订阅：CNY ¥232（非付款凭证，不计入按量预算）"
         );
         ov.subscription_cny_month = Some(0.0); // (total>0).then_some 保证不会是这个，防御性
-        assert_eq!(subscription_line_text(&ov), Some("本月订阅：¥0（已付，不计入按量预算）".into()));
+        assert_eq!(subscription_line_text(&ov), Some("已记录订阅：CNY ¥0（非付款凭证，不计入按量预算）".into()));
+    }
+
+    #[test]
+    fn subscription_line_keeps_usd_and_cny_declared_amounts_separate() {
+        let mut ov = ov_with(overview::BudgetAlert::default());
+        ov.subscription_cny_month = Some(114.0);
+        ov.subscription_month_by_currency = Some([
+            ("CNY".to_string(), 11_400),
+            ("USD".to_string(), 2_005),
+        ].into());
+        assert_eq!(
+            subscription_line_text_localized(&ov, NativeUiLanguage::English),
+            Some("Recorded subscription: CNY ¥114 · USD $20.05 (not payment-verified; excluded from metered budget)".into())
+        );
+        ov.subscription_month_by_currency = Some(Default::default());
+        assert_eq!(subscription_line_text(&ov), None, "权威空账不退回旧 CNY 字段");
     }
 
     #[test]
@@ -5500,30 +5676,23 @@ mod tests {
         assert_eq!(host_display_name("workbuddy"), "WorkBuddy");
     }
 
-    /// 合并按量总账金额主段（v1.3，spec §3.1/§4）真值表。核心语义：
-    /// · CNY = DSH 实测 + Claude catalog 估 相加，任何估分量并入 → 整段 `≈`；
-    /// · 纯 DSH 段（claude 无价流）实测精度、不带 ≈——同一笔实测 ¥ 不标成估；
-    /// · anthropic USD：**有 fx_estimate 汇率 → 按率折进 ¥ 主账（带 ≈，hover 展开
-    ///   原始分币）**（PM 决策 2026-09-07 速览层便利，非口径）；**无汇率 → 退回
-    ///   旧行为**（USD 不进 ¥ 主账，只在整行没有 ¥ 侧时单独浮出 ≈$）；
-    /// · 两币皆无 → None（调用方渲染 —，不摆 ¥0）。
-    /// 2026-09-17：归因把钱搬进 metered_declared 后托盘变「今日 —」——标题/两行改读 SQL
-    /// 的 metered_view，旧拼法只做兜底。
+    /// 托盘按量视图与 SQL `metered_view` 同币分栏，不用旧 FX 便利折算生成跨币总计。
     #[test]
     fn metered_view_text_prefers_sql_view_and_marks_estimates() {
-        let r = Some(7.15);
         let est = serde_json::json!({ "CNY": { "amount": 41.77, "actual": 0.0, "declared_estimate": 41.77, "default_estimate": 0.0, "label": "estimate" } });
-        assert_eq!(metered_view_text(Some(&est), r), Some("≈¥41.77".to_string()));
+        assert_eq!(metered_view_text(Some(&est)), Some("≈CNY ¥41.77".to_string()));
         let actual = serde_json::json!({ "CNY": { "amount": 12.34, "actual": 12.34, "declared_estimate": 0.0, "default_estimate": 0.0, "label": "actual" } });
-        assert_eq!(metered_view_text(Some(&actual), r), Some("¥12.34".to_string()));
+        assert_eq!(metered_view_text(Some(&actual)), Some("CNY ¥12.34".to_string()));
         let mixed = serde_json::json!({
             "CNY": { "amount": 10.0, "actual": 10.0, "declared_estimate": 0.0, "default_estimate": 0.0, "label": "actual" },
             "USD": { "amount": 2.0, "actual": 0.0, "declared_estimate": 2.0, "default_estimate": 0.0, "label": "estimate" } });
-        assert_eq!(metered_view_text(Some(&mixed), r), Some("≈¥24.3".to_string()), "USD 折进主账后整段带 ≈");
+        assert_eq!(metered_view_text(Some(&mixed)), Some("CNY ¥10 · ≈USD $2".to_string()), "跨币不相加，估算只标在 USD 段");
         let usd_only = serde_json::json!({ "USD": { "amount": 3.0, "actual": 0.0, "declared_estimate": 3.0, "default_estimate": 0.0, "label": "estimate" } });
-        assert_eq!(metered_view_text(Some(&usd_only), None), Some(format!("≈{}", fmt_usd(3.0))), "无汇率时 USD 单独浮出");
-        assert_eq!(metered_view_text(Some(&serde_json::json!({})), r), None, "视图为空 → 调用方写「—」");
-        assert_eq!(metered_view_text(None, r), None, "旧载荷 → 退回旧拼法");
+        assert_eq!(metered_view_text(Some(&usd_only)), Some("≈USD $3".to_string()));
+        let zero = serde_json::json!({ "USD": { "amount": 0.0, "actual": 0.0, "label": "actual" } });
+        assert_eq!(metered_view_text(Some(&zero)), Some("USD $0".to_string()), "权威零与无数据必须区分");
+        assert_eq!(metered_view_text(Some(&serde_json::json!({}))), None, "视图为空 → 调用方写「—」");
+        assert_eq!(metered_view_text(None), None, "旧载荷 → 退回旧拼法");
     }
 
     /// 设置 › MCP 的 SKILL.md：frontmatter 合法（name/description 两行、`---` 围栏），
@@ -5544,38 +5713,25 @@ mod tests {
 
     #[test]
     fn metered_amount_truth_table() {
-        let r = Some(7.15); // fx_estimate.USD_CNY
         // 纯 DSH 实测：claude 无价流 → 不带 ≈（实测不标成估）；含测到 0。
-        assert_eq!(metered_amount(Some(12.34), 0.0, 0.0, r), Some("¥12.34".to_string()));
-        assert_eq!(metered_amount(Some(0.0), 0.0, 0.0, r), Some("¥0".to_string()));
+        assert_eq!(metered_amount(Some(12.34), 0.0, 0.0), Some("CNY ¥12.34".to_string()));
+        assert_eq!(metered_amount(Some(0.0), 0.0, 0.0), Some("CNY ¥0".to_string()));
         // DSH 缺场 + claude CNY 估 → 估占主导，≈¥X。
-        assert_eq!(metered_amount(None, 37.17, 0.0, r), Some("≈¥37.17".to_string()));
+        assert_eq!(metered_amount(None, 37.17, 0.0), Some("≈CNY ¥37.17".to_string()));
         // 混合：DSH 实测 ¥12.34 + claude 估 ¥6 → 相加 + ≈（含估分量）。
-        assert_eq!(metered_amount(Some(12.34), 6.0, 0.0, r), Some("≈¥18.34".to_string()));
-        assert_eq!(metered_amount(Some(0.0), 6.0, 0.0, r), Some("≈¥6".to_string()));
-
-        // ── USD 折算（PM 决策 2026-09-07：速览层有汇率 → 折进 ¥ 主账，带 ≈）──
-        // 纯 anthropic USD 日、DSH 缺场：3 × 7.15 = 21.45 折进主账。
-        assert_eq!(metered_amount(None, 0.0, 3.0, r), Some("≈¥21.45".to_string()));
-        // CNY 侧有内容（DSH 测到 ¥0）+ USD → 不再丢 USD：¥0 + 21.45。
-        assert_eq!(metered_amount(Some(0.0), 0.0, 3.0, r), Some("≈¥21.45".to_string()));
-        // DSH 实测 + claude USD → 全部折成一个 ≈¥（12.34 + 21.45 = 33.79）。
-        assert_eq!(metered_amount(Some(12.34), 0.0, 3.0, r), Some("≈¥33.79".to_string()));
-        // 三分量齐：DSH 实 + claude CNY 估 + claude USD 折。
-        assert_eq!(metered_amount(Some(12.34), 6.0, 3.0, r), Some("≈¥39.79".to_string()));
-
-        // ── 无汇率（价表无 fx_estimate 节）→ 退回分币旧行为 ──
-        // USD 只在没有任何 ¥ 侧时单独浮出；有 ¥ 侧则 USD 被丢弃（混币不能相加）。
-        assert_eq!(metered_amount(None, 0.0, 3.0, None), Some("≈$3".to_string()));
-        assert_eq!(metered_amount(Some(0.0), 0.0, 3.0, None), Some("¥0".to_string()));
-        assert_eq!(metered_amount(Some(12.34), 0.0, 3.0, None), Some("¥12.34".to_string()));
+        assert_eq!(metered_amount(Some(12.34), 6.0, 0.0), Some("≈CNY ¥18.34".to_string()));
+        assert_eq!(metered_amount(Some(0.0), 6.0, 0.0), Some("≈CNY ¥6".to_string()));
+        // USD 始终保留原币种，不论 CNY 是否存在或 FX 目录是否可用。
+        assert_eq!(metered_amount(None, 0.0, 3.0), Some("≈USD $3".to_string()));
+        assert_eq!(metered_amount(Some(0.0), 0.0, 3.0), Some("CNY ¥0 · ≈USD $3".to_string()));
+        assert_eq!(metered_amount(Some(12.34), 0.0, 3.0), Some("CNY ¥12.34 · ≈USD $3".to_string()));
+        assert_eq!(metered_amount(Some(12.34), 6.0, 3.0), Some("≈CNY ¥18.34 · ≈USD $3".to_string()));
 
         // 两币皆无 → None，不摆 ¥0。
-        assert_eq!(metered_amount(None, 0.0, 0.0, r), None);
-        assert_eq!(metered_amount(None, 0.0, 0.0, None), None);
+        assert_eq!(metered_amount(None, 0.0, 0.0), None);
         // 数字走 fmt_money/fmt_usd 同款修剪。
-        assert_eq!(metered_amount(None, 200.0, 0.0, r), Some("≈¥200".to_string()));
-        assert_eq!(metered_amount(None, 0.0, 0.52, None), Some("≈$0.52".to_string()));
+        assert_eq!(metered_amount(None, 200.0, 0.0), Some("≈CNY ¥200".to_string()));
+        assert_eq!(metered_amount(None, 0.0, 0.52), Some("≈USD $0.52".to_string()));
     }
 
     /// claude_currency 读报告的 currency_totals 单侧金额：缺场/该币键缺场/值非数
@@ -5603,8 +5759,8 @@ mod tests {
         ov.claude_today_tokens = Some(188_213_789);
         ov.claude_month = Some(serde_json::json!({"currency_totals": {"CNY": 106.1, "USD": 0.0}}));
         let (today, month) = money_rows_text(&ov);
-        assert_eq!(today, "今日按量成本：≈¥37.17");
-        assert_eq!(month, "本月按量成本：≈¥106.1", "DSH 本月无日键 → 纯 claude 估主导");
+        assert_eq!(today, "今日按量成本：≈CNY ¥37.17");
+        assert_eq!(month, "本月按量成本：≈CNY ¥106.1", "DSH 本月无日键 → 纯 claude 估主导");
         // ② 纯 DSH 日（claude 无 CNY 价流）：实测精度，无 ≈；月行带实测 ¥。
         ov = ov_with(overview::BudgetAlert::default());
         ov.today = Some(serde_json::json!({"total": 12.34, "tokens": 1_398_214}));
@@ -5617,13 +5773,35 @@ mod tests {
             coverage: None,
         }];
         let (today, month) = money_rows_text(&ov);
-        assert_eq!(today, "今日按量成本：¥12.34");
-        assert_eq!(month, "本月按量成本：¥612.5", "分母已移除——预算只活在底部预算行");
+        assert_eq!(today, "今日按量成本：CNY ¥12.34");
+        assert_eq!(month, "本月按量成本：CNY ¥612.5", "分母已移除——预算只活在底部预算行");
         // ③ 两宿主今天都无按量钱 → 今日诚实的 —；本月空 → ¥0 兜底。
         let ov = ov_with(overview::BudgetAlert::default());
         let (today, month) = money_rows_text(&ov);
         assert_eq!(today, "今日按量成本：—（无数据）");
-        assert_eq!(month, "本月按量成本：¥0");
+        assert_eq!(month, "本月按量成本：—（无数据）");
+    }
+
+    #[test]
+    fn money_rows_keep_currencies_separate_and_respect_empty_authority_view() {
+        let mut ov = ov_with(overview::BudgetAlert::default());
+        ov.fx = Some(serde_json::json!({"usd_cny": 7.15, "as_of": "2026-09"}));
+        ov.metered_month = Some(serde_json::json!({
+            "CNY": {"amount": 10.0, "label": "actual"},
+            "USD": {"amount": 2.0, "label": "estimate"}
+        }));
+        let (_, month) = money_rows_text_localized(&ov, NativeUiLanguage::English);
+        assert_eq!(month, "Monthly metered cost: CNY ¥10 · ≈USD $2");
+        assert!(!month.contains("24.3"), "FX 目录存在也不得折合跨币总额");
+
+        ov.metered_today = Some(serde_json::json!({}));
+        ov.metered_month = Some(serde_json::json!({}));
+        ov.today = Some(serde_json::json!({"total": 12.34}));
+        ov.claude_today = Some(serde_json::json!({"currency_totals": {"USD": 3.0}}));
+        ov.claude_month = Some(serde_json::json!({"currency_totals": {"USD": 3.0}}));
+        let (today, month) = money_rows_text_localized(&ov, NativeUiLanguage::English);
+        assert_eq!(today, "Today’s metered cost: — (no data)");
+        assert_eq!(month, "Monthly metered cost: — (no data)");
     }
 
     /// fmt_usd 与 fmt_money 同修剪 spec：整美元不拖 `.0`，小数保留非零尾。
@@ -5634,6 +5812,8 @@ mod tests {
         assert_eq!(fmt_usd(123.4), "$123.4");
         assert_eq!(fmt_money(6.0), "¥6");
         assert_eq!(fmt_money(0.05), "¥0.05");
+        assert_eq!(fmt_money(0.001), "<¥0.01", "非零小额不能显示成免费");
+        assert_eq!(fmt_usd(0.0004), "<$0.01");
     }
 
     /// L1 宿主行（spec §4/§8 矩阵逐格）：完整 → `显示名 · token · N 会话`；
@@ -5665,6 +5845,26 @@ mod tests {
             ..full.clone()
         };
         assert_eq!(host_row_text(&no_tokens), "DeepSeek Harness · — · 2 会话");
+    }
+
+    #[test]
+    fn tray_information_rows_have_english_labels_without_changing_values() {
+        let ov = ov_with(overview::BudgetAlert::default());
+        assert_eq!(today_tokens_row_text_localized(&ov, NativeUiLanguage::English), "Today’s usage: —");
+        let (today, month) = money_rows_text_localized(&ov, NativeUiLanguage::English);
+        assert_eq!(today, "Today’s metered cost: — (no data)");
+        assert_eq!(month, "Monthly metered cost: — (no data)");
+        let row = HostRow {
+            host_kind: "codex".into(),
+            status: "ready".into(),
+            today_tokens: Some(15000),
+            today_partial: true,
+            today_sessions: Some(1),
+            recent: vec![],
+        };
+        assert_eq!(host_row_text_localized(&row, NativeUiLanguage::English), "Codex · ≈15K · 1 session");
+        let sync = SyncStatus { ok: false, stage: "error".into(), message: "本地路径错误".into(), at: None };
+        assert_eq!(sync_line_text_localized(&sync, NativeUiLanguage::English), "⚠ Last sync failed; see Settings for details");
     }
 
     /// L2 最近会话行（spec §4）：`MM-DD · 身份 · tokens`；title 超 24 字符截断；
@@ -5965,6 +6165,31 @@ mod tests {
             ]
         }));
         assert_eq!(budget_status_text_at(&ov, FIXTURE_AT_SECS), "预算：估算 CNY 接近 81.00/100.00；已确认 USD 正常 25.00/100.00");
+        assert_eq!(
+            budget_status_text_at_localized(&ov, FIXTURE_AT_SECS, NativeUiLanguage::English),
+            "Budget: Estimated CNY near limit 81.00/100.00; Confirmed USD within limit 25.00/100.00"
+        );
+    }
+
+    #[test]
+    fn english_budget_status_preserves_missing_and_stale_alert_semantics() {
+        let missing = ov_with(overview::BudgetAlert { source: "missing".into(), ..Default::default() });
+        assert_eq!(
+            budget_status_text_at_localized(&missing, FIXTURE_AT_SECS, NativeUiLanguage::English),
+            "Budget: waiting for budget data (run a sync)"
+        );
+        let stale = ov_with(overview::BudgetAlert {
+            source: "alert".into(),
+            level: Some("over".into()),
+            generated_at: Some(FIXTURE_AT.into()),
+            month_cost: Some(612.5),
+            monthly_cny: Some(600.0),
+            ..Default::default()
+        });
+        assert_eq!(
+            budget_status_text_at_localized(&stale, FIXTURE_AT_SECS + 3600, NativeUiLanguage::English),
+            "🚨 Budget exceeded: ¥612.5 (monthly ¥600) (stale data)"
+        );
     }
 
     #[test]

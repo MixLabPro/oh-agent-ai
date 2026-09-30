@@ -490,12 +490,10 @@ fn user_declared_relay_usage_moves_from_default_to_declared_estimate() {
     assert!(daily.by_provider.contains_key("claude-code/shengsuanyun"));
 }
 
-/// 2026-09-16：币种跟计费方走。胜算云（国内中转，CNY 结算）转的海外模型
-/// （`anthropic/claude-sonnet-5`，原厂卡 USD；codex 的 gpt-*，OpenAI 卡 USD）声明
-/// 归因后，估算按 fx_estimate 折成人民币、标 `fair-market-fallback-fx`，而不是
-/// 一条 CNY 一条 USD 各说各话。
+/// 用户声明 CNY 结算并不能把原厂 USD 报价变成 CNY 支出。
+/// 价卡 fallback 估算保留原币种，且不能随当前 fx_estimate 变化。
 #[test]
-fn declared_provider_settles_fallback_estimates_in_its_own_currency() {
+fn declared_provider_preserves_fallback_quote_currency() {
     let env = QEnv::new("settlement");
     let d = env.day.clone();
     let s = env.day_start(&d);
@@ -513,18 +511,15 @@ fn declared_provider_settles_fallback_estimates_in_its_own_currency() {
     let repo = SqlSummaryRepository::new();
     let month: String = d.chars().take(7).collect();
     let m = repo.monthly_summary(&MonthlySummaryQuery { month });
-    let rate = agent_vitals_domain::cost::load_pricing()["fx_estimate"]["USD_CNY"].as_f64().unwrap();
     for key in ["claude-code/shengsuanyun", "codex/shengsuanyun"] {
-        let h = &m.by_provider[key];
-        assert_eq!(h.currency.as_deref(), Some("CNY"), "{key}: 结算币种是计费方的 CNY，不是模型原厂的 USD");
-        assert_eq!(h.pricing_method.as_deref(), Some("fair-market-fallback-fx"), "{key}");
-        let cny = h.amounts_by_basis[&agent_vitals_data::projection::BillingBasis::MeteredDeclared];
-        assert!(cny > 0.0, "{key}");
-        assert!(!m.by_provider.contains_key(&format!("{key}/USD")), "{key}: 折算后不该再有 USD 分身");
-        // 折算是 USD 估算 × 汇率：把它折回去应等于一份正的 USD 数，且与汇率线性。
-        assert!((cny / rate) > 0.0);
+        let usd_key = format!("{key}/USD");
+        let h = &m.by_provider[&usd_key];
+        assert_eq!(h.currency.as_deref(), Some("USD"), "{key}: 保留原厂价卡报价币种");
+        assert_eq!(h.pricing_method.as_deref(), Some("fair-market-fallback"), "{key}");
+        assert!(h.amounts_by_basis[&agent_vitals_data::projection::BillingBasis::MeteredDeclared] > 0.0, "{key}");
+        assert!(!m.by_provider.contains_key(key), "{key}: 不能生成无依据的 CNY 估算");
     }
     let view = m.metered_view();
-    assert!(!view.contains_key("USD"), "按量视图只剩人民币：{view:?}");
-    assert_eq!(view["CNY"].label, agent_vitals_data::projection::MeteredLabel::Estimate);
+    assert!(view.contains_key("USD"), "按量视图保留 USD：{view:?}");
+    assert!(!view.contains_key("CNY"), "不从报价推断人民币结算：{view:?}");
 }

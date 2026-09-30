@@ -61,20 +61,36 @@ where
     agent_vitals_domain::util::pyround(total * 100.0, 0) as i64
 }
 
-/// 订阅月费在 `currency` 口径下的合计（分）：同币直接加；异币走 `fx_estimate`
-/// 折算并记 `fx_applied`（预算是规划数、估算档，允许 ≈；实付面永远分币）。
-/// 没有折算率的币种跳过并计入 `skipped`（不冒充）。
+/// 预算币种之外仍有可计入口径的金额时，已知金额只是下界，不能报安全。
+fn budget_profile_has_unconverted<'a, I>(amounts: I, profile_id: &str, currency: &str) -> bool
+where
+    I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
+{
+    use agent_vitals_data::projection::BillingBasis;
+    amounts.into_iter().any(|amount| {
+        if amount.currency.as_deref() == Some(currency) { return false; }
+        let get = |b: BillingBasis| amount.amounts_by_basis.get(&b).copied().unwrap_or(0.0);
+        let actual = get(BillingBasis::MeteredActual) + get(BillingBasis::HostBilled);
+        (match profile_id {
+            "estimate" => if actual > 0.0 { actual } else { get(BillingBasis::MeteredDeclared) + get(BillingBasis::MeteredEstimate) },
+            "confirmed" => actual,
+            _ => 0.0,
+        }) > 0.0
+    })
+}
+
+/// 订阅月费在 `currency` 口径下的合计（分）：仅同币相加。
+/// 异币跳过并计入 `skipped`；不能用当前汇率重新计算历史预算消耗。
 pub fn subscription_fees_minor<'a, I>(
     amounts: I,
     currency: &str,
-    pricing: &serde_json::Value,
+    _pricing: &serde_json::Value,
 ) -> (i64, bool, Vec<String>)
 where
     I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
 {
     use agent_vitals_data::projection::BillingBasis;
     let mut total = 0.0f64;
-    let mut fx_applied = false;
     let mut skipped = Vec::new();
     for amount in amounts {
         let Some(fee) = amount.amounts_by_basis.get(&BillingBasis::FixedSubscription).copied() else { continue };
@@ -82,14 +98,11 @@ where
         let Some(cur) = amount.currency.as_deref() else { skipped.push(amount.host_id.clone()); continue };
         if cur == currency {
             total += fee;
-        } else if let Some(v) = agent_vitals_domain::cost::to_settlement_currency(fee, cur, currency, pricing) {
-            total += v;
-            fx_applied = true;
         } else {
             skipped.push(amount.host_id.clone());
         }
     }
-    (agent_vitals_domain::util::pyround(total * 100.0, 0) as i64, fx_applied, skipped)
+    (agent_vitals_domain::util::pyround(total * 100.0, 0) as i64, false, skipped)
 }
 
 /// 当月天数 / 今天是第几天（北京日期）——订阅月费按天摊派用。
@@ -194,10 +207,15 @@ pub fn budget_profiles_status_from_parts(
         let daily_spent_minor = budget_profile_spent_minor(
             daily_values.iter().copied(), &profile.profile_id, &profile.currency,
         );
-        let has_unresolved = budget_profile_has_unresolved(
+        let subscription_incomplete = profile.profile_id == "estimate" && !subscription_skipped.is_empty();
+        let has_unresolved = subscription_incomplete || budget_profile_has_unconverted(
+            values.iter().copied(), &profile.profile_id, &profile.currency,
+        ) || budget_profile_has_unresolved(
             values.iter().copied(), &profile.profile_id, &profile.currency,
         );
-        let daily_has_unresolved = budget_profile_has_unresolved(
+        let daily_has_unresolved = subscription_incomplete || budget_profile_has_unconverted(
+            daily_values.iter().copied(), &profile.profile_id, &profile.currency,
+        ) || budget_profile_has_unresolved(
             daily_values.iter().copied(), &profile.profile_id, &profile.currency,
         );
         let daily_total_minor = daily_spent_minor + subscription_daily_minor;
@@ -943,6 +961,8 @@ mod tests {
         assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "CNY"), 32_495);
         assert_eq!(budget_profile_spent_minor(&amounts, "confirmed", "CNY"), 20_150);
         assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "USD"), 7_700);
+        assert!(budget_profile_has_unconverted(amounts.iter(), "estimate", "CNY"), "USD 按量估算不能被 CNY 预算忽略后仍报安全");
+        assert!(!budget_profile_has_unconverted(amounts.iter(), "confirmed", "CNY"), "仅 USD 估算不能影响已确认支出口径");
         // 归因估算（MeteredDeclared）同样进 estimate；同条目有账单时被账单取代。
         amounts[0].amounts_by_basis.insert(BillingBasis::MeteredDeclared, 10.0);
         assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "CNY"), 33_495);
@@ -950,14 +970,20 @@ mod tests {
         assert_eq!(budget_profile_spent_minor(&amounts, "estimate", "CNY"), 25_150, "账单取代该条目的两档估算");
         amounts[0].amounts_by_basis.remove(&BillingBasis::MeteredActual);
         amounts[0].amounts_by_basis.remove(&BillingBasis::MeteredDeclared);
-        // 订阅月费口径：同币直加，USD 按 fx_estimate 折算并标记。
+        // 订阅月费口径：同币直加；跨币保留为未覆盖，不用当前 FX 改写历史。
         let pricing = agent_vitals_domain::cost::load_pricing();
         let (fees, fx, skipped) = subscription_fees_minor(amounts.iter(), "CNY", &pricing);
         assert_eq!((fees, fx, skipped.len()), (99_900, false, 0));
         amounts[2].amounts_by_basis.insert(BillingBasis::FixedSubscription, 20.0);
-        let rate = pricing["fx_estimate"]["USD_CNY"].as_f64().unwrap();
-        let (fees, fx, _) = subscription_fees_minor(amounts.iter(), "CNY", &pricing);
-        assert_eq!((fees, fx), (99_900 + (20.0 * rate * 100.0).round() as i64, true));
+        let (fees, fx, skipped) = subscription_fees_minor(amounts.iter(), "CNY", &pricing);
+        assert_eq!((fees, fx, skipped), (99_900, false, vec!["codex".to_string()]));
+        let mut changed_rate = pricing.clone();
+        changed_rate["fx_estimate"]["USD_CNY"] = serde_json::json!(20.0);
+        assert_eq!(
+            subscription_fees_minor(amounts.iter(), "CNY", &changed_rate),
+            (fees, fx, vec!["codex".to_string()]),
+            "历史预算订阅分摊不能随当前汇率变化",
+        );
         assert_eq!(month_day_progress("2026-09-17"), (30, 17));
         assert_eq!(month_day_progress("2028-02-29"), (29, 29));
         assert!(!budget_profile_has_unresolved(amounts.iter(), "estimate", "CNY"));

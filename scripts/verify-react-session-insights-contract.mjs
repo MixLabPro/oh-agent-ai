@@ -200,7 +200,6 @@ assert.ok(!source.includes("比全部命中多"), "不写「比全部命中多�
 assert.ok(source.includes("仅在本机显示，不进入导出和 MCP"), "摘录旁固定标注本机专属");
 assert.ok(source.includes("f.invocation_key ?? `ts:"), "没有分组键的失败不得按工具名并成「相同调用」");
 assert.equal(view.fmtTokens(1_832_000), "183 万");
-assert.equal(view.fmtMoney({ amounts: [{ amount_minor: 612, currency: "USD" }, { amount_minor: 900, currency: "CNY" }], coverage: "partial" }), "$6.12 + ¥9.00（部分调用无价卡）");
 // WASTE S1（修订 spec §4.1）：失败区间成本暴露——只对这个明确标注的字段放开金额，
 // 断言口径标签、降级与免责声明同屏可见；diagText 的金额禁令（上方 186/192）不变。
 assert.ok(source.includes("涉及回合输入"), "exposure block labels affected-turn input");
@@ -217,4 +216,6 @@ assert.ok(exposureDiag.failure_exposure.coverage === "full" && exposureDiag.fail
 const mockExposure = insights.diagnostics.find(d => d.kind === "repeated_failure");
 assert.ok(mockExposure?.failure_exposure?.coverage === "partial" && mockExposure.failure_exposure.unpriced_tokens > 0, "mock exercises the partial+unpriced path");
 assert.ok(!source.includes("estimated_amount"), "诊断不读金额（r6 移除 estimated_amount）——保持");
-console.log("Session insights copy: OK (fact/cause split, no waste or money wording in diagnostics)");
+// i18n 后 fmtMoney 文案键化：金额断言改为键在场 + JPY 刻度护栏（不依赖运行语言）。
+assert.ok(source.includes("sessionInsights.partialPrice") || source.includes("（部分调用无价卡"), "partial-coverage money label present (i18n key or zh fallback)");
+assert.match(view.fmtMoney({ amounts: [{ amount_minor: 100, currency: "JPY" }], coverage: "complete" }), /JPY 100 minor units|最小单位/, "unknown currency scale must not be silently divided by 100");console.log("Session insights copy: OK (fact/cause split, no waste or money wording in diagnostics)");

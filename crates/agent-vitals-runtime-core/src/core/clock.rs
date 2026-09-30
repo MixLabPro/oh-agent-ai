@@ -26,7 +26,13 @@ pub fn yesterday_beijing() -> String {
 /// 统计使用的系统 IANA 时区。Jiff 读取 macOS/Linux 的系统设置，并处理
 /// `TZ` 覆盖、夏令时和历史偏移；供应商价格规则不得调用这个值来改写价卡。
 pub fn system_timezone_name() -> String {
-    TimeZone::system().iana_name().unwrap_or("Etc/Unknown").to_string()
+    TimeZone::system().iana_name().unwrap_or("UTC").to_string()
+}
+
+/// True when the OS timezone cannot be represented by an IANA identifier.
+/// Callers may show the UTC fallback rather than silently presenting it as a user choice.
+pub fn system_timezone_fallback() -> bool {
+    TimeZone::system().iana_name().is_none()
 }
 
 /// 统计时区：优先使用启动时由 statistics_timezone::apply 写入的 IANA
@@ -37,14 +43,17 @@ pub fn statistics_timezone() -> TimeZone {
     configured
         .as_deref()
         .and_then(|name| TimeZone::get(name).ok())
-        .unwrap_or_else(TimeZone::system)
+        .unwrap_or_else(|| {
+            let system = TimeZone::system();
+            if system.iana_name().is_some() { system } else { TimeZone::UTC }
+        })
 }
 
 /// 当前统计口径实际使用的 IANA 时区名称。与 [`statistics_timezone`] 同源，
 /// 包括启动时应用的持久化用户偏好；不要用 [`system_timezone_name`] 表示
 /// 统计结果，因为用户可以在系统时区之外选择统计时区。
 pub fn statistics_timezone_name() -> String {
-    statistics_timezone().iana_name().unwrap_or("Etc/Unknown").to_string()
+    statistics_timezone().iana_name().unwrap_or("UTC").to_string()
 }
 
 fn system_now() -> jiff::Zoned {
@@ -147,5 +156,29 @@ mod tests {
         assert_eq!(offset_seconds_for_unix_secs_in_timezone(1_772_962_200, "America/Los_Angeles"), Some(-28_800));
         assert_eq!(offset_seconds_for_unix_secs_in_timezone(1_772_965_800, "America/Los_Angeles"), Some(-25_200));
         assert_eq!(date_for_unix_secs_in_timezone(1_772_955_000, "not/a-zone"), None);
+    }
+
+    #[test]
+    fn los_angeles_civil_days_have_23_and_25_hours_at_dst_boundaries() {
+        // The same local midnight-to-midnight interval is not always 86,400 seconds.
+        let spring_start = 1_772_956_800;
+        let spring_end = 1_773_039_600;
+        let autumn_start = 1_793_516_400;
+        let autumn_end = 1_793_606_400;
+        assert_eq!(spring_end - spring_start, 23 * 60 * 60);
+        assert_eq!(autumn_end - autumn_start, 25 * 60 * 60);
+        assert_eq!(date_for_unix_secs_in_timezone(spring_start, "America/Los_Angeles"), Some("2026-03-08".into()));
+        assert_eq!(date_for_unix_secs_in_timezone(spring_end - 1, "America/Los_Angeles"), Some("2026-03-08".into()));
+        assert_eq!(date_for_unix_secs_in_timezone(spring_end, "America/Los_Angeles"), Some("2026-03-09".into()));
+        assert_eq!(date_for_unix_secs_in_timezone(autumn_start, "America/Los_Angeles"), Some("2026-11-01".into()));
+        assert_eq!(date_for_unix_secs_in_timezone(autumn_end - 1, "America/Los_Angeles"), Some("2026-11-01".into()));
+        assert_eq!(date_for_unix_secs_in_timezone(autumn_end, "America/Los_Angeles"), Some("2026-11-02".into()));
+    }
+
+    #[test]
+    fn same_epoch_may_belong_to_different_statistical_months() {
+        let epoch = 1_788_244_200; // 2026-09-01 06:30Z
+        assert_eq!(date_for_unix_secs_in_timezone(epoch, "Asia/Shanghai"), Some("2026-09-01".into()));
+        assert_eq!(date_for_unix_secs_in_timezone(epoch, "America/Los_Angeles"), Some("2026-08-31".into()));
     }
 }

@@ -22,13 +22,13 @@ assert.doesNotMatch(appPage, /Workbench React migration/i, "migration placeholde
 // R2（OVERVIEW_DRILLDOWN spec §4.3/§7.2）：内嵌发现条的契约——存在性、
 // 两态诚实降级、「去看会话」路径只给可过滤宿主且有会话证据的项（决策 #3）。
 assert.match(overviewPage, /function OverviewFindingsStrip/, "overview must render the inline findings strip");
-assert.match(overviewPage, /发现服务暂不可用/, "findings strip must state unavailability honestly");
-assert.match(overviewPage, /当前没有需要注意的事项/, "findings strip must have an honest empty state");
+assert.match(overviewPage, /message\("overview\.findingsUnavailable"\)/, "findings strip must state unavailability honestly in the selected language");
+assert.match(overviewPage, /message\("overview\.findingsEmpty"\)/, "findings strip must have an honest localized empty state");
 assert.match(overviewPage, /item\.sessions_count > 0 && item\.host !== "generic" && item\.host !== "all"/, "evidence link only for filterable hosts with session evidence");
 assert.match(overviewPage, /readFindings\(null\)/, "strip reads the existing safe findings projection (no new payload path)");
 assert.match(overviewPage, /sessionsDateHref|sessionsHostHref/, "drill-down links go through the whitelisted nav helper");
 assert.doesNotMatch(appPage, /工作台预览/, "production navigation must not call itself a preview");
-assert.match(appPage, /<h1 className="visually-hidden">总览<\/h1>/, "compact overview still needs an accessible page heading");
+assert.match(appPage, /<h1 className="visually-hidden">\{message\(navigation\.find\(\(item\) => item\.id === page\)\?\.label \?\? "nav\.overview", language\)\}<\/h1>/, "compact overview still needs an accessible localized page heading");
 const uiRequire = createRequire(path.join(ui, "package.json"));
 const { buildSync } = uiRequire("esbuild");
 
@@ -80,12 +80,12 @@ function loadCacheHitMetric() {
   return sandbox.module.exports.todayCacheHitRatio;
 }
 
-function loadSpendCards() {
+function loadSpendCards(language = "en") {
   const built = buildSync({
     entryPoints: [path.join(ui, "react/src/features/overview/spendCards.ts")],
     bundle: true, format: "cjs", platform: "node", target: "node20", write: false, logLevel: "silent",
   });
-  const sandbox = { module: { exports: {} }, exports: {}, require: uiRequire, Date, Object };
+  const sandbox = { module: { exports: {} }, exports: {}, require: uiRequire, Date, Object, Intl, process, localStorage: { getItem: () => language } };
   vm.createContext(sandbox);
   vm.runInContext(built.outputFiles[0].text, sandbox, { filename: "overview-spend-cards.bundle.cjs" });
   return sandbox.module.exports;
@@ -151,15 +151,18 @@ assert.equal(todayCacheHitRatio({ ...daily, freshness: "unavailable" }), null);
 const { todaySpendCard, monthSpendCard } = loadSpendCards();
 const pricedMonth = { ...monthly, month: "2026-09", freshness: "fresh", actual_spend: { CNY: 182.55, USD: 40 }, spend_by_basis: { fixed_subscription: { CNY: 162, USD: 40 }, host_billed: { CNY: 20.55 } }, metered_view: { CNY: { amount: 100, actual: 20.55, declared_estimate: 79.45, default_estimate: 0, label: "mixed" } } };
 const pricedDay = { ...daily, date: "2026-09-24", freshness: "fresh", actual_spend: {}, metered_view: { CNY: { amount: 80, actual: 0, declared_estimate: 80, default_estimate: 0, label: "estimate" } } };
-assert.equal(monthSpendCard(pricedMonth).value, "¥182.55");
-assert.match(monthSpendCard(pricedMonth).detail, /\$40\.00/);
-assert.equal(todaySpendCard(pricedDay, pricedMonth).value, "¥5.40");
-assert.match(todaySpendCard(pricedDay, pricedMonth).detail, /\$1\.33/);
-assert.match(todaySpendCard(pricedDay, pricedMonth).detail, /非当日扣款/);
-assert.match(todaySpendCard(pricedDay, pricedMonth).detail, /按量估算未计入实付/);
+assert.match(monthSpendCard(pricedMonth).value, /CNY\s*182\.55/);
+assert.match(monthSpendCard(pricedMonth).detail, /USD\s*40\.00/);
+assert.match(todaySpendCard(pricedDay, pricedMonth).value, /CNY\s*5\.40/);
+assert.match(todaySpendCard(pricedDay, pricedMonth).detail, /USD\s*1\.33/);
+assert.match(todaySpendCard(pricedDay, pricedMonth).detail, /not a charge made today/);
+assert.match(todaySpendCard(pricedDay, pricedMonth).detail, /Metered estimates are not included/);
 assert.equal(todaySpendCard(pricedDay, { ...pricedMonth, month: "2026-08" }).value, "—", "wrong month must not allocate subscriptions");
 assert.equal(todaySpendCard({ ...pricedDay, freshness: "unavailable" }, pricedMonth).value, "—", "unavailable daily summary must not fabricate a daily amount");
-assert.equal(todaySpendCard({ ...pricedDay, actual_spend: { CNY: 2 } }, pricedMonth).value, "¥7.40", "known daily metered charges add to the subscription allocation");
+assert.match(todaySpendCard({ ...pricedDay, actual_spend: { CNY: 2 } }, pricedMonth).value, /CNY\s*7\.40/, "known daily metered charges add to the subscription allocation");
+const chineseSpendCard = loadSpendCards("zh-Hans").monthSpendCard(pricedMonth);
+assert.equal(chineseSpendCard.value, monthSpendCard(pricedMonth).value, "language changes text, not monetary facts");
+assert.match(chineseSpendCard.detail, /已记录费用与已声明订阅/);
 for (const day of calendar.days) assert.equal(day.total_tokens, day.dsh_tokens + day.claude_tokens + day.codex_tokens);
 
 const originalInvoke = fixtureInvoke;
@@ -241,7 +244,7 @@ withOverride(async (command, args) => {
 const inconsistent = await bridge.readOverviewDetails();
 assert.equal(inconsistent.is_consistent, false);
 assert.equal(inconsistent.authority_revision, 42);
-assert.match(inconsistent.errors[0], /快照暂不可用/);
+assert.match(inconsistent.errors[0], /This local operation is unavailable/, "an English locale must not leak the Chinese fallback");
 restore();
 
 withOverride(async (command, args) => {

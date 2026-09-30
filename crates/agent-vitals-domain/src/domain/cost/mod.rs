@@ -114,8 +114,7 @@ pub fn metered_estimate_minor(
 mod billing;
 pub use billing::{
     billing_mode_of, billing_route_of, cache_hit_ratio, canonical_provider_id,
-    declared_subscriptions, provider_settlement_currency, subscription_fee_of,
-    to_settlement_currency, BillingMode,
+    declared_subscriptions, provider_quote_currency, subscription_fee_of, BillingMode,
 };
 
 const PRICING_JSON: &str = include_str!("../../../../../assets/pricing.json");
@@ -1701,5 +1700,13 @@ mod tests {
         // 坏日（null / 空对象）→ 0，不 panic。
         assert_eq!(claude_day_total_tokens(&serde_json::json!(null)), 0);
         assert_eq!(claude_day_total_tokens(&serde_json::json!({})), 0);
+    }
+
+    #[test]
+    fn missing_quote_currency_is_not_guessed_from_provider() {
+        let pricing = serde_json::json!({"providers": {"legacy": {"models": {
+            "legacy-model": {"input_uncached": 1, "input_cached": 0, "output": 1}
+        }}}});
+        assert!(super::claude::resolve_card_catalog("legacy-model", &pricing).is_none());
     }
 }

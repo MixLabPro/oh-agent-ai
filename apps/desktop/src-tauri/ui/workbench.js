@@ -1203,9 +1203,8 @@ async function renderPriceOverrideSettings() {
       put("ov-price-uncached-off", r.rates.input_uncached.off_peak); put("ov-price-uncached-peak", r.rates.input_uncached.peak);
       put("ov-price-cached-off", r.rates.input_cached.off_peak); put("ov-price-cached-peak", r.rates.input_cached.peak);
       put("ov-price-output-off", r.rates.output.off_peak); put("ov-price-output-peak", r.rates.output.peak);
-      status.textContent = "已按 " + (PROVIDER_LABEL[r.provider] || r.provider) + " 官方卡（" + r.card_key + "）预填" +
-        (r.converted_from ? "，" + r.converted_from + " 按 ≈" + r.rate + " 折成人民币" : "") +
-        "；这是原厂标价，不是 " + provider.value.trim() + " 的实际价——可直接保存，也可改成实际价再存。";
+      status.textContent = "已按 " + (PROVIDER_LABEL[r.provider] || r.provider) + " 的 CNY 官方卡（" + r.card_key + "）预填；" +
+        "这是原厂标价，不是 " + provider.value.trim() + " 的实际价——可直接保存，也可改成实际价再存。";
     } catch (e) {
       status.textContent = "预填失败：" + errText(e);
     } finally {
@@ -1883,10 +1882,10 @@ function adaptEstimateProfileToBudget(profile, legacy) {
       (profile.subscription_fx_applied ? "（异币月费按参考汇率折算）" : ""));
   }
   // 按量恒带 ≈：estimate profile 的按量是三级口径（账单 > 归因估算 > 默认估算），
-  // 归因估算在计费方无价卡时退回原厂官方价（summary.rs `fair-market-fallback-fx`），
+  // 归因估算在计费方无价卡时退回原厂官方价（`fair-market-fallback`，保留报价币种），
   // 与真实账单可差数倍（2026-09-17 真机：胜算云估 ¥1204.6、实付 ¥316）。
   if (metered > 0 || amortized === 0) parts.push("按量 ≈" + fmtMoney(metered));
-  if (profile.has_unresolved) reasons.push("部分用量无法归属服务商，已用金额是下界");
+  if (profile.has_unresolved) reasons.push("存在未定价或异币金额，已用金额只是当前预算币种的下界");
   return {
     source: "sql", // 与旧版 "sql" 态同义：都是无快照时刻的实时 SQL 计算。
     level,
@@ -4340,9 +4339,7 @@ function renderDualTrack(monthly) {
         // 已归因：按该计费方自己的价卡算写「按其价卡估算」；价卡没收录这些模型时
         // 退回了官方标价（可能连币种都是官方的），必须写明，否则用户看到中转按
         // 美元估算会以为填错了币种（2026-09-16）。
-        label = r.pricing_methods.has("fair-market-fallback-fx")
-          ? "已归因 · 价卡未收录，按官方标价 ≈折算成结算币"
-          : r.pricing_methods.has("fair-market-fallback")
+        label = r.pricing_methods.has("fair-market-fallback")
             ? "已归因 · 价卡未收录，按官方标价估算" : "已归因 · 按其价卡估算";
       }
       const cls = b === "metered_actual" || b === "host_billed" ? "measured" : "estimate";

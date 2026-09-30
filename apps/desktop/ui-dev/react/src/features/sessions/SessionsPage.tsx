@@ -17,16 +17,17 @@ import { SessionDetail } from "./SessionDetail";
 import { costReasonText, formatCost } from "./costSummary";
 import { Button, DateInput, Field, FilterBar, SelectInput, TextInput } from "../../components/ui/FormControls";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
+import { message, useLanguage, type AppLanguage, type MessageKey } from "../../lib/i18n";
 
-const costStates: Array<{ value: SessionsCostFilter; label: string }> = [
-  { value: "all", label: "全部计费状态" },
-  { value: "estimated", label: "估算" },
-  { value: "subscription", label: "订阅" },
-  { value: "unpriced", label: "缺价" },
-  { value: "unavailable", label: "不可用" },
+const costStates: Array<{ value: SessionsCostFilter; label: MessageKey }> = [
+  { value: "all", label: "sessions.billing.all" },
+  { value: "estimated", label: "sessions.billing.estimated" },
+  { value: "subscription", label: "sessions.billing.subscription" },
+  { value: "unpriced", label: "sessions.billing.unpriced" },
+  { value: "unavailable", label: "sessions.billing.unavailable" },
 ];
 
-const DEFAULT_STATISTICS_TIMEZONE = "Asia/Shanghai";
+const DEFAULT_STATISTICS_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 const SESSIONS_VIEW_STATE_KEY = "agent-vitals.sessions-view.v1";
 type SessionNavigationTarget = { type: "sessionDetail"; session_ref: string; host_kind: string } | { type: "sessionList"; host_kind: string | null };
 
@@ -79,31 +80,35 @@ function compact(value: number): string {
   return String(value);
 }
 
-function dateLabel(value: string | null): string {
-  if (!value) return "时间不可用";
+function dateLabel(value: string | null, language: AppLanguage): string {
+  if (!value) return message("sessions.unknownTime", language);
   return value.slice(0, 16).replace("T", " ");
 }
 
-function dayLabel(value: string | null): string {
-  if (!value) return "未知日期";
+function dayLabel(value: string | null, language: AppLanguage): string {
+  if (!value) return message("sessions.unknownDate", language);
   return value.slice(0, 10).replaceAll("-", "/");
 }
 
-function sessionTitle(row: SessionRow): string {
-  return `${row.host} 会话 · ${dayLabel(row.first_event_at)}`;
+function sessionTitle(row: SessionRow, language: AppLanguage): string {
+  return message("sessions.sessionTitle", language, { host: row.host, date: dayLabel(row.first_event_at, language) });
 }
 
-function costStateLabel(status: SessionCostStatus): string {
-  const labels: Record<SessionCostStatus["state"], string> = { estimated: "估算", subscription: "订阅", unpriced: "缺价", unavailable: "不可用" };
-  return `${labels[status.state]} · ${costReasonText(status)}`;
+function costStateLabel(status: SessionCostStatus, language: AppLanguage): string {
+  return `${costStateShort(status.state, language)} · ${costReasonText(status, language)}`;
 }
 
-function costStateShort(state: SessionCostStatus["state"]): string {
-  return ({ estimated: "估算", subscription: "订阅", unpriced: "缺价", unavailable: "不可用" } as Record<SessionCostStatus["state"], string>)[state];
+function costStateShort(state: SessionCostStatus["state"], language: AppLanguage): string {
+  return message(`sessions.billing.${state}`, language);
 }
 
 function costLabel(row: SessionRow): string {
   return formatCost(row.cost_minor) ?? "—";
+}
+
+function costBasisLabel(basis: string, language: AppLanguage): string {
+  const known = ["metered_actual", "host_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent"];
+  return message(known.includes(basis) ? `usage.basis.${basis}` as MessageKey : "usage.basis.other", language);
 }
 
 function serverArgs(filters: SessionsFilters, cursor: string | null, timezone: string): Parameters<typeof readSessions>[0] {
@@ -125,6 +130,7 @@ function updateFilter(setFilters: Dispatch<SetStateAction<SessionsFilters>>, key
 }
 
 export function SessionsPage({ navigationTarget = null, onNavigationTargetApplied }: { navigationTarget?: SessionNavigationTarget | null; onNavigationTargetApplied?: () => void }) {
+  const language = useLanguage();
   const initialViewState = useMemo(() => loadSessionsViewState(), []);
   // R1 深链（OVERVIEW_DRILLDOWN spec §4.2）：#sessions?date=…&host=… 优先于
   // 恢复的 view-state——深链是用户此刻的意图；切换窗口控件即离开 day 态。
@@ -303,49 +309,49 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
   return <div className="sessions-workspace">
     <main className="sessions-list-pane">
     <>
-    <h1 className="visually-hidden">会话</h1>
+    <h1 className="visually-hidden">{message("nav.sessions", language)}</h1>
     <ToolbarActions>
       <div className="sessions-header-actions">
-        <span className="status-pill"><span aria-hidden="true" className="status-dot" />安全列表</span>
-        <Button type="button" onClick={() => void fetchFirstPage()} disabled={loading}>刷新</Button>
+        <span className="status-pill"><span aria-hidden="true" className="status-dot" />{message("sessions.safeList", language)}</span>
+        <Button type="button" onClick={() => void fetchFirstPage()} disabled={loading}>{message("action.refresh", language)}</Button>
       </div>
     </ToolbarActions>
 
-    <FilterBar aria-label="会话筛选" data-window={filters.window}>
-      <Field label="时间窗口" htmlFor="sessions-window"><SelectInput id="sessions-window" value={filters.window} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "window", event.target.value); }}><option value="month">按月</option><option value="today">今天</option><option value="7d">最近 7 天</option><option value="day">单日</option><option value="custom">自定义</option></SelectInput></Field>
-      {filters.window === "day" && <Field label="日期" htmlFor="sessions-day"><DateInput id="sessions-day" type="date" value={filters.day} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "day", event.target.value); }} /></Field>}
-      {filters.window === "month" && <Field label="月份" htmlFor="sessions-month"><DateInput id="sessions-month" type="month" value={filters.month} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "month", event.target.value); }} /></Field>}
-      {filters.window === "custom" && <><Field label="开始日期" htmlFor="sessions-date-from"><DateInput id="sessions-date-from" type="date" value={filters.date_from} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "date_from", event.target.value); }} /></Field><Field label="结束日期" htmlFor="sessions-date-to"><DateInput id="sessions-date-to" type="date" value={filters.date_to} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "date_to", event.target.value); }} /></Field></>}
-      <Field label="宿主" htmlFor="sessions-host"><TextInput id="sessions-host" list="session-host-options" value={filters.host_kind === "all" ? "" : filters.host_kind} placeholder="全部宿主 / 动态宿主" onChange={(event) => updateFilter(setFilters, "host_kind", event.target.value || "all")} /></Field>
+    <FilterBar aria-label={message("sessions.filters", language)} data-window={filters.window}>
+      <Field label={message("sessions.window", language)} htmlFor="sessions-window"><SelectInput id="sessions-window" value={filters.window} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "window", event.target.value); }}><option value="month">{message("sessions.month", language)}</option><option value="today">{message("sessions.today", language)}</option><option value="7d">{message("sessions.lastSevenDays", language)}</option><option value="day">{message("sessions.singleDay", language)}</option><option value="custom">{message("sessions.custom", language)}</option></SelectInput></Field>
+      {filters.window === "day" && <Field label={message("sessions.date", language)} htmlFor="sessions-day"><DateInput id="sessions-day" type="date" value={filters.day} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "day", event.target.value); }} /></Field>}
+      {filters.window === "month" && <Field label={message("sessions.month", language)} htmlFor="sessions-month"><DateInput id="sessions-month" type="month" value={filters.month} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "month", event.target.value); }} /></Field>}
+      {filters.window === "custom" && <><Field label={message("sessions.startDate", language)} htmlFor="sessions-date-from"><DateInput id="sessions-date-from" type="date" value={filters.date_from} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "date_from", event.target.value); }} /></Field><Field label={message("sessions.endDate", language)} htmlFor="sessions-date-to"><DateInput id="sessions-date-to" type="date" value={filters.date_to} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "date_to", event.target.value); }} /></Field></>}
+      <Field label={message("sessions.host", language)} htmlFor="sessions-host"><TextInput id="sessions-host" list="session-host-options" value={filters.host_kind === "all" ? "" : filters.host_kind} placeholder={message("sessions.allHosts", language)} onChange={(event) => updateFilter(setFilters, "host_kind", event.target.value || "all")} /></Field>
       <datalist id="session-host-options"><option value="codex" /><option value="claude-code" /><option value="dsh" /><option value="workbuddy" /><option value="zcode" /><option value="minimax-code" /></datalist>
-      <Field label="模型" htmlFor="sessions-model"><TextInput id="sessions-model" value={filters.model} placeholder="可选精确匹配" onChange={(event) => updateFilter(setFilters, "model", event.target.value)} /></Field>
-      <Field label="服务商" htmlFor="sessions-provider"><TextInput id="sessions-provider" value={filters.provider} placeholder="可选精确匹配" onChange={(event) => updateFilter(setFilters, "provider", event.target.value)} /></Field>
-      <Field label="计费状态" htmlFor="sessions-cost"><SelectInput id="sessions-cost" value={filters.cost_status} onChange={(event) => updateFilter(setFilters, "cost_status", event.target.value)}>{costStates.map((state) => <option key={state.value} value={state.value}>{state.label}</option>)}</SelectInput></Field>
+      <Field label={message("sessions.model", language)} htmlFor="sessions-model"><TextInput id="sessions-model" value={filters.model} placeholder={message("sessions.exactMatch", language)} onChange={(event) => updateFilter(setFilters, "model", event.target.value)} /></Field>
+      <Field label={message("sessions.provider", language)} htmlFor="sessions-provider"><TextInput id="sessions-provider" value={filters.provider} placeholder={message("sessions.exactMatch", language)} onChange={(event) => updateFilter(setFilters, "provider", event.target.value)} /></Field>
+      <Field label={message("sessions.billingStatus", language)} htmlFor="sessions-cost"><SelectInput id="sessions-cost" value={filters.cost_status} onChange={(event) => updateFilter(setFilters, "cost_status", event.target.value)}>{costStates.map((state) => <option key={state.value} value={state.value}>{message(state.label, language)}</option>)}</SelectInput></Field>
     </FilterBar>
 
-    {error && <div className="error-banner" role="alert">会话数据不可用：{error}</div>}
-    {loading && rows.length > 0 && <div className="sessions-refresh-status" role="status" aria-live="polite">正在读取新的筛选窗口，下面暂保留上一份会话结果；完成后会替换为最新数据。</div>}
+    {error && <div className="error-banner" role="alert">{message("sessions.dataError", language, { error })}</div>}
+    {loading && rows.length > 0 && <div className="sessions-refresh-status" role="status" aria-live="polite">{message("sessions.refreshingWindow", language)}</div>}
     <section className="sessions-summary" aria-live="polite">
-      <div><strong>{total === null ? "—" : total}</strong><span>窗口会话</span></div>
-      <div><strong>{windowTokens === null ? "—" : compact(windowTokens)}</strong><span>窗口 tokens</span></div>
-      <div><strong>{visibleRows.length}</strong><span>{filters.cost_status === "all" ? "当前页" : "当前页匹配"}</span></div>
-      <p>已加载 {rows.length} 条 · 成本按币种分别计算</p>
+      <div><strong>{total === null ? "—" : total}</strong><span>{message("sessions.windowSessions", language)}</span></div>
+      <div><strong>{windowTokens === null ? "—" : compact(windowTokens)}</strong><span>{message("sessions.windowTokens", language)}</span></div>
+      <div><strong>{visibleRows.length}</strong><span>{message(filters.cost_status === "all" ? "sessions.currentPage" : "sessions.currentMatches", language)}</span></div>
+      <p>{message("sessions.loaded", language, { count: rows.length })}</p>
     </section>
 
     <section className="sessions-panel" aria-labelledby="sessions-list-title">
-      <div className="section-heading"><div><p className="eyebrow">安全投影</p><h3 id="sessions-list-title">会话列表</h3></div><span className="count-badge">{nextCursor ? "可继续" : "已加载"}</span></div>
-      {loading && rows.length === 0 ? <div className="sessions-state" role="status"><strong>正在读取会话</strong><p>正在通过本地 authority 汇总当前窗口，不会上传数据。</p></div> : visibleRows.length === 0 ? <div className="sessions-state"><strong>{error ? "无法显示会话" : rows.length ? "没有匹配的计费状态" : "暂无会话"}</strong><p>{error ? "请检查本地数据同步状态后重试。" : "当前筛选窗口没有可展示的安全会话聚合。"}</p></div> : <>
-        <div className="sessions-table-wrap"><table className="sessions-table"><thead><tr><th scope="col">会话</th><th scope="col">宿主 · 模型</th><th scope="col">时间</th><th scope="col">Tokens</th><th scope="col">费用</th><th scope="col">状态</th></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.session_ref} className={`sessions-table-row-clickable ${row.session_ref === selectedSessionRef ? "sessions-row-selected" : ""}`} tabIndex={0} role="button" aria-pressed={row.session_ref === selectedSessionRef} onClick={(event) => openSessionDetail(row.session_ref, event.currentTarget)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openSessionDetail(row.session_ref, event.currentTarget); } }}><td><strong>{sessionTitle(row)}</strong><code>{row.session_ref.slice(0, 15)}…</code></td><td>{row.host}<small>{row.model_ids.length ? row.model_ids.join(" · ") : "模型不可用"}</small></td><td>{dateLabel(row.first_event_at)}<small>{row.last_event_at ? `至 ${dateLabel(row.last_event_at)}` : "结束时间不可用"}</small></td><td><strong>{compact(row.tokens.total)}</strong><small>{row.event_count} 个事件 · 峰值 {compact(row.peak_tokens)}</small></td><td><strong>{costLabel(row)}</strong><small>{row.cost_minor ? row.cost_minor.basis : "未计入金额"}</small></td><td><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateLabel(row.cost_status)}</span></td></tr>)}</tbody></table></div>
-        <div className="sessions-card-list">{visibleRows.map((row) => <article className={`session-card session-card-clickable ${row.session_ref === selectedSessionRef ? "sessions-row-selected" : ""}`} key={row.session_ref} tabIndex={0} role="button" aria-pressed={row.session_ref === selectedSessionRef} onClick={(event) => openSessionDetail(row.session_ref, event.currentTarget)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openSessionDetail(row.session_ref, event.currentTarget); } }}><div className="session-card-heading"><strong>{sessionTitle(row)}</strong><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateShort(row.cost_status.state)}</span></div><p>{row.host} · {row.model_ids.join(" · ") || "模型不可用"}</p><div><span>{compact(row.tokens.total)} token · {row.event_count} 个事件</span><strong>{costLabel(row)}</strong></div><small>{dateLabel(row.first_event_at)} 至 {dateLabel(row.last_event_at)}</small><code>{row.session_ref.slice(0, 15)}…</code></article>)}</div>
-        {nextCursor && <div className="sessions-more"><Button type="button" onClick={() => void loadMore()} busy={loadingMore} disabled={loading}>{loadingMore ? "正在加载…" : "加载更多"}</Button></div>}
+      <div className="section-heading"><div><p className="eyebrow">{message("sessions.safeProjection", language)}</p><h3 id="sessions-list-title">{message("sessions.list", language)}</h3></div><span className="count-badge">{message(nextCursor ? "sessions.moreAvailable" : "sessions.loadedBadge", language)}</span></div>
+      {loading && rows.length === 0 ? <div className="sessions-state" role="status"><strong>{message("sessions.loading", language)}</strong><p>{message("sessions.loadingDetail", language)}</p></div> : visibleRows.length === 0 ? <div className="sessions-state"><strong>{message(error ? "sessions.cannotDisplay" : rows.length ? "sessions.noBillingMatch" : "sessions.empty", language)}</strong><p>{message(error ? "sessions.retryHelp" : "sessions.emptyHelp", language)}</p></div> : <>
+        <div className="sessions-table-wrap"><table className="sessions-table"><thead><tr><th scope="col">{message("sessions.column.session", language)}</th><th scope="col">{message("sessions.column.hostModel", language)}</th><th scope="col">{message("sessions.column.time", language)}</th><th scope="col">{message("sessions.column.tokens", language)}</th><th scope="col">{message("sessions.column.cost", language)}</th><th scope="col">{message("sessions.column.status", language)}</th></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.session_ref} className={`sessions-table-row-clickable ${row.session_ref === selectedSessionRef ? "sessions-row-selected" : ""}`} tabIndex={0} role="button" aria-pressed={row.session_ref === selectedSessionRef} onClick={(event) => openSessionDetail(row.session_ref, event.currentTarget)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openSessionDetail(row.session_ref, event.currentTarget); } }}><td><strong>{sessionTitle(row, language)}</strong><code>{row.session_ref.slice(0, 15)}…</code></td><td>{row.host}<small>{row.model_ids.length ? row.model_ids.join(" · ") : message("sessions.unknownModel", language)}</small></td><td>{dateLabel(row.first_event_at, language)}<small>{row.last_event_at ? message("sessions.until", language, { time: dateLabel(row.last_event_at, language) }) : message("sessions.unknownEnd", language)}</small></td><td><strong>{compact(row.tokens.total)}</strong><small>{message("sessions.eventPeak", language, { count: row.event_count, peak: compact(row.peak_tokens) })}</small></td><td><strong>{costLabel(row)}</strong><small>{row.cost_minor ? costBasisLabel(row.cost_minor.basis, language) : message("sessions.noAmount", language)}</small></td><td><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateLabel(row.cost_status, language)}</span></td></tr>)}</tbody></table></div>
+        <div className="sessions-card-list">{visibleRows.map((row) => <article className={`session-card session-card-clickable ${row.session_ref === selectedSessionRef ? "sessions-row-selected" : ""}`} key={row.session_ref} tabIndex={0} role="button" aria-pressed={row.session_ref === selectedSessionRef} onClick={(event) => openSessionDetail(row.session_ref, event.currentTarget)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openSessionDetail(row.session_ref, event.currentTarget); } }}><div className="session-card-heading"><strong>{sessionTitle(row, language)}</strong><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateShort(row.cost_status.state, language)}</span></div><p>{row.host} · {row.model_ids.join(" · ") || message("sessions.unknownModel", language)}</p><div><span>{compact(row.tokens.total)} tokens · {message("sessions.eventCount", language, { count: row.event_count })}</span><strong>{costLabel(row)}</strong></div><small>{dateLabel(row.first_event_at, language)} · {message("sessions.until", language, { time: dateLabel(row.last_event_at, language) })}</small><code>{row.session_ref.slice(0, 15)}…</code></article>)}</div>
+        {nextCursor && <div className="sessions-more"><Button type="button" onClick={() => void loadMore()} busy={loadingMore} disabled={loading}>{message(loadingMore ? "sessions.loadingMore" : "sessions.loadMore", language)}</Button></div>}
       </>}
     </section>
     </>
     </main>
     {selectedSessionRef && <>
       <div className="sessions-overlay-backdrop" onClick={closeSessionDetail} />
-      <div className="sessions-overlay-panel" role="dialog" aria-modal="true" aria-label="会话详情">
-        <div className="sessions-overlay-bar"><button type="button" className="sessions-overlay-close" onClick={closeSessionDetail} aria-label="关闭详情">×</button></div>
+      <div className="sessions-overlay-panel" role="dialog" aria-modal="true" aria-label={message("sessions.detail", language)}>
+        <div className="sessions-overlay-bar"><button type="button" className="sessions-overlay-close" onClick={closeSessionDetail} aria-label={message("sessions.closeDetail", language)}>×</button></div>
         <div className="sessions-overlay-body"><SessionDetail row={selectedRow} sessionRef={selectedSessionRef} hostKind={filters.host_kind} refreshKey={detailRefreshKey} onBack={closeSessionDetail} /></div>
       </div>
     </>}
