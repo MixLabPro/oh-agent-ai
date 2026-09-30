@@ -13,11 +13,11 @@ const { buildSync } = uiRequire("esbuild");
 const source = path.join(ui, "react/src/lib/tauri.ts");
 const trustPage = fs.readFileSync(path.join(ui, "react/src/features/trust/TrustPage.tsx"), "utf8");
 assert.match(trustPage, /readTrustEvidence\(null, 200, cursor\)/, "Trust page must load persisted evidence through the read-only history API");
-assert.match(trustPage, /宿主 Profile 与通知控制/, "less-frequent profile controls must be disclosed behind a secondary section");
-assert.match(trustPage, /尚无已保存的 Trust 证据/, "empty history must clearly distinguish no evidence from no risk");
+assert.match(trustPage, /tr\.controlsSummary/, "less-frequent profile controls must be disclosed behind a secondary section");
+assert.match(trustPage, /tr\.noSavedEvidence/, "empty history must clearly distinguish no evidence from no risk");
 assert.match(trustPage, /event\.type !== "TrustMonitorInvalidated"\) return;\s+setReport\(null\)/, "monitor invalidation must reveal refreshed persisted history instead of pinning a stale audit report");
 assert.match(trustPage, /onClick=\{\(\) => requestProfileDecision\(profile, "revoke"\)\}/, "revoke must first show an in-page confirmation");
-assert.match(trustPage, /role="group" aria-label=\{`\$\{profile\.display_name\} 撤销确认`\}/, "revoke confirmation must be adjacent to its profile");
+assert.match(trustPage, /role="group" aria-label=\{tx\("tr\.revokeAria", \{ name: profile\.display_name \}\)\}/, "revoke confirmation must be adjacent to its profile");
 assert.match(trustPage, /profileFeedback\?\.section === "approved"/, "revoke outcome must be visible in the approved-profile section");
 assert.doesNotMatch(trustPage.slice(trustPage.indexOf("const requestProfileDecision"), trustPage.indexOf("const revokeSuppression")), /window\.confirm/, "profile decisions must not rely on native confirmation dialogs");
 const built = buildSync({ entryPoints: [source], bundle: true, format: "cjs", platform: "node", target: "node20", write: false, logLevel: "silent" });
@@ -105,7 +105,7 @@ assert.equal(history.next_cursor, longValidCursor, "history parser must accept t
 await evidenceBridge.readTrustEvidence(null, 200, history.next_cursor);
 assert.equal(evidenceCalls[1].args.cursor, history.next_cursor, "opaque history cursor must be forwarded unchanged");
 await assert.rejects(() => evidenceBridge.readTrustEvidence(null, 200, "../../private"), /游标不安全/);
-assert.match(trustPage, /载入更早证据/);
+assert.match(trustPage, /tr\.loadOlder/);
 await assert.rejects(() => evidenceBridge.readTrustEvidence("../private", 200), /宿主标识不安全/);
 await assert.rejects(() => evidenceBridge.readTrustEvidence(null, 501), /读取范围不安全/);
 

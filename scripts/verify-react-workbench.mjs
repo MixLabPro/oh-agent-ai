@@ -49,6 +49,7 @@ const source = sourceFiles.map((file) => fs.readFileSync(file, "utf8")).join("\n
 const settingsPage = fs.readFileSync(path.join(reactSource, "features/settings/SettingsPage.tsx"), "utf8");
 const tauriBridge = fs.readFileSync(path.join(reactSource, "lib/tauri.ts"), "utf8");
 const trustPage = fs.readFileSync(path.join(reactSource, "features/trust/TrustPage.tsx"), "utf8");
+const trustI18n = fs.readFileSync(path.join(reactSource, "lib/i18n.ts"), "utf8");
 const findingsPage = fs.readFileSync(path.join(reactSource, "features/findings/FindingsPage.tsx"), "utf8");
 const decisionMatrix = fs.readFileSync(path.join(reactSource, "features/findings/DecisionMatrixSection.tsx"), "utf8");
 const sessionsPage = fs.readFileSync(path.join(reactSource, "features/sessions/SessionsPage.tsx"), "utf8");
@@ -68,8 +69,8 @@ if (!source.includes('"findings_groups_safe"')) fail("React Findings 未使用�
 if (!source.includes('"decision_matrix_safe"')) fail("React Findings 未使用版本化 decision matrix DTO command");
 if (!source.includes('"trust_monitor_config"') || !source.includes('"save_trust_monitor_config"') || !source.includes('"trust_runtime_snapshot"')) fail("React Trust 未使用版本化 monitor DTO commands");
 if (!source.includes('"trust_profile_proposal_status"') || !source.includes('"trust_profile_approve"') || !source.includes('"trust_profile_reject"') || !source.includes('"trust_profile_revoke"') || !source.includes('"trust_suppression_list"') || !source.includes('"trust_suppression_revoke"')) fail("React Trust 未接通 Profile 授权与通知抑制生命周期");
-if (!trustPage.includes("profileApprovalIsSafe") || !trustPage.includes("清单版本") || !trustPage.includes("source_scope_preview") || !trustPage.includes("trust_scope_preview")) fail("React Trust Profile 批准缺少脱敏范围预览或哈希确认");
-if (!trustPage.includes("无法安全预览，已禁用批准") || !trustPage.includes("历史证据保留") || !trustPage.includes("Trust 通知抑制")) fail("React Trust 未明确不可观察授权范围、撤销边界或 suppression 控制");
+if (!trustPage.includes("profileApprovalIsSafe") || !trustPage.includes("tr.manifestVer") || !trustPage.includes("source_scope_preview") || !trustPage.includes("trust_scope_preview")) fail("React Trust Profile 批准缺少脱敏范围预览或哈希确认");
+if (!trustPage.includes("tr.approveDisabled") || !trustPage.includes("tr.doneRevoked") || !trustPage.includes("tr.suppressTitle") || !trustI18n.includes("范围无法安全预览，已禁用批准") || !trustI18n.includes("历史证据保留") || !trustI18n.includes("Trust 通知抑制") || !trustI18n.includes("historical evidence is kept")) fail("React Trust 未明确不可观察授权范围、撤销边界或 suppression 控制");
 if (!findingsPage.includes("group.manual_follow_up && !group.read_only") || !findingsPage.includes("onNavigateToAction(group.action_kind)") || !appFile.includes("settings-billing") || !appFile.includes("settings-budget") || !appFile.includes("settings-sources")) fail("React Findings 待办缺少安全 action_kind 到设置分区的导航");
 if (!appFile.includes('value.startsWith("settings-")') || !appFile.includes('return "settings"')) fail("设置分区 hash 未映射回设置页，点击设置内锚点会丢失当前页面");
 if (!source.includes("aria-labelledby=\"trust-monitor-title\"")) fail("React Trust 缺少 monitor 控件可访问标题");
@@ -84,7 +85,7 @@ if ([usagePage, settingsPage, skillsPage, testPage].some((page) => unsafeErrorPa
 if (!skillsPage.includes("reportStale && scanning") || !skillsPage.includes("未形成新的可判定结果") || !skillsPage.includes("selectedHostNotScanned") || !skillsPage.includes("reportMatchesHost") || !skillsPage.includes("report && reportMatchesHost") || !source.includes("skill scan host_selection 不匹配") || !skillsPage.includes("保留上一次结果") || skillsPage.includes("setReport(null)")) fail("React Skill 扫描未保留旧报告、隔离宿主或把不可用误判为空结果");
 if (testPage.includes("setReport(null)") || !testPage.includes("上一次可读报告") || !testPage.includes("上一次路线质量结果") || !testPage.includes("reportWindow(report)") || !testPage.includes("loading && !report")) fail("React 测试页刷新未保留旧路线质量报告、原始窗口或缺少 stale 状态");
 if (!findingsPage.includes("requestGeneration") || !findingsPage.includes("Promise.allSettled") || !findingsPage.includes("发现新鲜度暂不可用")) fail("React Findings 刷新缺少请求代数或部分失败降级");
-if (!trustPage.includes("auditLoadingHost") || !trustPage.includes("auditRequest") || !trustPage.includes("上一次可读报告") || !trustPage.includes("上一次审计结果") || !trustPage.includes('event.type !== "TrustMonitorInvalidated"') || !trustPage.includes("setReport(null)")) fail("React Trust 必须在手动审计失败时保留旧报告，并在监测失效后解除旧报告以显示新历史证据");
+if (!trustPage.includes("auditLoadingHost") || !trustPage.includes("auditRequest") || !trustPage.includes("tr.refreshingHost") || !trustPage.includes("tr.lastAudit") || !trustI18n.includes("上一次可读报告") || !trustI18n.includes("上一次审计结果") || !trustPage.includes('event.type !== "TrustMonitorInvalidated"') || !trustPage.includes("setReport(null)")) fail("React Trust 必须在手动审计失败时保留旧报告，并在监测失效后解除旧报告以显示新历史证据");
 if (!source.includes("today_tokens_sql") || !source.includes("overview-host-panel")) fail("React 总览未消费权威 token/宿主投影");
 if (!source.includes('if (page !== "overview") return;')) fail("React 总览查询未按可见 tab 生命周期隔离");
 if (!source.includes("readOverviewDetails") || !source.includes("data_daily_summary") || !source.includes("tokens_by_host") || !source.includes("actual_spend_by_basis")) fail("React 总览未消费月度/今日安全 summary DTO");
