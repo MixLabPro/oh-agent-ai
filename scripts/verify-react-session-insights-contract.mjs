@@ -200,5 +200,6 @@ assert.ok(!source.includes("比全部命中多"), "不写「比全部命中多�
 assert.ok(source.includes("仅在本机显示，不进入导出和 MCP"), "摘录旁固定标注本机专属");
 assert.ok(source.includes("f.invocation_key ?? `ts:"), "没有分组键的失败不得按工具名并成「相同调用」");
 assert.equal(view.fmtTokens(1_832_000), "183 万");
-assert.equal(view.fmtMoney({ amounts: [{ amount_minor: 612, currency: "USD" }, { amount_minor: 900, currency: "CNY" }], coverage: "partial" }), "$6.12 + ¥9.00（部分调用无价卡）");
+assert.equal(view.fmtMoney({ amounts: [{ amount_minor: 612, currency: "USD" }, { amount_minor: 900, currency: "CNY" }], coverage: "partial" }), "$6.12 + ¥9.00 (some calls have no price)");
+assert.match(view.fmtMoney({ amounts: [{ amount_minor: 100, currency: "JPY" }], coverage: "complete" }), /JPY 100 minor units \(currency scale unavailable\)/, "unknown currency scale must not be silently divided by 100");
 console.log("Session insights copy: OK (fact/cause split, no waste or money wording in diagnostics)");

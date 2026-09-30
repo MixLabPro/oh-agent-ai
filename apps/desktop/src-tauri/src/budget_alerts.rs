@@ -7,7 +7,7 @@
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 
-use crate::overview;
+use crate::{native_label, native_ui_language, overview, NativeUiLanguage};
 
 const ACTION_TYPE: &str = "budget-alert";
 const FOCUS_TAB: &str = "budget";
@@ -75,24 +75,18 @@ pub fn maybe_notify(app: &AppHandle, overview: &overview::Overview) {
 
     for (key, ratio) in candidates {
         let threshold_kind = key.threshold;
-        let threshold = match threshold_kind {
-            agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Warn => "接近预算",
-            agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Over => "已超预算",
-        };
-        let scope = match key.scope {
-            agent_vitals_runtime::budget_notifications::BudgetAlertScope::Daily => "今日按量预算",
-            agent_vitals_runtime::budget_notifications::BudgetAlertScope::Monthly => "本月按量预算",
-        };
+        let language = native_ui_language();
+        let threshold = threshold_label(threshold_kind, language);
         // 系统通知默认不暴露金额、路径或任务内容（REQ-113）。完整金额和
         // 组成只在用户点击后进入预算页查看；这里保留阈值上下文即可。
-        let body = budget_notification_body(scope, threshold_kind, ratio);
+        let body = budget_notification_body(key.scope, threshold_kind, ratio, language, false);
         let app_for_notification = app.clone();
         let Ok(true) = agent_vitals_runtime::budget_notifications::claim_delivery_with(
             &data_home,
             &key,
             agent_vitals_runtime::sql_sync::now_ms(),
             || app_for_notification.notification().builder()
-                .title(format!("Agent Vitals：{threshold}"))
+                .title(format!("Agent Vitals{}{threshold}", native_label(language, ": ", "：")))
                 .body(body)
                 .action_type_id(ACTION_TYPE)
                 .extra("focusTab", FOCUS_TAB)
@@ -137,24 +131,18 @@ fn notify_profiles(app: &AppHandle, data_home: &std::path::Path, profiles: &[ser
                 profile.get("monthly_minor").and_then(serde_json::Value::as_i64)));
         }
         for (period, scope, threshold, _spent, _limit) in candidates {
-            let threshold_text = match threshold {
-                agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Warn => "接近预算",
-                agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Over => "已超预算",
-            };
-            let scope_text = match scope {
-                agent_vitals_runtime::budget_notifications::BudgetAlertScope::Daily => "今日",
-                agent_vitals_runtime::budget_notifications::BudgetAlertScope::Monthly => "本月",
-            };
+            let language = native_ui_language();
+            let threshold_text = threshold_label(threshold, language);
             // profile 名称、金额和币种也属于预算详情，默认不放入系统通知。
             // 点击通知后预算页会展示对应 profile 的完整证据。
-            let body = budget_notification_body(scope_text, threshold, None);
+            let body = budget_notification_body(scope, threshold, None, language, true);
             let key = agent_vitals_runtime::budget_notifications::BudgetAlertDeliveryKey {
                 period, scope, threshold, budget_revision: revision,
             };
             let app_for_notification = app.clone();
             let _ = agent_vitals_runtime::budget_notifications::claim_delivery_with(
                 data_home, &key, agent_vitals_runtime::sql_sync::now_ms(), || app_for_notification.notification().builder()
-                    .title(format!("Agent Vitals：{threshold_text}"))
+                    .title(format!("Agent Vitals{}{threshold_text}", native_label(language, ": ", "：")))
                     .body(body).action_type_id(ACTION_TYPE).extra("focusTab", FOCUS_TAB)
                     .show().map_err(|error| error.to_string()),
             );
@@ -162,20 +150,41 @@ fn notify_profiles(app: &AppHandle, data_home: &std::path::Path, profiles: &[ser
     }
 }
 
+fn threshold_label(
+    threshold: agent_vitals_runtime::budget_notifications::BudgetAlertThreshold,
+    language: NativeUiLanguage,
+) -> &'static str {
+    match threshold {
+        agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Warn => native_label(language, "Approaching budget", "接近预算"),
+        agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Over => native_label(language, "Budget exceeded", "已超预算"),
+    }
+}
+
 fn budget_notification_body(
-    scope: &str,
+    scope: agent_vitals_runtime::budget_notifications::BudgetAlertScope,
     threshold: agent_vitals_runtime::budget_notifications::BudgetAlertThreshold,
     ratio: Option<f64>,
+    language: NativeUiLanguage,
+    profile: bool,
 ) -> String {
-    let threshold_text = match threshold {
-        agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Warn => "接近预算",
-        agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Over => "已超预算",
+    let threshold_text = threshold_label(threshold, language);
+    let scope_text = match (scope, profile) {
+        (agent_vitals_runtime::budget_notifications::BudgetAlertScope::Daily, true) => native_label(language, "Today", "今日"),
+        (agent_vitals_runtime::budget_notifications::BudgetAlertScope::Monthly, true) => native_label(language, "This month", "本月"),
+        (agent_vitals_runtime::budget_notifications::BudgetAlertScope::Daily, false) => native_label(language, "Today's metered budget", "今日按量预算"),
+        (agent_vitals_runtime::budget_notifications::BudgetAlertScope::Monthly, false) => native_label(language, "This month's metered budget", "本月按量预算"),
     };
     let ratio_text = ratio
         .filter(|value| value.is_finite() && *value >= 0.0)
-        .map(|value| format!("（达到 {:.0}%）", value * 100.0))
+        .map(|value| match language {
+            NativeUiLanguage::English => format!(" ({:.0}% reached)", value * 100.0),
+            NativeUiLanguage::Chinese => format!("（达到 {:.0}%）", value * 100.0),
+        })
         .unwrap_or_default();
-    format!("{scope}{threshold_text}{ratio_text}，点击查看原因与明细。")
+    match language {
+        NativeUiLanguage::English => format!("{scope_text}: {threshold_text}{ratio_text}. Open Budget to review details."),
+        NativeUiLanguage::Chinese => format!("{scope_text}{threshold_text}{ratio_text}，点击查看原因与明细。"),
+    }
 }
 
 fn threshold_for(ratio: Option<f64>, warn_ratio: f64) -> Option<agent_vitals_runtime::budget_notifications::BudgetAlertThreshold> {
@@ -209,14 +218,25 @@ mod tests {
     #[test]
     fn notification_body_keeps_budget_details_out_of_system_notification() {
         let body = budget_notification_body(
-            "今日",
+            agent_vitals_runtime::budget_notifications::BudgetAlertScope::Daily,
             agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Warn,
             Some(0.8),
+            NativeUiLanguage::Chinese,
+            true,
         );
         assert!(body.contains("达到 80%"));
         assert!(body.contains("查看原因"));
         assert!(!body.contains('¥'));
         assert!(!body.contains("CNY"));
         assert!(!body.contains("USD"));
+        let english = budget_notification_body(
+            agent_vitals_runtime::budget_notifications::BudgetAlertScope::Daily,
+            agent_vitals_runtime::budget_notifications::BudgetAlertThreshold::Warn,
+            Some(0.8),
+            NativeUiLanguage::English,
+            true,
+        );
+        assert_eq!(english, "Today: Approaching budget (80% reached). Open Budget to review details.");
+        assert!(!english.contains('¥'));
     }
 }

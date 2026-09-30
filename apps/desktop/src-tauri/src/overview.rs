@@ -12,6 +12,7 @@
 //! 与二进制 `snapshot.rs`/`codex_cost.rs` 各有镜像，这里是菜单栏一份（独立
 //! workspace，import 不到二进制模块）。规格与那两份逐字段一致，单测钉住。
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use agent_vitals_domain::cost::{
@@ -460,14 +461,14 @@ pub struct Overview {
     /// bug——这是"当前能表达的节约来源只有缓存"这一事实的忠实反映。月无 by_model
     /// → None。
     pub month_savings: Option<Value>,
-    /// 展示层货币折算估算（`assets/pricing.json::fx_estimate` → `{usd_cny, as_of}`）
-    /// 或 None。**只给速览层**把混币金额并成一个 `≈` 数——预算/导出/对账永远
-    /// 分币。前端 hover 据此把 `≈¥X` 展开成原始分币。
+    /// 兼容旧 IPC 契约；无冻结的、有日期依据的 FX 快照时始终为 None。
+    /// 旧速览不能从当前价表获取汇率并折算历史金额。
     pub fx: Option<Value>,
-    /// 本月已生效的 CNY 订阅月费之和（GLM/MiniMax…），或 None（无订阅）。
-    /// **单列**，不进按量预算（PM 决策 2026-09-07）——订阅是月初已付的常数，
-    /// 摊进每 5 分钟刷新的告警分子只会让月初凭空涨一截然后整月杵着。
+    /// 兼容旧展示契约的 CNY 固定订阅记录之和；不能据此断言已付款。
+    /// 新托盘使用下方逐币种整数最小单位字段，不把 USD 丢掉。
     pub subscription_cny_month: Option<f64>,
+    /// 本月本地固定订阅记录，按原币种保留整数最小单位；None = 权威库不可读。
+    pub subscription_month_by_currency: Option<BTreeMap<String, i64>>,
 }
 
 /// 数据根：直接用 runtime 的唯一 `HomeResolver`（`AGENT_VITALS_HOME` →
@@ -539,37 +540,27 @@ fn monthly_budget_cny(data_home: &Path) -> Option<f64> {
     None
 }
 
-/// 展示层货币折算估算（`assets/pricing.json::fx_estimate`）→ `{usd_cny, as_of}`
-/// 或 None（价表无此节 / 值非数）。**只给速览层**把混币金额并成一个 `≈` 数给
-/// 用户一个感觉——预算 ratio / 实际支出 / 导出 / 对账永远分币不相加。前端
-/// hover 用它把 `≈¥X` 展开成「$A 折 + ¥B 实」。
-fn fx_estimate(pricing: &Value) -> Option<Value> {
-    let fx = pricing.get("fx_estimate")?;
-    let usd_cny = fx.get("USD_CNY").and_then(Value::as_f64).filter(|r| *r > 0.0)?;
-    Some(json!({
-        "usd_cny": usd_cny,
-        "as_of": fx.get("as_of").and_then(Value::as_str),
-    }))
-}
-
 /// 本月本地账单中的 **CNY 固定订阅月费之和**。用户订阅不属于公共价目；
 /// `host_bills` 是唯一展示源。库不可用或无订阅时返回 None（不显示“¥0”）。
-fn monthly_cny_subscriptions(data_home: &Path, month: &str) -> Option<f64> {
+fn monthly_subscriptions_by_currency(data_home: &Path, month: &str) -> Option<BTreeMap<String, i64>> {
     let db = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(data_home),
         agent_vitals_runtime::sql_sync::now_ms(),
     )
     .ok()?;
-    let total: i64 = db
-        .host_bills_for_period(month)
-        .ok()?
-        .into_iter()
-        .filter(|(_host, _provider, basis, _minor, currency)| {
-            basis == "fixed_subscription" && currency == "CNY"
-        })
-        .map(|(_host, _provider, _basis, minor, _currency)| minor)
-        .sum();
-    (total > 0).then_some(total as f64 / 100.0)
+    let mut totals = BTreeMap::<String, i64>::new();
+    for (_host, _provider, basis, minor, currency) in db.host_bills_for_period(month).ok()? {
+        if basis != "fixed_subscription" || minor <= 0 { continue; }
+        let previous = totals.get(&currency).copied().unwrap_or(0);
+        totals.insert(currency, previous.checked_add(minor)?);
+    }
+    Some(totals)
+}
+
+#[cfg(test)]
+fn monthly_cny_subscriptions(data_home: &Path, month: &str) -> Option<f64> {
+    monthly_subscriptions_by_currency(data_home, month)?
+        .get("CNY").copied().map(|minor| minor as f64 / 100.0)
 }
 
 /// 预算卡：从 SQL 权威库**实时算**（`runtime::budget::evaluate_alert_from_sql`），
@@ -750,6 +741,7 @@ fn read_overview_at(dh: &Path) -> Overview {
     // R2-F3：monthly 取一次，metered_month 与 budget_profiles 共用同一个
     // `Arc`——budget_profiles 内部不再第二次全量现算 monthly + daily。
     let monthly_summary_arc = monthly_memo().get_or_compute(dh, &cur_month);
+    let subscription_month_by_currency = monthly_subscriptions_by_currency(dh, &cur_month);
     let overview = Overview {
         data_home: dh.display().to_string(),
         today: today_val,
@@ -785,8 +777,11 @@ fn read_overview_at(dh: &Path) -> Overview {
         claude_today_tokens,
         claude_uncovered_month,
         month_savings,
-        fx: fx_estimate(&pricing),
-        subscription_cny_month: monthly_cny_subscriptions(dh, &cur_month),
+        fx: None,
+        subscription_cny_month: subscription_month_by_currency.as_ref()
+            .and_then(|totals| totals.get("CNY"))
+            .map(|minor| *minor as f64 / 100.0),
+        subscription_month_by_currency,
     };
     note("assembly", t_asm.elapsed(), &mut slowest);
     let total = t_total.elapsed();
@@ -1162,11 +1157,7 @@ mod tests {
         assert!(ov.claude_today.is_none());
         assert!(ov.claude_month.is_none());
         assert!(ov.claude_today_tokens.is_none());
-        // fx 来自 pricing.json（内嵌，与 state 无关）——空 state 也有。
-        assert_eq!(
-            ov.fx.as_ref().and_then(|f| f.get("usd_cny")).and_then(Value::as_f64),
-            Some(7.15),
-        );
+        assert!(ov.fx.is_none(), "未启用历史 FX 快照时，不向速览提供可变汇率");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1250,19 +1241,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// `fx_estimate` 提取：pricing.json 有 `fx_estimate` 节 → `{usd_cny, as_of}`；
-    /// 缺节 / 值非正 → None（展示层据此退回分币旧行为，不折算）。
-    #[test]
-    fn fx_estimate_reads_rate_or_degrades() {
-        let p = load_pricing();
-        let fx = fx_estimate(&p).expect("pricing.json 有 fx_estimate 节");
-        assert_eq!(fx["usd_cny"].as_f64(), Some(7.15));
-        assert_eq!(fx["as_of"].as_str(), Some("2026-09"));
-        assert!(fx_estimate(&json!({})).is_none(), "无节 → None");
-        assert!(fx_estimate(&json!({"fx_estimate": {"USD_CNY": 0}})).is_none(), "非正汇率 → None");
-        assert!(fx_estimate(&json!({"fx_estimate": {"as_of": "x"}})).is_none(), "缺 USD_CNY → None");
-    }
-
     /// 本月订阅总额只读本地 host_bills；公共 pricing.json 不参与。不同币种
     /// 不折算相加，非本月与非订阅账单不进入托盘行。
     #[test]
@@ -1285,6 +1263,9 @@ mod tests {
             500, "CNY", "test", 1,
         ).unwrap();
         assert_eq!(monthly_cny_subscriptions(&tmp, &month), Some(114.0));
+        let by_currency = monthly_subscriptions_by_currency(&tmp, &month).unwrap();
+        assert_eq!(by_currency.get("CNY"), Some(&11_400));
+        assert_eq!(by_currency.get("USD"), Some(&2_000));
         assert_eq!(monthly_cny_subscriptions(&tmp, "2000-01"), None);
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -6,6 +6,8 @@
   if (window.__TAURI__) return;
 
   let timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  let uiLanguage = "system";
+  let hasUiLanguagePreference = false;
   const dayInSystemTimezone = (value) => {
     const parts = new Intl.DateTimeFormat("en-CA", {
       timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
@@ -753,6 +755,14 @@
       case "export_diagnostic_package": return ok({ status: "saved", path: "/tmp/agent-vitals-diagnostic-browser-mock.zip", upload_performed: false });
       // Shape: apps/desktop/src-tauri/src/lib.rs:1708 statistics_timezone_config (json!).
       case "statistics_timezone_config": return { status: "ok", timezone, system_timezone: timezone };
+      case "ui_language_config": return { status: "ok", language: uiLanguage, has_preference: hasUiLanguagePreference };
+      case "save_ui_language_config": {
+        const language = args && args.language;
+        if (!["system", "en", "zh-Hans"].includes(language)) throw new Error("unsupported UI language preference");
+        uiLanguage = language;
+        hasUiLanguagePreference = true;
+        return { status: "saved", language };
+      }
       case "save_statistics_timezone_config": {
         const next = String((args && args.timezone) || "").trim();
         if (!next) throw new Error("statistics timezone must be a non-empty IANA name");
@@ -907,7 +917,9 @@
         rules: issueGroups.map((group) => ({ rule: group.rule, severity: group.severity, category: group.category, hits: group.hits, sessions: group.sessions })),
         issues: issueGroups, findings: [], source: "browser_mock", next_cursor: null, source_projection_count: 1,
       };
-      case "findings_groups_safe": return {
+      case "findings_groups_safe": {
+        const findingNow = Date.now();
+        return {
         schema_version: "agent-vitals-findings/v1", status: "ok",
         totals: { issues: 2, findings: 2, critical: 1, warning: 1, info: 0, sessions: 2, sessions_total: 2 },
         rules: [
@@ -915,11 +927,12 @@
           { rule: "PRICE_COVERAGE", severity: "warning", category: "billing", hits: 1, sessions: 1 },
         ],
         issues: [
-          { group_id: "fnv1a64:0123456789abcdef", action_kind: "behavior", rule: "SV709", host: "plugin:zcode", evidence_class: "egress", count: 1, first_seen_at_ms: Date.now() - 7200000, last_seen_at_ms: Date.now() - 3600000, severity: "critical", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:2222222222222222", observed_first_at_ms: Date.now() - 7200000, observed_last_at_ms: Date.now() - 3600000, evidence_level: "E3", stage: "egress_attempted", evidence_origin: "network_metadata", scope_classes: ["git_history", "workspace_archive"], observation_count: 2, file_count: null, byte_count: 3145728, destination_class: "object_storage", confidence: "high" }], read_only: true, manual_follow_up: false },
-          { group_id: "fnv1a64:1111111111111111", action_kind: "billing", rule: "PRICE_COVERAGE", host: "minimax-code", evidence_class: "billing", count: 1, first_seen_at_ms: Date.now() - 1800000, last_seen_at_ms: Date.now() - 1800000, severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:3333333333333333", observed_first_at_ms: Date.now() - 1800000, observed_last_at_ms: Date.now() - 1800000, evidence_level: null, stage: null, evidence_origin: "local_artifact", scope_classes: [], observation_count: 1, file_count: null, byte_count: null, destination_class: null, confidence: "medium" }], read_only: false, manual_follow_up: true },
+          { group_id: "fnv1a64:0123456789abcdef", action_kind: "behavior", rule: "SV709", host: "plugin:zcode", evidence_class: "egress", count: 1, first_seen_at_ms: findingNow - 7200000, last_seen_at_ms: findingNow - 3600000, severity: "critical", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:2222222222222222", observed_first_at_ms: findingNow - 7200000, observed_last_at_ms: findingNow - 3600000, evidence_level: "E3", stage: "egress_attempted", evidence_origin: "network_metadata", scope_classes: ["git_history", "workspace_archive"], observation_count: 2, file_count: null, byte_count: 3145728, destination_class: "object_storage", confidence: "high" }], read_only: true, manual_follow_up: false },
+          { group_id: "fnv1a64:1111111111111111", action_kind: "billing", rule: "PRICE_COVERAGE", host: "minimax-code", evidence_class: "billing", count: 1, first_seen_at_ms: findingNow - 1800000, last_seen_at_ms: findingNow - 1800000, severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:3333333333333333", observed_first_at_ms: findingNow - 1800000, observed_last_at_ms: findingNow - 1800000, evidence_level: null, stage: null, evidence_origin: "local_artifact", scope_classes: [], observation_count: 1, file_count: null, byte_count: null, destination_class: null, confidence: "medium" }], read_only: false, manual_follow_up: true },
         ],
         next_cursor: null, refreshed: false,
-      };
+        };
+      }
       case "findings_freshness": return { status: "ok", freshness: { state: "stale", last_successful_sync_at: new Date(Date.now() - 1500000).toISOString(), stale_hosts: ["workbuddy"], syncing: false } };
       case "trust_monitor_config": return { ...trustMonitorConfig };
       case "trust_evidence_read": return { host: args && args.host || null, count: 0, evidence: [], next_cursor: null, source: "browser_mock" };

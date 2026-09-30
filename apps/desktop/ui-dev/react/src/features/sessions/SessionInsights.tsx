@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { safeUiError } from "../../lib/tauri";
+import { message, resolvedLanguage } from "../../lib/i18n";
 import {
   readSessionInsights, readSessionTraceEvidence,
   type InsightDiagnostic, type InsightStep, type NominalCost, type SessionInsights, type SessionTraceEvidence,
@@ -32,8 +33,16 @@ function clock(ms: number): string {
 }
 export function fmtMoney(cost: NominalCost | null): string | null {
   if (!cost || cost.amounts.length === 0) return null;
-  const parts = cost.amounts.map(a => `${a.currency === "USD" ? "$" : a.currency === "CNY" ? "¥" : `${a.currency} `}${(a.amount_minor / 100).toFixed(2)}`);
-  return parts.join(" + ") + (cost.coverage === "partial" ? "（部分调用无价卡）" : "");
+  const language = resolvedLanguage();
+  const parts = cost.amounts.map((amount) => {
+    if (!Number.isSafeInteger(amount.amount_minor)) return "—";
+    if (amount.currency !== "USD" && amount.currency !== "CNY") {
+      return message("billing.minorUnitsUnknown", language, { currency: amount.currency, amount: amount.amount_minor });
+    }
+    const symbol = amount.currency === "USD" ? "$" : "¥";
+    return `${symbol}${(amount.amount_minor / 100).toFixed(2)}`;
+  });
+  return parts.join(" + ") + (cost.coverage === "partial" ? message("sessionInsights.partialPrice", language) : "");
 }
 const inputOf = (s: { input: { cache_read: number; cache_write: number; uncached_input: number } }) => s.input.cache_read + s.input.cache_write + s.input.uncached_input;
 const missOf = (s: { input: { cache_write: number; uncached_input: number } }) => s.input.cache_write + s.input.uncached_input;

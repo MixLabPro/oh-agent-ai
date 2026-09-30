@@ -1,3 +1,5 @@
+import { resolvedLanguage } from "./localePreference";
+
 export type Unsubscribe = () => void;
 
 /** Desktop `app-event` allowlist. `Invalidated` (RUNTIME_INVALIDATION spec §4.4)
@@ -47,15 +49,17 @@ export function makeInvalidationGate(): (event: AppEvent) => boolean {
  * cross the React serving face. Detailed diagnostics stay in the desktop log.
  */
 export function safeUiError(reason: unknown, fallback: string): string {
-  const message = reason instanceof Error ? reason.message : "";
-  if (!message) return fallback;
-  if (/取消|cancel/i.test(message)) return "操作已取消";
-  if (/proposal changed|profile changed|reload before|review the latest scope/i.test(message)) return "Profile 已更新；请重新检查最新授权范围后再操作";
-  if (/DTO|schema|格式|字段|不匹配|不守恒|超出|上限/i.test(message)) return "本地数据格式不兼容，请升级应用或重建投影";
-  if (/权限|permission|access denied|拒绝访问/i.test(message)) return "本地数据读取权限不足";
-  if (/authority|数据库|database|sqlite/i.test(message)) return "本地 authority 暂不可用";
-  if (/日期|月份|参数|引用|cursor|session_ref|filter/i.test(message)) return "筛选或引用参数不可用，请检查后重试";
-  return fallback;
+  const english = resolvedLanguage() === "en";
+  const safeFallback = english ? "This local operation is unavailable. Please retry." : fallback;
+  const detail = reason instanceof Error ? reason.message : "";
+  if (!detail) return safeFallback;
+  if (/取消|cancel/i.test(detail)) return english ? "Operation cancelled." : "操作已取消";
+  if (/proposal changed|profile changed|reload before|review the latest scope/i.test(detail)) return english ? "This profile changed. Review its latest scope before retrying." : "Profile 已更新；请重新检查最新授权范围后再操作";
+  if (/DTO|schema|格式|字段|不匹配|不守恒|超出|上限/i.test(detail)) return english ? "Local data format is incompatible. Update the app or rebuild its projection." : "本地数据格式不兼容，请升级应用或重建投影";
+  if (/权限|permission|access denied|拒绝访问/i.test(detail)) return english ? "Permission to read local data is missing." : "本地数据读取权限不足";
+  if (/authority|数据库|database|sqlite/i.test(detail)) return english ? "The local database is unavailable." : "本地 authority 暂不可用";
+  if (/日期|月份|参数|引用|cursor|session_ref|filter/i.test(detail)) return english ? "The date, filter, or reference is unavailable. Check it and retry." : "筛选或引用参数不可用，请检查后重试";
+  return safeFallback;
 }
 
 type TauriGlobal = {
@@ -157,7 +161,7 @@ export type OverviewDetails = {
 export type StatisticsTimezone = { timezone: string };
 
 export type StatisticsSettingsReport = {
-  timezone: { status: "ok" | "unavailable"; timezone: string | null; system_timezone: string | null };
+  timezone: { status: "ok" | "unavailable"; timezone: string | null; system_timezone: string | null; system_timezone_fallback?: boolean };
   retention: { status: "ok" | "unavailable"; months: number | null; minimum_months: number | null; maximum_months: number | null };
   pricing: { status: "ok" | "unavailable"; state: "ok" | "updated" | "failed" | "rejected" | "never_checked" | "skipped" | "unknown"; version: string | null; model_count: number | null; last_success_at_ms: number | null; available: boolean };
 };
@@ -1029,8 +1033,8 @@ function snoozeTimestamp(value: unknown): number | null {
   return null;
 }
 
-function currentBudgetMonth(): string {
-  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit" }).formatToParts(new Date());
+function currentBudgetMonth(timezone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit" }).formatToParts(new Date());
   const year = parts.find((part) => part.type === "year")?.value ?? "1970";
   const month = parts.find((part) => part.type === "month")?.value ?? "01";
   return `${year}-${month}`;
@@ -1296,7 +1300,7 @@ function parseStatisticsTimezone(value: unknown): StatisticsSettingsReport["time
   if (systemTimezone !== null) {
     try { new Intl.DateTimeFormat("en-US", { timeZone: systemTimezone }).format(); } catch (_) { throw new Error("系统时区不可用"); }
   }
-  return { status: "ok", timezone, system_timezone: systemTimezone };
+  return { status: "ok", timezone, system_timezone: systemTimezone, system_timezone_fallback: root.system_timezone_fallback === true };
 }
 
 function parseRetentionConfig(value: unknown): StatisticsSettingsReport["retention"] {
@@ -2348,6 +2352,10 @@ export async function invoke<T>(command: string, args?: unknown): Promise<T> {
   throw new Error(`本地 API 不可用：${command}`);
 }
 
+export function hasNativeBridge(): boolean {
+  return typeof globalTauri()?.core?.invoke === "function";
+}
+
 export async function readOverviewSnapshot(): Promise<OverviewSnapshot> {
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return browserPreview;
@@ -2396,8 +2404,7 @@ function statisticsMonthAndDate(timezone: string): { month: string; date: string
 }
 
 export async function readOverviewDetails(): Promise<OverviewDetails> {
-  let timezone = "Asia/Shanghai";
-  try { timezone = (await readStatisticsTimezone()).timezone; } catch (_) { /* backend window remains the safe Beijing default */ }
+  const timezone = (await readStatisticsTimezone()).timezone;
   const { month, date } = statisticsMonthAndDate(timezone);
   const handler = globalTauri()?.core?.invoke;
   if (handler) {
@@ -2870,8 +2877,9 @@ export async function readCustomSourceConfig(): Promise<CustomSourceReport> {
 }
 
 export async function readBudgetSettings(): Promise<BudgetSettingsReport> {
+  const month = currentBudgetMonth((await readStatisticsTimezone()).timezone);
   const fallbackProfiles = {
-    status: "ok", month: currentBudgetMonth(), profiles: [{
+    status: "ok", month, profiles: [{
       profile_id: "estimate", currency: "CNY", monthly_minor: 20000, daily_minor: null, warning_ratio_bp: 8000,
       spent_minor: 864, total_spent_minor: 864, ratio_bp: 432, level: "ok", has_unresolved: false,
       daily_spent_minor: 0, daily_total_minor: 0, daily_ratio_bp: null, daily_level: "disabled", updated_at_ms: Date.now(), subscription_amortized_minor: 0, subscription_skipped: false,
@@ -2879,10 +2887,10 @@ export async function readBudgetSettings(): Promise<BudgetSettingsReport> {
   };
   const fallbackLegacy = { status: "ok", monthly_cny_minor: 10000, daily_cny_minor: 500, warning_ratio_bp: 8000, origin: "legacy_import" };
   const handler = globalTauri()?.core?.invoke;
-  if (!handler) return { status: "ok", month: currentBudgetMonth(), estimate: parseBudgetProfiles(fallbackProfiles).profiles[0] ?? null, confirmed: null, legacy: parseLegacyBudget(fallbackLegacy), snoozed_until_ms: null };
+  if (!handler) return { status: "ok", month, estimate: parseBudgetProfiles(fallbackProfiles).profiles[0] ?? null, confirmed: null, legacy: parseLegacyBudget(fallbackLegacy), snoozed_until_ms: null };
   const [legacyResult, profilesResult, overviewResult] = await Promise.allSettled([
     handler("budget_config"),
-    handler("budget_profiles_status", { month: currentBudgetMonth() }),
+    handler("budget_profiles_status", { month }),
     handler("read_overview"),
   ]);
   let legacy: BudgetSettingsReport["legacy"] = null;
@@ -2902,7 +2910,7 @@ export async function readBudgetSettings(): Promise<BudgetSettingsReport> {
   }
   return {
     status: profiles.status === "ok" || legacy !== null ? "ok" : "unavailable",
-    month: profiles.month ?? currentBudgetMonth(),
+    month: profiles.month ?? month,
     estimate: profiles.profiles.find((profile) => profile.profile_id === "estimate") ?? null,
     confirmed: profiles.profiles.find((profile) => profile.profile_id === "confirmed") ?? null,
     legacy,
@@ -3132,7 +3140,7 @@ function parseBillingList(value: unknown, key: string): { status: "ok" | "unavai
 }
 
 export async function readBillingSettings(): Promise<BillingSettingsReport> {
-  const month = currentBudgetMonth();
+  const month = currentBudgetMonth((await readStatisticsTimezone()).timezone);
   const handler = globalTauri()?.core?.invoke;
   if (!handler) {
     return { status: "ok", month, candidates_status: "ok", groups_status: "ok", declarations_status: "ok", jobs_status: "ok", bills_status: "ok", candidates: [parseBillingCandidate({ candidate_id: "browser-candidate-1", host: "codex", provider_id: "openai", currency: "USD", amount_minor: 2000, billing_period_start: `${month}-01`, status: "pending", impact: { status: "ok", total_tokens: 18000, fact_count: 4, session_count: 1 } })], groups: [], declarations: [], jobs: [], bills: [] };

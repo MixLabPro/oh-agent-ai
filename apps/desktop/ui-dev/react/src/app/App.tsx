@@ -9,20 +9,21 @@ import { SettingsPage } from "../features/settings/SettingsPage";
 import { SkillsPage } from "../features/skills/SkillsPage";
 import { OverviewPage } from "../features/overview/OverviewPage";
 import { StatusPill } from "../components/ui/StatusPill";
+import { hydrateLanguagePreference, message, useLanguage, type MessageKey } from "../lib/i18n";
 
 type Page = "overview" | "usage" | "sessions" | "findings" | "test" | "trust" | "skills" | "settings";
 type SettingSection = "settings-sources" | "settings-billing" | "settings-budget";
 type SessionNavigationTarget = { type: "sessionDetail"; session_ref: string; host_kind: string } | { type: "sessionList"; host_kind: string | null };
 
-const navigation: Array<{ id: Page; label: string; hint: string }> = [
-  { id: "overview", label: "总览", hint: "当前状态" },
-  { id: "usage", label: "用量", hint: "按日查看" },
-  { id: "sessions", label: "会话", hint: "安全列表" },
-  { id: "findings", label: "发现", hint: "风险与待办" },
-  { id: "test", label: "测试", hint: "路线质量" },
-  { id: "trust", label: "Trust", hint: "证据审计" },
-  { id: "skills", label: "Skill", hint: "定义体检" },
-  { id: "settings", label: "设置", hint: "本机配置" },
+const navigation: Array<{ id: Page; label: MessageKey }> = [
+  { id: "overview", label: "nav.overview" },
+  { id: "usage", label: "nav.usage" },
+  { id: "sessions", label: "nav.sessions" },
+  { id: "findings", label: "nav.findings" },
+  { id: "test", label: "nav.test" },
+  { id: "trust", label: "nav.trust" },
+  { id: "skills", label: "nav.skills" },
+  { id: "settings", label: "nav.settings" },
 ];
 
 function isPage(value: unknown): value is Page {
@@ -63,14 +64,16 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error
   render() {
     if (!this.state.error) return this.props.children;
     return <main className="main-content"><section className="empty-state" role="alert">
-      <p className="eyebrow">工作台暂不可用</p><h1>页面渲染失败</h1>
-      <p>本地数据没有被修改。请刷新页面；如果问题持续，请从设置页导出脱敏诊断。</p>
-      <button className="button button-secondary" type="button" onClick={() => window.location.reload()}>重新加载</button>
+      <p className="eyebrow">{message("error.renderLead")}</p><h1>{message("error.renderTitle")}</h1>
+      <p>{message("error.renderHelp")}</p>
+      <button className="button button-secondary" type="button" onClick={() => window.location.reload()}>{message("error.reload")}</button>
     </section></main>;
   }
 }
 
 export function App() {
+  const language = useLanguage();
+  useEffect(() => { void hydrateLanguagePreference().catch(() => { /* Keep the existing local preference visible; Settings can retry. */ }); }, []);
   const [page, setPage] = useState<Page>(pageFromHash);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem("workbench.sidebarCollapsed") === "true"; } catch { return false; }
@@ -212,8 +215,8 @@ export function App() {
   };
 
   const headerStatus = page === "overview"
-    ? overview === null ? { tone: "neutral" as const, label: "读取中" } : overview.sync.ok ? { tone: "success" as const, label: "本地同步正常" } : { tone: "warning" as const, label: "同步需检查" }
-    : { tone: "success" as const, label: "本地运行" };
+    ? overview === null ? { tone: "neutral" as const, label: message("toolbar.loading", language) } : overview.sync.ok ? { tone: "success" as const, label: message("toolbar.synced", language) } : { tone: "warning" as const, label: message("toolbar.syncIssue", language) }
+    : { tone: "success" as const, label: message("toolbar.local", language) };
 
   const toggleSidebar = () => {
     const next = !sidebarCollapsed;
@@ -223,23 +226,23 @@ export function App() {
 
   return <AppErrorBoundary><div className={`app-shell desktop-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${nativeMac ? "native-mac" : ""}`}>
     <header className="desktop-toolbar" data-tauri-drag-region>
-      <button className="button button-secondary sidebar-toggle" type="button" aria-label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"} aria-expanded={!sidebarCollapsed} aria-controls="workbench-sidebar" onClick={toggleSidebar}><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor"/><path d="M6 3v10" stroke="currentColor"/></svg></button>
-      <span className="desktop-toolbar-title" data-tauri-drag-region>{navigation.find((item) => item.id === page)?.label}</span>
+      <button className="button button-secondary sidebar-toggle" type="button" aria-label={message(sidebarCollapsed ? "toolbar.expand" : "toolbar.collapse", language)} aria-expanded={!sidebarCollapsed} aria-controls="workbench-sidebar" onClick={toggleSidebar}><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor"/><path d="M6 3v10" stroke="currentColor"/></svg></button>
+      <span className="desktop-toolbar-title" data-tauri-drag-region>{message(navigation.find((item) => item.id === page)?.label ?? "nav.overview", language)}</span>
       <span className="desktop-drag-space" data-tauri-drag-region />
       <div id="desktop-toolbar-actions" className="desktop-toolbar-actions">
-        {page === "overview" && <div className="header-actions"><StatusPill tone={headerStatus.tone}>{headerStatus.label}</StatusPill><button className="button button-secondary" type="button" disabled={overviewRefreshing} onClick={() => setOverviewRefresh((value) => value + 1)}>{overviewRefreshing ? "刷新中…" : "刷新"}</button></div>}
+        {page === "overview" && <div className="header-actions"><StatusPill tone={headerStatus.tone}>{headerStatus.label}</StatusPill><button className="button button-secondary" type="button" disabled={overviewRefreshing} onClick={() => setOverviewRefresh((value) => value + 1)}>{message(overviewRefreshing ? "action.refreshing" : "action.refresh", language)}</button></div>}
       </div>
     </header>
-    <aside id="workbench-sidebar" className="sidebar" aria-label="主导航" hidden={sidebarCollapsed}>
-      <div className="brand"><span className="brand-mark" aria-hidden="true">av</span><div><strong>agent-vitals</strong><span>本地工作台</span></div></div>
+    <aside id="workbench-sidebar" className="sidebar" aria-label={message("nav.label", language)} hidden={sidebarCollapsed}>
+      <div className="brand"><span className="brand-mark" aria-hidden="true">av</span><div><strong>agent-vitals</strong><span>{message("sidebar.workspace", language)}</span></div></div>
       <nav className="nav-list">
-        {navigation.map((item) => <button key={item.id} title={item.hint} className={`nav-item ${page === item.id ? "nav-item-active" : ""}`} aria-current={page === item.id ? "page" : undefined} type="button" onClick={() => navigate(item.id)}><span>{item.label}</span></button>)}
+        {navigation.map((item) => <button key={item.id} className={`nav-item ${page === item.id ? "nav-item-active" : ""}`} aria-current={page === item.id ? "page" : undefined} type="button" onClick={() => navigate(item.id)}><span>{message(item.label, language)}</span></button>)}
       </nav>
-      <div className="sidebar-footer"><StatusPill>离线优先</StatusPill><span>所有数据留在本机</span></div>
+      <div className="sidebar-footer"><StatusPill>{message("sidebar.offline", language)}</StatusPill><span>{message("sidebar.local", language)}</span></div>
     </aside>
     <main className="main-content">
-      {page === "overview" ? <h1 className="visually-hidden">总览</h1> : <h1 className="visually-hidden">{navigation.find((item) => item.id === page)?.label}</h1>}
-      {page === "overview" && error && <div className="error-banner" role="alert">{error} · 如有历史结果则保留显示，未用模拟数据替代</div>}
+      <h1 className="visually-hidden">{message(navigation.find((item) => item.id === page)?.label ?? "nav.overview", language)}</h1>
+      {page === "overview" && error && <div className="error-banner" role="alert">{error} · {message("error.overviewStale", language)}</div>}
       {page === "overview" ? <OverviewPage overview={overview} details={overviewDetails} /> : page === "usage" ? <UsagePage /> : page === "sessions" ? <SessionsPage navigationTarget={sessionTarget} onNavigationTargetApplied={clearSessionTarget} /> : page === "trust" ? <TrustPage /> : page === "test" ? <TestPage /> : page === "skills" ? <SkillsPage /> : page === "settings" ? <SettingsPage focusSection={focusSettingSection} onSectionFocused={clearSettingSectionTarget} /> : <FindingsPage onNavigateToAction={navigateToFindingAction} />}
     </main>
   </div></AppErrorBoundary>;

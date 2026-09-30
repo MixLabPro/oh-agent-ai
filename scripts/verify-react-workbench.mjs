@@ -47,6 +47,7 @@ walk(reactSource);
 
 const source = sourceFiles.map((file) => fs.readFileSync(file, "utf8")).join("\n");
 const settingsPage = fs.readFileSync(path.join(reactSource, "features/settings/SettingsPage.tsx"), "utf8");
+const tauriBridge = fs.readFileSync(path.join(reactSource, "lib/tauri.ts"), "utf8");
 const trustPage = fs.readFileSync(path.join(reactSource, "features/trust/TrustPage.tsx"), "utf8");
 const findingsPage = fs.readFileSync(path.join(reactSource, "features/findings/FindingsPage.tsx"), "utf8");
 const decisionMatrix = fs.readFileSync(path.join(reactSource, "features/findings/DecisionMatrixSection.tsx"), "utf8");
@@ -90,10 +91,10 @@ if (!source.includes("readOverviewDetails") || !source.includes("data_daily_summ
 if (!source.includes("token totals 不守恒") || !source.includes("cache hit ratio 不安全") || !source.includes("部分总览数据不可用")) fail("React 总览缺少 token 守恒、缓存比率或部分失败可见性");
 if (!source.includes("refreshSeq") || !source.includes("requestId === refreshSeq.current")) fail("React 总览刷新缺少请求代数保护");
 if (!source.includes('"read_calendar_month"') || !source.includes('"read_hourly_distribution"') || !source.includes('"data_monthly_summary"') || !source.includes('"statistics_timezone_config"')) fail("React 用量未使用日历/小时/来源/统计时区安全 DTO command");
-if (!source.includes("usage-calendar-grid") || !source.includes("usage-hour-grid") || !source.includes("total_actual_spend") || !source.includes("aria-selected") || !source.includes("dsh_tokens") || !source.includes("claude_tokens") || !source.includes("codex_tokens") || !source.includes("usage-host-summary") || !usagePage.includes("sourceForDisplayedMonth.tokens_by_host") || !usagePage.includes("无已观测宿主")) fail("React 用量缺少日历、小时、币种、选择状态、动态宿主拆分或空数据诚实态");
+if (!source.includes("usage-calendar-grid") || !source.includes("usage-hour-grid") || !source.includes("total_actual_spend") || !source.includes("aria-selected") || !source.includes("dsh_tokens") || !source.includes("claude_tokens") || !source.includes("codex_tokens") || !source.includes("usage-host-summary") || !usagePage.includes("sourceForDisplayedMonth.tokens_by_host") || !usagePage.includes('"usage.noObservedHosts"')) fail("React 用量缺少日历、小时、币种、选择状态、动态宿主拆分或空数据诚实态");
 if (!source.includes("loadedCalendarMonth") || !source.includes("sourceError") || !source.includes("不会把上一月份来源数据冒充为当前月份") || !source.includes("mounted.current") || !source.includes("monthRequest.current += 1")) fail("React 用量刷新未隔离月份投影、来源失败态或卸载中的请求");
-if (!usagePage.includes("sourceForDisplayedMonth") || !usagePage.includes("sourceForPanel") || !usagePage.includes("尚未对齐") || !usagePage.includes("未决计费项") || !usagePage.includes("窗口：{monthTitle(sourceForPanel.month)}")) fail("React 用量未显式区分匹配月份摘要与来源窗口证据");
-if (!source.includes('"sessions_list"') || !source.includes("session_ref") || !source.includes("sessions-table") || !source.includes("window_session_count") || !sessionsPage.includes("readStatisticsTimezone") || !sessionsPage.includes("Intl.DateTimeFormat") || !sessionsPage.includes("Asia/Shanghai")) fail("React 会话未使用安全列表 DTO、窗口守恒字段或统计时区");
+if (!usagePage.includes("sourceForDisplayedMonth") || !usagePage.includes("sourceForPanel") || !usagePage.includes('"usage.sourceUnaligned"') || !usagePage.includes('"usage.unresolved"') || !usagePage.includes('message("usage.window", language, { month: monthTitle(sourceForPanel.month) })')) fail("React 用量未显式区分匹配月份摘要与来源窗口证据");
+if (!source.includes('"sessions_list"') || !source.includes("session_ref") || !source.includes("sessions-table") || !source.includes("window_session_count") || !sessionsPage.includes("readStatisticsTimezone") || !sessionsPage.includes("Intl.DateTimeFormat") || !sessionsPage.includes('resolvedOptions().timeZone || "UTC"') || sessionsPage.includes('DEFAULT_STATISTICS_TIMEZONE = "Asia/Shanghai"')) fail("React 会话未使用安全列表 DTO、窗口守恒字段或统计时区");
 if (!source.includes("加载更多") || !source.includes("cost_status") || !source.includes("requestInFlight") || !source.includes("pendingRefresh")) fail("React 会话缺少成本状态、分页或竞态保护");
 if (!source.includes('"sessions_read"') || !source.includes("workflow_timeline") || !source.includes("billing_breakdown") || !source.includes("session-detail-panel")) fail("React 会话详情缺少安全摘要、计费桶或脱敏时间线");
 if (!source.includes("page_size: 200") || source.includes("const args: Record<string, unknown> = { sessionRef, limit: 200 }") || !sessionDetailPage.includes("detail.next_cursor")) fail("React 会话详情未使用桌面分页字段或未透传 cursor");
@@ -119,7 +120,9 @@ if (!source.includes("resolveBillingImportCandidate") || !source.includes('"reso
 if (!source.includes("previewBillingDeclaration") || !source.includes("saveBillingDeclaration") || !source.includes('"billing_candidate_impact_preview"') || !source.includes('"save_billing_declaration_revision"') || !source.includes("声明归属") || !source.includes("确认并保存声明") || !source.includes("重算任务已入队") || !source.includes("重算未入队") || !source.includes("当前数字仍是旧结果")) fail("React 设置缺少计费声明的影响预览、确认保存或重算回执");
 if (!source.includes("retryBillingRecalculation") || !source.includes('"retry_billing_recalculation"') || !source.includes("重试重算") || !source.includes("旧结果仍可读") || !source.includes("重算任务已重新入队")) fail("React 设置缺少失败重算的安全重试回执或旧结果保留语义");
 if (!source.includes("revokeBillingDeclaration") || !source.includes('"revoke_billing_declaration"') || !source.includes("再次确认撤销") || !source.includes("历史事实保留") || !source.includes("未来归因将按未声明状态重算")) fail("React 设置缺少计费声明的二次确认撤销或历史保留语义");
-if (!source.includes("amendBillingDeclaration") || !source.includes('"official_subscription"') || !source.includes("修改订阅") || !source.includes("历史月份不变") || !source.includes("范围沿用当前声明") || !source.includes("currentMonthStart") || !source.includes('statisticsMonth("Asia/Shanghai")')) fail("React 设置缺少订阅修订的范围保留、当前月起点、历史月份和重算回执语义");
+if (!source.includes("amendBillingDeclaration") || !source.includes('"official_subscription"') || !source.includes("修改订阅") || !source.includes("历史月份不变") || !source.includes("范围沿用当前声明") || !source.includes("currentMonthStart") || !source.includes("statisticsMonth(timezone)") || !source.includes("statisticsDay(timezone)") || !source.includes("await readStatisticsTimezone()")) fail("React 设置缺少订阅修订的范围保留、当前月起点、历史月份和重算回执语义");
+if (tauriBridge.includes('timeZone: "Asia/Shanghai"') || !tauriBridge.includes('currentBudgetMonth((await readStatisticsTimezone()).timezone)') || !tauriBridge.includes('const timezone = (await readStatisticsTimezone()).timezone;')) fail("React 账期边界必须采用权威统计时区，不得固定上海时区");
+if (!settingsPage.includes('setMonthly(""); setDaily(""); setMessage(tr("budget.currencyChanged"))')) fail("切换预算币种必须清除旧金额并提示重新输入");
 if (["resolve_billing_import_candidate", "save_billing_declaration_revision", "revoke_billing_declaration", "save_host_bill", "save_host_bills", "delete_host_bill"].some((command) => appSource.includes(`\"${command}\"`))) fail("React 设置越过计费归因或账单写入 mutation 边界");
 if (!source.includes("readStatisticsSettings") || !source.includes('"retention_config"') || !source.includes('"statistics_timezone_config"') || !source.includes('"public_pricing_catalog_status"')) fail("React 设置缺少统计、保留期或价格目录只读 DTO");
 if (!source.includes("readMonthlyExportSummary") || !source.includes("当前月摘要 CSV") || !source.includes("settings-data-section")) fail("React 设置缺少安全月度摘要导出面");
@@ -132,7 +135,7 @@ if (!source.includes("显示完整路径") || !source.includes("settings-custom-
 if (!source.includes('status === "unavailable" ? []')) fail("React 设置未隔离自定义位置配置不可用态");
 if (!source.includes("尚未导入") || !source.includes("没有读取权限") || !source.includes("来源状态暂不可用")) fail("React 设置缺少来源空态、错误映射或不可用态");
 if (!source.includes("Promise.allSettled") || !source.includes("sync_pause_state") || !source.includes("read_overview")) fail("React 设置未保留来源状态的部分失败降级");
-if (!settingsPage.includes("SettingsLoadingState") || !settingsPage.includes("保留上一次可读结果；刷新完成前不会清空页面。")) fail("React 设置刷新未保留旧数据并明确 stale 状态");
+if (!settingsPage.includes("SettingsLoadingState") || !settingsPage.includes('message("settings.loadingRetain", language)')) fail("React 设置刷新未保留旧数据并明确 stale 状态");
 if (/set(?:Report|CustomReport|BudgetReport|BillingReport|DataReport|AboutReport)\(null\)/u.test(settingsPage)) fail("React 设置刷新失败时清空了已有投影");
 const routeQualityType = source.match(/export type RouteQualityModel[\s\S]*?\};/u)?.[0] || "";
 if (/provider_raw|provider_id|credential_ref|endpoint_base_url/u.test(routeQualityType)) fail("React 路线质量模型投影携带了 provider/credential/endpoint 字段");

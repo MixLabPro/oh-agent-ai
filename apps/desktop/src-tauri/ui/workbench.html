@@ -746,8 +746,7 @@
                 <p class="bd-help muted" id="ov-billing-relationship-effect" aria-live="polite"></p>
               </div>
             </div>
-            <!-- 结算币种跟计费方走、不跟模型走：胜算云是国内公司，转海外模型也按人民币结算，
-                 价卡未收录的模型退回原厂官方卡（可能是 USD）时按此币种折算估算（带 ≈）。
+            <!-- 结算币种是用户声明，不是价卡币种；fallback 价卡估算保留原报价币种。
                  只对按量 / 中转 / 组织承担显示；订阅的币种在月费那一栏。 -->
             <div class="bd-row" id="ov-billing-settlement-row" hidden>
               <div class="bd-label"><span class="bd-step" aria-hidden="true"></span><span>结算币种</span></div>
@@ -756,7 +755,7 @@
                   <option value="CNY">人民币 CNY</option>
                   <option value="USD">美元 USD</option>
                 </select>
-                <p class="bd-help muted" id="ov-billing-settlement-help">这家计费方用什么币向你结算。它的价卡没收录的模型会按原厂标价折算成这个币种（估算，带 ≈）。</p>
+                <p class="bd-help muted" id="ov-billing-settlement-help">这家计费方用什么币向你结算。未收录型号的原厂价估算会保留原报价币种，不视为该币种的实际付款。</p>
               </div>
             </div>
             <div class="bd-row" id="ov-billing-subscription-fields" hidden>
