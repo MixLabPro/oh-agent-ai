@@ -82,13 +82,20 @@ impl FxSnapshot {
         let rates = root.get("rates").and_then(Value::as_object).ok_or("fx snapshot has no rates")?;
         let mut rates_per_usd = BTreeMap::new();
         for (currency, entry) in rates {
+            // 大小写不同的重复键（`cny` 与 `CNY`）会静默互相覆盖，快照被改过时无法判断哪个对 → 拒绝。
+            if rates_per_usd.contains_key(&currency.to_uppercase()) { return Err(format!("fx snapshot has duplicate currency {currency}")); }
             // 值是十进制字符串（避免浮点文本漂移）；非法条目直接丢弃，不猜。
             let parsed = entry.get("rate").and_then(Value::as_str).and_then(|text| text.parse::<f64>().ok());
             if let Some(rate) = parsed.filter(|r| valid_rate(*r)) {
                 rates_per_usd.insert(currency.to_uppercase(), rate);
             }
         }
-        if !rates_per_usd.contains_key("USD") { return Err("fx snapshot lacks USD".into()); }
+        match rates_per_usd.get("USD") {
+            None => return Err("fx snapshot lacks USD".into()),
+            // 基准币种对自己恒为 1；否则 USD→X 与 USD→USD 会互相矛盾。
+            Some(rate) if (*rate - 1.0).abs() > 1e-12 => return Err("fx snapshot USD rate must be 1".into()),
+            Some(_) => {}
+        }
         Ok(Self { rate_date, captured_at, rates_per_usd })
     }
 }
@@ -106,11 +113,12 @@ impl FxPolicy {
     /// 追加用户手动汇率；非正 / 非有限 / 同币对 → 拒绝（返回 Err，不静默吞掉）。
     pub fn with_user_rate(mut self, rate: UserRate) -> Result<Self, String> {
         if !valid_rate(rate.rate) { return Err(format!("manual rate for {}→{} must be a positive finite number", rate.from, rate.to)); }
-        if rate.from.eq_ignore_ascii_case(&rate.to) { return Err("manual rate needs two different currencies".into()); }
+        if rate.from.trim().is_empty() || rate.to.trim().is_empty() { return Err("manual rate needs both currencies".into()); }
+        if rate.from.trim().eq_ignore_ascii_case(rate.to.trim()) { return Err("manual rate needs two different currencies".into()); }
         if let Some(date) = rate.as_of.as_deref() {
             if days_from_ymd(date).is_none() { return Err(format!("manual rate date {date:?} is not YYYY-MM-DD")); }
         }
-        self.user_rates.push(UserRate { from: rate.from.to_uppercase(), to: rate.to.to_uppercase(), ..rate });
+        self.user_rates.push(UserRate { from: rate.from.trim().to_uppercase(), to: rate.to.trim().to_uppercase(), ..rate });
         Ok(self)
     }
 
@@ -140,6 +148,8 @@ impl FxPolicy {
         let (from, to) = (from.to_uppercase(), to.to_uppercase());
         let (rate, rate_source, rate_date) = self.rate(&from, &to)?;
         if !valid_rate(rate) { return None; }
+        // 金额与汇率都有限，乘积仍可能溢出成 inf（1e308 × 17891）——不能把 inf 当结果返回。
+        if !(amount * rate).is_finite() { return None; }
         Some(Conversion {
             source_amount: amount,
             target_amount: amount * rate,
@@ -295,6 +305,24 @@ mod tests {
         assert_eq!(FxPolicy::age_days("2026-02-28", "2026-03-01"), Some(1));
         assert_eq!(FxPolicy::age_days("2024-02-28", "2024-03-01"), Some(2), "闰年");
         assert_eq!(FxPolicy::age_days("garbage", "2026-10-01"), None);
+    }
+
+    #[test]
+    fn overflowing_products_are_not_results() {
+        assert!(policy().convert(1e308, "USD", "IDR").is_none(), "有限 × 有限 仍可能溢出成 inf");
+    }
+
+    #[test]
+    fn snapshot_must_be_self_consistent() {
+        assert!(FxSnapshot::parse(r#"{"base":"USD","rate_date":"2026-09-30","rates":{"USD":{"rate":"2"},"CNY":{"rate":"7"}}}"#).is_err(), "USD 必须是 1");
+        assert!(FxSnapshot::parse(r#"{"base":"USD","rate_date":"2026-09-30","rates":{"USD":{"rate":"1"},"CNY":{"rate":"7"},"cny":{"rate":"6"}}}"#).is_err(), "大小写重复键拒绝");
+    }
+
+    #[test]
+    fn manual_rate_currency_codes_are_trimmed_and_non_empty() {
+        let p = policy().with_user_rate(UserRate { from: " usd ".into(), to: "cny".into(), rate: 6.8, as_of: None }).unwrap();
+        assert_eq!(p.convert(1.0, "USD", "CNY").unwrap().rate, 6.8);
+        assert!(policy().with_user_rate(UserRate { from: "".into(), to: "CNY".into(), rate: 6.8, as_of: None }).is_err());
     }
 
     #[test]

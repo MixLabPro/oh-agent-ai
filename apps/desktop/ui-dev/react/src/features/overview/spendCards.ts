@@ -66,6 +66,17 @@ export function todaySpendCard(daily: DailySummary | null, monthly: UsageSourceS
 export function applyConversion(spend: SpendCard, conversion: FxConvertResult | null): SpendCard {
   if (!conversion || conversion.unavailable.length > 0 || conversion.items.length === 0) return spend;
   if (conversion.items.every((item) => item.rate_source === "identity")) return spend;
+  // 折算结果必须与「这张卡当前的金额」一一对应：同一组币种、金额一致（到分）、没有非法值。
+  // 否则（刷新途中拿到旧结果、后端漏了某个币种、NaN / 负数）一律不折算——宁可显示分币种，
+  // 也不显示一个与卡片自己的金额对不上、或只折了一半的合计。
+  const wanted = Object.entries(spend.amounts).filter(([, amount]) => amount > 0);
+  if (wanted.length === 0 || wanted.length !== conversion.items.length) return spend;
+  for (const item of conversion.items) {
+    if (![item.amount, item.converted, item.rate].every(Number.isFinite) || item.amount < 0 || item.converted < 0 || item.rate <= 0) return spend;
+    const expected = spend.amounts[item.currency];
+    if (expected === undefined || Math.abs(expected - item.amount) >= 0.005) return spend;
+  }
+  if (!Number.isFinite(conversion.total) || conversion.total < 0) return spend;
   const originals = conversion.items.map((item) => formatAmount(item.currency, item.amount)).join(" · ");
   const bundled = conversion.items.find((item) => item.rate_source === "bundled_snapshot");
   const manual = conversion.items.some((item) => item.rate_source === "user_assumption");

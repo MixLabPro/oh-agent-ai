@@ -184,16 +184,20 @@ function OverviewFindingsStrip() {
 
 export function OverviewPage({ overview, details }: { overview: OverviewSnapshot | null; details: OverviewDetails | null }) {
   const language = useLanguage();
+  // hooks 必须在任何提前返回之前调用：overview 为 null（首屏加载）与有数据是同一组件的前后两次渲染，
+  // 放在 return 后面会让 hook 数量变化，React 报「Rendered more hooks」并把页面渲成空白。
+  const todayBase = todaySpendCard(details?.daily ?? null, details?.monthly ?? null);
+  const monthBase = monthSpendCard(details?.monthly ?? null);
+  const todayConversion = useConvertedAmounts(todayBase.amounts);
+  const monthConversion = useConvertedAmounts(monthBase.amounts);
   if (!overview) return <section className="empty-state" aria-live="polite"><p className="eyebrow">{message("overview.loading", language)}</p><h2>{message("overview.preparing", language)}</h2><p>{message("overview.loadingDetail", language)}</p></section>;
   const budgetTone = overview.budget.level === "over" ? "warning" : overview.budget.level === "warn" ? "warning" : overview.budget.level === "ok" ? "success" : "neutral";
   const measuredHosts = details?.monthly && details.monthly.freshness !== "unavailable" && details.monthly.freshness !== "unknown"
     ? Object.values(details.monthly.tokens_by_host).filter((host) => host.total > 0).length : null;
   const cacheHit = todayCacheHitRatio(details?.daily ?? null);
-  const todayBase = todaySpendCard(details?.daily ?? null, details?.monthly ?? null);
-  const monthBase = monthSpendCard(details?.monthly ?? null);
   // 报告币种折算（后端算、带出处）；折不了就保持分币种。
-  const todaySpend = applyConversion(todayBase, useConvertedAmounts(todayBase.amounts));
-  const monthSpend = applyConversion(monthBase, useConvertedAmounts(monthBase.amounts));
+  const todaySpend = applyConversion(todayBase, todayConversion);
+  const monthSpend = applyConversion(monthBase, monthConversion);
   return <>
     {details?.errors.length ? <div className="error-banner" role="status">{message("overview.partialError", language, { errors: details.errors.join("; ") })}</div> : null}
     <section className="stats-grid" aria-label={message("overview.status", language)}>

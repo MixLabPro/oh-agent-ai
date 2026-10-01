@@ -19,14 +19,25 @@ fn state_path(data_home: &Path, file: &str) -> std::path::PathBuf { data_home.jo
 fn write_atomic(path: &Path, value: &Value) -> Result<(), String> {
     let directory = path.parent().ok_or("state path has no parent")?;
     std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
-    let temporary = path.with_extension("json.tmp");
+    // 临时文件名带进程号与纳秒：两个并发保存不再抢同一个固定的 *.json.tmp。
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    let temporary = path.with_extension(format!("json.{}.{nonce}.tmp", std::process::id()));
     std::fs::write(&temporary, serde_json::to_vec(value).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
     std::fs::rename(&temporary, path).map_err(|error| error.to_string())
 }
 
+/// 文件损坏（不是合法 JSON）= 应用自己无法修复的状态：这是设置文件，不是用户账单。
+/// 把坏文件改名为 `.bad` 留作证据，之后当作「没有文件」继续；否则保存、移除都会一直报错，
+/// 而界面又把错误吞掉，用户只能手动删文件。
 fn read_json(path: &Path) -> Result<Option<Value>, String> {
     match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).map(Some).map_err(|error| format!("{} is invalid: {error}", path.display())),
+        Ok(text) => match serde_json::from_str(&text) {
+            Ok(value) => Ok(Some(value)),
+            Err(_) => {
+                let _ = std::fs::rename(path, path.with_extension("json.bad"));
+                Ok(None)
+            }
+        },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("{} unreadable: {error}", path.display())),
     }
@@ -47,7 +58,7 @@ pub fn reporting_currency(data_home: &Path, system_locale: &str) -> Result<(Stri
 
 pub fn save_reporting_currency(data_home: &Path, code: &str) -> Result<String, String> {
     let path = state_path(data_home, CURRENCY_FILE);
-    if code == DEFAULT_SENTINEL {
+    if code.trim().eq_ignore_ascii_case(DEFAULT_SENTINEL) {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -61,15 +72,29 @@ pub fn save_reporting_currency(data_home: &Path, code: &str) -> Result<String, S
     Ok(upper)
 }
 
-pub fn manual_rates(data_home: &Path) -> Result<Vec<UserRate>, String> {
-    let Some(root) = read_json(&state_path(data_home, MANUAL_RATES_FILE))? else { return Ok(Vec::new()) };
-    let rows = root.get("rates").and_then(Value::as_array).ok_or("fx-manual-rates.json has no rates array")?;
+/// 读手动汇率，同时报告有没有读不懂而被跳过的行（调用方据此在改写前先备份，不静默丢行）。
+fn read_manual(data_home: &Path) -> Result<(Vec<UserRate>, bool), String> {
+    let Some(root) = read_json(&state_path(data_home, MANUAL_RATES_FILE))? else { return Ok((Vec::new(), false)) };
+    let Some(rows) = root.get("rates").and_then(Value::as_array) else { return Ok((Vec::new(), true)) };
     let mut out = Vec::new();
+    let mut lossy = false;
     for row in rows {
-        let (Some(from), Some(to), Some(rate)) = (row.get("from").and_then(Value::as_str), row.get("to").and_then(Value::as_str), row.get("rate").and_then(Value::as_f64)) else { continue };
+        let (Some(from), Some(to), Some(rate)) = (row.get("from").and_then(Value::as_str), row.get("to").and_then(Value::as_str), row.get("rate").and_then(Value::as_f64)) else { lossy = true; continue };
         out.push(UserRate { from: from.into(), to: to.into(), rate, as_of: row.get("as_of").and_then(Value::as_str).map(String::from) });
     }
-    Ok(out)
+    Ok((out, lossy))
+}
+
+pub fn manual_rates(data_home: &Path) -> Result<Vec<UserRate>, String> {
+    read_manual(data_home).map(|(rates, _)| rates)
+}
+
+/// 改写之前：若原文件里有读不懂的行，先整份备份成 `.bak`，再写。
+fn backup_if_lossy(data_home: &Path, lossy: bool) {
+    if lossy {
+        let path = state_path(data_home, MANUAL_RATES_FILE);
+        let _ = std::fs::copy(&path, path.with_extension("json.bak"));
+    }
 }
 
 fn write_manual(data_home: &Path, rates: &[UserRate]) -> Result<(), String> {
@@ -81,7 +106,9 @@ fn write_manual(data_home: &Path, rates: &[UserRate]) -> Result<(), String> {
 pub fn save_manual_rate(data_home: &Path, rate: UserRate) -> Result<(), String> {
     FxPolicy::bundled()?.with_user_rate(rate.clone())?; // 只为校验
     let (from, to) = (rate.from.to_ascii_uppercase(), rate.to.to_ascii_uppercase());
-    let mut rates: Vec<UserRate> = manual_rates(data_home)?.into_iter()
+    let (existing, lossy) = read_manual(data_home)?;
+    backup_if_lossy(data_home, lossy);
+    let mut rates: Vec<UserRate> = existing.into_iter()
         .filter(|r| !(r.from.eq_ignore_ascii_case(&from) && r.to.eq_ignore_ascii_case(&to)) && !(r.from.eq_ignore_ascii_case(&to) && r.to.eq_ignore_ascii_case(&from)))
         .collect();
     rates.push(UserRate { from, to, ..rate });
@@ -89,7 +116,9 @@ pub fn save_manual_rate(data_home: &Path, rate: UserRate) -> Result<(), String> 
 }
 
 pub fn remove_manual_rate(data_home: &Path, from: &str, to: &str) -> Result<(), String> {
-    let rates: Vec<UserRate> = manual_rates(data_home)?.into_iter()
+    let (existing, lossy) = read_manual(data_home)?;
+    backup_if_lossy(data_home, lossy);
+    let rates: Vec<UserRate> = existing.into_iter()
         .filter(|r| !(r.from.eq_ignore_ascii_case(from) && r.to.eq_ignore_ascii_case(to)) && !(r.from.eq_ignore_ascii_case(to) && r.to.eq_ignore_ascii_case(from)))
         .collect();
     write_manual(data_home, &rates)
@@ -125,6 +154,40 @@ mod tests {
         assert!(save_reporting_currency(&h, "XXX").is_err(), "没有汇率的币种不能当报告币种");
         assert_eq!(save_reporting_currency(&h, DEFAULT_SENTINEL).unwrap(), DEFAULT_SENTINEL);
         assert_eq!(reporting_currency(&h, "zh_CN").unwrap(), ("CNY".into(), true), "选默认 = 删文件，随区域走");
+        let _ = std::fs::remove_dir_all(&h);
+    }
+
+    #[test]
+    fn a_corrupt_manual_rates_file_is_set_aside_and_the_user_can_save_again() {
+        let h = home("corrupt");
+        std::fs::create_dir_all(h.join("state")).unwrap();
+        let path = h.join("state").join(MANUAL_RATES_FILE);
+        std::fs::write(&path, "{garbage").unwrap();
+        assert!(manual_rates(&h).unwrap().is_empty(), "损坏文件当作没有，而不是一直报错");
+        assert!(path.with_extension("json.bad").exists(), "坏文件留作证据");
+        save_manual_rate(&h, UserRate { from: "USD".into(), to: "CNY".into(), rate: 6.8, as_of: None }).unwrap();
+        assert_eq!(manual_rates(&h).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&h);
+    }
+
+    #[test]
+    fn rows_that_cannot_be_read_are_backed_up_before_the_file_is_rewritten() {
+        let h = home("lossy");
+        std::fs::create_dir_all(h.join("state")).unwrap();
+        let path = h.join("state").join(MANUAL_RATES_FILE);
+        std::fs::write(&path, r#"{"rates":[{"from":"USD","to":"CNY","rate":"7.1"},{"from":"EUR","to":"JPY","rate":160.0}]}"#).unwrap();
+        save_manual_rate(&h, UserRate { from: "GBP".into(), to: "USD".into(), rate: 1.3, as_of: None }).unwrap();
+        let backup = std::fs::read_to_string(path.with_extension("json.bak")).unwrap();
+        assert!(backup.contains("\"7.1\""), "读不懂的行（字符串汇率）没有被静默丢掉：{backup}");
+        let _ = std::fs::remove_dir_all(&h);
+    }
+
+    #[test]
+    fn the_default_sentinel_is_forgiving_about_case_and_spaces() {
+        let h = home("sentinel");
+        save_reporting_currency(&h, "EUR").unwrap();
+        assert_eq!(save_reporting_currency(&h, " Default ").unwrap(), DEFAULT_SENTINEL);
+        assert_eq!(reporting_currency(&h, "en_US").unwrap(), ("USD".into(), true));
         let _ = std::fs::remove_dir_all(&h);
     }
 

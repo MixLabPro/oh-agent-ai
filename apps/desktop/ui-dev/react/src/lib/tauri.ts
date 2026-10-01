@@ -3533,6 +3533,7 @@ export async function fetchWatcherHealth(): Promise<WatcherHealthStatus | null> 
 export type FxManualRate = { from: string; to: string; rate: number; as_of: string | null };
 export type FxStatus = {
   reporting_currency: string;
+  default_currency: string;
   reporting_currency_is_default: boolean;
   system_locale: string;
   rate_date: string;
@@ -3560,6 +3561,7 @@ function parseFxStatus(value: unknown): FxStatus {
   });
   return {
     reporting_currency: stringField(root.reporting_currency, "reporting currency"),
+    default_currency: stringField(root.default_currency, "default currency"),
     reporting_currency_is_default: root.reporting_currency_is_default === true,
     system_locale: typeof root.system_locale === "string" ? root.system_locale : "",
     rate_date: stringField(root.rate_date, "fx rate date"),
@@ -3604,7 +3606,9 @@ export async function convertAmounts(amounts: Record<string, number>): Promise<F
   const items = (Array.isArray(root.items) ? root.items : []).map((row) => {
     const entry = record(row, "fx convert item");
     const source = entry.rate_source === "user_assumption" ? "user_assumption" : entry.rate_source === "identity" ? "identity" : "bundled_snapshot";
-    return { currency: stringField(entry.currency, "fx currency"), amount: Number(entry.amount), converted: Number(entry.converted), rate: Number(entry.rate), rate_source: source as FxConvertItem["rate_source"], rate_date: typeof entry.rate_date === "string" ? entry.rate_date : null };
+    const item = { currency: stringField(entry.currency, "fx currency"), amount: Number(entry.amount), converted: Number(entry.converted), rate: Number(entry.rate), rate_source: source as FxConvertItem["rate_source"], rate_date: typeof entry.rate_date === "string" ? entry.rate_date : null };
+    if (![item.amount, item.converted, item.rate].every(Number.isFinite) || item.rate <= 0) throw new Error("fx convert item invalid");
+    return item;
   });
   const unavailable = (Array.isArray(root.unavailable) ? root.unavailable : []).map((row) => { const entry = record(row, "fx unavailable"); return { currency: stringField(entry.currency, "fx currency"), amount: Number(entry.amount) }; });
   return { target: root.target, total: root.total, approximate: root.approximate === true, items, unavailable };

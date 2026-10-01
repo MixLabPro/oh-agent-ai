@@ -8,16 +8,18 @@ import { stable } from "./stable";
  * 折不了（含无桥接、后端报错）→ null，调用方回退到原币种分栏显示。
  */
 export function useConvertedAmounts(amounts: Record<string, number>): FxConvertResult | null {
-  const [result, setResult] = useState<FxConvertResult | null>(null);
+  const [state, setState] = useState<{ key: string; result: FxConvertResult | null } | null>(null);
   const [version, setVersion] = useState(0);
   const key = JSON.stringify(Object.entries(amounts).filter(([, amount]) => amount > 0).sort());
   useEffect(() => onFxChanged(() => setVersion((value) => value + 1)), []);
   useEffect(() => {
     let active = true;
     const payload = Object.fromEntries(JSON.parse(key) as Array<[string, number]>);
-    if (Object.keys(payload).length === 0) { setResult(null); return () => { active = false; }; }
-    void convertAmounts(payload).then((next) => { if (active) setResult((previous) => stable(previous, next)); }).catch(() => { if (active) setResult(null); });
+    if (Object.keys(payload).length === 0) { setState(null); return () => { active = false; }; }
+    void convertAmounts(payload).then((next) => { if (active) setState((previous) => ({ key, result: stable(previous?.key === key ? previous.result : null, next) })); }).catch(() => { if (active) setState(null); });
     return () => { active = false; };
   }, [key, version]);
-  return result;
+  // 结果只对它当初请求的那一组金额有效：键变了（数据刷新 / 币种变化）而新结果还没到时，
+  // 不把旧结果配给新金额。
+  return state && state.key === key ? state.result : null;
 }

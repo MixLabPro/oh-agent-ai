@@ -183,6 +183,17 @@ assert.match(todaySpendCard({ ...pricedDay, actual_spend: { CNY: 2 } }, pricedMo
 const chineseSpendCard = loadSpendCards("zh-Hans").monthSpendCard(pricedMonth);
 assert.equal(chineseSpendCard.value, monthSpendCard(pricedMonth).value, "language changes text, not monetary facts");
 assert.match(chineseSpendCard.detail, /已记录费用与已声明订阅/);
+// 验收发现的阻断缺陷：OverviewPage 首屏 overview 为 null 时提前返回，hook 写在 return 之后会让
+// 前后两次渲染的 hook 数量不同，React 报错、整页空白。守卫：该函数里提前返回之后不得再调用任何 hook。
+{
+  const src = readFileSync(path.join(ui, "react/src/features/overview/OverviewPage.tsx"), "utf8");
+  const start = src.indexOf("export function OverviewPage(");
+  const earlyReturn = src.indexOf("if (!overview) return", start);
+  assert.ok(start >= 0 && earlyReturn > start, "OverviewPage early return not found");
+  const afterReturn = src.slice(earlyReturn + 1);
+  const lateHooks = afterReturn.match(/\buse[A-Z][A-Za-z]*\(/g) ?? [];
+  assert.deepEqual(lateHooks, [], `hooks called after the early return in OverviewPage: ${lateHooks.join(", ")}`);
+}
 // 汇率 V2：折算只在「每个币种都折得了」时才改主值；原币种明细永远保留；出处写进说明。
 const { applyConversion } = loadSpendCards();
 const fxBase = monthSpendCard(pricedMonth);
@@ -198,6 +209,14 @@ assert.equal(applyConversion(fxBase, null), fxBase, "no conversion available →
 assert.equal(applyConversion(fxBase, { ...fxResult, unavailable: [{ currency: "XXX", amount: 1 }] }), fxBase, "any unconvertible currency → no half-converted headline");
 assert.equal(applyConversion(fxBase, { ...fxResult, items: [fxItem("CNY", 182.55, 182.55, "identity", null)], total: 182.55 }), fxBase, "already in the reporting currency → unchanged");
 assert.match(applyConversion(fxBase, { ...fxResult, items: [fxItem("CNY", 182.55, 27.2, "user_assumption", null), fxItem("USD", 40, 40, "identity", null)] }).detail, /your manual rate/, "manual rates are labelled as the user's assumption");
+// 验收发现的缺陷：折算结果必须与卡片当前的金额一一对应，否则不折算。
+const stale = { ...fxResult, items: [fxItem("CNY", 100, 14.9, "bundled_snapshot", "2026-09-30"), fxItem("USD", 40, 40, "identity", null)] };
+assert.equal(applyConversion(fxBase, stale), fxBase, "a stale result for different CNY amounts must not be paired with the card's current amounts");
+assert.equal(applyConversion(fxBase, { ...fxResult, items: [fxResult.items[0]] }), fxBase, "an item set missing a currency (no 'unavailable' entry) is not a full conversion");
+assert.equal(applyConversion(fxBase, { ...fxResult, items: [...fxResult.items, fxItem("EUR", 1, 1.1, "bundled_snapshot", "2026-09-30")] }), fxBase, "extra currencies the card does not have are not accepted");
+assert.equal(applyConversion(fxBase, { ...fxResult, items: [fxItem("CNY", 182.55, NaN, "bundled_snapshot", "2026-09-30"), fxResult.items[1]] }), fxBase, "NaN item values are never rendered");
+assert.equal(applyConversion(fxBase, { ...fxResult, total: -3 }), fxBase, "a negative total is never rendered");
+assert.equal(applyConversion(fxBase, { ...fxResult, items: [fxItem("CNY", 182.55, 27.2, "bundled_snapshot", "2026-09-30"), fxItem("USD", 40, 40, "identity", null)], total: Infinity }), fxBase, "an infinite total is never rendered");
 for (const day of calendar.days) assert.equal(day.total_tokens, day.dsh_tokens + day.claude_tokens + day.codex_tokens);
 
 const originalInvoke = fixtureInvoke;

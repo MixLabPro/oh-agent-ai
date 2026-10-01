@@ -7,9 +7,11 @@ export type { AppLanguage, LanguagePreference } from "./localePreference";
 
 const eventName = "agent-vitals-language-changed";
 const english = {
+  "fx.removeFor": "Remove the manual rate for {pair}",
+  "fx.dateInvalid": "Enter the date as YYYY-MM-DD, for example 2026-09-30, or leave it empty.",
   "fx.unavailableBrowser": "Exchange-rate settings are available in the desktop app.",
   "fx.pairInvalid": "Choose two different currencies.",
-  "fx.rateInvalid": "The rate must be a positive number.",
+  "fx.rateInvalid": "Enter the rate as a plain decimal number such as 6.8 (use a dot, no commas or exponents).",
   "fx.loadFailed": "Exchange-rate settings unavailable.",
   "fx.saveFailed": "Could not save.",
   "fx.removed": "Removed.",
@@ -25,9 +27,9 @@ const english = {
   "fx.manualNone": "No manual rates. The reference rates are used.",
   "fx.manualNote": "A manual rate is your own assumption, not a bank rate. It overrides the reference rate for that currency pair.",
   "fx.manualTitle": "Manual rates",
-  "fx.stale": "The reference rates are {days} days old. Figures are still shown, marked ≈; set a manual rate if you need something closer.",
+  "fx.stale": { one: "The reference rates are {days} day old. Figures are still shown, marked ≈; set a manual rate if you need something closer.", other: "The reference rates are {days} days old. Figures are still shown, marked ≈; set a manual rate if you need something closer." },
   "fx.refNote": "Public reference rates, not a bank settlement rate or what you actually paid. They are bundled with the app and do not change while you use it.",
-  "fx.refValue": "ECB reference rates, {date} ({age} days ago)",
+  "fx.refValue": { one: "ECB reference rates, {date} ({age} day ago)", other: "ECB reference rates, {date} ({age} days ago)" },
   "fx.refRates": "Reference rates",
   "fx.currencyHelp": "Default: USD in the US, CNY in China, USD elsewhere. Changing it never alters recorded bills or usage.",
   "fx.defaultOption": "Default for my region ({currency})",
@@ -1438,9 +1440,11 @@ const english = {
 
 type Translation = string | { one: string; other: string };
 const chinese: Record<keyof typeof english, Translation> = {
+  "fx.removeFor": "移除 {pair} 的手动汇率",
+  "fx.dateInvalid": "日期请按 YYYY-MM-DD 输入，例如 2026-09-30，或留空。",
   "fx.unavailableBrowser": "汇率设置仅在桌面应用中可用。",
   "fx.pairInvalid": "请选择两个不同的币种。",
-  "fx.rateInvalid": "汇率必须是正数。",
+  "fx.rateInvalid": "请按普通小数输入汇率，例如 6.8（用小数点，不要逗号或指数）。",
   "fx.loadFailed": "汇率设置暂不可用。",
   "fx.saveFailed": "保存失败。",
   "fx.removed": "已移除。",
@@ -1456,9 +1460,9 @@ const chinese: Record<keyof typeof english, Translation> = {
   "fx.manualNone": "没有手动汇率，使用参考汇率。",
   "fx.manualNote": "手动汇率是你自己的假设，不是银行汇率；它会覆盖该币对的参考汇率。",
   "fx.manualTitle": "手动汇率",
-  "fx.stale": "参考汇率已是 {days} 天前的数据。数字仍会显示并标 ≈；需要更接近的值可手动设置汇率。",
+  "fx.stale": { one: "参考汇率已是 {days} 天前的数据。数字仍会显示并标 ≈；需要更接近的值可手动设置汇率。", other: "参考汇率已是 {days} 天前的数据。数字仍会显示并标 ≈；需要更接近的值可手动设置汇率。" },
   "fx.refNote": "公开参考汇率，不是银行结算汇率，也不是你实际支付的汇率。随应用内置，使用期间不会变动。",
-  "fx.refValue": "欧央行参考汇率，{date}（{age} 天前）",
+  "fx.refValue": { one: "欧央行参考汇率，{date}（{age} 天前）", other: "欧央行参考汇率，{date}（{age} 天前）" },
   "fx.refRates": "参考汇率",
   "fx.currencyHelp": "默认：美区 USD、中国 CNY、其他 USD。更改不会改动任何已记录的账单或用量。",
   "fx.defaultOption": "按我的地区默认（{currency}）",
@@ -2734,7 +2738,11 @@ export function modelLabel(id: string, language = resolvedLanguage()): string {
 
 export function formatMajorMoney(amount: number | null, currency: string, locale = typeof navigator === "undefined" ? "en-US" : navigator.language): string {
   if (amount === null || !Number.isFinite(amount) || !currencyLabel(currency)) return "—";
-  if (!["USD", "CNY"].includes(currency)) return `${currency} ${amount}`;
+  if (!["USD", "CNY"].includes(currency)) {
+    // 其他 ISO 币种（报告币种可选 EUR/JPY…）：按该币种自己的小数位格式化，不能输出 `EUR 12.3456789`。
+    try { return new Intl.NumberFormat(locale, { style: "currency", currency, currencyDisplay: "code" }).format(amount); }
+    catch { return `${currency} ${amount}`; }
+  }
   if (amount !== 0 && Math.abs(amount) < 0.01) return `< ${currency} 0.01`;
   return new Intl.NumberFormat(locale, { style: "currency", currency, currencyDisplay: "code", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
 }

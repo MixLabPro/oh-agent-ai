@@ -395,11 +395,7 @@ fn metered_view_text(view: Option<&serde_json::Value>) -> Option<String> {
     for (currency, value) in view {
         let Some(amount) = value.get("amount").and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0) else { continue };
         let approximate = value.get("label").and_then(Value::as_str) != Some("actual");
-        let formatted = match currency.as_str() {
-            "CNY" => fmt_money(amount),
-            "USD" => fmt_usd(amount),
-            _ => amount.to_string(),
-        };
+        let formatted = fmt_currency_amount(currency, amount);
         parts.push(format!("{}{currency} {formatted}", if approximate { "≈" } else { "" }));
     }
     if parts.is_empty() { None } else { Some(parts.join(" · ")) }
@@ -417,15 +413,24 @@ impl TrayFx {
     }
 }
 
+/// 无小数位的币种（报告币种可选 JPY / KRW / IDR…）；其余按两位小数。
+fn zero_decimal_currency(currency: &str) -> bool { matches!(currency, "JPY" | "KRW" | "IDR" | "VND" | "HUF") }
+
 fn fmt_currency_amount(currency: &str, amount: f64) -> String {
-    match currency { "CNY" => fmt_money(amount), "USD" => fmt_usd(amount), _ => amount.to_string() }
+    match currency {
+        "CNY" => fmt_money(amount),
+        "USD" => fmt_usd(amount),
+        // 其他币种曾直接 `to_string()`，EUR 会显示成 59.28470000000001。
+        _ if zero_decimal_currency(currency) => format!("{:.0}", amount),
+        _ => format!("{:.2}", amount),
+    }
 }
 
 /// 本月成本一格钱：按量视图 + 订阅月费，逐币种合并（同币相加、跨币不加）。
 /// 给了报告币种且**每个币种都能折算**时，显示折算后的约数合计并保留原币种明细
 /// （`≈USD $67.3 [CNY ¥182.6 · USD $40]`）；任一币种折不了就整体退回分币种显示，
 /// 不能一部分折、一部分不折地拼出一个看似完整的数。
-fn month_cost_text(ov: &Overview, fx: Option<&TrayFx>) -> Option<String> {
+fn month_cost_text(ov: &Overview, fx: Option<&TrayFx>, language: NativeUiLanguage) -> Option<String> {
     let mut totals: std::collections::BTreeMap<String, (f64, bool)> = std::collections::BTreeMap::new();
     if let Some(view) = ov.metered_month.as_ref().and_then(Value::as_object) {
         for (currency, value) in view {
@@ -449,12 +454,22 @@ fn month_cost_text(ov: &Overview, fx: Option<&TrayFx>) -> Option<String> {
         // 只有一个币种且就是报告币种：无需折算，保持原样。
         let needs_conversion = totals.keys().any(|currency| currency != &fx.target);
         if needs_conversion {
-            let converted: Option<Vec<f64>> = totals.iter()
-                .map(|(currency, (amount, _))| fx.policy.convert(*amount, currency, &fx.target).map(|c| c.target_amount))
+            let converted: Option<Vec<agent_vitals_domain::fx::Conversion>> = totals.iter()
+                .map(|(currency, (amount, _))| fx.policy.convert(*amount, currency, &fx.target))
                 .collect();
-            if let Some(parts) = converted {
-                let sum: f64 = parts.iter().sum();
-                return Some(format!("≈{} {} [{}]", fx.target, fmt_currency_amount(&fx.target, sum), per_currency.join(" · ")));
+            if let Some(items) = converted {
+                let sum: f64 = items.iter().map(|c| c.target_amount).sum();
+                // 汇率出处必须写出来：用了手动汇率就标「手动汇率」，否则写参考汇率的日期。
+                let manual = items.iter().any(|c| c.rate_source == agent_vitals_domain::fx::RateSource::UserAssumption);
+                let date = items.iter().find(|c| c.rate_source == agent_vitals_domain::fx::RateSource::BundledSnapshot).and_then(|c| c.rate_date.clone());
+                let source = match (manual, date) {
+                    (true, Some(d)) => format!("{} + {d}", native_label(language, "manual rate", "手动汇率")),
+                    (true, None) => native_label(language, "manual rate", "手动汇率").to_string(),
+                    (false, Some(d)) => format!("{} {d}", native_label(language, "ECB", "欧央行")),
+                    (false, None) => String::new(),
+                };
+                let suffix = if source.is_empty() { String::new() } else { format!(" · {source}") };
+                return Some(format!("≈{} {} [{}]{suffix}", fx.target, fmt_currency_amount(&fx.target, sum), per_currency.join(" · ")));
             }
         }
     }
@@ -926,7 +941,7 @@ fn money_rows_text_fx(ov: &Overview, language: NativeUiLanguage, fx: Option<&Tra
     let has_subscription = ov.subscription_month_by_currency.as_ref().map_or(false, |m| m.values().any(|minor| *minor > 0));
     let merged_path = ov.metered_month.is_some() || has_subscription;
     let month_money = if merged_path {
-        month_cost_text(ov, fx)
+        month_cost_text(ov, fx, language)
     } else {
         metered_amount(
             if month_has_days { Some(month_total) } else { None },
@@ -2891,6 +2906,14 @@ fn system_locale() -> String {
             if !text.is_empty() { return text; }
         }
     }
+    #[cfg(target_os = "macos")]
+    if let Ok(output) = std::process::Command::new("/usr/bin/defaults").args(["read", "-g", "AppleLanguages"]).output() {
+        // `("zh-Hans-CN", "en-CN")` 的第一项带区域（zh-Hans-CN）；AppleLocale 缺失时用它定区域。
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout).to_string();
+            if let Some(first) = text.split(['"', '\'']).nth(1) { if !first.is_empty() { return first.to_string(); } }
+        }
+    }
     std::env::var("LC_ALL").or_else(|_| std::env::var("LANG")).unwrap_or_default()
 }
 
@@ -2910,6 +2933,7 @@ fn fx_status() -> Value {
         "status": "ok",
         "reporting_currency": currency,
         "reporting_currency_is_default": is_default,
+        "default_currency": agent_vitals_domain::fx::default_reporting_currency(&locale),
         "system_locale": locale,
         "rate_date": rate_date,
         "rate_age_days": age,
@@ -2922,22 +2946,25 @@ fn fx_status() -> Value {
 }
 
 #[tauri::command]
-fn save_reporting_currency_config(currency: String) -> Result<Value, String> {
+fn save_reporting_currency_config(app: AppHandle, currency: String) -> Result<Value, String> {
     let saved = agent_vitals_runtime::fx_settings::save_reporting_currency(&overview::data_home(), &currency)?;
+    refresh(&app, overview_snapshot_typed_sync().as_ref());
     Ok(serde_json::json!({ "status": "saved", "currency": saved }))
 }
 
 #[tauri::command]
-fn save_fx_manual_rate(from: String, to: String, rate: f64, as_of: Option<String>) -> Result<Value, String> {
+fn save_fx_manual_rate(app: AppHandle, from: String, to: String, rate: f64, as_of: Option<String>) -> Result<Value, String> {
     agent_vitals_runtime::fx_settings::save_manual_rate(&overview::data_home(), agent_vitals_domain::fx::UserRate {
         from, to, rate, as_of: as_of.filter(|d| !d.trim().is_empty()),
     })?;
+    refresh(&app, overview_snapshot_typed_sync().as_ref());
     Ok(serde_json::json!({ "status": "saved" }))
 }
 
 #[tauri::command]
-fn remove_fx_manual_rate(from: String, to: String) -> Result<Value, String> {
+fn remove_fx_manual_rate(app: AppHandle, from: String, to: String) -> Result<Value, String> {
     agent_vitals_runtime::fx_settings::remove_manual_rate(&overview::data_home(), &from, &to)?;
+    refresh(&app, overview_snapshot_typed_sync().as_ref());
     Ok(serde_json::json!({ "status": "removed" }))
 }
 
@@ -6063,11 +6090,24 @@ mod tests {
         // 报告币种 USD：CNY 180 → USD 26.47 + USD 40 = 66.47
         let usd = TrayFx { target: "USD".into(), policy: policy.clone() };
         let (_, month) = money_rows_text_fx(&ov, NativeUiLanguage::English, Some(&usd));
-        assert!(month.starts_with("Monthly cost: ≈USD $66.47 [CNY ¥180 · USD $40]"), "{month}");
+        assert_eq!(month, "Monthly cost: ≈USD $66.47 [CNY ¥180 · USD $40] · manual rate", "手动汇率必须在托盘里标出来");
         // 报告币种 CNY：USD 40 → 272 + 180 = 452
         let cny = TrayFx { target: "CNY".into(), policy: policy.clone() };
         let (_, month) = money_rows_text_fx(&ov, NativeUiLanguage::Chinese, Some(&cny));
-        assert!(month.starts_with("本月成本：≈CNY ¥452 [CNY ¥180 · USD $40]"), "{month}");
+        assert_eq!(month, "本月成本：≈CNY ¥452 [CNY ¥180 · USD $40] · 手动汇率");
+        // 用内置快照时写参考汇率的日期（欧央行），不写成「手动」
+        let bundled = TrayFx { target: "CNY".into(), policy: agent_vitals_domain::fx::FxPolicy::bundled().unwrap() };
+        let (_, month) = money_rows_text_fx(&ov, NativeUiLanguage::English, Some(&bundled));
+        assert!(month.contains("· ECB 20") && !month.contains("manual"), "{month}");
+        // 其他报告币种：EUR 两位小数、JPY 无小数；不出现 59.28470000000001 这类浮点原文
+        let eur = TrayFx { target: "EUR".into(), policy: agent_vitals_domain::fx::FxPolicy::bundled().unwrap() };
+        let (_, month) = money_rows_text_fx(&ov, NativeUiLanguage::English, Some(&eur));
+        let eur_amount = month.split("≈EUR ").nth(1).and_then(|t| t.split(' ').next()).unwrap_or("");
+        assert!(eur_amount.split('.').nth(1).map_or(false, |frac| frac.len() == 2), "EUR 应两位小数：{month}");
+        let jpy = TrayFx { target: "JPY".into(), policy: agent_vitals_domain::fx::FxPolicy::bundled().unwrap() };
+        let (_, month) = money_rows_text_fx(&ov, NativeUiLanguage::English, Some(&jpy));
+        let jpy_amount = month.split("≈JPY ").nth(1).and_then(|t| t.split(' ').next()).unwrap_or("");
+        assert!(!jpy_amount.is_empty() && jpy_amount.chars().all(|c| c.is_ascii_digit()), "JPY 应无小数：{month}");
         // 只有一个币种且就是报告币种：不折算、不加 ≈
         ov.subscription_month_by_currency = Some([("CNY".to_string(), 16_000_i64)].into_iter().collect());
         let (_, month) = money_rows_text_fx(&ov, NativeUiLanguage::English, Some(&cny));
