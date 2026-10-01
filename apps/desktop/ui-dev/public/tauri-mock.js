@@ -404,6 +404,8 @@
   let quotaReminderEnabled = false;
   // 用户补的价卡（浏览器里给一张，方便看"已补卡"列表的样子）。
   const priceOverrideCards = {};
+  // 并列报价（DeepSeek 美元/人民币两套官方价）的用户选择；null = 跟随报告币种（默认假设）。
+  let quoteChoice = null;
   // 归属声明（浏览器里给一条，方便看列表的样子）。
   const priceOverrideRoutes = { "claude-sonnet-5": { provider: "anthropic", mode: "metered" } };
   const priceOverrideKey = "acme/demo-model-v1";
@@ -834,11 +836,18 @@
         return ok({ status: "removed" });
       }
       case "price_cards": return { status: "ok", cards: priceOverrideCards };
-      // Shape: apps/desktop/src-tauri/src/lib.rs price_card_providers() -> {status, providers:[{id, currency|null}]}
+      // Shape: apps/desktop/src-tauri/src/lib.rs price_card_providers() -> {status, providers:[{id, currency|null, offered:[…]|null}]}
+      // deepseek-official 有两套官方报价：没被自己的卡钉住时 currency 为 null、offered 给出可选币种。
       case "price_card_providers": return { status: "ok", providers: [
-        { id: "anthropic", currency: "USD" }, { id: "moonshot", currency: "USD" },
-        { id: "minimax", currency: "CNY" }, { id: "shengsuanyun", currency: "CNY" },
+        { id: "anthropic", currency: "USD", offered: null }, { id: "moonshot", currency: "USD", offered: null },
+        { id: "minimax", currency: "CNY", offered: null }, { id: "shengsuanyun", currency: "CNY", offered: null },
+        { id: "deepseek-official", currency: null, offered: ["CNY", "USD"] },
       ] };
+      // Shape: apps/desktop/src-tauri/src/lib.rs quote_variants_status() -> {status, providers:[{provider,label,active_currency,source,available,chosen_currency|null}]}
+      case "quote_variants_status": return { status: "ok", providers: [
+        { provider: "deepseek-official", label: "DeepSeek 原厂", active_currency: quoteChoice || "USD", source: quoteChoice ? "user_choice" : "default_assumption", available: ["CNY", "USD"], chosen_currency: quoteChoice },
+      ] };
+      case "save_quote_choice": quoteChoice = args && args.currency ? args.currency : null; return { status: "saved" };
       // Shape: apps/desktop/src-tauri/src/lib.rs official_price_card() -> {found, provider?, card_key?, rates?, currency?, reason?}
       case "official_price_card": return { found: false };
       case "save_price_card": {

@@ -20,7 +20,9 @@ use std::path::Path;
 /// 层号：只能依赖严格更小的层。
 const LAYERS: &[(&str, u8)] = &[
     ("core", 0),
-    ("pricing", 0),
+    // pricing 读报告币种等设置（core::fx_settings）来选并列报价，方向是 core → pricing，所以在 core 之上；
+    // core 不得反向依赖 pricing（本守卫的 L0 规则会拦）。
+    ("pricing", 1),
     ("source_graph", 0),
     ("envelope", 1),
     ("skills", 1),

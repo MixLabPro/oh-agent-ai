@@ -3645,7 +3645,7 @@ export async function convertAmounts(amounts: Record<string, number>): Promise<F
 
 export type PriceCardRates = { off_peak: number; peak: number };
 export type UserPriceCard = { provider: string; model: string; input_uncached: PriceCardRates; input_cached: PriceCardRates; output: PriceCardRates; cache_write: PriceCardRates | null };
-export type PriceCardProvider = { id: string; currency: string | null };
+export type PriceCardProvider = { id: string; currency: string | null; offered: string[] };
 
 function parseRates(value: unknown, label: string): PriceCardRates {
   const row = record(value, label);
@@ -3675,7 +3675,7 @@ export async function readPriceCardProviders(): Promise<PriceCardProvider[]> {
   if (!hasNativeBridge()) return [];
   const root = record(await invoke<unknown>("price_card_providers"), "price card providers");
   if (root.status !== "ok" || !Array.isArray(root.providers)) throw new Error("price card providers unavailable");
-  return root.providers.map((row) => { const entry = record(row, "price card provider"); return { id: stringField(entry.id, "provider id"), currency: typeof entry.currency === "string" ? entry.currency : null }; });
+  return root.providers.map((row) => { const entry = record(row, "price card provider"); return { id: stringField(entry.id, "provider id"), currency: typeof entry.currency === "string" ? entry.currency : null, offered: Array.isArray(entry.offered) ? entry.offered.filter((code): code is string => typeof code === "string") : [] }; });
 }
 
 export async function saveUserPriceCard(payload: Record<string, unknown>): Promise<void> {
@@ -3697,4 +3697,37 @@ export async function readOfficialPriceCard(providerId: string, modelId: string)
   if (root.found !== true) return { found: false, reason: typeof root.reason === "string" ? root.reason : null };
   const rates = record(root.rates, "official rates");
   return { found: true, currency: stringField(root.currency, "official card currency"), input_uncached: parseRates(rates.input_uncached, "input_uncached"), input_cached: parseRates(rates.input_cached, "input_cached"), output: parseRates(rates.output, "output") };
+}
+
+
+// ───────────────────── 并列报价（同一服务商官方给了多个币种各一套价）─────────────────────
+// 形状来源：src-tauri/src/lib.rs 的 quote_variants_status / save_quote_choice，
+// 与 runtime-core pricing/quote_variants.rs::status（同一 PR 同改）。
+
+export type QuoteSource = "user_choice" | "default_assumption" | "base_quote" | "pinned_by_user_cards";
+export type QuoteVariantProvider = { provider: string; label: string; active_currency: string; source: QuoteSource; available: string[]; chosen_currency: string | null };
+const QUOTE_SOURCES: QuoteSource[] = ["user_choice", "default_assumption", "base_quote", "pinned_by_user_cards"];
+
+export async function readQuoteVariants(): Promise<QuoteVariantProvider[]> {
+  if (!hasNativeBridge()) return [];
+  const root = record(await invoke<unknown>("quote_variants_status"), "quote variants");
+  if (root.status !== "ok" || !Array.isArray(root.providers)) throw new Error("quote variants unavailable");
+  return root.providers.map((row) => {
+    const entry = record(row, "quote variant provider");
+    const source = QUOTE_SOURCES.find((candidate) => candidate === entry.source);
+    if (!source) throw new Error("quote variant source unknown");
+    const available = Array.isArray(entry.available) ? entry.available.filter((code): code is string => typeof code === "string") : [];
+    return {
+      provider: stringField(entry.provider, "quote provider"), label: typeof entry.label === "string" ? entry.label : stringField(entry.provider, "quote provider"),
+      active_currency: stringField(entry.active_currency, "active currency"), source, available,
+      chosen_currency: typeof entry.chosen_currency === "string" ? entry.chosen_currency : null,
+    };
+  });
+}
+
+/** `currency === null` 清除选择，回到默认假设。 */
+export async function saveQuoteChoice(providerId: string, currency: string | null): Promise<void> {
+  if (!hasNativeBridge()) return;
+  const root = record(await invoke<unknown>("save_quote_choice", { providerId, currency }), "save quote choice");
+  if (root.status !== "saved") throw new Error("quote choice not saved");
 }

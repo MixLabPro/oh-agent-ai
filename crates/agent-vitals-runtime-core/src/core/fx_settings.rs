@@ -14,9 +14,9 @@ const MANUAL_RATES_FILE: &str = "fx-manual-rates.json";
 /// 保存哨兵：选「按系统区域默认」就删文件，之后随区域走（同「跟随系统」时区的做法）。
 pub const DEFAULT_SENTINEL: &str = "default";
 
-fn state_path(data_home: &Path, file: &str) -> std::path::PathBuf { data_home.join("state").join(file) }
+pub(crate) fn state_path(data_home: &Path, file: &str) -> std::path::PathBuf { data_home.join("state").join(file) }
 
-fn write_atomic(path: &Path, value: &Value) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, value: &Value) -> Result<(), String> {
     let directory = path.parent().ok_or("state path has no parent")?;
     std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
     // 临时文件名带进程号与纳秒：两个并发保存不再抢同一个固定的 *.json.tmp。
@@ -29,7 +29,7 @@ fn write_atomic(path: &Path, value: &Value) -> Result<(), String> {
 /// 文件损坏（不是合法 JSON）= 应用自己无法修复的状态：这是设置文件，不是用户账单。
 /// 把坏文件改名为 `.bad` 留作证据，之后当作「没有文件」继续；否则保存、移除都会一直报错，
 /// 而界面又把错误吞掉，用户只能手动删文件。
-fn read_json(path: &Path) -> Result<Option<Value>, String> {
+pub(crate) fn read_json(path: &Path) -> Result<Option<Value>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => match serde_json::from_str(&text) {
             Ok(value) => Ok(Some(value)),
@@ -41,6 +41,32 @@ fn read_json(path: &Path) -> Result<Option<Value>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("{} unreadable: {error}", path.display())),
     }
+}
+
+const LOCALE_FILE: &str = "system-locale.json";
+
+/// 记下 app 读到的系统区域，让 CLI / MCP 这些不读系统偏好的面也能算出同一个默认报告币种。
+/// 只在变化时写盘；空串不写。
+pub fn save_locale_hint(data_home: &Path, locale: &str) -> Result<(), String> {
+    let locale = locale.trim();
+    if locale.is_empty() || locale_hint(data_home) == locale { return Ok(()); }
+    write_atomic(&state_path(data_home, LOCALE_FILE), &json!({ "locale": locale }))
+}
+
+/// 上次记下的系统区域（没有 → 空串）。
+pub fn locale_hint(data_home: &Path) -> String {
+    read_json(&state_path(data_home, LOCALE_FILE)).ok().flatten()
+        .and_then(|v| v.get("locale").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// 报告币种，但**只在有依据时**才给：用户保存过 → 它；否则有区域提示 → 区域默认；两者都没有
+/// → None。给「并列报价默认假设」用——没有任何依据时不能凭空猜一个币种去换价卡
+/// （纯 CLI 用户在没跑过 app 前，应继续按基础卡计价，而不是被默认成 USD）。
+pub fn reporting_currency_if_known(data_home: &Path) -> Option<String> {
+    let hint = locale_hint(data_home);
+    let (currency, is_default) = reporting_currency(data_home, &hint).ok()?;
+    if is_default && hint.is_empty() { None } else { Some(currency) }
 }
 
 /// 当前报告币种与是否是默认值。`system_locale` 由调用方供给（本模块不读环境）。

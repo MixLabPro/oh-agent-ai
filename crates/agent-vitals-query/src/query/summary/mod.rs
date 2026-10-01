@@ -110,6 +110,12 @@ impl PricingCards {
                         &mut main, &mut codex, &overlay,
                     );
                 }
+                // 旧快照里 deepseek-official 没有币种标签 → 补上（见函数文档）；否则那些月份的
+                // DeepSeek 用量整体被判 no-price-card。
+                agent_vitals_domain::cost::sync_overlay::backfill_provider_currency(
+                    &mut main,
+                    &agent_vitals_domain::cost::load_pricing(),
+                );
                 crate::price_overrides::apply_to_main(&mut main, &crate::home::data_home());
                 Self { main, codex }
             }

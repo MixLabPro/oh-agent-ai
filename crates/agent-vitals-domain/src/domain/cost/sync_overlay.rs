@@ -18,6 +18,26 @@ use serde_json::{Map, Value};
 
 /// 覆盖式合并（生成新快照）。币种与底表不一致的服务商整段跳过：同一服务商
 /// 美元卡与人民币卡混放会直接算错钱，宁可不叠加。
+/// 历史快照里**缺币种标签**的顶层服务商，按同一服务商 id 用内置价卡写明的报价币种补上。
+///
+/// 为什么需要：2026-09-14 及更早的快照里 `providers.deepseek-official` 没有 `currency`
+/// （当时的规则是「顶层段默认 CNY」，后来改成显式币种、缺币种的卡不得猜价）。规则收紧后，
+/// 用量查询一落到那些快照，DeepSeek 整体被判 `no-price-card`——真机 9 月约 19 亿 token 全部未计价，
+/// 而价格数字本身就是那份人民币表，只是缺了标签。
+///
+/// 边界（不是「猜币种」）：只补**缺失**的标签，已有的不改；只按**同一服务商 id** 取内置价卡的显式
+/// `currency`，内置里没有该服务商或它也没写币种 → 保持缺失（仍然不得计价）。不借别家的卡、不按国籍推断，
+/// 也不动任何价格数字。
+pub fn backfill_provider_currency(snapshot: &mut Value, embedded: &Value) {
+    let Some(providers) = snapshot.get_mut("providers").and_then(Value::as_object_mut) else { return };
+    for (id, entry) in providers.iter_mut() {
+        let Some(map) = entry.as_object_mut() else { continue };
+        if map.get("currency").and_then(Value::as_str).is_some_and(|c| !c.is_empty()) { continue; }
+        let Some(currency) = embedded.pointer(&format!("/providers/{id}/currency")).and_then(Value::as_str) else { continue };
+        map.insert("currency".to_string(), Value::String(currency.to_string()));
+    }
+}
+
 pub fn merge_sync_overlay(pricing: &mut Value, codex: &mut Value, overlay: &Value) {
     apply(pricing, codex, overlay, true);
 }
@@ -112,6 +132,25 @@ fn codex_key(entry: &Value) -> (Option<&str>, Option<&str>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_snapshot_provider_missing_its_currency_label_gets_the_embedded_one_and_nothing_else_changes() {
+        use serde_json::json;
+        let embedded = json!({ "providers": { "deepseek-official": { "currency": "CNY" }, "other": {}, "nocur": {} } });
+        let mut snapshot = json!({ "providers": {
+            "deepseek-official": { "models": { "m": { "output": 1.0 } } },
+            "other": { "currency": "USD", "models": {} },
+            "unknown-to-embedded": { "models": {} },
+            "nocur": { "models": {} },
+        }});
+        let before = snapshot.clone();
+        super::backfill_provider_currency(&mut snapshot, &embedded);
+        assert_eq!(snapshot["providers"]["deepseek-official"]["currency"], "CNY");
+        assert_eq!(snapshot["providers"]["deepseek-official"]["models"], before["providers"]["deepseek-official"]["models"], "prices untouched");
+        assert_eq!(snapshot["providers"]["other"]["currency"], "USD", "an existing label is never changed");
+        assert!(snapshot["providers"]["unknown-to-embedded"].get("currency").is_none(), "not in the embedded table => stays unlabeled (still not priced)");
+        assert!(snapshot["providers"]["nocur"].get("currency").is_none(), "embedded has no explicit currency either => no guess");
+    }
+
     use super::*;
     use serde_json::json;
 

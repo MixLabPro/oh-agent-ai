@@ -72,7 +72,8 @@ pub fn currencies(data_home: &Path) -> serde_json::Map<String, Value> {
 /// - 服务商的报价币种已知（目录，或此前用户为新服务商声明过）→ 卡币种必须与之一致，否则拒绝，
 ///   并明确说明不做任何换算；
 /// - 服务商是新的（币种未知）→ 以这次声明的币种为准并记下来，之后同一服务商的卡必须同币种。
-/// 同一服务商同时有两套币种的报价（如 DeepSeek 官方 USD / CNY）需要卡级币种，本函数不支持。
+/// 同一服务商同时有两套官方报价（如 DeepSeek USD / CNY，`quote_variants`）：第一张用户卡可选其中任一币种，
+/// 并把该服务商钉在这个币种上（见 `quote_variants`）；之后的卡必须同币种。卡本身仍没有卡级币种。
 pub fn save_card_checked(
     data_home: &Path,
     provider: &str,
@@ -89,8 +90,20 @@ pub fn save_card_checked(
         return Err("服务商与型号都不能为空".to_string());
     }
     let catalog = agent_vitals_domain::cost::load_pricing();
-    let known = agent_vitals_domain::cost::provider_quote_currency(provider_key, &catalog)
-        .or_else(|| currencies(data_home).get(provider_key).and_then(Value::as_str).map(str::to_string));
+    let offered = crate::pricing::quote_variants::offered_currencies(&catalog, provider_key);
+    let has_cards = cards(data_home).get(provider_key).and_then(Value::as_object).is_some_and(|m| !m.is_empty());
+    let recorded = currencies(data_home).get(provider_key).and_then(Value::as_str).map(str::to_string);
+    let known = match &offered {
+        // 并列报价的服务商：还没有用户卡 → 可从它提供的几个币种里任选一个（这张卡会把该服务商钉在这个币种上）；
+        // 已经有用户卡 → 必须与那些卡同币种，不能在同一服务商下混币种。
+        Some(options) => {
+            if !options.iter().any(|c| c == currency) {
+                return Err(format!("provider {provider_key} is quoted in {}; a {currency} card cannot be saved under it", options.join(" / ")));
+            }
+            if has_cards { recorded.clone().or_else(|| agent_vitals_domain::cost::provider_quote_currency(provider_key, &catalog)) } else { None }
+        }
+        None => agent_vitals_domain::cost::provider_quote_currency(provider_key, &catalog).or_else(|| recorded.clone()),
+    };
     if let Some(quote) = known {
         if quote != currency {
             return Err(format!(
@@ -101,7 +114,7 @@ pub fn save_card_checked(
     // 先校验卡本身（半张卡拒绝），再落币种，避免卡非法时留下一个孤立的币种声明。
     sanitize_card(card)?;
     save_card(data_home, provider, model, card)?;
-    if known_is_none_in_catalog(provider_key, &catalog) {
+    if offered.is_some() || known_is_none_in_catalog(provider_key, &catalog) {
         let mut root = load(data_home);
         root["currencies"][provider_key] = json!(currency);
         write(data_home, &root)?;
@@ -272,6 +285,8 @@ pub fn merged_main(data_home: &Path) -> Value {
 /// 快照时点选卡），如果只在某一刻把用户卡烤进某份快照，下一次价目表更新就会
 /// 把用户补的卡冲掉。读取时合并则**永远盖在最上面**。
 pub fn apply_to_main(main: &mut Value, data_home: &Path) {
+    // 并列报价先于用户卡：用户给某服务商补过卡 → 那个服务商保持基础卡（见 quote_variants 的 pinned 规则）。
+    crate::pricing::quote_variants::apply(main, data_home);
     apply_routes(main, data_home);
     let overlay = cards(data_home);
     if overlay.is_empty() {

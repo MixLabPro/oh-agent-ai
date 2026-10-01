@@ -42,8 +42,10 @@ export function PriceCardSection() {
   }, []);
 
   const providerId = fields.provider.trim();
-  const providerCurrency = providers.find((item) => item.id === providerId)?.currency ?? null;
-  const currencies = allowedCurrencies(providerCurrency, supported);
+  const matched = providers.find((item) => item.id === providerId);
+  const providerCurrency = matched?.currency ?? null;
+  const offered = matched?.offered ?? [];
+  const currencies = allowedCurrencies(providerCurrency, supported, offered);
   // 服务商币种已知时币种就是它，不让用户选出会被拒绝的组合。
   const currency = providerCurrency ?? fields.currency;
   const set = (patch: Partial<PriceCardFields>) => setFields((current) => ({ ...current, ...patch }));
@@ -66,7 +68,7 @@ export function PriceCardSection() {
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const built = buildPriceCardPayload({ ...fields, currency }, providerCurrency, supported);
+    const built = buildPriceCardPayload({ ...fields, currency }, providerCurrency, supported, offered);
     if (!built.ok) { setError(tr(`pc.err.${built.error}` as MessageKey)); return; }
     void run(async () => { await saveUserPriceCard(built.payload); setFields(emptyFields()); }, "pc.saved");
   };

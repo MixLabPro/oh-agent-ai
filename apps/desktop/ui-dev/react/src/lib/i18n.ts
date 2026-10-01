@@ -7,6 +7,19 @@ export type { AppLanguage, LanguagePreference } from "./localePreference";
 
 const eventName = "agent-vitals-language-changed";
 const english = {
+  "qv.note": "Changing this re-prices that provider's usage with the other official list; nothing is converted. If you added your own price cards for a provider, they decide its currency and this choice is locked.",
+  "qv.saveFailed": "Could not save the choice.",
+  "qv.choose": "Quote currency for {name}",
+  "qv.quotedIn": "Quoted in {currency}",
+  "qv.follow": "Follow reporting currency (default)",
+  "qv.source.pinned": "pinned by the price cards you added",
+  "qv.source.base": "built-in quote (no basis to pick another)",
+  "qv.source.assumed": "default assumption from your reporting currency — not evidence of how you actually pay",
+  "qv.source.user": "your choice",
+  "qv.using": "Priced in {currency}",
+  "qv.intro": "Some providers publish an official price list in more than one currency. The lists are separate official quotes, not conversions of each other, so usage is priced from exactly one of them.",
+  "qv.title": "Quote currency",
+  "qv.eyebrow": "Pricing",
   "pc.reloadFailed": "Saved, but the list could not be refreshed. Reopen Settings to see it.",
   "pc.err.price": "Uncached input, cached input and output prices are required; enter each as a plain number such as 3 or 0.3 (use a dot).",
   "pc.err.currency": "Choose a currency this provider can use.",
@@ -1491,6 +1504,19 @@ const english = {
 
 type Translation = string | { one: string; other: string };
 const chinese: Record<keyof typeof english, Translation> = {
+  "qv.note": "更改后，该服务商的用量会改用另一套官方价目重新计价，不做任何换算。如果你给某个服务商补过自己的价卡，它的币种由那些卡决定，此处选择会被锁定。",
+  "qv.saveFailed": "保存选择失败。",
+  "qv.choose": "{name} 的报价币种",
+  "qv.quotedIn": "按 {currency} 报价",
+  "qv.follow": "跟随报告币种（默认）",
+  "qv.source.pinned": "由你补的价卡决定",
+  "qv.source.base": "内置报价（没有依据选择其他币种）",
+  "qv.source.assumed": "默认假设：依据报告币种，并不是你实际付费方式的证据",
+  "qv.source.user": "你的选择",
+  "qv.using": "按 {currency} 计价",
+  "qv.intro": "有些服务商会同时公布多个币种的官方价目。这些价目是各自独立的官方报价，不是互相换算，所以用量只会按其中一套计价。",
+  "qv.title": "报价币种",
+  "qv.eyebrow": "价格",
   "pc.reloadFailed": "已保存，但列表暂时没刷新成功。重新打开设置即可看到。",
   "pc.err.price": "未命中输入、命中输入、输出三项价格必填，请按普通数字填写，例如 3 或 0.3（用小数点）。",
   "pc.err.currency": "请选择该服务商可用的币种。",

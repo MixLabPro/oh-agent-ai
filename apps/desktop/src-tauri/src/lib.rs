@@ -2927,6 +2927,7 @@ fn system_locale() -> String {
 fn fx_status() -> Value {
     let data_home = overview::data_home();
     let locale = system_locale();
+    let _ = agent_vitals_runtime::core::fx_settings::save_locale_hint(&data_home, &locale);
     let (currency, is_default) = agent_vitals_runtime::fx_settings::reporting_currency(&data_home, &locale)
         .unwrap_or_else(|_| (agent_vitals_domain::fx::default_reporting_currency(&locale).to_string(), true));
     let policy = agent_vitals_runtime::fx_settings::policy(&data_home);
@@ -4802,11 +4803,35 @@ fn price_card_providers() -> Value {
         }
     }
     ids.extend(agent_vitals_runtime::price_overrides::currencies(&data_home).keys().cloned());
+    let base = agent_vitals_domain::cost::load_pricing();
     let providers: Vec<Value> = ids.into_iter().map(|id| {
-        let currency = agent_vitals_domain::cost::provider_quote_currency(&id, &pricing);
-        serde_json::json!({ "id": id, "currency": currency })
+        let mut currency = agent_vitals_domain::cost::provider_quote_currency(&id, &pricing);
+        // 并列报价的服务商（官方给了几个币种各一套价）：没补过自己的卡 → 币种没被钉死，表单让用户从 offered 里选；
+        // 补过 → 钉在那些卡的币种上（merged 视图里的 currency 就是它）。
+        let offered = agent_vitals_runtime::pricing::quote_variants::offered_currencies(&base, &id);
+        let has_cards = agent_vitals_runtime::price_overrides::cards(&data_home).get(&id)
+            .and_then(Value::as_object).is_some_and(|m| !m.is_empty());
+        if offered.is_some() && !has_cards { currency = None; }
+        serde_json::json!({ "id": id, "currency": currency, "offered": offered })
     }).collect();
     serde_json::json!({ "status": "ok", "providers": providers })
+}
+
+/// 设置页「并列报价」板块：每个有多套官方报价的服务商当前用哪套、依据是什么（用户选择 / 默认假设 /
+/// 保持基础卡 / 被自己的价卡钉住）、还能选什么。
+#[tauri::command(async)]
+fn quote_variants_status() -> Value {
+    let providers = agent_vitals_runtime::pricing::quote_variants::status(&overview::data_home());
+    serde_json::json!({ "status": "ok", "providers": providers })
+}
+
+/// 保存（`currency` 为 null → 清除，回到默认假设）某服务商的报价币种选择。选择只改「用哪套官方价」，
+/// 不做任何换算；保存后刷新总览/托盘，金额随之重算。
+#[tauri::command]
+fn save_quote_choice(app: AppHandle, provider_id: String, currency: Option<String>) -> Result<Value, String> {
+    agent_vitals_runtime::pricing::quote_variants::save_choice(&overview::data_home(), &provider_id, currency.as_deref())?;
+    refresh(&app, overview_snapshot_typed_sync().as_ref());
+    Ok(serde_json::json!({ "status": "saved" }))
 }
 
 #[tauri::command]
@@ -5105,6 +5130,8 @@ pub fn run() {
             clear_budget_snooze,
             official_price_card,
             price_card_providers,
+            quote_variants_status,
+            save_quote_choice,
             mcp_setup_info,
             mcp_skill_text,
             export_mcp_skill,
@@ -5195,6 +5222,9 @@ pub fn run() {
             ) {
                 agent_vitals_runtime::logging::log_warn("timezone", &format!("unavailable: {error}"));
             }
+            // 记下系统区域：CLI / MCP 不读系统偏好，靠这份提示算出与 app 相同的默认报告币种
+            // （并列报价的「默认假设」据此挑套）。
+            let _ = agent_vitals_runtime::core::fx_settings::save_locale_hint(&overview::data_home(), &system_locale());
             start_public_pricing_catalog_tick();
             // 菜单栏工具：必须在代码里显式 `.accessory`，光靠 Info.plist 的 LSUIElement
             // 不够——tao 的事件循环启动时会显式 setActivationPolicy(Regular) 把 plist
@@ -5614,7 +5644,8 @@ mod tests {
         assert!(validate_desktop_declaration("official_subscription", "2026-07-01", Some("  ")).is_ok());
         // 填了就必须是一段真实可行的区间：不早于起始、不晚于今天（北京时间）。
         assert!(validate_desktop_declaration("official_subscription", "2026-08-15", Some("2026-08-14")).is_err());
-        assert!(validate_desktop_declaration("official_subscription", "2026-07-01", Some("2026-10-01")).is_err());
+        // 「晚于今天」用一个永远在未来的日期：写死某个具体日期，到了那天它就变成合法的今天（2026-10-01 踩到）。
+        assert!(validate_desktop_declaration("official_subscription", "2026-07-01", Some("2099-01-01")).is_err());
         assert!(validate_desktop_declaration("official_subscription", "2026-07-01", Some("2026-09-15")).is_ok());
         assert!(validate_desktop_declaration("organization", "2026-09-01", Some("2026-09-15")).is_ok());
     }

@@ -8,4 +8,5 @@
 
 pub mod money;
 pub mod price_overrides;
+pub mod quote_variants;
 pub mod pricing_catalog;

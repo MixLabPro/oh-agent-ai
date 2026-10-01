@@ -31,9 +31,13 @@ export function parsePrice(text: string): number | null {
   return Number.isFinite(value) && value >= 0 && value <= MAX_PRICE ? value : null;
 }
 
-/** 服务商币种已知 → 只能选它；新服务商 → 可选快照里支持的币种。 */
-export function allowedCurrencies(providerCurrency: string | null, supported: string[]): string[] {
-  return providerCurrency ? [providerCurrency] : supported;
+/**
+ * 服务商币种已知 → 只能选它；官方给了多套报价（`offered`）且还没被自己的卡钉住 → 只能在这几个里选；
+ * 新服务商 → 可选快照里支持的币种。
+ */
+export function allowedCurrencies(providerCurrency: string | null, supported: string[], offered: string[] = []): string[] {
+  if (providerCurrency) return [providerCurrency];
+  return offered.length ? offered : supported;
 }
 
 export function emptyFields(): PriceCardFields {
@@ -41,14 +45,14 @@ export function emptyFields(): PriceCardFields {
   return { provider: "", model: "", currency: "", price: blank(), peakDiffers: false, peak: blank() };
 }
 
-export function buildPriceCardPayload(fields: PriceCardFields, providerCurrency: string | null, supported: string[]):
+export function buildPriceCardPayload(fields: PriceCardFields, providerCurrency: string | null, supported: string[], offered: string[] = []):
   { ok: true; payload: PriceCardPayload } | { ok: false; error: PriceCardFieldError } {
   const provider = fields.provider.trim();
   const model = fields.model.trim();
   if (!PROVIDER.test(provider)) return { ok: false, error: "provider" };
   if (!model || model.length > 120 || /[\u0000-\u001f\u007f]/u.test(model)) return { ok: false, error: "model" };
   const currency = fields.currency.trim();
-  if (!allowedCurrencies(providerCurrency, supported).includes(currency)) return { ok: false, error: "currency" };
+  if (!allowedCurrencies(providerCurrency, supported, offered).includes(currency)) return { ok: false, error: "currency" };
   const offPeak = fields.price;
   const peak = fields.peakDiffers ? fields.peak : fields.price;
   const pair = (key: keyof PriceFields, required: boolean): RatePair | null | undefined => {

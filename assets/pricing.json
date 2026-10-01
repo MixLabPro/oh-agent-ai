@@ -22,6 +22,31 @@
           "input_cached": { "off_peak": 0.15, "peak": 0.30 },
           "output": { "off_peak": 13.5, "peak": 27.0 }
         }
+      },
+      "quote_variants": {
+        "_doc": "同一服务商的并列报价（官方给了不同币种的两套价）。基础卡（上面的 currency/models）是一套，这里的每个键是另一套的币种。两套是**各自的官方报价，不是互相换算**：计价时整套替换（币种与价格一起换），绝不拿汇率合成。用哪一套由 price_overrides::quote_variants 决定：用户明确选择 > 默认假设（跟随报告币种，界面标「默认假设」）。模型集合必须与基础卡一致（测试钉住），否则切换币种会让一部分用量凭空变成无价卡。",
+        "USD": {
+          "source_url": "https://api-docs.deepseek.com/quick_start/pricing/",
+          "as_of": "2026-10-01",
+          "_note": "官方英文页（2026-10-01 核实）：新名 deepseek-flash，旧名 deepseek-v4-flash 现由 DeepSeek-V4.1-Flash 提供服务并按此价计费，所以两个 flash 键同价（与 CNY 基础卡里 deepseek-v4-flash 仍是旧价不同——那是基础卡已知未同步项，见上方 _note）。峰谷规则同 CNY：非高峰为高峰的一半，高峰 01:00-04:00 与 06:00-10:00 UTC、周一至周五、不含中国法定假日。",
+          "models": {
+            "deepseek-v4-flash": {
+              "input_uncached": { "off_peak": 0.15, "peak": 0.30 },
+              "input_cached": { "off_peak": 0.003, "peak": 0.006 },
+              "output": { "off_peak": 0.60, "peak": 1.20 }
+            },
+            "deepseek-v4.1-flash": {
+              "input_uncached": { "off_peak": 0.15, "peak": 0.30 },
+              "input_cached": { "off_peak": 0.003, "peak": 0.006 },
+              "output": { "off_peak": 0.60, "peak": 1.20 }
+            },
+            "deepseek-v4-pro": {
+              "input_uncached": { "off_peak": 0.66, "peak": 1.32 },
+              "input_cached": { "off_peak": 0.022, "peak": 0.044 },
+              "output": { "off_peak": 1.98, "peak": 3.96 }
+            }
+          }
+        }
       }
     },
     "shengsuanyun": {
