@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -77,6 +78,10 @@ def _run(args, env=None):
         capture_output=True, text=True, env=full_env, timeout=60,
     )
 
+
+# 跟随当前月：merge_month 只把当月留在 month.json，写死的 2026-09 在跨月后会被当作「已滚出当月」归档，
+# 测试就从「按来源合并」变成了「测归档」（2026-10-01 实际踩到）。
+MONTH = datetime.now().strftime("%Y-%m")
 
 class _TmpHome:
     """每次测试一个临时 AGENT_VITALS_HOME + HOME —— 不污染真机。"""
@@ -171,17 +176,17 @@ class TestBySourceMerge(unittest.TestCase):
         主桶是两来源之和（翻倍），但 by_source 各来源行各一份。"""
         with _TmpHome() as h:
             day = self._day_bucket()
-            hb = {"buckets": [dict(day, date="2026-09-01")]}
+            hb = {"buckets": [dict(day, date=MONTH + "-01")]}
             bdm = {
-                "2026-09-01": self._model_day(),
+                MONTH + "-01": self._model_day(),
                 "by_source": {
-                    "2026-09-01": {"dsh-live": self._model_day()},
+                    MONTH + "-01": {"dsh-live": self._model_day()},
                 },
             }
             bdm2 = {
-                "2026-09-01": self._model_day(),
+                MONTH + "-01": self._model_day(),
                 "by_source": {
-                    "2026-09-01": {"cli": self._model_day()},
+                    MONTH + "-01": {"cli": self._model_day()},
                 },
             }
             with mock.patch.dict(os.environ, h.env, clear=False):
@@ -189,7 +194,7 @@ class TestBySourceMerge(unittest.TestCase):
                 state_module.merge_month(hb, by_date_model=bdm2)
 
             month = json.loads((Path(h.tmp) / "state" / "month.json").read_text())
-            day_out = month["days"]["2026-09-01"]
+            day_out = month["days"][MONTH + "-01"]
             bs = day_out["by_source"]
             self.assertEqual(sorted(bs.keys()), ["cli", "dsh-live"],
                              "两个来源键并存——诊断「同一批被喂几次」就靠这个")
@@ -205,15 +210,15 @@ class TestBySourceMerge(unittest.TestCase):
         `{date: {source: {model}}}` 整段塞进 by_model。"""
         with _TmpHome() as h:
             bdm = {
-                "by_source": {"2026-09-01": {"cli": self._model_day()}},
+                "by_source": {MONTH + "-01": {"cli": self._model_day()}},
             }
             with mock.patch.dict(os.environ, h.env, clear=False):
                 state_module.merge_month({"buckets": []}, by_date_model=bdm)
             month = json.loads((Path(h.tmp) / "state" / "month.json").read_text())
-            self.assertIn("2026-09-01", month["days"])
-            self.assertEqual(month["days"]["2026-09-01"]["uncached_input_tokens"], 0)
+            self.assertIn(MONTH + "-01", month["days"])
+            self.assertEqual(month["days"][MONTH + "-01"]["uncached_input_tokens"], 0)
             self.assertEqual(
-                month["days"]["2026-09-01"]["by_source"]["cli"]
+                month["days"][MONTH + "-01"]["by_source"]["cli"]
                 ["deepseek-v4-flash"]["uncached_input_tokens"],
                 100)
 
@@ -255,8 +260,8 @@ class TestBySourceMerge(unittest.TestCase):
         month.json 全靠它，跨天同一来源必须累加。"""
         month = {
             "days": {
-                "2026-09-01": {"by_source": {"cli": self._model_day(100)}},
-                "2026-09-02": {"by_source": {"cli": self._model_day(50)}},
+                MONTH + "-01": {"by_source": {"cli": self._model_day(100)}},
+                MONTH + "-02": {"by_source": {"cli": self._model_day(50)}},
             },
         }
         out = state_module.rollup_by_source(month)
@@ -344,14 +349,14 @@ class TestBySourceCli(unittest.TestCase):
     def test_state_by_source_reports_two_sources_after_two_feeds(self):
         with _TmpHome() as h:
             day = self._day_bucket()
-            hb = {"buckets": [dict(day, date="2026-09-01")]}
+            hb = {"buckets": [dict(day, date=MONTH + "-01")]}
             bdm = {
-                "2026-09-01": self._model_day(),
-                "by_source": {"2026-09-01": {"dsh-live": self._model_day()}},
+                MONTH + "-01": self._model_day(),
+                "by_source": {MONTH + "-01": {"dsh-live": self._model_day()}},
             }
             bdm2 = {
-                "2026-09-01": self._model_day(),
-                "by_source": {"2026-09-01": {"cli": self._model_day()}},
+                MONTH + "-01": self._model_day(),
+                "by_source": {MONTH + "-01": {"cli": self._model_day()}},
             }
             with mock.patch.dict(os.environ, h.env, clear=False):
                 state_module.merge_month(hb, by_date_model=bdm)

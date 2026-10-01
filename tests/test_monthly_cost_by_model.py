@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,6 +43,10 @@ def _run(args, env=None, binary=False):
     cmd = [BIN] + list(args) if binary else [sys.executable, str(SCRIPT)] + list(args)
     return subprocess.run(cmd, capture_output=True, text=True, env=full_env, timeout=60)
 
+
+# 跟随当前月：merge_month 只把当月留在 month.json，写死的 2026-09 在跨月后会被当作「已滚出当月」归档，
+# 测试就从「按来源合并」变成了「测归档」（2026-10-01 实际踩到）。
+MONTH = datetime.now().strftime("%Y-%m")
 
 class _TmpHome:
     """每次测试一个临时 AGENT_VITALS_HOME + HOME —— 不污染真机。"""
@@ -81,8 +86,8 @@ class RollupByModelCase(unittest.TestCase):
     def test_flattens_per_day_rows(self):
         month = {
             "days": {
-                "2026-09-01": {"by_model": {"pro": _bucket(100)}},
-                "2026-09-02": {"by_model": {"pro": _bucket(50)}},
+                MONTH + "-01": {"by_model": {"pro": _bucket(100)}},
+                MONTH + "-02": {"by_model": {"pro": _bucket(50)}},
             },
         }
         out = state_module.rollup_by_model(month)
@@ -91,7 +96,7 @@ class RollupByModelCase(unittest.TestCase):
     def test_two_models_stay_separate(self):
         month = {
             "days": {
-                "2026-09-01": {"by_model": {
+                MONTH + "-01": {"by_model": {
                     "deepseek-v4-flash": _bucket(100),
                     "deepseek/deepseek-v4-pro-0813": _bucket(200),
                 }},
@@ -136,10 +141,10 @@ class StateByModelCli(unittest.TestCase):
 
     def test_reports_two_models_after_two_day_feeds(self):
         with _TmpHome() as h:
-            hb = {"buckets": [dict(_bucket(), date="2026-09-01")]}
-            bdm1 = {"2026-09-01": self._model_day("deepseek-v4-flash", 100)}
-            hb2 = {"buckets": [dict(_bucket(50), date="2026-09-02")]}
-            bdm2 = {"2026-09-02": self._model_day("deepseek-v4-flash", 50)}
+            hb = {"buckets": [dict(_bucket(), date=MONTH + "-01")]}
+            bdm1 = {MONTH + "-01": self._model_day("deepseek-v4-flash", 100)}
+            hb2 = {"buckets": [dict(_bucket(50), date=MONTH + "-02")]}
+            bdm2 = {MONTH + "-02": self._model_day("deepseek-v4-flash", 50)}
             from unittest import mock
             with mock.patch.dict(os.environ, h.env, clear=False):
                 state_module.merge_month(hb, by_date_model=bdm1)
@@ -172,9 +177,9 @@ class StateByModelCli(unittest.TestCase):
             state_dir.mkdir(parents=True, exist_ok=True)
             month = {
                 "schema_version": "1.0.0",
-                "month": "2026-09",
+                "month": MONTH,
                 "days": {
-                    "2026-09-01": dict(_bucket(1000000), by_model={
+                    MONTH + "-01": dict(_bucket(1000000), by_model={
                         "deepseek-v4-flash": FLASH_1M,
                         "deepseek/deepseek-v4-pro-0813": FLASH_1M,
                     }),

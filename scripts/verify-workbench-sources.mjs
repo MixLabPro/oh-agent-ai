@@ -305,7 +305,7 @@ ok(elements["ov-billing-batch-models"].hidden === false && elements["ov-billing-
   "展开后列出将一起处理的模型（含 token 规模），可再收起");
 ok(elements["ov-billing-backdrop"].hidden === false && elements["ov-billing-declaration-stats"].textContent.includes("1.6M tokens · 7 个会话"),
   "弹窗打开时显示真实遮罩层，头部规模信息单独一行");
-ok(elements["ov-billing-scope-text"].textContent.includes("2 个模型（gpt-5.6-sol 等）") && elements["ov-billing-scope-text"].textContent.includes(monthStart + " – " + today),
+ok(elements["ov-billing-scope-text"].textContent.includes("2 个模型（gpt-5.6-sol 等）") && elements["ov-billing-scope-text"].textContent.includes(monthStart === today ? today : monthStart + " – " + today), // 每月 1 号起止同一天，界面只写一个日期（billingRangeText）
   "作用范围一句话列出模型数与起止日期");
 ok(elements["ov-billing-mode"].value === "" && elements["ov-billing-subscription-fields"].hidden === true,
   "没有账户证据时不预选计费方式（规格 §4「无证据 → 不预选」），订阅字段也不出现");
