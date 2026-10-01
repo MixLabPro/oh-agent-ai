@@ -557,6 +557,19 @@ fn monthly_subscriptions_by_currency(data_home: &Path, month: &str) -> Option<BT
     Some(totals)
 }
 
+/// 月度汇总里的订阅月费，逐币种换成最小单位（分）。币种未声明（空串键）的不进来——
+/// 没有币种就不能标 ¥ 或 $，宁可缺也不猜。没有任何订阅 → None（不显示「¥0」）。
+fn subscription_from_summary(summary: &agent_vitals_domain::data_contract::MonthlySummary) -> Option<BTreeMap<String, i64>> {
+    let by_basis = summary.actual_spend_by_basis();
+    let fixed = by_basis.get(&agent_vitals_domain::data_contract::BillingBasis::FixedSubscription)?;
+    let totals: BTreeMap<String, i64> = fixed.iter()
+        .filter(|(currency, amount)| !currency.is_empty() && amount.is_finite() && **amount > 0.0)
+        .map(|(currency, amount)| (currency.clone(), (amount * 100.0).round() as i64))
+        .filter(|(_, minor)| *minor > 0)
+        .collect();
+    if totals.is_empty() { None } else { Some(totals) }
+}
+
 #[cfg(test)]
 fn monthly_cny_subscriptions(data_home: &Path, month: &str) -> Option<f64> {
     monthly_subscriptions_by_currency(data_home, month)?
@@ -741,7 +754,13 @@ fn read_overview_at(dh: &Path) -> Overview {
     // R2-F3：monthly 取一次，metered_month 与 budget_profiles 共用同一个
     // `Arc`——budget_profiles 内部不再第二次全量现算 monthly + daily。
     let monthly_summary_arc = monthly_memo().get_or_compute(dh, &cur_month);
-    let subscription_month_by_currency = monthly_subscriptions_by_currency(dh, &cur_month);
+    // 订阅月费与工作台总览同源：月度汇总里的 FixedSubscription 档（计费声明持续生效、
+    // 零用量月份照摊）。`host_bills` 表里根本没有订阅行（声明不落那张表），只读它会让
+    // 托盘永远拿不到订阅——「本月成本」曾因此恒为「—（无数据）」。库里有账单行时作兜底。
+    let subscription_month_by_currency = monthly_summary_arc
+        .as_deref()
+        .and_then(subscription_from_summary)
+        .or_else(|| monthly_subscriptions_by_currency(dh, &cur_month));
     let overview = Overview {
         data_home: dh.display().to_string(),
         today: today_val,
