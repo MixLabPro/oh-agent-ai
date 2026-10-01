@@ -4754,6 +4754,26 @@ fn delete_price_route(model_prefix: String) -> Result<Value, String> {
     Ok(serde_json::json!({ "status": "removed" }))
 }
 
+/// 补价卡表单的服务商清单：目录里的服务商 + 用户为新服务商声明过的币种，各带报价币种。
+/// 表单据此把币种选项限制在服务商自己的报价币种上（币种是服务商级的，见 `save_card_checked`）。
+#[tauri::command(async)]
+fn price_card_providers() -> Value {
+    let data_home = overview::data_home();
+    let pricing = agent_vitals_runtime::price_overrides::merged_main(&data_home);
+    let mut ids = std::collections::BTreeSet::new();
+    for pointer in ["/providers", "/catalog_2026_09/providers"] {
+        if let Some(map) = pricing.pointer(pointer).and_then(Value::as_object) {
+            ids.extend(map.keys().filter(|key| !key.starts_with('_')).cloned());
+        }
+    }
+    ids.extend(agent_vitals_runtime::price_overrides::currencies(&data_home).keys().cloned());
+    let providers: Vec<Value> = ids.into_iter().map(|id| {
+        let currency = agent_vitals_domain::cost::provider_quote_currency(&id, &pricing);
+        serde_json::json!({ "id": id, "currency": currency })
+    }).collect();
+    serde_json::json!({ "status": "ok", "providers": providers })
+}
+
 #[tauri::command]
 fn delete_price_card(provider_id: String, model_id: String) -> Result<Value, String> {
     let data_home = overview::data_home();
@@ -5049,6 +5069,7 @@ pub fn run() {
             snooze_budget_current_period,
             clear_budget_snooze,
             official_price_card,
+            price_card_providers,
             mcp_setup_info,
             mcp_skill_text,
             export_mcp_skill,

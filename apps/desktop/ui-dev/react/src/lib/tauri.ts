@@ -3635,3 +3635,64 @@ export async function convertAmounts(amounts: Record<string, number>): Promise<F
   const unavailable = (Array.isArray(root.unavailable) ? root.unavailable : []).map((row) => { const entry = record(row, "fx unavailable"); return { currency: stringField(entry.currency, "fx currency"), amount: Number(entry.amount) }; });
   return { target: root.target, total: root.total, approximate: root.approximate === true, items, unavailable };
 }
+
+
+// ───────────────────── 补价卡（用户价卡覆盖层）─────────────────────
+// 形状来源：src-tauri/src/lib.rs 的 price_cards / price_card_providers / save_price_card /
+// delete_price_card / official_price_card（同一 PR 同改）。价格单位：每百万 token。
+
+export type PriceCardRates = { off_peak: number; peak: number };
+export type UserPriceCard = { provider: string; model: string; input_uncached: PriceCardRates; input_cached: PriceCardRates; output: PriceCardRates; cache_write: PriceCardRates | null };
+export type PriceCardProvider = { id: string; currency: string | null };
+
+function parseRates(value: unknown, label: string): PriceCardRates {
+  const row = record(value, label);
+  const read = (key: string) => { const n = row[key]; if (typeof n !== "number" || !Number.isFinite(n) || n < 0) throw new Error(`${label}.${key} invalid`); return n; };
+  return { off_peak: read("off_peak"), peak: read("peak") };
+}
+
+export async function readUserPriceCards(): Promise<UserPriceCard[]> {
+  if (!hasNativeBridge()) return [];
+  const root = record(await invoke<unknown>("price_cards"), "price cards");
+  if (root.status !== "ok") throw new Error("price cards unavailable");
+  const out: UserPriceCard[] = [];
+  for (const [provider, models] of Object.entries(record(root.cards ?? {}, "price cards by provider"))) {
+    for (const [model, card] of Object.entries(record(models, "price cards by model"))) {
+      const row = record(card, "price card");
+      out.push({
+        provider, model,
+        input_uncached: parseRates(row.input_uncached, "input_uncached"), input_cached: parseRates(row.input_cached, "input_cached"), output: parseRates(row.output, "output"),
+        cache_write: row.cache_write == null ? null : parseRates(row.cache_write, "cache_write"),
+      });
+    }
+  }
+  return out.sort((a, b) => `${a.provider}/${a.model}`.localeCompare(`${b.provider}/${b.model}`));
+}
+
+export async function readPriceCardProviders(): Promise<PriceCardProvider[]> {
+  if (!hasNativeBridge()) return [];
+  const root = record(await invoke<unknown>("price_card_providers"), "price card providers");
+  if (root.status !== "ok" || !Array.isArray(root.providers)) throw new Error("price card providers unavailable");
+  return root.providers.map((row) => { const entry = record(row, "price card provider"); return { id: stringField(entry.id, "provider id"), currency: typeof entry.currency === "string" ? entry.currency : null }; });
+}
+
+export async function saveUserPriceCard(payload: Record<string, unknown>): Promise<void> {
+  if (!hasNativeBridge()) return;
+  const root = record(await invoke<unknown>("save_price_card", { input: payload }), "save price card");
+  if (root.status !== "saved") throw new Error("price card not saved");
+}
+
+export async function deleteUserPriceCard(providerId: string, modelId: string): Promise<void> {
+  if (!hasNativeBridge()) return;
+  await invoke("delete_price_card", { providerId, modelId });
+}
+
+export type OfficialPriceCard = { found: true; currency: string; input_uncached: PriceCardRates; input_cached: PriceCardRates; output: PriceCardRates } | { found: false; reason: string | null };
+
+export async function readOfficialPriceCard(providerId: string, modelId: string): Promise<OfficialPriceCard> {
+  if (!hasNativeBridge()) return { found: false, reason: null };
+  const root = record(await invoke<unknown>("official_price_card", { providerId, modelId }), "official price card");
+  if (root.found !== true) return { found: false, reason: typeof root.reason === "string" ? root.reason : null };
+  const rates = record(root.rates, "official rates");
+  return { found: true, currency: stringField(root.currency, "official card currency"), input_uncached: parseRates(rates.input_uncached, "input_uncached"), input_cached: parseRates(rates.input_cached, "input_cached"), output: parseRates(rates.output, "output") };
+}

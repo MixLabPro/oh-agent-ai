@@ -834,11 +834,19 @@
         return ok({ status: "removed" });
       }
       case "price_cards": return { status: "ok", cards: priceOverrideCards };
+      // Shape: apps/desktop/src-tauri/src/lib.rs price_card_providers() -> {status, providers:[{id, currency|null}]}
+      case "price_card_providers": return { status: "ok", providers: [
+        { id: "anthropic", currency: "USD" }, { id: "moonshot", currency: "USD" },
+        { id: "minimax", currency: "CNY" }, { id: "shengsuanyun", currency: "CNY" },
+      ] };
+      // Shape: apps/desktop/src-tauri/src/lib.rs official_price_card() -> {found, provider?, card_key?, rates?, currency?, reason?}
+      case "official_price_card": return { found: false };
       case "save_price_card": {
         const input = (args && args.input) || {};
         if (!input.provider_id || !input.model_id) throw new Error("provider_id and model_id are required");
         (priceOverrideCards[input.provider_id] ||= {})[input.model_id] = {
           input_uncached: input.input_uncached, input_cached: input.input_cached, output: input.output,
+          ...(input.cache_write ? { cache_write: input.cache_write } : {}),
         };
         return ok({ status: "saved", provider_id: input.provider_id, model_id: input.model_id });
       }
