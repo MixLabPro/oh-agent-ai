@@ -18,6 +18,7 @@ import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js"
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import type { CityModel } from "../cityModel";
 import { activeTheme, setActiveTheme, type CityThemeName } from "./cityTheme";
+import { loadCityAssets, type CityAssets } from "./cityAssets";
 import { planCinematic, type CinematicPlan } from "./cityCinematic";
 import { layoutCity, type CityLayout } from "./cityLayout";
 import { CityParts, type QualityLevel } from "./cityParts";
@@ -88,6 +89,7 @@ export class CityEngine {
   private readonly disposablesSky: Array<{ dispose: () => void }> = [];
   private readonly observers: Array<() => void> = [];
   private skyDome: THREE.Mesh | null = null;
+  private assets: CityAssets | null = null;
   private composer: EffectComposer | null = null;
   private cinematic: { plan: CinematicPlan; startedAt: number; savedFov: number; look: THREE.Vector3 | null; lastSeconds: number } | null = null;
   private themeName: CityThemeName = "day";
@@ -128,6 +130,13 @@ export class CityEngine {
     this.scene.add(this.sun, this.sun.target);
     this.skyDome = this.buildSkyDome();
     this.scene.add(this.skyDome);
+    // 素材异步到达：天空原地换图，parts 按需重建（地面细节 / 立面 / 水面法线）。
+    void loadCityAssets().then((assets) => {
+      if (this.disposed || !assets) return;
+      this.assets = assets;
+      this.applySkyImage();
+      this.parts?.applyAssets(assets);
+    });
 
     this.applyQualityLevel(1);
 
@@ -244,6 +253,10 @@ export class CityEngine {
       uniforms.topColor.value.set(theme.skyTop);
       uniforms.midColor.value.set(theme.skyMid);
       uniforms.horizonColor.value.set(theme.skyHorizon);
+      uniforms.uGradeTop.value.set(theme.skyGrade.top);
+      uniforms.uGradeHorizon.value.set(theme.skyGrade.horizon);
+      uniforms.uGradeAmount.value = theme.skyGrade.amount;
+      this.applySkyImage();
     }
     if (this.model) this.applyModel(this.model, true);
   }
@@ -259,6 +272,7 @@ export class CityEngine {
     const layout = layoutCity(model, reuse ? this.layout : null);
     this.layout = layout;
     this.parts = new CityParts(model, layout);
+    if (this.assets) this.parts.applyAssets(this.assets);
     this.scene.add(this.parts.group, this.parts.water);
 
     this.cityCenter = { x: (layout.urbanBounds.left + layout.urbanBounds.right) / 2, z: (layout.urbanBounds.north + layout.urbanBounds.south) / 2 };
@@ -413,6 +427,13 @@ export class CityEngine {
   }
 
   /** 天穹：内翻大球，顶部到地平线的垂直渐变，1 次绘制的"天空感"。 */
+  private applySkyImage(): void {
+    const uniforms = (this.skyDome?.material as THREE.ShaderMaterial | undefined)?.uniforms;
+    if (!uniforms || !this.assets) return;
+    uniforms.uSky.value = activeTheme().skyImage === "dusk" ? this.assets.sky.dusk : this.assets.sky.day;
+    uniforms.uHasSky.value = 1;
+  }
+
   private buildSkyDome(): THREE.Mesh {
     const geometry = new THREE.SphereGeometry(6_000, 24, 14);
     const material = new THREE.ShaderMaterial({
@@ -423,6 +444,12 @@ export class CityEngine {
         topColor: { value: new THREE.Color(activeTheme().skyTop) },
         midColor: { value: new THREE.Color(activeTheme().skyMid) },
         horizonColor: { value: new THREE.Color(activeTheme().skyHorizon) },
+        // 全景天空图（HDR 转出）；uHasSky=0 时退回上面的三色渐变。
+        uSky: { value: null as THREE.Texture | null },
+        uHasSky: { value: 0 },
+        uGradeTop: { value: new THREE.Color(activeTheme().skyGrade.top) },
+        uGradeHorizon: { value: new THREE.Color(activeTheme().skyGrade.horizon) },
+        uGradeAmount: { value: activeTheme().skyGrade.amount },
       },
       vertexShader: /* glsl */ `
         varying vec3 vDirection;
@@ -435,12 +462,27 @@ export class CityEngine {
         uniform vec3 topColor;
         uniform vec3 midColor;
         uniform vec3 horizonColor;
+        uniform sampler2D uSky;
+        uniform float uHasSky;
+        uniform vec3 uGradeTop;
+        uniform vec3 uGradeHorizon;
+        uniform float uGradeAmount;
         varying vec3 vDirection;
         void main() {
-          float height = clamp(vDirection.y, 0.0, 1.0);
+          vec3 dir = normalize(vDirection);
+          float height = clamp(dir.y, 0.0, 1.0);
           // 地平线 → 中段 → 天顶：日落主题靠中段的粉色撑出渐变带。
           vec3 color = mix(horizonColor, midColor, smoothstep(0.0, 0.28, height));
           color = mix(color, topColor, smoothstep(0.22, 0.85, height));
+          if (uHasSky > 0.5) {
+            // 等距柱状投影采样；地平线以下复用地平线那一行（下半球在水面以下，从不直接可见）。
+            vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
+            vec3 photo = texture2D(uSky, uv).rgb;
+            // 调色：按高度在两个色调之间做 overlay 式乘染（保留云的明暗，只换色相）。
+            vec3 tint = mix(uGradeHorizon, uGradeTop, smoothstep(0.0, 0.6, height));
+            vec3 graded = photo * tint * 1.55;
+            color = mix(photo, graded, uGradeAmount);
+          }
           gl_FragColor = vec4(color, 1.0);
           #include <colorspace_fragment>
         }

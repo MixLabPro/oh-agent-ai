@@ -35,6 +35,46 @@ function canvas2d(width: number, height: number): { canvas: HTMLCanvasElement; c
 
 /** 立面纹理：近中性底 + 窗格图案，host 楼色作为实例 tint 相乘。
  *  纹理一格 = 4 层楼，实例属性 aFloors 在着色器里拉伸 v 轴，高层不糊。 */
+/** 海滨装饰艺术立面：近白灰泥底（乘宿主粉彩色）、水平「眉檐」饰带、横向带状窗、
+ *  中轴竖向肋。一块平铺 = 2 层楼（材质 uRows=2）。灰泥颗粒感来自 stucco 法线贴图。 */
+export function makeDecoFacadeTexture(): THREE.Texture {
+  const size = 256;
+  const { canvas, ctx } = canvas2d(size, size);
+  ctx.fillStyle = "#fbf8f2";
+  ctx.fillRect(0, 0, size, size);
+  for (let floor = 0; floor < 2; floor += 1) {
+    const top = floor * 128;
+    // 带状窗：圆角长条，两端留墙；窗下一条深色投影线像窗台。
+    ctx.fillStyle = "#5f8d96";
+    ctx.beginPath();
+    ctx.roundRect(22, top + 44, size - 44, 40, 14);
+    ctx.fill();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.28)";
+    ctx.fillRect(30, top + 50, size - 60, 6);
+    for (let mullion = 1; mullion < 6; mullion += 1) {
+      ctx.fillStyle = "#e9e3d8";
+      ctx.fillRect(22 + mullion * ((size - 44) / 6) - 2, top + 44, 4, 40);
+    }
+    // 眉檐饰带：浅色凸带 + 下方阴影，三道一组是装饰艺术的标志。
+    for (let line = 0; line < 3; line += 1) {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, top + 98 + line * 7, size, 3);
+      ctx.fillStyle = "rgba(90, 80, 70, 0.22)";
+      ctx.fillRect(0, top + 101 + line * 7, size, 2);
+    }
+  }
+  // 中轴竖向肋：遮住带状窗中段，形成对称立面。
+  ctx.fillStyle = "#f3eee6";
+  ctx.fillRect(size / 2 - 12, 0, 24, size);
+  ctx.fillStyle = "rgba(90, 80, 70, 0.18)";
+  ctx.fillRect(size / 2 + 12, 0, 3, size);
+  const texture = new THREE.Texture(canvas);
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.anisotropy = 4;
+  texture.needsUpdate = true;
+  return texture;
+}
+
 export function makeFacadeTexture(variant: number, seed: number): THREE.Texture {
   const { canvas, ctx } = canvas2d(128, 128);
   ctx.fillStyle = "#f4f1ea";

@@ -26,6 +26,10 @@ export type CityTheme = {
   water: { deep: string; shallow: string; sky: string };
   /** 水面距离淡出区间（相机距离）：日落主题拉远，免得整片海都被橙雾吃掉。 */
   waterFog: [number, number];
+  /** 天空球素材（HDR 转出的全景图）；加载前/失败时用 skyTop/skyMid/skyHorizon 渐变。 */
+  skyImage: "day" | "dusk";
+  /** 天空调色：天顶色、地平线色、强度（0 = 原图）。日落主题靠它把黄昏图染成粉紫。 */
+  skyGrade: { top: string; horizon: string; amount: number };
   /** 地面着色（RGB 0-255）：水下 / 沙滩 / 低草 / 高草 / 岩石。 */
   ground: { sea: [number, number, number]; sand: [number, number, number]; lawn: [number, number, number]; grass: [number, number, number]; rock: [number, number, number] };
   /** 霓虹屋顶描边 + bloom 后处理（仅日落主题；低画质档自动关闭 bloom）。 */
@@ -54,6 +58,8 @@ const DAY: CityTheme = {
   exposure: 1.06,
   water: { deep: "#57a3b4", shallow: "#a5d6da", sky: "#dff0f2" },
   waterFog: [900, 2300],
+  skyImage: "day",
+  skyGrade: { top: "#ffffff", horizon: "#ffffff", amount: 0 },
   ground: { sea: [75, 119, 127], sand: [199, 189, 158], lawn: [143, 159, 125], grass: [113, 134, 103], rock: [155, 150, 132] },
   neon: false,
   vegetation: "round",
@@ -85,6 +91,8 @@ const VICE: CityTheme = {
   exposure: 1.18,
   water: { deep: "#1a86c4", shallow: "#52dbe0", sky: "#ff9ccf" },
   waterFog: [1500, 4200],
+  skyImage: "dusk",
+  skyGrade: { top: "#6b3fb0", horizon: "#ff9a6b", amount: 0.62 },
   ground: { sea: [28, 110, 150], sand: [250, 232, 200], lawn: [118, 208, 156], grass: [84, 180, 132], rock: [190, 150, 170] },
   neon: true,
   vegetation: "palm",

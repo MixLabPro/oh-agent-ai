@@ -12,7 +12,8 @@ import { builtFractionAt, hashSeed, type CityBuilding, type CityModel } from "..
 import { fbm } from "./cityNoise";
 import type { CityLayout, DistrictLayout, Parcel, Vec2 } from "./cityLayout";
 import { activeTheme } from "./cityTheme";
-import { makeCityTexture, makeFacadeTexture, makeLabelSprite, paletteFor } from "./cityTextures";
+import type { CityAssets } from "./cityAssets";
+import { makeCityTexture, makeDecoFacadeTexture, makeFacadeTexture, makeLabelSprite, paletteFor } from "./cityTextures";
 import type { TerrainField } from "./cityLayout";
 
 const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
@@ -46,21 +47,64 @@ type BuildingRuntime = {
   craneX: number;
   craneZ: number;
   blinkPhase: number;
+  /** 装饰艺术附件实例起点（-1 = 不是海滨装饰楼）：corner 用 decoCornerMesh[i]，trim 用 decoTrimMesh[2i, 2i+1]。 */
+  deco: number;
 };
 
 /** terrain 非空 → 车贴地行驶；桥面路径 terrain 为空、y 固定。 */
 type CarPath = { points: Vec2[]; cumulative: number[]; total: number; y: number; terrain: TerrainField | null };
 type Car = { path: CarPath; distance: number; speed: number };
 
-function facadeMaterial(map: THREE.Texture): THREE.MeshLambertMaterial {
+type FacadeUniforms = {
+  uRows: { value: number };
+  uPhoto: { value: number };
+  uPhotoTex: { value: THREE.Texture | null };
+  uPhotoRows: { value: number };
+  uTileWidth: { value: number };
+  uSelfLit: { value: number };
+};
+
+/** 带「按自身颜色补自发光」的白底材质（颜色来自实例色）：彩色环境光下保住宿主色相。 */
+function selfLitMaterial(amount: number): THREE.MeshLambertMaterial {
+  const material = new THREE.MeshLambertMaterial({ color: "#ffffff" });
+  material.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace("#include <emissivemap_fragment>", `#include <emissivemap_fragment>\ntotalEmissiveRadiance += diffuseColor.rgb * ${amount.toFixed(3)};`);
+  };
+  material.customProgramCacheKey = () => `city-self-lit-${amount.toFixed(3)}`;
+  return material;
+}
+
+/** 立面材质：程序化窗格贴图负责「看得出是窗」，照片（可选）只调制材质明暗——
+ *  照片立面直接当窗格用时，城市尺度下玻璃幕墙读成瓷砖墙，窄楼读成条形码（两轮截图实测）。
+ *  uSelfLit：按自身颜色补一点自发光，日落主题的粉/紫色光会把薄荷、青色楼中和成灰。 */
+function facadeMaterial(map: THREE.Texture, uniforms: FacadeUniforms, key: string): THREE.MeshLambertMaterial {
   const material = new THREE.MeshLambertMaterial({ map });
   // 楼层按实例属性拉伸立面纹理的 v 轴：一根 InstancedMesh 搞定所有高度。
   material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
-      .replace("#include <common>", "#include <common>\nattribute float aFloors;")
-      .replace("#include <uv_vertex>", "#include <uv_vertex>\n#ifdef USE_MAP\nvMapUv.y *= aFloors;\n#endif");
+      .replace("#include <common>", "#include <common>\nattribute float aFloors;\nuniform float uRows;\nuniform float uPhotoRows;\nuniform float uTileWidth;\nvarying vec2 vPhotoUv;")
+      // 照片 UV 横向按「这个面的真实宽度 / 一块照片的宽度」平铺。宽度从实例矩阵读：
+      // ±x 面的宽是 z 轴缩放，±z 面是 x 轴缩放。
+      .replace("#include <uv_vertex>", `#include <uv_vertex>
+#ifdef USE_MAP
+vec2 baseUv = vMapUv;
+vMapUv.y *= aFloors / uRows;
+float faceWidth = abs(normal.x) > 0.5 ? length(instanceMatrix[2].xyz) : length(instanceMatrix[0].xyz);
+vPhotoUv = vec2(baseUv.x * faceWidth / max(uTileWidth, 1.0), baseUv.y * aFloors / max(uPhotoRows, 1.0));
+#endif`);
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", "#include <common>\nuniform float uPhoto;\nuniform sampler2D uPhotoTex;\nuniform float uSelfLit;\nvarying vec2 vPhotoUv;")
+      .replace("#include <map_fragment>", `#ifdef USE_MAP
+  diffuseColor *= texture2D( map, vMapUv );
+  if (uPhoto > 0.5) {
+    float l = dot(texture2D(uPhotoTex, vPhotoUv).rgb, vec3(0.2126, 0.7152, 0.0722));
+    diffuseColor.rgb *= 0.8 + 0.45 * smoothstep(0.03, 0.5, l);
+  }
+#endif`)
+      .replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\ntotalEmissiveRadiance += diffuseColor.rgb * uSelfLit;");
   };
-  material.customProgramCacheKey = () => "city-facade";
+  material.customProgramCacheKey = () => `city-facade-${key}`;
   return material;
 }
 
@@ -102,6 +146,12 @@ export class CityParts {
   private readonly disposables: Array<{ dispose: () => void }> = [];
   private readonly podiumMesh: THREE.InstancedMesh;
   private readonly roofMesh: THREE.InstancedMesh;
+  private readonly facadeUniforms: FacadeUniforms[] = [];
+  /** 海滨装饰艺术低层楼的附件：圆角转角柱、顶部阶梯女儿墙、底层遮阳棚（每栋 3 个实例）。 */
+  private readonly decoTrimMesh: THREE.InstancedMesh;
+  private readonly decoCornerMesh: THREE.InstancedMesh;
+  private terrainUniforms: Record<string, { value: unknown }> | null = null;
+  private waterAssetUniforms: Record<string, { value: unknown }> | null = null;
   /** 屋顶霓虹描边：比屋顶略大的自发光薄板，露出的一圈即霓虹；仅日落主题。 */
   private readonly neonMesh: THREE.InstancedMesh;
   private readonly scaffoldMesh: THREE.InstancedMesh;
@@ -137,7 +187,7 @@ export class CityParts {
     const total = model.buildings.length;
 
     // ── 建筑：立面（3 变体 × [主体+退台] 两段）──────────────────────────
-    const facades = [makeFacadeTexture(0, 11), makeFacadeTexture(1, 37), makeFacadeTexture(2, 71)];
+    const facades = [makeFacadeTexture(0, 11), makeFacadeTexture(1, 37), makeFacadeTexture(2, 71), makeDecoFacadeTexture()];
     facades.forEach((texture) => {
       texture.colorSpace = THREE.SRGBColorSpace;
       this.disposables.push(texture);
@@ -148,7 +198,7 @@ export class CityParts {
       for (const [id, parcel] of district.slots) zoneById.set(id, parcel.zone);
     }
     this.zoneById = zoneById;
-    const facadeCounts = [0, 0, 0];
+    const facadeCounts = [0, 0, 0, 0];
     for (const building of model.buildings) {
       if (!zoneById.has(building.id)) continue;
       facadeCounts[this.facadeFor(building)] += building.archetype === "tower" || building.archetype === "landmark" ? 2 : 1;
@@ -157,7 +207,17 @@ export class CityParts {
       const capacity = facadeCounts[variant] + 8;
       const geometry = BOX.clone();
       geometry.setAttribute("aFloors", new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1));
-      const mesh = new THREE.InstancedMesh(geometry, facadeMaterial(texture), capacity);
+      // 装饰艺术立面一块平铺画 2 层，其余程序化立面沿用一层一块。
+      const uniforms: FacadeUniforms = {
+        uRows: { value: variant === 3 ? 2 : 1 },
+        uPhoto: { value: 0 },
+        uPhotoTex: { value: null },
+        uPhotoRows: { value: 1 },
+        uTileWidth: { value: 1 },
+        uSelfLit: { value: activeTheme().name === "vice" ? 0.24 : 0.05 },
+      };
+      this.facadeUniforms.push(uniforms);
+      const mesh = new THREE.InstancedMesh(geometry, facadeMaterial(texture, uniforms, String(variant)), capacity);
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       mesh.castShadow = true;
       mesh.receiveShadow = true;
@@ -171,6 +231,9 @@ export class CityParts {
       this.disposables.push(geometry, mesh.material);
     });
 
+    const decoCount = facadeCounts[3] + 4;
+    this.decoTrimMesh = this.makeInstanced(BOX, selfLitMaterial(activeTheme().name === "vice" ? 0.24 : 0.05), decoCount * 2);
+    this.decoCornerMesh = this.makeInstanced(CYLINDER, selfLitMaterial(activeTheme().name === "vice" ? 0.24 : 0.05), decoCount);
     this.podiumMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#e8e2d5" }), total);
     this.roofMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#ffffff" }), total);
     this.neonMesh = this.makeInstanced(BOX, new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false }), total);
@@ -254,10 +317,122 @@ export class CityParts {
       const texture = makeCityTexture(this.layout);
       texture.colorSpace = THREE.SRGBColorSpace;
       const material = new THREE.MeshLambertMaterial({ map: texture });
+      this.installGroundDetail(material);
       const mesh = new THREE.Mesh(geometry, material);
       mesh.receiveShadow = true;
       this.group.add(mesh);
       this.disposables.push(geometry, material, texture);
+    }
+  }
+
+  /** 地面细节：全城图集（2048–4096²）只够画「哪里是路/沙/草」，近看糊成色块。
+   *  在图集颜色上按材质类别叠加世界坐标平铺的照片细节（颜色比值 + 法线明暗），
+   *  分类只看图集颜色与海拔：深灰低饱和=沥青，浅灰=人行道，绿=草，暖浅=沙，近水面的沙=滩涂。 */
+  private installGroundDetail(material: THREE.MeshLambertMaterial): void {
+    const uniforms: Record<string, { value: unknown }> = { uDetail: { value: 0 } };
+    for (const name of ["Asphalt", "Concrete", "Sand", "Mud", "Grass"]) {
+      uniforms[`u${name}C`] = { value: null };
+      uniforms[`u${name}N`] = { value: null };
+      uniforms[`u${name}Mean`] = { value: new THREE.Vector3(0.5, 0.5, 0.5) };
+    }
+    this.terrainUniforms = uniforms;
+    material.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, uniforms);
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "#include <common>\nvarying vec3 vCityWorld;")
+        .replace("#include <project_vertex>", "#include <project_vertex>\nvCityWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;");
+      const samplers = ["Asphalt", "Concrete", "Sand", "Mud", "Grass"].map((n) => `uniform sampler2D u${n}C; uniform sampler2D u${n}N; uniform vec3 u${n}Mean;`).join("\n");
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", `#include <common>\nvarying vec3 vCityWorld;\nuniform float uDetail;\n${samplers}`)
+        .replace("#include <map_fragment>", `#include <map_fragment>
+#ifdef USE_MAP
+  if (uDetail > 0.5) {
+    vec3 base = diffuseColor.rgb;
+    float lum = dot(base, vec3(0.2126, 0.7152, 0.0722));
+    float mx = max(base.r, max(base.g, base.b));
+    float sat = (mx - min(base.r, min(base.g, base.b))) / max(mx, 1e-3);
+    float wA = (1.0 - smoothstep(0.12, 0.3, sat)) * (1.0 - smoothstep(0.05, 0.14, lum));
+    float wC = (1.0 - smoothstep(0.08, 0.22, sat)) * smoothstep(0.16, 0.36, lum);
+    float wG = smoothstep(0.005, 0.05, base.g - max(base.r, base.b));
+    float wS = smoothstep(0.02, 0.09, base.r - base.b) * smoothstep(0.18, 0.4, lum) * (1.0 - wG);
+    float wet = 1.0 - smoothstep(0.5, 1.9, vCityWorld.y);
+    float wM = wS * wet;
+    wS *= 1.0 - wet;
+    float sum = wA + wC + wG + wS + wM;
+    float strength = smoothstep(0.05, 0.45, sum);
+    sum += 1e-4;
+    vec2 p = vCityWorld.xz;
+    vec3 ratio = (wA * texture2D(uAsphaltC, p / 7.0).rgb / uAsphaltMean
+      + wC * texture2D(uConcreteC, p / 5.5).rgb / uConcreteMean
+      + wS * texture2D(uSandC, p / 13.0).rgb / uSandMean
+      + wM * texture2D(uMudC, p / 9.0).rgb / uMudMean
+      + wG * mix(vec3(1.0), texture2D(uGrassC, p / 34.0).rgb / uGrassMean, 0.45)) / sum;
+    vec3 nrm = (wA * (texture2D(uAsphaltN, p / 7.0).xyz * 2.0 - 1.0)
+      + wC * (texture2D(uConcreteN, p / 5.5).xyz * 2.0 - 1.0)
+      + wS * (texture2D(uSandN, p / 13.0).xyz * 2.0 - 1.0)
+      + wM * (texture2D(uMudN, p / 9.0).xyz * 2.0 - 1.0)
+      + wG * 0.4 * (texture2D(uGrassN, p / 34.0).xyz * 2.0 - 1.0)) / sum;
+    diffuseColor.rgb *= mix(vec3(1.0), clamp(ratio, 0.35, 1.8), 0.8 * strength);
+    // 法线贴图做「固定光向」的明暗起伏：地面近似水平，省掉切线空间，代价是凹凸不随太阳转。
+    diffuseColor.rgb *= 1.0 + 0.55 * strength * (nrm.x * 0.6 - nrm.y * 0.45);
+    // 滩涂：向泥色偏、压暗，像刚退潮的湿岸。
+    vec3 mud = texture2D(uMudC, p / 9.0).rgb;
+    diffuseColor.rgb = mix(diffuseColor.rgb, mud * 0.9, 0.5 * wM / sum * strength);
+  }
+#endif`);
+    };
+    material.customProgramCacheKey = () => "city-terrain-detail";
+  }
+
+  /** 素材到齐后原地换上：地面细节、照片立面、灰泥法线、水面法线与天空反射。 */
+  applyAssets(assets: CityAssets): void {
+    const theme = activeTheme();
+    const mean = (texture: THREE.Texture): THREE.Vector3 => {
+      const image = texture.image as CanvasImageSource & { width: number; height: number };
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 8;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return new THREE.Vector3(0.5, 0.5, 0.5);
+      ctx.drawImage(image, 0, 0, 8, 8);
+      const data = ctx.getImageData(0, 0, 8, 8).data;
+      const sum = [0, 0, 0];
+      for (let index = 0; index < data.length; index += 4) for (let c = 0; c < 3; c += 1) sum[c] += data[index + c];
+      // 着色器里采样得到的是线性值（sRGB 纹理自动解码），均值也换算成线性。
+      const toLinear = (v: number) => Math.pow(v / 255 / 64, 2.2);
+      return new THREE.Vector3(toLinear(sum[0]), toLinear(sum[1]), toLinear(sum[2]));
+    };
+    if (this.terrainUniforms) {
+      const ground = assets.ground;
+      const pairs: Array<[string, { color: THREE.Texture; normal: THREE.Texture }]> = [["Asphalt", ground.asphalt], ["Concrete", ground.concrete], ["Sand", ground.sand], ["Mud", ground.mud], ["Grass", ground.grass]];
+      for (const [name, layer] of pairs) {
+        this.terrainUniforms[`u${name}C`].value = layer.color;
+        this.terrainUniforms[`u${name}N`].value = layer.normal;
+        this.terrainUniforms[`u${name}Mean`].value = mean(layer.color);
+      }
+      this.terrainUniforms.uDetail.value = 1;
+    }
+    // 照片立面：每张图的「每块平铺对应多少层」不同（窗格行数），uRows 让一层楼≈一行窗。
+    // 一块平铺覆盖的楼层数与宽度（世界单位，窗宽≈2.4）：让窗格大小在三种立面间一致。
+    const rows = [8, 10, 10];
+    const tileWidths = [30, 32, 32];
+    assets.facades.forEach((texture, variant) => {
+      const uniforms = this.facadeUniforms[variant];
+      if (!uniforms) return;
+      uniforms.uPhotoTex.value = texture;
+      uniforms.uPhoto.value = 1;
+      uniforms.uPhotoRows.value = rows[variant];
+      uniforms.uTileWidth.value = tileWidths[variant];
+    });
+    const deco = this.shaftMeshes[3]?.material as THREE.MeshLambertMaterial | undefined;
+    if (deco) {
+      deco.normalMap = assets.stuccoNormal;
+      deco.normalScale.set(0.6, 0.6);
+      deco.needsUpdate = true;
+    }
+    if (this.waterAssetUniforms) {
+      this.waterAssetUniforms.uNormal.value = assets.waterNormal;
+      this.waterAssetUniforms.uSkyTex.value = theme.skyImage === "dusk" ? assets.sky.dusk : assets.sky.day;
+      this.waterAssetUniforms.uHasAssets.value = 1;
     }
   }
 
@@ -529,6 +704,10 @@ export class CityParts {
   private facadeFor(building: CityBuilding): number {
     const zone = this.zoneById.get(building.id);
     if (!zone) return building.facade;
+    // 海滨（非地标、楼高 ≤ 36）→ 装饰艺术灰泥立面：粉彩墙、水平饰带、圆角转角。曾限定「低于 22」，
+    // 但楼高由 token 决定，真实会话几乎都高于 22，一栋都没命中；迈阿密海滨的装饰艺术酒店本来也有十几层。
+    // 楼高仍由 token 决定（数据语义不变），只是低矮的海滨楼换一种建筑语汇。
+    if (zone === "waterfront" && building.height <= 36 && building.archetype !== "landmark") return 3;
     if (zone === "downtown") return 2;
     if (zone === "commercial") return 1;
     if (zone === "residential") return 0;
@@ -830,6 +1009,12 @@ export class CityParts {
         // 否则 2600 见方的水面直边会像「世界边缘」露在天空下。
         uFog: { value: new THREE.Color(activeTheme().skyHorizon) },
         uFogRange: { value: new THREE.Vector2(...activeTheme().waterFog) },
+        uNormal: { value: null as THREE.Texture | null },
+        uSkyTex: { value: null as THREE.Texture | null },
+        uHasAssets: { value: 0 },
+        uGradeTop: { value: new THREE.Color(activeTheme().skyGrade.top) },
+        uGradeHorizon: { value: new THREE.Color(activeTheme().skyGrade.horizon) },
+        uGradeAmount: { value: activeTheme().skyGrade.amount },
       },
       vertexShader: /* glsl */ `
         varying vec3 vWorld;
@@ -847,7 +1032,21 @@ export class CityParts {
         uniform vec3 uSky;
         uniform vec3 uFog;
         uniform vec2 uFogRange;
+        uniform sampler2D uNormal;
+        uniform sampler2D uSkyTex;
+        uniform float uHasAssets;
+        uniform vec3 uGradeTop;
+        uniform vec3 uGradeHorizon;
+        uniform float uGradeAmount;
         varying vec3 vWorld;
+        // 与天空球同一套采样 + 调色：反射和远处淡出都要与天空完全一致，否则地平线出现接缝。
+        vec3 skyAt(vec3 dir) {
+          dir = normalize(dir);
+          vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
+          vec3 photo = texture2D(uSkyTex, uv).rgb;
+          vec3 tint = mix(uGradeHorizon, uGradeTop, smoothstep(0.0, 0.6, max(dir.y, 0.0)));
+          return mix(photo, photo * tint * 1.55, uGradeAmount);
+        }
         float wave(vec2 p, float t) {
           float h = sin(p.x * 0.09 + t * 0.8) * cos(p.y * 0.075 - t * 0.6) * 0.5;
           h += sin((p.x + p.y) * 0.16 + t * 1.1) * 0.28;
@@ -861,10 +1060,18 @@ export class CityParts {
           float hx = wave(p + vec2(e, 0.0), uTime);
           float hz = wave(p + vec2(0.0, e), uTime);
           vec3 n = normalize(vec3((h0 - hx) * 1.8, e * 1.7, (h0 - hz) * 1.8));
+          if (uHasAssets > 0.5) {
+            // 两层反向滚动的法线贴图：细碎波纹不再是规则的正弦格。
+            vec3 a = texture2D(uNormal, p / 46.0 + vec2(uTime * 0.010, uTime * 0.006)).xyz * 2.0 - 1.0;
+            vec3 b = texture2D(uNormal, p / 19.0 - vec2(uTime * 0.007, -uTime * 0.011)).xyz * 2.0 - 1.0;
+            vec3 t = a + b;
+            n = normalize(vec3(t.x * 0.32, 1.0, t.y * 0.32));
+          }
           vec3 view = normalize(cameraPosition - vWorld);
           float fresnel = pow(1.0 - max(dot(n, view), 0.0), 2.4);
           vec3 base = mix(uShallow, uDeep, clamp(length(p) / 420.0, 0.0, 1.0));
-          vec3 color = mix(base, uSky, fresnel * 0.6);
+          vec3 skyColor = uHasAssets > 0.5 ? skyAt(reflect(-view, n)) : uSky;
+          vec3 color = mix(base, skyColor, uHasAssets > 0.5 ? 0.12 + fresnel * 0.78 : fresnel * 0.6);
           float specular = pow(max(dot(reflect(-normalize(uSun), n), view), 0.0), 64.0);
           color += vec3(1.0, 0.97, 0.88) * specular * 1.05;
           color += vec3(0.05) * smoothstep(0.5, 0.95, h0);
@@ -879,11 +1086,18 @@ export class CityParts {
           gl_FragColor = vec4(color, 1.0);
           #include <tonemapping_fragment>
           // 雾混在色调映射之后：scene.background 不经色调映射，先混再映射会让远水发灰、与天空出现色带。
-          gl_FragColor.rgb = mix(gl_FragColor.rgb, uFog, smoothstep(uFogRange.x, uFogRange.y, dist));
+          vec3 fogColor = uFog;
+          if (uHasAssets > 0.5) {
+            // 远处淡出到「这个方向地平线上的天空」，而不是一个常数色。
+            vec3 horizonDir = normalize(vec3(vWorld.x - cameraPosition.x, 0.0, vWorld.z - cameraPosition.z));
+            fogColor = skyAt(horizonDir + vec3(0.0, 0.01, 0.0));
+          }
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, smoothstep(uFogRange.x, uFogRange.y, dist));
           #include <colorspace_fragment>
         }
       `,
     });
+    this.waterAssetUniforms = material.uniforms as Record<string, { value: unknown }>;
     const mesh = new THREE.Mesh(geometry, material);
     mesh.position.y = -0.55;
     this.disposables.push(geometry, material);
@@ -898,7 +1112,8 @@ export class CityParts {
     let antennaCount = 0;
     let beaconCount = 0;
     let craneCount = 0;
-    const shaftCursor = [0, 0, 0];
+    const shaftCursor = [0, 0, 0, 0];
+    let decoCursor = 0;
 
     const ordered = [...this.model.buildings].sort((left, right) => left.startedAt - right.startedAt);
     for (const building of ordered) {
@@ -928,9 +1143,22 @@ export class CityParts {
         craneX: 0,
         craneZ: 0,
         blinkPhase: hashSeed(`blink:${building.id}`) * Math.PI * 2,
+        deco: -1,
       };
 
       runtime.facade = this.facadeFor(building);
+      if (runtime.facade === 3) {
+        runtime.deco = decoCursor;
+        decoCursor += 1;
+        // 装饰艺术楼墙面用宿主强调色的粉彩版（而不是宿主的浅墙色）：浅墙色在黄昏暖光下被压成灰，
+        // 海滨要的是一眼能认出的粉、薄荷、青、紫。
+        runtime.paletteWall = new THREE.Color(palette.accent).lerp(new THREE.Color("#ffffff"), 0.52).multiplyScalar(0.96 + building.seed * 0.08);
+        // 转角柱与墙同色略亮；女儿墙与遮阳棚用宿主强调色的粉彩版——海滨一眼看出是哪个宿主。
+        const accent = new THREE.Color(palette.accent).lerp(new THREE.Color("#ffffff"), 0.35);
+        this.decoCornerMesh.setColorAt(runtime.deco, runtime.paletteWall.clone().multiplyScalar(1.06));
+        this.decoTrimMesh.setColorAt(runtime.deco * 2, accent);
+        this.decoTrimMesh.setColorAt(runtime.deco * 2 + 1, accent.clone().multiplyScalar(0.92));
+      }
       const mesh = this.shaftMeshes[runtime.facade];
       const instanceMap = this.shaftIdByInstance[runtime.facade];
       const wantsUpper = building.archetype === "tower" || building.archetype === "landmark";
@@ -990,6 +1218,10 @@ export class CityParts {
     this.antennaMesh.count = antennaCount;
     this.beaconMesh.count = beaconCount;
     this.craneMastMesh.count = craneCount;
+    this.decoCornerMesh.count = decoCursor;
+    this.decoTrimMesh.count = decoCursor * 2;
+    if (this.decoCornerMesh.instanceColor) this.decoCornerMesh.instanceColor.needsUpdate = true;
+    if (this.decoTrimMesh.instanceColor) this.decoTrimMesh.instanceColor.needsUpdate = true;
     this.craneArmMesh.count = craneCount;
 
     for (const runtime of this.runtimes) this.applyConstruction(runtime, true);
@@ -1078,6 +1310,22 @@ export class CityParts {
       }
       this.scaffoldMesh.setMatrixAt(runtime.scaffold, this.matrix);
     }
+    // 装饰艺术附件：圆角转角柱随楼长高；封顶后立起阶梯女儿墙；底层有遮阳棚。
+    if (runtime.deco >= 0) {
+      const local = (lx: number, lz: number) => ({ x: x + lx * Math.cos(yaw) + lz * Math.sin(yaw), z: z - lx * Math.sin(yaw) + lz * Math.cos(yaw) });
+      const radius = Math.min(widths[0], widths[1]) * 0.24;
+      const corner = local(widths[0] / 2 - radius * 0.55, widths[1] / 2 - radius * 0.55);
+      this.compose(corner.x, g, corner.z, 0, radius, Math.max(0.2, built + 0.4), radius);
+      this.decoCornerMesh.setMatrixAt(runtime.deco, this.matrix);
+      const done = fraction > 0.985;
+      const crown = local(0, widths[1] * 0.1);
+      this.compose(crown.x, g + built, crown.z, yaw, done ? widths[0] * 0.42 : 0, done ? 2.4 : 0, done ? widths[1] * 0.7 : 0);
+      this.decoTrimMesh.setMatrixAt(runtime.deco * 2, this.matrix);
+      const awning = local(-widths[0] * 0.08, widths[1] / 2 + 0.8);
+      const awningOn = built > 3.4;
+      this.compose(awning.x, g + 2.7, awning.z, yaw, awningOn ? widths[0] * 0.66 : 0, awningOn ? 0.28 : 0, awningOn ? 1.7 : 0);
+      this.decoTrimMesh.setMatrixAt(runtime.deco * 2 + 1, this.matrix);
+    }
     // 天线（landmark 封顶后立起）。
     if (runtime.antenna >= 0) {
       const done = fraction > 0.985;
@@ -1119,6 +1367,11 @@ export class CityParts {
     if (runtime.shaftPrimary >= 0) this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftPrimary, this.matrix);
     if (runtime.shaftUpper >= 0) this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftUpper, this.matrix);
     if (runtime.podium >= 0) this.podiumMesh.setMatrixAt(runtime.podium, this.matrix);
+    if (runtime.deco >= 0) {
+      this.decoCornerMesh.setMatrixAt(runtime.deco, this.matrix);
+      this.decoTrimMesh.setMatrixAt(runtime.deco * 2, this.matrix);
+      this.decoTrimMesh.setMatrixAt(runtime.deco * 2 + 1, this.matrix);
+    }
     if (runtime.roof >= 0) {
       this.roofMesh.setMatrixAt(runtime.roof, this.matrix);
       this.neonMesh.setMatrixAt(runtime.roof, this.matrix);
@@ -1227,6 +1480,8 @@ export class CityParts {
     if (dirty || Number.isNaN(this.cursor)) {
       for (const mesh of this.shaftMeshes) mesh.instanceMatrix.needsUpdate = true;
       this.podiumMesh.instanceMatrix.needsUpdate = true;
+      this.decoCornerMesh.instanceMatrix.needsUpdate = true;
+      this.decoTrimMesh.instanceMatrix.needsUpdate = true;
       this.roofMesh.instanceMatrix.needsUpdate = true;
       this.neonMesh.instanceMatrix.needsUpdate = true;
       this.scaffoldMesh.instanceMatrix.needsUpdate = true;
