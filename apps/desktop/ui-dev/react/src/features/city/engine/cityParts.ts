@@ -275,17 +275,46 @@ export class CityParts {
     const { left, right, north, south } = this.layout.urbanBounds;
     const highwayZ = north - 12;
     const highwayWidth = right - left + 36;
-    add((left + right) / 2, 7.4, highwayZ, highwayWidth, 0.9, 9, "#6a7071");
-    for (const offset of [-4.4, 0, 4.4]) add((left + right) / 2, 8.3, highwayZ + offset, highwayWidth, 0.5, 0.28, "#c6c6bb");
-    for (let x = left - 12; x < right + 18; x += 27) {
-      add(x, 1.2, highwayZ, 1.6, 6.2, 5.8, "#a9aaa0");
-      for (const offset of [-2.2, 2.2]) add(x, 8.32, highwayZ + offset, 9, 0.03, 0.18, "#ddd4aa");
+    // 北环高架只铺在「陆地/河面上、且地形低于桥面」的路段：原先整条直线铺满，
+    // 在北侧山体里被埋、出海岸线后又悬在海上（断头桥）。
+    const terrain = this.layout.terrain;
+    const ringStep = 9;
+    const samples: Array<{ x: number; land: boolean; low: boolean }> = [];
+    for (let x = left - 18; x <= right + 18; x += ringStep) {
+      const h = terrain.height(x, highwayZ);
+      samples.push({ x, land: h >= -0.3, low: h < 4.8 });
     }
-    // Long east/west approaches descend onto the perimeter streets.
-    for (const side of [-1, 1]) {
-      const x = side < 0 ? left : right;
+    const firstLand = samples.findIndex((sample) => sample.land && sample.low);
+    const lastLand = samples.length - 1 - [...samples].reverse().findIndex((sample) => sample.land && sample.low);
+    const rampEnds: Array<{ x: number; dir: number }> = [];
+    if (firstLand >= 0 && lastLand > firstLand) {
+      let runStart = -1;
+      const flush = (end: number) => {
+        if (runStart < 0 || end <= runStart) { runStart = -1; return; }
+        const x0 = samples[runStart].x;
+        const x1 = samples[end].x;
+        add((x0 + x1) / 2, 7.4, highwayZ, x1 - x0, 0.9, 9, "#6a7071");
+        for (const offset of [-4.4, 0, 4.4]) add((x0 + x1) / 2, 8.3, highwayZ + offset, x1 - x0, 0.5, 0.28, "#c6c6bb");
+        for (let x = x0; x <= x1; x += 27) {
+          const ground = Math.max(-3, terrain.height(x, highwayZ));
+          add(x, ground, highwayZ, 1.6, 7.4 - ground, 5.8, "#a9aaa0");
+          for (const offset of [-2.2, 2.2]) add(x, 8.32, highwayZ + offset, 9, 0.03, 0.18, "#ddd4aa");
+        }
+        runStart = -1;
+      };
+      for (let index = firstLand; index <= lastLand; index += 1) {
+        if (samples[index].low) {
+          if (runStart < 0) runStart = index;
+        } else flush(index - 1);
+      }
+      flush(lastLand);
+      if (samples[firstLand].x <= left + 20) rampEnds.push({ x: left, dir: -1 });
+      if (samples[lastLand].x >= right - 20) rampEnds.push({ x: right, dir: 1 });
+    }
+    // Long east/west approaches descend onto the perimeter streets — only where the ring really lands on ground.
+    for (const end of rampEnds) {
       const rampLength = 66;
-      add(x, 4.25, highwayZ + rampLength / 2, 6, 0.65, rampLength, "#737a79", Math.atan2(7.1, rampLength));
+      add(end.x, 4.25, highwayZ + rampLength / 2, 6, 0.65, rampLength, "#737a79", Math.atan2(7.1, rampLength));
     }
     // Port: two piers, warehouses, container stacks and two gantry cranes.
     for (let index = 0; index < 2; index += 1) {
@@ -334,12 +363,14 @@ export class CityParts {
           const groundY = Math.max(-3, this.layout.terrain.height(point.x, point.z));
           // 墩顶止于桥面底面（咬合 0.05）：桥面板在任何视角下都完整包住墩顶，
           // 不会出现"桥墩穿透路面"的视觉交叠。
-          const pierTop = deckY - 0.4;
+          // BOX 以底面为原点：y 是墩底而不是中心。曾按「中心」写成 (地面+墩顶)/2，
+          // 桥墩悬在半空且戳出桥面（截图里河中那个方块）。
+          const pierTop = deckY + 0.05;
           // 桥墩随该点处桥面走向旋转（横截面垂直于桥），盖梁宽度覆盖桥面。
           const neighbor = points[Math.min(index + 1, points.length - 1)];
           const prev = points[Math.max(index - 1, 0)];
           const pierYaw = -Math.atan2(neighbor.z - prev.z, neighbor.x - prev.x);
-          pieces.push({ x: point.x, y: (groundY + pierTop) / 2, z: point.z, sx: 1.8, sy: pierTop - groundY, sz: 8.4, yaw: pierYaw, color: "#a9aaa0" });
+          pieces.push({ x: point.x, y: groundY, z: point.z, sx: 1.8, sy: pierTop - groundY, sz: 8.4, yaw: pierYaw, color: "#a9aaa0" });
         }
       }
       for (let index = 1; index < points.length; index += 1) {
@@ -351,8 +382,11 @@ export class CityParts {
         const mx = (a.x + b.x) / 2;
         const mz = (a.z + b.z) / 2;
         pieces.push({ x: mx, y: deckY, z: mz, sx: length + 0.5, sy: 0.9, sz: 10.5, yaw, color: "#6a7071" });
-        for (const offset of [-3.6, 0, 3.6]) pieces.push({ x: mx, y: deckY + 0.55, z: mz, sx: length, sy: 0.12, sz: 0.3, yaw, color: "#c6c6bb" });
-        for (const offset of [-5.1, 5.1]) pieces.push({ x: mx, y: deckY + 0.75, z: mz, sx: length, sy: 0.55, sz: 0.3, yaw, color: "#b9bcb2" });
+        // 车道线/护栏沿桥面横向偏移（offset 之前被忽略，全叠在中线上），且要在桥面顶面（deckY+0.9）之上。
+        const sideX = Math.sin(yaw);
+        const sideZ = Math.cos(yaw);
+        for (const offset of [-3.6, 0, 3.6]) pieces.push({ x: mx + sideX * offset, y: deckY + 0.9, z: mz + sideZ * offset, sx: length, sy: 0.05, sz: 0.3, yaw, color: "#c6c6bb" });
+        for (const offset of [-5.1, 5.1]) pieces.push({ x: mx + sideX * offset, y: deckY + 0.9, z: mz + sideZ * offset, sx: length, sy: 0.55, sz: 0.3, yaw, color: "#b9bcb2" });
       }
     }
     if (!pieces.length) return;
@@ -603,7 +637,7 @@ export class CityParts {
   }
 
   private buildWater(): THREE.Mesh {
-    const geometry = new THREE.PlaneGeometry(2600, 2600, 1, 1).rotateX(-Math.PI / 2);
+    const geometry = new THREE.PlaneGeometry(9000, 9000, 1, 1).rotateX(-Math.PI / 2);
     const material = new THREE.ShaderMaterial({
       uniforms: {
         uTime: { value: 0 },
@@ -611,6 +645,9 @@ export class CityParts {
         uDeep: { value: new THREE.Color("#57a3b4") },
         uShallow: { value: new THREE.Color("#a5d6da") },
         uSky: { value: new THREE.Color("#dff0f2") },
+        // 与 scene.background 同色：ShaderMaterial 不吃 scene.fog，水面远处要自己淡出到天空色，
+        // 否则 2600 见方的水面直边会像「世界边缘」露在天空下。
+        uFog: { value: new THREE.Color("#d9ecf1") },
       },
       vertexShader: /* glsl */ `
         varying vec3 vWorld;
@@ -626,6 +663,7 @@ export class CityParts {
         uniform vec3 uDeep;
         uniform vec3 uShallow;
         uniform vec3 uSky;
+        uniform vec3 uFog;
         varying vec3 vWorld;
         float wave(vec2 p, float t) {
           float h = sin(p.x * 0.09 + t * 0.8) * cos(p.y * 0.075 - t * 0.6) * 0.5;
@@ -651,9 +689,14 @@ export class CityParts {
           vec2 cell = floor(p * 1.35);
           float sparkle = sin(dot(cell, vec2(127.1, 311.7)) + uTime * 2.2) * 0.5 + 0.5;
           sparkle = pow(sparkle, 7.0) * smoothstep(0.35, 0.9, h0);
+          // 近处格子比像素大会变成白色棋盘噪点，远处则混叠：只在中距离出现。
+          float dist = distance(cameraPosition, vWorld);
+          sparkle *= smoothstep(90.0, 200.0, dist) * (1.0 - smoothstep(300.0, 650.0, dist));
           color += vec3(1.0, 0.99, 0.92) * sparkle * 0.5;
           gl_FragColor = vec4(color, 1.0);
           #include <tonemapping_fragment>
+          // 雾混在色调映射之后：scene.background 不经色调映射，先混再映射会让远水发灰、与天空出现色带。
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, uFog, smoothstep(900.0, 2300.0, dist));
           #include <colorspace_fragment>
         }
       `,

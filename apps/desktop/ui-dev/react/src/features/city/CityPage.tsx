@@ -39,6 +39,15 @@ function durationLabel(startedAt: number, endedAt: number | null, language: AppL
   return message("city.detail.days", language, { count: Math.round(hours / 24) });
 }
 
+/** 帧率/绘制次数是调试信息：只在 ?cityDebug 或 localStorage.cityDebug=1 时显示，不给最终用户。 */
+function cityDebugEnabled(): boolean {
+  try {
+    return new URLSearchParams(window.location.search).has("cityDebug") || window.localStorage.getItem("cityDebug") === "1";
+  } catch {
+    return false;
+  }
+}
+
 export function CityPage() {
   const language = useLanguage();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -321,7 +330,7 @@ export function CityPage() {
     {error && <div className="error-banner city-error" role="alert">{error}</div>}
     {!loading && model && model.stats.totalSessions === 0 && !error && <div className="city-state"><strong>{message("city.empty", language)}</strong><p>{message("city.emptyHelp", language)}</p></div>}
 
-    {stats && <p className="city-perf" aria-hidden="true">{message("city.perf", language, { fps: stats.fps, calls: stats.drawCalls, buildings: stats.buildings, quality: stats.quality })}{stats.idle ? ` · ${message("city.perfIdle", language)}` : ""}</p>}
+    {stats && cityDebugEnabled() && <p className="city-perf" aria-hidden="true">{message("city.perf", language, { fps: stats.fps, calls: stats.drawCalls, buildings: stats.buildings, quality: stats.quality })}{stats.idle ? ` · ${message("city.perfIdle", language)}` : ""}</p>}
 
     {selectedBuilding && <aside className="city-panel" role="dialog" aria-label={message("city.detail.title", language)}>
       <button type="button" className="city-panel-close" aria-label={message("city.detail.close", language)} onClick={() => { selectedRef.current = null; setSelectedId(null); }}>×</button>
