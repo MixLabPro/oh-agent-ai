@@ -4381,15 +4381,14 @@ fn overview_details_snapshot_at(data_home: std::path::PathBuf, month: &str, date
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
     let repo = agent_vitals_runtime::query::summary::SqlSummaryRepository::at(data_home);
     let memo = agent_vitals_runtime::query::read_memo::ReadMemo::global();
-    // 趋势面板失败小时（OVERVIEW_TREND_PANEL spec v1.1 §3）：与 monthly/daily/calendar
-    // 同一 revision 括号，按快照 date（今日）取小时桶；库开不了/日期非法 → null，
-    // 前端走「失败标记不可用」降级。
-    let failure_hours = repo
-        .open_db()
-        .and_then(|db| agent_vitals_data::issues::failure_hours_day(db.conn(), date));
     let mut result = Value::Null;
     for attempt in 0..2 {
         let revision_before = authority_revision_at(&path);
+        // 趋势面板失败小时（OVERVIEW_TREND_PANEL spec v1.1 §3）：在 revision_before
+        // 采样之后读取，与 monthly/daily/calendar 同处一致性括号内。
+        let failure_hours = repo
+            .open_db()
+            .and_then(|db| agent_vitals_data::issues::failure_hours_day(db.conn(), date));
         let monthly = repo.monthly_summary_json_memoized(&MonthlySummaryQuery { month: month.to_string() }, memo);
         let daily = repo.daily_summary_json_memoized(&DailySummaryQuery { date: date.to_string() }, memo);
         let calendar = agent_vitals_runtime::query::summary::calendar_month_memoized(month, &repo, memo);

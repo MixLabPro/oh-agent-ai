@@ -106,10 +106,14 @@ pub fn failure_hours_day(conn: &rusqlite::Connection, date: &str) -> Option<Valu
     ).ok()?;
     let mut rows = stmt.query(rusqlite::params![start, end]).ok()?;
     let mut hours: BTreeMap<String, u64> = BTreeMap::new();
+    // 与 token 柱同口径：统计时区墙钟小时（SQLite strftime '%H' localtime）。
+    // 不用 (ms-start)/3600000 的流逝小时——DST 换日日两者会差一列（评审 P3）。
+    let timezone = crate::authority_query::statistics_timezone();
     while let Some(row) = rows.next().ok()? {
         let opened_at_ms: i64 = row.get(0).ok()?;
-        // 窗口已按日界过滤，小时 = 距日界的整小时偏移；漂入下一天的毫秒不可能出现。
-        let hour = (opened_at_ms - start) / 3_600_000;
+        let hour = Timestamp::from_millisecond(opened_at_ms).ok()?
+            .to_zoned(timezone.clone())
+            .hour();
         *hours.entry(hour.to_string()).or_insert(0) += 1;
     }
     Some(json!({ "date": date, "hours": hours }))

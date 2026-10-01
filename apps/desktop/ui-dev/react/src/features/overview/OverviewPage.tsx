@@ -133,7 +133,7 @@ function TrendPanel({ details }: { details: OverviewDetails }) {
           </a>;
         })}
       </div>
-      {!hasUsage && !hasFailures && <p className="overview-empty">{message("overview.trendEmpty", language)}</p>}
+      {!hasUsage && !hasFailures && hourlyState === "ok" && <p className="overview-empty">{message("overview.trendEmpty", language)}</p>}
       <p className="overview-trend-note">{message("overview.trendNote", language)}</p>
     </>}
   </section>;

@@ -2404,13 +2404,15 @@ function statisticsMonthAndDate(timezone: string): { month: string; date: string
   return { month: `${year}-${month}`, date: `${year}-${month}-${day}` };
 }
 
-// OVERVIEW_TREND_PANEL spec v1.1 §4：失败小时标记容错降级——形状不对 → null
-// （读不到 ≠ 零失败），绝不抛错连累同一 bundle 里的 token 面板。键只接受
-// "0".."23"、值正整数；任何条目非法也整体 null：丢弃坏条目剩下的「空对象」
-// 会被当成真零失败渲染，那是编造。
-function parseFailureHours(value: unknown): Record<string, number> | null {
+// OVERVIEW_TREND_PANEL spec v1.1 §4：失败小时标记容错降级——形状不对、外层
+// date 与请求日不一致 → null（读不到 ≠ 零失败），绝不抛错连累同一 bundle 里的
+// token 面板。键只接受 "0".."23"、值正整数；任何条目非法也整体 null：丢弃坏
+// 条目剩下的「空对象」会被当成真零失败渲染，那是编造。
+function parseFailureHours(value: unknown, expectedDate: string): Record<string, number> | null {
   if (value == null || typeof value !== "object" || Array.isArray(value)) return null;
-  const hours = (value as Record<string, unknown>).hours;
+  const root = value as Record<string, unknown>;
+  if (root.date !== expectedDate) return null;
+  const hours = root.hours;
   if (hours == null || typeof hours !== "object" || Array.isArray(hours)) return null;
   const out: Record<string, number> = {};
   for (const [hour, count] of Object.entries(hours as Record<string, unknown>)) {
@@ -2437,7 +2439,7 @@ export async function readOverviewDetails(): Promise<OverviewDetails> {
       monthly: root.monthly == null ? null : parseUsageSourceSummary(root.monthly),
       daily: root.daily == null ? null : parseDailySummary(root.daily),
       calendar: root.calendar == null ? null : parseUsageCalendar(root.calendar),
-      failure_hours: parseFailureHours(root.failure_hours),
+      failure_hours: parseFailureHours(root.failure_hours, date),
       authority_revision, is_consistent, errors,
     };
   }

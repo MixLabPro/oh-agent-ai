@@ -296,6 +296,15 @@ restore();
 withOverride(async (command, args) => {
   const result = await originalInvoke(command, args);
   if (command !== "read_overview_details_snapshot") return result;
+  return { ...result, failure_hours: { date: "1999-01-01", hours: { "9": 1 } } };
+});
+const trendWrongDate = await bridge.readOverviewDetails();
+assert.equal(trendWrongDate.failure_hours, null, "failure_hours for a different day must degrade to null, never mark the wrong day's chart");
+restore();
+
+withOverride(async (command, args) => {
+  const result = await originalInvoke(command, args);
+  if (command !== "read_overview_details_snapshot") return result;
   return { ...result, failure_hours: null };
 });
 const trendNullBackend = await bridge.readOverviewDetails();
