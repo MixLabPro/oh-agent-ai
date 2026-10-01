@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { FxSection } from "./FxSection";
 import { hostName } from "../../lib/hostNames";
 import { stable } from "../../lib/stable";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
@@ -1102,6 +1103,8 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
     <BudgetSection report={budgetReport} loading={budgetLoading} error={budgetError} onReload={refreshBudget} />
 
     <QuotaReminderSection config={quotaReminder} loading={quotaReminderLoading} error={quotaReminderError} onReload={refreshQuotaReminder} />
+
+    <FxSection />
 
     <StatisticsDataSection report={dataReport} loading={dataLoading} error={dataError} onReload={refreshData} />
 

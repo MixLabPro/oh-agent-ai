@@ -3524,3 +3524,88 @@ export async function fetchWatcherHealth(): Promise<WatcherHealthStatus | null> 
     return null;
   }
 }
+
+
+// ───────────────────── 汇率 V2（报告币种 + 参考汇率）─────────────────────
+// 形状来源：src-tauri/src/lib.rs 的 fx_status / fx_convert_amounts（同一 PR 同改）。
+// 账单层始终原币种；这里只是展示偏好与带出处的折算，折算不可用时界面回退原币种。
+
+export type FxManualRate = { from: string; to: string; rate: number; as_of: string | null };
+export type FxStatus = {
+  reporting_currency: string;
+  reporting_currency_is_default: boolean;
+  system_locale: string;
+  rate_date: string;
+  rate_age_days: number | null;
+  rate_stale: boolean;
+  rate_source: "bundled_snapshot";
+  supported_currencies: string[];
+  manual_rates: FxManualRate[];
+};
+export type FxConvertItem = { currency: string; amount: number; converted: number; rate: number; rate_source: "bundled_snapshot" | "user_assumption" | "identity"; rate_date: string | null };
+export type FxConvertResult = { target: string; total: number; approximate: boolean; items: FxConvertItem[]; unavailable: Array<{ currency: string; amount: number }> };
+
+const FX_CHANGED_EVENT = "agent-vitals-fx-changed";
+export const onFxChanged = (listener: () => void): (() => void) => { window.addEventListener(FX_CHANGED_EVENT, listener); return () => window.removeEventListener(FX_CHANGED_EVENT, listener); };
+const announceFxChanged = () => window.dispatchEvent(new Event(FX_CHANGED_EVENT));
+
+function parseFxStatus(value: unknown): FxStatus {
+  const root = record(value, "fx status");
+  if (root.status !== "ok") throw new Error("fx status unavailable");
+  const currencies = Array.isArray(root.supported_currencies) ? root.supported_currencies.filter((item): item is string => typeof item === "string") : [];
+  const manual = (Array.isArray(root.manual_rates) ? root.manual_rates : []).map((row) => {
+    const entry = record(row, "fx manual rate");
+    if (typeof entry.rate !== "number" || !Number.isFinite(entry.rate) || entry.rate <= 0) throw new Error("fx manual rate invalid");
+    return { from: stringField(entry.from, "fx from"), to: stringField(entry.to, "fx to"), rate: entry.rate, as_of: typeof entry.as_of === "string" ? entry.as_of : null };
+  });
+  return {
+    reporting_currency: stringField(root.reporting_currency, "reporting currency"),
+    reporting_currency_is_default: root.reporting_currency_is_default === true,
+    system_locale: typeof root.system_locale === "string" ? root.system_locale : "",
+    rate_date: stringField(root.rate_date, "fx rate date"),
+    rate_age_days: typeof root.rate_age_days === "number" ? root.rate_age_days : null,
+    rate_stale: root.rate_stale !== false,
+    rate_source: "bundled_snapshot",
+    supported_currencies: currencies,
+    manual_rates: manual,
+  };
+}
+
+export async function readFxStatus(): Promise<FxStatus | null> {
+  if (!hasNativeBridge()) return null;
+  return parseFxStatus(await invoke<unknown>("fx_status"));
+}
+
+export async function saveReportingCurrency(currency: string): Promise<void> {
+  if (!hasNativeBridge()) return;
+  const root = record(await invoke<unknown>("save_reporting_currency_config", { currency }), "save reporting currency");
+  if (root.status !== "saved") throw new Error("reporting currency not saved");
+  announceFxChanged();
+}
+
+export async function saveFxManualRate(from: string, to: string, rate: number, asOf: string | null): Promise<void> {
+  if (!Number.isFinite(rate) || rate <= 0) throw new Error("rate must be a positive number");
+  if (!hasNativeBridge()) return;
+  await invoke("save_fx_manual_rate", { from, to, rate, asOf });
+  announceFxChanged();
+}
+
+export async function removeFxManualRate(from: string, to: string): Promise<void> {
+  if (!hasNativeBridge()) return;
+  await invoke("remove_fx_manual_rate", { from, to });
+  announceFxChanged();
+}
+
+/** `{币种: 金额}` → 报告币种的约数合计（后端按快照/手动汇率算，界面不自造汇率）。无桥接 → null。 */
+export async function convertAmounts(amounts: Record<string, number>): Promise<FxConvertResult | null> {
+  if (!hasNativeBridge()) return null;
+  const root = record(await invoke<unknown>("fx_convert_amounts", { amounts }), "fx convert");
+  if (root.status !== "ok" || typeof root.target !== "string" || typeof root.total !== "number" || !Number.isFinite(root.total)) throw new Error("fx convert unavailable");
+  const items = (Array.isArray(root.items) ? root.items : []).map((row) => {
+    const entry = record(row, "fx convert item");
+    const source = entry.rate_source === "user_assumption" ? "user_assumption" : entry.rate_source === "identity" ? "identity" : "bundled_snapshot";
+    return { currency: stringField(entry.currency, "fx currency"), amount: Number(entry.amount), converted: Number(entry.converted), rate: Number(entry.rate), rate_source: source as FxConvertItem["rate_source"], rate_date: typeof entry.rate_date === "string" ? entry.rate_date : null };
+  });
+  const unavailable = (Array.isArray(root.unavailable) ? root.unavailable : []).map((row) => { const entry = record(row, "fx unavailable"); return { currency: stringField(entry.currency, "fx currency"), amount: Number(entry.amount) }; });
+  return { target: root.target, total: root.total, approximate: root.approximate === true, items, unavailable };
+}

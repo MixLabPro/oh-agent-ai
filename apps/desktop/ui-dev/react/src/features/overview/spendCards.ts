@@ -1,7 +1,8 @@
-import type { DailySummary, UsageSourceSummary } from "../../lib/tauri";
+import type { DailySummary, FxConvertResult, UsageSourceSummary } from "../../lib/tauri";
 import { formatMajorMoney, message } from "../../lib/i18n";
 
-type SpendCard = { value: string; detail: string };
+/** `amounts`/`notes` 留给汇率展示：折算只改主值与说明，原币种明细永远保留。 */
+export type SpendCard = { value: string; detail: string; amounts: Record<string, number>; notes: string[] };
 
 function available(summary: UsageSourceSummary | DailySummary | null): boolean {
   return summary !== null && summary.freshness !== "unavailable" && summary.freshness !== "unknown";
@@ -24,14 +25,14 @@ function meteredEstimateNote(summary: UsageSourceSummary | DailySummary): string
 
 function card(values: Record<string, number>, notes: string[]): SpendCard {
   const entries = rankedEntries(values);
-  if (!entries.length) return { value: "—", detail: notes.join(" · ") || message("spend.noVerified") };
+  if (!entries.length) return { value: "—", detail: notes.join(" · ") || message("spend.noVerified"), amounts: {}, notes };
   const [[currency, amount], ...other] = entries;
   const extra = other.length ? message("spend.otherCurrencies", undefined, { amounts: other.map(([unit, value]) => formatAmount(unit, value)).join(" · ") }) : "";
-  return { value: formatAmount(currency, amount), detail: [extra, ...notes].filter(Boolean).join(" · ") };
+  return { value: formatAmount(currency, amount), detail: [extra, ...notes].filter(Boolean).join(" · "), amounts: Object.fromEntries(entries), notes };
 }
 
 export function monthSpendCard(monthly: UsageSourceSummary | null): SpendCard {
-  if (!available(monthly) || !monthly) return { value: "—", detail: message("spend.unavailableMonth") };
+  if (!available(monthly) || !monthly) return { value: "—", detail: message("spend.unavailableMonth"), amounts: {}, notes: [] };
   const notes = [rankedEntries(monthly.actual_spend).length ? message("spend.recordedOrDeclared") : monthly.total_tokens > 0 ? message("spend.noConfirmed") : message("spend.noUsageMonth"), meteredEstimateNote(monthly)];
   if (monthly.has_unresolved || monthly.freshness === "partial") notes.push(message("spend.unresolved"));
   if (monthly.freshness === "stale") notes.push(message("spend.staleMonth"));
@@ -39,7 +40,7 @@ export function monthSpendCard(monthly: UsageSourceSummary | null): SpendCard {
 }
 
 export function todaySpendCard(daily: DailySummary | null, monthly: UsageSourceSummary | null): SpendCard {
-  if (!available(daily) || !daily) return { value: "—", detail: message("spend.unavailableToday") };
+  if (!available(daily) || !daily) return { value: "—", detail: message("spend.unavailableToday"), amounts: {}, notes: [] };
   const spend = { ...daily.actual_spend };
   let hasSubscription = false;
   if (available(monthly) && monthly && monthly.month === daily.date.slice(0, 7)) {
@@ -56,4 +57,24 @@ export function todaySpendCard(daily: DailySummary | null, monthly: UsageSourceS
   if (daily.freshness === "stale") notes.push(message("spend.staleToday"));
   if (!hasSubscription && !available(monthly)) notes.push(message("spend.subscriptionUnknown"));
   return card(spend, notes);
+}
+
+/**
+ * 报告币种折算（汇率 V2）：每个币种都折得了才改主值；任一币种折不了、或本来就只有报告币种，
+ * 原样返回（保持分币种、不拼半折半不折的假合计）。折算后主值带 ≈，说明里先列原币种明细再写出处。
+ */
+export function applyConversion(spend: SpendCard, conversion: FxConvertResult | null): SpendCard {
+  if (!conversion || conversion.unavailable.length > 0 || conversion.items.length === 0) return spend;
+  if (conversion.items.every((item) => item.rate_source === "identity")) return spend;
+  const originals = conversion.items.map((item) => formatAmount(item.currency, item.amount)).join(" · ");
+  const bundled = conversion.items.find((item) => item.rate_source === "bundled_snapshot");
+  const manual = conversion.items.some((item) => item.rate_source === "user_assumption");
+  const note = bundled && manual ? message("fx.noteMixed", undefined, { date: bundled.rate_date ?? "—" })
+    : manual ? message("fx.noteManual")
+    : message("fx.noteReference", undefined, { date: bundled?.rate_date ?? "—" });
+  return {
+    ...spend,
+    value: `≈ ${formatAmount(conversion.target, conversion.total)}`,
+    detail: [originals, note, ...spend.notes].filter(Boolean).join(" · "),
+  };
 }

@@ -183,6 +183,21 @@ assert.match(todaySpendCard({ ...pricedDay, actual_spend: { CNY: 2 } }, pricedMo
 const chineseSpendCard = loadSpendCards("zh-Hans").monthSpendCard(pricedMonth);
 assert.equal(chineseSpendCard.value, monthSpendCard(pricedMonth).value, "language changes text, not monetary facts");
 assert.match(chineseSpendCard.detail, /已记录费用与已声明订阅/);
+// 汇率 V2：折算只在「每个币种都折得了」时才改主值；原币种明细永远保留；出处写进说明。
+const { applyConversion } = loadSpendCards();
+const fxBase = monthSpendCard(pricedMonth);
+assert.deepEqual(JSON.parse(JSON.stringify(fxBase.amounts)), { CNY: 182.55, USD: 40 }, "card exposes the per-currency amounts it was built from");
+const fxItem = (currency, amount, converted, source, date) => ({ currency, amount, converted, rate: converted / amount, rate_source: source, rate_date: date });
+const fxResult = { target: "USD", total: 67.2, approximate: true, items: [fxItem("CNY", 182.55, 27.2, "bundled_snapshot", "2026-09-30"), fxItem("USD", 40, 40, "identity", null)], unavailable: [] };
+const fxShown = applyConversion(fxBase, fxResult);
+assert.match(fxShown.value, /^≈ USD\s*67\.20$/, "converted headline carries ≈ and the reporting currency");
+assert.match(fxShown.detail, /CNY\s*182\.55/, "original CNY amount stays visible");
+assert.match(fxShown.detail, /USD\s*40\.00/, "original USD amount stays visible");
+assert.match(fxShown.detail, /reference rates \(ECB, 2026-09-30\)/, "the rate source and date are disclosed");
+assert.equal(applyConversion(fxBase, null), fxBase, "no conversion available → unchanged");
+assert.equal(applyConversion(fxBase, { ...fxResult, unavailable: [{ currency: "XXX", amount: 1 }] }), fxBase, "any unconvertible currency → no half-converted headline");
+assert.equal(applyConversion(fxBase, { ...fxResult, items: [fxItem("CNY", 182.55, 182.55, "identity", null)], total: 182.55 }), fxBase, "already in the reporting currency → unchanged");
+assert.match(applyConversion(fxBase, { ...fxResult, items: [fxItem("CNY", 182.55, 27.2, "user_assumption", null), fxItem("USD", 40, 40, "identity", null)] }).detail, /your manual rate/, "manual rates are labelled as the user's assumption");
 for (const day of calendar.days) assert.equal(day.total_tokens, day.dsh_tokens + day.claude_tokens + day.codex_tokens);
 
 const originalInvoke = fixtureInvoke;

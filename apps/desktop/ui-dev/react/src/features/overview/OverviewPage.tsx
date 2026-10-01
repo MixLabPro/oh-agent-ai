@@ -4,7 +4,8 @@ import { StatusPill } from "../../components/ui/StatusPill";
 import { readFindings, readUsageHourly, type FindingGroup, type OverviewDetails, type OverviewSnapshot, type SummaryHostTokens, type UsageHourly } from "../../lib/tauri";
 import { sessionsDateHref, sessionsHostHref } from "../../lib/nav";
 import { todayCacheHitRatio } from "./cacheHit";
-import { monthSpendCard, todaySpendCard } from "./spendCards";
+import { applyConversion, monthSpendCard, todaySpendCard } from "./spendCards";
+import { useConvertedAmounts } from "../../lib/fx";
 import { DecisionArea } from "./DecisionArea";
 import { formatMajorMoney, message, useLanguage, type MessageKey, formatTokenCount } from "../../lib/i18n";
 
@@ -188,8 +189,11 @@ export function OverviewPage({ overview, details }: { overview: OverviewSnapshot
   const measuredHosts = details?.monthly && details.monthly.freshness !== "unavailable" && details.monthly.freshness !== "unknown"
     ? Object.values(details.monthly.tokens_by_host).filter((host) => host.total > 0).length : null;
   const cacheHit = todayCacheHitRatio(details?.daily ?? null);
-  const todaySpend = todaySpendCard(details?.daily ?? null, details?.monthly ?? null);
-  const monthSpend = monthSpendCard(details?.monthly ?? null);
+  const todayBase = todaySpendCard(details?.daily ?? null, details?.monthly ?? null);
+  const monthBase = monthSpendCard(details?.monthly ?? null);
+  // 报告币种折算（后端算、带出处）；折不了就保持分币种。
+  const todaySpend = applyConversion(todayBase, useConvertedAmounts(todayBase.amounts));
+  const monthSpend = applyConversion(monthBase, useConvertedAmounts(monthBase.amounts));
   return <>
     {details?.errors.length ? <div className="error-banner" role="status">{message("overview.partialError", language, { errors: details.errors.join("; ") })}</div> : null}
     <section className="stats-grid" aria-label={message("overview.status", language)}>
