@@ -114,7 +114,9 @@ fn notify_profiles(app: &AppHandle, data_home: &std::path::Path, profiles: &[ser
         let day = overview::today_beijing();
         let mut candidates = Vec::new();
         if let Some(threshold) = threshold_for(
-            profile.get("daily_ratio_bp").and_then(serde_json::Value::as_i64).map(|bp| bp as f64 / 10_000.0),
+            // 告警读「不含汇率折算部分」的比例：折算是约数，只提示、不触发支出警报（规格 §6.1）。
+            // 旧载荷没有该键时退回 daily_ratio_bp。
+            profile.get("daily_alert_ratio_bp").or_else(|| profile.get("daily_ratio_bp")).and_then(serde_json::Value::as_i64).map(|bp| bp as f64 / 10_000.0),
             warn_ratio,
         ) {
             candidates.push((day, agent_vitals_runtime::budget_notifications::BudgetAlertScope::Daily,
@@ -122,7 +124,7 @@ fn notify_profiles(app: &AppHandle, data_home: &std::path::Path, profiles: &[ser
                 profile.get("daily_minor").and_then(serde_json::Value::as_i64)));
         }
         if let Some(threshold) = threshold_for(
-            profile.get("ratio_bp").and_then(serde_json::Value::as_i64).map(|bp| bp as f64 / 10_000.0),
+            profile.get("alert_ratio_bp").or_else(|| profile.get("ratio_bp")).and_then(serde_json::Value::as_i64).map(|bp| bp as f64 / 10_000.0),
             warn_ratio,
         ) {
             candidates.push((month, agent_vitals_runtime::budget_notifications::BudgetAlertScope::Monthly,

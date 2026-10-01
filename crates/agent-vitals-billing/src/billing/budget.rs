@@ -105,6 +105,48 @@ where
     (agent_vitals_domain::util::pyround(total * 100.0, 0) as i64, false, skipped)
 }
 
+/// 跨币订阅月费折成预算币种（汇率 V2，参见 `domain/fx.rs`）。
+///
+/// 只折「同币相加之外」的订阅：每笔经 [`agent_vitals_domain::fx::FxPolicy::convert`]，
+/// 汇率缺失 / 币种未知 → 仍记入 `still_skipped`（预算继续报部分覆盖，不用默认常量顶）。
+/// 返回 (折算后的分, 每笔折算的出处, 仍未折算的宿主)。折算值永远是约数——调用方必须把
+/// 出处写进预算 JSON 并在界面标 ≈；折算部分**不触发支出警报**（只提示）。
+pub fn subscription_fees_converted<'a, I>(
+    amounts: I,
+    currency: &str,
+    policy: &agent_vitals_domain::fx::FxPolicy,
+) -> (i64, Vec<Value>, Vec<String>)
+where
+    I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
+{
+    use agent_vitals_data::projection::BillingBasis;
+    use agent_vitals_domain::fx::RateSource;
+    let mut total = 0.0f64;
+    let mut notes = Vec::new();
+    let mut skipped = Vec::new();
+    for amount in amounts {
+        let Some(fee) = amount.amounts_by_basis.get(&BillingBasis::FixedSubscription).copied() else { continue };
+        if fee <= 0.0 { continue; }
+        let Some(cur) = amount.currency.as_deref() else { skipped.push(amount.host_id.clone()); continue };
+        if cur == currency { continue; } // 同币已由 subscription_fees_minor 计入
+        match policy.convert(fee, cur, currency) {
+            Some(c) => {
+                total += c.target_amount;
+                notes.push(json!({
+                    "host": amount.host_id,
+                    "from": c.source_currency,
+                    "source_amount_minor": agent_vitals_domain::util::pyround(fee * 100.0, 0) as i64,
+                    "rate": c.rate,
+                    "rate_source": match c.rate_source { RateSource::BundledSnapshot => "bundled_snapshot", RateSource::UserAssumption => "user_assumption", RateSource::Identity => "identity" },
+                    "rate_date": c.rate_date,
+                }));
+            }
+            None => skipped.push(amount.host_id.clone()),
+        }
+    }
+    (agent_vitals_domain::util::pyround(total * 100.0, 0) as i64, notes, skipped)
+}
+
 /// 当月天数 / 今天是第几天（北京日期）——订阅月费按天摊派用。
 fn month_day_progress(today: &str) -> (i64, i64) {
     let y: i64 = today.get(0..4).and_then(|v| v.parse().ok()).unwrap_or(1970);
@@ -191,19 +233,32 @@ pub fn budget_profiles_status_from_parts(
     let today = crate::clock::today_beijing();
     let (days_in_month, day_of_month) = month_day_progress(&today);
     let is_current_month = today.starts_with(month);
+    let fx_policy = crate::core::fx_settings::policy(data_home);
     let elapsed_days = if is_current_month { day_of_month } else { days_in_month };
     let rows = profiles.into_iter().map(|profile| {
         let spent_minor = budget_profile_spent_minor(
             values.iter().copied(), &profile.profile_id, &profile.currency,
         );
-        let (subscription_minor, subscription_fx_applied, subscription_skipped) =
+        let (same_currency_minor, _, skipped_other_currency) =
             subscription_fees_minor(values.iter().copied(), &profile.currency, &pricing);
+        // 汇率 V2：只对**当月**折算其他币种订阅（历史月不用今天的快照改写——封账冻结尚未实现，
+        // 宁可保持「未覆盖」也不静默改写旧账）。折不了的（缺汇率/未知币种）仍记入 skipped。
+        let (converted_minor, subscription_fx, subscription_skipped) = if is_current_month && !skipped_other_currency.is_empty() {
+            subscription_fees_converted(values.iter().copied(), &profile.currency, &fx_policy)
+        } else {
+            (0, Vec::new(), skipped_other_currency)
+        };
+        let subscription_fx_applied = converted_minor > 0;
+        let subscription_minor = same_currency_minor + converted_minor;
         let amortize = profile.profile_id == "estimate" && subscription_minor > 0;
         let subscription_amortized_minor = if amortize {
             subscription_minor * elapsed_days / days_in_month
         } else { 0 };
         let subscription_daily_minor = if amortize { subscription_minor / days_in_month } else { 0 };
         let total_spent_minor = spent_minor + subscription_amortized_minor;
+        // 告警口径：不含折算部分（折算是约数，只提示、不触发支出警报；规格 §6.1）。
+        let same_amortized_minor = if amortize { same_currency_minor * elapsed_days / days_in_month } else { 0 };
+        let same_daily_minor = if amortize { same_currency_minor / days_in_month } else { 0 };
         let daily_spent_minor = budget_profile_spent_minor(
             daily_values.iter().copied(), &profile.profile_id, &profile.currency,
         );
@@ -221,6 +276,13 @@ pub fn budget_profiles_status_from_parts(
         let daily_total_minor = daily_spent_minor + subscription_daily_minor;
         let ratio_bp = (!has_unresolved && total_spent_minor > 0)
             .then(|| total_spent_minor * 10_000 / profile.monthly_minor);
+        let alert_total_minor = spent_minor + same_amortized_minor;
+        let alert_ratio_bp = (!has_unresolved && alert_total_minor > 0)
+            .then(|| alert_total_minor * 10_000 / profile.monthly_minor);
+        let daily_alert_total_minor = daily_spent_minor + same_daily_minor;
+        let daily_alert_ratio_bp = profile.daily_minor.and_then(|limit| {
+            (!daily_has_unresolved && daily_alert_total_minor > 0).then(|| daily_alert_total_minor * 10_000 / limit)
+        });
         let daily_ratio_bp = profile.daily_minor.and_then(|limit| {
             (!daily_has_unresolved && daily_total_minor > 0)
                 .then(|| daily_total_minor * 10_000 / limit)
@@ -255,6 +317,10 @@ pub fn budget_profiles_status_from_parts(
             "subscription_days_elapsed": if amortize { elapsed_days } else { 0 },
             "days_in_month": days_in_month,
             "subscription_fx_applied": subscription_fx_applied,
+            "subscription_converted_minor": converted_minor,
+            "subscription_fx": subscription_fx,
+            "alert_ratio_bp": alert_ratio_bp,
+            "daily_alert_ratio_bp": daily_alert_ratio_bp,
             "subscription_skipped": subscription_skipped,
             "total_spent_minor": total_spent_minor,
             "ratio_bp": ratio_bp,
@@ -924,6 +990,36 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn foreign_currency_subscriptions_convert_with_provenance_and_unknown_currencies_stay_skipped() {
+        use agent_vitals_data::projection::{BillingBasis, Freshness, HostAmount};
+        use agent_vitals_domain::fx::{FxPolicy, UserRate};
+        let host = |id: &str, currency: Option<&str>, fee: f64| {
+            let mut by = BTreeMap::new();
+            by.insert(BillingBasis::FixedSubscription, fee);
+            HostAmount { host_id: id.into(), amounts_by_basis: by, currency: currency.map(String::from), has_unresolved: false,
+                evidence_basis: None, pricing_method: None, unresolved_reason: None, freshness: Freshness::unavailable() }
+        };
+        let amounts = [host("minimax", Some("CNY"), 162.0), host("anthropic", Some("USD"), 40.0), host("odd", Some("XXX"), 9.0), host("nocur", None, 5.0)];
+        // 手动汇率 6.8：USD 40 → CNY 272
+        let policy = FxPolicy::bundled().unwrap().with_user_rate(UserRate { from: "USD".into(), to: "CNY".into(), rate: 6.8, as_of: None }).unwrap();
+        let (converted, notes, skipped) = subscription_fees_converted(amounts.iter(), "CNY", &policy);
+        assert_eq!(converted, 27_200, "USD 40 × 6.8 = CNY 272.00（同币的 162 不在这里计）");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0]["from"], "USD");
+        assert_eq!(notes[0]["rate"], 6.8);
+        assert_eq!(notes[0]["rate_source"], "user_assumption");
+        assert_eq!(skipped, vec!["odd".to_string(), "nocur".to_string()], "未知币种 / 无币种：不猜，仍未覆盖");
+        // 用内置快照时来源标 bundled_snapshot 并带日期
+        let bundled = FxPolicy::bundled().unwrap();
+        let (_, notes, _) = subscription_fees_converted(amounts.iter(), "CNY", &bundled);
+        assert_eq!(notes[0]["rate_source"], "bundled_snapshot");
+        assert!(notes[0]["rate_date"].as_str().is_some());
+        // 同币种订阅不被重复计入
+        let (converted, _, _) = subscription_fees_converted([host("a", Some("CNY"), 100.0)].iter(), "CNY", &bundled);
+        assert_eq!(converted, 0);
+    }
 
     #[test]
     fn budget_profiles_sum_only_matching_currency_and_basis() {
