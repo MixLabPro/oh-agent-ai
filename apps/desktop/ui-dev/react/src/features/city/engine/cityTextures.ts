@@ -7,7 +7,7 @@
  */
 
 import * as THREE from "three";
-import type { DistrictLayout } from "./cityLayout";
+import type { CityLayout } from "./cityLayout";
 import { hashSeed } from "../cityModel";
 
 export type DistrictPalette = {
@@ -30,16 +30,6 @@ const PALETTES: Record<string, DistrictPalette> = {
 export function paletteFor(hostId: string): DistrictPalette {
   return PALETTES[hostId] ?? PALETTES.default;
 }
-
-/** 地形色带（按高度 h 与坡度 shade 调色）。 */
-const TERRAIN = {
-  seaFloor: "#7ba9b0",
-  beach: "#e7dcb4",
-  grass: "#bccfa2",
-  grassDeep: "#a7c095",
-  rock: "#b8b2a4",
-  rockHigh: "#d2ccbf",
-};
 
 function canvas2d(width: number, height: number): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } {
   const canvas = document.createElement("canvas");
@@ -116,176 +106,74 @@ function strokePolyline(ctx: CanvasRenderingContext2D, points: Array<{ x: number
   ctx.stroke();
 }
 
-/**
- * 区岛面纹理：高度场着色（沙滩/草坡/岩石）+ 坡度暗化 + 河流 + 有机道路 +
- * 广场 + 楼基垫与接触阴影。像素高度从预烘焙 heightGrid 双线性采样（一致性 +
- * 速度：不逐像素跑完整噪声）。
- */
-export function makeDistrictTexture(district: DistrictLayout, palette: DistrictPalette): THREE.Texture {
-  const size = 768;
-  const worldExtent = district.radius * 2.72;
-  const scale = size / worldExtent;
-  const toPixel = (x: number, z: number): [number, number] => [
-    (x - district.center.x + worldExtent / 2) * scale,
-    (z - district.center.z + worldExtent / 2) * scale,
-  ];
-
-  // 1) 烘焙高度网格（128²，与地形 mesh 同源函数）。
-  const grid = 128;
-  const heights = new Float32Array(grid * grid);
-  const gridStep = worldExtent / (grid - 1);
-  for (let iz = 0; iz < grid; iz += 1) {
-    for (let ix = 0; ix < grid; ix += 1) {
-      const x = district.center.x - worldExtent / 2 + ix * gridStep;
-      const z = district.center.z - worldExtent / 2 + iz * gridStep;
-      heights[iz * grid + ix] = district.terrain.height(x, z);
-    }
-  }
-  const sampleHeight = (u: number, v: number): number => {
-    const fx = Math.min(grid - 1.001, Math.max(0, u * (grid - 1)));
-    const fz = Math.min(grid - 1.001, Math.max(0, v * (grid - 1)));
-    const ix = Math.floor(fx);
-    const iz = Math.floor(fz);
-    const tx = fx - ix;
-    const tz = fz - iz;
-    const h00 = heights[iz * grid + ix];
-    const h10 = heights[iz * grid + ix + 1];
-    const h01 = heights[(iz + 1) * grid + ix];
-    const h11 = heights[(iz + 1) * grid + ix + 1];
-    return h00 + (h10 - h00) * tx + (h01 - h00) * tz + (h00 - h10 - h01 + h11) * tx * tz;
-  };
-
-  // 2) 逐像素地形着色。
+/** One city-wide ground atlas: continuous land, hardscape blocks and connected streets. */
+export function makeCityTexture(layout: CityLayout): THREE.Texture {
+  const size = 2048;
   const { canvas, ctx } = canvas2d(size, size);
-  const image = ctx.createImageData(size, size);
-  const bandBeach = new THREE.Color(TERRAIN.beach);
-  const bandGrass = new THREE.Color(TERRAIN.grass);
-  const bandGrassDeep = new THREE.Color(TERRAIN.grassDeep);
-  const bandRock = new THREE.Color(TERRAIN.rock);
-  const bandRockHigh = new THREE.Color(TERRAIN.rockHigh);
-  const bandSea = new THREE.Color(TERRAIN.seaFloor);
-  const mix = (a: THREE.Color, b: THREE.Color, t: number): [number, number, number] => [
-    a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t,
-  ];
-  for (let py = 0; py < size; py += 1) {
-    for (let px = 0; px < size; px += 1) {
-      const u = px / size;
-      const v = py / size;
-      const h = sampleHeight(u, v);
-      // 坡度暗化（网格差分）。
-      const hx = sampleHeight(u + 1 / size, v) - h;
-      const hz = sampleHeight(u, v + 1 / size) - h;
-      const slope = Math.min(0.42, Math.hypot(hx, hz) * (size / worldExtent) * 0.09);
-      let rgb: [number, number, number];
-      if (h < -0.12) rgb = [bandSea.r, bandSea.g, bandSea.b];
-      else if (h < 0.5) rgb = mix(bandSea, bandBeach, Math.min(1, (h + 0.12) / 0.62));
-      else if (h < 2.2) rgb = mix(bandBeach, bandGrass, (h - 0.5) / 1.7);
-      else if (h < 5.5) rgb = mix(bandGrass, bandGrassDeep, (h - 2.2) / 3.3);
-      else if (h < 11) rgb = mix(bandGrassDeep, bandRock, (h - 5.5) / 5.5);
-      else rgb = mix(bandRock, bandRockHigh, Math.min(1, (h - 11) / 9));
-      const shade = 1 - slope * 0.55;
-      const index = (py * size + px) * 4;
-      image.data[index] = Math.min(255, rgb[0] * 255 * shade);
-      image.data[index + 1] = Math.min(255, rgb[1] * 255 * shade);
-      image.data[index + 2] = Math.min(255, rgb[2] * 255 * shade);
-      image.data[index + 3] = 255;
+  const scale = size / layout.extent;
+  const toPixel = (x: number, z: number): [number, number] => [(x + layout.extent / 2) * scale, (z + layout.extent / 2) * scale];
+  const ground = canvas2d(384, 384);
+  const pixels = ground.ctx.createImageData(384, 384);
+  for (let iz = 0; iz < 384; iz += 1) for (let ix = 0; ix < 384; ix += 1) {
+    const x = (ix / 383 - 0.5) * layout.extent;
+    const z = (iz / 383 - 0.5) * layout.extent;
+    const h = layout.terrain.height(x, z);
+    const noise = hashSeed(`ground:${ix}:${iz}`) * 7;
+    const color = h < 0 ? [75, 119, 127] : h < 2.5 ? [199, 189, 158] : h < 9 ? [143, 159, 125] : h < 35 ? [113, 134, 103] : [155, 150, 132];
+    const index = (iz * 384 + ix) * 4;
+    pixels.data[index] = color[0] + noise; pixels.data[index+1] = color[1] + noise; pixels.data[index+2] = color[2] + noise; pixels.data[index+3] = 255;
+  }
+  ground.ctx.putImageData(pixels, 0, 0);
+  ctx.drawImage(ground.canvas, 0, 0, size, size);
+  const polygon = (points: Array<{x:number;z:number}>, color:string) => {
+    ctx.beginPath(); points.forEach((p,i)=> { const [x,y]=toPixel(p.x,p.z); if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y); });
+    ctx.closePath(); ctx.fillStyle=color; ctx.fill();
+  };
+  const orientedRect = (x:number,z:number,width:number,depth:number,yaw:number,color:string) => {
+    const [px,py]=toPixel(x,z); ctx.save(); ctx.translate(px,py); ctx.rotate(-yaw);
+    ctx.fillStyle=color;ctx.fillRect(-width*scale/2,-depth*scale/2,width*scale,depth*scale);ctx.restore();
+  };
+  for (const block of layout.blocks) {
+    polygon(block.polygon.map((p)=>({x:block.x+(p.x-block.x)*0.88,z:block.z+(p.z-block.z)*0.88})),block.parcels.length?"#c5c0b3":"#91a57f");
+    for (const parcel of block.parcels) orientedRect(parcel.x,parcel.z,parcel.width-0.3,parcel.depth-0.3,parcel.yaw,"#bcb8ac");
+  }
+  for (const edge of layout.roadEdges) {
+    if(edge.bridge)continue; // Real bridge deck spans the actual water, no painted water-road.
+    ctx.lineCap="round";
+    ctx.strokeStyle="#d4cfc2";ctx.lineWidth=(edge.width+2.4)*scale;strokePolyline(ctx,edge.points,toPixel,false);
+    ctx.strokeStyle=edge.kind==="arterial"?"#505b60":"#646c6b";ctx.lineWidth=edge.width*scale;strokePolyline(ctx,edge.points,toPixel,false);
+  }
+  for (const edge of layout.roadEdges) {
+    if(edge.bridge)continue;
+    const [a,b]=edge.points;const length=Math.hypot(b.x-a.x,b.z-a.z);const dx=(b.x-a.x)/length;const dz=(b.z-a.z)/length;
+    const points=[{x:a.x+dx*6,z:a.z+dz*6},{x:b.x-dx*6,z:b.z-dz*6}];
+    ctx.strokeStyle=edge.kind==="arterial"?"#d6c998":"#b6bdba";ctx.lineWidth=0.22*scale;ctx.setLineDash([3*scale,3*scale]);
+    strokePolyline(ctx,points,toPixel,false);ctx.setLineDash([]);
+    for(const end of [a,b])for(let stripe=-2;stripe<=2;stripe+=1){
+      const sign=end===a?1:-1;
+      orientedRect(end.x+dx*6.5*sign-dz*stripe*0.8,end.z+dz*6.5*sign+dx*stripe*0.8,1.4,0.4,-Math.atan2(dz,dx),"#dbd8cb");
     }
   }
-  ctx.putImageData(image, 0, 0);
-
-  // 3) 河流：岸边浅滩 + 水面 + 中心高光。
-  if (district.river) {
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.strokeStyle = "rgba(231, 220, 180, 0.85)";
-    ctx.lineWidth = district.riverHalfWidth * 2.7 * scale;
-    strokePolyline(ctx, district.river, toPixel, false);
-    ctx.strokeStyle = "#8ec4cf";
-    ctx.lineWidth = district.riverHalfWidth * 2.1 * scale;
-    strokePolyline(ctx, district.river, toPixel, false);
-    ctx.strokeStyle = "rgba(226, 243, 246, 0.8)";
-    ctx.lineWidth = Math.max(1, district.riverHalfWidth * 0.4 * scale);
-    strokePolyline(ctx, district.river, toPixel, false);
+  for(const site of layout.publicSites){
+    const [x,y]=toPixel(site.x,site.z);
+    if(site.kind==="park"){
+      ctx.fillStyle="#799b71";ctx.beginPath();ctx.ellipse(x,y,site.radius*scale,site.radius*0.75*scale,-0.2,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle="#d2c4a0";ctx.lineWidth=2.2*scale;ctx.beginPath();ctx.ellipse(x,y,site.radius*0.75*scale,site.radius*0.55*scale,-0.2,0,Math.PI*2);ctx.stroke();
+    }else{
+      orientedRect(site.x,site.z,site.radius*1.6,site.radius*1.3,site.yaw,site.kind==="harbor"?"#999f98":"#d0c7b3");
+      if(site.kind==="civic"){
+        ctx.fillStyle="#609ca3";ctx.beginPath();ctx.arc(x,y+18*scale,6*scale,0,Math.PI*2);ctx.fill();
+        ctx.strokeStyle="#efdfbd";ctx.lineWidth=2*scale;ctx.stroke();
+      }
+      if(site.kind==="station")for(let track=0;track<4;track+=1)orientedRect(site.x-18+track*8,site.z,1.2,site.radius*1.15,site.yaw,"#737c76");
+      if(site.kind==="stadium"){
+        ctx.fillStyle="#647f62";ctx.beginPath();ctx.ellipse(x,y,28*scale,19*scale,-site.yaw,0,Math.PI*2);ctx.fill();
+        ctx.strokeStyle="#dad9c0";ctx.lineWidth=0.7*scale;ctx.strokeRect(x-18*scale,y-10*scale,36*scale,20*scale);
+      }
+    }
   }
-
-  // 4) 有机道路：土路基 + 浅色路面。
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  for (const road of district.roads) {
-    const close = road.length > 60; // 环线闭合，放射不闭合。
-    ctx.strokeStyle = "rgba(146, 134, 112, 0.30)";
-    ctx.lineWidth = 3.6 * scale;
-    strokePolyline(ctx, road, toPixel, close);
-    ctx.strokeStyle = "#f0e9d9";
-    ctx.lineWidth = 2.7 * scale;
-    strokePolyline(ctx, road, toPixel, close);
-  }
-
-  // 5) 中心广场。
-  const [plazaX, plazaY] = toPixel(district.plaza.x, district.plaza.z);
-  ctx.fillStyle = "#dcd4c2";
-  ctx.beginPath();
-  ctx.arc(plazaX, plazaY, 6.2 * scale, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = "rgba(120, 110, 92, 0.3)";
-  ctx.lineWidth = Math.max(1, 0.24 * scale);
-  for (const ring of [2.0, 3.5, 5.1]) {
-    ctx.beginPath();
-    ctx.arc(plazaX, plazaY, ring * scale, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-
-  // 6) 楼基垫 + 接触阴影（每栋楼：浅色小台 + 软椭圆）。
-  for (const [id, slot] of district.slots) {
-    const [sx, sy] = toPixel(slot.x, slot.z);
-    ctx.fillStyle = "rgba(236, 228, 208, 0.5)";
-    ctx.beginPath();
-    ctx.arc(sx, sy, 2.9 * scale, 0, Math.PI * 2);
-    ctx.fill();
-    const gradient = ctx.createRadialGradient(sx, sy, 0, sx, sy, 3.3 * scale);
-    gradient.addColorStop(0, "rgba(66, 58, 44, 0.30)");
-    gradient.addColorStop(0.65, "rgba(66, 58, 44, 0.12)");
-    gradient.addColorStop(1, "rgba(66, 58, 44, 0)");
-    ctx.fillStyle = gradient;
-    ctx.fillRect(sx - 3.3 * scale, sy - 3.3 * scale, 6.6 * scale, 6.6 * scale);
-  }
-
-  // 7) 树木绿斑（与 3D 树同位，加强河谷绿廊与山脚林线）。
-  ctx.fillStyle = palette.park;
-  ctx.globalAlpha = 0.5;
-  for (const tree of district.trees) {
-    const [tx, ty] = toPixel(tree.x, tree.z);
-    ctx.beginPath();
-    ctx.arc(tx, ty, 1.5 * scale, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.globalAlpha = 1;
-
-  const texture = new THREE.Texture(canvas);
+  const texture = new THREE.CanvasTexture(canvas);
   texture.anisotropy = 8;
-  texture.needsUpdate = true;
-  return texture;
-}
-
-/** 桥面纹理：路面 + 中线 + 边缘人行道。 */
-export function makeBridgeTexture(): THREE.Texture {
-  const { canvas, ctx } = canvas2d(128, 128);
-  ctx.fillStyle = "#a4a49f";
-  ctx.fillRect(0, 0, 128, 128);
-  ctx.fillStyle = "#b9b9b2";
-  ctx.fillRect(0, 0, 128, 14);
-  ctx.fillRect(0, 114, 128, 14);
-  ctx.strokeStyle = "rgba(246, 242, 228, 0.9)";
-  ctx.lineWidth = 4;
-  ctx.setLineDash([22, 16]);
-  ctx.beginPath();
-  ctx.moveTo(0, 64);
-  ctx.lineTo(128, 64);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  const texture = new THREE.Texture(canvas);
-  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
-  texture.needsUpdate = true;
   return texture;
 }
 

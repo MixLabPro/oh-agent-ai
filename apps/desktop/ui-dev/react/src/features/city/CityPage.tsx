@@ -63,6 +63,7 @@ export function CityPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailRefresh, setDetailRefresh] = useState(0);
+  const [overflowCount, setOverflowCount] = useState(0);
 
   const buildingIndex = useMemo(() => {
     const index = new Map<string, CityBuilding>();
@@ -70,14 +71,24 @@ export function CityPage() {
     return index;
   }, [model]);
 
-  const applyModel = useCallback((next: CityModel) => {
+  const laidOutComplete = useRef(false);
+  const applyModel = useCallback((result: { model: CityModel; complete: boolean }) => {
+    const next = result.model;
     const fingerprint = JSON.stringify([next.stats, next.districts, next.buildings.length, next.buildings.map((building) => [building.id, building.tokensTotal, building.active, building.height])]);
     modelRef.current = next;
     setModel(next);
     if (fingerprint !== fingerprintRef.current) {
       fingerprintRef.current = fingerprint;
-      engineRef.current?.applyModel(next);
+      // 分页是 token 降序、乱序到达：中间页的布局只是近似。全部页到齐后
+      // 做一次全量重排（老会话回到内圈，生长叙事归位）；此后轮询/失效
+      // 刷新复用布局，楼永不搬家。
+      const needsRelayout = result.complete && !laidOutComplete.current;
+      engineRef.current?.applyModel(next, !needsRelayout);
+      if (result.complete) laidOutComplete.current = true;
+      setOverflowCount(engineRef.current?.overflowCount ?? 0);
       if (selectedRef.current) engineRef.current?.setSelected(selectedRef.current);
+    } else if (result.complete) {
+      laidOutComplete.current = true;
     }
   }, []);
 
@@ -152,22 +163,23 @@ export function CityPage() {
     setLoading(true);
     setError(null);
     fingerprintRef.current = "";
+    laidOutComplete.current = false;
     void loader.reload(windowKind, {
       onModel: (result) => {
         setError(result.error);
-        applyModel(result.model);
+        applyModel(result);
         setLoading(false);
       },
       onBackgroundModel: (result) => {
         if (result.error) return; // 后台刷新失败保留旧城
-        applyModel(result.model);
+        applyModel(result);
       },
     });
     const stopPolling = loader.startActivePolling(90_000, () => {
       void loader.reload(windowKind, {
-        onModel: (result) => applyModel(result.model),
+        onModel: (result) => applyModel(result),
         onBackgroundModel: (result) => {
-          if (!result.error) applyModel(result.model);
+          if (!result.error) applyModel(result);
         },
       });
     });
@@ -265,7 +277,7 @@ export function CityPage() {
       <div><strong>{model ? model.stats.totalSessions : "—"}</strong><span>{message("city.stats.sessions", language)}</span></div>
       <div><strong>{model ? formatTokenCount(model.stats.tokensTotal) : "—"}</strong><span>{message("city.stats.tokens", language)}</span></div>
       <div><strong>{model ? model.stats.activeCount : "—"}</strong><span>{message("city.stats.active", language)}</span></div>
-      {model && model.stats.aggregatedSessions > 0 && <div><strong>{model.stats.aggregatedSessions}</strong><span>{message("city.stats.aggregated", language)}</span></div>}
+      {model && model.stats.aggregatedSessions + overflowCount > 0 && <div><strong>{model.stats.aggregatedSessions + overflowCount}</strong><span>{message("city.stats.aggregated", language)}</span></div>}
     </section>
 
     <section className="city-legend" aria-label={message("city.legend", language)}>

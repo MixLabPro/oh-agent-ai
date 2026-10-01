@@ -116,10 +116,11 @@ export function modelFamily(modelIds: string[]): string {
   return "unknown";
 }
 
-/** Token → 高度：对数幂曲线，1e3→6 / 1e5→27 / 1e7→64，拉开天际线层次。 */
+/** Token → 高度：对数幂曲线，1e3→3.4 / 1e5→15.8 / 1e7→38.6。
+ * Street-scale height preserves token ordering while keeping mid-rise neighborhoods legible. */
 export function tokensToHeight(tokens: number): number {
   const magnitude = Math.max(0, Math.log10(Math.max(tokens, 1)) - 1);
-  return Math.min(64, Math.max(2.6, 1.3 * Math.pow(magnitude, 2.2)));
+  return Math.min(48, Math.max(2.6, 0.75 * Math.pow(magnitude, 2.2)));
 }
 
 function archetypeFor(seed: number, height: number, landmark: boolean): BuildingArchetype {

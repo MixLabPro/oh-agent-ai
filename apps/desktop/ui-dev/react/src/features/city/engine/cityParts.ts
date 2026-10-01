@@ -9,18 +9,20 @@
 
 import * as THREE from "three";
 import { builtFractionAt, hashSeed, type CityBuilding, type CityModel } from "../cityModel";
-import type { CityLayout, DistrictLayout, Vec2 } from "./cityLayout";
-import { makeBridgeTexture, makeDistrictTexture, makeFacadeTexture, makeLabelSprite, paletteFor } from "./cityTextures";
+import { fbm } from "./cityNoise";
+import type { CityLayout, DistrictLayout, Parcel, Vec2 } from "./cityLayout";
+import { makeCityTexture, makeFacadeTexture, makeLabelSprite, paletteFor } from "./cityTextures";
 import type { TerrainField } from "./cityLayout";
 
-const DAY_MS = 86_400_000;
 const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
 
 export type QualityLevel = 0 | 1 | 2;
 
 type BuildingRuntime = {
   building: CityBuilding;
-  slot: Vec2;
+  slot: Parcel;
+  /** 渲染立面（地块分区驱动，覆盖模型层 hash）。 */
+  facade: number;
   /** 地基海拔：楼底、吊车、选中环的基准 y。 */
   groundY: number;
   paletteWall: THREE.Color;
@@ -89,6 +91,7 @@ export class CityParts {
   private readonly runtimes: BuildingRuntime[] = [];
   private readonly runtimeById = new Map<string, BuildingRuntime>();
   private readonly shaftMeshes: THREE.InstancedMesh[] = [];
+  private zoneById: Map<string, string> = new Map();
   private readonly shaftIdByInstance: Array<Map<number, string>> = [];
   private readonly disposables: Array<{ dispose: () => void }> = [];
   private readonly podiumMesh: THREE.InstancedMesh;
@@ -107,10 +110,9 @@ export class CityParts {
   private readonly hoverRing: THREE.Mesh;
   private readonly selectRing: THREE.Mesh;
   private readonly cars: Car[] = [];
-  private readonly boats: Array<{ radius: number; angle: number; speed: number; y: number; phase: number }> = [];
+  private readonly boats: Array<{ path: CarPath; distance: number; speed: number; phase: number }> = [];
   private readonly clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }> = [];
   private readonly waterUniforms: { uTime: { value: number }; uSun: { value: THREE.Vector3 } };
-  private railMaterialCache: THREE.MeshLambertMaterial | null = null;
   private readonly matrix = new THREE.Matrix4();
   private readonly quaternion = new THREE.Quaternion();
   private readonly euler = new THREE.Euler();
@@ -132,8 +134,17 @@ export class CityParts {
       texture.colorSpace = THREE.SRGBColorSpace;
       this.disposables.push(texture);
     });
+    // 立面由地块分区驱动：市中心玻璃幕墙 / 商业横带 / 居住窗洞。
+    const zoneById = new Map<string, string>();
+    for (const district of this.layout.districts) {
+      for (const [id, parcel] of district.slots) zoneById.set(id, parcel.zone);
+    }
+    this.zoneById = zoneById;
     const facadeCounts = [0, 0, 0];
-    for (const building of model.buildings) facadeCounts[building.facade] += building.archetype === "tower" || building.archetype === "landmark" ? 2 : 1;
+    for (const building of model.buildings) {
+      if (!zoneById.has(building.id)) continue;
+      facadeCounts[this.facadeFor(building)] += building.archetype === "tower" || building.archetype === "landmark" ? 2 : 1;
+    }
     facades.forEach((texture, variant) => {
       const capacity = facadeCounts[variant] + 8;
       const geometry = BOX.clone();
@@ -149,7 +160,7 @@ export class CityParts {
       this.shaftIdByInstance.push(new Map());
       this.group.add(mesh);
       this.raycastTargets.push(mesh);
-      this.disposables.push(geometry);
+      this.disposables.push(geometry, mesh.material);
     });
 
     this.podiumMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#e8e2d5" }), total);
@@ -161,9 +172,12 @@ export class CityParts {
     this.craneMastMesh = this.makeInstanced(new THREE.BoxGeometry(0.5, 1, 0.5).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#e8b73f" }), 48);
     this.craneArmMesh = this.makeInstanced(new THREE.BoxGeometry(1, 0.32, 0.32), new THREE.MeshLambertMaterial({ color: "#e8b73f" }), 48);
 
-    // ── 地形：岛 / 桥 / 树 ────────────────────────────────────────────
-    this.buildIslands();
-    this.buildBridges();
+    // ── 地形：岛 / 桥 / 树 / 背景楼群 / 远山 ──────────────────────────
+    this.buildTerrain();
+    this.buildInfrastructure();
+    this.buildDistrictExpressways();
+    this.buildMassing();
+    this.buildSeaMountains();
     this.treeMesh = this.buildTrees();
 
     // ── 生命感：车 / 船 / 云 ───────────────────────────────────────────
@@ -198,7 +212,7 @@ export class CityParts {
     mesh.count = 0;
     mesh.frustumCulled = false;
     this.group.add(mesh);
-    this.disposables.push(geometry);
+    this.disposables.push(geometry, material);
     return mesh;
   }
 
@@ -214,19 +228,19 @@ export class CityParts {
   }
 
   /** 地形 mesh：高度场位移的 PlaneGeometry；UV 与区纹理的世界映射严格一致。 */
-  private buildIslands(): void {
-    for (const district of this.layout.districts) {
-      const extent = district.radius * 2.72;
-      const segments = 128;
+  private buildTerrain(): void {
+    {
+      const extent = this.layout.extent;
+      const segments = 192;
       const geometry = new THREE.PlaneGeometry(extent, extent, segments, segments).rotateX(-Math.PI / 2);
       const position = geometry.attributes.position as THREE.BufferAttribute;
       for (let index = 0; index < position.count; index += 1) {
-        const worldX = district.center.x + position.getX(index);
-        const worldZ = district.center.z + position.getZ(index);
-        position.setXYZ(index, worldX, district.terrain.height(worldX, worldZ), worldZ);
+        const worldX = position.getX(index);
+        const worldZ = position.getZ(index);
+        position.setXYZ(index, worldX, this.layout.terrain.height(worldX, worldZ), worldZ);
       }
       geometry.computeVertexNormals();
-      const texture = makeDistrictTexture(district, paletteFor(district.id));
+      const texture = makeCityTexture(this.layout);
       texture.colorSpace = THREE.SRGBColorSpace;
       const material = new THREE.MeshLambertMaterial({ map: texture });
       const mesh = new THREE.Mesh(geometry, material);
@@ -234,115 +248,188 @@ export class CityParts {
       this.group.add(mesh);
       this.disposables.push(geometry, material, texture);
     }
-    // 装饰远山：同源高度场 + 顶点色（无纹理，省 3 张 canvas）。
-    for (const mountain of this.layout.decorMountains) {
-      const extent = mountain.radius * 2.72;
-      const segments = 96;
-      const geometry = new THREE.PlaneGeometry(extent, extent, segments, segments).rotateX(-Math.PI / 2);
+  }
+
+  /** Batched city furniture and waterfront infrastructure, not selectable data. */
+  private buildInfrastructure(): void {
+    type Part = { x: number; y: number; z: number; sx: number; sy: number; sz: number; color: string; tilt?: number };
+    const parts: Part[] = [];
+    const add = (x: number, y: number, z: number, sx: number, sy: number, sz: number, color: string, tilt = 0) => parts.push({ x, y, z, sx, sy, sz, color, tilt });
+    // Curbs and street lights are real geometry; asphalt and markings share the atlas.
+    for (const edge of this.layout.roadEdges) {
+      const [a, b] = edge.points;
+      const horizontal = a.z === b.z;
+      const length = Math.hypot(b.x - a.x, b.z - a.z) - 11;
+      const x = (a.x + b.x) / 2; const z = (a.z + b.z) / 2;
+      for (const side of [-1, 1]) {
+        const offset = side * (edge.width / 2 + 0.25);
+        add(x + (horizontal ? 0 : offset), 1.22, z + (horizontal ? offset : 0), horizontal ? length : 0.35, 0.18, horizontal ? 0.35 : length, "#cbc6ba");
+      }
+      if (edge.kind === "arterial") {
+        const lx = x + (horizontal ? 0 : edge.width / 2 + 0.9);
+        const lz = z + (horizontal ? edge.width / 2 + 0.9 : 0);
+        add(lx, 1.2, lz, 0.2, 4.5, 0.2, "#697477");
+        add(lx, 5.65, lz, horizontal ? 0.3 : 1.6, 0.2, horizontal ? 1.6 : 0.3, "#d8d3b8");
+      }
+    }
+    const { left, right, north, south } = this.layout.urbanBounds;
+    const highwayZ = north - 12;
+    const highwayWidth = right - left + 36;
+    add((left + right) / 2, 7.4, highwayZ, highwayWidth, 0.9, 9, "#6a7071");
+    for (const offset of [-4.4, 0, 4.4]) add((left + right) / 2, 8.3, highwayZ + offset, highwayWidth, 0.5, 0.28, "#c6c6bb");
+    for (let x = left - 12; x < right + 18; x += 27) {
+      add(x, 1.2, highwayZ, 1.6, 6.2, 5.8, "#a9aaa0");
+      for (const offset of [-2.2, 2.2]) add(x, 8.32, highwayZ + offset, 9, 0.03, 0.18, "#ddd4aa");
+    }
+    // Long east/west approaches descend onto the perimeter streets.
+    for (const side of [-1, 1]) {
+      const x = side < 0 ? left : right;
+      const rampLength = 66;
+      add(x, 4.25, highwayZ + rampLength / 2, 6, 0.65, rampLength, "#737a79", Math.atan2(7.1, rampLength));
+    }
+    // Port: two piers, warehouses, container stacks and two gantry cranes.
+    for (let index = 0; index < 2; index += 1) {
+      const x = right - 80 + index * 55;
+      add(x, 0.15, south + 58, 16, 1.05, 60, "#a8a899");
+      add(x, 1.2, south + 35, 21, 5, 12, "#bbc0b7");
+      add(x, 6.2, south + 35, 23, 0.45, 14, "#7c8988");
+      for (const dx of [-6, 6]) add(x + dx, 1.2, south + 65, 0.8, 15, 0.8, "#b19364");
+      add(x, 16.2, south + 65, 15, 0.9, 1, "#b19364");
+      add(x + 4, 16.7, south + 65, 23, 0.5, 0.5, "#b19364");
+      for (let item = 0; item < 8; item += 1) {
+        add(x + (item % 2 ? 3 : -3), 1.2, south + 47 + Math.floor(item / 2) * 7, 4.5, 2.4, 5.8, ["#a9684f", "#647f84", "#bab092"][item % 3]);
+      }
+    }
+    const mesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#ffffff" }), parts.length);
+    parts.forEach((part, index) => {
+      this.positionVector.set(part.x, part.y, part.z);
+      this.euler.set(part.tilt ?? 0, 0, 0);
+      this.quaternion.setFromEuler(this.euler);
+      this.scaleVector.set(part.sx, part.sy, part.sz);
+      this.matrix.compose(this.positionVector, this.quaternion, this.scaleVector);
+      mesh.setMatrixAt(index, this.matrix); mesh.setColorAt(index, this.color.set(part.color));
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.count = parts.length;
+    mesh.name = "city-infrastructure-decorative";
+  }
+
+  /** 区界高架：与北环高架同视觉语言（桥面/车道线/护栏/桥墩），
+   *  沿规划折线分段铺装 —— host 城区之间可辨认的硬边界。 */
+  private buildDistrictExpressways(): void {
+    type Piece = { x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; color: string };
+    const pieces: Piece[] = [];
+    const deckY = 8.2;
+    for (const points of this.layout.highways ?? []) {
+      // Piers every ~34 units by mileage, anchored into the terrain or riverbed
+      // (over water the pier reaches below the surface — a real bridge span).
+      let accumulated = 0;
+      let nextPier = 0;
+      for (let index = 0; index < points.length; index += 1) {
+        const point = points[index];
+        if (index > 0) accumulated += Math.hypot(point.x - points[index - 1].x, point.z - points[index - 1].z);
+        if (accumulated >= nextPier) {
+          nextPier = accumulated + 34;
+          const groundY = Math.max(-3, this.layout.terrain.height(point.x, point.z));
+          // 墩顶止于桥面底面（咬合 0.05）：桥面板在任何视角下都完整包住墩顶，
+          // 不会出现"桥墩穿透路面"的视觉交叠。
+          const pierTop = deckY - 0.4;
+          pieces.push({ x: point.x, y: (groundY + pierTop) / 2, z: point.z, sx: 1.8, sy: pierTop - groundY, sz: 5.6, yaw: 0, color: "#a9aaa0" });
+        }
+      }
+      for (let index = 1; index < points.length; index += 1) {
+        const a = points[index - 1];
+        const b = points[index];
+        const length = Math.hypot(b.x - a.x, b.z - a.z);
+        if (length < 6) continue;
+        const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
+        const mx = (a.x + b.x) / 2;
+        const mz = (a.z + b.z) / 2;
+        pieces.push({ x: mx, y: deckY, z: mz, sx: length + 0.5, sy: 0.9, sz: 10.5, yaw, color: "#6a7071" });
+        for (const offset of [-3.6, 0, 3.6]) pieces.push({ x: mx, y: deckY + 0.55, z: mz, sx: length, sy: 0.12, sz: 0.3, yaw, color: "#c6c6bb" });
+        for (const offset of [-5.1, 5.1]) pieces.push({ x: mx, y: deckY + 0.75, z: mz, sx: length, sy: 0.55, sz: 0.3, yaw, color: "#b9bcb2" });
+      }
+    }
+    if (!pieces.length) return;
+    const geometry = BOX.clone();
+    const mesh = new THREE.InstancedMesh(geometry, new THREE.MeshLambertMaterial({ color: "#ffffff" }), pieces.length);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    pieces.forEach((piece, index) => {
+      this.positionVector.set(piece.x, piece.y, piece.z);
+      this.euler.set(0, piece.yaw, 0);
+      this.quaternion.setFromEuler(this.euler);
+      this.scaleVector.set(piece.sx, piece.sy, piece.sz);
+      this.matrix.compose(this.positionVector, this.quaternion, this.scaleVector);
+      mesh.setMatrixAt(index, this.matrix);
+      mesh.setColorAt(index, this.color.set(piece.color));
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.name = "city-district-expressways";
+    this.group.add(mesh);
+    this.disposables.push(geometry, mesh.material);
+  }
+
+  /** 分区驱动立面：downtown 玻璃 / commercial 横带 / residential 窗洞 /
+   *  waterfront 混合。无地块信息的楼（不应出现）退回模型层的 hash 立面。 */
+  private facadeFor(building: CityBuilding): number {
+    const zone = this.zoneById.get(building.id);
+    if (!zone) return building.facade;
+    if (zone === "downtown") return 2;
+    if (zone === "commercial") return 1;
+    if (zone === "residential") return 0;
+    return building.seed > 0.5 ? 1 : 0;
+  }
+
+  /** 溢出会话的背景楼群：低细节体量块，可数不可点——数据没被丢，只是不占独立地块。 */
+  private buildMassing(): void {
+    const blocks = this.layout.massing ?? [];
+    if (!blocks.length) return;
+    const mesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#c9c7bd" }), blocks.length);
+    blocks.forEach((block, index) => {
+      this.compose(block.x, block.y, block.z, hashSeed(`mass:${block.districtId}:${index}`) * 0.6 - 0.3, 16, block.height, 12);
+      mesh.setMatrixAt(index, this.matrix);
+      mesh.setColorAt(index, this.color.set(index % 2 ? "#c4c2b6" : "#cdcbbf"));
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.castShadow = true;
+    mesh.name = "city-massing";
+  }
+
+  /** 海平线远山：低模锥形剪影 + fbm 顶点扰动，两侧海域各一座。 */
+  private buildSeaMountains(): void {
+    const mountains = this.layout.seaMountains ?? [];
+    if (!mountains.length) return;
+    for (const mountain of mountains) {
+      const geometry = new THREE.ConeGeometry(mountain.radius, mountain.height, 11, 4);
       const position = geometry.attributes.position as THREE.BufferAttribute;
       const colors = new Float32Array(position.count * 3);
-      const sea = new THREE.Color("#7ba9b0");
-      const beach = new THREE.Color("#e7dcb4");
-      const grass = new THREE.Color("#b4c8a0");
-      const rock = new THREE.Color("#b8b2a4");
-      const high = new THREE.Color("#d8d2c6");
+      const rock = new THREE.Color("#a9a496");
+      const high = new THREE.Color("#d6d0c2");
       const tint = new THREE.Color();
       for (let index = 0; index < position.count; index += 1) {
-        const worldX = mountain.center.x + position.getX(index);
-        const worldZ = mountain.center.z + position.getZ(index);
-        const h = mountain.terrain.height(worldX, worldZ);
-        position.setXYZ(index, worldX, h, worldZ);
-        if (h < 0.4) tint.copy(sea).lerp(beach, Math.max(0, (h + 1) / 1.4));
-        else if (h < 3.5) tint.copy(beach).lerp(grass, (h - 0.4) / 3.1);
-        else if (h < 9) tint.copy(grass).lerp(rock, (h - 3.5) / 5.5);
-        else tint.copy(rock).lerp(high, Math.min(1, (h - 9) / 8));
+        const x = position.getX(index);
+        const y = position.getY(index);
+        const z = position.getZ(index);
+        const wobble = 1 + fbm(x * 0.03 + mountain.seed, z * 0.03 - mountain.seed, mountain.seed, 3) * 0.22;
+        position.setX(index, x * wobble);
+        position.setZ(index, z * wobble);
+        tint.copy(rock).lerp(high, Math.max(0, (y + mountain.height / 2) / mountain.height));
         colors[index * 3] = tint.r;
         colors[index * 3 + 1] = tint.g;
         colors[index * 3 + 2] = tint.b;
       }
       geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
       geometry.computeVertexNormals();
-      const material = new THREE.MeshLambertMaterial({ vertexColors: true });
+      const material = new THREE.MeshLambertMaterial({ vertexColors: true, fog: false });
       const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.set(mountain.center.x, 0, mountain.center.z);
+      mesh.name = "city-sea-mountain";
       this.group.add(mesh);
       this.disposables.push(geometry, material);
-    }
-  }
-
-  private buildBridges(): void {
-    // 河上小桥：河中段一架，连接两岸（贴岸高度）。
-    for (const district of this.layout.districts) {
-      if (!district.river || district.river.length < 6) continue;
-      const mid = district.river[Math.floor(district.river.length * 0.46)];
-      const next = district.river[Math.floor(district.river.length * 0.46) + 1];
-      const tangent = { x: next.x - mid.x, z: next.z - mid.z };
-      const tangentLength = Math.hypot(tangent.x, tangent.z) || 1;
-      const normal = { x: -tangent.z / tangentLength, z: tangent.x / tangentLength };
-      const halfSpan = district.riverHalfWidth * 2.9;
-      const bankA = { x: mid.x + normal.x * halfSpan, z: mid.z + normal.z * halfSpan };
-      const bankB = { x: mid.x - normal.x * halfSpan, z: mid.z - normal.z * halfSpan };
-      const deckY = Math.max(district.terrain.height(bankA.x, bankA.z), district.terrain.height(bankB.x, bankB.z)) + 0.34;
-      const span = halfSpan * 2;
-      const angle = Math.atan2(bankB.z - bankA.z, bankB.x - bankA.x);
-      const deckGeometry = new THREE.BoxGeometry(span + 1.4, 0.42, 2.6);
-      const deck = new THREE.Mesh(deckGeometry, this.railMaterialCache ??= new THREE.MeshLambertMaterial({ color: "#cfc9bb" }));
-      deck.position.set((bankA.x + bankB.x) / 2, deckY, (bankA.z + bankB.z) / 2);
-      deck.rotation.y = -angle;
-      deck.castShadow = true;
-      this.group.add(deck);
-      this.disposables.push(deckGeometry);
-      for (const offset of [-1.2, 1.2]) {
-        const railGeometry = new THREE.BoxGeometry(span + 1.4, 0.3, 0.18);
-        const rail = new THREE.Mesh(railGeometry, deck.material as THREE.Material);
-        rail.position.copy(deck.position);
-        rail.position.y += 0.32;
-        rail.rotation.copy(deck.rotation);
-        rail.translateZ(offset);
-        this.group.add(rail);
-        this.disposables.push(railGeometry);
-      }
-    }
-    const texture = makeBridgeTexture();
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.repeat.set(3, 1);
-    this.disposables.push(texture);
-    const deckMaterial = new THREE.MeshLambertMaterial({ map: texture });
-    const railMaterial = new THREE.MeshLambertMaterial({ color: "#cfc9bb" });
-    this.disposables.push(deckMaterial, railMaterial);
-    const [mainDistrict, ...satellites] = this.layout.districts;
-    for (const bridge of this.layout.bridges) {
-      // 桥面高程取两端地形高度的平均，桥台加大埋入岸坡，消除悬空。
-      const fromY = mainDistrict.terrain.height(bridge.from.x, bridge.from.z);
-      const district = satellites.find((item) => Math.hypot(item.center.x - bridge.to.x, item.center.z - bridge.to.z) < item.radius + 6) ?? mainDistrict;
-      const toY = district.terrain.height(bridge.to.x, bridge.to.z);
-      const deckY = Math.max(0.55, (fromY + toY) / 2 + 0.32);
-      const deckGeometry = new THREE.BoxGeometry(bridge.length + 3.2, 0.95, 4.2);
-      const deck = new THREE.Mesh(deckGeometry, deckMaterial);
-      deck.position.set((bridge.from.x + bridge.to.x) / 2, deckY, (bridge.from.z + bridge.to.z) / 2);
-      deck.rotation.y = -bridge.angle;
-      deck.castShadow = true;
-      deck.receiveShadow = true;
-      this.group.add(deck);
-      this.disposables.push(deckGeometry);
-      for (const offset of [-2.0, 2.0]) {
-        const railGeometry = new THREE.BoxGeometry(bridge.length + 3.2, 0.42, 0.26);
-        const rail = new THREE.Mesh(railGeometry, railMaterial);
-        rail.position.copy(deck.position);
-        rail.position.y += 0.5;
-        rail.rotation.copy(deck.rotation);
-        rail.translateZ(offset);
-        rail.castShadow = true;
-        this.group.add(rail);
-        this.disposables.push(railGeometry);
-      }
-      for (const [end, endY] of [[bridge.from, fromY], [bridge.to, toY]] as Array<[Vec2, number]>) {
-        const abutGeometry = new THREE.BoxGeometry(4.6, Math.max(3.2, deckY - endY + 2.6), 5.4);
-        const abut = new THREE.Mesh(abutGeometry, railMaterial);
-        abut.position.set(end.x, endY - 0.9, end.z);
-        abut.rotation.y = -bridge.angle;
-        this.group.add(abut);
-        this.disposables.push(abutGeometry);
-      }
     }
   }
 
@@ -389,21 +476,16 @@ export class CityParts {
         paths.push({ points: path, cumulative, total, y: 0.08, terrain: district.terrain });
       }
     }
-    for (const bridge of this.layout.bridges) {
-      const points = [bridge.from, bridge.to, bridge.from];
-      const { cumulative, total } = polyCumulative(points);
-      paths.push({ points, cumulative, total, y: 0.5, terrain: null });
-    }
     const cars: Car[] = [];
     paths.forEach((path, pathIndex) => {
-      const count = Math.min(18, Math.max(4, Math.round(path.total / 16)));
+      const count = 3;
       for (let index = 0; index < count; index += 1) {
         const seed = hashSeed(`car:${pathIndex}:${index}`);
         cars.push({ path, distance: (index / count) * path.total + seed * 5, speed: 6.5 + seed * 6 });
       }
     });
     const carColors = ["#f8f5ec", "#c96f4a", "#4d7ca8", "#3f8f7a", "#d8a13c", "#8d5a5a"];
-    const geometry = new THREE.BoxGeometry(4.2, 1.3, 1.9).translate(0, 0.65, 0);
+    const geometry = new THREE.BoxGeometry(2.5, 0.8, 1.2).translate(0, 0.4, 0);
     const material = new THREE.MeshLambertMaterial({ color: "#ffffff" });
     const mesh = new THREE.InstancedMesh(geometry, material, Math.max(cars.length, 1));
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -418,16 +500,17 @@ export class CityParts {
     return { mesh, cars };
   }
 
-  private buildBoats(): { mesh: THREE.InstancedMesh; boats: Array<{ radius: number; angle: number; speed: number; y: number; phase: number }> } {
-    const boats: Array<{ radius: number; angle: number; speed: number; y: number; phase: number }> = [];
-    this.layout.boatLanes.forEach((lane, laneIndex) => {
-      const count = 2 + (laneIndex % 2);
+  private buildBoats(): { mesh: THREE.InstancedMesh; boats: Array<{ path: CarPath; distance: number; speed: number; phase: number }> } {
+    // 船沿海岸外扩航道巡航（折线推进，与车辆同一套采样）。
+    const boats: ReturnType<CityParts["buildBoats"]>["boats"] = [];
+    this.layout.boatLoops?.forEach((loop, laneIndex) => {
+      const { cumulative, total } = polyCumulative(loop);
+      const count = 3 + (laneIndex % 2);
       for (let index = 0; index < count; index += 1) {
         boats.push({
-          radius: lane.radius + (hashSeed(`br:${laneIndex}:${index}`) - 0.5) * 6,
-          angle: lane.phase + (index / count) * Math.PI * 2,
-          speed: lane.speed * (0.8 + hashSeed(`bs:${laneIndex}:${index}`) * 0.5),
-          y: -0.22,
+          path: { points: loop, cumulative, total, y: -0.3, terrain: null },
+          distance: (index / count) * total + hashSeed(`bd:${laneIndex}:${index}`) * 40,
+          speed: (laneIndex % 2 === 0 ? 1 : -1) * (2.6 + hashSeed(`bs:${laneIndex}:${index}`) * 1.6),
           phase: hashSeed(`bp:${laneIndex}:${index}`) * Math.PI * 2,
         });
       }
@@ -451,14 +534,14 @@ export class CityParts {
   private buildClouds(): { mesh: THREE.InstancedMesh; clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }> } {
     const clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }> = [];
     const bounds = this.layout.boundsRadius + 40;
-    for (let index = 0; index < 12; index += 1) {
+    for (let index = 0; index < 3; index += 1) {
       const seed = hashSeed(`cloud:${index}`);
       clouds.push({
         x: (seed - 0.5) * bounds * 2,
         z: (hashSeed(`cz:${index}`) - 0.5) * bounds * 2,
-        y: 104 + seed * 44,
+        y: 220 + seed * 44,
         speed: 0.65 + seed * 0.7,
-        scale: 1 + seed * 1.4,
+        scale: 0.5 + seed * 0.4,
       });
     }
     const geometry = new THREE.SphereGeometry(1, 8, 6);
@@ -503,12 +586,12 @@ export class CityParts {
       const detail = `${district.sessionCount} sessions`;
       const { texture, aspect } = makeLabelSprite(district.label, detail, palette.accent);
       texture.colorSpace = THREE.SRGBColorSpace;
-      const material = new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true });
+      const material = new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true, sizeAttenuation: false });
       const sprite = new THREE.Sprite(material);
-      const height = 6.4;
+      const height = 0.018;
       sprite.scale.set(height * aspect, height, 1);
       sprite.renderOrder = 20;
-      sprite.position.set(district.center.x, district.plaza.y + district.radius * 0.5 + 21, district.center.z);
+      sprite.position.set(district.center.x, district.plaza.y + 45, district.center.z);
       this.group.add(sprite);
       this.labels.push(sprite);
       this.disposables.push(material, texture);
@@ -596,9 +679,10 @@ export class CityParts {
       const runtime: BuildingRuntime = {
         building,
         slot,
+        facade: -1,
         groundY: district.grounds.get(building.id) ?? 0,
         paletteWall: new THREE.Color(palette.wall).multiplyScalar(0.92 + building.seed * 0.16),
-        display: 0,
+        display: building.builtFraction,
         target: building.builtFraction,
         district,
         shaftPrimary: -1,
@@ -614,20 +698,21 @@ export class CityParts {
         blinkPhase: hashSeed(`blink:${building.id}`) * Math.PI * 2,
       };
 
-      const mesh = this.shaftMeshes[building.facade];
-      const instanceMap = this.shaftIdByInstance[building.facade];
+      runtime.facade = this.facadeFor(building);
+      const mesh = this.shaftMeshes[runtime.facade];
+      const instanceMap = this.shaftIdByInstance[runtime.facade];
       const wantsUpper = building.archetype === "tower" || building.archetype === "landmark";
-      runtime.shaftPrimary = shaftCursor[building.facade];
+      runtime.shaftPrimary = shaftCursor[runtime.facade];
       mesh.setColorAt(runtime.shaftPrimary, runtime.paletteWall);
       (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftPrimary, Math.max(2, Math.round(building.height / 3.1)));
       instanceMap.set(runtime.shaftPrimary, building.id);
-      shaftCursor[building.facade] += 1;
+      shaftCursor[runtime.facade] += 1;
       if (wantsUpper) {
-        runtime.shaftUpper = shaftCursor[building.facade];
+        runtime.shaftUpper = shaftCursor[runtime.facade];
         mesh.setColorAt(runtime.shaftUpper, runtime.paletteWall.clone().multiplyScalar(0.94));
         (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftUpper, Math.max(2, Math.round((building.height * 0.28) / 3.1)));
         instanceMap.set(runtime.shaftUpper, building.id);
-        shaftCursor[building.facade] += 1;
+        shaftCursor[runtime.facade] += 1;
       }
 
       const needsPodium = building.archetype !== "tower" && building.archetype !== "landmark";
@@ -705,9 +790,13 @@ export class CityParts {
     else if (building.archetype === "block") widths = [fp * 1.2, fp * 0.85];
     else if (building.archetype === "tower" || building.archetype === "landmark") widths = [fp * 0.86, fp * 0.55];
     else widths = [fp, fp];
+    const streetWidth = runtime.slot.width * (runtime.slot.zone === "downtown" ? 0.8 : 0.88);
+    if (building.archetype !== "tower" && building.archetype !== "landmark") widths[0] = Math.max(widths[0], streetWidth);
+    widths[0] = Math.min(widths[0], runtime.slot.width - 0.8);
+    widths[1] = Math.min(widths[1], runtime.slot.depth - 2);
 
-    // 楼体朝向：以广场为参照的切向 + hash 抖动，破除正交网格感。
-    const yaw = Math.atan2(z - runtime.district.plaza.z, x - runtime.district.plaza.x) + Math.PI / 2 + (building.seed - 0.5) * 0.5;
+    // Parcel frontage owns orientation; podium, shaft and roof share it.
+    const yaw = runtime.slot.yaw;
     // 主体段。
     const shaftBottom = g + podiumHeight;
     const shaftTop = g + Math.min(built, h * split);
@@ -718,7 +807,7 @@ export class CityParts {
       } else {
         this.compose(x, shaftBottom, z, yaw, widths[0], shaftHeight, widths[1]);
       }
-      this.shaftMeshes[building.facade].setMatrixAt(runtime.shaftPrimary, this.matrix);
+      this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftPrimary, this.matrix);
     }
     // 退台段（tower/landmark）。
     if (runtime.shaftUpper >= 0) {
@@ -728,17 +817,17 @@ export class CityParts {
       } else {
         this.compose(x, g + h * split, z, yaw, widths[0] * 0.72, upperHeight, widths[1] * 0.72);
       }
-      this.shaftMeshes[building.facade].setMatrixAt(runtime.shaftUpper, this.matrix);
+      this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftUpper, this.matrix);
     }
     if (runtime.podium >= 0) {
-      this.compose(x, g, z, 0, fp * 1.16, podiumHeight > 0.1 ? podiumHeight : 0, fp * 1.16);
+      this.compose(x, g, z, yaw, fp * 1.16, podiumHeight > 0.1 ? podiumHeight : 0, fp * 1.16);
       this.podiumMesh.setMatrixAt(runtime.podium, this.matrix);
     }
     if (runtime.roof >= 0) {
       const roofY = g + Math.max(0.4, built - 0.18);
       const roofWidth = runtime.shaftUpper >= 0 && built > h * split ? widths[0] * 0.78 : widths[0] * 1.06;
       const roofDepth = runtime.shaftUpper >= 0 && built > h * split ? widths[1] * 0.78 : widths[1] * 1.06;
-      this.compose(x, roofY, z, 0, roofWidth, 0.34, roofDepth);
+      this.compose(x, roofY, z, yaw, roofWidth, 0.34, roofDepth);
       this.roofMesh.setMatrixAt(runtime.roof, this.matrix);
     }
     // 脚手架：包住"计划高度"的剩余部分——楼还没到的地方先看见壳。
@@ -782,8 +871,8 @@ export class CityParts {
   private hideAll(runtime: BuildingRuntime): void {
     this.compose(0, -40, 0, 0, 0, 0, 0);
     const building = runtime.building;
-    if (runtime.shaftPrimary >= 0) this.shaftMeshes[building.facade].setMatrixAt(runtime.shaftPrimary, this.matrix);
-    if (runtime.shaftUpper >= 0) this.shaftMeshes[building.facade].setMatrixAt(runtime.shaftUpper, this.matrix);
+    if (runtime.shaftPrimary >= 0) this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftPrimary, this.matrix);
+    if (runtime.shaftUpper >= 0) this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftUpper, this.matrix);
     if (runtime.podium >= 0) this.podiumMesh.setMatrixAt(runtime.podium, this.matrix);
     if (runtime.roof >= 0) this.roofMesh.setMatrixAt(runtime.roof, this.matrix);
     if (runtime.scaffold >= 0) this.scaffoldMesh.setMatrixAt(runtime.scaffold, this.matrix);
@@ -910,20 +999,18 @@ export class CityParts {
       car.distance += car.speed * dt;
       const sample = samplePolyline(car.path, car.distance);
       const y = car.path.terrain ? car.path.terrain.height(sample.x, sample.z) + car.path.y : car.path.y;
-      this.compose(sample.x, y, sample.z, Math.atan2(-sample.dz, sample.dx), 1, 1, 1);
+      this.compose(sample.x - sample.dz * 1.2, y + 0.04, sample.z + sample.dx * 1.2, Math.atan2(-sample.dz, sample.dx), 1, 1, 1);
       this.carMesh.setMatrixAt(index, this.matrix);
       carsMoved = true;
     });
     if (carsMoved) this.carMesh.instanceMatrix.needsUpdate = true;
 
-    // 船只。
+    // 船只（沿海岸航道折线推进 + 起伏）。
     this.boats.forEach((boat, index) => {
-      boat.angle += boat.speed * dt;
-      const x = Math.cos(boat.angle) * boat.radius;
-      const z = Math.sin(boat.angle) * boat.radius;
+      boat.distance += boat.speed * dt;
+      const sample = samplePolyline(boat.path, boat.distance);
       const bob = Math.sin(elapsed * 0.9 + boat.phase) * 0.12;
-      const heading = boat.angle + (boat.speed > 0 ? Math.PI / 2 : -Math.PI / 2);
-      this.compose(x, boat.y + bob, z, heading, 1, 1, 1);
+      this.compose(sample.x, -0.3 + bob, sample.z, Math.atan2(-sample.dz, sample.dx), 1, 1, 1);
       this.boatMesh.setMatrixAt(index, this.matrix);
     });
     this.boatMesh.instanceMatrix.needsUpdate = true;

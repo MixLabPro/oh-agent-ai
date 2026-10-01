@@ -34,8 +34,40 @@
   display: flex;
   align-items: center;
   gap: var(--ui-space-2);
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-end;
+}
+
+.city-toolbar .av-control {
+  width: auto;
+  min-width: 100px;
+  flex: 0 0 auto;
+}
+
+.city-toolbar .av-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .city-toolbar { gap: 4px; }
+  .city-toolbar .status-pill { display: none; }
+  .city-toolbar .av-control { min-width: 84px; font-size: 11px; }
+  .city-toolbar .av-button { padding-inline: 7px; font-size: 11px; }
+}
+
+@media (max-width: 700px) {
+  .city-workspace > .page-action-bar {
+    position: absolute;
+    top: 8px;
+    right: 10px;
+    left: 10px;
+    z-index: 7;
+    margin: 0;
+  }
+  .city-workspace .city-toolbar { justify-content: flex-end; width: 100%; }
+  .city-workspace .city-hud-stats { top: 60px; }
+  .city-workspace .city-perf { top: 122px; }
 }
 
 .city-tooltip {

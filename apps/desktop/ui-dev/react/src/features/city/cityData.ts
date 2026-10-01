@@ -32,7 +32,8 @@ function shiftDate(date: string, days: number): string {
   return value.toISOString().slice(0, 10);
 }
 
-export type CityLoadResult = { model: CityModel; error: string | null };
+export type CityLoadResult = { model: CityModel; error: string | null; /** 分页是否已全部到齐——到齐后应做一次全量重排。 */
+  complete: boolean };
 export type CityLoadHandlers = {
   onModel: (result: CityLoadResult) => void;
   onBackgroundModel?: (result: CityLoadResult) => void;
@@ -78,7 +79,8 @@ export class CityLoader {
           rows.push(...result.sessions);
           totalSessions = result.window_session_count;
           cursor = result.next_cursor;
-          if (first || (cursor && rows.length < LOAD_CAP)) {
+          truncated = Boolean(cursor) && (rows.length >= LOAD_CAP || page === 11);
+          {
             const findings = await findingsPromise;
             const model = buildCityModel({
               rows,
@@ -90,7 +92,9 @@ export class CityLoader {
               truncated,
             });
             const callback = first || !background ? handlers.onModel : handlers.onBackgroundModel ?? handlers.onModel;
-            callback({ model, error: null });
+            // 分页是 token 降序而非时间序：中间页只是"先看到城市"的近似布局，
+            // 明确标记未完成，等全部页到齐后由页面层做一次全量重排。
+            callback({ model, error: null, complete: false });
             first = false;
           }
           if (!cursor) break;
@@ -99,9 +103,25 @@ export class CityLoader {
             break;
           }
         }
+        // 全部页到齐：用完整数据发最终模型（complete=true → 全量重排，
+        // 修正中间页乱序到达造成的圈层错位）。
+        if (rows.length) {
+          const findings = await findingsPromise;
+          const model = buildCityModel({
+            rows,
+            findings,
+            windowStartMs: Date.parse(`${dateFrom}T00:00:00Z`),
+            windowEndMs: Date.now(),
+            windowLabel: `${dateFrom} ~ ${dateTo}`,
+            totalSessions,
+            truncated,
+          });
+          const callback = background ? handlers.onBackgroundModel ?? handlers.onModel : handlers.onModel;
+          callback({ model, error: null, complete: true });
+        }
       } catch (reason: unknown) {
         if (!this.active || generation !== this.generation) return;
-        handlers.onModel({ model: buildCityModel({ rows: [], findings: [], windowStartMs: Date.parse(`${dateFrom}T00:00:00Z`), windowEndMs: Date.now(), windowLabel: `${dateFrom} ~ ${dateTo}`, totalSessions: 0, truncated: false }), error: safeUiError(reason, "城市数据暂不可用") });
+        handlers.onModel({ model: buildCityModel({ rows: [], findings: [], windowStartMs: Date.parse(`${dateFrom}T00:00:00Z`), windowEndMs: Date.now(), windowLabel: `${dateFrom} ~ ${dateTo}`, totalSessions: 0, truncated: false }), error: safeUiError(reason, "城市数据暂不可用"), complete: true });
       }
     };
 

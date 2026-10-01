@@ -13,7 +13,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { CityModel } from "../cityModel";
-import { layoutCity } from "./cityLayout";
+import { layoutCity, type CityLayout } from "./cityLayout";
 import { CityParts, type QualityLevel } from "./cityParts";
 
 export type EngineQualityMode = "auto" | "high" | "eco";
@@ -41,6 +41,7 @@ export class CityEngine {
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
   private parts: CityParts | null = null;
+  private layout: CityLayout | null = null;
   private model: CityModel | null = null;
   private frame = 0;
   private raf = 0;
@@ -75,6 +76,7 @@ export class CityEngine {
   private pointerDown: { x: number; y: number; at: number } | null = null;
   private attracted = true;
   private boundsRadius = 150;
+  private cityCenter = { x: 0, z: 0 };
   private readonly disposablesSky: Array<{ dispose: () => void }> = [];
   private readonly observers: Array<() => void> = [];
 
@@ -96,7 +98,7 @@ export class CityEngine {
     this.controls.maxPolarAngle = 1.42;
     this.controls.minDistance = 16;
     this.controls.maxDistance = 900;
-    this.controls.autoRotate = true;
+    this.controls.autoRotate = false;
     this.controls.autoRotateSpeed = 0.45;
 
     this.scene.background = new THREE.Color("#d9ecf1");
@@ -139,7 +141,7 @@ export class CityEngine {
       if (moved > 7 || performance.now() - down.at > 500) return; // 拖拽不是点击
       this.handleClick();
     };
-    const onWheel = () => this.noteActivity();
+    const onWheel = () => { this.attracted = false; this.noteActivity(); };
     const onVisibility = () => {
       this.documentHidden = document.visibilityState === "hidden";
       if (this.documentHidden) this.stopLoop();
@@ -179,37 +181,46 @@ export class CityEngine {
     this.renderer.setSize(width, height, false);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
+    if (this.layout && this.attracted) {
+      const home = this.homeView();
+      this.camera.position.set(home.x, home.y, home.z);
+      this.controls.target.set(this.cityCenter.x, 6, this.cityCenter.z);
+    }
   }
 
-  applyModel(model: CityModel): void {
+  /** reuse=false：丢弃上一布局做全量重排（分页到齐后的圈层修正）。 */
+  applyModel(model: CityModel, reuse = true): void {
     this.model = model;
     if (this.parts) {
       this.scene.remove(this.parts.group, this.parts.water);
       this.parts.dispose();
       this.parts = null;
     }
-    const layout = layoutCity(model);
+    const layout = layoutCity(model, reuse ? this.layout : null);
+    this.layout = layout;
     this.parts = new CityParts(model, layout);
     this.scene.add(this.parts.group, this.parts.water);
 
-    const bounds = Math.max(120, layout.boundsRadius);
+    this.cityCenter = { x: (layout.urbanBounds.left + layout.urbanBounds.right) / 2, z: (layout.urbanBounds.north + layout.urbanBounds.south) / 2 };
+    const bounds = Math.max(100, Math.hypot(layout.urbanBounds.right - layout.urbanBounds.left, layout.urbanBounds.south - layout.urbanBounds.north) / 2 + 35);
     this.boundsRadius = bounds;
     this.controls.maxDistance = bounds * 4.5;
     this.scene.fog = new THREE.Fog(new THREE.Color("#dfeef2"), bounds * 2.1, bounds * 7.5);
     const shadowBox = bounds * 0.85 + 24;
     const shadowCamera = this.sun.shadow.camera as THREE.OrthographicCamera;
+    this.sun.position.set(this.cityCenter.x + 120, Math.max(160, bounds), this.cityCenter.z + 70);
+    this.sun.target.position.set(this.cityCenter.x, 0, this.cityCenter.z);
+    shadowCamera.far = bounds * 3 + 300;
     shadowCamera.left = -shadowBox;
     shadowCamera.right = shadowBox;
     shadowCamera.top = shadowBox;
     shadowCamera.bottom = -shadowBox;
     shadowCamera.updateProjectionMatrix();
 
-    if (this.frame < 5) {
+    if (this.attracted) {
       // 首个模型：入场镜头（远处高处 → 默认视角）。
       const home = this.homeView();
-      this.camera.position.set(home.x * 2.1, home.y * 2.4, home.z * 2.1);
-      this.controls.target.set(0, 6, 0);
-      this.flyTo(home, { x: 0, y: 6, z: 0 }, 2_000);
+      this.flyTo(home, { ...this.cityCenter, y: 6 }, 900);
     }
     this.parts.setLabelsVisible(true);
     this.parts.setQualityLevel(this.quality);
@@ -218,7 +229,8 @@ export class CityEngine {
 
   private homeView(): { x: number; y: number; z: number } {
     const bounds = Math.max(120, this.boundsRadius);
-    return { x: bounds * 0.98, y: bounds * 0.82, z: bounds * 1.12 };
+    const fit = 1.2 * Math.max(1, 1 / this.camera.aspect);
+    return { x: this.cityCenter.x + bounds * 0.86 * fit, y: bounds * 1.05 * fit, z: this.cityCenter.z + bounds * 1.16 * fit };
   }
 
   private flyTo(position: { x: number; y: number; z: number }, target: { x: number; y: number; z: number }, duration: number): void {
@@ -234,7 +246,7 @@ export class CityEngine {
 
   resetView(): void {
     const home = this.homeView();
-    this.flyTo(home, { x: 0, y: 6, z: 0 }, 900);
+    this.flyTo(home, { ...this.cityCenter, y: 6 }, 900);
     this.options.onSelect?.(null);
     this.parts?.setSelected(null);
   }
@@ -243,6 +255,7 @@ export class CityEngine {
     if (!this.parts) return false;
     const anchor = this.parts.anchorFor(id);
     if (!anchor) return false;
+    this.attracted = false;
     const distance = Math.max(26, anchor.height * 2.1);
     const direction = new THREE.Vector3().subVectors(this.camera.position, this.controls.target).setY(0).normalize();
     if (direction.lengthSq() < 0.01) direction.set(0.8, 0, 0.6).normalize();
@@ -255,6 +268,7 @@ export class CityEngine {
     if (!this.parts) return false;
     const anchor = this.parts.districtAnchor(districtId);
     if (!anchor) return false;
+    this.attracted = false;
     const distance = anchor.radius * 2.6;
     const direction = new THREE.Vector3().subVectors(this.camera.position, this.controls.target).setY(0).normalize();
     if (direction.lengthSq() < 0.01) direction.set(0.8, 0, 0.6).normalize();
@@ -287,6 +301,11 @@ export class CityEngine {
 
   setLabelsVisible(visible: boolean): void {
     this.parts?.setLabelsVisible(visible);
+  }
+
+  /** 地块预算之外、被聚合为背景楼群的会话数（HUD 如实展示）。 */
+  get overflowCount(): number {
+    return (this.layout?.massing ?? []).reduce((sum, block) => sum + block.count, 0);
   }
 
   /** 模型重建后恢复选中态（刷新不打断用户的浏览上下文）。 */
