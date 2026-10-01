@@ -1,14 +1,15 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { message, useLanguage, type MessageKey } from "../../lib/i18n";
 import { stable } from "../../lib/stable";
 import {
-  deleteUserPriceCard, readFxStatus, readOfficialPriceCard, readPriceCardProviders, readUserPriceCards, saveUserPriceCard,
+  deleteUserPriceCard, hasNativeBridge, readFxStatus, readOfficialPriceCard, readPriceCardProviders, readUserPriceCards, saveUserPriceCard,
   type PriceCardProvider, type UserPriceCard,
 } from "../../lib/tauri";
 import { allowedCurrencies, buildPriceCardPayload, emptyFields, type PriceCardFields, type PriceFields } from "./priceCardForm";
 
 const FALLBACK_CURRENCIES = ["USD", "CNY"];
-const fmt = (value: number) => String(Number(value.toFixed(6)));
+// 有效数字而不是固定小数位：`0.0000001` 通过了校验，不能在列表里显示成 0。
+const fmt = (value: number) => String(Number(value.toPrecision(8)));
 const toText = (rates: { off_peak: number; peak: number } | null | undefined): string => (rates ? fmt(rates.off_peak) : "");
 
 /**
@@ -49,11 +50,18 @@ export function PriceCardSection() {
   const setPrice = (peak: boolean, key: keyof PriceFields, value: string) =>
     setFields((current) => ({ ...current, [peak ? "peak" : "price"]: { ...(peak ? current.peak : current.price), [key]: value } }));
 
+  // 防重入：按钮被禁用只拦得住点击，拦不住 requestSubmit / 程序化提交（验收里观察到重复保存）。
+  const busyRef = useRef(false);
   const run = async (action: () => Promise<void>, done: MessageKey) => {
-    setBusy(true); setError(null); setNotice(null);
-    try { await action(); await reload(); setNotice(tr(done)); }
-    catch (reason: unknown) { setError(reason instanceof Error && reason.message ? reason.message : typeof reason === "string" && reason ? reason : tr("pc.saveFailed")); }
-    finally { setBusy(false); }
+    if (busyRef.current) return;
+    busyRef.current = true; setBusy(true); setError(null); setNotice(null);
+    try {
+      await action();
+      setNotice(tr(done));
+      // 保存已经成功：重新读取失败不能说成「保存失败」，只是列表暂时没刷新。
+      try { await reload(); } catch { setError(tr("pc.reloadFailed")); }
+    } catch (reason: unknown) { setError(reason instanceof Error && reason.message ? reason.message : typeof reason === "string" && reason ? reason : tr("pc.saveFailed")); }
+    finally { busyRef.current = false; setBusy(false); }
   };
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -63,10 +71,15 @@ export function PriceCardSection() {
     void run(async () => { await saveUserPriceCard(built.payload); setFields(emptyFields()); }, "pc.saved");
   };
 
+  const latest = useRef({ provider: "", model: "" });
+  latest.current = { provider: providerId, model: fields.model.trim() };
   const onPrefill = async () => {
     setError(null); setNotice(null);
+    const asked = { provider: providerId, model: fields.model.trim() };
     try {
-      const official = await readOfficialPriceCard(providerId, fields.model.trim());
+      const official = await readOfficialPriceCard(asked.provider, asked.model);
+      // 等待期间用户换了服务商 / 型号：这份官方价属于别的服务商（可能是别的币种），丢弃，不能填进去。
+      if (latest.current.provider !== asked.provider || latest.current.model !== asked.model) return;
       if (!official.found) { setError(official.reason ? tr("pc.officialNotFoundWhy", { reason: official.reason }) : tr("pc.officialNotFound")); return; }
       if (providerCurrency && official.currency !== providerCurrency) { setError(tr("pc.officialCurrencyMismatch", { official: official.currency, provider: providerCurrency })); return; }
       const differs = official.input_uncached.off_peak !== official.input_uncached.peak || official.input_cached.off_peak !== official.input_cached.peak || official.output.off_peak !== official.output.peak;
@@ -84,7 +97,9 @@ export function PriceCardSection() {
       <input inputMode="decimal" value={(peak ? fields.peak : fields.price)[key]} onChange={(event) => setPrice(peak, key, event.target.value)} placeholder="0.00" autoComplete="off" /></label>
   );
 
-  if (!available) return null; // 无桥接（浏览器预览）或读取失败：整块不显示，不留空壳
+  // 无桥接（浏览器预览）或读取失败：整块不显示，不留空壳。无桥接时读取函数返回空而不是抛错，
+  // 所以要显式判断——否则表单会照常出现、提交后还提示「已保存」而什么也没存。
+  if (!available || !hasNativeBridge()) return null;
 
   return <section className="settings-section" id="settings-price-cards" aria-labelledby="settings-pc-title">
     <div className="settings-section-heading"><div><p className="eyebrow">{tr("pc.eyebrow")}</p><h3 id="settings-pc-title">{tr("pc.title")}</h3><p>{tr("pc.intro")}</p></div></div>

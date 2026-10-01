@@ -3774,8 +3774,9 @@ fn snooze_budget_current_period() -> Result<Value, String> {
     snooze_budget_until(until_ms)
 }
 
-/// 补卡表单的「按原厂官方价预填」：当前旧表单只接受 CNY 价卡。
-/// 找到非 CNY 官方卡时必须拒绝预填，不能按可变 FX 自动生成 CNY 用户价卡。
+/// 补卡表单的「按原厂官方价预填」：**原样返回官方卡的报价币种与价格，不做任何换算**。
+/// 表单据此把币种定为官方币种，并在与所选服务商的报价币种不一致时拒绝预填（保存时后端
+/// `save_card_checked` 也会再拒绝一次）。曾经对非 CNY 卡一律拒绝，导致 Anthropic 等 USD 服务商永远预填不了。
 #[tauri::command]
 fn official_price_card(provider_id: String, model_id: String) -> Value {
     let pricing = agent_vitals_runtime::price_overrides::merged_main(&overview::data_home());
@@ -3785,12 +3786,6 @@ fn official_price_card(provider_id: String, model_id: String) -> Value {
     ) else {
         return serde_json::json!({ "found": false });
     };
-    if currency != "CNY" {
-        return serde_json::json!({
-            "found": false,
-            "reason": format!("official card is in {currency}; the current form only supports CNY and cannot infer a conversion"),
-        });
-    }
     serde_json::json!({
         "found": true, "provider": from_provider, "card_key": key, "rates": six,
         "currency": currency,
@@ -5233,13 +5228,17 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn official_usd_card_is_not_silently_converted_into_cny_form() {
+    fn official_usd_card_is_returned_in_its_own_currency_never_converted() {
         let result = super::official_price_card(
             "anthropic".to_string(),
             "anthropic/claude-sonnet-5".to_string(),
         );
-        assert_eq!(result["found"], false);
-        assert!(result["reason"].as_str().unwrap_or("").contains("only supports CNY"));
+        assert_eq!(result["found"], true, "{result}");
+        assert_eq!(result["currency"], "USD", "官方卡原样带着它的报价币种");
+        // 没有换算：美元价是个位数到两位数，乘 7 以上的汇率会明显更大
+        let output = result["rates"]["output"]["off_peak"].as_f64().unwrap();
+        assert!(output > 0.0 && output < 100.0, "USD 价格未被换算：{output}");
+        assert!(result.get("reason").is_none());
     }
     #[test]
     fn native_menu_language_follows_first_system_language() {

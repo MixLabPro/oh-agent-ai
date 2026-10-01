@@ -7,6 +7,7 @@ export type { AppLanguage, LanguagePreference } from "./localePreference";
 
 const eventName = "agent-vitals-language-changed";
 const english = {
+  "pc.reloadFailed": "Saved, but the list could not be refreshed. Reopen Settings to see it.",
   "pc.err.price": "Uncached input, cached input and output prices are required; enter each as a plain number such as 3 or 0.3 (use a dot).",
   "pc.err.currency": "Choose a currency this provider can use.",
   "pc.err.model": "Enter the model name.",
@@ -1490,6 +1491,7 @@ const english = {
 
 type Translation = string | { one: string; other: string };
 const chinese: Record<keyof typeof english, Translation> = {
+  "pc.reloadFailed": "已保存，但列表暂时没刷新成功。重新打开设置即可看到。",
   "pc.err.price": "未命中输入、命中输入、输出三项价格必填，请按普通数字填写，例如 3 或 0.3（用小数点）。",
   "pc.err.currency": "请选择该服务商可用的币种。",
   "pc.err.model": "请填写型号名称。",

@@ -62,4 +62,17 @@ assert.deepEqual(plain(peakOk.payload.input_uncached), { off_peak: 3, peak: 6 })
 assert.deepEqual(plain(peakOk.payload.output), { off_peak: 15, peak: 30 });
 peaked.peak.output = "";
 assert.equal(buildPriceCardPayload(peaked, "USD", SUPPORTED).error, "price", "peak prices must be complete when the toggle is on");
+
+// 验收发现的缺陷：用源码守卫防回归（真正的挂载验证见独立验收记录，仓库里没有 jsdom）。
+{
+  const src = readFileSync(path.join(ui, "react/src/features/settings/PriceCardSection.tsx"), "utf8");
+  assert.match(src, /hasNativeBridge\(\)/, "no native bridge => render nothing (the read helpers return [] instead of throwing, so this must be explicit)");
+  assert.match(src, /latest\.current\.provider !== asked\.provider/, "a prefill response for a provider the user has since left must be discarded");
+  assert.match(src, /busyRef\.current/, "submit must be re-entrancy guarded, not just the disabled button");
+  const early = src.indexOf("if (!available");
+  assert.ok(early > 0, "early return not found");
+  const lateHooks = src.slice(early + 1).match(/\buse[A-Z][A-Za-z]*\(/g) ?? [];
+  assert.deepEqual(lateHooks, [], `hooks called after the early return: ${lateHooks.join(", ")}`);
+  assert.doesNotMatch(src, /toFixed\(6\)/, "tiny prices that pass validation must not display as 0");
+}
 console.log("React price-card form contract: OK (currency follows the provider, no half cards, plain decimals only)");
