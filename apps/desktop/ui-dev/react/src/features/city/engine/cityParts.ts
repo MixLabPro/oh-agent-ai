@@ -62,6 +62,12 @@ type FacadeUniforms = {
   uPhotoRows: { value: number };
   uTileWidth: { value: number };
   uSelfLit: { value: number };
+  /** 玻璃反射：天空全景（与天空球、水面同一张图、同一套调色），只作用在窗格上。 */
+  uEnv: { value: THREE.Texture | null };
+  uEnvStrength: { value: number };
+  uGradeTop: { value: THREE.Color };
+  uGradeHorizon: { value: THREE.Color };
+  uGradeAmount: { value: number };
 };
 
 /** 带「按自身颜色补自发光」的白底材质（颜色来自实例色）：彩色环境光下保住宿主色相。 */
@@ -83,7 +89,11 @@ function facadeMaterial(map: THREE.Texture, uniforms: FacadeUniforms, key: strin
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
-      .replace("#include <common>", "#include <common>\nattribute float aFloors;\nuniform float uRows;\nuniform float uPhotoRows;\nuniform float uTileWidth;\nvarying vec2 vPhotoUv;")
+      .replace("#include <common>", "#include <common>\nattribute float aFloors;\nuniform float uRows;\nuniform float uPhotoRows;\nuniform float uTileWidth;\nvarying vec2 vPhotoUv;\nvarying vec3 vFacadeWorld;\nvarying vec3 vFacadeNormal;")
+      .replace("#include <project_vertex>", `#include <project_vertex>
+vFacadeWorld = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;
+// 盒子的面法线是轴向的：经实例矩阵（只有 yaw + 缩放）变换后归一化即为世界法线。
+vFacadeNormal = normalize(mat3(modelMatrix) * mat3(instanceMatrix) * objectNormal);`)
       // 照片 UV 横向按「这个面的真实宽度 / 一块照片的宽度」平铺。宽度从实例矩阵读：
       // ±x 面的宽是 z 轴缩放，±z 面是 x 轴缩放。
       .replace("#include <uv_vertex>", `#include <uv_vertex>
@@ -94,15 +104,50 @@ float faceWidth = abs(normal.x) > 0.5 ? length(instanceMatrix[2].xyz) : length(i
 vPhotoUv = vec2(baseUv.x * faceWidth / max(uTileWidth, 1.0), baseUv.y * aFloors / max(uPhotoRows, 1.0));
 #endif`);
     shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", "#include <common>\nuniform float uPhoto;\nuniform sampler2D uPhotoTex;\nuniform float uSelfLit;\nvarying vec2 vPhotoUv;")
+      .replace("#include <common>", `#include <common>
+uniform float uPhoto;
+uniform sampler2D uPhotoTex;
+uniform float uSelfLit;
+uniform sampler2D uEnv;
+uniform float uEnvStrength;
+uniform vec3 uGradeTop;
+uniform vec3 uGradeHorizon;
+uniform float uGradeAmount;
+varying vec2 vPhotoUv;
+varying vec3 vFacadeWorld;
+varying vec3 vFacadeNormal;
+float facadeWindow = 0.0;
+vec3 facadeSky(vec3 dir) {
+  dir = normalize(dir);
+  vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
+  vec3 photo = texture2D(uEnv, uv).rgb;
+  vec3 tint = mix(uGradeHorizon, uGradeTop, smoothstep(0.0, 0.6, max(dir.y, 0.0)));
+  return mix(photo, photo * tint * 1.55, uGradeAmount);
+}`)
       .replace("#include <map_fragment>", `#ifdef USE_MAP
-  diffuseColor *= texture2D( map, vMapUv );
+  vec4 facadeTexel = texture2D( map, vMapUv );
+  // 窗格遮罩：程序化立面里窗是暗格、墙是亮底。只让窗反光——整面反光的楼像一面镜子。
+  facadeWindow = 1.0 - smoothstep(0.22, 0.5, dot(facadeTexel.rgb, vec3(0.2126, 0.7152, 0.0722)));
+  diffuseColor *= facadeTexel;
   if (uPhoto > 0.5) {
     float l = dot(texture2D(uPhotoTex, vPhotoUv).rgb, vec3(0.2126, 0.7152, 0.0722));
-    diffuseColor.rgb *= 0.8 + 0.45 * smoothstep(0.03, 0.5, l);
+    diffuseColor.rgb *= mix(0.8 + 0.45 * smoothstep(0.03, 0.5, l), 1.0, facadeWindow);
   }
 #endif`)
-      .replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\ntotalEmissiveRadiance += diffuseColor.rgb * uSelfLit;");
+      .replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\ntotalEmissiveRadiance += diffuseColor.rgb * uSelfLit;")
+      // 光照算完之后再混反射：玻璃的颜色主要来自它映出的天空，不受漫反射光的明暗支配。
+      .replace("#include <opaque_fragment>", `if (uEnvStrength > 0.0) {
+  vec3 viewDir = normalize(vFacadeWorld - cameraPosition);
+  vec3 n = normalize(vFacadeNormal);
+  vec3 reflected = reflect(viewDir, n);
+  // 反射向下看到的是地面/邻楼（环境图里没有）：压暗而不是映天空。
+  float skyward = smoothstep(-0.15, 0.25, reflected.y);
+  float fresnel = 0.06 + 0.94 * pow(1.0 - max(dot(-viewDir, n), 0.0), 4.0);
+  // 俯视时反射多朝下（映地面），只轻压：压太狠玻璃发黑，航拍视角下大部分时间都是这个角度。
+  vec3 reflection = facadeSky(reflected) * mix(0.68, 1.0, skyward);
+  outgoingLight = mix(outgoingLight, reflection, clamp(facadeWindow * uEnvStrength * (0.35 + 0.65 * fresnel), 0.0, 0.92));
+}
+#include <opaque_fragment>`);
   };
   material.customProgramCacheKey = () => `city-facade-${key}`;
   return material;
@@ -209,12 +254,19 @@ export class CityParts {
       geometry.setAttribute("aFloors", new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1));
       // 装饰艺术立面一块平铺画 2 层，其余程序化立面沿用一层一块。
       const uniforms: FacadeUniforms = {
-        uRows: { value: variant === 3 ? 2 : 1 },
+        // 一块纹理覆盖几层楼：程序化立面画的是 4 层（makeFacadeTexture），装饰艺术画 2 层。
+        // 曾按「每层一块」铺，每层楼塞进 4 排窗、窗高只有四分之一——窗又扁又小，玻璃反射只落在细缝里。
+        uRows: { value: variant === 3 ? 2 : 4 },
         uPhoto: { value: 0 },
         uPhotoTex: { value: null },
         uPhotoRows: { value: 1 },
         uTileWidth: { value: 1 },
         uSelfLit: { value: activeTheme().name === "vice" ? 0.24 : 0.05 },
+        uEnv: { value: null },
+        uEnvStrength: { value: 0 },
+        uGradeTop: { value: new THREE.Color(activeTheme().skyGrade.top) },
+        uGradeHorizon: { value: new THREE.Color(activeTheme().skyGrade.horizon) },
+        uGradeAmount: { value: activeTheme().skyGrade.amount },
       };
       this.facadeUniforms.push(uniforms);
       const mesh = new THREE.InstancedMesh(geometry, facadeMaterial(texture, uniforms, String(variant)), capacity);
@@ -422,6 +474,13 @@ export class CityParts {
       uniforms.uPhoto.value = 1;
       uniforms.uPhotoRows.value = rows[variant];
       uniforms.uTileWidth.value = tileWidths[variant];
+    });
+    // 玻璃反射强度按立面：市中心玻璃幕墙最强，商业楼窗户次之，住宅与海滨灰泥楼的窗只带一点。
+    const envStrength = [0.3, 0.7, 0.9, 0.3];
+    const sky = theme.skyImage === "dusk" ? assets.sky.dusk : assets.sky.day;
+    this.facadeUniforms.forEach((uniforms, variant) => {
+      uniforms.uEnv.value = sky;
+      uniforms.uEnvStrength.value = envStrength[variant] ?? 0;
     });
     const deco = this.shaftMeshes[3]?.material as THREE.MeshLambertMaterial | undefined;
     if (deco) {

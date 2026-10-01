@@ -80,44 +80,51 @@ export function makeFacadeTexture(variant: number, seed: number): THREE.Texture 
   ctx.fillStyle = "#f4f1ea";
   ctx.fillRect(0, 0, 128, 128);
 
+  // 窗与墙的明暗对比同时是玻璃反射的遮罩（材质里按亮度判定：暗 = 玻璃）。
+  // 曾经三种立面都是「墙上开小窗」，反射只落在零碎小格里，玻璃楼看不出映着天空（用户实测反馈）。
   if (variant === 0) {
+    // 住宅：开窗，比原来大一圈；亮窗（有人在家）不进反射遮罩。
     for (let floor = 0; floor < 4; floor += 1) {
-      for (let column = 0; column < 6; column += 1) {
+      for (let column = 0; column < 5; column += 1) {
         const lit = hashSeed(`w${seed}:${floor}:${column}`) > 0.86;
-        ctx.fillStyle = lit ? "#f7e3ae" : "#5d6b78";
-        ctx.globalAlpha = lit ? 0.95 : 0.85;
-        ctx.fillRect(8 + column * 20, 10 + floor * 32, 12, 16);
+        ctx.fillStyle = lit ? "#f7e3ae" : "#4f5d6a";
+        ctx.fillRect(6 + column * 24, 7 + floor * 32, 16, 20);
       }
     }
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = "rgba(120, 108, 92, 0.10)";
-    ctx.fillRect(0, 0, 128, 3);
-    ctx.fillRect(0, 125, 128, 3);
+    ctx.fillStyle = "rgba(120, 108, 92, 0.14)";
+    for (let floor = 0; floor < 4; floor += 1) ctx.fillRect(0, floor * 32 + 28, 128, 2);
   } else if (variant === 1) {
+    // 商业：连续带状窗，层间是实墙横带。
     for (let floor = 0; floor < 4; floor += 1) {
-      ctx.fillStyle = floor % 2 === 0 ? "#eceada" : "#f6f3ea";
-      ctx.fillRect(0, floor * 32, 128, 32);
-      ctx.fillStyle = "rgba(96, 84, 70, 0.16)";
-      ctx.fillRect(0, floor * 32 + 28, 128, 3);
-      for (let column = 0; column < 4; column += 1) {
-        ctx.fillStyle = hashSeed(`b${seed}:${floor}:${column}`) > 0.88 ? "#f3dfa6" : "#64707c";
-        ctx.globalAlpha = 0.8;
-        ctx.fillRect(12 + column * 30, floor * 32 + 7, 18, 15);
-        ctx.globalAlpha = 1;
+      ctx.fillStyle = "#4d5c68";
+      ctx.fillRect(0, floor * 32 + 5, 128, 19);
+      ctx.fillStyle = "#e9e5d8";
+      for (let mullion = 0; mullion < 4; mullion += 1) ctx.fillRect(mullion * 32, floor * 32 + 5, 3, 19);
+      if (hashSeed(`b${seed}:${floor}`) > 0.8) {
+        ctx.fillStyle = "#f3dfa6";
+        ctx.fillRect(35 + (floor % 2) * 32, floor * 32 + 5, 29, 19);
       }
     }
   } else {
-    ctx.fillStyle = "#dfe4e4";
+    // 市中心：玻璃幕墙——整面玻璃，只留细竖梃与层间窄横带。
+    ctx.fillStyle = "#45586a";
     ctx.fillRect(0, 0, 128, 128);
     for (let floor = 0; floor < 4; floor += 1) {
-      for (let column = 0; column < 5; column += 1) {
-        const glass = hashSeed(`g${seed}:${floor}:${column}`);
-        ctx.fillStyle = glass > 0.9 ? "#f2dfae" : glass > 0.5 ? "#8ea4b2" : "#7d94a4";
-        ctx.fillRect(4 + column * 25, floor * 32 + 3, 22, 26);
+      for (let column = 0; column < 4; column += 1) {
+        const pane = hashSeed(`g${seed}:${floor}:${column}`);
+        if (pane > 0.93) {
+          ctx.fillStyle = "#f2dfae";
+          ctx.fillRect(column * 32 + 2, floor * 32 + 3, 29, 27);
+        } else {
+          // 玻璃间轻微色差：每块玻璃的反射率略不同，远看不是一张平板。
+          ctx.fillStyle = `rgba(${pane > 0.5 ? "70,92,110" : "58,76,94"}, 1)`;
+          ctx.fillRect(column * 32 + 2, floor * 32 + 3, 29, 27);
+        }
       }
     }
-    ctx.fillStyle = "rgba(250, 250, 248, 0.5)";
-    for (let floor = 0; floor <= 4; floor += 1) ctx.fillRect(0, floor * 32 - 1, 128, 2);
+    ctx.fillStyle = "#c9d0d3";
+    for (let floor = 0; floor < 4; floor += 1) ctx.fillRect(0, floor * 32, 128, 3);
+    for (let column = 0; column < 4; column += 1) ctx.fillRect(column * 32, 0, 2, 128);
   }
 
   const texture = new THREE.Texture(canvas);

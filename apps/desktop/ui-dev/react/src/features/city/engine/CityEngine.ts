@@ -16,6 +16,7 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
 import type { CityModel } from "../cityModel";
 import { activeTheme, setActiveTheme, type CityThemeName } from "./cityTheme";
 import { loadCityAssets, type CityAssets } from "./cityAssets";
@@ -91,6 +92,8 @@ export class CityEngine {
   private skyDome: THREE.Mesh | null = null;
   private assets: CityAssets | null = null;
   private composer: EffectComposer | null = null;
+  /** 当前后处理链的配置键（主题霓虹 × AO）：变化时重建，避免每帧判断哪些 pass 该在。 */
+  private composerKey = "";
   private cinematic: { plan: CinematicPlan; startedAt: number; savedFov: number; look: THREE.Vector3 | null; lastSeconds: number } | null = null;
   private themeName: CityThemeName = "day";
 
@@ -126,6 +129,9 @@ export class CityEngine {
     this.sun.shadow.camera.near = 20;
     this.sun.shadow.camera.far = 620;
     this.sun.shadow.bias = -0.0006;
+    // 软阴影：r186 已移除 PCFSoftShadowMap，PCF 的半径 + 采样数给出柔和的半影。
+    this.sun.shadow.radius = 3;
+    this.sun.shadow.blurSamples = 12;
     this.sun.shadow.normalBias = 0.6;
     this.scene.add(this.sun, this.sun.target);
     this.skyDome = this.buildSkyDome();
@@ -198,24 +204,38 @@ export class CityEngine {
     this.lastActivityAt = performance.now();
   }
 
-  /** bloom 只在霓虹主题且画质≥1 时启用；其余走直渲，省一整条后处理链。 */
+  /** 后处理链：环境光遮蔽（GTAO，画质≥1）给楼脚、街角、楼间缝隙压出体积感；
+   *  bloom 只在霓虹主题。都不需要时直渲，省一整条链。省电档（0）两者都关。 */
   private renderFrame(): void {
-    if (activeTheme().neon && this.quality >= 1) {
-      if (!this.composer) {
-        const size = this.renderer.getSize(new THREE.Vector2());
-        const composer = new EffectComposer(this.renderer);
-        composer.addPass(new RenderPass(this.scene, this.camera));
-        // 阈值取 HDR 值：霓虹（×3.2）越线，被光照的沙地/天空不会整片泛光。
-        composer.addPass(new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 1.0, 0.6, 2.0));
-        composer.addPass(new OutputPass());
-        composer.setPixelRatio(this.renderer.getPixelRatio());
-        composer.setSize(size.x, size.y);
-        this.composer = composer;
-      }
-      this.composer.render();
+    const wantAo = this.quality >= 1;
+    const wantBloom = activeTheme().neon && this.quality >= 1;
+    if (!wantAo && !wantBloom) {
+      this.renderer.render(this.scene, this.camera);
       return;
     }
-    this.renderer.render(this.scene, this.camera);
+    const key = `${wantAo ? "ao" : ""}|${wantBloom ? "bloom" : ""}|${this.quality}`;
+    if (!this.composer || this.composerKey !== key) {
+      this.composer?.dispose();
+      const size = this.renderer.getSize(new THREE.Vector2());
+      const composer = new EffectComposer(this.renderer);
+      composer.addPass(new RenderPass(this.scene, this.camera));
+      if (wantAo) {
+        const ao = new GTAOPass(this.scene, this.camera, size.x, size.y);
+        // 城市尺度：半径以世界单位计（一层楼约 3.1），够把楼脚和街角压暗、又不把整条街染黑。
+        ao.updateGtaoMaterial({ radius: 26, distanceExponent: 1, thickness: 20, distanceFallOff: 1, scale: 2.4, samples: this.quality >= 2 ? 16 : 10 });
+        ao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: this.quality >= 2 ? 16 : 8 });
+        ao.blendIntensity = 1;
+        composer.addPass(ao);
+      }
+      // 阈值取 HDR 值：霓虹（×3.2）越线，被光照的沙地/天空不会整片泛光。
+      if (wantBloom) composer.addPass(new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 1.0, 0.6, 2.0));
+      composer.addPass(new OutputPass());
+      composer.setPixelRatio(this.renderer.getPixelRatio());
+      composer.setSize(size.x, size.y);
+      this.composer = composer;
+      this.composerKey = key;
+    }
+    this.composer.render();
   }
 
   private resize(): void {
