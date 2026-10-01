@@ -1,3 +1,4 @@
+import { hostName } from "../../lib/hostNames";
 import { stable } from "../../lib/stable";
 import { useEffect, useRef, useState } from "react";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
@@ -501,7 +502,7 @@ export function TrustPage() {
         </div>}
       </section>
       <section className="trust-card" aria-label={tx("tr.auditResult")} aria-live="polite">
-          <div className="trust-card-heading"><div><p className="eyebrow">{report ? `${report.host} · ${tx(report.host === selectedHost ? "tr.justAudited" : "tr.lastAudit")}` : tx("tr.historyEvidence")}</p><h3>{displayedEvidence.length}{evidenceCursor && !report ? "+" : ""} {tx("tr.evidenceWord", { n: displayedEvidence.length })}</h3></div><div className="trust-evidence-actions"><span className={`status-pill ${report ? "status-pill-success" : ""}`}><span aria-hidden="true" className="status-dot" />{report ? tx("tr.localResult") : tx("tr.readOnlyHistory")}</span><button className="button button-secondary button-small" type="button" onClick={() => { setReport(null); setSelectedHost(null); void refreshEvidenceHistory(); }} disabled={evidenceLoading}>{evidenceLoading ? tx("tr.loadingDots") : tx("tr.refreshHistory")}</button></div></div>
+          <div className="trust-card-heading"><div><p className="eyebrow">{report ? `${hostName(report.host)} · ${tx(report.host === selectedHost ? "tr.justAudited" : "tr.lastAudit")}` : tx("tr.historyEvidence")}</p><h3>{displayedEvidence.length}{evidenceCursor && !report ? "+" : ""} {tx("tr.evidenceWord", { n: displayedEvidence.length })}</h3></div><div className="trust-evidence-actions"><span className={`status-pill ${report ? "status-pill-success" : ""}`}><span aria-hidden="true" className="status-dot" />{report ? tx("tr.localResult") : tx("tr.readOnlyHistory")}</span><button className="button button-secondary button-small" type="button" onClick={() => { setReport(null); setSelectedHost(null); void refreshEvidenceHistory(); }} disabled={evidenceLoading}>{evidenceLoading ? tx("tr.loadingDots") : tx("tr.refreshHistory")}</button></div></div>
           {report && <div className="trust-summary"><span>{tx("tr.inserted")} {report.inserted}</span><span>{tx("tr.duplicate")} {report.duplicate}</span><span>{tx("tr.findingUpdates")} {report.findings_upserted}</span></div>}
           {evidenceError && <div className="error-banner" role="alert">{tx("tr.historyUnavail", { error: evidenceError })}</div>}
           {evidenceLoading && <p className="inline-status" role="status">{tx("tr.readingSaved")}</p>}

@@ -1,4 +1,5 @@
 import { stable, isBackground } from "../lib/stable";
+import { hydrateHostNames, useHostNames } from "../lib/hostNames";
 import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { invoke, listen, listenAppEvents, makeInvalidationGate, readOverviewDetails, readOverviewSnapshot, readSourceDataRevision, safeUiError, type OverviewDetails, type OverviewSnapshot } from "../lib/tauri";
 import { FindingsPage } from "../features/findings/FindingsPage";
@@ -74,6 +75,8 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error
 
 export function App() {
   const language = useLanguage();
+  useHostNames();
+  useEffect(() => { void hydrateHostNames().catch(() => { /* 退回 prettify，不影响使用 */ }); }, []);
   useEffect(() => { void hydrateLanguagePreference().catch(() => { /* Keep the existing local preference visible; Settings can retry. */ }); }, []);
   const [page, setPage] = useState<Page>(pageFromHash);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {

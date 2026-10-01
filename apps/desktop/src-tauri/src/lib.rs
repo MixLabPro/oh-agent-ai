@@ -339,7 +339,22 @@ fn short_model(name: &str) -> &str {
 fn host_display_name(kind: &str) -> String {
     agent_vitals_domain::host_capability::host_profile(kind)
         .map(|h| h.display.to_string())
-        .unwrap_or_else(|| kind.to_string())
+        .unwrap_or_else(|| {
+            if kind.starts_with("plugin:") {
+                agent_vitals_runtime::host_registry::plugin_display_name(&overview::data_home(), kind)
+            } else {
+                kind.to_string()
+            }
+        })
+}
+
+/// 界面用：全部插件宿主的 `{ "plugin:<slug>": 显示名 }`。内置宿主的名字界面自带。
+#[tauri::command(async)]
+fn host_display_names() -> Value {
+    let (hosts, _) = agent_vitals_runtime::host_registry::scan_plugin_hosts(&overview::data_home());
+    let mut map = serde_json::Map::new();
+    for host in hosts { map.insert(format!("plugin:{}", host.slug), Value::String(host.display_name)); }
+    Value::Object(map)
 }
 
 /// 读 claude 估报告（core `claude_day_cost` / 当月聚合 `currency_totals`）的单侧
@@ -4333,6 +4348,11 @@ fn overview_details_snapshot_at(data_home: std::path::PathBuf, month: &str, date
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
     let repo = agent_vitals_runtime::query::summary::SqlSummaryRepository::at(data_home);
     let memo = agent_vitals_runtime::query::read_memo::ReadMemo::global();
+    // 趋势面板失败日（OVERVIEW_TREND_PANEL spec §3）：与 monthly/daily/calendar
+    // 同一 revision 括号；库开不了/月份非法 → null，前端走「失败标记不可用」降级。
+    let failure_days = repo
+        .open_db()
+        .and_then(|db| agent_vitals_data::issues::failure_days_month(db.conn(), month));
     let mut result = Value::Null;
     for attempt in 0..2 {
         let revision_before = authority_revision_at(&path);
@@ -4347,6 +4367,7 @@ fn overview_details_snapshot_at(data_home: std::path::PathBuf, month: &str, date
             "monthly": monthly.as_ref(),
             "daily": daily.as_ref(),
             "calendar": calendar.as_ref(),
+            "failure_days": failure_days,
             "authority_revision": revision_after,
             "is_consistent": is_consistent,
             "errors": if is_consistent { Vec::<String>::new() } else { vec!["汇总期间数据发生变化或权威库不可用，当前结果可能跨 revision".to_string()] },
@@ -4791,6 +4812,7 @@ pub fn run() {
             retention_config,
             save_retention_config,
             statistics_timezone_config,
+            host_display_names,
             save_statistics_timezone_config,
             ui_language_config,
             save_ui_language_config,
@@ -5005,6 +5027,9 @@ mod tests {
         assert!(result["monthly"].is_object());
         assert!(result["daily"].is_object());
         assert!(result["calendar"].is_object());
+        // 空库 = 读到零失败（对象空 days），不是 null——降级语义只在库不可用时出现。
+        assert_eq!(result["failure_days"]["month"], "2026-09");
+        assert_eq!(result["failure_days"]["days"].as_object().unwrap().len(), 0);
         assert!(result["errors"].as_array().unwrap().is_empty());
         drop(_db);
         std::fs::remove_dir_all(root).ok();

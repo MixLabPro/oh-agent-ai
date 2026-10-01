@@ -1,3 +1,4 @@
+import { hostName } from "../../lib/hostNames";
 import { stable, isBackground } from "../../lib/stable";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createTrustSuppression, listenAppEvents, makeInvalidationGate, readDecisionMatrix, readFindings, readFindingsFreshness, safeUiError, type DecisionMatrixReport, type FindingGroup, type FindingSample, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
@@ -135,7 +136,7 @@ function FindingRow({ group, onNavigateToAction }: { group: FindingGroup; onNavi
   return <article className="finding-row">
     <div className="finding-row-main">
       <div className="finding-row-title"><strong>{group.rule}</strong><span className={severityClass(group.severity)}>{severityLabel(group.severity)}</span></div>
-      <p className="finding-row-subtitle">{group.host} · {group.evidence_class}</p>
+      <p className="finding-row-subtitle">{hostName(group.host)} · {group.evidence_class}</p>
       <p className="finding-row-copy">{tx("fd.hitsLine", { n: group.count, sessions: group.sessions_count, from: timeLabel(group.first_seen_at_ms), to: timeLabel(group.last_seen_at_ms) })}</p>
       <p className="finding-row-copy">{remedyLabel(group)} · {group.sample_evidence.length ? tx("fd.haveSummaries", { n: group.sample_evidence.length }) : tx("fd.refNA")}</p>
       {group.manual_follow_up && !group.read_only && onNavigateToAction && <button className="button button-secondary button-small finding-evidence-toggle" type="button" onClick={() => onNavigateToAction(group.action_kind)}>{tx("fd.openSettings")}</button>}

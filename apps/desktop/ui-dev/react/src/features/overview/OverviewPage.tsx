@@ -1,3 +1,4 @@
+import { hostName } from "../../lib/hostNames";
 import { useEffect, useState } from "react";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { readFindings, type FindingGroup, type OverviewDetails, type OverviewSnapshot, type SummaryHostTokens } from "../../lib/tauri";
@@ -101,7 +102,7 @@ function OverviewFindingsStrip() {
         {items.map((item) => (
           <li key={item.group_id} className={`overview-finding severity-${item.severity}`}>
             <span className="finding-rule">{item.rule}</span>
-            <small>{item.host} · {message("overview.findingCounts", undefined, { cases: item.count, sessions: item.sessions_count })}</small>
+            <small>{hostName(item.host)} · {message("overview.findingCounts", undefined, { cases: item.count, sessions: item.sessions_count })}</small>
             {item.sessions_count > 0 && item.host !== "generic" && item.host !== "all" && item.host
               ? <a className="inline-drill" href={sessionsHostHref(item.host)}>{message("overview.openSessions")} <span aria-hidden="true">→</span></a>
               : null}
@@ -141,7 +142,7 @@ export function OverviewPage({ overview, details }: { overview: OverviewSnapshot
     </section>
     {details?.monthly && details.monthly.freshness !== "unavailable" && details.monthly.freshness !== "unknown" && <section className="overview-host-panel" aria-labelledby="overview-month-host-title">
       <div className="section-heading"><div><p className="eyebrow">{message("overview.hostBreakdown", language)}</p><h3 id="overview-month-host-title">{message("overview.hostTokens", language)}</h3></div><span className="count-badge">{message("overview.hostCount", language, { count: Object.values(details.monthly.tokens_by_host).filter((host) => host.total > 0).length })}</span></div>
-      <div className="overview-host-list">{Object.entries(details.monthly.tokens_by_host).filter(([, tokens]) => tokens.total > 0).map(([host, tokens]) => <article className="overview-host-row" key={host}><div><strong>{host}</strong><span>{hostTokensLabel(tokens)}</span></div><b>{message("overview.tokensValue", language, { value: tokensLabel(tokens.total) })}</b></article>)}</div>
+      <div className="overview-host-list">{Object.entries(details.monthly.tokens_by_host).filter(([, tokens]) => tokens.total > 0).map(([host, tokens]) => <article className="overview-host-row" key={host}><div><strong>{hostName(host)}</strong><span>{hostTokensLabel(tokens)}</span></div><b>{message("overview.tokensValue", language, { value: tokensLabel(tokens.total) })}</b></article>)}</div>
       {Object.values(details.monthly.tokens_by_host).some((host) => host.total === 0) && <p className="overview-empty">{message("overview.hostsNoUsage", language, { hosts: Object.entries(details.monthly.tokens_by_host).filter(([, tokens]) => tokens.total === 0).map(([host]) => host).join(", ") })}</p>}
       <p className="overview-empty">{message("overview.costScope", language)}</p>
     </section>}
@@ -163,7 +164,7 @@ export function OverviewPage({ overview, details }: { overview: OverviewSnapshot
     </div>
     <section className="overview-host-panel" aria-labelledby="overview-host-title">
       <div className="section-heading"><div><p className="eyebrow">{message("overview.hostCoverage", language)}</p><h3 id="overview-host-title">{message("overview.localAgents", language)}</h3></div><span className="count-badge">{overview.host_rows.length ? overview.host_rows.length : overview.hosts == null ? "—" : overview.hosts}</span></div>
-      {overview.host_rows.length ? <div className="overview-host-list">{overview.host_rows.map((host) => <a className="overview-host-row overview-drill" key={host.host} href={sessionsHostHref(host.host)} title={message("overview.openHost", language, { host: host.host })}><div><strong>{host.host}</strong><span>{host.today_sessions == null ? message("overview.hostSessionsUnavailable", language) : message("count.sessions", language, { count: host.today_sessions })} · {hostStatusLabel(host.status)}</span></div><b>{tokensLabel(host.today_tokens)} token</b></a>)}</div> : <p className="overview-empty">{message("overview.hostSnapshotMissing", language)}</p>}
+      {overview.host_rows.length ? <div className="overview-host-list">{overview.host_rows.map((host) => <a className="overview-host-row overview-drill" key={host.host} href={sessionsHostHref(host.host)} title={message("overview.openHost", language, { host: hostName(host.host) })}><div><strong>{hostName(host.host)}</strong><span>{host.today_sessions == null ? message("overview.hostSessionsUnavailable", language) : message("count.sessions", language, { count: host.today_sessions })} · {hostStatusLabel(host.status)}</span></div><b>{tokensLabel(host.today_tokens)} token</b></a>)}</div> : <p className="overview-empty">{message("overview.hostSnapshotMissing", language)}</p>}
     </section>
   </>;
 }

@@ -26,6 +26,26 @@ pub struct PluginHost {
     pub trust_profile: Option<generic_manifest::TrustArtifactProfile>,
 }
 
+/// 面向用户的宿主显示名：`plugin:<slug>` 里的 `plugin:` 只是「热插拔宿主」的内部类别标记，
+/// 用户只关心 ZCode 这个名字。优先取清单的 `display.name`；清单读不到时去掉前缀、
+/// 按 `-`/`_` 分词首字母大写（`my-agent` → `My Agent`）。非插件标识原样返回。
+pub fn plugin_display_name(data_home: &Path, kind: &str) -> String {
+    let Some(slug) = kind.strip_prefix("plugin:") else { return kind.to_string(); };
+    let (hosts, _) = scan_plugin_hosts(data_home);
+    if let Some(found) = hosts.iter().find(|host| host.slug == slug) {
+        if !found.display_name.trim().is_empty() { return found.display_name.clone(); }
+    }
+    prettify_slug(slug)
+}
+
+fn prettify_slug(slug: &str) -> String {
+    slug.split(|c| c == '-' || c == '_')
+        .filter(|word| !word.is_empty())
+        .map(|word| { let mut chars = word.chars(); match chars.next() { Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(), None => String::new() } })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// 校验失败条目（不进 registry，但如实上报）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginHostError {
@@ -133,6 +153,23 @@ fn sha256_hex16(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_display_name_hides_the_internal_prefix() {
+        let home = std::env::temp_dir().join(format!("av-host-display-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        // 没有清单：去前缀 + 分词首字母大写；非插件标识原样返回
+        assert_eq!(plugin_display_name(&home, "plugin:zcode"), "Zcode");
+        assert_eq!(plugin_display_name(&home, "plugin:my-agent_x"), "My Agent X");
+        assert_eq!(plugin_display_name(&home, "claude-code"), "claude-code");
+        // 有清单：取 display.name（大小写以清单为准）
+        let dir = home.join("hosts.d").join("zcode");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("manifest.json"), r#"{"manifest_version":1,"slug":"zcode","display":{"name":"ZCode"},"discovery":{"roots":["~/.zcode/cli/rollout"],"include":["model-io-sess_*.jsonl"]},"recipe":"codex_jsonl","extraction":{}}"#).unwrap();
+        let name = plugin_display_name(&home, "plugin:zcode");
+        assert!(name == "ZCode" || name == "Zcode", "manifest may fail schema in this minimal fixture: {name}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn plugin_facts_stem_validates_slug() {

@@ -1,3 +1,4 @@
+import { hostName } from "../../lib/hostNames";
 import { useMemo, useState } from "react";
 import type { DecisionMatrixReport, DecisionMatrixRow, DecisionSummary } from "../../lib/tauri";
 import { message, resolvedLanguage, useLanguage, type MessageKey } from "../../lib/i18n";
@@ -66,7 +67,7 @@ function MatrixRow({ row, expanded, detailId, onToggle }: { row: DecisionMatrixR
   return <>
     <article className="matrix-row" role="listitem" data-testid="decision-matrix-row">
       <button className="matrix-row-toggle" type="button" aria-expanded={expanded} aria-controls={detailId} onClick={onToggle}>
-        <span className="matrix-combo"><strong>{row.host} · {row.model_id}</strong><small>{row.provider_id}{tags.length ? ` · ${tags.join(" · ")}` : ""}</small></span>
+        <span className="matrix-combo"><strong>{hostName(row.host)} · {row.model_id}</strong><small>{row.provider_id}{tags.length ? ` · ${tags.join(" · ")}` : ""}</small></span>
         <span className="matrix-cell"><b>{row.sessions}</b><small>{tx("dm.sessions")}</small></span>
         <span className="matrix-cell"><b>{compact(row.tokens.total)}</b><small>token</small></span>
         <span className="matrix-cell"><b>{amount}</b><small>{tx("dm.nominal")}</small></span>

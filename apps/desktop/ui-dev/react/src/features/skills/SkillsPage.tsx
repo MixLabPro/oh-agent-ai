@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { cancelSkillScan, exportSkillsRedacted, readSkillsDiff, readSkillsScanSettings, readSkillScan, safeUiError, saveSkillsScanSettings, saveSkillsSnapshot, type SkillDiffReport, type SkillScanReport } from "../../lib/tauri";
+import { hostName } from "../../lib/hostNames";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
 import { message, resolvedLanguage, useLanguage, type MessageKey } from "../../lib/i18n";
 
@@ -8,7 +9,7 @@ const tx = (key: MessageKey, params: Record<string, string | number> = {}): stri
 const hostLabels: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", dsh: "DeepSeek Harness", openclaw: "OpenClaw", hermes: "Hermes", workbuddy: "WorkBuddy" };
 const severityLabel = (severity: "critical" | "warning" | "info"): string => tx(severity === "critical" ? "sk.critical" : severity === "warning" ? "sk.warning" : "sk.info");
 
-function hostLabel(host: string): string { return hostLabels[host] ?? host; }
+function hostLabel(host: string): string { return hostLabels[host] ?? hostName(host); }
 function tokensOrDash(value: number | null): string { return value === null ? "—" : value.toLocaleString(); }
 
 export function SkillsPage() {

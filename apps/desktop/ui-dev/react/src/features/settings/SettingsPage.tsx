@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { hostName } from "../../lib/hostNames";
 import { stable } from "../../lib/stable";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
 import { formatMinorMoney, languagePreference, message, message as translate, setLanguagePreference, useLanguage, type AppLanguage, type LanguagePreference, type MessageKey } from "../../lib/i18n";
@@ -32,13 +33,7 @@ function sourceTone(state: SourceConnectionState): "success" | "warning" | "neut
 }
 
 function sourceLabel(host: string): string {
-  const labels: Record<string, string> = {
-    "claude-code": "Claude Code",
-    codex: "Codex",
-    dsh: "DeepSeek Harness",
-    workbuddy: "WorkBuddy",
-  };
-  return labels[host] ?? host;
+  return hostName(host);
 }
 
 function shortenPath(path: string): string {
