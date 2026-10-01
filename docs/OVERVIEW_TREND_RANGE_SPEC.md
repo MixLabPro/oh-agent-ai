@@ -1,6 +1,6 @@
 # 用量趋势图：本日 / 本周 / 本月三档 + 共享图表组件 SPEC v2.0
 
-状态：**待实施**（2026-10-01）。取代 `OVERVIEW_TREND_PANEL_SPEC.md` v1.1 中
+状态：**已实施**（2026-10-01，T1–T6 + A1/A2/A3 验收，见 §7）。取代 `OVERVIEW_TREND_PANEL_SPEC.md` v1.1 中
 「只做今日逐小时」「不做日期切换」「零新读路径」三条；v1.1 其余契约（失败族规则、
 计数语义、null≠零、r6 无金额）继续有效。
 
@@ -9,8 +9,10 @@
 对照落地页演示图（`website/landing/index.html` demo：按宿主堆叠 + 失败日橙色高亮 +
 `This week / This month` 切换 + 「View trace」提示）核对真实总览面板，问题如下：
 
-1. **图太小**：`.overview-trend-bar { max-width: 22px }`，24 柱最多约 500px，落在
-   ~1900px 宽卡片里缩在中间，两侧大片空白。
+1. **图太小**：24 柱缩在 ~1900px 宽卡片中间。实测（headless Chrome）根因是
+   `.info-panel` 为 `display:flex` 横排，标题与图表被并排挤成一行，图只剩 244px
+   （卡片 1170px）；`max-width: 22px` 柱宽上限只是次要因素。修复 = `.overview-trend
+   { display:block }` + 去掉 px 上限，修后图宽 1080px/1170px，900px 窗口 580/670。
 2. **无坐标轴 / 无数值**：看不出多少 token，仅靠 `title` tooltip。
 3. **图例与数据不符**：图例列「有反复失败」橙色，但没失败时一点橙色都没有，读者分不清
    「今天没失败」与「没画出来」。
@@ -146,3 +148,16 @@ type TrendBucket = {
 
 - 周起始日：**周一**（自然周的常见定义；与统计时区无关，只看公历）。
 - 失败高亮样式：描边 + 底点，而非整柱变橙（保住宿主堆叠色的可读性）。
+
+## 7. 实施记录（2026-10-01）
+
+- T1 `failure_days_range/trailing` + 快照 `failure_days`（含 A1 建议的 31 号边界测试）；
+  T2 `trendBuckets.ts` + 可执行契约脚本；T3 `UsageTrendChart`；T4 总览三档；
+  T5 用量页复用并删除 `usage-hour-*`；T6 契约/文档收口。
+- **A1（后端，subAgent）**：无 P0/P1；P2（`issue_instances` 无 `(issue_type, opened_at_ms)`
+  索引、快照多一次扫描）暂不处理——当前表规模下开销可忽略，表增长后再加索引或合并两次聚合。
+- **A2（视觉）**：subAgent 的 Chrome 扩展未连接，改由本机 headless Chrome + CDP 实测
+  （脚本只在作业临时目录，未入库）。发现并修复真正根因（flex 横排，见 §0.1）；实测
+  三档在 1400/900px 下图宽、柱宽、失败标记数、未来位数、Y 轴、浮层不被裁剪均符合 §2.3。
+- 已知遗留：浏览器 mock 缺 `host_display_names` / `fx_convert_amounts` 两条命令（仅控制台
+  噪声，与本特性无关）；周档轴标签为日号，星期只在浮层里。

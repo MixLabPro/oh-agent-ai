@@ -64,7 +64,11 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .overview-recent-list { display: grid; gap: 7px; margin-top: 12px; }
 /* 总览趋势面板外壳（OVERVIEW_TREND_RANGE_SPEC v2.0；柱图本体见下方 .trend-*）。
    段色应用绿系，失败标记用暖橙——语义是「需要注意」，不是成本。 */
-.overview-trend { margin-top: 14px; }
+/* .info-panel 默认是 flex 横排（给「文字 + 按钮」的窄条用）；趋势面板是纵向的
+   标题 → 图例 → 图，必须覆盖成 block，否则标题与图表被并排挤在一行里，图只剩
+   ~244px 宽（实测 1400px 窗口下卡片 1170px、图 244px——这才是「图缩在卡片中间」的
+   根因，不是 22px 柱宽上限）。 */
+.overview-trend { display: block; margin-top: 14px; }
 .trend-seg-dsh { background: #087f62; }
 .trend-seg-claude { background: #69bba3; }
 .trend-seg-codex { background: #b7dccd; }

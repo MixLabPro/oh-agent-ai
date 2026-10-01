@@ -55,8 +55,9 @@ const usagePageSource = readFileSync(path.join(ui, "react/src/features/usage/Usa
 const stylesSource = readFileSync(path.join(ui, "react/src/styles.css"), "utf8");
 assert.match(usagePageSource, /<UsageTrendChart /, "usage page's hourly detail reuses the shared trend chart");
 assert.doesNotMatch(usagePageSource, /usage-hour-grid|usage-hour-bar/, "usage page must not keep a second hand-written hourly bar renderer");
-assert.doesNotMatch(stylesSource, /^\\.usage-hour(-grid|-bar)?\\b/m, "the duplicated usage-hour CSS is gone (single trend renderer)");
-const overviewTrendCode =overviewPage.slice(overviewPage.indexOf("function TrendPanel"), overviewPage.indexOf("function OverviewFindingsStrip")) + trendChartSource + trendBucketsSource;
+assert.doesNotMatch(stylesSource, /^\.usage-hour(-grid|-bar)?\b/m, "the duplicated usage-hour CSS is gone (single trend renderer)");
+assert.match(stylesSource, /^\.overview-trend \{ display: block;/m, "regression: .info-panel is a flex row; without display:block on .overview-trend the heading and chart sit side by side and the chart collapses to ~244px (measured 2026-10-01)");
+const overviewTrendCode = overviewPage.slice(overviewPage.indexOf("function TrendPanel"), overviewPage.indexOf("function OverviewFindingsStrip")) + trendChartSource + trendBucketsSource;
 assert.doesNotMatch(overviewTrendCode, /formatMajorMoney|moneyDetail|cost/, "trend panel is token+failure only (r6: no amounts)");
 const i18nSource = readFileSync(path.join(ui, "react/src/lib/i18n.ts"), "utf8");
 for (const key of ["overview.trendEmpty", "overview.trendNote", "overview.trendHourlyUnavailable", "trend.rangeLabel", "trend.range.day", "trend.range.week", "trend.range.month", "trend.rangeTitle.day", "trend.rangeTitle.week", "trend.rangeTitle.month", "trend.failureLegend", "trend.failureUnavailable", "trend.noFailures", "trend.tokens", "trend.noUsage", "trend.future", "trend.unavailable", "trend.failuresInBucket", "trend.bucketAria", "trend.bucketAriaOpen", "trend.weekNote", "trend.monthNote"]) {
