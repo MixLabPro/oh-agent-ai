@@ -1,3 +1,4 @@
+import { stable } from "../../lib/stable";
 import { useEffect, useRef, useState } from "react";
 import { SessionTrace } from "./SessionTrace";
 import { SessionInsightsPanel, fmtTokens } from "./SessionInsights";
@@ -89,9 +90,9 @@ export function SessionDetail({ row, sessionRef, hostKind, onBack, refreshKey = 
       shownRef.current = sessionRef;
       setRefreshFailed(false);
       // 用户已经「加载更多」翻过的时间线不因后台刷新缩回第一页
-      setDetail((previous) => sameSession && previous && previous.timeline.length > value.timeline.length
+      setDetail((previous) => stable(previous, sameSession && previous && previous.timeline.length > value.timeline.length
         ? { ...value, timeline: previous.timeline, has_more: previous.has_more, next_cursor: previous.next_cursor }
-        : value);
+        : value));
     }).catch((reason: unknown) => {
       if (generation.current !== current) return;
       if (sameSession) setRefreshFailed(true); else setError(safeUiError(reason, "会话详情暂不可用"));

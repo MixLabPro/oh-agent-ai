@@ -65,6 +65,10 @@ pub fn statistics_timezone() -> TimeZone {
         .as_deref()
         .and_then(|name| TimeZone::get(name).ok())
         .unwrap_or_else(|| {
+            // 跟随系统（没有 TZ 覆盖）：直接按 OS 真实 IANA 名取，不依赖 jiff 的 system() 缓存。
+            if let Some(name) = os_timezone_name() {
+                if let Ok(zone) = TimeZone::get(&name) { return zone; }
+            }
             let system = TimeZone::system();
             if system.iana_name().is_some() { system } else { TimeZone::UTC }
         })

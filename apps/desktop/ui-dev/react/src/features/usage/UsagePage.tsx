@@ -14,6 +14,7 @@ import {
 } from "../../lib/tauri";
 import { sessionsDateHref } from "../../lib/nav";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
+import { stable, isBackground } from "../../lib/stable";
 import { formatMajorMoney, message, resolvedLanguage, useLanguage, type MessageKey, formatTokenCount } from "../../lib/i18n";
 
 type Metric = "tokens" | "cost";
@@ -123,10 +124,13 @@ export function UsagePage() {
   const mounted = useRef(false);
   const loadedCalendarMonth = useRef<string | null>(null);
   const [hourlyReloadKey, setHourlyReloadKey] = useState(0);
+  const hourlyDate = useRef<string | null>(null);
 
-  const loadMonth = (requestedMonth: string) => {
+  const calendarSeen = useRef<string | null>(null);
+  const loadMonth = (requestedMonth: string, background: unknown = false) => {
+    const quiet = isBackground(background);
     const requestId = ++monthRequest.current;
-    setLoading(true);
+    if (!quiet) setLoading(true);
     setError(null);
     setSourceError(null);
     // Keep the last known projection visible during a refresh. The rendered
@@ -141,19 +145,22 @@ export function UsagePage() {
     void Promise.allSettled([readUsageCalendar(requestedMonth), readUsageSourceSummary(requestedMonth)]).then(([calendarResult, sourceResult]) => {
       if (!mounted.current || requestId !== monthRequest.current) return;
       if (calendarResult.status === "fulfilled") {
-        setCalendar(calendarResult.value);
+        setCalendar((previous) => stable(previous, calendarResult.value));
         loadedCalendarMonth.current = calendarResult.value.month;
         if (changingMonth) {
           const first = calendarResult.value.days.find((day) => day.total_tokens > 0)?.date ?? null;
           const today = todayDate(timezone);
           setSelectedDate(first && first <= today ? first : null);
         }
-        setHourlyReloadKey((value) => value + 1);
+        // 后台刷新到「没变化的日历」时不重取小时数据；变了才触发。手动/换月照常。
+        const fingerprint = JSON.stringify(calendarResult.value);
+        if (!quiet || calendarSeen.current !== fingerprint) setHourlyReloadKey((value) => value + 1);
+        calendarSeen.current = fingerprint;
       } else {
         setError(safeUiError(calendarResult.reason, "用量日历暂不可用"));
       }
       if (sourceResult.status === "fulfilled") {
-        setSource(sourceResult.value);
+        setSource((previous) => stable(previous, sourceResult.value));
       } else {
         setSourceError(safeUiError(sourceResult.reason, "来源状态暂不可用"));
       }
@@ -188,7 +195,7 @@ export function UsagePage() {
 
   useEffect(() => {
     let active = true;
-    const refresh = () => { if (active && timezoneReady) loadMonth(month); };
+    const refresh = () => { if (active && timezoneReady) loadMonth(month, true); };
     let cleanups: Array<() => void> = [];
     const gate = makeInvalidationGate();
     void listenAppEvents((event) => { if (gate(event)) refresh(); }).then((unsubscribe) => {
@@ -201,10 +208,12 @@ export function UsagePage() {
   useEffect(() => {
     if (!selectedDate) return;
     let active = true;
-    setHourlyLoading(true);
+    // 同一天的后台重取保留已显示的小时图（不换成「正在读取」再换回来）；换日期才清空。
+    const dateChanged = hourlyDate.current !== selectedDate;
+    if (dateChanged) { setHourly(null); setHourlyLoading(true); }
     setHourlyError(null);
     void readUsageHourly(selectedDate).then((value) => {
-      if (active) setHourly(value);
+      if (active) { hourlyDate.current = selectedDate; setHourly((previous) => stable(previous, value)); }
     }).catch((reason: unknown) => {
       if (active) setHourlyError(safeUiError(reason, "小时用量暂不可用"));
     }).finally(() => { if (active) setHourlyLoading(false); });

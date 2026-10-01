@@ -2760,6 +2760,7 @@ fn statistics_timezone_config() -> Value {
             "timezone": timezone,
             "system_timezone": agent_vitals_runtime::clock::system_timezone_name(),
             "system_timezone_fallback": agent_vitals_runtime::clock::system_timezone_fallback(),
+            "follows_system": agent_vitals_runtime::statistics_timezone::follows_system(&data_home).unwrap_or(false),
         }),
         Err(error) => serde_json::json!({ "status": "unavailable", "reason": error }),
     }
@@ -2769,7 +2770,7 @@ fn statistics_timezone_config() -> Value {
 fn save_statistics_timezone_config(app: AppHandle, timezone: String) -> Result<Value, String> {
     let data_home = overview::data_home();
     let saved = agent_vitals_runtime::statistics_timezone::save_timezone(&data_home, &timezone)?;
-    agent_vitals_runtime::statistics_timezone::apply(&data_home)?;
+    let effective = agent_vitals_runtime::statistics_timezone::apply(&data_home)?;
     // The Workbench refreshes its active tab after the IPC returns, but the
     // tray is a separate consumer and its host rows come from hosts.json. A
     // plain menu rebuild would therefore retain the old day's navigation
@@ -2781,7 +2782,9 @@ fn save_statistics_timezone_config(app: AppHandle, timezone: String) -> Result<V
         refresh(&background_app, overview_snapshot_typed_sync().as_ref());
     });
     refresh(&app, overview_snapshot_typed_sync().as_ref());
-    Ok(serde_json::json!({ "status": "saved", "timezone": saved }))
+    // follows_system 时 `saved` 是哨兵 "system"；回执给界面的是实际生效的 IANA 名。
+    let follows = saved == agent_vitals_runtime::statistics_timezone::FOLLOW_SYSTEM;
+    Ok(serde_json::json!({ "status": "saved", "timezone": if follows { effective } else { saved }, "follows_system": follows }))
 }
 
 const UI_LANGUAGE_CONFIG_FILE: &str = "ui-language.json";

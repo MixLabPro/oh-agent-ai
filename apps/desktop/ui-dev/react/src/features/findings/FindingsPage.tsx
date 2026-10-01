@@ -1,3 +1,4 @@
+import { stable, isBackground } from "../../lib/stable";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createTrustSuppression, listenAppEvents, makeInvalidationGate, readDecisionMatrix, readFindings, readFindingsFreshness, safeUiError, type DecisionMatrixReport, type FindingGroup, type FindingSample, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
 import { DecisionMatrixSection } from "./DecisionMatrixSection";
@@ -165,27 +166,30 @@ export function FindingsPage({ onNavigateToAction }: { onNavigateToAction?: (act
   const matrixGeneration = useRef(0);
   const eventRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const load = () => {
+  // 后台刷新（失效事件）不翻转 loading / matrixLoading（它们会让「正在读取」提示块出现又消失），
+  // 数据内容没变就沿用旧引用，React 跳过渲染。手动重新读取照旧显示读取状态。
+  const load = (background: unknown = false) => {
+    const quiet = isBackground(background);
     const requestId = ++requestGeneration.current;
     const matrixRequestId = ++matrixGeneration.current;
-    setLoading(tx("fd.loadingProj"));
+    if (!quiet) setLoading(tx("fd.loadingProj"));
     setLoadingMore(false);
     setError(null);
     void Promise.allSettled([readFindings(), readFindingsFreshness()])
       .then(([reportResult, freshnessResult]) => {
         if (requestId !== requestGeneration.current) return;
         const errors: string[] = [];
-        if (reportResult.status === "fulfilled") setReport(reportResult.value);
+        if (reportResult.status === "fulfilled") setReport((previous) => stable(previous, reportResult.value));
         else errors.push(safeUiError(reportResult.reason, tx("fd.unavail")));
-        if (freshnessResult.status === "fulfilled") setFreshness(freshnessResult.value);
+        if (freshnessResult.status === "fulfilled") setFreshness((previous) => stable(previous, freshnessResult.value));
         else errors.push(safeUiError(freshnessResult.reason, tx("fd.freshUnavail")));
         setError(errors.length ? errors.join("；") : null);
         setLoading("");
       });
-    setMatrixLoading(true);
+    if (!quiet) setMatrixLoading(true);
     setMatrixError(null);
     void readDecisionMatrix()
-      .then((nextMatrix) => { if (matrixRequestId === matrixGeneration.current) { setMatrix(nextMatrix); setMatrixLoading(false); } })
+      .then((nextMatrix) => { if (matrixRequestId === matrixGeneration.current) { setMatrix((previous) => stable(previous, nextMatrix)); setMatrixLoading(false); } })
       .catch((reason: unknown) => { if (matrixRequestId === matrixGeneration.current) { setMatrixError(safeUiError(reason, tx("fd.matrixUnavail"))); setMatrixLoading(false); } });
   };
 
@@ -217,7 +221,7 @@ export function FindingsPage({ onNavigateToAction }: { onNavigateToAction?: (act
       if (!active || eventRefreshTimer.current !== null) return;
       eventRefreshTimer.current = setTimeout(() => {
         eventRefreshTimer.current = null;
-        if (active) load();
+        if (active) load(true);
       }, 150);
     };
     const gate = makeInvalidationGate();

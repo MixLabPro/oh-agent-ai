@@ -55,8 +55,8 @@ export function SessionTrace({ sessionRef, refreshKey }: { sessionRef: string; r
       traceMarkup(data);
       const graphResult = await graph;
       const coverage = graphResult?.error ? undefined : graphResult?.data?.coverage;
-      if (active) { setError(null); setResult({ ref: sessionRef, data, count: data.points.length, unplaced: data.unplaced_events ?? 0,
-        coverage: coverage ? message("trace.coverage", resolvedLanguage(), { nodes: coverage.total_nodes ?? "—", parent: coverage.missing_parent ?? "—", time: coverage.missing_time ?? "—", status: coverage.missing_status ?? "—" }) : message("trace.coverageNA", resolvedLanguage()) }); }
+      if (active) { setError(null); setResult((previous) => { const next = { ref: sessionRef, data, count: data.points.length, unplaced: data.unplaced_events ?? 0,
+        coverage: coverage ? message("trace.coverage", resolvedLanguage(), { nodes: coverage.total_nodes ?? "—", parent: coverage.missing_parent ?? "—", time: coverage.missing_time ?? "—", status: coverage.missing_status ?? "—" }) : message("trace.coverageNA", resolvedLanguage()) }; return previous && previous.ref === sessionRef && JSON.stringify(previous) === JSON.stringify(next) ? previous : next; }); }
     }).catch((reason: unknown) => { if (active && !sameSession) setError(safeUiError(reason, message("trace.unavailable", resolvedLanguage()))); });
     return () => { active = false; };
   }, [sessionRef, refreshKey, retry]);

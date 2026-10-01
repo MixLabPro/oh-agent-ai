@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { stable } from "../../lib/stable";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
 import { formatMinorMoney, languagePreference, message, message as translate, setLanguagePreference, useLanguage, type AppLanguage, type LanguagePreference, type MessageKey } from "../../lib/i18n";
 import { isEditableCurrency, minorToEditableInput, suggestedInputCurrency, type EditableCurrency } from "../../lib/currencyPreference";
-import { fetchWatcherHealth, type WatcherHealthStatus, addCustomSourceRoot, amendBillingDeclaration, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, disableBudgetProfile, listenAppEvents, makeInvalidationGate, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, readStatisticsTimezone, removeCustomSourceRoot, resolveBillingImportCandidate, retryBillingRecalculation, revokeBillingDeclaration, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
+import { FOLLOW_SYSTEM_TIMEZONE, fetchWatcherHealth, type WatcherHealthStatus, addCustomSourceRoot, amendBillingDeclaration, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, disableBudgetProfile, listenAppEvents, makeInvalidationGate, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, readStatisticsTimezone, removeCustomSourceRoot, resolveBillingImportCandidate, retryBillingRecalculation, revokeBillingDeclaration, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
 
 function sourceStateLabel(state: SourceConnectionState, language: AppLanguage): string {
   return message(`source.state.${state}` as MessageKey, language);
@@ -135,7 +136,10 @@ function exportCsv(summary: MonthlyExportSummary): string {
 function SettingsLoadingState({ loading, hasData, title, detail }: { loading: boolean; hasData: boolean; title: string; detail: string }) {
   const language = useLanguage();
   if (!loading) return null;
-  return <div className="settings-source-state" role="status"><strong>{message(hasData ? "settings.loadingRefresh" : "settings.loadingRead", language, { title })}</strong><span>{hasData ? message("settings.loadingRetain", language) : detail}</span></div>;
+  // 已有数据时的后台刷新（每次同步 revision 前进都会触发七个区块同时重读）只给读屏提示，
+  // 不再插入可见块——可见块出现/消失会改变页面高度，造成设置页反复抖动、跳位。
+  if (hasData) return <span className="visually-hidden" role="status">{message("settings.loadingRefresh", language, { title })} {message("settings.loadingRetain", language)}</span>;
+  return <div className="settings-source-state" role="status"><strong>{message("settings.loadingRead", language, { title })}</strong><span>{detail}</span></div>;
 }
 
 function useMountedRef() {
@@ -168,11 +172,12 @@ function StatisticsDataSection({ report, loading, error, onReload }: StatisticsD
   useEffect(() => {
     if (report?.timezone.status === "ok" && report.timezone.timezone) {
       const current = report.timezone.timezone;
-      if (current === report.timezone.system_timezone || timezoneOptions.includes(current)) setTimezone(current);
+      if (report.timezone.follows_system) setTimezone(FOLLOW_SYSTEM_TIMEZONE);
+      else if (timezoneOptions.includes(current)) setTimezone(current);
       else { setTimezone("__custom__"); setCustomTimezone(current); }
     }
     if (report?.retention.status === "ok" && report.retention.months !== null) setRetention(String(report.retention.months));
-  }, [report?.timezone.timezone, report?.retention.months]);
+  }, [report?.timezone.timezone, report?.timezone.follows_system, report?.retention.months]);
 
   const saveTimezone = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -181,7 +186,7 @@ function StatisticsDataSection({ report, loading, error, onReload }: StatisticsD
     setActionError(null); setMessage(null);
     if (!next) { setActionError(tr("stats.invalidTimezone")); return; }
     setSavingTimezone(true);
-    try { const receipt = await saveStatisticsTimezone(next); if (!mounted.current) return; setTimezone(receipt.timezone); setMessage(tr("stats.timezoneSaved", { timezone: receipt.timezone })); onReload(); }
+    try { const receipt = await saveStatisticsTimezone(next); if (!mounted.current) return; setTimezone(next === FOLLOW_SYSTEM_TIMEZONE ? FOLLOW_SYSTEM_TIMEZONE : receipt.timezone); setMessage(tr("stats.timezoneSaved", { timezone: receipt.timezone })); onReload(); }
     catch (reason: unknown) { if (mounted.current) setActionError(safeUiError(reason, tr("stats.timezoneSaveFailed"))); }
     finally { if (mounted.current) setSavingTimezone(false); }
   };
@@ -225,7 +230,7 @@ function StatisticsDataSection({ report, loading, error, onReload }: StatisticsD
     {report && <>
       {report.timezone.system_timezone_fallback && <div className="error-banner" role="status">{tr("stats.fallbackUtc")}</div>}
       <div className="settings-data-grid">
-        <form className="settings-data-card" onSubmit={saveTimezone} aria-labelledby="settings-timezone-title"><div className="settings-card-heading"><div><p className="eyebrow">{tr("stats.boundary")}</p><h4 id="settings-timezone-title">{tr("stats.timezone")}</h4></div>{report.timezone.status === "unavailable" && <span className="status-pill status-pill-warning">{tr("stats.unavailable")}</span>}</div>{report.timezone.status === "ok" && <><label><span>{tr("stats.timezoneField")}</span><select value={timezone === report.timezone.system_timezone ? "__system__" : timezoneOptions.includes(timezone) ? timezone : timezone ? "__custom__" : ""} onChange={(event) => { const value = event.target.value; setTimezone(value === "__system__" ? report.timezone.system_timezone ?? "UTC" : value); }}><option value="">{tr("stats.chooseTimezone")}</option><option value="__system__">{tr("stats.followSystem", { timezone: report.timezone.system_timezone ?? tr("stats.system") })}</option>{timezoneOptions.map((option) => <option value={option} key={option}>{option}</option>)}<option value="__custom__">{tr("stats.customIana")}</option></select></label>{timezone === "__custom__" && <label><span>{tr("stats.customTimezone")}</span><input value={customTimezone} onChange={(event) => setCustomTimezone(event.target.value)} placeholder={tr("stats.exampleTimezone")} autoComplete="off" /></label>}<p className="settings-data-help">{tr("stats.timezoneHelp")}</p><button className="button button-secondary" type="submit" disabled={savingTimezone || !timezone || timezone === "__custom__" && !customTimezone.trim()}>{tr(savingTimezone ? "billing.saving" : "stats.saveTimezone")}</button></>}</form>
+        <form className="settings-data-card" onSubmit={saveTimezone} aria-labelledby="settings-timezone-title"><div className="settings-card-heading"><div><p className="eyebrow">{tr("stats.boundary")}</p><h4 id="settings-timezone-title">{tr("stats.timezone")}</h4></div>{report.timezone.status === "unavailable" && <span className="status-pill status-pill-warning">{tr("stats.unavailable")}</span>}</div>{report.timezone.status === "ok" && <><label><span>{tr("stats.timezoneField")}</span><select value={timezone === FOLLOW_SYSTEM_TIMEZONE ? "__system__" : timezoneOptions.includes(timezone) ? timezone : timezone ? "__custom__" : ""} onChange={(event) => { const value = event.target.value; setTimezone(value === "__system__" ? FOLLOW_SYSTEM_TIMEZONE : value); }}><option value="">{tr("stats.chooseTimezone")}</option><option value="__system__">{tr("stats.followSystem", { timezone: report.timezone.system_timezone ?? tr("stats.system") })}</option>{timezoneOptions.map((option) => <option value={option} key={option}>{option}</option>)}<option value="__custom__">{tr("stats.customIana")}</option></select></label>{timezone === "__custom__" && <label><span>{tr("stats.customTimezone")}</span><input value={customTimezone} onChange={(event) => setCustomTimezone(event.target.value)} placeholder={tr("stats.exampleTimezone")} autoComplete="off" /></label>}<p className="settings-data-help">{tr("stats.timezoneHelp")}</p><button className="button button-secondary" type="submit" disabled={savingTimezone || !timezone || timezone === "__custom__" && !customTimezone.trim()}>{tr(savingTimezone ? "billing.saving" : "stats.saveTimezone")}</button></>}</form>
         <form className="settings-data-card" onSubmit={saveRetention} aria-labelledby="settings-retention-title"><div className="settings-card-heading"><div><p className="eyebrow">{tr("stats.maintenance")}</p><h4 id="settings-retention-title">{tr("stats.retention")}</h4></div>{report.retention.status === "unavailable" && <span className="status-pill status-pill-warning">{tr("stats.unavailable")}</span>}</div>{report.retention.status === "ok" && <><label><span>{tr("stats.retentionMonths")}</span><input type="number" min={report.retention.minimum_months ?? 1} max={report.retention.maximum_months ?? 60} step="1" value={retention} onChange={(event) => setRetention(event.target.value)} /></label><p className="settings-data-help">{tr("stats.retentionHelp", { min: report.retention.minimum_months ?? 1, max: report.retention.maximum_months ?? 60 })}</p><button className="button button-secondary" type="submit" disabled={savingRetention || !retention}>{tr(savingRetention ? "billing.saving" : "stats.saveRetention")}</button></>}</form>
       </div>
       <div className="settings-data-card settings-pricing-card"><div className="settings-card-heading"><div><p className="eyebrow">{tr("stats.pricing")}</p><h4>{tr("stats.publicCatalog")}</h4></div>{report.pricing.status === "ok" && <span className={`status-pill status-pill-${report.pricing.available ? "success" : "warning"}`}>{pricingStateLabel(report.pricing.state, language)}</span>}</div>{report.pricing.status === "unavailable" ? <p className="settings-data-help">{tr("stats.pricingUnavailable")}</p> : <div className="settings-pricing-meta"><span>{tr("stats.version", { value: report.pricing.version ?? tr("stats.unknown") })}</span><span>{tr("stats.models", { value: report.pricing.model_count ?? tr("stats.unknown") })}</span><span>{tr("stats.lastSuccess", { value: report.pricing.last_success_at_ms ? new Date(report.pricing.last_success_at_ms).toLocaleString() : tr("stats.none") })}</span></div>}<p className="settings-data-help">{tr("stats.pricingHelp")}</p></div>
@@ -840,18 +845,18 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
     return () => window.removeEventListener("hashchange", updateActiveSection);
   }, []);
 
-  const refresh = () => {
+  const refresh = (background: unknown = false) => {
     const sourceRequestId = ++sourceRequest.current;
     const sourceControlsRequestId = ++sourceControlsRequest.current;
-    setLoading(true);
+    if (background !== true) setLoading(true);
     setError(null);
     void readSourceHostControls().then((next) => {
-      if (settingsMounted.current && sourceControlsRequestId === sourceControlsRequest.current) setSourceControls(next);
+      if (settingsMounted.current && sourceControlsRequestId === sourceControlsRequest.current) setSourceControls((previous) => stable(previous, next));
     }).catch(() => {
       if (settingsMounted.current && sourceControlsRequestId === sourceControlsRequest.current) setSourceControls(null);
     });
     void readSourceHealth().then((next) => {
-      if (settingsMounted.current && sourceRequestId === sourceRequest.current) setReport(next);
+      if (settingsMounted.current && sourceRequestId === sourceRequest.current) setReport((previous) => stable(previous, next));
     }).catch((reason: unknown) => {
       if (settingsMounted.current && sourceRequestId === sourceRequest.current) setError(safeUiError(reason, "来源状态读取失败"));
     }).finally(() => {
@@ -859,12 +864,12 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
     });
   };
 
-  const refreshCustom = () => {
+  const refreshCustom = (background: unknown = false) => {
     const requestId = ++customRequest.current;
-    setCustomLoading(true);
+    if (background !== true) setCustomLoading(true);
     setCustomError(null);
     void readCustomSourceConfig().then((next) => {
-      if (settingsMounted.current && requestId === customRequest.current) setCustomReport(next);
+      if (settingsMounted.current && requestId === customRequest.current) setCustomReport((previous) => stable(previous, next));
     }).catch((reason: unknown) => {
       if (settingsMounted.current && requestId === customRequest.current) setCustomError(safeUiError(reason, "自定义来源配置读取失败"));
     }).finally(() => {
@@ -872,12 +877,12 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
     });
   };
 
-  const refreshBudget = () => {
+  const refreshBudget = (background: unknown = false) => {
     const requestId = ++budgetRequest.current;
-    setBudgetLoading(true);
+    if (background !== true) setBudgetLoading(true);
     setBudgetError(null);
     void readBudgetSettings().then((next) => {
-      if (settingsMounted.current && requestId === budgetRequest.current) setBudgetReport(next);
+      if (settingsMounted.current && requestId === budgetRequest.current) setBudgetReport((previous) => stable(previous, next));
     }).catch((reason: unknown) => {
       if (settingsMounted.current && requestId === budgetRequest.current) setBudgetError(safeUiError(reason, "预算状态读取失败"));
     }).finally(() => {
@@ -885,12 +890,12 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
     });
   };
 
-  const refreshBilling = () => {
+  const refreshBilling = (background: unknown = false) => {
     const requestId = ++billingRequest.current;
-    setBillingLoading(true);
+    if (background !== true) setBillingLoading(true);
     setBillingError(null);
     void readBillingSettings().then((next) => {
-      if (settingsMounted.current && requestId === billingRequest.current) setBillingReport(next);
+      if (settingsMounted.current && requestId === billingRequest.current) setBillingReport((previous) => stable(previous, next));
     }).catch((reason: unknown) => {
       if (settingsMounted.current && requestId === billingRequest.current) setBillingError(safeUiError(reason, "计费状态读取失败"));
     }).finally(() => {
@@ -898,12 +903,12 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
     });
   };
 
-  const refreshData = () => {
+  const refreshData = (background: unknown = false) => {
     const requestId = ++dataRequest.current;
-    setDataLoading(true);
+    if (background !== true) setDataLoading(true);
     setDataError(null);
     void readStatisticsSettings().then((next) => {
-      if (settingsMounted.current && requestId === dataRequest.current) setDataReport(next);
+      if (settingsMounted.current && requestId === dataRequest.current) setDataReport((previous) => stable(previous, next));
     }).catch((reason: unknown) => {
       if (settingsMounted.current && requestId === dataRequest.current) setDataError(safeUiError(reason, "统计设置读取失败"));
     }).finally(() => {
@@ -911,12 +916,12 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
     });
   };
 
-  const refreshAbout = () => {
+  const refreshAbout = (background: unknown = false) => {
     const requestId = ++aboutRequest.current;
-    setAboutLoading(true);
+    if (background !== true) setAboutLoading(true);
     setAboutError(null);
     void readAboutDiagnostics().then((next) => {
-      if (settingsMounted.current && requestId === aboutRequest.current) setAboutReport(next);
+      if (settingsMounted.current && requestId === aboutRequest.current) setAboutReport((previous) => stable(previous, next));
     }).catch((reason: unknown) => {
       if (settingsMounted.current && requestId === aboutRequest.current) setAboutError(safeUiError(reason, "版本诊断读取失败"));
     }).finally(() => {
@@ -924,12 +929,12 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
     });
   };
 
-  const refreshQuotaReminder = () => {
+  const refreshQuotaReminder = (background: unknown = false) => {
     const requestId = ++quotaReminderRequest.current;
-    setQuotaReminderLoading(true);
+    if (background !== true) setQuotaReminderLoading(true);
     setQuotaReminderError(null);
     void readQuotaReminderConfig().then((next) => {
-      if (settingsMounted.current && requestId === quotaReminderRequest.current) setQuotaReminder(next);
+      if (settingsMounted.current && requestId === quotaReminderRequest.current) setQuotaReminder((previous) => stable(previous, next));
     }).catch((reason: unknown) => {
       if (settingsMounted.current && requestId === quotaReminderRequest.current) setQuotaReminderError(safeUiError(reason, "额度窗口提醒读取失败"));
     }).finally(() => {
@@ -1032,26 +1037,33 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
     refreshQuotaReminder();
     let active = true;
     let cleanups: Array<() => void> = [];
+    let coalesceTimer: number | null = null;
     const gate = makeInvalidationGate();
     void listenAppEvents((event) => {
       if (!active) return;
       if (event.type === "SourceDataDeleted" && gate(event)) {
         // R1：轮询合成的事件带 revision，已被 Invalidated 覆盖的同 revision 重复
         // 被 gate 吞掉；真删除（无 revision）仍无条件放行。
-        refresh(); refreshData(); refreshQuotaReminder();
+        refresh(true); refreshData(true); refreshQuotaReminder(true);
       } else if (event.type === "SyncStatusChanged") {
         // 同步失败/恢复只体现在数据源健康（sync_runs 是记账写，不推进 revision）。
-        refresh();
+        refresh(true);
       } else if (gate(event)) {
         // 权威 revision 前进：预算/计费/数据面/关于页一起重拉——每 tick 至多一次，
         // 且同 revision 的重复事件被闸门吞掉（RUNTIME_INVALIDATION spec §6）。
-        refresh(); refreshCustom(); refreshBudget(); refreshBilling(); refreshData(); refreshAbout(); refreshQuotaReminder();
+        // 再加 1.2s 合并：Agent 活跃时同步一轮接一轮，逐条重读七个区块会让页面持续抖动。
+        if (coalesceTimer !== null) window.clearTimeout(coalesceTimer);
+        coalesceTimer = window.setTimeout(() => {
+          coalesceTimer = null;
+          if (!active) return;
+          refresh(true); refreshCustom(true); refreshBudget(true); refreshBilling(true); refreshData(true); refreshAbout(true); refreshQuotaReminder(true);
+        }, 1200);
       }
     }).then((unsubscribe) => {
       if (active) cleanups = [unsubscribe];
       else unsubscribe();
     });
-    return () => { active = false; settingsMounted.current = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
+    return () => { active = false; settingsMounted.current = false; if (coalesceTimer !== null) window.clearTimeout(coalesceTimer); cleanups.forEach((unsubscribe) => unsubscribe()); };
   }, []);
 
   const attentionCount = useMemo(() => report?.sources.filter((source) => source.connection_state === "needs_attention").length ?? 0, [report]);

@@ -1,3 +1,4 @@
+import { stable, isBackground } from "../lib/stable";
 import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { invoke, listen, listenAppEvents, makeInvalidationGate, readOverviewDetails, readOverviewSnapshot, readSourceDataRevision, safeUiError, type OverviewDetails, type OverviewSnapshot } from "../lib/tauri";
 import { FindingsPage } from "../features/findings/FindingsPage";
@@ -179,15 +180,18 @@ export function App() {
     if (page !== "overview") return;
     let active = true;
     setError(null);
-    const refresh = () => {
+    // 后台刷新（失效事件）：不翻转 overviewRefreshing，内容没变就沿用旧引用——App 是根组件，
+    // 每次换新对象都会让整棵树重渲染。首次进入与手动刷新（overviewRefresh 变化）照旧显示刷新态。
+    const refresh = (background: unknown = false) => {
+      const quiet = isBackground(background);
       const requestId = ++refreshSeq.current;
       setError(null);
-      setOverviewRefreshing(true);
+      if (!quiet) setOverviewRefreshing(true);
       const snapshotRequest = readOverviewSnapshot()
-        .then((value) => { if (active && requestId === refreshSeq.current) setOverview(value); })
+        .then((value) => { if (active && requestId === refreshSeq.current) setOverview((previous) => stable(previous, value)); })
         .catch((reason: unknown) => { if (active && requestId === refreshSeq.current) setError(safeUiError(reason, "本地数据暂不可用")); });
       const detailsRequest = readOverviewDetails()
-        .then((value) => { if (active && requestId === refreshSeq.current) setOverviewDetails(value); })
+        .then((value) => { if (active && requestId === refreshSeq.current) setOverviewDetails((previous) => stable(previous, value)); })
         .catch((reason: unknown) => { if (active && requestId === refreshSeq.current) setError(safeUiError(reason, "总览明细暂不可用")); });
       void Promise.allSettled([snapshotRequest, detailsRequest]).then(() => {
         if (active && requestId === refreshSeq.current) setOverviewRefreshing(false);
@@ -198,7 +202,7 @@ export function App() {
     // 总览壳层：数据失效（revision 前进）或同步状态变化才重拉；WatcherHealth /
     // Trust 类事件与总览无关，不再触发这里的两个 invoke。
     const gate = makeInvalidationGate();
-    void listenAppEvents((event) => { if (gate(event) || event.type === "SyncStatusChanged" || event.type === "HostNavigationChanged") refresh(); })
+    void listenAppEvents((event) => { if (gate(event) || event.type === "SyncStatusChanged" || event.type === "HostNavigationChanged") refresh(true); })
       .then((unsubscribe) => { if (active) cleanups = [unsubscribe]; else unsubscribe(); });
     return () => { active = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
   }, [page, overviewRefresh]);

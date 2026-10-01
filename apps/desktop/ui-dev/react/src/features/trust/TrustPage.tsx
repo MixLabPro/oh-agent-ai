@@ -1,3 +1,4 @@
+import { stable } from "../../lib/stable";
 import { useEffect, useRef, useState } from "react";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
 import { message, resolvedLanguage, useLanguage, type MessageKey } from "../../lib/i18n";
@@ -181,14 +182,16 @@ export function TrustPage() {
     return profiles.status === "fulfilled";
   };
 
-  const refreshEvidenceHistory = async (cursor: string | null = null, append = false) => {
+  // quiet = 失效事件触发的后台重取：不翻转 loading（不让列表被「正在读取」替换再换回来），
+  // 内容没变就沿用旧引用，React 跳过渲染。
+  const refreshEvidenceHistory = async (cursor: string | null = null, append = false, quiet = false) => {
     const requestId = ++evidenceRequest.current;
-    if (append) setEvidenceLoadingMore(true); else setEvidenceLoading(true);
+    if (append) setEvidenceLoadingMore(true); else if (!quiet) setEvidenceLoading(true);
     setEvidenceError(null);
     try {
       const history = await readTrustEvidence(null, 200, cursor);
       if (requestId !== evidenceRequest.current) return;
-      setEvidenceHistory((current) => append ? current.concat(history.evidence) : history.evidence);
+      setEvidenceHistory((current) => append ? current.concat(history.evidence) : stable(current, history.evidence));
       setEvidenceCursor(history.next_cursor);
     } catch (reason: unknown) {
       if (requestId === evidenceRequest.current) setEvidenceError(errorMessage(reason));
@@ -300,11 +303,10 @@ export function TrustPage() {
       if (!active || event.type !== "TrustMonitorInvalidated") return;
       setReport(null);
       setSelectedHost(null);
-      setExpandedEvidence(null);
-      void refreshEvidenceHistory();
+      void refreshEvidenceHistory(null, false, true);
       void readTrustMonitorConfig().then((value) => {
         if (!active) return;
-        setMonitor(value);
+        setMonitor((previous) => stable(previous, value));
         setMonitorDraft({ enabled: value.enabled, interval_seconds: value.interval_seconds, notifications_enabled: value.notifications_enabled });
         setMonitorFeedback(tx("tr.monitorRefreshed"));
       }).catch(() => undefined);

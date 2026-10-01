@@ -153,6 +153,7 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
   // 换会话才清空；同一会话的后台刷新（每次同步都会触发）保留当前视图与选择，
   // 只在新数据到达后校验选择是否仍然有效（验收 Major：每次同步都把用户拽回诊断 1）。
   const loadedRef = useRef<string | null>(null);
+  const insightsFingerprint = useRef<string | null>(null);
   useEffect(() => {
     let active = true;
     const sameSession = loadedRef.current === sessionRef;
@@ -160,6 +161,10 @@ export function SessionInsightsPanel({ sessionRef, refreshKey }: { sessionRef: s
     setError(null);
     void readSessionInsights(sessionRef).then(insights => {
       if (!active) return;
+      // 同一会话、内容没变的后台刷新：什么都不更新（不换对象、不递增数据代次、不让证据缓存失效重取）。
+      const fingerprint = `${sessionRef}|${JSON.stringify(insights)}`;
+      if (sameSession && insightsFingerprint.current === fingerprint) { setRefreshFailed(false); return; }
+      insightsFingerprint.current = fingerprint;
       loadedRef.current = sessionRef;
       setData({ ref: sessionRef, insights });
       setRefreshFailed(false);

@@ -1,3 +1,4 @@
+import { stable, isBackground } from "../../lib/stable";
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import {
   listenAppEvents,
@@ -226,25 +227,33 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
     return () => { active = false; };
   }, []);
 
-  const fetchFirstPage = async () => {
-    setDetailRefreshKey((value) => value + 1);
+  // 后台刷新（失效事件触发）不翻转 loading、不先清空分页游标、不换内容相同的数据引用，
+  // 也只在列表真的变了才让详情面板重取——避免每次同步整个页面闪一遍。手动/换筛选照旧。
+  const rowsFingerprint = useRef<string | null>(null);
+  const pendingQuiet = useRef(true);
+  const fetchFirstPage = async (background: unknown = false) => {
+    const quiet = isBackground(background);
+    if (!quiet) setDetailRefreshKey((value) => value + 1);
     if (requestInFlight.current) {
       pendingRefresh.current = true;
+      if (!quiet) pendingQuiet.current = false;
       generation.current += 1;
-      setLoading(true);
+      if (!quiet) setLoading(true);
       setError(null);
       return;
     }
     const currentFilters = filtersRef.current;
     const currentGeneration = ++generation.current;
     requestInFlight.current = true;
-    setLoading(true);
+    if (!quiet) { setLoading(true); setNextCursor(null); }
     setError(null);
-    setNextCursor(null);
     try {
       const page = await readSessions(serverArgs(currentFilters, null, statisticsTimezone));
       if (currentGeneration !== generation.current) return;
-      setRows(page.sessions);
+      const fingerprint = JSON.stringify(page.sessions);
+      if (quiet && rowsFingerprint.current !== fingerprint) setDetailRefreshKey((value) => value + 1);
+      rowsFingerprint.current = fingerprint;
+      setRows((previous) => stable(previous, page.sessions));
       setNextCursor(page.next_cursor);
       setTotal(page.window_session_count);
       setWindowTokens(page.window_total_tokens);
@@ -258,7 +267,9 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
       requestInFlight.current = false;
       if (pendingRefresh.current) {
         pendingRefresh.current = false;
-        void fetchFirstPage();
+        const quietNext = pendingQuiet.current;
+        pendingQuiet.current = true;
+        void fetchFirstPage(quietNext);
       }
     }
   };
@@ -267,7 +278,7 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
 
   useEffect(() => {
     let active = true;
-    const refresh = () => { if (active) void fetchFirstPage(); };
+    const refresh = () => { if (active) void fetchFirstPage(true); };
     let cleanups: Array<() => void> = [];
     const gate = makeInvalidationGate();
     void listenAppEvents((event) => { if (gate(event)) refresh(); })

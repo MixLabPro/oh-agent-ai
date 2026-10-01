@@ -161,7 +161,7 @@ export type OverviewDetails = {
 export type StatisticsTimezone = { timezone: string };
 
 export type StatisticsSettingsReport = {
-  timezone: { status: "ok" | "unavailable"; timezone: string | null; system_timezone: string | null; system_timezone_fallback?: boolean };
+  timezone: { status: "ok" | "unavailable"; timezone: string | null; system_timezone: string | null; system_timezone_fallback?: boolean; follows_system?: boolean };
   retention: { status: "ok" | "unavailable"; months: number | null; minimum_months: number | null; maximum_months: number | null };
   pricing: { status: "ok" | "unavailable"; state: "ok" | "updated" | "failed" | "rejected" | "never_checked" | "skipped" | "unknown"; version: string | null; model_count: number | null; last_success_at_ms: number | null; available: boolean };
 };
@@ -1300,7 +1300,7 @@ function parseStatisticsTimezone(value: unknown): StatisticsSettingsReport["time
   if (systemTimezone !== null) {
     try { new Intl.DateTimeFormat("en-US", { timeZone: systemTimezone }).format(); } catch (_) { throw new Error("系统时区不可用"); }
   }
-  return { status: "ok", timezone, system_timezone: systemTimezone, system_timezone_fallback: root.system_timezone_fallback === true };
+  return { status: "ok", timezone, system_timezone: systemTimezone, system_timezone_fallback: root.system_timezone_fallback === true, follows_system: root.follows_system === true };
 }
 
 function parseRetentionConfig(value: unknown): StatisticsSettingsReport["retention"] {
@@ -2606,10 +2606,13 @@ function validateIanaTimezone(timezone: string): string {
   return timezone;
 }
 
+/** 「跟随系统」的保存哨兵：后端删偏好文件，之后随 OS 时区走（见 statistics_timezone.rs）。 */
+export const FOLLOW_SYSTEM_TIMEZONE = "system";
+
 export async function saveStatisticsTimezone(timezone: string): Promise<{ status: "saved"; timezone: string }> {
-  const safe = validateIanaTimezone(timezone);
+  const safe = timezone === FOLLOW_SYSTEM_TIMEZONE ? FOLLOW_SYSTEM_TIMEZONE : validateIanaTimezone(timezone);
   const handler = globalTauri()?.core?.invoke;
-  if (!handler) return { status: "saved", timezone: safe };
+  if (!handler) return { status: "saved", timezone: safe === FOLLOW_SYSTEM_TIMEZONE ? (Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC") : safe };
   const root = record(await handler("save_statistics_timezone_config", { timezone: safe }), "save statistics timezone");
   if (root.status !== "saved") throw new Error("统计时区保存未确认");
   const saved = validateIanaTimezone(stringField(root.timezone, "saved statistics timezone"));
