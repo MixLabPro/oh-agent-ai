@@ -2712,6 +2712,10 @@ struct PriceCardInput {
     /// 必须两档齐全，与三个必填维同一条 sanitize 纪律。
     #[serde(default)]
     cache_write: Option<Value>,
+    /// 卡的币种（ISO 三位字母）。不给 = 旧表单（只认人民币）→ 按 CNY 校验，与服务商币种不符就拒绝，
+    /// 而不是把别的币种的数字当人民币存下来。
+    #[serde(default)]
+    currency: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -4703,8 +4707,9 @@ fn save_price_card(input: PriceCardInput) -> Result<Value, String> {
     if let Some(cache_write) = input.cache_write {
         card["cache_write"] = cache_write;
     }
-    agent_vitals_runtime::price_overrides::save_card(
+    agent_vitals_runtime::price_overrides::save_card_checked(
         &data_home, &input.provider_id, &input.model_id, &card,
+        input.currency.as_deref().unwrap_or("CNY"),
     )?;
     Ok(serde_json::json!({
         "status": "saved",

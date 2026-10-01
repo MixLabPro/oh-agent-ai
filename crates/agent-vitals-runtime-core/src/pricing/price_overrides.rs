@@ -55,7 +55,62 @@ pub fn load(data_home: &Path) -> Value {
     if !value.get("routes").is_some_and(Value::is_object) {
         value["routes"] = json!({});
     }
+    if !value.get("currencies").is_some_and(Value::is_object) {
+        value["currencies"] = json!({});
+    }
     value
+}
+
+/// 用户新建的服务商（目录里没有的）所声明的报价币种：`provider → ISO 币种`。
+pub fn currencies(data_home: &Path) -> serde_json::Map<String, Value> {
+    load(data_home).get("currencies").and_then(Value::as_object).cloned().unwrap_or_default()
+}
+
+/// 保存价卡并**校验币种**。价卡本身没有币种字段，币种是服务商级的（目录里的
+/// `providers.<p>.currency`）；如果表单让用户以 USD 填数、计价却按服务商的 CNY 解释，
+/// 就会出现「美元数字被标成人民币」的错误金额——比直接拒绝更糟。所以：
+/// - 服务商的报价币种已知（目录，或此前用户为新服务商声明过）→ 卡币种必须与之一致，否则拒绝，
+///   并明确说明不做任何换算；
+/// - 服务商是新的（币种未知）→ 以这次声明的币种为准并记下来，之后同一服务商的卡必须同币种。
+/// 同一服务商同时有两套币种的报价（如 DeepSeek 官方 USD / CNY）需要卡级币种，本函数不支持。
+pub fn save_card_checked(
+    data_home: &Path,
+    provider: &str,
+    model: &str,
+    card: &Value,
+    currency: &str,
+) -> Result<(), String> {
+    let currency = currency.trim();
+    if currency.len() != 3 || !currency.chars().all(|c| c.is_ascii_uppercase()) {
+        return Err(format!("currency {currency:?} must be a 3-letter ISO code such as USD or CNY"));
+    }
+    let provider_key = provider.trim();
+    if provider_key.is_empty() {
+        return Err("服务商与型号都不能为空".to_string());
+    }
+    let catalog = agent_vitals_domain::cost::load_pricing();
+    let known = agent_vitals_domain::cost::provider_quote_currency(provider_key, &catalog)
+        .or_else(|| currencies(data_home).get(provider_key).and_then(Value::as_str).map(str::to_string));
+    if let Some(quote) = known {
+        if quote != currency {
+            return Err(format!(
+                "provider {provider_key} quotes in {quote}; a {currency} card cannot be saved under it (no currency conversion is done)"
+            ));
+        }
+    }
+    // 先校验卡本身（半张卡拒绝），再落币种，避免卡非法时留下一个孤立的币种声明。
+    sanitize_card(card)?;
+    save_card(data_home, provider, model, card)?;
+    if known_is_none_in_catalog(provider_key, &catalog) {
+        let mut root = load(data_home);
+        root["currencies"][provider_key] = json!(currency);
+        write(data_home, &root)?;
+    }
+    Ok(())
+}
+
+fn known_is_none_in_catalog(provider: &str, catalog: &Value) -> bool {
+    agent_vitals_domain::cost::provider_quote_currency(provider, catalog).is_none()
 }
 
 /// 覆盖层里全部卡片：`provider → model → 卡片`。
@@ -227,9 +282,13 @@ pub fn apply_to_main(main: &mut Value, data_home: &Path) {
     };
     for (provider, models) in overlay {
         let Some(models) = models.as_object() else { continue };
+        let declared_currency = currencies(data_home).get(provider.as_str()).and_then(Value::as_str).map(str::to_string);
         let entry = providers
             .entry(provider.clone())
-            .or_insert_with(|| json!({ "label": provider, "models": {} }));
+            .or_insert_with(|| match &declared_currency {
+                Some(currency) => json!({ "label": provider, "currency": currency, "models": {} }),
+                None => json!({ "label": provider, "models": {} }),
+            });
         let Some(entry_models) = entry
             .as_object_mut()
             .and_then(|e| e.entry("models".to_string()).or_insert_with(|| json!({})).as_object_mut())
@@ -292,6 +351,44 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&home);
         home
+    }
+
+    /// 2026-10-01：卡没有币种字段，币种是服务商级的。USD 数字存进 CNY 服务商、再被当人民币计价
+    /// 会得到「美元被标成人民币」的错误金额——保存时必须校验币种。
+    #[test]
+    fn saving_a_card_checks_its_currency_against_the_providers_quote_currency() {
+        let home = tmp("currency-guard");
+        // shengsuanyun 在目录里是 CNY；anthropic 是 USD
+        assert!(save_card_checked(&home, "shengsuanyun", "gpt-x", &card(1.0), "CNY").is_ok());
+        let err = save_card_checked(&home, "shengsuanyun", "gpt-y", &card(1.0), "USD").unwrap_err();
+        assert!(err.contains("quotes in CNY") && err.contains("no currency conversion"), "{err}");
+        assert!(save_card_checked(&home, "anthropic", "claude-x", &card(1.0), "USD").is_ok());
+        let err = save_card_checked(&home, "anthropic", "claude-y", &card(1.0), "CNY").unwrap_err();
+        assert!(err.contains("quotes in USD"), "{err}");
+        // 币种格式
+        for bad in ["", "usd", "US", "USDX", "U5D"] {
+            assert!(save_card_checked(&home, "anthropic", "m", &card(1.0), bad).is_err(), "{bad:?}");
+        }
+        // 非法卡不会留下孤立的币种声明
+        assert!(save_card_checked(&home, "brand-new", "m", &json!({"output": {}}), "EUR").is_err());
+        assert!(currencies(&home).get("brand-new").is_none());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_new_provider_gets_its_currency_from_the_first_card_and_later_cards_must_match() {
+        let home = tmp("currency-new-provider");
+        assert!(save_card_checked(&home, "us-relay", "m1", &card(2.0), "USD").is_ok());
+        assert_eq!(currencies(&home).get("us-relay").and_then(Value::as_str), Some("USD"));
+        assert!(save_card_checked(&home, "us-relay", "m2", &card(2.0), "USD").is_ok());
+        assert!(save_card_checked(&home, "us-relay", "m3", &card(2.0), "CNY").is_err(), "同一服务商后续的卡必须同币种");
+        // 计价读的价目表里，新服务商条目带着这个币种（否则会被当成「未知币种」）
+        let mut main = agent_vitals_domain::cost::load_pricing();
+        apply_to_main(&mut main, &home);
+        assert_eq!(agent_vitals_domain::cost::provider_quote_currency("us-relay", &main).as_deref(), Some("USD"));
+        // 目录里已有币种的服务商，覆盖层不能改写它
+        assert_eq!(agent_vitals_domain::cost::provider_quote_currency("anthropic", &main).as_deref(), Some("USD"));
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     fn card(off: f64) -> Value {
