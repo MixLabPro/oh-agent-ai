@@ -12,6 +12,10 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import type { CityModel } from "../cityModel";
 import { activeTheme, setActiveTheme, type CityThemeName } from "./cityTheme";
 import { layoutCity, type CityLayout } from "./cityLayout";
@@ -81,6 +85,7 @@ export class CityEngine {
   private readonly disposablesSky: Array<{ dispose: () => void }> = [];
   private readonly observers: Array<() => void> = [];
   private skyDome: THREE.Mesh | null = null;
+  private composer: EffectComposer | null = null;
   private themeName: CityThemeName = "day";
 
   constructor(private readonly options: CityEngineOptions) {
@@ -179,11 +184,35 @@ export class CityEngine {
     this.lastActivityAt = performance.now();
   }
 
+  /** bloom 只在霓虹主题且画质≥1 时启用；其余走直渲，省一整条后处理链。 */
+  private renderFrame(): void {
+    if (activeTheme().neon && this.quality >= 1) {
+      if (!this.composer) {
+        const size = this.renderer.getSize(new THREE.Vector2());
+        const composer = new EffectComposer(this.renderer);
+        composer.addPass(new RenderPass(this.scene, this.camera));
+        // 阈值取 HDR 值：霓虹（×3.2）越线，被光照的沙地/天空不会整片泛光。
+        composer.addPass(new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 1.0, 0.6, 2.0));
+        composer.addPass(new OutputPass());
+        composer.setPixelRatio(this.renderer.getPixelRatio());
+        composer.setSize(size.x, size.y);
+        this.composer = composer;
+      }
+      this.composer.render();
+      return;
+    }
+    this.renderer.render(this.scene, this.camera);
+  }
+
   private resize(): void {
     const parent = this.options.canvas.parentElement;
     const width = Math.max(1, parent?.clientWidth ?? this.options.canvas.clientWidth);
     const height = Math.max(1, parent?.clientHeight ?? this.options.canvas.clientHeight);
     this.renderer.setSize(width, height, false);
+    if (this.composer) {
+      this.composer.setPixelRatio(this.renderer.getPixelRatio());
+      this.composer.setSize(width, height);
+    }
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     if (this.layout && this.attracted) {
@@ -445,7 +474,7 @@ export class CityEngine {
     if (idle && now - this.lastRenderAt < IDLE_FRAME_INTERVAL_MS) return;
 
     this.updateScene(dt);
-    this.renderer.render(this.scene, this.camera);
+    this.renderFrame();
     this.lastRenderAt = now;
     this.accountFrame(now, idle);
 
@@ -547,6 +576,8 @@ export class CityEngine {
       this.parts.dispose();
       this.parts = null;
     }
+    this.composer?.dispose();
+    this.composer = null;
     this.controls.dispose();
     this.disposablesSky.forEach((disposable) => disposable.dispose());
     this.renderer.dispose();

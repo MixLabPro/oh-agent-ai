@@ -100,6 +100,8 @@ export class CityParts {
   private readonly disposables: Array<{ dispose: () => void }> = [];
   private readonly podiumMesh: THREE.InstancedMesh;
   private readonly roofMesh: THREE.InstancedMesh;
+  /** 屋顶霓虹描边：比屋顶略大的自发光薄板，露出的一圈即霓虹；仅日落主题。 */
+  private readonly neonMesh: THREE.InstancedMesh;
   private readonly scaffoldMesh: THREE.InstancedMesh;
   private readonly antennaMesh: THREE.InstancedMesh;
   private readonly beaconMesh: THREE.InstancedMesh;
@@ -169,12 +171,14 @@ export class CityParts {
 
     this.podiumMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#e8e2d5" }), total);
     this.roofMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#ffffff" }), total);
+    this.neonMesh = this.makeInstanced(BOX, new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false }), total);
+    this.neonMesh.castShadow = false;
     this.scaffoldMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#e0a83f", transparent: true, opacity: 0.24, depthWrite: false }), total);
     this.scaffoldMesh.castShadow = false;
     this.antennaMesh = this.makeInstanced(new THREE.CylinderGeometry(0.09, 0.16, 1, 5).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#5d6470" }), 96);
     this.beaconMesh = this.makeInstanced(new THREE.SphereGeometry(0.32, 8, 6), new THREE.MeshBasicMaterial({ color: "#ffb02e" }), 96);
-    this.craneMastMesh = this.makeInstanced(new THREE.BoxGeometry(0.5, 1, 0.5).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#e8b73f" }), 48);
-    this.craneArmMesh = this.makeInstanced(new THREE.BoxGeometry(1, 0.32, 0.32), new THREE.MeshLambertMaterial({ color: "#e8b73f" }), 48);
+    this.craneMastMesh = this.makeInstanced(new THREE.BoxGeometry(0.85, 1, 0.85).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#ffb400", emissive: "#6b4300" }), 48);
+    this.craneArmMesh = this.makeInstanced(new THREE.BoxGeometry(1, 0.32, 0.32), new THREE.MeshLambertMaterial({ color: "#ffb400", emissive: "#6b4300" }), 48);
 
     // ── 地形：岛 / 桥 / 树 / 背景楼群 / 远山 ──────────────────────────
     this.buildTerrain();
@@ -261,6 +265,8 @@ export class CityParts {
     const add = (x: number, y: number, z: number, sx: number, sy: number, sz: number, color: string, tilt = 0) => parts.push({ x, y, z, sx, sy, sz, color, tilt });
     // Curbs and street lights are real geometry; asphalt and markings share the atlas.
     for (const edge of this.layout.roadEdges) {
+      // 过河的桥路段没有桥面可依附：路缘石/路灯会悬在水面上，像河里一排排虚线。
+      if (edge.bridge) continue;
       const [a, b] = edge.points;
       const horizontal = a.z === b.z;
       const length = Math.hypot(b.x - a.x, b.z - a.z) - 11;
@@ -624,8 +630,8 @@ export class CityParts {
         });
       }
     });
-    const hull = new THREE.BoxGeometry(6.4, 1.1, 2.2).translate(0, 0.55, 0);
-    const cabin = new THREE.BoxGeometry(2.4, 1.0, 1.6).translate(0.8, 1.6, 0);
+    const hull = new THREE.BoxGeometry(11.5, 2, 4).translate(0, 1, 0);
+    const cabin = new THREE.BoxGeometry(4.3, 1.8, 2.9).translate(1.4, 2.9, 0);
     const geometry = mergeGeometries([hull, cabin]);
     const material = new THREE.MeshLambertMaterial({ color: "#f2efe6" });
     const mesh = new THREE.InstancedMesh(geometry, material, Math.max(boats.length, 1));
@@ -845,6 +851,8 @@ export class CityParts {
       }
       runtime.roof = roofCount;
       this.roofMesh.setColorAt(roofCount, new THREE.Color(palette.roof).multiplyScalar(0.94 + building.seed * 0.12));
+      // 乘 3.2 让亮度越过 bloom 阈值（MeshBasicMaterial 不吃光照，toneMapped=false 保留 HDR 值）。
+      this.neonMesh.setColorAt(roofCount, new THREE.Color(palette.accent).multiplyScalar(3.2));
       roofCount += 1;
       runtime.scaffold = scaffoldCount;
       scaffoldCount += 1;
@@ -871,6 +879,8 @@ export class CityParts {
     this.podiumMesh.count = podiumCount;
     if (this.podiumMesh.instanceColor) this.podiumMesh.instanceColor.needsUpdate = true;
     this.roofMesh.count = roofCount;
+    this.neonMesh.count = activeTheme().neon ? roofCount : 0;
+    if (this.neonMesh.instanceColor) this.neonMesh.instanceColor.needsUpdate = true;
     if (this.roofMesh.instanceColor) this.roofMesh.instanceColor.needsUpdate = true;
     this.scaffoldMesh.count = scaffoldCount;
     this.antennaMesh.count = antennaCount;
@@ -951,6 +961,8 @@ export class CityParts {
       const roofDepth = runtime.shaftUpper >= 0 && built > h * split ? widths[1] * 0.78 : widths[1] * 1.06;
       this.compose(x, roofY, z, yaw, roofWidth, 0.34, roofDepth);
       this.roofMesh.setMatrixAt(runtime.roof, this.matrix);
+      this.compose(x, roofY - 0.12, z, yaw, roofWidth * 1.16, 0.3, roofDepth * 1.16);
+      this.neonMesh.setMatrixAt(runtime.roof, this.matrix);
     }
     // 脚手架：包住"计划高度"的剩余部分——楼还没到的地方先看见壳。
     if (runtime.scaffold >= 0) {
@@ -993,7 +1005,7 @@ export class CityParts {
     const centerZ = cornerZ - Math.sin(angle) * armLength * 0.34;
     // three.js 绕 Y 转 θ 后 x 轴指向 (cosθ, -sinθ)，与上面的中心偏移同向，必须传 +angle；
     // 曾传 -angle，悬臂被镜像到另一侧，脱离立柱悬在空中。
-    this.compose(centerX, groundY + mastHeight + 0.1, centerZ, angle, armLength, 1.6, 1.6);
+    this.compose(centerX, groundY + mastHeight + 0.1, centerZ, angle, armLength, 2.2, 2.2);
     this.craneArmMesh.setMatrixAt(runtime.craneArm, this.matrix);
   }
 
@@ -1003,7 +1015,10 @@ export class CityParts {
     if (runtime.shaftPrimary >= 0) this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftPrimary, this.matrix);
     if (runtime.shaftUpper >= 0) this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftUpper, this.matrix);
     if (runtime.podium >= 0) this.podiumMesh.setMatrixAt(runtime.podium, this.matrix);
-    if (runtime.roof >= 0) this.roofMesh.setMatrixAt(runtime.roof, this.matrix);
+    if (runtime.roof >= 0) {
+      this.roofMesh.setMatrixAt(runtime.roof, this.matrix);
+      this.neonMesh.setMatrixAt(runtime.roof, this.matrix);
+    }
     if (runtime.scaffold >= 0) this.scaffoldMesh.setMatrixAt(runtime.scaffold, this.matrix);
     if (runtime.antenna >= 0) this.antennaMesh.setMatrixAt(runtime.antenna, this.matrix);
     if (runtime.beacon >= 0) this.beaconMesh.setMatrixAt(runtime.beacon, this.matrix);
@@ -1097,6 +1112,7 @@ export class CityParts {
       for (const mesh of this.shaftMeshes) mesh.instanceMatrix.needsUpdate = true;
       this.podiumMesh.instanceMatrix.needsUpdate = true;
       this.roofMesh.instanceMatrix.needsUpdate = true;
+      this.neonMesh.instanceMatrix.needsUpdate = true;
       this.scaffoldMesh.instanceMatrix.needsUpdate = true;
       this.antennaMesh.instanceMatrix.needsUpdate = true;
       this.craneMastMesh.instanceMatrix.needsUpdate = true;
