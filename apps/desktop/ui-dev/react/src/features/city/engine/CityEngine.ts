@@ -89,7 +89,7 @@ export class CityEngine {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
 
-    this.camera = new THREE.PerspectiveCamera(42, 1, 0.5, 3_000);
+    this.camera = new THREE.PerspectiveCamera(42, 1, 1.5, 3_000);
     this.camera.position.set(150, 120, 170);
 
     this.controls = new OrbitControls(this.camera, canvas);
@@ -454,6 +454,11 @@ export class CityEngine {
     }
 
     this.controls.update();
+    // 相机不得沉到地形/水面以下：低机位会让近裁剪面切出一条平直的陆地边。
+    if (this.layout) {
+      const floor = Math.max(0, this.layout.terrain.height(this.camera.position.x, this.camera.position.z)) + 3;
+      if (this.camera.position.y < floor) this.camera.position.y = floor;
+    }
     this.parts?.update(dt, this.elapsed);
 
     // 悬停拾取（每帧至多一次，且只在指针动过或相机在动时）。

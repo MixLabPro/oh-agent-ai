@@ -335,7 +335,11 @@ export class CityParts {
           // 墩顶止于桥面底面（咬合 0.05）：桥面板在任何视角下都完整包住墩顶，
           // 不会出现"桥墩穿透路面"的视觉交叠。
           const pierTop = deckY - 0.4;
-          pieces.push({ x: point.x, y: (groundY + pierTop) / 2, z: point.z, sx: 1.8, sy: pierTop - groundY, sz: 5.6, yaw: 0, color: "#a9aaa0" });
+          // 桥墩随该点处桥面走向旋转（横截面垂直于桥），盖梁宽度覆盖桥面。
+          const neighbor = points[Math.min(index + 1, points.length - 1)];
+          const prev = points[Math.max(index - 1, 0)];
+          const pierYaw = -Math.atan2(neighbor.z - prev.z, neighbor.x - prev.x);
+          pieces.push({ x: point.x, y: (groundY + pierTop) / 2, z: point.z, sx: 1.8, sy: pierTop - groundY, sz: 8.4, yaw: pierYaw, color: "#a9aaa0" });
         }
       }
       for (let index = 1; index < points.length; index += 1) {
@@ -834,7 +838,7 @@ export class CityParts {
     if (runtime.scaffold >= 0) {
       const remaining = h - built;
       if (fraction < 0.985 && remaining > 0.6) {
-        this.compose(x, g + built, z, 0, widths[0] * 1.14, remaining, widths[1] * 1.14);
+        this.compose(x, g + built, z, yaw, widths[0] * 1.14, remaining, widths[1] * 1.14);
       } else {
         this.compose(x, -40, z, 0, 0, 0, 0);
       }
@@ -851,8 +855,11 @@ export class CityParts {
     // 吊车（活跃会话）。
     if (runtime.craneMast >= 0) {
       const mastHeight = h * 1.02 + 6.5;
-      const cornerX = x + fp * 0.72;
-      const cornerZ = z + fp * 0.72;
+      // 立柱立在地块局部坐标的一角（随 slot.yaw 旋转），不再按世界轴偏移而被楼体吞掉。
+      const localX = widths[0] * 0.5 + 0.6;
+      const localZ = widths[1] * 0.5 + 0.6;
+      const cornerX = x + localX * Math.cos(yaw) + localZ * Math.sin(yaw);
+      const cornerZ = z - localX * Math.sin(yaw) + localZ * Math.cos(yaw);
       this.compose(cornerX, g, cornerZ, 0, 1, mastHeight, 1);
       this.craneMastMesh.setMatrixAt(runtime.craneMast, this.matrix);
       this.applyCraneArm(runtime, cornerX, cornerZ, g, mastHeight, 0);
@@ -864,7 +871,9 @@ export class CityParts {
     const angle = runtime.cranePhase + armRotation;
     const centerX = cornerX + Math.cos(angle) * armLength * 0.34;
     const centerZ = cornerZ - Math.sin(angle) * armLength * 0.34;
-    this.compose(centerX, groundY + mastHeight + 0.1, centerZ, -angle, armLength, 1, 1);
+    // three.js 绕 Y 转 θ 后 x 轴指向 (cosθ, -sinθ)，与上面的中心偏移同向，必须传 +angle；
+    // 曾传 -angle，悬臂被镜像到另一侧，脱离立柱悬在空中。
+    this.compose(centerX, groundY + mastHeight + 0.1, centerZ, angle, armLength, 1, 1);
     this.craneArmMesh.setMatrixAt(runtime.craneArm, this.matrix);
   }
 
