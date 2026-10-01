@@ -86,6 +86,19 @@ pub fn issues_projection_count(conn: &rusqlite::Connection) -> rusqlite::Result<
     conn.query_row("SELECT COUNT(*) FROM issue_instances", [], |r| r.get(0))
 }
 
+/// 失败族查询（小时 / 日两种聚合共用，规则族白名单只在这里一处——
+/// OVERVIEW_TREND_RANGE_SPEC §3「单一规则族常量」）。规则名是编译期常量内联，
+/// 只有时间窗走绑定参数（?1 起点含、?2 终点不含）。
+const FAILURE_FAMILY_RULES: &str = "'SV611','SV612','SV613','retry_loop','tool_failure'";
+
+fn failure_family_sql() -> String {
+    format!(
+        "SELECT opened_at_ms FROM issue_instances
+         WHERE issue_type IN ({FAILURE_FAMILY_RULES})
+           AND opened_at_ms >= ?1 AND opened_at_ms < ?2"
+    )
+}
+
 /// Overview 趋势面板的失败小时聚合（OVERVIEW_TREND_PANEL spec v1.1 §2）：给定
 /// 统计日（`beijing_day_bounds_ms` 的系统统计时区日窗）内，失败族 issue 按小时
 /// （0–23 本地小时）计数。返回 `{"date", "hours": {"3": 2}}`；日期非法或查询
@@ -100,9 +113,7 @@ pub fn failure_hours_day(conn: &rusqlite::Connection, date: &str) -> Option<Valu
     let (start, end) = crate::authority_query::beijing_day_bounds_ms(date)?;
     // 规则族是编译期常量，直接内联；只有时间窗走绑定参数。
     let mut stmt = conn.prepare(
-        "SELECT opened_at_ms FROM issue_instances
-         WHERE issue_type IN ('SV611','SV612','SV613','retry_loop','tool_failure')
-           AND opened_at_ms >= ?1 AND opened_at_ms < ?2",
+        &failure_family_sql(),
     ).ok()?;
     let mut rows = stmt.query(rusqlite::params![start, end]).ok()?;
     let mut hours: BTreeMap<String, u64> = BTreeMap::new();
@@ -117,6 +128,46 @@ pub fn failure_hours_day(conn: &rusqlite::Connection, date: &str) -> Option<Valu
         *hours.entry(hour.to_string()).or_insert(0) += 1;
     }
     Some(json!({ "date": date, "hours": hours }))
+}
+
+/// 趋势图「本周 / 本月」档的失败日聚合（OVERVIEW_TREND_RANGE_SPEC §2.2）：
+/// `[from, to]`（含两端的统计日）内失败族 issue 按统计时区**墙钟日期**计数。
+/// 返回 `{"from","to","days": {"2026-09-15": 3}}`；无数据日不出键。
+///
+/// `None` = 读不到（日期非法 / `from > to` / 跨度 > 62 天 / 查询失败），与
+/// 「合法空窗 → 空 days（读到零失败）」严格区分——前端据此走「失败标记不可用」，
+/// 不画假零。规则族与计数语义和 `failure_hours_day` 完全一致（共用
+/// `failure_family_sql`）；日归属用墙钟日期而非 `(ms-start)/86400000`，DST 换日日
+/// 两者会差一天。
+pub fn failure_days_range(conn: &rusqlite::Connection, from: &str, to: &str) -> Option<Value> {
+    let (start, _) = crate::authority_query::beijing_day_bounds_ms(from)?;
+    let (_, end) = crate::authority_query::beijing_day_bounds_ms(to)?;
+    let from_date: jiff::civil::Date = from.parse().ok()?;
+    let to_date: jiff::civil::Date = to.parse().ok()?;
+    if from_date > to_date { return None; }
+    let span_days = (to_date - from_date).get_days();
+    if span_days > 62 { return None; }
+    let mut stmt = conn.prepare(&failure_family_sql()).ok()?;
+    let mut rows = stmt.query(rusqlite::params![start, end]).ok()?;
+    let mut days: BTreeMap<String, u64> = BTreeMap::new();
+    let timezone = crate::authority_query::statistics_timezone();
+    while let Some(row) = rows.next().ok()? {
+        let opened_at_ms: i64 = row.get(0).ok()?;
+        let day = Timestamp::from_millisecond(opened_at_ms).ok()?
+            .to_zoned(timezone.clone())
+            .date();
+        *days.entry(day.to_string()).or_insert(0) += 1;
+    }
+    Some(json!({ "from": from, "to": to, "days": days }))
+}
+
+/// 以 `to` 为终点、向前回溯 `back_days` 天的失败日聚合（快照用：回溯 30 天一定覆盖
+/// 「本月 1 日起」与「本周周一起」，调用方不必自己做日期运算、桌面 crate 也不必直接
+/// 依赖 jiff）。`to` 非法 → `None`。
+pub fn failure_days_trailing(conn: &rusqlite::Connection, to: &str, back_days: i64) -> Option<Value> {
+    let to_date: jiff::civil::Date = to.parse().ok()?;
+    let from = to_date.checked_sub(jiff::Span::new().days(back_days)).ok()?;
+    failure_days_range(conn, &from.to_string(), to)
 }
 
 pub fn remedy_for(issue_type: &str) -> RemedyCandidate {
@@ -1233,6 +1284,41 @@ mod tests {
         assert!(failure_hours_day(db.conn(), "2026-02-30").is_none(), "非法日期 → None，不是假零");
         let empty = failure_hours_day(db.conn(), "2026-01-01").expect("合法空日是空对象");
         assert_eq!(empty["hours"].as_object().unwrap().len(), 0, "空日 = 读到零失败，不是 None");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// failure_days_range（OVERVIEW_TREND_RANGE_SPEC §2.2）：日桶、窗口两端含、
+    /// 规则族与 failure_hours_day 一致、非法/倒置/超跨度 → None、合法空窗 → 空 days。
+    #[test]
+    fn failure_days_range_buckets_days_and_guards_window() {
+        let dir = std::env::temp_dir().join(format!("av-issues-fdays-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = AuthorityDb::open(&dir.join("agent-vitals.sqlite3"), 1).unwrap();
+        let (d30, _) = crate::authority_query::beijing_day_bounds_ms("2026-09-30").unwrap();
+        let (d01, _) = crate::authority_query::beijing_day_bounds_ms("2026-10-01").unwrap();
+        let issue = |id: &str, rule: &str, at_ms: i64| {
+            upsert_issue(db.conn(), &IssueInput {
+                machine_namespace: "machine", host: "codex", session_key: Some("s"),
+                issue_type: rule, instance_fingerprint: id, status: "open", severity: "warning",
+                evaluator_id: "t", evaluator_version: "1", evidence_fingerprint: "ev",
+                opened_at_ms: at_ms, metadata_json: "{}",
+            }).unwrap()
+        };
+        issue("a", "SV613", d30 + 3_600_000);
+        issue("b", "SV611", d30 + 20 * 3_600_000);
+        issue("c", "retry_loop", d01 + 60_000);
+        issue("d", "SV601", d01 + 60_000);          // 非失败族
+        issue("e", "SV612", d30 - 60_000);          // 09-29 尾部：窗口外（from=09-30）
+        let v = failure_days_range(db.conn(), "2026-09-30", "2026-10-01").expect("合法窗口");
+        let days = v["days"].as_object().unwrap();
+        assert_eq!(days.len(), 2);
+        assert_eq!(days.get("2026-09-30").and_then(Value::as_u64), Some(2));
+        assert_eq!(days.get("2026-10-01").and_then(Value::as_u64), Some(1));
+        assert!(failure_days_range(db.conn(), "2026-10-01", "2026-09-30").is_none(), "倒置 → None");
+        assert!(failure_days_range(db.conn(), "2026-02-30", "2026-10-01").is_none(), "非法日期 → None");
+        assert!(failure_days_range(db.conn(), "2026-07-01", "2026-10-01").is_none(), "跨度 > 62 天 → None");
+        let empty = failure_days_range(db.conn(), "2026-01-01", "2026-01-07").expect("合法空窗");
+        assert_eq!(empty["days"].as_object().unwrap().len(), 0, "空窗 = 读到零失败，不是 None");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

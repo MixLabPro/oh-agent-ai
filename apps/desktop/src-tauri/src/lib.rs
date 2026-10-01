@@ -4555,6 +4555,11 @@ fn overview_details_snapshot_at(data_home: std::path::PathBuf, month: &str, date
         let failure_hours = repo
             .open_db()
             .and_then(|db| agent_vitals_data::issues::failure_hours_day(db.conn(), date));
+        // 趋势图本周/本月档的失败日（OVERVIEW_TREND_RANGE_SPEC §2.2）：窗口
+        // [date-30d, date] 一定覆盖「本月 1 日起」与「本周周一起」；同一 revision 括号。
+        let failure_days = repo
+            .open_db()
+            .and_then(|db| agent_vitals_data::issues::failure_days_trailing(db.conn(), date, 30));
         let monthly = repo.monthly_summary_json_memoized(&MonthlySummaryQuery { month: month.to_string() }, memo);
         let daily = repo.daily_summary_json_memoized(&DailySummaryQuery { date: date.to_string() }, memo);
         let calendar = agent_vitals_runtime::query::summary::calendar_month_memoized(month, &repo, memo);
@@ -4567,6 +4572,7 @@ fn overview_details_snapshot_at(data_home: std::path::PathBuf, month: &str, date
             "daily": daily.as_ref(),
             "calendar": calendar.as_ref(),
             "failure_hours": failure_hours,
+            "failure_days": failure_days,
             "authority_revision": revision_after,
             "is_consistent": is_consistent,
             "errors": if is_consistent { Vec::<String>::new() } else { vec!["汇总期间数据发生变化或权威库不可用，当前结果可能跨 revision".to_string()] },
@@ -5234,6 +5240,10 @@ mod tests {
         // 空库 = 读到零失败（对象空 hours），不是 null——降级语义只在库不可用时出现。
         assert_eq!(result["failure_hours"]["date"], "2026-09-24");
         assert_eq!(result["failure_hours"]["hours"].as_object().unwrap().len(), 0);
+        // 失败日（趋势图周/月档）：窗口回溯 30 天到请求日；空库同样是读到零失败。
+        assert_eq!(result["failure_days"]["to"], "2026-09-24");
+        assert_eq!(result["failure_days"]["from"], "2026-08-25");
+        assert_eq!(result["failure_days"]["days"].as_object().unwrap().len(), 0);
         assert!(result["errors"].as_array().unwrap().is_empty());
         drop(_db);
         std::fs::remove_dir_all(root).ok();
