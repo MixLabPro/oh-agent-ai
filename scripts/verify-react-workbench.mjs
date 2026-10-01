@@ -49,6 +49,7 @@ const source = sourceFiles.map((file) => fs.readFileSync(file, "utf8")).join("\n
 const settingsPage = fs.readFileSync(path.join(reactSource, "features/settings/SettingsPage.tsx"), "utf8");
 const tauriBridge = fs.readFileSync(path.join(reactSource, "lib/tauri.ts"), "utf8");
 const trustPage = fs.readFileSync(path.join(reactSource, "features/trust/TrustPage.tsx"), "utf8");
+const i18nTextPins = ["上一次对比结果","未形成新的可判定结果","上一次可读报告","上一次路线质量结果","发现新鲜度暂不可用","导出脱敏 JSON","高级扫描设置","不会自动上传"];
 const trustI18n = fs.readFileSync(path.join(reactSource, "lib/i18n.ts"), "utf8");
 const findingsPage = fs.readFileSync(path.join(reactSource, "features/findings/FindingsPage.tsx"), "utf8");
 const decisionMatrix = fs.readFileSync(path.join(reactSource, "features/findings/DecisionMatrixSection.tsx"), "utf8");
@@ -76,15 +77,16 @@ if (!appFile.includes('value.startsWith("settings-")') || !appFile.includes('ret
 if (!source.includes("aria-labelledby=\"trust-monitor-title\"")) fail("React Trust 缺少 monitor 控件可访问标题");
 if (!source.includes("查看明细") || !source.includes("evidence-detail")) fail("React Trust 缺少可展开的证据明细");
 if (!source.includes("查看证据") || !source.includes("finding-evidence-detail") || !source.includes("evidence_level") || !source.includes("上传尝试不等于远端接收、留存或训练")) fail("React Findings 缺少可核验的脱敏证据明细");
-if (!decisionMatrix.includes("hasStaleReport") || !decisionMatrix.includes("上一次对比结果") || !decisionMatrix.includes("窗口：${report.month}") || !decisionMatrix.includes("section-heading-side")) fail("React 决策矩阵刷新未标注旧窗口、旧结果或响应式状态");
+for (const pin of i18nTextPins) if (!trustI18n.includes(pin)) fail(`i18n 表缺少被页面引用的文案：${pin}`);
+if (!decisionMatrix.includes("hasStaleReport") || !decisionMatrix.includes("dm.prevResult") || !decisionMatrix.includes("dm.incomplete") || !decisionMatrix.includes("section-heading-side")) fail("React 决策矩阵刷新未标注旧窗口、旧结果或响应式状态");
 if (!source.includes("listenAppEvents") || !source.includes('"app-event"') || !source.includes("agent-vitals-source-data-deleted") || !findingsPage.includes("eventRefreshTimer") || findingsPage.includes('listen("sync-status-updated"') || findingsPage.includes('listen("usage-fold-updated"') || findingsPage.includes('listen("trust-monitor-updated"') || findingsPage.includes('listen("source-data-deleted"')) fail("React 事件刷新未统一到 app-event 或缺少跨进程删除 fallback");
 if (!source.includes("safeUiError") || [findingsPage, trustPage, sessionsPage, sessionDetailPage].some((page) => /reason\.message/.test(page))) fail("React Findings/Trust/会话错误面未统一脱敏");
 if (!appFile.includes("safeUiError") || /reason\.message/.test(appFile)) fail("React 壳层错误面未统一脱敏");
 const unsafeErrorPattern = /(?:setError|setActionError|setExportError|setCustomError|setBudgetError|setBillingError|setDataError|setAboutError|setSourceError)\([^;\n]*reason\.message/u;
 if ([usagePage, settingsPage, skillsPage, testPage].some((page) => unsafeErrorPattern.test(page))) fail("React 用量/设置/Skill/测试错误面仍直接渲染底层异常");
-if (!skillsPage.includes("reportStale && scanning") || !skillsPage.includes("未形成新的可判定结果") || !skillsPage.includes("selectedHostNotScanned") || !skillsPage.includes("reportMatchesHost") || !skillsPage.includes("report && reportMatchesHost") || !source.includes("skill scan host_selection 不匹配") || !skillsPage.includes("保留上一次结果") || skillsPage.includes("setReport(null)")) fail("React Skill 扫描未保留旧报告、隔离宿主或把不可用误判为空结果");
-if (testPage.includes("setReport(null)") || !testPage.includes("上一次可读报告") || !testPage.includes("上一次路线质量结果") || !testPage.includes("reportWindow(report)") || !testPage.includes("loading && !report")) fail("React 测试页刷新未保留旧路线质量报告、原始窗口或缺少 stale 状态");
-if (!findingsPage.includes("requestGeneration") || !findingsPage.includes("Promise.allSettled") || !findingsPage.includes("发现新鲜度暂不可用")) fail("React Findings 刷新缺少请求代数或部分失败降级");
+if (!skillsPage.includes("reportStale && scanning") || !skillsPage.includes("sk.noNewResult") || !skillsPage.includes("selectedHostNotScanned") || !skillsPage.includes("reportMatchesHost") || !skillsPage.includes("report && reportMatchesHost") || !source.includes("skill scan host_selection 不匹配") || !skillsPage.includes("sk.scanCancelled") || skillsPage.includes("setReport(null)")) fail("React Skill 扫描未保留旧报告、隔离宿主或把不可用误判为空结果");
+if (testPage.includes("setReport(null)") || !testPage.includes("qt.refreshing") || !testPage.includes("qt.prevResultAria") || !testPage.includes("reportWindow(report)") || !testPage.includes("loading && !report")) fail("React 测试页刷新未保留旧路线质量报告、原始窗口或缺少 stale 状态");
+if (!findingsPage.includes("requestGeneration") || !findingsPage.includes("Promise.allSettled") || !findingsPage.includes("fd.freshUnavail")) fail("React Findings 刷新缺少请求代数或部分失败降级");
 if (!trustPage.includes("auditLoadingHost") || !trustPage.includes("auditRequest") || !trustPage.includes("tr.refreshingHost") || !trustPage.includes("tr.lastAudit") || !trustI18n.includes("上一次可读报告") || !trustI18n.includes("上一次审计结果") || !trustPage.includes('event.type !== "TrustMonitorInvalidated"') || !trustPage.includes("setReport(null)")) fail("React Trust 必须在手动审计失败时保留旧报告，并在监测失效后解除旧报告以显示新历史证据");
 if (!source.includes("today_tokens_sql") || !source.includes("overview-host-panel")) fail("React 总览未消费权威 token/宿主投影");
 if (!source.includes('if (page !== "overview") return;')) fail("React 总览查询未按可见 tab 生命周期隔离");
@@ -129,7 +131,7 @@ if (!source.includes("readStatisticsSettings") || !source.includes('"retention_c
 if (!source.includes("readMonthlyExportSummary") || !source.includes("当前月摘要 CSV") || !source.includes("settings-data-section")) fail("React 设置缺少安全月度摘要导出面");
 if (!source.includes("readAboutDiagnostics") || !source.includes("saveDiagnosticPackage") || !source.includes("checkForUpdates") || !source.includes("openTrustedReleasesPage") || !source.includes("settings-about-section")) fail("React 设置缺少关于与诊断安全桥接");
 if (!source.includes("readSkillScan") || !source.includes("cancelSkillScan") || !source.includes("saveSkillsSnapshot") || !source.includes("readSkillsDiff") || !source.includes("readSkillsScanSettings") || !source.includes("saveSkillsScanSettings") || !source.includes("exportSkillsRedacted") || !source.includes('"skills_snapshot_save"') || !source.includes('"skills_diff_latest"') || !source.includes('"skills_scan_settings"') || !source.includes('"skills_export_redacted"') || !source.includes("upload_performed !== false") || !source.includes("快照未脱敏") || !source.includes("基线路径") || !source.includes("dropped_rows") || !source.includes("status === \"partial\"") || !source.includes("skills-page-header") || !source.includes('"skills_doctor_report"')) fail("React Skill 页未使用用户触发的安全扫描、快照、设置或导出安全 DTO");
-if (!skillsPage.includes("导出脱敏 JSON") || !skillsPage.includes("高级扫描设置") || !skillsPage.includes("hostOptions") || !skillsPage.includes("不会自动上传")) fail("React Skill 页缺少脱敏导出、高级设置或动态宿主体验");
+if (!skillsPage.includes("sk.exportJson") || !skillsPage.includes("sk.advanced") || !skillsPage.includes("hostOptions") || !skillsPage.includes("sk.exported")) fail("React Skill 页缺少脱敏导出、高级设置或动态宿主体验");
 if (["skills_export_redacted", "skills_export_pick_path", "save_skills_scan_settings", "disable_skill", "delete_skill"].some((command) => appSource.includes(`\"${command}\"`))) fail("React Skill 页越过导出、配置或修改 skill mutation 边界");
 if (["save_public_pricing_catalog_policy", "update_public_pricing_catalog", "delete_retained_data", "clear_retention"].some((command) => appSource.includes(`\"${command}\"`))) fail("React 设置越过价格联网或数据删除 mutation 边界");
 if (!source.includes("sx.showPath") || !source.includes("settings-custom-form")) fail("React 设置缺少本机位置的人机可读路径展示");

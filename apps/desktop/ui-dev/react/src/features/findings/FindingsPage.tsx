@@ -3,19 +3,24 @@ import { createTrustSuppression, listenAppEvents, makeInvalidationGate, readDeci
 import { DecisionMatrixSection } from "./DecisionMatrixSection";
 import { mergeFindingsPage } from "./contract";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
+import { message, resolvedLanguage, useLanguage, type MessageKey } from "../../lib/i18n";
+
+const tx = (key: MessageKey, params: Record<string, string | number> = {}): string => message(key, resolvedLanguage(), params);
+const isEn = (): boolean => resolvedLanguage() === "en";
+const listSep = (): string => (isEn() ? ", " : "、");
 
 type SeverityFilter = "all" | "critical" | "warning" | "info";
 
 function timeLabel(value: number): string {
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "时间不可用";
-  return new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "short" }).format(date);
+  if (Number.isNaN(date.getTime())) return tx("fd.timeNA");
+  return new Intl.DateTimeFormat(isEn() ? "en-US" : "zh-CN", { dateStyle: "short", timeStyle: "short" }).format(date);
 }
 
 function severityLabel(value: string): string {
-  if (value === "critical") return "高风险";
-  if (value === "warning") return "需关注";
-  if (value === "info") return "信息";
+  if (value === "critical") return tx("fd.critical");
+  if (value === "warning") return tx("fd.warning");
+  if (value === "info") return tx("fd.info");
   return value;
 }
 
@@ -30,37 +35,37 @@ function isTodo(group: FindingGroup): boolean {
 }
 
 function remedyLabel(group: FindingGroup): string {
-  if (group.read_only || !group.manual_follow_up) return "只读证据，不提供设置操作";
-  if (group.action_kind === "billing") return "需要复核计费与套餐";
-  if (group.action_kind === "budget") return "需要复核预算";
-  if (group.action_kind === "source") return "需要复核数据源";
-  return "需要人工复核";
+  if (group.read_only || !group.manual_follow_up) return tx("fd.readOnlyNoAction");
+  if (group.action_kind === "billing") return tx("fd.reviewBilling");
+  if (group.action_kind === "budget") return tx("fd.reviewBudget");
+  if (group.action_kind === "source") return tx("fd.reviewSource");
+  return tx("fd.reviewManual");
 }
 
 function evidenceLevelLabel(value: FindingSample["evidence_level"]): string {
-  return value === "E0" ? "推断" : value === "E1" ? "本地证据" : value === "E2" ? "上传就绪" : value === "E3" ? "网络尝试" : value === "E4" ? "已传输" : value === "E5" ? "远端接收" : "未知";
+  return value === "E0" ? tx("tr.e0") : value === "E1" ? tx("tr.e1") : value === "E2" ? tx("tr.e2") : value === "E3" ? tx("tr.e3") : value === "E4" ? tx("tr.e4") : value === "E5" ? tx("tr.e5") : tx("fd.unknown");
 }
 
 function evidenceStageLabel(value: FindingSample["stage"]): string {
-  return value === "read_observed" ? "读取已观察" : value === "package_observed" ? "打包已观察" : value === "credential_observed" ? "凭证已观察" : value === "egress_attempted" ? "出网尝试" : value === "egress_transmitted" ? "出网传输" : value === "remote_accepted" ? "远端已接收" : "未知";
+  return value === "read_observed" ? tx("tr.sRead") : value === "package_observed" ? tx("tr.sPack") : value === "credential_observed" ? tx("tr.sCred") : value === "egress_attempted" ? tx("tr.sAttempt") : value === "egress_transmitted" ? tx("tr.sTransmit") : value === "remote_accepted" ? tx("tr.sAccepted") : tx("fd.unknown");
 }
 
 function evidenceOriginLabel(value: FindingSample["evidence_origin"]): string {
-  return value === "local_artifact" ? "本地落盘" : value === "client_state_claim" ? "客户端状态" : value === "runtime_process_metadata" ? "运行时进程" : value === "network_metadata" ? "网络元数据" : value === "verified_receipt" ? "已验证回执" : value === "unknown_legacy" ? "历史来源" : "未知";
+  return value === "local_artifact" ? tx("tr.oLocal") : value === "client_state_claim" ? tx("tr.oClient") : value === "runtime_process_metadata" ? tx("tr.oRuntime") : value === "network_metadata" ? tx("tr.oNet") : value === "verified_receipt" ? tx("tr.oReceipt") : value === "unknown_legacy" ? tx("tr.oLegacy") : tx("fd.unknown");
 }
 
 function destinationLabel(value: FindingSample["destination_class"]): string {
-  return value === "vendor_api" ? "厂商 API" : value === "object_storage" ? "对象存储" : value === "telemetry" ? "遥测" : value === "eval" ? "评测" : value === "model_api" ? "模型 API" : value === "unknown" ? "未知目的地" : "未声明";
+  return value === "vendor_api" ? tx("tr.dVendor") : value === "object_storage" ? tx("tr.dStorage") : value === "telemetry" ? tx("tr.dTelemetry") : value === "eval" ? tx("tr.dEval") : value === "model_api" ? tx("tr.dModel") : value === "unknown" ? tx("tr.dUnk") : tx("tr.undeclared");
 }
 
 function confidenceLabel(value: FindingSample["confidence"]): string {
-  return value === "high" ? "高" : value === "medium" ? "中" : value === "low" ? "低" : "未知";
+  return value === "high" ? tx("fd.confHigh") : value === "medium" ? tx("fd.confMed") : value === "low" ? tx("fd.confLow") : tx("fd.unknown");
 }
 
 function sampleTimeLabel(first: number | null, last: number | null): string {
-  if (first == null) return "观测时间不可用";
+  if (first == null) return tx("fd.obsTimeNA");
   const start = timeLabel(first);
-  return last != null && last !== first ? `${start} 至 ${timeLabel(last)}` : start;
+  return last != null && last !== first ? `${start} ${tx("fd.to")} ${timeLabel(last)}` : start;
 }
 
 function sampleBytes(value: number | null): string {
@@ -71,39 +76,39 @@ function sampleBytes(value: number | null): string {
 }
 
 function FindingEvidenceDetail({ sample, index }: { sample: FindingSample; index: number }) {
-  return <article className="finding-evidence-detail" aria-label={`脱敏证据 ${index + 1}`}>
-    <div className="finding-evidence-detail-header"><strong>脱敏证据 {index + 1}</strong><span className={`status-pill ${sample.has_evidence ? "status-pill-success" : "status-pill-warning"}`}><span aria-hidden="true" className="status-dot" />{sample.has_evidence ? "可用" : "字段不可用"}</span></div>
+  return <article className="finding-evidence-detail" aria-label={tx("fd.redactedEv", { n: index + 1 })}>
+    <div className="finding-evidence-detail-header"><strong>{tx("fd.redactedEv", { n: index + 1 })}</strong><span className={`status-pill ${sample.has_evidence ? "status-pill-success" : "status-pill-warning"}`}><span aria-hidden="true" className="status-dot" />{sample.has_evidence ? tx("tr.cAvail") : tx("fd.fieldNA")}</span></div>
     <div className="finding-evidence-grid">
-      <div><span>观测时间</span><strong>{sampleTimeLabel(sample.observed_first_at_ms, sample.observed_last_at_ms)}</strong></div>
-      <div><span>证据等级</span><strong>{sample.evidence_level ? `${sample.evidence_level} · ${evidenceLevelLabel(sample.evidence_level)}` : "未知"}</strong></div>
-      <div><span>观测阶段</span><strong>{evidenceStageLabel(sample.stage)}</strong></div>
-      <div><span>证据来源</span><strong>{evidenceOriginLabel(sample.evidence_origin)}</strong></div>
-      <div><span>作用范围</span><strong>{sample.scope_classes.length ? sample.scope_classes.join("、") : "未声明"}</strong></div>
-      <div><span>目的地类别</span><strong>{destinationLabel(sample.destination_class)}</strong></div>
-      <div><span>观测计数</span><strong>{sample.observation_count ?? "—"}</strong></div>
-      <div><span>文件 / 大小</span><strong>{sample.file_count ?? "—"} / {sampleBytes(sample.byte_count)}</strong></div>
-      <div><span>置信度</span><strong>{confidenceLabel(sample.confidence)}</strong></div>
-      <div><span>安全引用</span><code>{sample.reference ?? "不可用"}</code></div>
+      <div><span>{tx("fd.fObsTime")}</span><strong>{sampleTimeLabel(sample.observed_first_at_ms, sample.observed_last_at_ms)}</strong></div>
+      <div><span>{tx("fd.fLevel")}</span><strong>{sample.evidence_level ? `${sample.evidence_level} · ${evidenceLevelLabel(sample.evidence_level)}` : tx("fd.unknown")}</strong></div>
+      <div><span>{tx("fd.fStage")}</span><strong>{evidenceStageLabel(sample.stage)}</strong></div>
+      <div><span>{tx("fd.fOrigin")}</span><strong>{evidenceOriginLabel(sample.evidence_origin)}</strong></div>
+      <div><span>{tx("fd.fScope")}</span><strong>{sample.scope_classes.length ? sample.scope_classes.join(listSep()) : tx("tr.undeclared")}</strong></div>
+      <div><span>{tx("fd.fDest")}</span><strong>{destinationLabel(sample.destination_class)}</strong></div>
+      <div><span>{tx("fd.fCount")}</span><strong>{sample.observation_count ?? "—"}</strong></div>
+      <div><span>{tx("fd.fFileSize")}</span><strong>{sample.file_count ?? "—"} / {sampleBytes(sample.byte_count)}</strong></div>
+      <div><span>{tx("fd.fConf")}</span><strong>{confidenceLabel(sample.confidence)}</strong></div>
+      <div><span>{tx("fd.fRef")}</span><code>{sample.reference ?? tx("tr.unavailable")}</code></div>
     </div>
-    <p>以上仅为本机脱敏投影；上传尝试不等于远端接收、留存或训练。</p>
+    <p>{tx("fd.detailNote")}</p>
   </article>;
 }
 
 function freshnessLabel(freshness: FindingsFreshness): string {
-  if (freshness.status !== "ok") return "新鲜度不可用：本地数据状态读取失败";
-  if (freshness.state === "not_yet_synced") return "新鲜度 · 尚未完成过成功同步，不能判定为数据完整";
-  if (freshness.state === "unknown") return "新鲜度未知：本地同步状态没有可判定结果";
+  if (freshness.status !== "ok") return tx("fd.freshNA");
+  if (freshness.state === "not_yet_synced") return tx("fd.freshNever");
+  if (freshness.state === "unknown") return tx("fd.freshUnknown");
   const parts = [];
-  if (freshness.syncing) parts.push("同步中");
-  if (freshness.last_successful_sync_at) parts.push(`数字截至 ${freshness.last_successful_sync_at}`);
-  if (freshness.stale_hosts.length) parts.push(`超过 24h 未更新：${freshness.stale_hosts.join("、")}`);
-  return parts.length ? `新鲜度 · ${parts.join(" · ")}` : "新鲜度 · 数据完整";
+  if (freshness.syncing) parts.push(tx("fd.syncing"));
+  if (freshness.last_successful_sync_at) parts.push(tx("fd.asOf", { at: freshness.last_successful_sync_at }));
+  if (freshness.stale_hosts.length) parts.push(tx("fd.stale", { hosts: freshness.stale_hosts.join(listSep()) }));
+  return parts.length ? tx("fd.freshParts", { parts: parts.join(" · ") }) : tx("fd.freshOk");
 }
 
 function StatusSummary({ group }: { group: FindingGroup }) {
   const status = group.status_rollup;
-  return <div className="finding-status-summary" aria-label="处理状态汇总">
-    <span>待处理 {status.open}</span><span>稍后 {status.later}</span><span>已确认 {status.acknowledged}</span>
+  return <div className="finding-status-summary" aria-label={tx("fd.statusAria")}>
+    <span>{tx("fd.open")} {status.open}</span><span>{tx("fd.later")} {status.later}</span><span>{tx("fd.acked")} {status.acknowledged}</span>
   </div>;
 }
 
@@ -114,14 +119,14 @@ function FindingRow({ group, onNavigateToAction }: { group: FindingGroup; onNavi
   const canExpand = group.sample_evidence.length > 0;
   const canSuppressNotifications = /^SV70[1-9]$|^SV710$/.test(group.rule);
   const suppressNotifications = async () => {
-    if (!window.confirm(`忽略 ${group.rule} 的后续系统通知？\n\n这是按规则全局忽略，不是仅忽略当前证据。历史 Finding 与证据不会删除；可在 Trust 页面随时恢复通知。`)) return;
+    if (!window.confirm(tx("fd.suppressConfirm", { rule: group.rule }))) return;
     setSuppressionBusy(true);
     setSuppressionMessage(null);
     try {
       await createTrustSuppression(group.rule);
-      setSuppressionMessage("后续通知已忽略；历史证据保留，可在 Trust 页面恢复。");
+      setSuppressionMessage(tx("fd.suppressed"));
     } catch (reason: unknown) {
-      setSuppressionMessage(safeUiError(reason, "通知抑制未保存"));
+      setSuppressionMessage(safeUiError(reason, tx("fd.suppressFailed")));
     } finally {
       setSuppressionBusy(false);
     }
@@ -130,27 +135,28 @@ function FindingRow({ group, onNavigateToAction }: { group: FindingGroup; onNavi
     <div className="finding-row-main">
       <div className="finding-row-title"><strong>{group.rule}</strong><span className={severityClass(group.severity)}>{severityLabel(group.severity)}</span></div>
       <p className="finding-row-subtitle">{group.host} · {group.evidence_class}</p>
-      <p className="finding-row-copy">{group.count} 次命中 · {group.sessions_count} 个会话 · {timeLabel(group.first_seen_at_ms)} 至 {timeLabel(group.last_seen_at_ms)}</p>
-      <p className="finding-row-copy">{remedyLabel(group)} · {group.sample_evidence.length ? `已有 ${group.sample_evidence.length} 条脱敏证据摘要` : "证据引用不可用"}</p>
-      {group.manual_follow_up && !group.read_only && onNavigateToAction && <button className="button button-secondary button-small finding-evidence-toggle" type="button" onClick={() => onNavigateToAction(group.action_kind)}>打开相关设置</button>}
-      {canExpand && <button className="button button-secondary button-small finding-evidence-toggle" type="button" aria-expanded={expanded} aria-controls={`finding-evidence-${group.group_id.replace(/[^a-z0-9-]/gi, "-")}`} onClick={() => setExpanded((value) => !value)}>{expanded ? "收起证据" : "查看证据"}</button>}
-      {canSuppressNotifications && <button className="button button-secondary button-small finding-evidence-toggle" type="button" onClick={() => void suppressNotifications()} disabled={suppressionBusy}>{suppressionBusy ? "保存抑制…" : "忽略此规则的后续通知"}</button>}
+      <p className="finding-row-copy">{tx("fd.hitsLine", { n: group.count, sessions: group.sessions_count, from: timeLabel(group.first_seen_at_ms), to: timeLabel(group.last_seen_at_ms) })}</p>
+      <p className="finding-row-copy">{remedyLabel(group)} · {group.sample_evidence.length ? tx("fd.haveSummaries", { n: group.sample_evidence.length }) : tx("fd.refNA")}</p>
+      {group.manual_follow_up && !group.read_only && onNavigateToAction && <button className="button button-secondary button-small finding-evidence-toggle" type="button" onClick={() => onNavigateToAction(group.action_kind)}>{tx("fd.openSettings")}</button>}
+      {canExpand && <button className="button button-secondary button-small finding-evidence-toggle" type="button" aria-expanded={expanded} aria-controls={`finding-evidence-${group.group_id.replace(/[^a-z0-9-]/gi, "-")}`} onClick={() => setExpanded((value) => !value)}>{expanded ? tx("fd.hideEvidence") : tx("fd.showEvidence")}</button>}
+      {canSuppressNotifications && <button className="button button-secondary button-small finding-evidence-toggle" type="button" onClick={() => void suppressNotifications()} disabled={suppressionBusy}>{suppressionBusy ? tx("fd.savingSuppress") : tx("fd.ignoreRule")}</button>}
       {suppressionMessage && <p className="finding-suppression-feedback" role="status">{suppressionMessage}</p>}
       {expanded && <div className="finding-evidence-details" id={`finding-evidence-${group.group_id.replace(/[^a-z0-9-]/gi, "-")}`}>{group.sample_evidence.map((sample, index) => <FindingEvidenceDetail key={sample.reference ?? index} sample={sample} index={index} />)}</div>}
     </div>
     <div className="finding-row-side"><StatusSummary group={group} />
-      {group.manual_follow_up && !group.read_only ? <span className="status-pill status-pill-warning"><span aria-hidden="true" className="status-dot" />需要在设置中处理</span> : <span className="status-pill"><span aria-hidden="true" className="status-dot" />只读证据</span>}
+      {group.manual_follow_up && !group.read_only ? <span className="status-pill status-pill-warning"><span aria-hidden="true" className="status-dot" />{tx("fd.needsSettings")}</span> : <span className="status-pill"><span aria-hidden="true" className="status-dot" />{tx("fd.readOnlyPill")}</span>}
     </div>
   </article>;
 }
 
 export function FindingsPage({ onNavigateToAction }: { onNavigateToAction?: (actionKind: string) => void }) {
+  useLanguage();
   const [report, setReport] = useState<FindingsReport | null>(null);
   const [freshness, setFreshness] = useState<FindingsFreshness>({ status: "unavailable", state: "unknown", last_successful_sync_at: null, stale_hosts: [], syncing: false });
   const [matrix, setMatrix] = useState<DecisionMatrixReport | null>(null);
   const [matrixLoading, setMatrixLoading] = useState(true);
   const [matrixError, setMatrixError] = useState<string | null>(null);
-  const [loading, setLoading] = useState("正在读取本地发现…");
+  const [loading, setLoading] = useState(tx("fd.loading"));
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [severity, setSeverity] = useState<SeverityFilter>("all");
@@ -162,7 +168,7 @@ export function FindingsPage({ onNavigateToAction }: { onNavigateToAction?: (act
   const load = () => {
     const requestId = ++requestGeneration.current;
     const matrixRequestId = ++matrixGeneration.current;
-    setLoading("正在读取本地发现投影…");
+    setLoading(tx("fd.loadingProj"));
     setLoadingMore(false);
     setError(null);
     void Promise.allSettled([readFindings(), readFindingsFreshness()])
@@ -170,9 +176,9 @@ export function FindingsPage({ onNavigateToAction }: { onNavigateToAction?: (act
         if (requestId !== requestGeneration.current) return;
         const errors: string[] = [];
         if (reportResult.status === "fulfilled") setReport(reportResult.value);
-        else errors.push(safeUiError(reportResult.reason, "本地发现暂不可用"));
+        else errors.push(safeUiError(reportResult.reason, tx("fd.unavail")));
         if (freshnessResult.status === "fulfilled") setFreshness(freshnessResult.value);
-        else errors.push(safeUiError(freshnessResult.reason, "发现新鲜度暂不可用"));
+        else errors.push(safeUiError(freshnessResult.reason, tx("fd.freshUnavail")));
         setError(errors.length ? errors.join("；") : null);
         setLoading("");
       });
@@ -180,7 +186,7 @@ export function FindingsPage({ onNavigateToAction }: { onNavigateToAction?: (act
     setMatrixError(null);
     void readDecisionMatrix()
       .then((nextMatrix) => { if (matrixRequestId === matrixGeneration.current) { setMatrix(nextMatrix); setMatrixLoading(false); } })
-      .catch((reason: unknown) => { if (matrixRequestId === matrixGeneration.current) { setMatrixError(safeUiError(reason, "本地对比数据暂不可用")); setMatrixLoading(false); } });
+      .catch((reason: unknown) => { if (matrixRequestId === matrixGeneration.current) { setMatrixError(safeUiError(reason, tx("fd.matrixUnavail"))); setMatrixLoading(false); } });
   };
 
   const loadMore = () => {
@@ -197,7 +203,7 @@ export function FindingsPage({ onNavigateToAction }: { onNavigateToAction?: (act
       })
       .catch((reason: unknown) => {
         if (requestId !== requestGeneration.current) return;
-        setError(`${safeUiError(reason, "更多发现暂不可用")} · 当前保留已读取结果`);
+        setError(`${safeUiError(reason, tx("fd.moreUnavail"))} · ${tx("fd.keepRead")}`);
         setLoadingMore(false);
       });
   };
@@ -234,14 +240,14 @@ export function FindingsPage({ onNavigateToAction }: { onNavigateToAction?: (act
   const visibleGroups = useMemo(() => groups.filter((group) => (severity === "all" || group.severity === severity) && (rule === "all" || group.rule === rule)), [groups, rule, severity]);
 
   return <section className="findings-page" aria-labelledby="findings-page-title">
-    <h2 id="findings-page-title" className="visually-hidden">风险与待办</h2>
-    <ToolbarActions><button className="button button-secondary" type="button" onClick={load} disabled={Boolean(loading)}>重新读取</button></ToolbarActions>
+    <h2 id="findings-page-title" className="visually-hidden">{tx("fd.pageTitle")}</h2>
+    <ToolbarActions><button className="button button-secondary" type="button" onClick={load} disabled={Boolean(loading)}>{tx("fd.reload")}</button></ToolbarActions>
     <div className="freshness-bar" role="status">{freshnessLabel(freshness)}</div>
     {loading && <p className="inline-status" role="status">{loading}</p>}
-    {error && <div className="error-banner" role="alert">{error} · 当前保留上一次结果</div>}
-    {report && <div className="finding-stats" aria-label="发现汇总"><article><span className="eyebrow">发现组</span><strong>{report.totals.issues}</strong><small>{report.totals.sessions} 个受影响会话</small></article><article><span className="eyebrow">高风险</span><strong>{report.totals.critical}</strong><small>需优先查看</small></article><article><span className="eyebrow">待关注</span><strong>{report.totals.warning}</strong><small>可行动或需确认</small></article><article><span className="eyebrow">规则</span><strong>{report.rules.length}</strong><small>本地确定性规则</small></article></div>}
-    <section className="finding-section" aria-labelledby="todo-title"><div className="section-heading"><div><p className="eyebrow">行动面</p><h3 id="todo-title">待办</h3></div><span className="count-badge">{todoGroups.length}</span></div>{todoGroups.length ? <div className="finding-list">{todoGroups.map((group) => <FindingRow key={group.group_id} group={group} onNavigateToAction={onNavigateToAction} />)}</div> : <div className="finding-empty"><strong>当前没有可直接处理的待办</strong><p>行为命中不会伪装成任务；它们会保留在下方证据明细中。</p></div>}</section>
+    {error && <div className="error-banner" role="alert">{error} · {tx("fd.keepLast")}</div>}
+    {report && <div className="finding-stats" aria-label={tx("fd.summaryAria")}><article><span className="eyebrow">{tx("fd.groups")}</span><strong>{report.totals.issues}</strong><small>{tx("fd.affected", { n: report.totals.sessions })}</small></article><article><span className="eyebrow">{tx("fd.critical")}</span><strong>{report.totals.critical}</strong><small>{tx("fd.lookFirst")}</small></article><article><span className="eyebrow">{tx("fd.toWatch")}</span><strong>{report.totals.warning}</strong><small>{tx("fd.actionable")}</small></article><article><span className="eyebrow">{tx("fd.rules")}</span><strong>{report.rules.length}</strong><small>{tx("fd.detRules")}</small></article></div>}
+    <section className="finding-section" aria-labelledby="todo-title"><div className="section-heading"><div><p className="eyebrow">{tx("fd.actionSurface")}</p><h3 id="todo-title">{tx("fd.todos")}</h3></div><span className="count-badge">{todoGroups.length}</span></div>{todoGroups.length ? <div className="finding-list">{todoGroups.map((group) => <FindingRow key={group.group_id} group={group} onNavigateToAction={onNavigateToAction} />)}</div> : <div className="finding-empty"><strong>{tx("fd.noTodos")}</strong><p>{tx("fd.noTodosNote")}</p></div>}</section>
     <DecisionMatrixSection report={matrix} loading={matrixLoading} error={matrixError} />
-    <section className="finding-section" aria-labelledby="evidence-title"><div className="section-heading"><div><p className="eyebrow">查证面</p><h3 id="evidence-title">证据明细</h3></div><div className="finding-filters"><label>等级<select value={severity} onChange={(event) => setSeverity(event.target.value as SeverityFilter)}><option value="all">全部</option><option value="critical">高风险</option><option value="warning">需关注</option><option value="info">信息</option></select></label><label>规则<select value={rule} onChange={(event) => setRule(event.target.value)}><option value="all">全部规则</option>{(report?.rules ?? []).map((item) => <option key={item.rule} value={item.rule}>{item.rule}</option>)}</select></label></div></div>{visibleGroups.length ? <div className="finding-list">{visibleGroups.map((group) => <FindingRow key={group.group_id} group={group} onNavigateToAction={onNavigateToAction} />)}</div> : <div className="finding-empty"><strong>{report ? "没有符合当前筛选的证据" : "正在准备证据投影"}</strong><p>{report ? "可切换等级或规则筛选；空结果不代表本机安全。" : "前端只展示脱敏后的本地投影。"}</p></div>}{report?.next_cursor && <div className="finding-pagination"><button className="button button-secondary" type="button" onClick={loadMore} disabled={loadingMore || Boolean(loading)}>{loadingMore ? "正在读取更多…" : "加载更多证据"}</button><span>{loadingMore ? "保持当前已读取结果不变" : "分页读取，不扫描原始日志"}</span></div>}</section>
+    <section className="finding-section" aria-labelledby="evidence-title"><div className="section-heading"><div><p className="eyebrow">{tx("fd.verifySurface")}</p><h3 id="evidence-title">{tx("fd.evidenceDetails")}</h3></div><div className="finding-filters"><label>{tx("fd.level")}<select value={severity} onChange={(event) => setSeverity(event.target.value as SeverityFilter)}><option value="all">{tx("fd.all")}</option><option value="critical">{tx("fd.critical")}</option><option value="warning">{tx("fd.warning")}</option><option value="info">{tx("fd.info")}</option></select></label><label>{tx("fd.rules")}<select value={rule} onChange={(event) => setRule(event.target.value)}><option value="all">{tx("fd.allRules")}</option>{(report?.rules ?? []).map((item) => <option key={item.rule} value={item.rule}>{item.rule}</option>)}</select></label></div></div>{visibleGroups.length ? <div className="finding-list">{visibleGroups.map((group) => <FindingRow key={group.group_id} group={group} onNavigateToAction={onNavigateToAction} />)}</div> : <div className="finding-empty"><strong>{report ? tx("fd.noMatch") : tx("fd.preparing")}</strong><p>{report ? tx("fd.noMatchHelp") : tx("fd.redactedOnly")}</p></div>}{report?.next_cursor && <div className="finding-pagination"><button className="button button-secondary" type="button" onClick={loadMore} disabled={loadingMore || Boolean(loading)}>{loadingMore ? tx("fd.loadingMore") : tx("fd.loadMore")}</button><span>{loadingMore ? tx("fd.keepCurrent") : tx("fd.paged")}</span></div>}</section>
   </section>;
 }
