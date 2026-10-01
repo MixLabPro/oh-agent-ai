@@ -3561,7 +3561,8 @@ export type FxStatus = {
   rate_date: string;
   rate_age_days: number | null;
   rate_stale: boolean;
-  rate_source: "bundled_snapshot";
+  rate_source: "bundled_snapshot" | "synced_snapshot";
+  rate_fetched_at_ms: number | null;
   supported_currencies: string[];
   manual_rates: FxManualRate[];
 };
@@ -3589,7 +3590,8 @@ function parseFxStatus(value: unknown): FxStatus {
     rate_date: stringField(root.rate_date, "fx rate date"),
     rate_age_days: typeof root.rate_age_days === "number" ? root.rate_age_days : null,
     rate_stale: root.rate_stale !== false,
-    rate_source: "bundled_snapshot",
+    rate_source: root.rate_source === "synced_snapshot" ? "synced_snapshot" : "bundled_snapshot",
+    rate_fetched_at_ms: typeof root.rate_fetched_at_ms === "number" ? root.rate_fetched_at_ms : null,
     supported_currencies: currencies,
     manual_rates: manual,
   };

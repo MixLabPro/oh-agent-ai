@@ -367,6 +367,18 @@ app 端：每 6 小时拉一次叠加层（`validate_sync_overlay` 校验）→ 
 （`norm_model_in` ↔ `cost.py::_norm_model_in`，对照表 `tests/test_cost_model_match.py`）——
 旧的「第一个前缀命中」让 claude-opus-5-5 吃到 claude-opus-5 的卡且永不报缺价。
 
+### 汇率每日同步（2026-10-01）
+
+与价卡同一个作业（`pricing-sync.yml`）、同一个用户开关（「允许公共价格更新」）、同一类请求（固定
+公开 HTTPS 地址、纯静态文件、不带任何用户数据——不改变「app 不回传用户数据」的前提）。
+`scripts/fx_sync.py` 取两个独立公开 JSON 源（Frankfurter/欧央行、fawazahmed0），**两源一致（≤0.5%）才
+采用**，写 `assets/fx-sync.json`；相对上一份已发布快照偏差 >25% 或日期倒退则**整份**不发布。
+app 端 `fx_settings::save_synced` 用 `FxSnapshot::validate_update` 再校验一遍（日期不倒退/不在未来、
+共有币种 ±25%、不残缺）并原子落盘 `state/fx-synced-rates.json`；`effective_snapshot` 每次读取都按
+内置快照重新校验，坏文件或落后于内置的文件自动退回内置。汇率拉取失败不影响价卡，反之亦然；
+用户手动汇率仍优先于任何快照。`tests::the_published_fx_sync_file_is_accepted_by_the_app_validator`
+钉住「CI 能发布的文件 app 一定收得下」。
+
 ### v0.9.1 数据面维护（SQL 权威库操作面；Phase 4.3 后）
 
 - **布局**：`<data_home>/facts/<host>.jsonl`（append-only 权威源，宿主封闭

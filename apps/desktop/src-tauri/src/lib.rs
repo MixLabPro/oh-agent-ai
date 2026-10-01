@@ -2931,6 +2931,7 @@ fn fx_status() -> Value {
         .unwrap_or_else(|_| (agent_vitals_domain::fx::default_reporting_currency(&locale).to_string(), true));
     let policy = agent_vitals_runtime::fx_settings::policy(&data_home);
     let rate_date = policy.snapshot().rate_date.clone();
+    let (_, synced, fetched_at_ms) = agent_vitals_runtime::fx_settings::effective_snapshot(&data_home);
     let age = agent_vitals_domain::fx::FxPolicy::age_days(&rate_date, &overview::today_beijing());
     let manual: Vec<Value> = agent_vitals_runtime::fx_settings::manual_rates(&data_home).unwrap_or_default().into_iter()
         .map(|r| serde_json::json!({ "from": r.from, "to": r.to, "rate": r.rate, "as_of": r.as_of })).collect();
@@ -2944,7 +2945,8 @@ fn fx_status() -> Value {
         "rate_age_days": age,
         // 超过 14 天标过期：界面据此提示「汇率已过期」，数字仍显示但必须带 ≈ 与日期。
         "rate_stale": age.map_or(true, |days| days > 14),
-        "rate_source": "bundled_snapshot",
+        "rate_source": if synced { "synced_snapshot" } else { "bundled_snapshot" },
+        "rate_fetched_at_ms": fetched_at_ms,
         "supported_currencies": policy.snapshot().rates_per_usd.keys().collect::<Vec<_>>(),
         "manual_rates": manual,
     })
@@ -3090,6 +3092,11 @@ const PUBLIC_PRICING_CATALOG_URL: &str =
 /// 6 小时而非 24 小时：CI 每天发布一次叠加层，24 小时的检查间隔叠上发布时间
 /// 会让新模型的价卡最晚拖近两天才到。拉的是本仓库十几 KB 的静态文件、不带任何
 /// 用户数据，多检查几次没有隐私代价。
+/// 每日汇率快照（`.github/workflows/pricing-sync.yml` 同一个作业里由 `scripts/fx_sync.py` 生成）。
+/// 与价卡同一个开关、同一类请求：固定公开 HTTPS 地址、纯静态文件、不带任何用户数据；
+/// 校验不过只丢弃，当前生效的汇率（已同步的或内置的）原样保留。
+const PUBLIC_FX_SNAPSHOT_URL: &str =
+    "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/assets/fx-sync.json";
 const PRICING_CHECK_INTERVAL_MS: i64 = 6 * 60 * 60 * 1000;
 const PRICING_UPDATE_STATUS_FILE: &str = "pricing-catalog-update.json";
 const PRICING_UPDATE_POLICY_FILE: &str = "pricing-catalog-policy.json";
@@ -3296,6 +3303,8 @@ async fn update_public_pricing_catalog_internal(enforce_schedule: bool) -> Resul
         .map_err(|e| format!("open authority database failed: {e}"))?;
     agent_vitals_runtime::sql_sync::snapshot_with_sync_overlay(&db, &validated)
         .map_err(|e| format!("save sync overlay and pricing snapshot atomically failed: {e}"))?;
+    // 汇率与价卡同一次检查、同一个开关；汇率失败不影响价卡（各自独立，失败只记一行原因）。
+    let fx = fetch_public_fx_snapshot(&data_home, now).await;
     status.state = "ok".into();
     status.last_success_at_ms = Some(now);
     status.source_version = Some(validated.version.clone());
@@ -3309,7 +3318,38 @@ async fn update_public_pricing_catalog_internal(enforce_schedule: bool) -> Resul
         "source_version": validated.version,
         "model_count": validated.card_count,
         "last_success_at_ms": now,
+        "fx": fx,
     }))
+}
+
+/// 拉取并保存公共汇率快照。返回 `{status:"updated"|"failed", ...}`，从不抛错：汇率拿不到时
+/// 应用继续用已有汇率（报告里会按快照日期标「≈ 与日期」，过期则标过期）。
+async fn fetch_public_fx_snapshot(data_home: &Path, now: i64) -> Value {
+    let failed = |reason: String| serde_json::json!({ "status": "failed", "reason": reason });
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("agent-vitals-public-fx-check/1")
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => return failed(format!("create fx client failed: {error}")),
+    };
+    let response = match client.get(PUBLIC_FX_SNAPSHOT_URL).send().await {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => return failed(format!("fx snapshot returned HTTP {}", response.status())),
+        Err(error) => return failed(format!("fx snapshot request failed: {error}")),
+    };
+    if response.content_length().is_some_and(|length| length > 256 * 1024) {
+        return failed("fx snapshot exceeds the 256 KiB limit".into());
+    }
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => return failed(format!("read fx snapshot failed: {error}")),
+    };
+    match agent_vitals_runtime::fx_settings::save_synced(data_home, &bytes, &overview::today_beijing(), now) {
+        Ok(snapshot) => serde_json::json!({ "status": "updated", "rate_date": snapshot.rate_date }),
+        Err(reason) => failed(reason),
+    }
 }
 
 #[tauri::command]

@@ -86,6 +86,8 @@ ALLOWED_ASSETS_FILES = {
         # 汇率 V2 的公开参考汇率快照（编译进 Rust 二进制）：只供桌面 app / CLI 折算展示。
         # Python 技能不做币种折算，打包工作流不带它。
         "fx-reference-rates.json",
+        # 每日汇率叠加快照（pricing-sync.yml 里 scripts/fx_sync.py 生成），同上只供桌面 app 联网拉取。
+        "fx-sync.json",
     )
 }
 ALLOWED_ASSETS_DIRS = {Path("templates")}

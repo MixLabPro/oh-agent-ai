@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use agent_vitals_domain::fx::{default_reporting_currency, FxPolicy, UserRate};
+use agent_vitals_domain::fx::{default_reporting_currency, FxPolicy, FxSnapshot, UserRate};
 use serde_json::{json, Value};
 
 const CURRENCY_FILE: &str = "reporting-currency.json";
@@ -124,9 +124,48 @@ pub fn remove_manual_rate(data_home: &Path, from: &str, to: &str) -> Result<(), 
     write_manual(data_home, &rates)
 }
 
-/// 生效的汇率策略：内置快照 + 用户手动汇率（坏条目被丢弃而不是让整个策略失败）。
+const SYNCED_FILE: &str = "fx-synced-rates.json";
+
+/// 联网同步下来的更新快照（若有且仍然有效）。每次读取都按「相对内置快照」重新校验：
+/// 文件被改坏、或内置快照随版本更新后它已经落后，都自动退回内置，不会用一份不可信的汇率。
+pub fn synced_snapshot(data_home: &Path) -> Option<(FxSnapshot, Option<i64>)> {
+    let text = std::fs::read_to_string(state_path(data_home, SYNCED_FILE)).ok()?;
+    let root: Value = serde_json::from_str(&text).ok()?;
+    let snapshot = FxSnapshot::parse(&text).ok()?;
+    let baseline = FxPolicy::bundled().ok()?.snapshot().clone();
+    // 读取时不再卡「未来」（时钟可能被调回）：只要不早于内置且不离谱即可。
+    snapshot.validate_update(&baseline, "9999-12-31").ok()?;
+    Some((snapshot, root.get("fetched_at_ms").and_then(Value::as_i64)))
+}
+
+/// 保存联网拿到的快照（调用方已按固定公开地址取回字节）。`today` 为 `YYYY-MM-DD`、`fetched_at_ms` 为取回时刻。
+/// 校验失败返回 Err，**不动**当前正在用的汇率；通过后原子写入。基线 = 已有的更新快照，其次是内置快照，
+/// 所以一份比已同步的更旧的文件也会被拒。
+pub fn save_synced(data_home: &Path, bytes: &[u8], today: &str, fetched_at_ms: i64) -> Result<FxSnapshot, String> {
+    if bytes.len() > 256 * 1024 { return Err("fx update exceeds the 256 KiB limit".into()); }
+    let text = std::str::from_utf8(bytes).map_err(|_| "fx update is not UTF-8".to_string())?;
+    let candidate = FxSnapshot::parse(text)?;
+    let bundled = FxPolicy::bundled()?.snapshot().clone();
+    let baseline = synced_snapshot(data_home).map(|(s, _)| s).filter(|s| s.rate_date >= bundled.rate_date).unwrap_or(bundled);
+    candidate.validate_update(&baseline, today)?;
+    let mut root: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    root["fetched_at_ms"] = json!(fetched_at_ms);
+    write_atomic(&state_path(data_home, SYNCED_FILE), &root)?;
+    Ok(candidate)
+}
+
+/// 当前生效的参考快照：已同步的更新快照（更新或同日）优先，否则内置。返回 (快照, 是否来自同步, 取回时刻)。
+pub fn effective_snapshot(data_home: &Path) -> (FxSnapshot, bool, Option<i64>) {
+    let bundled = FxPolicy::bundled().expect("bundled FX snapshot is validated by tests").snapshot().clone();
+    match synced_snapshot(data_home) {
+        Some((synced, fetched)) if synced.rate_date >= bundled.rate_date => (synced, true, fetched),
+        _ => (bundled, false, None),
+    }
+}
+
+/// 生效的汇率策略：参考快照（同步的或内置的）+ 用户手动汇率（坏条目被丢弃而不是让整个策略失败）。
 pub fn policy(data_home: &Path) -> FxPolicy {
-    let mut policy = FxPolicy::bundled().expect("bundled FX snapshot is validated by tests");
+    let mut policy = FxPolicy::from_snapshot(effective_snapshot(data_home).0);
     for rate in manual_rates(data_home).unwrap_or_default() {
         if let Ok(next) = policy.clone().with_user_rate(rate) { policy = next; }
     }
@@ -188,6 +227,64 @@ mod tests {
         save_reporting_currency(&h, "EUR").unwrap();
         assert_eq!(save_reporting_currency(&h, " Default ").unwrap(), DEFAULT_SENTINEL);
         assert_eq!(reporting_currency(&h, "en_US").unwrap(), ("USD".into(), true));
+        let _ = std::fs::remove_dir_all(&h);
+    }
+
+    fn doc(date: &str, cny: &str) -> String {
+        let bundled = FxPolicy::bundled().unwrap();
+        let mut rates = serde_json::Map::new();
+        for (currency, rate) in &bundled.snapshot().rates_per_usd {
+            let text = if currency == "CNY" { cny.to_string() } else { rate.to_string() };
+            rates.insert(currency.clone(), json!({ "rate": text }));
+        }
+        json!({ "base": "USD", "rate_date": date, "captured_at": "x", "rates": rates }).to_string()
+    }
+
+    #[test]
+    fn a_synced_snapshot_replaces_the_bundled_one_only_when_valid_and_never_goes_backwards() {
+        let h = home("synced");
+        let bundled_date = FxPolicy::bundled().unwrap().snapshot().rate_date.clone();
+        assert!(!effective_snapshot(&h).1, "no synced file => bundled");
+        // 合法的更新（更新日期、CNY 6.9）→ 生效，且被策略使用
+        save_synced(&h, doc("2026-10-02", "6.9").as_bytes(), "2026-10-02", 1_000).unwrap();
+        let (snapshot, synced, fetched) = effective_snapshot(&h);
+        assert!(synced && snapshot.rate_date == "2026-10-02" && fetched == Some(1_000));
+        assert_eq!(policy(&h).convert(1.0, "USD", "CNY").unwrap().rate, 6.9);
+        // 比已同步更旧 → 拒绝，当前汇率不变
+        assert!(save_synced(&h, doc("2026-10-01", "6.7").as_bytes(), "2026-10-02", 2_000).is_err());
+        assert_eq!(policy(&h).convert(1.0, "USD", "CNY").unwrap().rate, 6.9);
+        // 离谱的值（+40%）→ 整份拒绝
+        assert!(save_synced(&h, doc("2026-10-02", "9.8").as_bytes(), "2026-10-02", 3_000).is_err());
+        // 未来日期 → 拒绝
+        assert!(save_synced(&h, doc("2099-01-01", "6.9").as_bytes(), "2026-10-02", 3_000).is_err());
+        // 垃圾 / 超大
+        assert!(save_synced(&h, b"not json", "2026-10-02", 1).is_err());
+        assert!(save_synced(&h, &vec![b' '; 300 * 1024], "2026-10-02", 1).is_err());
+        assert!(!bundled_date.is_empty());
+        let _ = std::fs::remove_dir_all(&h);
+    }
+
+    #[test]
+    fn the_published_fx_sync_file_is_accepted_by_the_app_validator() {
+        // CI 能发布的文件，app 一定收得下——否则用户每天拉到的都是被拒收的汇率，等于没同步。
+        let h = home("published");
+        let bytes = include_bytes!("../../../../assets/fx-sync.json");
+        let bundled = FxPolicy::bundled().unwrap().snapshot().clone();
+        let candidate = FxSnapshot::parse(std::str::from_utf8(bytes).unwrap()).unwrap();
+        assert!(candidate.rate_date >= bundled.rate_date, "published file must not be older than the bundled snapshot");
+        save_synced(&h, bytes, "9999-12-31", 1).expect("published fx-sync.json must pass save_synced");
+        let _ = std::fs::remove_dir_all(&h);
+    }
+
+    #[test]
+    fn a_corrupt_or_stale_synced_file_falls_back_to_the_bundled_snapshot() {
+        let h = home("synced-bad");
+        std::fs::create_dir_all(h.join("state")).unwrap();
+        std::fs::write(h.join("state").join(SYNCED_FILE), "{garbage").unwrap();
+        assert!(!effective_snapshot(&h).1);
+        // 早于内置快照（内置随版本更新后同步文件落后）→ 忽略
+        std::fs::write(h.join("state").join(SYNCED_FILE), doc("2020-01-01", "6.7")).unwrap();
+        assert!(!effective_snapshot(&h).1);
         let _ = std::fs::remove_dir_all(&h);
     }
 

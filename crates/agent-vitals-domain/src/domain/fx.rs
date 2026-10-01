@@ -100,6 +100,37 @@ impl FxSnapshot {
     }
 }
 
+impl FxSnapshot {
+    /// 校验一份**联网拿到**的更新快照能否取代 `baseline`（已有的更新快照或内置快照）。
+    /// 任何一条不满足就整份拒收——不逐条放行：一份被污染或出错的文件里，没出问题的条目也不可信。
+    /// - 日期不能早于 `baseline`（回退）、不能在 `today` 之后（未来）；
+    /// - 与 `baseline` 共有的币种，相对偏差不得超过 25%（一天内主要货币不会这样动，超过就是数据有问题）；
+    /// - 不能少掉 `baseline` 里的核心币种（USD 必有，其余缺失超过一半视为残缺文件）。
+    /// 时钟由调用方供给（`today` 为 `YYYY-MM-DD`）。
+    pub fn validate_update(&self, baseline: &FxSnapshot, today: &str) -> Result<(), String> {
+        let age_vs_baseline = FxPolicy::age_days(&baseline.rate_date, &self.rate_date).ok_or("update rate_date is not a valid date")?;
+        if age_vs_baseline < 0 {
+            return Err(format!("update rate date {} is older than the current {}", self.rate_date, baseline.rate_date));
+        }
+        let age_vs_today = FxPolicy::age_days(&self.rate_date, today).ok_or("today is not a valid date")?;
+        if age_vs_today < 0 {
+            return Err(format!("update rate date {} is in the future", self.rate_date));
+        }
+        let mut shared = 0usize;
+        for (currency, old) in &baseline.rates_per_usd {
+            let Some(new) = self.rates_per_usd.get(currency) else { continue };
+            shared += 1;
+            if (new - old).abs() / old > 0.25 {
+                return Err(format!("{currency} moved more than 25% against the current snapshot; refusing the whole update"));
+            }
+        }
+        if shared * 2 < baseline.rates_per_usd.len() {
+            return Err("update covers fewer than half of the current currencies".into());
+        }
+        Ok(())
+    }
+}
+
 impl FxPolicy {
     /// 内置快照（`assets/fx-reference-rates.json`，编译进二进制）。
     pub fn bundled() -> Result<Self, String> {
@@ -314,6 +345,27 @@ mod tests {
         assert_eq!(FxPolicy::age_days("2026-02-29", "2026-10-01"), None, "2026 不是闰年");
         assert!(FxPolicy::age_days("2024-02-29", "2024-03-01").is_some(), "2024 是闰年");
         assert_eq!(FxPolicy::age_days("2026-04-31", "2026-10-01"), None);
+    }
+
+    #[test]
+    fn a_downloaded_update_is_validated_as_a_whole_before_it_can_replace_a_snapshot() {
+        let baseline = FxPolicy::bundled().unwrap().snapshot().clone();
+        let today = "2026-10-02";
+        let with = |mutate: &dyn Fn(&mut FxSnapshot)| { let mut s = baseline.clone(); s.rate_date = "2026-10-01".into(); mutate(&mut s); s };
+        assert!(with(&|_| {}).validate_update(&baseline, today).is_ok(), "same rates, newer date");
+        // 日期：不能回退、不能是未来
+        assert!(with(&|s| s.rate_date = "2026-09-29".into()).validate_update(&baseline, today).is_err());
+        assert!(with(&|s| s.rate_date = "2026-10-03".into()).validate_update(&baseline, today).is_err());
+        assert!(with(&|s| s.rate_date = "2026-02-31".into()).validate_update(&baseline, today).is_err());
+        // 一个币种偏差 >25% → 整份拒收，而不是只丢这一条
+        let jumped = with(&|s| { let cny = s.rates_per_usd["CNY"]; s.rates_per_usd.insert("CNY".into(), cny * 1.3); });
+        assert!(jumped.validate_update(&baseline, today).unwrap_err().contains("CNY"));
+        // 24% 以内的正常波动放行
+        assert!(with(&|s| { let cny = s.rates_per_usd["CNY"]; s.rates_per_usd.insert("CNY".into(), cny * 1.02); }).validate_update(&baseline, today).is_ok());
+        // 残缺文件：只剩 USD
+        let mut stub = baseline.clone(); stub.rate_date = "2026-10-01".into();
+        stub.rates_per_usd.retain(|k, _| k == "USD");
+        assert!(stub.validate_update(&baseline, today).is_err());
     }
 
     #[test]
