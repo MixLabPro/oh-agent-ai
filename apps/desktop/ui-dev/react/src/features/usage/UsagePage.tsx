@@ -43,6 +43,18 @@ function costsLabel(costs: Record<string, number>): string {
   return parts.length ? parts.join(" · ") : message("usage.noCost");
 }
 
+/** 日历格子按 (币种, 口径) 分行：同币种不同口径（estimate / API 等价 / 实付）相加是编造，格子主值也不例外。 */
+function dayBasisGroups(day: UsageDay): Array<{ amount: string; basis: string }> {
+  const groups = new Map<string, { currency: string; basis: string; amount: number }>();
+  for (const line of day.cost_lines) {
+    const key = `${line.currency}|${line.basis}`;
+    const entry = groups.get(key) ?? { currency: line.currency, basis: line.basis, amount: 0 };
+    entry.amount += line.amount;
+    groups.set(key, entry);
+  }
+  return [...groups.values()].filter((entry) => entry.amount > 0).map((entry) => ({ amount: formatMajorMoney(entry.amount, entry.currency), basis: entry.basis }));
+}
+
 function costLinesLabel(lines: UsageDay["cost_lines"]): string {
   const labels: Record<string, string> = { dsh: "DSH", claude: "Claude", codex: "Codex" };
   return lines.map((line) => `${labels[line.source]} ${formatMajorMoney(line.amount, line.currency)} (${message(`usage.basis.${line.basis}` as MessageKey)})`).join(" · ");
@@ -262,9 +274,9 @@ export function UsagePage() {
             const day = dayFor(calendarForDisplayedMonth, date);
             const future = date > today;
             const selected = selectedDate === date;
-            const value = metric === "tokens" ? (day ? tokensLabel(day.total_tokens) : "—") : (day ? costsLabel(day.costs) : "—");
+            const value = metric === "tokens" ? (day ? tokensLabel(day.total_tokens) : "—") : (day ? (dayBasisGroups(day).map((group) => `${group.amount} (${message(`usage.basis.${group.basis}` as MessageKey)})`).join(" · ") || message("usage.noCost")) : "—");
             const hosts = day && metric === "tokens" ? message("usage.dayHosts", language, { hosts: hostTokenLines(day) }) : "";
-            return <button className={`usage-calendar-cell ${day && day.total_tokens > 0 ? "usage-calendar-has-data" : ""} ${selected ? "usage-calendar-selected" : ""} ${future ? "usage-calendar-future" : ""}`} type="button" role="gridcell" key={date} disabled={future} aria-selected={selected} aria-label={message("usage.dayCell", language, { date, value, hosts, action: message(future ? "usage.futureDay" : "usage.openHour", language) })} onClick={() => setSelectedDate(date)}><span>{index + 1}</span><strong>{value}</strong>{metric === "tokens" && day && day.total_tokens > 0 && <small className="usage-host-breakdown">{hostTokenLines(day)}</small>}{metric === "cost" && day && day.total_tokens > 0 && <small>{day.cost_lines.length ? costLinesLabel(day.cost_lines) : `${tokensLabel(day.total_tokens)} tokens`}</small>}</button>;
+            return <button className={`usage-calendar-cell ${day && day.total_tokens > 0 ? "usage-calendar-has-data" : ""} ${selected ? "usage-calendar-selected" : ""} ${future ? "usage-calendar-future" : ""}`} type="button" role="gridcell" key={date} disabled={future} aria-selected={selected} aria-label={message("usage.dayCell", language, { date, value, hosts, action: message(future ? "usage.futureDay" : "usage.openHour", language) })} onClick={() => setSelectedDate(date)}><span>{index + 1}</span>{metric === "cost" && day ? <strong className="usage-cost-lines">{dayBasisGroups(day).length ? dayBasisGroups(day).map((group) => <span key={group.basis + group.amount}>{group.amount}<small className="usage-basis-tag">{message(`usage.basisShort.${group.basis}` as MessageKey, language)}</small></span>) : message("usage.noCost", language)}</strong> : <strong>{value}</strong>}{metric === "tokens" && day && day.total_tokens > 0 && <small className="usage-host-breakdown">{hostTokenLines(day)}</small>}{metric === "cost" && day && day.total_tokens > 0 && <small>{day.cost_lines.length ? costLinesLabel(day.cost_lines) : `${tokensLabel(day.total_tokens)} tokens`}</small>}</button>;
           })}
         </div> : <div className="usage-empty">{message(calendarForDisplayedMonth ? "usage.emptyMeasured" : "usage.emptyUnavailable", language)}</div>}
         <p className="usage-note">{message(metric === "tokens" ? "usage.tokensNote" : "usage.costNote", language)}</p>

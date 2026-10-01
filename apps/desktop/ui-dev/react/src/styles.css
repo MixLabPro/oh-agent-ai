@@ -749,3 +749,9 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .warn-chip { color: #f4c95d; border-color: rgba(244,201,93,0.4); }
 .ok-chip { color: #7ab98a; border-color: rgba(122,185,138,0.4); }
 .decision-payback-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* 日历格子按口径分行：每行 金额 + 口径小标签，不同口径不合并成一个数 */
+.usage-cost-lines { display: flex; flex-direction: column; gap: 2px; font-size: 13px; line-height: 1.25; }
+.usage-cost-lines > span { display: flex; align-items: baseline; gap: 5px; flex-wrap: wrap; }
+.usage-basis-tag { color: var(--text-muted); font-weight: 500; font-size: 10px; }
+.settings-budget-basis-note { display: block; flex-basis: 100%; margin-top: 4px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }

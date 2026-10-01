@@ -178,7 +178,7 @@ const english = {
   "usage.emptyMeasured": "No measured tokens this month. Empty data does not prove source availability; check coverage below.",
   "usage.emptyUnavailable": "Calendar results for this month are unavailable. An earlier result was not substituted.",
   "usage.tokensNote": "Main value = tokens from calendar-covered hosts that day; the monthly source summary may include more hosts. Select a past date for hourly data.",
-  "usage.costNote": "Main value = daily costs by currency. Missing cost evidence is shown as unavailable, not zero.",
+  "usage.costNote": "Each day lists amounts by currency and billing basis; different bases are never added together. Missing cost evidence is shown as unavailable, not zero.",
   "usage.hourly": "Hourly detail",
   "usage.today": "Today",
   "usage.selectDay": "Select a date",
@@ -1382,6 +1382,15 @@ const english = {
   "qt.foot": "Current selection: {window} · {range} · The quality analysis does not cover thinking, effort, context window or network latency.",
   "qt.footRange": "report window: {range}",
   "qt.notRead": "not read yet",
+  "usage.basisShort.metered_actual": "paid",
+  "usage.basisShort.host_billed": "host",
+  "usage.basisShort.fixed_subscription": "sub.",
+  "usage.basisShort.metered_declared": "attrib.",
+  "usage.basisShort.metered_estimate": "est.",
+  "usage.basisShort.api_equivalent": "API-eq",
+  "usage.basisShort.other": "other",
+  "budget.basisNote": "Counts metered charges, metered estimates and the subscription fee spread by day. It can be higher than “Known spend this month” on Overview, which counts only recorded charges and declared subscriptions.",
+  "overview.dailyAllocNote": "The “Known cost today” card also includes a daily share of declared subscriptions — an allocation, not a charge made today — so it can be higher than this line.",
 } as const;
 
 type Translation = string | { one: string; other: string };
@@ -1467,7 +1476,7 @@ const chinese: Record<keyof typeof english, Translation> = {
   "usage.emptyMeasured": "该月没有已测 token。空数据不等于来源不可用，请结合下方覆盖状态判断。",
   "usage.emptyUnavailable": "该月份日历结果暂不可用；上一份结果未被冒充为当前月份。",
   "usage.tokensNote": "主行 = 日历已覆盖宿主的当日 token；月度来源摘要可能包含更多宿主。点击过去日期查看小时分布。",
-  "usage.costNote": "主行 = 当日成本分币并列；没有成本证据显示“成本不可用”，不等于 ¥0。",
+  "usage.costNote": "每天按币种与口径分行列出，不同口径不相加；没有成本证据显示“成本不可用”，不等于 ¥0。",
   "usage.hourly": "小时明细", "usage.today": "今天", "usage.selectDay": "选择一个日期",
   "usage.daySessions": "该日会话", "usage.loadingHours": "正在读取小时事实…",
   "usage.hourTokens": "{hour}:00 · {tokens} tokens", "usage.hourEmpty": "{hour}:00 · 无观测数据",
@@ -2539,6 +2548,15 @@ const chinese: Record<keyof typeof english, Translation> = {
   "qt.foot": "当前选择：{window} · {range} · 质量分析不覆盖 thinking、effort、上下文窗口或网络时延。",
   "qt.footRange": "报告窗口：{range}",
   "qt.notRead": "尚未读取",
+  "usage.basisShort.metered_actual": "实付",
+  "usage.basisShort.host_billed": "宿主",
+  "usage.basisShort.fixed_subscription": "订阅",
+  "usage.basisShort.metered_declared": "声明",
+  "usage.basisShort.metered_estimate": "估算",
+  "usage.basisShort.api_equivalent": "等价",
+  "usage.basisShort.other": "其他",
+  "budget.basisNote": "含按量实付、按量估算和按天摊派的订阅月费；因此可能高于总览的“本月已知支出”（后者只计已记录支出与已声明订阅）。",
+  "overview.dailyAllocNote": "“今日已知成本”还含已声明订阅的按日摊派（是摊派，不是今天发生的扣费），因此可能高于这一行。",
 };
 
 export type MessageKey = keyof typeof english;
