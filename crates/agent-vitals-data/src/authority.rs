@@ -266,6 +266,31 @@ pub fn billing_declaration_fact_selection(
     }
     BillingDeclarationFactSelection { where_sql, params }
 }
+/// **官方订阅的默认覆盖**：订阅声明的模型清单不应是要逐个维护的白名单——Anthropic / OpenAI
+/// 每发一个新模型，用户都得回来补一遍声明（真机：`claude-sonnet-5-5` 因不在清单里，175M token
+/// 成了「归属不明」）。所以官方订阅默认覆盖「该宿主下该服务商」的全部模型，模型范围不再限制。
+///
+/// 只在三个条件**同时**成立时才去掉模型范围，否则原样返回：
+/// 1. 关系是 `official_subscription`；
+/// 2. 范围里没有 `("provider", "unresolved")`——那类声明是用户对「服务商未知」的事实作答，
+///    靠模型名识别（MiniMax lite / GLM Lite），去掉模型限制会把宿主下所有未知服务商的事实
+///    都错判成这个订阅；
+/// 3. 同宿主同服务商没有官方 API 声明——两种声明并存时，同一个 provider 下的用量可能是订阅
+///    也可能是 API Key，应用无从区分，不替用户猜，保持显式模型清单。
+///
+/// 账户 / 路由 / 会话范围照旧生效（用户主动收窄的意图不能被默认规则抹掉）。预览、重算、持续套用
+/// 三处必须都经过这一个函数，否则「预览命中的事实集合 = 重算会归因的集合」就破了。
+pub fn attribution_scopes<'a>(
+    relationship_kind: &str, scopes: &[(&'a str, &'a str)], official_api_declared: bool,
+) -> Vec<(&'a str, &'a str)> {
+    let provider_unresolved = scopes.iter().any(|(kind, value)| *kind == "provider" && *value == "unresolved");
+    if relationship_kind == "official_subscription" && !provider_unresolved && !official_api_declared {
+        scopes.iter().copied().filter(|(kind, _)| *kind != "model").collect()
+    } else {
+        scopes.to_vec()
+    }
+}
+
 type BillingDeclarationRevisionSnapshot = (
     i64, String, String, String, Option<String>, Option<i64>, Option<String>, String,
     Option<String>, Option<String>, Option<String>,
@@ -3635,13 +3660,13 @@ impl AuthorityDb {
     pub fn billing_declaration_impact_preview(
         &self, revision_id: &str, window: Option<(i64, i64)>,
     ) -> Result<BillingDeclarationImpactPreview, AuthorityError> {
-        let revision: Option<(String, String, String, String, Option<String>)> = self.conn.query_row(
-            "SELECT host, provider_id, effective_start, change_kind, effective_end
+        let revision: Option<(String, String, String, String, Option<String>, String)> = self.conn.query_row(
+            "SELECT host, provider_id, effective_start, change_kind, effective_end, relationship_kind
              FROM billing_declaration_revisions WHERE revision_id = ?1",
             rusqlite::params![revision_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
         ).optional()?;
-        let Some((host, provider_id, effective_start, change_kind, effective_end)) = revision else {
+        let Some((host, provider_id, effective_start, change_kind, effective_end, relationship_kind)) = revision else {
             return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
                 "unknown billing declaration revision".to_string(),
             )));
@@ -3653,8 +3678,8 @@ impl AuthorityDb {
         let scope_refs = scopes.iter()
             .map(|(_, kind, value)| (kind.as_str(), value.as_str()))
             .collect::<Vec<_>>();
-        self.billing_declaration_impact_preview_for(
-            &host, &provider_id, &effective_start, effective_end.as_deref(), &scope_refs, window,
+        self.billing_declaration_impact_preview_for_kind(
+            &host, &provider_id, &relationship_kind, &effective_start, effective_end.as_deref(), &scope_refs, window,
         )
     }
 
@@ -3700,6 +3725,30 @@ impl AuthorityDb {
         })
     }
 
+    /// 同宿主同服务商是否存在**生效中**的官方 API 声明（最新修订是 `saved`）。
+    /// 与官方订阅并存时默认覆盖规则让位给显式模型清单，见 [`attribution_scopes`]。
+    pub fn billing_official_api_declared(&self, host: &str, provider_id: &str) -> Result<bool, AuthorityError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (
+                 SELECT 1 FROM billing_declarations bd
+                 JOIN billing_declaration_revisions br ON br.declaration_id = bd.declaration_id
+                 WHERE bd.deleted_at_ms IS NULL AND br.host = ?1 AND br.provider_id = ?2
+                   AND br.relationship_kind = 'official_api' AND br.change_kind = 'saved'
+                   AND br.revision_number = (SELECT MAX(x.revision_number)
+                       FROM billing_declaration_revisions x WHERE x.declaration_id = bd.declaration_id))",
+            rusqlite::params![host, provider_id], |row| row.get::<_, i64>(0),
+        )? != 0)
+    }
+
+    /// 带关系种类的前瞻预览：先经 [`attribution_scopes`] 再算，与重算 / 持续套用同口径。
+    pub fn billing_declaration_impact_preview_for_kind(
+        &self, host: &str, provider_id: &str, relationship_kind: &str, effective_start: &str,
+        effective_end: Option<&str>, scopes: &[(&str, &str)], window: Option<(i64, i64)>,
+    ) -> Result<BillingDeclarationImpactPreview, AuthorityError> {
+        let effective = attribution_scopes(relationship_kind, scopes, self.billing_official_api_declared(host, provider_id)?);
+        self.billing_declaration_impact_preview_for(host, provider_id, effective_start, effective_end, &effective, window)
+    }
+
     fn billing_declaration_matching_fact_ids(&self, revision_id: &str) -> Result<Vec<String>, AuthorityError> {
         self.billing_declaration_matching_fact_ids_since(revision_id, None)
     }
@@ -3710,16 +3759,18 @@ impl AuthorityDb {
     fn billing_declaration_matching_fact_ids_since(
         &self, revision_id: &str, since_created_at_ms: Option<i64>,
     ) -> Result<Vec<String>, AuthorityError> {
-        let revision: (String, String, String, Option<String>) = self.conn.query_row(
-            "SELECT host, provider_id, effective_start, effective_end FROM billing_declaration_revisions WHERE revision_id = ?1 AND change_kind = 'saved'",
-            rusqlite::params![revision_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        let revision: (String, String, String, Option<String>, String) = self.conn.query_row(
+            "SELECT host, provider_id, effective_start, effective_end, relationship_kind FROM billing_declaration_revisions WHERE revision_id = ?1 AND change_kind = 'saved'",
+            rusqlite::params![revision_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )?;
         let scopes = self.billing_declaration_scopes(revision_id)?;
         let scope_refs = scopes.iter()
             .map(|(_, kind, value)| (kind.as_str(), value.as_str()))
             .collect::<Vec<_>>();
+        // 与预览同一个有效范围（默认覆盖规则），否则「预览命中 = 重算归因」的不变量就破了。
+        let effective = attribution_scopes(&revision.4, &scope_refs, self.billing_official_api_declared(&revision.0, &revision.1)?);
         let mut selection = billing_declaration_fact_selection(
-            &revision.0, &revision.1, &revision.2, revision.3.as_deref(), &scope_refs, None,
+            &revision.0, &revision.1, &revision.2, revision.3.as_deref(), &effective, None,
             ConflictEvidence::Exclude,
         );
         if let Some(since) = since_created_at_ms {
@@ -3795,10 +3846,14 @@ impl AuthorityDb {
                 "SELECT MAX(created_at_ms) FROM billing_fact_attributions WHERE revision_id = ?1",
                 rusqlite::params![revision_id], |row| row.get(0),
             )?;
-            let since = last_applied.or(completed_at_ms).unwrap_or(0);
+            // 默认覆盖规则改变了这类修订的选择谓词（不再受模型清单限制），水位之前入库、
+            // 却从未被匹配过的新模型事实要补算一次：对这类修订回到 0，之后用标记保证只做一次。
+            let catch_up = self.billing_default_scope_needs_catchup(&revision_id)?;
+            let since = if catch_up { 0 } else { last_applied.or(completed_at_ms).unwrap_or(0) };
             let fact_ids = self.billing_declaration_matching_fact_ids_since(&revision_id, Some(since))?;
             report.revisions += 1;
             if fact_ids.is_empty() {
+                if catch_up { self.billing_mark_default_scope_catchup(&revision_id)?; }
                 continue;
             }
             let kind = self.billing_attribution_kind_of(&revision_id)?;
@@ -3822,8 +3877,34 @@ impl AuthorityDb {
                     return Err(error.into());
                 }
             }
+            if catch_up { self.billing_mark_default_scope_catchup(&revision_id)?; }
         }
         Ok(report)
+    }
+
+    /// 这条修订的有效范围是否因「默认覆盖规则」而与保存的范围不同、且还没补算过。
+    fn billing_default_scope_needs_catchup(&self, revision_id: &str) -> Result<bool, AuthorityError> {
+        let key = format!("billing_default_scope_catchup:{revision_id}");
+        let done: Option<String> = self.conn.query_row(
+            "SELECT value FROM schema_meta WHERE key = ?1", rusqlite::params![key], |row| row.get(0),
+        ).optional()?;
+        if done.is_some() { return Ok(false); }
+        let (host, provider_id, kind): (String, String, String) = self.conn.query_row(
+            "SELECT host, provider_id, relationship_kind FROM billing_declaration_revisions WHERE revision_id = ?1",
+            rusqlite::params![revision_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let scopes = self.billing_declaration_scopes(revision_id)?;
+        let scope_refs = scopes.iter().map(|(_, k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>();
+        let effective = attribution_scopes(&kind, &scope_refs, self.billing_official_api_declared(&host, &provider_id)?);
+        Ok(effective.len() != scope_refs.len())
+    }
+
+    fn billing_mark_default_scope_catchup(&self, revision_id: &str) -> Result<(), AuthorityError> {
+        self.conn.execute(
+            "INSERT INTO schema_meta(key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value = '1'",
+            rusqlite::params![format!("billing_default_scope_catchup:{revision_id}")],
+        )?;
+        Ok(())
     }
 
     pub fn billing_recalculation_enqueue(
@@ -5537,8 +5618,10 @@ mod tests {
         assert_eq!(preview.conflict_fact_count, 1);
         assert_eq!(preview.conflict_tokens, 7);
 
+        // 本测试验证「模型范围」在预览与重算里同口径，所以用会受模型清单限制的 third_party：
+        // official_subscription 现在默认覆盖整个服务商（见 `attribution_scopes`），不再受清单限制。
         authority.billing_declaration_revision_save(
-            "r1-rev", "r1-decl", None, "codex", "openai", "official_subscription",
+            "r1-rev", "r1-decl", None, "codex", "openai", "third_party",
             None, None, None, "1970-01", Some("1970-12"), None, None, &scopes, 3,
         ).unwrap();
         assert_eq!(
@@ -5655,21 +5738,24 @@ mod tests {
         };
         assert_eq!((count("subscription_covered"), count("user_declared")), (1, 1));
 
-        // 之后同步进来的新会话：同 scope 的新事实 + 一个不在 scope 的模型 + 一个别的 provider。
+        // 之后同步进来的新会话：同 scope 的新事实 + 同服务商的新模型 + 一个别的 provider。
+        // 官方订阅默认覆盖整个服务商：`claude-opus-6` 虽然不在声明的模型清单里，也属于订阅覆盖
+        // （曾断言「scope 外模型不动」——那正是每个新模型都要用户回来补声明的缺陷）。
         insert("f-new", Some("anthropic"), "claude-opus-5", day(3), 1_000);
         insert("f-other-model", Some("anthropic"), "claude-opus-6", day(3), 1_000);
         insert("g-new", None, "deepseek/deepseek-v4.1-flash", day(3), 1_000);
         insert("h-known", Some("deepseek-official"), "deepseek/deepseek-v4.1-flash", day(3), 1_000);
         let report = authority.billing_apply_active_declarations(2_000).unwrap();
-        assert_eq!(report, BillingApplyReport { revisions: 2, attributed: 2 }, "{report:?}");
+        assert_eq!(report, BillingApplyReport { revisions: 2, attributed: 3 }, "{report:?}");
         let attributed: Vec<(String, String, String)> = authority.conn().prepare(
             "SELECT fact_id, job_id, attribution_kind FROM billing_fact_attributions WHERE created_at_ms = 2000 ORDER BY fact_id",
         ).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
             .collect::<Result<_, _>>().unwrap();
         assert_eq!(attributed, vec![
             ("f-new".to_string(), "job-sub".to_string(), "subscription_covered".to_string()),
+            ("f-other-model".to_string(), "job-sub".to_string(), "subscription_covered".to_string()),
             ("g-new".to_string(), "job-relay".to_string(), "user_declared".to_string()),
-        ], "新事实挂在该修订原来的 job 上；scope 外模型与别的 provider 不动");
+        ], "新事实挂在该修订原来的 job 上；官方订阅覆盖同服务商的新模型；别的 provider 不动");
 
         // 幂等：再跑一轮零新增。
         assert_eq!(authority.billing_apply_active_declarations(3_000).unwrap(),
@@ -5704,6 +5790,132 @@ mod tests {
         let report = authority.billing_apply_active_declarations(8_000).unwrap();
         assert_eq!(report.attributed, 0, "期外事实不得被扫进订阅覆盖：{report:?}");
         let _ = std::fs::remove_file(&db);
+    }
+
+    fn default_scope_fixture(name: &str) -> (std::path::PathBuf, AuthorityDb) {
+        let db = tmp_db(name);
+        let authority = AuthorityDb::open(&db, 1).unwrap();
+        authority.conn().execute_batch(
+            "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
+             VALUES('dflt-run', 1, 'test', 'succeeded', 13);",
+        ).unwrap();
+        (db, authority)
+    }
+
+    fn put_fact(authority: &AuthorityDb, id: &str, host: &str, provider: Option<&str>, model: &str, created: i64) {
+        authority.conn().execute(
+            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                 observation_kind, provider_id, model_id, event_ts_ms, evidence_basis,
+                 uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+                 ingested_run_id, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, 'm', ?1, ?1, 'assistant-usage', ?3, ?4, 1757086400000, 'missing',
+                 10, 0, 0, 0, 'dflt-run', ?5, ?5)",
+            rusqlite::params![id, host, provider, model, created],
+        ).unwrap();
+    }
+
+    fn covered(authority: &AuthorityDb, fact: &str) -> bool {
+        authority.conn().query_row(
+            "SELECT COUNT(*) FROM billing_fact_attributions WHERE fact_id = ?1", [fact], |r| r.get::<_, i64>(0),
+        ).unwrap() > 0
+    }
+
+    /// 用户要求（2026-10-01）：Anthropic 发新模型不该要求我们发版或用户回来补声明。
+    /// 真机：Claude Pro 声明只列了 sonnet-5 / opus-5，`claude-sonnet-5-5` 的 175M token 成了「归属不明」，
+    /// 而它的事实早已带着 `provider_id = anthropic`（官方端点证据）。
+    #[test]
+    fn official_subscription_covers_new_models_of_the_same_provider_by_default() {
+        let (db, authority) = default_scope_fixture("billing-default-scope");
+        put_fact(&authority, "f-listed", "claude-code", Some("anthropic"), "claude-sonnet-5", 100);
+        authority.billing_declaration_revision_save(
+            "rev-pro", "decl-pro", None, "claude-code", "anthropic", "official_subscription",
+            Some("Claude Pro"), Some(2_000), Some("USD"), "2025-07-20", None, None, None,
+            &[("model", "claude-sonnet-5")], 200,
+        ).unwrap();
+        authority.billing_recalculation_enqueue("job-pro", "decl-pro", "rev-pro", 300).unwrap();
+        assert!(authority.billing_recalculation_run("job-pro", 400).unwrap());
+        // 重算之后才出现的新模型；以及一个「水位之前入库、从未被匹配过」的新模型事实（历史补算）。
+        put_fact(&authority, "f-old-new-model", "claude-code", Some("anthropic"), "claude-sonnet-5-5", 250);
+        put_fact(&authority, "f-later-new-model", "claude-code", Some("anthropic"), "claude-opus-5-5", 5_000);
+        // 别的服务商的事实、同服务商但别的宿主，都不能被覆盖
+        put_fact(&authority, "f-other-provider", "claude-code", Some("minimax"), "MiniMax-M3", 5_000);
+        put_fact(&authority, "f-other-host", "codex", Some("anthropic"), "claude-sonnet-5-5", 5_000);
+        let report = authority.billing_apply_active_declarations(6_000).unwrap();
+        assert_eq!(report.attributed, 2, "{report:?}");
+        assert!(covered(&authority, "f-old-new-model"), "历史补算：水位之前入库的新模型事实也要被覆盖");
+        assert!(covered(&authority, "f-later-new-model"));
+        assert!(!covered(&authority, "f-other-provider"));
+        assert!(!covered(&authority, "f-other-host"));
+        // 补算只做一次：再跑不新增，也不重复写。
+        assert_eq!(authority.billing_apply_active_declarations(7_000).unwrap().attributed, 0);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 预览命中的事实集合必须等于重算 / 持续套用会归因的集合（计费主链规格 R1）。
+    #[test]
+    fn preview_matches_the_default_scope_used_by_recalculation() {
+        let (db, authority) = default_scope_fixture("billing-default-scope-preview");
+        put_fact(&authority, "p1", "claude-code", Some("anthropic"), "claude-sonnet-5", 100);
+        put_fact(&authority, "p2", "claude-code", Some("anthropic"), "claude-sonnet-5-5", 100);
+        let scopes = [("model", "claude-sonnet-5")];
+        let raw = authority.billing_declaration_impact_preview_for("claude-code", "anthropic", "2025-07-20", None, &scopes, None).unwrap();
+        let kind = authority.billing_declaration_impact_preview_for_kind("claude-code", "anthropic", "official_subscription", "2025-07-20", None, &scopes, None).unwrap();
+        assert_eq!((raw.fact_count, kind.fact_count), (1, 2), "按模型清单只命中 1 条；官方订阅默认覆盖命中 2 条");
+        let relay = authority.billing_declaration_impact_preview_for_kind("claude-code", "anthropic", "third_party", "2025-07-20", None, &scopes, None).unwrap();
+        assert_eq!(relay.fact_count, 1, "非官方订阅（中转）仍按模型清单");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 例外 1：`provider=unresolved` 的订阅声明（MiniMax lite / GLM Lite 那类）靠模型名识别「服务商未知」的事实，
+    /// 去掉模型限制会把宿主下所有未知服务商的事实都错判成这个订阅。
+    #[test]
+    fn unresolved_provider_subscriptions_keep_their_model_list() {
+        let (db, authority) = default_scope_fixture("billing-default-scope-unresolved");
+        put_fact(&authority, "u-listed", "claude-code", None, "MiniMax-M3", 100);
+        authority.billing_declaration_revision_save(
+            "rev-mm", "decl-mm", None, "claude-code", "minimax", "official_subscription",
+            Some("MiniMax lite"), Some(4_400), Some("CNY"), "2025-07-20", None, None, None,
+            &[("provider", "unresolved"), ("model", "MiniMax-M3")], 200,
+        ).unwrap();
+        authority.billing_recalculation_enqueue("job-mm", "decl-mm", "rev-mm", 300).unwrap();
+        assert!(authority.billing_recalculation_run("job-mm", 400).unwrap());
+        put_fact(&authority, "u-unrelated", "claude-code", None, "deepseek/deepseek-v4.1-flash", 5_000);
+        authority.billing_apply_active_declarations(6_000).unwrap();
+        assert!(!covered(&authority, "u-unrelated"), "未知服务商的其他模型不能被 MiniMax 订阅吞掉");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 例外 2：同宿主同服务商还有官方 API 声明时，订阅 / API Key 无从区分，不替用户猜。
+    #[test]
+    fn a_coexisting_official_api_declaration_keeps_the_explicit_model_list() {
+        let (db, authority) = default_scope_fixture("billing-default-scope-api");
+        put_fact(&authority, "a-listed", "claude-code", Some("anthropic"), "claude-sonnet-5", 100);
+        authority.billing_declaration_revision_save(
+            "rev-api", "decl-api", None, "claude-code", "anthropic", "official_api",
+            None, None, None, "2025-07-20", None, None, None, &[], 150,
+        ).unwrap();
+        authority.billing_declaration_revision_save(
+            "rev-pro2", "decl-pro2", None, "claude-code", "anthropic", "official_subscription",
+            Some("Claude Pro"), Some(2_000), Some("USD"), "2025-07-20", None, None, None,
+            &[("model", "claude-sonnet-5")], 200,
+        ).unwrap();
+        authority.billing_recalculation_enqueue("job-pro2", "decl-pro2", "rev-pro2", 300).unwrap();
+        assert!(authority.billing_recalculation_run("job-pro2", 400).unwrap());
+        put_fact(&authority, "a-new", "claude-code", Some("anthropic"), "claude-sonnet-5-5", 5_000);
+        authority.billing_apply_active_declarations(6_000).unwrap();
+        assert!(!covered(&authority, "a-new"), "订阅与 API 并存：新模型保持待确认，不自动算订阅覆盖");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn attribution_scopes_only_drops_model_scopes_for_plain_official_subscriptions() {
+        let scopes = [("model", "m1"), ("route", "r1"), ("account", "a1")];
+        assert_eq!(attribution_scopes("official_subscription", &scopes, false), vec![("route", "r1"), ("account", "a1")], "账户 / 路由范围保留");
+        assert_eq!(attribution_scopes("official_subscription", &scopes, true), scopes.to_vec(), "有官方 API 声明时让位");
+        assert_eq!(attribution_scopes("third_party", &scopes, false), scopes.to_vec());
+        assert_eq!(attribution_scopes("official_api", &scopes, false), scopes.to_vec());
+        let unresolved = [("provider", "unresolved"), ("model", "m1")];
+        assert_eq!(attribution_scopes("official_subscription", &unresolved, false), unresolved.to_vec());
     }
 
     /// 2026-09-16 真机：anthropic 候选被有效声明 decl 占着，用户点了「重新打开」→ 候选回

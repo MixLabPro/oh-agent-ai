@@ -117,9 +117,15 @@ fn read_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, ToolE
                 (Some(start), Some(end)) => Some((start, end)),
                 _ => None,
             };
-            let preview = handle.db().billing_declaration_impact_preview_for(
-                host, provider, start, optional_string(args, "effective_end"), &scope_refs, window,
-            ).map_err(authority_error)?;
+            // 可选 `relationship_kind`：给了就按默认覆盖规则预览（与重算同口径）；不给保持原始范围。
+            let preview = match optional_string(args, "relationship_kind") {
+                Some(kind) => handle.db().billing_declaration_impact_preview_for_kind(
+                    host, provider, kind, start, optional_string(args, "effective_end"), &scope_refs, window,
+                ),
+                None => handle.db().billing_declaration_impact_preview_for(
+                    host, provider, start, optional_string(args, "effective_end"), &scope_refs, window,
+                ),
+            }.map_err(authority_error)?;
             json!({ "action": action, "preview": preview_json(preview) })
         }
         "recalc_status" => {

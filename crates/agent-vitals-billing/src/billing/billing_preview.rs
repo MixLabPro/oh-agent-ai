@@ -21,6 +21,10 @@ pub fn declaration_impact_preview(
     db: &AuthorityDb, host: &str, provider_id: &str, relationship_kind: &str,
     effective_start: &str, effective_end: Option<&str>, scopes: &[(&str, &str)],
 ) -> Value {
+    // 默认覆盖规则（官方订阅不受模型清单限制）先于一切计算，预览与重算同口径。
+    let official_api = db.billing_official_api_declared(host, provider_id).unwrap_or(false);
+    let effective_scopes = agent_vitals_data::authority::attribution_scopes(relationship_kind, scopes, official_api);
+    let scopes = effective_scopes.as_slice();
     let counts = match db.billing_declaration_impact_preview_for(
         host, provider_id, effective_start, effective_end, scopes, None,
     ) {
@@ -689,8 +693,11 @@ mod tests {
     }
 
     /// 规格 R5：预览「移出估算」的金额 == 重算后 MCP `cost_breakdown` 从按量桶里
-    /// 消失、进入 `subscription` 桶的那部分——同一谓词、同一计价路径。同时钉
-    /// 住：不在作用域内的模型留在 `kept`，且预览不写任何行。
+    /// 消失、进入 `subscription` 桶的那部分——同一谓词、同一计价路径；且预览不写任何行。
+    ///
+    /// 2026-10-01 语义变更：官方订阅默认覆盖「该宿主下该服务商」的全部模型，声明里列的模型清单
+    /// 不再限制它（否则每个新模型都要用户回来补声明）。所以声明只列 `gpt-5.6-sol` 时，
+    /// `gpt-5.6-luna` 也一起移出估算，`kept` 为空；曾断言「清单外的模型留在 kept」。
     #[test]
     fn preview_moved_amounts_equal_cost_breakdown_subscription_bucket_after_recalc() {
         let home = temp_home("r5");
@@ -713,17 +720,18 @@ mod tests {
         );
         assert_eq!(preview["status"], json!("ok"), "{preview}");
         assert_eq!(preview["changes_amounts"], json!(true));
-        assert_eq!(preview["moved"]["fact_count"], json!(2));
-        assert_eq!(preview["moved"]["tokens"], json!(1_650_000));
-        assert_eq!(preview["kept"]["tokens"], json!(770_000));
+        assert_eq!(preview["moved"]["fact_count"], json!(3), "官方订阅默认覆盖整个服务商：luna 也移出");
+        assert_eq!(preview["moved"]["tokens"], json!(2_420_000));
+        assert_eq!(preview["kept"]["tokens"], json!(0));
         assert_eq!(preview["pending"]["fact_count"], json!(0));
         let moved_amounts = preview["moved"]["amounts"].as_array().unwrap();
         assert_eq!(moved_amounts.len(), 1, "one currency, one basis: {moved_amounts:?}");
         assert_eq!(moved_amounts[0]["currency"], json!("USD"));
         let moved_usd = moved_amounts[0]["amount_minor"].as_i64().unwrap();
         assert!(moved_usd > 0);
-        let kept_usd = preview["kept"]["amounts"][0]["amount_minor"].as_i64().unwrap();
-        assert!(kept_usd > 0);
+        let kept_usd = preview["kept"]["amounts"].as_array().and_then(|rows| rows.first())
+            .and_then(|row| row["amount_minor"].as_i64()).unwrap_or(0);
+        assert_eq!(kept_usd, 0, "没有什么留在按量桶里");
         assert_eq!(db.conn().query_row(
             "SELECT COUNT(*) FROM billing_declaration_revisions", [], |row| row.get::<_, i64>(0),
         ).unwrap(), 0, "preview must not persist anything");
@@ -750,7 +758,7 @@ mod tests {
         let subscription_tokens: i64 = after_rows.iter()
             .filter(|row| row["key"]["billing_mode"] == json!("subscription"))
             .map(|row| row["tokens"]["total"].as_i64().unwrap()).sum();
-        assert_eq!(subscription_tokens, 1_650_000);
+        assert_eq!(subscription_tokens, 2_420_000);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -811,9 +819,10 @@ mod tests {
         db.billing_recalculation_enqueue("job-sub", "decl-sub", "rev-sub", 7).unwrap();
         assert!(db.billing_recalculation_run("job-sub", 8).unwrap());
         let after = confirmation_groups(&db, "2026-08");
+        // 官方订阅默认覆盖整个服务商（2026-10-01）：声明只列 sol，luna 也一并回答了，组全部关掉。
+        // 曾断言「只剩未回答的 luna」——那正是新模型总要用户回来补声明的缺陷。
         let remaining = after["groups"].as_array().unwrap();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0]["model_id"], json!("gpt-5.6-luna"));
+        assert_eq!(remaining.len(), 0, "{after}");
 
         assert!(db.billing_declaration_revision_revoke("rev-sub-revoke", "decl-sub", "rev-sub", 9).unwrap());
         assert_eq!(confirmation_groups(&db, "2026-08")["groups"].as_array().unwrap().len(), 2,
