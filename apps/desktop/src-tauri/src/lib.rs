@@ -575,6 +575,16 @@ fn daily_budget_text_localized(ov: &Overview, now_secs: i64, language: NativeUiL
                 NativeUiLanguage::English => format!("Today’s budget: ≈{} / {denom} ({}%)", fmt_money(spent as f64 / 100.0), bp / 100),
                 NativeUiLanguage::Chinese => format!("今日预算：≈{} / {denom}（{}%）", fmt_money(spent as f64 / 100.0), bp / 100),
             },
+            // 比例缺失有两种原因，不能都写成「无数据」：
+            //  ① 部分覆盖（`daily_level == "incomplete"`）：有已知金额（今日按量 + 订阅日摊），
+            //     只是还有别的币种订阅没法折成预算币种（不做汇率折算）→ 比例被整体压掉。
+            //     工作台总览能分币种列出，托盘预算行是单币口径，应显示已知部分当下限，
+            //     与月预算行「部分覆盖 5.22/500」同一处理，不能说成没数据。
+            //  ② 确实没有可计价金额。
+            None if spent > 0 && profile.get("daily_level").and_then(Value::as_str) == Some("incomplete") => match language {
+                NativeUiLanguage::English => format!("Today’s budget: ≥{} / {denom} (partial: other-currency amounts not included)", fmt_money(spent as f64 / 100.0)),
+                NativeUiLanguage::Chinese => format!("今日预算：≥{} / {denom}（部分覆盖：不含其他币种金额）", fmt_money(spent as f64 / 100.0)),
+            },
             None => match language {
                 NativeUiLanguage::English => format!("Today’s budget: — / {denom} (no priced spend today)"),
                 NativeUiLanguage::Chinese => format!("今日预算：— / {denom}（今日暂无可计价金额）"),
@@ -5883,6 +5893,28 @@ mod tests {
         only_sub.subscription_month_by_currency = Some([("USD".to_string(), 2_000_i64)].into_iter().collect());
         let (_, month) = money_rows_text_localized(&only_sub, NativeUiLanguage::English);
         assert_eq!(month, "Monthly cost: USD $20");
+    }
+
+    /// 日预算「部分覆盖」：有已知金额（订阅日摊）但另有币种没法折算 → 显示已知下限，
+    /// 不写成「无数据」（2026-10-01 真机：总览 CNY 5.23 + USD 1.29，托盘却是 — / ¥30）。
+    #[test]
+    fn daily_budget_shows_known_floor_when_partially_covered() {
+        let mut ov = ov_with(overview::BudgetAlert::default());
+        ov.budget_profiles = Some(serde_json::json!({ "profiles": [{
+            "profile_id": "estimate", "currency": "CNY", "daily_minor": 3000,
+            "daily_total_minor": 522, "daily_ratio_bp": null, "daily_level": "incomplete",
+        }]}));
+        let zh = daily_budget_text_localized(&ov, 0, NativeUiLanguage::Chinese).unwrap();
+        assert!(zh.starts_with("今日预算：≥") && zh.contains("5.2") && zh.contains("部分覆盖"), "{zh}");
+        let en = daily_budget_text_localized(&ov, 0, NativeUiLanguage::English).unwrap();
+        assert!(en.contains("≥") && en.contains("partial"), "{en}");
+        // 确实没有金额 → 仍然是「暂无可计价金额」，不冒充 ≥0
+        ov.budget_profiles = Some(serde_json::json!({ "profiles": [{
+            "profile_id": "estimate", "currency": "CNY", "daily_minor": 3000,
+            "daily_total_minor": 0, "daily_ratio_bp": null, "daily_level": "no_data",
+        }]}));
+        let none = daily_budget_text_localized(&ov, 0, NativeUiLanguage::Chinese).unwrap();
+        assert!(none.contains("暂无可计价金额"), "{none}");
     }
 
     /// fmt_usd 与 fmt_money 同修剪 spec：整美元不拖 `.0`，小数保留非零尾。
