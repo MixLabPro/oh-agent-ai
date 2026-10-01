@@ -15,6 +15,8 @@ import {
 } from "../../lib/tauri";
 import { sessionsDateHref } from "../../lib/nav";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
+import { UsageTrendChart } from "../../components/UsageTrendChart";
+import { buildHourBuckets } from "./trendBuckets";
 import { stable, isBackground } from "../../lib/stable";
 import { formatMajorMoney, message, resolvedLanguage, useLanguage, type MessageKey, formatTokenCount } from "../../lib/i18n";
 
@@ -100,10 +102,6 @@ function hostTokenLines(day: UsageDay | undefined): string {
   const values: Array<[string, number]> = [["DSH", day.dsh_tokens], ["CC", day.claude_tokens], ["CX", day.codex_tokens]];
   const lines = values.filter(([, tokens]) => tokens > 0).map(([label, tokens]) => `${label} ${tokensLabel(tokens)}`);
   return lines.length ? lines.join(" · ") : message("usage.noObservedHosts");
-}
-
-function hourlyTotal(hour: UsageHourly["hours"][number]): number {
-  return (hour.dsh_tokens ?? 0) + (hour.claude_tokens ?? 0) + (hour.codex_tokens ?? 0);
 }
 
 export function UsagePage() {
@@ -249,7 +247,6 @@ export function UsagePage() {
   const sourceForPanel = source;
   const layout = dateParts(displayedMonth);
   const selectedDay = dayFor(calendarForDisplayedMonth, selectedDate ?? "");
-  const maxHourTokens = Math.max(1, ...(hourly?.hours.map(hourlyTotal) ?? [1]));
 
   return <>
     <h2 id="usage-title" className="visually-hidden">{message("usage.title", language)}</h2>
@@ -294,7 +291,7 @@ export function UsagePage() {
           <div className="section-heading"><div><p className="eyebrow">{message("usage.hourly", language)}</p><h3 id="usage-hourly-title">{selectedDate ? `${selectedDate}${selectedDate === today ? ` · ${message("usage.today", language)}` : ""}` : message("usage.selectDay", language)}</h3></div><div className="heading-side">{selectedDay && <span className="count-badge">{tokensLabel(dayTokens(selectedDay))}</span>}{selectedDate && <a className="inline-drill" href={sessionsDateHref(selectedDate)}>{message("usage.daySessions", language)} <span aria-hidden="true">→</span></a>}</div></div>
           {hourlyLoading && <p className="usage-empty">{message("usage.loadingHours", language)}</p>}
           {hourlyError && <p className="usage-empty" role="alert">{hourlyError}</p>}
-          {!hourlyLoading && !hourlyError && hourly && <><div className="usage-hour-grid">{hourly.hours.map((hour) => { const total = hourlyTotal(hour); const hourText = String(hour.hour).padStart(2, "0"); const label = total ? message("usage.hourTokens", language, { hour: hourText, tokens: tokensLabel(total) }) : message("usage.hourEmpty", language, { hour: hourText }); return <div className={`usage-hour ${total === 0 ? "usage-hour-empty" : ""}`} key={hour.hour} role="img" aria-label={label} title={label}><div className="usage-hour-bar"><span style={{ height: `${Math.max(total ? 4 : 1, Math.round((total / maxHourTokens) * 56))}px` }} /></div><small aria-hidden="true">{hourText}</small></div>; })}</div><p className="usage-note">{message("usage.hourlyNote", language, { sources: Object.entries(hourly.hosts_available).map(([host, value]) => `${host}: ${sourceLabel(value)}`).join(" · ") })}</p></>}
+          {!hourlyLoading && !hourlyError && hourly && <><UsageTrendChart buckets={buildHourBuckets(hourly, undefined)} ariaLabel={message("usage.hourly", language)} showFailures={false} /><p className="usage-note">{message("usage.hourlyNote", language, { sources: Object.entries(hourly.hosts_available).map(([host, value]) => `${host}: ${sourceLabel(value)}`).join(" · ") })}</p></>}
         </section>
         <section className="usage-source-panel" aria-labelledby="usage-source-title"><div className="section-heading"><div><p className="eyebrow">{message("usage.sourceStatus", language)}</p><h3 id="usage-source-title">{message("usage.coverageFreshness", language)}</h3>{sourceForPanel && <p className="section-meta">{message("usage.window", language, { month: monthTitle(sourceForPanel.month) })}</p>}</div><span className="count-badge">{sourceForPanel ? `${sourceForPanel.coverage.measured_fields}/${sourceForPanel.coverage.total_fields}` : "—"}</span></div>{sourceForPanel ? <dl className="usage-source-list"><div><dt>{message("usage.recordedCharges", language)}</dt><dd>{Object.keys(sourceForPanel.actual_spend).length ? costsLabel(sourceForPanel.actual_spend) : message("usage.noData", language)}</dd></div><div><dt>{message("usage.status", language)}</dt><dd>{freshnessLabel(sourceForPanel.freshness)}</dd></div><div><dt>{message("usage.lastObservedLabel", language)}</dt><dd>{sourceForPanel.last_observed_at ?? message("usage.noTimeEvidence", language)}</dd></div><div><dt>{message("usage.unresolved", language)}</dt><dd>{sourceForPanel.has_unresolved ? message("usage.unresolvedYes", language) : message("usage.none", language)}</dd></div><div><dt>{message("usage.excludedHosts", language)}</dt><dd>{sourceForPanel.excluded_hosts.length ? sourceForPanel.excluded_hosts.join(", ") : message("usage.none", language)}</dd></div></dl> : <p className="usage-empty">{message("usage.sourceUnavailable", language)}</p>}<p className="usage-note">{message("usage.coverageNote", language)}</p></section>
       </section>

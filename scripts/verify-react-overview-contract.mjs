@@ -51,7 +51,12 @@ assert.match(trendChartSource, /trend-bar-unavailable/, "unavailable buckets are
 assert.doesNotMatch(readFileSync(path.join(ui, "react/src/styles.css"), "utf8").match(/\.trend-bar, \.trend-bar-empty \{[^}]*\}/)?.[0] ?? "", /max-width:\s*\d+px/, "no hard-coded px bar cap (it shrank the chart into the middle of the card)");
 assert.match(trendBucketsSource, /Date\.UTC/, "calendar math is UTC-calendar only, never local-time Date");
 assert.doesNotMatch(trendBucketsSource, /getDate\(\)|getDay\(\)|getMonth\(\)|new Date\(\)/, "no local-timezone Date accessors in bucket assembly");
-const overviewTrendCode = overviewPage.slice(overviewPage.indexOf("function TrendPanel"), overviewPage.indexOf("function OverviewFindingsStrip")) + trendChartSource + trendBucketsSource;
+const usagePageSource = readFileSync(path.join(ui, "react/src/features/usage/UsagePage.tsx"), "utf8");
+const stylesSource = readFileSync(path.join(ui, "react/src/styles.css"), "utf8");
+assert.match(usagePageSource, /<UsageTrendChart /, "usage page's hourly detail reuses the shared trend chart");
+assert.doesNotMatch(usagePageSource, /usage-hour-grid|usage-hour-bar/, "usage page must not keep a second hand-written hourly bar renderer");
+assert.doesNotMatch(stylesSource, /^\\.usage-hour(-grid|-bar)?\\b/m, "the duplicated usage-hour CSS is gone (single trend renderer)");
+const overviewTrendCode =overviewPage.slice(overviewPage.indexOf("function TrendPanel"), overviewPage.indexOf("function OverviewFindingsStrip")) + trendChartSource + trendBucketsSource;
 assert.doesNotMatch(overviewTrendCode, /formatMajorMoney|moneyDetail|cost/, "trend panel is token+failure only (r6: no amounts)");
 const i18nSource = readFileSync(path.join(ui, "react/src/lib/i18n.ts"), "utf8");
 for (const key of ["overview.trendEmpty", "overview.trendNote", "overview.trendHourlyUnavailable", "trend.rangeLabel", "trend.range.day", "trend.range.week", "trend.range.month", "trend.rangeTitle.day", "trend.rangeTitle.week", "trend.rangeTitle.month", "trend.failureLegend", "trend.failureUnavailable", "trend.noFailures", "trend.tokens", "trend.noUsage", "trend.future", "trend.unavailable", "trend.failuresInBucket", "trend.bucketAria", "trend.bucketAriaOpen", "trend.weekNote", "trend.monthNote"]) {
