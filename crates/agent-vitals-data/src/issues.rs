@@ -86,6 +86,35 @@ pub fn issues_projection_count(conn: &rusqlite::Connection) -> rusqlite::Result<
     conn.query_row("SELECT COUNT(*) FROM issue_instances", [], |r| r.get(0))
 }
 
+/// Overview 趋势面板的失败小时聚合（OVERVIEW_TREND_PANEL spec v1.1 §2）：给定
+/// 统计日（`beijing_day_bounds_ms` 的系统统计时区日窗）内，失败族 issue 按小时
+/// （0–23 本地小时）计数。返回 `{"date", "hours": {"3": 2}}`；日期非法或查询
+/// 失败 → `None`（读不到 ≠ 零失败，前端据此走「失败标记不可用」降级，不画假零）。
+///
+/// 规则族是 trajectory 失败族（SV611 同调用连打 / SV612 turn 死循环 /
+/// SV613 进度停滞）加 legacy 名 `retry_loop` / `tool_failure`——规则级白名单，
+/// 不是宿主特化查询。计数含任意 status：标记表达「这小时发生过反复失败」的
+/// 历史事实，用户对单条 issue 的 wontfix/resolved 处置不抹掉历史。小时桶与
+/// 用量小时分布（`read_hourly_distribution`）同一条统计时区日界。
+pub fn failure_hours_day(conn: &rusqlite::Connection, date: &str) -> Option<Value> {
+    let (start, end) = crate::authority_query::beijing_day_bounds_ms(date)?;
+    // 规则族是编译期常量，直接内联；只有时间窗走绑定参数。
+    let mut stmt = conn.prepare(
+        "SELECT opened_at_ms FROM issue_instances
+         WHERE issue_type IN ('SV611','SV612','SV613','retry_loop','tool_failure')
+           AND opened_at_ms >= ?1 AND opened_at_ms < ?2",
+    ).ok()?;
+    let mut rows = stmt.query(rusqlite::params![start, end]).ok()?;
+    let mut hours: BTreeMap<String, u64> = BTreeMap::new();
+    while let Some(row) = rows.next().ok()? {
+        let opened_at_ms: i64 = row.get(0).ok()?;
+        // 窗口已按日界过滤，小时 = 距日界的整小时偏移；漂入下一天的毫秒不可能出现。
+        let hour = (opened_at_ms - start) / 3_600_000;
+        *hours.entry(hour.to_string()).or_insert(0) += 1;
+    }
+    Some(json!({ "date": date, "hours": hours }))
+}
+
 pub fn remedy_for(issue_type: &str) -> RemedyCandidate {
     match issue_type {
         "retry_loop" => RemedyCandidate { remedy_id: "inspect-retry-policy", diagnostic_only: false },
@@ -1159,6 +1188,47 @@ mod tests {
         let groups = source_issue_groups(db.conn(), None, None).unwrap();
         let g = groups.iter().find(|g| g["rule"] == "QUOTA_WINDOW").expect("应归到独立规则 QUOTA_WINDOW");
         assert_eq!(g["object"], "5 小时窗口", "object 是人类标签，不是 raw code");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// failure_hours_day（OVERVIEW_TREND_PANEL spec v1.1 §3）：小时桶、日窗过滤、
+    /// 规则族过滤、非法日期 → None。日界锚点取统计时区日窗（beijing_day_bounds_ms），
+    /// 钉住「失败标记与用量小时分布同一小时列」。
+    #[test]
+    fn failure_hours_day_buckets_rules_and_windows() {
+        let dir = std::env::temp_dir().join(format!("av-issues-fhours-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = AuthorityDb::open(&dir.join("agent-vitals.sqlite3"), 1).unwrap();
+        let (day_start, day_end) = crate::authority_query::beijing_day_bounds_ms("2026-10-01").expect("10-01 日窗");
+        let issue = |conn: &rusqlite::Connection, id: &str, rule: &str, at_ms: i64| {
+            upsert_issue(conn, &IssueInput {
+                machine_namespace: "machine", host: "codex", session_key: Some("s"),
+                issue_type: rule, instance_fingerprint: id, status: "open", severity: "warning",
+                evaluator_id: "t", evaluator_version: "1", evidence_fingerprint: "ev",
+                opened_at_ms: at_ms, metadata_json: "{}",
+            })
+        };
+        // 02:30（SV613 × 2，其一转 wontfix——历史事实仍计）、09:59（legacy retry_loop，已 resolved）。
+        let issue_b = issue(db.conn(), "b", "SV613", day_start + 2 * 3_600_000 + 1_800_000).unwrap();
+        let issue_c = issue(db.conn(), "c", "retry_loop", day_start + 9 * 3_600_000 + 59 * 60_000).unwrap();
+        transition_issue(db.conn(), &issue_b, "wontfix", 5, "t", "test", "ev", "t", "1", "in").unwrap();
+        transition_issue(db.conn(), &issue_c, "resolved", 6, "t", "test", "ev", "t", "1", "in").unwrap();
+        issue(db.conn(), "a", "SV613", day_start + 2 * 3_600_000 + 1_799_000).unwrap();
+        // 日窗边界外：前一日 23:59 尾部与次日 00:01 都不进 10-01 面板。
+        issue(db.conn(), "d", "SV611", day_start - 60_000).unwrap();
+        issue(db.conn(), "d2", "SV611", day_end + 60_000).unwrap();
+        // 非失败族（行为 shell 规则、数据质量）不计数。
+        issue(db.conn(), "e", "SV601", day_start + 60_000).unwrap();
+        issue(db.conn(), "f", "USAGE_GROWTH", day_start + 60_000).unwrap();
+        let value = failure_hours_day(db.conn(), "2026-10-01").expect("合法日期应有聚合");
+        assert_eq!(value["date"], "2026-10-01");
+        let hours = value["hours"].as_object().expect("hours 是对象");
+        assert_eq!(hours.len(), 2, "只有 02 与 09 两个小时列");
+        assert_eq!(hours.get("2").and_then(Value::as_u64), Some(2));
+        assert_eq!(hours.get("9").and_then(Value::as_u64), Some(1));
+        assert!(failure_hours_day(db.conn(), "2026-02-30").is_none(), "非法日期 → None，不是假零");
+        let empty = failure_hours_day(db.conn(), "2026-01-01").expect("合法空日是空对象");
+        assert_eq!(empty["hours"].as_object().unwrap().len(), 0, "空日 = 读到零失败，不是 None");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

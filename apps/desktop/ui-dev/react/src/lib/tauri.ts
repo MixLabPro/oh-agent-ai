@@ -153,6 +153,7 @@ export type OverviewDetails = {
   monthly: UsageSourceSummary | null;
   daily: DailySummary | null;
   calendar: UsageCalendar | null;
+  failure_hours: Record<string, number> | null;
   authority_revision: number | null;
   is_consistent: boolean;
   errors: string[];
@@ -2403,6 +2404,23 @@ function statisticsMonthAndDate(timezone: string): { month: string; date: string
   return { month: `${year}-${month}`, date: `${year}-${month}-${day}` };
 }
 
+// OVERVIEW_TREND_PANEL spec v1.1 §4：失败小时标记容错降级——形状不对 → null
+// （读不到 ≠ 零失败），绝不抛错连累同一 bundle 里的 token 面板。键只接受
+// "0".."23"、值正整数；任何条目非法也整体 null：丢弃坏条目剩下的「空对象」
+// 会被当成真零失败渲染，那是编造。
+function parseFailureHours(value: unknown): Record<string, number> | null {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return null;
+  const hours = (value as Record<string, unknown>).hours;
+  if (hours == null || typeof hours !== "object" || Array.isArray(hours)) return null;
+  const out: Record<string, number> = {};
+  for (const [hour, count] of Object.entries(hours as Record<string, unknown>)) {
+    if (!/^(?:[0-9]|1[0-9]|2[0-3])$/.test(hour)) return null;
+    if (typeof count !== "number" || !Number.isFinite(count) || count <= 0 || !Number.isInteger(count)) return null;
+    out[hour] = count;
+  }
+  return out;
+}
+
 export async function readOverviewDetails(): Promise<OverviewDetails> {
   const timezone = (await readStatisticsTimezone()).timezone;
   const { month, date } = statisticsMonthAndDate(timezone);
@@ -2419,6 +2437,7 @@ export async function readOverviewDetails(): Promise<OverviewDetails> {
       monthly: root.monthly == null ? null : parseUsageSourceSummary(root.monthly),
       daily: root.daily == null ? null : parseDailySummary(root.daily),
       calendar: root.calendar == null ? null : parseUsageCalendar(root.calendar),
+      failure_hours: parseFailureHours(root.failure_hours),
       authority_revision, is_consistent, errors,
     };
   }
@@ -2429,7 +2448,7 @@ export async function readOverviewDetails(): Promise<OverviewDetails> {
   const monthly = results[0].status === "fulfilled" ? results[0].value : (errors.push(safeUiError(results[0].reason, "月度汇总暂不可用")), null);
   const daily = results[1].status === "fulfilled" ? results[1].value : (errors.push(safeUiError(results[1].reason, "今日汇总暂不可用")), null);
   const calendar = results[2].status === "fulfilled" ? results[2].value : (errors.push(safeUiError(results[2].reason, "日历暂不可用")), null);
-  return { month, date, monthly, daily, calendar, authority_revision: null, is_consistent: false, errors };
+  return { month, date, monthly, daily, calendar, failure_hours: null, authority_revision: null, is_consistent: false, errors };
 }
 
 export async function readUsageHourly(date: string): Promise<UsageHourly> {

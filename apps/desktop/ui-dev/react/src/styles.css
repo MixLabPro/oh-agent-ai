@@ -62,6 +62,25 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .overview-host-panel { margin-top: 14px; padding: 20px; border: 1px solid #e1e8f0; border-radius: 14px; background: #fff; box-shadow: 0 10px 28px rgb(31 55 80 / 4%); }
 .overview-recent-panel { display: block; align-items: initial; }
 .overview-recent-list { display: grid; gap: 7px; margin-top: 12px; }
+/* OVERVIEW_TREND_PANEL：月内逐日堆叠柱 + 失败日标记。段色沿用应用绿系
+   （usage-hour 同族），失败标记用暖橙——语义是「需要注意」，不是成本。 */
+.overview-trend { margin-top: 14px; }
+.overview-trend-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; color: var(--text-subtle); font-size: 11px; }
+.overview-trend-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.overview-trend-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
+.overview-trend-unavailable { color: #9a6b1f; }
+.overview-trend-chart { display: flex; align-items: flex-end; gap: 1px; height: 104px; margin-top: 14px; }
+.overview-trend-col { display: flex; flex: 1 1 0; flex-direction: column; align-items: center; justify-content: flex-end; gap: 3px; min-width: 0; height: 100%; text-decoration: none; }
+.overview-trend-bar { display: flex; flex-direction: column; width: 100%; max-width: 22px; overflow: hidden; border-radius: 3px 3px 1px 1px; }
+.overview-trend-bar-empty { background: #edf1f5; }
+.overview-trend-bar i { flex: 0 0 auto; width: 100%; }
+.trend-seg-dsh { background: #087f62; }
+.trend-seg-claude { background: #69bba3; }
+.trend-seg-codex { background: #b7dccd; }
+.trend-flag { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: #e07a3f; }
+.overview-trend-col small { color: var(--text-subtle); font-size: 9px; line-height: 1; min-height: 9px; }
+.overview-trend-col:hover .overview-trend-bar { outline: 1px solid #087f62; }
+.overview-trend-note { margin-top: 10px; color: var(--text-subtle); font-size: 11px; }
 .overview-recent-row { display: grid; grid-template-columns: 1fr 1fr 1.5fr; gap: 10px; align-items: baseline; padding: 9px 11px; border: 1px solid #e6edf2; border-radius: 9px; background: #fbfcfe; color: #405875; font-size: 11px; }
 .overview-recent-row strong { color: #26384e; font-variant-numeric: tabular-nums; }
 .overview-recent-row small { color: var(--text-subtle); text-align: right; }

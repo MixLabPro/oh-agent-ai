@@ -202,6 +202,10 @@
       [isoDay]: { dsh_tokens: 52000, claude_tokens: 64000, codex_tokens: 130000, total_tokens: 246000, dsh_cost_cny: 3.21, claude_cost_cny: 0, claude_cost_usd: 0, codex_cost_usd: 0.84 },
     },
   };
+  // OVERVIEW_TREND_PANEL v1.1：失败小时标记的 mock（小时 → 次数，键 "0".."23"）。
+  // 与 read_hourly_distribution 的形状呼应：09 点是 shape 峰值附近，14 点有
+  // claude 参与但失败集中在 codex 侧——预览里橙点落在有柱子的时段。
+  const failureHours = { hours: { "9": 3, "14": 1 } };
 
   const sessions = [{
     session_ref: "sr_browser_mock_01",
@@ -452,6 +456,10 @@
           monthly: dto(374000, { month: requestedMonth }),
           daily: dto(246000, { daily: true, date: requestedDate }),
           calendar: { month: requestedMonth, days: requestedMonth === month ? calendar.days : {} },
+          // Shape: lib.rs overview_details_snapshot_at → issues::failure_hours_day
+          //   {date, hours:{hour:count}}；库不可用时后端给 null。mock 恒可用，
+          //   非请求日的窗口给空对象（真零），与日历的窗口守卫语义一致。
+          failure_hours: requestedDate === isoDay ? { date: requestedDate, hours: failureHours.hours } : { date: requestedDate, hours: {} },
           authority_revision: 42, is_consistent: true, errors: [],
         };
       }

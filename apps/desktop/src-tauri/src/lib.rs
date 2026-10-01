@@ -4380,11 +4380,12 @@ fn overview_details_snapshot_at(data_home: std::path::PathBuf, month: &str, date
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
     let repo = agent_vitals_runtime::query::summary::SqlSummaryRepository::at(data_home);
     let memo = agent_vitals_runtime::query::read_memo::ReadMemo::global();
-    // 趋势面板失败日（OVERVIEW_TREND_PANEL spec §3）：与 monthly/daily/calendar
-    // 同一 revision 括号；库开不了/月份非法 → null，前端走「失败标记不可用」降级。
-    let failure_days = repo
+    // 趋势面板失败小时（OVERVIEW_TREND_PANEL spec v1.1 §3）：与 monthly/daily/calendar
+    // 同一 revision 括号，按快照 date（今日）取小时桶；库开不了/日期非法 → null，
+    // 前端走「失败标记不可用」降级。
+    let failure_hours = repo
         .open_db()
-        .and_then(|db| agent_vitals_data::issues::failure_days_month(db.conn(), month));
+        .and_then(|db| agent_vitals_data::issues::failure_hours_day(db.conn(), date));
     let mut result = Value::Null;
     for attempt in 0..2 {
         let revision_before = authority_revision_at(&path);
@@ -4399,7 +4400,7 @@ fn overview_details_snapshot_at(data_home: std::path::PathBuf, month: &str, date
             "monthly": monthly.as_ref(),
             "daily": daily.as_ref(),
             "calendar": calendar.as_ref(),
-            "failure_days": failure_days,
+            "failure_hours": failure_hours,
             "authority_revision": revision_after,
             "is_consistent": is_consistent,
             "errors": if is_consistent { Vec::<String>::new() } else { vec!["汇总期间数据发生变化或权威库不可用，当前结果可能跨 revision".to_string()] },
@@ -5059,9 +5060,9 @@ mod tests {
         assert!(result["monthly"].is_object());
         assert!(result["daily"].is_object());
         assert!(result["calendar"].is_object());
-        // 空库 = 读到零失败（对象空 days），不是 null——降级语义只在库不可用时出现。
-        assert_eq!(result["failure_days"]["month"], "2026-09");
-        assert_eq!(result["failure_days"]["days"].as_object().unwrap().len(), 0);
+        // 空库 = 读到零失败（对象空 hours），不是 null——降级语义只在库不可用时出现。
+        assert_eq!(result["failure_hours"]["date"], "2026-09-24");
+        assert_eq!(result["failure_hours"]["hours"].as_object().unwrap().len(), 0);
         assert!(result["errors"].as_array().unwrap().is_empty());
         drop(_db);
         std::fs::remove_dir_all(root).ok();

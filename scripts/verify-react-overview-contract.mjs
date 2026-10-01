@@ -27,6 +27,22 @@ assert.match(overviewPage, /message\("overview\.findingsEmpty"\)/, "findings str
 assert.match(overviewPage, /item\.sessions_count > 0 && item\.host !== "generic" && item\.host !== "all"/, "evidence link only for filterable hosts with session evidence");
 assert.match(overviewPage, /readFindings\(null\)/, "strip reads the existing safe findings projection (no new payload path)");
 assert.match(overviewPage, /sessionsDateHref|sessionsHostHref/, "drill-down links go through the whitelisted nav helper");
+
+// OVERVIEW_TREND_PANEL spec v1.1 §4/§6：24 小时趋势面板的存在性、深链、诚实降级与 r6（面板无金额）。
+assert.match(overviewPage, /function TrendPanel/, "overview must render the hourly stacked usage trend panel");
+assert.match(overviewPage, /readUsageHourly\(details\.date\)/, "hourly columns reuse the usage page's hourly distribution command");
+assert.match(overviewPage, /length: 24/, "the chart always renders all 24 hour columns");
+assert.match(overviewPage, /overview\.trendFailureUnavailable/, "trend panel must state marker unavailability honestly");
+assert.match(overviewPage, /overview\.trendHourlyUnavailable/, "hourly fetch failure must degrade honestly");
+assert.match(overviewPage, /overview\.trendEmpty/, "trend panel must have an honest empty state");
+assert.match(overviewPage, /href=\{sessionsDateHref\(details\.date\)\}/, "hour columns drill into that day's sessions via the whitelisted nav helper");
+assert.match(overviewPage, /failureHours == null/, "null failure_hours must render the degradation note, not a fabricated zero");
+const overviewTrendCode = overviewPage.slice(overviewPage.indexOf("function TrendPanel"), overviewPage.indexOf("function OverviewFindingsStrip"));
+assert.doesNotMatch(overviewTrendCode, /formatMajorMoney|moneyDetail|cost/, "trend panel is token+failure only (r6: no amounts)");
+const i18nSource = readFileSync(path.join(ui, "react/src/lib/i18n.ts"), "utf8");
+for (const key of ["overview.trendTitle", "overview.trendFailureLegend", "overview.trendFailureUnavailable", "overview.trendHourlyUnavailable", "overview.trendEmpty", "overview.trendNote", "overview.trendDayAria", "overview.trendDayFailures"]) {
+  assert.equal((i18nSource.match(new RegExp(`"${key}"`, "g")) ?? []).length, 2, `trend i18n key ${key} must exist in both languages`);
+}
 assert.doesNotMatch(appPage, /工作台预览/, "production navigation must not call itself a preview");
 assert.match(appPage, /<h1 className="visually-hidden">\{message\(navigation\.find\(\(item\) => item\.id === page\)\?\.label \?\? "nav\.overview", language\)\}<\/h1>/, "compact overview still needs an accessible localized page heading");
 const uiRequire = createRequire(path.join(ui, "package.json"));
@@ -137,6 +153,10 @@ assert.equal(detailsSnapshot.date, date);
 assert.equal(detailsSnapshot.authority_revision, 42);
 assert.equal(detailsSnapshot.is_consistent, true);
 assert.equal(detailsSnapshot.errors.length, 0);
+// failure_hours：mock 给 09 时 3 条失败 → 正整数解析（§4）。
+assert.equal(detailsSnapshot.failure_hours["9"], 3);
+assert.equal(detailsSnapshot.failure_hours["14"], 1);
+assert.ok(Object.keys(detailsSnapshot.failure_hours).every((hour) => /^(?:[0-9]|1[0-9]|2[0-3])$/.test(hour)), "failure_hours keys are 0-23");
 assertTokenPartition(monthly);
 assertTokenPartition(daily);
 assertMoneyPartition(monthly);
@@ -252,6 +272,34 @@ withOverride(async (command, args) => {
   return command === "read_overview_details_snapshot" ? { ...result, month: "1900-01" } : result;
 });
 await assert.rejects(() => bridge.readOverviewDetails(), /窗口与请求不一致/);
+restore();
+
+withOverride(async (command, args) => {
+  const result = await originalInvoke(command, args);
+  if (command !== "read_overview_details_snapshot") return result;
+  return { ...result, failure_hours: { date: "bad", hours: { "24": 1, "9": -2 } } };
+});
+const trendDegraded = await bridge.readOverviewDetails();
+assert.equal(trendDegraded.failure_hours, null, "malformed failure_hours (hour 24 / negative) must degrade to null without killing the token panels");
+assert.equal(trendDegraded.calendar.month, month, "token/calendar panels survive failure_hours degradation");
+restore();
+
+withOverride(async (command, args) => {
+  const result = await originalInvoke(command, args);
+  if (command !== "read_overview_details_snapshot") return result;
+  return { ...result, failure_hours: { date: date, hours: { "9": 1.5 } } };
+});
+const trendFractional = await bridge.readOverviewDetails();
+assert.equal(trendFractional.failure_hours, null, "non-integer failure counts must degrade to null (contract produces integers only)");
+restore();
+
+withOverride(async (command, args) => {
+  const result = await originalInvoke(command, args);
+  if (command !== "read_overview_details_snapshot") return result;
+  return { ...result, failure_hours: null };
+});
+const trendNullBackend = await bridge.readOverviewDetails();
+assert.equal(trendNullBackend.failure_hours, null, "backend null (library unavailable) passes through as null");
 restore();
 
 console.log("React Overview/Usage contract: OK (revision-consistent snapshot, mock DTOs, malformed rejection, honest degradation)");

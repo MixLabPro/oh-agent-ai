@@ -1,7 +1,7 @@
 import { hostName } from "../../lib/hostNames";
 import { useEffect, useState } from "react";
 import { StatusPill } from "../../components/ui/StatusPill";
-import { readFindings, type FindingGroup, type OverviewDetails, type OverviewSnapshot, type SummaryHostTokens } from "../../lib/tauri";
+import { readFindings, readUsageHourly, type FindingGroup, type OverviewDetails, type OverviewSnapshot, type SummaryHostTokens, type UsageHourly } from "../../lib/tauri";
 import { sessionsDateHref, sessionsHostHref } from "../../lib/nav";
 import { todayCacheHitRatio } from "./cacheHit";
 import { monthSpendCard, todaySpendCard } from "./spendCards";
@@ -71,6 +71,74 @@ function StatCard({ label, value, detail }: { label: string; value: string; deta
   </article>;
 }
 
+/**
+ * OVERVIEW_TREND_PANEL spec v1.1 §4：今日逐小时用量分布（24 列，DSH /
+ * Claude Code / Codex 三段堆叠，token 高度）+ 失败小时标记。小时 token 复用
+ * 用量页同一条 read_hourly_distribution 命令；失败小时来自 overview 快照的
+ * failure_hours（同一 revision 括号）。不放金额（r6）。
+ * 降级：failure_hours 为 null → 柱照画、图例处标「失败标记不可用」；小时数据
+ * 读不到 → 诚实说不可用；有失败但零 token 的小时保留标记（没用量≠没失败）。
+ */
+function TrendPanel({ details }: { details: OverviewDetails }) {
+  const language = useLanguage();
+  const [hourly, setHourly] = useState<UsageHourly | null>(null);
+  const [hourlyState, setHourlyState] = useState<"loading" | "ok" | "unavailable">("loading");
+  const failureHours = details.failure_hours;
+  useEffect(() => {
+    let active = true;
+    setHourlyState("loading");
+    void readUsageHourly(details.date)
+      .then((value) => { if (active) { setHourly(value); setHourlyState("ok"); } })
+      .catch(() => { if (active) setHourlyState("unavailable"); });
+    return () => { active = false; };
+  }, [details.date]);
+  const hourByIndex = new Map((hourly?.hours ?? []).map((hour) => [hour.hour, hour]));
+  const hourTotal = (index: number) => {
+    const hour = hourByIndex.get(index);
+    return (hour?.dsh_tokens ?? 0) + (hour?.claude_tokens ?? 0) + (hour?.codex_tokens ?? 0);
+  };
+  const totals = Array.from({ length: 24 }, (_, index) => hourTotal(index));
+  const maxTokens = Math.max(1, ...totals);
+  const hasUsage = totals.some((total) => total > 0);
+  const hasFailures = failureHours != null && Object.keys(failureHours).length > 0;
+  return <section className="info-panel overview-trend" aria-labelledby="overview-trend-title">
+    <div className="section-heading">
+      <div><p className="eyebrow">{message("overview.trendTitle", language)}</p><h3 id="overview-trend-title">{details.date}</h3></div>
+      <div className="overview-trend-legend">
+        <span><i className="trend-seg-dsh" aria-hidden="true" />DSH</span>
+        <span><i className="trend-seg-claude" aria-hidden="true" />Claude Code</span>
+        <span><i className="trend-seg-codex" aria-hidden="true" />Codex</span>
+        <span><i className="trend-flag" aria-hidden="true" />{message("overview.trendFailureLegend", language)}</span>
+        {failureHours == null && <span className="overview-trend-unavailable">{message("overview.trendFailureUnavailable", language)}</span>}
+      </div>
+    </div>
+    {hourlyState === "unavailable" ? <p className="overview-empty">{message("overview.trendHourlyUnavailable", language)}</p> : <>
+      <div className="overview-trend-chart">
+        {totals.map((total, hour) => {
+          const row = hourByIndex.get(hour);
+          const failures = failureHours?.[String(hour)] ?? 0;
+          const failuresText = failures > 0 ? message("overview.trendDayFailures", language, { count: failures }) : "";
+          const aria = message("overview.trendDayAria", language, { hour: String(hour).padStart(2, "0"), tokens: tokensLabel(total), failures: failuresText });
+          const showLabel = hour % 6 === 0 || hour === 23;
+          return <a key={hour} className="overview-trend-col" href={sessionsDateHref(details.date)} aria-label={aria} title={aria}>
+            <span className={`overview-trend-bar ${total > 0 ? "" : "overview-trend-bar-empty"}`} style={{ height: total > 0 ? `${Math.max(5, Math.round((total / maxTokens) * 100))}%` : "2px" }}>
+              {row ? <>
+                <i className="trend-seg-codex" style={{ flexGrow: Math.max(row.codex_tokens ?? 0, 0.001) }} />
+                <i className="trend-seg-claude" style={{ flexGrow: Math.max(row.claude_tokens ?? 0, 0.001) }} />
+                <i className="trend-seg-dsh" style={{ flexGrow: Math.max(row.dsh_tokens ?? 0, 0.001) }} />
+              </> : null}
+            </span>
+            {failures > 0 ? <span className="trend-flag" aria-hidden="true" /> : null}
+            <small aria-hidden="true">{showLabel ? String(hour).padStart(2, "0") : ""}</small>
+          </a>;
+        })}
+      </div>
+      {!hasUsage && !hasFailures && <p className="overview-empty">{message("overview.trendEmpty", language)}</p>}
+      <p className="overview-trend-note">{message("overview.trendNote", language)}</p>
+    </>}
+  </section>;
+}
+
 
 /**
  * R2（OVERVIEW_DRILLDOWN spec §4.3）：总览内嵌发现条——画布首发承诺
@@ -130,6 +198,7 @@ export function OverviewPage({ overview, details }: { overview: OverviewSnapshot
       <StatCard label={message("overview.monthSpend", language)} value={monthSpend.value} detail={monthSpend.detail} />
       <StatCard label={message("overview.activeHosts", language)} value={measuredHosts == null ? "—" : String(measuredHosts)} detail={measuredHosts == null ? message("overview.noMonthlyCoverage", language) : message("overview.hostsObserved", language)} />
     </section>
+    {details && <TrendPanel details={details} />}
     <section className="overview-detail-grid" aria-label={message("overview.authoritativeSummaries", language)}>
       <section className="info-panel overview-panel">
         <div><p className="eyebrow">{message("overview.monthlySummary", language, { month: details?.monthly?.month ?? details?.month ?? "—" })}</p><h3>{summaryTokens(details?.monthly ?? null)}</h3><p className="overview-panel-copy">{details?.monthly && details.monthly.freshness !== "unavailable" && details.monthly.freshness !== "unknown" ? `${basisLines(details.monthly.spend_by_basis)}${details.monthly.has_unresolved ? ` · ${message("overview.unresolved", language)}` : ""}${summaryFreshnessNote(details.monthly)}` : message("overview.monthlyUnavailable", language)}</p></div>
