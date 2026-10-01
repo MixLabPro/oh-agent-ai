@@ -1322,6 +1322,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// failure_days_trailing(to, 30) 必须覆盖「本月 1 日起」：31 天月份、to=31 号时
+    /// 窗口起点恰为 1 号（A1 验收建议的边界），1 号当天的失败不能被漏掉。
+    #[test]
+    fn failure_days_trailing_covers_first_of_a_31_day_month() {
+        let dir = std::env::temp_dir().join(format!("av-issues-ftrail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = AuthorityDb::open(&dir.join("agent-vitals.sqlite3"), 1).unwrap();
+        let (first, _) = crate::authority_query::beijing_day_bounds_ms("2026-10-01").unwrap();
+        upsert_issue(db.conn(), &IssueInput {
+            machine_namespace: "machine", host: "codex", session_key: Some("s"),
+            issue_type: "SV613", instance_fingerprint: "first", status: "open", severity: "warning",
+            evaluator_id: "t", evaluator_version: "1", evidence_fingerprint: "ev",
+            opened_at_ms: first + 60_000, metadata_json: "{}",
+        }).unwrap();
+        let v = failure_days_trailing(db.conn(), "2026-10-31", 30).expect("合法");
+        assert_eq!(v["from"], "2026-10-01");
+        assert_eq!(v["days"]["2026-10-01"].as_u64(), Some(1), "月初当天的失败在窗口内");
+        assert!(failure_days_trailing(db.conn(), "not-a-date", 30).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn input<'a>(status: &'a str) -> IssueInput<'a> {
         IssueInput {
             machine_namespace: "machine",

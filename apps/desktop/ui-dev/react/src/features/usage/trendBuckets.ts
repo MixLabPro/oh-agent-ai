@@ -12,8 +12,10 @@ export type TrendBucket = {
   key: string;
   /** 轴标签；空串 = 不显示（稀疏标注）。 */
   label: string;
-  /** 完整标题（悬停浮层用），如 "09:00" / "2026-10-01 周三"。 */
+  /** 完整标题（悬停浮层用，语言中性），如 "09:00" / "2026-10-01"。 */
   title: string;
+  /** 日桶的星期（0=周日），由组件按界面语言格式化；小时桶无。 */
+  weekday?: number;
   /** null = 该宿主读不到（不是 0）。 */
   dsh: number | null;
   claude: number | null;
@@ -110,8 +112,6 @@ export function buildHourBuckets(
   });
 }
 
-const WEEKDAY_ZH = ["日", "一", "二", "三", "四", "五", "六"];
-
 /**
  * 日桶（周 7 / 月 28–31）。
  * - 晚于 today → future（不画柱、不进峰值）；
@@ -135,7 +135,8 @@ export function buildDayBuckets(
     const base = {
       key: date,
       label: index % labelEvery === 0 ? String(Number(date.slice(8))) : "",
-      title: `${date} 周${WEEKDAY_ZH[weekdayOf(date)]}`,
+      title: date,
+      weekday: weekdayOf(date),
       href: hrefFor?.(date),
     };
     if (date > today) return { ...base, dsh: null, claude: null, codex: null, failures: null, state: "future" };

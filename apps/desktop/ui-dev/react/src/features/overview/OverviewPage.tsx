@@ -1,7 +1,9 @@
 import { hostName } from "../../lib/hostNames";
 import { useEffect, useState } from "react";
 import { StatusPill } from "../../components/ui/StatusPill";
-import { readFindings, readUsageHourly, type FindingGroup, type OverviewDetails, type OverviewSnapshot, type SummaryHostTokens, type UsageHourly } from "../../lib/tauri";
+import { readFindings, readUsageCalendar, readUsageHourly, type FindingGroup, type OverviewDetails, type OverviewSnapshot, type SummaryHostTokens, type UsageCalendar, type UsageHourly } from "../../lib/tauri";
+import { UsageTrendChart } from "../../components/UsageTrendChart";
+import { bucketTotal, buildDayBuckets, buildHourBuckets, monthDates, monthOf, weekDates, weekExtraMonth, type TrendBucket, type TrendRange } from "../usage/trendBuckets";
 import { sessionsDateHref, sessionsHostHref } from "../../lib/nav";
 import { todayCacheHitRatio } from "./cacheHit";
 import { applyConversion, monthSpendCard, todaySpendCard } from "./spendCards";
@@ -73,69 +75,81 @@ function StatCard({ label, value, detail }: { label: string; value: string; deta
 }
 
 /**
- * OVERVIEW_TREND_PANEL spec v1.1 §4：今日逐小时用量分布（24 列，DSH /
- * Claude Code / Codex 三段堆叠，token 高度）+ 失败小时标记。小时 token 复用
- * 用量页同一条 read_hourly_distribution 命令；失败小时来自 overview 快照的
- * failure_hours（同一 revision 括号）。不放金额（r6）。
- * 降级：failure_hours 为 null → 柱照画、图例处标「失败标记不可用」；小时数据
- * 读不到 → 诚实说不可用；有失败但零 token 的小时保留标记（没用量≠没失败）。
+ * OVERVIEW_TREND_RANGE_SPEC v2.0：本日（24 小时）/ 本周（自然周 7 日，周一起）/
+ * 本月（自然月）三档趋势。渲染交给共享的 UsageTrendChart，桶由 trendBuckets.ts 装配
+ * （与用量页「小时明细」同一套）；失败标记：日档读 failure_hours，周/月档读 failure_days，
+ * 任一为 null → 图例处诚实标「失败标记不可用」，绝不画假零。不放金额（r6）。
+ * 降级：小时数据读不到 → 本日档说不可用；周跨月时上月日历读不到 → 那几天灰斜纹
+ * （unavailable，不是 0）；有失败但零 token 的桶保留标记（没用量≠没失败）。
  */
+const TREND_RANGE_KEY = "agent-vitals.overview.trendRange";
+const TREND_RANGES: TrendRange[] = ["day", "week", "month"];
+
+function readStoredTrendRange(): TrendRange {
+  try {
+    const value = localStorage.getItem(TREND_RANGE_KEY);
+    if (value === "day" || value === "week" || value === "month") return value;
+  } catch { /* 记住范围只是便利，读不到就用默认 */ }
+  return "day";
+}
+
 function TrendPanel({ details }: { details: OverviewDetails }) {
   const language = useLanguage();
+  const [range, setRange] = useState<TrendRange>(readStoredTrendRange);
   const [hourly, setHourly] = useState<UsageHourly | null>(null);
   const [hourlyState, setHourlyState] = useState<"loading" | "ok" | "unavailable">("loading");
-  const failureHours = details.failure_hours;
+  const [extraCalendar, setExtraCalendar] = useState<{ month: string; calendar: UsageCalendar | null } | null>(null);
+  const today = details.date;
+  const extraMonth = range === "week" ? weekExtraMonth(today) : null;
+  const chooseRange = (next: TrendRange) => {
+    setRange(next);
+    try { localStorage.setItem(TREND_RANGE_KEY, next); } catch { /* 同上 */ }
+  };
   useEffect(() => {
     let active = true;
     setHourlyState("loading");
-    void readUsageHourly(details.date)
+    void readUsageHourly(today)
       .then((value) => { if (active) { setHourly(value); setHourlyState("ok"); } })
       .catch(() => { if (active) setHourlyState("unavailable"); });
     return () => { active = false; };
-  }, [details.date]);
-  const hourByIndex = new Map((hourly?.hours ?? []).map((hour) => [hour.hour, hour]));
-  const hourTotal = (index: number) => {
-    const hour = hourByIndex.get(index);
-    return (hour?.dsh_tokens ?? 0) + (hour?.claude_tokens ?? 0) + (hour?.codex_tokens ?? 0);
-  };
-  const totals = Array.from({ length: 24 }, (_, index) => hourTotal(index));
-  const maxTokens = Math.max(1, ...totals);
-  const hasUsage = totals.some((total) => total > 0);
-  const hasFailures = failureHours != null && Object.keys(failureHours).length > 0;
+  }, [today]);
+  useEffect(() => {
+    if (!extraMonth) { setExtraCalendar(null); return; }
+    let active = true;
+    void readUsageCalendar(extraMonth)
+      .then((calendar) => { if (active) setExtraCalendar({ month: extraMonth, calendar }); })
+      .catch(() => { if (active) setExtraCalendar({ month: extraMonth, calendar: null }); });
+    return () => { active = false; };
+  }, [extraMonth]);
+
+  const dayHref = (date: string) => sessionsDateHref(date);
+  const buckets: TrendBucket[] = range === "day"
+    ? buildHourBuckets(hourlyState === "ok" ? hourly : null, details.failure_hours, () => sessionsDateHref(today))
+    : buildDayBuckets(
+      range === "week" ? weekDates(today) : monthDates(monthOf(today)),
+      today,
+      { [monthOf(today)]: details.calendar, ...(extraMonth ? { [extraMonth]: extraCalendar?.month === extraMonth ? extraCalendar.calendar : null } : {}) },
+      details.failure_days,
+      dayHref,
+      range === "month" ? 5 : 1,
+    );
+  const ready = range === "day" ? hourlyState !== "loading" : true;
+  const hasUsage = buckets.some((bucket) => bucketTotal(bucket) > 0);
+  const hasFailures = buckets.some((bucket) => (bucket.failures ?? 0) > 0);
+  const subtitle = range === "day" ? today : range === "week" ? `${weekDates(today)[0]} – ${weekDates(today)[6]}` : monthOf(today);
+  const unavailable = range === "day" && hourlyState === "unavailable";
+  const note = range === "day" ? message("overview.trendNote", language) : message(range === "week" ? "trend.weekNote" : "trend.monthNote", language);
   return <section className="info-panel overview-trend" aria-labelledby="overview-trend-title">
     <div className="section-heading">
-      <div><p className="eyebrow">{message("overview.trendTitle", language)}</p><h3 id="overview-trend-title">{details.date}</h3></div>
-      <div className="overview-trend-legend">
-        <span><i className="trend-seg-dsh" aria-hidden="true" />DSH</span>
-        <span><i className="trend-seg-claude" aria-hidden="true" />Claude Code</span>
-        <span><i className="trend-seg-codex" aria-hidden="true" />Codex</span>
-        <span><i className="trend-flag" aria-hidden="true" />{message("overview.trendFailureLegend", language)}</span>
-        {failureHours == null && <span className="overview-trend-unavailable">{message("overview.trendFailureUnavailable", language)}</span>}
+      <div><p className="eyebrow">{subtitle}</p><h3 id="overview-trend-title">{message(`trend.rangeTitle.${range}` as MessageKey, language)}</h3></div>
+      <div className="trend-range-switch" role="group" aria-label={message("trend.rangeLabel", language)}>
+        {TREND_RANGES.map((value) => <button key={value} type="button" aria-pressed={range === value} onClick={() => chooseRange(value)}>{message(`trend.range.${value}` as MessageKey, language)}</button>)}
       </div>
     </div>
-    {hourlyState === "unavailable" ? <p className="overview-empty">{message("overview.trendHourlyUnavailable", language)}</p> : <>
-      <div className="overview-trend-chart">
-        {totals.map((total, hour) => {
-          const row = hourByIndex.get(hour);
-          const failures = failureHours?.[String(hour)] ?? 0;
-          const failuresText = failures > 0 ? message("overview.trendDayFailures", language, { count: failures }) : "";
-          const aria = message("overview.trendDayAria", language, { hour: String(hour).padStart(2, "0"), tokens: tokensLabel(total), failures: failuresText });
-          const showLabel = hour % 6 === 0 || hour === 23;
-          return <a key={hour} className="overview-trend-col" href={sessionsDateHref(details.date)} aria-label={aria} title={aria}>
-            <span className={`overview-trend-bar ${total > 0 ? "" : "overview-trend-bar-empty"}`} style={{ height: total > 0 ? `${Math.max(5, Math.round((total / maxTokens) * 100))}%` : "2px" }}>
-              {row ? <>
-                <i className="trend-seg-codex" style={{ flexGrow: Math.max(row.codex_tokens ?? 0, 0.001) }} />
-                <i className="trend-seg-claude" style={{ flexGrow: Math.max(row.claude_tokens ?? 0, 0.001) }} />
-                <i className="trend-seg-dsh" style={{ flexGrow: Math.max(row.dsh_tokens ?? 0, 0.001) }} />
-              </> : null}
-            </span>
-            {failures > 0 ? <span className="trend-flag" aria-hidden="true" /> : null}
-            <small aria-hidden="true">{showLabel ? String(hour).padStart(2, "0") : ""}</small>
-          </a>;
-        })}
-      </div>
-      {!hasUsage && !hasFailures && hourlyState === "ok" && <p className="overview-empty">{message("overview.trendEmpty", language)}</p>}
-      <p className="overview-trend-note">{message("overview.trendNote", language)}</p>
+    {unavailable ? <p className="overview-empty">{message("overview.trendHourlyUnavailable", language)}</p> : <>
+      <UsageTrendChart buckets={buckets} ariaLabel={message(`trend.rangeTitle.${range}` as MessageKey, language)} barMax={range === "week" ? 72 : undefined} />
+      {!hasUsage && !hasFailures && ready && <p className="overview-empty">{message(range === "day" ? "overview.trendEmpty" : "trend.noUsage", language)}</p>}
+      <p className="overview-trend-note">{note}</p>
     </>}
   </section>;
 }
