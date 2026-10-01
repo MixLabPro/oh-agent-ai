@@ -30,6 +30,6 @@ pub use contracts::{billing, evidence, host_capability, session_key, source_iden
 // domain 计算模块的扁平别名——Phase C 迁出前 `agent_vitals_domain::behavior::*` 等。
 pub use domain::{
     attribution, behavior, budget, canonical_audit, coords, cost, data_contract, detectors, duration,
-    enrichment, findings, mcp, plan, probe, route_quality, session_insights, session_semantics, skill, skills, source_graph, state, subagent, takeover, trace, trajectory, trust,
+    enrichment, findings, fx, mcp, plan, probe, route_quality, session_insights, session_semantics, skill, skills, source_graph, state, subagent, takeover, trace, trajectory, trust,
     usage, util,
 };

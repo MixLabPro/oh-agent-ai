@@ -15,6 +15,7 @@ pub mod detectors;
 pub mod duration;
 pub mod enrichment;
 pub mod findings;
+pub mod fx;
 pub mod mcp;
 pub mod plan;
 pub mod probe;
