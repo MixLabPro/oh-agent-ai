@@ -221,6 +221,58 @@
     return { [to]: 4, [shift(3)]: 2, [shift(8)]: 1 };
   }
 
+  // City 页的浏览器预览数据：page_size ≥ 100 时返回一份确定性的 30 天合成会话集
+  // （4 宿主 / 对数分布 token / 少量"正在施工"的活跃会话）。仅供视觉迭代——
+  // 打包后的 app 走真实 authority，永不进这条路径。
+  const citySessions = (() => {
+    let state = 0x2f6e2b1;
+    const rand = () => {
+      state = Math.imul(state ^ (state >>> 15), state | 1);
+      state ^= state + Math.imul(state ^ (state >>> 7), state | 61);
+      return ((state ^ (state >>> 14)) >>> 0) / 4294967296;
+    };
+    const hosts = [
+      { host: "codex", models: [["gpt-5.6-sol"], ["gpt-5.6-luna"], ["gpt-5.6-terra", "gpt-5.6-sol"]], weight: 0.38 },
+      { host: "claude-code", models: [["claude-sonnet-5"], ["claude-opus-5-5"]], weight: 0.3 },
+      { host: "plugin:zcode", models: [["glm-5"], ["glm-5-air", "glm-5"]], weight: 0.2 },
+      { host: "dsh", models: [["deepseek-v4-flash"]], weight: 0.12 },
+    ];
+    const now = Date.now();
+    const rows = [];
+    for (let index = 0; index < 700; index += 1) {
+      const pick = rand();
+      let entry = hosts[hosts.length - 1];
+      let acc = 0;
+      for (const candidate of hosts) {
+        acc += candidate.weight;
+        if (pick <= acc) { entry = candidate; break; }
+      }
+      const ageDays = Math.pow(rand(), 1.4) * 29.7;
+      const dayStart = now - ageDays * 86400000;
+      const durationMinutes = 4 + Math.pow(rand(), 2.2) * 460;
+      const tokens = Math.round(2_500 + Math.pow(rand(), 3.2) * 3_400_000);
+      const uncached = Math.round(tokens * (0.18 + rand() * 0.3));
+      const output = Math.round(tokens * (0.04 + rand() * 0.1));
+      const cacheWrite = Math.round(tokens * 0.06);
+      const cacheRead = Math.max(0, tokens - uncached - output - cacheWrite);
+      const active = rand() > 0.985;
+      const last = active ? now - rand() * 240000 : dayStart + durationMinutes * 60000;
+      rows.push({
+        session_ref: `sr_citymock_${String(index).padStart(4, "0")}`,
+        host: entry.host,
+        first_event_at: new Date(dayStart).toISOString(),
+        last_event_at: new Date(Math.min(last, now)).toISOString(),
+        event_count: Math.max(2, Math.round(tokens / 9000)),
+        model_ids: entry.models[Math.floor(rand() * entry.models.length)],
+        tokens: { uncached_input_tokens: uncached, cache_read_tokens: cacheRead, cache_write_tokens: cacheWrite, output_tokens: output, total: tokens },
+        peak_tokens: Math.round(tokens * 0.2),
+        cost_minor: entry.host === "codex" ? { amount_minor: Math.round(tokens / 12000), currency: "USD", basis: "metered_estimate" } : entry.host === "dsh" ? { amount_minor: Math.round(tokens / 24000), currency: "CNY", basis: "metered_actual" } : null,
+        cost_status: entry.host === "codex" || entry.host === "dsh" ? { state: "estimated", reason: "metered-estimate", has_unresolved: false } : { state: "subscription", reason: "official-subscription", has_unresolved: true },
+      });
+    }
+    return rows.sort((left, right) => Date.parse(right.first_event_at) - Date.parse(left.first_event_at));
+  })();
+
   const sessions = [{
     session_ref: "sr_browser_mock_01",
     host: "codex",
@@ -906,8 +958,16 @@
         };
       }
       case "sessions_list": {
-        // 一页一条：第一页 → preview-next → preview-next-2（第三页是「订阅为主 + 缺价」样例）
         const cursor = args && args.cursor;
+        // City 预览：大页请求按游标分页给合成 30 天数据（每页 500，与真机分页同构）。
+        if ((args && args.page_size) >= 100 || /^city-page-\d+$/.test(String(cursor))) {
+          const pageIndex = cursor ? Number(String(cursor).slice("city-page-".length)) : 0;
+          const slice = citySessions.slice(pageIndex * 500, pageIndex * 500 + 500);
+          if (!slice.length) return { data: { sessions: [], next_cursor: null, has_more: false, window_session_count: citySessions.length, window_total_tokens: 0 } };
+          const next = (pageIndex + 1) * 500 < citySessions.length ? `city-page-${pageIndex + 1}` : null;
+          return { data: { sessions: slice, next_cursor: next, has_more: next !== null, window_session_count: citySessions.length, window_total_tokens: citySessions.reduce((sum, session) => sum + session.tokens.total, 0) } };
+        }
+        // 一页一条：第一页 → preview-next → preview-next-2（第三页是「订阅为主 + 缺价」样例）
         const pageIndex = cursor === "preview-next-2" ? 2 : cursor ? 1 : 0;
         const page = sessions.slice(pageIndex, pageIndex + 1);
         const next = pageIndex + 1 < sessions.length ? (pageIndex === 0 ? "preview-next" : "preview-next-2") : null;
@@ -919,8 +979,9 @@
         // + crates/agent-vitals-query/src/query/session_insights.rs::session_insights。
         if (args.output === "insights") {
           const index = sessions.findIndex((session) => session.session_ref === (args && args.sessionRef));
-          const session = sessions[Math.max(0, index)];
-          return { data: mockInsights(session.host, index === 1 ? 420 : 40) };
+          const cityIndex = citySessions.findIndex((session) => session.session_ref === (args && args.sessionRef));
+          const session = cityIndex >= 0 ? citySessions[cityIndex] : sessions[Math.max(0, index)];
+          return { data: mockInsights(session.host, cityIndex >= 0 ? 60 : index === 1 ? 420 : 40) };
         }
         if (args.output === "graph") return { data: { coverage: { total_nodes: 9, total_edges: 8, missing_parent: 0, missing_time: 0, missing_status: 0 } } };
         return { data: {
@@ -944,7 +1005,7 @@
         return { data: { steps: { from, to }, calls, failures, safety, local_only: true } };
       }
       case "sessions_read": {
-        const selected = sessions.find((session) => session.session_ref === (args && args.sessionRef)) || sessions[0];
+        const selected = sessions.find((session) => session.session_ref === (args && args.sessionRef)) || citySessions.find((session) => session.session_ref === (args && args.sessionRef)) || sessions[0];
         const model = selected.model_ids[0] || "<unknown>";
         const tokens = selected.tokens;
         return { data: {

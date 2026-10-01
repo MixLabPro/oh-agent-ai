@@ -21,8 +21,10 @@
     "vite": "^6.1.0"
   },
   "dependencies": {
+    "@types/three": "^0.186.0",
     "@vitejs/plugin-react": "^5.2.0",
     "react": "^19.3.0",
-    "react-dom": "^19.3.0"
+    "react-dom": "^19.3.0",
+    "three": "^0.186.1"
   }
 }

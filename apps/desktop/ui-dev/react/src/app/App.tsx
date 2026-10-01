@@ -1,6 +1,6 @@
 import { stable, isBackground } from "../lib/stable";
 import { hydrateHostNames, useHostNames } from "../lib/hostNames";
-import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
+import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { invoke, listen, listenAppEvents, makeInvalidationGate, readOverviewDetails, readOverviewSnapshot, readSourceDataRevision, safeUiError, type OverviewDetails, type OverviewSnapshot } from "../lib/tauri";
 import { FindingsPage } from "../features/findings/FindingsPage";
 import { TrustPage } from "../features/trust/TrustPage";
@@ -10,15 +10,18 @@ import { TestPage } from "../features/test/TestPage";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { SkillsPage } from "../features/skills/SkillsPage";
 import { OverviewPage } from "../features/overview/OverviewPage";
+// City 按需加载：three.js 只在进入城市页时才下载/解析，不拖慢工作台首屏。
+const CityPage = lazy(() => import("../features/city/CityPage").then((module) => ({ default: module.CityPage })));
 import { StatusPill } from "../components/ui/StatusPill";
 import { hydrateLanguagePreference, message, useLanguage, type MessageKey } from "../lib/i18n";
 
-type Page = "overview" | "usage" | "sessions" | "findings" | "test" | "trust" | "skills" | "settings";
+type Page = "overview" | "city" | "usage" | "sessions" | "findings" | "test" | "trust" | "skills" | "settings";
 type SettingSection = "settings-sources" | "settings-billing" | "settings-budget";
 type SessionNavigationTarget = { type: "sessionDetail"; session_ref: string; host_kind: string } | { type: "sessionList"; host_kind: string | null };
 
 const navigation: Array<{ id: Page; label: MessageKey }> = [
   { id: "overview", label: "nav.overview" },
+  { id: "city", label: "nav.city" },
   { id: "usage", label: "nav.usage" },
   { id: "sessions", label: "nav.sessions" },
   { id: "findings", label: "nav.findings" },
@@ -247,10 +250,10 @@ export function App() {
       </nav>
       <div className="sidebar-footer"><StatusPill>{message("sidebar.offline", language)}</StatusPill><span>{message("sidebar.local", language)}</span></div>
     </aside>
-    <main className="main-content">
+    <main className={`main-content ${page === "city" ? "city-main-content" : ""}`}>
       <h1 className="visually-hidden">{message(navigation.find((item) => item.id === page)?.label ?? "nav.overview", language)}</h1>
       {page === "overview" && error && <div className="error-banner" role="alert">{error} · {message("error.overviewStale", language)}</div>}
-      {page === "overview" ? <OverviewPage overview={overview} details={overviewDetails} /> : page === "usage" ? <UsagePage /> : page === "sessions" ? <SessionsPage navigationTarget={sessionTarget} onNavigationTargetApplied={clearSessionTarget} /> : page === "trust" ? <TrustPage /> : page === "test" ? <TestPage /> : page === "skills" ? <SkillsPage /> : page === "settings" ? <SettingsPage focusSection={focusSettingSection} onSectionFocused={clearSettingSectionTarget} /> : <FindingsPage onNavigateToAction={navigateToFindingAction} />}
+      {page === "overview" ? <OverviewPage overview={overview} details={overviewDetails} /> : page === "city" ? <Suspense fallback={<div className="city-workspace city-suspense"><p>{message("city.loading", language)}</p></div>}><CityPage /></Suspense> : page === "usage" ? <UsagePage /> : page === "sessions" ? <SessionsPage navigationTarget={sessionTarget} onNavigationTargetApplied={clearSessionTarget} /> : page === "trust" ? <TrustPage /> : page === "test" ? <TestPage /> : page === "skills" ? <SkillsPage /> : page === "settings" ? <SettingsPage focusSection={focusSettingSection} onSectionFocused={clearSettingSectionTarget} /> : <FindingsPage onNavigateToAction={navigateToFindingAction} />}
     </main>
   </div></AppErrorBoundary>;
 }
