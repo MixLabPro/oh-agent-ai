@@ -17,8 +17,9 @@ import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
+import { Reflector } from "three/addons/objects/Reflector.js";
 import type { CityModel } from "../cityModel";
-import { activeTheme, setActiveTheme, type CityThemeName } from "./cityTheme";
+import { activeTheme, setActiveTheme, skyYawOf, type CityThemeName } from "./cityTheme";
 import { loadCityAssets, type CityAssets } from "./cityAssets";
 import { planCinematic, type CinematicPlan } from "./cityCinematic";
 import { layoutCity, type CityLayout } from "./cityLayout";
@@ -94,6 +95,9 @@ export class CityEngine {
   private composer: EffectComposer | null = null;
   /** 当前后处理链的配置键（主题霓虹 × AO）：变化时重建，避免每帧判断哪些 pass 该在。 */
   private composerKey = "";
+  /** 水面平面镜：不进场景，只借它的镜像相机与渲染目标（three 的 Reflector 已处理斜裁剪面与视角判断）。 */
+  private mirror: Reflector | null = null;
+  private readonly mirrorMatrix = new THREE.Matrix4();
   private cinematic: { plan: CinematicPlan; startedAt: number; savedFov: number; look: THREE.Vector3 | null; lastSeconds: number } | null = null;
   private themeName: CityThemeName = "day";
 
@@ -129,9 +133,8 @@ export class CityEngine {
     this.sun.shadow.camera.near = 20;
     this.sun.shadow.camera.far = 620;
     this.sun.shadow.bias = -0.0006;
-    // 软阴影：r186 已移除 PCFSoftShadowMap，PCF 的半径 + 采样数给出柔和的半影。
-    this.sun.shadow.radius = 3;
-    this.sun.shadow.blurSamples = 12;
+    // 太阳是点光源般的远光：影子边缘应当清晰。只留 PCF 自带的 1 像素过滤去锯齿，不加模糊半径。
+    this.sun.shadow.radius = 1;
     this.sun.shadow.normalBias = 0.6;
     this.scene.add(this.sun, this.sun.target);
     this.skyDome = this.buildSkyDome();
@@ -204,9 +207,41 @@ export class CityEngine {
     this.lastActivityAt = performance.now();
   }
 
+  /** 每帧渲染一次水面倒影（画质≥1）。半分辨率：倒影本来就被波纹扰动，全分辨率是浪费。 */
+  private renderMirror(): void {
+    const parts = this.parts;
+    if (!parts) return;
+    if (this.quality < 1) {
+      parts.setMirror(null, null);
+      return;
+    }
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    const width = Math.max(256, Math.floor(size.x / 2));
+    const height = Math.max(256, Math.floor(size.y / 2));
+    if (!this.mirror) {
+      const mirror = new Reflector(new THREE.PlaneGeometry(1, 1), { textureWidth: width, textureHeight: height, clipBias: 0.003 });
+      mirror.rotation.x = -Math.PI / 2;
+      mirror.position.y = parts.water.position.y;
+      mirror.updateMatrixWorld();
+      this.mirror = mirror;
+    } else {
+      const target = this.mirror.getRenderTarget();
+      if (target.width !== width || target.height !== height) target.setSize(width, height);
+    }
+    // 渲染倒影时藏起水面自身，否则镜像相机看到的是水面背面。
+    parts.water.visible = false;
+    this.mirror.onBeforeRender(this.renderer, this.scene, this.camera, undefined as never, undefined as never, undefined as never);
+    parts.water.visible = true;
+    // Reflector 的 textureMatrix 末尾乘了它自己的 matrixWorld（对象空间输入）；水面着色器给的是世界坐标，乘回逆矩阵。
+    const textureMatrix = (this.mirror.material as THREE.ShaderMaterial).uniforms.textureMatrix.value as THREE.Matrix4;
+    this.mirrorMatrix.copy(textureMatrix).multiply(new THREE.Matrix4().copy(this.mirror.matrixWorld).invert());
+    parts.setMirror(this.mirror.getRenderTarget().texture, this.mirrorMatrix);
+  }
+
   /** 后处理链：环境光遮蔽（GTAO，画质≥1）给楼脚、街角、楼间缝隙压出体积感；
    *  bloom 只在霓虹主题。都不需要时直渲，省一整条链。省电档（0）两者都关。 */
   private renderFrame(): void {
+    this.renderMirror();
     const wantAo = this.quality >= 1;
     const wantBloom = activeTheme().neon && this.quality >= 1;
     if (!wantAo && !wantBloom) {
@@ -267,6 +302,7 @@ export class CityEngine {
     this.hemisphere.intensity = theme.hemiIntensity;
     this.sun.color.set(theme.sunColor);
     this.sun.intensity = theme.sunIntensity;
+    this.placeSun();
     this.renderer.toneMappingExposure = theme.exposure;
     const uniforms = (this.skyDome?.material as THREE.ShaderMaterial | undefined)?.uniforms;
     if (uniforms) {
@@ -276,6 +312,7 @@ export class CityEngine {
       uniforms.uGradeTop.value.set(theme.skyGrade.top);
       uniforms.uGradeHorizon.value.set(theme.skyGrade.horizon);
       uniforms.uGradeAmount.value = theme.skyGrade.amount;
+      uniforms.uSkyYaw.value = skyYawOf(theme);
       this.applySkyImage();
     }
     if (this.model) this.applyModel(this.model, true);
@@ -302,9 +339,8 @@ export class CityEngine {
     this.scene.fog = new THREE.Fog(new THREE.Color(activeTheme().fog), bounds * 2.1, bounds * 7.5);
     const shadowBox = bounds * 0.85 + 24;
     const shadowCamera = this.sun.shadow.camera as THREE.OrthographicCamera;
-    this.sun.position.set(this.cityCenter.x + 120, Math.max(160, bounds) * activeTheme().sunElevation, this.cityCenter.z + 70);
-    this.sun.target.position.set(this.cityCenter.x, 0, this.cityCenter.z);
-    shadowCamera.far = bounds * 3 + 300;
+    this.placeSun();
+    shadowCamera.far = this.sunDistance() + shadowBox * 2;
     shadowCamera.left = -shadowBox;
     shadowCamera.right = shadowBox;
     shadowCamera.top = shadowBox;
@@ -319,6 +355,26 @@ export class CityEngine {
     this.parts.setLabelsVisible(true);
     this.parts.setQualityLevel(this.quality);
     if (this.cursorMs !== null) this.parts.applyCursor(this.cursorMs, false);
+  }
+
+  private sunDistance(): number {
+    return Math.max(900, this.boundsRadius * 2.2);
+  }
+
+  /** 按主题的方位/高度角放太阳。曾放在城市中心正上方约 bounds 高、水平只偏 139 处——
+   *  高度角约 79°，影子只有楼高的五分之一、全藏在楼底下，看起来像「没有太阳」。 */
+  private placeSun(): void {
+    const theme = activeTheme();
+    const azimuth = THREE.MathUtils.degToRad(theme.sunAzimuthDeg);
+    const elevation = THREE.MathUtils.degToRad(theme.sunElevationDeg);
+    const distance = this.sunDistance();
+    this.sun.position.set(
+      this.cityCenter.x + Math.cos(azimuth) * Math.cos(elevation) * distance,
+      Math.sin(elevation) * distance,
+      this.cityCenter.z + Math.sin(azimuth) * Math.cos(elevation) * distance,
+    );
+    this.sun.target.position.set(this.cityCenter.x, 0, this.cityCenter.z);
+    this.sun.target.updateMatrixWorld();
   }
 
   private homeView(): { x: number; y: number; z: number } {
@@ -383,7 +439,8 @@ export class CityEngine {
     const dprCap = level >= 2 ? 2 : level === 1 ? 1.5 : 1;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, dprCap));
     this.renderer.shadowMap.enabled = level >= 1;
-    const size = level >= 2 ? 2048 : 1024;
+    // 阴影盒覆盖约 1200 单位：1024 时一个阴影像素 ≈ 1.2 单位，楼宽 6–10 的影子糊成一团。
+    const size = level >= 2 ? 4096 : 2048;
     if (this.sun.shadow.mapSize.x !== size) {
       this.sun.shadow.mapSize.set(size, size);
       this.sun.shadow.map?.dispose();
@@ -470,6 +527,7 @@ export class CityEngine {
         uGradeTop: { value: new THREE.Color(activeTheme().skyGrade.top) },
         uGradeHorizon: { value: new THREE.Color(activeTheme().skyGrade.horizon) },
         uGradeAmount: { value: activeTheme().skyGrade.amount },
+        uSkyYaw: { value: skyYawOf(activeTheme()) },
       },
       vertexShader: /* glsl */ `
         varying vec3 vDirection;
@@ -487,6 +545,7 @@ export class CityEngine {
         uniform vec3 uGradeTop;
         uniform vec3 uGradeHorizon;
         uniform float uGradeAmount;
+        uniform float uSkyYaw;
         varying vec3 vDirection;
         void main() {
           vec3 dir = normalize(vDirection);
@@ -496,7 +555,7 @@ export class CityEngine {
           color = mix(color, topColor, smoothstep(0.22, 0.85, height));
           if (uHasSky > 0.5) {
             // 等距柱状投影采样；地平线以下复用地平线那一行（下半球在水面以下，从不直接可见）。
-            vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
+            vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5 + uSkyYaw, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
             vec3 photo = texture2D(uSky, uv).rgb;
             // 调色：按高度在两个色调之间做 overlay 式乘染（保留云的明暗，只换色相）。
             vec3 tint = mix(uGradeHorizon, uGradeTop, smoothstep(0.0, 0.6, height));
@@ -716,6 +775,8 @@ export class CityEngine {
     }
     this.composer?.dispose();
     this.composer = null;
+    this.mirror?.dispose();
+    this.mirror = null;
     this.controls.dispose();
     this.disposablesSky.forEach((disposable) => disposable.dispose());
     this.renderer.dispose();

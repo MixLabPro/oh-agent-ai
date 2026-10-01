@@ -11,7 +11,7 @@ import * as THREE from "three";
 import { builtFractionAt, hashSeed, type CityBuilding, type CityModel } from "../cityModel";
 import { fbm } from "./cityNoise";
 import type { CityLayout, DistrictLayout, Parcel, Vec2 } from "./cityLayout";
-import { activeTheme } from "./cityTheme";
+import { activeTheme, skyYawOf } from "./cityTheme";
 import type { CityAssets } from "./cityAssets";
 import { makeCityTexture, makeDecoFacadeTexture, makeFacadeTexture, makeLabelSprite, paletteFor } from "./cityTextures";
 import type { TerrainField } from "./cityLayout";
@@ -68,6 +68,7 @@ type FacadeUniforms = {
   uGradeTop: { value: THREE.Color };
   uGradeHorizon: { value: THREE.Color };
   uGradeAmount: { value: number };
+  uSkyYaw: { value: number };
 };
 
 /** 带「按自身颜色补自发光」的白底材质（颜色来自实例色）：彩色环境光下保住宿主色相。 */
@@ -113,13 +114,14 @@ uniform float uEnvStrength;
 uniform vec3 uGradeTop;
 uniform vec3 uGradeHorizon;
 uniform float uGradeAmount;
+uniform float uSkyYaw;
 varying vec2 vPhotoUv;
 varying vec3 vFacadeWorld;
 varying vec3 vFacadeNormal;
 float facadeWindow = 0.0;
 vec3 facadeSky(vec3 dir) {
   dir = normalize(dir);
-  vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
+  vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5 + uSkyYaw, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
   vec3 photo = texture2D(uEnv, uv).rgb;
   vec3 tint = mix(uGradeHorizon, uGradeTop, smoothstep(0.0, 0.6, max(dir.y, 0.0)));
   return mix(photo, photo * tint * 1.55, uGradeAmount);
@@ -267,6 +269,7 @@ export class CityParts {
         uGradeTop: { value: new THREE.Color(activeTheme().skyGrade.top) },
         uGradeHorizon: { value: new THREE.Color(activeTheme().skyGrade.horizon) },
         uGradeAmount: { value: activeTheme().skyGrade.amount },
+        uSkyYaw: { value: skyYawOf(activeTheme()) },
       };
       this.facadeUniforms.push(uniforms);
       const mesh = new THREE.InstancedMesh(geometry, facadeMaterial(texture, uniforms, String(variant)), capacity);
@@ -434,6 +437,14 @@ export class CityParts {
 #endif`);
     };
     material.customProgramCacheKey = () => "city-terrain-detail";
+  }
+
+  /** 平面镜反射输入：texture=null 关闭（省电档，或相机在水面以下）。 */
+  setMirror(texture: THREE.Texture | null, matrix: THREE.Matrix4 | null): void {
+    if (!this.waterAssetUniforms) return;
+    this.waterAssetUniforms.uMirror.value = texture;
+    this.waterAssetUniforms.uHasMirror.value = texture ? 1 : 0;
+    if (matrix) (this.waterAssetUniforms.uMirrorMatrix.value as THREE.Matrix4).copy(matrix);
   }
 
   /** 素材到齐后原地换上：地面细节、照片立面、灰泥法线、水面法线与天空反射。 */
@@ -1069,11 +1080,16 @@ export class CityParts {
         uFog: { value: new THREE.Color(activeTheme().skyHorizon) },
         uFogRange: { value: new THREE.Vector2(...activeTheme().waterFog) },
         uNormal: { value: null as THREE.Texture | null },
+        // 平面镜反射（引擎每帧把镜像相机看到的场景渲染进来）：岸边的楼、山、桥倒映在水里。
+        uMirror: { value: null as THREE.Texture | null },
+        uMirrorMatrix: { value: new THREE.Matrix4() },
+        uHasMirror: { value: 0 },
         uSkyTex: { value: null as THREE.Texture | null },
         uHasAssets: { value: 0 },
         uGradeTop: { value: new THREE.Color(activeTheme().skyGrade.top) },
         uGradeHorizon: { value: new THREE.Color(activeTheme().skyGrade.horizon) },
         uGradeAmount: { value: activeTheme().skyGrade.amount },
+        uSkyYaw: { value: skyYawOf(activeTheme()) },
       },
       vertexShader: /* glsl */ `
         varying vec3 vWorld;
@@ -1092,16 +1108,20 @@ export class CityParts {
         uniform vec3 uFog;
         uniform vec2 uFogRange;
         uniform sampler2D uNormal;
+        uniform sampler2D uMirror;
+        uniform mat4 uMirrorMatrix;
+        uniform float uHasMirror;
         uniform sampler2D uSkyTex;
         uniform float uHasAssets;
         uniform vec3 uGradeTop;
         uniform vec3 uGradeHorizon;
         uniform float uGradeAmount;
+        uniform float uSkyYaw;
         varying vec3 vWorld;
         // 与天空球同一套采样 + 调色：反射和远处淡出都要与天空完全一致，否则地平线出现接缝。
         vec3 skyAt(vec3 dir) {
           dir = normalize(dir);
-          vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
+          vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5 + uSkyYaw, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
           vec3 photo = texture2D(uSkyTex, uv).rgb;
           vec3 tint = mix(uGradeHorizon, uGradeTop, smoothstep(0.0, 0.6, max(dir.y, 0.0)));
           return mix(photo, photo * tint * 1.55, uGradeAmount);
@@ -1130,7 +1150,15 @@ export class CityParts {
           float fresnel = pow(1.0 - max(dot(n, view), 0.0), 2.4);
           vec3 base = mix(uShallow, uDeep, clamp(length(p) / 420.0, 0.0, 1.0));
           vec3 skyColor = uHasAssets > 0.5 ? skyAt(reflect(-view, n)) : uSky;
-          vec3 color = mix(base, skyColor, uHasAssets > 0.5 ? 0.12 + fresnel * 0.78 : fresnel * 0.6);
+          if (uHasMirror > 0.5) {
+            // 镜像贴图按投影坐标采样，再用波纹法线扰动：倒影随水波轻晃而不是一面硬镜子。
+            vec4 projected = uMirrorMatrix * vec4(vWorld, 1.0);
+            vec2 mirrorUv = projected.xy / projected.w + n.xz * 0.035;
+            skyColor = texture2D(uMirror, mirrorUv).rgb;
+          }
+          // 有镜面倒影时反射占比更高：平静海面在斜视角下几乎就是一面镜子。
+          float reflectance = uHasMirror > 0.5 ? 0.04 + fresnel * 0.9 : (uHasAssets > 0.5 ? 0.12 + fresnel * 0.78 : fresnel * 0.6);
+          vec3 color = mix(base, skyColor, reflectance);
           float specular = pow(max(dot(reflect(-normalize(uSun), n), view), 0.0), 64.0);
           color += vec3(1.0, 0.97, 0.88) * specular * 1.05;
           color += vec3(0.05) * smoothstep(0.5, 0.95, h0);

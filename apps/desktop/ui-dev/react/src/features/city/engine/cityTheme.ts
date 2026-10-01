@@ -17,11 +17,16 @@ export type CityTheme = {
   fog: string;
   hemiSky: string;
   hemiGround: string;
+  /** 环境光（半球光）。影子里只缺太阳那一项，环境光一强影子就浅到看不见——曾 0.6/1.0，影子被地面纹理淹没。 */
   hemiIntensity: number;
   sunColor: string;
   sunIntensity: number;
-  /** 太阳相对城市中心的偏移比例（相对 bounds）：越低影子越长。 */
-  sunElevation: number;
+  /** 太阳方位与高度角（度）。方位与天空全景里太阳的位置对齐（等距柱状 u = atan(z,x)/2π + 0.5），
+   *  地上的影子方向才和天上的亮处一致。高度角越低影子越长。 */
+  sunAzimuthDeg: number;
+  sunElevationDeg: number;
+  /** 天空全景图里太阳所在的方位（度）。全景按 sunAzimuthDeg − 这个值旋转，天上亮处与地上影子同向。 */
+  skySunAzimuthDeg: number;
   exposure: number;
   water: { deep: string; shallow: string; sky: string };
   /** 水面距离淡出区间（相机距离）：日落主题拉远，免得整片海都被橙雾吃掉。 */
@@ -51,10 +56,12 @@ const DAY: CityTheme = {
   fog: "#dfeef2",
   hemiSky: "#eaf6fa",
   hemiGround: "#cbbfa6",
-  hemiIntensity: 0.6,
+  hemiIntensity: 0.32,
   sunColor: "#fff3de",
-  sunIntensity: 1.55,
-  sunElevation: 1,
+  sunIntensity: 2.6,
+  sunAzimuthDeg: -50,
+  sunElevationDeg: 42,
+  skySunAzimuthDeg: 36,
   exposure: 1.06,
   water: { deep: "#57a3b4", shallow: "#a5d6da", sky: "#dff0f2" },
   waterFog: [900, 2300],
@@ -84,10 +91,12 @@ const VICE: CityTheme = {
   fog: "#ffa98a",
   hemiSky: "#ffc9e6",
   hemiGround: "#9a80d6",
-  hemiIntensity: 1.0,
+  hemiIntensity: 0.55,
   sunColor: "#ffd9bd",
-  sunIntensity: 1.55,
-  sunElevation: 0.42,
+  sunIntensity: 2.4,
+  sunAzimuthDeg: -60,
+  sunElevationDeg: 16,
+  skySunAzimuthDeg: 43,
   exposure: 1.18,
   water: { deep: "#1a86c4", shallow: "#52dbe0", sky: "#ff9ccf" },
   waterFog: [1500, 4200],
@@ -115,6 +124,11 @@ export const THEMES: Record<CityThemeName, CityTheme> = { day: DAY, vice: VICE }
 let active: CityTheme = DAY;
 
 /** 当前主题：纹理/配色/植被在构建期读取；换主题 = 引擎重建 parts。 */
+/** 天空全景的 u 偏移（0–1）：着色器里 u = atan(z,x)/2π + 0.5 + skyYaw。 */
+export function skyYawOf(theme: CityTheme): number {
+  return (theme.skySunAzimuthDeg - theme.sunAzimuthDeg) / 360;
+}
+
 export function activeTheme(): CityTheme {
   return active;
 }
