@@ -13,6 +13,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { CityModel } from "../cityModel";
+import { activeTheme, setActiveTheme, type CityThemeName } from "./cityTheme";
 import { layoutCity, type CityLayout } from "./cityLayout";
 import { CityParts, type QualityLevel } from "./cityParts";
 
@@ -79,17 +80,19 @@ export class CityEngine {
   private cityCenter = { x: 0, z: 0 };
   private readonly disposablesSky: Array<{ dispose: () => void }> = [];
   private readonly observers: Array<() => void> = [];
+  private skyDome: THREE.Mesh | null = null;
+  private themeName: CityThemeName = "day";
 
   constructor(private readonly options: CityEngineOptions) {
     const canvas = options.canvas;
     const lowPower = { antialias: window.devicePixelRatio < 1.75, powerPreference: "low-power" as const, stencil: false };
     this.renderer = new THREE.WebGLRenderer({ canvas, ...lowPower });
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.06;
+    this.renderer.toneMappingExposure = activeTheme().exposure;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
 
-    this.camera = new THREE.PerspectiveCamera(42, 1, 1.5, 3_000);
+    this.camera = new THREE.PerspectiveCamera(42, 1, 1.5, 8_000);
     this.camera.position.set(150, 120, 170);
 
     this.controls = new OrbitControls(this.camera, canvas);
@@ -101,10 +104,11 @@ export class CityEngine {
     this.controls.autoRotate = false;
     this.controls.autoRotateSpeed = 0.45;
 
-    this.scene.background = new THREE.Color("#d9ecf1");
-    this.hemisphere = new THREE.HemisphereLight("#eaf6fa", "#cbbfa6", 0.6);
+    const theme = activeTheme();
+    this.scene.background = new THREE.Color(theme.skyHorizon);
+    this.hemisphere = new THREE.HemisphereLight(theme.hemiSky, theme.hemiGround, theme.hemiIntensity);
     this.scene.add(this.hemisphere);
-    this.sun = new THREE.DirectionalLight("#fff3de", 1.55);
+    this.sun = new THREE.DirectionalLight(theme.sunColor, theme.sunIntensity);
     this.sun.position.set(120, 160, 70);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(1024, 1024);
@@ -113,7 +117,8 @@ export class CityEngine {
     this.sun.shadow.bias = -0.0006;
     this.sun.shadow.normalBias = 0.6;
     this.scene.add(this.sun, this.sun.target);
-    this.scene.add(this.buildSkyDome());
+    this.skyDome = this.buildSkyDome();
+    this.scene.add(this.skyDome);
 
     this.applyQualityLevel(1);
 
@@ -188,6 +193,27 @@ export class CityEngine {
     }
   }
 
+  /** 切换视觉主题：场景级（天空/光/雾/曝光）原地更新，parts 级（水、地面、植被、宿主配色）重建。 */
+  setTheme(name: CityThemeName): void {
+    if (name === this.themeName && this.parts) return;
+    this.themeName = name;
+    const theme = setActiveTheme(name);
+    this.scene.background = new THREE.Color(theme.skyHorizon);
+    this.hemisphere.color.set(theme.hemiSky);
+    this.hemisphere.groundColor.set(theme.hemiGround);
+    this.hemisphere.intensity = theme.hemiIntensity;
+    this.sun.color.set(theme.sunColor);
+    this.sun.intensity = theme.sunIntensity;
+    this.renderer.toneMappingExposure = theme.exposure;
+    const uniforms = (this.skyDome?.material as THREE.ShaderMaterial | undefined)?.uniforms;
+    if (uniforms) {
+      uniforms.topColor.value.set(theme.skyTop);
+      uniforms.midColor.value.set(theme.skyMid);
+      uniforms.horizonColor.value.set(theme.skyHorizon);
+    }
+    if (this.model) this.applyModel(this.model, true);
+  }
+
   /** reuse=false：丢弃上一布局做全量重排（分页到齐后的圈层修正）。 */
   applyModel(model: CityModel, reuse = true): void {
     this.model = model;
@@ -205,10 +231,10 @@ export class CityEngine {
     const bounds = Math.max(100, Math.hypot(layout.urbanBounds.right - layout.urbanBounds.left, layout.urbanBounds.south - layout.urbanBounds.north) / 2 + 35);
     this.boundsRadius = bounds;
     this.controls.maxDistance = bounds * 4.5;
-    this.scene.fog = new THREE.Fog(new THREE.Color("#dfeef2"), bounds * 2.1, bounds * 7.5);
+    this.scene.fog = new THREE.Fog(new THREE.Color(activeTheme().fog), bounds * 2.1, bounds * 7.5);
     const shadowBox = bounds * 0.85 + 24;
     const shadowCamera = this.sun.shadow.camera as THREE.OrthographicCamera;
-    this.sun.position.set(this.cityCenter.x + 120, Math.max(160, bounds), this.cityCenter.z + 70);
+    this.sun.position.set(this.cityCenter.x + 120, Math.max(160, bounds) * activeTheme().sunElevation, this.cityCenter.z + 70);
     this.sun.target.position.set(this.cityCenter.x, 0, this.cityCenter.z);
     shadowCamera.far = bounds * 3 + 300;
     shadowCamera.left = -shadowBox;
@@ -354,14 +380,15 @@ export class CityEngine {
 
   /** 天穹：内翻大球，顶部到地平线的垂直渐变，1 次绘制的"天空感"。 */
   private buildSkyDome(): THREE.Mesh {
-    const geometry = new THREE.SphereGeometry(1_400, 24, 14);
+    const geometry = new THREE.SphereGeometry(6_000, 24, 14);
     const material = new THREE.ShaderMaterial({
       side: THREE.BackSide,
       depthWrite: false,
       fog: false,
       uniforms: {
-        topColor: { value: new THREE.Color("#a3cee6") },
-        horizonColor: { value: new THREE.Color("#eef6ee") },
+        topColor: { value: new THREE.Color(activeTheme().skyTop) },
+        midColor: { value: new THREE.Color(activeTheme().skyMid) },
+        horizonColor: { value: new THREE.Color(activeTheme().skyHorizon) },
       },
       vertexShader: /* glsl */ `
         varying vec3 vDirection;
@@ -372,11 +399,14 @@ export class CityEngine {
       `,
       fragmentShader: /* glsl */ `
         uniform vec3 topColor;
+        uniform vec3 midColor;
         uniform vec3 horizonColor;
         varying vec3 vDirection;
         void main() {
           float height = clamp(vDirection.y, 0.0, 1.0);
-          vec3 color = mix(horizonColor, topColor, pow(height, 0.62));
+          // 地平线 → 中段 → 天顶：日落主题靠中段的粉色撑出渐变带。
+          vec3 color = mix(horizonColor, midColor, smoothstep(0.0, 0.28, height));
+          color = mix(color, topColor, smoothstep(0.22, 0.85, height));
           gl_FragColor = vec4(color, 1.0);
           #include <colorspace_fragment>
         }

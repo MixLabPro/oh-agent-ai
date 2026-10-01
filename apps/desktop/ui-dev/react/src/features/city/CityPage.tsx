@@ -8,6 +8,7 @@ import "./city.css";
 import { CityLoader, CITY_WINDOWS, type CityWindowKind } from "./cityData";
 import type { CityBuilding, CityModel } from "./cityModel";
 import { paletteFor } from "./engine/cityTextures";
+import type { CityThemeName } from "./engine/cityTheme";
 import { CityEngine, type EngineQualityMode, type EngineStats } from "./engine/CityEngine";
 import { hostName } from "../../lib/hostNames";
 import { formatCost } from "../sessions/costSummary";
@@ -39,6 +40,14 @@ function durationLabel(startedAt: number, endedAt: number | null, language: AppL
   return message("city.detail.days", language, { count: Math.round(hours / 24) });
 }
 
+function readStoredTheme(): CityThemeName {
+  try {
+    return window.localStorage.getItem("cityTheme") === "vice" ? "vice" : "day";
+  } catch {
+    return "day";
+  }
+}
+
 /** 帧率/绘制次数是调试信息：只在 ?cityDebug 或 localStorage.cityDebug=1 时显示，不给最终用户。 */
 function cityDebugEnabled(): boolean {
   try {
@@ -65,6 +74,7 @@ export function CityPage() {
   const [windowKind, setWindowKind] = useState<CityWindowKind>("30d");
   const [qualityMode, setQualityMode] = useState<EngineQualityMode>("auto");
   const [labelsVisible, setLabelsVisible] = useState(true);
+  const [theme, setTheme] = useState<CityThemeName>(readStoredTheme);
   const [stats, setStats] = useState<EngineStats | null>(null);
   const [cursorMs, setCursorMs] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -204,6 +214,16 @@ export function CityPage() {
   }, [labelsVisible]);
 
   useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    engine.setTheme(theme);
+    // applyModel 会把标签重置为可见，按当前开关再套一次。
+    engine.setLabelsVisible(labelsVisible);
+    try { window.localStorage.setItem("cityTheme", theme); } catch { /* 无存储时仅本次生效 */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [theme]);
+
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         if (detailOpen) setDetailOpen(false);
@@ -276,6 +296,10 @@ export function CityPage() {
           <option value="auto">{message("city.quality.auto", language)}</option>
           <option value="high">{message("city.quality.high", language)}</option>
           <option value="eco">{message("city.quality.eco", language)}</option>
+        </SelectInput>
+        <SelectInput aria-label={message("city.theme", language)} value={theme} onChange={(event) => setTheme(event.target.value as CityThemeName)}>
+          <option value="day">{message("city.theme.day", language)}</option>
+          <option value="vice">{message("city.theme.vice", language)}</option>
         </SelectInput>
         <Button type="button" onClick={() => setLabelsVisible((value) => !value)}>{message(labelsVisible ? "city.labelsHide" : "city.labelsShow", language)}</Button>
         <Button type="button" onClick={() => engineRef.current?.resetView()}>{message("city.resetView", language)}</Button>

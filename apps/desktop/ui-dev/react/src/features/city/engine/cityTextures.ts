@@ -9,6 +9,7 @@
 import * as THREE from "three";
 import type { CityLayout } from "./cityLayout";
 import { hashSeed } from "../cityModel";
+import { activeTheme } from "./cityTheme";
 
 export type DistrictPalette = {
   /** 楼身 tint（乘在近白色立面纹理上）。 */
@@ -18,17 +19,9 @@ export type DistrictPalette = {
   park: string;
 };
 
-const PALETTES: Record<string, DistrictPalette> = {
-  "claude-code": { wall: "#e6d9c6", roof: "#cfa583", accent: "#c96f4a", park: "#a8bf97" },
-  codex: { wall: "#d3dce2", roof: "#93a7b4", accent: "#4a7fa0", park: "#9db8a8" },
-  dsh: { wall: "#d9e2d8", roof: "#98ac9a", accent: "#3f8f7a", park: "#a3c2a7" },
-  "plugin:zcode": { wall: "#e0dae8", roof: "#ab9ec2", accent: "#7c6fb0", park: "#a9bba4" },
-  "minimax-code": { wall: "#e4dee2", roof: "#b5a2ad", accent: "#a05a76", park: "#aabcaa" },
-  default: { wall: "#dededa", roof: "#a9a9a3", accent: "#7d8a8f", park: "#a6bb9f" },
-};
-
 export function paletteFor(hostId: string): DistrictPalette {
-  return PALETTES[hostId] ?? PALETTES.default;
+  const theme = activeTheme();
+  return theme.hosts[hostId] ?? theme.fallback;
 }
 
 function canvas2d(width: number, height: number): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } {
@@ -120,7 +113,8 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
     const z = (iz / 383 - 0.5) * layout.extent;
     const h = layout.terrain.height(x, z);
     const noise = hashSeed(`ground:${ix}:${iz}`) * 7;
-    const color = h < 0 ? [75, 119, 127] : h < 2.5 ? [199, 189, 158] : h < 9 ? [143, 159, 125] : h < 35 ? [113, 134, 103] : [155, 150, 132];
+    const g = activeTheme().ground;
+    const color = h < 0 ? g.sea : h < 2.5 ? g.sand : h < 9 ? g.lawn : h < 35 ? g.grass : g.rock;
     const index = (iz * 384 + ix) * 4;
     pixels.data[index] = color[0] + noise; pixels.data[index+1] = color[1] + noise; pixels.data[index+2] = color[2] + noise; pixels.data[index+3] = 255;
   }

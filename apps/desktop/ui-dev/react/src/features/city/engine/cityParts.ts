@@ -11,6 +11,7 @@ import * as THREE from "three";
 import { builtFractionAt, hashSeed, type CityBuilding, type CityModel } from "../cityModel";
 import { fbm } from "./cityNoise";
 import type { CityLayout, DistrictLayout, Parcel, Vec2 } from "./cityLayout";
+import { activeTheme } from "./cityTheme";
 import { makeCityTexture, makeFacadeTexture, makeLabelSprite, paletteFor } from "./cityTextures";
 import type { TerrainField } from "./cityLayout";
 
@@ -471,38 +472,105 @@ export class CityParts {
     }
   }
 
-  private buildTrees(): THREE.InstancedMesh {
+  /** 树位：规划层的 parkTrees（此前算出来却从没渲染，district.trees 恒为空）+
+   *  棕榈主题下沿街行道树（避开桥、水面和路口）。 */
+  private treeSpots(): Array<{ x: number; z: number; y: number; seed: number }> {
+    const theme = activeTheme();
     const spots: Array<{ x: number; z: number; y: number; seed: number }> = [];
     for (const district of this.layout.districts) spots.push(...district.trees);
+    spots.push(...(this.layout.parkTrees ?? []));
+    if (theme.streetTreeSpacing > 0) {
+      const terrain = this.layout.terrain;
+      for (const edge of this.layout.roadEdges) {
+        if (edge.bridge) continue;
+        const [a, b] = edge.points;
+        const length = Math.hypot(b.x - a.x, b.z - a.z);
+        if (length < 20) continue;
+        const dx = (b.x - a.x) / length;
+        const dz = (b.z - a.z) / length;
+        const spacing = theme.streetTreeSpacing * (edge.kind === "arterial" ? 0.8 : 1);
+        // 两端各留出路口宽度，沿路两侧交错栽种。
+        for (let along = 9, index = 0; along < length - 9; along += spacing, index += 1) {
+          const side = index % 2 === 0 ? 1 : -1;
+          const offset = edge.width / 2 + 2.4;
+          const x = a.x + dx * along - dz * offset * side;
+          const z = a.z + dz * along + dx * offset * side;
+          const y = terrain.height(x, z);
+          if (y < 1.2) continue;
+          spots.push({ x, z, y, seed: hashSeed(`street:${edge.id}:${index}`) });
+        }
+      }
+    }
+    return spots;
+  }
+
+  /** 圆冠树：树干 + 二十面体树冠。 */
+  private roundTreeGeometry(): THREE.BufferGeometry {
+    const theme = activeTheme();
     const trunk = new THREE.CylinderGeometry(0.14, 0.2, 0.9, 5).translate(0, 0.45, 0);
     const crown = new THREE.IcosahedronGeometry(0.78, 0).translate(0, 1.35, 0);
-    const trunkColor = new THREE.Color("#8a6a4c");
-    const crownColor = new THREE.Color("#6f9d63");
-    const colors = new Float32Array(trunk.getAttribute("position").count * 3 + crown.getAttribute("position").count * 3);
+    return this.tintedMerge([[trunk, theme.trunk], [crown, theme.foliage]]);
+  }
+
+  /** 棕榈：略弯的细高树干 + 一圈下垂的羽叶（每片叶 = 前倾的扁长方体）。 */
+  private palmGeometry(): THREE.BufferGeometry {
+    const theme = activeTheme();
+    const height = 4.6;
+    const trunk = new THREE.CylinderGeometry(0.1, 0.19, height, 6).translate(0, height / 2, 0);
+    // 树干顶端微微偏向一侧，避免整齐得像电线杆。
+    const position = trunk.getAttribute("position") as THREE.BufferAttribute;
+    for (let index = 0; index < position.count; index += 1) {
+      const t = position.getY(index) / height;
+      position.setX(index, position.getX(index) + t * t * 0.55);
+    }
+    trunk.computeVertexNormals();
+    const parts: Array<[THREE.BufferGeometry, string]> = [[trunk, theme.trunk]];
+    const fronds = 8;
+    for (let index = 0; index < fronds; index += 1) {
+      const frond = new THREE.BoxGeometry(2.3, 0.05, 0.42).translate(1.15, 0, 0);
+      frond.rotateZ(-0.42 - (index % 2) * 0.22); // 叶尖下垂
+      frond.rotateY((index / fronds) * Math.PI * 2);
+      frond.translate(0.55, height - 0.05, 0);
+      parts.push([frond, index % 3 === 0 ? "#27a868" : theme.foliage]);
+    }
+    return this.tintedMerge(parts);
+  }
+
+  private tintedMerge(parts: Array<[THREE.BufferGeometry, string]>): THREE.BufferGeometry {
+    let total = 0;
+    for (const [geometry] of parts) total += geometry.getAttribute("position").count;
+    const colors = new Float32Array(total * 3);
     let offset = 0;
-    for (let index = 0; index < trunk.getAttribute("position").count; index += 1) {
-      colors[offset++] = trunkColor.r;
-      colors[offset++] = trunkColor.g;
-      colors[offset++] = trunkColor.b;
+    const color = new THREE.Color();
+    for (const [geometry, hex] of parts) {
+      color.set(hex);
+      for (let index = 0; index < geometry.getAttribute("position").count; index += 1) {
+        colors[offset++] = color.r;
+        colors[offset++] = color.g;
+        colors[offset++] = color.b;
+      }
     }
-    for (let index = 0; index < crown.getAttribute("position").count; index += 1) {
-      colors[offset++] = crownColor.r;
-      colors[offset++] = crownColor.g;
-      colors[offset++] = crownColor.b;
-    }
-    const treeGeometry = mergeGeometries([trunk, crown]);
-    treeGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    const merged = mergeGeometries(parts.map(([geometry]) => geometry));
+    merged.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    for (const [geometry] of parts) geometry.dispose();
+    return merged;
+  }
+
+  private buildTrees(): THREE.InstancedMesh {
+    const spots = this.treeSpots();
+    const palm = activeTheme().vegetation === "palm";
+    const treeGeometry = palm ? this.palmGeometry() : this.roundTreeGeometry();
     const material = new THREE.MeshLambertMaterial({ vertexColors: true });
     const mesh = new THREE.InstancedMesh(treeGeometry, material, Math.max(spots.length, 1));
     mesh.castShadow = true;
     spots.forEach((spot, index) => {
-      const scale = 0.8 + spot.seed * 0.9;
+      const scale = palm ? 1.25 + spot.seed * 0.7 : 0.8 + spot.seed * 0.9;
       this.compose(spot.x, spot.y - 0.1, spot.z, spot.seed * Math.PI * 2, scale, scale, scale);
       mesh.setMatrixAt(index, this.matrix);
     });
     mesh.count = spots.length;
     this.group.add(mesh);
-    this.disposables.push(treeGeometry, material, trunk, crown);
+    this.disposables.push(treeGeometry, material);
     return mesh;
   }
 
@@ -642,12 +710,13 @@ export class CityParts {
       uniforms: {
         uTime: { value: 0 },
         uSun: { value: new THREE.Vector3(0.55, 0.75, 0.36).normalize() },
-        uDeep: { value: new THREE.Color("#57a3b4") },
-        uShallow: { value: new THREE.Color("#a5d6da") },
-        uSky: { value: new THREE.Color("#dff0f2") },
+        uDeep: { value: new THREE.Color(activeTheme().water.deep) },
+        uShallow: { value: new THREE.Color(activeTheme().water.shallow) },
+        uSky: { value: new THREE.Color(activeTheme().water.sky) },
         // 与 scene.background 同色：ShaderMaterial 不吃 scene.fog，水面远处要自己淡出到天空色，
         // 否则 2600 见方的水面直边会像「世界边缘」露在天空下。
-        uFog: { value: new THREE.Color("#d9ecf1") },
+        uFog: { value: new THREE.Color(activeTheme().skyHorizon) },
+        uFogRange: { value: new THREE.Vector2(...activeTheme().waterFog) },
       },
       vertexShader: /* glsl */ `
         varying vec3 vWorld;
@@ -664,6 +733,7 @@ export class CityParts {
         uniform vec3 uShallow;
         uniform vec3 uSky;
         uniform vec3 uFog;
+        uniform vec2 uFogRange;
         varying vec3 vWorld;
         float wave(vec2 p, float t) {
           float h = sin(p.x * 0.09 + t * 0.8) * cos(p.y * 0.075 - t * 0.6) * 0.5;
@@ -696,7 +766,7 @@ export class CityParts {
           gl_FragColor = vec4(color, 1.0);
           #include <tonemapping_fragment>
           // 雾混在色调映射之后：scene.background 不经色调映射，先混再映射会让远水发灰、与天空出现色带。
-          gl_FragColor.rgb = mix(gl_FragColor.rgb, uFog, smoothstep(900.0, 2300.0, dist));
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, uFog, smoothstep(uFogRange.x, uFogRange.y, dist));
           #include <colorspace_fragment>
         }
       `,
