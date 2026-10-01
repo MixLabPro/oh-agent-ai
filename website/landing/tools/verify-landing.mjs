@@ -60,7 +60,17 @@ for (const [, id] of appJs.matchAll(/querySelector\('#([\w-]+)'\)/g)) {
 const cjk = /[㐀-鿿]/;
 const aria = [...html.matchAll(/aria-label="([^"]*)"/g)].map((m) => m[1]).filter((v) => cjk.test(v));
 assert.deepEqual(aria, [], `英文页 aria-label 不得含中文：${aria.join(" | ")}`);
-console.log("演示脚本: OK（可解析 / 交互接线在场 / 选择器均存在 / aria 无中文残留）");
+// 英文默认面：可见文本、英文词表、CSS 生成内容都不得残留中文（唯一例外：语言切换入口「中文」）。
+const visible = html.replace(/<script[\s\S]*?<\/script>/g, "").replace(/<!--[\s\S]*?-->/g, "").replace(/<a[^>]*data-lang-switch[^>]*>[\s\S]*?<\/a>/g, "");
+const visibleCjk = [...visible.matchAll(/>([^<>]*[㐀-鿿「」][^<>]*)</g)].map((m) => m[1].trim());
+assert.deepEqual(visibleCjk, [], `英文页可见文本含中文：${visibleCjk.join(" | ")}`);
+const i18nSrc = readFileSync(path.join(landing, "i18n.js"), "utf8");
+const enDict = i18nSrc.slice(i18nSrc.indexOf("en: {"), i18nSrc.indexOf("zh: {"));
+const enCjk = [...enDict.matchAll(/"([^"]*[㐀-鿿「」][^"]*)"/g)].map((m) => m[1].slice(0, 40));
+assert.deepEqual(enCjk, [], `英文词表含中文/全角引号：${enCjk.join(" | ")}`);
+const cssBase = css.split("\n").filter((l) => !/data-av-lang="zh"/.test(l)).join("\n");
+assert.ok(!/content:\s*"[^"]*[㐀-鿿]/.test(cssBase), "默认（英文）CSS 生成内容不得含中文；中文版请用 html[data-av-lang=\"zh\"] 覆盖");
+console.log("演示脚本: OK（可解析 / 交互接线在场 / 选择器均存在 / aria 与英文可见文本无中文残留）");
 
 // ── 2c. 禁用词（LANDING_VALUE_FIRST_SPEC §0.6.5）：我们不产出/不支持的承诺 ──
 const i18nText = readFileSync(path.join(landing, "i18n.js"), "utf8");

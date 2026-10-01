@@ -93,9 +93,10 @@ p { text-wrap: pretty; }
 .kicker { display: inline-flex; align-items: center; gap: 10px; font-size: 14px; color: var(--ink-2); }
 .hero h1 {
   margin: 22px 0 24px;
-  font-size: clamp(40px, 4.6vw, 64px); font-weight: 650; line-height: 1.18; letter-spacing: -.03em;
+  font-size: clamp(32px, 3.4vw, 48px); font-weight: 650; line-height: 1.18; letter-spacing: -.03em;
 }
-.hero h1 span { white-space: nowrap; }
+/* 不再 nowrap：新标题一行约 33 字符，nowrap 会把单列网格撑宽、整页横向溢出（手机 390px 实测被截断） */
+.hero h1 span { text-wrap: balance; overflow-wrap: anywhere; }
 .hero h1 em { font-style: normal; color: var(--mint); }
 .lede { max-width: 520px; font-size: 18px; line-height: 1.8; color: var(--ink-2); }
 .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 34px; }
@@ -251,7 +252,7 @@ p { text-wrap: pretty; }
   background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
   font-size: 13px;
 }
-.vis::after { content: "示例"; position: absolute; right: 10px; bottom: 8px; font-size: 11px; color: #5d6f72; }
+.vis::after { content: "Sample"; position: absolute; right: 10px; bottom: 8px; font-size: 11px; color: #5d6f72; }
 .vis-sources { display: grid; grid-template-columns: auto auto 1fr; grid-template-rows: repeat(3, auto); gap: 8px 12px; align-items: center; }
 .vis-sources .src { grid-column: 1; padding: 5px 10px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--ink-2); font-size: 12px; }
 .vis-sources .arrow { grid-column: 2; grid-row: 1 / 4; color: var(--mint-2); font-size: 20px; }
@@ -360,7 +361,8 @@ dialog h2 { margin-top: 16px; font-size: 26px; font-weight: 650; letter-spacing:
 
 /* ── 响应式 ── */
 @media (max-width: 1040px) {
-  .hero-grid { grid-template-columns: 1fr; gap: 48px; }
+  .hero-grid { grid-template-columns: minmax(0, 1fr); gap: 48px; }
+  .hero-grid > * { min-width: 0; }
   .hero-copy { max-width: 640px; }
   .scope { max-width: 720px; }
   .steps { grid-template-columns: 1fr; max-width: 640px; }
@@ -410,3 +412,5 @@ dialog h2 { margin-top: 16px; font-size: 26px; font-weight: 650; letter-spacing:
   html { scroll-behavior: auto; }
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+html[data-av-lang="zh"] .vis::after { content: "示例"; }

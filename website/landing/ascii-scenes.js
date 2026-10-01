@@ -212,7 +212,7 @@
 
   // ── 工作收据：逐行打印，打完停留，再换一张 ──
   const RECEIPTS = [
-    ['research-q3', '128', '3', '18.6 M', '90 %', '¥ 4.10', 'estimate'],
+    ['research-q3', '128', '3', '18.6 M', '90 %', ((window.__avLandingLang || {}).lang === 'zh' ? '¥ 4.10' : '$ 0.60'), 'estimate'],
     ['refactor-auth', '342', '1', '42.3 M', '96 %', '—', 'subscription'],
   ];
   function receipt(el) {

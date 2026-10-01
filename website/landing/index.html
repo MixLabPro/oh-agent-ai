@@ -3,19 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Agent Vitals — a local agent work ledger. On-device analysis of your agents' usage, cost basis, failures, and session traces on macOS. MIT open source; sessions never leave your Mac.">
+  <meta name="description" content="Audit your AI tools' session logs offline. Find where they got stuck and what it cost — nothing leaves your Mac. Agent Vitals for macOS.">
   <link rel="alternate" hreflang="en" href="https://mixlabpro.github.io/agent-vitals/">
   <link rel="alternate" hreflang="zh" href="https://mixlabpro.github.io/agent-vitals/?lang=zh">
   <meta name="theme-color" content="#0a0f12">
   <meta property="og:image" content="assets/app-icon.png">
-  <meta property="og:title" content="You hand the work to Agents. Who checks the agents? — Agent Vitals">
-  <meta property="og:description" content="A local receipt for every agent run: how much it used, what it cost, where it failed, which sessions deserve a look. Sessions analyzed on-device only.">
-  <title>Agent Vitals — local agent work ledger</title>
+  <meta property="og:title" content="Is your AI actually working — or just burning money? — Agent Vitals">
+  <meta property="og:description" content="Audit your AI tools' session logs offline. Find where they got stuck and what it cost — nothing leaves your Mac.">
+  <title>Agent Vitals — a checkup for your AI tools</title>
   <link rel="icon" href="assets/app-icon.png">
-  <link rel="stylesheet" href="styles.css?v=20260928-r3">
-  <script src="i18n.js?v=20261001" defer></script>
-  <script src="app.js?v=20261001" defer></script>
-  <script src="ascii-scenes.js?v=20260928-r3" defer></script>
+  <link rel="stylesheet" href="styles.css?v=20261001d">
+  <script src="i18n.js?v=20261001f" defer></script>
+  <script src="app.js?v=20261001c" defer></script>
+  <script src="ascii-scenes.js?v=20261001c" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main" data-i18n="skip">Skip to content</a>
@@ -42,9 +42,9 @@
     <section class="hero" aria-labelledby="hero-title">
       <div class="shell hero-grid">
         <div class="hero-copy">
-          <p class="kicker"><span class="dot"></span><span data-i18n="kicker">Local agent work ledger · macOS beta</span></p>
-          <h1 id="hero-title"><span data-i18n="hero.l1">You hand the work to Agents.</span><br><em data-i18n="hero.l2">Keep the reins.</em></h1>
-          <p class="lede" data-i18n="hero.lede">How much did it cost, where did it stall, why did it retry over and over? Agent Vitals reads the records your agents already leave on your Mac and turns them into checkable usage, cost basis, and execution traces.</p>
+          <p class="kicker"><span class="dot"></span><span data-i18n="kicker">A checkup for your AI tools · macOS beta</span></p>
+          <h1 id="hero-title"><span data-i18n="hero.l1">Is your AI actually working,</span><br><em data-i18n="hero.l2">or just burning money?</em></h1>
+          <p class="lede" data-i18n="hero.lede">Audit your AI tools' session logs offline. Find where they got stuck and what it cost — nothing leaves your Mac.</p>
           <div class="actions">
             <a class="button button-primary" href="#download">
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4"/></svg><span data-i18n="cta.download">Get the macOS beta</span>
@@ -111,7 +111,7 @@
             </aside>
             <div class="app-content">
               <div class="app-heading">
-                <div><p class="eyebrow" data-i18n="demo.head.eyebrow">Local agent work records</p><h3 data-i18n="demo.head.title">Who worked, what it cost, where it stuck</h3></div>
+                <div><p class="eyebrow" data-i18n="demo.head.eyebrow">Local agent work records</p><h3 data-i18n="demo.head.title">Who worked, what it cost, where it got stuck</h3></div>
                 <div class="segmented" role="group" aria-label="Demo time range">
                   <button type="button" data-period="week" aria-pressed="false" data-i18n="demo.week">This week</button>
                   <button type="button" data-period="month" aria-pressed="true" data-i18n="demo.month">This month</button>
@@ -119,7 +119,7 @@
               </div>
               <div class="stats" aria-live="polite">
                 <div><span data-i18n="demo.tokens">Tokens observed</span><strong id="demo-tokens">127.4<small>M</small></strong><em id="demo-sessions">42 sessions · 2 tools</em></div>
-                <div><span data-i18n="demo.cost">Metered cost estimate</span><strong id="demo-cost"><small>¥</small>38.60</strong><em data-i18n="demo.cost.note">An estimate, not a bill</em></div>
+                <div><span data-i18n="demo.cost">Estimated cost</span><strong id="demo-cost"><small>$</small>5.40</strong><em data-i18n="demo.cost.note">An estimate, not a bill</em></div>
                 <div><span data-i18n="demo.cache">Cache hit rate</span><strong id="demo-cache">96.8<small>%</small></strong><em data-i18n="demo.cache.note">Cache reads / input tokens</em></div>
               </div>
               <div class="chart-head">
@@ -147,7 +147,7 @@
       <div class="shell">
         <header class="section-head">
           <p class="eyebrow" data-i18n="how.eyebrow">From delivered results to a checkable process</p>
-          <h2 id="how-title" data-i18n="how.title">Agents do the work.<br>You need to know how.</h2>
+          <h2 id="how-title" data-i18n="how.title">Logs tell you what happened.<br>Agent Vitals tells you where to look.</h2>
           <p data-i18n="how.sub">Research, docs, spreadsheets, code — all can go to an agent. But the process, cost, and failures should not stay in a black box.</p>
         </header>
         <ol class="steps">
@@ -162,17 +162,17 @@
             <p data-i18n="how.1.body">Browse events and traces your agents left, by date, source, and session. Fields a source never recorded are marked unavailable — never invented.</p>
           </li>
           <li class="step">
-            <span class="step-no mono" data-i18n="how.2.no">02 · Reconcile</span>
+            <span class="step-no mono" data-i18n="how.2.no">02 · Cost</span>
             <div class="vis vis-basis" aria-hidden="true">
-              <div><span data-i18n="how.2.metered">Metered estimate</span><b>¥38.60</b><em class="tag" data-i18n="how.2.tag.est">estimate</em></div>
-              <div><span data-i18n="how.2.sub">Subscription</span><b>¥140.00</b><em class="tag" data-i18n="how.2.tag.fixed">fixed</em></div>
+              <div><span data-i18n="how.2.metered">Pay-per-use estimate</span><b id="basis-metered">$5.40</b><em class="tag" data-i18n="how.2.tag.est">estimate</em></div>
+              <div><span data-i18n="how.2.sub">Subscription</span><b id="basis-sub">$20.00</b><em class="tag" data-i18n="how.2.tag.fixed">fixed</em></div>
               <div><span data-i18n="how.2.unpriced">Unpriced usage</span><b class="unknown" data-i18n="how.2.unknown">Unknown</b><em class="tag tag-warn" data-i18n="how.2.tag.warn">not counted as 0</em></div>
             </div>
             <h3 data-i18n="how.2.title">Know what it cost — and how solid the number is.</h3>
-            <p data-i18n="how.2.body">Subscription, metered estimate, and evidenced spend sit in separate columns and are never summed. Missing price or attribution stays「unknown」— guesses never pose as bills.</p>
+            <p data-i18n="how.2.body">Subscription, metered estimate, and evidenced spend sit in separate columns and are never summed. Missing price or attribution stays“unknown”— guesses never pose as bills.</p>
           </li>
           <li class="step">
-            <span class="step-no mono" data-i18n="how.3.no">03 · Inspect</span>
+            <span class="step-no mono" data-i18n="how.3.no">03 · Check</span>
             <div class="vis vis-flags" aria-hidden="true">
               <div><span data-i18n="how.3.fail">Consecutive failures</span><i style="--w:84%"></i><b>3×</b></div>
               <div><span data-i18n="how.3.infl">Input inflation</span><i style="--w:52%"></i><b>4.2×</b></div>
@@ -227,9 +227,9 @@
           <details><summary data-i18n="faq.1.q">Do I need an API key or to upload logs?</summary><p data-i18n="faq.1.a">No API key, no uploads. The desktop app reads usage records your supported tools already keep locally; if the system restricts access you may need to grant read permission.</p></details>
           <details><summary data-i18n="faq.2.q">Which computers and agents are supported?</summary><p data-i18n="faq.2.a">A macOS beta is available. Runtime sessions and usage focus on Claude Code, Codex, DeepSeek Harness, and WorkBuddy; statistics, cost, and trace coverage differs by host, version, and field. OpenClaw and Hermes currently get install- and skill-level checks only — not the same runtime coverage.</p></details>
           <details><summary data-i18n="faq.3.q">What if the first launch shows no data?</summary><p data-i18n="faq.3.a">Confirm your supported agents have local usage records, then check data-source status and read permissions in the app. No logs, no permission, and not-yet-synced are different states — none is ever filled with made-up data.</p></details>
-          <details><summary data-i18n="faq.4.q">Is the displayed amount what I actually pay?</summary><p data-i18n="faq.4.a">Not necessarily. Metered estimates come from available usage and pricing and are not charges. Subscription, estimate, and evidenced known spend are separate; missing price, route, or bill data stays unknown.</p></details>
+          <details><summary data-i18n="faq.4.q">Is the displayed amount what I actually pay?</summary><p data-i18n="faq.4.a">Not necessarily. Pay-per-use estimates come from available usage and pricing and are not charges. Subscription, estimate, and evidenced known spend are separate; missing price, route, or bill data stays unknown.</p></details>
           <details><summary data-i18n="faq.5.q">Will it actually save me money?</summary><p data-i18n="faq.5.a">Agent Vitals shows you usage and cost, and pinpoints high-spend or repeatedly failing sessions so you can act. Whether that saves money depends on your billing and what you change. On a fixed subscription, fewer tokens don't always mean a smaller bill; we promise no automatic savings or fixed ratios.</p></details>
-          <details><summary data-i18n="faq.6.q">Can it tell whether the agent did the job right?</summary><p data-i18n="faq.6.a">No. It records the usage, events, failures, and trace evidence your sources leave, and helps you find sessions worth checking. It never treats「low spend」as「correct output」, and it does not accept deliverables for you.</p></details>
+          <details><summary data-i18n="faq.6.q">Can it tell whether the agent did the job right?</summary><p data-i18n="faq.6.a">No. It records the usage, events, failures, and trace evidence your sources leave, and helps you find sessions worth checking. It never treats“low spend”as“correct output”, and it does not accept deliverables for you.</p></details>
           <details><summary data-i18n="faq.7.q">Is it open source?</summary><p data-i18n="faq.7.a">Yes, MIT licensed. Browse the code, license, and releases on GitHub, and file issues. Numbers on this page are demo data — not user statistics or savings claims.</p></details>
         </div>
       </div>
@@ -240,7 +240,7 @@
       <div class="shell download-grid">
         <div class="download-copy">
           <p class="eyebrow" data-i18n="dl.eyebrow">Every agent run leaves a receipt</p>
-          <h2 id="download-title" data-i18n="dl.title">Next time you run an agent,<br>you'll know the score.</h2>
+          <h2 id="download-title" data-i18n="dl.title">Your agent has logs.<br>Now give it vitals.</h2>
           <ol class="first-run">
             <li><b>1</b><span data-i18n="dl.1">Install the app</span></li>
             <li><b>2</b><span data-i18n="dl.2">Check local data sources</span></li>
@@ -281,7 +281,7 @@
       <div><span data-i18n="dialog.input">Uncached input</span><strong>1.2M</strong><i style="--w:7%"></i></div>
       <div><span data-i18n="dialog.output">Output</span><strong>0.6M</strong><i style="--w:3%"></i></div>
     </div>
-    <div class="dialog-note"><strong data-i18n="dialog.note.title">High consumption doesn't always mean a high bill.</strong><p data-i18n="dialog.note.body">Caching and billing shape the amount. Read the composition and pricing basis first; this demo never computes「amounts saved」.</p></div>
+    <div class="dialog-note"><strong data-i18n="dialog.note.title">High consumption doesn't always mean a high bill.</strong><p data-i18n="dialog.note.body">Caching and billing shape the amount. Read the composition and pricing basis first; this demo never computes“amounts saved”.</p></div>
     <button class="button button-primary dialog-done" type="button" data-i18n="dialog.done">Got it</button>
   </dialog>
 </body>

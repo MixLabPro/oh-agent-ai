@@ -177,6 +177,77 @@
 
 ---
 
+## 0.7 承诺兑现清单（2026-10-01 核对；每次发布前重跑）
+
+> 原则：landing 上每一条可被用户验证的承诺，必须有对应的产品/仓库证据；
+> 状态为 ❌/❓ 的承诺，要么先补齐，要么从页面上撤下或降级措辞（§1.3、§1.4）。
+> 状态：✅ 已兑现（有代码/测试/外部可验证证据）· ⚠️ 部分兑现 · ❌ 未兑现 · ❓ 未核实（本次没有证据，不得当作已兑现）。
+> 本表的「证据」列只记录本次实际查过的东西；外部可达性是 2026-10-01 从外部网络请求的结果。
+
+### A. 获取与信任（阻断项）
+
+| # | landing 承诺（位置） | 证据 | 状态 | 处置 |
+|---|---|---|---|---|
+| A1 | 开源，可检查代码（hero 保证 / 隐私屏 / FAQ7 / 页脚「MIT License」） | 外部请求 `github.com/MixLabPro/agent-vitals`、`/releases`、`/blob/main/LICENSE`、`raw.githubusercontent.com/.../LICENSE` 均 **404**；Releases API 亦 Not Found（公开仓库无发布也应返回空列表，故疑似私有或地址有误）。仓库内有 `LICENSE`，`apps/cli/Cargo.toml` 声明 `license = "MIT"` | ❌ | **先确认仓库可见性与正确地址**；未公开前撤下「Read the source on GitHub」「MIT open source」「Feedback」等外链承诺，或明确标注「即将开源」 |
+| A2 | 下载 macOS 测试版（nav / hero / 下载区） | `release-desktop.yml` 仅由 `app-v*` 标签触发；本地 `git tag` 与 `git ls-remote --tags origin` 均无 `app-v*`；`SUPPORT_MATRIX.md`：Apple Silicon「候选验证中」、**Intel 未支持**、公证未完成 | ❌ | 发布第一个真实 `app-v*` Release 前，CTA 改为「Join the waitlist / Watch」类文案，不写 Download；有 Release 后写明 `Apple Silicon only · macOS 11+ · not notarized` |
+| A3 | 「右键 → 打开」首装指引、未公证说明（下载区小字） | landing README 分发决策：Developer ID 签名、未公证 | ✅（措辞）/ ⚠️（缺架构披露） | 补「仅 Apple Silicon」；与 A2 同步 |
+| A4 | 应用内版本检查 | `apps/desktop/src-tauri/src/lib.rs:3331` 调用 `api.github.com/repos/MixLabPro/agent-vitals/releases/latest`，并要求 tag 以 `app-v` 开头 | ⚠️ | 仓库不可公开访问时检查必然失败；A1/A2 解决后复测；失败须是静默降级而非报错 |
+
+### B. 功能与口径（页面卖点）
+
+| # | 承诺 | 证据 | 状态 | 处置 |
+|---|---|---|---|---|
+| B1 | 找出「连续失败 / 输入膨胀 / 缓存未命中」（三步屏 Inspect） | `crates/agent-vitals-domain/src/domain/session_insights.rs` 三类诊断：`repeated_failure`、`input_growth`、`high_uncached_input`；带证据、`impact` 只给 tokens | ✅ | 页面三项名称与实现一致；缓存项只能说「观察」，不得写「缓存坏了」 |
+| B2 | 失败区间涉及的输入量/名义成本 | `WASTE_ATTRIBUTION_SPEC` S1 已实施并验收（`failure_exposure`） | ✅ | 金额只在诊断详情、同屏免责；不进 hero |
+| B3 | 订阅 / 按量估算 / 有依据金额分栏、未知≠0、估算不是账单（Reconcile 屏、FAQ4） | CLAUDE.md 成本词表与不变量；`metered_estimate`、`has_unresolved`、不静默归因，有测试钉住 | ✅ | 保持；演示数字为示例，页面已标注 |
+| B4 | 覆盖 Claude Code / Codex / DeepSeek Harness / WorkBuddy（宿主行、FAQ2） | 四宿主适配与同步管线均在；WorkBuddy 的 `provider_id` 为 null，**金额面恒 unresolved** | ⚠️ | 宿主行注明「WorkBuddy：用量与轨迹，无金额」；FAQ2 已说覆盖不均，保留 |
+| B5 | OpenClaw / Hermes 仅安装与 Skill 层检查（FAQ2） | 与仓库既有说明一致，本次未逐项复核 | ❓ | 发布前核对一次 |
+| B6 | 不需要 API Key（hero 保证、FAQ1） | 设计上读本机日志；本次未抓包验证 | ❓ | 与 C2 的出口自检一起验证 |
+| B7 | 演示窗/轨迹为示意数据 | 页面已标注；`verify-landing` 有标注检查 | ✅ | 保持；真图到位后降级为「交互示意」 |
+
+### C. 隐私与网络（核心信任资产，必须可证）
+
+| # | 承诺 | 证据 | 状态 | 处置 |
+|---|---|---|---|---|
+| C1 | 会话日志不上传（hero、隐私屏、页脚） | 产品政策与 Trust/出口审计设计存在；**未做实机抓包** | ❓ | 做一次出口自检：全流程（首启、同步、版本检查、价卡同步）抓包，确认只有公开价卡与 Releases 请求且不含会话内容；留存结果再对外使用「never uploaded」 |
+| C2 | 公共价卡更新与版本检查可能联网、不带会话数据（隐私屏小字） | 价卡叠加层每 6 小时拉取（CLAUDE.md「价卡每日同步」）；版本检查见 A4 | ⚠️ | 与 C1 同一次自检覆盖；设置页尚无联网开关，页面不得暗示可关闭 |
+
+### D. 首次体验（激活）
+
+| # | 承诺 | 证据 | 状态 | 处置 |
+|---|---|---|---|---|
+| D1 | 「第一次打开没有数据：没日志 / 没权限 / 未同步是不同状态」（FAQ3） | React 源码中可见总览「加载中」空态与同步状态枚举（`never / paused / partial`，`i18n.ts`）；**未找到**针对「没有日志」「没有读取权限」的专门引导界面 | ❓/❌ | 实机核对首启；缺失则补三态引导（P4），在补齐前把 FAQ3 措辞降为「可能需要授权读取」，不写「三种状态各有提示」 |
+| D2 | 「30 秒内看到你自己的第一份发现」（§0.6 钩子） | 无首启价值路径（P4 未做） | ❌ | landing 不得使用该承诺，直至 P4 上线并实测 |
+| D3 | 第一份用量与会话记录（下载区三步） | 同 D1/D2 | ⚠️ | 同上 |
+
+### E. 增长闭环能力（§0.6 的产品项）状态
+
+| 项 | 状态 | 备注 |
+|---|---|---|
+| P1 会话详情首屏重构（结论卡） | ❌ | 现状：4 统计卡 + 6 项指标在前，诊断清单在后，审计表占主体 |
+| P2 会话状态三档 + 一句话原因 | ❌ | 需先做人工标注标定 |
+| P3 总览精简 | ❌ | |
+| P4 首次启动价值路径与空态三分 | ❌ | 见 D1/D2 |
+| P5 截图专用演示工作区 | ❌ | `ui-dev/public/tauri-mock.js` 是 UI 开发桩（约 1100 行），不是可真跑的演示数据 |
+| P6 成功空转 / 上下文峰值占用 | ❌ | 现有规则偏失败；claude/codex 无 `context_tokens` 标准化 |
+| P7 重复失败通知 | ❌ | 现有通知只有预算与额度（`budget_alerts.rs`、`quota_alerts.rs`）；`repeated_failure` 无通知钩子 |
+
+### F. 放行规则与发布前核对
+
+1. **文案放行**：landing 上任何「能做到 X」的句子，要在本表找到 ✅ 的对应行；
+   ❌/❓ 行对应的句子必须撤下或改成未来时/等待名单措辞。
+2. **阻断项**：A1、A2 未解决 → 不做任何对外推广（Reddit/X/社群）。C1 未验证 →
+   页面不使用「never uploaded / 不上传」的绝对表述，改为「sessions are analyzed on your Mac」并附出口自检结论。
+3. **发布前核对命令**（每次重跑并把结果写回本表）：
+   - `for u in <repo> <repo>/releases <repo>/blob/main/LICENSE; do curl -s -o /dev/null -w '%{http_code} ' "$u"; done`
+   - `git ls-remote --tags origin | grep app-v`
+   - `node website/landing/tools/verify-landing.mjs`（含演示脚本、禁用词、aria 无 CJK 检查）
+   - 出口自检：首启 + 同步 + 版本检查全程抓包，记录目的主机与载荷类别。
+4. **landing 同步改动清单**：下载区补 `Apple Silicon only · macOS 11+`；宿主行注明
+   WorkBuddy 无金额；A1/A2 解决前 CTA 与「开源」外链降级；FAQ3 措辞与 D1 结论一致。
+
+---
+
 ## 0. 一句话结论
 
 把 landing 从「定位优先」调整为「痛点 + 产品真实证据 + 可核对边界」：

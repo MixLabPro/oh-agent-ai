@@ -5,17 +5,19 @@
 const LANG = window.__avLandingLang || { lang: 'en', t: () => '', demoSessions: () => '', chartAria: () => '' };
 const zh = LANG.lang === 'zh';
 const pick = (en, cn) => (zh ? cn : en);
+// 示例金额按页面语言取币种：英文页用 $（数值为同量级的示例数字，不是汇率换算），中文页用 ¥。
+const CUR = pick('$', '¥');
 
 const periods = {
-  month: { tokens: '127.4', cost: '38.60', cache: '96.8', sessions: [42, 2], label: pick('This month', '本月'), axis: ['09.01', '09.15', '09.28'], flag: 13, bars: [25, 34, 21, 49, 42, 68, 38, 57, 84, 46, 37, 65, 51, 94, 73, 54, 69, 41, 59, 76, 52] },
-  week: { tokens: '32.8', cost: '9.40', cache: '97.2', sessions: [11, 2], label: pick('This week', '本周'), axis: ['09.22', '09.25', '09.28'], flag: 5, bars: [35, 54, 83, 42, 63, 91, 49] },
+  month: { tokens: '127.4', cost: pick('5.40', '38.60'), cache: '96.8', sessions: [42, 2], label: pick('This month', '本月'), axis: ['09.01', '09.15', '09.28'], flag: 13, bars: [25, 34, 21, 49, 42, 68, 38, 57, 84, 46, 37, 65, 51, 94, 73, 54, 69, 41, 59, 76, 52] },
+  week: { tokens: '32.8', cost: pick('1.30', '9.40'), cache: '97.2', sessions: [11, 2], label: pick('This week', '本周'), axis: ['09.22', '09.25', '09.28'], flag: 5, bars: [35, 54, 83, 42, 63, 91, 49] },
 };
 
 function renderPeriod(period) {
   const value = periods[period];
   if (!value) return;
   document.querySelector('#demo-tokens').innerHTML = `${value.tokens}<small>M</small>`;
-  document.querySelector('#demo-cost').innerHTML = `<small>¥</small>${value.cost}`;
+  document.querySelector('#demo-cost').innerHTML = `<small>${CUR}</small>${value.cost}`;
   document.querySelector('#demo-cache').innerHTML = `${value.cache}<small>%</small>`;
   document.querySelector('#demo-sessions').textContent = LANG.demoSessions(value.sessions[0], value.sessions[1]);
   document.querySelectorAll('[data-period]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.period === period)));
@@ -34,6 +36,8 @@ function renderPeriod(period) {
 }
 document.querySelectorAll('[data-period]').forEach(button => button.addEventListener('click', () => renderPeriod(button.dataset.period)));
 renderPeriod('month');
+document.querySelector('#basis-metered').textContent = `${CUR}${pick('5.40', '38.60')}`;
+document.querySelector('#basis-sub').textContent = `${CUR}${pick('20.00', '140.00')}`;
 
 // 示例会话轨迹（虚构任务；只陈述记录，不推算浪费金额）
 const dialog = document.querySelector('#session-dialog');

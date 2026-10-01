@@ -4,8 +4,7 @@
 (() => {
   const params = new URLSearchParams(window.location.search);
   const stored = (() => { try { return window.localStorage.getItem("av-landing-lang"); } catch { return null; } })();
-  const nav = (typeof navigator !== "undefined" && /^zh/i.test(navigator.language)) ? "zh" : "en";
-  const lang = params.get("lang") === "zh" || params.get("lang") === "en" ? params.get("lang") : (stored || nav);
+  const lang = params.get("lang") === "zh" || params.get("lang") === "en" ? params.get("lang") : (stored === "zh" || stored === "en" ? stored : "en");
 
   const M = {
     en: {
@@ -13,9 +12,9 @@
       "brand.tag": "Agent Monitoring",
       "nav.demo": "Demo", "nav.how": "How it works", "nav.privacy": "Local privacy", "nav.faq": "FAQ",
       "nav.download": "Get for macOS",
-      "kicker": "Local agent work ledger · macOS beta",
-      "hero.l1": "You hand the work to Agents.", "hero.l2": "Keep the reins.",
-      "hero.lede": "How much did it cost, where did it stall, why did it retry over and over? Agent Vitals reads the records your agents already leave on your Mac and turns them into checkable usage, cost basis, and execution traces.",
+      "kicker": "A checkup for your AI tools · macOS beta",
+      "hero.l1": "Is your AI actually working,", "hero.l2": "or just burning money?",
+      "hero.lede": "Audit your AI tools' session logs offline. Find where they got stuck and what it cost — nothing leaves your Mac.",
       "cta.download": "Get the macOS beta", "cta.demo": "See the demo",
       "assure.1": "Sessions analyzed on-device only", "assure.2": "MIT open source", "assure.3": "No API key required",
       "scope.aria": "Concept animation: a woodpecker inspects a session log line by line, flagging failed calls. Sample data.",
@@ -31,9 +30,9 @@
       "demo.nav.overview": "Overview", "demo.nav.usage": "Usage", "demo.nav.sessions": "Sessions", "demo.nav.sources": "Sources",
       "demo.foot": "Local data · synced",
       "demo.head.eyebrow": "Local agent work records",
-      "demo.head.title": "Who worked, what it cost, where it stuck",
+      "demo.head.title": "Who worked, what it cost, where it got stuck",
       "demo.range": "Demo time range", "demo.week": "This week", "demo.month": "This month",
-      "demo.tokens": "Tokens observed", "demo.cost": "Metered cost estimate", "demo.cost.note": "An estimate, not a bill",
+      "demo.tokens": "Tokens observed", "demo.cost": "Estimated cost", "demo.cost.note": "An estimate, not a bill",
       "demo.cache": "Cache hit rate", "demo.cache.note": "Cache reads / input tokens",
       "demo.trend": "Usage trend", "demo.legend.flag": "consecutive failures",
       "demo.chart.aria": "Simulated usage trend",
@@ -41,15 +40,15 @@
       "demo.insight.note": "Sample session used 18.6M tokens; the same call failed 3 times in a row.",
       "demo.inspect": "View trace →",
       "how.eyebrow": "From delivered results to a checkable process",
-      "how.title": "Agents do the work.<br>You need to know how.",
+      "how.title": "Logs tell you what happened.<br>Agent Vitals tells you where to look.",
       "how.sub": "Research, docs, spreadsheets, code — all can go to an agent. But the process, cost, and failures should not stay in a black box.",
       "how.1.no": "01 · Record", "how.1.title": "Turn every run into a work record.",
       "how.1.body": "Browse events and traces your agents left, by date, source, and session. Fields a source never recorded are marked unavailable — never invented.",
       "how.1.ledger": "Work record", "how.1.ledger.sub": "sessions · events · traces",
-      "how.2.no": "02 · Reconcile", "how.2.title": "Know what it cost — and how solid the number is.",
-      "how.2.body": "Subscription, metered estimate, and evidenced spend sit in separate columns and are never summed. Missing price or attribution stays「unknown」— guesses never pose as bills.",
-      "how.2.metered": "Metered estimate", "how.2.sub": "Subscription", "how.2.unpriced": "Unpriced usage", "how.2.unknown": "Unknown", "how.2.tag.est": "estimate", "how.2.tag.fixed": "fixed", "how.2.tag.warn": "not counted as 0",
-      "how.3.no": "03 · Inspect", "how.3.title": "Look at failures, repeats, and outlier sessions first.",
+      "how.2.no": "02 · Cost", "how.2.title": "Know what it cost — and how solid the number is.",
+      "how.2.body": "Subscription, metered estimate, and evidenced spend sit in separate columns and are never summed. Missing price or attribution stays“unknown”— guesses never pose as bills.",
+      "how.2.metered": "Pay-per-use estimate", "how.2.sub": "Subscription", "how.2.unpriced": "Unpriced usage", "how.2.unknown": "Unknown", "how.2.tag.est": "estimate", "how.2.tag.fixed": "fixed", "how.2.tag.warn": "not counted as 0",
+      "how.3.no": "03 · Check", "how.3.title": "Look at failures, repeats, and outlier sessions first.",
       "how.3.body": "It points out ranges worth checking, then walks you back to the session trace to verify evidence. Clues, not verdicts — it never judges whether the work was right.",
       "how.3.fail": "Consecutive failures", "how.3.infl": "Input inflation", "how.3.miss": "Cache misses", "how.3.times": "times",
       "privacy.eyebrow": "Your computer is the data boundary",
@@ -71,10 +70,10 @@
       "faq.3.q": "What if the first launch shows no data?", "faq.3.a": "Confirm your supported agents have local usage records, then check data-source status and read permissions in the app. No logs, no permission, and not-yet-synced are different states — none is ever filled with made-up data.",
       "faq.4.q": "Is the displayed amount what I actually pay?", "faq.4.a": "Not necessarily. Metered estimates come from available usage and pricing and are not charges. Subscription, estimate, and evidenced known spend are separate; missing price, route, or bill data stays unknown.",
       "faq.5.q": "Will it actually save me money?", "faq.5.a": "Agent Vitals shows you usage and cost, and pinpoints high-spend or repeatedly failing sessions so you can act. Whether that saves money depends on your billing and what you change. On a fixed subscription, fewer tokens don't always mean a smaller bill; we promise no automatic savings or fixed ratios.",
-      "faq.6.q": "Can it tell whether the agent did the job right?", "faq.6.a": "No. It records the usage, events, failures, and trace evidence your sources leave, and helps you find sessions worth checking. It never treats「low spend」as「correct output」, and it does not accept deliverables for you.",
+      "faq.6.q": "Can it tell whether the agent did the job right?", "faq.6.a": "No. It records the usage, events, failures, and trace evidence your sources leave, and helps you find sessions worth checking. It never treats“low spend”as“correct output”, and it does not accept deliverables for you.",
       "faq.7.q": "Is it open source?", "faq.7.a": "Yes, MIT licensed. Browse the code, license, and releases on GitHub, and file issues. Numbers on this page are demo data — not user statistics or savings claims.",
       "dl.eyebrow": "Every agent run leaves a receipt",
-      "dl.title": "Next time you run an agent,<br>you'll know the score.",
+      "dl.title": "Your agent has logs.<br>Now give it vitals.",
       "dl.1": "Install the app", "dl.2": "Check local data sources", "dl.3": "Read your first usage and session report",
       "dl.cta": "Download the macOS beta ↗",
       "dl.fine": "Requires local records from a supported agent. The package is Developer ID–signed; the beta is un-notarized — right-click → Open on first launch. System requirements and install notes are on the GitHub release page.",
@@ -87,7 +86,7 @@
       "dialog.trace": "Sample session event trace",
       "dialog.cache": "Cache reads", "dialog.input": "Uncached input", "dialog.output": "Output",
       "dialog.note.title": "High consumption doesn't always mean a high bill.",
-      "dialog.note.body": "Caching and billing shape the amount. Read the composition and pricing basis first; this demo never computes「amounts saved」.",
+      "dialog.note.body": "Caching and billing shape the amount. Read the composition and pricing basis first; this demo never computes“amounts saved”.",
       "dialog.done": "Got it",
     },
     zh: {
@@ -95,9 +94,9 @@
       "brand.tag": "智能体监测",
       "nav.demo": "产品演示", "nav.how": "工作方式", "nav.privacy": "本地隐私", "nav.faq": "常见问题",
       "nav.download": "获取 macOS 版",
-      "kicker": "本地 Agent 工作账本 · macOS 测试版",
-      "hero.l1": "工作交给 Agent。", "hero.l2": "掌控留给你。",
-      "hero.lede": "花了多少、卡在哪里、为什么反复重试？Agent Vitals 在你的 Mac 上读取 Agent 已经留下的本地记录，整理成可核对的用量、成本依据与执行轨迹。",
+      "kicker": "给你的 AI 工具做个体检 · macOS 测试版",
+      "hero.l1": "你的 AI，是真的在干活，", "hero.l2": "还是在白白烧钱？",
+      "hero.lede": "离线审计 AI 工具的会话日志，找出它卡在哪、花了多少钱——数据不出你的 Mac。",
       "cta.download": "获取 macOS 测试版", "cta.demo": "看产品演示",
       "assure.1": "Sessions 仅在本机分析", "assure.2": "MIT 开源", "assure.3": "无需 API Key",
       "scope.aria": "概念动画：啄木鸟沿着会话日志逐行检查，把失败的调用标记出来。示例数据。",
@@ -121,7 +120,7 @@
       "demo.insight.title": "从反复失败的会话开始检查",
       "demo.inspect": "查看轨迹 →",
       "how.eyebrow": "从交付结果，到可核对的过程",
-      "how.title": "Agent 会做事。<br>你需要知道它怎么做。",
+      "how.title": "日志告诉你发生了什么。<br>Agent Vitals 告诉你该看哪里。",
       "how.sub": "研究、文档、表格、代码都可以交给 Agent。但过程、成本与失败，不该留在黑箱里。",
       "how.1.no": "01 · 留痕", "how.1.title": "把每次运行，变成一份工作记录。",
       "how.1.body": "按日期、来源和会话查看 Agent 留下的事件与轨迹。来源没有记录的字段，明确标为不可用。",
@@ -153,7 +152,7 @@
       "faq.6.q": "它能判断 Agent 把工作做对了吗？", "faq.6.a": "不能。Agent Vitals 记录受支持来源留下的用量、事件、失败和轨迹证据，帮助你定位值得检查的会话；它不会把「消耗低」当成「结果正确」，也不会替你验收最终交付。",
       "faq.7.q": "软件是否开源？", "faq.7.a": "是的，源代码采用 MIT 许可证。你可以在 GitHub 查看代码、许可证和发行说明，也可以提交问题与反馈。网页中的数字为演示数据，不是用户统计或节省承诺。",
       "dl.eyebrow": "每一次 Agent 工作，都留一张收据",
-      "dl.title": "下一次运行 Agent，<br>心里有数。",
+      "dl.title": "你的 Agent 有日志了。<br>现在，给它一份体检。",
       "dl.1": "安装应用", "dl.2": "检查本地数据源", "dl.3": "查看第一份用量与会话记录",
       "dl.cta": "前往下载 macOS 测试版 ↗",
       "dl.fine": "需要受支持 Agent 的本地记录。安装包已 Developer ID 签名；测试版未经公证，首次打开请右键 → 打开。系统要求与安装说明见 GitHub 发布页。",
@@ -195,7 +194,7 @@
     if (motion) motion.textContent = motion.getAttribute("aria-pressed") === "true" ? dict()["motion.resume"] : dict()["motion.pause"];
   }
 
-  // 首选语言持久化（URL 参数 > localStorage > navigator）
+  // 首选语言持久化（URL 参数 > localStorage（仅用户显式切换过）> 默认英文）
   try { if (params.get("lang") === "en" || params.get("lang") === "zh") window.localStorage.setItem("av-landing-lang", lang); } catch {}
 
   // 供 app.js 等后续脚本使用的轻量 API
