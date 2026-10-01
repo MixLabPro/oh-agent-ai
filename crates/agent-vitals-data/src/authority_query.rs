@@ -2361,7 +2361,7 @@ mod tests {
         // f-open 走中转（provider 未知，NULL）——真机形状；f-covered 是官方 openai。
         db.conn().execute("UPDATE usage_facts SET provider_id = 'openai' WHERE fact_id = 'f-covered'", []).unwrap();
         db.billing_declaration_revision_save(
-            "rev-cx", "decl-cx", None, "codex", "openai", "official_subscription", Some("Plus"),
+            "rev-cx", "decl-cx", None,"openai", "official_subscription", Some("Plus"),
             Some(2_000), Some("USD"), "2026-09-01", None, None, None, &[], 2,
         ).unwrap();
         db.billing_recalculation_enqueue("job-cx", "decl-cx", "rev-cx", 3).unwrap();
@@ -2384,7 +2384,7 @@ mod tests {
         // 用户把 f-open 归因到中转（user_declared）→ 它离开 openai 默认组、进入
         // (shengsuanyun, declared=true) 组；金额面据此改计 MeteredDeclared。
         db.billing_declaration_revision_save(
-            "rev-relay", "decl-relay", None, "codex", "shengsuanyun", "third_party", None, None, None,
+            "rev-relay", "decl-relay", None,"shengsuanyun", "third_party", None, None, None,
             "2026-09-01", None, None, None, &[("provider", "unresolved")], 6,
         ).unwrap();
         db.billing_recalculation_enqueue("job-relay", "decl-relay", "rev-relay", 7).unwrap();
@@ -2759,7 +2759,7 @@ mod tests {
         // 订阅覆盖一条 claude 实时事实（r2 之外再插一条并被 saved 声明覆盖）
         insert_fact(&db, "sc1", "claude-code", Some("m1"), "turn", s + 5_000, 0, 500, 0, 0, 0);
         db.billing_declaration_revision_save(
-            "rev-par", "decl-par", None, "claude-code", "anthropic", "official_subscription",
+            "rev-par", "decl-par", None,"anthropic", "official_subscription",
             Some("Max"), None, None, "2026-09-01", None, None, None, &[], 2,
         ).unwrap();
         db.billing_recalculation_enqueue("job-par", "decl-par", "rev-par", 3).unwrap();

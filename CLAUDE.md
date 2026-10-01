@@ -379,6 +379,27 @@ app 端 `fx_settings::save_synced` 用 `FxSnapshot::validate_update` 再校验�
 用户手动汇率仍优先于任何快照。`tests::the_published_fx_sync_file_is_accepted_by_the_app_validator`
 钉住「CI 能发布的文件 app 一定收得下」。
 
+### 计费声明属于服务商，不属于宿主（2026-10-01）
+
+计费关系（订阅 / API Key / 中转 / 组织）是**服务商账号**上的事，结算按「服务商 + 模型」，宿主只是
+用量的来源壳：同一个 GLM Lite 套餐在 Claude Code 与 ZCode 里是同一份，同一个中转账号在 Claude Code
+与 Codex 里也是同一个账号。曾经声明按 `(宿主, 服务商)` 切分，真机里同一服务商在每个宿主各留一份、
+生效期各自漂移，匹配还要给订阅单开「账号级」补丁。
+
+- **数据层没有宿主参数**：`billing_declaration_put` / `revision_save` / `fact_selection(_with)` /
+  `impact_preview*` / `billing_official_api_declared` 都只收 `provider_id`；`BillingDeclarationRow`
+  与 MCP/Tauri 的声明 DTO 不带宿主。选事实的唯一谓词是 `f.provider_id = ?`（「服务商未知」的组是
+  `provider_id IS NULL` + 模型范围），**不看 `f.host`**；要收窄用 account / route / model / session 作用域。
+- **`host` 列只是旧库 `NOT NULL` 的占位**：写入固定值 `authority::ALL_HOSTS`（`"*"`），任何谓词都不读它。
+  想把宿主重新当匹配条件，必须先改 `ALL_HOSTS` 的文档并过评审——这正是被拆掉的耦合。
+- **导入候选保留宿主**（`billing_import_candidates.host`）：它是「在哪个宿主的配置里发现的线索」，属于证据来源；
+  把候选确认成声明时只比对服务商。
+- **结算币种按服务商记**（`declared_settlement_currencies()` → `provider → 币种`）；**月费按服务商只摊一次**
+  （旧的 `(宿主, 服务商)` 去重会让同一订阅在两个宿主各摊一份）。月费在 `by_provider`（键 `宿主/服务商`）
+  里要有个落点宿主，只用于展示：服务商自家宿主 > 用量最集中的宿主（`dominant_host_of_provider`）> `unattributed`。
+- **未做**：`by_provider` 的键仍是 `宿主/服务商`、待确认组仍按 `(宿主, 服务商, 模型)` 切——那是**用量视图**，
+  宿主是事实自带的来源维度，不是计费归属；改成服务商键会波及全部金额 DTO 与 golden，另立项。
+
 ### v0.9.1 数据面维护（SQL 权威库操作面；Phase 4.3 后）
 
 - **布局**：`<data_home>/facts/<host>.jsonl`（append-only 权威源，宿主封闭

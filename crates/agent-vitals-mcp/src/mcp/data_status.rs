@@ -1041,7 +1041,7 @@ mod tests {
         // 用户在计费声明里把「服务商未知」的这批答成了 shengsuanyun 中转
         // （user_declared 归因）→ 它不再是「不知道是哪家服务商」。撤销后回到未归属。
         db.billing_declaration_revision_save(
-            "rev-q", "decl-q", None, "codex", "shengsuanyun", "third_party", None, None, None,
+            "rev-q", "decl-q", None,"shengsuanyun", "third_party", None, None, None,
             "1970-01-01", None, None, None, &[("provider", "unresolved")], 2,
         ).unwrap();
         db.billing_recalculation_enqueue("job-q", "decl-q", "rev-q", 3).unwrap();

@@ -1,15 +1,13 @@
 //! 计费声明的保存前影响预览（计费主链规格 §5.5）。
 //!
-//! 三组数字、同一谓词：`moved`（会被移出按量估算的事实）、`kept`（同宿主/
-//! provider/期间内**未**命中作用域、继续按量估算的事实）、`pending`（命中但
+//! 三组数字、同一谓词：`moved`（会被移出按量估算的事实）、`kept`（同
+//! 服务商/期间内**未**命中作用域（任何宿主）、继续按量估算的事实）、`pending`（命中但
 //! 证据为 `conflict`、既不移出也不归因的事实）。事实选择来自
 //! `authority::billing_declaration_fact_selection`——与重算归因同一条 `WHERE`；
 //! 金额来自 `mcp::cost_breakdown::price_fact_selection`——与 MCP `cost_breakdown`
 //! 同一条计价路径。这里没有第二套 SQL，也没有第二套价格查询。
 
-use agent_vitals_data::authority::{
-    billing_declaration_fact_selection, AuthorityDb, ConflictEvidence,
-};
+use agent_vitals_data::authority::{AuthorityDb, ConflictEvidence};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -18,22 +16,22 @@ use crate::query::cost_breakdown::{price_fact_selection, WindowResult};
 /// 非 `official_subscription` 的关系在 Beta 不改变金额：预览仍返回三组数字，
 /// 但 `moved` 的金额恒空并带 `changes_amounts: false`，UI 必须照实显示。
 pub fn declaration_impact_preview(
-    db: &AuthorityDb, host: &str, provider_id: &str, relationship_kind: &str,
+    db: &AuthorityDb, provider_id: &str, relationship_kind: &str,
     effective_start: &str, effective_end: Option<&str>, scopes: &[(&str, &str)],
 ) -> Value {
     // 默认覆盖规则（官方订阅不受模型清单限制）先于一切计算，预览与重算同口径。
-    let official_api = db.billing_official_api_declared(host, provider_id).unwrap_or(false);
+    let official_api = db.billing_official_api_declared(provider_id).unwrap_or(false);
     let (effective_scopes, native) = agent_vitals_data::authority::default_coverage(relationship_kind, scopes, official_api);
     let scopes = effective_scopes.as_slice();
     let counts = match db.billing_declaration_impact_preview_for_kind(
-        host, provider_id, relationship_kind, effective_start, effective_end, scopes, None,
+        provider_id, relationship_kind, effective_start, effective_end, scopes, None,
     ) {
         Ok(counts) => counts,
         Err(error) => return json!({ "status": "unavailable", "reason": error.to_string() }),
     };
     let priced = |scopes: &[(&str, &str)]| -> Result<WindowResult, String> {
         let selection = agent_vitals_data::authority::billing_declaration_fact_selection_with(
-            host, provider_id, effective_start, effective_end, scopes, None, ConflictEvidence::Exclude, native,
+            provider_id, effective_start, effective_end, scopes, None, ConflictEvidence::Exclude, native,
         );
         price_fact_selection(db.conn(), &selection.where_sql, &selection.params, &[])
             .map_err(|error| error.message)
@@ -50,7 +48,7 @@ pub fn declaration_impact_preview(
     let kept_amounts = subtract_amounts(&all.amounts, &moved.amounts);
     json!({
         "status": "ok",
-        "host": host, "provider_id": provider_id, "relationship_kind": relationship_kind,
+        "provider_id": provider_id, "relationship_kind": relationship_kind,
         "effective_start": effective_start, "effective_end": effective_end,
         "scopes": scopes.iter().map(|(kind, value)| json!({ "scope_kind": kind, "scope_value": value })).collect::<Vec<_>>(),
         "changes_amounts": changes_amounts,
@@ -716,7 +714,7 @@ mod tests {
 
         let scopes = [("model", "gpt-5.6-sol")];
         let preview = declaration_impact_preview(
-            &db, "codex", "openai", "official_subscription", "2026-08", Some("2026-08"), &scopes,
+            &db,"openai", "official_subscription", "2026-08", Some("2026-08"), &scopes,
         );
         assert_eq!(preview["status"], json!("ok"), "{preview}");
         assert_eq!(preview["changes_amounts"], json!(true));
@@ -743,7 +741,7 @@ mod tests {
         assert_eq!(before_metered, moved_usd + kept_usd, "preview moved + kept == whole metered window");
 
         db.billing_declaration_revision_save(
-            "rev-r5", "decl-r5", None, "codex", "openai", "official_subscription",
+            "rev-r5", "decl-r5", None,"openai", "official_subscription",
             None, None, None, "2026-08", Some("2026-08"), None, None, &scopes, 2,
         ).unwrap();
         db.billing_recalculation_enqueue("job-r5", "decl-r5", "rev-r5", 3).unwrap();
@@ -798,7 +796,7 @@ mod tests {
         // D02），待确认组谓词认它（行关掉）。此前"只有订阅关组"的真机后果：确认
         // 经中转后行永远留在待确认里。
         db.billing_declaration_revision_save(
-            "rev-api", "decl-api", None, "codex", "openai", "official_api",
+            "rev-api", "decl-api", None,"openai", "official_api",
             None, None, None, "2026-08", Some("2026-08"), None, None, &scopes, 2,
         ).unwrap();
         db.billing_recalculation_enqueue("job-api", "decl-api", "rev-api", 3).unwrap();
@@ -813,7 +811,7 @@ mod tests {
             "撤销官方 API 后组重新打开（MAX 修订变 revoked，无需重算）");
 
         db.billing_declaration_revision_save(
-            "rev-sub", "decl-sub", None, "codex", "openai", "official_subscription",
+            "rev-sub", "decl-sub", None,"openai", "official_subscription",
             None, None, None, "2026-08", Some("2026-08"), None, None, &scopes, 6,
         ).unwrap();
         db.billing_recalculation_enqueue("job-sub", "decl-sub", "rev-sub", 7).unwrap();

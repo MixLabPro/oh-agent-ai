@@ -497,7 +497,7 @@ pub(crate) fn claude_provider_amounts_from_sql(
     let settlement = db.as_ref().and_then(|db| db.declared_settlement_currencies().ok()).unwrap_or_default();
     let mut out = claude_provider_amounts_from_days(&undeclared, cards);
     for (provider, days) in &declared {
-        let declared_currency = settlement.get(&format!("claude-code/{provider}")).map(String::as_str);
+        let declared_currency = settlement.get(provider.as_str()).map(String::as_str);
         for (key, amount) in declared_provider_amounts("claude-code", provider, days, cards, declared_currency) {
             match out.remove(&key) {
                 Some(existing) => { out.insert(key, merge_host_amounts(existing, amount)); }
@@ -987,7 +987,7 @@ pub(crate) fn codex_provider_amounts_from_sql(
     for ((provider, declared), hours) in grouped {
         let key = format!("codex/{provider}");
         if declared {
-            let declared_currency = settlement.get(&format!("codex/{provider}")).map(String::as_str);
+            let declared_currency = settlement.get(provider.as_str()).map(String::as_str);
             for (k, amount) in codex_declared_provider_amounts(&provider, &hours, day, cards, declared_currency) {
                 match out.remove(&k) {
                     Some(existing) => { out.insert(k, merge_host_amounts(existing, amount)); }

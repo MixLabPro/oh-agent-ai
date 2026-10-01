@@ -61,6 +61,8 @@ pub(crate) fn apply_subscription_fees(
 
 /// 一条**已声明订阅**的月费（`billing_declarations` 当前态的一行）。
 pub(crate) struct DeclaredSubscriptionFee {
+    /// **展示落点**，不是归属：订阅属于服务商账号，`by_provider` 的键是 `宿主/服务商`，
+    /// 所以给它挑一个宿主放（见 [`fee_display_host`]）。
     pub(crate) host: String,
     pub(crate) provider: String,
     pub(crate) currency: String,
@@ -152,6 +154,17 @@ fn add_fixed_subscription_fee(
     }
 }
 
+/// 账号级月费在 `by_provider`（键 `宿主/服务商`）里的落点宿主：服务商自家的宿主优先
+/// （anthropic → claude-code），其次是它用量最集中的宿主，都没有才是 `unattributed`。
+fn fee_display_host(db: &agent_vitals_data::authority::AuthorityDb, provider: &str) -> String {
+    HOST_PROVIDER_MAP
+        .iter()
+        .find(|(_, providers)| providers.contains(&provider))
+        .map(|(host, _)| host.to_string())
+        .or_else(|| db.dominant_host_of_provider(provider).ok().flatten())
+        .unwrap_or_else(|| "unattributed".to_string())
+}
+
 /// 当前有效的 `official_subscription` 声明 → 月费行。
 ///
 /// 只认「当前态」表 `billing_declarations`：撤销会把它软删（`deleted_at_ms`），
@@ -165,24 +178,24 @@ pub(crate) fn declared_subscription_fees(
 ) -> Vec<DeclaredSubscriptionFee> {
     let Ok(rows) = db.billing_declarations() else { return Vec::new() };
     let mut out = Vec::new();
-    // **一个 host+provider 只摊一次**：待确认组按"模型组"切，用户对同一订阅常会分
+    // **一个服务商只摊一次**：待确认组按"模型组"切，用户对同一订阅常会分
     // 两次声明（MiniMax-M3 一组、MiniMax-M2.7 一组），两条声明各带 ¥44——不去重就
-    // 是 ¥88/月的双计。读取方 ORDER BY（host, provider_id, effective_start,
-    // declaration_id）保证留下的第一条是**最早生效**的那条。占坑放在**产出月费之后**：
+    // 是 ¥88/月的双计。订阅是服务商账号的套餐，与宿主无关，所以键是服务商本身；读取方 ORDER BY
+    // （provider_id, effective_start, declaration_id）保证留下的第一条是**最早生效**的那条。占坑放在**产出月费之后**：
     // 「金额暂不清楚」的声明不产出月费，不能把后来带金额的声明挡掉。多账户同服务商
     // 的订阅当前模型表达不了，属规格 §3.4 的修订范围，不用去重冒充支持。
-    let mut seen: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
-    for (declaration_id, host, provider, kind, _name, _amount, _currency, _start, _end, _candidate) in rows
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (declaration_id, provider, kind, _name, _amount, _currency, _start, _end, _candidate) in rows
     {
         if kind != "official_subscription" { continue; }
-        if host.trim().is_empty() || provider.trim().is_empty() { continue; }
+        if provider.trim().is_empty() { continue; }
         // 月费按修订链对**查询月**解析（改价不追溯，见 `declared_fee_for_month`）。
         let Some((amount, currency, start_month, end_month)) =
             declared_fee_for_month(db, &declaration_id, month)
         else { continue; };
-        if !seen.insert((host.clone(), provider.clone())) { continue; }
+        if !seen.insert(provider.clone()) { continue; }
         out.push(DeclaredSubscriptionFee {
-            host,
+            host: fee_display_host(db, &provider),
             provider,
             currency,
             amount,

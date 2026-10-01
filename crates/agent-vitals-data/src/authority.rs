@@ -79,10 +79,24 @@ pub struct TrustMonitorState {
 
 /// 用户计费声明的一行：关系本身和付款/账单分开建模。金额可未知，不能以
 /// `host_bills` 的实付金额或公开价卡来填充。
+/// `(declaration_id, provider_id, relationship_kind, subscription_name, amount_minor, currency,
+/// effective_start, effective_end, source_candidate_id)`——**没有宿主**：声明属于服务商账号，
+/// 按模型使用结算，宿主只是用量的来源壳（见 [`ALL_HOSTS`]）。
 pub type BillingDeclarationRow = (
-    String, String, String, String, Option<String>, Option<i64>, Option<String>,
+    String, String, String, Option<String>, Option<i64>, Option<String>,
     String, Option<String>, Option<String>,
 );
+
+/// `billing_declarations.host` / `billing_declaration_revisions.host` 的**固定值**。
+///
+/// 计费声明是服务商账号上的关系（订阅、API Key、中转），结算按「服务商 + 模型」，与用量是从哪个宿主
+/// 来的无关——同一个 GLM Lite 套餐在 Claude Code 和 ZCode 里是同一份，同一个中转账号在 Claude Code
+/// 和 Codex 里也是同一个账号。曾经声明按 `(宿主, 服务商)` 切分，同一服务商在每个宿主各留一份，
+/// 生效期还会各自漂移，匹配时也要额外开「账号级」补丁。
+///
+/// 该列因旧库的 `NOT NULL` 保留，只写这个常量、**任何谓词都不读它**——想把宿主重新当成匹配条件，
+/// 必须先改这条文档。需要收窄用声明的作用域（account / route / model / session）。
+pub const ALL_HOSTS: &str = "*";
 /// 声明修订的稳定读取行。修订为追加记录，绝不覆盖先前用户输入。
 pub type BillingDeclarationRevisionRow = (
     String,
@@ -195,16 +209,16 @@ pub struct BillingDeclarationFactSelection {
 /// 声明命中事实的**唯一**选择谓词。预览、重算归因与运行时计价三处都从这里拿
 /// `WHERE`，所以「预览说会移出的」与「重算真正归因的」不可能是两个集合。
 ///
-/// 规则：宿主/provider 相等；事实有时间戳且落在 `effective_start..=effective_end`
+/// 规则：provider 相等（**不看宿主**，见 [`ALL_HOSTS`]）；事实有时间戳且落在 `effective_start..=effective_end`
 /// 的北京时间自然日内；旧月份边界兼容展开为该月首日/末日。宿主自报
 /// `billing_mode='subscription'` 的事实不参与（它们本来
 /// 就不按量）；已被其他 saved 声明覆盖的事实不重复移出；作用域按 kind 取交集、
 /// 同 kind 取并集；`window` 只用于展示口径的额外时间窗。
 pub fn billing_declaration_fact_selection(
-    host: &str, provider_id: &str, effective_start: &str, effective_end: Option<&str>,
+    provider_id: &str, effective_start: &str, effective_end: Option<&str>,
     scopes: &[(&str, &str)], window: Option<(i64, i64)>, conflicts: ConflictEvidence,
 ) -> BillingDeclarationFactSelection {
-    billing_declaration_fact_selection_with(host, provider_id, effective_start, effective_end, scopes, window, conflicts, false)
+    billing_declaration_fact_selection_with(provider_id, effective_start, effective_end, scopes, window, conflicts, false)
 }
 
 /// [`billing_declaration_fact_selection`] 加一个开关：`account_level` 为真时，声明按**账号级**匹配——
@@ -216,15 +230,14 @@ pub fn billing_declaration_fact_selection(
 /// 比较而不是 LIKE，避免 `_` `%` 被当通配符。
 ///
 /// - 普通官方订阅：只用 B。
-/// - 带 `("provider","unresolved")` 的官方订阅（MiniMax lite / GLM Lite）：A（用户对「该宿主下服务商
-///   未知的这些模型」的显式作答，仍绑宿主、受模型范围限制）**并上** B。显式作答不能自动扩到别的宿主——
-///   换了宿主，同名模型可能走的是别的中转。
-/// - 其余声明（按量 / 中转 / 官方 API）保持原样：绑宿主 + 服务商 + 范围。
+/// - 带 `("provider","unresolved")` 的官方订阅（MiniMax lite / GLM Lite）：A（用户对「服务商未知的
+///   这些模型」的显式作答，受模型范围限制）**并上** B。
+/// - 其余声明（按量 / 中转 / 官方 API）：服务商 + 范围，同样**不看宿主**。
 ///
 /// 开关由 [`default_coverage`] 决定，预览 / 重算 / 持续套用三处共用。
 #[allow(clippy::too_many_arguments)]
 pub fn billing_declaration_fact_selection_with(
-    host: &str, provider_id: &str, effective_start: &str, effective_end: Option<&str>,
+    provider_id: &str, effective_start: &str, effective_end: Option<&str>,
     scopes: &[(&str, &str)], window: Option<(i64, i64)>, conflicts: ConflictEvidence,
     account_level: bool,
 ) -> BillingDeclarationFactSelection {
@@ -233,7 +246,7 @@ pub fn billing_declaration_fact_selection_with(
         .unwrap_or_else(|| effective_start.to_owned());
     let end_date = effective_end.and_then(|end| billing_boundary_date(end, true));
     let mut params: Vec<Value> = vec![
-        Value::Text(host.to_owned()), Value::Text(provider_id.to_owned()),
+        Value::Text(provider_id.to_owned()),
         Value::Text(start_date),
         end_date.map_or(Value::Null, Value::Text),
     ];
@@ -243,11 +256,11 @@ pub fn billing_declaration_fact_selection_with(
     // 声明本身仍记录用户选的服务商（计费主链规格 v1.2 §5.3a）。
     let provider_unresolved = scopes.iter()
         .any(|(kind, value)| *kind == "provider" && *value == "unresolved");
-    // A：绑宿主的原始匹配。
+    // A：显式匹配——服务商相等；「服务商未知」的组改成服务商为空（模型范围负责收窄）。**不看宿主**。
     let host_bound = if provider_unresolved {
-        "f.host = ?1 AND f.provider_id IS NULL AND ?2 IS NOT NULL"
+        "f.provider_id IS NULL AND ?1 IS NOT NULL"
     } else {
-        "f.host = ?1 AND f.provider_id = ?2"
+        "f.provider_id = ?1"
     };
     // B：账号级匹配。
     let account_condition = || -> String {
@@ -256,18 +269,18 @@ pub fn billing_declaration_fact_selection_with(
         let prefixes: Vec<String> = model_prefixes_of(provider_id).into_iter().filter(|p| safe(p, &['-', '.'])).collect();
         let hosts: Vec<String> = native_hosts_of(provider_id).into_iter().filter(|h| safe(h, &['-', '.', ':', '_'])).collect();
         if prefixes.is_empty() || hosts.is_empty() {
-            return "f.provider_id = ?2".to_string();
+            return "f.provider_id = ?1".to_string();
         }
         let alternatives = prefixes.iter()
             .map(|p| format!("substr(lower(f.model_id), 1, {}) = '{}'", p.len(), p))
             .collect::<Vec<_>>().join(" OR ");
         let host_list = hosts.iter().map(|h| format!("'{h}'")).collect::<Vec<_>>().join(", ");
-        format!("(f.provider_id = ?2 OR (f.provider_id IS NULL AND f.host IN ({host_list}) AND f.model_id IS NOT NULL AND instr(f.model_id, '/') = 0 AND ({alternatives})))")
+        format!("(f.provider_id = ?1 OR (f.provider_id IS NULL AND f.host IN ({host_list}) AND f.model_id IS NOT NULL AND instr(f.model_id, '/') = 0 AND ({alternatives})))")
     };
     let mut where_sql = String::new();
     where_sql.push_str("
-           AND strftime('%Y-%m-%d', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') >= ?3
-           AND (?4 IS NULL OR strftime('%Y-%m-%d', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') <= ?4)
+           AND strftime('%Y-%m-%d', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') >= ?2
+           AND (?3 IS NULL OR strftime('%Y-%m-%d', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') <= ?3)
            AND COALESCE(f.billing_mode, 'unknown') != 'subscription'
            AND NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
                JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
@@ -309,7 +322,7 @@ pub fn billing_declaration_fact_selection_with(
     } else if !provider_unresolved {
         format!("({}){scope_and}", account_condition())
     } else {
-        // A（显式作答，绑宿主 + 受范围限制）∪ B（账号级官方路由，不受模型范围限制）
+        // A（显式作答：服务商未知的事实，受模型范围限制）∪ B（账号级官方路由，不受模型范围限制）
         format!("((({host_bound}){scope_and}) OR ({}))", account_condition())
     };
     let where_sql = format!("f.deleted_at_ms IS NULL AND f.event_ts_ms IS NOT NULL AND {matched}{where_sql}");
@@ -3326,7 +3339,7 @@ impl AuthorityDb {
     /// 写入或更正本地计费声明。声明从不创建 `host_bills`，也不改写 facts。
     #[allow(clippy::too_many_arguments)]
     pub fn billing_declaration_put(
-        &self, declaration_id: &str, host: &str, provider_id: &str, relationship_kind: &str,
+        &self, declaration_id: &str, provider_id: &str, relationship_kind: &str,
         subscription_name: Option<&str>, amount_minor: Option<i64>, currency: Option<&str>,
         effective_start: &str, effective_end: Option<&str>, source_candidate_id: Option<&str>,
         evidence_ref: Option<&str>, now_ms: i64,
@@ -3340,7 +3353,7 @@ impl AuthorityDb {
             (Some(amount), Some(currency)) => amount >= 0 && !currency.trim().is_empty(),
             _ => false,
         };
-        if declaration_id.is_empty() || host.is_empty() || provider_id.is_empty() || !valid_kind
+        if declaration_id.is_empty() || provider_id.is_empty() || !valid_kind
             || !valid_amount || !valid_billing_boundary(effective_start)
             || effective_end.is_some_and(|end| {
                 !valid_billing_boundary(end)
@@ -3352,16 +3365,17 @@ impl AuthorityDb {
             )));
         }
         if let Some(candidate_id) = source_candidate_id {
+            // 候选是某个宿主配置里发现的线索（宿主只是证据来源）；声明属于服务商，只比对服务商。
             let candidate = self.conn.query_row(
-                "SELECT host, provider_id, status FROM billing_import_candidates WHERE candidate_id = ?1",
+                "SELECT provider_id, status FROM billing_import_candidates WHERE candidate_id = ?1",
                 rusqlite::params![candidate_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             ).optional()?;
-            if !matches!(candidate, Some((ref candidate_host, ref candidate_provider, ref status))
-                if candidate_host == host && candidate_provider == provider_id && status == "accepted")
+            if !matches!(candidate, Some((ref candidate_provider, ref status))
+                if candidate_provider == provider_id && status == "accepted")
             {
                 return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
-                    "billing declaration candidate must be accepted and match host/provider".to_string(),
+                    "billing declaration candidate must be accepted and match the provider".to_string(),
                 )));
             }
         }
@@ -3379,7 +3393,7 @@ impl AuthorityDb {
                effective_end = excluded.effective_end, source_candidate_id = excluded.source_candidate_id,
                evidence_ref = excluded.evidence_ref, updated_at_ms = excluded.updated_at_ms,
                deleted_at_ms = NULL",
-            rusqlite::params![declaration_id, host, provider_id, relationship_kind,
+            rusqlite::params![declaration_id, ALL_HOSTS, provider_id, relationship_kind,
                 subscription_name, amount_minor, currency, effective_start, effective_end,
                 source_candidate_id, evidence_ref, now_ms],
         )?;
@@ -3387,11 +3401,11 @@ impl AuthorityDb {
     }
 
     /// 活跃声明的稳定读取顺序；金额缺失保持 `None`，不以 0 或价卡代替。
-    /// 有效声明里记录的结算币种：`"host/provider"` → 币种。来自当前 saved 修订的
-    /// `settlement` 作用域行（按量/中转声明的结算币）；同键多条按修订创建时间取最新。
+    /// 有效声明里记录的结算币种：`provider` → 币种。来自当前 saved 修订的
+    /// `settlement` 作用域行（按量/中转声明的结算币）；同服务商多条按修订创建时间取最新。
     pub fn declared_settlement_currencies(&self) -> Result<std::collections::BTreeMap<String, String>, AuthorityError> {
         let mut stmt = self.conn.prepare(
-            "SELECT bd.host, bd.provider_id, s.scope_value
+            "SELECT bd.provider_id, s.scope_value
              FROM billing_declarations bd
              JOIN billing_declaration_revisions br ON br.declaration_id = bd.declaration_id
              JOIN billing_recalculation_jobs bj ON bj.revision_id = br.revision_id AND bj.status = 'succeeded'
@@ -3404,25 +3418,38 @@ impl AuthorityDb {
                    WHERE br2.declaration_id = bd.declaration_id AND (br2.change_kind = 'revoked' OR bj2.job_id IS NOT NULL))
              ORDER BY br.created_at_ms",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         let mut out = std::collections::BTreeMap::new();
         for row in rows {
-            let (host, provider, currency) = row?;
-            out.insert(format!("{host}/{provider}"), currency);
+            let (provider, currency) = row?;
+            out.insert(provider, currency);
         }
         Ok(out)
     }
 
+    /// 该服务商的用量最多出现在哪个宿主（事实数最多；并列取字典序小的）。没有用量 → `None`。
+    ///
+    /// 只用于**展示归位**：账号级的月费（订阅）不属于任何宿主，但汇总的 `by_provider` 键是
+    /// `宿主/服务商`，需要给它挑一个落点，选用量最集中的那个，月费就和该服务商的用量排在一起。
+    /// 不参与任何匹配或计价。
+    pub fn dominant_host_of_provider(&self, provider_id: &str) -> Result<Option<String>, AuthorityError> {
+        Ok(self.conn.query_row(
+            "SELECT host FROM usage_facts WHERE provider_id = ?1 AND deleted_at_ms IS NULL
+             GROUP BY host ORDER BY COUNT(*) DESC, host LIMIT 1",
+            rusqlite::params![provider_id], |row| row.get(0),
+        ).optional()?)
+    }
+
     pub fn billing_declarations(&self) -> Result<Vec<BillingDeclarationRow>, AuthorityError> {
         let mut stmt = self.conn.prepare(
-            "SELECT declaration_id, host, provider_id, relationship_kind, subscription_name,
+            "SELECT declaration_id, provider_id, relationship_kind, subscription_name,
                     amount_minor, currency, effective_start, effective_end, source_candidate_id
              FROM billing_declarations WHERE deleted_at_ms IS NULL
-             ORDER BY host, provider_id, effective_start, declaration_id",
+             ORDER BY provider_id, effective_start, declaration_id",
         )?;
         let rows = stmt.query_map([], |r| Ok((
             r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
-            r.get(7)?, r.get(8)?, r.get(9)?,
+            r.get(7)?, r.get(8)?,
         )))?.collect::<Result<Vec<_>, _>>().map_err(AuthorityError::from);
         rows
     }
@@ -3463,7 +3490,7 @@ impl AuthorityDb {
     #[allow(clippy::too_many_arguments)]
     pub fn billing_declaration_revision_save(
         &self, revision_id: &str, declaration_id: &str, supersedes_revision_id: Option<&str>,
-        host: &str, provider_id: &str, relationship_kind: &str, subscription_name: Option<&str>,
+        provider_id: &str, relationship_kind: &str, subscription_name: Option<&str>,
         amount_minor: Option<i64>, currency: Option<&str>, effective_start: &str,
         effective_end: Option<&str>, source_candidate_id: Option<&str>, evidence_ref: Option<&str>,
         scopes: &[(&str, &str)], now_ms: i64,
@@ -3484,7 +3511,7 @@ impl AuthorityDb {
                 || (kind == "provider" && value == "unresolved")
                 || (kind == "settlement" && matches!(value, "CNY" | "USD"))
         };
-        if revision_id.is_empty() || declaration_id.is_empty() || host.is_empty() || provider_id.is_empty()
+        if revision_id.is_empty() || declaration_id.is_empty() || provider_id.is_empty()
             || !valid_kind || !valid_amount || !valid_billing_boundary(effective_start)
             || effective_end.is_some_and(|end| {
                 !valid_billing_boundary(end)
@@ -3516,20 +3543,20 @@ impl AuthorityDb {
                 // 先释放它，再按「一张候选只归一条**有效**声明」的约束往下走。
                 self.release_revoked_candidate_claims(candidate_id)?;
                 let candidate = self.conn.query_row(
-                    "SELECT host, provider_id, status FROM billing_import_candidates WHERE candidate_id = ?1",
+                    "SELECT provider_id, status FROM billing_import_candidates WHERE candidate_id = ?1",
                     rusqlite::params![candidate_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 ).optional()?;
-                let Some((candidate_host, candidate_provider, status)) = candidate else {
+                let Some((candidate_provider, status)) = candidate else {
                     return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
-                        "billing declaration candidate must be accepted and match host/provider".to_string(),
+                        "billing declaration candidate must be accepted and match the provider".to_string(),
                     )));
                 };
-                if candidate_host != host || candidate_provider != provider_id
+                if candidate_provider != provider_id
                     || !matches!(status.as_str(), "pending" | "accepted")
                 {
                     return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
-                        "billing declaration candidate must be pending/accepted and match host/provider".to_string(),
+                        "billing declaration candidate must be pending/accepted and match the provider".to_string(),
                     )));
                 }
                 // 同一张候选被两条**有效**声明同时占用是约束本身要挡的（一张旧套餐记录
@@ -3583,7 +3610,7 @@ impl AuthorityDb {
                    effective_start = excluded.effective_start, effective_end = excluded.effective_end,
                    source_candidate_id = excluded.source_candidate_id, evidence_ref = excluded.evidence_ref,
                    updated_at_ms = excluded.updated_at_ms, deleted_at_ms = NULL",
-                rusqlite::params![declaration_id, host, provider_id, relationship_kind,
+                rusqlite::params![declaration_id, ALL_HOSTS, provider_id, relationship_kind,
                     subscription_name, amount_minor, currency, effective_start, effective_end,
                     source_candidate_id, evidence_ref, now_ms],
             )?;
@@ -3594,7 +3621,7 @@ impl AuthorityDb {
                      effective_start, effective_end, source_candidate_id, evidence_ref, created_at_ms)
                  VALUES (?1, ?2, ?3, 'saved', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 rusqlite::params![revision_id, declaration_id, revision_number, supersedes_revision_id,
-                    host, provider_id, relationship_kind, subscription_name, amount_minor, currency,
+                    ALL_HOSTS, provider_id, relationship_kind, subscription_name, amount_minor, currency,
                     effective_start, effective_end, source_candidate_id, evidence_ref, now_ms],
             )?;
             for (scope_kind, scope_value) in scopes {
@@ -3724,13 +3751,13 @@ impl AuthorityDb {
     pub fn billing_declaration_impact_preview(
         &self, revision_id: &str, window: Option<(i64, i64)>,
     ) -> Result<BillingDeclarationImpactPreview, AuthorityError> {
-        let revision: Option<(String, String, String, String, Option<String>, String)> = self.conn.query_row(
-            "SELECT host, provider_id, effective_start, change_kind, effective_end, relationship_kind
+        let revision: Option<(String, String, String, Option<String>, String)> = self.conn.query_row(
+            "SELECT provider_id, effective_start, change_kind, effective_end, relationship_kind
              FROM billing_declaration_revisions WHERE revision_id = ?1",
             rusqlite::params![revision_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         ).optional()?;
-        let Some((host, provider_id, effective_start, change_kind, effective_end, relationship_kind)) = revision else {
+        let Some((provider_id, effective_start, change_kind, effective_end, relationship_kind)) = revision else {
             return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
                 "unknown billing declaration revision".to_string(),
             )));
@@ -3743,7 +3770,7 @@ impl AuthorityDb {
             .map(|(_, kind, value)| (kind.as_str(), value.as_str()))
             .collect::<Vec<_>>();
         self.billing_declaration_impact_preview_for_kind(
-            &host, &provider_id, &relationship_kind, &effective_start, effective_end.as_deref(), &scope_refs, window,
+            &provider_id, &relationship_kind, &effective_start, effective_end.as_deref(), &scope_refs, window,
         )
     }
 
@@ -3757,15 +3784,15 @@ impl AuthorityDb {
     /// 集合，这是计费主链规格 R1 钉住的不变量（此前预览按前端传入的统计月窗口、
     /// 重算按全历史，两者对不上）。
     pub fn billing_declaration_impact_preview_for(
-        &self, host: &str, provider_id: &str, effective_start: &str,
+        &self, provider_id: &str, effective_start: &str,
         effective_end: Option<&str>, scopes: &[(&str, &str)], window: Option<(i64, i64)>,
     ) -> Result<BillingDeclarationImpactPreview, AuthorityError> {
-        self.billing_declaration_impact_preview_native(host, provider_id, effective_start, effective_end, scopes, window, false)
+        self.billing_declaration_impact_preview_native(provider_id, effective_start, effective_end, scopes, window, false)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn billing_declaration_impact_preview_native(
-        &self, host: &str, provider_id: &str, effective_start: &str,
+        &self, provider_id: &str, effective_start: &str,
         effective_end: Option<&str>, scopes: &[(&str, &str)], window: Option<(i64, i64)>, native: bool,
     ) -> Result<BillingDeclarationImpactPreview, AuthorityError> {
         if window.is_some_and(|(start, end)| end <= start) {
@@ -3773,7 +3800,7 @@ impl AuthorityDb {
         }
         let aggregate = |conflicts: ConflictEvidence| -> Result<PreviewAggregate, AuthorityError> {
             let selection = billing_declaration_fact_selection_with(
-                host, provider_id, effective_start, effective_end, scopes, window, conflicts, native,
+                provider_id, effective_start, effective_end, scopes, window, conflicts, native,
             );
             let sql = format!(
                 "SELECT COUNT(*), COUNT(DISTINCT f.session_key),
@@ -3799,8 +3826,8 @@ impl AuthorityDb {
 
     /// 该服务商是否存在**生效中**的官方 API 声明（最新修订是 `saved`），**不分宿主**：
     /// 官方订阅是账号级的，API Key 同样可能在任何宿主上使用，两者并存时用量无从区分，
-    /// 默认覆盖规则让位给显式范围，见 [`default_coverage`]。`host` 仅为兼容既有调用，不参与判断。
-    pub fn billing_official_api_declared(&self, _host: &str, provider_id: &str) -> Result<bool, AuthorityError> {
+    /// 默认覆盖规则让位给显式范围，见 [`default_coverage`]。
+    pub fn billing_official_api_declared(&self, provider_id: &str) -> Result<bool, AuthorityError> {
         Ok(self.conn.query_row(
             "SELECT EXISTS (
                  SELECT 1 FROM billing_declarations bd
@@ -3814,12 +3841,13 @@ impl AuthorityDb {
     }
 
     /// 带关系种类的前瞻预览：先经 [`attribution_scopes`] 再算，与重算 / 持续套用同口径。
+    #[allow(clippy::too_many_arguments)] // SQL 投影参数天然展开；收拢结构体反而遮蔽与 _native 的参数对应
     pub fn billing_declaration_impact_preview_for_kind(
-        &self, host: &str, provider_id: &str, relationship_kind: &str, effective_start: &str,
+        &self, provider_id: &str, relationship_kind: &str, effective_start: &str,
         effective_end: Option<&str>, scopes: &[(&str, &str)], window: Option<(i64, i64)>,
     ) -> Result<BillingDeclarationImpactPreview, AuthorityError> {
-        let (effective, native) = default_coverage(relationship_kind, scopes, self.billing_official_api_declared(host, provider_id)?);
-        self.billing_declaration_impact_preview_native(host, provider_id, effective_start, effective_end, &effective, window, native)
+        let (effective, native) = default_coverage(relationship_kind, scopes, self.billing_official_api_declared(provider_id)?);
+        self.billing_declaration_impact_preview_native(provider_id, effective_start, effective_end, &effective, window, native)
     }
 
     fn billing_declaration_matching_fact_ids(&self, revision_id: &str) -> Result<Vec<String>, AuthorityError> {
@@ -3832,18 +3860,18 @@ impl AuthorityDb {
     fn billing_declaration_matching_fact_ids_since(
         &self, revision_id: &str, since_created_at_ms: Option<i64>,
     ) -> Result<Vec<String>, AuthorityError> {
-        let revision: (String, String, String, Option<String>, String) = self.conn.query_row(
-            "SELECT host, provider_id, effective_start, effective_end, relationship_kind FROM billing_declaration_revisions WHERE revision_id = ?1 AND change_kind = 'saved'",
-            rusqlite::params![revision_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        let revision: (String, String, Option<String>, String) = self.conn.query_row(
+            "SELECT provider_id, effective_start, effective_end, relationship_kind FROM billing_declaration_revisions WHERE revision_id = ?1 AND change_kind = 'saved'",
+            rusqlite::params![revision_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
         let scopes = self.billing_declaration_scopes(revision_id)?;
         let scope_refs = scopes.iter()
             .map(|(_, kind, value)| (kind.as_str(), value.as_str()))
             .collect::<Vec<_>>();
         // 与预览同一个有效范围（默认覆盖规则），否则「预览命中 = 重算归因」的不变量就破了。
-        let (effective, native) = default_coverage(&revision.4, &scope_refs, self.billing_official_api_declared(&revision.0, &revision.1)?);
+        let (effective, native) = default_coverage(&revision.3, &scope_refs, self.billing_official_api_declared(&revision.0)?);
         let mut selection = billing_declaration_fact_selection_with(
-            &revision.0, &revision.1, &revision.2, revision.3.as_deref(), &effective, None,
+            &revision.0, &revision.1, revision.2.as_deref(), &effective, None,
             ConflictEvidence::Exclude, native,
         );
         if let Some(since) = since_created_at_ms {
@@ -3962,13 +3990,13 @@ impl AuthorityDb {
             "SELECT value FROM schema_meta WHERE key = ?1", rusqlite::params![key], |row| row.get(0),
         ).optional()?;
         if done.is_some() { return Ok(false); }
-        let (host, provider_id, kind): (String, String, String) = self.conn.query_row(
-            "SELECT host, provider_id, relationship_kind FROM billing_declaration_revisions WHERE revision_id = ?1",
-            rusqlite::params![revision_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        let (provider_id, kind): (String, String) = self.conn.query_row(
+            "SELECT provider_id, relationship_kind FROM billing_declaration_revisions WHERE revision_id = ?1",
+            rusqlite::params![revision_id], |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let scopes = self.billing_declaration_scopes(revision_id)?;
         let scope_refs = scopes.iter().map(|(_, k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>();
-        let (effective, native) = default_coverage(&kind, &scope_refs, self.billing_official_api_declared(&host, &provider_id)?);
+        let (effective, native) = default_coverage(&kind, &scope_refs, self.billing_official_api_declared(&provider_id)?);
         Ok(effective.len() != scope_refs.len() || native)
     }
 
@@ -5200,7 +5228,7 @@ mod tests {
         assert_eq!(upgraded.pending_billing_import_candidates().unwrap().len(), 1);
         assert!(upgraded.billing_import_candidate_resolve("candidate", "accepted", 4).unwrap());
         assert!(upgraded.billing_declaration_put(
-            "decl", "claude-code", "minimax", "official_subscription", None,
+            "decl","minimax", "official_subscription", None,
             Some(11_400), Some("CNY"), "2026-09", None, Some("candidate"), None, 5,
         ).unwrap());
         assert_eq!(upgraded.billing_declarations().unwrap().len(), 1);
@@ -5284,39 +5312,39 @@ mod tests {
         let db = tmp_db("billing-declaration");
         let authority = AuthorityDb::open(&db, 1).unwrap();
         assert!(authority.billing_declaration_put(
-            "decl-unknown", "codex", "openai", "official_subscription", Some("Plus"),
+            "decl-unknown","openai", "official_subscription", Some("Plus"),
             None, None, "2026-09", None, None, Some("user:declared"), 2,
         ).unwrap());
         assert!(authority.billing_declaration_put(
-            "decl-paid-contract", "claude-code", "anthropic", "official_subscription", Some("Pro"),
+            "decl-paid-contract","anthropic", "official_subscription", Some("Pro"),
             Some(2_000), Some("USD"), "2026-09", Some("2026-12"), None, None, 3,
         ).unwrap());
         let rows = authority.billing_declarations().unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].0, "decl-paid-contract");
-        assert_eq!(rows[0].5, Some(2_000));
+        assert_eq!(rows[0].4, Some(2_000));
         assert_eq!(rows[1].0, "decl-unknown");
-        assert_eq!(rows[1].5, None, "unknown contract amount must remain unknown");
+        assert_eq!(rows[1].4, None, "unknown contract amount must remain unknown");
         assert_eq!(authority.host_bill_count().unwrap(), 0,
             "a billing declaration must not masquerade as a payment record");
         assert!(authority.billing_declaration_put(
-            "bad", "codex", "openai", "official_subscription", None,
+            "bad","openai", "official_subscription", None,
             Some(100), None, "2026-09", None, None, None, 4,
         ).is_err(), "amount without a currency is invalid");
         assert!(authority.billing_declaration_put(
-            "bad-month", "codex", "openai", "official_subscription", None,
+            "bad-month","openai", "official_subscription", None,
             None, None, "2026-99", None, None, None, 4,
         ).is_err(), "malformed period must not pass a length-only check");
         authority.billing_import_candidate_put(
             "candidate", "claude-code", "anthropic", "USD", 2_000, "2026-09", "legacy", 4,
         ).unwrap();
         assert!(authority.billing_declaration_put(
-            "wrong-candidate", "codex", "openai", "official_subscription", None,
+            "wrong-candidate","openai", "official_subscription", None,
             None, None, "2026-09", None, Some("candidate"), None, 4,
         ).is_err(), "candidate must belong to the declaration host/provider and be accepted");
         authority.billing_import_candidate_resolve("candidate", "accepted", 5).unwrap();
         assert!(authority.billing_declaration_put(
-            "candidate-declaration", "claude-code", "anthropic", "official_subscription", None,
+            "candidate-declaration","anthropic", "official_subscription", None,
             Some(2_000), Some("USD"), "2026-09", None, Some("candidate"), None, 6,
         ).unwrap());
         let _ = std::fs::remove_file(&db);
@@ -5330,8 +5358,7 @@ mod tests {
             "pending-ok", "codex", "openai", "CNY", 1_990, "2026-09", "uat", 1,
         ).unwrap();
         assert!(authority.billing_declaration_revision_save(
-            "revision-from-pending", "declaration-from-pending", None,
-            "codex", "openai", "official_subscription", Some("Plus"),
+            "revision-from-pending", "declaration-from-pending", None,"openai", "official_subscription", Some("Plus"),
             Some(1_990), Some("CNY"), "2026-09", None, Some("pending-ok"),
             Some("candidate:pending-ok"), &[], 2,
         ).unwrap());
@@ -5343,8 +5370,7 @@ mod tests {
             "pending-fail", "codex", "openai", "CNY", 2_990, "2026-09", "uat", 3,
         ).unwrap();
         assert!(authority.billing_declaration_revision_save(
-            "revision-from-pending-fail", "declaration-from-pending-fail", None,
-            "codex", "openai", "official_subscription", None, None, None,
+            "revision-from-pending-fail", "declaration-from-pending-fail", None,"openai", "official_subscription", None, None, None,
             "2026-09", None, Some("pending-fail"), None,
             &[("model", "gpt-5"), ("model", "gpt-5")], 4,
         ).is_err());
@@ -5372,7 +5398,7 @@ mod tests {
             .unwrap();
         assert!(authority
             .billing_declaration_revision_save(
-                "rev-1", "decl-1", None, "claude-code", "anthropic", "official_subscription",
+                "rev-1", "decl-1", None,"anthropic", "official_subscription",
                 Some("Claude Pro"), Some(2_000), Some("USD"), "2025-07-20", None,
                 Some("cand-reuse"), None, &[], 2,
             )
@@ -5392,7 +5418,7 @@ mod tests {
         assert!(
             authority
                 .billing_declaration_revision_save(
-                    "rev-2", "decl-2", None, "claude-code", "anthropic", "official_subscription",
+                    "rev-2", "decl-2", None,"anthropic", "official_subscription",
                     Some("Claude Pro"), Some(2_000), Some("USD"), "2025-07-20", None,
                     Some("cand-reuse"), None, &[], 4,
                 )
@@ -5409,13 +5435,13 @@ mod tests {
             .unwrap();
         assert!(authority
             .billing_declaration_revision_save(
-                "rev-taken-1", "decl-taken-1", None, "codex", "openai", "official_subscription",
+                "rev-taken-1", "decl-taken-1", None,"openai", "official_subscription",
                 None, Some(1_000), Some("CNY"), "2026-09", None, Some("cand-taken"), None, &[], 6,
             )
             .unwrap());
         let error = authority
             .billing_declaration_revision_save(
-                "rev-taken-2", "decl-taken-2", None, "codex", "openai", "official_subscription",
+                "rev-taken-2", "decl-taken-2", None,"openai", "official_subscription",
                 None, Some(1_000), Some("CNY"), "2026-09", None, Some("cand-taken"), None, &[], 7,
             )
             .unwrap_err()
@@ -5440,7 +5466,7 @@ mod tests {
             .unwrap();
         assert!(authority
             .billing_declaration_revision_save(
-                "rev-stale", "decl-stale", None, "claude-code", "anthropic",
+                "rev-stale", "decl-stale", None,"anthropic",
                 "official_subscription", None, Some(2_000), Some("USD"), "2025-07-20", None,
                 Some("cand-stale"), None, &[], 2,
             )
@@ -5456,7 +5482,7 @@ mod tests {
         assert!(
             authority
                 .billing_declaration_revision_save(
-                    "rev-heal", "decl-heal", None, "claude-code", "anthropic",
+                    "rev-heal", "decl-heal", None,"anthropic",
                     "official_subscription", None, Some(2_000), Some("USD"), "2025-07-20", None,
                     Some("cand-stale"), None, &[], 4,
                 )
@@ -5471,7 +5497,7 @@ mod tests {
         let db = tmp_db("billing-declaration-revisions");
         let authority = AuthorityDb::open(&db, 1).unwrap();
         assert!(authority.billing_declaration_revision_save(
-            "revision-1", "declaration", None, "codex", "openai", "official_subscription",
+            "revision-1", "declaration", None,"openai", "official_subscription",
             Some("Plus"), None, None, "2026-09", None, None, Some("user:declared"),
             &[("route", "official-desktop"), ("model", "gpt-5.6-sol")], 2,
         ).unwrap());
@@ -5483,7 +5509,7 @@ mod tests {
         assert_eq!(authority.host_bill_count().unwrap(), 0,
             "a scoped declaration remains distinct from a payment record");
         assert!(authority.billing_declaration_revision_save(
-            "revision-2", "declaration", Some("revision-1"), "codex", "openai",
+            "revision-2", "declaration", Some("revision-1"),"openai",
             "official_subscription", Some("Plus"), None, None, "2026-10", None, None,
             Some("user:corrected"), &[("account", "personal")], 3,
         ).unwrap());
@@ -5494,7 +5520,7 @@ mod tests {
         assert_eq!(revisions[1].2, 2);
         assert_eq!(revisions[1].11, "2026-10");
         assert!(authority.billing_declaration_revision_save(
-            "bad-branch", "declaration", Some("revision-1"), "codex", "openai",
+            "bad-branch", "declaration", Some("revision-1"),"openai",
             "official_subscription", None, None, None, "2026-10", None, None, None, &[], 4,
         ).is_err(), "a stale revision cannot silently form a second current branch");
         assert!(authority.billing_declaration_revision_revoke(
@@ -5520,14 +5546,14 @@ mod tests {
         let db = tmp_db("billing-declaration-invalid-scopes");
         let authority = AuthorityDb::open(&db, 1).unwrap();
         assert!(authority.billing_declaration_revision_save(
-            "invalid", "declaration", None, "codex", "openai", "official_api", None,
+            "invalid", "declaration", None,"openai", "official_api", None,
             None, None, "2026-09", None, None, None,
             &[("model", "gpt-5"), ("model", "gpt-5")], 2,
         ).is_err());
         assert!(authority.billing_declaration_revisions("declaration").unwrap().is_empty());
         assert!(authority.billing_declarations().unwrap().is_empty());
         assert!(authority.billing_declaration_revision_save(
-            "invalid-kind", "declaration", None, "codex", "openai", "official_api", None,
+            "invalid-kind", "declaration", None,"openai", "official_api", None,
             None, None, "2026-09", None, None, None, &[("host", "codex")], 3,
         ).is_err());
         assert!(authority.billing_declaration_revisions("declaration").unwrap().is_empty());
@@ -5553,16 +5579,14 @@ mod tests {
                    ('f-known', 'claude-code', 'm', 'n3', 'e3', NULL, 'assistant-usage', 'zhipu-glm', 'glm-5', 3000, 'session-native', 'metered', 40, 0, 0, 0, 'pu-run', 1, 1);",
         ).unwrap();
         let scopes = [("provider", "unresolved"), ("model", "glm-5")];
-        let preview = authority.billing_declaration_impact_preview_for(
-            "claude-code", "zhipu-glm", "1970-01-01", Some("1970-12-31"), &scopes, None,
+        let preview = authority.billing_declaration_impact_preview_for("zhipu-glm", "1970-01-01", Some("1970-12-31"), &scopes, None,
         ).unwrap();
         assert_eq!((preview.fact_count, preview.total_tokens), (2, 30), "{preview:?}");
-        let plain = authority.billing_declaration_impact_preview_for(
-            "claude-code", "zhipu-glm", "1970-01-01", Some("1970-12-31"), &[("model", "glm-5")], None,
+        let plain = authority.billing_declaration_impact_preview_for("zhipu-glm", "1970-01-01", Some("1970-12-31"), &[("model", "glm-5")], None,
         ).unwrap();
         assert_eq!((plain.fact_count, plain.total_tokens), (1, 40), "plain declaration only sees the known-provider fact");
         authority.billing_declaration_revision_save(
-            "pu-rev", "pu-decl", None, "claude-code", "zhipu-glm", "official_subscription",
+            "pu-rev", "pu-decl", None,"zhipu-glm", "official_subscription",
             None, None, None, "1970-01-01", Some("1970-12-31"), None, None, &scopes, 2,
         ).unwrap();
         authority.billing_recalculation_enqueue("pu-job", "pu-decl", "pu-rev", 3).unwrap();
@@ -5574,7 +5598,7 @@ mod tests {
         // 显式作答（provider=unresolved + 模型清单）仍只针对 NULL-provider 的 f-null-*（见上面的预览）。
         assert_eq!(attributed, vec!["f-known".to_string(), "f-null-a".to_string(), "f-null-b".to_string()]);
         assert!(authority.billing_declaration_revision_save(
-            "bad-rev", "bad-decl", None, "claude-code", "zhipu-glm", "official_api",
+            "bad-rev", "bad-decl", None,"zhipu-glm", "official_api",
             None, None, None, "1970-01-01", Some("1970-12-31"), None, None, &[("provider", "anything")], 5,
         ).is_err(), "provider scope only accepts the literal `unresolved`");
         let _ = std::fs::remove_file(&db);
@@ -5612,8 +5636,7 @@ mod tests {
                    ('fact-2', 'codex', 'machine', 'session-a', 'event-2', 'session-a-key', 'assistant-usage', 'openai', 'model-b', 2000, 'route-a', 20, 0, 0, 0, 'preview-run', 1, 1),
                    ('fact-3', 'codex', 'machine', 'session-b', 'event-3', 'session-b-key', 'assistant-usage', 'openai', 'model-a', 3000, 'route-b', 30, 0, 0, 0, 'preview-run', 1, 1);",
         ).unwrap();
-        assert_eq!(authority.billing_declaration_impact_preview_for(
-            "codex", "openai", "1970-01", Some("1970-12"),
+        assert_eq!(authority.billing_declaration_impact_preview_for("openai", "1970-01", Some("1970-12"),
             &[("route", "route-a"), ("model", "model-a")], Some((0, 4_000)),
         ).unwrap(), BillingDeclarationImpactPreview {
             fact_count: 1, session_count: 1, total_tokens: 10,
@@ -5624,7 +5647,7 @@ mod tests {
             "SELECT COUNT(*) FROM billing_declaration_revisions", [], |row| row.get::<_, i64>(0),
         ).unwrap(), 0, "prospective preview must not persist a revision");
         authority.billing_declaration_revision_save(
-            "preview-revision", "preview-declaration", None, "codex", "openai", "official_api",
+            "preview-revision", "preview-declaration", None,"openai", "official_api",
             None, None, None, "1970-01", Some("1970-12"), None, Some("test"),
             &[("route", "route-a"), ("model", "model-a")], 2,
         ).unwrap();
@@ -5673,7 +5696,7 @@ mod tests {
                    ('f-native-sub', 'codex', 'machine', 'n2', 'e6', 's2', 'assistant-usage', 'openai', 'model-a', 3600, 'session-native', 'subscription', 90, 0, 0, 0, 'r1-run', 1, 1);",
         ).unwrap();
         authority.billing_declaration_revision_save(
-            "other-rev", "other-decl", None, "codex", "openai", "official_subscription",
+            "other-rev", "other-decl", None,"openai", "official_subscription",
             None, None, None, "1970-01", Some("1970-01"), None, None, &[("session", "s3")], 2,
         ).unwrap();
         authority.billing_recalculation_enqueue("other-job", "other-decl", "other-rev", 2).unwrap();
@@ -5684,8 +5707,7 @@ mod tests {
         assert_eq!(covered, vec!["f-covered".to_string()]);
 
         let scopes = [("model", "model-a")];
-        let preview = authority.billing_declaration_impact_preview_for(
-            "codex", "openai", "1970-01", Some("1970-12"), &scopes, None,
+        let preview = authority.billing_declaration_impact_preview_for("openai", "1970-01", Some("1970-12"), &scopes, None,
         ).unwrap();
         assert_eq!(preview.fact_count, 2, "{preview:?}");
         assert_eq!(preview.total_tokens, 40);
@@ -5696,7 +5718,7 @@ mod tests {
         // 本测试验证「模型范围」在预览与重算里同口径，所以用会受模型清单限制的 third_party：
         // official_subscription 现在默认覆盖整个服务商（见 `attribution_scopes`），不再受清单限制。
         authority.billing_declaration_revision_save(
-            "r1-rev", "r1-decl", None, "codex", "openai", "third_party",
+            "r1-rev", "r1-decl", None,"openai", "third_party",
             None, None, None, "1970-01", Some("1970-12"), None, None, &scopes, 3,
         ).unwrap();
         assert_eq!(
@@ -5723,7 +5745,7 @@ mod tests {
         let db = tmp_db("billing-recalculation-job");
         let authority = AuthorityDb::open(&db, 1).unwrap();
         authority.billing_declaration_revision_save(
-            "revision-job", "declaration-job", None, "codex", "openai", "official_api",
+            "revision-job", "declaration-job", None,"openai", "official_api",
             None, None, None, "2026-09", None, None, None, &[], 1,
         ).unwrap();
         assert!(authority.billing_recalculation_enqueue("job-1", "declaration-job", "revision-job", 2).unwrap());
@@ -5736,7 +5758,7 @@ mod tests {
         assert!(!authority.billing_recalculation_enqueue("job-3", "declaration-job", "revision-job", 6).unwrap(),
             "one revision cannot create a second recalculation job");
         authority.billing_declaration_revision_save(
-            "revision-job-2", "declaration-job-2", None, "codex", "openai", "official_api",
+            "revision-job-2", "declaration-job-2", None,"openai", "official_api",
             None, None, None, "2026-09", None, None, None, &[], 7,
         ).unwrap();
         assert!(authority.billing_recalculation_enqueue("job-failed", "declaration-job-2", "revision-job-2", 8).unwrap());
@@ -5790,7 +5812,7 @@ mod tests {
         // 保存前已入库的事实 → 重算 job 覆盖。
         insert("f-old", Some("anthropic"), "claude-opus-5", day(1), 100);
         authority.billing_declaration_revision_save(
-            "rev-sub", "decl-sub", None, "claude-code", "anthropic", "official_subscription",
+            "rev-sub", "decl-sub", None,"anthropic", "official_subscription",
             Some("Claude Pro"), Some(2_000), Some("USD"), "2025-07-20", None, None, None,
             &[("model", "claude-opus-5")], 200,
         ).unwrap();
@@ -5799,7 +5821,7 @@ mod tests {
         // 「计费方待定」的中转声明（provider=unresolved），同样持续有效。
         insert("g-old", None, "deepseek/deepseek-v4.1-flash", day(1), 100);
         authority.billing_declaration_revision_save(
-            "rev-relay", "decl-relay", None, "claude-code", "shengsuanyun", "third_party",
+            "rev-relay", "decl-relay", None,"shengsuanyun", "third_party",
             None, None, None, "2025-09-01", None, None, None,
             &[("provider", "unresolved"), ("model", "deepseek/deepseek-v4.1-flash")], 500,
         ).unwrap();
@@ -5849,7 +5871,7 @@ mod tests {
 
         // 有 effective_end 的声明到期即止：期外事实不套用。
         authority.billing_declaration_revision_save(
-            "rev-bounded", "decl-bounded", None, "codex", "openai", "official_subscription",
+            "rev-bounded", "decl-bounded", None,"openai", "official_subscription",
             Some("Plus"), Some(2_000), Some("USD"), "2025-09-01", Some("2025-09-03"), None, None, &[], 6_000,
         ).unwrap();
         authority.billing_recalculation_enqueue("job-bounded", "decl-bounded", "rev-bounded", 6_100).unwrap();
@@ -5898,12 +5920,81 @@ mod tests {
     /// 用户要求（2026-10-01）：Anthropic 发新模型不该要求我们发版或用户回来补声明。
     /// 真机：Claude Pro 声明只列了 sonnet-5 / opus-5，`claude-sonnet-5-5` 的 175M token 成了「归属不明」，
     /// 而它的事实早已带着 `provider_id = anthropic`（官方端点证据）。
+    /// 用户要求（2026-10-01）：计费绑定在服务商上、按模型使用结算，宿主只是壳。
+    /// 真机里同一个中转账号（shengsuanyun）在 Claude Code 与 Codex 各留一份声明、生效期还各自漂移；
+    /// 现在一份声明就够：不看宿主，任何宿主上归到该服务商的事实都属于这个账号。
+    /// 账号级月费要在 `宿主/服务商` 键下挑一个落点：用量最集中的宿主；没有用量则没有落点。
+    #[test]
+    fn the_dominant_host_of_a_provider_is_where_its_account_level_fee_is_shown() {
+        let (db, authority) = default_scope_fixture("billing-dominant-host");
+        put_fact(&authority, "d1", "codex", Some("relay-x"), "m", 1);
+        put_fact(&authority, "d2", "claude-code", Some("relay-x"), "m", 1);
+        put_fact(&authority, "d3", "claude-code", Some("relay-x"), "m", 1);
+        put_fact(&authority, "d4", "codex", Some("other"), "m", 1);
+        assert_eq!(authority.dominant_host_of_provider("relay-x").unwrap().as_deref(), Some("claude-code"));
+        assert_eq!(authority.dominant_host_of_provider("other").unwrap().as_deref(), Some("codex"));
+        assert_eq!(authority.dominant_host_of_provider("never-used").unwrap(), None);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn a_billing_declaration_belongs_to_the_provider_not_to_a_host() {
+        let (db, authority) = default_scope_fixture("billing-provider-level");
+        put_fact(&authority, "f-claude", "claude-code", Some("shengsuanyun"), "claude-sonnet-5", 100);
+        put_fact(&authority, "f-codex", "codex", Some("shengsuanyun"), "gpt-5.6-sol", 100);
+        put_fact(&authority, "f-other", "claude-code", Some("minimax"), "MiniMax-M3", 100);
+        authority.billing_declaration_revision_save(
+            "rev-gw", "decl-gw", None, "shengsuanyun", "third_party",
+            None, None, None, "2025-07-20", None, None, None,
+            &[("settlement", "CNY")], 200,
+        ).unwrap();
+        authority.billing_recalculation_enqueue("job-gw", "decl-gw", "rev-gw", 300).unwrap();
+        assert!(authority.billing_recalculation_run("job-gw", 400).unwrap());
+        assert!(covered(&authority, "f-claude"));
+        assert!(covered(&authority, "f-codex"), "同一个服务商账号在另一个宿主上的用量属于同一份声明");
+        assert!(!covered(&authority, "f-other"), "别的服务商不受影响");
+        // 预览与重算同一个谓词：不再有「按宿主」的数
+        let preview = authority.billing_declaration_impact_preview("rev-gw", None).unwrap();
+        assert_eq!(preview.fact_count, 2);
+        // 结算币种按服务商记，不带宿主
+        let settlement = authority.declared_settlement_currencies().unwrap();
+        assert_eq!(settlement.get("shengsuanyun").map(String::as_str), Some("CNY"));
+        assert!(settlement.keys().all(|key| !key.contains('/')), "{settlement:?}");
+        // 存储里的宿主列是固定占位，没有任何谓词读它；列表行也不再暴露宿主
+        let stored: Vec<String> = authority.conn().prepare("SELECT DISTINCT host FROM billing_declarations")
+            .unwrap().query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(stored, vec![ALL_HOSTS.to_string()]);
+        let revisions: Vec<String> = authority.conn().prepare("SELECT DISTINCT host FROM billing_declaration_revisions")
+            .unwrap().query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(revisions, vec![ALL_HOSTS.to_string()]);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 「服务商未知」的事实靠模型名认账（MiniMax lite / GLM Lite）：模型是结算依据，宿主不是。
+    #[test]
+    fn an_unresolved_provider_answer_matches_the_model_on_any_host() {
+        let (db, authority) = default_scope_fixture("billing-unresolved-any-host");
+        put_fact(&authority, "f-a", "claude-code", None, "MiniMax-M3", 100);
+        put_fact(&authority, "f-b", "codex", None, "MiniMax-M3", 100);
+        put_fact(&authority, "f-c", "claude-code", None, "some-other-model", 100);
+        authority.billing_declaration_revision_save(
+            "rev-mm", "decl-mm", None, "minimax", "third_party",
+            None, None, None, "2025-07-20", None, None, None,
+            &[("provider", "unresolved"), ("model", "MiniMax-M3")], 200,
+        ).unwrap();
+        authority.billing_recalculation_enqueue("job-mm", "decl-mm", "rev-mm", 300).unwrap();
+        assert!(authority.billing_recalculation_run("job-mm", 400).unwrap());
+        assert!(covered(&authority, "f-a") && covered(&authority, "f-b"));
+        assert!(!covered(&authority, "f-c"), "模型范围仍然收窄：没答过的模型不会被顺带归过来");
+        let _ = std::fs::remove_file(&db);
+    }
+
     #[test]
     fn official_subscription_covers_new_models_of_the_same_provider_by_default() {
         let (db, authority) = default_scope_fixture("billing-default-scope");
         put_fact(&authority, "f-listed", "claude-code", Some("anthropic"), "claude-sonnet-5", 100);
         authority.billing_declaration_revision_save(
-            "rev-pro", "decl-pro", None, "claude-code", "anthropic", "official_subscription",
+            "rev-pro", "decl-pro", None,"anthropic", "official_subscription",
             Some("Claude Pro"), Some(2_000), Some("USD"), "2025-07-20", None, None, None,
             &[("model", "claude-sonnet-5")], 200,
         ).unwrap();
@@ -5934,10 +6025,10 @@ mod tests {
         put_fact(&authority, "p1", "claude-code", Some("anthropic"), "claude-sonnet-5", 100);
         put_fact(&authority, "p2", "claude-code", Some("anthropic"), "claude-sonnet-5-5", 100);
         let scopes = [("model", "claude-sonnet-5")];
-        let raw = authority.billing_declaration_impact_preview_for("claude-code", "anthropic", "2025-07-20", None, &scopes, None).unwrap();
-        let kind = authority.billing_declaration_impact_preview_for_kind("claude-code", "anthropic", "official_subscription", "2025-07-20", None, &scopes, None).unwrap();
+        let raw = authority.billing_declaration_impact_preview_for("anthropic", "2025-07-20", None, &scopes, None).unwrap();
+        let kind = authority.billing_declaration_impact_preview_for_kind("anthropic", "official_subscription", "2025-07-20", None, &scopes, None).unwrap();
         assert_eq!((raw.fact_count, kind.fact_count), (1, 2), "按模型清单只命中 1 条；官方订阅默认覆盖命中 2 条");
-        let relay = authority.billing_declaration_impact_preview_for_kind("claude-code", "anthropic", "third_party", "2025-07-20", None, &scopes, None).unwrap();
+        let relay = authority.billing_declaration_impact_preview_for_kind("anthropic", "third_party", "2025-07-20", None, &scopes, None).unwrap();
         assert_eq!(relay.fact_count, 1, "非官方订阅（中转）仍按模型清单");
         let _ = std::fs::remove_file(&db);
     }
@@ -5949,7 +6040,7 @@ mod tests {
         let (db, authority) = default_scope_fixture("billing-default-scope-unresolved");
         put_fact(&authority, "u-listed", "claude-code", None, "MiniMax-M3", 100);
         authority.billing_declaration_revision_save(
-            "rev-mm", "decl-mm", None, "claude-code", "minimax", "official_subscription",
+            "rev-mm", "decl-mm", None,"minimax", "official_subscription",
             Some("MiniMax lite"), Some(4_400), Some("CNY"), "2025-07-20", None, None, None,
             &[("provider", "unresolved"), ("model", "MiniMax-M3")], 200,
         ).unwrap();
@@ -5967,11 +6058,11 @@ mod tests {
         let (db, authority) = default_scope_fixture("billing-default-scope-api");
         put_fact(&authority, "a-listed", "claude-code", Some("anthropic"), "claude-sonnet-5", 100);
         authority.billing_declaration_revision_save(
-            "rev-api", "decl-api", None, "claude-code", "anthropic", "official_api",
+            "rev-api", "decl-api", None,"anthropic", "official_api",
             None, None, None, "2025-07-20", None, None, None, &[], 150,
         ).unwrap();
         authority.billing_declaration_revision_save(
-            "rev-pro2", "decl-pro2", None, "claude-code", "anthropic", "official_subscription",
+            "rev-pro2", "decl-pro2", None,"anthropic", "official_subscription",
             Some("Claude Pro"), Some(2_000), Some("USD"), "2025-07-20", None, None, None,
             &[("model", "claude-sonnet-5")], 200,
         ).unwrap();
@@ -6001,13 +6092,13 @@ mod tests {
         put_fact(&authority, "c-foreign-family", "claude-code", None, "deepseek-v4-flash", 100);
         put_fact(&authority, "c-glm-via-claude", "claude-code", None, "glm-5.3-flash", 100);
         authority.billing_declaration_revision_save(
-            "rev-glm", "decl-glm", None, "plugin:zcode", "zhipu-glm", "official_subscription",
+            "rev-glm", "decl-glm", None,"zhipu-glm", "official_subscription",
             Some("GLM Lite"), Some(11_800), Some("CNY"), "2025-07-20", None, None, None, &[], 200,
         ).unwrap();
         authority.billing_recalculation_enqueue("job-glm", "decl-glm", "rev-glm", 300).unwrap();
         assert!(authority.billing_recalculation_run("job-glm", 400).unwrap());
         authority.billing_declaration_revision_save(
-            "rev-plus", "decl-plus", None, "codex", "openai", "official_subscription",
+            "rev-plus", "decl-plus", None,"openai", "official_subscription",
             Some("ChatGPT Plus"), Some(2_000), Some("USD"), "2025-07-20", None, None, None, &[], 210,
         ).unwrap();
         authority.billing_recalculation_enqueue("job-plus", "decl-plus", "rev-plus", 310).unwrap();
@@ -6020,8 +6111,7 @@ mod tests {
             assert!(!covered(&authority, id), "{id}：带前缀 / 非原生系列是第三方路由，不能被默认覆盖吞掉");
         }
         // 预览与重算同口径（带 native 开关）
-        let preview = authority.billing_declaration_impact_preview_for_kind(
-            "plugin:zcode", "zhipu-glm", "official_subscription", "2025-07-20", None, &[], None,
+        let preview = authority.billing_declaration_impact_preview_for_kind("zhipu-glm", "official_subscription", "2025-07-20", None, &[], None,
         ).unwrap();
         assert_eq!(preview.fact_count, 0, "已经被覆盖的事实不再重复计入预览");
         let _ = std::fs::remove_file(&db);
@@ -6037,7 +6127,7 @@ mod tests {
         put_fact(&authority, "c-listed", "claude-code", None, "glm-5.3-flash", 100);
         put_fact(&authority, "c-unlisted", "claude-code", None, "glm-5.4", 100);
         authority.billing_declaration_revision_save(
-            "rev-glm2", "decl-glm2", None, "claude-code", "zhipu-glm", "official_subscription",
+            "rev-glm2", "decl-glm2", None,"zhipu-glm", "official_subscription",
             Some("GLM Lite"), Some(11_800), Some("CNY"), "2025-07-20", None, None, None,
             &[("provider", "unresolved"), ("model", "glm-5.3-flash")], 200,
         ).unwrap();
@@ -6074,7 +6164,7 @@ mod tests {
             "cand-held", "claude-code", "anthropic", "USD", 2_000, "2025-07", "uat", 1,
         ).unwrap();
         assert!(authority.billing_declaration_revision_save(
-            "rev-held", "decl-held", None, "claude-code", "anthropic", "official_subscription",
+            "rev-held", "decl-held", None,"anthropic", "official_subscription",
             Some("Claude Pro"), Some(2_000), Some("USD"), "2025-07-20", None, Some("cand-held"), None, &[], 2,
         ).unwrap());
         let status = |id: &str| -> String {
@@ -6097,7 +6187,7 @@ mod tests {
 
         // 第二条新声明再引用同一张候选：保存路径的 release 不得把它翻回 pending。
         let err = authority.billing_declaration_revision_save(
-            "rev-dup", "decl-dup", None, "claude-code", "anthropic", "official_subscription",
+            "rev-dup", "decl-dup", None,"anthropic", "official_subscription",
             None, Some(2_000), Some("USD"), "2025-07-20", None, Some("cand-held"), None, &[], 6,
         ).unwrap_err().to_string();
         assert!(err.contains("another live declaration"), "{err}");
@@ -6118,7 +6208,7 @@ mod tests {
             "cand-uncertain", "codex", "openai", "USD", 2_000, "2026-09", "test", 1,
         ).unwrap();
         assert!(authority.billing_declaration_revision_save(
-            "rev-uncertain", "decl-uncertain", None, "codex", "openai", "unknown",
+            "rev-uncertain", "decl-uncertain", None,"openai", "unknown",
             None, None, None, "2026-09-01", None, Some("cand-uncertain"), None, &[], 2,
         ).is_err());
         let status: String = authority.conn().query_row(
@@ -6134,8 +6224,7 @@ mod tests {
         let db = tmp_db("billing-recalculation-transaction-failure");
         let authority = AuthorityDb::open(&db, 1).unwrap();
         authority.billing_declaration_revision_save(
-            "revision-transaction-failure", "declaration-transaction-failure", None,
-            "codex", "openai", "official_api", None, None, None, "2026-09", None,
+            "revision-transaction-failure", "declaration-transaction-failure", None,"openai", "official_api", None, None, None, "2026-09", None,
             None, None, &[], 1,
         ).unwrap();
         assert!(authority.billing_recalculation_enqueue(
@@ -7030,14 +7119,14 @@ mod tests {
         let a = AuthorityDb::open(&db, 1).unwrap();
         let r0 = a.revision().unwrap();
         assert!(a.billing_declaration_revision_save(
-            "rev-a", "decl-a", None, "codex", "openai", "official_subscription", Some("Plus"),
+            "rev-a", "decl-a", None,"openai", "official_subscription", Some("Plus"),
             Some(1_990), Some("CNY"), "2026-09", None, None, None, &[], 2,
         ).unwrap());
         let r1 = a.revision().unwrap();
         assert_eq!(r1, r0 + 1, "declaration save is a hand-rolled BEGIN IMMEDIATE path");
         // 同 revision_id 重放：查后无事可做 → 不推进
         assert!(!a.billing_declaration_revision_save(
-            "rev-a", "decl-a", None, "codex", "openai", "official_subscription", Some("Plus"),
+            "rev-a", "decl-a", None,"openai", "official_subscription", Some("Plus"),
             Some(1_990), Some("CNY"), "2026-09", None, None, None, &[], 3,
         ).unwrap());
         assert_eq!(a.revision().unwrap(), r1);

@@ -209,7 +209,7 @@ fn declared_relations_of_any_kind_close_their_group_until_revoked() {
             .unwrap().0 + 12 * 3_600_000;
         seed_fact(&db, "group-relay", "codex", Some("gpt-relay"), "token_count", ts, 0, 100, 20, 0, 5);
         db.billing_declaration_revision_save(
-            "rev-relay", "decl-relay", None, "codex", "shengsuanyun.com", "third_party",
+            "rev-relay", "decl-relay", None,"shengsuanyun.com", "third_party",
             None, None, None, "2026-09-01", None, None, None,
             &[("provider", "unresolved")], 1,
         ).unwrap();
@@ -1117,7 +1117,6 @@ fn declared_subscription_fees_reach_by_provider_and_stop_on_revoke() {
             "rev-pro",
             "decl-pro",
             None,
-            "claude-code",
             "anthropic",
             "official_subscription",
             Some("Claude Pro"),
@@ -1172,7 +1171,6 @@ fn declared_subscription_fees_skip_incomplete_other_kind_and_ended_rows() {
             "rev-nomoney",
             "decl-nomoney",
             None,
-            "claude-code",
             "anthropic",
             "official_subscription",
             None,
@@ -1190,7 +1188,6 @@ fn declared_subscription_fees_skip_incomplete_other_kind_and_ended_rows() {
             "rev-org",
             "decl-org",
             None,
-            "codex",
             "openai",
             "organization",
             None,
@@ -1208,7 +1205,6 @@ fn declared_subscription_fees_skip_incomplete_other_kind_and_ended_rows() {
             "rev-ended",
             "decl-ended",
             None,
-            "codex",
             "openai",
             "official_subscription",
             None,
@@ -1254,7 +1250,7 @@ fn duplicate_provider_subscription_declarations_charge_one_fee() {
             ("rev-dup-b", "decl-dup-b", "MiniMax-M2.7", 2),
         ] {
             db.billing_declaration_revision_save(
-                rev, decl, None, "claude-code", "minimax", "official_subscription",
+                rev, decl, None,"minimax", "official_subscription",
                 Some("MiniMax"), Some(4_400), Some("CNY"), "2026-06-01", None, None, None,
                 &[("model", model)], ts,
             ).unwrap();
@@ -1280,13 +1276,13 @@ fn amountless_declaration_does_not_block_a_later_priced_one() {
         let db = seed_authority_db();
         // 先声明的一条没填金额（弹窗允许勾「金额暂不清楚」）。
         db.billing_declaration_revision_save(
-            "rev-noamt", "decl-noamt", None, "claude-code", "minimax",
+            "rev-noamt", "decl-noamt", None,"minimax",
             "official_subscription", Some("MiniMax"), None, None,
             "2026-05-01", None, None, None, &[("model", "MiniMax-M3")], 1,
         ).unwrap();
         // 后声明的同服务商一条带了真实金额。
         db.billing_declaration_revision_save(
-            "rev-priced", "decl-priced", None, "claude-code", "minimax",
+            "rev-priced", "decl-priced", None,"minimax",
             "official_subscription", Some("MiniMax"), Some(4_400), Some("CNY"),
             "2026-06-01", None, None, None, &[("model", "MiniMax-M2.7")], 2,
         ).unwrap();
@@ -1305,12 +1301,12 @@ fn price_amendment_prices_from_the_amended_month_not_retroactively() {
         let october = agent_vitals_data::authority_query::beijing_month_bounds_ms("2026-10").unwrap().0;
         let db = seed_authority_db();
         db.billing_declaration_revision_save(
-            "rev-p1", "decl-price", None, "claude-code", "minimax",
+            "rev-p1", "decl-price", None,"minimax",
             "official_subscription", Some("MiniMax"), Some(4_400), Some("CNY"),
             "2026-06-01", None, None, None, &[], june + 1,
         ).unwrap();
         db.billing_declaration_revision_save(
-            "rev-p2", "decl-price", Some("rev-p1"), "claude-code", "minimax",
+            "rev-p2", "decl-price", Some("rev-p1"),"minimax",
             "official_subscription", Some("MiniMax"), Some(4_900), Some("CNY"),
             // 修订的适用范围**沿用原起点**（覆盖不断档）；新价格从声明月起。
             "2026-06-01", None, None, None, &[], october + 86_400_000,
@@ -1334,12 +1330,12 @@ fn end_date_amendment_keeps_history_and_stops_after_end() {
         let november = agent_vitals_data::authority_query::beijing_month_bounds_ms("2026-11").unwrap().0;
         let db = seed_authority_db();
         db.billing_declaration_revision_save(
-            "rev-e1", "decl-end", None, "claude-code", "minimax",
+            "rev-e1", "decl-end", None,"minimax",
             "official_subscription", Some("MiniMax"), Some(4_400), Some("CNY"),
             "2026-06-01", None, None, None, &[], june + 1,
         ).unwrap();
         db.billing_declaration_revision_save(
-            "rev-e2", "decl-end", Some("rev-e1"), "claude-code", "minimax",
+            "rev-e2", "decl-end", Some("rev-e1"),"minimax",
             "official_subscription", Some("MiniMax"), Some(4_400), Some("CNY"),
             "2026-06-01", Some("2026-11-20"), None, None, &[], november + 86_400_000,
         ).unwrap();
@@ -1361,7 +1357,6 @@ fn monthly_summary_spreads_a_declared_subscription_fee_into_the_dto() {
             "rev-dto",
             "decl-dto",
             None,
-            "claude-code",
             "anthropic",
             "official_subscription",
             Some("Claude Pro"),

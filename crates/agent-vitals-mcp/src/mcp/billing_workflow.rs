@@ -105,7 +105,6 @@ fn read_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, ToolE
             json!({ "action": action, "declaration_id": id, "revisions": revisions(handle.db(), id)? })
         }
         "declaration_preview" => {
-            let host = required_string(args, "host")?;
             let provider = required_string(args, "provider_id")?;
             let start = required_string(args, "effective_start")?;
             let scopes = parse_scopes(args)?;
@@ -120,10 +119,10 @@ fn read_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, ToolE
             // 可选 `relationship_kind`：给了就按默认覆盖规则预览（与重算同口径）；不给保持原始范围。
             let preview = match optional_string(args, "relationship_kind") {
                 Some(kind) => handle.db().billing_declaration_impact_preview_for_kind(
-                    host, provider, kind, start, optional_string(args, "effective_end"), &scope_refs, window,
+                    provider, kind, start, optional_string(args, "effective_end"), &scope_refs, window,
                 ),
                 None => handle.db().billing_declaration_impact_preview_for(
-                    host, provider, start, optional_string(args, "effective_end"), &scope_refs, window,
+                    provider, start, optional_string(args, "effective_end"), &scope_refs, window,
                 ),
             }.map_err(authority_error)?;
             json!({ "action": action, "preview": preview_json(preview) })
@@ -193,12 +192,11 @@ fn write_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, Tool
             let refs = scopes.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>();
             let revision_id = required_string(args, "revision_id")?;
             let declaration_id = required_string(args, "declaration_id")?;
-            let host = required_string(args, "host")?;
             let provider = required_string(args, "provider_id")?;
             let kind = required_string(args, "relationship_kind")?;
             let start = required_string(args, "effective_start")?;
             let changed = db.billing_declaration_revision_save(
-                revision_id, declaration_id, optional_string(args, "supersedes_revision_id"), host,
+                revision_id, declaration_id, optional_string(args, "supersedes_revision_id"),
                 provider, kind,
                 optional_string(args, "subscription_name"), optional_i64(args, "amount_minor"),
                 optional_string(args, "currency"), start,
@@ -287,8 +285,8 @@ fn candidates(db: &AuthorityDb) -> Result<Vec<Value>, ToolError> {
 
 fn declarations(db: &AuthorityDb) -> Result<Vec<Value>, ToolError> {
     let rows = db.billing_declarations().map_err(authority_error)?;
-    Ok(rows.into_iter().map(|(id, host, provider, kind, name, amount, currency, start, end, candidate)| json!({
-        "declaration_id": id, "host": host, "provider_id": provider, "relationship_kind": kind,
+    Ok(rows.into_iter().map(|(id, provider, kind, name, amount, currency, start, end, candidate)| json!({
+        "declaration_id": id, "provider_id": provider, "relationship_kind": kind,
         "subscription_name": name, "amount_minor": amount, "currency": currency,
         "effective_start": start, "effective_end": end, "source_candidate_id": candidate
     })).collect())

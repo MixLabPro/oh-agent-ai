@@ -2586,7 +2586,7 @@ fn billing_import_candidates() -> Value {
             "candidates": rows.into_iter().map(|(candidate_id, host, provider_id, currency, amount_minor, billing_period_start, status)| {
                 let impact = window.and_then(|(window_start_ms, window_end_ms)| {
                     db.billing_declaration_impact_preview_for(
-                        &host, &provider_id, &billing_period_start, None, &[],
+                        &provider_id, &billing_period_start, None, &[],
                         Some((window_start_ms, window_end_ms)),
                     ).ok()
                 });
@@ -4007,7 +4007,6 @@ fn save_billing_declaration_revision(
     revision_id: String,
     declaration_id: String,
     supersedes_revision_id: Option<String>,
-    host: String,
     provider_id: String,
     relationship_kind: String,
     subscription_name: Option<String>,
@@ -4039,7 +4038,7 @@ fn save_billing_declaration_revision(
         .collect::<Vec<_>>();
     let changed = db.billing_declaration_revision_save(
         &revision_id, &declaration_id, supersedes_revision_id.as_deref(),
-        &host, &provider_id, &relationship_kind, subscription_name.as_deref(),
+        &provider_id, &relationship_kind, subscription_name.as_deref(),
         amount_minor, currency.as_deref(), &effective_start, effective_end.as_deref(),
         source_candidate_id.as_deref(), evidence_ref.as_deref(), &scope_refs, now_ms,
     ).map_err(|error| error.to_string())?;
@@ -4093,7 +4092,7 @@ fn billing_declarations() -> Value {
 fn billing_declarations_value(db: &agent_vitals_data::authority::AuthorityDb) -> Value {
     match db.billing_declarations() {
         Ok(rows) => serde_json::json!({ "status": "ok", "declarations": rows.into_iter().map(|row| {
-            let (declaration_id, host, provider_id, relationship_kind, subscription_name,
+            let (declaration_id, provider_id, relationship_kind, subscription_name,
                 amount_minor, currency, effective_start, effective_end, source_candidate_id) = row;
             let current_revision_id = db.billing_declaration_revisions(&declaration_id)
                 .ok().and_then(|revisions| revisions.last().map(|revision| revision.0.clone()));
@@ -4106,7 +4105,7 @@ fn billing_declarations_value(db: &agent_vitals_data::authority::AuthorityDb) ->
                 })).collect::<Vec<_>>())
                 .unwrap_or_default();
             serde_json::json!({
-                "declaration_id": declaration_id, "host": host, "provider_id": provider_id,
+                "declaration_id": declaration_id, "provider_id": provider_id,
                 "relationship_kind": relationship_kind, "subscription_name": subscription_name,
                 "amount_minor": amount_minor, "currency": currency,
                 "effective_start": effective_start, "effective_end": effective_end,
@@ -4146,7 +4145,7 @@ fn revoke_billing_declaration(
 /// 归因同一条谓词、与 MCP `cost_breakdown` 同一条计价路径算出。
 #[tauri::command(async)]
 fn billing_candidate_impact_preview(
-    host: String, provider_id: String, relationship_kind: String, effective_start: String,
+    provider_id: String, relationship_kind: String, effective_start: String,
     effective_end: Option<String>, scopes: Vec<BillingScopeInput>,
 ) -> Value {
     let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
@@ -4161,7 +4160,7 @@ fn billing_candidate_impact_preview(
         .map(|scope| (scope.scope_kind.as_str(), scope.scope_value.as_str()))
         .collect::<Vec<_>>();
     agent_vitals_runtime::billing_preview::declaration_impact_preview(
-        &db, &host, &provider_id, &relationship_kind, &effective_start,
+        &db, &provider_id, &relationship_kind, &effective_start,
         effective_end.as_deref(), &scope_refs,
     )
 }

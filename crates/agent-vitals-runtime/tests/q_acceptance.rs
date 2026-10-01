@@ -422,7 +422,7 @@ fn subscription_coverage_moves_money_but_not_tokens() {
 
     // 声明订阅并让重算覆盖全部 codex/openai 事实。
     env.db.billing_declaration_revision_save(
-        "rev-cov", "decl-cov", None, "codex", "openai", "official_subscription", Some("Plus"),
+        "rev-cov", "decl-cov", None,"openai", "official_subscription", Some("Plus"),
         Some(2_000), Some("USD"), "2020-01-01", None, None, None, &[], 2,
     ).unwrap();
     env.db.billing_recalculation_enqueue("job-cov", "decl-cov", "rev-cov", 3).unwrap();
@@ -466,7 +466,7 @@ fn user_declared_relay_usage_moves_from_default_to_declared_estimate() {
     assert_eq!(view["CNY"].unattributed_providers, vec!["claude-code/deepseek-official".to_string()]);
 
     env.db.billing_declaration_revision_save(
-        "rev-relay", "decl-relay", None, "claude-code", "shengsuanyun", "third_party", None, None, None,
+        "rev-relay", "decl-relay", None,"shengsuanyun", "third_party", None, None, None,
         "2020-01-01", None, None, None, &[("provider", "unresolved")], 2,
     ).unwrap();
     env.db.billing_recalculation_enqueue("job-relay", "decl-relay", "rev-relay", 3).unwrap();
@@ -501,7 +501,7 @@ fn declared_provider_preserves_fallback_quote_currency() {
     env.fact("c1", "codex", "openai/gpt-5.6-luna", s + 2_000, 0, 1_000_000, 100_000);
     for (host, decl, rev) in [("claude-code", "decl-ss-cc", "rev-ss-cc"), ("codex", "decl-ss-cx", "rev-ss-cx")] {
         env.db.billing_declaration_revision_save(
-            rev, decl, None, host, "shengsuanyun", "third_party", None, None, None,
+            rev, decl, None,"shengsuanyun", "third_party", None, None, None,
             "2020-01-01", None, None, None, &[("provider", "unresolved"), ("settlement", "CNY")], 2,
         ).unwrap();
         let job = format!("job-{rev}");

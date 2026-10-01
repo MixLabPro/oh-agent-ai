@@ -2808,7 +2808,7 @@ function bindBillingDeclarationPanel() {
       if (relationshipKind === "unknown" &&
           (!billingDeclarationState || billingDeclarationState.phase !== "unknown_preview")) {
         const impact = await invoke("billing_candidate_impact_preview", {
-          host: target.host, providerId: providerId || target.provider_id, relationshipKind,
+          providerId: providerId || target.provider_id, relationshipKind,
           effectiveStart, effectiveEnd: effectiveEnd || null, scopes,
         });
         preview.hidden = false;
@@ -2836,7 +2836,7 @@ function bindBillingDeclarationPanel() {
       }
       if (!billingDeclarationState || billingDeclarationState.phase !== "preview") {
         const impact = await invoke("billing_candidate_impact_preview", {
-          host: target.host, providerId, relationshipKind, effectiveStart, effectiveEnd: effectiveEnd || null, scopes,
+          providerId, relationshipKind, effectiveStart, effectiveEnd: effectiveEnd || null, scopes,
         });
         preview.hidden = false;
         if (impact.status !== "ok") {
@@ -2862,7 +2862,7 @@ function bindBillingDeclarationPanel() {
       const selected = billingSelectedRows();
       const saved = await invoke("save_billing_declaration_revision", {
         revisionId, declarationId, supersedesRevisionId: null,
-        host: target.host, providerId, relationshipKind,
+        providerId, relationshipKind,
         subscriptionName: subscription.subscriptionName,
         // 月费只来自表单：勾了「金额暂不清楚」就写空，不拿旧候选的金额偷偷补上
         // （候选金额已在打开弹窗时预填，用户看得见、改得了）。
@@ -3256,7 +3256,7 @@ function renderBillingDeclarations(report) {
     const fee = declaration.amount_minor != null && declaration.currency
       ? " · " + fmtMinor(Number(declaration.amount_minor), declaration.currency) + "/月"
       : settlementScope ? " · 按 " + settlementScope.scope_value + " 结算" : "";
-    detail.textContent = declaration.host + " · " + declaration.provider_id + " · " + label +
+    detail.textContent = declaration.provider_id + " · " + label +
       (declaration.subscription_name ? " · " + declaration.subscription_name : "") + fee +
       " · " + billingRangeText(declaration.effective_start, declaration.effective_end);
     // 声明的依据一并带出：从旧版本套餐记录确认来的，标一行灰字；候选本身不再单独成行
@@ -3417,7 +3417,6 @@ function renderBillingAmendment(row, declaration, amendButton) {
         revisionId: "rev-amend-" + suffix,
         declarationId: declaration.declaration_id,
         supersedesRevisionId: declaration.current_revision_id,
-        host: declaration.host,
         providerId: declaration.provider_id,
         relationshipKind: "official_subscription",
         subscriptionName: String(name.value || "").trim() || null,

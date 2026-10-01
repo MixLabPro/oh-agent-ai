@@ -389,7 +389,7 @@
   // 合成当前订阅声明：用于视觉回归验证“修改订阅/撤销声明”的二次确认和回执。
   const billingDeclarations = [{
     declaration_id: "browser-subscription-decl", revision_id: "browser-subscription-rev-1", current_revision_id: "browser-subscription-rev-1",
-    host: "claude-code", provider_id: "anthropic", relationship_kind: "official_subscription", subscription_name: "Claude Pro",
+    provider_id: "anthropic", relationship_kind: "official_subscription", subscription_name: "Claude Pro",
     amount_minor: 2000, currency: "USD", effective_start: `${month}-01`, effective_end: null, source_candidate_id: null,
     scopes: [{ scope_kind: "provider", scope_value: "unresolved" }], status: "saved",
   }];
@@ -657,7 +657,6 @@
         billingDeclarations.push({
           declaration_id: args && args.declarationId,
           revision_id: args && args.revisionId,
-          host: args && args.host,
           provider_id: args && args.providerId,
           relationship_kind: args && args.relationshipKind,
           amount_minor: args && args.amountMinor,
