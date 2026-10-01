@@ -89,7 +89,7 @@ export class CityEngine {
   private readonly observers: Array<() => void> = [];
   private skyDome: THREE.Mesh | null = null;
   private composer: EffectComposer | null = null;
-  private cinematic: { plan: CinematicPlan; startedAt: number; savedFov: number } | null = null;
+  private cinematic: { plan: CinematicPlan; startedAt: number; savedFov: number; look: THREE.Vector3 | null; lastSeconds: number } | null = null;
   private themeName: CityThemeName = "day";
 
   constructor(private readonly options: CityEngineOptions) {
@@ -503,10 +503,11 @@ export class CityEngine {
     this.attracted = false;
     this.controls.autoRotate = false;
     this.controls.enabled = false;
-    this.cinematic = { plan, startedAt: this.elapsed, savedFov: this.camera.fov };
+    this.cinematic = { plan, startedAt: this.elapsed, savedFov: this.camera.fov, look: null, lastSeconds: 0 };
     this.camera.fov = 38; // 略长焦：压缩纵深，更像航拍镜头
     this.camera.updateProjectionMatrix();
     this.parts.setLabelsVisible(false);
+    this.parts.setScaffoldVisible(false);
     this.parts.applyCursor(plan.cursor(0), false);
     this.noteActivity();
     return plan;
@@ -518,6 +519,7 @@ export class CityEngine {
     this.cinematic = null;
     this.controls.enabled = true;
     this.camera.fov = state.savedFov;
+    this.parts?.setScaffoldVisible(true);
     this.camera.updateProjectionMatrix();
     this.cursorMs = null;
     this.parts?.applyCursor(this.model?.windowEndMs ?? Date.now(), true);
@@ -533,14 +535,23 @@ export class CityEngine {
     const state = this.cinematic;
     if (!state) return false;
     const seconds = this.elapsed - state.startedAt;
-    const t = Math.min(1, seconds / state.plan.durationSec);
-    const position = state.plan.position(t);
+    const clamped = Math.min(seconds, state.plan.durationSec);
+    // 分页数据到达会重建 parts，标签/脚手架被重置为可见：航拍期间每帧压住。
+    this.parts?.setLabelsVisible(false);
+    this.parts?.setScaffoldVisible(false);
+    const position = state.plan.position(clamped);
     // 相机贴地保护在航拍里同样生效：路径插值偶尔会擦过山脊。
     if (this.layout) position.y = Math.max(position.y, Math.max(0, this.layout.terrain.height(position.x, position.z)) + 6);
     this.camera.position.copy(position);
-    this.controls.target.copy(state.plan.target(t));
-    this.camera.lookAt(this.controls.target);
-    const cursor = state.plan.cursor(t);
+    // 注视点做临界阻尼跟随：关键帧之间注视点切换会让镜头急甩，阻尼把甩头摊到 ~0.8s。
+    const desired = state.plan.target(clamped);
+    const frameDt = Math.max(0, seconds - state.lastSeconds);
+    state.lastSeconds = seconds;
+    if (!state.look) state.look = desired.clone();
+    else state.look.lerp(desired, 1 - Math.exp(-frameDt / 0.35));
+    this.controls.target.copy(state.look);
+    this.camera.lookAt(state.look);
+    const cursor = state.plan.cursor(clamped);
     this.parts?.applyCursor(cursor, false);
     this.options.onTimeCursor?.(cursor, false);
     this.options.onCinematic?.(seconds, state.plan, false);

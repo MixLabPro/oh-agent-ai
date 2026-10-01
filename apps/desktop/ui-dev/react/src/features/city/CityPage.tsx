@@ -75,6 +75,8 @@ export function CityPage() {
   const [windowKind, setWindowKind] = useState<CityWindowKind>("30d");
   const [qualityMode, setQualityMode] = useState<EngineQualityMode>("auto");
   const [labelsVisible, setLabelsVisible] = useState(true);
+  const labelsVisibleRef = useRef(labelsVisible);
+  labelsVisibleRef.current = labelsVisible;
   const [theme, setTheme] = useState<CityThemeName>(readStoredTheme);
   const [stats, setStats] = useState<EngineStats | null>(null);
   const [cursorMs, setCursorMs] = useState<number | null>(null);
@@ -167,6 +169,8 @@ export function CityPage() {
         if (ended) {
           cinemaCardRef.current = null;
           setCinema(null);
+          // 航拍期间引擎隐藏了标签；结束后按用户自己的开关恢复，而不是一律显示。
+          engine.setLabelsVisible(labelsVisibleRef.current);
           return;
         }
         const card = plan.cards.find((item) => seconds >= item.atSec && seconds < item.untilSec) ?? null;

@@ -1150,6 +1150,11 @@ export class CityParts {
     });
   }
 
+  /** 航拍时隐藏「计划高度」脚手架壳：低机位下它是悬在天上的半透明大方块。 */
+  setScaffoldVisible(visible: boolean): void {
+    this.scaffoldMesh.visible = visible;
+  }
+
   setLabelsVisible(visible: boolean): void {
     this.labelsVisible = visible;
     for (const label of this.labels) label.visible = visible;
