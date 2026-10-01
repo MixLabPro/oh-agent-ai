@@ -84,6 +84,32 @@ fn vendor_by_prefix(catalog: &Value, model: &str) -> Option<String> {
     best.map(|(_, vendor)| vendor.to_string())
 }
 
+/// 宿主的原生厂商（`host_native_vendor` 表）：宿主读自家模型，模型名不带服务商前缀。
+/// 没有登记的宿主返回 `None`——不猜。
+pub fn host_native_vendor(host: &str) -> Option<String> {
+    host_native_vendor_in(&signatures(), host)
+}
+
+pub fn host_native_vendor_in(catalog: &Value, host: &str) -> Option<String> {
+    catalog.pointer("/host_native_vendor")?.get(host)?.as_str().filter(|v| !v.is_empty()).map(str::to_string)
+}
+
+/// 某厂商的模型名前缀（小写）。
+pub fn model_prefixes_of(vendor: &str) -> Vec<String> {
+    signatures().pointer(&format!("/vendors/{vendor}/model_prefixes"))
+        .and_then(Value::as_array)
+        .map(|prefixes| prefixes.iter().filter_map(Value::as_str).map(str::to_ascii_lowercase).filter(|p| !p.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+/// 这个模型对该宿主是不是「自家原生」：**无网关前缀**，且模型厂商就是宿主的原生厂商。
+/// 带前缀（`bigmodel/glm-5.3-flash`）= 第三方云厂商 / 中转；非原生系列（claude-code 下的 `deepseek-*`）
+/// = 第三方。两者都返回 false，仍需要用户声明它走哪个中转。
+pub fn is_host_native_model(host: &str, model: &str) -> bool {
+    let Some(native) = host_native_vendor(host) else { return false };
+    model_vendor(model).is_some_and(|m| !m.gateway_named && m.vendor == native)
+}
+
 /// L1：一条记录的请求/响应 ID 形状说明了什么。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteShape {
@@ -217,6 +243,31 @@ mod tests {
         assert!(!is_official_endpoint("deepseek", "api.deepseek.com.evil.example"));
         assert!(!is_official_endpoint("deepseek", ""));
         assert_eq!(official_endpoints_of("deepseek"), vec!["api.deepseek.com"]);
+    }
+
+    #[test]
+    fn host_native_models_have_no_gateway_prefix_and_belong_to_the_hosts_own_vendor() {
+        // 宿主读自家模型：无前缀（用户 2026-10-01 的观察）
+        assert!(is_host_native_model("claude-code", "claude-sonnet-5-5"));
+        assert!(is_host_native_model("codex", "gpt-5.6-terra"));
+        assert!(is_host_native_model("plugin:zcode", "GLM-5.3"), "大小写不敏感");
+        assert!(is_host_native_model("plugin:zcode", "glm-5.3-flash"));
+        // 第三方云厂商 / 中转给模型加路径前缀
+        assert!(!is_host_native_model("plugin:zcode", "bigmodel/glm-5.3-flash"));
+        assert!(!is_host_native_model("codex", "deepseek/deepseek-v4.1-flash"));
+        assert!(!is_host_native_model("codex", "openai/gpt-5.6-luna"), "即使前缀就是自家厂商，带前缀也是经过网关");
+        assert!(!is_host_native_model("claude-code", "anthropic/claude-sonnet-5"));
+        // 非原生系列：宿主读别家的模型 = 第三方路由
+        assert!(!is_host_native_model("claude-code", "deepseek-v4-flash"));
+        assert!(!is_host_native_model("claude-code", "MiniMax-M3"));
+        assert!(!is_host_native_model("claude-code", "glm-5.3-flash"));
+        // 没登记原生厂商的宿主 / 哨兵 / 空：不猜
+        assert!(!is_host_native_model("workbuddy", "hy4-preview-f"));
+        assert!(!is_host_native_model("claude-code", "<synthetic>"));
+        assert!(!is_host_native_model("claude-code", ""));
+        assert_eq!(host_native_vendor("plugin:zcode").as_deref(), Some("zhipu-glm"));
+        assert_eq!(host_native_vendor("nope"), None);
+        assert!(model_prefixes_of("zhipu-glm").contains(&"glm-".to_string()));
     }
 
     #[test]

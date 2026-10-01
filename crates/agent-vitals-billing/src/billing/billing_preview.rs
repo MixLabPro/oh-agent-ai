@@ -23,17 +23,17 @@ pub fn declaration_impact_preview(
 ) -> Value {
     // 默认覆盖规则（官方订阅不受模型清单限制）先于一切计算，预览与重算同口径。
     let official_api = db.billing_official_api_declared(host, provider_id).unwrap_or(false);
-    let effective_scopes = agent_vitals_data::authority::attribution_scopes(relationship_kind, scopes, official_api);
+    let (effective_scopes, native) = agent_vitals_data::authority::default_coverage(relationship_kind, scopes, official_api);
     let scopes = effective_scopes.as_slice();
-    let counts = match db.billing_declaration_impact_preview_for(
-        host, provider_id, effective_start, effective_end, scopes, None,
+    let counts = match db.billing_declaration_impact_preview_for_kind(
+        host, provider_id, relationship_kind, effective_start, effective_end, scopes, None,
     ) {
         Ok(counts) => counts,
         Err(error) => return json!({ "status": "unavailable", "reason": error.to_string() }),
     };
     let priced = |scopes: &[(&str, &str)]| -> Result<WindowResult, String> {
-        let selection = billing_declaration_fact_selection(
-            host, provider_id, effective_start, effective_end, scopes, None, ConflictEvidence::Exclude,
+        let selection = agent_vitals_data::authority::billing_declaration_fact_selection_with(
+            host, provider_id, effective_start, effective_end, scopes, None, ConflictEvidence::Exclude, native,
         );
         price_fact_selection(db.conn(), &selection.where_sql, &selection.params, &[])
             .map_err(|error| error.message)

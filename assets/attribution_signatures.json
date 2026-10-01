@@ -75,6 +75,13 @@
       "_doc": "既有 provider 常量（agent-vitals-provider::is_cogfoundry_host）的目录化；它是网关不是模型厂商，所以没有模型前缀。"
     }
   },
+  "host_native_vendor": {
+    "_doc": "宿主读自家模型时，模型名不带服务商前缀（claude-code → claude-*、codex → gpt-*、ZCode → glm-*）；第三方云厂商 / 中转才会加路径前缀（bigmodel/glm-5.3-flash、deepseek/deepseek-v4.1-flash）。无前缀且厂商 = 宿主原生厂商的模型，默认按宿主自家官方路由对待：官方订阅声明默认覆盖它（服务商字段为空时也一样）。带前缀或非原生系列的模型不适用，仍需用户声明走哪个中转。厂商命名规则很少变，这张表比『逐个模型的清单』稳定得多。",
+    "claude-code": "anthropic",
+    "codex": "openai",
+    "plugin:zcode": "zhipu-glm",
+    "dsh": "deepseek"
+  },
   "sentinels": {
     "_doc": "不是模型的模型名：合成/占位记录，永远不参与归因。",
     "models": ["<synthetic>", "fast-model"]

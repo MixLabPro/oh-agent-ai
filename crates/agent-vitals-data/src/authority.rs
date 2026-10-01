@@ -204,6 +204,19 @@ pub fn billing_declaration_fact_selection(
     host: &str, provider_id: &str, effective_start: &str, effective_end: Option<&str>,
     scopes: &[(&str, &str)], window: Option<(i64, i64)>, conflicts: ConflictEvidence,
 ) -> BillingDeclarationFactSelection {
+    billing_declaration_fact_selection_with(host, provider_id, effective_start, effective_end, scopes, window, conflicts, false)
+}
+
+/// [`billing_declaration_fact_selection`] 加一个开关：`native_null_provider` 为真时，**服务商字段为空、
+/// 但模型是宿主原生系列且无网关前缀**的事实也算该服务商的（ZCode 的 `GLM-5.3`、Codex 的
+/// `gpt-5.6-terra` 没有路由证据，`provider_id` 是 NULL，却显然是宿主自家官方路由）。
+/// 开关由 [`default_coverage`] 决定，预览 / 重算 / 持续套用三处共用。
+#[allow(clippy::too_many_arguments)]
+pub fn billing_declaration_fact_selection_with(
+    host: &str, provider_id: &str, effective_start: &str, effective_end: Option<&str>,
+    scopes: &[(&str, &str)], window: Option<(i64, i64)>, conflicts: ConflictEvidence,
+    native_null_provider: bool,
+) -> BillingDeclarationFactSelection {
     use rusqlite::types::Value;
     let start_date = billing_boundary_date(effective_start, false)
         .unwrap_or_else(|| effective_start.to_owned());
@@ -226,6 +239,28 @@ pub fn billing_declaration_fact_selection(
         "f.deleted_at_ms IS NULL AND f.host = ?1 AND f.provider_id = ?2
            AND f.event_ts_ms IS NOT NULL"
     });
+    // 原生系列且服务商为空的事实：把上面那句 `f.provider_id = ?2` 放宽为「= ?2 或（为空且是原生模型）」。
+    // 模型前缀来自 `host_native_vendor` / `vendors.*.model_prefixes`（数据文件），只接受安全字符，
+    // 用 substr 比较而不是 LIKE，避免 `_` `%` 被当通配符。
+    if native_null_provider && !provider_unresolved {
+        let prefixes: Vec<String> = agent_vitals_domain::attribution::host_native_vendor(host)
+            .filter(|vendor| vendor == provider_id)
+            .map(|vendor| agent_vitals_domain::attribution::model_prefixes_of(&vendor))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.'))
+            .collect();
+        if !prefixes.is_empty() {
+            let alternatives = prefixes.iter()
+                .map(|p| format!("substr(lower(f.model_id), 1, {}) = '{}'", p.len(), p))
+                .collect::<Vec<_>>().join(" OR ");
+            where_sql = where_sql.replacen(
+                "f.provider_id = ?2",
+                &format!("(f.provider_id = ?2 OR (f.provider_id IS NULL AND f.model_id IS NOT NULL AND instr(f.model_id, '/') = 0 AND ({alternatives})))"),
+                1,
+            );
+        }
+    }
     where_sql.push_str("
            AND strftime('%Y-%m-%d', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') >= ?3
            AND (?4 IS NULL OR strftime('%Y-%m-%d', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') <= ?4)
@@ -283,11 +318,19 @@ pub fn billing_declaration_fact_selection(
 pub fn attribution_scopes<'a>(
     relationship_kind: &str, scopes: &[(&'a str, &'a str)], official_api_declared: bool,
 ) -> Vec<(&'a str, &'a str)> {
+    default_coverage(relationship_kind, scopes, official_api_declared).0
+}
+
+/// 默认覆盖的完整结果：(有效范围, 是否把「服务商为空的宿主原生模型」也算进来)。
+/// 第二项只在默认覆盖生效时为真——它与去掉模型范围是同一条规则的两半：官方订阅覆盖该宿主自家官方路由。
+pub fn default_coverage<'a>(
+    relationship_kind: &str, scopes: &[(&'a str, &'a str)], official_api_declared: bool,
+) -> (Vec<(&'a str, &'a str)>, bool) {
     let provider_unresolved = scopes.iter().any(|(kind, value)| *kind == "provider" && *value == "unresolved");
     if relationship_kind == "official_subscription" && !provider_unresolved && !official_api_declared {
-        scopes.iter().copied().filter(|(kind, _)| *kind != "model").collect()
+        (scopes.iter().copied().filter(|(kind, _)| *kind != "model").collect(), true)
     } else {
-        scopes.to_vec()
+        (scopes.to_vec(), false)
     }
 }
 
@@ -3696,12 +3739,20 @@ impl AuthorityDb {
         &self, host: &str, provider_id: &str, effective_start: &str,
         effective_end: Option<&str>, scopes: &[(&str, &str)], window: Option<(i64, i64)>,
     ) -> Result<BillingDeclarationImpactPreview, AuthorityError> {
+        self.billing_declaration_impact_preview_native(host, provider_id, effective_start, effective_end, scopes, window, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn billing_declaration_impact_preview_native(
+        &self, host: &str, provider_id: &str, effective_start: &str,
+        effective_end: Option<&str>, scopes: &[(&str, &str)], window: Option<(i64, i64)>, native: bool,
+    ) -> Result<BillingDeclarationImpactPreview, AuthorityError> {
         if window.is_some_and(|(start, end)| end <= start) {
             return Ok(BillingDeclarationImpactPreview::default());
         }
         let aggregate = |conflicts: ConflictEvidence| -> Result<PreviewAggregate, AuthorityError> {
-            let selection = billing_declaration_fact_selection(
-                host, provider_id, effective_start, effective_end, scopes, window, conflicts,
+            let selection = billing_declaration_fact_selection_with(
+                host, provider_id, effective_start, effective_end, scopes, window, conflicts, native,
             );
             let sql = format!(
                 "SELECT COUNT(*), COUNT(DISTINCT f.session_key),
@@ -3745,8 +3796,8 @@ impl AuthorityDb {
         &self, host: &str, provider_id: &str, relationship_kind: &str, effective_start: &str,
         effective_end: Option<&str>, scopes: &[(&str, &str)], window: Option<(i64, i64)>,
     ) -> Result<BillingDeclarationImpactPreview, AuthorityError> {
-        let effective = attribution_scopes(relationship_kind, scopes, self.billing_official_api_declared(host, provider_id)?);
-        self.billing_declaration_impact_preview_for(host, provider_id, effective_start, effective_end, &effective, window)
+        let (effective, native) = default_coverage(relationship_kind, scopes, self.billing_official_api_declared(host, provider_id)?);
+        self.billing_declaration_impact_preview_native(host, provider_id, effective_start, effective_end, &effective, window, native)
     }
 
     fn billing_declaration_matching_fact_ids(&self, revision_id: &str) -> Result<Vec<String>, AuthorityError> {
@@ -3768,10 +3819,10 @@ impl AuthorityDb {
             .map(|(_, kind, value)| (kind.as_str(), value.as_str()))
             .collect::<Vec<_>>();
         // 与预览同一个有效范围（默认覆盖规则），否则「预览命中 = 重算归因」的不变量就破了。
-        let effective = attribution_scopes(&revision.4, &scope_refs, self.billing_official_api_declared(&revision.0, &revision.1)?);
-        let mut selection = billing_declaration_fact_selection(
+        let (effective, native) = default_coverage(&revision.4, &scope_refs, self.billing_official_api_declared(&revision.0, &revision.1)?);
+        let mut selection = billing_declaration_fact_selection_with(
             &revision.0, &revision.1, &revision.2, revision.3.as_deref(), &effective, None,
-            ConflictEvidence::Exclude,
+            ConflictEvidence::Exclude, native,
         );
         if let Some(since) = since_created_at_ms {
             selection.params.push(rusqlite::types::Value::Integer(since));
@@ -3895,8 +3946,8 @@ impl AuthorityDb {
         )?;
         let scopes = self.billing_declaration_scopes(revision_id)?;
         let scope_refs = scopes.iter().map(|(_, k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>();
-        let effective = attribution_scopes(&kind, &scope_refs, self.billing_official_api_declared(&host, &provider_id)?);
-        Ok(effective.len() != scope_refs.len())
+        let (effective, native) = default_coverage(&kind, &scope_refs, self.billing_official_api_declared(&host, &provider_id)?);
+        Ok(effective.len() != scope_refs.len() || (native && agent_vitals_domain::attribution::host_native_vendor(&host).as_deref() == Some(provider_id.as_str())))
     }
 
     fn billing_mark_default_scope_catchup(&self, revision_id: &str) -> Result<(), AuthorityError> {
@@ -5904,6 +5955,50 @@ mod tests {
         put_fact(&authority, "a-new", "claude-code", Some("anthropic"), "claude-sonnet-5-5", 5_000);
         authority.billing_apply_active_declarations(6_000).unwrap();
         assert!(!covered(&authority, "a-new"), "订阅与 API 并存：新模型保持待确认，不自动算订阅覆盖");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 用户观察（2026-10-01）：宿主读自家模型，模型名不带服务商前缀；第三方云厂商 / 中转才加
+    /// `provider/` 路径前缀。所以 ZCode 的 `GLM-5.3`、Codex 的 `gpt-5.6-terra` 即使没有路由证据
+    /// （`provider_id` 为 NULL），也是宿主自家官方路由——官方订阅默认覆盖它们；而带前缀的、
+    /// 以及宿主读别家系列的（claude-code 下的 deepseek）都是第三方，不能被吞掉。
+    #[test]
+    fn official_subscription_also_covers_native_models_that_lack_a_provider() {
+        let (db, authority) = default_scope_fixture("billing-default-scope-native");
+        // 真机分布：ZCode 的 GLM（provider 为空）、Codex 的 gpt（少量为空）
+        put_fact(&authority, "z-native", "plugin:zcode", None, "GLM-5.3", 100);
+        put_fact(&authority, "z-native-lower", "plugin:zcode", None, "glm-5.3-flash", 100);
+        put_fact(&authority, "z-gateway", "plugin:zcode", None, "bigmodel/glm-5.3-flash", 100);
+        put_fact(&authority, "z-foreign-family", "plugin:zcode", None, "deepseek-v4-flash", 100);
+        put_fact(&authority, "x-native-null", "codex", None, "gpt-5.6-terra", 100);
+        put_fact(&authority, "x-prefixed-own-vendor", "codex", None, "openai/gpt-5.6-luna", 100);
+        put_fact(&authority, "x-relay-family", "codex", None, "deepseek/deepseek-v4.1-flash", 100);
+        put_fact(&authority, "c-foreign-family", "claude-code", None, "deepseek-v4-flash", 100);
+        put_fact(&authority, "c-glm-via-claude", "claude-code", None, "glm-5.3-flash", 100);
+        authority.billing_declaration_revision_save(
+            "rev-glm", "decl-glm", None, "plugin:zcode", "zhipu-glm", "official_subscription",
+            Some("GLM Lite"), Some(11_800), Some("CNY"), "2025-07-20", None, None, None, &[], 200,
+        ).unwrap();
+        authority.billing_recalculation_enqueue("job-glm", "decl-glm", "rev-glm", 300).unwrap();
+        assert!(authority.billing_recalculation_run("job-glm", 400).unwrap());
+        authority.billing_declaration_revision_save(
+            "rev-plus", "decl-plus", None, "codex", "openai", "official_subscription",
+            Some("ChatGPT Plus"), Some(2_000), Some("USD"), "2025-07-20", None, None, None, &[], 210,
+        ).unwrap();
+        authority.billing_recalculation_enqueue("job-plus", "decl-plus", "rev-plus", 310).unwrap();
+        assert!(authority.billing_recalculation_run("job-plus", 410).unwrap());
+        authority.billing_apply_active_declarations(6_000).unwrap();
+        for id in ["z-native", "z-native-lower", "x-native-null"] {
+            assert!(covered(&authority, id), "{id}：宿主原生模型，服务商为空也应被官方订阅覆盖");
+        }
+        for id in ["z-gateway", "z-foreign-family", "x-prefixed-own-vendor", "x-relay-family", "c-foreign-family", "c-glm-via-claude"] {
+            assert!(!covered(&authority, id), "{id}：带前缀 / 非原生系列是第三方路由，不能被默认覆盖吞掉");
+        }
+        // 预览与重算同口径（带 native 开关）
+        let preview = authority.billing_declaration_impact_preview_for_kind(
+            "plugin:zcode", "zhipu-glm", "official_subscription", "2025-07-20", None, &[], None,
+        ).unwrap();
+        assert_eq!(preview.fact_count, 0, "已经被覆盖的事实不再重复计入预览");
         let _ = std::fs::remove_file(&db);
     }
 
