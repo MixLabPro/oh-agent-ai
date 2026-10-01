@@ -62,25 +62,60 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .overview-host-panel { margin-top: 14px; padding: 20px; border: 1px solid #e1e8f0; border-radius: 14px; background: #fff; box-shadow: 0 10px 28px rgb(31 55 80 / 4%); }
 .overview-recent-panel { display: block; align-items: initial; }
 .overview-recent-list { display: grid; gap: 7px; margin-top: 12px; }
-/* OVERVIEW_TREND_PANEL v1.1：今日逐小时 24 列堆叠柱 + 失败小时标记。段色沿用
-   应用绿系（usage-hour 同族），失败标记用暖橙——语义是「需要注意」，不是成本。 */
-.overview-trend { margin-top: 14px; }
-.overview-trend-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; color: var(--text-subtle); font-size: 11px; }
-.overview-trend-legend span { display: inline-flex; align-items: center; gap: 5px; }
-.overview-trend-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
-.overview-trend-unavailable { color: #9a6b1f; }
-.overview-trend-chart { display: flex; align-items: flex-end; gap: 1px; height: 104px; margin-top: 14px; }
-.overview-trend-col { display: flex; flex: 1 1 0; flex-direction: column; align-items: center; justify-content: flex-end; gap: 3px; min-width: 0; height: 100%; text-decoration: none; }
-.overview-trend-bar { display: flex; flex-direction: column; width: 100%; max-width: 22px; overflow: hidden; border-radius: 3px 3px 1px 1px; }
-.overview-trend-bar-empty { background: #edf1f5; }
-.overview-trend-bar i { flex: 0 0 auto; width: 100%; }
+/* 总览趋势面板外壳（OVERVIEW_TREND_RANGE_SPEC v2.0；柱图本体见下方 .trend-*）。
+   段色应用绿系，失败标记用暖橙——语义是「需要注意」，不是成本。 */
+/* .info-panel 默认是 flex 横排（给「文字 + 按钮」的窄条用）；趋势面板是纵向的
+   标题 → 图例 → 图，必须覆盖成 block，否则标题与图表被并排挤在一行里，图只剩
+   ~244px 宽（实测 1400px 窗口下卡片 1170px、图 244px——这才是「图缩在卡片中间」的
+   根因，不是 22px 柱宽上限）。 */
+.overview-trend { display: block; margin-top: 14px; }
 .trend-seg-dsh { background: #087f62; }
 .trend-seg-claude { background: #69bba3; }
 .trend-seg-codex { background: #b7dccd; }
 .trend-flag { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: #e07a3f; }
-.overview-trend-col small { color: var(--text-subtle); font-size: 9px; line-height: 1; min-height: 9px; }
-.overview-trend-col:hover .overview-trend-bar { outline: 1px solid #087f62; }
 .overview-trend-note { margin-top: 10px; color: var(--text-subtle); font-size: 11px; }
+/* OVERVIEW_TREND_RANGE_SPEC §2.3：共享趋势柱图 UsageTrendChart（总览三档 + 用量页小时明细）。
+   柱宽随容器伸缩（没有写死的 22px 上限——那是「图缩在卡片中间」的根因）；只有周档
+   7 根粗柱用 --trend-bar-max 约束。失败 = 柱描边 + 底点（橙 = 需要注意，不是成本）。 */
+.trend-chart { margin-top: 14px; }
+.trend-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; margin-bottom: 12px; color: var(--text-subtle); font-size: 11px; }
+.trend-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.trend-legend i, .trend-tip i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
+.trend-legend i.trend-flag, .trend-tip i.trend-flag { width: 7px; height: 7px; border-radius: 50%; }
+.trend-legend-warn { color: #9a6b1f; }
+.trend-legend-muted { color: var(--text-subtle); opacity: 0.85; }
+.trend-plot { display: flex; gap: 10px; }
+.trend-yaxis { display: flex; flex: 0 0 38px; flex-direction: column; justify-content: space-between; height: 148px; color: var(--text-subtle); font-size: 10px; font-variant-numeric: tabular-nums; text-align: right; line-height: 1; }
+.trend-yaxis span:first-child { transform: translateY(-1px); }
+.trend-area { position: relative; flex: 1 1 auto; min-width: 0; }
+.trend-grid { position: absolute; inset: 0 0 auto 0; display: flex; flex-direction: column; justify-content: space-between; height: 148px; pointer-events: none; }
+.trend-grid i { display: block; height: 0; border-top: 1px dashed #e3eaf0; }
+.trend-grid i:last-child { border-top-style: solid; border-top-color: #d3dde6; }
+.trend-cols { position: relative; display: flex; align-items: stretch; gap: 3px; }
+.trend-col { position: relative; display: flex; flex: 1 1 0; flex-direction: column; align-items: center; min-width: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: none; cursor: default; }
+.trend-col-interactive { cursor: pointer; }
+.trend-col:focus-visible { outline: 2px solid #087f62; outline-offset: 2px; border-radius: 4px; }
+.trend-bar-slot { display: flex; align-items: flex-end; justify-content: center; width: 100%; height: 148px; }
+.trend-bar, .trend-bar-empty { display: flex; flex-direction: column; width: 78%; max-width: var(--trend-bar-max, none); overflow: hidden; border-radius: 3px 3px 1px 1px; }
+.trend-bar i { flex: 1 1 0; min-height: 1px; }
+.trend-bar-empty { height: 2px; background: #e3eaf0; }
+.trend-bar-failed { box-shadow: 0 0 0 2px #e07a3f; }
+.trend-bar-unavailable { background: repeating-linear-gradient(45deg, #eef2f6 0 4px, #e3eaf0 4px 8px); opacity: 0.8; }
+.trend-flag-slot { display: flex; align-items: center; justify-content: center; height: 12px; }
+.trend-col small { min-height: 11px; color: var(--text-subtle); font-size: 10px; line-height: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.trend-label-future { opacity: 0.45; }
+.trend-col-interactive:hover .trend-bar { filter: brightness(0.92); }
+.trend-tip { position: absolute; bottom: calc(100% - 20px); left: 50%; z-index: 5; display: none; min-width: 148px; flex-direction: column; gap: 3px; padding: 8px 10px; border: 1px solid #d3dde6; border-radius: 8px; background: #fff; box-shadow: 0 8px 22px rgb(31 55 80 / 14%); color: #26384e; font-size: 11px; line-height: 1.35; text-align: left; white-space: nowrap; transform: translateX(-50%); pointer-events: none; }
+.trend-tip span { display: flex; align-items: center; gap: 6px; }
+.trend-tip-left { left: 0; transform: none; }
+.trend-tip-right { left: auto; right: 0; transform: none; }
+.trend-tip-failure { color: #9a6b1f; }
+.trend-col:hover .trend-tip, .trend-col:focus-visible .trend-tip { display: flex; }
+@media (max-width: 720px) { .trend-yaxis { flex-basis: 30px; } .trend-cols { gap: 1px; } .trend-col small { font-size: 9px; } }
+.trend-range-switch { display: inline-flex; padding: 2px; border: 1px solid #d3dde6; border-radius: 9px; background: #f4f7fa; }
+.trend-range-switch button { padding: 4px 12px; border: 0; border-radius: 7px; background: none; color: var(--text-subtle); font: inherit; font-size: 12px; cursor: pointer; }
+.trend-range-switch button[aria-pressed="true"] { background: #fff; color: #26384e; font-weight: 600; box-shadow: 0 1px 3px rgb(31 55 80 / 12%); }
+.trend-range-switch button:focus-visible { outline: 2px solid #087f62; outline-offset: 1px; }
 .overview-recent-row { display: grid; grid-template-columns: 1fr 1fr 1.5fr; gap: 10px; align-items: baseline; padding: 9px 11px; border: 1px solid #e6edf2; border-radius: 9px; background: #fbfcfe; color: #405875; font-size: 11px; }
 .overview-recent-row strong { color: #26384e; font-variant-numeric: tabular-nums; }
 .overview-recent-row small { color: var(--text-subtle); text-align: right; }
@@ -120,12 +155,6 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
 .usage-refresh-status { margin: -4px 0 12px; padding: 9px 12px; border: 1px solid #dbe9e4; border-radius: 8px; color: #426b61; background: #f5fbf8; font-size: 11px; line-height: 1.45; }
 .usage-empty { padding: 14px 4px 4px; color: var(--text-subtle); font-size: 12px; line-height: 1.6; }
 .usage-detail-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(260px, .6fr); gap: 14px; margin-top: 14px; }
-.usage-hour-grid { display: grid; grid-template-columns: repeat(24, minmax(13px, 1fr)); align-items: end; gap: 5px; min-height: 88px; padding: 13px 4px 0; border-bottom: 1px solid #e5ebf0; }
-.usage-hour { display: grid; align-content: end; justify-items: center; gap: 4px; min-width: 0; height: 75px; }
-.usage-hour-bar { display: flex; align-items: end; height: 56px; width: 100%; }
-.usage-hour-bar span { display: block; width: 100%; min-height: 1px; border-radius: 4px 4px 1px 1px; background: #69bba3; }
-.usage-hour-empty .usage-hour-bar span { background: #e3eaf0; }
-.usage-hour small { color: var(--text-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
 .usage-source-list { display: grid; gap: 9px; margin: 4px 0 0; }
 .usage-source-list div { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 8px; border-bottom: 1px solid #edf1f5; }
 .usage-source-list div:last-child { padding-bottom: 0; border-bottom: 0; }
@@ -608,7 +637,6 @@ h2 { margin-top: 7px; font-size: clamp(22px, 3vw, 31px); letter-spacing: -0.035e
   .usage-host-summary p { grid-column: auto; }
   .usage-calendar-cell { min-height: 62px; padding: 7px 5px; }
   .usage-calendar-cell strong { font-size: 10px; }
-  .usage-hour-grid { gap: 2px; }
   .overview-detail-grid, .overview-host-list { grid-template-columns: 1fr; }
   .overview-recent-row { grid-template-columns: 1fr; gap: 4px; }
   .overview-recent-row small { text-align: left; }

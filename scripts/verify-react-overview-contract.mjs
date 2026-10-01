@@ -28,19 +28,39 @@ assert.match(overviewPage, /item\.sessions_count > 0 && item\.host !== "generic"
 assert.match(overviewPage, /readFindings\(null\)/, "strip reads the existing safe findings projection (no new payload path)");
 assert.match(overviewPage, /sessionsDateHref|sessionsHostHref/, "drill-down links go through the whitelisted nav helper");
 
-// OVERVIEW_TREND_PANEL spec v1.1 §4/§6：24 小时趋势面板的存在性、深链、诚实降级与 r6（面板无金额）。
-assert.match(overviewPage, /function TrendPanel/, "overview must render the hourly stacked usage trend panel");
-assert.match(overviewPage, /readUsageHourly\(details\.date\)/, "hourly columns reuse the usage page's hourly distribution command");
-assert.match(overviewPage, /length: 24/, "the chart always renders all 24 hour columns");
-assert.match(overviewPage, /overview\.trendFailureUnavailable/, "trend panel must state marker unavailability honestly");
+// OVERVIEW_TREND_RANGE_SPEC v2.0 §2/§3：三档趋势面板（取代 v1.1 的「只有今日 24 列」）——
+// 存在性、共享组件、三档、深链、诚实降级与 r6（面板无金额）。
+const trendChartSource = readFileSync(path.join(ui, "react/src/components/UsageTrendChart.tsx"), "utf8");
+const trendBucketsSource = readFileSync(path.join(ui, "react/src/features/usage/trendBuckets.ts"), "utf8");
+assert.match(overviewPage, /function TrendPanel/, "overview must render the trend panel");
+assert.match(overviewPage, /<UsageTrendChart /, "overview renders the shared trend chart, not its own bars");
+assert.doesNotMatch(overviewPage, /overview-trend-bar|overview-trend-col/, "no second hand-written bar renderer in the overview");
+assert.match(overviewPage, /readUsageHourly\(today\)/, "day range reuses the usage page's hourly distribution command");
+assert.match(overviewPage, /TREND_RANGES: TrendRange\[\] = \["day", "week", "month"\]/, "three ranges: day / week / month");
+assert.match(overviewPage, /readUsageCalendar\(extraMonth\)/, "a week spanning two months reads the earlier month's calendar");
+assert.match(overviewPage, /details\.failure_hours/, "day range marks failures from failure_hours");
+assert.match(overviewPage, /details\.failure_days/, "week/month ranges mark failures from failure_days");
+assert.match(overviewPage, /trend\.rangeTitle\./, "range heading is localized per range");
 assert.match(overviewPage, /overview\.trendHourlyUnavailable/, "hourly fetch failure must degrade honestly");
 assert.match(overviewPage, /overview\.trendEmpty/, "trend panel must have an honest empty state");
-assert.match(overviewPage, /href=\{sessionsDateHref\(details\.date\)\}/, "hour columns drill into that day's sessions via the whitelisted nav helper");
-assert.match(overviewPage, /failureHours == null/, "null failure_hours must render the degradation note, not a fabricated zero");
-const overviewTrendCode = overviewPage.slice(overviewPage.indexOf("function TrendPanel"), overviewPage.indexOf("function OverviewFindingsStrip"));
+assert.match(overviewPage, /sessionsDateHref\(/, "bucket drill-downs go through the whitelisted nav helper");
+assert.match(overviewPage, /try \{[^}]*localStorage/, "remembered range is wrapped in try/catch (storage can throw)");
+assert.match(trendChartSource, /trend\.failureUnavailable/, "chart must state failure-marker unavailability honestly");
+assert.match(trendChartSource, /bucket\.failures == null|failures == null/, "null failures is 'unavailable', never a fabricated zero");
+assert.match(trendChartSource, /trend-bar-unavailable/, "unavailable buckets are hatched, not drawn as zero");
+assert.doesNotMatch(readFileSync(path.join(ui, "react/src/styles.css"), "utf8").match(/\.trend-bar, \.trend-bar-empty \{[^}]*\}/)?.[0] ?? "", /max-width:\s*\d+px/, "no hard-coded px bar cap (it shrank the chart into the middle of the card)");
+assert.match(trendBucketsSource, /Date\.UTC/, "calendar math is UTC-calendar only, never local-time Date");
+assert.doesNotMatch(trendBucketsSource, /getDate\(\)|getDay\(\)|getMonth\(\)|new Date\(\)/, "no local-timezone Date accessors in bucket assembly");
+const usagePageSource = readFileSync(path.join(ui, "react/src/features/usage/UsagePage.tsx"), "utf8");
+const stylesSource = readFileSync(path.join(ui, "react/src/styles.css"), "utf8");
+assert.match(usagePageSource, /<UsageTrendChart /, "usage page's hourly detail reuses the shared trend chart");
+assert.doesNotMatch(usagePageSource, /usage-hour-grid|usage-hour-bar/, "usage page must not keep a second hand-written hourly bar renderer");
+assert.doesNotMatch(stylesSource, /^\.usage-hour(-grid|-bar)?\b/m, "the duplicated usage-hour CSS is gone (single trend renderer)");
+assert.match(stylesSource, /^\.overview-trend \{ display: block;/m, "regression: .info-panel is a flex row; without display:block on .overview-trend the heading and chart sit side by side and the chart collapses to ~244px (measured 2026-10-01)");
+const overviewTrendCode = overviewPage.slice(overviewPage.indexOf("function TrendPanel"), overviewPage.indexOf("function OverviewFindingsStrip")) + trendChartSource + trendBucketsSource;
 assert.doesNotMatch(overviewTrendCode, /formatMajorMoney|moneyDetail|cost/, "trend panel is token+failure only (r6: no amounts)");
 const i18nSource = readFileSync(path.join(ui, "react/src/lib/i18n.ts"), "utf8");
-for (const key of ["overview.trendTitle", "overview.trendFailureLegend", "overview.trendFailureUnavailable", "overview.trendHourlyUnavailable", "overview.trendEmpty", "overview.trendNote", "overview.trendDayAria", "overview.trendDayFailures"]) {
+for (const key of ["overview.trendEmpty", "overview.trendNote", "overview.trendHourlyUnavailable", "trend.rangeLabel", "trend.range.day", "trend.range.week", "trend.range.month", "trend.rangeTitle.day", "trend.rangeTitle.week", "trend.rangeTitle.month", "trend.failureLegend", "trend.failureUnavailable", "trend.noFailures", "trend.tokens", "trend.noUsage", "trend.future", "trend.unavailable", "trend.failuresInBucket", "trend.bucketAria", "trend.bucketAriaOpen", "trend.weekNote", "trend.monthNote"]) {
   assert.equal((i18nSource.match(new RegExp(`"${key}"`, "g")) ?? []).length, 2, `trend i18n key ${key} must exist in both languages`);
 }
 assert.doesNotMatch(appPage, /工作台预览/, "production navigation must not call itself a preview");
@@ -347,6 +367,41 @@ withOverride(async (command, args) => {
 });
 const trendNullBackend = await bridge.readOverviewDetails();
 assert.equal(trendNullBackend.failure_hours, null, "backend null (library unavailable) passes through as null");
+restore();
+
+withOverride(async (command, args) => {
+  const result = await originalInvoke(command, args);
+  if (command !== "read_overview_details_snapshot") return result;
+  return { ...result, failure_days: { from: "2026-01-01", to: date, days: { "2026-09-15": 3, [date]: 1 } } };
+});
+const failureDaysOk = await bridge.readOverviewDetails();
+assert.deepEqual({ ...failureDaysOk.failure_days }, { "2026-09-15": 3, [date]: 1 }, "well-formed failure_days passes through");
+restore();
+
+for (const [label, bad] of [
+  ["malformed day key", { from: "x", to: date, days: { "2026-9-1": 1 } }],
+  ["zero count", { from: "x", to: date, days: { [date]: 0 } }],
+  ["fractional count", { from: "x", to: date, days: { [date]: 1.5 } }],
+  ["wrong window end", { from: "x", to: "1999-01-01", days: { "1999-01-01": 1 } }],
+  ["array days", { from: "x", to: date, days: [] }],
+]) {
+  withOverride(async (command, args) => {
+    const result = await originalInvoke(command, args);
+    if (command !== "read_overview_details_snapshot") return result;
+    return { ...result, failure_days: bad };
+  });
+  const degraded = await bridge.readOverviewDetails();
+  assert.equal(degraded.failure_days, null, `${label}: failure_days must degrade to null (never a fabricated zero), token panels survive`);
+  assert.equal(degraded.calendar.month, month, `${label}: calendar survives failure_days degradation`);
+  restore();
+}
+
+withOverride(async (command, args) => {
+  const result = await originalInvoke(command, args);
+  if (command !== "read_overview_details_snapshot") return result;
+  return { ...result, failure_days: null };
+});
+assert.equal((await bridge.readOverviewDetails()).failure_days, null, "backend null failure_days passes through as null");
 restore();
 
 console.log("React Overview/Usage contract: OK (revision-consistent snapshot, mock DTOs, malformed rejection, honest degradation)");

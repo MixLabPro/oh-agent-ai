@@ -154,6 +154,8 @@ export type OverviewDetails = {
   daily: DailySummary | null;
   calendar: UsageCalendar | null;
   failure_hours: Record<string, number> | null;
+  /** 趋势图本周/本月档：{"2026-09-15": 3}；null = 读不到（不是零失败）。 */
+  failure_days: Record<string, number> | null;
   authority_revision: number | null;
   is_consistent: boolean;
   errors: string[];
@@ -2423,6 +2425,25 @@ function parseFailureHours(value: unknown, expectedDate: string): Record<string,
   return out;
 }
 
+// OVERVIEW_TREND_RANGE_SPEC §2.2：失败日聚合的容错降级，语义同 parseFailureHours——
+// 形状不对 / 任一键非 YYYY-MM-DD / 任一值非正整数 → 整体 null，不抛错、不丢弃坏条目
+// 后冒充真零。`to` 必须等于请求日（窗口守卫）。Shape：lib.rs overview_details_snapshot_at
+// → issues::failure_days_trailing  {from,to,days:{date:count}}。
+function parseFailureDays(value: unknown, expectedTo: string): Record<string, number> | null {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return null;
+  const root = value as Record<string, unknown>;
+  if (root.to !== expectedTo) return null;
+  const days = root.days;
+  if (days == null || typeof days !== "object" || Array.isArray(days)) return null;
+  const out: Record<string, number> = {};
+  for (const [day, count] of Object.entries(days as Record<string, unknown>)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+    if (typeof count !== "number" || !Number.isFinite(count) || count <= 0 || !Number.isInteger(count)) return null;
+    out[day] = count;
+  }
+  return out;
+}
+
 export async function readOverviewDetails(): Promise<OverviewDetails> {
   const timezone = (await readStatisticsTimezone()).timezone;
   const { month, date } = statisticsMonthAndDate(timezone);
@@ -2440,6 +2461,7 @@ export async function readOverviewDetails(): Promise<OverviewDetails> {
       daily: root.daily == null ? null : parseDailySummary(root.daily),
       calendar: root.calendar == null ? null : parseUsageCalendar(root.calendar),
       failure_hours: parseFailureHours(root.failure_hours, date),
+      failure_days: parseFailureDays(root.failure_days, date),
       authority_revision, is_consistent, errors,
     };
   }
@@ -2450,7 +2472,7 @@ export async function readOverviewDetails(): Promise<OverviewDetails> {
   const monthly = results[0].status === "fulfilled" ? results[0].value : (errors.push(safeUiError(results[0].reason, "月度汇总暂不可用")), null);
   const daily = results[1].status === "fulfilled" ? results[1].value : (errors.push(safeUiError(results[1].reason, "今日汇总暂不可用")), null);
   const calendar = results[2].status === "fulfilled" ? results[2].value : (errors.push(safeUiError(results[2].reason, "日历暂不可用")), null);
-  return { month, date, monthly, daily, calendar, failure_hours: null, authority_revision: null, is_consistent: false, errors };
+  return { month, date, monthly, daily, calendar, failure_hours: null, failure_days: null, authority_revision: null, is_consistent: false, errors };
 }
 
 export async function readUsageHourly(date: string): Promise<UsageHourly> {

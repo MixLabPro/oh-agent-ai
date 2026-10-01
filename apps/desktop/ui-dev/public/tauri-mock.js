@@ -196,8 +196,17 @@
   // 月界守卫：每月 1 日 previousDay 会落入上月，而桥的 parseUsageCalendar 拒绝
   // 不属于请求月份的 day——只在与 isoDay 同月时才进日历（2026-10-01 契约全红事故）。
   const previousDayInMonth = previousDay.slice(0, 7) === month ? { [previousDay]: { dsh_tokens: 64000, claude_tokens: 64000, codex_tokens: 0, total_tokens: 128000, dsh_cost_cny: 2.34, claude_cost_cny: 0, claude_cost_usd: 1.12, codex_cost_usd: 0 } } : {};
+  // OVERVIEW_TREND_RANGE_SPEC：本周/本月档需要「这个月前面几天」才有走势可看——
+  // 确定性伪数据（按日号取模，刷新不跳），只补本月里早于 previousDay 的日子。
+  const earlierDaysInMonth = {};
+  for (let day = 1; day < Number(isoDay.slice(8)) - 1; day += 1) {
+    const key = `${month}-${String(day).padStart(2, "0")}`;
+    const dsh = (day * 37 % 5) * 18000, claude = ((day * 53 % 7) + 1) * 21000, codex = (day * 29 % 4) * 40000;
+    earlierDaysInMonth[key] = { dsh_tokens: dsh, claude_tokens: claude, codex_tokens: codex, total_tokens: dsh + claude + codex, dsh_cost_cny: 0, claude_cost_cny: 0, claude_cost_usd: 0, codex_cost_usd: 0 };
+  }
   const calendar = {
     days: {
+      ...earlierDaysInMonth,
       ...previousDayInMonth,
       [isoDay]: { dsh_tokens: 52000, claude_tokens: 64000, codex_tokens: 130000, total_tokens: 246000, dsh_cost_cny: 3.21, claude_cost_cny: 0, claude_cost_usd: 0, codex_cost_usd: 0.84 },
     },
@@ -206,6 +215,11 @@
   // 与 read_hourly_distribution 的形状呼应：09 点是 shape 峰值附近，14 点有
   // claude 参与但失败集中在 codex 侧——预览里橙点落在有柱子的时段。
   const failureHours = { hours: { "9": 3, "14": 1 } };
+  // 失败日 mock（OVERVIEW_TREND_RANGE_SPEC §2.2）：今天 + 3 天前 + 8 天前，三档都能看到橙标。
+  function failureDaysMock(to) {
+    const shift = (n) => { const [y, m, d] = to.split("-").map(Number); const t = new Date(Date.UTC(y, m - 1, d) - n * 86400000); return t.toISOString().slice(0, 10); };
+    return { [to]: 4, [shift(3)]: 2, [shift(8)]: 1 };
+  }
 
   const sessions = [{
     session_ref: "sr_browser_mock_01",
@@ -460,6 +474,8 @@
           //   {date, hours:{hour:count}}；库不可用时后端给 null。mock 恒可用，
           //   非请求日的窗口给空对象（真零），与日历的窗口守卫语义一致。
           failure_hours: requestedDate === isoDay ? { date: requestedDate, hours: failureHours.hours } : { date: requestedDate, hours: {} },
+          // Shape: issues::failure_days_trailing {from,to,days:{date:count}}。
+          failure_days: { from: requestedDate, to: requestedDate, days: failureDaysMock(requestedDate) },
           authority_revision: 42, is_consistent: true, errors: [],
         };
       }
