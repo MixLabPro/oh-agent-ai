@@ -7,6 +7,7 @@ export type { AppLanguage, LanguagePreference } from "./localePreference";
 
 const eventName = "agent-vitals-language-changed";
 const english = {
+  "billing.needModel": "This usage has no known provider and no recognisable model, so a declaration cannot be scoped. Without a scope it would become a catch-all for every unattributed usage. Confirm the model first.",
   "qv.note": "Changing this re-prices that provider's usage with the other official list; nothing is converted. If you added your own price cards for a provider, they decide its currency and this choice is locked.",
   "qv.saveFailed": "Could not save the choice.",
   "qv.choose": "Quote currency for {name}",
@@ -1567,6 +1568,7 @@ const english = {
 
 type Translation = string | { one: string; other: string };
 const chinese: Record<keyof typeof english, Translation> = {
+  "billing.needModel": "这组用量的服务商未知、也没有可识别的模型，声明无法限定范围；不带范围会变成对所有未归属用量的兜底。请先确认具体模型。",
   "qv.note": "更改后，该服务商的用量会改用另一套官方价目重新计价，不做任何换算。如果你给某个服务商补过自己的价卡，它的币种由那些卡决定，此处选择会被锁定。",
   "qv.saveFailed": "保存选择失败。",
   "qv.choose": "{name} 的报价币种",

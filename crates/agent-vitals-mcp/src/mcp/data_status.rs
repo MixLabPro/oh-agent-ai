@@ -1042,7 +1042,8 @@ mod tests {
         // （user_declared 归因）→ 它不再是「不知道是哪家服务商」。撤销后回到未归属。
         db.billing_declaration_revision_save(
             "rev-q", "decl-q", None,"shengsuanyun", "third_party", None, None, None,
-            "1970-01-01", None, None, None, &[("provider", "unresolved")], 2,
+            // 夹具事实没有模型：用会话范围收窄（「服务商未知」的答复必须带收窄范围）
+            "1970-01-01", None, None, None, &[("provider", "unresolved"), ("session", "quality-session")], 2,
         ).unwrap();
         db.billing_recalculation_enqueue("job-q", "decl-q", "rev-q", 3).unwrap();
         assert!(db.billing_recalculation_run("job-q", 4).unwrap());

@@ -211,7 +211,7 @@ fn declared_relations_of_any_kind_close_their_group_until_revoked() {
         db.billing_declaration_revision_save(
             "rev-relay", "decl-relay", None,"shengsuanyun.com", "third_party",
             None, None, None, "2026-09-01", None, None, None,
-            &[("provider", "unresolved")], 1,
+            &[("provider", "unresolved"), ("model", "gpt-relay")], 1,
         ).unwrap();
         db.billing_recalculation_enqueue("job-relay", "decl-relay", "rev-relay", 2).unwrap();
         assert!(db.billing_recalculation_run("job-relay", 3).unwrap());

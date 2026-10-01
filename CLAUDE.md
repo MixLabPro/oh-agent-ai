@@ -397,6 +397,13 @@ app 端 `fx_settings::save_synced` 用 `FxSnapshot::validate_update` 再校验�
 - **结算币种按服务商记**（`declared_settlement_currencies()` → `provider → 币种`）；**月费按服务商只摊一次**
   （旧的 `(宿主, 服务商)` 去重会让同一订阅在两个宿主各摊一份）。月费在 `by_provider`（键 `宿主/服务商`）
   里要有个落点宿主，只用于展示：服务商自家宿主 > 用量最集中的宿主（`dominant_host_of_provider`）> `unattributed`。
+- **收窄靠作用域，不靠宿主**：「服务商未知」的答复（`("provider","unresolved")`，匹配 `provider_id IS NULL` 的事实）
+  **必须带** model / route / account / session 之一，否则它就是对所有宿主、所有未归属用量的兜底——写入时拒绝，
+  旧库里留下的这类声明选择谓词恒假（`0 = 1`，宁可不匹配也不吞用量）。确认弹窗对这类组始终写上组内模型，
+  没有可识别模型（`<unknown>`）就拦下，不允许声明。
+- **重复保存守卫**：新声明与某条现行声明在服务商 / 关系 / 套餐 / 金额 / 币种 / 起止 / 作用域（集合相等）上完全一致，
+  `billing_declaration_revision_save` 返回 `false` 不新建（连点保存曾留下两条一模一样的 minimax 声明）；
+  Tauri 命令据此回 `duplicate: true` 且不入队重算。撤销过的声明不再占位。
 - **未做**：`by_provider` 的键仍是 `宿主/服务商`、待确认组仍按 `(宿主, 服务商, 模型)` 切——那是**用量视图**，
   宿主是事实自带的来源维度，不是计费归属；改成服务商键会波及全部金额 DTO 与 golden，另立项。
 

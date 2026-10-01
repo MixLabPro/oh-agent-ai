@@ -2534,11 +2534,14 @@ function billingDeclarationScopes() {
   const target = billingDeclarationTarget;
   if (!target) return [];
   const scopes = [];
-  if (target.missing && target.missing.provider) scopes.push({ scope_kind: "provider", scope_value: "unresolved" });
-  // 模型作用域只在用户明确勾了「仅限这些模型」时写：默认按计费方级匹配，之后同
-  // 计费方的新模型名自动沿用（声明是持续生效的规则，不是模型清单快照）。
+  const providerUnresolved = !!(target.missing && target.missing.provider);
+  if (providerUnresolved) scopes.push({ scope_kind: "provider", scope_value: "unresolved" });
+  // 模型作用域：默认按计费方级匹配，之后同计费方的新模型名自动沿用（声明是持续生效的规则，不是模型
+  // 清单快照），所以只在用户明确勾了「仅限这些模型」时写——**服务商未知的组除外**：那类声明匹配的是
+  // 「服务商为空」的事实，声明本身不再绑宿主，不带模型就成了对所有宿主、所有未知服务商用量的兜底，
+  // 会把别的中转 / 别的宿主的用量一并吞掉。模型是这类答复唯一的收窄依据，必须写。
   const modelsOnly = document.getElementById("ov-billing-scope-models");
-  if (modelsOnly && modelsOnly.checked) {
+  if ((modelsOnly && modelsOnly.checked) || providerUnresolved) {
     for (const row of billingSelectedRows()) {
       if (row.model_id && row.model_id !== "<unknown>") scopes.push({ scope_kind: "model", scope_value: row.model_id });
     }
@@ -2802,6 +2805,10 @@ function bindBillingDeclarationPanel() {
     save.disabled = true;
     try {
       const scopes = billingDeclarationScopes();
+      if (scopes.some((sc) => sc.scope_kind === "provider") &&
+          !scopes.some((sc) => ["model", "route", "account", "session"].includes(sc.scope_kind))) {
+        return fail("这组用量的服务商未知、也没有可识别的模型，无法限定声明范围（否则会变成对所有用量的兜底）。请先确认具体模型后再声明。");
+      }
       // 「仍不确定」不是一条计费声明：它必须继续保留组和按量估算，不改变
       // provider 与金额，不能显示为已解决。先展示影响，第二次点击只记录 30 天
       // 的提醒降级，组留在待处理列表里（AC28）。

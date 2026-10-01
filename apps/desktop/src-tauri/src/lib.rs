@@ -4042,6 +4042,15 @@ fn save_billing_declaration_revision(
         amount_minor, currency.as_deref(), &effective_start, effective_end.as_deref(),
         source_candidate_id.as_deref(), evidence_ref.as_deref(), &scope_refs, now_ms,
     ).map_err(|error| error.to_string())?;
+    // 重复保存守卫命中：内容与某条现行声明完全一致，没有新建修订——没有可入队重算的对象，回执如实说明。
+    if !changed && !db.billing_declaration_revisions(&declaration_id)
+        .map(|revisions| revisions.iter().any(|revision| revision.0 == revision_id)).unwrap_or(false)
+    {
+        return Ok(serde_json::json!({
+            "status": "saved", "revision_id": revision_id, "declaration_id": declaration_id,
+            "changed": false, "duplicate": true, "job": Value::Null,
+        }));
+    }
     // **所有关系种类都入队重算**（2026-09-16 放开，此前只有官方订阅）。非订阅关系的
     // 重算写 `user_declared` 归因行——金额排除谓词不认它（D02：不改金额），但待确认
     // 组的谓词认它：确认经中转/按量/组织后，那组事实标成"已回答"、行从待确认关掉。

@@ -87,6 +87,20 @@ pub type BillingDeclarationRow = (
     String, Option<String>, Option<String>,
 );
 
+/// 能把声明收窄到一部分用量的作用域种类。`provider=unresolved`（「服务商为空」的事实）与 `settlement`
+/// （结算币种）不是收窄，只是匹配方式 / 声明属性。
+fn is_narrowing_scope(kind: &str) -> bool {
+    matches!(kind, "account" | "route" | "model" | "session")
+}
+
+/// 「服务商未知」的答复却没有任何收窄作用域 = 对**所有宿主、所有服务商为空**的用量的兜底声明。
+/// 声明不再绑宿主之后，宿主不再替它兜住边界，所以这类声明既不允许写入、也不匹配任何事实
+/// （见 [`billing_declaration_fact_selection_with`]）：模型（或路由 / 账户 / 会话）是这类答复唯一的收窄依据。
+fn is_unbounded_unresolved(scopes: &[(&str, &str)]) -> bool {
+    scopes.iter().any(|(kind, value)| *kind == "provider" && *value == "unresolved")
+        && !scopes.iter().any(|(kind, _)| is_narrowing_scope(kind))
+}
+
 /// `billing_declarations.host` / `billing_declaration_revisions.host` 的**固定值**。
 ///
 /// 计费声明是服务商账号上的关系（订阅、API Key、中转），结算按「服务商 + 模型」，与用量是从哪个宿主
@@ -256,6 +270,10 @@ pub fn billing_declaration_fact_selection_with(
     // 声明本身仍记录用户选的服务商（计费主链规格 v1.2 §5.3a）。
     let provider_unresolved = scopes.iter()
         .any(|(kind, value)| *kind == "provider" && *value == "unresolved");
+    // 无收窄的「服务商未知」声明（旧库里留下的兜底声明）：宁可不匹配，也不去吞所有宿主上的未归属用量。
+    if is_unbounded_unresolved(scopes) {
+        return BillingDeclarationFactSelection { where_sql: "0 = 1".to_owned(), params: Vec::new() };
+    }
     // A：显式匹配——服务商相等；「服务商未知」的组改成服务商为空（模型范围负责收窄）。**不看宿主**。
     let host_bound = if provider_unresolved {
         "f.provider_id IS NULL AND ?1 IS NOT NULL"
@@ -3529,6 +3547,11 @@ impl AuthorityDb {
                 "duplicate billing declaration scope".to_string(),
             )));
         }
+        if is_unbounded_unresolved(scopes) {
+            return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
+                "a provider=unresolved declaration needs a model, route, account or session scope".to_string(),
+            )));
+        }
         let mark = begin_immediate(&self.conn)?;
         let result = (|| -> Result<bool, AuthorityError> {
             let exists: Option<i64> = self.conn.query_row(
@@ -3587,6 +3610,17 @@ impl AuthorityDb {
                  WHERE declaration_id = ?1 ORDER BY revision_number DESC LIMIT 1",
                 rusqlite::params![declaration_id], |row| Ok((row.get(0)?, row.get(1)?)),
             ).optional()?;
+            // 重复保存守卫：新声明（没有前一修订）与某条**现行**声明在服务商 / 关系 / 套餐 / 金额 / 币种 /
+            // 起止 / 作用域上完全一致 → 不再新建（连点两次保存曾留下两条一模一样的 minimax 声明，各自又
+            // 归因了同一批 3192 条事实）。返回 `false`（与「修订已存在」同一个幂等语义）。
+            if previous.is_none() && source_candidate_id.is_none()
+                && self.billing_identical_live_declaration(
+                    provider_id, relationship_kind, subscription_name, amount_minor, currency,
+                    effective_start, effective_end, scopes,
+                )?
+            {
+                return Ok(false);
+            }
             let revision_number = match previous {
                 Some((ref current, number)) if supersedes_revision_id == Some(current.as_str()) => number + 1,
                 Some(_) => return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
@@ -3637,6 +3671,41 @@ impl AuthorityDb {
             Ok(changed) => { commit_advancing_revision(&self.conn, mark)?; Ok(changed) }
             Err(error) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(error) }
         }
+    }
+
+    /// 是否已有一条现行声明与给定内容完全一致（见 [`Self::billing_declaration_revision_save`] 的重复保存守卫）。
+    #[allow(clippy::too_many_arguments)]
+    fn billing_identical_live_declaration(
+        &self, provider_id: &str, relationship_kind: &str, subscription_name: Option<&str>,
+        amount_minor: Option<i64>, currency: Option<&str>, effective_start: &str,
+        effective_end: Option<&str>, scopes: &[(&str, &str)],
+    ) -> Result<bool, AuthorityError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT br.revision_id FROM billing_declarations bd
+             JOIN billing_declaration_revisions br ON br.declaration_id = bd.declaration_id
+             WHERE bd.deleted_at_ms IS NULL AND bd.provider_id = ?1 AND bd.relationship_kind = ?2
+               AND IFNULL(bd.subscription_name, '') = IFNULL(?3, '')
+               AND IFNULL(bd.amount_minor, -1) = IFNULL(?4, -1) AND IFNULL(bd.currency, '') = IFNULL(?5, '')
+               AND bd.effective_start = ?6 AND IFNULL(bd.effective_end, '') = IFNULL(?7, '')
+               AND br.change_kind = 'saved'
+               AND br.revision_number = (SELECT MAX(x.revision_number)
+                   FROM billing_declaration_revisions x WHERE x.declaration_id = bd.declaration_id)",
+        )?;
+        let candidates = stmt.query_map(
+            rusqlite::params![provider_id, relationship_kind, subscription_name, amount_minor, currency,
+                effective_start, effective_end],
+            |row| row.get::<_, String>(0),
+        )?.collect::<Result<Vec<_>, _>>()?;
+        let wanted: std::collections::BTreeSet<(String, String)> = scopes.iter()
+            .map(|(kind, value)| (kind.to_string(), value.to_string())).collect();
+        for revision_id in candidates {
+            let existing: std::collections::BTreeSet<(String, String)> = self.billing_declaration_scopes(&revision_id)?
+                .into_iter().map(|(_, kind, value)| (kind, value)).collect();
+            if existing == wanted {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// 撤销不删除声明历史：追加 `revoked` 修订，复制最近范围，并使当前态失效。
@@ -5758,8 +5827,9 @@ mod tests {
         assert!(!authority.billing_recalculation_enqueue("job-3", "declaration-job", "revision-job", 6).unwrap(),
             "one revision cannot create a second recalculation job");
         authority.billing_declaration_revision_save(
+            // 与上面那条起始月不同：完全一致的声明会被重复保存守卫挡掉（不新建修订）。
             "revision-job-2", "declaration-job-2", None,"openai", "official_api",
-            None, None, None, "2026-09", None, None, None, &[], 7,
+            None, None, None, "2026-08", None, None, None, &[], 7,
         ).unwrap();
         assert!(authority.billing_recalculation_enqueue("job-failed", "declaration-job-2", "revision-job-2", 8).unwrap());
         assert!(authority.billing_recalculation_set_status("job-failed", "running", None, None, 9).unwrap());
@@ -5915,6 +5985,71 @@ mod tests {
         authority.conn().query_row(
             "SELECT COUNT(*) FROM billing_fact_attributions WHERE fact_id = ?1", [fact], |r| r.get::<_, i64>(0),
         ).unwrap() > 0
+    }
+
+    /// 声明不再绑宿主之后，「服务商未知」的答复若没有任何收窄范围，就是对所有宿主、所有未归属用量的
+    /// 兜底声明（真机：claude-code 2.46 万、codex 1.72 万、WorkBuddy 3874 条服务商为空的事实都会被吞）。
+    /// 所以写入时拒绝，旧库里留下的这类声明则不匹配任何事实。
+    #[test]
+    fn an_unresolved_provider_answer_without_a_narrowing_scope_is_not_allowed() {
+        let (db, authority) = default_scope_fixture("billing-unbounded-unresolved");
+        put_fact(&authority, "u-claude", "claude-code", None, "m-a", 100);
+        put_fact(&authority, "u-codex", "codex", None, "m-b", 100);
+        let save = |id: &str, scopes: &[(&str, &str)]| authority.billing_declaration_revision_save(
+            &format!("rev-{id}"), &format!("decl-{id}"), None, "shengsuanyun", "third_party",
+            None, None, None, "2025-07-20", None, None, None, scopes, 200,
+        );
+        // 只有 unresolved（加结算币种）→ 拒绝；任何一种收窄作用域都可以
+        assert!(save("bare", &[("provider", "unresolved")]).is_err());
+        assert!(save("settle-only", &[("provider", "unresolved"), ("settlement", "CNY")]).is_err());
+        assert!(save("model", &[("provider", "unresolved"), ("model", "m-a")]).unwrap());
+        assert!(save("session", &[("provider", "unresolved"), ("session", "s-1")]).unwrap());
+        // 旧库里已经存在的无收窄声明：选择谓词恒假，宁可不匹配也不吞用量
+        let selection = billing_declaration_fact_selection(
+            "shengsuanyun", "2025-07-20", None, &[("provider", "unresolved")], None, ConflictEvidence::Exclude,
+        );
+        assert_eq!(selection.where_sql, "0 = 1");
+        let preview = authority.billing_declaration_impact_preview_for(
+            "shengsuanyun", "2025-07-20", None, &[("provider", "unresolved")], None,
+        ).unwrap();
+        assert_eq!(preview.fact_count, 0);
+        // 带模型范围的只命中该模型，不会顺带吞 u-codex
+        authority.billing_recalculation_enqueue("job-model", "decl-model", "rev-model", 300).unwrap();
+        assert!(authority.billing_recalculation_run("job-model", 400).unwrap());
+        assert!(covered(&authority, "u-claude") && !covered(&authority, "u-codex"));
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 同一次操作提交两次曾留下两条一模一样的声明（各自又归因了同一批事实）。内容完全一致就不再新建；
+    /// 起止、金额、关系种类、作用域任何一项不同都是另一条声明。
+    #[test]
+    fn saving_an_identical_declaration_twice_keeps_one() {
+        let (db, authority) = default_scope_fixture("billing-duplicate-save");
+        let save = |id: &str, kind: &str, start: &str, scopes: &[(&str, &str)]| authority.billing_declaration_revision_save(
+            &format!("rev-{id}"), &format!("decl-{id}"), None, "minimax", kind,
+            None, None, None, start, None, None, None, scopes, 200,
+        ).unwrap();
+        let scopes = [("provider", "unresolved"), ("model", "MiniMax-M3"), ("settlement", "CNY")];
+        assert!(save("a", "official_api", "2026-09-01", &scopes));
+        assert!(!save("b", "official_api", "2026-09-01", &scopes), "完全一致 → 不新建");
+        // 作用域顺序不同也是同一份
+        let shuffled = [("settlement", "CNY"), ("model", "MiniMax-M3"), ("provider", "unresolved")];
+        assert!(!save("c", "official_api", "2026-09-01", &shuffled));
+        // 任何一项不同都是新的声明
+        assert!(save("d", "official_api", "2026-09-02", &scopes), "起始日不同");
+        assert!(save("e", "third_party", "2026-09-01", &scopes), "关系种类不同");
+        assert!(save("f", "official_api", "2026-09-01", &[("provider", "unresolved"), ("model", "MiniMax-M2.7"), ("settlement", "CNY")]), "模型不同");
+        let live = authority.billing_declarations().unwrap();
+        assert_eq!(live.len(), 4, "{live:?}");
+        // 被挡掉的那次没有留下任何修订
+        let revisions: i64 = authority.conn().query_row(
+            "SELECT COUNT(*) FROM billing_declaration_revisions WHERE declaration_id IN ('decl-b', 'decl-c')", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(revisions, 0);
+        // 撤销后同样内容可以重新声明
+        authority.billing_declaration_revision_revoke("rev-revoke-a", "decl-a", "rev-a", 300).unwrap();
+        assert!(save("g", "official_api", "2026-09-01", &scopes), "撤销过的声明不再占位");
+        let _ = std::fs::remove_file(&db);
     }
 
     /// 用户要求（2026-10-01）：Anthropic 发新模型不该要求我们发版或用户回来补声明。

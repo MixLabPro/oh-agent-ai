@@ -467,7 +467,7 @@ fn user_declared_relay_usage_moves_from_default_to_declared_estimate() {
 
     env.db.billing_declaration_revision_save(
         "rev-relay", "decl-relay", None,"shengsuanyun", "third_party", None, None, None,
-        "2020-01-01", None, None, None, &[("provider", "unresolved")], 2,
+        "2020-01-01", None, None, None, &[("provider", "unresolved"), ("model", "deepseek-v4-pro")], 2,
     ).unwrap();
     env.db.billing_recalculation_enqueue("job-relay", "decl-relay", "rev-relay", 3).unwrap();
     assert!(env.db.billing_recalculation_run("job-relay", 4).unwrap());
@@ -499,10 +499,12 @@ fn declared_provider_preserves_fallback_quote_currency() {
     let s = env.day_start(&d);
     env.fact("s1", "claude-code", "anthropic/claude-sonnet-5", s + 1_000, 0, 1_000_000, 100_000);
     env.fact("c1", "codex", "openai/gpt-5.6-luna", s + 2_000, 0, 1_000_000, 100_000);
-    for (host, decl, rev) in [("claude-code", "decl-ss-cc", "rev-ss-cc"), ("codex", "decl-ss-cx", "rev-ss-cx")] {
+    // 声明属于服务商，按模型结算：两个宿主上的两个模型各答一次（模型就是收窄依据；
+    // 作用域完全一致的两条声明会被重复保存守卫合并，不会各留一份）。
+    for (model, decl, rev) in [("anthropic/claude-sonnet-5", "decl-ss-cc", "rev-ss-cc"), ("openai/gpt-5.6-luna", "decl-ss-cx", "rev-ss-cx")] {
         env.db.billing_declaration_revision_save(
             rev, decl, None,"shengsuanyun", "third_party", None, None, None,
-            "2020-01-01", None, None, None, &[("provider", "unresolved"), ("settlement", "CNY")], 2,
+            "2020-01-01", None, None, None, &[("provider", "unresolved"), ("model", model), ("settlement", "CNY")], 2,
         ).unwrap();
         let job = format!("job-{rev}");
         env.db.billing_recalculation_enqueue(&job, decl, rev, 3).unwrap();

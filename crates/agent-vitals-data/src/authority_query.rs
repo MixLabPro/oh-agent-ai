@@ -2385,7 +2385,7 @@ mod tests {
         // (shengsuanyun, declared=true) 组；金额面据此改计 MeteredDeclared。
         db.billing_declaration_revision_save(
             "rev-relay", "decl-relay", None,"shengsuanyun", "third_party", None, None, None,
-            "2026-09-01", None, None, None, &[("provider", "unresolved")], 6,
+            "2026-09-01", None, None, None, &[("provider", "unresolved"), ("model", "gpt-5.6-sol")], 6,
         ).unwrap();
         db.billing_recalculation_enqueue("job-relay", "decl-relay", "rev-relay", 7).unwrap();
         assert!(db.billing_recalculation_run("job-relay", 8).unwrap());
