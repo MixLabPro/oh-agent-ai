@@ -34,6 +34,7 @@ pub use core::home;
 pub use core::logging;
 pub use core::state;
 pub use core::takeover;
+pub use core::fx_settings;
 pub use core::statistics_timezone;
 pub use core::retention;
 

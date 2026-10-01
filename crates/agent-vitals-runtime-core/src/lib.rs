@@ -22,6 +22,7 @@ pub use core::logging;
 pub use core::retention;
 pub use core::sql_authority;
 pub use core::state;
+pub use core::fx_settings;
 pub use core::statistics_timezone;
 pub use core::takeover;
 pub mod pricing;

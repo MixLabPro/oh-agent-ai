@@ -8,5 +8,6 @@ pub mod logging;
 pub mod retention;
 pub mod sql_authority;
 pub mod state;
+pub mod fx_settings;
 pub mod statistics_timezone;
 pub mod takeover;

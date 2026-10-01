@@ -159,6 +159,22 @@ impl FxPolicy {
     }
 }
 
+/// 系统区域 → 默认报告币种：美区 USD、中国 CNY，**其他一律 USD**（用户决策 2026-10-01）。
+/// 区域取标识符里最后一个两位字母段（`en_US` / `zh-Hans-CN` / `zh_CN@collation=pinyin`）；
+/// 取不到区域也是 USD。语言不是币种：`zh` 不推出 CNY，`en-GB` 不推出 GBP。
+pub fn default_reporting_currency(locale: &str) -> &'static str {
+    let base = locale.split('@').next().unwrap_or(locale);
+    let region = base
+        .split(|c| c == '_' || c == '-' || c == '.')
+        .filter(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_alphabetic()))
+        .last()
+        .map(|part| part.to_ascii_uppercase());
+    match region.as_deref() {
+        Some("CN") => "CNY",
+        _ => "USD",
+    }
+}
+
 /// `YYYY-MM-DD` → 自 1970-01-01 起的天数（公历，Howard Hinnant 算法）。
 fn days_from_ymd(text: &str) -> Option<i64> {
     let bytes = text.as_bytes();
@@ -255,6 +271,22 @@ mod tests {
         // 无日期的手动汇率合法（即时 what-if），rate_date 为 None
         let p = policy().with_user_rate(UserRate { from: "USD".into(), to: "CNY".into(), rate: 6.8, as_of: None }).unwrap();
         assert_eq!(p.convert(1.0, "USD", "CNY").unwrap().rate_date, None);
+    }
+
+    #[test]
+    fn default_reporting_currency_follows_the_region_not_the_language() {
+        assert_eq!(default_reporting_currency("en_US"), "USD");
+        assert_eq!(default_reporting_currency("en-US"), "USD");
+        assert_eq!(default_reporting_currency("zh_CN"), "CNY");
+        assert_eq!(default_reporting_currency("zh-Hans-CN"), "CNY");
+        assert_eq!(default_reporting_currency("zh_CN@collation=pinyin"), "CNY");
+        // 其他一律 USD：语言是中文但区域是台湾/香港，也不是 CNY；英国不推出 GBP
+        assert_eq!(default_reporting_currency("zh_TW"), "USD");
+        assert_eq!(default_reporting_currency("zh_HK"), "USD");
+        assert_eq!(default_reporting_currency("en_GB"), "USD");
+        assert_eq!(default_reporting_currency("ja_JP"), "USD");
+        assert_eq!(default_reporting_currency("zh"), "USD");
+        assert_eq!(default_reporting_currency(""), "USD");
     }
 
     #[test]
