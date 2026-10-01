@@ -9,6 +9,7 @@ import { CityLoader, CITY_WINDOWS, type CityWindowKind } from "./cityData";
 import type { CityBuilding, CityModel } from "./cityModel";
 import { paletteFor } from "./engine/cityTextures";
 import type { CityThemeName } from "./engine/cityTheme";
+import type { CinematicCard } from "./engine/cityCinematic";
 import { CityEngine, type EngineQualityMode, type EngineStats } from "./engine/CityEngine";
 import { hostName } from "../../lib/hostNames";
 import { formatCost } from "../sessions/costSummary";
@@ -78,6 +79,10 @@ export function CityPage() {
   const [stats, setStats] = useState<EngineStats | null>(null);
   const [cursorMs, setCursorMs] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
+  /** 航拍状态：null = 未在放；card = 当前字卡（按播放秒数切换，不每帧重渲）。 */
+  const [cinema, setCinema] = useState<{ card: CinematicCard | null; progress: number } | null>(null);
+  const cinemaCardRef = useRef<CinematicCard | null>(null);
+  const cinemaProgressRef = useRef(0);
   const [speed, setSpeed] = useState(3_600);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -158,6 +163,21 @@ export function CityPage() {
         if (!id) setDetailOpen(false);
       },
       onStats: (value) => setStats(value),
+      onCinematic: (seconds, plan, ended) => {
+        if (ended) {
+          cinemaCardRef.current = null;
+          setCinema(null);
+          return;
+        }
+        const card = plan.cards.find((item) => seconds >= item.atSec && seconds < item.untilSec) ?? null;
+        const progress = Math.min(1, seconds / plan.durationSec);
+        // 字卡变化或进度跨过 1% 才重渲，避免 60fps setState。
+        if (card !== cinemaCardRef.current || Math.abs(progress - cinemaProgressRef.current) > 0.01) {
+          cinemaCardRef.current = card;
+          cinemaProgressRef.current = progress;
+          setCinema({ card, progress });
+        }
+      },
       onTimeCursor: (ms, live) => {
         const now = performance.now();
         if (now - cursorThrottleRef.current < 180 && !live) return;
@@ -264,6 +284,23 @@ export function CityPage() {
     setPlaying(false);
   };
 
+  const startCinematic = () => {
+    const engine = engineRef.current;
+    if (!engine || !engine.startCinematic()) return;
+    setSelectedId(null);
+    selectedRef.current = null;
+    setPlaying(false);
+    setCinema({ card: null, progress: 0 });
+  };
+
+  const cinemaOn = cinema !== null;
+  useEffect(() => {
+    if (!cinemaOn) return;
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") engineRef.current?.stopCinematic(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [cinemaOn]);
+
   const backToLive = () => {
     engineRef.current?.setTimeCursor(null);
     setCursorMs(null);
@@ -282,7 +319,7 @@ export function CityPage() {
     setDetailOpen(true);
   };
 
-  return <div className="city-workspace">
+  return <div className={`city-workspace${cinema ? " city-cinema-on" : ""}`}>
     <canvas ref={canvasRef} className="city-canvas" aria-label={message("city.canvasLabel", language)} />
     <div ref={tooltipRef} className="city-tooltip" aria-hidden="true" />
 
@@ -303,6 +340,7 @@ export function CityPage() {
         </SelectInput>
         <Button type="button" onClick={() => setLabelsVisible((value) => !value)}>{message(labelsVisible ? "city.labelsHide" : "city.labelsShow", language)}</Button>
         <Button type="button" onClick={() => engineRef.current?.resetView()}>{message("city.resetView", language)}</Button>
+        <Button type="button" className="city-cinema-button" onClick={startCinematic} disabled={!model || model.stats.totalSessions === 0 || cinema !== null}>{message("city.cinema.start", language)}</Button>
       </div>
     </ToolbarActions>
 
@@ -349,6 +387,31 @@ export function CityPage() {
       </div>
       <p className="city-time-hint">{message("city.time.hint", language)}</p>
     </section>
+
+    {cinema && model && <div className="city-cinema" aria-live="polite">
+      <div className="city-cinema-bar city-cinema-top" />
+      <div className="city-cinema-bar city-cinema-bottom">
+        <span className="city-cinema-progress" style={{ transform: `scaleX(${cinema.progress})` }} />
+      </div>
+      {cinema.card && <div key={`${cinema.card.kind}:${cinema.card.atSec}`} className={`city-cinema-card city-cinema-${cinema.card.kind}`}>
+        {cinema.card.kind === "title" && <>
+          <p className="city-cinema-eyebrow">{message("city.cinema.eyebrow", language)}</p>
+          <h2>{message("city.cinema.title", language, { sessions: model.stats.totalSessions })}</h2>
+          <p>{message("city.cinema.subtitle", language, { window: message(`city.window.${windowKind}` as "city.window.7d", language), tokens: formatTokenCount(model.stats.tokensTotal) })}</p>
+        </>}
+        {cinema.card.kind === "district" && <>
+          <p className="city-cinema-eyebrow">{message("city.cinema.district", language)}</p>
+          <h2>{cinema.card.text}</h2>
+          <p>{message("city.cinema.districtSessions", language, { count: Number(cinema.card.detail ?? 0) })}</p>
+        </>}
+        {cinema.card.kind === "finale" && <>
+          <h2>{formatTokenCount(model.stats.tokensTotal)}</h2>
+          <p>{message("city.cinema.finale", language, { sessions: model.stats.totalSessions, districts: model.districts.length })}</p>
+          <p className="city-cinema-mark">agent-vitals</p>
+        </>}
+      </div>}
+      <button type="button" className="city-cinema-exit" onClick={() => engineRef.current?.stopCinematic()}>{message("city.cinema.exit", language)}</button>
+    </div>}
 
     {loading && !model && <div className="city-state" role="status"><strong>{message("city.loading", language)}</strong><p>{message("city.loadingHelp", language)}</p></div>}
     {error && <div className="error-banner city-error" role="alert">{error}</div>}

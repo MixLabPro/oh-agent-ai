@@ -18,6 +18,7 @@ import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js"
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import type { CityModel } from "../cityModel";
 import { activeTheme, setActiveTheme, type CityThemeName } from "./cityTheme";
+import { planCinematic, type CinematicPlan } from "./cityCinematic";
 import { layoutCity, type CityLayout } from "./cityLayout";
 import { CityParts, type QualityLevel } from "./cityParts";
 
@@ -30,6 +31,8 @@ export type CityEngineOptions = {
   onSelect?: (id: string | null) => void;
   onStats?: (stats: EngineStats) => void;
   onTimeCursor?: (ms: number, live: boolean) => void;
+  /** 航拍进度（秒）；ended=true 表示片子放完或被打断。 */
+  onCinematic?: (elapsedSec: number, plan: CinematicPlan, ended: boolean) => void;
   onFirstFrame?: () => void;
 };
 
@@ -86,6 +89,7 @@ export class CityEngine {
   private readonly observers: Array<() => void> = [];
   private skyDome: THREE.Mesh | null = null;
   private composer: EffectComposer | null = null;
+  private cinematic: { plan: CinematicPlan; startedAt: number; savedFov: number } | null = null;
   private themeName: CityThemeName = "day";
 
   constructor(private readonly options: CityEngineOptions) {
@@ -136,6 +140,7 @@ export class CityEngine {
     };
     const onPointerDown = (event: PointerEvent) => {
       this.pointerDown = { x: event.clientX, y: event.clientY, at: performance.now() };
+      if (this.cinematic) this.stopCinematic();
       if (this.attracted) {
         this.attracted = false;
         this.controls.autoRotate = false;
@@ -489,7 +494,67 @@ export class CityEngine {
     if (this.controls.autoRotate || this.tween) this.lastActivityAt = performance.now();
   }
 
+  /** 开拍：镜头接管相机与时间游标；用户点/拖画布即中止。 */
+  startCinematic(): CinematicPlan | null {
+    if (!this.layout || !this.model || !this.parts) return null;
+    const plan = planCinematic(this.layout, this.model, this.parts.anchors());
+    this.tween = null;
+    this.playing = false;
+    this.attracted = false;
+    this.controls.autoRotate = false;
+    this.controls.enabled = false;
+    this.cinematic = { plan, startedAt: this.elapsed, savedFov: this.camera.fov };
+    this.camera.fov = 38; // 略长焦：压缩纵深，更像航拍镜头
+    this.camera.updateProjectionMatrix();
+    this.parts.setLabelsVisible(false);
+    this.parts.applyCursor(plan.cursor(0), false);
+    this.noteActivity();
+    return plan;
+  }
+
+  stopCinematic(): void {
+    const state = this.cinematic;
+    if (!state) return;
+    this.cinematic = null;
+    this.controls.enabled = true;
+    this.camera.fov = state.savedFov;
+    this.camera.updateProjectionMatrix();
+    this.cursorMs = null;
+    this.parts?.applyCursor(this.model?.windowEndMs ?? Date.now(), true);
+    this.options.onTimeCursor?.(this.model?.windowEndMs ?? Date.now(), true);
+    this.options.onCinematic?.(0, state.plan, true);
+  }
+
+  get isCinematic(): boolean {
+    return this.cinematic !== null;
+  }
+
+  private updateCinematic(): boolean {
+    const state = this.cinematic;
+    if (!state) return false;
+    const seconds = this.elapsed - state.startedAt;
+    const t = Math.min(1, seconds / state.plan.durationSec);
+    const position = state.plan.position(t);
+    // 相机贴地保护在航拍里同样生效：路径插值偶尔会擦过山脊。
+    if (this.layout) position.y = Math.max(position.y, Math.max(0, this.layout.terrain.height(position.x, position.z)) + 6);
+    this.camera.position.copy(position);
+    this.controls.target.copy(state.plan.target(t));
+    this.camera.lookAt(this.controls.target);
+    const cursor = state.plan.cursor(t);
+    this.parts?.applyCursor(cursor, false);
+    this.options.onTimeCursor?.(cursor, false);
+    this.options.onCinematic?.(seconds, state.plan, false);
+    this.lastActivityAt = performance.now();
+    // 片尾停在全景上 4 秒再交还控制权。
+    if (seconds > state.plan.durationSec + 4) this.stopCinematic();
+    return true;
+  }
+
   private updateScene(dt: number): void {
+    if (this.updateCinematic()) {
+      this.parts?.update(dt, this.elapsed);
+      return;
+    }
     // 回放推进。
     if (this.playing && this.model) {
       const next = (this.cursorMs ?? this.model.windowStartMs) + dt * 1000 * this.playbackSpeed;

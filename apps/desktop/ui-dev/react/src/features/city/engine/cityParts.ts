@@ -1161,6 +1161,13 @@ export class CityParts {
     return this.shaftIdByInstance[index].get(instanceId) ?? null;
   }
 
+  /** 所有楼的锚点（航拍挑主角用）：只读快照，不暴露 runtime。 */
+  anchors(): Map<string, { x: number; z: number; height: number; ground: number }> {
+    const out = new Map<string, { x: number; z: number; height: number; ground: number }>();
+    for (const [id, runtime] of this.runtimeById) out.set(id, { x: runtime.slot.x, z: runtime.slot.z, height: runtime.building.height, ground: runtime.groundY });
+    return out;
+  }
+
   anchorFor(id: string): { x: number; z: number; height: number; ground: number } | null {
     const runtime = this.runtimeById.get(id);
     if (!runtime) return null;
