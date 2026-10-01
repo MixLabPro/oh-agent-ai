@@ -16,6 +16,8 @@ import { makeCityTexture, makeFacadeTexture, makeLabelSprite, paletteFor } from 
 import type { TerrainField } from "./cityLayout";
 
 const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+/** 单位圆柱（半径 1、高 1、底面为原点）：sx/sz 当半径、sy 当高度。 */
+const CYLINDER = new THREE.CylinderGeometry(1, 1, 1, 14).translate(0, 0.5, 0);
 
 export type QualityLevel = 0 | 1 | 2;
 
@@ -184,6 +186,7 @@ export class CityParts {
     this.buildTerrain();
     this.buildInfrastructure();
     this.buildDistrictExpressways();
+    this.buildPublicSites();
     this.buildMassing();
     this.buildSeaMountains();
     this.treeMesh = this.buildTrees();
@@ -418,6 +421,107 @@ export class CityParts {
     mesh.name = "city-district-expressways";
     this.group.add(mesh);
     this.disposables.push(geometry, mesh.material);
+  }
+
+  /** 公共用地的 3D 体量：此前市政广场/车站/体育场/观景塔/港口只有地面纹理里的一块色块
+   *  （海岸边那块灰色长方形就是港口）。全部由方块与圆柱拼成，局部坐标按地块 yaw 旋转。 */
+  private buildPublicSites(): void {
+    type Piece = { x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; color: string };
+    const boxes: Piece[] = [];
+    const cylinders: Piece[] = [];
+    for (const site of this.layout.publicSites) {
+      if (site.kind === "park") continue;
+      const r = site.radius;
+      const base = Math.max(0, this.layout.terrain.height(site.x, site.z));
+      const cos = Math.cos(site.yaw);
+      const sin = Math.sin(site.yaw);
+      // 局部 (lx, lz) → 世界；与吊车/地块同一套 yaw 约定。
+      const place = (lx: number, lz: number) => ({ x: site.x + lx * cos + lz * sin, z: site.z - lx * sin + lz * cos });
+      const box = (lx: number, ly: number, lz: number, sx: number, sy: number, sz: number, color: string, extraYaw = 0) => {
+        const p = place(lx, lz);
+        boxes.push({ x: p.x, y: base + ly, z: p.z, sx, sy, sz, yaw: site.yaw + extraYaw, color });
+      };
+      const cyl = (lx: number, ly: number, lz: number, radius: number, height: number, color: string) => {
+        const p = place(lx, lz);
+        cylinders.push({ x: p.x, y: base + ly, z: p.z, sx: radius, sy: height, sz: radius, yaw: 0, color });
+      };
+      if (site.kind === "civic") {
+        box(0, 0, 0, r * 1.2, 1.6, r * 0.9, "#e4dcc8");
+        box(0, 1.6, 0, r * 0.9, 9, r * 0.55, "#efe7d6");
+        for (let column = -3; column <= 3; column += 1) cyl(column * r * 0.12, 1.6, r * 0.34, 0.75, 9, "#f6f0e2");
+        box(0, 10.6, 0, r * 0.98, 1.1, r * 0.62, "#cdbf9f");
+        cyl(0, 11.7, 0, r * 0.27, 4.2, "#d6c9a8");
+        cyl(0, 15.9, 0, r * 0.2, 3.4, "#5fa7a3");
+        cyl(0, 19.3, 0, 0.4, 6, "#c9b98f");
+      } else if (site.kind === "station") {
+        box(0, 0, 0, r * 1.5, 0.7, r * 1.1, "#cfc7b3");
+        for (const track of [-18, -10, -2, 6]) box(track, 0.7, 0, 0.5, 0.15, r * 1.1, "#6f7773");
+        box(0, 7.4, 0, r * 1.4, 0.55, r * 0.9, "#8e9a9c");
+        for (const px of [-r * 0.6, 0, r * 0.6]) for (const pz of [-r * 0.38, r * 0.38]) cyl(px, 0.7, pz, 0.55, 6.7, "#a9b0b0");
+        box(0, 0, -r * 0.62, r * 1.3, 11, 7, "#d9cdb5");
+        cyl(r * 0.5, 11, -r * 0.62, 1.6, 10, "#c8bba0");
+        cyl(r * 0.5, 21, -r * 0.62, 2.1, 1.2, "#f4efe0");
+      } else if (site.kind === "stadium") {
+        const segments = 18;
+        for (let index = 0; index < segments; index += 1) {
+          const t = (index / segments) * Math.PI * 2;
+          const lx = Math.cos(t) * 27;
+          const lz = Math.sin(t) * 19.5;
+          // 椭圆切线方向：看台段首尾相接。
+          const tangent = Math.atan2(19.5 * Math.cos(t), -27 * Math.sin(t));
+          box(lx, 0, lz, 10.5, index % 4 === 0 ? 11 : 8, 5.5, index % 4 === 0 ? "#c05a4f" : "#dcd8ca", -tangent);
+        }
+        for (const [lx, lz] of [[-30, -22], [30, -22], [-30, 22], [30, 22]]) {
+          cyl(lx, 0, lz, 0.55, 24, "#9aa0a0");
+          box(lx, 24, lz, 4, 1.4, 2.4, "#fff3c4");
+        }
+      } else if (site.kind === "tower") {
+        cyl(0, 0, 0, 6.5, 3.2, "#c4c7c6");
+        cyl(0, 3.2, 0, 2.3, 42, "#cfd3d6");
+        cyl(0, 42, 0, 6.4, 3.8, "#eaf0f2");
+        cyl(0, 45.8, 0, 4.2, 2.2, "#7fb4c2");
+        cyl(0, 48, 0, 0.45, 15, "#d45a4a");
+      } else if (site.kind === "harbor") {
+        box(0, 0, 0, r * 1.5, 0.5, r * 1.2, "#8e9490");
+        box(0, 0.5, -r * 0.5, r * 1.1, 6.5, 10, "#bab4a3");
+        const containerColors = ["#a9684f", "#4f7f8a", "#c9a24a", "#6a8a62", "#8a5a7a", "#d8d2c0"];
+        for (let col = 0; col < 5; col += 1) {
+          for (let row = 0; row < 3; row += 1) {
+            const stack = 1 + Math.floor(hashSeed(`ctn:${site.id}:${col}:${row}`) * 3);
+            for (let level = 0; level < stack; level += 1) {
+              box(-r * 0.55 + col * 7, 0.5 + level * 2.7, -r * 0.1 + row * 4.4, 6.2, 2.6, 3.8, containerColors[Math.floor(hashSeed(`ctc:${site.id}:${col}:${row}:${level}`) * containerColors.length)]);
+            }
+          }
+        }
+        for (const [lx, lz] of [[-r * 0.65, r * 0.38], [-r * 0.65, r * 0.62], [r * 0.15, r * 0.38], [r * 0.15, r * 0.62]]) cyl(lx, 0.5, lz, 0.6, 17, "#c9532f");
+        box(-r * 0.25, 17.5, r * 0.5, r * 1.1, 1.3, 1.5, "#c9532f");
+        box(-r * 0.25 + r * 0.55, 17.2, r * 0.5, 14, 1, 1, "#d9d3c2", 0);
+      }
+    }
+    if (!boxes.length) return;
+    const build = (geometry: THREE.BufferGeometry, pieces: Piece[], name: string) => {
+      if (!pieces.length) return;
+      const material = new THREE.MeshLambertMaterial({ color: "#ffffff" });
+      const mesh = new THREE.InstancedMesh(geometry.clone(), material, pieces.length);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      pieces.forEach((piece, index) => {
+        this.positionVector.set(piece.x, piece.y, piece.z);
+        this.euler.set(0, piece.yaw, 0);
+        this.quaternion.setFromEuler(this.euler);
+        this.scaleVector.set(piece.sx, piece.sy, piece.sz);
+        this.matrix.compose(this.positionVector, this.quaternion, this.scaleVector);
+        mesh.setMatrixAt(index, this.matrix);
+        mesh.setColorAt(index, this.color.set(piece.color));
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.name = name;
+      this.group.add(mesh);
+      this.disposables.push(mesh.geometry, material);
+    };
+    build(BOX, boxes, "city-public-sites-boxes");
+    build(CYLINDER, cylinders, "city-public-sites-cylinders");
   }
 
   /** 分区驱动立面：downtown 玻璃 / commercial 横带 / residential 窗洞 /
