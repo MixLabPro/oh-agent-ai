@@ -40,6 +40,9 @@ type BuildingRuntime = {
   craneMast: number;
   craneArm: number;
   cranePhase: number;
+  /** 吊车立柱的世界坐标：applyConstruction 按地块 yaw 与楼宽算出，逐帧的吊臂旋转复用同一份。 */
+  craneX: number;
+  craneZ: number;
   blinkPhase: number;
 };
 
@@ -812,6 +815,8 @@ export class CityParts {
         craneMast: -1,
         craneArm: -1,
         cranePhase: building.seed * Math.PI * 2,
+        craneX: 0,
+        craneZ: 0,
         blinkPhase: hashSeed(`blink:${building.id}`) * Math.PI * 2,
       };
 
@@ -973,6 +978,8 @@ export class CityParts {
       const localZ = widths[1] * 0.5 + 0.6;
       const cornerX = x + localX * Math.cos(yaw) + localZ * Math.sin(yaw);
       const cornerZ = z - localX * Math.sin(yaw) + localZ * Math.cos(yaw);
+      runtime.craneX = cornerX;
+      runtime.craneZ = cornerZ;
       this.compose(cornerX, g, cornerZ, 0, 1, mastHeight, 1);
       this.craneMastMesh.setMatrixAt(runtime.craneMast, this.matrix);
       this.applyCraneArm(runtime, cornerX, cornerZ, g, mastHeight, 0);
@@ -986,7 +993,7 @@ export class CityParts {
     const centerZ = cornerZ - Math.sin(angle) * armLength * 0.34;
     // three.js 绕 Y 转 θ 后 x 轴指向 (cosθ, -sinθ)，与上面的中心偏移同向，必须传 +angle；
     // 曾传 -angle，悬臂被镜像到另一侧，脱离立柱悬在空中。
-    this.compose(centerX, groundY + mastHeight + 0.1, centerZ, angle, armLength, 1, 1);
+    this.compose(centerX, groundY + mastHeight + 0.1, centerZ, angle, armLength, 1.6, 1.6);
     this.craneArmMesh.setMatrixAt(runtime.craneArm, this.matrix);
   }
 
@@ -1097,12 +1104,14 @@ export class CityParts {
 
     // 吊车臂：活跃楼的节奏 = 繁忙度。
     for (const runtime of this.runtimes) {
-      if (runtime.craneArm < 0 || runtime.display <= 0.002) continue;
+      if (runtime.craneArm < 0 || runtime.display <= 0.002 || (runtime.craneX === 0 && runtime.craneZ === 0)) continue;
       const spin = (0.25 + runtime.building.busyness * 0.85) * dt;
       runtime.cranePhase += spin;
       const mastHeight = runtime.building.height * 1.02 + 6.5;
-      const cornerX = runtime.slot.x + runtime.building.footprint * 0.72;
-      const cornerZ = runtime.slot.z + runtime.building.footprint * 0.72;
+      // 曾在此处重算旧公式（x + fp*0.72，无 yaw/楼宽），把 applyConstruction 里修正的立柱位置
+      // 每帧覆盖回去：吊臂绕着错误的点转，与立柱脱节。
+      const cornerX = runtime.craneX;
+      const cornerZ = runtime.craneZ;
       this.applyCraneArm(runtime, cornerX, cornerZ, runtime.groundY, mastHeight, 0);
       this.craneArmMesh.instanceMatrix.needsUpdate = true;
       // 吊车顶警示灯。
