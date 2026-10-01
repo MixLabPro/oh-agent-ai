@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { safeUiError } from "../../lib/tauri";
-import { message, resolvedLanguage, useLanguage, type MessageKey } from "../../lib/i18n";
+import { message, resolvedLanguage, useLanguage, type MessageKey, modelLabel } from "../../lib/i18n";
 import {
   readSessionInsights, readSessionTraceEvidence,
   type InsightDiagnostic, type InsightStep, type NominalCost, type SessionInsights, type SessionTraceEvidence,
@@ -774,7 +774,7 @@ function Inspector({ insights, mode, unit, ev, go, retry }: { insights: SessionI
       <h4>{t.title}</h4><p className="muted num">{rangeLabel}</p>
       <div className="insights-big num">{fmtTokens(Number(d.fact.uncached_tokens ?? 0))}<small>{tx("ins.uncachedTokens")}</small></div>
       <dl className="kv"><dt>{tx("ins.rangeHit")}</dt><dd className="num">{rangeInput ? fmtPct(rangeRead / rangeInput) : "—"}</dd><dt>{tx("ins.restOfSession")}</dt><dd className="num">{restInput > 0 ? fmtPct((insights.session.input.cache_read - rangeRead) / restInput) : "—"}</dd><dt>{tx("ins.shareInput")}</dt><dd className="num">{fmtPct(d.impact.share_of_session_input)}</dd></dl>
-      <ul className="insights-list">{L.slice(0, 40).map(s => <li key={s.index}><button type="button" className="row" onClick={() => go({ kind: "step", step: s.index })}><span className="num">{unit} {s.index}</span><span className="muted">{s.idle_before_ms != null ? tx("ins.idleFor", { d: fmtDuration(s.idle_before_ms) }) : ""} · {s.model_ids.join("→")}</span><span className="num">{s.hit_rate != null ? fmtPct(s.hit_rate) : "—"}</span></button></li>)}</ul>
+      <ul className="insights-list">{L.slice(0, 40).map(s => <li key={s.index}><button type="button" className="row" onClick={() => go({ kind: "step", step: s.index })}><span className="num">{unit} {s.index}</span><span className="muted">{s.idle_before_ms != null ? tx("ins.idleFor", { d: fmtDuration(s.idle_before_ms) }) : ""} · {s.model_ids.map((id) => modelLabel(id)).join("→")}</span><span className="num">{s.hit_rate != null ? fmtPct(s.hit_rate) : "—"}</span></button></li>)}</ul>
       <div className="insights-note"><b>{tx("ins.cause")}</b> {t.why}</div>
       <div className="insights-acts"><button type="button" className="button button-primary" onClick={() => go({ kind: "calls", from: d.steps.from, to: d.steps.to })}>{tx("ins.viewPerCall")}</button></div>
       {rm && <div className="insights-note"><b>{tx("ins.advice")}</b> {rm[0]}<br /><span className="muted">{rm[1]}</span></div>}
@@ -795,7 +795,7 @@ function Inspector({ insights, mode, unit, ev, go, retry }: { insights: SessionI
       <dt>{tx("ins.calls")}</dt><dd className="num">{s.calls}</dd>
       <dt>{tx("ins.peakInput")}</dt><dd className="num">{fmtTokens(s.input_peak)}</dd>
       <dt>{tx("ins.hitRate")}</dt><dd className="num">{s.hit_rate != null ? fmtPct(s.hit_rate) : "—"}</dd>
-      <dt>{tx("ins.model")}</dt><dd className="wrap">{s.model_ids.join(" → ") || "—"}</dd>
+      <dt>{tx("ins.model")}</dt><dd className="wrap">{s.model_ids.map((id) => modelLabel(id)).join(" → ") || "—"}</dd>
       {s.outcome && <><dt>{tx("ins.outcome")}</dt><dd>{tx(({ succeeded: "ins.outSucceeded", failed: "ins.outFailed", cancelled: "ins.outCancelled", unknown: "ins.outUnknown" } as const)[s.outcome])}</dd></>}
       <dt>{tx("ins.nominal")}</dt><dd className="num">{cost ?? tx("ins.noPricing")}</dd>
     </dl>

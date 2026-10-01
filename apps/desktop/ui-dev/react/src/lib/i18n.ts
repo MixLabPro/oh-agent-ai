@@ -264,7 +264,8 @@ const english = {
   "sessions.unknownModel": "Model unavailable",
   "sessions.until": "Until {time}",
   "sessions.unknownEnd": "End time unavailable",
-  "sessions.eventPeak": "{count} events · peak {peak}",
+  "sessions.eventPeak": "{count} events · {peak} in peak hours",
+  "model.synthetic": "No model (API error placeholder)",
   "sessions.eventCount": "{count} events",
   "sessions.noAmount": "No recorded amount",
   "sessions.loadingMore": "Loading…",
@@ -1391,6 +1392,9 @@ const english = {
   "usage.basisShort.other": "other",
   "budget.basisNote": "Counts metered charges, metered estimates and the subscription fee spread by day. It can be higher than “Known spend this month” on Overview, which counts only recorded charges and declared subscriptions.",
   "overview.dailyAllocNote": "The “Known cost today” card also includes a daily share of declared subscriptions — an allocation, not a charge made today — so it can be higher than this line.",
+  "overview.hostTokens": "Tokens by host",
+  "overview.tokensValue": "{value} tokens",
+  "overview.hostsNoUsage": "No usage this month: {hosts}",
 } as const;
 
 type Translation = string | { one: string; other: string };
@@ -1516,7 +1520,8 @@ const chinese: Record<keyof typeof english, Translation> = {
   "sessions.column.status": "状态", "sessions.unknownTime": "时间不可用",
   "sessions.unknownDate": "未知日期", "sessions.sessionTitle": "{host} 会话 · {date}",
   "sessions.unknownModel": "模型不可用", "sessions.until": "至 {time}",
-  "sessions.unknownEnd": "结束时间不可用", "sessions.eventPeak": "{count} 个事件 · 峰值 {peak}",
+  "sessions.unknownEnd": "结束时间不可用", "sessions.eventPeak": "{count} 个事件 · 高峰时段 {peak}",
+  "model.synthetic": "无模型（API 错误占位）",
   "sessions.eventCount": "{count} 个事件", "sessions.noAmount": "未计入金额",
   "sessions.loadingMore": "正在加载…", "sessions.loadMore": "加载更多",
   "sessions.detail": "会话详情", "sessions.closeDetail": "关闭详情",
@@ -2557,6 +2562,9 @@ const chinese: Record<keyof typeof english, Translation> = {
   "usage.basisShort.other": "其他",
   "budget.basisNote": "含按量实付、按量估算和按天摊派的订阅月费；因此可能高于总览的“本月已知支出”（后者只计已记录支出与已声明订阅）。",
   "overview.dailyAllocNote": "“今日已知成本”还含已声明订阅的按日摊派（是摊派，不是今天发生的扣费），因此可能高于这一行。",
+  "overview.hostTokens": "各宿主 token",
+  "overview.tokensValue": "{value} token",
+  "overview.hostsNoUsage": "本月无用量：{hosts}",
 };
 
 export type MessageKey = keyof typeof english;
@@ -2635,6 +2643,19 @@ export function formatMinorMoney(amountMinor: number | null, currency: string, l
 }
 
 /** Display-only formatting for an already-denominated major-unit amount. Never sums currencies. */
+/** token 数量的唯一格式化口径：K / M / B。各页曾各写一份、只到 M，月度 14.6B 显示成「14604.7M」。 */
+export function formatTokenCount(value: number): string {
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return String(value);
+}
+
+/** 模型 id 的展示名：Claude Code 给 API 报错占位消息写 `<synthetic>`，那不是模型。 */
+export function modelLabel(id: string, language = resolvedLanguage()): string {
+  return id === "<synthetic>" ? message("model.synthetic", language) : id;
+}
+
 export function formatMajorMoney(amount: number | null, currency: string, locale = typeof navigator === "undefined" ? "en-US" : navigator.language): string {
   if (amount === null || !Number.isFinite(amount) || !currencyLabel(currency)) return "—";
   if (!["USD", "CNY"].includes(currency)) return `${currency} ${amount}`;

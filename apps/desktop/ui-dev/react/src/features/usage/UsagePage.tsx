@@ -14,7 +14,7 @@ import {
 } from "../../lib/tauri";
 import { sessionsDateHref } from "../../lib/nav";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
-import { formatMajorMoney, message, resolvedLanguage, useLanguage, type MessageKey } from "../../lib/i18n";
+import { formatMajorMoney, message, resolvedLanguage, useLanguage, type MessageKey, formatTokenCount } from "../../lib/i18n";
 
 type Metric = "tokens" | "cost";
 
@@ -33,9 +33,7 @@ function shiftMonth(month: string, delta: number): string {
 }
 
 function tokensLabel(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
-  return String(value);
+  return formatTokenCount(value);
 }
 
 function costsLabel(costs: Record<string, number>): string {

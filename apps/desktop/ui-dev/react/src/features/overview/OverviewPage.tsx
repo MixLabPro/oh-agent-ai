@@ -5,13 +5,11 @@ import { sessionsDateHref, sessionsHostHref } from "../../lib/nav";
 import { todayCacheHitRatio } from "./cacheHit";
 import { monthSpendCard, todaySpendCard } from "./spendCards";
 import { DecisionArea } from "./DecisionArea";
-import { formatMajorMoney, message, useLanguage, type MessageKey } from "../../lib/i18n";
+import { formatMajorMoney, message, useLanguage, type MessageKey, formatTokenCount } from "../../lib/i18n";
 
 function tokensLabel(value: number | null): string {
   if (value == null) return "—";
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
-  return String(value);
+  return formatTokenCount(value);
 }
 
 function moneyDetail(values: Record<string, number>): string {
@@ -142,8 +140,9 @@ export function OverviewPage({ overview, details }: { overview: OverviewSnapshot
       </section>
     </section>
     {details?.monthly && details.monthly.freshness !== "unavailable" && details.monthly.freshness !== "unknown" && <section className="overview-host-panel" aria-labelledby="overview-month-host-title">
-      <div className="section-heading"><div><p className="eyebrow">{message("overview.hostBreakdown", language)}</p><h3 id="overview-month-host-title">tokens_by_host</h3></div><span className="count-badge">{message("overview.hostCount", language, { count: Object.keys(details.monthly.tokens_by_host).length })}</span></div>
-      <div className="overview-host-list">{Object.entries(details.monthly.tokens_by_host).map(([host, tokens]) => <article className="overview-host-row" key={host}><div><strong>{host}</strong><span>{hostTokensLabel(tokens)}</span></div><b>{tokens.total ? tokensLabel(tokens.total) : "—"} token</b></article>)}</div>
+      <div className="section-heading"><div><p className="eyebrow">{message("overview.hostBreakdown", language)}</p><h3 id="overview-month-host-title">{message("overview.hostTokens", language)}</h3></div><span className="count-badge">{message("overview.hostCount", language, { count: Object.values(details.monthly.tokens_by_host).filter((host) => host.total > 0).length })}</span></div>
+      <div className="overview-host-list">{Object.entries(details.monthly.tokens_by_host).filter(([, tokens]) => tokens.total > 0).map(([host, tokens]) => <article className="overview-host-row" key={host}><div><strong>{host}</strong><span>{hostTokensLabel(tokens)}</span></div><b>{message("overview.tokensValue", language, { value: tokensLabel(tokens.total) })}</b></article>)}</div>
+      {Object.values(details.monthly.tokens_by_host).some((host) => host.total === 0) && <p className="overview-empty">{message("overview.hostsNoUsage", language, { hosts: Object.entries(details.monthly.tokens_by_host).filter(([, tokens]) => tokens.total === 0).map(([host]) => host).join(", ") })}</p>}
       <p className="overview-empty">{message("overview.costScope", language)}</p>
     </section>}
     <DecisionArea monthly={details?.monthly ?? null} />
