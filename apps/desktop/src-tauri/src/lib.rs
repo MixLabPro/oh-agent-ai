@@ -421,8 +421,9 @@ fn fmt_currency_amount(currency: &str, amount: f64) -> String {
         "CNY" => fmt_money(amount),
         "USD" => fmt_usd(amount),
         // 其他币种曾直接 `to_string()`，EUR 会显示成 59.28470000000001。
-        _ if zero_decimal_currency(currency) => format!("{:.0}", amount),
-        _ => format!("{:.2}", amount),
+        // 不足最小单位的非零金额写 `<` 而不是 `0.00`，与 CNY / USD 的 `<¥0.01` 一致。
+        _ if zero_decimal_currency(currency) => if amount > 0.0 && amount < 0.5 { "<1".to_string() } else { format!("{:.0}", amount) },
+        _ => if amount > 0.0 && amount < 0.005 { "<0.01".to_string() } else { format!("{:.2}", amount) },
     }
 }
 
@@ -6099,6 +6100,10 @@ mod tests {
         let bundled = TrayFx { target: "CNY".into(), policy: agent_vitals_domain::fx::FxPolicy::bundled().unwrap() };
         let (_, month) = money_rows_text_fx(&ov, NativeUiLanguage::English, Some(&bundled));
         assert!(month.contains("· ECB 20") && !month.contains("manual"), "{month}");
+        // 不足一分的非零金额不写成 0.00
+        assert_eq!(fmt_currency_amount("EUR", 0.001), "<0.01");
+        assert_eq!(fmt_currency_amount("EUR", 0.0), "0.00");
+        assert_eq!(fmt_currency_amount("JPY", 0.3), "<1");
         // 其他报告币种：EUR 两位小数、JPY 无小数；不出现 59.28470000000001 这类浮点原文
         let eur = TrayFx { target: "EUR".into(), policy: agent_vitals_domain::fx::FxPolicy::bundled().unwrap() };
         let (_, month) = money_rows_text_fx(&ov, NativeUiLanguage::English, Some(&eur));

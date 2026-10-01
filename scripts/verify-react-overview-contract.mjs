@@ -216,6 +216,10 @@ assert.equal(applyConversion(fxBase, { ...fxResult, items: [fxResult.items[0]] }
 assert.equal(applyConversion(fxBase, { ...fxResult, items: [...fxResult.items, fxItem("EUR", 1, 1.1, "bundled_snapshot", "2026-09-30")] }), fxBase, "extra currencies the card does not have are not accepted");
 assert.equal(applyConversion(fxBase, { ...fxResult, items: [fxItem("CNY", 182.55, NaN, "bundled_snapshot", "2026-09-30"), fxResult.items[1]] }), fxBase, "NaN item values are never rendered");
 assert.equal(applyConversion(fxBase, { ...fxResult, total: -3 }), fxBase, "a negative total is never rendered");
+// 第二轮验收：重复币种 / 原型属性名
+assert.equal(applyConversion(fxBase, { ...fxResult, items: [fxItem("CNY", 182.55, 27.2, "bundled_snapshot", "2026-09-30"), fxItem("CNY", 182.55, 27.2, "bundled_snapshot", "2026-09-30")] }), fxBase, "duplicate currencies must not stand in for a missing one");
+const protoCard = { ...fxBase, amounts: { EUR: 1 } };
+assert.equal(applyConversion(protoCard, { ...fxResult, items: [fxItem("constructor", 1, 0.1, "bundled_snapshot", "2026-09-30")], total: 0.1 }), protoCard, "an item named like an Object.prototype member is not a currency the card has");
 assert.equal(applyConversion(fxBase, { ...fxResult, items: [fxItem("CNY", 182.55, 27.2, "bundled_snapshot", "2026-09-30"), fxItem("USD", 40, 40, "identity", null)], total: Infinity }), fxBase, "an infinite total is never rendered");
 for (const day of calendar.days) assert.equal(day.total_tokens, day.dsh_tokens + day.claude_tokens + day.codex_tokens);
 

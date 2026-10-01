@@ -192,7 +192,11 @@ fn days_from_ymd(text: &str) -> Option<i64> {
     let year: i64 = text.get(0..4)?.parse().ok()?;
     let month: i64 = text.get(5..7)?.parse().ok()?;
     let day: i64 = text.get(8..10)?.parse().ok()?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) { return None; }
+    if !(1..=12).contains(&month) { return None; }
+    // 日必须存在于该月（`2026-02-31` 不是日期）；闰年按公历规则。
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days_in_month = match month { 1 | 3 | 5 | 7 | 8 | 10 | 12 => 31, 4 | 6 | 9 | 11 => 30, _ => if leap { 29 } else { 28 } };
+    if !(1..=days_in_month).contains(&day) { return None; }
     let y = if month <= 2 { year - 1 } else { year };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
@@ -278,6 +282,7 @@ mod tests {
         assert!(bad(f64::NAN, "USD", "CNY", None));
         assert!(bad(6.8, "USD", "USD", None));
         assert!(bad(6.8, "USD", "CNY", Some("2026/09/01")));
+        assert!(bad(6.8, "USD", "CNY", Some("2026-02-31")), "不存在的日期不能当手动汇率的适用日期");
         // 无日期的手动汇率合法（即时 what-if），rate_date 为 None
         let p = policy().with_user_rate(UserRate { from: "USD".into(), to: "CNY".into(), rate: 6.8, as_of: None }).unwrap();
         assert_eq!(p.convert(1.0, "USD", "CNY").unwrap().rate_date, None);
@@ -305,6 +310,10 @@ mod tests {
         assert_eq!(FxPolicy::age_days("2026-02-28", "2026-03-01"), Some(1));
         assert_eq!(FxPolicy::age_days("2024-02-28", "2024-03-01"), Some(2), "闰年");
         assert_eq!(FxPolicy::age_days("garbage", "2026-10-01"), None);
+        assert_eq!(FxPolicy::age_days("2026-02-31", "2026-10-01"), None, "不存在的日期");
+        assert_eq!(FxPolicy::age_days("2026-02-29", "2026-10-01"), None, "2026 不是闰年");
+        assert!(FxPolicy::age_days("2024-02-29", "2024-03-01").is_some(), "2024 是闰年");
+        assert_eq!(FxPolicy::age_days("2026-04-31", "2026-10-01"), None);
     }
 
     #[test]

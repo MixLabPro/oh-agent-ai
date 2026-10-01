@@ -71,10 +71,14 @@ export function applyConversion(spend: SpendCard, conversion: FxConvertResult | 
   // 也不显示一个与卡片自己的金额对不上、或只折了一半的合计。
   const wanted = Object.entries(spend.amounts).filter(([, amount]) => amount > 0);
   if (wanted.length === 0 || wanted.length !== conversion.items.length) return spend;
+  const seen = new Set<string>();
   for (const item of conversion.items) {
     if (![item.amount, item.converted, item.rate].every(Number.isFinite) || item.amount < 0 || item.converted < 0 || item.rate <= 0) return spend;
-    const expected = spend.amounts[item.currency];
-    if (expected === undefined || Math.abs(expected - item.amount) >= 0.005) return spend;
+    // 币种必须唯一（`[EUR, EUR]` 配 `{EUR, USD}` 长度相等、逐项都对得上，却漏了 USD），
+    // 且只读卡片自己的属性（`"constructor"` 这类名字会读到原型上的函数）。
+    if (seen.has(item.currency) || !Object.prototype.hasOwnProperty.call(spend.amounts, item.currency)) return spend;
+    seen.add(item.currency);
+    if (Math.abs(spend.amounts[item.currency] - item.amount) >= 0.005) return spend;
   }
   if (!Number.isFinite(conversion.total) || conversion.total < 0) return spend;
   const originals = conversion.items.map((item) => formatAmount(item.currency, item.amount)).join(" · ");
