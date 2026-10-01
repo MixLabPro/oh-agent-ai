@@ -576,8 +576,8 @@ fn daily_budget_text_localized(ov: &Overview, now_secs: i64, language: NativeUiL
                 NativeUiLanguage::Chinese => format!("今日预算：≈{} / {denom}（{}%）", fmt_money(spent as f64 / 100.0), bp / 100),
             },
             None => match language {
-                NativeUiLanguage::English => format!("Today’s budget: — / {denom} (no data)"),
-                NativeUiLanguage::Chinese => format!("今日预算：— / {denom}（今日无数据）"),
+                NativeUiLanguage::English => format!("Today’s budget: — / {denom} (no priced spend today)"),
+                NativeUiLanguage::Chinese => format!("今日预算：— / {denom}（今日暂无可计价金额）"),
             },
         });
     }
@@ -587,8 +587,8 @@ fn daily_budget_text_localized(ov: &Overview, now_secs: i64, language: NativeUiL
     let fresh = !stale_from(b.generated_at.as_deref(), now_secs);
     if ov.today.is_none() {
         return Some(match language {
-            NativeUiLanguage::English => format!("Today’s metered budget: — / {denom} (no data)"),
-            NativeUiLanguage::Chinese => format!("今日按量预算：— / {denom}（今日无数据）"),
+            NativeUiLanguage::English => format!("Today’s metered budget: — / {denom} (no priced spend today)"),
+            NativeUiLanguage::Chinese => format!("今日按量预算：— / {denom}（今日暂无可计价金额）"),
         });
     }
     if !fresh {
@@ -607,8 +607,8 @@ fn daily_budget_text_localized(ov: &Overview, now_secs: i64, language: NativeUiL
         // alert.json 在场且新鲜，但这两个字段是 null——`evaluate()` 对"今日无
         // 数据"就是这么落盘的。不拿 null 当 0。
         _ => Some(match language {
-            NativeUiLanguage::English => format!("Today’s metered budget: — / {denom} (no data)"),
-            NativeUiLanguage::Chinese => format!("今日按量预算：— / {denom}（今日无数据）"),
+            NativeUiLanguage::English => format!("Today’s metered budget: — / {denom} (no priced spend today)"),
+            NativeUiLanguage::Chinese => format!("今日按量预算：— / {denom}（今日暂无可计价金额）"),
         }),
     }
 }
@@ -671,14 +671,15 @@ fn sync_line_text_localized(sync: &SyncStatus, language: NativeUiLanguage) -> St
         };
     }
     // `at` 是北京时间 `YYYY-MM-DD HH:MM:SS`，菜单只要 HH:MM。成功形态加
-    // 「（DSH 折叠 + Claude 账）」后缀（spec §4）：同步回路折 DSH 会话 + 尾折
-    // Claude 账（2026-09-02 起，tick 顺序见 sync_tick），Codex 没有同步循环——
-    // 时间戳的覆盖范围必须说清楚，不能让人以为它是全宿主的新鲜度。
+    // 成功形态带覆盖宿主后缀（spec §4）：同步回路只折 DSH 会话 + 尾折 Claude 账
+    // （2026-09-02 起，tick 顺序见 sync_tick），Codex 没有同步循环——时间戳的覆盖范围
+    // 必须说清楚，不能让人以为它是全宿主的新鲜度。后缀写宿主名而不是内部术语
+    // （曾写「DSH 折叠 + Claude 账」，用户看不懂）。
     match (language, sync.at.as_deref().and_then(|s| s.get(11..16))) {
-        (NativeUiLanguage::English, Some(hhmm)) => format!("Last sync: {hhmm} succeeded (DSH folding + Claude usage)"),
-        (NativeUiLanguage::English, None) => "Last sync: succeeded (DSH folding + Claude usage)".to_string(),
-        (NativeUiLanguage::Chinese, Some(hhmm)) => format!("上次同步：{hhmm} 成功（DSH 折叠 + Claude 账）"),
-        (NativeUiLanguage::Chinese, None) => "上次同步：成功（DSH 折叠 + Claude 账）".to_string(),
+        (NativeUiLanguage::English, Some(hhmm)) => format!("Last sync: {hhmm} succeeded · DeepSeek Harness, Claude Code"),
+        (NativeUiLanguage::English, None) => "Last sync: succeeded · DeepSeek Harness, Claude Code".to_string(),
+        (NativeUiLanguage::Chinese, Some(hhmm)) => format!("上次同步：{hhmm} 成功（DeepSeek Harness、Claude Code）"),
+        (NativeUiLanguage::Chinese, None) => "上次同步：成功（DeepSeek Harness、Claude Code）".to_string(),
     }
 }
 
@@ -5667,7 +5668,7 @@ mod tests {
         assert!(ov.today.is_none());
         assert_eq!(
             daily_budget_text(&ov, FIXTURE_AT_SECS).unwrap(),
-            "今日按量预算：— / ¥30（今日无数据）",
+            "今日按量预算：— / ¥30（今日暂无可计价金额）",
             "今天没有数据时，alert.json 里那个属于别的一天的 today_cost 不得冒充今日"
         );
     }
@@ -6139,7 +6140,7 @@ mod tests {
             message: "无未折 DSH 会话".into(),
             at: Some("2026-09-01 09:50:52".into()),
         };
-        assert_eq!(sync_line_text(&ok), "上次同步：09:50 成功（DSH 折叠 + Claude 账）");
+        assert_eq!(sync_line_text(&ok), "上次同步：09:50 成功（DeepSeek Harness、Claude Code）");
         let never = SyncStatus::default();
         assert_eq!(sync_line_text(&never), "尚未同步");
         let failed = SyncStatus {
@@ -6151,7 +6152,7 @@ mod tests {
         assert_eq!(sync_line_text(&failed), "⚠ 上次同步失败：oneline 失败");
         // at 缺场（老状态文件）也不能崩，退化成不带时间的成功。
         let ok_no_at = SyncStatus { at: None, ..ok };
-        assert_eq!(sync_line_text(&ok_no_at), "上次同步：成功（DSH 折叠 + Claude 账）");
+        assert_eq!(sync_line_text(&ok_no_at), "上次同步：成功（DeepSeek Harness、Claude Code）");
     }
 
     #[test]
