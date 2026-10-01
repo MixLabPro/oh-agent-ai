@@ -112,9 +112,9 @@ function TrendPanel({ details }: { details: OverviewDetails }) {
       .then((value) => { if (active) { setHourly(value); setHourlyState("ok"); } })
       .catch(() => { if (active) setHourlyState("unavailable"); });
     return () => { active = false; };
-  }, [today]);
+  }, [today, details.authority_revision]);
   useEffect(() => {
-    if (!extraMonth) { setExtraCalendar(null); return; }
+    if (!extraMonth) return; // 不清空：下方 month 比对已防陈旧，保留旧值避免切回周档时先闪一下灰斜纹
     let active = true;
     void readUsageCalendar(extraMonth)
       .then((calendar) => { if (active) setExtraCalendar({ month: extraMonth, calendar }); })
