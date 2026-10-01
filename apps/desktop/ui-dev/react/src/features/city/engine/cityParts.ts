@@ -49,6 +49,10 @@ type BuildingRuntime = {
   blinkPhase: number;
   /** 装饰艺术附件实例起点（-1 = 不是海滨装饰楼）：corner 用 decoCornerMesh[i]，trim 用 decoTrimMesh[2i, 2i+1]。 */
   deco: number;
+  /** 屋顶轮廓：0 平顶 / 1 坡顶 / 2 尖顶 / 3 退台冠 / 4 屋顶花园。只由 (分区, 楼型, seed) 决定，确定性。 */
+  roofKind: number;
+  /** 全城 token 最多的会话：专属冠顶 + 灯环 + 光束。 */
+  hero: boolean;
 };
 
 /** terrain 非空 → 车贴地行驶；桥面路径 terrain 为空、y 固定。 */
@@ -196,6 +200,10 @@ export class CityParts {
   private readonly facadeUniforms: FacadeUniforms[] = [];
   /** 海滨装饰艺术低层楼的附件：圆角转角柱、顶部阶梯女儿墙、底层遮阳棚（每栋 3 个实例）。 */
   private readonly decoTrimMesh: THREE.InstancedMesh;
+  /** 屋顶轮廓网格（下标 = runtime.roof；不是这种轮廓的实例缩成 0）。 */
+  private readonly roofProfiles: THREE.InstancedMesh[] = [];
+  private readonly gardenTreeMesh: THREE.InstancedMesh;
+  private heroParts: { spire: THREE.Mesh; rings: THREE.Mesh[]; beam: THREE.Mesh | null } | null = null;
   private readonly decoCornerMesh: THREE.InstancedMesh;
   private terrainUniforms: Record<string, { value: unknown }> | null = null;
   private waterAssetUniforms: Record<string, { value: unknown }> | null = null;
@@ -286,6 +294,23 @@ export class CityParts {
       this.disposables.push(geometry, mesh.material);
     });
 
+    // 屋顶轮廓：坡顶（三棱柱，屋脊沿 z）、尖顶（四棱锥）、退台冠（小一号的盒子）、屋顶花园（草皮板）。
+    const pitched = BOX.clone();
+    {
+      const position = pitched.getAttribute("position") as THREE.BufferAttribute;
+      for (let index = 0; index < position.count; index += 1) if (position.getY(index) > 0.99) position.setX(index, 0);
+      pitched.computeVertexNormals();
+    }
+    const spire = new THREE.ConeGeometry(0.5, 1, 4, 1).rotateY(Math.PI / 4).translate(0, 0.5, 0);
+    const profileGeometries = [pitched, spire, BOX, BOX];
+    profileGeometries.forEach((geometry, index) => {
+      const mesh = this.makeInstanced(geometry, selfLitMaterial(activeTheme().name === "vice" ? 0.18 : 0.04), total);
+      mesh.castShadow = true;
+      mesh.name = `city-roof-profile-${index + 1}`;
+      this.roofProfiles.push(mesh);
+    });
+    this.gardenTreeMesh = this.makeInstanced(new THREE.IcosahedronGeometry(1, 0).translate(0, 1, 0), new THREE.MeshLambertMaterial({ color: activeTheme().foliage }), total * 3);
+    this.gardenTreeMesh.castShadow = true;
     const decoCount = facadeCounts[3] + 4;
     this.decoTrimMesh = this.makeInstanced(BOX, selfLitMaterial(activeTheme().name === "vice" ? 0.24 : 0.05), decoCount * 2);
     this.decoCornerMesh = this.makeInstanced(CYLINDER, selfLitMaterial(activeTheme().name === "vice" ? 0.24 : 0.05), decoCount);
@@ -769,6 +794,63 @@ export class CityParts {
     build(CYLINDER, cylinders, "city-public-sites-cylinders");
   }
 
+  /** 屋顶轮廓选择：只依赖 (分区, 楼型, 立面, seed)，同一份数据永远同一种屋顶。 */
+  private roofKindFor(building: CityBuilding, facade: number): number {
+    if (facade === 3) return 0; // 装饰艺术楼有自己的阶梯冠
+    const zone = this.zoneById.get(building.id);
+    const r = building.seed;
+    if (building.archetype === "landmark" || building.archetype === "tower") return r > 0.66 ? 2 : r > 0.3 ? 3 : 0;
+    if ((zone === "residential" || zone === "waterfront") && building.height < 30) return r < 0.55 ? 1 : 0;
+    if (zone === "commercial") return r < 0.4 ? 4 : r < 0.6 ? 3 : 0;
+    if (zone === "downtown") return r < 0.35 ? 3 : 0;
+    return 0;
+  }
+
+  /** 地标塔冠顶：金属尖顶 + 三道自发光灯环；日落霓虹主题再加一道向上的光束（进 bloom）。 */
+  private buildHeroCrown(hero: BuildingRuntime): void {
+    const palette = paletteFor(hero.building.districtId);
+    const spireMaterial = new THREE.MeshLambertMaterial({ color: "#dfe6ea", emissive: new THREE.Color(palette.accent).multiplyScalar(0.12) });
+    const spire = new THREE.Mesh(new THREE.ConeGeometry(1, 1, 8, 1).translate(0, 0.5, 0), spireMaterial);
+    spire.castShadow = true;
+    const ringMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color(palette.accent).multiplyScalar(activeTheme().neon ? 3 : 1.4), toneMapped: false });
+    const rings = [0, 1, 2].map(() => new THREE.Mesh(new THREE.TorusGeometry(1, 0.06, 6, 40).rotateX(Math.PI / 2), ringMaterial));
+    let beam: THREE.Mesh | null = null;
+    const disposables: Array<{ dispose(): void }> = [spire.geometry, spireMaterial, ringMaterial, ...rings.map((ring) => ring.geometry)];
+    if (activeTheme().neon) {
+      const beamMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color(palette.accent).lerp(new THREE.Color("#ffffff"), 0.4).multiplyScalar(2.2), transparent: true, opacity: 0.22, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
+      beam = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 1.6, 1, 16, 1, true).translate(0, 0.5, 0), beamMaterial);
+      beam.renderOrder = 5;
+      disposables.push(beam.geometry, beamMaterial);
+      this.group.add(beam);
+    }
+    this.group.add(spire, ...rings);
+    this.disposables.push(...disposables);
+    this.heroParts = { spire, rings, beam };
+  }
+
+  private placeHeroCrown(x: number, top: number, z: number, width: number, depth: number, h: number, capped: boolean): void {
+    const parts = this.heroParts;
+    if (!parts) return;
+    const visible = capped;
+    const radius = Math.min(width, depth) * 0.42;
+    const spireHeight = Math.max(14, h * 0.4);
+    parts.spire.visible = visible;
+    parts.spire.position.set(x, top, z);
+    parts.spire.scale.set(radius, spireHeight, radius);
+    parts.rings.forEach((ring, index) => {
+      ring.visible = visible;
+      const t = 0.12 + index * 0.2;
+      ring.position.set(x, top + spireHeight * t, z);
+      const r = radius * (1 - t) + 0.6;
+      ring.scale.set(r, 1, r);
+    });
+    if (parts.beam) {
+      parts.beam.visible = visible;
+      parts.beam.position.set(x, top + spireHeight, z);
+      parts.beam.scale.set(1, 900, 1);
+    }
+  }
+
   /** 分区驱动立面：downtown 玻璃 / commercial 横带 / residential 窗洞 /
    *  waterfront 混合。无地块信息的楼（不应出现）退回模型层的 hash 立面。 */
   private facadeFor(building: CityBuilding): number {
@@ -1231,6 +1313,8 @@ export class CityParts {
         craneZ: 0,
         blinkPhase: hashSeed(`blink:${building.id}`) * Math.PI * 2,
         deco: -1,
+        roofKind: 0,
+        hero: false,
       };
 
       runtime.facade = this.facadeFor(building);
@@ -1270,6 +1354,10 @@ export class CityParts {
       }
       runtime.roof = roofCount;
       this.roofMesh.setColorAt(roofCount, new THREE.Color(palette.roof).multiplyScalar(0.94 + building.seed * 0.12));
+      runtime.roofKind = this.roofKindFor(building, runtime.facade);
+      const roofColor = new THREE.Color(palette.roof).multiplyScalar(0.94 + building.seed * 0.12);
+      const profileColors = [roofColor, new THREE.Color(palette.accent).lerp(new THREE.Color("#e8eef0"), 0.55), runtime.paletteWall.clone().multiplyScalar(0.96), new THREE.Color("#7fae6a")];
+      this.roofProfiles.forEach((mesh, index) => mesh.setColorAt(roofCount, profileColors[index]));
       // 乘 3.2 让亮度越过 bloom 阈值（MeshBasicMaterial 不吃光照，toneMapped=false 保留 HDR 值）。
       this.neonMesh.setColorAt(roofCount, new THREE.Color(palette.accent).multiplyScalar(3.2));
       roofCount += 1;
@@ -1298,6 +1386,20 @@ export class CityParts {
     this.podiumMesh.count = podiumCount;
     if (this.podiumMesh.instanceColor) this.podiumMesh.instanceColor.needsUpdate = true;
     this.roofMesh.count = roofCount;
+    for (const mesh of this.roofProfiles) {
+      mesh.count = roofCount;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    }
+    this.gardenTreeMesh.count = roofCount * 3;
+    // 天际线焦点：token 最多的会话。楼高本就是 token 的单调函数，它已是（或几乎是）最高楼；
+    // 这里只给它专属冠顶，不改高度——高度是数据语义。
+    let hero: BuildingRuntime | null = null;
+    for (const runtime of this.runtimes) if (!hero || runtime.building.tokensTotal > hero.building.tokensTotal) hero = runtime;
+    if (hero) {
+      hero.hero = true;
+      hero.roofKind = 0;
+      this.buildHeroCrown(hero);
+    }
     this.neonMesh.count = activeTheme().neon ? roofCount : 0;
     if (this.neonMesh.instanceColor) this.neonMesh.instanceColor.needsUpdate = true;
     if (this.roofMesh.instanceColor) this.roofMesh.instanceColor.needsUpdate = true;
@@ -1386,6 +1488,28 @@ export class CityParts {
       this.roofMesh.setMatrixAt(runtime.roof, this.matrix);
       this.compose(x, roofY - 0.12, z, yaw, roofWidth * 1.16, 0.3, roofDepth * 1.16);
       this.neonMesh.setMatrixAt(runtime.roof, this.matrix);
+      // 屋顶轮廓只在封顶后出现：施工中的楼顶是脚手架。
+      const capped = fraction > 0.985;
+      const top = roofY + 0.34;
+      this.roofProfiles.forEach((mesh, index) => {
+        const kind = index + 1;
+        if (!capped || runtime.roofKind !== kind) this.compose(x, -40, z, 0, 0, 0, 0);
+        else if (kind === 1) this.compose(x, top, z, yaw, roofWidth, Math.min(roofWidth, roofDepth) * 0.42, roofDepth);
+        else if (kind === 2) this.compose(x, top, z, yaw, roofWidth * 0.92, Math.max(6, h * 0.22), roofDepth * 0.92);
+        else if (kind === 3) this.compose(x, top, z, yaw, roofWidth * 0.62, Math.max(2.4, h * 0.06), roofDepth * 0.62);
+        else this.compose(x, top, z, yaw, roofWidth * 0.86, 0.35, roofDepth * 0.86);
+        mesh.setMatrixAt(runtime.roof, this.matrix);
+      });
+      for (let tree = 0; tree < 3; tree += 1) {
+        if (capped && runtime.roofKind === 4) {
+          const angle = runtime.building.seed * 6.283 + tree * 2.1;
+          const reach = Math.min(roofWidth, roofDepth) * 0.28;
+          const scale = 0.7 + ((runtime.building.seed * 7 + tree) % 1) * 0.5;
+          this.compose(x + Math.cos(angle) * reach, top + 0.3, z + Math.sin(angle) * reach, 0, scale, scale * 1.1, scale);
+        } else this.compose(x, -40, z, 0, 0, 0, 0);
+        this.gardenTreeMesh.setMatrixAt(runtime.roof * 3 + tree, this.matrix);
+      }
+      if (runtime.hero) this.placeHeroCrown(x, roofY + 0.34, z, roofWidth, roofDepth, h, capped);
     }
     // 脚手架：包住"计划高度"的剩余部分——楼还没到的地方先看见壳。
     if (runtime.scaffold >= 0) {
@@ -1462,6 +1586,9 @@ export class CityParts {
     if (runtime.roof >= 0) {
       this.roofMesh.setMatrixAt(runtime.roof, this.matrix);
       this.neonMesh.setMatrixAt(runtime.roof, this.matrix);
+      for (const mesh of this.roofProfiles) mesh.setMatrixAt(runtime.roof, this.matrix);
+      for (let tree = 0; tree < 3; tree += 1) this.gardenTreeMesh.setMatrixAt(runtime.roof * 3 + tree, this.matrix);
+      if (runtime.hero && this.heroParts) this.placeHeroCrown(0, -40, 0, 0, 0, 0, false);
     }
     if (runtime.scaffold >= 0) this.scaffoldMesh.setMatrixAt(runtime.scaffold, this.matrix);
     if (runtime.antenna >= 0) this.antennaMesh.setMatrixAt(runtime.antenna, this.matrix);
@@ -1569,6 +1696,8 @@ export class CityParts {
       this.podiumMesh.instanceMatrix.needsUpdate = true;
       this.decoCornerMesh.instanceMatrix.needsUpdate = true;
       this.decoTrimMesh.instanceMatrix.needsUpdate = true;
+      for (const mesh of this.roofProfiles) mesh.instanceMatrix.needsUpdate = true;
+      this.gardenTreeMesh.instanceMatrix.needsUpdate = true;
       this.roofMesh.instanceMatrix.needsUpdate = true;
       this.neonMesh.instanceMatrix.needsUpdate = true;
       this.scaffoldMesh.instanceMatrix.needsUpdate = true;
