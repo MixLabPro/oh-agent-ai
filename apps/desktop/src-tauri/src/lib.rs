@@ -405,6 +405,30 @@ fn metered_view_text(view: Option<&serde_json::Value>) -> Option<String> {
     if parts.is_empty() { None } else { Some(parts.join(" · ")) }
 }
 
+/// 本月成本一格钱：按量视图 + 订阅月费，逐币种合并（同币相加、跨币不加）。
+fn month_cost_text(ov: &Overview) -> Option<String> {
+    let mut totals: std::collections::BTreeMap<String, (f64, bool)> = std::collections::BTreeMap::new();
+    if let Some(view) = ov.metered_month.as_ref().and_then(Value::as_object) {
+        for (currency, value) in view {
+            let Some(amount) = value.get("amount").and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0) else { continue };
+            let approximate = value.get("label").and_then(Value::as_str) != Some("actual");
+            let entry = totals.entry(currency.clone()).or_insert((0.0, false));
+            entry.0 += amount;
+            entry.1 |= approximate;
+        }
+    }
+    if let Some(subs) = ov.subscription_month_by_currency.as_ref() {
+        for (currency, minor) in subs.iter().filter(|(_, minor)| **minor > 0) {
+            totals.entry(currency.clone()).or_insert((0.0, false)).0 += *minor as f64 / 100.0;
+        }
+    }
+    let parts: Vec<String> = totals.iter().map(|(currency, (amount, approximate))| {
+        let formatted = match currency.as_str() { "CNY" => fmt_money(*amount), "USD" => fmt_usd(*amount), _ => amount.to_string() };
+        format!("{}{currency} {formatted}", if *approximate { "≈" } else { "" })
+    }).collect();
+    if parts.is_empty() { None } else { Some(parts.join(" · ")) }
+}
+
 /// 今日合并 token（v1.3）：DSH 当日实测 + Claude Code 当日 ledger（core
 /// `claude_day_total_tokens`，Overview 已嵌）。一侧缺场 → 另一侧照常；两侧都缺
 /// → 0（调用方反正渲染 —，0 不会被看见）。token 是消耗量的直观信号、与计价无
@@ -848,8 +872,14 @@ fn money_rows_text_localized(ov: &Overview, language: NativeUiLanguage) -> (Stri
     // 非空 ⇔ DSH 本月确实折到过账。month_cost 聚合本身不带日数，不能从
     // `ov.month` 里看。
     let month_has_days = !ov.days.is_empty();
-    let month_money = if ov.metered_month.is_some() {
-        metered_view_text(ov.metered_month.as_ref())
+    // 本月成本 = 按量（账单 > 归因估算 > 默认估算）+ 订阅月费，**同币种内相加、币种之间不加**；
+    // 任一成分是估算就整个币种段标 `≈`（订阅是声明值，本身不带估算）。曾叫「本月按量成本」，
+    // 订阅月费不在里面，用户看到 — 而下面预算行有数，读起来互相矛盾。
+    // 库缺席（旧载荷兜底）时拿不到订阅明细，只能给按量，所以保持旧标签「按量成本」不撒谎。
+    let has_subscription = ov.subscription_month_by_currency.as_ref().map_or(false, |m| m.values().any(|minor| *minor > 0));
+    let merged_path = ov.metered_month.is_some() || has_subscription;
+    let month_money = if merged_path {
+        month_cost_text(ov)
     } else {
         metered_amount(
             if month_has_days { Some(month_total) } else { None },
@@ -858,9 +888,11 @@ fn money_rows_text_localized(ov: &Overview, language: NativeUiLanguage) -> (Stri
         )
     };
     // 两侧都没有当月可报金额时不能凭空给出 CNY 0；缺列报缺。
-    let month_text = match month_money {
-        Some(m) => format!("{}{m}", native_label(language, "Monthly metered cost: ", "本月按量成本：")),
-        None => native_label(language, "Monthly metered cost: — (no data)", "本月按量成本：—（无数据）").to_string(),
+    let month_text = match (month_money, merged_path) {
+        (Some(m), true) => format!("{}{m}", native_label(language, "Monthly cost: ", "本月成本：")),
+        (Some(m), false) => format!("{}{m}", native_label(language, "Monthly metered cost: ", "本月按量成本：")),
+        (None, true) => native_label(language, "Monthly cost: — (no data)", "本月成本：—（无数据）").to_string(),
+        (None, false) => native_label(language, "Monthly metered cost: — (no data)", "本月按量成本：—（无数据）").to_string(),
     };
     (today_text, month_text)
 }
@@ -5819,7 +5851,7 @@ mod tests {
             "USD": {"amount": 2.0, "label": "estimate"}
         }));
         let (_, month) = money_rows_text_localized(&ov, NativeUiLanguage::English);
-        assert_eq!(month, "Monthly metered cost: CNY ¥10 · ≈USD $2");
+        assert_eq!(month, "Monthly cost: CNY ¥10 · ≈USD $2");
         assert!(!month.contains("24.3"), "FX 目录存在也不得折合跨币总额");
 
         ov.metered_today = Some(serde_json::json!({}));
@@ -5829,7 +5861,27 @@ mod tests {
         ov.claude_month = Some(serde_json::json!({"currency_totals": {"USD": 3.0}}));
         let (today, month) = money_rows_text_localized(&ov, NativeUiLanguage::English);
         assert_eq!(today, "Today’s metered cost: — (no data)");
-        assert_eq!(month, "Monthly metered cost: — (no data)");
+        assert_eq!(month, "Monthly cost: — (no data)", "权威视图在场但为空 → 合并路径、不退回旧载荷");
+    }
+
+    /// 本月成本 = 按量 + 订阅月费：同币相加、跨币不加，估算成分标 ≈（用户 2026-10-01 要求）。
+    #[test]
+    fn month_cost_includes_metered_and_subscription_per_currency() {
+        let mut ov = ov_with(overview::BudgetAlert::default());
+        ov.metered_month = Some(serde_json::json!({
+            "CNY": {"amount": 20.55, "label": "actual"},
+            "USD": {"amount": 2.0, "label": "estimate"}
+        }));
+        ov.subscription_month_by_currency = Some([("CNY".to_string(), 16_200_i64), ("USD".to_string(), 4_000_i64)].into_iter().collect());
+        let (_, month) = money_rows_text_localized(&ov, NativeUiLanguage::English);
+        assert_eq!(month, "Monthly cost: CNY ¥182.6 · ≈USD $42", "托盘金额一位小数约定；CNY 实付 20.55 + 订阅 162；USD 估算 2 + 订阅 40 → 估算段标 ≈；不跨币相加");
+        let (_, zh) = money_rows_text_localized(&ov, NativeUiLanguage::Chinese);
+        assert!(zh.starts_with("本月成本："), "{zh}");
+        // 只有订阅、没有按量：成本就是订阅月费，不是「无数据」
+        let mut only_sub = ov_with(overview::BudgetAlert::default());
+        only_sub.subscription_month_by_currency = Some([("USD".to_string(), 2_000_i64)].into_iter().collect());
+        let (_, month) = money_rows_text_localized(&only_sub, NativeUiLanguage::English);
+        assert_eq!(month, "Monthly cost: USD $20");
     }
 
     /// fmt_usd 与 fmt_money 同修剪 spec：整美元不拖 `.0`，小数保留非零尾。
