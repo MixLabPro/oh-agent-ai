@@ -207,15 +207,26 @@ pub fn billing_declaration_fact_selection(
     billing_declaration_fact_selection_with(host, provider_id, effective_start, effective_end, scopes, window, conflicts, false)
 }
 
-/// [`billing_declaration_fact_selection`] 加一个开关：`native_null_provider` 为真时，**服务商字段为空、
-/// 但模型是宿主原生系列且无网关前缀**的事实也算该服务商的（ZCode 的 `GLM-5.3`、Codex 的
-/// `gpt-5.6-terra` 没有路由证据，`provider_id` 是 NULL，却显然是宿主自家官方路由）。
+/// [`billing_declaration_fact_selection`] 加一个开关：`account_level` 为真时，声明按**账号级**匹配——
+/// 订阅是账号的一份套餐，不是某个宿主的（GLM Lite 在 Claude Code 和 ZCode 里用的是同一份）。
+///
+/// 账号级匹配 B = 任何宿主上：`provider_id` 等于声明的服务商，**或** 服务商为空、模型无网关前缀、
+/// 且该宿主的原生厂商就是这个服务商（ZCode 的 `GLM-5.3`、Codex 的 `gpt-5.6-terra`：没有路由证据，
+/// 但显然是宿主自家官方路由）。模型前缀与宿主原生厂商来自数据文件，只接受安全字符，用 `substr`
+/// 比较而不是 LIKE，避免 `_` `%` 被当通配符。
+///
+/// - 普通官方订阅：只用 B。
+/// - 带 `("provider","unresolved")` 的官方订阅（MiniMax lite / GLM Lite）：A（用户对「该宿主下服务商
+///   未知的这些模型」的显式作答，仍绑宿主、受模型范围限制）**并上** B。显式作答不能自动扩到别的宿主——
+///   换了宿主，同名模型可能走的是别的中转。
+/// - 其余声明（按量 / 中转 / 官方 API）保持原样：绑宿主 + 服务商 + 范围。
+///
 /// 开关由 [`default_coverage`] 决定，预览 / 重算 / 持续套用三处共用。
 #[allow(clippy::too_many_arguments)]
 pub fn billing_declaration_fact_selection_with(
     host: &str, provider_id: &str, effective_start: &str, effective_end: Option<&str>,
     scopes: &[(&str, &str)], window: Option<(i64, i64)>, conflicts: ConflictEvidence,
-    native_null_provider: bool,
+    account_level: bool,
 ) -> BillingDeclarationFactSelection {
     use rusqlite::types::Value;
     let start_date = billing_boundary_date(effective_start, false)
@@ -232,35 +243,28 @@ pub fn billing_declaration_fact_selection_with(
     // 声明本身仍记录用户选的服务商（计费主链规格 v1.2 §5.3a）。
     let provider_unresolved = scopes.iter()
         .any(|(kind, value)| *kind == "provider" && *value == "unresolved");
-    let mut where_sql = String::from(if provider_unresolved {
-        "f.deleted_at_ms IS NULL AND f.host = ?1 AND f.provider_id IS NULL AND ?2 IS NOT NULL
-           AND f.event_ts_ms IS NOT NULL"
+    // A：绑宿主的原始匹配。
+    let host_bound = if provider_unresolved {
+        "f.host = ?1 AND f.provider_id IS NULL AND ?2 IS NOT NULL"
     } else {
-        "f.deleted_at_ms IS NULL AND f.host = ?1 AND f.provider_id = ?2
-           AND f.event_ts_ms IS NOT NULL"
-    });
-    // 原生系列且服务商为空的事实：把上面那句 `f.provider_id = ?2` 放宽为「= ?2 或（为空且是原生模型）」。
-    // 模型前缀来自 `host_native_vendor` / `vendors.*.model_prefixes`（数据文件），只接受安全字符，
-    // 用 substr 比较而不是 LIKE，避免 `_` `%` 被当通配符。
-    if native_null_provider && !provider_unresolved {
-        let prefixes: Vec<String> = agent_vitals_domain::attribution::host_native_vendor(host)
-            .filter(|vendor| vendor == provider_id)
-            .map(|vendor| agent_vitals_domain::attribution::model_prefixes_of(&vendor))
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|p| p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.'))
-            .collect();
-        if !prefixes.is_empty() {
-            let alternatives = prefixes.iter()
-                .map(|p| format!("substr(lower(f.model_id), 1, {}) = '{}'", p.len(), p))
-                .collect::<Vec<_>>().join(" OR ");
-            where_sql = where_sql.replacen(
-                "f.provider_id = ?2",
-                &format!("(f.provider_id = ?2 OR (f.provider_id IS NULL AND f.model_id IS NOT NULL AND instr(f.model_id, '/') = 0 AND ({alternatives})))"),
-                1,
-            );
+        "f.host = ?1 AND f.provider_id = ?2"
+    };
+    // B：账号级匹配。
+    let account_condition = || -> String {
+        use agent_vitals_domain::attribution::{model_prefixes_of, native_hosts_of};
+        let safe = |text: &str, extra: &[char]| text.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || extra.contains(&c));
+        let prefixes: Vec<String> = model_prefixes_of(provider_id).into_iter().filter(|p| safe(p, &['-', '.'])).collect();
+        let hosts: Vec<String> = native_hosts_of(provider_id).into_iter().filter(|h| safe(h, &['-', '.', ':', '_'])).collect();
+        if prefixes.is_empty() || hosts.is_empty() {
+            return "f.provider_id = ?2".to_string();
         }
-    }
+        let alternatives = prefixes.iter()
+            .map(|p| format!("substr(lower(f.model_id), 1, {}) = '{}'", p.len(), p))
+            .collect::<Vec<_>>().join(" OR ");
+        let host_list = hosts.iter().map(|h| format!("'{h}'")).collect::<Vec<_>>().join(", ");
+        format!("(f.provider_id = ?2 OR (f.provider_id IS NULL AND f.host IN ({host_list}) AND f.model_id IS NOT NULL AND instr(f.model_id, '/') = 0 AND ({alternatives})))")
+    };
+    let mut where_sql = String::new();
     where_sql.push_str("
            AND strftime('%Y-%m-%d', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') >= ?3
            AND (?4 IS NULL OR strftime('%Y-%m-%d', f.event_ts_ms / 1000, 'unixepoch', '+8 hours') <= ?4)
@@ -286,6 +290,7 @@ pub fn billing_declaration_fact_selection_with(
             " AND f.event_ts_ms >= ?{} AND f.event_ts_ms < ?{}", params.len() - 1, params.len(),
         ));
     }
+    let mut scope_and = String::new();
     for (kind, column) in [
         ("account", "r.account_ref"), ("route", "f.route_evidence_id"),
         ("model", "f.model_id"), ("session", "f.session_key"),
@@ -297,8 +302,17 @@ pub fn billing_declaration_fact_selection_with(
             params.push(Value::Text((*value).to_owned()));
             format!("?{}", params.len())
         }).collect::<Vec<_>>().join(", ");
-        where_sql.push_str(&format!(" AND {column} IN ({placeholders})"));
+        scope_and.push_str(&format!(" AND {column} IN ({placeholders})"));
     }
+    let matched = if !account_level {
+        format!("({host_bound}){scope_and}")
+    } else if !provider_unresolved {
+        format!("({}){scope_and}", account_condition())
+    } else {
+        // A（显式作答，绑宿主 + 受范围限制）∪ B（账号级官方路由，不受模型范围限制）
+        format!("((({host_bound}){scope_and}) OR ({}))", account_condition())
+    };
+    let where_sql = format!("f.deleted_at_ms IS NULL AND f.event_ts_ms IS NOT NULL AND {matched}{where_sql}");
     BillingDeclarationFactSelection { where_sql, params }
 }
 /// **官方订阅的默认覆盖**：订阅声明的模型清单不应是要逐个维护的白名单——Anthropic / OpenAI
@@ -321,17 +335,24 @@ pub fn attribution_scopes<'a>(
     default_coverage(relationship_kind, scopes, official_api_declared).0
 }
 
-/// 默认覆盖的完整结果：(有效范围, 是否把「服务商为空的宿主原生模型」也算进来)。
-/// 第二项只在默认覆盖生效时为真——它与去掉模型范围是同一条规则的两半：官方订阅覆盖该宿主自家官方路由。
+/// 默认覆盖的完整结果：(有效范围, 是否账号级)。
+///
+/// - 范围：官方订阅且没有 `provider=unresolved`、也没有官方 API 声明 → 去掉模型范围（见 [`attribution_scopes`]）。
+/// - 账号级：官方订阅、没有官方 API 声明、且用户没有用路由 / 账户 / 会话范围主动收窄 → 为真。
+///   订阅是账号的套餐，覆盖该服务商在任何宿主上的官方路由（见 [`billing_declaration_fact_selection_with`]）。
+///   用户主动收窄过的声明，意图不能被默认规则抹掉。
 pub fn default_coverage<'a>(
     relationship_kind: &str, scopes: &[(&'a str, &'a str)], official_api_declared: bool,
 ) -> (Vec<(&'a str, &'a str)>, bool) {
     let provider_unresolved = scopes.iter().any(|(kind, value)| *kind == "provider" && *value == "unresolved");
-    if relationship_kind == "official_subscription" && !provider_unresolved && !official_api_declared {
-        (scopes.iter().copied().filter(|(kind, _)| *kind != "model").collect(), true)
+    let narrowed = scopes.iter().any(|(kind, _)| matches!(*kind, "route" | "account" | "session"));
+    let subscription_default = relationship_kind == "official_subscription" && !official_api_declared;
+    let effective = if subscription_default && !provider_unresolved {
+        scopes.iter().copied().filter(|(kind, _)| *kind != "model").collect()
     } else {
-        (scopes.to_vec(), false)
-    }
+        scopes.to_vec()
+    };
+    (effective, subscription_default && !narrowed)
 }
 
 type BillingDeclarationRevisionSnapshot = (
@@ -3776,18 +3797,19 @@ impl AuthorityDb {
         })
     }
 
-    /// 同宿主同服务商是否存在**生效中**的官方 API 声明（最新修订是 `saved`）。
-    /// 与官方订阅并存时默认覆盖规则让位给显式模型清单，见 [`attribution_scopes`]。
-    pub fn billing_official_api_declared(&self, host: &str, provider_id: &str) -> Result<bool, AuthorityError> {
+    /// 该服务商是否存在**生效中**的官方 API 声明（最新修订是 `saved`），**不分宿主**：
+    /// 官方订阅是账号级的，API Key 同样可能在任何宿主上使用，两者并存时用量无从区分，
+    /// 默认覆盖规则让位给显式范围，见 [`default_coverage`]。`host` 仅为兼容既有调用，不参与判断。
+    pub fn billing_official_api_declared(&self, _host: &str, provider_id: &str) -> Result<bool, AuthorityError> {
         Ok(self.conn.query_row(
             "SELECT EXISTS (
                  SELECT 1 FROM billing_declarations bd
                  JOIN billing_declaration_revisions br ON br.declaration_id = bd.declaration_id
-                 WHERE bd.deleted_at_ms IS NULL AND br.host = ?1 AND br.provider_id = ?2
+                 WHERE bd.deleted_at_ms IS NULL AND br.provider_id = ?1
                    AND br.relationship_kind = 'official_api' AND br.change_kind = 'saved'
                    AND br.revision_number = (SELECT MAX(x.revision_number)
                        FROM billing_declaration_revisions x WHERE x.declaration_id = bd.declaration_id))",
-            rusqlite::params![host, provider_id], |row| row.get::<_, i64>(0),
+            rusqlite::params![provider_id], |row| row.get::<_, i64>(0),
         )? != 0)
     }
 
@@ -3935,7 +3957,7 @@ impl AuthorityDb {
 
     /// 这条修订的有效范围是否因「默认覆盖规则」而与保存的范围不同、且还没补算过。
     fn billing_default_scope_needs_catchup(&self, revision_id: &str) -> Result<bool, AuthorityError> {
-        let key = format!("billing_default_scope_catchup:{revision_id}");
+        let key = format!("billing_default_scope_catchup:v2:{revision_id}");
         let done: Option<String> = self.conn.query_row(
             "SELECT value FROM schema_meta WHERE key = ?1", rusqlite::params![key], |row| row.get(0),
         ).optional()?;
@@ -3947,13 +3969,13 @@ impl AuthorityDb {
         let scopes = self.billing_declaration_scopes(revision_id)?;
         let scope_refs = scopes.iter().map(|(_, k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>();
         let (effective, native) = default_coverage(&kind, &scope_refs, self.billing_official_api_declared(&host, &provider_id)?);
-        Ok(effective.len() != scope_refs.len() || (native && agent_vitals_domain::attribution::host_native_vendor(&host).as_deref() == Some(provider_id.as_str())))
+        Ok(effective.len() != scope_refs.len() || native)
     }
 
     fn billing_mark_default_scope_catchup(&self, revision_id: &str) -> Result<(), AuthorityError> {
         self.conn.execute(
             "INSERT INTO schema_meta(key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value = '1'",
-            rusqlite::params![format!("billing_default_scope_catchup:{revision_id}")],
+            rusqlite::params![format!("billing_default_scope_catchup:v2:{revision_id}")],
         )?;
         Ok(())
     }
@@ -5548,7 +5570,9 @@ mod tests {
         let attributed: Vec<String> = authority.conn().prepare(
             "SELECT fact_id FROM billing_fact_attributions WHERE job_id = 'pu-job' ORDER BY fact_id",
         ).unwrap().query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
-        assert_eq!(attributed, vec!["f-null-a".to_string(), "f-null-b".to_string()]);
+        // 订阅是账号级的（2026-10-01）：provider 明确为 zhipu-glm 的 f-known 也属于这份 GLM 订阅；
+        // 显式作答（provider=unresolved + 模型清单）仍只针对 NULL-provider 的 f-null-*（见上面的预览）。
+        assert_eq!(attributed, vec!["f-known".to_string(), "f-null-a".to_string(), "f-null-b".to_string()]);
         assert!(authority.billing_declaration_revision_save(
             "bad-rev", "bad-decl", None, "claude-code", "zhipu-glm", "official_api",
             None, None, None, "1970-01-01", Some("1970-12-31"), None, None, &[("provider", "anything")], 5,
@@ -5888,15 +5912,16 @@ mod tests {
         // 重算之后才出现的新模型；以及一个「水位之前入库、从未被匹配过」的新模型事实（历史补算）。
         put_fact(&authority, "f-old-new-model", "claude-code", Some("anthropic"), "claude-sonnet-5-5", 250);
         put_fact(&authority, "f-later-new-model", "claude-code", Some("anthropic"), "claude-opus-5-5", 5_000);
-        // 别的服务商的事实、同服务商但别的宿主，都不能被覆盖
+        // 别的服务商的事实不能被覆盖；同服务商别的宿主属于同一个账号，会被覆盖
         put_fact(&authority, "f-other-provider", "claude-code", Some("minimax"), "MiniMax-M3", 5_000);
         put_fact(&authority, "f-other-host", "codex", Some("anthropic"), "claude-sonnet-5-5", 5_000);
         let report = authority.billing_apply_active_declarations(6_000).unwrap();
-        assert_eq!(report.attributed, 2, "{report:?}");
+        assert_eq!(report.attributed, 3, "{report:?}");
         assert!(covered(&authority, "f-old-new-model"), "历史补算：水位之前入库的新模型事实也要被覆盖");
         assert!(covered(&authority, "f-later-new-model"));
         assert!(!covered(&authority, "f-other-provider"));
-        assert!(!covered(&authority, "f-other-host"));
+        // 订阅是账号级的：别的宿主上、服务商明确为 anthropic 的事实同样属于这份 Claude Pro
+        assert!(covered(&authority, "f-other-host"), "账号级订阅覆盖该服务商在任何宿主上的官方路由");
         // 补算只做一次：再跑不新增，也不重复写。
         assert_eq!(authority.billing_apply_active_declarations(7_000).unwrap().attributed, 0);
         let _ = std::fs::remove_file(&db);
@@ -5999,6 +6024,31 @@ mod tests {
             "plugin:zcode", "zhipu-glm", "official_subscription", "2025-07-20", None, &[], None,
         ).unwrap();
         assert_eq!(preview.fact_count, 0, "已经被覆盖的事实不再重复计入预览");
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// 用户（2026-10-01）：订阅属于账号，不属于宿主——GLM Lite 在 Claude Code 里声明，ZCode 也在用这份套餐。
+    #[test]
+    fn a_subscription_declared_on_one_host_covers_the_providers_native_models_on_another() {
+        let (db, authority) = default_scope_fixture("billing-account-level");
+        put_fact(&authority, "z-native", "plugin:zcode", None, "GLM-5.3", 100);
+        put_fact(&authority, "z-gateway", "plugin:zcode", None, "bigmodel/glm-5.3-flash", 100);
+        put_fact(&authority, "x-glm-on-codex", "codex", None, "glm-5.3", 100);
+        put_fact(&authority, "c-listed", "claude-code", None, "glm-5.3-flash", 100);
+        put_fact(&authority, "c-unlisted", "claude-code", None, "glm-5.4", 100);
+        authority.billing_declaration_revision_save(
+            "rev-glm2", "decl-glm2", None, "claude-code", "zhipu-glm", "official_subscription",
+            Some("GLM Lite"), Some(11_800), Some("CNY"), "2025-07-20", None, None, None,
+            &[("provider", "unresolved"), ("model", "glm-5.3-flash")], 200,
+        ).unwrap();
+        authority.billing_recalculation_enqueue("job-glm2", "decl-glm2", "rev-glm2", 300).unwrap();
+        assert!(authority.billing_recalculation_run("job-glm2", 400).unwrap());
+        authority.billing_apply_active_declarations(6_000).unwrap();
+        assert!(covered(&authority, "z-native"), "ZCode 的原生 GLM 属于同一份 GLM Lite（账号级）");
+        assert!(covered(&authority, "c-listed"), "原来的显式作答（Claude Code 下列出的模型）照旧");
+        assert!(!covered(&authority, "c-unlisted"), "显式作答不自动扩到清单外的未知服务商模型");
+        assert!(!covered(&authority, "z-gateway"), "带前缀 = 第三方路由");
+        assert!(!covered(&authority, "x-glm-on-codex"), "别的宿主上服务商未知的 GLM 模型不是原生，显式作答不跨宿主");
         let _ = std::fs::remove_file(&db);
     }
 

@@ -94,6 +94,16 @@ pub fn host_native_vendor_in(catalog: &Value, host: &str) -> Option<String> {
     catalog.pointer("/host_native_vendor")?.get(host)?.as_str().filter(|v| !v.is_empty()).map(str::to_string)
 }
 
+/// 原生厂商是 `vendor` 的所有宿主（`host_native_vendor` 表的反查）。
+pub fn native_hosts_of(vendor: &str) -> Vec<String> {
+    signatures().pointer("/host_native_vendor")
+        .and_then(Value::as_object)
+        .map(|table| table.iter()
+            .filter(|(host, native)| !host.starts_with('_') && native.as_str() == Some(vendor))
+            .map(|(host, _)| host.clone()).collect())
+        .unwrap_or_default()
+}
+
 /// 某厂商的模型名前缀（小写）。
 pub fn model_prefixes_of(vendor: &str) -> Vec<String> {
     signatures().pointer(&format!("/vendors/{vendor}/model_prefixes"))
@@ -268,6 +278,9 @@ mod tests {
         assert_eq!(host_native_vendor("plugin:zcode").as_deref(), Some("zhipu-glm"));
         assert_eq!(host_native_vendor("nope"), None);
         assert!(model_prefixes_of("zhipu-glm").contains(&"glm-".to_string()));
+        assert_eq!(native_hosts_of("zhipu-glm"), vec!["plugin:zcode".to_string()]);
+        assert_eq!(native_hosts_of("anthropic"), vec!["claude-code".to_string()]);
+        assert!(native_hosts_of("nobody").is_empty());
     }
 
     #[test]
