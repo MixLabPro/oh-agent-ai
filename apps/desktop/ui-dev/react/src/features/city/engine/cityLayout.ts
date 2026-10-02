@@ -1,6 +1,6 @@
 /** Geography and public planning are fixed; sessions occupy reserved parcels. */
 import { hashSeed, type CityModel } from "../cityModel";
-import { createCityPlan, scaleTierFor, type Biome } from "./cityPlan";
+import { createCityPlan, scaleTierFor, type Biome, type Landmark } from "./cityPlan";
 
 export type Vec2 = { x: number; z: number };
 export type Zone = "downtown" | "residential" | "commercial" | "waterfront";
@@ -51,6 +51,7 @@ export type CityLayout = {
   massing: Array<{ districtId: string; x: number; z: number; y: number; count: number; tokens: number; height: number }>;
   /** 海岸外扩环状航道（折线）与两侧装饰远山。 */
   civics: CivicSite[];
+  landmarks: Landmark[];
   gardens: GardenSite[];
   boatLoops: Vec2[][]; seaMountains: Array<{ center: Vec2; radius: number; height: number; seed: number }>;
 };

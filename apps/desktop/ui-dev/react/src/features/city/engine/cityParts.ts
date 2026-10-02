@@ -223,6 +223,8 @@ export class CityParts {
   private readonly treeMesh: THREE.InstancedMesh;
   /** 生态带植被网格（加载完成后替换程序化树；每个树种一个）。 */
   private floraMeshes: THREE.InstancedMesh[] = [];
+  /** 地标里会动的部件：摩天轮转盘、灯塔光束。 */
+  private landmarkSpinners: Array<{ object: THREE.Object3D; axis: "x" | "y" | "z"; speed: number }> = [];
   private readonly carMesh: THREE.InstancedMesh;
   private readonly boatMesh: THREE.InstancedMesh;
   private readonly cloudMesh: THREE.InstancedMesh;
@@ -339,6 +341,7 @@ export class CityParts {
     this.buildDistrictExpressways();
     this.buildPublicSites();
     this.buildCivics();
+    this.buildLandmarks();
     this.buildMassing();
     this.buildSeaMountains();
     this.treeMesh = this.buildTrees();
@@ -846,6 +849,171 @@ export class CityParts {
     build(new THREE.DodecahedronGeometry(0.6, 0).translate(0, 0.45, 0), rocks, "city-garden-rocks");
     build(new THREE.ConeGeometry(0.5, 1, 4).translate(0, 0.5, 0), cones, "city-garden-roofs");
     build(new THREE.IcosahedronGeometry(1, 0).translate(0, 1.4, 0), trees, "city-garden-trees");
+  }
+
+  /** 致敬型地标（程序化几何，不复刻具体建筑）。高度上限 = 全城最高会话楼 × 0.9：天际线焦点仍是会话楼。 */
+  private buildLandmarks(): void {
+    const landmarks = this.layout.landmarks ?? [];
+    if (!landmarks.length) return;
+    const tallest = Math.max(30, ...this.model.buildings.map((building) => building.height));
+    const cap = tallest * 0.9;
+    const neon = activeTheme().neon;
+    const material = (color: string, emissive = 0) => {
+      const m = new THREE.MeshLambertMaterial({ color, emissive: new THREE.Color(color).multiplyScalar(emissive) });
+      this.disposables.push(m);
+      return m;
+    };
+    const mesh = (geometry: THREE.BufferGeometry, mat: THREE.Material, parent: THREE.Object3D, x: number, y: number, z: number, ry = 0) => {
+      const m = new THREE.Mesh(geometry, mat);
+      m.position.set(x, y, z);
+      m.rotation.y = ry;
+      m.castShadow = true;
+      m.receiveShadow = true;
+      parent.add(m);
+      this.disposables.push(geometry);
+      return m;
+    };
+    const white = material("#f3f1ea");
+    const steel = material("#c9cfd3");
+    const red = material("#c8473a");
+    for (const landmark of landmarks) {
+      const group = new THREE.Group();
+      const ground = Math.max(0.3, this.layout.terrain.height(landmark.x, landmark.z));
+      group.position.set(landmark.x, ground, landmark.z);
+      group.rotation.y = landmark.yaw;
+      if (landmark.kind === "tv-tower") {
+        const h = Math.min(cap, 70);
+        mesh(new THREE.CylinderGeometry(1.6, 3.2, h * 0.78, 12).translate(0, h * 0.39, 0), steel, group, 0, 0, 0);
+        mesh(new THREE.SphereGeometry(5.5, 18, 12).scale(1, 0.55, 1), white, group, 0, h * 0.72, 0);
+        mesh(new THREE.TorusGeometry(6.2, 0.5, 6, 32).rotateX(Math.PI / 2), material("#7fb4c2", neon ? 0.8 : 0.2), group, 0, h * 0.72, 0);
+        mesh(new THREE.CylinderGeometry(0.25, 0.45, h * 0.24, 6).translate(0, h * 0.12, 0), red, group, 0, h * 0.78, 0);
+      } else if (landmark.kind === "twin-towers") {
+        const h = Math.min(cap, 62);
+        for (const side of [-1, 1]) {
+          mesh(new THREE.BoxGeometry(8, h, 8).translate(0, h / 2, 0), material("#9fb3c0"), group, side * 9, 0, 0);
+          mesh(new THREE.ConeGeometry(3, 10, 8).translate(0, 5, 0), steel, group, side * 9, h, 0);
+        }
+        mesh(new THREE.BoxGeometry(10, 2.4, 3).translate(0, 1.2, 0), steel, group, 0, h * 0.55, 0); // 天桥连廊
+      } else if (landmark.kind === "twist-tower") {
+        const h = Math.min(cap, 66);
+        const floors = 22;
+        for (let i = 0; i < floors; i += 1) {
+          mesh(new THREE.BoxGeometry(9, h / floors * 0.92, 9).translate(0, (h / floors) * 0.46, 0), material(i % 2 ? "#a9c3cf" : "#93aebb"), group, 0, (i * h) / floors, 0, (i / floors) * Math.PI * 0.5);
+        }
+      } else if (landmark.kind === "arch") {
+        const h = Math.min(cap, 26);
+        for (const side of [-1, 1]) mesh(new THREE.BoxGeometry(5, h, 7).translate(0, h / 2, 0), white, group, side * 8, 0, 0);
+        mesh(new THREE.BoxGeometry(21, 6, 7.4).translate(0, 3, 0), white, group, 0, h, 0);
+        mesh(new THREE.BoxGeometry(22, 1, 8).translate(0, 0.5, 0), material("#d9d3c2"), group, 0, h + 6, 0);
+      } else if (landmark.kind === "sail-opera") {
+        mesh(new THREE.BoxGeometry(46, 3, 26).translate(0, 1.5, 0), material("#d9d3c2"), group, 0, 0, 0);
+        // 帆：半个穹顶（半球再切一半）拉成薄而高的壳，开口朝前；双面材质（开口里也要看得见内壁）。
+        const sail = new THREE.MeshLambertMaterial({ color: "#f6f4ee", side: THREE.DoubleSide });
+        this.disposables.push(sail);
+        const shells = 4;
+        for (let i = 0; i < shells; i += 1) {
+          const size = 13 - i * 2;
+          const shell = new THREE.SphereGeometry(size, 20, 12, Math.PI / 2, Math.PI, 0, Math.PI / 2).scale(0.75, 1.6, 0.9);
+          const m = mesh(shell, sail, group, -15 + i * 9.5, 3, 0, 0);
+          m.rotation.z = -0.18;
+        }
+      } else if (landmark.kind === "lighthouse") {
+        const h = Math.min(cap, 32);
+        const bands = 6;
+        for (let i = 0; i < bands; i += 1) {
+          const r0 = 3.4 - (i / bands) * 1.4; const r1 = 3.4 - ((i + 1) / bands) * 1.4;
+          mesh(new THREE.CylinderGeometry(r1, r0, h / bands, 14).translate(0, h / bands / 2, 0), i % 2 ? red : white, group, 0, (i * h) / bands, 0);
+        }
+        mesh(new THREE.CylinderGeometry(2.2, 2.2, 3, 10).translate(0, 1.5, 0), material("#fff2c0", 1.5), group, 0, h, 0);
+        mesh(new THREE.ConeGeometry(2.8, 3, 10).translate(0, 1.5, 0), red, group, 0, h + 3, 0);
+        if (neon) {
+          // 旋转光束：两束对向的加色锥，绕竖轴转（进 bloom）。
+          const beamMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color("#fff2c0").multiplyScalar(1.6), transparent: true, opacity: 0.08, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
+          this.disposables.push(beamMaterial);
+          const beam = new THREE.Group();
+          beam.position.set(0, h + 1.5, 0);
+          for (const side of [-1, 1]) {
+            const cone = new THREE.Mesh(new THREE.ConeGeometry(7, 160, 16, 1, true).translate(0, -90, 0).rotateZ((side * Math.PI) / 2), beamMaterial);
+            this.disposables.push(cone.geometry);
+            beam.add(cone);
+          }
+          group.add(beam);
+          this.landmarkSpinners.push({ object: beam, axis: "y", speed: 0.9 });
+        }
+      } else if (landmark.kind === "ferris-wheel") {
+        const radius = Math.min(cap * 0.45, 20);
+        for (const side of [-1, 1]) {
+          mesh(new THREE.BoxGeometry(1, radius + 4, 1).translate(0, (radius + 4) / 2, 0), steel, group, -4, 0, side * 3).rotation.z = side * 0.18;
+          mesh(new THREE.BoxGeometry(1, radius + 4, 1).translate(0, (radius + 4) / 2, 0), steel, group, 4, 0, side * 3).rotation.z = -side * 0.18;
+        }
+        const wheel = new THREE.Group();
+        wheel.position.set(0, radius + 4, 0);
+        const ring = new THREE.Mesh(new THREE.TorusGeometry(radius, 0.45, 6, 48), material("#e8eef0", neon ? 0.6 : 0));
+        this.disposables.push(ring.geometry);
+        wheel.add(ring);
+        const cabins = 16;
+        for (let i = 0; i < cabins; i += 1) {
+          const t = (i / cabins) * Math.PI * 2;
+          const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.25, radius, 0.25).translate(0, radius / 2, 0), steel);
+          spoke.rotation.z = t;
+          this.disposables.push(spoke.geometry);
+          wheel.add(spoke);
+          const cabin = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), material(["#ff6f61", "#ffd166", "#06d6a0", "#118ab2"][i % 4], neon ? 0.5 : 0));
+          cabin.position.set(Math.cos(t) * radius, Math.sin(t) * radius, 0);
+          this.disposables.push(cabin.geometry);
+          wheel.add(cabin);
+        }
+        group.add(wheel);
+        this.landmarkSpinners.push({ object: wheel, axis: "z", speed: 0.08 });
+      } else if (landmark.kind === "pagoda") {
+        const tiers = 7;
+        let y = 0;
+        mesh(new THREE.BoxGeometry(16, 2, 16).translate(0, 1, 0), material("#d9d3c2"), group, 0, 0, 0);
+        y = 2;
+        const roof = material("#3d5a4f");
+        const wall = material("#b5463a");
+        for (let i = 0; i < tiers; i += 1) {
+          const w = 10 - i * 1.1;
+          mesh(new THREE.BoxGeometry(w, 3.6, w).translate(0, 1.8, 0), wall, group, 0, y, 0);
+          // 檐：四棱锥扁台，比墙宽一圈，角略上翘的感觉靠「宽而薄」。
+          mesh(new THREE.ConeGeometry(w * 0.95, 1.6, 4).rotateY(Math.PI / 4).translate(0, 0.8, 0), roof, group, 0, y + 3.6, 0);
+          y += 4.4;
+        }
+        mesh(new THREE.CylinderGeometry(0.2, 0.35, 6, 6).translate(0, 3, 0), material("#c9a24a"), group, 0, y, 0);
+      } else if (landmark.kind === "suspension-bridge" && landmark.to) {
+        // 悬索桥：沿既有过河桥加两座门式塔与主缆、吊索（路网不变，只是换造型）。
+        group.position.set(landmark.x, 0, landmark.z);
+        group.rotation.y = -Math.atan2(landmark.to.z - landmark.z, landmark.to.x - landmark.x);
+        const span = Math.hypot(landmark.to.x - landmark.x, landmark.to.z - landmark.z);
+        const towerH = 34;
+        for (const t of [0.18, 0.82]) {
+          for (const side of [-1, 1]) mesh(new THREE.BoxGeometry(1.6, towerH, 1.6).translate(0, towerH / 2, 0), material("#c8473a"), group, span * t, 0, side * 5.5);
+          mesh(new THREE.BoxGeometry(1.6, 1.6, 12.6).translate(0, 0.8, 0), material("#c8473a"), group, span * t, towerH - 4, 0);
+        }
+        for (const side of [-1, 1]) {
+          const points: THREE.Vector3[] = [];
+          for (let i = 0; i <= 24; i += 1) {
+            const u = i / 24;
+            const x = -span * 0.08 + u * span * 1.16;
+            const local = (x - span * 0.5) / (span * 0.32);
+            points.push(new THREE.Vector3(x, Math.max(9, towerH - 1 - (1 - local * local) * (towerH - 12)), side * 5.5));
+          }
+          const cable = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), 48, 0.3, 5), steel);
+          this.disposables.push(cable.geometry);
+          group.add(cable);
+          for (let i = 3; i <= 21; i += 1) {
+            const p = points[i];
+            if (p.y <= 9.5) continue;
+            const hanger = new THREE.Mesh(new THREE.BoxGeometry(0.12, p.y - 8.2, 0.12).translate(0, (p.y - 8.2) / 2, 0), steel);
+            hanger.position.set(p.x, 8.2, p.z);
+            this.disposables.push(hanger.geometry);
+            group.add(hanger);
+          }
+        }
+      }
+      group.name = `city-landmark-${landmark.kind}`;
+      this.group.add(group);
+    }
   }
 
   /** 学校 / 商场 / 医院：由方块与圆柱拼成，局部坐标按街区朝向旋转。纯装饰，不进拾取。 */
@@ -1866,6 +2034,7 @@ export class CityParts {
   update(dt: number, elapsed: number): boolean {
     this.waterUniforms.uTime.value = elapsed;
     this.updateCivics(dt);
+    for (const spinner of this.landmarkSpinners) spinner.object.rotation[spinner.axis] += spinner.speed * dt;
 
     let dirty = false;
     const rate = Math.min(1, dt * 1.35);

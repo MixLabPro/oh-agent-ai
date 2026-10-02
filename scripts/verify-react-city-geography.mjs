@@ -47,6 +47,7 @@ function correlation(a, b) {
 const seeds = Array.from({ length: 30 }, (_, i) => (i * 2654435761 + 12345) >>> 0 || 1);
 const profiles = [];
 const biomes = new Set();
+const landmarkKinds = new Set();
 let rivers = 0;
 for (const seed of seeds) {
   const input = model(700);
@@ -67,6 +68,15 @@ for (const seed of seeds) {
     const gap = Math.hypot(centers[i].x - centers[j].x, centers[i].z - centers[j].z);
     assert(gap >= 120, `seed ${seed}: districts ${centers[i].id} and ${centers[j].id} crowd together (${gap.toFixed(0)} apart)`);
   }
+  // 致敬型地标：每岛 2–4 座（含可能的悬索桥），在陆地上，不压任何会话地块。
+  assert(layout.landmarks.length >= 2 && layout.landmarks.length <= 4, `seed ${seed}: ${layout.landmarks.length} landmarks`);
+  const lots = layout.districts.flatMap((d) => [...d.slots.values()]);
+  for (const landmark of layout.landmarks) {
+    landmarkKinds.add(landmark.kind);
+    if (landmark.kind === "suspension-bridge") continue;
+    assert(layout.terrain.height(landmark.x, landmark.z) > 0.5, `seed ${seed}: ${landmark.id} on land`);
+    for (const lot of lots) assert(Math.hypot(lot.x - landmark.x, lot.z - landmark.z) >= landmark.radius, `seed ${seed}: ${landmark.id} sits on session lot ${lot.id}`);
+  }
   profiles.push(profile(layout.coast));
   biomes.add(layout.biome);
   if (layout.river.length) rivers += 1;
@@ -76,6 +86,7 @@ for (let i = 0; i < profiles.length; i += 1) for (let j = i + 1; j < profiles.le
 pairs.sort((x, y) => x - y);
 const median = pairs[Math.floor(pairs.length / 2)];
 assert(median < 0.6, `island shapes too similar across seeds (median correlation ${median.toFixed(2)})`);
+assert(landmarkKinds.size >= 7, `landmark variety too low: ${[...landmarkKinds].join(",")}`);
 assert(biomes.size >= 4, `seeds should reach most biomes (got ${[...biomes].join(",")})`);
 assert(rivers >= 18 && rivers < 30, `about four in five islands have a river (got ${rivers}/30)`);
-console.log(`City geography: 30 seeds, all placed, sites on land, bridges over water; shape correlation median ${median.toFixed(2)}, ${biomes.size} biomes, ${rivers}/30 rivers passed.`);
+console.log(`City geography: 30 seeds, all placed, sites on land, bridges over water; shape correlation median ${median.toFixed(2)}, ${biomes.size} biomes, ${rivers}/30 rivers, ${landmarkKinds.size} landmark kinds passed.`);

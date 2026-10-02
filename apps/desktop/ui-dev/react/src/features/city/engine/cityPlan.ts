@@ -32,6 +32,10 @@ export function polygonDistance(p: Vec2, polygon: Vec2[]): number {
 export const roadNodeId = (p: Vec2): string => `${p.x}:${p.z}`;
 
 export type Biome = "tropical" | "temperate" | "boreal" | "savanna" | "eastasian";
+
+/** 致敬型地标（SPEC §4.4）：程序化几何、不复刻具体建筑；纯装饰，不占会话地块、不进统计。 */
+export type LandmarkKind = "tv-tower" | "sail-opera" | "arch" | "pagoda" | "lighthouse" | "ferris-wheel" | "suspension-bridge" | "twin-towers" | "twist-tower";
+export type Landmark = Vec2 & { id: string; kind: LandmarkKind; yaw: number; radius: number; to?: Vec2 };
 const BIOMES: Biome[] = ["tropical", "temperate", "boreal", "savanna", "eastasian"];
 
 /** 每档对应的目标地块数（SPEC §4.2：400 会话一档 × 1.35 余量给公共用地、花园、配套与道路损耗）。 */
@@ -60,17 +64,17 @@ export function createCityPlan(seed: number, tier = 2) {
   const biome: Biome = BIOMES[Math.floor(random("biome") * BIOMES.length) % BIOMES.length];
   // 先按档位估一个半径，再按实测地块数校正（最多 4 次）：面积 ∝ R²。
   let radius = 390 * Math.sqrt(tier);
-  let plan = buildPlan(seed, radius, shape);
+  let plan = buildPlan(seed, radius, shape, biome);
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const parcels = plan.blocks.reduce((sum, block) => sum + block.parcels.length, 0);
     if (parcels >= targetParcels(tier)) break;
     radius *= Math.sqrt(targetParcels(tier) / Math.max(1, parcels)) * 1.04;
-    plan = buildPlan(seed, radius, shape);
+    plan = buildPlan(seed, radius, shape, biome);
   }
   return { ...plan, scaleTier: tier, biome };
 }
 
-function buildPlan(seed: number, R: number, shape: Shape) {
+function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
   const random = (key: string) => hashSeed(`${seed}:${key}`);
   const phase = random("river") * 3;
 
@@ -187,6 +191,41 @@ function buildPlan(seed: number, R: number, shape: Shape) {
     place("working-harbor", "harbor", inward, 37, -Math.atan2(shore.z - core.z, shore.x - core.x));
   }
 
+  // ── 致敬型地标：种子从候选里抽 2–3 座，按地理条件选址；和公共用地一样先于街区预留土地。
+  const landmarks: Landmark[] = [];
+  {
+    const shoreOrder = [...coast].sort((p, q) => Math.hypot(p.x - core.x, p.z - core.z) - Math.hypot(q.x - core.x, q.z - core.z));
+    const inwardFrom = (shore: Vec2, amount: number) => ({ x: shore.x + (core.x - shore.x) * amount, z: shore.z + (core.z - shore.z) * amount });
+    const taken = () => [...publicSites, ...landmarks].map((site) => ({ x: site.x, z: site.z, radius: site.radius }));
+    const candidates: Array<{ kind: LandmarkKind; weight: number; site: () => { at: Vec2; radius: number; clearance: number; yaw: number } | null }> = [
+      { kind: "tv-tower", weight: 2, site: () => ({ at: around(turn + 0.4, 0.14 * R), radius: 16, clearance: 20, yaw: 0 }) },
+      { kind: "twin-towers", weight: 1, site: () => ({ at: around(turn + 3.1, 0.12 * R), radius: 22, clearance: 20, yaw: turn }) },
+      { kind: "twist-tower", weight: 1, site: () => ({ at: around(turn + 2.6, 0.17 * R), radius: 16, clearance: 20, yaw: 0 }) },
+      { kind: "arch", weight: 1, site: () => ({ at: around(turn + 5.6, 0.26 * R), radius: 18, clearance: 20, yaw: turn + 5.6 }) },
+      { kind: "sail-opera", weight: 2, site: () => { const shore = shoreOrder[Math.min(shoreOrder.length - 1, 3)]; return { at: inwardFrom(shore, 0.1), radius: 34, clearance: 16, yaw: -Math.atan2(shore.z - core.z, shore.x - core.x) }; } },
+      { kind: "lighthouse", weight: 2, site: () => { const shore = shoreOrder[shoreOrder.length - 1]; return { at: inwardFrom(shore, 0.04), radius: 12, clearance: 6, yaw: 0 }; } },
+      { kind: "ferris-wheel", weight: 2, site: () => { const shore = shoreOrder[Math.floor(shoreOrder.length * 0.45)]; return { at: inwardFrom(shore, 0.08), radius: 26, clearance: 14, yaw: -Math.atan2(shore.z - core.z, shore.x - core.x) + Math.PI / 2 }; } },
+      { kind: "pagoda", weight: biome === "eastasian" ? 5 : 1, site: () => ({ at: { x: hillDir.x * (hillLine - 80), z: hillDir.z * (hillLine - 80) }, radius: 18, clearance: 18, yaw: hillAngle }) },
+    ];
+    const count = 2 + (random("landmarkCount") < 0.5 ? 1 : 0);
+    const pool = [...candidates];
+    for (let n = 0; n < count && pool.length; n += 1) {
+      const total = pool.reduce((sum, c) => sum + c.weight, 0);
+      let pick = random(`landmark${n}`) * total;
+      let index = 0;
+      while (index < pool.length - 1 && pick >= pool[index].weight) { pick -= pool[index].weight; index += 1; }
+      const chosen = pool.splice(index, 1)[0];
+      // 双子塔与扭转塔同属 downtown 高塔：抽到一个就不再抽另一个。
+      if (chosen.kind === "twin-towers" || chosen.kind === "twist-tower") for (let k = pool.length - 1; k >= 0; k -= 1) if (pool[k].kind === "twin-towers" || pool[k].kind === "twist-tower") pool.splice(k, 1);
+      const site = chosen.site();
+      if (!site) continue;
+      const q = snap(site.at, site.clearance, taken(), site.radius);
+      landmarks.push({ id: `landmark:${chosen.kind}`, kind: chosen.kind, x: q.x, z: q.z, yaw: site.yaw, radius: site.radius });
+    }
+  }
+  /** 公共用地 + 地标：街区与地块都要避开的预留地。 */
+  const reservations = () => [...publicSites, ...landmarks];
+
   // ── L2 骨架（CITY_PLANNING_SPEC §4.3）──
   // 主干道从核心放射、沿陆地延伸到海边，过河处自动成桥；环线高架绕核心一圈（沿陆地断续）；
   // 主干道之间每个扇区各铺一张朝向沿扇区放射方向的街网——不再是全岛一张方格（曾经整张方格盖在岛上）。
@@ -295,7 +334,7 @@ function buildPlan(seed: number, R: number, shape: Shape) {
       if (polygon.some((p, k) => { const q = polygon[(k + 1) % 4]; return !buildable((p.x + q.x) / 2, (p.z + q.z) / 2); })) continue;
       if ([center, ...polygon].some((p) => distanceToTrunks(p) < 10)) continue;
       if ([center, ...polygon].some((p) => distanceToRing(p) < 9)) continue;
-      const reserved = publicSites.some((site) => polygonDistance(site, polygon) > -site.radius);
+      const reserved = reservations().some((site) => polygonDistance(site, polygon) > -site.radius);
       const zone = zoneFor(center);
       const id = `plan:${sectorIndex}:${i}:${j}`; const parcels: Parcel[] = [];
       const sideLength = Math.hypot(polygon[1].x - polygon[0].x, polygon[1].z - polygon[0].z);
@@ -306,7 +345,7 @@ function buildPlan(seed: number, R: number, shape: Shape) {
         const t = (index + 0.5) / columnCount; const inset = side === 0 ? 12 : -12;
         const p = { x: a.x + dx * (7 + (length - 14) * t) - dz * inset, z: a.z + dz * (7 + (length - 14) * t) + dx * inset };
         if (polygonDistance(p, polygon) < 3.6 + 5) continue;
-        if (publicSites.some((site) => Math.hypot(p.x - site.x, p.z - site.z) < site.radius + 9)) continue;
+        if (reservations().some((site) => Math.hypot(p.x - site.x, p.z - site.z) < site.radius + 9)) continue;
         parcels.push({ ...p, id: `${id}/${side}:${index}`, blockId: id, yaw: -Math.atan2(dz, dx), zone, width: Math.min(7.2, (length - 14) / columnCount), depth: 8 });
       }
       const k = (p: Vec2) => key(p);
@@ -380,5 +419,12 @@ function buildPlan(seed: number, R: number, shape: Shape) {
   const boundsRadius = Math.max(bbox.maxX - bbox.minX, bbox.maxZ - bbox.minZ) / 2 + 40;
   const extent = Math.ceil((Math.max(Math.abs(bbox.minX), Math.abs(bbox.maxX), Math.abs(bbox.minZ), Math.abs(bbox.maxZ)) + 260) * 2 / 100) * 100;
   return { blocks, roadNodes: [...nodes.values()], roadEdges: [...edges.values()], terrain, extent, coast, river, publicSites, parkTrees,
-    urbanBounds, bridges, boundsRadius, carPaths, districtAnchors, highways: highwayRuns, core, islandRadius: R };
+    urbanBounds, bridges, boundsRadius, carPaths, districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks: withBridgeLandmark(landmarks, bridges, random) };
+}
+
+/** 悬索大桥：有河桥时，以一定概率把最长的那座替换成悬索桥（地标，不改路网）。 */
+function withBridgeLandmark(landmarks: Landmark[], bridges: CityLayout["bridges"], random: (key: string) => number): Landmark[] {
+  if (!bridges.length || random("suspension") > 0.55) return landmarks;
+  const longest = [...bridges].sort((a, b) => b.length - a.length)[0];
+  return [...landmarks, { id: "landmark:suspension-bridge", kind: "suspension-bridge", x: longest.from.x, z: longest.from.z, to: longest.to, yaw: longest.angle, radius: 0 }];
 }
