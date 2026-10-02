@@ -2529,6 +2529,8 @@ export async function readSessions(input: {
   provider?: string;
   page_size?: number;
   cursor?: string | null;
+  /** "oldest"：first_event 升序分页（City 一年窗口从最老数据开始装载）。 */
+  order?: "oldest" | "tokens";
 }): Promise<SessionsPage> {
   if ((input.date_from === undefined) !== (input.date_to === undefined)) throw new Error("sessions 日期范围必须成对提供");
   // IPC 边界统一 camelCase：Tauri 2 命令参数只认 camel（dateFrom/hostKind/…）。
@@ -2557,6 +2559,10 @@ export async function readSessions(input: {
   if (input.cursor) {
     if (input.cursor.length > 4096) throw new Error("sessions cursor 不安全");
     args.cursor = input.cursor;
+  }
+  if (input.order) {
+    if (input.order !== "oldest" && input.order !== "tokens") throw new Error("sessions order 不安全");
+    if (input.order === "oldest") args.order = input.order;
   }
   const handler = globalTauri()?.core?.invoke;
   if (!handler) {

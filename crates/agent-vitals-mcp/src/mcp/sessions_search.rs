@@ -20,7 +20,7 @@ const MAX_LIMIT: usize = 500;
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "sessions_search",
-        description: "List sessions active in a day or month in the configured statistics timezone (optionally narrowed to one local hour), each aggregated: token buckets, first/last event, distinct raw model ids, event count, peak-slot token share. Sorted by total tokens descending, keyset-paginated. Sessions are identified only by an opaque per-install session_ref (HMAC) — never a native id. data.window_total_tokens lets a caller check that the returned sessions sum to the window/peak total; if has_more is true the page was truncated and the sum is partial.",
+        description: "List sessions active in a day or month in the configured statistics timezone (optionally narrowed to one local hour), each aggregated: token buckets, first/last event, distinct raw model ids, event count, peak-slot token share. Sorted by total tokens descending, keyset-paginated (order=oldest: first event ascending). Sessions are identified only by an opaque per-install session_ref (HMAC) — never a native id. data.window_total_tokens lets a caller check that the returned sessions sum to the window/peak total; if has_more is true the page was truncated and the sum is partial.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -38,7 +38,9 @@ pub fn spec() -> ToolSpec {
                                 "description": "Optional: drop sessions whose window total is below this." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500,
                            "description": "Page size (default 50, max 500)." },
-                "cursor": { "type": "string", "description": "Opaque cursor from a previous page's data.next_cursor." },
+                "cursor": { "type": "string", "description": "Opaque cursor from a previous page's data.next_cursor. Continue a page with the same order the page was produced with." },
+                "order": { "type": "string", "enum": ["tokens", "oldest"],
+                           "description": "Result ordering: 'tokens' (window total desc, default) or 'oldest' (first event asc). Cursors are order-specific." },
                 "as_of_run_id": { "type": "string", "description": "spec §6.4.1 snapshot token; drift → warning." }
             },
             "additionalProperties": false
@@ -151,6 +153,18 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             parse_cursor(c).ok_or_else(|| ToolError::new("invalid_argument", "malformed `cursor`"))?,
         ),
     };
+    // 排序：`tokens`（默认，窗口 token 降序）或 `oldest`（first_event 升序）。
+    // 游标是 (i64, String) 对，语义随排序变——续页必须用同一种排序。
+    let oldest_first = match args.get("order").and_then(Value::as_str) {
+        None | Some("tokens") => false,
+        Some("oldest") => true,
+        Some(other) => {
+            return Err(ToolError::new(
+                "invalid_argument",
+                format!("`order` must be \"tokens\" or \"oldest\", got {other:?}"),
+            ))
+        }
+    };
 
     let handle = AuthorityHandle::open(data_home)?;
     let conn = handle.conn();
@@ -163,8 +177,8 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         Some((t, k)) => (Some(*t), Some(k.as_str())),
         None => (None, None),
     };
-    let (rows, has_more, window_total, window_session_count) = authority_query::sessions_in_window(
-        conn, start_ms, end_ms, &hosts, model, provider, hour, min_tokens, after_total, after_key, limit,
+    let (rows, has_more, window_total, window_session_count) = authority_query::sessions_in_window_ordered(
+        conn, start_ms, end_ms, &hosts, model, provider, hour, min_tokens, after_total, after_key, limit, oldest_first,
     )
     .map_err(|e| ToolError::new("internal_error", format!("authority query: {e}")))?;
 
@@ -179,7 +193,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let next_cursor = rows
         .last()
         .filter(|_| has_more)
-        .map(|s| make_cursor(s.total(), &s.session_key));
+        .map(|s| make_cursor(if oldest_first { s.first_event_ms } else { s.total() }, &s.session_key));
 
     let sessions: Vec<Value> = rows
         .iter()

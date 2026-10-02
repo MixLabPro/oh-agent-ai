@@ -328,6 +328,8 @@ export class CityEngine {
   applyModel(model: CityModel, reuse = true): void {
     this.model = model;
     if (this.seed === null) return;
+    // 重建前抓显示进度：回访的楼保持高度（不闪缩、不重演生长），新到的楼从 0 长入。
+    const previousDisplays = this.parts ? this.parts.displaySnapshot() : null;
     if (this.parts) {
       this.scene.remove(this.parts.group, this.parts.water);
       this.parts.dispose();
@@ -335,7 +337,7 @@ export class CityEngine {
     }
     const layout = layoutCity(model, reuse ? this.layout : null, this.seed);
     this.layout = layout;
-    this.parts = new CityParts(model, layout);
+    this.parts = new CityParts(model, layout, previousDisplays);
     if (this.assets) this.parts.applyAssets(this.assets);
     this.parts.setSkyMix(this.dayMix);
     this.lastSkyHour = -1; // 新建的 parts 还是白天默认状态：强制下一帧按当前时刻重新应用昼夜（灯光/亮窗/天空）

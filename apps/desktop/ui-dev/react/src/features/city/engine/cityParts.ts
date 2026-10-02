@@ -33,6 +33,9 @@ type BuildingRuntime = {
   paletteWall: THREE.Color;
   display: number;
   target: number;
+  /** 上一份渲染对象里已有高度（分页/刷新回访的楼）：重建不重演生长；
+   *  false = 本轮新到的楼，display 从 0 长入（懒加载的「逐步更新到完整城市」）。 */
+  settled: boolean;
   district: DistrictLayout;
   shaftPrimary: number;
   shaftUpper: number;
@@ -294,10 +297,13 @@ export class CityParts {
   private cursor = Number.NaN;
   private live = true;
   private labelsVisible = true;
+  /** 重建前各楼的显示进度（null = 首个模型，全城直接成像）。 */
+  private previousDisplays: Map<string, number> | null = null;
   hoveredId: string | null = null;
   selectedId: string | null = null;
 
-  constructor(private model: CityModel, private layout: CityLayout) {
+  constructor(private model: CityModel, private layout: CityLayout, previousDisplays: Map<string, number> | null = null) {
+    this.previousDisplays = previousDisplays;
     const total = model.buildings.length;
 
     // ── 静态城（seed 决定）：缓存命中则整段复用，重建只花在建筑层 ──────
@@ -2005,8 +2011,9 @@ export class CityParts {
         facade: -1,
         groundY: district.grounds.get(building.id) ?? 0,
         paletteWall: new THREE.Color(palette.wall).multiplyScalar(0.92 + building.seed * 0.16),
-        display: building.builtFraction,
+        display: this.previousDisplays?.get(building.id) ?? 0,
         target: building.builtFraction,
+        settled: this.previousDisplays ? this.previousDisplays.has(building.id) : true,
         district,
         shaftPrimary: -1,
         shaftUpper: -1,
@@ -2122,7 +2129,9 @@ export class CityParts {
     if (this.decoTrimMesh.instanceColor) this.decoTrimMesh.instanceColor.needsUpdate = true;
     this.craneArmMesh.count = craneCount;
 
-    for (const runtime of this.runtimes) this.applyConstruction(runtime, true);
+    // 初次落矩阵：回访的楼按已知高度写（settled），新到的楼从 display=0 藏起，
+    // 由 update 循环长入——immediate=true 会按 target 写满高，新楼会先闪一下。
+    for (const runtime of this.runtimes) this.applyConstruction(runtime, runtime.settled);
   }
 
   private compose(x: number, y: number, z: number, rotationY: number, sx: number, sy: number, sz: number): void {
@@ -2319,12 +2328,21 @@ export class CityParts {
     }
   }
 
+  /** 重建前的显示进度快照：applyModel 把它交给下一份 CityParts——回访的楼保持
+   *  高度（不重演生长），新到的楼从 0 长入（分页/失效刷新的「逐步长全」）。 */
+  displaySnapshot(): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const [id, runtime] of this.runtimeById) out.set(id, runtime.display);
+    return out;
+  }
+
   /** display/civicProgress 直接对齐 target：模型重建后的第一步。重建时 display
    *  被初始化为「已完工」（closed 的 builtFraction=1，civic 全 1），回放中若任由
    *  动画循环追赶，整城会先闪满高、再被压回时间轴进度——数据加载不应改变城市
    *  已呈现的样子。 */
   snapToTargets(): void {
     for (const runtime of this.runtimes) {
+      if (!runtime.settled) continue; // 新楼交给 update 循环长入
       runtime.display = runtime.target;
       this.applyConstruction(runtime, true);
     }
@@ -2465,6 +2483,7 @@ export class CityParts {
         dirty = true;
       } else if (runtime.display !== runtime.target) {
         runtime.display = runtime.target;
+        runtime.settled = true;
         this.applyConstruction(runtime, false);
         dirty = true;
       }

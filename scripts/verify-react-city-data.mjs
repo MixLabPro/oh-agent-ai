@@ -33,8 +33,10 @@ const row = (index) => ({ session_ref: `session:${index}`, host: "codex", tokens
 
 for (const count of [0, 1, 500, 501, 700, 4500, 5000]) {
   let requests = 0;
-  fixture.readSessions = async ({ cursor, page_size }) => {
+  const orders = [];
+  fixture.readSessions = async ({ cursor, page_size, order }) => {
     requests += 1;
+    orders.push(order ?? null);
     const offset = cursor ? Number(cursor) : 0;
     const end = Math.min(count, offset + page_size);
     return { sessions: Array.from({ length: end - offset }, (_, i) => row(offset + i)), next_cursor: end < count ? String(end) : null, window_session_count: count };
@@ -47,7 +49,10 @@ for (const count of [0, 1, 500, 501, 700, 4500, 5000]) {
   assert.equal(published.at(-1).model.stats.totalSessions, count);
   assert.equal(published.at(-1).model.stats.tokensTotal, Math.min(4500, count) * 1000, "the terminal page is included in token totals");
   assert.equal(published.at(-1).model.stats.truncated, count > 4500);
-  assert.equal(requests, Math.max(1, Math.ceil(Math.min(4500, count) / 500)));
+  // 分页请求一律 oldest（一年窗口从最老数据开始）；截断时补抓最近 2 天一页，
+  // 保住活跃会话——请求数 = 主窗口页数 + (截断 ? 1 : 0)。
+  assert(orders.slice(0, -1).every((order) => order === "oldest"), "window pages request oldest-first");
+  assert.equal(requests, Math.max(1, Math.ceil(Math.min(4500, count) / 500)) + (count > 4500 ? 1 : 0));
   loader.dispose();
 }
-console.log("City loader: empty, single-page, final-page and load-cap publication passed.");
+console.log("City loader: oldest-first paging, empty/single/final-page, load-cap and truncation hedge passed.");

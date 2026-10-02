@@ -1332,6 +1332,31 @@ pub fn sessions_in_window(
     after_key: Option<&str>,
     limit: usize,
 ) -> Result<(Vec<SessionAgg>, bool, i64, usize), AuthorityError> {
+    sessions_in_window_ordered(
+        conn, start_ms, end_ms, hosts, model, provider, hour, min_tokens,
+        after_total, after_key, limit, false,
+    )
+}
+
+/// `sessions_in_window` 的全参版。`oldest_first=true` 时排序与 keyset 游标改为
+/// `(first_event_ms, session_key)` 升序——供桌面 City 装载器从最老数据开始分页
+/// （默认的 token 降序在装载上限内只会到达「token 最大」的会话，一年窗口下
+/// 最老的城市地基永远到不了）。游标编码仍是 (i64, String) 对，语义随排序变。
+#[allow(clippy::too_many_arguments)] // 查询面就是这十来个过滤器；包结构体反而破坏调用点可读性
+pub fn sessions_in_window_ordered(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    hosts: &[String],
+    model: Option<&str>,
+    provider: Option<&str>,
+    hour: Option<u32>,
+    min_tokens: i64,
+    after_total: Option<i64>,
+    after_key: Option<&str>,
+    limit: usize,
+    oldest_first: bool,
+) -> Result<(Vec<SessionAgg>, bool, i64, usize), AuthorityError> {
     let selected: Vec<String> = if hosts.is_empty() {
         conn.prepare("SELECT DISTINCT host FROM usage_facts WHERE deleted_at_ms IS NULL ORDER BY host")?
             .query_map([], |r| r.get(0))?
@@ -1374,10 +1399,18 @@ pub fn sessions_in_window(
     let window_session_count = all.len();
 
     all.retain(|s| s.total() >= min_tokens);
-    // total 降序、session_key 升序——稳定、可 keyset 分页。
-    all.sort_by(|x, y| y.total().cmp(&x.total()).then_with(|| x.session_key.cmp(&y.session_key)));
-    if let (Some(at), Some(ak)) = (after_total, after_key) {
-        all.retain(|s| s.total() < at || (s.total() == at && s.session_key.as_str() > ak));
+    if oldest_first {
+        // first_event 升序、session_key 升序——「从最老的数据开始」的分页序。
+        all.sort_by(|x, y| x.first_event_ms.cmp(&y.first_event_ms).then_with(|| x.session_key.cmp(&y.session_key)));
+        if let (Some(at), Some(ak)) = (after_total, after_key) {
+            all.retain(|s| s.first_event_ms > at || (s.first_event_ms == at && s.session_key.as_str() > ak));
+        }
+    } else {
+        // total 降序、session_key 升序——稳定、可 keyset 分页。
+        all.sort_by(|x, y| y.total().cmp(&x.total()).then_with(|| x.session_key.cmp(&y.session_key)));
+        if let (Some(at), Some(ak)) = (after_total, after_key) {
+            all.retain(|s| s.total() < at || (s.total() == at && s.session_key.as_str() > ak));
+        }
     }
     let has_more = all.len() > limit;
     all.truncate(limit);
@@ -3142,6 +3175,31 @@ mod tests {
         assert_eq!(provider_count, 1);
         assert_eq!(provider_total, 500);
         assert_eq!(rows[0].session_key, "kB");
+
+        // oldest_first：first_event 升序 + (first_event, session_key) keyset 续页。
+        // City 一年窗口从最老数据开始装载——token 序下被上限裁掉的永远是最老的
+        // 会话，这里钉住装载序与游标语义。
+        let (page1, more1, _, _) = sessions_in_window_ordered(
+            db.conn(), start, end, &[], None, None, None, 0, None, None, 2, true,
+        )
+        .unwrap();
+        assert_eq!(
+            page1.iter().map(|s| s.session_key.as_str()).collect::<Vec<_>>(),
+            vec!["kA", "kC"],
+            "oldest_first 按 first_event 升序（kA@9:00, kC@9:01），token 序完全相反"
+        );
+        assert!(more1);
+        let cursor_at = page1.last().unwrap().first_event_ms; // h9+60s (kC)
+        let (page2, more2, _, _) = sessions_in_window_ordered(
+            db.conn(), start, end, &[], None, None, None, 0, Some(cursor_at), Some("kC"), 2, true,
+        )
+        .unwrap();
+        assert_eq!(
+            page2.iter().map(|s| s.session_key.as_str()).collect::<Vec<_>>(),
+            vec!["kB"],
+            "游标之后只剩 first_event 更晚（或同刻更大 key）的会话"
+        );
+        assert!(!more2);
         let _ = std::fs::remove_file(&path);
     }
 
