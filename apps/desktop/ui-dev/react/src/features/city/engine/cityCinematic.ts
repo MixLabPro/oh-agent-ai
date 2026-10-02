@@ -94,7 +94,12 @@ export function planCinematic(layout: CityLayout, model: CityModel, heights: Map
     const n = near(phi);
     const x = center.x + Math.cos(phi) * n.radius;
     const z = center.z + Math.sin(phi) * n.radius;
-    return { pos: [x, groundAt(x, z) + n.height, z] as [number, number, number], look: [n.look.x, 8, n.look.z] as [number, number, number] };
+    // 高度参考取周围 70 范围的地形均值（再不低于脚下地形）：海岸山崖处地形在 10 单位内从 0 升到几十，
+    // 直接用脚下高度镜头会跟着跳（seed 42：单帧速度突变）。
+    let sum = 0;
+    for (let k = 0; k < 12; k += 1) { const a2 = (k / 12) * Math.PI * 2; sum += groundAt(x + Math.cos(a2) * 70, z + Math.sin(a2) * 70); }
+    const reference = Math.max(groundAt(x, z), (sum / 12 + groundAt(x, z)) / 2);
+    return { pos: [x, reference + n.height, z] as [number, number, number], look: [n.look.x, 8, n.look.z] as [number, number, number] };
   };
 
   // 1. 远海推近：沿起点方位从海上高空压向城市。

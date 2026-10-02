@@ -40,14 +40,15 @@ function validate(layout, input) {
   for (const [, parcel] of all) {
     assert(Number.isFinite(layout.terrain.height(parcel.x, parcel.z)));
     assert.equal(layout.terrain.height(parcel.x, parcel.z), 1.2, "buildings occupy the level coastal plain");
+    // Parcel footprint (half-diagonal of width × depth) must clear every street + sidewalk, in any direction.
+    // 曾只检查水平/竖直路段：街网一旦斜向（warp 后已是斜的，G2 起各片区朝向不同）这条断言就形同虚设。
+    const halfDiagonal = Math.hypot(parcel.width, parcel.depth) / 2;
     for (const edge of layout.roadEdges) {
       const [a, b] = edge.points;
-      // Parcel rectangle must not intersect even the widest street + sidewalk.
-      if (a.x === b.x && parcel.z >= Math.min(a.z, b.z) && parcel.z <= Math.max(a.z, b.z)) {
-        assert(Math.abs(parcel.x - a.x) >= parcel.width / 2 + edge.width / 2 + 1);
-      } else if (a.z === b.z && parcel.x >= Math.min(a.x, b.x) && parcel.x <= Math.max(a.x, b.x)) {
-        assert(Math.abs(parcel.z - a.z) >= parcel.depth / 2 + edge.width / 2 + 1);
-      }
+      const dx = b.x - a.x; const dz = b.z - a.z;
+      const t = Math.max(0, Math.min(1, ((parcel.x - a.x) * dx + (parcel.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
+      const gap = Math.hypot(parcel.x - a.x - dx * t, parcel.z - a.z - dz * t);
+      assert(gap >= halfDiagonal + edge.width / 2 + 0.5, `parcel ${parcel.id} overlaps road ${edge.id} (gap ${gap.toFixed(1)})`);
     }
   }
   const edgePairs = new Set(layout.roadEdges.map((edge) => [edge.from, edge.to].sort().join("/")));

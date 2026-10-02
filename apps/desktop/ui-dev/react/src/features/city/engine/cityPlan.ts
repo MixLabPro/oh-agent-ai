@@ -132,7 +132,8 @@ function buildPlan(seed: number, R: number, shape: Shape) {
     const hills = smoothstep(hillLine - 10, hillLine + reach * 0.3, hillProj(x, z)) * (30 + 65 * fbm(x * 0.012, z * 0.013, seed, 4));
     return smoothstep(0, 10, inland) * (1.2 + hills);
   };
-  const buildable = (x: number, z: number) => landClearance(x, z) > 12 && hillProj(x, z) < hillLine;
+  // 离山脚留 12：山体高度从 hillLine−10 开始起坡，地块要落在 1.2 的平地上。
+  const buildable = (x: number, z: number) => landClearance(x, z) > 12 && hillProj(x, z) < hillLine - 12;
   const terrain: TerrainField = {
     height, slope: (x, z) => Math.hypot(height(x + 1, z) - height(x - 1, z), height(x, z + 1) - height(x, z - 1)) / 2,
     buildable, center: { x: 0, z: 0 }, radius: R * 1.3, coastRadius: () => R, hasRiver,
@@ -186,71 +187,157 @@ function buildPlan(seed: number, R: number, shape: Shape) {
     place("working-harbor", "harbor", inward, 37, -Math.atan2(shore.z - core.z, shore.x - core.x));
   }
 
-  // ── 街区网格：按岛包围盒生成（曾是固定的 x≈±600 / z≈-455..520）。x=0 经 warp 对齐到河心，
-  // 第 0 列是河道空隙（无河时照常铺）。
-  const xs = new Map<number, number>([[0, -48], [1, 48]]);
-  let west = 0;
-  while (xs.get(west)! + riverShift > bbox.minX - 40) { west -= 1; xs.set(west, xs.get(west + 1)! - (43 + random(`west${-west}`) * 16)); }
-  let east = 1;
-  while (xs.get(east)! + riverShift < bbox.maxX + 40) { east += 1; xs.set(east, xs.get(east - 1)! + (49 + random(`east${east}`) * 19)); }
-  const zs = new Map<number, number>([[0, core.z - 15]]);
-  let north = 0;
-  while (zs.get(north)! > bbox.minZ - 40) { north -= 1; zs.set(north, zs.get(north + 1)! - (34 + random(`north${-north}`) * 17)); }
-  let south = 0;
-  while (zs.get(south)! < bbox.maxZ + 40) { south += 1; zs.set(south, zs.get(south - 1)! + (35 + random(`south${south}`) * 20)); }
-  const warp = (x: number, z: number): Vec2 => {
-    const wz = z + Math.sin(x * 0.006 + phase) * 21 + (x < 0 ? x * 0.14 : -x * 0.07) * 0.6;
-    return { x: x + riverX(wz), z: wz };
-  };
-  const blocks: CityBlock[] = [];
+  // ── L2 骨架（CITY_PLANNING_SPEC §4.3）──
+  // 主干道从核心放射、沿陆地延伸到海边，过河处自动成桥；环线高架绕核心一圈（沿陆地断续）；
+  // 主干道之间每个扇区各铺一张朝向沿扇区放射方向的街网——不再是全岛一张方格（曾经整张方格盖在岛上）。
   const nodes = new Map<string, RoadNode>(); const edges = new Map<string, RoadEdge>();
-  const addEdge = (a: Vec2, b: Vec2, arterial: boolean, bridge = false) => {
-    const from = roadNodeId(a); const to = roadNodeId(b); const id = [from, to].sort().join("/");
+  const key = (p: Vec2) => ({ x: Math.round(p.x * 100) / 100, z: Math.round(p.z * 100) / 100 });
+  const addEdge = (a0: Vec2, b0: Vec2, arterial: boolean, bridge = false) => {
+    const a = key(a0); const b = key(b0);
+    const from = roadNodeId(a); const to = roadNodeId(b); if (from === to) return;
+    const id = [from, to].sort().join("/");
     nodes.set(from, { ...a, id: from }); nodes.set(to, { ...b, id: to });
-    edges.set(id, { id, from, to, width: arterial ? 8 : 5, kind: arterial ? "arterial" : "local", points: [a, b], bridge });
+    if (!edges.has(id)) edges.set(id, { id, from, to, width: arterial ? 8 : 5, kind: arterial ? "arterial" : "local", points: [a, b], bridge });
   };
-  const zoneFor = (center: Vec2, col: number, row: number): Zone => {
-    // 分区由地理决定（曾按网格行列号）：核心附近 downtown、临海 waterfront、主干道沿线 commercial、其余 residential。
+  const inRiver = (x: number, z: number) => hasRiver && coastDistance(x, z) > 0 && Math.abs(x - riverX(z)) < riverWidth(z);
+
+  // 主干道：5–6 条，均分方位 + 抖动；指向山脊的方向（与山脊方位夹角 < 40°）不修路。
+  const trunkCount = 5 + Math.floor(random("trunks") * 2);
+  const trunkBase = random("trunkBase") * Math.PI * 2;
+  const trunks: Array<{ angle: number; points: Vec2[] }> = [];
+  const bridges: CityLayout["bridges"] = [];
+  for (let i = 0; i < trunkCount; i += 1) {
+    const angle = trunkBase + (i / trunkCount) * Math.PI * 2 + (random(`trunkJ${i}`) - 0.5) * 0.35;
+    const dir = { x: Math.cos(angle), z: Math.sin(angle) };
+    if (dir.x * hillDir.x + dir.z * hillDir.z > Math.cos((40 * Math.PI) / 180)) continue;
+    const points: Vec2[] = [core];
+    let water = 0;
+    for (let step = 1; step < 400; step += 1) {
+      const q = { x: core.x + dir.x * step * 12, z: core.z + dir.z * step * 12 };
+      if (inRiver(q.x, q.z)) { water += 12; if (water > 140) break; continue; } // 河：最多跨 140
+      if (!buildable(q.x, q.z)) break;
+      if (water > 0) {
+        // 刚过完河：把对岸点接上，这一段是桥。
+        const from = points[points.length - 1];
+        bridges.push({ from, to: q, angle: Math.atan2(q.z - from.z, q.x - from.x), length: Math.hypot(q.x - from.x, q.z - from.z) });
+        addEdge(from, q, true, true);
+        points.push(q);
+        water = 0;
+        continue;
+      }
+      if (step % 3 === 0) points.push(q);
+    }
+    if (points.length < 3) continue;
+    for (let k = 1; k < points.length; k += 1) {
+      const isBridge = bridges.some((bridge) => bridge.to === points[k]);
+      if (!isBridge) addEdge(points[k - 1], points[k], true);
+    }
+    trunks.push({ angle, points });
+  }
+  trunks.sort((p, q) => p.angle - q.angle);
+  const distanceToTrunks = (p: Vec2) => {
+    let d = Infinity;
+    for (const trunk of trunks) for (let k = 1; k < trunk.points.length; k += 1) d = Math.min(d, segmentDistance(p, trunk.points[k - 1], trunk.points[k]));
+    return d;
+  };
+
+  // 环线高架：半径 0.55R ± fbm，沿陆地断续（落水或进山就断开），作为高架（不是地面道路）。
+  const ringRadius = 0.55 * R;
+  const ringRuns: Vec2[][] = [];
+  let run: Vec2[] = [];
+  for (let i = 0; i <= 96; i += 1) {
+    const t = (i / 96) * Math.PI * 2;
+    const r = ringRadius * (1 + 0.08 * fbm(Math.cos(t) * 1.7, Math.sin(t) * 1.7, seed + 91, 2));
+    const q = { x: core.x + Math.cos(t) * r, z: core.z + Math.sin(t) * r };
+    if (buildable(q.x, q.z) || inRiver(q.x, q.z)) run.push(q);
+    else { if (run.length >= 6) ringRuns.push(run); run = []; }
+  }
+  if (run.length >= 6) ringRuns.push(run);
+  const distanceToRing = (p: Vec2) => {
+    let d = Infinity;
+    for (const ring of ringRuns) for (let k = 1; k < ring.length; k += 1) d = Math.min(d, segmentDistance(p, ring[k - 1], ring[k]));
+    return d;
+  };
+
+  const zoneFor = (center: Vec2): Zone => {
+    // 分区由地理与骨架决定：核心附近 downtown、临海 waterfront、主干道两侧 commercial、其余 residential。
     if (Math.hypot(center.x - core.x, center.z - core.z) < 0.24 * R) return "downtown";
     if (coastDistance(center.x, center.z) < 90) return "waterfront";
-    if (row % 3 === 0 || col % 3 === 0) return "commercial";
+    if (distanceToTrunks(center) < 60) return "commercial";
     return "residential";
   };
-  for (let row = north; row < south; row += 1) for (let col = west; col < east; col += 1) {
-    if (col === 0 && hasRiver) continue;
-    const x0 = xs.get(col)!; const x1 = xs.get(col + 1)!; const z0 = zs.get(row)!; const z1 = zs.get(row + 1)!;
-    const polygon = [warp(x0, z0), warp(x1, z0), warp(x1, z1), warp(x0, z1)];
-    // Reject whole fringe blocks; never draw a road or parcel through coast/river.
-    if (polygon.some((p) => !buildable(p.x, p.z))) continue;
-    if (polygon.some((p, i) => { const q = polygon[(i + 1) % 4]; return !buildable((p.x + q.x) / 2, (p.z + q.z) / 2); })) continue;
-    const center = warp((x0 + x1) / 2, (z0 + z1) / 2);
-    const reserved = publicSites.some((site) => polygonDistance(site, polygon) > -site.radius);
-    const zone = zoneFor(center, col, row);
-    const id = `plan:${col}:${row}`; const parcels: Parcel[] = [];
-    const columnCount = Math.max(3, Math.floor((x1 - x0 - 14) / 7.2));
-    for (let side = 0; side < 2 && !reserved; side += 1) for (let index = 0; index < columnCount; index += 1) {
-      const a = polygon[side === 0 ? 0 : 3]; const b = polygon[side === 0 ? 1 : 2];
-      const length = Math.hypot(b.x - a.x, b.z - a.z); const dx = (b.x - a.x) / length; const dz = (b.z - a.z) / length;
-      const t = (index + 0.5) / columnCount; const inset = side === 0 ? 12 : -12;
-      const p = { x: a.x + dx * (7 + (length - 14) * t) - dz * inset, z: a.z + dz * (7 + (length - 14) * t) + dx * inset };
-      const half = 3.6;
-      if (polygonDistance(p, polygon) < half + 5) continue;
-      if (publicSites.some((site) => Math.hypot(p.x - site.x, p.z - site.z) < site.radius + 9)) continue;
-      parcels.push({ ...p, id: `${id}/${side}:${index}`, blockId: id, yaw: -Math.atan2(dz, dx), zone, width: Math.min(7.2, (length - 14) / columnCount), depth: 8 });
+
+  // 扇区街网：相邻两条主干道之间，网格 u 轴沿扇区的平分方向（放射向），v 轴垂直。
+  const blocks: CityBlock[] = [];
+  const angleBetween = (a: number, lo: number, hi: number) => {
+    const span = ((hi - lo) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) || Math.PI * 2;
+    const off = ((a - lo) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+    return off > 0 && off < span;
+  };
+  const sectors = trunks.length ? trunks.map((trunk, i) => ({ lo: trunk.angle, hi: trunks[(i + 1) % trunks.length].angle })) : [{ lo: 0, hi: Math.PI * 2 }];
+  sectors.forEach((sector, sectorIndex) => {
+    const span = ((sector.hi - sector.lo) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) || Math.PI * 2;
+    const theta = sector.lo + span / 2;
+    const u = { x: Math.cos(theta), z: Math.sin(theta) };
+    const v = { x: -u.z, z: u.x };
+    const du = 44 + random(`du${sectorIndex}`) * 10;
+    const dv = 40 + random(`dv${sectorIndex}`) * 12;
+    const at = (i: number, j: number): Vec2 => ({ x: core.x + u.x * i * du + v.x * j * dv, z: core.z + u.z * i * du + v.z * j * dv });
+    const reachCells = Math.ceil((R * 1.6) / Math.min(du, dv));
+    for (let i = 1; i < reachCells; i += 1) for (let j = -reachCells; j < reachCells; j += 1) {
+      const polygon = [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)];
+      const center = at(i + 0.5, j + 0.5);
+      const centerAngle = Math.atan2(center.z - core.z, center.x - core.x);
+      if (!angleBetween(centerAngle, sector.lo, sector.hi)) continue;
+      // 四角都在本扇区内（不和相邻扇区的街网重叠）、可建、离主干道与环线高架留出路幅。
+      if (polygon.some((p) => !angleBetween(Math.atan2(p.z - core.z, p.x - core.x), sector.lo, sector.hi))) continue;
+      if (polygon.some((p) => !buildable(p.x, p.z))) continue;
+      if (polygon.some((p, k) => { const q = polygon[(k + 1) % 4]; return !buildable((p.x + q.x) / 2, (p.z + q.z) / 2); })) continue;
+      if ([center, ...polygon].some((p) => distanceToTrunks(p) < 10)) continue;
+      if ([center, ...polygon].some((p) => distanceToRing(p) < 9)) continue;
+      const reserved = publicSites.some((site) => polygonDistance(site, polygon) > -site.radius);
+      const zone = zoneFor(center);
+      const id = `plan:${sectorIndex}:${i}:${j}`; const parcels: Parcel[] = [];
+      const sideLength = Math.hypot(polygon[1].x - polygon[0].x, polygon[1].z - polygon[0].z);
+      const columnCount = Math.max(3, Math.floor((sideLength - 14) / 7.2));
+      for (let side = 0; side < 2 && !reserved; side += 1) for (let index = 0; index < columnCount; index += 1) {
+        const a = polygon[side === 0 ? 0 : 3]; const b = polygon[side === 0 ? 1 : 2];
+        const length = Math.hypot(b.x - a.x, b.z - a.z); const dx = (b.x - a.x) / length; const dz = (b.z - a.z) / length;
+        const t = (index + 0.5) / columnCount; const inset = side === 0 ? 12 : -12;
+        const p = { x: a.x + dx * (7 + (length - 14) * t) - dz * inset, z: a.z + dz * (7 + (length - 14) * t) + dx * inset };
+        if (polygonDistance(p, polygon) < 3.6 + 5) continue;
+        if (publicSites.some((site) => Math.hypot(p.x - site.x, p.z - site.z) < site.radius + 9)) continue;
+        parcels.push({ ...p, id: `${id}/${side}:${index}`, blockId: id, yaw: -Math.atan2(dz, dx), zone, width: Math.min(7.2, (length - 14) / columnCount), depth: 8 });
+      }
+      const k = (p: Vec2) => key(p);
+      blocks.push({ id, districtId: "", ...center, width: du, depth: dv, zone, parcels, polygon: polygon.map(k) });
+      // 每 3 条网格线一条主干级街道（宽 8），其余为支路。
+      polygon.forEach((p, e) => addEdge(p, polygon[(e + 1) % 4], e % 2 === 0 ? j % 3 === 0 : i % 3 === 0));
     }
-    blocks.push({ id, districtId: "", ...center, width: x1 - x0, depth: z1 - z0, zone, parcels, polygon });
-    polygon.forEach((p, i) => addEdge(p, polygon[(i + 1) % 4], i % 2 === 0 ? row % 3 === 0 : col % 3 === 0));
-  }
-  const bridges: CityLayout["bridges"] = [];
-  if (hasRiver) {
-    for (const [row, z] of zs) {
-      if (row % 3 !== 0) continue;
-      const from = warp(xs.get(0)!, z); const to = warp(xs.get(1)!, z);
-      if (!nodes.has(roadNodeId(from)) || !nodes.has(roadNodeId(to))) continue;
-      addEdge(from, to, true, true);
-      bridges.push({ from, to, angle: Math.atan2(to.z - from.z, to.x - from.x), length: Math.hypot(to.x - from.x, to.z - from.z) });
+  });
+
+  // 连通：各扇区街网可能被河/保留用地切成几块。并查集找连通分量，每个不含核心的分量用一条支路
+  // 接到最近的主干道节点（主干道都从核心出发，彼此已连通）。
+  {
+    const parent = new Map<string, string>();
+    const find = (x: string): string => { let r = x; while (parent.get(r) !== r) r = parent.get(r)!; let c = x; while (parent.get(c) !== r) { const n = parent.get(c)!; parent.set(c, r); c = n; } return r; };
+    for (const id of nodes.keys()) parent.set(id, id);
+    for (const edge of edges.values()) { const ra = find(edge.from); const rb = find(edge.to); if (ra !== rb) parent.set(ra, rb); }
+    const coreId = roadNodeId(key(core));
+    const trunkNodes = trunks.flatMap((trunk) => trunk.points.map((p) => key(p)));
+    const groups = new Map<string, RoadNode[]>();
+    for (const node of nodes.values()) { const r = find(node.id); const list = groups.get(r); if (list) list.push(node); else groups.set(r, [node]); }
+    for (const [root, members] of groups) {
+      if (nodes.has(coreId) && root === find(coreId)) continue;
+      let best: { a: RoadNode; b: Vec2; d: number } | null = null;
+      for (const a of members) for (const b of trunkNodes) {
+        const d = Math.hypot(a.x - b.x, a.z - b.z);
+        if (!best || d < best.d) best = { a, b, d };
+      }
+      if (best && best.d < 400) addEdge(best.a, best.b, false);
     }
   }
+
   const parkTrees: CityLayout["parkTrees"] = [];
   const spanX = bbox.maxX - bbox.minX + 120; const spanZ = bbox.maxZ - bbox.minZ + 120;
   // 路段按 60 单位网格分桶：逐棵树对全部路段算距离是百万级运算（单岛 0.2–1 s 的主要来源）。
@@ -285,19 +372,8 @@ function buildPlan(seed: number, R: number, shape: Shape) {
   }
   const districtAnchors = anchorsPlaced.map(({ x, z }) => ({ x, z }));
 
-  // 内部高架：沿离核心偏南 0.2R 最近的一条网格横线，裁到陆地。
-  let highwayRow = 0; let gap = Infinity;
-  for (const [row, z] of zs) if (Math.abs(z - (core.z + 0.2 * R)) < gap) { gap = Math.abs(z - (core.z + 0.2 * R)); highwayRow = row; }
-  const highwayZ = zs.get(highwayRow)!;
-  const highwayRuns: Vec2[][] = [];
-  const line: Vec2[] = [];
-  for (let i = 0; i <= 100; i += 1) line.push(warp(xs.get(west)! + (xs.get(east)! - xs.get(west)!) * (i / 100), highwayZ));
-  const onLand = (p: Vec2) => buildable(p.x, p.z);
-  let start = 0; let end = line.length - 1;
-  while (start < line.length && !onLand(line[start])) start += 1;
-  while (end >= 0 && !onLand(line[end])) end -= 1;
-  start = Math.max(0, start - 1); end = Math.min(line.length - 1, end + 1);
-  if (end - start >= 8) highwayRuns.push(line.slice(start, end + 1));
+  // 高架：环线（沿陆地断续），取代原来按常量画在城北的一条直线。
+  const highwayRuns: Vec2[][] = ringRuns;
 
   // 下游读的边界：全部由岛的实际包围盒推导（曾是常量 ±570 / -350..430 / 650 / 1600）。
   const urbanBounds = { left: bbox.minX + 30, right: bbox.maxX - 30, north: bbox.minZ + 30, south: bbox.maxZ - 30 };

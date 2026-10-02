@@ -543,89 +543,39 @@ export class CityParts {
 
   /** Batched city furniture and waterfront infrastructure, not selectable data. */
   private buildInfrastructure(): void {
-    type Part = { x: number; y: number; z: number; sx: number; sy: number; sz: number; color: string; tilt?: number };
+    type Part = { x: number; y: number; z: number; sx: number; sy: number; sz: number; color: string; tilt?: number; yaw?: number };
     const parts: Part[] = [];
-    const add = (x: number, y: number, z: number, sx: number, sy: number, sz: number, color: string, tilt = 0) => parts.push({ x, y, z, sx, sy, sz, color, tilt });
+    const add = (x: number, y: number, z: number, sx: number, sy: number, sz: number, color: string, tilt = 0, yaw = 0) => parts.push({ x, y, z, sx, sy, sz, color, tilt, yaw });
     // Curbs and street lights are real geometry; asphalt and markings share the atlas.
     for (const edge of this.layout.roadEdges) {
       // 过河的桥路段没有桥面可依附：路缘石/路灯会悬在水面上，像河里一排排虚线。
       if (edge.bridge) continue;
+      // 沿路段的实际方向摆放（G2 起各片区街网朝向不同；曾只认水平/竖直两种方向）。
       const [a, b] = edge.points;
-      const horizontal = a.z === b.z;
-      const length = Math.hypot(b.x - a.x, b.z - a.z) - 11;
+      const segment = Math.hypot(b.x - a.x, b.z - a.z);
+      if (segment < 14) continue;
+      const length = segment - 11;
+      const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
+      const nx = -(b.z - a.z) / segment; const nz = (b.x - a.x) / segment; // 路段法向
       const x = (a.x + b.x) / 2; const z = (a.z + b.z) / 2;
+      const base = Math.max(0, this.layout.terrain.height(x, z));
       for (const side of [-1, 1]) {
         const offset = side * (edge.width / 2 + 0.25);
-        add(x + (horizontal ? 0 : offset), 1.22, z + (horizontal ? offset : 0), horizontal ? length : 0.35, 0.18, horizontal ? 0.35 : length, "#cbc6ba");
+        add(x + nx * offset, base + 0.02, z + nz * offset, length, 0.18, 0.35, "#cbc6ba", 0, yaw);
       }
       if (edge.kind === "arterial") {
-        const lx = x + (horizontal ? 0 : edge.width / 2 + 0.9);
-        const lz = z + (horizontal ? edge.width / 2 + 0.9 : 0);
-        add(lx, 1.2, lz, 0.2, 4.5, 0.2, "#697477");
-        add(lx, 5.65, lz, horizontal ? 0.3 : 1.6, 0.2, horizontal ? 1.6 : 0.3, "#d8d3b8");
+        const lx = x + nx * (edge.width / 2 + 0.9);
+        const lz = z + nz * (edge.width / 2 + 0.9);
+        add(lx, base, lz, 0.2, 4.5, 0.2, "#697477");
+        add(lx - nx * 0.6, base + 4.45, lz - nz * 0.6, 0.3, 0.2, 1.6, "#d8d3b8", 0, yaw);
       }
     }
-    const { left, right, north, south } = this.layout.urbanBounds;
-    const highwayZ = north - 12;
-    const highwayWidth = right - left + 36;
-    // 北环高架只铺在「陆地/河面上、且地形低于桥面」的路段：原先整条直线铺满，
-    // 在北侧山体里被埋、出海岸线后又悬在海上（断头桥）。
-    const terrain = this.layout.terrain;
-    const ringStep = 9;
-    const samples: Array<{ x: number; land: boolean; low: boolean }> = [];
-    for (let x = left - 18; x <= right + 18; x += ringStep) {
-      const h = terrain.height(x, highwayZ);
-      samples.push({ x, land: h >= -0.3, low: h < 4.8 });
-    }
-    const firstLand = samples.findIndex((sample) => sample.land && sample.low);
-    const lastLand = samples.length - 1 - [...samples].reverse().findIndex((sample) => sample.land && sample.low);
-    const rampEnds: Array<{ x: number; dir: number }> = [];
-    if (firstLand >= 0 && lastLand > firstLand) {
-      let runStart = -1;
-      const flush = (end: number) => {
-        if (runStart < 0 || end <= runStart) { runStart = -1; return; }
-        const x0 = samples[runStart].x;
-        const x1 = samples[end].x;
-        add((x0 + x1) / 2, 7.4, highwayZ, x1 - x0, 0.9, 9, "#6a7071");
-        for (const offset of [-4.4, 0, 4.4]) add((x0 + x1) / 2, 8.3, highwayZ + offset, x1 - x0, 0.5, 0.28, "#c6c6bb");
-        for (let x = x0; x <= x1; x += 27) {
-          const ground = Math.max(-3, terrain.height(x, highwayZ));
-          add(x, ground, highwayZ, 1.6, 7.4 - ground, 5.8, "#a9aaa0");
-          for (const offset of [-2.2, 2.2]) add(x, 8.32, highwayZ + offset, 9, 0.03, 0.18, "#ddd4aa");
-        }
-        runStart = -1;
-      };
-      for (let index = firstLand; index <= lastLand; index += 1) {
-        if (samples[index].low) {
-          if (runStart < 0) runStart = index;
-        } else flush(index - 1);
-      }
-      flush(lastLand);
-      if (samples[firstLand].x <= left + 20) rampEnds.push({ x: left, dir: -1 });
-      if (samples[lastLand].x >= right - 20) rampEnds.push({ x: right, dir: 1 });
-    }
-    // Long east/west approaches descend onto the perimeter streets — only where the ring really lands on ground.
-    for (const end of rampEnds) {
-      const rampLength = 66;
-      add(end.x, 4.25, highwayZ + rampLength / 2, 6, 0.65, rampLength, "#737a79", Math.atan2(7.1, rampLength));
-    }
-    // Port: two piers, warehouses, container stacks and two gantry cranes.
-    for (let index = 0; index < 2; index += 1) {
-      const x = right - 80 + index * 55;
-      add(x, 0.15, south + 58, 16, 1.05, 60, "#a8a899");
-      add(x, 1.2, south + 35, 21, 5, 12, "#bbc0b7");
-      add(x, 6.2, south + 35, 23, 0.45, 14, "#7c8988");
-      for (const dx of [-6, 6]) add(x + dx, 1.2, south + 65, 0.8, 15, 0.8, "#b19364");
-      add(x, 16.2, south + 65, 15, 0.9, 1, "#b19364");
-      add(x + 4, 16.7, south + 65, 23, 0.5, 0.5, "#b19364");
-      for (let item = 0; item < 8; item += 1) {
-        add(x + (item % 2 ? 3 : -3), 1.2, south + 47 + Math.floor(item / 2) * 7, 4.5, 2.4, 5.8, ["#a9684f", "#647f84", "#bab092"][item % 3]);
-      }
-    }
+    // 城北高架与城南港口曾按常量坐标（urbanBounds.north − 12 / right − 80、south + 58）摆放、与地理无关：
+    // G2 起高架是规划层的环线（buildDistrictExpressways 渲染），港口是 harbor 公共用地（buildPublicSites）。
     const mesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#ffffff" }), parts.length);
     parts.forEach((part, index) => {
       this.positionVector.set(part.x, part.y, part.z);
-      this.euler.set(part.tilt ?? 0, 0, 0);
+      this.euler.set(part.tilt ?? 0, part.yaw ?? 0, 0);
       this.quaternion.setFromEuler(this.euler);
       this.scaleVector.set(part.sx, part.sy, part.sz);
       this.matrix.compose(this.positionVector, this.quaternion, this.scaleVector);
