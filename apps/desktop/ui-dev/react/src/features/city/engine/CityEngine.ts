@@ -30,6 +30,8 @@ import { CityParts, type QualityLevel } from "./cityParts";
 import { skyStateAt, type CitySkyPreset } from "./citySky";
 import { CityAurora } from "./cityAurora";
 import { CityAmbient } from "./cityAmbient";
+import { CityWildlife } from "./cityWildlife";
+import { RainbowArch, RainOverlay, weatherAt } from "./cityWeather";
 
 /** 航拍的昼夜区间（小时）：黄昏渐入，片尾 > 19:00 城市全亮（见 citySky 的灯光曲线）。 */
 const CINEMATIC_HOUR_FROM = 15;
@@ -79,6 +81,9 @@ export class CityEngine {
   private lastSkyHour = -1;
   private aurora: CityAurora | null = null;
   private ambient: CityAmbient | null = null;
+  private wildlife: CityWildlife | null = null;
+  private rain: RainOverlay | null = null;
+  private rainbow: RainbowArch | null = null;
   private fillLight: THREE.DirectionalLight | null = null;
   private backLight: THREE.DirectionalLight | null = null;
   /** 当前 theme 的立面自发光基线（昼夜在其上抬升）。 */
@@ -369,6 +374,9 @@ export class CityEngine {
     this.ambient?.dispose();
     this.ambient = new CityAmbient(this.cityCenter, Math.max(120, layout.boundsRadius) * 0.6, layout.terrain.height, layout.river);
     this.scene.add(this.ambient.group);
+    this.wildlife?.dispose();
+    this.wildlife = new CityWildlife(this.cityCenter, Math.max(120, layout.boundsRadius), layout.parkTrees ?? [], layout.seaMountains ?? []);
+    this.scene.add(this.wildlife.group);
     if (!this.fillLight) {
       this.fillLight = new THREE.DirectionalLight("#cfe8ef", 0.35);
       this.backLight = new THREE.DirectionalLight("#ffffff", 0.15);
@@ -875,6 +883,58 @@ export class CityEngine {
     this.applyDayMix(hour);
     const sky = skyStateAt(hour);
     this.applySky(sky);
+    // 天气（按日期确定性）：航拍/胶片导出走晴朗（可复现），回放与实况按当天。
+    if (!this.cinematic) this.applyWeather(this.cursorMs ?? Date.now());
+  }
+
+  /** 天气后处理（applySky 之后）：阴/雨对光照、雾、天色、云、水色的幂等调制——
+   *  applySky 每个节流 tick 先按预设重写，这里再乘天气系数，不累积。夜灯判定
+   *  在 applySky 内由未调制的 sunIntensity 推导，雨天中午不会被误判成夜晚开灯。 */
+  private applyWeather(ms: number): void {
+    const state = weatherAt(ms);
+    const overcast = state.overcast;
+    if (!this.rain) {
+      this.rain = new RainOverlay();
+      this.scene.add(this.rain.mesh);
+    }
+    if (!this.rainbow) {
+      this.rainbow = new RainbowArch(Math.max(90, this.boundsRadius * 0.35));
+      this.scene.add(this.rainbow.mesh);
+    }
+    this.rain.setAspect(this.renderer.domElement.width, this.renderer.domElement.height);
+    this.rain.setAmount(state.kind === "rain" ? state.intensity * 0.8 : 0);
+    const azimuth = Math.atan2(this.sun.position.z - this.cityCenter.z, this.sun.position.x - this.cityCenter.x);
+    this.rainbow.set(state.rainbow, azimuth, this.cityCenter, Math.max(240, this.boundsRadius * 0.85));
+    if (overcast <= 0.001 && state.rainbow <= 0.001) return;
+    const greySky = new THREE.Color("#9aa3ab");
+    const greyFog = new THREE.Color("#aeb6bc");
+    const darkWater = new THREE.Color("#3c4a54");
+    const dome = this.skyDome?.material as THREE.ShaderMaterial | undefined;
+    if (dome) {
+      (dome.uniforms.topColor.value as THREE.Color).lerp(greySky, 0.5 * overcast);
+      (dome.uniforms.midColor.value as THREE.Color).lerp(greySky, 0.5 * overcast);
+      (dome.uniforms.horizonColor.value as THREE.Color).lerp(greyFog, 0.55 * overcast);
+    }
+    (this.scene.background as THREE.Color).lerp(greyFog, 0.5 * overcast);
+    const fog = this.scene.fog;
+    if (fog instanceof THREE.Fog) {
+      fog.color.lerp(greyFog, 0.5 * overcast);
+      fog.near *= 1 - 0.5 * overcast;
+      fog.far *= 1 - 0.45 * overcast;
+    }
+    this.sun.intensity *= 1 - 0.55 * overcast;
+    this.hemisphere.intensity *= 1 + 0.18 * overcast;
+    if (this.fillLight) this.fillLight.intensity *= 1 - 0.3 * overcast;
+    if (this.backLight) this.backLight.intensity *= 1 - 0.3 * overcast;
+    if (this.parts) {
+      const clouds = this.parts.cloudMaterial;
+      if (clouds) clouds.opacity = Math.min(1, clouds.opacity + 0.55 * overcast);
+      const water = this.parts.waterColors;
+      if (water) {
+        water.uShallow.value.lerp(darkWater, 0.35 * overcast);
+        water.uDeep.value.lerp(darkWater, 0.35 * overcast);
+      }
+    }
   }
 
   private applySky(sky: CitySkyPreset): void {
@@ -936,6 +996,7 @@ export class CityEngine {
       if (clouds) clouds.opacity = sky.cloudOpacity;
       this.aurora?.setNight(sky.stars);
       this.ambient?.setNight(sky.stars);
+      this.wildlife?.setNight(sky.stars, this.cursorMs ?? Date.now());
       // 夜晚城市亮窗：立面自发光抬升（保留 theme 基线的下限）。
       this.parts.setNightGlow(sky.selfLit);
       this.parts.applySelfLit(this.themeSelfLit);
@@ -947,6 +1008,10 @@ export class CityEngine {
     this.updateDaylight();
     this.aurora?.update(dt);
     this.ambient?.update(dt, this.elapsed);
+    this.wildlife?.update(dt, this.elapsed);
+    // 雨丝层贴相机前方；航拍期间强制晴朗（applyWeather 不跑，手动关掉防残留）。
+    if (this.cinematic) this.rain?.setAmount(0);
+    else this.rain?.update(dt, this.elapsed, this.camera);
     if (this.updateCinematic()) {
       this.parts?.update(dt, this.elapsed);
       return;
@@ -1046,6 +1111,12 @@ export class CityEngine {
     this.aurora = null;
     this.ambient?.dispose();
     this.ambient = null;
+    this.wildlife?.dispose();
+    this.wildlife = null;
+    this.rain?.dispose();
+    this.rain = null;
+    this.rainbow?.dispose();
+    this.rainbow = null;
     this.disposablesSky.forEach((disposable) => disposable.dispose());
     this.renderer.dispose();
   }

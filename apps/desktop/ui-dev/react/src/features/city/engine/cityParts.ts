@@ -20,6 +20,12 @@ import type { TerrainField } from "./cityLayout";
 const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
 /** 单位圆柱（半径 1、高 1、底面为原点）：sx/sz 当半径、sy 当高度。 */
 const CYLINDER = new THREE.CylinderGeometry(1, 1, 1, 14).translate(0, 0.5, 0);
+/** 区界高架桥面：BOX 底面在 DECK_Y、厚 DECK_THICKNESS，行车面在两者之和。
+ *  路灯曾按 8.2（板底）立杆，光斑埋进桥面板、又因半径大于半幅桥宽漏到桥下地面。 */
+const EXPRESSWAY_DECK_Y = 8.2;
+const EXPRESSWAY_DECK_THICKNESS = 0.9;
+const EXPRESSWAY_DECK_WIDTH = 10.5;
+const EXPRESSWAY_DECK_TOP = EXPRESSWAY_DECK_Y + EXPRESSWAY_DECK_THICKNESS;
 
 export type QualityLevel = 0 | 1 | 2;
 
@@ -241,11 +247,15 @@ type StaticCity = {
   carMesh: THREE.InstancedMesh;
   cars: Array<{ path: CarPath; distance: number; speed: number }>;
   boatMesh: THREE.InstancedMesh;
-  boats: Array<{ path: CarPath; distance: number; speed: number; phase: number }>;
+  boats: Array<{ path: CarPath; distance: number; speed: number; phase: number; wakeTimer: number }>;
+  wakeMesh: THREE.InstancedMesh;
+  wakes: Array<{ x: number; z: number; birth: number; driftX: number; driftZ: number }>;
   cloudMesh: THREE.InstancedMesh;
   clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }>;
   /** 缓存命中时新实例上这些字段是空的（它们在静态构建里赋值）：地面素材/水面倒影与夜间开关/摩天轮旋转/夜间灯光都要随缓存带回。 */
   terrainUniforms: Record<string, { value: unknown }> | null;
+  /** 旗帜摆动的时间 uniform：材质经缓存共享，uniform 对象也必须随缓存带回。 */
+  flagTime: { value: number } | null;
   waterAssetUniforms: Record<string, { value: unknown }> | null;
   landmarkSpinners: Array<{ object: THREE.Object3D; axis: "x" | "y" | "z"; speed: number }>;
   nightLights: NightLights | null;
@@ -279,6 +289,7 @@ export class CityParts {
   private readonly decoCornerMesh: THREE.InstancedMesh;
   private nightLights: NightLights | null = null;
   private terrainUniforms: Record<string, { value: unknown }> | null = null;
+  private flagTime: { value: number } | null = null;
   private waterAssetUniforms: Record<string, { value: unknown }> | null = null;
   /** 屋顶霓虹描边：比屋顶略大的自发光薄板，露出的一圈即霓虹；仅日落主题。 */
   private readonly neonMesh: THREE.InstancedMesh;
@@ -295,13 +306,15 @@ export class CityParts {
   private readonly carMesh: THREE.InstancedMesh;
   private carKeep = 1;
   private readonly boatMesh: THREE.InstancedMesh;
+  private readonly wakeMesh: THREE.InstancedMesh;
+  private readonly wakes: Array<{ x: number; z: number; birth: number; driftX: number; driftZ: number }>;
   private readonly cloudMesh: THREE.InstancedMesh;
   private readonly anomalyMarkers: Array<{ mesh: THREE.Mesh; ring: THREE.Mesh; baseY: number; phase: number }> = [];
   private readonly labels: THREE.Sprite[] = [];
   private readonly hoverRing: THREE.Mesh;
   private readonly selectRing: THREE.Mesh;
   private readonly cars: Car[];
-  private readonly boats: Array<{ path: CarPath; distance: number; speed: number; phase: number }>;
+  private readonly boats: Array<{ path: CarPath; distance: number; speed: number; phase: number; wakeTimer: number }>;
   private readonly clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }>;
   private readonly waterUniforms: { uTime: { value: number }; uSun: { value: THREE.Vector3 }; uShallow: { value: THREE.Color }; uDeep: { value: THREE.Color }; uSky: { value: THREE.Color } };
   private readonly matrix = new THREE.Matrix4();
@@ -343,10 +356,13 @@ export class CityParts {
       this.carMesh = carResult.mesh;
       const boatResult = this.buildBoats();
       this.boatMesh = boatResult.mesh;
+      this.wakeMesh = boatResult.wakeMesh;
+      this.wakes = boatResult.wakes;
       const cloudResult = this.buildClouds();
       this.cloudMesh = cloudResult.mesh;
       this.water = this.buildWater();
       this.buildGardens();
+      this.buildFlags();
       staticCity = {
         seed: layout.seed,
         layout,
@@ -358,9 +374,12 @@ export class CityParts {
         cars: carResult.cars,
         boatMesh: this.boatMesh,
         boats: boatResult.boats,
+        wakeMesh: this.wakeMesh,
+        wakes: boatResult.wakes,
         cloudMesh: this.cloudMesh,
         clouds: cloudResult.clouds,
         terrainUniforms: this.terrainUniforms,
+        flagTime: this.flagTime,
         waterAssetUniforms: this.waterAssetUniforms,
         landmarkSpinners: this.landmarkSpinners,
         nightLights: this.nightLights,
@@ -379,7 +398,10 @@ export class CityParts {
     this.cars = staticCity.cars;
     this.boats = staticCity.boats;
     this.clouds = staticCity.clouds;
+    this.wakeMesh = staticCity.wakeMesh;
+    this.wakes = staticCity.wakes;
     this.terrainUniforms = staticCity.terrainUniforms;
+    this.flagTime = staticCity.flagTime;
     this.waterAssetUniforms = staticCity.waterAssetUniforms;
     this.landmarkSpinners = staticCity.landmarkSpinners;
     this.nightLights = staticCity.nightLights;
@@ -734,7 +756,7 @@ export class CityParts {
   private buildDistrictExpressways(): void {
     type Piece = { x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; color: string };
     const pieces: Piece[] = [];
-    const deckY = 8.2;
+    const deckY = EXPRESSWAY_DECK_Y;
     for (const points of this.layout.highways ?? []) {
       // Piers every ~34 units by mileage, anchored into the terrain or riverbed
       // (over water the pier reaches below the surface — a real bridge span).
@@ -766,12 +788,12 @@ export class CityParts {
         const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
         const mx = (a.x + b.x) / 2;
         const mz = (a.z + b.z) / 2;
-        pieces.push({ x: mx, y: deckY, z: mz, sx: length + 0.5, sy: 0.9, sz: 10.5, yaw, color: "#6a7071" });
+        pieces.push({ x: mx, y: deckY, z: mz, sx: length + 0.5, sy: EXPRESSWAY_DECK_THICKNESS, sz: EXPRESSWAY_DECK_WIDTH, yaw, color: "#6a7071" });
         // 车道线/护栏沿桥面横向偏移（offset 之前被忽略，全叠在中线上），且要在桥面顶面（deckY+0.9）之上。
         const sideX = Math.sin(yaw);
         const sideZ = Math.cos(yaw);
-        for (const offset of [-3.6, 0, 3.6]) pieces.push({ x: mx + sideX * offset, y: deckY + 0.9, z: mz + sideZ * offset, sx: length, sy: 0.05, sz: 0.3, yaw, color: "#c6c6bb" });
-        for (const offset of [-5.1, 5.1]) pieces.push({ x: mx + sideX * offset, y: deckY + 0.9, z: mz + sideZ * offset, sx: length, sy: 0.55, sz: 0.3, yaw, color: "#b9bcb2" });
+        for (const offset of [-3.6, 0, 3.6]) pieces.push({ x: mx + sideX * offset, y: EXPRESSWAY_DECK_TOP, z: mz + sideZ * offset, sx: length, sy: 0.05, sz: 0.3, yaw, color: "#c6c6bb" });
+        for (const offset of [-5.1, 5.1]) pieces.push({ x: mx + sideX * offset, y: EXPRESSWAY_DECK_TOP, z: mz + sideZ * offset, sx: length, sy: 0.55, sz: 0.3, yaw, color: "#b9bcb2" });
       }
     }
     if (!pieces.length) return;
@@ -951,6 +973,60 @@ export class CityParts {
   }
 
   /** 小区中心花园：草坪 + 湖（与海面同一套水面材质，能映倒影）+ 湖石驳岸 + 假山叠石 + 亭 + 环湖树。 */
+  /** 旗帜（tinyskies FlagSystem 手法）：各区花园一杆 host 色旗 + 观测塔一面大旗。
+   *  布料摆动在顶点着色器里做——摆幅从旗杆（x=0）到自由端渐增，双频叠加更像风。 */
+  private buildFlags(): void {
+    const spots: Array<{ x: number; z: number; y: number; yaw: number; pole: number; cloth: number; color: string }> = [];
+    for (const garden of this.layout.gardens ?? []) {
+      const c = Math.cos(garden.yaw);
+      const s = Math.sin(garden.yaw);
+      spots.push({
+        x: garden.x + c * garden.width * 0.3 - s * garden.depth * 0.32,
+        z: garden.z + s * garden.width * 0.3 + c * garden.depth * 0.32,
+        y: garden.y, yaw: garden.yaw, pole: 7.5, cloth: 1,
+        color: paletteFor(garden.districtId).accent,
+      });
+    }
+    const tower = this.layout.publicSites.find((site) => site.kind === "tower");
+    if (tower) {
+      spots.push({ x: tower.x, z: tower.z, y: this.layout.terrain.height(tower.x, tower.z), yaw: tower.yaw, pole: 15, cloth: 1.5, color: "#f2efe6" });
+    }
+    if (!spots.length) return;
+    this.flagTime = { value: 0 };
+    const poleGeometry = new THREE.CylinderGeometry(0.12, 0.17, 1, 6).translate(0, 0.5, 0);
+    const poleMaterial = new THREE.MeshLambertMaterial({ color: "#8a9096" });
+    const poleMesh = this.makeInstanced(poleGeometry, poleMaterial, spots.length);
+    // 旗面：左缘挂在杆顶，宽度 5.2×cloth；aPhase 是实例属性（每面旗自己的风相位）。
+    const clothWidth = 5.2;
+    const clothGeometry = new THREE.PlaneGeometry(clothWidth, 3.1, 10, 5).translate(clothWidth / 2 + 0.1, -1.7, 0);
+    const phases = new Float32Array(spots.map((_, index) => hashSeed(`flag:${index}`) * Math.PI * 2));
+    clothGeometry.setAttribute("aPhase", new THREE.InstancedBufferAttribute(phases, 1));
+    const clothMaterial = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
+    const flagTime = this.flagTime;
+    clothMaterial.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = flagTime;
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "#include <common>\nattribute float aPhase;\nuniform float uTime;")
+        .replace("#include <begin_vertex>", `#include <begin_vertex>
+          float hoist = smoothstep(0.0, ${clothWidth.toFixed(1)}, position.x);
+          transformed.z += (sin(uTime * 2.7 + aPhase + position.x * 1.1) * 0.4 + sin(uTime * 5.2 + aPhase * 1.7 + position.x * 2.4) * 0.13) * hoist;
+          transformed.y -= hoist * hoist * 0.2;`);
+    };
+    clothMaterial.customProgramCacheKey = () => "city-flag-cloth";
+    const clothMesh = new THREE.InstancedMesh(clothGeometry, clothMaterial, spots.length);
+    clothMesh.name = "city-flags";
+    spots.forEach((spot, index) => {
+      this.compose(spot.x, spot.y, spot.z, spot.yaw, 0.8, spot.pole, 0.8);
+      poleMesh.setMatrixAt(index, this.matrix);
+      this.compose(spot.x, spot.y + spot.pole - 0.15, spot.z, spot.yaw, spot.cloth, spot.cloth, 1);
+      clothMesh.setMatrixAt(index, this.matrix);
+      clothMesh.setColorAt(index, this.color.set(spot.color));
+    });
+    if (clothMesh.instanceColor) clothMesh.instanceColor.needsUpdate = true;
+    this.group.add(poleMesh, clothMesh);
+    this.disposables.push(poleGeometry, poleMaterial, clothGeometry, clothMaterial);
+  }
+
   private buildGardens(): void {
     const gardens = this.layout.gardens ?? [];
     if (!gardens.length) return;
@@ -1073,14 +1149,14 @@ export class CityParts {
     const stripMesh = this.makeInstanced(BOX, strips, 2200);
     const spacing = 30;
     let lamps = 0;
-    const lamp = (x: number, z: number, nx: number, nz: number, base: number, yaw: number) => {
+    const lamp = (x: number, z: number, nx: number, nz: number, base: number, yaw: number, poolReach = 3.2, poolRadius = 9.5) => {
       if (lamps >= 4600) return;
       this.compose(x, base, z, 0, 1, 4.6, 1);
       poles.setMatrixAt(lamps, this.matrix);
       // 灯头悬在路中心一侧（臂长 0.7），朝路面。
       this.compose(x - nx * 0.7, base + 4.55, z - nz * 0.7, yaw, 1, 1, 1);
       headMesh.setMatrixAt(lamps, this.matrix);
-      this.compose(x - nx * 3.2, base + 0.12, z - nz * 3.2, 0, 9.5, 1, 9.5);
+      this.compose(x - nx * poolReach, base + 0.12, z - nz * poolReach, 0, poolRadius, 1, poolRadius);
       poolMesh.setMatrixAt(lamps, this.matrix);
       lamps += 1;
     };
@@ -1112,7 +1188,8 @@ export class CityParts {
         lamp(x, z, ox, oz, Math.max(0, this.layout.terrain.height(x, z)), -Math.atan2(ox, -oz) + Math.PI / 2);
       }
     }
-    // 高架：桥面（高 8.2）两侧交错路灯，灯头朝路中心。
+    // 高架：桥面两侧交错路灯，灯头朝路中心。立在行车面（板顶）上；光斑圆心落到桥面中线、
+    // 半径不超过半幅桥宽——地面路灯的 9.5 光斑在 10.5 宽桥面上大半悬空，看起来是灯光穿透到桥下。
     for (const run of this.layout.highways ?? []) {
       let carry = 0;
       for (let i = 1; i < run.length; i += 1) {
@@ -1123,7 +1200,7 @@ export class CityParts {
         const yaw = -Math.atan2(dz, dx);
         for (let t = 14 - carry; t < length; t += 34) {
           const side = Math.floor((t + length * 0.37 + a.x) / 34) % 2 === 0 ? 1 : -1;
-          lamp(a.x + dx * t - dz * side * 5.1, a.z + dz * t + dx * side * 5.1, -dz * side, dx * side, 8.2, yaw);
+          lamp(a.x + dx * t - dz * side * 5.1, a.z + dz * t + dx * side * 5.1, -dz * side, dx * side, EXPRESSWAY_DECK_TOP, yaw, 5.1, EXPRESSWAY_DECK_WIDTH / 2 - 0.3);
         }
         carry = (length - (14 - carry)) % 34;
       }
@@ -1779,7 +1856,7 @@ export class CityParts {
     return { mesh, cars };
   }
 
-  private buildBoats(): { mesh: THREE.InstancedMesh; boats: Array<{ path: CarPath; distance: number; speed: number; phase: number }> } {
+  private buildBoats(): { mesh: THREE.InstancedMesh; boats: Array<{ path: CarPath; distance: number; speed: number; phase: number; wakeTimer: number }>; wakeMesh: THREE.InstancedMesh; wakes: Array<{ x: number; z: number; birth: number; driftX: number; driftZ: number }> } {
     // 船沿海岸外扩航道巡航（折线推进，与车辆同一套采样）。
     const boats: ReturnType<CityParts["buildBoats"]>["boats"] = [];
     this.layout.boatLoops?.forEach((loop, laneIndex) => {
@@ -1791,6 +1868,7 @@ export class CityParts {
           distance: (index / count) * total + hashSeed(`bd:${laneIndex}:${index}`) * 40,
           speed: (laneIndex % 2 === 0 ? 1 : -1) * (2.6 + hashSeed(`bs:${laneIndex}:${index}`) * 1.6),
           phase: hashSeed(`bp:${laneIndex}:${index}`) * Math.PI * 2,
+          wakeTimer: hashSeed(`bt:${laneIndex}:${index}`) * 0.3,
         });
       }
     });
@@ -1807,7 +1885,35 @@ export class CityParts {
     mesh.frustumCulled = false;
     this.group.add(mesh);
     this.disposables.push(geometry, material, hull, cabin);
-    return { mesh, boats };
+    // 尾迹泡沫（tinyskies WakeTrail 手法）：船尾定期吐软圆斑，漂移放大后消散。
+    // 径向渐变贴图让圆斑边缘衰减——纯色圆片读作沙盘贴纸，不像浪花。
+    const foamCanvas = document.createElement("canvas");
+    foamCanvas.width = foamCanvas.height = 64;
+    const foamCtx = foamCanvas.getContext("2d");
+    if (foamCtx) {
+      const gradient = foamCtx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gradient.addColorStop(0, "rgba(255,255,255,0.95)");
+      gradient.addColorStop(0.45, "rgba(255,255,255,0.4)");
+      gradient.addColorStop(1, "rgba(255,255,255,0)");
+      foamCtx.fillStyle = gradient;
+      foamCtx.fillRect(0, 0, 64, 64);
+    }
+    const foamTexture = new THREE.CanvasTexture(foamCanvas);
+    const foamMaterial = new THREE.MeshBasicMaterial({ color: "#eef6f7", map: foamTexture, transparent: true, opacity: 0.5, depthWrite: false, toneMapped: false });
+    const wakeGeometry = new THREE.CircleGeometry(1, 10).rotateX(-Math.PI / 2);
+    const wakeMesh = new THREE.InstancedMesh(wakeGeometry, foamMaterial, 128);
+    wakeMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    wakeMesh.frustumCulled = false;
+    wakeMesh.renderOrder = 1;
+    const wakes: Array<{ x: number; z: number; birth: number; driftX: number; driftZ: number }> = [];
+    for (let index = 0; index < 128; index += 1) {
+      wakes.push({ x: 0, z: 0, birth: -1, driftX: 0, driftZ: 0 });
+      this.compose(0, -60, 0, 0, 0.0001, 0.0001, 0.0001);
+      wakeMesh.setMatrixAt(index, this.matrix);
+    }
+    this.group.add(wakeMesh);
+    this.disposables.push(foamTexture, foamMaterial, wakeGeometry);
+    return { mesh, boats, wakeMesh, wakes };
   }
 
   private buildClouds(): { mesh: THREE.InstancedMesh; clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }> } {
@@ -1879,6 +1985,27 @@ export class CityParts {
 
   private buildWater(): THREE.Mesh {
     const geometry = new THREE.PlaneGeometry(9000, 9000, 1, 1).rotateX(-Math.PI / 2);
+    // 岸线深度图（tinyskies Globe 的 oceanDepth 等价物）：构建期把 -height/16 采样
+    // 进单通道纹理（384²，随静态城缓存一次性烘焙）。水面是 1×1 段平面没有顶点
+    // 可烘，纹理方案逐像素平滑；河床 height<0 同样被采到，河岸也起涟漪。
+    const DEPTH_TEX = 384;
+    const DEPTH_WORLD = 1500;
+    const depthData = new Uint8Array(DEPTH_TEX * DEPTH_TEX);
+    for (let y = 0; y < DEPTH_TEX; y += 1) {
+      for (let x = 0; x < DEPTH_TEX; x += 1) {
+        const worldX = (x / (DEPTH_TEX - 1) - 0.5) * DEPTH_WORLD * 2;
+        const worldZ = (y / (DEPTH_TEX - 1) - 0.5) * DEPTH_WORLD * 2;
+        const h = this.layout.terrain.height(worldX, worldZ);
+        depthData[y * DEPTH_TEX + x] = Math.max(0, Math.min(255, Math.round((-h / 16) * 255)));
+      }
+    }
+    const depthTexture = new THREE.DataTexture(depthData, DEPTH_TEX, DEPTH_TEX, THREE.RedFormat, THREE.UnsignedByteType);
+    depthTexture.minFilter = THREE.LinearFilter;
+    depthTexture.magFilter = THREE.LinearFilter;
+    depthTexture.wrapS = THREE.ClampToEdgeWrapping;
+    depthTexture.wrapT = THREE.ClampToEdgeWrapping;
+    depthTexture.needsUpdate = true;
+    this.disposables.push(depthTexture);
     const material = new THREE.ShaderMaterial({
       uniforms: {
         uTime: { value: 0 },
@@ -1886,6 +2013,8 @@ export class CityParts {
         uDeep: { value: new THREE.Color(activeTheme().water.deep) },
         uShallow: { value: new THREE.Color(activeTheme().water.shallow) },
         uSky: { value: new THREE.Color(activeTheme().water.sky) },
+        uDepth: { value: depthTexture },
+        uDepthWorld: { value: DEPTH_WORLD },
         // 与 scene.background 同色：ShaderMaterial 不吃 scene.fog，水面远处要自己淡出到天空色，
         // 否则 2600 见方的水面直边会像「世界边缘」露在天空下。
         uFog: { value: new THREE.Color(activeTheme().skyHorizon) },
@@ -1930,6 +2059,8 @@ export class CityParts {
         uniform vec3 uGradeHorizon;
         uniform float uGradeAmount;
         uniform float uSkyYaw;
+        uniform sampler2D uDepth;
+        uniform float uDepthWorld;
         varying vec3 vWorld;
         // 与天空球同一套采样 + 调色：反射和远处淡出都要与天空完全一致，否则地平线出现接缝。
         vec3 skyAt(vec3 dir) {
@@ -1940,10 +2071,23 @@ export class CityParts {
           return mix(photo, photo * tint * 1.55, uGradeAmount);
         }
         float wave(vec2 p, float t) {
-          float h = sin(p.x * 0.09 + t * 0.8) * cos(p.y * 0.075 - t * 0.6) * 0.5;
+          // 曾是 sin(x)·cos(y) 蛋托面——~70×84 单位的规则峰格，会透过波峰提亮/碎光门控显出点阵；
+          // 改为两条非平行方向的平面波之和，不再形成二维格点。
+          float h = (sin((p.x * 0.82 + p.y * 0.57) * 0.09 + t * 0.8) + sin((p.x * -0.34 + p.y * 0.94) * 0.075 - t * 0.6)) * 0.25;
           h += sin((p.x + p.y) * 0.16 + t * 1.1) * 0.28;
           h += sin((p.x * 0.6 - p.y * 0.8) * 0.23 - t * 0.9) * 0.18;
           return h;
+        }
+        // 水面法线贴图（512²）在该 uv 处的 mip 级：0 = 1 texel/像素，每 +1 = 降采样一倍。
+        float waterMip(vec2 uv) {
+          vec2 d = fwidth(uv) * 512.0;
+          return log2(max(max(d.x, d.y), 1e-4));
+        }
+        // 离岸深度（构建期烘焙）：0 = 水线，1 = 深水；纹理外一律深水。
+        float shoreDepth(vec2 p) {
+          vec2 uv = p / (uDepthWorld * 2.0) + 0.5;
+          if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+          return texture2D(uDepth, uv).r;
         }
         void main() {
           vec2 p = vWorld.xz;
@@ -1954,10 +2098,29 @@ export class CityParts {
           vec3 n = normalize(vec3((h0 - hx) * 1.8, e * 1.7, (h0 - hz) * 1.8));
           if (uHasAssets > 0.5) {
             // 两层反向滚动的法线贴图：细碎波纹不再是规则的正弦格。
-            vec3 a = texture2D(uNormal, p / 46.0 + vec2(uTime * 0.010, uTime * 0.006)).xyz * 2.0 - 1.0;
-            vec3 b = texture2D(uNormal, p / 19.0 - vec2(uTime * 0.007, -uTime * 0.011)).xyz * 2.0 - 1.0;
-            vec3 t = a + b;
-            n = normalize(vec3(t.x * 0.32, 1.0, t.y * 0.32));
+            // 曾是 p/46、p/19 两层轴对齐平铺：同一块贴图每 46 单位原样复制，掠射角下菲涅尔
+            // 反射把每块的法线偏转放大成一颗暗椭圆，全海排成规则点阵。现在三层各自旋转到
+            // 非轴向、尺度互不整除（重复周期错开），再用低频场混合权重，平铺不再对齐成格。
+            vec2 pa = mat2(0.857, 0.515, -0.515, 0.857) * p;   // 31°
+            vec2 pb = mat2(0.682, -0.731, 0.731, 0.682) * p;   // -47°
+            vec2 pc = mat2(0.276, 0.961, -0.961, 0.276) * p;   // 74°
+            vec2 uvA = pa / 41.3 + vec2(uTime * 0.010, uTime * 0.006);
+            vec2 uvB = pb / 15.7 - vec2(uTime * 0.007, -uTime * 0.011);
+            vec2 uvC = pc / 113.0 + vec2(uTime * 0.004, -uTime * 0.003);
+            vec3 a = texture2D(uNormal, uvA).xyz * 2.0 - 1.0;
+            vec3 b = texture2D(uNormal, uvB).xyz * 2.0 - 1.0;
+            vec3 c = texture2D(uNormal, uvC).xyz * 2.0 - 1.0;
+            // 旋转只把点阵转斜，不消除周期（上一版修复的错）。真正成格的原因：一层平铺在屏幕上
+            // 只有几十像素时，512² 贴图被 mip 降采样 ~3 级，细节滤光、只剩「以平铺尺寸为周期」的
+            // 低频分量——一张干净的正弦格，再被掠射菲涅尔放大。按各层自己的 mip 级淡出：细节一旦
+            // 被滤掉就不再贡献法线，留下的起伏由下面 wave() 的解析法线（非格点平面波）接管。
+            float wA = 1.0 - smoothstep(1.0, 2.5, waterMip(uvA));
+            float wB = 1.0 - smoothstep(1.0, 2.5, waterMip(uvB));
+            float wC = 1.0 - smoothstep(1.0, 2.5, waterMip(uvC));
+            float mixW = 0.5 + 0.5 * sin(p.x * 0.013 + p.y * 0.017) * sin(p.y * 0.011 - p.x * 0.007);
+            vec3 t = a * wA * (0.6 + 0.4 * mixW) + b * wB * (1.0 - 0.4 * mixW) + c * wC * 0.7;
+            float strength = 0.28;
+            n = normalize(vec3(t.x * strength + n.x * 0.5, 1.0, t.y * strength + n.z * 0.5));
           }
           vec3 view = normalize(cameraPosition - vWorld);
           float fresnel = pow(1.0 - max(dot(n, view), 0.0), 2.4);
@@ -1975,15 +2138,43 @@ export class CityParts {
           float specular = pow(max(dot(reflect(-normalize(uSun), n), view), 0.0), 64.0);
           color += vec3(1.0, 0.97, 0.88) * specular * 1.05;
           color += vec3(0.05) * smoothstep(0.5, 0.95, h0);
-          // 碎波光：高频相位格在波峰处闪，俯视也有“粼粼”质感。
-          vec2 cell = floor(p * 1.35);
-          float sparkle = sin(dot(cell, vec2(127.1, 311.7)) + uTime * 2.2) * 0.5 + 0.5;
-          sparkle = pow(sparkle, 7.0) * smoothstep(0.35, 0.9, h0);
-          // 近处格子比像素大会变成白色棋盘噪点，远处则混叠：只在中距离出现。
+          // 碎波光：连续 sin 乘积场 × 大尺度成片掩码 × 太阳光路门控。曾用
+          // floor(p*1.35) 相位格——每格随机亮度，在其 200–650 显示距离带上读作
+          // 一粒粒的规则网格点，且无视太阳方向全海均匀撒点；连续场不成格，光路
+          // 门控（与上方 specular 同一个反射方向）让碎光只出现在太阳反射带里，
+          // 开阔海面干净。频率上限 0.4/单位，显示带内屏幕空间频率低于采样极限。
+          float sp1 = sin(p.x * 0.40 + p.y * 0.23 + uTime * 2.1);
+          float sp2 = sin(p.y * 0.35 + p.x * 0.13 - uTime * 1.7);
+          float sp3 = sin(p.x * 0.27 - p.y * 0.17 + uTime * 2.6);
+          float sp4 = sin(p.x * 0.33 - p.y * 0.23 + uTime * 1.3);
+          float patchMask = sin(p.x * 0.031 + p.y * 0.047 + uTime * 0.25) * sin(p.y * 0.053 - p.x * 0.029 - uTime * 0.18);
+          patchMask *= sin(p.y * 0.023 + p.x * 0.039 + uTime * 0.35);
+          float sunPath = smoothstep(0.55, 0.95, dot(reflect(-normalize(uSun), n), view));
+          float sparkle = smoothstep(0.55, 0.95, sp1 * sp2 * sp3 + sp4 * 0.25) * smoothstep(0.05, 0.4, patchMask) * sunPath * smoothstep(0.35, 0.9, h0);
           float dist = distance(cameraPosition, vWorld);
-          sparkle *= smoothstep(90.0, 200.0, dist) * (1.0 - smoothstep(300.0, 650.0, dist));
+          // 远端不再用硬距离窗掐断（镜头拉远时光路粼粼带应当仍在）：抗混叠交给
+          // 下面的 fwidth 守卫与雾；650–1100 只做进入雾前的柔和收尾。
+          sparkle *= smoothstep(90.0, 200.0, dist) * (1.0 - smoothstep(650.0, 1100.0, dist));
+          // 屏幕上小于 ~2px 的细节淡出（分辨率感知的抗混叠守卫）：低分屏/小窗口
+          // 或极远视角下，亚像素碎光会退化成静态白噪点。
+          float cellPx = 1.0 / max(length(fwidth(p * 1.35)), 1e-4);
+          sparkle *= smoothstep(1.5, 4.0, cellPx);
           // 粼粼碎光是日光反射：夜里关掉（曾夜里照样按白天强度闪，一片白色雪花点）；夜海的亮点来自平面镜里的城市灯光。
-          color += vec3(1.0, 0.99, 0.92) * sparkle * 0.5 * (1.0 - uNight);
+          color += vec3(1.0, 0.99, 0.92) * sparkle * 0.75 * (1.0 - uNight);
+          // ── 岸线涟漪（tinyskies Globe 手法，作者授权移植）──────────────────
+          // 只此一件：fract(深度×频率−时间) 生成向岸滚动的白色波纹带，sin 噪声让
+          // 条带不规则、深度衰减离岸消失。深度驱动、空间上低频（条带宽 ~10-30 单
+          // 位），远处（700–1400）柔和淡出防混叠；不动碎光、不加开阔海面浪花。
+          float d = shoreDepth(p);
+          if (d < 0.8) {
+            float dayFade = 1.0 - uNight * 0.6;
+            float nz = sin(p.x * 0.09 + p.y * 0.06 + uTime * 0.4) * 0.05 + sin(p.x * 0.05 - p.y * 0.11 + uTime * 0.27) * 0.035;
+            float contour = fract((d + nz) * 4.0 - uTime * 0.42);
+            float band = smoothstep(0.45, 0.7, contour) * (1.0 - smoothstep(0.75, 1.0, contour));
+            float depthFade = 1.0 - smoothstep(0.08, 0.7, d);
+            float bandFade = 1.0 - smoothstep(700.0, 1400.0, dist);
+            color = mix(color, vec3(0.9, 0.97, 0.98), band * depthFade * bandFade * 0.75 * dayFade);
+          }
           gl_FragColor = vec4(color, 1.0);
           #include <tonemapping_fragment>
           // 雾混在色调映射之后：scene.background 不经色调映射，先混再映射会让远水发灰、与天空出现色带。
@@ -2453,13 +2644,15 @@ export class CityParts {
     this.nightGlow = night;
     const lights = this.nightLights;
     if (lights) {
-      // 灯头：白天几乎不亮（0.12），夜里 ×3.2 进 bloom；光斑与灯带随夜晚淡入。
-      lights.heads.color.setRGB(1, 0.78, 0.45).multiplyScalar(0.12 + night * 3.2);
+      // 电灯白天完全熄灭（0），随 night 线性亮起：此前留的 0.12/0.1「白天底线」
+      // 在 4600 盏灯的规模下肉眼可见，读作「灯没关」；灯杆由 Lambert 灰呈现，
+      // 灯头不需要白天亮度。
+      lights.heads.color.setRGB(1, 0.78, 0.45).multiplyScalar(night * 3.2);
       lights.pools.color.setRGB(1, 0.62, 0.3).multiplyScalar(night * 0.9);
       lights.pools.visible = night > 0.03;
-      lights.strips.color.setRGB(1, 0.7, 0.4).multiplyScalar(0.1 + night * 2.4);
-      // 霓虹/边缘光：实例色决定色相（青/洋红/暖白），这里只管亮度；白天近乎熄灭。
-      lights.neon.color.setRGB(1, 1, 1).multiplyScalar(0.04 + night * 2.6);
+      lights.strips.color.setRGB(1, 0.7, 0.4).multiplyScalar(night * 2.4);
+      // 霓虹/边缘光：实例色决定色相（青/洋红/暖白），这里只管亮度；白天熄灭。
+      lights.neon.color.setRGB(1, 1, 1).multiplyScalar(night * 2.6);
     }
   }
 
@@ -2509,6 +2702,7 @@ export class CityParts {
   /** 每帧增量更新。返回是否有矩阵写入（供引擎决定是否强制重绘）。 */
   update(dt: number, elapsed: number): boolean {
     this.waterUniforms.uTime.value = elapsed;
+    if (this.flagTime) this.flagTime.value = elapsed;
     this.updateCivics(dt);
     for (const spinner of this.landmarkSpinners) spinner.object.rotation[spinner.axis] += spinner.speed * dt;
 
@@ -2571,15 +2765,46 @@ export class CityParts {
     });
     if (carsMoved) this.carMesh.instanceMatrix.needsUpdate = true;
 
-    // 船只（沿海岸航道折线推进 + 起伏）。
+    // 船只（沿海岸航道折线推进 + 起伏）+ 尾迹泡沫在船尾持续吐出。
+    let wakeCursor = 0;
     this.boats.forEach((boat, index) => {
       boat.distance += boat.speed * dt;
       const sample = samplePolyline(boat.path, boat.distance);
       const bob = Math.sin(elapsed * 0.9 + boat.phase) * 0.12;
       this.compose(sample.x, -0.3 + bob, sample.z, Math.atan2(-sample.dz, sample.dx), 1, 1, 1);
       this.boatMesh.setMatrixAt(index, this.matrix);
+      boat.wakeTimer -= dt;
+      if (boat.wakeTimer <= 0) {
+        boat.wakeTimer = 0.3 + 0.08 * Math.sin(elapsed * 1.7 + boat.phase);
+        const puff = this.wakes[wakeCursor];
+        wakeCursor = (wakeCursor + 1) % this.wakes.length;
+        const side = Math.sin(elapsed * 5.3 + boat.phase + index);
+        puff.x = sample.x - sample.dx * 6.4 - sample.dz * side * 1.6;
+        puff.z = sample.z - sample.dz * 6.4 + sample.dx * side * 1.6;
+        puff.birth = elapsed;
+        puff.driftX = -sample.dx * 0.5 - sample.dz * side * 0.35;
+        puff.driftZ = -sample.dz * 0.5 + sample.dx * side * 0.35;
+      }
     });
     this.boatMesh.instanceMatrix.needsUpdate = true;
+    // 尾迹推进：放大 + 漂移，寿命 2.8s 后藏起。
+    let wakesMoved = false;
+    for (let index = 0; index < this.wakes.length; index += 1) {
+      const puff = this.wakes[index];
+      if (puff.birth < 0) continue;
+      const age = elapsed - puff.birth;
+      if (age > 2.8) {
+        puff.birth = -1;
+        this.compose(0, -60, 0, 0, 0.0001, 0.0001, 0.0001);
+      } else {
+        puff.x += puff.driftX * dt;
+        puff.z += puff.driftZ * dt;
+        this.compose(puff.x, -0.44, puff.z, age * 0.5, 1.1 + age * 2.3, 1, 1.1 + age * 2.3);
+      }
+      this.wakeMesh.setMatrixAt(index, this.matrix);
+      wakesMoved = true;
+    }
+    if (wakesMoved) this.wakeMesh.instanceMatrix.needsUpdate = true;
 
     // 云。
     const bounds = this.layout.boundsRadius + 60;
