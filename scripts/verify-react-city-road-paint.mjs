@@ -1,0 +1,26 @@
+#!/usr/bin/env node
+import assert from "node:assert/strict";
+import path from "node:path";
+import vm from "node:vm";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const require = createRequire(path.join(repo, "apps/desktop/ui-dev/package.json"));
+const { buildSync } = require("esbuild");
+const out = buildSync({entryPoints:[path.join(repo,"apps/desktop/ui-dev/react/src/features/city/engine/cityRoadPaint.ts")],bundle:true,write:false,format:"cjs",platform:"node"});
+const mod={exports:{}};vm.runInNewContext(out.outputFiles[0].text,{module:mod,exports:mod.exports,Map,Set});
+const {roadPaintPlan}=mod.exports;
+const edge=(id,from,to,a,b,bridge=false,width=8)=>({id,from,to,points:[a,b],width,kind:"arterial",bridge});
+const a={x:0,z:0},b={x:20,z:0},c={x:40,z:0},d={x:20,z:20};
+const chain=[edge("bc","b","c",b,c),edge("ab","a","b",a,b)];
+let plan=roadPaintPlan(chain);
+assert.equal(plan.runs.length,1,"unordered contiguous road segments merge");
+assert.equal(plan.runs[0].points.length,3);
+assert.equal(plan.junctions.size,0,"degree-two segmentation is not a zebra crossing");
+plan=roadPaintPlan([...chain,edge("bd","b","d",b,d)]);
+assert.equal(plan.runs.length,3,"T junction splits approaches");
+assert.equal(plan.junctions.size,1);assert(plan.junctions.has("b"));
+plan=roadPaintPlan([chain[1],edge("bridge","b","c",b,c,true)]);
+assert.equal(plan.runs.length,1);assert.equal(plan.runs[0].points.length,2,"atlas road stops at real bridge");
+assert.equal(roadPaintPlan([chain[1],edge("bc","b","c",b,c,false,5)]).runs.length,2,"width transitions are retained");
+console.log("City road paint: chains merge, true junctions only, bridge and width boundaries passed.");

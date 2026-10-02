@@ -10,6 +10,7 @@ import * as THREE from "three";
 import type { CityLayout } from "./cityLayout";
 import { hashSeed } from "../cityModel";
 import { activeTheme } from "./cityTheme";
+import { roadPaintPlan } from "./cityRoadPaint";
 
 export type DistrictPalette = {
   /** 楼身 tint（乘在近白色立面纹理上）。 */
@@ -179,21 +180,44 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
     polygon(block.polygon.map((p)=>({x:block.x+(p.x-block.x)*0.88,z:block.z+(p.z-block.z)*0.88})),block.parcels.length?"#c5c0b3":"#91a57f");
     for (const parcel of block.parcels) orientedRect(parcel.x,parcel.z,parcel.width-0.3,parcel.depth-0.3,parcel.yaw,"#bcb8ac");
   }
-  for (const edge of layout.roadEdges) {
-    if(edge.bridge)continue; // Real bridge deck spans the actual water, no painted water-road.
-    ctx.lineCap="round";
-    ctx.strokeStyle="#d4cfc2";ctx.lineWidth=(edge.width+2.4)*scale;strokePolyline(ctx,edge.points,toPixel,false);
-    ctx.strokeStyle=edge.kind==="arterial"?"#505b60":"#646c6b";ctx.lineWidth=edge.width*scale;strokePolyline(ctx,edge.points,toPixel,false);
+  const { runs, junctions } = roadPaintPlan(layout.roadEdges);
+  ctx.lineCap="butt"; ctx.lineJoin="round";
+  // Paint ALL sidewalks before ANY asphalt: neighboring caps cannot cut white seams into roads.
+  for (const road of runs) {
+    ctx.strokeStyle="#d4cfc2";ctx.lineWidth=(road.width+2.4)*scale;strokePolyline(ctx,road.points,toPixel,false);
+  }
+  for (const road of runs) {
+    ctx.strokeStyle=road.kind==="arterial"?"#505b60":"#646c6b";ctx.lineWidth=road.width*scale;strokePolyline(ctx,road.points,toPixel,false);
+  }
+  // Fill junction centers after pavement passes, without separate round endcaps.
+  for (const node of layout.roadNodes) if (junctions.has(node.id)) {
+    const incident = layout.roadEdges.filter((edge) => edge.from === node.id || edge.to === node.id);
+    const width = Math.max(...incident.map((edge) => edge.width));
+    const [x,y] = toPixel(node.x,node.z);
+    ctx.fillStyle=incident.some((edge)=>edge.kind==="arterial")?"#505b60":"#646c6b";
+    ctx.beginPath();ctx.arc(x,y,width*scale/2,0,Math.PI*2);ctx.fill();
+  }
+  for (const edge of runs) {
+    const a=edge.points[0];const b=edge.points[edge.points.length-1];
+    const next=edge.points[1];const prev=edge.points[edge.points.length-2];
+    const startLength=Math.hypot(next.x-a.x,next.z-a.z);const endLength=Math.hypot(b.x-prev.x,b.z-prev.z);
+    const startInset=junctions.has(edge.from)?6:0;const endInset=junctions.has(edge.to)?6:0;
+    if(startLength<=startInset || endLength<=endInset)continue;
+    const points=[{x:a.x+(next.x-a.x)*startInset/startLength,z:a.z+(next.z-a.z)*startInset/startLength},...edge.points.slice(1,-1),{x:b.x-(b.x-prev.x)*endInset/endLength,z:b.z-(b.z-prev.z)*endInset/endLength}];
+    ctx.strokeStyle=edge.kind==="arterial"?"#d6c998":"#b6bdba";ctx.lineWidth=0.22*scale;ctx.setLineDash([3*scale,3*scale]);
+    strokePolyline(ctx,points,toPixel,false);ctx.setLineDash([]);
   }
   for (const edge of layout.roadEdges) {
     if(edge.bridge)continue;
-    const [a,b]=edge.points;const length=Math.hypot(b.x-a.x,b.z-a.z);const dx=(b.x-a.x)/length;const dz=(b.z-a.z)/length;
-    const points=[{x:a.x+dx*6,z:a.z+dz*6},{x:b.x-dx*6,z:b.z-dz*6}];
-    ctx.strokeStyle=edge.kind==="arterial"?"#d6c998":"#b6bdba";ctx.lineWidth=0.22*scale;ctx.setLineDash([3*scale,3*scale]);
-    strokePolyline(ctx,points,toPixel,false);ctx.setLineDash([]);
-    for(const end of [a,b])for(let stripe=-2;stripe<=2;stripe+=1){
+    const [a,b]=edge.points;const length=Math.hypot(b.x-a.x,b.z-a.z);
+    if(length<14)continue;
+    const dx=(b.x-a.x)/length;const dz=(b.z-a.z)/length;
+    for(const end of [a,b]) {
+      if(!junctions.has(end===a?edge.from:edge.to))continue;
+      for(let stripe=-2;stripe<=2;stripe+=1){
       const sign=end===a?1:-1;
       orientedRect(end.x+dx*6.5*sign-dz*stripe*0.8,end.z+dz*6.5*sign+dx*stripe*0.8,1.4,0.4,-Math.atan2(dz,dx),"#dbd8cb");
+      }
     }
   }
   for(const site of layout.publicSites){
