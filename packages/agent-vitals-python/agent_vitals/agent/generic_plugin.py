@@ -25,7 +25,7 @@ def _sha256_hex16(data):
 
 def _source_profile_for_root(slug, root_declared):
     digest = hashlib.sha256(("%s|%s" % (slug, root_declared)).encode("utf-8")).hexdigest()
-    return "plugin-%s" % digest[:8]
+    return "host-%s" % digest[:8]
 
 
 def _expand_tilde_home(path, home):

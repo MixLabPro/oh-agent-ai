@@ -816,7 +816,7 @@ fn safe_findings_rule(value: &str) -> String {
 }
 
 fn safe_findings_host(value: &str) -> String {
-    if let Some(slug) = value.strip_prefix("plugin:") {
+    if let Some(slug) = value.strip_prefix("host:").or_else(|| value.strip_prefix("plugin:")) {
         if agent_vitals_runtime::host_registry::plugin_slug_ok(slug) {
             return value.to_string();
         }

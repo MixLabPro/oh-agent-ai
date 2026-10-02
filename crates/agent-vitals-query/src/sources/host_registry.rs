@@ -1,9 +1,9 @@
-//! HostRegistry —— 官方封闭词表 ∪ 校验过的插件宿主（HOST_MANIFEST_DSL_SPEC
+//! HostRegistry —— 官方封闭词表 ∪ 校验过的 manifest 宿主（HOST_MANIFEST_DSL_SPEC
 //! §7.2）。
 //!
 //! 「加宿主四处一起改」的账面开口点：`ingest_service::FACT_HOSTS` 保持官方
-//! 四宿主常量不动（行为面词表 `TRACE_HOSTS` 的封闭性不受影响），插件宿主以
-//! `plugin:<slug>` 形态经本模块并入账面路由。扫描只读 hosts.d，校验失败的
+//! 四宿主常量不动（行为面词表 `TRACE_HOSTS` 的封闭性不受影响），manifest 宿主以
+//! `host:<slug>` 形态经本模块并入账面路由。扫描只读 hosts.d，校验失败的
 //! manifest **不进 registry** 并以可操作错误上报——半坏目录不得拖死官方四
 //! 宿主的摄入（降级隔离）。
 
@@ -26,11 +26,11 @@ pub struct PluginHost {
     pub trust_profile: Option<generic_manifest::TrustArtifactProfile>,
 }
 
-/// 面向用户的宿主显示名：`plugin:<slug>` 里的 `plugin:` 只是「热插拔宿主」的内部类别标记，
+/// 面向用户的宿主显示名：`host:<slug>` 里的 `host:` 只是「热插拔宿主」的内部类别标记，
 /// 用户只关心 ZCode 这个名字。优先取清单的 `display.name`；清单读不到时去掉前缀、
 /// 按 `-`/`_` 分词首字母大写（`my-agent` → `My Agent`）。非插件标识原样返回。
 pub fn plugin_display_name(data_home: &Path, kind: &str) -> String {
-    let Some(slug) = kind.strip_prefix("plugin:") else { return kind.to_string(); };
+    let Some(slug) = kind.strip_prefix("host:").or_else(|| kind.strip_prefix("plugin:")) else { return kind.to_string(); };
     let (hosts, _) = scan_plugin_hosts(data_home);
     if let Some(found) = hosts.iter().find(|host| host.slug == slug) {
         if !found.display_name.trim().is_empty() { return found.display_name.clone(); }
@@ -39,7 +39,7 @@ pub fn plugin_display_name(data_home: &Path, kind: &str) -> String {
 }
 
 fn prettify_slug(slug: &str) -> String {
-    slug.split(|c| c == '-' || c == '_')
+    slug.split(['-', '_'])
         .filter(|word| !word.is_empty())
         .map(|word| { let mut chars = word.chars(); match chars.next() { Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(), None => String::new() } })
         .collect::<Vec<_>>()
@@ -120,14 +120,15 @@ pub fn scan_plugin_hosts(data_home: &Path) -> (Vec<PluginHost>, Vec<PluginHostEr
     (hosts, errors)
 }
 
-/// `plugin:<slug>` → facts 文件 stem 的校验式换算。slug 不合法 → None
-/// （路径穿越防护语义保留，spec §7.1 #2）。
+/// `host:<slug>` → facts 文件 stem 的校验式换算。slug 不合法 → None
+/// （路径穿越防护语义保留，spec §7.1 #2）。迁移期旧 `plugin:` 值同样换算
+/// （重命名为新 stem），便于数据迁移一次性收口。
 pub fn plugin_facts_stem(host: &str) -> Option<String> {
-    let slug = host.strip_prefix("plugin:")?;
+    let slug = host.strip_prefix("host:").or_else(|| host.strip_prefix("plugin:"))?;
     if !plugin_slug_ok(slug) {
         return None;
     }
-    Some(format!("plugin-{slug}.jsonl"))
+    Some(format!("host-{slug}.jsonl"))
 }
 
 /// slug 规则与 `hosts::generic::manifest` 的正则 `^[a-z][a-z0-9-]{0,31}$`
@@ -140,6 +141,7 @@ pub fn plugin_slug_ok(slug: &str) -> bool {
     matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         && slug.len() <= 32
+        && !slug.starts_with("host-")
         && !slug.starts_with("plugin-")
         && !generic_manifest::RESERVED_SLUGS.contains(&slug)
 }
@@ -159,14 +161,15 @@ mod tests {
         let home = std::env::temp_dir().join(format!("av-host-display-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         // 没有清单：去前缀 + 分词首字母大写；非插件标识原样返回
-        assert_eq!(plugin_display_name(&home, "plugin:zcode"), "Zcode");
-        assert_eq!(plugin_display_name(&home, "plugin:my-agent_x"), "My Agent X");
+        assert_eq!(plugin_display_name(&home, "host:zcode"), "Zcode");
+        assert_eq!(plugin_display_name(&home, "host:my-agent_x"), "My Agent X");
+        assert_eq!(plugin_display_name(&home, "plugin:zcode"), "Zcode", "迁移期旧前缀同样显示");
         assert_eq!(plugin_display_name(&home, "claude-code"), "claude-code");
         // 有清单：取 display.name（大小写以清单为准）
         let dir = home.join("hosts.d").join("zcode");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("manifest.json"), r#"{"manifest_version":1,"slug":"zcode","display":{"name":"ZCode"},"discovery":{"roots":["~/.zcode/cli/rollout"],"include":["model-io-sess_*.jsonl"]},"recipe":"codex_jsonl","extraction":{}}"#).unwrap();
-        let name = plugin_display_name(&home, "plugin:zcode");
+        let name = plugin_display_name(&home, "host:zcode");
         assert!(name == "ZCode" || name == "Zcode", "manifest may fail schema in this minimal fixture: {name}");
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -174,15 +177,21 @@ mod tests {
     #[test]
     fn plugin_facts_stem_validates_slug() {
         assert_eq!(
-            plugin_facts_stem("plugin:zcode").as_deref(),
-            Some("plugin-zcode.jsonl")
+            plugin_facts_stem("host:zcode").as_deref(),
+            Some("host-zcode.jsonl")
         );
-        assert_eq!(plugin_facts_stem("plugin:Zcode"), None, "大写拒绝");
-        assert_eq!(plugin_facts_stem("plugin:../escape"), None, "路径穿越拒绝");
-        assert_eq!(plugin_facts_stem("plugin:"), None);
+        // 迁移期：旧 plugin: 值换算到新 stem。
+        assert_eq!(
+            plugin_facts_stem("plugin:zcode").as_deref(),
+            Some("host-zcode.jsonl")
+        );
+        assert_eq!(plugin_facts_stem("host:Zcode"), None, "大写拒绝");
+        assert_eq!(plugin_facts_stem("host:../escape"), None, "路径穿越拒绝");
+        assert_eq!(plugin_facts_stem("host:"), None);
         assert_eq!(plugin_facts_stem("claude-code"), None, "无前缀不是插件");
-        assert_eq!(plugin_facts_stem("plugin:plugin-x"), None, "保留前缀拒绝");
-        assert_eq!(plugin_facts_stem("plugin:claude-code"), None, "保留字拒绝");
+        assert_eq!(plugin_facts_stem("host:host-x"), None, "保留前缀拒绝");
+        assert_eq!(plugin_facts_stem("host:plugin-x"), None, "迁移期旧前缀同样拒绝为新 slug");
+        assert_eq!(plugin_facts_stem("host:claude-code"), None, "保留字拒绝");
     }
 
     #[test]

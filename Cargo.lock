@@ -82,6 +82,7 @@ dependencies = [
  "agent-vitals-domain",
  "agent-vitals-hosts",
  "agent-vitals-provider",
+ "agent-vitals-runtime-core",
  "jiff",
  "libc",
  "notify",

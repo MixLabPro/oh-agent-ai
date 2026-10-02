@@ -1439,7 +1439,7 @@ pub(crate) fn plugin_tokens_by_host(
     }
     let mut out = Vec::new();
     for h in hosts {
-        let host_label = format!("plugin:{}", h.slug);
+        let host_label = format!("host:{}", h.slug);
         let Ok(Some((u, cr, cw, o))) =
             agent_vitals_data::authority_query::host_tokens_all(db.conn(), &host_label, start, end)
         else {

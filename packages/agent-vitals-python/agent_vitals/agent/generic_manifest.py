@@ -9,7 +9,75 @@
 import hashlib
 import re as _re
 
+from agent_vitals import __version__
+
 MANIFEST_VERSION = 1
+FEATURE_IDS = ()
+APP_VERSION = __version__
+
+
+def _release_version(value):
+    if not isinstance(value, str) or not _re.fullmatch(
+            r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", value):
+        return None
+    # Bound before int conversion, including Python's large-integer string limit.
+    parts = value.split(".")
+    if any(len(p) > 10 or (len(p) == 10 and p > "4294967295") for p in parts):
+        return None
+    return tuple(int(p) for p in parts)
+
+
+class CapabilitySet(object):
+    def __init__(self, app_version=None, recipes=None, features=None):
+        self.app_version = APP_VERSION if app_version is None else app_version
+        self.recipes = RECIPE_IDS if recipes is None else tuple(recipes)
+        self.features = FEATURE_IDS if features is None else tuple(features)
+
+
+def negotiate_capabilities(value, capabilities=None):
+    capabilities = CapabilitySet() if capabilities is None else capabilities
+    _negotiate_requirements(value, capabilities)
+    if "recipe" in value:
+        recipe = value["recipe"]
+        if not isinstance(recipe, str):
+            raise _err("recipe", "必须是字符串")
+        if recipe not in capabilities.recipes:
+            raise _err("recipe", "未知 recipe `%s`（已知：%s）"
+                       % (recipe, _rust_debug_list(capabilities.recipes)))
+
+
+def _negotiate_requirements(value, capabilities):
+    if not isinstance(value, dict):
+        raise _err("(root)", "manifest 必须是 JSON object")
+    if "min_app_version" in value:
+        minimum = _release_version(value["min_app_version"])
+        if minimum is None:
+            raise _err("min_app_version", "必须是 MAJOR.MINOR.PATCH（无前导零、预发布或构建后缀，各段 <= 4294967295）")
+        current = _release_version(capabilities.app_version)
+        if current is None:
+            raise _err("min_app_version", "运行时版本不是受支持的发布版本")
+        if current < minimum:
+            raise _err("min_app_version", "需要 app >= %s（当前 %s）——请升级 app"
+                       % (value["min_app_version"], capabilities.app_version))
+    if "requires" in value:
+        requires = value["requires"]
+        if not isinstance(requires, dict):
+            raise _err("requires", "必须是 object")
+        for key in requires:
+            if key not in ("recipes", "features"):
+                raise _err("requires.%s" % key, "未知字段")
+        for key, supported in (("recipes", capabilities.recipes), ("features", capabilities.features)):
+            if key not in requires:
+                continue
+            field = "requires.%s" % key
+            entries = _string_array(requires[key], field, 0, 64)
+            for i, entry in enumerate(entries):
+                if entry in entries[:i]:
+                    raise _err("%s[%d]" % (field, i), "重复能力")
+                if entry not in supported:
+                    raise _err("%s[%d]" % (field, i),
+                               "缺失能力 `%s`（支持：%s；最低版本未知）——请升级 app 或换 manifest"
+                               % (entry, _rust_debug_list(supported)))
 
 RECIPE_IDS = (
     "request-usage-anthropic-v1",
@@ -61,11 +129,11 @@ class PluginManifest(object):
 
     @property
     def facts_host(self):
-        return "plugin:%s" % self.slug
+        return "host:%s" % self.slug
 
     @property
     def facts_file_stem(self):
-        return "plugin-%s" % self.slug
+        return "host-%s" % self.slug
 
 
 def is_dotted_path(s):
@@ -151,7 +219,7 @@ def parse_manifest(value):
 
     known = ("$schema", "manifest_version", "slug", "display", "discovery",
              "source", "session", "recipe", "overrides", "event_key",
-             "limits", "billing")
+             "limits", "billing", "requires", "min_app_version")
     for key in value.keys():
         if key not in known:
             raise _err(key, "未知字段（schema additionalProperties: false）")
@@ -170,13 +238,15 @@ def parse_manifest(value):
                    "不支持的版本 %d（本运行时支持 %d）——请升级 app 或换 manifest"
                    % (version, MANIFEST_VERSION))
 
+    _negotiate_requirements(value, CapabilitySet())
+
     slug = value.get("slug")
     if not isinstance(slug, str):
         raise _err("slug", "必须是非空字符串")
     if not _SLUG_RE.match(slug):
         raise _err("slug", "必须匹配 ^[a-z][a-z0-9-]{0,31}$")
-    if slug in RESERVED_SLUGS or slug.startswith("plugin-"):
-        raise _err("slug", "`%s` 是保留字（官方宿主名 / plugin- 前缀）" % slug)
+    if slug in RESERVED_SLUGS or slug.startswith("host-") or slug.startswith("plugin-"):
+        raise _err("slug", "`%s` 是保留字（官方宿主名 / host- 与 plugin- 前缀）" % slug)
 
     display = value.get("display")
     if not isinstance(display, dict):

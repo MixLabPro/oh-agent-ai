@@ -127,7 +127,7 @@ ENV_BY_CASE = {
 }
 
 # HOST_MANIFEST_DSL_SPEC §8.1：generic 插件宿主 case——**不走** scan.py 的
-# `--json FILE` 扫描器契约，走 `plugin-validate` 的 stdout JSON 契约（Rust /
+# `--json FILE` 扫描器契约，走 `manifest-validate` 的 stdout JSON 契约（Rust /
 # Python 两侧各自实现同一负载，本 runner 负责钉字节）。fixture 文件内联在
 # 这里（语料生成器 generate.py 不掺和），写入隔离 HOME 后 discovery 走
 # manifest 的 `~/data`。
@@ -171,7 +171,7 @@ def _plugin_fixture_row(request_id, attempt, input_tokens):
 
 PLUGIN_CASES = {
     "host-generic-zcode": {
-        "args": ["plugin-validate",
+        "args": ["manifest-validate",
                  "--manifest", "{root}/hosts.d/zcode/manifest.json",
                  "--machine-namespace", "golden",
                  "--json"],
@@ -348,7 +348,7 @@ def canonicalize(data, root_str, case=None):
 
 
 def _run_plugin_case(root: Path, name: str):
-    """generic 插件宿主 case：写内联 fixture → 跑 plugin-validate（stdout
+    """generic 插件宿主 case：写内联 fixture → 跑 manifest-validate（stdout
     JSON 契约）→ scrub。退出码非 0 = case 失败（gate refuse / 硬错误）。"""
     import json as _json
     root = root.resolve()
@@ -368,7 +368,7 @@ def _run_plugin_case(root: Path, name: str):
                        capture_output=True, text=True)
     if r.returncode != 0:
         raise AssertionError(
-            "plugin-validate 退出码 %d\nstdout: %s\nstderr: %s"
+            "manifest-validate 退出码 %d\nstdout: %s\nstderr: %s"
             % (r.returncode, r.stdout, r.stderr))
     data = _json.loads(r.stdout)
     return scrub(data, root_s, set())

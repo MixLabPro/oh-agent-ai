@@ -32,7 +32,7 @@ use crate::safe_query::authority_callback;
 /// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 27;
+pub const SCHEMA_VERSION: i64 = 30;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
 /// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
@@ -1417,6 +1417,52 @@ fn ensure_schema_v26(conn: &Connection) -> Result<(), AuthorityError> {
 /// 显式保存过，任何迁移永不覆写）/ `dismissed`（询问被「稍后」，永不再问
 /// 且保持关）。本版**不翻默认**：fresh 种子行与存量行都是 `legacy_default`
 /// + enabled=0；翻默认是 R6c（前置：§7.5 24h soak），届时只改种子行。
+/// v30（发布前拍板 2026-10-01：未正式发布，不做老 id 兼容）：把 manifest 宿主
+/// 的旧 `plugin-` 期 fact_id 一次性重 stamp 到 `host:` 身份。标记 = source_profile
+/// 仍为 `plugin-` 前缀（v29 只折算了 host 列）。同事件新 id 已存在（重导先写
+/// 入）时删除旧行保留新行；provenance 子行先随迁再改父键。幂等：无标记行即空转。
+fn ensure_schema_v30(conn: &Connection) -> Result<(), AuthorityError> {
+    // 事实行改 fact_id 牵动子表（billing_fact_attributions /
+    // extension_fact_provenance）。立即 FK 校验下「先子后父」任一顺序都会
+    // 中途违约——事务内延迟到 COMMIT 统一校验，子表父表同批改。
+    conn.execute_batch("PRAGMA defer_foreign_keys=ON")?;
+    let mut statement = conn.prepare(
+        "SELECT fact_id, machine_namespace, host, source_profile, native_session_id, source_event_id, observation_kind
+         FROM usage_facts WHERE source_profile LIKE 'plugin-%'",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?,
+        ))
+    })?.collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for (old_id, namespace, host, profile, session, event, kind) in rows {
+        let slug = host.strip_prefix("host:").map(str::to_string).unwrap_or_else(|| host.clone());
+        let new_host = format!("host:{slug}");
+        let rest = profile.strip_prefix("plugin-").map(str::to_string).unwrap_or_else(|| profile.clone());
+        let new_profile = format!("host-{rest}");
+        let new_id = agent_vitals_domain::contracts::usage_fact::fact_id(
+            &namespace, &new_host, &new_profile, &session, &event, &kind,
+        );
+        if new_id == old_id { continue; }
+        // 事件级 UNIQUE(host,ns,session,event,kind) 保证同事件的「新 id 行」
+        // 不可能与旧行共存（重导在新 key 下直接被拒）——所以这里只需 UPDATE；
+        // 若仍撞 fact_id 主键（异事件哈希碰撞），事务失败整体回滚，响亮报错。
+        conn.execute(
+            "UPDATE extension_fact_provenance SET fact_id=?1 WHERE fact_id=?2",
+            rusqlite::params![new_id, old_id])?;
+        conn.execute(
+            "UPDATE billing_fact_attributions SET fact_id=?1 WHERE fact_id=?2",
+            rusqlite::params![new_id, old_id])?;
+        let changed = conn.execute(
+            "UPDATE usage_facts SET fact_id=?1, source_profile=?2 WHERE fact_id=?3",
+            rusqlite::params![new_id, new_profile, old_id])?;
+        if changed != 1 { return Err(AuthorityError::Sqlite(rusqlite::Error::QueryReturnedNoRows)); }
+    }
+    Ok(())
+}
+
 fn ensure_schema_v27(conn: &Connection) -> Result<(), AuthorityError> {
     let has_source: bool = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('trust_monitor_state') WHERE name = 'enabled_source'",
@@ -1653,6 +1699,9 @@ impl AuthorityDb {
     }
 
     fn ensure_schema(conn: &Connection, now_ms: i64) -> Result<(), AuthorityError> {
+        // Legacy branches commit v27 first. Only the common final transaction
+        // may advertise v28; an interrupted additive migration stays at v27.
+        const SCHEMA_VERSION: i64 = 27;
         // 版本行在 SCHEMA_V1 里随全量 DDL 一起建——这里只**读**：schema_meta
         // 表不存在 = 全新库（None）。不能先无条件建表再跑全量 DDL（后者会
         // 撞 already exists）。
@@ -1675,13 +1724,15 @@ impl AuthorityDb {
             None
         };
         match version {
-            Some(v) if v > SCHEMA_VERSION => {
+            Some(v) if v > super::authority::SCHEMA_VERSION => {
                 return Err(AuthorityError::NewerSchema {
                     found: v,
-                    supported: SCHEMA_VERSION,
+                    supported: super::authority::SCHEMA_VERSION,
                 })
             }
-            Some(v) if v == SCHEMA_VERSION => {
+            // 幂等升级带：27（旧分支提交点）..=当前版本都走加性尾事务——v29
+            // 曾漏掉「上一发布版本 28」，导致现网 28 库掉进 unsupported 分支。
+            Some(v) if (SCHEMA_VERSION..=super::authority::SCHEMA_VERSION).contains(&v) => {
                 // 增量 7.5：脱敏只读 view（`query_sql_readonly` 的来源层屏障）。
                 // 版本无关的只读加法——`CREATE VIEW IF NOT EXISTS` 幂等。
                 conn.execute_batch(SCHEMA_V18_ADD)?;
@@ -2287,6 +2338,8 @@ impl AuthorityDb {
         // v18/v19 都只有 `CREATE ... IF NOT EXISTS`。历史分支在升级 V1–V17
         // 后会把 version 直接盖到当前值，故在同一 writer open 内补一次；这也
         // 修复崩溃恰好发生在旧版链已提交、增量表尚未执行时留下的陈旧版本戳。
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let upgrade = (|| -> Result<(), AuthorityError> {
         conn.execute_batch(SCHEMA_V18_ADD)?;
         conn.execute_batch(SCHEMA_V19_ADD)?;
         ensure_schema_v20(conn)?;
@@ -2297,6 +2350,23 @@ impl AuthorityDb {
         ensure_schema_v25(conn)?;
         ensure_schema_v26(conn)?;
         ensure_schema_v27(conn)?;
+        conn.execute_batch(crate::extension_authority::SCHEMA_V28_ADD)?;
+        // v29（HOST_MANIFEST_DSL_SPEC §13.3）：host 字符串契约迁移 `plugin:` →
+        // `host:`。幂等 UPDATE，只改 host 列、不触碰任何其他事实字段；facts
+        // 文件改名由 ingest 层 `migrate_manifest_facts_prefix` 配套完成（迁移
+        // 期间读写两侧都双认新旧前缀，见 host_registry/source_controls）。
+        conn.execute_batch(
+            "UPDATE usage_facts SET host = 'host:' || substr(host, 8) WHERE host LIKE 'plugin:%';",
+        )?;
+        ensure_schema_v30(conn)?;
+        conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
+            rusqlite::params![super::authority::SCHEMA_VERSION.to_string()])?;
+        Ok(())
+        })();
+        match upgrade {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(error) => { let _ = conn.execute_batch("ROLLBACK"); return Err(error); }
+        }
         // 中断批次清扫（§3.1）：任何 running 的批次在下次 open 时标
         // interrupted——它是观测记录，不是可恢复状态（恢复靠幂等重跑）。
         conn.execute(
@@ -6217,10 +6287,10 @@ mod tests {
     fn official_subscription_also_covers_native_models_that_lack_a_provider() {
         let (db, authority) = default_scope_fixture("billing-default-scope-native");
         // 真机分布：ZCode 的 GLM（provider 为空）、Codex 的 gpt（少量为空）
-        put_fact(&authority, "z-native", "plugin:zcode", None, "GLM-5.3", 100);
-        put_fact(&authority, "z-native-lower", "plugin:zcode", None, "glm-5.3-flash", 100);
-        put_fact(&authority, "z-gateway", "plugin:zcode", None, "bigmodel/glm-5.3-flash", 100);
-        put_fact(&authority, "z-foreign-family", "plugin:zcode", None, "deepseek-v4-flash", 100);
+        put_fact(&authority, "z-native", "host:zcode", None, "GLM-5.3", 100);
+        put_fact(&authority, "z-native-lower", "host:zcode", None, "glm-5.3-flash", 100);
+        put_fact(&authority, "z-gateway", "host:zcode", None, "bigmodel/glm-5.3-flash", 100);
+        put_fact(&authority, "z-foreign-family", "host:zcode", None, "deepseek-v4-flash", 100);
         put_fact(&authority, "x-native-null", "codex", None, "gpt-5.6-terra", 100);
         put_fact(&authority, "x-prefixed-own-vendor", "codex", None, "openai/gpt-5.6-luna", 100);
         put_fact(&authority, "x-relay-family", "codex", None, "deepseek/deepseek-v4.1-flash", 100);
@@ -6256,8 +6326,8 @@ mod tests {
     #[test]
     fn a_subscription_declared_on_one_host_covers_the_providers_native_models_on_another() {
         let (db, authority) = default_scope_fixture("billing-account-level");
-        put_fact(&authority, "z-native", "plugin:zcode", None, "GLM-5.3", 100);
-        put_fact(&authority, "z-gateway", "plugin:zcode", None, "bigmodel/glm-5.3-flash", 100);
+        put_fact(&authority, "z-native", "host:zcode", None, "GLM-5.3", 100);
+        put_fact(&authority, "z-gateway", "host:zcode", None, "bigmodel/glm-5.3-flash", 100);
         put_fact(&authority, "x-glm-on-codex", "codex", None, "glm-5.3", 100);
         put_fact(&authority, "c-listed", "claude-code", None, "glm-5.3-flash", 100);
         put_fact(&authority, "c-unlisted", "claude-code", None, "glm-5.4", 100);

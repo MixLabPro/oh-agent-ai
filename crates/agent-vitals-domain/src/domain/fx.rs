@@ -106,6 +106,7 @@ impl FxSnapshot {
     /// - 日期不能早于 `baseline`（回退）、不能在 `today` 之后（未来）；
     /// - 与 `baseline` 共有的币种，相对偏差不得超过 25%（一天内主要货币不会这样动，超过就是数据有问题）；
     /// - 不能少掉 `baseline` 里的核心币种（USD 必有，其余缺失超过一半视为残缺文件）。
+    ///
     /// 时钟由调用方供给（`today` 为 `YYYY-MM-DD`）。
     pub fn validate_update(&self, baseline: &FxSnapshot, today: &str) -> Result<(), String> {
         let age_vs_baseline = FxPolicy::age_days(&baseline.rate_date, &self.rate_date).ok_or("update rate_date is not a valid date")?;
@@ -206,9 +207,8 @@ impl FxPolicy {
 pub fn default_reporting_currency(locale: &str) -> &'static str {
     let base = locale.split('@').next().unwrap_or(locale);
     let region = base
-        .split(|c| c == '_' || c == '-' || c == '.')
-        .filter(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_alphabetic()))
-        .last()
+        .split(['_', '-', '.'])
+        .rfind(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_alphabetic()))
         .map(|part| part.to_ascii_uppercase());
     match region.as_deref() {
         Some("CN") => "CNY",

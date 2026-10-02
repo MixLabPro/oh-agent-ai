@@ -76,6 +76,74 @@ class GlobSemanticsTest(unittest.TestCase):
 
 
 class ManifestRulesTest(unittest.TestCase):
+    def test_schema_version_bounds_match_runtime_grammar(self):
+        import re
+        from agent_vitals.agent.generic_manifest import _release_version
+        schema_path = Path(__file__).resolve().parent.parent / "docs" / "schemas" / "host-manifest-v1.json"
+        rule = json.loads(schema_path.read_text(encoding="utf-8"))["properties"]["min_app_version"]
+        for version in ("0.0.0", "1.4.0", "4294967295.4294967295.4294967295",
+                        "4294967296.0.0", "1.4294967296.0", "1.0.4294967296",
+                        "1.4.0\n", "01.4.0", "1.4.0-rc.1", "1.4.0+build"):
+            with self.subTest(version=version):
+                accepted = bool(re.search(rule["pattern"], version)) and not re.search(rule["not"]["pattern"], version)
+                self.assertEqual(bool(accepted), _release_version(version) is not None)
+
+    def test_shared_capability_fixtures(self):
+        fixture = Path(__file__).resolve().parent.parent / "fixtures" / "host-manifest-capabilities.json"
+        for case in json.loads(fixture.read_text(encoding="utf-8")):
+            with self.subTest(case=case):
+                value = zcode_manifest()
+                value.update(case["extension"])
+                if "repeat_features" in case:
+                    value["requires"] = {"features": ["future"] * case["repeat_features"]}
+                if case["error_field"] is None:
+                    parse_manifest(value)
+                else:
+                    with self.assertRaises(ManifestError) as caught:
+                        parse_manifest(value)
+                    self.assertEqual(caught.exception.field, case["error_field"])
+                    self.assertEqual(caught.exception.problem, case["problem"])
+
+    def test_negotiation_uses_injected_runtime_capabilities(self):
+        from agent_vitals.agent.generic_manifest import CapabilitySet, negotiate_capabilities
+        v = {"min_app_version": "1.10.0", "requires": {"features": ["fixture-feature"]}}
+        negotiate_capabilities(v, CapabilitySet("1.10.0", (), ("fixture-feature",)))
+        with self.assertRaises(ManifestError) as caught:
+            negotiate_capabilities({"recipe": "request-usage-anthropic-v1"}, CapabilitySet(recipes=()))
+        self.assertEqual(caught.exception.field, "recipe")
+        with self.assertRaises(ManifestError) as caught:
+            negotiate_capabilities(v, CapabilitySet("1.9.0", (), ("fixture-feature",)))
+        self.assertEqual(caught.exception.field, "min_app_version")
+
+    def test_capabilities_and_release_versions_gate_real_parser(self):
+        from agent_vitals.agent.generic_manifest import APP_VERSION, RECIPE_IDS
+        for minimum in ("0.0.0", APP_VERSION):
+            v = zcode_manifest()
+            v.update(min_app_version=minimum, requires={"recipes": list(RECIPE_IDS), "features": []})
+            self.assertEqual(parse_manifest(v).facts_host, "host:zcode")
+        cases = [
+            ({"min_app_version": "4294967295.0.0"}, "min_app_version"),
+            ({"min_app_version": "01.0.0"}, "min_app_version"),
+            ({"min_app_version": "1.0.0-rc.1"}, "min_app_version"),
+            ({"min_app_version": "1.0.0+build"}, "min_app_version"),
+            ({"min_app_version": "1.0"}, "min_app_version"),
+            ({"min_app_version": "4294967296.0.0"}, "min_app_version"),
+            ({"min_app_version": None}, "min_app_version"),
+            ({"requires": None}, "requires"),
+            ({"requires": {"unknown": []}}, "requires.unknown"),
+            ({"requires": {"features": ["trust"]}}, "requires.features[0]"),
+            ({"requires": {"recipes": ["future-v2"]}}, "requires.recipes[0]"),
+            ({"requires": {"recipes": [RECIPE_IDS[0]] * 2}}, "requires.recipes[1]"),
+            ({"requires": {"features": "records"}}, "requires.features"),
+        ]
+        for extension, field in cases:
+            with self.subTest(extension=extension):
+                v = zcode_manifest()
+                v.update(extension)
+                with self.assertRaises(ManifestError) as caught:
+                    parse_manifest(v)
+                self.assertEqual(caught.exception.field, field)
+
     def test_reserved_slug_and_future_capabilities_rejected(self):
         for bad in ("claude-code", "plugin-x", "ZCode"):
             v = zcode_manifest()
@@ -140,6 +208,21 @@ class TriStateTest(unittest.TestCase):
 
 
 class GateAndE2ETest(unittest.TestCase):
+    def test_unsupported_capability_refuses_file_loading_before_fact_emission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = self._setup(tmp)
+            value = zcode_manifest()
+            value["requires"] = {"features": ["records"]}
+            manifest.write_text(json.dumps(value), encoding="utf-8")
+            before = sorted(str(p.relative_to(tmp)) for p in Path(tmp).rglob("*"))
+            with self.assertRaisesRegex(Exception, r"manifest 校验失败：requires.features\[0\]"):
+                run_plugin(str(manifest), [], "m1", tmp)
+            payload = plugin_validate_payload(str(manifest), [], "m1", tmp)
+            self.assertNotIn("facts", payload)
+            self.assertIn("error", payload)
+            self.assertIn("requires.features[0]", json.dumps(payload, ensure_ascii=False))
+            self.assertEqual(before, sorted(str(p.relative_to(tmp)) for p in Path(tmp).rglob("*")))
+
     def _setup(self, tmp):
         manifest_dir = Path(tmp) / "hosts.d" / "zcode"
         manifest_dir.mkdir(parents=True)
@@ -183,7 +266,7 @@ class GateAndE2ETest(unittest.TestCase):
             self.assertEqual(report["emitted"], 2)
             self.assertEqual(report["models"], ["GLM-5.3"])
             self.assertEqual(facts[0]["fact_id"][:4], "uf1-")
-            self.assertEqual(facts[0]["host"], "plugin:zcode")
+            self.assertEqual(facts[0]["host"], "host:zcode")
 
 
 if __name__ == "__main__":

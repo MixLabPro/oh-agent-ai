@@ -184,10 +184,11 @@ fn lane(total: usize, known: usize, empty_reason: &str) -> Value {
     }
 }
 
-/// 会话里一个工具结果都没有时的原因。插件宿主（`plugin:*`，走 DSL 适配）目前
-/// 不产 workflow 事件；原生宿主没有就是这次会话恰好没用工具。
+/// 会话里一个工具结果都没有时的原因。manifest 宿主（`host:*`，走 DSL 适配；
+/// 迁移期旧 `plugin:*` 同判）目前不产 workflow 事件；原生宿主没有就是这次
+/// 会话恰好没用工具。
 fn tools_empty_reason(host: &str) -> &'static str {
-    if host.starts_with("plugin:") { "not_ingested" } else { "no_data_in_session" }
+    if host.starts_with("host:") || host.starts_with("plugin:") { "not_ingested" } else { "no_data_in_session" }
 }
 
 /// 名义成本（spec §4、§8.5）：每组（回合 × 宿主 × 模型 × provider × 峰谷 × 价格快照）

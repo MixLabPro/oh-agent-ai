@@ -11,3 +11,4 @@ pub mod state;
 pub mod fx_settings;
 pub mod statistics_timezone;
 pub mod takeover;
+pub mod extension_objects;

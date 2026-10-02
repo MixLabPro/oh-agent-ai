@@ -22,6 +22,9 @@ agent-vitals-data = { path = "../agent-vitals-data" }
 agent-vitals-domain = { path = "../agent-vitals-domain" }
 agent-vitals-hosts = { path = "../agent-vitals-hosts", features = ["sources"] }
 agent-vitals-provider = { path = "../agent-vitals-provider" }
+# E04 安装器直接使用 core 的不可变对象存储（extension_objects）。runtime-core
+# 是叶子 core crate，无反向依赖，不引入环。
+agent-vitals-runtime-core = { path = "../agent-vitals-runtime-core" }
 rusqlite = { version = "0.31", features = ["bundled"] }
 jiff = "0.2"
 serde = "1"
@@ -37,3 +40,10 @@ libc = "0.2"
 # `notify`：2026-09-22 产品拍板（P2_WATCHER_PRODUCT_REVIEW.md 方案 A）后解除禁令，但只在
 # `watcher` feature 下引入（desktop 经 runtime 门面启用）——默认构建（CLI / wasm）零该依赖。
 notify = { version = "6.1", optional = true }
+
+[dev-dependencies]
+agent-vitals-domain = { path = "../agent-vitals-domain" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+

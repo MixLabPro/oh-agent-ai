@@ -117,7 +117,7 @@ fn source_profile_for_root(slug: &str, root_declared: &str) -> String {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(format!("{slug}|{root_declared}").as_bytes());
     let hex: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
-    format!("plugin-{hex}")
+    format!("host-{hex}")
 }
 
 /// 候选行 → UsageFact 字段 map（§9.2 映射表）。**billing 锁在这里 stamp**：
@@ -604,7 +604,7 @@ pub fn plugin_list(data_home: &Path) -> Value {
                 "slug": h.slug,
                 "display_name": h.display_name,
                 "recipe": h.recipe,
-                "host": format!("plugin:{}", h.slug),
+                "host": format!("host:{}", h.slug),
                 "manifest_revision": h.manifest_sha256,
                 "manifest_path": h.manifest_path.to_string_lossy(),
             })
@@ -713,9 +713,9 @@ mod tests {
         assert!(report.fact_id_stable);
         assert!(report.corpus_has_emit);
         assert_eq!(report.models, ["GLM-5.3"]);
-        assert_eq!(report.host, "plugin:zcode");
+        assert_eq!(report.host, "host:zcode");
         let f = &report.facts[0];
-        assert_eq!(f["host"], "plugin:zcode");
+        assert_eq!(f["host"], "host:zcode");
         assert_eq!(f["billing_mode"], "metered", "计价锁（§6.1）");
         assert_eq!(f["pricing_basis"], "metered_estimate");
         assert_eq!(f["machine_namespace"], "m1");
@@ -763,18 +763,18 @@ mod tests {
         assert_eq!(ingest["hosts"][0]["duplicate"], 0);
 
         // facts 文件落在 slug 命名空间。
-        let facts_file = data_home.join("facts/plugin-zcode.jsonl");
+        let facts_file = data_home.join("facts/host-zcode.jsonl");
         assert!(facts_file.exists(), "{:?}", facts_file);
         assert_eq!(std::fs::read_to_string(&facts_file).unwrap().lines().count(), 3);
 
-        // authority 双写：usage_facts 有行（host = plugin:zcode）。
+        // authority 双写：usage_facts 有行（host = host:zcode）。
         let authority_path =
             agent_vitals_data::authority::default_authority_path(&data_home);
         let db = agent_vitals_data::authority::AuthorityDb::open(&authority_path, 0).unwrap();
         let count: i64 = db
             .conn()
             .query_row(
-                "SELECT COUNT(*) FROM usage_facts WHERE host = 'plugin:zcode'",
+                "SELECT COUNT(*) FROM usage_facts WHERE host = 'host:zcode'",
                 [],
                 |r| r.get(0),
             )
@@ -788,7 +788,7 @@ mod tests {
         let count2: i64 = db
             .conn()
             .query_row(
-                "SELECT COUNT(*) FROM usage_facts WHERE host = 'plugin:zcode'",
+                "SELECT COUNT(*) FROM usage_facts WHERE host = 'host:zcode'",
                 [],
                 |r| r.get(0),
             )
@@ -798,7 +798,7 @@ mod tests {
         // retention 覆盖插件文件（registry 驱动）。
         let rep = crate::ingest_service::enforce_retention(&data_home, "2026-09").unwrap();
         assert!(
-            rep.get("plugin:zcode").is_some(),
+            rep.get("host:zcode").is_some(),
             "retention 输出含插件宿主：{rep}"
         );
 

@@ -38,3 +38,4 @@ pub mod trajectory;
 pub mod trust;
 pub mod usage;
 pub mod util;
+pub mod catalog_index;

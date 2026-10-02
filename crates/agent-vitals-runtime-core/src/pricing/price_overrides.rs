@@ -72,6 +72,7 @@ pub fn currencies(data_home: &Path) -> serde_json::Map<String, Value> {
 /// - 服务商的报价币种已知（目录，或此前用户为新服务商声明过）→ 卡币种必须与之一致，否则拒绝，
 ///   并明确说明不做任何换算；
 /// - 服务商是新的（币种未知）→ 以这次声明的币种为准并记下来，之后同一服务商的卡必须同币种。
+///
 /// 同一服务商同时有两套官方报价（如 DeepSeek USD / CNY，`quote_variants`）：第一张用户卡可选其中任一币种，
 /// 并把该服务商钉在这个币种上（见 `quote_variants`）；之后的卡必须同币种。卡本身仍没有卡级币种。
 pub fn save_card_checked(
