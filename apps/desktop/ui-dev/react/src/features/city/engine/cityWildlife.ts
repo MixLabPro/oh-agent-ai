@@ -293,7 +293,8 @@ class Fireflies {
           float drift = sin(uTime * 0.6 + aPhase * 4.0) * 0.5;
           mvPosition.y += drift;
           vGlow = blink;
-          gl_PointSize = (60.0 + blink * 46.0) / max(1.0, -mvPosition.z);
+          // ×4：50 单位外原来只有 ~2px，等于看不见（审计夜景公园里一只都找不到）；近处封顶 28px。
+          gl_PointSize = min(28.0, (240.0 + blink * 184.0) / max(1.0, -mvPosition.z));
           gl_Position = projectionMatrix * mvPosition;
         }`,
       fragmentShader: /* glsl */ `

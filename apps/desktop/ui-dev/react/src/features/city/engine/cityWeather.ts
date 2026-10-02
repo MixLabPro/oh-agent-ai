@@ -120,36 +120,42 @@ export class RainOverlay {
 /** 雨后彩虹：海平面上空的半圆光谱弧，反太阳方位，强度随上午渐隐（weatherAt 给出）。 */
 export class RainbowArch {
   readonly mesh: THREE.Mesh;
-  private readonly uniforms: { uOpacity: { value: number } };
+  private readonly uniforms: { uOpacity: { value: number }; uInner: { value: number }; uOuter: { value: number } };
 
   constructor(radius: number) {
-    this.uniforms = { uOpacity: { value: 0 } };
+    this.uniforms = { uOpacity: { value: 0 }, uInner: { value: radius * 0.78 }, uOuter: { value: radius } } as RainbowArch["uniforms"];
+    // 普通 alpha 混合 + 饱和光谱：加色混合下粉彩色在亮白的雾天空上叠成一道白环（审计照片：没有颜色）。
     const material = new THREE.ShaderMaterial({
       transparent: true, depthWrite: false, side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
+      blending: THREE.NormalBlending,
       uniforms: this.uniforms,
       vertexShader: /* glsl */ `
-        varying vec2 vUv;
+        varying float vRadius;
         void main() {
-          vUv = uv;
+          vRadius = length(position.xy);
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }`,
       fragmentShader: /* glsl */ `
         uniform float uOpacity;
-        varying vec2 vUv;
+        uniform float uInner;
+        uniform float uOuter;
+        varying float vRadius;
         vec3 band(float t) {
           // 光谱：外缘紫 → 内缘红，只在环带内可见（RingGeometry 的 uv.y 跨越环宽）。
           vec3 spectrum[6] = vec3[6](
-            vec3(0.55, 0.35, 0.75), vec3(0.35, 0.5, 0.85), vec3(0.4, 0.7, 0.9),
-            vec3(0.5, 0.85, 0.6), vec3(0.95, 0.8, 0.4), vec3(0.95, 0.45, 0.4)
+            vec3(0.5, 0.2, 0.85), vec3(0.15, 0.35, 0.95), vec3(0.1, 0.75, 0.9),
+            vec3(0.2, 0.85, 0.3), vec3(1.0, 0.85, 0.1), vec3(1.0, 0.25, 0.15)
           );
           float f = clamp(t, 0.0, 1.0) * 5.0;
           int i = int(f);
           return mix(spectrum[i], spectrum[min(i + 1, 5)], fract(f));
         }
         void main() {
-          float edge = smoothstep(0.0, 0.22, vUv.y) * smoothstep(1.0, 0.78, vUv.y);
-          gl_FragColor = vec4(band(vUv.y) * edge * 0.8, edge * uOpacity);
+          // 光谱沿半径展开（真实主虹：内缘紫 → 外缘红）。曾用 RingGeometry 的 uv.y——那是包围盒上的平面坐标、
+          // 自下而上贯穿整道弧，不是环带宽度方向：颜色被拉满整个弧高，环带内几乎是同一种色。
+          float t = clamp((vRadius - uInner) / (uOuter - uInner), 0.0, 1.0);
+          float edge = smoothstep(0.0, 0.18, t) * smoothstep(1.0, 0.82, t);
+          gl_FragColor = vec4(band(t), edge * uOpacity * 0.55);
         }`,
     });
     const geometry = new THREE.RingGeometry(radius * 0.78, radius, 48, 1, 0, Math.PI);

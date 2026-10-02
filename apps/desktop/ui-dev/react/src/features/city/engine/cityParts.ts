@@ -2206,10 +2206,11 @@ export class CityParts {
             // 只在深度真的在变的地方画（靠近真实岸线）：用 2 单位差分估深度梯度，平坦处不画条带。
             float grad = length(vec2(shoreDepth(p + vec2(2.0, 0.0)) - d, shoreDepth(p + vec2(0.0, 2.0)) - d)) * 0.5;
             float band = smoothstep(0.45, 0.7, contour) * (1.0 - smoothstep(0.75, 1.0, contour));
-            float depthFade = 1.0 - smoothstep(0.08, 0.7, d);
+            // 只留最靠岸的一窄条：窄河里深度处处都浅，曾整条河铺满白色条带、读作结冰（拍照实测）。
+            float depthFade = 1.0 - smoothstep(0.03, 0.3, d);
             float bandFade = 1.0 - smoothstep(700.0, 1400.0, dist);
             float slopeFade = smoothstep(0.0012, 0.004, grad);
-            color = mix(color, vec3(0.9, 0.97, 0.98), band * depthFade * bandFade * slopeFade * 0.75 * dayFade);
+            color = mix(color, vec3(0.9, 0.97, 0.98), band * depthFade * bandFade * slopeFade * 0.45 * dayFade);
           }
           gl_FragColor = vec4(color, 1.0);
           #include <tonemapping_fragment>
@@ -2697,8 +2698,11 @@ export class CityParts {
    *  theme 切换会重设 uSelfLit 基线，下一次昼夜 tick 会在其上再抬升。 */
   private nightGlow = 0;
 
-  setNightGlow(night: number): void {
-    this.nightGlow = night;
+  setNightGlow(selfLit: number): void {
+    this.nightGlow = selfLit;
+    // 电灯用自己的「夜」量：DAY 档 selfLit = 0.05（立面的白天余光），直接拿来点灯会让正午的光斑/霓虹
+    // 越过 0.03/0.04 的开灯阈值、灯头也带着亮度（审计实测正午灯全开）。≤0.1 一律算白天 = 0。
+    const night = Math.max(0, (selfLit - 0.1) / 0.9);
     const beamMaterial = this.heroParts?.beam?.material as THREE.MeshBasicMaterial | undefined;
     if (beamMaterial) {
       beamMaterial.visible = night > 0.05;
