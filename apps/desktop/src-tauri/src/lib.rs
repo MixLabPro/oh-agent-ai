@@ -340,7 +340,7 @@ fn host_display_name(kind: &str) -> String {
     agent_vitals_domain::host_capability::host_profile(kind)
         .map(|h| h.display.to_string())
         .unwrap_or_else(|| {
-            if kind.starts_with("plugin:") {
+            if kind.starts_with("host:") || kind.starts_with("plugin:") {
                 agent_vitals_runtime::host_registry::plugin_display_name(&overview::data_home(), kind)
             } else {
                 kind.to_string()
@@ -348,12 +348,12 @@ fn host_display_name(kind: &str) -> String {
         })
 }
 
-/// 界面用：全部插件宿主的 `{ "plugin:<slug>": 显示名 }`。内置宿主的名字界面自带。
+/// 界面用：全部 manifest 宿主的 `{ "host:<slug>": 显示名 }`。内置宿主的名字界面自带。
 #[tauri::command(async)]
 fn host_display_names() -> Value {
     let (hosts, _) = agent_vitals_runtime::host_registry::scan_plugin_hosts(&overview::data_home());
     let mut map = serde_json::Map::new();
-    for host in hosts { map.insert(format!("plugin:{}", host.slug), Value::String(host.display_name)); }
+    for host in hosts { map.insert(format!("host:{}", host.slug), Value::String(host.display_name)); }
     Value::Object(map)
 }
 
@@ -3422,6 +3422,260 @@ async fn update_public_pricing_catalog() -> Result<Value, String> {
     update_public_pricing_catalog_internal(false).await
 }
 
+// ── 官方 manifest 目录（E06，扩展架构 §8.2）────────────────────────────
+// 与公共价卡同一条纪律：HTTP 只在桌面层；请求固定公共 HTTPS 地址、不带任何
+// 用户数据；默认关闭、显式 opt-in；失败只写状态文件，绝不影响已装内容。
+// 本批次交付「索引拉取 + 校验 + 缓存 + 状态面」；payload 下载与激活确认随
+// E06 后续批次接入——状态如实标注 supported_entries，不冒充已可安装。
+const MANIFEST_CATALOG_INDEX_URL: &str =
+    "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/catalog/index.json";
+const MANIFEST_CATALOG_STATUS_FILE: &str = "manifest-catalog-update.json";
+const MANIFEST_CATALOG_POLICY_FILE: &str = "manifest-catalog-policy.json";
+const MANIFEST_CATALOG_CHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct ManifestCatalogStatus {
+    state: String,
+    source_url: String,
+    last_checked_at_ms: Option<i64>,
+    last_success_at_ms: Option<i64>,
+    catalog_sequence: Option<u64>,
+    index_sha256: Option<String>,
+    entry_count: Option<usize>,
+    supported_entries: Option<usize>,
+    failure_reason: Option<String>,
+    #[serde(default)]
+    failure_count: u32,
+    #[serde(default)]
+    next_check_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct ManifestCatalogPolicy {
+    network_enabled: bool,
+}
+
+fn manifest_catalog_status_path(data_home: &Path) -> PathBuf {
+    data_home.join(MANIFEST_CATALOG_STATUS_FILE)
+}
+
+fn manifest_catalog_policy_path(data_home: &Path) -> PathBuf {
+    data_home.join(MANIFEST_CATALOG_POLICY_FILE)
+}
+
+fn read_manifest_catalog_policy(data_home: &Path) -> ManifestCatalogPolicy {
+    std::fs::read(manifest_catalog_policy_path(data_home))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn write_manifest_catalog_policy(
+    data_home: &Path,
+    policy: &ManifestCatalogPolicy,
+) -> Result<(), String> {
+    std::fs::create_dir_all(data_home).map_err(|e| format!("create data home failed: {e}"))?;
+    let bytes = serde_json::to_vec_pretty(policy)
+        .map_err(|e| format!("serialize manifest catalog policy failed: {e}"))?;
+    let tmp = data_home.join("manifest-catalog-policy.json.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write manifest catalog policy failed: {e}"))?;
+    std::fs::rename(&tmp, manifest_catalog_policy_path(data_home))
+        .map_err(|e| format!("commit manifest catalog policy failed: {e}"))
+}
+
+fn read_manifest_catalog_status(data_home: &Path) -> ManifestCatalogStatus {
+    std::fs::read(manifest_catalog_status_path(data_home))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| ManifestCatalogStatus {
+            state: "never_checked".into(),
+            source_url: MANIFEST_CATALOG_INDEX_URL.into(),
+            ..Default::default()
+        })
+}
+
+fn write_manifest_catalog_status(
+    data_home: &Path,
+    status: &ManifestCatalogStatus,
+) -> Result<(), String> {
+    std::fs::create_dir_all(data_home).map_err(|e| format!("create data home failed: {e}"))?;
+    let bytes = serde_json::to_vec_pretty(status)
+        .map_err(|e| format!("serialize manifest catalog status failed: {e}"))?;
+    let tmp = data_home.join("manifest-catalog-update.json.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write manifest catalog status failed: {e}"))?;
+    std::fs::rename(&tmp, manifest_catalog_status_path(data_home))
+        .map_err(|e| format!("commit manifest catalog status failed: {e}"))
+}
+
+fn fail_manifest_catalog_update(
+    data_home: &Path,
+    status: &mut ManifestCatalogStatus,
+    state: &str,
+    reason: String,
+) -> Result<Value, String> {
+    status.state = state.into();
+    status.failure_reason = Some(reason.clone());
+    status.failure_count = status.failure_count.saturating_add(1);
+    let backoff_hours = 1_i64 << status.failure_count.min(7);
+    status.next_check_at_ms = Some(
+        status
+            .last_checked_at_ms
+            .unwrap_or_else(agent_vitals_runtime::core::clock::now_ms)
+            .saturating_add(backoff_hours.saturating_mul(60 * 60 * 1000)),
+    );
+    write_manifest_catalog_status(data_home, status)?;
+    Err(reason)
+}
+
+/// 本体当前支持的 slot/能力（E01 capability 协商的目录面镜像——来源是
+/// `generic_manifest::CapabilitySet::default()`，不维护第二份词表）。
+fn manifest_catalog_slot_support() -> std::collections::BTreeMap<String, agent_vitals_domain::domain::catalog_index::SlotSupport> {
+    let capabilities = agent_vitals_hosts::generic_manifest::CapabilitySet::default();
+    let mut support = std::collections::BTreeMap::new();
+    support.insert(
+        "host_manifest".to_string(),
+        agent_vitals_domain::domain::catalog_index::SlotSupport {
+            schemas: vec![1],
+            capabilities: capabilities
+                .recipes
+                .iter()
+                .map(|recipe| format!("recipe:{recipe}"))
+                .chain(capabilities.features.iter().map(|feature| format!("feature:{feature}")))
+                .collect(),
+        },
+    );
+    support
+}
+
+fn manifest_catalog_cache_path(data_home: &Path) -> PathBuf {
+    data_home.join("cache").join("catalog").join("index.json")
+}
+
+fn write_manifest_catalog_index_cache(data_home: &Path, bytes: &[u8]) -> Result<(), String> {
+    let path = manifest_catalog_cache_path(data_home);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create catalog cache dir failed: {e}"))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write catalog cache failed: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("commit catalog cache failed: {e}"))
+}
+
+#[tauri::command(async)]
+fn manifest_catalog_status() -> Value {
+    let data_home = overview::data_home();
+    let mut status = serde_json::to_value(read_manifest_catalog_status(&data_home))
+        .unwrap_or_else(|_| serde_json::json!({ "state": "unavailable" }));
+    status["network_enabled"] = Value::Bool(read_manifest_catalog_policy(&data_home).network_enabled);
+    status
+}
+
+#[tauri::command]
+fn save_manifest_catalog_policy(network_enabled: bool) -> Result<Value, String> {
+    let data_home = overview::data_home();
+    write_manifest_catalog_policy(&data_home, &ManifestCatalogPolicy { network_enabled })?;
+    Ok(serde_json::json!({ "status": "saved", "network_enabled": network_enabled }))
+}
+
+/// 手动检查官方 manifest 目录索引。请求只访问固定公共 HTTPS 地址，不携带
+/// AGENT_VITALS_HOME、日志内容、会话或任何本地数据；下载/校验失败只写状态，
+/// 已装 manifest 与缓存旧索引原样保留。payload 激活需要独立的显式确认
+/// （扩展架构 §8.2），不在本命令内自动发生。
+#[tauri::command]
+async fn update_manifest_catalog() -> Result<Value, String> {
+    let data_home = overview::data_home();
+    let policy = read_manifest_catalog_policy(&data_home);
+    if !policy.network_enabled {
+        return Err("manifest 目录联网检查未开启；请先明确允许访问公共目录服务".into());
+    }
+    let now = agent_vitals_runtime::core::clock::now_ms();
+    let mut status = read_manifest_catalog_status(&data_home);
+    if status.next_check_at_ms.is_some_and(|next| now < next)
+        || status
+            .last_checked_at_ms
+            .is_some_and(|last| now.saturating_sub(last) < MANIFEST_CATALOG_CHECK_INTERVAL_MS)
+    {
+        return Ok(serde_json::json!({ "status": "skipped", "reason": "check_window" }));
+    }
+    status.source_url = MANIFEST_CATALOG_INDEX_URL.into();
+    status.last_checked_at_ms = Some(now);
+    status.failure_reason = None;
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("agent-vitals-manifest-catalog-check/1")
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return fail_manifest_catalog_update(&data_home, &mut status, "failed", format!("create manifest catalog client failed: {error}"))
+        }
+    };
+    let response = match client.get(MANIFEST_CATALOG_INDEX_URL).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return fail_manifest_catalog_update(&data_home, &mut status, "failed", format!("manifest catalog request failed: {error}"))
+        }
+    };
+    if !response.status().is_success() {
+        return fail_manifest_catalog_update(&data_home, &mut status, "failed", format!("manifest catalog returned HTTP {}", response.status()));
+    }
+    if response.content_length().is_some_and(|length| length > 4 * 1024 * 1024) {
+        return fail_manifest_catalog_update(&data_home, &mut status, "failed", "manifest catalog response exceeds 4 MiB limit".into());
+    }
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return fail_manifest_catalog_update(&data_home, &mut status, "failed", format!("read manifest catalog response failed: {error}"))
+        }
+    };
+    let index = match agent_vitals_domain::domain::catalog_index::parse_catalog(&bytes) {
+        Ok(index) => index,
+        Err(reason) => return fail_manifest_catalog_update(&data_home, &mut status, "rejected", reason.into()),
+    };
+    use sha2::Digest;
+    let index_sha256 = format!("{:x}", sha2::Sha256::digest(&bytes));
+    let support = manifest_catalog_slot_support();
+    let capabilities = agent_vitals_hosts::generic_manifest::CapabilitySet::default();
+    let highest = status
+        .catalog_sequence
+        .zip(status.index_sha256.as_deref().map(|hash| hash.to_string()))
+        .map(|(sequence, hash)| (sequence, hash));
+    let highest_ref = highest.as_ref().map(|(sequence, hash)| (*sequence, hash.as_str()));
+    if let Err(reason) = agent_vitals_domain::domain::catalog_index::validate_catalog(
+        &index,
+        &support,
+        &capabilities.app_version,
+        &index_sha256,
+        highest_ref,
+    ) {
+        return fail_manifest_catalog_update(&data_home, &mut status, "rejected", reason.into());
+    }
+    write_manifest_catalog_index_cache(&data_home, &bytes)?;
+    let entry_count = index["entries"].as_array().map(|entries| entries.len());
+    let supported_entries = index["entries"]
+        .as_array()
+        .map(|entries| entries.iter().filter(|entry| entry["slot_type"] == "host_manifest").count());
+    status.state = "ok".into();
+    status.last_success_at_ms = Some(now);
+    status.catalog_sequence = index["catalog_sequence"].as_u64();
+    status.index_sha256 = Some(index_sha256);
+    status.entry_count = entry_count;
+    status.supported_entries = supported_entries;
+    status.failure_count = 0;
+    status.next_check_at_ms = Some(now.saturating_add(MANIFEST_CATALOG_CHECK_INTERVAL_MS));
+    write_manifest_catalog_status(&data_home, &status)?;
+    Ok(serde_json::json!({
+        "status": "checked",
+        "source_url": MANIFEST_CATALOG_INDEX_URL,
+        "catalog_sequence": status.catalog_sequence,
+        "entry_count": status.entry_count,
+        "supported_entries": status.supported_entries,
+        "activation": "payload 下载与激活确认需要显式确认命令（扩展架构 §8.2），本命令只拉取并缓存索引",
+        "last_success_at_ms": now,
+    }))
+}
+
 fn start_public_pricing_catalog_tick() {
     tauri::async_runtime::spawn(async {
         loop {
@@ -3460,7 +3714,7 @@ fn findings_freshness_state(report: &Value) -> &'static str {
 
 fn findings_safe_host_label(value: &Value) -> String {
     let Some(host) = value.as_str() else { return "generic".to_string(); };
-    if let Some(slug) = host.strip_prefix("plugin:") {
+    if let Some(slug) = host.strip_prefix("host:").or_else(|| host.strip_prefix("plugin:")) {
         if agent_vitals_runtime::host_registry::plugin_slug_ok(slug) {
             return host.to_string();
         }
@@ -5188,6 +5442,9 @@ pub fn run() {
             reset_city_seed,
             set_city_seed,
             public_pricing_catalog_status,
+            manifest_catalog_status,
+            save_manifest_catalog_policy,
+            update_manifest_catalog,
             save_public_pricing_catalog_policy,
             update_public_pricing_catalog,
             restore_authority_backup,

@@ -475,15 +475,19 @@ enum Cmd {
         #[arg(long)]
         write: bool,
     },
-    /// List validated plugin hosts (HOST_MANIFEST_DSL_SPEC §7.2 registry).
+    /// List validated manifest hosts (HOST_MANIFEST_DSL_SPEC §7.2 registry).
     /// Read-only; broken manifests are reported, never fatal (degradation
     /// isolation). Python mirror lands with the parity task.
-    PluginList,
-    /// Dry-run a plugin manifest (§6.5 first-install walkthrough): discovery + extraction +
+    ManifestList,
+    /// Local manifest-catalog check status (E06): reads the status/policy files
+    /// written by the desktop check. CLI has no network transport — the fetch
+    /// itself is desktop-owned, mirroring the pricing catalog.
+    ManifestCatalogStatus,
+    /// Dry-run a manifest host (§6.5 first-install walkthrough): discovery + extraction +
     /// fact_id stability + format guard. No writes. With --file, feed fixture
     /// files directly (golden/parity mode); otherwise discovery per manifest.
-    /// Mirrors Python `scan.py plugin-validate`.
-    PluginValidate {
+    /// Mirrors Python `scan.py manifest-validate`.
+    ManifestValidate {
         /// Path to hosts.d/<slug>/manifest.json
         #[arg(long)]
         manifest: PathBuf,
@@ -497,10 +501,10 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: bool,
     },
-    /// Ingest a plugin host (§6.5): validate gate -> facts JSONL (exactly-once)
+    /// Ingest a manifest host (§6.5): validate gate -> facts JSONL (exactly-once)
     /// -> authority dual-write. Rust-only writer (Python grows no writer, same
     /// rule as workbuddy-usage-facts --write). Rerun-safe on every stage.
-    PluginIngest {
+    ManifestIngest {
         /// Path to hosts.d/<slug>/manifest.json (slug must match dir name)
         #[arg(long)]
         manifest: PathBuf,
@@ -2933,7 +2937,7 @@ session_store={store} fold={fold}"
     // event id 按 rollout stem 命名空间——同 stem 的 byte-identical 复本去重、
     // 异 stem 永不误合并。与 Python `scan.py codex-usage-facts --json -` 字节相等
     // （parity 钉测在 tests/test_codex_usage_fact.py）。
-    if let Some(Cmd::PluginList) = &args.cmd {
+    if let Some(Cmd::ManifestList) = &args.cmd {
         let payload = agent_vitals_runtime::plugin_ingest::plugin_list(
             &agent_vitals_runtime::home::data_home(),
         );
@@ -2941,7 +2945,27 @@ session_store={store} fold={fold}"
         return;
     }
 
-    if let Some(Cmd::PluginValidate {
+    if let Some(Cmd::ManifestCatalogStatus) = &args.cmd {
+        // 只读本地状态/策略文件（与桌面共享同一事实源）；无网络。
+        let data_home = agent_vitals_runtime::core::home::data_home();
+        let read = |name: &str| {
+            std::fs::read(data_home.join(name))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        };
+        let mut status = read("manifest-catalog-update.json").unwrap_or_else(|| {
+            serde_json::json!({ "state": "never_checked",
+                "source_url": "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/catalog/index.json" })
+        });
+        let network_enabled = read("manifest-catalog-policy.json")
+            .and_then(|policy| policy.get("network_enabled").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+        status["network_enabled"] = serde_json::Value::Bool(network_enabled);
+        println!("{}", serde_json::to_string_pretty(&status).unwrap_or_default());
+        return;
+    }
+
+    if let Some(Cmd::ManifestValidate {
         manifest,
         files,
         machine_namespace,
@@ -2978,7 +3002,7 @@ session_store={store} fold={fold}"
             println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
         }
         if let Some(err) = payload.get("error").and_then(|v| v.as_str()) {
-            eprintln!("plugin-validate failed: {err}");
+            eprintln!("manifest-validate failed: {err}");
         }
         if failed {
             std::process::exit(2);
@@ -2986,7 +3010,7 @@ session_store={store} fold={fold}"
         return;
     }
 
-    if let Some(Cmd::PluginIngest {
+    if let Some(Cmd::ManifestIngest {
         manifest,
         machine_namespace,
         write,
@@ -2997,15 +3021,15 @@ session_store={store} fold={fold}"
         // CLI 不读 takeover 身份补齐，缺失 exit 2。
         let Some(ns) = machine_namespace.as_deref().filter(|s| !s.is_empty()) else {
             eprintln!(
-                "plugin-ingest: --machine-namespace is required \
+                "manifest-ingest: --machine-namespace is required \
                  (v0.7 spec §9: caller-provided; a CLI default would write state)"
             );
             std::process::exit(2);
         };
         if !*write {
             eprintln!(
-                "plugin-ingest: pass --write to persist (without it use \
-                 plugin-validate for the read-only dry-run)"
+                "manifest-ingest: pass --write to persist (without it use \
+                 manifest-validate for the read-only dry-run)"
             );
             std::process::exit(2);
         }
@@ -3020,7 +3044,7 @@ session_store={store} fold={fold}"
                 println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
             }
             Err(e) => {
-                eprintln!("plugin-ingest failed: {e}");
+                eprintln!("manifest-ingest failed: {e}");
                 std::process::exit(2);
             }
         }
@@ -3303,6 +3327,14 @@ session_store={store} fold={fold}"
             eprintln!("data-migrate failed: {e}");
             std::process::exit(2);
         }
+        // E05/v30 文件侧迁移（幂等）：先把 plugin- 期行重 stamp 到 host: 身份
+        // （与 authority v30 同拍板），再改 facts 文件名。挂在 data-migrate 而
+        // 非仅靠 retention——CLI 调用图裁剪后后者不一定被链接，且这是显式
+        // 维护命令，确定性触发优于等每日首轮。
+        let restamp = agent_vitals_runtime::ingest::ingest_service::restamp_manifest_fact_files(&data_home);
+        let rename = agent_vitals_runtime::ingest::ingest_service::migrate_manifest_facts_prefix(&data_home);
+        println!("manifest facts restamp: {}", serde_json::to_string_pretty(&restamp).unwrap_or_default());
+        println!("manifest facts rename: {}", serde_json::to_string_pretty(&rename).unwrap_or_default());
         // 迁移总量（JSONL + legacy ledger 合并同一口径——收尾行与 migrations
         // checkpoint 都从这读）。
         struct Totals {

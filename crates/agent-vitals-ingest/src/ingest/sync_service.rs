@@ -814,14 +814,14 @@ pub fn sync_facts_filtered(
                     if appended > 0 {
                         crate::core::logging::log_info(
                             "sync",
-                            &format!("plugin:{slug} 再摄取 +{appended} 条"),
+                            &format!("host:{slug} 再摄取 +{appended} 条"),
                         );
                         report.total_appended += appended as usize;
                     }
                 }
                 Err(error) => {
                     report.hosts.push(HostSyncReport {
-                        host: format!("plugin:{slug}"),
+                        host: format!("host:{slug}"),
                         errors: vec![error],
                         ..Default::default()
                     });

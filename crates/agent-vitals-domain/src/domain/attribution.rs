@@ -260,10 +260,10 @@ mod tests {
         // 宿主读自家模型：无前缀（用户 2026-10-01 的观察）
         assert!(is_host_native_model("claude-code", "claude-sonnet-5-5"));
         assert!(is_host_native_model("codex", "gpt-5.6-terra"));
-        assert!(is_host_native_model("plugin:zcode", "GLM-5.3"), "大小写不敏感");
-        assert!(is_host_native_model("plugin:zcode", "glm-5.3-flash"));
+        assert!(is_host_native_model("host:zcode", "GLM-5.3"), "大小写不敏感");
+        assert!(is_host_native_model("host:zcode", "glm-5.3-flash"));
         // 第三方云厂商 / 中转给模型加路径前缀
-        assert!(!is_host_native_model("plugin:zcode", "bigmodel/glm-5.3-flash"));
+        assert!(!is_host_native_model("host:zcode", "bigmodel/glm-5.3-flash"));
         assert!(!is_host_native_model("codex", "deepseek/deepseek-v4.1-flash"));
         assert!(!is_host_native_model("codex", "openai/gpt-5.6-luna"), "即使前缀就是自家厂商，带前缀也是经过网关");
         assert!(!is_host_native_model("claude-code", "anthropic/claude-sonnet-5"));
@@ -275,10 +275,10 @@ mod tests {
         assert!(!is_host_native_model("workbuddy", "hy4-preview-f"));
         assert!(!is_host_native_model("claude-code", "<synthetic>"));
         assert!(!is_host_native_model("claude-code", ""));
-        assert_eq!(host_native_vendor("plugin:zcode").as_deref(), Some("zhipu-glm"));
+        assert_eq!(host_native_vendor("host:zcode").as_deref(), Some("zhipu-glm"));
         assert_eq!(host_native_vendor("nope"), None);
         assert!(model_prefixes_of("zhipu-glm").contains(&"glm-".to_string()));
-        assert_eq!(native_hosts_of("zhipu-glm"), vec!["plugin:zcode".to_string()]);
+        assert_eq!(native_hosts_of("zhipu-glm"), vec!["host:zcode".to_string()]);
         assert_eq!(native_hosts_of("anthropic"), vec!["claude-code".to_string()]);
         assert!(native_hosts_of("nobody").is_empty());
     }

@@ -35,9 +35,10 @@ use serde_json::Value;
 pub use crate::core::fact_hosts::FACT_HOSTS;
 
 /// 单宿主 facts 文件路径。未知宿主 → None（调用方报错，不猜）。
-/// 插件宿主（`plugin:<slug>`）经 slug 校验后落 `plugin-<slug>.jsonl`——
-/// 路径穿越防护语义保留（slug 词表闸在 `host_registry::plugin_facts_stem`，
-/// HOST_MANIFEST_DSL_SPEC §7.2）；`plugin-` 前缀的文件名空间官方宿主永不占用。
+/// manifest 宿主（`host:<slug>`；迁移期旧 `plugin:<slug>` 折算到同一 stem）
+/// 经 slug 校验后落 `host-<slug>.jsonl`——路径穿越防护语义保留（slug 词表闸
+/// 在 `host_registry::plugin_facts_stem`，HOST_MANIFEST_DSL_SPEC §7.2/§13）；
+/// `host-` 前缀的文件名空间官方宿主永不占用。
 pub fn facts_path(data_home: &Path, host: &str) -> Option<PathBuf> {
     if !FACT_HOSTS.contains(&host) {
         let stem = crate::host_registry::plugin_facts_stem(host)?;
@@ -125,7 +126,7 @@ pub fn ingest_facts(data_home: &Path, facts: &[Value]) -> Result<IngestReport, S
         if !FACT_HOSTS.contains(&host) && facts_path(data_home, host).is_none() {
             return Err(format!(
                 "unknown host `{host}` (known: {FACT_HOSTS:?} + validated \
-                 plugin:<slug>) — refusing to invent a facts file"
+                 host:<slug>) — refusing to invent a facts file"
             ));
         }
         grouped.entry(host).or_default().push(fact);
@@ -214,11 +215,113 @@ fn month_shift(month: &str, months_back: u32) -> String {
     format!("{:04}-{:02}", total / 12, total % 12 + 1)
 }
 
+/// v30 配套（发布前拍板 2026-10-01）：facts JSONL 里 `plugin-` 期行一次性重
+/// stamp 到 `host:` 身份——fact_id 与 source_profile 用 domain 的同一
+/// `fact_id()` 重算，与 authority 迁移同构。重算后同 id 重复行保留首行
+/// （重导已写入的新行优先）。仅重写有变化的文件（原子替换），幂等。
+pub fn restamp_manifest_fact_files(data_home: &Path) -> Value {
+    let facts_dir = data_home.join("facts");
+    let mut report = serde_json::Map::new();
+    let Ok(entries) = std::fs::read_dir(&facts_dir) else { return serde_json::Value::Object(report) };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| (n.starts_with("host-") || n.starts_with("plugin-")) && n.ends_with(".jsonl"))
+        .collect();
+    names.sort();
+    for name in names {
+        let path = facts_dir.join(&name);
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let mut restamped = 0usize;
+        let mut merged = 0usize;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut lines = Vec::new();
+        for line in text.lines() {
+            if line.trim().is_empty() { continue; }
+            let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+                lines.push(line.to_string()); // 坏行原样保留，交由既有修复路径处理
+                continue;
+            };
+            let profile = value.get("source_profile").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if let Some(rest) = profile.strip_prefix("plugin-") {
+                let slug = value.get("host").and_then(|v| v.as_str())
+                    .and_then(|h| h.strip_prefix("host:").or_else(|| h.strip_prefix("plugin:")))
+                    .unwrap_or_default().to_string();
+                let namespace = value.get("machine_namespace").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let session = value.get("native_session_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let event = value.get("source_event_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let kind = value.get("observation_kind").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let new_profile = format!("host-{rest}");
+                let new_id = agent_vitals_domain::contracts::usage_fact::fact_id(
+                    &namespace, &format!("host:{slug}"), &new_profile, &session, &event, &kind);
+                if seen.contains(&new_id) { merged += 1; continue; }
+                seen.insert(new_id.clone());
+                value["fact_id"] = serde_json::Value::String(new_id);
+                value["source_profile"] = serde_json::Value::String(new_profile);
+                restamped += 1;
+                lines.push(serde_json::to_string(&value).unwrap_or_else(|_| line.to_string()));
+            } else {
+                if let Some(id) = value.get("fact_id").and_then(|v| v.as_str()) {
+                    if !seen.insert(id.to_string()) {
+                        merged += 1;
+                        continue;
+                    }
+                }
+                lines.push(line.to_string());
+            }
+        }
+        if restamped > 0 || merged > 0 {
+            let temporary = facts_dir.join(format!(".restamp-{}-{}", std::process::id(), name));
+            if std::fs::write(&temporary, lines.join("\n") + "\n").and_then(|_| std::fs::rename(&temporary, &path)).is_ok() {
+                report.insert(name, serde_json::json!({ "restamped": restamped, "merged": merged }));
+            }
+        }
+    }
+    serde_json::Value::Object(report)
+}
+
+/// E05（spec §13.3）：旧 `plugin-<slug>.jsonl` facts 文件一次性改名为
+/// `host-<slug>.jsonl`。幂等：目标已存在则跳过（不合并、不覆盖，留人工
+/// 核对）；slug 不过闸的旧文件如实上报不改。authority 侧 `plugin:` →
+/// `host:` 的行迁移在 schema v29（authority.rs）同批完成。
+pub fn migrate_manifest_facts_prefix(data_home: &Path) -> Value {
+    let facts_dir = data_home.join("facts");
+    let empty = || serde_json::json!({ "renamed": [], "skipped_existing": [], "rejected": [] });
+    let Ok(entries) = std::fs::read_dir(&facts_dir) else {
+        return empty();
+    };
+    let mut renamed: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut rejected: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(stem) = name.strip_prefix("plugin-").and_then(|s| s.strip_suffix(".jsonl")) else { continue; };
+        if crate::host_registry::plugin_facts_stem(&format!("host:{stem}")).is_none() {
+            rejected.push(name);
+            continue;
+        }
+        let target = format!("host-{stem}.jsonl");
+        if facts_dir.join(&target).exists() {
+            skipped.push(name);
+            continue;
+        }
+        match std::fs::rename(entry.path(), facts_dir.join(&target)) {
+            Ok(()) => renamed.push(target),
+            Err(_) => rejected.push(name),
+        }
+    }
+    serde_json::json!({ "renamed": renamed, "skipped_existing": skipped, "rejected": rejected })
+}
+
 /// Stage C（spec §6）：UsageFact 13 个月滚动保留。对每个宿主 facts 文件
 /// 执行 `retain`（无日期行保留、原子替换、幂等）。调用方负责持有 lease——
 /// `sync_facts` 每天首轮在 `.ingest.lock` 内调一次（对权威 JSONL 的重写
 /// 是显式维护动作，节流到日粒度，不藏在每次 ingest 里）。
 pub fn enforce_retention(data_home: &Path, current_month: &str) -> Result<Value, String> {
+    // 迁移先行（幂等）：先把旧行 id/profile 重 stamp 到 host: 身份（与
+    // authority v30 同一拍板），再改文件名，下方按 host: 推导的路径才能命中。
+    let _ = restamp_manifest_fact_files(data_home);
+    let _ = migrate_manifest_facts_prefix(data_home);
     // spec §6「UsageFact 13 个月保留」钉死为「保留最近 13 个自然月」
     // （含当月）→ cutoff = current − 12（两端含）。fencepost 常量与
     // authority 侧共享（RETENTION_MONTHS_MINUS_ONE）——两处各持魔法数就是
@@ -229,23 +332,29 @@ pub fn enforce_retention(data_home: &Path, current_month: &str) -> Result<Value,
     );
     let mut out = serde_json::Map::new();
     let mut hosts: Vec<String> = FACT_HOSTS.iter().map(|h| h.to_string()).collect();
-    // 插件宿主：磁盘驱动（比 registry 扫描更稳——manifest 被删后历史文件
-    // 仍要能被清理）；文件名反查过同一 slug 闸（§7.1 #3）。
+    // manifest 宿主：磁盘驱动（比 registry 扫描更稳——manifest 被删后历史文件
+    // 仍要能被清理）；文件名反查过同一 slug 闸（§7.1 #3）。迁移期旧
+    // `plugin-<slug>.jsonl` 一并发现并按新 `host:` 身份纳入清理。
     if let Ok(entries) = std::fs::read_dir(data_home.join("facts")) {
-        let mut plugin_hosts: Vec<String> = entries
+        let mut manifest_hosts: Vec<String> = entries
             .flatten()
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
-                let stem = name.strip_prefix("plugin-")?.strip_suffix(".jsonl")?;
-                if crate::host_registry::plugin_facts_stem(&format!("plugin:{stem}")).is_some() {
-                    Some(format!("plugin:{stem}"))
+                let legacy = name.strip_prefix("plugin-");
+                let stem = name
+                    .strip_prefix("host-")
+                    .or(legacy)?
+                    .strip_suffix(".jsonl")?;
+                if crate::host_registry::plugin_facts_stem(&format!("host:{stem}")).is_some() {
+                    Some(format!("host:{stem}"))
                 } else {
                     None
                 }
             })
             .collect();
-        plugin_hosts.sort();
-        hosts.append(&mut plugin_hosts);
+        manifest_hosts.sort();
+        manifest_hosts.dedup();
+        hosts.append(&mut manifest_hosts);
     }
     for host in hosts {
         let Some(path) = facts_path(data_home, &host) else {
@@ -398,6 +507,54 @@ mod tests {
         let r2 = ingest_facts(&home, &[fact("codex", "e3")]).unwrap();
         assert!(!r2.hosts[0].repaired_tail);
         assert_eq!(r2.hosts[0].total_after, 3);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn manifest_fact_files_restamp_to_host_identity() {
+        use agent_vitals_domain::contracts::usage_fact::fact_id;
+        let home = tmp_home("restamp");
+        std::fs::create_dir_all(home.join("facts")).unwrap();
+        let old_line = |event: &str, id: &str| format!(
+            "{{\"fact_id\":\"{id}\",\"machine_namespace\":\"m\",\"host\":\"host:zcode\",\"source_profile\":\"plugin-abcd\",\"native_session_id\":\"s\",\"source_event_id\":\"{event}\",\"observation_kind\":\"usage\"}}");
+        let host_line = r#"{"fact_id":"uf1-keep","machine_namespace":"m","host":"host:zcode","source_profile":"host-abcd","native_session_id":"s","source_event_id":"e9","observation_kind":"usage"}"#;
+        std::fs::write(home.join("facts/plugin-zcode.jsonl"),
+            old_line("e1", "uf1-old-a") + "\n" + &old_line("e1", "uf1-old-b") + "\n" + host_line + "\n").unwrap();
+        let report = restamp_manifest_fact_files(&home);
+        assert_eq!(report["plugin-zcode.jsonl"]["restamped"], serde_json::json!(1));
+        assert_eq!(report["plugin-zcode.jsonl"]["merged"], serde_json::json!(1), "同事件重复行合并");
+        let text = std::fs::read_to_string(home.join("facts/plugin-zcode.jsonl")).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let expected_id = fact_id("m", "host:zcode", "host-abcd", "s", "e1", "usage");
+        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(first["fact_id"], serde_json::json!(expected_id));
+        assert_eq!(first["source_profile"], serde_json::json!("host-abcd"));
+        assert_eq!(lines[1], host_line, "host- 期行原样保留");
+        // 幂等：再来一遍无事发生。
+        let report = restamp_manifest_fact_files(&home);
+        assert!(report.as_object().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn manifest_facts_prefix_migration_is_idempotent_and_honest() {
+        let home = tmp_home("prefix-migrate");
+        std::fs::create_dir_all(home.join("facts")).unwrap();
+        std::fs::write(home.join("facts/plugin-zcode.jsonl"), "{}\n").unwrap();
+        std::fs::write(home.join("facts/host-other.jsonl"), "{}\n").unwrap();
+        std::fs::write(home.join("facts/plugin-bad!slug.jsonl"), "{}\n").unwrap();
+        let report = migrate_manifest_facts_prefix(&home);
+        assert_eq!(report["renamed"], serde_json::json!(["host-zcode.jsonl"]));
+        assert_eq!(report["skipped_existing"], serde_json::json!([]));
+        assert_eq!(report["rejected"], serde_json::json!(["plugin-bad!slug.jsonl"]));
+        assert!(home.join("facts/host-zcode.jsonl").exists());
+        assert!(!home.join("facts/plugin-zcode.jsonl").exists());
+        // 幂等：再来一遍无事发生；同 slug 新旧并存时跳过并如实上报。
+        std::fs::write(home.join("facts/plugin-zcode.jsonl"), "{}\n").unwrap();
+        let report = migrate_manifest_facts_prefix(&home);
+        assert_eq!(report["renamed"], serde_json::json!([]));
+        assert_eq!(report["skipped_existing"], serde_json::json!(["plugin-zcode.jsonl"]));
         let _ = std::fs::remove_dir_all(&home);
     }
 }

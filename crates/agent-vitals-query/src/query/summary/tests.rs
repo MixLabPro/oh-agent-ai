@@ -50,25 +50,25 @@ fn plugin_tokens_by_host_lists_installed_and_stays_silent_when_absent() {
 
     let repo = SqlSummaryRepository::at(&data_home);
     let monthly = repo.monthly_summary(&MonthlySummaryQuery { month: "2026-09".into() });
-    let tk = monthly.tokens_by_host.get("plugin:zcode")
+    let tk = monthly.tokens_by_host.get("host:zcode")
         .expect("插件宿主 tokens 必须可见（L0 处理量纪律）");
     assert_eq!(tk.total, 33, "10+20+0+3");
     assert_eq!(tk.uncached_input, 10);
     assert_eq!(tk.cache_read, 20);
-    assert!(!monthly.by_host.contains_key("plugin:zcode"),
+    assert!(!monthly.by_host.contains_key("host:zcode"),
         "金额面不入（billing 声明前 L0 纪律）");
 
     // 幂等重放：duplicate 吸收，tokens 不变。
     let _ = agent_vitals_ingest::plugin_ingest::ingest_installed("ns-tk", &data_home, &user_home);
     let monthly2 = repo.monthly_summary(&MonthlySummaryQuery { month: "2026-09".into() });
-    assert_eq!(monthly2.tokens_by_host.get("plugin:zcode").unwrap().total, 33);
+    assert_eq!(monthly2.tokens_by_host.get("host:zcode").unwrap().total, 33);
 
     // 零漂移守卫：无 hosts.d 的 data_home → 插件面静默缺席。
     let bare = dir.join("bare");
     std::fs::create_dir_all(&bare).unwrap();
     let repo_bare = SqlSummaryRepository::at(&bare);
     let m_bare = repo_bare.monthly_summary(&MonthlySummaryQuery { month: "2026-09".into() });
-    assert!(!m_bare.tokens_by_host.contains_key("plugin:zcode"));
+    assert!(!m_bare.tokens_by_host.contains_key("host:zcode"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

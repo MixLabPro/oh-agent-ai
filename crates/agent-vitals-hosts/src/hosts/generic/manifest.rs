@@ -23,8 +23,9 @@ pub const RECIPE_IDS: [&str; 3] = [
     "request-usage-four-bucket-v1",
 ];
 
-/// slug 保留字（spec §3.1）：官方宿主名 + `plugin-` 前缀变体（防
-/// `plugin:plugin-x` → `plugin-plugin-x.jsonl` 的文件名混淆）。
+/// slug 保留字（spec §3.1）：官方宿主名（防 `host:claude-code` 式冒充）+
+/// `host-` / `plugin-` 前缀变体（防 `host:host-x` → `host-host-x.jsonl`
+/// 与迁移期旧 `plugin-` 文件名的混淆）。
 pub const RESERVED_SLUGS: [&str; 6] =
     ["claude-code", "codex", "dsh", "workbuddy", "openclaw", "hermes"];
 
@@ -48,6 +49,83 @@ pub const HARD_MAX_ROWS_PER_FILE: u64 = 500_000;
 
 /// manifest 版本。不认识的版本拒绝加载并报可操作错误（spec §3.1）。
 pub const MANIFEST_VERSION: u64 = 1;
+
+/// Only capabilities implemented by both compatibility runtimes are advertised.
+pub const FEATURE_IDS: [&str; 0] = [];
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Debug, Clone)]
+pub struct CapabilitySet {
+    pub app_version: String,
+    pub recipes: Vec<String>,
+    pub features: Vec<String>,
+}
+
+impl Default for CapabilitySet {
+    fn default() -> Self {
+        Self {
+            app_version: APP_VERSION.to_owned(),
+            recipes: RECIPE_IDS.iter().map(|s| (*s).to_owned()).collect(),
+            features: FEATURE_IDS.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+}
+
+fn release_version(value: &str) -> Option<[u32; 3]> {
+    let parts: Vec<&str> = value.split('.').collect();
+    if parts.len() != 3 { return None; }
+    let mut version = [0; 3];
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit())
+            || (part.len() > 1 && part.starts_with('0')) { return None; }
+        version[i] = part.parse().ok()?;
+    }
+    Some(version)
+}
+
+pub fn negotiate_capabilities(value: &serde_json::Value, capabilities: &CapabilitySet) -> Result<(), ManifestError> {
+    negotiate_requirements(value, capabilities)?;
+    if let Some(recipe) = value.get("recipe") {
+        let recipe = recipe.as_str().ok_or_else(|| err("recipe", "必须是字符串"))?;
+        if !capabilities.recipes.iter().any(|supported| supported == recipe) {
+            return Err(err("recipe", format!("未知 recipe `{recipe}`（已知：{:?}）", capabilities.recipes)));
+        }
+    }
+    Ok(())
+}
+
+fn negotiate_requirements(value: &serde_json::Value, capabilities: &CapabilitySet) -> Result<(), ManifestError> {
+    let obj = value.as_object().ok_or_else(|| err("(root)", "manifest 必须是 JSON object"))?;
+    let app_version = &capabilities.app_version;
+    if let Some(value) = obj.get("min_app_version") {
+        let minimum = value.as_str().and_then(release_version)
+            .ok_or_else(|| err("min_app_version", "必须是 MAJOR.MINOR.PATCH（无前导零、预发布或构建后缀，各段 <= 4294967295）"))?;
+        let current = release_version(app_version)
+            .ok_or_else(|| err("min_app_version", "运行时版本不是受支持的发布版本"))?;
+        if current < minimum {
+            return Err(err("min_app_version", format!("需要 app >= {}（当前 {app_version}）——请升级 app", value.as_str().unwrap())));
+        }
+    }
+    if let Some(value) = obj.get("requires") {
+        let requires = value.as_object().ok_or_else(|| err("requires", "必须是 object"))?;
+        for key in requires.keys() {
+            if key != "recipes" && key != "features" { return Err(err(format!("requires.{key}"), "未知字段")); }
+        }
+        for (key, supported) in [("recipes", capabilities.recipes.as_slice()), ("features", capabilities.features.as_slice())] {
+            if let Some(value) = requires.get(key) {
+                let field = format!("requires.{key}");
+                let entries = string_array(Some(value), &field, 0, 64)?;
+                for (i, entry) in entries.iter().enumerate() {
+                    if entries[..i].contains(entry) { return Err(err(format!("{field}[{i}]"), "重复能力")); }
+                    if !supported.contains(entry) {
+                        return Err(err(format!("{field}[{i}]"), format!("缺失能力 `{entry}`（支持：{supported:?}；最低版本未知）——请升级 app 或换 manifest")));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 /// 校验失败：`field` 是 manifest 内的字段路径（如 `session.pattern`），
 /// `problem` 是可直接展示给作者/Agent 的原因。
@@ -144,11 +222,11 @@ impl TrustEvidenceAdapter {
 /// 从 `~/` 展开后的 roots。保留原始串用于 display；展开在 discovery 做。
 impl PluginManifest {
     pub fn facts_host(&self) -> String {
-        format!("plugin:{}", self.slug)
+        format!("host:{}", self.slug)
     }
 
     pub fn facts_file_stem(&self) -> String {
-        format!("plugin-{}", self.slug)
+        format!("host-{}", self.slug)
     }
 }
 
@@ -253,6 +331,8 @@ pub fn parse_manifest(value: serde_json::Value) -> Result<PluginManifest, Manife
         "limits",
         "billing",
         "trust",
+        "requires",
+        "min_app_version",
     ];
     for key in obj.keys() {
         if !known.contains(&key.as_str()) {
@@ -276,6 +356,8 @@ pub fn parse_manifest(value: serde_json::Value) -> Result<PluginManifest, Manife
         ));
     }
 
+    negotiate_requirements(&value, &CapabilitySet::default())?;
+
     let slug = obj
         .get("slug")
         .and_then(|v| v.as_str())
@@ -287,8 +369,8 @@ pub fn parse_manifest(value: serde_json::Value) -> Result<PluginManifest, Manife
             "必须匹配 ^[a-z][a-z0-9-]{0,31}$",
         ));
     }
-    if RESERVED_SLUGS.contains(&slug) || slug.starts_with("plugin-") {
-        return Err(err("slug", format!("`{slug}` 是保留字（官方宿主名 / plugin- 前缀）")));
+    if RESERVED_SLUGS.contains(&slug) || slug.starts_with("host-") || slug.starts_with("plugin-") {
+        return Err(err("slug", format!("`{slug}` 是保留字（官方宿主名 / host- 与 plugin- 前缀）")));
     }
 
     let display = obj
@@ -612,11 +694,72 @@ mod tests {
     }
 
     #[test]
+    fn shared_capability_fixtures() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!("../../../../../fixtures/host-manifest-capabilities.json")).unwrap();
+        for case in cases.as_array().unwrap() {
+            let mut value = zcode_manifest();
+            value.as_object_mut().unwrap().extend(case["extension"].as_object().unwrap().clone());
+            if let Some(count) = case["repeat_features"].as_u64() {
+                value["requires"] = json!({"features": vec!["future"; count as usize]});
+            }
+            if case["error_field"].is_null() {
+                parse_manifest(value).unwrap();
+            } else {
+                let error = parse_manifest(value).unwrap_err();
+                assert_eq!(error.field, case["error_field"].as_str().unwrap());
+                assert_eq!(error.problem, case["problem"].as_str().unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn negotiation_uses_injected_runtime_capabilities() {
+        let value = json!({"min_app_version": "1.10.0", "requires": {"features": ["fixture-feature"]}});
+        let mut capabilities = CapabilitySet {
+            app_version: "1.10.0".to_owned(), recipes: vec![], features: vec!["fixture-feature".to_owned()],
+        };
+        negotiate_capabilities(&value, &capabilities).unwrap();
+        let recipe_value = json!({"recipe": RECIPE_IDS[0]});
+        assert_eq!(negotiate_capabilities(&recipe_value, &capabilities).unwrap_err().field, "recipe");
+        capabilities.app_version = "1.9.0".to_owned();
+        assert_eq!(negotiate_capabilities(&value, &capabilities).unwrap_err().field, "min_app_version");
+    }
+
+    #[test]
+    fn capabilities_and_release_versions_gate_real_parser() {
+        for minimum in ["0.0.0", APP_VERSION] {
+            let mut v = zcode_manifest();
+            v["min_app_version"] = json!(minimum);
+            v["requires"] = json!({"recipes": RECIPE_IDS, "features": []});
+            assert_eq!(parse_manifest(v).unwrap().facts_host(), "host:zcode");
+        }
+        for (extension, field) in [
+            (json!({"min_app_version": "4294967295.0.0"}), "min_app_version"),
+            (json!({"min_app_version": "01.0.0"}), "min_app_version"),
+            (json!({"min_app_version": "1.0.0-rc.1"}), "min_app_version"),
+            (json!({"min_app_version": "1.0.0+build"}), "min_app_version"),
+            (json!({"min_app_version": "1.0"}), "min_app_version"),
+            (json!({"min_app_version": "4294967296.0.0"}), "min_app_version"),
+            (json!({"min_app_version": null}), "min_app_version"),
+            (json!({"requires": null}), "requires"),
+            (json!({"requires": {"unknown": []}}), "requires.unknown"),
+            (json!({"requires": {"features": ["trust"]}}), "requires.features[0]"),
+            (json!({"requires": {"recipes": ["future-v2"]}}), "requires.recipes[0]"),
+            (json!({"requires": {"recipes": [RECIPE_IDS[0], RECIPE_IDS[0]]}}), "requires.recipes[1]"),
+            (json!({"requires": {"features": "records"}}), "requires.features"),
+        ] {
+            let mut v = zcode_manifest();
+            v.as_object_mut().unwrap().extend(extension.as_object().unwrap().clone());
+            assert_eq!(parse_manifest(v).unwrap_err().field, field);
+        }
+    }
+
+    #[test]
     fn zcode_pilot_manifest_parses() {
         let m = parse_manifest(zcode_manifest()).unwrap();
         assert_eq!(m.slug, "zcode");
-        assert_eq!(m.facts_host(), "plugin:zcode");
-        assert_eq!(m.facts_file_stem(), "plugin-zcode");
+        assert_eq!(m.facts_host(), "host:zcode");
+        assert_eq!(m.facts_file_stem(), "host-zcode");
         assert_eq!(m.recipe, "request-usage-anthropic-v1");
         assert_eq!(m.overrides.len(), 3);
         assert_eq!(m.event_key_paths, ["requestId", "attempt"]);
@@ -703,7 +846,7 @@ mod tests {
     fn slug_rules_are_enforced() {
         for bad in [
             "ZCode", "1code", "-code", "", "claude-code", "codex", "dsh", "workbuddy",
-            "openclaw", "hermes", "plugin-x", "has_underscore",
+            "openclaw", "hermes", "plugin-x", "host-x", "has_underscore",
         ] {
             let mut v = zcode_manifest();
             v["slug"] = json!(bad);

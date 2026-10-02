@@ -18,13 +18,13 @@ const ACTIONS: &[&str] = &[
     "monthly_summary", "calendar_month", "hourly_distribution", "codex_quota",
     "pricing_catalog_status", "issues_list", "custom_source_add", "custom_source_remove", "source_exclusion_set",
     "source_data_delete", "retention_set", "statistics_timezone_set", "sync_pause_set",
-    "sync_facts", "issue_transition", "pricing_catalog_policy_set",
+    "sync_facts", "issue_transition", "pricing_catalog_policy_set", "manifest_catalog_status", "manifest_catalog_policy_set",
 ];
 
 const MUTATIONS: &[&str] = &[
     "custom_source_add", "custom_source_remove", "source_exclusion_set",
     "source_data_delete", "retention_set", "statistics_timezone_set", "sync_pause_set",
-    "sync_facts", "issue_transition", "pricing_catalog_policy_set",
+    "sync_facts", "issue_transition", "pricing_catalog_policy_set", "manifest_catalog_policy_set",
 ];
 
 pub fn spec() -> ToolSpec {
@@ -160,6 +160,10 @@ fn read_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, ToolE
             "action": action,
             "pricing": pricing_catalog_status(data_home)?,
         }),
+        "manifest_catalog_status" => json!({
+            "action": action,
+            "manifest_catalog": manifest_catalog_status(data_home)?,
+        }),
         "issues_list" => {
             let (from_ms, to_ms) = issue_window(args);
             let page_size = args.get("page_size").and_then(Value::as_u64).unwrap_or(50).min(500) as usize;
@@ -237,6 +241,12 @@ fn write_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, Tool
             let network_enabled = args.get("network_enabled").and_then(Value::as_bool)
                 .ok_or_else(|| ToolError::new("invalid_argument", "`network_enabled` is required"))?;
             save_pricing_catalog_policy(data_home, network_enabled)?;
+            json!({ "action": action, "network_enabled": network_enabled, "changed": true })
+        }
+        "manifest_catalog_policy_set" => {
+            let network_enabled = args.get("network_enabled").and_then(Value::as_bool)
+                .ok_or_else(|| ToolError::new("invalid_argument", "`network_enabled` is required"))?;
+            save_manifest_catalog_policy(data_home, network_enabled)?;
             json!({ "action": action, "network_enabled": network_enabled, "changed": true })
         }
         "sync_facts" => {
@@ -368,6 +378,54 @@ fn save_pricing_catalog_policy(data_home: &Path, network_enabled: bool) -> Resul
         .map_err(|error| local_error(format!("write pricing policy failed: {error}")))?;
     std::fs::rename(&temp, path)
         .map_err(|error| local_error(format!("commit pricing policy failed: {error}")))
+}
+
+const MANIFEST_CATALOG_INDEX_URL: &str =
+    "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/catalog/index.json";
+const MANIFEST_CATALOG_STATUS_FILE: &str = "manifest-catalog-update.json";
+const MANIFEST_CATALOG_POLICY_FILE: &str = "manifest-catalog-policy.json";
+
+/// 只读镜像桌面目录检查状态（E06）。MCP 无网络：拉取由桌面层执行；
+/// 状态与策略文件是共享事实，origin/激活权威在 authority 台账。
+fn manifest_catalog_status(data_home: &Path) -> Result<Value, ToolError> {
+    let mut status = std::fs::read(data_home.join(MANIFEST_CATALOG_STATUS_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({
+            "state": "never_checked",
+            "source_url": MANIFEST_CATALOG_INDEX_URL,
+            "last_checked_at_ms": null,
+            "last_success_at_ms": null,
+            "catalog_sequence": null,
+            "index_sha256": null,
+            "entry_count": null,
+            "supported_entries": null,
+            "failure_reason": null,
+            "failure_count": 0,
+            "next_check_at_ms": null,
+        }));
+    let network_enabled = std::fs::read(data_home.join(MANIFEST_CATALOG_POLICY_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|policy| policy.get("network_enabled").and_then(Value::as_bool))
+        .unwrap_or(false);
+    let object = status.as_object_mut().expect("status is normalized to an object");
+    object.insert("source_url".into(), Value::String(MANIFEST_CATALOG_INDEX_URL.into()));
+    object.insert("network_enabled".into(), Value::Bool(network_enabled));
+    Ok(Value::Object(object.clone()))
+}
+
+fn save_manifest_catalog_policy(data_home: &Path, network_enabled: bool) -> Result<(), ToolError> {
+    std::fs::create_dir_all(data_home).map_err(|error| local_error(format!("create data home failed: {error}")))?;
+    let path = data_home.join(MANIFEST_CATALOG_POLICY_FILE);
+    let temp = data_home.join("manifest-catalog-policy.json.tmp");
+    let bytes = serde_json::to_vec_pretty(&json!({ "network_enabled": network_enabled }))
+        .map_err(|error| ToolError::new("internal_error", format!("serialize manifest catalog policy failed: {error}")))?;
+    std::fs::write(&temp, bytes)
+        .map_err(|error| local_error(format!("write manifest catalog policy failed: {error}")))?;
+    std::fs::rename(&temp, path)
+        .map_err(|error| local_error(format!("commit manifest catalog policy failed: {error}")))
 }
 
 fn issue_window(args: &Value) -> (Option<i64>, Option<i64>) {
