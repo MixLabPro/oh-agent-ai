@@ -3,3 +3,8 @@ declare module "*.jpg" {
   const url: string;
   export default url;
 }
+// .glb 用 ?url 导入：Vite 默认不把 .glb 当静态资源，直接 import 会被当成 JS 解析而报错。
+declare module "*.glb?url" {
+  const url: string;
+  export default url;
+}

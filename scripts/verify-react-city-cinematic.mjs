@@ -88,7 +88,10 @@ if (process.argv.includes("--report") && seed === Number(process.env.SEED ?? see
   console.log("worst", rel.slice(0, 6).map(([i, r]) => `${(i * dt).toFixed(1)}s ${speeds[i - 1].toFixed(1)}→${speeds[i].toFixed(1)} (${r.toFixed(2)})`).join(" | "));
 }
 
-assert(plan.durationSec >= 35 && plan.durationSec <= 120, `film length ${plan.durationSec}s out of 35–120s`);
+// 片长随岛的尺寸增长（规模档位放大岛）：上限按岛半径线性放宽，基准 520 半径对应 120s。
+// 片长随岛的尺寸增长（规模档位放大岛）：绕岛一圈的航线在基准岛上约 90–125s。
+const lengthCap = 130 * Math.max(1, layout.islandRadius / 520);
+assert(plan.durationSec >= 35 && plan.durationSec <= lengthCap, `film length ${plan.durationSec.toFixed(1)}s out of 35–${lengthCap.toFixed(0)}s`);
 assert(report.speed.max <= 122, `cruise speed peaks at ${report.speed.max} u/s (cap 120)`);
 // 视觉速度稳定：巡航段的 95 分位不超过中位数的 2 倍。
 assert(report.visualRadPerSec.p95 <= report.visualRadPerSec.p50 * 2, `visual speed unstable: p95 ${report.visualRadPerSec.p95} vs p50 ${report.visualRadPerSec.p50}`);

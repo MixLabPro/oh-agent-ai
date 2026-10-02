@@ -13,6 +13,7 @@ import { fbm } from "./cityNoise";
 import type { CityLayout, DistrictLayout, Parcel, Vec2 } from "./cityLayout";
 import { activeTheme, skyYawOf } from "./cityTheme";
 import type { CityAssets } from "./cityAssets";
+import type { LoadedFlora } from "./cityFlora";
 import { makeCityTexture, makeDecoFacadeTexture, makeFacadeTexture, makeLabelSprite, paletteFor } from "./cityTextures";
 import type { TerrainField } from "./cityLayout";
 
@@ -220,6 +221,8 @@ export class CityParts {
   private readonly craneMastMesh: THREE.InstancedMesh;
   private readonly craneArmMesh: THREE.InstancedMesh;
   private readonly treeMesh: THREE.InstancedMesh;
+  /** 生态带植被网格（加载完成后替换程序化树；每个树种一个）。 */
+  private floraMeshes: THREE.InstancedMesh[] = [];
   private readonly carMesh: THREE.InstancedMesh;
   private readonly boatMesh: THREE.InstancedMesh;
   private readonly cloudMesh: THREE.InstancedMesh;
@@ -1195,6 +1198,43 @@ export class CityParts {
     merged.setAttribute("color", new THREE.BufferAttribute(colors, 3));
     for (const [geometry] of parts) geometry.dispose();
     return merged;
+  }
+
+  /** 用生态带模型替换程序化树：树位不变（同一份 treeSpots），按确定性 hash 分给各树种。 */
+  applyFlora(flora: LoadedFlora): void {
+    if (!flora.length || this.floraMeshes.length) return;
+    const spots = this.treeSpots();
+    const total = flora.reduce((sum, item) => sum + item.species.weight, 0);
+    const buckets: Array<typeof spots> = flora.map(() => []);
+    for (const spot of spots) {
+      let pick = hashSeed(`flora:${spot.x.toFixed(1)}:${spot.z.toFixed(1)}`) * total;
+      let index = 0;
+      while (index < flora.length - 1 && pick >= flora[index].species.weight) { pick -= flora[index].species.weight; index += 1; }
+      buckets[index].push(spot);
+    }
+    flora.forEach(({ species, geometry }, index) => {
+      const list = buckets[index];
+      if (!list.length) return;
+      const material = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+      const mesh = new THREE.InstancedMesh(geometry, material, list.length);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      const tint = species.tint ? new THREE.Color(species.tint) : null;
+      list.forEach((spot, i) => {
+        const size = species.height * (0.8 + spot.seed * 0.45);
+        this.compose(spot.x, spot.y - 0.1, spot.z, spot.seed * Math.PI * 2, size, size, size);
+        mesh.setMatrixAt(i, this.matrix);
+        // 染色树种（樱花/枫）：实例色乘在顶点色上，树干也会被染——用浅色乘数只轻推色相。
+        mesh.setColorAt(i, tint ? this.color.copy(tint).lerp(new THREE.Color("#ffffff"), 0.25 + spot.seed * 0.2) : this.color.set("#ffffff").multiplyScalar(0.88 + spot.seed * 0.2));
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.name = `city-flora-${index}`;
+      this.group.add(mesh);
+      this.floraMeshes.push(mesh);
+      this.disposables.push(material); // 几何由 cityFlora 缓存共享，不随 parts 销毁
+    });
+    if (this.floraMeshes.length) this.treeMesh.visible = false;
   }
 
   private buildTrees(): THREE.InstancedMesh {

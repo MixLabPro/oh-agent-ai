@@ -1,6 +1,6 @@
 /** Geography and public planning are fixed; sessions occupy reserved parcels. */
 import { hashSeed, type CityModel } from "../cityModel";
-import { createCityPlan } from "./cityPlan";
+import { createCityPlan, scaleTierFor, type Biome } from "./cityPlan";
 
 export type Vec2 = { x: number; z: number };
 export type Zone = "downtown" | "residential" | "commercial" | "waterfront";
@@ -35,6 +35,8 @@ const CIVIC_ORDER: CivicKind[] = ["school", "mall", "hospital"];
 export type BridgeLayout = { from: Vec2; to: Vec2; angle: number; length: number };
 export type PublicSite = Vec2 & { id: string; kind: "civic" | "station" | "stadium" | "park" | "tower" | "harbor"; radius: number; yaw: number };
 export type CityLayout = {
+  /** G1：规模档位、生态带与城市核心点（下游取景/航拍/植被读这里，不再假设岛在原点、固定大小）。 */
+  scaleTier: number; biome: Biome; core: Vec2; islandRadius: number;
   seed: number; districts: DistrictLayout[]; blocks: CityBlock[]; roadNodes: RoadNode[]; roadEdges: RoadEdge[];
   terrain: TerrainField; extent: number; coast: Vec2[]; river: Vec2[]; publicSites: PublicSite[];
   parkTrees: Array<Vec2 & { y: number; seed: number }>;
@@ -53,7 +55,7 @@ export type CityLayout = {
   boatLoops: Vec2[][]; seaMountains: Array<{ center: Vec2; radius: number; height: number; seed: number }>;
 };
 
-const plans = new Map<number, ReturnType<typeof createCityPlan>>();
+const plans = new Map<string, ReturnType<typeof createCityPlan>>();
 
 /** Overflow sessions never vanish and never crash the page: they merge into a
  *  few background massing blocks per district, placed on open buildable land
@@ -92,13 +94,17 @@ function aggregateOverflow(districtId: string, anchor: Vec2, overflow: CityModel
 
 /** The seed controls geography, never host count, token ranking or time window. */
 export function layoutCity(model: CityModel, previous?: CityLayout | null, seed = 1927): CityLayout {
-  let plan = plans.get(seed);
-  if (!plan) { plan = createCityPlan(seed); plans.set(seed, plan); }
+  // 规模档位由会话总数分档：档位内刷新/分页不改地图；跨档时岛按原形状放大。
+  const tier = scaleTierFor(model.buildings.length);
+  const planKey = `${seed}:${tier}`;
+  let plan = plans.get(planKey);
+  if (!plan) { plan = createCityPlan(seed, tier); plans.set(planKey, plan); }
   const parcels = plan.blocks.flatMap((block) => block.parcels);
   const parcelIndex = new Map(parcels.map((parcel) => [parcel.id, parcel]));
   const assigned = new Map<string, Parcel>();
   const used = new Set<string>();
-  if (previous?.seed === seed) {
+  // 跨档时地块编号对应的位置变了，不能复用旧地址（G1 简化：整体重排；SPEC §4.2 的比例映射留待后续）。
+  if (previous?.seed === seed && previous.scaleTier === tier) {
     const old = new Map(previous.districts.flatMap((district) => [...district.slots]));
     for (const building of model.buildings) {
       const parcel = old.get(building.id);

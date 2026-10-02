@@ -66,7 +66,9 @@ for (const [count, hosts] of [[0, []], [1, ["codex"]], [700], [1400, ["codex"]],
   assert.deepEqual(addresses(layoutCity(reversed)), addresses(layout), "input order does not change a fresh layout");
 }
 const first = layoutCity(model(500));
-const expandedInput = model(1400); const expanded = layoutCity(expandedInput, first);
+// 分页追加在同一规模档位内（400 会话一档）必须不搬家；跨档时岛按原形状放大、整体重排（CITY_PLANNING_SPEC §4.2，
+// 比例映射留待后续），所以这里用同档的 500 → 780。
+const expandedInput = model(780); const expanded = layoutCity(expandedInput, first);
 validate(expanded, expandedInput);
 for (const [id, address] of Object.entries(addresses(first))) assert.deepEqual(addresses(expanded)[id], address, "pagination retains existing addresses");
 const changed = { ...expandedInput, buildings: expandedInput.buildings.map((building) => ({ ...building, height: 48, startedAt: 0 })) };
@@ -99,5 +101,13 @@ for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
   for (const site of layout.publicSites) assert(layout.terrain.height(site.x, site.z) > 0.5, `seed ${seed}: ${site.id} must sit on land`);
   for (const anchor of layout.districtAnchors) assert(layout.terrain.height(anchor.x, anchor.z) > 0.5, `seed ${seed}: district anchor must sit on land`);
   assert.deepEqual(addresses(layoutCity(input, null, seed)), addresses(layout), `seed ${seed}: deterministic`);
+}
+// 跨档：同一种子从档位 2 到 4，岛只放大不变形（归一化轮廓逐点重合）。
+{
+  const small = layoutCity(model(700), null, 42); const big = layoutCity(model(1500), null, 42);
+  assert(big.scaleTier > small.scaleTier, "more sessions move to a larger tier");
+  const ratio = big.islandRadius / small.islandRadius;
+  assert(ratio > 1.2, "a larger tier grows the island");
+  small.coast.forEach((p, i) => { const q = big.coast[i]; assert(Math.hypot(q.x - p.x * ratio, q.z - p.z * ratio) < 0.5, "tier change scales the coast without reshaping it"); });
 }
 console.log("City layout: full placement, unique lots, road clearance/connectivity, traffic, incremental stability, civic growth and per-user seeds passed.");

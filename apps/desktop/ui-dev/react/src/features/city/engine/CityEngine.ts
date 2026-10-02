@@ -21,6 +21,7 @@ import { Reflector } from "three/addons/objects/Reflector.js";
 import type { CityModel } from "../cityModel";
 import { activeTheme, setActiveTheme, skyYawOf, type CityThemeName } from "./cityTheme";
 import { loadCityAssets, type CityAssets } from "./cityAssets";
+import { loadBiomeFlora } from "./cityFlora";
 import { planCinematic, type CinematicPlan } from "./cityCinematic";
 import { layoutCity, type CityLayout } from "./cityLayout";
 import { CityParts, type QualityLevel } from "./cityParts";
@@ -343,6 +344,9 @@ export class CityEngine {
     this.layout = layout;
     this.parts = new CityParts(model, layout);
     if (this.assets) this.parts.applyAssets(this.assets);
+    // 生态带植被异步到达：只在 parts 仍是这一份时替换（换种子/换主题会重建 parts）。
+    const parts = this.parts;
+    void loadBiomeFlora(layout.biome).then((flora) => { if (this.parts === parts && !this.disposed) parts.applyFlora(flora); });
     this.scene.add(this.parts.group, this.parts.water);
 
     this.cityCenter = { x: (layout.urbanBounds.left + layout.urbanBounds.right) / 2, z: (layout.urbanBounds.north + layout.urbanBounds.south) / 2 };

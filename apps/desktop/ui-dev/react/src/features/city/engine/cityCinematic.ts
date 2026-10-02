@@ -43,100 +43,118 @@ export function planCinematic(layout: CityLayout, model: CityModel, heights: Map
   const span = Math.max(right - left, south - north);
   const groundAt = (x: number, z: number) => Math.max(0, layout.terrain.height(x, z));
 
-  // 主角：全城最高的楼（没有楼时退回城市中心）。
+  // 主角：全城最高的楼（没有楼时退回城市中心）。G1 航线不再单独环绕它，绕岛时自然经过。
   let hero = { x: cx, z: cz, height: 30, ground: groundAt(cx, cz) };
   for (const anchor of heights.values()) if (anchor.height > hero.height) hero = anchor;
 
   const keys: Key[] = [];
   const push = (pos: [number, number, number], look: [number, number, number], card?: number) => keys.push({ pos, look, card });
 
-  // 1. 远海推近：从南面海上高空起，压向城市。
-  push([cx + span * 0.1, span * 0.42, south + span * 0.6], [cx, 0, cz + span * 0.1]);
-  push([cx + span * 0.03, span * 0.2, south + span * 0.2], [cx, 0, cz]);
-
-  // 2. 贴河低飞：沿河道中线从南往北，略高于两岸楼的腰线。
-  const river = (layout.river ?? []).filter((p) => p.z > north - 40 && p.z < south + 60).sort((a, b) => b.z - a.z);
-  if (river.length >= 4) {
-    // 只取穿过城区的中段（约 35%–80%），离地 40：低飞 16 时整段河要飞两分多钟。
-    const pick = [0.45, 0.72].map((f) => river[Math.min(river.length - 1, Math.floor(f * (river.length - 1)))]);
-    pick.forEach((p, index) => {
-      const ahead = pick[Math.min(pick.length - 1, index + 1)];
-      const lookZ = index === pick.length - 1 ? p.z - 80 : ahead.z;
-      push([p.x, groundAt(p.x, p.z) + 40, p.z], [ahead.x, 10, lookZ]);
-    });
-  }
-
-  // 3. 环绕地标：半圈，仰角，半径随楼高。
-  const orbitR = Math.max(55, hero.height * 1.6);
-  const heroLook: [number, number, number] = [hero.x, hero.ground + hero.height * 0.65, hero.z];
-  // 四分之一圈多一点：半圈在楼高的半径上要飞 30s。
-  // 切入角取「上一个机位所在的一侧」：曾写死 0.85π，换种子后地标可能在河段身后，镜头得掉头。
-  // 绕行方向取与来向一致的那一边（叉积符号），不逆着惯性拐。
-  const previous = keys[keys.length - 1].pos;
-  const entry = Math.atan2(previous[2] - hero.z, previous[0] - hero.x);
-  const beforePrevious = keys[keys.length - 2]?.pos ?? previous;
-  const travel = { x: previous[0] - beforePrevious[0], z: previous[2] - beforePrevious[2] };
-  const radial = { x: Math.cos(entry), z: Math.sin(entry) };
-  const sweep = (travel.x * radial.z - travel.z * radial.x) > 0 ? -1 : 1;
-  for (let index = 0; index <= 2; index += 1) {
-    const angle = entry + sweep * (index / 2) * Math.PI * 0.6;
-    const x = hero.x + Math.cos(angle) * orbitR;
-    const z = hero.z + Math.sin(angle) * orbitR;
-    // 高度取楼高的 75%–100%：主角是全城最高楼，这个高度在其余楼顶之上，环绕不会擦着邻楼飞。
-    push([x, hero.ground + hero.height * (0.75 + index * 0.12), z], heroLook);
-  }
-
-  // 4. 掠过城区：按 token 排序依次飞越各宿主城区上空。
+  // ── 航线（G1 种子地形版）：海上推近 → 绕城市核心一圈（经过每个城区时拉近、降低）→ 拉升全景。
+  // 曾是「贴河低飞 → 环绕最高楼 → 逐个飞城区」一串任意顺序的控制点：换成种子地形后城区常在
+  // 死胡同半岛上，路线在机位上折返（seed 7 / 42 反复出现，单点修补停不下来）。绕岛一圈时方位角
+  // 单调递增，结构上不可能掉头。贴河与环绕地标两段留待 G4 按主干道重做航线时再加回来。
+  const center = layout.core ?? { x: cx, z: cz };
   const ranked = [...layout.districts]
     .map((d) => ({ layout: d, data: model.districts.find((m) => m.id === d.id) }))
-    .filter((d) => d.data)
+    .filter((d) => d.data && d.layout.slots.size > 0)
     .sort((a, b) => (b.data!.tokensTotal - a.data!.tokensTotal));
+  // 用该区楼的实际质心：district.center 是规划圆心，楼按宿主锚点落位，二者可能隔着半座城。
   const centroid = (district: (typeof ranked)[number]) => {
     const slots = [...district.layout.slots.values()];
-    return slots.length
-      ? { x: slots.reduce((sum, slot) => sum + slot.x, 0) / slots.length, z: slots.reduce((sum, slot) => sum + slot.z, 0) / slots.length }
-      : district.layout.center;
+    return { x: slots.reduce((sum, slot) => sum + slot.x, 0) / slots.length, z: slots.reduce((sum, slot) => sum + slot.z, 0) / slots.length };
   };
-  // 就近顺序：从地标出发每次飞最近的下一个城区。按 token 排序会在城区间来回横穿半座城，
-  // 转场距离一长，镜头就只能高速掠过（用户看不清 Claude Code → Zcode → DeepSeek）。
-  const remaining = ranked.slice(0, 4);
-  const ordered: typeof remaining = [];
-  let from = { x: hero.x, z: hero.z };
-  while (remaining.length) {
-    remaining.sort((a, b) => Math.hypot(centroid(a).x - from.x, centroid(a).z - from.z) - Math.hypot(centroid(b).x - from.x, centroid(b).z - from.z));
-    const next = remaining.shift()!;
-    ordered.push(next);
-    from = centroid(next);
-  }
-  for (const [cardIndex, district] of ordered.entries()) {
-    // 用该区楼的实际质心：district.center 是规划圆心，楼按宿主锚点落位，二者可能隔着半座城
-    // （曾出现「Zcode」字卡配着 Claude Code 的粉色楼群）。
+  const stops = ranked.slice(0, 4).map((district) => {
     const c = centroid(district);
-    const g = groundAt(c.x, c.z);
-    // 每个城区只放一个机位：曾用「抵达 + 横移」两帧，城区挨得近时横移方向与下一段相反，
-    // 路径折返出尖角（匀速下弦长骤减，画面一顿一冲）。停留感改由「低空 → 自动减速」提供：
-    // 速度 ∝ 离地高度，这里比城区间巡航低，镜头自然放慢。
-    push([c.x - 70, g + 62, c.z + 80], [c.x, 8, c.z], cardIndex);
+    return { district, c, angle: Math.atan2(c.z - center.z, c.x - center.x), distance: Math.hypot(c.x - center.x, c.z - center.z) };
+  }).sort((a, b) => a.angle - b.angle);
+  const ordered = stops.map((stop) => stop.district);
+  // 起点方位：第一个城区之前 0.6 rad（从它前方的海上飞进来），然后逆时针一圈。
+  const phi0 = stops.length ? stops[0].angle - 0.6 : 0;
+  const unwrap = (angle: number) => { let a = angle; while (a < phi0) a += Math.PI * 2; while (a >= phi0 + Math.PI * 2) a -= Math.PI * 2; return a; };
+  const stopAngles = stops.map((stop) => unwrap(stop.angle));
+  const angularGap = (a: number, b: number) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
+  const cruiseRadius = Math.max(140, ...stops.map((stop) => stop.distance + 60));
+  /** 方位 φ 处的半径/高度/注视点：离城区越近越贴近它（半径收到城区外缘 +60、高度降到 62）。 */
+  const near = (phi: number) => {
+    let weight = 0; let radius = 0; let look = { x: center.x, z: center.z }; let lookWeight = 0;
+    stops.forEach((stop) => {
+      const w = Math.exp(-((angularGap(phi, stop.angle) / 0.38) ** 2));
+      weight += w; radius += w * (stop.distance + 60);
+      if (w > lookWeight) { lookWeight = w; look = stop.c; }
+    });
+    const pull = Math.min(1, weight);
+    return {
+      radius: cruiseRadius * (1 - pull) + (weight > 0 ? radius / weight : cruiseRadius) * pull,
+      height: 95 - 33 * pull,
+      look: { x: center.x + (look.x - center.x) * lookWeight, z: center.z + (look.z - center.z) * lookWeight },
+    };
+  };
+  const orbitPoint = (phi: number) => {
+    const n = near(phi);
+    const x = center.x + Math.cos(phi) * n.radius;
+    const z = center.z + Math.sin(phi) * n.radius;
+    return { pos: [x, groundAt(x, z) + n.height, z] as [number, number, number], look: [n.look.x, 8, n.look.z] as [number, number, number] };
+  };
+
+  // 1. 远海推近：沿起点方位从海上高空压向城市。
+  const dir0 = { x: Math.cos(phi0), z: Math.sin(phi0) };
+  push([center.x + dir0.x * (cruiseRadius + span * 0.75), span * 0.42, center.z + dir0.z * (cruiseRadius + span * 0.75)], [center.x, 0, center.z]);
+  push([center.x + dir0.x * (cruiseRadius + span * 0.3), span * 0.2, center.z + dir0.z * (cruiseRadius + span * 0.3)], [center.x, 0, center.z]);
+
+  // 2. 绕岛一圈：每 18° 一个控制点；离城区方位最近的那个控制点挂字卡。
+  const STEP = Math.PI / 10;
+  const cardAt = new Map<number, number>();
+  // 两个城区方位很近时会落到同一个控制点：后来的顺延到下一个空控制点（每个宿主都要有自己的字卡）。
+  stopAngles.forEach((angle, index) => {
+    let slot = Math.round((angle - phi0) / STEP);
+    while (cardAt.has(slot) && slot < 20) slot += 1;
+    cardAt.set(slot, index);
+  });
+  for (let i = 0; i <= 20; i += 1) {
+    const point = orbitPoint(phi0 + i * STEP);
+    push(point.pos, point.look, cardAt.get(i));
   }
 
-  // 5. 拉升收尾：后退并升到全景。
-  push([cx - span * 0.35, span * 0.42, cz + span * 0.75], [cx, 0, cz]);
-  push([cx - span * 0.55, span * 0.62, cz + span * 1.05], [cx, 10, cz - span * 0.05]);
+  // 3. 拉升收尾：沿终点方位后退并升到全景。
+  const phi1 = phi0 + Math.PI * 2;
+  const dir1 = { x: Math.cos(phi1 + 0.3), z: Math.sin(phi1 + 0.3) };
+  push([center.x + dir1.x * (cruiseRadius + span * 0.35), span * 0.42, center.z + dir1.z * (cruiseRadius + span * 0.35)], [center.x, 0, center.z]);
+  push([center.x + dir1.x * (cruiseRadius + span * 0.7), span * 0.62, center.z + dir1.z * (cruiseRadius + span * 0.7)], [center.x, 10, center.z]);
 
-  // 几何兜底：路线由布局推导，换地形总可能出现掉头。不带字卡的关键帧若让水平航向转弯
-  // 超过 115°，删掉它（迭代到稳定）；带字卡的城区机位保留——宁可少一个过渡镜头，也不让画面折返。
-  for (let changed = true; changed;) {
+  // 几何兜底：路线由布局推导，换地形总可能出现掉头。水平航向转弯超过 115° 时：
+  // 不带字卡的过渡帧直接删掉；带字卡的城区机位沿转弯外侧角平分线外推（每次 30，最多 10 次），
+  // 字卡与镜头都保留、路线改为绕弯（种子地形下相邻城区常要掉头，seed 7 / 42 曾在机位上折返）。
+  const turnAt = (index: number) => {
+    const [ax, , az] = keys[index - 1].pos;
+    const [bx, , bz] = keys[index].pos;
+    const [cx2, , cz2] = keys[index + 1].pos;
+    const inX = bx - ax, inZ = bz - az, outX = cx2 - bx, outZ = cz2 - bz;
+    const inLen = Math.hypot(inX, inZ); const outLen = Math.hypot(outX, outZ);
+    if (inLen * outLen < 1e-6) return { turn: Math.PI, din: { x: 0, z: 0 }, dout: { x: 0, z: 0 } };
+    const din = { x: inX / inLen, z: inZ / inLen }; const dout = { x: outX / outLen, z: outZ / outLen };
+    return { turn: Math.acos(Math.max(-1, Math.min(1, din.x * dout.x + din.z * dout.z))), din, dout };
+  };
+  const LIMIT = (115 * Math.PI) / 180;
+  for (let changed = true, guard = 0; changed && guard < 200; guard += 1) {
     changed = false;
     for (let index = 1; index < keys.length - 1; index += 1) {
-      if (keys[index].card !== undefined) continue;
-      const [ax, , az] = keys[index - 1].pos;
-      const [bx, , bz] = keys[index].pos;
-      const [cx2, , cz2] = keys[index + 1].pos;
-      const inX = bx - ax, inZ = bz - az, outX = cx2 - bx, outZ = cz2 - bz;
-      const norm = Math.hypot(inX, inZ) * Math.hypot(outX, outZ);
-      if (norm < 1e-6) { keys.splice(index, 1); changed = true; break; }
-      const turn = Math.acos(Math.max(-1, Math.min(1, (inX * outX + inZ * outZ) / norm)));
-      if (turn > (115 * Math.PI) / 180) { keys.splice(index, 1); changed = true; break; }
+      const { turn, din, dout } = turnAt(index);
+      if (turn <= LIMIT) continue;
+      if (keys[index].card === undefined) { keys.splice(index, 1); changed = true; break; }
+      let side = { x: din.x - dout.x, z: din.z - dout.z };
+      const len = Math.hypot(side.x, side.z);
+      // 近乎掉头（>150°，如死胡同半岛上的城区）时角平分线落在航线上、外推无效：改为垂直来向侧推，
+      // 让路线在城区旁兜一个弯再出来；侧推距离放宽到 750。
+      const reversal = turn > (150 * Math.PI) / 180;
+      side = reversal || len < 0.3 ? { x: -din.z, z: din.x } : { x: side.x / len, z: side.z / len };
+      for (let step = 0; step < (reversal ? 25 : 10) && turnAt(index).turn > LIMIT; step += 1) {
+        keys[index].pos[0] += side.x * 30;
+        keys[index].pos[2] += side.z * 30;
+      }
+      if (turnAt(index).turn > LIMIT) continue; // 推不开就接受这一处（守卫会报出来）
+      changed = true;
+      break;
     }
   }
 
@@ -158,13 +176,19 @@ export function planCinematic(layout: CityLayout, model: CityModel, heights: Map
   const OMEGA = Number((globalThis as { __CITY_CINE_OMEGA__?: number }).__CITY_CINE_OMEGA__ ?? 0.55);
   const MIN_SPEED = 9; // 单位/秒：起落之外最慢也在动
   const MAX_SPEED = 120; // 高空全景也不允许飞得比这快
-  const RAMP_SECONDS = 2.5; // 起飞/降落各自的加减速时长（按距离折算）
+  const RAMP_SECONDS = 3; // 起飞/降落各自的加减速时长（按距离折算）
   const segment = totalLength / SAMPLES;
   const raw = new Float64Array(SAMPLES);
   for (let index = 0; index < SAMPLES; index += 1) raw[index] = Math.min(MAX_SPEED, Math.max(MIN_SPEED, OMEGA * altitudeAtU((index + 0.5) / SAMPLES)));
   // 速度平滑：约 ±80 单位的滑动平均，两遍；地形起伏/海岸线会让离地高度跳变，速度不能跟着跳。
   const window = Math.max(2, Math.round(80 / segment));
-  let smoothed = raw;
+  // 先做窗口最小值（腐蚀）：一段低空（掠过山脊/楼顶）之前就开始减速，平滑后不会把高速带进低空段。
+  let smoothed = new Float64Array(SAMPLES);
+  for (let index = 0; index < SAMPLES; index += 1) {
+    let lowest = Infinity;
+    for (let j = Math.max(0, index - window); j <= Math.min(SAMPLES - 1, index + window); j += 1) lowest = Math.min(lowest, raw[j]);
+    smoothed[index] = lowest;
+  }
   for (let pass = 0; pass < 2; pass += 1) {
     const next = new Float64Array(SAMPLES);
     for (let index = 0; index < SAMPLES; index += 1) {

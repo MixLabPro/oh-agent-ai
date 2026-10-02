@@ -1,0 +1,72 @@
+#!/usr/bin/env node
+// 种子地理守卫（CITY_PLANNING_SPEC §6）：不同种子必须是明显不同的岛，任何种子都是完整可用的城。
+// 曾经海岸是写死折线 + ±19 抖动，30 个种子的轮廓几乎完全重合——截图里「每个人的岛都一样」。
+import assert from "node:assert/strict";
+import path from "node:path";
+import vm from "node:vm";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+
+const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const ui = path.join(repo, "apps/desktop/ui-dev");
+const { buildSync } = createRequire(path.join(ui, "package.json"))("esbuild");
+const out = buildSync({ entryPoints: [path.join(ui, "react/src/features/city/engine/cityLayout.ts")], bundle: true, write: false, format: "cjs", platform: "node", logLevel: "silent" });
+const mod = { exports: {} };
+vm.runInNewContext(out.outputFiles[0].text, { module: mod, exports: mod.exports, process, console, Math, Map, Set });
+const { layoutCity } = mod.exports;
+
+const hosts = ["codex", "claude-code", "dsh", "plugin:zcode"];
+const model = (count) => {
+  const buildings = Array.from({ length: count }, (_, i) => ({ id: `s${i}`, districtId: hosts[i % hosts.length], height: 3 + (i * 37) % 44, footprint: 7.2, startedAt: i * 1000 }));
+  return { buildings, districts: hosts.map((id) => ({ id, label: id, sessionCount: buildings.filter((b) => b.districtId === id).length, anomaly: null })) };
+};
+
+/** 海岸轮廓的世界坐标极坐标剖面：72 个方位上的半径，按均值归一化（只比形状，不比大小）。 */
+function profile(coast) {
+  const cx = coast.reduce((a, p) => a + p.x, 0) / coast.length;
+  const cz = coast.reduce((a, p) => a + p.z, 0) / coast.length;
+  const polar = coast.map((p) => ({ a: Math.atan2(p.z - cz, p.x - cx), r: Math.hypot(p.x - cx, p.z - cz) })).sort((u, v) => u.a - v.a);
+  const samples = [];
+  for (let k = 0; k < 72; k += 1) {
+    const a = -Math.PI + (k / 72) * Math.PI * 2;
+    let lo = polar[polar.length - 1]; let hi = polar[0];
+    for (let i = 0; i < polar.length; i += 1) if (polar[i].a >= a) { hi = polar[i]; lo = polar[(i - 1 + polar.length) % polar.length]; break; }
+    const span = ((hi.a - lo.a) + Math.PI * 2) % (Math.PI * 2) || 1;
+    const t = (((a - lo.a) + Math.PI * 2) % (Math.PI * 2)) / span;
+    samples.push(lo.r + (hi.r - lo.r) * t);
+  }
+  const mean = samples.reduce((x, y) => x + y, 0) / samples.length;
+  return samples.map((r) => r / mean - 1);
+}
+function correlation(a, b) {
+  const dot = a.reduce((s, v, i) => s + v * b[i], 0);
+  const na = Math.sqrt(a.reduce((s, v) => s + v * v, 0)); const nb = Math.sqrt(b.reduce((s, v) => s + v * v, 0));
+  return dot / (na * nb || 1);
+}
+
+const seeds = Array.from({ length: 30 }, (_, i) => (i * 2654435761 + 12345) >>> 0 || 1);
+const profiles = [];
+const biomes = new Set();
+let rivers = 0;
+for (const seed of seeds) {
+  const input = model(700);
+  const layout = layoutCity(input, null, seed);
+  const placed = layout.districts.reduce((sum, d) => sum + d.slots.size, 0);
+  assert.equal(placed, 700, `seed ${seed}: every session gets a lot (${placed}/700)`);
+  for (const site of layout.publicSites) assert(layout.terrain.buildable(site.x, site.z) || layout.terrain.height(site.x, site.z) > 0.5, `seed ${seed}: ${site.id} on land`);
+  for (const bridge of layout.bridges) {
+    const mid = { x: (bridge.from.x + bridge.to.x) / 2, z: (bridge.from.z + bridge.to.z) / 2 };
+    assert(layout.terrain.height(mid.x, mid.z) < 0.5, `seed ${seed}: bridge spans water`);
+  }
+  profiles.push(profile(layout.coast));
+  biomes.add(layout.biome);
+  if (layout.river.length) rivers += 1;
+}
+const pairs = [];
+for (let i = 0; i < profiles.length; i += 1) for (let j = i + 1; j < profiles.length; j += 1) pairs.push(correlation(profiles[i], profiles[j]));
+pairs.sort((x, y) => x - y);
+const median = pairs[Math.floor(pairs.length / 2)];
+assert(median < 0.6, `island shapes too similar across seeds (median correlation ${median.toFixed(2)})`);
+assert(biomes.size >= 4, `seeds should reach most biomes (got ${[...biomes].join(",")})`);
+assert(rivers >= 18 && rivers < 30, `about four in five islands have a river (got ${rivers}/30)`);
+console.log(`City geography: 30 seeds, all placed, sites on land, bridges over water; shape correlation median ${median.toFixed(2)}, ${biomes.size} biomes, ${rivers}/30 rivers passed.`);
