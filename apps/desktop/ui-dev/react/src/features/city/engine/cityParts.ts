@@ -20,6 +20,12 @@ import type { TerrainField } from "./cityLayout";
 const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
 /** 单位圆柱（半径 1、高 1、底面为原点）：sx/sz 当半径、sy 当高度。 */
 const CYLINDER = new THREE.CylinderGeometry(1, 1, 1, 14).translate(0, 0.5, 0);
+/** 区界高架桥面：BOX 底面在 DECK_Y、厚 DECK_THICKNESS，行车面在两者之和。
+ *  路灯曾按 8.2（板底）立杆，光斑埋进桥面板、又因半径大于半幅桥宽漏到桥下地面。 */
+const EXPRESSWAY_DECK_Y = 8.2;
+const EXPRESSWAY_DECK_THICKNESS = 0.9;
+const EXPRESSWAY_DECK_WIDTH = 10.5;
+const EXPRESSWAY_DECK_TOP = EXPRESSWAY_DECK_Y + EXPRESSWAY_DECK_THICKNESS;
 
 export type QualityLevel = 0 | 1 | 2;
 
@@ -733,7 +739,7 @@ export class CityParts {
   private buildDistrictExpressways(): void {
     type Piece = { x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; color: string };
     const pieces: Piece[] = [];
-    const deckY = 8.2;
+    const deckY = EXPRESSWAY_DECK_Y;
     for (const points of this.layout.highways ?? []) {
       // Piers every ~34 units by mileage, anchored into the terrain or riverbed
       // (over water the pier reaches below the surface — a real bridge span).
@@ -765,12 +771,12 @@ export class CityParts {
         const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
         const mx = (a.x + b.x) / 2;
         const mz = (a.z + b.z) / 2;
-        pieces.push({ x: mx, y: deckY, z: mz, sx: length + 0.5, sy: 0.9, sz: 10.5, yaw, color: "#6a7071" });
+        pieces.push({ x: mx, y: deckY, z: mz, sx: length + 0.5, sy: EXPRESSWAY_DECK_THICKNESS, sz: EXPRESSWAY_DECK_WIDTH, yaw, color: "#6a7071" });
         // 车道线/护栏沿桥面横向偏移（offset 之前被忽略，全叠在中线上），且要在桥面顶面（deckY+0.9）之上。
         const sideX = Math.sin(yaw);
         const sideZ = Math.cos(yaw);
-        for (const offset of [-3.6, 0, 3.6]) pieces.push({ x: mx + sideX * offset, y: deckY + 0.9, z: mz + sideZ * offset, sx: length, sy: 0.05, sz: 0.3, yaw, color: "#c6c6bb" });
-        for (const offset of [-5.1, 5.1]) pieces.push({ x: mx + sideX * offset, y: deckY + 0.9, z: mz + sideZ * offset, sx: length, sy: 0.55, sz: 0.3, yaw, color: "#b9bcb2" });
+        for (const offset of [-3.6, 0, 3.6]) pieces.push({ x: mx + sideX * offset, y: EXPRESSWAY_DECK_TOP, z: mz + sideZ * offset, sx: length, sy: 0.05, sz: 0.3, yaw, color: "#c6c6bb" });
+        for (const offset of [-5.1, 5.1]) pieces.push({ x: mx + sideX * offset, y: EXPRESSWAY_DECK_TOP, z: mz + sideZ * offset, sx: length, sy: 0.55, sz: 0.3, yaw, color: "#b9bcb2" });
       }
     }
     if (!pieces.length) return;
@@ -1126,14 +1132,14 @@ export class CityParts {
     const stripMesh = this.makeInstanced(BOX, strips, 2200);
     const spacing = 30;
     let lamps = 0;
-    const lamp = (x: number, z: number, nx: number, nz: number, base: number, yaw: number) => {
+    const lamp = (x: number, z: number, nx: number, nz: number, base: number, yaw: number, poolReach = 3.2, poolRadius = 9.5) => {
       if (lamps >= 4600) return;
       this.compose(x, base, z, 0, 1, 4.6, 1);
       poles.setMatrixAt(lamps, this.matrix);
       // 灯头悬在路中心一侧（臂长 0.7），朝路面。
       this.compose(x - nx * 0.7, base + 4.55, z - nz * 0.7, yaw, 1, 1, 1);
       headMesh.setMatrixAt(lamps, this.matrix);
-      this.compose(x - nx * 3.2, base + 0.12, z - nz * 3.2, 0, 9.5, 1, 9.5);
+      this.compose(x - nx * poolReach, base + 0.12, z - nz * poolReach, 0, poolRadius, 1, poolRadius);
       poolMesh.setMatrixAt(lamps, this.matrix);
       lamps += 1;
     };
@@ -1165,7 +1171,8 @@ export class CityParts {
         lamp(x, z, ox, oz, Math.max(0, this.layout.terrain.height(x, z)), -Math.atan2(ox, -oz) + Math.PI / 2);
       }
     }
-    // 高架：桥面（高 8.2）两侧交错路灯，灯头朝路中心。
+    // 高架：桥面两侧交错路灯，灯头朝路中心。立在行车面（板顶）上；光斑圆心落到桥面中线、
+    // 半径不超过半幅桥宽——地面路灯的 9.5 光斑在 10.5 宽桥面上大半悬空，看起来是灯光穿透到桥下。
     for (const run of this.layout.highways ?? []) {
       let carry = 0;
       for (let i = 1; i < run.length; i += 1) {
@@ -1176,7 +1183,7 @@ export class CityParts {
         const yaw = -Math.atan2(dz, dx);
         for (let t = 14 - carry; t < length; t += 34) {
           const side = Math.floor((t + length * 0.37 + a.x) / 34) % 2 === 0 ? 1 : -1;
-          lamp(a.x + dx * t - dz * side * 5.1, a.z + dz * t + dx * side * 5.1, -dz * side, dx * side, 8.2, yaw);
+          lamp(a.x + dx * t - dz * side * 5.1, a.z + dz * t + dx * side * 5.1, -dz * side, dx * side, EXPRESSWAY_DECK_TOP, yaw, 5.1, EXPRESSWAY_DECK_WIDTH / 2 - 0.3);
         }
         carry = (length - (14 - carry)) % 34;
       }
