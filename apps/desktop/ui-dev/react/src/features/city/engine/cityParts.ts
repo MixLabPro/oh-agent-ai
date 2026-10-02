@@ -2054,6 +2054,11 @@ export class CityParts {
           h += sin((p.x * 0.6 - p.y * 0.8) * 0.23 - t * 0.9) * 0.18;
           return h;
         }
+        // 水面法线贴图（512²）在该 uv 处的 mip 级：0 = 1 texel/像素，每 +1 = 降采样一倍。
+        float waterMip(vec2 uv) {
+          vec2 d = fwidth(uv) * 512.0;
+          return log2(max(max(d.x, d.y), 1e-4));
+        }
         // 离岸深度（构建期烘焙）：0 = 水线，1 = 深水；纹理外一律深水。
         float shoreDepth(vec2 p) {
           vec2 uv = p / (uDepthWorld * 2.0) + 0.5;
@@ -2075,16 +2080,23 @@ export class CityParts {
             vec2 pa = mat2(0.857, 0.515, -0.515, 0.857) * p;   // 31°
             vec2 pb = mat2(0.682, -0.731, 0.731, 0.682) * p;   // -47°
             vec2 pc = mat2(0.276, 0.961, -0.961, 0.276) * p;   // 74°
-            vec3 a = texture2D(uNormal, pa / 41.3 + vec2(uTime * 0.010, uTime * 0.006)).xyz * 2.0 - 1.0;
-            vec3 b = texture2D(uNormal, pb / 15.7 - vec2(uTime * 0.007, -uTime * 0.011)).xyz * 2.0 - 1.0;
-            vec3 c = texture2D(uNormal, pc / 113.0 + vec2(uTime * 0.004, -uTime * 0.003)).xyz * 2.0 - 1.0;
+            vec2 uvA = pa / 41.3 + vec2(uTime * 0.010, uTime * 0.006);
+            vec2 uvB = pb / 15.7 - vec2(uTime * 0.007, -uTime * 0.011);
+            vec2 uvC = pc / 113.0 + vec2(uTime * 0.004, -uTime * 0.003);
+            vec3 a = texture2D(uNormal, uvA).xyz * 2.0 - 1.0;
+            vec3 b = texture2D(uNormal, uvB).xyz * 2.0 - 1.0;
+            vec3 c = texture2D(uNormal, uvC).xyz * 2.0 - 1.0;
+            // 旋转只把点阵转斜，不消除周期（上一版修复的错）。真正成格的原因：一层平铺在屏幕上
+            // 只有几十像素时，512² 贴图被 mip 降采样 ~3 级，细节滤光、只剩「以平铺尺寸为周期」的
+            // 低频分量——一张干净的正弦格，再被掠射菲涅尔放大。按各层自己的 mip 级淡出：细节一旦
+            // 被滤掉就不再贡献法线，留下的起伏由下面 wave() 的解析法线（非格点平面波）接管。
+            float wA = 1.0 - smoothstep(1.0, 2.5, waterMip(uvA));
+            float wB = 1.0 - smoothstep(1.0, 2.5, waterMip(uvB));
+            float wC = 1.0 - smoothstep(1.0, 2.5, waterMip(uvC));
             float mixW = 0.5 + 0.5 * sin(p.x * 0.013 + p.y * 0.017) * sin(p.y * 0.011 - p.x * 0.007);
-            vec3 t = a * (0.6 + 0.4 * mixW) + b * (1.0 - 0.4 * mixW) + c * 0.7;
-            // 远处/掠射角收敛向平静镜面：真实远海近似镜子，也压住残余的平铺混叠。
-            float viewDist = distance(cameraPosition, vWorld);
-            float calm = mix(1.0, 0.35, smoothstep(120.0, 600.0, viewDist));
-            float strength = 0.28 * calm;
-            n = normalize(vec3(t.x * strength, 1.0, t.y * strength));
+            vec3 t = a * wA * (0.6 + 0.4 * mixW) + b * wB * (1.0 - 0.4 * mixW) + c * wC * 0.7;
+            float strength = 0.28;
+            n = normalize(vec3(t.x * strength + n.x * 0.5, 1.0, t.y * strength + n.z * 0.5));
           }
           vec3 view = normalize(cameraPosition - vWorld);
           float fresnel = pow(1.0 - max(dot(n, view), 0.0), 2.4);
