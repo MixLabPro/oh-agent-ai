@@ -216,6 +216,21 @@ function samplePolyline(path: CarPath, distance: number): { x: number; z: number
 /** 夜间照明：路灯灯头（自发光）、地面光斑（加色）、高架灯带。亮度由 setNightGlow 统一驱动。 */
 type NightLights = { heads: THREE.MeshBasicMaterial; pools: THREE.MeshBasicMaterial; strips: THREE.MeshBasicMaterial; neon: THREE.MeshBasicMaterial };
 
+/** 动画起点：车/船/云/旋转件第一次出现时的状态。它们在静态缓存里跨实例共享、每帧原地累加，
+ *  所以起点按对象记在模块级 WeakMap，只在第一次见到时写入——之后的任何实例都能把它们放回原位。
+ *  胶片导出靠它从同一个状态开拍（曾经接着实时循环的状态开拍：同一座城两次导出从第 ~17 帧开始逐像素不同）。 */
+const animationOrigin = new WeakMap<object, number>();
+const carBaseSpeed = new WeakMap<object, number>();
+/** 车的原速：第一次见到时记下（构造时 speed 还是原值），低画质藏车不再丢失它。 */
+function baseSpeedOf(car: { speed: number }): number {
+  if (!carBaseSpeed.has(car)) carBaseSpeed.set(car, car.speed);
+  return carBaseSpeed.get(car) as number;
+}
+function originOf(owner: object, value: number): number {
+  if (!animationOrigin.has(owner)) animationOrigin.set(owner, value);
+  return animationOrigin.get(owner) as number;
+}
+
 type StaticCity = {
   seed: number;
   layout: CityLayout;
@@ -278,6 +293,7 @@ export class CityParts {
   /** 地标里会动的部件：摩天轮转盘、灯塔光束。 */
   private landmarkSpinners: Array<{ object: THREE.Object3D; axis: "x" | "y" | "z"; speed: number }> = [];
   private readonly carMesh: THREE.InstancedMesh;
+  private carKeep = 1;
   private readonly boatMesh: THREE.InstancedMesh;
   private readonly cloudMesh: THREE.InstancedMesh;
   private readonly anomalyMarkers: Array<{ mesh: THREE.Mesh; ring: THREE.Mesh; baseY: number; phase: number }> = [];
@@ -367,6 +383,7 @@ export class CityParts {
     this.waterAssetUniforms = staticCity.waterAssetUniforms;
     this.landmarkSpinners = staticCity.landmarkSpinners;
     this.nightLights = staticCity.nightLights;
+    this.captureAnimationOrigin();
     this.waterUniforms = (this.water.material as THREE.ShaderMaterial).uniforms as unknown as {
       uTime: { value: number };
       uSun: { value: THREE.Vector3 };
@@ -2367,11 +2384,32 @@ export class CityParts {
 
   setQualityLevel(level: QualityLevel): void {
     this.cloudMesh.visible = level >= 1;
-    const keep = level >= 1 ? 1 : 0.5;
-    const visibleCars = Math.floor(this.cars.length * keep);
+    this.carKeep = level >= 1 ? 1 : 0.5;
+    this.applyCarDensity();
+  }
+
+  /** 低画质只开一半车：多出来的车缩成 0（藏起），速度从「原速」取回。
+   *  曾直接把 speed 写成 0 且不留原速：掉到 Q0 一次，那一半车整场会话都冻在原地（升档也不恢复），
+   *  冻结时的矩阵还取决于掉档那一刻——同一座城两次导出的车位置不同。 */
+  private applyCarDensity(): void {
+    const visibleCars = Math.floor(this.cars.length * this.carKeep);
     this.cars.forEach((car, index) => {
-      car.speed = index < visibleCars ? car.speed : 0;
+      const speed = baseSpeedOf(car);
+      car.speed = index < visibleCars ? speed : 0;
+      this.placeCar(car, index, index < visibleCars);
     });
+    this.carMesh.instanceMatrix.needsUpdate = true;
+  }
+
+  private placeCar(car: Car, index: number, visible: boolean): void {
+    if (!visible) {
+      this.compose(0, -40, 0, 0, 0, 0, 0);
+    } else {
+      const sample = samplePolyline(car.path, car.distance);
+      const y = car.path.terrain ? car.path.terrain.height(sample.x, sample.z) + car.path.y : car.path.y;
+      this.compose(sample.x - sample.dz * 1.2, y + 0.04, sample.z + sample.dx * 1.2, Math.atan2(-sample.dz, sample.dx), 1, 1, 1);
+    }
+    this.carMesh.setMatrixAt(index, this.matrix);
   }
 
   /** 航拍时隐藏「计划高度」脚手架壳：低机位下它是悬在天上的半透明大方块。 */
@@ -2528,10 +2566,7 @@ export class CityParts {
     this.cars.forEach((car, index) => {
       if (car.speed === 0) return;
       car.distance += car.speed * dt;
-      const sample = samplePolyline(car.path, car.distance);
-      const y = car.path.terrain ? car.path.terrain.height(sample.x, sample.z) + car.path.y : car.path.y;
-      this.compose(sample.x - sample.dz * 1.2, y + 0.04, sample.z + sample.dx * 1.2, Math.atan2(-sample.dz, sample.dx), 1, 1, 1);
-      this.carMesh.setMatrixAt(index, this.matrix);
+      this.placeCar(car, index, true);
       carsMoved = true;
     });
     if (carsMoved) this.carMesh.instanceMatrix.needsUpdate = true;
@@ -2573,6 +2608,39 @@ export class CityParts {
     if (this.selectRing.visible) (this.selectRing.material as THREE.MeshBasicMaterial).opacity = 0.6 + 0.3 * (0.5 + 0.5 * Math.sin(elapsed * 2.4));
 
     return dirty || carsMoved;
+  }
+
+  private captureAnimationOrigin(): void {
+    for (const car of this.cars) { originOf(car, car.distance); baseSpeedOf(car); }
+    for (const boat of this.boats) originOf(boat, boat.distance);
+    for (const cloud of this.clouds) originOf(cloud, cloud.x);
+    for (const spinner of this.landmarkSpinners) originOf(spinner, spinner.object.rotation[spinner.axis]);
+  }
+
+  /** 把所有随帧累加的动画状态放回起点，楼与配套直接落到目标进度（不再有生长插值）。
+   *  胶片导出开拍前调用：同一份数据 + seed，任何时候导出都从同一个状态开始。 */
+  resetAnimation(): void {
+    for (const car of this.cars) car.distance = originOf(car, car.distance);
+    this.applyCarDensity();
+    for (const boat of this.boats) boat.distance = originOf(boat, boat.distance);
+    for (const cloud of this.clouds) cloud.x = originOf(cloud, cloud.x);
+    for (const spinner of this.landmarkSpinners) spinner.object.rotation[spinner.axis] = originOf(spinner, spinner.object.rotation[spinner.axis]);
+    // 每栋都重写一遍实例矩阵（不只是进度变了的）：吊臂角度、信标闪烁等姿态只在楼可见时逐帧写，
+    // 楼一旦藏起就停在上一部片子留下的样子——只按进度判脏会漏掉它们。
+    for (const runtime of this.runtimes) {
+      runtime.cranePhase = runtime.building.seed * Math.PI * 2;
+      runtime.display = runtime.target;
+      runtime.settled = true;
+      this.applyConstruction(runtime, false);
+    }
+    for (const mesh of [...this.shaftMeshes, ...this.roofProfiles, this.podiumMesh, this.decoCornerMesh, this.decoTrimMesh, this.gardenTreeMesh, this.roofMesh, this.neonMesh, this.scaffoldMesh, this.antennaMesh, this.craneMastMesh, this.craneArmMesh, this.beaconMesh]) {
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+    for (let index = 0; index < this.civicTarget.length; index += 1) {
+      if (this.civicProgress[index] === this.civicTarget[index]) continue;
+      this.civicProgress[index] = this.civicTarget[index];
+      this.writeCivic(index);
+    }
   }
 
   districtAnchor(districtId: string): { x: number; z: number; y: number; radius: number } | null {

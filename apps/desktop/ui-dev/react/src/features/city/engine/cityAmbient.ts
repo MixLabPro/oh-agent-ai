@@ -59,12 +59,16 @@ class SeaSpout {
     const presence = Math.max(0, Math.sin(cycle));
     this.material.opacity = 0.38 * presence;
     this.mesh.visible = presence > 0.03;
-    if (!this.mesh.visible) return;
+    // 位置不论隐现都写：曾隐藏时提前返回，矩阵停在上一次可见的样子，两次导出不同。
     const orbit = elapsed * 0.03 + this.phase;
     const x = this.center.x + Math.cos(orbit) * 18 + this.drift.x * Math.sin(elapsed * 0.05 + this.phase) * 30;
     const z = this.center.z + Math.sin(orbit) * 18 + this.drift.z * Math.sin(elapsed * 0.05 + this.phase) * 30;
     this.mesh.position.set(x, this.terrainHeight(x, z), z);
     this.mesh.rotation.y = elapsed * 0.5 + this.phase;
+  }
+
+  reset(): void {
+    this.timeU.value = 0;
   }
 
   dispose(): void {
@@ -82,9 +86,13 @@ class HotAirBalloon {
   private readonly rise: number;
   private readonly sway: number;
   private t: number;
+  private readonly t0: number;
+  private readonly spawn: { x: number; z: number };
 
   constructor(spawn: { x: number; z: number }, color: string, seed: number) {
     this.t = seed * 120;
+    this.t0 = this.t;
+    this.spawn = { ...spawn };
     this.rise = 1.6 + seed * 1.4;
     this.sway = 0.4 + seed * 0.6;
     this.baseY = 70 + seed * 40;
@@ -110,6 +118,13 @@ class HotAirBalloon {
   private readonly geometries: THREE.BufferGeometry[] = [];
   private readonly materials: THREE.Material[] = [];
 
+  /** 位置是逐帧积分的（x/z += sway），重置必须连位置一起放回出生点。 */
+  reset(): void {
+    this.t = this.t0;
+    this.group.position.set(this.spawn.x, this.baseY, this.spawn.z);
+    this.group.rotation.set(0, 0, 0);
+  }
+
   update(dt: number): void {
     this.t += dt;
     this.group.position.y = this.baseY + Math.sin(this.t * 0.05 * this.rise) * 55;
@@ -129,7 +144,7 @@ class HotAirBalloon {
 /** 夜间水上浮灯：暖光小灯 instanced，随夜色淡入，缓慢升空漂移（参考 FloatingLanterns）。 */
 class NightLanterns {
   readonly mesh: THREE.InstancedMesh;
-  private readonly lanterns: Array<{ x: number; z: number; y: number; rise: number; drift: number; phase: number }> = [];
+  private readonly lanterns: Array<{ x: number; z: number; y: number; y0: number; rise: number; drift: number; phase: number }> = [];
   private night = 0;
   private readonly matrix = new THREE.Matrix4();
   private readonly position = new THREE.Vector3();
@@ -157,7 +172,7 @@ class NightLanterns {
         x = center.x + Math.cos(angle) * reach;
         z = center.z + Math.sin(angle) * reach;
       }
-      this.lanterns.push({ x, z, y: 3 + seed * 6, rise: 0.5 + hashSeed(`lri:${index}`) * 0.9, drift: seed * Math.PI * 2, phase: seed * Math.PI * 2 });
+      this.lanterns.push({ x, z, y: 3 + seed * 6, y0: 3 + seed * 6, rise: 0.5 + hashSeed(`lri:${index}`) * 0.9, drift: seed * Math.PI * 2, phase: seed * Math.PI * 2 });
     }
     this.geometry = geometry;
     this.material = material;
@@ -172,8 +187,12 @@ class NightLanterns {
     this.mesh.visible = night > 0.03;
   }
 
+  reset(): void {
+    for (const lantern of this.lanterns) lantern.y = lantern.y0;
+  }
+
+  // 白天也推进与写矩阵（42 个实例，开销可忽略）：曾只在夜里写，矩阵留着上一个夜晚的样子。
   update(dt: number, elapsed: number): void {
-    if (!this.mesh.visible) return;
     this.lanterns.forEach((lantern, index) => {
       lantern.y += lantern.rise * dt * 1.6;
       if (lantern.y > 90) lantern.y = 2.5;
@@ -227,6 +246,13 @@ export class CityAmbient {
 
   setNight(night: number): void {
     this.lanterns?.setNight(night);
+  }
+
+  /** 所有随帧累加的状态回到构造时（胶片导出开拍前）。 */
+  reset(): void {
+    this.spouts.forEach((spout) => spout.reset());
+    this.balloons.forEach((balloon) => balloon.reset());
+    this.lanterns?.reset();
   }
 
   update(dt: number, elapsed: number): void {

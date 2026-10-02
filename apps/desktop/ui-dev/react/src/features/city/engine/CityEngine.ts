@@ -275,7 +275,23 @@ export class CityEngine {
       const composer = new EffectComposer(this.renderer);
       composer.addPass(new RenderPass(this.scene, this.camera));
       if (wantAo) {
-        const ao = new GTAOPass(this.scene, this.camera, size.x, size.y);
+        // GTAOPass 构造时用 new SimplexNoise()（默认 Math.random）生成降噪噪声贴图：每次重建 composer
+        // （换画质档/尺寸/新会话）AO 颗粒都不同，导出的片子逐像素不可复现。它不接受随机源参数，
+        // 只能在构造期间把 Math.random 换成固定种子的 mulberry32，构造完立即还原。
+        const nativeRandom = Math.random;
+        let state = 0x9e3779b9;
+        Math.random = () => {
+          state = (state + 0x6d2b79f5) | 0;
+          let t = Math.imul(state ^ (state >>> 15), 1 | state);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+        let ao: GTAOPass;
+        try {
+          ao = new GTAOPass(this.scene, this.camera, size.x, size.y);
+        } finally {
+          Math.random = nativeRandom;
+        }
         // 城市尺度：半径以世界单位计（一层楼约 3.1），够把楼脚和街角压暗、又不把整条街染黑。
         ao.updateGtaoMaterial({ radius: 26, distanceExponent: 1, thickness: 20, distanceFallOff: 1, scale: 2.4, samples: this.quality >= 2 ? 16 : 10 });
         ao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: this.quality >= 2 ? 16 : 8 });
@@ -744,6 +760,13 @@ export class CityEngine {
     const savedElapsed = this.elapsed;
     this.exportSize = { width: options.width, height: options.height };
     this.applyQualityLevel(2);
+    // 从固定状态开拍：时钟归零、所有随帧累加的动画回到起点、天空强制重算。
+    // 曾接着实时循环的 elapsed 与累加状态开拍，两次导出同一座城从第 ~17 帧起逐像素不同。
+    this.elapsed = 0;
+    this.lastSkyHour = Number.NaN;
+    this.parts.resetAnimation();
+    this.ambient?.reset();
+    this.aurora?.reset();
     const plan = this.startCinematic(options.cut);
     if (!plan) { this.exportSize = null; this.applyQualityLevel(wasQuality); this.startLoop(); throw new Error("cinematic unavailable"); }
     const film = document.createElement("canvas");
@@ -765,7 +788,11 @@ export class CityEngine {
     const dt = 1 / options.fps;
     const filmLength = plan.durationSec + 4; // 片尾停在全景 4 秒（同实时版）
     const total = Math.ceil(filmLength * options.fps);
-    // 预热：让云/水/车等就位，不进片子。
+    // 预热：渲染管线自带跨帧状态（同一状态连渲两次像素不同——倒影/阴影/后处理目标沿用上一帧），
+    // 开拍前在起始状态原地渲几帧，把这些缓冲冲成同一个样子，不进片子。
+    // 曾直接开拍：两次导出继承的是各自上一次实时帧的残留，片子逐像素不同。
+    this.updateScene(0);
+    for (let warm = 0; warm < 3; warm += 1) this.renderFrame();
     try {
       for (let frame = 0; frame < total; frame += 1) {
         if (options.signal?.aborted) throw new DOMException("aborted", "AbortError");

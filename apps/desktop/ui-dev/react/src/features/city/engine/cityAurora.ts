@@ -139,8 +139,13 @@ export class CityAurora {
     this.group.visible = night > 0.02;
   }
 
+  /** 幕帘相位回零（胶片导出开拍前）。 */
+  reset(): void {
+    for (const uniform of this.timeUniforms) uniform.value = 0;
+  }
+
+  // 隐藏时也推进：状态只取决于累计时间，不取决于「之前是否可见」（导出可复现）。
   update(dt: number): void {
-    if (!this.group.visible) return;
     for (let index = 0; index < this.timeUniforms.length; index += 1) {
       this.timeUniforms[index].value += dt;
       this.alphaUniforms[index].value = this.baseAlphas[index] * this.night * 0.8;
