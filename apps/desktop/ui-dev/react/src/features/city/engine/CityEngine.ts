@@ -376,7 +376,28 @@ export class CityEngine {
     this.ambient = new CityAmbient(this.cityCenter, Math.max(120, layout.boundsRadius) * 0.6, layout.terrain.height, layout.river);
     this.scene.add(this.ambient.group);
     this.wildlife?.dispose();
-    this.wildlife = new CityWildlife(this.cityCenter, Math.max(120, layout.boundsRadius), layout.parkTrees ?? [], layout.seaMountains ?? []);
+    // 萤火虫落点：城市公园与小区花园里撒点在前（确定性环形分布），山林/海岸的 parkTrees 在后。
+    // 规划层的植树跳过所有高度 < 2.5 的点，而城市公园都在低平地上——曾只拿 parkTrees，萤火虫全落在
+    // 山坡和海岸，公园里一只都没有（审计夜景实测）。
+    const fireflySpots: Array<{ x: number; z: number; y: number }> = [];
+    const ground = (x: number, z: number) => Math.max(0, layout.terrain.height(x, z));
+    for (const site of layout.publicSites) {
+      if (site.kind !== "park") continue;
+      for (let i = 0; i < 48; i += 1) {
+        const a = i * 2.399; const r = site.radius * 0.85 * Math.sqrt((i + 0.5) / 48);
+        const x = site.x + Math.cos(a) * r; const z = site.z + Math.sin(a) * r;
+        fireflySpots.push({ x, z, y: ground(x, z) });
+      }
+    }
+    for (const garden of layout.gardens ?? []) {
+      for (let i = 0; i < 14; i += 1) {
+        const a = i * 2.399; const r = Math.min(garden.width, garden.depth) * 0.45 * Math.sqrt((i + 0.5) / 14);
+        const x = garden.x + Math.cos(a) * r; const z = garden.z + Math.sin(a) * r;
+        fireflySpots.push({ x, z, y: garden.y });
+      }
+    }
+    fireflySpots.push(...(layout.parkTrees ?? []));
+    this.wildlife = new CityWildlife(this.cityCenter, Math.max(120, layout.boundsRadius), fireflySpots, layout.seaMountains ?? []);
     this.scene.add(this.wildlife.group);
     if (!this.fillLight) {
       this.fillLight = new THREE.DirectionalLight("#cfe8ef", 0.35);
@@ -785,6 +806,7 @@ export class CityEngine {
     this.ambient?.reset();
     this.aurora?.reset();
     this.wildlife?.reset();
+    this.rain?.reset();
     const plan = this.startCinematic(options.cut);
     if (!plan) { this.exportSize = null; this.applyQualityLevel(wasQuality); this.startLoop(); throw new Error("cinematic unavailable"); }
     const film = document.createElement("canvas");

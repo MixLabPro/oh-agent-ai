@@ -266,7 +266,8 @@ class Fireflies {
   constructor(spots: Array<{ x: number; z: number; y: number }>, count = 130) {
     const picked: Array<{ x: number; z: number; y: number; seed: number }> = [];
     for (let index = 0; index < count && index < spots.length; index += 1) {
-      const spot = spots[Math.floor(hashSeed(`firefly:${index}`) * spots.length)];
+      // 按顺序取：调用方把公园/花园的落点排在最前。曾按哈希随机抽，公园只分到 ~19%、稀疏得看不见。
+      const spot = spots[index % spots.length];
       picked.push({ ...spot, seed: hashSeed(`fireflyphase:${index}`) });
     }
     const positions = new Float32Array(picked.length * 3);

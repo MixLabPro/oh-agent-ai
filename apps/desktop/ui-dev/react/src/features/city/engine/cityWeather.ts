@@ -34,56 +34,64 @@ export function weatherAt(ms: number): WeatherState {
 }
 
 /** 屏幕空间雨丝：相机前方跟随的四边形 + 程序化斜雨（三层不同密度/速度/倾角）。 */
+/** 雨丝：移植 tinyskies RainOverlay 的「离散雨线」做法（作者授权参考）。
+ *  曾是整屏程序化 shader（固定列格 + 同速下落），读作一排排雪片/方块（用户截图两次）。
+ *  原版：≤50 根独立雨线，每根各自的速度 1.8–3.2 屏/秒、长度 8–22% 屏高、宽 0.15–0.3% 屏宽、
+ *  风偏 0.35 rad ± 0.09 抖动，加色混合，不透明度 0.35×雨强。这里一模一样，只把 Math.random
+ *  换成按生成序号的确定性哈希（胶片导出可复现），并用一个 InstancedMesh + 裁剪空间顶点着色器
+ *  画在屏幕上（不需要原版的第二个正交场景）。原版的「玻璃水珠折射」要拷贝帧缓冲，未移植。 */
+const STREAK_COUNT = 50;
+const WIND_ANGLE = 0.35;
+const ANGLE_JITTER = 0.09;
+
+function rainHash(n: number): number {
+  const x = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+  return x - Math.floor(x);
+}
+
 export class RainOverlay {
-  readonly mesh: THREE.Mesh;
-  private readonly uniforms: { uTime: { value: number }; uAmount: { value: number }; uAspect: { value: number } };
+  readonly mesh: THREE.InstancedMesh;
+  private readonly uniforms: { uOpacity: { value: number }; uAspect: { value: number } };
+  private readonly streaks = Array.from({ length: STREAK_COUNT }, () => ({ x: 0, y: 0, speed: 0, length: 0, width: 0, angle: 0, active: false }));
+  private amount = 0;
+  private spawnCount = 0;
+  private frame = 0;
+  private readonly matrix = new THREE.Matrix4();
+  private readonly position = new THREE.Vector3();
+  private readonly quaternion = new THREE.Quaternion();
+  private readonly scale = new THREE.Vector3();
+  private readonly zAxis = new THREE.Vector3(0, 0, 1);
 
   constructor() {
-    this.uniforms = { uTime: { value: 0 }, uAmount: { value: 0 }, uAspect: { value: 1 } };
+    this.uniforms = { uOpacity: { value: 0 }, uAspect: { value: 1 } };
     const material = new THREE.ShaderMaterial({
-      transparent: true, depthTest: false, depthWrite: false,
+      transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
       uniforms: this.uniforms,
       vertexShader: /* glsl */ `
         varying vec2 vUv;
         void main() {
           vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          // 实例矩阵直接给出 NDC（-1..1）里的位置/朝向/尺寸：雨线贴屏幕，不随相机透视。
+          gl_Position = vec4((instanceMatrix * vec4(position, 1.0)).xy, 0.0, 1.0);
         }`,
       fragmentShader: /* glsl */ `
-        uniform float uTime;
-        uniform float uAmount;
-        uniform float uAspect;
+        uniform float uOpacity;
         varying vec2 vUv;
-        float h1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
-        // 一层雨丝：细长、略斜的线段。曾是「格宽一半 × 格高 0.2–0.4」的方块且严格居中在固定列上、
-        // 同层同速——画面上是一排排整齐的白方块（用户：「这是下雪吗？」）。
-        // 现在：每列各自的下落速度与相位；每滴各自的横向偏移、长度、有无；线宽只占格宽的 ~7%。
-        float layer(vec2 uv, float scale, float speed, float slant, float seed) {
-          vec2 p = vec2(uv.x * uAspect * scale + uv.y * slant, uv.y * scale * 0.22);
-          float column = floor(p.x);
-          float colSpeed = 0.7 + 0.6 * h1(column + seed * 3.1);
-          p.y += uTime * speed * colSpeed + h1(column * 1.7 + seed) * 11.0;
-          float cell = floor(p.y);
-          float drop = h1(column * 13.1 + cell * 7.7 + seed);
-          float offset = (h1(column * 5.3 + cell * 3.3 + seed + 1.9) - 0.5) * 0.7;
-          float across = abs(fract(p.x) - 0.5 - offset);
-          float y = fract(p.y);
-          float len = 0.3 + drop * 0.4;
-          float shape = smoothstep(0.0, 0.12, y) * smoothstep(len, len - 0.15, y) * (1.0 - smoothstep(0.012, 0.04, across));
-          return shape * step(0.5, drop);
-        }
         void main() {
-          float rain = layer(vUv, 26.0, 8.0, 0.32, 0.0) * 0.55
-                     + layer(vUv, 44.0, 11.0, 0.42, 17.0) * 0.4
-                     + layer(vUv, 70.0, 14.0, 0.5, 41.0) * 0.28;
-          gl_FragColor = vec4(0.86, 0.9, 0.96, min(1.0, rain * uAmount * 1.4));
+          float along = vUv.y;
+          float taper = smoothstep(0.0, 0.15, along) * smoothstep(1.0, 0.7, along);
+          float across = abs(vUv.x - 0.5) * 2.0;
+          float shape = (1.0 - smoothstep(0.0, 1.0, across)) * taper;
+          gl_FragColor = vec4(0.75, 0.8, 0.88, shape * uOpacity);
         }`,
     });
-    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+    this.mesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), material, STREAK_COUNT);
     this.mesh.name = "city-rain";
     this.mesh.renderOrder = 90;
     this.mesh.frustumCulled = false;
     this.mesh.visible = false;
+    this.mesh.count = 0;
   }
 
   setAspect(width: number, height: number): void {
@@ -91,24 +99,58 @@ export class RainOverlay {
   }
 
   setAmount(amount: number): void {
-    this.uniforms.uAmount.value = amount;
+    this.amount = amount;
+    this.uniforms.uOpacity.value = amount * 0.35;
     this.mesh.visible = amount > 0.02;
+    if (!this.mesh.visible) for (const streak of this.streaks) streak.active = false;
   }
 
-  /** 每帧贴在相机前方（相机不进场景图，四边形手动跟随）。 */
+  /** 生成序列回到起点（胶片导出开拍前）。 */
+  reset(): void {
+    this.spawnCount = 0;
+    this.frame = 0;
+    for (const streak of this.streaks) streak.active = false;
+  }
+
+  private spawn(streak: (typeof this.streaks)[number]): void {
+    const n = this.spawnCount * 6;
+    this.spawnCount += 1;
+    streak.angle = -WIND_ANGLE + (rainHash(n) - 0.5) * 2 * ANGLE_JITTER;
+    streak.length = 0.08 + rainHash(n + 1) * 0.14;
+    streak.width = 0.0015 + rainHash(n + 2) * 0.0015;
+    streak.speed = 1.8 + rainHash(n + 3) * 1.4;
+    streak.x = (rainHash(n + 4) - 0.5) * 2.6;
+    streak.y = 1.15 + rainHash(n + 5) * 0.3;
+    streak.active = true;
+  }
+
   update(dt: number, elapsed: number, camera: THREE.PerspectiveCamera): void {
+    void elapsed;
+    void camera;
     if (!this.mesh.visible) return;
-    this.uniforms.uTime.value = elapsed;
-    void dt;
-    // 四边形必须在近裁剪面之外：曾放在相机前 1.4，而相机 near = 1.5，雨丝层永远被裁掉——雨天从来没下过雨。
-    const distance = Math.max(3, camera.near * 2);
-    const half = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * distance;
-    this.mesh.scale.set(half * 2 * camera.aspect, half * 2, 1);
-    this.mesh.quaternion.copy(camera.quaternion);
-    this.mesh.position.copy(camera.position).addScaledVector(this.forward.set(0, 0, -1).applyQuaternion(camera.quaternion), distance);
+    const step = Math.min(dt, 0.1);
+    this.frame += 1;
+    let visible = 0;
+    for (let index = 0; index < STREAK_COUNT; index += 1) {
+      const streak = this.streaks[index];
+      if (!streak.active) {
+        // 原版：每秒按 雨强×0.85×30 的机会补生；同样只用前 25%…这里 50 根即原版普通雨的 activeLimit。
+        if (rainHash(this.frame * 53.7 + index * 1.31 + 0.5) < this.amount * 0.85 * step * 30) this.spawn(streak);
+        else continue;
+      }
+      streak.x += Math.sin(streak.angle) * streak.speed * step;
+      streak.y -= Math.cos(streak.angle) * streak.speed * step;
+      if (streak.y < -1.3) { streak.active = false; continue; }
+      this.position.set(streak.x, streak.y, 0);
+      this.quaternion.setFromAxisAngle(this.zAxis, streak.angle);
+      this.scale.set(streak.width, streak.length, 1);
+      this.matrix.compose(this.position, this.quaternion, this.scale);
+      this.mesh.setMatrixAt(visible, this.matrix);
+      visible += 1;
+    }
+    this.mesh.count = visible;
+    this.mesh.instanceMatrix.needsUpdate = true;
   }
-
-  private readonly forward = new THREE.Vector3();
 
   dispose(): void {
     this.mesh.geometry.dispose();

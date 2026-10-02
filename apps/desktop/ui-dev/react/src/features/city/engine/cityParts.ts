@@ -26,6 +26,22 @@ const EXPRESSWAY_DECK_Y = 8.2;
 const EXPRESSWAY_DECK_THICKNESS = 0.9;
 const EXPRESSWAY_DECK_WIDTH = 10.5;
 const EXPRESSWAY_DECK_TOP = EXPRESSWAY_DECK_Y + EXPRESSWAY_DECK_THICKNESS;
+/** 高架两端的匝道长度：环线在海岸/山体处断开成几段，段尾曾悬在 8.2 高的半空、下面是沙地（拍照实测）。 */
+const EXPRESSWAY_RAMP = 90;
+
+/** 每个折线点处的桥面底高：两端各 EXPRESSWAY_RAMP 内平滑落到地面以上 0.3，中段保持 EXPRESSWAY_DECK_Y。 */
+function expresswayDeckHeights(points: Array<{ x: number; z: number }>, groundAt: (x: number, z: number) => number): number[] {
+  const along: number[] = [0];
+  for (let i = 1; i < points.length; i += 1) along.push(along[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].z - points[i - 1].z));
+  const total = along[along.length - 1] || 1;
+  return points.map((point, i) => {
+    const edge = Math.min(along[i], total - along[i]);
+    const u = Math.min(1, edge / EXPRESSWAY_RAMP);
+    const ease = u * u * (3 - 2 * u);
+    const ground = Math.max(0, groundAt(point.x, point.z)) + 0.3 - EXPRESSWAY_DECK_THICKNESS;
+    return ground + (EXPRESSWAY_DECK_Y - ground) * ease;
+  });
+}
 
 export type QualityLevel = 0 | 1 | 2;
 
@@ -754,10 +770,10 @@ export class CityParts {
   /** 区界高架：与北环高架同视觉语言（桥面/车道线/护栏/桥墩），
    *  沿规划折线分段铺装 —— host 城区之间可辨认的硬边界。 */
   private buildDistrictExpressways(): void {
-    type Piece = { x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; color: string };
+    type Piece = { x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; pitch?: number; color: string };
     const pieces: Piece[] = [];
-    const deckY = EXPRESSWAY_DECK_Y;
     for (const points of this.layout.highways ?? []) {
+      const heights = expresswayDeckHeights(points, (x, z) => this.layout.terrain.height(x, z));
       // Piers every ~34 units by mileage, anchored into the terrain or riverbed
       // (over water the pier reaches below the surface — a real bridge span).
       let accumulated = 0;
@@ -772,7 +788,8 @@ export class CityParts {
           // 不会出现"桥墩穿透路面"的视觉交叠。
           // BOX 以底面为原点：y 是墩底而不是中心。曾按「中心」写成 (地面+墩顶)/2，
           // 桥墩悬在半空且戳出桥面（截图里河中那个方块）。
-          const pierTop = deckY + 0.05;
+          const pierTop = heights[index] + 0.05;
+          if (pierTop - groundY < 1.5) continue; // 匝道落地段不需要桥墩
           // 桥墩随该点处桥面走向旋转（横截面垂直于桥），盖梁宽度覆盖桥面。
           const neighbor = points[Math.min(index + 1, points.length - 1)];
           const prev = points[Math.max(index - 1, 0)];
@@ -788,12 +805,18 @@ export class CityParts {
         const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
         const mx = (a.x + b.x) / 2;
         const mz = (a.z + b.z) / 2;
-        pieces.push({ x: mx, y: deckY, z: mz, sx: length + 0.5, sy: EXPRESSWAY_DECK_THICKNESS, sz: EXPRESSWAY_DECK_WIDTH, yaw, color: "#6a7071" });
+        const ya = heights[index - 1];
+        const yb = heights[index];
+        const my = (ya + yb) / 2;
+        const pitch = Math.atan2(yb - ya, length);
+        const slant = Math.hypot(length, yb - ya);
+        const top = my + EXPRESSWAY_DECK_THICKNESS;
+        pieces.push({ x: mx, y: my, z: mz, sx: slant + 0.5, sy: EXPRESSWAY_DECK_THICKNESS, sz: EXPRESSWAY_DECK_WIDTH, yaw, pitch, color: "#6a7071" });
         // 车道线/护栏沿桥面横向偏移（offset 之前被忽略，全叠在中线上），且要在桥面顶面（deckY+0.9）之上。
         const sideX = Math.sin(yaw);
         const sideZ = Math.cos(yaw);
-        for (const offset of [-3.6, 0, 3.6]) pieces.push({ x: mx + sideX * offset, y: EXPRESSWAY_DECK_TOP, z: mz + sideZ * offset, sx: length, sy: 0.05, sz: 0.3, yaw, color: "#c6c6bb" });
-        for (const offset of [-5.1, 5.1]) pieces.push({ x: mx + sideX * offset, y: EXPRESSWAY_DECK_TOP, z: mz + sideZ * offset, sx: length, sy: 0.55, sz: 0.3, yaw, color: "#b9bcb2" });
+        for (const offset of [-3.6, 0, 3.6]) pieces.push({ x: mx + sideX * offset, y: top, z: mz + sideZ * offset, sx: slant, sy: 0.05, sz: 0.3, yaw, pitch, color: "#c6c6bb" });
+        for (const offset of [-5.1, 5.1]) pieces.push({ x: mx + sideX * offset, y: top, z: mz + sideZ * offset, sx: slant, sy: 0.55, sz: 0.3, yaw, pitch, color: "#b9bcb2" });
       }
     }
     if (!pieces.length) return;
@@ -803,8 +826,10 @@ export class CityParts {
     mesh.receiveShadow = true;
     pieces.forEach((piece, index) => {
       this.positionVector.set(piece.x, piece.y, piece.z);
-      this.euler.set(0, piece.yaw, 0);
+      // 先绕局部 z 俯仰（匝道坡度），再绕 y 转向：'YZX' 顺序。
+      this.euler.set(0, piece.yaw, piece.pitch ?? 0, "YZX");
       this.quaternion.setFromEuler(this.euler);
+      this.euler.set(0, 0, 0, "XYZ");
       this.scaleVector.set(piece.sx, piece.sy, piece.sz);
       this.matrix.compose(this.positionVector, this.quaternion, this.scaleVector);
       mesh.setMatrixAt(index, this.matrix);
@@ -1191,6 +1216,7 @@ export class CityParts {
     // 高架：桥面两侧交错路灯，灯头朝路中心。立在行车面（板顶）上；光斑圆心落到桥面中线、
     // 半径不超过半幅桥宽——地面路灯的 9.5 光斑在 10.5 宽桥面上大半悬空，看起来是灯光穿透到桥下。
     for (const run of this.layout.highways ?? []) {
+      const heights = expresswayDeckHeights(run, (x, z) => this.layout.terrain.height(x, z));
       let carry = 0;
       for (let i = 1; i < run.length; i += 1) {
         const a = run[i - 1]; const b = run[i];
@@ -1200,7 +1226,8 @@ export class CityParts {
         const yaw = -Math.atan2(dz, dx);
         for (let t = 14 - carry; t < length; t += 34) {
           const side = Math.floor((t + length * 0.37 + a.x) / 34) % 2 === 0 ? 1 : -1;
-          lamp(a.x + dx * t - dz * side * 5.1, a.z + dz * t + dx * side * 5.1, -dz * side, dx * side, EXPRESSWAY_DECK_TOP, yaw, 5.1, EXPRESSWAY_DECK_WIDTH / 2 - 0.3);
+          const deckTop = heights[i - 1] + (heights[i] - heights[i - 1]) * (t / length) + EXPRESSWAY_DECK_THICKNESS;
+          lamp(a.x + dx * t - dz * side * 5.1, a.z + dz * t + dx * side * 5.1, -dz * side, dx * side, deckTop, yaw, 5.1, EXPRESSWAY_DECK_WIDTH / 2 - 0.3);
         }
         carry = (length - (14 - carry)) % 34;
       }
@@ -1210,14 +1237,16 @@ export class CityParts {
     // 高架灯带：沿环线两侧护栏上沿的发光细条（桥面高 8.2，护栏在 ±5.1）。
     let strip = 0;
     for (const run of this.layout.highways ?? []) {
+      const heights = expresswayDeckHeights(run, (x, z) => this.layout.terrain.height(x, z));
       for (let i = 1; i < run.length && strip < 2190; i += 1) {
         const a = run[i - 1]; const b = run[i];
         const length = Math.hypot(b.x - a.x, b.z - a.z);
         if (length < 6) continue;
+        if (Math.abs(heights[i] - heights[i - 1]) > 0.15) continue; // 匝道坡段不挂水平灯带（会悬空/插进桥面）
         const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
         const sx = Math.sin(yaw); const sz = Math.cos(yaw);
         for (const offset of [-5.1, 5.1]) {
-          this.compose((a.x + b.x) / 2 + sx * offset, 9.45, (a.z + b.z) / 2 + sz * offset, yaw, length, 0.14, 0.14);
+          this.compose((a.x + b.x) / 2 + sx * offset, (heights[i] + heights[i - 1]) / 2 + EXPRESSWAY_DECK_THICKNESS + 0.35, (a.z + b.z) / 2 + sz * offset, yaw, length, 0.14, 0.14);
           stripMesh.setMatrixAt(strip, this.matrix);
           strip += 1;
         }

@@ -17,6 +17,8 @@ class SeaSpout {
   private readonly drift: { x: number; z: number };
   private readonly radius: number;
   private readonly speed: number;
+  /** 夜晚程度：水龙卷是被日光照亮的水雾，夜里曾照样是一根亮白的锥（审计夜景实测）。 */
+  night = 0;
 
   constructor(private center: { x: number; z: number }, angle: number, seed: number, private terrainHeight: (x: number, z: number) => number) {
     this.phase = seed * Math.PI * 2;
@@ -57,7 +59,7 @@ class SeaSpout {
     // 缓慢绕锚点漂移 + 周期性隐现（~50s 一轮）。
     const cycle = (elapsed * this.speed + this.phase) % (Math.PI * 2);
     const presence = Math.max(0, Math.sin(cycle));
-    this.material.opacity = 0.38 * presence;
+    this.material.opacity = 0.38 * presence * (1 - this.night * 0.8);
     this.mesh.visible = presence > 0.03;
     // 位置不论隐现都写：曾隐藏时提前返回，矩阵停在上一次可见的样子，两次导出不同。
     const orbit = elapsed * 0.03 + this.phase;
@@ -225,7 +227,17 @@ export class CityAmbient {
     // 两个水龙卷锚在城外海面（对角方向）。
     for (let index = 0; index < 2; index += 1) {
       const angle = index * 2.4 + 0.7;
-      const reach = radius * 1.55;
+      // 沿这个方向往外走，找到「锚点及其漂移范围（±50）内全是水」的第一个位置。
+      // 曾固定 1.55×(0.6R) ≈ 0.93R：种子岛形状各异，水龙卷常落在山坡/陆地上（审计夜景实测）。
+      let reach = radius * 1.55;
+      const dry = (r: number) => {
+        for (let k = 0; k < 8; k += 1) {
+          const a = (k / 8) * Math.PI * 2;
+          if (terrainHeight(center.x + Math.cos(angle) * r + Math.cos(a) * 50, center.z + Math.sin(angle) * r + Math.sin(a) * 50) > -0.5) return true;
+        }
+        return terrainHeight(center.x + Math.cos(angle) * r, center.z + Math.sin(angle) * r) > -0.5;
+      };
+      while (dry(reach) && reach < radius * 6) reach += 20;
       const spout = new SeaSpout({ x: center.x + Math.cos(angle) * reach, z: center.z + Math.sin(angle) * reach }, angle, hashSeed(`spout:${index}`), terrainHeight);
       this.spouts.push(spout);
       this.group.add(spout.mesh);
@@ -247,6 +259,10 @@ export class CityAmbient {
 
   setNight(night: number): void {
     this.lanterns?.setNight(night);
+    for (const spout of this.spouts) {
+      spout.night = night;
+      (spout.mesh.material as THREE.MeshBasicMaterial).color.setRGB(0.86, 0.96, 1).multiplyScalar(1 - night * 0.75);
+    }
   }
 
   /** 所有随帧累加的状态回到构造时（胶片导出开拍前）。 */
