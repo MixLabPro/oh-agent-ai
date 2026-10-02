@@ -25,6 +25,7 @@ import { loadBiomeFlora } from "./cityFlora";
 import { planCinematic, type CinematicPlan } from "./cityCinematic";
 import { layoutCity, type CityLayout } from "./cityLayout";
 import { CityParts, type QualityLevel } from "./cityParts";
+import { skyStateAt, type CitySkyPreset } from "./citySky";
 
 export type EngineQualityMode = "auto" | "high" | "eco";
 export type EngineStats = { fps: number; drawCalls: number; triangles: number; buildings: number; quality: QualityLevel; idle: boolean };
@@ -66,6 +67,10 @@ export class CityEngine {
 
   // 时间轴（replay）状态。
   private cursorMs: number | null = null; // null = live（跟随现在）
+  /** 昼夜相位缓存（上次 apply 的 hour，变化才写 uniform）。 */
+  private lastSkyHour = -1;
+  /** 当前 theme 的立面自发光基线（昼夜在其上抬升）。 */
+  private themeSelfLit = activeTheme().name === "vice" ? 0.24 : 0.05;
   private playing = false;
   private playbackSpeed = 3_600; // 1 秒 = 1 小时（默认）
 
@@ -545,6 +550,9 @@ export class CityEngine {
         uGradeHorizon: { value: new THREE.Color(activeTheme().skyGrade.horizon) },
         uGradeAmount: { value: activeTheme().skyGrade.amount },
         uSkyYaw: { value: skyYawOf(activeTheme()) },
+        // 昼夜：渐变分支的程序星点强度；HDR 全景分支的夜间压暗（1=白天原样）。
+        uStars: { value: 0 },
+        uSkyDim: { value: 1 },
       },
       vertexShader: /* glsl */ `
         varying vec3 vDirection;
@@ -563,6 +571,8 @@ export class CityEngine {
         uniform vec3 uGradeHorizon;
         uniform float uGradeAmount;
         uniform float uSkyYaw;
+        uniform float uStars;
+        uniform float uSkyDim;
         varying vec3 vDirection;
         void main() {
           vec3 dir = normalize(vDirection);
@@ -570,10 +580,17 @@ export class CityEngine {
           // 地平线 → 中段 → 天顶：日落主题靠中段的粉色撑出渐变带。
           vec3 color = mix(horizonColor, midColor, smoothstep(0.0, 0.28, height));
           color = mix(color, topColor, smoothstep(0.22, 0.85, height));
+          // 程序星点：方向量化到球面网格，每格 hash 决定有无星；只在上半天空。
+          if (uStars > 0.01) {
+            vec3 cell = floor(dir * 190.0);
+            float h = fract(sin(dot(cell, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+            float star = step(0.9965, h) * smoothstep(0.22, 0.65, dir.y);
+            color += vec3(0.92, 0.95, 1.0) * star * uStars * (0.55 + 0.45 * h);
+          }
           if (uHasSky > 0.5) {
             // 等距柱状投影采样；地平线以下复用地平线那一行（下半球在水面以下，从不直接可见）。
             vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5 + uSkyYaw, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
-            vec3 photo = texture2D(uSky, uv).rgb;
+            vec3 photo = texture2D(uSky, uv).rgb * uSkyDim;
             // 调色：按高度在两个色调之间做 overlay 式乘染（保留云的明暗，只换色相）。
             vec3 tint = mix(uGradeHorizon, uGradeTop, smoothstep(0.0, 0.6, height));
             vec3 graded = photo * tint * 1.55;
@@ -699,7 +716,64 @@ export class CityEngine {
     return true;
   }
 
+  /** 昼夜循环：live 跟随真实本地时间，回放跟随时间轴游标的小时——
+   *  拖动时间轴可以看到城市从白天进入黄昏与夜晚（亮窗/星空/水色变化）。 */
+  private updateDaylight(): void {
+    const now = this.cursorMs !== null ? new Date(this.cursorMs) : new Date();
+    const hour = now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600;
+    // 插值随秒连续；仅在跨过 0.02h（~72s）时重写 uniform，避免无谓上传。
+    if (Math.abs(hour - this.lastSkyHour) < 0.02) return;
+    this.lastSkyHour = hour;
+    const sky = skyStateAt(hour);
+    this.applySky(sky);
+  }
+
+  private applySky(sky: CitySkyPreset): void {
+    const domeMaterial = this.skyDome?.material as THREE.ShaderMaterial | undefined;
+    if (!domeMaterial) return;
+    const skyUniforms = domeMaterial.uniforms;
+    (skyUniforms.topColor.value as THREE.Color).set(sky.top);
+    (skyUniforms.midColor.value as THREE.Color).set(sky.middle);
+    (skyUniforms.horizonColor.value as THREE.Color).set(sky.horizon);
+    skyUniforms.uStars.value = sky.stars;
+    skyUniforms.uSkyDim.value = 0.22 + 0.78 * Math.min(1, sky.sunIntensity / 1.2);
+    (this.scene.background as THREE.Color).set(sky.fog);
+    const fog = this.scene.fog;
+    if (fog && fog instanceof THREE.Fog) {
+      fog.color.set(sky.fog);
+      const bounds = Math.max(120, this.boundsRadius);
+      fog.near = bounds * sky.fogNearFactor;
+      fog.far = bounds * sky.fogFarFactor;
+    }
+    this.hemisphere.color.set(sky.hemiSky);
+    this.hemisphere.groundColor.set(sky.hemiGround);
+    this.hemisphere.intensity = sky.hemiIntensity;
+    this.sun.color.set(sky.sunColor);
+    this.sun.intensity = sky.sunIntensity;
+    // 太阳绕城心的方位/高度角：白天高、黄昏低、夜晚是月光方向。
+    const radius = 320;
+    this.sun.position.set(
+      this.cityCenter.x + Math.cos(sky.sunAzimuth) * Math.cos(sky.sunElevation) * radius,
+      Math.sin(sky.sunElevation) * radius,
+      this.cityCenter.z + Math.sin(sky.sunAzimuth) * Math.cos(sky.sunElevation) * radius,
+    );
+    if (this.parts) {
+      const water = this.parts.waterColors;
+      if (water) {
+        water.uShallow.value.set(sky.waterShallow);
+        water.uDeep.value.set(sky.waterDeep);
+        water.uSky.value.set(sky.fog);
+      }
+      const clouds = this.parts.cloudMaterial;
+      if (clouds) clouds.opacity = sky.cloudOpacity;
+      // 夜晚城市亮窗：立面自发光抬升（保留 theme 基线的下限）。
+      this.parts.setNightGlow(sky.selfLit);
+      this.parts.applySelfLit(this.themeSelfLit);
+    }
+  }
+
   private updateScene(dt: number): void {
+    this.updateDaylight();
     if (this.updateCinematic()) {
       this.parts?.update(dt, this.elapsed);
       return;

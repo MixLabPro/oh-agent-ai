@@ -254,7 +254,7 @@ export class CityParts {
   private readonly cars: Car[];
   private readonly boats: Array<{ path: CarPath; distance: number; speed: number; phase: number }>;
   private readonly clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }>;
-  private readonly waterUniforms: { uTime: { value: number }; uSun: { value: THREE.Vector3 } };
+  private readonly waterUniforms: { uTime: { value: number }; uSun: { value: THREE.Vector3 }; uShallow: { value: THREE.Color }; uDeep: { value: THREE.Color }; uSky: { value: THREE.Color } };
   private readonly matrix = new THREE.Matrix4();
   private readonly quaternion = new THREE.Quaternion();
   private readonly euler = new THREE.Euler();
@@ -325,6 +325,9 @@ export class CityParts {
     this.waterUniforms = (this.water.material as THREE.ShaderMaterial).uniforms as unknown as {
       uTime: { value: number };
       uSun: { value: THREE.Vector3 };
+      uShallow: { value: THREE.Color };
+      uDeep: { value: THREE.Color };
+      uSky: { value: THREE.Color };
     };
 
     // ── 建筑：立面（3 变体 × [主体+退台] 两段）──────────────────────────
@@ -2060,6 +2063,31 @@ export class CityParts {
     const out = new Map<string, { x: number; z: number; height: number; ground: number }>();
     for (const [id, runtime] of this.runtimeById) out.set(id, { x: runtime.slot.x, z: runtime.slot.z, height: runtime.building.height, ground: runtime.groundY });
     return out;
+  }
+
+  /** 云层材质（昼夜循环驱动透明度）。 */
+  get cloudMaterial(): (THREE.Material & { opacity: number }) | null {
+    return this.cloudMesh ? (this.cloudMesh.material as THREE.Material & { opacity: number }) : null;
+  }
+
+  /** 水色 uniform（昼夜循环驱动深浅两色）。 */
+  get waterColors(): { uShallow: { value: THREE.Color }; uDeep: { value: THREE.Color }; uSky: { value: THREE.Color } } | null {
+    return this.water ? ((this.water.material as THREE.ShaderMaterial).uniforms as unknown as { uShallow: { value: THREE.Color }; uDeep: { value: THREE.Color }; uSky: { value: THREE.Color } }) : null;
+  }
+
+  /** 夜晚城市亮窗：抬升立面自发光，保留 theme 基线下限（白天≈基线不变）。
+   *  theme 切换会重设 uSelfLit 基线，下一次昼夜 tick 会在其上再抬升。 */
+  private nightGlow = 0;
+
+  setNightGlow(night: number): void {
+    this.nightGlow = night;
+  }
+
+  /** theme 基线 + 夜晚抬升的合成值（theme 切换后由昼夜 tick 重新应用）。 */
+  applySelfLit(themeBase: number): void {
+    for (const uniforms of this.facadeUniforms) {
+      uniforms.uSelfLit.value = Math.max(themeBase, this.nightGlow * 0.42);
+    }
   }
 
   anchorFor(id: string): { x: number; z: number; height: number; ground: number } | null {
