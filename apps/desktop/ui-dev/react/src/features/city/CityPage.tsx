@@ -10,7 +10,7 @@ import type { CityBuilding, CityModel } from "./cityModel";
 import { paletteFor } from "./engine/cityTextures";
 import type { CityThemeName } from "./engine/cityTheme";
 import type { CinematicCard } from "./engine/cityCinematic";
-import { loadCitySeed, resetCitySeed } from "./citySeed";
+import { loadCitySeed, resetCitySeed, setCitySeed } from "./citySeed";
 import { CityEngine, type EngineQualityMode, type EngineStats } from "./engine/CityEngine";
 import { hostName } from "../../lib/hostNames";
 import { formatCost } from "../sessions/costSummary";
@@ -81,6 +81,9 @@ export function CityPage() {
   const [theme, setTheme] = useState<CityThemeName>(readStoredTheme);
   /** 「重新生成岛屿」两步确认：第一次点击只是武装按钮，4 秒内再点才执行。 */
   const [confirmReseed, setConfirmReseed] = useState(false);
+  /** 当前岛屿种子（显示在输入框里，可手动改，回车生效并保存）。 */
+  const [seed, setSeedState] = useState<number | null>(null);
+  const [seedDraft, setSeedDraft] = useState("");
   const [stats, setStats] = useState<EngineStats | null>(null);
   const [cursorMs, setCursorMs] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -199,7 +202,7 @@ export function CityPage() {
     // 种子到了才画城市。读失败（数据目录不可写等）时本次用内置种子兜底——城市照常可用，
     // 只是这次不是「你的岛」；不落盘，下次进入再试。
     loadCitySeed()
-      .then((seed) => { if (engineRef.current === engine) engine.setSeed(seed); })
+      .then((value) => { if (engineRef.current === engine) { engine.setSeed(value); setSeedState(value); setSeedDraft(String(value)); } })
       .catch((reason) => {
         console.warn("[city] seed unavailable, using the built-in island for this visit", reason);
         if (engineRef.current === engine) engine.setSeed(1927);
@@ -368,10 +371,37 @@ export function CityPage() {
             }
             setConfirmReseed(false);
             resetCitySeed()
-              .then((seed) => engineRef.current?.setSeed(seed))
+              .then((value) => { engineRef.current?.setSeed(value); setSeedState(value); setSeedDraft(String(value)); })
               .catch((reason) => setError(String(reason)));
           }}
         >{message(confirmReseed ? "city.reseedConfirm" : "city.reseed", language)}</Button>
+        <form
+          className="city-seed-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const value = Number(seedDraft.trim());
+            if (!Number.isInteger(value) || value < 1 || value > 4294967295) {
+              setSeedDraft(seed === null ? "" : String(seed));
+              return;
+            }
+            if (value === seed) return;
+            setCitySeed(value)
+              .then((saved) => { engineRef.current?.setSeed(saved); setSeedState(saved); setSeedDraft(String(saved)); })
+              .catch((reason) => setError(String(reason)));
+          }}
+        >
+          <label className="city-seed-label" htmlFor="city-seed-input">{message("city.seed", language)}</label>
+          <input
+            id="city-seed-input"
+            className="city-seed-input"
+            inputMode="numeric"
+            value={seedDraft}
+            title={message("city.seedHint", language)}
+            disabled={!model || cinema !== null}
+            onChange={(event) => setSeedDraft(event.target.value.replace(/[^0-9]/g, ""))}
+            onBlur={() => setSeedDraft(seed === null ? "" : String(seed))}
+          />
+        </form>
         <Button type="button" className="city-cinema-button" onClick={startCinematic} disabled={!model || model.stats.totalSessions === 0 || cinema !== null}>{message("city.cinema.start", language)}</Button>
       </div>
     </ToolbarActions>

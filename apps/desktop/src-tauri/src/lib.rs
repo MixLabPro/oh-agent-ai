@@ -3132,6 +3132,14 @@ fn city_seed_config() -> Result<Value, String> {
     Ok(serde_json::json!({ "status": "ok", "seed": seed, "created": true }))
 }
 
+/// 手动指定种子（城市页的种子输入框，用于检查不同地形下的布局）。落盘后与自动生成的种子同等对待。
+#[tauri::command]
+fn set_city_seed(seed: u32) -> Result<Value, String> {
+    if seed == 0 { return Err("city seed must be a positive integer".to_string()); }
+    write_city_seed(seed)?;
+    Ok(serde_json::json!({ "status": "saved", "seed": seed }))
+}
+
 #[tauri::command]
 fn reset_city_seed() -> Result<Value, String> {
     let previous = read_city_seed()?;
@@ -5178,6 +5186,7 @@ pub fn run() {
             save_ui_language_config,
             city_seed_config,
             reset_city_seed,
+            set_city_seed,
             public_pricing_catalog_status,
             save_public_pricing_catalog_policy,
             update_public_pricing_catalog,

@@ -38,6 +38,19 @@ export function loadCitySeed(): Promise<number> {
   return cached;
 }
 
+/** 手动指定种子（检查不同地形下的布局算法）。 */
+export async function setCitySeed(seed: number): Promise<number> {
+  if (!validSeed(seed)) throw new Error("seed must be an integer between 1 and 4294967295");
+  if (!hasNativeBridge()) {
+    try { window.localStorage.setItem(STORAGE_KEY, String(seed)); } catch { /* ignore */ }
+  } else {
+    const result = await invoke<{ status: string; seed: unknown }>("set_city_seed", { seed });
+    if (result.status !== "saved" || result.seed !== seed) throw new Error("city seed was not saved");
+  }
+  cached = Promise.resolve(seed);
+  return seed;
+}
+
 export async function resetCitySeed(): Promise<number> {
   let seed: number;
   if (!hasNativeBridge()) seed = browserSeed(true);

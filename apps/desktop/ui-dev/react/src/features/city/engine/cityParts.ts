@@ -357,6 +357,7 @@ export class CityParts {
     this.selectRing = this.makeGroundRing("#c96f4a");
 
     this.water = this.buildWater();
+    this.buildGardens();
     this.waterUniforms = (this.water.material as THREE.ShaderMaterial).uniforms as unknown as {
       uTime: { value: number };
       uSun: { value: THREE.Vector3 };
@@ -798,6 +799,100 @@ export class CityParts {
     };
     build(BOX, boxes, "city-public-sites-boxes");
     build(CYLINDER, cylinders, "city-public-sites-cylinders");
+  }
+
+  /** 小区中心花园：草坪 + 湖（与海面同一套水面材质，能映倒影）+ 湖石驳岸 + 假山叠石 + 亭 + 环湖树。 */
+  private buildGardens(): void {
+    const gardens = this.layout.gardens ?? [];
+    if (!gardens.length) return;
+    type Piece = { x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; tilt: number; color: string };
+    const boxes: Piece[] = [];
+    const rocks: Piece[] = [];
+    const cones: Piece[] = [];
+    const trees: Piece[] = [];
+    const waterMaterial = this.water.material as THREE.Material;
+    for (const garden of gardens) {
+      const r = garden.seed;
+      const base = Math.max(0.3, garden.y);
+      const cos = Math.cos(garden.yaw);
+      const sin = Math.sin(garden.yaw);
+      const at = (lx: number, lz: number) => ({ x: garden.x + lx * cos + lz * sin, z: garden.z - lx * sin + lz * cos });
+      const W = garden.width - 3;
+      const D = garden.depth - 3;
+      const lawn = at(0, 0);
+      boxes.push({ x: lawn.x, y: base, z: lawn.z, sx: W, sy: 0.25, sz: D, yaw: garden.yaw, tilt: 0, color: "#7fae6a" });
+      // 湖：偏一侧的椭圆，留出另一侧放亭子。
+      const lakeX = -W * 0.08;
+      const lakeZ = D * 0.04;
+      const rx = W * 0.32;
+      const rz = D * 0.3;
+      const lakeCenter = at(lakeX, lakeZ);
+      const lake = new THREE.Mesh(new THREE.CircleGeometry(1, 40).rotateX(-Math.PI / 2), waterMaterial);
+      lake.position.set(lakeCenter.x, base + 0.3, lakeCenter.z);
+      lake.rotation.y = garden.yaw;
+      lake.scale.set(rx, 1, rz);
+      lake.renderOrder = 1;
+      this.group.add(lake);
+      this.disposables.push(lake.geometry);
+      // 湖石驳岸：一圈大小不一的扁石。
+      for (let index = 0; index < 22; index += 1) {
+        const t = (index / 22) * Math.PI * 2;
+        const jitter = hashSeed(`${garden.id}:bank:${index}`);
+        const q = at(lakeX + Math.cos(t) * (rx + 0.6), lakeZ + Math.sin(t) * (rz + 0.6));
+        const size = 0.9 + jitter * 0.9;
+        rocks.push({ x: q.x, y: base + 0.2, z: q.z, sx: size * 1.3, sy: size * 0.55, sz: size, yaw: jitter * 6.28, tilt: 0, color: jitter > 0.5 ? "#a8a59c" : "#8f8c84" });
+      }
+      // 假山：湖心偏后的一组叠石，越往上越小、略微错位。
+      const hill = at(lakeX + rx * 0.35, lakeZ - rz * 0.25);
+      for (let index = 0; index < 7; index += 1) {
+        const jitter = hashSeed(`${garden.id}:rock:${index}`);
+        const level = index < 3 ? 0 : index < 5 ? 1 : index < 6 ? 2 : 3;
+        const size = (3.2 - level * 0.7) * (0.8 + jitter * 0.4);
+        const off = (jitter - 0.5) * 2.4;
+        rocks.push({ x: hill.x + off, y: base + 0.1 + level * 2.1, z: hill.z + (hashSeed(`${garden.id}:rz:${index}`) - 0.5) * 2.4, sx: size, sy: size * (1.1 + jitter * 0.5), sz: size * 0.85, yaw: jitter * 6.28, tilt: (jitter - 0.5) * 0.4, color: ["#9b978c", "#b3afa4", "#86837b"][index % 3] });
+      }
+      // 亭：四柱 + 方台 + 攒尖顶（宿主强调色），在湖的另一侧。
+      const pavilion = at(W * 0.34, -D * 0.18);
+      const roofColor = new THREE.Color(paletteFor(garden.districtId).accent).lerp(new THREE.Color("#5a3b2c"), 0.35).getStyle();
+      boxes.push({ x: pavilion.x, y: base + 0.25, z: pavilion.z, sx: 5.4, sy: 0.5, sz: 5.4, yaw: garden.yaw, tilt: 0, color: "#d8d1c2" });
+      for (const [dx, dz] of [[-2, -2], [2, -2], [-2, 2], [2, 2]]) {
+        const q = at(W * 0.34 + dx, -D * 0.18 + dz);
+        boxes.push({ x: q.x, y: base + 0.75, z: q.z, sx: 0.35, sy: 3.4, sz: 0.35, yaw: garden.yaw, tilt: 0, color: "#8a3b2e" });
+      }
+      cones.push({ x: pavilion.x, y: base + 4.1, z: pavilion.z, sx: 4.4, sy: 2.6, sz: 4.4, yaw: garden.yaw + Math.PI / 4, tilt: 0, color: roofColor });
+      // 环湖树。
+      for (let index = 0; index < 14; index += 1) {
+        const t = (index / 14) * Math.PI * 2 + r;
+        const q = at(Math.cos(t) * W * 0.44, Math.sin(t) * D * 0.42);
+        const size = 1.4 + hashSeed(`${garden.id}:tree:${index}`) * 0.9;
+        trees.push({ x: q.x, y: base + 0.2, z: q.z, sx: size, sy: size * 1.2, sz: size, yaw: 0, tilt: 0, color: index % 3 === 0 ? "#5f9a55" : "#6fae63" });
+      }
+    }
+    const build = (geometry: THREE.BufferGeometry, pieces: Piece[], name: string) => {
+      if (!pieces.length) return;
+      const material = new THREE.MeshLambertMaterial({ color: "#ffffff", flatShading: true });
+      const mesh = new THREE.InstancedMesh(geometry, material, pieces.length);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      pieces.forEach((piece, index) => {
+        this.positionVector.set(piece.x, piece.y, piece.z);
+        this.euler.set(piece.tilt, piece.yaw, 0);
+        this.quaternion.setFromEuler(this.euler);
+        this.scaleVector.set(piece.sx, piece.sy, piece.sz);
+        this.matrix.compose(this.positionVector, this.quaternion, this.scaleVector);
+        mesh.setMatrixAt(index, this.matrix);
+        mesh.setColorAt(index, this.color.set(piece.color));
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.name = name;
+      this.group.add(mesh);
+      this.disposables.push(geometry, material);
+    };
+    build(BOX.clone(), boxes, "city-garden-boxes");
+    build(new THREE.DodecahedronGeometry(0.6, 0).translate(0, 0.45, 0), rocks, "city-garden-rocks");
+    build(new THREE.ConeGeometry(0.5, 1, 4).translate(0, 0.5, 0), cones, "city-garden-roofs");
+    build(new THREE.IcosahedronGeometry(1, 0).translate(0, 1.4, 0), trees, "city-garden-trees");
   }
 
   /** 学校 / 商场 / 医院：由方块与圆柱拼成，局部坐标按街区朝向旋转。纯装饰，不进拾取。 */

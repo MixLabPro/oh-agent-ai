@@ -836,6 +836,7 @@
       // Shape: apps/desktop/src-tauri/src/lib.rs:1708 statistics_timezone_config (json!).
       case "statistics_timezone_config": return { status: "ok", timezone, system_timezone: timezone };
       case "city_seed_config": return { status: "ok", seed: 1927, created: false };
+      case "set_city_seed": return { status: "saved", seed: args && args.seed };
       case "reset_city_seed": return { status: "saved", seed: (Math.floor(Math.random() * 0xfffffffe) + 1) >>> 0 };
       case "ui_language_config": return { status: "ok", language: uiLanguage, has_preference: hasUiLanguagePreference };
       case "save_ui_language_config": {

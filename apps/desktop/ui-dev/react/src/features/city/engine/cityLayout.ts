@@ -25,6 +25,8 @@ export type DistrictLayout = {
 };
 /** 城市配套：学校 / 商场 / 医院。数量随会话规模增长（每 CIVIC_PER_SESSIONS 个会话一座），
  *  落成时刻 = 城市长到那个规模的时刻——回放时看得见「城市在发展」。纯装饰，不进统计、不可拾取。 */
+/** 小区中心花园：每个宿主城区锚点处预留一个整街区（湖 + 假山 + 亭 + 环湖树），楼从四周向外长。 */
+export type GardenSite = Vec2 & { id: string; districtId: string; blockId: string; y: number; yaw: number; width: number; depth: number; seed: number };
 export type CivicKind = "school" | "mall" | "hospital";
 export type CivicSite = Vec2 & { id: string; kind: CivicKind; districtId: string; parcelId: string; y: number; yaw: number; width: number; depth: number; unlockAt: number };
 export const CIVIC_PER_SESSIONS = 45;
@@ -47,6 +49,7 @@ export type CityLayout = {
   massing: Array<{ districtId: string; x: number; z: number; y: number; count: number; tokens: number; height: number }>;
   /** 海岸外扩环状航道（折线）与两侧装饰远山。 */
   civics: CivicSite[];
+  gardens: GardenSite[];
   boatLoops: Vec2[][]; seaMountains: Array<{ center: Vec2; radius: number; height: number; seed: number }>;
 };
 
@@ -113,6 +116,23 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   // refresh never relocates the city; only new sessions compete for what is
   // left — a late-discovered older session may land slightly outward, which is
   // the honest cost of never moving an existing building.
+  // 小区中心花园：先于会话落楼，按城区排名把锚点处最近的空街区整块预留出来（只看锚点与规划，
+  // 与会话数据无关——确定性不变）。会话楼按「离锚点由近到远」落位，于是自然围着花园生长。
+  const gardenRanked = [...model.districts].sort((a, b) => b.sessionCount - a.sessionCount || (a.id < b.id ? -1 : 1));
+  const gardens: GardenSite[] = [];
+  const gardenBlocks = new Set<string>();
+  gardenRanked.forEach((district, rank) => {
+    if (rank >= plan.districtAnchors.length) return; // 锚点复用的宿主共享同一座花园
+    if (!model.buildings.some((building) => building.districtId === district.id)) return;
+    const anchor = plan.districtAnchors[rank];
+    const block = plan.blocks
+      .filter((candidate) => candidate.parcels.length > 0 && !gardenBlocks.has(candidate.id) && candidate.parcels.every((parcel) => !used.has(parcel.id)))
+      .sort((a, b) => Math.hypot(a.x - anchor.x, a.z - anchor.z) - Math.hypot(b.x - anchor.x, b.z - anchor.z) || a.id.localeCompare(b.id))[0];
+    if (!block) return;
+    gardenBlocks.add(block.id);
+    for (const parcel of block.parcels) used.add(parcel.id);
+    gardens.push({ id: `garden:${district.id}`, districtId: district.id, blockId: block.id, x: block.x, z: block.z, y: plan.terrain.height(block.x, block.z), yaw: block.parcels[0].yaw, width: block.width, depth: block.depth, seed: hashSeed(`garden:${district.id}`) });
+  });
   const pending = model.buildings.filter((building) => !assigned.has(building.id));
   const massing: CityLayout["massing"] = [];
   const anchors = plan.districtAnchors;
@@ -171,7 +191,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     { center: { x: centroid.x + 980, z: centroid.z - 320 }, radius: 120, height: 88, seed: 71 },
     { center: { x: centroid.x - 1020, z: centroid.z + 260 }, radius: 150, height: 108, seed: 37 },
   ];
-  return { ...plan, districts, seed, massing, civics, boatLanes: [], decorMountains: [], boatLoops, seaMountains };
+  return { ...plan, districts, seed, massing, civics, gardens, boatLanes: [], decorMountains: [], boatLoops, seaMountains };
 }
 
 /** 配套选址：会话楼先占地，配套只拿剩下的地块（绝不挤走会话）。
