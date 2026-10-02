@@ -19,7 +19,10 @@ class BirdFlocks {
   private readonly offsets: Array<[number, number]>;
   private daylight = 1;
 
+  private readonly center: { x: number; z: number };
+
   constructor(center: { x: number; z: number }, radius: number) {
+    this.center = { ...center };
     // 鸥形剪影：两片后掠翼 + 尾尖，6 个三角形的扁平 V——航拍距离下读作滑翔的鸟。
     const shape = new THREE.Shape();
     shape.moveTo(-1.7, 0.12); shape.lineTo(-0.5, 0.05); shape.lineTo(0, 0.28);
@@ -29,7 +32,7 @@ class BirdFlocks {
     this.material = new THREE.MeshBasicMaterial({ color: "#343a40", transparent: true, opacity: 0.85, side: THREE.DoubleSide });
     // tinyskies BirdFlock 的 V 位（头鸟在前，两翼逐级后撤）；×3.2 拉到城市尺度。
     this.offsets = [[0, 0], [-0.13, -0.085], [-0.13, 0.085], [-0.26, -0.17], [-0.26, 0.17], [-0.39, -0.25], [-0.39, 0.25]]
-      .map(([back, side]) => [back * 10.5, side * 10.5] as [number, number]);
+      .map(([back, side]) => [back * 30, side * 30] as [number, number]);
     const total = this.offsets.length * 2;
     this.mesh = new THREE.InstancedMesh(geometry, this.material, total);
     this.mesh.name = "city-birds";
@@ -38,8 +41,9 @@ class BirdFlocks {
       const seed = hashSeed(`flock:${index}`);
       this.flocks.push({
         orbit: seed * Math.PI * 2,
-        radius: radius * (1.05 + seed * 0.35),
-        altitude: 78 + seed * 46,
+        // 绕城心、在岛的上空盘旋（曾 1.05–1.4 倍城市半径，几乎都在海上，又绕世界原点而不是城心）。
+        radius: radius * (0.35 + seed * 0.4),
+        altitude: 70 + seed * 50,
         speed: (0.05 + seed * 0.018) * (index === 0 ? 1 : -1),
         phase: seed * 7,
         bob: 0.55 + seed * 0.4,
@@ -67,13 +71,14 @@ class BirdFlocks {
       const angle = flock.orbit + elapsed * flock.speed;
       for (const [back, side] of this.offsets) {
         const along = angle - Math.sign(flock.speed) * back / flock.radius;
-        const x = Math.cos(along) * (flock.radius + side * Math.sin(along));
-        const z = Math.sin(along) * (flock.radius + side * -Math.cos(along));
+        const x = this.center.x + Math.cos(along) * (flock.radius + side * Math.sin(along));
+        const z = this.center.z + Math.sin(along) * (flock.radius + side * -Math.cos(along));
         const flap = Math.sin(elapsed * 7.5 + flock.phase + back * 1.9 + side * 3.1);
         position.set(x, flock.altitude + flap * flock.bob, z);
         euler.set(flap * 0.14, -angle - Math.sign(flock.speed) * Math.PI / 2, flap * 0.22);
         quaternion.setFromEuler(euler);
-        scale.setScalar(0.92 + flap * 0.1);
+        // 翼展 3.4 → ×3：航拍距离下曾只有一两个像素，等于看不见。
+        scale.setScalar(3 * (0.92 + flap * 0.1));
         matrix.compose(position, quaternion, scale);
         this.mesh.setMatrixAt(index, matrix);
         index += 1;
@@ -105,7 +110,9 @@ class MeteorShower {
 
   constructor(private radius: number) {
     // 拉长的锥形流星：头在前、尾渐细，additive 发光。
-    const geometry = new THREE.ConeGeometry(0.9, 26, 5, 1, true).rotateX(Math.PI / 2);
+    // 锥尖朝后（-z）、宽口在前并平移到原点：lookAt 让 +z 指向速度方向后，亮头在前、细尾拖在后面。
+    // 曾 rotateX(+π/2) 让锥尖朝前，且每帧 lookAt 之后又补一次 rotateX——尾巴横着甩（用户反馈「尾巴方向不对」）。
+    const geometry = new THREE.ConeGeometry(0.9, 26, 5, 1, true).rotateX(-Math.PI / 2).translate(0, 0, -13);
     this.material = new THREE.MeshBasicMaterial({ color: "#fff3d2", transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, fog: false, toneMapped: false });
     for (let index = 0; index < 3; index += 1) {
       const mesh = new THREE.Mesh(geometry, this.material);
@@ -165,7 +172,6 @@ class MeteorShower {
       const fade = Math.sin(age * Math.PI);
       meteor.mesh.scale.setScalar(0.5 + fade * 0.8);
       meteor.mesh.lookAt(meteor.mesh.position.clone().add(meteor.velocity));
-      meteor.mesh.rotateX(Math.PI / 2);
     }
   }
 
@@ -192,12 +198,16 @@ class VolcanoPlume {
     // buildSeaMountains 的锥中心在 y=0，峰值在 height/2。
     this.crater = new THREE.Vector3(mountain.center.x, mountain.height / 2, mountain.center.z);
     const geometry = new THREE.SphereGeometry(1, 7, 6);
-    this.material = new THREE.MeshLambertMaterial({ color: "#c9ced2", transparent: true, opacity: 0.4, depthWrite: false });
+    // 更淡、略深的灰：0.4 不透明度的浅色球读作一串实心雪球（拍照实测），烟要能透出后面的天空。
+    this.material = new THREE.MeshLambertMaterial({ color: "#aeb4b9", transparent: true, opacity: 0.22, depthWrite: false });
     this.puffs = new THREE.InstancedMesh(geometry, this.material, 11);
     this.puffs.name = "city-volcano-plume";
     for (let index = 0; index < 11; index += 1) {
-      this.ages.push(hashSeed(`puff:${index}`) * 9);
-      this.spans.push(7 + hashSeed(`puffspan:${index}`) * 5);
+      // 相位按序号均分（再加小抖动）：曾全用 hashSeed(`puff:${i}`)——末位数字不同的字符串哈希几乎相同，
+      // 11 团同龄同寿命、永远叠成一个灰球。
+      const span = 8 + (index % 4) * 1.3 + hashSeed(`puffspan:${index}`) * 0.6;
+      this.spans.push(span);
+      this.ages.push(((index / 11) + hashSeed(`puff:${index}`) * 0.04) * span);
     }
     this.glowMaterial = new THREE.MeshBasicMaterial({ color: "#ff5a2e", transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, fog: false, toneMapped: false });
     this.glow = new THREE.Mesh(new THREE.SphereGeometry(4.5, 8, 6), this.glowMaterial);
@@ -210,7 +220,7 @@ class VolcanoPlume {
   }
 
   reset(): void {
-    for (let index = 0; index < this.ages.length; index += 1) this.ages[index] = hashSeed(`puff:${index}`) * 9;
+    for (let index = 0; index < this.ages.length; index += 1) this.ages[index] = ((index / 11) + hashSeed(`puff:${index}`) * 0.04) * this.spans[index];
   }
 
   update(dt: number): void {
@@ -218,13 +228,18 @@ class VolcanoPlume {
     const position = new THREE.Vector3();
     const scale = new THREE.Vector3();
     for (let index = 0; index < this.ages.length; index += 1) {
-      this.ages[index] += dt;
-      if (this.ages[index] > this.spans[index]) this.ages[index] = 0;
+      // 取模而不是归零：一次长帧（后台标签页/首帧）会让所有烟团同时越过寿命、一起归零，
+      // 之后 11 团永远叠成一个灰球（实测 10 团位置几乎重合）。取模保留各自的相位。
+      this.ages[index] = (this.ages[index] + Math.min(dt, 0.5)) % this.spans[index];
       const age = this.ages[index] / this.spans[index];
       const rise = age * 58;
       position.copy(this.crater).addScaledVector(this.wind, age * this.spans[index]);
       position.y += rise;
-      const size = 3.5 + age * 13;
+      // 每团各自的侧向漂移（不再沿同一条直线叠成一串），越往上越大、越散。
+      const drift = Math.sin(index * 2.399) * age * 14;
+      position.x += drift * 0.8;
+      position.z += Math.cos(index * 2.399) * age * 14 * 0.8;
+      const size = 4 + age * 21;
       scale.set(size, size * 0.8, size);
       matrix.compose(position, new THREE.Quaternion(), scale);
       this.puffs.setMatrixAt(index, matrix);

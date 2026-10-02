@@ -2163,7 +2163,7 @@ export class CityParts {
           vec3 view = normalize(cameraPosition - vWorld);
           float fresnel = pow(1.0 - max(dot(n, view), 0.0), 2.4);
           vec3 base = mix(uShallow, uDeep, clamp(length(p) / 420.0, 0.0, 1.0));
-          vec3 skyColor = uHasAssets > 0.5 ? skyAt(reflect(-view, n)) : uSky;
+          vec3 skyColor = uHasAssets > 0.5 ? mix(skyAt(reflect(-view, n)), uSky, uNight) : uSky; // 夜里不再倒映晚霞照片
           if (uHasMirror > 0.5) {
             // 镜像贴图按投影坐标采样，再用波纹法线扰动：倒影随水波轻晃而不是一面硬镜子。
             vec4 projected = uMirrorMatrix * vec4(vWorld, 1.0);
@@ -2220,6 +2220,9 @@ export class CityParts {
             vec3 horizonDir = normalize(vec3(vWorld.x - cameraPosition.x, 0.0, vWorld.z - cameraPosition.z));
             fogColor = skyAt(horizonDir + vec3(0.0, 0.01, 0.0));
           }
+          // 夜里远海淡出到夜雾色：skyAt 采样的是黄昏照片，天穹入夜后换成渐变，水面却一直淡出到照片里的
+          // 晚霞——23 点远海一整条粉红光带（用户截图「光照污染」）。
+          fogColor = mix(fogColor, uSky, uNight); // uSky 每个 tick 按当前档位的雾色更新；uFog 是主题常量（迈阿密的晚霞橙），夜里不能用
           gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, smoothstep(uFogRange.x, uFogRange.y, dist));
           #include <colorspace_fragment>
         }

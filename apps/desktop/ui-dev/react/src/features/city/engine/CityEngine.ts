@@ -601,6 +601,8 @@ export class CityEngine {
         uSkyDim: { value: 1 },
         // 夜晚混合量（0 = 照片天空，1 = 夜空渐变 + 星点）：夜里不再用压暗的黄昏照片。
         uNight: { value: 0 },
+        // 阴天程度：照片天空也要变灰（曾只改渐变色，而照片会整个盖住渐变——阴天和雨天的天空照样晴朗）。
+        uOvercast: { value: 0 },
       },
       vertexShader: /* glsl */ `
         varying vec3 vDirection;
@@ -624,6 +626,7 @@ export class CityEngine {
         uniform float uStars;
         uniform float uSkyDim;
         uniform float uNight;
+        uniform float uOvercast;
         varying vec3 vDirection;
         void main() {
           vec3 dir = normalize(vDirection);
@@ -647,6 +650,8 @@ export class CityEngine {
           // 夜里整张照片天空换成渐变：照片会整个覆盖渐变（夜预设的深蓝从来显示不出来），
           // 压暗的黄昏照片在 20:00 是灰白雾、23:00 仍是橙色日落（用户截图）。
           color = mix(color, gradient, uNight);
+          float skyLuma = dot(color, vec3(0.299, 0.587, 0.114));
+          color = mix(color, vec3(skyLuma) * vec3(0.9, 0.93, 0.97), uOvercast);
           // 程序星点：方向量化到球面网格，每格 hash 决定有无星；只在上半天空。放在最后，照片/渐变都看得见。
           if (uStars > 0.01) {
             vec3 cell = floor(dir * 190.0);
@@ -955,6 +960,8 @@ export class CityEngine {
     this.rain.setAmount(state.kind === "rain" ? state.intensity * 0.8 : 0);
     const azimuth = Math.atan2(this.sun.position.z - this.cityCenter.z, this.sun.position.x - this.cityCenter.x);
     this.rainbow.set(state.rainbow, azimuth, this.cityCenter, Math.max(240, this.boundsRadius * 0.85));
+    const domeUniforms = (this.skyDome?.material as THREE.ShaderMaterial | undefined)?.uniforms;
+    if (domeUniforms) domeUniforms.uOvercast.value = Math.min(0.85, overcast * 0.85);
     if (overcast <= 0.001 && state.rainbow <= 0.001) return;
     const greySky = new THREE.Color("#9aa3ab");
     const greyFog = new THREE.Color("#aeb6bc");
@@ -1000,6 +1007,7 @@ export class CityEngine {
     const night = 1 - Math.min(1, Math.max(0, (sky.sunIntensity - 0.32) / (0.95 - 0.32)));
     skyUniforms.uNight.value = night * night * (3 - 2 * night);
     this.parts?.setNightWater(skyUniforms.uNight.value);
+    skyUniforms.uOvercast.value = 0; // applyWeather 随后再按当天天气写入：每个 tick 先归零，不累积
     (this.scene.background as THREE.Color).set(sky.fog);
     const fog = this.scene.fog;
     if (fog && fog instanceof THREE.Fog) {

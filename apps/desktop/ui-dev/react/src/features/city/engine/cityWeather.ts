@@ -54,22 +54,29 @@ export class RainOverlay {
         uniform float uAmount;
         uniform float uAspect;
         varying vec2 vUv;
-        float layer(vec2 uv, float scale, float speed, float slant) {
-          vec2 p = vec2(uv.x * uAspect * scale + uv.y * slant, uv.y * scale);
-          p.y += uTime * speed;
+        float h1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
+        // 一层雨丝：细长、略斜的线段。曾是「格宽一半 × 格高 0.2–0.4」的方块且严格居中在固定列上、
+        // 同层同速——画面上是一排排整齐的白方块（用户：「这是下雪吗？」）。
+        // 现在：每列各自的下落速度与相位；每滴各自的横向偏移、长度、有无；线宽只占格宽的 ~7%。
+        float layer(vec2 uv, float scale, float speed, float slant, float seed) {
+          vec2 p = vec2(uv.x * uAspect * scale + uv.y * slant, uv.y * scale * 0.22);
           float column = floor(p.x);
-          float rnd = fract(sin(column * 127.1) * 43758.5453);
-          float across = abs(fract(p.x) - 0.5) * 2.0;
-          float y = fract(p.y + rnd * 7.0);
-          float len = 0.18 + rnd * 0.22;
-          float shape = smoothstep(0.0, 0.25, y) * smoothstep(len, len - 0.12, y) * smoothstep(0.55, 0.1, across);
-          return shape * step(0.8, rnd);
+          float colSpeed = 0.7 + 0.6 * h1(column + seed * 3.1);
+          p.y += uTime * speed * colSpeed + h1(column * 1.7 + seed) * 11.0;
+          float cell = floor(p.y);
+          float drop = h1(column * 13.1 + cell * 7.7 + seed);
+          float offset = (h1(column * 5.3 + cell * 3.3 + seed + 1.9) - 0.5) * 0.7;
+          float across = abs(fract(p.x) - 0.5 - offset);
+          float y = fract(p.y);
+          float len = 0.3 + drop * 0.4;
+          float shape = smoothstep(0.0, 0.12, y) * smoothstep(len, len - 0.15, y) * (1.0 - smoothstep(0.012, 0.04, across));
+          return shape * step(0.5, drop);
         }
         void main() {
-          float rain = layer(vUv, 20.0, 9.0, 0.32) * 0.5
-                     + layer(vUv, 34.0, 13.0, 0.42) * 0.34
-                     + layer(vUv, 54.0, 17.0, 0.5) * 0.22;
-          gl_FragColor = vec4(0.72, 0.78, 0.86, rain * uAmount);
+          float rain = layer(vUv, 26.0, 8.0, 0.32, 0.0) * 0.55
+                     + layer(vUv, 44.0, 11.0, 0.42, 17.0) * 0.4
+                     + layer(vUv, 70.0, 14.0, 0.5, 41.0) * 0.28;
+          gl_FragColor = vec4(0.86, 0.9, 0.96, min(1.0, rain * uAmount * 1.4));
         }`,
     });
     this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
@@ -93,10 +100,12 @@ export class RainOverlay {
     if (!this.mesh.visible) return;
     this.uniforms.uTime.value = elapsed;
     void dt;
-    const half = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * 1.4;
+    // 四边形必须在近裁剪面之外：曾放在相机前 1.4，而相机 near = 1.5，雨丝层永远被裁掉——雨天从来没下过雨。
+    const distance = Math.max(3, camera.near * 2);
+    const half = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * distance;
     this.mesh.scale.set(half * 2 * camera.aspect, half * 2, 1);
     this.mesh.quaternion.copy(camera.quaternion);
-    this.mesh.position.copy(camera.position).addScaledVector(this.forward.set(0, 0, -1).applyQuaternion(camera.quaternion), 1.4);
+    this.mesh.position.copy(camera.position).addScaledVector(this.forward.set(0, 0, -1).applyQuaternion(camera.quaternion), distance);
   }
 
   private readonly forward = new THREE.Vector3();
