@@ -22,3 +22,17 @@ encoding — no `.hdr` file is shipped.
 | `facade-banded.jpg` | `Facade006` (1K color) | ambientCG | CC0 1.0 | 512 q78 |
 | `stucco-normal.jpg` | `PaintedPlaster006` (1K normal GL; color map not used) | ambientCG | CC0 1.0 | 512 q78 |
 | `water-normal.jpg` | `examples/textures/waternormals.jpg` | three.js — github.com/mrdoob/three.js | MIT (three.js authors) | 512 q80 |
+
+## Flora (`flora/`)
+
+Twenty low-poly vegetation models from **Kenney Nature Kit 2.1** (kenney.nl, "Created/distributed by Kenney",
+License: Creative Commons Zero, CC0 — per the kit's `License.txt`). Copied unmodified as `.glb`; colour variants
+(cherry pink, maple red) are applied at runtime, not baked into the files.
+
+| File | Biome use |
+| --- | --- |
+| `flora/tree_palm.glb`, `flora/tree_palmBend.glb`, `flora/tree_palmTall.glb`, `flora/tree_palmDetailedShort.glb`, `flora/plant_bushLarge.glb` | tropical |
+| `flora/tree_oak.glb`, `flora/tree_default.glb`, `flora/tree_detailed.glb`, `flora/tree_fat.glb`, `flora/plant_bush.glb` | temperate |
+| `flora/tree_pineRoundA.glb`, `flora/tree_pineTallA_detailed.glb`, `flora/tree_pineDefaultA.glb`, `flora/tree_cone_dark.glb` | boreal / highland |
+| `flora/tree_plateau.glb`, `flora/tree_thin.glb`, `flora/plant_bushTriangle.glb` | savanna |
+| `flora/tree_default_fall.glb`, `flora/tree_simple_fall.glb`, `flora/tree_tall.glb` | east-asian garden |

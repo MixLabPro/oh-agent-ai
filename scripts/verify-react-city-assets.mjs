@@ -9,14 +9,14 @@ import { fileURLToPath } from "node:url";
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dir = path.join(repo, "apps/desktop/ui-dev/react/src/features/city/assets");
 const BUDGET = 5 * 1024 * 1024;
-const files = fs.readdirSync(dir).filter((name) => !name.startsWith("."));
+const files = fs.readdirSync(dir, { recursive: true }).map(String).filter((name) => !path.basename(name).startsWith(".") && fs.statSync(path.join(dir, name)).isFile());
 const licenses = fs.readFileSync(path.join(dir, "LICENSES.md"), "utf8");
 let total = 0;
 for (const name of files) {
   const size = fs.statSync(path.join(dir, name)).size;
   total += size;
   if (name === "LICENSES.md" || name.endsWith(".d.ts")) continue;
-  assert(/\.(jpg|png|webp)$/.test(name), `${name}: only compressed images belong here (no .hdr/.exr/.zip)`);
+  assert(/\.(jpg|png|webp|glb)$/.test(name), `${name}: only compressed images and .glb models belong here (no .hdr/.exr/.zip/.fbx)`);
   assert(size <= 400 * 1024, `${name}: ${(size / 1024).toFixed(0)} KB exceeds the 400 KB per-file cap`);
   // 登记可以是完整文件名，也可以是「-color.jpg / -normal.jpg」成对写法的前缀。
   const stem = name.replace(/-(color|normal)\.jpg$/, "");
