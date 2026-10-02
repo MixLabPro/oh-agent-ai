@@ -36,7 +36,10 @@ function smootherstep(x: number): number {
   return t * t * t * (t * (t * 6 - 15) + 10);
 }
 
-export function planCinematic(layout: CityLayout, model: CityModel, heights: Map<string, { x: number; z: number; height: number; ground: number }>): CinematicPlan {
+export type CinematicCut = "full" | "short";
+
+/** cut="short"：只飞最高楼附近约 125° 的一段弧线（开场推近 → 绕向最高楼 → 拉升），适合分享的 30–45 秒版。 */
+export function planCinematic(layout: CityLayout, model: CityModel, heights: Map<string, { x: number; z: number; height: number; ground: number }>, options: { cut?: CinematicCut } = {}): CinematicPlan {
   const { left, right, north, south } = layout.urbanBounds;
   const cx = (left + right) / 2;
   const cz = (north + south) / 2;
@@ -70,7 +73,11 @@ export function planCinematic(layout: CityLayout, model: CityModel, heights: Map
   }).sort((a, b) => a.angle - b.angle);
   const ordered = stops.map((stop) => stop.district);
   // 起点方位：第一个城区之前 0.6 rad（从它前方的海上飞进来），然后逆时针一圈。
-  const phi0 = stops.length ? stops[0].angle - 0.6 : 0;
+  const heroAngle = Math.atan2(hero.z - center.z, hero.x - center.x);
+  const short = options.cut === "short" && hero.height > 30;
+  const sweepSpan = short ? 1.4 : Math.PI * 2;
+  const lead = short ? 0.4 : 1; // 开场推近 / 收尾拉升的距离系数：短版压缩
+  const phi0 = short ? heroAngle - 0.9 : stops.length ? stops[0].angle - 0.6 : 0;
   const unwrap = (angle: number) => { let a = angle; while (a < phi0) a += Math.PI * 2; while (a >= phi0 + Math.PI * 2) a -= Math.PI * 2; return a; };
   const stopAngles = stops.map((stop) => unwrap(stop.angle));
   const angularGap = (a: number, b: number) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
@@ -125,28 +132,30 @@ export function planCinematic(layout: CityLayout, model: CityModel, heights: Map
 
   // 1. 远海推近：沿起点方位从海上高空压向城市。
   const dir0 = { x: Math.cos(phi0), z: Math.sin(phi0) };
-  push([center.x + dir0.x * (cruiseRadius + span * 0.75), span * 0.42, center.z + dir0.z * (cruiseRadius + span * 0.75)], [center.x, 0, center.z]);
-  push([center.x + dir0.x * (cruiseRadius + span * 0.3), span * 0.2, center.z + dir0.z * (cruiseRadius + span * 0.3)], [center.x, 0, center.z]);
+  push([center.x + dir0.x * (cruiseRadius + span * 0.75 * lead), span * 0.42, center.z + dir0.z * (cruiseRadius + span * 0.75 * lead)], [center.x, 0, center.z]);
+  push([center.x + dir0.x * (cruiseRadius + span * 0.3 * lead), span * 0.2, center.z + dir0.z * (cruiseRadius + span * 0.3 * lead)], [center.x, 0, center.z]);
 
   // 2. 绕岛一圈：每 18° 一个控制点；离城区方位最近的那个控制点挂字卡。
   const STEP = Math.PI / 10;
   const cardAt = new Map<number, number>();
   // 两个城区方位很近时会落到同一个控制点：后来的顺延到下一个空控制点（每个宿主都要有自己的字卡）。
   stopAngles.forEach((angle, index) => {
+    if (angle - phi0 > sweepSpan) return; // 短版只覆盖弧线内的城区
     let slot = Math.round((angle - phi0) / STEP);
-    while (cardAt.has(slot) && slot < 20) slot += 1;
+    while (cardAt.has(slot) && slot < Math.round(sweepSpan / STEP)) slot += 1;
     cardAt.set(slot, index);
   });
-  for (let i = 0; i <= 20; i += 1) {
+  const steps = Math.round(sweepSpan / STEP);
+  for (let i = 0; i <= steps; i += 1) {
     const point = orbitPoint(phi0 + i * STEP);
     push(point.pos, point.look, cardAt.get(i));
   }
 
   // 3. 拉升收尾：沿终点方位后退并升到全景。
-  const phi1 = phi0 + Math.PI * 2;
+  const phi1 = phi0 + sweepSpan;
   const dir1 = { x: Math.cos(phi1 + 0.3), z: Math.sin(phi1 + 0.3) };
-  push([center.x + dir1.x * (cruiseRadius + span * 0.35), span * 0.42, center.z + dir1.z * (cruiseRadius + span * 0.35)], [center.x, 0, center.z]);
-  push([center.x + dir1.x * (cruiseRadius + span * 0.7), span * 0.62, center.z + dir1.z * (cruiseRadius + span * 0.7)], [center.x, 10, center.z]);
+  push([center.x + dir1.x * (cruiseRadius + span * 0.35 * lead), span * 0.42, center.z + dir1.z * (cruiseRadius + span * 0.35 * lead)], [center.x, 0, center.z]);
+  push([center.x + dir1.x * (cruiseRadius + span * 0.7 * lead), span * 0.62, center.z + dir1.z * (cruiseRadius + span * 0.7 * lead)], [center.x, 10, center.z]);
 
   // 几何兜底：路线由布局推导，换地形总可能出现掉头。水平航向转弯超过 115° 时：
   // 不带字卡的过渡帧直接删掉；带字卡的城区机位沿转弯外侧角平分线外推（每次 30，最多 10 次），
@@ -199,7 +208,8 @@ export function planCinematic(layout: CityLayout, model: CityModel, heights: Map
     const point = positionCurve.getPointAt(Math.min(1, Math.max(0, u)));
     return Math.max(12, point.y - groundAt(point.x, point.z));
   };
-  const OMEGA = Number((globalThis as { __CITY_CINE_OMEGA__?: number }).__CITY_CINE_OMEGA__ ?? 0.55);
+  // 短版略快（0.62 rad/s）：分享片 30–45 秒；视觉速度仍低于守卫的 0.7 上限。
+  const OMEGA = Number((globalThis as { __CITY_CINE_OMEGA__?: number }).__CITY_CINE_OMEGA__ ?? (short ? 0.62 : 0.55));
   const MIN_SPEED = 9; // 单位/秒：起落之外最慢也在动
   const MAX_SPEED = 120; // 高空全景也不允许飞得比这快
   const RAMP_SECONDS = 3; // 起飞/降落各自的加减速时长（按距离折算）

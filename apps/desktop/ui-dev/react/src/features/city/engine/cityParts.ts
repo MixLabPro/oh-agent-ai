@@ -60,6 +60,9 @@ type BuildingRuntime = {
 type CarPath = { points: Vec2[]; cumulative: number[]; total: number; y: number; terrain: TerrainField | null };
 type Car = { path: CarPath; distance: number; speed: number };
 
+/** 每块立面平铺里的窗格数（列 × 行）：与 makeFacadeTexture 画的窗格对齐，亮灯按窗格取 hash。 */
+const FACADE_GRIDS: Array<[number, number]> = [[5, 4], [1, 4], [4, 4], [1, 2]];
+
 type FacadeUniforms = {
   uRows: { value: number };
   uPhoto: { value: number };
@@ -67,6 +70,9 @@ type FacadeUniforms = {
   uPhotoRows: { value: number };
   uTileWidth: { value: number };
   uSelfLit: { value: number };
+  /** 夜里亮窗：0 = 全灭，≈1 = 夜档（每扇窗按 hash 决定亮不亮，只发光窗格、墙面不发光）。 */
+  uWindowGlow: { value: number };
+  uGrid: { value: THREE.Vector2 };
   /** 玻璃反射：天空全景（与天空球、水面同一张图、同一套调色），只作用在窗格上。 */
   uEnv: { value: THREE.Texture | null };
   uEnvStrength: { value: number };
@@ -95,9 +101,10 @@ function facadeMaterial(map: THREE.Texture, uniforms: FacadeUniforms, key: strin
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
-      .replace("#include <common>", "#include <common>\nattribute float aFloors;\nuniform float uRows;\nuniform float uPhotoRows;\nuniform float uTileWidth;\nvarying vec2 vPhotoUv;\nvarying vec3 vFacadeWorld;\nvarying vec3 vFacadeNormal;")
+      .replace("#include <common>", "#include <common>\nattribute float aFloors;\nuniform float uRows;\nuniform float uPhotoRows;\nuniform float uTileWidth;\nvarying vec2 vPhotoUv;\nvarying vec3 vFacadeWorld;\nvarying vec3 vFacadeNormal;\nvarying float vBuildSeed;")
       .replace("#include <project_vertex>", `#include <project_vertex>
 vFacadeWorld = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;
+vBuildSeed = fract(sin(dot(instanceMatrix[3].xz, vec2(12.9898, 78.233))) * 43758.5453);
 // 盒子的面法线是轴向的：经实例矩阵（只有 yaw + 缩放）变换后归一化即为世界法线。
 vFacadeNormal = normalize(mat3(modelMatrix) * mat3(instanceMatrix) * objectNormal);`)
       // 照片 UV 横向按「这个面的真实宽度 / 一块照片的宽度」平铺。宽度从实例矩阵读：
@@ -123,7 +130,11 @@ uniform float uSkyYaw;
 varying vec2 vPhotoUv;
 varying vec3 vFacadeWorld;
 varying vec3 vFacadeNormal;
+varying float vBuildSeed;
+uniform float uWindowGlow;
+uniform vec2 uGrid;
 float facadeWindow = 0.0;
+float cellHash(vec2 c, float s) { return fract(sin(dot(c, vec2(127.1, 311.7)) + s * 91.7) * 43758.5453); }
 vec3 facadeSky(vec3 dir) {
   dir = normalize(dir);
   vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5 + uSkyYaw, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
@@ -141,7 +152,17 @@ vec3 facadeSky(vec3 dir) {
     diffuseColor.rgb *= mix(0.8 + 0.45 * smoothstep(0.03, 0.5, l), 1.0, facadeWindow);
   }
 #endif`)
-      .replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\ntotalEmissiveRadiance += diffuseColor.rgb * uSelfLit;")
+      .replace("#include <emissivemap_fragment>", `#include <emissivemap_fragment>
+totalEmissiveRadiance += diffuseColor.rgb * uSelfLit;
+// 夜里亮窗：只有窗格发光，每扇窗按 (楼, 窗格) hash 决定亮不亮，暖黄/冷白两种灯色；墙面保持暗。
+// 曾把 uSelfLit 抬到 0.58 作用在整个立面颜色上——墙和窗一起发光，整栋楼是一块奶白色的纸盒。
+if (uWindowGlow > 0.02) {
+  vec2 cell = floor(vec2(vMapUv.x * uGrid.x, vMapUv.y * uGrid.y));
+  float on = step(cellHash(cell, vBuildSeed), (0.28 + 0.5 * vBuildSeed) * smoothstep(0.1, 0.95, uWindowGlow));
+  float warm = step(0.35, cellHash(cell + 17.0, vBuildSeed));
+  vec3 lamp = mix(vec3(0.62, 0.8, 1.0), vec3(1.0, 0.72, 0.36), warm);
+  totalEmissiveRadiance += lamp * facadeWindow * on * uWindowGlow * 2.3;
+}`)
       // 光照算完之后再混反射：玻璃的颜色主要来自它映出的天空，不受漫反射光的明暗支配。
       .replace("#include <opaque_fragment>", `if (uEnvStrength > 0.0) {
   vec3 viewDir = normalize(vFacadeWorld - cameraPosition);
@@ -189,6 +210,9 @@ function samplePolyline(path: CarPath, distance: number): { x: number; z: number
 /** 静态城（只依赖 seed 的部分：地形/基建/高架/公共设施/地标/远山/树/水面/
  *  车/船/云/花园）。模块级缓存——数据刷新重建时整段复用，重建成本只剩建筑层；
  *  只保留最近一个 seed（换岛时旧静态城整体释放）。 */
+/** 夜间照明：路灯灯头（自发光）、地面光斑（加色）、高架灯带。亮度由 setNightGlow 统一驱动。 */
+type NightLights = { heads: THREE.MeshBasicMaterial; pools: THREE.MeshBasicMaterial; strips: THREE.MeshBasicMaterial; neon: THREE.MeshBasicMaterial };
+
 type StaticCity = {
   seed: number;
   layout: CityLayout;
@@ -202,6 +226,11 @@ type StaticCity = {
   boats: Array<{ path: CarPath; distance: number; speed: number; phase: number }>;
   cloudMesh: THREE.InstancedMesh;
   clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }>;
+  /** 缓存命中时新实例上这些字段是空的（它们在静态构建里赋值）：地面素材/水面倒影与夜间开关/摩天轮旋转/夜间灯光都要随缓存带回。 */
+  terrainUniforms: Record<string, { value: unknown }> | null;
+  waterAssetUniforms: Record<string, { value: unknown }> | null;
+  landmarkSpinners: Array<{ object: THREE.Object3D; axis: "x" | "y" | "z"; speed: number }>;
+  nightLights: NightLights | null;
 };
 let staticCityCache: StaticCity | null = null;
 
@@ -224,12 +253,13 @@ export class CityParts {
   private readonly roofProfiles: THREE.InstancedMesh[] = [];
   private readonly gardenTreeMesh: THREE.InstancedMesh;
   /** 城市配套（学校/商场/医院）：每个部件记住所属配套与「满高」矩阵参数，按落成进度纵向长出来。 */
-  private civicPieces: Array<{ civic: number; mesh: 0 | 1; index: number; x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; baseY: number }> = [];
+  private civicPieces: Array<{ civic: number; mesh: 0 | 1 | 2; index: number; x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; baseY: number }> = [];
   private civicMeshes: THREE.InstancedMesh[] = [];
   private civicProgress: number[] = [];
   private civicTarget: number[] = [];
   private heroParts: { spire: THREE.Mesh; rings: THREE.Mesh[]; beam: THREE.Mesh | null } | null = null;
   private readonly decoCornerMesh: THREE.InstancedMesh;
+  private nightLights: NightLights | null = null;
   private terrainUniforms: Record<string, { value: unknown }> | null = null;
   private waterAssetUniforms: Record<string, { value: unknown }> | null = null;
   /** 屋顶霓虹描边：比屋顶略大的自发光薄板，露出的一圈即霓虹；仅日落主题。 */
@@ -281,6 +311,7 @@ export class CityParts {
       this.buildTerrain();
       this.buildInfrastructure();
       this.buildDistrictExpressways();
+      this.nightLights = this.buildNightLights();
       this.buildPublicSites();
       this.buildCivics();
       this.buildLandmarks();
@@ -307,6 +338,10 @@ export class CityParts {
         boats: boatResult.boats,
         cloudMesh: this.cloudMesh,
         clouds: cloudResult.clouds,
+        terrainUniforms: this.terrainUniforms,
+        waterAssetUniforms: this.waterAssetUniforms,
+        landmarkSpinners: this.landmarkSpinners,
+        nightLights: this.nightLights,
       };
       staticCityCache = staticCity;
       // this.group 曾是静态组：让位给动态组，静态组挂为其子节点。
@@ -322,6 +357,10 @@ export class CityParts {
     this.cars = staticCity.cars;
     this.boats = staticCity.boats;
     this.clouds = staticCity.clouds;
+    this.terrainUniforms = staticCity.terrainUniforms;
+    this.waterAssetUniforms = staticCity.waterAssetUniforms;
+    this.landmarkSpinners = staticCity.landmarkSpinners;
+    this.nightLights = staticCity.nightLights;
     this.waterUniforms = (this.water.material as THREE.ShaderMaterial).uniforms as unknown as {
       uTime: { value: number };
       uSun: { value: THREE.Vector3 };
@@ -360,7 +399,9 @@ export class CityParts {
         uPhotoTex: { value: null },
         uPhotoRows: { value: 1 },
         uTileWidth: { value: 1 },
-        uSelfLit: { value: activeTheme().name === "vice" ? 0.24 : 0.05 },
+        uSelfLit: { value: 0.24 },
+        uWindowGlow: { value: 0 },
+        uGrid: { value: new THREE.Vector2(...(FACADE_GRIDS[variant] ?? [4, 4])) },
         uEnv: { value: null },
         uEnvStrength: { value: 0 },
         uGradeTop: { value: new THREE.Color(activeTheme().skyGrade.top) },
@@ -393,7 +434,7 @@ export class CityParts {
     const spire = new THREE.ConeGeometry(0.5, 1, 4, 1).rotateY(Math.PI / 4).translate(0, 0.5, 0);
     const profileGeometries = [pitched, spire, BOX, BOX];
     profileGeometries.forEach((geometry, index) => {
-      const mesh = this.makeInstanced(geometry, selfLitMaterial(activeTheme().name === "vice" ? 0.18 : 0.04), total);
+      const mesh = this.makeInstanced(geometry, selfLitMaterial(0.18), total);
       mesh.castShadow = true;
       mesh.name = `city-roof-profile-${index + 1}`;
       this.roofProfiles.push(mesh);
@@ -401,8 +442,8 @@ export class CityParts {
     this.gardenTreeMesh = this.makeInstanced(new THREE.IcosahedronGeometry(1, 0).translate(0, 1, 0), new THREE.MeshLambertMaterial({ color: activeTheme().foliage }), total * 3);
     this.gardenTreeMesh.castShadow = true;
     const decoCount = facadeCounts[3] + 4;
-    this.decoTrimMesh = this.makeInstanced(BOX, selfLitMaterial(activeTheme().name === "vice" ? 0.24 : 0.05), decoCount * 2);
-    this.decoCornerMesh = this.makeInstanced(CYLINDER, selfLitMaterial(activeTheme().name === "vice" ? 0.24 : 0.05), decoCount);
+    this.decoTrimMesh = this.makeInstanced(BOX, selfLitMaterial(0.24), decoCount * 2);
+    this.decoCornerMesh = this.makeInstanced(CYLINDER, selfLitMaterial(0.24), decoCount);
     this.podiumMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#e8e2d5" }), total);
     this.roofMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#ffffff" }), total);
     this.neonMesh = this.makeInstanced(BOX, new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false }), total);
@@ -535,6 +576,17 @@ export class CityParts {
     if (matrix) (this.waterAssetUniforms.uMirrorMatrix.value as THREE.Matrix4).copy(matrix);
   }
 
+  setNightWater(night: number): void {
+    if (this.waterAssetUniforms) this.waterAssetUniforms.uNight.value = night;
+  }
+
+  /** 昼夜天空混合量（0 = 黄昏/夜，1 = 白天）：水面与玻璃反射的粉紫调色量随白天程度衰减。 */
+  setSkyMix(dayMix: number): void {
+    const amount = activeTheme().skyGrade.amount * (1 - dayMix);
+    if (this.waterAssetUniforms) this.waterAssetUniforms.uGradeAmount.value = amount;
+    for (const uniforms of this.facadeUniforms) uniforms.uGradeAmount.value = amount;
+  }
+
   /** 素材到齐后原地换上：地面细节、照片立面、灰泥法线、水面法线与天空反射。 */
   applyAssets(assets: CityAssets): void {
     const theme = activeTheme();
@@ -576,7 +628,8 @@ export class CityParts {
     });
     // 玻璃反射强度按立面：市中心玻璃幕墙最强，商业楼窗户次之，住宅与海滨灰泥楼的窗只带一点。
     const envStrength = [0.3, 0.7, 0.9, 0.3];
-    const sky = theme.skyImage === "dusk" ? assets.sky.dusk : assets.sky.day;
+    // 反射一律用白天照片：黄昏的粉紫由 uGradeAmount 叠加（见 setSkyMix），白天不染色——和天穹的混合保持一致。
+    const sky = assets.sky.day;
     this.facadeUniforms.forEach((uniforms, variant) => {
       uniforms.uEnv.value = sky;
       uniforms.uEnvStrength.value = envStrength[variant] ?? 0;
@@ -589,7 +642,7 @@ export class CityParts {
     }
     if (this.waterAssetUniforms) {
       this.waterAssetUniforms.uNormal.value = assets.waterNormal;
-      this.waterAssetUniforms.uSkyTex.value = theme.skyImage === "dusk" ? assets.sky.dusk : assets.sky.day;
+      this.waterAssetUniforms.uSkyTex.value = assets.sky.day;
       this.waterAssetUniforms.uHasAssets.value = 1;
     }
   }
@@ -634,12 +687,6 @@ export class CityParts {
       for (const side of [-1, 1]) {
         const offset = side * (edge.width / 2 + 0.25);
         add(x + nx * offset, base + 0.02, z + nz * offset, length, 0.18, 0.35, "#cbc6ba", 0, yaw);
-      }
-      if (edge.kind === "arterial") {
-        const lx = x + nx * (edge.width / 2 + 0.9);
-        const lz = z + nz * (edge.width / 2 + 0.9);
-        add(lx, base, lz, 0.2, 4.5, 0.2, "#697477");
-        add(lx - nx * 0.6, base + 4.45, lz - nz * 0.6, 0.3, 0.2, 1.6, "#d8d3b8", 0, yaw);
       }
     }
     // 城北高架与城南港口曾按常量坐标（urbanBounds.north − 12 / right − 80、south + 58）摆放、与地理无关：
@@ -731,6 +778,7 @@ export class CityParts {
     type Piece = { x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; color: string };
     const boxes: Piece[] = [];
     const cylinders: Piece[] = [];
+    const glows: Piece[] = []; // 夜间霓虹/边缘光：与 nightLights.neon 共用亮度，实例色定色相
     for (const site of this.layout.publicSites) {
       if (site.kind === "park") continue;
       const r = site.radius;
@@ -747,6 +795,10 @@ export class CityParts {
         const p = place(lx, lz);
         cylinders.push({ x: p.x, y: base + ly, z: p.z, sx: radius, sy: height, sz: radius, yaw: 0, color });
       };
+      const glow = (lx: number, ly: number, lz: number, sx: number, sy: number, sz: number, color: string, extraYaw = 0) => {
+        const p = place(lx, lz);
+        glows.push({ x: p.x, y: base + ly, z: p.z, sx, sy, sz, yaw: site.yaw + extraYaw, color });
+      };
       if (site.kind === "civic") {
         box(0, 0, 0, r * 1.2, 1.6, r * 0.9, "#e4dcc8");
         box(0, 1.6, 0, r * 0.9, 9, r * 0.55, "#efe7d6");
@@ -755,6 +807,12 @@ export class CityParts {
         cyl(0, 11.7, 0, r * 0.27, 4.2, "#d6c9a8");
         cyl(0, 15.9, 0, r * 0.2, 3.4, "#5fa7a3");
         cyl(0, 19.3, 0, 0.4, 6, "#c9b98f");
+        // 檐口一圈暖白边缘光 + 门廊柱脚洗墙光 + 穹顶青色腰线。
+        for (const sz of [-1, 1]) glow(0, 11.7, sz * r * 0.31, r * 0.98, 0.22, 0.22, "#ffe2a8");
+        for (const sx of [-1, 1]) glow(sx * r * 0.49, 11.7, 0, 0.22, 0.22, r * 0.62, "#ffe2a8");
+        glow(0, 1.7, r * 0.46, r * 1.2, 0.2, 0.2, "#ffd08a");
+        glow(0, 17.4, 0, r * 0.41, 0.25, r * 0.41, "#46e6ff");
+        glow(0, 25.6, 0, 0.6, 0.9, 0.6, "#ff5a7a");
       } else if (site.kind === "station") {
         box(0, 0, 0, r * 1.5, 0.7, r * 1.1, "#cfc7b3");
         for (const track of [-18, -10, -2, 6]) box(track, 0.7, 0, 0.5, 0.15, r * 1.1, "#6f7773");
@@ -763,6 +821,10 @@ export class CityParts {
         box(0, 0, -r * 0.62, r * 1.3, 11, 7, "#d9cdb5");
         cyl(r * 0.5, 11, -r * 0.62, 1.6, 10, "#c8bba0");
         cyl(r * 0.5, 21, -r * 0.62, 2.1, 1.2, "#f4efe0");
+        // 站房钟面发光 + 雨棚两侧边缘光 + 站台边线。
+        glow(r * 0.5, 21.15, -r * 0.62, 1.7, 0.9, 1.7, "#fff3cf");
+        for (const sz of [-1, 1]) glow(0, 7.5, sz * r * 0.45, r * 1.4, 0.22, 0.22, "#58e0ff");
+        glow(0, 11, -r * 0.62 + 3.6, r * 1.3, 0.22, 0.22, "#ffd08a");
       } else if (site.kind === "stadium") {
         const segments = 18;
         for (let index = 0; index < segments; index += 1) {
@@ -775,7 +837,13 @@ export class CityParts {
         }
         for (const [lx, lz] of [[-30, -22], [30, -22], [-30, 22], [30, 22]]) {
           cyl(lx, 0, lz, 0.55, 24, "#9aa0a0");
-          box(lx, 24, lz, 4, 1.4, 2.4, "#fff3c4");
+          glow(lx, 24, lz, 4, 1.4, 2.4, "#fff3c4"); // 泛光灯塔灯头：夜里发光
+        }
+        // 看台上沿一圈青/洋红交替的边缘光。
+        for (let index = 0; index < segments; index += 1) {
+          const t = (index / segments) * Math.PI * 2;
+          const tangent = Math.atan2(19.5 * Math.cos(t), -27 * Math.sin(t));
+          glow(Math.cos(t) * 27, index % 4 === 0 ? 11.1 : 8.1, Math.sin(t) * 19.5, 10.5, 0.22, 0.22, index % 2 === 0 ? "#38e8ff" : "#ff4fd8", -tangent);
         }
       } else if (site.kind === "tower") {
         cyl(0, 0, 0, 6.5, 3.2, "#c4c7c6");
@@ -783,6 +851,11 @@ export class CityParts {
         cyl(0, 42, 0, 6.4, 3.8, "#eaf0f2");
         cyl(0, 45.8, 0, 4.2, 2.2, "#7fb4c2");
         cyl(0, 48, 0, 0.45, 15, "#d45a4a");
+        // 观景台与塔身腰线霓虹 + 天线红色航空灯。
+        glow(0, 45.2, 0, 4.4, 0.35, 4.4, "#46e6ff");
+        glow(0, 41.6, 0, 6.6, 0.3, 6.6, "#ff4fd8");
+        glow(0, 20, 0, 2.5, 0.35, 2.5, "#ffd08a");
+        glow(0, 62.6, 0, 1.1, 1.3, 1.1, "#ff3b3b");
       } else if (site.kind === "harbor") {
         box(0, 0, 0, r * 1.5, 0.5, r * 1.2, "#8e9490");
         box(0, 0.5, -r * 0.5, r * 1.1, 6.5, 10, "#bab4a3");
@@ -798,6 +871,15 @@ export class CityParts {
         for (const [lx, lz] of [[-r * 0.65, r * 0.38], [-r * 0.65, r * 0.62], [r * 0.15, r * 0.38], [r * 0.15, r * 0.62]]) cyl(lx, 0.5, lz, 0.6, 17, "#c9532f");
         box(-r * 0.25, 17.5, r * 0.5, r * 1.1, 1.3, 1.5, "#c9532f");
         box(-r * 0.25 + r * 0.55, 17.2, r * 0.5, 14, 1, 1, "#d9d3c2", 0);
+        // 码头发光：岸线灯带、龙门吊顶部泛光灯、堆场高杆灯与吊臂红色航空灯。
+        glow(0, 0.55, r * 0.6, r * 1.5, 0.25, 0.25, "#ffb366");
+        glow(0, 0.55, -r * 0.6, r * 1.5, 0.25, 0.25, "#ffb366");
+        for (const [lx, lz] of [[-r * 0.65, r * 0.38], [-r * 0.65, r * 0.62], [r * 0.15, r * 0.38], [r * 0.15, r * 0.62]]) glow(lx, 17.6, lz, 1.4, 0.7, 1.4, "#fff1c4");
+        glow(-r * 0.25 + r * 0.55 + 7, 17.2, r * 0.5, 0.9, 0.9, 0.9, "#ff3b3b");
+        for (const lx of [-r * 0.6, 0, r * 0.6]) {
+          cyl(lx, 0.5, -r * 0.2, 0.18, 12, "#8a9096");
+          glow(lx, 12.5, -r * 0.2, 1.6, 0.5, 1.6, "#fff1c4");
+        }
       }
     }
     if (!boxes.length) return;
@@ -824,6 +906,25 @@ export class CityParts {
     };
     build(BOX, boxes, "city-public-sites-boxes");
     build(CYLINDER, cylinders, "city-public-sites-cylinders");
+    const neon = this.nightLights?.neon;
+    if (neon && glows.length) {
+      const mesh = new THREE.InstancedMesh(BOX.clone(), neon, glows.length);
+      glows.forEach((piece, index) => {
+        this.positionVector.set(piece.x, piece.y, piece.z);
+        this.euler.set(0, piece.yaw, 0);
+        this.quaternion.setFromEuler(this.euler);
+        this.scaleVector.set(piece.sx, piece.sy, piece.sz);
+        this.matrix.compose(this.positionVector, this.quaternion, this.scaleVector);
+        mesh.setMatrixAt(index, this.matrix);
+        mesh.setColorAt(index, this.color.set(piece.color));
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.frustumCulled = false;
+      mesh.name = "city-public-sites-glow";
+      this.group.add(mesh);
+      this.disposables.push(mesh.geometry);
+    }
   }
 
   /** 小区中心花园：草坪 + 湖（与海面同一套水面材质，能映倒影）+ 湖石驳岸 + 假山叠石 + 亭 + 环湖树。 */
@@ -918,6 +1019,115 @@ export class CityParts {
     build(new THREE.DodecahedronGeometry(0.6, 0).translate(0, 0.45, 0), rocks, "city-garden-rocks");
     build(new THREE.ConeGeometry(0.5, 1, 4).translate(0, 0.5, 0), cones, "city-garden-roofs");
     build(new THREE.IcosahedronGeometry(1, 0).translate(0, 1.4, 0), trees, "city-garden-trees");
+  }
+
+  /** 夜间照明（静态，随 seed 缓存）：沿主干道两侧交错的路灯（杆 + 自发光灯头 + 地面光斑）、高架灯带。
+   *  曾只有每条主干道路段中点一盏不发光的灯，夜里道路是一片黑——现在街道有"灯线"，这是夜景像城市的关键。 */
+  private buildNightLights(): NightLights {
+    const heads = new THREE.MeshBasicMaterial({ color: "#ffc773", toneMapped: false });
+    // 光斑用径向渐变贴图（中心亮、边缘衰减到 0）：纯色圆片在夜里像一个个米色沙盘圆点，不像灯光。
+    const glow = document.createElement("canvas");
+    glow.width = glow.height = 64;
+    const gctx = glow.getContext("2d");
+    if (gctx) {
+      const gradient = gctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gradient.addColorStop(0, "rgba(255,255,255,1)");
+      gradient.addColorStop(0.35, "rgba(255,255,255,0.45)");
+      gradient.addColorStop(1, "rgba(255,255,255,0)");
+      gctx.fillStyle = gradient;
+      gctx.fillRect(0, 0, 64, 64);
+    }
+    const glowTexture = new THREE.CanvasTexture(glow);
+    const pools = new THREE.MeshBasicMaterial({ color: "#ff9e4d", map: glowTexture, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
+    this.disposables.push(glowTexture);
+    pools.visible = false;
+    const strips = new THREE.MeshBasicMaterial({ color: "#ffb366", toneMapped: false });
+    const neon = new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false });
+    const poles = this.makeInstanced(new THREE.CylinderGeometry(0.1, 0.14, 1, 5).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#59636a" }), 4600);
+    const headMesh = this.makeInstanced(new THREE.BoxGeometry(0.5, 0.22, 0.9), heads, 4600);
+    const poolMesh = this.makeInstanced(new THREE.CircleGeometry(1, 14).rotateX(-Math.PI / 2), pools, 4600);
+    poolMesh.renderOrder = 2;
+    const stripMesh = this.makeInstanced(BOX, strips, 2200);
+    const spacing = 30;
+    let lamps = 0;
+    const lamp = (x: number, z: number, nx: number, nz: number, base: number, yaw: number) => {
+      if (lamps >= 4600) return;
+      this.compose(x, base, z, 0, 1, 4.6, 1);
+      poles.setMatrixAt(lamps, this.matrix);
+      // 灯头悬在路中心一侧（臂长 0.7），朝路面。
+      this.compose(x - nx * 0.7, base + 4.55, z - nz * 0.7, yaw, 1, 1, 1);
+      headMesh.setMatrixAt(lamps, this.matrix);
+      this.compose(x - nx * 3.2, base + 0.12, z - nz * 3.2, 0, 9.5, 1, 9.5);
+      poolMesh.setMatrixAt(lamps, this.matrix);
+      lamps += 1;
+    };
+    for (const edge of this.layout.roadEdges) {
+      if (edge.bridge || edge.kind !== "arterial") continue;
+      const [a, b] = edge.points;
+      const length = Math.hypot(b.x - a.x, b.z - a.z);
+      if (length < 18) continue;
+      const dx = (b.x - a.x) / length; const dz = (b.z - a.z) / length;
+      const nx = -dz; const nz = dx;
+      const yaw = -Math.atan2(dz, dx);
+      const count = Math.max(1, Math.floor(length / spacing));
+      for (let i = 0; i < count; i += 1) {
+        const t = ((i + 0.5) / count) * length;
+        const side = i % 2 === 0 ? 1 : -1; // 两侧交错
+        const x = a.x + dx * t + nx * side * (edge.width / 2 + 0.9);
+        const z = a.z + dz * t + nz * side * (edge.width / 2 + 0.9);
+        lamp(x, z, nx * side, nz * side, Math.max(0, this.layout.terrain.height(x, z)), yaw);
+      }
+    }
+    // 公园：沿园路一圈路灯（外圈 8 盏），灯头朝内。
+    for (const site of this.layout.publicSites) {
+      if (site.kind !== "park") continue;
+      const ring = Math.max(10, site.radius * 0.7);
+      for (let i = 0; i < 8; i += 1) {
+        const t = (i / 8) * Math.PI * 2;
+        const ox = Math.cos(t); const oz = Math.sin(t);
+        const x = site.x + ox * ring; const z = site.z + oz * ring;
+        lamp(x, z, ox, oz, Math.max(0, this.layout.terrain.height(x, z)), -Math.atan2(ox, -oz) + Math.PI / 2);
+      }
+    }
+    // 高架：桥面（高 8.2）两侧交错路灯，灯头朝路中心。
+    for (const run of this.layout.highways ?? []) {
+      let carry = 0;
+      for (let i = 1; i < run.length; i += 1) {
+        const a = run[i - 1]; const b = run[i];
+        const length = Math.hypot(b.x - a.x, b.z - a.z);
+        if (length < 1) continue;
+        const dx = (b.x - a.x) / length; const dz = (b.z - a.z) / length;
+        const yaw = -Math.atan2(dz, dx);
+        for (let t = 14 - carry; t < length; t += 34) {
+          const side = Math.floor((t + length * 0.37 + a.x) / 34) % 2 === 0 ? 1 : -1;
+          lamp(a.x + dx * t - dz * side * 5.1, a.z + dz * t + dx * side * 5.1, -dz * side, dx * side, 8.2, yaw);
+        }
+        carry = (length - (14 - carry)) % 34;
+      }
+    }
+    poles.count = lamps; headMesh.count = lamps; poolMesh.count = lamps;
+    for (const mesh of [poles, headMesh, poolMesh]) { mesh.instanceMatrix.needsUpdate = true; mesh.frustumCulled = false; }
+    // 高架灯带：沿环线两侧护栏上沿的发光细条（桥面高 8.2，护栏在 ±5.1）。
+    let strip = 0;
+    for (const run of this.layout.highways ?? []) {
+      for (let i = 1; i < run.length && strip < 2190; i += 1) {
+        const a = run[i - 1]; const b = run[i];
+        const length = Math.hypot(b.x - a.x, b.z - a.z);
+        if (length < 6) continue;
+        const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
+        const sx = Math.sin(yaw); const sz = Math.cos(yaw);
+        for (const offset of [-5.1, 5.1]) {
+          this.compose((a.x + b.x) / 2 + sx * offset, 9.45, (a.z + b.z) / 2 + sz * offset, yaw, length, 0.14, 0.14);
+          stripMesh.setMatrixAt(strip, this.matrix);
+          strip += 1;
+        }
+      }
+    }
+    stripMesh.count = strip;
+    stripMesh.instanceMatrix.needsUpdate = true;
+    stripMesh.frustumCulled = false;
+    this.disposables.push(heads, pools, strips, neon);
+    return { heads, pools, strips, neon };
   }
 
   /** 致敬型地标（程序化几何，不复刻具体建筑）。高度上限 = 全城最高会话楼 × 0.9：天际线焦点仍是会话楼。 */
@@ -1051,33 +1261,74 @@ export class CityParts {
         mesh(new THREE.CylinderGeometry(0.2, 0.35, 6, 6).translate(0, 3, 0), material("#c9a24a"), group, 0, y, 0);
       } else if (landmark.kind === "suspension-bridge" && landmark.to) {
         // 悬索桥：沿既有过河桥加两座门式塔与主缆、吊索（路网不变，只是换造型）。
+        // 桥面高度与 buildInfrastructure 的桥面一致（两端地形高度的较大者）；塔、吊索都以它为底。
+        // 曾把主缆写成整段抛物线并且塔底/吊索底硬编码在 y=0/8.2：塔外侧 |local|>1 时抛物线反向上翘，
+        // 两侧缆索飞到塔顶之上（用户截图「两边桥上天了」）——主缆现在只在两塔之间是悬链，塔外是落到桥面的斜拉后锚。
         group.position.set(landmark.x, 0, landmark.z);
         group.rotation.y = -Math.atan2(landmark.to.z - landmark.z, landmark.to.x - landmark.x);
         const span = Math.hypot(landmark.to.x - landmark.x, landmark.to.z - landmark.z);
+        const deckY = Math.max(0.3, this.layout.terrain.height(landmark.x, landmark.z), this.layout.terrain.height(landmark.to.x, landmark.to.z));
         const towerH = 34;
-        for (const t of [0.18, 0.82]) {
-          for (const side of [-1, 1]) mesh(new THREE.BoxGeometry(1.6, towerH, 1.6).translate(0, towerH / 2, 0), material("#c8473a"), group, span * t, 0, side * 5.5);
-          mesh(new THREE.BoxGeometry(1.6, 1.6, 12.6).translate(0, 0.8, 0), material("#c8473a"), group, span * t, towerH - 4, 0);
+        const topY = deckY + towerH - 1;
+        const t0 = span * 0.18;
+        const t1 = span * 0.82;
+        const mid = (t0 + t1) / 2;
+        const lowY = deckY + 9;
+        const towerMaterial = material("#c8473a");
+        for (const x of [t0, t1]) {
+          for (const side of [-1, 1]) mesh(new THREE.BoxGeometry(1.6, towerH, 1.6).translate(0, towerH / 2, 0), towerMaterial, group, x, deckY, side * 5.5);
+          mesh(new THREE.BoxGeometry(1.6, 1.6, 12.6).translate(0, 0.8, 0), towerMaterial, group, x, deckY + towerH - 4, 0);
         }
+        const lights = this.nightLights;
+        const bulbs: Array<[number, number, number, number]> = []; // x,y,z,kind(0 = 暖灯, 1 = 霓虹)
+        const cableY = (x: number) => {
+          if (x < t0) return deckY + 1 + (x / Math.max(1, t0)) * (topY - deckY - 1);
+          if (x > t1) return deckY + 1 + ((span - x) / Math.max(1, span - t1)) * (topY - deckY - 1);
+          const c = (x - mid) / ((t1 - t0) / 2);
+          return lowY + (topY - lowY) * c * c;
+        };
         for (const side of [-1, 1]) {
           const points: THREE.Vector3[] = [];
-          for (let i = 0; i <= 24; i += 1) {
-            const u = i / 24;
-            const x = -span * 0.08 + u * span * 1.16;
-            const local = (x - span * 0.5) / (span * 0.32);
-            points.push(new THREE.Vector3(x, Math.max(9, towerH - 1 - (1 - local * local) * (towerH - 12)), side * 5.5));
+          for (let i = 0; i <= 40; i += 1) {
+            const x = (i / 40) * span;
+            points.push(new THREE.Vector3(x, cableY(x), side * 5.5));
           }
-          const cable = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), 48, 0.3, 5), steel);
+          const cable = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), 64, 0.3, 5), steel);
           this.disposables.push(cable.geometry);
           group.add(cable);
-          for (let i = 3; i <= 21; i += 1) {
-            const p = points[i];
-            if (p.y <= 9.5) continue;
-            const hanger = new THREE.Mesh(new THREE.BoxGeometry(0.12, p.y - 8.2, 0.12).translate(0, (p.y - 8.2) / 2, 0), steel);
-            hanger.position.set(p.x, 8.2, p.z);
+          // 吊索：只在两塔之间，从桥面立起到主缆。
+          for (let x = t0 + 3; x < t1 - 2; x += 4) {
+            const y = cableY(x);
+            const hanger = new THREE.Mesh(new THREE.BoxGeometry(0.12, y - deckY - 0.9, 0.12).translate(0, (y - deckY - 0.9) / 2, 0), steel);
+            hanger.position.set(x, deckY + 0.9, side * 5.5);
             this.disposables.push(hanger.geometry);
             group.add(hanger);
+            bulbs.push([x, y - 0.5, side * 5.5, 0]);
           }
+          // 桥面护栏灯串与塔身霓虹。
+          for (let x = 4; x < span - 3; x += 7) bulbs.push([x, deckY + 1.1, side * 5.2, 0]);
+          for (const tx of [t0, t1]) {
+            bulbs.push([tx, deckY + towerH + 0.4, side * 5.5, 1]);
+            for (let k = 1; k <= 4; k += 1) bulbs.push([tx, deckY + (towerH * k) / 5, side * 5.5 + side * 0.9, 1]);
+          }
+        }
+        if (lights && bulbs.length) {
+          const place = (list: typeof bulbs, material: THREE.Material, size: number, neonTint: boolean) => {
+            if (!list.length) return;
+            const instanced = new THREE.InstancedMesh(new THREE.BoxGeometry(size, size, size), material, list.length);
+            list.forEach((b, i) => {
+              this.matrix.compose(this.positionVector.set(b[0], b[1], b[2]), this.quaternion.identity(), this.scaleVector.set(1, 1, 1));
+              instanced.setMatrixAt(i, this.matrix);
+              if (neonTint) instanced.setColorAt(i, this.color.set(i % 2 === 0 ? "#38e8ff" : "#ff4fd8"));
+            });
+            instanced.instanceMatrix.needsUpdate = true;
+            if (instanced.instanceColor) instanced.instanceColor.needsUpdate = true;
+            instanced.frustumCulled = false;
+            this.disposables.push(instanced.geometry);
+            group.add(instanced);
+          };
+          place(bulbs.filter((b) => b[3] === 0), lights.heads, 0.5, false);
+          place(bulbs.filter((b) => b[3] === 1), lights.neon, 0.9, true);
         }
       }
       group.name = `city-landmark-${landmark.kind}`;
@@ -1092,7 +1343,8 @@ export class CityParts {
     type Piece = (typeof this.civicPieces)[number];
     const boxes: Piece[] = [];
     const cylinders: Piece[] = [];
-    const colors: [string[], string[]] = [[], []];
+    const glows: Piece[] = [];
+    const colors: [string[], string[], string[]] = [[], [], []];
     civics.forEach((civic, civicIndex) => {
       const cos = Math.cos(civic.yaw);
       const sin = Math.sin(civic.yaw);
@@ -1110,6 +1362,12 @@ export class CityParts {
         cylinders.push({ civic: civicIndex, mesh: 1, index: cylinders.length, x: q.x, y: base + ly, z: q.z, sx: r, sy: h, sz: r, yaw: 0, baseY: base });
         colors[1].push(color);
       };
+      // 夜间边缘光：随同一座配套一起生长（同一套 baseY/progress），挂第三个实例网格。
+      const glow = (lx: number, ly: number, lz: number, sx: number, sy: number, sz: number, color: string) => {
+        const q = at(lx, lz);
+        glows.push({ civic: civicIndex, mesh: 2, index: glows.length, x: q.x, y: base + ly, z: q.z, sx, sy, sz, yaw: civic.yaw, baseY: base });
+        colors[2].push(color);
+      };
       if (civic.kind === "school") {
         // U 形教学楼 + 操场（绿茵 + 红色跑道）+ 旗杆。
         box(-W * 0.38, 0, -D * 0.18, W * 0.2, 9, D * 0.6, "#e9d9b8");
@@ -1120,6 +1378,10 @@ export class CityParts {
         box(0, 0.1, D * 0.22, W * 0.5, 0.14, D * 0.3, "#6fa65a");
         cyl(W * 0.42, 0, D * 0.4, 0.15, 12, "#d8dcdc");
         box(W * 0.42 + 1.1, 10.4, D * 0.4, 2, 1.3, 0.1, "#d84b3a");
+        glow(0, 11.6, -D * 0.42, W * 0.96, 0.22, 0.22, "#ffd08a");
+        glow(-W * 0.38, 9, -D * 0.18 + D * 0.3, W * 0.2, 0.22, 0.22, "#ffd08a");
+        glow(W * 0.38, 9, -D * 0.18 + D * 0.3, W * 0.2, 0.22, 0.22, "#ffd08a");
+        glow(0, 0.3, D * 0.22, W * 0.62, 0.14, 0.2, "#46e6ff");
       } else if (civic.kind === "mall") {
         // 大体量低层 + 玻璃中庭 + 屋顶停车场 + 招牌塔。
         box(0, 0, 0, W, 10, D, "#d9d3c7");
@@ -1129,6 +1391,10 @@ export class CityParts {
         cyl(-W * 0.3, 13, 0, Math.min(W, D) * 0.12, 2.5, "#9ac4d4");
         box(W * 0.42, 0, -D * 0.42, 3.2, 20, 3.2, "#2f6f8f");
         box(W * 0.42, 15, -D * 0.42 - 1.7, 6, 4, 0.3, "#ff6f61");
+        glow(W * 0.42, 15, -D * 0.42 - 1.9, 6, 4, 0.1, "#ff4fd8"); // 招牌发光
+        glow(0, 10.5, D * 0.5, W, 0.22, 0.22, "#ff4fd8");
+        glow(0, 10.5, -D * 0.5, W, 0.22, 0.22, "#46e6ff");
+        glow(-W * 0.3, 13.4, 0, Math.min(W, D) * 0.25, 0.22, Math.min(W, D) * 0.25, "#46e6ff");
       } else {
         // 医院：白色主楼 + 两翼 + 红十字 + 屋顶停机坪。
         box(0, 0, 0, W * 0.34, 22, D * 0.44, "#f4f5f2");
@@ -1139,10 +1405,14 @@ export class CityParts {
         box(0, 16, D * 0.225, 1.4, 5, 0.3, "#e0352b");
         box(0, 16, D * 0.225, 5, 1.4, 0.3, "#e0352b");
         box(0, 0, D * 0.36, W * 0.3, 3.4, 4, "#d84a3d");
+        glow(0, 16, D * 0.235, 1.2, 4.8, 0.1, "#ff4a3d"); // 红十字发光
+        glow(0, 16, D * 0.235, 4.8, 1.2, 0.1, "#ff4a3d");
+        glow(0, 22.2, 0, W * 0.34, 0.22, D * 0.44, "#7fe8ff");
+        glow(0, 3.5, D * 0.36 + 2, W * 0.3, 0.22, 0.22, "#ff4a3d");
       }
     });
     const build = (geometry: THREE.BufferGeometry, pieces: Piece[], palette: string[], name: string) => {
-      const mesh = this.makeInstanced(geometry.clone(), selfLitMaterial(activeTheme().name === "vice" ? 0.18 : 0.04), Math.max(1, pieces.length));
+      const mesh = this.makeInstanced(geometry.clone(), selfLitMaterial(0.18), Math.max(1, pieces.length));
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       mesh.count = pieces.length;
@@ -1151,8 +1421,20 @@ export class CityParts {
       mesh.name = name;
       return mesh;
     };
-    this.civicMeshes = [build(BOX, boxes, colors[0], "city-civic-boxes"), build(CYLINDER, cylinders, colors[1], "city-civic-cylinders")];
-    this.civicPieces = [...boxes, ...cylinders];
+    const glowMesh = this.nightLights
+      ? new THREE.InstancedMesh(BOX.clone(), this.nightLights.neon, Math.max(1, glows.length))
+      : build(BOX, glows, colors[2], "city-civic-glow");
+    glowMesh.count = glows.length;
+    if (this.nightLights) {
+      colors[2].forEach((color, index) => glowMesh.setColorAt(index, this.color.set(color)));
+      if (glowMesh.instanceColor) glowMesh.instanceColor.needsUpdate = true;
+      glowMesh.frustumCulled = false;
+      glowMesh.name = "city-civic-glow";
+      this.group.add(glowMesh);
+      this.disposables.push(glowMesh.geometry);
+    }
+    this.civicMeshes = [build(BOX, boxes, colors[0], "city-civic-boxes"), build(CYLINDER, cylinders, colors[1], "city-civic-cylinders"), glowMesh];
+    this.civicPieces = [...boxes, ...cylinders, ...glows];
     this.civicProgress = civics.map(() => 1);
     this.civicTarget = civics.map(() => 1);
     for (let index = 0; index < civics.length; index += 1) this.writeCivic(index);
@@ -1590,6 +1872,7 @@ export class CityParts {
         uMirror: { value: null as THREE.Texture | null },
         uMirrorMatrix: { value: new THREE.Matrix4() },
         uHasMirror: { value: 0 },
+        uNight: { value: 0 },
         uSkyTex: { value: null as THREE.Texture | null },
         uHasAssets: { value: 0 },
         uGradeTop: { value: new THREE.Color(activeTheme().skyGrade.top) },
@@ -1617,6 +1900,7 @@ export class CityParts {
         uniform sampler2D uMirror;
         uniform mat4 uMirrorMatrix;
         uniform float uHasMirror;
+        uniform float uNight;
         uniform sampler2D uSkyTex;
         uniform float uHasAssets;
         uniform vec3 uGradeTop;
@@ -1675,7 +1959,8 @@ export class CityParts {
           // 近处格子比像素大会变成白色棋盘噪点，远处则混叠：只在中距离出现。
           float dist = distance(cameraPosition, vWorld);
           sparkle *= smoothstep(90.0, 200.0, dist) * (1.0 - smoothstep(300.0, 650.0, dist));
-          color += vec3(1.0, 0.99, 0.92) * sparkle * 0.5;
+          // 粼粼碎光是日光反射：夜里关掉（曾夜里照样按白天强度闪，一片白色雪花点）；夜海的亮点来自平面镜里的城市灯光。
+          color += vec3(1.0, 0.99, 0.92) * sparkle * 0.5 * (1.0 - uNight);
           gl_FragColor = vec4(color, 1.0);
           #include <tonemapping_fragment>
           // 雾混在色调映射之后：scene.background 不经色调映射，先混再映射会让远水发灰、与天空出现色带。
@@ -2110,12 +2395,24 @@ export class CityParts {
 
   setNightGlow(night: number): void {
     this.nightGlow = night;
+    const lights = this.nightLights;
+    if (lights) {
+      // 灯头：白天几乎不亮（0.12），夜里 ×3.2 进 bloom；光斑与灯带随夜晚淡入。
+      lights.heads.color.setRGB(1, 0.78, 0.45).multiplyScalar(0.12 + night * 3.2);
+      lights.pools.color.setRGB(1, 0.62, 0.3).multiplyScalar(night * 0.9);
+      lights.pools.visible = night > 0.03;
+      lights.strips.color.setRGB(1, 0.7, 0.4).multiplyScalar(0.1 + night * 2.4);
+      // 霓虹/边缘光：实例色决定色相（青/洋红/暖白），这里只管亮度；白天近乎熄灭。
+      lights.neon.color.setRGB(1, 1, 1).multiplyScalar(0.04 + night * 2.6);
+    }
   }
 
   /** theme 基线 + 夜晚抬升的合成值（theme 切换后由昼夜 tick 重新应用）。 */
   applySelfLit(themeBase: number): void {
     for (const uniforms of this.facadeUniforms) {
-      uniforms.uSelfLit.value = Math.max(themeBase, this.nightGlow * 0.58);
+      // 夜里不再抬升墙面自发光（只点亮窗格，见 uWindowGlow）；墙面保持主题基线。
+      uniforms.uSelfLit.value = themeBase;
+      uniforms.uWindowGlow.value = this.nightGlow;
     }
   }
 

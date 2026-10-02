@@ -89,7 +89,7 @@ export function makeFacadeTexture(variant: number, seed: number): THREE.Texture 
       for (let column = 0; column < 5; column += 1) {
         const lit = hashSeed(`w${seed}:${floor}:${column}`) > 0.86;
         ctx.fillStyle = lit ? "#f7e3ae" : "#4f5d6a";
-        ctx.fillRect(6 + column * 24, 7 + floor * 32, 16, 20);
+        ctx.fillRect(4 + column * 24, 5 + floor * 32, 20, 24);
       }
     }
     ctx.fillStyle = "rgba(120, 108, 92, 0.14)";
@@ -98,12 +98,12 @@ export function makeFacadeTexture(variant: number, seed: number): THREE.Texture 
     // 商业：连续带状窗，层间是实墙横带。
     for (let floor = 0; floor < 4; floor += 1) {
       ctx.fillStyle = "#4d5c68";
-      ctx.fillRect(0, floor * 32 + 5, 128, 19);
+      ctx.fillRect(0, floor * 32 + 3, 128, 25);
       ctx.fillStyle = "#e9e5d8";
-      for (let mullion = 0; mullion < 4; mullion += 1) ctx.fillRect(mullion * 32, floor * 32 + 5, 3, 19);
+      for (let mullion = 0; mullion < 4; mullion += 1) ctx.fillRect(mullion * 32, floor * 32 + 3, 2, 25);
       if (hashSeed(`b${seed}:${floor}`) > 0.8) {
         ctx.fillStyle = "#f3dfa6";
-        ctx.fillRect(35 + (floor % 2) * 32, floor * 32 + 5, 29, 19);
+        ctx.fillRect(34 + (floor % 2) * 32, floor * 32 + 3, 30, 25);
       }
     }
   } else {
@@ -115,17 +115,17 @@ export function makeFacadeTexture(variant: number, seed: number): THREE.Texture 
         const pane = hashSeed(`g${seed}:${floor}:${column}`);
         if (pane > 0.93) {
           ctx.fillStyle = "#f2dfae";
-          ctx.fillRect(column * 32 + 2, floor * 32 + 3, 29, 27);
+          ctx.fillRect(column * 32 + 1, floor * 32 + 2, 31, 29);
         } else {
           // 玻璃间轻微色差：每块玻璃的反射率略不同，远看不是一张平板。
           ctx.fillStyle = `rgba(${pane > 0.5 ? "70,92,110" : "58,76,94"}, 1)`;
-          ctx.fillRect(column * 32 + 2, floor * 32 + 3, 29, 27);
+          ctx.fillRect(column * 32 + 1, floor * 32 + 2, 31, 29);
         }
       }
     }
     ctx.fillStyle = "#c9d0d3";
-    for (let floor = 0; floor < 4; floor += 1) ctx.fillRect(0, floor * 32, 128, 3);
-    for (let column = 0; column < 4; column += 1) ctx.fillRect(column * 32, 0, 2, 128);
+    for (let floor = 0; floor < 4; floor += 1) ctx.fillRect(0, floor * 32, 128, 2);
+    for (let column = 0; column < 4; column += 1) ctx.fillRect(column * 32, 0, 1, 128);
   }
 
   const texture = new THREE.Texture(canvas);

@@ -4,7 +4,7 @@
  * 宿主配色在两个主题里都必须互相可分辨（色相不同），因为楼的颜色承载「哪个宿主」。
  */
 
-export type CityThemeName = "day" | "vice";
+export type CityThemeName = "miami";
 
 export type HostPaletteEntry = { wall: string; roof: string; accent: string; park: string };
 
@@ -32,7 +32,7 @@ export type CityTheme = {
   /** 水面距离淡出区间（相机距离）：日落主题拉远，免得整片海都被橙雾吃掉。 */
   waterFog: [number, number];
   /** 天空球素材（HDR 转出的全景图）；加载前/失败时用 skyTop/skyMid/skyHorizon 渐变。 */
-  skyImage: "day" | "dusk";
+  skyImage: "dusk";
   /** 天空调色：天顶色、地平线色、强度（0 = 原图）。日落主题靠它把黄昏图染成粉紫。 */
   skyGrade: { top: string; horizon: string; amount: number };
   /** 地面着色（RGB 0-255）：水下 / 沙滩 / 低草 / 高草 / 岩石。 */
@@ -48,43 +48,11 @@ export type CityTheme = {
   fallback: HostPaletteEntry;
 };
 
-const DAY: CityTheme = {
-  name: "day",
-  skyTop: "#a3cee6",
-  skyMid: "#c9e3ea",
-  skyHorizon: "#eef6ee",
-  fog: "#dfeef2",
-  hemiSky: "#eaf6fa",
-  hemiGround: "#cbbfa6",
-  hemiIntensity: 0.32,
-  sunColor: "#fff3de",
-  sunIntensity: 2.6,
-  sunAzimuthDeg: -50,
-  sunElevationDeg: 42,
-  skySunAzimuthDeg: 36,
-  exposure: 1.06,
-  water: { deep: "#57a3b4", shallow: "#a5d6da", sky: "#dff0f2" },
-  waterFog: [900, 2300],
-  skyImage: "day",
-  skyGrade: { top: "#ffffff", horizon: "#ffffff", amount: 0 },
-  ground: { sea: [75, 119, 127], sand: [199, 189, 158], lawn: [143, 159, 125], grass: [113, 134, 103], rock: [155, 150, 132] },
-  neon: false,
-  vegetation: "round",
-  trunk: "#8a6a4c",
-  foliage: "#6f9d63",
-  streetTreeSpacing: 0,
-  hosts: {
-    "claude-code": { wall: "#e6d9c6", roof: "#cfa583", accent: "#c96f4a", park: "#a8bf97" },
-    codex: { wall: "#d3dce2", roof: "#93a7b4", accent: "#4a7fa0", park: "#9db8a8" },
-    dsh: { wall: "#d9e2d8", roof: "#98ac9a", accent: "#3f8f7a", park: "#a3c2a7" },
-    "plugin:zcode": { wall: "#e0dae8", roof: "#ab9ec2", accent: "#7c6fb0", park: "#a9bba4" },
-    "minimax-code": { wall: "#e4dee2", roof: "#b5a2ad", accent: "#a05a76", park: "#aabcaa" },
-  },
-  fallback: { wall: "#dededa", roof: "#a9a9a3", accent: "#7d8a8f", park: "#a6bb9f" },
-};
-
-const VICE: CityTheme = {
-  name: "vice",
+/** 唯一的皮肤：迈阿密风（Miami Vice）——珊瑚/青/薄荷/紫的粉彩宿主色、棕榈行道树、屋顶霓虹与 bloom。
+ *  曾有「日光」「日落霓虹」两个主题可切换；24 小时昼夜（citySky）上线后，白天/黄昏/夜晚由光照负责，
+ *  主题开关只剩「同一座城两种配色」的重复，且日光版明显粗糙，于是只保留这一套。 */
+const MIAMI: CityTheme = {
+  name: "miami",
   skyTop: "#2b1f6b",
   skyMid: "#e0529c",
   skyHorizon: "#ffb072",
@@ -119,23 +87,15 @@ const VICE: CityTheme = {
   fallback: { wall: "#f6e6cf", roof: "#d9a98c", accent: "#e8a07a", park: "#86d6a6" },
 };
 
-export const THEMES: Record<CityThemeName, CityTheme> = { day: DAY, vice: VICE };
 
-let active: CityTheme = DAY;
-
-/** 当前主题：纹理/配色/植被在构建期读取；换主题 = 引擎重建 parts。 */
 /** 天空全景的 u 偏移（0–1）：着色器里 u = atan(z,x)/2π + 0.5 + skyYaw。 */
 export function skyYawOf(theme: CityTheme): number {
   return (theme.skySunAzimuthDeg - theme.sunAzimuthDeg) / 360;
 }
 
+/** 当前皮肤（唯一）：纹理/配色/植被在构建期读取。 */
 export function activeTheme(): CityTheme {
-  return active;
-}
-
-export function setActiveTheme(name: CityThemeName): CityTheme {
-  active = THEMES[name] ?? DAY;
-  return active;
+  return MIAMI;
 }
 
 /** 生态带调色（CITY_PLANNING_SPEC §4.1）：只改观感、不改数据语义；与主题叠加而非替换，

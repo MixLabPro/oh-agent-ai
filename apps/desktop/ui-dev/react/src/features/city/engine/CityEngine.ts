@@ -19,15 +19,21 @@ import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
 import { Reflector } from "three/addons/objects/Reflector.js";
 import type { CityModel } from "../cityModel";
-import { activeTheme, BIOME_GRADES, setActiveTheme, skyYawOf, type CityThemeName } from "./cityTheme";
+import { activeTheme, BIOME_GRADES, skyYawOf } from "./cityTheme";
 import { loadCityAssets, type CityAssets } from "./cityAssets";
 import { loadBiomeFlora } from "./cityFlora";
-import { planCinematic, type CinematicPlan } from "./cityCinematic";
+import { planCinematic, type CinematicCut, type CinematicPlan } from "./cityCinematic";
+import { drawFilmOverlay, type FilmCardText } from "./cityFilmOverlay";
+import { WebmWriter, type WebmCodec } from "./webmMuxer";
 import { layoutCity, type CityLayout } from "./cityLayout";
 import { CityParts, type QualityLevel } from "./cityParts";
 import { skyStateAt, type CitySkyPreset } from "./citySky";
 import { CityAurora } from "./cityAurora";
 import { CityAmbient } from "./cityAmbient";
+
+/** 航拍的昼夜区间（小时）：黄昏渐入，片尾 > 19:00 城市全亮（见 citySky 的灯光曲线）。 */
+const CINEMATIC_HOUR_FROM = 15;
+const CINEMATIC_HOUR_TO = 19.6;
 
 export type EngineQualityMode = "auto" | "high" | "eco";
 export type EngineStats = { fps: number; drawCalls: number; triangles: number; buildings: number; quality: QualityLevel; idle: boolean };
@@ -76,7 +82,7 @@ export class CityEngine {
   private fillLight: THREE.DirectionalLight | null = null;
   private backLight: THREE.DirectionalLight | null = null;
   /** 当前 theme 的立面自发光基线（昼夜在其上抬升）。 */
-  private themeSelfLit = activeTheme().name === "vice" ? 0.24 : 0.05;
+  private themeSelfLit = 0.24;
   private playing = false;
   private playbackSpeed = 3_600; // 1 秒 = 1 小时（默认）
 
@@ -104,6 +110,7 @@ export class CityEngine {
   private readonly observers: Array<() => void> = [];
   private skyDome: THREE.Mesh | null = null;
   private assets: CityAssets | null = null;
+  private dayMix = 0;
   /** 地形种子：未拿到前不渲染城市（否则先闪一座默认岛再跳成用户自己的岛）。 */
   private seed: number | null = null;
   private composer: EffectComposer | null = null;
@@ -113,7 +120,6 @@ export class CityEngine {
   private mirror: Reflector | null = null;
   private readonly mirrorMatrix = new THREE.Matrix4();
   private cinematic: { plan: CinematicPlan; startedAt: number; savedFov: number; look: THREE.Vector3 | null; lastSeconds: number; pace: number } | null = null;
-  private themeName: CityThemeName = "day";
 
   constructor(private readonly options: CityEngineOptions) {
     const canvas = options.canvas;
@@ -287,10 +293,13 @@ export class CityEngine {
     this.composer.render();
   }
 
+  /** 导出期间的固定渲染尺寸（与窗口无关）；null = 跟随容器。 */
+  private exportSize: { width: number; height: number } | null = null;
+
   private resize(): void {
     const parent = this.options.canvas.parentElement;
-    const width = Math.max(1, parent?.clientWidth ?? this.options.canvas.clientWidth);
-    const height = Math.max(1, parent?.clientHeight ?? this.options.canvas.clientHeight);
+    const width = this.exportSize?.width ?? Math.max(1, parent?.clientWidth ?? this.options.canvas.clientWidth);
+    const height = this.exportSize?.height ?? Math.max(1, parent?.clientHeight ?? this.options.canvas.clientHeight);
     this.renderer.setSize(width, height, false);
     if (this.composer) {
       this.composer.setPixelRatio(this.renderer.getPixelRatio());
@@ -303,33 +312,6 @@ export class CityEngine {
       this.camera.position.set(home.x, home.y, home.z);
       this.controls.target.set(this.cityCenter.x, 6, this.cityCenter.z);
     }
-  }
-
-  /** 切换视觉主题：场景级（天空/光/雾/曝光）原地更新，parts 级（水、地面、植被、宿主配色）重建。 */
-  setTheme(name: CityThemeName): void {
-    if (name === this.themeName && this.parts) return;
-    this.themeName = name;
-    const theme = setActiveTheme(name);
-    this.scene.background = new THREE.Color(theme.skyHorizon);
-    this.hemisphere.color.set(theme.hemiSky);
-    this.hemisphere.groundColor.set(theme.hemiGround);
-    this.hemisphere.intensity = theme.hemiIntensity;
-    this.sun.color.set(theme.sunColor);
-    this.sun.intensity = theme.sunIntensity;
-    this.placeSun();
-    this.renderer.toneMappingExposure = theme.exposure;
-    const uniforms = (this.skyDome?.material as THREE.ShaderMaterial | undefined)?.uniforms;
-    if (uniforms) {
-      uniforms.topColor.value.set(theme.skyTop);
-      uniforms.midColor.value.set(theme.skyMid);
-      uniforms.horizonColor.value.set(theme.skyHorizon);
-      uniforms.uGradeTop.value.set(theme.skyGrade.top);
-      uniforms.uGradeHorizon.value.set(theme.skyGrade.horizon);
-      uniforms.uGradeAmount.value = theme.skyGrade.amount;
-      uniforms.uSkyYaw.value = skyYawOf(theme);
-      this.applySkyImage();
-    }
-    if (this.model) this.applyModel(this.model, true);
   }
 
   /** 设定地形种子。换种子 = 换一座岛：丢弃旧布局整体重排（地址不再复用）。 */
@@ -355,6 +337,8 @@ export class CityEngine {
     this.layout = layout;
     this.parts = new CityParts(model, layout);
     if (this.assets) this.parts.applyAssets(this.assets);
+    this.parts.setSkyMix(this.dayMix);
+    this.lastSkyHour = -1; // 新建的 parts 还是白天默认状态：强制下一帧按当前时刻重新应用昼夜（灯光/亮窗/天空）
     // 生态带植被异步到达：只在 parts 仍是这一份时替换（换种子/换主题会重建 parts）。
     const parts = this.parts;
     void loadBiomeFlora(layout.biome).then((flora) => { if (this.parts === parts && !this.disposed) parts.applyFlora(flora); });
@@ -479,7 +463,8 @@ export class CityEngine {
   private applyQualityLevel(level: QualityLevel): void {
     this.quality = level;
     const dprCap = level >= 2 ? 2 : level === 1 ? 1.5 : 1;
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, dprCap));
+    // 导出时像素比固定为 1：成片分辨率就是 exportSize，不随屏幕 DPR 变化（可复现）。
+    this.renderer.setPixelRatio(this.exportSize ? 1 : Math.min(window.devicePixelRatio || 1, dprCap));
     this.renderer.shadowMap.enabled = level >= 1;
     // 阴影盒覆盖约 1200 单位：1024 时一个阴影像素 ≈ 1.2 单位，楼宽 6–10 的影子糊成一团。
     const size = level >= 2 ? 4096 : 2048;
@@ -546,10 +531,21 @@ export class CityEngine {
   }
 
   /** 天穹：内翻大球，顶部到地平线的垂直渐变，1 次绘制的"天空感"。 */
+  /** 白天天空照片的混合量：6–8 点渐入、16–18:30 渐出；同步给水面与玻璃反射（它们只用白天照片，调色量随之衰减）。 */
+  private applyDayMix(hour: number): void {
+    const smooth = (a: number, b: number, x: number) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+    const dayMix = smooth(6, 8, hour) * (1 - smooth(16, 18.5, hour));
+    const uniforms = (this.skyDome?.material as THREE.ShaderMaterial | undefined)?.uniforms;
+    if (uniforms) uniforms.uDayMix.value = dayMix;
+    this.dayMix = dayMix;
+    this.parts?.setSkyMix(dayMix);
+  }
+
   private applySkyImage(): void {
     const uniforms = (this.skyDome?.material as THREE.ShaderMaterial | undefined)?.uniforms;
     if (!uniforms || !this.assets) return;
-    uniforms.uSky.value = activeTheme().skyImage === "dusk" ? this.assets.sky.dusk : this.assets.sky.day;
+    uniforms.uSky.value = this.assets.sky.dusk;
+    uniforms.uSkyDay.value = this.assets.sky.day;
     uniforms.uHasSky.value = 1;
   }
 
@@ -566,6 +562,9 @@ export class CityEngine {
         // 全景天空图（HDR 转出）；uHasSky=0 时退回上面的三色渐变。
         uSky: { value: null as THREE.Texture | null },
         uHasSky: { value: 0 },
+        // 白天照片与混合量：白天照片在 6–8 点渐入、16–18:30 渐出（见 updateDaylight），其余时间是黄昏照片（夜里再乘 uSkyDim）。
+        uSkyDay: { value: null as THREE.Texture | null },
+        uDayMix: { value: 0 },
         uGradeTop: { value: new THREE.Color(activeTheme().skyGrade.top) },
         uGradeHorizon: { value: new THREE.Color(activeTheme().skyGrade.horizon) },
         uGradeAmount: { value: activeTheme().skyGrade.amount },
@@ -573,6 +572,8 @@ export class CityEngine {
         // 昼夜：渐变分支的程序星点强度；HDR 全景分支的夜间压暗（1=白天原样）。
         uStars: { value: 0 },
         uSkyDim: { value: 1 },
+        // 夜晚混合量（0 = 照片天空，1 = 夜空渐变 + 星点）：夜里不再用压暗的黄昏照片。
+        uNight: { value: 0 },
       },
       vertexShader: /* glsl */ `
         varying vec3 vDirection;
@@ -587,12 +588,15 @@ export class CityEngine {
         uniform vec3 horizonColor;
         uniform sampler2D uSky;
         uniform float uHasSky;
+        uniform sampler2D uSkyDay;
+        uniform float uDayMix;
         uniform vec3 uGradeTop;
         uniform vec3 uGradeHorizon;
         uniform float uGradeAmount;
         uniform float uSkyYaw;
         uniform float uStars;
         uniform float uSkyDim;
+        uniform float uNight;
         varying vec3 vDirection;
         void main() {
           vec3 dir = normalize(vDirection);
@@ -600,21 +604,28 @@ export class CityEngine {
           // 地平线 → 中段 → 天顶：日落主题靠中段的粉色撑出渐变带。
           vec3 color = mix(horizonColor, midColor, smoothstep(0.0, 0.28, height));
           color = mix(color, topColor, smoothstep(0.22, 0.85, height));
-          // 程序星点：方向量化到球面网格，每格 hash 决定有无星；只在上半天空。
+          vec3 gradient = color;
+          if (uHasSky > 0.5) {
+            // 等距柱状投影采样；地平线以下复用地平线那一行（下半球在水面以下，从不直接可见）。
+            vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5 + uSkyYaw, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
+            vec3 photoDusk = texture2D(uSky, uv).rgb;
+            vec3 photoDay = texture2D(uSkyDay, uv).rgb;
+            vec3 photo = mix(photoDusk, photoDay, uDayMix) * uSkyDim;
+            // 调色：按高度在两个色调之间做 overlay 式乘染（保留云的明暗，只换色相）。
+            vec3 tint = mix(uGradeHorizon, uGradeTop, smoothstep(0.0, 0.6, height));
+            vec3 graded = photo * tint * 1.55;
+            // 粉紫调色只染黄昏那部分：白天照片保持原色。
+            color = mix(photo, graded, uGradeAmount * (1.0 - uDayMix));
+          }
+          // 夜里整张照片天空换成渐变：照片会整个覆盖渐变（夜预设的深蓝从来显示不出来），
+          // 压暗的黄昏照片在 20:00 是灰白雾、23:00 仍是橙色日落（用户截图）。
+          color = mix(color, gradient, uNight);
+          // 程序星点：方向量化到球面网格，每格 hash 决定有无星；只在上半天空。放在最后，照片/渐变都看得见。
           if (uStars > 0.01) {
             vec3 cell = floor(dir * 190.0);
             float h = fract(sin(dot(cell, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
             float star = step(0.9965, h) * smoothstep(0.22, 0.65, dir.y);
-            color += vec3(0.92, 0.95, 1.0) * star * uStars * (0.55 + 0.45 * h);
-          }
-          if (uHasSky > 0.5) {
-            // 等距柱状投影采样；地平线以下复用地平线那一行（下半球在水面以下，从不直接可见）。
-            vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5 + uSkyYaw, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
-            vec3 photo = texture2D(uSky, uv).rgb * uSkyDim;
-            // 调色：按高度在两个色调之间做 overlay 式乘染（保留云的明暗，只换色相）。
-            vec3 tint = mix(uGradeHorizon, uGradeTop, smoothstep(0.0, 0.6, height));
-            vec3 graded = photo * tint * 1.55;
-            color = mix(photo, graded, uGradeAmount);
+            color += vec3(0.92, 0.95, 1.0) * star * uStars * (0.55 + 0.45 * h) * (0.3 + 0.7 * uNight);
           }
           gl_FragColor = vec4(color, 1.0);
           #include <colorspace_fragment>
@@ -670,9 +681,9 @@ export class CityEngine {
   }
 
   /** 开拍：镜头接管相机与时间游标；用户点/拖画布即中止。 */
-  startCinematic(): CinematicPlan | null {
+  startCinematic(cut: CinematicCut = "full"): CinematicPlan | null {
     if (!this.layout || !this.model || !this.parts) return null;
-    const plan = planCinematic(this.layout, this.model, this.parts.anchors());
+    const plan = planCinematic(this.layout, this.model, this.parts.anchors(), { cut });
     this.tween = null;
     this.playing = false;
     this.attracted = false;
@@ -702,6 +713,85 @@ export class CityEngine {
     this.parts?.applyCursor(this.model?.windowEndMs ?? Date.now(), true);
     this.options.onTimeCursor?.(this.model?.windowEndMs ?? Date.now(), true);
     this.options.onCinematic?.(0, state.plan, true);
+  }
+
+  /** 逐帧导出航拍（WebM）。
+   *  确定性：不读墙钟——每一帧用固定步长 1/fps 推进 elapsed、相机、昼夜与所有动画，再渲染、叠字、交给编码器；
+   *  时间戳取自帧序号，所以渲染比实时慢多少都不影响成片速度（MediaRecorder 做不到这一点）。
+   *  需要 WebCodecs（VideoEncoder，VP9/VP8）；不支持时抛错，由页面提示。 */
+  async renderFilm(options: {
+    cut: CinematicCut; width: number; height: number; fps: number; bitrate: number; letterbox: number;
+    describe: (card: import("./cityCinematic").CinematicCard) => FilmCardText | null; watermark: string;
+    onProgress?: (frame: number, total: number) => void; signal?: AbortSignal;
+    /** 每帧叠完字幕、交给编码器之前的回调（验收「逐帧像素可复现」用；生产路径不传）。 */
+    onFrame?: (canvas: HTMLCanvasElement, frame: number) => void;
+  }): Promise<Blob> {
+    if (!this.layout || !this.model || !this.parts) throw new Error("city not ready");
+    if (typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined") throw new Error("WebCodecs unavailable");
+    const candidates: Array<{ codec: WebmCodec; string: string }> = [{ codec: "V_VP9", string: "vp09.00.10.08" }, { codec: "V_VP8", string: "vp8" }];
+    let chosen: { codec: WebmCodec; string: string } | null = null;
+    for (const candidate of candidates) {
+      const support = await VideoEncoder.isConfigSupported({ codec: candidate.string, width: options.width, height: options.height, bitrate: options.bitrate, framerate: options.fps });
+      if (support.supported) { chosen = candidate; break; }
+    }
+    if (!chosen) throw new Error("no WebM-capable video encoder");
+
+    // 暂停实时循环，接管渲染。
+    this.stopLoop();
+    const wasQuality = this.quality;
+    const savedElapsed = this.elapsed;
+    this.exportSize = { width: options.width, height: options.height };
+    this.applyQualityLevel(2);
+    const plan = this.startCinematic(options.cut);
+    if (!plan) { this.exportSize = null; this.applyQualityLevel(wasQuality); this.startLoop(); throw new Error("cinematic unavailable"); }
+    const film = document.createElement("canvas");
+    film.width = options.width;
+    film.height = options.height;
+    const ctx = film.getContext("2d");
+    if (!ctx) throw new Error("2d context unavailable");
+    const writer = new WebmWriter({ codec: chosen.codec, width: options.width, height: options.height });
+    let encodeError: unknown = null;
+    const encoder = new VideoEncoder({
+      output: (chunk) => {
+        const data = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(data);
+        writer.addChunk(chunk.timestamp / 1000, chunk.type === "key", data);
+      },
+      error: (error) => { encodeError = error; },
+    });
+    encoder.configure({ codec: chosen.codec === "V_VP9" ? "vp09.00.10.08" : "vp8", width: options.width, height: options.height, bitrate: options.bitrate, framerate: options.fps });
+    const dt = 1 / options.fps;
+    const filmLength = plan.durationSec + 4; // 片尾停在全景 4 秒（同实时版）
+    const total = Math.ceil(filmLength * options.fps);
+    // 预热：让云/水/车等就位，不进片子。
+    try {
+      for (let frame = 0; frame < total; frame += 1) {
+        if (options.signal?.aborted) throw new DOMException("aborted", "AbortError");
+        if (encodeError) throw encodeError;
+        this.elapsed += dt;
+        this.updateScene(dt);
+        this.renderFrame();
+        ctx.drawImage(this.options.canvas, 0, 0, options.width, options.height);
+        drawFilmOverlay(ctx, { width: options.width, height: options.height, seconds: frame * dt, durationSec: filmLength, cards: plan.cards, describe: options.describe, watermark: options.watermark, letterbox: options.letterbox });
+        options.onFrame?.(film, frame);
+        const videoFrame = new VideoFrame(film, { timestamp: Math.round(frame * dt * 1_000_000) });
+        encoder.encode(videoFrame, { keyFrame: frame % (options.fps * 2) === 0 });
+        videoFrame.close();
+        // 反压：编码队列堆积时让出事件循环，避免内存暴涨；顺便让进度条刷新。
+        if (encoder.encodeQueueSize > 6 || frame % 5 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+        options.onProgress?.(frame + 1, total);
+      }
+      await encoder.flush();
+      if (encodeError) throw encodeError;
+      return writer.finish(filmLength * 1000);
+    } finally {
+      try { encoder.close(); } catch { /* 已关闭 */ }
+      this.stopCinematic();
+      this.exportSize = null;
+      this.elapsed = savedElapsed;
+      this.applyQualityLevel(wasQuality);
+      this.startLoop();
+    }
   }
 
   get isCinematic(): boolean {
@@ -741,11 +831,19 @@ export class CityEngine {
   /** 昼夜循环：live 跟随真实本地时间，回放跟随时间轴游标的小时——
    *  拖动时间轴可以看到城市从白天进入黄昏与夜晚（亮窗/星空/水色变化）。 */
   private updateDaylight(): void {
-    const now = this.cursorMs !== null ? new Date(this.cursorMs) : new Date();
-    const hour = now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600;
+    // 航拍用固定的「黄昏渐入」：15:00 → 19:36 随片长线性推进，片尾城市全亮。
+    // 不能跟随真实时钟（导出的片子必须可复现），也不能跟随回放游标（90 天窗口在片中转 90 个昼夜，会频闪）。
+    let hour: number;
+    if (this.cinematic) {
+      hour = CINEMATIC_HOUR_FROM + (CINEMATIC_HOUR_TO - CINEMATIC_HOUR_FROM) * Math.min(1, this.cinematic.lastSeconds / this.cinematic.plan.durationSec);
+    } else {
+      const now = this.cursorMs !== null ? new Date(this.cursorMs) : new Date();
+      hour = now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600;
+    }
     // 插值随秒连续；仅在跨过 0.02h（~72s）时重写 uniform，避免无谓上传。
-    if (Math.abs(hour - this.lastSkyHour) < 0.02) return;
+    if (Math.abs(hour - this.lastSkyHour) < (this.cinematic ? 0.0005 : 0.02)) return;
     this.lastSkyHour = hour;
+    this.applyDayMix(hour);
     const sky = skyStateAt(hour);
     this.applySky(sky);
   }
@@ -759,6 +857,10 @@ export class CityEngine {
     (skyUniforms.horizonColor.value as THREE.Color).set(sky.horizon);
     skyUniforms.uStars.value = sky.stars;
     skyUniforms.uSkyDim.value = 0.22 + 0.78 * Math.min(1, sky.sunIntensity / 1.2);
+    // sunIntensity：日 1.55 / 黄昏 1.05 / 夜 0.32 → 黄昏及之前 0，入夜渐变到 1。
+    const night = 1 - Math.min(1, Math.max(0, (sky.sunIntensity - 0.32) / (0.95 - 0.32)));
+    skyUniforms.uNight.value = night * night * (3 - 2 * night);
+    this.parts?.setNightWater(skyUniforms.uNight.value);
     (this.scene.background as THREE.Color).set(sky.fog);
     const fog = this.scene.fog;
     if (fog && fog instanceof THREE.Fog) {
@@ -808,6 +910,7 @@ export class CityEngine {
       // 夜晚城市亮窗：立面自发光抬升（保留 theme 基线的下限）。
       this.parts.setNightGlow(sky.selfLit);
       this.parts.applySelfLit(this.themeSelfLit);
+      this.parts.setNightWater(skyUniforms.uNight.value as number);
     }
   }
 

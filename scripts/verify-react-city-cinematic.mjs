@@ -47,7 +47,9 @@ for (const district of layout.districts) for (const [id, slot] of district.slots
   const building = buildings.find((item) => item.id === id);
   anchors.set(id, { x: slot.x, z: slot.z, height: building.height, ground: district.grounds.get(id) ?? 0 });
 }
-const plan = planCinematic(layout, model, anchors);
+// 完整版与 30–45 秒短版都要满足同一套节奏/净空/加速度断言；只有片长与字卡要求不同。
+for (const cut of ["full", "short"]) {
+const plan = planCinematic(layout, model, anchors, { cut });
 
 const dt = 0.1;
 const samples = [];
@@ -91,7 +93,8 @@ if (process.argv.includes("--report") && seed === Number(process.env.SEED ?? see
 // 片长随岛的尺寸增长（规模档位放大岛）：上限按岛半径线性放宽，基准 520 半径对应 120s。
 // 片长随岛的尺寸增长（规模档位放大岛）：绕岛一圈的航线在基准岛上约 90–125s。
 const lengthCap = 130 * Math.max(1, layout.islandRadius / 520);
-assert(plan.durationSec >= 35 && plan.durationSec <= lengthCap, `film length ${plan.durationSec.toFixed(1)}s out of 35–${lengthCap.toFixed(0)}s`);
+if (cut === "full") assert(plan.durationSec >= 35 && plan.durationSec <= lengthCap, `film length ${plan.durationSec.toFixed(1)}s out of 35–${lengthCap.toFixed(0)}s`);
+else assert(plan.durationSec >= 18 && plan.durationSec <= 55, `short cut ${plan.durationSec.toFixed(1)}s out of 18–55s`);
 assert(report.speed.max <= 122, `cruise speed peaks at ${report.speed.max} u/s (cap 120)`);
 // 视觉速度稳定：巡航段的 95 分位不超过中位数的 2 倍。
 assert(report.visualRadPerSec.p95 <= report.visualRadPerSec.p50 * 2, `visual speed unstable: p95 ${report.visualRadPerSec.p95} vs p50 ${report.visualRadPerSec.p50}`);
@@ -101,7 +104,8 @@ for (const [name, , dwell] of report.districtCards) assert(dwell >= 3, `${name} 
 // 机位偏移是相对常数，换地形后不能把镜头送进山里或贴着地面。
 const lowest = Math.min(...samples.map((sample) => sample.clearance));
 assert(lowest >= 8, `seed ${seed}: camera passes ${lowest.toFixed(1)} above terrain`);
-assert.equal(report.districtCards.length, hosts.length, `seed ${seed}: every host district gets a shot`);
-console.log(`  seed ${seed}: ${report.durationSec}s, cruise ${report.speed.min}–${report.speed.max} u/s, visual p50 ${report.visualRadPerSec.p50} / p95 ${report.visualRadPerSec.p95} rad/s, accel ${report.maxRelativeAccelPerSec}×/s, min clearance ${lowest.toFixed(0)}`);
+if (cut === "full") assert.equal(report.districtCards.length, hosts.length, `seed ${seed}: every host district gets a shot`);
+console.log(`  seed ${seed} ${cut}: ${report.durationSec}s, cruise ${report.speed.min}–${report.speed.max} u/s, visual p50 ${report.visualRadPerSec.p50} / p95 ${report.visualRadPerSec.p95} rad/s, accel ${report.maxRelativeAccelPerSec}×/s, min clearance ${lowest.toFixed(0)}`);
+}
 }
 console.log(`City cinematic: pacing, clearance and district shots passed for ${seeds.length} seeds.`);

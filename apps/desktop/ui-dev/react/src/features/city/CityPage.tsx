@@ -8,8 +8,7 @@ import "./city.css";
 import { CityLoader, CITY_WINDOWS, type CityWindowKind } from "./cityData";
 import type { CityBuilding, CityModel } from "./cityModel";
 import { paletteFor } from "./engine/cityTextures";
-import type { CityThemeName } from "./engine/cityTheme";
-import type { CinematicCard } from "./engine/cityCinematic";
+import type { CinematicCard, CinematicCut } from "./engine/cityCinematic";
 import { loadCitySeed, resetCitySeed, setCitySeed } from "./citySeed";
 import { CityEngine, type EngineQualityMode, type EngineStats } from "./engine/CityEngine";
 import { hostName } from "../../lib/hostNames";
@@ -46,14 +45,6 @@ function durationLabel(startedAt: number, endedAt: number | null, language: AppL
   return message("city.detail.days", language, { count: Math.round(hours / 24) });
 }
 
-function readStoredTheme(): CityThemeName {
-  try {
-    return window.localStorage.getItem("cityTheme") === "vice" ? "vice" : "day";
-  } catch {
-    return "day";
-  }
-}
-
 /** 帧率/绘制次数是调试信息：只在 ?cityDebug 或 localStorage.cityDebug=1 时显示，不给最终用户。 */
 function cityDebugEnabled(): boolean {
   try {
@@ -84,7 +75,6 @@ export function CityPage() {
   const [labelsVisible, setLabelsVisible] = useState(true);
   const labelsVisibleRef = useRef(labelsVisible);
   labelsVisibleRef.current = labelsVisible;
-  const [theme, setTheme] = useState<CityThemeName>(readStoredTheme);
   /** 「重新生成岛屿」两步确认：第一次点击只是武装按钮，4 秒内再点才执行。 */
   const [confirmReseed, setConfirmReseed] = useState(false);
   /** 当前岛屿种子（显示在输入框里，可手动改，回车生效并保存）。 */
@@ -270,15 +260,6 @@ export function CityPage() {
     engineRef.current?.setLabelsVisible(labelsVisible);
   }, [labelsVisible]);
 
-  useEffect(() => {
-    const engine = engineRef.current;
-    if (!engine) return;
-    engine.setTheme(theme);
-    // applyModel 会把标签重置为可见，按当前开关再套一次。
-    engine.setLabelsVisible(labelsVisible);
-    try { window.localStorage.setItem("cityTheme", theme); } catch { /* 无存储时仅本次生效 */ }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [theme]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -330,6 +311,50 @@ export function CityPage() {
     setCinema({ card: null, progress: 0 });
   };
 
+  // ── 导出视频（WebM，逐帧确定性渲染；见 CityEngine.renderFilm）──
+  const [exportCut, setExportCut] = useState<CinematicCut>("short");
+  const [exportState, setExportState] = useState<{ frame: number; total: number } | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const exportAbort = useRef<AbortController | null>(null);
+
+  /** 字卡文案：与页面里实时版同一套 i18n，数字全部是聚合量（不含会话标题/路径）。 */
+  const describeCard = (card: CinematicCard) => {
+    const current = modelRef.current;
+    if (!current) return null;
+    if (card.kind === "title") return { eyebrow: message("city.cinema.eyebrow", language), title: message("city.cinema.title", language, { sessions: current.stats.totalSessions }), subtitle: message("city.cinema.subtitle", language, { window: message(`city.window.${windowKind}` as "city.window.7d", language), tokens: formatTokenCount(current.stats.tokensTotal) }) };
+    if (card.kind === "district") return { eyebrow: message("city.cinema.district", language), title: card.text, subtitle: message("city.cinema.districtSessions", language, { count: Number(card.detail ?? 0) }) };
+    return { title: formatTokenCount(current.stats.tokensTotal), subtitle: message("city.cinema.finale", language, { sessions: current.stats.totalSessions, districts: current.districts.length }) };
+  };
+
+  const exportFilm = async () => {
+    const engine = engineRef.current;
+    if (!engine || exportState) return;
+    setExportError(null);
+    setSelectedId(null);
+    selectedRef.current = null;
+    const controller = new AbortController();
+    exportAbort.current = controller;
+    setExportState({ frame: 0, total: 1 });
+    try {
+      const blob = await engine.renderFilm({
+        cut: exportCut, width: 1920, height: 1080, fps: 30, bitrate: 12_000_000, letterbox: 2.39,
+        describe: describeCard, watermark: "agent-vitals", signal: controller.signal,
+        onProgress: (frame, total) => setExportState({ frame, total }),
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `agent-city-${exportCut}-${new Date().toISOString().slice(0, 10)}.webm`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (reason) {
+      if (!(reason instanceof DOMException && reason.name === "AbortError")) setExportError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      exportAbort.current = null;
+      setExportState(null);
+    }
+  };
+
   const cinemaOn = cinema !== null;
   useEffect(() => {
     if (!cinemaOn) return;
@@ -370,10 +395,6 @@ export function CityPage() {
           <option value="auto">{message("city.quality.auto", language)}</option>
           <option value="high">{message("city.quality.high", language)}</option>
           <option value="eco">{message("city.quality.eco", language)}</option>
-        </SelectInput>
-        <SelectInput aria-label={message("city.theme", language)} value={theme} onChange={(event) => setTheme(event.target.value as CityThemeName)}>
-          <option value="day">{message("city.theme.day", language)}</option>
-          <option value="vice">{message("city.theme.vice", language)}</option>
         </SelectInput>
         <Button type="button" onClick={() => setLabelsVisible((value) => !value)}>{message(labelsVisible ? "city.labelsHide" : "city.labelsShow", language)}</Button>
         <Button type="button" onClick={() => engineRef.current?.resetView()}>{message("city.resetView", language)}</Button>
@@ -421,7 +442,14 @@ export function CityPage() {
             onBlur={() => setSeedDraft(seed === null ? "" : String(seed))}
           />
         </form>
-        <Button type="button" className="city-cinema-button" onClick={startCinematic} disabled={!model || model.stats.totalSessions === 0 || cinema !== null}>{message("city.cinema.start", language)}</Button>
+        <Button type="button" className="city-cinema-button" onClick={startCinematic} disabled={!model || model.stats.totalSessions === 0 || cinema !== null || exportState !== null}>{message("city.cinema.start", language)}</Button>
+        <SelectInput aria-label={message("city.export.cut", language)} value={exportCut} disabled={exportState !== null} onChange={(event) => setExportCut(event.target.value as CinematicCut)}>
+          <option value="short">{message("city.export.short", language)}</option>
+          <option value="full">{message("city.export.full", language)}</option>
+        </SelectInput>
+        <Button type="button" onClick={exportState ? () => exportAbort.current?.abort() : exportFilm} disabled={!model || model.stats.totalSessions === 0 || cinema !== null}>
+          {exportState ? message("city.export.cancel", language, { percent: Math.round((exportState.frame / Math.max(1, exportState.total)) * 100) }) : message("city.export.start", language)}
+        </Button>
       </div>
     </ToolbarActions>
 
@@ -497,6 +525,7 @@ export function CityPage() {
 
     {loading && !model && <div className="city-state" role="status"><strong>{message("city.loading", language)}</strong><p>{message("city.loadingHelp", language)}</p></div>}
     {error && <div className="error-banner city-error" role="alert">{error}</div>}
+    {exportError && <div className="error-banner city-error" role="alert">{message("city.export.error", language, { reason: exportError })}</div>}
     {!loading && model && model.stats.totalSessions === 0 && !error && <div className="city-state"><strong>{message("city.empty", language)}</strong><p>{message("city.emptyHelp", language)}</p></div>}
 
     {stats && cityDebugEnabled() && <p className="city-perf" aria-hidden="true">{message("city.perf", language, { fps: stats.fps, calls: stats.drawCalls, buildings: stats.buildings, quality: stats.quality })}{stats.idle ? ` · ${message("city.perfIdle", language)}` : ""}</p>}

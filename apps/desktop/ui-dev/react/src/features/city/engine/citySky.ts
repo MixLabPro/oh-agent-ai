@@ -67,10 +67,11 @@ const DUSK: CitySkyPreset = {
 const NIGHT: CitySkyPreset = {
   top: "#141f3a", middle: "#223358", horizon: "#42598a",
   fog: "#1f3050", fogNearFactor: 1.7, fogFarFactor: 6.4,
-  hemiSky: "#2c3f66", hemiGround: "#1a2233", hemiIntensity: 0.52,
+  // 夜里的月光环境光：曾是 #2c3f66 × 0.52，远山/气球/地面几乎纯黑；抬到能看出轮廓与地面的程度。
+  hemiSky: "#4d67a6", hemiGround: "#2b3652", hemiIntensity: 0.9,
   sunColor: "#a9bde0", sunIntensity: 0.32,
   sunAzimuth: 4.4, sunElevation: 0.7,
-  fillColor: "#31456e", fillIntensity: 0.3, backColor: "#5a74a8", backIntensity: 0.35,
+  fillColor: "#3d5688", fillIntensity: 0.42, backColor: "#6b86c0", backIntensity: 0.45,
   waterShallow: "#27415e", waterDeep: "#101f33",
   cloudOpacity: 0.55, selfLit: 1.0, stars: 1,
 };
