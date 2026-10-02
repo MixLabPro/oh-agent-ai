@@ -30,6 +30,7 @@ import { CityParts, type QualityLevel } from "./cityParts";
 import { skyStateAt, type CitySkyPreset } from "./citySky";
 import { CityAurora } from "./cityAurora";
 import { CityAmbient } from "./cityAmbient";
+import { CityWildlife } from "./cityWildlife";
 
 /** 航拍的昼夜区间（小时）：黄昏渐入，片尾 > 19:00 城市全亮（见 citySky 的灯光曲线）。 */
 const CINEMATIC_HOUR_FROM = 15;
@@ -79,6 +80,7 @@ export class CityEngine {
   private lastSkyHour = -1;
   private aurora: CityAurora | null = null;
   private ambient: CityAmbient | null = null;
+  private wildlife: CityWildlife | null = null;
   private fillLight: THREE.DirectionalLight | null = null;
   private backLight: THREE.DirectionalLight | null = null;
   /** 当前 theme 的立面自发光基线（昼夜在其上抬升）。 */
@@ -353,6 +355,9 @@ export class CityEngine {
     this.ambient?.dispose();
     this.ambient = new CityAmbient(this.cityCenter, Math.max(120, layout.boundsRadius) * 0.6, layout.terrain.height, layout.river);
     this.scene.add(this.ambient.group);
+    this.wildlife?.dispose();
+    this.wildlife = new CityWildlife(this.cityCenter, Math.max(120, layout.boundsRadius), layout.parkTrees ?? [], layout.seaMountains ?? []);
+    this.scene.add(this.wildlife.group);
     if (!this.fillLight) {
       this.fillLight = new THREE.DirectionalLight("#cfe8ef", 0.35);
       this.backLight = new THREE.DirectionalLight("#ffffff", 0.15);
@@ -909,6 +914,7 @@ export class CityEngine {
       if (clouds) clouds.opacity = sky.cloudOpacity;
       this.aurora?.setNight(sky.stars);
       this.ambient?.setNight(sky.stars);
+      this.wildlife?.setNight(sky.stars, this.cursorMs ?? Date.now());
       // 夜晚城市亮窗：立面自发光抬升（保留 theme 基线的下限）。
       this.parts.setNightGlow(sky.selfLit);
       this.parts.applySelfLit(this.themeSelfLit);
@@ -920,6 +926,7 @@ export class CityEngine {
     this.updateDaylight();
     this.aurora?.update(dt);
     this.ambient?.update(dt, this.elapsed);
+    this.wildlife?.update(dt, this.elapsed);
     if (this.updateCinematic()) {
       this.parts?.update(dt, this.elapsed);
       return;
@@ -1019,6 +1026,8 @@ export class CityEngine {
     this.aurora = null;
     this.ambient?.dispose();
     this.ambient = null;
+    this.wildlife?.dispose();
+    this.wildlife = null;
     this.disposablesSky.forEach((disposable) => disposable.dispose());
     this.renderer.dispose();
   }
