@@ -1,9 +1,10 @@
 /**
  * 城市天气（tinyskies RainOverlay/RainbowArch 手法，作者授权参考）：
  *  · 按日期哈希确定性生成——回放同一天必现同天气（流星夜同款纪律）；
- *  · 三态：clear 62% / overcast 20% / rain 18%，一天内恒定、首尾 1.5h 平滑过渡；
- *  · 雨后清晨出彩虹（昨日降雨 + 当日哈希，50%），上午渐隐；
- *  · 渲染层：程序化雨丝屏幕层（玻璃水珠折射版需要读帧缓冲，太贵不搬）+ 光谱弧。
+ *  · 三态：clear 62% / overcast 20% / rain 18%，按**本地**日期定，首尾 1.5h 平滑过渡；
+ *  · 雨天里阵雨一阵一阵（原版 getRainWeight 的两条慢正弦 + smoothstep 阈值，相位按当天播种）；
+ *  · 雨后清晨出彩虹（昨日降雨 + 当日哈希，50%），日出后出现、上午渐隐；
+ *  · 渲染层：离散雨线（原版 RainOverlay 的做法与参数）+ 光谱弧。原版的玻璃水珠折射与闪电未移植。
  *  天气是纯装饰（同气球/流星），不映射任何数据语义。
  */
 
@@ -18,22 +19,34 @@ const OVERCAST_THRESHOLD = 0.62;
 
 /** 某时刻的天气。ms 为回放游标或真实时钟。 */
 export function weatherAt(ms: number): WeatherState {
-  const dayIndex = Math.floor(ms / 86_400_000);
-  const hour = (ms / 3_600_000) % 24;
+  // 按本地时间切日：曾用 ms/86_400_000（UTC 日界），天空用本地小时——北京时间每天 8 点天气突变。
+  const local = ms - new Date(ms).getTimezoneOffset() * 60_000;
+  const dayIndex = Math.floor(local / 86_400_000);
+  const hour = (local / 3_600_000) % 24;
   // 顺序日期先过一次 Knuth 混淆再入哈希：FNV 对「末位数字 +1」的字符串雪崩
   // 不足，直接哈希会让相邻日期的天气强相关（实测连出十几天的同种天气）。
   const roll = hashSeed(`weather:${(Math.imul(dayIndex, 2654435761) ^ 0x9e3779b9) >>> 0}`);
   const kind: WeatherKind = roll < OVERCAST_THRESHOLD ? "clear" : roll < RAIN_THRESHOLD ? "overcast" : "rain";
   // 首尾 1.5 小时包络：跨日不跳变，日内恒定。
   const envelope = Math.max(0, Math.min(1, Math.min(hour / 1.5, (24 - hour) / 1.5)));
-  const intensity = kind === "clear" ? 0 : envelope;
+  // 阵雨：原版 DayNightCycle.getRainWeight——两条频率比无理的慢正弦加权，过 0.50–0.58 的 smoothstep。
+  // 原版按秒（周期 ~2 分钟，游戏时间）；这里按小时（周期 ~1.7h / 3.9h），相位按当天播种，回放可复现。
+  // 雨天下限 0.25：阴雨天的间隙仍飘着毛毛雨，不会突然变成晴天里的雨天。
+  const seed = hashSeed(`rainphase:${dayIndex}`) * 100;
+  const a = Math.sin(hour * 3.7 + seed * 1.7) * 0.5 + 0.5;
+  const b = Math.sin(hour * 1.6 + seed * 3.1) * 0.5 + 0.5;
+  const raw = a * 0.65 + b * 0.35;
+  const shower = Math.max(0, Math.min(1, (raw - 0.5) / 0.08));
+  const showerWeight = 0.25 + 0.75 * shower * shower * (3 - 2 * shower);
+  const intensity = kind === "clear" ? 0 : kind === "rain" ? envelope * showerWeight : envelope;
   const overcast = kind === "clear" ? 0 : envelope * (kind === "rain" ? 1 : 0.72);
   const yesterdayRained = hashSeed(`weather:${(Math.imul(dayIndex - 1, 2654435761) ^ 0x9e3779b9) >>> 0}`) >= RAIN_THRESHOLD;
-  const rainbow = yesterdayRained && hashSeed(`bow:${dayIndex}`) < 0.5 ? Math.max(0, Math.min(1, (11 - hour) / 2.5)) : 0;
+  // 只在日出后（6:00–7:30 淡入）到上午（8:30–11:00 淡出）：曾只有 (11-hour)/2.5，凌晨 0–6 点整夜挂着彩虹。
+  const sunrise = Math.max(0, Math.min(1, (hour - 6) / 1.5));
+  const rainbow = yesterdayRained && hashSeed(`bow:${dayIndex}`) < 0.5 ? sunrise * Math.max(0, Math.min(1, (11 - hour) / 2.5)) : 0;
   return { kind, intensity, overcast, rainbow };
 }
 
-/** 屏幕空间雨丝：相机前方跟随的四边形 + 程序化斜雨（三层不同密度/速度/倾角）。 */
 /** 雨丝：移植 tinyskies RainOverlay 的「离散雨线」做法（作者授权参考）。
  *  曾是整屏程序化 shader（固定列格 + 同速下落），读作一排排雪片/方块（用户截图两次）。
  *  原版：≤50 根独立雨线，每根各自的速度 1.8–3.2 屏/秒、长度 8–22% 屏高、宽 0.15–0.3% 屏宽、
@@ -143,7 +156,8 @@ export class RainOverlay {
       if (streak.y < -1.3) { streak.active = false; continue; }
       this.position.set(streak.x, streak.y, 0);
       this.quaternion.setFromAxisAngle(this.zAxis, streak.angle);
-      this.scale.set(streak.width, streak.length, 1);
+      // 宽度按屏幕宽高比折算：NDC 的 x 跨度在宽屏上更长，原版这里没校正，16:9 下雨线横向被拉粗。
+      this.scale.set(streak.width / this.uniforms.uAspect.value, streak.length, 1);
       this.matrix.compose(this.position, this.quaternion, this.scale);
       this.mesh.setMatrixAt(visible, this.matrix);
       visible += 1;
@@ -173,8 +187,10 @@ export class RainbowArch {
       uniforms: this.uniforms,
       vertexShader: /* glsl */ `
         varying float vRadius;
+        varying float vArc;
         void main() {
           vRadius = length(position.xy);
+          vArc = atan(position.y, position.x) / 3.14159265; // 0 = 右脚, 1 = 左脚
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }`,
       fragmentShader: /* glsl */ `
@@ -182,8 +198,9 @@ export class RainbowArch {
         uniform float uInner;
         uniform float uOuter;
         varying float vRadius;
+        varying float vArc;
         vec3 band(float t) {
-          // 光谱：外缘紫 → 内缘红，只在环带内可见（RingGeometry 的 uv.y 跨越环宽）。
+          // t = 0 → 紫，1 → 红。
           vec3 spectrum[6] = vec3[6](
             vec3(0.5, 0.2, 0.85), vec3(0.15, 0.35, 0.95), vec3(0.1, 0.75, 0.9),
             vec3(0.2, 0.85, 0.3), vec3(1.0, 0.85, 0.1), vec3(1.0, 0.25, 0.15)
@@ -197,7 +214,10 @@ export class RainbowArch {
           // 自下而上贯穿整道弧，不是环带宽度方向：颜色被拉满整个弧高，环带内几乎是同一种色。
           float t = clamp((vRadius - uInner) / (uOuter - uInner), 0.0, 1.0);
           float edge = smoothstep(0.0, 0.18, t) * smoothstep(1.0, 0.82, t);
-          gl_FragColor = vec4(band(t), edge * uOpacity * 0.55);
+          // 两脚淡出（原版 groundFade = sin(u·π)）：曾在海平面处硬切。不透明度只在 set() 里乘一次 0.55
+          // ——曾在这里再乘一次，峰值只有原版的一半。
+          float groundFade = sin(clamp(vArc, 0.0, 1.0) * 3.14159265);
+          gl_FragColor = vec4(band(t), edge * groundFade * uOpacity);
         }`,
     });
     const geometry = new THREE.RingGeometry(radius * 0.78, radius, 48, 1, 0, Math.PI);
