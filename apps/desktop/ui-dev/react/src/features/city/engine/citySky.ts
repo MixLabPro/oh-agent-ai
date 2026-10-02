@@ -27,6 +27,11 @@ export type CitySkyPreset = {
   /** 太阳方位角（弧度，绕城心）与高度角（弧度）。 */
   sunAzimuth: number;
   sunElevation: number;
+  /** 三点布光的补光/轮廓光（参考 tinyskies 的 fill/back，颜色+强度）。 */
+  fillColor: string;
+  fillIntensity: number;
+  backColor: string;
+  backIntensity: number;
   waterShallow: string;
   waterDeep: string;
   cloudOpacity: number;
@@ -42,6 +47,7 @@ const DAY: CitySkyPreset = {
   hemiSky: "#eaf6fa", hemiGround: "#cbbfa6", hemiIntensity: 0.95,
   sunColor: "#fff3de", sunIntensity: 1.55,
   sunAzimuth: 1.05, sunElevation: 0.95,
+  fillColor: "#cfe8ef", fillIntensity: 0.35, backColor: "#ffffff", backIntensity: 0.15,
   waterShallow: "#a5d6da", waterDeep: "#57a3b4",
   cloudOpacity: 0.88, selfLit: 0.05, stars: 0,
 };
@@ -52,6 +58,7 @@ const DUSK: CitySkyPreset = {
   hemiSky: "#f0dcc2", hemiGround: "#8d7c66", hemiIntensity: 0.72,
   sunColor: "#ffcf96", sunIntensity: 1.05,
   sunAzimuth: 3.35, sunElevation: 0.18,
+  fillColor: "#ffd2a0", fillIntensity: 0.55, backColor: "#ff9a5e", backIntensity: 0.5,
   waterShallow: "#d3bd93", waterDeep: "#5f7383",
   // 18:00 起城市灯光要明确亮起：黄昏档就把亮窗推高，入夜接满档。
   cloudOpacity: 0.8, selfLit: 0.8, stars: 0.15,
@@ -63,6 +70,7 @@ const NIGHT: CitySkyPreset = {
   hemiSky: "#2c3f66", hemiGround: "#1a2233", hemiIntensity: 0.52,
   sunColor: "#a9bde0", sunIntensity: 0.32,
   sunAzimuth: 4.4, sunElevation: 0.7,
+  fillColor: "#31456e", fillIntensity: 0.3, backColor: "#5a74a8", backIntensity: 0.35,
   waterShallow: "#27415e", waterDeep: "#101f33",
   cloudOpacity: 0.55, selfLit: 1.0, stars: 1,
 };
@@ -80,8 +88,8 @@ const KEYFRAMES: Array<{ hour: number; preset: CitySkyPreset }> = [
   { hour: 24, preset: NIGHT },
 ];
 
-type ColorSlot = "top" | "middle" | "horizon" | "fog" | "hemiSky" | "hemiGround" | "sunColor" | "waterShallow" | "waterDeep";
-const COLOR_SLOTS: ColorSlot[] = ["top", "middle", "horizon", "fog", "hemiSky", "hemiGround", "sunColor", "waterShallow", "waterDeep"];
+type ColorSlot = "top" | "middle" | "horizon" | "fog" | "hemiSky" | "hemiGround" | "sunColor" | "fillColor" | "backColor" | "waterShallow" | "waterDeep";
+const COLOR_SLOTS: ColorSlot[] = ["top", "middle", "horizon", "fog", "hemiSky", "hemiGround", "sunColor", "fillColor", "backColor", "waterShallow", "waterDeep"];
 
 const colorA = new THREE.Color();
 const colorB = new THREE.Color();
@@ -90,6 +98,7 @@ const scratch: CitySkyPreset = {
   fogNearFactor: 0, fogFarFactor: 0,
   hemiSky: "", hemiGround: "", hemiIntensity: 0,
   sunColor: "", sunIntensity: 0, sunAzimuth: 0, sunElevation: 0,
+  fillColor: "", fillIntensity: 0, backColor: "", backIntensity: 0,
   waterShallow: "", waterDeep: "", cloudOpacity: 0, selfLit: 0, stars: 0,
 };
 
@@ -134,6 +143,8 @@ export function skyStateAt(hour: number): CitySkyPreset {
   scratch.sunIntensity = lerp(a.sunIntensity, b.sunIntensity, t);
   scratch.sunAzimuth = lerp(a.sunAzimuth, b.sunAzimuth, t);
   scratch.sunElevation = lerp(a.sunElevation, b.sunElevation, t);
+  scratch.fillIntensity = lerp(a.fillIntensity, b.fillIntensity, t);
+  scratch.backIntensity = lerp(a.backIntensity, b.backIntensity, t);
   scratch.cloudOpacity = lerp(a.cloudOpacity, b.cloudOpacity, t);
   scratch.selfLit = lerp(a.selfLit, b.selfLit, t);
   scratch.stars = lerp(a.stars, b.stars, t);

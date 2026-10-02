@@ -26,6 +26,7 @@ import { planCinematic, type CinematicPlan } from "./cityCinematic";
 import { layoutCity, type CityLayout } from "./cityLayout";
 import { CityParts, type QualityLevel } from "./cityParts";
 import { skyStateAt, type CitySkyPreset } from "./citySky";
+import { CityAurora } from "./cityAurora";
 
 export type EngineQualityMode = "auto" | "high" | "eco";
 export type EngineStats = { fps: number; drawCalls: number; triangles: number; buildings: number; quality: QualityLevel; idle: boolean };
@@ -69,6 +70,9 @@ export class CityEngine {
   private cursorMs: number | null = null; // null = live（跟随现在）
   /** 昼夜相位缓存（上次 apply 的 hour，变化才写 uniform）。 */
   private lastSkyHour = -1;
+  private aurora: CityAurora | null = null;
+  private fillLight: THREE.DirectionalLight | null = null;
+  private backLight: THREE.DirectionalLight | null = null;
   /** 当前 theme 的立面自发光基线（昼夜在其上抬升）。 */
   private themeSelfLit = activeTheme().name === "vice" ? 0.24 : 0.05;
   private playing = false;
@@ -355,6 +359,14 @@ export class CityEngine {
     this.scene.add(this.parts.group, this.parts.water);
 
     this.cityCenter = { x: (layout.urbanBounds.left + layout.urbanBounds.right) / 2, z: (layout.urbanBounds.north + layout.urbanBounds.south) / 2 };
+    this.aurora?.dispose();
+    this.aurora = new CityAurora(this.cityCenter, Math.max(120, layout.boundsRadius) * 0.6);
+    this.scene.add(this.aurora.group);
+    if (!this.fillLight) {
+      this.fillLight = new THREE.DirectionalLight("#cfe8ef", 0.35);
+      this.backLight = new THREE.DirectionalLight("#ffffff", 0.15);
+      this.scene.add(this.fillLight, this.backLight);
+    }
     const bounds = Math.max(100, Math.hypot(layout.urbanBounds.right - layout.urbanBounds.left, layout.urbanBounds.south - layout.urbanBounds.north) / 2 + 35);
     this.boundsRadius = bounds;
     this.controls.maxDistance = bounds * 4.5;
@@ -750,6 +762,12 @@ export class CityEngine {
     this.hemisphere.intensity = sky.hemiIntensity;
     this.sun.color.set(sky.sunColor);
     this.sun.intensity = sky.sunIntensity;
+    if (this.fillLight && this.backLight) {
+      this.fillLight.color.set(sky.fillColor);
+      this.fillLight.intensity = sky.fillIntensity;
+      this.backLight.color.set(sky.backColor);
+      this.backLight.intensity = sky.backIntensity;
+    }
     // 太阳绕城心的方位/高度角：白天高、黄昏低、夜晚是月光方向。
     const radius = 320;
     this.sun.position.set(
@@ -766,6 +784,7 @@ export class CityEngine {
       }
       const clouds = this.parts.cloudMaterial;
       if (clouds) clouds.opacity = sky.cloudOpacity;
+      this.aurora?.setNight(sky.stars);
       // 夜晚城市亮窗：立面自发光抬升（保留 theme 基线的下限）。
       this.parts.setNightGlow(sky.selfLit);
       this.parts.applySelfLit(this.themeSelfLit);
@@ -774,6 +793,7 @@ export class CityEngine {
 
   private updateScene(dt: number): void {
     this.updateDaylight();
+    this.aurora?.update(dt);
     if (this.updateCinematic()) {
       this.parts?.update(dt, this.elapsed);
       return;
@@ -869,6 +889,8 @@ export class CityEngine {
     this.mirror?.dispose();
     this.mirror = null;
     this.controls.dispose();
+    this.aurora?.dispose();
+    this.aurora = null;
     this.disposablesSky.forEach((disposable) => disposable.dispose());
     this.renderer.dispose();
   }
