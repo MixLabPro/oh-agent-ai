@@ -53,7 +53,7 @@ export function planCinematic(layout: CityLayout, model: CityModel, heights: Map
   // ── 航线（G1 种子地形版）：海上推近 → 绕城市核心一圈（经过每个城区时拉近、降低）→ 拉升全景。
   // 曾是「贴河低飞 → 环绕最高楼 → 逐个飞城区」一串任意顺序的控制点：换成种子地形后城区常在
   // 死胡同半岛上，路线在机位上折返（seed 7 / 42 反复出现，单点修补停不下来）。绕岛一圈时方位角
-  // 单调递增，结构上不可能掉头。贴河与环绕地标两段留待 G4 按主干道重做航线时再加回来。
+  // 单调递增，结构上不可能掉头；最高楼与最长的桥作为「特写停靠点」落在绕行路线上（见 features）。
   const center = layout.core ?? { x: cx, z: cz };
   const ranked = [...layout.districts]
     .map((d) => ({ layout: d, data: model.districts.find((m) => m.id === d.id) }))
@@ -76,6 +76,19 @@ export function planCinematic(layout: CityLayout, model: CityModel, heights: Map
   const angularGap = (a: number, b: number) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
   const cruiseRadius = Math.max(140, ...stops.map((stop) => stop.distance + 60));
   /** 方位 φ 处的半径/高度/注视点：离城区越近越贴近它（半径收到城区外缘 +60、高度降到 62）。 */
+  // 特写停靠点（G4 补回「环绕最高楼」「贴河低飞」两段）：同样落在绕行的方位角上，经过时相机靠近、降低并对准目标——
+  // 方位角仍单调递增，所以不会折返。最高楼：相机退到楼外 90、高度取楼高 85%、看向楼身 60% 处；
+  // 最长的桥（过河处）：贴近桥面 45 高、看向桥中点。
+  type Feature = { angle: number; radius: number; height: number; look: { x: number; y: number; z: number } };
+  const features: Feature[] = [];
+  if (hero.height > 30) {
+    features.push({ angle: Math.atan2(hero.z - center.z, hero.x - center.x), radius: Math.hypot(hero.x - center.x, hero.z - center.z) + 90, height: Math.max(40, hero.height * 0.85), look: { x: hero.x, y: hero.ground + hero.height * 0.6, z: hero.z } });
+  }
+  const longestBridge = [...(layout.bridges ?? [])].sort((a, b) => b.length - a.length)[0];
+  if (longestBridge) {
+    const mid = { x: (longestBridge.from.x + longestBridge.to.x) / 2, z: (longestBridge.from.z + longestBridge.to.z) / 2 };
+    features.push({ angle: Math.atan2(mid.z - center.z, mid.x - center.x), radius: Math.hypot(mid.x - center.x, mid.z - center.z) + 70, height: 45, look: { x: mid.x, y: 6, z: mid.z } });
+  }
   const near = (phi: number) => {
     let weight = 0; let radius = 0; let look = { x: center.x, z: center.z }; let lookWeight = 0;
     stops.forEach((stop) => {
@@ -84,11 +97,19 @@ export function planCinematic(layout: CityLayout, model: CityModel, heights: Map
       if (w > lookWeight) { lookWeight = w; look = stop.c; }
     });
     const pull = Math.min(1, weight);
-    return {
+    const base = {
       radius: cruiseRadius * (1 - pull) + (weight > 0 ? radius / weight : cruiseRadius) * pull,
       height: 120 - 58 * pull,
-      look: { x: center.x + (look.x - center.x) * lookWeight, z: center.z + (look.z - center.z) * lookWeight },
+      look: { x: center.x + (look.x - center.x) * lookWeight, y: 8, z: center.z + (look.z - center.z) * lookWeight },
     };
+    for (const feature of features) {
+      const w = Math.exp(-((angularGap(phi, feature.angle) / 0.3) ** 2));
+      if (w < 0.01) continue;
+      base.radius += (feature.radius - base.radius) * w;
+      base.height += (feature.height - base.height) * w;
+      base.look = { x: base.look.x + (feature.look.x - base.look.x) * w, y: base.look.y + (feature.look.y - base.look.y) * w, z: base.look.z + (feature.look.z - base.look.z) * w };
+    }
+    return base;
   };
   const orbitPoint = (phi: number) => {
     const n = near(phi);
@@ -99,7 +120,7 @@ export function planCinematic(layout: CityLayout, model: CityModel, heights: Map
     let sum = 0;
     for (let k = 0; k < 12; k += 1) { const a2 = (k / 12) * Math.PI * 2; sum += groundAt(x + Math.cos(a2) * 70, z + Math.sin(a2) * 70); }
     const reference = Math.max(groundAt(x, z), (sum / 12 + groundAt(x, z)) / 2);
-    return { pos: [x, reference + n.height, z] as [number, number, number], look: [n.look.x, 8, n.look.z] as [number, number, number] };
+    return { pos: [x, reference + n.height, z] as [number, number, number], look: [n.look.x, n.look.y, n.look.z] as [number, number, number] };
   };
 
   // 1. 远海推近：沿起点方位从海上高空压向城市。
