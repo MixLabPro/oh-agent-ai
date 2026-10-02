@@ -7,41 +7,63 @@
  */
 
 import * as THREE from "three";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { hashSeed } from "../cityModel";
 
 type Mountain = { center: { x: number; z: number }; radius: number; height: number; seed: number };
 
-/** V 字鸟群：两群海鸥剪影绕城巡航，白天可见、入夜归巢。单 InstancedMesh。 */
+/** V 字鸟群：3D 低模鸟——纺锤身体 + 楔形尾 + 双侧独立扇动的翼（tinyskies BirdFlock
+ *  手法，作者授权参考）。曾用扁平剪影：侧视是一条线、多数角度读不出鸟形；双翼
+ *  扇动 + 扇/滑翔交替才是任何距离下「是一只鸟」的第一特征。 */
 class BirdFlocks {
-  private readonly mesh: THREE.InstancedMesh;
-  private readonly material: THREE.MeshBasicMaterial;
+  private readonly bodyMesh: THREE.InstancedMesh;
+  private readonly wingMesh: THREE.InstancedMesh;
+  private readonly bodyMaterial: THREE.MeshLambertMaterial;
+  private readonly wingMaterial: THREE.MeshLambertMaterial;
   private readonly flocks: Array<{ orbit: number; radius: number; altitude: number; speed: number; phase: number; bob: number }> = [];
   private readonly offsets: Array<[number, number]>;
-  private daylight = 1;
-
+  private readonly matrix = new THREE.Matrix4();
+  private readonly wingMatrix = new THREE.Matrix4();
+  private readonly birdQuaternion = new THREE.Quaternion();
+  private readonly wingQuaternion = new THREE.Quaternion();
+  private readonly flapQuaternion = new THREE.Quaternion();
+  private readonly euler = new THREE.Euler();
+  private readonly position = new THREE.Vector3();
+  private readonly scaleVector = new THREE.Vector3();
+  private readonly mirror = new THREE.Matrix4().makeScale(1, 1, -1);
+  private readonly axisX = new THREE.Vector3(1, 0, 0);
   private readonly center: { x: number; z: number };
+  readonly group = new THREE.Group();
+  private daylight = 1;
 
   constructor(center: { x: number; z: number }, radius: number) {
     this.center = { ...center };
-    // 鸥形剪影：两片后掠翼 + 尾尖，6 个三角形的扁平 V——航拍距离下读作滑翔的鸟。
-    const shape = new THREE.Shape();
-    shape.moveTo(-1.7, 0.12); shape.lineTo(-0.5, 0.05); shape.lineTo(0, 0.28);
-    shape.lineTo(0.5, 0.05); shape.lineTo(1.7, 0.12); shape.lineTo(0.42, -0.1);
-    shape.lineTo(0, -0.02); shape.lineTo(-0.42, -0.1); shape.closePath();
-    const geometry = new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2);
-    this.material = new THREE.MeshBasicMaterial({ color: "#343a40", transparent: true, opacity: 0.85, side: THREE.DoubleSide });
-    // tinyskies BirdFlock 的 V 位（头鸟在前，两翼逐级后撤）；×3.2 拉到城市尺度。
+    // 身体：沿 +x（前进方向）拉长的纺锤 + 后方楔形尾；翼：薄三角从翼根向 +z 展开并
+    // 后掠，右翼复用同一几何、按 z 镜像摆放（DoubleSide 吃负缩放）。
+    const body = new THREE.SphereGeometry(0.3, 6, 5).scale(2.4, 0.85, 0.8);
+    const tail = new THREE.ConeGeometry(0.3, 0.85, 4).rotateZ(Math.PI / 2).translate(-0.95, 0.02, 0).scale(1, 0.16, 1);
+    const bodyGeometry = mergeGeometries([body, tail]);
+    const wingShape = new THREE.Shape();
+    wingShape.moveTo(0, 0); wingShape.lineTo(-0.45, 1.55); wingShape.lineTo(-1.0, 1.9); wingShape.lineTo(-0.55, 0.2); wingShape.closePath();
+    const wingGeometry = new THREE.ShapeGeometry(wingShape).rotateX(Math.PI / 2);
+    this.bodyMaterial = new THREE.MeshLambertMaterial({ color: "#454b52", transparent: true });
+    this.wingMaterial = new THREE.MeshLambertMaterial({ color: "#3d434a", transparent: true, side: THREE.DoubleSide });
+    // tinyskies BirdFlock 的 V 位（头鸟在前，两翼逐级后撤）；×30 拉到城市尺度。
     this.offsets = [[0, 0], [-0.13, -0.085], [-0.13, 0.085], [-0.26, -0.17], [-0.26, 0.17], [-0.39, -0.25], [-0.39, 0.25]]
       .map(([back, side]) => [back * 30, side * 30] as [number, number]);
     const total = this.offsets.length * 2;
-    this.mesh = new THREE.InstancedMesh(geometry, this.material, total);
-    this.mesh.name = "city-birds";
-    this.mesh.frustumCulled = false;
+    this.bodyMesh = new THREE.InstancedMesh(bodyGeometry, this.bodyMaterial, total);
+    this.bodyMesh.name = "city-birds";
+    this.wingMesh = new THREE.InstancedMesh(wingGeometry, this.wingMaterial, total * 2);
+    this.wingMesh.name = "city-bird-wings";
+    this.bodyMesh.frustumCulled = false;
+    this.wingMesh.frustumCulled = false;
+    this.wingMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.group.add(this.bodyMesh, this.wingMesh);
     for (let index = 0; index < 2; index += 1) {
       const seed = hashSeed(`flock:${index}`);
       this.flocks.push({
         orbit: seed * Math.PI * 2,
-        // 绕城心、在岛的上空盘旋（曾 1.05–1.4 倍城市半径，几乎都在海上，又绕世界原点而不是城心）。
         radius: radius * (0.35 + seed * 0.4),
         altitude: 70 + seed * 50,
         speed: (0.05 + seed * 0.018) * (index === 0 ? 1 : -1),
@@ -51,21 +73,16 @@ class BirdFlocks {
     }
   }
 
-  readonly group = new THREE.Group();
-
   setDaylight(daylight: number): void {
     this.daylight = daylight;
-    this.material.opacity = 0.85 * daylight;
+    this.bodyMaterial.opacity = 0.92 * daylight;
+    this.wingMaterial.opacity = 0.92 * daylight;
     this.group.visible = daylight > 0.05;
   }
 
   update(dt: number, elapsed: number): void {
     if (!this.group.visible) return;
-    const matrix = new THREE.Matrix4();
-    const quaternion = new THREE.Quaternion();
-    const euler = new THREE.Euler();
-    const position = new THREE.Vector3();
-    const scale = new THREE.Vector3();
+    void dt;
     let index = 0;
     for (const flock of this.flocks) {
       const angle = flock.orbit + elapsed * flock.speed;
@@ -73,28 +90,39 @@ class BirdFlocks {
         const along = angle - Math.sign(flock.speed) * back / flock.radius;
         const x = this.center.x + Math.cos(along) * (flock.radius + side * Math.sin(along));
         const z = this.center.z + Math.sin(along) * (flock.radius + side * -Math.cos(along));
-        const flap = Math.sin(elapsed * 7.5 + flock.phase + back * 1.9 + side * 3.1);
-        position.set(x, flock.altitude + flap * flock.bob, z);
-        euler.set(flap * 0.14, -angle - Math.sign(flock.speed) * Math.PI / 2, flap * 0.22);
-        quaternion.setFromEuler(euler);
-        // 翼展 3.4 → ×3：航拍距离下曾只有一两个像素，等于看不见。
-        scale.setScalar(3 * (0.92 + flap * 0.1));
-        matrix.compose(position, quaternion, scale);
-        this.mesh.setMatrixAt(index, matrix);
+        const flap = Math.sin(elapsed * 8.5 + flock.phase + back * 1.9 + side * 3.1);
+        // 扇/滑翔交替：环境量慢变，扇翼幅度在 0.25–1 间起伏，滑翔段近乎平翼。
+        const flapEnv = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(elapsed * 0.31 + flock.phase + side));
+        const flapAngle = 0.12 + (0.1 + 0.85 * flapEnv) * flap;
+        this.position.set(x, flock.altitude + flap * flock.bob, z);
+        this.euler.set(flap * 0.12, -angle - Math.sign(flock.speed) * Math.PI / 2, flap * 0.18);
+        this.birdQuaternion.setFromEuler(this.euler);
+        this.scaleVector.setScalar(3 * (0.92 + flap * 0.06));
+        this.matrix.compose(this.position, this.birdQuaternion, this.scaleVector);
+        this.bodyMesh.setMatrixAt(index, this.matrix);
+        // 左翼：绕前进轴 (+x) 抬/压；右翼反相 + z 镜像——两翼同起同落。
+        this.flapQuaternion.setFromAxisAngle(this.axisX, flapAngle);
+        this.wingQuaternion.copy(this.birdQuaternion).multiply(this.flapQuaternion);
+        this.wingMatrix.compose(this.position, this.wingQuaternion, this.scaleVector);
+        this.wingMesh.setMatrixAt(index * 2, this.wingMatrix);
+        this.flapQuaternion.setFromAxisAngle(this.axisX, -flapAngle);
+        this.wingQuaternion.copy(this.birdQuaternion).multiply(this.flapQuaternion);
+        this.wingMatrix.compose(this.position, this.wingQuaternion, this.scaleVector);
+        this.wingMatrix.multiply(this.mirror);
+        this.wingMesh.setMatrixAt(index * 2 + 1, this.wingMatrix);
         index += 1;
       }
     }
-    this.mesh.instanceMatrix.needsUpdate = true;
+    this.bodyMesh.instanceMatrix.needsUpdate = true;
+    this.wingMesh.instanceMatrix.needsUpdate = true;
   }
 
   dispose(): void {
-    this.mesh.geometry.dispose();
-    this.material.dispose();
+    this.bodyMesh.geometry.dispose();
+    this.wingMesh.geometry.dispose();
+    this.bodyMaterial.dispose();
+    this.wingMaterial.dispose();
     this.group.removeFromParent();
-  }
-
-  get object3d(): THREE.Object3D {
-    return this.mesh;
   }
 }
 
@@ -463,16 +491,115 @@ class Fireflies {
   }
 }
 
+/** 街区行人（tinyskies PersonGenerator 的宏观版，作者授权参考）：沿街区周界内缩
+ *  出的人行道环线行走。模型城市尺度的超比例人偶（高 ~2.2 单位）——航拍中读作沿
+ *  街流动的点阵，「城市有生机」最便宜的表达。确定性 seed；不走车道；夜间照常
+ *  （迈阿密的夜生活）。单 InstancedMesh，双向行走。 */
+class Pedestrians {
+  private readonly mesh: THREE.InstancedMesh;
+  private readonly material: THREE.MeshLambertMaterial;
+  private readonly walkers: Array<{ points: Array<{ x: number; z: number }>; cumulative: number[]; total: number; distance: number; speed: number; phase: number }> = [];
+  private readonly matrix = new THREE.Matrix4();
+  private readonly quaternion = new THREE.Quaternion();
+  private readonly euler = new THREE.Euler();
+  private readonly position = new THREE.Vector3();
+  private readonly scaleVector = new THREE.Vector3();
+  private readonly color = new THREE.Color();
+  private readonly ground: (x: number, z: number) => number;
+
+  constructor(loops: Array<Array<{ x: number; z: number }>>, ground: (x: number, z: number) => number, cap = 220) {
+    this.ground = ground;
+    const body = new THREE.CylinderGeometry(0.26, 0.34, 1.35, 5).translate(0, 0.68, 0);
+    const head = new THREE.SphereGeometry(0.21, 6, 5).translate(0, 1.58, 0);
+    const geometry = mergeGeometries([body, head]);
+    this.material = new THREE.MeshLambertMaterial({ color: "#ffffff" });
+    this.mesh = new THREE.InstancedMesh(geometry, this.material, Math.max(1, cap));
+    this.mesh.name = "city-pedestrians";
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.mesh.frustumCulled = false;
+    const palette = ["#d8d3c8", "#b8c4cc", "#c9a08a", "#8f9aa4", "#d9b48a", "#7f8b94", "#c8ccd0"];
+    let cursor = 0;
+    loops.forEach((loop, loopIndex) => {
+      if (loop.length < 3 || cursor >= cap) return;
+      // 街区多边形边贴路缘：向质心内缩 ~3.2 单位即人行道。
+      const cx = loop.reduce((sum, p) => sum + p.x, 0) / loop.length;
+      const cz = loop.reduce((sum, p) => sum + p.z, 0) / loop.length;
+      const inset = loop.map((p) => {
+        const dx = cx - p.x; const dz = cz - p.z;
+        const len = Math.hypot(dx, dz) || 1;
+        return { x: p.x + (dx / len) * 3.2, z: p.z + (dz / len) * 3.2 };
+      });
+      const cumulative = [0];
+      for (let i = 1; i <= inset.length; i += 1) {
+        const a = inset[i - 1]; const b = inset[i % inset.length];
+        cumulative.push(cumulative[i - 1] + Math.hypot(b.x - a.x, b.z - a.z));
+      }
+      const total = cumulative[cumulative.length - 1];
+      if (total < 40) return;
+      const count = Math.min(16, Math.max(6, Math.round(total / 55)));
+      for (let i = 0; i < count && cursor < cap; i += 1) {
+        const seed = hashSeed(`ped:${loopIndex}:${i}`);
+        this.walkers.push({
+          points: inset, cumulative, total,
+          distance: seed * total,
+          speed: (seed > 0.5 ? 1 : -1) * (1.15 + hashSeed(`peds:${loopIndex}:${i}`) * 0.75),
+          phase: hashSeed(`pedp:${loopIndex}:${i}`) * Math.PI * 2,
+        });
+        this.mesh.setColorAt(cursor, this.color.set(palette[Math.floor(hashSeed(`pedc:${loopIndex}:${i}`) * palette.length)]));
+        cursor += 1;
+      }
+    });
+    this.mesh.count = cursor;
+  }
+
+  readonly group = new THREE.Group();
+
+  update(dt: number, elapsed: number): void {
+    if (!this.walkers.length) return;
+    for (let index = 0; index < this.walkers.length; index += 1) {
+      const walker = this.walkers[index];
+      walker.distance = (walker.distance + walker.speed * dt + walker.total) % walker.total;
+      let segment = 1;
+      while (segment < walker.cumulative.length - 1 && walker.cumulative[segment] < walker.distance) segment += 1;
+      const a = walker.points[segment - 1];
+      const b = walker.points[segment % walker.points.length];
+      const span = walker.cumulative[segment] - walker.cumulative[segment - 1] || 1;
+      const t = (walker.distance - walker.cumulative[segment - 1]) / span;
+      const x = a.x + (b.x - a.x) * t;
+      const z = a.z + (b.z - a.z) * t;
+      const bob = Math.abs(Math.sin(elapsed * 6 + walker.phase)) * 0.05;
+      this.position.set(x, this.ground(x, z) + bob, z);
+      this.euler.set(0, Math.atan2(-(b.z - a.z), b.x - a.x), 0);
+      this.quaternion.setFromEuler(this.euler);
+      this.scaleVector.set(1, 1, 1);
+      this.matrix.compose(this.position, this.quaternion, this.scaleVector);
+      this.mesh.setMatrixAt(index, this.matrix);
+    }
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  dispose(): void {
+    this.mesh.geometry.dispose();
+    this.material.dispose();
+    this.group.removeFromParent();
+  }
+
+  get object3d(): THREE.Object3D {
+    return this.mesh;
+  }
+}
+
 export class CityWildlife {
   private readonly birds: BirdFlocks;
   private readonly meteors: MeteorShower;
   private readonly volcano: VolcanoPlume | null;
   private readonly fireflies: Fireflies | null;
+  private readonly pedestrians: Pedestrians | null;
   readonly group = new THREE.Group();
 
-  constructor(center: { x: number; z: number }, radius: number, parkTrees: Array<{ x: number; z: number; y: number }>, seaMountains: Mountain[]) {
+  constructor(center: { x: number; z: number }, radius: number, parkTrees: Array<{ x: number; z: number; y: number }>, seaMountains: Mountain[], carPaths: Array<Array<{ x: number; z: number }>>, ground: (x: number, z: number) => number) {
     this.birds = new BirdFlocks(center, radius);
-    this.group.add(this.birds.object3d);
+    this.group.add(this.birds.group);
     this.meteors = new MeteorShower(radius, center);
     this.group.add(this.meteors.group);
     const volcanoMountain = [...seaMountains].sort((a, b) => b.height - a.height)[0];
@@ -480,6 +607,8 @@ export class CityWildlife {
     if (this.volcano) this.group.add(this.volcano.group);
     this.fireflies = parkTrees.length ? new Fireflies(parkTrees) : null;
     if (this.fireflies) this.group.add(this.fireflies.points);
+    this.pedestrians = carPaths.length ? new Pedestrians(carPaths, ground) : null;
+    if (this.pedestrians) this.group.add(this.pedestrians.object3d);
   }
 
   setNight(night: number, nowMs: number): void {
@@ -501,6 +630,7 @@ export class CityWildlife {
     this.meteors.update(dt);
     this.volcano?.update(dt);
     this.fireflies?.update(dt, elapsed);
+    this.pedestrians?.update(dt, elapsed);
   }
 
   dispose(): void {
@@ -508,6 +638,7 @@ export class CityWildlife {
     this.meteors.dispose();
     this.volcano?.dispose();
     this.fireflies?.dispose();
+    this.pedestrians?.dispose();
     this.group.removeFromParent();
   }
 }

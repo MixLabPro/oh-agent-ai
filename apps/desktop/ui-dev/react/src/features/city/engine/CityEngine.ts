@@ -397,7 +397,7 @@ export class CityEngine {
       }
     }
     fireflySpots.push(...(layout.parkTrees ?? []));
-    this.wildlife = new CityWildlife(this.cityCenter, Math.max(120, layout.boundsRadius), fireflySpots, layout.seaMountains ?? []);
+    this.wildlife = new CityWildlife(this.cityCenter, Math.max(120, layout.boundsRadius), fireflySpots, layout.seaMountains ?? [], layout.districts.flatMap((district) => district.carPaths), layout.terrain.height);
     this.scene.add(this.wildlife.group);
     if (!this.fillLight) {
       this.fillLight = new THREE.DirectionalLight("#cfe8ef", 0.35);
