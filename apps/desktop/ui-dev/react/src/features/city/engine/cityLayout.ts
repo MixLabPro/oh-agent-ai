@@ -105,7 +105,34 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const parcelIndex = new Map(parcels.map((parcel) => [parcel.id, parcel]));
   const assigned = new Map<string, Parcel>();
   const used = new Set<string>();
-  // 跨档时地块编号对应的位置变了，不能复用旧地址（G1 简化：整体重排；SPEC §4.2 的比例映射留待后续）。
+  // 跨档（会话数越过 400 的整数倍）：岛按原形状放大，地块编号对应的位置变了，旧地址不能原样复用——
+  // 按放大比例把每栋楼映射到「放大后的原位置」最近的空地块（SPEC §4.2），城市看起来是整体长大而不是整体洗牌。
+  // 先落位的是更早开工的楼（占最好的位置）；映射不到（半径 > 120 内没有空地块）的留给后面的常规落位。
+  if (previous?.seed === seed && previous.scaleTier !== tier && previous.islandRadius > 0) {
+    const ratio = plan.islandRadius / previous.islandRadius;
+    const old = new Map(previous.districts.flatMap((district) => [...district.slots]));
+    const CELL = 40;
+    const grid = new Map<string, Parcel[]>();
+    for (const parcel of parcels) { const key = `${Math.floor(parcel.x / CELL)}:${Math.floor(parcel.z / CELL)}`; const list = grid.get(key); if (list) list.push(parcel); else grid.set(key, [parcel]); }
+    const ordered = [...model.buildings].filter((building) => old.has(building.id)).sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
+    for (const building of ordered) {
+      const from = old.get(building.id)!;
+      const tx = from.x * ratio; const tz = from.z * ratio;
+      const cx = Math.floor(tx / CELL); const cz = Math.floor(tz / CELL);
+      let best: Parcel | null = null; let bestD = Infinity;
+      for (let ring = 0; ring <= 3 && !best; ring += 1) {
+        for (let gx = cx - ring; gx <= cx + ring; gx += 1) for (let gz = cz - ring; gz <= cz + ring; gz += 1) {
+          if (Math.max(Math.abs(gx - cx), Math.abs(gz - cz)) !== ring) continue;
+          for (const parcel of grid.get(`${gx}:${gz}`) ?? []) {
+            if (used.has(parcel.id)) continue;
+            const d = Math.hypot(parcel.x - tx, parcel.z - tz);
+            if (d < bestD) { bestD = d; best = parcel; }
+          }
+        }
+      }
+      if (best && bestD <= 120) { assigned.set(building.id, best); used.add(best.id); }
+    }
+  }
   if (previous?.seed === seed && previous.scaleTier === tier) {
     const old = new Map(previous.districts.flatMap((district) => [...district.slots]));
     for (const building of model.buildings) {
@@ -256,10 +283,10 @@ function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, ass
     for (const q of [...quota].sort((a, b) => b.take - a.take || (a.id < b.id ? -1 : 1))) if (round < q.take) sequence.push(q.id);
   }
   // 单个地块只有约 7×8，放不下学校/商场：配套占整个空街区（街区里没有任何会话楼）。
-  type Lot = { id: string; x: number; z: number; yaw: number; width: number; depth: number };
+  type Lot = { id: string; x: number; z: number; yaw: number; width: number; depth: number; zone: Zone };
   const free: Lot[] = plan.blocks
     .filter((block) => block.parcels.length > 0 && block.parcels.every((parcel) => !used.has(parcel.id)) && clearsHighways(block, block.width, block.depth, plan.highways))
-    .map((block) => ({ id: block.id, x: block.x, z: block.z, yaw: block.parcels[0].yaw, width: block.width, depth: block.depth }));
+    .map((block) => ({ id: block.id, x: block.x, z: block.z, yaw: block.parcels[0].yaw, width: block.width, depth: block.depth, zone: block.zone }));
   const taken = new Set<string>();
   const out: CivicSite[] = [];
   const old = new Map((previous?.civics ?? []).map((civic) => [civic.id, civic]));
@@ -283,9 +310,18 @@ function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, ass
       if (!own.length) return;
       const cx = own.reduce((acc, p) => acc + p.x, 0) / own.length;
       const cz = own.reduce((acc, p) => acc + p.z, 0) / own.length;
+      // 按服务半径铺开（SPEC §4.4）：离已有配套越远越好（封顶 150），同时不要离本城区中心太远；
+      // 学校偏居住区、商场偏商业/市中心、医院偏市中心与商业区。曾只取「离城区质心最近的空街区」，
+      // 配套全挤在城区中心，一座岛上五座学校互相挨着。
+      const preferred: Record<CivicKind, Zone[]> = { school: ["residential"], mall: ["downtown", "commercial", "waterfront"], hospital: ["downtown", "commercial", "residential"] };
       parcel = free
         .filter((p) => !taken.has(p.id) && !reservedFor.has(p.id) && out.every((c) => Math.hypot(c.x - p.x, c.z - p.z) >= 60))
-        .map((p) => ({ p, d: Math.hypot(p.x - cx, p.z - cz) + hashSeed(`${id}:${p.id}`) * 20 }))
+        .map((p) => {
+          const nearestCivic = Math.min(150, ...out.map((c) => Math.hypot(c.x - p.x, c.z - p.z)));
+          const rank = preferred[kind].indexOf(p.zone);
+          const zonePenalty = rank < 0 ? 60 : rank * 15;
+          return { p, d: Math.hypot(p.x - cx, p.z - cz) * 0.35 - nearestCivic * 0.7 + zonePenalty + hashSeed(`${id}:${p.id}`) * 10 };
+        })
         .sort((a, b) => a.d - b.d || a.p.id.localeCompare(b.p.id))[0]?.p;
     }
     if (!parcel) return;

@@ -103,6 +103,36 @@ for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
   for (const anchor of layout.districtAnchors) assert(layout.terrain.height(anchor.x, anchor.z) > 0.5, `seed ${seed}: district anchor must sit on land`);
   assert.deepEqual(addresses(layoutCity(input, null, seed)), addresses(layout), `seed ${seed}: deterministic`);
 }
+// 配套按服务半径铺开：同一座岛上任意两座配套至少隔 60，学校多数落在居住区、商场多数落在商业区/市中心。
+{
+  const layout = layoutCity(model(1000), null, 42);
+  const civics = layout.civics;
+  assert(civics.length >= 10, `enough civic buildings to judge spread (${civics.length})`);
+  for (let i = 0; i < civics.length; i += 1) for (let j = i + 1; j < civics.length; j += 1) assert(Math.hypot(civics[i].x - civics[j].x, civics[i].z - civics[j].z) >= 60, "civic buildings keep their distance");
+  const zoneOf = (civic) => layout.blocks.find((block) => block.id === civic.parcelId)?.zone;
+  const schools = civics.filter((civic) => civic.kind === "school");
+  const malls = civics.filter((civic) => civic.kind === "mall");
+  assert(schools.filter((civic) => zoneOf(civic) === "residential").length >= schools.length / 2, "schools prefer residential blocks");
+  // 岛上商业/市中心街区本就稀少（被会话楼占满），商场退而求其次落在海滨（沿海商业街）：这里只要求不落进居住区。
+  assert(malls.filter((civic) => zoneOf(civic) !== "residential").length >= malls.length / 2, "malls prefer commercial, downtown or waterfront blocks");
+}
+// 跨档地址映射：整体长大而不是整体洗牌——每栋楼落在「放大后的原位置」附近。
+{
+  const before = layoutCity(model(700), null, 42);
+  const after = layoutCity(model(900), before, 42);
+  assert(after.scaleTier > before.scaleTier, "700 -> 900 sessions crosses a tier");
+  const ratio = after.islandRadius / before.islandRadius;
+  const was = new Map(before.districts.flatMap((d) => [...d.slots]));
+  const now = new Map(after.districts.flatMap((d) => [...d.slots]));
+  let moved = 0; let kept = 0;
+  for (const [id, parcel] of was) {
+    const next = now.get(id); if (!next) continue;
+    kept += 1;
+    if (Math.hypot(next.x - parcel.x * ratio, next.z - parcel.z * ratio) <= 120) moved += 1;
+  }
+  assert(kept >= 650, `buildings survive a tier change (${kept}/700)`);
+  assert(moved / kept >= 0.9, `a tier change keeps buildings near their scaled position (${moved}/${kept})`);
+}
 // 跨档：同一种子从档位 2 到 4，岛只放大不变形（归一化轮廓逐点重合）。
 {
   const small = layoutCity(model(700), null, 42); const big = layoutCity(model(1500), null, 42);
