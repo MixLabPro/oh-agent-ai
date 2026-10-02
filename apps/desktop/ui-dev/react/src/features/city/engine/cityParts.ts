@@ -226,7 +226,9 @@ type StaticCity = {
   carMesh: THREE.InstancedMesh;
   cars: Array<{ path: CarPath; distance: number; speed: number }>;
   boatMesh: THREE.InstancedMesh;
-  boats: Array<{ path: CarPath; distance: number; speed: number; phase: number }>;
+  boats: Array<{ path: CarPath; distance: number; speed: number; phase: number; wakeTimer: number }>;
+  wakeMesh: THREE.InstancedMesh;
+  wakes: Array<{ x: number; z: number; birth: number; driftX: number; driftZ: number }>;
   cloudMesh: THREE.InstancedMesh;
   clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }>;
   /** 缓存命中时新实例上这些字段是空的（它们在静态构建里赋值）：地面素材/水面倒影与夜间开关/摩天轮旋转/夜间灯光都要随缓存带回。 */
@@ -279,13 +281,15 @@ export class CityParts {
   private landmarkSpinners: Array<{ object: THREE.Object3D; axis: "x" | "y" | "z"; speed: number }> = [];
   private readonly carMesh: THREE.InstancedMesh;
   private readonly boatMesh: THREE.InstancedMesh;
+  private readonly wakeMesh: THREE.InstancedMesh;
+  private readonly wakes: Array<{ x: number; z: number; birth: number; driftX: number; driftZ: number }>;
   private readonly cloudMesh: THREE.InstancedMesh;
   private readonly anomalyMarkers: Array<{ mesh: THREE.Mesh; ring: THREE.Mesh; baseY: number; phase: number }> = [];
   private readonly labels: THREE.Sprite[] = [];
   private readonly hoverRing: THREE.Mesh;
   private readonly selectRing: THREE.Mesh;
   private readonly cars: Car[];
-  private readonly boats: Array<{ path: CarPath; distance: number; speed: number; phase: number }>;
+  private readonly boats: Array<{ path: CarPath; distance: number; speed: number; phase: number; wakeTimer: number }>;
   private readonly clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }>;
   private readonly waterUniforms: { uTime: { value: number }; uSun: { value: THREE.Vector3 }; uShallow: { value: THREE.Color }; uDeep: { value: THREE.Color }; uSky: { value: THREE.Color } };
   private readonly matrix = new THREE.Matrix4();
@@ -327,6 +331,8 @@ export class CityParts {
       this.carMesh = carResult.mesh;
       const boatResult = this.buildBoats();
       this.boatMesh = boatResult.mesh;
+      this.wakeMesh = boatResult.wakeMesh;
+      this.wakes = boatResult.wakes;
       const cloudResult = this.buildClouds();
       this.cloudMesh = cloudResult.mesh;
       this.water = this.buildWater();
@@ -342,6 +348,8 @@ export class CityParts {
         cars: carResult.cars,
         boatMesh: this.boatMesh,
         boats: boatResult.boats,
+        wakeMesh: this.wakeMesh,
+        wakes: boatResult.wakes,
         cloudMesh: this.cloudMesh,
         clouds: cloudResult.clouds,
         terrainUniforms: this.terrainUniforms,
@@ -363,6 +371,8 @@ export class CityParts {
     this.cars = staticCity.cars;
     this.boats = staticCity.boats;
     this.clouds = staticCity.clouds;
+    this.wakeMesh = staticCity.wakeMesh;
+    this.wakes = staticCity.wakes;
     this.terrainUniforms = staticCity.terrainUniforms;
     this.waterAssetUniforms = staticCity.waterAssetUniforms;
     this.landmarkSpinners = staticCity.landmarkSpinners;
@@ -1762,7 +1772,7 @@ export class CityParts {
     return { mesh, cars };
   }
 
-  private buildBoats(): { mesh: THREE.InstancedMesh; boats: Array<{ path: CarPath; distance: number; speed: number; phase: number }> } {
+  private buildBoats(): { mesh: THREE.InstancedMesh; boats: Array<{ path: CarPath; distance: number; speed: number; phase: number; wakeTimer: number }>; wakeMesh: THREE.InstancedMesh; wakes: Array<{ x: number; z: number; birth: number; driftX: number; driftZ: number }> } {
     // 船沿海岸外扩航道巡航（折线推进，与车辆同一套采样）。
     const boats: ReturnType<CityParts["buildBoats"]>["boats"] = [];
     this.layout.boatLoops?.forEach((loop, laneIndex) => {
@@ -1774,6 +1784,7 @@ export class CityParts {
           distance: (index / count) * total + hashSeed(`bd:${laneIndex}:${index}`) * 40,
           speed: (laneIndex % 2 === 0 ? 1 : -1) * (2.6 + hashSeed(`bs:${laneIndex}:${index}`) * 1.6),
           phase: hashSeed(`bp:${laneIndex}:${index}`) * Math.PI * 2,
+          wakeTimer: hashSeed(`bt:${laneIndex}:${index}`) * 0.3,
         });
       }
     });
@@ -1790,7 +1801,35 @@ export class CityParts {
     mesh.frustumCulled = false;
     this.group.add(mesh);
     this.disposables.push(geometry, material, hull, cabin);
-    return { mesh, boats };
+    // 尾迹泡沫（tinyskies WakeTrail 手法）：船尾定期吐软圆斑，漂移放大后消散。
+    // 径向渐变贴图让圆斑边缘衰减——纯色圆片读作沙盘贴纸，不像浪花。
+    const foamCanvas = document.createElement("canvas");
+    foamCanvas.width = foamCanvas.height = 64;
+    const foamCtx = foamCanvas.getContext("2d");
+    if (foamCtx) {
+      const gradient = foamCtx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gradient.addColorStop(0, "rgba(255,255,255,0.95)");
+      gradient.addColorStop(0.45, "rgba(255,255,255,0.4)");
+      gradient.addColorStop(1, "rgba(255,255,255,0)");
+      foamCtx.fillStyle = gradient;
+      foamCtx.fillRect(0, 0, 64, 64);
+    }
+    const foamTexture = new THREE.CanvasTexture(foamCanvas);
+    const foamMaterial = new THREE.MeshBasicMaterial({ color: "#eef6f7", map: foamTexture, transparent: true, opacity: 0.5, depthWrite: false, toneMapped: false });
+    const wakeGeometry = new THREE.CircleGeometry(1, 10).rotateX(-Math.PI / 2);
+    const wakeMesh = new THREE.InstancedMesh(wakeGeometry, foamMaterial, 128);
+    wakeMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    wakeMesh.frustumCulled = false;
+    wakeMesh.renderOrder = 1;
+    const wakes: Array<{ x: number; z: number; birth: number; driftX: number; driftZ: number }> = [];
+    for (let index = 0; index < 128; index += 1) {
+      wakes.push({ x: 0, z: 0, birth: -1, driftX: 0, driftZ: 0 });
+      this.compose(0, -60, 0, 0, 0.0001, 0.0001, 0.0001);
+      wakeMesh.setMatrixAt(index, this.matrix);
+    }
+    this.group.add(wakeMesh);
+    this.disposables.push(foamTexture, foamMaterial, wakeGeometry);
+    return { mesh, boats, wakeMesh, wakes };
   }
 
   private buildClouds(): { mesh: THREE.InstancedMesh; clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }> } {
@@ -2609,15 +2648,46 @@ export class CityParts {
     });
     if (carsMoved) this.carMesh.instanceMatrix.needsUpdate = true;
 
-    // 船只（沿海岸航道折线推进 + 起伏）。
+    // 船只（沿海岸航道折线推进 + 起伏）+ 尾迹泡沫在船尾持续吐出。
+    let wakeCursor = 0;
     this.boats.forEach((boat, index) => {
       boat.distance += boat.speed * dt;
       const sample = samplePolyline(boat.path, boat.distance);
       const bob = Math.sin(elapsed * 0.9 + boat.phase) * 0.12;
       this.compose(sample.x, -0.3 + bob, sample.z, Math.atan2(-sample.dz, sample.dx), 1, 1, 1);
       this.boatMesh.setMatrixAt(index, this.matrix);
+      boat.wakeTimer -= dt;
+      if (boat.wakeTimer <= 0) {
+        boat.wakeTimer = 0.3 + 0.08 * Math.sin(elapsed * 1.7 + boat.phase);
+        const puff = this.wakes[wakeCursor];
+        wakeCursor = (wakeCursor + 1) % this.wakes.length;
+        const side = Math.sin(elapsed * 5.3 + boat.phase + index);
+        puff.x = sample.x - sample.dx * 6.4 - sample.dz * side * 1.6;
+        puff.z = sample.z - sample.dz * 6.4 + sample.dx * side * 1.6;
+        puff.birth = elapsed;
+        puff.driftX = -sample.dx * 0.5 - sample.dz * side * 0.35;
+        puff.driftZ = -sample.dz * 0.5 + sample.dx * side * 0.35;
+      }
     });
     this.boatMesh.instanceMatrix.needsUpdate = true;
+    // 尾迹推进：放大 + 漂移，寿命 2.8s 后藏起。
+    let wakesMoved = false;
+    for (let index = 0; index < this.wakes.length; index += 1) {
+      const puff = this.wakes[index];
+      if (puff.birth < 0) continue;
+      const age = elapsed - puff.birth;
+      if (age > 2.8) {
+        puff.birth = -1;
+        this.compose(0, -60, 0, 0, 0.0001, 0.0001, 0.0001);
+      } else {
+        puff.x += puff.driftX * dt;
+        puff.z += puff.driftZ * dt;
+        this.compose(puff.x, -0.44, puff.z, age * 0.5, 1.1 + age * 2.3, 1, 1.1 + age * 2.3);
+      }
+      this.wakeMesh.setMatrixAt(index, this.matrix);
+      wakesMoved = true;
+    }
+    if (wakesMoved) this.wakeMesh.instanceMatrix.needsUpdate = true;
 
     // 云。
     const bounds = this.layout.boundsRadius + 60;
