@@ -1972,9 +1972,11 @@ export class CityParts {
           float sunPath = smoothstep(0.55, 0.95, dot(reflect(-normalize(uSun), n), view));
           float sparkle = smoothstep(0.55, 0.95, sp1 * sp2 * sp3 + sp4 * 0.25) * smoothstep(0.05, 0.4, patchMask) * sunPath * smoothstep(0.35, 0.9, h0);
           float dist = distance(cameraPosition, vWorld);
-          sparkle *= smoothstep(90.0, 200.0, dist) * (1.0 - smoothstep(300.0, 650.0, dist));
-          // 屏幕上小于 ~2px 的细节淡出（与上面 300–650 距离带互补的分辨率感知
-          // 保护）：低分屏/小窗口上，距离淡出的远端仍可能残留亚像素闪烁。
+          // 远端不再用硬距离窗掐断（镜头拉远时光路粼粼带应当仍在）：抗混叠交给
+          // 下面的 fwidth 守卫与雾；650–1100 只做进入雾前的柔和收尾。
+          sparkle *= smoothstep(90.0, 200.0, dist) * (1.0 - smoothstep(650.0, 1100.0, dist));
+          // 屏幕上小于 ~2px 的细节淡出（分辨率感知的抗混叠守卫）：低分屏/小窗口
+          // 或极远视角下，亚像素碎光会退化成静态白噪点。
           float cellPx = 1.0 / max(length(fwidth(p * 1.35)), 1e-4);
           sparkle *= smoothstep(1.5, 4.0, cellPx);
           // 粼粼碎光是日光反射：夜里关掉（曾夜里照样按白天强度闪，一片白色雪花点）；夜海的亮点来自平面镜里的城市灯光。
