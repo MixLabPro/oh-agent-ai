@@ -183,7 +183,10 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
       .filter((building) => building.districtId === district.id)
       .sort((a, b) => a.startedAt - b.startedAt || b.height - a.height || a.id.localeCompare(b.id));
     if (!buildings.length) continue;
-    const score = (p: Parcel) => Math.hypot(p.x - anchor.x, p.z - anchor.z) + hashSeed(p.id) * 30;
+    // 距花园排序 + 小于一个地块间距（~7）的哈希抖动：既不排成机械同心环，又保住
+    // 「越新的会话越靠外」的回放生长波前（曾用 ±30 抖动——远大于地块间距，约
+    // 五分之一的楼会落在当前前沿之内，回放叙事读起来像乱序）。
+    const score = (p: Parcel) => Math.hypot(p.x - anchor.x, p.z - anchor.z) + hashSeed(p.id) * 6;
     const inside = blocksOf(district.id).flatMap((block) => block.parcels).filter((parcel) => !used.has(parcel.id)).sort((a, b) => score(a) - score(b) || a.id.localeCompare(b.id));
     const overflow: typeof buildings = [];
     let cursor = 0;
