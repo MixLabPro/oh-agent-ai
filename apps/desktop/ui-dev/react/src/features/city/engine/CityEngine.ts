@@ -112,7 +112,7 @@ export class CityEngine {
   /** 水面平面镜：不进场景，只借它的镜像相机与渲染目标（three 的 Reflector 已处理斜裁剪面与视角判断）。 */
   private mirror: Reflector | null = null;
   private readonly mirrorMatrix = new THREE.Matrix4();
-  private cinematic: { plan: CinematicPlan; startedAt: number; savedFov: number; look: THREE.Vector3 | null; lastSeconds: number } | null = null;
+  private cinematic: { plan: CinematicPlan; startedAt: number; savedFov: number; look: THREE.Vector3 | null; lastSeconds: number; pace: number } | null = null;
   private themeName: CityThemeName = "day";
 
   constructor(private readonly options: CityEngineOptions) {
@@ -393,7 +393,10 @@ export class CityEngine {
     }
     this.parts.setLabelsVisible(true);
     this.parts.setQualityLevel(this.quality);
-    if (this.cursorMs !== null) this.parts.applyCursor(this.cursorMs, false);
+    if (this.cursorMs !== null) this.parts.applyCursor(this.cursorMs, false, this.playbackSpeed * 1000);
+    // 重建后 display 是「已完工」初值：先对齐到当前时间轴进度，否则回放中
+    // 每次数据发布（分页到齐/后台刷新）都会看到城市闪满高再缩回去。
+    this.parts.snapToTargets();
   }
 
   private sunDistance(): number {
@@ -508,7 +511,7 @@ export class CityEngine {
     this.cursorMs = ms;
     if (options?.playing !== undefined) this.playing = options.playing;
     if (options?.speed !== undefined) this.playbackSpeed = options.speed;
-    if (ms !== null) this.parts?.applyCursor(ms, false);
+    if (ms !== null) this.parts?.applyCursor(ms, false, this.playbackSpeed * 1000);
     else if (this.model) this.parts?.applyCursor(this.model.windowEndMs, true);
     this.noteActivity();
   }
@@ -675,12 +678,14 @@ export class CityEngine {
     this.attracted = false;
     this.controls.autoRotate = false;
     this.controls.enabled = false;
-    this.cinematic = { plan, startedAt: this.elapsed, savedFov: this.camera.fov, look: null, lastSeconds: 0 };
+    // 航拍的时间加速率：整窗数据时长摊到片长上，喂给 applyCursor 做有节奏的升起。
+    const cinemaPace = (this.model.windowEndMs - this.model.windowStartMs) / Math.max(1, plan.durationSec);
+    this.cinematic = { plan, startedAt: this.elapsed, savedFov: this.camera.fov, look: null, lastSeconds: 0, pace: cinemaPace };
     this.camera.fov = 38; // 略长焦：压缩纵深，更像航拍镜头
     this.camera.updateProjectionMatrix();
     this.parts.setLabelsVisible(false);
     this.parts.setScaffoldVisible(false);
-    this.parts.applyCursor(plan.cursor(0), false);
+    this.parts.applyCursor(plan.cursor(0), false, cinemaPace);
     this.noteActivity();
     return plan;
   }
@@ -724,7 +729,7 @@ export class CityEngine {
     this.controls.target.copy(state.look);
     this.camera.lookAt(state.look);
     const cursor = state.plan.cursor(clamped);
-    this.parts?.applyCursor(cursor, false);
+    this.parts?.applyCursor(cursor, false, state.pace);
     this.options.onTimeCursor?.(cursor, false);
     this.options.onCinematic?.(seconds, state.plan, false);
     this.lastActivityAt = performance.now();
@@ -814,7 +819,7 @@ export class CityEngine {
       } else {
         this.cursorMs = next;
       }
-      this.parts?.applyCursor(this.cursorMs, false);
+      this.parts?.applyCursor(this.cursorMs, false, this.playbackSpeed * 1000);
       this.options.onTimeCursor?.(this.cursorMs, false);
     }
 

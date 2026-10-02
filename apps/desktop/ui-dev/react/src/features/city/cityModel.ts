@@ -321,12 +321,21 @@ export function buildCityModel(input: CityModelInput): CityModel {
  * 线性累计是可视化近似（列表数据没有逐事件 token 序列），进度含义已在 HUD 标注。
  * 活跃会话以当前 token 数按已流逝时长折算，之后随真实数据增长。
  */
-export function builtFractionAt(building: CityBuilding, cursor: number, live: boolean): number {
-  if (building.aggregated) return cursor >= building.startedAt ? 1 : 0;
+/** 回放进度：cursor 时刻这栋楼长到几分之几。
+ *  pace>0（回放/拖动）时把「升起时长」夹在 0.9–3.5 墙钟秒（seed 决定 stagger）——
+ *  若严格等于会话时长，短会话一帧闪现整楼、长会话整段回放都在爬，同屏快慢楼
+ *  交错读起来像乱序；夹住后每栋楼都有一段可见的施工动画，且先后仍由 startedAt 决定。 */
+export function builtFractionAt(building: CityBuilding, cursor: number, live: boolean, paceMsPerSec = 0): number {
   if (cursor < building.startedAt) return 0;
   if (building.active && live) return building.builtFraction;
   const span = (building.endedAt ?? building.startedAt) - building.startedAt;
-  if (!Number.isFinite(span) || span <= 0) return 1;
-  const fraction = (cursor - building.startedAt) / span;
+  let effSpan = span;
+  if (paceMsPerSec > 0) {
+    const floor = (0.9 + building.seed * 0.6) * paceMsPerSec;
+    effSpan = Math.min(Math.max(span, floor), 3.5 * paceMsPerSec);
+  }
+  if (!Number.isFinite(effSpan) || effSpan <= 0) return 1;
+  if (building.aggregated && paceMsPerSec <= 0) return cursor >= building.startedAt ? 1 : 0;
+  const fraction = (cursor - building.startedAt) / effSpan;
   return Math.min(1, Math.max(0.04, fraction));
 }

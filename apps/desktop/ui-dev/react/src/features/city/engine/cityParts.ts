@@ -2023,14 +2023,43 @@ export class CityParts {
     }
   }
 
-  applyCursor(cursor: number, live: boolean): void {
+  /** pace>0 时按回放节奏夹住升起时长（见 builtFractionAt）；live 或未回放时传 0。 */
+  applyCursor(cursor: number, live: boolean, paceMsPerSec = 0): void {
     this.cursor = cursor;
     this.live = live;
     (this.layout.civics ?? []).forEach((civic, index) => { this.civicTarget[index] = live || cursor >= civic.unlockAt ? 1 : 0; });
     for (const runtime of this.runtimes) {
-      runtime.target = builtFractionAt(runtime.building, cursor, live);
+      runtime.target = builtFractionAt(runtime.building, cursor, live, paceMsPerSec);
       if (live && runtime.building.active) runtime.target = Math.max(runtime.target, runtime.building.builtFraction);
     }
+  }
+
+  /** display/civicProgress 直接对齐 target：模型重建后的第一步。重建时 display
+   *  被初始化为「已完工」（closed 的 builtFraction=1，civic 全 1），回放中若任由
+   *  动画循环追赶，整城会先闪满高、再被压回时间轴进度——数据加载不应改变城市
+   *  已呈现的样子。 */
+  snapToTargets(): void {
+    for (const runtime of this.runtimes) {
+      runtime.display = runtime.target;
+      this.applyConstruction(runtime, true);
+    }
+    for (let index = 0; index < this.civicTarget.length; index += 1) {
+      if (this.civicProgress[index] !== this.civicTarget[index]) {
+        this.civicProgress[index] = this.civicTarget[index];
+        this.writeCivic(index);
+      }
+    }
+    for (const mesh of this.shaftMeshes) mesh.instanceMatrix.needsUpdate = true;
+    this.podiumMesh.instanceMatrix.needsUpdate = true;
+    this.decoCornerMesh.instanceMatrix.needsUpdate = true;
+    this.decoTrimMesh.instanceMatrix.needsUpdate = true;
+    for (const mesh of this.roofProfiles) mesh.instanceMatrix.needsUpdate = true;
+    this.gardenTreeMesh.instanceMatrix.needsUpdate = true;
+    this.roofMesh.instanceMatrix.needsUpdate = true;
+    this.neonMesh.instanceMatrix.needsUpdate = true;
+    this.scaffoldMesh.instanceMatrix.needsUpdate = true;
+    this.antennaMesh.instanceMatrix.needsUpdate = true;
+    this.craneMastMesh.instanceMatrix.needsUpdate = true;
   }
 
   setQualityLevel(level: QualityLevel): void {
