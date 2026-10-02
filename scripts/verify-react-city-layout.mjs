@@ -73,4 +73,21 @@ const changed = { ...expandedInput, buildings: expandedInput.buildings.map((buil
 assert.deepEqual(addresses(layoutCity(changed, expanded)), addresses(expanded), "token growth and replay timing do not move buildings");
 const additionalHost = model(1400, ["codex", "claude-code", "dsh", "plugin:zcode", "new-host"]);
 validate(layoutCity(additionalHost, expanded), additionalHost);
-console.log("City layout: full placement, unique lots, road clearance/connectivity, traffic and incremental stability passed.");
+// 城市配套（学校/商场/医院）：数量随会话规模增长、只占没有会话楼的整街区、落成时刻随规模单调、刷新不搬家。
+const civicCount = (count) => layoutCity(model(count)).civics.length;
+assert.equal(civicCount(0), 0, "an empty city has no civic buildings");
+// 规划城区约 1600 个地块：会话楼接近填满时空街区所剩无几，配套不挤占会话地块，数量随之封顶（1400 会话时约 11 座）。
+assert(civicCount(90) < civicCount(300) && civicCount(300) < civicCount(700) && civicCount(700) < civicCount(1000), "civic buildings grow with the city until it runs out of empty blocks");
+for (const layout of [first, expanded]) {
+  const sessionBlocks = new Set(layout.districts.flatMap((district) => [...district.slots.values()].map((parcel) => parcel.blockId)));
+  for (const civic of layout.civics) assert(!sessionBlocks.has(civic.parcelId), `${civic.id} must not share a block with session buildings`);
+  assert.equal(new Set(layout.civics.map((civic) => civic.parcelId)).size, layout.civics.length, "one civic building per block");
+  for (let index = 1; index < layout.civics.length; index += 1) assert(layout.civics[index].unlockAt >= layout.civics[index - 1].unlockAt, "civic buildings open in growth order");
+}
+const expandedBlocks = new Set(expanded.districts.flatMap((district) => [...district.slots.values()].map((parcel) => parcel.blockId)));
+for (const civic of first.civics) {
+  if (expandedBlocks.has(civic.parcelId)) continue;
+  const again = expanded.civics.find((item) => item.id === civic.id);
+  assert(again && again.parcelId === civic.parcelId, `${civic.id} keeps its block while the block stays free`);
+}
+console.log("City layout: full placement, unique lots, road clearance/connectivity, traffic, incremental stability and civic growth passed.");

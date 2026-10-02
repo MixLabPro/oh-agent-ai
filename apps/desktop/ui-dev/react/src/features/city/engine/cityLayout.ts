@@ -23,6 +23,13 @@ export type DistrictLayout = {
   plaza: Vec2 & { y: number }; anomaly: { severity: "critical" | "warning" | "info"; count: number } | null;
   sessionCount: number;
 };
+/** 城市配套：学校 / 商场 / 医院。数量随会话规模增长（每 CIVIC_PER_SESSIONS 个会话一座），
+ *  落成时刻 = 城市长到那个规模的时刻——回放时看得见「城市在发展」。纯装饰，不进统计、不可拾取。 */
+export type CivicKind = "school" | "mall" | "hospital";
+export type CivicSite = Vec2 & { id: string; kind: CivicKind; districtId: string; parcelId: string; y: number; yaw: number; width: number; depth: number; unlockAt: number };
+export const CIVIC_PER_SESSIONS = 45;
+const CIVIC_ORDER: CivicKind[] = ["school", "mall", "hospital"];
+
 export type BridgeLayout = { from: Vec2; to: Vec2; angle: number; length: number };
 export type PublicSite = Vec2 & { id: string; kind: "civic" | "station" | "stadium" | "park" | "tower" | "harbor"; radius: number; yaw: number };
 export type CityLayout = {
@@ -39,6 +46,7 @@ export type CityLayout = {
    *  background massing blocks (honest count surfaced in the HUD). */
   massing: Array<{ districtId: string; x: number; z: number; y: number; count: number; tokens: number; height: number }>;
   /** 海岸外扩环状航道（折线）与两侧装饰远山。 */
+  civics: CivicSite[];
   boatLoops: Vec2[][]; seaMountains: Array<{ center: Vec2; radius: number; height: number; seed: number }>;
 };
 
@@ -131,6 +139,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     });
     if (overflow.length) massing.push(...aggregateOverflow(district.id, anchor, overflow, parcels, plan));
   }
+  const civics = placeCivics(model, parcels, used, assigned, previous ?? null, plan);
   const districts = model.districts.map((district, districtIndex): DistrictLayout => {
     const buildings = model.buildings.filter((building) => building.districtId === district.id && assigned.has(building.id));
     const slots = new Map(buildings.map((building) => [building.id, assigned.get(building.id)!]));
@@ -162,7 +171,57 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     { center: { x: centroid.x + 980, z: centroid.z - 320 }, radius: 120, height: 88, seed: 71 },
     { center: { x: centroid.x - 1020, z: centroid.z + 260 }, radius: 150, height: 108, seed: 37 },
   ];
-  return { ...plan, districts, seed, massing, boatLanes: [], decorMountains: [], boatLoops, seaMountains };
+  return { ...plan, districts, seed, massing, civics, boatLanes: [], decorMountains: [], boatLoops, seaMountains };
+}
+
+/** 配套选址：会话楼先占地，配套只拿剩下的地块（绝不挤走会话）。
+ *  第 i 座配套属于「第 i 座落成时会话最多的城区」之外按会话数加权轮转的城区，落在该城区楼群外缘
+ *  最近的空地块上，彼此至少隔 60。上一版布局里已有的配套若地块仍空着就原地保留（刷新不搬家）。 */
+function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, assigned: Map<string, Parcel>, previous: CityLayout | null, plan: ReturnType<typeof createCityPlan>): CivicSite[] {
+  const total = model.buildings.length;
+  const count = total === 0 ? 0 : Math.max(2, Math.min(30, Math.floor(total / CIVIC_PER_SESSIONS)));
+  if (!count) return [];
+  const times = model.buildings.map((building) => building.startedAt).sort((a, b) => a - b);
+  // 城区会话数 → 配额（最大余数法），保证多会话的城区配套多。
+  const weights = model.districts.map((district) => ({ id: district.id, n: model.buildings.filter((b) => b.districtId === district.id).length })).filter((d) => d.n > 0);
+  const sum = weights.reduce((acc, d) => acc + d.n, 0) || 1;
+  const quota = weights.map((d) => ({ id: d.id, exact: (d.n / sum) * count, take: Math.floor((d.n / sum) * count) }));
+  let left = count - quota.reduce((acc, q) => acc + q.take, 0);
+  [...quota].sort((a, b) => (b.exact - b.take) - (a.exact - a.take) || (a.id < b.id ? -1 : 1)).forEach((q) => { if (left > 0) { q.take += 1; left -= 1; } });
+  // 轮转顺序：按配额从多到少交错，第 i 座的落成时刻按全城规模走。
+  const sequence: string[] = [];
+  for (let round = 0; sequence.length < count; round += 1) {
+    for (const q of [...quota].sort((a, b) => b.take - a.take || (a.id < b.id ? -1 : 1))) if (round < q.take) sequence.push(q.id);
+  }
+  // 单个地块只有约 7×8，放不下学校/商场：配套占整个空街区（街区里没有任何会话楼）。
+  type Lot = { id: string; x: number; z: number; yaw: number; width: number; depth: number };
+  const free: Lot[] = plan.blocks
+    .filter((block) => block.parcels.length > 0 && block.parcels.every((parcel) => !used.has(parcel.id)))
+    .map((block) => ({ id: block.id, x: block.x, z: block.z, yaw: block.parcels[0].yaw, width: block.width, depth: block.depth }));
+  const taken = new Set<string>();
+  const out: CivicSite[] = [];
+  const old = new Map((previous?.civics ?? []).map((civic) => [civic.id, civic]));
+  sequence.forEach((districtId, index) => {
+    const id = `civic:${index}`;
+    const kind = CIVIC_ORDER[index % CIVIC_ORDER.length];
+    const unlockAt = times[Math.min(times.length - 1, (index + 1) * CIVIC_PER_SESSIONS - 1)] ?? times[times.length - 1];
+    const keep = old.get(id);
+    let parcel: Lot | undefined = keep ? free.find((p) => p.id === keep.parcelId && !taken.has(p.id)) : undefined;
+    if (!parcel) {
+      const own = model.buildings.filter((b) => b.districtId === districtId).map((b) => assigned.get(b.id)).filter((p): p is Parcel => !!p);
+      if (!own.length) return;
+      const cx = own.reduce((acc, p) => acc + p.x, 0) / own.length;
+      const cz = own.reduce((acc, p) => acc + p.z, 0) / own.length;
+      parcel = free
+        .filter((p) => !taken.has(p.id) && out.every((c) => Math.hypot(c.x - p.x, c.z - p.z) >= 60))
+        .map((p) => ({ p, d: Math.hypot(p.x - cx, p.z - cz) + hashSeed(`${id}:${p.id}`) * 20 }))
+        .sort((a, b) => a.d - b.d || a.p.id.localeCompare(b.p.id))[0]?.p;
+    }
+    if (!parcel) return;
+    taken.add(parcel.id);
+    out.push({ id, kind, districtId, parcelId: parcel.id, x: parcel.x, z: parcel.z, y: plan.terrain.height(parcel.x, parcel.z), yaw: parcel.yaw, width: parcel.width, depth: parcel.depth, unlockAt });
+  });
+  return out;
 }
 
 function coastCentroid(coast: Vec2[]): Vec2 {

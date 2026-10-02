@@ -203,6 +203,11 @@ export class CityParts {
   /** 屋顶轮廓网格（下标 = runtime.roof；不是这种轮廓的实例缩成 0）。 */
   private readonly roofProfiles: THREE.InstancedMesh[] = [];
   private readonly gardenTreeMesh: THREE.InstancedMesh;
+  /** 城市配套（学校/商场/医院）：每个部件记住所属配套与「满高」矩阵参数，按落成进度纵向长出来。 */
+  private civicPieces: Array<{ civic: number; mesh: 0 | 1; index: number; x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw: number; baseY: number }> = [];
+  private civicMeshes: THREE.InstancedMesh[] = [];
+  private civicProgress: number[] = [];
+  private civicTarget: number[] = [];
   private heroParts: { spire: THREE.Mesh; rings: THREE.Mesh[]; beam: THREE.Mesh | null } | null = null;
   private readonly decoCornerMesh: THREE.InstancedMesh;
   private terrainUniforms: Record<string, { value: unknown }> | null = null;
@@ -330,6 +335,7 @@ export class CityParts {
     this.buildInfrastructure();
     this.buildDistrictExpressways();
     this.buildPublicSites();
+    this.buildCivics();
     this.buildMassing();
     this.buildSeaMountains();
     this.treeMesh = this.buildTrees();
@@ -792,6 +798,102 @@ export class CityParts {
     };
     build(BOX, boxes, "city-public-sites-boxes");
     build(CYLINDER, cylinders, "city-public-sites-cylinders");
+  }
+
+  /** 学校 / 商场 / 医院：由方块与圆柱拼成，局部坐标按街区朝向旋转。纯装饰，不进拾取。 */
+  private buildCivics(): void {
+    const civics = this.layout.civics ?? [];
+    if (!civics.length) return;
+    type Piece = (typeof this.civicPieces)[number];
+    const boxes: Piece[] = [];
+    const cylinders: Piece[] = [];
+    const colors: [string[], string[]] = [[], []];
+    civics.forEach((civic, civicIndex) => {
+      const cos = Math.cos(civic.yaw);
+      const sin = Math.sin(civic.yaw);
+      const base = Math.max(0.3, civic.y);
+      const W = Math.min(civic.width, 48) * 0.82;
+      const D = Math.min(civic.depth, 40) * 0.82;
+      const at = (lx: number, lz: number) => ({ x: civic.x + lx * cos + lz * sin, z: civic.z - lx * sin + lz * cos });
+      const box = (lx: number, ly: number, lz: number, sx: number, sy: number, sz: number, color: string) => {
+        const q = at(lx, lz);
+        boxes.push({ civic: civicIndex, mesh: 0, index: boxes.length, x: q.x, y: base + ly, z: q.z, sx, sy, sz, yaw: civic.yaw, baseY: base });
+        colors[0].push(color);
+      };
+      const cyl = (lx: number, ly: number, lz: number, r: number, h: number, color: string) => {
+        const q = at(lx, lz);
+        cylinders.push({ civic: civicIndex, mesh: 1, index: cylinders.length, x: q.x, y: base + ly, z: q.z, sx: r, sy: h, sz: r, yaw: 0, baseY: base });
+        colors[1].push(color);
+      };
+      if (civic.kind === "school") {
+        // U 形教学楼 + 操场（绿茵 + 红色跑道）+ 旗杆。
+        box(-W * 0.38, 0, -D * 0.18, W * 0.2, 9, D * 0.6, "#e9d9b8");
+        box(W * 0.38, 0, -D * 0.18, W * 0.2, 9, D * 0.6, "#e9d9b8");
+        box(0, 0, -D * 0.42, W * 0.96, 11, D * 0.16, "#f1e4c6");
+        box(0, 11, -D * 0.42, W * 0.96, 0.6, D * 0.18, "#b5533c");
+        box(0, 0.05, D * 0.22, W * 0.62, 0.12, D * 0.42, "#b8574a");
+        box(0, 0.1, D * 0.22, W * 0.5, 0.14, D * 0.3, "#6fa65a");
+        cyl(W * 0.42, 0, D * 0.4, 0.15, 12, "#d8dcdc");
+        box(W * 0.42 + 1.1, 10.4, D * 0.4, 2, 1.3, 0.1, "#d84b3a");
+      } else if (civic.kind === "mall") {
+        // 大体量低层 + 玻璃中庭 + 屋顶停车场 + 招牌塔。
+        box(0, 0, 0, W, 10, D, "#d9d3c7");
+        box(0, 10, 0, W * 0.98, 0.4, D * 0.98, "#6e7275");
+        for (let row = -2; row <= 2; row += 1) box(W * 0.15, 10.45, row * D * 0.16, W * 0.5, 0.06, 0.25, "#e8e3c8");
+        box(-W * 0.3, 0, 0, W * 0.24, 13, D * 0.5, "#6f9fb6");
+        cyl(-W * 0.3, 13, 0, Math.min(W, D) * 0.12, 2.5, "#9ac4d4");
+        box(W * 0.42, 0, -D * 0.42, 3.2, 20, 3.2, "#2f6f8f");
+        box(W * 0.42, 15, -D * 0.42 - 1.7, 6, 4, 0.3, "#ff6f61");
+      } else {
+        // 医院：白色主楼 + 两翼 + 红十字 + 屋顶停机坪。
+        box(0, 0, 0, W * 0.34, 22, D * 0.44, "#f4f5f2");
+        box(-W * 0.32, 0, D * 0.06, W * 0.3, 12, D * 0.34, "#ecefea");
+        box(W * 0.32, 0, D * 0.06, W * 0.3, 12, D * 0.34, "#ecefea");
+        cyl(0, 22, 0, Math.min(W, D) * 0.16, 0.4, "#5d6266");
+        box(0, 22.42, 0, Math.min(W, D) * 0.16, 0.05, 1.2, "#f2f2ee");
+        box(0, 16, D * 0.225, 1.4, 5, 0.3, "#e0352b");
+        box(0, 16, D * 0.225, 5, 1.4, 0.3, "#e0352b");
+        box(0, 0, D * 0.36, W * 0.3, 3.4, 4, "#d84a3d");
+      }
+    });
+    const build = (geometry: THREE.BufferGeometry, pieces: Piece[], palette: string[], name: string) => {
+      const mesh = this.makeInstanced(geometry.clone(), selfLitMaterial(activeTheme().name === "vice" ? 0.18 : 0.04), Math.max(1, pieces.length));
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      mesh.count = pieces.length;
+      palette.forEach((color, index) => mesh.setColorAt(index, this.color.set(color)));
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.name = name;
+      return mesh;
+    };
+    this.civicMeshes = [build(BOX, boxes, colors[0], "city-civic-boxes"), build(CYLINDER, cylinders, colors[1], "city-civic-cylinders")];
+    this.civicPieces = [...boxes, ...cylinders];
+    this.civicProgress = civics.map(() => 1);
+    this.civicTarget = civics.map(() => 1);
+    for (let index = 0; index < civics.length; index += 1) this.writeCivic(index);
+  }
+
+  /** 按进度写一座配套的部件矩阵：从地面纵向长出来（y 方向缩放），进度 0 时整座藏起。 */
+  private writeCivic(civicIndex: number): void {
+    const progress = this.civicProgress[civicIndex];
+    const ease = progress * progress * (3 - 2 * progress);
+    for (const piece of this.civicPieces) {
+      if (piece.civic !== civicIndex) continue;
+      if (ease <= 0.001) this.compose(piece.x, -40, piece.z, 0, 0, 0, 0);
+      else this.compose(piece.x, piece.baseY + (piece.y - piece.baseY) * ease, piece.z, piece.yaw, piece.sx, piece.sy * ease, piece.sz);
+      this.civicMeshes[piece.mesh].setMatrixAt(piece.index, this.matrix);
+    }
+    for (const mesh of this.civicMeshes) mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  private updateCivics(dt: number): void {
+    for (let index = 0; index < this.civicTarget.length; index += 1) {
+      const current = this.civicProgress[index];
+      const target = this.civicTarget[index];
+      if (current === target) continue;
+      this.civicProgress[index] = target > current ? Math.min(target, current + dt / 1.2) : Math.max(target, current - dt / 0.6);
+      this.writeCivic(index);
+    }
   }
 
   /** 屋顶轮廓选择：只依赖 (分区, 楼型, 立面, seed)，同一份数据永远同一种屋顶。 */
@@ -1602,6 +1704,7 @@ export class CityParts {
   applyCursor(cursor: number, live: boolean): void {
     this.cursor = cursor;
     this.live = live;
+    (this.layout.civics ?? []).forEach((civic, index) => { this.civicTarget[index] = live || cursor >= civic.unlockAt ? 1 : 0; });
     for (const runtime of this.runtimes) {
       runtime.target = builtFractionAt(runtime.building, cursor, live);
       if (live && runtime.building.active) runtime.target = Math.max(runtime.target, runtime.building.builtFraction);
@@ -1677,6 +1780,7 @@ export class CityParts {
   /** 每帧增量更新。返回是否有矩阵写入（供引擎决定是否强制重绘）。 */
   update(dt: number, elapsed: number): boolean {
     this.waterUniforms.uTime.value = elapsed;
+    this.updateCivics(dt);
 
     let dirty = false;
     const rate = Math.min(1, dt * 1.35);
