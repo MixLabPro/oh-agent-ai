@@ -116,6 +116,13 @@ class MeteorShower {
     }
   }
 
+  /** 发射序列与在飞流星回到初始（胶片导出开拍前）。 */
+  reset(): void {
+    this.countdown = 3;
+    this.spawnCount = 0;
+    for (const meteor of this.pool) { meteor.active = false; meteor.life = 0; meteor.mesh.visible = false; }
+  }
+
   setNight(night: number, nowMs: number): void {
     this.night = night;
     // 确定性流星夜：按「第几夜」哈希，约 30% 的夜晚有流星雨；回放同一晚必现。
@@ -200,6 +207,10 @@ class VolcanoPlume {
 
   setNight(night: number): void {
     this.glowMaterial.opacity = night * 0.3;
+  }
+
+  reset(): void {
+    for (let index = 0; index < this.ages.length; index += 1) this.ages[index] = hashSeed(`puff:${index}`) * 9;
   }
 
   update(dt: number): void {
@@ -325,6 +336,13 @@ export class CityWildlife {
     this.meteors.setNight(night, nowMs);
     this.volcano?.setNight(night);
     this.fireflies?.setNight(night);
+  }
+
+  /** 随帧累加的状态（流星发射序列、火山烟团年龄）回到构造时：胶片导出从同一状态开拍。
+   *  鸟群与萤火虫只由 elapsed 决定，不需要重置。 */
+  reset(): void {
+    this.meteors.reset();
+    this.volcano?.reset();
   }
 
   update(dt: number, elapsed: number): void {

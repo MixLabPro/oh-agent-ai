@@ -717,6 +717,9 @@ export class CityEngine {
     this.controls.enabled = false;
     // 航拍的时间加速率：整窗数据时长摊到片长上，喂给 applyCursor 做有节奏的升起。
     const cinemaPace = (this.model.windowEndMs - this.model.windowStartMs) / Math.max(1, plan.durationSec);
+    // 航拍走晴天（applyWeather 在航拍中不调用）：把实况留下的彩虹收起，否则会一直挂在片子里。
+    this.rainbow?.set(0, 0, this.cityCenter, 1);
+    this.rain?.setAmount(0);
     this.cinematic = { plan, startedAt: this.elapsed, savedFov: this.camera.fov, look: null, lastSeconds: 0, pace: cinemaPace };
     this.camera.fov = 38; // 略长焦：压缩纵深，更像航拍镜头
     this.camera.updateProjectionMatrix();
@@ -775,6 +778,7 @@ export class CityEngine {
     this.parts.resetAnimation();
     this.ambient?.reset();
     this.aurora?.reset();
+    this.wildlife?.reset();
     const plan = this.startCinematic(options.cut);
     if (!plan) { this.exportSize = null; this.applyQualityLevel(wasQuality); this.startLoop(); throw new Error("cinematic unavailable"); }
     const film = document.createElement("canvas");
@@ -996,7 +1000,8 @@ export class CityEngine {
       if (clouds) clouds.opacity = sky.cloudOpacity;
       this.aurora?.setNight(sky.stars);
       this.ambient?.setNight(sky.stars);
-      this.wildlife?.setNight(sky.stars, this.cursorMs ?? Date.now());
+      // 航拍/导出不读墙钟：流星夜按数据窗口末日决定（同一份数据永远同一种夜空）。
+      this.wildlife?.setNight(sky.stars, this.cinematic ? (this.model?.windowEndMs ?? 0) : (this.cursorMs ?? Date.now()));
       // 夜晚城市亮窗：立面自发光抬升（保留 theme 基线的下限）。
       this.parts.setNightGlow(sky.selfLit);
       this.parts.applySelfLit(this.themeSelfLit);
