@@ -273,7 +273,9 @@ class MeteorShower {
 /** 远火山：海平线远山中最高的那座冒烟——上升烟团缓慢膨胀漂移，夜里山口微光。 */
 class VolcanoPlume {
   private readonly puffs: THREE.InstancedMesh;
-  private readonly material: THREE.MeshLambertMaterial;
+  private readonly material: THREE.ShaderMaterial;
+  private readonly lifeAttr: THREE.InstancedBufferAttribute;
+  private readonly nightU = { value: 0 };
   private readonly glow: THREE.Mesh;
   private readonly glowMaterial: THREE.MeshBasicMaterial;
   private readonly crater: THREE.Vector3;
@@ -285,10 +287,51 @@ class VolcanoPlume {
   constructor(mountain: Mountain) {
     // buildSeaMountains 的锥中心在 y=0，峰值在 height/2。
     this.crater = new THREE.Vector3(mountain.center.x, mountain.height / 2, mountain.center.z);
-    const geometry = new THREE.SphereGeometry(1, 7, 6);
-    // 更淡、略深的灰：0.4 不透明度的浅色球读作一串实心雪球（拍照实测），烟要能透出后面的天空。
-    this.material = new THREE.MeshLambertMaterial({ color: "#aeb4b9", transparent: true, opacity: 0.22, depthWrite: false });
+    // 烟团：移植 tinyskies Volcano.ts 的公告板烟（作者授权）——始终正对相机的方片，径向软边，
+    // 按寿命淡入（前 15%）淡出（后 50%）。曾是半透明球，怎么调都读作一串实心雪球（拍照实测）。
+    // 颜色：原版是熔岩映红的暗红烟；这里白天是灰烟，夜里内圈带一点山口的红光。
+    const geometry = new THREE.PlaneGeometry(1, 1);
+    this.lifeAttr = new THREE.InstancedBufferAttribute(new Float32Array(11), 1);
+    geometry.setAttribute("aLife", this.lifeAttr);
+    this.material = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false,
+      uniforms: { uOpacity: { value: 1 }, uNight: this.nightU },
+      vertexShader: /* glsl */ `
+        attribute float aLife;
+        varying vec2 vUv;
+        varying float vLife;
+        void main() {
+          vUv = uv;
+          vLife = aLife;
+          vec4 instancePos = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+          vec4 mvPos = modelViewMatrix * instancePos;
+          float scaleX = length(vec3(instanceMatrix[0][0], instanceMatrix[0][1], instanceMatrix[0][2]));
+          float scaleY = length(vec3(instanceMatrix[1][0], instanceMatrix[1][1], instanceMatrix[1][2]));
+          mvPos.xy += position.xy * vec2(scaleX, scaleY);
+          gl_Position = projectionMatrix * mvPos;
+        }`,
+      fragmentShader: /* glsl */ `
+        uniform float uOpacity;
+        uniform float uNight;
+        varying vec2 vUv;
+        varying float vLife;
+        void main() {
+          float d = length(vUv - 0.5) * 2.0;
+          vec3 inner = mix(vec3(0.42, 0.43, 0.45), vec3(0.6, 0.12, 0.03), uNight * (1.0 - vLife));
+          vec3 outer = mix(vec3(0.33, 0.34, 0.37), vec3(0.18, 0.12, 0.12), uNight);
+          vec3 col = mix(inner, outer, smoothstep(0.0, 0.8, d));
+          float lifeFade = smoothstep(0.0, 0.15, vLife) * (1.0 - smoothstep(0.5, 1.0, vLife));
+          float alpha = (1.0 - smoothstep(0.3, 1.0, d)) * uOpacity * lifeFade;
+          gl_FragColor = vec4(col * 1.2, alpha * 0.7); // 原版 0.45 是暗夜背景；白天浅色天空上要更实一点
+        }`,
+    });
     this.puffs = new THREE.InstancedMesh(geometry, this.material, 11);
+    this.puffs.frustumCulled = false;
+    // GTAO 的法线/深度预渲染用覆盖材质（scene.overrideMaterial）重画整个场景，只替点/线隐身：
+    // 公告板的朝向在我们自己的顶点着色器里，覆盖材质下它们是没转向的方片——画面里一条条深色竖条（实测）。
+    // 覆盖材质期间把实例数临时置 0 跳过绘制，画完恢复。
+    this.puffs.onBeforeRender = (_renderer, scene) => { if (scene.overrideMaterial) this.puffs.count = 0; };
+    this.puffs.onAfterRender = () => { this.puffs.count = 11; };
     this.puffs.name = "city-volcano-plume";
     for (let index = 0; index < 11; index += 1) {
       // 相位按序号均分（再加小抖动）：曾全用 hashSeed(`puff:${i}`)——末位数字不同的字符串哈希几乎相同，
@@ -305,6 +348,7 @@ class VolcanoPlume {
 
   setNight(night: number): void {
     this.glowMaterial.opacity = night * 0.3;
+    this.nightU.value = night;
   }
 
   reset(): void {
@@ -327,12 +371,14 @@ class VolcanoPlume {
       const drift = Math.sin(index * 2.399) * age * 14;
       position.x += drift * 0.8;
       position.z += Math.cos(index * 2.399) * age * 14 * 0.8;
-      const size = 4 + age * 21;
-      scale.set(size, size * 0.8, size);
+      const size = 9 + age * 34; // 方片带软边，有效面积比球小，放大一些
+      scale.set(size, size, 1);
+      this.lifeAttr.setX(index, age);
       matrix.compose(position, new THREE.Quaternion(), scale);
       this.puffs.setMatrixAt(index, matrix);
     }
     this.puffs.instanceMatrix.needsUpdate = true;
+    this.lifeAttr.needsUpdate = true;
   }
 
   dispose(): void {

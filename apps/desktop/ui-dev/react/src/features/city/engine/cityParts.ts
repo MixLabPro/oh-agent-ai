@@ -253,6 +253,60 @@ function originOf(owner: object, value: number): number {
   return animationOrigin.get(owner) as number;
 }
 
+/** 火山体：移植 tinyskies Volcano.ts::buildVolcanoGeometry。原版 S=0.35、H=1.25 的单位尺度换成
+ *  「底半径 = radius、火山口高 = rimHeight」；原版的 3D simplex 噪声换成本仓库的 fbm（三轴投影组合）。 */
+function volcanoGeometry(radius: number, rimHeight: number, seed: number): THREE.BufferGeometry {
+  const S = radius / 1.39; // 原版底半径 (0.24 + 1.15)·S
+  const yScale = rimHeight / S; // 原版火山口高 S·H；这里按目标高度换算
+  const profile: THREE.Vector2[] = [
+    new THREE.Vector2(0.0 * S, 0.88 * S), new THREE.Vector2(0.06 * S, 0.88 * S), new THREE.Vector2(0.09 * S, 0.94 * S),
+    new THREE.Vector2(0.12 * S, 0.98 * S), new THREE.Vector2(0.18 * S, 1.0 * S), new THREE.Vector2(0.24 * S, 0.98 * S),
+  ];
+  const steps = 24;
+  for (let i = 1; i <= steps; i += 1) {
+    const t = i / steps;
+    profile.push(new THREE.Vector2(0.24 * S + Math.pow(t, 1.6) * 1.15 * S, (1 - t) * 0.98 * S));
+  }
+  // LatheGeometry 按点序决定面朝向：原版自上而下排点（配 DoubleSide 材质），这里翻成自下而上，单面材质下外侧朝外。
+  const geometry = new THREE.LatheGeometry(profile.reverse(), 32);
+  const position = geometry.attributes.position as THREE.BufferAttribute;
+  // fbm ≈ -1..1；原版 terrainNoise 是 0..1，换算过来（曾直接当 0..1 用，扭曲量翻三倍、山脚戳出黑色尖刺）。
+  const noise3 = (x: number, y: number, z: number, octaves: number) => (fbm(x + z * 0.71, y + z * 1.37, seed + 77, octaves) + fbm(z + y * 0.53, x - y * 0.91, seed + 131, octaves)) * 0.25 + 0.5;
+  const rimY = S;
+  for (let i = 0; i < position.count; i += 1) {
+    const x = position.getX(i); const y = position.getY(i); const z = position.getZ(i);
+    const r = Math.hypot(x, z);
+    if (r < 0.001) { position.setY(i, y * yScale); continue; }
+    const t = y / rimY;
+    const warp = (noise3((x / S) * 4, (y / S) * 4, (z / S) * 4, 4) - 0.5) * 2;
+    const slopeBand = Math.sin(t * Math.PI);
+    const radialScale = 1 + warp * 0.25 * Math.max(slopeBand, (1 - t) * 0.6);
+    position.setX(i, x * radialScale);
+    position.setZ(i, z * radialScale);
+    position.setY(i, (y + warp * 0.08 * S * slopeBand) * yScale);
+  }
+  const colors = new Float32Array(position.count * 3);
+  for (let i = 0; i < position.count; i += 1) {
+    const x = position.getX(i); const y = position.getY(i) / yScale; const z = position.getZ(i);
+    const r = Math.hypot(x, z);
+    const t = Math.max(0, y / rimY);
+    const cNoise = noise3((x / S) * 10, (y / S) * 10, (z / S) * 10, 3);
+    const tMod = Math.max(0, Math.min(1, t + (cNoise - 0.5) * 0.25));
+    let c: [number, number, number];
+    if (tMod > 0.88 && r < 0.1 * S) c = [0.85, 0.25, 0.05]; // 岩浆芯
+    else if (tMod > 0.82) c = [0.16, 0.1, 0.08]; // 焦黑火山口
+    else if (tMod > 0.55) { const k = (tMod - 0.55) / 0.27; c = [0.38 + (0.16 - 0.38) * k, 0.24 + (0.1 - 0.24) * k, 0.18 + (0.08 - 0.18) * k]; }
+    else { const k = Math.min(1, tMod / 0.55); c = [0.28 + 0.1 * k, 0.32 - 0.08 * k, 0.22 - 0.04 * k]; } // 青褐山脚
+    const highlight = (cNoise - 0.5) * 0.1;
+    colors[i * 3] = Math.max(0, Math.min(1, c[0] + highlight));
+    colors[i * 3 + 1] = Math.max(0, Math.min(1, c[1] + highlight));
+    colors[i * 3 + 2] = Math.max(0, Math.min(1, c[2] + highlight));
+  }
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
 type StaticCity = {
   seed: number;
   layout: CityLayout;
@@ -1695,7 +1749,19 @@ export class CityParts {
   private buildSeaMountains(): void {
     const mountains = this.layout.seaMountains ?? [];
     if (!mountains.length) return;
+    const volcano = [...mountains].sort((a, b) => b.height - a.height)[0];
     for (const mountain of mountains) {
+      if (mountain === volcano) {
+        // 冒烟的那座（CityWildlife 选最高的）是火山：火山体直接移植 tinyskies Volcano.ts 的 buildVolcanoGeometry
+        // （作者授权）——带火山口的车削轮廓、噪声扭曲成不规则岩体、顶点色从青褐山脚→灰烬→焦黑火山口→岩浆芯。
+        // 曾是一个光秃的浅色圆锥，读作「海上一顶帽子」（拍照实测）。烟柱从 height/2 的火山口冒出。
+        const mesh = new THREE.Mesh(volcanoGeometry(mountain.radius, mountain.height / 2, this.layout.seed), new THREE.MeshLambertMaterial({ vertexColors: true, fog: false }));
+        mesh.position.set(mountain.center.x, -2, mountain.center.z);
+        mesh.name = "city-sea-volcano";
+        this.group.add(mesh);
+        this.disposables.push(mesh.geometry, mesh.material as THREE.Material);
+        continue;
+      }
       const geometry = new THREE.ConeGeometry(mountain.radius, mountain.height, 11, 4);
       const position = geometry.attributes.position as THREE.BufferAttribute;
       const colors = new Float32Array(position.count * 3);
