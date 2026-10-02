@@ -98,28 +98,111 @@ class BirdFlocks {
   }
 }
 
-/** 夜间流星：对象池 3 颗，按日期哈希决定「流星夜」（约三成夜晚），其余夜偶发孤星。 */
+/* ── 流星外观：直接移植 tinyskies MeteorShower.ts 的着色器（作者授权）──────────────────
+ * 头：熔岩裂纹（噪声 → 暗岩/橙红/亮黄）；尾：沿锥体的流动噪声，前段火焰、后段淡成烟，普通 alpha 混合。
+ * 原版的撞击（穹顶火球、冲击波环、火星）是「末日月亮」玩法，城市夜空里流星落地爆炸不合适，未移植。 */
+const meteorNoiseGLSL = `
+float hash3(vec3 p) {
+  p = fract(p * vec3(443.897, 441.423, 437.195));
+  p += dot(p, p.yzx + 19.19);
+  return fract((p.x + p.y) * p.z);
+}
+float noise3(vec3 p) {
+  vec3 i = floor(p); vec3 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(mix(hash3(i), hash3(i + vec3(1.0,0.0,0.0)), f.x),
+        mix(hash3(i + vec3(0.0,1.0,0.0)), hash3(i + vec3(1.0,1.0,0.0)), f.x), f.y),
+    mix(mix(hash3(i + vec3(0.0,0.0,1.0)), hash3(i + vec3(1.0,0.0,1.0)), f.x),
+        mix(hash3(i + vec3(0.0,1.0,1.0)), hash3(i + vec3(1.0,1.0,1.0)), f.x), f.y), f.z);
+}
+`;
+const meteorHeadFrag = `
+uniform float uTime;
+uniform float uOpacity;
+varying vec3 vPos;
+${meteorNoiseGLSL}
+void main() {
+  float n = noise3(vPos * 2.2 + uTime * 3.0);
+  float crack = smoothstep(0.35, 0.6, n);
+  vec3 rock = vec3(0.08, 0.03, 0.01);
+  vec3 lava = mix(vec3(1.0, 0.2, 0.0), vec3(1.0, 0.9, 0.2), crack);
+  gl_FragColor = vec4(mix(rock, lava, crack * 0.8 + 0.2), uOpacity);
+}
+`;
+const meteorTrailFrag = `
+uniform float uTime;
+uniform float uOpacity;
+varying vec2 vUv;
+${meteorNoiseGLSL}
+void main() {
+  float fade = 1.0 - vUv.y;
+  float n = noise3(vec3(vUv.x * 12.0, vUv.y * 6.0 - uTime * 15.0, uTime * 2.0));
+  float core = smoothstep(0.2, 0.8, fade) * smoothstep(0.1, 0.9, n);
+  vec3 fireCol = mix(vec3(1.0, 0.2, 0.0), vec3(1.0, 0.9, 0.3), core);
+  vec3 smokeCol = vec3(0.08, 0.08, 0.08);
+  float fireMix = smoothstep(0.3, 0.8, fade + n * 0.2);
+  vec3 col = mix(smokeCol, fireCol, fireMix);
+  float alpha = smoothstep(0.0, 0.2, fade) * n * uOpacity;
+  alpha = clamp(mix(alpha * 1.5, alpha, fireMix), 0.0, 1.0);
+  gl_FragColor = vec4(col, alpha);
+}
+`;
+
+/** 夜间流星：对象池 3 颗，按日期哈希决定「流星夜」（约三成夜晚），其余夜偶发孤星。外观见上。 */
 class MeteorShower {
-  private readonly pool: Array<{ mesh: THREE.Mesh; active: boolean; life: number; span: number; velocity: THREE.Vector3 }> = [];
-  private readonly material: THREE.MeshBasicMaterial;
+  private readonly pool: Array<{ mesh: THREE.Group; active: boolean; life: number; span: number; velocity: THREE.Vector3 }> = [];
+  private readonly trailMaterial: THREE.ShaderMaterial;
+  private readonly headMaterial: THREE.ShaderMaterial;
+  private readonly glowMaterial: THREE.MeshBasicMaterial;
+  private readonly geometries: THREE.BufferGeometry[] = [];
+  private readonly timeU = { value: 0 };
   private countdown = 3;
   private interval = 1.2;
   private night = 0;
   private spawnCount = 0;
   readonly group = new THREE.Group();
 
-  constructor(private radius: number) {
-    // 拉长的锥形流星：头在前、尾渐细，additive 发光。
-    // 锥尖朝后（-z）、宽口在前并平移到原点：lookAt 让 +z 指向速度方向后，亮头在前、细尾拖在后面。
-    // 曾 rotateX(+π/2) 让锥尖朝前，且每帧 lookAt 之后又补一次 rotateX——尾巴横着甩（用户反馈「尾巴方向不对」）。
-    const geometry = new THREE.ConeGeometry(0.9, 26, 5, 1, true).rotateX(-Math.PI / 2).translate(0, 0, -13);
-    this.material = new THREE.MeshBasicMaterial({ color: "#fff3d2", transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, fog: false, toneMapped: false });
+  constructor(private radius: number, private readonly center: { x: number; z: number } = { x: 0, z: 0 }) {
+    // 锥体：宽口（uv.y = 0，火焰最亮）在前、锥尖（uv.y = 1，淡成烟）在后。rotateX(-π/2) 把锥尖转到 -z，
+    // 平移让宽口落在原点：lookAt 让 +z 指向速度方向后，头在前、尾拖在后。
+    const trailGeometry = new THREE.ConeGeometry(2.4, 70, 16, 4, true).rotateX(-Math.PI / 2).translate(0, 0, -35);
+    const headGeometry = new THREE.DodecahedronGeometry(2.2, 1);
+    const position = headGeometry.attributes.position;
+    for (let i = 0; i < position.count; i += 1) {
+      const r = 1 + (hashSeed(`meteor-rock:${i}`) - 0.5) * 0.1; // 原版 Math.random()：换成哈希，导出可复现
+      position.setXYZ(i, position.getX(i) * r, position.getY(i) * r, position.getZ(i) * r);
+    }
+    headGeometry.computeVertexNormals();
+    const glowGeometry = new THREE.SphereGeometry(5.5, 12, 8);
+    this.geometries.push(trailGeometry, headGeometry, glowGeometry);
+    this.trailMaterial = new THREE.ShaderMaterial({
+      vertexShader: "varying vec2 vUv;\nvoid main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }",
+      fragmentShader: meteorTrailFrag,
+      uniforms: { uTime: this.timeU, uOpacity: { value: 1 } },
+      transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: false,
+    });
+    this.headMaterial = new THREE.ShaderMaterial({
+      vertexShader: "varying vec3 vPos;\nvoid main() { vPos = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }",
+      fragmentShader: meteorHeadFrag,
+      uniforms: { uTime: this.timeU, uOpacity: { value: 1 } },
+      transparent: true, fog: false,
+    });
+    // 头部光晕（原版地面落点光环的空中版）：加色、进 bloom。
+    this.glowMaterial = new THREE.MeshBasicMaterial({ color: "#ffba73", transparent: true, opacity: 0.35, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false, fog: false });
     for (let index = 0; index < 3; index += 1) {
-      const mesh = new THREE.Mesh(geometry, this.material);
-      mesh.visible = false;
-      mesh.frustumCulled = false;
-      this.group.add(mesh);
-      this.pool.push({ mesh, active: false, life: 0, span: 2.6, velocity: new THREE.Vector3() });
+      const meteor = new THREE.Group();
+      const trail = new THREE.Mesh(trailGeometry, this.trailMaterial);
+      trail.renderOrder = 335;
+      const head = new THREE.Mesh(headGeometry, this.headMaterial);
+      head.renderOrder = 340;
+      const glow = new THREE.Mesh(glowGeometry, this.glowMaterial);
+      glow.renderOrder = 330;
+      for (const part of [trail, head, glow]) part.frustumCulled = false;
+      meteor.add(trail, glow, head);
+      meteor.visible = false;
+      this.group.add(meteor);
+      this.pool.push({ mesh: meteor, active: false, life: 0, span: 2.6, velocity: new THREE.Vector3() });
     }
   }
 
@@ -127,6 +210,7 @@ class MeteorShower {
   reset(): void {
     this.countdown = 3;
     this.spawnCount = 0;
+    this.timeU.value = 0;
     for (const meteor of this.pool) { meteor.active = false; meteor.life = 0; meteor.mesh.visible = false; }
   }
 
@@ -139,6 +223,7 @@ class MeteorShower {
   }
 
   update(dt: number): void {
+    this.timeU.value += dt;
     const active = this.night > 0.55;
     this.group.visible = active;
     if (!active) {
@@ -154,7 +239,8 @@ class MeteorShower {
         this.spawnCount += 1;
         const reach = this.radius * (1.15 + seed * 0.5);
         const heading = seed * Math.PI * 2;
-        free.mesh.position.set(Math.cos(heading) * reach, 560 + seed * 220, Math.sin(heading) * reach);
+        // 绕城心（曾绕世界原点：城心偏离原点的岛，流星总在一侧）。
+        free.mesh.position.set(this.center.x + Math.cos(heading) * reach, 560 + seed * 220, this.center.z + Math.sin(heading) * reach);
         free.velocity.set(-Math.cos(heading) * 150 - 60, -95 - seed * 45, -Math.sin(heading) * 150 + 40).normalize().multiplyScalar(230 + seed * 70);
         free.span = 2.2 + seed * 1.1;
         free.life = 0;
@@ -176,8 +262,10 @@ class MeteorShower {
   }
 
   dispose(): void {
-    this.pool.forEach((meteor) => meteor.mesh.geometry.dispose());
-    this.material.dispose();
+    this.geometries.forEach((geometry) => geometry.dispose());
+    this.trailMaterial.dispose();
+    this.headMaterial.dispose();
+    this.glowMaterial.dispose();
     this.group.removeFromParent();
   }
 }
@@ -339,7 +427,7 @@ export class CityWildlife {
   constructor(center: { x: number; z: number }, radius: number, parkTrees: Array<{ x: number; z: number; y: number }>, seaMountains: Mountain[]) {
     this.birds = new BirdFlocks(center, radius);
     this.group.add(this.birds.object3d);
-    this.meteors = new MeteorShower(radius);
+    this.meteors = new MeteorShower(radius, center);
     this.group.add(this.meteors.group);
     const volcanoMountain = [...seaMountains].sort((a, b) => b.height - a.height)[0];
     this.volcano = volcanoMountain ? new VolcanoPlume(volcanoMountain) : null;
