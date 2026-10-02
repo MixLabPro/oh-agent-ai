@@ -1862,6 +1862,27 @@ export class CityParts {
 
   private buildWater(): THREE.Mesh {
     const geometry = new THREE.PlaneGeometry(9000, 9000, 1, 1).rotateX(-Math.PI / 2);
+    // 岸线深度图（tinyskies Globe 的 oceanDepth 等价物）：构建期把 -height/16 采样
+    // 进单通道纹理（384²，随静态城缓存一次性烘焙）。水面是 1×1 段平面没有顶点
+    // 可烘，纹理方案逐像素平滑；河床 height<0 同样被采到，河岸也起涟漪。
+    const DEPTH_TEX = 384;
+    const DEPTH_WORLD = 1500;
+    const depthData = new Uint8Array(DEPTH_TEX * DEPTH_TEX);
+    for (let y = 0; y < DEPTH_TEX; y += 1) {
+      for (let x = 0; x < DEPTH_TEX; x += 1) {
+        const worldX = (x / (DEPTH_TEX - 1) - 0.5) * DEPTH_WORLD * 2;
+        const worldZ = (y / (DEPTH_TEX - 1) - 0.5) * DEPTH_WORLD * 2;
+        const h = this.layout.terrain.height(worldX, worldZ);
+        depthData[y * DEPTH_TEX + x] = Math.max(0, Math.min(255, Math.round((-h / 16) * 255)));
+      }
+    }
+    const depthTexture = new THREE.DataTexture(depthData, DEPTH_TEX, DEPTH_TEX, THREE.RedFormat, THREE.UnsignedByteType);
+    depthTexture.minFilter = THREE.LinearFilter;
+    depthTexture.magFilter = THREE.LinearFilter;
+    depthTexture.wrapS = THREE.ClampToEdgeWrapping;
+    depthTexture.wrapT = THREE.ClampToEdgeWrapping;
+    depthTexture.needsUpdate = true;
+    this.disposables.push(depthTexture);
     const material = new THREE.ShaderMaterial({
       uniforms: {
         uTime: { value: 0 },
@@ -1869,6 +1890,8 @@ export class CityParts {
         uDeep: { value: new THREE.Color(activeTheme().water.deep) },
         uShallow: { value: new THREE.Color(activeTheme().water.shallow) },
         uSky: { value: new THREE.Color(activeTheme().water.sky) },
+        uDepth: { value: depthTexture },
+        uDepthWorld: { value: DEPTH_WORLD },
         // 与 scene.background 同色：ShaderMaterial 不吃 scene.fog，水面远处要自己淡出到天空色，
         // 否则 2600 见方的水面直边会像「世界边缘」露在天空下。
         uFog: { value: new THREE.Color(activeTheme().skyHorizon) },
@@ -1913,6 +1936,8 @@ export class CityParts {
         uniform vec3 uGradeHorizon;
         uniform float uGradeAmount;
         uniform float uSkyYaw;
+        uniform sampler2D uDepth;
+        uniform float uDepthWorld;
         varying vec3 vWorld;
         // 与天空球同一套采样 + 调色：反射和远处淡出都要与天空完全一致，否则地平线出现接缝。
         vec3 skyAt(vec3 dir) {
@@ -1927,6 +1952,12 @@ export class CityParts {
           h += sin((p.x + p.y) * 0.16 + t * 1.1) * 0.28;
           h += sin((p.x * 0.6 - p.y * 0.8) * 0.23 - t * 0.9) * 0.18;
           return h;
+        }
+        // 离岸深度（构建期烘焙）：0 = 水线，1 = 深水；纹理外一律深水。
+        float shoreDepth(vec2 p) {
+          vec2 uv = p / (uDepthWorld * 2.0) + 0.5;
+          if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+          return texture2D(uDepth, uv).r;
         }
         void main() {
           vec2 p = vWorld.xz;
@@ -1981,6 +2012,20 @@ export class CityParts {
           sparkle *= smoothstep(1.5, 4.0, cellPx);
           // 粼粼碎光是日光反射：夜里关掉（曾夜里照样按白天强度闪，一片白色雪花点）；夜海的亮点来自平面镜里的城市灯光。
           color += vec3(1.0, 0.99, 0.92) * sparkle * 0.75 * (1.0 - uNight);
+          // ── 岸线涟漪（tinyskies Globe 手法，作者授权移植）──────────────────
+          // 只此一件：fract(深度×频率−时间) 生成向岸滚动的白色波纹带，sin 噪声让
+          // 条带不规则、深度衰减离岸消失。深度驱动、空间上低频（条带宽 ~10-30 单
+          // 位），远处（700–1400）柔和淡出防混叠；不动碎光、不加开阔海面浪花。
+          float d = shoreDepth(p);
+          if (d < 0.8) {
+            float dayFade = 1.0 - uNight * 0.6;
+            float nz = sin(p.x * 0.09 + p.y * 0.06 + uTime * 0.4) * 0.05 + sin(p.x * 0.05 - p.y * 0.11 + uTime * 0.27) * 0.035;
+            float contour = fract((d + nz) * 4.0 - uTime * 0.42);
+            float band = smoothstep(0.45, 0.7, contour) * (1.0 - smoothstep(0.75, 1.0, contour));
+            float depthFade = 1.0 - smoothstep(0.08, 0.7, d);
+            float bandFade = 1.0 - smoothstep(700.0, 1400.0, dist);
+            color = mix(color, vec3(0.9, 0.97, 0.98), band * depthFade * bandFade * 0.75 * dayFade);
+          }
           gl_FragColor = vec4(color, 1.0);
           #include <tonemapping_fragment>
           // 雾混在色调映射之后：scene.background 不经色调映射，先混再映射会让远水发灰、与天空出现色带。
