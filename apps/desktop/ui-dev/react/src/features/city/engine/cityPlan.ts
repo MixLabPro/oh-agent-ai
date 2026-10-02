@@ -31,9 +31,35 @@ export function polygonDistance(p: Vec2, polygon: Vec2[]): number {
 
 export const roadNodeId = (p: Vec2): string => `${p.x}:${p.z}`;
 
+/** 路段空间索引：按 CELL 分格，查询只看点周围的格子（全路段逐一算距离是规划生成的主要耗时：profile 里占 60%）。 */
+export class SegmentIndex {
+  private readonly cell = 60;
+  private readonly cells = new Map<string, Array<[Vec2, Vec2]>>();
+  constructor(runs: Vec2[][]) { for (const run of runs) for (let i = 1; i < run.length; i += 1) this.add(run[i - 1], run[i]); }
+  add(a: Vec2, b: Vec2): void {
+    const c = this.cell;
+    for (let gx = Math.floor(Math.min(a.x, b.x) / c); gx <= Math.floor(Math.max(a.x, b.x) / c); gx += 1)
+      for (let gz = Math.floor(Math.min(a.z, b.z) / c); gz <= Math.floor(Math.max(a.z, b.z) / c); gz += 1) {
+        const key = `${gx}:${gz}`;
+        const list = this.cells.get(key);
+        if (list) list.push([a, b]); else this.cells.set(key, [[a, b]]);
+      }
+  }
+  /** 点到任一路段的距离是否小于 d（d 不超过一个格宽，查询 3×3 格）。 */
+  closerThan(p: Vec2, d: number): boolean {
+    const gx = Math.floor(p.x / this.cell); const gz = Math.floor(p.z / this.cell);
+    for (let dx = -1; dx <= 1; dx += 1) for (let dz = -1; dz <= 1; dz += 1) {
+      const list = this.cells.get(`${gx + dx}:${gz + dz}`);
+      if (list) for (const [a, b] of list) if (segmentDistance(p, a, b) < d) return true;
+    }
+    return false;
+  }
+}
+
 /** Conservative footprint guard: includes the full deck and a sidewalk setback. */
-export function clearsHighways(p: Vec2, width: number, depth: number, highways: Vec2[][]): boolean {
+export function clearsHighways(p: Vec2, width: number, depth: number, highways: Vec2[][] | SegmentIndex): boolean {
   const clearance = 5.25 + Math.hypot(width, depth) / 2 + 1;
+  if (highways instanceof SegmentIndex) return !highways.closerThan(p, clearance);
   for (const run of highways) for (let i = 1; i < run.length; i += 1) {
     if (segmentDistance(p, run[i - 1], run[i]) < clearance) return false;
   }
@@ -166,7 +192,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
   }
 
   /** 从名义位置就近找可建地：同心环搜索，离岸/离河至少 clearance，与已放置点保持间距。 */
-  const snap = (nominal: Vec2, clearance: number, placed: Array<Vec2 & { radius: number }>, radius: number): Vec2 => {
+  const snap = (nominal: Vec2, clearance: number, placed: Array<Vec2 & { radius: number }>, radius: number, accept?: (q: Vec2) => boolean): Vec2 => {
     for (let ring = 0; ring <= 60; ring += 1) {
       const steps = Math.max(1, ring * 8);
       for (let k = 0; k < steps; k += 1) {
@@ -174,6 +200,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
         const q = { x: nominal.x + Math.cos(a) * ring * 12, z: nominal.z + Math.sin(a) * ring * 12 };
         if (landClearance(q.x, q.z) < clearance || hillProj(q.x, q.z) > hillLine - clearance * 0.5) continue;
         if (placed.some((o) => Math.hypot(o.x - q.x, o.z - q.z) < o.radius + radius + 20)) continue;
+        if (accept && !accept(q)) continue;
         return q;
       }
     }
@@ -285,6 +312,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
     trunks.push({ angle, points });
   }
   trunks.sort((p, q) => p.angle - q.angle);
+  const trunkIndex = new SegmentIndex(trunks.map((trunk) => trunk.points));
   const distanceToTrunks = (p: Vec2) => {
     let d = Infinity;
     for (const trunk of trunks) for (let k = 1; k < trunk.points.length; k += 1) d = Math.min(d, segmentDistance(p, trunk.points[k - 1], trunk.points[k]));
@@ -303,6 +331,15 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
     else { if (run.length >= 6) ringRuns.push(run); run = []; }
   }
   if (run.length >= 6) ringRuns.push(run);
+  // 公共用地与地标先于环线选址，名义位置可能正压在高架上（clearsHighways 守卫只覆盖了地块/配套/花园）：
+  // 环线只取决于核心点与岛半径，所以这里把压线的预留地原地重新贴到不压高架的位置；街区与地块都在此之后生成。
+  for (const site of [...publicSites, ...landmarks]) {
+    if (!site.radius || clearsHighways(site, site.radius * 2, site.radius * 2, ringRuns)) continue;
+    const others = [...publicSites, ...landmarks].filter((o) => o !== site).map((o) => ({ x: o.x, z: o.z, radius: o.radius }));
+    const q = snap(site, site.radius + 14, others, site.radius, (c) => clearsHighways(c, site.radius * 2, site.radius * 2, ringRuns));
+    site.x = q.x; site.z = q.z;
+  }
+  const ringIndex = new SegmentIndex(ringRuns);
   const distanceToRing = (p: Vec2) => {
     let d = Infinity;
     for (const ring of ringRuns) for (let k = 1; k < ring.length; k += 1) d = Math.min(d, segmentDistance(p, ring[k - 1], ring[k]));
@@ -313,7 +350,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
     // 分区由地理与骨架决定：核心附近 downtown、临海 waterfront、主干道两侧 commercial、其余 residential。
     if (Math.hypot(center.x - core.x, center.z - core.z) < 0.24 * R) return "downtown";
     if (coastDistance(center.x, center.z) < 90) return "waterfront";
-    if (distanceToTrunks(center) < 60) return "commercial";
+    if (trunkIndex.closerThan(center, 60)) return "commercial";
     return "residential";
   };
 
@@ -343,8 +380,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
       if (polygon.some((p) => !angleBetween(Math.atan2(p.z - core.z, p.x - core.x), sector.lo, sector.hi))) continue;
       if (polygon.some((p) => !buildable(p.x, p.z))) continue;
       if (polygon.some((p, k) => { const q = polygon[(k + 1) % 4]; return !buildable((p.x + q.x) / 2, (p.z + q.z) / 2); })) continue;
-      if ([center, ...polygon].some((p) => distanceToTrunks(p) < 10)) continue;
-      if ([center, ...polygon].some((p) => distanceToRing(p) < 9)) continue;
+      if ([center, ...polygon].some((p) => trunkIndex.closerThan(p, 10))) continue;
+      if ([center, ...polygon].some((p) => ringIndex.closerThan(p, 9))) continue;
       const reserved = reservations().some((site) => polygonDistance(site, polygon) > -site.radius);
       const zone = zoneFor(center);
       const id = `plan:${sectorIndex}:${i}:${j}`; const parcels: Parcel[] = [];
@@ -357,7 +394,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
         const p = { x: a.x + dx * (7 + (length - 14) * t) - dz * inset, z: a.z + dz * (7 + (length - 14) * t) + dx * inset };
         if (polygonDistance(p, polygon) < 3.6 + 5) continue;
         if (reservations().some((site) => Math.hypot(p.x - site.x, p.z - site.z) < site.radius + 9)) continue;
-        if (!clearsHighways(p, 7.2, 8, ringRuns)) continue;
+        if (!clearsHighways(p, 7.2, 8, ringIndex)) continue;
         parcels.push({ ...p, id: `${id}/${side}:${index}`, blockId: id, yaw: -Math.atan2(dz, dx), zone, width: Math.min(7.2, (length - 14) / columnCount), depth: 8 });
       }
       const k = (p: Vec2) => key(p);
@@ -386,6 +423,30 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
         if (!best || d < best.d) best = { a, b, d };
       }
       if (best && best.d < 400) addEdge(best.a, best.b, false);
+    }
+  }
+
+  // 终筛：主干道、桥、连接支路都定型后，对每个地块统一核对「到任何路段的距离」。
+  // 块级检查只看街区四角与中心到主干道的距离，边中点更近的地块会漏过；连接支路又长达上百单位直穿街区、
+  // 且在地块之后才加入——布局守卫抓到过 gap 6.4 的压路地块。
+  {
+    const CELL = 60;
+    const grid = new Map<string, RoadEdge[]>();
+    for (const edge of edges.values()) {
+      const [a0, b0] = edge.points;
+      for (let gx = Math.floor(Math.min(a0.x, b0.x) / CELL) - 1; gx <= Math.floor(Math.max(a0.x, b0.x) / CELL) + 1; gx += 1)
+        for (let gz = Math.floor(Math.min(a0.z, b0.z) / CELL) - 1; gz <= Math.floor(Math.max(a0.z, b0.z) / CELL) + 1; gz += 1) {
+          const key2 = `${gx}:${gz}`;
+          const list = grid.get(key2);
+          if (list) list.push(edge); else grid.set(key2, [edge]);
+        }
+    }
+    for (const block of blocks) {
+      block.parcels = block.parcels.filter((parcel) => {
+        const need = Math.hypot(parcel.width, parcel.depth) / 2;
+        return (grid.get(`${Math.floor(parcel.x / CELL)}:${Math.floor(parcel.z / CELL)}`) ?? []).every((edge) =>
+          segmentDistance(parcel, edge.points[0], edge.points[1]) >= need + edge.width / 2 + 0.5);
+      });
     }
   }
 

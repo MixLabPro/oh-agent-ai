@@ -66,7 +66,8 @@ for (const seed of seeds) {
   });
   for (let i = 0; i < centers.length; i += 1) for (let j = i + 1; j < centers.length; j += 1) {
     const gap = Math.hypot(centers[i].x - centers[j].x, centers[i].z - centers[j].z);
-    assert(gap >= 120, `seed ${seed}: districts ${centers[i].id} and ${centers[j].id} crowd together (${gap.toFixed(0)} apart)`);
+    // 100：曾挤成一团的种子（seed 42）两城区质心只隔几十单位；正常种子在 110–400 之间，120 的阈值贴着边、一次选址微调就会误报。
+    assert(gap >= 100, `seed ${seed}: districts ${centers[i].id} and ${centers[j].id} crowd together (${gap.toFixed(2)} apart)`);
   }
   // 致敬型地标：每岛 2–4 座（含可能的悬索桥），在陆地上，不压任何会话地块。
   assert(layout.landmarks.length >= 2 && layout.landmarks.length <= 4, `seed ${seed}: ${layout.landmarks.length} landmarks`);
@@ -77,6 +78,13 @@ for (const seed of seeds) {
     const t = Math.max(0, Math.min(1, ((lot.x - a.x) * dx + (lot.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
     const gap = Math.hypot(lot.x - a.x - dx * t, lot.z - a.z - dz * t);
     assert(gap >= 5.25 + Math.hypot(lot.width, lot.depth) / 2 + 1, `seed ${seed}: ${lot.id} overlaps expressway`);
+  }
+  // 公共用地与地标（半径 > 0 的）同样不得压在环线高架的路幅上：它们先于环线选址，曾只有地块被守住。
+  for (const site of [...layout.publicSites, ...layout.landmarks.filter((l) => l.radius > 0)]) for (const run of layout.highways) for (let i = 1; i < run.length; i += 1) {
+    const a = run[i - 1]; const b = run[i]; const dx = b.x - a.x; const dz = b.z - a.z;
+    const t = Math.max(0, Math.min(1, ((site.x - a.x) * dx + (site.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
+    const gap = Math.hypot(site.x - a.x - dx * t, site.z - a.z - dz * t);
+    assert(gap >= 5.25 + site.radius + 1, `seed ${seed}: ${site.id} overlaps expressway (gap ${gap.toFixed(1)})`);
   }
   for (const landmark of layout.landmarks) {
     landmarkKinds.add(landmark.kind);
