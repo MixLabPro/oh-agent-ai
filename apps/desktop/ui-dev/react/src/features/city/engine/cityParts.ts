@@ -1154,7 +1154,7 @@ export class CityParts {
       this.compose(x, base, z, 0, 1, 4.6, 1);
       poles.setMatrixAt(lamps, this.matrix);
       // 灯头悬在路中心一侧（臂长 0.7），朝路面。
-      this.compose(x - nx * 0.7, base + 4.55, z - nz * 0.7, yaw, 1, 1, 1);
+      this.compose(x - nx * 0.45, base + 4.55, z - nz * 0.45, yaw, 1, 1, 1); // 灯头长 0.9：一端贴住灯杆，不再悬空
       headMesh.setMatrixAt(lamps, this.matrix);
       this.compose(x - nx * poolReach, base + 0.12, z - nz * poolReach, 0, poolRadius, 1, poolRadius);
       poolMesh.setMatrixAt(lamps, this.matrix);
@@ -1587,7 +1587,18 @@ export class CityParts {
     const disposables: Array<{ dispose(): void }> = [spire.geometry, spireMaterial, ringMaterial, ...rings.map((ring) => ring.geometry)];
     if (activeTheme().neon) {
       const beamMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color(palette.accent).lerp(new THREE.Color("#ffffff"), 0.4).multiplyScalar(2.2), transparent: true, opacity: 0.22, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
-      beam = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 1.6, 1, 16, 1, true).translate(0, 0.5, 0), beamMaterial);
+      // 光柱自下而上淡出（加色混合下顶点色 → 黑 = 透明）：曾是等亮度的 900 高圆柱，近看顶端是一截平切的白块。
+      const beamGeometry = new THREE.CylinderGeometry(0.6, 1.6, 1, 16, 6, true).translate(0, 0.5, 0);
+      const fade = new Float32Array(beamGeometry.attributes.position.count * 3);
+      for (let i = 0; i < beamGeometry.attributes.position.count; i += 1) {
+        const y = beamGeometry.attributes.position.getY(i);
+        const k = Math.min(1, y / 0.03) * Math.pow(1 - y, 1.6); // 底部 ~12 单位淡入：近看不再是一截硬边白块
+        fade[i * 3] = fade[i * 3 + 1] = fade[i * 3 + 2] = k;
+      }
+      beamGeometry.setAttribute("color", new THREE.BufferAttribute(fade, 3));
+      beamMaterial.vertexColors = true;
+      beamMaterial.visible = false; // 只在夜里亮（setNightGlow），白天天上不再挂一根白线
+      beam = new THREE.Mesh(beamGeometry, beamMaterial);
       beam.renderOrder = 5;
       disposables.push(beam.geometry, beamMaterial);
       this.group.add(beam);
@@ -1616,7 +1627,7 @@ export class CityParts {
     if (parts.beam) {
       parts.beam.visible = visible;
       parts.beam.position.set(x, top + spireHeight, z);
-      parts.beam.scale.set(1, 900, 1);
+      parts.beam.scale.set(1, 420, 1);
     }
   }
 
@@ -2070,18 +2081,45 @@ export class CityParts {
           vec3 tint = mix(uGradeHorizon, uGradeTop, smoothstep(0.0, 0.6, max(dir.y, 0.0)));
           return mix(photo, photo * tint * 1.55, uGradeAmount);
         }
-        float wave(vec2 p, float t) {
-          // 曾是 sin(x)·cos(y) 蛋托面——~70×84 单位的规则峰格，会透过波峰提亮/碎光门控显出点阵；
-          // 改为两条非平行方向的平面波之和，不再形成二维格点。
-          float h = (sin((p.x * 0.82 + p.y * 0.57) * 0.09 + t * 0.8) + sin((p.x * -0.34 + p.y * 0.94) * 0.075 - t * 0.6)) * 0.25;
-          h += sin((p.x + p.y) * 0.16 + t * 1.1) * 0.28;
-          h += sin((p.x * 0.6 - p.y * 0.8) * 0.23 - t * 0.9) * 0.18;
-          return h;
-        }
         // 水面法线贴图（512²）在该 uv 处的 mip 级：0 = 1 texel/像素，每 +1 = 降采样一倍。
         float waterMip(vec2 uv) {
           vec2 d = fwidth(uv) * 512.0;
           return log2(max(max(d.x, d.y), 1e-4));
+        }
+        float rHash(vec2 c) { return fract(sin(dot(c, vec2(127.1, 311.7))) * 43758.5453); }
+        vec2 rHash2(vec2 c) { return fract(sin(vec2(dot(c, vec2(127.1, 311.7)), dot(c, vec2(269.5, 183.3)))) * 43758.5453); }
+        // 平滑值噪声（格点哈希 + smoothstep 插值）：没有周期，等值线不成点阵。
+        float valueNoise(vec2 q) {
+          vec2 i = floor(q);
+          vec2 f = fract(q);
+          vec2 u = f * f * (3.0 - 2.0 * f);
+          float a = rHash(i);
+          float b = rHash(i + vec2(1.0, 0.0));
+          float c = rHash(i + vec2(0.0, 1.0));
+          float e = rHash(i + vec2(1.0, 1.0));
+          return mix(mix(a, b, u.x), mix(c, e, u.x), u.y);
+        }
+        // 一层涟漪：格距 cell；查 3×3 邻格（中心在格内 0.15–0.85、半径 ≤ 0.85 格，跨格的环也能画到）。
+        float rippleLayer(vec2 p, float cell, float t, float seed) {
+          vec2 g = floor(p / cell);
+          float acc = 0.0;
+          for (int i = -1; i <= 1; i++) {
+            for (int j = -1; j <= 1; j++) {
+              vec2 c = g + vec2(float(i), float(j));
+              float period = 3.0 + rHash(c + seed) * 5.0;              // 时间：每格自己的周期
+              float phase = t / period + rHash(c + seed + 7.1);        // …且错相
+              float cycle = floor(phase);
+              float age = fract(phase);
+              float alive = step(0.45, rHash(c + cycle * 3.3 + seed + 1.7)); // 约一半轮次不出现
+              vec2 center = (c + 0.15 + rHash2(c + cycle * 13.7 + seed) * 0.7) * cell; // 位置：每轮重抽
+              float maxR = cell * (0.3 + 0.55 * rHash(c + cycle * 5.9 + seed + 4.2)); // 大小：每轮随机
+              float r = age * maxR;
+              float width = 0.7 + r * 0.06;
+              float ring = 1.0 - smoothstep(0.0, width, abs(length(p - center) - r));
+              acc += ring * (1.0 - age) * (1.0 - age) * alive;
+            }
+          }
+          return acc;
         }
         // 离岸深度（构建期烘焙）：0 = 水线，1 = 深水；纹理外一律深水。
         float shoreDepth(vec2 p) {
@@ -2091,11 +2129,11 @@ export class CityParts {
         }
         void main() {
           vec2 p = vWorld.xz;
-          float e = 0.65;
-          float h0 = wave(p, uTime);
-          float hx = wave(p + vec2(e, 0.0), uTime);
-          float hz = wave(p + vec2(0.0, e), uTime);
-          vec3 n = normalize(vec3((h0 - hx) * 1.8, e * 1.7, (h0 - hz) * 1.8));
+          // 不再用解析波（几组平面波之和）做法线：平面波相加本身是二维干涉点阵，波峰周期性对齐，
+          // 镜面高光 pow(·,64) 在每个波峰上点出一颗一模一样的白椭圆，满海排成格子（拍照实测：
+          // 关掉碎光、法线贴图、镜面倒影、尾迹之后椭圆都还在）。法线只来自下面旋转错开的法线贴图层，
+          // 起伏的随机感交给随机涟漪。
+          vec3 n = vec3(0.0, 1.0, 0.0);
           if (uHasAssets > 0.5) {
             // 两层反向滚动的法线贴图：细碎波纹不再是规则的正弦格。
             // 曾是 p/46、p/19 两层轴对齐平铺：同一块贴图每 46 单位原样复制，掠射角下菲涅尔
@@ -2137,30 +2175,22 @@ export class CityParts {
           vec3 color = mix(base, skyColor, reflectance);
           float specular = pow(max(dot(reflect(-normalize(uSun), n), view), 0.0), 64.0);
           color += vec3(1.0, 0.97, 0.88) * specular * 1.05;
-          color += vec3(0.05) * smoothstep(0.5, 0.95, h0);
-          // 碎波光：连续 sin 乘积场 × 大尺度成片掩码 × 太阳光路门控。曾用
-          // floor(p*1.35) 相位格——每格随机亮度，在其 200–650 显示距离带上读作
-          // 一粒粒的规则网格点，且无视太阳方向全海均匀撒点；连续场不成格，光路
-          // 门控（与上方 specular 同一个反射方向）让碎光只出现在太阳反射带里，
-          // 开阔海面干净。频率上限 0.4/单位，显示带内屏幕空间频率低于采样极限。
-          float sp1 = sin(p.x * 0.40 + p.y * 0.23 + uTime * 2.1);
-          float sp2 = sin(p.y * 0.35 + p.x * 0.13 - uTime * 1.7);
-          float sp3 = sin(p.x * 0.27 - p.y * 0.17 + uTime * 2.6);
-          float sp4 = sin(p.x * 0.33 - p.y * 0.23 + uTime * 1.3);
-          float patchMask = sin(p.x * 0.031 + p.y * 0.047 + uTime * 0.25) * sin(p.y * 0.053 - p.x * 0.029 - uTime * 0.18);
-          patchMask *= sin(p.y * 0.023 + p.x * 0.039 + uTime * 0.35);
-          float sunPath = smoothstep(0.55, 0.95, dot(reflect(-normalize(uSun), n), view));
-          float sparkle = smoothstep(0.55, 0.95, sp1 * sp2 * sp3 + sp4 * 0.25) * smoothstep(0.05, 0.4, patchMask) * sunPath * smoothstep(0.35, 0.9, h0);
+          // ── 随机涟漪 ─────────────────────────────────────────────────────
+          // 曾是 sin×sin×sin 的「碎光」乘积场 × 正弦掩码 × 波峰门控：正弦的乘积本身是周期点阵，
+          // 满海排成规则的白椭圆（拍照实测，关掉法线贴图/镜面/尾迹都还在）。现在是真正的涟漪：
+          // 海面按格子划分，每格每一轮——中心在格内随机重抽（位置随机）、周期 3–8 秒且各自错相
+          // 并有约一半轮次不出现（时间随机）、最大半径随机（大小随机）；两层不同格距（22/47，
+          // 第二层旋转）混出大小涟漪。全部由 uTime 与哈希决定：导出仍可复现。
           float dist = distance(cameraPosition, vWorld);
-          // 远端不再用硬距离窗掐断（镜头拉远时光路粼粼带应当仍在）：抗混叠交给
-          // 下面的 fwidth 守卫与雾；650–1100 只做进入雾前的柔和收尾。
-          sparkle *= smoothstep(90.0, 200.0, dist) * (1.0 - smoothstep(650.0, 1100.0, dist));
-          // 屏幕上小于 ~2px 的细节淡出（分辨率感知的抗混叠守卫）：低分屏/小窗口
-          // 或极远视角下，亚像素碎光会退化成静态白噪点。
-          float cellPx = 1.0 / max(length(fwidth(p * 1.35)), 1e-4);
-          sparkle *= smoothstep(1.5, 4.0, cellPx);
-          // 粼粼碎光是日光反射：夜里关掉（曾夜里照样按白天强度闪，一片白色雪花点）；夜海的亮点来自平面镜里的城市灯光。
-          color += vec3(1.0, 0.99, 0.92) * sparkle * 0.75 * (1.0 - uNight);
+          float sunPath = smoothstep(0.55, 0.95, dot(reflect(-normalize(uSun), n), view));
+          float ripples = rippleLayer(p, 22.0, uTime, 0.0)
+            + rippleLayer(mat2(0.6, 0.8, -0.8, 0.6) * p, 47.0, uTime * 0.8, 31.0) * 0.75;
+          // 环宽 ~1 单位：屏幕上一像素已经大于环宽时淡出（远处不闪成噪点），再进雾前柔和收尾。
+          float footprint = length(fwidth(p));
+          ripples *= (1.0 - smoothstep(0.5, 1.6, footprint)) * (1.0 - smoothstep(650.0, 1100.0, dist));
+          color += vec3(0.88, 0.95, 1.0) * ripples * 0.16 * (1.0 - uNight * 0.75);
+          // 太阳反射带里的涟漪更亮（碎金）：只在日间。
+          color += vec3(1.0, 0.98, 0.9) * ripples * sunPath * 0.55 * (1.0 - uNight);
           // ── 岸线涟漪（tinyskies Globe 手法，作者授权移植）──────────────────
           // 只此一件：fract(深度×频率−时间) 生成向岸滚动的白色波纹带，sin 噪声让
           // 条带不规则、深度衰减离岸消失。深度驱动、空间上低频（条带宽 ~10-30 单
@@ -2168,12 +2198,18 @@ export class CityParts {
           float d = shoreDepth(p);
           if (d < 0.8) {
             float dayFade = 1.0 - uNight * 0.6;
-            float nz = sin(p.x * 0.09 + p.y * 0.06 + uTime * 0.4) * 0.05 + sin(p.x * 0.05 - p.y * 0.11 + uTime * 0.27) * 0.035;
+            // 条带的不规则来自哈希值噪声（非周期），不再是两个正弦之和——深度在大片浅滩/陆下近乎常数时，
+            // 条带退化成噪声的等值线，正弦和的等值线是一张规则的椭圆点阵，满海一圈圈白椭圆（拍照实测）。
+            float nz = (valueNoise(p * 0.035 + vec2(uTime * 0.05, -uTime * 0.03)) - 0.5) * 0.09
+              + (valueNoise(p * 0.09 - vec2(uTime * 0.04, uTime * 0.06)) - 0.5) * 0.04;
             float contour = fract((d + nz) * 4.0 - uTime * 0.42);
+            // 只在深度真的在变的地方画（靠近真实岸线）：用 2 单位差分估深度梯度，平坦处不画条带。
+            float grad = length(vec2(shoreDepth(p + vec2(2.0, 0.0)) - d, shoreDepth(p + vec2(0.0, 2.0)) - d)) * 0.5;
             float band = smoothstep(0.45, 0.7, contour) * (1.0 - smoothstep(0.75, 1.0, contour));
             float depthFade = 1.0 - smoothstep(0.08, 0.7, d);
             float bandFade = 1.0 - smoothstep(700.0, 1400.0, dist);
-            color = mix(color, vec3(0.9, 0.97, 0.98), band * depthFade * bandFade * 0.75 * dayFade);
+            float slopeFade = smoothstep(0.0012, 0.004, grad);
+            color = mix(color, vec3(0.9, 0.97, 0.98), band * depthFade * bandFade * slopeFade * 0.75 * dayFade);
           }
           gl_FragColor = vec4(color, 1.0);
           #include <tonemapping_fragment>
@@ -2612,6 +2648,9 @@ export class CityParts {
   hideOverlaysForPhoto(): () => void {
     const labels = this.labels.map((label) => label.visible);
     const rings = [this.hoverRing.visible, this.selectRing.visible];
+    const scaffold = this.scaffoldMesh.visible;
+    // 「计划高度」脚手架壳在照片里读作悬空的半透明方块（航拍/导出也藏它）。
+    this.scaffoldMesh.visible = false;
     for (const label of this.labels) label.visible = false;
     this.hoverRing.visible = false;
     this.selectRing.visible = false;
@@ -2619,6 +2658,7 @@ export class CityParts {
       this.labels.forEach((label, index) => { label.visible = labels[index]; });
       this.hoverRing.visible = rings[0];
       this.selectRing.visible = rings[1];
+      this.scaffoldMesh.visible = scaffold;
     };
   }
 
@@ -2656,6 +2696,11 @@ export class CityParts {
 
   setNightGlow(night: number): void {
     this.nightGlow = night;
+    const beamMaterial = this.heroParts?.beam?.material as THREE.MeshBasicMaterial | undefined;
+    if (beamMaterial) {
+      beamMaterial.visible = night > 0.05;
+      beamMaterial.opacity = 0.22 * Math.min(1, night * 1.5);
+    }
     const lights = this.nightLights;
     if (lights) {
       // 电灯白天完全熄灭（0），随 night 线性亮起：此前留的 0.12/0.1「白天底线」
@@ -2667,6 +2712,8 @@ export class CityParts {
       lights.strips.color.setRGB(1, 0.7, 0.4).multiplyScalar(night * 2.4);
       // 霓虹/边缘光：实例色决定色相（青/洋红/暖白），这里只管亮度；白天熄灭。
       lights.neon.color.setRGB(1, 1, 1).multiplyScalar(night * 2.6);
+      // 白天整体关掉：近黑的实例色在日光下读作一块块深色方块（桥塔上的霓虹点实测）。
+      lights.neon.visible = night > 0.04;
     }
   }
 

@@ -298,7 +298,8 @@ export class CityEngine {
           Math.random = nativeRandom;
         }
         // 城市尺度：半径以世界单位计（一层楼约 3.1），够把楼脚和街角压暗、又不把整条街染黑。
-        ao.updateGtaoMaterial({ radius: 26, distanceExponent: 1, thickness: 20, distanceFallOff: 1, scale: 2.4, samples: this.quality >= 2 ? 16 : 10 });
+        // 半径/厚度过大会在平墙与树旁留下大片黑色污渍（拍照实测），收小到街角尺度。
+        ao.updateGtaoMaterial({ radius: 14, distanceExponent: 1, thickness: 8, distanceFallOff: 1, scale: 2.4, samples: this.quality >= 2 ? 16 : 10 });
         ao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: this.quality >= 2 ? 16 : 8 });
         ao.blendIntensity = 1;
         composer.addPass(ao);

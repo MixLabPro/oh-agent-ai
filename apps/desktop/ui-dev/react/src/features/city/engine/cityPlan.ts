@@ -211,8 +211,11 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
 
   // ── 公共用地：相对核心点放置再贴陆地（按条件选址在 G3 细化）。
   const publicSites: PublicSite[] = [];
+  // 离水的最小距离：港口只要 ~24（堆场 1.5r×1.2r，近边正好落在水线上），其余预留地仍是 radius+14。
+  // 曾一律 radius+14=51，港口中心被推到离水 ~60 的内陆，码头和吊车立在沙地上（拍照实测）。
+  const siteClearance = (kind: string, radius: number) => (kind === "harbor" ? 24 : radius + 14);
   const place = (id: string, kind: PublicSite["kind"], nominal: Vec2, radius: number, yaw: number) => {
-    const q = snap(nominal, radius + 14, publicSites, radius);
+    const q = snap(nominal, siteClearance(kind, radius), publicSites, radius);
     publicSites.push({ id, kind, x: q.x, z: q.z, radius, yaw });
   };
   place("civic-square", "civic", core, 44, -0.15);
@@ -223,7 +226,10 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
   {
     // 港口：离核心最近的一段海岸内侧（码头离市中心不远）。
     const shore = [...coast].sort((a, b) => Math.hypot(a.x - core.x, a.z - core.z) - Math.hypot(b.x - core.x, b.z - core.z))[0];
-    const inward = { x: shore.x + (core.x - shore.x) * 0.12, z: shore.z + (core.z - shore.z) * 0.12 };
+    // 中心放在岸线内侧固定距离（0.7×半径），码头边缘贴水：曾按到核心距离的 12% 内移，核心远时港口落在内陆沙地上。
+    const toCore = Math.max(1, Math.hypot(core.x - shore.x, core.z - shore.z));
+    const inset = Math.min(37 * 0.7, toCore * 0.5);
+    const inward = { x: shore.x + ((core.x - shore.x) / toCore) * inset, z: shore.z + ((core.z - shore.z) / toCore) * inset };
     place("working-harbor", "harbor", inward, 37, -Math.atan2(shore.z - core.z, shore.x - core.x));
   }
 
@@ -336,7 +342,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
   for (const site of [...publicSites, ...landmarks]) {
     if (!site.radius || clearsHighways(site, site.radius * 2, site.radius * 2, ringRuns)) continue;
     const others = [...publicSites, ...landmarks].filter((o) => o !== site).map((o) => ({ x: o.x, z: o.z, radius: o.radius }));
-    const q = snap(site, site.radius + 14, others, site.radius, (c) => clearsHighways(c, site.radius * 2, site.radius * 2, ringRuns));
+    const q = snap(site, siteClearance(site.kind, site.radius), others, site.radius, (c) => clearsHighways(c, site.radius * 2, site.radius * 2, ringRuns));
     site.x = q.x; site.z = q.z;
   }
   const ringIndex = new SegmentIndex(ringRuns);

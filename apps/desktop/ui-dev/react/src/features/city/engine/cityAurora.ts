@@ -94,7 +94,8 @@ export class CityAurora {
 
   constructor(center: { x: number; z: number }, cityRadius: number) {
     this.group.renderOrder = -5;
-    const ringRadius = cityRadius * 1.9;
+    // 环放到航拍/总览机位之外（曾 1.9×0.6R ≈ 1.14R，落在总览相机与城市之间）。
+    const ringRadius = cityRadius * 3.4;
     const curtainHeight = cityRadius * 0.55;
     const curtainWidth = cityRadius * 0.5;
     for (let index = 0; index < CURTAINS; index += 1) {
@@ -121,7 +122,8 @@ export class CityAurora {
       });
       const mesh = new THREE.Mesh(geometry, material);
       mesh.position.set(center.x + Math.cos(angle) * ringRadius, cityRadius * 1.05, center.z + Math.sin(angle) * ringRadius);
-      mesh.rotation.y = -angle;
+      // 幕面朝向城心：曾 rotation.y = -angle，平面法线沿切向，从城里看是侧边——一根竖直的光柱横穿画面。
+      mesh.rotation.y = Math.PI / 2 - angle;
       mesh.rotation.z = def.tilt;
       this.group.add(mesh);
       this.timeUniforms.push(timeUniform);

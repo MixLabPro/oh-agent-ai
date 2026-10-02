@@ -39,7 +39,22 @@ function smootherstep(x: number): number {
 export type CinematicCut = "full" | "short";
 
 /** cut="short"：只飞最高楼附近约 125° 的一段弧线（开场推近 → 绕向最高楼 → 拉升），适合分享的 30–45 秒版。 */
+/** 短版片长上限：分享片 30–45 秒，最长不超过 ~52 秒（守卫 18–55）。 */
+const SHORT_MAX_SECONDS = 52;
+const SHORT_SWEEPS = [1.4, 1.2, 1.0, 0.85];
+
 export function planCinematic(layout: CityLayout, model: CityModel, heights: Map<string, { x: number; z: number; height: number; ground: number }>, options: { cut?: CinematicCut } = {}): CinematicPlan {
+  if (options.cut !== "short") return planRoute(layout, model, heights, options, Math.PI * 2);
+  // 短版：弧线里落进一个城区停靠点会让航线绕远（seed 42 港口贴岸后布局微移，短片从 40s 涨到 60s）。
+  // 不靠压缩时间（会把视觉速度推过 0.7 rad/s），而是收窄弧线重排，直到片长落进上限。
+  let plan = planRoute(layout, model, heights, options, SHORT_SWEEPS[0]);
+  for (let index = 1; index < SHORT_SWEEPS.length && plan.durationSec > SHORT_MAX_SECONDS; index += 1) {
+    plan = planRoute(layout, model, heights, options, SHORT_SWEEPS[index]);
+  }
+  return plan;
+}
+
+function planRoute(layout: CityLayout, model: CityModel, heights: Map<string, { x: number; z: number; height: number; ground: number }>, options: { cut?: CinematicCut }, shortSweep: number): CinematicPlan {
   const { left, right, north, south } = layout.urbanBounds;
   const cx = (left + right) / 2;
   const cz = (north + south) / 2;
@@ -75,7 +90,7 @@ export function planCinematic(layout: CityLayout, model: CityModel, heights: Map
   // 起点方位：第一个城区之前 0.6 rad（从它前方的海上飞进来），然后逆时针一圈。
   const heroAngle = Math.atan2(hero.z - center.z, hero.x - center.x);
   const short = options.cut === "short" && hero.height > 30;
-  const sweepSpan = short ? 1.4 : Math.PI * 2;
+  const sweepSpan = short ? shortSweep : Math.PI * 2;
   const lead = short ? 0.4 : 1; // 开场推近 / 收尾拉升的距离系数：短版压缩
   const phi0 = short ? heroAngle - 0.9 : stops.length ? stops[0].angle - 0.6 : 0;
   const unwrap = (angle: number) => { let a = angle; while (a < phi0) a += Math.PI * 2; while (a >= phi0 + Math.PI * 2) a -= Math.PI * 2; return a; };
@@ -176,7 +191,9 @@ export function planCinematic(layout: CityLayout, model: CityModel, heights: Map
     for (let index = 1; index < keys.length - 1; index += 1) {
       const { turn, din, dout } = turnAt(index);
       if (turn <= LIMIT) continue;
-      if (keys[index].card === undefined) { keys.splice(index, 1); changed = true; break; }
+      // 短版的城区字卡只是「弧线恰好扫过」的附带镜头，不值得为它外推几百单位绕一大圈
+      // （seed 42：外推 750 把 40 秒的短片拖到 60 秒）——直接删掉；完整版仍要求每个城区都有镜头，照旧外推。
+      if (keys[index].card === undefined || short) { keys.splice(index, 1); changed = true; break; }
       let side = { x: din.x - dout.x, z: din.z - dout.z };
       const len = Math.hypot(side.x, side.z);
       // 近乎掉头（>150°，如死胡同半岛上的城区）时角平分线落在航线上、外推无效：改为垂直来向侧推，

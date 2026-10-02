@@ -234,8 +234,9 @@ export class CityAmbient {
     const palette = ["#d96a4e", "#4e96b8", "#d9a94e"];
     for (let index = 0; index < 3; index += 1) {
       const seed = hashSeed(`balloon:${index}`);
-      const angle = seed * Math.PI * 2;
-      const reach = radius * (0.55 + seed * 0.5);
+      // 三只按 120° 分开再加抖动：曾 angle = seed·2π，固定字符串的哈希恰好挤在一起，三个气球叠成一团。
+      const angle = (index / 3) * Math.PI * 2 + seed * 0.9;
+      const reach = radius * (0.5 + ((index * 0.37 + seed) % 1) * 0.45);
       const balloon = new HotAirBalloon({ x: center.x + Math.cos(angle) * reach, z: center.z + Math.sin(angle) * reach }, palette[index], seed);
       this.balloons.push(balloon);
       this.group.add(balloon.group);
