@@ -1,6 +1,6 @@
 /** Geography and public planning are fixed; sessions occupy reserved parcels. */
 import { hashSeed, type CityModel } from "../cityModel";
-import { createCityPlan, scaleTierFor, type Biome, type Landmark } from "./cityPlan";
+import { clearsHighways, createCityPlan, scaleTierFor, type Biome, type Landmark } from "./cityPlan";
 
 export type Vec2 = { x: number; z: number };
 export type Zone = "downtown" | "residential" | "commercial" | "waterfront";
@@ -77,11 +77,12 @@ function aggregateOverflow(districtId: string, anchor: Vec2, overflow: CityModel
       const x = anchor.x + Math.cos(angle) * reach;
       const z = anchor.z + Math.sin(angle) * reach;
       if (!plan.terrain.buildable(x, z)) continue;
+      if (!clearsHighways({ x, z }, 30, 30, plan.highways)) continue;
       if (plan.blocks.some((block) => block.parcels.length > 0 && Math.hypot(block.x - x, block.z - z) < 46)) continue;
       if (out.some((block2) => Math.hypot(block2.x - x, block2.z - z) < 34)) continue;
       placed = { x, z };
     }
-    if (!placed) placed = { x: anchor.x + Math.cos(angle) * 220, z: anchor.z + Math.sin(angle) * 220 };
+    if (!placed) continue; // No unsafe fallback into infrastructure reservations.
     out.push({
       districtId,
       x: placed.x, z: placed.z, y: Math.max(0.3, plan.terrain.height(placed.x, placed.z)),
@@ -164,7 +165,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   for (const district of ranked) {
     const anchor = anchorOf.get(district.id)!;
     const block = blocksOf(district.id)
-      .filter((candidate) => candidate.parcels.every((parcel) => !used.has(parcel.id)))
+      .filter((candidate) => candidate.parcels.every((parcel) => !used.has(parcel.id)) && clearsHighways(candidate, candidate.width, candidate.depth, plan.highways))
       .sort((a, b) => Math.hypot(a.x - anchor.x, a.z - anchor.z) - Math.hypot(b.x - anchor.x, b.z - anchor.z) || a.id.localeCompare(b.id))[0];
     if (!block) continue;
     for (const parcel of block.parcels) used.add(parcel.id);
@@ -254,7 +255,7 @@ function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, ass
   // 单个地块只有约 7×8，放不下学校/商场：配套占整个空街区（街区里没有任何会话楼）。
   type Lot = { id: string; x: number; z: number; yaw: number; width: number; depth: number };
   const free: Lot[] = plan.blocks
-    .filter((block) => block.parcels.length > 0 && block.parcels.every((parcel) => !used.has(parcel.id)))
+    .filter((block) => block.parcels.length > 0 && block.parcels.every((parcel) => !used.has(parcel.id)) && clearsHighways(block, block.width, block.depth, plan.highways))
     .map((block) => ({ id: block.id, x: block.x, z: block.z, yaw: block.parcels[0].yaw, width: block.width, depth: block.depth }));
   const taken = new Set<string>();
   const out: CivicSite[] = [];

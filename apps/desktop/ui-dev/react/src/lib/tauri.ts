@@ -2531,6 +2531,8 @@ export async function readSessions(input: {
   cursor?: string | null;
 }): Promise<SessionsPage> {
   if ((input.date_from === undefined) !== (input.date_to === undefined)) throw new Error("sessions 日期范围必须成对提供");
+  // IPC 边界统一 camelCase：Tauri 2 命令参数只认 camel（dateFrom/hostKind/…）。
+  // snake key 会被静默丢成 None——城市/会话页的日期窗口曾因此退化为"今天"。
   const args: Record<string, unknown> = {};
   if (input.day !== undefined) args.day = safeDate(input.day, "sessions day");
   if (input.month !== undefined) args.month = safeMonth(input.month, "sessions month");
@@ -2538,19 +2540,19 @@ export async function readSessions(input: {
     const from = safeDate(input.date_from, "sessions date from");
     const to = safeDate(input.date_to, "sessions date to");
     if (from > to) throw new Error("sessions 日期范围起点不能晚于终点");
-    args.date_from = from;
-    args.date_to = to;
+    args.dateFrom = from;
+    args.dateTo = to;
   }
   if (input.host_kind) {
     const host = safeHostLabel(input.host_kind);
     if (host === "generic") throw new Error("sessions host filter 不安全");
-    args.host_kind = host;
+    args.hostKind = host;
   }
   if (input.model) args.model = decisionLabel(input.model, "sessions model filter");
   if (input.provider) args.provider = decisionLabel(input.provider, "sessions provider filter");
   if (input.page_size !== undefined) {
     if (!Number.isSafeInteger(input.page_size) || input.page_size < 1 || input.page_size > 500) throw new Error("sessions page size 不安全");
-    args.page_size = input.page_size;
+    args.pageSize = input.page_size;
   }
   if (input.cursor) {
     if (input.cursor.length > 4096) throw new Error("sessions cursor 不安全");
@@ -2582,7 +2584,7 @@ export async function readSessionDetail(sessionRef: string, cursor: string | nul
   // Tauri's sessions_read command translates this field to the CLI's
   // `--page-size`; keeping the name explicit prevents the old MCP `limit`
   // spelling from being silently dropped at the desktop boundary.
-  const args: Record<string, unknown> = { sessionRef, page_size: 200 };
+  const args: Record<string, unknown> = { sessionRef, pageSize: 200 };
   if (cursor !== null) {
     if (typeof cursor !== "string" || cursor.length < 1 || cursor.length > 4096) throw new Error("session detail cursor 不安全");
     args.cursor = cursor;

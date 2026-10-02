@@ -31,6 +31,15 @@ export function polygonDistance(p: Vec2, polygon: Vec2[]): number {
 
 export const roadNodeId = (p: Vec2): string => `${p.x}:${p.z}`;
 
+/** Conservative footprint guard: includes the full deck and a sidewalk setback. */
+export function clearsHighways(p: Vec2, width: number, depth: number, highways: Vec2[][]): boolean {
+  const clearance = 5.25 + Math.hypot(width, depth) / 2 + 1;
+  for (const run of highways) for (let i = 1; i < run.length; i += 1) {
+    if (segmentDistance(p, run[i - 1], run[i]) < clearance) return false;
+  }
+  return true;
+}
+
 export type Biome = "tropical" | "temperate" | "boreal" | "savanna" | "eastasian";
 
 /** 致敬型地标（SPEC §4.4）：程序化几何、不复刻具体建筑；纯装饰，不占会话地块、不进统计。 */
@@ -254,8 +263,10 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
     for (let step = 1; step < 400; step += 1) {
       const q = { x: core.x + dir.x * step * 12, z: core.z + dir.z * step * 12 };
       if (inRiver(q.x, q.z)) { water += 12; if (water > 140) break; continue; } // 河：最多跨 140
-      if (!buildable(q.x, q.z)) break;
+      // Riverbank setbacks are not obstacles to a road crossing the river.
+      if (coastDistance(q.x, q.z) <= 0 || hillProj(q.x, q.z) >= hillLine - 12) break;
       if (water > 0) {
+        if (!buildable(q.x, q.z)) continue; // Extend the deck across the far-bank setback.
         // 刚过完河：把对岸点接上，这一段是桥。
         const from = points[points.length - 1];
         bridges.push({ from, to: q, angle: Math.atan2(q.z - from.z, q.x - from.x), length: Math.hypot(q.x - from.x, q.z - from.z) });
@@ -280,7 +291,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
     return d;
   };
 
-  // 环线高架：半径 0.55R ± fbm，沿陆地断续（落水或进山就断开），作为高架（不是地面道路）。
+  // 环线高架：半径 0.55R ± fbm，河流/河岸连续跨越，仅出海或进山时断开。
   const ringRadius = 0.55 * R;
   const ringRuns: Vec2[][] = [];
   let run: Vec2[] = [];
@@ -288,7 +299,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
     const t = (i / 96) * Math.PI * 2;
     const r = ringRadius * (1 + 0.08 * fbm(Math.cos(t) * 1.7, Math.sin(t) * 1.7, seed + 91, 2));
     const q = { x: core.x + Math.cos(t) * r, z: core.z + Math.sin(t) * r };
-    if (buildable(q.x, q.z) || inRiver(q.x, q.z)) run.push(q);
+    if (coastDistance(q.x, q.z) > 0 && hillProj(q.x, q.z) < hillLine - 12) run.push(q);
     else { if (run.length >= 6) ringRuns.push(run); run = []; }
   }
   if (run.length >= 6) ringRuns.push(run);
@@ -346,6 +357,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
         const p = { x: a.x + dx * (7 + (length - 14) * t) - dz * inset, z: a.z + dz * (7 + (length - 14) * t) + dx * inset };
         if (polygonDistance(p, polygon) < 3.6 + 5) continue;
         if (reservations().some((site) => Math.hypot(p.x - site.x, p.z - site.z) < site.radius + 9)) continue;
+        if (!clearsHighways(p, 7.2, 8, ringRuns)) continue;
         parcels.push({ ...p, id: `${id}/${side}:${index}`, blockId: id, yaw: -Math.atan2(dz, dx), zone, width: Math.min(7.2, (length - 14) / columnCount), depth: 8 });
       }
       const k = (p: Vec2) => key(p);

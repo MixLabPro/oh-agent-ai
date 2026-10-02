@@ -70,8 +70,13 @@ export class CityLoader {
         let cursor: string | null = null;
         let totalSessions = 0;
         let truncated = false;
-        // 第一页拿到就出模型，后续分页增量重建（楼不搬家，只是新区长出来）。
-        let first = true;
+        // 发布策略：只发「首屏页」与「终态页」两次模型——中间页不发布。
+        // 每次发布都会整城重建渲染对象（地形/纹理已按 seed 缓存，建筑层仍要
+        // 全量重建），逐页发布会把重建成本乘以页数，形成连续卡顿；首屏先让
+        // 城市成像，终态一次到位（complete=true → 全量重排修正乱序圈层）。
+        // findings 与 sessions 共享后端锁且慢：首屏不等它（信标异步补充），
+        // 终态再带上完整 findings。
+        let published = false;
         for (let page = 0; page < 12; page += 1) {
           if (!this.active || generation !== this.generation) return;
           const result = await readSessions({ date_from: dateFrom, date_to: dateTo, page_size: 500, cursor });
@@ -80,22 +85,19 @@ export class CityLoader {
           totalSessions = result.window_session_count;
           cursor = result.next_cursor;
           truncated = Boolean(cursor) && (rows.length >= LOAD_CAP || page === 11);
-          {
-            const findings = await findingsPromise;
+          if (!published) {
             const model = buildCityModel({
               rows,
-              findings,
+              findings: [],
               windowStartMs: Date.parse(`${dateFrom}T00:00:00Z`),
               windowEndMs: Date.now(),
               windowLabel: `${dateFrom} ~ ${dateTo}`,
               totalSessions,
               truncated,
             });
-            const callback = first || !background ? handlers.onModel : handlers.onBackgroundModel ?? handlers.onModel;
-            // 分页是 token 降序而非时间序：中间页只是"先看到城市"的近似布局，
-            // 明确标记未完成，等全部页到齐后由页面层做一次全量重排。
+            const callback = !background ? handlers.onModel : handlers.onBackgroundModel ?? handlers.onModel;
             callback({ model, error: null, complete: false });
-            first = false;
+            published = true;
           }
           if (!cursor) break;
           if (rows.length >= LOAD_CAP) {

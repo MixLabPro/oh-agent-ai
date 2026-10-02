@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // React bridge contract for the Sessions list/detail path. This locks the
-// desktop-facing spelling of detail pagination (`page_size`, not the MCP
+// desktop-facing spelling of detail pagination (`pageSize` — Tauri 2 commands
+// only bind camelCase args; a snake_case key silently lands as None, which once
+// degraded the city's 30-day window to "today" on the real app)
 // `limit` field) and rejects unsafe windows or malformed page envelopes.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -58,7 +60,7 @@ const bridge = loadBridge(invoke);
 const first = await bridge.readSessions({ month: "2026-09", page_size: 50 });
 assert.equal(first.sessions.length, 1);
 assert.equal(calls.at(-1).command, "sessions_list");
-assert.equal(calls.at(-1).args.page_size, 50);
+assert.equal(calls.at(-1).args.pageSize, 50);
 assert.equal(calls.at(-1).args.month, "2026-09");
 
 const second = await bridge.readSessions({ month: "2026-09", page_size: 50, cursor: first.next_cursor });
@@ -69,7 +71,7 @@ assert.notEqual(second.sessions[0].session_ref, first.sessions[0].session_ref);
 const detail = await bridge.readSessionDetail("sr_browser_mock_01");
 assert.equal(calls.at(-1).command, "sessions_read");
 assert.equal(calls.at(-1).args.sessionRef, "sr_browser_mock_01");
-assert.equal(calls.at(-1).args.page_size, 200);
+assert.equal(calls.at(-1).args.pageSize, 200);
 assert.equal(calls.at(-1).args.limit, undefined);
 const detailPage = await bridge.readSessionDetail("sr_browser_mock_01", "detail-next");
 assert.equal(calls.at(-1).args.cursor, "detail-next");

@@ -186,6 +186,25 @@ function samplePolyline(path: CarPath, distance: number): { x: number; z: number
   };
 }
 
+/** 静态城（只依赖 seed 的部分：地形/基建/高架/公共设施/地标/远山/树/水面/
+ *  车/船/云/花园）。模块级缓存——数据刷新重建时整段复用，重建成本只剩建筑层；
+ *  只保留最近一个 seed（换岛时旧静态城整体释放）。 */
+type StaticCity = {
+  seed: number;
+  layout: CityLayout;
+  group: THREE.Group;
+  disposables: Array<{ dispose: () => void }>;
+  water: THREE.Mesh;
+  treeMesh: THREE.InstancedMesh;
+  carMesh: THREE.InstancedMesh;
+  cars: Array<{ path: CarPath; distance: number; speed: number }>;
+  boatMesh: THREE.InstancedMesh;
+  boats: Array<{ path: CarPath; distance: number; speed: number; phase: number }>;
+  cloudMesh: THREE.InstancedMesh;
+  clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }>;
+};
+let staticCityCache: StaticCity | null = null;
+
 export class CityParts {
   readonly group = new THREE.Group();
   readonly raycastTargets: THREE.Object3D[] = [];
@@ -232,9 +251,9 @@ export class CityParts {
   private readonly labels: THREE.Sprite[] = [];
   private readonly hoverRing: THREE.Mesh;
   private readonly selectRing: THREE.Mesh;
-  private readonly cars: Car[] = [];
-  private readonly boats: Array<{ path: CarPath; distance: number; speed: number; phase: number }> = [];
-  private readonly clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }> = [];
+  private readonly cars: Car[];
+  private readonly boats: Array<{ path: CarPath; distance: number; speed: number; phase: number }>;
+  private readonly clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }>;
   private readonly waterUniforms: { uTime: { value: number }; uSun: { value: THREE.Vector3 } };
   private readonly matrix = new THREE.Matrix4();
   private readonly quaternion = new THREE.Quaternion();
@@ -250,6 +269,63 @@ export class CityParts {
 
   constructor(private model: CityModel, private layout: CityLayout) {
     const total = model.buildings.length;
+
+    // ── 静态城（seed 决定）：缓存命中则整段复用，重建只花在建筑层 ──────
+    let staticCity = staticCityCache && staticCityCache.seed === layout.seed && staticCityCache.layout.scaleTier === layout.scaleTier
+      && staticCityCache.layout.highways === layout.highways
+      && JSON.stringify([staticCityCache.layout.civics, staticCityCache.layout.gardens]) === JSON.stringify([layout.civics, layout.gardens]) ? staticCityCache : null;
+    if (!staticCity) {
+      staticCityCache?.disposables.forEach((disposable) => disposable.dispose());
+      const staticBucket: Array<{ dispose: () => void }> = [];
+      (this.disposables as Array<{ dispose: () => void }>) = staticBucket;
+      this.buildTerrain();
+      this.buildInfrastructure();
+      this.buildDistrictExpressways();
+      this.buildPublicSites();
+      this.buildCivics();
+      this.buildLandmarks();
+      this.buildSeaMountains();
+      this.treeMesh = this.buildTrees();
+      const carResult = this.buildCars();
+      this.carMesh = carResult.mesh;
+      const boatResult = this.buildBoats();
+      this.boatMesh = boatResult.mesh;
+      const cloudResult = this.buildClouds();
+      this.cloudMesh = cloudResult.mesh;
+      this.water = this.buildWater();
+      this.buildGardens();
+      staticCity = {
+        seed: layout.seed,
+        layout,
+        group: this.group,
+        disposables: staticBucket,
+        water: this.water,
+        treeMesh: this.treeMesh,
+        carMesh: this.carMesh,
+        cars: carResult.cars,
+        boatMesh: this.boatMesh,
+        boats: boatResult.boats,
+        cloudMesh: this.cloudMesh,
+        clouds: cloudResult.clouds,
+      };
+      staticCityCache = staticCity;
+      // this.group 曾是静态组：让位给动态组，静态组挂为其子节点。
+      (this.group as THREE.Group) = new THREE.Group();
+      (this.disposables as Array<{ dispose: () => void }>) = [];
+    }
+    this.group.add(staticCity.group);
+    this.water = staticCity.water;
+    this.treeMesh = staticCity.treeMesh;
+    this.carMesh = staticCity.carMesh;
+    this.boatMesh = staticCity.boatMesh;
+    this.cloudMesh = staticCity.cloudMesh;
+    this.cars = staticCity.cars;
+    this.boats = staticCity.boats;
+    this.clouds = staticCity.clouds;
+    this.waterUniforms = (this.water.material as THREE.ShaderMaterial).uniforms as unknown as {
+      uTime: { value: number };
+      uSun: { value: THREE.Vector3 };
+    };
 
     // ── 建筑：立面（3 变体 × [主体+退台] 两段）──────────────────────────
     const facades = [makeFacadeTexture(0, 11), makeFacadeTexture(1, 37), makeFacadeTexture(2, 71), makeDecoFacadeTexture()];
@@ -335,40 +411,11 @@ export class CityParts {
     this.craneMastMesh = this.makeInstanced(new THREE.BoxGeometry(0.85, 1, 0.85).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#ffb400", emissive: "#6b4300" }), 48);
     this.craneArmMesh = this.makeInstanced(new THREE.BoxGeometry(1, 0.32, 0.32), new THREE.MeshLambertMaterial({ color: "#ffb400", emissive: "#6b4300" }), 48);
 
-    // ── 地形：岛 / 桥 / 树 / 背景楼群 / 远山 ──────────────────────────
-    this.buildTerrain();
-    this.buildInfrastructure();
-    this.buildDistrictExpressways();
-    this.buildPublicSites();
-    this.buildCivics();
-    this.buildLandmarks();
+    // ── 动态层：溢出楼群 / 信标 / 标签 / 选中环 / 建筑运行时 ────────────
     this.buildMassing();
-    this.buildSeaMountains();
-    this.treeMesh = this.buildTrees();
-
-    // ── 生命感：车 / 船 / 云 ───────────────────────────────────────────
-    const carResult = this.buildCars();
-    this.carMesh = carResult.mesh;
-    this.cars.push(...carResult.cars);
-    const boatResult = this.buildBoats();
-    this.boatMesh = boatResult.mesh;
-    this.boats.push(...boatResult.boats);
-    const cloudResult = this.buildClouds();
-    this.cloudMesh = cloudResult.mesh;
-    this.clouds.push(...cloudResult.clouds);
-
-    // ── 异常信标 & 标签 & 选中环 ───────────────────────────────────────
     this.buildAnomalyMarkers();
     this.hoverRing = this.makeGroundRing("#087f62");
     this.selectRing = this.makeGroundRing("#c96f4a");
-
-    this.water = this.buildWater();
-    this.buildGardens();
-    this.waterUniforms = (this.water.material as THREE.ShaderMaterial).uniforms as unknown as {
-      uTime: { value: number };
-      uSun: { value: THREE.Vector3 };
-    };
-
     this.buildRuntimes();
     this.buildLabels();
   }
@@ -551,8 +598,27 @@ export class CityParts {
     const add = (x: number, y: number, z: number, sx: number, sy: number, sz: number, color: string, tilt = 0, yaw = 0) => parts.push({ x, y, z, sx, sy, sz, color, tilt, yaw });
     // Curbs and street lights are real geometry; asphalt and markings share the atlas.
     for (const edge of this.layout.roadEdges) {
-      // 过河的桥路段没有桥面可依附：路缘石/路灯会悬在水面上，像河里一排排虚线。
-      if (edge.bridge) continue;
+      // Bridge spans need actual geometry; the terrain atlas is below the river surface.
+      if (edge.bridge) {
+        const [a, b] = edge.points;
+        const length = Math.hypot(b.x - a.x, b.z - a.z);
+        const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
+        const x = (a.x + b.x) / 2; const z = (a.z + b.z) / 2;
+        // Deck top meets the level plain; unlike atlas roads it remains above water.
+        const deckTop = Math.max(this.layout.terrain.height(a.x, a.z), this.layout.terrain.height(b.x, b.z));
+        add(x, deckTop - 0.4, z, length + 0.5, 0.4, edge.width, "#6a7071", 0, yaw);
+        for (const side of [-1, 1]) {
+          const offset = side * (edge.width / 2 - 0.15);
+          add(x + Math.sin(yaw) * offset, deckTop, z + Math.cos(yaw) * offset, length, 0.65, 0.3, "#b9bcb2", 0, yaw);
+        }
+        for (let distance = 16; distance < length - 12; distance += 32) {
+          const t = distance / length;
+          const px = a.x + (b.x - a.x) * t; const pz = a.z + (b.z - a.z) * t;
+          const bed = this.layout.terrain.height(px, pz);
+          add(px, bed, pz, 1.6, Math.max(0.1, deckTop - 0.35 - bed), edge.width - 0.6, "#a9aaa0", 0, yaw);
+        }
+        continue;
+      }
       // 沿路段的实际方向摆放（G2 起各片区街网朝向不同；曾只认水平/竖直两种方向）。
       const [a, b] = edge.points;
       const segment = Math.hypot(b.x - a.x, b.z - a.z);
@@ -2142,7 +2208,12 @@ export class CityParts {
   }
 
   dispose(): void {
+    // 只拆动态层：静态城（地形/基建/车船云）留在模块级缓存，同一 seed 的下一次
+    // 重建直接复用；换 seed 时由构造函数统一释放旧缓存。
     this.group.removeFromParent();
+    if (staticCityCache && staticCityCache.seed === this.layout.seed) {
+      this.group.remove(staticCityCache.group);
+    }
     for (const disposable of this.disposables) disposable.dispose();
   }
 }

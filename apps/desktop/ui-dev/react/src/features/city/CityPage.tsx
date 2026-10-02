@@ -19,6 +19,10 @@ import { message, resolvedLanguage, useLanguage, formatTokenCount, modelLabel, t
 import { Button, SelectInput } from "../../components/ui/FormControls";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
 
+// 上一次的城市模型（模块级缓存，页面切换存活）：回到城市页先用它立即
+// 成像——不再每次进入都"空城等数据"；后台装载完成后按既有刷新纪律替换。
+let cityModelCache: { windowKind: CityWindowKind; model: CityModel } | null = null;
+
 const PLAYBACK_SPEEDS: Array<{ value: number; key: "city.time.speed10m" | "city.time.speed1h" | "city.time.speed4h" }> = [
   { value: 600, key: "city.time.speed10m" },
   { value: 3_600, key: "city.time.speed1h" },
@@ -71,9 +75,11 @@ export function CityPage() {
   const selectedRef = useRef<string | null>(null);
 
   const [model, setModel] = useState<CityModel | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => cityModelCache === null);
+  const [updating, setUpdating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [windowKind, setWindowKind] = useState<CityWindowKind>("30d");
+  const [diag, setDiag] = useState<string | null>(null);
+  const [windowKind, setWindowKind] = useState<CityWindowKind>("90d");
   const [qualityMode, setQualityMode] = useState<EngineQualityMode>("auto");
   const [labelsVisible, setLabelsVisible] = useState(true);
   const labelsVisibleRef = useRef(labelsVisible);
@@ -104,8 +110,11 @@ export function CityPage() {
   }, [model]);
 
   const laidOutComplete = useRef(false);
+  const windowKindRef = useRef<CityWindowKind>("90d");
+  windowKindRef.current = windowKind;
   const applyModel = useCallback((result: { model: CityModel; complete: boolean }) => {
     const next = result.model;
+    if (result.complete) cityModelCache = { windowKind: windowKindRef.current, model: next };
     const fingerprint = JSON.stringify([next.stats, next.districts, next.buildings.length, next.buildings.map((building) => [building.id, building.tokensTotal, building.active, building.height])]);
     modelRef.current = next;
     setModel(next);
@@ -198,7 +207,14 @@ export function CityPage() {
     });
     engineRef.current = engine;
     engine.setQualityMode(qualityMode);
-    if (modelRef.current) engine.applyModel(modelRef.current);
+    if (cityModelCache) {
+      modelRef.current = cityModelCache.model;
+      setModel(cityModelCache.model);
+      engine.applyModel(cityModelCache.model, false);
+      laidOutComplete.current = true;
+    } else if (modelRef.current) {
+      engine.applyModel(modelRef.current);
+    }
     // 种子到了才画城市。读失败（数据目录不可写等）时本次用内置种子兜底——城市照常可用，
     // 只是这次不是「你的岛」；不落盘，下次进入再试。
     loadCitySeed()
@@ -217,19 +233,22 @@ export function CityPage() {
   useEffect(() => {
     const loader = loaderRef.current;
     if (!loader) return;
-    setLoading(true);
+    // 切窗/重载不清空当前城市：旧城保持成像，新窗数据到达后无缝替换——
+    // 避免每次切换都"空城等数据"。只有首屏（尚无模型）才走 loading 遮罩。
+    if (!modelRef.current) setLoading(true);
+    else setUpdating(true);
     setError(null);
-    fingerprintRef.current = "";
-    laidOutComplete.current = false;
     void loader.reload(windowKind, {
       onModel: (result) => {
         setError(result.error);
         applyModel(result);
         setLoading(false);
+        setUpdating(false);
       },
       onBackgroundModel: (result) => {
-        if (result.error) return; // 后台刷新失败保留旧城
+        if (result.error) { setUpdating(false); return; } // 后台刷新失败保留旧城
         applyModel(result);
+        setUpdating(false);
       },
     });
     const stopPolling = loader.startActivePolling(90_000, () => {
@@ -406,7 +425,8 @@ export function CityPage() {
       </div>
     </ToolbarActions>
 
-    <section className="city-hud-stats" aria-live="polite">
+        {updating && model && <div className="city-updating" role="status">{message("city.updating", language)}</div>}
+<section className="city-hud-stats" aria-live="polite">
       <div><strong>{model ? model.stats.totalSessions : "—"}</strong><span>{message("city.stats.sessions", language)}</span></div>
       <div><strong>{model ? formatTokenCount(model.stats.tokensTotal) : "—"}</strong><span>{message("city.stats.tokens", language)}</span></div>
       <div><strong>{model ? model.stats.activeCount : "—"}</strong><span>{message("city.stats.active", language)}</span></div>

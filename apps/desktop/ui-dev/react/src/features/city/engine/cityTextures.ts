@@ -149,8 +149,10 @@ function strokePolyline(ctx: CanvasRenderingContext2D, points: Array<{ x: number
 
 /** One city-wide ground atlas: continuous land, hardscape blocks and connected streets. */
 export function makeCityTexture(layout: CityLayout): THREE.Texture {
-  // 2048 铺 1600 单位仅 ~1.3px/单位，10 宽的街道只有十来个像素，近景糊成一片。
-  const size = 4096;
+  // 2048 铺 1600 单位 ~1.3px/单位，街道偏窄但可辨；4096 的 RGBA 原图 64MiB，
+  // 反复重建时内存峰值过高（WebView 实测峰值 2.6GB）。静态缓存落地后只在
+  // 换 seed 时付一次生成成本，2048 是内存/清晰度的折衷。
+  const size = 2048;
   const { canvas, ctx } = canvas2d(size, size);
   const scale = size / layout.extent;
   const toPixel = (x: number, z: number): [number, number] => [(x + layout.extent / 2) * scale, (z + layout.extent / 2) * scale];

@@ -100,7 +100,8 @@ if (!usagePage.includes("sourceForDisplayedMonth") || !usagePage.includes("sourc
 if (!source.includes('"sessions_list"') || !source.includes("session_ref") || !source.includes("sessions-table") || !source.includes("window_session_count") || !sessionsPage.includes("readStatisticsTimezone") || !sessionsPage.includes("Intl.DateTimeFormat") || !sessionsPage.includes('resolvedOptions().timeZone || "UTC"') || sessionsPage.includes('DEFAULT_STATISTICS_TIMEZONE = "Asia/Shanghai"')) fail("React 会话未使用安全列表 DTO、窗口守恒字段或统计时区");
 if (!source.includes("加载更多") || !source.includes("cost_status") || !source.includes("requestInFlight") || !source.includes("pendingRefresh")) fail("React 会话缺少成本状态、分页或竞态保护");
 if (!source.includes('"sessions_read"') || !source.includes("workflow_timeline") || !source.includes("billing_breakdown") || !source.includes("session-detail-panel")) fail("React 会话详情缺少安全摘要、计费桶或脱敏时间线");
-if (!source.includes("page_size: 200") || source.includes("const args: Record<string, unknown> = { sessionRef, limit: 200 }") || !sessionDetailPage.includes("detail.next_cursor")) fail("React 会话详情未使用桌面分页字段或未透传 cursor");
+// Tauri 2 命令参数只绑定 camelCase；snake key 会静默变成 None（真机日志证实）。
+if (!source.includes("pageSize: 200") || source.includes("const args: Record<string, unknown> = { sessionRef, limit: 200 }") || !sessionDetailPage.includes("detail.next_cursor")) fail("React 会话详情未使用桌面分页字段或未透传 cursor");
 if (!source.includes("session detail session_ref 不匹配") || !source.includes("paginationError") || !source.includes("已有详情仍可用，请重试")) fail("React 会话详情缺少分页错配保护或可重试的局部错误态");
 if (source.includes('"sessions_issues"')) fail("React Findings 直接消费 legacy 宽 DTO");
 if (!source.includes('"routes_quality"') || !source.includes("readRouteQuality") || !source.includes("test-quality-host")) fail("React 测试页未使用只读路线质量 DTO");

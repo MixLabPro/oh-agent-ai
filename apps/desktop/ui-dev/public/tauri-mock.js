@@ -963,7 +963,7 @@
       case "sessions_list": {
         const cursor = args && args.cursor;
         // City 预览：大页请求按游标分页给合成 30 天数据（每页 500，与真机分页同构）。
-        if ((args && args.page_size) >= 100 || /^city-page-\d+$/.test(String(cursor))) {
+        if ((args && (args.pageSize ?? args.page_size)) >= 100 || /^city-page-\d+$/.test(String(cursor))) {
           const pageIndex = cursor ? Number(String(cursor).slice("city-page-".length)) : 0;
           const slice = citySessions.slice(pageIndex * 500, pageIndex * 500 + 500);
           if (!slice.length) return { data: { sessions: [], next_cursor: null, has_more: false, window_session_count: citySessions.length, window_total_tokens: 0 } };
