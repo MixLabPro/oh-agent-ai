@@ -58,6 +58,15 @@ for (const seed of seeds) {
     const mid = { x: (bridge.from.x + bridge.to.x) / 2, z: (bridge.from.z + bridge.to.z) / 2 };
     assert(layout.terrain.height(mid.x, mid.z) < 0.5, `seed ${seed}: bridge spans water`);
   }
+  // 小区连片且彼此分开：曾按固定锚点就近落楼，两个城区挤成一团、标签重叠（seed 42）。
+  const centers = layout.districts.filter((d) => d.slots.size).map((d) => {
+    const pts = [...d.slots.values()];
+    return { id: d.id, x: pts.reduce((a, p) => a + p.x, 0) / pts.length, z: pts.reduce((a, p) => a + p.z, 0) / pts.length };
+  });
+  for (let i = 0; i < centers.length; i += 1) for (let j = i + 1; j < centers.length; j += 1) {
+    const gap = Math.hypot(centers[i].x - centers[j].x, centers[i].z - centers[j].z);
+    assert(gap >= 120, `seed ${seed}: districts ${centers[i].id} and ${centers[j].id} crowd together (${gap.toFixed(0)} apart)`);
+  }
   profiles.push(profile(layout.coast));
   biomes.add(layout.biome);
   if (layout.river.length) rivers += 1;

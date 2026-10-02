@@ -122,47 +122,78 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   // refresh never relocates the city; only new sessions compete for what is
   // left — a late-discovered older session may land slightly outward, which is
   // the honest cost of never moving an existing building.
-  // 小区中心花园：先于会话落楼，按城区排名把锚点处最近的空街区整块预留出来（只看锚点与规划，
-  // 与会话数据无关——确定性不变）。会话楼按「离锚点由近到远」落位，于是自然围着花园生长。
-  const gardenRanked = [...model.districts].sort((a, b) => b.sessionCount - a.sessionCount || (a.id < b.id ? -1 : 1));
+  // ── G3 小区划分（CITY_PLANNING_SPEC §4.4）──
+  // 以城市核心为圆心，按方位角排列可建街区，按各宿主会话数的比例切成连续扇形——每个宿主一片连成一块的小区。
+  // 曾按 4 个固定锚点「就近」落楼：锚点贴到陆地后可能挨在一起，两个城区挤成一团、标签重叠（seed 42）。
+  // 城区排名按 (会话数降序, id 字典序) 确定性排序——输入顺序不影响划分（契约：reversed 输入得到同一座城）。
+  const ranked = [...model.districts]
+    .sort((a, b) => b.sessionCount - a.sessionCount || (a.id < b.id ? -1 : 1))
+    .filter((district) => model.buildings.some((building) => building.districtId === district.id));
+  const sessionsOf = new Map(ranked.map((district) => [district.id, model.buildings.filter((building) => building.districtId === district.id).length]));
+  const totalSessions = [...sessionsOf.values()].reduce((sum, n) => sum + n, 0) || 1;
+  const core = plan.core;
+  const wedgeStart = hashSeed(`${seed}:wedge`) * Math.PI * 2;
+  const angleFrom = (p: Vec2) => (((Math.atan2(p.z - core.z, p.x - core.x) - wedgeStart) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+  const usableBlocks = plan.blocks.filter((block) => block.parcels.length > 0)
+    .sort((a, b) => angleFrom(a) - angleFrom(b) || a.id.localeCompare(b.id));
+  const totalLots = usableBlocks.reduce((sum, block) => sum + block.parcels.length, 0);
+  const wedgeOf = new Map<string, string>(); // blockId → districtId
+  {
+    let index = 0; let accumulated = 0; let quota = 0;
+    for (const district of ranked) {
+      quota += (sessionsOf.get(district.id)! / totalSessions) * totalLots;
+      while (index < usableBlocks.length && (accumulated < quota || district === ranked[ranked.length - 1])) {
+        wedgeOf.set(usableBlocks[index].id, district.id);
+        accumulated += usableBlocks[index].parcels.length;
+        index += 1;
+      }
+    }
+  }
+  const blocksOf = (districtId: string) => usableBlocks.filter((block) => wedgeOf.get(block.id) === districtId);
+  /** 小区中心：本片街区按离核心距离由近到远，取 30% 处——靠内但不压在核心点上（核心是市政广场）。 */
+  const anchorOf = new Map<string, Vec2>();
+  for (const district of ranked) {
+    const own = blocksOf(district.id).sort((a, b) => Math.hypot(a.x - core.x, a.z - core.z) - Math.hypot(b.x - core.x, b.z - core.z));
+    const pick = own[Math.min(own.length - 1, Math.floor(own.length * 0.3))];
+    anchorOf.set(district.id, pick ? { x: pick.x, z: pick.z } : core);
+  }
+
+  // 小区中心花园：先于会话落楼，在本小区内离中心最近的空街区整块预留（只看规划与会话数，确定性不变）。
   const gardens: GardenSite[] = [];
-  const gardenBlocks = new Set<string>();
-  gardenRanked.forEach((district, rank) => {
-    if (rank >= plan.districtAnchors.length) return; // 锚点复用的宿主共享同一座花园
-    if (!model.buildings.some((building) => building.districtId === district.id)) return;
-    const anchor = plan.districtAnchors[rank];
-    const block = plan.blocks
-      .filter((candidate) => candidate.parcels.length > 0 && !gardenBlocks.has(candidate.id) && candidate.parcels.every((parcel) => !used.has(parcel.id)))
+  for (const district of ranked) {
+    const anchor = anchorOf.get(district.id)!;
+    const block = blocksOf(district.id)
+      .filter((candidate) => candidate.parcels.every((parcel) => !used.has(parcel.id)))
       .sort((a, b) => Math.hypot(a.x - anchor.x, a.z - anchor.z) - Math.hypot(b.x - anchor.x, b.z - anchor.z) || a.id.localeCompare(b.id))[0];
-    if (!block) return;
-    gardenBlocks.add(block.id);
+    if (!block) continue;
     for (const parcel of block.parcels) used.add(parcel.id);
     gardens.push({ id: `garden:${district.id}`, districtId: district.id, blockId: block.id, x: block.x, z: block.z, y: plan.terrain.height(block.x, block.z), yaw: block.parcels[0].yaw, width: block.width, depth: block.depth, seed: hashSeed(`garden:${district.id}`) });
-  });
+  }
+
+  // 落楼：每个宿主在自己的小区里按 (startedAt, −height, id) 从花园向外取地块——回放时看得见小区从中心长出来。
+  // 小区装满（会话数相对配额偏多）才溢出到小区外最近的空地块；全城都满才进背景楼群。
+  // 已落位的会话保留地址（见上方 previous），刷新不搬家。
   const pending = model.buildings.filter((building) => !assigned.has(building.id));
   const massing: CityLayout["massing"] = [];
-  const anchors = plan.districtAnchors;
-  // 城区排名按 (会话数降序, id 字典序) 确定性排序——宿主拿哪个象限锚点
-  // 不随输入数组顺序变化（契约：reversed 输入得到同一座城）。
-  const ranked = [...model.districts].sort((a, b) => b.sessionCount - a.sessionCount || (a.id < b.id ? -1 : 1));
-  const rankOf = new Map(ranked.map((district, index) => [district.id, index]));
   for (const district of ranked) {
-    const anchor = anchors[rankOf.get(district.id)! % anchors.length];
+    const anchor = anchorOf.get(district.id)!;
     const buildings = pending
       .filter((building) => building.districtId === district.id)
       .sort((a, b) => a.startedAt - b.startedAt || b.height - a.height || a.id.localeCompare(b.id));
     if (!buildings.length) continue;
-    const available = parcels.filter((parcel) => !used.has(parcel.id)).sort((a, b) => {
-      const score = (p: Parcel) => Math.hypot(p.x - anchor.x, p.z - anchor.z) + hashSeed(p.id) * 55;
-      return score(a) - score(b) || a.id.localeCompare(b.id);
-    });
+    const score = (p: Parcel) => Math.hypot(p.x - anchor.x, p.z - anchor.z) + hashSeed(p.id) * 30;
+    const inside = blocksOf(district.id).flatMap((block) => block.parcels).filter((parcel) => !used.has(parcel.id)).sort((a, b) => score(a) - score(b) || a.id.localeCompare(b.id));
     const overflow: typeof buildings = [];
-    buildings.forEach((building, index) => {
-      const parcel = available[index];
-      if (!parcel) { overflow.push(building); return; }
+    let cursor = 0;
+    for (const building of buildings) {
+      while (cursor < inside.length && used.has(inside[cursor].id)) cursor += 1;
+      let parcel: Parcel | undefined = inside[cursor];
+      if (parcel) cursor += 1;
+      else parcel = parcels.filter((candidate) => !used.has(candidate.id)).sort((a, b) => score(a) - score(b) || a.id.localeCompare(b.id))[0];
+      if (!parcel) { overflow.push(building); continue; }
       assigned.set(building.id, parcel);
       used.add(parcel.id);
-    });
+    }
     if (overflow.length) massing.push(...aggregateOverflow(district.id, anchor, overflow, parcels, plan));
   }
   const civics = placeCivics(model, parcels, used, assigned, previous ?? null, plan);
@@ -227,25 +258,34 @@ function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, ass
   const taken = new Set<string>();
   const out: CivicSite[] = [];
   const old = new Map((previous?.civics ?? []).map((civic) => [civic.id, civic]));
+  // 第一遍：先为所有仍能原地保留的配套占住原街区，否则编号更小的新配套会先抢走它（刷新不搬家）。
+  const reservedFor = new Map<string, string>(); // blockId → civic id
+  sequence.forEach((_, index) => {
+    const keep = old.get(`civic:${index}`);
+    if (keep && free.some((lot) => lot.id === keep.parcelId)) reservedFor.set(keep.parcelId, `civic:${index}`);
+  });
   sequence.forEach((districtId, index) => {
     const id = `civic:${index}`;
     const kind = CIVIC_ORDER[index % CIVIC_ORDER.length];
     const unlockAt = times[Math.min(times.length - 1, (index + 1) * CIVIC_PER_SESSIONS - 1)] ?? times[times.length - 1];
     const keep = old.get(id);
-    let parcel: Lot | undefined = keep ? free.find((p) => p.id === keep.parcelId && !taken.has(p.id)) : undefined;
+    let parcel: Lot | undefined = keep && reservedFor.get(keep.parcelId) === id ? free.find((p) => p.id === keep.parcelId && !taken.has(p.id)) : undefined;
+    // 已有配套原地保留时连同它原来的城区一起保留：总数一变，轮转里「第 i 座属于哪个城区」会变，
+    // 曾因此让 civic:7 换了城区、搬去新城区找地（刷新不搬家契约被打破）。
+    const owner = parcel && keep ? keep.districtId : districtId;
     if (!parcel) {
       const own = model.buildings.filter((b) => b.districtId === districtId).map((b) => assigned.get(b.id)).filter((p): p is Parcel => !!p);
       if (!own.length) return;
       const cx = own.reduce((acc, p) => acc + p.x, 0) / own.length;
       const cz = own.reduce((acc, p) => acc + p.z, 0) / own.length;
       parcel = free
-        .filter((p) => !taken.has(p.id) && out.every((c) => Math.hypot(c.x - p.x, c.z - p.z) >= 60))
+        .filter((p) => !taken.has(p.id) && !reservedFor.has(p.id) && out.every((c) => Math.hypot(c.x - p.x, c.z - p.z) >= 60))
         .map((p) => ({ p, d: Math.hypot(p.x - cx, p.z - cz) + hashSeed(`${id}:${p.id}`) * 20 }))
         .sort((a, b) => a.d - b.d || a.p.id.localeCompare(b.p.id))[0]?.p;
     }
     if (!parcel) return;
     taken.add(parcel.id);
-    out.push({ id, kind, districtId, parcelId: parcel.id, x: parcel.x, z: parcel.z, y: plan.terrain.height(parcel.x, parcel.z), yaw: parcel.yaw, width: parcel.width, depth: parcel.depth, unlockAt });
+    out.push({ id, kind, districtId: owner, parcelId: parcel.id, x: parcel.x, z: parcel.z, y: plan.terrain.height(parcel.x, parcel.z), yaw: parcel.yaw, width: parcel.width, depth: parcel.depth, unlockAt });
   });
   return out;
 }

@@ -86,7 +86,7 @@ export function planCinematic(layout: CityLayout, model: CityModel, heights: Map
     const pull = Math.min(1, weight);
     return {
       radius: cruiseRadius * (1 - pull) + (weight > 0 ? radius / weight : cruiseRadius) * pull,
-      height: 95 - 33 * pull,
+      height: 120 - 58 * pull,
       look: { x: center.x + (look.x - center.x) * lookWeight, z: center.z + (look.z - center.z) * lookWeight },
     };
   };
