@@ -1973,9 +1973,8 @@ export class CityParts {
           float sparkle = smoothstep(0.55, 0.95, sp1 * sp2 * sp3 + sp4 * 0.25) * smoothstep(0.05, 0.4, patchMask) * sunPath * smoothstep(0.35, 0.9, h0);
           float dist = distance(cameraPosition, vWorld);
           sparkle *= smoothstep(90.0, 200.0, dist) * (1.0 - smoothstep(300.0, 650.0, dist));
-          // 只在太阳反射带里闪：曾按相位格均匀撒满整片海，与光照方向无关，俯视/斜视都是一片均匀白点，不像日光。
-          sparkle *= smoothstep(0.55, 0.92, max(dot(reflect(-normalize(uSun), n), view), 0.0));
-          // 相位格在屏幕上小于 ~2px 时淡出：单像素硬边格会混叠成静态白噪点。
+          // 屏幕上小于 ~2px 的细节淡出（与上面 300–650 距离带互补的分辨率感知
+          // 保护）：低分屏/小窗口上，距离淡出的远端仍可能残留亚像素闪烁。
           float cellPx = 1.0 / max(length(fwidth(p * 1.35)), 1e-4);
           sparkle *= smoothstep(1.5, 4.0, cellPx);
           // 粼粼碎光是日光反射：夜里关掉（曾夜里照样按白天强度闪，一片白色雪花点）；夜海的亮点来自平面镜里的城市灯光。
