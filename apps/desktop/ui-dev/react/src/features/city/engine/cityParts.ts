@@ -2086,7 +2086,7 @@ export class CityParts {
   /** theme 基线 + 夜晚抬升的合成值（theme 切换后由昼夜 tick 重新应用）。 */
   applySelfLit(themeBase: number): void {
     for (const uniforms of this.facadeUniforms) {
-      uniforms.uSelfLit.value = Math.max(themeBase, this.nightGlow * 0.42);
+      uniforms.uSelfLit.value = Math.max(themeBase, this.nightGlow * 0.58);
     }
   }
 

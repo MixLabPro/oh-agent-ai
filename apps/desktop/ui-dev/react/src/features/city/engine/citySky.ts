@@ -53,7 +53,8 @@ const DUSK: CitySkyPreset = {
   sunColor: "#ffcf96", sunIntensity: 1.05,
   sunAzimuth: 3.35, sunElevation: 0.18,
   waterShallow: "#d3bd93", waterDeep: "#5f7383",
-  cloudOpacity: 0.8, selfLit: 0.55, stars: 0.15,
+  // 18:00 起城市灯光要明确亮起：黄昏档就把亮窗推高，入夜接满档。
+  cloudOpacity: 0.8, selfLit: 0.8, stars: 0.15,
 };
 
 const NIGHT: CitySkyPreset = {
@@ -73,8 +74,9 @@ const KEYFRAMES: Array<{ hour: number; preset: CitySkyPreset }> = [
   { hour: 6.5, preset: DUSK },
   { hour: 8, preset: DAY },
   { hour: 16.5, preset: DAY },
+  // 城市灯光：18:00 起渐亮（day→dusk 过渡），19:00 起夜档全亮。
   { hour: 18.5, preset: DUSK },
-  { hour: 20, preset: NIGHT },
+  { hour: 19, preset: NIGHT },
   { hour: 24, preset: NIGHT },
 ];
 
