@@ -233,6 +233,8 @@ type StaticCity = {
   clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }>;
   /** 缓存命中时新实例上这些字段是空的（它们在静态构建里赋值）：地面素材/水面倒影与夜间开关/摩天轮旋转/夜间灯光都要随缓存带回。 */
   terrainUniforms: Record<string, { value: unknown }> | null;
+  /** 旗帜摆动的时间 uniform：材质经缓存共享，uniform 对象也必须随缓存带回。 */
+  flagTime: { value: number } | null;
   waterAssetUniforms: Record<string, { value: unknown }> | null;
   landmarkSpinners: Array<{ object: THREE.Object3D; axis: "x" | "y" | "z"; speed: number }>;
   nightLights: NightLights | null;
@@ -266,6 +268,7 @@ export class CityParts {
   private readonly decoCornerMesh: THREE.InstancedMesh;
   private nightLights: NightLights | null = null;
   private terrainUniforms: Record<string, { value: unknown }> | null = null;
+  private flagTime: { value: number } | null = null;
   private waterAssetUniforms: Record<string, { value: unknown }> | null = null;
   /** 屋顶霓虹描边：比屋顶略大的自发光薄板，露出的一圈即霓虹；仅日落主题。 */
   private readonly neonMesh: THREE.InstancedMesh;
@@ -337,6 +340,7 @@ export class CityParts {
       this.cloudMesh = cloudResult.mesh;
       this.water = this.buildWater();
       this.buildGardens();
+      this.buildFlags();
       staticCity = {
         seed: layout.seed,
         layout,
@@ -353,6 +357,7 @@ export class CityParts {
         cloudMesh: this.cloudMesh,
         clouds: cloudResult.clouds,
         terrainUniforms: this.terrainUniforms,
+        flagTime: this.flagTime,
         waterAssetUniforms: this.waterAssetUniforms,
         landmarkSpinners: this.landmarkSpinners,
         nightLights: this.nightLights,
@@ -374,6 +379,7 @@ export class CityParts {
     this.wakeMesh = staticCity.wakeMesh;
     this.wakes = staticCity.wakes;
     this.terrainUniforms = staticCity.terrainUniforms;
+    this.flagTime = staticCity.flagTime;
     this.waterAssetUniforms = staticCity.waterAssetUniforms;
     this.landmarkSpinners = staticCity.landmarkSpinners;
     this.nightLights = staticCity.nightLights;
@@ -944,6 +950,60 @@ export class CityParts {
   }
 
   /** 小区中心花园：草坪 + 湖（与海面同一套水面材质，能映倒影）+ 湖石驳岸 + 假山叠石 + 亭 + 环湖树。 */
+  /** 旗帜（tinyskies FlagSystem 手法）：各区花园一杆 host 色旗 + 观测塔一面大旗。
+   *  布料摆动在顶点着色器里做——摆幅从旗杆（x=0）到自由端渐增，双频叠加更像风。 */
+  private buildFlags(): void {
+    const spots: Array<{ x: number; z: number; y: number; yaw: number; pole: number; cloth: number; color: string }> = [];
+    for (const garden of this.layout.gardens ?? []) {
+      const c = Math.cos(garden.yaw);
+      const s = Math.sin(garden.yaw);
+      spots.push({
+        x: garden.x + c * garden.width * 0.3 - s * garden.depth * 0.32,
+        z: garden.z + s * garden.width * 0.3 + c * garden.depth * 0.32,
+        y: garden.y, yaw: garden.yaw, pole: 7.5, cloth: 1,
+        color: paletteFor(garden.districtId).accent,
+      });
+    }
+    const tower = this.layout.publicSites.find((site) => site.kind === "tower");
+    if (tower) {
+      spots.push({ x: tower.x, z: tower.z, y: this.layout.terrain.height(tower.x, tower.z), yaw: tower.yaw, pole: 15, cloth: 1.5, color: "#f2efe6" });
+    }
+    if (!spots.length) return;
+    this.flagTime = { value: 0 };
+    const poleGeometry = new THREE.CylinderGeometry(0.12, 0.17, 1, 6).translate(0, 0.5, 0);
+    const poleMaterial = new THREE.MeshLambertMaterial({ color: "#8a9096" });
+    const poleMesh = this.makeInstanced(poleGeometry, poleMaterial, spots.length);
+    // 旗面：左缘挂在杆顶，宽度 5.2×cloth；aPhase 是实例属性（每面旗自己的风相位）。
+    const clothWidth = 5.2;
+    const clothGeometry = new THREE.PlaneGeometry(clothWidth, 3.1, 10, 5).translate(clothWidth / 2 + 0.1, -1.7, 0);
+    const phases = new Float32Array(spots.map((_, index) => hashSeed(`flag:${index}`) * Math.PI * 2));
+    clothGeometry.setAttribute("aPhase", new THREE.InstancedBufferAttribute(phases, 1));
+    const clothMaterial = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
+    const flagTime = this.flagTime;
+    clothMaterial.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = flagTime;
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "#include <common>\nattribute float aPhase;\nuniform float uTime;")
+        .replace("#include <begin_vertex>", `#include <begin_vertex>
+          float hoist = smoothstep(0.0, ${clothWidth.toFixed(1)}, position.x);
+          transformed.z += (sin(uTime * 2.7 + aPhase + position.x * 1.1) * 0.4 + sin(uTime * 5.2 + aPhase * 1.7 + position.x * 2.4) * 0.13) * hoist;
+          transformed.y -= hoist * hoist * 0.2;`);
+    };
+    clothMaterial.customProgramCacheKey = () => "city-flag-cloth";
+    const clothMesh = new THREE.InstancedMesh(clothGeometry, clothMaterial, spots.length);
+    clothMesh.name = "city-flags";
+    spots.forEach((spot, index) => {
+      this.compose(spot.x, spot.y, spot.z, spot.yaw, 0.8, spot.pole, 0.8);
+      poleMesh.setMatrixAt(index, this.matrix);
+      this.compose(spot.x, spot.y + spot.pole - 0.15, spot.z, spot.yaw, spot.cloth, spot.cloth, 1);
+      clothMesh.setMatrixAt(index, this.matrix);
+      clothMesh.setColorAt(index, this.color.set(spot.color));
+    });
+    if (clothMesh.instanceColor) clothMesh.instanceColor.needsUpdate = true;
+    this.group.add(poleMesh, clothMesh);
+    this.disposables.push(poleGeometry, poleMaterial, clothGeometry, clothMaterial);
+  }
+
   private buildGardens(): void {
     const gardens = this.layout.gardens ?? [];
     if (!gardens.length) return;
@@ -2583,6 +2643,7 @@ export class CityParts {
   /** 每帧增量更新。返回是否有矩阵写入（供引擎决定是否强制重绘）。 */
   update(dt: number, elapsed: number): boolean {
     this.waterUniforms.uTime.value = elapsed;
+    if (this.flagTime) this.flagTime.value = elapsed;
     this.updateCivics(dt);
     for (const spinner of this.landmarkSpinners) spinner.object.rotation[spinner.axis] += spinner.speed * dt;
 
