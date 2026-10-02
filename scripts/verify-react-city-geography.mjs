@@ -44,7 +44,7 @@ function correlation(a, b) {
   return dot / (na * nb || 1);
 }
 
-const seeds = Array.from({ length: 30 }, (_, i) => (i * 2654435761 + 12345) >>> 0 || 1);
+const seeds = [1485618003, ...Array.from({ length: 30 }, (_, i) => (i * 2654435761 + 12345) >>> 0 || 1)];
 const profiles = [];
 const biomes = new Set();
 const landmarkKinds = new Set();
@@ -71,6 +71,13 @@ for (const seed of seeds) {
   // 致敬型地标：每岛 2–4 座（含可能的悬索桥），在陆地上，不压任何会话地块。
   assert(layout.landmarks.length >= 2 && layout.landmarks.length <= 4, `seed ${seed}: ${layout.landmarks.length} landmarks`);
   const lots = layout.districts.flatMap((d) => [...d.slots.values()]);
+  // The elevated ring lives outside roadEdges: ground-road guards cannot protect it.
+  for (const lot of lots) for (const run of layout.highways) for (let i = 1; i < run.length; i += 1) {
+    const a = run[i - 1]; const b = run[i]; const dx = b.x - a.x; const dz = b.z - a.z;
+    const t = Math.max(0, Math.min(1, ((lot.x - a.x) * dx + (lot.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
+    const gap = Math.hypot(lot.x - a.x - dx * t, lot.z - a.z - dz * t);
+    assert(gap >= 5.25 + Math.hypot(lot.width, lot.depth) / 2 + 1, `seed ${seed}: ${lot.id} overlaps expressway`);
+  }
   for (const landmark of layout.landmarks) {
     landmarkKinds.add(landmark.kind);
     if (landmark.kind === "suspension-bridge") continue;
@@ -89,4 +96,4 @@ assert(median < 0.6, `island shapes too similar across seeds (median correlation
 assert(landmarkKinds.size >= 7, `landmark variety too low: ${[...landmarkKinds].join(",")}`);
 assert(biomes.size >= 4, `seeds should reach most biomes (got ${[...biomes].join(",")})`);
 assert(rivers >= 18 && rivers < 30, `about four in five islands have a river (got ${rivers}/30)`);
-console.log(`City geography: 30 seeds, all placed, sites on land, bridges over water; shape correlation median ${median.toFixed(2)}, ${biomes.size} biomes, ${rivers}/30 rivers, ${landmarkKinds.size} landmark kinds passed.`);
+console.log(`City geography: ${seeds.length} seeds, all placed, expressway clearance, sites on land, bridges over water; shape correlation median ${median.toFixed(2)}, ${biomes.size} biomes, ${rivers}/${seeds.length} rivers, ${landmarkKinds.size} landmark kinds passed.`);
