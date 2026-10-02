@@ -403,12 +403,17 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
         if (list) list.push(edge); else edgeBuckets.set(key, [edge]);
       }
   }
-  for (let i = 0; i < 1200; i += 1) {
+  // 山体植被（tinyskies 的教训：山不能光秃秃）——高度 3.2 以上、坡度可站立
+  // （slope < 1.5）的山坡是主要林区；公园/河岸/近海沙滩维持原有条件。
+  const slope = (x: number, z: number) => Math.hypot(height(x + 1, z) - height(x - 1, z), height(x, z + 1) - height(x, z - 1)) / 2;
+  for (let i = 0; i < 2600; i += 1) {
     const x = bbox.minX - 60 + random(`tx${i}`) * spanX; const z = bbox.minZ - 60 + random(`tz${i}`) * spanZ;
+    const h = height(x, z);
     const park = publicSites.some((s) => s.kind === "park" && Math.hypot(x - s.x, z - s.z) < s.radius - 5);
     const bank = Math.abs(x - riverX(z)) - riverWidth(z);
-    const wild = hillProj(x, z) > hillLine - 20 || coastDistance(x, z) < 30;
-    if (height(x, z) < 2.5 || (!park && !wild && !(hasRiver && bank < 23))) continue;
+    const mountainside = h > 3.2 && h < 60 && slope(x, z) < 1.5;
+    const wild = hillProj(x, z) > hillLine - 20 || coastDistance(x, z) < 30 || mountainside;
+    if (h < 2.5 || (!park && !wild && !(hasRiver && bank < 23))) continue;
     if ((edgeBuckets.get(`${Math.floor(x / CELL)}:${Math.floor(z / CELL)}`) ?? []).some((e) => segmentDistance({ x, z }, e.points[0], e.points[1]) < e.width / 2 + 3)) continue;
     parkTrees.push({ x, z, y: height(x, z), seed: random(`tree${i}`) });
   }
