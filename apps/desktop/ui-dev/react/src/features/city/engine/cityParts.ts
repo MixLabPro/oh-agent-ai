@@ -1958,15 +1958,23 @@ export class CityParts {
           float specular = pow(max(dot(reflect(-normalize(uSun), n), view), 0.0), 64.0);
           color += vec3(1.0, 0.97, 0.88) * specular * 1.05;
           color += vec3(0.05) * smoothstep(0.5, 0.95, h0);
-          // 碎波光：高频相位格在波峰处闪，俯视也有“粼粼”质感。
-          vec2 cell = floor(p * 1.35);
-          float sparkle = sin(dot(cell, vec2(127.1, 311.7)) + uTime * 2.2) * 0.5 + 0.5;
-          sparkle = pow(sparkle, 7.0) * smoothstep(0.35, 0.9, h0);
-          // 近处格子比像素大会变成白色棋盘噪点，远处则混叠：只在中距离出现。
+          // 碎波光：连续 sin 乘积场 × 大尺度成片掩码 × 太阳光路门控。曾用
+          // floor(p*1.35) 相位格——每格随机亮度，在其 200–650 显示距离带上读作
+          // 一粒粒的规则网格点，且无视太阳方向全海均匀撒点；连续场不成格，光路
+          // 门控（与上方 specular 同一个反射方向）让碎光只出现在太阳反射带里，
+          // 开阔海面干净。频率上限 0.4/单位，显示带内屏幕空间频率低于采样极限。
+          float sp1 = sin(p.x * 0.40 + p.y * 0.23 + uTime * 2.1);
+          float sp2 = sin(p.y * 0.35 + p.x * 0.13 - uTime * 1.7);
+          float sp3 = sin(p.x * 0.27 - p.y * 0.17 + uTime * 2.6);
+          float sp4 = sin(p.x * 0.33 - p.y * 0.23 + uTime * 1.3);
+          float patchMask = sin(p.x * 0.031 + p.y * 0.047 + uTime * 0.25) * sin(p.y * 0.053 - p.x * 0.029 - uTime * 0.18);
+          patchMask *= sin(p.y * 0.023 + p.x * 0.039 + uTime * 0.35);
+          float sunPath = smoothstep(0.55, 0.95, dot(reflect(-normalize(uSun), n), view));
+          float sparkle = smoothstep(0.55, 0.95, sp1 * sp2 * sp3 + sp4 * 0.25) * smoothstep(0.05, 0.4, patchMask) * sunPath * smoothstep(0.35, 0.9, h0);
           float dist = distance(cameraPosition, vWorld);
           sparkle *= smoothstep(90.0, 200.0, dist) * (1.0 - smoothstep(300.0, 650.0, dist));
           // 粼粼碎光是日光反射：夜里关掉（曾夜里照样按白天强度闪，一片白色雪花点）；夜海的亮点来自平面镜里的城市灯光。
-          color += vec3(1.0, 0.99, 0.92) * sparkle * 0.5 * (1.0 - uNight);
+          color += vec3(1.0, 0.99, 0.92) * sparkle * 0.75 * (1.0 - uNight);
           gl_FragColor = vec4(color, 1.0);
           #include <tonemapping_fragment>
           // 雾混在色调映射之后：scene.background 不经色调映射，先混再映射会让远水发灰、与天空出现色带。
