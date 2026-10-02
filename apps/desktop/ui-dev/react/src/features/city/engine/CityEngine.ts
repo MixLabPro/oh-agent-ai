@@ -835,6 +835,51 @@ export class CityEngine {
     }
   }
 
+  /** 拍照：按当前机位，以固定尺寸、最高画质渲染一张 PNG（不带标签/悬停环，右下角水印）。
+   *  不推进时间：画面就是用户此刻看到的城市。渲染管线有一帧滞后（倒影/阴影/后处理沿用上一帧），
+   *  所以连渲两次再取第二帧。 */
+  async capturePhoto(options: { width?: number; height?: number; watermark?: string } = {}): Promise<Blob> {
+    if (!this.parts) throw new Error("city not ready");
+    const width = options.width ?? 2560;
+    const height = options.height ?? 1440;
+    const wasQuality = this.quality;
+    const aspect = this.camera.aspect;
+    this.stopLoop();
+    const restoreOverlays = this.parts.hideOverlaysForPhoto();
+    this.exportSize = { width, height };
+    this.applyQualityLevel(2);
+    try {
+      this.renderFrame();
+      this.renderFrame();
+      const photo = document.createElement("canvas");
+      photo.width = width;
+      photo.height = height;
+      const ctx = photo.getContext("2d");
+      if (!ctx) throw new Error("2d context unavailable");
+      ctx.drawImage(this.options.canvas, 0, 0, width, height);
+      if (options.watermark) {
+        const unit = height / 1080;
+        ctx.save();
+        ctx.globalAlpha = 0.6;
+        ctx.fillStyle = "#fff";
+        ctx.shadowColor = "rgba(0,0,0,0.5)";
+        ctx.shadowBlur = 8 * unit;
+        ctx.textAlign = "right";
+        ctx.font = `600 ${Math.round(16 * unit)}px system-ui, -apple-system, 'Segoe UI', 'PingFang SC', sans-serif`;
+        ctx.fillText(options.watermark, width - 28 * unit, height - 24 * unit);
+        ctx.restore();
+      }
+      return await new Promise<Blob>((resolve, reject) => photo.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("PNG encode failed"))), "image/png"));
+    } finally {
+      restoreOverlays();
+      this.exportSize = null;
+      this.applyQualityLevel(wasQuality);
+      this.camera.aspect = aspect;
+      this.camera.updateProjectionMatrix();
+      this.startLoop();
+    }
+  }
+
   get isCinematic(): boolean {
     return this.cinematic !== null;
   }

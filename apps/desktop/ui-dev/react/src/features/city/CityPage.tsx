@@ -357,6 +357,28 @@ export function CityPage() {
     }
   };
 
+  // ── 拍照（当前机位，PNG）──
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const takePhoto = async () => {
+    const engine = engineRef.current;
+    if (!engine || photoBusy) return;
+    setPhotoBusy(true);
+    setExportError(null);
+    try {
+      const blob = await engine.capturePhoto({ watermark: "agent-vitals" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `agent-city-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.png`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (reason) {
+      setExportError(message("city.photo.error", language, { reason: reason instanceof Error ? reason.message : String(reason) }));
+    } finally {
+      setPhotoBusy(false);
+    }
+  };
+
   const cinemaOn = cinema !== null;
   useEffect(() => {
     if (!cinemaOn) return;
@@ -449,6 +471,9 @@ export function CityPage() {
           <option value="short">{message("city.export.short", language)}</option>
           <option value="full">{message("city.export.full", language)}</option>
         </SelectInput>
+        <Button type="button" onClick={takePhoto} disabled={!model || photoBusy || exportState !== null}>
+          {message(photoBusy ? "city.photo.busy" : "city.photo.take", language)}
+        </Button>
         <Button type="button" onClick={exportState ? () => exportAbort.current?.abort() : exportFilm} disabled={!model || model.stats.totalSessions === 0 || cinema !== null}>
           {exportState ? message("city.export.cancel", language, { percent: Math.round((exportState.frame / Math.max(1, exportState.total)) * 100) }) : message("city.export.start", language)}
         </Button>

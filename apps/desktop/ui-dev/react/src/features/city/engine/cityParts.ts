@@ -2608,6 +2608,20 @@ export class CityParts {
     this.scaffoldMesh.visible = visible;
   }
 
+  /** 拍照用：暂时藏起标签与悬停/选中环（不改 labelsVisible 偏好），返回恢复函数。 */
+  hideOverlaysForPhoto(): () => void {
+    const labels = this.labels.map((label) => label.visible);
+    const rings = [this.hoverRing.visible, this.selectRing.visible];
+    for (const label of this.labels) label.visible = false;
+    this.hoverRing.visible = false;
+    this.selectRing.visible = false;
+    return () => {
+      this.labels.forEach((label, index) => { label.visible = labels[index]; });
+      this.hoverRing.visible = rings[0];
+      this.selectRing.visible = rings[1];
+    };
+  }
+
   setLabelsVisible(visible: boolean): void {
     this.labelsVisible = visible;
     for (const label of this.labels) label.visible = visible;
