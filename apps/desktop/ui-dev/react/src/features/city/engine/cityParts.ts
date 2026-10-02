@@ -1948,7 +1948,9 @@ export class CityParts {
           return mix(photo, photo * tint * 1.55, uGradeAmount);
         }
         float wave(vec2 p, float t) {
-          float h = sin(p.x * 0.09 + t * 0.8) * cos(p.y * 0.075 - t * 0.6) * 0.5;
+          // 曾是 sin(x)·cos(y) 蛋托面——~70×84 单位的规则峰格，会透过波峰提亮/碎光门控显出点阵；
+          // 改为两条非平行方向的平面波之和，不再形成二维格点。
+          float h = (sin((p.x * 0.82 + p.y * 0.57) * 0.09 + t * 0.8) + sin((p.x * -0.34 + p.y * 0.94) * 0.075 - t * 0.6)) * 0.25;
           h += sin((p.x + p.y) * 0.16 + t * 1.1) * 0.28;
           h += sin((p.x * 0.6 - p.y * 0.8) * 0.23 - t * 0.9) * 0.18;
           return h;
@@ -1968,10 +1970,22 @@ export class CityParts {
           vec3 n = normalize(vec3((h0 - hx) * 1.8, e * 1.7, (h0 - hz) * 1.8));
           if (uHasAssets > 0.5) {
             // 两层反向滚动的法线贴图：细碎波纹不再是规则的正弦格。
-            vec3 a = texture2D(uNormal, p / 46.0 + vec2(uTime * 0.010, uTime * 0.006)).xyz * 2.0 - 1.0;
-            vec3 b = texture2D(uNormal, p / 19.0 - vec2(uTime * 0.007, -uTime * 0.011)).xyz * 2.0 - 1.0;
-            vec3 t = a + b;
-            n = normalize(vec3(t.x * 0.32, 1.0, t.y * 0.32));
+            // 曾是 p/46、p/19 两层轴对齐平铺：同一块贴图每 46 单位原样复制，掠射角下菲涅尔
+            // 反射把每块的法线偏转放大成一颗暗椭圆，全海排成规则点阵。现在三层各自旋转到
+            // 非轴向、尺度互不整除（重复周期错开），再用低频场混合权重，平铺不再对齐成格。
+            vec2 pa = mat2(0.857, 0.515, -0.515, 0.857) * p;   // 31°
+            vec2 pb = mat2(0.682, -0.731, 0.731, 0.682) * p;   // -47°
+            vec2 pc = mat2(0.276, 0.961, -0.961, 0.276) * p;   // 74°
+            vec3 a = texture2D(uNormal, pa / 41.3 + vec2(uTime * 0.010, uTime * 0.006)).xyz * 2.0 - 1.0;
+            vec3 b = texture2D(uNormal, pb / 15.7 - vec2(uTime * 0.007, -uTime * 0.011)).xyz * 2.0 - 1.0;
+            vec3 c = texture2D(uNormal, pc / 113.0 + vec2(uTime * 0.004, -uTime * 0.003)).xyz * 2.0 - 1.0;
+            float mixW = 0.5 + 0.5 * sin(p.x * 0.013 + p.y * 0.017) * sin(p.y * 0.011 - p.x * 0.007);
+            vec3 t = a * (0.6 + 0.4 * mixW) + b * (1.0 - 0.4 * mixW) + c * 0.7;
+            // 远处/掠射角收敛向平静镜面：真实远海近似镜子，也压住残余的平铺混叠。
+            float viewDist = distance(cameraPosition, vWorld);
+            float calm = mix(1.0, 0.35, smoothstep(120.0, 600.0, viewDist));
+            float strength = 0.28 * calm;
+            n = normalize(vec3(t.x * strength, 1.0, t.y * strength));
           }
           vec3 view = normalize(cameraPosition - vWorld);
           float fresnel = pow(1.0 - max(dot(n, view), 0.0), 2.4);
