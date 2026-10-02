@@ -10,12 +10,13 @@
 import { buildCityModel, LOAD_CAP, type CityModel } from "./cityModel";
 import { listenAppEvents, makeInvalidationGate, readFindings, readSessions, readStatisticsTimezone, safeUiError, type FindingGroup, type SessionRow } from "../../lib/tauri";
 
-export type CityWindowKind = "7d" | "30d" | "90d";
+export type CityWindowKind = "7d" | "30d" | "90d" | "366d";
 
 export const CITY_WINDOWS: Array<{ kind: CityWindowKind; days: number }> = [
   { kind: "7d", days: 7 },
   { kind: "30d", days: 30 },
   { kind: "90d", days: 90 },
+  { kind: "366d", days: 366 },
 ];
 
 function dateInTimezone(timezone: string, date = new Date()): string {
@@ -30,6 +31,22 @@ function shiftDate(date: string, days: number): string {
   const value = new Date(`${date}T00:00:00Z`);
   value.setUTCDate(value.getUTCDate() + days);
   return value.toISOString().slice(0, 10);
+}
+
+/** 时间轴起点：第一栋建筑落成的那天（已装载行里最早 first_event_at 的当天零
+ *  点，本地时区）。查询窗（如 366 天）是数据面的取数范围，不是回放起点——
+ *  滑块从有数据那天开始，用户拖到头就能立刻看到第一个建筑破土。oldest 优先
+ *  分页保证后续页只会更晚，起点跨页稳定。无数据时退回查询窗起点。 */
+function timelineStartMs(rows: SessionRow[], queryStartMs: number): number {
+  let earliest = Number.POSITIVE_INFINITY;
+  for (const row of rows) {
+    const ms = row.first_event_at ? Date.parse(row.first_event_at) : Number.NaN;
+    if (Number.isFinite(ms) && ms < earliest) earliest = ms;
+  }
+  if (!Number.isFinite(earliest)) return queryStartMs;
+  const day = new Date(earliest);
+  day.setHours(0, 0, 0, 0);
+  return Math.min(day.getTime(), Date.now() - 60_000);
 }
 
 export type CityLoadResult = { model: CityModel; error: string | null; /** 分页是否已全部到齐——到齐后应做一次全量重排。 */
@@ -79,7 +96,10 @@ export class CityLoader {
         let published = false;
         for (let page = 0; page < 12; page += 1) {
           if (!this.active || generation !== this.generation) return;
-          const result = await readSessions({ date_from: dateFrom, date_to: dateTo, page_size: 500, cursor });
+          // order=oldest：分页从最老会话开始。默认 token 降序在装载上限内只
+          // 保证「token 最大」的会话到达——一年窗口下城市地基（最早的会话）
+          // 永远装不进来，回放也从头就是空的。
+          const result = await readSessions({ date_from: dateFrom, date_to: dateTo, page_size: 500, cursor, order: "oldest" });
           if (!this.active || generation !== this.generation) return;
           rows.push(...result.sessions);
           totalSessions = result.window_session_count;
@@ -89,7 +109,7 @@ export class CityLoader {
             const model = buildCityModel({
               rows,
               findings: [],
-              windowStartMs: Date.parse(`${dateFrom}T00:00:00Z`),
+              windowStartMs: timelineStartMs(rows, Date.parse(`${dateFrom}T00:00:00Z`)),
               windowEndMs: Date.now(),
               windowLabel: `${dateFrom} ~ ${dateTo}`,
               totalSessions,
@@ -105,6 +125,20 @@ export class CityLoader {
             break;
           }
         }
+        // 截断补救：oldest 序在上限内丢的是「最新」尾巴——其中包含正在施工的
+        // 活跃会话。补抓最近 2 天一页（去重合并），保住工地与吊车；窗口总数仍
+        // 如实来自主窗口查询（truncated 保持 true，HUD 照常标注已聚合）。
+        if (truncated) {
+          try {
+            const recentFrom = shiftDate(today, -1);
+            const hedge = await readSessions({ date_from: recentFrom, date_to: today, page_size: 500, order: "oldest" });
+            if (!this.active || generation !== this.generation) return;
+            const seen = new Set(rows.map((row) => row.session_ref));
+            for (const row of hedge.sessions) if (!seen.has(row.session_ref)) rows.push(row);
+          } catch {
+            /* 补抓失败不阻断发布：主窗口数据完整可用 */
+          }
+        }
         // 全部页到齐：用完整数据发最终模型（complete=true → 全量重排，
         // 修正中间页乱序到达造成的圈层错位）。
         if (rows.length) {
@@ -112,7 +146,7 @@ export class CityLoader {
           const model = buildCityModel({
             rows,
             findings,
-            windowStartMs: Date.parse(`${dateFrom}T00:00:00Z`),
+            windowStartMs: timelineStartMs(rows, Date.parse(`${dateFrom}T00:00:00Z`)),
             windowEndMs: Date.now(),
             windowLabel: `${dateFrom} ~ ${dateTo}`,
             totalSessions,

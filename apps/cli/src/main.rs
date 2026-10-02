@@ -1127,6 +1127,11 @@ enum SessionsAction {
         /// Opaque cursor from a previous page's `data.next_cursor`
         #[arg(long)]
         cursor: Option<String>,
+        /// Result ordering: `tokens` (window total desc, default) or `oldest`
+        /// (first event asc — the City loader pages oldest-first so a year-long
+        /// window always reaches the earliest sessions within its load cap)
+        #[arg(long, default_value = "tokens")]
+        order: String,
         /// Print the envelope JSON to stdout
         #[arg(long)]
         json: bool,
@@ -4333,6 +4338,7 @@ session_store={store} fold={fold}"
                 min_tokens,
                 page_size,
                 cursor,
+                order,
                 json,
             } => {
                 // 严格校验三种时间窗形态：单日、月份、成对自定义日期范围。
@@ -4387,6 +4393,9 @@ session_store={store} fold={fold}"
                 );
                 if let Some(c) = cursor {
                     args.insert("cursor".into(), Value::String(c.clone()));
+                }
+                if order != "tokens" {
+                    args.insert("order".into(), Value::String(order.clone()));
                 }
                 dispatch_sessions("sessions_search", Value::Object(args), *json, &data_home);
             }

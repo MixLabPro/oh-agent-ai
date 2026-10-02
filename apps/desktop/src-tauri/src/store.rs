@@ -110,6 +110,7 @@ fn list_args(
     provider: &Option<String>,
     page_size: Option<usize>,
     cursor: &Option<String>,
+    order: &Option<String>,
 ) -> Vec<String> {
     let mut a: Vec<String> = vec![
         "sessions".into(),
@@ -152,6 +153,13 @@ fn list_args(
     if let Some(c) = cursor {
         a.push("--cursor".into());
         a.push(c.clone());
+    }
+    // 排序只收白名单：`oldest`（City 一年窗口从最老数据开始分页）。默认
+    // token 降序不传参——保持既有 argv 字节序，golden/契约不受影响；非法值
+    // 在 sessions_list 入口就被拒，这里只处理合法的两种。
+    if order.as_deref() == Some("oldest") {
+        a.push("--order".into());
+        a.push("oldest".into());
     }
     a
 }
@@ -406,14 +414,20 @@ pub async fn sessions_list(
     provider: Option<String>,
     page_size: Option<usize>,
     cursor: Option<String>,
+    order: Option<String>,
 ) -> Result<Value, Value> {
+    if let Some(value) = order.as_deref() {
+        if value != "oldest" && value != "tokens" {
+            return Err(error_value("invalid-argument", "sessions list order must be \"oldest\" or \"tokens\""));
+        }
+    }
     let lock = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = lock.acquire();
         let Some(bin) = resolve_binary() else {
             return Err(no_binary());
         };
-        let args = list_args(&day, &month, &date_from, &date_to, &host_kind, &model, &provider, page_size, &cursor);
+        let args = list_args(&day, &month, &date_from, &date_to, &host_kind, &model, &provider, page_size, &cursor, &order);
         let mut cmd = Command::new(&bin);
         cmd.args(&args);
         // 与 tick 同款：显式钉死 AGENT_VITALS_HOME，权威库 / salt / 状态文件都
@@ -2218,10 +2232,29 @@ mod tests {
     fn list_args_full() {
         let some = &Some("x".to_string());
         assert_eq!(
-            list_args(some, &None, some, &None, &Some("x".to_string()), &None, &None, Some(7), &Some("c".to_string())),
+            list_args(some, &None, some, &None, &Some("x".to_string()), &None, &None, Some(7), &Some("c".to_string()), &None),
             vec!["sessions", "list", "--json",
                  "--day", "x", "--host-kind", "x", "--page-size", "7",
                  "--cursor", "c"]
+        );
+    }
+
+    /// `order=oldest`：City 一年窗口从最老会话开始分页的 argv 面。默认
+    /// （None / "tokens"）不出现 `--order`——既有调用方的 argv 字节序不变。
+    #[test]
+    fn list_args_order_oldest_opt_in() {
+        let none = &None;
+        assert_eq!(
+            list_args(&None, &None, &Some("2026-07-04".into()), &Some("2026-10-02".into()), none, none, none, Some(496), &None, &Some("oldest".into())),
+            vec!["sessions", "list", "--json",
+                 "--from-date", "2026-07-04", "--to-date", "2026-10-02",
+                 "--page-size", "496", "--order", "oldest"]
+        );
+        assert_eq!(
+            list_args(&None, &None, &Some("2026-07-04".into()), &Some("2026-10-02".into()), none, none, none, Some(496), &None, &Some("tokens".into())),
+            vec!["sessions", "list", "--json",
+                 "--from-date", "2026-07-04", "--to-date", "2026-10-02",
+                 "--page-size", "496"]
         );
     }
 
@@ -2231,7 +2264,7 @@ mod tests {
     #[test]
     fn list_args_month_mode_emits_month_flag_only() {
         assert_eq!(
-            list_args(&None, &Some("2026-08".to_string()), &None, &None, &None, &None, &None, None, &None),
+            list_args(&None, &Some("2026-08".to_string()), &None, &None, &None, &None, &None, None, &None, &None),
             vec!["sessions", "list", "--json", "--month", "2026-08"]
         );
     }
@@ -2244,7 +2277,7 @@ mod tests {
             list_args(
                 &Some("2026-08-15".to_string()),
                 &Some("2026-08".to_string()),
-                &None, &None, &None, &None, &None, None, &None,
+                &None, &None, &None, &None, &None, None, &None, &None,
             ),
             vec!["sessions", "list", "--json",
                  "--month", "2026-08"]
@@ -2260,7 +2293,7 @@ mod tests {
                 &None,
                 &Some("2026-08".to_string()),
                 &None, &None, &Some("dsh".to_string()), &None, &None,
-                Some(100), &None,
+                Some(100), &None, &None,
             ),
             vec!["sessions", "list", "--json",
                  "--month", "2026-08",
@@ -2274,7 +2307,7 @@ mod tests {
     /// IPC 不替前端报错而是补一个今天的 `--day` —— 这一行是契约面。
     #[test]
     fn list_args_default_day_is_today() {
-        let a = list_args(&None, &None, &None, &None, &None, &None, &None, None, &None);
+        let a = list_args(&None, &None, &None, &None, &None, &None, &None, None, &None, &None);
         // 第一段固定
         assert_eq!(&a[0..3], &["sessions", "list", "--json"]);
         // --day 必须紧跟固定段（位置由 list_args 保证）

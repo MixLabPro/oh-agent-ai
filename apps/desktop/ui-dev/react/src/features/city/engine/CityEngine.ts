@@ -346,6 +346,8 @@ export class CityEngine {
   applyModel(model: CityModel, reuse = true): void {
     this.model = model;
     if (this.seed === null) return;
+    // 重建前抓显示进度：回访的楼保持高度（不闪缩、不重演生长），新到的楼从 0 长入。
+    const previousDisplays = this.parts ? this.parts.displaySnapshot() : null;
     if (this.parts) {
       this.scene.remove(this.parts.group, this.parts.water);
       this.parts.dispose();
@@ -353,7 +355,7 @@ export class CityEngine {
     }
     const layout = layoutCity(model, reuse ? this.layout : null, this.seed);
     this.layout = layout;
-    this.parts = new CityParts(model, layout);
+    this.parts = new CityParts(model, layout, previousDisplays);
     if (this.assets) this.parts.applyAssets(this.assets);
     // 生态带植被异步到达：只在 parts 仍是这一份时替换（换种子/换主题会重建 parts）。
     const parts = this.parts;

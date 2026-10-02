@@ -34,7 +34,9 @@ function dayLabel(ms: number): string {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   const hour = String(date.getHours()).padStart(2, "0");
-  return `${month}-${day} ${hour}:00`;
+  // 366 天窗会跨年：非当年的日期带上年份，否则「10-08」分不清是哪一年。
+  const year = date.getFullYear() === new Date().getFullYear() ? "" : `${date.getFullYear()}-`;
+  return `${year}${month}-${day} ${hour}:00`;
 }
 
 function durationLabel(startedAt: number, endedAt: number | null, language: AppLanguage): string {
@@ -79,7 +81,7 @@ export function CityPage() {
   const [updating, setUpdating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [diag, setDiag] = useState<string | null>(null);
-  const [windowKind, setWindowKind] = useState<CityWindowKind>("90d");
+  const [windowKind, setWindowKind] = useState<CityWindowKind>("366d");
   const [qualityMode, setQualityMode] = useState<EngineQualityMode>("auto");
   const [labelsVisible, setLabelsVisible] = useState(true);
   const labelsVisibleRef = useRef(labelsVisible);

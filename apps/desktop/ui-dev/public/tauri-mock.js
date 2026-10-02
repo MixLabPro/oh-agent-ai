@@ -221,9 +221,9 @@
     return { [to]: 4, [shift(3)]: 2, [shift(8)]: 1 };
   }
 
-  // City 页的浏览器预览数据：page_size ≥ 100 时返回一份确定性的 30 天合成会话集
-  // （4 宿主 / 对数分布 token / 少量"正在施工"的活跃会话）。仅供视觉迭代——
-  // 打包后的 app 走真实 authority，永不进这条路径。
+  // City 页的浏览器预览数据：page_size ≥ 100 时返回一份确定性的一年跨度合成会话集
+  // （4 宿主 / 对数分布 token / 近期更密 / 少量"正在施工"的活跃会话）。仅供视觉
+  // 迭代——打包后的 app 走真实 authority，永不进这条路径。
   const citySessions = (() => {
     let state = 0x2f6e2b1;
     const rand = () => {
@@ -247,7 +247,12 @@
         acc += candidate.weight;
         if (pick <= acc) { entry = candidate; break; }
       }
-      const ageDays = Math.pow(rand(), 1.4) * 29.7;
+      // 锚定首个数据日 = 2026-07-23（与真机一致）：预览的时间轴起点/第一个
+      // 建筑落在与真实数据同一天，视觉迭代的结论可直接迁移到真机。第 0 条
+      // 会话钉在锚点当天，其余按近期更密的偏移分布在锚点至今的范围内。
+      const firstDataMs = Date.parse("2026-07-23T00:00:00+08:00");
+      const spanDays = Math.max(7, (now - firstDataMs) / 86400000);
+      const ageDays = index === 0 ? spanDays : Math.pow(rand(), 1.4) * spanDays;
       const dayStart = now - ageDays * 86400000;
       const durationMinutes = 4 + Math.pow(rand(), 2.2) * 460;
       const tokens = Math.round(2_500 + Math.pow(rand(), 3.2) * 3_400_000);
@@ -962,12 +967,17 @@
       }
       case "sessions_list": {
         const cursor = args && args.cursor;
-        // City 预览：大页请求按游标分页给合成 30 天数据（每页 500，与真机分页同构）。
+        // City 预览：大页请求按游标分页给合成数据（每页 500，与真机分页同构）。
+        // order=oldest 与真机同语义：first_event 升序——预览里也能看到「从最老
+        // 数据开始分页」的懒加载叙事。
         if ((args && (args.pageSize ?? args.page_size)) >= 100 || /^city-page-\d+$/.test(String(cursor))) {
+          const ordered = args && args.order === "oldest"
+            ? [...citySessions].sort((left, right) => Date.parse(left.first_event_at) - Date.parse(right.first_event_at))
+            : citySessions;
           const pageIndex = cursor ? Number(String(cursor).slice("city-page-".length)) : 0;
-          const slice = citySessions.slice(pageIndex * 500, pageIndex * 500 + 500);
+          const slice = ordered.slice(pageIndex * 500, pageIndex * 500 + 500);
           if (!slice.length) return { data: { sessions: [], next_cursor: null, has_more: false, window_session_count: citySessions.length, window_total_tokens: 0 } };
-          const next = (pageIndex + 1) * 500 < citySessions.length ? `city-page-${pageIndex + 1}` : null;
+          const next = (pageIndex + 1) * 500 < ordered.length ? `city-page-${pageIndex + 1}` : null;
           return { data: { sessions: slice, next_cursor: next, has_more: next !== null, window_session_count: citySessions.length, window_total_tokens: citySessions.reduce((sum, session) => sum + session.tokens.total, 0) } };
         }
         // 一页一条：第一页 → preview-next → preview-next-2（第三页是「订阅为主 + 缺价」样例）
