@@ -92,6 +92,8 @@ export class CityEngine {
   private readonly observers: Array<() => void> = [];
   private skyDome: THREE.Mesh | null = null;
   private assets: CityAssets | null = null;
+  /** 地形种子：未拿到前不渲染城市（否则先闪一座默认岛再跳成用户自己的岛）。 */
+  private seed: number | null = null;
   private composer: EffectComposer | null = null;
   /** 当前后处理链的配置键（主题霓虹 × AO）：变化时重建，避免每帧判断哪些 pass 该在。 */
   private composerKey = "";
@@ -318,15 +320,26 @@ export class CityEngine {
     if (this.model) this.applyModel(this.model, true);
   }
 
+  /** 设定地形种子。换种子 = 换一座岛：丢弃旧布局整体重排（地址不再复用）。 */
+  setSeed(seed: number): void {
+    if (seed === this.seed) return;
+    const first = this.seed === null;
+    this.seed = seed;
+    this.layout = null;
+    if (this.model) this.applyModel(this.model, false);
+    if (!first) this.resetView();
+  }
+
   /** reuse=false：丢弃上一布局做全量重排（分页到齐后的圈层修正）。 */
   applyModel(model: CityModel, reuse = true): void {
     this.model = model;
+    if (this.seed === null) return;
     if (this.parts) {
       this.scene.remove(this.parts.group, this.parts.water);
       this.parts.dispose();
       this.parts = null;
     }
-    const layout = layoutCity(model, reuse ? this.layout : null);
+    const layout = layoutCity(model, reuse ? this.layout : null, this.seed);
     this.layout = layout;
     this.parts = new CityParts(model, layout);
     if (this.assets) this.parts.applyAssets(this.assets);

@@ -3085,6 +3085,62 @@ fn save_ui_language_config(app: AppHandle, language: String) -> Result<Value, St
     Ok(serde_json::json!({ "status": "saved", "language": language }))
 }
 
+const CITY_SEED_CONFIG_FILE: &str = "city-seed.json";
+
+/// 城市地形种子：第一次打开城市页时生成并落盘，之后永远读同一个——地图不能每次启动都变。
+/// 只有用户在城市页点「重新生成岛屿」才换。种子只来自本机（时间 + 进程 + 地址熵的 FNV 混合），
+/// 不关联账号或任何网络标识，也不离开本机。
+fn read_city_seed() -> Result<Option<u32>, String> {
+    let path = overview::data_home().join("state").join(CITY_SEED_CONFIG_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("city seed unreadable: {error}")),
+    };
+    let value: Value = serde_json::from_str(&text).map_err(|error| format!("city seed invalid: {error}"))?;
+    Ok(value.get("seed").and_then(Value::as_u64).and_then(|seed| u32::try_from(seed).ok()).filter(|seed| *seed > 0))
+}
+
+fn fresh_city_seed() -> u32 {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let marker = 0u8;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in nanos.to_le_bytes().iter().chain(std::process::id().to_le_bytes().iter()).chain((&marker as *const u8 as usize).to_le_bytes().iter()) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // 0 保留给「未设置」。
+    ((hash ^ (hash >> 32)) as u32).max(1)
+}
+
+fn write_city_seed(seed: u32) -> Result<(), String> {
+    let directory = overview::data_home().join("state");
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let temporary = directory.join("city-seed.json.tmp");
+    let contents = serde_json::to_vec(&serde_json::json!({ "seed": seed })).map_err(|error| error.to_string())?;
+    std::fs::write(&temporary, contents).map_err(|error| error.to_string())?;
+    std::fs::rename(&temporary, directory.join(CITY_SEED_CONFIG_FILE)).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn city_seed_config() -> Result<Value, String> {
+    if let Some(seed) = read_city_seed()? {
+        return Ok(serde_json::json!({ "status": "ok", "seed": seed, "created": false }));
+    }
+    let seed = fresh_city_seed();
+    write_city_seed(seed)?;
+    Ok(serde_json::json!({ "status": "ok", "seed": seed, "created": true }))
+}
+
+#[tauri::command]
+fn reset_city_seed() -> Result<Value, String> {
+    let previous = read_city_seed()?;
+    let mut seed = fresh_city_seed();
+    if Some(seed) == previous { seed = seed.wrapping_add(1).max(1); }
+    write_city_seed(seed)?;
+    Ok(serde_json::json!({ "status": "saved", "seed": seed }))
+}
+
 /// 每日同步叠加层（`.github/workflows/pricing-sync.yml` 每天生成）。app 拉到后与
 /// 内置底表合并成完整快照入库；旧链路拉的是完整 `pricing.json` 且只存它一份，
 /// 快照里没有 `codex_pricing`，开启更新后 codex 用量会全部算不出金额。
@@ -5120,6 +5176,8 @@ pub fn run() {
             save_statistics_timezone_config,
             ui_language_config,
             save_ui_language_config,
+            city_seed_config,
+            reset_city_seed,
             public_pricing_catalog_status,
             save_public_pricing_catalog_policy,
             update_public_pricing_catalog,

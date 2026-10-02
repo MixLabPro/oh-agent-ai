@@ -434,3 +434,5 @@
 .city-cinema-exit { position: absolute; right: 18px; top: calc(11% + 12px); pointer-events: auto; background: rgba(0, 0, 0, .35); color: #fff; border: 1px solid rgba(255, 255, 255, .3); border-radius: 999px; padding: 6px 12px; font-size: 12px; cursor: pointer; backdrop-filter: blur(6px); }
 .city-cinema-exit:hover { background: rgba(0, 0, 0, .55); }
 @media (prefers-reduced-motion: reduce) { .city-cinema-card, .city-cinema-bar { animation: none; } }
+
+.city-reseed-armed { border-color: #c96f4a !important; color: #c96f4a !important; }

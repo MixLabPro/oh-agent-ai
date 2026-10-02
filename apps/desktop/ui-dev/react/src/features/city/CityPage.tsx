@@ -10,6 +10,7 @@ import type { CityBuilding, CityModel } from "./cityModel";
 import { paletteFor } from "./engine/cityTextures";
 import type { CityThemeName } from "./engine/cityTheme";
 import type { CinematicCard } from "./engine/cityCinematic";
+import { loadCitySeed, resetCitySeed } from "./citySeed";
 import { CityEngine, type EngineQualityMode, type EngineStats } from "./engine/CityEngine";
 import { hostName } from "../../lib/hostNames";
 import { formatCost } from "../sessions/costSummary";
@@ -78,6 +79,8 @@ export function CityPage() {
   const labelsVisibleRef = useRef(labelsVisible);
   labelsVisibleRef.current = labelsVisible;
   const [theme, setTheme] = useState<CityThemeName>(readStoredTheme);
+  /** 「重新生成岛屿」两步确认：第一次点击只是武装按钮，4 秒内再点才执行。 */
+  const [confirmReseed, setConfirmReseed] = useState(false);
   const [stats, setStats] = useState<EngineStats | null>(null);
   const [cursorMs, setCursorMs] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -193,6 +196,14 @@ export function CityPage() {
     engineRef.current = engine;
     engine.setQualityMode(qualityMode);
     if (modelRef.current) engine.applyModel(modelRef.current);
+    // 种子到了才画城市。读失败（数据目录不可写等）时本次用内置种子兜底——城市照常可用，
+    // 只是这次不是「你的岛」；不落盘，下次进入再试。
+    loadCitySeed()
+      .then((seed) => { if (engineRef.current === engine) engine.setSeed(seed); })
+      .catch((reason) => {
+        console.warn("[city] seed unavailable, using the built-in island for this visit", reason);
+        if (engineRef.current === engine) engine.setSeed(1927);
+      });
     return () => {
       engine.dispose();
       engineRef.current = null;
@@ -344,6 +355,23 @@ export function CityPage() {
         </SelectInput>
         <Button type="button" onClick={() => setLabelsVisible((value) => !value)}>{message(labelsVisible ? "city.labelsHide" : "city.labelsShow", language)}</Button>
         <Button type="button" onClick={() => engineRef.current?.resetView()}>{message("city.resetView", language)}</Button>
+        <Button
+          type="button"
+          className={confirmReseed ? "city-reseed-armed" : undefined}
+          title={message("city.reseedHint", language)}
+          disabled={!model || cinema !== null}
+          onClick={() => {
+            if (!confirmReseed) {
+              setConfirmReseed(true);
+              window.setTimeout(() => setConfirmReseed(false), 4000);
+              return;
+            }
+            setConfirmReseed(false);
+            resetCitySeed()
+              .then((seed) => engineRef.current?.setSeed(seed))
+              .catch((reason) => setError(String(reason)));
+          }}
+        >{message(confirmReseed ? "city.reseedConfirm" : "city.reseed", language)}</Button>
         <Button type="button" className="city-cinema-button" onClick={startCinematic} disabled={!model || model.stats.totalSessions === 0 || cinema !== null}>{message("city.cinema.start", language)}</Button>
       </div>
     </ToolbarActions>

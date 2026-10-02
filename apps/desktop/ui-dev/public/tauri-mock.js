@@ -835,6 +835,8 @@
       case "export_diagnostic_package": return ok({ status: "saved", path: "/tmp/agent-vitals-diagnostic-browser-mock.zip", upload_performed: false });
       // Shape: apps/desktop/src-tauri/src/lib.rs:1708 statistics_timezone_config (json!).
       case "statistics_timezone_config": return { status: "ok", timezone, system_timezone: timezone };
+      case "city_seed_config": return { status: "ok", seed: 1927, created: false };
+      case "reset_city_seed": return { status: "saved", seed: (Math.floor(Math.random() * 0xfffffffe) + 1) >>> 0 };
       case "ui_language_config": return { status: "ok", language: uiLanguage, has_preference: hasUiLanguagePreference };
       case "save_ui_language_config": {
         const language = args && args.language;

@@ -90,4 +90,14 @@ for (const civic of first.civics) {
   const again = expanded.civics.find((item) => item.id === civic.id);
   assert(again && again.parcelId === civic.parcelId, `${civic.id} keeps its block while the block stays free`);
 }
-console.log("City layout: full placement, unique lots, road clearance/connectivity, traffic, incremental stability and civic growth passed.");
+// 个人化地形：每个用户一个随机种子（首次打开城市页生成并落盘）。任何种子下都必须是一座完整可用的城：
+// 会话全部落位、公共用地与城区锚点不落进海里、同种子同输入得到同一座城。
+for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
+  const input = model(700);
+  const layout = layoutCity(input, null, seed);
+  validate(layout, input);
+  for (const site of layout.publicSites) assert(layout.terrain.height(site.x, site.z) > 0.5, `seed ${seed}: ${site.id} must sit on land`);
+  for (const anchor of layout.districtAnchors) assert(layout.terrain.height(anchor.x, anchor.z) > 0.5, `seed ${seed}: district anchor must sit on land`);
+  assert.deepEqual(addresses(layoutCity(input, null, seed)), addresses(layout), `seed ${seed}: deterministic`);
+}
+console.log("City layout: full placement, unique lots, road clearance/connectivity, traffic, incremental stability, civic growth and per-user seeds passed.");
