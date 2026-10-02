@@ -19,7 +19,7 @@ import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
 import { Reflector } from "three/addons/objects/Reflector.js";
 import type { CityModel } from "../cityModel";
-import { activeTheme, setActiveTheme, skyYawOf, type CityThemeName } from "./cityTheme";
+import { activeTheme, BIOME_GRADES, setActiveTheme, skyYawOf, type CityThemeName } from "./cityTheme";
 import { loadCityAssets, type CityAssets } from "./cityAssets";
 import { loadBiomeFlora } from "./cityFlora";
 import { planCinematic, type CinematicPlan } from "./cityCinematic";
@@ -785,6 +785,15 @@ export class CityEngine {
       if (water) {
         water.uShallow.value.set(sky.waterShallow);
         water.uDeep.value.set(sky.waterDeep);
+        // 生态带水色：在昼夜预设之上轻度偏移（量随白天亮度衰减，夜里夜海仍是夜色）。
+        const grade = this.layout ? BIOME_GRADES[this.layout.biome] : null;
+        if (grade?.water) {
+          const lightness = { h: 0, s: 0, l: 0 };
+          new THREE.Color(sky.waterShallow).getHSL(lightness);
+          const daylight = Math.min(1, lightness.l * 2.2);
+          water.uShallow.value.lerp(new THREE.Color(grade.water.shallow), grade.waterAmount * daylight);
+          water.uDeep.value.lerp(new THREE.Color(grade.water.deep), grade.waterAmount * daylight);
+        }
         water.uSky.value.set(sky.fog);
       }
       const clouds = this.parts.cloudMaterial;

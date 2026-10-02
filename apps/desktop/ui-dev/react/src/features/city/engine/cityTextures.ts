@@ -9,7 +9,7 @@
 import * as THREE from "three";
 import type { CityLayout } from "./cityLayout";
 import { hashSeed } from "../cityModel";
-import { activeTheme } from "./cityTheme";
+import { activeTheme, groundFor } from "./cityTheme";
 import { roadPaintPlan } from "./cityRoadPaint";
 
 export type DistrictPalette = {
@@ -158,12 +158,18 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
   const toPixel = (x: number, z: number): [number, number] => [(x + layout.extent / 2) * scale, (z + layout.extent / 2) * scale];
   const ground = canvas2d(384, 384);
   const pixels = ground.ctx.createImageData(384, 384);
+  const groundColors = groundFor(activeTheme(), layout.biome);
+  // 街区铺装与空街区草坪也跟着生态带走：它们占了地图的大半，只改沙滩/草地色时生态带几乎看不出（截图实测）。
+  const toHex = (c: number[]) => `#${c.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("")}`;
+  const mixRgb = (a0: number[], b0: number[], t: number) => a0.map((v, i) => v + (b0[i] - v) * t);
+  const paving = toHex(mixRgb([197, 192, 179], groundColors.sand, 0.45));
+  const lawnTint = toHex(mixRgb([145, 165, 127], groundColors.lawn, 0.6));
   for (let iz = 0; iz < 384; iz += 1) for (let ix = 0; ix < 384; ix += 1) {
     const x = (ix / 383 - 0.5) * layout.extent;
     const z = (iz / 383 - 0.5) * layout.extent;
     const h = layout.terrain.height(x, z);
     const noise = hashSeed(`ground:${ix}:${iz}`) * 7;
-    const g = activeTheme().ground;
+    const g = groundColors;
     const color = h < 0 ? g.sea : h < 2.5 ? g.sand : h < 9 ? g.lawn : h < 35 ? g.grass : g.rock;
     const index = (iz * 384 + ix) * 4;
     pixels.data[index] = color[0] + noise; pixels.data[index+1] = color[1] + noise; pixels.data[index+2] = color[2] + noise; pixels.data[index+3] = 255;
@@ -179,7 +185,7 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
     ctx.fillStyle=color;ctx.fillRect(-width*scale/2,-depth*scale/2,width*scale,depth*scale);ctx.restore();
   };
   for (const block of layout.blocks) {
-    polygon(block.polygon.map((p)=>({x:block.x+(p.x-block.x)*0.88,z:block.z+(p.z-block.z)*0.88})),block.parcels.length?"#c5c0b3":"#91a57f");
+    polygon(block.polygon.map((p)=>({x:block.x+(p.x-block.x)*0.88,z:block.z+(p.z-block.z)*0.88})),block.parcels.length?paving:lawnTint);
     for (const parcel of block.parcels) orientedRect(parcel.x,parcel.z,parcel.width-0.3,parcel.depth-0.3,parcel.yaw,"#bcb8ac");
   }
   const { runs, junctions } = roadPaintPlan(layout.roadEdges);

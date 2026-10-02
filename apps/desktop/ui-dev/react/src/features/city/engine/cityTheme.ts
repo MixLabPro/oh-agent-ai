@@ -137,3 +137,31 @@ export function setActiveTheme(name: CityThemeName): CityTheme {
   active = THEMES[name] ?? DAY;
   return active;
 }
+
+/** 生态带调色（CITY_PLANNING_SPEC §4.1）：只改观感、不改数据语义；与主题叠加而非替换，
+ *  所以日光/日落霓虹两个主题下五种生态带仍然各不相同、又保持各自的整体色调。
+ *  ground 值为目标色（0–255），按 groundAmount 向目标混合；water 为水面两色的目标色。
+ *  地面混合量取适中：地面细节着色器按颜色把像素分类成沥青/沙/草（见 installGroundDetail），混得太满会分类错。 */
+export type BiomeGrade = {
+  ground: Partial<Record<"sand" | "lawn" | "grass" | "rock", [number, number, number]>>;
+  groundAmount: number;
+  water: { shallow: string; deep: string } | null;
+  waterAmount: number;
+};
+
+export const BIOME_GRADES: Record<"tropical" | "temperate" | "boreal" | "savanna" | "eastasian", BiomeGrade> = {
+  tropical: { ground: { sand: [255, 241, 208], lawn: [104, 204, 138], grass: [74, 178, 118] }, groundAmount: 0.75, water: { shallow: "#5fe0d0", deep: "#0f8fb8" }, waterAmount: 0.65 },
+  temperate: { ground: {}, groundAmount: 0, water: null, waterAmount: 0 },
+  boreal: { ground: { sand: [170, 162, 146], lawn: [84, 118, 92], grass: [62, 96, 74], rock: [128, 128, 126] }, groundAmount: 0.8, water: { shallow: "#7da4b4", deep: "#1c4258" }, waterAmount: 0.65 },
+  savanna: { ground: { sand: [228, 192, 128], lawn: [186, 172, 98], grass: [164, 150, 84], rock: [168, 128, 96] }, groundAmount: 0.8, water: { shallow: "#7cc7b0", deep: "#2f7f78" }, waterAmount: 0.6 },
+  eastasian: { ground: { lawn: [118, 176, 108], grass: [92, 150, 96] }, groundAmount: 0.7, water: { shallow: "#8fd6bf", deep: "#2c8a86" }, waterAmount: 0.65 },
+};
+
+/** 主题地面色 + 生态带调色。 */
+export function groundFor(theme: CityTheme, biome: keyof typeof BIOME_GRADES): CityTheme["ground"] {
+  const grade = BIOME_GRADES[biome];
+  if (!grade || !grade.groundAmount) return theme.ground;
+  const mix = (a: [number, number, number], b?: [number, number, number]): [number, number, number] =>
+    b ? [a[0] + (b[0] - a[0]) * grade.groundAmount, a[1] + (b[1] - a[1]) * grade.groundAmount, a[2] + (b[2] - a[2]) * grade.groundAmount] : a;
+  return { sea: theme.ground.sea, sand: mix(theme.ground.sand, grade.ground.sand), lawn: mix(theme.ground.lawn, grade.ground.lawn), grass: mix(theme.ground.grass, grade.ground.grass), rock: mix(theme.ground.rock, grade.ground.rock) };
+}
