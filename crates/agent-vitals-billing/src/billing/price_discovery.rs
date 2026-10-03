@@ -34,17 +34,17 @@ const UNPRICED_CODE: &str = "unpriced_model";
 /// 含 `route` → 归入 `ROUTE_UNCONFIRMED` 规则。
 const UNROUTED_CODE: &str = "unrouted_usage";
 
-/// WorkBuddy 的 provider 恒为 null 是**设计**（宿主就是不报，§2.1 明确记为
+/// WorkBuddy 的 provider 恒为 null 是**设计**（执行环境就是不报，§2.1 明确记为
 /// unresolved money by design）。给它建"去确认路由"的任务，等于让用户去确认一件
-/// 宿主从未提供、也无从确认的信息——那是把设计当缺陷，必须排除。
-const ROUTE_UNCONFIRMED_EXEMPT_HOSTS: &[&str] = &["workbuddy"];
+/// 执行环境从未提供、也无从确认的信息——那是把设计当缺陷，必须排除。
+const ROUTE_UNCONFIRMED_EXEMPT_HARNESSES: &[&str] = &["workbuddy"];
 
 /// 对账一轮：没有价卡的模型 → 建/刷新任务；已经能计价的 → 自动解决。
 ///
 /// 返回仍然有任务的 (模型, 原因) 条数。
 ///
 /// 粒度是**一个模型一条**：可执行单元就是"这个模型要么补卡、要么定路由"。同一个
-/// 模型经不同宿主/服务商出现时仍算一条——要补的是同一张卡。
+/// 模型经不同执行环境/服务商出现时仍算一条——要补的是同一张卡。
 ///
 /// **两种原因、两种动作**（合并成一条会让用户不知道该做什么）：
 /// - `no-price-card`：归属已定，价卡缺 → 补卡 / 确认模型名；
@@ -56,37 +56,37 @@ pub fn reconcile_unpriced_models(
 ) -> Result<usize, String> {
     let detail = crate::summary::unresolved_detail(month);
 
-    // (code, model) → (host/provider, tokens)
+    // (code, model) → (harness/provider, tokens)
     let mut tasks: BTreeMap<(String, String), (String, i64)> = BTreeMap::new();
     if let Some(map) = detail.as_object() {
-        for (host_provider, rows) in map {
-            let host = host_provider.split('/').next().unwrap_or("");
+        for (harness_provider, rows) in map {
+            let harness = harness_provider.split('/').next().unwrap_or("");
             let Some(rows) = rows.as_array() else { continue };
             for row in rows {
                 let Some(reason) = row.get("reason").and_then(serde_json::Value::as_str) else {
                     continue;
                 };
-                let Some(code) = task_code_for(reason, host) else { continue };
+                let Some(code) = task_code_for(reason, harness) else { continue };
                 let Some(model) = row.get("model").and_then(serde_json::Value::as_str) else {
                     continue;
                 };
                 let tokens = row.get("tokens").and_then(serde_json::Value::as_i64).unwrap_or(0);
                 let entry = tasks
                     .entry((code.to_string(), model.to_string()))
-                    .or_insert_with(|| (host_provider.clone(), 0));
+                    .or_insert_with(|| (harness_provider.clone(), 0));
                 entry.1 += tokens;
             }
         }
     }
 
     let conn = db.conn();
-    for ((code, model), (host_provider, tokens)) in &tasks {
-        let (host, provider) = match host_provider.split_once('/') {
-            Some((host, provider)) => (host, provider),
-            None => (host_provider.as_str(), "unknown"),
+    for ((code, model), (harness_provider, tokens)) in &tasks {
+        let (harness, provider) = match harness_provider.split_once('/') {
+            Some((harness, provider)) => (harness, provider),
+            None => (harness_provider.as_str(), "unknown"),
         };
         let payload = serde_json::json!({
-            "host": host,
+            "harness": harness,
             "provider_id": provider,
             "model_id": model,
             "tokens": tokens,
@@ -130,10 +130,10 @@ pub fn reconcile_unpriced_models(
 ///
 /// 单独成函数是为了让 **WorkBuddy 的豁免**能被直接断言——它是这里唯一一个
 /// "看起来该建任务、其实不该"的分支（设计使然，不是缺陷）。
-fn task_code_for(reason: &str, host: &str) -> Option<&'static str> {
+fn task_code_for(reason: &str, harness: &str) -> Option<&'static str> {
     match reason {
         "no-price-card" => Some(UNPRICED_CODE),
-        "billing-route-unknown" if !ROUTE_UNCONFIRMED_EXEMPT_HOSTS.contains(&host) => {
+        "billing-route-unknown" if !ROUTE_UNCONFIRMED_EXEMPT_HARNESSES.contains(&harness) => {
             Some(UNROUTED_CODE)
         }
         _ => None,
@@ -232,11 +232,11 @@ mod tests {
     #[test]
     fn reason_maps_to_code_and_workbuddy_is_exempt_from_route_tasks() {
         // 两种原因两种动作；workbuddy 的 provider 恒为 null 是**设计**，
-        // 不能建"去确认路由"的任务（用户无从确认宿主从未提供的信息）。
+        // 不能建"去确认路由"的任务（用户无从确认执行环境从未提供的信息）。
         assert_eq!(task_code_for("no-price-card", "claude-code"), Some(UNPRICED_CODE));
         assert_eq!(task_code_for("billing-route-unknown", "claude-code"), Some(UNROUTED_CODE));
         assert_eq!(task_code_for("billing-route-unknown", "workbuddy"), None);
-        // 无价卡与宿主无关：workbuddy 真出现缺卡也该建（虽然当前不可能，因为它没有价卡面）。
+        // 无价卡与执行环境无关：workbuddy 真出现缺卡也该建（虽然当前不可能，因为它没有价卡面）。
         assert_eq!(task_code_for("no-price-card", "workbuddy"), Some(UNPRICED_CODE));
         // 别的原因不建任务（归属已定的部分覆盖等由别的流程管）。
         assert_eq!(task_code_for("partial-price-basis", "claude-code"), None);
@@ -259,7 +259,7 @@ mod tests {
             rusqlite::params![
                 "unpriced-model:acme/model-x", "acme/model-x", UNPRICED_CODE, 1_000i64,
                 serde_json::json!({
-                    "host": "claude-code",
+                    "harness": "claude-code",
                     "provider_id": "deepseek-official",
                     "model_id": "acme/model-x",
                     "tokens": 14700,
@@ -274,7 +274,7 @@ mod tests {
              VALUES (?1, 'model', ?2, ?3, 'warning', ?4, ?4, NULL, ?5)",
             rusqlite::params![
                 "unresolved-model:unrouted_usage:acme/model-y", "acme/model-y", UNROUTED_CODE, 1_000i64,
-                serde_json::json!({"host": "claude-code", "model_id": "acme/model-y"}).to_string(),
+                serde_json::json!({"harness": "claude-code", "model_id": "acme/model-y"}).to_string(),
             ],
         ).unwrap();
         let groups = agent_vitals_data::issues::source_issue_groups(db.conn(), None, None).unwrap();

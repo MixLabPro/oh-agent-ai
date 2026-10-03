@@ -6,7 +6,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 /// 单一真相源在 domain（`agent_vitals_domain::util::norm`）—— v0.8 Phase E7.6
-/// 起 `agent-vitals-hosts` 的宿主适配器也要用它，不能各写一份。
+/// 起 `agent-vitals-harnesses` 的执行环境适配器也要用它，不能各写一份。
 pub use agent_vitals_domain::util::norm;
 
 /// 读文件，非 UTF-8 字节替换为 U+FFFD，并做 universal newlines 转换。
@@ -23,7 +23,7 @@ pub use agent_vitals_domain::util::norm;
 /// 它只在 CRLF 文件上显形 —— 也就是 Windows 上写的 skill。
 pub fn read_lossy(p: &Path) -> Option<String> {
     // I/O 在这里；转换逻辑（宽松 UTF-8 + universal newlines）下沉到 domain——
-    // v0.8 Phase E7.6 起 agent-vitals-hosts 读 ~/.claude.json 也要同一份转换，
+    // v0.8 Phase E7.6 起 agent-vitals-harnesses 读 ~/.claude.json 也要同一份转换，
     // 见 agent_vitals_domain::util::bytes_to_lossy_normalized 的文档注释。
     let bytes = std::fs::read(p).ok()?;
     Some(agent_vitals_domain::util::bytes_to_lossy_normalized(&bytes))

@@ -61,7 +61,7 @@ ok(lib.includes('CoalescingConsumer::new("desktop-ui", ConsumerInterest::present
   "desktop-ui 以合并型 + Presentation 角色注册（结构上拿不到载荷）");
 ok(lib.includes("fn publish_invalidation") && lib.includes("publish_if_advanced"),
   "Invalidated 经 publish_if_advanced 发射（revision 严格前进才发）");
-ok(/timed\("drain_event_bus", \|\| drain_event_bus\(app\)\);[\s\S]{0,200}timed\("publish_invalidation", \|\| \{[\s\S]{0,150}publish_invalidation\(app, hosts_for_invalidation\)/.test(lib),
+ok(/timed\("drain_event_bus", \|\| drain_event_bus\(app\)\);[\s\S]{0,200}timed\("publish_invalidation", \|\| \{[\s\S]{0,150}publish_invalidation\(app, harnesses_for_invalidation\)/.test(lib),
   "sync_tick 尾部调用 drain_event_bus 后做 revision 电平检查（P3 timed 包装形态）");
 
 // 手动同步轮询的标志：声明 + 置位 + 复位齐全，防止「漏复位把之后的事件全吞掉」。

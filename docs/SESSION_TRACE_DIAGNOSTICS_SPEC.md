@@ -1,7 +1,7 @@
 # 会话消耗诊断设计规格（Session Consumption Diagnostics）
 
 > 状态：草案 r7，2026-09-28（P0 + P1 数据面已实现：`967a66e` 及其后续提交）。
-> - r1–r3：以查询时构建的 `TraceGraph` 为数据源，宿主覆盖逐步核实。
+> - r1–r3：以查询时构建的 `TraceGraph` 为数据源，执行环境覆盖逐步核实。
 > - r4：数据源改为权威库标准化投影；通用横轴为回合。
 > - **r5：按产品评审收敛**——目标从「5 秒指出为什么变贵 / 出错 / 变危险」收敛为「**快速定位值得关注的
 >   消耗区间，提供有证据边界的解释和下一步建议**」；诊断缩为三类并带解释、证据强度与建议；拆开
@@ -34,7 +34,7 @@
    - 同一调用重复失败。
 4. **口径先于诊断**（P0）：回合定义、token 口径、费用口径统一；错误的解释比没有解释更伤信任。
 5. 数据源为权威库的标准化投影（`usage_facts` / `workflow_events` / `issue_instances`），前端只渲染。
-6. **首发宿主**：Claude Code 与 Codex。其余宿主诚实降级，不阻塞主线。
+6. **首发执行环境**：Claude Code 与 Codex。其余执行环境诚实降级，不阻塞主线。
 
 ---
 
@@ -91,11 +91,11 @@ ATTRIBUTABLE_WASTE 的 confirmed/opportunity 分子不变；其他诊断
 1. **结论先行，证据可查**：诊断卡在上，图与检查器是证据。
 2. **事实与原因分开**：事实照实陈述；原因单列并标确定度（有证据 / 可能 / 原因未明），文案随之变化（§7）。
 3. **影响不等于浪费**：只说「相关消耗」，不说「多付」「可节省」。
-4. **建立在标准化投影上**：只读权威库三张表，不在查询时解析宿主原始日志；诊断层没有宿主分支。
+4. **建立在标准化投影上**：只读权威库三张表，不在查询时解析执行环境原始日志；诊断层没有执行环境分支。
 5. **诚实降级**：缺数据显示为「未记录」并说明原因（§6.3），绝不画成 0。
 6. **成本与安全分开**：安全类发现（SV6xx 危险操作等）单独成块醒目提示，不进入成本诊断清单、不挤占
    其排序。
-7. **计算在宿主侧，几何在前端且只有一份**；x 轴是回合序号；曲线可抽稀，诊断标记与失败标记不抽稀。
+7. **计算在执行环境侧，几何在前端且只有一份**；x 轴是回合序号；曲线可抽稀，诊断标记与失败标记不抽稀。
 8. **出口红线不放宽**：见 §10。
 
 ---
@@ -105,7 +105,7 @@ ATTRIBUTABLE_WASTE 的 confirmed/opportunity 分子不变；其他诊断
 | 口径 | 定义 | 说明 |
 |---|---|---|
 | 回合 | 由 `workflow_events` 的 `task_started` 界定：一次用户请求到助手完成 | 区间 `[本次 task_started, 下一次 task_started)`，最后一个到会话末尾。只有 0–1 个回合起点、或过半调用早于首个回合起点时，退为「每次助手调用一步」；少量调用早于首回合时补一个前导步，不丢调用（实现：`session_insights::AxisPlan`，三处共用） |
-| 助手调用 | `usage_facts` 一行（四个原生宿主 `observation_kind = assistant-usage`） | 一个回合内可有多次调用 |
+| 助手调用 | `usage_facts` 一行（四个原生执行环境 `observation_kind = assistant-usage`） | 一个回合内可有多次调用 |
 | 回合输入消耗 | 回合内所有调用的 `cache_read + cache_write + uncached_input` 之和 | **累计处理量**，不是上下文大小 |
 | 单次输入规模 | 一次调用的 `cache_read + cache_write + uncached_input` | 日志口径下的输入规模；回合内取峰值 `input_peak` |
 | 命中率 | `cache_read / 单次输入规模`（按调用算；区间命中率 = 区间 cache_read 之和 / 区间输入之和） | 冷启动与缓存过期都会合理地拉低它 |
@@ -113,18 +113,18 @@ ATTRIBUTABLE_WASTE 的 confirmed/opportunity 分子不变；其他诊断
 | 名义成本 | 每次调用按其模型、路线的官方价计 `cache_read` / `cache_write` / `uncached_input` / `output` 四项之和；回合、会话为求和 | 即 CLAUDE.md 的 `nominal_cost`，不是账单、不扣套餐与折扣，与 `metered_*` 不相加；无价卡的调用不计 0，整体标「暂无可用计价依据」或部分覆盖 |
 
 **G6（P0 前置）**：claude-code 当前每会话只有 1 个 `task_started`（293 个会话共 299 个；会话 `c95f7819…`
-在调用树里有 71 轮）。根因：`hosts/claude_code/sources/workflow.rs` 约 252 行只有第一条用户文本消息触发
+在调用树里有 71 轮）。根因：`harnesses/claude_code/sources/workflow.rs` 约 252 行只有第一条用户文本消息触发
 `task_started`，`task_finished` 在会话末尾发一次（约 390 行，注释写明为保持既有 event_id 而冻结的历史
 语义）。修复为每条用户文本请求开一个回合。event_id 以 offset 派生，新增回合事件不影响既有事件 id，
 但既有 `task_finished` 的时点会变，须评估 `workflow_summary` 等消费者并同改；Python 镜像同步。
 **不修则 Claude Code 整个会话只有一步，「定位消耗区间」无法成立。**
 
-**已实现（r7）**：判据是 `hosts::claude_code::sessions::turns::turn_signal`，evidence（SV612、调用树、
+**已实现（r7）**：判据是 `harnesses::claude_code::sessions::turns::turn_signal`，evidence（SV612、调用树、
 UserPrompts 覆盖）与 workflow 共用一份，Python 镜像 `claude_evidence.turn_signal`。首回合沿用历史判据
-（event_id 不变）；其后排除 `isSidechain` / `isMeta` / `isCompactSummary`、宿主回灌（`<task-notification>`、
+（event_id 不变）；其后排除 `isSidechain` / `isMeta` / `isCompactSummary`、执行环境回灌（`<task-notification>`、
 `<local-command-*>`、`<bash-*>`）与只改设置的斜杠命令；贴图的请求（text + image）算新回合；
 `[Request interrupted…` 产 `task_finished{cancelled}`（每回合至多一次）。本机重放：claude 回合
-299 → 1,754，取消 86。源日志已被宿主清理的旧会话无法重放，仍只有首回合，按调用铺开。
+299 → 1,754，取消 86。源日志已被执行环境清理的旧会话无法重放，仍只有首回合，按调用铺开。
 
 ---
 
@@ -142,7 +142,7 @@ UserPrompts 覆盖）与 workflow 共用一份，Python 镜像 `claude_evidence.
 
 ### 5.2 首发覆盖（2026-09-27 本机权威库）
 
-| | claude-code | codex | 其他宿主（首发不承诺） |
+| | claude-code | codex | 其他执行环境（首发不承诺） |
 |---|---|---|---|
 | 助手调用 | 49,295 | 37,938 | dsh 2,460 / workbuddy 3,874 / zcode 1,004 |
 | 回合 | ⚠️ G6 前每会话 1 个 | ✅ 每会话均值 30.6 | dsh 11.8；workbuddy 16.0（来源待核）；zcode 无 |
@@ -151,7 +151,7 @@ UserPrompts 覆盖）与 workflow 共用一份，Python 镜像 `claude_evidence.
 | 模型切换 | 408 | 154 | dsh 26 |
 | 时间戳 | 100% | 100% | 100% |
 
-其他宿主进入同一流程即可得到诊断，但其口径问题（WorkBuddy 回合来源、findings 入库、ZCode 无回合事件）
+其他执行环境进入同一流程即可得到诊断，但其口径问题（WorkBuddy 回合来源、findings 入库、ZCode 无回合事件）
 不在首发范围，界面按 §6.3 诚实降级。
 
 ### 5.3 已知缺口
@@ -161,8 +161,8 @@ UserPrompts 覆盖）与 workflow 共用一份，Python 镜像 `claude_evidence.
 | G6 | claude-code 回合粒度 | **阻塞**首发 | P0 |
 | G8 | `workflow_events.error_class` 全空（2,775 次失败无分类） | 重复失败只能给通用建议，说不出「权限错误」这类原因 | 首发用通用建议；错误摘录仅在本地检查器经本地专用通道展示（§10）；分类补齐后再细化建议 |
 | G7 | 标准化层无压缩事件 | 高未命中输入的解释里没有「压缩之后」 | 首发不列该解释；后续补 `context_compacted` |
-| G4 / G2 | WorkBuddy 回合来源、findings 入库 | 非首发宿主 | 后续 |
-| G5 | ZCode 无回合 / 工具事件 | 非首发宿主 | 后续，走插件 DSL 独立规格 |
+| G4 / G2 | WorkBuddy 回合来源、findings 入库 | 非首发执行环境 | 后续 |
+| G5 | ZCode 无回合 / 工具事件 | 非首发执行环境 | 后续，走插件 DSL 独立规格 |
 | T1 / T2 | 调用树视图里 codex / dsh 工具成败为空 | 不影响本诊断（标准化层正确） | 调用树视图单独排期 |
 
 ---
@@ -176,12 +176,12 @@ UserPrompts 覆盖）与 workflow 共用一份，Python 镜像 `claude_evidence.
 ### 6.2 形状
 
 实现：`agent-vitals-domain::session_insights::build_insights`（axis / session / diagnostics / safety）+
-`agent-vitals-query::session_insights::session_insights`（lanes / host / 名义成本 / quality）。
+`agent-vitals-query::session_insights::session_insights`（lanes / harness / 名义成本 / quality）。
 
 ```jsonc
 {
   "schema_version": 1,
-  "host": "claude-code",
+  "harness": "claude-code",
   "axis": {
     "unit": "turn",                       // "turn" | "assistant_call"
     "turn_starts": 102,                   // 去重后的回合起点数
@@ -224,7 +224,7 @@ UserPrompts 覆盖）与 workflow 共用一份，Python 镜像 `claude_evidence.
 }
 ```
 
-约定：缺键不出现；数字都在宿主侧算好；不下发自然语言（前端按 `kind` / `explanation` / `remedy_id` 选文案）。
+约定：缺键不出现；数字都在执行环境侧算好；不下发自然语言（前端按 `kind` / `explanation` / `remedy_id` 选文案）。
 名义成本：回合级按（回合 × 模型 × provider × 峰谷 × 价格快照）分组计价；会话合计**另按会话级分组计价**
 （不是回合金额之和——逐组取整会累积误差），覆盖所有调用；价格快照最早只到 2026-09-09，更早的调用无
 金额并给 `nominal_cost_reason`，不计 0。
@@ -241,7 +241,7 @@ UserPrompts 覆盖）与 workflow 共用一份，Python 镜像 `claude_evidence.
 | `partial` | 0% < 覆盖率 < 95%：未测部分显示「未记录」 |
 | `unavailable` | 覆盖率 = 0%：显示「未记录」并附 `reason` |
 
-`reason` 来自会话宿主注册表的能力声明：`not_recorded_by_host`（宿主不记录）/ `not_ingested`（有数据未接入）
+`reason` 来自会话执行环境注册表的能力声明：`not_recorded_by_harness`（执行环境不记录）/ `not_ingested`（有数据未接入）
 / `no_data_in_session`（本会话恰好没有）。能不能画只看数据；为什么画不了由声明给出。
 
 ---
@@ -355,7 +355,7 @@ r5 的单一 `evidence_strength` 把两者混在一起：「输入增长」是�
 **会话摘要 → 紧凑诊断列表 → 联动的轨迹与检查器**。默认选中排第一的诊断，检查器直接展示它的证据。
 
 ```
-┌ 摘要：宿主 · 开始 · 时长 · 回合 · 调用 · 输入/输出 · 命中率 · 名义成本（含口径小字）   安全提醒 [4 条 查看] ┐
+┌ 摘要：执行环境 · 开始 · 时长 · 回合 · 调用 · 输入/输出 · 命中率 · 名义成本（含口径小字）   安全提醒 [4 条 查看] ┐
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ 值得关注 ─────────────────────────────────────────────────────────────── 3 条 · 有直接证据的排前面 ┐
 │ ① 同一调用失败 4 次  回合 24–26  [有错误摘要]                                                  ▾ │
@@ -387,7 +387,7 @@ r5 的单一 `evidence_strength` 把两者混在一起：「输入增长」是�
 
 | 元素 | 编码 | 说明 |
 |---|---|---|
-| 每回合输入消耗 | 堆叠柱（缓存读取 / 缓存写入 / 未缓存输入） | 标「累计」，**不标为「上下文」**；宿主不报告的桶在图例标「宿主不报告」，不画成 0 |
+| 每回合输入消耗 | 堆叠柱（缓存读取 / 缓存写入 / 未缓存输入） | 标「累计」，**不标为「上下文」**；执行环境不报告的桶在图例标「执行环境不报告」，不画成 0 |
 | 单次输入峰值 | 独立一行折线 | 跨长空闲断开 |
 | 命中率 | 不画常驻折线；在检查器与诊断中给出 | 避免与消耗柱争夺注意力 |
 | 诊断区间 | 柱下方底带，编号与诊断列表对应；`evidence` 实线，`possible` / `unknown` 虚线 | 颜色按种类：失败红、未命中橙、增长墨色 |
@@ -428,7 +428,7 @@ r5 的单一 `evidence_strength` 把两者混在一起：「输入增长」是�
 
 - 摘要与普通回合检查器显示**名义成本**（`nominal_cost`）：按每次调用对应的模型、路线与官方价计算，**含输出**，
   小字写明「按调用模型的官方价估算，含输出，非账单」。
-- 无可用价卡时写「暂无可用计价依据」，不按宿主名推断计费方式（如不写「积分计费」）。
+- 无可用价卡时写「暂无可用计价依据」，不按执行环境名推断计费方式（如不写「积分计费」）。
 - 诊断条目与诊断检查器**不显示金额**；不出现「比全部命中多约 $X」「可节省」一类表述。
 
 ### 8.6 交互与可访问性
@@ -445,9 +445,9 @@ r5 的单一 `evidence_strength` 把两者混在一起：「输入增长」是�
 | 期 | 内容 | 覆盖 |
 |---|---|---|
 | **P0 口径** | G6 claude-code 回合；§4 口径在总览、用量页、会话详情三处一致（同一数字只有一种算法）；注册表能力声明 | Claude Code、Codex |
-| **P1 诊断闭环** | `insights` 契约；三类诊断（事实 + 原因确定度）；remedy 三项；紧凑诊断列表 + 消耗柱 + 峰值线 + 工具泳道 + 随选择切换的检查器；长会话缩略图；安全提醒入摘要栏；与总览穿透规格衔接 | Claude Code、Codex；其他宿主诚实降级 |
+| **P1 诊断闭环** | `insights` 契约；三类诊断（事实 + 原因确定度）；remedy 三项；紧凑诊断列表 + 消耗柱 + 峰值线 + 工具泳道 + 随选择切换的检查器；长会话缩略图；安全提醒入摘要栏；与总览穿透规格衔接 | Claude Code、Codex；其他执行环境诚实降级 |
 | **P2 回访** | 标记会话「待观察」；在该会话与之后的同项目会话上展示同类指标（如区间命中率、重复失败次数）的前后对比 | 同上 |
-| **后续** | 其他宿主口径（G4 / G2 / G5）、压缩事件（G7）、错误分类（G8）后的细化建议、完整安全泳道、插件诊断 DSL（独立规格） | — |
+| **后续** | 其他执行环境口径（G4 / G2 / G5）、压缩事件（G7）、错误分类（G8）后的细化建议、完整安全泳道、插件诊断 DSL（独立规格） | — |
 
 ### 9.1 P2 的边界
 
@@ -522,5 +522,5 @@ r5 的单一 `evidence_strength` 把两者混在一起：「输入增长」是�
 8. 名义成本在订阅覆盖的会话里是否需要额外提示「已含在订阅中」（口径不变，只是呈现）。
 
 已决定：数据源为权威库标准化投影，调用树保留为下钻（r4）；通用横轴为回合（r4）；目标、三类诊断、成本与
-安全分开、首发宿主、插件 DSL 移出（r5）；事实与原因确定度分开、确定度优先排序、诊断不给金额、
+安全分开、首发执行环境、插件 DSL 移出（r5）；事实与原因确定度分开、确定度优先排序、诊断不给金额、
 会话级名义成本含输出、检查器随选择切换、长会话缩略图（r6）。

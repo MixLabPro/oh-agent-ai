@@ -164,7 +164,7 @@ fn shared_display(
 
 /// 两两比较描述的字面相似度。
 ///
-/// 只比**同一 conflict_domain 内、且真的进了上下文**的那批：不同宿主是互不
+/// 只比**同一 conflict_domain 内、且真的进了上下文**的那批：不同执行环境是互不
 /// 相干的运行时，未加载的副本压根不在选择器里 —— 把它们算进来会报出一堆
 /// 用户无法验证也无需处理的「重叠」。这与预算、冲突用的是同一条口径。
 pub fn overlap_pairs(out: &Value, o: &OverlapOpts) -> Value {
@@ -311,7 +311,7 @@ pub fn render_overlap(out: &Value, o: &OverlapOpts) -> String {
     t.push_str("    · overlap --judge (external model) is not implemented yet; see PRODUCT §5.4.\n");
     t.push('\n');
     t.push_str(&format!(
-        "  Scope: {} loaded skills, grouped by host; threshold --min {:.2}\n",
+        "  Scope: {} loaded skills, grouped by harness; threshold --min {:.2}\n",
         scope, o.min
     ));
     t

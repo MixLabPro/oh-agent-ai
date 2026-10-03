@@ -38,21 +38,21 @@ fn budget_profiles_from_parts_matches_sql_at() {
         agent_vitals_data::authority_query::beijing_day_bounds_ms(&today)
             .unwrap()
             .0;
-    // 当月多宿主 token 事实：by_provider / coverage / daily 与 monthly 的差异
+    // 当月多执行环境 token 事实：by_provider / coverage / daily 与 monthly 的差异
     // 让「部件错接」即使绕过类型检查也会改变输出。
-    for (id, host, model, u, o) in [
+    for (id, harness, model, u, o) in [
         ("f1", "claude-code", "claude-sonnet-4-6", 1_000_000i64, 200_000i64),
         ("f2", "claude-code", "claude-opus-4-8", 500_000, 80_000),
         ("f3", "dsh", "glm-4.7", 2_000_000, 300_000),
     ] {
         db.conn()
             .execute(
-                "INSERT OR IGNORE INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT OR IGNORE INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                      source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                      event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                      output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1, ?2, 'm', 's1', ?1, 'turn', NULL, ?3, ?4, ?4, ?5, 0, 0, ?6, 'run', 1, 1)",
-                rusqlite::params![id, host, model, day_start + 1000, u, o],
+                rusqlite::params![id, harness, model, day_start + 1000, u, o],
             )
             .unwrap();
     }

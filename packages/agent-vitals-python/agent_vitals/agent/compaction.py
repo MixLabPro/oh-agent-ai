@@ -10,7 +10,7 @@
     compaction/prune         {shadowedRange, shadowedSeqs,
                               shadowedTokenCount}                     增量剪除被遮蔽的内容
 
-`prune` 是最有价值的一条：`shadowedTokenCount` 是**宿主自己算出来的被丢弃 token
+`prune` 是最有价值的一条：`shadowedTokenCount` 是**执行环境自己算出来的被丢弃 token
 数**——不是我们的 est_tokens 估算，是 harness 的测量值。FR-04b 要回答「哪些是
 浪费的」，与其自己写重复内容检测器再估算量级，不如直接用这个实测值。两者
 provenance 不同，展示层必须分开标注（context_composition 那边是估算）。
@@ -75,7 +75,7 @@ def compaction_events(events):
                 "seq": seq,
                 "time": time,
                 "turn": turn,
-                # 宿主上报的实测值（不是 est_tokens 估算）；缺则 None。
+                # 执行环境上报的实测值（不是 est_tokens 估算）；缺则 None。
                 "shadowed_token_count": count,
                 "shadowed_seq_count": seq_count,
             })

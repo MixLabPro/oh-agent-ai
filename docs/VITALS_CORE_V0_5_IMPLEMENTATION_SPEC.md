@@ -43,12 +43,12 @@ agent-vitals-core           Agent 领域模型、规则与兼容层
       ↑
 agent-vitals CLI / WASM     适配器、I/O、命令与交付
       ↑
-Tauri / dsh-client          展示与宿主集成
+Tauri / dsh-client          展示与执行环境集成
 ```
 
 v0.5 的成功标准不是“完成所有通用 Runtime 能力”，而是：
 
-> 现有 DSH 与 Codex 的规范化事件，可以不向 `vitals-core` 引入任何宿主专属字段，经过同一个 Engine 生成可解释、可回放、三态诚实的 Finding；至少三条 Agent 规则迁移后与现有结果保持一致。
+> 现有 DSH 与 Codex 的规范化事件，可以不向 `vitals-core` 引入任何执行环境专属字段，经过同一个 Engine 生成可解释、可回放、三态诚实的 Finding；至少三条 Agent 规则迁移后与现有结果保持一致。
 
 ---
 
@@ -56,7 +56,7 @@ v0.5 的成功标准不是“完成所有通用 Runtime 能力”，而是：
 
 当前项目已经具备一批可复用资产：
 
-- `CanonicalSession` 与宿主中立 timeline；
+- `CanonicalSession` 与执行环境中立 timeline；
 - `Signal`、`Coverage`、`CoverageCounts`；
 - `Provenance` 与 measured / derived / estimated / lossy 区分；
 - `RuleOutcome` 的 findings / measured-zero / unavailable 三态；
@@ -97,7 +97,7 @@ v0.5 的直接用户是领域包开发者，而不是最终桌面用户。
 2. 指定事件如何归入 Trajectory；
 3. 注册领域 Detector；
 4. 得到带 Evidence、Coverage 和 Replay 的 Audit Report；
-5. 在 CLI、WASM、桌面应用或其他宿主中渲染结果。
+5. 在 CLI、WASM、桌面应用或其他执行环境中渲染结果。
 
 ### 2.2 首个验证场景
 
@@ -322,7 +322,7 @@ agent-vitals CLI  → agent-vitals-core
 ```text
 vitals-core → agent-vitals-core
 vitals-core → CLI / Tauri / WASM
-vitals-core → 任意宿主 Adapter
+vitals-core → 任意执行环境 Adapter
 ```
 
 ### 5.3 依赖预算
@@ -1009,7 +1009,7 @@ pub struct AuditReport {
 
 `Finding` 本身不带执行流下标（§10.2 之前的模型没有这个概念），但兼容桥要
 在 §14.3 里重建旧输出的字节序，这个排序规则给不出旧序——`severity rank →
-trajectory ID → fingerprint` 是 vitals-core 的权威序，不承诺等于任何宿主
+trajectory ID → fingerprint` 是 vitals-core 的权威序，不承诺等于任何执行环境
 迁移前的展示序。旧序完全由 §10.2 定义的 `attributes["vitals.source_ordinal"]`
 在兼容桥内部重建，Core 的排序规则和兼容桥的重排是两件事，互不覆盖。
 
@@ -1418,7 +1418,7 @@ boundary test` 需要覆盖 `src-tauri/`：它是从根 workspace 用空 `[works
 
 只有同时满足以下条件，Vitals Core v0.5 才算完成：
 
-- [x] `crates/vitals-core` 不含宿主或 Agent 专属类型——`module_file_names_are_
+- [x] `crates/vitals-core` 不含执行环境或 Agent 专属类型——`module_file_names_are_
   domain_free` / `public_item_identifiers_are_domain_free`
   （`dependency_boundary.rs`）本来就存在，但只扫声明行本身（`pub struct
   Foo {` 这一行的 `Foo`），扫不进花括号内部：一个 `pub struct Foo { pub
@@ -1449,7 +1449,7 @@ boundary test` 需要覆盖 `src-tauri/`：它是从根 workspace 用空 `[works
 - [x] 现有 HTML、Tauri、dsh-client **源码**不需要同步重写——`dsh-client/
   agent_vitals_wasm_bg.wasm` 构建产物需要每次随 core 改动重新 `wasm-pack
   build` 并拷贝（本来就是既定流程，不是意外的返工），已重新生成并跑通
-  `verify-host.mjs` 等六个 verify 脚本；
+  `verify-harness.mjs` 等六个 verify 脚本；
 - [x] Rust、Python、Tauri、WASM 相关 gate 全部通过；
 - [x] 性能与确定性基线已记录（`vitals-core/PERFORMANCE.md`）——记录基线过
   程中发现并修复了一个真实 O(n²) 复杂度 bug（Finding Validation 对
@@ -1536,7 +1536,7 @@ v0.5 不是把现有 `agent-vitals-core` 改名为 `vitals-core`。
 它是在现有产品内部建立一道新的、可验证的边界：
 
 ```text
-宿主事实与 Agent 语义
+执行环境事实与 Agent 语义
           │
           ▼
   Agent Vitals Domain Layer

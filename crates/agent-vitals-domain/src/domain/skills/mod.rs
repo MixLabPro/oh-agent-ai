@@ -2,8 +2,8 @@
 //! Session Surface 的 skill 执行审计，两者刻意分开，见 `docs/
 //! AGENT_VITALS_V0_8_PHASE_E7_RESEARCH.md`）。
 //!
-//! v0.8 Phase E7（收口 D4/D5 遗漏的 Skill Surface 宿主归位）：把
-//! `apps/cli/src/skills/` 里零 I/O、零宿主专有逻辑的纯函数迁进来。
+//! v0.8 Phase E7（收口 D4/D5 遗漏的 Skill Surface 执行环境归位）：把
+//! `apps/cli/src/skills/` 里零 I/O、零执行环境专有逻辑的纯函数迁进来。
 //! E7.1 迁 `frontmatter`；E7.2 迁 `analysis`/`overlap`/`ranking`（冲突/覆盖
 //! 优先级排序，原 main.rs 顶层的 `level_rank`/`severity_rank`/…）；E7.3 迁
 //! `security_rules`——**这一步是拆，不是搬**：原 `security.rs` 把目录遍历/

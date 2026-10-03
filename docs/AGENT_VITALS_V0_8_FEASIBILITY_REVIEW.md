@@ -18,7 +18,7 @@
 
 - 六层单向依赖模型与三证据面（Skill / Session / MCP）分离在概念上自洽，且与本仓
   **已经存在**的边界纪律（`vitals-core` 真无 I/O、`dependency_boundary.rs`、
-  `host_contract.rs` G1–G10、golden / Python↔Rust byte-parity、CLAUDE.md「不长第
+  `harness_contract.rs` G1–G10、golden / Python↔Rust byte-parity、CLAUDE.md「不长第
   N 份拷贝」）同源，不是另起炉灶。
 - 与已拍板的 `TAURI_RUNTIME_WORKBENCH_SPEC.md §7.1`（渐进弱化 Python）**一致**：
   编排/IO 立即 Rust-only、纯规则按档迁 core、Python 四态生命周期——v0.8 的 §9
@@ -46,16 +46,16 @@
 
 | 规格断言 | 实测结果 | 结论 |
 |---|---|---|
-| §12.2.1 `vitals-core` 无 I/O、无宿主概念，有依赖边界测试 | `crates/vitals-core` 依赖仅 serde/serde_json/thiserror/sha2；`tests/dependency_boundary.rs` 6 测（禁依赖 + 禁宿主词 + 独立 Tauri workspace 跨仓核对） | ✅ 属实 |
+| §12.2.1 `vitals-core` 无 I/O、无执行环境概念，有依赖边界测试 | `crates/vitals-core` 依赖仅 serde/serde_json/thiserror/sha2；`tests/dependency_boundary.rs` 6 测（禁依赖 + 禁执行环境词 + 独立 Tauri workspace 跨仓核对） | ✅ 属实 |
 | §12.2.2 `agent-vitals-core` 纯计算，Tauri 复用其成本函数、无第四套计价 | `src/agent/cost.rs` 只有 8 行 `pub use agent_vitals_core::cost::*`；`crates/agent-vitals-core` 直接依赖仅 regex/serde_json/vitals-core | ✅ 属实 |
 | §15 DoD「domain 不读取文件、环境变量、数据库或系统时间」 | `agent-vitals-core/src/**` 非 test 代码对 `std::fs` / `std::process` / `std::env` / `SystemTime::now` 命中数 = **0**（唯一 `SystemTime::now` 在 `budget.rs` 的 `#[cfg(test)]`） | ✅ **当前已满足**——这正是可以现在就加守卫钉住的原因 |
-| §12.3 P1「`agent-vitals-core/src` 平铺 Claude/Codex/DSH/WorkBuddy 模块」 | `claude_code_evidence.rs`(49K) `codex_evidence.rs`(85K) `codex_usage.rs`(77K) `dsh_evidence.rs`(33K) `workbuddy_evidence.rs`(36K) 全部平铺在 crate 根 | ✅ 属实——宿主词汇确实进了名义上的"core" |
+| §12.3 P1「`agent-vitals-core/src` 平铺 Claude/Codex/DSH/WorkBuddy 模块」 | `claude_code_evidence.rs`(49K) `codex_evidence.rs`(85K) `codex_usage.rs`(77K) `dsh_evidence.rs`(33K) `workbuddy_evidence.rs`(36K) 全部平铺在 crate 根 | ✅ 属实——执行环境词汇确实进了名义上的"core" |
 | §12.3 P1「data-home 解析存在 Python、CLI Rust、Tauri 三份」 | Rust 侧 `AGENT_VITALS_HOME` 读取散在 `discovery.rs`/`budget.rs`/`r2a_store.rs`/`state.rs`/`takeover.rs`；Tauri `overview.rs:395` 另一份（含 legacy `.skill-vitals` 回退）；Python `paths.py` 第三份 | ✅ 属实 |
 | §12.3 P1「`src/skills/inventory.rs` 同时编排 Skill inventory + DSH session evidence + Codex runtime probe」 | `inventory.rs` 顶部 import `crate::dsh` + `skills::codex` + `skills::openclaw`，docstring 明写四阶段编排含 probe/reconcile | ✅ 属实（但该文件的 docstring 已对"为什么不是一个 trait"给了充分论证——见 §3 反对意见） |
 | §12.3 P1「`cost.rs` 同时承担模型匹配、价格表、订阅排除、成本投影」 | `crates/agent-vitals-core/src/domain/cost.rs` = **99 KB**，单文件含 `price_claude_map` / `resolve_card_catalog` / `flat_rate` / `bucket_price` / `priced_day` / 订阅排除估算 | ✅ 属实——这是最有说服力的一条 |
 | §14.9「WASM 只能链接 vitals-core、domain 和 adapters 的纯模块」 | `agent-vitals-wasm` 依赖**整个** `agent-vitals-core`（含 `codex_evidence` / `dsh_evidence` / `r2a` / `state` / `cost`）；靠死代码消除裁剪，不是靠 crate 边界 | ⚠️ 现状不满足——需要 crate 拆分才能真正兑现，属 Phase C 的收益之一 |
-| §12.2.4 `host_runtime_registration.rs` 已校验注册 | `src/agent/host_runtime_registration.rs` 存在，`host_contract.rs` G2/G3 已跑 CLI host 词表 ↔ registry ↔ adapter 目录三处逐字对账 | ✅ 属实，是 §7 Host Registry 的可演进基础 |
-| §11 迁移映射表 | 逐条对照现有文件，**路径均存在、映射方向合理**（`usage_fact.rs`→domain/contracts、`*_evidence.rs`→adapters/hosts、`r2a.rs` 拆纯契约/存储投影、`src-tauri`→apps/desktop 等） | ✅ 表本身无错，但见 §4 关于 `usage.rs` / `cost.rs` 拆分粒度的保留意见 |
+| §12.2.4 `harness_runtime_registration.rs` 已校验注册 | `src/agent/harness_runtime_registration.rs` 存在，`harness_contract.rs` G2/G3 已跑 CLI harness 词表 ↔ registry ↔ adapter 目录三处逐字对账 | ✅ 属实，是 §7 Harness Registry 的可演进基础 |
+| §11 迁移映射表 | 逐条对照现有文件，**路径均存在、映射方向合理**（`usage_fact.rs`→domain/contracts、`*_evidence.rs`→adapters/harnesses、`r2a.rs` 拆纯契约/存储投影、`src-tauri`→apps/desktop 等） | ✅ 表本身无错，但见 §4 关于 `usage.rs` / `cost.rs` 拆分粒度的保留意见 |
 
 **没有发现规格与现状的事实性冲突。** 规格对差距的描述是准确的，不是想象出来的问题。
 
@@ -65,9 +65,9 @@
 
 1. **六层单向 + 三禁止方向（§3.1/§3.2）** 是对的，而且**可测**——本仓已经证明
    文本级静态断言足以守住 crate 依赖方向（`dependency_boundary.rs` 的做法）。
-2. **Source Connector ↔ Host Adapter 分工（§1.1/§1.2/§4.2）** 是对的：I/O 策略与
+2. **Source Connector ↔ Harness Adapter 分工（§1.1/§1.2/§4.2）** 是对的：I/O 策略与
    wire 语义是两种会独立变化的知识，DSH 的 `runtime::sources`（找 `.zstd` + 多帧
-   解压）vs `adapters::hosts::dsh`（认 `assistant/chunk` + 相邻 shadow 替换）这条
+   解压）vs `adapters::harnesses::dsh`（认 `assistant/chunk` + 相邻 shadow 替换）这条
    切线清晰，且 Stage 3 已经把 observer 从 request_metrics 抽出来、正好落在这条线上。
 3. **Skill / Session / MCP 三证据面不共用 scanner/fold/输出模型（§1.6/§4.1/§5 条 11）**
    是对的：`Installed → Loaded → Triggered` 漏斗与 `UsageFact` 是不同节奏、不同
@@ -75,10 +75,10 @@
    语义变糊。
 4. **Model Catalog 四步（§1.7）+ 成本输出五分（§10.4）** 是对的，而且是整份规格里
    **收益最高**的一块：`cost.rs` 99KB 单文件、`billing.toml` 语义（§10.3 的
-   `host + source_profile` 路由粒度）、"套餐覆盖 ≠ 单价为零"——这些是当前
+   `harness + source_profile` 路由粒度）、"套餐覆盖 ≠ 单价为零"——这些是当前
    `claude_subscription_uncovered_estimate` 这种打补丁做法的根因，值得优先。
-5. **不抽 `HostAdapter` 大 trait（§5 末段 / §4.2 末段）** 是对的克制：规格自己说
-   "至少三个宿主出现完全相同、稳定的调用生命周期后才抽最小 trait"——与
+5. **不抽 `HarnessAdapter` 大 trait（§5 末段 / §4.2 末段）** 是对的克制：规格自己说
+   "至少三个执行环境出现完全相同、稳定的调用生命周期后才抽最小 trait"——与
    `inventory.rs` docstring 的现有论证一致。
 6. **Python 作为独立 package + 四态状态标注（§9）** 与 `TAURI_RUNTIME_WORKBENCH_SPEC
    §7.1` 一致，没有制造第二套路线图。
@@ -99,13 +99,13 @@
 ### 3.2 [粒度保留意见] `usage.rs` / `cost.rs` 的拆分不是纯搬运
 
 §11 迁移表把 `usage.rs`（**188 KB**）写成"拆为 domain 通用计算与
-`adapters/hosts/dsh/usage.rs`"、`cost.rs`（99 KB）写成"拆为 domain models/ +
+`adapters/harnesses/dsh/usage.rs`"、`cost.rs`（99 KB）写成"拆为 domain models/ +
 billing/"。这两条**不是**"移动文件"级别的操作：
 
 - `usage.rs` 里 `token_by_model` / `token_by_date_model` / `usage_fold_resume` /
   `request_metrics` / DSH observer 是**互相咬合**的（CLAUDE.md 用大段篇幅描述它们
   的 resumability 契约、reconcile 不变量、`(turn,step)` 去重）。切"哪部分是 DSH
-  wire、哪部分是跨宿主 fold"需要一次真正的设计，且每一刀都要 golden + parity +
+  wire、哪部分是跨执行环境 fold"需要一次真正的设计，且每一刀都要 golden + parity +
   `usage_fold_resume_equals_full_fold` 零漂移。**这是 Phase C 的主体工作量，不是
   Phase A/B 顺手**。
 - `cost.rs` 同理：`price_claude_map` doc 注释自钉「日面与会话面的钱必须同源」、
@@ -115,10 +115,10 @@ billing/"。这两条**不是**"移动文件"级别的操作：
 **建议**：§11 这两行标注"= Phase C 设计项，非搬运"，避免被读成低风险移动。
 
 **2026-09-04 调研修正**（`docs/AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md`）：进一步核实后
-分成两件事——① 抽 `agent-vitals-domain` crate 的**阻塞项**是断 `domain → host`
+分成两件事——① 抽 `agent-vitals-domain` crate 的**阻塞项**是断 `domain → harness`
 的 6 个生产耦合点（~370 行，3 组「移动 + 改 import」），`usage.rs` 里的耦合全在
 **生产零调用**的 canonical 归一层；② `cost.rs` 拆 models/billing、`usage.rs`
-wire/fold 分离**零 host 耦合、不阻塞 crate 抽出**，是 domain 内部重构，建议并入
+wire/fold 分离**零 harness 耦合、不阻塞 crate 抽出**，是 domain 内部重构，建议并入
 Phase D。本条对「非搬运」的判断只对 ② 成立；① 比原估计小得多。
 
 ### 3.3 [澄清] `agent-vitals-adapters` 无 I/O 与 Python 镜像的关系
@@ -143,7 +143,7 @@ contracts/domain/adapters**（§12.3 P2 说"采用相同分层"）需要明确�
 ### 3.5 [反对意见 - 局部] `inventory.rs` 拆分要保留其现有论证
 
 §12.3 P1 要求拆 `src/skills/inventory.rs`。该文件 docstring **已经**论证了"为什么
-四个宿主适配器不是一个 trait"（差异在"哪些阶段存在"而非"同阶段怎么做"），并给
+四个执行环境适配器不是一个 trait"（差异在"哪些阶段存在"而非"同阶段怎么做"），并给
 了 additive（codex）vs exclusive（openclaw）这条真正的语义分界。拆 Skill Source /
 Service 时**这段论证和它对应的测试必须迁移过去**，不能在"分层"的名义下丢掉——
 否则新结构会重新长出 trait 空实现。
@@ -167,7 +167,7 @@ Service 时**这段论证和它对应的测试必须迁移过去**，不能在"�
 | Phase | 内容 | 代价 | 风险 | 前置 |
 |---|---|---|---|---|
 | **A（守卫）** | §14.2/§14.4/§15 DoD 变可执行测试（本次落地）| 小（~1 个测试文件，纯增量）| 极低（约束已满足）| 无 |
-| A（边界）| `agent-vitals-core/src` 内建 `contracts/domain/adapters/hosts` 子模块 + re-export | 中（~30 文件搬子目录，`lib.rs` 重写，CLAUDE.md 大段更新）| 中（golden/parity 零漂移门 + CLAUDE.md 引用的模块路径全失效需同步）| 拍板 |
+| A（边界）| `agent-vitals-core/src` 内建 `contracts/domain/adapters/harnesses` 子模块 + re-export | 中（~30 文件搬子目录，`lib.rs` 重写，CLAUDE.md 大段更新）| 中（golden/parity 零漂移门 + CLAUDE.md 引用的模块路径全失效需同步）| 拍板 |
 | **B** | 抽 `agent-vitals-adapters` crate（先 claude/codex，再 dsh/workbuddy）| 大 | 中高（wasm 依赖重接、`test_classification` family set 重构、clawhub 打包边界）| A 完成 |
 | **C** | 抽 `agent-vitals-domain` crate + 拆 `cost.rs`→models/billing + 拆 `usage.rs`→domain/adapter | **最大**（§3.2）| 高（计价/fold 不变量逐刀零漂移）| B 完成 |
 | **D** | `agent-vitals-runtime` crate + 唯一 HomeResolver + User Profile/Catalog loader + Skill/Session services | 大 | 高（state owner 唯一性、Tauri 去子进程、home 迁移）| C 完成 |
@@ -214,13 +214,13 @@ golden 双侧）验证零漂移后推送。**Phase A 边界搬迁及 B–F 待�
 ## 8. Phase A 边界实施记录（2026-09-04）
 
 用户完成 §5 拍板后，Phase A 边界在独立 worktree/分支实施，未改变公开 JSON、计费、
-fold、fact identity 或宿主 wire 语义：
+fold、fact identity 或执行环境 wire 语义：
 
 1. `agent-vitals-core/src` 从平铺结构迁为 `contracts/`、`domain/`、
-   `adapters/hosts/<host>/sessions/`，宿主集合为 Claude Code、Codex、DSH、WorkBuddy。
+   `adapters/harnesses/<harness>/sessions/`，执行环境集合为 Claude Code、Codex、DSH、WorkBuddy。
 2. `lib.rs` 保留旧 public path compatibility re-export；新代码可使用显式所有权路径。
-3. `dependency_budget.rs` 增加目录集合、宿主集合、re-export 等价和
-   domain→host 既有兼容债务不得增长的守卫。
+3. `dependency_budget.rs` 增加目录集合、执行环境集合、re-export 等价和
+   domain→harness 既有兼容债务不得增长的守卫。
 4. `src/agent/session_sources.rs` 成为 DSH Session 证据读取入口；
    `src/skills/inventory.rs` 只消费注入的 `SessionEvidenceInput`，不再直接读取
    Session 日志。注册表快照与 Codex/OpenClaw probe 仍是 Skill capability 证据。
@@ -244,15 +244,15 @@ Claude evidence、Codex evidence、WorkBuddy evidence。CLI 使用新 crate 的�
 
 所以 Codex usage 与 DSH evidence 暂留 core 的 `adapters/`，由新 adapter crate 统一
 re-export。该状态不是最终所有权，也不冒充 Phase B 全部完成。Phase C 的第一步应先
-解除 domain→host 依赖，然后 Phase B2 将这两个模块物理迁出；架构测试禁止残余集合
+解除 domain→harness 依赖，然后 Phase B2 将这两个模块物理迁出；架构测试禁止残余集合
 从两个继续增长。这样避免为了目录纯洁复制解析器或提前改变 fold 语义。
 
 **B1 收口（2026-09-04）**：
 
-- **格式噪声清理**：迁移过程一度对 `host_contract.rs` / `dependency_budget.rs`
+- **格式噪声清理**：迁移过程一度对 `harness_contract.rs` / `dependency_budget.rs`
   跑了 `cargo fmt` 全文件重排（本仓无 `rustfmt.toml`、既有风格刻意紧凑）——已还原，
   两个测试文件现在只剩实质路径/断言改动（g3/g8 evidence 路径改仓根相对、
-  `residual_host_adapter_directories` 断言收敛到 `["codex","dsh"]`）。
+  `residual_harness_adapter_directories` 断言收敛到 `["codex","dsh"]`）。
 - **WASM 依赖**：一度给 `agent-vitals-wasm/Cargo.toml` 挂了 `agent-vitals-adapters`
   依赖，但 `wasm/src/lib.rs` 一个符号都没用它——已撤掉。§3.1 的 `wasm ─► adapters`
   是未来边，带真实调用点的 Phase 再加。

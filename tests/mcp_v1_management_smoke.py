@@ -3,7 +3,7 @@
 
 默认 MCP 仍只读；本脚本显式启动 ``--allow-local-writes``，并且只在临时
 AGENT_VITALS_HOME 中调用 billing_workflow 的类型化动作。它不允许任意 SQL、
-宿主原始日志或真实用户库参与测试。
+执行环境原始日志或真实用户库参与测试。
 """
 
 import argparse
@@ -32,21 +32,21 @@ def main():
     }}
     requests = [init, {"jsonrpc": "2.0", "method": "notifications/initialized"}]
     calls = [
-        (10, {"action": "candidate_put", "candidate_id": "candidate-uat", "host": "codex",
+        (10, {"action": "candidate_put", "candidate_id": "candidate-uat", "harness": "codex",
               "provider_id": "openai", "currency": "USD", "amount_minor": 2000,
               "billing_period_start": "2026-09", "source_pricing_version": "uat-v1"}),
         (11, {"action": "candidate_list"}),
         (12, {"action": "candidate_resolve", "candidate_id": "candidate-uat", "status": "accepted"}),
         (13, {"action": "declaration_save", "revision_id": "revision-uat-1",
-              "declaration_id": "declaration-uat", "host": "codex", "provider_id": "openai",
+              "declaration_id": "declaration-uat", "harness": "codex", "provider_id": "openai",
               "relationship_kind": "official_subscription", "subscription_name": "UAT Plan",
               "amount_minor": 2000, "currency": "USD", "effective_start": "2026-09",
               "source_candidate_id": "candidate-uat", "evidence_ref": "uat", "scopes": []}),
-        (14, {"action": "declaration_preview", "host": "codex", "provider_id": "openai",
+        (14, {"action": "declaration_preview", "harness": "codex", "provider_id": "openai",
               "effective_start": "2026-09", "scopes": []}),
         # 计费主链规格 §7.3：有界（effective_end）预览的命中数 ≤ 开放预览；
         # 预览带 conflict_* 字段（E207 的「仍待确认」桶）。
-        (30, {"action": "declaration_preview", "host": "codex", "provider_id": "openai",
+        (30, {"action": "declaration_preview", "harness": "codex", "provider_id": "openai",
               "effective_start": "2026-09", "effective_end": "2026-09", "scopes": []}),
         (15, {"action": "declaration_revisions", "declaration_id": "declaration-uat"}),
         (16, {"action": "recalc_enqueue", "job_id": "job-uat", "declaration_id": "declaration-uat",
@@ -59,11 +59,11 @@ def main():
         (21, {"action": "declaration_revisions", "declaration_id": "declaration-uat"}),
         (31, {"action": "candidate_list"}),
         (22, {"action": "candidate_reopen", "candidate_id": "candidate-uat"}),
-        (23, {"action": "host_bill_put", "bill_id": "bill-uat", "host": "codex",
-              "provider_id": "openai", "billing_period_start": "2026-09", "basis": "host_billed",
+        (23, {"action": "harness_bill_put", "bill_id": "bill-uat", "harness": "codex",
+              "provider_id": "openai", "billing_period_start": "2026-09", "basis": "harness_billed",
               "amount_minor": 1234, "currency": "USD", "evidence_ref": "uat"}),
-        (24, {"action": "host_bill_list", "billing_period_start": "2026-09"}),
-        (25, {"action": "host_bill_delete", "bill_id": "bill-uat"}),
+        (24, {"action": "harness_bill_list", "billing_period_start": "2026-09"}),
+        (25, {"action": "harness_bill_delete", "bill_id": "bill-uat"}),
         (26, {"action": "budget_profile_set", "profile_id": "confirmed", "currency": "USD",
               "monthly_minor": 5000, "daily_minor": 1000, "warning_ratio_bp": 8000}),
         (27, {"action": "budget_snooze_set", "until_ms": 4102444800000}),

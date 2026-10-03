@@ -1,7 +1,7 @@
 """WorkBuddy 会话读取器 —— 五段式流水线（locate → shape → extract → derive →
 coverage）的"locate → shape → extract"三段，I/O 都在这里；"derive → coverage"在
 `scripts/agent_vitals/agent/workbuddy_evidence.py`（与 Rust
-`crates/agent-vitals-hosts/src/hosts/workbuddy/sessions/evidence.rs` 逐字节对齐），I/O 不进去。
+`crates/agent-vitals-harnesses/src/harnesses/workbuddy/sessions/evidence.rs` 逐字节对齐），I/O 不进去。
 
 与 Rust `src/agent/workbuddy_session.rs` 逐字节对齐——两条实现产出同一份字典，
 `tests/test_cli_matrix.py::both()` 的差分靠这份一致把关（Rust 侧 sqlite 读用
@@ -13,7 +13,7 @@ rusqlite bundled，spec §1.4——这里是 Python stdlib `sqlite3`，同一份
 
 - `workbuddy.db` 的 `sessions` 行（id/permission_mode/use_sandbox_cli/model/cwd/
   title/时间戳）——会话锚点；
-- `session_usage` 行（session_id/used/size/credit_json）——宿主自计费（spec §9，
+- `session_usage` 行（session_id/used/size/credit_json）——执行环境自计费（spec §9，
   成本直接吃 credit_json，不长第四份价格拷贝）；
 - `audit-log/*.jsonl` 里按 `sessionId` **字段**（不是文件名）分组的决策记录；
 - `file-history/<sessionId>/` 的版本文件数（FileMutations 源）。
@@ -346,7 +346,7 @@ def normalize_wb_ts(value, now_secs):
     `sessions.created_at` / `updated_at` 三处同一规则。返回 `(iso_or_None,
     out_of_window)`：
 
-    - **字符串** → 原样（走既有路径，不回归其他宿主/旧形状），`out_of_window=False`。
+    - **字符串** → 原样（走既有路径，不回归其他执行环境/旧形状），`out_of_window=False`。
     - **整数/浮点** → 按毫秒解释，归一成 `YYYY-MM-DDTHH:MM:SSZ`；落在
       `[2000-01-01T00:00:00Z, now+24h]` 之外 → `(None, True)`（报 null 且进 attempts）。
     - **其余类型（bool/null/object）/缺失** → `(None, False)`（报 null，不进 attempts）。
@@ -377,12 +377,12 @@ def normalize_wb_ts(value, now_secs):
 def lifecycle_of(db_rec):
     """spec §10 B5（`WORKBUDDY_OBSERVABILITY_ASK.md` P0-3「若不做」降级路径）：
     `status`/`source_mode`/`is_playground`/`deleted_at`/`is_background_automation`
-    按列名原样浮出，**只浮出不过滤**——语义宿主未声明，过滤是消费方的事（哪怕
-    按字面值过滤，如排除 `is_playground=1`，本身也是一次未经宿主声明语义的
+    按列名原样浮出，**只浮出不过滤**——语义执行环境未声明，过滤是消费方的事（哪怕
+    按字面值过滤，如排除 `is_playground=1`，本身也是一次未经执行环境声明语义的
     推断，spec 选择不做）。db 行整体缺失（audit-log 独苗会话）→ None（不是全
     null 对象——没有行就没有生命周期状态可言）；行存在但某列缺失/NULL/类型不符
     → 该字段 None（与 `_val` 同款缺列报缺纪律）。`is_playground`/
-    `is_background_automation` 保持宿主存的 INTEGER（不转 bool——转型是解读）；
+    `is_background_automation` 保持执行环境存的 INTEGER（不转 bool——转型是解读）；
     `status`/`source_mode` 是 TEXT，原样字符串；`deleted_at` 是 INTEGER
     epoch-ms，走与 A2 `created_at`/`updated_at` 同一条 `normalize_wb_ts` 路径。
 

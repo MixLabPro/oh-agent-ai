@@ -15,12 +15,12 @@ use std::path::Path;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Map, Value};
 
-use super::{build_envelope, coverage_not_applicable, stale_hosts, ToolError};
+use super::{build_envelope, coverage_not_applicable, stale_harnesses, ToolError};
 
 pub fn spec() -> super::ToolSpec {
     super::ToolSpec {
         name: "data_status",
-        description: "Report whether the local authority data is trustworthy, fresh, and switched to SQL: schema version, DB integrity, per-host fact counts and coverage, open data-quality issues by code, recent sync runs, and a health verdict. Takes no arguments. Works even when the database is empty; returns a structured error only when the database file is missing.",
+        description: "Report whether the local authority data is trustworthy, fresh, and switched to SQL: schema version, DB integrity, per-harness fact counts and coverage, open data-quality issues by code, recent sync runs, and a health verdict. Takes no arguments. Works even when the database is empty; returns a structured error only when the database file is missing.",
         input_schema: json!({
             "type": "object",
             "properties": {},
@@ -28,7 +28,7 @@ pub fn spec() -> super::ToolSpec {
         }),
         output_schema: json!({
             "type": "object",
-            "description": "The standard response envelope (schema_version, data_version, authority_state, authority_revision, coverage, freshness, warnings, data). `data` carries: schema_version, integrity, facts, sources, sessions, open_quality_issues(+_by_code), sql_authority_enabled, pricing_snapshots, pricing health, unresolved_tokens, unpriced_tokens, host_bills, recent_runs, by_host, health, hints."
+            "description": "The standard response envelope (schema_version, data_version, authority_state, authority_revision, coverage, freshness, warnings, data). `data` carries: schema_version, integrity, facts, sources, sessions, open_quality_issues(+_by_code), sql_authority_enabled, pricing_snapshots, pricing health, unresolved_tokens, unpriced_tokens, harness_bills, recent_runs, by_harness, health, hints."
         }),
     }
 }
@@ -95,17 +95,17 @@ pub fn run(_args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         }
     }
 
-    // 无时间窗的 doctor 也必须把「有宿主但最近实时事实已过期」显式折成
-    // partial；否则 consumer 容易把旧数据误读为当前零用量。没有任何已知宿主
+    // 无时间窗的 doctor 也必须把「有执行环境但最近实时事实已过期」显式折成
+    // partial；否则 consumer 容易把旧数据误读为当前零用量。没有任何已知执行环境
     // 时仍保留 not_applicable，避免把空库编成一次覆盖失败。
-    let known_hosts = report["by_host"]
+    let known_harnesses = report["by_harness"]
         .as_object()
-        .is_some_and(|hosts| !hosts.is_empty());
-    let stale_hosts = stale_hosts(&conn, crate::clock::now_ms());
-    let coverage = if known_hosts {
+        .is_some_and(|harnesses| !harnesses.is_empty());
+    let stale_harnesses = stale_harnesses(&conn, crate::clock::now_ms());
+    let coverage = if known_harnesses {
         json!({
-            "status": if stale_hosts.is_empty() { "complete" } else { "partial" },
-            "missing_hosts": stale_hosts,
+            "status": if stale_harnesses.is_empty() { "complete" } else { "partial" },
+            "missing_harnesses": stale_harnesses,
         })
     } else {
         coverage_not_applicable()
@@ -124,7 +124,7 @@ pub fn run(_args: &Value, data_home: &Path) -> Result<Value, ToolError> {
 /// Merge the desktop/runtime sync receipt into the read-only data-status view.
 /// The authority DB can legitimately have zero rows when discovery failed before
 /// the first source file was written; without this receipt MCP would report an
-/// empty healthy source instead of the host-level failure.
+/// empty healthy source instead of the harness-level failure.
 pub fn augment_sync_failure(report: &mut Value, data_home: &Path) {
     let path = data_home.join("state").join("last-sync.json");
     let Ok(raw) = std::fs::read_to_string(path) else { return; };
@@ -139,9 +139,9 @@ pub fn augment_sync_failure(report: &mut Value, data_home: &Path) {
     } else {
         "source_read_failed"
     };
-    let hosts = ["claude-code", "codex", "dsh", "workbuddy"];
-    let affected: Vec<&str> = hosts.iter().copied()
-        .filter(|host| message.contains(&format!("[{host}]")) || message.to_lowercase().contains(host))
+    let harnesses = ["claude-code", "codex", "dsh", "workbuddy"];
+    let affected: Vec<&str> = harnesses.iter().copied()
+        .filter(|harness| message.contains(&format!("[{harness}]")) || message.to_lowercase().contains(harness))
         .collect();
     let affected = if affected.is_empty() { vec!["unknown"] } else { affected };
     let failures = report.as_object_mut().map(|object| {
@@ -149,8 +149,8 @@ pub fn augment_sync_failure(report: &mut Value, data_home: &Path) {
         object.get_mut("source_failures").and_then(Value::as_object_mut).unwrap()
     });
     if let Some(failures) = failures {
-        for host in affected {
-            failures.insert(host.to_string(), json!({
+        for harness in affected {
+            failures.insert(harness.to_string(), json!({
                 "connection_state": "needs_attention",
                 "error_codes": [error_code],
                 "recovery_action": "retry_sync"
@@ -187,7 +187,7 @@ fn fact_tokens(uncached: i64, cache_read: i64, cache_write: i64, output: i64) ->
 /// 总览仍喊 5.46B 未归属，2026-09-16 真机）。**WorkBuddy 不计**：它的事实按设计
 /// provider 恒 NULL（平台积分 / 自配 key / 限免请求级不可判，WORKBUDDY_ONBOARDING
 /// §2.1），用户在待确认面板里无从回答，喊它只会产生一条永远关不掉的提示；它已经
-/// 整宿主计在 unpriced 里。
+/// 整执行环境计在 unpriced 里。
 fn unresolved_tokens(conn: &Connection, window: Option<(i64, i64)>) -> i64 {
     conn.query_row(
         &format!(
@@ -196,7 +196,7 @@ fn unresolved_tokens(conn: &Connection, window: Option<(i64, i64)>) -> i64 {
              FROM usage_facts AS f
              WHERE f.deleted_at_ms IS NULL
                AND f.observation_kind != 'legacy_aggregate'
-               AND f.host != 'workbuddy'
+               AND f.harness != 'workbuddy'
                AND (f.provider_id IS NULL OR EXISTS (
                     SELECT 1 FROM data_quality_issues AS q
                     WHERE q.scope_key = f.fact_id
@@ -249,7 +249,7 @@ fn total_tokens(conn: &Connection, window: Option<(i64, i64)>) -> i64 {
 /// 的那部分——只有它会让「按量费用」少算。套餐内的无价卡模型（智谱订阅里的 glm-*）
 /// 钱已经在月费里，缺卡只让「按官方价折算」那个参考数偏低，不该用同一条警告吓人
 /// （2026-09-16：用户把归因全做完了，仍看到"715M tokens 没有价格"以为归因没生效）。
-/// 缺价卡的型号清单（[`unpriced_tokens`] 的副产品）：`(host, 该补到哪家的卡, 型号,
+/// 缺价卡的型号清单（[`unpriced_tokens`] 的副产品）：`(harness, 该补到哪家的卡, 型号,
 /// tokens, 是否套餐内)`。「补到哪家」= 用户归因的计费方 > 事实自带 provider > 目录
 /// 路由 > 空（不知道）。总览的「查看价格表」落到设置页时，用户要看到的就是这张表
 /// 和每行一个「补这张卡」——不是两张空表单（2026-09-17 反馈）。
@@ -276,10 +276,10 @@ fn unpriced_tokens_detailed(
         .unwrap_or(&[]);
     let mut total_unpriced = 0i64;
     let mut metered_unpriced = 0i64;
-    // (host, card_provider, model) → (tokens, covered)
+    // (harness, card_provider, model) → (tokens, covered)
     let mut models: std::collections::BTreeMap<(String, String, String), (i64, bool)> = std::collections::BTreeMap::new();
     let Ok(mut stmt) = conn.prepare(&format!(
-        "SELECT host, provider_id, model_id, uncached_input_tokens,
+        "SELECT harness, provider_id, model_id, uncached_input_tokens,
                 cache_read_tokens, cache_write_tokens, output_tokens,
                 EXISTS (SELECT 1 FROM billing_fact_attributions ba
                     JOIN billing_declaration_revisions br ON br.revision_id = ba.revision_id
@@ -325,7 +325,7 @@ fn unpriced_tokens_detailed(
     for row in rows.flatten() {
         // `declared` = 任意归因种类的声明计费方：订阅覆盖的 glm-* 该补到 zhipu-glm 的卡，
         // 中转归因的 gpt-* 该补到 shengsuanyun 的卡。
-        let (host, provider, model, uncached, cache_read, cache_write, output, covered, declared) = row;
+        let (harness, provider, model, uncached, cache_read, cache_write, output, covered, declared) = row;
         let tokens = fact_tokens(uncached, cache_read, cache_write, output);
         let card_provider = declared.clone()
             .or_else(|| provider.clone())
@@ -334,7 +334,7 @@ fn unpriced_tokens_detailed(
         let mut count = |t: i64, model_key: &str| {
             total_unpriced += t;
             if !covered { metered_unpriced += t; }
-            let slot = models.entry((host.clone(), card_provider.clone(), model_key.to_string())).or_insert((0, true));
+            let slot = models.entry((harness.clone(), card_provider.clone(), model_key.to_string())).or_insert((0, true));
             slot.0 += t;
             slot.1 &= covered;
         };
@@ -345,8 +345,8 @@ fn unpriced_tokens_detailed(
         // WorkBuddy（E4b）：事实一律 provider null——平台积分 / 自配 key / 限免
         // 三轨请求级不可判（WORKBUDDY_ONBOARDING §2.1）。不能拿裸模型名去撞
         // DSH 价卡（真机 `deepseek-v4-flash` ×62 会命中 deepseek-official 卡，
-        // 那是给「路由证据缺失」的 token 借一张别家的价卡）——整宿主计 unpriced。
-        if host == "workbuddy" {
+        // 那是给「路由证据缺失」的 token 借一张别家的价卡）——整执行环境计 unpriced。
+        if harness == "workbuddy" {
             count(tokens, &model);
             continue;
         }
@@ -362,9 +362,9 @@ fn unpriced_tokens_detailed(
                 continue;
             }
         }
-        let priced = if host == "codex" {
+        let priced = if harness == "codex" {
             agent_vitals_domain::cost::codex_resolve_entry(&model, "standard", entries).is_some()
-        } else if host == "claude-code" {
+        } else if harness == "claude-code" {
             let report = agent_vitals_domain::cost::claude_day_cost(
                 &json!({
                     model.clone(): {
@@ -412,7 +412,7 @@ fn unpriced_tokens_detailed(
     }
     let mut list: Vec<UnpricedModel> = models.into_iter()
         .filter(|(_, (t, _))| *t > 0)
-        .map(|((host, provider, model), (t, covered))| (host, provider, model, t, covered))
+        .map(|((harness, provider, model), (t, covered))| (harness, provider, model, t, covered))
         .collect();
     list.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.2.cmp(&b.2)));
     (total_unpriced, metered_unpriced, list)
@@ -587,7 +587,7 @@ pub fn collect_report_at_depth(
     let sessions = count("SELECT COUNT(*) FROM sessions WHERE deleted_at_ms IS NULL");
     let issues = count("SELECT COUNT(*) FROM data_quality_issues WHERE resolved_at_ms IS NULL");
     let pricing_snapshots = count("SELECT COUNT(*) FROM pricing_snapshots");
-    let host_bills = count("SELECT COUNT(*) FROM host_bills WHERE deleted_at_ms IS NULL");
+    let harness_bills = count("SELECT COUNT(*) FROM harness_bills WHERE deleted_at_ms IS NULL");
     // 本月同款三指标先算（函数名与下面的局部变量同名，绑定后就遮蔽了）：总览把
     // 这两条提示渲染在「本月已处理」下面，而待确认面板也只处理当月——全库累计的数
     // 用户在 UI 里根本消不掉（历史月份的未归因只能靠把声明起始日提前）。本月的数
@@ -665,8 +665,8 @@ pub fn collect_report_at_depth(
         }
     }
 
-    // spec §7.1 impl note（draft-3）：逐宿主最近观测时间 / 事实数 / 覆盖起止。
-    let by_host = per_host_breakdown(conn);
+    // spec §7.1 impl note（draft-3）：逐执行环境最近观测时间 / 事实数 / 覆盖起止。
+    let by_harness = per_harness_breakdown(conn);
 
     let last_run_bad = runs
         .first()
@@ -736,29 +736,29 @@ pub fn collect_report_at_depth(
         "unpriced_metered_tokens_month": unpriced_metered_tokens_month,
         // 本月缺价卡的型号（按 tokens 降序，最多 20 条）——设置页「价格目录」据此列出
         // 「补这张卡」清单。`provider` 是该补到哪家的卡；`covered` = 在套餐内（只影响折算参考）。
-        "unpriced_models_month": unpriced_models_month.iter().take(20).map(|(host, provider, model, tokens, covered)| json!({
-            "host": host, "provider": provider, "model": model, "tokens": tokens, "covered": covered,
+        "unpriced_models_month": unpriced_models_month.iter().take(20).map(|(harness, provider, model, tokens, covered)| json!({
+            "harness": harness, "provider": provider, "model": model, "tokens": tokens, "covered": covered,
         })).collect::<Vec<_>>(),
         "total_tokens_month": total_tokens_month,
-        "host_bills": host_bills,
+        "harness_bills": harness_bills,
         "recent_runs": runs,
-        "by_host": by_host,
+        "by_harness": by_harness,
         "health": health,
         "hints": hints,
     })
 }
 
-/// `{ host: { facts, sources, covered_from, covered_to, last_seen_at } }`。
-/// 空对象 = 库里一个宿主都没有（不是错误——诚实的空）。
-fn per_host_breakdown(conn: &Connection) -> Value {
+/// `{ harness: { facts, sources, covered_from, covered_to, last_seen_at } }`。
+/// 空对象 = 库里一个执行环境都没有（不是错误——诚实的空）。
+fn per_harness_breakdown(conn: &Connection) -> Value {
     use super::ms_to_rfc3339_beijing;
     let mut out: Map<String, Value> = Map::new();
 
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT host, COUNT(*), MIN(event_ts_ms), MAX(event_ts_ms)
+        "SELECT harness, COUNT(*), MIN(event_ts_ms), MAX(event_ts_ms)
          FROM usage_facts
          WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'
-         GROUP BY host ORDER BY host",
+         GROUP BY harness ORDER BY harness",
     ) {
         if let Ok(rows) = stmt.query_map([], |r| {
             Ok((
@@ -768,9 +768,9 @@ fn per_host_breakdown(conn: &Connection) -> Value {
                 r.get::<_, Option<i64>>(3)?,
             ))
         }) {
-            for (host, n, min_ts, max_ts) in rows.flatten() {
+            for (harness, n, min_ts, max_ts) in rows.flatten() {
                 out.insert(
-                    host,
+                    harness,
                     json!({
                         "facts": n,
                         "sources": 0,
@@ -784,13 +784,13 @@ fn per_host_breakdown(conn: &Connection) -> Value {
     }
 
     if let Ok(mut stmt) = conn.prepare(
-        "SELECT host, COUNT(*), MAX(last_seen_at_ms) FROM source_files GROUP BY host ORDER BY host",
+        "SELECT harness, COUNT(*), MAX(last_seen_at_ms) FROM source_files GROUP BY harness ORDER BY harness",
     ) {
         if let Ok(rows) = stmt.query_map([], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?))
         }) {
-            for (host, n, last_seen) in rows.flatten() {
-                let entry = out.entry(host).or_insert_with(|| {
+            for (harness, n, last_seen) in rows.flatten() {
+                let entry = out.entry(harness).or_insert_with(|| {
                     json!({
                         "facts": 0,
                         "sources": 0,
@@ -845,7 +845,7 @@ mod tests {
         assert_eq!(env["data"]["health"], "ok");
         assert_eq!(env["authority_state"], "candidate");
         assert_eq!(env["coverage"]["status"], "not_applicable");
-        assert!(env["data"]["by_host"].as_object().unwrap().is_empty());
+        assert!(env["data"]["by_harness"].as_object().unwrap().is_empty());
         // 从没同步过 → authority_revision 诚实为 null。
         assert_eq!(env["authority_revision"], Value::Null);
 
@@ -1014,7 +1014,7 @@ mod tests {
             .unwrap();
         db.conn()
             .execute(
-                "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace,
+                "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace,
                  source_profile, last_observed_at_ms)
                  VALUES ('quality-session', 'codex', 'native-quality', 'machine', 'default', 1)",
                 [],
@@ -1022,7 +1022,7 @@ mod tests {
             .unwrap();
         db.conn()
             .execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                  session_key, source_event_id, observation_kind, provider_id, model_id,
                  event_ts_ms, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                  output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
@@ -1071,7 +1071,7 @@ mod tests {
             .unwrap();
         db.conn()
             .execute(
-                "INSERT INTO sessions(session_key, host, native_session_id,
+                "INSERT INTO sessions(session_key, harness, native_session_id,
                     machine_namespace, source_profile, last_observed_at_ms)
                  VALUES ('s', 'codex', 'native', 'm', 'default', 1)",
                 [],
@@ -1081,7 +1081,7 @@ mod tests {
             db.conn()
                 .execute(
                     "INSERT INTO usage_facts(
-                        fact_id, host, machine_namespace, native_session_id,
+                        fact_id, harness, machine_namespace, native_session_id,
                         session_key, source_event_id, observation_kind,
                         provider_id, model_id, event_ts_ms, event_peak,
                         uncached_input_tokens, cache_read_tokens,
@@ -1110,8 +1110,8 @@ mod tests {
     }
 
     #[test]
-    fn stale_host_is_reported_in_freshness_and_doctor_coverage() {
-        let home = tmp_home("stale-host");
+    fn stale_harness_is_reported_in_freshness_and_doctor_coverage() {
+        let home = tmp_home("stale-harness");
         std::fs::create_dir_all(&home).unwrap();
         let path = agent_vitals_data::authority::default_authority_path(&home);
         let db = AuthorityDb::open(&path, 1_700_000_000_000).unwrap();
@@ -1124,33 +1124,33 @@ mod tests {
             rusqlite::params![now],
         )
         .unwrap();
-        for (host, fact_id, source_id, event_ts) in [
+        for (harness, fact_id, source_id, event_ts) in [
             ("dsh", "fact-old", "source-old", old),
             ("codex", "fact-current", "source-current", now),
         ] {
             conn.execute(
-                "INSERT INTO source_files(source_id, host, path_hash, size_bytes, mtime_ns,
+                "INSERT INTO source_files(source_id, harness, path_hash, size_bytes, mtime_ns,
                                           parser_version, first_seen_at_ms, last_seen_at_ms,
                                           last_successful_run_id)
                  VALUES (?1, ?2, ?1, 0, 0, 1, ?3, ?3, 'run-stale')",
-                rusqlite::params![source_id, host, now],
+                rusqlite::params![source_id, harness, now],
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                                          source_event_id, observation_kind, event_ts_ms,
                                          source_id, ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1, ?2, 'test', ?1, ?1, 'assistant-usage', ?3, ?4,
                          'run-stale', ?3, ?3)",
-                rusqlite::params![fact_id, host, event_ts, source_id],
+                rusqlite::params![fact_id, harness, event_ts, source_id],
             )
             .unwrap();
         }
 
         let env = run(&json!({}), &home).unwrap();
-        assert_eq!(env["freshness"]["stale_hosts"], json!(["dsh"]));
+        assert_eq!(env["freshness"]["stale_harnesses"], json!(["dsh"]));
         assert_eq!(env["coverage"]["status"], "partial");
-        assert_eq!(env["coverage"]["missing_hosts"], json!(["dsh"]));
+        assert_eq!(env["coverage"]["missing_harnesses"], json!(["dsh"]));
         let _ = std::fs::remove_dir_all(&home);
     }
 

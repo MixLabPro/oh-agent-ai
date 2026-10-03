@@ -3,7 +3,7 @@
 //! 这是把一次会话变成「一张可下钻的图」的类型层：一份会话跑完适配器流水线
 //! 产出的 `CanonicalSession`（`contracts::evidence`）之后，`domain::trace`
 //! 里的纯函数把它**投影**成 `TraceGraph`——图节点/边引用 `CanonicalSession`
-//! 已经算好的观测，本模块不解析任何宿主 wire 事件（`contracts_module_stays_
+//! 已经算好的观测，本模块不解析任何执行环境 wire 事件（`contracts_module_stays_
 //! vocabulary_only` 的边界同样约束这里：只放词表，不放算法）。
 //!
 //! **诚实性边界（读代码前必读）**：以下三个字段目前只能给出诚实的占位值，
@@ -50,7 +50,7 @@ pub enum TraceNodeType {
     Retry,
     Outcome,
     /// Pi 单会话实测 4 模型 5 次切换，W1 需按模型族分别计算并排除切换边界
-    /// （spec §2.4.1）——v0.10.0 的三宿主（claude-code/codex/dsh）目前没有
+    /// （spec §2.4.1）——v0.10.0 的三执行环境（claude-code/codex/dsh）目前没有
     /// 单会话内切换模型的已知场景，此变体先占位，构建函数暂不产出。
     ModelChange,
 }
@@ -172,14 +172,14 @@ pub struct TraceNode {
     pub scope: String,
     /// 权威执行顺序；scope 内严格递增，跨 scope 不可比。**不得用于跨 scope 比较**。
     pub ordinal: u64,
-    /// 宿主原生事件 id（Seq|Uuid|CallId|TurnId）——跨 scope join 只走它。
+    /// 执行环境原生事件 id（Seq|Uuid|CallId|TurnId）——跨 scope join 只走它。
     pub native: String,
     pub node_type: TraceNodeType,
     /// 引用的 `UsageFact.fact_id`；canonical evidence 节点为空，运行时追加的
     /// `model_invocation` 节点必须填真实 fact id（见模块顶部诚实性边界 1）。
     pub fact_id: String,
     /// 引用的 evidence_ref；canonical 节点是稳定的 opaque 坐标，SQL fact 节点
-    /// 是 `uf1:<fact_id>`。空串只允许表示宿主确实没有该证据。
+    /// 是 `uf1:<fact_id>`。空串只允许表示执行环境确实没有该证据。
     pub evidence_ref: String,
     pub parent_node_id: Option<String>,
     /// v0.10.0 恒为 `Live`（诚实性边界 2）。

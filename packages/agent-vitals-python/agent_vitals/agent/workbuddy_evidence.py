@@ -5,7 +5,7 @@ extract → derive → coverage，"locate → shape → extract" 留在
 拆出的 `session_meta` 折成 `evidence::CanonicalSession` 的等价字典，覆盖计数按
 `docs/WORKBUDDY_INTEGRATION.md` §3 矩阵逐信号对应。
 
-与 Rust `crates/agent-vitals-hosts/src/hosts/workbuddy/sessions/evidence.rs` 逐字节对齐——产出同一个
+与 Rust `crates/agent-vitals-harnesses/src/harnesses/workbuddy/sessions/evidence.rs` 逐字节对齐——产出同一个
 `workbuddy_evidence_json` 输出字典（键序一致），`tests/test_cli_matrix.py::both()`
 的差分靠这份一致把关。
 
@@ -24,7 +24,7 @@ tool_calls + sandbox 轴。被批准的命令是否另有执行记录不可靠�
 join（spec §7）。
 
 **audit-log 按 `sequence` 排序。** 记录可能来自多个并发 spool 文件，`sequence` 是
-宿主原生顺序（实测有跳号，来自并发写）。排序键 = `(sequence or MAX, 文件内序)`；
+执行环境原生顺序（实测有跳号，来自并发写）。排序键 = `(sequence or MAX, 文件内序)`；
 输出 `seq` = 排序后的下标（会话内序，同 Claude 的 `seq = ordinal` 惯例）。
 
 **`session_meta` 携带 db/file-history 拆出的会话级数据**（I/O 层拆好传进来）：
@@ -86,7 +86,7 @@ ALL_SIGNALS = (
 # 白名单——真机零命中，2,471/2,563 条记录全被当 unknown 丢掉（ToolCalls 只剩
 # WebFetch 的 75 条），差分门禁过了是因为 fixture 写的也是纸面词。§14.4 的
 # schema-drift sentinel（skipped and recorded）当时照实报了 attempts——哨兵没
-# 错，错在白名单本身。分类键必须用宿主自己的判别器，见
+# 错，错在白名单本身。分类键必须用执行环境自己的判别器，见
 # docs/WORKBUDDY_INTEGRATION.md §2.2 的漂移注记。
 KNOWN_EVENT_TYPES = frozenset((
     ("command-safety", "command-safety.sandbox-executed"),
@@ -112,10 +112,10 @@ KNOWN_EVENT_TYPES = frozenset((
 #   反而 measured（session_usage.used，spec §9）；
 # - SandboxPolicy：use_sandbox_cli 是常量（恒 1），不是结构化策略事件；
 # - QuotaConsumption **不在**这个集合里（spec §10 B6，2026-09-11）：`credit_json`
-#   的每个 requestId 条目就是一次「宿主报告的配额消耗」——分子 measured；分母
+#   的每个 requestId 条目就是一次「执行环境报告的配额消耗」——分子 measured；分母
 #   （allowance/余额）在服务端账户面、本机不可观测，由 note 说明，不出百分比。
 #   此前把它声明成 unavailable 是错的——那是「有证据却不计」。§13 矩阵文档滞后，
-#   按 G5 流程在 tests/test_host_contract.py::_REGISTERED_DEVIATIONS 登记；
+#   按 G5 流程在 tests/test_harness_contract.py::_REGISTERED_DEVIATIONS 登记；
 # - SubagentSpawns / SkillInvocations / Hooks / UserPrompts / UserCorrections /
 #   ContextWindow / StepBoundaries / Compaction：只存于 traces（可按
 #   `trace.sessionId` 归属但现有实现未接，Phase E）或根本不在会话面上。
@@ -254,7 +254,7 @@ def _record_key(record):
     """(category, eventType) 对——分类键。WorkBuddy 的记录 schema 里 category 就是
     决策轴（command-safety / network / file-safety / approval / rejection），
     eventType 是轴内路径（真机实测：命令类是 `command-safety.sandbox-executed`
-    全限定名，审批类是裸工具名 `Bash`）。按对键分类才用得上宿主自己的判别器；
+    全限定名，审批类是裸工具名 `Bash`）。按对键分类才用得上执行环境自己的判别器；
     只按 eventType 裸词建白名单正是 2026-09-02 真机事故的根源（见 KNOWN_EVENT_TYPES
     的漂移注记）。"""
     return (_text(record, "category"), _text(record, "eventType"))
@@ -336,7 +336,7 @@ def _chain_note(records):
 
 
 def _populate_workbuddy_timelines(records, session_meta, spans):
-    """跑一遍（按 sequence 排序后的）audit-log 记录，翻译成五条 host-neutral
+    """跑一遍（按 sequence 排序后的）audit-log 记录，翻译成五条 harness-neutral
     timeline（spec §7 决策映射）：
     - `tool_calls`：`command-safety`+`command-safety.sandbox-executed` → bash
       （commandPreview）；`network`+`WebFetch` → web_fetch（messageParams.target）。
@@ -410,7 +410,7 @@ def _populate_workbuddy_timelines(records, session_meta, spans):
     # E2：traces 的 function span → tool_calls + tool_results（Measured）。**Bash 排除**
     # （E3 定主源前不双计）。args_text 只放 `{"file_path": …}`——SV604/605 的正则读它；
     # 其余 input 一律不进（§4 不要正文）。tool_results：`failed` = status≠ok 或 error
-    # 非空；`error_code` = 宿主原生 status，**不翻译成 DSH 码集**——SV607/608 照跑
+    # 非空；`error_code` = 执行环境原生 status，**不翻译成 DSH 码集**——SV607/608 照跑
     # 零命中是诚实 MeasuredZero（Codex `exit_code:N` 同款纪律）。
     for span in _sort_spans(spans):
         if span.get("kind") != "function":
@@ -532,7 +532,7 @@ def _derive_coverage(records, timelines, session_meta, spans):
     if session_meta.get("used") is not None or session_meta.get("credit_json"):
         _bump(coverage, "UsageAggregate", "measured")
     # QuotaConsumption measured = credit_json 里**可解析为数值**的条目数（spec §10 B6）
-    # ——每条 = 宿主为一个 requestId 记了一笔配额消耗。只数条目不看金额：0 积分的
+    # ——每条 = 执行环境为一个 requestId 记了一笔配额消耗。只数条目不看金额：0 积分的
     # 条目也是一次记账观察。非数值（bool/字符串垃圾/None）不计——记账缺口报缺。
     # 与 workbuddy_session_audit._credit_cents 的求和是两件事：那边算钱，这边算次数。
     quota_entries = _credit_entry_count(session_meta.get("credit_json"))
@@ -649,7 +649,7 @@ def build_workbuddy_evidence(raw_records, session_id, session_meta, spans=()):
     canonical = {
         "meta": {
             "session_id": session_id,
-            "host_id": "workbuddy",
+            "harness_id": "workbuddy",
             "workspace_roots": _first_cwd(session_meta),
             "model": _extract_model(session_meta),
             "span": session_span(native_times),
@@ -681,7 +681,7 @@ def workbuddy_evidence_json(evidence):
     """evidence 字典 → `workbuddy-evidence --json` 的输出形状。与 Rust
     `workbuddy_evidence_json` 逐字节对齐——键序、嵌套结构、`attempts`/`notes` 的
     序列化都是这里单独控制的。`signals` 数组按 ALL_SIGNALS 序；`coverage` 20 键
-    全量（unavailable 的也是全零四条，不是缺键）；`available` 标记宿主是否提供该
+    全量（unavailable 的也是全零四条，不是缺键）；`available` 标记执行环境是否提供该
     维度——false = 结构缺口，任何会话都为零，KPI 分母不算它。"""
     canonical = evidence["canonical"]
     sigset = set(canonical["signals"])
@@ -707,7 +707,7 @@ def workbuddy_evidence_json(evidence):
     notes = [n["message"] if isinstance(n, dict) else n
              for n in canonical["notes"]]
     return {
-        "host": "workbuddy",
+        "harness": "workbuddy",
         "session_id": canonical["meta"]["session_id"],
         "workspace_roots": canonical["meta"]["workspace_roots"],
         "model": canonical["meta"]["model"],

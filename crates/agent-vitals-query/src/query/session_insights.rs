@@ -11,7 +11,7 @@
 //!   `trace_service::session_anchor_report` 同一信任域（CLAUDE.md「出口收口」）。
 //!
 //! 计算全部在 `agent_vitals_domain::session_insights`；本模块只做 SQL 投影与计价。
-//! 只读权威库，不读宿主源文件——源日志轮换后诊断照样可用。
+//! 只读权威库，不读执行环境源文件——源日志轮换后诊断照样可用。
 
 use std::collections::BTreeMap;
 
@@ -70,7 +70,7 @@ struct EventRows {
     events: Vec<InsightEvent>,
     tool_finished: usize,
     tool_known: usize,
-    /// 仍是工具名级旧指纹的失败行（源日志已被宿主清理、无法重放纠正）。
+    /// 仍是工具名级旧指纹的失败行（源日志已被执行环境清理、无法重放纠正）。
     legacy_fingerprints: usize,
 }
 
@@ -84,7 +84,7 @@ fn capability_label(value: Option<String>) -> Option<String> {
 }
 
 /// PARSER_VERSION 6 之前的调用指纹只编码工具名。源日志还在的会话已被重放纠正；
-/// 源日志已被宿主清理的会话永远停在旧值——把它当「同一调用」会把「Bash 失败过
+/// 源日志已被执行环境清理的会话永远停在旧值——把它当「同一调用」会把「Bash 失败过
 /// 两次」报成「同一调用重复失败」（验收：7,296 行、124 个会话）。识别出来当作未知。
 fn is_tool_level_fingerprint(fp: &str, capability: Option<&str>) -> bool {
     let Some(cap) = capability else { return false };
@@ -139,36 +139,36 @@ fn load_events(conn: &Connection, session_key: &str) -> rusqlite::Result<EventRo
 
 /// `issue_instances.session_key` 存的是**原生会话 id**（findings_eval 按
 /// `session.native_id` 写入），不是 ledger key——按 ledger key 查会恒为 0 条
-/// （真机 6079 条全是原生 id）。这里按 (宿主, 原生 id) 查，并兼容将来改写成
+/// （真机 6079 条全是原生 id）。这里按 (执行环境, 原生 id) 查，并兼容将来改写成
 /// ledger key 的行。
 fn safety_filter(conn: &Connection, session_key: &str) -> rusqlite::Result<(String, String, String)> {
-    let (host, native): (String, String) = conn
+    let (harness, native): (String, String) = conn
         .query_row(
-            "SELECT host, native_session_id FROM sessions WHERE session_key = ?1",
+            "SELECT harness, native_session_id FROM sessions WHERE session_key = ?1",
             params![session_key],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?
         .unwrap_or_default();
     let placeholders = SAFETY_RULES.iter().map(|r| format!("'{r}'")).collect::<Vec<_>>().join(",");
-    Ok((host, native, placeholders))
+    Ok((harness, native, placeholders))
 }
 
 fn load_safety(conn: &Connection, session_key: &str) -> rusqlite::Result<Vec<InsightSafety>> {
-    let (host, native, placeholders) = safety_filter(conn, session_key)?;
+    let (harness, native, placeholders) = safety_filter(conn, session_key)?;
     let mut stmt = conn.prepare(&format!(
         "SELECT issue_type, severity, json_extract(metadata_json, '$.time')
          FROM issue_instances
-         WHERE host = ?1 AND session_key IN (?2, ?3) AND issue_type IN ({placeholders})
+         WHERE harness = ?1 AND session_key IN (?2, ?3) AND issue_type IN ({placeholders})
          ORDER BY issue_type, opened_at_ms"
     ))?;
-    let rows = stmt.query_map(params![host, native, session_key], |r| {
+    let rows = stmt.query_map(params![harness, native, session_key], |r| {
         Ok(InsightSafety { rule: r.get(0)?, severity: r.get(1)?, ts_ms: r.get::<_, Option<i64>>(2)? })
     })?;
     rows.collect()
 }
 
-/// 泳道可用性（spec §6.3）：能不能画只看数据；画不了的原因来自宿主能力。
+/// 泳道可用性（spec §6.3）：能不能画只看数据；画不了的原因来自执行环境能力。
 fn lane(total: usize, known: usize, empty_reason: &str) -> Value {
     if total == 0 {
         return json!({ "state": "unavailable", "reason": empty_reason });
@@ -180,18 +180,18 @@ fn lane(total: usize, known: usize, empty_reason: &str) -> Value {
         json!({ "state": "partial", "coverage": round4(coverage) })
     } else {
         // 事件在，但结果一个都没记（如 Codex Legacy 线格式的工具输出不带成败）。
-        json!({ "state": "unavailable", "reason": "not_recorded_by_host" })
+        json!({ "state": "unavailable", "reason": "not_recorded_by_harness" })
     }
 }
 
-/// 会话里一个工具结果都没有时的原因。manifest 宿主（`host:*`，走 DSL 适配；
-/// 迁移期旧 `plugin:*` 同判）目前不产 workflow 事件；原生宿主没有就是这次
+/// 会话里一个工具结果都没有时的原因。manifest 执行环境（`harness:*`，走 DSL 适配；
+/// 迁移期旧 `plugin:*` 同判）目前不产 workflow 事件；原生执行环境没有就是这次
 /// 会话恰好没用工具。
-fn tools_empty_reason(host: &str) -> &'static str {
-    if host.starts_with("host:") || host.starts_with("plugin:") { "not_ingested" } else { "no_data_in_session" }
+fn tools_empty_reason(harness: &str) -> &'static str {
+    if harness.starts_with("harness:") || harness.starts_with("plugin:") { "not_ingested" } else { "no_data_in_session" }
 }
 
-/// 名义成本（spec §4、§8.5）：每组（回合 × 宿主 × 模型 × provider × 峰谷 × 价格快照）
+/// 名义成本（spec §4、§8.5）：每组（回合 × 执行环境 × 模型 × provider × 峰谷 × 价格快照）
 /// 按官方价卡估算，**不扣订阅**（名义 = 官方标价折算，与 `metered_*` 不相加），
 /// 含输出。计价函数与会话成本分桶同一个（`metered_estimate_minor` +
 /// `billing_bucket_usage_json`）。无价卡的调用不计 0：`coverage` 标 partial。
@@ -216,7 +216,7 @@ struct Priced {
 
 fn price_groups(
     conn: &Connection,
-    host: &str,
+    harness: &str,
     acc: &NominalAccumulator,
 ) -> rusqlite::Result<Priced> {
     let mut snapshots: BTreeMap<String, Option<Value>> = BTreeMap::new();
@@ -248,8 +248,8 @@ fn price_groups(
             }
             None => None,
         };
-        let usage = billing_bucket_usage_json(host, model, provider.as_deref(), *peak, *tokens);
-        let money = snapshot.and_then(|s| agent_vitals_domain::cost::metered_estimate_minor(host, &usage, s));
+        let usage = billing_bucket_usage_json(harness, model, provider.as_deref(), *peak, *tokens);
+        let money = snapshot.and_then(|s| agent_vitals_domain::cost::metered_estimate_minor(harness, &usage, s));
         let entry = per_step.entry(*step).or_insert_with(|| (Money::new(), false));
         match money {
             Some(m) => *entry.0.entry(m.currency).or_default() += m.amount_minor,
@@ -334,8 +334,8 @@ fn money_json(money: &Money, partial: bool) -> Option<Value> {
     })
 }
 
-/// `session_trace(output = "insights")` 的 data。`host` 取自 `sessions.host`。
-pub fn session_insights(conn: &Connection, session_key: &str, host: &str) -> rusqlite::Result<Value> {
+/// `session_trace(output = "insights")` 的 data。`harness` 取自 `sessions.harness`。
+pub fn session_insights(conn: &Connection, session_key: &str, harness: &str) -> rusqlite::Result<Value> {
     let calls = load_calls(conn, session_key)?;
     let events = load_events(conn, session_key)?;
     let safety = load_safety(conn, session_key)?;
@@ -375,9 +375,9 @@ pub fn session_insights(conn: &Connection, session_key: &str, host: &str) -> rus
         tokens[2] += row.call.cache_write;
         tokens[3] += row.call.output;
     }
-    let Priced { per_step, unpriced, .. } = price_groups(conn, host, &acc)?;
+    let Priced { per_step, unpriced, .. } = price_groups(conn, harness, &acc)?;
     let any_unversioned = calls.iter().any(|c| c.pricing_version.is_none());
-    let Priced { session: session_money, session_partial, .. } = price_groups(conn, host, &session_acc)?;
+    let Priced { session: session_money, session_partial, .. } = price_groups(conn, harness, &session_acc)?;
     if let Some(steps_json) = data["axis"]["steps"].as_array_mut() {
         for (i, step) in steps_json.iter_mut().enumerate() {
             if let Some((money, partial)) = per_step.get(&i) {
@@ -436,9 +436,9 @@ pub fn session_insights(conn: &Connection, session_key: &str, host: &str) -> rus
 
     data["lanes"] = json!({
         "consumption": lane(calls.len(), calls.len(), "no_data_in_session"),
-        "tools": lane(events.tool_finished, events.tool_known, tools_empty_reason(host)),
+        "tools": lane(events.tool_finished, events.tool_known, tools_empty_reason(harness)),
     });
-    data["host"] = json!(host);
+    data["harness"] = json!(harness);
     Ok(data)
 }
 
@@ -507,16 +507,16 @@ pub fn session_trace_evidence_with(conn: &Connection, session_key: &str, from: u
         }));
     }
 
-    let (host, native, placeholders) = safety_filter(conn, session_key)?;
+    let (harness, native, placeholders) = safety_filter(conn, session_key)?;
     let mut stmt = conn.prepare(&format!(
         "SELECT issue_type, severity, json_extract(metadata_json, '$.time'),
                 json_extract(metadata_json, '$.evidence'), json_extract(metadata_json, '$.tool_name')
          FROM issue_instances
-         WHERE host = ?1 AND session_key IN (?2, ?3) AND issue_type IN ({placeholders})
+         WHERE harness = ?1 AND session_key IN (?2, ?3) AND issue_type IN ({placeholders})
          ORDER BY opened_at_ms"
     ))?;
     let mut safety = Vec::new();
-    let mut rows = stmt.query(params![host, native, session_key])?;
+    let mut rows = stmt.query(params![harness, native, session_key])?;
     while let Some(r) = rows.next()? {
         let ts: Option<i64> = r.get(2)?;
         safety.push(json!({

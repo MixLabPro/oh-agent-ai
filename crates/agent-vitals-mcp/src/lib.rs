@@ -17,7 +17,7 @@ pub use agent_vitals_ingest::source_graph;
 #[doc(hidden)]
 pub use agent_vitals_ingest::ENV_LOCK;
 pub use agent_vitals_ingest::clock;
-pub use agent_vitals_ingest::fact_hosts;
+pub use agent_vitals_ingest::fact_harnesses;
 pub use agent_vitals_ingest::home;
 pub use agent_vitals_ingest::lease;
 pub use agent_vitals_ingest::logging;
@@ -31,7 +31,7 @@ pub use agent_vitals_ingest::price_overrides;
 pub use agent_vitals_ingest::pricing_catalog;
 pub use agent_vitals_ingest::sources;
 pub use agent_vitals_ingest::custom_sources;
-pub use agent_vitals_ingest::host_registry;
+pub use agent_vitals_ingest::harness_registry;
 pub use agent_vitals_ingest::session_sources;
 pub use agent_vitals_ingest::source_controls;
 pub use agent_vitals_ingest::sessions;

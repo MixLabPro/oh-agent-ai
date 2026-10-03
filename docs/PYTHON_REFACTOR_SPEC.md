@@ -29,7 +29,7 @@ The refactor is complete only when:
 
 `scan.py` currently owns six unrelated responsibilities:
 
-1. host discovery and runtime subprocess probing;
+1. harness discovery and runtime subprocess probing;
 2. filesystem traversal and SKILL.md parsing;
 3. report calculation and JSON schema assembly;
 4. diagnostics, overlap, and explanation logic;
@@ -39,7 +39,7 @@ The refactor is complete only when:
 These responsibilities have different failure modes. Discovery must degrade
 on malformed external state, analysis should be a deterministic pure function,
 and rendering should never change measurements. Keeping them in one module
-makes those boundaries unenforceable and makes every host addition a regression
+makes those boundaries unenforceable and makes every harness addition a regression
 risk for every command.
 
 The target is not a particular line count per file. The target is one source of
@@ -54,7 +54,7 @@ All commands must use this single data flow:
 
 ```text
 CLI options
-   -> host roots
+   -> harness roots
    -> filesystem inventory
    -> optional runtime probes
    -> evidence reconciliation
@@ -63,7 +63,7 @@ CLI options
    -> command-specific rendering or JSON
 ```
 
-No renderer may rescan the filesystem, invoke a host, or recompute a report
+No renderer may rescan the filesystem, invoke a harness, or recompute a report
 metric from a truncated display field.
 
 ### 3.2 I/O at the edges
@@ -106,20 +106,20 @@ separate project.
 This avoids combining three risky changes: module extraction, type-model
 redesign, and public schema migration.
 
-### 3.5 Do not force a generic host interface
+### 3.5 Do not force a generic harness interface
 
 The Rust implementation correctly avoids a trait whose methods would be empty
-for most hosts. Python should follow the same reasoning.
+for most harnesses. Python should follow the same reasoning.
 
-Every host participates in four explicit phases, but not every host implements
+Every harness participates in four explicit phases, but not every harness implements
 all four:
 
 | Phase | Responsibility | Implementations |
 |---|---|---|
-| roots | locate candidate Skills | all hosts |
+| roots | locate candidate Skills | all harnesses |
 | probe | ask the runtime what it sees | Codex, OpenClaw |
 | reconcile | apply runtime evidence | Codex, OpenClaw |
-| facts | emit host-specific report evidence | as available |
+| facts | emit harness-specific report evidence | as available |
 
 `inventory.py` orchestrates these phases explicitly. Do not hide the important
 Codex additive versus OpenClaw exclusive reconciliation difference behind a
@@ -161,7 +161,7 @@ scripts/
       hermes.py                   # external_dirs discovery
 ```
 
-The file count is deliberate. The host adapters change for different external
+The file count is deliberate. The harness adapters change for different external
 reasons and need independent fixtures. Pure product logic is separated by the
 user command that owns it. Files must not be combined merely to reduce the
 number of modules.
@@ -189,14 +189,14 @@ Temporary re-exports are removed only after tests import the owning modules.
 
 ### 5.2 `inventory.py`
 
-Input: selected host, explicit paths, home/cwd, host configuration, probe
+Input: selected harness, explicit paths, home/cwd, harness configuration, probe
 timeouts, and feature-disable environment flags.
 
 Output: one `Inventory` containing disk skills, scanned roots, unreadable
-entries, runtime capabilities, and host-specific facts.
+entries, runtime capabilities, and harness-specific facts.
 
-It is the only place that defines phase ordering. A host adapter must not call
-another host adapter.
+It is the only place that defines phase ordering. A harness adapter must not call
+another harness adapter.
 
 ### 5.3 `discovery.py`
 
@@ -235,7 +235,7 @@ Contains pure calculations with narrow inputs and outputs:
 - trigger-age gates;
 - structure cost groups;
 - security summary;
-- host and OpenClaw instance summaries.
+- harness and OpenClaw instance summaries.
 
 Each metric has exactly one implementation. Renderers consume calculated
 fields and never rederive the metric.
@@ -256,7 +256,7 @@ Expected external failures are data, not exceptions:
 - executable absent;
 - timeout;
 - malformed config or JSONL;
-- unsupported host version;
+- unsupported harness version;
 - permission or encoding failure on one Skill.
 
 Adapters return unavailable capability evidence and error strings. Programmer
@@ -285,7 +285,7 @@ Additional rules:
 - renderers must not import adapters or discovery;
 - `cli.py` may coordinate modules but may not implement measurements;
 - circular imports are forbidden;
-- module import must not probe hosts or scan the filesystem.
+- module import must not probe harnesses or scan the filesystem.
 
 ## 7. Compatibility requirements
 
@@ -302,7 +302,7 @@ This refactor does not authorize changes to:
 - path handling on Windows, macOS, and Linux;
 - supported Python baseline (3.8+ unless changed by a separate decision).
 
-The 12 invariants in `docs/ENGINEERING.md` remain acceptance criteria. Host-
+The 12 invariants in `docs/ENGINEERING.md` remain acceptance criteria. Harness-
 specific invariants added since that list—OpenClaw instance isolation, Codex
 runtime additivity, and WorkBuddy manifest-selected top-level packages—are also
 mandatory.
@@ -331,7 +331,7 @@ Move, in order:
 Keep compatibility re-exports in `scan.py`. This phase should produce no output
 diff and no changed fixture.
 
-### Phase 2 — Extract host adapters
+### Phase 2 — Extract harness adapters
 
 Move Claude config, Codex, OpenClaw, WorkBuddy, and Hermes logic into separate
 adapter modules. Add adapter-local tests for success, absent, timeout, malformed,
@@ -341,7 +341,7 @@ and partial-result cases before moving orchestration.
 
 Move generic traversal to `discovery.py`, then implement the explicit four-phase
 orchestration in `inventory.py`. Verify additive and exclusive reconciliation
-with fake-host tests.
+with fake-harness tests.
 
 ### Phase 4 — Extract report and analysis
 
@@ -379,7 +379,7 @@ python tests/golden_runner.py --diff
 Final gates:
 
 1. Linux, macOS, and Windows CI pass on the supported Python minimum.
-2. Fake Codex and OpenClaw success paths pass without installed hosts.
+2. Fake Codex and OpenClaw success paths pass without installed harnesses.
 3. Malformed and unreadable Skill tests prove scan continuation.
 4. Property tests preserve redaction and token-estimation invariants.
 5. The packaged ClawHub artifact runs `--version`, `--help`, default doctor,
@@ -416,7 +416,7 @@ This refactor does not:
 
 - merge the Rust branch;
 - decide whether Python or Rust is the final distributed implementation;
-- add new host capabilities or runtime probes;
+- add new harness capabilities or runtime probes;
 - redesign schema v1 into the aspirational schema v2;
 - add third-party Python dependencies;
 - optimize performance without a measured regression;
@@ -428,7 +428,7 @@ This refactor does not:
 | Risk | Control |
 |---|---|
 | Hidden import contracts in tests | temporary re-exports; migrate imports phase by phase |
-| Golden passes while host success paths are broken | fake-host positive-path tests |
+| Golden passes while harness success paths are broken | fake-harness positive-path tests |
 | Circular imports after extraction | dependency architecture test |
 | Environment reads at import time make tests nondeterministic | pass home/cwd/env through context objects |
 | Missing modules in ClawHub | run commands from the built artifact in CI |
@@ -444,7 +444,7 @@ This refactor does not:
 - [ ] Runtime probes return visible unavailable reasons rather than empty facts.
 - [ ] Codex additive and OpenClaw exclusive reconciliation have direct tests.
 - [ ] WorkBuddy manifest and mode filtering have direct tests.
-- [ ] All 12 engineering invariants and added host invariants remain green.
+- [ ] All 12 engineering invariants and added harness invariants remain green.
 - [ ] Existing reviewed golden files pass without unexplained regeneration.
 - [ ] ClawHub artifact smoke tests import the packaged modules only.
 - [ ] Python/Rust shared behavior is equivalent where both implement the command.

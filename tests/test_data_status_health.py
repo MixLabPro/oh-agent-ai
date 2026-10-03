@@ -135,7 +135,7 @@ class DataStatusHealthTests(unittest.TestCase):
         proc = self.run_cli("data", "coverage", "--month", today[:7], "--json")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         d = json.loads(proc.stdout)
-        self.assertGreater(d["by_host"]["dsh"]["amounts_by_basis"]["metered_actual"], 0.0)
+        self.assertGreater(d["by_harness"]["dsh"]["amounts_by_basis"]["metered_actual"], 0.0)
 
 
 if __name__ == "__main__":

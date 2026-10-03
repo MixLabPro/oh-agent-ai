@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""命令面 × 宿主 × 参数位置的双实现矩阵。
+"""命令面 × 执行环境 × 参数位置的双实现矩阵。
 
 ## 为什么单独有这一层
 
@@ -16,7 +16,7 @@
 问题：**`differential` job 只能证明「跑过的那条路径一致」。**
 
 具体地说，此前每一个 snapshot / diff / CI 闸门测试都写着
-`--host claude-code` —— 那是唯一有描述预算的宿主。默认的 `--host all` 下
+`--harness claude-code` —— 那是唯一有描述预算的执行环境。默认的 `--harness all` 下
 `description_budget.used_chars` 是 `None`，两处崩溃就藏在那里，316 个测试
 全绿了几十次都没碰到。
 
@@ -48,7 +48,7 @@ _BIN = os.environ.get("AGENT_VITALS_BIN")
 if _BIN:
     _BIN = str(Path(_BIN).resolve())
 
-HOSTS = ["all", "claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"]
+HARNESSES = ["all", "claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"]
 
 # 快照文件名带秒级时间戳与同秒序号，两个实现先后跑必然不同 —— 那不是实现
 # 差异，是测试自己制造的噪声。掩掉文件名，其余每一行照比。
@@ -178,7 +178,7 @@ def write_claude_session_log(base: Path, sid: str, records, slug="p-skill-vitals
 def write_dsh_session_log(base: Path, name="session.jsonl"):
     """写一份带触发证据的 DSH 会话日志：目录发布 proj-only/shared-tool，随后
     proj-only 被用户显式 `/<name>` 调用（invoked）、shared-tool 被模型自主选中
-    （selected）。host=dsh 的 per-skill usage_count 必须由这两个事件算出。
+    （selected）。harness=dsh 的 per-skill usage_count 必须由这两个事件算出。
     """
     header = {"type": "session", "version": 0, "id": "s", "delegationDepth": 0}
     events = [
@@ -223,7 +223,7 @@ class CliMatrix(unittest.TestCase):
         for cmd, tag in ((PY_CMD, "py"), ([_BIN], "rs")):
             env = isolated_home_env(self.tmp)
             env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.tmp / ("snap-" + tag))
-            # DSH 宿主扫描的会话日志证据走环境变量（golden_runner 同款注入）。
+            # DSH 执行环境扫描的会话日志证据走环境变量（golden_runner 同款注入）。
             # 设了这个的用例是 DSH 扫描差分；没设的保持原样。
             log = getattr(self, "dsh_session_log", None)
             if log:
@@ -241,31 +241,31 @@ class CliMatrix(unittest.TestCase):
         self.assertNotEqual(got[0][0], 2, "工具自身出错 %r：\n%s" % (argv, got[0][2]))
         return got[0]
 
-    # ── 每个宿主 × 每条命令 ───────────────────────────────
-    def test_doctor_every_host(self):
-        for h in HOSTS:
-            with self.subTest(host=h):
-                self.both("--host", h, "--no-snapshot")
+    # ── 每个执行环境 × 每条命令 ───────────────────────────────
+    def test_doctor_every_harness(self):
+        for h in HARNESSES:
+            with self.subTest(harness=h):
+                self.both("--harness", h, "--no-snapshot")
 
-    def test_list_every_host(self):
-        for h in HOSTS:
-            with self.subTest(host=h):
-                self.both("list", "--host", h)
+    def test_list_every_harness(self):
+        for h in HARNESSES:
+            with self.subTest(harness=h):
+                self.both("list", "--harness", h)
 
-    def test_overlap_every_host(self):
-        for h in HOSTS:
-            with self.subTest(host=h):
-                self.both("overlap", "--host", h)
+    def test_overlap_every_harness(self):
+        for h in HARNESSES:
+            with self.subTest(harness=h):
+                self.both("overlap", "--harness", h)
 
-    def test_json_every_host(self):
-        for h in HOSTS:
-            with self.subTest(host=h):
-                self.both("--host", h, "--json", "-")
+    def test_json_every_harness(self):
+        for h in HARNESSES:
+            with self.subTest(harness=h):
+                self.both("--harness", h, "--json", "-")
 
-    def test_snapshot_every_host(self):
-        for h in HOSTS:
-            with self.subTest(host=h):
-                self.both("--host", h, "snapshot")
+    def test_snapshot_every_harness(self):
+        for h in HARNESSES:
+            with self.subTest(harness=h):
+                self.both("--harness", h, "snapshot")
 
     # ── plan：报告 → 省钱方案 ────────────────────────────────
     def _plan_fixture(self):
@@ -301,15 +301,15 @@ class CliMatrix(unittest.TestCase):
                            "shadow": {"usageCount": 1}},
         }), encoding="utf-8")
 
-    def test_plan_every_host(self):
-        for h in HOSTS:
-            with self.subTest(host=h):
-                self.both("plan", "--host", h)
+    def test_plan_every_harness(self):
+        for h in HARNESSES:
+            with self.subTest(harness=h):
+                self.both("plan", "--harness", h)
 
     def test_plan_full_fixture_human_and_json(self):
         """全夹具：zombie+oversized+trim+shadow 四类项同时出现，人读与 JSON 都逐字节一致。"""
         self._plan_fixture()
-        common = ["plan", "--host", "claude-code", "--zombie-age", "0",
+        common = ["plan", "--harness", "claude-code", "--zombie-age", "0",
                   "--split-threshold", "100", "--startup-rate", "30"]
         # both() 返回 (rc, stdout, stderr) 且内部已断言逐字节一致
         self.both(*common)
@@ -349,58 +349,58 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(payload["summary"]["savings_items"],
                          sum(1 for it in payload["items"] if it["savings_per_event"] is not None))
         self.assertEqual(len(payload["summary"]["top_3_moves"]), 3)
-        self.assertEqual(payload["host_selection"], "claude-code")
+        self.assertEqual(payload["harness_selection"], "claude-code")
         self.assertEqual(payload["startup_rate_per_month"], 30)
 
-    def test_plan_default_host_has_no_zombies(self):
-        """默认 `--host all`（无 trigger 证据）：报不了 0 次就绝不编 zombie 项。"""
+    def test_plan_default_harness_has_no_zombies(self):
+        """默认 `--harness all`（无 trigger 证据）：报不了 0 次就绝不编 zombie 项。"""
         self._plan_fixture()
         py_out = self.both("plan", "--json", "-")
         payload = json.loads(py_out[1])
         self.assertNotIn("disable-zombie", [it["kind"] for it in payload["items"]])
-        self.assertEqual(payload["host_selection"], "all")
+        self.assertEqual(payload["harness_selection"], "all")
         self.assertIsNone(payload["startup_rate_per_month"])
 
-    def _shared_baseline(self, host):
+    def _shared_baseline(self, harness):
         """两个实现共用同一个基线文件。
 
         各用各的快照目录的话，`baseline_file` 是不同的绝对路径，它进 run_id
         的哈希 —— 于是报告头一行必然不同，而那是测试造出来的差异，不是实现
         差异。共用一份基线，run_id 才有判别力。
         """
-        base = self.tmp / ("baseline-%s.json" % host)
+        base = self.tmp / ("baseline-%s.json" % harness)
         env = isolated_home_env(self.tmp)
         env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.tmp / "seed")
-        subprocess.run(PY_CMD + ["--host", host, "--json", str(base),
+        subprocess.run(PY_CMD + ["--harness", harness, "--json", str(base),
                                  "--no-snapshot"],
                        cwd=str(self.tmp / "workdir"), env=env,
                        capture_output=True, text=True, check=True)
         return base
 
-    def test_diff_every_host(self):
-        """**默认宿主也要走一遍。**两处崩溃就藏在 `--host all` 这一格里。"""
-        for h in HOSTS:
-            with self.subTest(host=h):
+    def test_diff_every_harness(self):
+        """**默认执行环境也要走一遍。**两处崩溃就藏在 `--harness all` 这一格里。"""
+        for h in HARNESSES:
+            with self.subTest(harness=h):
                 base = self._shared_baseline(h)
-                self.both("--host", h, "--baseline", str(base), "--no-snapshot")
-                self.both("diff", str(base), "--host", h)
-                self.both("--host", h, "--baseline", str(base),
+                self.both("--harness", h, "--baseline", str(base), "--no-snapshot")
+                self.both("diff", str(base), "--harness", h)
+                self.both("--harness", h, "--baseline", str(base),
                           "--no-snapshot", "--new-only")
 
-    def test_explain_every_host(self):
-        for h in HOSTS:
-            with self.subTest(host=h):
-                self.both("explain", "alpha", "--host", h)
-                self.both("explain", "definitely-absent", "--host", h)
+    def test_explain_every_harness(self):
+        for h in HARNESSES:
+            with self.subTest(harness=h):
+                self.both("explain", "alpha", "--harness", h)
+                self.both("explain", "definitely-absent", "--harness", h)
 
     # ── 参数位置：子命令前 vs 后 ──────────────────────────
     def test_global_flags_before_and_after_subcommand(self):
         """argparse 的子解析器会把默认值写进同一个 namespace。
 
-        `--host claude-code list` 曾因此静默扫了所有宿主，而 clap 的
+        `--harness claude-code list` 曾因此静默扫了所有执行环境，而 clap 的
         `global = true` 是对的 —— 两个实现给出不同答案，没有测试发现。
         """
-        for flag, value in (("--host", "claude-code"), ("--zombie-age", "77"),
+        for flag, value in (("--harness", "claude-code"), ("--zombie-age", "77"),
                             ("--budget", "999"), ("--split-threshold", "100")):
             with self.subTest(flag=flag, pos="before"):
                 self.both(flag, value, "list")
@@ -410,15 +410,15 @@ class CliMatrix(unittest.TestCase):
     def test_store_true_flags_before_and_after(self):
         for flag in ("--all", "--redact", "--redact-names"):
             with self.subTest(flag=flag, pos="before"):
-                self.both(flag, "--host", "claude-code", "--json", "-")
+                self.both(flag, "--harness", "claude-code", "--json", "-")
             with self.subTest(flag=flag, pos="after"):
-                self.both("--host", "claude-code", "--json", "-", flag)
+                self.both("--harness", "claude-code", "--json", "-", flag)
 
     # ── 闸门与错误路径 ────────────────────────────────────
     def test_gate_levels(self):
         for lvl in ("none", "info", "warning", "critical"):
             with self.subTest(fail_on=lvl):
-                self.both("--host", "all", "--no-snapshot", "--fail-on", lvl)
+                self.both("--harness", "all", "--no-snapshot", "--fail-on", lvl)
 
     def test_behavior_gate_levels_and_ignore(self):
         """behavior 的 --fail-on/--ignore 闸门：此前硬编码「有 critical 就退 1」，
@@ -477,7 +477,7 @@ class CliMatrix(unittest.TestCase):
         code, out, err = self.both("behavior", str(log), "--json", "-")
         # `--json` 输出七个键：findings 是风险列表；usage/requests/context 是
         # **同一批 usage_events 的三种分辨率**（按模型汇总、逐请求时间序列、
-        # 常驻上下文分类估算）；compaction 是压缩事件（✂ 标记 + 宿主实测的
+        # 常驻上下文分类估算）；compaction 是压缩事件（✂ 标记 + 执行环境实测的
         # 被丢弃 token 数）；waste 是 FR-04b 结构性浪费（规则可直接判定，不需要
         # 历史基线，与 compaction 的 prune 不是同一件事）；cost 是 usage ×
         # pricing.json 的派生结果（纯展示层，不是 audit 本体的一部分——没有
@@ -522,8 +522,8 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual([f["evidence"] for f in findings],
                          ["/workspace/proj-other/b.json", "/outside/c.json"])
         # 无 usage 事件 → usage 报告是空的 by_model + 空 sequence（不臆造）；
-        # unreported_fields 同样为空——0 个样本时不对「宿主不报某字段」下断言
-        # （与「host 能力缺失时降级、不臆造」同一条纪律，见 usage.py 的注释）。
+        # unreported_fields 同样为空——0 个样本时不对「执行环境不报某字段」下断言
+        # （与「harness 能力缺失时降级、不臆造」同一条纪律，见 usage.py 的注释）。
         # unaccounted_usage 同样为空——残差哨兵（见 usage.py::usage_shaped_tokens）
         # 也没在这份日志里发现漏算。
         self.assertEqual(report["usage"],
@@ -832,7 +832,7 @@ class CliMatrix(unittest.TestCase):
                          list(range(1, len(rows) + 1)))
         # 缺字段落 null 不落 0：fixture 从不带 cacheWriteTokens
         self.assertTrue(all(r["cache_write_tokens"] is None for r in rows),
-                        "宿主没报的字段必须是 null，不是 0")
+                        "执行环境没报的字段必须是 null，不是 0")
         # 压缩视图独立存在于 report["compaction"]，不塞进 requests 的一列
         self.assertNotIn("compacted", rows[0])
 
@@ -1077,20 +1077,20 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("No duration data found", out)
 
-    # ── v0.6 host-contract spec §8 G1：hosts --json 双语言字节 parity ──────
+    # ── v0.6 harness-contract spec §8 G1：harnesses --json 双语言字节 parity ──────
 
-    def test_hosts_json_byte_parity(self):
-        """G1：`HOSTS` 行的忠实序列化——行、字段、顺序全等（v0.6 spec §8）。"""
-        code, out, err = self.both("hosts", "--json", "-")
+    def test_harnesses_json_byte_parity(self):
+        """G1：`HARNESSES` 行的忠实序列化——行、字段、顺序全等（v0.6 spec §8）。"""
+        code, out, err = self.both("harnesses", "--json", "-")
         self.assertEqual(code, 0)
-        hosts = json.loads(out)["hosts"]
-        ids = [h["id"] for h in hosts]
+        harnesses = json.loads(out)["harnesses"]
+        ids = [h["id"] for h in harnesses]
         self.assertEqual(ids, ["dsh", "codex", "claude-code", "workbuddy"],
                          "四行顺序即展示顺序（v0.6 spec §5.1）")
 
-    def test_hosts_human_format_byte_parity(self):
+    def test_harnesses_human_format_byte_parity(self):
         """人读格式差分（py==rs 逐字节，由 both() 兜底）。"""
-        code, out, err = self.both("hosts")
+        code, out, err = self.both("harnesses")
         self.assertEqual(code, 0)
         self.assertIn("dsh (DeepSeek Harness):", out)
         self.assertIn("workbuddy (WorkBuddy):", out)
@@ -1115,7 +1115,7 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(report["model"], "gpt-5.6-sol")
         self.assertEqual(report["workspace_roots"], ["/Users/alice/repo"])
         cov = report["coverage"]
-        # 每个条目都带 available 标记（2026-08 起）：true = 宿主提供该维度，
+        # 每个条目都带 available 标记（2026-08 起）：true = 执行环境提供该维度，
         # false = 结构缺口（任何会话都为零）。下面全部是 true——Legacy fixture
         # 没有用户消息，UserPrompts 因此是 available=true 但 measured=0。
         self.assertEqual(cov["ToolCalls"], {"measured": 3, "derived": 0, "lossy": 0, "unmetered": 0, "available": True})
@@ -1216,12 +1216,12 @@ class CliMatrix(unittest.TestCase):
         self.assertEqual(report["session_id"], "s1", "日志没有被判成不可读")
 
     def test_codex_evidence_human_output(self):
-        """人读格式差分（py==rs 逐字节，由 both() 兜底）：host/session 头 +
+        """人读格式差分（py==rs 逐字节，由 both() 兜底）：harness/session 头 +
         有覆盖信号的 coverage 行 + attempts/notes 计数。"""
         log = ROOT / "fixtures" / "codex" / "legacy.jsonl"
         code, out, err = self.both("codex-evidence", str(log))
         self.assertEqual(code, 0)
-        self.assertIn("host: codex\n", out)
+        self.assertIn("harness: codex\n", out)
         self.assertIn("history_mode: legacy\n", out)
         self.assertIn("FileMutations        measured=0 derived=0 lossy=1 unmetered=0\n", out)
         self.assertIn("attempts: 0    notes: 1\n", out)
@@ -1283,7 +1283,7 @@ class CliMatrix(unittest.TestCase):
         code, out, err = self.both("codex-evidence", "--roots", "--json", "-")
         self.assertEqual(code, 0)
         report = json.loads(out)
-        self.assertEqual(report["host"], "codex")
+        self.assertEqual(report["harness"], "codex")
         self.assertEqual([r["kind"] for r in report["roots"]], ["live", "archived"])
         self.assertEqual(report["roots"][0]["exists"], True)
         self.assertEqual(report["roots"][0]["file_count"], 1)
@@ -1310,7 +1310,7 @@ class CliMatrix(unittest.TestCase):
 
         code, out, err = self.both("codex-evidence", "--roots")
         self.assertEqual(code, 0)
-        self.assertIn("host: codex\n", out)
+        self.assertIn("harness: codex\n", out)
         self.assertIn("(absent)", out)
         self.assertIn("archived", out)
 
@@ -1341,7 +1341,7 @@ class CliMatrix(unittest.TestCase):
 
     def test_codex_cost_rust_only_smoke_empty_db(self):
         """`codex-cost` 现在是 Rust-only（读 SQL 权威库）。这条只钉 e2e 形状：
-        空/缺库 → 退出 0、stdout 是可解析 JSON（host=codex/currency=USD/
+        空/缺库 → 退出 0、stdout 是可解析 JSON（harness=codex/currency=USD/
         total_cost_usd 数字）、stderr 带一句 `sync-facts` 提示（不把空报告当
         「codex 没花钱」端出去）。数值正确性在 apps/cli 的 codex_merged_from_sql
         单测里跑。"""
@@ -1352,7 +1352,7 @@ class CliMatrix(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         report = json.loads(r.stdout)
-        self.assertEqual(report["host"], "codex")
+        self.assertEqual(report["harness"], "codex")
         self.assertEqual(report["currency"], "USD")
         self.assertIsInstance(report["total_cost_usd"], (int, float))
         self.assertIn("sync-facts", r.stderr,
@@ -1362,7 +1362,7 @@ class CliMatrix(unittest.TestCase):
                             cwd=str(self.tmp / "workdir"), env=env,
                             capture_output=True, text=True)
         self.assertEqual(r2.returncode, 0, r2.stderr)
-        self.assertIn("host: codex", r2.stdout)
+        self.assertIn("harness: codex", r2.stdout)
 
     # ── codex-session（Codex 单会话审计：逐 session 成本 + 出处覆盖）────────
     # 复用 _codex_cost_roots() 的三份夹具：文件名即 session_id（夹具无
@@ -1376,7 +1376,7 @@ class CliMatrix(unittest.TestCase):
         code, out, err = self.both("codex-session", "--list", "--json", "-")
         self.assertEqual(code, 0)
         report = json.loads(out)
-        self.assertEqual(report["host"], "codex")
+        self.assertEqual(report["harness"], "codex")
         self.assertEqual(report["currency"], "USD")
         sessions = report["sessions"]
         self.assertEqual([s["session_id"] for s in sessions],
@@ -1395,7 +1395,7 @@ class CliMatrix(unittest.TestCase):
         # 人读视图差分（py==rs，both() 兜底）+ 语义：行宽固定 28。
         code, out, err = self.both("codex-session", "--list")
         self.assertEqual(code, 0)
-        self.assertIn("host: codex\n", out)
+        self.assertIn("harness: codex\n", out)
         self.assertIn("sessions: 3\n", out)
         self.assertIn("rollout-sol", out)
 
@@ -1409,7 +1409,7 @@ class CliMatrix(unittest.TestCase):
                                    "--json", "-")
         self.assertEqual(code, 0)
         report = json.loads(out)
-        self.assertEqual(report["host"], "codex")
+        self.assertEqual(report["harness"], "codex")
         self.assertEqual(report["currency"], "USD")
         self.assertEqual(report["session_id"], "rollout-sol")
         self.assertEqual(report["model"], "gpt-5.6-sol")
@@ -1711,7 +1711,7 @@ class CliMatrix(unittest.TestCase):
         code, out, err = self.both("claude-session", "--list", "--json", "-")
         self.assertEqual(code, 0)
         report = json.loads(out)
-        self.assertEqual(report["host"], "claude-code")
+        self.assertEqual(report["harness"], "claude-code")
         sessions = report["sessions"]
         self.assertEqual([s["session_id"] for s in sessions], ["bbb", "aaa"],
                          "排序 = 末行时间戳降序（bbb 11:05 最新在前）")
@@ -1725,14 +1725,14 @@ class CliMatrix(unittest.TestCase):
         # 人读视图差分（py==rs，both() 兜底）+ 语义：行宽固定 28。
         code, out, err = self.both("claude-session", "--list")
         self.assertEqual(code, 0)
-        self.assertIn("host: claude-code\n", out)
+        self.assertIn("harness: claude-code\n", out)
         self.assertIn("sessions: 2\n", out)
         self.assertIn("新会话", out)
 
     def test_claude_session_detail_differential(self):
         """`claude-session --session <sid>`：健康会话深挖。§10 验收 #4 的三态
         契约——SV607/608/609/610/614 必须 Unavailable（不得 MeasuredZero），其中
-        SV607/608 的 reason 是 host-capability override、SV609/610/614 是门控的
+        SV607/608 的 reason 是 harness-capability override、SV609/610/614 是门控的
         no evidence；可跑规则 SV601-606/611/612/613 空转零命中。SV607/608 的
         Unavailable 把 rules_unavailable 从 3 推到 5（degrade 后重算）。
         coverage 与 timeline 同源：2 tool_result、2 tool_use、1 重建 turn。"""
@@ -1741,7 +1741,7 @@ class CliMatrix(unittest.TestCase):
                                    "c0ffee00000000000000000000000000", "--json", "-")
         self.assertEqual(code, 0)
         report = json.loads(out)
-        self.assertEqual(report["host"], "claude-code")
+        self.assertEqual(report["harness"], "claude-code")
         self.assertEqual(report["session_id"], "c0ffee00000000000000000000000000")
         self.assertEqual(report["title"], "我的会话")
         self.assertEqual(report["model"], "claude-sonnet-4-5")
@@ -1754,7 +1754,7 @@ class CliMatrix(unittest.TestCase):
         # `model` 后——与 `model`/`cwd` 同属 meta 派生，不追加到末位；
         # 13→14 键，两侧锁步）。见 docs/v1.0.0/OBSERVED_SPAN_IMPLEMENTATION_PLAN.md。
         self.assertEqual(list(report.keys()),
-                         ["host", "session_id", "title", "model", "span", "cwd",
+                         ["harness", "session_id", "title", "model", "span", "cwd",
                           "file", "files", "date_span", "audit", "coverage",
                           "signals", "attempts", "notes"])
         cov = report["coverage"]
@@ -1771,15 +1771,15 @@ class CliMatrix(unittest.TestCase):
         for code in ("SV607", "SV608", "SV609", "SV610", "SV614"):
             self.assertEqual(rules[code]["status"], "unavailable", code)
         # reason 逐字节钉死（曾只有 assertIn 子串——两侧一起改措辞测试仍绿，
-        # 评审 P3-5）。与 core `host_capability.rs` 常量同串。
+        # 评审 P3-5）。与 core `harness_capability.rs` 常量同串。
         self.assertEqual(
             rules["SV607"]["reason"],
-            "claude-code host capability: tool results carry no reason codes "
+            "claude-code harness capability: tool results carry no reason codes "
             "(error_code structurally absent); SV607/608 are reason-level "
             "detectors and cannot discriminate")
         self.assertEqual(
             rules["SV608"]["reason"],
-            "claude-code host capability: tool results carry no reason codes "
+            "claude-code harness capability: tool results carry no reason codes "
             "(error_code structurally absent); SV607/608 are reason-level "
             "detectors and cannot discriminate")
         self.assertEqual(rules["SV609"]["reason"],
@@ -1811,7 +1811,7 @@ class CliMatrix(unittest.TestCase):
     def test_claude_session_dangerous_finding_differential(self):
         """finding leaf（`fixtures/claude/dangerous.jsonl`）：SV601 正命中路径在
         Claude 侧的观察面（LOW-4 复盘同款——healthy 不触发、both() 只钉
-        coverage，规则表上的「可跑」没有观察面）。§10 验收 #5 跨宿主同 finding：
+        coverage，规则表上的「可跑」没有观察面）。§10 验收 #5 跨执行环境同 finding：
         与 codex paginated 夹具同一危险片段 `rm -rf` → 同 evidence/severity/
         call_id 形状（codex 侧钉在 test_codex_session_paginated_findings）。
         Bash 里没有 sudo/curl|sh → SV602/603 照跑零命中（measured_zero，不是
@@ -1972,9 +1972,9 @@ class CliMatrix(unittest.TestCase):
         by_rule = {r["rule"]: r for r in rollup["summary_rules"]}
         self.assertIn("SV601", by_rule, "SV601 from claude dangerous fixture")
         self.assertEqual(by_rule["SV601"]["hits"], 1)
-        # 分组明细里出现 claude-code 宿主。
-        self.assertTrue(any(g.get("host") == "claude-code" for g in rollup["groups"]),
-                        [g.get("host") for g in rollup["groups"]])
+        # 分组明细里出现 claude-code 执行环境。
+        self.assertTrue(any(g.get("harness") == "claude-code" for g in rollup["groups"]),
+                        [g.get("harness") for g in rollup["groups"]])
 
     # ── WorkBuddy 会话审计（合成 home：sqlite db + audit-log + file-history）──
     # 夹具是 `fixtures/workbuddy/workdir`（`build_workbuddy_fixture.py` 自校验钉死
@@ -1992,7 +1992,7 @@ class CliMatrix(unittest.TestCase):
         code, out, err = self.both("workbuddy-session", "--list", "--json", "-")
         self.assertEqual(code, 0)
         report = json.loads(out)
-        self.assertEqual(report["host"], "workbuddy")
+        self.assertEqual(report["harness"], "workbuddy")
         sessions = report["sessions"]
         self.assertEqual([s["session_id"] for s in sessions], ["s2", "s1"],
                          "排序 = updated_at 降序（s2 10:05 最新在前）")
@@ -2022,7 +2022,7 @@ class CliMatrix(unittest.TestCase):
         # 按真机声明序建全 30/5 列，哨兵在 fixture 上必须沉默（无迁移表 → None，
         # 两表 unknown/missing 均空）。
         self.assertEqual(list(report.keys()),
-                         ["host", "sessions", "source_snapshot", "schema_probe"])
+                         ["harness", "sessions", "source_snapshot", "schema_probe"])
         self.assertEqual(report["source_snapshot"],
                          {"journal_mode": "delete", "db_bytes": 20480, "wal_bytes": 0})
         self.assertEqual(report["schema_probe"], {
@@ -2043,15 +2043,15 @@ class CliMatrix(unittest.TestCase):
         # 人读视图差分（py==rs，both() 兜底）+ 语义：行宽固定 28。
         code, out, err = self.both("workbuddy-session", "--list")
         self.assertEqual(code, 0)
-        self.assertIn("host: workbuddy\n", out)
+        self.assertIn("harness: workbuddy\n", out)
         self.assertIn("sessions: 2\n", out)
         self.assertIn("健康会话", out)
 
     def test_workbuddy_session_detail_differential(self):
         """`workbuddy-session --session s1`：健康会话深挖。§10 验收 #4 的三态
-        契约——SV604/605（host-capability override）+ SV607/608/609/612/613
+        契约——SV604/605（harness-capability override）+ SV607/608/609/612/613
         （门控 no evidence）必须 Unavailable，其中 SV604/605 的 reason 是
-        host-capability override；可跑规则 SV601-603/606/610/611/614 空转零命中。
+        harness-capability override；可跑规则 SV601-603/606/610/611/614 空转零命中。
         SV604/605 的 Unavailable 把 rules_unavailable 从 5 推到 7（degrade 后
         重算）。coverage 与 timeline 同源：3 tool_calls（2 bash + 1 web_fetch）、
         2 sandbox 模式、1 网络访问、distinct requestId 派生 2 turn。成本块（A3）：
@@ -2061,7 +2061,7 @@ class CliMatrix(unittest.TestCase):
         code, out, err = self.both("workbuddy-session", "--session", "s1", "--json", "-")
         self.assertEqual(code, 0)
         report = json.loads(out)
-        self.assertEqual(report["host"], "workbuddy")
+        self.assertEqual(report["harness"], "workbuddy")
         self.assertEqual(report["session_id"], "s1")
         self.assertEqual(report["title"], "健康会话")
         self.assertEqual(report["model"], "deepseek-v4-flash")
@@ -2073,7 +2073,7 @@ class CliMatrix(unittest.TestCase):
         # B4：`schema_probe` 再追加在它之后；B5：`lifecycle` 再追加在
         # `schema_probe` 之后（spec §10 B5：append-at-end，不打乱既有键序断言）。
         self.assertEqual(list(report.keys()),
-                         ["host", "session_id", "title", "model", "span", "cwd",
+                         ["harness", "session_id", "title", "model", "span", "cwd",
                           "file", "date_span", "audit", "coverage", "signals",
                           "attempts", "cost", "notes", "source_snapshot",
                           "schema_probe", "lifecycle", "traces_probe"])
@@ -2148,7 +2148,7 @@ class CliMatrix(unittest.TestCase):
                          "no evidence for required signal(s) in this session")
         for code in ("SV601", "SV602", "SV603", "SV606", "SV610", "SV611", "SV614"):
             self.assertEqual(rules[code]["status"], "measured_zero", code)
-        # E2 起 s1 没有任何 Unavailable 带 reason 的 host-capability 降级。
+        # E2 起 s1 没有任何 Unavailable 带 reason 的 harness-capability 降级。
         self.assertNotIn("reason", rules["SV604"])
         # A3：`cny` 键消失。credit_json 求和是**积分**（22.53+19.48=42.01），
         # 不是人民币——旧字段名把 1000cr=¥50 的积分当货币，约 20× 高估（§3.1/§6.1）。
@@ -2159,7 +2159,7 @@ class CliMatrix(unittest.TestCase):
         # +11000+450 = 15450 → 27750）；无 trace 证据的会话该键为 null（诚实缺失）。
         self.assertEqual(list(report["cost"].keys()),
                          ["tokens", "processed_tokens", "credits", "cash_cny",
-                          "nominal_cny", "nominal_basis", "host_billed"])
+                          "nominal_cny", "nominal_basis", "harness_billed"])
         self.assertEqual(report["cost"], {
             "tokens": 5000,
             "processed_tokens": 27750,
@@ -2167,7 +2167,7 @@ class CliMatrix(unittest.TestCase):
             "cash_cny": None,
             "nominal_cny": 2.1,
             "nominal_basis": "pack-price-public:1000cr=50CNY@2026-07-01",
-            "host_billed": True,
+            "harness_billed": True,
         })
         # 信号序 = ALL_SIGNALS 序（Signals 数组的顺序是输出契约的一部分）。
         self.assertEqual(report["signals"],
@@ -2202,7 +2202,7 @@ class CliMatrix(unittest.TestCase):
             "generation spans).",
             "lifecycle fields (status / source_mode / is_playground / deleted_at / "
             "is_background_automation) are surfaced verbatim; their value vocabularies "
-            "are not declared by the host, so no session is filtered on them here — "
+            "are not declared by the harness, so no session is filtered on them here — "
             "filtering is the consumer's decision",
         ])
         # E2：traces 已按 trace.sessionId 折进 timeline，不再是「已知但刻意不用」的
@@ -2255,7 +2255,7 @@ class CliMatrix(unittest.TestCase):
         # 键序是输出契约（评审 A4）。B3：`source_snapshot` 追加在末位；B4：
         # `schema_probe` 再追加在它之后；B5：`lifecycle` 再追加在最后。
         self.assertEqual(list(report.keys()),
-                         ["host", "session_id", "title", "model", "span", "cwd",
+                         ["harness", "session_id", "title", "model", "span", "cwd",
                           "file", "date_span", "audit", "coverage", "signals",
                           "attempts", "cost", "notes", "source_snapshot",
                           "schema_probe", "lifecycle", "traces_probe"])
@@ -2305,11 +2305,11 @@ class CliMatrix(unittest.TestCase):
             "session not billed to credits: the platform credit ledger recorded no "
             "consumption (credits: 0.0 is a real measurement). The cause is NOT "
             "determinable from this machine \u2014 a self-configured route, a promotional "
-            "free tier, and host-side non-billing are indistinguishable here.",
+            "free tier, and harness-side non-billing are indistinguishable here.",
             # B5：生命周期字段「浮出不过滤」注记（末位，lifecycle 非 null 时追加）。
             "lifecycle fields (status / source_mode / is_playground / deleted_at / "
             "is_background_automation) are surfaced verbatim; their value vocabularies "
-            "are not declared by the host, so no session is filtered on them here \u2014 "
+            "are not declared by the harness, so no session is filtered on them here \u2014 "
             "filtering is the consumer's decision",
         ])
         # E5：s2 无 trace 文件 → processed_tokens None（诚实缺失）。
@@ -2320,7 +2320,7 @@ class CliMatrix(unittest.TestCase):
             "cash_cny": None,
             "nominal_cny": 0.0,
             "nominal_basis": "pack-price-public:1000cr=50CNY@2026-07-01",
-            "host_billed": True,
+            "harness_billed": True,
         })
 
     def test_workbuddy_session_defaults_to_latest(self):
@@ -2378,7 +2378,7 @@ class CliMatrix(unittest.TestCase):
         # 分配页内——文件字节数与未插入前相同（真机验证过：20480 → 20480）。
         # B4：`schema_probe` 再追加在它之后；B5：`lifecycle` 再追加在最后。
         self.assertEqual(list(report.keys()),
-                         ["host", "session_id", "title", "model", "span", "cwd",
+                         ["harness", "session_id", "title", "model", "span", "cwd",
                           "file", "date_span", "audit", "coverage", "signals",
                           "attempts", "cost", "notes", "source_snapshot",
                           "schema_probe", "lifecycle", "traces_probe"])
@@ -2411,7 +2411,7 @@ class CliMatrix(unittest.TestCase):
         self.assertIn(
             "lifecycle fields (status / source_mode / is_playground / deleted_at / "
             "is_background_automation) are surfaced verbatim; their value vocabularies "
-            "are not declared by the host, so no session is filtered on them here — "
+            "are not declared by the harness, so no session is filtered on them here — "
             "filtering is the consumer's decision",
             report["notes"])
         self.assertEqual(report["audit"]["summary"]["findings_total"], 0)
@@ -2436,7 +2436,7 @@ class CliMatrix(unittest.TestCase):
             "cash_cny": None,
             "nominal_cny": 0.0,
             "nominal_basis": "pack-price-public:1000cr=50CNY@2026-07-01",
-            "host_billed": True,
+            "harness_billed": True,
         })
 
     def test_calendar_codex_blob_is_a_wellformed_three_view_report(self):
@@ -2463,11 +2463,11 @@ class CliMatrix(unittest.TestCase):
                       html, re.DOTALL)
         self.assertIsNotNone(m, "calendar 必须内联 codex 数据块")
         blob = json.loads(m.group(1))
-        self.assertEqual(blob["host"], "codex")
+        self.assertEqual(blob["harness"], "codex")
         self.assertEqual(blob["currency"], "USD")
         self.assertEqual(set(blob["views"].keys()), {"today", "month", "all"})
         for name, view in blob["views"].items():
-            for key in ("host", "currency", "per_model", "days", "total_cost_usd",
+            for key in ("harness", "currency", "per_model", "days", "total_cost_usd",
                         "unpriced_tokens"):
                 self.assertIn(key, view, "views.%s 缺 %s（不是完整报告）" % (name, key))
         # today 视图 want_hours=True → 带 hours 键；month/all 不带。
@@ -2525,7 +2525,7 @@ class CliMatrix(unittest.TestCase):
                 for cmd, tag in ((PY_CMD, "py"), ([_BIN], "rs")):
                     env = isolated_home_env(self.tmp)
                     env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.tmp / ("snap-" + tag))
-                    r = subprocess.run(cmd + ["diff", str(bad), "--host", "all"],
+                    r = subprocess.run(cmd + ["diff", str(bad), "--harness", "all"],
                                        cwd=str(self.tmp / "workdir"), env=env,
                                        capture_output=True, text=True)
                     got.append(r.returncode)
@@ -2537,16 +2537,16 @@ class CliMatrix(unittest.TestCase):
 
         这里**只比退出码**，不比 stdout：两个实现各自的快照路径不同，
         run_id 因此必然不同（见文件头的说明）。要比内容的用
-        `test_diff_every_host`，那条共用基线。
+        `test_diff_every_harness`，那条共用基线。
         """
-        for h in HOSTS:
-            with self.subTest(host=h):
+        for h in HARNESSES:
+            with self.subTest(harness=h):
                 codes = []
                 for cmd, tag in ((PY_CMD, "py"), ([_BIN], "rs")):
                     env = isolated_home_env(self.tmp)
                     env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.tmp / ("twice-" + tag))
                     for _ in range(2):
-                        r = subprocess.run(cmd + ["--host", h],
+                        r = subprocess.run(cmd + ["--harness", h],
                                            cwd=str(self.tmp / "workdir"), env=env,
                                            capture_output=True, text=True)
                     codes.append(r.returncode)
@@ -2554,22 +2554,22 @@ class CliMatrix(unittest.TestCase):
                                      "%s 第二次运行崩了：\n%s" % (tag, r.stderr))
                     self.assertNotEqual(r.returncode, 2,
                                         "%s 工具自身出错：\n%s" % (tag, r.stderr))
-                self.assertEqual(codes[0], codes[1], "退出码不一致 host=%s" % h)
+                self.assertEqual(codes[0], codes[1], "退出码不一致 harness=%s" % h)
 
 
     # `budget show` 的 py↔rs 差分随 Phase 4.3 退役：Rust `budget show` 改读
     # SQL 权威库（`evaluate_alert_from_sql` / `month_cost_sql`），Python
-    # `budget show`（ClawHub in-host skill 形态）仍读 month.json——两侧数据源
+    # `budget show`（ClawHub in-harness skill 形态）仍读 month.json——两侧数据源
     # 不同、不再逐字节可比。Python 侧覆盖在 tests/test_budget.py（直调
     # `agent_vitals.budget`），Rust 侧在 budget.rs 的 `evaluate_alert_from_sql_*`
     # / `month_cost_sql_prices_dsh_month_from_facts` 单测。
 
 
 class DshScanCountsSessionLogEvidence(CliMatrix):
-    """回归：host=dsh 的 per-skill usage_count 必须来自会话日志的 invoked+selected，
-    而不是 claude.json 的 skillUsage（那是另一个宿主——Claude Code——的账）。
+    """回归：harness=dsh 的 per-skill usage_count 必须来自会话日志的 invoked+selected，
+    而不是 claude.json 的 skillUsage（那是另一个执行环境——Claude Code——的账）。
 
-    缺陷原文：`explain proj-only --host dsh` 在会话日志明明记录了 proj-only 被
+    缺陷原文：`explain proj-only --harness dsh` 在会话日志明明记录了 proj-only 被
     调用的情况下，报告里的 usage_count 仍是 0，漏斗打出
     「STATUS NEVER TRIGGERED / zero lifetime triggers」——trigger_data 说用过、
     skill 记录说没用，同一份报告自相矛盾。根因是 discovery 的 usage_count 只读
@@ -2582,7 +2582,7 @@ class DshScanCountsSessionLogEvidence(CliMatrix):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         (self.tmp / "workdir").mkdir(parents=True, exist_ok=True)
-        # DSH 的项目 scope 根是 workdir/.dsh/skills（与 golden host-dsh-log 同款
+        # DSH 的项目 scope 根是 workdir/.dsh/skills（与 golden harness-dsh-log 同款
         # 布局）；会话日志里的目录/调用/选中都指向这两个 skill。
         write_skill(self.tmp / "workdir" / ".dsh" / "skills", "proj-only",
                     desc="project-scope skill the user invokes")
@@ -2596,7 +2596,7 @@ class DshScanCountsSessionLogEvidence(CliMatrix):
     def test_invoked_skill_is_not_never_triggered(self):
         """会话日志证明 proj-only 被用户显式调用过，explain 就不得打 NEVER
         TRIGGERED——这是缺陷的直接症状。"""
-        code, out, _ = self.both("explain", "proj-only", "--host", "dsh")
+        code, out, _ = self.both("explain", "proj-only", "--harness", "dsh")
         self.assertEqual(code, 0)
         self.assertNotIn("NEVER TRIGGERED", out,
                          "被调用的 skill 打成 NEVER TRIGGERED：\n%s" % out)
@@ -2606,7 +2606,7 @@ class DshScanCountsSessionLogEvidence(CliMatrix):
     def test_selected_skill_is_not_never_triggered(self):
         """模型自主选中也算「用过」（never_triggered 是 never_selected ∩
         never_invoked，两侧计数语义必须一致）。"""
-        code, out, _ = self.both("explain", "shared-tool", "--host", "dsh")
+        code, out, _ = self.both("explain", "shared-tool", "--harness", "dsh")
         self.assertEqual(code, 0)
         self.assertNotIn("NEVER TRIGGERED", out,
                          "被模型选中的 skill 打成 NEVER TRIGGERED：\n%s" % out)
@@ -2616,7 +2616,7 @@ class DshScanCountsSessionLogEvidence(CliMatrix):
         """JSON 层面：usage_count = invoked + selected，last_used_days_ago 保持
         None（invoked/selected 只是名字列表、没有时间戳，绝不伪造新鲜度）。"""
         out_json = self.tmp / "scan.json"
-        code, _, _ = self.both("--host", "dsh", "--json", str(out_json))
+        code, _, _ = self.both("--harness", "dsh", "--json", str(out_json))
         self.assertEqual(code, 0)
         data = json.loads(out_json.read_text(encoding="utf-8"))
         by = {s["name"]: s for s in data["skills"]}

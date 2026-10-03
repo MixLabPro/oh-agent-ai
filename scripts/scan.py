@@ -22,11 +22,11 @@ def redact(obj, names=False, name_map=None):
     return _compat.redact(obj, names=names, name_map=name_map,
                           home_n=HOME_N, cwd_n=CWD_N)
 
-def classify(skill_dir, host):
-    return _compat.classify(skill_dir, host, home_n=HOME_N, cwd_n=CWD_N)
+def classify(skill_dir, harness):
+    return _compat.classify(skill_dir, harness, home_n=HOME_N, cwd_n=CWD_N)
 
-def scan_skill_dir(skill_dir, host, enabled_plugins, usage, plugins_known, source_meta=None):
-    return _compat.scan_skill_dir(skill_dir, host, enabled_plugins, usage,
+def scan_skill_dir(skill_dir, harness, enabled_plugins, usage, plugins_known, source_meta=None):
+    return _compat.scan_skill_dir(skill_dir, harness, enabled_plugins, usage,
         plugins_known, source_meta, home_n=HOME_N, cwd_n=CWD_N)
 
 def collect(roots, enabled_plugins, usage, plugins_known):

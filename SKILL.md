@@ -9,19 +9,19 @@ Audit an installed skill library and report cost versus value with concrete acti
 
 The scanner measures, `doctor` diagnoses, and you judge what neither can decide. Keep those three separate, and never turn an unavailable field into a guessed value.
 
-## 1. Run one host at a time
+## 1. Run one harness at a time
 
 ```bash
-python3 scripts/scan.py doctor --host claude-code
+python3 scripts/scan.py doctor --harness claude-code
 ```
 
-Hosts: `claude-code`, `codex`, `openclaw`, `hermes`, `workbuddy`, `dsh`. Never combine context budgets or conflicts across hosts — run one report per runtime.
+Harnesses: `claude-code`, `codex`, `openclaw`, `hermes`, `workbuddy`, `dsh`. Never combine context budgets or conflicts across harnesses — run one report per runtime.
 
 On `dsh` (DeepSeek Harness), description budget is unavailable — there is no global budget, so per-description truncation (SV004) replaces SV001/SV002 — and loaded/trigger evidence comes from the session log and the registry snapshot, not a live plugin list.
 
 Use `--path <dir>` when the inventory is clearly incomplete. Use `--all` only to diagnose why installed copies did not load; never present its aggregate as the active context cost.
 
-Host evidence differs and degrades explicitly. Read [references/hosts.md](references/hosts.md) before reporting on any host other than Claude Code, or whenever a field comes back unavailable.
+Harness evidence differs and degrades explicitly. Read [references/harnesses.md](references/harnesses.md) before reporting on any harness other than Claude Code, or whenever a field comes back unavailable.
 
 ## 2. Read the diagnosis
 
@@ -82,7 +82,7 @@ Lead with the conclusion, then the evidence:
 Only when budget overflow, a high-severity conflict, or a serious security finding exists.
 
 ## Overview
-Host and instance · run <marker> · installed N · active/runtime-verified M · estimated Tier 1 cost · evidence availability
+Harness and instance · run <marker> · installed N · active/runtime-verified M · estimated Tier 1 cost · evidence availability
 
 ## Immediate actions
 1. `SV___` — concrete action naming the skill and its path

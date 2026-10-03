@@ -50,7 +50,7 @@ was an analysis error, §12.2):
   JSON after `schema_probe`): s1 = `status completed / source_mode working`,
   s2 = `status terminated / source_mode coding`, both `is_playground 0 /
   is_background_automation 0 / deleted_at NULL`. They are **surfaced verbatim
-  and never filtered on** — the host has not declared their value vocabularies
+  and never filtered on** — the harness has not declared their value vocabularies
   (ASK P0-3), so even a literal filter like "drop `is_playground=1`" would be an
   inference the adapter has no basis for; filtering is the consumer's decision.
   `is_playground`/`is_background_automation` stay INTEGER 0/1 (not bool),
@@ -87,7 +87,7 @@ Two sessions:
   → healthy-session shape of §10 acceptance #4: `rules_unavailable=7`,
   `findings_total=0`, cost `{tokens:5000, credits:42.01, cash_cny:null,
   nominal_cny:2.1, nominal_basis:"pack-price-public:1000cr=50CNY@2026-07-01",
-  host_billed:true}` (A3: the sum is **credits**, not CNY; `cash_cny` is always
+  harness_billed:true}` (A3: the sum is **credits**, not CNY; `cash_cny` is always
   null — no payment evidence on this machine; `nominal_cny = credits × 0.05`
   lands in the nominal lane only, never a spend lane).
 - **s2 审批流程会话** — three approval decisions (approved/rejected/bulk-delete
@@ -95,15 +95,15 @@ Two sessions:
   (`prevHash="5a5a..."` on seq=100 has no predecessor) → the approvals axis +
   rotation note: `findings_total=4` (SV609×3 info, SV610×1 allowed-once
   warning), `rules_unavailable=6`, cost `{tokens:12000, credits:0.0,
-  cash_cny:null, nominal_cny:0.0, nominal_basis:"…", host_billed:true}` — a
+  cash_cny:null, nominal_cny:0.0, nominal_basis:"…", harness_billed:true}` — a
   session not billed to credits (`credit_json={}`): the `0.0` is a real
   measurement (platform credit ledger genuinely unused), and the audit output
   carries an extra `notes` entry stating that the *cause* is not determinable
-  here (self-configured route / promotional free tier / host-side non-billing
+  here (self-configured route / promotional free tier / harness-side non-billing
   are indistinguishable) — it never asserts which one.
 
-The Rust side (`crates/agent-vitals-hosts/src/hosts/workbuddy/sessions/evidence.rs` +
-`crates/agent-vitals-hosts/src/hosts/workbuddy/sources/mod.rs`) reads the same sqlite db (rusqlite, bundled)
+The Rust side (`crates/agent-vitals-harnesses/src/harnesses/workbuddy/sessions/evidence.rs` +
+`crates/agent-vitals-harnesses/src/harnesses/workbuddy/sources/mod.rs`) reads the same sqlite db (rusqlite, bundled)
 and audit-log; the differential gate in `tests/test_cli_matrix.py` copies
 `workdir` into a temp HOME, feeds it to both implementations, and byte-compares
 the output — which is what pins the two sides together.

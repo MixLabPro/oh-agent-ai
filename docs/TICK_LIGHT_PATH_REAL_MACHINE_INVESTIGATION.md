@@ -59,7 +59,7 @@
 ```
 轻 tick 的实际同步开销（稳定）：
   claude-sync   0.052–0.096s
-  sync-facts    0.470–0.967s   ← 宿主过滤 + walk 级裁剪生效
+  sync-facts    0.470–0.967s   ← 执行环境过滤 + walk 级裁剪生效
   drain_event_bus 0.006–0.012s
   合计 ≈ 0.53–1.08s
 ```

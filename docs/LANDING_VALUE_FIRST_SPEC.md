@@ -9,7 +9,7 @@
 > a11y、美学上已达标；本 spec 解决的是**价值呈现结构**：痛语言 hero、真截图
 > 证据位、「它替你抓什么」价值清单。CLI、安装通道及渠道实验改为独立后续
 > 决策，不再作为真实证据版 landing 的发布前置项。
-> 前置：产品侧已有会话诊断与总览发现入口；当前总览发现入口可能只到宿主
+> 前置：产品侧已有会话诊断与总览发现入口；当前总览发现入口可能只到执行环境
 > 会话列表，并不保证直达具体诊断，截图与动线须以待发布版本实测。
 > 关联：`OVERVIEW_DRILLDOWN_AND_INLINE_FINDINGS_SPEC.md`（产品侧能力）、
 > 精益画布讨论（首发四页与付费边界）、数据保留与 serving-face 政策
@@ -140,7 +140,7 @@
   核实 Release 与 `app-v*` 标签（无资产则 CTA 不写 Download）；仅 macOS 披露。
 - **W2（依赖 P6）**：B1 真图、Hero 可换诊断图、「四个信号」屏（只列已实现且标覆盖范围）。
 - 页面结构（9 屏）：Hero → 「看似全成功」的问题屏（示意） → 日志 vs Vitals 品类对比 →
-  四个信号 → 聚焦证据演示 → **花费口径（我们独有）** → 本地与开源 → 支持的宿主 → 终屏。
+  四个信号 → 聚焦证据演示 → **花费口径（我们独有）** → 本地与开源 → 支持的执行环境 → 终屏。
 
 ### 4. 截图设计标准（普通人一眼看懂）
 
@@ -164,7 +164,7 @@
   架构图里的 Health/Policy Engine；「The agent still failed」（我们不判成败，用 `went nowhere`）；
   「开发者注册」（无账号体系、不上传）。
 - **保留我们独有、对标稿没有的**：三类金额不相加、未知≠0、本地不上传、MIT、
-  宿主覆盖差异诚实标注。
+  执行环境覆盖差异诚实标注。
 
 ### 6. 验收与节奏
 
@@ -200,7 +200,7 @@
 | B1 | 找出「连续失败 / 输入膨胀 / 缓存未命中」（三步屏 Inspect） | `crates/agent-vitals-domain/src/domain/session_insights.rs` 三类诊断：`repeated_failure`、`input_growth`、`high_uncached_input`；带证据、`impact` 只给 tokens | ✅ | 页面三项名称与实现一致；缓存项只能说「观察」，不得写「缓存坏了」 |
 | B2 | 失败区间涉及的输入量/名义成本 | `WASTE_ATTRIBUTION_SPEC` S1 已实施并验收（`failure_exposure`） | ✅ | 金额只在诊断详情、同屏免责；不进 hero |
 | B3 | 订阅 / 按量估算 / 有依据金额分栏、未知≠0、估算不是账单（Reconcile 屏、FAQ4） | CLAUDE.md 成本词表与不变量；`metered_estimate`、`has_unresolved`、不静默归因，有测试钉住 | ✅ | 保持；演示数字为示例，页面已标注 |
-| B4 | 覆盖 Claude Code / Codex / DeepSeek Harness / WorkBuddy（宿主行、FAQ2） | 四宿主适配与同步管线均在；WorkBuddy 的 `provider_id` 为 null，**金额面恒 unresolved** | ⚠️ | 宿主行注明「WorkBuddy：用量与轨迹，无金额」；FAQ2 已说覆盖不均，保留 |
+| B4 | 覆盖 Claude Code / Codex / DeepSeek Harness / WorkBuddy（执行环境行、FAQ2） | 四执行环境适配与同步管线均在；WorkBuddy 的 `provider_id` 为 null，**金额面恒 unresolved** | ⚠️ | 执行环境行注明「WorkBuddy：用量与轨迹，无金额」；FAQ2 已说覆盖不均，保留 |
 | B5 | OpenClaw / Hermes 仅安装与 Skill 层检查（FAQ2） | 与仓库既有说明一致，本次未逐项复核 | ❓ | 发布前核对一次 |
 | B6 | 不需要 API Key（hero 保证、FAQ1） | 设计上读本机日志；本次未抓包验证 | ❓ | 与 C2 的出口自检一起验证 |
 | B7 | 演示窗/轨迹为示意数据 | 页面已标注；`verify-landing` 有标注检查 | ✅ | 保持；真图到位后降级为「交互示意」 |
@@ -243,7 +243,7 @@
    - `git ls-remote --tags origin | grep app-v`
    - `node website/landing/tools/verify-landing.mjs`（含演示脚本、禁用词、aria 无 CJK 检查）
    - 出口自检：首启 + 同步 + 版本检查全程抓包，记录目的主机与载荷类别。
-4. **landing 同步改动清单**：下载区补 `Apple Silicon only · macOS 11+`；宿主行注明
+4. **landing 同步改动清单**：下载区补 `Apple Silicon only · macOS 11+`；执行环境行注明
    WorkBuddy 无金额；A1/A2 解决前 CTA 与「开源」外链降级；FAQ3 措辞与 D1 结论一致。
 
 ---
@@ -388,10 +388,10 @@ FAQ         补真实商业边界与经复核的竞品差异
 | 组 | 问题标题 | 必须能在产品里复现的输出 | 边界 |
 |---|---|---|---|
 | B1 | 哪次会话在反复失败？ | 重复失败诊断、命中回合和证据检查入口 | 涉及 Token 不等于浪费或可节省 Token |
-| B2 | 用量集中在哪些会话？ | 时间/宿主用量 → 会话列表 → 所选会话详情 | 只称「一键到会话」当入口确实能直达该会话；否则展示真实的两步动线 |
+| B2 | 用量集中在哪些会话？ | 时间/执行环境用量 → 会话列表 → 所选会话详情 | 只称「一键到会话」当入口确实能直达该会话；否则展示真实的两步动线 |
 | B3 | 这笔钱是账单还是估算？ | 订阅、按量估算、已知账单及未知项的原样口径 | 不同币种与 basis 不混加；估算不等于实付 |
 
-原 B4 额度与 B5 输入膨胀可以放在后续专题或 FAQ；只有宿主能力、
+原 B4 额度与 B5 输入膨胀可以放在后续专题或 FAQ；只有执行环境能力、
 真实数据和截图都通过验收才升级为首页主价值卡。啄木鸟与收据动画保留
 为品牌视觉，不承载未实现的数字承诺。
 
@@ -399,7 +399,7 @@ FAQ         补真实商业边界与经复核的竞品差异
 
 海外版页面、截图、CTA、FAQ 与 Release 安装说明必须用一致的英文术语。
 首版仅链接已发布且可验证的 macOS 安装渠道；下载前告知系统要求、
-受支持宿主、首次无数据/权限不足的处理方法。不要展示尚不存在的
+受支持执行环境、首次无数据/权限不足的处理方法。不要展示尚不存在的
 `agent-vitals vitals`、brew tap 或 `install.sh`。
 
 **URL 结构**：英文为根 `website/landing/index.html`（`lang="en"`，海外分享

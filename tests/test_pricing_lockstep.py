@@ -23,7 +23,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 PRICING_JSON = REPO / "assets" / "pricing.json"
 CLIENT_JS = REPO / "integrations" / "dsh-client" / "src" / "client" / "styles" / "index.ts"
-HOST_PRICING_JSON = REPO / "integrations" / "dsh-client" / "pricing.json"
+HARNESS_PRICING_JSON = REPO / "integrations" / "dsh-client" / "pricing.json"
 
 _has_node = shutil.which("node") is not None
 # `.is_dir()` alone 靠不住——拆分当天就抓到过一次：`git rm` 只删跟踪文件，
@@ -105,19 +105,19 @@ class PricingLockstepTests(unittest.TestCase):
     "integrations/dsh-client/ 已拆成独立仓库 dsh-agent-vitals-audit——运行时"
     "副本 pricing.json 不在本仓库了，手动同步纪律见那个仓库的 README",
 )
-class HostPricingCopyLockstepTests(unittest.TestCase):
-    """integrations/dsh-client/pricing.json 是 pricing.json 的运行时副本（宿主 costReport
+class HarnessPricingCopyLockstepTests(unittest.TestCase):
+    """integrations/dsh-client/pricing.json 是 pricing.json 的运行时副本（执行环境 costReport
     投影读它算钱），应该逐字节相同——不需要 node，任何环境都跑。"""
 
-    def test_host_copy_matches_source_byte_for_byte(self):
-        if not HOST_PRICING_JSON.exists():
+    def test_harness_copy_matches_source_byte_for_byte(self):
+        if not HARNESS_PRICING_JSON.exists():
             self.fail("integrations/dsh-client/pricing.json 缺失——运行时副本没有从 "
-                      "assets/pricing.json 复制过去，host/index.ts "
+                      "assets/pricing.json 复制过去，harness/index.ts "
                       "的 costReport 投影会在 readFileSync 处直接崩")
         self.assertEqual(
-            HOST_PRICING_JSON.read_bytes(), PRICING_JSON.read_bytes(),
+            HARNESS_PRICING_JSON.read_bytes(), PRICING_JSON.read_bytes(),
             "integrations/dsh-client/pricing.json 与 assets/pricing.json 内容不同——"
-            "改了价目表后忘了重新复制到 dsh-client/，宿主的 costReport 会算出旧价钱")
+            "改了价目表后忘了重新复制到 dsh-client/，执行环境的 costReport 会算出旧价钱")
 
 
 if __name__ == "__main__":

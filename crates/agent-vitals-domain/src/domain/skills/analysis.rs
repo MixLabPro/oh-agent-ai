@@ -55,7 +55,7 @@ for (_, idxs) in groups {
     };
 
     conflicts.push(json!({
-        "host": s(winner, "host_family"),
+        "harness": s(winner, "harness_family"),
         "instance_id": winner.get("instance_id").cloned().unwrap_or(Value::Null),
         "conflict_domain": s(winner, "conflict_domain"),
         "name": s(winner, "name"),
@@ -257,11 +257,11 @@ treated as a safety verdict. Every finding includes a line number and requires m
 
 /// 描述预算。返回 (报告块, 供摘要行用的可用性)。
 ///
-/// **Claude Code / Codex 专有。**默认的多宿主模式下不给总数 —— 把互不共享
+/// **Claude Code / Codex 专有。**默认的多执行环境模式下不给总数 —— 把互不共享
 /// 的上下文加起来没有意义，只会被误读。
 pub fn budget(
     unique: &[&Value],
-    host: &str,
+    harness: &str,
     all_scope: bool,
     budget: i64,
 ) -> Map<String, Value> {
@@ -270,8 +270,8 @@ pub fn budget(
 // 超出后静默丢弃描述（据报从调用最少的开始），无告警。
 // Codex 没有 SLASH_COMMAND_TOOL_CHAR_BUDGET，用实测的回退值；
 // 且它的列表里还带 path，字符数要一并算进去。
-let is_codex_budget = host == "codex";
-let is_dsh_budget = host == "dsh";
+let is_codex_budget = harness == "codex";
+let is_dsh_budget = harness == "dsh";
 let effective_budget = if is_codex_budget { CODEX_FALLBACK_DESC_BUDGET } else { budget };
 let desc_chars: i64 = unique
     .iter()
@@ -313,11 +313,11 @@ let longest_descriptions: Vec<Value> = longest
     .collect();
 
 let mut budget_report = Map::new();
-// 描述预算是 Claude Code / Codex 专有的。默认的多宿主模式下**不给总数** ——
-// 把互不共享的上下文加起来没有意义，只会被误读（见 cross_host_note）。
+// 描述预算是 Claude Code / Codex 专有的。默认的多执行环境模式下**不给总数** ——
+// 把互不共享的上下文加起来没有意义，只会被误读（见 cross_harness_note）。
 budget_report.insert(
     "available".into(),
-    json!(host == "claude-code" || host == "codex"),
+    json!(harness == "claude-code" || harness == "codex"),
 );
 budget_report.insert(
     "scope".into(),
@@ -370,7 +370,7 @@ budget_report.insert(
 );
 
 // 预算不可用时把每一个数字都置空。**不是留着旧值** ——
-// 这是 Claude Code 专属的配置与阈值，其他宿主没有等价、可验证的口径，
+// 这是 Claude Code 专属的配置与阈值，其他执行环境没有等价、可验证的口径，
 // 留一个看似合理的数字比留 null 危险得多（不变量 12）。
 if budget_report["available"] != json!(true) {
     for k in ["counted_skills", "budget_chars", "used_chars", "pct_used",
@@ -393,19 +393,19 @@ pub fn trigger(
     loaded: &[&Value],
     usage_len: usize,
     usage_empty: bool,
-    host: &str,
+    harness: &str,
     zombie_age: i64,
     dsh_evidence: Option<&Value>,
     dsh_evidence_path: Option<&str>,
 ) -> (Map<String, Value>, bool) {
-    if host == "dsh" {
+    if harness == "dsh" {
         let report = trigger_dsh(loaded, zombie_age, dsh_evidence, dsh_evidence_path);
         let available = report.get("available").and_then(|v| v.as_bool()) == Some(true);
         return (report, available);
     }
 // ── 触发数据 ─────────────────────────────────────────
 // 触发数据只有 Claude Code 有（~/.claude.json -> skillUsage）。
-let trigger_available = host == "claude-code" && !usage_empty;
+let trigger_available = harness == "claude-code" && !usage_empty;
 // 拿不到触发数据时范围为空 —— 不能拿「没有记录」当「零触发」，
 // 那会把所有 skill 报成僵尸（不变量 12）。
 let empty_scope: Vec<&Value> = Vec::new();
@@ -441,7 +441,7 @@ nsorted.sort_by(|a, b| {
 let mut trigger_report = Map::new();
 trigger_report.insert("available".into(), json!(trigger_available));
 trigger_report.insert("source".into(), json!("~/.claude.json -> skillUsage"));
-trigger_report.insert("entries_in_host_record".into(), json!(usage_len));
+trigger_report.insert("entries_in_harness_record".into(), json!(usage_len));
 trigger_report.insert(
     "counts_are".into(),
     json!("lifetime cumulative, not last-30-days"),
@@ -583,20 +583,20 @@ the session log separates user-explicit invocation \
     report
 }
 
-/// 按宿主的分项。
+/// 按执行环境的分项。
 ///
-/// **上下文属于各自宿主**，不能把 Codex、Claude Code 等的数值相加后当成
-/// 一个窗口 —— 这与顶层预算在多宿主模式下报 not-available 是同一条理由。
+/// **上下文属于各自执行环境**，不能把 Codex、Claude Code 等的数值相加后当成
+/// 一个窗口 —— 这与顶层预算在多执行环境模式下报 not-available 是同一条理由。
 ///
 /// `budget_chars` 是 claude-code 侧生效的描述预算（CLI `--budget`，含默认值）；
 /// `dsh_trigger_available` 由调用方从 DSH 会话日志证据算出（有证据且未 degraded），
 /// 本函数不重复解释证据。
 ///
 /// `description_budget`（字符串状态）之后追加了 `description_budget_detail`
-/// （逐宿主数字）：多宿主模式下顶层预算恒不可用（分母不同的量相加就是编造），
-/// 而按宿主给出自己的 used/budget 是**并列不是合并** —— 每个宿主一条、各用
-/// 各的分母。没有预算的宿主 `available:false` 且数字全 null，绝不冒充 0。
-pub fn host_summaries(
+/// （逐执行环境数字）：多执行环境模式下顶层预算恒不可用（分母不同的量相加就是编造），
+/// 而按执行环境给出自己的 used/budget 是**并列不是合并** —— 每个执行环境一条、各用
+/// 各的分母。没有预算的执行环境 `available:false` 且数字全 null，绝不冒充 0。
+pub fn harness_summaries(
     skills: &[Value],
     usage_empty: bool,
     codex_available: bool,
@@ -604,19 +604,19 @@ pub fn host_summaries(
     budget_chars: i64,
     dsh_trigger_available: bool,
 ) -> Map<String, Value> {
-let mut host_summaries = Map::new();
+let mut harness_summaries = Map::new();
 for family in ["claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"] {
-    let host_skills: Vec<&Value> = skills
+    let harness_skills: Vec<&Value> = skills
         .iter()
-        .filter(|x| s(x, "host_family") == family)
+        .filter(|x| s(x, "harness_family") == family)
         .collect();
-    let host_loaded: Vec<&&Value> = host_skills.iter().filter(|x| b(x, "loaded")).collect();
-    let host_discoverable: Vec<&&Value> =
-        host_skills.iter().filter(|x| b(x, "discoverable")).collect();
+    let harness_loaded: Vec<&&Value> = harness_skills.iter().filter(|x| b(x, "loaded")).collect();
+    let harness_discoverable: Vec<&&Value> =
+        harness_skills.iter().filter(|x| b(x, "discoverable")).collect();
     let summary_scope: &Vec<&&Value> = if family == "openclaw" {
-        &host_discoverable
+        &harness_discoverable
     } else {
-        &host_loaded
+        &harness_loaded
     };
 
     // 按 (instance_id, namespace, name) 分组，组内取优先级最高的那份
@@ -634,7 +634,7 @@ for family in ["claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"]
         }
         groups.entry(key).or_default().push(x);
     }
-    let host_unique: Vec<&Value> = order
+    let harness_unique: Vec<&Value> = order
         .iter()
         .filter_map(|k| {
             let mut g = groups.get(k)?.clone();
@@ -643,7 +643,7 @@ for family in ["claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"]
         })
         .collect();
 
-    // 这个宿主**有没有运行时证据可拿**。
+    // 这个执行环境**有没有运行时证据可拿**。
     //
     // Claude Code / Hermes / WorkBuddy 压根没有逐 skill 的运行时接口可问，
     // Codex 与 OpenClaw 有但可能探测失败。两种情况下面两个计数都必须是
@@ -672,15 +672,15 @@ for family in ["claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"]
     verified_keys.sort();
     verified_keys.dedup();
 
-    // 逐宿主预算明细。口径与 `budget()` 同一套：name+description+4（Codex 另加
-    // path+1，它的列表带路径），分母是**该宿主自己的**（claude-code 可配置 /
-    // Codex 官方 8k 回退），只在本宿主的 unique 集上累加 —— 不与任何其他宿主
-    // 相加。没有预算口径的宿主（openclaw 的「可配」无实测分母、dsh 逐条截断、
+    // 逐执行环境预算明细。口径与 `budget()` 同一套：name+description+4（Codex 另加
+    // path+1，它的列表带路径），分母是**该执行环境自己的**（claude-code 可配置 /
+    // Codex 官方 8k 回退），只在本执行环境的 unique 集上累加 —— 不与任何其他执行环境
+    // 相加。没有预算口径的执行环境（openclaw 的「可配」无实测分母、dsh 逐条截断、
     // workbuddy/hermes 无此概念）available=false、数字全 null。
     let budget_detail = if family == "claude-code" || (family == "codex" && codex_available) {
         let is_codex = family == "codex";
         let denom = if is_codex { CODEX_FALLBACK_DESC_BUDGET } else { budget_chars };
-        let used: i64 = host_unique
+        let used: i64 = harness_unique
             .iter()
             .map(|v| {
                 (chars(v, "description")
@@ -697,7 +697,7 @@ for family in ["claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"]
             "pct_used": if denom != 0 {
                 json!(pyround(used as f64 / denom as f64 * 100.0, 1))
             } else { Value::Null },
-            "counted_skills": host_unique.len(),
+            "counted_skills": harness_unique.len(),
         })
     } else {
         json!({
@@ -710,20 +710,20 @@ for family in ["claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"]
         })
     };
 
-    host_summaries.insert(
+    harness_summaries.insert(
         family.into(),
         json!({
-            "skills_on_disk": host_skills.len(),
-            "discoverable_skills": host_discoverable.len(),
+            "skills_on_disk": harness_skills.len(),
+            "discoverable_skills": harness_discoverable.len(),
             "runtime_verified_loaded_skills": if runtime_evidence {
-                json!(host_skills.iter()
+                json!(harness_skills.iter()
                     .filter(|x| b(x, "runtime_verified") && b(x, "loaded")).count())
             } else { Value::Null },
             "runtime_verified_unique_skills": if runtime_evidence {
                 json!(verified_keys.len())
             } else { Value::Null },
-            "unique_discoverable_skills": host_unique.len(),
-            "tier1_total_tokens": host_unique.iter().map(|x| i(x, "tier1_tokens")).sum::<i64>(),
+            "unique_discoverable_skills": harness_unique.len(),
+            "tier1_total_tokens": harness_unique.iter().map(|x| i(x, "tier1_tokens")).sum::<i64>(),
             "description_budget": if family == "claude-code" { "available" }
                 else if family == "codex" && codex_available { "official-estimate" }
                 else if family == "openclaw" { "configurable" }
@@ -735,7 +735,7 @@ for family in ["claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"]
         }),
     );
 }
-    host_summaries
+    harness_summaries
 }
 
 /// OpenClaw 逐实例汇总。
@@ -749,7 +749,7 @@ pub fn openclaw_instances(
 let mut oc_instances = Map::new();
 let mut instance_ids: Vec<String> = skills
     .iter()
-    .filter(|x| s(x, "host_family") == "openclaw")
+    .filter(|x| s(x, "harness_family") == "openclaw")
     .filter_map(|x| x.get("instance_id").and_then(|v| v.as_str()).map(String::from))
     .collect();
 instance_ids.sort();
@@ -757,7 +757,7 @@ instance_ids.dedup();
 for id in instance_ids {
     let inst: Vec<&Value> = skills
         .iter()
-        .filter(|x| s(x, "host_family") == "openclaw"
+        .filter(|x| s(x, "harness_family") == "openclaw"
             && x.get("instance_id").and_then(|v| v.as_str()) == Some(id.as_str()))
         .collect();
     let disc: Vec<&&Value> = inst.iter().filter(|x| b(x, "discoverable")).collect();

@@ -122,9 +122,9 @@ jobs:
       # 没有这一条，Codex/OpenClaw 的子进程链路在 CI 上永远测不到。
       - name: 假宿主成功路径（双实现）
         run: |
-          python -m unittest tests.test_host_stubs
+          python -m unittest tests.test_harness_stubs
           AGENT_VITALS_BIN="$GITHUB_WORKSPACE/target/release/agent-vitals" \
-            python -m unittest tests.test_host_stubs
+            python -m unittest tests.test_harness_stubs
 
   # ── 4. 降级：畸形语料不得中断扫描（ENGINEERING §4.5）─────
   degradation:
@@ -185,3 +185,25 @@ jobs:
           node-version: "20"
       - name: 检查桌面发布 workflow 门禁
         run: node scripts/verify-release-desktop-workflow.mjs
+
+  city_guards:
+    name: City 专项守卫
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            apps/desktop/ui-dev/package-lock.json
+            apps/agent-city/ui/package-lock.json
+      - name: 安装守卫依赖
+        working-directory: apps/desktop/ui-dev
+        run: npm ci
+      - name: 安装 City 插件依赖
+        working-directory: apps/agent-city/ui
+        run: npm ci
+      - name: City 专项守卫
+        working-directory: apps/desktop/ui-dev
+        run: npm run verify:city

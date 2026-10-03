@@ -8,18 +8,19 @@ import { fileURLToPath } from "node:url";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ui = path.join(repo, "apps/desktop/ui-dev");
+const city = path.join(repo, "apps/agent-city/ui/src");
 const { buildSync } = createRequire(path.join(ui, "package.json"))("esbuild");
-const out = buildSync({ entryPoints: [path.join(ui, "react/src/features/city/engine/cityLayout.ts")], bundle: true, write: false, format: "cjs", platform: "node", logLevel: "silent" });
+const out = buildSync({ entryPoints: [path.join(city, "engine/cityLayout.ts")], bundle: true, write: false, format: "cjs", platform: "node", logLevel: "silent" });
 const mod = { exports: {} };
 vm.runInNewContext(out.outputFiles[0].text, { module: mod, exports: mod.exports, process, console, setTimeout, clearTimeout });
 const { layoutCity } = mod.exports;
 
-function model(count, hosts = ["codex", "claude-code", "dsh", "plugin:zcode"]) {
+function model(count, harnesses = ["codex", "claude-code", "dsh", "plugin:zcode"]) {
   const buildings = Array.from({ length: count }, (_, index) => ({
-    id: `session:${index}`, districtId: hosts[index % hosts.length], height: 2.6 + index % 46,
+    id: `session:${index}`, districtId: harnesses[index % harnesses.length], height: 2.6 + index % 46,
     footprint: 7.2, startedAt: index * 1000,
   }));
-  return { buildings, districts: hosts.map((id) => ({ id, label: id, sessionCount: buildings.filter((b) => b.districtId === id).length, anomaly: null })) };
+  return { buildings, districts: harnesses.map((id) => ({ id, label: id, sessionCount: buildings.filter((b) => b.districtId === id).length, anomaly: null })) };
 }
 const addresses = (layout) => Object.fromEntries(layout.districts.flatMap((district) => [...district.slots].map(([id, p]) => [id, [p.id, p.x, p.z, p.yaw]])));
 function validate(layout, input) {
@@ -36,7 +37,7 @@ function validate(layout, input) {
   for (let index = 0; index < queue.length; index += 1) {
     for (const neighbor of adjacency.get(queue[index])) if (!visited.has(neighbor)) { visited.add(neighbor); queue.push(neighbor); }
   }
-  assert.equal(visited.size, nodes.size, "surface road graph is connected across hosts");
+  assert.equal(visited.size, nodes.size, "surface road graph is connected across harnesses");
   for (const [, parcel] of all) {
     assert(Number.isFinite(layout.terrain.height(parcel.x, parcel.z)));
     assert.equal(layout.terrain.height(parcel.x, parcel.z), 1.2, "buildings occupy the level coastal plain");
@@ -61,8 +62,8 @@ function validate(layout, input) {
   }
 }
 
-for (const [count, hosts] of [[0, []], [1, ["codex"]], [700], [1400, ["codex"]], [1480], [240, Array.from({ length: 12 }, (_, i) => `plugin:${i}`)]]) {
-  const input = model(count, hosts); const layout = layoutCity(input); validate(layout, input);
+for (const [count, harnesses] of [[0, []], [1, ["codex"]], [700], [1400, ["codex"]], [1480], [240, Array.from({ length: 12 }, (_, i) => `plugin:${i}`)]]) {
+  const input = model(count, harnesses); const layout = layoutCity(input); validate(layout, input);
   const reversed = { ...input, buildings: [...input.buildings].reverse(), districts: [...input.districts].reverse() };
   assert.deepEqual(addresses(layoutCity(reversed)), addresses(layout), "input order does not change a fresh layout");
 }
@@ -74,8 +75,8 @@ validate(expanded, expandedInput);
 for (const [id, address] of Object.entries(addresses(first))) assert.deepEqual(addresses(expanded)[id], address, "pagination retains existing addresses");
 const changed = { ...expandedInput, buildings: expandedInput.buildings.map((building) => ({ ...building, height: 48, startedAt: 0 })) };
 assert.deepEqual(addresses(layoutCity(changed, expanded)), addresses(expanded), "token growth and replay timing do not move buildings");
-const additionalHost = model(1400, ["codex", "claude-code", "dsh", "plugin:zcode", "new-host"]);
-validate(layoutCity(additionalHost, expanded), additionalHost);
+const additionalHarness = model(1400, ["codex", "claude-code", "dsh", "plugin:zcode", "new-harness"]);
+validate(layoutCity(additionalHarness, expanded), additionalHarness);
 // 城市配套（学校/商场/医院）：数量随会话规模增长、只占没有会话楼的整街区、落成时刻随规模单调、刷新不搬家。
 const civicCount = (count) => layoutCity(model(count)).civics.length;
 assert.equal(civicCount(0), 0, "an empty city has no civic buildings");

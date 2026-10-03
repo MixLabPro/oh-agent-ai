@@ -1,12 +1,12 @@
-//! `usage_hourly` 工具（spec §7.2）——回答模型 / 宿主 / provider 的小时分布。
+//! `usage_hourly` 工具（spec §7.2）——回答模型 / 执行环境 / provider 的小时分布。
 //!
 //! 实现注记（增量 2；`group_by` 路径在真机验证后统一，2026-09-08）：
-//! - 三个 `group_by` 都走 `authority_query::hourly_by_host_model`（真四桶 +
-//!   `(host, model, hour)` 三维聚合 + 24 桶）。`group_by=host` 把 model 维折叠掉。
-//!   曾经 host 轴走 `hourly_by_host`（Stage 5b 导航查询，只回单个 i64 总量），
+//! - 三个 `group_by` 都走 `authority_query::hourly_by_harness_model`（真四桶 +
+//!   `(harness, model, hour)` 三维聚合 + 24 桶）。`group_by=harness` 把 model 维折叠掉。
+//!   曾经 harness 轴走 `hourly_by_harness`（Stage 5b 导航查询，只回单个 i64 总量），
 //!   总量被塞进 `output_tokens` 槽 → `total_output_tokens == total_tokens`，逐桶
-//!   同样失真——已改。`hourly_by_host_model` 空 host 列表即全 wired 宿主，所以
-//!   `group_by=model` 不带 `hosts` 参数也不再静默返回空 series。
+//!   同样失真——已改。`hourly_by_harness_model` 空 harness 列表即全 wired 执行环境，所以
+//!   `group_by=model` 不带 `harnesses` 参数也不再静默返回空 series。
 //! - **`metrics="cost"` 推迟到 `cost_breakdown`（M3）**：spec §7.2 已校正
 //!   ——逐小时计价要求事实时点选价版（`PricingCards::asof` 当前仅窗口级），
 //!   强行 round 到小时会破坏 M01 守恒测试夹具的 fixture。
@@ -32,7 +32,7 @@ const HOURS: [&str; 24] = [
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "usage_hourly",
-        description: "Report hourly usage curves (24 buckets in the configured statistics timezone, including zero buckets) for one day, optionally broken down by host / model / provider. Tokens are summed across usage_facts (excluding legacy_aggregate rows). 'cost' metric is not yet exposed per-hour — it lives in cost_breakdown (M3) because per-hour pricing needs fact-time price-version replay, not window-level.",
+        description: "Report hourly usage curves (24 buckets in the configured statistics timezone, including zero buckets) for one day, optionally broken down by harness / model / provider. Tokens are summed across usage_facts (excluding legacy_aggregate rows). 'cost' metric is not yet exposed per-hour — it lives in cost_breakdown (M3) because per-hour pricing needs fact-time price-version replay, not window-level.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -42,27 +42,27 @@ pub fn spec() -> ToolSpec {
                 },
                 "group_by": {
                     "type": "string",
-                    "enum": ["host", "model", "provider"],
+                    "enum": ["harness", "model", "provider"],
                     "description": "Dimension to aggregate by. `provider` uses provider_id; missing evidence is grouped under <unknown>."
                 },
-                "hosts": {
+                "harnesses": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Optional host filter (claude-code / codex / dsh). Empty/missing = all known hosts."
+                    "description": "Optional harness filter (claude-code / codex / dsh). Empty/missing = all known harnesses."
                 },
                 "models": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "kind": { "type": "string", "enum": ["host_raw"] },
-                            "host": { "type": "string" },
+                            "kind": { "type": "string", "enum": ["harness_raw"] },
+                            "harness": { "type": "string" },
                             "value": { "type": "string" }
                         },
-                        "required": ["kind", "host", "value"],
+                        "required": ["kind", "harness", "value"],
                         "additionalProperties": false
                     },
-                    "description": "Optional model filter — v1 only `kind: host_raw` (matches usage_facts.model_id, the host-scoped raw value). Empty/missing = all models."
+                    "description": "Optional model filter — v1 only `kind: harness_raw` (matches usage_facts.model_id, the harness-scoped raw value). Empty/missing = all models."
                 },
                 "metrics": {
                     "type": "array",
@@ -100,9 +100,9 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     // spec §6.4.1 `as_of_run_id` 三态——共享助手（`mcp::check_as_of_run_id`）。
     super::check_as_of_run_id(conn, args, &mut warnings)?;
 
-    // 模型 / 宿主 / provider 过滤转 SQL WHERE 子句。
-    let host_filter: Vec<String> = args
-        .get("hosts")
+    // 模型 / 执行环境 / provider 过滤转 SQL WHERE 子句。
+    let harness_filter: Vec<String> = args
+        .get("harnesses")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
@@ -114,25 +114,25 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
                 .filter_map(|v| {
                     let obj = v.as_object()?;
                     let kind = obj.get("kind").and_then(Value::as_str)?;
-                    if kind != "host_raw" {
-                        return None; // spec D3：v1 只 host_raw，其它非法
+                    if kind != "harness_raw" {
+                        return None; // spec D3：v1 只 harness_raw，其它非法
                     }
-                    let host = obj.get("host").and_then(Value::as_str)?;
+                    let harness = obj.get("harness").and_then(Value::as_str)?;
                     let value = obj.get("value").and_then(Value::as_str)?;
-                    Some((host.to_string(), value.to_string()))
+                    Some((harness.to_string(), value.to_string()))
                 })
                 .collect()
         })
         .unwrap_or_default();
 
     let series = match group_by {
-        "host" => series_by_host(conn, start_ms, end_ms, &host_filter)?,
-        "model" => series_by_model(conn, start_ms, end_ms, &host_filter, &model_filter)?,
-        "provider" => series_by_provider(conn, start_ms, end_ms, &host_filter)?,
+        "harness" => series_by_harness(conn, start_ms, end_ms, &harness_filter)?,
+        "model" => series_by_model(conn, start_ms, end_ms, &harness_filter, &model_filter)?,
+        "provider" => series_by_provider(conn, start_ms, end_ms, &harness_filter)?,
         other => {
             return Err(ToolError::new(
                 "invalid_argument",
-                format!("unknown `group_by`: {other} (expected host | model | provider)"),
+                format!("unknown `group_by`: {other} (expected harness | model | provider)"),
             ));
         }
     };
@@ -149,12 +149,12 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         })
         .unwrap_or_else(|| vec!["total_tokens", "output_tokens"]);
 
-    let totals_by_host = compute_totals_by_host(&series);
-    let peak_hour_by_host = compute_peak_hour_by_host(&series);
+    let totals_by_harness = compute_totals_by_harness(&series);
+    let peak_hour_by_harness = compute_peak_hour_by_harness(&series);
 
     let mut sequences: Vec<Value> = series
     .iter()
-    .map(|((host, model), buckets)| {
+    .map(|((harness, model), buckets)| {
         let total: i64 = buckets.values().map(HourlyCell::total).sum();
         let total_output: i64 = buckets.values().map(|c| c.output_tokens).sum();
         let hours: Vec<Value> = HOURS
@@ -180,19 +180,19 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         .collect();
         json!({
             "key": match group_by {
-                "host" => json!({ "host": host }),
+                "harness" => json!({ "harness": harness }),
                 "model" => json!({
-                    "host": host,
+                    "harness": harness,
                     "model": model,
-                    "identity_kind": "host_raw",
+                    "identity_kind": "harness_raw",
                 }),
-                "provider" => json!({ "host": host, "provider": model }),
+                "provider" => json!({ "harness": harness, "provider": model }),
                 _ => unreachable!(),
             },
             "hours": hours,
             "total_tokens": total,
             "total_output_tokens": total_output,
-            "peak_hour": peak_hour_by_host.get(host).cloned().unwrap_or(Value::Null),
+            "peak_hour": peak_hour_by_harness.get(harness).cloned().unwrap_or(Value::Null),
         })
     })
     .collect();
@@ -212,7 +212,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         "date": date,
         "group_by": group_by,
         "series": sequences,
-        "totals_by_host": totals_by_host,
+        "totals_by_harness": totals_by_harness,
     });
 
     let coverage = json!({
@@ -221,7 +221,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         "requested_to": ms_to_rfc3339_beijing(end_ms),
         "covered_from": ms_to_rfc3339_beijing(start_ms),
         "covered_to": ms_to_rfc3339_beijing(end_ms),
-        "missing_hosts": compute_missing_hosts(&series, &host_filter),
+        "missing_harnesses": compute_missing_harnesses(&series, &harness_filter),
     });
 
     Ok(build_envelope(
@@ -234,24 +234,24 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     ))
 }
 
-/// 内部序列形状：(host, model_or_wildcard) → 24 桶 cell。
+/// 内部序列形状：(harness, model_or_wildcard) → 24 桶 cell。
 type SeriesEntry = ((String, String), BTreeMap<String, HourlyCell>);
 
-fn series_by_host(
+fn series_by_harness(
     conn: &rusqlite::Connection,
     start_ms: i64,
     end_ms: i64,
-    host_filter: &[String],
+    harness_filter: &[String],
 ) -> Result<Vec<SeriesEntry>, ToolError> {
-    // host 轴 = model 轴按 host 折叠。用 `hourly_by_host_model`（真四桶）而非
-    // `hourly_by_host`（Stage 5b 导航查询只回单个 i64 总量——塞进 output_tokens
+    // harness 轴 = model 轴按 harness 折叠。用 `hourly_by_harness_model`（真四桶）而非
+    // `hourly_by_harness`（Stage 5b 导航查询只回单个 i64 总量——塞进 output_tokens
     // 会让 `total_output_tokens` 变成 `total_tokens` 的复制品，逐桶同样失真）。
-    // `hourly_by_host_model` 空 host_filter 即全 wired，无需在这里补默认。
+    // `hourly_by_harness_model` 空 harness_filter 即全 wired，无需在这里补默认。
     let map =
-        authority_query::hourly_by_host_model(conn, start_ms, end_ms, host_filter).map_err(too)?;
-    let mut by_host: BTreeMap<String, BTreeMap<String, HourlyCell>> = BTreeMap::new();
-    for ((host, _model), buckets) in map {
-        let cells = by_host.entry(host).or_default();
+        authority_query::hourly_by_harness_model(conn, start_ms, end_ms, harness_filter).map_err(too)?;
+    let mut by_harness: BTreeMap<String, BTreeMap<String, HourlyCell>> = BTreeMap::new();
+    for ((harness, _model), buckets) in map {
+        let cells = by_harness.entry(harness).or_default();
         for (hour, cell) in buckets {
             let acc = cells.entry(hour).or_insert(HourlyCell {
                 uncached_input_tokens: 0,
@@ -265,9 +265,9 @@ fn series_by_host(
             acc.output_tokens += cell.output_tokens;
         }
     }
-    Ok(by_host
+    Ok(by_harness
         .into_iter()
-        .map(|(host, cells)| ((host, "*".to_string()), cells))
+        .map(|(harness, cells)| ((harness, "*".to_string()), cells))
         .collect())
 }
 
@@ -275,32 +275,32 @@ fn series_by_model(
     conn: &rusqlite::Connection,
     start_ms: i64,
     end_ms: i64,
-    host_filter: &[String],
+    harness_filter: &[String],
     model_filter: &[(String, String)],
 ) -> Result<Vec<SeriesEntry>, ToolError> {
-    // `hourly_by_host_model` 本身对空 host_filter 就展开成全 wired 宿主（单宿主
-    // SQL + 内存合并）——曾经这里有一个 `if host_filter.is_empty() { return
-    // Ok(vec![]) }` 的守卫，让 `group_by=model` 不带 `hosts` 参数时**静默返回
-    // 空 series**，违反 schema 里「empty/missing = all known hosts」的承诺，也
+    // `hourly_by_harness_model` 本身对空 harness_filter 就展开成全 wired 执行环境（单执行环境
+    // SQL + 内存合并）——曾经这里有一个 `if harness_filter.is_empty() { return
+    // Ok(vec![]) }` 的守卫，让 `group_by=model` 不带 `harnesses` 参数时**静默返回
+    // 空 series**，违反 schema 里「empty/missing = all known harnesses」的承诺，也
     // 违反「缺证据不能伪装成零」。删掉。
     let map =
-        authority_query::hourly_by_host_model(conn, start_ms, end_ms, host_filter).map_err(too)?;
+        authority_query::hourly_by_harness_model(conn, start_ms, end_ms, harness_filter).map_err(too)?;
     let mut out: Vec<SeriesEntry> = map
         .into_iter()
-        .filter(|((host, model), _)| {
-            // host 过滤：空 = 不过滤。
-            if !host_filter.is_empty() && !host_filter.iter().any(|h| h == host) {
+        .filter(|((harness, model), _)| {
+            // harness 过滤：空 = 不过滤。
+            if !harness_filter.is_empty() && !harness_filter.iter().any(|h| h == harness) {
                 return false;
             }
-            // model 过滤：空 = 不过滤。`models[]` 的 `kind="host_raw"` + host + value
-            // 共同决定一格匹配——`(host, value)` 必须在 `model_filter` 命中。
-            // 其它 `kind` 在调用层已经过滤掉（仅 host_raw 进入这里）。
+            // model 过滤：空 = 不过滤。`models[]` 的 `kind="harness_raw"` + harness + value
+            // 共同决定一格匹配——`(harness, value)` 必须在 `model_filter` 命中。
+            // 其它 `kind` 在调用层已经过滤掉（仅 harness_raw 进入这里）。
             if model_filter.is_empty() {
                 true
             } else {
                 model_filter
                     .iter()
-                    .any(|(mh, mv)| mh == host && mv == model)
+                    .any(|(mh, mv)| mh == harness && mv == model)
             }
         })
         .collect();
@@ -312,26 +312,26 @@ fn series_by_provider(
     conn: &rusqlite::Connection,
     start_ms: i64,
     end_ms: i64,
-    host_filter: &[String],
+    harness_filter: &[String],
 ) -> Result<Vec<SeriesEntry>, ToolError> {
-    let map = authority_query::hourly_by_host_provider(conn, start_ms, end_ms, host_filter).map_err(too)?;
+    let map = authority_query::hourly_by_harness_provider(conn, start_ms, end_ms, harness_filter).map_err(too)?;
     Ok(map.into_iter().collect())
 }
 
-fn compute_totals_by_host(series: &[SeriesEntry]) -> BTreeMap<String, i64> {
+fn compute_totals_by_harness(series: &[SeriesEntry]) -> BTreeMap<String, i64> {
     let mut out: BTreeMap<String, i64> = BTreeMap::new();
-    for ((host, _), buckets) in series {
-        *out.entry(host.clone()).or_default() += buckets.values().map(HourlyCell::total).sum::<i64>();
+    for ((harness, _), buckets) in series {
+        *out.entry(harness.clone()).or_default() += buckets.values().map(HourlyCell::total).sum::<i64>();
     }
     out
 }
 
-fn compute_peak_hour_by_host(series: &[SeriesEntry]) -> BTreeMap<String, Value> {
+fn compute_peak_hour_by_harness(series: &[SeriesEntry]) -> BTreeMap<String, Value> {
     let mut best: BTreeMap<String, (i64, &str)> = BTreeMap::new();
-    for ((host, _), buckets) in series {
+    for ((harness, _), buckets) in series {
         for (h, cell) in buckets {
             let t = cell.total();
-            let cur = best.entry(host.clone()).or_insert((0, "00"));
+            let cur = best.entry(harness.clone()).or_insert((0, "00"));
             if t > cur.0 {
                 *cur = (t, h);
             }
@@ -340,10 +340,10 @@ fn compute_peak_hour_by_host(series: &[SeriesEntry]) -> BTreeMap<String, Value> 
     best.into_iter().map(|(h, (_, hh))| (h, json!(hh))).collect()
 }
 
-fn compute_missing_hosts(series: &[SeriesEntry], host_filter: &[String]) -> Vec<String> {
+fn compute_missing_harnesses(series: &[SeriesEntry], harness_filter: &[String]) -> Vec<String> {
     let present: std::collections::BTreeSet<&str> =
         series.iter().map(|((h, _), _)| h.as_str()).collect();
-    host_filter
+    harness_filter
         .iter()
         .filter(|h| !present.contains(h.as_str()))
         .cloned()
@@ -401,7 +401,7 @@ mod tests {
         let home = tmp_home("empty");
         seed_db(&home);
         let env = run(
-            &json!({ "date": "2026-09-07", "group_by": "host" }),
+            &json!({ "date": "2026-09-07", "group_by": "harness" }),
             &home,
         )
         .unwrap();
@@ -419,7 +419,7 @@ mod tests {
         let home = tmp_home("bad-date");
         seed_db(&home);
         let err = run(
-            &json!({ "date": "not-a-date", "group_by": "host" }),
+            &json!({ "date": "not-a-date", "group_by": "harness" }),
             &home,
         )
         .unwrap_err();
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn unknown_model_kind_is_silently_ignored_not_hard_error() {
-        // spec §7.2 D3：v1 只支持 kind=host_raw，其它值（含 "canonical"）
+        // spec §7.2 D3：v1 只支持 kind=harness_raw，其它值（含 "canonical"）
         // 合法但不识别。spec 没有规定硬错误——选择静默过滤，不污染响应。
         let home = tmp_home("bad-kind");
         seed_db(&home);
@@ -451,7 +451,7 @@ mod tests {
                 "date": "2026-09-07",
                 "group_by": "model",
                 "models": [
-                    { "kind": "canonical", "host": "x", "value": "y" }
+                    { "kind": "canonical", "harness": "x", "value": "y" }
                 ]
             }),
             &home,
@@ -479,7 +479,7 @@ mod tests {
         let err = run(
             &json!({
                 "date": "2026-09-07",
-                "group_by": "host",
+                "group_by": "harness",
                 "as_of_run_id": "never-happened"
             }),
             &home,
@@ -510,7 +510,7 @@ mod tests {
         let env = run(
             &json!({
                 "date": "2026-09-07",
-                "group_by": "host",
+                "group_by": "harness",
                 "as_of_run_id": "run_old"
             }),
             &home,
@@ -528,7 +528,7 @@ mod tests {
     fn seed_fact(
         db: &AuthorityDb,
         fid: &str,
-        host: &str,
+        harness: &str,
         model: &str,
         ts_ms: i64,
         u: i64,
@@ -545,23 +545,23 @@ mod tests {
             .unwrap();
         db.conn()
             .execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                      source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                      event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                      output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1, ?2, 'm', 'sess', ?1, 'assistant-usage', NULL, ?3, ?4, 0,
                      ?5, ?6, ?7, ?8, 'run', 1, 1)",
-                rusqlite::params![fid, host, model, ts_ms, u, cr, cw, o],
+                rusqlite::params![fid, harness, model, ts_ms, u, cr, cw, o],
             )
             .unwrap();
     }
 
     /// 真机验证抓出的两个缺陷（2026-09-08）：
-    /// (A) `group_by=host` 曾把每小时单个 i64 总量塞进 `output_tokens` 槽 →
+    /// (A) `group_by=harness` 曾把每小时单个 i64 总量塞进 `output_tokens` 槽 →
     ///     `total_output_tokens == total_tokens`、逐桶亦然；
-    /// (B) `group_by=model` 不带 `hosts` 参数曾静默返回空 series。
+    /// (B) `group_by=model` 不带 `harnesses` 参数曾静默返回空 series。
     #[test]
-    fn host_axis_reports_real_output_split_and_model_axis_needs_no_hosts_arg() {
+    fn harness_axis_reports_real_output_split_and_model_axis_needs_no_harnesses_arg() {
         let home = tmp_home("axis-fix");
         seed_db(&home);
         let db = AuthorityDb::open(
@@ -576,13 +576,13 @@ mod tests {
         seed_fact(&db, "f2", "codex", "gpt-5-codex", nine + 60_000, 2_000, 10_000, 0, 3_000);
         drop(db);
 
-        // (A) host 轴：output 是总量的一小部分，不是复制品。
-        let env = run(&json!({ "date": "2026-09-07", "group_by": "host" }), &home).unwrap();
+        // (A) harness 轴：output 是总量的一小部分，不是复制品。
+        let env = run(&json!({ "date": "2026-09-07", "group_by": "harness" }), &home).unwrap();
         let series = env["data"]["series"].as_array().unwrap();
         assert_eq!(series.len(), 2, "claude-code + codex");
         let cc = series
             .iter()
-            .find(|s| s["key"]["host"] == "claude-code")
+            .find(|s| s["key"]["harness"] == "claude-code")
             .unwrap();
         let total = cc["total_tokens"].as_i64().unwrap();
         let out = cc["total_output_tokens"].as_i64().unwrap();
@@ -599,10 +599,10 @@ mod tests {
         assert_eq!(h09["output_tokens"].as_i64().unwrap(), 5_000);
         assert_eq!(h09["total_tokens"].as_i64().unwrap(), 906_100);
 
-        // (B) model 轴，无 `hosts` 参数 → 仍返回所有 wired 宿主的 model 序列。
+        // (B) model 轴，无 `harnesses` 参数 → 仍返回所有 wired 执行环境的 model 序列。
         let env = run(&json!({ "date": "2026-09-07", "group_by": "model" }), &home).unwrap();
         let series = env["data"]["series"].as_array().unwrap();
-        assert_eq!(series.len(), 2, "两个宿主各一个 model，不带 hosts 参数不该是空");
+        assert_eq!(series.len(), 2, "两个执行环境各一个 model，不带 harnesses 参数不该是空");
         assert!(series.iter().any(|s| s["key"]["model"] == "claude-sonnet-5"));
         assert!(series.iter().any(|s| s["key"]["model"] == "gpt-5-codex"));
 

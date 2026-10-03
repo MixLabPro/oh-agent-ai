@@ -4,11 +4,11 @@
 
 **目标版本：** v1.0.0-beta.5 之后的 Trust 增量
 
-**前置规格：** [Findings 2.0：本地 Agent 数据访问与出境审计](FINDINGS_TRUST_EGRESS_MONITORING_SPEC.md)、[Host Manifest DSL](../HOST_MANIFEST_DSL_SPEC.md)、[Windows Trust Runtime](WINDOWS_TRUST_RUNTIME_SPEC.md)。若本规格与前置规格冲突，以 Findings 2.0 的离线、只读、脱敏和证据等级约束为准。
+**前置规格：** [Findings 2.0：本地 Agent 数据访问与出境审计](FINDINGS_TRUST_EGRESS_MONITORING_SPEC.md)、[Harness Manifest DSL](../HARNESS_MANIFEST_DSL_SPEC.md)、[Windows Trust Runtime](WINDOWS_TRUST_RUNTIME_SPEC.md)。若本规格与前置规格冲突，以 Findings 2.0 的离线、只读、脱敏和证据等级约束为准。
 
 ## 0. 决策摘要
 
-Trust 不应以“这是 ZCode”或“这是 MiniMax Code”作为风险判断条件。宿主只提供发现根、已审计能力与可选设置映射；统一关联器只消费行为特征链：
+Trust 不应以“这是 ZCode”或“这是 MiniMax Code”作为风险判断条件。执行环境只提供发现根、已审计能力与可选设置映射；统一关联器只消费行为特征链：
 
 ```text
 范围读取 / 枚举 → 归档或索引状态 → 上传准备 → 出网尝试 → 字节发送 → 可验证回执
@@ -26,8 +26,8 @@ Trust 不应以“这是 ZCode”或“这是 MiniMax Code”作为风险判断�
 |---|---|---|
 | `crates/agent-vitals-runtime/src/trust_audit.rs` | artifact 历史审计；ZCode checkpoint、MiniMax workspace-index adapter | Profile 只能选择一个 adapter，不能表达复合特征；adapter 输出缺少来源可信度 |
 | `crates/agent-vitals-runtime/src/trust_runtime_monitor.rs` | macOS `lsof` 点时快照；Git history + archive/index 写入 + TCP 关联 | 无持续事件流、无字节数、无 proxy 最终目的地、无 verified process group |
-| `crates/agent-vitals-hosts/src/hosts/generic/manifest.rs` | `trust` 根/文件特征与受限 adapter allowlist | 缺少多 adapter、版本、能力上限与 schema-fingerprint 声明 |
-| `crates/agent-vitals-data/src/trust_correlator.rs` | 同 host/actor/workspace/window 的 SV702、SV705、SV709 关联 | 对“工作区归档但尚无 Git history”只能保留 Observation，缺少通用覆盖/缺环解释 |
+| `crates/agent-vitals-harnesses/src/harnesses/generic/manifest.rs` | `trust` 根/文件特征与受限 adapter allowlist | 缺少多 adapter、版本、能力上限与 schema-fingerprint 声明 |
+| `crates/agent-vitals-data/src/trust_correlator.rs` | 同 harness/actor/workspace/window 的 SV702、SV705、SV709 关联 | 对“工作区归档但尚无 Git history”只能保留 Observation，缺少通用覆盖/缺环解释 |
 | `crates/agent-vitals-runtime/src/mcp/trust_profiles.rs` | 受限 Profile 草案、校验、stage，UI-only approve | 未展示 feature 矩阵和各 adapter 的最高证据等级 |
 
 本规格不改变产品的离线承诺：任何读取都在本机完成；原始路径、对象 key、文件内容、消息、命令、请求正文、凭据和 TLS 明文均不得写入 authority、MCP、导出或诊断包。
@@ -61,20 +61,20 @@ MiniMax 的现有 workspace-index adapter 属于第二类。它是可复用 layo
 
 ### 2.3 `.git`、备份与归档的处理
 
-扫描器只能在已批准宿主 root 内检查以下结构类别：
+扫描器只能在已批准执行环境 root 内检查以下结构类别：
 
 - Git：objects、packs、LFS、logs、reflog、refs、bundle；
 - 归档：tar、tgz、zip、zstd、bundle、enc、manifest；
 - 状态：SQLite、LevelDB/RocksDB 元数据、JSON state、队列/retry 文件；
-- 历史：宿主明确命名的、固定上限的迁移备份。
+- 历史：执行环境明确命名的、固定上限的迁移备份。
 
-不得递归扫描用户所有项目、家目录或任意 `.git`；不得因用户自己的备份工具、依赖缓存、模型下载或普通附件压缩包产生 Trust Finding。必须有“宿主 root + 特征链关联”才可进入 Incident。
+不得递归扫描用户所有项目、家目录或任意 `.git`；不得因用户自己的备份工具、依赖缓存、模型下载或普通附件压缩包产生 Trust Finding。必须有“执行环境 root + 特征链关联”才可进入 Incident。
 
 ## 3. Profile 与 adapter 合同
 
 ### 3.1 从单 adapter 迁移到 feature 集合
 
-Host Manifest v1 的 `trust.adapter` 是当前兼容字段。新增可选 `trust.evidence_adapters`，取代它作为未来主字段：
+Harness Manifest v1 的 `trust.adapter` 是当前兼容字段。新增可选 `trust.evidence_adapters`，取代它作为未来主字段：
 
 ```json
 {
@@ -119,7 +119,7 @@ Host Manifest v1 的 `trust.adapter` 是当前兼容字段。新增可选 `trust
 
 ### 3.3 监测优先级不是“有罪推定”
 
-Profile 可声明闭集 `watch_priority: normal|enhanced`。它只影响覆盖提示、运行时检查排程和人工复核队列；不得参与 Observation 的 `evidence_level`、`evidence_origin`、Finding 严重性、Finding 创建或通知资格。`enhanced` 只能表示某宿主值得更密集地验证，不表示当前机器已经发生上传。
+Profile 可声明闭集 `watch_priority: normal|enhanced`。它只影响覆盖提示、运行时检查排程和人工复核队列；不得参与 Observation 的 `evidence_level`、`evidence_origin`、Finding 严重性、Finding 创建或通知资格。`enhanced` 只能表示某执行环境值得更密集地验证，不表示当前机器已经发生上传。
 
 ## 4. Observation 与关联规则
 
@@ -139,7 +139,7 @@ Profile 可声明闭集 `watch_priority: normal|enhanced`。它只影响覆盖�
 
 ### 4.2 通用 Incident 最低关联
 
-关联键仍是 `(machine_namespace, host, actor_id 或 verified_process_group, workspace_ref, time_window)`。新增特征链约束：
+关联键仍是 `(machine_namespace, harness, actor_id 或 verified_process_group, workspace_ref, time_window)`。新增特征链约束：
 
 - E1 package + `git_history_scope`：可判 SV702；
 - E1 package + E2 upload preparation：显示“已打包并准备上传”，默认不通知；
@@ -157,7 +157,7 @@ Profile 可声明闭集 `watch_priority: normal|enhanced`。它只影响覆盖�
 推荐流程：
 
 1. 创建或选择一次性实验仓；可包含虚构 canary 和仅在 Git 历史中存在的虚构条目。
-2. 记录宿主版本、Profile revision、开关状态类别和首次基线；不保存实际开关文本或仓库路径。
+2. 记录执行环境版本、Profile revision、开关状态类别和首次基线；不保存实际开关文本或仓库路径。
 3. 用户自行完成“开”与“关”两次运行；产品不替用户改设置、不发送 prompt、不启动代理。
 4. 每次运行只采集 artifact diff、结构性状态、允许的网络元数据和 runtime 分类计数。
 5. 结果只报告可比性、链路阶段和缺环；canary 仅在用户本地展示，绝不进入 authority/MCP/export。
@@ -186,7 +186,7 @@ Profile 可声明闭集 `watch_priority: normal|enhanced`。它只影响覆盖�
 
 ### Phase B：组合式 Profile
 
-1. Host Manifest 支持 `evidence_adapters`；保留 `adapter` 兼容解析与明确迁移错误。
+1. Harness Manifest 支持 `evidence_adapters`；保留 `adapter` 兼容解析与明确迁移错误。
 2. Runtime 将 `TrustAuditProfile` 从单 enum 改为稳定排序的 feature 集合；adapter 输出合并时按 observation ID 去重。
 3. MCP/UI 展示 feature 矩阵、最高等级、平台可用性和批准边界。
 
@@ -208,8 +208,8 @@ Profile 可声明闭集 `watch_priority: normal|enhanced`。它只影响覆盖�
 
 ## 8. 非目标与禁止项
 
-- 不自动制造、上传或验证 canary；不修改宿主隐私开关、二进制、代理、证书、防火墙或系统安全配置。
+- 不自动制造、上传或验证 canary；不修改执行环境隐私开关、二进制、代理、证书、防火墙或系统安全配置。
 - 不把“云端可解密”表述为“用于训练/出售/人工浏览”。
 - 不让热插拔 Manifest 获得任意 SQL、脚本、正则、网络请求或本机原始证据读取权。
 - 不因缺少 runtime sensor、目录不存在、数据库为零行或没有 `.enc` 就输出“从未上传”。
-- 不把当前 ZCode/MiniMax layout 作为其他宿主的默认真相；新 layout 必须有版本、公开/用户提供的结构证据和脱敏 fixture。
+- 不把当前 ZCode/MiniMax layout 作为其他执行环境的默认真相；新 layout 必须有版本、公开/用户提供的结构证据和脱敏 fixture。

@@ -36,9 +36,25 @@ vm.createContext(sandbox);
 vm.runInContext(built.outputFiles[0].text, sandbox);
 const i18n = sandbox.module.exports;
 assert.deepEqual([...i18n.translationIntegrityIssues()], [], "English and Chinese resources must share keys and interpolation parameters");
+const pluginHook = readFileSync(path.join(ui, "react/src/app/plugins/usePlugin.tsx"), "utf8");
+for (const name of ["City", "Metrics"]) {
+  for (const [key, en, zh] of [
+    ["plugin.toolbar", `${name} toolbar`, `${name} 工具栏`],
+    ["plugin.content", `${name} plugin content`, `${name} 插件内容`],
+    ["plugin.ready", `${name} ready`, `${name} 已就绪`],
+    ["plugin.retryNamed", `Retry ${name}`, `重试 ${name}`],
+    ["plugin.loading", `Loading ${name}…`, `正在加载 ${name}…`],
+    ["plugin.diagnostics", "Local diagnostics", "本地诊断"],
+  ]) {
+    assert.equal(i18n.message(key, "en", { name }), en);
+    assert.equal(i18n.message(key, "zh-Hans", { name }), zh);
+    assert.ok(pluginHook.includes(`"${key}"`), `${key} must be connected to the generic plugin hook`);
+  }
+}
+assert.ok(!/[\u3400-\u9fff]/u.test(pluginHook), "plugin host must not hardcode Chinese presentation strings");
 assert.equal(i18n.message("billing.billMeteredActual", "en"), "Metered actual");
 assert.equal(i18n.message("billing.billSubscription", "en"), "Subscription");
-assert.notEqual(i18n.message("billing.billMeteredActual", "en"), i18n.message("billing.billHostBilled", "en"), "actual metered charges must not be confused with host-recorded bills");
+assert.notEqual(i18n.message("billing.billMeteredActual", "en"), i18n.message("billing.billHarnessBilled", "en"), "actual metered charges must not be confused with harness-recorded bills");
 assert.match(i18n.message("billing.minorUnitsUnknown", "en", { currency: "JPY", amount: 100 }), /currency scale unavailable/, "unknown currency precision must not be silently converted");
 assert.equal(i18n.message("source.state.needs_attention", "en"), "Needs attention");
 assert.match(i18n.message("source.deleteScope", "en"), /Original logs, manual bills and price cards remain/, "source deletion scope must be legible in English");
@@ -110,7 +126,7 @@ const settings = readFileSync(path.join(ui, "react/src/features/settings/Setting
 const statisticsSection = settings.split("function StatisticsDataSection(")[1]?.split("type AboutSectionProps")[0];
 assert.ok(statisticsSection, "statistics and data settings must be present");
 assert.doesNotMatch(statisticsSection, /[\p{Script=Han}]/u, "statistics settings must not embed Chinese-only copy");
-assert.match(settings, /const header = \["统计月份", "宿主", "服务商"/, "existing CSV column contract must remain stable");
+assert.match(settings, /const header = \["统计月份", "执行环境", "服务商"/, "existing CSV column contract must remain stable");
 const billingSection = settings.split("function BillingSection(")[1]?.split("type BudgetSectionProps")[0];
 assert.ok(billingSection, "billing section must be present");
 assert.doesNotMatch(billingSection, /[\p{Script=Han}]/u, "the billing settings UI must not embed Chinese-only copy");

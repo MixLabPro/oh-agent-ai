@@ -32,7 +32,7 @@
 | `apps/desktop/ui-dev/react/src/lib/tauri.ts` | 已有带 currency/basis 的金额结构；部分月份计算和 fallback 写死上海时区 | 复用现有金额契约；消除错误默认，保留证据边界 |
 | `apps/desktop/ui-dev/react/src/features/sessions/SessionsPage.tsx` | 默认统计时区为上海 | 改为统一解析的统计时区 |
 | `crates/agent-vitals-domain/src/domain/cost/billing.rs` | 已有 `fx_estimate` 换算 | 按价卡与 FX V2 将其移出新计价路径；预发布派生值失效重建 |
-| `crates/agent-vitals-query/src/query/summary/host_amounts.rs` | 有 `fair-market-fallback-fx` 及结算币兜底 | 不把估算结算币当原始付款币种 |
+| `crates/agent-vitals-query/src/query/summary/harness_amounts.rs` | 有 `fair-market-fallback-fx` 及结算币兜底 | 不把估算结算币当原始付款币种 |
 | `crates/agent-vitals-billing/src/billing/budget.rs` | 估算预算已有跨币订阅折算 | 与原币种账单分开；显式说明预算算法 |
 | `crates/agent-vitals-runtime/tests/q_acceptance.rs` | 已有折算归因验收 | 以 V2 规则替换旧断言，保留事实/账单守恒和 Python/Rust parity 验收 |
 
@@ -100,7 +100,7 @@
 | Allocated subscription cost / 订阅分摊成本 | 月费按既定规则分摊 | 当天实际扣费 |
 | Unpriced usage / 未计价用量 | 有用量，缺价格或必要依据 | 零费用 |
 
-这些是展示分类，不要求直接新增或重命名既有 basis 枚举；实施前提交既有枚举到展示分类的完整映射测试。`host_billed` 也不得仅凭名称被标记 paid。
+这些是展示分类，不要求直接新增或重命名既有 basis 枚举；实施前提交既有枚举到展示分类的完整映射测试。`harness_billed` 也不得仅凭名称被标记 paid。
 
 ### BILL-02 汇总、覆盖与重复计算（P0）
 

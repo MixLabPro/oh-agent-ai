@@ -47,24 +47,24 @@ def _shadow_map(out):
 
 
 def _enabled_stage(s):
-    """Enabled：所属 plugin / host 配置是否启用。
+    """Enabled：所属 plugin / harness 配置是否启用。
 
-    **拿不到宿主配置时是 unknown，不是 false。**把「问不到」渲染成「关着」，
+    **拿不到执行环境配置时是 unknown，不是 false。**把「问不到」渲染成「关着」，
     用户会去开一个本来就开着的开关，然后以为自己修好了。
     """
     reason = s.get("loaded_reason") or ""
     if s.get("enabled_state") is False:
-        return "false", "explicitly disabled in host configuration"
+        return "false", "explicitly disabled in harness configuration"
     if reason == "plugin-not-enabled":
         return "false", "owning plugin is absent from enabledPlugins"
     if reason == "plugin-state-unknown":
-        return "unknown", "host configuration is unreadable; plugin state is unknown"
+        return "unknown", "harness configuration is unreadable; plugin state is unknown"
     if reason.startswith("workbuddy-mode-filtered"):
         return "false", "filtered by welcome mode: %s" % reason.split(":", 1)[-1]
     if reason == "openclaw-config-disabled":
         return "false", "disabled in OpenClaw configuration"
-    if s.get("enabled_state") is None and s["host_family"] in ("openclaw", "workbuddy"):
-        return "unknown", "this host has no per-skill enablement interface"
+    if s.get("enabled_state") is None and s["harness_family"] in ("openclaw", "workbuddy"):
+        return "unknown", "this harness has no per-skill enablement interface"
     return "true", s.get("level") or reason or "—"
 
 
@@ -102,7 +102,7 @@ def funnel(s, out, budget_at_risk):
                                 ("description", s.get("has_description"))) if not ok]
         rows.append(("Discoverable", "at_risk", "frontmatter is missing %s" % ", ".join(miss)))
     elif not b.get("available"):
-        rows.append(("Discoverable", "unknown", "this host does not expose a description budget"))
+        rows.append(("Discoverable", "unknown", "this harness does not expose a description budget"))
     elif s["name"] in budget_at_risk:
         rows.append(("Discoverable", "at_risk",
                      "budget is exceeded by %d characters; this skill is in the estimated risk band" % b["over_by_chars"]))
@@ -110,11 +110,11 @@ def funnel(s, out, budget_at_risk):
         rows.append(("Discoverable", "true", "budget is within limit and frontmatter is complete"))
 
     # Selected 没有任何直接数据源。**能给的只有 candidates，不是结论。**
-    rows.append(("Selected", "unknown", "host does not expose routing data; only overlap candidates are available"))
+    rows.append(("Selected", "unknown", "harness does not expose routing data; only overlap candidates are available"))
 
     t = out.get("trigger_data", {}) or {}
     if not t.get("available"):
-        rows.append(("Triggered", "unknown", "this host does not expose trigger data"))
+        rows.append(("Triggered", "unknown", "this harness does not expose trigger data"))
     elif (s.get("usage_count") or 0) > 0:
         last = s.get("last_used_days_ago")
         if last is None:
@@ -158,7 +158,7 @@ def explain_record(out, s, budget_at_risk, overlap_min=DEFAULT_OVERLAP_MIN):
         "name": s["name"],
         "namespace": s.get("namespace"),
         "path": s["path"],
-        "host": s["host_family"],
+        "harness": s["harness_family"],
         "status": ("NOT IN EFFECT" if blocked in ("Enabled", "Loaded")
                    else "NEVER TRIGGERED" if blocked == "Triggered"
                    else "IN EFFECT"),
@@ -206,13 +206,13 @@ def _explain_fix_lines(rec, out):
         ])
     st = rec["_states"]
     if st["Enabled"][0] == "false":
-        return ["1. Enable it in the host configuration (Claude Code: enabledPlugins)",
+        return ["1. Enable it in the harness configuration (Claude Code: enabledPlugins)",
                 "2. If unneeded, remove the on-disk copy to avoid future confusion"]
     if st["Enabled"][0] == "unknown":
-        return ["1. Make the host configuration readable; otherwise this stage remains unknown",
+        return ["1. Make the harness configuration readable; otherwise this stage remains unknown",
                 "   Claude Code requires a readable ~/.claude.json"]
     if st["Loaded"][0] == "false":
-        return ["1. Move it to a location scanned by this host (see the reason above)"]
+        return ["1. Move it to a location scanned by this harness (see the reason above)"]
     lines = []
     if st["Discoverable"][0] == "at_risk":
         if "frontmatter" in st["Discoverable"][1]:

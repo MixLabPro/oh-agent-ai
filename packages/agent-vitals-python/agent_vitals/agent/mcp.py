@@ -6,8 +6,8 @@
 Python 镜像，由 `tests/test_mcp.py` 交叉锁定。
 
 命名约定目前只在 Claude Code 上被证实为三段式 `mcp__<server>__<tool>`；Codex 的
-`McpToolCall` 真实 `name` 形状未经真机语料验证，本模块不为任何宿主的 wire 形状
-背书——调用方决定要不要在某个宿主上使用它。
+`McpToolCall` 真实 `name` 形状未经真机语料验证，本模块不为任何执行环境的 wire 形状
+背书——调用方决定要不要在某个执行环境上使用它。
 """
 from collections import defaultdict
 

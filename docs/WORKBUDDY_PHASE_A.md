@@ -10,7 +10,7 @@
 2. 正确解析真机 SQLite/audit log 的 epoch-ms 时间戳，使会话日期范围可用。
 3. fixture 的列类型、时间戳类型和 credit 数值量级与真机一致。
 
-本阶段不接 SQL authority、不改 `FACT_HOSTS`、不让 WorkBuddy 进入统一 sessions/金额/预算视图。
+本阶段不接 SQL authority、不改 `FACT_HARNESSES`、不让 WorkBuddy 进入统一 sessions/金额/预算视图。
 
 ## 已核实的输入事实
 
@@ -29,7 +29,7 @@
   "cash_cny": null,
   "nominal_cny": 88.19,
   "nominal_basis": "pack-price-public:1000cr=50CNY@2026-07-01",
-  "host_billed": true
+  "harness_billed": true
 }
 ```
 
@@ -49,12 +49,12 @@
 3. 结果在 `2000-01-01T00:00:00Z` 至 `now + 24h` 之外：返回 `null` 并计入 `attempts`。
 4. bool、null、对象及其他类型：返回 `null`。
 
-不得根据位数猜测秒或毫秒；该宿主的已知事实只有毫秒。归一后的 ISO 串可按字典序排序。
+不得根据位数猜测秒或毫秒；该执行环境的已知事实只有毫秒。归一后的 ISO 串可按字典序排序。
 
 ## 实施项
 
 1. 更新 `fixtures/workbuddy/build_workbuddy_fixture.py`：`sessions` 的 `created_at`/`updated_at` 用 INTEGER，`session_usage` 含 `updated_at`，audit log timestamp 使用 epoch-ms 整数，credit 调整到真机量级；同步 builder 自校验。
-2. 在 Rust `hosts/workbuddy/sources/mod.rs` 与对应 Python 镜像中实现相同的时间戳归一，并接入 `date_span_of` 与会话元数据。
+2. 在 Rust `harnesses/workbuddy/sources/mod.rs` 与对应 Python 镜像中实现相同的时间戳归一，并接入 `date_span_of` 与会话元数据。
 3. 在 Rust/Python 的 `cost_of` 实现新成本对象，删除含义错误的 `cny`。
 4. 重新冻结六条既有 Rust/Python 差分输出，并新增针对整数、越界、错误货币键和实付隔离的回归。
 5. 勘误 [WORKBUDDY_INTEGRATION.md](./WORKBUDDY_INTEGRATION.md)：`credit_json` 明确为 credit；更新总量、成本对象和对本文件的引用。
@@ -71,5 +71,5 @@
 
 - 不新增 `BillingBasis` 枚举值。
 - 不动 `assets/pricing.json`，不写入自动账单。
-- 不接统一会话、SQL authority、日历、by_host、by_provider 或预算。
+- 不接统一会话、SQL authority、日历、by_harness、by_provider 或预算。
 - 不修改待删除的 `r2a_store.rs`，不重建 wasm，不碰 DSH tab，也不用 traces 猜会话。

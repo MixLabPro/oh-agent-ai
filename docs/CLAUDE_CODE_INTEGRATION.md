@@ -1,18 +1,18 @@
-# Claude Code 宿主接入：调研结论与适配边界
+# Claude Code 执行环境接入：调研结论与适配边界
 
 > 采集 2026-09-01。本机 Claude Code 全部会话 JSONL 实测。
-> 关联：[CLAUDE_CODE_CORPUS.md](./CLAUDE_CODE_CORPUS.md)（数据面快照）· [VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md](./VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md)（v0.5 架构）· [MENUBAR_MULTIHOST_NAVIGATION_SPEC.md](./MENUBAR_MULTIHOST_NAVIGATION_SPEC.md)（多宿主导航）。
+> 关联：[CLAUDE_CODE_CORPUS.md](./CLAUDE_CODE_CORPUS.md)（数据面快照）· [VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md](./VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md)（v0.5 架构）· [MENUBAR_MULTIHARNESS_NAVIGATION_SPEC.md](./MENUBAR_MULTIHARNESS_NAVIGATION_SPEC.md)（多执行环境导航）。
 > 状态：**调研结论 + 适配器已落地**（2026-09-02 更新）。数据面证据已实测（2026-09-01 二次
 > 抽查修正：日期轴原生、事件类型 12 种、usage 富字段、tool_result 三态——见 §2）；接入层级、
 > 规则能力矩阵、provenance、SessionStore、WASM 五个问题已定案（P0 修正版）；§7 工具名规范化
 > 与 §8 turn 重建状态机已**实现并验证**（§11 工作项 1/2/5，`claude_code_evidence.rs` /
 > `claude_evidence.py` + 三份 leaf fixture 差分钉住，见 §10/§11）。§4 的
-> `TimelineEntry.provenance` + `source_type` 按 host 生成、§3 的 `ToolResultObservation.failed`
+> `TimelineEntry.provenance` + `source_type` 按 harness 生成、§3 的 `ToolResultObservation.failed`
 > 已实现进 `agent-vitals-core`（core 单测 + golden 差分 15/15 全绿，输出字节不变，见 §4）。
 > 评审结论：v0.5 通用 Core 不修改的方向**成立**。§5 SessionStore 接入已**落地**（2026-09-02，
 > §11 工作项 7/8，见 §5——三源并行 `all()`、`source_statuses["claude-code"]` 三态、
-> workbench 会话 tab 宿主 chip）；仅剩 §9 成本部分（§11 工作项 6，需价表）与 menubar
-> 导航第三宿主行（MENUBAR spec 自证两行，另行跟进）。
+> workbench 会话 tab 执行环境 chip）；仅剩 §9 成本部分（§11 工作项 6，需价表）与 menubar
+> 导航第三执行环境行（MENUBAR spec 自证两行，另行跟进）。
 
 ## 0. 结论
 
@@ -209,8 +209,8 @@ pub struct ToolResultObservation {
    原样透传。映射是**保真的**：`evidence::Provenance`（`&'static str`，每事件热路省分配）
    → `vitals_core::provenance::Provenance`（`String`/`Vec<SignalId>`，公开模型）——Derived
    恒 Derived、Estimated 恒 Estimated，**绝落不进 Measured**。
-2. **`source_type` 改为按 `SessionMeta.host_id` 生成**，不再硬编码 `"dsh_session"`：
-   `dsh_session` / `codex_session` / `claude_code_session`，未登记宿主走 `{host}_session`
+2. **`source_type` 改为按 `SessionMeta.harness_id` 生成**，不再硬编码 `"dsh_session"`：
+   `dsh_session` / `codex_session` / `claude_code_session`，未登记执行环境走 `{harness}_session`
    通用形状，一律不许落回 dsh 名下。
 
 ```rust
@@ -222,7 +222,7 @@ pub struct TimelineEntry<T> {
 ```
 
 回归由三条 core 单测钉住（都过）：
-- `source_type_follows_host_id_not_hardcoded_dsh`——codex 输入 → `codex_session`，非 dsh；
+- `source_type_follows_harness_id_not_hardcoded_dsh`——codex 输入 → `codex_session`，非 dsh；
 - `derived_provenance_passes_through_not_as_measured`——Derived 过桥不降级 Measured；
 - `tool_result_failed_flag_carries_through_bridge`——`failed` 随桥进 attributes。
 
@@ -232,9 +232,9 @@ DSH/Codex 现有输入全部 Measured，输出字节不变（golden 差分 15/15
 
 `src/agent/r2a_store.rs` 曾对 Codex/DSH **硬编码分发**（`codex_cache_path`/
 `dsh_cache_path`、`codex_source_fingerprints`/`dsh_source_fingerprints`、`source_statuses`
-均按宿主写死）。已接入 Claude（本计划的「第三源」）：
+均按执行环境写死）。已接入 Claude（本计划的「第三源」）：
 
-- `SessionStore::claude_code(home)` + `sessions list --host-kind claude-code` ✅
+- `SessionStore::claude_code(home)` + `sessions list --harness-kind claude-code` ✅
 - `sessions read` 接受 Claude `SessionKey`（渲染走 pretty JSON，不落 codex HTML 渲染器）✅
 - `SessionStore::all()` 三源并行合并（`thread::scope` 三 spawn；sort_key 字典序 →
   claude-code 在合并列表最前；`source_statuses` 键序 `{claude-code, codex, dsh}` 稳定）✅
@@ -244,11 +244,11 @@ DSH/Codex 现有输入全部 Measured，输出字节不变（golden 差分 15/15
   ok；files>0 但 built==0 → unavailable，CLI 报类型化错误码而非空页，§4.3 同款）✅
 - list/read/filter/pagination 测试（`tests/test_r2a.py` ClaudePopulation/Reconciliation
   E2E + `tests/test_cli_matrix.py` 差分，py==rs 逐字节，含 cache 共享双方向）✅
-- Workbench host filter（`src-tauri/ui/workbench.html` chips 全部/Claude Code/DSH/Codex）
-  ✅；menubar 导航保持两宿主（MENUBAR spec 自证两行，另行跟进）
+- Workbench harness filter（`src-tauri/ui/workbench.html` chips 全部/Claude Code/DSH/Codex）
+  ✅；menubar 导航保持两执行环境（MENUBAR spec 自证两行，另行跟进）
 
 **source registry 不抽（follow-up）**：本次保持 list/read 显式三臂（各 3 行，diff 最小），
-registry 抽取等第四宿主出现再做——刚写完的 codex 镜像不重构，避免两件事互相污染。
+registry 抽取等第四执行环境出现再做——刚写完的 codex 镜像不重构，避免两件事互相污染。
 
 ## 6. WASM 复用修正（评审 P0-5）
 
@@ -264,7 +264,7 @@ Tauri Rust backend
 → WebView 只负责显示
 ```
 
-计算保持 host-side（repo 纪律：计算在宿主侧，浏览器只读投影）。若要浏览器侧纯计算，
+计算保持 harness-side（repo 纪律：计算在执行环境侧，浏览器只读投影）。若要浏览器侧纯计算，
 须新增**明确的 canonical WASM API**，不是让 JS 再实现一套 Claude parser。
 
 ## 7. 工具名规范化（设计草案，2026-09-01 定稿）
@@ -378,7 +378,7 @@ Tauri Rust backend
 - **消费方**：core `claude_day_cost`/`claude_session_cost` 同源计价（同一
   `price_claude_map`，日面 flat/包一层两形都认、cost-state 面只做 camel→snake 键名
   映射）；托盘账卡分列读 `claude_today`/`claude_month`；`sessions navigation` 的
-  claude-code 宿主行 `today_tokens` basis=ledger（MENUBAR spec §5.2）。
+  claude-code 执行环境行 `today_tokens` basis=ledger（MENUBAR spec §5.2）。
 
 ## 10. 验收章节（新增）
 
@@ -386,7 +386,7 @@ Tauri Rust backend
 2. Claude adapter 必须先生成 `CanonicalSession`，走 `canonical_session_to_vitals` 桥；
 3. Derived/Lossy provenance 不得变成 Measured（§4 的 `TimelineEntry.provenance` 测试）；
 4. unsupported 规则（SV607/608/609/610/614）必须 Unavailable，不得 MeasuredZero；
-5. 跨宿主相同行为产生相同 finding（Claude 与 DSH/Codex fixture 对齐——`dangerous.jsonl`
+5. 跨执行环境相同行为产生相同 finding（Claude 与 DSH/Codex fixture 对齐——`dangerous.jsonl`
    的 `rm -rf` 与 codex paginated 夹具产出同 evidence/severity/call_id 形状）；
 6. 每个 leaf-path 与 all-recorded 形状分别有 fixture（`fixtures/claude/` 三份——
    `healthy.jsonl` = healthy leaf、`dangerous.jsonl` = finding leaf、
@@ -406,7 +406,7 @@ Tauri Rust backend
    parentUuid → timeline；turn/step 由 §8 状态机算出）~~ **已落地**（core `claude_code_evidence.rs`
    + binary `claude_session.rs` + Python 镜像 `adapters/claude_session.py` /
    `agent/claude_evidence.py` / `agent/claude_session_audit.py`，`claude-session` CLI）；
-3. ~~`TimelineEntry.provenance` 字段 + 桥透传 + `source_type` 按 host_id 生成~~ **已落地**
+3. ~~`TimelineEntry.provenance` 字段 + 桥透传 + `source_type` 按 harness_id 生成~~ **已落地**
    （2026-09-01 第一刀，core 单测 + golden 差分 15/15 全绿，输出字节不变，见 §4）；
 4. ~~`ToolResultObservation.failed` 字段 + SV613(b) 的 lossy 路径改读 `failed`~~ **已落地**
    （见 §3：is_error 三态 → `Some(bool)`；DSH/Codex 的 `failed` 恒 None，布尔式退化成原判据，
@@ -422,10 +422,10 @@ Tauri Rust backend
    （2026-09-02：第三源全弧线——`SessionStore::claude_code` + payload `files` 键 +
    `claude_source_statuses` 三态 + `all()` 三源并行 + roots 报告，Rust/Python 锁步，
    `tests/test_r2a.py` + `tests/test_cli_matrix.py` 差分逐字节；source registry **不抽**——
-   list/read 保持显式三臂，第四宿主出现时再做，见 §5）；
-8. ~~Tauri/workbench 消费（§6 架构，计算 host-side）~~ **已落地**（2026-09-02：工作台
-   会话 tab 三宿主 chips + 会话列表/详情/Findings 页消费 claude 源，wasm 零改动——
-   claude 源只在 CLI/r2a 面；menubar 导航第三宿主行按 MENUBAR spec 另行跟进）；
+   list/read 保持显式三臂，第四执行环境出现时再做，见 §5）；
+8. ~~Tauri/workbench 消费（§6 架构，计算 harness-side）~~ **已落地**（2026-09-02：工作台
+   会话 tab 三执行环境 chips + 会话列表/详情/Findings 页消费 claude 源，wasm 零改动——
+   claude 源只在 CLI/r2a 面；menubar 导航第三执行环境行按 MENUBAR spec 另行跟进）；
 9. ~~验收 10 条 + fixtures 入库~~ **已落地**（`fixtures/claude/` 三份 leaf 夹具——
    `healthy.jsonl` / `dangerous.jsonl` / `all-recorded.jsonl`，`build_claude_fixture.py`
    自校验钉死 §10 验收 #4/#5/#6 数字；`tests/test_cli_matrix.py` `test_claude_session_*`
@@ -437,10 +437,10 @@ Tauri Rust backend
     `state/claude-fold.json` checkpoint + `claude-ledger.json`/`claude-ledger-archive.json`
     逐日账，`tests/test_claude_cost.py` both() 差分逐字节；core `resolve_card_catalog`/
     `claude_day_cost`/`claude_session_cost` 计价，见 §9）；
-11. ~~托盘账卡分列 + 导航第三宿主行~~ **已落地**（2026-09-02：托盘 today/month 行挂
+11. ~~托盘账卡分列 + 导航第三执行环境行~~ **已落地**（2026-09-02：托盘 today/month 行挂
     ` · Claude 估 ≈¥/≈$` 后缀（read_overview 增读 ledger → Overview claude_today/
-    claude_month），预算 alert 保持 DSH-only；`sessions navigation` 第三宿主行
-    claude-code（today_tokens basis=ledger）+ HostsSnapshot 兜底三行，见 MENUBAR spec；
+    claude_month），预算 alert 保持 DSH-only；`sessions navigation` 第三执行环境行
+    claude-code（today_tokens basis=ledger）+ HarnessesSnapshot 兜底三行，见 MENUBAR spec；
     tick 顺序 DSH fold → `claude-sync`，SyncStatus 失败留痕不 abort）。
 
 ## 12. 诚实性注记

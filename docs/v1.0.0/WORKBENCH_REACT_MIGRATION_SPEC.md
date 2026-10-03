@@ -19,7 +19,7 @@ React renderer（仅呈现、交互、查询状态）
                  ▼
 typed local desktop API（DTO、错误、可见性边界）
                  ▼
-Rust runtime / data / host adapters / SQLite
+Rust runtime / data / harness adapters / SQLite
 ```
 
 产品仍然离线优先。除既有公开价目和版本检查外，迁移不得新增任何将用户数据、路径、会话、证据或诊断内容发送出设备的网络路径。
@@ -28,7 +28,7 @@ Rust runtime / data / host adapters / SQLite
 
 ## 1. 背景与问题
 
-当前 Workbench 已从只读用量页扩展到总览、会话、发现、测试、Skill、设置、宿主覆盖、Trust 审计、证据链和实时监控。代码层的实际信号是：
+当前 Workbench 已从只读用量页扩展到总览、会话、发现、测试、Skill、设置、执行环境覆盖、Trust 审计、证据链和实时监控。代码层的实际信号是：
 
 | 现状 | 已产生的问题 |
 |---|---|
@@ -95,22 +95,22 @@ Findings 与 Trust 采用一致的「结论 → 证据 → 行动」模型：
 ```text
 页面 Header：安全状态 · 上次扫描 · 实时监控状态 · 主操作
 ┌ 结论摘要 ─────────────────────────────────────────────┐
-│ 可判定风险 / 证据不足 / 未扫描 / 受监控宿主覆盖         │
+│ 可判定风险 / 证据不足 / 未扫描 / 受监控执行环境覆盖         │
 └──────────────────────────────────────────────────────┘
-分段导航：风险 Finding | 证据链 | 宿主覆盖 | 实时监控
+分段导航：风险 Finding | 证据链 | 执行环境覆盖 | 实时监控
 ┌ Finding / Evidence 列表 ─┬─ 详情面板 ─────────────────┐
-│ 等级、置信度、时间、宿主   │ 判定说明、时间线、安全引用 │
+│ 等级、置信度、时间、执行环境   │ 判定说明、时间线、安全引用 │
 │ 筛选、排序、空状态         │ 作用范围、下一步、告警状态 │
 └──────────────────────────┴──────────────────────────┘
 ```
 
 具体规则：
 
-- 「未生成 Finding」必须同时显示：已扫描宿主、可用证据数量、缺失的判定条件，以及“启动实时监控/再次本地审计”等下一步；它不能伪装成“安全”。
-- 一个 Evidence row 至少有宿主、观测时间、证据等级、来源、范围、大小/计数（如可用）及安全引用；详情面板再显示其与 Finding 的因果关系。
+- 「未生成 Finding」必须同时显示：已扫描执行环境、可用证据数量、缺失的判定条件，以及“启动实时监控/再次本地审计”等下一步；它不能伪装成“安全”。
+- 一个 Evidence row 至少有执行环境、观测时间、证据等级、来源、范围、大小/计数（如可用）及安全引用；详情面板再显示其与 Finding 的因果关系。
 - 时间线默认按最近证据排序，长列表虚拟化或分页，避免一次性渲染完整历史。
 - 风险、置信度和来源不能只靠颜色；须有可读标签和 tooltip/说明。
-- 空态是一等状态：分别覆盖无宿主、无证据、尚未扫描、权限不足、来源不可用、扫描失败和确实无风险命中。
+- 空态是一等状态：分别覆盖无执行环境、无证据、尚未扫描、权限不足、来源不可用、扫描失败和确实无风险命中。
 
 ### 3.3 数据密集页面
 
@@ -218,7 +218,7 @@ Tauri runtime event ─────────┼─> feature query invalidatio
 - App 根、每个 feature 页和高风险详情面板设 Error Boundary，局部渲染错误不得使整个工作台白屏。
 - IPC 错误映射为用户可理解、可行动的状态，例如“随包 CLI 版本过旧 → 重建投影库 / 升级 app”，而不是裸 command stderr。
 - 错误详情默认隐藏；若提供复制诊断，只能是已脱敏文本。
-- 任何重建/迁移操作必须先说明影响范围，并只删除/重建 app-owned projection，不能触碰宿主原始日志。
+- 任何重建/迁移操作必须先说明影响范围，并只删除/重建 app-owned projection，不能触碰执行环境原始日志。
 
 ---
 
@@ -259,7 +259,7 @@ Tauri runtime event ─────────┼─> feature query invalidatio
 
 **产出**
 
-- Trust dashboard、Finding list、Evidence timeline、Evidence detail、Host profile / coverage、Monitor control。
+- Trust dashboard、Finding list、Evidence timeline、Evidence detail、Harness profile / coverage、Monitor control。
 - 统一的置信度与证据等级展示组件，以及安全字段投影测试。
 - runtime events + 可见性兜底刷新；操作后有明确回执。
 - “无 Finding”的可解释空态，按 §3.2 展示已扫描和未满足条件。
@@ -292,12 +292,12 @@ Tauri runtime event ─────────┼─> feature query invalidatio
 
 | 项目 | 要求 |
 |---|---|
-| 首屏 | 不扫描宿主原始日志；只读 authority 聚合与轻量状态。 |
-| 详情 | 会话轨迹、原始宿主重读和大型证据按用户展开懒加载。 |
+| 首屏 | 不扫描执行环境原始日志；只读 authority 聚合与轻量状态。 |
+| 详情 | 会话轨迹、原始执行环境重读和大型证据按用户展开懒加载。 |
 | 渲染 | 长列表分页/虚拟化；稳定 key；只对已测得昂贵且 props 稳定的纯列表使用 `React.memo`。 |
 | 刷新 | 旧数据刷新时保持可见；禁止全屏闪白和无说明的 layout shift。 |
 | 包体 | 每引入一个第三方 UI / chart 包都记录 bundle 增量与替代方案。 |
-| 安全 | browser mock 是合成数据；不得复制真实 SQLite、宿主日志、证据或密钥进入 `public/`。 |
+| 安全 | browser mock 是合成数据；不得复制真实 SQLite、执行环境日志、证据或密钥进入 `public/`。 |
 | 观测 | 不加线上 telemetry；本地错误仅以受控、脱敏的 UI 回执或用户主动复制诊断呈现。 |
 
 ---
@@ -322,7 +322,7 @@ Tauri runtime event ─────────┼─> feature query invalidatio
 ### 7.3 验收标准
 
 1. React 页对现有功能不减少；每个旧 tab 有对应迁移页或明确仍在回退窗口的说明。
-2. Trust 审计有证据时，用户在两次点击以内看到时间、宿主、证据等级、来源、安全引用及其与结论的关系。
+2. Trust 审计有证据时，用户在两次点击以内看到时间、执行环境、证据等级、来源、安全引用及其与结论的关系。
 3. 没有 Finding 时，用户在首屏知道“已扫描什么、发现了什么证据、还缺什么”，而非只见一行文字。
 4. 主操作均有 loading、成功或失败反馈；任何刷新不将已有数据清空。
 5. 所有按钮可键盘触达并有可见焦点；图标按钮有 accessible name；颜色不是唯一语义。
@@ -344,7 +344,7 @@ Tauri runtime event ─────────┼─> feature query invalidatio
 ## 9. 明确不做
 
 - 不将 Trust 的原始 `.enc`、manifest、路径或网络记录交给 React 解析；Rust 只输出安全投影。
-- 不因前端重构修改 Finding 置信度、证据分级或宿主风险加权算法。
+- 不因前端重构修改 Finding 置信度、证据分级或执行环境风险加权算法。
 - 不把“实时”理解为每秒全库扫描；实时是事件驱动 + 有界 fallback。
 - 不以 `localStorage` 缓存用户审计数据；只存无敏感的 UI 偏好，且要有清除入口。
 - 不用远端字体、CDN 图标、分析 SDK、错误上报 SDK 或云 feature flag。

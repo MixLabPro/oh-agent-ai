@@ -10,7 +10,7 @@
 //! `tests/test_cli_matrix.py` 的 `both()` 差分看守。
 //!
 //! 模块尾部另有一张**独立的第二计价面**（`catalog_2026_09`，Claude Code 语料
-//! 官方卡折算）：服务 claude 会话账/托盘第三宿主列，不参与 DSH 账。它只进新
+//! 官方卡折算）：服务 claude 会话账/托盘第三执行环境列，不参与 DSH 账。它只进新
 //! 函数，`cost_report`/`priced_day` 等 DSH 路径字节不变——两条面不许互相改价。
 //!
 //! 价格表的单一真相源是 `assets/pricing.json`（v0.8 Phase E5 从 Python 包内搬到
@@ -36,14 +36,14 @@ pub use codex::{codex_price_bucket, codex_resolve_entry, load_codex_pricing};
 
 /// Price one already-aggregated metered usage projection from the immutable
 /// combined snapshot used by SQL, MCP, CLI, and Tauri. Callers own fact
-/// selection and windowing; this function owns host dispatch, price matching,
+/// selection and windowing; this function owns harness dispatch, price matching,
 /// unpriced rejection, currency precision, and the single minor-unit round.
 ///
 /// `usage` must contain a `by_model` object. For Codex, the caller passes only
 /// non-subscription/unknown-route facts; explicit OpenAI subscription facts do
 /// not become a token bill through this function.
 pub fn metered_estimate_minor(
-    host: &str,
+    harness: &str,
     usage: &Value,
     snapshot: &Value,
 ) -> Option<crate::domain::data_contract::MoneyMinor> {
@@ -51,7 +51,7 @@ pub fn metered_estimate_minor(
 
     let mut total = 0.0f64;
     let currency: String;
-    if host == "codex" {
+    if harness == "codex" {
         let codex = snapshot.get("codex_pricing").unwrap_or(snapshot);
         let entries = codex.get("entries").and_then(Value::as_array)?;
         for (model, buckets) in usage.get("by_model")?.as_object()? {
@@ -61,7 +61,7 @@ pub fn metered_estimate_minor(
         currency = "USD".to_string();
     } else {
         let pricing = snapshot.get("pricing").unwrap_or(snapshot);
-        if host == "claude-code" {
+        if harness == "claude-code" {
             let report = claude_day_cost(usage, pricing)?;
             if report.get("unpriced_tokens").and_then(Value::as_i64).unwrap_or(0) > 0 {
                 return None;
@@ -467,13 +467,13 @@ pub fn cost_report(usage: &Value, pricing: &Value) -> Option<Value> {
 
 /// 逐请求费用序列（FR-04 的「费用」纵轴，工作台单会话图与 dsh-client 审计 tab 共用）。
 ///
-/// 语义逐行照搬 dsh-client 宿主 `costSeriesFrom`（`integrations/dsh-client/src/host/index.ts`）——
+/// 语义逐行照搬 dsh-client 执行环境 `costSeriesFrom`（`integrations/dsh-client/src/harness/index.ts`）——
 /// 这里、`scripts/agent_vitals/agent/cost.py::cost_series`、以及那段 TS 是**同一规则的
 /// 三个镜像**，锁步一致（cost 是四路锁步的第 N 面：见 CLAUDE.md「cost 计算本身也是
 /// 一层锁步」）。
 ///
 /// - 每笔 request 用 `resolve_card(model, providers[model], pricing)` 定价格卡；
-///   `is_peak` 为 null（宿主没上报时间戳）时**这一笔不计价**——累计值保持、`priced`
+///   `is_peak` 为 null（执行环境没上报时间戳）时**这一笔不计价**——累计值保持、`priced`
 ///   不增，而不是按空闲价猜一档（猜出来的单价就是编数字）。累计曲线因此可能低估，
 ///   `priced/total` 一并透出，展示层照实说。
 /// - 单笔费用 = (uncached/1e6)×input_uncached[tier] + (cache_read/1e6)×input_cached[tier] +
@@ -492,7 +492,7 @@ pub fn cost_series(requests: &[Value], providers: &Value, pricing: &Value) -> Va
         // 与 `cost_report` 走同一个解析器——逐请求曲线的单价必须和汇总金额同源，
         // 否则曲线终值跟 `cost` 键对不上。
         if let Some((key, provider_key, _)) = resolve_card(model, provider, pricing) {
-            // is_peak 为 null（宿主没上报时间戳）时这笔不计价——累计保持（carry），
+            // is_peak 为 null（执行环境没上报时间戳）时这笔不计价——累计保持（carry），
             // 不是 false（「没测到」≠「不在高峰」），也不按空闲价猜一档。
             if let Some(peak) = r.get("is_peak").and_then(|v| v.as_bool()) {
                 let tier = if peak { "peak" } else { "off_peak" };
@@ -1121,7 +1121,7 @@ mod tests {
                 "曲线终值 {} 必须等于 cost_report.total {}", cum[2], report["total"]);
     }
 
-    /// `is_peak` 为 null（宿主没上报时间戳）→ 这笔不计价：累计保持、priced 不增，
+    /// `is_peak` 为 null（执行环境没上报时间戳）→ 这笔不计价：累计保持、priced 不增，
     /// 而不是按空闲价猜一档。缺省 is_peak 也要 carry——测过没有 is_peak 键的行。
     #[test]
     fn cost_series_carries_unpriced_on_null_peak() {
@@ -1510,7 +1510,7 @@ mod tests {
 
     /// anthropic 卡四型齐计：opus-5 1M uncached ×5 + 1M cached-read ×0.5 +
     /// 1M cache-creation ×1h 档 10 + 0.5M output ×25 → 5+0.5+10+12.5 = 28.0 USD。
-    /// 缓存写走 1h 档——host_costusd_note：Claude Code 自报 costUSD 按 1h 计，
+    /// 缓存写走 1h 档——harness_costusd_note：Claude Code 自报 costUSD 按 1h 计，
     /// 照它走才能与 cost-state 互相当差分 oracle。
     #[test]
     fn claude_session_cost_prices_anthropic_all_four_token_types() {

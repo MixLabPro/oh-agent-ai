@@ -11,7 +11,7 @@
   给了的话，用户会去修一个在当前状态下根本不存在的问题。
 - `Discoverable` **永远不取 false**（§1.2）。「超预算后从调用最少的开始
   丢弃」是传闻不是实测，我们没有资格断言某一条真的被丢了。
-- 读不到宿主配置时 `Enabled` 是 **unknown 不是 false**。渲染成 false，
+- 读不到执行环境配置时 `Enabled` 是 **unknown 不是 false**。渲染成 false，
   用户会去开一个本来就开着的开关，然后以为自己修好了。
 - 同名多份必须**全部列出并标出你问的是哪一份**，否则这条命令讲不清
   shadowing —— 而那是它最主要的用途。
@@ -85,11 +85,11 @@ class ExplainCase(unittest.TestCase):
         self.newer = newer
 
         self.claude_json = self.tmp / ".claude.json"
-        self.write_host({"enabledPlugins": {},
+        self.write_harness({"enabledPlugins": {},
                          "skillUsage": {"healthy": {"usageCount": 9,
                                                     "lastUsedAt": _ms_days_ago(1)}}})
 
-    def write_host(self, cfg):
+    def write_harness(self, cfg):
         self.claude_json.write_text(json.dumps(cfg), encoding="utf-8")
 
     def tearDown(self):
@@ -97,7 +97,7 @@ class ExplainCase(unittest.TestCase):
 
     def run_explain(self, name, *extra, cmd=None, expect=0):
         env = isolated_home_env(self.tmp)
-        r = subprocess.run((cmd or SCAN_CMD) + ["explain", name, "--host", "claude-code"]
+        r = subprocess.run((cmd or SCAN_CMD) + ["explain", name, "--harness", "claude-code"]
                            + list(extra),
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
@@ -147,7 +147,7 @@ class TestBrokenUpstreamStopsTheFunnel(ExplainCase):
 class TestDiscoverableIsNeverFalse(ExplainCase):
     """ARCHITECTURE §1.2：「超预算后丢弃最少用的」是传闻不是实测。
 
-    断言 `false` 等于宣称我们知道宿主真的丢了它 —— 我们不知道。
+    断言 `false` 等于宣称我们知道执行环境真的丢了它 —— 我们不知道。
     """
 
     def test_no_state_is_false_across_every_reachable_case(self):
@@ -176,7 +176,7 @@ class TestDiscoverableIsNeverFalse(ExplainCase):
         """
         env = isolated_home_env(self.tmp)
         raw = self.tmp / "raw.json"
-        subprocess.run(SCAN_CMD + ["--host", "claude-code", "--budget", "1",
+        subprocess.run(SCAN_CMD + ["--harness", "claude-code", "--budget", "1",
                                    "--json", str(raw)],
                        cwd=str(self.tmp / "workdir"), env=env,
                        capture_output=True, text=True, check=True)
@@ -196,7 +196,7 @@ class TestDiscoverableIsNeverFalse(ExplainCase):
         """对照组：没超预算时名单必须是空的，不能顺手塞几个进去。"""
         env = isolated_home_env(self.tmp)
         raw = self.tmp / "ok.json"
-        subprocess.run(SCAN_CMD + ["--host", "claude-code", "--json", str(raw)],
+        subprocess.run(SCAN_CMD + ["--harness", "claude-code", "--json", str(raw)],
                        cwd=str(self.tmp / "workdir"), env=env,
                        capture_output=True, text=True, check=True)
         b = json.loads(raw.read_text(encoding="utf-8"))["description_budget"]
@@ -205,12 +205,12 @@ class TestDiscoverableIsNeverFalse(ExplainCase):
 
 
 class TestUnknownIsNotFalse(ExplainCase):
-    """读不到宿主配置 → Enabled 是 unknown。
+    """读不到执行环境配置 → Enabled 是 unknown。
 
     渲染成 false，用户会去开一个本来就开着的开关，然后以为自己修好了。
     """
 
-    def test_unreadable_host_config_yields_unknown(self):
+    def test_unreadable_harness_config_yields_unknown(self):
         self.claude_json.unlink()
         st = self.stages("gh")[0]
         self.assertEqual(st["Enabled"][0], "unknown", st["Enabled"])
@@ -300,7 +300,7 @@ class TestOneThresholdOneAnswer(ExplainCase):
     def test_neighbours_match_overlap(self):
         env = isolated_home_env(self.tmp)
         pairs = self.tmp / "pairs.json"
-        subprocess.run(SCAN_CMD + ["overlap", "--host", "claude-code",
+        subprocess.run(SCAN_CMD + ["overlap", "--harness", "claude-code",
                                    "--min", "0.1", "--json", str(pairs)],
                        cwd=str(self.tmp / "workdir"), env=env,
                        capture_output=True, text=True, check=True)
@@ -341,7 +341,7 @@ class TestTerminalOutputHasNoMarkdown(ExplainCase):
                      ["explain", "gh"], ["explain", "no-desc"], ["list"],
                      ["overlap"], ["overlap", "--min", "0.99"],
                      ["list", "--unused"]):
-            r = subprocess.run(SCAN_CMD + argv + ["--host", "claude-code"],
+            r = subprocess.run(SCAN_CMD + argv + ["--harness", "claude-code"],
                                cwd=str(self.tmp / "workdir"), env=env,
                                capture_output=True, text=True)
             texts.append((argv, r.stdout))

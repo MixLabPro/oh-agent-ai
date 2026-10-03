@@ -79,7 +79,7 @@ fn skill_lookup(skills: &[Value]) -> std::collections::HashMap<&str, &Value> {
 /// 把 scan 报告派生为省钱方案。`startup_rate` 是用户估算的每月启动次数
 /// （`--startup-rate`），只有它能让 per-startup 项填上 `events_per_month`。
 pub fn build_plan(report: &Value, startup_rate: Option<i64>) -> Value {
-    let host = s(report.get("host_selection").unwrap_or(&Value::Null));
+    let harness = s(report.get("harness_selection").unwrap_or(&Value::Null));
 
     // —— 各源区块（缺区一律当 unavailable / 空，绝不给假数据）——
     let trigger = report.get("trigger_data").unwrap_or(&Value::Null);
@@ -272,7 +272,7 @@ pub fn build_plan(report: &Value, startup_rate: Option<i64>) -> Value {
 
     json!({
         "schema_version": "plan/1.0",
-        "host_selection": host,
+        "harness_selection": harness,
         "startup_rate_per_month": num_or_null(startup_rate),
         "diagnosis_refs": all_refs.iter().collect::<Vec<_>>(),
         "items": items,
@@ -291,7 +291,7 @@ mod tests {
     fn full_report() -> Value {
         json!({
             "schema_version": "1.0",
-            "host_selection": "claude-code",
+            "harness_selection": "claude-code",
             "description_budget": {"available": true, "over_by_chars": 0, "pct_used": 90},
             "trigger_data": {"available": true, "zombie_min_age_days": 14,
                 "zombie_candidates": [{"name": "z1", "tier1_tokens": 100}]},
@@ -315,7 +315,7 @@ mod tests {
     fn build_plan_full_report() {
         let p = build_plan(&full_report(), Some(30));
         assert_eq!(p["schema_version"], "plan/1.0");
-        assert_eq!(p["host_selection"], "claude-code");
+        assert_eq!(p["harness_selection"], "claude-code");
         assert_eq!(p["startup_rate_per_month"], 30);
 
         let items = p["items"].as_array().unwrap();

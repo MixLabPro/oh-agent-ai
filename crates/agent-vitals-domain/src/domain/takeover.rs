@@ -13,8 +13,8 @@
 //!     挡在门外，这正是「Rust 只能先 shadow-replay、不能直接写权威」的机制。
 //!   · **会话 ledger**（§4.3 的 SessionKey/dedup）—— 同一 `session_log` 连续多
 //!     tick 只累加一次（§4.2 验收：已填充 state + 多 tick fixture 断言）。
-//!     key = host kind + native id + machine namespace 的自定界拼接，杜绝「不同
-//!     宿主/机器同一 session_id」的碰撞（§4.3：只用宿主 `session_id` 会在跨宿主、
+//!     key = harness kind + native id + machine namespace 的自定界拼接，杜绝「不同
+//!     执行环境/机器同一 session_id」的碰撞（§4.3：只用执行环境 `session_id` 会在跨执行环境、
 //!     跨机器、rollout 重连时把同一逻辑会话数成两笔成本）。
 //!
 //! 剩下两件（shadow replay / atomic cutover 的 I/O 编排）在二进制侧。
@@ -45,15 +45,15 @@ pub const DEFAULT_OWNER: &str = PY_OWNER;
 /// 自定界会话 key —— 复刻 `takeover.py::session_key`（Python 镜像钉同一组
 /// 数值，见 `tests/test_takeover_lockstep.py`）。
 ///
-/// 为什么不直接 `format!("{}|{}|{}", host, id, ns)`：三个字段都可能含 `|`
-/// （宿主 native id 尤其自由），裸拼接会让 `("ab","c")` 与 `("a","bc")` 撞
+/// 为什么不直接 `format!("{}|{}|{}", harness, id, ns)`：三个字段都可能含 `|`
+/// （执行环境 native id 尤其自由），裸拼接会让 `("ab","c")` 与 `("a","bc")` 撞
 /// 同一个 key。长度前缀是自定界的：先写 `len:`，再写本体，天然无法伪造碰撞。
 /// 例：`session_key("dsh", "s1", "ns-abc")` → `"3:dsh|2:s1|6:ns-abc"`。
-pub fn session_key(host_kind: &str, native_id: &str, machine_namespace: &str) -> String {
+pub fn session_key(harness_kind: &str, native_id: &str, machine_namespace: &str) -> String {
     fn seg(s: &str) -> String {
         format!("{}:{s}", s.len())
     }
-    format!("{}|{}|{}", seg(host_kind), seg(native_id), seg(machine_namespace))
+    format!("{}|{}|{}", seg(harness_kind), seg(native_id), seg(machine_namespace))
 }
 
 /// 缺 manifest 时的默认 manifest —— owner=python、epoch=0、since/last_fold_at
@@ -128,14 +128,14 @@ pub fn mark_fold(manifest: &Value, now_iso: &str) -> Value {
 /// 一条 ledger 条目 —— 记下「这次 fold 的会话身份 + 折叠时刻 + 落账代际」。
 /// 身份三件套各存各的（不拆 key 字符串，自描述、人可读）。
 pub fn ledger_entry(
-    host_kind: &str,
+    harness_kind: &str,
     native_id: &str,
     machine_namespace: &str,
     folded_at: &str,
     epoch: u64,
 ) -> Value {
     json!({
-        "host_kind": host_kind,
+        "harness_kind": harness_kind,
         "native_id": native_id,
         "machine_namespace": machine_namespace,
         "folded_at": folded_at,

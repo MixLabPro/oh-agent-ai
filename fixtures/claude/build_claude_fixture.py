@@ -23,7 +23,7 @@ gate):
 - `dangerous.jsonl` — the finding leaf: one Bash call `rm -rf /tmp/x`. SV601
   must produce exactly one finding (evidence `"rm -rf"`, severity `critical`,
   call_id `"call1"`) — the same finding shape codex's paginated fixture
-  produces for the same danger fragment (§10 acceptance #5: cross-host same
+  produces for the same danger fragment (§10 acceptance #5: cross-harness same
   finding). SV602/603 must stay `measured_zero` (no sudo, no curl|sh).
 - `all-recorded.jsonl` — the full-shape leaf: every record kind the adapter
   must not lose — two turns (two pure-text roots), Bash/Write/Task tool calls,

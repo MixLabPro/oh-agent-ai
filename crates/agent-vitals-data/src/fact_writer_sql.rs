@@ -93,19 +93,19 @@ pub(crate) fn iso_to_ms(ts: &str) -> Option<i64> {
 }
 
 /// r2a 会话键——**长度前缀自定界**（`SessionKey::ledger_key`，域契约的
-/// 同一构造）。审查 P1：朴素 `{host}:{ns}:{profile}:{sid}` 拼接会让
-/// `("ab","c")` 与 `("a","bc")` 撞同一个 key（宿主原生 id 含 `:` 是自由
+/// 同一构造）。审查 P1：朴素 `{harness}:{ns}:{profile}:{sid}` 拼接会让
+/// `("ab","c")` 与 `("a","bc")` 撞同一个 key（执行环境原生 id 含 `:` 是自由
 /// 形状），且 Phase 3 的会话下钻要用 r2a 键重建——必须与全仓同一构造。
 /// `upsert_session` 与 `insert_facts` 走同一函数保证外键一致；profile 缺省
 /// "default"（与既有 r2a 消费方同款）。
 fn session_key(
-    host: &str,
+    harness: &str,
     machine_namespace: &str,
     native_session_id: &str,
     source_profile: Option<&str>,
 ) -> String {
     agent_vitals_domain::contracts::session_key::SessionKey::new(
-        host,
+        harness,
         native_session_id,
         source_profile.unwrap_or("default"),
         machine_namespace,
@@ -160,11 +160,11 @@ impl<'a> SqlFactWriter<'a> {
     }
 
     /// source_files upsert。path_hash = fnv1a64(路径)，明文路径不进库。
-    /// 返回 source_id = `{host}:{path_hash}`。首见 INSERT 全量，再见只更新
+    /// 返回 source_id = `{harness}:{path_hash}`。首见 INSERT 全量，再见只更新
     /// last_seen_at_ms + (size, mtime) 指纹（含 parser/native 刷新）。
     pub fn upsert_source_file(
         &self,
-        host: &str,
+        harness: &str,
         path: &Path,
         size_bytes: u64,
         mtime_ns: u64,
@@ -173,14 +173,14 @@ impl<'a> SqlFactWriter<'a> {
     ) -> Result<String, AuthorityError> {
         let path_hash =
             agent_vitals_domain::source_identity::fnv1a64_hex(path.to_string_lossy().as_bytes());
-        let source_id = format!("{host}:{path_hash}");
+        let source_id = format!("{harness}:{path_hash}");
         self.conn.execute(
             "INSERT INTO source_files(
-                 source_id, host, path_hash, native_session_id,
+                 source_id, harness, path_hash, native_session_id,
                  size_bytes, mtime_ns, content_fingerprint, parser_version,
                  first_seen_at_ms, last_seen_at_ms)
              VALUES (?1,?2,?3,?4,?5,?6,NULL,?7,?8,?8)
-             ON CONFLICT(host, path_hash) DO UPDATE SET
+             ON CONFLICT(harness, path_hash) DO UPDATE SET
                  size_bytes = excluded.size_bytes,
                  mtime_ns = excluded.mtime_ns,
                  native_session_id = excluded.native_session_id,
@@ -188,7 +188,7 @@ impl<'a> SqlFactWriter<'a> {
                  last_seen_at_ms = excluded.last_seen_at_ms",
             rusqlite::params![
                 source_id,
-                host,
+                harness,
                 path_hash,
                 native_session_id,
                 size_bytes as i64,
@@ -201,28 +201,28 @@ impl<'a> SqlFactWriter<'a> {
     }
 
     /// sessions upsert：session_key 键构造与 insert_facts 一致；冲突按
-    /// UNIQUE(host, machine_namespace, native_session_id) 更新 last_observed，
+    /// UNIQUE(harness, machine_namespace, native_session_id) 更新 last_observed，
     /// started_at_ms 仅首见写。
     pub fn upsert_session(
         &self,
-        host: &str,
+        harness: &str,
         machine_namespace: &str,
         native_session_id: &str,
         source_profile: Option<&str>,
         last_observed_ms: i64,
     ) -> Result<String, AuthorityError> {
-        let key = session_key(host, machine_namespace, native_session_id, source_profile);
+        let key = session_key(harness, machine_namespace, native_session_id, source_profile);
         self.conn.execute(
             "INSERT INTO sessions(
-                 session_key, host, native_session_id, machine_namespace,
+                 session_key, harness, native_session_id, machine_namespace,
                  source_profile, started_at_ms, last_observed_at_ms)
              VALUES (?1,?2,?3,?4,?5,?6,?6)
-             ON CONFLICT(host, machine_namespace, native_session_id) DO UPDATE SET
+             ON CONFLICT(harness, machine_namespace, native_session_id) DO UPDATE SET
                  source_profile = COALESCE(excluded.source_profile, sessions.source_profile),
                  last_observed_at_ms = excluded.last_observed_at_ms",
             rusqlite::params![
                 key,
-                host,
+                harness,
                 native_session_id,
                 machine_namespace,
                 source_profile,
@@ -240,7 +240,7 @@ impl<'a> SqlFactWriter<'a> {
     /// 必须已在一个事务内（调用方 with_immediate_txn）。
     pub fn import_facts_jsonl(
         &self,
-        host: &str,
+        harness: &str,
         jsonl_path: &Path,
     ) -> Result<SqlInsertReport, AuthorityError> {
         use crate::evidence::replay;
@@ -265,7 +265,7 @@ impl<'a> SqlFactWriter<'a> {
             .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
-        let source_id = self.upsert_source_file(host, jsonl_path, size, mtime, None, 1)?;
+        let source_id = self.upsert_source_file(harness, jsonl_path, size, mtime, None, 1)?;
 
         // 按 (native_session_id, machine_namespace, source_profile) 分组——
         // insert_facts 逐事实算 session_key 外键，sessions 行必须先以**同键**
@@ -295,12 +295,12 @@ impl<'a> SqlFactWriter<'a> {
 
         let mut report = SqlInsertReport::default();
         for ((sid, ns, profile), group) in groups {
-            self.upsert_session(host, &ns, &sid, Some(&profile), self.now_ms)?;
+            self.upsert_session(harness, &ns, &sid, Some(&profile), self.now_ms)?;
             // 事实带 `route_evidence_id` 时先落 route_evidence 行（与 sql_sync 的
             // 预插入同纪律），否则 usage_facts 的 FK 触发器会让整个迁移中止——
             // claude-code emitter 自 provider-v1.0-beta.1 起会带这个字段（验收审查
             // iteration 1 #4）。
-            self.insert_route_evidence_rows(host, &ns, &sid, &group, &source_id)?;
+            self.insert_route_evidence_rows(harness, &ns, &sid, &group, &source_id)?;
             let r = self.insert_facts(&group, &source_id, &sid)?;
             report.inserted += r.inserted;
             report.duplicate += r.duplicate;
@@ -323,12 +323,12 @@ impl<'a> SqlFactWriter<'a> {
     }
 
     /// 批次标记 source（`write_flat_facts_to_authority` 用）：跨文件的
-    /// 扁平批次没有单一源文件——落一行合成 source（路径 = `/sync/{host}`，
-    /// 经哈希只留指纹）。返回 source_id = `{host}:{fnv1a64(路径)}`（与
+    /// 扁平批次没有单一源文件——落一行合成 source（路径 = `/sync/{harness}`，
+    /// 经哈希只留指纹）。返回 source_id = `{harness}:{fnv1a64(路径)}`（与
     /// upsert_source_file 同构；**Phase 3 差量/repair 必须排除此类合成行**
     /// ——size/mtime 恒 0，按文件指纹判定会把它们当 vanished 假阳性）。
-    pub fn upsert_batch_source(&self, host: &str) -> Result<String, AuthorityError> {
-        self.upsert_source_file(host, Path::new(&format!("/sync/{host}")), 0, 0, None, 1)
+    pub fn upsert_batch_source(&self, harness: &str) -> Result<String, AuthorityError> {
+        self.upsert_source_file(harness, Path::new(&format!("/sync/{harness}")), 0, 0, None, 1)
     }
 
     /// 事实批写入。每 candidate：契约校验（build_usage_fact 同款）→ 不合格
@@ -405,11 +405,11 @@ impl<'a> SqlFactWriter<'a> {
             let r = FactReader {
                 obj: built.as_object().expect("build 产物必为对象"),
             };
-            let host = r.s("host").unwrap_or_default().to_string();
+            let harness = r.s("harness").unwrap_or_default().to_string();
             let ns = r.s("machine_namespace").unwrap_or_default().to_string();
             let sid = r.s("native_session_id").unwrap_or_default().to_string();
             let profile = r.s("source_profile");
-            let skey = session_key(&host, &ns, &sid, profile);
+            let skey = session_key(&harness, &ns, &sid, profile);
             let ts_ms = ts_ms.expect("doc 只在事件时间可 parse 时才 Some——此处必有毫秒"); // 见上方校验：doc 非 None 即 ts 已 parse
             let peak = peak_of(r.s("event_ts_utc").unwrap_or_default());
             let model_id = r
@@ -429,7 +429,7 @@ impl<'a> SqlFactWriter<'a> {
 
             let n = self.conn.execute(
                 "INSERT INTO usage_facts(
-                     fact_id, host, machine_namespace, native_session_id, session_key,
+                     fact_id, harness, machine_namespace, native_session_id, session_key,
                      source_event_id, observation_kind, source_profile,
                      provider_id, provider_raw, billing_source, billing_mode,
                      pricing_basis, billing_template_id, evidence_basis, normalization_version,
@@ -441,7 +441,7 @@ impl<'a> SqlFactWriter<'a> {
                  ON CONFLICT DO NOTHING",
                 rusqlite::params![
                     r.s("fact_id").unwrap_or_default(),
-                    host, ns, sid, skey,
+                    harness, ns, sid, skey,
                     r.s("source_event_id").unwrap_or_default(),
                     r.s("observation_kind").unwrap_or_default(),
                     r.s("source_profile"),
@@ -665,13 +665,13 @@ impl<'a> SqlFactWriter<'a> {
     }
 }
 
-// 列映射索引：`{host}:{path_hash}`；`session_key` 用 source_key；
+// 列映射索引：`{harness}:{path_hash}`；`session_key` 用 source_key；
 // `ingested_run_id`=run_id；created/updated=now；deleted 恒 NULL。
 
 impl SqlFactWriter<'_> {
     /// 迁移/导入路径的 route_evidence 预插入（镜像 `sql_sync.rs` 同步路径的写法）。
     fn insert_route_evidence_rows(
-        &self, host: &str, machine_namespace: &str, native_session_id: &str,
+        &self, harness: &str, machine_namespace: &str, native_session_id: &str,
         facts: &[Value], source_id: &str,
     ) -> Result<(), AuthorityError> {
         let mut seen = std::collections::HashSet::new();
@@ -680,13 +680,13 @@ impl SqlFactWriter<'_> {
             if !seen.insert(evidence_id.to_string()) { continue; }
             self.conn.execute(
                 "INSERT OR IGNORE INTO route_evidence(
-                   evidence_id, host, machine_namespace, native_session_id,
+                   evidence_id, harness, machine_namespace, native_session_id,
                    provider_raw, endpoint_host, evidence_basis, observed_at_ms,
                    source_id, ingested_run_id)
                  VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
                     evidence_id,
-                    fact.get("host").and_then(Value::as_str).unwrap_or(host),
+                    fact.get("harness").and_then(Value::as_str).unwrap_or(harness),
                     machine_namespace,
                     native_session_id,
                     fact.get("provider_raw").and_then(Value::as_str),
@@ -727,7 +727,7 @@ mod tests {
 
     fn mk_fact(event_id: &str) -> Value {
         json!({
-            "host": "claude-code",
+            "harness": "claude-code",
             "machine_namespace": "ns-m",
             "source_profile": "default",
             "native_session_id": "sess-a",
@@ -962,7 +962,7 @@ mod tests {
 
     #[test]
     fn five_tuple_conflict_is_duplicate_even_with_foreign_fact_id() {
-        // UNIQUE(host,ns,ses,event,kind) 是 second 防线：即使 fact_id 被
+        // UNIQUE(harness,ns,ses,event,kind) 是 second 防线：即使 fact_id 被
         // 外部 hash 规则污染，同五元组也只记一次（不产生罪证双账）。
         let (db, path) = open_db("five");
         let mut f = mk_fact("e1");
@@ -1006,7 +1006,7 @@ mod tests {
                 None,
                 1,
             )?;
-            assert_eq!(a, b, "同 (host,path) 必须同 source_id");
+            assert_eq!(a, b, "同 (harness,path) 必须同 source_id");
             Ok(())
         })
         .unwrap();

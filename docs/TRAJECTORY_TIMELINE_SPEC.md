@@ -18,13 +18,13 @@
 >         - dsh-client `timeline.ts` 已改成**数据准备适配器**，经
 >           `timeline-shared.cjs`（字节锁步副本，`tests/test_timeline_lockstep.py` 守）
 >           import 共享 `buildGeometry`/`nearestPoint`；成本纵轴走 `'carry'` 语义
->           （宿主算好的累计值，浏览器不再累加、不重算单价）；
+>           （执行环境算好的累计值，浏览器不再累加、不重算单价）；
 >         - `codex_session.html` 内联块已重生成（`>>> sv-timeline-geometry` 逐字节
 >           对齐源，`scripts/verify-codex-session-timeline.mjs` 守），调用点走
 >           `TimelineGeometry.buildTimeline`，不再有内联 `svTimelineSvg`。
-> 目标：给 DSH / Codex / Claude Code / WorkBuddy / 未来宿主 的「会话时间线」
+> 目标：给 DSH / Codex / Claude Code / WorkBuddy / 未来执行环境 的「会话时间线」
 >       定一个统一的 canonical 数据形状 + 通用绘制范式，让几何只写一份。
-> 配套：`RUNTIME_EVIDENCE_CONTRACT.md`（每宿主的证据面与退化规则，本文的
+> 配套：`RUNTIME_EVIDENCE_CONTRACT.md`（每执行环境的证据面与退化规则，本文的
 >       事实来源）、`RUNTIME_EVIDENCE_CONVERGENCE_SPEC.md`（P1–P6 落地进度，
 >       本文不碰行为检测，只碰「时间线」这个呈现投影）。
 
@@ -38,15 +38,15 @@
 
 > **把一棵可能分叉的事件树，按显式选定的线性化路径投影到一条线上；序靠
 > `(scope, ordinal)` 加 `native` 跨 scope join；时间戳只是展示/分桶的副属性；
-> 粒度层（一个点是什么）与序列（y 轴值）按宿主证据独立退化；事件标记是与线
+> 粒度层（一个点是什么）与序列（y 轴值）按执行环境证据独立退化；事件标记是与线
 > 正交、永不聚合的第二图层。**
 
-五个正交维度，每条都随宿主退化，退化方式各不相同：
+五个正交维度，每条都随执行环境退化，退化方式各不相同：
 
 1. **线性化**（树 → 线）：选 LeafPath 还是 AllRecorded。
 2. **序**（x 轴真键）：`(scope, ordinal)`，跨 scope 走 `native`，时间戳不排序。
 3. **粒度层**（一个点 = turn / step / subagent / task）：可用度天差地别。
-4. **序列**（y 轴值）：token 桶分宿主；成本是 Money/Credits/Quota 三种不可通约。
+4. **序列**（y 轴值）：token 桶分执行环境；成本是 Money/Credits/Quota 三种不可通约。
 5. **事件标记**（与线正交）：永不聚合、永不丢；lossy 是独立第二轴。
 
 canonical 形状是：
@@ -59,10 +59,10 @@ timeline_series = {
     ordinal,        // scope 内严格递增；跨 scope 不可比
     native,         // Seq | Uuid | CallId | TurnId —— 跨 scope join 只走它
     ts,             // 可选；只用于时间分桶与展示，不参与排序
-    task_id,        // 可选；映射到 turn（数据现成，四宿主都有）
+    task_id,        // 可选；映射到 turn（数据现成，四执行环境都有）
                     // 注：无 goal_id——见 §3.3，goal 是「/goal 文本命令」或
                     // 「task 跟踪结构化列表」，两者都不该塞进 per-point 字段
-    values,         // { context, input, output, cache, cost? } —— 按宿主有的填
+    values,         // { context, input, output, cache, cost? } —— 按执行环境有的填
   }],
   events: [{       // 与 points 正交，永不参与聚合
     ordinal, native, kind, label, severity?, targetId?,
@@ -77,7 +77,7 @@ timeline_series = {
 工作台（`src-tauri`）要展示「会话时间线」，但仓库里已经有两份各画各的折线图，
 且都不在同一个面上：
 
-| 宿主 | 现状 | x 轴 | 几何实现在哪 |
+| 执行环境 | 现状 | x 轴 | 几何实现在哪 |
 |---|---|---|---|
 | DSH | `dsh-client` 浏览器插件 `TimelinePanel.tsx` | request_seq | `dsh-client/src/client/timeline.ts`（React + SVG） |
 | Codex | `codex_session.html` 静态报告 | 逐小时桶 | 模板内联 `svTimelineSvg` |
@@ -95,7 +95,7 @@ timeline_series = {
 
 ## 2. 本质：时间线是树的投影，不是日志排序
 
-这条是五个维度成立的前提。四个宿主的证据分别证实：
+这条是五个维度成立的前提。四个执行环境的证据分别证实：
 
 - **Claude Code** 的 transcript 是**消息树**（`uuid`/`parentUuid`），`type` 是角色
   （assistant/user/attachment/system）不是事件种类，**没有 `seq`**。本机实测一条
@@ -105,14 +105,14 @@ timeline_series = {
 - **Codex** 记录 `thread_rolled_back`；**DSH** 分支带 `seedLength` 前缀。
   （`RUNTIME_EVIDENCE_CONTRACT.md` §243）
 
-三个宿主日志里都躺着**用户放弃过的路径**。画线之前必须先决定画哪条。契约文档
+三个执行环境日志里都躺着**用户放弃过的路径**。画线之前必须先决定画哪条。契约文档
 §243 给出的形状是 `Linearization { LeafPath, AllRecorded }`，默认 `LeafPath`（用户
 最终走的那条）。
 
 **Claude Code 侧这条不用猜**：本机实测，281 条 `last-prompt` 记录都带 `leafUuid`
-指向那一刻的当前叶节点，`isSidechain` 标旁支。也就是说「叶路径」是宿主自己写在
+指向那一刻的当前叶节点，`isSidechain` 标旁支。也就是说「叶路径」是执行环境自己写在
 日志里的信号，adapter 是去**读**它，不是去**发明**它。这一点比「adapter 选
-LeafPath」更强——线性化有宿主信号可循。
+LeafPath」更强——线性化有执行环境信号可循。
 
 废弃/无法解析的分叉 → `unmetered`，不是 0，不是静默合并（`RUNTIME_EVIDENCE_CONTRACT.md`
 §243：「fork 无法解析 → 不进 floor、不进 total、单独计入 unmetered，让缺口出现在
@@ -126,7 +126,7 @@ LeafPath」更强——线性化有宿主信号可循。
 
 - 选 `leaf`（默认，用户最终走的那条）还是 `all`（全部记录路径）。
 - 选 `leaf` 时，废弃分叉 → `unmetered`，总览的覆盖率必须显示这个缺口。
-- Claude Code 的 `leafUuid` / `isSidechain` 是宿主给的线性化信号；Codex 的
+- Claude Code 的 `leafUuid` / `isSidechain` 是执行环境给的线性化信号；Codex 的
   `thread_rolled_back`、DSH 的 `seedLength` 是同义但形态不同的信号。
 
 ### 3.2 序（x 轴真键）
@@ -136,12 +136,12 @@ LeafPath」更强——线性化有宿主信号可循。
 event.rs`）。契约文档把它升级成三段式（§9）：
 
 ```rust
-EventId { host_scope, ordinal, native }
+EventId { harness_scope, ordinal, native }
 // ordinal：adapter 局部、只在「一个 scope 内」可比（Claude Code 无 seq，是合成的）
 // native ：Seq | Uuid | CallId | TurnId —— 跨 scope join 只走它，绝不走 ordinal
 ```
 
-每宿主 identity 键不同：DSH `seq`；Codex `turn_id`/`call_id`；Claude Code
+每执行环境 identity 键不同：DSH `seq`；Codex `turn_id`/`call_id`；Claude Code
 `uuid`/`parentUuid`/`toolUseID`；WorkBuddy `toolCallId`/`requestId`
 （`RUNTIME_EVIDENCE_CONTRACT.md` §9）。跨 scope（主子代理）join 走 `native`，
 因为子代理会话是另一个编号空间——`dsh-client` 的 `skillAttribution` 已经手工
@@ -172,8 +172,8 @@ epoch。错一个时区，peak/off-peak 成本就错——这是成本领域规�
    `<local-command-stdout>Goal set: …</local-command-stdout>`。它跟 `/model`、`/effort`
    用同一套 `<command-name>` 文本包装，没有专属字段——要提取得去 parse `<command-args>`
    文本。用户报告 Codex/WorkBuddy/DSH 也有 `/goal` 入口，但本文档只对 Claude Code
-   做了本机验证，其余待逐宿主核。
-2. **结构化 task 跟踪**（todo 列表，与 `/goal` 是两回事）→ **真·结构化数据，且两宿主
+   做了本机验证，其余待逐执行环境核。
+2. **结构化 task 跟踪**（todo 列表，与 `/goal` 是两回事）→ **真·结构化数据，且两执行环境
    几乎同构**：
    - Claude Code `TaskCreate`/`TaskUpdate`/`TaskList` → `{ taskId, subject, description, status }`（status ∈ pending/in_progress/completed）
    - WorkBuddy `~/.workbuddy/tasks/<session-id>/<id>.json` → `{ id, subject, description, activeForm, status, createdAt, updatedAt }`（本机实测 14/15 个 task 目录的 uuid 命中 SQLite session id）
@@ -181,7 +181,7 @@ epoch。错一个时区，peak/off-peak 成本就错——这是成本领域规�
 3. **Codex 的 "task" = "turn"**：`task_started`/`task_complete` 事件的 payload 带
    `turn_id`，是 turn 边界，不是独立 goal。
 
-所以 vitals-core 的 `goal_id` 槽**不是"无宿主喂"**，是**把两个概念（`/goal` 文本 +
+所以 vitals-core 的 `goal_id` 槽**不是"无执行环境喂"**，是**把两个概念（`/goal` 文本 +
 task 跟踪结构化）合并成了一个字段，且两个都没映射**——adapter `canonical_session.rs:77`
 的 `goal_id: None` 是写死，不是"挖了没挖到"。契约应区分：`task_id`（= turn，数据现成）
 与 `goal`（`/goal` 文本，需 parse；task 跟踪结构化，可映射但语义是"待办列表"不是"会话
@@ -189,7 +189,7 @@ task 跟踪结构化）合并成了一个字段，且两个都没映射**——a
 
 ### 3.4 序列（y 轴值）
 
-token 桶分宿主：DSH 4 桶、Codex 6 桶（`codex_usage.rs` 读 `last_token_usage` 增量 +
+token 桶分执行环境：DSH 4 桶、Codex 6 桶（`codex_usage.rs` 读 `last_token_usage` 增量 +
 按 `total_token_usage` 签名去重）、Claude Code 4 桶 + `thinking_tokens` + ephemeral
 cache（`message.usage`，按 `message.id` 去重）、WorkBuddy 计量 **credits 不是 token**。
 
@@ -200,7 +200,7 @@ enum Cost { Money { currency }, Credits(f64), Quota(Vec<QuotaWindow>), Unavailab
 ```
 
 不同币种 / credits / token **绝不互加、绝不排名**。时间线的「cost 轴」因此是
-宿主专属的（DSH/Codex/Claude Code 是 Money，WorkBuddy 是 Credits），几何函数
+执行环境专属的（DSH/Codex/Claude Code 是 Money，WorkBuddy 是 Credits），几何函数
 不关心——它只画「一个命名序列的值」，值是什么单位由适配器决定。
 
 ### 3.5 事件标记（与线正交的第二图层）
@@ -234,12 +234,12 @@ lossy），不把 lossy 的标记和 measured 的标记画成同一种置信度�
       "ts": 1786895978589,               // 可选；展示/分桶副属性
       "task_id": "turn-71",              // 可选；映射到 turn
       // 无 goal_id：goal/task 见 §3.3 的三分法，不塞进 per-point
-      "values": {                        // 按宿主有的填，缺了不编
+      "values": {                        // 按执行环境有的填，缺了不编
         "context": 1813,
         "input": 8238,
         "output": 9112,
         "cache_read": 1380864,
-        "cost": 0.02                     // 单位由宿主定（Money/Credits），不跨宿主比
+        "cost": 0.02                     // 单位由执行环境定（Money/Credits），不跨执行环境比
       }
     }
   ],
@@ -256,7 +256,7 @@ lossy），不把 lossy 的标记和 measured 的标记画成同一种置信度�
 
 - `points` 按 `(scope, ordinal)` 升序；**同 scope 内 ordinal 唯一**，跨 scope 靠
   `native` 关联。
-- `values` 的键集合由宿主声明，缺的键**不出现**（不是填 0 / null）——「这个宿主
+- `values` 的键集合由执行环境声明，缺的键**不出现**（不是填 0 / null）——「这个执行环境
   没测这个维度」与「测了是 0」必须可区分。
 - `events` 与 `points` 正交，**永不参与聚合**；每个 event 必带 `provenance`
   （measured/derived/lossy）。
@@ -270,8 +270,8 @@ lossy），不把 lossy 的标记和 measured 的标记画成同一种置信度�
 
 1. **树要显式选线性化**；废弃分叉进 `unmetered`，不归零、不静默合并。
 2. **序 = `(scope, ordinal)`，跨 scope 走 `native`**；时间戳永不参与排序。
-3. **每个字段只用宿主真暴露的证据**；`unavailable ≠ 零`，lossy 单独标记。
-4. **用量/成本不可通约**，不跨宿主相加、不跨币种排名。
+3. **每个字段只用执行环境真暴露的证据**；`unavailable ≠ 零`，lossy 单独标记。
+4. **用量/成本不可通约**，不跨执行环境相加、不跨币种排名。
 5. **事件点一个不丢**（`eventsIn === eventsOut`）；缺数据留缺口不连直线。
 6. **父子 agent 关系是半成品**，不塞进线性的 x 轴，放独立的树视图。
 
@@ -284,7 +284,7 @@ lossy），不把 lossy 的标记和 measured 的标记画成同一种置信度�
 
 | 层 | 干什么 | 归属 | 理由 |
 |---|---|---|---|
-| **数据准备**：原始事件 → `timeline_series.points` | 折 token 快照、按小时/turn 分桶、选叶路径、映射 ordinal/native | **agent-vitals-core 的宿主适配器 + envelope** | 宿主专属的测量派生，不该在浏览器重算 |
+| **数据准备**：原始事件 → `timeline_series.points` | 折 token 快照、按小时/turn 分桶、选叶路径、映射 ordinal/native | **agent-vitals-core 的执行环境适配器 + envelope** | 执行环境专属的测量派生，不该在浏览器重算 |
 | **几何**：`points+events` → SVG path/柱/点 | 比例尺、聚合、缺口断开 | **共享 client `.js`（纯函数）** | 呈现，不是测量；「错比例尺不报错」要靠测试钉，不是靠位置 |
 | **渲染壳** | SVG 字符串 → DOM/React/模板 | 每前端一份 | 三个前端构建链不同 |
 
@@ -296,22 +296,22 @@ lossy），不把 lossy 的标记和 measured 的标记画成同一种置信度�
   变死代码）、`codex_session.html` Python 内联。一条 node 验证脚本
   （现 `verify-timeline.mjs` / `verify-codex-session-timeline.mjs` 的模式）断言
   纯几何，跑在 CI 和本地 unittest 里，风险钉一次不是三次。
-- **数据准备收口到 envelope**：Codex 现在已把 `cost_report.hours` 在宿主侧折好，
-  DSH 却把原始 `requests[]` 丢给客户端自己折——这份不一致正是要消灭的。每个宿主
+- **数据准备收口到 envelope**：Codex 现在已把 `cost_report.hours` 在执行环境侧折好，
+  DSH 却把原始 `requests[]` 丢给客户端自己折——这份不一致正是要消灭的。每个执行环境
   适配器产同一个 `timeline_series`，客户端几何函数只消费这个形状。
 
 ---
 
-## 7. 每宿主证据现状
+## 7. 每执行环境证据现状
 
-本机实测 + `RUNTIME_EVIDENCE_CONTRACT.md` §14 汇总。四个宿主都读了原始数据，不是
+本机实测 + `RUNTIME_EVIDENCE_CONTRACT.md` §14 汇总。四个执行环境都读了原始数据，不是
 adapter 产出：Claude Code `~/.claude/projects/.../*.jsonl` 5739 行；Codex rollout
 `~/.codex/sessions/.../rollout-*.jsonl` 4707 行；DSH `~/.dsh/sessions/.../
 session.jsonl.zstd` 解压后 9807 行；WorkBuddy SQLite（`sessions`/`session_usage`
 22 会话）+ `tasks/<session-id>/<id>.json`（15 目录，14 命中 session id）+ `traces/`
 670 个 span 树。
 
-| 宿主 | 存储 | 树/线 | 序 | 一个点的粒度 | y 轴值 | 备注 |
+| 执行环境 | 存储 | 树/线 | 序 | 一个点的粒度 | y 轴值 | 备注 |
 |---|---|---|---|---|---|---|
 | DSH | JSONL | 线（`seedLength` 分支） | `seq` | request / turn / step | 4 桶 token + cost(CNY) | 唯一有 StepBoundaries |
 | Codex | JSONL | 线 + `thread_rolled_back` | `turn_id`/`call_id` | turn（`task_started`/`task_complete`）/ 快照 | 6 桶 token（`last_token_usage` 增量）+ Money | history_mode Legacy/Paginated 两套词汇 |
@@ -320,7 +320,7 @@ session.jsonl.zstd` 解压后 9807 行；WorkBuddy SQLite（`sessions`/`session_
 
 **task/goal 数据结构**（本机实测，是这次调研的核心纠正项）：
 
-| 宿主 | task/goal 形态 | 结构化？ | 字段 |
+| 执行环境 | task/goal 形态 | 结构化？ | 字段 |
 |---|---|---|---|
 | Claude Code | `/goal` 斜杠命令 | ❌ 文本 | `user` 消息里 `<command-name>/goal</command-name>` + `<command-args>` + `<local-command-stdout>Goal set: …` |
 | Claude Code | `TaskCreate`/`TaskUpdate`/`TaskList` 工具 | ✅ 结构化 | `{ taskId, subject, description, status }` |
@@ -331,7 +331,7 @@ session.jsonl.zstd` 解压后 9807 行；WorkBuddy SQLite（`sessions`/`session_
 两条要单独记的：
 
 - **Claude Code 的树是显式的**：`leafUuid`（在 `last-prompt` 上）标叶、`isSidechain`
-  标旁支，线性化信号宿主自给。
+  标旁支，线性化信号执行环境自给。
 - **WorkBuddy 的轨迹证据曾被漏掉一轮**：最富的 `traces/`（670 个 span 树、652MB）
   在第一轮调研里没被发现，文档据此立规矩「adapter 报 unavailable 必须枚举它试过
   哪些 store」。时间线同理：停在 2 个 store 就报「无 transcript」，画出来必错。
@@ -344,12 +344,12 @@ session.jsonl.zstd` 解压后 9807 行；WorkBuddy SQLite（`sessions`/`session_
 |---|---|---|
 | task/goal 未映射 | vitals-core `goal_id` 把「`/goal` 文本命令」与「task 跟踪结构化列表」合并成一个字段，且两者都没映射；adapter `canonical_session.rs:77` 写死 `None` | **待接的映射缺口，不是删除对象**。`/goal` 需 parse `<command-args>` 文本（lossy）；task 跟踪（Claude Code `TaskCreate`、WorkBuddy `tasks/*.json`）是可映射的结构化数据，语义是"待办列表"不是"会话目标"，宜作独立列表维度 |
 | 父子 agent 关系 | DSH 扁平列表（`parentSession` 5/19 不可靠）；Codex `agent_thread_id` 只数覆盖率未提取；Claude Code `isSidechain`；WorkBuddy `parentId` 树 | 不进 `timeline_series` 的线性轴；留给独立的子代理树视图 |
-| 成本轴 | Money/Credits/Quota 不可通约 | 不做跨宿主 cost 轴；每宿主画自己的 |
+| 成本轴 | Money/Credits/Quota 不可通约 | 不做跨执行环境 cost 轴；每执行环境画自己的 |
 | WorkBuddy 全貌 | traces 仅抽样 schema，未对全 corpus 校准 | 标 `※`，未校准前按 provisional 处理 |
 
-「诚实空」是本仓库一贯的纪律（`references/hosts.md`：unavailable 不是 0；报告缺
+「诚实空」是本仓库一贯的纪律（`references/harnesses.md`：unavailable 不是 0；报告缺
 一列比编一列有用）。时间线契约继承它：`values` 缺键不出现、lossy 单独标——都是同一
-原则的呈现侧镜像。task/goal 这一条**不是**"诚实空"，是"**未映射**"：数据在宿主原始
+原则的呈现侧镜像。task/goal 这一条**不是**"诚实空"，是"**未映射**"：数据在执行环境原始
 日志里真实存在（本机已验证），是 adapter 没接，两者不能混为一谈。
 
 ---
@@ -363,11 +363,11 @@ session.jsonl.zstd` 解压后 9807 行；WorkBuddy SQLite（`sessions`/`session_
 2. **契约形状测试**：`timeline_series` 逐字段对账 `CanonicalSession`（同
    `test_canonical_schema.py` 的做法），`ordinal` 同 scope 唯一、跨 scope 走
    `native`。
-3. **每宿主 adapter 的 parity**：同一 session 的 `timeline_series` 与现有
+3. **每执行环境 adapter 的 parity**：同一 session 的 `timeline_series` 与现有
    `cost_report.hours` / `requests[]` 数字一致（守恒：分桶求和 = 总量）。
-4. **退化诚实**：某个宿主缺 turn/step 时，对应字段不出现、图上留缺口，不拿
+4. **退化诚实**：某个执行环境缺 turn/step 时，对应字段不出现、图上留缺口，不拿
    unavailable 冒充 measured-zero（`evidence.rs`「adapter 不得用读不到的东西刷
    覆盖」的呈现侧同款）。
 
 验收的靶子不是「图画得好看」，是「同一份数据画两次画得一样、缺的数据诚实留白、
-跨宿主不把不可通约的数画进同一条线」。
+跨执行环境不把不可通约的数画进同一条线」。

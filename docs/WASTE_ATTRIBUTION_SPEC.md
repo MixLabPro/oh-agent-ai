@@ -144,7 +144,7 @@ insights_envelope.json` 冻结面，additive 追加并经 fixture 评审）。�
 
 - 事实级 token-失败血缘（usage_facts/workflow_events 加列或归因桥表）：
   ingest 改造 + 回填，另案立项；本 spec 的粒度上限声明就是对它的诚实对冲。
-- 跨宿主 measured 净增长口径（DSH SV-COST-02 式）：claude/codex 标准化层
+- 跨执行环境 measured 净增长口径（DSH SV-COST-02 式）：claude/codex 标准化层
   无 context_tokens，不可比。
 - 把 `failure_exposure` 计入 MonthlySummary、账单、`amounts_by_basis` 或
   confirmed waste 分子；也不以其制作 landing「白烧金额」Hero。

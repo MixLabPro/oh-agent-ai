@@ -19,7 +19,7 @@ path = "src/lib.rs"
 [dependencies]
 agent-vitals-data = { path = "../agent-vitals-data" }
 agent-vitals-domain = { path = "../agent-vitals-domain" }
-agent-vitals-hosts = { path = "../agent-vitals-hosts", features = ["sources"] }
+agent-vitals-harnesses = { path = "../agent-vitals-harnesses", features = ["sources"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 jiff = "0.2"
 serde = "1"

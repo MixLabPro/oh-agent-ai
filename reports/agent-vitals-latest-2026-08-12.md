@@ -10,9 +10,9 @@
 
 Codex 不再只靠目录猜测：发现范围、启用状态、scope、interface 和 dependencies 均由本机官方运行时返回。按 OpenAI 官方的“模型上下文 2%，未知时 8,000 字符”规则，当前 18 个 Codex skill 的初始列表估算使用约 89.9%，已接近阈值但尚未超限。Codex 逐 skill 触发次数仍没有公开接口。
 
-## 宿主盘点
+## 执行环境盘点
 
-| 宿主 | 磁盘 skill | 可发现 skill | Tier 1 估算 | 描述预算 | 触发数据 |
+| 执行环境 | 磁盘 skill | 可发现 skill | Tier 1 估算 | 描述预算 | 触发数据 |
 |---|---:|---:|---:|---|---|
 | Claude Code | 50 | 3 | 约 466 token | 941 / 15,000（6.3%） | 可用 |
 | Codex | 18 | 18 | 约 1,725 token | 约 7,192 / 8,000（89.9%，官方 fallback 估算） | 未获取 |
@@ -20,7 +20,7 @@ Codex 不再只靠目录猜测：发现范围、启用状态、scope、interface
 | Hermes | 0 | 0 | 0 | 未获取 | 未获取 |
 | WorkBuddy | 18 个顶层缓存包 | Work 模式 12 个 | 约 1,859 token | 未获取 | 未获取 |
 
-“磁盘 skill”包含 Claude Code 未启用插件副本；可发现 skill 才是该宿主当前会考虑的集合。Codex 预算规则已有官方依据，但 `skills/list` 不返回当前模型上下文窗口，因此本报告采用官方 8,000 字符 fallback，属于可复算估算而非实际提示词遥测。OpenClaw、Hermes 与 WorkBuddy 的预算及非 Claude 宿主的逐 skill 使用计数仍报告为未获取。
+“磁盘 skill”包含 Claude Code 未启用插件副本；可发现 skill 才是该执行环境当前会考虑的集合。Codex 预算规则已有官方依据，但 `skills/list` 不返回当前模型上下文窗口，因此本报告采用官方 8,000 字符 fallback，属于可复算估算而非实际提示词遥测。OpenClaw、Hermes 与 WorkBuddy 的预算及非 Claude 执行环境的逐 skill 使用计数仍报告为未获取。
 
 ### WorkBuddy：当前 Work 模式为 12 个 Skill
 
@@ -52,7 +52,7 @@ Claude Code 与 Codex 未发现覆盖冲突。OpenClaw 按实例隔离后从 11 
 
 扫描器在当前顶层 Skill 口径下发现 3 个 critical 级启发式命中，但不能直接等同于恶意代码：
 
-| 宿主 | skill | 加载状态 | 复核结果 |
+| 执行环境 | skill | 加载状态 | 复核结果 |
 |---|---|---|---|
 | Claude Code | `agent-vitals` | 已加载 | 3 条均为安全规则/注入示例的引用语境；建议保留人工复核记录。 |
 | Claude Code | `receipts` | 未加载 | 1 条为注入示例的引用语境；当前不进入上下文。 |
@@ -67,12 +67,12 @@ Claude Code 与 Codex 未发现覆盖冲突。OpenClaw 按实例隔离后从 11 
 - Claude Code 的预算不包括内置 skill，因此实际使用量可能更高。
 - Codex 运行时字段来自官方 `skills/list`；逐 skill 触发记录仍不可用，零使用不等于僵尸。
 - Codex 预算按官方 8,000 字符 fallback 估算，无法证明某次具体会话实际注入了多少字符。
-- 本次 Claude Code 扫描到的是已安装副本；本仓库中刚完成的多宿主适配尚未复制到该安装目录。
+- 本次 Claude Code 扫描到的是已安装副本；本仓库中刚完成的多执行环境适配尚未复制到该安装目录。
 
 ## 建议下一步
 
 1. 优先精简 Codex skill 的 description，使 8,000 字符 fallback 下保留至少 20% 余量；再评估拆分 `design-taste-frontend` 与 `documents:documents` 的正文。
-2. 将当前仓库版本安装/同步到目标宿主目录后再扫描，尤其是 Claude Code 现有的 `agent-vitals` 副本。
+2. 将当前仓库版本安装/同步到目标执行环境目录后再扫描，尤其是 Claude Code 现有的 `agent-vitals` 副本。
 3. 对 OpenClaw 的 `web-design-engineer` 做拆分评估，并人工复核 `podcast-voice-video` 的安全命中行。
 4. WorkBuddy 报告保持“18 个顶层缓存包 / 当前 Work 模式 12 个 Skill”的双层口径；不要把 builtin-plugin 内部资源或 connectors marketplace 候选算成顶层安装。若准备使用 Hermes，请先安装至少一个 skill 后复扫。
 5. 在 2–3 周后对 Claude Code 复扫，并使用本次 JSON 作为基线比较触发增量和新增风险。
@@ -81,4 +81,4 @@ Claude Code 与 Codex 未发现覆盖冲突。OpenClaw 按实例隔离后从 11 
 
 已拉取 `origin/refactor/rust-port`（`f406da5`）。该分支当前尚无 `Cargo.toml` 或 Rust 源码，主要新增架构文档、fixtures、golden 与 characterization/invariant/property 测试，是 Rust 移植前的契约固化阶段。重构仍值得继续，但必须先完成契约刷新：加入 Codex app-server capability、WorkBuddy manifest capability、OpenClaw `instance_id` / `conflict_domain` / 三态 enabled-loaded-runtime_verified、按实例汇总，以及各来源的降级错误。然后补三组 fixtures 和 golden，再开始 Rust 等价实现；否则 Rust 会忠实复制旧版“Codex 不可获取、WorkBuddy 为 0、OpenClaw 跨实例冲突”的错误行为。当前工作区有未提交修改，因此未直接 checkout/merge 该分支。
 
-本次已新增可直接并入重构分支的契约文档：[Host Adapter Contract](../docs/HOST_ADAPTER_CONTRACT.md)、[Rust Port Plan](../docs/RUST_PORT_PLAN.md) 和 [Product Capability Matrix](../docs/PRODUCT_CAPABILITY_MATRIX.md)。
+本次已新增可直接并入重构分支的契约文档：[Harness Adapter Contract](../docs/HARNESS_ADAPTER_CONTRACT.md)、[Rust Port Plan](../docs/RUST_PORT_PLAN.md) 和 [Product Capability Matrix](../docs/PRODUCT_CAPABILITY_MATRIX.md)。

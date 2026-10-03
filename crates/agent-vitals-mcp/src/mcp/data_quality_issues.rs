@@ -21,7 +21,7 @@ pub fn spec() -> ToolSpec {
                 "status": { "type": "string", "enum": ["open", "resolved", "all"] },
                 "severity": { "type": "array", "items": { "type": "string" } },
                 "codes": { "type": "array", "items": { "type": "string" } },
-                "hosts": { "type": "array", "items": { "type": "string" } },
+                "harnesses": { "type": "array", "items": { "type": "string" } },
                 "from": { "type": "string", "description": "Inclusive statistics date YYYY-MM-DD." },
                 "to": { "type": "string", "description": "Inclusive statistics date YYYY-MM-DD." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
@@ -68,7 +68,7 @@ fn date_bound(args: &Value, key: &str, end: bool) -> Result<Option<i64>, ToolErr
     Ok(Some(if end { end_ms } else { start_ms }))
 }
 
-fn allowed_host(value: &str) -> bool {
+fn allowed_harness(value: &str) -> bool {
     matches!(value, "claude-code" | "codex" | "dsh" | "workbuddy")
 }
 
@@ -111,8 +111,8 @@ fn safe_detail(code: &str, raw: &str) -> Value {
             safe.insert("by_model".to_string(), json!(by_model));
         }
     } else if code == "missing_sid" {
-        if let Some(host) = object.get("source_host").and_then(Value::as_str).filter(|host| allowed_host(host)) {
-            safe.insert("source_host".to_string(), json!(host));
+        if let Some(harness) = object.get("source_harness").and_then(Value::as_str).filter(|harness| allowed_harness(harness)) {
+            safe.insert("source_harness".to_string(), json!(harness));
         }
         if let Some(reason) = object.get("reason").and_then(Value::as_str).filter(|reason| {
             matches!(*reason, "missing_native_session_id" | "source_missing" | "unattached_event")
@@ -120,11 +120,11 @@ fn safe_detail(code: &str, raw: &str) -> Value {
             safe.insert("reason".to_string(), json!(reason));
         }
     } else if code.starts_with("legacy_aggregate") {
-        for key in ["month", "host", "coverage_kind"] {
+        for key in ["month", "harness", "coverage_kind"] {
             let Some(value) = object.get(key) else { continue };
             let allowed = match key {
                 "month" => safe_month(value),
-                "host" => value.as_str().filter(|host| allowed_host(host)).map(str::to_string),
+                "harness" => value.as_str().filter(|harness| allowed_harness(harness)).map(str::to_string),
                 _ => value.as_str().filter(|kind| matches!(*kind, "base" | "peak" | "coverage" | "explained")).map(str::to_string),
             };
             if let Some(value) = allowed {
@@ -132,7 +132,7 @@ fn safe_detail(code: &str, raw: &str) -> Value {
             }
         }
     } else if code == "reconcile_exception" {
-        for key in ["month", "host", "basis", "currency", "amount_minor", "kind"] {
+        for key in ["month", "harness", "basis", "currency", "amount_minor", "kind"] {
             let Some(value) = object.get(key) else { continue };
             if key == "amount_minor" {
                 if let Some(amount) = value.as_i64() {
@@ -142,7 +142,7 @@ fn safe_detail(code: &str, raw: &str) -> Value {
             }
             let allowed = match key {
                 "month" => safe_month(value),
-                "host" => value.as_str().filter(|host| allowed_host(host)).map(str::to_string),
+                "harness" => value.as_str().filter(|harness| allowed_harness(harness)).map(str::to_string),
                 "currency" => safe_currency(value),
                 "kind" => value.as_str().filter(|kind| matches!(*kind, "exact" | "explained")).map(str::to_string),
                 _ => value.as_str().filter(|value| value.len() <= 64 && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')).map(str::to_string),
@@ -198,7 +198,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     }
     let severities = list_arg(args, "severity")?;
     let codes = list_arg(args, "codes")?;
-    let hosts = list_arg(args, "hosts")?;
+    let harnesses = list_arg(args, "harnesses")?;
     let from_ms = date_bound(args, "from", false)?;
     let to_ms = date_bound(args, "to", true)?;
     if from_ms.zip(to_ms).is_some_and(|(from, to)| from >= to) {
@@ -256,9 +256,9 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         let (issue_id, scope_type, code, severity, first, last, resolved, detail_raw) = row
             .map_err(|e| ToolError::new("internal_error", format!("data quality row failed: {e}")))?;
         let detail = safe_detail(&code, &detail_raw);
-        let host = detail.get("host").and_then(Value::as_str)
-            .or_else(|| detail.get("source_host").and_then(Value::as_str));
-        if !hosts.is_empty() && !host.is_some_and(|host| hosts.iter().any(|wanted| wanted == host)) {
+        let harness = detail.get("harness").and_then(Value::as_str)
+            .or_else(|| detail.get("source_harness").and_then(Value::as_str));
+        if !harnesses.is_empty() && !harness.is_some_and(|harness| harnesses.iter().any(|wanted| wanted == harness)) {
             continue;
         }
         let safe_id = safe_issue_id(&issue_id);
@@ -266,7 +266,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             "issue_id": safe_id,
             "category": category(&code),
             "scope": scope_type,
-            "host": host,
+            "harness": harness,
             "code": code,
             "severity": severity,
             "first_seen": super::ms_to_rfc3339_beijing(first),

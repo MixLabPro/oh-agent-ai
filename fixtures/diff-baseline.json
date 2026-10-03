@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "host_selection": "claude-code",
+  "harness_selection": "claude-code",
   "description_budget": {
     "available": true,
     "used_chars": 120,
@@ -18,7 +18,7 @@
   "skills": [
     {
       "name": "retired-tool",
-      "host_family": "claude-code",
+      "harness_family": "claude-code",
       "instance_id": null,
       "namespace": null,
       "loaded": true,
@@ -28,7 +28,7 @@
     },
     {
       "name": "shared-name",
-      "host_family": "claude-code",
+      "harness_family": "claude-code",
       "instance_id": null,
       "namespace": "plugin-a",
       "loaded": true,
@@ -38,7 +38,7 @@
     },
     {
       "name": "shared-name",
-      "host_family": "claude-code",
+      "harness_family": "claude-code",
       "instance_id": null,
       "namespace": "plugin-b",
       "loaded": true,
@@ -48,7 +48,7 @@
     },
     {
       "name": "alpha",
-      "host_family": "claude-code",
+      "harness_family": "claude-code",
       "instance_id": null,
       "namespace": null,
       "loaded": true,
@@ -58,7 +58,7 @@
     },
     {
       "name": "p1-tool",
-      "host_family": "claude-code",
+      "harness_family": "claude-code",
       "instance_id": null,
       "namespace": "plug-one",
       "loaded": true,

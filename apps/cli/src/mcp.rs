@@ -25,7 +25,7 @@ const SERVER_NAME: &str = "agent-vitals-data";
 /// `agent-vitals data-mcp serve` 的入口。永不返回（stdin EOF → exit 0）。
 pub fn serve(allow_local_writes: bool) -> ! {
     let data_home = agent_vitals_runtime::home::data_home();
-    // 生命周期横幅，不是问题——保留原样直出 stderr（外部 MCP host 常年就是
+    // 生命周期横幅，不是问题——保留原样直出 stderr（外部 MCP harness 常年就是
     // 这么认这个进程活没活的），同时落一条 info 到文件（本机侧的进程存活
     // 记录，此前完全没有）。
     let banner = format!(

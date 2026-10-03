@@ -1,4 +1,4 @@
-# 问题分析规格：`issue_instances.opened_at_ms` 单位随宿主分化（秒 vs 毫秒）
+# 问题分析规格：`issue_instances.opened_at_ms` 单位随执行环境分化（秒 vs 毫秒）
 
 > 状态：**待修**（分析完成，真机证据齐备；未改任何代码）
 > 发现：2026-09-12，验证 REQ-073 P1 归并层（`issue_groups`）时顺带发现
@@ -9,7 +9,7 @@
 
 ## 1. 现象
 
-`issue_groups()`（P1 归并层）按 `(问题族, 宿主, 对象, 证据类, **日桶**)` 归并，其中日桶
+`issue_groups()`（P1 归并层）按 `(问题族, 执行环境, 对象, 证据类, **日桶**)` 归并，其中日桶
 由 `opened_at_ms` 算出。真机上：
 
 - **1,542 / 4,450（34.7%）的实例被归入日桶 `1970-01-22`**；
@@ -20,9 +20,9 @@
 
 ## 2. 实测证据
 
-**E1 单位按宿主分化**（真机 4,450 条 `issue_instances`）：
+**E1 单位按执行环境分化**（真机 4,450 条 `issue_instances`）：
 
-| 宿主 | `metadata.time` 单位 | 条数 | 样本（值 → 按该单位解读） |
+| 执行环境 | `metadata.time` 单位 | 条数 | 样本（值 → 按该单位解读） |
 |---|---|---|---|
 | `claude-code` | **秒** | 1,527 | `1788651641` → 2026-09-06 ✓ |
 | `codex` | 秒 | 15 | — |
@@ -46,16 +46,16 @@ SV603 19 · SV602 18 · SV604 18（覆盖 7 个规则族，非个别规则的问
 opened_at_ms: finding.time.unwrap_or_else(crate::sql_sync::now_ms),
 ```
 
-`finding.time` 的单位**随宿主 findings 层而变**，而这里原样写入一个名字带 `_ms` 的列
+`finding.time` 的单位**随执行环境 findings 层而变**，而这里原样写入一个名字带 `_ms` 的列
 （`crates/agent-vitals-data/src/issues.rs:21 pub opened_at_ms: i64`）。
 
 **上游**：`finding.time` 来自行为时间线的条目时间
 （`crates/agent-vitals-domain/src/domain/behavior.rs:466` 的 `"time": to_json(entry.time)`），
-而 `entry.time` 由**各宿主适配器**在构造 canonical 时间线时填入——**各宿主各自决定单位**，
+而 `entry.time` 由**各执行环境适配器**在构造 canonical 时间线时填入——**各执行环境各自决定单位**，
 没有任何一层统一。解析链：
 
 ```
-宿主适配器填 entry.time ──► behavior.rs:466 原样进 finding.time
+执行环境适配器填 entry.time ──► behavior.rs:466 原样进 finding.time
    ──► r2a_store.rs:409 读取 ──► r2a_store.rs:1649 原样进 metadata.time
    ──► r2a_store.rs:1668 原样进 opened_at_ms ──► issues.rs:249 日桶（按 ms 解释）
 ```
@@ -98,12 +98,12 @@ fn issue_day_bucket(opened_at_ms: i64) -> String {
 fn to_epoch_ms(t: i64) -> i64 { if t < 100_000_000_000 { t * 1000 } else { t } }
 ```
 
-理由：`finding.time` 的单位目前由宿主适配器决定（见 §3），在一个版本内无法保证全部改完；
+理由：`finding.time` 的单位目前由执行环境适配器决定（见 §3），在一个版本内无法保证全部改完；
 边界归一保证**列契约恒成立**，且可独立验收。
 
 ### 5.2 产生方修正（应做，宽而正）
 
-把各宿主适配器填入 `entry.time` 的地方统一为毫秒（claude-code 的秒是主犯，1,527 条）。
+把各执行环境适配器填入 `entry.time` 的地方统一为毫秒（claude-code 的秒是主犯，1,527 条）。
 优先做法是**在填 entry.time 处转换**，让 canonical 时间线的 `time` 有单一契约；
 §5.1 的边界归一保留为防御层（两者并存不冲突，幂等）。
 

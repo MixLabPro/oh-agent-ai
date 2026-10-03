@@ -1,7 +1,7 @@
-//! Stage B 遗留收口：Runtime 共享 sync service —— 四宿主**例行** facts ingest
+//! Stage B 遗留收口：Runtime 共享 sync service —— 四执行环境**例行** facts ingest
 //! （claude-code / codex / dsh，E4b 起 + workbuddy）。
 //!
-//! 本模块回答「**哪些会话文件该被 emit**」：文件发现（各宿主 sources 的
+//! 本模块回答「**哪些会话文件该被 emit**」：文件发现（各执行环境 sources 的
 //! locate 面）→ `source_files` SQL 指纹差量 → emitter → authority 写入。这是
 //! month.json/today.json 退休路径（§5）的第 ① 步——
 //! facts 平面从「手动 `--write` 诊断」升级为「可例行驱动的生产流」（托盘
@@ -29,8 +29,8 @@ use serde_json::{json, Value};
 
 /// 单文件指纹（size + mtime 纳秒）——与 `claude_cost` fold checkpoint 同款。
 /// **无时间戳字段**：指纹就是状态，字节确定性由构造保证。
-/// （换行边界扫描在 `agent-vitals-hosts::sources::parsers`——P3 起它属于
-/// 解析器注册表，只有增量能力宿主才需要写换行边界检查点。）
+/// （换行边界扫描在 `agent-vitals-harnesses::sources::parsers`——P3 起它属于
+/// 解析器注册表，只有增量能力执行环境才需要写换行边界检查点。）
 fn fingerprint(path: &Path) -> Option<(u64, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta
@@ -41,12 +41,12 @@ fn fingerprint(path: &Path) -> Option<(u64, u64)> {
     Some((meta.len(), mtime.as_nanos() as u64))
 }
 
-/// 单宿主同步结果。`errors` 是「该文件本轮没写进 authority」的
+/// 单执行环境同步结果。`errors` 是「该文件本轮没写进 authority」的
 /// 明细——下次 sync 会重试它们（永久坏文件会每次重试并每次出现在这里，
 /// 这是诚实噪声：坏文件不该被静默遗忘）。
 #[derive(Debug, Default, serde::Serialize)]
-pub struct HostSyncReport {
-    pub host: String,
+pub struct HarnessSyncReport {
+    pub harness: String,
     pub files_seen: usize,
     pub files_synced: usize,
     pub files_skipped: usize,
@@ -63,17 +63,17 @@ pub struct HostSyncReport {
     pub findings_candidates: Vec<PathBuf>,
 }
 
-/// 三宿主例行同步报告。
+/// 三执行环境例行同步报告。
 #[derive(Debug, Default, serde::Serialize)]
 pub struct SyncReport {
-    pub hosts: Vec<HostSyncReport>,
+    pub harnesses: Vec<HarnessSyncReport>,
     pub total_appended: usize,
     pub total_duplicate: usize,
     /// 本轮同步末尾按当前有效计费声明新写的归因行数
     /// （`AuthorityDb::billing_apply_active_declarations`）。
     pub declarations_applied: usize,
     /// W8：同步后的行为 findings 评估（`ingest::findings_eval`）。None = 本轮
-    /// 没有需要评估的 DSH/Codex 会话。评估错误在这里，不混进宿主 `errors`
+    /// 没有需要评估的 DSH/Codex 会话。评估错误在这里，不混进执行环境 `errors`
     /// （后者的语义是「该文件没写进 authority、下轮重试」）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub behavior_findings: Option<crate::ingest::findings_eval::EvalReport>,
@@ -91,8 +91,8 @@ fn scan_claude_quota_cached(
     data_home: &Path,
     files: &[PathBuf],
     now: std::time::SystemTime,
-) -> agent_vitals_hosts::claude_quota::QuotaScan {
-    use agent_vitals_hosts::claude_quota::{
+) -> agent_vitals_harnesses::claude_quota::QuotaScan {
+    use agent_vitals_harnesses::claude_quota::{
         scan_claude_quota_from_contributions, quota_contribution_from_file,
         QuotaFileContribution, QuotaScan, QUOTA_SCAN_WINDOW,
     };
@@ -157,16 +157,16 @@ fn scan_claude_quota_cached(
     scan
 }
 
-/// 对单个宿主执行「发现 → SQL 差量 → emit → authority 写入」。
-/// `emit` 的宿主差异收敛在这个闭包里：输入差量文件集，输出事实批（或
+/// 对单个执行环境执行「发现 → SQL 差量 → emit → authority 写入」。
+/// `emit` 的执行环境差异收敛在这个闭包里：输入差量文件集，输出事实批（或
 /// 逐文件错误）。
-fn sync_host(
-    host: &str,
+fn sync_harness(
+    harness: &str,
     ns: &str,
     db: &agent_vitals_data::authority::AuthorityDb,
     data_home: &Path,
     files: Vec<PathBuf>,
-    report: &mut HostSyncReport,
+    report: &mut HarnessSyncReport,
 ) -> Result<(), String> {
     report.files_seen = files.len();
     let now = crate::clock::now_ms();
@@ -174,7 +174,7 @@ fn sync_host(
     // 指纹会让所有 rollout 都被跳过，因而必须强制重放一次，不能把「日志未变」
     // 误当成「新派生状态已经存在」。没有 rate_limits 的历史也只重放一次：同一
     // 事务留下 schema_meta 标记，避免以后每个 tick 扫完整个 rollout 历史。
-    let runtime_snapshot_backfill_needed = if host == "codex" {
+    let runtime_snapshot_backfill_needed = if harness == "codex" {
         let already_backfilled: Option<i64> = db
             .conn()
             .query_row(
@@ -193,23 +193,23 @@ fn sync_host(
     // 配额扫描要用**整份候选清单**（下面这个循环会把 `files` 消费掉）。复制一份
     // 路径而已（247 个 PathBuf，可忽略），换来的是撞窗计数覆盖完整的 7 天窗口——
     // 只看 dirty 会把"近 7 天撞窗 3 次"报成 1 次，那是拿一个支持不了的数字当结论。
-    let host_files: Vec<PathBuf> = files.clone();
+    let harness_files: Vec<PathBuf> = files.clone();
     // 发现/失效判定走 SourceGraph classify()（F3 修复 + M2 参数对齐）。
     // 发现层与 emit 层用**同一组 classify 参数**——此前发现层硬编码
     // can_increment=false 而 emit 层判 true，两次调用结论矛盾（复跑 M2）。
     // 发现层只需正确判定 skip（Unchanged） vs 处理（非 Unchanged），
     // 具体增量/全量路由由 emit 层的第二次 classify 决定。
     let expected_version = crate::sql_sync::parser_version();
-    // classify 的 expected_parser/can_increment 参数经宿主解析器注册表
-    // （agent-vitals-hosts::sources::parsers，P3 宿主铺开）——runtime 不再
-    // 持有 host 字符串特判。
-    let descriptor = agent_vitals_hosts::parsers::descriptor_for(host);
+    // classify 的 expected_parser/can_increment 参数经执行环境解析器注册表
+    // （agent-vitals-harnesses::sources::parsers，P3 执行环境铺开）——runtime 不再
+    // 持有 harness 字符串特判。
+    let descriptor = agent_vitals_harnesses::parsers::descriptor_for(harness);
     let expected_parser = descriptor.parser_id;
     let can_increment_discovery = descriptor.can_increment;
     for path in files {
         let fp = fingerprint(&path);
         let hash = crate::source_graph::path_hash(&path);
-        let checkpoint = crate::source_graph::read_checkpoint(db.conn(), host, &hash)
+        let checkpoint = crate::source_graph::read_checkpoint(db.conn(), harness, &hash)
             .map_err(|e| format!("source_graph checkpoint: {e}"))?;
         let on_disk = fp;
         let decision = crate::source_graph::classify(
@@ -233,22 +233,22 @@ fn sync_host(
             continue;
         };
         // classify 判定非 Unchanged（或回填需要）→ 标脏 + 进处理列表
-        crate::source_graph::mark_dirty(db.conn(), host, &hash)
+        crate::source_graph::mark_dirty(db.conn(), harness, &hash)
             .map_err(|e| format!("source_graph mark_dirty: {e}"))?;
         dirty.push((path, fp));
     }
 
-    if agent_vitals_hosts::sources::session_hosts::session_host(host)
+    if agent_vitals_harnesses::sources::session_harnesses::session_harness(harness)
         .is_some_and(|h| h.findings.is_some())
     {
         report.findings_candidates = dirty.iter().map(|(p, _)| p.clone()).collect();
     }
     let mut facts: Vec<Value> = Vec::new();
-    // 本轮要落库的宿主实时快照（kind, payload, observed_at_ms）。Codex 的配额与
+    // 本轮要落库的执行环境实时快照（kind, payload, observed_at_ms）。Codex 的配额与
     // Claude 的窗口状态共用这一条路，但各自是独立的 snapshot_kind。
     let mut pending_snapshots: Vec<(&'static str, String, i64)> = Vec::new();
     let mut workflow_events: Vec<WorkflowEvent> = Vec::new();
-    // V16：任务意图摘录（现仅 claude-code emitter 产；其他宿主空集）。
+    // V16：任务意图摘录（现仅 claude-code emitter 产；其他执行环境空集）。
     let mut session_excerpts: Vec<agent_vitals_domain::contracts::workflow::SessionExcerpt> =
         Vec::new();
     let mut synced_sources: Vec<(PathBuf, (u64, u64))> = Vec::new();
@@ -257,8 +257,8 @@ fn sync_host(
     // 去重丢给 ingest 层（账不错但 duplicate 通胀 + 双倍 emit；tick 常驻后
     // 每 5 分钟付一次，审查 P2-1）。claude/dsh 是单文件语义，逐文件隔离错误。
     let codex_dirty: Vec<PathBuf> = dirty.iter().map(|(p, _)| p.clone()).collect();
-    if host == "codex" && !codex_dirty.is_empty() {
-        match agent_vitals_hosts::codex_usage_fact::codex_rollouts_to_usage_facts_with_route(
+    if harness == "codex" && !codex_dirty.is_empty() {
+        match agent_vitals_harnesses::codex_usage_fact::codex_rollouts_to_usage_facts_with_route(
             &codex_dirty,
             ns,
             "default",
@@ -267,7 +267,7 @@ fn sync_host(
             Ok(r) => {
                 if let (Some(contract), Some(payload)) = (r.quota_snapshot, r.quota_snapshot_payload_json) {
                     // 观察时刻挪到这里派生：**解析失败只跳过这条快照，不再让整批写入
-                    // 失败**（旧行为是 Err 上抛，一个坏时间戳会连累整个宿主的 facts）。
+                    // 失败**（旧行为是 Err 上抛，一个坏时间戳会连累整个执行环境的 facts）。
                     match agent_vitals_domain::budget::parse_iso(&contract.observed_at) {
                         Some((seconds, _)) => pending_snapshots.push((
                             "codex_quota",
@@ -291,18 +291,18 @@ fn sync_host(
         }
     }
     let mut incremental_checkpoints: std::collections::HashMap<String, crate::source_graph::SourceCheckpointOverride> = std::collections::HashMap::new();
-    // 解析路由经宿主注册表（P3 收编，此前 `host == "claude-code"` 字面量
-    // 特判散落两处）。trait 背书的逐文件宿主在这里走 parse_increment/parse_full；
+    // 解析路由经执行环境注册表（P3 收编，此前 `harness == "claude-code"` 字面量
+    // 特判散落两处）。trait 背书的逐文件执行环境在这里走 parse_increment/parse_full；
     // codex 是批 emitter（跨文件 seen 去重 + 整批配额折叠，见上），
     // 注册表对它只给 descriptor 申报、不给 trait 实现。
-    let registered = agent_vitals_hosts::parsers::parser_for(host);
+    let registered = agent_vitals_harnesses::parsers::parser_for(harness);
     for (path, fp) in &dirty {
-        if host == "codex" {
+        if harness == "codex" {
             continue; // 已批量处理
         }
         let Some(parser) = registered else {
             report.errors.push(format!(
-                "{}: host `{host}` has no registered parser",
+                "{}: harness `{harness}` has no registered parser",
                 path.display()
             ));
             continue;
@@ -310,11 +310,11 @@ fn sync_host(
         // P1b/P3：SourceGraph 增量路由——classify 已在发现层标脏并判定软/硬。
         // 这里查检查点 + 注册表 descriptor 决定走增量还是全量。
         let hash = crate::source_graph::path_hash(path);
-        let checkpoint = crate::source_graph::read_checkpoint(db.conn(), host, &hash)
+        let checkpoint = crate::source_graph::read_checkpoint(db.conn(), harness, &hash)
             .map_err(|e| format!("source_graph checkpoint: {e}"))?
             .unwrap_or_default();
         // can_increment = 解析器申报（descriptor）合取检查点已有起读 offset
-        //（trait 缺省判定）；全量申报宿主恒 false。
+        //（trait 缺省判定）；全量申报执行环境恒 false。
         let can_increment = parser.can_increment(&checkpoint);
         let emit_expected_parser = if can_increment {
             parser.descriptor().parser_id
@@ -353,10 +353,10 @@ fn sync_host(
                 (out.facts, out.workflow_events, out.session_excerpts)
             })
         } else {
-            // 全量路径（首见/硬失效/全量申报宿主）。增量能力宿主的全量轮也要
+            // 全量路径（首见/硬失效/全量申报执行环境）。增量能力执行环境的全量轮也要
             // 写自己的 parser_id + **换行边界**（不是 stat size）：否则下次
             // classify 判 parser-id-mismatch，该文件永远进不了增量（F2 死循环
-            // 防线）。全量申报宿主不覆写——写路径按 FULL_PARSE_V0 + stat size
+            // 防线）。全量申报执行环境不覆写——写路径按 FULL_PARSE_V0 + stat size
             // 落（dsh/workbuddy 现状，它们的 offset 无语义）。
             parser.parse_full(&ctx, path).map(|out| {
                 if parser.descriptor().can_increment {
@@ -385,22 +385,22 @@ fn sync_host(
     // 不会改变结论）。扫不到就保持旧快照不动（不写空值）：
     // 窗口状态是"越新越准"的观察，空值覆盖反而会把已有证据抹掉，过期与否交给
     // 状态机按 `resets_at` 判。
-    if host == "claude-code" {
-        let scan = scan_claude_quota_cached(data_home, &host_files, std::time::SystemTime::now());
+    if harness == "claude-code" {
+        let scan = scan_claude_quota_cached(data_home, &harness_files, std::time::SystemTime::now());
         // 待处理任务：窗口耗尽 → 建一条；重置或不再有证据 → 自动解决。与快照
         // 同一轮推进，所以「窗口一重置，任务自己从列表里消失」不需要额外机制。
         let exhausted = scan.latest.as_ref().and_then(|snapshot| {
-            match agent_vitals_hosts::claude_quota::window_state(snapshot, now / 1_000) {
-                agent_vitals_hosts::claude_quota::WindowState::Exhausted { resets_at, window } => Some((
+            match agent_vitals_harnesses::claude_quota::window_state(snapshot, now / 1_000) {
+                agent_vitals_harnesses::claude_quota::WindowState::Exhausted { resets_at, window } => Some((
                     resets_at,
                     window,
-                    agent_vitals_hosts::claude_quota::window_label(window),
+                    agent_vitals_harnesses::claude_quota::window_label(window),
                 )),
-                agent_vitals_hosts::claude_quota::WindowState::Unknown => None,
+                agent_vitals_harnesses::claude_quota::WindowState::Unknown => None,
             }
         });
         if let Err(e) = agent_vitals_data::issues::reconcile_quota_window_issue(
-            db.conn(), host, exhausted, now,
+            db.conn(), harness, exhausted, now,
         ) {
             report.errors.push(format!("claude quota issue: {e}"));
         }
@@ -431,7 +431,7 @@ fn sync_host(
             });
         let outcome = crate::sql_sync::write_flat_facts_with_sources(
             db,
-            host,
+            harness,
             ns,
             &synced_sources,
             &incremental_checkpoints,
@@ -453,16 +453,16 @@ fn sync_host(
     Ok(())
 }
 
-/// 例行同步入口（`ingest_service::FACT_HOSTS` 全部宿主）。幂等：重复调用第二次
+/// 例行同步入口（`ingest_service::FACT_HARNESSES` 全部执行环境）。幂等：重复调用第二次
 /// 基本全 skipped / duplicate。
 pub fn sync_facts(data_home: &Path) -> Result<SyncReport, String> {
     sync_facts_filtered(data_home, None)
 }
 
-/// 定向同步入口（LIGHT-PATH spec §5.2）：`only` 给出时只跑这些宿主的批
-/// （批级过滤——codex 的整批语义在 `sync_host` 之内，不受影响）。`None` =
-/// 全宿主，行为与 [`sync_facts`] 逐字节一致。被过滤掉的宿主不 acquire
-/// lease、不产生 HostSyncReport（对账责任整体留给周期重 tick）。
+/// 定向同步入口（LIGHT-PATH spec §5.2）：`only` 给出时只跑这些执行环境的批
+/// （批级过滤——codex 的整批语义在 `sync_harness` 之内，不受影响）。`None` =
+/// 全执行环境，行为与 [`sync_facts`] 逐字节一致。被过滤掉的执行环境不 acquire
+/// lease、不产生 HarnessSyncReport（对账责任整体留给周期重 tick）。
 pub fn sync_facts_filtered(
     data_home: &Path,
     only: Option<&std::collections::BTreeSet<String>>,
@@ -472,8 +472,8 @@ pub fn sync_facts_filtered(
     let custom_sources = crate::custom_sources::custom_source_roots(data_home)
         .map_err(|error| format!("custom source configuration failed: {error}"))?;
     // Validate the control file before maintenance writes; the authoritative
-    // decision is re-read under each host lease immediately before import.
-    crate::source_controls::excluded_hosts(data_home)
+    // decision is re-read under each harness lease immediately before import.
+    crate::source_controls::excluded_harnesses(data_home)
         .map_err(|error| format!("source controls failed: {error}"))?;
     // **machine_namespace 首建单飞（审查 P2-3）**：machine.json 缺失时两个
     // 进程同时首启（托盘 tick + 外部 cron）会各自生成不同 ns、写各自的
@@ -586,52 +586,52 @@ pub fn sync_facts_filtered(
     }
     let mut report = SyncReport::default();
 
-    // 各宿主 locate 面直取（hosts sources 的既有函数，不在这里重写枚举）。
+    // 各执行环境 locate 面直取（harnesses sources 的既有函数，不在这里重写枚举）。
     let user_home = PathBuf::from(
         std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_default(),
     );
-    // 定向同步（LIGHT-PATH §5.2，验收 #2）：walk 也按宿主裁剪——非唤醒宿主
+    // 定向同步（LIGHT-PATH §5.2，验收 #2）：walk 也按执行环境裁剪——非唤醒执行环境
     // 不付目录遍历成本（stat 对账与解析本来就在后面的批过滤里跳过，但目录
-    // walk 本身每宿主几百次 stat，不裁剪的话轻 tick 的发现面仍是全宿主）。
-    let wanted = |host: &str| only.map_or(true, |set| set.contains(host));
-    // R5-F7b（REFRESH_STORM）：四个内置宿主的清单与错误同一次遍历（此前每宿主
+    // walk 本身每执行环境几百次 stat，不裁剪的话轻 tick 的发现面仍是全执行环境）。
+    let wanted = |harness: &str| only.map_or(true, |set| set.contains(harness));
+    // R5-F7b（REFRESH_STORM）：四个内置执行环境的清单与错误同一次遍历（此前每执行环境
     // 两个函数各自 walk 一遍——codex 真机 2.96 万文件 × 2 趟/轻 tick，claude
-    // 541 文件 × 2 趟同款）；且错误面同样按唤醒裁剪——宿主未唤醒时一趟都不走
+    // 541 文件 × 2 趟同款）；且错误面同样按唤醒裁剪——执行环境未唤醒时一趟都不走
     // （此前各 *_walk_errors 不看 wanted）。claude/dsh/workbuddy 是 F7b 从 codex
     // 推广的同款（模板提交 09c8533）。
-    // W3：宿主的「根在哪、根下怎么枚举」来自 hosts 的会话宿主注册表，这里不再按宿主名
+    // W3：执行环境的「根在哪、根下怎么枚举」来自 harnesses 的会话执行环境注册表，这里不再按执行环境名
     // 分支。注册表顺序即批次顺序（claude-code → codex → dsh → workbuddy，同步报告
-    // `hosts[]` 顺序不变）；错误也是先四个内置根、再自定义源根（与原逐宿主写法同序）。
+    // `harnesses[]` 顺序不变）；错误也是先四个内置根、再自定义源根（与原逐执行环境写法同序）。
     let dsh_home = crate::home::dsh_home();
-    let roots = agent_vitals_hosts::sources::session_hosts::HostRoots {
+    let roots = agent_vitals_harnesses::sources::session_harnesses::HarnessRoots {
         user_home: &user_home,
         dsh_home: dsh_home.as_deref(),
     };
-    let registry = &agent_vitals_hosts::sources::session_hosts::SESSION_HOSTS;
+    let registry = &agent_vitals_harnesses::sources::session_harnesses::SESSION_HARNESSES;
     let mut batches: Vec<(&str, Vec<PathBuf>)> = Vec::with_capacity(registry.len());
     let mut discovery_errors: Vec<(String, String)> = Vec::new();
-    for host in registry.iter() {
+    for harness in registry.iter() {
         // 根未知（如 DSH_HOME 与 HOME 都没有）→ 空清单、无错误：无根不报错，同原语义。
-        let (files, errors) = match (wanted(host.id), (host.default_root)(&roots)) {
-            (true, Some(root)) => (host.files_under)(&root),
+        let (files, errors) = match (wanted(harness.id), (harness.default_root)(&roots)) {
+            (true, Some(root)) => (harness.files_under)(&root),
             _ => (Vec::new(), Vec::new()),
         };
-        discovery_errors.extend(errors.into_iter().map(|error| (host.id.to_string(), error)));
-        batches.push((host.id, files));
+        discovery_errors.extend(errors.into_iter().map(|error| (harness.id.to_string(), error)));
+        batches.push((harness.id, files));
     }
-    // 自定义源根：原实现不看 `wanted`（未唤醒宿主的自定义根也会遍历，批次随后被
+    // 自定义源根：原实现不看 `wanted`（未唤醒执行环境的自定义根也会遍历，批次随后被
     // `only` 过滤）。W3 只做结构迁移，行为原样保留。
     for source in custom_sources {
-        let Some(host) = agent_vitals_hosts::sources::session_hosts::session_host(&source.host)
-            .filter(|host| host.accepts_custom_roots)
+        let Some(harness) = agent_vitals_harnesses::sources::session_harnesses::session_harness(&source.harness)
+            .filter(|harness| harness.accepts_custom_roots)
         else {
             continue;
         };
-        let (files, errors) = (host.files_under)(Path::new(&source.root));
-        discovery_errors.extend(errors.into_iter().map(|error| (host.id.to_string(), error)));
-        if let Some((_, batch)) = batches.iter_mut().find(|(id, _)| *id == host.id) {
+        let (files, errors) = (harness.files_under)(Path::new(&source.root));
+        discovery_errors.extend(errors.into_iter().map(|error| (harness.id.to_string(), error)));
+        if let Some((_, batch)) = batches.iter_mut().find(|(id, _)| *id == harness.id) {
             batch.extend(files);
         }
     }
@@ -639,7 +639,7 @@ pub fn sync_facts_filtered(
         files.sort();
         files.dedup();
     }
-    // W8：findings 评估的输入在宿主循环里收集、循环后在锁外算（见 findings_eval）。
+    // W8：findings 评估的输入在执行环境循环里收集、循环后在锁外算（见 findings_eval）。
     // 回填标记缺失 = 升级后首轮：全部会话评估一次（它们在 SourceGraph 眼里是
     // Unchanged，不回填就永远停在 r2a 最后一次运行的样子）。
     let findings_backfill = authority
@@ -653,77 +653,77 @@ pub fn sync_facts_filtered(
         .map_err(|e| format!("read findings backfill marker: {e}"))?
         .is_none();
     let mut findings_work: Vec<(
-        &'static agent_vitals_hosts::sources::session_hosts::SessionHost,
+        &'static agent_vitals_harnesses::sources::session_harnesses::SessionHarness,
         Vec<PathBuf>,
         Vec<PathBuf>,
     )> = Vec::new();
-    for (host, files) in batches {
-        // Serialize each host's ingest with source deletion.  The exclusion
-        // decision is deliberately re-read while holding the same per-host
+    for (harness, files) in batches {
+        // Serialize each harness's ingest with source deletion.  The exclusion
+        // decision is deliberately re-read while holding the same per-harness
         // lease as the delete command; otherwise a concurrent sync could pass
         // an old exclusion snapshot and re-import data after deletion.
         if let Some(only) = only {
-            if !only.contains(host) {
+            if !only.contains(harness) {
                 continue;
             }
         }
-        let host_lease = crate::lease::acquire_blocking(
-            &crate::source_controls::host_data_lock_path(data_home, host)?,
+        let harness_lease = crate::lease::acquire_blocking(
+            &crate::source_controls::harness_data_lock_path(data_home, harness)?,
             "facts-source-sync",
             600_000,
             10_000,
         )
-        .map_err(|error| format!("source {host} lease: {error}"))?;
-        let _host_heartbeat = host_lease.heartbeat(std::time::Duration::from_secs(30), 600_000);
-        let excluded_hosts = crate::source_controls::excluded_hosts(data_home)
+        .map_err(|error| format!("source {harness} lease: {error}"))?;
+        let _harness_heartbeat = harness_lease.heartbeat(std::time::Duration::from_secs(30), 600_000);
+        let excluded_harnesses = crate::source_controls::excluded_harnesses(data_home)
             .map_err(|error| format!("source controls failed: {error}"))?;
-        if excluded_hosts.contains(host) {
+        if excluded_harnesses.contains(harness) {
             continue;
         }
-        let mut r = HostSyncReport {
-            host: host.to_string(),
+        let mut r = HarnessSyncReport {
+            harness: harness.to_string(),
             ..Default::default()
         };
-        let evaluated_host = agent_vitals_hosts::sources::session_hosts::session_host(host)
+        let evaluated_harness = agent_vitals_harnesses::sources::session_harnesses::session_harness(harness)
             .filter(|h| h.findings.is_some());
-        let all_files = if evaluated_host.is_some() { files.clone() } else { Vec::new() };
-        sync_host(host, &ns, &authority, data_home, files, &mut r)?;
-        if let Some(eval_host) = evaluated_host {
+        let all_files = if evaluated_harness.is_some() { files.clone() } else { Vec::new() };
+        sync_harness(harness, &ns, &authority, data_home, files, &mut r)?;
+        if let Some(eval_harness) = evaluated_harness {
             let changed = if findings_backfill {
                 all_files.clone()
             } else {
                 std::mem::take(&mut r.findings_candidates)
             };
-            findings_work.push((eval_host, changed, all_files));
+            findings_work.push((eval_harness, changed, all_files));
         }
-        for (error_host, error) in &discovery_errors {
-            if error_host == host {
+        for (error_harness, error) in &discovery_errors {
+            if error_harness == harness {
                 r.errors.push(format!("discovery: {error}"));
             }
         }
         report.total_appended += r.appended;
         report.total_duplicate += r.duplicate;
-        report.hosts.push(r);
+        report.harnesses.push(r);
     }
 
     // W8：行为 findings 评估。规则计算在锁外（DSH 解压 + 审计、Codex 解析都慢，
-    // CLAUDE.md「临界区必须短」）；写库每宿主一个短临界区，并在锁内重读排除
-    // 名单——与上面的摄取同一把宿主锁，删除数据源与评估写入不会交错。
+    // CLAUDE.md「临界区必须短」）；写库每执行环境一个短临界区，并在锁内重读排除
+    // 名单——与上面的摄取同一把执行环境锁，删除数据源与评估写入不会交错。
     if findings_work.iter().any(|(_, changed, _)| !changed.is_empty()) {
         use crate::ingest::findings_eval;
         let mut eval = findings_eval::EvalReport::default();
         let mut all_persisted = true;
-        // 价卡（内置 + 用户覆盖）一轮只加载一次，各宿主评估共用。
+        // 价卡（内置 + 用户覆盖）一轮只加载一次，各执行环境评估共用。
         let pricing = crate::price_overrides::merged_main(data_home);
         let codex_index_cache = data_home.join("facts").join(".codex-session-index.json");
-        let ctx = agent_vitals_hosts::sources::session_hosts::FindingsCtx {
+        let ctx = agent_vitals_harnesses::sources::session_harnesses::FindingsCtx {
             roots,
             codex_index_cache: &codex_index_cache,
             pricing: &pricing,
         };
-        for (session_host, changed, all_files) in &findings_work {
-            let host = session_host.id;
-            let Some(evaluate) = session_host.findings else { continue };
+        for (session_harness, changed, all_files) in &findings_work {
+            let harness = session_harness.id;
+            let Some(evaluate) = session_harness.findings else { continue };
             if changed.is_empty() {
                 continue;
             }
@@ -733,15 +733,15 @@ pub fn sync_facts_filtered(
                 continue;
             }
             let _lease = crate::lease::acquire_blocking(
-                &crate::source_controls::host_data_lock_path(data_home, host)?,
+                &crate::source_controls::harness_data_lock_path(data_home, harness)?,
                 "findings-eval",
                 600_000,
                 10_000,
             )
-            .map_err(|error| format!("findings {host} lease: {error}"))?;
-            if crate::source_controls::excluded_hosts(data_home)
+            .map_err(|error| format!("findings {harness} lease: {error}"))?;
+            if crate::source_controls::excluded_harnesses(data_home)
                 .map_err(|error| format!("source controls failed: {error}"))?
-                .contains(host)
+                .contains(harness)
             {
                 continue;
             }
@@ -767,14 +767,14 @@ pub fn sync_facts_filtered(
                     Err(error) => {
                         all_persisted = false;
                         eval.errors.push(format!(
-                            "findings persist {host}/{}: {error}",
+                            "findings persist {harness}/{}: {error}",
                             session.native_id
                         ));
                     }
                 }
             }
         }
-        // 回填标记只在全宿主路径、且没有写库失败时落：定向同步只评估了部分宿主，
+        // 回填标记只在全执行环境路径、且没有写库失败时落：定向同步只评估了部分执行环境，
         // 写失败的会话下轮还得重评。单文件读失败不阻塞——那个文件变了自然重评。
         if findings_backfill && only.is_none() && all_persisted {
             authority
@@ -794,8 +794,8 @@ pub fn sync_facts_filtered(
         report.behavior_findings = Some(eval);
     }
 
-    // 插件宿主周期再摄取（zcode 接入收尾，2026-09-23）：只在全量路径跑
-    // （定向过滤只针对内置宿主批）；exactly-once 由 fact_id 幂等兜底，
+    // 插件执行环境周期再摄取（zcode 接入收尾，2026-09-23）：只在全量路径跑
+    // （定向过滤只针对内置执行环境批）；exactly-once 由 fact_id 幂等兜底，
     // 单 manifest 失败隔离进 errors 不拖垮整轮。首装 format guard 挡
     // 「include/recipe 与数据不匹配」的 manifest（零 emit 拒写）。
     if only.is_none() {
@@ -803,25 +803,25 @@ pub fn sync_facts_filtered(
         for (slug, result) in crate::plugin_ingest::ingest_installed(&ns, data_home, &user_home_for_plugins) {
             match result {
                 Ok(payload) => {
-                    // 验收修正：appended 在 ingest.hosts[0]（IngestReport 嵌套层），
+                    // 验收修正：appended 在 ingest.harnesses[0]（IngestReport 嵌套层），
                     // 顶层无此键——此前恒读 0，成功再摄取完全不可见。
-                    let appended = payload["ingest"]["hosts"]
+                    let appended = payload["ingest"]["harnesses"]
                         .as_array()
-                        .and_then(|hosts| hosts.first())
+                        .and_then(|harnesses| harnesses.first())
                         .and_then(|h| h.get("appended"))
                         .and_then(Value::as_i64)
                         .unwrap_or(0);
                     if appended > 0 {
                         crate::core::logging::log_info(
                             "sync",
-                            &format!("host:{slug} 再摄取 +{appended} 条"),
+                            &format!("harness:{slug} 再摄取 +{appended} 条"),
                         );
                         report.total_appended += appended as usize;
                     }
                 }
                 Err(error) => {
-                    report.hosts.push(HostSyncReport {
-                        host: format!("host:{slug}"),
+                    report.harnesses.push(HarnessSyncReport {
+                        harness: format!("harness:{slug}"),
                         errors: vec![error],
                         ..Default::default()
                     });
@@ -829,9 +829,9 @@ pub fn sync_facts_filtered(
             }
         }
     }
-    // v1.0 升级闭环：旧个人订阅若存在于历史价卡快照，先落为本地 host_bills。
+    // v1.0 升级闭环：旧个人订阅若存在于历史价卡快照，先落为本地 harness_bills。
     // 正常桌面同步也会经过这里，用户无需手动执行 CLI 迁移；失败只警告，不能
-    // 阻断三宿主事实导入。
+    // 阻断三执行环境事实导入。
     // R5-F7c（REFRESH_STORM）：迁移与价格快照都是幂等重活（遍历全部快照
     // JSON / 事务写），此前每 tick 无条件跑——改为按日节流（retention 的
     // `.authority-retention.json` 同款范式：state 文件记日戳，失败不盖戳、
@@ -877,7 +877,7 @@ pub fn sync_facts_filtered(
         Err(e) => crate::core::logging::log_warn("sync_service", &format!("candidate claims: {e}")),
     }
     // 本地价格发现（零网络）改为事件驱动（EVENT_BUS spec §9 P0 验收 #4）：
-    // FactsIngested 已在各宿主写入事务内落 outbox；价卡快照仍显式先行（消费
+    // FactsIngested 已在各执行环境写入事务内落 outbox；价卡快照仍显式先行（消费
     // 者依赖最新价卡做判定），随后一次性 drain——本轮新事件与上次崩溃残留
     // （deliveries 缺行）同轮补投，顺序与原内联调用等价。
     {
@@ -955,7 +955,7 @@ pub fn force_codex_provider_replay(data_home: &Path) -> Result<SyncReport, Strin
         .map_err(|e| format!("open authority for replay: {e}"))?;
     db.with_immediate_txn(|conn| {
         conn.execute(
-            "UPDATE source_files SET parser_version = parser_version - 1 WHERE host = 'codex'",
+            "UPDATE source_files SET parser_version = parser_version - 1 WHERE harness = 'codex'",
             [],
         ).map(|_| ()).map_err(agent_vitals_data::authority::AuthorityError::Sqlite)
     }).map_err(|e| format!("invalidate Codex checkpoints: {e}"))?;
@@ -1013,7 +1013,7 @@ mod tests {
         ];
 
         // 冷缓存：缓存路径 == 全量基准。
-        let full = agent_vitals_hosts::claude_quota::scan_claude_quota(&files, now);
+        let full = agent_vitals_harnesses::claude_quota::scan_claude_quota(&files, now);
         let cached = scan_claude_quota_cached(&home, &files, now);
         assert_eq!(cached, full, "冷缓存必须与全量扫一致");
         assert!(cached.latest.is_some(), "fixture 必须产出快照，防止空对空");
@@ -1027,7 +1027,7 @@ mod tests {
         // 内容变更：a 换成更新的快照 → 缓存失效重解析，仍与全量一致。
         let (ts_a2, resets_a2) = ago(12);
         files[0] = write_file("a", &[line(&ts_a2, resets_a2, "five_hour")]);
-        let full2 = agent_vitals_hosts::claude_quota::scan_claude_quota(&files, now);
+        let full2 = agent_vitals_harnesses::claude_quota::scan_claude_quota(&files, now);
         let cached2 = scan_claude_quota_cached(&home, &files, now);
         assert_eq!(cached2, full2, "部分失效后必须与全量扫一致");
         assert_ne!(cached2.latest, full.latest, "fixture 前后必须有差异，防止假对拍");
@@ -1042,7 +1042,7 @@ mod tests {
             let file = std::fs::File::options().append(true).open(path).unwrap();
             file.set_modified(future_mtime).unwrap();
         }
-        let full_future = agent_vitals_hosts::claude_quota::scan_claude_quota(&files, future);
+        let full_future = agent_vitals_harnesses::claude_quota::scan_claude_quota(&files, future);
         assert!(full_future.latest.is_some(), "mtime 仍在窗内，贡献必须非空（防空转腿）");
         let cached_future = scan_claude_quota_cached(&home, &files, future);
         assert_eq!(cached_future, full_future, "floor 滑动后必须与全量扫一致");
@@ -1147,7 +1147,7 @@ mod tests {
                 .unwrap();
                 let n: i64 = db.conn().query_row(
                     "SELECT COUNT(*) FROM issue_instances
-                     WHERE host='dsh' AND session_key='sess-behavior-0001' AND evaluator_id='legacy-finding'",
+                     WHERE harness='dsh' AND session_key='sess-behavior-0001' AND evaluator_id='legacy-finding'",
                     [], |r| r.get(0)).unwrap();
                 let marker: i64 = db.conn().query_row(
                     "SELECT COUNT(*) FROM schema_meta WHERE key=?1",
@@ -1191,8 +1191,8 @@ mod tests {
             let data = PathBuf::from(data);
 
             let r1 = sync_facts(&data).unwrap();
-            let cl = r1.hosts.iter().find(|h| h.host == "claude-code").unwrap();
-            let cx = r1.hosts.iter().find(|h| h.host == "codex").unwrap();
+            let cl = r1.harnesses.iter().find(|h| h.harness == "claude-code").unwrap();
+            let cx = r1.harnesses.iter().find(|h| h.harness == "codex").unwrap();
             assert_eq!(cl.files_synced, 1, "首次全量：claude 1 文件");
             assert_eq!(cl.appended, 2, "两条 usage 事实");
             assert_eq!(cx.files_synced, 1, "首次全量：codex 1 文件");
@@ -1222,8 +1222,8 @@ mod tests {
 
             // 第二次：全部 skipped（SQL source_files 指纹命中），零新增。
             let r2 = sync_facts(&data).unwrap();
-            for h in &r2.hosts {
-                assert_eq!(h.files_synced, 0, "{host} 二次不应有处理", host = h.host);
+            for h in &r2.harnesses {
+                assert_eq!(h.files_synced, 0, "{harness} 二次不应有处理", harness = h.harness);
                 assert_eq!(h.files_skipped, h.files_seen);
             }
             assert_eq!(r2.total_appended, 0);
@@ -1238,7 +1238,7 @@ mod tests {
             text.push('\n');
             std::fs::write(&sess, text).unwrap();
             let r3 = sync_facts(&data).unwrap();
-            let cl3 = r3.hosts.iter().find(|h| h.host == "claude-code").unwrap();
+            let cl3 = r3.harnesses.iter().find(|h| h.harness == "claude-code").unwrap();
             assert_eq!(cl3.files_synced, 1, "变化文件重新处理");
             assert_eq!(cl3.appended, 1, "只有新行是新事实");
             // P1b 增量语义：只读新行，旧行不重发 → duplicate=0（此前全量重解析
@@ -1270,8 +1270,8 @@ mod tests {
                 &agent_vitals_data::authority::default_authority_path(&data),
                 crate::clock::now_ms(),
             ).unwrap().pending_billing_import_candidates().unwrap();
-            assert!(candidates.iter().any(|(_id, host, provider, currency, amount, start, status)| {
-                host == "claude-code" && provider == "minimax"
+            assert!(candidates.iter().any(|(_id, harness, provider, currency, amount, start, status)| {
+                harness == "claude-code" && provider == "minimax"
                     && *amount == 11_400 && currency == "CNY" && start == &month && status == "pending"
             }), "normal sync must surface an unconfirmed legacy declaration: {candidates:?}");
         });
@@ -1293,8 +1293,8 @@ mod tests {
             // 派生快照及其 backfill 标记都尚未写入。
             db.conn()
                 .execute(
-                    "DELETE FROM host_runtime_snapshots
-                     WHERE host = 'codex' AND snapshot_kind = 'codex_quota'",
+                    "DELETE FROM harness_runtime_snapshots
+                     WHERE harness = 'codex' AND snapshot_kind = 'codex_quota'",
                     [],
                 )
                 .unwrap();
@@ -1307,7 +1307,7 @@ mod tests {
                 .unwrap();
 
             let replay = sync_facts(&data).unwrap();
-            let codex = replay.hosts.iter().find(|h| h.host == "codex").unwrap();
+            let codex = replay.harnesses.iter().find(|h| h.harness == "codex").unwrap();
             assert_eq!(codex.files_seen, 1);
             assert_eq!(codex.files_synced, 1, "unchanged rollout 必须为 v2 补快照");
             assert!(db
@@ -1325,7 +1325,7 @@ mod tests {
                 .unwrap());
 
             let stable = sync_facts(&data).unwrap();
-            let codex = stable.hosts.iter().find(|h| h.host == "codex").unwrap();
+            let codex = stable.harnesses.iter().find(|h| h.harness == "codex").unwrap();
             assert_eq!(codex.files_synced, 0, "backfill 后恢复普通 SQL 差量同步");
             assert!(rollout.exists());
         });
@@ -1337,7 +1337,7 @@ mod tests {
             let source = claude_session(home);
             let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
             let first = sync_facts(&data).unwrap();
-            assert_eq!(first.hosts[0].files_synced, 1);
+            assert_eq!(first.harnesses[0].files_synced, 1);
 
             let db = agent_vitals_data::authority::AuthorityDb::open(
                 &agent_vitals_data::authority::default_authority_path(&data),
@@ -1350,16 +1350,16 @@ mod tests {
             db.conn()
                 .execute(
                     "UPDATE source_files SET parser_version = parser_version - 1
-                     WHERE host = 'claude-code' AND path_hash = ?1",
+                     WHERE harness = 'claude-code' AND path_hash = ?1",
                     rusqlite::params![path_hash],
                 )
                 .unwrap();
 
             let second = sync_facts(&data).unwrap();
             let claude = second
-                .hosts
+                .harnesses
                 .iter()
-                .find(|host| host.host == "claude-code")
+                .find(|harness| harness.harness == "claude-code")
                 .unwrap();
             assert_eq!(claude.files_synced, 1, "解析器升级必须重放原文件");
             assert_eq!(claude.appended, 0, "原事实仍由 fact_id 幂等吸收");
@@ -1378,7 +1378,7 @@ mod tests {
             std::fs::write(&p, "{not json\n").unwrap();
             let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
             let r = sync_facts(&data).unwrap();
-            let cl = r.hosts.iter().find(|h| h.host == "claude-code").unwrap();
+            let cl = r.harnesses.iter().find(|h| h.harness == "claude-code").unwrap();
             assert!(!cl.errors.is_empty(), "坏文件必须出现在 errors 里");
             let db = agent_vitals_data::authority::AuthorityDb::open(
                 &agent_vitals_data::authority::default_authority_path(&data),
@@ -1388,20 +1388,20 @@ mod tests {
             let n: i64 = db
                 .conn()
                 .query_row(
-                    "SELECT COUNT(*) FROM source_files WHERE host = 'claude-code'",
+                    "SELECT COUNT(*) FROM source_files WHERE harness = 'claude-code'",
                     [],
                     |row| row.get(0),
                 )
                 .unwrap();
             assert_eq!(n, 0, "失败文件不得留下 SQL 指纹，才能被下轮重试");
             let r2 = sync_facts(&data).unwrap();
-            let cl2 = r2.hosts.iter().find(|h| h.host == "claude-code").unwrap();
+            let cl2 = r2.harnesses.iter().find(|h| h.harness == "claude-code").unwrap();
             assert!(!cl2.errors.is_empty(), "下次 sync 重试坏文件（诚实噪声）");
         });
     }
 
     #[test]
-    fn one_host_read_failure_does_not_block_another_host() {
+    fn one_harness_read_failure_does_not_block_another_harness() {
         with_isolated_home(|home| {
             let bad_dir = home.join(".claude/projects/p-bad");
             std::fs::create_dir_all(&bad_dir).unwrap();
@@ -1410,8 +1410,8 @@ mod tests {
             let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
 
             let report = sync_facts(&data).unwrap();
-            let claude = report.hosts.iter().find(|host| host.host == "claude-code").unwrap();
-            let codex = report.hosts.iter().find(|host| host.host == "codex").unwrap();
+            let claude = report.harnesses.iter().find(|harness| harness.harness == "claude-code").unwrap();
+            let codex = report.harnesses.iter().find(|harness| harness.harness == "codex").unwrap();
             assert!(!claude.errors.is_empty(), "坏的 Claude 文件必须保留失败证据");
             assert_eq!(codex.files_synced, 1, "Codex 仍必须完成本轮导入");
         });
@@ -1431,7 +1431,7 @@ mod tests {
                 &crate::clock::current_month_beijing(), 0,
             ).unwrap();
             db.conn().execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                      source_event_id, observation_kind, event_ts_ms, event_peak,
                      uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                      ingested_run_id, created_at_ms, updated_at_ms)
@@ -1490,13 +1490,13 @@ mod tests {
     }
 
     #[test]
-    fn excluded_host_is_not_read_by_sync() {
+    fn excluded_harness_is_not_read_by_sync() {
         with_isolated_home(|home| {
             claude_session(home);
             let data = PathBuf::from(std::env::var("AGENT_VITALS_HOME").unwrap());
-            crate::source_controls::set_host_excluded(&data, "claude-code", true).unwrap();
+            crate::source_controls::set_harness_excluded(&data, "claude-code", true).unwrap();
             let report = sync_facts(&data).unwrap();
-            assert!(!report.hosts.iter().any(|host| host.host == "claude-code"));
+            assert!(!report.harnesses.iter().any(|harness| harness.harness == "claude-code"));
         });
     }
 
@@ -1510,7 +1510,7 @@ mod tests {
                 &data, "claude-code", &custom_home,
             ).unwrap());
             let report = sync_facts(&data).unwrap();
-            let claude = report.hosts.iter().find(|host| host.host == "claude-code").unwrap();
+            let claude = report.harnesses.iter().find(|harness| harness.harness == "claude-code").unwrap();
             assert_eq!(claude.files_synced, 1);
             assert_eq!(claude.appended, 2);
         });

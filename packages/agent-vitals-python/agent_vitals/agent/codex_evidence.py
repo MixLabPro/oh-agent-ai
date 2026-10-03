@@ -3,15 +3,15 @@ extract → derive → coverage，见 `docs/RUNTIME_EVIDENCE_CONTRACT.md` §4.2�
 "locate → shape → extract" 留在 `scripts/agent_vitals/adapters/codex_session.py`，
 I/O 不在这里。它把一份 rollout JSONL 里抽出的原始条目折成
 `evidence::CanonicalSession` 的等价字典，覆盖计数按
-`docs/RUNTIME_EVIDENCE_CONTRACT.md` §13 host coverage matrix 的 **Codex
+`docs/RUNTIME_EVIDENCE_CONTRACT.md` §13 harness coverage matrix 的 **Codex
 (Legacy) 与 Codex (Paginated) 两列**逐条对应。
 
-与 Rust `crates/agent-vitals-hosts/src/hosts/codex/sessions/evidence.rs` 逐字节对齐——产出
+与 Rust `crates/agent-vitals-harnesses/src/harnesses/codex/sessions/evidence.rs` 逐字节对齐——产出
 同一个 `codex_evidence_json` 输出字典（键序一致），差分测试靠这份一致把关。
 
 **P4 的验收标准是单个词 "sound"**：Codex 是唯一一个在两种互不兼容的词表
 （`ThreadHistoryMode` 的 Legacy / Paginated，见 §14.1）之间不自我声明、必须靠
-探测内容区分的宿主。如果加这一个宿主、两种形状会逼着共享类型层
+探测内容区分的执行环境。如果加这一个执行环境、两种形状会逼着共享类型层
 （`CanonicalSession`/`Coverage`/`RuleSpec`，P1 落地）做结构性改动，这个模型
 就失败了。这里不触碰 `evidence.rs` 的任何类型——**"Tool-call duration" 也不
 在 20 个 `Signal` 里，它是 `CommandExecutionItem.duration` 这个**值**而不是
@@ -23,16 +23,16 @@ I/O 不在这里。它把一份 rollout JSONL 里抽出的原始条目折成
 `item_completed.payload.item.type` / `response_item.payload.type` 三套
 snake_case / PascalCase 线格式才是权威。下面的映射表直接以实测词表为准。
 
-**不是 trait**——理由同 `dsh_evidence.rs`：宿主之间差的是"哪些阶段存在"，
-trait 会强迫每个宿主实现一堆空方法。Codex 的 `build_codex_evidence` 返回的
-evidence 把 `canonical`（§12 规定不持有任何宿主专属 payload）和它派生自的
+**不是 trait**——理由同 `dsh_evidence.rs`：执行环境之间差的是"哪些阶段存在"，
+trait 会强迫每个执行环境实现一堆空方法。Codex 的 `build_codex_evidence` 返回的
+evidence 把 `canonical`（§12 规定不持有任何执行环境专属 payload）和它派生自的
 原始条目捆在一起——将来把 SV 规则迁到 Codex 上时，规则引擎需要原始条目。
 """
 
 import re
 
 from agent_vitals.agent import canonical_audit
-from agent_vitals.agent.host_capability import host_profile
+from agent_vitals.agent.harness_capability import harness_profile
 from ..util import iso_to_epoch_ms, session_span
 
 # 19 个 Signal 的声明序——与 Rust `codex_evidence.rs::ALL_SIGNALS` 同名同序。
@@ -137,17 +137,17 @@ KNOWN_RESPONSE_TYPES = frozenset((
 # UserPrompts 同样不在其中：response_item.payload.type="message" + role="user"
 # 是真实线格式（session 01a029cb 实测 15 条），2026-08 已改 measured。
 # UserCorrections 留在里面：它的定义是 UserPrompts + TurnBoundaries 的关键词/
-# 时间窗启发（§3.2），没有任何宿主有参考实现（DSH 也显式置零），移植即发明。
-# v0.6 host-contract spec §6/§11-M2a：这份清单不再是本文件的字面量表，改从
-# `host_capability.HOSTS` 的 "codex" 行读（行上的值就是从这里原来的字面量表
+# 时间窗启发（§3.2），没有任何执行环境有参考实现（DSH 也显式置零），移植即发明。
+# v0.6 harness-contract spec §6/§11-M2a：这份清单不再是本文件的字面量表，改从
+# `harness_capability.HARNESSES` 的 "codex" 行读（行上的值就是从这里原来的字面量表
 # 搬过去的，golden 字节不变）。
-_UNAVAILABLE_SIGNALS = tuple(host_profile("codex")["unmeasured_signals"])
+_UNAVAILABLE_SIGNALS = tuple(harness_profile("codex")["unmeasured_signals"])
 
 # §14.3 的 SkillInvocations 说明文本——在 Rust 里逐字节相同，差分测试靠它。
 _SKILL_INVOCATION_NOTE = (
     "Codex does not persist skill invocations (§14.3); SkillInvocations "
     "coverage is a derived presence lower bound, and offline inference may "
-    "disagree with the host's runtime decision. The upstream heuristic "
+    "disagree with the harness's runtime decision. The upstream heuristic "
     "detect_implicit_skill_invocation_for_command is deliberately not ported."
 )
 
@@ -155,7 +155,7 @@ _SKILL_INVOCATION_NOTE = (
 def _user_prompt_kind(payload):
     """Classify a user-role message without returning its body.
 
-    Codex persists host-injected context in the same `message/user` envelope
+    Codex persists harness-injected context in the same `message/user` envelope
     as a human prompt.  We only inspect the shallow text fragments needed to
     recognize known wrappers; callers receive a category, never the text.
     """
@@ -402,7 +402,7 @@ def derive_coverage(items):
     return signals, coverage, unknown
 
 
-# `evidence::CanonicalSession` 的五个 host-neutral timeline 字段（Rust 侧
+# `evidence::CanonicalSession` 的五个 harness-neutral timeline 字段（Rust 侧
 # `crates/agent-vitals-domain/src/contracts/evidence.rs` 的 struct 字段集——形状对账测试
 # `tests/test_canonical_schema.py` 钉死两边一致，漏加一个字段这里就红）。
 # 共享类型层的文档化 schema，与 ALL_SIGNALS 同为显式清单。
@@ -568,8 +568,8 @@ def _has_command_execution(items):
 
 
 def _populate_codex_timelines(items):
-    """跑一遍 `items`，把 Codex 线格式翻译成五个 host-neutral timeline（§11.5）。
-    仿 Rust `populate_codex_timelines`（`crates/agent-vitals-hosts/src/hosts/codex/sessions/evidence.rs`）
+    """跑一遍 `items`，把 Codex 线格式翻译成五个 harness-neutral timeline（§11.5）。
+    仿 Rust `populate_codex_timelines`（`crates/agent-vitals-harnesses/src/harnesses/codex/sessions/evidence.rs`）
     的状态机写法，与它逐条对齐：
     - `sandbox_modes`：顶层 turn_context 的 sandbox_policy（对象/字符串两态）→ 一条。
     - `tool_calls`：`CommandExecution` → `name:"bash"` + 命令文本；`function_call` →
@@ -590,7 +590,7 @@ def _populate_codex_timelines(items):
     - `approvals`：恒空——Codex 无 asked/decided 生命周期（approval_policy 是
       策略不是审批事件），「故意空」的构造点，比传一个永不填充的参数更诚实。
 
-    `exec`→`bash` / `exit_code`→`error_code` 是 L2 适配器持有的宿主词表翻译；
+    `exec`→`bash` / `exit_code`→`error_code` 是 L2 适配器持有的执行环境词表翻译；
     诚实代价与真值表见 Rust `build_codex_evidence` 的注释（同一份，不另抄）。
     """
     tool_calls, tool_results, sandbox_modes, turns = [], [], [], []
@@ -664,7 +664,7 @@ def _populate_codex_timelines(items):
             it = payload.get("item")
             item_type = it.get("type") if isinstance(it, dict) else None
             if item_type == "CommandExecution" and isinstance(it, dict):
-                name = "bash"  # exec → bash 翻译（L2 适配器宿主词表）
+                name = "bash"  # exec → bash 翻译（L2 适配器执行环境词表）
                 args = _command_text(it)
                 turn_id = payload.get("turn_id")
                 turn_coord = None
@@ -751,19 +751,19 @@ def _populate_codex_timelines(items):
 
 
 # Audit is deliberately evaluated from the canonical timelines above, not from
-# rollout records again.  That keeps the host adapter responsible for vocabulary
+# rollout records again.  That keeps the harness adapter responsible for vocabulary
 # translation and gives the Python CLI the same rule boundary as Rust core.
 # §6.5 regex 与 `_audit_evidence`/`_audit_finding`/求值器本体全部移入共享模块
-# `canonical_audit.py`——Codex 与 Claude 是同一批 core dispatcher 的两个宿主镜像，
-# 求值器是宿主无关的，只允许一份 Python 拷贝（差分测试把关不漂移）。
+# `canonical_audit.py`——Codex 与 Claude 是同一批 core dispatcher 的两个执行环境镜像，
+# 求值器是执行环境无关的，只允许一份 Python 拷贝（差分测试把关不漂移）。
 
 
 def codex_audit_projection(canonical):
     """Evaluate SV601–SV614 on canonical Codex timelines.
 
-    Delegates to the shared host-neutral evaluator in `canonical_audit.py`
+    Delegates to the shared harness-neutral evaluator in `canonical_audit.py`
     (the Python mirror of Rust's canonical dispatchers).  Codex has no
-    host-specific degradation to apply here.
+    harness-specific degradation to apply here.
     """
     return canonical_audit.audit_projection(canonical)
 
@@ -783,7 +783,7 @@ def build_codex_evidence(items, session_id, title, history_mode, cli_version,
 
     `title` 是 `session_index.jsonl` 查出的 `thread_name`（**Codex 专属
     provenance**，与 `history_mode`/`cli_version` 同位——放 evidence 顶层，
-    不放 `canonical`，§12 铁律「宿主专属字段不进共享类型层」）。`None` 表示
+    不放 `canonical`，§12 铁律「执行环境专属字段不进共享类型层」）。`None` 表示
     索引缺失或该 session 不在索引里，绝不编造。
     """
     signals, coverage, unknown = derive_coverage(items)
@@ -798,7 +798,7 @@ def build_codex_evidence(items, session_id, title, history_mode, cli_version,
 
     notes = []
     if _total(coverage["SkillInvocations"]) > 0:
-        # §14.3：诚实标记 Derived，说明离线推断可能与宿主运行时决定不一致，
+        # §14.3：诚实标记 Derived，说明离线推断可能与执行环境运行时决定不一致，
         # 且明确拒绝 port 上游的 detect_implicit_skill_invocation_for_command。
         # 这段文本在 Rust 里逐字节相同。
         notes.append(_SKILL_INVOCATION_NOTE)
@@ -806,7 +806,7 @@ def build_codex_evidence(items, session_id, title, history_mode, cli_version,
     canonical = {
         "meta": {
             "session_id": session_id,
-            "host_id": "codex",
+            "harness_id": "codex",
             "workspace_roots": workspace_roots,
             "model": model,
             # D1–D4：Codex 的顶层 `{type, timestamp, payload}` 包络带 ISO 时间戳。
@@ -861,7 +861,7 @@ def codex_evidence_json(evidence):
     """evidence 字典 → `codex-evidence --json` 的输出形状。与 Rust
     `codex_evidence_json` 逐字节对齐——键序、嵌套结构、`attempts`/`notes` 的
     序列化都是这里单独控制的。`signals` 数组按 ALL_SIGNALS 序；`coverage` 19
-    键全量（unavailable 的也是全零四条，不是缺键）；`available` 标记宿主是否
+    键全量（unavailable 的也是全零四条，不是缺键）；`available` 标记执行环境是否
     提供该维度——false = 结构缺口，任何会话都为零，KPI 分母不算它。
     """
     canonical = evidence["canonical"]
@@ -895,7 +895,7 @@ def codex_evidence_json(evidence):
     notes = [n["message"] if isinstance(n, dict) else n
              for n in canonical["notes"]]
     return {
-        "host": "codex",
+        "harness": "codex",
         "session_id": canonical["meta"]["session_id"],
         "title": evidence["title"],
         "history_mode": evidence["history_mode"],

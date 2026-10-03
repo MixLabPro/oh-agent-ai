@@ -73,7 +73,7 @@
       <!-- 第一行三张 KPI 大卡。金额纪律：口径分栏永不相加（按量实付 / 订阅月费分币
            各自成行，来自 DTO 的 actual_spend_by_basis——拆栏在 domain，不在 JS）；
            名义只作诊断脚注；unavailable 一律「无数据」，绝不渲染 0。
-           预算口径 = 跨宿主「按量实付」CNY（PM 决策 2026-09-07，排除订阅月费）。 -->
+           预算口径 = 跨执行环境「按量实付」CNY（PM 决策 2026-09-07，排除订阅月费）。 -->
       <div class="cards month-band" id="ov-kpi-row">
         <div class="stat spend-card">
           <div class="label-row"><span class="label">本月支出</span><button type="button" class="card-link" id="ov-link-spend">查看明细 ›</button></div>
@@ -153,8 +153,8 @@
       </section>
 
       <!-- 费用明细：原「费用构成（双轨账）」与「数据源」是同一份 by_provider 的
-           两种投影（同样三行、同样金额、不同词表），合成一张表。每行 = 宿主 ·
-           服务商 / 金额（带币种 + 人话性质）/ 状态 / 数据新鲜度（来自 by_host）。
+           两种投影（同样三行、同样金额、不同词表），合成一张表。每行 = 执行环境 ·
+           服务商 / 金额（带币种 + 人话性质）/ 状态 / 数据新鲜度（来自 by_harness）。
            订阅利用率倍数 = 标价折算 ÷ 月费，>50× 是「请核对套餐」告警而非套利。
            evidence_basis / pricing_method / unresolved_reason 等 reason code 只进
            hover（规格 §4 第 84 行：禁止在卡面展示 raw reason code）。
@@ -201,11 +201,11 @@
       </div>
       <!-- ============ 数据源（v0.9 Stage 0.6 日历页月份级诚实状态）============
            由 data_monthly_summary 驱动（与 read_calendar_month 并发拉取，失败
-           不拖垮方格）：标题行加新鲜度标注，月注记区追加逐宿主月度概览。方格
-           走 read_calendar_month 的逐日跨宿主数据——两者各自诚实渲染，不许互相替代。 -->
+           不拖垮方格）：标题行加新鲜度标注，月注记区追加逐执行环境月度概览。方格
+           走 read_calendar_month 的逐日跨执行环境数据——两者各自诚实渲染，不许互相替代。 -->
       <div class="panel sources">
-        <div class="panel-title">本月跨宿主概览</div>
-        <div id="cal-sources-empty" class="empty" hidden>本月无跨宿主数据</div>
+        <div class="panel-title">本月跨执行环境概览</div>
+        <div id="cal-sources-empty" class="empty" hidden>本月无跨执行环境数据</div>
         <ul id="cal-sources-list" class="src-list"></ul>
         <div class="src-meta" id="cal-sources-meta"></div>
       </div>
@@ -243,14 +243,14 @@
             <option value="unpriced">未计价</option>
             <option value="unavailable">成本不可用</option>
           </select>
-          <!-- host 过滤 chips（spec §7.3）：全部 / Claude Code / DeepSeek Harness /
+          <!-- harness 过滤 chips（spec §7.3）：全部 / Claude Code / DeepSeek Harness /
                Codex。过滤变化重置分页重新加载；会话详情深链（SessionList 目标）
                也会落到这个过滤上。 -->
           <span class="chips" id="sess-filter">
-            <button class="chip active" data-host="all">全部</button>
-            <button class="chip claude-code" data-host="claude-code">Claude Code</button>
-            <button class="chip dsh" data-host="dsh">DeepSeek Harness</button>
-            <button class="chip codex" data-host="codex">Codex</button>
+            <button class="chip active" data-harness="all">全部</button>
+            <button class="chip claude-code" data-harness="claude-code">Claude Code</button>
+            <button class="chip dsh" data-harness="dsh">DeepSeek Harness</button>
+            <button class="chip codex" data-harness="codex">Codex</button>
           </span>
           <button id="sess-reload" class="btn" title="重新加载列表">重载列表</button>
         </div>
@@ -260,7 +260,7 @@
           <table class="sess-table">
             <thead>
               <tr>
-                <th>标题</th><th>宿主</th><th>模型</th><th>日期</th>
+                <th>标题</th><th>执行环境</th><th>模型</th><th>日期</th>
                 <th class="num">Tokens</th><th class="num">估算成本</th><th class="num">Findings</th>
               </tr>
             </thead>
@@ -324,7 +324,7 @@
       <div id="find-trust-profile-approved" class="notice-list" hidden aria-label="已启用的本地 Agent Profile"></div>
       <div id="find-trust-suppressions" class="notice-list" hidden aria-label="已忽略的 Trust Finding"></div>
       <div id="find-loading" class="muted" hidden>加载中…跨会话汇总，首次可能需要几十秒，之后会走缓存变快</div>
-      <!-- 新鲜度条（WORKBENCH_FINDINGS_TAB_SPEC §4.8）：数字截止时刻 + stale 宿主名单。 -->
+      <!-- 新鲜度条（WORKBENCH_FINDINGS_TAB_SPEC §4.8）：数字截止时刻 + stale 执行环境名单。 -->
       <div id="find-freshness" class="muted note" hidden></div>
 
       <!-- 计数反馈（WORKBENCH_FINDINGS_TAB_SPEC §3.1/§5.6）：状态迁移后「已处理 1
@@ -353,10 +353,10 @@
 
       <!-- ②模型 × Harness 对比（spec §3.2/§4，P2）：决策证据面。金额按币种/口径
            分列永不相加（§1.5）；浪费率仅 DSH 有证据、未接入恒「—」（§4.2）；
-           行为标记是宿主级聚合（§4.7）。 -->
+           行为标记是执行环境级聚合（§4.7）。 -->
       <div class="panel" id="find-matrix">
         <div class="panel-title">模型 × Harness 对比</div>
-        <div class="muted note">每个组合一行。名义便宜但费 token 的组合在这里露馅；点行展开看四桶 token、贡献会话与宿主级行为标记。</div>
+        <div class="muted note">每个组合一行。名义便宜但费 token 的组合在这里露馅；点行展开看四桶 token、贡献会话与执行环境级行为标记。</div>
         <div id="find-matrix-sort" class="muted note"></div>
         <div id="find-matrix-empty" class="empty" hidden>本月没有可对比的组合（需要有用量事实）。</div>
         <div class="table-wrap">
@@ -377,7 +377,7 @@
            回答「这个数字是哪些命中构成的」，不承担首屏。 -->
       <details id="find-evidence-box" class="find-evidence">
         <summary id="find-evidence-summary">证据明细</summary>
-        <!-- 统计卡与宿主分布是证据面的计数（P2 从首屏移入：首屏只留待办与对比）。
+        <!-- 统计卡与执行环境分布是证据面的计数（P2 从首屏移入：首屏只留待办与对比）。
 -->
       <div class="cards cards-4">
         <div class="stat">
@@ -452,25 +452,25 @@
     </section>
 
     <!-- ============ Skill 体检（docs/v1.0.0/WORKBENCH_SKILL_HEALTH_TAB_SPEC.md） ============
-         「并列不合并」：默认一屏看全部宿主，每宿主一张摘要卡 + 一份带宿主标签的发现
-         列表（REQ-SK-02）。页头合计只允许四类（宿主数 / 去重 skill 目录数 / 安全发现
+         「并列不合并」：默认一屏看全部执行环境，每执行环境一张摘要卡 + 一份带执行环境标签的发现
+         列表（REQ-SK-02）。页头合计只允许四类（执行环境数 / 去重 skill 目录数 / 安全发现
          按严重度含 cited / 结构问题数，REQ-SK-03 穷举）；预算、Tier1、冲突、重叠、
-         僵尸永不出跨宿主单一数字（REQ-SK-01，#sk-totals 字面守卫 §11.1）。
-         分区顺序固定（§4.3）：宿主卡 → 立即处理 → 安全与结构 → 冲突与重叠 →
+         僵尸永不出跨执行环境单一数字（REQ-SK-01，#sk-totals 字面守卫 §11.1）。
+         分区顺序固定（§4.3）：执行环境卡 → 立即处理 → 安全与结构 → 冲突与重叠 →
          使用证据 → 本次未评估。 -->
     
     <!-- ============ Skill 体检（docs/v1.0.0/WORKBENCH_SKILL_HEALTH_TAB_SPEC.md） ============
-         「并列不合并」：默认一屏看全部宿主，每宿主一张摘要卡 + 一份带宿主标签的发现
-         列表（REQ-SK-02）。页头合计只允许四类（宿主数 / 去重 skill 目录数 / 安全发现
+         「并列不合并」：默认一屏看全部执行环境，每执行环境一张摘要卡 + 一份带执行环境标签的发现
+         列表（REQ-SK-02）。页头合计只允许四类（执行环境数 / 去重 skill 目录数 / 安全发现
          按严重度含 cited / 结构问题数，REQ-SK-03 穷举）；预算、Tier1、冲突、重叠、
-         僵尸永不出跨宿主单一数字（REQ-SK-01，#sk-totals 字面守卫 §11.1）。
-         分区顺序固定（§4.3）：宿主卡 → 立即处理 → 安全与结构 → 冲突与重叠 →
+         僵尸永不出跨执行环境单一数字（REQ-SK-01，#sk-totals 字面守卫 §11.1）。
+         分区顺序固定（§4.3）：执行环境卡 → 立即处理 → 安全与结构 → 冲突与重叠 →
          使用证据 → 本次未评估。 -->
     <section id="tab-skills" class="tabpane">
       <div class="find-toolbar">
         <strong>Skill 体检</strong>
-        <label class="sk-host-label">宿主
-          <select id="sk-host">
+        <label class="sk-harness-label">执行环境
+          <select id="sk-harness">
             <option value="all">全部</option>
             <option value="claude-code">Claude Code</option>
             <option value="codex">Codex</option>
@@ -494,13 +494,13 @@
       </div>
       <div id="sk-error" class="notice danger" hidden role="alert" aria-live="assertive"></div>
       <div id="sk-empty" class="empty" hidden>
-        尚未扫描。扫描会读取各宿主的 skills 目录，可能需要几秒（Codex 探测要拉起它的
+        尚未扫描。扫描会读取各执行环境的 skills 目录，可能需要几秒（Codex 探测要拉起它的
         app-server）。
         <button id="sk-start" class="btn primary">开始扫描</button>
       </div>
-      <div id="sk-scanning" class="muted" hidden>正在遍历宿主根…</div>
+      <div id="sk-scanning" class="muted" hidden>正在遍历执行环境根…</div>
 
-      <div class="sk-cards" id="sk-host-cards"></div>
+      <div class="sk-cards" id="sk-harness-cards"></div>
 
       <div class="panel" id="sk-act-now">
         <div class="panel-title">立即处理</div>
@@ -516,8 +516,8 @@
 
       <div class="panel" id="sk-conflicts">
         <div class="panel-title">冲突与重叠</div>
-        <div class="muted note">同一宿主内才存在「谁盖过谁」；跨宿主永不成对。</div>
-        <div id="sk-conflicts-empty" class="empty" hidden>没有同宿主冲突或重叠候选</div>
+        <div class="muted note">同一执行环境内才存在「谁盖过谁」；跨执行环境永不成对。</div>
+        <div id="sk-conflicts-empty" class="empty" hidden>没有同执行环境冲突或重叠候选</div>
         <div id="sk-conflicts-list" class="sk-rows"></div>
       </div>
 
@@ -540,7 +540,7 @@
     <!-- ============ 设置（内部仍沿用 sources 标识以保持导航合同） ============ -->
 
     <!-- 「测试」tab v2（2026-09-20 转向，WORKBENCH_TEST_TAB_SPEC §0 addendum）：
-         默认面 = 被动路线质量报告（宿主 × 实际模型族，usage_facts 硬证据，
+         默认面 = 被动路线质量报告（执行环境 × 实际模型族，usage_facts 硬证据，
          不发探针请求）；主动 L0 探针收进「高级」折叠区（隔离在 cc-switch 型
          机器上不成立，见 spec）。 -->
     <section id="tab-test" class="tabpane">
@@ -585,12 +585,12 @@
         <button id="test-quality-reload" class="btn" title="重新汇总" type="button">重载</button>
       </div>
       <div id="test-quality-banner" class="notice danger" hidden role="alert" aria-live="assertive"></div>
-      <div id="test-quality-loading" class="muted" hidden>加载中…按宿主 × 模型族汇总</div>
-      <div id="test-quality-hosts"></div>
+      <div id="test-quality-loading" class="muted" hidden>加载中…按执行环境 × 模型族汇总</div>
+      <div id="test-quality-harnesses"></div>
       <div class="muted note" id="test-quality-foot"></div>
 
       <details class="panel" id="test-advanced">
-        <summary class="panel-title">高级：主动验证（L0 身份探针）——需逐路线授权，且在 cc-switch 路由机上结果可能被宿主设置劫持</summary>
+        <summary class="panel-title">高级：主动验证（L0 身份探针）——需逐路线授权，且在 cc-switch 路由机上结果可能被执行环境设置劫持</summary>
         <div class="form-row">
           <label><span>路线 A</span>
             <select id="test-route-a"></select>
@@ -642,7 +642,7 @@
           </div>
           <div class="form-row">
             <label><span>工具</span>
-              <select id="src-custom-host">
+              <select id="src-custom-harness">
                 <option value="claude-code">Claude Code</option>
                 <option value="codex">Codex</option>
                 <option value="dsh">DeepSeek Harness</option>
@@ -685,14 +685,14 @@
             <div class="setting-title" id="ov-billing-declaration-title">明确计费方式</div>
             <button class="chip-link bd-close" id="ov-billing-close" type="button" aria-label="关闭（Esc）">关闭</button>
           </div>
-          <!-- 头部三行：这批用量是什么（宿主 · 模型 · 规模 · 当前估算）/ 缺什么 / 一句边界。
+          <!-- 头部三行：这批用量是什么（执行环境 · 模型 · 规模 · 当前估算）/ 缺什么 / 一句边界。
                不再把这些塞进一段密文（2026-09-15 真机截图）。 -->
           <div class="bd-summary">
             <div class="bd-summary-main" id="ov-billing-declaration-context"></div>
             <div class="bd-summary-stats muted" id="ov-billing-declaration-stats"></div>
             <div class="bd-summary-missing" id="ov-billing-missing"></div>
           </div>
-          <!-- 批量：默认勾选所有「宿主、未知原因、适用日期相同」的组，一次声明写多条
+          <!-- 批量：默认勾选所有「执行环境、未知原因、适用日期相同」的组，一次声明写多条
                model 作用域，一次预览、一个修订、一个重算任务（计费主链规格 v1.2 §5.2a）。
                包含哪些模型必须列出来，用户才知道自己在批量确认什么。 -->
           <!-- 作用域粒度：声明默认按计费方级匹配（之后同计费方的新模型名也沿用，
@@ -841,12 +841,12 @@
         <!-- 账单录入 / CSV 导入：Beta 延期（发布规格 D01），DOM 保留供正式版，不显示。 -->
         <section class="billing-record" id="ov-billing-record-panel" hidden>
           <div class="billing-form">
-            <label>宿主 <input id="ov-bill-host" value="codex" maxlength="64" /></label>
+            <label>执行环境 <input id="ov-bill-harness" value="codex" maxlength="64" /></label>
             <label>服务商 <input id="ov-bill-provider" maxlength="128" placeholder="openai" /></label>
             <label>账期 <input id="ov-bill-period" placeholder="YYYY-MM" maxlength="7" /></label>
             <label>费用类型
               <select id="ov-bill-basis">
-                <option value="host_billed">账单实付</option>
+                <option value="harness_billed">账单实付</option>
                 <option value="metered_actual">按量实付</option>
                 <option value="fixed_subscription">固定订阅</option>
               </select>
@@ -860,7 +860,7 @@
           <div class="muted" id="ov-bill-existing"></div>
           <details class="billing-csv">
             <summary>导入 CSV 模板</summary>
-            <textarea id="ov-bill-csv" rows="4" placeholder="host,provider_id,billing_period,billing_basis,amount_minor,currency,evidence_ref"></textarea>
+            <textarea id="ov-bill-csv" rows="4" placeholder="harness,provider_id,billing_period,billing_basis,amount_minor,currency,evidence_ref"></textarea>
             <div class="billing-form-actions">
               <button class="btn secondary" id="ov-bill-csv-preview" type="button">预览 CSV</button>
               <button class="btn" id="ov-bill-csv-import" type="button" disabled>确认导入</button>

@@ -102,8 +102,8 @@ ok(!dom.includes("可计价"), "「N% 可计价」写法已从页面消失");
 ok(!/本月实付[^<]*含订阅月费/.test(dom), "「本月实付 …（含订阅月费 …）」跨币句式已消失");
 ok(!/未定 provider|路由与缺价|未计价 token|仅撞窗史|已付费产能|套餐等价|metered-bill|official-price-card|fair-market/.test(ovText),
   "总览可见文本不出现内部词表 / raw reason code");
-ok(/OpenAI[^\n]*经 Codex/.test(ovText) && /DeepSeek[^\n]*经 DeepSeek Harness/.test(ovText), "费用明细行名 = 服务商，宿主为「经 X」副属性");
-// 预算分子与本月按量实付是同一个数（跨宿主按量实付 CNY）——两卡不得打架。
+ok(/OpenAI[^\n]*经 Codex/.test(ovText) && /DeepSeek[^\n]*经 DeepSeek Harness/.test(ovText), "费用明细行名 = 服务商，执行环境为「经 X」副属性");
+// 预算分子与本月按量实付是同一个数（跨执行环境按量实付 CNY）——两卡不得打架。
 const metered = (ov.match(/id="ov-m-metered"[^>]*>([^<]*)</) || [])[1] || "";
 const budgetAmt = (ov.match(/id="ov-budget-amount"[^>]*>([^<]*)</) || [])[1] || "";
 ok(metered && budgetAmt.startsWith(metered + " /"), `预算已用 == 本月按量实付（${budgetAmt} vs ${metered}）`);

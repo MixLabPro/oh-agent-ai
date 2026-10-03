@@ -1,12 +1,14 @@
 # AGENT_VITALS_EXTENSION_ARCHITECTURE_SPEC — 动态扩展架构：统一扩展注册面 + 官方目录
 
+> 术语调整（2026-10-03）：本文 Agent 执行环境称 `harness`，与应用插件架构中的 Agent Vitals `host` 区分。内部开发阶段直接更新 schema、来源 ID 和文件名，不保留旧名兼容，见 [HOST_HARNESS_TERMINOLOGY.md](HOST_HARNESS_TERMINOLOGY.md)。
+
 - 版本：v1.1（2026-10-01）
 - 状态：设计定稿候选。本文整合 2026-10-01 架构评审的全部结论，是「目录时代」
-  的总纲；host 插槽的实现细节以
-  [HOST_MANIFEST_DSL_SPEC.md](HOST_MANIFEST_DSL_SPEC.md) 为准；跨插槽的分发、
+  的总纲；harness 插槽的实现细节以
+  [HARNESS_MANIFEST_DSL_SPEC.md](HARNESS_MANIFEST_DSL_SPEC.md) 为准；跨插槽的分发、
   来源持久化、激活事务和目录索引以本文为准。两份规格互相引用同一生命周期，
-  不另造 host 专属安装协议。本文为目标契约，实现状态单列于 §9。
-- 关联：`HOST_MANIFEST_DSL_SPEC.md`（host 插槽主规格）、
+  不另造 harness 专属安装协议。本文为目标契约，实现状态单列于 §9。
+- 关联：`HARNESS_MANIFEST_DSL_SPEC.md`（harness 插槽主规格）、
   `PROVIDER_ROUTE_ATTRIBUTION_SPEC.md`（归因规则）、
   `AGENT_EXECUTION_PROBLEM_TAXONOMY.md`（taxonomy 注册纪律）、
   AGENTS.md「Data Retention & Serving-Face Policy（2026-09-19）」、
@@ -18,21 +20,21 @@
 - v1.1（2026-10-01）：明确逐插槽信任矩阵；激活台账与历史 provenance 进入
   状态区；增加内容校验、统一生命周期、激活事务、崩溃恢复及验收门。
   CAP-1 与最小 revision 关联提前至 P0.5；修正旧 URL 兼容策略和实施状态。
-- v1.0（2026-10-01）：初稿。整合宿主热插拔三档分层、官方目录拉取（P0.5）、
+- v1.0（2026-10-01）：初稿。整合执行环境热插拔三档分层、官方目录拉取（P0.5）、
   provider 动态接入、插槽清单三档、统一扩展注册面（ExtensionRegistry）、
-  磁盘契约（仓库 `catalog/` + 本机 `.d` 三区）、`plugin:` → `host:` 改名、
+  磁盘契约（仓库 `catalog/` + 本机 `.d` 三区）、`plugin:` → `harness:` 改名、
   先例对照与分期路线。
 
 ---
 
 ## §0 背景与问题
 
-三条「维护跑步机」在编译期接入模式下成本最高（宿主适配、模型适配、价卡
-计算）——一个新宿主 = hosts crate 解析器 + 四处运行时词表 + CLI 子命令 +
+三条「维护跑步机」在编译期接入模式下成本最高（执行环境适配、模型适配、价卡
+计算）——一个新执行环境 = harnesses crate 解析器 + 四处运行时词表 + CLI 子命令 +
 Python 对等实现 + golden 案例 + UI 注册。上游格式漂移不提前通知，修复要等
 app 发版。
 
-本架构的目标：**新出的宿主、provider、价卡默认以数据形态经官方目录下发接入，
+本架构的目标：**新出的执行环境、provider、价卡默认以数据形态经官方目录下发接入，
 格式漂移的修复从「等 app 发版」变为「发一个 revision」**；同时不拆掉产品的
 承重墙——计费诚实、行为面审计信任、Python/Rust 字节 parity、离线隐私承诺。
 
@@ -41,12 +43,12 @@ app 发版。
 1. **数据可下发，执行权不可让渡。** manifest / 价卡 / 映射表 / pattern 清单
    是数据；recipe 引擎、归因规则、redaction、规范化喉咙是本体代码，版本化
    随 app 走。manifest 永远只能填参数，不能越过接口边界。
-2. **三轴解耦。** host 字符串只表机制（官方裸名 vs `host:<slug>`）；评审档
+2. **三轴解耦。** harness 字符串只表机制（官方裸名 vs `harness:<slug>`）；评审档
    归 `origin`（`vendor-catalog` / `local`）；计价档归 billing 锁
    （`metered_estimate` + `has_unresolved`）。任何前缀/徽标不得混装三义。
 3. **账面可自助，行为须官方。** 数据面行可来自任何校验通过的插槽；SV6xx
    行为规则、CanonicalSession 投影、TraceGraph、会话叙事只消费官方编译
-   适配器（谓词 `host NOT LIKE 'host:%'` 在各模块内声明）。
+   适配器（谓词 `harness NOT LIKE 'harness:%'` 在各模块内声明）。
 4. **校验后切换。** schema、能力协商及插槽专属影响预览通过后，持久化
    不可变内容，再事务性切换 active generation（§8.3）。单文件 rename
    不是多插槽原子性的替代品；提交前失败保留旧版本。
@@ -65,7 +67,7 @@ app 发版。
 
 | 先例 | 模式 | 本架构的对应 |
 |---|---|---|
-| Chrome 扩展 `manifest.json` | 声明能力，引擎执法 | `hosts.d/<slug>/manifest.json`（纯配置、零执行权） |
+| Chrome 扩展 `manifest.json` | 声明能力，引擎执法 | `harnesses.d/<slug>/manifest.json`（纯配置、零执行权） |
 | LSP `initialize` 握手 | 能力协商 | CAP-1 `CapabilitySet` / `negotiate` |
 | Terraform Registry | 协议版本与版本化分发的参照 | 本方案采用 index + SHA-256 + 固定 commit；当前不提供独立发布签名 |
 | VS Code contributions | 声明式登记优先，代码进程隔离 + Marketplace 评审 | origin 双轨徽标 + 首装 dry-run 门槛 |
@@ -78,9 +80,20 @@ app 发版。
 
 ## §3 架构总览
 
+### 应用层边界（2026-10-03）
+
+本规格管理声明式数据扩展；含可执行代码的插件APP由
+[应用层规格](AGENT_VITALS_APP_LAYER_ARCHITECTURE_SPEC.md) v0.2管理。
+官方City使用独立app index、签名清单、应用对象目录、应用台账与授权协议，
+不得作为harness_manifest/content_pack安装，也不得将执行包存入payload.json对象库。
+可复用哈希、预览绑定和generation/CAS原语；数据目录来源不授予应用执行信任。
+city:v1是单独授权的app-local面，不扩大MCP权限。content_pack的多文件契约和
+新索引版本后置；严格catalog-index-v1保持原契约。当前主线为City M0–M2，
+数据扩展仅收尾已启动批次，余项保留台账。
+
 ```
 ┌─ 统一扩展注册面（ExtensionRegistry：统一生命周期，按类型执法）─────┐
-│  slot 类型：host_manifest · endpoint_pattern · price_card ·        │
+│  slot 类型：harness_manifest · endpoint_pattern · price_card ·        │
 │   model_alias · error_taxonomy · behavior_patterns ·              │
 │   trust_profile · subscription_scope · fx_reference · …           │
 │  每个 slot 统一携带：capability id · schema 版本 · origin ·        │
@@ -95,14 +108,14 @@ app 发版。
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-落位（接口签名草案见 HOST_MANIFEST_DSL_SPEC 附录 D）：
+落位（接口签名草案见 HARNESS_MANIFEST_DSL_SPEC 附录 D）：
 
 | 层 | 职责 |
 |---|---|
-| `agent-vitals-hosts/generic/` | 能力协商、发现、解码（RecordSource 统一记录流）、recipe 注册表 |
+| `agent-vitals-harnesses/generic/` | 能力协商、发现、解码（RecordSource 统一记录流）、recipe 注册表 |
 | `agent-vitals-runtime` + `agent-vitals-ingest` | 规范化喉咙、catalog 客户端、激活 / revision 管理、双写编排 |
 | `agent-vitals-provider` | 归因与计费诚实规则（封闭）；endpoint pattern 的**数据**经插槽喂入 |
-| `agent-vitals-query/sources` | HostRegistry、合并语义、锁与源控制 |
+| `agent-vitals-query/sources` | HarnessRegistry、合并语义、锁与源控制 |
 | `agent-vitals-domain` | 计价锁枚举、origin 感知原因码等确定性策略常量 |
 | `agent-vitals-data` | 激活 generation、revision 台账与历史 provenance 关联；事务与迁移 |
 | `agent-vitals-mcp` | control_plane 镜像 `pricing_catalog_*` 形态的目录状态 / 策略面 |
@@ -114,7 +127,7 @@ app 发版。
 
 | slot | 内容 | 备注 |
 |---|---|---|
-| `host_manifest` | 发现 / 会话 / recipe 引用 / 证据槽 / billing 锁 | 主规格全篇；v1 覆盖「JSONL + 文件名会话 + 三 recipe 族」的规整新 CLI |
+| `harness_manifest` | 发现 / 会话 / recipe 引用 / 证据槽 / billing 锁 | 主规格全篇；v1 覆盖「JSONL + 文件名会话 + 三 recipe 族」的规整新 CLI |
 | `model_alias` | `model_raw` → 价卡键归一表 | 高频低险；错→估算偏差（有 basis 标注兜底） |
 | `endpoint_pattern` | 域名 → provider_id 映射（数据） | `normalize_host` 算法留本体；替代 `is_cogfoundry_host` 式硬编码 |
 | `error_taxonomy` | HTTP / JSON-RPC −32xxx / 工具错误分类表 | 分类规则（截断、脱敏）留本体；先注册后写 emitter 的纪律不变 |
@@ -148,12 +161,12 @@ app 发版。
 
 | slot | 安装来源 | 影响预览 / 强制限制 |
 |---|---|---|
-| `host_manifest` | local、vendor | 命中率、invalid、token 差异、身份集合；始终锁估算，不授予行为能力 |
+| `harness_manifest` | local、vendor | 命中率、invalid、token 差异、身份集合；始终锁估算，不授予行为能力 |
 | `price_card` / `model_alias` | local、vendor | 受影响模型、估算差额与缺价；local 不可改变官方账单、订阅资格或封账快照 |
 | `endpoint_pattern` | local、vendor | 受影响 provider 映射及冲突；local 映射只作估算提示，不能证明官方路由或覆盖源日志显式证据 |
 | `error_taxonomy` | vendor-only | 分类变化计数；新问题类仍须先登记 taxonomy 文档 |
 | `behavior_patterns` | vendor-only | 固定回放集的 finding 增减；只改变 pattern，不改变判定引擎或数据源资格 |
-| `subscription_scope` | vendor-only | billing basis 变化预览；scope 不替代路由及订阅证据，不能解除 `host:` 估算锁 |
+| `subscription_scope` | vendor-only | billing basis 变化预览；scope 不替代路由及订阅证据，不能解除 `harness:` 估算锁 |
 | `fx_reference` | vendor-only | 币种、有效期、受影响快照；按 FX V2 保持封账绑定 |
 | `quota_window` | vendor-only | 时区、边界、DST 变化；不创造官方配额证据 |
 | `trust_profile` | local、vendor | 仅证据发现范围及本体内置适配器选择；不得设置严重性、置信度、行为资格或通知判定 |
@@ -171,7 +184,7 @@ app 发版。
 ```
 catalog/                            # 官方目录：下发契约数据（index 驱动）
   index.json                        # 统一 typed entries，契约见 §5.4
-  hosts/<slug>.json                 # 宿主 manifest（原 P0.5 的 assets/hosts.d/，
+  harnesses/<slug>.json                 # 执行环境 manifest（原 P0.5 的 assets/harnesses.d/，
                                     #   未实现即改名，零迁移成本）
   providers/<id>.json               # provider 身份 + endpoint_patterns
   pricing/<provider>.json           # 价卡（渐进按 provider 拆分）
@@ -202,7 +215,7 @@ assets/                             # 真·静态资源（templates/ 等）
 ~/.agent-vitals/
 ├─【配置区：用户声明，须保留与迁移，不能假定可重拉】
 │  ├─ config.toml                    # 主配置（现有）
-│  ├─ hosts.d/<slug>/manifest.json   # 本地 manifest 输入；安装时复制为不可变内容
+│  ├─ harnesses.d/<slug>/manifest.json   # 本地 manifest 输入；安装时复制为不可变内容
 │  ├─ providers.d/<id>.json          # provider 身份 / 端点映射 drop-in
 │  ├─ pricing.d/<id>.json            # 价卡 + 模型别名 drop-in（manual-rate 统一到此）
 │  └─ catalog/
@@ -212,12 +225,12 @@ assets/                             # 真·静态资源（templates/ 等）
 ├─【缓存区：可随时丢弃重建】
 │  └─ cache/catalog/                 # index、下载 staging、未安装件；不含唯一有效版本
 │
-└─【状态区：不可丢。与 host 主规格 §13.3 一起迁移】
+└─【状态区：不可丢。与 harness 主规格 §13.3 一起迁移】
    ├─ authority.db / agent-vitals.sqlite3（沿用实际数据库路径，不另建第二 authority）
    │                                # 含 revision、activation、provenance 关联
    ├─ state/extensions/objects/<sha256>/payload.json
    │                                # 已安装不可变内容，离线恢复与回放所需
-   ├─ facts/host-<slug>.jsonl
+   ├─ facts/harness-<slug>.jsonl
    ├─ state/（锁路径、源控制开关）、machine.json、snapshots/、logs/
 ```
 
@@ -230,7 +243,7 @@ vendor 不写入 local 输入目录，用户修改 vendor 内容须显式“复�
 1. 合并键为 `(slot_type, slot_id)`。仅 §4.1 允许 local 的类型可显式覆盖
    vendor；两份内容均保留，台账记录选择和 pin。同来源同键多份拒绝选择，
    不按扫描顺序 last-wins。首次冲突需预览后确认，不能因出现文件自动覆盖。
-2. host 的目录名等于 slug；provider/price 文件 stem 等于内容 id。坏候选
+2. harness 的目录名等于 slug；provider/price 文件 stem 等于内容 id。坏候选
    逐件隔离，已有 active 内容保持；同一依赖组任一校验失败则整组不激活。
 3. local pin 不被目录更新写穿；解钉为显式激活动作，重新预览 vendor 版本。
 4. origin 由获取通道与内容校验结果写入 authority；payload 不得自报 origin。
@@ -247,8 +260,8 @@ commit SHA，`sha256` 是原始 payload bytes 的完整 SHA-256，两者不能�
 
 必填字段：`slot_type`、`slot_id`、`revision`、`payload_path`、`sha256`、
 `schema_version`、`requires`、`min_app_version`、`display`、`dependencies`。
-host payload 的 `manifest_version` 必须与 entry 的 schema_version 对应。
-entry 的 `display` 是 1..=256 字符的目录展示字符串；host payload 的
+harness payload 的 `manifest_version` 必须与 entry 的 schema_version 对应。
+entry 的 `display` 是 1..=256 字符的目录展示字符串；harness payload 的
 `display.name` 保持自身 schema。`published_at` 使用有效 UTC 日历时间
 `YYYY-MM-DDTHH:MM:SSZ`，catalog_sequence 为 u64；schema_version 为正 u32。
 `requires` 按插槽声明 recipes/features；依赖固定到具体类型、id、revision
@@ -273,7 +286,7 @@ authority 增加逻辑记录（具体 SQL migration 随实现评审）：
 - activation：generation、上一 generation、完整有效 slot→revision 映射、
   预览摘要/哈希、动作与提交时间；当前指针是唯一激活权威。
 - provenance 关联：摄入批次或产物关联所用 generation、revision 与引擎版本；
-  可从每条 fact/分类结果追到来源，不仅关联到“当前安装的 host”。
+  可从每条 fact/分类结果追到来源，不仅关联到“当前安装的 harness”。
 
 不向 billing/behavior fact 契约硬塞配置字段；优先新增关联表，保证关联与
 对应 authority 写入同事务。facts JSONL 的 revision 表达及导出/重建的关联
@@ -291,24 +304,24 @@ authority 增加逻辑记录（具体 SQL migration 随实现评审）：
   固定完整 commit 取。这是来源通道与完整性校验，不是独立发布签名；仓库
   发布权限被攻破时，攻击者可同时替换 index 与 payload。签名体系后置到
   P3 再议；vendor-only 不等于具有密码学发布者证明。
-- 网络边界：唯一新增出站 = 官方目录拉取（pricing catalog 同类，opt-in、
+- 网络边界：本数据扩展规格新增出站 = 官方目录拉取（pricing catalog 同类，opt-in、
   不带用户数据）；实施合入时同步更新 AGENTS.md 网络边界一句；
-- 执行边界：永不执行 manifest 携带的代码；脚本 adapter（P1.5）仅默认关闭的
+- 执行边界：永不执行数据扩展 manifest 携带的代码；脚本 adapter（P1.5）仅默认关闭的
   开发者模式，须先过能力沙箱评审，且不可经任何目录分发；
 - 信任插槽逐项按 §4.1 执法，不按分档推断权限。声明式输入仍须有 payload
   字节、条目数、路径/正则长度和运行资源上限；不能因“无代码”而取消限额。
 
 ## §7 诚实与计费边界（不变量）
 
-- 数据面行（`host:<slug>`）一律 `metered_estimate` + `has_unresolved`，
+- 数据面行（`harness:<slug>`）一律 `metered_estimate` + `has_unresolved`，
   原因码按 origin：`data-plane-recipe-no-billing-evidence`（vendor）/
   `unreviewed-manifest-route`（local）；
-- manifest 无权声明订阅档；active billing declarations 不得把 `host:%` 改成
+- manifest 无权声明订阅档；active billing declarations 不得把 `harness:%` 改成
   subscription（SQL/MCP 回归测试钉死）；
 - 估算 ≠ 账单、unknown ≠ zero；缺字段报 null 不编造；
-- 行为面 / trace / narrative 谓词 `host NOT LIKE 'host:%'` 在各模块内声明，
+- 行为面 / trace / narrative 谓词 `harness NOT LIKE 'harness:%'` 在各模块内声明，
   同时由共享查询入口限制为本体注册的编译适配器白名单。前缀排除只作额外
-  防线，未知裸 host 也不能进入；迁移期间同时排除 `plugin:%`。`trust_profile`
+  防线，未知裸 harness 也不能进入；迁移期间同时排除 `plugin:%`。`trust_profile`
   的本地 artifact 发现不授予 SV6xx/TraceGraph/CanonicalSession 消费资格；
 - golden / Python-Rust 字节 parity 对所有插槽数据同样成立：数据驱动不豁免
   契约测试。
@@ -322,7 +335,7 @@ confirm → commit`。ExtensionRegistry 统一编排；schema、来源权限和
 `preview_impact` 由本体内置的 slot handler 按 §4.1 执行。没有 handler
 不能靠通用 JSON 校验激活；golden 验证在发布 CI 执行，不要求客户端执行下载的测试代码。
 
-host 预览比较同一冻结输入范围的 `(session, source_event_id, fact_id)`、
+harness 预览比较同一冻结输入范围的 `(session, source_event_id, fact_id)`、
 token 值及 emit/skip/invalid；同源行换 id 默认拒绝，需要独立迁移流程。
 预览须注明采样范围、截断和未覆盖部分；没有日志时可暂存，不能绕过首装
 format guard 宣称已验证。其他 slot 使用 §4.1 的影响维度，不套用 fact_id。
@@ -333,7 +346,7 @@ format guard 宣称已验证。其他 slot 使用 §4.1 的影响维度，不套
 ### 8.2 操作与网络策略
 
 CLI 保留 `manifest-catalog-status` / `manifest-catalog-update`，作为统一
-catalog 服务的 host 视图；其他 slot 随实现增加类型化入口，不复制下载逻辑。
+catalog 服务的 harness 视图；其他 slot 随实现增加类型化入口，不复制下载逻辑。
 MCP control_plane 镜像既有 pricing_catalog 策略，但只展示脱敏状态/影响。
 update 只检查、下载与预览；激活必须有针对预览的显式确认，不因网络 opt-in
 而自动安装。网络关闭时使用既有有效内容，显示无法检查更新，不报摄入错误。
@@ -361,24 +374,24 @@ update 只检查、下载与预览；激活必须有针对预览的显式确认�
 
 ### 8.4 应急旁名与退出
 
-官方目录可下发 `<host>-drift` recipe，落库 `host:<host>-drift`，只保用量
+官方目录可下发 `<harness>-drift` recipe，落库 `harness:<harness>-drift`，只保用量
 估算。启用预览必须检测与编译适配器的源文件/事件时间范围重叠；无法证明
 互斥就阻止同范围同时摄入。正式修复后先预览切回的范围与去重结果，再解除
-应急摄入；不得简单同时启用两个不同 host 身份。历史旁名事实保留其 provenance，
+应急摄入；不得简单同时启用两个不同 harness 身份。历史旁名事实保留其 provenance，
 合并/重算须走显式迁移，不能凭正式版上线自动再算一遍。
 
 ## §9 与既有实现 / 规格的关系
 
-- **HOST_MANIFEST_DSL_SPEC v0.4.2**：host 插槽与 `plugin:` → `host:` 迁移的
+- **HARNESS_MANIFEST_DSL_SPEC v0.4.2**：harness 插槽与 `plugin:` → `harness:` 迁移的
   主规格（含 §13 命名映射与数据迁移、附录 D 接口契约、附录 E 分层影响）；
 - **已有基础实现**（2026-10-01 仓库检查）：
-  `crates/agent-vitals-query/src/sources/host_registry.rs`、
-  `crates/agent-vitals-hosts/src/hosts/generic/manifest.rs`、
+  `crates/agent-vitals-query/src/sources/harness_registry.rs`、
+  `crates/agent-vitals-harnesses/src/harnesses/generic/manifest.rs`、
   `crates/agent-vitals-ingest/src/ingest/plugin_ingest.rs`；Python 已有
   `generic_plugin.py`、`generic_manifest.py`、`generic_recipe.py`，以及
-  `host-generic-zcode.json` golden 和 hosts.d 发现机制。已有 pricing catalog 通道。
-- **本轮检查仍未完成的目标**：Rust facts_host 仍生成 `plugin:<slug>`；
-  `host:` 迁移、统一 catalog/ExtensionRegistry、本文的 origin/revision
+  `harness-generic-zcode.json` golden 和 harnesses.d 发现机制。已有 pricing catalog 通道。
+- **本轮检查仍未完成的目标**：Rust facts_harness 仍生成 `plugin:<slug>`；
+  `harness:` 迁移、统一 catalog/ExtensionRegistry、本文的 origin/revision
   台账、CAP-1 及激活事务不能标记为已实现。已有模块不代表通过本规格验收。
 - **claude-code / codex 不退出编译适配器**：manifest 能迁移的只有用量数据面
   且是「搬家不是消失」（recipe 也是本体代码）；装机层 skill 体检、订阅计费
@@ -389,16 +402,16 @@ update 只检查、下载与预览；激活必须有针对预览的显式确认�
 
 | 阶段 | 内容 |
 |---|---|
-| P-1 | recipe feasibility spike（≥10 宿主脱敏 fixture、覆盖率 ≥80% 目标、双语言 golden） |
-| P0 | 安全声明式导入（manifest v1 + zcode 试点；CLI 三命令；`host:` 前缀落地） |
-| P0.5 | CAP-1 + typed index → revision/provenance 关联与激活事务 → host 官方目录拉取；catalog 仓库布局、pricing 兼容镜像、应急旁名互斥门；完整通过 §12 |
-| P1 | 桌面导入向导、宿主徽标、KPI/矩阵呈现口径；复用 P0.5 台账，不推迟来源持久化 |
+| P-1 | recipe feasibility spike（≥10 执行环境脱敏 fixture、覆盖率 ≥80% 目标、双语言 golden） |
+| P0 | 安全声明式导入（manifest v1 + zcode 试点；CLI 三命令；`harness:` 前缀落地） |
+| P0.5 | CAP-1 + typed index → revision/provenance 关联与激活事务 → harness 官方目录拉取；catalog 仓库布局、pricing 兼容镜像、应急旁名互斥门；完整通过 §12 |
+| P1 | 桌面导入向导、执行环境徽标、KPI/矩阵呈现口径；复用 P0.5 台账，不推迟来源持久化 |
 | P1.5 | Adapter 开发者模式（未承诺，沙箱评审前置，不可目录分发） |
 | v2（MAN） | 复用 P0.5 CAP-1 → MAN-3/4（会话身份、provider 证据槽）→ MAN-1 多源 join → MAN-2 json/rotated → sqlite 单独立项；recipe 族随版本生长 |
 | 目录时代增量 | `providers.d` / `pricing.d` 插槽、endpoint_pattern 数据化、taxonomy / behavior_patterns（vendor-only）、subscription_scope（vendor + 影响预览） |
 | P3（政策门槛，未承诺） | 社区 / 第三方目录：多来源注册、签名与信任链、分发治理 |
 
-DSL 政策：P2 触发条件驱动（「≥3 个 recipe 覆盖不了的宿主」或「分发需求
+DSL 政策：P2 触发条件驱动（「≥3 个 recipe 覆盖不了的执行环境」或「分发需求
 出现」），从证据里长语言；`RuleTable`（多行型分流）设计为 DSL 的有界退化
 形，将来激活即增量松绑。永不入门：跨行状态、浮点、时间函数、env / 文件 /
 网络、控制流扩展。
@@ -422,8 +435,8 @@ redaction 数据化；遥测与用户数据上传；云 SaaS 化；i18n 目录�
 | 对象写入、DB 提交、快照输出各边界中断 | 重启只见完整旧/新 generation，无半激活；快照可重建 |
 | 两进程激活、预览后输入或 active 变化 | generation 校验阻止过期提交，要求重新预览 |
 | 安装后禁网并清空 cache、卸载或回滚 | 有效对象仍可离线读取；历史来源及估算原因不丢失 |
-| host 自报订阅、local endpoint/alias 指向官方 provider | SQL、summary、MCP 均不能由此产生 subscription 或官方路由证据 |
-| `host:`、迁移期 `plugin:`、未知裸 host 进入行为查询 | 共享白名单及模块守卫拒绝，编译适配器原有结果不变 |
+| harness 自报订阅、local endpoint/alias 指向官方 provider | SQL、summary、MCP 均不能由此产生 subscription 或官方路由证据 |
+| `harness:`、迁移期 `plugin:`、未知裸 harness 进入行为查询 | 共享白名单及模块守卫拒绝，编译适配器原有结果不变 |
 | 同源重放、升级 id 漂移、应急旁名与正式适配器重叠 | 重放不双计；漂移/重叠阻止激活或要求专门迁移 |
 | 历史重算、封账、脱敏 export/rebuild | 不覆写封账；来源可追；无原始参数、错误、凭据或 canary 外泄 |
 | 旧客户端价卡 URL 与双语言 fixtures | 镜像保持旧 schema；schema/归并/错误与事实输出满足 Python/Rust parity |
@@ -439,14 +452,14 @@ golden 掩盖意外的 fact 契约或计费变化。
 | # | 决策 | 一句话理由 |
 |---|---|---|
 | 1 | 统一数据扩展生命周期 + 封闭执行面 | 数据扩展不授予归因、计费或行为判定执行权 |
-| 2 | host 字符串 `plugin:` → `host:`，CLI 用 `manifest-*` | 三轴解耦；`plugin` 让回给真正的插件系统（DSH plugin、Claude Code plugins）；`host-*` 会撞 `--host` 行为面枚举 |
+| 2 | harness 字符串 `plugin:` → `harness:`，CLI 用 `manifest-*` | 三轴解耦；`plugin` 让回给真正的插件系统（DSH plugin、Claude Code plugins）；`harness-*` 会撞 `--harness` 行为面枚举 |
 | 3 | 仓库侧 `catalog/` 取代 `assets/` 放契约数据 | assets 语义是静态资源；pricing/providers/manifests 是版本化契约数据；pricing.json 旧 URL 走镜像过渡 |
 | 4 | recipe-first，DSL 后置 P2 | v0.2 脚本优先的教训；受限解释器 + parity 可对拍；语言从证据里长 |
 | 5 | origin 与完整哈希写入 authority，历史产物关联固定 revision | 可编辑快照不作授权依据，变更内容不能继承官方身份 |
 | 6 | manifest 按不可变 revision 取，index 才浮动 main | manifest 驱动解析，错了是错账 |
 | 7 | 信任承载插槽无 `.d` | 错数据冒充官方口径（订阅 scope / 行为 pattern / taxonomy / 签名）不可接受 |
 | 8 | claude-code / codex 不退出编译适配器 | 四件机制外部件（装机层 / 订阅链 / 配额 / app-server）+ 用量面是搬家不是删除 |
-| 9 | 应急旁名 `<host>-drift` | 上游漂移时的韧性：救生筏保账面，正式修复随版走 |
+| 9 | 应急旁名 `<harness>-drift` | 上游漂移时的韧性：救生筏保账面，正式修复随版走 |
 | 10 | 旧价卡 URL 持续兼容，退役须另定支持期 | 无遥测不能推断旧安装消失，发新版本不等于可以删除旧入口 |
 | 11 | 不可变对象先持久化，DB 事务切换 generation | 保证依赖组与 provenance 一致；单文件 rename 不足以保证跨文件事务 |
 | 12 | CAP-1 与 provenance 提前到 P0.5 | 首次目录分发即需要能力门与历史来源，不能推迟到产品向导阶段 |

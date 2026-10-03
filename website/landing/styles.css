@@ -158,15 +158,15 @@ p { text-wrap: pretty; }
 .ascii .kt { color: #59bc98; }
 
 /* 来源条 */
-.hosts {
+.harnesses {
   display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px 36px;
   margin-top: 72px; padding: 26px 0 30px; border-top: 1px solid var(--line);
   font-size: 14px; color: var(--muted);
 }
-.hosts ul { display: flex; flex-wrap: wrap; gap: 10px 34px; justify-content: flex-end; font-size: 16px; font-weight: 550; color: var(--ink); }
-.hosts li { display: flex; align-items: center; gap: 8px; }
-.host-mark { color: var(--mint); }
-.hosts .fine { grid-column: 1 / -1; }
+.harnesses ul { display: flex; flex-wrap: wrap; gap: 10px 34px; justify-content: flex-end; font-size: 16px; font-weight: 550; color: var(--ink); }
+.harnesses li { display: flex; align-items: center; gap: 8px; }
+.harness-mark { color: var(--mint); }
+.harnesses .fine { grid-column: 1 / -1; }
 
 /* ── 通用 section ── */
 .section { padding: 112px 0; }
@@ -382,8 +382,8 @@ dialog h2 { margin-top: 16px; font-size: 26px; font-weight: 650; letter-spacing:
   .actions .button { flex: 1 1 200px; }
   .ascii { padding: 14px 10px; }
   .scope-foot .muted { margin-left: 0; }
-  .hosts { grid-template-columns: 1fr; margin-top: 48px; }
-  .hosts ul { justify-content: flex-start; gap: 8px 22px; font-size: 15px; }
+  .harnesses { grid-template-columns: 1fr; margin-top: 48px; }
+  .harnesses ul { justify-content: flex-start; gap: 8px 22px; font-size: 15px; }
   .section { padding: 80px 0; }
   .section-head { margin-bottom: 36px; }
   .app-body { grid-template-columns: 1fr; }

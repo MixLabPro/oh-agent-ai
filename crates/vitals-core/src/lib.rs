@@ -1,4 +1,4 @@
-//! Vitals Core —— host-agnostic behavioral audit runtime
+//! Vitals Core —— harness-agnostic behavioral audit runtime
 //! （`docs/VITALS_CORE_V0_5_IMPLEMENTATION_SPEC.md`）。
 //!
 //! # 现状（M0–M3 已完成，接入生产）
@@ -22,7 +22,7 @@
 //! - 本 crate 的公开类型、模块名不出现 Codex / DSH / Skill / Investment /
 //!   IBKR 等领域词——领域内容只能通过 `CanonicalEvent::kind` /
 //!   `CanonicalEvent::attributes` 承载，Core 不解释这些值（§4.1）。
-//! - 本 crate 不依赖 `agent-vitals-domain` / `agent-vitals-hosts` / `agent-vitals-wasm` / 二进制 /
+//! - 本 crate 不依赖 `agent-vitals-domain` / `agent-vitals-harnesses` / `agent-vitals-wasm` / 二进制 /
 //!   `apps/desktop/src-tauri`（§5.2 单向依赖：只能反过来）。
 //! - 本 crate 不读文件、不读环境变量、不访问网络、不启动子进程（§18.1）。
 

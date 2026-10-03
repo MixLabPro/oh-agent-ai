@@ -150,8 +150,8 @@ pub(crate) fn load_sync_status(dh: &Path) -> SyncStatus {
 
 
 
-/// 多宿主导航行（spec §5.3）：`sessions navigation` 的宿主快照在托盘侧的落盘
-/// 形状。tick 每次查询完写 `state/hosts.json`，`read_overview` 附带返回——托盘
+/// 多执行环境导航行（spec §5.3）：`sessions navigation` 的执行环境快照在托盘侧的落盘
+/// 形状。tick 每次查询完写 `state/harnesses.json`，`read_overview` 附带返回——托盘
 /// 启动时 warm-start 直接渲染上一轮结果，不阻塞在冷查询上（与 today.json/
 /// month.json 的持久化同款）。
 ///
@@ -161,8 +161,8 @@ pub(crate) fn load_sync_status(dh: &Path) -> SyncStatus {
 /// 「会话数据暂不可用」；**不拿缺失字段当 0**——「今天没跑」是 None，「今天花了
 /// 0」才是 0，两者在托盘上是两种文案。
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub struct HostRow {
-    pub host_kind: String,
+pub struct HarnessRow {
+    pub harness_kind: String,
     /// 快照 status 原样落盘（"ready" | "partial" | "unavailable"）——L2 渲染
     /// 靠它区分「读不了」（禁用「会话数据暂不可用」）与「真零会话」（禁用
     /// 「尚无会话」），两种状态必须可区分。
@@ -179,7 +179,7 @@ pub struct HostRow {
 /// 最近会话行的落盘形状（spec §5.3）。`session_key` 存 `Value`：core `SessionKey`
 /// 不 derive Serialize（`r2a.rs` 用 `to_json`/`from_json` 显式往返），这里原样
 /// 存 `SessionKey::to_json()` 的四元组 JSON，深链透传给工作台（`sessions read`
-/// 期待同形状）——一旦在 `HostRow` 里拆开重排，字节契约就断了。
+/// 期待同形状）——一旦在 `HarnessRow` 里拆开重排，字节契约就断了。
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct RecentSessionRow {
     pub session_key: Value,
@@ -190,12 +190,12 @@ pub struct RecentSessionRow {
     pub tokens: Option<i64>,
 }
 
-impl HostRow {
+impl HarnessRow {
     /// 查询失败兜底行：L1 字段全 None（托盘显示「—」）、L2 渲染禁用文案。
     /// 不臆造「0 会话 / 0 token」——失败与零是两种诚实。
     pub fn unavailable(kind: &str) -> Self {
-        HostRow {
-            host_kind: kind.to_string(),
+        HarnessRow {
+            harness_kind: kind.to_string(),
             status: "unavailable".to_string(),
             today_tokens: None,
             today_partial: false,
@@ -205,74 +205,74 @@ impl HostRow {
     }
 }
 
-/// hosts.json 落盘信封（spec §5.1 快照形状的落盘投影）：`generated_at` 是
+/// harnesses.json 落盘信封（spec §5.1 快照形状的落盘投影）：`generated_at` 是
 /// `sessions navigation` 快照的生成时刻（RFC3339 UTC），托盘据此**渲染时**判
 /// stale（`now - generated_at > 2 × tick`，spec §6 决策 5）——所以 stale 是派生
-/// 值、不入盘（刷新失败不覆盖 hosts.json，旧的 generated_at 自然变旧 → 变 stale，
+/// 值、不入盘（刷新失败不覆盖 harnesses.json，旧的 generated_at 自然变旧 → 变 stale，
 /// 这正是「保留末次成功快照」的意义）；display_name 同理是托盘侧映射（spec §4），
 /// 也不入盘。
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub struct HostsSnapshot {
+pub struct HarnessesSnapshot {
     pub generated_at: Option<String>,
-    pub hosts: Vec<HostRow>,
+    pub harnesses: Vec<HarnessRow>,
 }
 
-impl HostsSnapshot {
+impl HarnessesSnapshot {
     /// 缺场/解析失败兜底：generated_at None（无缓存 → 无 stale footer）、行集
-    /// 从 core `host_capability::HOSTS` 派生（v0.6 host-contract spec §6/
-    /// §11-M3，G7）——遍历 `fold != None` 的宿主，键序即 `HOSTS` 行序
+    /// 从 core `harness_capability::HARNESSES` 派生（v0.6 harness-contract spec §6/
+    /// §11-M3，G7）——遍历 `fold != None` 的执行环境，键序即 `HARNESSES` 行序
     /// （dsh→codex→claude-code→workbuddy），今天恰好等于旧硬编码三行（workbuddy
-    /// 尚 `fold: None`，M4 补 `HostBillTotals` 后自动出现第四行，不用再改这个
-    /// 函数）。托盘永远渲染注册集里有折叠能力的宿主，数据缺失才显示「—」，
-    /// spec §8。一条坏掉的 hosts.json 不该让菜单整块消失（同 last-sync.json 的
-    /// 「解析失败走默认」哲学）。旧版只落两行的 hosts.json 按字面读出两行
+    /// 尚 `fold: None`，M4 补 `HarnessBillTotals` 后自动出现第四行，不用再改这个
+    /// 函数）。托盘永远渲染注册集里有折叠能力的执行环境，数据缺失才显示「—」，
+    /// spec §8。一条坏掉的 harnesses.json 不该让菜单整块消失（同 last-sync.json 的
+    /// 「解析失败走默认」哲学）。旧版只落两行的 harnesses.json 按字面读出两行
     /// （宽容：不整盘丢弃），下一轮 tick 的新快照覆盖它。
     pub fn unavailable() -> Self {
-        HostsSnapshot {
+        HarnessesSnapshot {
             generated_at: None,
-            hosts: agent_vitals_domain::host_capability::HOSTS
+            harnesses: agent_vitals_domain::harness_capability::HARNESSES
                 .iter()
                 .filter(|h| h.fold.is_some())
-                .map(|h| HostRow::unavailable(h.id))
+                .map(|h| HarnessRow::unavailable(h.id))
                 .collect(),
         }
     }
 }
 
-/// tick 每轮把宿主快照落盘到 `state/hosts.json`（与 last-sync.json 同目录）。
+/// tick 每轮把执行环境快照落盘到 `state/harnesses.json`（与 last-sync.json 同目录）。
 /// 镜像 `save_sync_status_at`：数据根只有一份，托盘/面板读的都是它。
-pub fn save_hosts_at(dh: &Path, snap: &HostsSnapshot) {
+pub fn save_harnesses_at(dh: &Path, snap: &HarnessesSnapshot) {
     let dir = dh.join("state");
     let _ = std::fs::create_dir_all(&dir);
     if let Ok(text) = serde_json::to_string_pretty(snap) {
-        let _ = std::fs::write(dir.join("hosts.json"), text);
+        let _ = std::fs::write(dir.join("harnesses.json"), text);
     }
 }
 
-/// 读回上一轮 tick 的宿主快照。缺场/解析失败 → `HostsSnapshot::unavailable()`
+/// 读回上一轮 tick 的执行环境快照。缺场/解析失败 → `HarnessesSnapshot::unavailable()`
 /// （dsh→codex→claude-code 固定三行——托盘永远渲染固定三行，数据缺失才显示
 /// 「—」，spec §8）。
-pub fn read_hosts_at(dh: &Path) -> HostsSnapshot {
-    read_json(&dh.join("state").join("hosts.json"))
-        .and_then(|v| serde_json::from_value::<HostsSnapshot>(v).ok())
-        .unwrap_or_else(HostsSnapshot::unavailable)
+pub fn read_harnesses_at(dh: &Path) -> HarnessesSnapshot {
+    read_json(&dh.join("state").join("harnesses.json"))
+        .and_then(|v| serde_json::from_value::<HarnessesSnapshot>(v).ok())
+        .unwrap_or_else(HarnessesSnapshot::unavailable)
 }
 
 /// `sessions navigation` 快照 JSON → 落盘形状的最后一小段投影（spec §5.2 →
 /// §5.3）。**宽容解析**：单字段坏 → None，不整盘丢弃——一条字段报错不该让两个
-/// 宿主一起消失。`today_tokens` 整个对象可能是 null（Codex 无计量时），
-/// `get("value")` 在 null 上是 None，恰好走诚实降级。宿主顺序原样保留——快照的
+/// 执行环境一起消失。`today_tokens` 整个对象可能是 null（Codex 无计量时），
+/// `get("value")` 在 null 上是 None，恰好走诚实降级。执行环境顺序原样保留——快照的
 /// dsh→codex 序是数据层的字节契约（r2a_store.rs），托盘不重排（§5.3「不做任何
-/// 排序」）。hosts 数组缺失/不是数组 → 空 vec（落盘后 read 侧 unavailable 兜底，
+/// 排序」）。harnesses 数组缺失/不是数组 → 空 vec（落盘后 read 侧 unavailable 兜底，
 /// 与「真零」「失败」都无关，是形状违约的防御）。
-pub fn host_rows_from_navigation(snap: &Value) -> Vec<HostRow> {
-    let Some(hosts) = snap.get("hosts").and_then(Value::as_array) else {
+pub fn harness_rows_from_navigation(snap: &Value) -> Vec<HarnessRow> {
+    let Some(harnesses) = snap.get("harnesses").and_then(Value::as_array) else {
         return Vec::new();
     };
-    hosts
+    harnesses
         .iter()
-        .map(|h| HostRow {
-            host_kind: h["host_kind"].as_str().unwrap_or_default().to_string(),
+        .map(|h| HarnessRow {
+            harness_kind: h["harness_kind"].as_str().unwrap_or_default().to_string(),
             // status 缺场 → unavailable（未知状态按「读不了」渲染，不冒充零）。
             status: h["status"].as_str().unwrap_or("unavailable").to_string(),
             today_tokens: h
@@ -423,17 +423,17 @@ pub struct Overview {
     /// None = 库打不开（退回旧拼法）。
     pub metered_today: Option<Value>,
     pub metered_month: Option<Value>,
-    /// 今日跨宿主 token 总量（SQL daily DTO `tokens_by_host` 四桶之和，含缓存读写）
+    /// 今日跨执行环境 token 总量（SQL daily DTO `tokens_by_harness` 四桶之和，含缓存读写）
     /// ——与工作台「今日消耗」KPI 同一个数。托盘标题「鸟头 + 64.4M」读它；None =
     /// 库打不开（退回 DSH state + claude ledger 的旧合并）。
     pub today_tokens_sql: Option<i64>,
     /// 菜单栏同步回路状态（tick 落盘）。前端据此示警/给「立即同步」入口。
     pub sync: SyncStatus,
-    /// 多宿主导航行（tick 落盘 hosts.json）。托盘据此渲染 L1 宿主行 + L2 最近会话。
-    pub hosts: Vec<HostRow>,
-    /// hosts.json 的 `generated_at`（RFC3339 UTC）——托盘渲染时据此判 stale
-    /// （spec §6 决策 5），与 hosts 同源同刻，拆开是因为 stale 是派生值不入盘。
-    pub hosts_generated_at: Option<String>,
+    /// 多执行环境导航行（tick 落盘 harnesses.json）。托盘据此渲染 L1 执行环境行 + L2 最近会话。
+    pub harnesses: Vec<HarnessRow>,
+    /// harnesses.json 的 `generated_at`（RFC3339 UTC）——托盘渲染时据此判 stale
+    /// （spec §6 决策 5），与 harnesses 同源同刻，拆开是因为 stale 是派生值不入盘。
+    pub harnesses_generated_at: Option<String>,
     pub estimate_note: String,
     /// Claude Code 成本估（账卡分列，D2）：`claude_today` = core `claude_day_cost`
     /// 折 claude-ledger 当日 flat 直图的整报告；`claude_month` = 当月逐日
@@ -541,7 +541,7 @@ fn monthly_budget_cny(data_home: &Path) -> Option<f64> {
 }
 
 /// 本月本地账单中的 **CNY 固定订阅月费之和**。用户订阅不属于公共价目；
-/// `host_bills` 是唯一展示源。库不可用或无订阅时返回 None（不显示“¥0”）。
+/// `harness_bills` 是唯一展示源。库不可用或无订阅时返回 None（不显示“¥0”）。
 fn monthly_subscriptions_by_currency(data_home: &Path, month: &str) -> Option<BTreeMap<String, i64>> {
     let db = agent_vitals_data::authority::AuthorityDb::open(
         &agent_vitals_data::authority::default_authority_path(data_home),
@@ -549,7 +549,7 @@ fn monthly_subscriptions_by_currency(data_home: &Path, month: &str) -> Option<BT
     )
     .ok()?;
     let mut totals = BTreeMap::<String, i64>::new();
-    for (_host, _provider, basis, minor, currency) in db.host_bills_for_period(month).ok()? {
+    for (_harness, _provider, basis, minor, currency) in db.harness_bills_for_period(month).ok()? {
         if basis != "fixed_subscription" || minor <= 0 { continue; }
         let previous = totals.get(&currency).copied().unwrap_or(0);
         totals.insert(currency, previous.checked_add(minor)?);
@@ -579,7 +579,7 @@ fn monthly_cny_subscriptions(data_home: &Path, month: &str) -> Option<f64> {
 /// 预算卡：从 SQL 权威库**实时算**（`runtime::budget::evaluate_alert_from_sql`），
 /// 不读 `alert.json`（spec §5.2 禁读清单；Tier B 收尾）。`evaluate_alert_from_sql`
 /// 内部按 `current_month_beijing()` 的北京毫秒窗查 DSH `peaked_days_map` 再喂
-/// 不变的 `domain::budget::evaluate_alert`——口径 = 跨宿主「按量实付」CNY
+/// 不变的 `domain::budget::evaluate_alert`——口径 = 跨执行环境「按量实付」CNY
 /// （PM 决策 2026-09-07，当前唯一 CNY MeteredActual 源是 DSH）。
 ///
 /// **`source = "sql"`、`generated_at = None`**：实时算没有「快照时刻」，预算行
@@ -680,16 +680,16 @@ fn read_overview_at(dh: &Path) -> Overview {
         days.sort_by(|a, b| a.date.cmp(&b.date));
     }
 
-    // 预算卡：SQL 权威库实时算（跨宿主按量 CNY 口径），天生按当月窗——
+    // 预算卡：SQL 权威库实时算（跨执行环境按量 CNY 口径），天生按当月窗——
     // 旧 alert.json 快照的月份漂移校正整段删除（见 budget_alert_from_sql doc）。
     let t_budget = std::time::Instant::now();
     let budget = budget_alert_from_sql(dh);
     note("budget_sql", t_budget.elapsed(), &mut slowest);
 
-    // 多宿主导航快照：读一次 hosts.json，拆成 hosts + generated_at 两个字段
+    // 多执行环境导航快照：读一次 harnesses.json，拆成 harnesses + generated_at 两个字段
     //（后者供托盘判 stale）。**不做任何排序**——快照的 dsh→codex 序是数据层的
     // 字节契约，托盘只渲染（spec §5.3「托盘不做任何排序/求和/日界换算」）。
-    let hosts_snap = read_hosts_at(dh);
+    let harnesses_snap = read_harnesses_at(dh);
 
     // Claude Code 估（账卡分列，D2）：SQL 的 claude 逐日账（`claude-ledger.json`
     // days 同形：实时行级事实优先 + legacy_aggregate 深历史按模型补缺）→ core
@@ -755,7 +755,7 @@ fn read_overview_at(dh: &Path) -> Overview {
     // `Arc`——budget_profiles 内部不再第二次全量现算 monthly + daily。
     let monthly_summary_arc = monthly_memo().get_or_compute(dh, &cur_month);
     // 订阅月费与工作台总览同源：月度汇总里的 FixedSubscription 档（计费声明持续生效、
-    // 零用量月份照摊）。`host_bills` 表里根本没有订阅行（声明不落那张表），只读它会让
+    // 零用量月份照摊）。`harness_bills` 表里根本没有订阅行（声明不落那张表），只读它会让
     // 托盘永远拿不到订阅——「本月成本」曾因此恒为「—（无数据）」。库里有账单行时作兜底。
     let subscription_month_by_currency = monthly_summary_arc
         .as_deref()
@@ -786,10 +786,10 @@ fn read_overview_at(dh: &Path) -> Overview {
             .map(|m| metered_view_json(m.metered_view())),
         today_tokens_sql: shared_daily
             .as_ref()
-            .map(|d| d.tokens_by_host.values().map(|t| t.total).sum()),
+            .map(|d| d.tokens_by_harness.values().map(|t| t.total).sum()),
         sync: load_sync_status(dh),
-        hosts: hosts_snap.hosts,
-        hosts_generated_at: hosts_snap.generated_at,
+        harnesses: harnesses_snap.harnesses,
+        harnesses_generated_at: harnesses_snap.generated_at,
         estimate_note: "估算值，不是账单；覆盖率不足的日子按 fallback 价补齐并标注".to_string(),
         claude_today,
         claude_month,
@@ -930,7 +930,7 @@ mod tests {
 
     /// Phase 4 §5.2：`read_overview_at` 改读 SQL 权威库后，组装级测试
     /// seed `usage_facts` 行而不是写 state/*.json。DSH 行 = 8 桶词表
-    /// （`uncached_input_tokens`…）；claude 行同表不同 host。`u/cr/cw/o` 是
+    /// （`uncached_input_tokens`…）；claude 行同表不同 harness。`u/cr/cw/o` 是
     /// 4 桶 token，`ts_ms` 决定北京日 key。整数直接拼进 SQL（测试用、零注入面）。
     fn seed_overview_db(dir: &Path) -> agent_vitals_data::authority::AuthorityDb {
         let db = agent_vitals_data::authority::AuthorityDb::open(
@@ -951,7 +951,7 @@ mod tests {
     fn seed_fact(
         db: &agent_vitals_data::authority::AuthorityDb,
         id: &str,
-        host: &str,
+        harness: &str,
         model: &str,
         ts_ms: i64,
         (u, cr, cw, o): (i64, i64, i64, i64),
@@ -959,11 +959,11 @@ mod tests {
         db.conn()
             .execute(
                 &format!(
-                    "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                    "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                          source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                          event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                          output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
-                     VALUES ('{id}', '{host}', 'm', 's', '{id}', 'turn', NULL, '{model}',
+                     VALUES ('{id}', '{harness}', 'm', 's', '{id}', 'turn', NULL, '{model}',
                              {ts_ms}, 0, {u}, {cr}, {cw}, {o}, 'r', 1, 1)"
                 ),
                 [],
@@ -979,18 +979,18 @@ mod tests {
         start + 12 * 3_600_000
     }
 
-    /// v0.6 host-contract spec §6/§11-M3（G7）：托盘的兜底行不再是本文件的
-    /// 硬编码三行，而是从 core `host_capability::HOSTS` 派生——遍历
-    /// `fold != None` 的宿主。今天恰好等于旧硬编码（workbuddy 仍
-    /// `fold: None`），行为零变化；M4 给 workbuddy 补 `HostBillTotals` 后，
+    /// v0.6 harness-contract spec §6/§11-M3（G7）：托盘的兜底行不再是本文件的
+    /// 硬编码三行，而是从 core `harness_capability::HARNESSES` 派生——遍历
+    /// `fold != None` 的执行环境。今天恰好等于旧硬编码（workbuddy 仍
+    /// `fold: None`），行为零变化；M4 给 workbuddy 补 `HarnessBillTotals` 后，
     /// 这条测试的期望需要同步改成四行——那正是"注册集派生"要买的东西：
-    /// 加宿主不用回来改这个函数，只需要改 HOSTS 行。
+    /// 加执行环境不用回来改这个函数，只需要改 HARNESSES 行。
     #[test]
-    fn hosts_snapshot_unavailable_derives_from_hosts_registry_fold_capability() {
-        let snap = HostsSnapshot::unavailable();
-        let kinds: Vec<&str> = snap.hosts.iter().map(|h| h.host_kind.as_str()).collect();
+    fn harnesses_snapshot_unavailable_derives_from_harnesses_registry_fold_capability() {
+        let snap = HarnessesSnapshot::unavailable();
+        let kinds: Vec<&str> = snap.harnesses.iter().map(|h| h.harness_kind.as_str()).collect();
         assert_eq!(kinds, vec!["dsh", "codex", "claude-code"]);
-        for h in &snap.hosts {
+        for h in &snap.harnesses {
             assert_eq!(h.status, "unavailable");
         }
         assert!(snap.generated_at.is_none());
@@ -1208,7 +1208,7 @@ mod tests {
             db.conn()
                 .execute(
                     &format!(
-                        "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                        "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                              source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                              event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                              output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
@@ -1260,24 +1260,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// 本月订阅总额只读本地 host_bills；公共 pricing.json 不参与。不同币种
+    /// 本月订阅总额只读本地 harness_bills；公共 pricing.json 不参与。不同币种
     /// 不折算相加，非本月与非订阅账单不进入托盘行。
     #[test]
-    fn monthly_cny_subscriptions_reads_local_host_bills() {
+    fn monthly_cny_subscriptions_reads_local_harness_bills() {
         let tmp = std::env::temp_dir().join("sv-menubar-local-subscriptions-test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let db = seed_overview_db(&tmp);
         let month = current_month_beijing();
-        db.host_bill_put(
+        db.harness_bill_put(
             "sub-cny", "claude-code", "minimax", &month, "fixed_subscription",
             11_400, "CNY", "test", 1,
         ).unwrap();
-        db.host_bill_put(
+        db.harness_bill_put(
             "sub-usd", "claude-code", "anthropic", &month, "fixed_subscription",
             2_000, "USD", "test", 1,
         ).unwrap();
-        db.host_bill_put(
+        db.harness_bill_put(
             "api-cny", "dsh", "deepseek", &month, "metered_actual",
             500, "CNY", "test", 1,
         ).unwrap();
@@ -1436,23 +1436,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// hosts.json 往返：save_hosts_at 写的快照（generated_at + 两行，含 partial
-    /// 态）能由 read_hosts_at 原样读回。session_key 用 `SessionKey::to_json()` 的
+    /// harnesses.json 往返：save_harnesses_at 写的快照（generated_at + 两行，含 partial
+    /// 态）能由 read_harnesses_at 原样读回。session_key 用 `SessionKey::to_json()` 的
     /// 真实形状构造——这是「深链透传给工作台」的字节契约：读回后必须仍能过
-    /// `SessionKey::from_json`，一旦在 HostRow 里拆开重排，`sessions read` 就认
+    /// `SessionKey::from_json`，一旦在 HarnessRow 里拆开重排，`sessions read` 就认
     /// 不出它了。
     #[test]
-    fn hosts_save_then_read_round_trips() {
+    fn harnesses_save_then_read_round_trips() {
         use agent_vitals_domain::session_key::SessionKey;
-        let tmp = std::env::temp_dir().join("sv-menubar-hosts-roundtrip-test");
+        let tmp = std::env::temp_dir().join("sv-menubar-harnesses-roundtrip-test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("state")).unwrap();
         let key = SessionKey::new("dsh", "sess-1", "default", "m1").to_json();
-        let saved = HostsSnapshot {
+        let saved = HarnessesSnapshot {
             generated_at: Some("2026-09-01T02:31:00Z".into()),
-            hosts: vec![
-                HostRow {
-                    host_kind: "dsh".into(),
+            harnesses: vec![
+                HarnessRow {
+                    harness_kind: "dsh".into(),
                     status: "partial".into(),
                     today_tokens: Some(1234),
                     today_partial: true,
@@ -1465,36 +1465,36 @@ mod tests {
                         tokens: Some(88000),
                     }],
                 },
-                HostRow::unavailable("codex"),
+                HarnessRow::unavailable("codex"),
             ],
         };
-        save_hosts_at(&tmp, &saved);
-        let back = read_hosts_at(&tmp);
+        save_harnesses_at(&tmp, &saved);
+        let back = read_harnesses_at(&tmp);
         assert_eq!(back, saved);
         assert!(
-            SessionKey::from_json(&back.hosts[0].recent[0].session_key).is_some(),
+            SessionKey::from_json(&back.harnesses[0].recent[0].session_key).is_some(),
             "落盘的 session_key 必须仍是 SessionKey::to_json 形状"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// 缺场兜底：没有 hosts.json → generated_at None + 固定三行 unavailable
+    /// 缺场兜底：没有 harnesses.json → generated_at None + 固定三行 unavailable
     /// （dsh→codex→claude-code，status "unavailable"），L1 全 None——托盘永远
     /// 渲染三行，「—」是缺失不是 0；无 generated_at 也就无 stale footer（从未
     /// 成功过）。
     #[test]
-    fn hosts_missing_falls_back_to_three_unavailable_rows() {
-        let tmp = std::env::temp_dir().join("sv-menubar-hosts-missing-test");
+    fn harnesses_missing_falls_back_to_three_unavailable_rows() {
+        let tmp = std::env::temp_dir().join("sv-menubar-harnesses-missing-test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("state")).unwrap();
-        let snap = read_hosts_at(&tmp);
+        let snap = read_harnesses_at(&tmp);
         assert!(snap.generated_at.is_none());
-        let hosts = &snap.hosts;
-        assert_eq!(hosts.len(), 3);
-        assert_eq!(hosts[0].host_kind, "dsh");
-        assert_eq!(hosts[1].host_kind, "codex");
-        assert_eq!(hosts[2].host_kind, "claude-code");
-        assert!(hosts
+        let harnesses = &snap.harnesses;
+        assert_eq!(harnesses.len(), 3);
+        assert_eq!(harnesses[0].harness_kind, "dsh");
+        assert_eq!(harnesses[1].harness_kind, "codex");
+        assert_eq!(harnesses[2].harness_kind, "claude-code");
+        assert!(harnesses
             .iter()
             .all(|h| h.status == "unavailable"
                 && h.today_tokens.is_none()
@@ -1503,83 +1503,83 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// 解析失败兜底：hosts.json 是合法 JSON 但形状不对（数组而不是信封对象）→
+    /// 解析失败兜底：harnesses.json 是合法 JSON 但形状不对（数组而不是信封对象）→
     /// 同缺场回退。一条坏文件不该让菜单整块消失。
     #[test]
-    fn hosts_parse_failure_falls_back_to_unavailable() {
-        let tmp = std::env::temp_dir().join("sv-menubar-hosts-corrupt-test");
+    fn harnesses_parse_failure_falls_back_to_unavailable() {
+        let tmp = std::env::temp_dir().join("sv-menubar-harnesses-corrupt-test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("state")).unwrap();
-        std::fs::write(tmp.join("state").join("hosts.json"), r#"["dsh"]"#).unwrap();
-        let snap = read_hosts_at(&tmp);
+        std::fs::write(tmp.join("state").join("harnesses.json"), r#"["dsh"]"#).unwrap();
+        let snap = read_harnesses_at(&tmp);
         assert!(snap.generated_at.is_none());
-        let hosts = &snap.hosts;
-        assert_eq!(hosts.len(), 3);
-        assert_eq!(hosts[0].host_kind, "dsh");
-        assert_eq!(hosts[1].host_kind, "codex");
-        assert_eq!(hosts[2].host_kind, "claude-code");
-        assert!(hosts.iter().all(|h| h.status == "unavailable"));
+        let harnesses = &snap.harnesses;
+        assert_eq!(harnesses.len(), 3);
+        assert_eq!(harnesses[0].harness_kind, "dsh");
+        assert_eq!(harnesses[1].harness_kind, "codex");
+        assert_eq!(harnesses[2].harness_kind, "claude-code");
+        assert!(harnesses.iter().all(|h| h.status == "unavailable"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// Overview 组装包含 hosts：往临时数据根写 hosts.json，read_overview_at 的
-    /// ov.hosts 原样带出 + ov.hosts_generated_at 同源；空态（无 hosts.json）→
-    /// generated_at None + 固定两行 unavailable。托盘读 Overview 一次就拿到宿主
+    /// Overview 组装包含 harnesses：往临时数据根写 harnesses.json，read_overview_at 的
+    /// ov.harnesses 原样带出 + ov.harnesses_generated_at 同源；空态（无 harnesses.json）→
+    /// generated_at None + 固定两行 unavailable。托盘读 Overview 一次就拿到执行环境
     /// 行，不需要第二条 IPC 或第二个文件读取。
     #[test]
-    fn read_overview_embeds_hosts() {
-        let tmp = std::env::temp_dir().join("sv-menubar-hosts-overview-test");
+    fn read_overview_embeds_harnesses() {
+        let tmp = std::env::temp_dir().join("sv-menubar-harnesses-overview-test");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("state")).unwrap();
-        save_hosts_at(
+        save_harnesses_at(
             &tmp,
-            &HostsSnapshot {
+            &HarnessesSnapshot {
                 generated_at: Some("2026-09-01T02:31:00Z".into()),
-                hosts: vec![
-                    HostRow::unavailable("dsh"),
-                    HostRow::unavailable("codex"),
+                harnesses: vec![
+                    HarnessRow::unavailable("dsh"),
+                    HarnessRow::unavailable("codex"),
                 ],
             },
         );
         let ov = read_overview_at(&tmp);
-        assert_eq!(ov.hosts.len(), 2);
-        assert_eq!(ov.hosts[0].host_kind, "dsh");
-        assert!(ov.hosts[0].status == "unavailable");
+        assert_eq!(ov.harnesses.len(), 2);
+        assert_eq!(ov.harnesses[0].harness_kind, "dsh");
+        assert!(ov.harnesses[0].status == "unavailable");
         assert_eq!(
-            ov.hosts_generated_at.as_deref(),
+            ov.harnesses_generated_at.as_deref(),
             Some("2026-09-01T02:31:00Z")
         );
 
-        let tmp2 = std::env::temp_dir().join("sv-menubar-hosts-overview-empty-test");
+        let tmp2 = std::env::temp_dir().join("sv-menubar-harnesses-overview-empty-test");
         let _ = std::fs::remove_dir_all(&tmp2);
         std::fs::create_dir_all(tmp2.join("state")).unwrap();
         let ov2 = read_overview_at(&tmp2);
-        // hosts.json 缺场 → 固定三行 unavailable（dsh→codex→claude-code）。
-        assert_eq!(ov2.hosts.len(), 3);
-        assert_eq!(ov2.hosts[0].host_kind, "dsh");
-        assert_eq!(ov2.hosts[1].host_kind, "codex");
-        assert_eq!(ov2.hosts[2].host_kind, "claude-code");
-        assert!(ov2.hosts_generated_at.is_none());
+        // harnesses.json 缺场 → 固定三行 unavailable（dsh→codex→claude-code）。
+        assert_eq!(ov2.harnesses.len(), 3);
+        assert_eq!(ov2.harnesses[0].harness_kind, "dsh");
+        assert_eq!(ov2.harnesses[1].harness_kind, "codex");
+        assert_eq!(ov2.harnesses[2].harness_kind, "claude-code");
+        assert!(ov2.harnesses_generated_at.is_none());
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(&tmp2);
     }
 
-    /// `sessions navigation` 快照 → HostRow 映射：完整形状逐字段落位、null 的
+    /// `sessions navigation` 快照 → HarnessRow 映射：完整形状逐字段落位、null 的
     /// today_tokens 对象（Codex 无计量）诚实 None、status 缺场 → unavailable、
-    /// hosts 数组缺失 → 空 vec。映射规则全在这——托盘菜单只渲染不重算。
+    /// harnesses 数组缺失 → 空 vec。映射规则全在这——托盘菜单只渲染不重算。
     #[test]
-    fn host_rows_from_navigation_maps_snapshot_fields() {
+    fn harness_rows_from_navigation_maps_snapshot_fields() {
         let snap = serde_json::json!({
             "schema_version": 1,
             "generated_at": "2026-09-01T02:31:00Z",
-            "hosts": [
+            "harnesses": [
                 {
-                    "host_kind": "dsh",
+                    "harness_kind": "dsh",
                     "status": "ready",
                     "today_tokens": {"value": 1398214, "basis": "state-file", "coverage": "complete"},
                     "today_sessions": 3,
                     "recent": [{
-                        "session_key": {"host_kind": "dsh", "native_id": "s1", "source_profile": null, "machine_namespace": null},
+                        "session_key": {"harness_kind": "dsh", "native_id": "s1", "source_profile": null, "machine_namespace": null},
                         "title": "重构 r2a 查询",
                         "model": "deepseek-v4-flash",
                         "tokens_total": 88000,
@@ -1590,7 +1590,7 @@ mod tests {
                     "store_revision": 7
                 },
                 {
-                    "host_kind": "codex",
+                    "harness_kind": "codex",
                     "status": "partial",
                     // Codex 无计量时 today_tokens 是整对象 null——get("value") 为
                     // None，恰好走诚实降级（「—」），不把 null 当成 0。
@@ -1601,9 +1601,9 @@ mod tests {
                 }
             ]
         });
-        let rows = host_rows_from_navigation(&snap);
+        let rows = harness_rows_from_navigation(&snap);
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].host_kind, "dsh");
+        assert_eq!(rows[0].harness_kind, "dsh");
         assert_eq!(rows[0].status, "ready");
         assert_eq!(rows[0].today_tokens, Some(1398214));
         assert!(!rows[0].today_partial, "coverage=complete → 无 ≈");
@@ -1617,7 +1617,7 @@ mod tests {
             rows[0].recent[0].session_key["native_id"],
             serde_json::json!("s1")
         );
-        assert_eq!(rows[1].host_kind, "codex");
+        assert_eq!(rows[1].harness_kind, "codex");
         assert_eq!(rows[1].status, "partial");
         assert_eq!(rows[1].today_tokens, None, "null 对象 → None，不编 0");
         assert_eq!(rows[1].today_sessions, None);
@@ -1625,12 +1625,12 @@ mod tests {
     }
 
     /// 宽容解析的两个防御面：partial 覆盖率 → today_partial（≈ 前缀的数据来源），
-    /// hosts 数组缺失 → 空 vec（不 panic、不整盘丢弃）。
+    /// harnesses 数组缺失 → 空 vec（不 panic、不整盘丢弃）。
     #[test]
-    fn host_rows_from_navigation_partial_coverage_and_missing_hosts() {
+    fn harness_rows_from_navigation_partial_coverage_and_missing_harnesses() {
         let partial = serde_json::json!({
-            "hosts": [{
-                "host_kind": "codex",
+            "harnesses": [{
+                "harness_kind": "codex",
                 "status": "ready",
                 "today_tokens": {"value": 15000, "basis": "events", "coverage": "partial"},
                 "today_sessions": 1,
@@ -1638,12 +1638,12 @@ mod tests {
                 "store_revision": 3
             }]
         });
-        let rows = host_rows_from_navigation(&partial);
+        let rows = harness_rows_from_navigation(&partial);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].today_partial, "unaccounted>0 → coverage=partial → ≈15K");
 
-        let no_hosts = serde_json::json!({"schema_version": 1, "generated_at": "2026-09-01T02:31:00Z"});
-        assert!(host_rows_from_navigation(&no_hosts).is_empty());
+        let no_harnesses = serde_json::json!({"schema_version": 1, "generated_at": "2026-09-01T02:31:00Z"});
+        assert!(harness_rows_from_navigation(&no_harnesses).is_empty());
     }
 
     /// day_to_row 三态：exact（by_model 覆盖完整 → basis "exact"、coverage 1.0）、

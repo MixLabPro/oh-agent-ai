@@ -6,7 +6,7 @@ Every skill you install costs context on every single startup, and only some
 of them ever get triggered — no tool puts those two columns side by side. Once
 an agent is actually running, "installed correctly" stops being the only
 question that matters: what it just did, and what that cost, matter just as
-much. This tool answers both, at whichever layer your host currently supports.
+much. This tool answers both, at whichever layer your harness currently supports.
 
 *[中文说明在下方](#中文)*
 
@@ -63,22 +63,22 @@ or flow-diagram view), and execution-duration auditing — computed by the same
 Rust core the CLI's `behavior` and `duration-audit` subcommands run, so the
 browser and the CLI never disagree.
 
-**The rule engine is host-agnostic; the wiring to DSH is not.** The core
+**The rule engine is harness-agnostic; the wiring to DSH is not.** The core
 (`crates/agent-vitals-core`) is a pure function over a JSON event array — it
 does not know or care where the events came from. The CLI proves this: `agent-vitals
 behavior <session-log>` and `agent-vitals duration-audit <session-log>` run the
 same rules against a log file on disk, no live plugin required. What's actually
 DeepSeek Harness–specific is (1) the live, interactive audit tab, which needs a
-host that pushes session events to a plugin in real time (DSH's `sessionProjections`
+harness that pushes session events to a plugin in real time (DSH's `sessionProjections`
 model), and (2) the adapter that reshapes DSH's own event vocabulary
 (`tool/call`, `turn/start`, …) into the shape the core expects. Claude Code,
 Codex, OpenClaw, Hermes, and WorkBuddy get the install-time layer only today —
 not because the rules can't apply to them, but because nobody has written their
 adapter yet. Same division of labor as the install-time side: one core, one
-adapter per host.
+adapter per harness.
 
 **Three places an agent's behaviour can be recorded, and only one is
-retroactive.** A host may write a durable session log, export OpenTelemetry, or
+retroactive.** A harness may write a durable session log, export OpenTelemetry, or
 fire hooks that a tool can subscribe to. Telemetry and hooks only ever cover
 sessions that ran *after* somebody configured them — they cannot answer "what
 did that session do yesterday". A session log can be read after the agent has
@@ -95,10 +95,10 @@ and the hook that sees permission decisions in Claude Code is one whose *output
 decides whether the tool call runs*, which would make an audit tool a
 participant in the behaviour it audits. This project does not do that.
 
-What each host actually records has been surveyed against upstream source code
+What each harness actually records has been surveyed against upstream source code
 and first-party logs — including which cells will stay `unavailable` and why.
 See [`docs/RUNTIME_EVIDENCE_CONTRACT.md`](docs/RUNTIME_EVIDENCE_CONTRACT.md)
-for the per-host matrix and the rules an adapter has to satisfy, plus
+for the per-harness matrix and the rules an adapter has to satisfy, plus
 [`docs/DSH_INTEGRATION.md`](docs/DSH_INTEGRATION.md) and
 [`docs/AGENT_BEHAVIOR_AUDIT.md`](docs/AGENT_BEHAVIOR_AUDIT.md).
 
@@ -135,7 +135,7 @@ support one — a missing field reports `null`, not a guessed 0.
 
 Architecture and Rust-port contracts:
 
-- [Host adapter contract](docs/HOST_ADAPTER_CONTRACT.md)
+- [Harness adapter contract](docs/HARNESS_ADAPTER_CONTRACT.md)
 - [Incremental Python refactor specification](docs/PYTHON_REFACTOR_SPEC.md)
 - [Rust port plan](docs/RUST_PORT_PLAN.md)
 - [Product capability matrix](docs/PRODUCT_CAPABILITY_MATRIX.md)
@@ -143,7 +143,7 @@ Architecture and Rust-port contracts:
 ClawHub releases are packaged by
 [`package-clawhub.yml`](.github/workflows/package-clawhub.yml). The published
 runtime bundle is deliberately limited to the English `SKILL.md`, its
-progressive-disclosure references (`references/hosts.md`,
+progressive-disclosure references (`references/harnesses.md`,
 `references/judgment.md`, and the Chinese `references/guide.zh-CN.md`),
 `agents/openai.yaml`, `README.md`, `LICENSE`, and
 the Python entry scripts plus the complete `scripts/agent_vitals/` package;
@@ -155,14 +155,14 @@ manually after adding the `CLAWHUB_TOKEN` repository secret. Release notes must
 contain both English and Chinese; use an annotated tag message or the manual
 workflow's changelog input.
 
-## Host compatibility
+## Harness compatibility
 
 The scanner supports Claude Code, Codex, OpenClaw, Hermes, Tencent WorkBuddy, and DeepSeek Harness.
-Use `--host` to produce a report for one runtime; skills from different hosts are
+Use `--harness` to produce a report for one runtime; skills from different harnesses are
 never combined into one context budget or conflict set. The checks are not equally
 available everywhere:
 
-| Check | Any host | Claude Code | Codex | OpenClaw | WorkBuddy | Hermes | DeepSeek Harness |
+| Check | Any harness | Claude Code | Codex | OpenClaw | WorkBuddy | Hermes | DeepSeek Harness |
 |---|---|---|---|---|---|---|---|---|
 | Context cost, structure, semantic overlap, security | ✅ | | | | | | |
 | **Description budget** (2.1) | | configurable estimate | official 2% / 8k fallback | configurable cap | unavailable | unavailable | unavailable (SV004 truncation) |
@@ -171,9 +171,9 @@ available everywhere:
 | **Trigger data** (2.5) | | `skillUsage` | unavailable | unavailable | unavailable | unavailable | session log |
 | **Runtime behavior audit** | | surveyed, not built † | surveyed, not built † | not surveyed | surveyed, not built † | not surveyed | ✅ live audit tab + `behavior`/`duration-audit` CLI |
 
-`†` **"Surveyed, not built"** means the host's evidence has been read against
+`†` **"Surveyed, not built"** means the harness's evidence has been read against
 upstream source code and real logs, and the adapter has not been written. No
-runtime checks run on these hosts today. What the survey found:
+runtime checks run on these harnesses today. What the survey found:
 
 - **Claude Code** — a JSONL message *tree* (not an event stream): tool calls,
   per-request token usage, and turn durations are all there; approval and
@@ -184,7 +184,7 @@ runtime checks run on these hosts today. What the survey found:
   durations. Approvals and hooks are excluded from the file by upstream design.
 - **WorkBuddy** — no conversation transcript, but three separate stores: session
   metadata in SQLite, a hash-chained security-decision log (the only durable
-  approval record on any host surveyed), and an OpenTelemetry-shaped span tree
+  approval record on any harness surveyed), and an OpenTelemetry-shaped span tree
   with tool names, durations and statuses.
 - **OpenClaw / Hermes** — no instance was available on the audited machine, so
   their runtime surfaces are simply unknown. They are recorded as unknown rather
@@ -201,13 +201,13 @@ visibility means the compact Skill metadata is eligible/model-visible; it does
 not prove the complete `SKILL.md` body was loaded. `probe_logs.py --deep` can
 report deduplicated observed reads as indirect evidence, never as activation counts.
 
-Each field uses only evidence exposed by that host. Unsupported fields degrade to
+Each field uses only evidence exposed by that harness. Unsupported fields degrade to
 "not available" — the tool will not substitute install time or mtime to fake them.
 A report without the trigger column is still useful; a report with a fabricated
 one is not.
 
 DeepSeek Harness is distributed as a profile bundle (`dsh/`, published as
-`dsh-agent-vitals`) and is health-checked via `--host dsh`. Its description budget is
+`dsh-agent-vitals`) and is health-checked via `--harness dsh`. Its description budget is
 unavailable — DSH has no global budget, so per-description truncation (SV004) replaces
 SV001/SV002 — and loaded/trigger evidence comes from the session log and the registry
 snapshot.
@@ -227,7 +227,7 @@ counted as top-level installed Skills.
 git clone https://github.com/MixLabPro/agent-vitals ~/.claude/skills/agent-vitals
 ```
 
-Install the same directory at the host's root instead when using another runtime:
+Install the same directory at the harness's root instead when using another runtime:
 
 ```bash
 # Codex / Hermes / WorkBuddy
@@ -259,7 +259,7 @@ the CLI is absent or the protocol call fails.
 The scanner runs fine without an agent:
 
 ```bash
-python3 scripts/scan.py --host codex --json scan.json
+python3 scripts/scan.py --harness codex --json scan.json
 ```
 
 `scripts/scan.py` remains the stable direct-entry command while implementation
@@ -270,8 +270,8 @@ extraction phase.
 
 | Flag | Purpose |
 |---|---|
-| `--path PATH` | Extra scan root (repeatable) — for hosts not auto-detected |
-| `--host HOST` | Analyze one of `claude-code`, `codex`, `openclaw`, `hermes`, or `workbuddy`; default `all` only inventories hosts separately |
+| `--path PATH` | Extra scan root (repeatable) — for harnesses not auto-detected |
+| `--harness HARNESS` | Analyze one of `claude-code`, `codex`, `openclaw`, `hermes`, or `workbuddy`; default `all` only inventories harnesses separately |
 | `--budget N` | Description budget in chars (default 15000) |
 | `--all` | Count every skill on disk, not just loaded ones (diagnostic only) |
 | `--zombie-age N` | Minimum install age in days before zero-triggers counts (default 14) |
@@ -280,7 +280,7 @@ extraction phase.
 | `--redact` | Strip home directory and username from all paths |
 | `--redact-names` | Also replace skill names with `skill-001`-style IDs, and drop descriptions |
 
-Auto-detected hosts: Claude Code, Codex, OpenClaw, WorkBuddy, cc-switch, Cursor,
+Auto-detected harnesses: Claude Code, Codex, OpenClaw, WorkBuddy, cc-switch, Cursor,
 Gemini CLI, OpenCode, and project-local `.claude/skills`.
 
 ### Subcommands
@@ -380,7 +380,7 @@ not just "there is a problem". Three rules it will not bend:
 - `Discoverable` **never takes `false`**. "Over budget drops the least-used
   descriptions first" is hearsay, not something measured, so claiming a specific
   skill was dropped would be inventing a fact.
-- An unreadable host config makes `Enabled` **unknown, not false** — render it
+- An unreadable harness config makes `Enabled` **unknown, not false** — render it
   as false and you will go flip a switch that was already on.
 
 Same-named copies are all shown, with the one you asked about marked, because
@@ -400,14 +400,14 @@ Two things it deliberately does *not* do:
   threshold, SV203 is an open product question, SV402 needs a semantic judgement.
   A report missing a column is useful; one that quietly drops a column is not.
 
-`list` separates **LOAD** (`loaded` / `shadowed` / `disabled` / `other-host`)
+`list` separates **LOAD** (`loaded` / `shadowed` / `disabled` / `other-harness`)
 from **STATUS** (`active` / `occasional` / `dormant` / `zombie` / `too-new`).
 They are orthogonal: a skill can be both shadowed and active — the copy in
 effect is being used while the one you edited is not. That is exactly the case
 worth seeing, and a single column would hide it.
 
 `overlap` is a **lexical filter, not a verdict**. It reports Jaccard similarity
-over `name + description` among loaded skills within one host, and prints the
+over `name + description` among loaded skills within one harness, and prints the
 shared wording so you can judge it yourself. Semantic competition happens
 between skills that share no vocabulary at all, and this will never find those —
 for an actual judgement, run `/agent-vitals` inside Claude Code and let the
@@ -449,7 +449,7 @@ pinned by a test in `tests/test_regressions.py`.
 **Disk ≠ context.** `total_skills_on_disk` and `loaded_skills` differ a lot.
 Disabled plugin copies (checked against `enabledPlugins` in `~/.claude.json`),
 duplicate copies under both `plugins/cache/` and `plugins/marketplaces/`, and
-other hosts' skills all sit on disk without costing you a byte of context.
+other harnesses' skills all sit on disk without costing you a byte of context.
 Counting them produced a "budget 143% over" false alarm that would have sent the
 user to change an environment variable that was fine. Budget, conflicts, and
 zombies default to loaded-only.
@@ -562,7 +562,7 @@ MIT. See [LICENSE](LICENSE).
 每个 skill 都在花钱——每次启动都占上下文；但只有一部分在创造价值——真的被触发。
 今天没有任何工具把这两列放在一起看。而 agent 一旦真的跑起来，"装得对不对"就不
 再是唯一要紧的问题了——它刚才干了什么、花了多少，同样要紧。这个工具两头都答，
-具体答到哪一层，看你的宿主目前支持到哪。
+具体答到哪一层，看你的执行环境目前支持到哪。
 
 ## 它解决什么
 
@@ -606,17 +606,17 @@ Agent Skills 用渐进式披露：启动时只载入每个 skill 的 `name` + `d
 `duration-audit` 子命令跑的**同一套** Rust core 算出来，浏览器和 CLI 不会各说
 各话。
 
-**规则引擎跟宿主无关，接到 DSH 上这件事才是。** core（`crates/agent-vitals-core`）
+**规则引擎跟执行环境无关，接到 DSH 上这件事才是。** core（`crates/agent-vitals-core`）
 是个纯函数，吃一份 JSON 事件数组，不知道也不关心事件从哪来——CLI 就是证据：
 `agent-vitals behavior <session-log>` 和 `agent-vitals duration-audit <session-log>`
 直接对着磁盘上的一份日志文件跑同一套规则，不需要任何实时 plugin。真正 DeepSeek
-Harness 专属的是：①**实时交互审计 tab**（需要宿主能把会话事件实时推给 plugin，
+Harness 专属的是：①**实时交互审计 tab**（需要执行环境能把会话事件实时推给 plugin，
 DSH 的 `sessionProjections` 机制）；②**适配器**（把 DSH 自己的事件命名法
 `tool/call`/`turn/start`/... 折算成 core 认的形状）。Claude Code、Codex、
 OpenClaw、Hermes、WorkBuddy 现在只有装机层——不是规则用不上它们，是还没人给
-它们写适配器。跟装机层的分工是同一个模式：一套 core，每个宿主各自一份适配代码。
+它们写适配器。跟装机层的分工是同一个模式：一套 core，每个执行环境各自一份适配代码。
 
-**Agent 的行为有三个地方可能被记下来，其中只有一个是可回溯的。** 宿主可能写
+**Agent 的行为有三个地方可能被记下来，其中只有一个是可回溯的。** 执行环境可能写
 持久化会话日志、可能导出 OpenTelemetry、也可能提供 hook 让工具订阅。遥测和
 hook 只覆盖「配好之后」跑的会话——它们回答不了「昨天那次会话干了什么」。而
 会话日志可以在 agent 退出之后、在一台从未做过任何埋点的机器上、不需要提前
@@ -630,8 +630,8 @@ hook——而在 Claude Code 上能看见权限决策的那个 hook，**它的�
 调用放不放行**，装上去就意味着审计工具成了它所审计行为的参与者。本项目不做
 这件事。
 
-每个宿主到底记了什么，已经对着上游源码和一手日志逐项核过——包括哪些格子会
-永久保持 `unavailable` 及其原因。逐宿主矩阵与适配器必须满足的规则见
+每个执行环境到底记了什么，已经对着上游源码和一手日志逐项核过——包括哪些格子会
+永久保持 `unavailable` 及其原因。逐执行环境矩阵与适配器必须满足的规则见
 [`docs/RUNTIME_EVIDENCE_CONTRACT.md`](docs/RUNTIME_EVIDENCE_CONTRACT.md)，
 另见 [`docs/DSH_INTEGRATION.md`](docs/DSH_INTEGRATION.md) 与
 [`docs/AGENT_BEHAVIOR_AUDIT.md`](docs/AGENT_BEHAVIOR_AUDIT.md)。
@@ -665,12 +665,12 @@ hook——而在 Claude Code 上能看见权限决策的那个 hook，**它的�
 
 同一条纪律：只做测量，日志支持不了的数字不编——缺字段报 `null`，不是猜一个 0。
 
-## 宿主兼容性
+## 执行环境兼容性
 
-扫描器支持 Claude Code、Codex、OpenClaw、Hermes、腾讯 WorkBuddy 和 DeepSeek Harness。使用 `--host`
-为单个运行时生成报告；不同宿主的 skill 不会被合并到同一个上下文预算或冲突集合。**七项检查并非在所有宿主上都可用**：
+扫描器支持 Claude Code、Codex、OpenClaw、Hermes、腾讯 WorkBuddy 和 DeepSeek Harness。使用 `--harness`
+为单个运行时生成报告；不同执行环境的 skill 不会被合并到同一个上下文预算或冲突集合。**七项检查并非在所有执行环境上都可用**：
 
-| 检查项 | 任意宿主 | Claude Code | Codex | OpenClaw | WorkBuddy | Hermes | DeepSeek Harness |
+| 检查项 | 任意执行环境 | Claude Code | Codex | OpenClaw | WorkBuddy | Hermes | DeepSeek Harness |
 |---|---|---|---|---|---|---|---|---|
 | 上下文成本、结构、语义重叠、安全 | ✅ | | | | | | |
 | **描述预算**（2.1） | | 可配置估算 | 官方 2% / 8k fallback 估算 | 可配置上限 | 未获取 | 未获取 | 未获取（SV004 逐条截断） |
@@ -678,8 +678,8 @@ hook——而在 Claude Code 上能看见权限决策的那个 hook，**它的�
 | **触发数据**（2.5） | | `skillUsage` | 未获取 | 未获取 | 未获取 | 未获取 | 会话日志 |
 | **运行时行为审计** | | 已勘察，未实现 † | 已勘察，未实现 † | 未勘察 | 已勘察，未实现 † | 未勘察 | ✅ 实时审计 tab + `behavior`/`duration-audit` CLI |
 
-`†` **「已勘察，未实现」**的意思是：该宿主的证据已经对着上游源码和真实日志逐项
-核过，但适配器还没写。**这些宿主上今天不跑任何运行时检查。** 勘察结果：
+`†` **「已勘察，未实现」**的意思是：该执行环境的证据已经对着上游源码和真实日志逐项
+核过，但适配器还没写。**这些执行环境上今天不跑任何运行时检查。** 勘察结果：
 
 - **Claude Code** —— JSONL 的**消息树**（不是事件流）：工具调用、逐请求 token
   用量、turn 时长都有；审批与沙箱决策在里面**一条都没有**。
@@ -687,7 +687,7 @@ hook——而在 Claude Code 上能看见权限决策的那个 hook，**它的�
   本身不声明自己是哪种**，只能靠探测。`Paginated` 是更丰富的那种，带 argv、
   退出码和逐命令耗时。审批与 hook 被上游设计**明确排除**在文件之外。
 - **WorkBuddy** —— 没有对话 transcript，但有三个独立存储：SQLite 里的会话
-  元数据、一份哈希链安全决策日志（**所有已勘察宿主中唯一可回溯的审批记录**）、
+  元数据、一份哈希链安全决策日志（**所有已勘察执行环境中唯一可回溯的审批记录**）、
   以及一个 OpenTelemetry 形状的 span 树（含工具名、耗时、成败）。
 - **OpenClaw / Hermes** —— 被审计的机器上没有安装实例，运行时证据面**未知**。
   记为未知，而不是猜一个。
@@ -701,11 +701,11 @@ workspace、插件和 npm 内置 Skills 的 eligibility 与模型可见性；命
 不证明完整 `SKILL.md` 正文已载入。`probe_logs.py --deep` 可输出去重后的读取观测，
 但只能作为间接证据，不能冒充触发次数。
 
-每个字段只采用对应宿主可验证的证据；不可获取时如实标注——**工具不会用安装时间或
+每个字段只采用对应执行环境可验证的证据；不可获取时如实标注——**工具不会用安装时间或
 修改时间去凑一个假的触发列**。缺一列的报告仍然有价值；编一列的报告没有。
 
 DeepSeek Harness 以 profile bundle 形式分发（`dsh/`，发布为 `dsh-agent-vitals`），
-可通过 `--host dsh` 体检。其描述预算不可用——DSH 没有全局预算，逐条截断（SV004）
+可通过 `--harness dsh` 体检。其描述预算不可用——DSH 没有全局预算，逐条截断（SV004）
 取代 SV001/SV002——加载与触发证据来自会话日志和注册表快照。
 
 ## 安装
@@ -732,7 +732,7 @@ Python 3.8+，只用标准库。无依赖，不联网。
 扫描器不需要 Agent 也能跑：
 
 ```bash
-python3 scripts/scan.py --host codex --json scan.json
+python3 scripts/scan.py --harness codex --json scan.json
 ```
 
 `scripts/scan.py` 始终是稳定的直接入口；实现会渐进拆到同级的
@@ -741,8 +741,8 @@ python3 scripts/scan.py --host codex --json scan.json
 
 | 参数 | 作用 |
 |---|---|
-| `--path PATH` | 追加扫描路径（可重复）——用于没被自动识别的宿主 |
-| `--host HOST` | 分析 `claude-code`、`codex`、`openclaw`、`hermes` 或 `workbuddy`；默认 `all` 仅按宿主盘点 |
+| `--path PATH` | 追加扫描路径（可重复）——用于没被自动识别的执行环境 |
+| `--harness HARNESS` | 分析 `claude-code`、`codex`、`openclaw`、`hermes` 或 `workbuddy`；默认 `all` 仅按执行环境盘点 |
 | `--budget N` | 描述字符预算，默认 15000 |
 | `--all` | 按磁盘上所有 skill 算，而非仅已加载的（仅诊断用） |
 | `--zombie-age N` | 判定僵尸所需的最小安装天数，默认 14 |
@@ -751,7 +751,7 @@ python3 scripts/scan.py --host codex --json scan.json
 | `--redact` | 脱敏：路径里的 home 目录和用户名替换掉 |
 | `--redact-names` | 连 skill 名一起换成 `skill-001` 编号，并丢弃 description 正文 |
 
-自动识别的宿主：Claude Code、Codex、OpenClaw、WorkBuddy、cc-switch、Cursor、
+自动识别的执行环境：Claude Code、Codex、OpenClaw、WorkBuddy、cc-switch、Cursor、
 Gemini CLI、OpenCode，以及项目本地 `.claude/skills`。
 
 ### 子命令
@@ -841,7 +841,7 @@ Discoverable、Selected、Triggered —— 回答的是**「为什么」和「�
   用户会去修一个在当前状态下根本不存在的问题。
 - `Discoverable` **永远不取 `false`**。「超预算后从调用最少的开始丢弃」是
   传闻不是实测，断言某一条真的被丢了，就是在编事实。
-- 读不到宿主配置时 `Enabled` 是 **unknown 不是 false** —— 渲染成 false，
+- 读不到执行环境配置时 `Enabled` 是 **unknown 不是 false** —— 渲染成 false，
   用户会去开一个本来就开着的开关，然后以为自己修好了。
 
 同名多份会全部列出，并标出你问的是哪一份 —— 被遮蔽时这正是唯一要紧的信息。
@@ -857,12 +857,12 @@ caveats** —— 带已知系统性偏差的结论，偏差必须与数字同屏
 - **打印本次没评估的码和原因**：SV003/SV302 没有可辩护的阈值，SV203 是产品侧
   未决问题，SV402 需要语义判定。缺一列的报告有价值，悄悄少一列的没有。
 
-`list` 把 **LOAD**（`loaded` / `shadowed` / `disabled` / `other-host`）与
+`list` 把 **LOAD**（`loaded` / `shadowed` / `disabled` / `other-harness`）与
 **STATUS**（`active` / `occasional` / `dormant` / `zombie` / `too-new`）分成两列。
 两者正交：一个 skill 完全可以既 shadowed 又 active —— 生效的那份在被用，
 你改的那份没生效。这恰恰是最该被看见的情况，挤成一列会把它藏起来。
 
-`overlap` 是**筛选器，不是判决**。它在同一宿主内、已加载的 skill 之间按
+`overlap` 是**筛选器，不是判决**。它在同一执行环境内、已加载的 skill 之间按
 `name + description` 算 Jaccard，并把共享的说法打出来让你自己判断。
 语义竞争完全可能发生在用词毫无交集的两个 skill 之间，它永远查不到 ——
 要拿可作结论的判断，请在 Claude Code 里运行 `/agent-vitals`，由模型读
@@ -899,7 +899,7 @@ python3 scripts/scan.py --baseline last-scan.json --json scan.json
 
 **磁盘 ≠ 上下文。** `total_skills_on_disk` 和 `loaded_skills` 通常差很多：未启用
 的插件副本（读 `~/.claude.json` 的 `enabledPlugins` 判断）、`plugins/cache/` 与
-`plugins/marketplaces/` 里的同一份东西、其他宿主的 skill——都在磁盘上但一个字节
+`plugins/marketplaces/` 里的同一份东西、其他执行环境的 skill——都在磁盘上但一个字节
 上下文都不占。把它们算进去会得出「预算超支 143%」的假警报，并诱导用户去改一个
 根本不需要改的环境变量。预算、冲突、僵尸三项默认只按已加载的算。
 

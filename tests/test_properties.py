@@ -104,7 +104,7 @@ def build_output(skill_names, plugin_names, market_names, removed_names,
             "namespace": plug,
             "plugin_key": "%s@%s" % (plug, mkt),
             "usage_key_matched": "%s:%s" % (plug, n),
-            # 多宿主字段：instance_id 是用户机器上的目录名，同样要脱敏；
+            # 多执行环境字段：instance_id 是用户机器上的目录名，同样要脱敏；
             # instance_root / config_path / conflict_domain 里嵌着同一串。
             #
             # **必须用独立于 markets 的一组名字。**曾经这里复用 mkt，于是
@@ -151,9 +151,9 @@ def build_output(skill_names, plugin_names, market_names, removed_names,
             # 所以只从 skills[].name 收集的实现必然漏掉。
             # 形状必须跟真实输出一致：dict 而不是裸名列表。喂裸名的话，
             # 这条属性测的就是一个 scan.py 不再产出的形状。
-            "removed_skills": [{"host": "claude-code", "instance_id": None,
+            "removed_skills": [{"harness": "claude-code", "instance_id": None,
                                 "namespace": "", "name": n} for n in removed_names],
-            "added_skills": [{"host": "claude-code", "instance_id": None,
+            "added_skills": [{"harness": "claude-code", "instance_id": None,
                               "namespace": "", "name": n} for n in skill_names],
             "usage_delta": [{"name": n, "delta": 1} for n in skill_names],
             "new_security_findings": [{"skill": n, "rule": "r"} for n in skill_names],

@@ -15,14 +15,14 @@
 |---|---|---|
 | Phase 0 冻结与基线 | ✅ | spec 冻结；基线备份 `~/.agent-vitals/backup-v0.9.1-baseline/`（facts 48,999 条 + 索引库 + state JSON + 对账报告） |
 | Phase 1 schema 与迁移框架 | ✅ | authority.rs（DDL v1 全 12 表 + 版本闸 + 中断清扫 + 事务帮助器 + retention）+ 时钟注入（sql_sync::now_ms）+ 迁移记录（sync_runs/migrations 表）。**1.7 损坏恢复文档化**：`data-status` 加 `PRAGMA integrity_check` + `health`/`hints`（critical → 退出码 1），58c38b8 |
-| Phase 2 清洗写入与同步 | ✅ | 三路并发实现合流（c06de2e）+ 审查收口（6776fe0）+ 收口批（b1f8b38）+ 迁移哨兵真 bug 修复（1f67331）。2.1–2.3/2.6/2.7 复选框此前滞后——功能随三路合流全部落地，本次盘点补勾（命令名是 `data-*` 前缀，非 `data <sub>`）。2.8（host_bills + pricing_snapshots）cf04121/64aa87d |
+| Phase 2 清洗写入与同步 | ✅ | 三路并发实现合流（c06de2e）+ 审查收口（6776fe0）+ 收口批（b1f8b38）+ 迁移哨兵真 bug 修复（1f67331）。2.1–2.3/2.6/2.7 复选框此前滞后——功能随三路合流全部落地，本次盘点补勾（命令名是 `data-*` 前缀，非 `data <sub>`）。2.8（harness_bills + pricing_snapshots）cf04121/64aa87d |
 | Phase 3 SQL repository 与读路径切换 | ✅ | 3.1–3.7 全部完成（见各条）。Tier B 逐消费点切完 + Q01–Q14 端到端 fixture（b082a79）。**Q13 价格历史重放**（`PricingCards::asof`，`SqlSummaryRepository`/`calendar_month` 按查询窗口月末时点选历史价卡）3eecf09——3.5 Tier B 的最后一个后续项收口 |
-| Phase 4 双轨验收与旧路径退役 | 🔨（仅剩真机观察期） | 4.1（77a59ab）+ 4.2（e339cce）+ 4.4 可自动化部分（58c38b8）✅。**4.3 旧路径退役全部落 `main`**：Stage 1–5a（ad4e33e/b5ca48c/98602a7/8498023）+ Stage 5b（4c0fba9/cf71a22/a1e4851/c503563/370e495 + 本次差分收口）+ Stage 6。`JsonSummaryRepository` / `data-reconcile*` / legacy `budget show` / `index.sqlite3` / `store` / DSH tick 的业务 state 写链 / 主二进制 `state merge-*` 子命令 / `behavior --json` 的 `hour_buckets` 全部退役；`SummaryRepository` 只剩 SQL；例行同步以 SQL `source_files` 做唯一差量索引；`data-unresolved` / 会话导航今日 token / Codex 配额（schema v2 `host_runtime_snapshots`）均读 authority。Python mirror + 全部差分/lockstep 测试已对齐（`cargo test` + `clippy -D warnings` + `unittest discover tests` 1151 + golden 15/15 + `e2e_smoke` 全绿）。**仍待（用户本机）**：spec §6.1 备份 → `data-migrate` → 逐月核对 → `data authority enable` → ≥1–2 周观察期（4.4 最后一项）。 |
+| Phase 4 双轨验收与旧路径退役 | 🔨（仅剩真机观察期） | 4.1（77a59ab）+ 4.2（e339cce）+ 4.4 可自动化部分（58c38b8）✅。**4.3 旧路径退役全部落 `main`**：Stage 1–5a（ad4e33e/b5ca48c/98602a7/8498023）+ Stage 5b（4c0fba9/cf71a22/a1e4851/c503563/370e495 + 本次差分收口）+ Stage 6。`JsonSummaryRepository` / `data-reconcile*` / legacy `budget show` / `index.sqlite3` / `store` / DSH tick 的业务 state 写链 / 主二进制 `state merge-*` 子命令 / `behavior --json` 的 `hour_buckets` 全部退役；`SummaryRepository` 只剩 SQL；例行同步以 SQL `source_files` 做唯一差量索引；`data-unresolved` / 会话导航今日 token / Codex 配额（schema v2 `harness_runtime_snapshots`）均读 authority。Python mirror + 全部差分/lockstep 测试已对齐（`cargo test` + `clippy -D warnings` + `unittest discover tests` 1151 + golden 15/15 + `e2e_smoke` 全绿）。**仍待（用户本机）**：spec §6.1 备份 → `data-migrate` → 逐月核对 → `data authority enable` → ≥1–2 周观察期（4.4 最后一项）。 |
 
 ### claude ledger 去重 bug——发现、修复、真机验证（2026-09-06，非本 Phase 引入）
 
 `SqlSummaryRepository` 写完后用真机 `~/.agent-vitals` 数据跑
-`crates/agent-vitals-runtime/examples/reconcile_real.rs`（json vs sql 逐宿主
+`crates/agent-vitals-runtime/examples/reconcile_real.rs`（json vs sql 逐执行环境
 对比），claude-code 月度 token 相差近 2 倍。排查定位到 **`apps/cli/src/agent/
 claude_cost.rs::apply_record`（`claude_sync` 重建 `claude-ledger.json` 的 fold
 核心）没有按 `message.id` 去重**——Claude Code 的 session JSONL 会把同一条
@@ -59,7 +59,7 @@ relay，CNY）¥591.68 → ¥216.79（−63.4%）；真机 `claude-sync` 报告
 
 - [x] **1.1 DDL v1 全量建库** — `agent-vitals-data/src/authority.rs`
   （spec §3.1–§3.6 逐表：schema_meta / sync_runs / source_files / sessions /
-  usage_facts / host_bills / pricing_snapshots / budget_config /
+  usage_facts / harness_bills / pricing_snapshots / budget_config /
   budget_snoozes / data_quality_issues / migrations / workflow_events；
   `foreign_keys=ON` + WAL + `busy_timeout` 5s）
 - [x] **1.2 版本闸** — 空/同版本/更新版本三态；半建库（有业务表无版本行）
@@ -92,10 +92,10 @@ pub struct SqlFactWriter<'a> { /* conn + run_id + now_ms */ }
 impl<'a> SqlFactWriter<'a> {
     pub fn new(conn: &'a Connection, run_id: &str, now_ms: i64) -> Result<Self, AuthorityError>;
     /// source_files upsert（path_hash = fnv1a64(路径)，不存明文）。返回 source_id。
-    pub fn upsert_source_file(&self, host: &str, path: &Path, size: u64,
+    pub fn upsert_source_file(&self, harness: &str, path: &Path, size: u64,
         mtime_ns: u64, native_session_id: Option<&str>, parser_version: i64) -> Result<String, AuthorityError>;
     /// sessions upsert（session_key = r2a 键构造）。
-    pub fn upsert_session(&self, host: &str, ns: &str, native_id: &str,
+    pub fn upsert_session(&self, harness: &str, ns: &str, native_id: &str,
         profile: Option<&str>, last_observed_ms: i64) -> Result<String, AuthorityError>;
     /// 事实批写入：契约校验（build_usage_fact 同款）→ 合格 INSERT OR CONFLICT
     /// DO NOTHING；不合格写 data_quality_issues（不静默丢）。重复 = duplicate 计数。
@@ -113,14 +113,14 @@ pub struct SqlInsertReport { pub inserted: usize, pub duplicate: usize, pub reje
 - 敏感点：fact 的 `event_ts_ms` 由 ISO ts 解析（复用 store.rs `parse_ymd` 同
   层 helper）；`event_peak` 复用 `peak_of`（三个尾部形态都已钉测）。
 - **批次合成 source 行排除规则**（审查收口定稿）：`upsert_batch_source` 落
-  的合成行路径 = `/sync/{host}`、size/mtime 恒 0——Phase 3 的差量判定、
+  的合成行路径 = `/sync/{harness}`、size/mtime 恒 0——Phase 3 的差量判定、
   repair 重放、source 计数必须排除（`source_id LIKE '%:sync'` 或按指纹
   判 0），并把「迁移窗口内事实的 source_id 指向批次行」记录为已知
   provenance 限制（fact_id/会话下钻不受影响，文件级溯源在此窗口缺失）。
 
 
 
-目标：三宿主 emitter → **SQL writer**；JSON checkpoint → `source_files`；
+目标：三执行环境 emitter → **SQL writer**；JSON checkpoint → `source_files`；
 lease 包住完整事务。旧 `index.sqlite3` 的 facts 按 §6.2.1 一次性导入。
 
 - [x] **2.1 SQL writer**（c06de2e，`agent-vitals-data/src/fact_writer_sql.rs`）
@@ -151,7 +151,7 @@ lease 包住完整事务。旧 `index.sqlite3` 的 facts 按 §6.2.1 一次性�
   `ingest_service` 多处 `acquire_blocking(".ingest.lock")`）— O_EXCL + 原子
   rename 陈旧偷取，包住「发现→解析→事务写入」；`lease.rs` 8 单测（互斥 /
   TTL 偷锁 / 偷锁后 drop 尊重所有权…）
-- [x] **2.8 HostBillRecord + 价格快照** — ✅
+- [x] **2.8 HarnessBillRecord + 价格快照** — ✅
   - `pricing_snapshots`（cf04121）：`sql_sync::snapshot_current_pricing`
     在 `data-migrate` / `sync-facts` 各落一次当前版本；`authority::
     pricing_snapshot_asof/latest/get` 是历史重放读原语。**Q13 消费面已收口
@@ -161,15 +161,15 @@ lease 包住完整事务。旧 `index.sqlite3` 的 facts 按 §6.2.1 一次性�
     真机数据 no-op）。粒度 = 窗口级（月末），逐日重放是独立后续项。reconcile
     §6.3 加 `pricing_replayed` 例外（SQL 按历史卡 vs legacy 按当前卡 →
     explained 非 mismatch）。
-  - `host_bills` 写入方：`authority::host_bill_put/host_bills_for_period/
-    host_bill_delete`（YYYY-MM + 五档 basis + amount_minor≥0 + currency
-    非空四项校验，同键 upsert，soft delete）；CLI `data-host-bill
+  - `harness_bills` 写入方：`authority::harness_bill_put/harness_bills_for_period/
+    harness_bill_delete`（YYYY-MM + 五档 basis + amount_minor≥0 + currency
+    非空四项校验，同键 upsert，soft delete）；CLI `data-harness-bill
     {set,list,delete}`（spec §5.3 显式管理 API，不由 UI 直写表）；
-    `summary::apply_host_bills` 把活账单行折进 `MonthlySummary.by_provider`
-    对应 `{host}/{provider}` 条目的 basis 桶（跨币不相加，冲突撤 currency
+    `summary::apply_harness_bills` 把活账单行折进 `MonthlySummary.by_provider`
+    对应 `{harness}/{provider}` 条目的 basis 桶（跨币不相加，冲突撤 currency
     + unresolved）。WorkBuddy credit_json 是首个消费方——录入仍是人工
-    （`workbuddy-session` 读到的 credit_json 值 → `data-host-bill set
-    --basis host_billed`），自动接线是后续项。
+    （`workbuddy-session` 读到的 credit_json 值 → `data-harness-bill set
+    --basis harness_billed`），自动接线是后续项。
   - 附带：`persist_reconcile_exceptions` 修 scope 从 mismatch 转
     exact/explained 后陈旧 `reconcile_mismatch` 行不 resolve 的 bug
     （真机 2026-08/claude-code 挂了一条假警告）。
@@ -183,7 +183,7 @@ lease 包住完整事务。旧 `index.sqlite3` 的 facts 按 §6.2.1 一次性�
 month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
 
 - [x] **3.1 `SqlSummaryRepository`** — 实现 `SummaryRepository` trait
-  （daily/monthly）：tokens 从 `usage_facts` 聚合（host × 日/月 ×
+  （daily/monthly）：tokens 从 `usage_facts` 聚合（harness × 日/月 ×
   model/provider，event_ts_ms → 北京日/月窗口）；金额走
   `domain::cost` 同一计价面，DSH peak 按 `event_peak` 列。
   `crates/agent-vitals-data/src/authority_query.rs`（反查层）+
@@ -214,17 +214,17 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
   实施 + subAgent 审查收口）：三维分母 v1（usage/price/sync，
   COVERAGE_DENOMINATOR_VERSION=1），trait 新增 coverage_status(month)；
   Sql 侧真实三维、Json 侧二值近似 version=0（两把尺异版不可互比）；
-  summary 级字段（接线宿主数语义）刻意不动。审查确认 spent 口径与
+  summary 级字段（接线执行环境数语义）刻意不动。审查确认 spent 口径与
   price 维单点否决（与 has_unresolved 同源）为设计意图。
   **设计定稿（2026-09-07，主 agent 拍板）**：分母 v1（`denominator_
-  version=1`，定义变更必须递增）= 每宿主 3 维：① usage 维——窗口内有
+  version=1`，定义变更必须递增）= 每执行环境 3 维：① usage 维——窗口内有
   可解析时间戳的事实存在；② price 维——窗口内全部非零 token 模型能经
   `billing_route_of`/价卡归属（认不出的模型让本维不算 measured，与
-  has_unresolved 同源）；③ sync 维——`source_files` 该宿主最近
+  has_unresolved 同源）；③ sync 维——`source_files` 该执行环境最近
   last_seen_at_ms 落在窗口内。`measured_fields` = 三维命中数、
-  `total_fields = 3`。落点 `authority_query::coverage_status(conn, host,
+  `total_fields = 3`。落点 `authority_query::coverage_status(conn, harness,
   start, end)`；`SqlSummaryRepository` 改用它（Json 侧保持静态 3/3 直至
-  Phase 4 退休）。诚实约束：窗口零事实的宿主三维全 0/3 + Unavailable；
+  Phase 4 退休）。诚实约束：窗口零事实的执行环境三维全 0/3 + Unavailable；
   「接线了」是能力不是观测，永不计入 measured
 - [x] **3.4 budget_status** — ✅ 390d3f8 + 1f1ed4e（同上循环）：authority
   CRUD（config/snooze，minor 整数）+ budget_status_sql（CNY summable→
@@ -240,7 +240,7 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
   budget_snooze_set}` 全走 `with_immediate_txn`；CLI `budget config
   show/set`、`budget snooze set/clear`。③ 计算——预算口径 = CNY 实际支出
   （by_provider summable 桶的 CNY 列：MeteredActual+FixedSubscription+
-  HostBilled）→ minor 单位一律 `pyround(×100)`（银行家舍入与全仓一致），
+  HarnessBilled）→ minor 单位一律 `pyround(×100)`（银行家舍入与全仓一致），
   **判断全部 minor 整数比较、不落浮点**（纪律 2）；ratio vs
   warning_ratio_bp，snoozed（until_ms > now）输出标记不告警；输出带
   coverage/freshness（复用 3.3）。④ 替代路径——alert.json/budget.json
@@ -277,7 +277,7 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
     spent 严格更大）。为什么单独一提交：ZST 只认 `crate::home::data_home()`
     是本会话预算卡连续 4 次实现失败的根因，先把这个坑填平再接线。
   - [x] **预算口径改按量**（下一提交）：`budget_status_sql` 支出分子从
-    `summable_total()`（含 FixedSubscription）改成 `MeteredActual + HostBilled`，
+    `summable_total()`（含 FixedSubscription）改成 `MeteredActual + HarnessBilled`，
     **排除订阅月费**；JSON 键 `spent_cny_minor` → `metered_cny_minor`。见下
     「预算口径（PM 决策 2026-09-07）」。
   - [x] **evaluate_alert 切 SQL**（f749e8e）：`runtime::budget::evaluate_alert_
@@ -315,13 +315,13 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
 
   #### 预算口径（PM 决策 2026-09-07，PM熊叔评审）
 
-  **预算 = 跨宿主「按量实付」的成本闸门。** 不是全宿主总预算（含订阅），也
+  **预算 = 跨执行环境「按量实付」的成本闸门。** 不是全执行环境总预算（含订阅），也
   不是 token 预算。
 
   | 花钱类型 | basis | 本月还会变 | 用户当下能干预 | 进预算告警 |
   |---|---|---|---|---|
   | 按量实付 | `MeteredActual` | 是（越用越多） | 换模型/少跑/开缓存/避峰 | ✅ |
-  | 宿主账单 | `HostBilled` | 是（用量变动） | 同上 | ✅ |
+  | 执行环境账单 | `HarnessBilled` | 是（用量变动） | 同上 | ✅ |
   | 订阅月费 | `FixedSubscription` | 否（月初已付） | 只能下月退订 | ❌ 完整面板单列「本月订阅 ¥X（已付）」 |
   | 无价卡 token | —— | 未知 | 补价卡映射 | ❌ 进「数据可信度」 |
 
@@ -333,10 +333,10 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
     绝不用一个 ¥ 数字盖住多币现实。USD 按量若起量→加独立 USD 预算行。
   - **token 预算**：不做主口径（单价非常数，Opus vs Flash 差数十倍；用户脑子
     里是「还剩 ¥200」不是「还剩 40M token」）。作 per-model 高级下钻视图。
-  - **「只是 DSH」是缺陷**：历史遗留（DSH 曾是唯一有真实 CNY 按量的宿主）。
+  - **「只是 DSH」是缺陷**：历史遗留（DSH 曾是唯一有真实 CNY 按量的执行环境）。
     切 SQL 后 `budget_status_sql` 的分子已是跨 by_provider 的 CNY 按量之和。
   - **落地**：`budget_status_sql` 分子排除 FixedSubscription（已改，
-    `metered_cny_minor`）；`evaluate_alert` SQL 端口喂「跨宿主按量日/月窗」
+    `metered_cny_minor`）；`evaluate_alert` SQL 端口喂「跨执行环境按量日/月窗」
     而非 DSH-only；托盘完整面板加「本月订阅 ¥X（已付，不计入按量预算）」行。
   - **验收指标**：告警「有效触发率」（触发后 24h 内确实降调用/换模型）≥40%；
     「告警后无动作」率 ≤30%；跨币遗漏投诉 = 0；托盘逐日分子之和 ≡ 月度
@@ -380,15 +380,15 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
 
   | 用例 | 现有覆盖（层级） | 缺口 |
   |---|---|---|
-  | Q01 跨宿主小时曲线 | `codex_by_hour_model` 单元测试 | 跨宿主小时聚合面在 Tier B（未切 SQL）；e2e 无 |
-  | Q02 同模型跨宿主不重不漏 | parity 测试隐式（三宿主同测） | 「各宿主之和 == 总量」未显式断言 |
+  | Q01 跨执行环境小时曲线 | `codex_by_hour_model` 单元测试 | 跨执行环境小时聚合面在 Tier B（未切 SQL）；e2e 无 |
+  | Q02 同模型跨执行环境不重不漏 | parity 测试隐式（三执行环境同测） | 「各执行环境之和 == 总量」未显式断言 |
   | Q03 北京月界 00:30 归属 | `authority_query` 边界单元测试（±1ms） | e2e fixture 无 |
   | Q04 峰值小时下钻、会话合计==峰值 | **无** | **前置 3.7a**：authority 库缺最小 `facts_page` 查询面（`SummaryRepository` 现只有 daily/monthly 两个方法，spec §4「最少提供」9 个方法只落 2 个） |
   | Q05 无价卡 unresolved 不归零 | claude/codex unresolved 单元测试 | e2e fixture 无 |
-  | Q11 宿主 24h 未同步 → stale/partial 显式 | freshness/excluded_hosts 契约测试 | 「单宿主过期不得冒充完整总额」e2e 无 |
+  | Q11 执行环境 24h 未同步 → stale/partial 显式 | freshness/excluded_harnesses 契约测试 | 「单执行环境过期不得冒充完整总额」e2e 无 |
   | Q12 双次导入+中断 → 重跑恒等 | writer 级幂等/回滚测试 | 跨「导入→查询」e2e 无 |
   | Q13 调价日前后价格版本 | `pricing_snapshots` 写入方 + `pricing_snapshot_asof` 读原语（2.8，cf04121） | `SqlSummaryRepository` 按事件时间点选版本重放未接（存储/读侧已齐），非 blocker、显式记欠 |
-  | Q14 同 raw 模型名跨宿主 | unknown→unresolved 单元测试 | 跨宿主同名 fixture 无 |
+  | Q14 同 raw 模型名跨执行环境 | unknown→unresolved 单元测试 | 跨执行环境同名 fixture 无 |
   | Q06–Q10 workflow_events | 表已建、无 writer/reader | spec 自身定位 v0.9.1 最小化，随 v0.10 任务图，不阻塞 release |
 
   另：spec §4 行轴/聚合轴分离纪律明文要求 Phase 3 repository 验收矩阵含
@@ -397,7 +397,7 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
   `SqlSummaryRepository` 层「同日两类行并存不双计」未落。
 
   执行方案（3.2/3.5/3.6 之后、Phase 3 收口审查之前）：
-  - **3.7a**：authority 库补最小 `facts_page`（host × 时间窗 × cursor 分页），
+  - **3.7a**：authority 库补最小 `facts_page`（harness × 时间窗 × cursor 分页），
     落 `agent_vitals_data::authority_query`，供 Q04 下钻。
   - **3.7b**：新建 e2e 测试文件（临时 `AGENT_VITALS_HOME` + 权威库 seed 的
     fixture builder），blocker 集 Q01–Q05、Q11–Q12 + §4 分离纪律 fixture
@@ -415,7 +415,7 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
 `data-migrate`。纯接线，不改算法。
 
 **落点**：`apps/cli/src/main.rs`，`Cmd::DataMigrate` 分支（约 2246-2322 行）。
-现有代码在 `for host in ["claude-code", "codex", "dsh"]` 的 JSONL 导入循环
+现有代码在 `for harness in ["claude-code", "codex", "dsh"]` 的 JSONL 导入循环
 结束、`db.finish_run(...)` 之前收尾。
 
 **步骤**：
@@ -426,7 +426,7 @@ month.json / ledger / Codex fold / facts JSONL（spec §5.2 禁读清单）。
 2. 若非空对象，`db.with_immediate_txn(|conn| legacy_import::
    import_claude_ledger_days(conn, &run_id, now_ms, &days))`，把
    `LegacyImportReport{imported, duplicate, conflicts}` 累进汇总输出（新加
-   一行 `println!`，格式参照现有 `"  {host}: +{} inserted, ..."`）。
+   一行 `println!`，格式参照现有 `"  {harness}: +{} inserted, ..."`）。
 3. 读文件失败（`AuthorityError::Io`，如非法 JSON）与 JSONL 导入失败同一
    处理：`finish_run("failed", ...)` + `exit(2)`——不能吞。
 4. **不需要判断"这天是否已有实时事实"**——两者身份字段完全不重叠
@@ -498,7 +498,7 @@ clippy 全绿。**这三行切完之后必须重跑一次 `reconcile_real.rs` �
    `SummaryRepository` trait 之外。SQL 版需要仿照本次会话
    `authority_query.rs` 的模式：DSH 已经有 `peaked_days_map`
    可以直接复用出日轴；小时轴（`hourly_distribution`）需要新写一个
-   `authority_query::hourly_by_host`（三宿主，参照 `codex_by_hour_model`
+   `authority_query::hourly_by_harness`（三执行环境，参照 `codex_by_hour_model`
    的整数除法算北京小时，claude/dsh 也要各自补一版）。
 2. **`budget show` / alert**
    （`crates/agent-vitals-runtime/src/budget.rs::{budget_show,
@@ -520,7 +520,7 @@ clippy 全绿。**这三行切完之后必须重跑一次 `reconcile_real.rs` �
 #### 3.6 导出切 SQL——先决问题，不要直接派发实现
 
 **范围**：`crates/agent-vitals-runtime/src/export.rs` 的
-`export_private`/`export_redacted`，当前都读 `facts/<host>.jsonl` 原文件
+`export_private`/`export_redacted`，当前都读 `facts/<harness>.jsonl` 原文件
 （`export_private` 逐字节复制；`export_redacted` 经 `evidence::replay` 重放
 后重导身份）。
 
@@ -550,15 +550,15 @@ clippy 全绿。**这三行切完之后必须重跑一次 `reconcile_real.rs` �
 **如果确认要切 SQL**：读 `usage_facts WHERE deleted_at_ms IS NULL`（私有
 导出可能还要决定是否包含软删除行——这也是需要先问的点，`export_private`
 当前的"逐字节复制"语义下，被删除的行从未被排除，因为 JSONL 是
-append-only 没有删除概念），按 host 分文件写出，字段名映射回原
-UsageFact JSON 形状（`fact_id`/`host`/`machine_namespace`/... 直接对应列，
+append-only 没有删除概念），按 harness 分文件写出，字段名映射回原
+UsageFact JSON 形状（`fact_id`/`harness`/`machine_namespace`/... 直接对应列，
 `event_ts_utc` 需要从 `event_ts_ms` 反算 ISO 字符串）。
 
 ## Phase 4：双轨验收与旧路径退役（spec §6.3 / §7 Phase 4 / §10）
 
 - [x] **4.1 机器可读对账报告**（77a59ab）— `data-reconcile-authority
   [--month] [--json]`：`SqlSummaryRepository` vs `JsonSummaryRepository`
-  逐 `host × bucket`（token 严格相等）+ `provider × basis × currency`
+  逐 `harness × bucket`（token 严格相等）+ `provider × basis × currency`
   （金额最小货币单位）。分档 exact / explained（§6.3 允许例外：claude
   历史月 legacy 不保留—SQL 有 legacy_aggregate 更完整 / 当月缺口 ≤
   undated_residual / codex reasoning 双计 legacy bug）/ mismatch。
@@ -620,13 +620,13 @@ UsageFact JSON 形状（`fact_id`/`host`/`machine_namespace`/... 直接对应列
     删去已退役的 xbar M7。**Python 差分门全绿**（`unittest discover tests`
     1151 例 + golden 15/15 + `e2e_smoke` ALL OK）。
     **5b-b（cf71a22）**：例行 `sync-facts`
-    用 `source_files(host,path_hash,size_bytes,mtime_ns)` 作为唯一差量索引，
+    用 `source_files(harness,path_hash,size_bytes,mtime_ns)` 作为唯一差量索引，
     source 元数据和 facts 在同一 SQL 事务提交；旧 `.ingest-checkpoint.json`
     只在首启迁入后改名为 `.migrated`，运行时不再读写。**5b-c（a1e4851）**：
-    `data-unresolved` 复用 authority 的三宿主窗口查询和同一份历史价格卡，
+    `data-unresolved` 复用 authority 的三执行环境窗口查询和同一份历史价格卡，
     不再读取 ledger/codex fold/month JSON。**5b-d（c503563 + 370e495 + 本次
-    schema v2 backfill 收口）**：`sessions navigation` 的三宿主今日 token 改为
-    authority 聚合；Codex 配额作为 schema v2 `host_runtime_snapshots` 的
+    schema v2 backfill 收口）**：`sessions navigation` 的三执行环境今日 token 改为
+    authority 聚合；Codex 配额作为 schema v2 `harness_runtime_snapshots` 的
     `codex_quota` 快照，在同一次 `sync-facts` 事务写入、桌面端只读 SQL——
     schema v1→v2 升级时强制重放一次 Codex rollout 补齐该派生快照（`schema_meta`
     标记保证只补一次）。配额不混入 UsageFact（形状/写语义/聚合三方面都不同）。
@@ -652,11 +652,11 @@ UsageFact JSON 形状（`fact_id`/`host`/`machine_namespace`/... 直接对应列
 | 1 | schema migration（空装/升级/重复/中断/低版本/高版本） | `agent-vitals-data/src/authority.rs::tests` | ✅ 核心 6 条（空装建全 schema / 中断清扫 / 损坏报不删 / 半建拒绝 / 高版本拒绝 / txn 回滚）。低版本升级路径仍缺 |
 | 2 | ingest（重放/修改/截断/坏行/并发） | `fact_writer_sql`（12）+ `sql_sync`（12）+ `lease`（8） | ✅ 重放幂等 / source 指纹更新 / 坏 ts 拒绝 / 负 token 拒绝 / 混会话回滚；并发 = lease 互斥 + TTL 偷锁。截断恢复走 legacy `sync_service` 半行修复 |
 | 3 | transaction 故障注入（facts/bills/checkpoint/run 各提交点） | `authority::immediate_txn_rolls_back_on_error` + `fact_writer_sql::mixed_session_batch_..._rolls_back` + `store::failed_rebuild_rolls_back_to_previous_index` | 🔶 通用回滚 + rebuild 回滚有；逐提交点注入（bills/checkpoint 单独）未穷举 |
-| 4 | CRUD（soft delete/retention/分页 cursor） | `authority::retention_deletes_only_dated_rows` + `host_bill_put`（soft delete + 复活）+ `authority_query::facts_page_window_is_stable_and_cursor_paginates` + `store::pagination_is_ordered_and_sliced` | ✅ |
+| 4 | CRUD（soft delete/retention/分页 cursor） | `authority::retention_deletes_only_dated_rows` + `harness_bill_put`（soft delete + 复活）+ `authority_query::facts_page_window_is_stable_and_cursor_paginates` + `store::pagination_is_ordered_and_sliced` | ✅ |
 | 5 | query（时区边界/峰谷/跨月/跨币/unresolved） | `authority_query`（12：月/日边界 / 峰谷分桶 / legacy 排除 / untimed 排除 / coverage 三维）+ `q03`（北京月首 00:30）+ `q05`（unpriced）+ `summary` 跨币 ProviderAcc | ✅ |
 | 6 | reconciliation（全量+增量） | `q12_double_import_with_interrupted_run`（增量幂等 + 回滚）+ `data-reconcile` 命令（迁移期用过）| 🔶 Phase 4.3 退役了 SQL-vs-legacy / index-vs-DTO 两条对账（legacy 侧已删）；增量幂等 + 中断回滚仍有测试。迁移收敛后对账不再是常设面 |
 | 7 | client parity | `summary::sql_repository_{dsh_month,claude_day,codex_day}_matches_json_repository` + `q_acceptance::separation_discipline` | ✅ |
-| 8 | performance（不枚举原始日志/索引命中） | `authority_query::windowed_queries_hit_the_host_time_index_never_full_scan`（306af6e，EXPLAIN QUERY PLAN 逐条断言命中 `usage_facts_host_time`、不 SCAN） | ✅ |
+| 8 | performance（不枚举原始日志/索引命中） | `authority_query::windowed_queries_hit_the_harness_time_index_never_full_scan`（306af6e，EXPLAIN QUERY PLAN 逐条断言命中 `usage_facts_harness_time`、不 SCAN） | ✅ |
 | 9 | 用户查询验收 Q01–Q14 | `crates/agent-vitals-runtime/tests/q_acceptance.rs`（q01–q05/q11/q12/q14 e2e）+ `summary` 内 Q13 4 例 | ✅ Q01–Q05/Q11–Q12 blocker 集 e2e 齐（b082a79）；Q13 lib 级 |
 
 ---
@@ -685,7 +685,7 @@ ls -la ~/.agent-vitals.backup-*        # 确认 facts/ + state/ + agent-vitals.s
 ### 2. 全量同步 + 迁移（把权威库刷到最新）
 
 ```bash
-agent-vitals sync-facts                 # 三宿主 emit → SQL 权威 + legacy 双写
+agent-vitals sync-facts                 # 三执行环境 emit → SQL 权威 + legacy 双写
 agent-vitals data-migrate               # 存量 facts JSONL → 权威库（幂等，可重跑）
 agent-vitals data-status                # health: ok / integrity: ok / facts 数量合理
 ```
@@ -697,12 +697,12 @@ agent-vitals data-status                # health: ok / integrity: ok / facts 数
 
 ```bash
 agent-vitals data-status --json        # health: ok / integrity: ok
-agent-vitals data monthly --month "$(date +%Y-%m)" --json   # 逐宿主数字与体感核对
+agent-vitals data monthly --month "$(date +%Y-%m)" --json   # 逐执行环境数字与体感核对
 agent-vitals budget show               # DSH 按量预算态
 ```
 
 判据：`data-status` health=ok、integrity=ok、facts 数量级合理；`data monthly`
-的逐宿主数字与你对本月花销的体感一致。Phase 4.3 起没有 legacy 第二实现
+的逐执行环境数字与你对本月花销的体感一致。Phase 4.3 起没有 legacy 第二实现
 可对账——核对靠 `data-status` 健康 + 人眼看数字。
 
 ### 4. 翻开关

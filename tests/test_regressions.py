@@ -54,7 +54,7 @@ def write_skill(base: Path, name: str, body: str = "body\n", desc: str = "d"):
 
 
 def _isolated_env(home):
-    """隔离的 HOME + 关掉宿主运行时探测，让边界用例不依赖本机装了什么。"""
+    """隔离的 HOME + 关掉执行环境运行时探测，让边界用例不依赖本机装了什么。"""
     env = isolated_home_env(home)
     for k in ("CODEX_RUNTIME", "OPENCLAW_RUNTIME", "WORKBUDDY_BUILTINS"):
         env["AGENT_VITALS_DISABLE_" + k] = "1"
@@ -271,17 +271,17 @@ class TestZombieNeedsAgeGate(unittest.TestCase):
         self.assertEqual(data["trigger_data"]["zombie_min_age_days"], 999)
 
 
-class TestHostIsolation(unittest.TestCase):
-    """Codex 等运行时必须把自身的可发现 skill 计入本宿主。"""
+class TestHarnessIsolation(unittest.TestCase):
+    """Codex 等运行时必须把自身的可发现 skill 计入本执行环境。"""
 
     def test_codex_skill_is_discoverable(self):
         tmp = Path(tempfile.mkdtemp())
         try:
             write_skill(tmp, "codex-local")
-            data = run_scan("--host", "codex", "--path", str(tmp))
+            data = run_scan("--harness", "codex", "--path", str(tmp))
             s = next(s for s in data["skills"] if s["name"] == "codex-local")
             self.assertTrue(s["loaded"])
-            self.assertEqual(s["host_family"], "codex")
+            self.assertEqual(s["harness_family"], "codex")
             self.assertTrue(data["description_budget"]["available"])
             self.assertEqual(data["description_budget"]["budget_chars"], 8000)
             self.assertIn("name, description, and path", data["description_budget"]["note"])
@@ -295,7 +295,7 @@ class TestHostIsolation(unittest.TestCase):
             root = (tmp / ".workbuddy" / "plugins" / "marketplaces" /
                     "workbuddy-builtin" / "skills")
             write_skill(root, "wb-local")
-            data = run_scan("--host", "workbuddy", "--path", str(root))
+            data = run_scan("--harness", "workbuddy", "--path", str(root))
             skill = next(s for s in data["skills"] if s["name"] == "wb-local")
             self.assertTrue(skill["loaded"])
             self.assertEqual(skill["loaded_reason"],
@@ -307,7 +307,7 @@ class TestHostIsolation(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         try:
             write_skill(tmp, "claw-local")
-            data = run_scan("--host", "openclaw", "--path", str(tmp))
+            data = run_scan("--harness", "openclaw", "--path", str(tmp))
             skill = next(s for s in data["skills"] if s["name"] == "claw-local")
             self.assertTrue(skill["discoverable"])
             self.assertFalse(skill["loaded"])
@@ -345,10 +345,10 @@ class TestHostIsolation(unittest.TestCase):
         try:
             baseline = tmp / "baseline.json"
             old = {"skills": [
-                {"host_family": "openclaw", "instance_id": ".openclaw-a",
+                {"harness_family": "openclaw", "instance_id": ".openclaw-a",
                  "namespace": None, "name": "same", "loaded": True,
                  "usage_count": 1, "installed_days_ago": 20},
-                {"host_family": "openclaw", "instance_id": ".openclaw-b",
+                {"harness_family": "openclaw", "instance_id": ".openclaw-b",
                  "namespace": None, "name": "same", "loaded": True,
                  "usage_count": 5, "installed_days_ago": 20}],
                    "trigger_data": {"zombie_min_age_days": 14},
@@ -376,7 +376,7 @@ class TestHostIsolation(unittest.TestCase):
         try:
             root = tmp / "plugins" / "cache" / "market" / "plug" / "skills"
             write_skill(root, "plugin-off")
-            data = run_scan("--host", "claude-code", "--path", str(root))
+            data = run_scan("--harness", "claude-code", "--path", str(root))
             skill = next(s for s in data["skills"] if s["name"] == "plugin-off")
             self.assertFalse(skill["loaded"])
             self.assertFalse(skill["discoverable"])
@@ -453,9 +453,9 @@ class TestCliSurfaceIsIdenticalAcrossImplementations(unittest.TestCase):
         self.assertIn(version, printed,
                       "版本号有两个来源（Cargo.toml 与 scan.py），必须一致：%r" % printed)
 
-    def test_rejects_unknown_host_with_exit_2(self):
-        """未知宿主必须报错退出，不能静默按 all 处理。"""
-        r = subprocess.run(SCAN_CMD + ["--host", "bogus"], capture_output=True, text=True)
+    def test_rejects_unknown_harness_with_exit_2(self):
+        """未知执行环境必须报错退出，不能静默按 all 处理。"""
+        r = subprocess.run(SCAN_CMD + ["--harness", "bogus"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)
 
     def test_rejects_non_numeric_budget(self):
@@ -486,7 +486,7 @@ class TestCliSurfaceIsIdenticalAcrossImplementations(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "o.json"
             r = subprocess.run(
-                SCAN_CMD + ["--host", "claude-code", "--budget", "0", "--json", str(out)],
+                SCAN_CMD + ["--harness", "claude-code", "--budget", "0", "--json", str(out)],
                 capture_output=True, text=True, env=_isolated_env(tmp))
             self.assertEqual(r.returncode, 0, r.stderr)
             data = json.loads(out.read_text(encoding="utf-8"))
@@ -523,7 +523,7 @@ class TestCodexBudgetCountsPathLength(unittest.TestCase):
             (root / "workdir").mkdir(parents=True, exist_ok=True)
             out = root / "o.json"
             env = _isolated_env(root)
-            r = subprocess.run(SCAN_CMD + ["--host", "codex", "--json", str(out)],
+            r = subprocess.run(SCAN_CMD + ["--harness", "codex", "--json", str(out)],
                                cwd=str(root / "workdir"), env=env,
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -555,7 +555,7 @@ class TestCodexBudgetCountsPathLength(unittest.TestCase):
                 (root / "workdir").mkdir(parents=True, exist_ok=True)
                 out = root / "o.json"
                 r = subprocess.run(
-                    SCAN_CMD + ["--host", "claude-code", "--json", str(out)],
+                    SCAN_CMD + ["--harness", "claude-code", "--json", str(out)],
                     cwd=str(root / "workdir"), env=_isolated_env(root),
                     capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
@@ -595,16 +595,16 @@ class TestRedactionCoversNamesOutsideSkillsList(unittest.TestCase):
         """输入用**真实形状**（带 name 字段的 dict），不是裸名列表。
 
         这两个键曾经是裸名列表，也因此被放进 SKILL_NAME_KEYS。后来
-        `diff_against` 改成复合键，脱敏对列表元素继承父键，于是宿主名
+        `diff_against` 改成复合键，脱敏对列表元素继承父键，于是执行环境名
         `claude-code` 也被当成 skill 名收录并全文替换 —— 见
-        `test_host_name_is_not_mistaken_for_a_skill_name`。现在是 dict，
+        `test_harness_name_is_not_mistaken_for_a_skill_name`。现在是 dict，
         由内层的 `name` 负责，这条断言的目标（只存在于基线的名字也要脱敏）
         完全不变。
         """
         out = self._redact({
             "skills": [{"name": "kept", "dir_name": "kept"}],
             "diff_vs_baseline": {
-                "removed_skills": [{"host": "claude-code", "instance_id": None,
+                "removed_skills": [{"harness": "claude-code", "instance_id": None,
                                     "namespace": "", "name": "secret-client-tool"}],
                 "added_skills": []}})
         raw = json.dumps(out, ensure_ascii=False)
@@ -649,15 +649,15 @@ class TestUnreadableSkillIsNotSilentlyDropped(unittest.TestCase):
         self.assertIsInstance(data["unreadable_skills"], list)
 
 
-class TestMissingHostConfigDegradesNotCrashes(unittest.TestCase):
+class TestMissingHarnessConfigDegradesNotCrashes(unittest.TestCase):
     """曾经：机器上没有 ~/.claude.json 且磁盘上有插件 skill → 整次扫描崩溃。
 
-    read_host_config() 读不到时返回 (None, {}, {})，第三个值是 `{}` 不是 None，
-    于是 `plugins_known = host_cfg is not None` 判成 True，插件分支照常执行，
+    read_harness_config() 读不到时返回 (None, {}, {})，第三个值是 `{}` 不是 None，
+    于是 `plugins_known = harness_cfg is not None` 判成 True，插件分支照常执行，
     而 enabled_plugins 是 None —— `plugin_key in None` 抛 TypeError。
     降级分支 plugin-state-unknown 早就写好了，只是永远走不到。
 
-    真机上 ~/.claude.json 必然存在，所以这个缺陷只伤害「其他宿主」用户，
+    真机上 ~/.claude.json 必然存在，所以这个缺陷只伤害「其他执行环境」用户，
     也就是不变量 12（拿不到就报 unavailable）本该保护的那批人。
     """
 
@@ -674,7 +674,7 @@ class TestMissingHostConfigDegradesNotCrashes(unittest.TestCase):
                            cwd=str(cls.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
         if r.returncode != 0:
-            raise AssertionError("缺少宿主配置时不得崩溃\n%s" % r.stderr)
+            raise AssertionError("缺少执行环境配置时不得崩溃\n%s" % r.stderr)
         cls.data = json.loads(out.read_text(encoding="utf-8"))
 
     @classmethod
@@ -685,8 +685,8 @@ class TestMissingHostConfigDegradesNotCrashes(unittest.TestCase):
         self.assertGreater(self.data["total_skills_on_disk"], 0,
                            "缺配置时仍应扫出磁盘上的 skill")
 
-    def test_host_config_reported_unavailable(self):
-        self.assertFalse(self.data["plugin_state"]["host_config_read"])
+    def test_harness_config_reported_unavailable(self):
+        self.assertFalse(self.data["plugin_state"]["harness_config_read"])
         self.assertFalse(self.data["trigger_data"]["available"],
                          "拿不到触发数据必须报 unavailable，不得编造")
 
@@ -696,10 +696,10 @@ class TestMissingHostConfigDegradesNotCrashes(unittest.TestCase):
         **范围限定在 Claude Code。**`enabledPlugins` 是它独有的机制；WorkBuddy
         的 skill 也住在 `plugins/cache/` 下，`plugin_identity` 会先命中而把
         level 判成 plugin，但它们的加载与 ~/.claude.json 无关。
-        曾经这里不加 host_family 过滤，语料一加入 WorkBuddy 包就误报。
+        曾经这里不加 harness_family 过滤，语料一加入 WorkBuddy 包就误报。
         """
         plugin_skills = [s for s in self.data["skills"]
-                         if s["level"] == "plugin" and s["host_family"] == "claude-code"]
+                         if s["level"] == "plugin" and s["harness_family"] == "claude-code"]
         self.assertTrue(plugin_skills, "语料里应当有插件 skill")
         for s in plugin_skills:
             self.assertFalse(s["loaded"])
@@ -755,7 +755,7 @@ class TestVersionDirectoryIsNotANamespace(unittest.TestCase):
             with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
                 out = f.name
             r = subprocess.run(
-                SCAN_CMD + ["--host", "claude-code", "--all", "--json", out],
+                SCAN_CMD + ["--harness", "claude-code", "--all", "--json", out],
                 cwd=str(tmp / "workdir"), env=_isolated_env(tmp),
                 capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -805,7 +805,7 @@ class TestAtRiskSkillsAreRedacted(unittest.TestCase):
 
             out = tmp / "r.json"
             env = isolated_home_env(tmp)
-            subprocess.run(SCAN_CMD + ["--host", "claude-code", "--budget", "1",
+            subprocess.run(SCAN_CMD + ["--harness", "claude-code", "--budget", "1",
                                        "--redact", "--redact-names",
                                        "--json", str(out)],
                            cwd=str(tmp / "workdir"), env=env,
@@ -1034,7 +1034,7 @@ class TestWorkbuddyIntegerEpochMsTimestamps(unittest.TestCase):
 
 
 class TestWorkbuddyEvidenceTimeFieldParsesIntegerEpochMs(unittest.TestCase):
-    """A6（spec §10）：`hosts/workbuddy/sessions/evidence.rs::parse_time` ↔
+    """A6（spec §10）：`harnesses/workbuddy/sessions/evidence.rs::parse_time` ↔
     `agent/workbuddy_evidence.py::_parse_time` 曾只收字符串
     （`and_then(Value::as_str)` / `isinstance(ts, str)`）——真机
     `~/.workbuddy/audit-log/*.jsonl` 的 `timestamp` 是 13 位 epoch-ms 整数，于是
@@ -1102,7 +1102,7 @@ class TestWorkbuddyEvidenceTimeFieldParsesIntegerEpochMs(unittest.TestCase):
 
 class TestWorkbuddyCostBlockReportsCreditsNotCny(unittest.TestCase):
     """2026-09-10：`workbuddy-session --json` 的 `cost` 块把 `credit_json` 求和塞进
-    一个叫 `cny` 的键、旁边站着 `host_billed: true`——任何下游都当人民币读，而真机
+    一个叫 `cny` 的键、旁边站着 `harness_billed: true`——任何下游都当人民币读，而真机
     单请求积分中位 ~22、1000 积分才 ¥50，约 20× 高估（spec §3.1/§6.1）。
 
     修复（A3）：`cny` 键消失 → `credits`（诚实单位名，同一求和值，单位 = 积分）
@@ -1150,7 +1150,7 @@ class TestWorkbuddyCostBlockReportsCreditsNotCny(unittest.TestCase):
         # E5：cost 块 7 键（processed_tokens 是 traces 四桶之和，无 trace 证据 → null）。
         self.assertEqual(list(cost.keys()),
                          ["tokens", "processed_tokens", "credits", "cash_cny",
-                          "nominal_cny", "nominal_basis", "host_billed"])
+                          "nominal_cny", "nominal_basis", "harness_billed"])
         self.assertIsNone(cost["cash_cny"])
         self.assertEqual(cost["credits"], 42.01)
         self.assertEqual(cost["nominal_cny"], round(42.01 * 0.05, 2))
@@ -1164,7 +1164,7 @@ class TestWorkbuddyCostBlockReportsCreditsNotCny(unittest.TestCase):
         (self-configured key + endpoint)」——真机当场证伪：`hy3` 是平台内置模型、
         根本没有自配路由可走，却有零积分会话；用户 2026-09-11 给出真相是**平台
         推广自家模型的限免**（真免费，不存在那笔支出）。零积分至少三种成因
-        （自配路由 / 限免促销 / 宿主未记账）且本机不可分辨。适配器的职责到
+        （自配路由 / 限免促销 / 执行环境未记账）且本机不可分辨。适配器的职责到
         「未计入积分」为止，再往下是用户声明的领域。"""
         report = self._audit(
             "s1", [self._SESSION], [("s1", 12000, 10, 1788167100000, "{}")])
@@ -1179,7 +1179,7 @@ class TestWorkbuddyCostBlockReportsCreditsNotCny(unittest.TestCase):
         self.assertIn("NOT determinable", unbilled[0])
         # 三种成因都要点名为「不可分辨」，且不得单独指认其中任何一种。
         for cause in ("self-configured route", "promotional free tier",
-                      "host-side non-billing"):
+                      "harness-side non-billing"):
             self.assertIn(cause, unbilled[0])
         self.assertNotIn("own API account", unbilled[0])
         self.assertNotIn("self-configured key", unbilled[0])
@@ -1324,7 +1324,7 @@ class TestWorkbuddyKnownColumnsBaselineParity(unittest.TestCase):
     结果跟着改，测试才有意义。与 `USAGE_FACT_FIELDS` 的双语 pin 同一纪律：一份
     list（Rust）+ 一份 tuple（Python）+ 一条差分守。"""
 
-    _RUST_PATH = (ROOT / "crates" / "agent-vitals-hosts" / "src" / "hosts" /
+    _RUST_PATH = (ROOT / "crates" / "agent-vitals-harnesses" / "src" / "harnesses" /
                   "workbuddy" / "sources" / "mod.rs")
 
     # 2026-09-11 08:00 真机实测：
@@ -1536,11 +1536,11 @@ class TestWorkbuddySchemaProbeSentinel(unittest.TestCase):
                 drift_notes = [n for n in drifted["notes"]
                               if n.startswith("schema-drift:")]
                 self.assertEqual(len(drift_notes), 1, drifted["notes"])
-                # note 文本给的是「缺列的下游后果」（older host version / renamed
+                # note 文本给的是「缺列的下游后果」（older harness version / renamed
                 # column / 既有缺列降级），措辞与 attempts 的 `error`
                 # （已在上面逐字节钉死 "missing known columns"）分工——note 不
                 # 重复那句话，验成因说明本身。
-                self.assertIn("older host version or a renamed column", drift_notes[0])
+                self.assertIn("older harness version or a renamed column", drift_notes[0])
                 self.assertIn("already degrades to null", drift_notes[0])
 
                 self.assertEqual(list(drifted.keys()), list(baseline.keys()))
@@ -1611,8 +1611,8 @@ class TestWorkbuddyLifecycleIsSurfacedNeverFiltered(unittest.TestCase):
     `is_background_automation` 五列按名**原样浮出**（`--list` 每行的 `lifecycle`
     + 单会话审计的顶层 `lifecycle`），**绝不据其值过滤任何会话**。
 
-    为什么不过滤：这五列的取值词表宿主没有声明（ASK P0-3 的诉求正是要它声明）。
-    按字面值过滤（如「排除 `is_playground=1`」）本身就是一次未经宿主声明语义的
+    为什么不过滤：这五列的取值词表执行环境没有声明（ASK P0-3 的诉求正是要它声明）。
+    按字面值过滤（如「排除 `is_playground=1`」）本身就是一次未经执行环境声明语义的
     推断——spec §11 规则 16「语料观测不进规则」。所以适配器只浮出，过滤是消费方
     的决定；本类的核心不变式是 (3)：任何 lifecycle 取值都不改变 `--list` 的会话数
     与 id 集。"""
@@ -1711,7 +1711,7 @@ class TestWorkbuddyLifecycleIsSurfacedNeverFiltered(unittest.TestCase):
     def test_no_lifecycle_value_filters_a_session_out_of_list(self):
         """(3) **不变式**：三个分别打了 `is_playground=1` / `deleted_at` 非空 /
         `is_background_automation=1` 的会话，与三个全 0/NULL 的会话，`--list`
-        的会话数与 id 集**完全相同**。宿主没声明这些值的语义，适配器不得据其
+        的会话数与 id 集**完全相同**。执行环境没声明这些值的语义，适配器不得据其
         过滤——过滤是消费方的决定。"""
         flagged = self._mk_tmp(); dbf = self._copy_fixture(flagged)
         plain = self._mk_tmp(); dbp = self._copy_fixture(plain)
@@ -1761,14 +1761,14 @@ class TestWorkbuddyLifecycleIsSurfacedNeverFiltered(unittest.TestCase):
 
 class TestWorkbuddyQuotaConsumptionNumeratorIsMeasured(unittest.TestCase):
     """spec §10 B6 / §5.0 / §8.0：`QuotaConsumption` 从 WorkBuddy 的
-    `unmeasured_signals` 移出。`credit_json` 的每个 requestId 条目就是宿主报告的
+    `unmeasured_signals` 移出。`credit_json` 的每个 requestId 条目就是执行环境报告的
     一次配额消耗（与 codex `token_count.rate_limits` 同一语义档）——**分子
     measured**；分母（allowance/余额）在服务端账户面、本机不可观测——由 note
     说明，**不出百分比**（§6.6「无法证明完整时不编百分比」）。
 
     此前把它声明成 unavailable 是错的：那是「有证据却不计」，`evidence.rs`
     「适配器不得刷覆盖」纪律的反面（同样不得**压**覆盖）。§13 矩阵文档滞后，
-    按 G5 在 `test_host_contract._REGISTERED_DEVIATIONS` 登记。"""
+    按 G5 在 `test_harness_contract._REGISTERED_DEVIATIONS` 登记。"""
 
     _SESSION = ("s1", "t", "deepseek-v4-flash", "/repo", "fullAccess", 1,
                 1788167100000, 1788167400000)
@@ -1799,7 +1799,7 @@ class TestWorkbuddyQuotaConsumptionNumeratorIsMeasured(unittest.TestCase):
     def test_measured_equals_number_of_numeric_credit_entries(self):
         """分子 = credit_json 里可解析为数值的条目数（int / float / 数值字符串），
         0 积分的条目也算一次记账观察；bool / 垃圾字符串 / null 不计。available
-        恒 true——这是宿主结构性能报的信号。"""
+        恒 true——这是执行环境结构性能报的信号。"""
         cj = json.dumps({"r1": 22.53, "r2": 0, "r3": "19.48", "r4": True,
                          "r5": "garbage", "r6": None})
         rep = self._audit("s1", [self._SESSION], [("s1", 5000, 10, 1788167100000, cj)])
@@ -1809,7 +1809,7 @@ class TestWorkbuddyQuotaConsumptionNumeratorIsMeasured(unittest.TestCase):
 
     def test_zero_entries_is_measured_zero_of_the_ledger_not_unavailable(self):
         """credit_json 为 `{}` 或空串 → measured 0 **且 available true**：账本的
-        MeasuredZero（宿主能报、这个会话确实没记）——不是 Unavailable。成因
+        MeasuredZero（执行环境能报、这个会话确实没记）——不是 Unavailable。成因
         （自配路由/限免/未记账）不判定，由 A7 的 note 说明，与本信号无关。"""
         for cj in ("{}", ""):
             rep = self._audit("s1", [self._SESSION], [("s1", 5000, 10, 1788167100000, cj)])
@@ -1831,12 +1831,12 @@ class TestWorkbuddyQuotaConsumptionNumeratorIsMeasured(unittest.TestCase):
         self.assertFalse(any(n.startswith(self._NOTE_PREFIX) for n in zero["notes"]))
 
     def test_declaration_and_evidence_agree_quota_is_not_unmeasured(self):
-        """三处锁步：`host_capability.HOSTS` 的 workbuddy 行不再声明 QuotaConsumption
-        为 unmeasured；evidence 层输出的 available 也为 true；`hosts --json` 两语言
+        """三处锁步：`harness_capability.HARNESSES` 的 workbuddy 行不再声明 QuotaConsumption
+        为 unmeasured；evidence 层输出的 available 也为 true；`harnesses --json` 两语言
         字节一致由 test_cli_matrix 另钉。声明与实现必须同步翻——只翻一边就是
         G9 守卫要抓的「声明了却没实现 / 实现了却没声明」。"""
-        from agent_vitals.agent import host_capability  # noqa: PLC0415
-        wb = next(h for h in host_capability.HOSTS if h["id"] == "workbuddy")
+        from agent_vitals.agent import harness_capability  # noqa: PLC0415
+        wb = next(h for h in harness_capability.HARNESSES if h["id"] == "workbuddy")
         self.assertNotIn("QuotaConsumption", wb["unmeasured_signals"])
         rep = self._audit("s1", [self._SESSION], [("s1", 5000, 10, 1788167100000, "{}")])
         self.assertTrue(rep["coverage"]["QuotaConsumption"]["available"])
@@ -2031,12 +2031,12 @@ class TestWorkbuddyTracesFoldIntoBehaviorTimelinesE2(unittest.TestCase):
             "spans": spans}, ensure_ascii=False), encoding="utf-8")
 
     def test_sv604_and_sv605_actually_fire_on_span_paths(self):
-        """(1) Write 到 `/etc/hosts` → SV604 critical；Edit 到 workspace（/repo）之外的
+        """(1) Write 到 `/etc/harnesses` → SV604 critical；Edit 到 workspace（/repo）之外的
         `/home/x/notes.md` → SV605 warning。两条都要有 `evidence` 指向路径。这是翻转
         的真验收：规则不但能跑，还能命中。"""
         tmp = self._mk_tmp(); root = self._copy_fixture(tmp)
         self._write_trace(root, "trace_e2hit", [
-            self._fn_span("w1", "Write", {"file_path": "/etc/hosts", "content": "x"}),
+            self._fn_span("w1", "Write", {"file_path": "/etc/harnesses", "content": "x"}),
             self._fn_span("e1", "Edit", {"file_path": "/home/x/notes.md", "old_string": "a",
                                           "new_string": "b"}, t0="2026-08-31T09:01:41.000Z"),
         ])
@@ -2055,7 +2055,7 @@ class TestWorkbuddyTracesFoldIntoBehaviorTimelinesE2(unittest.TestCase):
 
     def test_span_status_becomes_tool_result_but_is_not_translated_to_dsh_codes(self):
         """(2) status=error 的 span → tool_results.failed=true、error_code="error"
-        （宿主原生码）。SV607 读的是 DSH 码集（FS_SANDBOX_DENIED…），"error" 不在
+        （执行环境原生码）。SV607 读的是 DSH 码集（FS_SANDBOX_DENIED…），"error" 不在
         里面 → **诚实 MeasuredZero**，不翻译成 DSH 码硬凑命中（Codex `exit_code:N`
         同款纪律）。ToolResults 覆盖照计。"""
         tmp = self._mk_tmp(); root = self._copy_fixture(tmp)
@@ -2188,14 +2188,14 @@ class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):
     """A4（spec §6.4-5）：`nominal_cny`（名义 credits × 兑换价）绝不能出现在
     真实**实付**汇总 DTO 里——它是尺，不是账（`ATTRIBUTABLE_WASTE.md` §6.7）。
     E4b（docs/WORKBUDDY_ONBOARDING_SPEC.md §9E.5）起 WorkBuddy 离开
-    `PERMANENTLY_EXCLUDED_HOSTS`（如今是空表）：它不再靠「不在表里」拦钱，而是靠
+    `PERMANENTLY_EXCLUDED_HARNESSES`（如今是空表）：它不再靠「不在表里」拦钱，而是靠
     **结构**——每条事实 `provider_id: null`（三轨请求级不可判，§2.1），汇总层
-    `workbuddy_host_amount_with_tokens` 恒 `amounts_by_basis` 空。这条测试把新防线
+    `workbuddy_harness_amount_with_tokens` 恒 `amounts_by_basis` 空。这条测试把新防线
     钉死：排除表为空 + money 防线在接线函数本体，且 `nominal_cny` 仍只活在
     workbuddy 的会话适配器里。"""
 
     def test_workbuddy_money_cannot_enter_the_summary_dto(self):
-        # 2026-09-23 summary.rs 目录化为 query/summary/{mod,host_amounts,…}——
+        # 2026-09-23 summary.rs 目录化为 query/summary/{mod,harness_amounts,…}——
         # 路径钉随之扫整个目录（断言语义零变化）。W3（2026-09-24）query 层拆成
         # agent-vitals-query crate。
         summary_dir = (ROOT / "crates" / "agent-vitals-query" / "src"
@@ -2204,7 +2204,7 @@ class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):
         # 目录搬走时 glob 为空、拼出空串——否定断言会静默通过。先钉住读到了文件。
         self.assertTrue(sources, f"summary 源文件找不到：{summary_dir}")
         summary_rs = "\n".join(p.read_text(encoding="utf-8") for p in sources)
-        self.assertIn("PERMANENTLY_EXCLUDED_HOSTS: &[&str] = &[]", summary_rs)
+        self.assertIn("PERMANENTLY_EXCLUDED_HARNESSES: &[&str] = &[]", summary_rs)
         # E4b：money 防线内建在 workbuddy 栏构造器里（provider null → basis 恒空），
         # 不再是排除表。
         self.assertIn('amounts_by_basis: BTreeMap::new()', summary_rs)
@@ -2219,7 +2219,7 @@ class TestNominalCnyNeverEntersASpendSummaryDto(unittest.TestCase):
             capture_output=True, text=True)
         hits = {Path(p).resolve() for p in r.stdout.split()}
         allowed = {
-            (ROOT / "crates" / "agent-vitals-hosts" / "src" / "hosts" / "workbuddy"
+            (ROOT / "crates" / "agent-vitals-harnesses" / "src" / "harnesses" / "workbuddy"
              / "sources" / "mod.rs").resolve(),
             (ROOT / "packages" / "agent-vitals-python" / "agent_vitals" / "agent"
              / "workbuddy_session_audit.py").resolve(),

@@ -60,7 +60,7 @@ function bucketCost(bucket: SessionBillingBucket): string {
   return costLabel(bucket);
 }
 
-export function SessionDetail({ row, sessionRef, hostKind, onBack, refreshKey = 0 }: { row: SessionRow | null; sessionRef: string; hostKind?: string; onBack: () => void; refreshKey?: number }) {
+export function SessionDetail({ row, sessionRef, harnessKind, onBack, refreshKey = 0 }: { row: SessionRow | null; sessionRef: string; harnessKind?: string; onBack: () => void; refreshKey?: number }) {
   const language = useLanguage();
   const [detail, setDetail] = useState<SessionDetailData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -118,7 +118,7 @@ export function SessionDetail({ row, sessionRef, hostKind, onBack, refreshKey = 
   };
 
   return <>
-    <div className="session-detail-header"><button className="button button-secondary" type="button" onClick={onBack}>← {message("detail.back", language)}</button><div><p className="eyebrow">{message("detail.safe", language)}</p><h2>{message("detail.sessionTitle", language, { host: row?.host ?? detail?.host ?? hostKind ?? message("nav.sessions", language) })}</h2></div><span className="status-pill"><span aria-hidden="true" className="status-dot" />{message("detail.readOnly", language)}</span></div>
+    <div className="session-detail-header"><button className="button button-secondary" type="button" onClick={onBack}>← {message("detail.back", language)}</button><div><p className="eyebrow">{message("detail.safe", language)}</p><h2>{message("detail.sessionTitle", language, { harness: row?.harness ?? detail?.harness ?? harnessKind ?? message("nav.sessions", language) })}</h2></div><span className="status-pill"><span aria-hidden="true" className="status-dot" />{message("detail.readOnly", language)}</span></div>
     <p className="section-description session-detail-intro">{message("detail.intro", language)} <code>{sessionRef.slice(0, 18)}…</code></p>
     {loading && <div className="sessions-state" role="status"><strong>{message("detail.loading", language)}</strong><p>{message("detail.loadingTimeline", language)}</p></div>}
     {error && <div className="error-banner" role="alert">{message("detail.error", language, { error })}</div>}

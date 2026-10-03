@@ -81,7 +81,7 @@ class SnapCase(unittest.TestCase):
     def run_cmd(self, *argv, expect=0, snapdir=None):
         env = isolated_home_env(self.tmp)
         env["AGENT_VITALS_SNAPSHOT_DIR"] = str(snapdir or self.snaps)
-        r = subprocess.run(SCAN_CMD + list(argv) + ["--host", "claude-code"],
+        r = subprocess.run(SCAN_CMD + list(argv) + ["--harness", "claude-code"],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, expect, r.stderr or r.stdout)
@@ -347,41 +347,41 @@ class TestNewlyJudgeableSectionRenders(unittest.TestCase):
 
 
 
-class TestDefaultHostDoesNotCrash(SnapCase):
-    """验收时发现的三处缺陷，全部只在 `--host all`（默认宿主）下出现。
+class TestDefaultHarnessDoesNotCrash(SnapCase):
+    """验收时发现的三处缺陷，全部只在 `--harness all`（默认执行环境）下出现。
 
     ## 为什么 316 个测试全绿却没抓到
 
     `test_snapshot` / `test_diff_end_to_end` / `test_ci_gate` 里每一次调用都写着
-    `--host claude-code` —— 那是唯一有描述预算的宿主。默认的 `--host all` 下
+    `--harness claude-code` —— 那是唯一有描述预算的执行环境。默认的 `--harness all` 下
     `description_budget.used_chars` 是 `None`，而所有测试都绕开了它。
 
     **最朴素的调用第二次运行必崩**：第一次写快照，第二次自动对比，
     `None - None` → TypeError。退出码还是 1，与「扫出 critical」撞码。
     """
 
-    def _bare(self, *argv, host="all"):
+    def _bare(self, *argv, harness="all"):
         env = isolated_home_env(self.tmp)
         env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
-        r = subprocess.run(SCAN_CMD + list(argv) + ["--host", host],
+        r = subprocess.run(SCAN_CMD + list(argv) + ["--harness", harness],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
         self.assertNotIn("Traceback", r.stderr, "崩溃了：\n%s" % r.stderr)
         return r.returncode, r.stdout + r.stderr
 
     def test_second_bare_run_does_not_crash(self):
-        """默认宿主下跑两次 —— 第二次会走自动对比那条路径。"""
+        """默认执行环境下跑两次 —— 第二次会走自动对比那条路径。"""
         self._bare()
         rc, _ = self._bare()
         self.assertIn(rc, (0, 1), "第二次运行应当是闸门结论，不是崩溃")
 
-    def test_diff_on_default_host(self):
+    def test_diff_on_default_harness(self):
         self._bare("snapshot")
         rc, out = self._bare("diff")
         self.assertIn(rc, (0, 1))
         self.assertIn("Changes since", out)
 
-    def test_new_only_on_default_host(self):
+    def test_new_only_on_default_harness(self):
         self._bare("snapshot")
         rc, _ = self._bare("--no-snapshot", "--new-only")
         self.assertIn(rc, (0, 1))
@@ -389,7 +389,7 @@ class TestDefaultHostDoesNotCrash(SnapCase):
     def test_budget_delta_is_null_not_zero_when_unavailable(self):
         """预算不可用时 `budget_delta_chars` 是 null。
 
-        当成 0 的话，报告会说「预算没变化」，而真相是「这个宿主根本没有预算
+        当成 0 的话，报告会说「预算没变化」，而真相是「这个执行环境根本没有预算
         这个概念」—— 又一次把「问不到」render 成「问到了，是零」。
         """
         self._bare("snapshot")
@@ -397,7 +397,7 @@ class TestDefaultHostDoesNotCrash(SnapCase):
         out = self.tmp / "scan.json"
         env = isolated_home_env(self.tmp)
         env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
-        subprocess.run(SCAN_CMD + ["--host", "all", "--baseline", str(base),
+        subprocess.run(SCAN_CMD + ["--harness", "all", "--baseline", str(base),
                                    "--json", str(out), "--no-snapshot"],
                        cwd=str(self.tmp / "workdir"), env=env,
                        capture_output=True, text=True, check=True)
@@ -415,7 +415,7 @@ class TestDefaultHostDoesNotCrash(SnapCase):
         out = self.tmp / "diag.json"
         # 把预算压到刚好落进 85–100% 区间，逼出 SV001（而不是 SV002）
         for budget in range(1, 400):
-            r = subprocess.run(SCAN_CMD + ["doctor", "--host", "claude-code",
+            r = subprocess.run(SCAN_CMD + ["doctor", "--harness", "claude-code",
                                            "--budget", str(budget),
                                            "--no-snapshot", "--json", str(out)],
                                cwd=str(self.tmp / "workdir"), env=env,
@@ -447,7 +447,7 @@ class TestBaselineMustLookLikeAScanReport(SnapCase):
         bad.write_text(content, encoding="utf-8")
         env = isolated_home_env(self.tmp)
         env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
-        r = subprocess.run(SCAN_CMD + ["diff", str(bad), "--host", "all"],
+        r = subprocess.run(SCAN_CMD + ["diff", str(bad), "--harness", "all"],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
         return r.returncode, r.stdout + r.stderr
@@ -464,7 +464,7 @@ class TestBaselineMustLookLikeAScanReport(SnapCase):
     def test_missing_baseline_is_also_a_tool_error(self):
         env = isolated_home_env(self.tmp)
         env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.tmp / "nope")
-        r = subprocess.run(SCAN_CMD + ["diff", "--host", "all"],
+        r = subprocess.run(SCAN_CMD + ["diff", "--harness", "all"],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 2, "「没东西可比」不是「有发现」")
@@ -473,10 +473,10 @@ class TestBaselineMustLookLikeAScanReport(SnapCase):
         """对照组：没有它，上面几条可以靠「diff 恒返回 2」通过。"""
         env = isolated_home_env(self.tmp)
         env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
-        subprocess.run(SCAN_CMD + ["snapshot", "--host", "all"],
+        subprocess.run(SCAN_CMD + ["snapshot", "--harness", "all"],
                        cwd=str(self.tmp / "workdir"), env=env,
                        capture_output=True, text=True, check=True)
-        r = subprocess.run(SCAN_CMD + ["diff", "--host", "all"],
+        r = subprocess.run(SCAN_CMD + ["diff", "--harness", "all"],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)

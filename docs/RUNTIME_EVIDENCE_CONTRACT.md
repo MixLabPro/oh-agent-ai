@@ -2,7 +2,7 @@
 
 Status: required contract for every runtime (session-log) adapter.
 
-Companion to [HOST_ADAPTER_CONTRACT.md](./HOST_ADAPTER_CONTRACT.md), which governs
+Companion to [HARNESS_ADAPTER_CONTRACT.md](./HARNESS_ADAPTER_CONTRACT.md), which governs
 the **install-time** layer (does a skill exist / is it enabled / is it loaded).
 This document governs the **runtime** layer: what an agent actually did, what it
 cost, and how long it took.
@@ -12,7 +12,7 @@ layer has not, and the consequence is visible in the code: DSH's event vocabular
 (`tool/call`, `approval/asked`, `data.toolName`, `chunk.usage`) is read directly
 inside `crates/agent-vitals-core`, which makes DSH's session format the de-facto
 universal interface by accident. This document defines the interface that should
-have been there, and the rules an adapter must satisfy to claim a host is
+have been there, and the rules an adapter must satisfy to claim a harness is
 supported.
 
 Related: [AGENT_BEHAVIOR_AUDIT.md](./AGENT_BEHAVIOR_AUDIT.md) (rule engine,
@@ -24,11 +24,11 @@ buckets) · [PRODUCT_CAPABILITY_MATRIX.md](./PRODUCT_CAPABILITY_MATRIX.md)
 
 ## 1. Why a normalized event stream is the wrong interface
 
-The obvious design is: each host gets an adapter that translates its log into
+The obvious design is: each harness gets an adapter that translates its log into
 DSH-shaped events, and the core runs unchanged. It is wrong for three reasons,
-each established by a host in the support list rather than by speculation.
+each established by a harness in the support list rather than by speculation.
 
-**Hosts differ by which projections they durably record, not by field names.**
+**Harnesses differ by which projections they durably record, not by field names.**
 WorkBuddy keeps no conversation transcript: `~/.workbuddy/workbuddy.db` holds
 session *metadata* and one aggregate usage row per session, its event-level
 record is a hash-chained security-decision log, and its execution record is an
@@ -40,7 +40,7 @@ one canonical stream has "some fields missing" cannot express this; it can only
 express "WorkBuddy performed zero tool calls", which is a fabrication.
 
 The sharper form of the claim, which §14.6 records the cost of learning: evidence
-is not merely uneven **across** hosts — **within** a single host it is scattered
+is not merely uneven **across** harnesses — **within** a single harness it is scattered
 across stores that must each be located, and an adapter that stops after two of
 them will report `unavailable` for signals that were sitting in the third.
 
@@ -63,21 +63,21 @@ codebase today only as comments, which is why they are periodically violated.
 
 | Axis | Question | Today |
 |---|---|---|
-| **Availability** | Does the host record this at all? | Install-time only |
+| **Availability** | Does the harness record this at all? | Install-time only |
 | **Fidelity** | It records it — how lossy is the record? | Absent |
 | **Provenance** | Is this number measured, derived, or estimated? | Comments only |
 
-The third is an existing debt. `compaction.shadowedTokenCount` is host-measured;
+The third is an existing debt. `compaction.shadowedTokenCount` is harness-measured;
 `context_composition` is `est_tokens`-estimated. Today a comment says the display
 layer must not mix them. Making it a type removes the requirement to remember.
-This is the same argument `src/host.rs` already makes for `Option`: "Rust 里
+This is the same argument `src/harness.rs` already makes for `Option`: "Rust 里
 `Option` 让这个区分变成编译期的事 —— 这正是选 Rust 的理由之一."
 
 ```rust
 pub struct Observed<T> { pub value: T, pub prov: Provenance }
 
 pub enum Provenance {
-    Measured,                                 // the host recorded this number
+    Measured,                                 // the harness recorded this number
     Derived   { from: &'static str },         // the adapter inferred it
     Estimated { estimator: &'static str },    // est_tokens and friends
     Lossy     { kind: LossKind },             // present but degraded
@@ -95,7 +95,7 @@ and we know nothing about their tokens" is a fact, not an absence.
 
 A **Signal** is a named, typed channel that may be present or absent
 *independently of every other signal*. This is the property that makes the model
-survive all four hosts.
+survive all four harnesses.
 
 ```rust
 pub enum Signal {
@@ -133,7 +133,7 @@ Codex persists no approval *events* but always persists the approval *policy*
 Never` and executed N commands matching dangerous-command rules" — with no
 approval events at all. Claude Code's `permission-mode` records are the same
 class. Any rule whose `requires` list contains only Policy and Occurrence signals
-runs on hosts that have no approval events whatsoever, which is most of them.
+runs on harnesses that have no approval events whatsoever, which is most of them.
 
 ### 3.2 One signal is subjective, and that is the point
 
@@ -159,18 +159,18 @@ claim and must not be summed into one score.
 
 ### 3.3 Visibility
 
-A signal carries a visibility marker, because a host may durably record data it
+A signal carries a visibility marker, because a harness may durably record data it
 deliberately withholds from its own users.
 
 ```rust
-pub enum Visibility { HostVisible, HostHidden { reason: &'static str } }
+pub enum Visibility { HarnessVisible, HarnessHidden { reason: &'static str } }
 ```
 
 Codex persists `SecurityRiskScore` to the rollout file with the source comment
 "Scores must not enter model-visible conversation context or user-visible thread
 item projections." agent-vitals reads that file and has an export path.
-**`HostHidden` data is excluded from export by default, and the exclusion itself
-is reported.** Silently exporting what the host chose to hide is a defect even
+**`HarnessHidden` data is excluded from export by default, and the exclusion itself
+is reported.** Silently exporting what the harness chose to hide is a defect even
 when the file is readable.
 
 ---
@@ -183,7 +183,7 @@ denominator instead of disappearing.
 
 ```rust
 pub struct CoverageCounts {
-    pub measured:  u64,   // the host recorded it
+    pub measured:  u64,   // the harness recorded it
     pub derived:   u64,   // the adapter inferred it
     pub lossy:     u64,   // present but degraded
     pub unmetered: u64,   // known to have happened; nothing else known
@@ -196,18 +196,18 @@ can be neither counted nor discarded — see §6. Because it sits in the
 denominator, an adapter cannot quietly improve its own coverage number by
 dropping what it could not read.
 
-**Coverage is computed per session, not looked up per host.** Codex proves this
+**Coverage is computed per session, not looked up per harness.** Codex proves this
 is mandatory: `ThreadHistoryMode` is `Legacy` or `Paginated`, the two modes
 persist different event vocabularies, and `ThreadSettingsSnapshot` — the record
 that carries every other setting — does **not** contain the mode. The file does
 not declare its own shape. The adapter's `shape` stage must probe it by
 inspecting content, and `coverage` is its output, not a static property of the
-host id.
+harness id.
 
 An adapter is a fixed five-stage pipeline (`locate → shape → extract → derive →
 coverage`), **not a trait** — for the reason given in
 [ARCHITECTURE.md §4.2](./ARCHITECTURE.md) and restated for this layer in §10 of
-that document: hosts differ in *which stages exist*, and a trait manufactures
+that document: harnesses differ in *which stages exist*, and a trait manufactures
 empty implementations that hide exactly that.
 
 ### 4.1 Window is not coverage
@@ -266,7 +266,7 @@ data.
 
 Two evidence sources may describe the same traffic. A subagent session that is
 also a top-level session file; a shared `~/.agents/skills` root projected into two
-hosts; a session log plus a separate usage log for the same run.
+harnesses; a session log plus a separate usage log for the same run.
 
 **Default to separate rows. Merging is opt-in and requires a proven disjointness
 argument.** Silent merging double-counts, and double-counted totals are worse
@@ -323,7 +323,7 @@ single percentage is exactly the mistake §14.10 flags in `cc-switch`'s
 is emitted in both Codex vocabularies (§13), so `Quota` costs are available
 before the rest of the P4 Codex adapter's format-shape work lands.
 
-### 8.2 Bucket sets are per host
+### 8.2 Bucket sets are per harness
 
 Four buckets is a DSH fact, not a universal one. Codex records six
 (`input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`,
@@ -353,7 +353,7 @@ input_token_semantics INTEGER NOT NULL DEFAULT 0   -- proxy_request_logs
 
 The rule that follows:
 
-> **A `BucketId` names a measurement convention, not just a field.** Two hosts
+> **A `BucketId` names a measurement convention, not just a field.** Two harnesses
 > may only share a `BucketId` when they share the convention. When they do not,
 > the adapter either normalises to one convention and records that it did, or
 > emits distinct `BucketId`s — never a silent merge.
@@ -367,23 +367,23 @@ invariant-12 violation again, and the correct value is absent.
 
 `is_peak_slot` in `usage.rs` hardcodes Beijing time. That is correct *for
 DeepSeek*, whose peak/off-peak rule is defined in that zone — the pinned zone is
-part of the pricing rule, not a property of the reader. When a second host is
+part of the pricing rule, not a property of the reader. When a second harness is
 added, the zone must travel with its price table. Re-bucketing the same history
 under a different zone moves midnight-adjacent events and changes totals.
 
-The zone is pinned when cost tracking is first enabled for a host and stored;
+The zone is pinned when cost tracking is first enabled for a harness and stored;
 it is not re-read from current settings on each scan.
 
 ---
 
 ## 9. Identity and join keys
 
-Each host uses a different key: DSH `seq`; Codex `turn_id` / `call_id`; Claude
+Each harness uses a different key: DSH `seq`; Codex `turn_id` / `call_id`; Claude
 Code `uuid` / `parentUuid` / `toolUseID`; WorkBuddy `toolCallId` / `requestId`.
 
 ```rust
 pub struct EventId {
-    pub host_scope: ScopeId,   // numbering space: main session, or one subagent
+    pub harness_scope: ScopeId,   // numbering space: main session, or one subagent
     pub ordinal:    u64,       // adapter-local; ordering *within one scope* only
     pub native:     NativeId,  // Seq | Uuid | CallId | TurnId
 }
@@ -394,7 +394,7 @@ ordinals are synthesized (Claude Code has no `seq` at all) and are not comparabl
 across scopes or adapters.
 
 This is the structural form of a guard that already exists by hand: the
-`skillAttribution` projection in `dsh-client/src/host/index.ts` checks
+`skillAttribution` projection in `dsh-client/src/harness/index.ts` checks
 `source_agent_id === null` before joining on `seq`, precisely because subagent
 sessions use a different numbering space. A remembered guard becomes a type.
 
@@ -411,7 +411,7 @@ pub struct RuleSpec {
 }
 ```
 
-The engine produces, **for every rule, on every host**, exactly one of three
+The engine produces, **for every rule, on every harness**, exactly one of three
 outcomes:
 
 ```
@@ -422,7 +422,7 @@ Consequently the core's return type is `(Vec<Finding>, Vec<RuleOutcome>)`, not
 `Vec<Finding>`.
 
 This three-state output is the single non-negotiable property of this contract.
-It is exactly what a "translate the host into DSH events" adapter can never
+It is exactly what a "translate the harness into DSH events" adapter can never
 deliver: with no approval events to translate, such an adapter reports zero
 approval anomalies, and the report is quietly wrong.
 
@@ -446,7 +446,7 @@ result as folding the whole log.
 
 This is not an optimisation. Measured on one developer machine:
 
-| Host | Largest single session log |
+| Harness | Largest single session log |
 |---|---|
 | Codex | **200 MB** |
 | Claude Code | 33 MB (current session) |
@@ -491,7 +491,7 @@ was tried. Free-text notes do not answer it structurally.
 
 ```rust
 pub struct CanonicalSession {
-    pub meta:     SessionMeta,          // id, host, workspace roots, model, span
+    pub meta:     SessionMeta,          // id, harness, workspace roots, model, span
     pub signals:  SignalSet,
     pub coverage: Coverage,
     pub attempts: Vec<SourceAttempt>,   // structured, not prose
@@ -517,21 +517,21 @@ install-time contract states for filesystem measurements.
 
 ---
 
-## 12. Host-specific data does not travel in shared types
+## 12. Harness-specific data does not travel in shared types
 
 Shared types (`CanonicalSession`, `Coverage`, `RuleSpec`, the fetch context)
-must contain no host-specific fields. Host-specific data lives in an opaque
-per-host payload keyed by host id.
+must contain no harness-specific fields. Harness-specific data lives in an opaque
+per-harness payload keyed by harness id.
 
 This rule has a test: assert that no identifier in the shared type layer contains
-a host name. It exists because the failure is gradual and invisible per commit —
+a harness name. It exists because the failure is gradual and invisible per commit —
 one Claude-specific recovery flag in a shared context is harmless; after enough
-hosts the "generic" layer is a union of every host's quirks and no longer
+harnesses the "generic" layer is a union of every harness's quirks and no longer
 supports adding the next one cheaply.
 
 ---
 
-## 13. Host coverage matrix
+## 13. Harness coverage matrix
 
 Runtime counterpart to the install-time matrix in
 [PRODUCT_CAPABILITY_MATRIX.md](./PRODUCT_CAPABILITY_MATRIX.md).
@@ -564,7 +564,7 @@ incompatible vocabularies** (§4).
 | Storage medium | JSONL | JSONL | JSONL | JSONL | SQLite + JSONL + **span-tree JSON** + blobs |
 | Process liveness | unavailable | unavailable | unavailable | unavailable | partial (`workerPid`, `status:"running"`) — see §16.1 |
 
-> ⁶ **WorkBuddy QuotaConsumption 单元格已滞后于代码**（2026-09-11，spec §10 B6）：`session_usage.credit_json` 的每个 requestId 条目是宿主报告的一次配额消耗，代码已改 **measured（分子）**；分母（allowance/余额）不可观测由 note 说明。按 G5 在 `tests/test_host_contract.py::_REGISTERED_DEVIATIONS` 登记，单元格保留原文以让登记项继续「与原矩阵不一致」（该测试的反向校验要求）。
+> ⁶ **WorkBuddy QuotaConsumption 单元格已滞后于代码**（2026-09-11，spec §10 B6）：`session_usage.credit_json` 的每个 requestId 条目是执行环境报告的一次配额消耗，代码已改 **measured（分子）**；分母（allowance/余额）不可观测由 note 说明。按 G5 在 `tests/test_harness_contract.py::_REGISTERED_DEVIATIONS` 登记，单元格保留原文以让登记项继续「与原矩阵不一致」（该测试的反向校验要求）。
 
 `¶` — recoverable from the Claude Code transcript **without a hook**, by
 matching marker strings in tool-result text (§14.5). Denials only: grants leave
@@ -577,14 +577,14 @@ against a full corpus.
 `‡` — **session-log surface only.** Codex and Claude Code both emit approval and
 sandbox evidence over an opt-in OpenTelemetry channel that this table does not
 cover; see §14.8. A cell marked `‡` means "not in the durable session log", not
-"this host has no such evidence anywhere."
+"this harness has no such evidence anywhere."
 
 Hermes and OpenClaw appear in the install-time matrix but are absent here: no
 instance of either existed on the audited machine, so their runtime evidence
 surfaces are unmeasured. §14.9 records second-hand leads for both (skill roots
 and hook backends) — leads, not measurements. They stay out of this table until
 verified against a real corpus. CodeBuddy is likewise absent: it is not in the
-product's host list, and what §14.9 records about its transcript shape is
+product's harness list, and what §14.9 records about its transcript shape is
 second-hand.
 
 Every cell above is derived from either upstream source code or a first-party log
@@ -650,7 +650,7 @@ only be `Derived`, by re-running an equivalent heuristic.
 
 **Do not port Codex's heuristic.** A fifth implementation to keep in lockstep is
 a worse outcome than an honest `Derived` marker stating that the offline
-inference may disagree with the host's runtime decision.
+inference may disagree with the harness's runtime decision.
 
 ### 14.4 Codex — no format version
 
@@ -722,7 +722,7 @@ content-block line; naive summation over-counts by a large factor. The dedup key
 is `message.id`, falling back to the top-level `requestId`. This is the same
 defect class the DSH fold already handles with its `(turn, step)` replacement
 logic in `usage.rs` — two independent implementations converged on it, so treat
-it as universal rather than host-specific. (Independently confirmed by
+it as universal rather than harness-specific. (Independently confirmed by
 `Tencent/teamai-cli`'s `scanTranscriptStop`; see §14.9.)
 
 ### 14.6 WorkBuddy — from a first-party install
@@ -772,7 +772,7 @@ The conclusion survives in weakened form — WorkBuddy has no *conversation*
 transcript, and its evidence surface really is complementary to Claude Code's —
 but the stronger and more accurate statement is different:
 
-> **Evidence is not merely uneven across hosts; within a single host it is
+> **Evidence is not merely uneven across harnesses; within a single harness it is
 > scattered across three or four unrelated stores with different formats,
 > different retention, and different fidelity.** WorkBuddy alone has SQLite +
 > hash-chained JSONL + a span-tree store + a blob store + a heartbeat registry.
@@ -788,7 +788,7 @@ produces it enumerates its attempts.
 [steipete/CodexBar](https://github.com/steipete/CodexBar) (MIT) is a macOS
 menu-bar app tracking quota and cost across 69 providers. It is not a behaviour
 auditor, but it is the only mature project that has solved "N heterogeneous
-hosts, each with a different evidence surface" at scale, and several rules in this
+harnesses, each with a different evidence surface" at scale, and several rules in this
 document are adopted from it:
 
 - `CostProvenance` — provenance as a type, with `isBillingReceipt` hardcoded to
@@ -815,13 +815,13 @@ document are adopted from it:
   activity, and is not clickable." Make a fabricated zero physically unreachable
   rather than annotated.
 
-Two anti-patterns observed there and prohibited by §12: host-specific fields
+Two anti-patterns observed there and prohibited by §12: harness-specific fields
 accumulating in the shared fetch context (`claudeOwnerCLIRecoveryOnly`, a
 hardcoded Antigravity session shutdown, a `.kiro` branch inside a generic error),
 and a 278 KB single-type scanner.
 
 **Scale calibration.** CodexBar's `Vendored/CostUsage/` is roughly 530 KB of
-Swift covering the *cost slice only*, for *two* hosts, backed by 909 test files,
+Swift covering the *cost slice only*, for *two* harnesses, backed by 909 test files,
 with dedicated modules for fork coverage, truncated prefixes, source priority,
 report reconciliation, timestamps, subagent rollout shape, and a fast JSON path.
 A runtime adapter is a subsystem, not a file. Plan accordingly.
@@ -835,7 +835,7 @@ other surfaces, and they carry different signals with different preconditions.
 
 | # | Surface | Retroactive | Precondition | Position | Schema |
 |---|---|---|---|---|---|
-| 1 | Session log | **yes** — readable after the agent exits | none | outside | host-defined, N of them |
+| 1 | Session log | **yes** — readable after the agent exits | none | outside | harness-defined, N of them |
 | 2 | OTel export | no | exporter configured *before* the session | outside | semi-standard |
 | 3 | Self-installed hook | no | hook installed *before* the session | **in the decision path** | ours, one of them |
 | 4 | Reverse proxy | no | the agent's base URL repointed at us | **in the data path** | ours, one of them |
@@ -877,7 +877,7 @@ managed settings, so on a managed machine this surface may already exist.
 
 Consequences for this contract:
 
-1. **Availability is per (host, surface), not per host.** A signal absent from
+1. **Availability is per (harness, surface), not per harness.** A signal absent from
    the log may be present in telemetry. The §13 matrix needs a second sheet
    before any `unavailable` cell touching approvals or sandboxing is final.
 2. **The telemetry surface has a precondition the log surface does not**: it must
@@ -886,7 +886,7 @@ Consequences for this contract:
    and it belongs in the `locate` stage, not in the rule engine.
 3. **It is push, not pull.** There is no file to read; the data went to whatever
    collector was configured. Supporting it means reading a collector's store,
-   which is a different adapter shape from every host in §13 and should not be
+   which is a different adapter shape from every harness in §13 and should not be
    assumed to be in scope without a decision.
 4. Alignment with the OTel GenAI semantic conventions (`gen_ai.usage.*`,
    `gen_ai.client.operation.duration`, agent/tool spans) should be evaluated for
@@ -898,9 +898,9 @@ Consequences for this contract:
 #### 14.8.2 Self-installed hooks
 
 `Tencent/teamai-cli` (§14.9) takes the third route: it installs a hook into each
-host, receives events on the hook's STDIN, and writes its own `events.jsonl`.
+harness, receives events on the hook's STDIN, and writes its own `events.jsonl`.
 This sidesteps the N-format problem entirely — the schema is the tool's own — and
-it collapses N hosts into three hook formats plus two special backends.
+it collapses N harnesses into three hook formats plus two special backends.
 
 Its normalized vocabulary is five values:
 
@@ -929,7 +929,7 @@ the *session pointer and lifecycle* — which file, and when it stopped being
 written — and the log supplies the detail. agent-vitals answers the pointer
 question today by globbing directories and guessing at liveness. The same split
 can be had **without writing anything into the user's configuration**, by using
-the host's own session registry as the pointer: WorkBuddy's `sessions` table and
+the harness's own session registry as the pointer: WorkBuddy's `sessions` table and
 its `~/.workbuddy/sessions/*.json` heartbeat files (§14.6) are exactly that.
 
 #### 14.8.3 Why surface 3 is probably not optional forever
@@ -938,7 +938,7 @@ Read §13 by row rather than by column and a structural problem appears: the
 signals with the **thinnest log coverage are the highest-value security
 signals**.
 
-| Signal | Hosts with it in the log |
+| Signal | Harnesses with it in the log |
 |---|---|
 | ApprovalDecisions | DSH, WorkBuddy, Claude Code (denials only, §14.5) |
 | SandboxModes | DSH, WorkBuddy |
@@ -1029,7 +1029,7 @@ error_message, input_tokens … cache_creation_tokens, total_cost_usd
 ```
 
 `latency_ms`, `first_token_ms`, `status_code` and `is_streaming` appear in **no
-session log on any host surveyed here**. They are only observable from the wire.
+session log on any harness surveyed here**. They are only observable from the wire.
 
 This surface is nevertheless out of bounds for this product, and the reason is
 the same one as §14.8.4 at a higher strength:
@@ -1051,7 +1051,7 @@ about role, not about technique:
 > do. A tool that was asked only to observe may not.**
 
 One consequence worth recording rather than regretting: `latency_ms` and
-`first_token_ms` are **permanently unavailable** to this product on every host.
+`first_token_ms` are **permanently unavailable** to this product on every harness.
 They are not unimplemented; they are unobservable from where we stand. Report
 them as `unavailable(not observable from a log)`, alongside process liveness
 (§16.1).
@@ -1079,7 +1079,7 @@ union window as if every signal covered it.
 [`Tencent/teamai-cli`](https://github.com/Tencent/teamai-cli) (MIT) distributes
 skills, rules, and docs *into* Claude Code / Codex / CodeBuddy / WorkBuddy /
 OpenClaw / Hermes and ~27 more. It is the write-side mirror of this product's
-read-side problem, over substantially the same host set.
+read-side problem, over substantially the same harness set.
 
 > **Provenance of this section is weaker than §14.1–14.7.** Those cells come from
 > upstream source code or a first-party log corpus. Everything below is read out
@@ -1088,7 +1088,7 @@ read-side problem, over substantially the same host set.
 
 #### What it supplies
 
-| Host | Fact | Where |
+| Harness | Fact | Where |
 |---|---|---|
 | **CodeBuddy** | Transcript is a single `index.json` document: `{ messages: [{ role }], requests: [{ usage: { inputTokens, outputTokens, totalTokens } }] }` — **not** JSONL, and **no cache read/creation split at request level** | `readCodebuddyIndexOnce` |
 | **WorkBuddy** | `~/.workbuddy/settings.json` (verified by them on 5.2.0); hooks use the Claude-style settings injection path, same as CodeBuddy | `hooks.ts` |
@@ -1096,12 +1096,12 @@ read-side problem, over substantially the same host set.
 | **OpenClaw** family | hook backend is `HOOK.md` + `handler.ts`; family covers `openclaw`, `qclaw`, `easyclaw`, `autoclaw` | `openclaw-hooks.ts` |
 | **CodeBuddy IDE** | Tool names differ from CLI form: `execute_command`→`Bash`, `search_content`→`Grep`, `write_to_file`→`Write`, `replace_in_file`→`Edit`, `list_dir`→`Glob`, `read_file`→`Read`, `task`→`Task` | `utils/tool-names.ts` |
 
-None of it closes the approval / sandbox / tool-duration gaps for these hosts —
+None of it closes the approval / sandbox / tool-duration gaps for these harnesses —
 hooks do not carry those either.
 
 #### Why its adaptation strategy does not transfer
 
-Its host registry is a flat table, one line per host, **zero host-specific code**
+Its harness registry is a flat table, one line per harness, **zero harness-specific code**
 for the common case:
 
 ```ts
@@ -1109,15 +1109,15 @@ for the common case:
 ```
 
 The comment states the precondition: *"agents whose skills directory layout is
-**predictable** (`~/.<id>/skills/`)"*. Where that breaks — hooks — 33 hosts
+**predictable** (`~/.<id>/skills/`)"*. Where that breaks — hooks — 33 harnesses
 collapse to `type ToolFormat = 'claude' | 'cursor' | 'codex'` plus two backends,
 with `'claude'` as the fallback. Claude Code's format and Claude Code's tool
 names are its de-facto IR, deliberately.
 
-**Writing to a convention is symmetric across hosts; reading truth is not.**
-Writing requires only that the host *look* in an agreed place. Reading requires
-the host to *report* what it did, and each host reports differently or not at
-all. This is why a one-line-per-host table is sufficient there and insufficient
+**Writing to a convention is symmetric across harnesses; reading truth is not.**
+Writing requires only that the harness *look* in an agreed place. Reading requires
+the harness to *report* what it did, and each harness reports differently or not at
+all. This is why a one-line-per-harness table is sufficient there and insufficient
 here, and why §13 is a matrix rather than a list.
 
 One consequence is directly instructive. Where a target lacks an event, its hook
@@ -1131,7 +1131,7 @@ if (!cursorEvent) continue;   // event Cursor doesn't support → skip
 Skipping is correct for a writer — one cannot install a hook for an event that
 does not exist. The same action in a reader is fabrication. **The correct
 behaviour for a missing capability is opposite in the two directions**, which is
-why a read tool cannot borrow a write tool's host abstraction wholesale.
+why a read tool cannot borrow a write tool's harness abstraction wholesale.
 
 #### The violation this contract exists to prevent
 
@@ -1205,7 +1205,7 @@ writing anything into the user's configuration.
 
 [`farion1231/cc-switch`](https://github.com/farion1231/cc-switch) is a Tauri app
 managing Claude Code / Codex / Gemini CLI / OpenCode / OpenClaw / Hermes — again
-close to this product's host list. It answers "quota" and "usage" by two
+close to this product's harness list. It answers "quota" and "usage" by two
 completely separate paths, and neither resembles surface 1.
 
 **Quota — a sandboxed JavaScript plugin.** Each provider's quota query is a
@@ -1224,7 +1224,7 @@ stack; secrets are template-substituted rather than written into the script; bot
 reason is that scripts arrive from deeplinks and imports — untrusted input.
 
 This is a third answer to "N heterogeneous providers": CodexBar compiles 69
-strategies, teamai-cli asserts one convention over 33 hosts, cc-switch **ships an
+strategies, teamai-cli asserts one convention over 33 harnesses, cc-switch **ships an
 interpreter and makes provider support data**.
 
 **Usage — it is the proxy.** See §14.8.5.
@@ -1244,7 +1244,7 @@ interpreter and makes provider support data**.
 3. **Credential state is not a boolean.** `SubscriptionQuota` separates
    `credentialStatus: valid | expired | not_found | parse_error` from `success`,
    and carries `queriedAt` — the time coordinate a probe-class answer requires
-   (`HOST_ADAPTER_CONTRACT`'s `evidence_recency: probe`). `tiers[]` is a list,
+   (`HARNESS_ADAPTER_CONTRACT`'s `evidence_recency: probe`). `tiers[]` is a list,
    because a plan has several windows, not one number.
 
 #### One judgment worth copying
@@ -1257,7 +1257,7 @@ users into reading it as the Desktop's full usage."
 > more honest than showing a partial figure under its name.**
 
 That is §4.1 (window is not coverage) applied to a dimension rather than a time
-range, and it is the correct default for any host whose adapter can see only part
+range, and it is the correct default for any harness whose adapter can see only part
 of a signal.
 
 ---
@@ -1267,12 +1267,12 @@ of a signal.
 Extends the vocabulary in
 [PRODUCT_CAPABILITY_MATRIX.md](./PRODUCT_CAPABILITY_MATRIX.md#reporting-language).
 
-- **measured**: the host recorded this value.
+- **measured**: the harness recorded this value.
 - **derived**: the adapter inferred it from adjacent records; state from what.
 - **estimated**: computed by an estimator; name the estimator.
 - **lossy**: recorded but degraded (truncated, hashed, redacted).
 - **unmetered**: known to have occurred; nothing further is known.
-- **unavailable**: the host records no such evidence; state the reason.
+- **unavailable**: the harness records no such evidence; state the reason.
 
 Prohibited phrasings:
 
@@ -1289,7 +1289,7 @@ Prohibited phrasings:
 
 ## 16. Acceptance
 
-A host is supported when, for every signal in §13, the adapter reports
+A harness is supported when, for every signal in §13, the adapter reports
 `measured`, `derived`, `estimated`, `lossy`, or `unavailable(reason)` — and for
 every rule in the engine, the report states findings, a measured zero, or
 unavailability. Completeness means every cell is answered, not that every cell
@@ -1310,20 +1310,20 @@ This is the one place where a 5-event hook vocabulary holds something our
 16-signal vocabulary does not. Record it as `unavailable(no process observer)`
 rather than inferring liveness from a truncated log.
 
-**One host escapes this.** WorkBuddy's trace store carries `workerPid` on every
+**One harness escapes this.** WorkBuddy's trace store carries `workerPid` on every
 trace and `status: "running"` on spans that never completed — process-level
 liveness is *in the durable record* there, so the cell is `partial` rather than
 `unavailable` (§13, §14.6).
 
 **Wire-level timing is the other permanent gap.** `latency_ms`, `first_token_ms`,
 `is_streaming` and HTTP status codes are observable only from the traffic path
-(§14.8.5), which this product does not occupy. No host writes them to a log.
+(§14.8.5), which this product does not occupy. No harness writes them to a log.
 Report `unavailable(not observable from a log)` — they are unobservable from
 where we stand, not unimplemented.
 
 > This asymmetry is worth keeping in view when comparing vocabularies: 16 signals
 > read unevenly from logs is a **larger vocabulary over a raggeder matrix** than
-> 5 signals pushed uniformly from hooks across 33 hosts. That is a trade-off, not
+> 5 signals pushed uniformly from hooks across 33 harnesses. That is a trade-off, not
 > a win.
 
 ---
@@ -1337,10 +1337,10 @@ behaviour is the golden corpus, and the golden corpus speaks only DSH.
 | Phase | Work | Acceptance |
 |---|---|---|
 | **P0** | This document, plus the §13 matrix as a checked-in baseline | Matrix committed; it *is* the test baseline |
-| **P1 ✅** | `evidence` module in `agent-vitals-core`: `CanonicalSession`, `Signal`, `Observed<T>`, `Provenance`, `CoverageCounts`, `RuleSpec`, `RuleOutcome` | Zero behaviour change — nothing consumes it yet. Landed in `crates/agent-vitals-core/src/contracts/evidence.rs`: all §2–§12 types plus `AggregateProvenance::for_window`, `CoverageCounts`/`Coverage` ratios, and the §12 no-host-identifier self-check, 12 unit tests. 15/15 goldens byte-identical before/after (nothing calls it yet) |
-| **P2 ✅** | `crates/agent-vitals-core/src/adapters/hosts/dsh/sessions/evidence.rs`: a plain function (`build_dsh_evidence`, **not a trait** — see `CanonicalSession`'s own doc comment and `ARCHITECTURE.md` §4.2) that folds `src/dsh.rs`'s already-extracted `execution_events`/`usage_events` into a `CanonicalSession` (Signal/Coverage counted per §13's DSH column; the 3 rows §13 doesn't cover — `SandboxPolicy`/`UserPrompts`/`UserCorrections` — are left `Unavailable`, not fabricated), bundled with the raw events (`CanonicalSession` alone has no event-payload field); plus `reverse_project`, a temporary bridge back to today's `behavior.rs` input shape | **Byte-identical `behavior --json` output**, proven three ways: `cargo test` (154 core + 137 binary), `AGENT_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix` (the real Python↔Rust differential — `golden/*.json` covers the unrelated `scan` command, not this), and a manual before/after diff on `fixtures/dsh/behavior.jsonl`. `reverse_project` is deleted when P3 completes |
+| **P1 ✅** | `evidence` module in `agent-vitals-core`: `CanonicalSession`, `Signal`, `Observed<T>`, `Provenance`, `CoverageCounts`, `RuleSpec`, `RuleOutcome` | Zero behaviour change — nothing consumes it yet. Landed in `crates/agent-vitals-core/src/contracts/evidence.rs`: all §2–§12 types plus `AggregateProvenance::for_window`, `CoverageCounts`/`Coverage` ratios, and the §12 no-harness-identifier self-check, 12 unit tests. 15/15 goldens byte-identical before/after (nothing calls it yet) |
+| **P2 ✅** | `crates/agent-vitals-core/src/adapters/harnesses/dsh/sessions/evidence.rs`: a plain function (`build_dsh_evidence`, **not a trait** — see `CanonicalSession`'s own doc comment and `ARCHITECTURE.md` §4.2) that folds `src/dsh.rs`'s already-extracted `execution_events`/`usage_events` into a `CanonicalSession` (Signal/Coverage counted per §13's DSH column; the 3 rows §13 doesn't cover — `SandboxPolicy`/`UserPrompts`/`UserCorrections` — are left `Unavailable`, not fabricated), bundled with the raw events (`CanonicalSession` alone has no event-payload field); plus `reverse_project`, a temporary bridge back to today's `behavior.rs` input shape | **Byte-identical `behavior --json` output**, proven three ways: `cargo test` (154 core + 137 binary), `AGENT_VITALS_BIN=<rust> python3 -m unittest tests.test_cli_matrix` (the real Python↔Rust differential — `golden/*.json` covers the unrelated `scan` command, not this), and a manual before/after diff on `fixtures/dsh/behavior.jsonl`. `reverse_project` is deleted when P3 completes |
 | **P3 ✅ (all 5 groups)** | Migrate rules one family per PR: read Signals, declare `requires`, goldens unchanged. Order: ① command/path (SV601–610) ② cost fold ③ duration ④ trajectory ⑤ skill / subagent / compaction / waste | See §17.1a for what actually landed per group. `reverse_project` is retained (not deleted) — see note at the end of §17.1a |
-| **P4 ✅** | Codex adapter | Chosen second not for coverage breadth — §14.1 shows it lacks tool-call duration, approvals, and hooks — but because it is the only host that emits **two incompatible formats without declaring which**. If the model absorbs both Codex modes without structural change, it is sound. See §17.1c for what actually landed: **sound — zero structural change to the shared type layer** (`shared_type_layer_has_no_host_identifiers_in_code` stayed green throughout; §13's Codex Legacy + Paginated columns are absorbed by one flat type→Signal table in `derive_coverage`) |
+| **P4 ✅** | Codex adapter | Chosen second not for coverage breadth — §14.1 shows it lacks tool-call duration, approvals, and hooks — but because it is the only harness that emits **two incompatible formats without declaring which**. If the model absorbs both Codex modes without structural change, it is sound. See §17.1c for what actually landed: **sound — zero structural change to the shared type layer** (`shared_type_layer_has_no_harness_identifiers_in_code` stayed green throughout; §13's Codex Legacy + Paginated columns are absorbed by one flat type→Signal table in `derive_coverage`) |
 | **P4.5** | Schema-drift sentinel for `RolloutItem` (§14.4) | CI fails on upstream persistence-policy change |
 | **P5** | Claude Code adapter | First real use of `Provenance::Derived` (turn boundaries) and `Linearization` (message tree) |
 | **P6** | WorkBuddy adapter | First real use of `unavailable`, `LossKind::Hashed`, `Cost::Credits`, and non-JSONL I/O. **Last not because it is hardest, but because it is the strongest falsifier**: if `CanonicalSession` has quietly become a synonym for "event stream" during P1–P5, WorkBuddy exposes it immediately |
@@ -1476,7 +1476,7 @@ remaining signals to migrate, not for this pass.
 All five groups verified the same way: `cargo test`, `cargo clippy -D
 warnings`, full Python suite, `AGENT_VITALS_BIN=<rust> python3 -m unittest
 tests.test_cli_matrix` (byte-identical new keys both languages), wasm
-rebuilt + `dsh-client`'s full `npm test` (including `verify-host.mjs`) green
+rebuilt + `dsh-client`'s full `npm test` (including `verify-harness.mjs`) green
 against the new binary each time.
 
 ### 17.1c P4 group log
@@ -1502,9 +1502,9 @@ against the new binary each time.
 > not serialized); only `SandboxModes` coverage flips zero→measured.
 
 **P4 ✅** — the acceptance word was "sound": the shared type layer
-(`CanonicalSession`/`Coverage`/`RuleSpec`, host-neutral since P1) had to absorb
+(`CanonicalSession`/`Coverage`/`RuleSpec`, harness-neutral since P1) had to absorb
 Codex's **two incompatible formats without declaring which** — with zero
-structural change. It did: `shared_type_layer_has_no_host_identifiers_in_code`
+structural change. It did: `shared_type_layer_has_no_harness_identifiers_in_code`
 stayed green throughout, and no shared type in `evidence.rs` was touched.
 
 What landed, one new module per layer of the five-stage pipeline (§4.2):
@@ -1518,7 +1518,7 @@ What landed, one new module per layer of the five-stage pipeline (§4.2):
   by existence probing only (empty → `missing-header`, non-JSON line →
   `non-json`, unreadable → `file-missing`), never by a `SESSION_FORMAT_VERSION`
   check that would misclassify a new record type as corruption.
-- **derive/coverage** — `crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs` ↔
+- **derive/coverage** — `crates/agent-vitals-adapters/src/harnesses/codex/sessions/evidence.rs` ↔
   `scripts/agent_vitals/agent/codex_evidence.py`: **one flat type→Signal table**
   (never a per-mode fork — real Paginated rollouts carry `task_started`/
   `task_complete`, so mixed streams must just work). Both §13 Codex columns
@@ -1537,7 +1537,7 @@ What landed, one new module per layer of the five-stage pipeline (§4.2):
   "skipped and recorded in attempts, never treated as corruption"). Real
   corpus: 0 attempts.
 - **CLI** — `codex-evidence <rollout.jsonl> [--json]` subcommand (both
-  implementations), emitting `{host, session_id, history_mode, cli_version,
+  implementations), emitting `{harness, session_id, history_mode, cli_version,
   model, workspace_roots, signals, coverage (all 20 keys), attempts, notes}`.
   No detectors run against Codex (the deferred detector-decoupling P3 named);
   this is the observable "sound" proof, not findings.
@@ -1561,13 +1561,13 @@ every build), so the mapping table can't silently drift.
 
 ### 17.1 Tests
 
-- **Coverage-matrix golden**: host × session shape × rule family →
+- **Coverage-matrix golden**: harness × session shape × rule family →
   `run` / `degrade` / `unavailable`. Codex(Legacy) and Codex(Paginated) are two
   rows, not one. A forgotten `requires` declaration turns it red.
-- **Per-host fixture corpora** under `fixtures/<host>/`, redacted.
+- **Per-harness fixture corpora** under `fixtures/<harness>/`, redacted.
 - **Reverse-projection equivalence** (P2 only; deleted afterwards).
 - **Anti-fabrication assertion**: a Claude Code corpus must yield
   `Unavailable` for approval rules, never `[]`. This is the property most likely
   to regress silently, so it gets its own test rather than relying on review.
-- **Shared-type purity**: no host name appears in any identifier in the shared
+- **Shared-type purity**: no harness name appears in any identifier in the shared
   type layer (§12).

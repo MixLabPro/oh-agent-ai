@@ -42,10 +42,10 @@ ok(
 ok(tpl.includes("TimelineGeometry.buildTimeline({"), "调用点走 TimelineGeometry.buildTimeline()");
 ok(!tpl.includes("svTimelineSvg("), "模板里不再有内联 svTimelineSvg 第二份拷贝");
 // 3) 事件叠加已接线：buildTimeline 收 events（findings 对齐到小时桶），对齐字典
-//    读 turn_timeline 宿主侧折好的 hour 键——浏览器不重算北京时间。
+//    读 turn_timeline 执行环境侧折好的 hour 键——浏览器不重算北京时间。
 ok(tpl.includes("events: tlEvents"), "调用点把 tlEvents 传给 buildTimeline");
 ok(tpl.includes("seqToHour[te.source_order]"), "事件对齐读 turn_timeline.source_order→hour");
-ok(tpl.includes("var seqToHour"), "对齐字典在模板内声明（hour 键来自宿主，不在浏览器算）");
+ok(tpl.includes("var seqToHour"), "对齐字典在模板内声明（hour 键来自执行环境，不在浏览器算）");
 
 // 4) 内联副本真的能用：eval 出 TimelineGeometry，画一个 3 点序列确认产出 sv-* SVG。
 //    （形状的完整断言在 verify-timeline-geometry.mjs，这里只证明内联副本不是死代码。）

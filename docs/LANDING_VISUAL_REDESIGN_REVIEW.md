@@ -8,7 +8,7 @@ Scope: `website/landing`; one landing page, reviewed section by section before r
 | Product demo | Tiny labels; failure CTA only opens token composition | Legible dashboard and a mock event trace with selectable evidence; label all figures as illustrative |
 | Features | Equal-weight generic illustrations lack narrative | Three steps: collect local records, inspect failure evidence, distinguish cost bases |
 | Privacy | Important differentiation below the fold; mostly text | Repeat concise promise in hero; show a bounded local data pipeline and explicit network exceptions |
-| Host coverage | Support scope buried in FAQ | Visible source strip with coverage caveat; retain detailed FAQ |
+| Harness coverage | Support scope buried in FAQ | Visible source strip with coverage caveat; retain detailed FAQ |
 | FAQ | Begins with negative limitations | Lead with privacy/setup, then financial honesty and capability boundaries |
 | Download | Repeats abstract metaphor | Concrete first-use steps and clearly identified macOS beta release link |
 

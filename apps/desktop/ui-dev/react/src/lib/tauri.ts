@@ -6,11 +6,11 @@ export type Unsubscribe = () => void;
  * replaced `FoldCompleted` + `FactsIngested`: the desktop now publishes one
  * level-triggered signal per authority-revision advance instead of forwarding
  * domain events one by one. */
-export type AppEventType = "Invalidated" | "SyncStatusChanged" | "HostNavigationChanged" | "TrustMonitorEvent" | "TrustMonitorInvalidated" | "SourceDataDeleted" | "WatcherHealthChanged";
+export type AppEventType = "Invalidated" | "SyncStatusChanged" | "HarnessNavigationChanged" | "TrustMonitorEvent" | "TrustMonitorInvalidated" | "SourceDataDeleted" | "WatcherHealthChanged";
 /** Only `Invalidated` carries fields across the bridge: a monotonic revision and
- * the hosts touched by that drain (a lower bound, never an exact set). Every
+ * the harnesses touched by that drain (a lower bound, never an exact set). Every
  * other type is reduced to its tag — payloads stay on the desktop side. */
-export type AppEvent = { type: AppEventType; revision?: number; hosts?: string[] };
+export type AppEvent = { type: AppEventType; revision?: number; harnesses?: string[] };
 
 /** Data-refresh gate (spec §6 + REFRESH_STORM R1): refresh on `SourceDataDeleted`
  * (revision-carrying poll syntheses compare against the watermark; real deletions
@@ -69,7 +69,7 @@ type TauriGlobal = {
 
 const browserPreview: OverviewSnapshot = {
   freshness: "浏览器预览 · 合成数据",
-  hosts: 5,
+  harnesses: 5,
   findings: 0,
   evidence: 8,
   monitored: false,
@@ -79,12 +79,12 @@ const browserPreview: OverviewSnapshot = {
   subscription_cny_month: 49,
   sync: { ok: true, stage: "complete", at: null },
   budget: { source: "sql", level: "warn", month_cost: 8.64, monthly_cny: 12, month_ratio: 0.72 },
-  host_rows: [],
+  harness_rows: [],
 };
 
 export type OverviewSnapshot = {
   freshness: string;
-  hosts: number | null;
+  harnesses: number | null;
   findings: number | null;
   evidence: number | null;
   monitored: boolean;
@@ -94,7 +94,7 @@ export type OverviewSnapshot = {
   subscription_cny_month: number | null;
   sync: { ok: boolean; stage: string; at: string | null };
   budget: { source: "sql" | "alert" | "missing"; level: string; month_cost: number | null; monthly_cny: number | null; month_ratio: number | null };
-  host_rows: Array<{ host: string; status: "ready" | "partial" | "unavailable"; today_tokens: number | null; today_sessions: number | null; recent_count: number }>;
+  harness_rows: Array<{ harness: string; status: "ready" | "partial" | "unavailable"; today_tokens: number | null; today_sessions: number | null; recent_count: number }>;
 };
 
 export type UsageDay = {
@@ -117,17 +117,17 @@ export type UsageSourceSummary = {
   freshness: "fresh" | "stale" | "partial" | "unavailable" | "unknown";
   last_observed_at: string | null;
   coverage: { measured_fields: number; total_fields: number };
-  excluded_hosts: string[];
+  excluded_harnesses: string[];
   actual_spend: Record<string, number>;
   spend_by_basis: Record<string, Record<string, number>>;
-  tokens_by_host: Record<string, SummaryHostTokens>;
+  tokens_by_harness: Record<string, SummaryHarnessTokens>;
   total_tokens: number;
   metered_view: Record<string, { amount: number; actual: number; declared_estimate: number; default_estimate: number; label: string }>;
   by_provider: Record<string, SummaryAmount>;
   has_unresolved: boolean;
 };
 
-export type SummaryHostTokens = {
+export type SummaryHarnessTokens = {
   total: number;
   uncached_input: number;
   cache_read: number;
@@ -137,7 +137,7 @@ export type SummaryHostTokens = {
 };
 
 export type SummaryAmount = {
-  host_id: string;
+  harness_id: string;
   amounts_by_basis: Record<string, number>;
   currency: string | null;
   has_unresolved: boolean;
@@ -170,7 +170,7 @@ export type StatisticsSettingsReport = {
 };
 
 export type MonthlyExportRow = {
-  host: string;
+  harness: string;
   provider: string | null;
   tokens: number | null;
   basis: string | null;
@@ -187,7 +187,7 @@ export type MonthlyExportSummary = {
   rows: MonthlyExportRow[];
   coverage: { measured_fields: number; total_fields: number };
   freshness: UsageSourceSummary["freshness"];
-  excluded_hosts: string[];
+  excluded_harnesses: string[];
 };
 
 export type AboutDiagnosticsReport = {
@@ -204,10 +204,10 @@ export type AboutDiagnosticsReport = {
 export type DiagnosticExportReceipt = { status: "saved" | "cancelled"; uploadPerformed: false };
 export type UpdateCheckResult = { status: "ok" | "no_release" | "unavailable"; currentVersion: string | null; latestTag: string | null; automaticInstall: false };
 
-export type SkillHostSummary = { host: string; skills_on_disk: number; discoverable_skills: number; runtime_verified_loaded_skills: number | null; unique_discoverable_skills: number; description_budget: { available: boolean; used_chars: number | null; budget_chars: number | null; pct_used: number | null; source: string | null }; trigger_data: "available" | "unavailable" | "unknown" };
+export type SkillHarnessSummary = { harness: string; skills_on_disk: number; discoverable_skills: number; runtime_verified_loaded_skills: number | null; unique_discoverable_skills: number; description_budget: { available: boolean; used_chars: number | null; budget_chars: number | null; pct_used: number | null; source: string | null }; trigger_data: "available" | "unavailable" | "unknown" };
 export type SkillDiagnostic = { code: string; name: string; severity: "critical" | "warning" | "info"; skill: string | null; evidence_count: number; impact: string | null; recommendation: string | null; caveats: string[] };
-export type SkillScanReport = { status: "ok" | "unavailable"; schema_version: string | null; run: string | null; host_selection: string; generated_at_ms: number | null; from_cache: boolean; hosts: SkillHostSummary[]; diagnostics: SkillDiagnostic[]; not_assessed: Array<{ code: string; name: string; reason: string }> };
-export type SkillDiffIdentity = { host: string; name: string; namespace: string | null; instance_id: string | null };
+export type SkillScanReport = { status: "ok" | "unavailable"; schema_version: string | null; run: string | null; harness_selection: string; generated_at_ms: number | null; from_cache: boolean; harnesses: SkillHarnessSummary[]; diagnostics: SkillDiagnostic[]; not_assessed: Array<{ code: string; name: string; reason: string }> };
+export type SkillDiffIdentity = { harness: string; name: string; namespace: string | null; instance_id: string | null };
 export type SkillDiffReport = {
   schema_version: "skills-diff-v1";
   status: "ok" | "partial";
@@ -232,7 +232,7 @@ export type SkillExportReceipt = { status: "saved" | "cancelled"; upload_perform
 export type SourceConnectionState = "connected" | "needs_attention" | "paused" | "excluded" | "not_detected" | "unknown";
 export type SourceErrorKind = "permission_denied" | "file_missing" | "all_files_failed" | "db_error" | "migration_failed" | "read_failed";
 export type SourceHealthRow = {
-  host: string;
+  harness: string;
   connection_state: SourceConnectionState;
   sessions: number;
   facts: number;
@@ -248,12 +248,12 @@ export type SourceHealthReport = {
   sources: SourceHealthRow[];
   sync: { paused: boolean | null; last_success_at: string | null; state: "ok" | "failed" | "never" | "unavailable" };
 };
-export type SourceHostControls = { status: "ok" | "unavailable"; excluded_hosts: string[]; supported_hosts: string[] };
-export type SourceHostControlReceipt = { status: "saved"; changed: boolean; excluded: boolean };
-export type DeleteImportedSourceReceipt = { status: "deleted"; host: string; facts: number; sessions: number; source_files: number; trust_observations: number; route_evidence: number; session_excerpts: number };
+export type SourceHarnessControls = { status: "ok" | "unavailable"; excluded_harnesses: string[]; supported_harnesses: string[] };
+export type SourceHarnessControlReceipt = { status: "saved"; changed: boolean; excluded: boolean };
+export type DeleteImportedSourceReceipt = { status: "deleted"; harness: string; facts: number; sessions: number; source_files: number; trust_observations: number; route_evidence: number; session_excerpts: number };
 
 export type SyncRequestStatus = { completed: boolean; failed: boolean };
-export type CustomSourceRoot = { host: string; root: string };
+export type CustomSourceRoot = { harness: string; root: string };
 export type CustomSourceReport = { status: "ok" | "unavailable"; sources: CustomSourceRoot[]; locations: Record<string, string | null> };
 
 export type BudgetLevel = "ok" | "warn" | "exceeded" | "incomplete" | "no_data" | "disabled";
@@ -294,7 +294,7 @@ export type QuotaReminderReceipt = { status: "saved"; enabled: boolean; notifica
 export type BillingAmount = { amount_minor: number; currency: string; basis: string };
 export type BillingCandidate = {
   candidate_id: string;
-  host: string;
+  harness: string;
   provider_id: string;
   currency: string;
   amount_minor: number;
@@ -327,7 +327,7 @@ export type BillingDeclarationReceipt = {
 export type BillingDeclarationRevokeReceipt = { status: "revoked"; declaration_id: string; revision_id: string; changed: boolean };
 export type BillingGroup = {
   group_id: string;
-  host: string;
+  harness: string;
   provider_id: string;
   model_id: string;
   evidence_basis: string;
@@ -341,7 +341,7 @@ export type BillingGroup = {
   unresolved_reason: string | null;
   evidence_state: "determined" | "needs_input" | "unresolved" | "unknown";
 };
-/** 计费声明属于服务商账号、按模型使用结算，**没有宿主**——宿主只是用量的来源壳。 */
+/** 计费声明属于服务商账号、按模型使用结算，**没有执行环境**——执行环境只是用量的来源壳。 */
 export type BillingDeclaration = {
   declaration_id: string;
   provider_id: string;
@@ -358,9 +358,9 @@ export type BillingDeclaration = {
 };
 export type BillingJob = { job_id: string; status: "queued" | "running" | "failed" | "cancelled" | "succeeded" | "unknown"; error_code: string | null; requested_at_ms: number | null };
 export type BillingJobRetryReceipt = { status: "queued"; job_id: string; changed: boolean };
-export type HostBill = { bill_id: string; host: string; provider_id: string; billing_period: string; billing_basis: string; amount_minor: number; currency: string; has_evidence: boolean };
+export type HarnessBill = { bill_id: string; harness: string; provider_id: string; billing_period: string; billing_basis: string; amount_minor: number; currency: string; has_evidence: boolean };
 export type BillingPanelStatus = "ok" | "partial" | "unavailable";
-export type BillingSettingsReport = { status: "ok" | "unavailable"; month: string; candidates_status: BillingPanelStatus; groups_status: BillingPanelStatus; declarations_status: BillingPanelStatus; jobs_status: BillingPanelStatus; bills_status: BillingPanelStatus; candidates: BillingCandidate[]; groups: BillingGroup[]; declarations: BillingDeclaration[]; jobs: BillingJob[]; bills: HostBill[] };
+export type BillingSettingsReport = { status: "ok" | "unavailable"; month: string; candidates_status: BillingPanelStatus; groups_status: BillingPanelStatus; declarations_status: BillingPanelStatus; jobs_status: BillingPanelStatus; bills_status: BillingPanelStatus; candidates: BillingCandidate[]; groups: BillingGroup[]; declarations: BillingDeclaration[]; jobs: BillingJob[]; bills: HarnessBill[] };
 
 export type UsageHour = {
   hour: number;
@@ -371,7 +371,7 @@ export type UsageHour = {
 
 export type UsageHourly = {
   date: string;
-  hosts_available: { dsh: string | null; claude: string | null; codex: string | null };
+  harnesses_available: { dsh: string | null; claude: string | null; codex: string | null };
   hours: UsageHour[];
 };
 
@@ -389,7 +389,7 @@ export type SessionCostStatus = {
 
 export type SessionRow = {
   session_ref: string;
-  host: string;
+  harness: string;
   first_event_at: string | null;
   last_event_at: string | null;
   event_count: number;
@@ -470,7 +470,7 @@ export type SessionsFilters = {
   day: string;
   date_from: string;
   date_to: string;
-  host_kind: string;
+  harness_kind: string;
   model: string;
   provider: string;
   cost_status: SessionsCostFilter;
@@ -494,8 +494,8 @@ export type RouteQualityFamily = {
   models: RouteQualityModel[];
 };
 
-export type RouteQualityHost = {
-  host: string;
+export type RouteQualityHarness = {
+  harness: string;
   has_baseline: boolean;
   native_families: string[];
   totals: { requests: number; sessions: number };
@@ -506,10 +506,10 @@ export type RouteQualityReport = {
   since_ms: number;
   now_ms: number;
   families_vocabulary: string[];
-  hosts: RouteQualityHost[];
+  harnesses: RouteQualityHarness[];
 };
 
-export type TrustHostCandidate = {
+export type TrustHarnessCandidate = {
   id: string;
   detected: boolean;
   artifact_profile_available: boolean;
@@ -532,7 +532,7 @@ export type TrustEvidence = {
 };
 
 export type TrustAuditReport = {
-  host: string;
+  harness: string;
   discovered: number;
   inserted: number;
   duplicate: number;
@@ -544,13 +544,13 @@ export type TrustAuditReport = {
 };
 
 export type TrustEvidenceHistory = {
-  host: string | null;
+  harness: string | null;
   count: number;
   evidence: TrustEvidence[];
   next_cursor: string | null;
 };
 
-export type TrustDiscovery = { candidates: TrustHostCandidate[]; profile_errors: string[] };
+export type TrustDiscovery = { candidates: TrustHarnessCandidate[]; profile_errors: string[] };
 
 export type TrustProfileScopePreview = {
   roots_count: number;
@@ -643,7 +643,7 @@ export type FindingGroup = {
   group_id: string;
   action_kind: string;
   rule: string;
-  host: string;
+  harness: string;
   evidence_class: string;
   count: number;
   first_seen_at_ms: number;
@@ -668,7 +668,7 @@ export type FindingsFreshness = {
   status: "ok" | "unavailable";
   state: "fresh" | "stale" | "not_yet_synced" | "unknown";
   last_successful_sync_at: string | null;
-  stale_hosts: string[];
+  stale_harnesses: string[];
   syncing: boolean;
 };
 
@@ -681,7 +681,7 @@ export type DecisionTopSession = {
   failures: number;
 };
 export type DecisionMatrixRow = {
-  host: string;
+  harness: string;
   model_id: string;
   provider_id: string;
   sessions: number;
@@ -691,15 +691,15 @@ export type DecisionMatrixRow = {
   waste_rate: number | null;
   amounts: DecisionAmount[];
   top_sessions: DecisionTopSession[];
-  host_behavior: Record<string, number>;
+  harness_behavior: Record<string, number>;
   limit_pressure: { hits: number; per_session: number | null } | null;
   cost_provider_unresolved: boolean;
 };
 export type DecisionSummary = {
   kind: "cost_outlier" | "marathon" | "currency_split";
   currency?: string;
-  outlier?: { host: string; model_id: string; provider_id: string; per_session_minor: number; cache_hit_ratio: number | null; uncached_tokens: number };
-  control?: { host: string; model_id: string; provider_id: string; per_session_minor: number; cache_hit_ratio: number | null; uncached_tokens: number };
+  outlier?: { harness: string; model_id: string; provider_id: string; per_session_minor: number; cache_hit_ratio: number | null; uncached_tokens: number };
+  control?: { harness: string; model_id: string; provider_id: string; per_session_minor: number; cache_hit_ratio: number | null; uncached_tokens: number };
   ratio_vs_control?: number;
   saving_minor?: number;
   saving_pct?: number;
@@ -707,7 +707,7 @@ export type DecisionSummary = {
   span_hours?: number;
   tokens_total?: number;
   failures?: number;
-  combo?: { host: string; model_id: string };
+  combo?: { harness: string; model_id: string };
   currencies?: string[];
   by_currency?: Record<string, { combos: number; tokens: number }>;
 };
@@ -803,7 +803,7 @@ function safeReference(value: unknown, label: string): string | null {
   return reference;
 }
 
-const SESSION_PRICING_BASES = ["metered_estimate", "metered_actual", "metered_declared", "fixed_subscription", "host_billed", "api_equivalent", "unavailable"] as const;
+const SESSION_PRICING_BASES = ["metered_estimate", "metered_actual", "metered_declared", "fixed_subscription", "harness_billed", "api_equivalent", "unavailable"] as const;
 /// `backfilled`：当时快照没有这个模型的卡，用事后每日同步到的价卡补算（只补缺卡）。
 const SESSION_PRICING_SOURCES = ["official", "fallback_official", "backfilled"] as const;
 
@@ -812,7 +812,7 @@ function boundedEnum(value: unknown, label: string, allowed: readonly string[], 
   return allowed.includes(candidate) ? candidate : fallback;
 }
 
-function safeHostLabel(value: unknown): string {
+function safeHarnessLabel(value: unknown): string {
   if (typeof value !== "string") return "generic";
   const candidate = value;
   if (/^plugin:[a-z][a-z0-9-]{0,31}$/.test(candidate)) return candidate;
@@ -904,7 +904,7 @@ function parseSourceHealth(value: unknown, pauseValue: unknown, overviewValue: u
     const scope = row.import_scope == null ? {} : record(row.import_scope, "source health import scope");
     const failed = row.failed_scope == null ? {} : record(row.failed_scope, "source health failed scope");
     return {
-      host: safeHostLabel(row.host),
+      harness: safeHarnessLabel(row.harness),
       connection_state: boundedEnum(row.connection_state ?? "unknown", "source health state", sourceStates, "unknown") as SourceConnectionState,
       sessions: boundedCount(scope.sessions ?? 0, "source health sessions", 10_000_000),
       facts: boundedCount(scope.facts ?? 0, "source health facts", 100_000_000),
@@ -915,7 +915,7 @@ function parseSourceHealth(value: unknown, pauseValue: unknown, overviewValue: u
       failed_sources: boundedCount(failed.sources ?? 0, "source health failed sources", 1_000_000),
       error_kinds: sourceErrorKinds(failed.error_codes),
     };
-  }).sort((left, right) => (left.connection_state === "needs_attention" ? -1 : 0) - (right.connection_state === "needs_attention" ? -1 : 0) || left.host.localeCompare(right.host));
+  }).sort((left, right) => (left.connection_state === "needs_attention" ? -1 : 0) - (right.connection_state === "needs_attention" ? -1 : 0) || left.harness.localeCompare(right.harness));
   const pauseRoot = pauseValue == null ? {} : record(pauseValue, "source pause state");
   const paused = pauseRoot.paused === null || pauseRoot.paused === undefined ? null : requiredBoolean(pauseRoot.paused, "source pause state");
   const overviewRoot = overviewValue == null ? {} : record(overviewValue, "source sync overview");
@@ -925,12 +925,12 @@ function parseSourceHealth(value: unknown, pauseValue: unknown, overviewValue: u
   return { status, sources: rows, sync: { paused, last_success_at: overviewTimestamp(sync.at), state: syncState } };
 }
 
-function parseSourceHostControls(value: unknown): SourceHostControls {
-  const root = record(value, "source host controls");
-  const status = boundedEnum(root.status ?? "unavailable", "source host controls status", ["ok", "unavailable"], "unavailable") as SourceHostControls["status"];
-  const hosts = requiredArray(root.excluded_hosts ?? [], "excluded source hosts").slice(0, 64).map((host) => safeHostLabel(host));
-  const supported = requiredArray(root.supported_hosts ?? [], "supported source hosts").slice(0, 64).map((host) => safeHostLabel(host));
-  return { status, excluded_hosts: [...new Set(hosts.filter((host) => host !== "generic"))], supported_hosts: [...new Set(supported.filter((host) => host !== "generic"))] };
+function parseSourceHarnessControls(value: unknown): SourceHarnessControls {
+  const root = record(value, "source harness controls");
+  const status = boundedEnum(root.status ?? "unavailable", "source harness controls status", ["ok", "unavailable"], "unavailable") as SourceHarnessControls["status"];
+  const harnesses = requiredArray(root.excluded_harnesses ?? [], "excluded source harnesses").slice(0, 64).map((harness) => safeHarnessLabel(harness));
+  const supported = requiredArray(root.supported_harnesses ?? [], "supported source harnesses").slice(0, 64).map((harness) => safeHarnessLabel(harness));
+  return { status, excluded_harnesses: [...new Set(harnesses.filter((harness) => harness !== "generic"))], supported_harnesses: [...new Set(supported.filter((harness) => harness !== "generic"))] };
 }
 
 function parseCustomSourceReport(value: unknown, locationsValue: unknown): CustomSourceReport {
@@ -940,19 +940,19 @@ function parseCustomSourceReport(value: unknown, locationsValue: unknown): Custo
   if (rawSources.length > 64) throw new Error("custom source roots 超出上限");
   const sources = rawSources.map((item) => {
     const row = record(item, "custom source root");
-    const host = safeHostLabel(row.host);
-    if (!["claude-code", "codex", "dsh"].includes(host)) throw new Error("custom source host 不受支持");
+    const harness = safeHarnessLabel(row.harness);
+    if (!["claude-code", "codex", "dsh"].includes(harness)) throw new Error("custom source harness 不受支持");
     const rootPath = safeLocalPath(row.root, "custom source root");
     if (!/^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(rootPath)) throw new Error("custom source root DTO 必须为绝对路径");
-    return { host, root: rootPath };
-  }).sort((left, right) => left.host.localeCompare(right.host) || left.root.localeCompare(right.root));
+    return { harness, root: rootPath };
+  }).sort((left, right) => left.harness.localeCompare(right.harness) || left.root.localeCompare(right.root));
   const locationRoot = locationsValue == null ? {} : record(locationsValue, "source read locations");
   const locations: Record<string, string | null> = {};
-  for (const [host, rawPath] of Object.entries(locationRoot).slice(0, 16)) {
-    const safeHost = safeHostLabel(host);
-    if (!["claude-code", "codex", "dsh"].includes(safeHost)) continue;
-    if (rawPath === null || rawPath === undefined) locations[safeHost] = null;
-    else locations[safeHost] = safeLocalPath(rawPath, "source read location");
+  for (const [harness, rawPath] of Object.entries(locationRoot).slice(0, 16)) {
+    const safeHarness = safeHarnessLabel(harness);
+    if (!["claude-code", "codex", "dsh"].includes(safeHarness)) continue;
+    if (rawPath === null || rawPath === undefined) locations[safeHarness] = null;
+    else locations[safeHarness] = safeLocalPath(rawPath, "source read location");
   }
   return { status, sources, locations };
 }
@@ -999,7 +999,7 @@ function parseBudgetProfile(value: unknown): BudgetProfile {
     daily_has_unresolved: row.daily_has_unresolved === true,
     updated_at_ms: nullableTimestampMs(row.updated_at_ms, "budget updated at"),
     subscription_amortized_minor: budgetMinor(row.subscription_amortized_minor ?? 0, "budget subscription amortized") ?? 0,
-    subscription_skipped: Array.isArray(row.subscription_skipped) ? row.subscription_skipped.slice(0, 16).map((item) => safeHostLabel(item)) : [],
+    subscription_skipped: Array.isArray(row.subscription_skipped) ? row.subscription_skipped.slice(0, 16).map((item) => safeHarnessLabel(item)) : [],
   };
 }
 
@@ -1093,14 +1093,14 @@ function parseOverviewSnapshot(value: unknown): OverviewSnapshot {
   const budgetRow = root.budget == null ? {} : record(root.budget, "overview budget");
   const budgetSource = boundedEnum(budgetRow.source ?? "missing", "overview budget source", ["sql", "alert", "missing"], "missing") as OverviewSnapshot["budget"]["source"];
   const budgetLevel = boundedEnum(budgetRow.level ?? "unknown", "overview budget level", ["no_budget", "ok", "warn", "over", "snoozed", "disabled", "unknown"], "unknown");
-  const rawHosts = Array.isArray(root.hosts) ? root.hosts : [];
-  const hostRows = rawHosts.slice(0, 16).map((item) => {
-    const row = record(item, "overview host");
+  const rawHarnesses = Array.isArray(root.harnesses) ? root.harnesses : [];
+  const harnessRows = rawHarnesses.slice(0, 16).map((item) => {
+    const row = record(item, "overview harness");
     return {
-      host: safeHostLabel(row.host_kind),
-      status: boundedEnum(row.status, "overview host status", ["ready", "partial", "unavailable"], "unavailable") as OverviewSnapshot["host_rows"][number]["status"],
-      today_tokens: nullableCount(row.today_tokens, "overview host tokens"),
-      today_sessions: nullableCount(row.today_sessions, "overview host sessions"),
+      harness: safeHarnessLabel(row.harness_kind),
+      status: boundedEnum(row.status, "overview harness status", ["ready", "partial", "unavailable"], "unavailable") as OverviewSnapshot["harness_rows"][number]["status"],
+      today_tokens: nullableCount(row.today_tokens, "overview harness tokens"),
+      today_sessions: nullableCount(row.today_sessions, "overview harness sessions"),
       recent_count: Array.isArray(row.recent) ? Math.min(row.recent.length, 100) : 0,
     };
   });
@@ -1111,10 +1111,10 @@ function parseOverviewSnapshot(value: unknown): OverviewSnapshot {
   const todayTokens = root.today_tokens_sql === null || root.today_tokens_sql === undefined
     ? null : boundedCount(root.today_tokens_sql, "overview today tokens");
   const subscription = nullableMoney(root.subscription_cny_month, "overview subscription");
-  const hostCount = rawHosts.length ? Math.min(rawHosts.length, 16) : (root.tokens_by_host && typeof root.tokens_by_host === "object" && !Array.isArray(root.tokens_by_host) ? Math.min(Object.keys(root.tokens_by_host).length, 16) : null);
+  const harnessCount = rawHarnesses.length ? Math.min(rawHarnesses.length, 16) : (root.tokens_by_harness && typeof root.tokens_by_harness === "object" && !Array.isArray(root.tokens_by_harness) ? Math.min(Object.keys(root.tokens_by_harness).length, 16) : null);
   return {
     freshness: syncAt ? `本地同步 · ${syncAt}` : syncOk ? "本地同步 · 已完成" : "本地同步 · 状态不可用",
-    hosts: hostCount,
+    harnesses: harnessCount,
     findings: null,
     evidence: null,
     monitored: false,
@@ -1124,7 +1124,7 @@ function parseOverviewSnapshot(value: unknown): OverviewSnapshot {
     subscription_cny_month: subscription,
     sync: { ok: syncOk, stage: syncStage, at: syncAt },
     budget: { source: budgetSource, level: budgetLevel, month_cost: nullableMoney(budgetRow.month_cost, "overview month cost"), monthly_cny: nullableMoney(budgetRow.monthly_cny, "overview monthly budget"), month_ratio: budgetRow.month_ratio == null ? null : Math.min(requiredFiniteNumber(budgetRow.month_ratio, "overview budget ratio"), 1000) },
-    host_rows: hostRows,
+    harness_rows: harnessRows,
   };
 }
 
@@ -1191,7 +1191,7 @@ function parseUsageCalendar(value: unknown): UsageCalendar {
   return { month, days: days.sort((left, right) => left.date.localeCompare(right.date)) };
 }
 
-function parseSummaryHostTokens(value: unknown, label: string): SummaryHostTokens {
+function parseSummaryHarnessTokens(value: unknown, label: string): SummaryHarnessTokens {
   const row = record(value, label);
   const total = boundedCount(row.total, `${label} total`, 1_000_000_000_000_000);
   const uncached = boundedCount(row.uncached_input, `${label} uncached input`, 1_000_000_000_000_000);
@@ -1215,7 +1215,7 @@ function parseSummaryAmount(value: unknown, label: string): SummaryAmount {
   const currency = row.currency === null || row.currency === undefined ? null : stringField(row.currency, `${label} currency`);
   if (currency !== null && !/^[A-Z0-9_]{1,12}$/.test(currency)) throw new Error(`${label} currency 不安全`);
   return {
-    host_id: safeHostLabel(row.host_id), amounts_by_basis, currency,
+    harness_id: safeHarnessLabel(row.harness_id), amounts_by_basis, currency,
     has_unresolved: row.has_unresolved === true,
     evidence_basis: row.evidence_basis == null ? null : decisionLabel(row.evidence_basis, `${label} evidence basis`),
     pricing_method: row.pricing_method == null ? null : decisionLabel(row.pricing_method, `${label} pricing method`),
@@ -1228,23 +1228,23 @@ function parseSummaryRoot(value: unknown, windowKind: "month" | "date"): UsageSo
   const freshnessRow = record(root.freshness, "usage freshness");
   const freshness = boundedEnum(freshnessRow.state, "usage freshness state", ["fresh", "stale", "partial", "unavailable"], "unknown") as UsageSourceSummary["freshness"];
   const coverageRow = record(root.coverage, "usage coverage");
-  const excluded = requiredArray(root.excluded_hosts, "usage excluded hosts").slice(0, 32).map((host) => safeHostLabel(host));
+  const excluded = requiredArray(root.excluded_harnesses, "usage excluded harnesses").slice(0, 32).map((harness) => safeHarnessLabel(harness));
   const measured = boundedCount(coverageRow.measured_fields, "usage measured fields", 1_000);
   const total = boundedCount(coverageRow.total_fields, "usage total fields", 1_000);
   if (measured > total) throw new Error("usage coverage 不守恒");
   const rawBasis = record(root.actual_spend_by_basis, "usage spend by basis");
   const spendByBasis: Record<string, Record<string, number>> = {};
-  const allowedBases = ["metered_actual", "host_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent", "other"] as const;
+  const allowedBases = ["metered_actual", "harness_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent", "other"] as const;
   for (const basis of Object.keys(rawBasis)) {
     if (!(allowedBases as readonly string[]).includes(basis)) throw new Error("usage spend basis 不受支持");
   }
   for (const basis of allowedBases) {
     if (rawBasis[basis] !== undefined) spendByBasis[basis] = strictSummaryMoneyMap(rawBasis[basis], `usage ${basis} spend`);
   }
-  const rawTokens = record(root.tokens_by_host ?? {}, "usage tokens by host");
-  const tokens_by_host: Record<string, SummaryHostTokens> = {};
-  for (const [host, item] of Object.entries(rawTokens).slice(0, 64)) tokens_by_host[safeHostLabel(host)] = parseSummaryHostTokens(item, `usage tokens ${host}`);
-  const total_tokens = Object.values(tokens_by_host).reduce((sum, item) => sum + item.total, 0);
+  const rawTokens = record(root.tokens_by_harness ?? {}, "usage tokens by harness");
+  const tokens_by_harness: Record<string, SummaryHarnessTokens> = {};
+  for (const [harness, item] of Object.entries(rawTokens).slice(0, 64)) tokens_by_harness[safeHarnessLabel(harness)] = parseSummaryHarnessTokens(item, `usage tokens ${harness}`);
+  const total_tokens = Object.values(tokens_by_harness).reduce((sum, item) => sum + item.total, 0);
   const rawMetered = record(root.metered_view ?? {}, "usage metered view");
   const metered_view: UsageSourceSummary["metered_view"] = {};
   for (const [currency, item] of Object.entries(rawMetered).slice(0, 16)) {
@@ -1264,10 +1264,10 @@ function parseSummaryRoot(value: unknown, windowKind: "month" | "date"): UsageSo
     freshness,
     last_observed_at: safeTimestamp(freshnessRow.last_observed_at, "usage observed at"),
     coverage: { measured_fields: measured, total_fields: total },
-    excluded_hosts: excluded,
+    excluded_harnesses: excluded,
     actual_spend: strictSummaryMoneyMap(root.total_actual_spend, "usage actual spend"),
     spend_by_basis: spendByBasis,
-    tokens_by_host, total_tokens, metered_view, by_provider,
+    tokens_by_harness, total_tokens, metered_view, by_provider,
     has_unresolved: root.has_unresolved === true,
   };
   assertSummaryMoneyPartition(common.actual_spend, common.spend_by_basis);
@@ -1370,21 +1370,21 @@ function safeSkillText(value: unknown, label: string): string | null {
   return text;
 }
 
-function parseSkillScan(value: unknown, expectedHost?: string): SkillScanReport {
+function parseSkillScan(value: unknown, expectedHarness?: string): SkillScanReport {
   const root = record(value, "skill scan");
   const report = root.report == null ? null : record(root.report, "skill scan report");
   const meta = root.desktop_meta == null ? {} : record(root.desktop_meta, "skill scan metadata");
-  if (!report) return { status: "unavailable", schema_version: null, run: null, host_selection: "all", generated_at_ms: null, from_cache: false, hosts: [], diagnostics: [], not_assessed: [] };
-  const rawHosts = record(report.host_summaries ?? {}, "skill host summaries");
-  const hosts: SkillHostSummary[] = Object.entries(rawHosts).slice(0, 16).map(([hostKey, raw]) => {
-    const row = record(raw, "skill host summary");
+  if (!report) return { status: "unavailable", schema_version: null, run: null, harness_selection: "all", generated_at_ms: null, from_cache: false, harnesses: [], diagnostics: [], not_assessed: [] };
+  const rawHarnesses = record(report.harness_summaries ?? {}, "skill harness summaries");
+  const harnesses: SkillHarnessSummary[] = Object.entries(rawHarnesses).slice(0, 16).map(([harnessKey, raw]) => {
+    const row = record(raw, "skill harness summary");
     const budget = row.description_budget_detail == null ? {} : record(row.description_budget_detail, "skill budget detail");
     const budgetAvailable = budget.available === true;
     const used = budget.used_chars == null ? null : boundedCount(budget.used_chars, "skill budget used", 10_000_000);
     const limit = budget.budget_chars == null ? null : boundedCount(budget.budget_chars, "skill budget limit", 10_000_000);
     const pct = budget.pct_used == null ? null : Math.min(requiredFiniteNumber(budget.pct_used, "skill budget percent"), 1000);
-    const trigger = boundedEnum(row.trigger_data ?? "unknown", "skill trigger data", ["available", "unavailable"], "unknown") as SkillHostSummary["trigger_data"];
-    return { host: safeHostLabel(hostKey), skills_on_disk: boundedCount(row.skills_on_disk ?? 0, "skills on disk", 10_000_000), discoverable_skills: boundedCount(row.discoverable_skills ?? 0, "discoverable skills", 10_000_000), runtime_verified_loaded_skills: row.runtime_verified_loaded_skills == null ? null : boundedCount(row.runtime_verified_loaded_skills, "runtime verified skills", 10_000_000), unique_discoverable_skills: boundedCount(row.unique_discoverable_skills ?? row.discoverable_skills ?? 0, "unique discoverable skills", 10_000_000), description_budget: { available: budgetAvailable, used_chars: used, budget_chars: limit, pct_used: pct, source: safeSkillText(budget.source, "skill budget source") }, trigger_data: trigger };
+    const trigger = boundedEnum(row.trigger_data ?? "unknown", "skill trigger data", ["available", "unavailable"], "unknown") as SkillHarnessSummary["trigger_data"];
+    return { harness: safeHarnessLabel(harnessKey), skills_on_disk: boundedCount(row.skills_on_disk ?? 0, "skills on disk", 10_000_000), discoverable_skills: boundedCount(row.discoverable_skills ?? 0, "discoverable skills", 10_000_000), runtime_verified_loaded_skills: row.runtime_verified_loaded_skills == null ? null : boundedCount(row.runtime_verified_loaded_skills, "runtime verified skills", 10_000_000), unique_discoverable_skills: boundedCount(row.unique_discoverable_skills ?? row.discoverable_skills ?? 0, "unique discoverable skills", 10_000_000), description_budget: { available: budgetAvailable, used_chars: used, budget_chars: limit, pct_used: pct, source: safeSkillText(budget.source, "skill budget source") }, trigger_data: trigger };
   });
   const diagnostics = requiredArray(root.diagnostics ?? [], "skill diagnostics").slice(0, 512).map((raw) => {
     const row = record(raw, "skill diagnostic");
@@ -1393,15 +1393,15 @@ function parseSkillScan(value: unknown, expectedHost?: string): SkillScanReport 
     return { code: safeSkillText(row.code, "skill diagnostic code") ?? "unknown", name: safeSkillText(row.name, "skill diagnostic name") ?? "未命名规则", severity: boundedEnum(row.severity ?? "info", "skill severity", ["critical", "warning", "info"], "info") as SkillDiagnostic["severity"], skill: safeSkillText(row.skill, "skill diagnostic skill"), evidence_count: evidenceCount, impact: safeSkillText(row.impact, "skill diagnostic impact"), recommendation: safeSkillText(row.recommendation, "skill diagnostic recommendation"), caveats: Array.isArray(row.caveats) ? row.caveats.slice(0, 16).map((item) => safeSkillText(item, "skill caveat") ?? "").filter(Boolean) : [] };
   });
   const notAssessed = requiredArray(root.not_assessed ?? [], "skill not assessed").slice(0, 128).map((raw) => { const row = record(raw, "skill not assessed row"); return { code: safeSkillText(row.code, "skill not assessed code") ?? "unknown", name: safeSkillText(row.name, "skill not assessed name") ?? "未评估规则", reason: safeSkillText(row.reason, "skill not assessed reason") ?? "原因不可用" }; });
-  const hostSelection = safeSkillText(root.host_selection, "skill host selection") ?? "all";
-  if (expectedHost !== undefined && hostSelection !== expectedHost) throw new Error("skill scan host_selection 不匹配");
-  return { status: "ok", schema_version: safeVersion(root.schema_version, "skill schema") ?? null, run: safeSkillText(root.run, "skill run"), host_selection: hostSelection, generated_at_ms: meta.generated_at_ms == null ? null : nullableSourceTimestampMs(meta.generated_at_ms, "skill generated at"), from_cache: meta.from_cache === true, hosts, diagnostics, not_assessed: notAssessed };
+  const harnessSelection = safeSkillText(root.harness_selection, "skill harness selection") ?? "all";
+  if (expectedHarness !== undefined && harnessSelection !== expectedHarness) throw new Error("skill scan harness_selection 不匹配");
+  return { status: "ok", schema_version: safeVersion(root.schema_version, "skill schema") ?? null, run: safeSkillText(root.run, "skill run"), harness_selection: harnessSelection, generated_at_ms: meta.generated_at_ms == null ? null : nullableSourceTimestampMs(meta.generated_at_ms, "skill generated at"), from_cache: meta.from_cache === true, harnesses, diagnostics, not_assessed: notAssessed };
 }
 
 function parseSkillDiffIdentity(value: unknown): SkillDiffIdentity {
   const row = record(value, "skill diff identity");
   return {
-    host: safeSkillText(row.host, "skill diff host") ?? "unknown",
+    harness: safeSkillText(row.harness, "skill diff harness") ?? "unknown",
     name: safeSkillText(row.name, "skill diff name") ?? "未命名 skill",
     namespace: row.namespace == null ? null : safeSkillText(row.namespace, "skill diff namespace"),
     instance_id: row.instance_id == null ? null : safeSkillText(row.instance_id, "skill diff instance"),
@@ -1440,15 +1440,15 @@ function parseMonthlyExportSummary(value: unknown): MonthlyExportSummary {
   const measured = boundedCount(coverageRow.measured_fields, "monthly export measured fields", 1_000);
   const total = boundedCount(coverageRow.total_fields, "monthly export total fields", 1_000);
   if (measured > total) throw new Error("monthly export coverage 不守恒");
-  const excluded = requiredArray(root.excluded_hosts, "monthly export excluded hosts").slice(0, 32).map((host) => safeHostLabel(host));
+  const excluded = requiredArray(root.excluded_harnesses, "monthly export excluded harnesses").slice(0, 32).map((harness) => safeHarnessLabel(harness));
   const freshness = parseFreshness(root.freshness, "monthly export freshness");
-  const byHost = record(root.by_host ?? {}, "monthly export hosts");
-  const tokensByHost = record(root.tokens_by_host ?? {}, "monthly export tokens");
+  const byHarness = record(root.by_harness ?? {}, "monthly export harnesses");
+  const tokensByHarness = record(root.tokens_by_harness ?? {}, "monthly export tokens");
   const byProvider = record(root.by_provider ?? {}, "monthly export providers");
   const rows: MonthlyExportRow[] = [];
   Object.entries(byProvider).slice(0, 128).forEach(([key, raw]) => {
     const parts = key.split("/");
-    const host = safeHostLabel(parts.shift() ?? "generic");
+    const harness = safeHarnessLabel(parts.shift() ?? "generic");
     const provider = parts.length ? decisionLabel(parts.join("/"), "monthly export provider") : null;
     const amount = record(raw, "monthly export provider row");
     const amounts = record(amount.amounts_by_basis ?? {}, "monthly export provider amounts");
@@ -1456,10 +1456,10 @@ function parseMonthlyExportSummary(value: unknown): MonthlyExportSummary {
     const currency = amount.currency == null ? null : decisionCurrency(amount.currency, "monthly export currency");
     if (!basisEntries.length) basisEntries.push(["other", 0]);
     basisEntries.forEach(([basis, rawAmount]) => rows.push({
-      host,
+      harness,
       provider,
       tokens: null,
-      basis: boundedEnum(basis, "monthly export basis", ["metered_actual", "host_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent", "other"], "other"),
+      basis: boundedEnum(basis, "monthly export basis", ["metered_actual", "harness_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent", "other"], "other"),
       currency,
       amount: safeNonNegativeNumber(rawAmount, "monthly export amount"),
       unresolved: amount.has_unresolved === true,
@@ -1468,19 +1468,19 @@ function parseMonthlyExportSummary(value: unknown): MonthlyExportSummary {
       freshness: parseFreshness(amount.freshness, "monthly export provider freshness"),
     }));
   });
-  Object.entries(byHost).slice(0, 64).forEach(([hostKey, raw]) => {
-    const host = safeHostLabel(hostKey);
-    const amount = record(raw, "monthly export host row");
-    const tokenRow = tokensByHost[host] == null ? null : record(tokensByHost[host], "monthly export host tokens");
-    rows.push({ host, provider: null, tokens: tokenRow == null ? null : boundedCount(tokenRow.total ?? 0, "monthly export host tokens", 1_000_000_000_000_000), basis: null, currency: amount.currency == null ? null : decisionCurrency(amount.currency, "monthly export currency"), amount: null, unresolved: amount.has_unresolved === true, evidence_basis: null, pricing_method: null, freshness: parseFreshness(amount.freshness, "monthly export host freshness") });
+  Object.entries(byHarness).slice(0, 64).forEach(([harnessKey, raw]) => {
+    const harness = safeHarnessLabel(harnessKey);
+    const amount = record(raw, "monthly export harness row");
+    const tokenRow = tokensByHarness[harness] == null ? null : record(tokensByHarness[harness], "monthly export harness tokens");
+    rows.push({ harness, provider: null, tokens: tokenRow == null ? null : boundedCount(tokenRow.total ?? 0, "monthly export harness tokens", 1_000_000_000_000_000), basis: null, currency: amount.currency == null ? null : decisionCurrency(amount.currency, "monthly export currency"), amount: null, unresolved: amount.has_unresolved === true, evidence_basis: null, pricing_method: null, freshness: parseFreshness(amount.freshness, "monthly export harness freshness") });
   });
-  return { month, rows, coverage: { measured_fields: measured, total_fields: total }, freshness, excluded_hosts: excluded };
+  return { month, rows, coverage: { measured_fields: measured, total_fields: total }, freshness, excluded_harnesses: excluded };
 }
 
 function parseUsageHourly(value: unknown): UsageHourly {
   const root = record(value, "usage hourly");
   const date = safeDate(root.date, "usage hourly date");
-  const source = record(root.hosts_available, "usage hourly sources");
+  const source = record(root.harnesses_available, "usage hourly sources");
   const sourceValue = (key: string): string | null => {
     if (source[key] === null || source[key] === undefined) return null;
     const value = boundedEnum(source[key], `usage hourly ${key} source`, ["sql-facts"], "unknown");
@@ -1495,7 +1495,7 @@ function parseUsageHourly(value: unknown): UsageHourly {
     return { hour, dsh_tokens: safeNullableToken(row.dsh_tokens, "usage hourly dsh"), claude_tokens: safeNullableToken(row.claude_tokens, "usage hourly claude"), codex_tokens: safeNullableToken(row.codex_tokens, "usage hourly codex") };
   }).sort((left, right) => left.hour - right.hour);
   if (hours.length !== 24 || new Set(hours.map((hour) => hour.hour)).size !== 24) throw new Error("usage hours 必须覆盖 0-23 且不可重复");
-  return { date, hosts_available: { dsh: sourceValue("dsh"), claude: sourceValue("claude"), codex: sourceValue("codex") }, hours };
+  return { date, harnesses_available: { dsh: sourceValue("dsh"), claude: sourceValue("claude"), codex: sourceValue("codex") }, hours };
 }
 
 function parseSessionCost(value: unknown, label: string): SessionCost | null {
@@ -1538,7 +1538,7 @@ function parseSessionBase(value: unknown): Omit<SessionRow, "peak_tokens"> {
   const modelIds = requiredArray(row.model_ids, "session model ids").slice(0, 16).map((model) => decisionLabel(model, "session model"));
   return {
     session_ref: sessionRef,
-    host: safeHostLabel(row.host),
+    harness: safeHarnessLabel(row.harness),
     first_event_at: safeTimestamp(row.first_event_at, "session first event"),
     last_event_at: safeTimestamp(row.last_event_at, "session last event"),
     event_count: boundedCount(row.event_count, "session event count", 1_000_000_000),
@@ -1722,8 +1722,8 @@ function parseRouteQualityFamily(value: unknown): RouteQualityFamily {
 
 function parseRouteQuality(value: unknown): RouteQualityReport {
   const root = record(value, "route quality report");
-  const hosts = requiredArray(root.hosts, "route quality hosts");
-  if (hosts.length > 128) throw new Error("route quality hosts 超出上限");
+  const harnesses = requiredArray(root.harnesses, "route quality harnesses");
+  if (harnesses.length > 128) throw new Error("route quality harnesses 超出上限");
   const sinceMs = boundedCount(root.since_ms, "route quality since", 9_000_000_000_000);
   const nowMs = boundedCount(root.now_ms, "route quality now", 9_000_000_000_000);
   if (sinceMs > nowMs) throw new Error("route quality 时间范围不安全");
@@ -1736,14 +1736,14 @@ function parseRouteQuality(value: unknown): RouteQualityReport {
     since_ms: sinceMs,
     now_ms: nowMs,
     families_vocabulary: vocabulary,
-    hosts: hosts.map((item) => {
-      const row = record(item, "route quality host");
+    harnesses: harnesses.map((item) => {
+      const row = record(item, "route quality harness");
       const totals = record(row.totals, "route quality totals");
       const native = requiredArray(row.native_families, "route quality native families").slice(0, 16).map((family) => routeFamily(family, "route quality native family"));
-      const families = requiredArray(row.families, "route quality host families");
+      const families = requiredArray(row.families, "route quality harness families");
       if (families.length > 32) throw new Error("route quality families 超出上限");
       return {
-        host: safeHostLabel(row.host),
+        harness: safeHarnessLabel(row.harness),
         has_baseline: requiredBoolean(row.has_baseline, "route quality baseline"),
         native_families: native,
         totals: { requests: boundedCount(totals.requests, "route quality total requests", 1_000_000_000), sessions: boundedCount(totals.sessions, "route quality total sessions", 1_000_000_000) },
@@ -1781,7 +1781,7 @@ function parseTrustDiscovery(value: unknown): TrustDiscovery {
     const row = record(item, "trust candidate");
     if (typeof row.detected !== "boolean" || typeof row.artifact_profile_available !== "boolean") throw new Error("trust candidate 状态不安全");
     return {
-      id: safeHostLabel(row.id),
+      id: safeHarnessLabel(row.id),
       detected: row.detected,
       artifact_profile_available: row.artifact_profile_available,
       coverage_state: boundedEnum(row.coverage_state, "trust coverage state", ["not_detected", "profiled", "detected_unprofiled"], "unknown"),
@@ -1934,7 +1934,7 @@ function parseTrustAudit(value: unknown): TrustAuditReport {
     return Object.fromEntries(Object.entries(source).map(([key, item]) => [stringField(key, name), requiredCount(item, name)]));
   };
   return {
-    host: stringField(root.host, "trust host"), discovered: count("discovered"), inserted: count("inserted"), duplicate: count("duplicate"),
+    harness: stringField(root.harness, "trust harness"), discovered: count("discovered"), inserted: count("inserted"), duplicate: count("duplicate"),
     findings_upserted: count("findings_upserted"), evidence_links_added: count("evidence_links_added"),
     stage_counts: map("stage_counts"), observation_kind_counts: map("observation_kind_counts"), evidence,
   };
@@ -2040,7 +2040,7 @@ function parseFindingGroup(value: unknown): FindingGroup {
   return {
     group_id: safeHash(row.group_id, "finding group id"),
     action_kind: boundedEnum(row.action_kind, "finding action kind", ["behavior", "billing", "budget", "source", "usage", "probe", "other"], "other"),
-    rule: stringField(row.rule, "finding rule"), host: safeHostLabel(row.host),
+    rule: stringField(row.rule, "finding rule"), harness: safeHarnessLabel(row.harness),
     evidence_class: boundedEnum(row.evidence_class, "finding evidence class", ["egress", "billing", "data_source", "trust", "usage", "behavior", "generic"], "generic"),
     count: requiredCount(row.count, "finding count"), first_seen_at_ms: firstSeen,
     last_seen_at_ms: lastSeen, severity: stringField(row.severity, "finding severity"),
@@ -2070,14 +2070,14 @@ function parseFindings(value: unknown): FindingsReport {
 
 function parseFindingsFreshness(value: unknown): FindingsFreshness {
   const root = record(value, "findings freshness");
-  if (root.status === "unavailable") return { status: "unavailable", state: "unknown", last_successful_sync_at: null, stale_hosts: [], syncing: false };
+  if (root.status === "unavailable") return { status: "unavailable", state: "unknown", last_successful_sync_at: null, stale_harnesses: [], syncing: false };
   if (root.status !== "ok") throw new Error("findings freshness 状态不兼容");
   const freshness = record(root.freshness, "findings freshness data");
-  const stale = requiredArray(freshness.stale_hosts, "stale hosts").map((host) => safeHostLabel(host));
+  const stale = requiredArray(freshness.stale_harnesses, "stale harnesses").map((harness) => safeHarnessLabel(harness));
   const lastSuccessfulSyncAt = safeTimestamp(freshness.last_successful_sync_at, "last sync");
   const requestedState = freshness.state === "fresh" || freshness.state === "stale" || freshness.state === "not_yet_synced" ? freshness.state : "unknown";
   const state = requestedState === "fresh" && lastSuccessfulSyncAt === null ? "unknown" : requestedState;
-  return { status: "ok", state, last_successful_sync_at: lastSuccessfulSyncAt, stale_hosts: stale, syncing: freshness.syncing === true };
+  return { status: "ok", state, last_successful_sync_at: lastSuccessfulSyncAt, stale_harnesses: stale, syncing: freshness.syncing === true };
 }
 
 function boundedRatio(value: unknown, label: string): number | null {
@@ -2104,8 +2104,8 @@ function parseDecisionSession(value: unknown): DecisionTopSession {
 function parseDecisionRow(value: unknown): DecisionMatrixRow {
   const row = record(value, "decision matrix row");
   const tokens = record(row.tokens, "decision token buckets");
-  const hostBehavior = record(row.host_behavior, "decision host behavior");
-  const behavior = Object.fromEntries(Object.entries(hostBehavior).filter(([key]) => ["SV607", "SV608", "SV610"].includes(key)).map(([key, item]) => [key, requiredCount(item, `decision ${key}`)]));
+  const harnessBehavior = record(row.harness_behavior, "decision harness behavior");
+  const behavior = Object.fromEntries(Object.entries(harnessBehavior).filter(([key]) => ["SV607", "SV608", "SV610"].includes(key)).map(([key, item]) => [key, requiredCount(item, `decision ${key}`)]));
   const rawPressure = row.limit_pressure;
   let limitPressure: DecisionMatrixRow["limit_pressure"] = null;
   if (rawPressure !== null && rawPressure !== undefined) {
@@ -2113,12 +2113,12 @@ function parseDecisionRow(value: unknown): DecisionMatrixRow {
     limitPressure = { hits: requiredCount(pressure.hits, "decision pressure hits"), per_session: pressure.per_session === null ? null : requiredFiniteNumber(pressure.per_session, "decision pressure per session") };
   }
   return {
-    host: safeHostLabel(row.host), model_id: decisionLabel(row.model_id, "decision model"), provider_id: decisionLabel(row.provider_id, "decision provider"),
+    harness: safeHarnessLabel(row.harness), model_id: decisionLabel(row.model_id, "decision model"), provider_id: decisionLabel(row.provider_id, "decision provider"),
     sessions: requiredCount(row.sessions, "decision sessions"),
     tokens: { uncached_input: requiredCount(tokens.uncached_input, "uncached input"), cache_read: requiredCount(tokens.cache_read, "cache read"), cache_write: requiredCount(tokens.cache_write, "cache write"), output: requiredCount(tokens.output, "output tokens"), total: requiredCount(tokens.total, "total tokens") },
     cache_hit_ratio: boundedRatio(row.cache_hit_ratio, "cache hit"), has_subscription: requiredBoolean(row.has_subscription, "subscription"), waste_rate: boundedRatio(row.waste_rate, "waste rate"),
     amounts: requiredArray(row.amounts, "decision amounts").slice(0, 8).map(parseDecisionAmount), top_sessions: requiredArray(row.top_sessions, "decision top sessions").slice(0, 3).map(parseDecisionSession),
-    host_behavior: behavior, limit_pressure: limitPressure, cost_provider_unresolved: requiredBoolean(row.cost_provider_unresolved, "provider resolution"),
+    harness_behavior: behavior, limit_pressure: limitPressure, cost_provider_unresolved: requiredBoolean(row.cost_provider_unresolved, "provider resolution"),
   };
 }
 
@@ -2133,7 +2133,7 @@ function parseDecisionSummary(value: unknown): DecisionSummary {
   for (const key of ["ratio_vs_control", "saving_pct", "span_hours"] as const) if (row[key] !== undefined) { if (typeof row[key] !== "number" || !Number.isFinite(row[key]) || row[key] < 0) throw new Error(`decision ${key} 不安全`); summary[key] = row[key]; }
   for (const key of ["saving_minor", "tokens_total", "failures"] as const) if (row[key] !== undefined) summary[key] = requiredCount(row[key], `decision ${key}`);
   if (row.session_ref !== undefined) { const reference = stringField(row.session_ref, "decision summary session"); if (!/^sr_[A-Za-z0-9_-]{8,128}$/.test(reference)) throw new Error("decision summary session 不安全"); summary.session_ref = reference; }
-  if (row.combo !== undefined) { const combo = record(row.combo, "decision summary combo"); summary.combo = { host: safeHostLabel(combo.host), model_id: decisionLabel(combo.model_id, "summary model") }; }
+  if (row.combo !== undefined) { const combo = record(row.combo, "decision summary combo"); summary.combo = { harness: safeHarnessLabel(combo.harness), model_id: decisionLabel(combo.model_id, "summary model") }; }
   if (row.currencies !== undefined) summary.currencies = requiredArray(row.currencies, "summary currencies").slice(0, 8).map((item) => decisionCurrency(item, "summary currency"));
   if (row.by_currency !== undefined) { const source = record(row.by_currency, "summary currency values"); summary.by_currency = Object.fromEntries(Object.entries(source).slice(0, 8).map(([key, item]) => { const value = record(item, "summary currency value"); return [decisionCurrency(key, "summary currency key"), { combos: requiredCount(value.combos, "summary combos"), tokens: requiredCount(value.tokens, "summary tokens") }]; })); }
   return summary;
@@ -2141,7 +2141,7 @@ function parseDecisionSummary(value: unknown): DecisionSummary {
 
 function parseDecisionSummaryCombo(value: unknown): NonNullable<DecisionSummary["outlier"]> {
   const row = record(value, "decision summary combo");
-  return { host: safeHostLabel(row.host), model_id: decisionLabel(row.model_id, "summary model"), provider_id: row.provider_id === undefined ? "<unknown>" : decisionLabel(row.provider_id, "summary provider"), per_session_minor: requiredCount(row.per_session_minor, "summary per session"), cache_hit_ratio: boundedRatio(row.cache_hit_ratio, "summary cache hit"), uncached_tokens: row.uncached_tokens === undefined ? 0 : requiredCount(row.uncached_tokens, "summary uncached") };
+  return { harness: safeHarnessLabel(row.harness), model_id: decisionLabel(row.model_id, "summary model"), provider_id: row.provider_id === undefined ? "<unknown>" : decisionLabel(row.provider_id, "summary provider"), per_session_minor: requiredCount(row.per_session_minor, "summary per session"), cache_hit_ratio: boundedRatio(row.cache_hit_ratio, "summary cache hit"), uncached_tokens: row.uncached_tokens === undefined ? 0 : requiredCount(row.uncached_tokens, "summary uncached") };
 }
 
 function parseDecisionMatrix(value: unknown): DecisionMatrixReport {
@@ -2152,7 +2152,7 @@ function parseDecisionMatrix(value: unknown): DecisionMatrixReport {
   const rows = requiredArray(root.rows, "decision rows");
   const summaries = requiredArray(root.findings_summary, "decision summary");
   const limitations = requiredArray(root.limitations, "decision limitations");
-  const allowedLimitations = new Set(["waste_rate_unavailable", "host_behavior_host_level", "amounts_currency_separated", "fingerprint_link_deferred", "top_sessions_unavailable", "pricing_unavailable"]);
+  const allowedLimitations = new Set(["waste_rate_unavailable", "harness_behavior_harness_level", "amounts_currency_separated", "fingerprint_link_deferred", "top_sessions_unavailable", "pricing_unavailable"]);
   if (rows.length > 500 || summaries.length > 4 || limitations.length > 6) throw new Error("decision matrix DTO 数量超限");
   return { schema_version: "agent-vitals-decision-matrix/v1", status: "ok", month, rows: rows.map(parseDecisionRow), findings_summary: summaries.map(parseDecisionSummary), limitations: limitations.map((item) => { const limitation = stringField(item, "decision limitation"); if (!allowedLimitations.has(limitation)) throw new Error("decision limitation 不安全"); return limitation; }) };
 }
@@ -2220,39 +2220,39 @@ export async function createTrustSuppression(issueType: string): Promise<string>
   return id;
 }
 
-export async function auditTrust(host: string): Promise<TrustAuditReport> {
-  if (!/^[a-z][a-z0-9_-]{0,31}$/.test(host)) throw new Error("宿主标识不安全");
+export async function auditTrust(harness: string): Promise<TrustAuditReport> {
+  if (!/^[a-z][a-z0-9_-]{0,31}$/.test(harness)) throw new Error("执行环境标识不安全");
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return {
-    host, discovered: 1, inserted: 1, duplicate: 0, findings_upserted: 0, evidence_links_added: 0,
+    harness, discovered: 1, inserted: 1, duplicate: 0, findings_upserted: 0, evidence_links_added: 0,
     stage_counts: { package_observed: 1 }, observation_kind_counts: { package: 1 }, evidence: [{
       kind: "package", stage: "package_observed", evidence_level: "E1", evidence_origin: "local_artifact", observed_at_ms: Date.now(),
       workspace_ref: "hmac:preview-workspace", native_event_ref: "hmac:preview-event", scope_classes: ["workspace_current", "git_history"],
       file_count: 42, byte_count: 1024 * 1024, destination_class: "object_storage", collector_id: "preview",
     }],
   };
-  const result = await handler("trust_audit", { host });
+  const result = await handler("trust_audit", { harness });
   const root = record(result, "trust audit envelope");
   const reports = Array.isArray(root.reports) ? root.reports : [];
-  if (reports.length !== 1) throw new Error("trust audit 未返回单一宿主报告");
+  if (reports.length !== 1) throw new Error("trust audit 未返回单一执行环境报告");
   return parseTrustAudit(reports[0]);
 }
 
-export async function readTrustEvidence(host: string | null = null, limit = 200, cursor: string | null = null): Promise<TrustEvidenceHistory> {
-  if (host !== null && !/^[a-z][a-z0-9_-]{0,31}$/.test(host)) throw new Error("宿主标识不安全");
+export async function readTrustEvidence(harness: string | null = null, limit = 200, cursor: string | null = null): Promise<TrustEvidenceHistory> {
+  if (harness !== null && !/^[a-z][a-z0-9_-]{0,31}$/.test(harness)) throw new Error("执行环境标识不安全");
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new Error("Trust 证据读取范围不安全");
   const handler = globalTauri()?.core?.invoke;
   if (cursor !== null && (cursor.length > 320 || !/^[A-Za-z0-9_.:-]+$/.test(cursor))) throw new Error("Trust 证据游标不安全");
-  if (!handler) return { host, count: 0, evidence: [], next_cursor: null };
-  const result = record(await handler("trust_evidence_read", { host, limit, cursor }), "trust evidence history");
+  if (!handler) return { harness, count: 0, evidence: [], next_cursor: null };
+  const result = record(await handler("trust_evidence_read", { harness, limit, cursor }), "trust evidence history");
   const evidence = requiredArray(result.evidence, "trust evidence history evidence").map((item) => parseTrustEvidence(item));
   const count = requiredCount(result.count, "trust evidence history count");
   if (count !== evidence.length) throw new Error("Trust 证据数量与记录不一致");
-  const returnedHost = result.host === null ? null : stringField(result.host, "trust evidence history host");
-  if (returnedHost !== host) throw new Error("Trust 证据宿主范围不一致");
+  const returnedHarness = result.harness === null ? null : stringField(result.harness, "trust evidence history harness");
+  if (returnedHarness !== harness) throw new Error("Trust 证据执行环境范围不一致");
   const next_cursor = result.next_cursor == null ? null : result.next_cursor;
   if (next_cursor !== null && (typeof next_cursor !== "string" || next_cursor.length > 320 || !/^[A-Za-z0-9_.:-]+$/.test(next_cursor))) throw new Error("Trust 证据游标不安全");
-  return { host: returnedHost, count, evidence, next_cursor };
+  return { harness: returnedHarness, count, evidence, next_cursor };
 }
 
 export async function readTrustMonitorConfig(): Promise<TrustMonitorConfig> {
@@ -2317,8 +2317,8 @@ export async function readFindings(cursor: string | null = null): Promise<Findin
     totals: { issues: 2, findings: 2, critical: 1, warning: 1, info: 0, sessions: 2, sessions_total: 5 },
     rules: [{ rule: "SV709", severity: "critical", category: "object_storage_egress", hits: 1, sessions: 1 }, { rule: "PRICE_COVERAGE", severity: "warning", category: "billing", hits: 1, sessions: 1 }],
     issues: [
-      { group_id: "fnv1a64:0123456789abcdef", action_kind: "behavior", rule: "SV709", host: "plugin:zcode", evidence_class: "egress", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "critical", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:2222222222222222", observed_first_at_ms: 1789891200000, observed_last_at_ms: 1789891200000, evidence_level: "E3", stage: "egress_attempted", evidence_origin: "network_metadata", scope_classes: ["git_history"], observation_count: 1, file_count: null, byte_count: 3145728, destination_class: "object_storage", confidence: "high" }], read_only: true, manual_follow_up: false },
-      { group_id: "fnv1a64:1111111111111111", action_kind: "billing", rule: "PRICE_COVERAGE", host: "minimax-code", evidence_class: "billing", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:3333333333333333", observed_first_at_ms: 1789891200000, observed_last_at_ms: 1789891200000, evidence_level: null, stage: null, evidence_origin: "local_artifact", scope_classes: [], observation_count: 1, file_count: null, byte_count: null, destination_class: null, confidence: "medium" }], read_only: false, manual_follow_up: true },
+      { group_id: "fnv1a64:0123456789abcdef", action_kind: "behavior", rule: "SV709", harness: "plugin:zcode", evidence_class: "egress", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "critical", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:2222222222222222", observed_first_at_ms: 1789891200000, observed_last_at_ms: 1789891200000, evidence_level: "E3", stage: "egress_attempted", evidence_origin: "network_metadata", scope_classes: ["git_history"], observation_count: 1, file_count: null, byte_count: 3145728, destination_class: "object_storage", confidence: "high" }], read_only: true, manual_follow_up: false },
+      { group_id: "fnv1a64:1111111111111111", action_kind: "billing", rule: "PRICE_COVERAGE", harness: "minimax-code", evidence_class: "billing", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:3333333333333333", observed_first_at_ms: 1789891200000, observed_last_at_ms: 1789891200000, evidence_level: null, stage: null, evidence_origin: "local_artifact", scope_classes: [], observation_count: 1, file_count: null, byte_count: null, destination_class: null, confidence: "medium" }], read_only: false, manual_follow_up: true },
     ], next_cursor: null, refreshed: false,
   });
   return parseFindings(await handler("findings_groups_safe", { pageSize: 50, cursor }));
@@ -2326,7 +2326,7 @@ export async function readFindings(cursor: string | null = null): Promise<Findin
 
 export async function readFindingsFreshness(): Promise<FindingsFreshness> {
   const handler = globalTauri()?.core?.invoke;
-  if (!handler) return { status: "ok", state: "stale", last_successful_sync_at: "2026-09-20T15:00:00+08:00", stale_hosts: ["dsh"], syncing: false };
+  if (!handler) return { status: "ok", state: "stale", last_successful_sync_at: "2026-09-20T15:00:00+08:00", stale_harnesses: ["dsh"], syncing: false };
   return parseFindingsFreshness(await handler("findings_freshness"));
 }
 
@@ -2334,9 +2334,9 @@ export async function readDecisionMatrix(): Promise<DecisionMatrixReport> {
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return parseDecisionMatrix({
     schema_version: "agent-vitals-decision-matrix/v1", status: "ok", month: "2026-09",
-    rows: [{ host: "plugin:zcode", model_id: "glm-5", provider_id: "zhipu", sessions: 4, tokens: { uncached_input: 1200, cache_read: 8800, cache_write: 300, output: 900, total: 11200 }, cache_hit_ratio: 0.8544, has_subscription: false, waste_rate: null, amounts: [{ amount_minor: 781, currency: "CNY", basis: "metered_estimate" }], top_sessions: [{ session_ref: "sr_0123456789", span_first_ms: 1789891200000, span_last_ms: 1789894800000, tokens_total: 6400, failures: 2 }], host_behavior: { SV610: 2 }, limit_pressure: { hits: 1, per_session: 0.25 }, cost_provider_unresolved: false }],
-    findings_summary: [{ kind: "marathon", session_ref: "sr_0123456789", span_hours: 25.2, tokens_total: 11200, failures: 2, combo: { host: "plugin:zcode", model_id: "glm-5" }}],
-    limitations: ["waste_rate_unavailable", "host_behavior_host_level", "amounts_currency_separated", "fingerprint_link_deferred"],
+    rows: [{ harness: "plugin:zcode", model_id: "glm-5", provider_id: "zhipu", sessions: 4, tokens: { uncached_input: 1200, cache_read: 8800, cache_write: 300, output: 900, total: 11200 }, cache_hit_ratio: 0.8544, has_subscription: false, waste_rate: null, amounts: [{ amount_minor: 781, currency: "CNY", basis: "metered_estimate" }], top_sessions: [{ session_ref: "sr_0123456789", span_first_ms: 1789891200000, span_last_ms: 1789894800000, tokens_total: 6400, failures: 2 }], harness_behavior: { SV610: 2 }, limit_pressure: { hits: 1, per_session: 0.25 }, cost_provider_unresolved: false }],
+    findings_summary: [{ kind: "marathon", session_ref: "sr_0123456789", span_hours: 25.2, tokens_total: 11200, failures: 2, combo: { harness: "plugin:zcode", model_id: "glm-5" }}],
+    limitations: ["waste_rate_unavailable", "harness_behavior_harness_level", "amounts_currency_separated", "fingerprint_link_deferred"],
   });
   return parseDecisionMatrix(await handler("decision_matrix_safe", { month: null }));
 }
@@ -2381,7 +2381,7 @@ export async function readUsageSourceSummary(month: string): Promise<UsageSource
     month: safe,
     freshness: { state: "unavailable", last_observed_at: null },
     coverage: { measured_fields: 0, total_fields: 0 },
-    excluded_hosts: [], total_actual_spend: {}, actual_spend_by_basis: {},
+    excluded_harnesses: [], total_actual_spend: {}, actual_spend_by_basis: {},
   });
   const parsed = parseUsageSourceSummary(await handler("data_monthly_summary", { month: safe }));
   if (parsed.month !== safe) throw new Error("usage source summary 返回了错误月份");
@@ -2391,7 +2391,7 @@ export async function readUsageSourceSummary(month: string): Promise<UsageSource
 export async function readDailySummary(date: string): Promise<DailySummary> {
   const safe = safeDate(date, "daily summary date");
   const handler = globalTauri()?.core?.invoke;
-  if (!handler) return parseDailySummary({ date: safe, freshness: { state: "unavailable", last_observed_at: null }, coverage: { measured_fields: 0, total_fields: 0 }, excluded_hosts: [], total_actual_spend: {}, actual_spend_by_basis: {}, tokens_by_host: {}, by_provider: {}, has_unresolved: false });
+  if (!handler) return parseDailySummary({ date: safe, freshness: { state: "unavailable", last_observed_at: null }, coverage: { measured_fields: 0, total_fields: 0 }, excluded_harnesses: [], total_actual_spend: {}, actual_spend_by_basis: {}, tokens_by_harness: {}, by_provider: {}, has_unresolved: false });
   const parsed = parseDailySummary(await handler("data_daily_summary", { date: safe }));
   if (parsed.date !== safe) throw new Error("daily summary 返回了错误日期");
   return parsed;
@@ -2478,7 +2478,7 @@ export async function readOverviewDetails(): Promise<OverviewDetails> {
 export async function readUsageHourly(date: string): Promise<UsageHourly> {
   const safe = safeDate(date, "usage hourly date");
   const handler = globalTauri()?.core?.invoke;
-  if (!handler) return parseUsageHourly({ date: safe, hosts_available: { dsh: null, claude: null, codex: null }, hours: Array.from({ length: 24 }, (_, hour) => ({ hour, dsh_tokens: null, claude_tokens: null, codex_tokens: null })) });
+  if (!handler) return parseUsageHourly({ date: safe, harnesses_available: { dsh: null, claude: null, codex: null }, hours: Array.from({ length: 24 }, (_, hour) => ({ hour, dsh_tokens: null, claude_tokens: null, codex_tokens: null })) });
   const parsed = parseUsageHourly(await handler("read_hourly_distribution", { date: safe }));
   if (parsed.date !== safe) throw new Error("usage hourly 返回了错误日期");
   return parsed;
@@ -2491,8 +2491,8 @@ export async function readRouteQuality(days: 30 | 90 | 365): Promise<RouteQualit
     since_ms: now - days * 86_400_000,
     now_ms: now,
     families_vocabulary: [...routeFamilies],
-    hosts: [{
-      host: "plugin:zcode",
+    harnesses: [{
+      harness: "plugin:zcode",
       has_baseline: true,
       native_families: ["glm"],
       totals: { requests: 12, sessions: 3 },
@@ -2524,7 +2524,7 @@ export async function readSessions(input: {
   month?: string;
   date_from?: string;
   date_to?: string;
-  host_kind?: string;
+  harness_kind?: string;
   model?: string;
   provider?: string;
   page_size?: number;
@@ -2533,7 +2533,7 @@ export async function readSessions(input: {
   order?: "oldest" | "tokens";
 }): Promise<SessionsPage> {
   if ((input.date_from === undefined) !== (input.date_to === undefined)) throw new Error("sessions 日期范围必须成对提供");
-  // IPC 边界统一 camelCase：Tauri 2 命令参数只认 camel（dateFrom/hostKind/…）。
+  // IPC 边界统一 camelCase：Tauri 2 命令参数只认 camel（dateFrom/harnessKind/…）。
   // snake key 会被静默丢成 None——城市/会话页的日期窗口曾因此退化为"今天"。
   const args: Record<string, unknown> = {};
   if (input.day !== undefined) args.day = safeDate(input.day, "sessions day");
@@ -2545,10 +2545,10 @@ export async function readSessions(input: {
     args.dateFrom = from;
     args.dateTo = to;
   }
-  if (input.host_kind) {
-    const host = safeHostLabel(input.host_kind);
-    if (host === "generic") throw new Error("sessions host filter 不安全");
-    args.hostKind = host;
+  if (input.harness_kind) {
+    const harness = safeHarnessLabel(input.harness_kind);
+    if (harness === "generic") throw new Error("sessions harness filter 不安全");
+    args.harnessKind = harness;
   }
   if (input.model) args.model = decisionLabel(input.model, "sessions model filter");
   if (input.provider) args.provider = decisionLabel(input.provider, "sessions provider filter");
@@ -2570,7 +2570,7 @@ export async function readSessions(input: {
     const iso = preview.toISOString();
     const sample = {
       session_ref: "sr_browser_mock_01",
-      host: "codex",
+      harness: "codex",
       first_event_at: new Date(preview.valueOf() - 3_600_000).toISOString(),
       last_event_at: iso,
       event_count: 24,
@@ -2603,7 +2603,7 @@ export async function readSessionDetail(sessionRef: string, cursor: string | nul
       tokens: { uncached_input_tokens: total, cache_read_tokens: 0, cache_write_tokens: 0, output_tokens: 0, total },
     });
     const sample = {
-      session_ref: sessionRef, host: "codex", first_event_at: new Date(now.valueOf() - 3_600_000).toISOString(), last_event_at: now.toISOString(),
+      session_ref: sessionRef, harness: "codex", first_event_at: new Date(now.valueOf() - 3_600_000).toISOString(), last_event_at: now.toISOString(),
       event_count: 24, model_ids: ["gpt-5.6-sol"], tokens: { uncached_input_tokens: 92000, cache_read_tokens: 128000, cache_write_tokens: 12000, output_tokens: 14000, total: 246000 }, peak_tokens: 34000,
       cost_minor: { amount_minor: 84, currency: "USD", basis: "metered_estimate" }, cost_status: { state: "estimated", reason: "metered-estimate", has_unresolved: false },
       billing_breakdown: [{ provider_id: "openai", provider_raw: "openai", model_id: "gpt-5.6-sol", billing_template_id: null, billing_mode: "metered", pricing_basis: "metered_estimate", evidence_basis: "explicit-official-route", pricing_version: "preview-v1", pricing_source: "official", cost_minor: { amount_minor: 84, currency: "USD", basis: "metered_estimate" }, peak: true, tokens: { uncached_input_tokens: 92000, cache_read_tokens: 128000, cache_write_tokens: 12000, output_tokens: 14000, total: 246000 }, has_unresolved: false, unresolved_reason: null }],
@@ -2682,7 +2682,7 @@ export async function saveRetentionMonths(months: number, minimum = 1, maximum =
 export async function readMonthlyExportSummary(month: string): Promise<MonthlyExportSummary> {
   const safe = safeMonth(month, "monthly export month");
   const handler = globalTauri()?.core?.invoke;
-  if (!handler) return parseMonthlyExportSummary({ month: safe, by_host: {}, by_provider: {}, tokens_by_host: {}, coverage: { measured_fields: 0, total_fields: 0 }, freshness: { state: "unavailable" }, excluded_hosts: [] });
+  if (!handler) return parseMonthlyExportSummary({ month: safe, by_harness: {}, by_provider: {}, tokens_by_harness: {}, coverage: { measured_fields: 0, total_fields: 0 }, freshness: { state: "unavailable" }, excluded_harnesses: [] });
   const parsed = parseMonthlyExportSummary(await handler("data_monthly_summary", { month: safe }));
   if (parsed.month !== safe) throw new Error("月度导出返回了错误月份");
   return parsed;
@@ -2695,13 +2695,13 @@ export async function readAboutDiagnostics(): Promise<AboutDiagnosticsReport> {
   try { return parseAboutDiagnostics(await handler("about_diagnostics")); } catch { return { status: "unavailable", appVersion: null, cliVersion: null, engineVersion: null, architecture: "unknown", authoritySchema: null, statisticsTimezone: null, pricing: null, sync: { state: "unknown" } }; }
 }
 
-export async function readSkillScan(host: string = "all", force = false): Promise<SkillScanReport> {
-  if (!/^(?:all|[a-z][a-z0-9-]{0,31})$/.test(host)) throw new Error("Skill 宿主筛选不安全");
+export async function readSkillScan(harness: string = "all", force = false): Promise<SkillScanReport> {
+  if (!/^(?:all|[a-z][a-z0-9-]{0,31})$/.test(harness)) throw new Error("Skill 执行环境筛选不安全");
   const now = Date.now();
-  const fallback = { schema_version: "1.0", run: "browser-preview", host_selection: host, desktop_meta: { generated_at_ms: now, from_cache: !force, host }, diagnostics: [{ code: "SV501", name: "提示注入模式", severity: "warning", skill: "browser-preview", evidence: { count: 1 }, impact: "发现 1 条需要人工复核的启发式命中。", recommendation: "打开对应 skill 定义后人工复核。", caveats: ["启发式命中不是恶意结论。"] }], not_assessed: [{ code: "SV003", name: "描述长度", reason: "当前宿主没有可辩护的统一阈值。" }], report: { host_summaries: { "claude-code": { skills_on_disk: 12, discoverable_skills: 8, runtime_verified_loaded_skills: null, unique_discoverable_skills: 8, description_budget: "available", description_budget_detail: { available: true, source: "configurable", budget_chars: 15000, used_chars: 4200, pct_used: 28.0 }, trigger_data: "available" } } } };
+  const fallback = { schema_version: "1.0", run: "browser-preview", harness_selection: harness, desktop_meta: { generated_at_ms: now, from_cache: !force, harness }, diagnostics: [{ code: "SV501", name: "提示注入模式", severity: "warning", skill: "browser-preview", evidence: { count: 1 }, impact: "发现 1 条需要人工复核的启发式命中。", recommendation: "打开对应 skill 定义后人工复核。", caveats: ["启发式命中不是恶意结论。"] }], not_assessed: [{ code: "SV003", name: "描述长度", reason: "当前执行环境没有可辩护的统一阈值。" }], report: { harness_summaries: { "claude-code": { skills_on_disk: 12, discoverable_skills: 8, runtime_verified_loaded_skills: null, unique_discoverable_skills: 8, description_budget: "available", description_budget_detail: { available: true, source: "configurable", budget_chars: 15000, used_chars: 4200, pct_used: 28.0 }, trigger_data: "available" } } } };
   const handler = globalTauri()?.core?.invoke;
-  if (!handler) return parseSkillScan(fallback, host);
-  try { return parseSkillScan(await handler("skills_doctor_report", { host, force }), host); }
+  if (!handler) return parseSkillScan(fallback, harness);
+  try { return parseSkillScan(await handler("skills_doctor_report", { harness, force }), harness); }
   catch (reason: unknown) {
     const row = reason && typeof reason === "object" ? reason as Record<string, unknown> : {};
     const detail = row.error && typeof row.error === "object" ? row.error as Record<string, unknown> : row;
@@ -2743,8 +2743,8 @@ export async function readSkillsDiff(): Promise<SkillDiffReport> {
     return parseSkillDiff({
       schema_version: "skills-diff-v1", status: "ok", baseline_available: true, truncated: false, dropped_rows: 0,
       summary: { added: 1, removed: 0, usage_changed: 1, newly_judgeable: 0, new_overlap_candidates: 0, new_security_findings: 1 },
-      added_skills: [{ host: "claude-code", name: "browser-preview", namespace: null, instance_id: null }], removed_skills: [],
-      usage_delta: [{ host: "claude-code", name: "browser-preview", namespace: null, instance_id: null, delta: 2, now: 8 }], newly_judgeable: [], new_overlap_candidates: [], new_security_findings: [{ skill: "browser-preview", rule: "SV501", line: 12 }], budget_delta_chars: null, budget_pct_then_now: [null, null], loaded_then_now: [8, 9],
+      added_skills: [{ harness: "claude-code", name: "browser-preview", namespace: null, instance_id: null }], removed_skills: [],
+      usage_delta: [{ harness: "claude-code", name: "browser-preview", namespace: null, instance_id: null, delta: 2, now: 8 }], newly_judgeable: [], new_overlap_candidates: [], new_security_findings: [{ skill: "browser-preview", rule: "SV501", line: 12 }], budget_delta_chars: null, budget_pct_then_now: [null, null], loaded_then_now: [8, 9],
     });
   }
   try { return parseSkillDiff(await handler("skills_diff_latest")); }
@@ -2908,10 +2908,10 @@ export async function readSourceHealth(): Promise<SourceHealthReport> {
   const fallback = {
     status: "ok",
     sources: [
-      { host: "codex", connection_state: "connected", scan: { source_count: 12, last_scanned_at_ms: Date.now() - 3_600_000 }, log: { last_event_at_ms: Date.now() - 3_600_000 }, import_scope: { facts: 42, sessions: 8, first_event_at_ms: Date.now() - 30 * 86_400_000, last_event_at_ms: Date.now() - 3_600_000 }, failed_scope: { sources: 0, error_codes: [] } },
-      { host: "claude-code", connection_state: "needs_attention", scan: { source_count: 4, last_scanned_at_ms: Date.now() - 7_200_000 }, log: { last_event_at_ms: Date.now() - 7_200_000 }, import_scope: { facts: 18, sessions: 3, first_event_at_ms: Date.now() - 20 * 86_400_000, last_event_at_ms: Date.now() - 7_200_000 }, failed_scope: { sources: 1, error_codes: ["permission_denied"] } },
-      { host: "dsh", connection_state: "connected", scan: { source_count: 2, last_scanned_at_ms: Date.now() - 1_800_000 }, log: { last_event_at_ms: Date.now() - 1_800_000 }, import_scope: { facts: 9, sessions: 2, first_event_at_ms: Date.now() - 5 * 86_400_000, last_event_at_ms: Date.now() - 1_800_000 }, failed_scope: { sources: 0, error_codes: [] } },
-      { host: "workbuddy", connection_state: "not_detected", scan: { source_count: 0, last_scanned_at_ms: null }, log: {}, import_scope: { facts: 0, sessions: 0, first_event_at_ms: null, last_event_at_ms: null }, failed_scope: { sources: 0, error_codes: ["vendor_internal_code"] } },
+      { harness: "codex", connection_state: "connected", scan: { source_count: 12, last_scanned_at_ms: Date.now() - 3_600_000 }, log: { last_event_at_ms: Date.now() - 3_600_000 }, import_scope: { facts: 42, sessions: 8, first_event_at_ms: Date.now() - 30 * 86_400_000, last_event_at_ms: Date.now() - 3_600_000 }, failed_scope: { sources: 0, error_codes: [] } },
+      { harness: "claude-code", connection_state: "needs_attention", scan: { source_count: 4, last_scanned_at_ms: Date.now() - 7_200_000 }, log: { last_event_at_ms: Date.now() - 7_200_000 }, import_scope: { facts: 18, sessions: 3, first_event_at_ms: Date.now() - 20 * 86_400_000, last_event_at_ms: Date.now() - 7_200_000 }, failed_scope: { sources: 1, error_codes: ["permission_denied"] } },
+      { harness: "dsh", connection_state: "connected", scan: { source_count: 2, last_scanned_at_ms: Date.now() - 1_800_000 }, log: { last_event_at_ms: Date.now() - 1_800_000 }, import_scope: { facts: 9, sessions: 2, first_event_at_ms: Date.now() - 5 * 86_400_000, last_event_at_ms: Date.now() - 1_800_000 }, failed_scope: { sources: 0, error_codes: [] } },
+      { harness: "workbuddy", connection_state: "not_detected", scan: { source_count: 0, last_scanned_at_ms: null }, log: {}, import_scope: { facts: 0, sessions: 0, first_event_at_ms: null, last_event_at_ms: null }, failed_scope: { sources: 0, error_codes: ["vendor_internal_code"] } },
     ],
   };
   const handler = globalTauri()?.core?.invoke;
@@ -2933,10 +2933,10 @@ export async function readSourceHealth(): Promise<SourceHealthReport> {
   }
 }
 
-export async function readSourceHostControls(): Promise<SourceHostControls> {
+export async function readSourceHarnessControls(): Promise<SourceHarnessControls> {
   const handler = globalTauri()?.core?.invoke;
-  if (!handler) return { status: "ok", excluded_hosts: [], supported_hosts: [] };
-  try { return parseSourceHostControls(await handler("source_host_controls")); } catch { return { status: "unavailable", excluded_hosts: [], supported_hosts: [] }; }
+  if (!handler) return { status: "ok", excluded_harnesses: [], supported_harnesses: [] };
+  try { return parseSourceHarnessControls(await handler("source_harness_controls")); } catch { return { status: "unavailable", excluded_harnesses: [], supported_harnesses: [] }; }
 }
 
 export async function readSourceDataRevision(): Promise<number> {
@@ -2950,22 +2950,22 @@ export async function readSourceDataRevision(): Promise<number> {
   }
 }
 
-export async function setSourceHostExcluded(host: string, excluded: boolean): Promise<SourceHostControlReceipt> {
-  if (safeHostLabel(host) !== host || host === "generic") throw new Error("source host is not supported");
+export async function setSourceHarnessExcluded(harness: string, excluded: boolean): Promise<SourceHarnessControlReceipt> {
+  if (safeHarnessLabel(harness) !== harness || harness === "generic") throw new Error("source harness is not supported");
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return { status: "saved", changed: true, excluded };
-  const root = record(await handler("set_source_host_excluded", { input: { host, excluded } }), "source host control receipt");
-  if (root.status !== "saved" && root.status !== "ok") throw new Error("source host control was not saved");
-  return { status: "saved", changed: requiredBoolean(root.changed ?? true, "source host control changed"), excluded: requiredBoolean(root.excluded, "source host control excluded") };
+  const root = record(await handler("set_source_harness_excluded", { input: { harness, excluded } }), "source harness control receipt");
+  if (root.status !== "saved" && root.status !== "ok") throw new Error("source harness control was not saved");
+  return { status: "saved", changed: requiredBoolean(root.changed ?? true, "source harness control changed"), excluded: requiredBoolean(root.excluded, "source harness control excluded") };
 }
 
-export async function deleteImportedSourceData(host: string): Promise<DeleteImportedSourceReceipt> {
-  if (safeHostLabel(host) !== host || host === "generic") throw new Error("source host is not supported");
+export async function deleteImportedSourceData(harness: string): Promise<DeleteImportedSourceReceipt> {
+  if (safeHarnessLabel(harness) !== harness || harness === "generic") throw new Error("source harness is not supported");
   const handler = globalTauri()?.core?.invoke;
-  if (!handler) return { status: "deleted", host, facts: 0, sessions: 0, source_files: 0, trust_observations: 0, route_evidence: 0, session_excerpts: 0 };
-  const root = record(await handler("delete_imported_source_data", { host }), "delete source data receipt");
-  if (root.status !== "deleted" || root.host !== host) throw new Error("delete source data receipt was not confirmed");
-  return { status: "deleted", host, facts: boundedCount(root.facts, "deleted source facts", 100_000_000), sessions: boundedCount(root.sessions, "deleted source sessions", 10_000_000), source_files: boundedCount(root.source_files, "deleted source files", 1_000_000), trust_observations: boundedCount(root.trust_observations, "deleted trust observations", 10_000_000), route_evidence: boundedCount(root.route_evidence, "deleted route evidence", 10_000_000), session_excerpts: boundedCount(root.session_excerpts, "deleted session excerpts", 10_000_000) };
+  if (!handler) return { status: "deleted", harness, facts: 0, sessions: 0, source_files: 0, trust_observations: 0, route_evidence: 0, session_excerpts: 0 };
+  const root = record(await handler("delete_imported_source_data", { harness }), "delete source data receipt");
+  if (root.status !== "deleted" || root.harness !== harness) throw new Error("delete source data receipt was not confirmed");
+  return { status: "deleted", harness, facts: boundedCount(root.facts, "deleted source facts", 100_000_000), sessions: boundedCount(root.sessions, "deleted source sessions", 10_000_000), source_files: boundedCount(root.source_files, "deleted source files", 1_000_000), trust_observations: boundedCount(root.trust_observations, "deleted trust observations", 10_000_000), route_evidence: boundedCount(root.route_evidence, "deleted route evidence", 10_000_000), session_excerpts: boundedCount(root.session_excerpts, "deleted session excerpts", 10_000_000) };
 }
 
 export async function readCustomSourceConfig(): Promise<CustomSourceReport> {
@@ -3112,7 +3112,7 @@ function billingCurrency(value: unknown): string {
 
 function billingBasis(value: unknown): string {
   const basis = stringField(value, "billing basis");
-  return ["metered_actual", "metered_estimate", "fixed_subscription", "host_billed", "api_equivalent", "other"].includes(basis) ? basis : "unknown";
+  return ["metered_actual", "metered_estimate", "fixed_subscription", "harness_billed", "api_equivalent", "other"].includes(basis) ? basis : "unknown";
 }
 
 function parseBillingCandidate(value: unknown): BillingCandidate {
@@ -3124,7 +3124,7 @@ function parseBillingCandidate(value: unknown): BillingCandidate {
     return { total_tokens: boundedCount(data.total_tokens ?? 0, "candidate impact tokens", Number.MAX_SAFE_INTEGER), fact_count: boundedCount(data.fact_count ?? 0, "candidate impact facts", Number.MAX_SAFE_INTEGER), session_count: boundedCount(data.session_count ?? 0, "candidate impact sessions", Number.MAX_SAFE_INTEGER) };
   })();
   return {
-    candidate_id: decisionLabel(row.candidate_id, "billing candidate id"), host: safeHostLabel(row.host), provider_id: decisionLabel(row.provider_id, "billing candidate provider"),
+    candidate_id: decisionLabel(row.candidate_id, "billing candidate id"), harness: safeHarnessLabel(row.harness), provider_id: decisionLabel(row.provider_id, "billing candidate provider"),
     currency: billingCurrency(row.currency), amount_minor: boundedCount(row.amount_minor, "billing candidate amount", Number.MAX_SAFE_INTEGER),
     billing_period_start: safeDate(row.billing_period_start, "billing candidate start") as string,
     status, impact,
@@ -3202,7 +3202,7 @@ function parseBillingGroup(value: unknown): BillingGroup {
   const verdictState = verdict?.state;
   const evidenceState = unresolved ? "unresolved" : verdictState === "determined" ? "determined" : verdictState === "one_question" || verdictState === "needs_input" ? "needs_input" : "unknown";
   return {
-    group_id: decisionLabel(row.group_id, "billing group id"), host: safeHostLabel(row.host), provider_id: decisionLabel(row.provider_id, "billing group provider"), model_id: row.model_id == null ? "<unknown>" : decisionLabel(row.model_id, "billing group model"),
+    group_id: decisionLabel(row.group_id, "billing group id"), harness: safeHarnessLabel(row.harness), provider_id: decisionLabel(row.provider_id, "billing group provider"), model_id: row.model_id == null ? "<unknown>" : decisionLabel(row.model_id, "billing group model"),
     evidence_basis: decisionLabel(row.evidence_basis ?? "unknown", "billing evidence basis"), pricing_basis: decisionLabel(row.pricing_basis ?? "unknown", "billing pricing basis"),
     tokens: boundedCount(row.tokens ?? 0, "billing group tokens", Number.MAX_SAFE_INTEGER), session_count: boundedCount(row.session_count ?? 0, "billing group sessions", Number.MAX_SAFE_INTEGER),
     effective_start: safeBillingPeriod(row.effective_start, "billing group start") as string, effective_end: safeBillingPeriod(row.effective_end, "billing group end", true),
@@ -3239,9 +3239,9 @@ function parseBillingJobRetryReceipt(value: unknown): BillingJobRetryReceipt {
   return { status: "queued", job_id: decisionLabel(root.job_id, "billing job id"), changed: root.changed === true };
 }
 
-function parseHostBill(value: unknown, billingPeriod: string): HostBill {
-  const row = record(value, "host bill");
-  return { bill_id: decisionLabel(row.bill_id, "bill id"), host: safeHostLabel(row.host), provider_id: decisionLabel(row.provider_id, "bill provider"), billing_period: row.billing_period == null ? billingPeriod : safeMonth(row.billing_period, "bill period"), billing_basis: billingBasis(row.billing_basis ?? "unknown"), amount_minor: boundedCount(row.amount_minor, "bill amount", Number.MAX_SAFE_INTEGER), currency: billingCurrency(row.currency), has_evidence: typeof row.evidence_ref === "string" && row.evidence_ref.length > 0 };
+function parseHarnessBill(value: unknown, billingPeriod: string): HarnessBill {
+  const row = record(value, "harness bill");
+  return { bill_id: decisionLabel(row.bill_id, "bill id"), harness: safeHarnessLabel(row.harness), provider_id: decisionLabel(row.provider_id, "bill provider"), billing_period: row.billing_period == null ? billingPeriod : safeMonth(row.billing_period, "bill period"), billing_basis: billingBasis(row.billing_basis ?? "unknown"), amount_minor: boundedCount(row.amount_minor, "bill amount", Number.MAX_SAFE_INTEGER), currency: billingCurrency(row.currency), has_evidence: typeof row.evidence_ref === "string" && row.evidence_ref.length > 0 };
 }
 
 function parseBillingList(value: unknown, key: string): { status: "ok" | "unavailable"; items: unknown[] } {
@@ -3257,10 +3257,10 @@ export async function readBillingSettings(): Promise<BillingSettingsReport> {
   const month = currentBudgetMonth((await readStatisticsTimezone()).timezone);
   const handler = globalTauri()?.core?.invoke;
   if (!handler) {
-    return { status: "ok", month, candidates_status: "ok", groups_status: "ok", declarations_status: "ok", jobs_status: "ok", bills_status: "ok", candidates: [parseBillingCandidate({ candidate_id: "browser-candidate-1", host: "codex", provider_id: "openai", currency: "USD", amount_minor: 2000, billing_period_start: `${month}-01`, status: "pending", impact: { status: "ok", total_tokens: 18000, fact_count: 4, session_count: 1 } })], groups: [], declarations: [], jobs: [], bills: [] };
+    return { status: "ok", month, candidates_status: "ok", groups_status: "ok", declarations_status: "ok", jobs_status: "ok", bills_status: "ok", candidates: [parseBillingCandidate({ candidate_id: "browser-candidate-1", harness: "codex", provider_id: "openai", currency: "USD", amount_minor: 2000, billing_period_start: `${month}-01`, status: "pending", impact: { status: "ok", total_tokens: 18000, fact_count: 4, session_count: 1 } })], groups: [], declarations: [], jobs: [], bills: [] };
   }
   const results = await Promise.allSettled([
-    handler("billing_import_candidates"), handler("billing_confirmation_groups", { month }), handler("billing_declarations"), handler("billing_recalculation_jobs"), handler("host_bills_for_period", { billingPeriod: month }),
+    handler("billing_import_candidates"), handler("billing_confirmation_groups", { month }), handler("billing_declarations"), handler("billing_recalculation_jobs"), handler("harness_bills_for_period", { billingPeriod: month }),
   ]);
   const parse = <T,>(index: number, key: string, mapper: (item: unknown) => T): { status: BillingPanelStatus; items: T[] } => {
     const result = results[index];
@@ -3279,7 +3279,7 @@ export async function readBillingSettings(): Promise<BillingSettingsReport> {
   const groups = parse(1, "groups", parseBillingGroup);
   const declarations = parse(2, "declarations", parseBillingDeclaration);
   const jobs = parse(3, "jobs", parseBillingJob);
-  const bills = parse(4, "bills", (item) => parseHostBill(item, month));
+  const bills = parse(4, "bills", (item) => parseHarnessBill(item, month));
   const pendingUnavailable = candidates.status === "unavailable" && groups.status === "unavailable";
   return { status: pendingUnavailable ? "unavailable" : "ok", month, candidates_status: candidates.status, groups_status: groups.status, declarations_status: declarations.status, jobs_status: jobs.status, bills_status: bills.status, candidates: candidates.items, groups: groups.items, declarations: declarations.items, jobs: jobs.items, bills: bills.items };
 }
@@ -3348,8 +3348,8 @@ export async function revokeBillingDeclaration(input: { declaration_id: string; 
   return parseBillingDeclarationRevokeReceipt(await handler("revoke_billing_declaration", { revisionId, declarationId: input.declaration_id, supersedesRevisionId: input.supersedes_revision_id }));
 }
 
-function validateCustomSourceInput(host: string, root: string): void {
-  if (!["claude-code", "codex", "dsh"].includes(host)) throw new Error("该工具暂不支持自定义位置");
+function validateCustomSourceInput(harness: string, root: string): void {
+  if (!["claude-code", "codex", "dsh"].includes(harness)) throw new Error("该工具暂不支持自定义位置");
   if (!/^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(root) || root.length > 4096 || /[\u0000-\u001f\u007f]/u.test(root)) throw new Error("请输入绝对目录路径");
 }
 
@@ -3367,24 +3367,24 @@ export async function pickCustomSourceRoot(): Promise<string | null> {
   }
 }
 
-export async function addCustomSourceRoot(host: string, root: string): Promise<{ changed: boolean }> {
-  validateCustomSourceInput(host, root);
+export async function addCustomSourceRoot(harness: string, root: string): Promise<{ changed: boolean }> {
+  validateCustomSourceInput(harness, root);
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return { changed: true };
   try {
-    const value = record(await handler("add_custom_source_root", { input: { host, root } }), "custom source add result");
+    const value = record(await handler("add_custom_source_root", { input: { harness, root } }), "custom source add result");
     return { changed: requiredBoolean(value.changed, "custom source add changed") };
   } catch {
     throw new Error("添加读取位置失败，请确认目录存在且可读取");
   }
 }
 
-export async function removeCustomSourceRoot(host: string, root: string): Promise<{ changed: boolean }> {
-  validateCustomSourceInput(host, root);
+export async function removeCustomSourceRoot(harness: string, root: string): Promise<{ changed: boolean }> {
+  validateCustomSourceInput(harness, root);
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return { changed: true };
   try {
-    const value = record(await handler("remove_custom_source_root", { input: { host, root } }), "custom source remove result");
+    const value = record(await handler("remove_custom_source_root", { input: { harness, root } }), "custom source remove result");
     return { changed: requiredBoolean(value.changed, "custom source remove changed") };
   } catch {
     throw new Error("移除读取位置失败");
@@ -3444,10 +3444,10 @@ export async function listen(event: string, handler: (payload: unknown) => void)
   };
 }
 
-const appEventTypes = new Set<AppEventType>(["Invalidated", "SyncStatusChanged", "HostNavigationChanged", "TrustMonitorEvent", "TrustMonitorInvalidated", "SourceDataDeleted", "WatcherHealthChanged"]);
+const appEventTypes = new Set<AppEventType>(["Invalidated", "SyncStatusChanged", "HarnessNavigationChanged", "TrustMonitorEvent", "TrustMonitorInvalidated", "SourceDataDeleted", "WatcherHealthChanged"]);
 
-/** Closed host vocabulary for `Invalidated.hosts` (unknown names are dropped). */
-const invalidationHosts: ReadonlySet<string> = new Set(["claude-code", "codex", "dsh", "workbuddy"]);
+/** Closed harness vocabulary for `Invalidated.harnesses` (unknown names are dropped). */
+const invalidationHarnesses: ReadonlySet<string> = new Set(["claude-code", "codex", "dsh", "workbuddy"]);
 
 function safeAppEvent(raw: unknown): AppEvent | null {
   const candidate = raw && typeof raw === "object" && "payload" in raw
@@ -3462,10 +3462,10 @@ function safeAppEvent(raw: unknown): AppEvent | null {
   const revision = typeof rawRevision === "number" && Number.isFinite(rawRevision) && rawRevision >= 0 && rawRevision <= Number.MAX_SAFE_INTEGER
     ? Math.floor(rawRevision)
     : undefined;
-  const hosts = Array.isArray(record.hosts)
-    ? record.hosts.filter((h): h is string => typeof h === "string" && invalidationHosts.has(h))
+  const harnesses = Array.isArray(record.harnesses)
+    ? record.harnesses.filter((h): h is string => typeof h === "string" && invalidationHarnesses.has(h))
     : [];
-  return revision === undefined ? { type: "Invalidated", hosts } : { type: "Invalidated", revision, hosts };
+  return revision === undefined ? { type: "Invalidated", harnesses } : { type: "Invalidated", revision, harnesses };
 }
 
 /** Subscribe to the single desktop event bus and expose only its allowlisted type. */

@@ -4,7 +4,7 @@
 // 与 verify-workbench-kpi-decide.mjs 同一模式：静态断言打在真实文件上，
 // 行为断言跑在 vm 执行的真实 workbench.js 上。差异在 fixture 的来源 ——
 // **规格 §5.1「形状来源纪律」**：载荷不是手写的期望形状，而是每次验证时
-// 用真实 CLI（`agent-vitals doctor --host <h> --json - --with-report
+// 用真实 CLI（`agent-vitals doctor --harness <h> --json - --with-report
 // --no-snapshot`，跑在本目录 build_fixture.py 展开的 HOME 语料上）现场
 // 捕获。语料 → 断言对照见 fixtures/skills-tab/build_fixture.py 文件头。
 //
@@ -33,7 +33,7 @@ const css = readFileSync(`${root}/apps/desktop/src-tauri/ui/workbench.css`, "utf
 // ── §11.1 结构守卫（静态断言） ────────────────────────────────────────────
 console.log("# §11.1 结构守卫（真实文件）");
 ok(html.includes('data-tab="skills"'), "tab 条含 data-tab=\"skills\"");
-for (const id of ["sk-host-cards", "sk-act-now", "sk-security", "sk-conflicts", "sk-usage", "sk-not-assessed"]) {
+for (const id of ["sk-harness-cards", "sk-act-now", "sk-security", "sk-conflicts", "sk-usage", "sk-not-assessed"]) {
   ok(html.includes(`id="${id}"`), `#tab-skills 含分区 ${id}`);
 }
 {
@@ -57,7 +57,7 @@ for (const id of ["sk-host-cards", "sk-act-now", "sk-security", "sk-conflicts", 
   }
 }
 ok(css.includes(".sk-cards") && css.includes(".sk-budget-fill"),
-  "CSS 带宿主卡与预算条样式");
+  "CSS 带执行环境卡与预算条样式");
 // 托盘入口：tab_for_menu_id 把 skill_health 映射到 skills tab（lib.rs 单测同款）。
 ok(wb.includes('activeTab === "skills"'), "loadActiveTab 认识 skills tab（懒加载分支）");
 ok(wb.includes("首次进不自动扫") || wb.includes("不自动跑"),
@@ -82,8 +82,8 @@ function resolveCli() {
   }
 }
 const cli = resolveCli();
-function doctorPayload(host) {
-  const out = execFileSync(cli[0], [...cli.slice(1), "doctor", "--host", host,
+function doctorPayload(harness) {
+  const out = execFileSync(cli[0], [...cli.slice(1), "doctor", "--harness", harness,
     "--json", "-", "--with-report", "--no-snapshot"], {
     cwd: tmpHome,
     env: { ...process.env, HOME: tmpHome, SLASH_COMMAND_TOOL_CHAR_BUDGET: "15000",
@@ -103,9 +103,9 @@ try {
 }
 const metaNote = `fixture 实现来源: ${path.relative(root, cli[0])} · HOME=${tmpHome}`;
 ok(payloadAll.report && payloadAll.diagnostics, "doctor --with-report 载荷带 diagnostics + report（" + metaNote + "）");
-ok(payloadAll.report.host_summaries["dsh"], "host_summaries 带 dsh 家族（P0-3）");
-ok(payloadAll.report.host_summaries["claude-code"].description_budget_detail.available === true,
-  "claude-code 带逐宿主预算明细（P0-3 description_budget_detail）");
+ok(payloadAll.report.harness_summaries["dsh"], "harness_summaries 带 dsh 家族（P0-3）");
+ok(payloadAll.report.harness_summaries["claude-code"].description_budget_detail.available === true,
+  "claude-code 带逐执行环境预算明细（P0-3 description_budget_detail）");
 
 // ── vm 执行真实 workbench.js ─────────────────────────────────────────────
 function makeElement(tag) {
@@ -174,15 +174,15 @@ const domText = (id) => textOf(elements[id]);
 const countButtons = (node) => (node == null ? 0 : (node.tag === "button" ? 1 : 0)
   + (node.children || []).map(countButtons).reduce((a, b) => a + b, 0));
 
-// 宿主选择器的 options（模拟 HTML 里的七个 option），用于灰显断言。
-el("sk-host").options = ["all", "claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"]
+// 执行环境选择器的 options（模拟 HTML 里的七个 option），用于灰显断言。
+el("sk-harness").options = ["all", "claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"]
   .map((v) => ({ value: v, textContent: v, disabled: false }));
 
 console.log("# §11.2 全部视图（renderSkillHealth(payloadAll, 'all')）");
 sandbox.renderSkillHealth(payloadAll, "all");
 {
-  const cards = elements["sk-host-cards"].children;
-  ok(cards.length >= 3, `渲染多张宿主摘要卡（got ${cards.length}）`);
+  const cards = elements["sk-harness-cards"].children;
+  ok(cards.length >= 3, `渲染多张执行环境摘要卡（got ${cards.length}）`);
   const claudeCard = cards.find((c) => textOf(c).includes("Claude Code"));
   ok(claudeCard && textOf(claudeCard).includes("15,000") && textOf(claudeCard).includes("字符"),
     "claude-code 卡画预算条（分母 15,000 来自 description_budget_detail）");
@@ -191,12 +191,12 @@ sandbox.renderSkillHealth(payloadAll, "all");
   const dshCard = cards.find((c) => textOf(c).includes("DeepSeek Harness"));
   ok(dshCard && textOf(dshCard).includes("SV004") && !textOf(dshCard).includes("sk-budget-fill"),
     "dsh 卡不画预算条且文案含 SV004（逐条截断提示）");
-  ok(dshCard && textOf(dshCard).includes("该宿主没有描述预算"), "dsh 卡写明无预算，不冒充 0");
+  ok(dshCard && textOf(dshCard).includes("该执行环境没有描述预算"), "dsh 卡写明无预算，不冒充 0");
   ok(claudeCard && textOf(claudeCard).includes("运行时核实 —"),
     "runtime_verified 为 null 渲染为「—」而非 0");
   const codexCard = cards.find((c) => textOf(c).includes("Codex"));
   ok(codexCard && textOf(codexCard).includes("未检测到"),
-    "未检测到的宿主在卡片里注明「未检测到」，不隐藏");
+    "未检测到的执行环境在卡片里注明「未检测到」，不隐藏");
 }
 {
   // 页头安全合计 = 安全分区行数（§6.3，vm 钉住）。
@@ -212,21 +212,21 @@ sandbox.renderSkillHealth(payloadAll, "all");
   }
 }
 {
-  // 共享根（~/.agents/skills）同 path 命中：去重一行、两枚宿主芯片（§3.2/§11.2）。
+  // 共享根（~/.agents/skills）同 path 命中：去重一行、两枚执行环境芯片（§3.2/§11.2）。
   const rows = elements["sk-security-list"].children.filter((r) => textOf(r).includes("shared-hit"));
   ok(rows.length === 1, `同 path 安全命中只渲染一行（got ${rows.length}）`);
   if (rows.length === 1) {
     ok(textOf(rows[0]).includes("DeepSeek Harness") && textOf(rows[0]).includes("OpenClaw"),
-      "该行挂 dsh + OpenClaw 两枚宿主芯片");
+      "该行挂 dsh + OpenClaw 两枚执行环境芯片");
   }
   // cited 命中：标「疑似引用语境」，不降级不隐藏。
   const cited = elements["sk-security-list"].children.filter((r) => textOf(r).includes("疑似引用语境"));
   ok(cited.length >= 1, "cited 命中标「疑似引用语境」且照常渲染");
 }
 {
-  // DOM 不存在跨宿主预算相加：给 codex 造第二份预算明细（形状 = P0-3 真实输出），
+  // DOM 不存在跨执行环境预算相加：给 codex 造第二份预算明细（形状 = P0-3 真实输出），
   // 断言两个分母之和、两个 used 之和都不出现在 DOM 任何地方。
-  const hs = payloadAll.report.host_summaries;
+  const hs = payloadAll.report.harness_summaries;
   hs["codex"].skills_on_disk = 9;
   hs["codex"].description_budget_detail = {
     available: true, source: "official-estimate", budget_chars: 8000,
@@ -236,10 +236,10 @@ sandbox.renderSkillHealth(payloadAll, "all");
   const sumAll = String(claudeBudget + 8000);
   const sumAllFmt = (claudeBudget + 8000).toLocaleString("en-US");
   sandbox.renderSkillHealth(payloadAll, "all");
-  const wholePage = ["sk-host-cards", "sk-totals", "sk-act-now-list", "sk-security-list",
+  const wholePage = ["sk-harness-cards", "sk-totals", "sk-act-now-list", "sk-security-list",
     "sk-conflicts-list", "sk-usage-list", "sk-not-assessed-list"].map(domText).join(" ");
   ok(!wholePage.includes(sumAll) && !wholePage.includes(sumAllFmt),
-    `DOM 不存在两宿主预算分母之和（${sumAll}）`);
+    `DOM 不存在两执行环境预算分母之和（${sumAll}）`);
   ok(wholePage.includes("8,000") && wholePage.includes("15,000"),
     "两份预算明细各自出现（并列，不是相加）");
   delete hs["codex"].description_budget_detail;
@@ -270,20 +270,20 @@ sandbox.renderSkillHealth(payloadAll, "all");
   ok(createdTags.every((t) => t !== "button"), "渲染器从不创建 button（无一键禁用/删除）");
 }
 
-console.log("# §11.2 单宿主视图（REQ-SK-04）");
+console.log("# §11.2 单执行环境视图（REQ-SK-04）");
 sandbox.renderSkillHealth(payloadClaude, "claude-code");
 {
-  ok(elements["sk-totals"].hidden === true, "单宿主视图页头合计行隐藏");
-  const cards = elements["sk-host-cards"].children;
-  ok(cards.length === 1, `单宿主视图只渲染该宿主的卡（got ${cards.length}）`);
+  ok(elements["sk-totals"].hidden === true, "单执行环境视图页头合计行隐藏");
+  const cards = elements["sk-harness-cards"].children;
+  ok(cards.length === 1, `单执行环境视图只渲染该执行环境的卡（got ${cards.length}）`);
   const repro = domText("sk-repro");
-  ok(repro.includes("--host claude-code") && repro.includes(payloadClaude.run),
-    "复现命令含 --host <h> 与 run 标记");
+  ok(repro.includes("--harness claude-code") && repro.includes(payloadClaude.run),
+    "复现命令含 --harness <h> 与 run 标记");
   ok(elements["sk-act-now-empty"].hidden === true,
-    "单宿主视图同样不挂空态占位");
+    "单执行环境视图同样不挂空态占位");
   // 使用证据（§6.5）：claude-code 有触发数据 —— 僵尸 / too-new 分列。
   const usage = domText("sk-usage-list");
-  ok(usage.includes("Claude Code"), "使用证据按宿主分组");
+  ok(usage.includes("Claude Code"), "使用证据按执行环境分组");
   ok(usage.includes("零触发"), "使用证据列零触发（SV201 证据）");
   ok(usage.includes("太新不判") && usage.includes("满 14 天可判定"),
     "too-new 带「N 天后可判定」，不落进僵尸");
@@ -303,7 +303,7 @@ console.log("# §7 状态：exit 2 → 错误 notice（不冒充「没有发现�
     "错误 notice 原样带 stderr 首行");
   sandbox.__nextDoctor = { payload: payloadAll };
   await sandbox.loadSkillsDoctor(true);
-  ok(elements["sk-error"].hidden === true && elements["sk-host-cards"].children.length >= 3,
+  ok(elements["sk-error"].hidden === true && elements["sk-harness-cards"].children.length >= 3,
     "成功取数后正常渲染（错误 notice 收起）");
 }
 

@@ -49,7 +49,7 @@ pub fn fill_missing_from_sync_overlay(pricing: &mut Value, codex: &mut Value, ov
 
 /// [`fill_missing_from_sync_overlay`] 的完整快照版本：`pricing_snapshots.payload_json`
 /// 形如 `{pricing, codex_pricing}`。老快照只存了其中一半（或根本不是这个形状）
-/// 时原样不动——半边回补会让同一时点两个宿主用上不同来源的价卡。
+/// 时原样不动——半边回补会让同一时点两个执行环境用上不同来源的价卡。
 pub fn fill_missing_in_snapshot(snapshot: &mut Value, overlay: &Value) {
     let Some(obj) = snapshot.as_object_mut() else { return };
     if !(obj.contains_key("pricing") && obj.contains_key("codex_pricing")) {

@@ -2,6 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { buildOfficialPlugins } from "./official-plugins.mjs";
 import path from "node:path";
 
 const repo = path.resolve(import.meta.dirname, "..");
@@ -13,6 +14,11 @@ execFileSync("npm", ["--prefix", "apps/desktop/ui-dev", "run", "build:react"], {
   cwd: repo,
   stdio: "inherit",
 });
+
+{
+  const probe = process.env.AGENT_VITALS_PLUGIN_ISOLATION_PROBE === "1";
+  buildOfficialPlugins({ install: true, probe });
+}
 
 execFileSync("cargo", ["build", "--release", "-p", "agent-vitals"], {
   cwd: repo,

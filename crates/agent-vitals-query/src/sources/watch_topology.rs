@@ -15,10 +15,10 @@
 //!   （外置卷/归档挂载是合法用例），但仍拒绝 `/`、home 根本身与 `..` 穿越。
 //!   spec 非目标禁的是「**导入 profile** 递归监听任意路径」，不是用户显式
 //!   添加的自定义源。
-//! - **Configured**：内置宿主的明确运行时根配置（当前仅 `DSH_HOME`）。它同样
-//!   允许 home 外，但只能由已知内置宿主产生，且受与 CustomApproved 相同的范围
+//! - **Configured**：内置执行环境的明确运行时根配置（当前仅 `DSH_HOME`）。它同样
+//!   允许 home 外，但只能由已知内置执行环境产生，且受与 CustomApproved 相同的范围
 //!   限制；不能借此让 profile 导入任意根。
-//! - **PluginApproved**：**暂缓**——仓库没有签名插件基建（HOST_MANIFEST_DSL
+//! - **PluginApproved**：**暂缓**——仓库没有签名插件基建（HARNESS_MANIFEST_DSL
 //!   无签名面），spec §5.3 的 provenance 行在签名系统落地前不开放 plugin
 //!   origin（评审修正，见 HARDENING spec 修订注记）。
 //!
@@ -35,8 +35,8 @@ use crate::custom_sources::custom_source_roots;
 /// （spec §4 不变量 6）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WatchRootDescriptor {
-    /// 宿主标签（内置 slug 或自定义源 host）。
-    pub host: String,
+    /// 执行环境标签（内置 slug 或自定义源 harness）。
+    pub harness: String,
     /// 根的类别：事实面（可唤醒 sync）或缓存面（只失效缓存）。
     pub class: WatchRootClass,
     /// 根的来历——内置 / 用户批准的自定义源。
@@ -71,8 +71,8 @@ pub enum RootRejection {
     ParentTraversal,
     /// BuiltIn/CacheOnly 的规范化路径逃出了 user_home（符号链接逃逸）。
     CanonicalEscape,
-    /// 事实源宿主不在 ingest 支持集（含自定义源合法宿主集）。
-    UnsupportedHost,
+    /// 事实源执行环境不在 ingest 支持集（含自定义源合法执行环境集）。
+    UnsupportedHarness,
 }
 
 impl RootRejection {
@@ -84,12 +84,12 @@ impl RootRejection {
             RootRejection::HomeRoot => "home_root",
             RootRejection::ParentTraversal => "parent_traversal",
             RootRejection::CanonicalEscape => "canonical_escape",
-            RootRejection::UnsupportedHost => "unsupported_host",
+            RootRejection::UnsupportedHarness => "unsupported_harness",
         }
     }
 }
 
-/// 拓扑快照：通过的描述符 + 被拒项（`(host, path)` 对 + 原因码）。
+/// 拓扑快照：通过的描述符 + 被拒项（`(harness, path)` 对 + 原因码）。
 /// 快照不可变（spec §5.4「each descriptor snapshot is immutable after
 /// submission」）；热插拔 = 换一份新快照。
 #[derive(Clone, Debug, Default)]
@@ -112,15 +112,15 @@ impl WatchTopology {
     }
 }
 
-/// 自定义源允许的事实宿主（与 `custom_sources::valid_host` 同一集合——
+/// 自定义源允许的事实执行环境（与 `custom_sources::valid_harness` 同一集合——
 /// sync 侧批处理只认这三个，watcher 不得超前）。
-const CUSTOM_FACTS_HOSTS: [&str; 3] = ["claude-code", "codex", "dsh"];
+const CUSTOM_FACTS_HARNESSES: [&str; 3] = ["claude-code", "codex", "dsh"];
 
-fn is_ingest_host(host: &str) -> bool {
-    crate::source_controls::supported_hosts().contains(&host)
+fn is_ingest_harness(harness: &str) -> bool {
+    crate::source_controls::supported_harnesses().contains(&harness)
 }
 
-/// 单描述符策略校验（spec §5.3 表的词法/规范化两行 + 宿主行）。
+/// 单描述符策略校验（spec §5.3 表的词法/规范化两行 + 执行环境行）。
 /// 纯函数：只看路径形状与 home，不碰配置。
 pub fn validate_descriptor(
     descriptor: &WatchRootDescriptor,
@@ -143,18 +143,18 @@ pub fn validate_descriptor(
     match descriptor.class {
         WatchRootClass::FactsSource => {
             let known = match descriptor.origin {
-                WatchRootOrigin::BuiltIn => is_ingest_host(&descriptor.host),
+                WatchRootOrigin::BuiltIn => is_ingest_harness(&descriptor.harness),
                 WatchRootOrigin::CustomApproved | WatchRootOrigin::Configured => {
-                    CUSTOM_FACTS_HOSTS.contains(&descriptor.host.as_str())
+                    CUSTOM_FACTS_HARNESSES.contains(&descriptor.harness.as_str())
                 }
             };
             if !known {
-                return Err(RootRejection::UnsupportedHost);
+                return Err(RootRejection::UnsupportedHarness);
             }
         }
         WatchRootClass::CacheOnly => {
-            // skills 根的 host 标签是扫描器词表（如 "claude-code-plugins"），
-            // 不做 ingest 宿主校验——它本来就不进事实面。
+            // skills 根的 harness 标签是扫描器词表（如 "claude-code-plugins"），
+            // 不做 ingest 执行环境校验——它本来就不进事实面。
         }
     }
     match descriptor.origin {
@@ -174,7 +174,7 @@ pub fn validate_descriptor(
             Ok(())
         }
         WatchRootOrigin::CustomApproved | WatchRootOrigin::Configured => {
-            // 用户亲手输入或内置宿主显式配置的绝对路径：允许 home 外，但已存在时
+            // 用户亲手输入或内置执行环境显式配置的绝对路径：允许 home 外，但已存在时
             // 规范化不得落到 `/` 或 canonical home（整盘/整个 home 的监听没有
             // 产品语义）。
             if let Ok(canonical_root) = path.canonicalize() {
@@ -196,21 +196,21 @@ pub fn validate_descriptor(
 /// - 内置事实根：`default_source_watch_roots`（与 sync_facts 发现根同源）；
 /// - 已批准自定义源：`custom_source_roots`（读取即校验，失败上抛）；
 /// - skills 缓存根：`default_skill_watch_roots`（CacheOnly）；
-/// - source-controls 排除的宿主即时移除（spec §5.3「user control」行）。
+/// - source-controls 排除的执行环境即时移除（spec §5.3「user control」行）。
 pub fn watch_topology(data_home: &Path, user_home: &Path) -> Result<WatchTopology, String> {
     let mut topology = WatchTopology::default();
 
-    for (host, path) in default_source_watch_roots(user_home) {
+    for (harness, path) in default_source_watch_roots(user_home) {
         // `DSH_HOME` 是 DSH 的显式运行时配置，不能错误套用「内置根均在
         // user_home 内」的规则。默认 ~/.dsh 仍是 BuiltIn；只有偏离默认值的
         // 已知 DSH 根才取得 Configured provenance。
-        let origin = if host == "dsh" && path != user_home.join(".dsh") {
+        let origin = if harness == "dsh" && path != user_home.join(".dsh") {
             WatchRootOrigin::Configured
         } else {
             WatchRootOrigin::BuiltIn
         };
         let descriptor = WatchRootDescriptor {
-            host: host.to_string(),
+            harness: harness.to_string(),
             class: WatchRootClass::FactsSource,
             origin,
             path,
@@ -220,12 +220,12 @@ pub fn watch_topology(data_home: &Path, user_home: &Path) -> Result<WatchTopolog
             Ok(()) => topology.descriptors.push(descriptor),
             Err(reason) => topology
                 .rejected
-                .push((descriptor.host.clone(), descriptor.path.clone(), reason)),
+                .push((descriptor.harness.clone(), descriptor.path.clone(), reason)),
         }
     }
-    for (host, path) in default_skill_watch_roots(user_home) {
+    for (harness, path) in default_skill_watch_roots(user_home) {
         let descriptor = WatchRootDescriptor {
-            host,
+            harness,
             class: WatchRootClass::CacheOnly,
             origin: WatchRootOrigin::BuiltIn,
             path,
@@ -235,13 +235,13 @@ pub fn watch_topology(data_home: &Path, user_home: &Path) -> Result<WatchTopolog
             Ok(()) => topology.descriptors.push(descriptor),
             Err(reason) => topology
                 .rejected
-                .push((descriptor.host.clone(), descriptor.path.clone(), reason)),
+                .push((descriptor.harness.clone(), descriptor.path.clone(), reason)),
         }
     }
 
     for source in custom_source_roots(data_home)? {
         let descriptor = WatchRootDescriptor {
-            host: source.host.clone(),
+            harness: source.harness.clone(),
             class: WatchRootClass::FactsSource,
             origin: WatchRootOrigin::CustomApproved,
             path: PathBuf::from(&source.root),
@@ -251,18 +251,18 @@ pub fn watch_topology(data_home: &Path, user_home: &Path) -> Result<WatchTopolog
             Ok(()) => topology.descriptors.push(descriptor),
             Err(reason) => topology
                 .rejected
-                .push((source.host, PathBuf::from(source.root), reason)),
+                .push((source.harness, PathBuf::from(source.root), reason)),
         }
     }
 
-    // 排除的宿主：整宿主移除（内置 + 自定义一起）。控制面读失败不能退化成
-    // 「全部未排除」：那会在启动或热插拔时重新监听用户已经禁止的宿主。
+    // 排除的执行环境：整执行环境移除（内置 + 自定义一起）。控制面读失败不能退化成
+    // 「全部未排除」：那会在启动或热插拔时重新监听用户已经禁止的执行环境。
     // 调用方收到 Err 后保留上一份安全快照（启动时则空注册表 + 周期兜底）。
-    let excluded = crate::source_controls::excluded_hosts(data_home)
+    let excluded = crate::source_controls::excluded_harnesses(data_home)
         .map_err(|error| format!("source controls failed: {error}"))?;
     topology
         .descriptors
-        .retain(|d| !excluded.contains(&d.host));
+        .retain(|d| !excluded.contains(&d.harness));
 
     topology.descriptors.sort_by(|a, b| a.path.cmp(&b.path));
     topology.descriptors.dedup_by(|a, b| a.path == b.path && a.class == b.class);
@@ -274,18 +274,18 @@ pub fn watch_topology(data_home: &Path, user_home: &Path) -> Result<WatchTopolog
 /// cwd 无产品语义，监听它会做出随启动目录变化的怪行为。
 pub fn default_skill_watch_roots(user_home: &Path) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
-    for (host, root) in crate::skills::scanner::DEFAULT_ROOTS.iter() {
+    for (harness, root) in crate::skills::scanner::DEFAULT_ROOTS.iter() {
         let Some(rel) = root.strip_prefix("~/") else {
             continue; // "./…" 项目本地根跳过
         };
-        out.push((host.to_string(), user_home.join(rel)));
+        out.push((harness.to_string(), user_home.join(rel)));
     }
     out.sort();
     out.dedup();
     out
 }
 
-/// 四宿主事实面的监听根——**与 `sync_facts` 的发现根同一来源**
+/// 四执行环境事实面的监听根——**与 `sync_facts` 的发现根同一来源**
 /// （ingest/sync_service.rs 的 batches 枚举；W3 从 ingest/watch.rs 挪来）：watcher 只是那趟 walk 的
 /// 「早点跑」触发器，不是第二个真相源。根不存在也返回（注册进 pending，
 /// watcher 超时循环补挂）。
@@ -298,7 +298,7 @@ pub fn default_source_watch_roots(user_home: &Path) -> Vec<(&'static str, PathBu
         ("codex", user_home.join(".codex")),
         (
             "workbuddy",
-            agent_vitals_hosts::workbuddy_session::workbuddy_root(user_home),
+            agent_vitals_harnesses::workbuddy_session::workbuddy_root(user_home),
         ),
     ];
     if let Some(dsh) = crate::home::dsh_home() {
@@ -342,7 +342,7 @@ mod tests {
 
     fn descriptor(path: &str) -> WatchRootDescriptor {
         WatchRootDescriptor {
-            host: "claude-code".into(),
+            harness: "claude-code".into(),
             class: WatchRootClass::FactsSource,
             origin: WatchRootOrigin::BuiltIn,
             path: PathBuf::from(path),
@@ -360,7 +360,7 @@ mod tests {
 
         let facts: Vec<(&str, &Path)> = topology
             .facts_sources()
-            .map(|d| (d.host.as_str(), d.path.as_path()))
+            .map(|d| (d.harness.as_str(), d.path.as_path()))
             .collect();
         // claude/codex/workbuddy 总在；dsh 视环境而定（dsh_home 可能 None）。
         assert!(facts
@@ -385,7 +385,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_home);
     }
 
-    /// 策略矩阵（spec §6「security」行）：根/home 根/穿越/非绝对/未知宿主。
+    /// 策略矩阵（spec §6「security」行）：根/home 根/穿越/非绝对/未知执行环境。
     #[test]
     fn policy_rejects_closed_reason_set() {
         let user_home = PathBuf::from("/home/u");
@@ -403,37 +403,37 @@ mod tests {
             validate_descriptor(&descriptor("/opt/data"), &user_home).unwrap_err(),
             RootRejection::CanonicalEscape,
         );
-        // 内置宿主词表外 → 拒绝。
+        // 内置执行环境词表外 → 拒绝。
         let mut alien = descriptor("/home/u/x");
-        alien.host = "not-a-host".into();
+        alien.harness = "not-a-harness".into();
         assert_eq!(
             validate_descriptor(&alien, &user_home).unwrap_err(),
-            RootRejection::UnsupportedHost,
+            RootRejection::UnsupportedHarness,
         );
-        // 自定义源宿主超出 {claude-code,codex,dsh} → 拒绝（workbuddy 对自定义
+        // 自定义源执行环境超出 {claude-code,codex,dsh} → 拒绝（workbuddy 对自定义
         // 源不开放——sync 批处理不认它）。
         let mut custom = descriptor("/mnt/archive");
         custom.origin = WatchRootOrigin::CustomApproved;
-        custom.host = "workbuddy".into();
+        custom.harness = "workbuddy".into();
         assert_eq!(
             validate_descriptor(&custom, &user_home).unwrap_err(),
-            RootRejection::UnsupportedHost,
+            RootRejection::UnsupportedHarness,
         );
-        // 同一路径作为 CustomApproved 且宿主合法 → 通过（home 外合法）。
+        // 同一路径作为 CustomApproved 且执行环境合法 → 通过（home 外合法）。
         let mut custom_ok = descriptor("/mnt/archive");
         custom_ok.origin = WatchRootOrigin::CustomApproved;
         assert!(validate_descriptor(&custom_ok, &user_home).is_ok());
 
-        // DSH_HOME 这类已知宿主的显式配置可在 home 外，但仍复用相同的
-        // 宽根拒绝策略；它不是给未知 host 打开的旁路。
+        // DSH_HOME 这类已知执行环境的显式配置可在 home 外，但仍复用相同的
+        // 宽根拒绝策略；它不是给未知 harness 打开的旁路。
         let mut configured = descriptor("/mnt/dsh-state");
         configured.origin = WatchRootOrigin::Configured;
-        configured.host = "dsh".into();
+        configured.harness = "dsh".into();
         assert!(validate_descriptor(&configured, &user_home).is_ok());
-        configured.host = "not-a-host".into();
+        configured.harness = "not-a-harness".into();
         assert_eq!(
             validate_descriptor(&configured, &user_home).unwrap_err(),
-            RootRejection::UnsupportedHost,
+            RootRejection::UnsupportedHarness,
         );
     }
 
@@ -460,7 +460,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &link).unwrap();
 
         let d = WatchRootDescriptor {
-            host: "claude-code".into(),
+            harness: "claude-code".into(),
             class: WatchRootClass::FactsSource,
             origin: WatchRootOrigin::BuiltIn,
             path: link,
@@ -474,7 +474,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&user_home);
     }
 
-    /// 自定义源生命周期入拓扑：添加 → 描述符出现；排除宿主 → 即时移除
+    /// 自定义源生命周期入拓扑：添加 → 描述符出现；排除执行环境 → 即时移除
     /// （spec §6「dynamic lifecycle」行的 Phase B 子集）。
     #[test]
     fn custom_sources_enter_topology_and_exclusion_removes_them() {
@@ -495,17 +495,17 @@ mod tests {
             topology.descriptors,
         );
 
-        crate::source_controls::set_host_excluded(&data_home, "claude-code", true).unwrap();
+        crate::source_controls::set_harness_excluded(&data_home, "claude-code", true).unwrap();
         let topology = watch_topology(&data_home, &user_home).unwrap();
         assert!(
-            !topology.descriptors.iter().any(|d| d.host == "claude-code"),
-            "排除的宿主不得留任何监听描述符",
+            !topology.descriptors.iter().any(|d| d.harness == "claude-code"),
+            "排除的执行环境不得留任何监听描述符",
         );
         let _ = std::fs::remove_dir_all(data_home);
         let _ = std::fs::remove_dir_all(user_home);
     }
 
-    /// 排除控制文件不可读/损坏不能按「无排除」继续，否则用户已关闭的宿主会
+    /// 排除控制文件不可读/损坏不能按「无排除」继续，否则用户已关闭的执行环境会
     /// 在 watcher 重启或热插拔时重新进入监听集合。
     #[test]
     fn invalid_source_controls_fail_topology_closed() {

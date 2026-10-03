@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ui = path.join(repo, "apps/desktop/ui-dev");
+const cityEngine = path.join(repo, "apps/agent-city/ui/src/engine");
 const require = createRequire(path.join(ui, "package.json"));
 const { buildSync } = require("esbuild");
 const entry = `
@@ -17,23 +18,23 @@ export { layoutCity } from "./cityLayout";
 export { planCinematic } from "./cityCinematic";
 `;
 const out = buildSync({
-  stdin: { contents: entry, resolveDir: path.join(ui, "react/src/features/city/engine"), loader: "ts" },
+  stdin: { contents: entry, resolveDir: cityEngine, loader: "ts" },
   bundle: true, write: false, format: "cjs", platform: "node", logLevel: "silent",
 });
 const mod = { exports: {} };
 vm.runInNewContext(out.outputFiles[0].text, { module: mod, exports: mod.exports, require, process, console, setTimeout, clearTimeout, Float64Array, Float32Array, Uint16Array, Uint32Array, Int32Array, Uint8Array, Map, Set, Math, JSON });
 const { layoutCity, planCinematic } = mod.exports;
 
-const hosts = ["codex", "claude-code", "plugin:zcode", "dsh"];
+const harnesses = ["codex", "claude-code", "plugin:zcode", "dsh"];
 const count = 700;
 const buildings = Array.from({ length: count }, (_, index) => ({
-  id: `session:${index}`, districtId: hosts[index % hosts.length], height: 6 + (index * 37) % 90,
+  id: `session:${index}`, districtId: harnesses[index % harnesses.length], height: 6 + (index * 37) % 90,
   footprint: 7.2, startedAt: index * 1000, endedAt: index * 1000 + 500, active: index % 30 === 0,
 }));
 const model = {
   windowStartMs: 0, windowEndMs: count * 1000, windowLabel: "30d",
   buildings,
-  districts: hosts.map((id, rank) => ({ id, label: id, sessionCount: count / 4, tokensTotal: 1e8 * (4 - rank), activeCount: 0, anomaly: null })),
+  districts: harnesses.map((id, rank) => ({ id, label: id, sessionCount: count / 4, tokensTotal: 1e8 * (4 - rank), activeCount: 0, anomaly: null })),
   stats: { totalSessions: count, tokensTotal: 1e9, renderedSessions: count, aggregatedSessions: 0, activeCount: 0, truncated: false },
   rows: new Map(),
 };
@@ -104,7 +105,7 @@ for (const [name, , dwell] of report.districtCards) assert(dwell >= 3, `${name} 
 // 机位偏移是相对常数，换地形后不能把镜头送进山里或贴着地面。
 const lowest = Math.min(...samples.map((sample) => sample.clearance));
 assert(lowest >= 8, `seed ${seed}: camera passes ${lowest.toFixed(1)} above terrain`);
-if (cut === "full") assert.equal(report.districtCards.length, hosts.length, `seed ${seed}: every host district gets a shot`);
+if (cut === "full") assert.equal(report.districtCards.length, harnesses.length, `seed ${seed}: every harness district gets a shot`);
 console.log(`  seed ${seed} ${cut}: ${report.durationSec}s, cruise ${report.speed.min}–${report.speed.max} u/s, visual p50 ${report.visualRadPerSec.p50} / p95 ${report.visualRadPerSec.p95} rad/s, accel ${report.maxRelativeAccelPerSec}×/s, min clearance ${lowest.toFixed(0)}`);
 }
 }

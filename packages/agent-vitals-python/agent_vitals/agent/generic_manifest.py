@@ -1,6 +1,6 @@
-"""generic 插件宿主 manifest 解析（HOST_MANIFEST_DSL_SPEC §3）。
+"""generic 插件执行环境 manifest 解析（HARNESS_MANIFEST_DSL_SPEC §3）。
 
-`agent_vitals_hosts::hosts::generic::manifest` 的 Python twin——错误串、
+`agent_vitals_harnesses::harnesses::generic::manifest` 的 Python twin——错误串、
 校验顺序、词表逐字对齐（golden parity 契约）。改动任何一侧必须同步另一侧
 并补两侧 fixtures；受限正则子集是显式扫描，不能依赖各自 re 引擎的失败模式
 （Python re 支持 lookahead 而 Rust regex 不支持——这里是两语言分歧的头号源）。
@@ -128,12 +128,12 @@ class PluginManifest(object):
         self.billing_locked = billing_locked
 
     @property
-    def facts_host(self):
-        return "host:%s" % self.slug
+    def facts_harness(self):
+        return "harness:%s" % self.slug
 
     @property
     def facts_file_stem(self):
-        return "host-%s" % self.slug
+        return "harness-%s" % self.slug
 
 
 def is_dotted_path(s):
@@ -245,8 +245,8 @@ def parse_manifest(value):
         raise _err("slug", "必须是非空字符串")
     if not _SLUG_RE.match(slug):
         raise _err("slug", "必须匹配 ^[a-z][a-z0-9-]{0,31}$")
-    if slug in RESERVED_SLUGS or slug.startswith("host-") or slug.startswith("plugin-"):
-        raise _err("slug", "`%s` 是保留字（官方宿主名 / host- 与 plugin- 前缀）" % slug)
+    if slug in RESERVED_SLUGS or slug.startswith("harness-") or slug.startswith("plugin-"):
+        raise _err("slug", "`%s` 是保留字（官方执行环境名 / harness- 与 plugin- 前缀）" % slug)
 
     display = value.get("display")
     if not isinstance(display, dict):
@@ -365,7 +365,7 @@ def parse_manifest(value):
             raise _err("billing.policy", "必须是字符串")
         if policy != "lock:metered_estimate":
             raise _err("billing.policy",
-                       "插件宿主仅接受 `lock:metered_estimate`（得到 `%s`）——官方订阅档须官方适配器"
+                       "插件执行环境仅接受 `lock:metered_estimate`（得到 `%s`）——官方订阅档须官方适配器"
                        % policy)
         billing_locked = True
 

@@ -1,4 +1,4 @@
-import { hostName } from "../../lib/hostNames";
+import { harnessName } from "../../lib/harnessNames";
 import { stable, isBackground } from "../../lib/stable";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createTrustSuppression, listenAppEvents, makeInvalidationGate, readDecisionMatrix, readFindings, readFindingsFreshness, safeUiError, type DecisionMatrixReport, type FindingGroup, type FindingSample, type FindingsFreshness, type FindingsReport } from "../../lib/tauri";
@@ -103,7 +103,7 @@ function freshnessLabel(freshness: FindingsFreshness): string {
   const parts = [];
   if (freshness.syncing) parts.push(tx("fd.syncing"));
   if (freshness.last_successful_sync_at) parts.push(tx("fd.asOf", { at: freshness.last_successful_sync_at }));
-  if (freshness.stale_hosts.length) parts.push(tx("fd.stale", { hosts: freshness.stale_hosts.join(listSep()) }));
+  if (freshness.stale_harnesses.length) parts.push(tx("fd.stale", { harnesses: freshness.stale_harnesses.join(listSep()) }));
   return parts.length ? tx("fd.freshParts", { parts: parts.join(" · ") }) : tx("fd.freshOk");
 }
 
@@ -136,7 +136,7 @@ function FindingRow({ group, onNavigateToAction }: { group: FindingGroup; onNavi
   return <article className="finding-row">
     <div className="finding-row-main">
       <div className="finding-row-title"><strong>{group.rule}</strong><span className={severityClass(group.severity)}>{severityLabel(group.severity)}</span></div>
-      <p className="finding-row-subtitle">{hostName(group.host)} · {group.evidence_class}</p>
+      <p className="finding-row-subtitle">{harnessName(group.harness)} · {group.evidence_class}</p>
       <p className="finding-row-copy">{tx("fd.hitsLine", { n: group.count, sessions: group.sessions_count, from: timeLabel(group.first_seen_at_ms), to: timeLabel(group.last_seen_at_ms) })}</p>
       <p className="finding-row-copy">{remedyLabel(group)} · {group.sample_evidence.length ? tx("fd.haveSummaries", { n: group.sample_evidence.length }) : tx("fd.refNA")}</p>
       {group.manual_follow_up && !group.read_only && onNavigateToAction && <button className="button button-secondary button-small finding-evidence-toggle" type="button" onClick={() => onNavigateToAction(group.action_kind)}>{tx("fd.openSettings")}</button>}
@@ -154,7 +154,7 @@ function FindingRow({ group, onNavigateToAction }: { group: FindingGroup; onNavi
 export function FindingsPage({ onNavigateToAction }: { onNavigateToAction?: (actionKind: string) => void }) {
   useLanguage();
   const [report, setReport] = useState<FindingsReport | null>(null);
-  const [freshness, setFreshness] = useState<FindingsFreshness>({ status: "unavailable", state: "unknown", last_successful_sync_at: null, stale_hosts: [], syncing: false });
+  const [freshness, setFreshness] = useState<FindingsFreshness>({ status: "unavailable", state: "unknown", last_successful_sync_at: null, stale_harnesses: [], syncing: false });
   const [matrix, setMatrix] = useState<DecisionMatrixReport | null>(null);
   const [matrixLoading, setMatrixLoading] = useState(true);
   const [matrixError, setMatrixError] = useState<string | null>(null);

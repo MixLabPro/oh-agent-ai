@@ -4,7 +4,7 @@ use agent_vitals_domain::behavior::{detect_sv604_legacy, flatten};
 use agent_vitals_domain::compatibility::canonical_session::{canonical_session_to_vitals, KIND_TOOL_CALL, SIGNAL_TOOL_CALLS};
 use agent_vitals_domain::compatibility::findings::vitals_report_to_legacy_findings;
 use agent_vitals_domain::detectors::Sv604Detector;
-use agent_vitals_hosts::dsh_evidence::build_dsh_evidence;
+use agent_vitals_harnesses::dsh_evidence::build_dsh_evidence;
 use agent_vitals_domain::util::post_fork;
 use serde_json::{json, Value};
 use vitals_core::coverage::Coverage;
@@ -46,7 +46,7 @@ fn assert_parity(events: &[Value]) {
 
 #[test]
 fn hit_and_miss_match_the_old_path() {
-    assert_parity(&[tool_call("write", r#"{"file_path":"/etc/hosts"}"#, 1)]);
+    assert_parity(&[tool_call("write", r#"{"file_path":"/etc/harnesses"}"#, 1)]);
     assert_parity(&[tool_call("write", r#"{"file_path":"notes.md"}"#, 2)]);
 }
 

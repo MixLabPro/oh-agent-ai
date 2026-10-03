@@ -1,4 +1,4 @@
-"""v0.7 Stage 2：Codex static fold → UsageFact emitter（host adapter，不进 Core）。
+"""v0.7 Stage 2：Codex static fold → UsageFact emitter（harness adapter，不进 Core）。
 
 spec §2.3「发射集 == fold 的 by_model 消费集，是构造出来的」：本模块不重抄一套
 codex wire-shape 解释，而是驱动 `codex_usage.CodexFoldState`（Stage 2 commit 1
@@ -39,8 +39,8 @@ from .codex_usage import (
 )
 from .usage_fact import build_usage_fact
 
-# 常量与 Stage 1 claude emitter 同源；宿主差异由 host / observation_kind 表达。
-HOST = "codex"
+# 常量与 Stage 1 claude emitter 同源；执行环境差异由 harness / observation_kind 表达。
+HARNESS = "codex"
 OBSERVATION_KIND = "assistant-usage"
 
 
@@ -320,7 +320,7 @@ def _consumed_to_usage_fact(
         evidence_basis = route_evidence_basis
     fields = {
         "machine_namespace": machine_namespace,
-        "host": HOST,
+        "harness": HARNESS,
         "source_profile": source_profile,
         "native_session_id": native_session_id,
         "source_event_id": source_event_id,
@@ -469,7 +469,7 @@ def codex_rollouts_to_usage_facts(
 
 
 __all__ = [
-    "HOST",
+    "HARNESS",
     "OBSERVATION_KIND",
     "UsageFactEmitResult",
     "codex_rollouts_to_usage_facts",

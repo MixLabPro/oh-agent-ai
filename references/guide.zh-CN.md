@@ -29,7 +29,7 @@ Agent Skills 采用渐进式披露：启动时只把每个 skill 的 name + desc
 ### 第 1 步 · 扫描
 
 ```bash
-python3 scripts/scan.py doctor --host claude-code
+python3 scripts/scan.py doctor --harness claude-code
 ```
 
 `doctor` 把扫描出来的事实翻成「原因 → 影响 → 行动」，逐条带 SV 编号（SV001–SV902），
@@ -58,20 +58,20 @@ python3 scripts/scan.py --json -         # 原始度量，需要某个字段时�
 `doctor` 会自动存快照并与上一次比对，`--no-snapshot` 关掉。对外分享前加
 `--redact --redact-names`。
 
-脚本支持 Claude Code、Codex、OpenClaw、Hermes 和腾讯 WorkBuddy。**一次报告只解释一个宿主的上下文**：调用时必须传对应的 `--host`；不传时仅做按宿主分组的盘点，不能把各宿主的 token 相加。
+脚本支持 Claude Code、Codex、OpenClaw、Hermes 和腾讯 WorkBuddy。**一次报告只解释一个执行环境的上下文**：调用时必须传对应的 `--harness`；不传时仅做按执行环境分组的盘点，不能把各执行环境的 token 相加。
 
 ```bash
-python3 scripts/scan.py --host codex --json /tmp/skill-scan.json
-python3 scripts/scan.py --host openclaw --json /tmp/skill-scan.json
-python3 scripts/scan.py --host hermes --json /tmp/skill-scan.json
-python3 scripts/scan.py --host workbuddy --json /tmp/skill-scan.json
+python3 scripts/scan.py --harness codex --json /tmp/skill-scan.json
+python3 scripts/scan.py --harness openclaw --json /tmp/skill-scan.json
+python3 scripts/scan.py --harness hermes --json /tmp/skill-scan.json
+python3 scripts/scan.py --harness workbuddy --json /tmp/skill-scan.json
 ```
 
-> **宿主能力差异，报告里要先讲清。** 结构、上下文成本、语义重叠、安全这四项对所有支持宿主都有效。Claude Code 可从 `~/.claude.json` 获取启用状态和逐 Skill 触发数据；Codex 可从官方 app-server 获取运行时清单、scope、interface 和 dependencies，并按官方 2% / 8,000 字符 fallback 估算预算；OpenClaw 可从 `skills list --eligible --json` 获取 eligibility、模型可见性、来源、禁用/allowlist 状态和缺失依赖，其 Skill prompt 上限可配置；WorkBuddy 按 builtin manifest、缓存版本和 welcome mode 识别顶层活动 Skills；Hermes 目前以文件系统和配置目录为证据。没有证据的字段必须标为「本次未获取」，不要用安装时间或文件时间凑数。
+> **执行环境能力差异，报告里要先讲清。** 结构、上下文成本、语义重叠、安全这四项对所有支持执行环境都有效。Claude Code 可从 `~/.claude.json` 获取启用状态和逐 Skill 触发数据；Codex 可从官方 app-server 获取运行时清单、scope、interface 和 dependencies，并按官方 2% / 8,000 字符 fallback 估算预算；OpenClaw 可从 `skills list --eligible --json` 获取 eligibility、模型可见性、来源、禁用/allowlist 状态和缺失依赖，其 Skill prompt 上限可配置；WorkBuddy 按 builtin manifest、缓存版本和 welcome mode 识别顶层活动 Skills；Hermes 目前以文件系统和配置目录为证据。没有证据的字段必须标为「本次未获取」，不要用安装时间或文件时间凑数。
 
 > **OpenClaw 必须按实例解释。** `openclaw_instances` 是权威分组，workspace、`plugin-skills`、共享目录和 npm bundled Skills 都归属各自实例。CLI 成功时只把 runtime 返回且 model-visible 的记录称为已加载；CLI 失败时退回 installed/discoverable candidate，不能冒充已加载。冲突只能在相同 `conflict_domain` 内成立。
 
-> **Host evidence (English).** Keep hosts isolated. Claude Code provides plugin and usage evidence; Codex provides an app-server runtime catalog; OpenClaw provides per-instance eligible/model-visible metadata; WorkBuddy provides manifest/cache/welcome-mode evidence; Hermes currently provides filesystem/config evidence. Mark unsupported fields unavailable instead of inferring them from timestamps.
+> **Harness evidence (English).** Keep harnesses isolated. Claude Code provides plugin and usage evidence; Codex provides an app-server runtime catalog; OpenClaw provides per-instance eligible/model-visible metadata; WorkBuddy provides manifest/cache/welcome-mode evidence; Hermes currently provides filesystem/config evidence. Mark unsupported fields unavailable instead of inferring them from timestamps.
 
 **如果扫描结果为 0 或明显偏少**，主动问用户 skill 装在哪，然后用 `--path` 追加：
 
@@ -88,7 +88,7 @@ python3 scripts/scan.py --path ~/some/other/skills --json /tmp/skill-scan.json
 `total_skills_on_disk` 和 `loaded_skills` 通常差很多。磁盘上有大量**不进上下文**的 SKILL.md：
 
 - **未启用的插件副本** —— Claude Code 读取 `enabledPlugins`；OpenClaw 使用结构化 eligibility；WorkBuddy 使用 manifest 与 welcome mode。同一个插件可能在缓存和 marketplace 各有一份
-- **其他宿主的 skill** —— `~/.codex/skills` 等，属于别的 Agent，不占 Claude Code 的预算
+- **其他执行环境的 skill** —— `~/.codex/skills` 等，属于别的 Agent，不占 Claude Code 的预算
 
 **预算、冲突、僵尸这三项默认只按 `loaded` 那批算。**把没加载的算进去会得出「预算超支 143%」这种假警报，并诱导用户去改一个根本不需要改的环境变量。
 
@@ -201,7 +201,7 @@ Tier2 视角（**注意三个字段的区别，别混用**）：
 
 `~/.claude.json` → `skillUsage`，每个 skill 一条 `usageCount` + `lastUsedAt`。`scan.py` 已经读好并挂在每个 skill 的 `usage_count` / `last_used_days_ago` 上，汇总在 `trigger_data`。
 
-> 早期版本走的是 `~/.claude/projects/**/*.jsonl`（动辄上百个文件、上百 MB，且只能靠正则猜）。Claude Code 默认不再走这条路。对没有原生计数的 OpenClaw，可用 `scripts/probe_logs.py --host openclaw --deep` 统计去重后的 `SKILL.md` read 观测；它只能证明日志里出现过读取，可能来自审计或调试，**不等于自动触发次数，不能写进 `usage_count` 或单独用于僵尸判定**。
+> 早期版本走的是 `~/.claude/projects/**/*.jsonl`（动辄上百个文件、上百 MB，且只能靠正则猜）。Claude Code 默认不再走这条路。对没有原生计数的 OpenClaw，可用 `scripts/probe_logs.py --harness openclaw --deep` 统计去重后的 `SKILL.md` read 观测；它只能证明日志里出现过读取，可能来自审计或调试，**不等于自动触发次数，不能写进 `usage_count` 或单独用于僵尸判定**。
 
 报告时必须说清两件事：
 
@@ -229,7 +229,7 @@ python3 scripts/scan.py --baseline /tmp/skill-scan-prev.json --json /tmp/skill-s
 
 `diff_vs_baseline` 会给出：新增/移除的 skill、每个 skill 的触发增量、预算变化、**新出现的安全命中**，以及 `newly_judgeable`——上次还太新、这次已装够天数的那批。**`newly_judgeable` 才是本次新增的僵尸判定对象**，直接报这一张，不要把老结论重报一遍。
 
-**若 `trigger_data.available` 为 false**（宿主没有 `skillUsage`），明确写「本次未能获取触发数据」，不要猜、不要用装载时间或修改时间代替。缺这一列的报告仍然有价值，但必须诚实标注。
+**若 `trigger_data.available` 为 false**（执行环境没有 `skillUsage`），明确写「本次未能获取触发数据」，不要猜、不要用装载时间或修改时间代替。缺这一列的报告仍然有价值，但必须诚实标注。
 
 #### 2.6 结构问题
 
@@ -329,9 +329,9 @@ Agent Skills 生态存在真实的供应链风险。Snyk 在 2026-02-05 扫描�
 已用 X / 预算 Y（Z%）· 可能被静默丢弃 N 个
 
 ## 概览
-本次扫描 run <标记> · 磁盘 N 个 · **实际加载 M 个**（未加载的：未启用插件 A 个、其他宿主 B 个）
+本次扫描 run <标记> · 磁盘 N 个 · **实际加载 M 个**（未加载的：未启用插件 A 个、其他执行环境 B 个）
 加载部分启动占用约 X token（约占 200k 的 Y%）
-本次扫描宿主：...
+本次扫描执行环境：...
 触发数据：已获取（~/.claude.json → skillUsage，终身累计）/ 未能获取
 
 ## 需要立刻处理（按严重度）

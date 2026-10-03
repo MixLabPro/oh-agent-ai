@@ -2,11 +2,11 @@
 
 use super::*;
 
-/// zcode 宿主接入收尾（2026-09-23）：插件宿主 tokens 可见性 + 零漂移守卫。
-/// hosts.d 是机器本地配置——空 data_home 下扫描为空，monthly/daily 输出与
+/// zcode 执行环境接入收尾（2026-09-23）：插件执行环境 tokens 可见性 + 零漂移守卫。
+/// harnesses.d 是机器本地配置——空 data_home 下扫描为空，monthly/daily 输出与
 /// 接入前逐字节一致（golden 双世界钉的是同一性质）。
 #[test]
-fn plugin_tokens_by_host_lists_installed_and_stays_silent_when_absent() {
+fn plugin_tokens_by_harness_lists_installed_and_stays_silent_when_absent() {
     use agent_vitals_data::repository::SummaryRepository;
     let dir = std::env::temp_dir().join(format!(
         "av-plugin-tk-{}-{}",
@@ -15,10 +15,10 @@ fn plugin_tokens_by_host_lists_installed_and_stays_silent_when_absent() {
     ));
     let data_home = dir.join("dh");
     let user_home = dir.join("home");
-    std::fs::create_dir_all(data_home.join("hosts.d/zcode")).unwrap();
+    std::fs::create_dir_all(data_home.join("harnesses.d/zcode")).unwrap();
     std::fs::create_dir_all(user_home.join("rollout")).unwrap();
     std::fs::write(
-        data_home.join("hosts.d/zcode/manifest.json"),
+        data_home.join("harnesses.d/zcode/manifest.json"),
         r#"{"manifest_version":1,"slug":"zcode","display":{"name":"ZCode"},
             "discovery":{"roots":["{HOME}/rollout"],"include":["*.jsonl"]},
             "source":{"format":"jsonl"},
@@ -44,31 +44,31 @@ fn plugin_tokens_by_host_lists_installed_and_stays_silent_when_absent() {
     let (slug, res) = &results[0];
     assert_eq!(slug, "zcode", "首条必须是成功条目而非 manifest 错误: {res:?}");
     let payload = res.as_ref().expect("ingest 成功");
-    let appended = payload["ingest"]["hosts"][0]["appended"].as_i64();
+    let appended = payload["ingest"]["harnesses"][0]["appended"].as_i64();
     assert_eq!(appended, Some(1), "首装一条：{payload}");
     let _ = appended;
 
     let repo = SqlSummaryRepository::at(&data_home);
     let monthly = repo.monthly_summary(&MonthlySummaryQuery { month: "2026-09".into() });
-    let tk = monthly.tokens_by_host.get("host:zcode")
-        .expect("插件宿主 tokens 必须可见（L0 处理量纪律）");
+    let tk = monthly.tokens_by_harness.get("harness:zcode")
+        .expect("插件执行环境 tokens 必须可见（L0 处理量纪律）");
     assert_eq!(tk.total, 33, "10+20+0+3");
     assert_eq!(tk.uncached_input, 10);
     assert_eq!(tk.cache_read, 20);
-    assert!(!monthly.by_host.contains_key("host:zcode"),
+    assert!(!monthly.by_harness.contains_key("harness:zcode"),
         "金额面不入（billing 声明前 L0 纪律）");
 
     // 幂等重放：duplicate 吸收，tokens 不变。
     let _ = agent_vitals_ingest::plugin_ingest::ingest_installed("ns-tk", &data_home, &user_home);
     let monthly2 = repo.monthly_summary(&MonthlySummaryQuery { month: "2026-09".into() });
-    assert_eq!(monthly2.tokens_by_host.get("host:zcode").unwrap().total, 33);
+    assert_eq!(monthly2.tokens_by_harness.get("harness:zcode").unwrap().total, 33);
 
-    // 零漂移守卫：无 hosts.d 的 data_home → 插件面静默缺席。
+    // 零漂移守卫：无 harnesses.d 的 data_home → 插件面静默缺席。
     let bare = dir.join("bare");
     std::fs::create_dir_all(&bare).unwrap();
     let repo_bare = SqlSummaryRepository::at(&bare);
     let m_bare = repo_bare.monthly_summary(&MonthlySummaryQuery { month: "2026-09".into() });
-    assert!(!m_bare.tokens_by_host.contains_key("host:zcode"));
+    assert!(!m_bare.tokens_by_harness.contains_key("harness:zcode"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -93,7 +93,7 @@ fn codex_unresolved_rows_read_the_two_layer_by_model_shape() {
     // 真实形状（codex_by_model_from_hours 产物）：model → speed → 桶对象，
     // 桶键 = CODEX_TOKEN_FIELDS（cached_input_tokens 而非 cache_read——
     // 审查 P1-1 的错键名在这里被钉死）。
-    use agent_vitals_hosts::codex_usage::codex_by_model_from_hours;
+    use agent_vitals_harnesses::codex_usage::codex_by_model_from_hours;
     let by_hour = json!({
         "2026-09-05T10:00:00.000Z": {
             "gpt-5.3-mystery": {
@@ -189,7 +189,7 @@ fn unresolved_billing_groups_carries_real_scope_and_excludes_subscriptions() {
         assert_eq!(groups["status"], json!("ok"));
         let rows = groups["groups"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["host"], json!("codex"));
+        assert_eq!(rows[0]["harness"], json!("codex"));
         assert_eq!(rows[0]["model_id"], json!("gpt-mystery"));
         assert_eq!(rows[0]["tokens"], json!(125));
         assert_eq!(rows[0]["session_count"], json!(1));
@@ -231,9 +231,9 @@ fn declared_relations_of_any_kind_close_their_group_until_revoked() {
     });
 }
 
-/// 组装层：monthly summary 的 by_provider 必含三个宿主的 provider 条目、
+/// 组装层：monthly summary 的 by_provider 必含三个执行环境的 provider 条目、
 /// 不含 workbuddy（excluded 检查双向成立）、contract_violations 为空、
-/// by_host 与 by_provider 互不串扰。
+/// by_harness 与 by_provider 互不串扰。
 /// 当前月的 Beijing 毫秒时点（月首中午，安全在窗内）——转 SQL 后
 /// 各测试种 fact 用同一个。
 fn current_month_noon_ms() -> i64 {
@@ -306,20 +306,20 @@ fn monthly_summary_fills_by_provider_without_contract_violations() {
             || summary.by_provider.contains_key("codex/<unknown>"),
             "Codex facts without provider evidence must remain unresolved: {:?}",
             summary.by_provider.keys());
-        // DSH 条目与宿主条目同额同档（同一 provider 镜像）。
-        let dsh_host = &summary.by_host["dsh"];
+        // DSH 条目与执行环境条目同额同档（同一 provider 镜像）。
+        let dsh_harness = &summary.by_harness["dsh"];
         let dsh_prov = &summary.by_provider["dsh/deepseek-official"];
-        assert_eq!(dsh_host.amounts_by_basis, dsh_prov.amounts_by_basis);
-        // excluded 宿主不得出现在 by_provider（键的宿主部分）。
+        assert_eq!(dsh_harness.amounts_by_basis, dsh_prov.amounts_by_basis);
+        // excluded 执行环境不得出现在 by_provider（键的执行环境部分）。
         assert!(summary
             .by_provider
             .keys()
             .all(|k| k.split('/').next() != Some("workbuddy")));
-        // by_provider 的条目不回灌 total_summable（总额仍只按 by_host 算，
+        // by_provider 的条目不回灌 total_summable（总额仍只按 by_harness 算，
         // 否则同一笔钱进两次——month.json 三倍计数事故的结构镜像）。
-        let via_host = summary.total_summable();
-        let host_only_sum: f64 = summary
-            .by_host
+        let via_harness = summary.total_summable();
+        let harness_only_sum: f64 = summary
+            .by_harness
             .values()
             .map(|h| {
                 h.amounts_by_basis
@@ -329,7 +329,7 @@ fn monthly_summary_fills_by_provider_without_contract_violations() {
                     .sum::<f64>()
             })
             .sum();
-        assert_eq!(via_host, host_only_sum);
+        assert_eq!(via_harness, harness_only_sum);
     });
 }
 
@@ -460,7 +460,7 @@ fn dsh_tokens_daily_path_is_not_structurally_zero() {
 /// （`SqlSummaryRepository::daily_summary`）——`CODE_REVIEW_V0_9_STAGE_
 /// A_D_KPI_BILLING.md` 头部 bug #2 的完整回归：`dsh_day_tokens` 造出来
 /// 之后没有一条测试真的走 `daily_summary` 这条公开路径去断言 DSH 的
-/// `tokens_by_host` 非零，调用点因此漏改，恒零一直没被抓到。
+/// `tokens_by_harness` 非零，调用点因此漏改，恒零一直没被抓到。
 #[test]
 fn daily_summary_reports_nonzero_dsh_tokens_for_a_real_day() {
     with_home(|| {
@@ -485,7 +485,7 @@ fn daily_summary_reports_nonzero_dsh_tokens_for_a_real_day() {
         );
         drop(db);
         let daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: day });
-        let dsh_tk = &daily.tokens_by_host["dsh"];
+        let dsh_tk = &daily.tokens_by_harness["dsh"];
         assert_eq!(dsh_tk.total, 1_350_000, "DSH 今日 token 不得假零");
         assert_eq!(dsh_tk.uncached_input, 1_000_000);
     });
@@ -519,7 +519,7 @@ fn dsh_zero_token_day_does_not_render_as_metered_actual_zero() {
         drop(db);
         let summary =
             SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month });
-        let dsh = &summary.by_host["dsh"];
+        let dsh = &summary.by_harness["dsh"];
         // total=0 → 不入 MeteredActual（金额表留空）+ freshness 照报（day
         // 存在 = 测到日，不是 Unavailable）。
         assert!(
@@ -533,18 +533,18 @@ fn dsh_zero_token_day_does_not_render_as_metered_actual_zero() {
     });
 }
 
-/// 接线结构（真机）：三宿主全进 `by_host`、不进 `excluded_hosts`；汇总
-/// 新鲜度 = 最新被观测到的宿主（不是硬编码 dsh）；非 summable 的金额
+/// 接线结构（真机）：三执行环境全进 `by_harness`、不进 `excluded_harnesses`；汇总
+/// 新鲜度 = 最新被观测到的执行环境（不是硬编码 dsh）；非 summable 的金额
 /// （codex/claude 的 MeteredEstimate）
-/// 不得混进 `total_summable`——可汇总总额必须恰好等于各宿主 summable
+/// 不得混进 `total_summable`——可汇总总额必须恰好等于各执行环境 summable
 /// 档之和，估算与诊断价再大也不出现。
 #[test]
-fn monthly_summary_wires_all_hosts_without_leaking_into_total() {
+fn monthly_summary_wires_all_harnesses_without_leaking_into_total() {
     with_home(|| {
         let month = crate::clock::current_month_beijing();
         let ts = current_month_noon_ms();
         let db = seed_authority_db();
-        // 三宿主各一笔：dsh 出 MeteredActual（summable），codex 出
+        // 三执行环境各一笔：dsh 出 MeteredActual（summable），codex 出
         // MeteredEstimate（非 summable），claude 同样为 MeteredEstimate。
         seed_fact(
             &db,
@@ -593,25 +593,25 @@ fn monthly_summary_wires_all_hosts_without_leaking_into_total() {
             "{:?}",
             summary.contract_violations()
         );
-        assert!(summary.by_host.contains_key("codex"));
-        assert!(summary.by_host.contains_key("dsh"));
-        assert!(summary.by_host.contains_key("claude-code"));
-        assert!(summary.by_host.contains_key("workbuddy"));
-        assert!(!summary.excluded_hosts.contains("codex"));
-        assert!(!summary.excluded_hosts.contains("claude-code"));
-        // E4b：四宿主全接线，excluded 是空集。
-        assert_eq!(summary.excluded_hosts, BTreeSet::new());
-        // 汇总新鲜度 = 宿主里最新的 last_observed_at（字典序=时间序，两处
+        assert!(summary.by_harness.contains_key("codex"));
+        assert!(summary.by_harness.contains_key("dsh"));
+        assert!(summary.by_harness.contains_key("claude-code"));
+        assert!(summary.by_harness.contains_key("workbuddy"));
+        assert!(!summary.excluded_harnesses.contains("codex"));
+        assert!(!summary.excluded_harnesses.contains("claude-code"));
+        // E4b：四执行环境全接线，excluded 是空集。
+        assert_eq!(summary.excluded_harnesses, BTreeSet::new());
+        // 汇总新鲜度 = 执行环境里最新的 last_observed_at（字典序=时间序，两处
         // 格式统一 `YYYY-MM-DDT00:00:00Z`）。
-        let max_host = summary
-            .by_host
+        let max_harness = summary
+            .by_harness
             .values()
             .filter_map(|h| h.freshness.last_observed_at.clone())
             .max();
-        assert_eq!(summary.freshness.last_observed_at, max_host);
+        assert_eq!(summary.freshness.last_observed_at, max_harness);
         // spec §4 汇总纪律：总额只收 summable 三档（estimate/诊断价不入）。
-        let host_summable = summary
-            .by_host
+        let harness_summable = summary
+            .by_harness
             .values()
             .map(|h| {
                 h.amounts_by_basis
@@ -621,7 +621,7 @@ fn monthly_summary_wires_all_hosts_without_leaking_into_total() {
                     .sum::<f64>()
             })
             .sum::<f64>();
-        assert_eq!(summary.total_summable(), host_summable);
+        assert_eq!(summary.total_summable(), harness_summable);
     });
 }
 
@@ -656,7 +656,7 @@ fn month_with_data_sums_as_metered_actual() {
             "{:?}",
             summary.contract_violations()
         );
-        let dsh = &summary.by_host["dsh"];
+        let dsh = &summary.by_harness["dsh"];
         assert_eq!(dsh.freshness.state, FreshnessState::Fresh);
         assert!(dsh
             .amounts_by_basis
@@ -669,7 +669,7 @@ fn month_with_data_sums_as_metered_actual() {
 
 /// 每次都在一个**保证干净**的库上开始——`with_home` 的目录清理是尽力而为
 /// （`let _ = remove_dir_all`，失败不追责），残留的 `agent-vitals.sqlite3`
-/// 会让下一个测试的 `fact_id`（PRIMARY KEY，全表唯一，不分宿主）撞车；
+/// 会让下一个测试的 `fact_id`（PRIMARY KEY，全表唯一，不分执行环境）撞车；
 /// 显式先删库文件（含 WAL/SHM 旁路文件）比依赖目录级清理更可靠。
 fn seed_authority_db() -> agent_vitals_data::authority::AuthorityDb {
     let data_home = crate::home::data_home();
@@ -680,23 +680,23 @@ fn seed_authority_db() -> agent_vitals_data::authority::AuthorityDb {
     agent_vitals_data::authority::AuthorityDb::open(&path, 1).unwrap()
 }
 
-/// 四张宿主词表必须同表（加宿主一处漏改就是「事实进得来、汇总看不见」）。
+/// 四张执行环境词表必须同表（加执行环境一处漏改就是「事实进得来、汇总看不见」）。
 #[test]
-fn wired_hosts_match_fact_hosts() {
-    let mut wired: Vec<&str> = WIRED_HOSTS.to_vec();
+fn wired_harnesses_match_fact_harnesses() {
+    let mut wired: Vec<&str> = WIRED_HARNESSES.to_vec();
     wired.sort_unstable();
-    let mut facts: Vec<&str> = crate::core::fact_hosts::FACT_HOSTS.to_vec();
+    let mut facts: Vec<&str> = crate::core::fact_harnesses::FACT_HARNESSES.to_vec();
     facts.sort_unstable();
     assert_eq!(wired, facts);
-    for (host, _) in HOST_PROVIDER_MAP {
-        assert!(WIRED_HOSTS.contains(host), "{host} in HOST_PROVIDER_MAP but not wired");
+    for (harness, _) in HARNESS_PROVIDER_MAP {
+        assert!(WIRED_HARNESSES.contains(harness), "{harness} in HARNESS_PROVIDER_MAP but not wired");
     }
 }
 
-/// E4b（spec WORKBUDDY_ONBOARDING §9E.5）：WorkBuddy 进 `by_host`/`tokens_by_host`
+/// E4b（spec WORKBUDDY_ONBOARDING §9E.5）：WorkBuddy 进 `by_harness`/`tokens_by_harness`
 /// 但**只有 token、没有金额**——事实 `provider_id: null`（三轨请求级不可判，
 /// §2.1），`amounts_by_basis` 必空、`has_unresolved` 必真、不进 `by_provider`；
-/// 四桶原样出现在 `tokens_by_host`（真桶非零，不再是 §7.2 的「恒 0 冒充」）。
+/// 四桶原样出现在 `tokens_by_harness`（真桶非零，不再是 §7.2 的「恒 0 冒充」）。
 /// 月/日两个窗口同一契约，`contract_violations` 为空。
 #[test]
 fn workbuddy_row_carries_tokens_but_never_money() {
@@ -721,9 +721,9 @@ fn workbuddy_row_carries_tokens_but_never_money() {
         assert!(monthly.contract_violations().is_empty(), "{:?}", monthly.contract_violations());
         assert!(daily.contract_violations().is_empty(), "{:?}", daily.contract_violations());
         for (label, wb, tk, by_provider) in [
-            ("monthly", &monthly.by_host["workbuddy"], &monthly.tokens_by_host["workbuddy"],
+            ("monthly", &monthly.by_harness["workbuddy"], &monthly.tokens_by_harness["workbuddy"],
              &monthly.by_provider),
-            ("daily", &daily.by_host["workbuddy"], &daily.tokens_by_host["workbuddy"],
+            ("daily", &daily.by_harness["workbuddy"], &daily.tokens_by_harness["workbuddy"],
              &daily.by_provider),
         ] {
             assert!(wb.amounts_by_basis.is_empty(), "{label}: 金额面必须为空");
@@ -737,12 +737,12 @@ fn workbuddy_row_carries_tokens_but_never_money() {
             assert_eq!(tk.total, 27_750, "{label}");
             assert!(
                 !by_provider.keys().any(|k| k.starts_with("workbuddy/")),
-                "{label}: provider null 的事实没有 host/provider 键可挂"
+                "{label}: provider null 的事实没有 harness/provider 键可挂"
             );
         }
-        // 没有事实的宿主照旧 Unavailable + 零 token（不是 workbuddy 抢了别人的桶）。
-        assert_eq!(monthly.by_host["dsh"].freshness.state, FreshnessState::Unavailable);
-        assert_eq!(monthly.tokens_by_host["dsh"].total, 0);
+        // 没有事实的执行环境照旧 Unavailable + 零 token（不是 workbuddy 抢了别人的桶）。
+        assert_eq!(monthly.by_harness["dsh"].freshness.state, FreshnessState::Unavailable);
+        assert_eq!(monthly.tokens_by_harness["dsh"].total, 0);
         // total_summable 不受影响（没有钱进来）。
         assert_eq!(monthly.total_summable(), 0.0);
     });
@@ -769,7 +769,7 @@ fn calendar_month_memo_hits_on_same_version_and_misses_on_every_input_change() {
                 "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
                  VALUES ('run', 1, 'cli', 'succeeded', 1) ON CONFLICT(run_id) DO NOTHING", [])?;
             c.execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                      source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                      event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                      output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
@@ -831,7 +831,7 @@ fn calendar_month_memo_hits_on_same_version_and_misses_on_every_input_change() {
 fn seed_fact(
     db: &agent_vitals_data::authority::AuthorityDb,
     fact_id: &str,
-    host: &str,
+    harness: &str,
     model_id: Option<&str>,
     observation_kind: &str,
     event_ts_ms: i64,
@@ -850,13 +850,13 @@ fn seed_fact(
         .unwrap();
     db.conn()
         .execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                  source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                  event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                  output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
              VALUES (?1, ?2, 'm', 'sess', ?1, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'run', 1, 1)",
             rusqlite::params![
-                fact_id, host, observation_kind, model_id, event_ts_ms, event_peak, u, cr, cw, o
+                fact_id, harness, observation_kind, model_id, event_ts_ms, event_peak, u, cr, cw, o
             ],
         )
         .unwrap();
@@ -866,7 +866,7 @@ fn seed_fact(
 fn seed_provider_fact(
     db: &agent_vitals_data::authority::AuthorityDb,
     fact_id: &str,
-    host: &str,
+    harness: &str,
     provider_id: &str,
     model_id: &str,
     event_ts_ms: i64,
@@ -886,13 +886,13 @@ fn seed_provider_fact(
     db.conn()
         .execute(
             "INSERT INTO usage_facts(
-                 fact_id, host, machine_namespace, native_session_id,
+                 fact_id, harness, machine_namespace, native_session_id,
                  source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                  event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                  output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
              VALUES (?1, ?2, 'm', 'provider-session', ?1, 'token_count', ?3, ?4,
                      ?5, ?5, ?6, ?7, ?8, ?9, 'provider-run', 1, 1)",
-            rusqlite::params![fact_id, host, provider_id, model_id, event_ts_ms, u, cr, cw, o],
+            rusqlite::params![fact_id, harness, provider_id, model_id, event_ts_ms, u, cr, cw, o],
         )
         .unwrap();
 }
@@ -1032,8 +1032,8 @@ fn codex_quota_snapshot_reads_authority_without_a_rollout_fallback() {
             .unwrap();
         db.conn()
             .execute(
-                "INSERT INTO host_runtime_snapshots(
-                     host, snapshot_kind, payload_json, observed_at_ms,
+                "INSERT INTO harness_runtime_snapshots(
+                     harness, snapshot_kind, payload_json, observed_at_ms,
                      ingested_run_id, updated_at_ms)
                  VALUES ('codex', 'codex_quota', ?1, 2, 'quota-run', 2)",
                 rusqlite::params![
@@ -1049,18 +1049,18 @@ fn codex_quota_snapshot_reads_authority_without_a_rollout_fallback() {
     });
 }
 
-/// Phase 2.8：`data host-bill set` 录入的行进 `by_provider` 的 basis 桶。
+/// Phase 2.8：`data harness-bill set` 录入的行进 `by_provider` 的 basis 桶。
 /// 找不到条目就新建（WorkBuddy 从不产 usage_fact），有就叠加；跨币不相加。
 #[test]
-fn apply_host_bills_folds_user_entered_rows_into_by_provider() {
+fn apply_harness_bills_folds_user_entered_rows_into_by_provider() {
     with_home(|| {
         let db = seed_authority_db();
-        db.host_bill_put(
-            "wb:wb:2026-09:host_billed:",
+        db.harness_bill_put(
+            "wb:wb:2026-09:harness_billed:",
             "workbuddy",
             "workbuddy",
             "2026-09",
-            "host_billed",
+            "harness_billed",
             21_500,
             "CNY",
             "credit_json",
@@ -1068,7 +1068,7 @@ fn apply_host_bills_folds_user_entered_rows_into_by_provider() {
         )
         .unwrap();
         // 另一档进已存在的 provider 条目（叠加，不覆盖）。
-        db.host_bill_put(
+        db.harness_bill_put(
             "wb:wb:2026-09:fixed_subscription:",
             "workbuddy",
             "workbuddy",
@@ -1081,15 +1081,15 @@ fn apply_host_bills_folds_user_entered_rows_into_by_provider() {
         )
         .unwrap();
 
-        let mut by_provider: BTreeMap<String, HostAmount> = BTreeMap::new();
-        apply_host_bills(&mut by_provider, &db, "2026-09");
+        let mut by_provider: BTreeMap<String, HarnessAmount> = BTreeMap::new();
+        apply_harness_bills(&mut by_provider, &db, "2026-09");
 
         let e = by_provider.get("workbuddy/workbuddy").expect("新建条目");
         assert_eq!(e.currency.as_deref(), Some("CNY"));
         assert!(!e.has_unresolved);
         assert_eq!(
             e.amounts_by_basis
-                .get(&agent_vitals_domain::data_contract::BillingBasis::HostBilled),
+                .get(&agent_vitals_domain::data_contract::BillingBasis::HarnessBilled),
             Some(&215.0)
         );
         assert_eq!(
@@ -1099,8 +1099,8 @@ fn apply_host_bills_folds_user_entered_rows_into_by_provider() {
         );
 
         // 别的月份不串。
-        let mut other: BTreeMap<String, HostAmount> = BTreeMap::new();
-        apply_host_bills(&mut other, &db, "2026-08");
+        let mut other: BTreeMap<String, HarnessAmount> = BTreeMap::new();
+        apply_harness_bills(&mut other, &db, "2026-08");
         assert!(other.is_empty());
     });
 }
@@ -1136,7 +1136,7 @@ fn declared_subscription_fees_reach_by_provider_and_stop_on_revoke() {
         assert_eq!(declared[0].amount, 20.0, "2000 minor = 20.00");
         assert_eq!(declared[0].start_month, "2025-07");
 
-        let mut by_provider: BTreeMap<String, HostAmount> = BTreeMap::new();
+        let mut by_provider: BTreeMap<String, HarnessAmount> = BTreeMap::new();
         apply_declared_subscription_fees(&mut by_provider, "2026-09", &declared);
         let entry = by_provider.get("claude-code/anthropic").expect("月费条目");
         assert_eq!(
@@ -1146,7 +1146,7 @@ fn declared_subscription_fees_reach_by_provider_and_stop_on_revoke() {
         assert_eq!(entry.currency.as_deref(), Some("USD"));
 
         // 账期：订阅生效前的月份不摊（不得凭空造出订阅前的支出）。
-        let mut earlier: BTreeMap<String, HostAmount> = BTreeMap::new();
+        let mut earlier: BTreeMap<String, HarnessAmount> = BTreeMap::new();
         apply_declared_subscription_fees(&mut earlier, "2025-06", &declared);
         assert!(earlier.is_empty(), "订阅生效前不得摊月费");
 
@@ -1229,18 +1229,18 @@ fn declared_subscription_fees_skip_incomplete_other_kind_and_ended_rows() {
             "到期后的月份不再产出月费"
         );
 
-        let mut in_range: BTreeMap<String, HostAmount> = BTreeMap::new();
+        let mut in_range: BTreeMap<String, HarnessAmount> = BTreeMap::new();
         apply_declared_subscription_fees(&mut in_range, "2026-02", &declared);
         assert!(in_range.contains_key("codex/openai"), "结束月之前照常摊");
 
-        let mut after_end: BTreeMap<String, HostAmount> = BTreeMap::new();
+        let mut after_end: BTreeMap<String, HarnessAmount> = BTreeMap::new();
         apply_declared_subscription_fees(&mut after_end, "2026-04", &declared);
         assert!(after_end.is_empty(), "到期后继续收月费是编造");
     });
 }
 
 /// **双计守卫**：待确认组按模型组切，同一订阅常被分两次声明（M3 一组、M2.7 一组），
-/// 两条声明各带 ¥44——不去重就是 ¥88/月。一个 host+provider 只摊一次，留最早生效的。
+/// 两条声明各带 ¥44——不去重就是 ¥88/月。一个 harness+provider 只摊一次，留最早生效的。
 #[test]
 fn duplicate_provider_subscription_declarations_charge_one_fee() {
     with_home(|| {
@@ -1256,8 +1256,8 @@ fn duplicate_provider_subscription_declarations_charge_one_fee() {
             ).unwrap();
         }
         let declared = declared_subscription_fees(&db, "2026-09");
-        assert_eq!(declared.len(), 1, "同一 host+provider 的两条订阅声明只摊一次");
-        let mut by_provider: BTreeMap<String, HostAmount> = BTreeMap::new();
+        assert_eq!(declared.len(), 1, "同一 harness+provider 的两条订阅声明只摊一次");
+        let mut by_provider: BTreeMap<String, HarnessAmount> = BTreeMap::new();
         apply_declared_subscription_fees(&mut by_provider, "2026-09", &declared);
         let entry = by_provider.get("claude-code/minimax").expect("月费条目");
         assert_eq!(
@@ -1391,22 +1391,22 @@ fn monthly_summary_spreads_a_declared_subscription_fee_into_the_dto() {
 }
 
 #[test]
-fn apply_host_bills_never_labels_mixed_cny_usd_as_single_currency() {
+fn apply_harness_bills_never_labels_mixed_cny_usd_as_single_currency() {
     with_home(|| {
         let db = seed_authority_db();
-        db.host_bill_put(
-            "mixed:2026-09:host_billed",
+        db.harness_bill_put(
+            "mixed:2026-09:harness_billed",
             "workbuddy",
             "gateway",
             "2026-09",
-            "host_billed",
+            "harness_billed",
             21_500,
             "CNY",
             "credit_json",
             1,
         )
         .unwrap();
-        db.host_bill_put(
+        db.harness_bill_put(
             "mixed:2026-09:fixed_subscription",
             "workbuddy",
             "gateway",
@@ -1419,7 +1419,7 @@ fn apply_host_bills_never_labels_mixed_cny_usd_as_single_currency() {
         )
         .unwrap();
         // A later CNY row must not re-claim CNY after the conflict.
-        db.host_bill_put(
+        db.harness_bill_put(
             "mixed:2026-09:api_equivalent",
             "workbuddy",
             "gateway",
@@ -1433,7 +1433,7 @@ fn apply_host_bills_never_labels_mixed_cny_usd_as_single_currency() {
         .unwrap();
 
         let mut by_provider = BTreeMap::new();
-        apply_host_bills(&mut by_provider, &db, "2026-09");
+        apply_harness_bills(&mut by_provider, &db, "2026-09");
 
         let e = by_provider.get("workbuddy/gateway").expect("provider entry");
         assert_eq!(e.currency, None);
@@ -1546,7 +1546,7 @@ fn legacy_backed_month_degrades_claude_freshness_to_partial() {
         let summary = repo.monthly_summary(&MonthlySummaryQuery {
             month: month.clone(),
         });
-        let claude = &summary.by_host["claude-code"];
+        let claude = &summary.by_harness["claude-code"];
         assert_eq!(
             claude.freshness.state,
             FreshnessState::Partial,
@@ -1556,9 +1556,9 @@ fn legacy_backed_month_degrades_claude_freshness_to_partial() {
             claude.freshness.last_observed_at.is_some(),
             "Partial 保留 last_observed_at（观测过，只是部分是聚合兜底）"
         );
-        // 其他宿主不受 claude 的标记影响。
+        // 其他执行环境不受 claude 的标记影响。
         assert_eq!(
-            summary.by_host["codex"].freshness.state,
+            summary.by_harness["codex"].freshness.state,
             FreshnessState::Unavailable
         );
     });
@@ -1576,21 +1576,21 @@ fn sql_repository_reports_unavailable_with_no_facts() {
             "{:?}",
             summary.contract_violations()
         );
-        for host in WIRED_HOSTS {
+        for harness in WIRED_HARNESSES {
             assert_eq!(
-                summary.by_host[*host].freshness.state,
+                summary.by_harness[*harness].freshness.state,
                 FreshnessState::Unavailable,
-                "host={host}"
+                "harness={harness}"
             );
             assert!(
-                summary.by_host[*host].amounts_by_basis.is_empty(),
-                "host={host}"
+                summary.by_harness[*harness].amounts_by_basis.is_empty(),
+                "harness={harness}"
             );
         }
-        assert!(!summary.excluded_hosts.contains("dsh"));
+        assert!(!summary.excluded_harnesses.contains("dsh"));
         // E4b：workbuddy 不再 excluded——它有 token 数据面（金额仍 unresolved）。
-        assert!(!summary.excluded_hosts.contains("workbuddy"));
-        assert!(summary.excluded_hosts.is_empty());
+        assert!(!summary.excluded_harnesses.contains("workbuddy"));
+        assert!(summary.excluded_harnesses.is_empty());
         assert_eq!(summary.coverage.measured_fields, 4);
 
         let daily = repo.daily_summary(&DailySummaryQuery {
@@ -1602,7 +1602,7 @@ fn sql_repository_reports_unavailable_with_no_facts() {
             daily.contract_violations()
         );
         assert_eq!(
-            daily.by_host["dsh"].freshness.state,
+            daily.by_harness["dsh"].freshness.state,
             FreshnessState::Unavailable
         );
     });
@@ -1619,14 +1619,14 @@ fn sql_repository_rejects_a_malformed_window_without_a_guess() {
             month: "2026-9".to_string(),
         });
         assert_eq!(
-            summary.by_host["dsh"].freshness.state,
+            summary.by_harness["dsh"].freshness.state,
             FreshnessState::Unavailable
         );
         let daily = repo.daily_summary(&DailySummaryQuery {
             date: "not-a-date".to_string(),
         });
         assert_eq!(
-            daily.by_host["dsh"].freshness.state,
+            daily.by_harness["dsh"].freshness.state,
             FreshnessState::Unavailable
         );
     });
@@ -1664,9 +1664,9 @@ fn sql_repository_codex_day_reports_unconfirmed_metered_estimate() {
             "{:?}",
             sql_daily.contract_violations()
         );
-        let codex = &sql_daily.by_host["codex"];
+        let codex = &sql_daily.by_harness["codex"];
         assert!(codex.has_unresolved, "missing provider evidence must not be priced as OpenAI: {codex:?}");
-        assert!(sql_daily.tokens_by_host["codex"].total > 0);
+        assert!(sql_daily.tokens_by_harness["codex"].total > 0);
     });
 }
 
@@ -1740,7 +1740,7 @@ fn monthly_summary_replays_historical_pricing_snapshot() {
         let s = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery {
             month: past.to_string(),
         });
-        let dsh = &s.by_host["dsh"];
+        let dsh = &s.by_harness["dsh"];
         let metered = dsh
             .amounts_by_basis
             .get(&BillingBasis::MeteredActual)
@@ -1756,7 +1756,7 @@ fn monthly_summary_replays_historical_pricing_snapshot() {
 }
 
 /// Q13 的对账不变式：`calendar_month`（按日轴）与 `monthly_summary`
-/// （按宿主轴）对同一个历史月、在价格重放下，DSH 月度金额仍必须相等
+/// （按执行环境轴）对同一个历史月、在价格重放下，DSH 月度金额仍必须相等
 /// （`usage.rs` 的 `token_by_date_model` 纪律——两条轴一份能力）。
 #[test]
 fn calendar_and_monthly_agree_on_dsh_under_pricing_replay() {
@@ -1808,7 +1808,7 @@ fn calendar_and_monthly_agree_on_dsh_under_pricing_replay() {
         let monthly = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery {
             month: past.to_string(),
         });
-        let monthly_dsh = monthly.by_host["dsh"]
+        let monthly_dsh = monthly.by_harness["dsh"]
             .amounts_by_basis
             .get(&BillingBasis::MeteredActual)
             .copied()
@@ -1824,7 +1824,7 @@ fn calendar_and_monthly_agree_on_dsh_under_pricing_replay() {
 
         assert!(
             (monthly_dsh - cal_dsh).abs() < 0.01,
-            "日轴合计 {cal_dsh} 必须 == 宿主轴 {monthly_dsh}（重放下也不例外）"
+            "日轴合计 {cal_dsh} 必须 == 执行环境轴 {monthly_dsh}（重放下也不例外）"
         );
         // 且确实用了便宜卡：1.0M*0.4 + 60K*1.2 = 0.4 + 0.072 = 0.472。
         assert!(monthly_dsh < 1.0, "便宜快照生效，得 {monthly_dsh}");
@@ -1853,7 +1853,7 @@ fn monthly_daily_hourly_summaries_are_memoized_by_version_and_params() {
             "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
              VALUES ('run', 1, 'cli', 'succeeded', 1) ON CONFLICT(run_id) DO NOTHING", [])?;
         c.execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                  source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                  event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                  output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
@@ -1896,7 +1896,7 @@ fn monthly_daily_hourly_summaries_are_memoized_by_version_and_params() {
     let db = agent_vitals_data::authority::AuthorityDb::open(&path, 2).unwrap();
     db.with_immediate_txn(|c| {
         c.execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                  source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                  event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                  output_tokens, ingested_run_id, created_at_ms, updated_at_ms)

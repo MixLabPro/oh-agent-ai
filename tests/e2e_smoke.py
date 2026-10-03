@@ -27,7 +27,7 @@ RUST_BIN = ROOT / "target" / "release" / "agent-vitals"
 def _home():
     """每个 run 使用隔离的 HOME 和 $AGENT_VITALS_HOME。"""
     tmp = tempfile.mkdtemp(prefix="sv-e2e-")
-    # `calendar`/`oneline` 会通过 host adapter 读取默认宿主目录。
+    # `calendar`/`oneline` 会通过 harness adapter 读取默认执行环境目录。
     # 仅隔离 AGENT_VITALS_HOME 不够：真实 HOME 下的大型 Codex 日志仍会被
     # 扫描，导致 smoke 在开发机上超时并制造与 fixture 无关的内存压力。
     isolated_home = Path(tmp) / "home"

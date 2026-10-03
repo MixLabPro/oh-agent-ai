@@ -84,7 +84,7 @@ assert.deepEqual(Object.keys(result.errors), []);
 // Invalid numeric fields cannot become NaN or fabricated zero in a renderer.
 override = async (command, args) => {
   const value = await fixtureInvoke(command, args);
-  if (command === "data_daily_summary") delete value.tokens_by_host.codex.output;
+  if (command === "data_daily_summary") delete value.tokens_by_harness.codex.output;
   return value;
 };
 result = await sandbox.loadOverviewData();
@@ -277,7 +277,7 @@ for (const [command, patch, key] of [
   ["billing_import_candidates", (v) => { delete v.candidates[0].impact.total_tokens; }, "candidates"],
   ["billing_confirmation_groups", (v) => { delete v.groups[0].tokens; }, "billingGroups"],
   ["billing_confirmation_groups", (v) => { v.groups[0].estimated_amounts = [{ amount_minor: "12", currency: "USD" }]; }, "billingGroups"],
-  ["billing_declarations", (v) => { v.declarations = [{ declaration_id: "d", host: "codex", provider_id: "openai" }]; }, "declarations"],
+  ["billing_declarations", (v) => { v.declarations = [{ declaration_id: "d", harness: "codex", provider_id: "openai" }]; }, "declarations"],
   ["billing_recalculation_jobs", (v) => { v.jobs = [null]; }, "jobs"],
 ]) {
   override = async (cmd, args) => {
@@ -314,7 +314,7 @@ sandbox.statisticsToday = originalToday;
 calls.length = 0;
 vm.runInContext('activeTab = "sources"; srcState.loaded = true;', sandbox);
 await sandbox.loadActiveTab();
-for (const command of ["host_bills_for_period", "retention_config", "statistics_timezone_config",
+for (const command of ["harness_bills_for_period", "retention_config", "statistics_timezone_config",
   "public_pricing_catalog_status", "about_diagnostics", "budget_config"]) {
   assert.ok(calls.some((c) => c.command === command), command + " loads in Settings");
 }

@@ -1,6 +1,6 @@
 //! Claude Code 语料计价（`pricing.json::catalog_2026_09`）—— **独立的第二计价面**。
 //!
-//! 服务 claude 会话账 / 托盘第三宿主列，不参与 DSH 账。按提供商分栏、currency
+//! 服务 claude 会话账 / 托盘第三执行环境列，不参与 DSH 账。按提供商分栏、currency
 //! 各异、平费率（无 off_peak 兜底）。与 DSH 路径（`super` 里的 `cost_report`/
 //! `priced_day`）字节隔离——两面的钱不许互相改价（`price_claude_map` doc 自钉
 //! 「两面的钱必须同源」）。v0.8 Phase D2 从 `cost.rs` 切出，语义零改。
@@ -123,7 +123,7 @@ fn card_is_time_varying(card: &Value) -> bool {
 }
 
 /// 缓存写入（cache_creation）单价：catalog 卡按 1h 档（5min 是 1.25×输入、
-/// 1h 是 2×——Claude Code 自报 costUSD 按 1h 计，host_costusd_note 说它与
+/// 1h 是 2×——Claude Code 自报 costUSD 按 1h 计，harness_costusd_note 说它与
 /// catalog 逐分吻合的前提就是 1h，照它走才能拿 cost-state 当差分 oracle）；
 /// 没有 1h 档的卡（M2.7 的 `cache_write`、deepseek 无行 → 0）各取各的。
 fn cache_write_rate(card: &Value) -> f64 {
@@ -175,7 +175,7 @@ pub(crate) fn resolve_card_catalog_preferring(
 }
 
 /// 用户归因的计费方 `provider` 的价卡是否收录了 `model`（收录 → 该模型按它的价、
-/// 它的币种算；未收录 → 调用方退回宿主自己的官方价卡）。
+/// 它的币种算；未收录 → 调用方退回执行环境自己的官方价卡）。
 pub fn declared_card_covers(provider: &str, model: &str, pricing: &Value) -> bool {
     resolve_card_catalog_preferring(model, pricing, Some(provider))
         .is_some_and(|(p, _, _)| p == provider)
@@ -346,7 +346,7 @@ fn price_claude_map_preferring(
 /// cacheReadInputTokens/cacheCreationInputTokens/costUSD）→ 会话账金额。
 /// 键名转 claude snake 后走 `price_claude_map`——转换只有键名映射，不重算。
 /// `webSearchRequests`/`costUSD` 不参与计价（web search 没有 token 单价；
-/// costUSD 对网关模型按默认卡 $5/$0.5/$25 计、高估 20–70×——host_costusd_note
+/// costUSD 对网关模型按默认卡 $5/$0.5/$25 计、高估 20–70×——harness_costusd_note
 /// 说清了，绝不能当账单数字）。modelUsage 为空/缺场 → None。
 ///
 /// `peak_resolved=false`：cost-state 的累计口径没有逐行 ts，压根不知道这些

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { readRouteQuality, safeUiError, type RouteQualityFamily, type RouteQualityHost, type RouteQualityReport } from "../../lib/tauri";
+import { readRouteQuality, safeUiError, type RouteQualityFamily, type RouteQualityHarness, type RouteQualityReport } from "../../lib/tauri";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
 import { message, resolvedLanguage, useLanguage, type MessageKey } from "../../lib/i18n";
 
@@ -41,10 +41,10 @@ function familyTone(family: RouteQualityFamily["flag"]): "success" | "warning" |
   return "neutral";
 }
 
-function hostSummary(host: RouteQualityHost): { title: string; copy: string; tone: "success" | "warning" | "neutral" } {
-  const nonNative = host.families.filter((family) => family.flag === "non_native");
-  const apiErrors = host.families.find((family) => family.flag === "api_error");
-  if (!host.has_baseline) return { title: tx("qt.noBaseline"), copy: tx("qt.noBaselineCopy"), tone: "neutral" };
+function harnessSummary(harness: RouteQualityHarness): { title: string; copy: string; tone: "success" | "warning" | "neutral" } {
+  const nonNative = harness.families.filter((family) => family.flag === "non_native");
+  const apiErrors = harness.families.find((family) => family.flag === "api_error");
+  if (!harness.has_baseline) return { title: tx("qt.noBaseline"), copy: tx("qt.noBaselineCopy"), tone: "neutral" };
   if (nonNative.length) {
     const share = nonNative.reduce((sum, family) => sum + family.request_share, 0);
     return { title: tx("qt.nonNativeTitle", { share: share.toFixed(1) }), copy: tx("qt.nonNativeCopy"), tone: "warning" };
@@ -65,17 +65,17 @@ function FamilyRow({ family }: { family: RouteQualityFamily }) {
   </tr>;
 }
 
-function HostQualityPanel({ host }: { host: RouteQualityHost }) {
-  const summary = hostSummary(host);
-  return <section className="test-quality-host" aria-labelledby={`test-host-${host.host}`}>
-    <div className="test-quality-host-heading">
-      <div><p className="eyebrow">{tx("qt.hostModel")}</p><h3 id={`test-host-${host.host}`}>{host.host}</h3><p>{tx("qt.hostTotals", { requests: host.totals.requests, sessions: host.totals.sessions })}</p></div>
+function HarnessQualityPanel({ harness }: { harness: RouteQualityHarness }) {
+  const summary = harnessSummary(harness);
+  return <section className="test-quality-harness" aria-labelledby={`test-harness-${harness.harness}`}>
+    <div className="test-quality-harness-heading">
+      <div><p className="eyebrow">{tx("qt.harnessModel")}</p><h3 id={`test-harness-${harness.harness}`}>{harness.harness}</h3><p>{tx("qt.harnessTotals", { requests: harness.totals.requests, sessions: harness.totals.sessions })}</p></div>
       <span className={`status-pill status-pill-${summary.tone}`}>{summary.title}</span>
     </div>
     <div className={`test-quality-notice test-quality-notice-${summary.tone}`}>
       <strong>{summary.title}</strong><span>{summary.copy}</span>
     </div>
-    <div className="test-quality-table-wrap"><table className="test-quality-table"><thead><tr><th scope="col">{tx("qt.thFamily")}</th><th scope="col">{tx("qt.thVerdict")}</th><th scope="col">{tx("qt.thShare")}</th><th scope="col">{tx("qt.thSessions")}</th><th scope="col">{tx("qt.thModels")}</th><th scope="col">{tx("qt.thLast")}</th></tr></thead><tbody>{host.families.map((family) => <FamilyRow key={`${host.host}-${family.family}`} family={family} />)}</tbody></table></div>
+    <div className="test-quality-table-wrap"><table className="test-quality-table"><thead><tr><th scope="col">{tx("qt.thFamily")}</th><th scope="col">{tx("qt.thVerdict")}</th><th scope="col">{tx("qt.thShare")}</th><th scope="col">{tx("qt.thSessions")}</th><th scope="col">{tx("qt.thModels")}</th><th scope="col">{tx("qt.thLast")}</th></tr></thead><tbody>{harness.families.map((family) => <FamilyRow key={`${harness.harness}-${family.family}`} family={family} />)}</tbody></table></div>
   </section>;
 }
 
@@ -105,12 +105,12 @@ export function TestPage() {
   useEffect(() => { refresh(); }, [days]);
 
   const totals = useMemo(() => {
-    const hosts = report?.hosts ?? [];
-    return hosts.reduce((acc, host) => {
-      acc.requests += host.totals.requests;
-      acc.sessions += host.totals.sessions;
-      acc.nonNative += host.families.filter((family) => family.flag === "non_native").reduce((sum, family) => sum + family.requests, 0);
-      acc.apiErrors += host.families.filter((family) => family.flag === "api_error").reduce((sum, family) => sum + family.requests, 0);
+    const harnesses = report?.harnesses ?? [];
+    return harnesses.reduce((acc, harness) => {
+      acc.requests += harness.totals.requests;
+      acc.sessions += harness.totals.sessions;
+      acc.nonNative += harness.families.filter((family) => family.flag === "non_native").reduce((sum, family) => sum + family.requests, 0);
+      acc.apiErrors += harness.families.filter((family) => family.flag === "api_error").reduce((sum, family) => sum + family.requests, 0);
       return acc;
     }, { requests: 0, sessions: 0, nonNative: 0, apiErrors: 0 });
   }, [report]);
@@ -127,7 +127,7 @@ export function TestPage() {
     </section>
 
     <section className="test-summary-grid" aria-label={tx("qt.summaryAria")}>
-      <article><span>{tx("qt.coveredHosts")}</span><strong>{report ? report.hosts.length : "—"}</strong><small>{tx("qt.coveredHostsNote")}</small></article>
+      <article><span>{tx("qt.coveredHarnesses")}</span><strong>{report ? report.harnesses.length : "—"}</strong><small>{tx("qt.coveredHarnessesNote")}</small></article>
       <article><span>{tx("qt.requests")}</span><strong>{report ? totals.requests : "—"}</strong><small>{tx("qt.requestsNote")}</small></article>
       <article><span>{tx("qt.nonNativeReq")}</span><strong className={totals.nonNative ? "test-value-warning" : ""}>{report ? totals.nonNative : "—"}</strong><small>{tx("qt.nonNativeNote")}</small></article>
       <article><span>{tx("qt.apiErrors")}</span><strong className={totals.apiErrors ? "test-value-warning" : ""}>{report ? totals.apiErrors : "—"}</strong><small>{tx("qt.apiErrorsNote")}</small></article>
@@ -137,8 +137,8 @@ export function TestPage() {
     {loading && report && <div className="usage-refresh-status" role="status">{tx("qt.refreshing", { window: windowLabel(days) ?? "", range: reportWindow(report) })}</div>}
     {!loading && error && report && <div className="usage-refresh-status trust-refresh-status-error" role="status">{tx("qt.refreshIncomplete", { range: reportWindow(report) })}</div>}
     {loading && !report && <section className="test-state" role="status"><strong>{tx("qt.reading")}</strong><p>{tx("qt.readingNote")}</p></section>}
-    {!loading && !error && report && report.hosts.length === 0 && <section className="test-state"><strong>{tx("qt.noFacts")}</strong><p>{tx("qt.noFactsNote")}</p></section>}
-    {report && report.hosts.length > 0 && <div className="test-quality-list" aria-label={loading || error ? tx("qt.prevResultAria") : tx("qt.resultAria")} aria-busy={loading || undefined}>{report.hosts.map((host) => <HostQualityPanel key={host.host} host={host} />)}</div>}
+    {!loading && !error && report && report.harnesses.length === 0 && <section className="test-state"><strong>{tx("qt.noFacts")}</strong><p>{tx("qt.noFactsNote")}</p></section>}
+    {report && report.harnesses.length > 0 && <div className="test-quality-list" aria-label={loading || error ? tx("qt.prevResultAria") : tx("qt.resultAria")} aria-busy={loading || undefined}>{report.harnesses.map((harness) => <HarnessQualityPanel key={harness.harness} harness={harness} />)}</div>}
     <p className="test-quality-foot">{tx("qt.foot", { window: windowLabel(days) ?? "", range: report ? tx("qt.footRange", { range: reportWindow(report) }) : tx("qt.notRead") })}</p>
   </>;
 }

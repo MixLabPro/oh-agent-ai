@@ -22,7 +22,7 @@
 
   const byProvider = {
     "codex/openai": {
-      host_id: "codex",
+      harness_id: "codex",
       currency: "USD",
       amounts_by_basis: { api_equivalent: 14.82 },
       has_unresolved: false,
@@ -30,17 +30,17 @@
       evidence_basis: "route-evidence",
     },
     "claude-code/anthropic": {
-      host_id: "claude-code",
+      harness_id: "claude-code",
       currency: "USD",
       amounts_by_basis: { fixed_subscription: 20 },
       has_unresolved: true,
       unresolved_reason: "subscription-token-usage-is-not-a-per-token-bill",
       evidence_basis: "official-subscription",
     },
-    // 真实场景：MiniMax 订阅 ¥49/月，经 Claude Code 中转使用——与 anthropic 同宿主、
+    // 真实场景：MiniMax 订阅 ¥49/月，经 Claude Code 中转使用——与 anthropic 同执行环境、
     // 不同服务商、不同币种，必须各占一行、永不相加（CLAUDE.md 的反面教材）。
     "claude-code/minimax": {
-      host_id: "claude-code",
+      harness_id: "claude-code",
       currency: "CNY",
       amounts_by_basis: { fixed_subscription: 49, api_equivalent: 56.2 },
       has_unresolved: false,
@@ -48,7 +48,7 @@
       evidence_basis: "official-subscription",
     },
     "dsh/deepseek": {
-      host_id: "dsh",
+      harness_id: "dsh",
       currency: "CNY",
       amounts_by_basis: { metered_actual: 8.64 },
       has_unresolved: false,
@@ -74,7 +74,7 @@
   // 反复失败（18–20，带错误摘要）、一段输入增长（2–16），第 22 回合前长空闲、第 30 回合换模型。
   // 第二个样本会话是 420 个回合（缩略图 + 窗口）；第 25 回合没有任何测量（缺 ended_at_ms，
   // 真实输出就会这样省略——验收 blocker 的来源）。
-  function mockInsights(host, total) {
+  function mockInsights(harness, total) {
     const steps = [];
     let ts = 1789000000000;
     for (let i = 1; i <= total; i += 1) {
@@ -95,7 +95,7 @@
         nominal_cost: { amounts: [{ amount_minor: 12 + (i % 7), currency: "USD" }], coverage: "full", basis: "nominal" } };
       if (i === 33) step.outcome = "cancelled";
       if (step.idle_before_ms === undefined) delete step.idle_before_ms;
-      if (host === "codex") { step.input.cache_write = 0; }
+      if (harness === "codex") { step.input.cache_write = 0; }
       if (i === 25) {
         Object.assign(step, { input: { cache_read: 0, cache_write: 0, uncached_input: 0 }, output: 0, input_peak: 0, calls: 0, model_ids: [], tools: { succeeded: 0, failed: 0, cancelled: 0, unknown: 0 }, notes: [] });
         delete step.ended_at_ms; delete step.hit_rate; delete step.idle_before_ms; delete step.nominal_cost;
@@ -106,7 +106,7 @@
     const allInput = input.cache_read + input.cache_write + input.uncached_input;
     const share = (tokens) => Math.round(tokens / allInput * 10000) / 10000;
     return {
-      schema_version: 1, host,
+      schema_version: 1, harness,
       axis: { unit: "turn", turn_starts: total, leading_step: false, fallback: null, steps, unplaced: { usage_facts: 0, workflow_events: 0 } },
       session: { calls: steps.reduce((a, s) => a + s.calls, 0), input, output: steps.reduce((a, s) => a + s.output, 0), nominal_cost: { amounts: [{ amount_minor: 612, currency: "USD" }], coverage: "full", basis: "nominal" } },
       quality: { legacy_fingerprints: 0 },
@@ -133,7 +133,7 @@
       ...(daily ? { date: opts.date || isoDay } : { month: opts && opts.month || month }),
       has_unresolved: true,
       last_observed_at: `${isoDay}T00:00:00Z`,
-      tokens_by_host: {
+      tokens_by_harness: {
         codex: { total: Math.round(tokens * 0.46), uncached_input: Math.round(tokens * 0.26), cache_read: Math.round(tokens * 0.12), cache_write: Math.round(tokens * 0.03), output: Math.round(tokens * 0.05) },
         "claude-code": { total: Math.round(tokens * 0.34), uncached_input: Math.round(tokens * 0.20), cache_read: Math.round(tokens * 0.08), cache_write: Math.round(tokens * 0.02), output: Math.round(tokens * 0.04) },
         dsh: { total: Math.round(tokens * 0.20), uncached_input: Math.round(tokens * 0.12), cache_read: Math.round(tokens * 0.04), cache_write: Math.round(tokens * 0.01), output: Math.round(tokens * 0.03) },
@@ -146,14 +146,14 @@
       metered_view: daily
         ? { CNY: { amount: 3.21, actual: 3.21, declared_estimate: 0, default_estimate: 0, label: "actual" } }
         : { CNY: { amount: 8.64, actual: 8.64, declared_estimate: 0, default_estimate: 0, label: "actual" }, USD: { amount: 0, actual: 0, declared_estimate: 0, default_estimate: 0, label: "estimate" } },
-      by_host: {
+      by_harness: {
         codex: { amounts_by_basis: { api_equivalent: 14.82 }, freshness: { state: "fresh", last_observed_at: `${isoDay}T00:00:00Z` }, has_unresolved: false, pricing_method: "provider-card" },
-        // by_host 的 claude-code 条目混币（USD 20 + CNY 49），故不声明 currency（domain 规则：混币条目 currency=None）。
+        // by_harness 的 claude-code 条目混币（USD 20 + CNY 49），故不声明 currency（domain 规则：混币条目 currency=None）。
         "claude-code": { amounts_by_basis: { fixed_subscription: 69, api_equivalent: 56.2 }, freshness: { state: "partial", last_observed_at: `${isoDay}T00:00:00Z` }, has_unresolved: true, pricing_method: "fair-market-fallback", unresolved_reason: "missing-provider-route-evidence" },
         dsh: { amounts_by_basis: { metered_actual: 8.64 }, freshness: { state: "fresh", last_observed_at: `${isoDay}T00:00:00Z` }, has_unresolved: false, pricing_method: "provider-card" },
       },
       coverage: { measured_fields: 3, total_fields: 3, denominator_version: 1 },
-      excluded_hosts: [],
+      excluded_harnesses: [],
       total_summable: daily ? 3.21 : 8.64,
       freshness: { state: "partial", last_observed_at: `${isoDay}T00:00:00Z` },
     };
@@ -178,13 +178,13 @@
     month: dto(374000, { month }),
     today_tokens_sql: 374000,
     subscription_cny_month: 49,
-    hosts: [
-      { host_kind: "codex", status: "ready", today_tokens: 172040, today_sessions: 4, recent: [{ title: "浏览器样式调试会话" }] },
-      { host_kind: "claude-code", status: "partial", today_tokens: 127160, today_sessions: 2, recent: [] },
-      { host_kind: "dsh", status: "ready", today_tokens: 74800, today_sessions: 1, recent: [] },
+    harnesses: [
+      { harness_kind: "codex", status: "ready", today_tokens: 172040, today_sessions: 4, recent: [{ title: "浏览器样式调试会话" }] },
+      { harness_kind: "claude-code", status: "partial", today_tokens: 127160, today_sessions: 2, recent: [] },
+      { harness_kind: "dsh", status: "ready", today_tokens: 74800, today_sessions: 1, recent: [] },
     ],
     days: [{ date: isoDay, total: 0 }],
-    // 预算分子 = 跨宿主按量实付 CNY = 上面 dto() 的 total_actual_spend.CNY（8.64）。
+    // 预算分子 = 跨执行环境按量实付 CNY = 上面 dto() 的 total_actual_spend.CNY（8.64）。
     // 此前 mock 写 68 → 预算卡「¥68」与本月支出卡「¥8.64」同屏打架（2026-09-01
     // 两卡打架事故的形状复刻）。
     budget: { source: "sql", level: "warn", month_ratio: 0.72, month_cost: 8.64, monthly_cny: 12, effective_daily_budget: 0.6, generated_at: new Date().toISOString(), reasons: ["browser mock"] },
@@ -222,7 +222,7 @@
   }
 
   // City 页的浏览器预览数据：page_size ≥ 100 时返回一份确定性的一年跨度合成会话集
-  // （4 宿主 / 对数分布 token / 近期更密 / 少量"正在施工"的活跃会话）。仅供视觉
+  // （4 执行环境 / 对数分布 token / 近期更密 / 少量"正在施工"的活跃会话）。仅供视觉
   // 迭代——打包后的 app 走真实 authority，永不进这条路径。
   const citySessions = (() => {
     let state = 0x2f6e2b1;
@@ -231,19 +231,19 @@
       state ^= state + Math.imul(state ^ (state >>> 7), state | 61);
       return ((state ^ (state >>> 14)) >>> 0) / 4294967296;
     };
-    const hosts = [
-      { host: "codex", models: [["gpt-5.6-sol"], ["gpt-5.6-luna"], ["gpt-5.6-terra", "gpt-5.6-sol"]], weight: 0.38 },
-      { host: "claude-code", models: [["claude-sonnet-5"], ["claude-opus-5-5"]], weight: 0.3 },
-      { host: "plugin:zcode", models: [["glm-5"], ["glm-5-air", "glm-5"]], weight: 0.2 },
-      { host: "dsh", models: [["deepseek-v4-flash"]], weight: 0.12 },
+    const harnesses = [
+      { harness: "codex", models: [["gpt-5.6-sol"], ["gpt-5.6-luna"], ["gpt-5.6-terra", "gpt-5.6-sol"]], weight: 0.38 },
+      { harness: "claude-code", models: [["claude-sonnet-5"], ["claude-opus-5-5"]], weight: 0.3 },
+      { harness: "plugin:zcode", models: [["glm-5"], ["glm-5-air", "glm-5"]], weight: 0.2 },
+      { harness: "dsh", models: [["deepseek-v4-flash"]], weight: 0.12 },
     ];
     const now = Date.now();
     const rows = [];
     for (let index = 0; index < 700; index += 1) {
       const pick = rand();
-      let entry = hosts[hosts.length - 1];
+      let entry = harnesses[harnesses.length - 1];
       let acc = 0;
-      for (const candidate of hosts) {
+      for (const candidate of harnesses) {
         acc += candidate.weight;
         if (pick <= acc) { entry = candidate; break; }
       }
@@ -264,15 +264,15 @@
       const last = active ? now - rand() * 240000 : dayStart + durationMinutes * 60000;
       rows.push({
         session_ref: `sr_citymock_${String(index).padStart(4, "0")}`,
-        host: entry.host,
+        harness: entry.harness,
         first_event_at: new Date(dayStart).toISOString(),
         last_event_at: new Date(Math.min(last, now)).toISOString(),
         event_count: Math.max(2, Math.round(tokens / 9000)),
         model_ids: entry.models[Math.floor(rand() * entry.models.length)],
         tokens: { uncached_input_tokens: uncached, cache_read_tokens: cacheRead, cache_write_tokens: cacheWrite, output_tokens: output, total: tokens },
         peak_tokens: Math.round(tokens * 0.2),
-        cost_minor: entry.host === "codex" ? { amount_minor: Math.round(tokens / 12000), currency: "USD", basis: "metered_estimate" } : entry.host === "dsh" ? { amount_minor: Math.round(tokens / 24000), currency: "CNY", basis: "metered_actual" } : null,
-        cost_status: entry.host === "codex" || entry.host === "dsh" ? { state: "estimated", reason: "metered-estimate", has_unresolved: false } : { state: "subscription", reason: "official-subscription", has_unresolved: true },
+        cost_minor: entry.harness === "codex" ? { amount_minor: Math.round(tokens / 12000), currency: "USD", basis: "metered_estimate" } : entry.harness === "dsh" ? { amount_minor: Math.round(tokens / 24000), currency: "CNY", basis: "metered_actual" } : null,
+        cost_status: entry.harness === "codex" || entry.harness === "dsh" ? { state: "estimated", reason: "metered-estimate", has_unresolved: false } : { state: "subscription", reason: "official-subscription", has_unresolved: true },
       });
     }
     return rows.sort((left, right) => Date.parse(right.first_event_at) - Date.parse(left.first_event_at));
@@ -280,7 +280,7 @@
 
   const sessions = [{
     session_ref: "sr_browser_mock_01",
-    host: "codex",
+    harness: "codex",
     first_event_at: new Date(Date.now() - 3600000).toISOString(),
     last_event_at: new Date().toISOString(),
     event_count: 24,
@@ -291,7 +291,7 @@
     cost_status: { state: "estimated", reason: "metered-estimate", has_unresolved: false },
   }, {
     session_ref: "sr_browser_mock_02",
-    host: "claude-code",
+    harness: "claude-code",
     first_event_at: new Date(Date.now() - 7200000).toISOString(),
     last_event_at: new Date(Date.now() - 5400000).toISOString(),
     event_count: 12,
@@ -306,7 +306,7 @@
     // 形状出处：crates/agent-vitals-data/src/authority_query.rs::session_billing_buckets
     // 与 ::session_cost_view（billing_mode 经订阅归因改写为 "subscription"，cost_minor 为 null）。
     session_ref: "sr_browser_mock_03",
-    host: "codex",
+    harness: "codex",
     first_event_at: new Date(Date.now() - 9 * 86400000).toISOString(),
     last_event_at: new Date(Date.now() - 600000).toISOString(),
     event_count: 8506,
@@ -328,7 +328,7 @@
   const issueGroups = [
     {
       group_id: "browser-issue-group-1", source_kind: "behavior", rule: "SV613",
-      host: "codex", object: "进度停滞: 连续工具失败", evidence_class: "tool_failure",
+      harness: "codex", object: "进度停滞: 连续工具失败", evidence_class: "tool_failure",
       bucket: isoDay, count: 3, first_seen_at_ms: Date.now() - 7200000,
       last_seen_at_ms: Date.now() - 3600000, severity: "warning",
       status_rollup: { open: 3, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 },
@@ -338,7 +338,7 @@
     },
     {
       group_id: "browser-issue-group-2", source_kind: "billing_candidate", rule: "BILLING_CONFIRMATION",
-      host: "codex", object: "openai:2026-09", evidence_class: "USD", bucket: month,
+      harness: "codex", object: "openai:2026-09", evidence_class: "USD", bucket: month,
       count: 1, first_seen_at_ms: Date.now() - 1800000, last_seen_at_ms: Date.now() - 1800000,
       severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 },
       sessions_count: 0, sample_evidence: [{ candidate_id: "browser-candidate-1", provider_id: "openai", currency: "USD", amount_minor: 2000, is_bill: false }],
@@ -347,26 +347,26 @@
     },
   ];
   const issueInstances = [{
-    issue_id: "browser-issue-1", host_kind: "codex", session_key: "browser_mock_session",
+    issue_id: "browser-issue-1", harness_kind: "codex", session_key: "browser_mock_session",
     rule: "SV613", status: "open", severity: "warning", evidence: "tool failure",
     opened_at_ms: Date.now() - 7200000, closed_at_ms: null, metadata: { category: "tool_failure", time: Date.now() - 7200000 },
   }];
 
   let syncPaused = false;
   // Shape: crates/agent-vitals-runtime/src/mcp/mod.rs:488-499 source_status_report()
-  // 一行一个 host；生产 error_codes 词表目前只见 permission_denied/permission
+  // 一行一个 harness；生产 error_codes 词表目前只见 permission_denied/permission
   // （mcp/mod.rs:716 测试），file_missing 只在本 mock 里出现过——改用生产词表，
   // 免得设置页规格 §5.6 的映射表在 Vite 里测不到真实分支。
   const sourceStatuses = [
     {
-      host: "codex", source_id: "browser-codex", connection_state: "connected",
+      harness: "codex", source_id: "browser-codex", connection_state: "connected",
       scan: { source_count: 12, last_scanned_at_ms: Date.now() - 3600000 },
       log: { last_event_at_ms: Date.now() - 3600000 },
       import_scope: { sessions: 8, facts: 42, first_event_at_ms: Date.now() - 30 * 86400000, last_event_at_ms: Date.now() - 3600000 },
       recovery_action: null,
     },
     {
-      host: "claude-code", source_id: "browser-claude", connection_state: "needs_attention",
+      harness: "claude-code", source_id: "browser-claude", connection_state: "needs_attention",
       scan: { source_count: 4, last_scanned_at_ms: Date.now() - 7200000 },
       log: { last_event_at_ms: Date.now() - 7200000 },
       import_scope: { sessions: 3, facts: 18, first_event_at_ms: Date.now() - 20 * 86400000, last_event_at_ms: Date.now() - 7200000 },
@@ -374,14 +374,14 @@
       recovery_action: { label: "重新同步", kind: "retry_source" },
     },
     {
-      host: "dsh", source_id: "browser-dsh", connection_state: "connected",
+      harness: "dsh", source_id: "browser-dsh", connection_state: "connected",
       scan: { source_count: 2, last_scanned_at_ms: Date.now() - 1800000 },
       log: { last_event_at_ms: Date.now() - 1800000 },
       import_scope: { sessions: 2, facts: 9, first_event_at_ms: Date.now() - 5 * 86400000, last_event_at_ms: Date.now() - 1800000 },
       recovery_action: null,
     },
     {
-      host: "workbuddy", source_id: "browser-workbuddy", connection_state: "not_detected",
+      harness: "workbuddy", source_id: "browser-workbuddy", connection_state: "not_detected",
       scan: { source_count: 0 }, log: {},
       import_scope: { sessions: 0, facts: 0 },
       recovery_action: { label: "扫描并接入", kind: "scan_and_connect" },
@@ -397,44 +397,44 @@
       warning_ratio_bp: 8000, spent_minor: 864, ratio_bp: 432, level: "ok", has_unresolved: false, daily_level: "disabled" },
   };
   const billingCandidates = [{
-    candidate_id: "browser-candidate-1", status: "pending", host: "codex",
+    candidate_id: "browser-candidate-1", status: "pending", harness: "codex",
     provider_id: "openai", currency: "USD", amount_minor: 2000,
     billing_period_start: month + "-01",
     impact: { status: "ok", total_tokens: 18000, fact_count: 4, session_count: 1 },
   }];
   // 待确认组（形状出处：runtime::billing_preview::confirmation_groups，见 invoke 内注释）。
-  // 两组同 host/provider（候选会挂到第一组下）、一组无价卡排最后；CNY/USD 各一。
+  // 两组同 harness/provider（候选会挂到第一组下）、一组无价卡排最后；CNY/USD 各一。
   const monthStartMs = Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)) - 1, 1, 4, 0, 0);
   const billingGroups = [
-    { group_id: "codex|openai|gpt-5.6-sol|session-native|metered_estimate|" + month, host: "codex",
+    { group_id: "codex|openai|gpt-5.6-sol|session-native|metered_estimate|" + month, harness: "codex",
       provider_id: "openai", model_id: "gpt-5.6-sol", evidence_basis: "session-native",
       pricing_basis: "metered_estimate", tokens: 1_650_000, first_event_at_ms: monthStartMs + 3_600_000,
       last_event_at_ms: monthStartMs + 86_400_000 * 9, session_count: 7, effective_start: month, effective_end: month,
       estimated_amounts: [{ amount_minor: 1892, currency: "USD", basis: "metered_estimate" }],
       unpriced_tokens: 0, unresolved_reason: null },
-    { group_id: "claude-code|<unknown>|deepseek-v4-flash|inferred|metered_estimate|" + month, host: "claude-code",
+    { group_id: "claude-code|<unknown>|deepseek-v4-flash|inferred|metered_estimate|" + month, harness: "claude-code",
       provider_id: "<unknown>", model_id: "deepseek-v4-flash", evidence_basis: "inferred",
       pricing_basis: "metered_estimate", tokens: 856_000_000, first_event_at_ms: monthStartMs + 3_600_000,
       last_event_at_ms: monthStartMs + 86_400_000 * 14, session_count: 35, effective_start: month, effective_end: month,
       estimated_amounts: [], unpriced_tokens: 856_000_000, unresolved_reason: "billing-route-unknown" },
-    { group_id: "claude-code|minimax|MiniMax-M2.5|missing|metered_estimate|" + month, host: "claude-code",
+    { group_id: "claude-code|minimax|MiniMax-M2.5|missing|metered_estimate|" + month, harness: "claude-code",
       provider_id: "minimax", model_id: "MiniMax-M2.5", evidence_basis: "missing",
       pricing_basis: "metered_estimate", tokens: 980_000, first_event_at_ms: monthStartMs + 7_200_000,
       last_event_at_ms: monthStartMs + 86_400_000 * 6, session_count: 4, effective_start: month, effective_end: month,
       estimated_amounts: [{ amount_minor: 760, currency: "CNY", basis: "metered_estimate" }],
       unpriced_tokens: 0, unresolved_reason: null },
-    { group_id: "codex|openai|gpt-5.6-luna|session-native|metered_estimate|" + month, host: "codex",
+    { group_id: "codex|openai|gpt-5.6-luna|session-native|metered_estimate|" + month, harness: "codex",
       provider_id: "openai", model_id: "gpt-5.6-luna", evidence_basis: "session-native",
       pricing_basis: "metered_estimate", tokens: 120_000, first_event_at_ms: monthStartMs + 3_600_000 * 5,
       last_event_at_ms: monthStartMs + 86_400_000 * 2, session_count: 1, effective_start: month, effective_end: month,
       estimated_amounts: [{ amount_minor: 96, currency: "USD", basis: "metered_estimate" }],
       unpriced_tokens: 0, unresolved_reason: null },
-    { group_id: "claude-code|<unknown>|glm-5|missing|metered_estimate|" + month, host: "claude-code",
+    { group_id: "claude-code|<unknown>|glm-5|missing|metered_estimate|" + month, harness: "claude-code",
       provider_id: "<unknown>", model_id: "glm-5", evidence_basis: "missing",
       pricing_basis: "metered_estimate", tokens: 640_000, first_event_at_ms: monthStartMs + 3_600_000 * 3,
       last_event_at_ms: monthStartMs + 86_400_000 * 4, session_count: 3, effective_start: month, effective_end: month,
       estimated_amounts: [], unpriced_tokens: 640_000, unresolved_reason: "billing-route-unknown" },
-    { group_id: "codex|openai|gpt-mystery|missing|unavailable|" + month, host: "codex",
+    { group_id: "codex|openai|gpt-mystery|missing|unavailable|" + month, harness: "codex",
       provider_id: "openai", model_id: "gpt-mystery", evidence_basis: "missing",
       pricing_basis: "unavailable", tokens: 18_000, first_event_at_ms: monthStartMs + 3_600_000 * 8,
       last_event_at_ms: monthStartMs + 3_600_000 * 8, session_count: 1, effective_start: month, effective_end: month,
@@ -545,7 +545,7 @@
       // Shape: apps/desktop/src-tauri/src/lib.rs:2780 read_calendar_month → crates/agent-vitals-runtime/src/summary.rs:1466 calendar_month (json!).
       case "read_calendar_month": return { month: args && args.month || month, days: (args && args.month && args.month !== month) ? {} : calendar.days };
       // Shape: apps/desktop/src-tauri/src/lib.rs:2946 read_hourly_distribution → crates/agent-vitals-runtime/src/summary.rs:689 hourly_distribution (json!):
-      //   { date, hosts_available: { dsh|codex|claude: "sql-facts" | null }, hours: [24 × { hour, dsh_tokens, codex_tokens, claude_tokens }] }
+      //   { date, harnesses_available: { dsh|codex|claude: "sql-facts" | null }, hours: [24 × { hour, dsh_tokens, codex_tokens, claude_tokens }] }
       //   空小时的值是 null 不是 0（渲染器据此画虚线空格）。此前 mock 缺这条，
       //   浏览器里「当日按小时」面板永远显示「读取失败」（2026-09-15 巡检）。
       case "read_hourly_distribution": {
@@ -558,14 +558,14 @@
           codex_tokens: hasData && w > 2 ? w * 4200 : null,
           claude_tokens: hasData && hour >= 13 && w > 0 ? w * 2600 : null,
         }));
-        return { date, hosts_available: { dsh: "sql-facts", codex: "sql-facts", claude: hasData ? "sql-facts" : null }, hours };
+        return { date, harnesses_available: { dsh: "sql-facts", codex: "sql-facts", claude: hasData ? "sql-facts" : null }, hours };
       }
       // Shape: apps/desktop/src-tauri/src/lib.rs:1390 data_status (json!).
       case "data_status": return { status: "ok", data: { health: "warn", integrity: "ok", facts: 42, unresolved_tokens: 18000, unpriced_tokens: 0, pricing: { stale: false }, hints: ["浏览器 mock 数据，不会写入本地库"] } };
       // Shape: apps/desktop/src-tauri/src/lib.rs:1491 billing_import_candidates (json!).
       case "billing_import_candidates": return { status: "ok", candidates: billingCandidates };
       // Shape: crates/agent-vitals-runtime/src/billing_preview.rs::confirmation_groups —
-      // 组行来自 summary.rs::unresolved_billing_groups_in（group_id/host/provider_id/model_id/
+      // 组行来自 summary.rs::unresolved_billing_groups_in（group_id/harness/provider_id/model_id/
       // evidence_basis/pricing_basis/tokens/first_event_at_ms/last_event_at_ms/session_count/
       // effective_start/effective_end），estimated_amounts[{amount_minor,currency,basis}]/
       // unpriced_tokens/unresolved_reason 由 confirmation_groups 补；已按金额降序。
@@ -574,22 +574,22 @@
         const groups = billingGroups.filter((group) => !billingCoveredGroups.has(group.group_id));
         // 与 billing_preview.rs::auto_verdict / clusters_of 同一形状（浏览器里用固定判定）。
         const verdictOf = (g) => {
-          // 冲突证据单列：宿主自报与会话路由证据打架时既不归因也不给一键订阅
+          // 冲突证据单列：执行环境自报与会话路由证据打架时既不归因也不给一键订阅
           // （billing_preview.rs::auto_verdict 的 conflict 短路）。
           if (g.evidence_basis === "conflict") {
             return { model_vendor: g.provider_id && g.provider_id !== "<unknown>" ? g.provider_id : null, gateway_named: false,
               route_state: "conflict", route_basis: "conflict", billing_party: null, billing_mode: null,
               relationship_kind: null, plan: null, state: "needs_input", question: null, basis: ["route.conflict"] };
           }
-          if (g.provider_id === "openai" && g.host === "codex") {
+          if (g.provider_id === "openai" && g.harness === "codex") {
             return { model_vendor: "openai", gateway_named: false, route_state: "provider_reported", route_basis: g.evidence_basis,
               billing_party: "openai", billing_mode: "subscription", relationship_kind: "official_subscription",
               plan: { label: "ChatGPT", channel: null, anchor_date: null, source: "~/.codex/auth.json auth_mode" },
-              state: "determined", question: null, basis: ["host.provider_reported", "account.ChatGPT"] };
+              state: "determined", question: null, basis: ["harness.provider_reported", "account.ChatGPT"] };
           }
           // 配置证据（billing_preview.rs::auto_verdict 的 relay_config 分支）：基址不是
           // 该厂商官方端点 → 计费方是中转的注册域，状态仍是 one_question。
-          if (g.host === "claude-code" && /^deepseek/.test(g.model_id)) {
+          if (g.harness === "claude-code" && /^deepseek/.test(g.model_id)) {
             return { model_vendor: "deepseek", gateway_named: false, route_state: "relay_config",
               route_basis: g.evidence_basis, billing_party: "shengsuanyun.com",
               config_endpoint: "router.shengsuanyun.com", billing_mode: "metered", relationship_kind: null,
@@ -613,10 +613,10 @@
           const v = verdictOf(g);
           // 与 billing_preview.rs::clusters_of 同键：计费方为空时用 model_vendor 补位，
           // 否则不同厂商的网关模型会被并成一行。
-          const key = [g.host, v.billing_party || v.model_vendor || "<unknown>", v.route_state, v.state,
+          const key = [g.harness, v.billing_party || v.model_vendor || "<unknown>", v.route_state, v.state,
             g.effective_start, g.effective_end].join("|");
           if (!clusters.has(key)) {
-            clusters.set(key, { cluster_id: key, host: g.host, billing_party: v.billing_party, model_vendor: v.model_vendor,
+            clusters.set(key, { cluster_id: key, harness: g.harness, billing_party: v.billing_party, model_vendor: v.model_vendor,
               provider_id: g.provider_id, evidence_basis: g.evidence_basis, pricing_basis: g.pricing_basis,
               effective_start: g.effective_start, effective_end: g.effective_end, auto_verdict: v,
               models: [], group_ids: [], tokens: 0, session_count: 0, unpriced_tokens: 0, estimated_amounts: [] });
@@ -649,7 +649,7 @@
         return { status: candidate.status, changed: true };
       }
       // Shape: crates/agent-vitals-runtime/src/billing_preview.rs::declaration_impact_preview —
-      // {status, host, provider_id, relationship_kind, effective_start, effective_end, scopes[],
+      // {status, harness, provider_id, relationship_kind, effective_start, effective_end, scopes[],
       //  changes_amounts, moved{fact_count,session_count,tokens,unpriced_tokens,amounts[],estimated_amounts[]},
       //  kept{tokens,unpriced_tokens,amounts[]}, pending{fact_count,tokens,reasons[]}, first/last_event_ts_ms}
       // Shape: crates/agent-vitals-runtime/src/billing_preview.rs:20 declaration_impact_preview（经 lib.rs:2474）.
@@ -658,11 +658,11 @@
         const models = scopes.filter((scope) => scope.scope_kind === "model").map((scope) => scope.scope_value);
         const providerUnresolved = scopes.some((scope) => scope.scope_kind === "provider" && scope.scope_value === "unresolved");
         // 批量：多个 model 作用域 = 多组求和；服务商未知的组按 "<unknown>" 匹配。
-        const matched = billingGroups.filter((item) => item.host === (args && args.host)
+        const matched = billingGroups.filter((item) => item.harness === (args && args.harness)
           && item.provider_id === (providerUnresolved ? "<unknown>" : (args && args.providerId))
           && (!models.length || models.includes(item.model_id)));
         const group = matched.length ? {
-          host: matched[0].host, provider_id: matched[0].provider_id,
+          harness: matched[0].harness, provider_id: matched[0].provider_id,
           tokens: matched.reduce((sum, item) => sum + item.tokens, 0),
           session_count: matched.reduce((sum, item) => sum + item.session_count, 0),
           unpriced_tokens: matched.reduce((sum, item) => sum + item.unpriced_tokens, 0),
@@ -675,7 +675,7 @@
           last_event_at_ms: Math.max(...matched.map((item) => item.last_event_at_ms)),
         } : null;
         if (!group) {
-          return { status: "ok", host: args && args.host, provider_id: args && args.providerId,
+          return { status: "ok", harness: args && args.harness, provider_id: args && args.providerId,
             relationship_kind: args && args.relationshipKind, effective_start: args && args.effectiveStart,
             effective_end: args && args.effectiveEnd, scopes, changes_amounts: (args && args.relationshipKind) === "official_subscription",
             moved: { fact_count: 0, session_count: 0, tokens: 0, unpriced_tokens: 0, amounts: [], estimated_amounts: [] },
@@ -683,10 +683,10 @@
             first_event_ts_ms: null, last_event_ts_ms: null };
         }
         const changesAmounts = (args && args.relationshipKind) === "official_subscription";
-        const others = billingGroups.filter((item) => !matched.includes(item) && item.host === group.host && item.provider_id === group.provider_id);
+        const others = billingGroups.filter((item) => !matched.includes(item) && item.harness === group.harness && item.provider_id === group.provider_id);
         const keptTokens = others.reduce((sum, item) => sum + item.tokens, 0);
         const keptAmounts = others.flatMap((item) => item.estimated_amounts);
-        return { status: "ok", host: group.host, provider_id: group.provider_id,
+        return { status: "ok", harness: group.harness, provider_id: group.provider_id,
           relationship_kind: args && args.relationshipKind, effective_start: args && args.effectiveStart,
           effective_end: args && args.effectiveEnd, scopes, changes_amounts: changesAmounts,
           moved: { fact_count: group.session_count * 3, session_count: group.session_count, tokens: group.tokens,
@@ -733,7 +733,7 @@
           const models = scopes.filter((scope) => scope.scope_kind === "model").map((scope) => scope.scope_value);
           const providerUnresolved = scopes.some((scope) => scope.scope_kind === "provider" && scope.scope_value === "unresolved");
           for (const group of billingGroups) {
-            if (group.host === args.host
+            if (group.harness === args.harness
                 && group.provider_id === (providerUnresolved ? "<unknown>" : args.providerId)
                 && (!models.length || models.includes(group.model_id))) {
               billingCoveredGroups.set(group.group_id, args.declarationId);
@@ -765,10 +765,10 @@
         }
         return { status: "revoked", declaration_id: args && args.declarationId, revision_id: args && args.revisionId, changed: index >= 0 };
       }
-      case "host_bills_for_period": return emptyReport("bills");
+      case "harness_bills_for_period": return emptyReport("bills");
       // Shape: apps/desktop/src-tauri/src/lib.rs:2632 data_source_status (json!).
       case "data_source_status": return { status: "ok", sources: sourceStatuses };
-      case "source_host_controls": return { status: "ok", excluded_hosts: sourceStatuses.filter((source) => source.connection_state === "excluded").map((source) => source.host), supported_hosts: ["claude-code", "codex", "dsh", "workbuddy"] };
+      case "source_harness_controls": return { status: "ok", excluded_harnesses: sourceStatuses.filter((source) => source.connection_state === "excluded").map((source) => source.harness), supported_harnesses: ["claude-code", "codex", "dsh", "workbuddy"] };
       case "source_data_revision": return { status: "ok", revision: sourceDataRevision };
       case "custom_source_roots": return { status: "ok", sources: customRoots };
       // Shape: crates/agent-vitals-runtime/src/budget.rs:140-152（万分比，8000=80%）；
@@ -815,20 +815,20 @@
       }
       case "retention_config": return { status: "ok", months: retentionMonths, minimum_months: 1, maximum_months: 60 };
       case "skills_doctor_report": {
-        const selectedHost = (args && args.host) || "all";
-        const summaryHost = selectedHost === "all" ? "claude-code" : selectedHost;
+        const selectedHarness = (args && args.harness) || "all";
+        const summaryHarness = selectedHarness === "all" ? "claude-code" : selectedHarness;
         return {
           schema_version: "1.0",
           run: "browser-skill-preview",
-          host_selection: selectedHost,
-          desktop_meta: { generated_at_ms: Date.now(), from_cache: false, host: selectedHost },
+          harness_selection: selectedHarness,
+          desktop_meta: { generated_at_ms: Date.now(), from_cache: false, harness: selectedHarness },
           diagnostics: [{ code: "SV501", name: "提示注入模式", severity: "warning", skill: "browser-preview", evidence: { count: 1 }, impact: "发现 1 条需要人工复核的启发式命中。", recommendation: "打开对应 skill 定义后人工复核。", caveats: ["启发式命中不是恶意结论。"] }],
-          not_assessed: [{ code: "SV003", name: "描述长度", reason: "当前宿主没有可辩护的统一阈值。" }],
-          report: { host_summaries: { [summaryHost]: { skills_on_disk: 12, discoverable_skills: 8, runtime_verified_loaded_skills: null, unique_discoverable_skills: 8, description_budget: { available: true, source: "configurable", budget_chars: 15000, used_chars: 4200, pct_used: 28 }, trigger_data: "available" } } }
+          not_assessed: [{ code: "SV003", name: "描述长度", reason: "当前执行环境没有可辩护的统一阈值。" }],
+          report: { harness_summaries: { [summaryHarness]: { skills_on_disk: 12, discoverable_skills: 8, runtime_verified_loaded_skills: null, unique_discoverable_skills: 8, description_budget: { available: true, source: "configurable", budget_chars: 15000, used_chars: 4200, pct_used: 28 }, trigger_data: "available" } } }
         };
       }
       case "skills_snapshot_save": return { status: "saved", upload_performed: false };
-      case "skills_diff_latest": return { schema_version: "skills-diff-v1", status: "ok", baseline_available: true, truncated: false, dropped_rows: 0, summary: { added: 1, removed: 0, usage_changed: 1, newly_judgeable: 0, new_overlap_candidates: 0, new_security_findings: 1 }, added_skills: [{ host: "claude-code", name: "browser-preview", namespace: null, instance_id: null }], removed_skills: [], usage_delta: [{ host: "claude-code", name: "browser-preview", namespace: null, instance_id: null, delta: 2, now: 8 }], newly_judgeable: [], new_overlap_candidates: [], new_security_findings: [{ skill: "browser-preview", rule: "SV501", line: 12 }], budget_delta_chars: null, budget_pct_then_now: [null, null], loaded_then_now: [8, 9] };
+      case "skills_diff_latest": return { schema_version: "skills-diff-v1", status: "ok", baseline_available: true, truncated: false, dropped_rows: 0, summary: { added: 1, removed: 0, usage_changed: 1, newly_judgeable: 0, new_overlap_candidates: 0, new_security_findings: 1 }, added_skills: [{ harness: "claude-code", name: "browser-preview", namespace: null, instance_id: null }], removed_skills: [], usage_delta: [{ harness: "claude-code", name: "browser-preview", namespace: null, instance_id: null, delta: 2, now: 8 }], newly_judgeable: [], new_overlap_candidates: [], new_security_findings: [{ skill: "browser-preview", rule: "SV501", line: 12 }], budget_delta_chars: null, budget_pct_then_now: [null, null], loaded_then_now: [8, 9] };
       case "save_retention_config": {
         const input = (args && args.input) || {};
         if (!Number.isInteger(input.months) || input.months < 1 || input.months > 60) {
@@ -840,9 +840,6 @@
       case "export_diagnostic_package": return ok({ status: "saved", path: "/tmp/agent-vitals-diagnostic-browser-mock.zip", upload_performed: false });
       // Shape: apps/desktop/src-tauri/src/lib.rs:1708 statistics_timezone_config (json!).
       case "statistics_timezone_config": return { status: "ok", timezone, system_timezone: timezone };
-      case "city_seed_config": return { status: "ok", seed: 1927, created: false };
-      case "set_city_seed": return { status: "saved", seed: args && args.seed };
-      case "reset_city_seed": return { status: "saved", seed: (Math.floor(Math.random() * 0xfffffffe) + 1) >>> 0 };
       case "ui_language_config": return { status: "ok", language: uiLanguage, has_preference: hasUiLanguagePreference };
       case "save_ui_language_config": {
         const language = args && args.language;
@@ -940,9 +937,9 @@
         observed_at: new Date(Date.now() - 45 * 60000).toISOString(),
         windows_recent: 2,
       };
-      // 形状出处：hosts/codex/sessions/usage.rs plan_from_rate_limits →
+      // 形状出处：harnesses/codex/sessions/usage.rs plan_from_rate_limits →
       //   { plan_type, has_credits, limits: { primary: {...} }, observed_at }（事件的 ISO 时间戳）。
-      // Shape: apps/desktop/src-tauri/src/lib.rs:2767 data_codex_quota → crates/agent-vitals-hosts/src/hosts/codex/sessions/usage.rs:191 plan_from_rate_limits.
+      // Shape: apps/desktop/src-tauri/src/lib.rs:2767 data_codex_quota → crates/agent-vitals-harnesses/src/harnesses/codex/sessions/usage.rs:191 plan_from_rate_limits.
       case "data_codex_quota": return { plan_type: "Plus", has_credits: false, limits: { primary: { used_percent: 38, window_minutes: 10080, resets_at: Math.floor(Date.now() / 1000) + 7200 } }, observed_at: new Date(Date.now() - 1500000).toISOString() };
       // Shape: crates/agent-vitals-data/src/route_quality.rs:138-186.
       // 只放合成的模型族事实；credential_ref、endpoint、路径和原始日志不进入 mock。
@@ -952,15 +949,15 @@
           since_ms: nowMs - Number((args && args.days) || 90) * 86400000,
           now_ms: nowMs,
           families_vocabulary: ["anthropic", "openai", "deepseek", "glm", "minimax", "gemini", "qwen", "synthetic", "unknown"],
-          hosts: [{
-            host: "plugin:zcode", has_baseline: true, native_families: ["glm"], totals: { requests: 12, sessions: 3 },
+          harnesses: [{
+            harness: "plugin:zcode", has_baseline: true, native_families: ["glm"], totals: { requests: 12, sessions: 3 },
             families: [
               { family: "glm", flag: "native", requests: 9, sessions: 3, tokens_total: 18000, last_event_ms: nowMs - 3600000, request_share: 75, models: [{ model: "glm-5", provider_raw: "zhipu", provider_id: "zhipu", requests: 9, tokens_total: 18000, last_event_ms: nowMs - 3600000 }] },
               { family: "deepseek", flag: "non_native", requests: 2, sessions: 1, tokens_total: 4200, last_event_ms: nowMs - 7200000, request_share: 16.7, models: [{ model: "bigmodel/deepseek-v4-flash[1M]", provider_raw: "relay", provider_id: "relay", requests: 2, tokens_total: 4200, last_event_ms: nowMs - 7200000 }] },
               { family: "synthetic", flag: "api_error", requests: 1, sessions: 1, tokens_total: 0, last_event_ms: nowMs - 10800000, request_share: 8.3, models: [{ model: "<synthetic>", provider_raw: "", provider_id: "", requests: 1, tokens_total: 0, last_event_ms: nowMs - 10800000 }] },
             ],
           }, {
-            host: "minimax-code", has_baseline: false, native_families: [], totals: { requests: 4, sessions: 2 },
+            harness: "minimax-code", has_baseline: false, native_families: [], totals: { requests: 4, sessions: 2 },
             families: [{ family: "minimax", flag: "no_baseline", requests: 4, sessions: 2, tokens_total: 9000, last_event_ms: nowMs - 1800000, request_share: 100, models: [{ model: "MiniMax-M2", provider_raw: "", provider_id: "", requests: 4, tokens_total: 9000, last_event_ms: nowMs - 1800000 }] }],
           }],
         };
@@ -994,7 +991,7 @@
           const index = sessions.findIndex((session) => session.session_ref === (args && args.sessionRef));
           const cityIndex = citySessions.findIndex((session) => session.session_ref === (args && args.sessionRef));
           const session = cityIndex >= 0 ? citySessions[cityIndex] : sessions[Math.max(0, index)];
-          return { data: mockInsights(session.host, cityIndex >= 0 ? 60 : index === 1 ? 420 : 40) };
+          return { data: mockInsights(session.harness, cityIndex >= 0 ? 60 : index === 1 ? 420 : 40) };
         }
         if (args.output === "graph") return { data: { coverage: { total_nodes: 9, total_edges: 8, missing_parent: 0, missing_time: 0, missing_status: 0 } } };
         return { data: {
@@ -1023,7 +1020,7 @@
         const tokens = selected.tokens;
         return { data: {
           ...selected,
-          billing_breakdown: mockBillingBreakdowns[selected.session_ref] ? mockBillingBreakdowns[selected.session_ref].map(([model_id, billing_mode, total]) => ({ provider_id: "openai", provider_raw: "openai", model_id, billing_template_id: null, billing_mode, pricing_basis: "metered_estimate", evidence_basis: "missing", pricing_version: "preview-v1", pricing_source: null, cost_minor: null, peak: false, tokens: { uncached_input_tokens: 0, cache_read_tokens: total, cache_write_tokens: 0, output_tokens: 0, total }, has_unresolved: billing_mode !== "subscription", unresolved_reason: billing_mode === "subscription" ? "subscription token usage is not a per-token bill" : "no compatible price card for this provider/model bucket" })) : [{ provider_id: selected.host === "codex" ? "openai" : "<unknown>", provider_raw: selected.host === "codex" ? "openai" : null, model_id: model, billing_template_id: null, billing_mode: selected.cost_status.state === "subscription" ? "subscription" : "metered", pricing_basis: selected.cost_minor?.basis || "unavailable", evidence_basis: selected.cost_status.has_unresolved ? "missing" : "explicit-official-route", pricing_version: selected.cost_minor ? "preview-v1" : null, pricing_source: selected.cost_minor ? "official" : null, cost_minor: selected.cost_minor, peak: true, tokens, has_unresolved: selected.cost_status.has_unresolved, unresolved_reason: selected.cost_status.has_unresolved ? "no pricing snapshot covers this event time" : null }],
+          billing_breakdown: mockBillingBreakdowns[selected.session_ref] ? mockBillingBreakdowns[selected.session_ref].map(([model_id, billing_mode, total]) => ({ provider_id: "openai", provider_raw: "openai", model_id, billing_template_id: null, billing_mode, pricing_basis: "metered_estimate", evidence_basis: "missing", pricing_version: "preview-v1", pricing_source: null, cost_minor: null, peak: false, tokens: { uncached_input_tokens: 0, cache_read_tokens: total, cache_write_tokens: 0, output_tokens: 0, total }, has_unresolved: billing_mode !== "subscription", unresolved_reason: billing_mode === "subscription" ? "subscription token usage is not a per-token bill" : "no compatible price card for this provider/model bucket" })) : [{ provider_id: selected.harness === "codex" ? "openai" : "<unknown>", provider_raw: selected.harness === "codex" ? "openai" : null, model_id: model, billing_template_id: null, billing_mode: selected.cost_status.state === "subscription" ? "subscription" : "metered", pricing_basis: selected.cost_minor?.basis || "unavailable", evidence_basis: selected.cost_status.has_unresolved ? "missing" : "explicit-official-route", pricing_version: selected.cost_minor ? "preview-v1" : null, pricing_source: selected.cost_minor ? "official" : null, cost_minor: selected.cost_minor, peak: true, tokens, has_unresolved: selected.cost_status.has_unresolved, unresolved_reason: selected.cost_status.has_unresolved ? "no pricing snapshot covers this event time" : null }],
           timeline: [{ event_at: selected.first_event_at, model_id: model, observation_kind: "assistant-usage", peak: false, tokens: { uncached_input_tokens: tokens.uncached_input_tokens, cache_read_tokens: 0, cache_write_tokens: 0, output_tokens: 0, total: tokens.uncached_input_tokens } }, { event_at: selected.last_event_at, model_id: model, observation_kind: "assistant-usage", peak: true, tokens: { uncached_input_tokens: 0, cache_read_tokens: tokens.cache_read_tokens, cache_write_tokens: tokens.cache_write_tokens, output_tokens: tokens.output_tokens, total: tokens.cache_read_tokens + tokens.cache_write_tokens + tokens.output_tokens } }],
           workflow_timeline: [{ event_at: selected.last_event_at, event_type: "tool_finished", capability_kind: "tool", capability_id: "bash", capability_version: null, outcome: "succeeded", duration_ms: 1400, error_fingerprint: null, invocation_fingerprint: null }],
           workflow_has_more: false, has_more: false, next_cursor: null,
@@ -1044,15 +1041,15 @@
           { rule: "PRICE_COVERAGE", severity: "warning", category: "billing", hits: 1, sessions: 1 },
         ],
         issues: [
-          { group_id: "fnv1a64:0123456789abcdef", action_kind: "behavior", rule: "SV709", host: "plugin:zcode", evidence_class: "egress", count: 1, first_seen_at_ms: findingNow - 7200000, last_seen_at_ms: findingNow - 3600000, severity: "critical", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:2222222222222222", observed_first_at_ms: findingNow - 7200000, observed_last_at_ms: findingNow - 3600000, evidence_level: "E3", stage: "egress_attempted", evidence_origin: "network_metadata", scope_classes: ["git_history", "workspace_archive"], observation_count: 2, file_count: null, byte_count: 3145728, destination_class: "object_storage", confidence: "high" }], read_only: true, manual_follow_up: false },
-          { group_id: "fnv1a64:1111111111111111", action_kind: "billing", rule: "PRICE_COVERAGE", host: "minimax-code", evidence_class: "billing", count: 1, first_seen_at_ms: findingNow - 1800000, last_seen_at_ms: findingNow - 1800000, severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:3333333333333333", observed_first_at_ms: findingNow - 1800000, observed_last_at_ms: findingNow - 1800000, evidence_level: null, stage: null, evidence_origin: "local_artifact", scope_classes: [], observation_count: 1, file_count: null, byte_count: null, destination_class: null, confidence: "medium" }], read_only: false, manual_follow_up: true },
+          { group_id: "fnv1a64:0123456789abcdef", action_kind: "behavior", rule: "SV709", harness: "plugin:zcode", evidence_class: "egress", count: 1, first_seen_at_ms: findingNow - 7200000, last_seen_at_ms: findingNow - 3600000, severity: "critical", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:2222222222222222", observed_first_at_ms: findingNow - 7200000, observed_last_at_ms: findingNow - 3600000, evidence_level: "E3", stage: "egress_attempted", evidence_origin: "network_metadata", scope_classes: ["git_history", "workspace_archive"], observation_count: 2, file_count: null, byte_count: 3145728, destination_class: "object_storage", confidence: "high" }], read_only: true, manual_follow_up: false },
+          { group_id: "fnv1a64:1111111111111111", action_kind: "billing", rule: "PRICE_COVERAGE", harness: "minimax-code", evidence_class: "billing", count: 1, first_seen_at_ms: findingNow - 1800000, last_seen_at_ms: findingNow - 1800000, severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:3333333333333333", observed_first_at_ms: findingNow - 1800000, observed_last_at_ms: findingNow - 1800000, evidence_level: null, stage: null, evidence_origin: "local_artifact", scope_classes: [], observation_count: 1, file_count: null, byte_count: null, destination_class: null, confidence: "medium" }], read_only: false, manual_follow_up: true },
         ],
         next_cursor: null, refreshed: false,
         };
       }
-      case "findings_freshness": return { status: "ok", freshness: { state: "stale", last_successful_sync_at: new Date(Date.now() - 1500000).toISOString(), stale_hosts: ["workbuddy"], syncing: false } };
+      case "findings_freshness": return { status: "ok", freshness: { state: "stale", last_successful_sync_at: new Date(Date.now() - 1500000).toISOString(), stale_harnesses: ["workbuddy"], syncing: false } };
       case "trust_monitor_config": return { ...trustMonitorConfig };
-      case "trust_evidence_read": return { host: args && args.host || null, count: 0, evidence: [], next_cursor: null, source: "browser_mock" };
+      case "trust_evidence_read": return { harness: args && args.harness || null, count: 0, evidence: [], next_cursor: null, source: "browser_mock" };
       case "trust_discover": return { candidates: [{ id: "sample-agent", detected: true, artifact_profile_available: true, coverage_state: "profiled" }], profile_errors: [] };
       case "trust_profile_proposal_status": return { status: "ok", authority_state: "ready", data: { pending: trustProfileState.pending, approved: trustProfileState.approved, history: [] } };
       case "trust_profile_approve": {
@@ -1111,38 +1108,38 @@
       // （rows 键 = combo_rows 的 json! 字段；金额按币种分列，mock 同纪律）。
       case "decision_matrix_safe": return {
         schema_version: "agent-vitals-decision-matrix/v1", status: "ok", month: "2026-09",
-        rows: [{ host: "plugin:zcode", model_id: "glm-5", provider_id: "zhipu", sessions: 4,
+        rows: [{ harness: "plugin:zcode", model_id: "glm-5", provider_id: "zhipu", sessions: 4,
           tokens: { uncached_input: 1200, cache_read: 8800, cache_write: 300, output: 900, total: 11200 },
           cache_hit_ratio: 0.8544, has_subscription: false, waste_rate: null,
           amounts: [{ amount_minor: 781, currency: "CNY", basis: "metered_estimate" }],
           top_sessions: [{ session_ref: "sr_0123456789", span_first_ms: Date.now() - 3600000, span_last_ms: Date.now(), tokens_total: 6400, failures: 2 }],
-          host_behavior: { SV610: 2 }, limit_pressure: { hits: 1, per_session: 0.25 }, cost_provider_unresolved: false }],
-        findings_summary: [{ kind: "marathon", session_ref: "sr_0123456789", span_hours: 25.2, tokens_total: 11200, failures: 2, combo: { host: "plugin:zcode", model_id: "glm-5" } }],
-        limitations: ["waste_rate_unavailable", "host_behavior_host_level", "amounts_currency_separated", "fingerprint_link_deferred"],
+          harness_behavior: { SV610: 2 }, limit_pressure: { hits: 1, per_session: 0.25 }, cost_provider_unresolved: false }],
+        findings_summary: [{ kind: "marathon", session_ref: "sr_0123456789", span_hours: 25.2, tokens_total: 11200, failures: 2, combo: { harness: "plugin:zcode", model_id: "glm-5" } }],
+        limitations: ["waste_rate_unavailable", "harness_behavior_harness_level", "amounts_currency_separated", "fingerprint_link_deferred"],
       };
       case "decision_matrix": return {
         month: "2026-09",
         rows: [
-          { host: "codex", model_id: "gpt-6-astra", provider_id: "cogfoundry.ai", sessions: 10,
+          { harness: "codex", model_id: "gpt-6-astra", provider_id: "cogfoundry.ai", sessions: 10,
             tokens: { uncached_input: 2, cache_read: 3, cache_write: 1, output: 1, total: 7 },
             cache_hit_ratio: 0.5, has_subscription: false, waste_rate: null,
-            amounts: [], cost_provider_unresolved: false, top_sessions: [], host_behavior: {} },
-          { host: "codex", model_id: "gpt-5.6-terra", provider_id: "shengsuanyun", sessions: 31,
+            amounts: [], cost_provider_unresolved: false, top_sessions: [], harness_behavior: {} },
+          { harness: "codex", model_id: "gpt-5.6-terra", provider_id: "shengsuanyun", sessions: 31,
             tokens: { uncached_input: 1754, cache_read: 34448965, cache_write: 2304878, output: 119195, total: 36875892 },
             cache_hit_ratio: 0.9363, has_subscription: false, waste_rate: null,
             amounts: [{ amount_minor: 1408, currency: "USD", basis: "metered_estimate" }],
-            cost_provider_unresolved: true, top_sessions: [], host_behavior: { SV610: 62, SV607: 8 } },
-          { host: "claude-code", model_id: "deepseek-v4-flash-0731", provider_id: "<unknown>", sessions: 12,
+            cost_provider_unresolved: true, top_sessions: [], harness_behavior: { SV610: 62, SV607: 8 } },
+          { harness: "claude-code", model_id: "deepseek-v4-flash-0731", provider_id: "<unknown>", sessions: 12,
             tokens: { uncached_input: 44432002, cache_read: 12596736, cache_write: 0, output: 13030, total: 57041768 },
             cache_hit_ratio: 0.2211, has_subscription: false, waste_rate: null,
             amounts: [{ amount_minor: 6734, currency: "CNY", basis: "metered_estimate" }],
             cost_provider_unresolved: true,
             top_sessions: [{ session_ref: "sr_1f7589ece7184a8a8a9bb0c", span_first_ms: Date.now() - 179000000, span_last_ms: Date.now(), tokens_total: 473030189 }],
-            host_behavior: {} },
-          { host: "claude-code", model_id: "glm-5.3", provider_id: "zhipu-glm", sessions: 3,
+            harness_behavior: {} },
+          { harness: "claude-code", model_id: "glm-5.3", provider_id: "zhipu-glm", sessions: 3,
             tokens: { uncached_input: 1, cache_read: 2, cache_write: 0, output: 0, total: 3 },
             cache_hit_ratio: null, has_subscription: true, waste_rate: null,
-            amounts: [], cost_provider_unresolved: false, top_sessions: [], host_behavior: {} },
+            amounts: [], cost_provider_unresolved: false, top_sessions: [], harness_behavior: {} },
         ],
         notes: ["waste_rate 恒 null：waste 检测器仅 DSH 且尚未接入（spec §4.2，不用 0 冒充）"],
       };
@@ -1166,22 +1163,22 @@
       case "set_sync_paused":
         syncPaused = !!(args && args.paused);
         return ok({ status: "ok", paused: syncPaused });
-      case "set_source_host_excluded": {
+      case "set_source_harness_excluded": {
         const input = (args && args.input) || {};
-        const source = sourceStatuses.find((item) => item.host === input.host);
-        if (!source) throw new Error("source host not found");
+        const source = sourceStatuses.find((item) => item.harness === input.harness);
+        if (!source) throw new Error("source harness not found");
         source.connection_state = input.excluded ? "excluded" : "connected";
         source.failed_scope = input.excluded ? {} : source.failed_scope;
         source.recovery_action = input.excluded
           ? { label: "恢复读取", kind: "include_source" }
           : null;
-        return ok({ status: "ok", host: source.host, excluded: !!input.excluded });
+        return ok({ status: "ok", harness: source.harness, excluded: !!input.excluded });
       }
       case "delete_imported_source_data": {
-        const source = sourceStatuses.find((item) => item.host === (args && args.host));
-        if (!source) throw new Error("source host not found");
+        const source = sourceStatuses.find((item) => item.harness === (args && args.harness));
+        if (!source) throw new Error("source harness not found");
         const scope = source.import_scope || {};
-        const result = { status: "deleted", host: source.host, facts: Number(scope.facts || 0), sessions: Number(scope.sessions || 0), source_files: Number((source.scan && source.scan.source_count) || 0), trust_observations: 0, route_evidence: 0, session_excerpts: 0 };
+        const result = { status: "deleted", harness: source.harness, facts: Number(scope.facts || 0), sessions: Number(scope.sessions || 0), source_files: Number((source.scan && source.scan.source_count) || 0), trust_observations: 0, route_evidence: 0, session_excerpts: 0 };
         source.import_scope = { facts: 0, sessions: 0 };
         source.connection_state = "excluded";
         sourceDataRevision += 1;
@@ -1190,14 +1187,14 @@
       case "pick_custom_source_root": return "/tmp/agent-vitals-browser-custom-source";
       case "add_custom_source_root": {
         const input = (args && args.input) || {};
-        if (!input.host || !input.root) throw new Error("custom source host and root are required");
-        const exists = customRoots.some((item) => item.host === input.host && item.root === input.root);
-        if (!exists) customRoots.push({ host: input.host, root: input.root });
+        if (!input.harness || !input.root) throw new Error("custom source harness and root are required");
+        const exists = customRoots.some((item) => item.harness === input.harness && item.root === input.root);
+        if (!exists) customRoots.push({ harness: input.harness, root: input.root });
         return ok({ status: "ok", changed: !exists });
       }
       case "remove_custom_source_root": {
         const input = (args && args.input) || {};
-        const index = customRoots.findIndex((item) => item.host === input.host && item.root === input.root);
+        const index = customRoots.findIndex((item) => item.harness === input.harness && item.root === input.root);
         if (index >= 0) customRoots.splice(index, 1);
         return ok({ status: "ok", changed: index >= 0 });
       }

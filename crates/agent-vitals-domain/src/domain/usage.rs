@@ -69,7 +69,7 @@ const SAMPLE_FIELDS: [&str; 4] =
 /// 有实测依据：真实会话（session-e4b0be69）的 1398 个 usage 样本（720 条
 /// `assistant/chunk` + 678 条 `assistant/message`）里 `cacheWriteTokens`
 /// **一次都没出现过**，`cacheReadTokens` 出现 1348 次。原来缺字段直接落 0，
-/// UI 于是显示「缓存写 0」——一个被伪造出来的测量值。这与「host 能力缺失时
+/// UI 于是显示「缓存写 0」——一个被伪造出来的测量值。这与「harness 能力缺失时
 /// 降级、绝不臆造」是同一条纪律：缺列的报告有用，编造列的没用。
 ///
 /// （早先这条注释写的是「679 个样本」——那个数只数了 `assistant/message`
@@ -319,7 +319,7 @@ fn usage_sample(event: &Value) -> Option<UsageSample<'_>> {
 /// （`token_by_model`/`request_metrics`/`context_composition`/
 /// `src/cost.rs::cost_report`）依赖 `Signal::Usage`。**不新造一套裁决逻辑**——
 /// 这族函数从很早就有自己的一套"不编造"纪律：零样本时 `by_model` 是 `{}`、
-/// `unreported_fields` 是 `[]`（不对"宿主不报某字段"下断言）、
+/// `unreported_fields` 是 `[]`（不对"执行环境不报某字段"下断言）、
 /// `cost_report` 直接返回 `None`。这些早就是 §10 三态契约里
 /// "measured-zero vs unavailable" 的实现，只是没有挂 `Signal` 这个词汇。
 /// 这个函数把两者正式挂钩，给 §17.1 "coverage-matrix golden" 这类跨规则族
@@ -349,7 +349,7 @@ pub fn usage_signal_status(coverage: &Coverage) -> Value {
 /// 逐字节一致的原因。
 ///
 /// 各字段对应 `token_by_model` 折叠的跨 turn 变量：`by_model`/`providers`/
-/// `sequence`/`active` 是累计或游标，天然跨调用；`seen`/`samples` 决定「宿主
+/// `sequence`/`active` 是累计或游标，天然跨调用；`seen`/`samples` 决定「执行环境
 /// 未上报字段」的断言（0 个样本不下断言）；`unaccounted` 是残差哨兵，逐事件
 /// 累计。没有 serde derive——core 不引 serde 宏，checkpoint 序列化走手写的
 /// `to_json`/`from_json`（`usage_fold_checkpoint_json`/`usage_fold_resume_json`）。
@@ -469,15 +469,15 @@ fn usage_fold_into(state: &mut UsageFoldState, events: &[Value]) {
 
 /// 折叠状态 → `token_by_model` 的输出形状。
 pub fn usage_fold_render(state: &UsageFoldState) -> Value {
-    // 一个样本都没有时返回空列表：没有数据就不做「宿主不报这个字段」的断言。
+    // 一个样本都没有时返回空列表：没有数据就不做「执行环境不报这个字段」的断言。
     let unreported: Vec<&str> = if state.samples > 0 {
         SAMPLE_FIELDS.iter().enumerate().filter(|(i, _)| !state.seen[*i]).map(|(_, k)| *k).collect()
     } else {
         Vec::new()
     };
 
-    // `unaccounted_usage` 是 `unreported_fields` 的**对偶**：后者说「宿主
-    // 从没报过这个字段」，前者说「宿主报了 token，但我们没接住」。在证据
+    // `unaccounted_usage` 是 `unreported_fields` 的**对偶**：后者说「执行环境
+    // 从没报过这个字段」，前者说「执行环境报了 token，但我们没接住」。在证据
     // 模型里它就是 `Signal::Usage` 的 `unmetered` 计数——`evidence.rs` 的
     // 那句注释精确预言了这个 bug：「适配器不能靠"读不到就不算"来偷偷刷高
     // 自己的覆盖率」。
@@ -616,7 +616,7 @@ pub fn token_by_model(events: &[Value]) -> Value {
 ///
 /// 与 `buckets_from` 的「缺字段按 0」是**两种正确语义**，不是不一致：那边在做
 /// 求和（四桶之和必须与 DSH `tokenUsage` 逐字节相等，是已对账的不变量），求和
-/// 里缺项当 0 是对的；这里在做逐请求的**测量值**，缺项落 0 就是把「宿主没报」
+/// 里缺项当 0 是对的；这里在做逐请求的**测量值**，缺项落 0 就是把「执行环境没报」
 /// 伪造成「测到 0」——正是 `unreported_fields` 当初要修的那个缺陷。
 fn opt_i64(usage: &Value, key: &str) -> Option<i64> {
     usage.get(key).and_then(|v| v.as_i64())
@@ -821,7 +821,7 @@ pub fn dsh_usage_observations(events: &[Value]) -> Vec<DshUsageObservation> {
         // ── 开槽：身份形成的唯一边界（§3.3 三段公式，一律此刻算好并冻结）──
         let (identity_basis, source_event_id, first_hash) = if is_compaction {
             match &compaction_id {
-                // 有 compactionId：compaction_id 是宿主原生标识 → native 身份，无
+                // 有 compactionId：compaction_id 是执行环境原生标识 → native 身份，无
                 // hash。
                 Some(cid) => ("native", format!("compaction:{}", cid), None),
                 // 无 compactionId：对开槽样本 canonical 行算 hash 并冻结。首样本
@@ -1526,7 +1526,7 @@ mod tests {
     use crate::evidence::CoverageCounts;
     // canonical 归一层 phase C 迁进 `adapters/canonical_usage.rs`；这些测试
     // 复用本模块的 `reconcile_fixture`，留原处、经 crate 根 re-export 调进来。
-    use agent_vitals_hosts::canonical_usage::{
+    use agent_vitals_harnesses::canonical_usage::{
         canonical_tokens, canonical_total_delta, CANONICAL_DIMS,
     };
 
@@ -1644,8 +1644,8 @@ mod tests {
             json!({"type":"assistant/chunk","seq":2,"data":{"turn":1,"step":1,"chunk":{"type":"text","text":"x"}}}), // 非 usage
         ];
         let out = token_by_model(&events);
-        // unreported_fields 为空：一个 usage 样本都没有，就不对「宿主不报某字段」
-        // 下断言——没有数据时不做判断，与 host 能力缺失时「缺列不编列」同一条纪律。
+        // unreported_fields 为空：一个 usage 样本都没有，就不对「执行环境不报某字段」
+        // 下断言——没有数据时不做判断，与 harness 能力缺失时「缺列不编列」同一条纪律。
         //
         // 但 seq:1 那条**残差哨兵能看到**：它有真实的 `inputTokens:7`，只是
         // 缺 turn/step 没法进正式折叠——这正是哨兵存在的意义（见
@@ -1915,7 +1915,7 @@ mod tests {
     }
 
     /// 「字段从未上报」必须与「字段上报了 0」区分开——这两者以前都落成 `0`，
-    /// UI 于是把「宿主根本不报缓存写入」显示成「缓存写 0」，一个伪造的测量值。
+    /// UI 于是把「执行环境根本不报缓存写入」显示成「缓存写 0」，一个伪造的测量值。
     ///
     /// 实测依据：真实会话 session-e4b0be69 的 1398 个 usage 样本里
     /// `cacheWriteTokens` 一次都没出现，`cacheReadTokens` 出现 1348 次——
@@ -1924,7 +1924,7 @@ mod tests {
     fn usage_unreported_field_is_not_a_measured_zero() {
         let header = json!({"type":"request/header","seq":1,"data":{"header":{"config":{"model":"m"}}}});
 
-        // ① 宿主从不上报 cacheWrite/cacheRead → 两者都进 unreported_fields
+        // ① 执行环境从不上报 cacheWrite/cacheRead → 两者都进 unreported_fields
         let absent = [
             header.clone(),
             json!({"type":"assistant/chunk","seq":2,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":10,"outputTokens":2}}}}),
@@ -1933,7 +1933,7 @@ mod tests {
         assert_eq!(out["unreported_fields"], json!(["cacheReadTokens", "cacheWriteTokens"]));
         assert_eq!(out["by_model"]["m"]["cache_write_tokens"], json!(0), "求和仍按 0——四桶之和必须与 tokenUsage 相等");
 
-        // ② 宿主显式上报 0 → 不算未上报，`0` 是一个真实测量值
+        // ② 执行环境显式上报 0 → 不算未上报，`0` 是一个真实测量值
         let explicit_zero = [
             header.clone(),
             json!({"type":"assistant/chunk","seq":2,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":10,"outputTokens":2,"cacheReadTokens":0,"cacheWriteTokens":0}}}}),
@@ -1997,7 +1997,7 @@ mod tests {
         ];
         let rows = request_metrics(&events);
         let row = &rows[0];
-        assert_eq!(row["cache_read_tokens"], Value::Null, "宿主没报就是 null，不是 0");
+        assert_eq!(row["cache_read_tokens"], Value::Null, "执行环境没报就是 null，不是 0");
         assert_eq!(row["cache_write_tokens"], Value::Null);
         assert_eq!(row["context_tokens"], Value::Null, "缺一个加数，整行留空而不是拿部分和硬凑");
         assert_eq!(row["uncached_input_tokens"], json!(1000), "在场的字段照常给值");
@@ -2425,7 +2425,7 @@ mod tests {
         assert_eq!(obs[0].turn, None);
         assert_eq!(obs[0].step, None);
         assert_eq!(obs[0].compaction_id.as_deref(), Some("c1"));
-        assert_eq!(obs[0].identity_basis, "native", "compactionId 是宿主原生标识");
+        assert_eq!(obs[0].identity_basis, "native", "compactionId 是执行环境原生标识");
         assert_eq!(obs[0].source_event_id, "compaction:c1");
         assert_eq!(obs[0].first_sample_identity_hash, None, "有 id 无 hash");
         assert_eq!(obs[0].model_raw.as_deref(), Some("deepseek-v4-flash"),

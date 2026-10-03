@@ -8,7 +8,7 @@ envelope。本文件就是这个 wrapper——byte-mirror spec §6 envelope 的
 `data_version / authority_state / authority_revision / generated_at /
 timezone / coverage / freshness / warnings / data` 顶层 + data 形状
 （`window.{label,hour,from,to}` + `sessions[]` + `window_total_tokens` +
-`has_more` + `next_cursor` + 每会话 `session_ref / host / first_event_at /
+`has_more` + `next_cursor` + 每会话 `session_ref / harness / first_event_at /
 last_event_at / event_count / model_ids / identity_kind / tokens{4 桶 +
 total} / peak_tokens / cost_minor`）。
 
@@ -296,8 +296,8 @@ def _tool_error_envelope(err_code, message):
         "authority_revision": None,
         "generated_at": _ms_to_rfc3339_beijing(int(datetime.now(tz=timezone.utc).timestamp() * 1000)),
         "timezone": _system_timezone_name(),
-        "coverage": {"status": "unavailable", "missing_hosts": []},
-        "freshness": {"last_successful_sync_at": None, "stale_hosts": []},
+        "coverage": {"status": "unavailable", "missing_harnesses": []},
+        "freshness": {"last_successful_sync_at": None, "stale_harnesses": []},
         "warnings": [],
         "data": None,
         "error": {"code": err_code, "message": message},
@@ -440,7 +440,7 @@ def _freshness(conn):
         last = None
     return {
         "last_successful_sync_at": _ms_to_rfc3339_beijing(last),
-        "stale_hosts": [],
+        "stale_harnesses": [],
     }
 
 
@@ -475,7 +475,7 @@ def _build_envelope(conn, home, max_observed_ms, coverage, warnings, data):
 
 
 def _coverage_not_applicable():
-    return {"status": "not_applicable", "missing_hosts": []}
+    return {"status": "not_applicable", "missing_harnesses": []}
 
 
 def _check_as_of_run_id(conn, args, warnings):
@@ -600,11 +600,11 @@ def beijing_month_bounds_ms(month_str):
 
 
 # ────────────────────────────────────────────────────────────────────────
-# 单 host SQL：sessions_in_window + session_facts_timeline（mirror Rust SQL）
+# 单 harness SQL：sessions_in_window + session_facts_timeline（mirror Rust SQL）
 # ────────────────────────────────────────────────────────────────────────
 
 _SQL_SESSIONS_IN_WINDOW = (
-    "SELECT session_key, host, "
+    "SELECT session_key, harness, "
     "MIN(event_ts_ms), MAX(event_ts_ms), COUNT(*), "
     "SUM(uncached_input_tokens), SUM(cache_read_tokens), "
     "SUM(cache_write_tokens), SUM(output_tokens), "
@@ -613,7 +613,7 @@ _SQL_SESSIONS_IN_WINDOW = (
     "   + cache_write_tokens + output_tokens) ELSE 0 END), "
     "GROUP_CONCAT(DISTINCT COALESCE(model_id, '<unknown>')) "
     "FROM usage_facts "
-    "WHERE host = ?1 "
+    "WHERE harness = ?1 "
     "  AND observation_kind != 'legacy_aggregate' "
     "  AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL "
     "  AND session_key IS NOT NULL "
@@ -645,7 +645,7 @@ _SQL_SESSION_TOTAL_AGG = (
 )
 
 _SQL_SESSION_ROW = (
-    "SELECT host, source_profile FROM sessions WHERE session_key = ?1"
+    "SELECT harness, source_profile FROM sessions WHERE session_key = ?1"
 )
 
 _SQL_ALL_SESSION_KEYS = "SELECT session_key FROM sessions"
@@ -669,18 +669,18 @@ def _all_session_keys(conn):
 
 
 def _session_row(conn, session_key):
-    """mirror Rust `session_row` → (host, source_profile)。"""
+    """mirror Rust `session_row` → (harness, source_profile)。"""
     row = conn.execute(_SQL_SESSION_ROW, (session_key,)).fetchone()
     if row is None:
         return None
-    return (row["host"], row["source_profile"])
+    return (row["harness"], row["source_profile"])
 
 
-def _sessions_in_window(conn, start_ms, end_ms, hosts, hour, min_tokens,
+def _sessions_in_window(conn, start_ms, end_ms, harnesses, hour, min_tokens,
                         after_total, after_key, limit):
     """mirror Rust `sessions_in_window` → (rows, has_more, window_total)。"""
     wired = ["claude-code", "codex", "dsh"]
-    selected = [w for w in wired if (not hosts) or any(h == w for h in hosts)]
+    selected = [w for w in wired if (not harnesses) or any(h == w for h in harnesses)]
     hour_param = -1 if hour is None else int(hour)
 
     all_rows = []
@@ -692,7 +692,7 @@ def _sessions_in_window(conn, start_ms, end_ms, hosts, hour, min_tokens,
             models = [m.strip() for m in models_str.split(",") if m.strip()]
             all_rows.append({
                 "session_key": r[0],
-                "host": r[1],
+                "harness": r[1],
                 "first_event_ms": r[2],
                 "last_event_ms": r[3],
                 "event_count": r[4],
@@ -918,11 +918,11 @@ def sessions_search(args, home):
             )
         hour = h
 
-    # 3. hosts
-    hosts_arg = args.get("hosts")
-    hosts = []
-    if isinstance(hosts_arg, list):
-        hosts = [h for h in hosts_arg if isinstance(h, str)]
+    # 3. harnesses
+    harnesses_arg = args.get("harnesses")
+    harnesses = []
+    if isinstance(harnesses_arg, list):
+        harnesses = [h for h in harnesses_arg if isinstance(h, str)]
 
     min_tokens = args.get("min_tokens", 0)
     if not isinstance(min_tokens, int):
@@ -952,7 +952,7 @@ def sessions_search(args, home):
 
         salt = load_or_create_salt(home)
         rows, has_more, window_total = _sessions_in_window(
-            conn, start_ms, end_ms, hosts, hour, min_tokens,
+            conn, start_ms, end_ms, harnesses, hour, min_tokens,
             after_total, after_key, limit,
         )
 
@@ -980,12 +980,12 @@ def sessions_search(args, home):
             cm = _session_cost_minor(conn, r["session_key"])
             sessions_json.append({
                 "session_ref": session_ref(salt, r["session_key"]),
-                "host": r["host"],
+                "harness": r["harness"],
                 "first_event_at": _ms_to_rfc3339_beijing(r["first_event_ms"]),
                 "last_event_at": _ms_to_rfc3339_beijing(r["last_event_ms"]),
                 "event_count": r["event_count"],
                 "model_ids": r["model_ids"],
-                "identity_kind": "host_raw",
+                "identity_kind": "harness_raw",
                 "tokens": {
                     "uncached_input_tokens": r["uncached_input_tokens"],
                     "cache_read_tokens": r["cache_read_tokens"],
@@ -1013,7 +1013,7 @@ def sessions_search(args, home):
             "status": "complete",
             "requested_from": _ms_to_rfc3339_beijing(start_ms),
             "requested_to": _ms_to_rfc3339_beijing(end_ms),
-            "missing_hosts": [],
+            "missing_harnesses": [],
         }
         return _build_envelope(conn, home, max_ts or end_ms, coverage, warnings, data)
     finally:
@@ -1072,7 +1072,7 @@ def session_detail(args, home):
             return _tool_error_envelope(
                 "invalid_argument", "session_ref resolved but the session row is gone",
             )
-        host, _profile = row
+        harness, _profile = row
 
         facts, has_more = _session_facts_timeline(conn, skey, after_ts, after_id, limit)
         agg = _session_total_agg(conn, skey)
@@ -1080,7 +1080,7 @@ def session_detail(args, home):
         timeline = [{
             "event_at": _ms_to_rfc3339_beijing(f["event_ts_ms"]),
             "model_id": f["model_id"],
-            "identity_kind": "host_raw",
+            "identity_kind": "harness_raw",
             "observation_kind": f["observation_kind"],
             "peak": f["event_peak"],
             "fact_id": f["fact_id"],
@@ -1103,12 +1103,12 @@ def session_detail(args, home):
 
         data = {
             "session_ref": sref,
-            "host": host,
+            "harness": harness,
             "first_event_at": _ms_to_rfc3339_beijing(agg["first_event_ms"]),
             "last_event_at": _ms_to_rfc3339_beijing(agg["last_event_ms"]),
             "event_count": agg["event_count"],
             "model_ids": agg["model_ids"],
-            "identity_kind": "host_raw",
+            "identity_kind": "harness_raw",
             "tokens": {
                 "uncached_input_tokens": agg["uncached_input_tokens"],
                 "cache_read_tokens": agg["cache_read_tokens"],
@@ -1145,15 +1145,15 @@ def sessions_navigation(day, recent_n, home, timezone_name=None):
         if err is not None:
             return err
         try:
-            hosts = []
-            for host in ("dsh", "codex", "claude-code"):
-                today_tokens = _day_token_totals_by_host_one(conn, day, host)
-                recent = _recent_for_host(conn, home, day, recent_n, host)
-                sessions = _day_session_count(conn, day, host)
+            harnesses = []
+            for harness in ("dsh", "codex", "claude-code"):
+                today_tokens = _day_token_totals_by_harness_one(conn, day, harness)
+                recent = _recent_for_harness(conn, home, day, recent_n, harness)
+                sessions = _day_session_count(conn, day, harness)
                 value = today_tokens.get("value") if isinstance(today_tokens, dict) else None
                 status = "ready" if value is not None else "partial"
-                hosts.append({
-                    "host_kind": host,
+                harnesses.append({
+                    "harness_kind": harness,
                     "status": status,
                     "today_tokens": today_tokens,
                     "today_sessions": sessions,
@@ -1165,15 +1165,15 @@ def sessions_navigation(day, recent_n, home, timezone_name=None):
                 "day_key": day,
                 "timezone": _system_timezone_name(),
                 "generated_at": _now_iso_utc(),
-                "hosts": hosts,
+                "harnesses": harnesses,
             }
         finally:
             conn.close()
 
 
-def _day_token_totals_by_host_one(conn, day, host):
-    """单 host 今日 token 聚合（mirror Rust `day_token_totals_by_host`
-    的单 host 切片）。值缺失 → `{value: null, basis: null, coverage: null}`."""
+def _day_token_totals_by_harness_one(conn, day, harness):
+    """单 harness 今日 token 聚合（mirror Rust `day_token_totals_by_harness`
+    的单 harness 切片）。值缺失 → `{value: null, basis: null, coverage: null}`."""
     bounds = beijing_day_bounds_ms(day)
     if bounds is None:
         return {"value": None, "basis": None, "coverage": None}
@@ -1183,11 +1183,11 @@ def _day_token_totals_by_host_one(conn, day, host):
             "SELECT SUM(uncached_input_tokens + cache_read_tokens + "
             "          cache_write_tokens + output_tokens) "
             "FROM usage_facts "
-            "WHERE host = ?1 "
+            "WHERE harness = ?1 "
             "  AND observation_kind != 'legacy_aggregate' "
             "  AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL "
             "  AND event_ts_ms >= ?2 AND event_ts_ms < ?3",
-            (host, start_ms, end_ms),
+            (harness, start_ms, end_ms),
         ).fetchone()
     except sqlite3.DatabaseError:
         return {"value": None, "basis": None, "coverage": None}
@@ -1197,7 +1197,7 @@ def _day_token_totals_by_host_one(conn, day, host):
     return {"value": int(v), "basis": "sql-facts", "coverage": "complete"}
 
 
-def _day_session_count(conn, day, host):
+def _day_session_count(conn, day, harness):
     bounds = beijing_day_bounds_ms(day)
     if bounds is None:
         return 0
@@ -1206,23 +1206,23 @@ def _day_session_count(conn, day, host):
         row = conn.execute(
             "SELECT COUNT(DISTINCT session_key) "
             "FROM usage_facts "
-            "WHERE host = ?1 "
+            "WHERE harness = ?1 "
             "  AND observation_kind != 'legacy_aggregate' "
             "  AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL "
             "  AND event_ts_ms >= ?2 AND event_ts_ms < ?3",
-            (host, start_ms, end_ms),
+            (harness, start_ms, end_ms),
         ).fetchone()
     except sqlite3.DatabaseError:
         return 0
     return int(row[0]) if row is not None and row[0] is not None else 0
 
 
-def _recent_for_host(conn, home, day, recent_n, host):
-    """mirror Rust `recent_for_host`：单 host 在 day 窗口内跑
+def _recent_for_harness(conn, home, day, recent_n, harness):
+    """mirror Rust `recent_for_harness`：单 harness 在 day 窗口内跑
     `sessions_search` 拿 sessions，按旧 envelope 形状重命名。"""
     try:
         env = sessions_search(
-            {"date": day, "hosts": [host], "limit": recent_n}, home,
+            {"date": day, "harnesses": [harness], "limit": recent_n}, home,
         )
     except Exception:
         return []

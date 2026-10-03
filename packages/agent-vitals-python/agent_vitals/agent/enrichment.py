@@ -12,7 +12,7 @@
 3. 空白裁剪用共享 ``WS_CHARS``（Unicode White_Space 全集），不用内建
    ``str.strip()``——后者额外裁 ``\\x1c``–``\\x1f``，两侧语义有缝。
 4. 不追加省略号（provenance 已声明截断，文本里塞 ``…`` 是第二份真值）。
-5. ``host:`` 家族原生码一律归 ``unknown``，不猜分类。
+5. ``harness:`` 家族原生码一律归 ``unknown``，不猜分类。
 6. ``scrubbed`` 优先于 ``truncated``（provenance 报更保守的那个）。
 """
 
@@ -144,7 +144,7 @@ def classify_error_code(code):
         if "timeout" in lowered or "timedout" in lowered:
             return "timeout"
         return "tool_policy"
-    if family == "host":
+    if family == "harness":
         return "unknown"  # 原生码透传，不猜（规则 5）
     return None
 

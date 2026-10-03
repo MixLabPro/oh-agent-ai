@@ -31,14 +31,14 @@
 
 | # | 来源 | 归属 | 量级 | 证据强度 |
 |---|---|---|---|---|
-| 1 | **fsevents 线程 churn**：不存在的宿主目录每 1.2s 被重试挂载，每次重试创建又销毁 FSEventStream 线程 | watcher hardening 引入（`retry_pending`） | 持续本底 + 锁自旋 | 高（线程 ID 生灭实录 + 卡在 `FSEventStreamStart` 的栈 + mutex 自旋） |
+| 1 | **fsevents 线程 churn**：不存在的执行环境目录每 1.2s 被重试挂载，每次重试创建又销毁 FSEventStream 线程 | watcher hardening 引入（`retry_pending`） | 持续本底 + 锁自旋 | 高（线程 ID 生灭实录 + 卡在 `FSEventStreamStart` 的栈 + mutex 自旋） |
 | 2 | **trust 传感 30s 突发**：lsof 采样 + 观察落库 + 相关器 | 既有面，opt-in，本机开启 | 峰值 170–263% | 高（峰值与事件时间戳逐个对齐） |
 | 3 | **read_overview 2–21s**：托盘节流刷新路径的重聚合慢在并发争用，不在 SQL | 既有的重查询路径（轻路径把它限到 60s 一次） | 每次 1 核 × 2–21s，每 60s 一次 | 中（组件全快、组合慢；内因未定位） |
 | 4 | **持续写入源本身**：多 agent 会话（本调查会话 + codex worktree 会话）高频追加被监听日志，watcher 每 30s（冷却下限）合法唤醒 | 环境负载 | 每 30s 一次轻 tick（~1–3s） | 高（日志时序） |
 
 截图的 613% 是**多峰瞬时叠加**；稳态实测峰值 170–263%，其余时间 0–30%。
 
-**先说清楚什么没有被打破**：tick 轻路径（LIGHT-PATH spec 四阶段，`a8a26d3`）按设计工作——日志可见轻 tick 只同步被唤醒的宿主、sync-facts 624ms、防饥饿与冷却全部生效。本次问题在轻路径的**周边**，不在其上。
+**先说清楚什么没有被打破**：tick 轻路径（LIGHT-PATH spec 四阶段，`a8a26d3`）按设计工作——日志可见轻 tick 只同步被唤醒的执行环境、sync-facts 624ms、防饥饿与冷却全部生效。本次问题在轻路径的**周边**，不在其上。
 
 ---
 
@@ -50,7 +50,7 @@
 
 - `66db5c3` sync_tick 步骤精细计时
 - `e0b9f07` read_overview 每 tick 只算一次
-- `a8a26d3`（= 0510770 + 04ceca1）tick 轻路径（宿主键唤醒槽 + 定向同步 + revision 备忘 + refresh 预算）
+- `a8a26d3`（= 0510770 + 04ceca1）tick 轻路径（执行环境键唤醒槽 + 定向同步 + revision 备忘 + refresh 预算）
 
 ### 1.2 关键时间线（app.log，UTC+8=本地）
 
@@ -74,7 +74,7 @@ CPU 时间核算：进程 8 分钟墙钟累计 10:02.73 CPU 分钟 ≈ **平均 
 
 1. **日志重建**：`read_overview 完成，用时 X` 逐条提取，建立耗时分布（正常 2–3.5s，峰值 21.0/19.9/31.9s）。
 2. **组件隔离实测**（真机 245MB 权威库）：
-   - claude_days SQL（含 GROUP BY）：**45ms**（索引 `usage_facts_host_time` 命中，186 分组）
+   - claude_days SQL（含 GROUP BY）：**45ms**（索引 `usage_facts_harness_time` 命中，186 分组）
    - DB 打开序列复刻（busy_timeout + journal_mode + user_version + repair 查询）：**12–22ms**
    - 每次 open 的 DDL churn（DROP/CREATE VIEW 写事务）：**5–20ms**
    - `load_pricing`：内嵌常量解析，微秒级
@@ -104,7 +104,7 @@ Err(RecvTimeoutError::Timeout) => {
 }
 ```
 
-`retry_pending` 对 4 个 pending 根（不存在的宿主目录：hermes/cursor/gemini-cli/opencode 的 skills 根）逐个 `try_attach`。macOS 后端上，notify 的 `watch()` 对不存在路径的每次尝试都会**启动 FSEventStream（含 runloop 线程）**，再以 PathNotFound 失败销毁。结果：
+`retry_pending` 对 4 个 pending 根（不存在的执行环境目录：hermes/cursor/gemini-cli/opencode 的 skills 根）逐个 `try_attach`。macOS 后端上，notify 的 `watch()` 对不存在路径的每次尝试都会**启动 FSEventStream（含 runloop 线程）**，再以 PathNotFound 失败销毁。结果：
 
 - 空闲时每 1.2s 制造 4 次线程创建/销毁循环（伴随内核锁争用）；
 - 持续写入期间超时分支虽少触发，但 supervisor/派发路径的线程生灭仍在采样窗口可见；
@@ -148,7 +148,7 @@ trust 传感（opt-in，本机开启）每 30s：spawn lsof 子进程采样 → 
 |---|---|---|
 | claude_days + peaked_days SQL | 45ms | — |
 | DB 打开序列（含 DDL churn） | 12–22ms | — |
-| load_pricing / 折叠 / hosts.json | 微秒–毫秒 | — |
+| load_pricing / 折叠 / harnesses.json | 微秒–毫秒 | — |
 | **read_overview 整体** | — | **基线 2s，峰值 21.0/19.9/31.9s** |
 
 单组件全快、整体慢 40–400 倍 → 慢在**组合场景**：与同步子进程的写入事务、其他线程的 DB 打开（每次 open 都带 DDL 写事务）、WAL checkpoint 的争用。21s 峰值与 `busy_timeout(5s)` × 多语句等待的量级吻合（未证实）。
@@ -168,9 +168,9 @@ trust 传感（opt-in，本机开启）每 30s：spawn lsof 子进程采样 → 
 
 | 假设 | 否证 |
 |---|---|
-| 轻路径路由失效，仍在跑全量 tick | 日志：轻 tick 只含被唤醒宿主；重 tick 与轻 tick 步骤集清晰分离 |
-| SQL 聚合慢（表大无索引） | 245MB 库 / usage_facts 91,315 行，EXPLAIN 命中 `usage_facts_host_time`，实测 45ms |
-| 单槽唤醒积压（HARDENING 前 P0） | 单槽+宿主键合并在位；日志无陈旧唤醒排队形态 |
+| 轻路径路由失效，仍在跑全量 tick | 日志：轻 tick 只含被唤醒执行环境；重 tick 与轻 tick 步骤集清晰分离 |
+| SQL 聚合慢（表大无索引） | 245MB 库 / usage_facts 91,315 行，EXPLAIN 命中 `usage_facts_harness_time`，实测 45ms |
+| 单槽唤醒积压（HARDENING 前 P0） | 单槽+执行环境键合并在位；日志无陈旧唤醒排队形态 |
 | notify fsevents 线程持续烧 CPU | 栈顶在 `mach_msg2_trap`（runloop 阻塞等待）——线程存在≠在烧；真正的成本是它们的**生灭**（发现 #1） |
 | load_pricing 网络阻塞 | 实现为内嵌 `include_str!` 常量解析，零网络 |
 | 冷启动 34.9s 是回归 | 一次性全量回填，历史行为，完成后不再出现 |

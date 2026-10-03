@@ -1,7 +1,7 @@
 //! Cost breakdown over the SQL authority facts.
 //!
 //! The SQL layer selects the price snapshot that was captured before each
-//! fact's event time.  The domain cost engine prices one host/model/snapshot
+//! fact's event time.  The domain cost engine prices one harness/model/snapshot
 //! bucket, so rounding happens once at the finest exposed bucket and parents
 //! are formed by summing integer minor units.  Subscription facts and missing
 //! price evidence remain visible as tokens with a null amount.
@@ -17,7 +17,7 @@ use crate::envelope::{build_envelope, AuthorityHandle, ToolError, ToolSpec};
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "cost_breakdown",
-        description: "Break down metered estimates and subscription-covered usage by host, provider, model, and historical price version. Prices are selected at fact time; currencies and billing bases are never combined, and unresolved tokens remain visible.",
+        description: "Break down metered estimates and subscription-covered usage by harness, provider, model, and historical price version. Prices are selected at fact time; currencies and billing bases are never combined, and unresolved tokens remain visible.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -26,10 +26,10 @@ pub fn spec() -> ToolSpec {
                 "compare_to_previous": { "type": "boolean", "default": false },
                 "group_by": {
                     "type": "array",
-                    "items": { "type": "string", "enum": ["host", "provider", "model", "basis"] },
+                    "items": { "type": "string", "enum": ["harness", "provider", "model", "basis"] },
                     "description": "Requested display dimensions. Fact-time price-version rows remain separate for auditability."
                 },
-                "hosts": { "type": "array", "items": { "type": "string" }, "description": "Optional host filter." }
+                "harnesses": { "type": "array", "items": { "type": "string" }, "description": "Optional harness filter." }
             },
             "required": ["from", "to"],
             "additionalProperties": false
@@ -43,7 +43,7 @@ pub fn spec() -> ToolSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct BucketKey {
-    host: String,
+    harness: String,
     provider_id: Option<String>,
     provider_raw: Option<String>,
     model: String,
@@ -122,15 +122,15 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         Some(value) => value.as_bool().ok_or_else(|| ToolError::new("invalid_argument", "`compare_to_previous` must be boolean"))?,
     };
     let group_by = parse_group_by(args)?;
-    let hosts = parse_hosts(args)?;
+    let harnesses = parse_harnesses(args)?;
     let handle = AuthorityHandle::open(data_home)?;
-    let current = collect_window(handle.conn(), start_ms, end_ms, &hosts, &group_by)?;
+    let current = collect_window(handle.conn(), start_ms, end_ms, &harnesses, &group_by)?;
     let previous = if compare {
         let width = end_ms.checked_sub(start_ms)
             .ok_or_else(|| ToolError::new("invalid_argument", "date range is too wide"))?;
         let previous_start = start_ms.checked_sub(width)
             .ok_or_else(|| ToolError::new("invalid_argument", "previous comparison range is out of bounds"))?;
-        Some(collect_window(handle.conn(), previous_start, start_ms, &hosts, &group_by)?)
+        Some(collect_window(handle.conn(), previous_start, start_ms, &harnesses, &group_by)?)
     } else {
         None
     };
@@ -138,7 +138,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         "from": from,
         "to": to,
         "group_by": group_by,
-        "hosts": hosts,
+        "harnesses": harnesses,
         "total_tokens": current.total_tokens,
         "priced_tokens": current.priced_tokens,
         "unresolved_tokens": current.unresolved_tokens,
@@ -165,7 +165,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         "requested_to": crate::envelope::ms_to_rfc3339_beijing(end_ms),
         "covered_from": crate::envelope::ms_to_rfc3339_beijing(start_ms),
         "covered_to": crate::envelope::ms_to_rfc3339_beijing(end_ms),
-        "missing_hosts": [],
+        "missing_harnesses": [],
         "priced_tokens": current.priced_tokens,
         "unresolved_tokens": current.unresolved_tokens,
     });
@@ -177,13 +177,13 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
 
 fn parse_group_by(args: &Value) -> Result<Vec<String>, ToolError> {
     let Some(value) = args.get("group_by") else {
-        return Ok(vec!["host".into(), "provider".into(), "model".into(), "basis".into()]);
+        return Ok(vec!["harness".into(), "provider".into(), "model".into(), "basis".into()]);
     };
     let values = value.as_array().ok_or_else(|| ToolError::new("invalid_argument", "`group_by` must be an array"))?;
     let mut out = Vec::new();
     for value in values {
         let item = value.as_str().ok_or_else(|| ToolError::new("invalid_argument", "`group_by` items must be strings"))?;
-        if !matches!(item, "host" | "provider" | "model" | "basis") {
+        if !matches!(item, "harness" | "provider" | "model" | "basis") {
             return Err(ToolError::new("invalid_argument", format!("unsupported group_by dimension `{item}`")));
         }
         if !out.iter().any(|seen| seen == item) {
@@ -196,14 +196,14 @@ fn parse_group_by(args: &Value) -> Result<Vec<String>, ToolError> {
     Ok(out)
 }
 
-fn parse_hosts(args: &Value) -> Result<Vec<String>, ToolError> {
-    let Some(value) = args.get("hosts") else { return Ok(Vec::new()); };
-    let values = value.as_array().ok_or_else(|| ToolError::new("invalid_argument", "`hosts` must be an array"))?;
+fn parse_harnesses(args: &Value) -> Result<Vec<String>, ToolError> {
+    let Some(value) = args.get("harnesses") else { return Ok(Vec::new()); };
+    let values = value.as_array().ok_or_else(|| ToolError::new("invalid_argument", "`harnesses` must be an array"))?;
     let mut out = Vec::new();
     for value in values {
-        let host = value.as_str().ok_or_else(|| ToolError::new("invalid_argument", "`hosts` items must be strings"))?;
-        if host.is_empty() { return Err(ToolError::new("invalid_argument", "`hosts` items must not be empty")); }
-        if !out.iter().any(|seen| seen == host) { out.push(host.to_owned()); }
+        let harness = value.as_str().ok_or_else(|| ToolError::new("invalid_argument", "`harnesses` items must be strings"))?;
+        if harness.is_empty() { return Err(ToolError::new("invalid_argument", "`harnesses` items must not be empty")); }
+        if !out.iter().any(|seen| seen == harness) { out.push(harness.to_owned()); }
     }
     Ok(out)
 }
@@ -212,7 +212,7 @@ fn collect_window(
     conn: &rusqlite::Connection,
     start_ms: i64,
     end_ms: i64,
-    hosts: &[String],
+    harnesses: &[String],
     group_by: &[String],
 ) -> Result<WindowResult, ToolError> {
     let mut where_sql = "f.deleted_at_ms IS NULL AND f.observation_kind != 'legacy_aggregate' AND f.event_ts_ms IS NOT NULL AND f.event_ts_ms >= ?1 AND f.event_ts_ms < ?2".to_owned();
@@ -220,10 +220,10 @@ fn collect_window(
         rusqlite::types::Value::Integer(start_ms),
         rusqlite::types::Value::Integer(end_ms),
     ];
-    if !hosts.is_empty() {
-        let placeholders = (0..hosts.len()).map(|idx| format!("?{}", idx + 3)).collect::<Vec<_>>().join(", ");
-        where_sql.push_str(&format!(" AND f.host IN ({placeholders})"));
-        params.extend(hosts.iter().cloned().map(rusqlite::types::Value::Text));
+    if !harnesses.is_empty() {
+        let placeholders = (0..harnesses.len()).map(|idx| format!("?{}", idx + 3)).collect::<Vec<_>>().join(", ");
+        where_sql.push_str(&format!(" AND f.harness IN ({placeholders})"));
+        params.extend(harnesses.iter().cloned().map(rusqlite::types::Value::Text));
     }
     price_fact_selection(conn, &where_sql, &params, group_by)
 }
@@ -261,7 +261,7 @@ pub fn price_fact_selection(
         "COALESCE(f.billing_mode, 'unknown')"
     };
     let sql = format!(
-        "SELECT f.host, f.provider_id, f.provider_raw, COALESCE(f.model_id, '<unknown>'),
+        "SELECT f.harness, f.provider_id, f.provider_raw, COALESCE(f.model_id, '<unknown>'),
                 {billing_mode_expr}, COALESCE(f.pricing_basis, 'unavailable'),
                 COALESCE(f.evidence_basis, 'missing'), f.billing_template_id, f.event_peak,
                 ps.pricing_version, ps.source_kind, ps.captured_at_ms, ps.payload_json,
@@ -274,11 +274,11 @@ pub fn price_fact_selection(
              WHERE captured_at_ms <= f.event_ts_ms
              ORDER BY captured_at_ms DESC, pricing_version DESC LIMIT 1)
          WHERE {where_sql}
-         GROUP BY f.host, f.provider_id, f.provider_raw, f.model_id, {billing_mode_expr},
+         GROUP BY f.harness, f.provider_id, f.provider_raw, f.model_id, {billing_mode_expr},
                   f.billing_template_id, f.pricing_basis, f.evidence_basis, f.event_peak,
                   ps.pricing_version, ps.source_kind, ps.captured_at_ms, ps.payload_json
          HAVING SUM(f.uncached_input_tokens + f.cache_read_tokens + f.cache_write_tokens + f.output_tokens) > 0
-         ORDER BY f.host, f.provider_id, f.provider_raw, f.model_id, ps.pricing_version, f.event_peak",
+         ORDER BY f.harness, f.provider_id, f.provider_raw, f.model_id, ps.pricing_version, f.event_peak",
         billing_mode_expr = billing_mode_expr,
         where_sql = where_sql,
     );
@@ -297,10 +297,10 @@ pub fn price_fact_selection(
 
     let mut buckets: BTreeMap<BucketKey, Tokens> = BTreeMap::new();
     for row in rows {
-        let (host, provider_id, provider_raw, model, billing_mode, pricing_basis, evidence_basis,
+        let (harness, provider_id, provider_raw, model, billing_mode, pricing_basis, evidence_basis,
             billing_template_id, peak, pricing_version, pricing_source, captured_at_ms, _payload,
             uncached, cache_read, cache_write, output, max_event_ms) = row.map_err(|e| ToolError::new("internal_error", format!("cost breakdown row failed: {e}")))?;
-        let key = BucketKey { host, provider_id, provider_raw, model, billing_mode, pricing_basis,
+        let key = BucketKey { harness, provider_id, provider_raw, model, billing_mode, pricing_basis,
             evidence_basis, billing_template_id, pricing_version, pricing_source, captured_at_ms };
         buckets.entry(key).or_default().add(peak, (uncached, cache_read, cache_write, output, max_event_ms));
     }
@@ -330,11 +330,11 @@ pub fn price_fact_selection(
         } else {
             let payload = query_payload_for_bucket(conn, &key)?;
             if let Some(payload) = payload {
-                let usage = usage_json(&key.host, &key.model, &tokens);
+                let usage = usage_json(&key.harness, &key.model, &tokens);
                 // 当时快照没有这个模型的卡、每日同步后来补上了 → 用补过缺卡的快照计价
                 // （只补缺卡，已有价不动）。
                 amount = agent_vitals_data::authority_query::price_with_sync_backfill(
-                    &key.host, &usage, Some(&payload), sync_overlay.as_ref(),
+                    &key.harness, &usage, Some(&payload), sync_overlay.as_ref(),
                 ).0;
                 if amount.is_none() {
                     unresolved_reason = Some("no compatible price card for this provider/model bucket");
@@ -358,7 +358,7 @@ pub fn price_fact_selection(
         }
         let mut row = json!({
             "key": {
-                "host": key.host,
+                "harness": key.harness,
                 "provider": key.provider_id,
                 "provider_raw": key.provider_raw,
                 "model": key.model,
@@ -413,8 +413,8 @@ fn query_payload_for_bucket(
     Ok(payload)
 }
 
-fn usage_json(host: &str, model: &str, tokens: &Tokens) -> Value {
-    if host == "claude-code" {
+fn usage_json(harness: &str, model: &str, tokens: &Tokens) -> Value {
+    if harness == "claude-code" {
         json!({ "by_model": { model: {
             "input_tokens": tokens.uncached_input,
             "cache_read_input_tokens": tokens.cache_read,
@@ -425,7 +425,7 @@ fn usage_json(host: &str, model: &str, tokens: &Tokens) -> Value {
             "peak_cache_creation_input_tokens": tokens.peak_cache_write,
             "peak_output_tokens": tokens.peak_output,
         }}})
-    } else if host == "codex" {
+    } else if harness == "codex" {
         json!({ "by_model": { model: {
             "uncached_input_tokens": tokens.uncached_input,
             "cached_input_tokens": tokens.cache_read,
@@ -454,8 +454,8 @@ mod tests {
     #[test]
     fn schema_is_closed_and_group_dimensions_are_bounded() {
         assert_eq!(spec().input_schema["additionalProperties"], json!(false));
-        let args = json!({"group_by": ["host", "model", "host"]});
-        assert_eq!(parse_group_by(&args).unwrap(), vec!["host", "model"]);
+        let args = json!({"group_by": ["harness", "model", "harness"]});
+        assert_eq!(parse_group_by(&args).unwrap(), vec!["harness", "model"]);
         assert!(parse_group_by(&json!({"group_by": []})).is_err());
         assert!(parse_group_by(&json!({"group_by": ["cost"]})).is_err());
     }

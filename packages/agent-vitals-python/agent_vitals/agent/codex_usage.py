@@ -1,6 +1,6 @@
 """Codex 成本折叠的 Python 平行实现。
 
-单一真相源是 `crates/agent-vitals-hosts/src/hosts/codex/sessions/usage.rs`——那里有一份完整的中文
+单一真相源是 `crates/agent-vitals-harnesses/src/harnesses/codex/sessions/usage.rs`——那里有一份完整的中文
 注释讲**正确性铁律**（为什么读 `last_token_usage` 不读累计、为什么 `uncached` 是派生
 字段、为什么连续去重必须做、为什么 model 是游标）。这一份是它的逐字节镜像，由
 `tests/test_cli_matrix.py::both("codex-cost", ...)` 差分看守：Py↔Rust 的 `--json` 输出

@@ -85,16 +85,16 @@ turn/step/seq/time/session 全部蒸发。
 - 改：`dsh-client/agent_vitals_wasm.d.ts` 补声明
 - ⚠️ wasm↔CLI 漂移**没有自动测试守**，必须手工拿同一份 fixture 两边对一遍
 
-#### T5 · 宿主 `skillAudit` 投影
-- 改：`dsh-client/src/host/index.ts`
+#### T5 · 执行环境 `skillAudit` 投影
+- 改：`dsh-client/src/harness/index.ts`
 - ⚠️ **`stateVersion` 必填**（非负整数）。漏了会让**整个插件树加载失败**，不是这一个投影失败——踩过
 - ⚠️ `apply()` 必须展开前态（`{...state, …}`）。返回裸字面量会静默丢掉 `seed`/`cwd`/`sessionId`——踩过
 - ⚠️ 分叉过滤：skill 触发是**流量**，不继承上游。走 `withSeed` + `seeded`，和
   `tokenByModel` 同一套
-- 测试：`dsh-client/scripts/verify-host.mjs`
+- 测试：`dsh-client/scripts/verify-harness.mjs`
 
 #### T6 · 子 Agent 聚合与覆盖率（FR-SK-01）
-能力都在（宿主 `readZstdFrames` 已能读兄弟会话，`subagent.rs` 在 core），缺组装。
+能力都在（执行环境 `readZstdFrames` 已能读兄弟会话，`subagent.rs` 在 core），缺组装。
 
 - 输出 `sessionsDiscovered` / `sessionsCovered` / 缺失清单
 - ⚠️ AC-SK-05：**同名 skill 跨 Agent 不能错误去重**。去重键是 `(sessionId, skillName)`，
@@ -168,7 +168,7 @@ turn/step/seq/time/session 全部蒸发。
 | # | 问题 | 答案 |
 |---|---|---|
 | 2 | `tool/call` 与结果能否总用 `callId` 关联 | ✅ 能。`subagent.rs` 已在生产中这么做 |
-| 4 | 子 Agent 的 sessionId / 父 sessionId / 启动 Turn 是否完整 | ✅ 可读。宿主已能读兄弟会话 |
+| 4 | 子 Agent 的 sessionId / 父 sessionId / 启动 Turn 是否完整 | ✅ 可读。执行环境已能读兄弟会话 |
 | 5 | 是否有统一的测试/验收结果事件 | ❌ 没有 |
 | 8 | Skill 版本与内容哈希的唯一来源 | ❌ 会话日志里没有 |
 
@@ -190,7 +190,7 @@ turn/step/seq/time/session 全部蒸发。
 ## 5. 全程纪律
 
 1. **四方 lockstep**：core（Rust）↔ `scripts/agent_vitals/`（Python）↔ wasm（重编译并拷贝）
-   ↔ 宿主 TS。差分 golden 守 Python↔Rust；**wasm↔CLI 漂移没有自动测试，必须手工验**
+   ↔ 执行环境 TS。差分 golden 守 Python↔Rust；**wasm↔CLI 漂移没有自动测试，必须手工验**
 2. **golden `--update` 前逐字确认**。反射性 `--update` 会把 golden 变成「当前行为的记录」，
    测试就不再有意义
 3. **缺数据一律 `null` + `missingFields`，绝不填 0**。PRD §8 和仓库既有纪律一致：
@@ -202,7 +202,7 @@ turn/step/seq/time/session 全部蒸发。
 ## 6. 完成状态（2026-08-24）与遗留项
 
 **T1–T6、T8–T12 已实现并验证**：Python 426 / Rust 137+90 全绿，`cargo clippy`、
-golden 双实现差分、TS 类型门、`verify`/`verify:host`/`verify:render`/`verify:export`/
+golden 双实现差分、TS 类型门、`verify`/`verify:harness`/`verify:render`/`verify:export`/
 `verify:timeline` 五个脚本、CLI `skill-audit` 子命令实测均通过。
 
 **T7 自然作废**：那 6 个 bug 是 v3 原型「用 DOM 属性当状态存储、选择器再回头查」
@@ -212,7 +212,7 @@ golden 双实现差分、TS 类型门、`verify`/`verify:host`/`verify:render`/`
 1. `SkillSection.tsx` 多一个右括号 → 整个文件语法解析失败，`npm run check` 直接红
 2. core `skill_invocations_enriched` 的 `agent_id` 只在配对成功时写 key，
    explicit 调用那条 key 整个不存在 → JS 侧读出 `undefined` 而非 `null`，过不了
-   宿主 zod 的 `.nullable()`。Python 侧一直是对的（两分支都显式 `None`），
+   执行环境 zod 的 `.nullable()`。Python 侧一直是对的（两分支都显式 `None`），
    Rust 单测测不出是因为 `serde_json::Value` 索引缺失 key 也返回 `Value::Null`——
    已把断言改成 `contains_key("agent_id")`
 3. `verify-export.mjs` 硬编码「导出十个键」，T10 加 `skill` 键后没跟着改

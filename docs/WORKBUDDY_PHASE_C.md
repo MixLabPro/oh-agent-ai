@@ -24,31 +24,31 @@ WorkBuddy 的积分、名义价值、实际支付与用户自配 API 使用是�
 1. 在名义成本视图并列展示 WorkBuddy credit 兑换的名义值及 basis/date。
 2. 不把它并入可求和的实付总额、`metered_spend` 或预算分子。
 3. 将积分轨覆盖范围和自配 API 未计价 token 同时呈现，避免把不可观测误写为免费。
-4. 维持与其它宿主“并列可比较、不跨量尺合计”的展示。
+4. 维持与其它执行环境“并列可比较、不跨量尺合计”的展示。
 
 验收：名义金额可追溯到 basis；实付/预算 DTO 没有从 credit 推导的金额；缺支付证据时没有倍数结论。
 
 ## C2：真实现金账单（现有手工通路）
 
-只有用户提供收据、账期或明确付款声明时，才能录入 `host_bills`。示例：
+只有用户提供收据、账期或明确付款声明时，才能录入 `harness_bills`。示例：
 
 ```bash
 # 实际购买的 credit
-agent-vitals data-host-bill set --host workbuddy --provider workbuddy \
-  --month 2026-08 --basis host_billed --amount-minor <分> --currency CNY \
+agent-vitals data-harness-bill set --harness workbuddy --provider workbuddy \
+  --month 2026-08 --basis harness_billed --amount-minor <分> --currency CNY \
   --evidence-ref "receipt:<订单号>"
 
 # WorkBuddy/CodeBuddy 订阅月费
-agent-vitals data-host-bill set --host workbuddy --provider workbuddy \
+agent-vitals data-harness-bill set --harness workbuddy --provider workbuddy \
   --month 2026-08 --basis fixed_subscription --amount-minor <分> --currency CNY \
   --evidence-ref "subscription:<账期>"
 ```
 
-录入前必须确认 WorkBuddy 已从金额面排除名单中按设计移除，并同步调整约束测试；否则系统应拒绝“排除宿主同时贡献数据”的矛盾状态。
+录入前必须确认 WorkBuddy 已从金额面排除名单中按设计移除，并同步调整约束测试；否则系统应拒绝“排除执行环境同时贡献数据”的矛盾状态。
 
 ## 守则
 
-- 系统永不从 `credits × 0.05` 自动创建 host bill。
+- 系统永不从 `credits × 0.05` 自动创建 harness bill。
 - 合同、账单、付款与积分兑换价分别存储，不允许同一金额多处维护。
 - 不修改 `assets/pricing.json` 存放个人账单或套餐。
 - 输入不完整时保留未知/未计价，不归零。

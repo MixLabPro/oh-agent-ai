@@ -3,7 +3,7 @@ name = "agent-vitals-runtime"
 version = "1.4.0"
 edition = "2021"
 rust-version = "1.74"
-description = "Non-host local machinery for Agent Vitals: HomeResolver, state store, ledger, session/skill services"
+description = "Non-harness local machinery for Agent Vitals: HomeResolver, state store, ledger, session/skill services"
 repository = "https://github.com/MixLabPro/agent-vitals"
 license = "MIT"
 
@@ -13,11 +13,11 @@ path = "src/lib.rs"
 
 # v0.8 Phase D6/D7：`agent-vitals-runtime` 装**非宿主**的本机机器——唯一
 # `HomeResolver`、state/ledger 存储、Skill/Session service 编排。依赖
-# `agent-vitals-hosts`（`features = ["sources"]`）+ `agent-vitals-domain`（正向）。
+# `agent-vitals-harnesses`（`features = ["sources"]`）+ `agent-vitals-domain`（正向）。
 # v0.9 Stage 0.4 起也依赖 `agent-vitals-data`——spec §3.1 依赖表把
-# `agent-vitals-data` 的允许依赖限定在 domain，够不到 hosts/runtime，
+# `agent-vitals-data` 的允许依赖限定在 domain，够不到 harnesses/runtime，
 # `SummaryRepository` trait（`agent-vitals-data::repository`）的具体实现
-# 因此住在这里（唯一同时看得到 hosts 与 data 的 crate），不是 data 自己实现
+# 因此住在这里（唯一同时看得到 harnesses 与 data 的 crate），不是 data 自己实现
 # （docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md §8.1）。
 # `notify` / `libc`：W3 起只在 `agent-vitals-ingest` 里（watcher / self_monitor 的家），
 # 本门面的 `watcher` feature 只做转发。
@@ -44,7 +44,7 @@ agent-vitals-data = { path = "../agent-vitals-data" }
 # data 质量表的参数化写入（sql_sync 的 missing_sid issue）——同版本 0.31
 rusqlite = { version = "0.31", features = ["bundled"] }
 agent-vitals-domain = { path = "../agent-vitals-domain" }
-agent-vitals-hosts = { path = "../agent-vitals-hosts", features = ["sources"] }
+agent-vitals-harnesses = { path = "../agent-vitals-harnesses", features = ["sources"] }
 agent-vitals-provider = { path = "../agent-vitals-provider" }
 jiff = "0.2"
 serde = "1"

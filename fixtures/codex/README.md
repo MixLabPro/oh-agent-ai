@@ -16,8 +16,8 @@ loudly.
 ## Why these exist
 
 `docs/RUNTIME_EVIDENCE_CONTRACT.md` §17 P4 is the "sound" proof: Codex is the
-only host that emits **two incompatible formats without declaring which**
-(`history_mode` ∈ {`legacy`, `paginated`}). If one new host + two shapes forces
+only harness that emits **two incompatible formats without declaring which**
+(`history_mode` ∈ {`legacy`, `paginated`}). If one new harness + two shapes forces
 a structural change in the shared type layer (`CanonicalSession`/`Coverage`/
 `RuleSpec`), the model is unsound. The two files deliberately carry **different**
 coverage so the differential can assert "two rows, not one" (§17.1):
@@ -99,7 +99,7 @@ self-verifying posture as the top-level `assert_coverage`.
 - `scripts/agent_vitals/adapters/codex_session.py` ↔ `src/codex_session.rs` —
   the JSONL reader (locate → shape → extract).
 - `scripts/agent_vitals/agent/codex_evidence.py` ↔
-  `crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs` — the coverage fold
+  `crates/agent-vitals-adapters/src/harnesses/codex/sessions/evidence.rs` — the coverage fold
   (derive → coverage).
 - `scripts/agent_vitals/agent/codex_usage_fact.py` ↔
   `src/agent/codex_usage_fact.rs` — the Stage-2 UsageFact emitter (§5/§6).

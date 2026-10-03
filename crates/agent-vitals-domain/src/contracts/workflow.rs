@@ -1,4 +1,4 @@
-//! Host-neutral workflow event contract.
+//! Harness-neutral workflow event contract.
 //!
 //! Adapters may observe very different wire events, but the product-facing
 //! workflow queries need one deliberately small shape.  This contract carries
@@ -20,7 +20,7 @@ pub struct WorkflowEvent {
     /// The normalised session ledger key.  `None` is allowed for an event that
     /// is observable but cannot be safely attached to a session.
     pub session_key: Option<String>,
-    /// UTC Unix milliseconds from the host-native event timestamp.
+    /// UTC Unix milliseconds from the harness-native event timestamp.
     pub event_ts_ms: i64,
     /// One of the schema's closed event types.
     pub event_type: String,
@@ -35,8 +35,8 @@ pub struct WorkflowEvent {
     pub error_fingerprint: Option<String>,
     /// Stable redacted shape used to group retries without storing arguments.
     pub invocation_fingerprint: Option<String>,
-    // ── V16 富化字段（2026-09-19 政策；NULL = 宿主没有该证据，绝不编造） ──
-    /// `家族:细节` 语法的归一化错误码（http/jsonrpc/tool/host）。宿主只给布尔
+    // ── V16 富化字段（2026-09-19 政策；NULL = 执行环境没有该证据，绝不编造） ──
+    /// `家族:细节` 语法的归一化错误码（http/jsonrpc/tool/harness）。执行环境只给布尔
     /// （如 claude 的 `is_error`）时保持 `None`——不从文本猜码。
     pub error_code: Option<String>,
     /// `domain::enrichment::ErrorClass` 十值闭集；仅当 error_code 可分类时填。
@@ -48,7 +48,7 @@ pub struct WorkflowEvent {
     /// 序列化请求/结果字节数（§「结果过大」检测原料）。
     pub request_bytes: Option<i64>,
     pub result_bytes: Option<i64>,
-    /// 宿主原生事件 id（claude: record uuid / tool_use call id）——锚点重定位键。
+    /// 执行环境原生事件 id（claude: record uuid / tool_use call id）——锚点重定位键。
     pub native_event_id: Option<String>,
     /// 源文件行号（1 基）与行首字节偏移——自校验加速 hints，不存路径。
     pub source_line: Option<i64>,
@@ -56,7 +56,7 @@ pub struct WorkflowEvent {
 }
 
 impl WorkflowEvent {
-    /// Validate the cross-host contract.  Wire-specific missing-field policy
+    /// Validate the cross-harness contract.  Wire-specific missing-field policy
     /// remains in the adapter; the data layer rejects only malformed output.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.event_id.is_empty() || self.event_id.len() > 256 {
@@ -172,7 +172,7 @@ pub struct SessionExcerpt {
     pub excerpt: String,
     /// 闭集：`verbatim | truncated | scrubbed`。
     pub provenance: String,
-    /// 宿主原生事件 id（锚点重定位键）。
+    /// 执行环境原生事件 id（锚点重定位键）。
     pub native_event_id: String,
 }
 

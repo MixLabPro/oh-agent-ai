@@ -3,7 +3,7 @@ name = "vitals-core"
 version = "0.5.0"
 edition = "2021"
 rust-version = "1.74"
-description = "Host-agnostic behavioral audit runtime: Canonical Event -> Trajectory -> Detector -> Evidence-backed Finding -> Deterministic Replay"
+description = "Harness-agnostic behavioral audit runtime: Canonical Event -> Trajectory -> Detector -> Evidence-backed Finding -> Deterministic Replay"
 repository = "https://github.com/MixLabPro/agent-vitals"
 license = "MIT"
 

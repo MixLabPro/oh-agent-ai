@@ -14,7 +14,7 @@
 
 倾向现在就迁 Rust，但**带 timebox 与停止规则**（§1.5）。语言选择不得凌驾于产品验证之上。
 
-**2026-08 修订（双实现永久并行，不删 Python）。** Rust 二进制服务 npm / brew / cargo / Release 等「装一个二进制」的渠道；Python 保留，服务 ClawHub 的 in-host skill 形态，也便于不同语言的开发者阅读与贡献。两者靠差分护栏（同一份 golden、逐字节一致）同步维护——§6.8 因此从「临时并行、终将合并」改为「永久并行」。
+**2026-08 修订（双实现永久并行，不删 Python）。** Rust 二进制服务 npm / brew / cargo / Release 等「装一个二进制」的渠道；Python 保留，服务 ClawHub 的 in-harness skill 形态，也便于不同语言的开发者阅读与贡献。两者靠差分护栏（同一份 golden、逐字节一致）同步维护——§6.8 因此从「临时并行、终将合并」改为「永久并行」。
 
 ## 1.2 为什么是现在而不是 Phase 2
 
@@ -153,7 +153,7 @@ SCAN_CMD = [str(BINARY)]
 | 9 | **零触发必须先过年龄闸**，不够天数进 `too_new_to_judge` | 用户删掉昨天刚装的 skill |
 | 10 | 覆盖优先级 `enterprise > personal > project > plugin` | 诊断方向完全搞反 |
 | 11 | 脱敏必须覆盖 path，且 description 整体丢弃 | 两次真实泄露 |
-| 12 | 宿主拿不到就报 unavailable，**绝不用装机时间或 mtime 代替触发数** | 缺一列的报告有价值，编一列的没有 |
+| 12 | 执行环境拿不到就报 unavailable，**绝不用装机时间或 mtime 代替触发数** | 缺一列的报告有价值，编一列的没有 |
 
 ---
 
@@ -227,10 +227,10 @@ golden 全文比对分工不同：**全文比对回答「有没有变」，验�
 
 > **机器上没有 `~/.claude.json`、且磁盘上有任何插件 skill → 整次扫描 `TypeError` 崩溃。**
 
-`read_host_config()` 读不到时返回 `(None, {}, {})`，第三个值是 `{}` 不是 `None`，
-于是 `plugins_known = host_cfg is not None` 判成 True，插件分支照常执行，而
+`read_harness_config()` 读不到时返回 `(None, {}, {})`，第三个值是 `{}` 不是 `None`，
+于是 `plugins_known = harness_cfg is not None` 判成 True，插件分支照常执行，而
 `enabled_plugins` 是 `None`。降级分支 `plugin-state-unknown` 早就写好了，只是永远
-走不到。真机上 `~/.claude.json` 必然存在，所以它只伤害「其他宿主」用户——正是
+走不到。真机上 `~/.claude.json` 必然存在，所以它只伤害「其他执行环境」用户——正是
 不变量 12 本该保护的那批人。
 
 两点值得记住：
@@ -240,7 +240,7 @@ golden 全文比对分工不同：**全文比对回答「有没有变」，验�
    （[ARCHITECTURE.md §3](./ARCHITECTURE.md)）要解决的问题——在 Rust 里这两处
    都是编译错误，不是运行时崩溃。这条 ADR 因此有了一个具体的、已发生的证据。
 2. **语料的价值在写完它之前就兑现了。**缺陷不是 golden 比对发现的，是「为了能
-   生成 golden 而必须构造出无宿主配置的环境」这个动作发现的。
+   生成 golden 而必须构造出无执行环境配置的环境」这个动作发现的。
 
 ## 4.2 有时间窗口的 oracle
 
@@ -350,7 +350,7 @@ python3 -m venv .venv && .venv/bin/python -m pip install hypothesis
 这半成立，「畸形项必须现身」这半不成立——用户看到的清点数字是错的，而报告里没有
 任何东西表明少了一项。对一个做清点的工具，**静默丢项就是错误答案**。
 
-已加 `unreadable_skills` 顶层字段（含 `name` / `path` / `host` / `reason`），并同时
+已加 `unreadable_skills` 顶层字段（含 `name` / `path` / `harness` / `reason`），并同时
 写一份到 stderr——只写进 JSON 不够，直接在终端跑的人同样需要知道清点不完整。
 
 > 该字段的 `name` 来自目录名，且这批 skill 不在 `skills[]` 里，**与
@@ -365,11 +365,11 @@ python3 -m venv .venv && .venv/bin/python -m pip install hypothesis
 Python 主线采用单向流水线：
 
 ```text
-CLI options → host roots → disk inventory → runtime probes → reconciliation
+CLI options → harness roots → disk inventory → runtime probes → reconciliation
             → pure report → diff → redaction → rendering
 ```
 
-实现从 `scripts/scan.py` 分阶段提取到标准库包 `scripts/agent_vitals/`。宿主适配、
+实现从 `scripts/scan.py` 分阶段提取到标准库包 `scripts/agent_vitals/`。执行环境适配、
 发现与 I/O 在边缘；报告计算与诊断保持纯函数；`cli.py` 只负责编排、输出和退出码。
 完整模块边界与迁移门见 [PYTHON_REFACTOR_SPEC.md](./PYTHON_REFACTOR_SPEC.md)。
 
@@ -389,7 +389,7 @@ ClawHub 产物必须递归包含整个 `scripts/agent_vitals/`，同时排除
 src/
 ├── main.rs
 ├── cli.rs             clap derive
-├── hosts/             mod(trait) · claude · codex · cursor · generic
+├── harnesses/             mod(trait) · claude · codex · cursor · generic
 ├── model/             skill · capability · diagnostic · snapshot
 ├── scan/              discovery · frontmatter · context · security
 ├── analyze/           usage · overlap · cost · lifecycle
@@ -414,7 +414,7 @@ npm/                   主包 shim.cjs + 各平台包模板（§6）
 
 **渠道与受众高度重合**：agent-vitals 的用户按定义就是 Agent CLI 的用户，而 Claude Code 自身即 `npm install -g @anthropic-ai/claude-code`，Codex CLI、Gemini CLI 同理。**Node 在目标用户中具有极高覆盖率。**
 
-> 不是 100%——存在 standalone binary 安装路径与其他宿主的用户。npm 是**覆盖率最高的单一渠道**，不是唯一渠道；§6.6 的其余四条并存正是为了这部分人。
+> 不是 100%——存在 standalone binary 安装路径与其他执行环境的用户。npm 是**覆盖率最高的单一渠道**，不是唯一渠道；§6.6 的其余四条并存正是为了这部分人。
 
 ```bash
 npx agent-vitals                              # 零安装试用
@@ -570,15 +570,15 @@ provider，`resourceBase` 指向 skill 正文，扫描仍由 PATH 上的 `agent-
 
 一个仓库同时提供两种形态是生态里的常见做法（`liustack/modlens` 的说法是
 「on the skill harnesses it is exactly one skill folder, on dsh exactly one
-plugin」）。对本仓库意味着：根目录的 `SKILL.md` 与 `scripts/` 服务前五个宿主，
-`dsh/` 子目录是第六个宿主的 bundle，**两者共用同一个二进制，没有第二份实现**。
+plugin」）。对本仓库意味着：根目录的 `SKILL.md` 与 `scripts/` 服务前五个执行环境，
+`dsh/` 子目录是第六个执行环境的 bundle，**两者共用同一个二进制，没有第二份实现**。
 
 发布后给仓库打上 GitHub `dsh-plugin` topic（DSH README 明确要求，是该生态的
 发现入口）。
 
-## 6.7 In-host Skill 形态的安装
+## 6.7 In-harness Skill 形态的安装
 
-双实现并行下，in-host skill 形态**继续以 Python 为主**（`python3 scripts/scan.py`，`git clone` 完就能用，ClawHub 打包走这条）。二进制形态（`agent-vitals`）服务 npm / brew / cargo / Release，SKILL.md 第 1 步写成「检测二进制，不存在则 `npm i -g agent-vitals`」，Agent 自己会执行。
+双实现并行下，in-harness skill 形态**继续以 Python 为主**（`python3 scripts/scan.py`，`git clone` 完就能用，ClawHub 打包走这条）。二进制形态（`agent-vitals`）服务 npm / brew / cargo / Release，SKILL.md 第 1 步写成「检测二进制，不存在则 `npm i -g agent-vitals`」，Agent 自己会执行。
 
 > **双维护的可行性建立在差分护栏上（§6.8）。**「两套实现必然发散」曾经是「绝对不做两套」的理由；现在 `differential` 在当天抓出任何发散，而不是让它静默累积，所以「同时维护两套」从禁令变成「在护栏内做」。护栏失效的那天，本节退回单实现。
 
@@ -590,7 +590,7 @@ plugin」）。对本仓库意味着：根目录的 `SKILL.md` 与 `scripts/` �
 
 - Rust 二进制（`agent-vitals`）服务 npm / brew / cargo / Release 这些「装一个
   二进制」的渠道；
-- Python（`scripts/scan.py`）服务 ClawHub 的 in-host skill 形态，也便于不同
+- Python（`scripts/scan.py`）服务 ClawHub 的 in-harness skill 形态，也便于不同
   语言的开发者阅读与贡献。
 
 **发散被当天发现是这条路的全部前提。**代价已经演示过一次：`main` 一次合并
@@ -601,7 +601,7 @@ plugin」）。对本仓库意味着：根目录的 `SKILL.md` 与 `scripts/` �
 |---|---|
 | 双实现跑同一份 golden，任一不一致即红 | `verify.yml` 的 `differential` job |
 | 集成套件指向二进制再跑一遍 | 同上，靠 `AGENT_VITALS_BIN` |
-| 假宿主验运行时适配器的成功路径 | `tests/test_host_stubs.py` |
+| 假执行环境验运行时适配器的成功路径 | `tests/test_harness_stubs.py` |
 | 跨平台复现（macOS + Linux） | `reproducible` job |
 | `clippy -D warnings` 守 §4.5 的「扫描路径不得有 unwrap」 | `rust` job |
 
@@ -745,7 +745,7 @@ web-video-presentation (187 词)` 这种是「短描述写得笼统」而非路�
 1. **双实现约束消失**（曾以「Rust 成为唯一实现」为 §6.8 的退出条件）—— 双实现
    约束消失，jieba 的唯一代价就只剩启动耗时，而那有 lazy-init 可解。2026-08
    修订后双实现**永久并行**，这一条不再可能触发，仅作历史留存。
-2. **语料的中文占比显著上升** —— 本次是 26%（35/137）。如果某个宿主的 skill
+2. **语料的中文占比显著上升** —— 本次是 26%（35/137）。如果某个执行环境的 skill
    以中文为主，§9.2 那 4 倍差距会直接作用在主路径上。
 3. **扫描器变成常驻进程**（watch / LSP 形态）—— 词典加载只付一次，§9.3 的
    主要成本消失。

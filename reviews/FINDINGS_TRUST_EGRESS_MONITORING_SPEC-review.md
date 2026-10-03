@@ -15,7 +15,7 @@ CLI `trust` 子命令、桌面 `trust_audit/trust_discover/trust_runtime_snapsho
 规格的威胁模型意识是这套设计最强的部分：证据分级（E0–E5）、"读取/打包/尝试/已发送/远端接受"分阶段表达、
 "未取得服务端证据不得声称数据被训练/转卖"、severity 与 confidence 分离、默认不阻断——这些边界声明成熟且自洽。
 写入端契约校验（路径/URL 入库前拒绝）是 enforce 而非 test-only，metadata 白名单防身份泄漏有测试钉住，
-`delete_imported_host_data` 的 trust 级联有实现有测试。这些是合格甚至优秀的部分。
+`delete_imported_harness_data` 的 trust 级联有实现有测试。这些是合格甚至优秀的部分。
 
 但存在一个**阻断级设计-实现落差**（V-1：关联器没有实现关联）、一个**高误报成本直达系统弹窗的判定错误**
 （V-4），以及若干威胁模型自身的绕过面与流程风险。按严重度列于下。
@@ -27,7 +27,7 @@ CLI `trust` 子命令、桌面 `trust_audit/trust_discover/trust_runtime_snapsho
 ## V-1（Critical，发布阻断）：关联器没有实现"关联"——逐行判定取代多信号链
 
 **位置**: `trust_correlator.rs::candidates()` / `correlate_selected()`
-**规格承诺**: §6.3 关联键 `(host, actor_id, workspace_ref, time_window)`，判定为多信号链
+**规格承诺**: §6.3 关联键 `(harness, actor_id, workspace_ref, time_window)`，判定为多信号链
 （大范围读取/打包 → 取凭证 → 连对象存储 → consent 偏差合成**一个** Finding）；§12.6 验收要求
 ZCode fixture 形成"完整或缺环时间线"。
 
@@ -47,7 +47,7 @@ ZCode fixture 形成"完整或缺环时间线"。
    §7.2 "阶段首次升级到 E4/E5 才弹通知" 的门槛机制失去载体。
 
 **修复方向**:
-- 判定输入从单行改为**按 `(host, actor_id, workspace_ref, 时间窗)` 聚合的观测集**；
+- 判定输入从单行改为**按 `(harness, actor_id, workspace_ref, 时间窗)` 聚合的观测集**；
   窗口建议滚动 30–60 分钟或按事件间隙切分（规格可拍板）；
 - 规则改写为对窗口内**阶段序列**的判定：链完整（package+credential+egress）→ 一个 Finding、
   critical、confidence high；链有缺环 → 同一 Finding 按已达最远阶段定级，缺环事实进
@@ -120,7 +120,7 @@ P2 运行时快照是唯一兜底，但默认关、非驻留、且要求**同进
 
 **后果**: 误报场景下用户唯一自保途径失效，最终只会关掉整个信任面。
 
-**修复方向**: 忽略动作写抑制记录（`actor+rule` 或 `host+rule` 粒度，入 authority）；
+**修复方向**: 忽略动作写抑制记录（`actor+rule` 或 `harness+rule` 粒度，入 authority）；
 correlate 时命中抑制的降为 info 或跳过，且抑制状态在 Findings UI 可见、可撤销。
 
 ---
@@ -189,7 +189,7 @@ issue 分组/导出离开本地呈现边界。
    不只是测试；`raw_path_is_rejected_before_insert` 钉住；
 3. **metadata 白名单 + 身份不落 Issue**: correlator 测试断言 actor/workspace/hostname 不进
    `issue_instances.metadata_json`——§5.5 的呈现边界被测试钉死；
-4. **删除级联**: `delete_imported_host_data` 先删 evidence 关联再删 observations，有测试；
+4. **删除级联**: `delete_imported_harness_data` 先删 evidence 关联再删 observations，有测试；
 5. **severity / confidence 分离**（§7.1）在数据结构层面成立；
 6. **P1 不进 MCP / 默认导出**（§9）与数据留存政策的分面纪律一致。
 
@@ -224,6 +224,6 @@ issue 分组/导出离开本地呈现边界。
 ## 2026-09-20 follow-up（实现复核）
 
 上述初评中的 V-1/V-2/P-2 已在当前 worktree 迭代中落地：关联器现在按
-`(machine, host, actor, workspace, 60m window)` 聚合，30 分钟无相邻观测即断链；SV709 需要上传准备与独立对象存储观测，SV705 在 E2 为 warning、E3+ 才可 critical；ZCode/MiniMax 脱敏链路 fixture 与 Python/Rust lockstep 已加入。Trust actor/workspace/event 引用已统一到本机随机密钥 HMAC，拒绝宽权限、符号链接和半写 key，并有并发初始化测试。
+`(machine, harness, actor, workspace, 60m window)` 聚合，30 分钟无相邻观测即断链；SV709 需要上传准备与独立对象存储观测，SV705 在 E2 为 warning、E3+ 才可 critical；ZCode/MiniMax 脱敏链路 fixture 与 Python/Rust lockstep 已加入。Trust actor/workspace/event 引用已统一到本机随机密钥 HMAC，拒绝宽权限、符号链接和半写 key，并有并发初始化测试。
 
 当前验收证据：Rust 全量 363 tests 通过，Python 1233 tests（8 skipped）通过，golden 16/16 字节一致，clippy 与 desktop release check 通过。剩余发布范围明确为：IntentHint bridge 尚未实现（轨迹只能作辅助上下文）、无主动 key rotation；macOS 提供可选 `lsof` runtime，Linux 仅历史审计，Windows Trust 侧标记 unavailable。

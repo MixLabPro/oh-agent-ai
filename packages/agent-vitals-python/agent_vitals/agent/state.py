@@ -126,7 +126,7 @@ def _locked(path: Path):
     文件）仍然可以直读 —— 这是 POSIX flock 的语义，不补保证。
 
     Windows 不支持 fcntl.flock；这里直接报错而不是静默走无锁路径
-    （CLAUDE.md §「host 能力缺失时降级、绝不臆造」是数据纪律不是
+    （CLAUDE.md §「harness 能力缺失时降级、绝不臆造」是数据纪律不是
     锁纪律，锁缺失必须显式失败）。
     """
     if sys.platform == "win32":

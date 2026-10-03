@@ -166,6 +166,6 @@
         "reason": "no_data_in_session"
       }
     },
-    "host": "claude-code"
+    "harness": "claude-code"
   }
 }

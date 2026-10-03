@@ -2,7 +2,7 @@
 //! 结果落 `issue_instances`（W8，docs/ARCHITECTURE_OPTIMIZATION_GUIDE.md）。
 //!
 //! 为什么搬到同步路径：此前唯一生产者是 `sessions/r2a_store.rs` 的
-//! `sessions findings`——整套 legacy SessionStore（全宿主遍历 + 文件指纹缓存）
+//! `sessions findings`——整套 legacy SessionStore（全执行环境遍历 + 文件指纹缓存）
 //! 只为这一个出口活着，且只在旧 DOM 界面的「重载」按钮或首启引导时触发。React
 //! 切换（ed1660c）后没有任何入口再触发它，Findings 页读到的 Issues 停在了
 //! 2026-09-20（真机：5,332 条全是 `legacy-finding`，最后更新 09-20 15:23）。
@@ -25,9 +25,9 @@ use std::collections::BTreeSet;
 
 use rusqlite::Connection;
 
-// W3：会话级评估（每宿主怎么读、怎么分组）搬到 hosts 的注册表
-// `sources::session_hosts`；这里只剩写库。旧路径保留。
-pub use agent_vitals_hosts::sources::session_hosts::{findings_from_payload, SessionFindings};
+// W3：会话级评估（每执行环境怎么读、怎么分组）搬到 harnesses 的注册表
+// `sources::session_harnesses`；这里只剩写库。旧路径保留。
+pub use agent_vitals_harnesses::sources::session_harnesses::{findings_from_payload, SessionFindings};
 
 /// 与 r2a 写入的既有 issue 同一身份（见模块文档「身份连续性」）。
 pub const EVALUATOR_ID: &str = "legacy-finding";
@@ -92,7 +92,7 @@ pub fn persist(
         .to_string();
         let input = issues::IssueInput {
             machine_namespace: ns,
-            host: session.host,
+            harness: session.harness,
             session_key: Some(&session.native_id),
             issue_type: &finding.rule,
             instance_fingerprint: &fingerprint,
@@ -120,13 +120,13 @@ pub fn persist(
     }
     let mut stmt = conn.prepare(
         "SELECT issue_id FROM issue_instances
-         WHERE machine_namespace = ?1 AND host = ?2 AND session_key = ?3
+         WHERE machine_namespace = ?1 AND harness = ?2 AND session_key = ?3
            AND evaluator_id = ?4 AND status IN ('open', 'acknowledged')
          ORDER BY issue_id",
     )?;
     let open_ids = stmt
         .query_map(
-            rusqlite::params![ns, session.host, session.native_id, EVALUATOR_ID],
+            rusqlite::params![ns, session.harness, session.native_id, EVALUATOR_ID],
             |r| r.get::<_, String>(0),
         )?
         .collect::<Result<Vec<_>, _>>()?;
@@ -189,7 +189,7 @@ mod tests {
         // 模拟 r2a 写入：fingerprint = native_id\0rule\0seq\0evidence。
         let legacy_fp = "sess-1\0SV601\u{0}3\0rm -rf /tmp/x";
         let legacy = agent_vitals_data::issues::IssueInput {
-            machine_namespace: "ns", host: "dsh", session_key: Some("sess-1"),
+            machine_namespace: "ns", harness: "dsh", session_key: Some("sess-1"),
             issue_type: "SV601", instance_fingerprint: legacy_fp, status: "open",
             severity: "warning", evaluator_id: "legacy-finding", evaluator_version: "v0.11",
             evidence_fingerprint: "e", opened_at_ms: 1, metadata_json: "{}",
@@ -198,7 +198,7 @@ mod tests {
         agent_vitals_data::issues::transition_issue(db.conn(), &legacy_id, "acknowledged", 2,
             "seen", "user", "user-action", "user", "v1", "ack").unwrap();
 
-        let session = SessionFindings { host: "dsh", native_id: "sess-1".into(), findings: vec![f] };
+        let session = SessionFindings { harness: "dsh", native_id: "sess-1".into(), findings: vec![f] };
         let mut report = EvalReport::default();
         persist(db.conn(), "ns", &session, 10, &mut report).unwrap();
 
@@ -216,12 +216,12 @@ mod tests {
         let (path, db) = tmp_db("close");
         let mut report = EvalReport::default();
         let both = SessionFindings {
-            host: "codex",
+            harness: "codex",
             native_id: "c1".into(),
             findings: vec![finding("SV611", "a", 1), finding("SV611", "b", 2), finding("SV611", "c", 3)],
         };
         persist(db.conn(), "ns", &both, 1, &mut report).unwrap();
-        let other = SessionFindings { host: "codex", native_id: "c2".into(), findings: vec![finding("SV611", "a", 1)] };
+        let other = SessionFindings { harness: "codex", native_id: "c2".into(), findings: vec![finding("SV611", "a", 1)] };
         persist(db.conn(), "ns", &other, 1, &mut report).unwrap();
         let id_of = |sid: &str, ev: &str, seq: u64| -> String {
             db.conn().query_row(
@@ -234,7 +234,7 @@ mod tests {
 
         // 第二轮：只剩 a。
         let mut report = EvalReport::default();
-        let only_a = SessionFindings { host: "codex", native_id: "c1".into(), findings: vec![finding("SV611", "a", 1)] };
+        let only_a = SessionFindings { harness: "codex", native_id: "c1".into(), findings: vec![finding("SV611", "a", 1)] };
         persist(db.conn(), "ns", &only_a, 5, &mut report).unwrap();
         assert_eq!(status(&db, &id_of("c1", "a", 1)), "open");
         assert_eq!(status(&db, &id_of("c1", "b", 2)), "closed");

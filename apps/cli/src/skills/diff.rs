@@ -31,20 +31,20 @@ fn io_reason(p: &std::path::Path) -> String {
     }
 }
 
-/// 比对用的键：`(host, instance_id, namespace, name)`。
+/// 比对用的键：`(harness, instance_id, namespace, name)`。
 ///
-/// **不能只用 name。**同名 skill 在两个宿主里不是同一个，插件里的
+/// **不能只用 name。**同名 skill 在两个执行环境里不是同一个，插件里的
 /// `<plugin>:<name>` 也各自独立 —— 只按名字建键会把它们并成一条，diff 于是
-/// 把「A 宿主删了一个、B 宿主加了一个」报成「没变化」。
+/// 把「A 执行环境删了一个、B 执行环境加了一个」报成「没变化」。
 /// 这与 `plugin_identity` 那次「版本号被当成命名空间」是同一类错误：
 /// 去重键取粗了，不同的东西被并成一个。
 type Key = (String, String, String, String);
 
 fn key_of(s: &Value) -> Key {
-    let host = s
-        .get("host_family")
+    let harness = s
+        .get("harness_family")
         .and_then(|v| v.as_str())
-        .or_else(|| s.get("host").and_then(|v| v.as_str()))
+        .or_else(|| s.get("harness").and_then(|v| v.as_str()))
         .unwrap_or("")
         .to_string();
     // Python 侧把 None 归一成空串再逐字段比较；这里必须同口径，否则两个实现
@@ -52,15 +52,15 @@ fn key_of(s: &Value) -> Key {
     let instance = s.get("instance_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let namespace = s.get("namespace").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    (host, instance, namespace, name)
+    (harness, instance, namespace, name)
 }
 
 fn entry_of(s: &Value) -> Value {
-    // 有名字段，不是裸数组：裸数组会让脱敏把宿主名当成 skill 名收录并全文
-    // 替换（见 tests/test_diff_end_to_end.py::TestRedactionDoesNotEatTheHostName）。
+    // 有名字段，不是裸数组：裸数组会让脱敏把执行环境名当成 skill 名收录并全文
+    // 替换（见 tests/test_diff_end_to_end.py::TestRedactionDoesNotEatTheHarnessName）。
     json!({
-        "host": s.get("host_family").cloned()
-                 .or_else(|| s.get("host").cloned()).unwrap_or(Value::Null),
+        "harness": s.get("harness_family").cloned()
+                 .or_else(|| s.get("harness").cloned()).unwrap_or(Value::Null),
         "instance_id": s.get("instance_id").cloned().unwrap_or(Value::Null),
         "namespace": s.get("namespace").and_then(|v| v.as_str()).unwrap_or(""),
         "name": s.get("name").cloned().unwrap_or(Value::Null),
@@ -180,11 +180,11 @@ pub fn diff_against(prev_path: &Path, now: &Value) -> Value {
     let mut both: Vec<&Key> = a.keys().filter(|k| b.contains_key(*k)).collect();
     both.sort();
 
-    // 这三处的字段**必须与 Python 的 dict 字面量同名同序**：host / instance_id
+    // 这三处的字段**必须与 Python 的 dict 字面量同名同序**：harness / instance_id
     // / namespace 曾经在 Rust 侧整个缺失，而 diff 从不进 golden，没有测试抓到。
     fn ident(v: &Value) -> (Value, Value, String) {
         (
-            v.get("host_family").cloned().or_else(|| v.get("host").cloned())
+            v.get("harness_family").cloned().or_else(|| v.get("harness").cloned())
                 .unwrap_or(Value::Null),
             v.get("instance_id").cloned().unwrap_or(Value::Null),
             v.get("namespace").and_then(|x| x.as_str()).unwrap_or("").to_string(),
@@ -195,9 +195,9 @@ pub fn diff_against(prev_path: &Path, now: &Value) -> Value {
     for k in &both {
         let delta = usage_of(&b[*k]) - usage_of(&a[*k]);
         if delta != 0 {
-            let (host, instance, ns) = ident(&b[*k]);
+            let (harness, instance, ns) = ident(&b[*k]);
             used_more.push(json!({
-                "name": k.3, "host": host, "instance_id": instance, "namespace": ns,
+                "name": k.3, "harness": harness, "instance_id": instance, "namespace": ns,
                 "delta": delta, "now": usage_of(&b[*k]),
             }));
         }
@@ -216,9 +216,9 @@ pub fn diff_against(prev_path: &Path, now: &Value) -> Value {
         .iter()
         .filter(|k| days_of(&a[*k]) < gate && gate <= days_of(&b[*k]))
         .map(|k| {
-            let (host, instance, ns) = ident(&b[*k]);
+            let (harness, instance, ns) = ident(&b[*k]);
             json!({
-                "name": k.3, "host": host, "instance_id": instance, "namespace": ns,
+                "name": k.3, "harness": harness, "instance_id": instance, "namespace": ns,
                 "usage_count": usage_of(&b[*k]),
                 "installed_days_ago": b[*k].get("installed_days_ago").cloned()
                     .unwrap_or(Value::Null),
@@ -257,8 +257,8 @@ pub fn diff_against(prev_path: &Path, now: &Value) -> Value {
     out.insert("usage_delta".into(), Value::Array(used_more));
     out.insert("newly_judgeable".into(), Value::Array(newly_judgeable));
     // **两边都没有预算数据时是 null，不是 0。**`num()` 把 null 折成 0，于是
-    // `--host all`（默认宿主）下会报出一个「预算没变化」的结论，而真相是
-    // 「这个宿主根本没有预算这个概念」。Python 侧同一处曾因此 None - None 崩溃。
+    // `--harness all`（默认执行环境）下会报出一个「预算没变化」的结论，而真相是
+    // 「这个执行环境根本没有预算这个概念」。Python 侧同一处曾因此 None - None 崩溃。
     let budget_delta = match (pb.get("used_chars").and_then(|v| v.as_i64()),
                               nb.get("used_chars").and_then(|v| v.as_i64())) {
         (Some(before), Some(after)) => json!(after - before),

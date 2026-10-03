@@ -4,7 +4,7 @@
 //! 是同一份报告的不同切面，不是各自再算一遍。算两遍就会有两套口径，
 //! 而这个程序最重要的一条口径（磁盘 ≠ 上下文）恰恰最容易在第二遍里走样。
 //!
-//! 边界：输入全部是已经采集好的证据（skills、运行时探测结果、宿主配置），
+//! 边界：输入全部是已经采集好的证据（skills、运行时探测结果、执行环境配置），
 //! 输出是一个 `Value` 加几个供摘要行用的计数。**这里不做任何 I/O** ——
 //! 于是它可以被任何命令调用，也可以在测试里直接喂构造好的输入。
 //!
@@ -17,7 +17,7 @@ use serde_json::{json, Map, Value};
 
 use agent_vitals_domain::skills::analysis;
 use agent_vitals_runtime::skills::scanner::group_by_key;
-use agent_vitals_hosts::hosts::claude_code::skills::HostConfig;
+use agent_vitals_harnesses::harnesses::claude_code::skills::HarnessConfig;
 use agent_vitals_runtime::skills::inventory::Inventory;
 use crate::util::{norm, pyround};
 use crate::{b, i, s};
@@ -35,14 +35,14 @@ pub const SCHEMA_VERSION: &str = "1.0";
 /// **不接受任何「顺手算好的中间量」**——那会让同一个数存在两个来源，
 /// 而这个程序最容易出错的地方正是同一件事被算了两遍。
 pub struct ReportInput<'a> {
-    pub host: &'a str,
+    pub harness: &'a str,
     pub all: bool,
     pub budget: i64,
     pub zombie_age: i64,
     pub split_threshold: i64,
     pub home_n: &'a str,
     pub inv: &'a Inventory,
-    pub cfg: &'a HostConfig,
+    pub cfg: &'a HarnessConfig,
 }
 
 /// 报告本体，外加摘要行需要的几个计数。
@@ -77,7 +77,7 @@ pub fn build(inp: &ReportInput) -> Report {
     let analysis_candidates: Vec<&Value> = skills
         .iter()
         .filter(|x| b(x, "loaded")
-            || (s(x, "host_family") == "openclaw" && b(x, "discoverable")))
+            || (s(x, "harness_family") == "openclaw" && b(x, "discoverable")))
         .collect();
     let scope: Vec<Value> = if inp.all {
         skills.to_vec()
@@ -87,7 +87,7 @@ pub fn build(inp: &ReportInput) -> Report {
 
     // ── 同名 skill 的副本 ─────────────────────────────────
     // 按 (conflict_domain, namespace, name) 去重：插件里的 skill 有命名空间
-    // 隔离，跨宿主是独立运行时。判定逻辑在 analysis::conflicts。
+    // 隔离，跨执行环境是独立运行时。判定逻辑在 analysis::conflicts。
     let groups = group_by_key(&scope);
     let conflicts = analysis::conflicts(&scope, &groups);
 
@@ -96,14 +96,14 @@ pub fn build(inp: &ReportInput) -> Report {
     let tier1_total: i64 = unique.iter().map(|v| i(v, "tier1_tokens")).sum();
 
     // ── 描述预算 ─────────────────────────────────────────
-    let budget_report = analysis::budget(&unique, inp.host, inp.all, inp.budget);
+    let budget_report = analysis::budget(&unique, inp.harness, inp.all, inp.budget);
 
     // ── 触发数据 ─────────────────────────────────────────
     let (trigger_report, trigger_available) = analysis::trigger(
         &loaded,
         cfg.usage.len(),
         cfg.usage.is_empty(),
-        inp.host,
+        inp.harness,
         inp.zombie_age,
         inv.dsh_evidence.as_ref(),
         inv.dsh_evidence_path.as_deref(),
@@ -127,16 +127,16 @@ pub fn build(inp: &ReportInput) -> Report {
     let mut skills_sorted: Vec<&Value> = skills.iter().collect();
     skills_sorted.sort_by_key(|x| (!b(x, "loaded"), -i(x, "tier1_tokens")));
 
-    // ── 按宿主的分项 ─────────────────────────────────────
+    // ── 按执行环境的分项 ─────────────────────────────────────
     // dsh 触发证据的可用性与 trigger_dsh 的判定同口径：有证据且未 degraded 才算
     // available。degraded 与 trigger_dsh 一样按字符串读（键存在但值为 null 不算
-    // degraded）；host_summaries 不重新解释证据，只接收这个布尔。
+    // degraded）；harness_summaries 不重新解释证据，只接收这个布尔。
     let dsh_trigger_available = inv
         .dsh_evidence
         .as_ref()
         .map(|e| e.get("degraded").and_then(|d| d.as_str()).is_none())
         .unwrap_or(false);
-    let host_summaries = analysis::host_summaries(
+    let harness_summaries = analysis::harness_summaries(
         skills,
         cfg.usage.is_empty(),
         inv.codex.available,
@@ -149,8 +149,8 @@ pub fn build(inp: &ReportInput) -> Report {
     // 放在最前：解析方应当先读到它，再决定怎么读其余字段
     out.insert("schema_version".into(), json!(SCHEMA_VERSION));
     out.insert("scanned_roots".into(), json!(inv.scanned_roots));
-    out.insert("host_selection".into(), json!(inp.host));
-    out.insert("host_summaries".into(), Value::Object(host_summaries));
+    out.insert("harness_selection".into(), json!(inp.harness));
+    out.insert("harness_summaries".into(), Value::Object(harness_summaries));
     out.insert("openclaw_runtime".into(), json!(inv.openclaw.iter().map(|r| json!({
         "available": r.available,
         "source": "openclaw skills list --eligible --json",
@@ -167,10 +167,10 @@ pub fn build(inp: &ReportInput) -> Report {
     out.insert(
         "plugin_state".into(),
         json!({
-            "host_config_read": cfg.present,
+            "harness_config_read": cfg.present,
             "enabled_plugins": enabled_sorted,
             "note": "Disabled plugin copies remain on disk but do not enter context or count toward the budget. \
-When host_config_read=false, plugin state is unknown and copies are treated as not loaded.",
+When harness_config_read=false, plugin state is unknown and copies are treated as not loaded.",
         }),
     );
     out.insert("codex_runtime".into(), json!({
@@ -222,12 +222,12 @@ come from the official app-server. No public per-skill trigger-count API is avai
     );
     out.insert("conflicts".into(), Value::Array(conflicts));
     out.insert("precedence_note".into(), json!(
-        "Overrides are compared only within one host. Claude Code: enterprise > personal > project > plugin; \
+        "Overrides are compared only within one harness. Claude Code: enterprise > personal > project > plugin; \
 OpenClaw: workspace > project > personal > managed. Plugin skills \
 are isolated by <plugin>:<name>, so equal bare names are not conflicts."));
-    out.insert("cross_host_note".into(), json!(
-        "Hosts do not share context. Use host_summaries or --host for one runtime; do not \
-interpret top-level Tier1 or description-budget values as a cross-host total."));
+    out.insert("cross_harness_note".into(), json!(
+        "Harnesses do not share context. Use harness_summaries or --harness for one runtime; do not \
+interpret top-level Tier1 or description-budget values as a cross-harness total."));
     out.insert(
         "skills".into(),
         Value::Array(skills_sorted.into_iter().cloned().collect()),

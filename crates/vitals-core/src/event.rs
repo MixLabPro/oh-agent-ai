@@ -1,4 +1,4 @@
-//! §6 Canonical Event——不同宿主的离散事件被翻译成的唯一形状。Core 不解释
+//! §6 Canonical Event——不同执行环境的离散事件被翻译成的唯一形状。Core 不解释
 //! `kind` / `attributes` 的内容（§4.1 Domain-free），只对它们做结构性校验。
 
 use serde::{Deserialize, Serialize};

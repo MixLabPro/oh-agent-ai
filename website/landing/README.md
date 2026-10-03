@@ -13,7 +13,7 @@ Open http://127.0.0.1:5180/. The directory can also be deployed as a static site
 ## Content and interactions
 
 - Brand: **Agent Vitals 智能体监测**. Privacy promise: Sessions are analyzed offline on the user's Mac and are never uploaded to a cloud service. Public pricing-catalog and release checks may use the network but carry no Session data.
-- Positioning: 你把工作交给 Agent，谁来检查 Agent？The category metaphor is a local “Agent work receipt”: usage, cost basis, failures, and session traces that supported hosts already leave on the machine. The page does not claim output-quality judgment, universal runtime coverage, measured savings, or automatic optimization.
+- Positioning: 你把工作交给 Agent，谁来检查 Agent？The category metaphor is a local “Agent work receipt”: usage, cost basis, failures, and session traces that supported harnesses already leave on the machine. The page does not claim output-quality judgment, universal runtime coverage, measured savings, or automatic optimization.
 - The product window and session dialog are explicitly labeled illustrative mock data, not screenshots of a released UI. Period buttons switch sample totals and charts; the session button opens a dismissible native dialog. FAQs use native details elements.
 - Download CTA opens the project's desktop release listing. It does not claim a particular architecture, signature, release artifact, or system requirement; those must be verified against the published package before direct download links are added.
 - Product icon copied from `apps/desktop/src-tauri/icons/128x128.png`.
@@ -30,4 +30,4 @@ is run with the Apple ID app-specific password:
 
 ## Before publishing
 
-Verify the public desktop release, installation instructions, and supported host versions. If a production screenshot replaces the illustrative window, use redacted or dedicated demo data. No product event collection is authorized by this page.
+Verify the public desktop release, installation instructions, and supported harness versions. If a production screenshot replaces the illustrative window, use redacted or dedicated demo data. No product event collection is authorized by this page.

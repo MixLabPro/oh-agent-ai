@@ -94,7 +94,7 @@ def _parse_scalar(text):
 def load_config():
     """读 ~/.agent-vitals/config.toml 的 [budget] 节,与默认预算深合并。
 
-    缺文件 / 缺节 / 缺字段一律走默认 —— 与 CLAUDE.md §「host 能力缺失时
+    缺文件 / 缺节 / 缺字段一律走默认 —— 与 CLAUDE.md §「harness 能力缺失时
     降级、绝不臆造」同条纪律,但反向：**配置缺失**也要降级而非崩溃。
     """
     cfg = default_budget()
@@ -371,7 +371,7 @@ def compute_7d_avg_daily():
     """近 7 天日均 cost —— 自适应阈值的输入。
 
     从当前自然月取最近 N 天的「日总和」算术平均。N < 7 时按现有天数
-    平均 —— 「窗口不足」**不**报错，按已有数据降级（host 能力缺失纪律）。
+    平均 —— 「窗口不足」**不**报错，按已有数据降级（harness 能力缺失纪律）。
 
     **只查当前自然月**：7 天窗口理论上可能跨月初（比如 3 号往前推 7 天到
     上月 25 号），但 `state.read_month()` 不传参数只返回当前月——这是已知
@@ -525,7 +525,7 @@ def evaluate(now=None):
             reasons.append("peak share %d%% exceeds max %d%%" %
                            (round(peak_share * 100), round(peak_max * 100)))
     elif today is None:
-        reasons.append("no metered spend recorded for today yet (budget counts cross-host metered spend only)")
+        reasons.append("no metered spend recorded for today yet (budget counts cross-harness metered spend only)")
 
     # 月预算：之前只把 month_cost/monthly_cny 算出来给 xbar 显示,从没真的
     # 参与过 level 判定——用户月预算超了几倍,只要今天花得少,菜单栏照样

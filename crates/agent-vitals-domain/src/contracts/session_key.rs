@@ -12,11 +12,11 @@ use serde_json::{json, Value};
 /// 换版本（设计 §2.2）。与 crate 版本号解耦，专指 R2a 规则集。
 pub const ENGINE_VERSION: &str = "1";
 
-/// `SessionKey` 四元组（设计 §1.1）。host_kind + native_id 已在同一 namespace 内
+/// `SessionKey` 四元组（设计 §1.1）。harness_kind + native_id 已在同一 namespace 内
 /// 去重；source_profile 与 machine_namespace 把跨工作区/跨机器碰撞拆开。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionKey {
-    pub host_kind: String,
+    pub harness_kind: String,
     pub native_id: String,
     pub source_profile: String,
     pub machine_namespace: String,
@@ -24,13 +24,13 @@ pub struct SessionKey {
 
 impl SessionKey {
     pub fn new(
-        host_kind: &str,
+        harness_kind: &str,
         native_id: &str,
         source_profile: &str,
         machine_namespace: &str,
     ) -> Self {
         SessionKey {
-            host_kind: host_kind.to_string(),
+            harness_kind: harness_kind.to_string(),
             native_id: native_id.to_string(),
             source_profile: source_profile.to_string(),
             machine_namespace: machine_namespace.to_string(),
@@ -38,10 +38,10 @@ impl SessionKey {
     }
 
     /// 序列化形状 —— **键序是字节一致的一部分，不能重排**（设计 §1.1 标「推断」，
-    /// 此处定为 host_kind → native_id → source_profile → machine_namespace）。
+    /// 此处定为 harness_kind → native_id → source_profile → machine_namespace）。
     pub fn to_json(&self) -> Value {
         json!({
-            "host_kind": self.host_kind,
+            "harness_kind": self.harness_kind,
             "native_id": self.native_id,
             "source_profile": self.source_profile,
             "machine_namespace": self.machine_namespace,
@@ -52,7 +52,7 @@ impl SessionKey {
     /// 设计 §1.2「session_id 与 id 双缺 → 该 rollout 无法归入任何 SessionKey」）。
     pub fn from_json(v: &Value) -> Option<SessionKey> {
         Some(SessionKey {
-            host_kind: v.get("host_kind")?.as_str()?.to_string(),
+            harness_kind: v.get("harness_kind")?.as_str()?.to_string(),
             native_id: v.get("native_id")?.as_str()?.to_string(),
             source_profile: v.get("source_profile")?.as_str()?.to_string(),
             machine_namespace: v.get("machine_namespace")?.as_str()?.to_string(),
@@ -68,7 +68,7 @@ impl SessionKey {
         }
         format!(
             "{}|{}|{}|{}",
-            seg(&self.host_kind),
+            seg(&self.harness_kind),
             seg(&self.native_id),
             seg(&self.source_profile),
             seg(&self.machine_namespace),
@@ -78,7 +78,7 @@ impl SessionKey {
     /// Parse the length-prefixed ledger key emitted by [`ledger_key`].
     ///
     /// This stays in the vocabulary contract so data writers can materialize
-    /// the session foreign key without knowing any host-specific log shape.
+    /// the session foreign key without knowing any harness-specific log shape.
     pub fn from_ledger_key(raw: &str) -> Option<SessionKey> {
         let mut rest = raw;
         let mut parts = Vec::with_capacity(4);
@@ -111,9 +111,9 @@ mod tests {
         let v = k.to_json();
         assert_eq!(
             v.as_object().unwrap().keys().collect::<Vec<_>>(),
-            vec!["host_kind", "native_id", "source_profile", "machine_namespace"]
+            vec!["harness_kind", "native_id", "source_profile", "machine_namespace"]
         );
-        assert_eq!(v["host_kind"], "codex");
+        assert_eq!(v["harness_kind"], "codex");
         assert_eq!(v["native_id"], "s1");
         assert_eq!(v["source_profile"], "/repo");
         assert_eq!(v["machine_namespace"], "ns-abc");
@@ -123,14 +123,14 @@ mod tests {
 
     #[test]
     fn session_key_from_json_missing_component_is_none() {
-        assert_eq!(SessionKey::from_json(&json!({"host_kind": "codex"})), None);
-        assert_eq!(SessionKey::from_json(&json!({"host_kind": 1, "native_id": "s",
+        assert_eq!(SessionKey::from_json(&json!({"harness_kind": "codex"})), None);
+        assert_eq!(SessionKey::from_json(&json!({"harness_kind": 1, "native_id": "s",
             "source_profile": "/r", "machine_namespace": "ns"})), None);
     }
 
     #[test]
     fn session_key_ledger_key_roundtrips_length_prefixed_segments() {
-        let key = SessionKey::new("dsh|host", "session:1", "profile", "机器");
+        let key = SessionKey::new("dsh|harness", "session:1", "profile", "机器");
         assert_eq!(SessionKey::from_ledger_key(&key.ledger_key()), Some(key));
         assert_eq!(SessionKey::from_ledger_key("4:only"), None);
         assert_eq!(SessionKey::from_ledger_key("1:a|1:b|1:c|1:d|extra"), None);

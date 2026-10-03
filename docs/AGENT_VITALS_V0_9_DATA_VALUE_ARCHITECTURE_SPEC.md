@@ -14,8 +14,8 @@ v0.9 是独立可发布的**可信数据底座**，不是 v0.10 的施工前置�
 > 用户看到的月度成本、用量、订阅覆盖、按量估算和数据缺口，能否追溯、重放、恢复并诚实解释？
 
 ```text
-Host source
-  → CanonicalSession / UsageFact / HostBillRecord
+Harness source
+  → CanonicalSession / UsageFact / HarnessBillRecord
   → agent-vitals-data durable evidence plane
   → rebuildable SQLite query projection
   → cost / coverage / billing projection
@@ -27,8 +27,8 @@ v0.9 不交付通用任务图、问题→方案→执行闭环或 LLM evaluator�
 ### 0.1 Stage 0 的可信度边界
 
 v0.9 不把当前展示错误留到后续版本。它的 **v0.9.0 Stage 0：Data Access Foundation**
-首先完成控制台的**诚实展示**：过期、未同步、部分覆盖或宿主未接入的日/月数据不得渲染为
-`¥0`、“正常”或看似完整的总额；每一个金额都必须可见其宿主范围、计费口径与最后有效时间。
+首先完成控制台的**诚实展示**：过期、未同步、部分覆盖或执行环境未接入的日/月数据不得渲染为
+`¥0`、“正常”或看似完整的总额；每一个金额都必须可见其执行环境范围、计费口径与最后有效时间。
 
 Stage 0 不要求先完成 SQLite 迁移。它先建立稳定的 Data Query API，并可由现有 JSON
 projection、Claude ledger 和 WorkBuddy source adapter 实现；UI/CLI 自此不再直接读取这些
@@ -41,15 +41,15 @@ projection、Claude ledger 和 WorkBuddy source adapter 实现；UI/CLI 自此�
 
 | 交付物 | 状态 | 落点 |
 |---|---|---|
-| Stage 0 全部七步（DTO 冻结 / data crate / CLI 收口 / 三宿主接线 / data CLI / Tauri 命令 + 数据源 panel / 四宿主 fixture） | ✅ 已完成并合入 main | `1596836`（执行记录 `AGENT_VITALS_V0_9_STAGE0_RESEARCH.md`） |
+| Stage 0 全部七步（DTO 冻结 / data crate / CLI 收口 / 三执行环境接线 / data CLI / Tauri 命令 + 数据源 panel / 四执行环境 fixture） | ✅ 已完成并合入 main | `1596836`（执行记录 `AGENT_VITALS_V0_9_STAGE0_RESEARCH.md`） |
 | 计费模式声明层 `billing_modes` + `billing_route_of`（与价卡解耦，无价卡模型可归属） | ✅ | Stage A `c7d0e06` |
-| 权威归属视角 `by_provider`（host ≠ billing source，条目级单币 currency） | ✅ | Stage B `f004756` |
+| 权威归属视角 `by_provider`（harness ≠ billing source，条目级单币 currency） | ✅ | Stage B `f004756` |
 | `FixedSubscription` 写入方（账期过滤、零用量照摊、只进月不进日）+ `total_actual_spend` 分币 | ✅ | Stage C `68ca4eb` |
-| 总览感知层看板（KPI 行 / 双轨账 / 决策卡 / 本月结论行）+ Token 日历跨宿主逐日 | ✅ | Stage D `6586112`/`f110066` |
+| 总览感知层看板（KPI 行 / 双轨账 / 决策卡 / 本月结论行）+ Token 日历跨执行环境逐日 | ✅ | Stage D `6586112`/`f110066` |
 | 名义成本口径（list-price，"名义 GDP"式客观基准） | ✅ 定义 + 实现 | 定义 `ATTRIBUTABLE_WASTE.md` §6.7（提交 `9b279ca`）；实现 = catalog 计价面既有产物被正式命名 |
 | 性能形状：codex fold 进程级 60s memo（`codex_merged_cached`，Arc 命中） | ✅ | `d8c6c83` |
 | 审查修复：`CODE_REVIEW_V0_9_STAGE_A_D_KPI_BILLING` 10 条 + `CODE_REVIEW_V0_9_WORKBENCH_UX` 14 条 | ✅ | `29c0717`/`0096607`/`01f0d9a` |
-| §2.1 其余八项：writer（✅ `93fbc0d`）、emitter 归位（✅ `f1850bc`）、ingest service（✅ `0f1d6b5`）、SQLite 投影（✅ `2d32ed0`）、lease（✅ `6b3aadd`）、BillingContext（✅ `9fbf920`）、checkpoint（✅ `e03e712`，随 sync_service）、故障注入（🔶 `3ffe10f`：facts/projection/lease 三点有注入测试）；**SummaryRepository 索引实现（替换 Stage 0 read adapter）—— ❌ 未达成（v0.10 主线，见 §5.2a）**；生成事务 / HostBillRecord（待 WorkBuddy 范围确认） | 🔶 | 分期见 §7 Stage A–C |
+| §2.1 其余八项：writer（✅ `93fbc0d`）、emitter 归位（✅ `f1850bc`）、ingest service（✅ `0f1d6b5`）、SQLite 投影（✅ `2d32ed0`）、lease（✅ `6b3aadd`）、BillingContext（✅ `9fbf920`）、checkpoint（✅ `e03e712`，随 sync_service）、故障注入（🔶 `3ffe10f`：facts/projection/lease 三点有注入测试）；**SummaryRepository 索引实现（替换 Stage 0 read adapter）—— ❌ 未达成（v0.10 主线，见 §5.2a）**；生成事务 / HarnessBillRecord（待 WorkBuddy 范围确认） | 🔶 | 分期见 §7 Stage A–C |
 
 **数据缺口（阻塞实际侧计费精度，等用户输入，非工程阻塞）**：中转商对
 claude-sonnet-5 的 cache_read 单价（决定 claude-* 实际支出 78.9%）、GLM 官方按量
@@ -60,7 +60,7 @@ claude-sonnet-5 的 cache_read 单价（决定 claude-* 实际支出 78.9%）、
 
 1. 月度总感知成本：固定订阅与按量成本分开，不把 API 等价额伪装成账单。
 2. 每一项成本都有 `basis`：`measured`、`derived`、`estimated` 或 `unresolved`。
-3. 数据源状态可见：哪些宿主、日期和模型已覆盖，哪些仍在估算或缺失。
+3. 数据源状态可见：哪些执行环境、日期和模型已覆盖，哪些仍在估算或缺失。
 4. 用户可重建本地索引，应用崩溃、索引损坏或并发运行不应悄悄改变账目。
 5. CLI、Tauri、HTML 对同一 projection 的关键数字一致。
 
@@ -71,7 +71,7 @@ claude-sonnet-5 的 cache_read 单价（决定 claude-* 实际支出 78.9%）、
 **P0 —— 消除已知病灶（Stage A，下一轮主体）**
 
 - `UsageFact` append-only writer、稳定 identity、去重与 reconciliation；
-  *这是读侧形状歧义的根本解：summary.rs 现按宿主逐个适配 month.json /
+  *这是读侧形状歧义的根本解：summary.rs 现按执行环境逐个适配 month.json /
   claude-ledger / codex fold 三种 wire 形状，写入统一后歧义消失（审查 #2/#5 类
   缺陷的病根）*；
 - `CanonicalSession` 最小持久化 + JSONL 事实作为审计输入；
@@ -87,8 +87,8 @@ claude-sonnet-5 的 cache_read 单价（决定 claude-* 实际支出 78.9%）、
 **P2 —— 完整性收口（Stage B 后半 + Stage C）**
 
 - intent → facts → projection → manifest 的可恢复 generation transaction；
-- `HostBillRecord`（WorkBuddy credit_json 是全仓唯一真实宿主账单，落地时
-  BillingBasis::HostBilled 首次获得生产写入方）；
+- `HarnessBillRecord`（WorkBuddy credit_json 是全仓唯一真实执行环境账单，落地时
+  BillingBasis::HarnessBilled 首次获得生产写入方）；
 - BillingContext / UserProfile：订阅、按量账户、预算、模型/价格来源和
   unresolved（吸收本轮的 `billing_modes` 声明层——见 §4.1）；
 - replay、故障注入测试、`data rebuild-index` CLI；
@@ -111,8 +111,8 @@ claude-sonnet-5 的 cache_read 单价（决定 claude-* 实际支出 78.9%）、
 ## 3. 数据与所有权
 
 ```text
-agent-vitals-hosts
-  raw wire → CanonicalSession / UsageObservation / HostBillRecord candidate
+agent-vitals-harnesses
+  raw wire → CanonicalSession / UsageObservation / HarnessBillRecord candidate
 
 agent-vitals-data
   validation + fact identity + JSONL evidence + SQLite index
@@ -125,12 +125,12 @@ apps/cli / apps/desktop
   commands, authorization, versioned DTO rendering only
 ```
 
-- Hosts 不写 state、不决定套餐覆盖、不输出产品结论；
+- Harnesses 不写 state、不决定套餐覆盖、不输出产品结论；
 - Domain 保持纯：不读文件、不读凭据、不发网络请求、不取当前时间；
 - `agent-vitals-data` 是事实写入、索引、恢复和查询的唯一数据边界；
 - Runtime 编排 adapter 与 data，不拥有另一份账本或查询规则；
 - UI 不从空数组推断 unavailable，必须消费 capability 与 coverage；
-- 新命令不得直接读取宿主日志或 state JSON。
+- 新命令不得直接读取执行环境日志或 state JSON。
 
 ### 3.1 `agent-vitals-data`：数据层，不是独立服务
 
@@ -139,46 +139,46 @@ apps/cli / apps/desktop
 
 | crate / 层 | 允许依赖 | 不允许承担的职责 |
 |---|---|---|
-| `agent-vitals-domain` | 纯 Rust 类型与规则 | I/O、SQL、当前时间、宿主解析 |
-| `agent-vitals-hosts` | Domain、受 feature 门控的源 I/O | 写共享账本、价格/套餐结论 |
-| `agent-vitals-data` | Domain、SQLite 驱动 | 解析 host wire、UI 呈现、同步调度 |
-| `agent-vitals-runtime` | Hosts + Data | 第二个 state/projection store |
-| `apps/cli` / `apps/desktop` | Runtime 的版本化 DTO | SQL、state JSON、宿主日志直读 |
+| `agent-vitals-domain` | 纯 Rust 类型与规则 | I/O、SQL、当前时间、执行环境解析 |
+| `agent-vitals-harnesses` | Domain、受 feature 门控的源 I/O | 写共享账本、价格/套餐结论 |
+| `agent-vitals-data` | Domain、SQLite 驱动 | 解析 harness wire、UI 呈现、同步调度 |
+| `agent-vitals-runtime` | Harnesses + Data | 第二个 state/projection store |
+| `apps/cli` / `apps/desktop` | Runtime 的版本化 DTO | SQL、state JSON、执行环境日志直读 |
 
 数据层提供小型 typed repository/query service，而不是通用 Active Record ORM。例如：
 
 ~~~rust
 data.ingest(batch)?;
 data.rebuild_index()?;
-data.daily_summary(DailySummaryQuery { date, host_scope })?;
-data.monthly_summary(MonthlySummaryQuery { month, host_scope, billing_scope })?;
-data.coverage_status(CoverageQuery { month, host_scope })?;
+data.daily_summary(DailySummaryQuery { date, harness_scope })?;
+data.monthly_summary(MonthlySummaryQuery { month, harness_scope, billing_scope })?;
+data.coverage_status(CoverageQuery { month, harness_scope })?;
 ~~~
 
 `MonthlySummary` 必须同时返回 `total_summable`、`total_actual_spend`（分币）、
-`by_host`、`by_provider`、`tokens_by_host`、`coverage`、`freshness`、`excluded_hosts`
+`by_harness`、`by_provider`、`tokens_by_harness`、`coverage`、`freshness`、`excluded_harnesses`
 与 `last_observed_at`。金额不是脱离来源的 scalar；任何 UI 若只消费金额而丢弃这些
 字段，视为契约违规。调用者不应知道数据来自 JSON、SQLite 或未来的离线分析索引，
 但不得忽略这些业务语义字段。
 
 **该 DTO 已于 Stage 0 冻结并在消费中（Tauri/CLI），Stage B 的 SQLite repository
-必须产出同一形状。** R4 补充：权威计费归属在 `by_provider`（键 `"host/provider"`，
-条目级单币 currency——claude-code 宿主内 anthropic(USD)+minimax(CNY) 同桶跨币
-相加就是编造）；`by_host` 保留币种分栏的旧口径（有测试钉着），新增消费方一律读
+必须产出同一形状。** R4 补充：权威计费归属在 `by_provider`（键 `"harness/provider"`，
+条目级单币 currency——claude-code 执行环境内 anthropic(USD)+minimax(CNY) 同桶跨币
+相加就是编造）；`by_harness` 保留币种分栏的旧口径（有测试钉着），新增消费方一律读
 `by_provider`。
 
 ### 3.2 DSH 是参考实现，不是数据模型
 
-DSH + dsh-client 是当前审计闭环最完整的宿主集成：它已经验证了
+DSH + dsh-client 是当前审计闭环最完整的执行环境集成：它已经验证了
 原始会话事件 → 语义信号 → coverage → detector → finding → projection 这条链。
 但 v0.9 不得把 DSH 的 JSONL 字段、四 token 桶、峰谷定价、compaction 事件或
-session projection 协议提升为跨宿主模型。
+session projection 协议提升为跨执行环境模型。
 
 复用单位必须是能力与事实契约：
 
 ~~~
 DSH / Claude Code / Codex 原始 wire
-  → 各自 host adapter
+  → 各自 harness adapter
   → CanonicalSession + UsageObservation + SourceAttempt
   → shared identity / validation / reconciliation
   → UsageFact + coverage + projection
@@ -187,36 +187,36 @@ DSH / Claude Code / Codex 原始 wire
 - DSH 的 zstd、header、cwd/profile、approval、sandbox、hook、峰谷定价仍是 DSH adapter 的责任；
 - Claude/Codex 的累计快照、rollout、cache 桶、逻辑 session identity 仍是各自 adapter 的责任；
 - UsageFact 的 ID、schema、provenance、缺失语义、事实校验和写入协议必须只有一份；
-- 行为检测器以 Signal / capability 为输入。宿主未提供足够信号时，必须得到
+- 行为检测器以 Signal / capability 为输入。执行环境未提供足够信号时，必须得到
   unavailable / partial，不能把 DSH 规则硬跑后输出 measured zero；
-- dsh-client 的 WASM 复用证明同一规则可跨 CLI、host、browser 运行，但它不是
-  其他宿主必须实现的 UI 插件接口。
+- dsh-client 的 WASM 复用证明同一规则可跨 CLI、harness、browser 运行，但它不是
+  其他执行环境必须实现的 UI 插件接口。
 
-### 3.3 最小宿主接入契约
+### 3.3 最小执行环境接入契约
 
-一个宿主要进入 v0.9 的可信数据面，必须分别声明下列能力；不能以已扫到文件替代。
+一个执行环境要进入 v0.9 的可信数据面，必须分别声明下列能力；不能以已扫到文件替代。
 
-| 交付物 | Host adapter 责任 | Runtime 责任 |
+| 交付物 | Harness adapter 责任 | Runtime 责任 |
 |---|---|---|
 | Source descriptor | roots、文件类型、读取错误与 source revision | 调度、checkpoint、source status |
 | CanonicalSession | 原始 session → 可重放最小会话输入 | 持久化、保留、重放 |
 | UsageObservation | 原始用量载体 → token/金额/时间/身份输入 | schema 校验、reconciliation、emit |
 | UsageFact | 提供 build_usage_fact 所需字段和原始证据 | 去重、append、lease、transaction |
-| HostBillRecord | 提供宿主账单金额、周期、原始账单证据与不可归因字段 | 独立持久化、不可与 token 估算混淆 |
-| Coverage | 可观察/不可观察字段与分母 | 跨宿主汇总、投影和 UI 降级 |
+| HarnessBillRecord | 提供执行环境账单金额、周期、原始账单证据与不可归因字段 | 独立持久化、不可与 token 估算混淆 |
+| Coverage | 可观察/不可观察字段与分母 | 跨执行环境汇总、投影和 UI 降级 |
 | Capability | 支持的 trace、cost、session、MCP 等面 | 命令/UI 是否启用及 unavailable 解释 |
 
-UsageObservation 是内部规范化输入，不是第二份账本，也不是公开 API。它允许不同宿主
+UsageObservation 是内部规范化输入，不是第二份账本，也不是公开 API。它允许不同执行环境
 保留精确 token、amount、provider、模型、时间和 identity 语义；Runtime 只消费已经
-完成宿主解释的观察值，绝不从通用 writer 反向猜 wire 字段。
+完成执行环境解释的观察值，绝不从通用 writer 反向猜 wire 字段。
 
 ### 3.4 事实与索引
 
 | 层 | 权威性 | 用途 |
 |---|---|---|
-| 原始宿主日志 | 宿主拥有 | 不复制、不作为本项目写入目标 |
+| 原始执行环境日志 | 执行环境拥有 | 不复制、不作为本项目写入目标 |
 | `UsageFact` JSONL | 审计事实 | 追加、去重、账目对账、导出 |
-| `HostBillRecord` JSONL | 宿主账单事实 | 不可验证 token 时的可信费用、周期与来源 |
+| `HarnessBillRecord` JSONL | 执行环境账单事实 | 不可验证 token 时的可信费用、周期与来源 |
 | CanonicalSession snapshot | 可重放输入 | session 级解释、重建与审计 |
 | SQLite | 可重建投影 | 筛选、排序、分页、跨页面查询 |
 | Tauri cache | 临时 | 加速显示，不能成为账目权威 |
@@ -246,7 +246,7 @@ lease acquired → intent durable → facts/canonical durable
 | fixed subscription | 用户声明的固定订阅费用 | 否，只能按周期单列 |
 | metered actual | 可观测到的按量实际费用 | 可以按口径汇总 |
 | metered estimate | 依据价格表的估算 | 不可以 |
-| host-billed | 宿主提供的账单/credits 消耗，但无逐请求 token 归因 | 可以按宿主账单口径汇总，不能重标为模型 API 成本 |
+| harness-billed | 执行环境提供的账单/credits 消耗，但无逐请求 token 归因 | 可以按执行环境账单口径汇总，不能重标为模型 API 成本 |
 | API equivalent | 套餐消耗的等价 API 标价 | 不可以，只作诊断 |
 | unresolved | 模型或价格不可确认 | 不得归零 |
 
@@ -299,7 +299,7 @@ agent-vitals-data/
 └── projection/           versioned summary DTO builders
 
 agent-vitals-runtime/
-├── ingest_service.rs     hosts → data batch orchestration
+├── ingest_service.rs     harnesses → data batch orchestration
 ├── sync_service.rs       scheduling / checkpoint trigger / recovery entry
 └── projection_events.rs  cache invalidation / UI refresh event only
 ```
@@ -309,7 +309,7 @@ agent-vitals-runtime/
 ```text
 agent-vitals data coverage [--json]
 agent-vitals data rebuild-index
-agent-vitals data replay [--host <host>]
+agent-vitals data replay [--harness <harness>]
 agent-vitals billing show
 agent-vitals billing validate
 ```
@@ -346,7 +346,7 @@ v0.9 的权威事实仍是 JSONL；SQLite 只承担可删除、可重建的本�
   反而会扩大依赖、编译和模型迁移成本；
 - repository 的 typed query 是唯一取数接口，手写、参数化 SQL 可审计且适合有限 schema；
 - DuckDB 仍只可作为显式离线分析/导出 adapter，不可成为实时状态库或第二权威源；
-- 将来若需要云同步，再在 Data 之上增加 sync adapter；不得改变 Host/Runtime/UI 的查询契约。
+- 将来若需要云同步，再在 Data 之上增加 sync adapter；不得改变 Harness/Runtime/UI 的查询契约。
 
 ### 5.2a 统一查询源的差距（2026-09-06 外部审计 P1 确认，v0.10 主线）
 
@@ -355,7 +355,7 @@ fold——facts 索引只在 DSH 预算对账（`data budget-reconcile`）与小
 面板被消费，不驱动 CLI/Tauri/HTML 的日/月汇总。Stage B「替换 Stage 0
 JSON read adapter」目标**未达成**，v0.9 数据访问维度保持未完成。
 
-**三宿主的索引覆盖实测（2026-09-06 真机）**：
+**三执行环境的索引覆盖实测（2026-09-06 真机）**：
 - **DSH**：双轨逐厘相等（¥1752.45，`data budget-reconcile`）——索引可全权
   接管 ✅；
 - **Codex**：差 0.25%（fold 的 untimed 残差样本不产 fact）——小且方向
@@ -388,26 +388,26 @@ observation_kind 显式分轴：小时分布只读行/槽 facts（day-summary �
 ### 5.2 CLI application-layer extraction
 
 v0.9 开工前必须完成 v0.8 E7 的所有权收口。当前 apps/cli/src/agent/ 仍混有三类职责：
-宿主 UsageFact emitter、跨宿主 SessionStore/缓存/分页，以及命令输出。该目录不能继续
+执行环境 UsageFact emitter、跨执行环境 SessionStore/缓存/分页，以及命令输出。该目录不能继续
 成为新的数据面 owner。
 
 | 当前类别 | 目标位置 | 迁移原则 |
 |---|---|---|
-| Claude/Codex/DSH 的 wire → UsageFact emitter | hosts/<host>/sessions/ | 每宿主一份 adapter；不在 CLI 重抄 wire |
-| roots、解码、数据库/文件读取 | hosts/<host>/sources/ | 受 sources feature 门控 |
-| SessionStore、跨宿主分页、cache、checkpoint、writer | agent-vitals-runtime/ | 一套服务，不按 host 复制 |
-| 成本、ID、coverage、事实校验、纯指标 | Domain / Vitals Core | 无 I/O、无 UI、无宿主文件路径 |
+| Claude/Codex/DSH 的 wire → UsageFact emitter | harnesses/<harness>/sessions/ | 每执行环境一份 adapter；不在 CLI 重抄 wire |
+| roots、解码、数据库/文件读取 | harnesses/<harness>/sources/ | 受 sources feature 门控 |
+| SessionStore、跨执行环境分页、cache、checkpoint、writer | agent-vitals-runtime/ | 一套服务，不按 harness 复制 |
+| 成本、ID、coverage、事实校验、纯指标 | Domain / Vitals Core | 无 I/O、无 UI、无执行环境文件路径 |
 | 参数解析、human/JSON 终端渲染 | apps/cli/ | 只能调用 Runtime projection |
 
 迁移不是机械移动文件：例如 Codex 单会话审计的成本/证据组合是 Runtime projection，
-不应塞回 hosts/codex；反之 Claude/Codex/DSH 的原始 usage 解释不能继续留在 CLI。
+不应塞回 harnesses/codex；反之 Claude/Codex/DSH 的原始 usage 解释不能继续留在 CLI。
 
 ## 6. 存储、隐私与导出
 
 - JSONL 适合审计、append、跨语言 parity 和脱敏导出；
 - SQLite 只承担交互查询，不承担第二份权威事实；
 - DuckDB 只作为显式启用的离线分析/benchmark/export adapter，读取同一份脱敏输入；
-- 原始宿主日志不复制；CanonicalSession 默认 90 天、UsageFact 保留**最近 13 个自然月**（含当月；fencepost 钉死——cutoff = current − 12，两端含）、可重建 cache 30 天；
+- 原始执行环境日志不复制；CanonicalSession 默认 90 天、UsageFact 保留**最近 13 个自然月**（含当月；fencepost 钉死——cutoff = current − 12，两端含）、可重建 cache 30 天；
 - 私有 trace 与脱敏 export 必须是不同写路径，不能由一个 `redacted: bool` 决定；
 - 用户配置与可重建 state/cache 分目录，配置与导出均不得保存凭据。
 
@@ -419,24 +419,24 @@ v0.9 开工前必须完成 v0.8 E7 的所有权收口。当前 apps/cli/src/agen
 - 用现有 DSH `today/month`、Claude ledger 与 WorkBuddy source 实现只读 source adapters；
   Stage 0 可继续读取 JSON，不要求先迁移历史账本；
 - Tauri、CLI、HTML 改为只调用 `daily_summary`、`monthly_summary`、`coverage_status` 等 API，
-  禁止再直读 state JSON 或宿主账本；
-- 控制台日/月/预算展示 freshness、coverage、host scope 和 excluded hosts；stale / partial /
+  禁止再直读 state JSON 或执行环境账本；
+- 控制台日/月/预算展示 freshness、coverage、harness scope 和 excluded harnesses；stale / partial /
   excluded 不得降级成零或“正常”；
 - 完成 v0.8 E7：Skill Surface ownership migration 与 CLI application-layer extraction；
-- 将三宿主 UsageFact emitter 的 wire 解释迁到 hosts/<host>/sessions/，将 SessionStore 的
+- 将三执行环境 UsageFact emitter 的 wire 解释迁到 harnesses/<harness>/sessions/，将 SessionStore 的
   cache/checkpoint 所有权迁到 Runtime；
-- 为 DSH、Claude Code、Codex 和 WorkBuddy 建立 v0.9 最小宿主接入契约 fixture；
+- 为 DSH、Claude Code、Codex 和 WorkBuddy 建立 v0.9 最小执行环境接入契约 fixture；
 - 保持现有 CLI/Python/WASM 输出零漂移，除新增的 freshness/coverage 契约字段外不重写既有数值。
 
 **门槛：**上层仅依赖 Data Query API，且接口实现可以在不改 UI/CLI 的情况下由 JSON
-切换至 SQLite；控制台不会把 stale / partial / excluded 当作零或正常；CLI 不再拥有宿主
-wire 解释或事实写入；各宿主的 capability/coverage 与实际注册实现双向对账。
+切换至 SQLite；控制台不会把 stale / partial / excluded 当作零或正常；CLI 不再拥有执行环境
+wire 解释或事实写入；各执行环境的 capability/coverage 与实际注册实现双向对账。
 
 ### ✅ v0.9.0 Stage 0：Data Access Foundation（2026-09-05 完成）
 
 七步全部落地并合入 main（`1596836`），门槛逐条达成：上层只依赖 Data Query API；
 stale/partial/excluded 不降级为零或正常（含 DSH 0-token 月回归 `9ccc488`）；
-CLI 宿主 wire 解释收口至 runtime（Stage 0.3 六文件搬迁）；四宿主 capability/
+CLI 执行环境 wire 解释收口至 runtime（Stage 0.3 六文件搬迁）；四执行环境 capability/
 coverage 双向对账 fixture。执行记录：`AGENT_VITALS_V0_9_STAGE0_RESEARCH.md`。
 
 ### ✅ 计划外插入（2026-09-05，同日）：KPI/计费归属与总览感知层
@@ -444,7 +444,7 @@ coverage 双向对账 fixture。执行记录：`AGENT_VITALS_V0_9_STAGE0_RESEARC
 用户指出总览 KPI 只反映 DSH 一家后展开，最终演化为计费归属重构：计费模式
 声明层（Stage A `c7d0e06`）、by_provider 权威归属（Stage B `f004756`）、
 FixedSubscription 写入方与 total_actual_spend（Stage C `68ca4eb`）、总览
-KPI 行/双轨账/决策卡与跨宿主 Token 日历（Stage D `6586112`/`f110066`）、
+KPI 行/双轨账/决策卡与跨执行环境 Token 日历（Stage D `6586112`/`f110066`）、
 两轮审查修复（`29c0717`/`0096607`/`01f0d9a`）、tab 卡顿性能回归修复
 （`d8c6c83`/`4ed99e7`）。全部在冻结 DTO 上 additive 演进，未破 Stage 0 契约。
 教训沉淀：`CLAUDE.md`「v0.9 成本词表与计费归属」节。
@@ -454,18 +454,18 @@ KPI 行/双轨账/决策卡与跨宿主 Token 日历（Stage D `6586112`/`f11006
 UsageFact writer（`agent-vitals-data::evidence`：fact_id exactly-once、
 崩溃尾面**修复**——半行截断/缺封口补换行，open 落实而非只容忍）、稳定
 identity（v0.7 契约层）、去重与 reconciliation（`reconcile_tokens` 报告式）、
-Runtime 共享 ingest service（`agent-vitals-runtime::ingest_service`：宿主
-封闭词表、按事实自身 host 分组成 `<data_home>/facts/<host>.jsonl`、写后
+Runtime 共享 ingest service（`agent-vitals-runtime::ingest_service`：执行环境
+封闭词表、按事实自身 harness 分组成 `<data_home>/facts/<harness>.jsonl`、写后
 重放自检）。CLI 端到端：`{claude,codex,dsh}-usage-facts --write`（Rust-only
 ——Python 不长 writer，spec DoD #7；flag 关闭时输出与 Python 字节相等）。
 **剩余**：CanonicalSession snapshot writer、facts vs 投影 DTO 的全量
 reconcile（投影在 Stage B 落地后接）。
 
-§5.2 遗留的 `{claude,codex,dsh}_usage_fact.rs` 宿主归位（Stage 0.3 曾记录的
-scope gap）已完成：emitter 落 `agent-vitals-hosts/hosts/<h>/sources/usage_fact.rs`
+§5.2 遗留的 `{claude,codex,dsh}_usage_fact.rs` 执行环境归位（Stage 0.3 曾记录的
+scope gap）已完成：emitter 落 `agent-vitals-harnesses/harnesses/<h>/sources/usage_fact.rs`
 （读文件 → sources 层；行级原语下沉 `claude_code/sessions/usage.rs`、
 `dsh_header`/`dsh_source_profile` 下沉 `dsh/sessions/header.rs`——runtime 对
-宿主词表的所有权就此清零），CLI 经 flat alias re-export，212 项差分 +
+执行环境词表的所有权就此清零），CLI 经 flat alias re-export，212 项差分 +
 golden 15/15 钉住字节零漂移。
 
 ### v0.9.0 Stage B（P1→P2）：索引、计费和覆盖
@@ -473,7 +473,7 @@ golden 15/15 钉住字节零漂移。
 SQLite schema/migration/rebuild（P1，与 writer lease、checkpoint、增量失效
 同批——托盘 tick 与 CLI 并写 month.json 的冲突面由 lease 收口），替换 Stage 0
 JSON read adapter；BillingContext/UserProfile 吸收 4.1 声明层（P2）；
-HostBillRecord 落地（WorkBuddy credit_json 首个生产写入方）；coverage
+HarnessBillRecord 落地（WorkBuddy credit_json 首个生产写入方）；coverage
 projection 完整化。Data Query API 与上层 DTO 不变。
 
 ### ✅ v0.9.0 Stage C（P2）：发布收口（2026-09-06 完成）
@@ -495,9 +495,9 @@ v0.9.0 发布条件。当前 Tauri 的五分钟 tick 与手动同步是允许的
 只有下列条件全部满足后，才可以另开后续 feature 实现 watcher：
 
 1. fold_resume(checkpoint, appended) == fold(all) 有 fixture 证明；
-2. source revision、稳定 identity 与 exactly-once writer 已在三宿主跑通；
+2. source revision、稳定 identity 与 exactly-once writer 已在三执行环境跑通；
 3. append 中、半写入、rename、zstd 更新、重复事件和 watcher 重启均有恢复测试；
-4. watcher 只触发 Runtime ingest，不直接让 Tauri、CLI 或 host adapter 写权威 state；
+4. watcher 只触发 Runtime ingest，不直接让 Tauri、CLI 或 harness adapter 写权威 state；
 5. UI 只接收 versioned projection 更新事件，而不以文件事件本身作为账已结清的证明。
 
 ## 8. Definition of Done
@@ -509,7 +509,7 @@ v0.9 可发布，当且仅当（R4 标注当前达成状态）：
 3. 双进程竞争遵守同一 writer lease；—— ✅ Stage B `6b3aadd`：`runtime::lease`（O_EXCL + 原子 rename 陈旧偷取），接线 merge_today/merge_month（托盘 vs CLI 的读改写序列）与 facts ingest/reconcile/rebuild 临界区；Python 写入方按 §7.1 退役路线不纳入
 4. 每月成本按 fixed / actual / estimate / equivalent / unresolved 分开，且可下钻来源；—— ✅ Stage B `9fbf920`：`data-unresolved` 逐模型下钻（billing-route-unknown / billing-mode-unknown / no-price-card / partial-price-basis 四类原因，键与 by_provider 同词表）；五档分离为 Stage B/C `f004756`/`68ca4eb` 落地
 5. coverage 不把未知伪装成零，所有分母有版本化定义；—— 🔶 字段级已钉（contract_violations + denominator_version），投影层待完整化
-6. CLI、Tauri、HTML 均通过同一 Data query DTO 取数；关键账目、宿主范围、新鲜度与覆盖率一致；—— ✅ Stage 0 达成并保持
+6. CLI、Tauri、HTML 均通过同一 Data query DTO 取数；关键账目、执行环境范围、新鲜度与覆盖率一致；—— ✅ Stage 0 达成并保持
 7. Python/Rust 的公开 JSON 保持必要的 byte-parity，Python 没有新增 writer、ORM 或网络持久化旁路；—— ✅ 持续保持（golden 15/15 + 锁步测试）
 8. v0.10 所需的 Trace/Issue/Action 数据可以只依赖本版事实与 projection，而无需回读 UI 文件。—— ❌ 依赖 Stage A/B
 
@@ -532,12 +532,12 @@ CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 CREATE TABLE facts(
     fact_id            TEXT PRIMARY KEY,   -- 契约层 6 元组 fnv1a64（uf1-…）；去重容器，不产生身份
-    host               TEXT NOT NULL,      -- 封闭词表：claude-code / codex / dsh
+    harness               TEXT NOT NULL,      -- 封闭词表：claude-code / codex / dsh
     machine_namespace  TEXT NOT NULL,
     native_session_id  TEXT NOT NULL,
     source_event_id    TEXT NOT NULL,
     observation_kind   TEXT NOT NULL,
-    event_ts_utc       TEXT,               -- 宿主事件时间（UTC ISO）；月/小时窗都在读取时按它切
+    event_ts_utc       TEXT,               -- 执行环境事件时间（UTC ISO）；月/小时窗都在读取时按它切
     model_id           TEXT,               -- model_id ?? model_raw
     provider_id        TEXT,               -- provider_id ?? billing_source
     source_profile     TEXT,               -- fact 自带 source_profile（DSH by_source 视角的索引落位）
@@ -548,15 +548,15 @@ CREATE TABLE facts(
     t_output           INTEGER NOT NULL DEFAULT 0,
     raw                TEXT NOT NULL       -- 事实全文 JSON（列不够用时从自己身上读回）
 );
-CREATE INDEX facts_host_ts  ON facts(host, event_ts_utc);      -- 月/小时窗扫描
-CREATE INDEX facts_session  ON facts(host, native_session_id); -- 会话下钻
+CREATE INDEX facts_harness_ts  ON facts(harness, event_ts_utc);      -- 月/小时窗扫描
+CREATE INDEX facts_session  ON facts(harness, native_session_id); -- 会话下钻
 ```
 
 ### A.2 设计规则（每条都有测试或守卫钉着）
 
-1. **不派生 day 列**：北京日归属是宿主逻辑（claude UTC+8 日线 / codex
+1. **不派生 day 列**：北京日归属是执行环境逻辑（claude UTC+8 日线 / codex
    `codex_hour_of` / DSH 各自），索引层复制任何一份都违反「单一 wire 解释」
-   ——月/小时窗都在**读取时**按 `event_ts_utc` 现算（`hours_by_host`）。
+   ——月/小时窗都在**读取时**按 `event_ts_utc` 现算（`hours_by_harness`）。
 2. **迁移 = 整库重建**：schema_version 不匹配 / 库损坏（SQLITE_CORRUPT/
    NOTADB）/ 删除 → open 时从 JSONL 全量重放；比本二进制新的 schema 报错
    不重建（重建丢新语义）。
@@ -573,7 +573,7 @@ CREATE INDEX facts_session  ON facts(host, native_session_id); -- 会话下钻
 |---|---|---|
 | ~~peak 峰谷标志~~ | ✅ v2 已落地（插入时派生，零 emitter 改动） | `event_peak` 列 |
 | ~~by_source~~ | ✅ v2 已落地 | `source_profile` 列 |
-| HostBillRecord | WorkBuddy credit_json 写入方落地 | 独立 `host_bills` 表（宿主账单口径，不冒充 API 成本） |
+| HarnessBillRecord | WorkBuddy credit_json 写入方落地 | 独立 `harness_bills` 表（执行环境账单口径，不冒充 API 成本） |
 | canonical snapshot | §3.4 第三层落地 | 独立 `sessions` 表 + 90 天保留 |
 | checkpoint/lease 表 | 多进程 ingest 常态化 | 独立表或继续文件锁（P0 文件锁够用） |
 

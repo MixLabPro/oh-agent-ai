@@ -15,7 +15,7 @@
 //! memo 键是 `SessionKey::ledger_key()`（长度前缀自定界，全仓同一构造——
 //! `fact_writer_sql::session_key` 的注释写明朴素拼接会撞键）。
 //!
-//! I/O 归属：本模块在 runtime（不是 hosts），允许碰文件系统与 SQLite——与
+//! I/O 归属：本模块在 runtime（不是 harnesses），允许碰文件系统与 SQLite——与
 //! `mcp::AuthorityHandle` 同层。
 
 use std::collections::HashMap;
@@ -34,10 +34,10 @@ use serde_json::{json, Value};
 /// spec §7 门槛 4：60s TTL。
 pub const MEMO_TTL: Duration = Duration::from_secs(60);
 
-/// 宿主封闭词表（spec §2.5.1；与 `ingest_service::FACT_HOSTS` 同表——那边是
+/// 执行环境封闭词表（spec §2.5.1；与 `ingest_service::FACT_HARNESSES` 同表——那边是
 /// 数组常量，这里只需要 contains 语义；workbuddy 自 E4b 起入表，它的会话
 /// 图节点来自 traces 的 generation span 事实）。
-pub const TRACE_HOSTS: &[&str] = &["claude-code", "codex", "dsh", "workbuddy"];
+pub const TRACE_HARNESSES: &[&str] = &["claude-code", "codex", "dsh", "workbuddy"];
 
 /// 一份 memo 条目：图 + 产生它时的输入快照指纹（`(COUNT, MAX(rowid))`）+
 /// 挂载时间。
@@ -78,8 +78,8 @@ fn fact_counter(
 /// memo 层的会话查找失败原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraceLookupError {
-    /// host 不在 `TRACE_HOSTS` 词表里。
-    UnknownHost(String),
+    /// harness 不在 `TRACE_HARNESSES` 词表里。
+    UnknownHarness(String),
     /// 权威库打不开 / 不存在 / schema 不符。
     AuthorityUnavailable(String),
     /// session_key 在 `sessions` 表里没有行（引用了已删除的会话）。
@@ -93,8 +93,8 @@ pub enum TraceLookupError {
 impl std::fmt::Display for TraceLookupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TraceLookupError::UnknownHost(h) => {
-                write!(f, "unknown host `{h}` (trace hosts: {})", TRACE_HOSTS.join("/"))
+            TraceLookupError::UnknownHarness(h) => {
+                write!(f, "unknown harness `{h}` (trace harnesses: {})", TRACE_HARNESSES.join("/"))
             }
             TraceLookupError::AuthorityUnavailable(e) => write!(f, "authority unavailable: {e}"),
             TraceLookupError::SessionNotFound => write!(f, "session not found in authority"),
@@ -104,7 +104,7 @@ impl std::fmt::Display for TraceLookupError {
     }
 }
 
-/// 从 `sessions` 表取 `(host, native_session_id, source_profile,
+/// 从 `sessions` 表取 `(harness, native_session_id, source_profile,
 /// machine_namespace)`——`SessionKey` 四元组的全量。缺失的
 /// `source_profile` 回退 `"default"`（与 `fact_writer_sql::session_key` 同款）。
 fn session_row(
@@ -112,7 +112,7 @@ fn session_row(
     session_key: &str,
 ) -> Result<Option<(String, String, String, String)>, TraceLookupError> {
     conn.query_row(
-        "SELECT host, native_session_id, COALESCE(source_profile, 'default'), machine_namespace
+        "SELECT harness, native_session_id, COALESCE(source_profile, 'default'), machine_namespace
          FROM sessions WHERE session_key = ?1",
         rusqlite::params![session_key],
         |r| {
@@ -131,59 +131,59 @@ fn session_row(
     })
 }
 
-/// 在受控宿主目录中定位 `key` 的源文件。返回的路径只在本模块内部使用，绝不
+/// 在受控执行环境目录中定位 `key` 的源文件。返回的路径只在本模块内部使用，绝不
 /// 进入 MCP/CLI JSON；这保留 authority DB 不持久化原始路径的隐私边界，同时让
 /// `session_ref` 成为真正可下钻的公共标识。
 fn source_paths_for_session(
-    host_home: &Path,
+    harness_home: &Path,
     dsh_root: &Path,
     key: &SessionKey,
 ) -> Result<Vec<PathBuf>, TraceLookupError> {
-    // W3：各宿主「怎么在根下找到这个会话的源」来自 hosts 的会话宿主注册表。
-    let host = agent_vitals_hosts::sources::session_hosts::session_host(&key.host_kind)
-        .ok_or_else(|| TraceLookupError::UnknownHost(key.host_kind.clone()))?;
-    let roots = agent_vitals_hosts::sources::session_hosts::HostRoots {
-        user_home: host_home,
+    // W3：各执行环境「怎么在根下找到这个会话的源」来自 harnesses 的会话执行环境注册表。
+    let harness = agent_vitals_harnesses::sources::session_harnesses::session_harness(&key.harness_kind)
+        .ok_or_else(|| TraceLookupError::UnknownHarness(key.harness_kind.clone()))?;
+    let roots = agent_vitals_harnesses::sources::session_harnesses::HarnessRoots {
+        user_home: harness_home,
         dsh_home: Some(dsh_root),
     };
-    let paths = (host.session_sources)(&roots, &key.native_id);
+    let paths = (harness.session_sources)(&roots, &key.native_id);
     if paths.is_empty() {
         return Err(TraceLookupError::SourceUnavailable(
-            "no matching source remains under this host's configured directory".to_string(),
+            "no matching source remains under this harness's configured directory".to_string(),
         ));
     }
     Ok(paths)
 }
 
 /// 从显式根目录建立一份 canonical session。这一可注入入口供测试使用；生产
-/// `canonical_for_local_session` 只从 HOME / DSH_HOME 的固定宿主目录调用它。
+/// `canonical_for_local_session` 只从 HOME / DSH_HOME 的固定执行环境目录调用它。
 pub fn canonical_for_session_from_roots(
-    host_home: &Path,
+    harness_home: &Path,
     dsh_root: &Path,
     key: &SessionKey,
 ) -> Result<agent_vitals_domain::contracts::evidence::CanonicalSession, TraceLookupError> {
-    let paths = source_paths_for_session(host_home, dsh_root, key)?;
-    agent_vitals_hosts::canonical_input::canonical_session_for_paths(
+    let paths = source_paths_for_session(harness_home, dsh_root, key)?;
+    agent_vitals_harnesses::canonical_input::canonical_session_for_paths(
         &paths,
-        &key.host_kind,
+        &key.harness_kind,
         key.native_id.clone(),
     )
     .map_err(|e| TraceLookupError::SourceUnavailable(e.to_string()))
 }
 
-/// 生产入口：`session_ref` 先被解析为 `SessionKey`，再只在当前用户三宿主的
+/// 生产入口：`session_ref` 先被解析为 `SessionKey`，再只在当前用户三执行环境的
 /// 固定数据目录扫描。找不到源（已清理、移动、权限失效）是显式
 /// `SourceUnavailable`，绝不能悄悄拿 SQL token 事实伪造一张完整执行图。
 pub fn canonical_for_local_session(
     key: &SessionKey,
 ) -> Result<agent_vitals_domain::contracts::evidence::CanonicalSession, TraceLookupError> {
-    let host_home = std::env::var_os("HOME")
+    let harness_home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| TraceLookupError::SourceUnavailable("HOME is not configured".to_string()))?;
     let dsh_root = crate::home::dsh_home().ok_or_else(|| {
         TraceLookupError::SourceUnavailable("DSH_HOME and HOME are not configured".to_string())
     })?;
-    canonical_for_session_from_roots(&host_home, &dsh_root, key)
+    canonical_for_session_from_roots(&harness_home, &dsh_root, key)
 }
 
 /// SQL 身份到源文件的受控反查在 `canonical_for_local_session` 完成；本函数仍
@@ -244,8 +244,8 @@ fn usage_facts_for_session(
 
 /// 把 SQL authority 的可计量事实接入 canonical trace。
 ///
-/// 这里**不**按相近时间把 fact 硬挂到 assistant turn/tool call：不同宿主的
-/// token 事件和工具事件没有一条跨宿主可靠的 join 规则。每个 fact 因此成为
+/// 这里**不**按相近时间把 fact 硬挂到 assistant turn/tool call：不同执行环境的
+/// token 事件和工具事件没有一条跨执行环境可靠的 join 规则。每个 fact 因此成为
 /// 独立 `usage` scope 的 ModelInvocation，有真实 `fact_id`；其 parent 缺席是
 /// 已知、可见的因果缺口，不是被时间猜测掩盖。
 fn attach_usage_facts(
@@ -301,7 +301,7 @@ fn attach_usage_facts(
             branch_state: BranchState::Live,
             // `event_ts_ms` 按权威库契约已是毫秒，这里仍然过一遍具名归一：
             // `TraceNode.started_at_ms` 的契约是毫秒，而它有**两个**写入方
-            // （此处与 `domain/trace.rs`，后者的输入是宿主各自定单位的
+            // （此处与 `domain/trace.rs`，后者的输入是执行环境各自定单位的
             // `TimelineEntry.time`）。让两个写入方都调同一个归一函数，契约才是
             // 被强制的；只归一一个，另一个的正确性就靠运气。函数幂等，对已是
             // 毫秒的输入零行为变化。
@@ -434,8 +434,8 @@ pub fn session_key_for(
 ) -> Result<SessionKey, TraceLookupError> {
     match session_row(conn, session_key)? {
         None => Err(TraceLookupError::SessionNotFound),
-        Some((host, native_id, profile, ns)) => {
-            Ok(SessionKey::new(&host, &native_id, &profile, &ns))
+        Some((harness, native_id, profile, ns)) => {
+            Ok(SessionKey::new(&harness, &native_id, &profile, &ns))
         }
     }
 }
@@ -521,7 +521,7 @@ pub fn clear_memo(data_home: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_vitals_hosts::dsh_evidence::build_dsh_evidence;
+    use agent_vitals_harnesses::dsh_evidence::build_dsh_evidence;
     use serde_json::json;
 
     fn tmp_data_home(tag: &str) -> PathBuf {
@@ -544,12 +544,12 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE sessions (
-                session_key TEXT PRIMARY KEY, host TEXT NOT NULL,
+                session_key TEXT PRIMARY KEY, harness TEXT NOT NULL,
                 native_session_id TEXT NOT NULL, machine_namespace TEXT NOT NULL,
                 source_profile TEXT);
              CREATE TABLE usage_facts (
                 session_key TEXT NOT NULL, fact_id TEXT NOT NULL,
-                host TEXT NOT NULL DEFAULT 'dsh', provider_id TEXT,
+                harness TEXT NOT NULL DEFAULT 'dsh', provider_id TEXT,
                 model_id TEXT, event_ts_ms INTEGER,
                 uncached_input_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
@@ -567,12 +567,12 @@ mod tests {
         conn
     }
 
-    fn seed_session(conn: &rusqlite::Connection, host: &str, sid: &str) -> SessionKey {
-        let key = SessionKey::new(host, sid, "default", "ns-test");
+    fn seed_session(conn: &rusqlite::Connection, harness: &str, sid: &str) -> SessionKey {
+        let key = SessionKey::new(harness, sid, "default", "ns-test");
         conn.execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, source_profile, machine_namespace)
+            "INSERT INTO sessions(session_key, harness, native_session_id, source_profile, machine_namespace)
              VALUES (?1, ?2, ?3, 'default', 'ns-test')",
-            rusqlite::params![key.ledger_key(), host, sid],
+            rusqlite::params![key.ledger_key(), harness, sid],
         )
         .unwrap();
         key
@@ -775,12 +775,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_host_is_rejected_at_the_service_layer_too() {
-        // 服务层自己也拒一遍（双保险）：TRACE_HOSTS 与 ingest 的 FACT_HOSTS
-        // 同表，新增宿主必须两处同步。
-        assert_eq!(TRACE_HOSTS.len(), crate::core::fact_hosts::FACT_HOSTS.len());
-        for h in crate::core::fact_hosts::FACT_HOSTS {
-            assert!(TRACE_HOSTS.contains(&h), "{h} in FACT_HOSTS but not TRACE_HOSTS");
+    fn unknown_harness_is_rejected_at_the_service_layer_too() {
+        // 服务层自己也拒一遍（双保险）：TRACE_HARNESSES 与 ingest 的 FACT_HARNESSES
+        // 同表，新增执行环境必须两处同步。
+        assert_eq!(TRACE_HARNESSES.len(), crate::core::fact_harnesses::FACT_HARNESSES.len());
+        for h in crate::core::fact_harnesses::FACT_HARNESSES {
+            assert!(TRACE_HARNESSES.contains(&h), "{h} in FACT_HARNESSES but not TRACE_HARNESSES");
         }
     }
 
@@ -828,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn controlled_source_lookup_resolves_all_three_hosts_without_exposing_paths() {
+    fn controlled_source_lookup_resolves_all_three_harnesses_without_exposing_paths() {
         let root = tmp_data_home("source-lookup");
         let dsh_root = root.join("dsh");
         let claude = root.join(".claude/projects/demo/claude-s1.jsonl");
@@ -864,7 +864,7 @@ mod tests {
             SessionKey::new("dsh", "dsh-s1", "default", "ns"),
         ] {
             let canonical = canonical_for_session_from_roots(&root, &dsh_root, &key).unwrap();
-            assert_eq!(canonical.meta.host_id, key.host_kind);
+            assert_eq!(canonical.meta.harness_id, key.harness_kind);
             assert_eq!(canonical.meta.session_id, key.native_id);
         }
 

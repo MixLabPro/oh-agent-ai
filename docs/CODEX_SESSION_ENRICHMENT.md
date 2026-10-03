@@ -22,8 +22,8 @@
 
 | 概念 | 含义 | UI 表示 | 是否计入异常 |
 |---|---|---|---|
-| 宿主结构缺口 | Codex wire 从不提供该维度 | `Unavailable` / 结构缺口 | 否 |
-| 会话未观测 | 宿主可提供，但本会话没有此事件 | `Not observed` / 证据缺口 | 否 |
+| 执行环境结构缺口 | Codex wire 从不提供该维度 | `Unavailable` / 结构缺口 | 否 |
+| 会话未观测 | 执行环境可提供，但本会话没有此事件 | `Not observed` / 证据缺口 | 否 |
 | 审计 finding | 可运行规则命中风险模式 | severity + rule + evidence | 是 |
 
 `coverage.<signal>.available` 只回答第一行；coverage 计数只回答第二行；
@@ -70,14 +70,14 @@ Python 必须以相同 gating 和字节形状镜像 Rust。
 
 - “异常”KPI 只显示 `audit.summary.findings_total` 与最严重 rule；
 - “Finding 队列”只显示真实 `audit.findings`；
-- `Unavailable` rule 要显示缺少的信号和宿主限制，不显示为零命中；
+- `Unavailable` rule 要显示缺少的信号和执行环境限制，不显示为零命中；
 - coverage 移回“证据质量”，不进入 finding 计数；
 - 每条 finding 显示 rule、severity、turn、工具（若有）和截断 evidence。
 
 ### 0.4 UserPrompts 数据纪律
 
 `response_item.message + role:"user"` 并不天然等于真人提示：真实会话中已有仅含
-`<recommended_plugins>` 与 `<environment_context>` 的宿主注入 message。Python/Rust 必须
+`<recommended_plugins>` 与 `<environment_context>` 的执行环境注入 message。Python/Rust 必须
 以同一规则把它分类为 `human` / `ambient_only` / `mixed` / `unknown`：
 
 - `human` 与 `mixed` 每条 message 最多计一次 `UserPrompts.measured`；
@@ -214,7 +214,7 @@ Map，**同序号插入**；键序是字节一致的一部分，不能重排）�
 
 - `docs/RUNTIME_EVIDENCE_CONTRACT.md:561` §13 Tool-call duration 行 Codex-Paginated cell 加
   「⚠️ 实测 4–9µs 非墙钟，语义待澄清」脚注；`:623` TurnItem 表 duration 句同。
-- `crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs:403-404` 过时注释（「CommandExecution
+- `crates/agent-vitals-adapters/src/harnesses/codex/sessions/evidence.rs:403-404` 过时注释（「CommandExecution
   额外带 duration → 也喂 Tool-call duration」——实际从未喂）改为诚实话；
   `codex_evidence.py:218-220` 同源注释同步。
 - comp_hash 注记：`scripts/agent_vitals/adapters/codex_session.py:116`（turn_context 分支）
@@ -251,11 +251,11 @@ quota checkpoint 与 turn 结束状态。点击 finding 必须能定位对应事
 - 前置条件：quota burn-rate、额度告警、日历/菜单栏聚合或可行动 quota KPI 至少有一个与
   enum 同一阶段落地。未满足时，Phase 1 的 `quota_trajectory` 已足够。
 - `crates/agent-vitals-core/src/contracts/evidence.rs`：`Signal::QuotaConsumption`
-  （host-neutral 名，不违反 `shared_type_layer_has_no_host_identifiers_in_code`）。
+  （harness-neutral 名，不违反 `shared_type_layer_has_no_harness_identifiers_in_code`）。
 
 ### 6.2 Codex 侧（measured）
 
-- `crates/agent-vitals-adapters/src/hosts/codex/sessions/evidence.rs` ALL_SIGNALS（:438）+1；
+- `crates/agent-vitals-adapters/src/harnesses/codex/sessions/evidence.rs` ALL_SIGNALS（:438）+1；
   `derive_coverage` 的 `token_count` 分支：`rate_limits` 存在 → `bump(QuotaConsumption,
   Measured, 1)`（每事件 1，同 Usage 口径；无 rate_limits 的 token_count 不数——同
   ContextWindow 的守卫式）。
@@ -266,7 +266,7 @@ quota checkpoint 与 turn 结束状态。点击 finding 必须能定位对应事
 
 ### 6.3 DSH 侧（honest unavailable）
 
-- `crates/agent-vitals-core/src/adapters/hosts/dsh/sessions/evidence.rs:486-489` 零填充列表 +1
+- `crates/agent-vitals-core/src/adapters/harnesses/dsh/sessions/evidence.rs:486-489` 零填充列表 +1
   （`coverage.set(Signal::QuotaConsumption, CoverageCounts::default())`），注释「矩阵没
   覆盖的三行」→ 四行；单测 `unmapped_signals_are_unavailable_not_fabricated`
   （:649-652）列表 +1。

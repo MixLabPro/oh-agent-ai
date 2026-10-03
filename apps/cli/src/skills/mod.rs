@@ -2,9 +2,9 @@
 //! redact / render / report，读已经扫描好的记录渲染成文字/JSON。
 //!
 //! 扫描本身（`discovery.rs`/`inventory.rs`/`security.rs`）v0.8 Phase E7.5
-//! 迁进 `agent-vitals-runtime::skills::{scanner,inventory,security}`；宿主
-//! 适配器（codex / openclaw / workbuddy / host 的配置解释与探测）E7.6 迁进
-//! `agent-vitals-hosts::hosts::<h>::{skills,sources::skills}`。本子树现在
+//! 迁进 `agent-vitals-runtime::skills::{scanner,inventory,security}`；执行环境
+//! 适配器（codex / openclaw / workbuddy / harness 的配置解释与探测）E7.6 迁进
+//! `agent-vitals-harnesses::harnesses::<h>::{skills,sources::skills}`。本子树现在
 //! 只剩"调 runtime service → 渲染"的 CLI 层，没有自己的扫描/编排逻辑。
 //!
 //! 与 `agent/` 的边界：**「skill 体检」是静态资产审计**（本子树），**「skill

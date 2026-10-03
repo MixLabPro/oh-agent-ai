@@ -270,7 +270,7 @@ pub fn read_redacted_tail(max_lines: usize) -> Vec<String> {
     let Ok(content) = std::fs::read_to_string(log_path()) else {
         return Vec::new();
     };
-    let home = crate::core::home::host_dir();
+    let home = crate::core::home::harness_dir();
     let lines: Vec<&str> = content.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
     lines[start..].iter().map(|line| redact_path_like(line, &home)).collect()

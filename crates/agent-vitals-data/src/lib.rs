@@ -9,11 +9,11 @@
 //! - [`evidence`]   —— append / replay / reconciliation（Stage A）
 //! - [`authority`]  —— v0.9.1 SQL 权威库 `agent-vitals.sqlite3`（schema /
 //!   迁移 / 事务 / 保留；**不自愈**——损坏需 `rm + data-migrate` 重建）
-//! - [`authority_query`] —— `usage_facts` → 各宿主计价桶形状的反查
+//! - [`authority_query`] —— `usage_facts` → 各执行环境计价桶形状的反查
 //! - [`fact_writer_sql`] —— `usage_facts` 的唯一 SQL 写入口
 //! - [`repository`] —— typed query/mutation 边界，上层唯一入口
 //! - [`billing`]    —— `BillingContext` / cost basis（Stage B）
-//! - [`coverage`]   —— source/denominator coverage 的跨宿主汇总
+//! - [`coverage`]   —— source/denominator coverage 的跨执行环境汇总
 //! - [`projection`] —— 组装 `agent_vitals_domain::data_contract` 的
 //!   `MonthlySummary`/`DailySummary` 等版本化 DTO
 //!
@@ -22,7 +22,7 @@
 //!
 //! **`SummaryRepository` 的实现不在这个 crate 里**：spec §3.1 的依赖表把
 //! 本 crate 的允许依赖限定在 Domain（+ 未来的 SQLite 驱动），不包括
-//! `agent-vitals-hosts`——Stage 0 唯一能读到宿主数据（`SessionStore`/
+//! `agent-vitals-harnesses`——Stage 0 唯一能读到执行环境数据（`SessionStore`/
 //! `budget` 状态）的地方是 `agent-vitals-runtime`，所以 trait 的具体实现
 //! 住在那边（`docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md` §8.1/§8.4）。
 

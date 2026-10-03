@@ -17,14 +17,14 @@ const ACTIONS: &[&str] = &[
     "candidate_list", "candidate_put", "candidate_resolve", "candidate_reopen",
     "declaration_list", "declaration_preview", "declaration_save", "declaration_revoke",
     "declaration_revisions", "recalc_enqueue", "recalc_status", "recalc_run",
-    "recalc_retry", "recalc_recover", "host_bill_list", "host_bill_put", "host_bill_delete",
+    "recalc_retry", "recalc_recover", "harness_bill_list", "harness_bill_put", "harness_bill_delete",
     "budget_get", "budget_profile_set", "budget_snooze_set", "budget_snooze_clear",
 ];
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "billing_workflow",
-        description: "Internal typed v1.0 Authority workflow for billing candidates, declarations, recalculation jobs, host bills, and budget controls. Reads are available in mcp-internal; mutations require the explicit --allow-local-writes server flag. No arbitrary SQL, source-log access, or generic writes.",
+        description: "Internal typed v1.0 Authority workflow for billing candidates, declarations, recalculation jobs, harness bills, and budget controls. Reads are available in mcp-internal; mutations require the explicit --allow-local-writes server flag. No arbitrary SQL, source-log access, or generic writes.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -34,7 +34,7 @@ pub fn spec() -> ToolSpec {
                 "revision_id": { "type": "string" },
                 "supersedes_revision_id": { "type": ["string", "null"] },
                 "job_id": { "type": "string" },
-                "host": { "type": "string" },
+                "harness": { "type": "string" },
                 "provider_id": { "type": "string" },
                 "relationship_kind": { "type": "string", "enum": ["official_subscription", "official_api", "third_party", "organization", "unknown"] },
                 "subscription_name": { "type": ["string", "null"] },
@@ -90,8 +90,8 @@ fn is_mutation(action: &str) -> bool {
     matches!(action,
         "candidate_put" | "candidate_resolve" | "candidate_reopen" |
         "declaration_save" | "declaration_revoke" | "recalc_enqueue" |
-        "recalc_run" | "recalc_retry" | "recalc_recover" | "host_bill_put" |
-        "host_bill_delete" | "budget_profile_set" | "budget_snooze_set" |
+        "recalc_run" | "recalc_retry" | "recalc_recover" | "harness_bill_put" |
+        "harness_bill_delete" | "budget_profile_set" | "budget_snooze_set" |
         "budget_snooze_clear")
 }
 
@@ -133,9 +133,9 @@ fn read_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, ToolE
             let result = handle.db().billing_recalculation_result(id).map_err(authority_error)?;
             json!({ "action": action, "job_id": id, "job": job.map(job_json), "result": result.map(result_json) })
         }
-        "host_bill_list" => {
+        "harness_bill_list" => {
             let month = required_string(args, "billing_period_start")?;
-            let bills = handle.db().host_bill_details_for_period(month).map_err(authority_error)?;
+            let bills = handle.db().harness_bill_details_for_period(month).map_err(authority_error)?;
             json!({ "action": action, "month": month, "bills": bills.into_iter().map(bill_json).collect::<Vec<_>>() })
         }
         "budget_get" => {
@@ -162,14 +162,14 @@ fn write_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, Tool
     let data = match action {
         "candidate_put" => {
             let id = required_string(args, "candidate_id")?;
-            let host = required_string(args, "host")?;
+            let harness = required_string(args, "harness")?;
             let provider = required_string(args, "provider_id")?;
             let currency = required_string(args, "currency")?;
             let amount = required_i64(args, "amount_minor")?;
             let period = required_string(args, "billing_period_start")?;
             let pricing = required_string(args, "source_pricing_version")?;
             let changed = db.with_immediate_txn(|_| db.billing_import_candidate_put(
-                id, host, provider, currency, amount, period, pricing, now,
+                id, harness, provider, currency, amount, period, pricing, now,
             )).map_err(authority_error)?;
             json!({ "action": action, "candidate_id": id, "changed": changed })
         }
@@ -229,24 +229,24 @@ fn write_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, Tool
             "changed": db.billing_recalculation_retry(required_string(args, "job_id")?, now).map_err(authority_error)? }),
         "recalc_recover" => json!({ "action": action,
             "queued_job_ids": db.billing_recalculation_recover(now).map_err(authority_error)? }),
-        "host_bill_put" => {
-            let host = required_string(args, "host")?;
+        "harness_bill_put" => {
+            let harness = required_string(args, "harness")?;
             let provider = required_string(args, "provider_id")?;
             let month = required_string(args, "billing_period_start")?;
             let basis = required_string(args, "basis")?;
             let evidence = optional_string(args, "evidence_ref").unwrap_or("");
             let id = optional_string(args, "bill_id").map(str::to_owned)
-                .unwrap_or_else(|| format!("{host}:{provider}:{month}:{basis}:{evidence}"));
+                .unwrap_or_else(|| format!("{harness}:{provider}:{month}:{basis}:{evidence}"));
             let amount = required_i64(args, "amount_minor")?;
             let currency = required_string(args, "currency")?;
-            db.with_immediate_txn(|_| db.host_bill_put(&id, host, provider, month, basis,
+            db.with_immediate_txn(|_| db.harness_bill_put(&id, harness, provider, month, basis,
                 amount, currency, evidence, now))
                 .map_err(authority_error)?;
             json!({ "action": action, "bill_id": id, "changed": true })
         }
-        "host_bill_delete" => {
+        "harness_bill_delete" => {
             let bill_id = required_string(args, "bill_id")?;
-            let changed = db.with_immediate_txn(|_| db.host_bill_delete(bill_id, now)).map_err(authority_error)?;
+            let changed = db.with_immediate_txn(|_| db.harness_bill_delete(bill_id, now)).map_err(authority_error)?;
             json!({ "action": action, "bill_id": bill_id, "changed": changed })
         }
         "budget_profile_set" => {
@@ -277,8 +277,8 @@ fn write_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, Tool
 
 fn candidates(db: &AuthorityDb) -> Result<Vec<Value>, ToolError> {
     let rows = db.billing_import_candidates().map_err(authority_error)?;
-    Ok(rows.into_iter().map(|(id, host, provider, currency, amount, period, status)| json!({
-        "candidate_id": id, "host": host, "provider_id": provider, "currency": currency,
+    Ok(rows.into_iter().map(|(id, harness, provider, currency, amount, period, status)| json!({
+        "candidate_id": id, "harness": harness, "provider_id": provider, "currency": currency,
         "amount_minor": amount, "billing_period_start": period, "status": status
     })).collect())
 }
@@ -296,14 +296,14 @@ fn revisions(db: &AuthorityDb, id: &str) -> Result<Vec<Value>, ToolError> {
     let rows = db.billing_declaration_revisions(id).map_err(authority_error)?;
     Ok(rows.into_iter().map(|r| json!({
         "revision_id": r.0, "declaration_id": r.1, "revision_number": r.2, "change_kind": r.3,
-        "supersedes_revision_id": r.4, "host": r.5, "provider_id": r.6, "relationship_kind": r.7,
+        "supersedes_revision_id": r.4, "harness": r.5, "provider_id": r.6, "relationship_kind": r.7,
         "subscription_name": r.8, "amount_minor": r.9, "currency": r.10, "effective_start": r.11,
         "effective_end": r.12, "source_candidate_id": r.13, "evidence_ref": r.14, "created_at_ms": r.15
     })).collect())
 }
 
 fn bill_json(r: (String, String, String, String, i64, String, String)) -> Value {
-    json!({ "bill_id": r.0, "host": r.1, "provider_id": r.2, "basis": r.3,
+    json!({ "bill_id": r.0, "harness": r.1, "provider_id": r.2, "basis": r.3,
         "amount_minor": r.4, "currency": r.5, "evidence_ref": r.6 })
 }
 

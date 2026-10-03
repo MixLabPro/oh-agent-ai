@@ -14,7 +14,7 @@ use crate::authority::AuthorityError;
 pub struct ProbeRoute {
     pub route_id: String,
     pub label: String,
-    pub host_kind: String,
+    pub harness_kind: String,
     pub endpoint_base_url: Option<String>,
     pub credential_ref: Option<String>,
     pub model_requested: String,
@@ -43,12 +43,12 @@ pub fn put_route(
     now_ms: i64,
 ) -> Result<(), AuthorityError> {
     conn.execute(
-        "INSERT INTO probe_routes(route_id, label, host_kind, endpoint_base_url,
+        "INSERT INTO probe_routes(route_id, label, harness_kind, endpoint_base_url,
              credential_ref, model_requested, consent_granted_at_ms, created_at_ms, updated_at_ms)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8)
          ON CONFLICT(route_id) DO UPDATE SET
              label = excluded.label,
-             host_kind = excluded.host_kind,
+             harness_kind = excluded.harness_kind,
              endpoint_base_url = excluded.endpoint_base_url,
              credential_ref = excluded.credential_ref,
              model_requested = excluded.model_requested,
@@ -58,7 +58,7 @@ pub fn put_route(
         params![
             route.route_id,
             route.label,
-            route.host_kind,
+            route.harness_kind,
             route.endpoint_base_url,
             route.credential_ref,
             route.model_requested,
@@ -98,7 +98,7 @@ pub fn grant_consent(
 
 pub fn get_route(conn: &Connection, route_id: &str) -> Result<Option<ProbeRoute>, AuthorityError> {
     conn.query_row(
-        "SELECT route_id, label, host_kind, endpoint_base_url, credential_ref,
+        "SELECT route_id, label, harness_kind, endpoint_base_url, credential_ref,
                 model_requested, consent_granted_at_ms
          FROM probe_routes WHERE route_id = ?1",
         params![route_id],
@@ -106,7 +106,7 @@ pub fn get_route(conn: &Connection, route_id: &str) -> Result<Option<ProbeRoute>
             Ok(ProbeRoute {
                 route_id: row.get(0)?,
                 label: row.get(1)?,
-                host_kind: row.get(2)?,
+                harness_kind: row.get(2)?,
                 endpoint_base_url: row.get(3)?,
                 credential_ref: row.get(4)?,
                 model_requested: row.get(5)?,
@@ -366,7 +366,7 @@ mod tests {
         let route = ProbeRoute {
             route_id: "rt1".into(),
             label: "官方直连".into(),
-            host_kind: "claude-code".into(),
+            harness_kind: "claude-code".into(),
             endpoint_base_url: None,
             credential_ref: Some("env:ANTHROPIC_AUTH_TOKEN".into()),
             model_requested: "claude-sonnet-5".into(),
@@ -393,7 +393,7 @@ mod tests {
         let (authority, path) = db();
         let conn = authority.conn();
         put_route(conn, &ProbeRoute {
-            route_id: "rt1".into(), label: "r".into(), host_kind: "claude-code".into(),
+            route_id: "rt1".into(), label: "r".into(), harness_kind: "claude-code".into(),
             endpoint_base_url: None, credential_ref: None,
             model_requested: "m".into(), consent_granted_at_ms: Some(1),
         }, 1).unwrap();

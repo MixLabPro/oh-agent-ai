@@ -19,7 +19,7 @@ spec 把 D1–D10 列为「冻结前必须拍板」。本节按 spec 的推荐�
 |---|---|---|
 | **D1 传输层 + 线协议** | 手写最小 JSON-RPC 2.0 over stdio（stdlib + `serde_json`）。MCP protocol version = `"2025-06-18"`（支持 `structuredContent`）。逐行 JSON framing（`\n` 分隔，UTF-8）。方法集 = `initialize` / `notifications/initialized` / `tools/list` / `tools/call` / `ping`。业务错误走 `tools/call` 结果的 `isError: true` + envelope，不塞 JSON-RPC error。stdin EOF → flush stderr + 关连接 + exit 0。单连接串行。 | spec §6.4；`apps/cli/src/mcp/` |
 | **D2 金额精度** | `MoneyMinor { amount_minor: i64, currency, basis }`。舍入：本次查询最细上报维度一次 `pyround(× 10^minor_digits)`，父层 = 子项整数和。落点 = `agent-vitals-data` / `agent-vitals-runtime`，三消费面同源读。`minor_digits` 由 currency 决定（CNY/USD=2）。 | spec §5.1 规则 5；增量 2（首个带金额工具落地时） |
-| **D3 模型归属范围** | `(host, raw_model, billing_route)` 语义。过滤字段 `models: [{kind, host, value}]`，v1 仅 `kind="host_raw"`；响应带 `identity_kind`。canonical 归一表不拉进 v0.9.1。 | spec §5.1 规则 4、§7.2 |
+| **D3 模型归属范围** | `(harness, raw_model, billing_route)` 语义。过滤字段 `models: [{kind, harness, value}]`，v1 仅 `kind="harness_raw"`；响应带 `identity_kind`。canonical 归一表不拉进 v0.9.1。 | spec §5.1 规则 4、§7.2 |
 | **D4 内部工具 gating** | cargo feature `mcp-internal`（`apps/cli`）。公开构建编译期排除 `authority_audit` / `query_sql_readonly`。 | spec §8；`apps/cli/Cargo.toml` |
 | **D5 `session_ref` salt** | `<data_home>/.mcp-session-salt`（32 字节随机，权限 `0600`），首次 `data-mcp serve` 时生成。HMAC-SHA256（`sha2` 已是依赖）。**不进权威库**。 | spec §9.2；增量 6（session 工具） |
 | **D6 迁移验收工具** | 拆分：MCP 内只读 `authority_audit`（守恒/重复/覆盖/`authority_revision` 自检）+ MCP 外 `agent-vitals data reimport-verify`（临时库重导入比对，非 MCP 工具）。 | spec §8.1；增量 7 |
@@ -35,18 +35,18 @@ spec 把 D1–D10 列为「冻结前必须拍板」。本节按 spec 的推荐�
 spec 的 Phase 是能力里程碑；这里是可 commit 的工程增量，每个都过完整循环。
 
 > **2026-09-08**：增量 1 / 2 / 7.5 已 rebase 到 `main`（在 v0.9.1 SQL 权威迁移
-> Phase 4.3 全部落地之后），与 schema v2（`host_runtime_snapshots`）+ Stage 5b
+> Phase 4.3 全部落地之后），与 schema v2（`harness_runtime_snapshots`）+ Stage 5b
 > 退役对齐：`data_status` 走 `mcp::data_status_report`（CLI/MCP 同源）、损坏恢复
 > 提示改为 `rm sqlite3* && data-migrate`、脱敏 view 版本无关幂等重建。
 >
-> **真机验证抓出增量 2 的两个缺陷（已修）**：① `usage_hourly group_by=host`
-> 曾走 `hourly_by_host`（导航查询只回单个 i64 总量），总量被塞进 `output_tokens`
+> **真机验证抓出增量 2 的两个缺陷（已修）**：① `usage_hourly group_by=harness`
+> 曾走 `hourly_by_harness`（导航查询只回单个 i64 总量），总量被塞进 `output_tokens`
 > 槽 → `total_output_tokens == total_tokens`、逐桶亦然；② `group_by=model` 不带
-> `hosts` 参数曾静默返回空 series（违反 schema「empty = all hosts」承诺 + 诚实
-> 返回原则）。两个 `group_by` 现统一走 `hourly_by_host_model`（真四桶 + 空 host
-> 列表即全 wired）。真机对账：`usage_hourly` 逐宿主总量 + output 与 CLI `data
-> daily --date` 逐值相等；host 轴 == model 轴按宿主求和（守恒）。回归测试
-> `host_axis_reports_real_output_split_and_model_axis_needs_no_hosts_arg`。
+> `harnesses` 参数曾静默返回空 series（违反 schema「empty = all harnesses」承诺 + 诚实
+> 返回原则）。两个 `group_by` 现统一走 `hourly_by_harness_model`（真四桶 + 空 harness
+> 列表即全 wired）。真机对账：`usage_hourly` 逐执行环境总量 + output 与 CLI `data
+> daily --date` 逐值相等；harness 轴 == model 轴按执行环境求和（守恒）。回归测试
+> `harness_axis_reports_real_output_split_and_model_axis_needs_no_harnesses_arg`。
 >
 > 全 gate 绿（`cargo test` + `clippy -D warnings` 双 feature + `unittest discover
 > tests` + golden）。**M1 尚未完成**：增量 3 / 4 / 5 未开始；M0 D1–D10 只有
@@ -65,10 +65,10 @@ spec 的 Phase 是能力里程碑；这里是可 commit 的工程增量，每个
 | # | 增量 | spec 对应 | 状态 |
 |---|---|---|---|
 | **1** | 传输层 + envelope + `data_status` | M1 起步 | ✅ (rebased `fde1c09` + `e2da5d6`) |
-| **2** | `MoneyMinor` 精确投影 + `usage_hourly`（宿主轴 + model/provider 轴 + 逐小时成本） + S2/S4/S5/S7 review follow-ups | M1 | ✅ (rebased `4bf7433`) |
+| **2** | `MoneyMinor` 精确投影 + `usage_hourly`（执行环境轴 + model/provider 轴 + 逐小时成本） + S2/S4/S5/S7 review follow-ups | M1 | ✅ (rebased `4bf7433`) |
 | 3 | `summary_daily` + `summary_monthly`（含会话数 / 活跃小时 / 逐日趋势 / 月底预测 / 占比新查询） | M1 | ⬜ |
 | 4 | `data_quality_issues` + code-aware 脱敏 allowlist | M1 | ⬜ |
-| 5 | M1 收口：M01–M08 / M13–M18 契约测试 + 三消费面 parity（M15）+ 真机 U01/U02/U08 + 缺口 #F1（`freshness.stale_hosts` 落地） | M1 退出 | ⬜ |
+| 5 | M1 收口：M01–M08 / M13–M18 契约测试 + 三消费面 parity（M15）+ 真机 U01/U02/U08 + 缺口 #F1（`freshness.stale_harnesses` 落地） | M1 退出 | ⬜ |
 | 6 | `authority_revision` `as_of_run_id` 钉截面 + `authority_audit`（`mcp-internal`）| M2 | ⬜ |
 | **7** | **`reimport_verify`（`agent-vitals data-reimport-verify` CLI，MCP 外）** —— 用户 2026-09-08 提前做（Q12） | M2 退出 | ✅ (`4c7f75b`) |
 | **7.5** | **`query_sql_readonly`（内部 MCP 工具，让其他 Agent 调试用）** | M2 并行 | ✅ (rebased `e73a46a`，`mcp-internal` only) |
@@ -86,7 +86,7 @@ spec 的 Phase 是能力里程碑；这里是可 commit 的工程增量，每个
 | S3 `error_envelope` 硬编码 `"1"` 与 `ENVELOPE_SCHEMA_VERSION` 不同源 | should-fix → **已修（合入前）** | 改用常量 + `error_envelope_uses_envelope_schema_version_constant` 单测。 |
 | S4 `authority_revision.max_observed_at` 缺 `observation_kind != 'legacy_aggregate'` 过滤 | should-fix → **延后** | 增量 2 修（`MAX(event_ts_ms) FROM usage_facts WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'`）。 |
 | S5 `validate_args` 对未设 `additionalProperties:false` 放行 | should-fix → **延后** | 增量 2 加 `assert_eq!` fail-fast（debug_assert）+ 启动期 lint。 |
-| S6 `by_host[*].facts` 排除 legacy_aggregate 但 `data_status` 用户期望全表 | should-fix → **延后** | 增量 2 拆 `live_facts` / `legacy_aggregates` 两栏。 |
+| S6 `by_harness[*].facts` 排除 legacy_aggregate 但 `data_status` 用户期望全表 | should-fix → **延后** | 增量 2 拆 `live_facts` / `legacy_aggregates` 两栏。 |
 | S7 `PRAGMA integrity_check` 每次调用都跑零缓存 | should-fix → **延后** | 增量 2 加频次 warn；增量 5/6 接 `data-status-health` watcher 时再做进程级 60s memo（与 `runtime::summary::codex_merged_cached` 同形）。 |
 | N1 `schema_version()` 损坏时静默回零 | nit → **延后** | 增量 2 直接 `Err` 让 `error_envelope` 接管。 |
 | N2 `mcp-internal` feature 在 `apps/cli/Cargo.toml` 占位 | nit → 接受 | 增量 6 落地时加 `#[cfg(feature = "mcp-internal")]` 引用即可。 |
@@ -110,7 +110,7 @@ spec 的 Phase 是能力里程碑；这里是可 commit 的工程增量，每个
     `tool_specs()`（`[ToolSpec { name, description, input_schema, output_schema }]`）、
     `dispatch(name, args, data_home) -> Result<Value /*envelope*/, ToolError>`。
   - `data_status.rs`：从 `apps/cli/src/main.rs` 抽出的 `data-status` 查询
-    + spec §7.1 要求补的逐宿主 `GROUP BY host`。
+    + spec §7.1 要求补的逐执行环境 `GROUP BY harness`。
 - **`apps/cli/src/mcp.rs`**（传输层）：`serve()` stdio 循环 + JSON-RPC 编解码
   + method dispatch + 错误映射。
 - **`apps/cli/src/main.rs`**：`DataMcp { action: Serve }` 命令（→ `data-mcp serve`）
@@ -151,7 +151,7 @@ stdout 纪律）→ 修复 S1/S3 → commit `dcb672e` + `5b8e38e`。
 
 **目标**：把 spec §5.1.1 `MoneyMinor` 三元组（amount_minor 整数 + currency + basis）
 作为权威读面统一投影落地，MCP / CLI / Tauri 三消费面同源读（不再各自乘回分）；
-并把第一个时间窗口工具 `usage_hourly` 端到端跑通——宿主 / model / provider 三轴
+并把第一个时间窗口工具 `usage_hourly` 端到端跑通——执行环境 / model / provider 三轴
 + 逐小时 `MoneyMinor` 成本（24 桶含零）。同时并入增量 1 review 的 4 处
 should-fix（S2 / S4 / S5 / S7）：
 
@@ -170,15 +170,15 @@ should-fix（S2 / S4 / S5 / S7）：
   - `pub fn from_f64(value: f64, currency: &str, basis: BillingBasis) -> MoneyMinor`（一次 `pyround(× 10^minor_digits)`；NaN/Inf 输入 → 业务错误 `internal_error`，不静默）。
   - `pub fn sum_minor(items: &[MoneyMinor]) -> Option<MoneyMinor>`（同 `currency` + `basis` 求和；跨币返回 `None` + warn，**不**伪造总金额）。
 - **`crates/agent-vitals-data/src/authority_query.rs`**：
-  - 新增 `hourly_by_host_and_model(conn, start_ms, end_ms, hosts, models) -> Result<BTreeMap<(String, String, String), HourlyCell>, AuthorityError>`——三宿主「小时 × host × raw_model」聚合 + token 之和 + cost（`MoneyMinor` 字段）。复用 `hourly_by_host` 的窗口算术（`(event_ts_ms + BEIJING_OFFSET_MS) / HOUR_MS % 24`）。
-  - **修正 S4**：`authority_state_for` / `authority_revision` 内的 SQL 加 `observation_kind != 'legacy_aggregate'`（目前 envelope + per_host 都过滤了，只有 revision 还漏）。
-  - 已有 `hourly_by_host` 加 `cost` 字段——可选；M1 阶段先用 model 轴查，宿主轴的 cost 留给后续工具。
+  - 新增 `hourly_by_harness_and_model(conn, start_ms, end_ms, harnesses, models) -> Result<BTreeMap<(String, String, String), HourlyCell>, AuthorityError>`——三执行环境「小时 × harness × raw_model」聚合 + token 之和 + cost（`MoneyMinor` 字段）。复用 `hourly_by_harness` 的窗口算术（`(event_ts_ms + BEIJING_OFFSET_MS) / HOUR_MS % 24`）。
+  - **修正 S4**：`authority_state_for` / `authority_revision` 内的 SQL 加 `observation_kind != 'legacy_aggregate'`（目前 envelope + per_harness 都过滤了，只有 revision 还漏）。
+  - 已有 `hourly_by_harness` 加 `cost` 字段——可选；M1 阶段先用 model 轴查，执行环境轴的 cost 留给后续工具。
 - **`crates/agent-vitals-runtime/src/mcp/usage_hourly.rs`**（新工具）：
-  - `ToolSpec`（inputSchema：`{date: YYYY-MM-DD, group_by: enum, hosts?, models?, metrics?, as_of_run_id?}`，所有参数 `additionalProperties: false`）。
+  - `ToolSpec`（inputSchema：`{date: YYYY-MM-DD, group_by: enum, harnesses?, models?, metrics?, as_of_run_id?}`，所有参数 `additionalProperties: false`）。
   - `run(args, data_home) -> Result<Value, ToolError>`：
     1. 参数解析 + schema 校验（参数错误 → `invalid_argument`）。
     2. `AuthorityHandle::open(data_home)` 取只读 conn（**先**改正 S2：返回 `Result` 而非 panic）。
-    3. 调 `hourly_by_host_and_model`（或 `hourly_by_host` for `group_by=host`）拼 envelope。
+    3. 调 `hourly_by_harness_and_model`（或 `hourly_by_harness` for `group_by=harness`）拼 envelope。
     4. 窗口拉满 24 桶含零值（缺桶填 `null` + warning）。
     5. `as_of_run_id` 处理按 §6.4.1：drift → `warnings:[{code:"snapshot_drift",...}]`，不存在 → `invalid_argument`。
 - **`crates/agent-vitals-runtime/src/mcp/mod.rs`**：
@@ -190,23 +190,23 @@ should-fix（S2 / S4 / S5 / S7）：
 - **`apps/cli/src/main.rs`**：现有 `Cmd::Data { action: DataAction::Coverage | Daily | Authority }` 不变；`data-mcp serve` 通过 `tool_specs()` 自动暴露 `usage_hourly`——CLI 端不需要新子命令。
 - **测试**：
   - `money` 模块：`minor_digits_for("CNY")==2`、`from_f64(0.125, "CNY", MeteredActual).amount_minor==13`（银行家舍入；0.125 → 12.5 → 13）。
-  - `hourly_by_host_and_model`：3 宿主 × 2 模型 × 24 桶 fixture，守恒（小时累加 == 日累计）+ 北京小时边界。
+  - `hourly_by_harness_and_model`：3 执行环境 × 2 模型 × 24 桶 fixture，守恒（小时累加 == 日累计）+ 北京小时边界。
   - `usage_hourly`：空库（24 个 `null` + `coverage.covered_to=null`）+ drift warn + invalid_argument（多余字段、坏 enum、坏日期）+ 真机 fixture 守恒。
   - `validate_args`：缺 `additionalProperties:false` 触发 panic（debug_assert）。
   - `authority_revision`：fixture 含 legacy_aggregate 行时 `max_observed_at` ≠ legacy 行的 `event_ts_ms`。
-- **文档**：实施计划本节同步记录 M0 D2 ack（`MoneyMinor` 落地）+ D3 ack（`models.kind="host_raw"` + `identity_kind` 落地）。
+- **文档**：实施计划本节同步记录 M0 D2 ack（`MoneyMinor` 落地）+ D3 ack（`models.kind="harness_raw"` + `identity_kind` 落地）。
 
 ### 验收
 
 - Rust 单元：`money::minor_digits_for` 覆盖 `CNY/USD/JPY/EUR`；`from_f64` 银行家舍入；`sum_minor` 跨币返 None。
-- Rust 集成：`usage_hourly` 三宿主 × 双模型 × 24 桶 fixture，每小时与日累计守恒。
+- Rust 集成：`usage_hourly` 三执行环境 × 双模型 × 24 桶 fixture，每小时与日累计守恒。
 - 三消费面 parity：MCP `usage_hourly.data.totals_by_currency_basis` 与 `data coverage` / `data daily`（按日累计聚合）逐值 `amount_minor` 相等。
 - 错误路径：corrupt DB → `isError:true` + `database_unreadable`（与 data_status 同形态，已 S1 验证）；缺 `additionalProperties:false` → debug_assert panic 触发（**S5**）；`as_of_run_id` drift → `warnings:[snapshot_drift]`。
 - 全量 gate：`cargo test --workspace`、`cargo clippy --workspace --all-targets -D warnings`、golden 15/15、`AGENT_VITALS_BIN` 差分 + 真机 U01/U02（小时曲线 24 桶 / 峰值小时）。
 
 ### 收口
 
-subAgent 审查（MoneyMinor 三消费面逐值相等、`from_f64` 舍入点、`hourly_by_host_and_model` 索引命中、`as_of_run_id` drift 检测、`validate_args` fail-fast 强度、`usage_hourly` 输出 schema 闭合） → 修复 → commit。
+subAgent 审查（MoneyMinor 三消费面逐值相等、`from_f64` 舍入点、`hourly_by_harness_and_model` 索引命中、`as_of_run_id` drift 检测、`validate_args` fail-fast 强度、`usage_hourly` 输出 schema 闭合） → 修复 → commit。
 
 ---
 
@@ -237,7 +237,7 @@ subAgent 审查（MoneyMinor 三消费面逐值相等、`from_f64` 舍入点、`
   - `SQLITE_READ` on `sessions.native_session_id` / `sessions.machine_namespace` / `sessions.session_key` / `source_files.path_hash` → deny
   - `SQLITE_INSERT` / `SQLITE_UPDATE` / `SQLITE_DELETE` / `SQLITE_PRAGMA` / `SQLITE_ATTACH` / `SQLITE_DETACH` / `SQLITE_TRANSACTION` / `SQLITE_SAVEPOINT` / `SQLITE_REPLACE` → 一律 deny
   - `SQLITE_FUNCTION` on 任何非 `sqlite3_builtin_*` 函数 → deny（禁 `load_extension` / 自定义函数；SQLite 内置 whitelist：`avg/sum/count/min/max/abs/round/group_concat/json_extract/json_array_length/typeof/coalesce/nullif/ifnull/upper/lower/length/substr/replace/trim/ltrim/rtrim/printf/strftime/datetime/zeroblob/random/unicode/abs/sign/round/floor/ceil`——其它都 deny）
-  - `SQLITE_SELECT` 限定：col-attr 至少有一个来自 `usage_facts` / `sessions` / `source_files` / `pricing_snapshots` / `host_bills` / `sync_runs` / `data_quality_issues` / `migrations` / `budget_config` / `budget_snoozes` / `workflow_events` **或** v_* view；其它来源 deny
+  - `SQLITE_SELECT` 限定：col-attr 至少有一个来自 `usage_facts` / `sessions` / `source_files` / `pricing_snapshots` / `harness_bills` / `sync_runs` / `data_quality_issues` / `migrations` / `budget_config` / `budget_snoozes` / `workflow_events` **或** v_* view；其它来源 deny
 - **`crates/agent-vitals-data/src/safe_views.rs`**（新模块）：建库时同步建（DDL 入 `SCHEMA_V1` const 里和现有 12 表一起）。
   - `v_facts_safe`：SELECT 14 列（不含 `native_session_id` / `machine_namespace` / `source_event_id` / `source_id` / `session_key`）
   - `v_sessions_safe`：SELECT 6 列（不含 `native_session_id` / `machine_namespace`）
@@ -255,7 +255,7 @@ subAgent 审查（MoneyMinor 三消费面逐值相等、`from_f64` 舍入点、`
   - `#[cfg(feature = "mcp-internal")] mod query_sql_readonly;` + 工具注册 + 分发（都包 cfg）。
 - **测试**（**测试本身也包 cfg**——公开构建不编译）：
   - 安全（9 条）：`SELECT native_session_id FROM usage_facts` / `SELECT * FROM usage_facts` / `INSERT INTO usage_facts ...` / `DELETE FROM usage_facts WHERE 1=1` / `UPDATE usage_facts SET ...` / `SELECT load_extension('/tmp/x')` / `SELECT 1; SELECT 2` / `SELECT * FROM pragma_compile_options()` / `SELECT * FROM sqlite_master` → 都拒
-  - 功能：合法 `SELECT count(*) FROM v_facts_safe` / `SELECT host, SUM(...) FROM v_facts_safe GROUP BY host` / `WITH cte AS (...) SELECT ... FROM v_facts_safe` → 都通过
+  - 功能：合法 `SELECT count(*) FROM v_facts_safe` / `SELECT harness, SUM(...) FROM v_facts_safe GROUP BY harness` / `WITH cte AS (...) SELECT ... FROM v_facts_safe` → 都通过
   - 上限：`SELECT * FROM v_facts_safe` 改写 LIMIT 200 → 不返 201+ 行
   - 脱敏：所有 view 输出 JSON Schema 反查，**不**含 `native_session_id` / `machine_namespace` / `path_hash` 字段名
 - **审查重点（subAgent 必看）**：

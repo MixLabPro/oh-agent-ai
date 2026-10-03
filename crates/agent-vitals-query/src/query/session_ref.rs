@@ -1,6 +1,6 @@
 //! `session_ref`：不可反推的会话引用（spec §9.2 / M0 D5）。
 //!
-//! `session_key`（`SessionKey::ledger_key`）内嵌宿主原生 session id——绝不能进
+//! `session_key`（`SessionKey::ledger_key`）内嵌执行环境原生 session id——绝不能进
 //! MCP 响应。`session_ref = HMAC-SHA256(salt, session_key)` 截前 16 字节 → 32 hex，
 //! 加 `sr_` 前缀。salt 每安装随机、`0600`、**不进权威库**（库会被 `data-export-*`
 //! 导出）。

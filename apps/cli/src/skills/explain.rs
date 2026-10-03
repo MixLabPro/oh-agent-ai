@@ -72,20 +72,20 @@ fn shadow_of<'a>(out: &'a Value, path: &str) -> Option<(&'a Value, bool)> {
     None
 }
 
-/// Enabled：所属 plugin / host 配置是否启用。
+/// Enabled：所属 plugin / harness 配置是否启用。
 ///
-/// **拿不到宿主配置时是 unknown，不是 false。**把「问不到」渲染成「关着」，
+/// **拿不到执行环境配置时是 unknown，不是 false。**把「问不到」渲染成「关着」，
 /// 用户会去开一个本来就开着的开关，然后以为自己修好了。
 fn enabled_stage(sk: &Value) -> (&'static str, String) {
     let reason = sk.get("loaded_reason").and_then(|v| v.as_str()).unwrap_or("");
     if sk.get("enabled_state").and_then(|v| v.as_bool()) == Some(false) {
-        return ("false", "explicitly disabled in host configuration".into());
+        return ("false", "explicitly disabled in harness configuration".into());
     }
     if reason == "plugin-not-enabled" {
         return ("false", "owning plugin is absent from enabledPlugins".into());
     }
     if reason == "plugin-state-unknown" {
-        return ("unknown", "host configuration is unreadable; plugin state is unknown".into());
+        return ("unknown", "harness configuration is unreadable; plugin state is unknown".into());
     }
     if let Some(mode) = reason.strip_prefix("workbuddy-mode-filtered:") {
         return ("false", format!("filtered by welcome mode: {mode}"));
@@ -93,11 +93,11 @@ fn enabled_stage(sk: &Value) -> (&'static str, String) {
     if reason == "openclaw-config-disabled" {
         return ("false", "disabled in OpenClaw configuration".into());
     }
-    let hf = s(sk, "host_family");
+    let hf = s(sk, "harness_family");
     if sk.get("enabled_state").map(|v| v.is_null()).unwrap_or(true)
         && (hf == "openclaw" || hf == "workbuddy")
     {
-        return ("unknown", "this host has no per-skill enablement interface".into());
+        return ("unknown", "this harness has no per-skill enablement interface".into());
     }
     let level = s(sk, "level");
     let fallback = if !level.is_empty() {
@@ -168,7 +168,7 @@ pub fn funnel(sk: &Value, out: &Value, at_risk: &[String]) -> Vec<(String, Strin
                    format!("frontmatter is missing {}", miss.join(", "))));
     } else if !b(bud, "available") {
         rows.push(("Discoverable".into(), "unknown".into(),
-                   "this host does not expose a description budget".into()));
+                   "this harness does not expose a description budget".into()));
     } else if at_risk.contains(&s(sk, "name")) {
         rows.push(("Discoverable".into(), "at_risk".into(),
                    format!("budget is exceeded by {} characters; this skill is in the estimated risk band", i(bud, "over_by_chars"))));
@@ -178,11 +178,11 @@ pub fn funnel(sk: &Value, out: &Value, at_risk: &[String]) -> Vec<(String, Strin
 
     // Selected 没有任何直接数据源。**能给的只有 candidates，不是结论。**
     rows.push(("Selected".into(), "unknown".into(),
-               "host does not expose routing data; only overlap candidates are available".into()));
+               "harness does not expose routing data; only overlap candidates are available".into()));
 
     let t = out.get("trigger_data").unwrap_or(&empty);
     if !b(t, "available") {
-        rows.push(("Triggered".into(), "unknown".into(), "this host does not expose trigger data".into()));
+        rows.push(("Triggered".into(), "unknown".into(), "this harness does not expose trigger data".into()));
     } else if i(sk, "usage_count") > 0 {
         // DSH 的 invoked/selected 只是名字列表、没有时间戳：有用过但不知新鲜度，
         // 写「most recent never」就是自相矛盾。
@@ -266,7 +266,7 @@ pub fn explain_record(out: &Value, sk: &Value, at_risk: &[String], min: f64) -> 
         "name": bare.clone(),
         "namespace": sk.get("namespace").cloned().unwrap_or(Value::Null),
         "path": s(sk, "path"),
-        "host": s(sk, "host_family"),
+        "harness": s(sk, "harness_family"),
         "status": status,
         "blocked_at": blocked.clone().map(Value::String).unwrap_or(Value::Null),
         "funnel": rows.iter().map(|(n, st, r)|
@@ -336,19 +336,19 @@ If you observe both, runtime behavior may differ from documentation; rename them
     let (enabled, _) = state_of(&rec.states, "Enabled");
     if enabled == "false" {
         return vec![
-            "1. Enable it in the host configuration (Claude Code: enabledPlugins)".into(),
+            "1. Enable it in the harness configuration (Claude Code: enabledPlugins)".into(),
             "2. If unneeded, remove the on-disk copy to avoid future confusion".into(),
         ];
     }
     if enabled == "unknown" {
         return vec![
-            "1. Make the host configuration readable; otherwise this stage remains unknown".into(),
+            "1. Make the harness configuration readable; otherwise this stage remains unknown".into(),
             "   Claude Code requires a readable ~/.claude.json".into(),
         ];
     }
     let (loaded, _) = state_of(&rec.states, "Loaded");
     if loaded == "false" {
-        return vec!["1. Move it to a location scanned by this host (see the reason above)".into()];
+        return vec!["1. Move it to a location scanned by this harness (see the reason above)".into()];
     }
     let mut lines: Vec<String> = Vec::new();
     let (disc, disc_reason) = state_of(&rec.states, "Discoverable");
@@ -585,7 +585,7 @@ mod tests {
     fn broken_upstream_marks_everything_below_as_na() {
         let sk = json!({
             "path": "/p", "loaded_reason": "plugin-not-enabled", "loaded": false,
-            "host_family": "claude-code", "name": "x",
+            "harness_family": "claude-code", "name": "x",
         });
         let out = json!({"skills": [], "conflicts": []});
         let rows = funnel(&sk, &out, &[]);
@@ -596,11 +596,11 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_host_config_is_unknown_not_false() {
+    fn unreadable_harness_config_is_unknown_not_false() {
         // 渲染成 false，用户会去开一个本来就开着的开关
-        let sk = json!({"loaded_reason": "plugin-state-unknown", "host_family": "claude-code"});
+        let sk = json!({"loaded_reason": "plugin-state-unknown", "harness_family": "claude-code"});
         assert_eq!(enabled_stage(&sk).0, "unknown");
-        let off = json!({"loaded_reason": "plugin-not-enabled", "host_family": "claude-code"});
+        let off = json!({"loaded_reason": "plugin-not-enabled", "harness_family": "claude-code"});
         assert_eq!(enabled_stage(&off).0, "false");
     }
 
@@ -609,7 +609,7 @@ mod tests {
         // ARCHITECTURE §1.2：「超预算后丢弃最少用的」是传闻不是实测
         let sk = json!({
             "path": "/p", "loaded": true, "loaded_reason": "personal", "level": "personal",
-            "host_family": "claude-code", "name": "x",
+            "harness_family": "claude-code", "name": "x",
             "has_name": true, "has_description": true, "usage_count": 0,
             "installed_days_ago": 900.0,
         });

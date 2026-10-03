@@ -16,7 +16,7 @@ export type TrendBucket = {
   title: string;
   /** 日桶的星期（0=周日），由组件按界面语言格式化；小时桶无。 */
   weekday?: number;
-  /** null = 该宿主读不到（不是 0）。 */
+  /** null = 该执行环境读不到（不是 0）。 */
   dsh: number | null;
   claude: number | null;
   codex: number | null;

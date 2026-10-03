@@ -5,7 +5,7 @@
 ```bash
 # 1. 先产出一份扫描快照当语料（用你自己的机器，或任何 --path 指向的语料）
 cd ../..
-cargo run --release -- --host all --json /tmp/ov.json
+cargo run --release -- --harness all --json /tmp/ov.json
 
 # 2. 跑实验
 cd experiments/jieba-overlap

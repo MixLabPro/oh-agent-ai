@@ -1,7 +1,7 @@
 """Claude Code 会话 JSONL 读取器 —— 五段式流水线（locate → shape → extract →
 derive → coverage）的"locate → shape → extract"三段，I/O 都在这里；
 "derive → coverage"在 `scripts/agent_vitals/agent/claude_evidence.py`（与 Rust
-`crates/agent-vitals-hosts/src/hosts/claude_code/sessions/evidence.rs` 逐字节对齐），I/O 不进去。
+`crates/agent-vitals-harnesses/src/harnesses/claude_code/sessions/evidence.rs` 逐字节对齐），I/O 不进去。
 
 与 Rust `src/agent/claude_session.rs` 逐字节对齐——两条实现产出同一份字典，字节
 序（键序）一致，`tests/test_cli_matrix.py::both()` 的差分靠的就是这份一致。
@@ -163,10 +163,10 @@ def _file_bytes(path):
 
 def claude_session_roots_report(home=None):
     """`~/.claude/projects` 根的存在性报告（r2a store 的
-    `source_statuses["claude-code"]` 与 menubar 的 `host_has_source` 都靠它判「该
-    宿主有数据源」——roots 缺席时绝不能报「0 会话」冒充「没有 Claude Code」）。
+    `source_statuses["claude-code"]` 与 menubar 的 `harness_has_source` 都靠它判「该
+    执行环境有数据源」——roots 缺席时绝不能报「0 会话」冒充「没有 Claude Code」）。
     镜像 `codex_session_roots_report`：单根 `projects`，exists/file_count/
-    total_bytes 同形状、同键序（host → roots，根对象 kind → path → exists →
+    total_bytes 同形状、同键序（harness → roots，根对象 kind → path → exists →
     file_count → total_bytes）。键序是字节一致的一部分，不能重排。
     mirror `claude_session.rs::claude_session_roots_report`。"""
     if home is None:
@@ -181,7 +181,7 @@ def claude_session_roots_report(home=None):
         file_count = len(files)
         total_bytes = sum(_file_bytes(f) for f in files)
     return {
-        "host": "claude-code",
+        "harness": "claude-code",
         "roots": [{
             "kind": "projects",
             "path": str(root),

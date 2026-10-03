@@ -76,7 +76,7 @@ pub fn oneline(
     });
 
     // 4. events 只用于导航摘要的小时分布；业务账由 sync 写入 SQL 权威库。
-    let session = agent_vitals_hosts::dsh_sources::read_session_log(path);
+    let session = agent_vitals_harnesses::dsh_sources::read_session_log(path);
     let events: Vec<Value> = session
         .get("usage_events")
         .and_then(Value::as_array)
@@ -145,7 +145,7 @@ pub fn oneline(
     let mut req = Map::new();
     req.insert("session_id".into(), json!(session_id));
     req.insert("session_log".into(), json!(path.display().to_string()));
-    req.insert("host_kind".into(), json!("dsh"));
+    req.insert("harness_kind".into(), json!("dsh"));
     req.insert("machine_namespace".into(), json!(ns));
     req.insert("oneline".into(), summary);
     let req = Value::Object(req);

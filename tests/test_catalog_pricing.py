@@ -12,7 +12,7 @@
   camel → snake 键名转换，不重算。
 - 未知模型 `<synthetic>` 等 → 四型全进 unpriced（含 output——与 cost_report
   的 unpriced 词表不同是有意的，见 cost.py::_price_claude_map 注释）。
-- 缓存写（cache_creation）走 1h 档（host_costusd_note：Claude Code 自报
+- 缓存写（cache_creation）走 1h 档（harness_costusd_note：Claude Code 自报
   costUSD 按 1h 计），无 1h 档的卡各取各的（M2.7 cache_write / deepseek 0）。
 - MiniMax-M3 tiers 一律取首档（≤512K）并把档位标签透出。
 """

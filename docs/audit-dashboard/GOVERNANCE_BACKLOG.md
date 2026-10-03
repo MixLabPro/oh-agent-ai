@@ -8,7 +8,7 @@
 
 ## 0. 定位澄清（先说这个，不然会做错方向）
 
-`dsh-client` 插件声明 `inject: ['sessionProjections']`（`dsh-client/src/host/index.ts`
+`dsh-client` 插件声明 `inject: ['sessionProjections']`（`dsh-client/src/harness/index.ts`
 顶部，`scripts/verify.mjs` 断言过这一行）——这是**纯读投影**接口。浏览器侧连原始
 事件都读不到（CLAUDE.md 原话："approval/sandbox events are log-only"），更没有
 "在下一次 `tool/call` 执行前拦截并返回拒绝"这种钩子。
@@ -34,12 +34,12 @@ V3（预算管理）/V4（Guardrails），且明确要求"控制按钮存在的�
 
 ### 1.1 成本失控 → 已有观测能力
 
-- `costReport` 投影（`dsh-client/src/host/index.ts:468`）：逐模型定价
+- `costReport` 投影（`dsh-client/src/harness/index.ts:468`）：逐模型定价
   （`per_model[*].total/peak/cache_read_cost`）、峰值/非峰值拆分、缓存命中实付、
   逐请求累计曲线（`series`，单调不降）；CLI 侧 `src/cost.rs`/
   `scripts/agent_vitals/agent/cost.py` 同款计价逻辑（四方 lockstep 的一环）。
 - `tokenByModel`：逐模型 token 分桶 + 模型切换序列。
-- Subagent 成本：`subagentUsage`（`dsh-client/src/host/index.ts:260`）把子会话
+- Subagent 成本：`subagentUsage`（`dsh-client/src/harness/index.ts:260`）把子会话
   token/费用汇总进主会话费用卡副标题，**明确标注"合计是下限"**——子会话日志读不到
   时不冒充完整，这条纪律本身就是治理研究里"看不见有多少 Agent 在跑"的部分解药。
 
@@ -94,7 +94,7 @@ V3（预算管理）/V4（Guardrails），且明确要求"控制按钮存在的�
 `ok`/`near`(≥70%)/`over`(≥100%) 三态，颜色只用现成的 `T.warn`/`T.error`
 两档，没有为 85% 单独发明第三种颜色，具体百分比数字本身携带更细的信号）；
 `VerdictSection.tsx::BudgetEditor`（挂在费用卡的展开面板里，**不新增
-KPI 卡**）。全程未碰 core/wasm/host——纯 `dsh-client` 前端叠加层，符合预期。
+KPI 卡**）。全程未碰 core/wasm/harness——纯 `dsh-client` 前端叠加层，符合预期。
 `verify-render.mjs` 补了 G1 专属断言（未设置/超预算/接近预算/远低于预算
 四态），复用了 `__notes` 的 localStorage 桩子模式扩出 `__budget`。
 
@@ -167,12 +167,12 @@ KPI 卡**）。全程未碰 core/wasm/host——纯 `dsh-client` 前端叠加层
   类判定，没有区间概念。`crates/agent-vitals-wasm`/`src/behavior.rs`（CLI）/
   `scripts/agent_vitals/agent/behavior.py` 全是纯透传，无需改动；wasm 重新构建
   （`wasm-pack build --target web`）并只重新拷贝 `.wasm` 二进制（`.js`
-  字节相同，`.d.ts` 是手写文件，不能被生成产物覆盖）。`dsh-client/src/host/
+  字节相同，`.d.ts` 是手写文件，不能被生成产物覆盖）。`dsh-client/src/harness/
   index.ts` 的 `findingSchema`（zod）补了 `run_end_seq: z.number().nullable()`
   ——不声明的话 zod 会静默剥掉这个键，前提字段就白加了；`behaviorFindings`
   的 `stateVersion` 4→5（state 形状没变，但 schema/view() 契约变了）。
-- **对齐（宿主侧，纯 TS，不产生新的四方 lockstep）**：新增 `loopCosts` 投影
-  （`dsh-client/src/host/index.ts`）——按 (行为规则事件类型 ∪ 计价用量事件
+- **对齐（执行环境侧，纯 TS，不产生新的四方 lockstep）**：新增 `loopCosts` 投影
+  （`dsh-client/src/harness/index.ts`）——按 (行为规则事件类型 ∪ 计价用量事件
   类型) 的并集折叠，`view()` 里用 `audit_events` 拿到带 `run_end_seq` 的
   findings，筛出 SV611/612/613，按 `request_metrics` 逐请求行的 `seq` 落在
   `[seq, run_end_seq]` 区间内过滤，用新增的 `loopCostFor()`（复用
@@ -184,7 +184,7 @@ KPI 卡**）。全程未碰 core/wasm/host——纯 `dsh-client` 前端叠加层
   "合并后对错行"的歧义）；`FindingRow.tsx` 在展开详情里加一行"这段循环消耗
   了约 X token · ¥Y"（`tokens` 有值、`cost` 算不出时降级为"仅 token 数"）。
   `export.ts` 顺带把 `loop_tokens`/`loop_cost` 加进导出的 finding 行（同
-  `waste_tokens`/`suggestion` 的模式）。`verify-host.mjs` 用真实定价卡
+  `waste_tokens`/`suggestion` 的模式）。`verify-harness.mjs` 用真实定价卡
   （`deepseek-v4-pro` 高峰价 9.0/27.0 每百万 token）手算期望值验证求和与
   区间过滤都对；`verify-render.mjs` 验证详情文案渲染与英文 locale 下的
   翻译完整性。
@@ -202,9 +202,9 @@ KPI 卡**）。全程未碰 core/wasm/host——纯 `dsh-client` 前端叠加层
 **实现落点**：`SubagentSection.tsx` 新增 `fanoutLine()`（纯函数），挂在区块
 标题下方——`total_cost`（已有）加上新传入的 `selfCost` 算总费用，`derive.ts`
 的 `formatShare()` 复用小占比不被取整抹平那条纪律。`selfCost` 算不出时
-（老宿主/投影未就绪）降级为"仅金额"文案，不拿一个算不出的分母硬凑百分比——
+（老执行环境/投影未就绪）降级为"仅金额"文案，不拿一个算不出的分母硬凑百分比——
 两套 i18n 模板（`subagentFanoutSummary` / `subagentFanoutSummaryNoPct`）分开
-写，不共用一句话再拼接。全程未碰 core/wasm/host，纯 `dsh-client` 前端叠加层。
+写，不共用一句话再拼接。全程未碰 core/wasm/harness，纯 `dsh-client` 前端叠加层。
 `verify-render.mjs` 补了三条断言：汇总行内容、`selfCost` 不可用时的降级路径、
 英文 locale 下的中文残留扫描（同 D7 的做法，正则扫描而不是关键词枚举）。
 

@@ -12,7 +12,7 @@ SQLite `usage_entries`。我们 `codex-cost` 是第二/三套。两套读同一�
 默认根目录，产出 `usage.db`；这里只 SELECT。
 
 用法：
-    agent-vitals codex-cost --host codex --month all --json /tmp/codex-cost.json
+    agent-vitals codex-cost --harness codex --month all --json /tmp/codex-cost.json
     python3 scripts/cc_trace_oracle.py \
         --cc-trace-db /tmp/cc-trace-usage-audit-oracle/usage.db \
         --codex-cost-json /tmp/codex-cost.json \
@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cc-trace-db", required=True, type=Path,
                    help="cc-trace usage_audit 产出的 usage.db")
     p.add_argument("--codex-cost-json", required=True, type=Path,
-                   help="`agent-vitals codex-cost --host codex --month all --json` 的输出文件")
+                   help="`agent-vitals codex-cost --harness codex --month all --json` 的输出文件")
     p.add_argument("--codex-logs-dir", type=Path, default=None,
                    help="可选：~/.codex/sessions 等 Codex rollout 根；给定时重放两种"
                         "模型归属规则，把 per-model 差异逐 (turn_context, thread_settings) 归类")

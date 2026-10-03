@@ -8,7 +8,7 @@
 `agent/claude_evidence.py`）。五段式流水线：locate → shape → extract（适配器）→
 derive → coverage（evidence）→ 组合（本模块）。
 
-**SV607/608 的 Unavailable 是本模块的 host-capability degradation（§12），不是
+**SV607/608 的 Unavailable 是本模块的 harness-capability degradation（§12），不是
 core 规则改动。** Claude 的 tool_result 没有原因码词汇——core 适配器 §3 让
 `error_code` 结构性恒 None（绝不伪造），而 SV607/608 是原因级检测器（读
 error_code，不读 failed）。家族①门控按 timeline 非空放行后，检测器会在全 None
@@ -21,7 +21,7 @@ SV609/610/614 不需要 override：approvals/sandbox_modes timeline 恒空，家
 家族④ OR 门控已经如实给 Unavailable。
 
 SV607/608 的 override 放在本模块（dispatcher 层）、不在 `canonical_audit.py`
-（共享求值器）——求值器是宿主无关的，特例一旦进共享代码就再难摘出来。
+（共享求值器）——求值器是执行环境无关的，特例一旦进共享代码就再难摘出来。
 `claude_audit_projection` 委托共享求值器算三态契约（§10 验收 #4），然后对
 rule_outcomes 做 override、重算 `summary.rules_unavailable`。
 """
@@ -31,21 +31,21 @@ import json
 from pathlib import Path
 
 from agent_vitals.adapters import claude_session
-from agent_vitals.agent import canonical_audit, claude_evidence, host_capability
+from agent_vitals.agent import canonical_audit, claude_evidence, harness_capability
 
 
 def claude_audit_projection(canonical):
     """family① + family④ 的审计投影：findings + 三态 rule_outcomes + summary。
 
-    委托共享求值器 `canonical_audit.audit_projection`（宿主无关），然后做唯一的
-    Claude 特例：把 SV607/608 从 MeasuredZero 覆盖成 Unavailable（host-capability
-    degradation，`host_capability.py`——表已下沉，这里是消费方）。**只覆盖
+    委托共享求值器 `canonical_audit.audit_projection`（执行环境无关），然后做唯一的
+    Claude 特例：把 SV607/608 从 MeasuredZero 覆盖成 Unavailable（harness-capability
+    degradation，`harness_capability.py`——表已下沉，这里是消费方）。**只覆盖
     MeasuredZero**：门控已因 timeline 空给 Unavailable（缺失信号、无需 override）
     或给了 Findings（Claude 不可能，但 override 不吞真命中）时保持原样。覆盖后
     重算 `rules_unavailable`——共享求值器的数已经不反映 degrade 后的状态（健康
     会话 3 → 5）。"""
     proj = canonical_audit.audit_projection(canonical)
-    host_capability.degrade_rule_outcomes("claude-code", proj["rule_outcomes"])
+    harness_capability.degrade_rule_outcomes("claude-code", proj["rule_outcomes"])
     proj["summary"]["rules_unavailable"] = sum(
         1 for v in proj["rule_outcomes"].values() if v.get("status") == "unavailable")
     return proj
@@ -93,15 +93,15 @@ def claude_session_list(home=None):
             "last": info["last"],
         })
     sessions.sort(key=functools.cmp_to_key(_session_cmp))
-    return {"host": "claude-code", "sessions": sessions}
+    return {"harness": "claude-code", "sessions": sessions}
 
 
 def _render_list(out):
     """`claude-session --list` 的人读呈现。缺席的字段一律 `-`（诚实缺失，不编造）；
     session_id 缺失 → 空串（`{sid:<28}` 留白，同 Rust）。与 Rust
-    `render_claude_session_list` 逐字节对齐：`host: claude-code\\n` +
+    `render_claude_session_list` 逐字节对齐：`harness: claude-code\\n` +
     `sessions: {n}\\n\\n` + 每行 `"{sid:<28}  {title}  {model}  {first} → {last}\\n"`。"""
-    s = "host: claude-code\n"
+    s = "harness: claude-code\n"
     sessions = out.get("sessions")
     sessions = sessions if isinstance(sessions, list) else []
     s += "sessions: %d\n\n" % len(sessions)
@@ -156,7 +156,7 @@ def claude_session_audit_json(home, session_id):
     roots = roots if isinstance(roots, list) else []
     cwd = roots[0] if roots else None
     return {
-        "host": "claude-code",
+        "harness": "claude-code",
         "session_id": session_id,
         "title": claude_session._title_of(evidence["raw_records"]),
         "model": ev["model"],

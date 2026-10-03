@@ -16,7 +16,7 @@ SKILL_NAME_KEYS = frozenset({
 })
 PLUGIN_NAME_KEYS = frozenset({"namespace"})
 PLUGIN_KEY_KEYS = frozenset({"plugin_key", "enabled_plugins"})
-# 宿主实例名。instance_id = Path(instance_root).name —— 用户机器上的目录名，
+# 执行环境实例名。instance_id = Path(instance_root).name —— 用户机器上的目录名，
 # 常常就是工作区或客户项目的名字，与 skill 名同一性质。
 # 收集它之后，instance_root / config_path / conflict_domain 里嵌着的同一串
 # 会被后面的单遍替换一起清掉，不必逐个字段列举。

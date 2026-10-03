@@ -12,7 +12,7 @@
 use agent_vitals_domain::compatibility::canonical_session::{canonical_session_to_vitals, KIND_TURN, SIGNAL_TURN_BOUNDARIES};
 use agent_vitals_domain::compatibility::findings::vitals_report_to_legacy_findings;
 use agent_vitals_domain::detectors::Sv612Detector;
-use agent_vitals_hosts::dsh_evidence::build_dsh_evidence;
+use agent_vitals_harnesses::dsh_evidence::build_dsh_evidence;
 use agent_vitals_domain::trajectory::{detect_sv612_legacy, flatten_trajectory};
 use agent_vitals_domain::util::post_fork;
 use serde_json::{json, Value};

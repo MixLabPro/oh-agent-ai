@@ -56,9 +56,9 @@ sentinel、coverage 三态）的正确延伸。
 ### F2. `issue_instances` 的 PRIMARY KEY 与 UNIQUE 自相矛盾，且击穿 DoD 第 7 条（§10.2.1）
 
 ```sql
-issue_id TEXT PRIMARY KEY,   -- fnv1a64_hex(canonical_json(host, issue_type, instance_fingerprint))
+issue_id TEXT PRIMARY KEY,   -- fnv1a64_hex(canonical_json(harness, issue_type, instance_fingerprint))
 ...
-UNIQUE(host, instance_fingerprint, status)  -- §9 DoD 第 7 条幂等性
+UNIQUE(harness, instance_fingerprint, status)  -- §9 DoD 第 7 条幂等性
 ```
 
 两个约束的键不同：`issue_id` 不含 `status`，`UNIQUE` 含。后果：
@@ -70,7 +70,7 @@ UNIQUE(host, instance_fingerprint, status)  -- §9 DoD 第 7 条幂等性
    实现者只能二选一，而 spec 没说选哪个**。注释却写着这条 UNIQUE 就是 DoD 第 7 条
    「同一输入重放不重复写」的落地，实际是它的反面。
 
-**建议**：`UNIQUE(host, instance_fingerprint)`，`status` 作为可变列 UPDATE；需要状态
+**建议**：`UNIQUE(harness, instance_fingerprint)`，`status` 作为可变列 UPDATE；需要状态
 历史就单开 `issue_status_transitions(issue_id, from, to, at_ms)`，别塞进幂等键。
 
 ### F3. 派生层 memo 的失效条件永不触发，且表名不存在（§10.1 / §10.3 / §11.7）
@@ -83,8 +83,8 @@ UNIQUE(host, instance_fingerprint, status)  -- §9 DoD 第 7 条幂等性
    的事实只要哈希字典序小于当前最大值，`MAX` 就不变，**memo 永不失效，长期喂陈旧
    TraceGraph**。这正是本仓库反复踩的「看着正常、静默返回旧数据」类缺陷。
 2. **`session_facts` 表不存在**。authority 库的 13 张表是：`usage_facts` / `sessions` /
-   `source_files` / `sync_runs` / `data_quality_issues` / `host_bills` /
-   `host_runtime_snapshots` / `pricing_snapshots` / `budget_config` / `budget_snoozes` /
+   `source_files` / `sync_runs` / `data_quality_issues` / `harness_bills` /
+   `harness_runtime_snapshots` / `pricing_snapshots` / `budget_config` / `budget_snoozes` /
    `workflow_events` / `migrations` / `schema_meta`。会话事实在 `usage_facts`。
 
 **建议**：失效条件改为 `(COUNT(*), MAX(rowid))` 或每会话 `updated_at_ms`/ingest 序号；
@@ -119,7 +119,7 @@ UNIQUE(host, instance_fingerprint, status)  -- §9 DoD 第 7 条幂等性
 - 升级逻辑在 `ensure_schema` 的版本比较分支里（:401 `found.cmp(&SCHEMA_VERSION)`），
   低版本走 :98 的 "run product migration" 错误路径
 - 全仓库 `PRAGMA user_version` 只在一处注释里出现，且是**明确说"不是它"**
-  （`hosts/dsh/sources.rs:31`）
+  （`harnesses/dsh/sources.rs:31`）
 
 §10.4 需整节重写为：bump `SCHEMA_VERSION` 常量 2→3、在 `ensure_schema` 的版本比较分支
 加 v2→v3 迁移、`migrations` 表记录 checkpoint、`data-migrate` 子命令接线。
@@ -140,7 +140,7 @@ UNIQUE(host, instance_fingerprint, status)  -- §9 DoD 第 7 条幂等性
 
 另：`agent-vitals-data/` 实际还有 `billing.rs` ✅ / `authority_query.rs` ✅ /
 `coverage.rs` / `projection.rs` / `repository.rs` / `safe_query.rs` / `legacy_import.rs`
-/ `reimport_verify.rs`，`host_bills` 表也已存在（memory 里记的「HostBillRecord 待做」
+/ `reimport_verify.rs`，`harness_bills` 表也已存在（memory 里记的「HarnessBillRecord 待做」
 已过期）。
 
 ### F7. `codex_merged_cached` 不存在（§10.1 / §10.3）
@@ -259,7 +259,7 @@ FK 会直接违反。
   以为 5→6 是纯新增，实际还有一个 tab 要被合并掉（这正是 §11.5 自己想避免的
   「在两个版本里被两边都改一次」）。补一行 `Token 日历 → 并入 Overview / v0.10-A`。
 - 「DSH audit tab 的 `behaviorFindings` projection 同步改名为 `issueFindings`」：这是
-  跨 host/client 两半的契约改名（`host/index.ts` 注册 + `client/index.cts` 的
+  跨 harness/client 两半的契约改名（`harness/index.ts` 注册 + `client/index.cts` 的
   `useProjection` 键 + 若干注释），**收益为零**（UI tab 名与 projection 名本就不必同名），
   风险是双面插件不同步。建议删掉这条。
 

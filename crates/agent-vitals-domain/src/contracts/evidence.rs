@@ -20,12 +20,12 @@ pub struct Observed<T> {
     pub prov: Provenance,
 }
 
-/// 一个数字是宿主measured出来的、适配器derive出来的、还是像 `est_tokens`
-/// 那样纯estimate的——`src/host.rs` 已经用 `Option` 把"能不能读到"变成编译期
+/// 一个数字是执行环境measured出来的、适配器derive出来的、还是像 `est_tokens`
+/// 那样纯estimate的——`src/harness.rs` 已经用 `Option` 把"能不能读到"变成编译期
 /// 的事，这里把"读到的东西有多可信"也变成编译期的事，理由相同。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Provenance {
-    /// 宿主自己记录的数字。
+    /// 执行环境自己记录的数字。
     Measured,
     /// 适配器从别的信号推出来的（例如 Claude Code 的 turn 边界）。
     Derived { from: &'static str },
@@ -46,7 +46,7 @@ pub enum LossKind {
 // ────────────────────────── §3 Signals ──────────────────────────
 
 /// 一个具名、类型化的证据通道，独立于其它任何通道存在或缺席——这条独立性是
-/// 整个模型能撑过四个宿主的原因（§4 的 host coverage matrix 逐格都不同）。
+/// 整个模型能撑过四个执行环境的原因（§4 的 harness coverage matrix 逐格都不同）。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Signal {
     ToolCalls,
@@ -58,7 +58,7 @@ pub enum Signal {
     /// 只有总量，没有逐请求分辨率。
     UsageAggregate,
     ContextWindow,
-    /// 宿主报告的额度/配额使用快照。
+    /// 执行环境报告的额度/配额使用快照。
     QuotaConsumption,
     ApprovalDecisions,
     ApprovalPolicy,
@@ -72,7 +72,7 @@ pub enum Signal {
     FileMutations,
     /// 真人发起的 turn（与 agent 自己续写的 turn 相对）。
     UserPrompts,
-    /// §3.2：永远是 `Estimated`，从不是 `Measured`——没有宿主会把"用户不满意
+    /// §3.2：永远是 `Estimated`，从不是 `Measured`——没有执行环境会把"用户不满意
     /// 上一步的输出"这件事直接记下来，只能从后续行为里猜。
     UserCorrections,
 }
@@ -80,7 +80,7 @@ pub enum Signal {
 impl Signal {
     /// 20 个变体的声明序——`signals` 数组 / `coverage` 字典的输出顺序、以及
     /// 各证据适配器过去各自维护的 `ALL_SIGNALS` 都靠这份序对齐。v0.6
-    /// host-contract spec §6（复制点 B）把它上收成这一份共享 Canonical
+    /// harness-contract spec §6（复制点 B）把它上收成这一份共享 Canonical
     /// Schema：适配器不再各自声明完整信号表，统一用它遍历（M2a）。与 Python
     /// 镜像 `claude_evidence.py`/`codex_evidence.py`/`workbuddy_evidence.py`
     /// 的 `ALL_SIGNALS` 元组同表同序。
@@ -165,7 +165,7 @@ impl CoverageCounts {
 }
 
 /// 一份会话里每个 `Signal` 各自的覆盖计数。§4：覆盖率是**逐会话算出来的**，
-/// 不是按宿主 id 查表——Codex 的 `ThreadHistoryMode` 就是反例：同一个宿主 id
+/// 不是按执行环境 id 查表——Codex 的 `ThreadHistoryMode` 就是反例：同一个执行环境 id
 /// 下有两种互不兼容的事件词表，只能靠探测内容判断，不能靠"这是 Codex 所以
 /// 覆盖率是 X"这种静态查表。
 #[derive(Clone, Default, Debug)]
@@ -297,7 +297,7 @@ pub struct DecimalAmount {
 /// 用 `Vec<QuotaWindow>` 而不是单个百分比。
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuotaWindow {
-    /// 套餐档位的原始字符串（如某宿主上会读到 `"plus"`）——不同宿主的叫法
+    /// 套餐档位的原始字符串（如某执行环境上会读到 `"plus"`）——不同执行环境的叫法
     /// 互不通用，不结构化成枚举。
     pub plan: String,
     pub used_percent: f64,
@@ -305,11 +305,11 @@ pub struct QuotaWindow {
     pub resets_at_ms: i64,
 }
 
-/// 宿主无关的当前配额快照。
+/// 执行环境无关的当前配额快照。
 ///
-/// 各宿主的 wire 字段（例如 Codex 的 `rate_limits`、未来其他宿主的
-/// `limits`）由 adapter 映射到这里。`plan` 只保留人可见的宿主原始档位，
-/// 不把它误当成跨宿主通用枚举；宿主特有的 credits/balance 扩展不进入该
+/// 各执行环境的 wire 字段（例如 Codex 的 `rate_limits`、未来其他执行环境的
+/// `limits`）由 adapter 映射到这里。`plan` 只保留人可见的执行环境原始档位，
+/// 不把它误当成跨执行环境通用枚举；执行环境特有的 credits/balance 扩展不进入该
 /// 类型，也不能被统一换算成金额。
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuotaSnapshot {
@@ -319,7 +319,7 @@ pub struct QuotaSnapshot {
 }
 
 impl QuotaSnapshot {
-    /// 仅检查跨宿主不变量；具体 wire 字段和缺失字段策略由 adapter 决定。
+    /// 仅检查跨执行环境不变量；具体 wire 字段和缺失字段策略由 adapter 决定。
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.observed_at.is_empty() {
             return Err("quota snapshot observed_at is empty");
@@ -344,7 +344,7 @@ impl QuotaSnapshot {
 /// 不同单位的花费**不可比较**——不同币种不相加不排名；WorkBuddy 计的是
 /// credits，不是 token，不能先换算成 token 再定价。
 ///
-/// `Quota` 是第三种、既不是 `Money` 也不是 `Credits` 的花费：某些宿主的
+/// `Quota` 是第三种、既不是 `Money` 也不是 `Credits` 的花费：某些执行环境的
 /// 订阅账户按请求返回一个"这次用了多少配额"的百分比，相对一个会清零的
 /// 滚动窗口，从头到尾没有美元单价，也不是可攒可花的余额（`has_credits`
 /// 恒为 false）。把它硬塞进 `Money` 是编造一个不存在的单价；塞进 `Credits`
@@ -364,13 +364,13 @@ pub type Reason = String;
 
 // ────────────────────────── §9 Identity and join keys ──────────────────────────
 
-/// 一个宿主内部的编号空间——主会话是一个，每个子代理会话各自另开一个。
+/// 一个执行环境内部的编号空间——主会话是一个，每个子代理会话各自另开一个。
 /// 不同 scope 下的 `ordinal` 互不可比，这也是为什么 `EventId` 强制要求
 /// 跨 scope 的 join 必须走 `native` 字段。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ScopeId(pub u32);
 
-/// 各宿主自己的原生标识：DSH 用 `seq`，Codex 用 `turn_id`/`call_id`，
+/// 各执行环境自己的原生标识：DSH 用 `seq`，Codex 用 `turn_id`/`call_id`，
 /// Claude Code 用 `uuid`，WorkBuddy 用 `toolCallId`/`requestId`。
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum NativeId {
@@ -382,7 +382,7 @@ pub enum NativeId {
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct EventId {
-    pub host_scope: ScopeId,
+    pub harness_scope: ScopeId,
     /// 适配器内部合成的序号，**只在同一个 scope 内**保证有序——Claude Code
     /// 完全没有原生 `seq`，跨 scope 或跨适配器比较这个字段没有意义。
     pub ordinal: u64,
@@ -412,8 +412,8 @@ pub struct RuleSpec {
     pub min_fidelity: Fidelity,
 }
 
-/// 引擎对每条规则、在每个宿主上，必须产出且只能产出这三种之一——这是整份
-/// 契约里唯一"不可谈判"的属性。"把宿主翻译成 DSH 事件再跑老引擎"这条路
+/// 引擎对每条规则、在每个执行环境上，必须产出且只能产出这三种之一——这是整份
+/// 契约里唯一"不可谈判"的属性。"把执行环境翻译成 DSH 事件再跑老引擎"这条路
 /// 天生做不到这件事：没有 approval 事件可翻译时，这类适配器只会报告"零条
 /// 审批异常"，而报告本身就是错的（该说 unavailable 却说成了 measured-zero）。
 pub enum RuleOutcome {
@@ -477,20 +477,20 @@ pub struct AdapterNote {
 
 /// 一份会话跑完五段式适配器流水线（locate → shape → extract → derive →
 /// coverage，§4）之后的产物。**不是 trait**——理由见
-/// `ARCHITECTURE.md` §4.2：宿主之间差的是"哪些阶段存在"，trait 会强迫每个
-/// 宿主实现一堆空方法，反而把这个差异藏起来。
+/// `ARCHITECTURE.md` §4.2：执行环境之间差的是"哪些阶段存在"，trait 会强迫每个
+/// 执行环境实现一堆空方法，反而把这个差异藏起来。
 ///
-/// §12：这个类型（以及它引用的每一个类型）里不允许出现任何宿主专属字段——
-/// 宿主专属数据必须放进一个由宿主 id 索引的不透明 payload，本模块自己不
-/// 持有那个 payload（避免"通用层"迟早变成"每个宿主怪癖的并集"）。
+/// §12：这个类型（以及它引用的每一个类型）里不允许出现任何执行环境专属字段——
+/// 执行环境专属数据必须放进一个由执行环境 id 索引的不透明 payload，本模块自己不
+/// 持有那个 payload（避免"通用层"迟早变成"每个执行环境怪癖的并集"）。
 pub struct CanonicalSession {
     pub meta: SessionMeta,
     pub signals: SignalSet,
     pub coverage: Coverage,
     pub attempts: Vec<SourceAttempt>,
     pub notes: Vec<AdapterNote>,
-    // §11.5 timeline：逐事件观测的 host-neutral 投影——phase B 的规则引擎直接读
-    // 这五个字段，不再读裸宿主事件。适配器在「derive」段填充（见 dsh_evidence.rs
+    // §11.5 timeline：逐事件观测的 harness-neutral 投影——phase B 的规则引擎直接读
+    // 这五个字段，不再读裸执行环境事件。适配器在「derive」段填充（见 dsh_evidence.rs
     // 的 populate_timelines）。
     pub tool_calls: Timeline<ToolCallObservation>,
     pub tool_results: Timeline<ToolResultObservation>,
@@ -531,10 +531,10 @@ impl CanonicalSession {
 
 pub struct SessionMeta {
     pub session_id: String,
-    /// 通用的宿主标识符**值**（比如运行时取到的 `"codex"`）——存的是数据，
-    /// 不是类型名，所以不违反 §12："不能有宿主专属字段"针对的是字段/类型
-    /// 名字本身携带宿主专属含义，不是字段里能装什么字符串。
-    pub host_id: &'static str,
+    /// 通用的执行环境标识符**值**（比如运行时取到的 `"codex"`）——存的是数据，
+    /// 不是类型名，所以不违反 §12："不能有执行环境专属字段"针对的是字段/类型
+    /// 名字本身携带执行环境专属含义，不是字段里能装什么字符串。
+    pub harness_id: &'static str,
     pub workspace_roots: Vec<String>,
     pub model: Option<String>,
     /// 这份会话**实际覆盖**的时间跨度——喂进本证据的原生记录时间的 min/max。
@@ -548,17 +548,17 @@ pub struct SessionMeta {
     /// - 只取原生记录的时间，不含合成的 `ordinal` 序数（序数不是时间）。
     ///
     /// 与 `SourceAttempt.observed_span` 的分工：那个是**逐来源**的覆盖跨度，为
-    /// §14.8.6「surface 2/3 的参差左沿」预留（当前无宿主实现那些表面）；
-    /// 本字段是**整个会话**的跨度，四宿主都已接线。
+    /// §14.8.6「surface 2/3 的参差左沿」预留（当前无执行环境实现那些表面）；
+    /// 本字段是**整个会话**的跨度，四执行环境都已接线。
     /// 方案见 `docs/v1.0.0/OBSERVED_SPAN_IMPLEMENTATION_PLAN.md`。
     pub span: Option<TimeSpan>,
 }
 
-// ────────────────────────── §11.5 Timeline: host-neutral observations ──────────────────────────
+// ────────────────────────── §11.5 Timeline: harness-neutral observations ──────────────────────────
 
 /// 规则引擎直接消费的逐事件投影——phase B 把 `detect_svNNN` 从读裸 DSH JSON
-/// 事件改读这里的窄 payload 后，规则不再依赖任何宿主事件形状（§12 的「不持有
-/// 宿主专属 payload」约束就落在这里：payload 字段名不含宿主名，DSH / Codex /
+/// 事件改读这里的窄 payload 后，规则不再依赖任何执行环境事件形状（§12 的「不持有
+/// 执行环境专属 payload」约束就落在这里：payload 字段名不含执行环境名，DSH / Codex /
 /// WorkBuddy 各自适配器把自家事件翻译成这五个观察类型）。
 ///
 /// 事件坐标（turn/step/call_id）在抽取时用 `Coords` 顺延定死、随 entry 存下来，
@@ -571,7 +571,7 @@ pub struct ToolCallObservation {
 
 #[derive(Clone, Debug)]
 pub struct ToolResultObservation {
-    /// 通用失败信号（是/否），不解释原因——宿主只证明「失败了」、不给码时用它
+    /// 通用失败信号（是/否），不解释原因——执行环境只证明「失败了」、不给码时用它
     /// （Claude Code 的 `is_error` 就是这种）。`None` = 源没有失败信号，不是
     /// "没失败"。原因级检测（SV607/608）读 `error_code`，不读它。
     pub failed: Option<bool>,
@@ -642,7 +642,7 @@ pub struct TurnObservation {
 #[derive(Clone, Debug)]
 pub struct TimelineEntry<T> {
     pub observation: T,
-    /// 这条 entry 是宿主原生记的、适配器 derive 的，还是降级过的——兼容桥
+    /// 这条 entry 是执行环境原生记的、适配器 derive 的，还是降级过的——兼容桥
     /// （canonical_session.rs）原样透传给 `CanonicalEvent.provenance`。缺它，
     /// 推导 turn / 模糊错误会被下游当成原生测量（Codex 输入过桥被标成 dsh 来源、
     /// Derived 变 Measured 是同一类洞）。
@@ -783,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_snapshot_validates_cross_host_invariants() {
+    fn quota_snapshot_validates_cross_harness_invariants() {
         let snapshot = QuotaSnapshot {
             plan: Some("plus".into()),
             windows: vec![QuotaWindow {
@@ -801,16 +801,16 @@ mod tests {
         assert_eq!(invalid.validate(), Err("quota snapshot window is invalid"));
     }
 
-    /// §12："这条规则有一个测试：断言共享类型层里没有任何标识符含宿主名。"
+    /// §12："这条规则有一个测试：断言共享类型层里没有任何标识符含执行环境名。"
     /// 用源码文本自检而不是逐类型反射——本文件的说明性注释里会大量提到
     /// Codex / Claude Code / WorkBuddy / DSH（解释为什么要这么设计），所以
     /// 必须先把 `//` / `///` 注释行剥掉，只检查真正的代码文本；否则这条
     /// 测试自己先假红。
     #[test]
-    fn shared_type_layer_has_no_host_identifiers_in_code() {
+    fn shared_type_layer_has_no_harness_identifiers_in_code() {
         let src = include_str!("evidence.rs");
-        // 只扫 `#[cfg(test)]` 之前的部分——测试模块自己就得把宿主名列成
-        // 字符串字面量才能拿它们去查（正下面这份 host 列表），不这样切一刀
+        // 只扫 `#[cfg(test)]` 之前的部分——测试模块自己就得把执行环境名列成
+        // 字符串字面量才能拿它们去查（正下面这份 harness 列表），不这样切一刀
         // 这条测试会先把自己判红。
         let production_src = src.split("#[cfg(test)]").next().unwrap_or(src);
         let code_only: String = production_src
@@ -828,10 +828,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
             .to_lowercase();
-        for host in ["codex", "claude_code", "claudecode", "workbuddy", "dsh"] {
+        for harness in ["codex", "claude_code", "claudecode", "workbuddy", "dsh"] {
             assert!(
-                !code_only.contains(host),
-                "shared evidence type layer must not name host {host:?} in code (see contract §12)"
+                !code_only.contains(harness),
+                "shared evidence type layer must not name harness {harness:?} in code (see contract §12)"
             );
         }
     }

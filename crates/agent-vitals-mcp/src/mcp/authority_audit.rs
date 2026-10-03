@@ -18,7 +18,7 @@ pub fn spec() -> ToolSpec {
             "properties": {
                 "month": { "type": "string", "description": "Optional statistics month YYYY-MM." },
                 "date": { "type": "string", "description": "Optional statistics date YYYY-MM-DD." },
-                "host": { "type": "string", "description": "Optional host filter." },
+                "harness": { "type": "string", "description": "Optional harness filter." },
                 "tolerance_tokens": { "type": "integer", "minimum": 0, "default": 0 }
             },
             "additionalProperties": false
@@ -49,8 +49,8 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let tolerance = tolerance_from_args(args)?;
     let handle = AuthorityHandle::open(data_home)?;
     let conn = handle.conn();
-    let host = args.get("host").and_then(Value::as_str);
-    let scope = scope_clause(month, date, host)?;
+    let harness = args.get("harness").and_then(Value::as_str);
+    let scope = scope_clause(month, date, harness)?;
 
     let (facts, tokens, legacy_facts, realtime_facts, realtime_tokens) = conn.query_row(
         &format!("SELECT COUNT(*), COALESCE(SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens), 0), COALESCE(SUM(CASE WHEN observation_kind = 'legacy_aggregate' THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN observation_kind != 'legacy_aggregate' THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN observation_kind != 'legacy_aggregate' THEN uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens ELSE 0 END), 0) FROM usage_facts WHERE deleted_at_ms IS NULL AND {}", scope.clause),
@@ -59,40 +59,40 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     ).map_err(|e| ToolError::new("internal_error", format!("authority fact audit failed: {e}")))?;
 
     let duplicate_groups = scalar(conn, &format!(
-        "SELECT COUNT(*) FROM (SELECT host, machine_namespace, native_session_id, source_event_id, observation_kind, COUNT(*) n FROM usage_facts WHERE deleted_at_ms IS NULL AND {} GROUP BY host, machine_namespace, native_session_id, source_event_id, observation_kind HAVING n > 1)", scope.clause), &scope.params)?;
+        "SELECT COUNT(*) FROM (SELECT harness, machine_namespace, native_session_id, source_event_id, observation_kind, COUNT(*) n FROM usage_facts WHERE deleted_at_ms IS NULL AND {} GROUP BY harness, machine_namespace, native_session_id, source_event_id, observation_kind HAVING n > 1)", scope.clause), &scope.params)?;
     let orphan_sessions = scalar(conn, &format!(
         "SELECT COUNT(*) FROM usage_facts f LEFT JOIN sessions s ON s.session_key = f.session_key WHERE f.deleted_at_ms IS NULL AND f.session_key IS NOT NULL AND s.session_key IS NULL AND {}", scope.clause), &scope.params)?;
     let negative_buckets = scalar(conn, &format!(
         "SELECT COUNT(*) FROM usage_facts WHERE deleted_at_ms IS NULL AND (uncached_input_tokens < 0 OR cache_read_tokens < 0 OR cache_write_tokens < 0 OR output_tokens < 0) AND {}", scope.clause), &scope.params)?;
-    let host_axis_tokens = scalar(conn, &format!(
-        "SELECT COALESCE(SUM(t), 0) FROM (SELECT SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens) t FROM usage_facts WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate' AND {} GROUP BY host)", scope.clause), &scope.params)?;
+    let harness_axis_tokens = scalar(conn, &format!(
+        "SELECT COALESCE(SUM(t), 0) FROM (SELECT SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens) t FROM usage_facts WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate' AND {} GROUP BY harness)", scope.clause), &scope.params)?;
     let model_axis_tokens = scalar(conn, &format!(
-        "SELECT COALESCE(SUM(t), 0) FROM (SELECT SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens) t FROM usage_facts WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate' AND {} GROUP BY host, provider_id, model_id)", scope.clause), &scope.params)?;
-    let host_conservation_delta = realtime_tokens.saturating_sub(host_axis_tokens).max(host_axis_tokens.saturating_sub(realtime_tokens));
+        "SELECT COALESCE(SUM(t), 0) FROM (SELECT SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens) t FROM usage_facts WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate' AND {} GROUP BY harness, provider_id, model_id)", scope.clause), &scope.params)?;
+    let harness_conservation_delta = realtime_tokens.saturating_sub(harness_axis_tokens).max(harness_axis_tokens.saturating_sub(realtime_tokens));
     let model_conservation_delta = realtime_tokens.saturating_sub(model_axis_tokens).max(model_axis_tokens.saturating_sub(realtime_tokens));
     let open_quality = scalar(conn, "SELECT COUNT(*) FROM data_quality_issues WHERE resolved_at_ms IS NULL", &[])?;
     let future_revisions = scalar(conn, &format!(
         "SELECT COUNT(*) FROM sync_runs WHERE status = 'succeeded' AND COALESCE(completed_at_ms, started_at_ms) > {}", crate::clock::now_ms()), &[])?;
     let mixed_legacy_groups = scalar(conn, &format!(
-        "SELECT COUNT(*) FROM (SELECT host, COALESCE(source_profile, '') p, date(event_ts_ms / 1000, 'unixepoch') d, MAX(CASE WHEN observation_kind = 'legacy_aggregate' THEN 1 ELSE 0 END) legacy, MAX(CASE WHEN observation_kind != 'legacy_aggregate' THEN 1 ELSE 0 END) realtime FROM usage_facts WHERE deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL AND {} GROUP BY host, p, d HAVING legacy = 1 AND realtime = 1)", scope.clause), &scope.params)?;
+        "SELECT COUNT(*) FROM (SELECT harness, COALESCE(source_profile, '') p, date(event_ts_ms / 1000, 'unixepoch') d, MAX(CASE WHEN observation_kind = 'legacy_aggregate' THEN 1 ELSE 0 END) legacy, MAX(CASE WHEN observation_kind != 'legacy_aggregate' THEN 1 ELSE 0 END) realtime FROM usage_facts WHERE deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL AND {} GROUP BY harness, p, d HAVING legacy = 1 AND realtime = 1)", scope.clause), &scope.params)?;
 
-    let structural_mismatch = host_conservation_delta > tolerance || model_conservation_delta > tolerance
+    let structural_mismatch = harness_conservation_delta > tolerance || model_conservation_delta > tolerance
         || duplicate_groups > 0 || orphan_sessions > 0 || negative_buckets > 0
         || future_revisions > 0 || mixed_legacy_groups > 0;
     let verdict = if structural_mismatch { "mismatch" } else if open_quality > 0 { "explained" } else { "exact" };
     let checks = vec![
-        check("token_conservation_host_axis", host_conservation_delta <= tolerance, host_conservation_delta, "host-axis realtime token delta <= tolerance"),
+        check("token_conservation_harness_axis", harness_conservation_delta <= tolerance, harness_conservation_delta, "harness-axis realtime token delta <= tolerance"),
         check("token_conservation_model_axis", model_conservation_delta <= tolerance, model_conservation_delta, "model-axis realtime token delta <= tolerance"),
         check("fact_token_totals_non_negative", negative_buckets == 0, negative_buckets, "zero negative token rows"),
         check("identity_duplicate_groups", duplicate_groups == 0, duplicate_groups, "zero duplicate identity groups"),
         check("session_foreign_keys_resolve", orphan_sessions == 0, orphan_sessions, "zero orphan session references"),
-        check("legacy_realtime_axes_separate", mixed_legacy_groups == 0, mixed_legacy_groups, "no host/profile/day mixes legacy and realtime rows"),
+        check("legacy_realtime_axes_separate", mixed_legacy_groups == 0, mixed_legacy_groups, "no harness/profile/day mixes legacy and realtime rows"),
         check("authority_revision_not_in_future", future_revisions == 0, future_revisions, "zero future successful revisions"),
         check("registered_quality_exceptions", open_quality == 0, open_quality, "zero unresolved registered quality issues"),
     ];
     let data = json!({
         "verdict": verdict,
-        "scope": { "month": month, "date": date, "host": host, "tolerance_tokens": tolerance },
+        "scope": { "month": month, "date": date, "harness": harness, "tolerance_tokens": tolerance },
         "facts": facts,
         "total_tokens": tokens,
         "realtime_tokens": realtime_tokens,
@@ -119,7 +119,7 @@ struct Scope {
     params: Vec<rusqlite::types::Value>,
 }
 
-fn scope_clause(month: Option<&str>, date: Option<&str>, host: Option<&str>) -> Result<Scope, ToolError> {
+fn scope_clause(month: Option<&str>, date: Option<&str>, harness: Option<&str>) -> Result<Scope, ToolError> {
     let mut clauses = Vec::new();
     let mut params = Vec::new();
     if let Some(value) = month {
@@ -136,8 +136,8 @@ fn scope_clause(month: Option<&str>, date: Option<&str>, host: Option<&str>) -> 
         params.push(rusqlite::types::Value::Integer(start));
         params.push(rusqlite::types::Value::Integer(end));
     }
-    if let Some(value) = host {
-        clauses.push("host = ?".to_string());
+    if let Some(value) = harness {
+        clauses.push("harness = ?".to_string());
         params.push(rusqlite::types::Value::Text(value.to_owned()));
     }
     Ok(Scope { clause: if clauses.is_empty() { "1 = 1".to_string() } else { clauses.join(" AND ") }, params })

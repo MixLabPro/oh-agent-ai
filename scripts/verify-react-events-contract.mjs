@@ -33,29 +33,29 @@ const events = [];
 const unsubscribe = await listenAppEvents((event) => events.push(event));
 assert.equal(subscribed, "app-event");
 callback?.({ payload: { type: "SyncStatusChanged", secret: "must-not-cross" } });
-callback?.({ payload: { type: "HostNavigationChanged", path: "/private/path" } });
+callback?.({ payload: { type: "HarnessNavigationChanged", path: "/private/path" } });
 callback?.({ payload: { type: "SourceDataDeleted", path: "/private/path" } });
 callback?.({ payload: { type: "WatcherHealthChanged", mode: "active", topology_revision: 2, pending_roots: 0, reason_code: null } });
 callback?.({ payload: { type: "WatcherHealthChanged", mode: "not-a-mode", raw: "/private/path" } });
 callback?.({ payload: { type: "UnknownInternalEvent", secret: "drop" } });
-// RUNTIME_INVALIDATION spec §6：Invalidated 只透 revision（限幅）+ hosts（闭集过滤）。
-callback?.({ payload: { type: "Invalidated", schema_version: 1, revision: 42, hosts: ["dsh", "codex", "/private/path", 7], payload: { secret: "drop" } } });
-callback?.({ payload: { type: "Invalidated", revision: -1, hosts: "not-an-array" } });
+// RUNTIME_INVALIDATION spec §6：Invalidated 只透 revision（限幅）+ harnesses（闭集过滤）。
+callback?.({ payload: { type: "Invalidated", schema_version: 1, revision: 42, harnesses: ["dsh", "codex", "/private/path", 7], payload: { secret: "drop" } } });
+callback?.({ payload: { type: "Invalidated", revision: -1, harnesses: "not-an-array" } });
 callback?.({ payload: { type: "Invalidated", revision: 1e300 } });
 // 退役类型：领域事件不再透传（spec §4.3）。
 callback?.({ payload: { type: "FoldCompleted", at: 1 } });
-callback?.({ payload: { type: "FactsIngested", host: "dsh", inserted: 3 } });
+callback?.({ payload: { type: "FactsIngested", harness: "dsh", inserted: 3 } });
 callback?.({ payload: "malformed" });
 domCallback?.();
 assert.equal(JSON.stringify(events), JSON.stringify([
   { type: "SyncStatusChanged" },
-  { type: "HostNavigationChanged" },
+  { type: "HarnessNavigationChanged" },
   { type: "SourceDataDeleted" },
   { type: "WatcherHealthChanged" },
   { type: "WatcherHealthChanged" },
-  { type: "Invalidated", revision: 42, hosts: ["dsh", "codex"] },
-  { type: "Invalidated", hosts: [] },
-  { type: "Invalidated", hosts: [] },
+  { type: "Invalidated", revision: 42, harnesses: ["dsh", "codex"] },
+  { type: "Invalidated", harnesses: [] },
+  { type: "Invalidated", harnesses: [] },
   { type: "SourceDataDeleted" },
 ]));
 unsubscribe();
@@ -75,23 +75,23 @@ assert.equal(domCallback, null);
 // SourceDataDeleted 恒放行；无 revision 的旧桌面进程保守放行。
 const { makeInvalidationGate } = sandbox.module.exports;
 const gate = makeInvalidationGate();
-assert.equal(gate({ type: "Invalidated", revision: 5, hosts: [] }), true, "first revision refreshes");
-assert.equal(gate({ type: "Invalidated", revision: 5, hosts: ["dsh"] }), false, "same revision swallowed");
-assert.equal(gate({ type: "Invalidated", revision: 4, hosts: [] }), false, "older revision swallowed");
-assert.equal(gate({ type: "Invalidated", revision: 6, hosts: [] }), true, "advance refreshes");
+assert.equal(gate({ type: "Invalidated", revision: 5, harnesses: [] }), true, "first revision refreshes");
+assert.equal(gate({ type: "Invalidated", revision: 5, harnesses: ["dsh"] }), false, "same revision swallowed");
+assert.equal(gate({ type: "Invalidated", revision: 4, harnesses: [] }), false, "older revision swallowed");
+assert.equal(gate({ type: "Invalidated", revision: 6, harnesses: [] }), true, "advance refreshes");
 assert.equal(gate({ type: "SyncStatusChanged" }), false, "status is not data invalidation");
-assert.equal(gate({ type: "HostNavigationChanged" }), false, "overview refreshes navigation explicitly");
+assert.equal(gate({ type: "HarnessNavigationChanged" }), false, "overview refreshes navigation explicitly");
 assert.equal(gate({ type: "WatcherHealthChanged" }), false);
 assert.equal(gate({ type: "TrustMonitorEvent" }), false);
 assert.equal(gate({ type: "SourceDataDeleted" }), true, "deletion always refreshes");
-assert.equal(gate({ type: "Invalidated", hosts: [] }), true, "no revision (old desktop) refreshes conservatively");
-assert.equal(gate({ type: "Invalidated", revision: 6, hosts: [] }), false, "conservative path does not reset seenRevision");
+assert.equal(gate({ type: "Invalidated", harnesses: [] }), true, "no revision (old desktop) refreshes conservatively");
+assert.equal(gate({ type: "Invalidated", revision: 6, harnesses: [] }), false, "conservative path does not reset seenRevision");
 // R1（REFRESH_STORM spec §4.1）：轮询合成的 SourceDataDeleted 带 revision——只比较、
 // 不推进水位（各订阅者对不同事件类型的刷新集不同，外来信号不得吞掉 Invalidated 全量扇出）。
 assert.equal(gate({ type: "SourceDataDeleted", revision: 6 }), false, "poll synthesis covered by watermark is swallowed");
 assert.equal(gate({ type: "SourceDataDeleted", revision: 7 }), true, "newer poll synthesis refreshes");
-assert.equal(gate({ type: "Invalidated", revision: 7, hosts: [] }), true, "deletion does not advance watermark (full fan still runs)");
-assert.equal(gate({ type: "Invalidated", revision: 7, hosts: [] }), false, "and the watermark advances only via Invalidated");
+assert.equal(gate({ type: "Invalidated", revision: 7, harnesses: [] }), true, "deletion does not advance watermark (full fan still runs)");
+assert.equal(gate({ type: "Invalidated", revision: 7, harnesses: [] }), false, "and the watermark advances only via Invalidated");
 
 const { parseWatcherHealth } = sandbox.module.exports;
 // vm 跨 realm 对象不做 deepEqual（原型不同）——按本文件惯例用 JSON 串比较。
@@ -133,4 +133,4 @@ assert.ok(!source.includes('listen("sync-status-updated"'));
 assert.ok(!source.includes('listen("usage-fold-updated"'));
 assert.ok(!source.includes('listen("trust-monitor-updated"'));
 assert.ok(!source.includes('listen("source-data-deleted"'));
-console.log("React event bus contract: OK (app-event allowlist, Invalidated revision/hosts, invalidation gate, payload redaction, cleanup, burst queue, watcher-health closed set)");
+console.log("React event bus contract: OK (app-event allowlist, Invalidated revision/harnesses, invalidation gate, payload redaction, cleanup, burst queue, watcher-health closed set)");

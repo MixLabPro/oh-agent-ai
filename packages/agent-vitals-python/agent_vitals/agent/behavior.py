@@ -56,7 +56,7 @@ SENSITIVE_PATH_RE = re.compile(r"(?i)~/\.ssh/authorized_keys|/etc/|~/\.bashrc")
 # SV605 工作区外写：绝对路径（v1 无 workspace 根，退化为「绝对路径」启发式，§10.5）
 ABS_PATH_RE = re.compile(r"/(?:[A-Za-z0-9_.+-]+/)+[A-Za-z0-9_.+-]*")
 
-# SV606 内网/裸 IP 外联：web_fetch URL 的 host 是裸 IPv4（含内网段）
+# SV606 内网/裸 IP 外联：web_fetch URL 的 harness 是裸 IPv4（含内网段）
 INTERNAL_IP_URL_RE = re.compile(r"(?i)https?://\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?")
 
 # SV607 被沙箱拒绝：TOOL_TIMEOUT 之外的拒绝/中止/不可用码（TOOL_TIMEOUT 归 SV608）
@@ -354,7 +354,7 @@ _TRAJECTORY_CODES = ("SV611", "SV612", "SV613", "SV614")
 # 的是 tool/call，所以是 ToolCalls。SV610 单靠 sandbox/mode 就能出一条
 # finding，所以 ApprovalDecisions 只是 enhances，不是 requires（不在
 # requires 元组里就是 enhances——本文件不做完整 19 信号的 Coverage 模型，
-# 只镜像 Rust crates/agent-vitals-hosts/src/hosts/dsh/sessions/evidence.rs 里这四个信号）。
+# 只镜像 Rust crates/agent-vitals-harnesses/src/harnesses/dsh/sessions/evidence.rs 里这四个信号）。
 # 与 Rust behavior.rs::rule_specs 逐条对齐，改一边要改另一边。
 RULE_REQUIRES = {
     "SV601": ("ToolCalls",), "SV602": ("ToolCalls",), "SV603": ("ToolCalls",),
@@ -560,7 +560,7 @@ def audit_session_log(path):
         usage       按模型汇总的四桶（成本折算的输入）
         requests    逐请求时间序列（上下文占用曲线的数据源，PRD §9.3）
         context     常驻前缀的分类估算（系统提示词/工具定义/技能目录，FR-04a）
-        compaction  压缩事件；prune 的 shadowed_token_count 是**宿主实测**的
+        compaction  压缩事件；prune 的 shadowed_token_count 是**执行环境实测**的
                     被丢弃 token 数，与 context 的 est_tokens 估算 provenance
                     不同，展示层须分开标注
         waste       FR-04b 结构性浪费——规则可直接判定、不需要历史基线的浪费
@@ -595,10 +595,10 @@ def audit_session_log(path):
     # 个理由）。family ④ 的轨迹 findings 与所有 coverage 都用同一份 pf，两端
     # lockstep（Rust src/behavior.rs 用 post_fork_evidence.canonical）。
     pf = post_fork(events)
-    # v0.6 host-contract spec §7-C/§11-M1：SV601–614 从此和 claude/codex/
+    # v0.6 harness-contract spec §7-C/§11-M1：SV601–614 从此和 claude/codex/
     # workbuddy 一样，经共享求值器 `canonical_audit.audit_projection` 求值——
     # `dsh_evidence.build_dsh_canonical` 把 pf 翻译成它消费的 5 条
-    # host-neutral timeline（镜像 Rust `dsh_evidence.rs` + 已塌缩的
+    # harness-neutral timeline（镜像 Rust `dsh_evidence.rs` + 已塌缩的
     # `canonical_audit.rs`，Rust 侧的 `match_behavior`/`match_behavior_canonical`
     # 早就走这条路）。family①（SV601–610，前置门控）+ family④（SV611–614，
     # 轨迹级）一次求出，键序、findings 字节序与旧的
@@ -628,7 +628,7 @@ def audit_session_log(path):
     # 不是本次改动引入的新缺口。
     skill = skill_invocations(events, requests)
     # D11：执行时长审计。hooks 是 CLI 独有的一项——浏览器的 durationAudit
-    # 投影不收 hook/* 事件（宿主前提未验证），CLI 直接读盘上的原始 JSONL，
+    # 投影不收 hook/* 事件（执行环境前提未验证），CLI 直接读盘上的原始 JSONL，
     # hook/* 本来就在 execution_events 里，这里立即可用。
     duration = {
         "tool_calls": tool_call_durations(events),

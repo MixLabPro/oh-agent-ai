@@ -82,16 +82,16 @@ def flatten_keys(obj, prefix="", out=None, depth=0):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--path", action="append", default=[])
-    ap.add_argument("--host", choices=("all", *CANDIDATE_DIRS), default="all",
-                    help="只探测一个宿主；默认探测全部已知日志目录")
+    ap.add_argument("--harness", choices=("all", *CANDIDATE_DIRS), default="all",
+                    help="只探测一个执行环境；默认探测全部已知日志目录")
     ap.add_argument("--skill-name", help="检查该 skill 名在日志中出现的次数")
     ap.add_argument("--max-files", type=int, default=40)
     ap.add_argument("--deep", action="store_true",
                     help="统计去重后的 SKILL.md read 观测；这是间接证据，不是触发次数")
     args = ap.parse_args()
 
-    defaults = (sum(CANDIDATE_DIRS.values(), []) if args.host == "all"
-                else CANDIDATE_DIRS[args.host])
+    defaults = (sum(CANDIDATE_DIRS.values(), []) if args.harness == "all"
+                else CANDIDATE_DIRS[args.harness])
     dirs = [Path(os.path.expanduser(d)) for d in defaults + args.path]
     found_dirs, seen_dirs = [], set()
     for directory in dirs:
@@ -105,7 +105,7 @@ def main():
 
     print("=== 日志目录 ===")
     if not found_dirs:
-        print("未找到。用 --path 指定，或告诉我你的宿主把会话存在哪。")
+        print("未找到。用 --path 指定，或告诉我你的执行环境把会话存在哪。")
         return
     for d in found_dirs:
         files = list(d.rglob("*.jsonl")) + list(d.rglob("*.json"))

@@ -28,9 +28,9 @@
    和「我读错了表」。给一个 `schema_version` 就够,不需要承诺列不变。
 3. **最值得要的一条是请求级路由枚举**(§3 P1-2,评审后**升为 P0**):一个
    `platform-credits / self-configured / promotional` 枚举值就能同时解掉 46.5% token
-   落 `unpriced`、零积分只能两态、成因只能归用户声明三个问题——宿主声明比用户声明
+   落 `unpriced`、零积分只能两态、成因只能归用户声明三个问题——执行环境声明比用户声明
    好一个量级。**逐请求用量已解决(2026-09-12,spec Phase E)**:traces 的 generation span
-   自带逐请求四桶,`cost.processed_tokens` 已是真实用量;§7.2 路径 1 已开。剩下的是让宿主
+   自带逐请求四桶,`cost.processed_tokens` 已是真实用量;§7.2 路径 1 已开。剩下的是让执行环境
    **声明 `usage`/`model` 字段是契约**(§3 P1-1 改写)。
 4. **traces 不是匿名的**(§3 P2-3,评审后改写):`trace.sessionId` 结构化字段已存在、
    覆盖 22/23 会话。本文初版沿用 09-02 的错误结论,验收复测抓出。write/edit/subagent/
@@ -40,10 +40,10 @@
 
 ## 1. 我们在测什么(一句话)
 
-agent-vitals 做的事是:**把各宿主(Codex / Claude Code / DSH / WorkBuddy)的会话行为与
+agent-vitals 做的事是:**把各执行环境(Codex / Claude Code / DSH / WorkBuddy)的会话行为与
 消耗,归一化成同一套「证据 + 三态覆盖 + 四栏成本」结构**,并且**不许用估算冒充测量**。
-因此它对宿主的诉求集中在三件事上:**这个数测到了吗(measured / unavailable / measured-zero)**、
-**它归谁记的账(宿主 / 用户自配 / 未知)**、**它花在什么粒度上(请求 / 会话 / 常驻)**。
+因此它对执行环境的诉求集中在三件事上:**这个数测到了吗(measured / unavailable / measured-zero)**、
+**它归谁记的账(执行环境 / 用户自配 / 未知)**、**它花在什么粒度上(请求 / 会话 / 常驻)**。
 
 ## 2. 真机核验基线(2026-09-11 08:00,`~/.workbuddy/`)
 
@@ -125,7 +125,7 @@ agent-vitals 做的事是:**把各宿主(Codex / Claude Code / DSH / WorkBuddy)�
 - **为什么**:这是**文档化 6 列语义就能消除一整类分母污染**的低成本高收益项——
   不需要改任何列,只需要说清取值域。
 - **若不做**:适配器只能按字面值过滤(如排除 `is_playground=1`),并在 notes 标注
-  「语义未经宿主声明,过滤基于字面值」。**不做任何基于列名的推断**。
+  「语义未经执行环境声明,过滤基于字面值」。**不做任何基于列名的推断**。
 
 ### P1
 
@@ -136,9 +136,9 @@ agent-vitals 做的事是:**把各宿主(Codex / Claude Code / DSH / WorkBuddy)�
   `cost.processed_tokens` = 该会话 traces 四桶之和,§7.2 路径 1 已开(统一会话面里有
   真四桶,不再「恒 0 沉底」);`session_usage.used` 是**最后一次调用上下文快照**不是
   使用量(§9E.1)。原先「§9 判不可拆四桶」的判定已随 E phase 作废。
-- **剩余问题**:`usage`/`model` 字段未被宿主**声明为契约**——若漂移只会表现为
-  decode_failures/attempts 上升,而不是「宿主改了什么」。
-- **建议(改写)**:向宿主**显式声明 `toolOutput[i].usage` 与 `toolOutput[i].model`
+- **剩余问题**:`usage`/`model` 字段未被执行环境**声明为契约**——若漂移只会表现为
+  decode_failures/attempts 上升,而不是「执行环境改了什么」。
+- **建议(改写)**:向执行环境**显式声明 `toolOutput[i].usage` 与 `toolOutput[i].model`
   是契约**,形状 = OpenAI 兼容 {prompt_tokens, cached_tokens, completion_tokens,
   …details} + 逐调用 model 串;不承诺稳就提供一个 `schema_version`。我们已实测两字段
   均真实,只差一句稳定承诺。
@@ -151,13 +151,13 @@ agent-vitals 做的事是:**把各宿主(Codex / Claude Code / DSH / WorkBuddy)�
   `hy3` / `hy4-preview-f` = 平台内置),但**前缀是实现细节,不是契约**。
   实测同一模型(`MiniMax-M3`)有的会话记积分有的不记——轨道是**请求级**的,而会话表不记路由。
 - **后果**:`ONBOARDING_SPEC` §2.1 因此判定零积分成因**不可分辨**(自配路由 / 限免促销 /
-  宿主未记账三者),并把成因归用户声明——这是正确的保守设计,但代价是 46.5% 的 token
+  执行环境未记账三者),并把成因归用户声明——这是正确的保守设计,但代价是 46.5% 的 token
   落在 `unpriced` 里,名义单位成本的分母被永久分裂。
 - **建议**:在请求级(或至少会话级)落一个 `route` / `billing_source` 标记,取值如
   `platform-credits` / `self-configured` / `promotional`。**不需要暴露 endpoint**,
   一个枚举值即可。
 - **为什么排 P0**:`ONBOARDING_SPEC` §2.1 把成因归「用户声明」是退而求其次——
-  **宿主声明比用户声明好一个量级**(宿主知道,用户只是记得)。这一条要到了,
+  **执行环境声明比用户声明好一个量级**(执行环境知道,用户只是记得)。这一条要到了,
   §2.1 / §5.1.2 / §8.0 一半的保守设计都可以松绑;要不到,它们必须留着。
 - **若不做**:维持「两态 + 成因归用户声明」;`models.json` 的路由线索只作**诊断提示**
   显示,不进任何判定(按 `ONBOARDING_SPEC` §11 规则 16:语料偶然不配写成规则)。
@@ -181,12 +181,12 @@ agent-vitals 做的事是:**把各宿主(Codex / Claude Code / DSH / WorkBuddy)�
 - **现状**:`automations` / `automation_runs` / `automation_runtime_state` /
   `automation_delivery_outbox` 四表已存在(当前 0 行),`sessions.is_background_automation`
   列已存在。`automation_runs` 有 `result_success` / `runs_json` / `source_cwd` / `thread_id`。
-- **为什么重要**:「无人值守运行」是 agent-vitals 目前对**任何宿主都未建模**的一类信号,
+- **为什么重要**:「无人值守运行」是 agent-vitals 目前对**任何执行环境都未建模**的一类信号,
   而它恰恰是可归因浪费最集中之处(定时跑空、重复执行、静默失败无人看)。
 - **建议**:`automation_runs` 稳定关联到 `sessionId`(现有 `thread_id` 看起来是这个角色,
   但语义未声明),使「一次定时触发 → 消耗多少 → 是否成功」可闭环。
 - **若不做**:agent-vitals 侧按 `WORKBUDDY_ONBOARDING_SPEC` §5.0 的纪律,把
-  `AutomationRuns` 建成**宿主中立**的 timeline signal,WorkBuddy 作为第一个实例;
+  `AutomationRuns` 建成**执行环境中立**的 timeline signal,WorkBuddy 作为第一个实例;
   数据为空时三态报 `unavailable`,**不报 measured-zero**(未启用 ≠ 零次运行)。
 
 ### P2
@@ -224,7 +224,7 @@ agent-vitals 做的事是:**把各宿主(Codex / Claude Code / DSH / WorkBuddy)�
      有真实 usage)——答案决定我们是否仍该收 unattributed。
   3. span 级是否也会落 `sessionId`——非必需(包装层够用),但若有则可校验一致性。
 - **若不做**:按现状接入——`trace.sessionId` 非空即归属(**字符串相等,不猜不推断**),
-  `Agent workflow` 类进 attempts 并单列计数,语义标「宿主未声明」。这条已从「结构性不可接」
+  `Agent workflow` 类进 attempts 并单列计数,语义标「执行环境未声明」。这条已从「结构性不可接」
   改判为「可接,归属键已知」,是 `ONBOARDING_SPEC` Phase E 的立项依据。
 
 
@@ -246,7 +246,7 @@ agent-vitals 做的事是:**把各宿主(Codex / Claude Code / DSH / WorkBuddy)�
 
 本文的每一条诉求都对应我们自己的一条约束:
 
-1. **只读,永不写回** `~/.workbuddy/`;不创建、不修改、不删除任何宿主文件。
+1. **只读,永不写回** `~/.workbuddy/`;不创建、不修改、不删除任何执行环境文件。
 2. **缺列报缺、多列报哨兵、绝不猜**:未识别的字段进 `attempts` 与 notes,不静默丢弃,
    也不按名字推断语义。
 3. **三态不冒充**:`measured` / `unavailable` / `measured-zero` 三态严格区分——
@@ -276,7 +276,7 @@ agent-vitals 做的事是:**把各宿主(Codex / Claude Code / DSH / WorkBuddy)�
 | 1 | 双向 schema 哨兵(未知列进 `attempts`) | 无 | 见 spec §10 B4 |
 | 2 | 会话生命周期字段**浮出**(不过滤——语义未声明,过滤是消费方的事) | 无(浮出不依赖答复;过滤才依赖) | 见 spec §10 B5 |
 | 3 | 读取快照时点标注(`source_snapshot` 键) | **无**(评审:不依赖任何答复) | 见 spec §10 B3 |
-| 4 | `AutomationRuns` 宿主中立 signal | P1-4 答复 **+ 至少一行数据** | **明确不做**(spec §10:为 0 行表建跨宿主 Signal 违反 §11 规则 16) |
+| 4 | `AutomationRuns` 执行环境中立 signal | P1-4 答复 **+ 至少一行数据** | **明确不做**(spec §10:为 0 行表建跨执行环境 Signal 违反 §11 规则 16) |
 | 5 | traces 改判「**可接**,归属键 `trace.sessionId`」并写入文档;traces 适配器立项 | 无 | 见 spec §10 B2 / Phase E |
 | 6 | 校正本文档 §2 记录的错误建议(`immutable=1`) | 无 | 已在本版订正 |
 

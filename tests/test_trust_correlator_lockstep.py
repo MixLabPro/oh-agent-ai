@@ -51,7 +51,7 @@ class TrustCorrelatorLockstep(unittest.TestCase):
         for case in payload["cases"]:
             self.assertEqual(python_projection(case), case["expected"], case["id"])
 
-    def test_host_chain_fixtures_are_redacted_and_do_not_overclaim_acceptance(self):
+    def test_harness_chain_fixtures_are_redacted_and_do_not_overclaim_acceptance(self):
         for path in CHAIN_FIXTURES:
             payload = json.loads(path.read_text())
             self.assertEqual(payload["schema_version"], "trust-egress-fixture-v1")

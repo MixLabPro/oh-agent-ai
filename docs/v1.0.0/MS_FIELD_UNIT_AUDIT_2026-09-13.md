@@ -1,6 +1,6 @@
 # `_ms` 契约字段全量体检 · 2026-09-13
 
-> 触发：`TraceNode.started_at_ms` 被发现是宿主决定单位（claude-code 秒 / codex 毫秒），
+> 触发：`TraceNode.started_at_ms` 被发现是执行环境决定单位（claude-code 秒 / codex 毫秒），
 > 而那已是**同一根因第二次**出现（首次是 `issue_instances.opened_at_ms`）。
 > 本体检要在**第三颗雷**出现前，把全仓纪元类 `_ms` 字段扫一遍。
 >
@@ -64,8 +64,8 @@ sessions.started_at_ms         min = 1788964225932
 | 字段 | 产生方 | 单位保证 | 判定 |
 |---|---|---|---|
 | `TraceNode.started_at_ms` / `ended_at_ms` | `domain/trace.rs`（3 处）+ `runtime/trace_service.rs`（1 处） | **本次修复**：全部过 `util::to_epoch_ms` | ✅ 已修 |
-| `WorkflowEvent.event_ts_ms` | 各宿主 `sources/workflow.rs` | `iso_to_epoch_ms`（ISO → 毫秒） | ✅ |
-| `QuotaWindow.resets_at_ms` | `hosts/codex/sessions/usage.rs:270` | 产生方做秒→毫秒转换，单测钉 `1_787_858_552_000` | ✅ |
+| `WorkflowEvent.event_ts_ms` | 各执行环境 `sources/workflow.rs` | `iso_to_epoch_ms`（ISO → 毫秒） | ✅ |
+| `QuotaWindow.resets_at_ms` | `harnesses/codex/sessions/usage.rs:270` | 产生方做秒→毫秒转换，单测钉 `1_787_858_552_000` | ✅ |
 | `TimeSpan.start_ms` / `end_ms` | 无产生方 —— 但**空值语义正确**（见 §4） | — | ✅ 非缺陷 |
 | `BillingPeriod.effective_from_ms` / `_to_ms` | 桌面 IPC 用户输入 | 需另行核（桌面面未扫，见 §5） | ⚠️ 未覆盖 |
 | `usage_facts.event_ts_ms` 等 SQL 列 | 事实写入路径 | 权威库契约，真机实测毫秒 | ✅ |
@@ -85,13 +85,13 @@ sessions.started_at_ms         min = 1788964225932
 pub observed_span: Option<TimeSpan>,
 ```
 
-**全部会话 `SourceAttempt` 都在失败路径上。** 三个宿主适配器都在 `unknown` 派生
+**全部会话 `SourceAttempt` 都在失败路径上。** 三个执行环境适配器都在 `unknown` 派生
 的 attempt 里写死 `None`：
 
 ```
-hosts/codex/sessions/evidence.rs:892        在 unknown.map(...) 内，available: false
-hosts/claude_code/sessions/evidence.rs:638  同上
-hosts/workbuddy/sessions/evidence.rs:848    同上
+harnesses/codex/sessions/evidence.rs:892        在 unknown.map(...) 内，available: false
+harnesses/claude_code/sessions/evidence.rs:638  同上
+harnesses/workbuddy/sessions/evidence.rs:848    同上
 ```
 
 这些 attempt 的语义是「**这条信号压根没能 derive 出来**」（`available: false` +
@@ -103,11 +103,11 @@ hosts/workbuddy/sessions/evidence.rs:848    同上
 与 `SourceAttempt` 无关。）
 
 **结论**：`observed_span` 是**面向未来的契约字段**——为 §14.8.6 那种
-「钩子/遥测类表面只从配置那一刻起才有数据」的场景预留，而当前三个宿主都没有这种
+「钩子/遥测类表面只从配置那一刻起才有数据」的场景预留，而当前三个执行环境都没有这种
 表面，所以没有产生方。**不接线、不删除、不改代码**；把它当"洞"去填，反而是造一个
 没有证据支撑的值。
 
-**唯一可选的动作**：在 `evidence.rs` 该字段上补一句「当前无产生方，因为三个宿主的
+**唯一可选的动作**：在 `evidence.rs` 该字段上补一句「当前无产生方，因为三个执行环境的
 attempt 都只在失败路径产出」——避免下一个读者（就是我）再次误判。**本轮未改**，
 留给代码所有者决定措辞。
 
@@ -129,7 +129,7 @@ attempt 都只在失败路径产出」——避免下一个读者（就是我）
 
 1. **桌面侧 IPC 的 DTO** —— `read_overview` / `read_calendar_month` / `budget_config` /
    `data_source_status` / `public_pricing_catalog_status` / `about_diagnostics` /
-   `host_bills_for_period` / `billing_*`。这些只在 `.app` 里可调，本次**没有实跑取值**，
+   `harness_bills_for_period` / `billing_*`。这些只在 `.app` 里可调，本次**没有实跑取值**，
    因而它们的 `_ms` 值未被扫描。已读过的产生方代码（如 `overview.rs` 的
    `budget.generated_at` 用 `SyncStatus.at`）看起来是毫秒，但**没有实测背书**。
 2. `sessions_search` 在本次窗口内返回空（2026-09-10..11 无会话），其字段未被实际取到。

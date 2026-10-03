@@ -1,6 +1,6 @@
-"""generic 插件宿主 recipe 提取（HOST_MANIFEST_DSL_SPEC §4）。
+"""generic 插件执行环境 recipe 提取（HARNESS_MANIFEST_DSL_SPEC §4）。
 
-`agent_vitals_hosts::hosts::generic::recipe` 的 Python twin——三态判定、
+`agent_vitals_harnesses::harnesses::generic::recipe` 的 Python twin——三态判定、
 token 桶算术、canonical event key（UTF-8 字节长前缀）逐字对齐。
 
 两语言分歧的头号坑（fixtures 已钉，Rust 侧见 recipe.rs 同名测试）：

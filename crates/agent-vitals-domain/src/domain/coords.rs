@@ -2,11 +2,11 @@
 //!
 //! **住 `domain/` 是过渡**：`Coords` 本质是 DSH 原始事件的边界顺延状态机
 //! （`observe` match `"turn/start"`/`"step/start"`），按 arch 该在
-//! `hosts/dsh/sessions/`。但 `trajectory::coord_map` / `duration` / `skill` 目前
+//! `harnesses/dsh/sessions/`。但 `trajectory::coord_map` / `duration` / `skill` 目前
 //! 还直接对 raw 事件跑它（layer-2 债），而这几个又要留 `domain/`——把它放
-//! 这里让 domain 侧的调用不再横跨去 host adapter 取类型，adapter 侧
-//! （evidence / compaction）经 `hosts → domain` 正向依赖取。
-//! 终态：per-host `sessions/evidence` 产出的 `CanonicalSession` 时间线自带解好的
+//! 这里让 domain 侧的调用不再横跨去 harness adapter 取类型，adapter 侧
+//! （evidence / compaction）经 `harnesses → domain` 正向依赖取。
+//! 终态：per-harness `sessions/evidence` 产出的 `CanonicalSession` 时间线自带解好的
 //! 坐标，`Coords` + `coord_map` 一起退场（wire/fold 分离，Phase D 之后）。
 //!
 //! 三个字段在真实日志里的覆盖率**完全不同**（session-e4b0be69 实测）：

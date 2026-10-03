@@ -9,12 +9,12 @@
 ## 理由
 
 1. WorkBuddy 没有逐 requestId token 数，只有会话级 `used`；拆分会伪造时间粒度与构成。
-2. 宿主没有四桶语义，尤其没有可靠的缓存读写信息；任何 cache hit ratio 都没有数据来源。
-3. 借用 Codex、Claude 或其它宿主的价格卡会产生错误定价；真机证据显示同一模型在不同卡下可相差约 46 倍。
+2. 执行环境没有四桶语义，尤其没有可靠的缓存读写信息；任何 cache hit ratio 都没有数据来源。
+3. 借用 Codex、Claude 或其它执行环境的价格卡会产生错误定价；真机证据显示同一模型在不同卡下可相差约 46 倍。
 
 ## 与 Phase B 的边界
 
-若将来批准 Phase B 路径 1，逐 requestId UsageFact 的四桶可以全部为 0。这是“宿主未报告分桶”的诚实缺失声明，不是对会话 token 的零测量。WorkBuddy 仍必须排除在 `tokens_by_host` 等将零解释为已测量的 token DTO 之外。
+若将来批准 Phase B 路径 1，逐 requestId UsageFact 的四桶可以全部为 0。这是“执行环境未报告分桶”的诚实缺失声明，不是对会话 token 的零测量。WorkBuddy 仍必须排除在 `tokens_by_harness` 等将零解释为已测量的 token DTO 之外。
 
 ## 长期约束
 

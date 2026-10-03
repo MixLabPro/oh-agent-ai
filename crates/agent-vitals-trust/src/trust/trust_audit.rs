@@ -11,8 +11,8 @@ use agent_vitals_domain::trust::{
     TrustObservationKind, TrustStage,
 };
 use crate::trust_identity::TrustIdentity;
-use agent_vitals_hosts::generic_manifest::TrustEvidenceAdapter;
-use agent_vitals_hosts::generic_manifest::TrustWatchPriority;
+use agent_vitals_harnesses::generic_manifest::TrustEvidenceAdapter;
+use agent_vitals_harnesses::generic_manifest::TrustWatchPriority;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -20,7 +20,7 @@ use walkdir::WalkDir;
 
 const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const PROFILE_VERSION: u64 = 1;
-const PROFILE_DIRECTORY: &str = "trust-hosts.d";
+const PROFILE_DIRECTORY: &str = "trust-harnesses.d";
 const MAX_MINIMAX_STATE_DATABASES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,13 +62,13 @@ impl TrustAuditProfile {
 
     fn imported(
         home: &Path, id: &str, display: &str,
-        spec: &agent_vitals_hosts::generic_manifest::TrustArtifactProfile, fallback_adapter: TrustEvidenceAdapter,
+        spec: &agent_vitals_harnesses::generic_manifest::TrustArtifactProfile, fallback_adapter: TrustEvidenceAdapter,
     ) -> Result<Self, String> {
         let roots = spec.roots.iter().map(|root| expand_profile_root(home, root)).collect::<Result<Vec<_>, _>>()?;
-        // Specialized adapters are capabilities of reviewed built-in hosts,
+        // Specialized adapters are capabilities of reviewed built-in harnesses,
         // not claims a dynamically imported manifest may make about itself.
         // An unknown plugin remains generic E1 coverage until its adapter is
-        // shipped and bound to a verified host identity.
+        // shipped and bound to a verified harness identity.
         let adapter = if fallback_adapter == TrustEvidenceAdapter::GenericArtifactV1 {
             TrustEvidenceAdapter::GenericArtifactV1
         } else {
@@ -78,7 +78,7 @@ impl TrustAuditProfile {
             id: id.to_string(), display: display.to_string(), roots,
             artifact_terms: spec.artifact_terms.clone(), extensions: spec.extensions.clone(),
             actor_id: format!("{id}-client"), collector_id: format!("{id}-imported-artifact-metadata"),
-            source: "imported_host_manifest", match_mode: MatchMode::TermAndExtension,
+            source: "imported_harness_manifest", match_mode: MatchMode::TermAndExtension,
             adapter, watch_priority: spec.watch_priority,
         })
     }
@@ -87,7 +87,7 @@ impl TrustAuditProfile {
 /// Coverage is separate from Findings. `detected` only says a local client
 /// directory exists; it does not say data was packaged or uploaded.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct TrustHostCandidate {
+pub struct TrustHarnessCandidate {
     pub id: String,
     pub detected: bool,
     pub artifact_profile_available: bool,
@@ -106,7 +106,7 @@ pub struct TrustProfileSummary {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TrustAuditReport {
-    pub host: String,
+    pub harness: String,
     pub discovered: usize,
     pub inserted: usize,
     pub duplicate: usize,
@@ -144,23 +144,23 @@ pub struct TrustEvidenceHistoryPage {
 
 /// Read a bounded, redacted projection of persisted Trust observations.
 /// This is deliberately separate from `audit_and_store`: opening the Trust
-/// page never walks host directories. No paths, contents, destination hosts,
+/// page never walks harness directories. No paths, contents, destination harnesses,
 /// provenance JSON, or source anchors cross this local UI query face.
-pub fn read_evidence_history(data_home: &Path, host: Option<&str>, limit: usize, cursor: Option<&str>) -> Result<TrustEvidenceHistoryPage, String> {
+pub fn read_evidence_history(data_home: &Path, harness: Option<&str>, limit: usize, cursor: Option<&str>) -> Result<TrustEvidenceHistoryPage, String> {
     let now_ms = crate::clock::now_ms();
-    read_evidence_history_at(data_home, host, limit, cursor, now_ms)
+    read_evidence_history_at(data_home, harness, limit, cursor, now_ms)
 }
 
-fn read_evidence_history_at(data_home: &Path, host: Option<&str>, limit: usize, cursor: Option<&str>, now_ms: i64) -> Result<TrustEvidenceHistoryPage, String> {
+fn read_evidence_history_at(data_home: &Path, harness: Option<&str>, limit: usize, cursor: Option<&str>, now_ms: i64) -> Result<TrustEvidenceHistoryPage, String> {
     if !(1..=500).contains(&limit) { return Err("trust evidence limit out of range".into()); }
-    if let Some(host) = host {
-        if host.is_empty() || host.len() > 32 || !host.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')) {
-            return Err("trust evidence host is invalid".into());
+    if let Some(harness) = harness {
+        if harness.is_empty() || harness.len() > 32 || !harness.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')) {
+            return Err("trust evidence harness is invalid".into());
         }
     }
     let parsed_cursor = cursor.map(parse_evidence_cursor).transpose()?;
-    if parsed_cursor.as_ref().is_some_and(|value| value.1.as_deref() != host) {
-        return Err("trust evidence cursor does not match host filter".into());
+    if parsed_cursor.as_ref().is_some_and(|value| value.1.as_deref() != harness) {
+        return Err("trust evidence cursor does not match harness filter".into());
     }
     let path = agent_vitals_data::authority::default_authority_path(data_home);
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -171,11 +171,11 @@ fn read_evidence_history_at(data_home: &Path, host: Option<&str>, limit: usize, 
                       destination_class, collector_id
                FROM trust_observations
                WHERE (expires_at_ms IS NULL OR expires_at_ms >= ?1)
-                 AND (?2 IS NULL OR host = ?2)
+                 AND (?2 IS NULL OR harness = ?2)
                  AND (?3 IS NULL OR observed_at_ms < ?4 OR (observed_at_ms = ?4 AND observation_id < ?5))
                ORDER BY observed_at_ms DESC, observation_id DESC LIMIT ?6";
     let mut statement = conn.prepare(sql).map_err(|error| error.to_string())?;
-    let rows = statement.query_map(rusqlite::params![now_ms, host, cursor, parsed_cursor.as_ref().map(|value| value.0), parsed_cursor.as_ref().map(|value| value.2.as_str()), (limit + 1) as i64], |row| {
+    let rows = statement.query_map(rusqlite::params![now_ms, harness, cursor, parsed_cursor.as_ref().map(|value| value.0), parsed_cursor.as_ref().map(|value| value.2.as_str()), (limit + 1) as i64], |row| {
         let raw_scopes: String = row.get(8)?;
         let scope_classes = serde_json::from_str::<Vec<String>>(&raw_scopes).unwrap_or_default()
             .into_iter().filter(|value| !value.is_empty() && value.len() <= 64).take(16).collect();
@@ -189,7 +189,7 @@ fn read_evidence_history_at(data_home: &Path, host: Option<&str>, limit: usize, 
     let has_more = rows.len() > limit;
     if has_more { rows.pop(); }
     let next_cursor = if has_more {
-        rows.last().map(|(id, item)| format!("{}:{}:{id}", item.observed_at_ms, host.unwrap_or("")))
+        rows.last().map(|(id, item)| format!("{}:{}:{id}", item.observed_at_ms, harness.unwrap_or("")))
     } else { None };
     Ok(TrustEvidenceHistoryPage { evidence: rows.into_iter().map(|(_, item)| item).collect(), next_cursor })
 }
@@ -198,16 +198,16 @@ fn parse_evidence_cursor(cursor: &str) -> Result<(i64, Option<String>, String), 
     if cursor.len() > 320 { return Err("trust evidence cursor is invalid".into()); }
     let mut parts = cursor.splitn(3, ':');
     let timestamp = parts.next().ok_or_else(|| "trust evidence cursor is invalid".to_string())?;
-    let host = parts.next().ok_or_else(|| "trust evidence cursor is invalid".to_string())?;
+    let harness = parts.next().ok_or_else(|| "trust evidence cursor is invalid".to_string())?;
     let observation_id = parts.next().ok_or_else(|| "trust evidence cursor is invalid".to_string())?;
     let timestamp = timestamp.parse::<i64>().map_err(|_| "trust evidence cursor is invalid".to_string())?;
-    if !host.is_empty() && (host.len() > 32 || !host.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_'))) {
+    if !harness.is_empty() && (harness.len() > 32 || !harness.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_'))) {
         return Err("trust evidence cursor is invalid".into());
     }
     if timestamp < 0 || observation_id.is_empty() || observation_id.len() > 256 || !observation_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')) {
         return Err("trust evidence cursor is invalid".into());
     }
-    Ok((timestamp, (!host.is_empty()).then(|| host.to_string()), observation_id.to_string()))
+    Ok((timestamp, (!harness.is_empty()).then(|| harness.to_string()), observation_id.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -285,14 +285,14 @@ fn parse_profile_file(home: &Path, raw: &[u8]) -> Result<TrustAuditProfile, Stri
     })
 }
 
-/// Load optional local profiles from `<data_home>/trust-hosts.d`. Invalid files
+/// Load optional local profiles from `<data_home>/trust-harnesses.d`. Invalid files
 /// are isolated and only a safe label plus reason is returned.
 pub fn profiles(data_home: &Path, home: &Path) -> (Vec<TrustAuditProfile>, Vec<String>) {
     let mut loaded = builtin_profiles(home);
     let mut errors = Vec::new();
-    let (plugin_hosts, plugin_host_errors) = crate::host_registry::scan_plugin_hosts(data_home);
-    errors.extend(plugin_host_errors.into_iter().map(|_| "plugin_host_manifest_invalid".to_string()));
-    for plugin in plugin_hosts {
+    let (plugin_harnesses, plugin_harness_errors) = crate::harness_registry::scan_plugin_harnesses(data_home);
+    errors.extend(plugin_harness_errors.into_iter().map(|_| "plugin_harness_manifest_invalid".to_string()));
+    for plugin in plugin_harnesses {
         let Some(spec) = plugin.trust_profile.as_ref() else { continue; };
         let fallback_adapter = loaded.iter().find(|present| present.id == plugin.slug)
             .map(|present| present.adapter).unwrap_or(TrustEvidenceAdapter::GenericArtifactV1);
@@ -304,7 +304,7 @@ pub fn profiles(data_home: &Path, home: &Path) -> (Vec<TrustAuditProfile>, Vec<S
                     loaded.push(profile);
                 }
             }
-            Err(_) => errors.push("plugin_host_trust_profile_invalid".to_string()),
+            Err(_) => errors.push("plugin_harness_trust_profile_invalid".to_string()),
         }
     }
     let directory = data_home.join(PROFILE_DIRECTORY);
@@ -336,7 +336,7 @@ pub fn profile_summaries(profiles: &[TrustAuditProfile]) -> Vec<TrustProfileSumm
 
 /// Discover well-known client roots without inspecting their content. This is
 /// coverage inventory, not behavioral detection or a vendor risk ranking.
-pub fn discover_host_candidates(home: &Path, profiles: &[TrustAuditProfile]) -> Vec<TrustHostCandidate> {
+pub fn discover_harness_candidates(home: &Path, profiles: &[TrustAuditProfile]) -> Vec<TrustHarnessCandidate> {
     let candidates: [(&str, &[&str]); 10] = [
         ("zcode", &[".zcode"]), ("minimax-code", &[".minimax", ".minimax-agent-cn", "Library/Application Support/MiniMax"]),
         ("codex", &[".codex"]), ("claude-code", &[".claude"]), ("cursor", &[".cursor"]),
@@ -346,7 +346,7 @@ pub fn discover_host_candidates(home: &Path, profiles: &[TrustAuditProfile]) -> 
     candidates.into_iter().map(|(id, roots)| {
         let detected = roots.iter().any(|root| home.join(root).is_dir());
         let available = profiles.iter().any(|profile| profile.id == id);
-        TrustHostCandidate {
+        TrustHarnessCandidate {
             id: id.to_string(), detected, artifact_profile_available: available,
             coverage_state: if !detected { "not_detected" } else if available { "profiled" } else { "detected_unprofiled" }.to_string(),
         }
@@ -398,7 +398,7 @@ fn zcode_manifest_observation(
     let observed_at_ms = observed_at_from_metadata(metadata, fallback_ms);
     Some(TrustObservation {
         observation_id: format!("{}_{}", profile.id, identity.event_ref(&format!("{}#manifest", entry.display()))),
-        machine_namespace: machine_namespace.to_string(), host: profile.id.clone(),
+        machine_namespace: machine_namespace.to_string(), harness: profile.id.clone(),
         actor_id: identity.actor_ref(&profile.actor_id), actor_kind: TrustActorKind::Sidecar, actor_version: None,
         observed_at_ms, observation_kind: TrustObservationKind::Package, stage: TrustStage::PackageObserved,
         evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref: workspace_ref_for_entry(identity, root, entry),
@@ -426,7 +426,7 @@ fn zcode_state_observations(
         || value.get("lastAcceptedExtraManifestHash").and_then(serde_json::Value::as_str).is_some() {
         out.push(TrustObservation {
             observation_id: format!("{}_{}", profile.id, identity.event_ref(&format!("{event}#accepted"))),
-            machine_namespace: machine_namespace.to_string(), host: profile.id.clone(), actor_id: actor_id.clone(),
+            machine_namespace: machine_namespace.to_string(), harness: profile.id.clone(), actor_id: actor_id.clone(),
             actor_kind: TrustActorKind::Sidecar, actor_version: None, observed_at_ms,
             observation_kind: TrustObservationKind::RemoteAck, stage: TrustStage::PackageObserved,
             evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::ClientStateClaim, workspace_ref: workspace_ref.clone(), scope_classes: Vec::new(),
@@ -441,7 +441,7 @@ fn zcode_state_observations(
     if let Some(failure_count) = value.get("failureCount").and_then(serde_json::Value::as_i64).filter(|count| *count > 0) {
         out.push(TrustObservation {
             observation_id: format!("{}_{}", profile.id, identity.event_ref(&format!("{event}#retry"))),
-            machine_namespace: machine_namespace.to_string(), host: profile.id.clone(), actor_id,
+            machine_namespace: machine_namespace.to_string(), harness: profile.id.clone(), actor_id,
             actor_kind: TrustActorKind::Sidecar, actor_version: None, observed_at_ms,
             observation_kind: TrustObservationKind::Retry, stage: TrustStage::PackageObserved,
             evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref, scope_classes: vec!["snapshot_artifact".to_string()],
@@ -563,7 +563,7 @@ fn scan_minimax_workspace_index_database(
             if has_archive_path || has_archive_hash { scopes.push("workspace_archive".to_string()); }
             if has_manifest_path || has_manifest_hash { scopes.push("workspace_manifest".to_string()); }
             observations.push(TrustObservation {
-                observation_id: format!("minimax_package_{native}"), machine_namespace: machine_namespace.to_string(), host: profile.id.clone(),
+                observation_id: format!("minimax_package_{native}"), machine_namespace: machine_namespace.to_string(), harness: profile.id.clone(),
                 actor_id: actor_id.clone(), actor_kind: TrustActorKind::Main, actor_version: None, observed_at_ms,
                 observation_kind: TrustObservationKind::Package, stage: TrustStage::PackageObserved,
                 evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref: workspace_ref.clone(), scope_classes: scopes,
@@ -576,7 +576,7 @@ fn scan_minimax_workspace_index_database(
         }
         if has_archive_oss_key || has_manifest_oss_key {
             observations.push(TrustObservation {
-                observation_id: format!("minimax_upload_ready_{native}"), machine_namespace: machine_namespace.to_string(), host: profile.id.clone(),
+                observation_id: format!("minimax_upload_ready_{native}"), machine_namespace: machine_namespace.to_string(), harness: profile.id.clone(),
                 actor_id: actor_id.clone(), actor_kind: TrustActorKind::Main, actor_version: None, observed_at_ms,
                 observation_kind: TrustObservationKind::Credential, stage: TrustStage::CredentialObserved,
                 evidence_level: TrustEvidenceLevel::E2UploadReady, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref: workspace_ref.clone(), scope_classes: Vec::new(),
@@ -589,7 +589,7 @@ fn scan_minimax_workspace_index_database(
         }
         if retry_count > 0 {
             observations.push(TrustObservation {
-                observation_id: format!("minimax_retry_{native}"), machine_namespace: machine_namespace.to_string(), host: profile.id.clone(),
+                observation_id: format!("minimax_retry_{native}"), machine_namespace: machine_namespace.to_string(), harness: profile.id.clone(),
                 actor_id: actor_id.clone(), actor_kind: TrustActorKind::Main, actor_version: None, observed_at_ms,
                 observation_kind: TrustObservationKind::Retry, stage: TrustStage::PackageObserved,
                 evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref, scope_classes: vec!["workspace_index".to_string()],
@@ -605,7 +605,7 @@ fn scan_minimax_workspace_index_database(
 }
 
 /// Scan one generic profile and emit only E1 package observations. It never
-/// reads file content; hosts with a verified adapter add bounded derivations separately.
+/// reads file content; harnesses with a verified adapter add bounded derivations separately.
 fn scan_generic_history(
     profile: &TrustAuditProfile, identity: &TrustIdentity, machine_namespace: &str, observed_at_ms: i64,
 ) -> Vec<TrustObservation> {
@@ -621,7 +621,7 @@ fn scan_generic_history(
             let workspace_ref = workspace.map(|root| identity.workspace_ref(root));
             let actor_ref = identity.actor_ref(&profile.actor_id);
             observations.push(TrustObservation {
-                observation_id: format!("{}_{}", profile.id, path_ref), machine_namespace: machine_namespace.to_string(), host: profile.id.clone(),
+                observation_id: format!("{}_{}", profile.id, path_ref), machine_namespace: machine_namespace.to_string(), harness: profile.id.clone(),
                 actor_id: actor_ref, actor_kind: TrustActorKind::Sidecar, actor_version: None,
                 observed_at_ms, observation_kind: TrustObservationKind::Package, stage: TrustStage::PackageObserved,
                 evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref,
@@ -678,7 +678,7 @@ pub fn audit_and_store(
             authority.finish_run(&run_id, "succeeded", None, None, now_ms)
                 .map_err(|error| format!("trust audit run finish failed: {error}"))?;
             Ok(TrustAuditReport {
-                host: profile.id.clone(), discovered: observations.len(), inserted: inserted.inserted,
+                harness: profile.id.clone(), discovered: observations.len(), inserted: inserted.inserted,
                 duplicate: inserted.duplicate, findings_upserted: correlation.findings_upserted,
                 evidence_links_added: correlation.evidence_links_added,
                 stage_counts: observations.iter().fold(BTreeMap::new(), |mut counts, observation| {
@@ -723,8 +723,8 @@ pub fn findings_summary(data_home: &Path) -> Result<Vec<agent_vitals_data::trust
 
 #[cfg(test)]
 mod tests {
-    use super::{audit_and_store, builtin_profiles, discover_host_candidates, profiles, read_evidence_history, read_evidence_history_at, scan_history, RETENTION_MS};
-    use agent_vitals_hosts::generic_manifest::TrustEvidenceAdapter;
+    use super::{audit_and_store, builtin_profiles, discover_harness_candidates, profiles, read_evidence_history, read_evidence_history_at, scan_history, RETENTION_MS};
+    use agent_vitals_harnesses::generic_manifest::TrustEvidenceAdapter;
     use crate::trust_identity::TrustIdentity;
     use rusqlite::Connection;
 
@@ -816,7 +816,7 @@ mod tests {
     #[test]
     fn local_profile_is_restricted_and_extensible() {
         let root = std::env::temp_dir().join(format!("agent-vitals-trust-profile-{}", std::process::id()));
-        let data = root.join("data/trust-hosts.d");
+        let data = root.join("data/trust-harnesses.d");
         std::fs::create_dir_all(&data).unwrap();
         std::fs::write(data.join("cursor.json"), r#"{"profile_version":1,"id":"cursor","display":"Cursor","roots":["~/.cursor/cache"],"artifact_terms":["snapshot"],"extensions":[".enc"]}"#).unwrap();
         std::fs::create_dir_all(root.join(".cursor/cache")).unwrap();
@@ -840,7 +840,7 @@ mod tests {
     fn discovery_marks_unprofiled_client_as_coverage_not_finding() {
         let root = std::env::temp_dir().join(format!("agent-vitals-trust-discovery-{}", std::process::id()));
         std::fs::create_dir_all(root.join(".cursor")).unwrap();
-        let candidates = discover_host_candidates(&root, &builtin_profiles(&root));
+        let candidates = discover_harness_candidates(&root, &builtin_profiles(&root));
         let cursor = candidates.iter().find(|item| item.id == "cursor").unwrap();
         assert!(cursor.detected);
         assert_eq!(cursor.coverage_state, "detected_unprofiled");
@@ -848,11 +848,11 @@ mod tests {
     }
 
     #[test]
-    fn imported_host_manifest_replaces_builtin_profile_without_rebuild() {
+    fn imported_harness_manifest_replaces_builtin_profile_without_rebuild() {
         let root = std::env::temp_dir().join(format!("agent-vitals-trust-plugin-{}", std::process::id()));
-        let host_dir = root.join("data/hosts.d/zcode");
-        std::fs::create_dir_all(&host_dir).unwrap();
-        std::fs::write(host_dir.join("manifest.json"), r#"{
+        let harness_dir = root.join("data/harnesses.d/zcode");
+        std::fs::create_dir_all(&harness_dir).unwrap();
+        std::fs::write(harness_dir.join("manifest.json"), r#"{
             "manifest_version":1,"slug":"zcode","display":{"name":"ZCode"},
             "discovery":{"roots":["~/.zcode/cli/rollout"],"include":["*.jsonl"]},
             "source":{"format":"jsonl"},"session":{"from":"filename","pattern":"^s_(?P<id>.+)\\.jsonl$"},
@@ -862,18 +862,18 @@ mod tests {
         let (loaded, errors) = profiles(&root.join("data"), &root);
         assert!(errors.is_empty());
         let profile = loaded.iter().find(|item| item.id() == "zcode").unwrap();
-        assert_eq!(profile.source, "imported_host_manifest");
+        assert_eq!(profile.source, "imported_harness_manifest");
         assert_eq!(profile.adapter, TrustEvidenceAdapter::ZcodeCheckpointV1,
             "legacy imported manifests inherit the replaced built-in adapter");
         std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
-    fn unknown_imported_host_cannot_claim_a_specialized_adapter() {
+    fn unknown_imported_harness_cannot_claim_a_specialized_adapter() {
         let root = std::env::temp_dir().join(format!("agent-vitals-trust-plugin-generic-{}", std::process::id()));
-        let host_dir = root.join("data/hosts.d/unknown-agent");
-        std::fs::create_dir_all(&host_dir).unwrap();
-        std::fs::write(host_dir.join("manifest.json"), r#"{
+        let harness_dir = root.join("data/harnesses.d/unknown-agent");
+        std::fs::create_dir_all(&harness_dir).unwrap();
+        std::fs::write(harness_dir.join("manifest.json"), r#"{
             "manifest_version":1,"slug":"unknown-agent","display":{"name":"Unknown Agent"},
             "discovery":{"roots":["~/.unknown-agent"],"include":["*.jsonl"]},
             "source":{"format":"jsonl"},"session":{"from":"filename","pattern":"^s_(?P<id>.+)\\.jsonl$"},
@@ -902,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn evidence_history_is_bounded_read_only_and_host_filterable() {
+    fn evidence_history_is_bounded_read_only_and_harness_filterable() {
         let root = std::env::temp_dir().join(format!("agent-vitals-trust-history-{}", std::process::id()));
         std::fs::create_dir_all(root.join(".zcode/v2/checkpoints/x")).unwrap();
         std::fs::write(root.join(".zcode/v2/checkpoints/x/snapshot.enc"), b"snapshot").unwrap();
@@ -922,12 +922,12 @@ mod tests {
         assert_eq!(second_page.evidence.len(), 1);
         assert_ne!(first_page.evidence[0].native_event_ref, second_page.evidence[0].native_event_ref);
         assert!(second_page.next_cursor.is_none());
-        assert!(read_evidence_history_at(&data, Some("zcode"), 1, Some(&cursor), 10).is_err(), "cursor from all-host query must not be reused with a host filter");
-        let host_page = read_evidence_history_at(&data, Some("zcode"), 1, None, 10).unwrap();
-        if let Some(host_cursor) = host_page.next_cursor {
-            assert!(read_evidence_history_at(&data, None, 1, Some(&host_cursor), 10).is_err(), "host-filtered cursor must not be reused without its filter");
-            assert!(read_evidence_history_at(&data, Some("minimax-code"), 1, Some(&host_cursor), 10).is_err(), "host-filtered cursor must not be reused for another host");
-            assert!(read_evidence_history_at(&data, Some("zcode"), 1, Some(&host_cursor), 10).is_ok(), "cursor remains valid with its originating host filter");
+        assert!(read_evidence_history_at(&data, Some("zcode"), 1, Some(&cursor), 10).is_err(), "cursor from all-harness query must not be reused with a harness filter");
+        let harness_page = read_evidence_history_at(&data, Some("zcode"), 1, None, 10).unwrap();
+        if let Some(harness_cursor) = harness_page.next_cursor {
+            assert!(read_evidence_history_at(&data, None, 1, Some(&harness_cursor), 10).is_err(), "harness-filtered cursor must not be reused without its filter");
+            assert!(read_evidence_history_at(&data, Some("minimax-code"), 1, Some(&harness_cursor), 10).is_err(), "harness-filtered cursor must not be reused for another harness");
+            assert!(read_evidence_history_at(&data, Some("zcode"), 1, Some(&harness_cursor), 10).is_ok(), "cursor remains valid with its originating harness filter");
         }
         assert!(read_evidence_history(&data, None, 0, None).is_err());
         assert!(read_evidence_history(&data, Some("../private"), 10, None).is_err());

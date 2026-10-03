@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 
-def read_host_config(home=None):
+def read_harness_config(home=None):
     """Return enabled plugins, skill usage, and the raw Claude configuration."""
     base = Path(home) if home is not None else Path(os.path.expanduser("~"))
     path = base / ".claude.json"

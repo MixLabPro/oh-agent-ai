@@ -13,9 +13,9 @@ separate release gates in `BETA_1_EXECUTION_PLAN.md`.
 | `overview-backend-wiring-2` | Merged as superseded history (`-s ours`) | Its committed overview implementation predates the current React/Authority integration. All 17 changed paths have later versions on `main`; the legacy and React overview contract suites pass. Its five uncommitted session-span edits were compared separately: the `span` output and Python/Rust key-order expectations already exist on `main`. The dirty worktree was not modified. |
 | detached `bf14` worktree | Commit already an ancestor of `main`; no merge needed | Its uncommitted schema-v4 catalog/template migration is present in the current schema-v27 evolution. The four untracked files exist on `main`; the two that differ have newer additions or updated v1 checks. The dirty worktree was not modified. |
 
-The current UI follow-up also fixes the usage host summary to use the dynamic
+The current UI follow-up also fixes the usage harness summary to use the dynamic
 Authority source summary, makes Settings navigation/reload reflect the selected
-section and full page, and stops a Skill host-selection change from implicitly
+section and full page, and stops a Skill harness-selection change from implicitly
 starting a scan. The release checklist remains open until the installed `.app`
 passes a separate end-to-end usability run.
 

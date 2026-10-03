@@ -1,13 +1,13 @@
 //! `domain::trace::build_trace_graph` 的 canonical-fixture 测试——与
 //! `tests/behavior_rules.rs` 同一个理由迁到集成测试：经
-//! `agent_vitals_hosts::dsh_evidence::build_dsh_evidence` 造 `CanonicalSession`
+//! `agent_vitals_harnesses::dsh_evidence::build_dsh_evidence` 造 `CanonicalSession`
 //! fixture，跨 crate 传 domain 类型的 inline lib test 会撞
 //! `multiple versions of crate`。
 
 use agent_vitals_domain::contracts::session_key::SessionKey;
 use agent_vitals_domain::contracts::trace_graph::{BranchState, TraceEdgeType, TraceNodeType, TraceStatus};
 use agent_vitals_domain::domain::trace::build_trace_graph;
-use agent_vitals_hosts::dsh_evidence::build_dsh_evidence;
+use agent_vitals_harnesses::dsh_evidence::build_dsh_evidence;
 use agent_vitals_domain::evidence::CanonicalSession;
 use serde_json::{json, Value};
 
@@ -20,7 +20,7 @@ fn tool_call(seq: i64, time: i64, name: &str, call_id: &str, turn: i64) -> Value
 
 fn tool_result(seq: i64, time: i64, call_id: &str, error_code: Option<&str>) -> Value {
     // DSH 的 `result_code` 读 `data.error.code`（嵌套对象），不是 `data.error`
-    // 本身——见 `hosts/dsh/sessions/evidence.rs::result_code`。
+    // 本身——见 `harnesses/dsh/sessions/evidence.rs::result_code`。
     json!({
         "type": "tool/result", "seq": seq, "time": time,
         "data": {"callId": call_id, "error": error_code.map(|c| json!({"code": c}))},
@@ -224,7 +224,7 @@ fn tool_result_error_propagates_to_tool_call_node_status() {
 }
 
 /// `TraceNode.started_at_ms` / `ended_at_ms` 的契约是**毫秒**，而
-/// `TimelineEntry.time` 的单位由各宿主适配器各自决定——Claude 的构造器明写
+/// `TimelineEntry.time` 的单位由各执行环境适配器各自决定——Claude 的构造器明写
 /// 「`parse_iso` → 秒」，Codex 与 DSH 是毫秒。真机实测（2026-09-13）：
 /// claude-code 节点 `1788449204` 当毫秒读是 1970-01-21，codex 节点
 /// `1789132709000` 当毫秒读才是对的。

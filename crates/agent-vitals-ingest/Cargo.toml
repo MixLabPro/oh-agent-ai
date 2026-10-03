@@ -20,7 +20,7 @@ watcher = ["dep:notify"]
 agent-vitals-billing = { path = "../agent-vitals-billing" }
 agent-vitals-data = { path = "../agent-vitals-data" }
 agent-vitals-domain = { path = "../agent-vitals-domain" }
-agent-vitals-hosts = { path = "../agent-vitals-hosts", features = ["sources"] }
+agent-vitals-harnesses = { path = "../agent-vitals-harnesses", features = ["sources"] }
 agent-vitals-provider = { path = "../agent-vitals-provider" }
 # E04 安装器直接使用 core 的不可变对象存储（extension_objects）。runtime-core
 # 是叶子 core crate，无反向依赖，不引入环。

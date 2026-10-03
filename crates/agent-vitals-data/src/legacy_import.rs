@@ -34,7 +34,7 @@
 //! 逐行事实。
 //!
 //! **事实身份委托 `contracts::usage_fact::build_usage_fact`**——fact_id 由
-//! 六元身份字段（machine_namespace/host/source_profile/native_session_id/
+//! 六元身份字段（machine_namespace/harness/source_profile/native_session_id/
 //! source_event_id/observation_kind）哈希派生，与全仓同一把尺；build 会覆盖
 //! 任何外部传入的 fact_id。token 非负也在构造器内校验（负值 → 问题清单 →
 //! 记 invalid_fact issue，不吞）。
@@ -65,7 +65,7 @@ const LEDGER_BUCKET_KEYS: [(&str, &str); 4] = [
     ("output_tokens", "output_tokens"),
 ];
 
-const LEGACY_HOST: &str = "claude-code";
+const LEGACY_HARNESS: &str = "claude-code";
 const LEGACY_NS: &str = "legacy";
 const LEGACY_PROFILE: &str = "ledger";
 const LEGACY_KIND: &str = "legacy_aggregate";
@@ -199,7 +199,7 @@ fn build_legacy_fact(
 ) -> Result<LegacyFact, Vec<String>> {
     let mut fields: Map<String, Value> = Map::new();
     fields.insert("machine_namespace".into(), json!(LEGACY_NS));
-    fields.insert("host".into(), json!(LEGACY_HOST));
+    fields.insert("harness".into(), json!(LEGACY_HARNESS));
     fields.insert("source_profile".into(), json!(LEGACY_PROFILE));
     fields.insert("native_session_id".into(), json!(format!("day:{day}")));
     fields.insert("source_event_id".into(), json!(format!("{day}:{model}:{peak}")));
@@ -287,14 +287,14 @@ fn touch_fact(
         None => {
             let n = conn.execute(
                 "INSERT INTO usage_facts(
-                     fact_id, host, machine_namespace, native_session_id, source_event_id,
+                     fact_id, harness, machine_namespace, native_session_id, source_event_id,
                      observation_kind, source_profile, model_id, event_ts_ms, event_peak,
                      uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                      ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
                 rusqlite::params![
                     fact_id,
-                    LEGACY_HOST,
+                    LEGACY_HARNESS,
                     LEGACY_NS,
                     fact.doc["native_session_id"].as_str().unwrap_or_default(),
                     fact.doc["source_event_id"].as_str().unwrap_or_default(),
@@ -368,7 +368,7 @@ fn write_conflict_issue(
     existing_kind: &str,
 ) -> Result<(), AuthorityError> {
     let detail = json!({
-        "host": LEGACY_HOST,
+        "harness": LEGACY_HARNESS,
         "observation_kind": LEGACY_KIND,
         "fact_id": fact.fact_id(),
         "existing_kind": existing_kind,
@@ -397,7 +397,7 @@ fn write_invalid_issue(
     problems: Vec<String>,
 ) -> Result<(), AuthorityError> {
     let detail = json!({
-        "host": LEGACY_HOST,
+        "harness": LEGACY_HARNESS,
         "observation_kind": LEGACY_KIND,
         "problems": problems,
         "note": "legacy ledger 导入时该候选未通过契约校验（token 负值 / 非法 day key），未入库",
@@ -428,7 +428,7 @@ fn mark_coverage_degradation(
     // scope_key, code) 保证重跑幂等吸收。
     for month in months {
         let detail = json!({
-            "host": LEGACY_HOST,
+            "harness": LEGACY_HARNESS,
             "observation_kind": LEGACY_KIND,
             "months": [month],
             "note": "claude-ledger 深历史以 legacy 聚合导入：底层会话文件已轮转/压缩，无法从现存 raw 源重放；本 scope 的 coverage 应作降级标注（spec §6.2.3）",
@@ -585,7 +585,7 @@ pub fn import_claude_ledger_unaccounted(
         return Ok(0);
     }
     let detail = json!({
-        "host": LEGACY_HOST,
+        "harness": LEGACY_HARNESS,
         "by_model_tokens": by_model,
         "total_tokens": total,
         "source": "claude-ledger.json::unaccounted",
@@ -685,7 +685,7 @@ mod tests {
         );
         let row: BaseRow =
             conn.query_row(
-                "SELECT host, machine_namespace, source_profile, native_session_id,
+                "SELECT harness, machine_namespace, source_profile, native_session_id,
                         source_event_id, observation_kind, model_id, event_peak,
                         event_ts_ms, uncached_input_tokens, cache_read_tokens,
                         cache_write_tokens, output_tokens
@@ -922,7 +922,7 @@ mod tests {
         db.conn()
             .execute(
                 "INSERT INTO usage_facts(
-                     fact_id, host, machine_namespace, native_session_id, source_event_id,
+                     fact_id, harness, machine_namespace, native_session_id, source_event_id,
                      observation_kind, source_profile, model_id, event_ts_ms, event_peak,
                      uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                      output_tokens, ingested_run_id, created_at_ms, updated_at_ms)

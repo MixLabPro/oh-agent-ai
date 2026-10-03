@@ -1,4 +1,4 @@
-import { hostName } from "../../lib/hostNames";
+import { harnessName } from "../../lib/harnessNames";
 import { useMemo, useState } from "react";
 import type { DecisionMatrixReport, DecisionMatrixRow, DecisionSummary } from "../../lib/tauri";
 import { message, resolvedLanguage, useLanguage, type MessageKey } from "../../lib/i18n";
@@ -18,7 +18,7 @@ function money(minor: number, currency: string, basis: string): string {
 }
 
 function rowKey(row: DecisionMatrixRow): string {
-  return JSON.stringify([row.host, row.model_id, row.provider_id]);
+  return JSON.stringify([row.harness, row.model_id, row.provider_id]);
 }
 
 function summaryTitle(summary: DecisionSummary): string {
@@ -31,14 +31,14 @@ function summaryBody(summary: DecisionSummary): string {
   if (summary.kind === "cost_outlier" && summary.outlier && summary.control) {
     return tx("dm.outlierBody", { model: summary.outlier.model_id, amount: money(summary.outlier.per_session_minor, summary.currency ?? "<unknown>", "metered_estimate"), control: summary.control.model_id, ratio: summary.ratio_vs_control ?? "—", hit: summary.outlier.cache_hit_ratio == null ? "—" : `${Math.round(summary.outlier.cache_hit_ratio * 100)}%` });
   }
-  if (summary.kind === "marathon") return tx("dm.marathonBody", { host: summary.combo?.host ?? "<unknown>", model: summary.combo?.model_id ?? "<unknown>", failures: summary.failures ?? 0 });
+  if (summary.kind === "marathon") return tx("dm.marathonBody", { harness: summary.combo?.harness ?? "<unknown>", model: summary.combo?.model_id ?? "<unknown>", failures: summary.failures ?? 0 });
   const detail = Object.entries(summary.by_currency ?? {}).map(([currency, value]) => tx("dm.comboTokens", { currency, combos: value.combos, tokens: compact(value.tokens) })).join(tx("dm.sep"));
   return detail ? tx("dm.pricedCombos", { detail }) : tx("dm.currencyMixed");
 }
 
 const limitationLabel = (id: string): string => {
   const keys: Record<string, MessageKey> = {
-    waste_rate_unavailable: "dm.limWaste", host_behavior_host_level: "dm.limHost", amounts_currency_separated: "dm.limCurrency",
+    waste_rate_unavailable: "dm.limWaste", harness_behavior_harness_level: "dm.limHarness", amounts_currency_separated: "dm.limCurrency",
     fingerprint_link_deferred: "dm.limFingerprint", top_sessions_unavailable: "dm.limTop", pricing_unavailable: "dm.limPricing",
   };
   return keys[id] ? tx(keys[id]) : tx("dm.limPartial");
@@ -67,7 +67,7 @@ function MatrixRow({ row, expanded, detailId, onToggle }: { row: DecisionMatrixR
   return <>
     <article className="matrix-row" role="listitem" data-testid="decision-matrix-row">
       <button className="matrix-row-toggle" type="button" aria-expanded={expanded} aria-controls={detailId} onClick={onToggle}>
-        <span className="matrix-combo"><strong>{hostName(row.host)} · {row.model_id}</strong><small>{row.provider_id}{tags.length ? ` · ${tags.join(" · ")}` : ""}</small></span>
+        <span className="matrix-combo"><strong>{harnessName(row.harness)} · {row.model_id}</strong><small>{row.provider_id}{tags.length ? ` · ${tags.join(" · ")}` : ""}</small></span>
         <span className="matrix-cell"><b>{row.sessions}</b><small>{tx("dm.sessions")}</small></span>
         <span className="matrix-cell"><b>{compact(row.tokens.total)}</b><small>token</small></span>
         <span className="matrix-cell"><b>{amount}</b><small>{tx("dm.nominal")}</small></span>
@@ -78,9 +78,9 @@ function MatrixRow({ row, expanded, detailId, onToggle }: { row: DecisionMatrixR
         <span className="matrix-chevron" aria-hidden="true">{expanded ? "⌃" : "⌄"}</span>
       </button>
     </article>
-    {expanded && <div id={detailId} className="matrix-detail" role="region" aria-label={tx("dm.evidenceAria", { host: row.host, model: row.model_id })}>
+    {expanded && <div id={detailId} className="matrix-detail" role="region" aria-label={tx("dm.evidenceAria", { harness: row.harness, model: row.model_id })}>
       <p>{tx("dm.buckets", { uncached: compact(row.tokens.uncached_input), read: compact(row.tokens.cache_read), write: compact(row.tokens.cache_write), output: compact(row.tokens.output) })}</p>
-      {Object.keys(row.host_behavior).length > 0 && <p>{tx("dm.hostBehavior")}{Object.entries(row.host_behavior).map(([rule, count]) => `${rule} × ${count}`).join(" · ")}</p>}
+      {Object.keys(row.harness_behavior).length > 0 && <p>{tx("dm.harnessBehavior")}{Object.entries(row.harness_behavior).map(([rule, count]) => `${rule} × ${count}`).join(" · ")}</p>}
       {row.top_sessions.length > 0 ? row.top_sessions.map((session) => <p key={session.session_ref}>{tx("dm.contributing")} <code>{session.session_ref.slice(0, 18)}…</code>{tx("dm.sessionTail", { hours: ((session.span_last_ms - session.span_first_ms) / 3_600_000).toFixed(1), tokens: compact(session.tokens_total), failures: session.failures })}</p>) : <p>{tx("dm.topNA")}</p>}
     </div>}
   </>;

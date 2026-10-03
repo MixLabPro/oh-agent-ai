@@ -83,7 +83,7 @@ td { padding: 9px 12px; border-bottom: 1px solid color-mix(in srgb, var(--line) 
 tr:last-child td { border-bottom: none; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 td .model { font-weight: 600; }
-td .host-tag { color: var(--text-dim); font-size: 11px; margin-right: 6px; }
+td .harness-tag { color: var(--text-dim); font-size: 11px; margin-right: 6px; }
 .clickable { cursor: pointer; }
 .clickable:hover { background: color-mix(in srgb, var(--panel-2) 30%, transparent); }
 tr.detail-row td { background: color-mix(in srgb, var(--bg) 55%, var(--panel)); padding: 12px 16px; }
@@ -130,7 +130,7 @@ details.evidence[open] summary { margin-bottom: 12px; }
 
   <div class="dig-card">
     <div class="head"><span class="no">1</span>最贵的组合贵在缓存纪律，不在单价 <span class="chip danger">成本异常</span></div>
-    <div class="why">deepseek-v4-flash-0731 单会话 ≈¥5.61，是同宿主 v4.1-flash（≈¥1.20）的 <b>4.7 倍</b>；主因缓存命中 <b>22.1%</b>（全表最低，中位 94%），57M token 里 44.4M 是未缓存重读。同一会话切到 v4.1-flash 后 191 次调用命中 99.5%——修复已被验证。</div>
+    <div class="why">deepseek-v4-flash-0731 单会话 ≈¥5.61，是同执行环境 v4.1-flash（≈¥1.20）的 <b>4.7 倍</b>；主因缓存命中 <b>22.1%</b>（全表最低，中位 94%），57M token 里 44.4M 是未缓存重读。同一会话切到 v4.1-flash 后 191 次调用命中 99.5%——修复已被验证。</div>
     <div class="actions">
       <span class="gain">该线月省 ≈¥54（−79%）</span>
       <button class="btn primary" onclick="drillToRow('r1')">定位到行</button>
@@ -207,7 +207,7 @@ details.evidence[open] summary { margin-bottom: 12px; }
 
 <!-- ══════════════ ② 模型 × Harness 对比 ══════════════ -->
 <h2>② 模型 × Harness 对比 <span class="chip dim">2026-09-01 → 09-18</span></h2>
-<div class="sub">每一行 = 宿主 × 模型 × 计费方。<b>排序按浪费调整后单位会话成本（近似）</b>——名义便宜但费 token 的组合会浮上来。点行展开：四桶 token、计价依据、<b>贡献 Top 会话</b>（可再进轨迹图，直达到那一次烧 token 的执行）。</div>
+<div class="sub">每一行 = 执行环境 × 模型 × 计费方。<b>排序按浪费调整后单位会话成本（近似）</b>——名义便宜但费 token 的组合会浮上来。点行展开：四桶 token、计价依据、<b>贡献 Top 会话</b>（可再进轨迹图，直达到那一次烧 token 的执行）。</div>
 
 <table id="matrix">
   <thead><tr>
@@ -217,7 +217,7 @@ details.evidence[open] summary { margin-bottom: 12px; }
   </tr></thead>
   <tbody>
     <tr class="clickable flash-hl" onclick="toggleRow('r1', event)">
-      <td><span class="host-tag">claude-code</span><span class="model">deepseek-v4-flash-0731</span><br><span class="chip warn">归属未定 · 官方卡兜底</span><br><span class="flagbox"><span class="flag cost">单会话 4.7× 中位</span><span class="flag hit">命中 22% · 全表最低</span></span></td>
+      <td><span class="harness-tag">claude-code</span><span class="model">deepseek-v4-flash-0731</span><br><span class="chip warn">归属未定 · 官方卡兜底</span><br><span class="flagbox"><span class="flag cost">单会话 4.7× 中位</span><span class="flag hit">命中 22% · 全表最低</span></span></td>
       <td class="num">12</td><td class="num">57.0M</td>
       <td class="num">≈¥67.34</td><td class="num"><b>≈¥5.61</b></td>
       <td class="num"><span style="color:var(--warn)">22.1%</span><div class="bar bad"><i style="width:22.1%"></i></div></td>
@@ -237,7 +237,7 @@ details.evidence[open] summary { margin-bottom: 12px; }
     </td></tr>
 
     <tr class="clickable" onclick="toggleRow('r2', event)">
-      <td><span class="host-tag">codex</span><span class="model">gpt-5.6-terra</span><br><span class="chip warn">custom · 官方卡兜底 USD</span><br><span class="flagbox"><span class="flag mix">币种失真 · 阻断排序</span></span></td>
+      <td><span class="harness-tag">codex</span><span class="model">gpt-5.6-terra</span><br><span class="chip warn">custom · 官方卡兜底 USD</span><br><span class="flagbox"><span class="flag mix">币种失真 · 阻断排序</span></span></td>
       <td class="num">31</td><td class="num">36.9M</td>
       <td class="num">≈$14.08</td><td class="num"><b>≈$0.45</b></td>
       <td class="num">93.7%<div class="bar"><i style="width:93.7%"></i></div></td>
@@ -249,7 +249,7 @@ details.evidence[open] summary { margin-bottom: 12px; }
     </td></tr>
 
     <tr class="clickable" onclick="toggleRow('r3', event)">
-      <td><span class="host-tag">codex</span><span class="model">openai/gpt-5.6-sol</span><br><span class="chip warn">custom · 官方卡兜底 USD</span></td>
+      <td><span class="harness-tag">codex</span><span class="model">openai/gpt-5.6-sol</span><br><span class="chip warn">custom · 官方卡兜底 USD</span></td>
       <td class="num">22</td><td class="num">11.4M</td>
       <td class="num">≈$8.53</td><td class="num"><b>≈$0.39</b></td>
       <td class="num">94.2%<div class="bar"><i style="width:94.2%"></i></div></td>
@@ -261,7 +261,7 @@ details.evidence[open] summary { margin-bottom: 12px; }
     </td></tr>
 
     <tr class="clickable" onclick="toggleRow('r4', event)">
-      <td><span class="host-tag">claude-code</span><span class="model">deepseek/deepseek-v4.1-flash</span><br><span class="chip estimate">估算 · minimax 中转</span></td>
+      <td><span class="harness-tag">claude-code</span><span class="model">deepseek/deepseek-v4.1-flash</span><br><span class="chip estimate">估算 · minimax 中转</span></td>
       <td class="num">17</td><td class="num">637.8M</td>
       <td class="num">≈¥20.33</td><td class="num"><b>≈¥1.20</b></td>
       <td class="num"><span style="color:var(--success)">99.7%</span><div class="bar"><i style="width:99.7%"></i></div></td>
@@ -279,7 +279,7 @@ details.evidence[open] summary { margin-bottom: 12px; }
     </td></tr>
 
     <tr class="clickable" onclick="toggleRow('r5', event)">
-      <td><span class="host-tag">claude-code</span><span class="model">glm-5.3</span><br><span class="chip ok">套餐内 · zhipu-glm</span></td>
+      <td><span class="harness-tag">claude-code</span><span class="model">glm-5.3</span><br><span class="chip ok">套餐内 · zhipu-glm</span></td>
       <td class="num">3</td><td class="num">63.7M</td>
       <td class="num">¥118<span class="chip dim">月订阅</span></td><td class="num">—</td>
       <td class="num">—</td><td class="num">—</td>
@@ -289,7 +289,7 @@ details.evidence[open] summary { margin-bottom: 12px; }
     </td></tr>
 
     <tr class="clickable" onclick="toggleRow('r6', event)">
-      <td><span class="host-tag">codex</span><span class="model">gpt-6-astra</span><br><span class="chip danger">未计价 · cogfoundry</span></td>
+      <td><span class="harness-tag">codex</span><span class="model">gpt-6-astra</span><br><span class="chip danger">未计价 · cogfoundry</span></td>
       <td class="num">10</td><td class="num">8.95M</td>
       <td class="num">—</td><td class="num">—</td>
       <td class="num">—</td><td class="num">—</td>
@@ -299,13 +299,13 @@ details.evidence[open] summary { margin-bottom: 12px; }
     </td></tr>
 
     <tr class="clickable" onclick="toggleRow('r7', event)">
-      <td><span class="host-tag">workbuddy</span><span class="model">hy4-preview-f</span><br><span class="chip danger">无归属</span></td>
+      <td><span class="harness-tag">workbuddy</span><span class="model">hy4-preview-f</span><br><span class="chip danger">无归属</span></td>
       <td class="num">2</td><td class="num">1.41M</td>
       <td class="num">—</td><td class="num">—</td>
       <td class="num">—</td><td class="num">—</td>
     </tr>
     <tr class="detail-row" id="r7" hidden><td colspan="7">
-      <div class="note">连服务商都未知（<b>待办③</b>）——声明归属后才能谈价卡。workbuddy 宿主数据最后观测于 09-12（stale）。</div>
+      <div class="note">连服务商都未知（<b>待办③</b>）——声明归属后才能谈价卡。workbuddy 执行环境数据最后观测于 09-12（stale）。</div>
     </td></tr>
   </tbody>
 </table>

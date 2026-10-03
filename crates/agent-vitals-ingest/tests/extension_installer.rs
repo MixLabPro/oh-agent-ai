@@ -60,7 +60,7 @@ fn revision(id: &str, origin: RevisionOrigin, store: &ObjectStore, payload: &[u8
     store.install(Path::new(&staged), &digest(payload)).unwrap();
     ExtensionRevision {
         revision_id: id.to_string(),
-        slot_type: "host_manifest".to_string(),
+        slot_type: "harness_manifest".to_string(),
         slot_id: "zcode".to_string(),
         content_sha256: digest(payload),
         origin,
@@ -70,7 +70,7 @@ fn revision(id: &str, origin: RevisionOrigin, store: &ObjectStore, payload: &[u8
     }
 }
 fn slot_map(id: &str) -> SlotMap {
-    BTreeMap::from([(("host_manifest".to_string(), "zcode".to_string()), id.to_string())])
+    BTreeMap::from([(("harness_manifest".to_string(), "zcode".to_string()), id.to_string())])
 }
 fn ticket(expected: i64, revisions: Vec<ExtensionRevision>, map: SlotMap) -> PreviewTicket {
     PreviewTicket { expected_generation: expected, engine_version: "1.4.0".to_string(), action: ActivationAction::Activate, new_revisions: revisions, target_map: map }

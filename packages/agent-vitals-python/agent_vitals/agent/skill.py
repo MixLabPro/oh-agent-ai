@@ -225,7 +225,7 @@ def skill_invocations_enriched(events, requests, spawns):
     {
         "enriched": [...SkillInvocationEvent[], agent_id 填充],
         "sessions_discovered": int,
-        "sessions_covered": int,   # 实际读取由宿主侧完成，这里只出占位
+        "sessions_covered": int,   # 实际读取由执行环境侧完成，这里只出占位
         "missing_sessions": [],
         "coverage_by_skill": {},
     }
@@ -258,7 +258,7 @@ def skill_invocations_enriched(events, requests, spawns):
     return {
         "enriched": enriched,
         "sessions_discovered": sessions_discovered,
-        "sessions_covered": sessions_discovered,  # 实际读取由宿主完成
+        "sessions_covered": sessions_discovered,  # 实际读取由执行环境完成
         "missing_sessions": [],
         "coverage_by_skill": {},
     }

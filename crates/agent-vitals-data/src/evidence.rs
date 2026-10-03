@@ -27,7 +27,7 @@
 //!    行**解析失败 → `Corrupt` 错误——那不是崩溃边界，是真实损坏，静默跳
 //!    过就是把损坏伪装成没发生。
 //! 3. **不取时钟**：chrono/time 被本 crate 的 dependency_budget 禁止，且
-//!    事实自带 `event_ts_utc`（宿主事件时间）；写入顺序就是文件序，重放
+//!    事实自带 `event_ts_utc`（执行环境事件时间）；写入顺序就是文件序，重放
 //!    排序（`sort_key`）按 `(time_basis, fact_id)` 确定化——同一份文件在
 //!    任何机器上重放出同一个序列。
 
@@ -311,43 +311,43 @@ impl FactWriter {
     }
 }
 
-/// reconciliation：facts 的每宿主 token 总和 vs 消费方 DTO 的
-/// `tokens_by_host`（Stage D 冻结形状）。**报告式，不 panic**——与
+/// reconciliation：facts 的每执行环境 token 总和 vs 消费方 DTO 的
+/// `tokens_by_harness`（Stage D 冻结形状）。**报告式，不 panic**——与
 /// `usage.rs::unaccounted_usage` 哨兵同一惯例：发现矛盾是报告给上层决定，
 /// 不是 writer 代替调用方 abort。
 ///
-/// fact 的 token 桶（snake 四桶）与 `tokens_by_host` 的四轴同词表；host 取
-/// `host` 字段（by_host 视角聚合）。缺桶按 0 计——「缺失」在 fact 层是
-/// null（宿主没这项证据），聚合为 0 是对的；「真实 0」也是 0，两者在聚合
+/// fact 的 token 桶（snake 四桶）与 `tokens_by_harness` 的四轴同词表；harness 取
+/// `harness` 字段（by_harness 视角聚合）。缺桶按 0 计——「缺失」在 fact 层是
+/// null（执行环境没这项证据），聚合为 0 是对的；「真实 0」也是 0，两者在聚合
 /// 面等价是设计使然（区分发生在单 fact 层，那里 null 与 0 是不同的值）。
 pub fn reconcile_tokens(
     facts: &[serde_json::Value],
-    tokens_by_host: &serde_json::Value,
+    tokens_by_harness: &serde_json::Value,
 ) -> serde_json::Value {
     let mut from_facts: std::collections::BTreeMap<String, i64> = Default::default();
     for f in facts {
-        let host = f.get("host").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let harness = f.get("harness").and_then(|v| v.as_str()).unwrap_or("unknown");
         let g = |k: &str| f.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
-        *from_facts.entry(host.to_string()).or_insert(0) += g("uncached_input_tokens")
+        *from_facts.entry(harness.to_string()).or_insert(0) += g("uncached_input_tokens")
             + g("cache_read_tokens")
             + g("cache_write_tokens")
             + g("output_tokens");
     }
     let mut from_dto: std::collections::BTreeMap<String, i64> = Default::default();
-    if let Some(map) = tokens_by_host.as_object() {
-        for (host, t) in map {
-            from_dto.insert(host.clone(), t.get("total").and_then(|v| v.as_i64()).unwrap_or(0));
+    if let Some(map) = tokens_by_harness.as_object() {
+        for (harness, t) in map {
+            from_dto.insert(harness.clone(), t.get("total").and_then(|v| v.as_i64()).unwrap_or(0));
         }
     }
     let mut mismatches = Vec::new();
-    let hosts: std::collections::BTreeSet<&String> =
+    let harnesses: std::collections::BTreeSet<&String> =
         from_facts.keys().chain(from_dto.keys()).collect();
-    for host in hosts {
-        let a = from_facts.get(host).copied().unwrap_or(0);
-        let b = from_dto.get(host).copied().unwrap_or(0);
+    for harness in harnesses {
+        let a = from_facts.get(harness).copied().unwrap_or(0);
+        let b = from_dto.get(harness).copied().unwrap_or(0);
         if a != b {
             mismatches.push(json!({
-                "host": host,
+                "harness": harness,
                 "facts_total": a,
                 "projection_total": b,
                 "delta": a - b,
@@ -356,7 +356,7 @@ pub fn reconcile_tokens(
     }
     json!({
         "reconciled": mismatches.is_empty(),
-        "hosts_compared": from_facts.len().max(from_dto.len()),
+        "harnesses_compared": from_facts.len().max(from_dto.len()),
         "mismatches": mismatches,
     })
 }
@@ -370,7 +370,7 @@ mod tests {
     fn base_fields() -> serde_json::Map<String, serde_json::Value> {
         let mut m = serde_json::Map::new();
         m.insert("machine_namespace".to_string(), json!("m1"));
-        m.insert("host".to_string(), json!("codex"));
+        m.insert("harness".to_string(), json!("codex"));
         m.insert("source_profile".to_string(), json!("default"));
         m.insert("native_session_id".to_string(), json!("sess-1"));
         m.insert("source_event_id".to_string(), json!("evt-1"));

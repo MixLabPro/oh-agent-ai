@@ -38,7 +38,7 @@ fn tmp_root() -> std::path::PathBuf {
 /// fact_id（契约层 `build_usage_fact` 派生，导入路径不信任外部 id）。
 fn live_fact(event_id: &str, ts: &str) -> serde_json::Value {
     serde_json::json!({
-        "host": "claude-code",
+        "harness": "claude-code",
         "machine_namespace": "default",
         "source_profile": "default",
         "native_session_id": "sess-live",

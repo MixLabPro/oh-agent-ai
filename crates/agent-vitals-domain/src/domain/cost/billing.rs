@@ -333,7 +333,7 @@ mod tests {
     fn billing_route_specific_declaration_wins_over_generic() {
         // 0813 是 shengsuanyun 转售型号：声明序先专后泛，必须截在
         // shengsuanyun，不能落 deepseek-official 泛行——两家中转/官方价同、
-        // 但账归属不同（Host ≠ BillingSource，§6.3）。
+        // 但账归属不同（Harness ≠ BillingSource，§6.3）。
         let (p, m) = billing_route_of("deepseek-v4-pro-0813", &pricing()).unwrap();
         assert_eq!(p, "shengsuanyun");
         assert_eq!(m, BillingMode::Metered);

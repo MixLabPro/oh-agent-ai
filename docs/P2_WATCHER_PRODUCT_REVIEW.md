@@ -75,12 +75,12 @@ Cargo.toml 注释原文：
 路径 B（tick 兜底）：5min walk → stat → classify → 处理
 ```
 
-两条路径**必须永远并存**（watcher 丢事件需要兜底），每个新宿主接入都要决定"哪些目录走 A、哪些走 B"。这个决策面**每个功能都会遇到**——它就是依赖蠕变的入口。
+两条路径**必须永远并存**（watcher 丢事件需要兜底），每个新执行环境接入都要决定"哪些目录走 A、哪些走 B"。这个决策面**每个功能都会遇到**——它就是依赖蠕变的入口。
 
 缓解方案（spec §3 已设计）：
 - SourceGraph 是唯一状态注册表，两条路径都写同一个 dirty 标记；
 - watcher 是**可选层**（`NoopWatcher` 模式，Vite 同款），无 watcher 时 tick 照常工作；
-- 新增目录监听 = `watch_registry.register(path, host)` 一行，不选边。
+- 新增目录监听 = `watch_registry.register(path, harness)` 一行，不选边。
 
 ### 3.3 平台差异
 
@@ -167,7 +167,7 @@ notify 适配器）、`apps/desktop/src-tauri/src/lib.rs::start_source_watcher`�
    的进程内报告缓存 `SkillsScanState::invalidate`）。
 4. **FSEvents 规范化路径别名**：macOS 把 `/var/…` 上报为 `/private/var/…`
    （`std::env::temp_dir` 一类符号链接路径必然发生）。挂载成功后为每个根
-   补 canonicalize 别名，别名映射回同一宿主/回调下标（路由器显式回调索引，
+   补 canonicalize 别名，别名映射回同一执行环境/回调下标（路由器显式回调索引，
    追加别名不移动既有下标）。
 
 真机验证（macOS 26 / arm64）：写入被监听目录 → **1.62s 收到 tick 唤醒**

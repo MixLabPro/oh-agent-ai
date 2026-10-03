@@ -1,7 +1,7 @@
 //! 平台原语（crate 根，无领域归属，被所有子目录依赖）。
 
 pub mod clock;
-pub mod fact_hosts;
+pub mod fact_harnesses;
 pub mod home;
 pub mod lease;
 pub mod logging;

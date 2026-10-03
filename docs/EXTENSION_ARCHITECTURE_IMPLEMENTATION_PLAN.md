@@ -1,7 +1,7 @@
 # 扩展架构实施任务与验收台账
 
 依据：`AGENT_VITALS_EXTENSION_ARCHITECTURE_SPEC.md` v1.1 与
-`HOST_MANIFEST_DSL_SPEC.md` v0.4.2。任务范围覆盖两份规格的承诺路线；
+`HARNESS_MANIFEST_DSL_SPEC.md` v0.4.2。任务范围覆盖两份规格的承诺路线；
 P1.5 脚本开发者模式、P2 DSL、P3 社区目录均为条件触发，不自动启用。
 
 ## 迭代协议
@@ -13,14 +13,23 @@ P1.5 脚本开发者模式、P2 DSL、P3 社区目录均为条件触发，不自
 
 ## 任务分解
 
+### 当前优先级（2026-10-03）
+
+主线转到APP_LAYER_IMPLEMENTATION_PLAN.md的C0–C13（独立City M0–M2）。
+保留本表完成证据和欠账；已启动批次仅作必要修复、测试与阶段合并准备。
+E00及尚未开始的执行环境/DSL/其他数据插槽扩容后移，E15全范围验收仍未完成。
+City按需复用已有校验/来源/事务原语，可执行包、签名和独立权限机制按新规格建设。
+本分支基于main；原feat/agent-city工作区未提交的E06–E08进展未迁入此分支，
+不能用原工作区局部测试证明本分支已具备这些运行能力。
+
 | ID | 任务 | 依赖 | 完成证据 | 状态 |
 |---|---|---|---|---|
-| E00 | P-1 真实宿主 feasibility 与 recipe 覆盖率调查 | 无 | 至少十真实宿主或明确报告折算；两个分母、脱敏样本与真实来源 | 待调查 |
+| E00 | P-1 真实执行环境 feasibility 与 recipe 覆盖率调查 | 无 | 至少十真实执行环境或明确报告折算；两个分母、脱敏样本与真实来源 | 待调查 |
 | E01 | CAP-1：schema、Rust/Python 能力与版本门，接入加载入口 | 无 | 旧 manifest 正常、未知能力/格式拒绝、双语言错误与输出对拍 | 本轮验收通过 |
 | E02 | typed index、固定 commit/hash、路径与资源限制、依赖闭包 | E01 | 共用合法/恶意 fixture、循环/冲突/超限测试 | 本轮纯校验层验收通过 |
 | E03 | authority 扩展台账 migration、revision/origin、generation、历史关联 | E02 | 旧库迁移、事务回滚、事实关联及读写兼容测试 | 本轮验收通过 |
 | E04 | 不可变对象、校验加载、staging、预览绑定、事务激活/回滚 | E03 | 各崩溃边界、对象损坏、并发预览失效测试 | 本轮验收通过 |
-| E05 | host 前缀迁移及完整消费面守卫、billing 估算锁 | E03 | 迁移预览/备份/恢复、SQL/MCP/行为面拒绝、受控 golden parity | 本轮验收通过（一项测试欠账登记） |
+| E05 | harness 前缀迁移及完整消费面守卫、billing 估算锁 | E03 | 迁移预览/备份/恢复、SQL/MCP/行为面拒绝、受控 golden parity | 本轮验收通过（一项测试欠账登记） |
 | E06 | 官方目录 opt-in 客户端、CLI/MCP、更新与确认、来源状态 | E04,E05 | 禁网无请求、同源约束、离线加载/回滚、来源不可伪造 | 索引面验收通过；payload 下载与激活确认待下批次 |
 | E07 | catalog 仓库布局、价卡兼容镜像与发布 CI | E02 | 旧 URL/schema 兼容、镜像漂移检查、客户端缺价降级 | 待实施 |
 | E08 | 应急旁名互斥、升级漂移、退出与显式重算 | E05,E06 | 同源范围重叠拒绝、重放不双计、封账保持测试 | 待实施 |
@@ -33,9 +42,9 @@ P1.5 脚本开发者模式、P2 DSL、P3 社区目录均为条件触发，不自
 | E14 | subscription_scope、FX、quota_window 与阈值插槽 | E12,E13 | 路由证据门、封账绑定、DST/时间窗口与影响预览 | 待实施 |
 | E15 | 发布验收与全量 parity、clippy、故障矩阵核对 | E00–E14（含 E11R） | 对架构 §12 每项逐一登记测试/实现证据与 subAgent 结论 | 待实施 |
 
-SQLite 源扩容另行立项评审。P-1 的至少十宿主覆盖率调查须记录真实样本来源、
-宿主与 usage 行两个分母；缺少样本时明确缺口，不能以合成数据冒充真实覆盖率。
-host 前缀迁移会变更外部身份，E05 实现时必须检查 source 控制、retention、
+SQLite 源扩容另行立项评审。P-1 的至少十执行环境覆盖率调查须记录真实样本来源、
+执行环境与 usage 行两个分母；缺少样本时明确缺口，不能以合成数据冒充真实覆盖率。
+harness 前缀迁移会变更外部身份，E05 实现时必须检查 source 控制、retention、
 导出/封账引用及 fact_id，不以纯文本替换视为完成。
 
 ## 当前轮
@@ -65,13 +74,13 @@ Python catalog suite 最终 7 tests 通过，覆盖 schema search 语义下末�
 
 ### E01 验收记录（2026-10-01）
 
-实现：Rust hosts manifest 和 Python twin 的真实 parser 入口能力门，公开
-CapabilitySet/协商接口、schema 与共享 `host-manifest-capabilities.json`。
+实现：Rust harnesses manifest 和 Python twin 的真实 parser 入口能力门，公开
+CapabilitySet/协商接口、schema 与共享 `harness-manifest-capabilities.json`。
 旧 local manifest 缺声明仍按实际 recipe 校验；当前公告三种内置 recipe、
 零 feature，尚未消除的 trust 双语言差异不能成为已支持 feature。
 
 build/test：`cargo build --release -p agent-vitals` 通过；
-`cargo test --release -p agent-vitals-hosts hosts::generic` 29 tests 通过；
+`cargo test --release -p agent-vitals-harnesses harnesses::generic` 29 tests 通过；
 Python generic suite 22 tests 通过，包含文件加载拒绝与共享错误串。
 独立 architecture_analysis subAgent 使用新 release CLI 与 `scripts/scan.py`
 对同输入 unknown-feature、非法 u32 版本、未知键顺序三个拒绝案例：均 exit 2，
@@ -85,7 +94,7 @@ stdout 逐字一致；另核查 registry/ingest 加载必经 parser、schema 数
 因此此记录只证明 E01 本轮门通过，不代表发布全量检查通过。
 
 后续补充：Python 与新 release Rust 二进制各 16 golden cases 全部逐字一致。
-hosts/domain 的 `clippy --release --all-targets -- -D warnings` 通过；检查遇到
+harnesses/domain 的 `clippy --release --all-targets -- -D warnings` 通过；检查遇到
 既有 FX 文档/迭代器 lint，以手工小改修正（last/filter 改等价反向查找），
 FX 回归测试随后运行。workspace 全量 gate 仍待后续实施及完整验证。
 
@@ -93,8 +102,8 @@ FX 回归测试随后运行。workspace 全量 gate 仍待后续实施及完整�
 
 已检查 tracked fixtures 和 README：DSH README 明确为按源码格式生成的手写
 语料，golden_runner 的 zcode case 也由 `_plugin_fixture_row` 生成。这些可用
-作回归测试，不能计入“十个真实宿主”调查分母。仓库有 Claude、Codex、DSH、
-WorkBuddy 格式夹具与 trust/minimax 元数据，但尚无覆盖十宿主的真实用量样本
+作回归测试，不能计入“十个真实执行环境”调查分母。仓库有 Claude、Codex、DSH、
+WorkBuddy 格式夹具与 trust/minimax 元数据，但尚无覆盖十执行环境的真实用量样本
 来源台账。E00 保持未完成；后续可以完成合成回归、收集已提供的脱敏样本并
 明确覆盖缺口，不能宣称 recipe-only 80% 目标已满足。
 
@@ -113,20 +122,20 @@ rollback_to/uninstall_all、registry.json 派生快照可删可重建）。测�
 登记 revision、卸载保留历史、未知 revision/空引擎版本拒绝。ingest 542+14
 测试通过。
 
-**E05 验收通过（一项欠账）**：`plugin:` → `host:` 全量迁移——
-`facts_host`/`facts_file_stem`/source_profile 前缀、`plugin_facts_stem`（旧
+**E05 验收通过（一项欠账）**：`plugin:` → `harness:` 全量迁移——
+`facts_harness`/`facts_file_stem`/source_profile 前缀、`plugin_facts_stem`（旧
 `plugin:` 值折算新 stem）、source_controls 锁与排除项（旧值读取时原地规范
-化，未注册 manifest 宿主仍按既有 stale 语义清扫）、session_insights/summary
+化，未注册 manifest 执行环境仍按既有 stale 语义清扫）、session_insights/summary
 谓词、retention 磁盘发现（新旧文件名双认）、CLI 三命令改名 `manifest-*`、
 Python twin（`generic_manifest.py`/`generic_plugin.py`/cli.py，slug 错误串
 两侧逐字一致）、desktop 显示/徽标双前缀、attribution 签名表键位。数据迁移
-三件套：authority **v29**（`usage_facts` host 列幂等 UPDATE，重开即迁）、
+三件套：authority **v29**（`usage_facts` harness 列幂等 UPDATE，重开即迁）、
 facts 文件改名 `migrate_manifest_facts_prefix`（幂等、目标存在即跳过如实
 上报，retention 前置执行）、source-controls 就地规范化。**受控 golden 更
-新**：仅 `host-generic-zcode.json` 10 行（前缀 ×7；fact_id ×3——host 参与
+新**：仅 `harness-generic-zcode.json` 10 行（前缀 ×7；fact_id ×3——harness 参与
 身份哈希，属契约变更预期后果），16 case 双实现逐字节一致。欠账：E05 证据
-项中「declarations 不得把 `host:%` 改 subscription」的**专项 SQL 回归测试**
-未写（现有 attribution 测试已覆盖 host: 行的声明路径，负向断言待补）。
+项中「declarations 不得把 `harness:%` 改 subscription」的**专项 SQL 回归测试**
+未写（现有 attribution 测试已覆盖 harness: 行的声明路径，负向断言待补）。
 
 **E06 索引面验收通过；payload 面待下批次**：桌面 `update_manifest_catalog`
 （opt-in 策略默认关、10s/4MiB 限、UA 固定、index sha256 + E02
@@ -137,7 +146,7 @@ control_plane 增 `manifest_catalog_status`（只读）与
 `manifest_catalog_policy_set`（MUTATIONS）；CLI 增 `manifest-catalog-status`
 （本地只读，无网络——HTTP 归桌面层，与价卡同构，规格 §13.2 的 CLI update
 预期按此修正）。仓库播种 `catalog/index.json`（空 entries，sequence 1）。
-capability 词表经桌面直依 hosts 的 `CapabilitySet::default()` 单一来源。
+capability 词表经桌面直依 harnesses 的 `CapabilitySet::default()` 单一来源。
 **待办**：payload 下载 → ObjectStore staging → preview ticket → 显式确认激
 活的完整链路、E08 互斥门联动、以及禁网/离线加载的故障注入测试（§12 对应
 行）。本批次未写桌面/MCP 专项单测（沿用价卡同构面，构建+CLI 冒烟验证）。
@@ -158,15 +167,15 @@ Python 1274 tests OK（210 skip）；golden 16/16 双实现逐字节一致；wor
 through_the_idempotent_band` 回归（28/27 双向钉死）。
 
 **迁移时序缝（已收口，登记成因）**：首个 bundle 带着上述 bug，其同步 tick
-在 retention 改名迁移**之前**就写了新路径 `host-zcode.jsonl`（当时 authority
+在 retention 改名迁移**之前**就写了新路径 `harness-zcode.jsonl`（当时 authority
 写连接被 brick，双写半失败）；改名迁移按「目标存在即跳过」如实保留旧件。
 修复后重导 + 精确对账收口：DB 2141 行（2015 个 v29 保留旧 id + 126 个新
-id；**事件级 exactly-once 证明与 host 无关**，无重复计数），facts 文件合并
+id；**事件级 exactly-once 证明与 harness 无关**，无重复计数），facts 文件合并
 为 2141 行、id 与 DB 逐一对应；旧文件备份于 /tmp。**E05 遗留决定项——已拍板并实施（2026-10-01）**：产品未正式发布、无老数据
 兼容包袱，**一次性重 stamp 到新 fact_id**。实现为 authority **v30**（标记 =
 `source_profile LIKE 'plugin-%'`；`PRAGMA defer_foreign_keys=ON` 下同批改
 `extension_fact_provenance` / `billing_fact_attributions` 子表与父行；事件级
-UNIQUE(host,ns,session,event,kind) 保证新旧 id 不可能由常规摄入共存——UPDATE
+UNIQUE(harness,ns,session,event,kind) 保证新旧 id 不可能由常规摄入共存——UPDATE
 即足够，异事件哈希碰撞交由事务整体回滚响亮报错）+ ingest 文件侧重写
 `restamp_manifest_fact_files`（同 `fact_id()` 重算、文件内按新 id 全量去重、
 原子替换、幂等）。**接线教训**：迁移不能只挂在 retention 链路上——CLI 调用

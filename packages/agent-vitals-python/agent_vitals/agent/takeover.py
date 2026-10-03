@@ -24,7 +24,7 @@ RS_OWNER = "rust"
 DEFAULT_OWNER = PY_OWNER
 
 
-def session_key(host_kind, native_id, machine_namespace):
+def session_key(harness_kind, native_id, machine_namespace):
     """自定界会话 key —— 与 core `session_key` 逐字节一致。
 
     长度前缀：`("ab","c")` 与 `("a","bc")` 不得同 key。例：
@@ -33,7 +33,7 @@ def session_key(host_kind, native_id, machine_namespace):
     def seg(s):
         return "%d:%s" % (len(s), s)
 
-    return "%s|%s|%s" % (seg(host_kind), seg(native_id), seg(machine_namespace))
+    return "%s|%s|%s" % (seg(harness_kind), seg(native_id), seg(machine_namespace))
 
 
 def default_manifest():
@@ -85,9 +85,9 @@ def mark_fold(manifest, now_iso):
     }
 
 
-def ledger_entry(host_kind, native_id, machine_namespace, folded_at, epoch):
+def ledger_entry(harness_kind, native_id, machine_namespace, folded_at, epoch):
     return {
-        "host_kind": host_kind,
+        "harness_kind": harness_kind,
         "native_id": native_id,
         "machine_namespace": machine_namespace,
         "folded_at": folded_at,
@@ -180,14 +180,14 @@ def fold_session_req(req, shadow=False):
     if not shadow and not owner_allows(manifest, RS_OWNER):
         return ("refused",
                 "owner is %r, not rust" % manifest_owner(manifest))
-    host_kind = req.get("host_kind") or "cli"
+    harness_kind = req.get("harness_kind") or "cli"
     native_id = req.get("session_id") or ""
     if not native_id:
         return ("refused", "session_id required (producer derives it, §4.3)")
     ns = req.get("machine_namespace")
     if not ns:
         return ("refused", "machine_namespace required (state machine-namespace)")
-    key = session_key(host_kind, native_id, ns)
+    key = session_key(harness_kind, native_id, ns)
     ledger = read_ledger()
     if ledger_folded(ledger, key):
         return ("skipped", key)
@@ -197,7 +197,7 @@ def fold_session_req(req, shadow=False):
     if isinstance(oneline, dict):
         state_mod.write_oneline(oneline)
         state_mod.append_session_history(oneline)
-    entry = ledger_entry(host_kind, native_id, ns, now, epoch + 1)
+    entry = ledger_entry(harness_kind, native_id, ns, now, epoch + 1)
     write_ledger(ledger_record(ledger, key, entry))
     write_manifest(mark_fold(manifest, now))
     return ("folded", key)
@@ -215,7 +215,7 @@ def folded(session_key):
     return ledger_folded(read_ledger(), session_key)
 
 
-def record_fold(session_key, host_kind, native_id, machine_namespace):
+def record_fold(session_key, harness_kind, native_id, machine_namespace):
     """oneline 折完后的提交：ledger 记 key + manifest epoch+1/last_fold_at。
 
     写序与 Rust 驱动一致（ledger 先、manifest 后）。epoch 取当前 manifest 代际
@@ -223,7 +223,7 @@ def record_fold(session_key, host_kind, native_id, machine_namespace):
     """
     manifest = read_manifest()
     now = state_mod._now_iso()
-    entry = ledger_entry(host_kind, native_id, machine_namespace, now,
+    entry = ledger_entry(harness_kind, native_id, machine_namespace, now,
                          manifest_epoch(manifest) + 1)
     write_ledger(ledger_record(read_ledger(), session_key, entry))
     write_manifest(mark_fold(manifest, now))

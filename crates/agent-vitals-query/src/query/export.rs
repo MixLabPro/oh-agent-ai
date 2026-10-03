@@ -20,12 +20,12 @@
 //! 叠），JSONL 里 ingest 时的元数据字段——`identity_basis` / `time_basis` /
 //! `source_usage_semantics` / `normalization_version` / `provider_raw` /
 //! `source_revision` / `adapter_version` / `event_tz_basis` / `turn` / `step` /
-//! `call_id`——没有对应列，不再出现在导出里。这些字段的取证需求回宿主原始日志
-//! （spec §1.1：JSONL 降级为迁移/导出输入，宿主日志才是 raw source）。反向收
+//! `call_id`——没有对应列，不再出现在导出里。这些字段的取证需求回执行环境原始日志
+//! （spec §1.1：JSONL 降级为迁移/导出输入，执行环境日志才是 raw source）。反向收
 //! 益：`legacy_aggregate` 行只存在于 SQL，导出面反而比 JSONL 全。
 //!
 //! `identity_basis` 缺失**不影响 fact_id 正确性**：`usage_fact::fact_id` 的哈
-//! 希基是六元组身份字段（machine_namespace / host / source_profile /
+//! 希基是六元组身份字段（machine_namespace / harness / source_profile /
 //! native_session_id / source_event_id / observation_kind），`identity_basis`
 //! 只是随文档存储的声明。**导出时显式剥掉这个键**（[`strip_unrecoverable_keys`]，
 //! 2026-09-07 审查 F1）：builder 会缺省补 `"native"`，而真机语料里 codex 事实
@@ -38,7 +38,7 @@
 //! | `usage_facts` 列 | 导出键 | 说明 |
 //! |---|---|---|
 //! | `fact_id` | `fact_id` | 由身份六元组复算：private 下与库内值相等（身份未动），redacted 下按伪名身份重 stamp |
-//! | `host` | `host` | |
+//! | `harness` | `harness` | |
 //! | `machine_namespace` | `machine_namespace` | redacted 伪名化 |
 //! | `native_session_id` | `native_session_id` | redacted 伪名化 |
 //! | `source_event_id` | `source_event_id` | redacted 伪名化（审查 P1：claude 侧是原生 message.uuid，全局稳定标识） |
@@ -52,7 +52,7 @@
 //! | `session_key` / `source_id` / `ingested_run_id` / `created_at_ms` / `updated_at_ms` / `deleted_at_ms` | （不出键） | SQL 侧 provenance/簿记列，不属于 UsageFact 词表 |
 //!
 //! 「不存在的键不要伪造」：SQL 没有的列不出键，重建时由 `build_usage_fact`
-//! 统一补 `null`（与「缺失 ≠ 0」的契约同语义——null 是「这个宿主没有这项证据」）。
+//! 统一补 `null`（与「缺失 ≠ 0」的契约同语义——null 是「这个执行环境没有这项证据」）。
 //!
 //! ## 锁语义：不再拿 `facts/.ingest.lock`
 //!
@@ -60,7 +60,7 @@
 //! SQL 读的一致性由事务承担：`BEGIN DEFERRED`（rusqlite 的
 //! `Connection::unchecked_transaction`）在本事务首条读语句上固定快照——WAL
 //! 模式下 reader
-//! 不阻塞 writer，三宿主逐 host 查询都在同一事务里 = 同一截面。ingest 侧走
+//! 不阻塞 writer，三执行环境逐 harness 查询都在同一事务里 = 同一截面。ingest 侧走
 //! `BEGIN IMMEDIATE`、按 run 整批提交，「导出中途 ingest 提交半批」在快照语义
 //! 下要么整体在快照建立前（可见）要么整体在快照后（不可见），不存在半批可见
 //! ——所以不需要文件锁，旧 lease 代码随之删除。`ingest_service` 的
@@ -79,7 +79,7 @@ use serde_json::{Map, Value, json};
 
 /// 导出列清单（与模块头映射表一一对应）。新增列 = 新增映射行 + 重审 redacted
 /// 的身份白名单，不是顺手加个字段。
-const EXPORT_COLUMNS: &str = "fact_id, host, machine_namespace, native_session_id, \
+const EXPORT_COLUMNS: &str = "fact_id, harness, machine_namespace, native_session_id, \
      source_event_id, observation_kind, source_profile, provider_id, provider_raw, \
      billing_source, billing_mode, pricing_basis, billing_template_id, evidence_basis, normalization_version, \
      route_evidence_id, attribution_version, model_id, event_ts_ms, uncached_input_tokens, \
@@ -96,25 +96,25 @@ fn open_authority(
     .map_err(|e| format!("authority open: {e}"))
 }
 
-/// 单宿主行 → 契约字段映射（[`row_to_fields`] 的查询包装）。行序 = `fact_id`
+/// 单执行环境行 → 契约字段映射（[`row_to_fields`] 的查询包装）。行序 = `fact_id`
 /// 字典序：主键唯一、与插入时序无关，保证同库两次导出字节一致（确定性是
 /// redacted 对账的前提，不是审美）。软删除行（`deleted_at_ms` 非空）不导出
 /// ——spec §5.4，见模块头。
-fn host_rows(conn: &rusqlite::Connection, host: &str) -> Result<Vec<Map<String, Value>>, String> {
+fn harness_rows(conn: &rusqlite::Connection, harness: &str) -> Result<Vec<Map<String, Value>>, String> {
     let sql = format!(
         "SELECT {EXPORT_COLUMNS} FROM usage_facts \
-         WHERE host = ?1 AND deleted_at_ms IS NULL ORDER BY fact_id"
+         WHERE harness = ?1 AND deleted_at_ms IS NULL ORDER BY fact_id"
     );
     let mut stmt = conn
         .prepare(&sql)
-        .map_err(|e| format!("authority query ({host}): {e}"))?;
+        .map_err(|e| format!("authority query ({harness}): {e}"))?;
     let mut rows = stmt
-        .query(rusqlite::params![host])
-        .map_err(|e| format!("authority query ({host}): {e}"))?;
+        .query(rusqlite::params![harness])
+        .map_err(|e| format!("authority query ({harness}): {e}"))?;
     let mut out = Vec::new();
     while let Some(row) = rows
         .next()
-        .map_err(|e| format!("authority read ({host}): {e}"))?
+        .map_err(|e| format!("authority read ({harness}): {e}"))?
     {
         out.push(row_to_fields(row)?);
     }
@@ -134,7 +134,7 @@ fn row_to_fields(r: &rusqlite::Row<'_>) -> Result<Map<String, Value>, String> {
     let sid = get_s("native_session_id")?;
     let evt = get_s("source_event_id")?;
     let kind = get_s("observation_kind")?;
-    let host = get_s("host")?;
+    let harness = get_s("harness")?;
     // source_profile 是契约必填身份（IDENTITY_INPUT_FIELDS 六元组之一）：NULL
     // 行无法重建合法 UsageFact。契约门写入路径（insert_facts / legacy_import）
     // 落不了这种行；真出现 = 有人绕过了门——如实报错点名 fact_id，不静默丢行
@@ -145,7 +145,7 @@ fn row_to_fields(r: &rusqlite::Row<'_>) -> Result<Map<String, Value>, String> {
 
     let mut fields = Map::new();
     fields.insert("machine_namespace".into(), json!(ns));
-    fields.insert("host".into(), json!(host));
+    fields.insert("harness".into(), json!(harness));
     fields.insert("source_profile".into(), json!(profile));
     fields.insert("native_session_id".into(), json!(sid));
     fields.insert("source_event_id".into(), json!(evt));
@@ -189,7 +189,7 @@ fn row_to_fields(r: &rusqlite::Row<'_>) -> Result<Map<String, Value>, String> {
 
 /// epoch 毫秒 → `YYYY-MM-DDTHH:MM:SS.mmmZ`。emitter 原格式（DSH
 /// `usage_fact.rs::rfc3339_ms_z` 的同一公式：纯整数 `div_euclid`/`rem_euclid`，
-/// 日期走 domain 的 civil 表）——那个 fn 是 hosts 的私有项，本 crate 引用不到；
+/// 日期走 domain 的 civil 表）——那个 fn 是 harnesses 的私有项，本 crate 引用不到；
 /// 这里按同一公式重写，格式由映射测试钉死，writer 的 `iso_to_ms` 可解析回同
 /// 一毫秒（正向/反向闭环）。
 fn event_ts_utc_from_ms(ms: i64) -> String {
@@ -238,7 +238,7 @@ fn pseudonymize_identity(fields: &mut Map<String, Value>) {
     }
 }
 
-/// 一宿主的多行文档写成 `<host>.jsonl`（一行一个 JSON 对象，末行带换行）。
+/// 一执行环境的多行文档写成 `<harness>.jsonl`（一行一个 JSON 对象，末行带换行）。
 fn write_lines(dst: &Path, lines: &[String]) -> Result<(), String> {
     let mut text = lines.join("\n");
     if !lines.is_empty() {
@@ -256,27 +256,27 @@ fn write_lines(dst: &Path, lines: &[String]) -> Result<(), String> {
 pub fn export_private(data_home: &Path, out_dir: &Path) -> Result<usize, String> {
     let db = open_authority(data_home)?;
     std::fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
-    // 只读快照事务（锁语义见模块头）：BEGIN DEFERRED + 三宿主同事务。
+    // 只读快照事务（锁语义见模块头）：BEGIN DEFERRED + 三执行环境同事务。
     let tx = db
         .conn()
         .unchecked_transaction()
         .map_err(|e| format!("authority snapshot: {e}"))?;
     let mut files = 0usize;
-    for host in crate::core::fact_hosts::FACT_HOSTS {
-        let fields = host_rows(&tx, host)?;
+    for harness in crate::core::fact_harnesses::FACT_HARNESSES {
+        let fields = harness_rows(&tx, harness)?;
         if fields.is_empty() {
-            // 旧行为沿用：无数据的宿主不出文件（JSONL 时代 = 该宿主文件不存在）。
+            // 旧行为沿用：无数据的执行环境不出文件（JSONL 时代 = 该执行环境文件不存在）。
             continue;
         }
         let mut lines = Vec::with_capacity(fields.len());
         for f in &fields {
             let mut doc = build_usage_fact(f).map_err(|p| {
-                format!("authority row (host {host}): {p:?} — 库内存在契约不可重建的行，先查 data_quality_issues")
+                format!("authority row (harness {harness}): {p:?} — 库内存在契约不可重建的行，先查 data_quality_issues")
             })?;
             strip_unrecoverable_keys(&mut doc);
             lines.push(doc.to_string());
         }
-        let dst = out_dir.join(format!("{host}.jsonl"));
+        let dst = out_dir.join(format!("{harness}.jsonl"));
         write_lines(&dst, &lines)?;
         files += 1;
     }
@@ -285,7 +285,7 @@ pub fn export_private(data_home: &Path, out_dir: &Path) -> Result<usize, String>
         // F3：迁移期一台没跑过 sync/migrate 的机器上恰好会踩）。不报错——
         // 空库导空件语义上没错——但必须喊一声。
         eprintln!(
-            "warning: authority DB holds 0 facts for all hosts — export is empty; \
+            "warning: authority DB holds 0 facts for all harnesses — export is empty; \
              run 'sync-facts' / 'data-migrate' first if this is unexpected"
         );
     }
@@ -320,8 +320,8 @@ pub fn export_redacted(data_home: &Path, out_dir: &Path) -> Result<(usize, usize
         .map_err(|e| format!("authority snapshot: {e}"))?;
     let mut files = 0usize;
     let mut total = 0usize;
-    for host in crate::core::fact_hosts::FACT_HOSTS {
-        let fields = host_rows(&tx, host)?;
+    for harness in crate::core::fact_harnesses::FACT_HARNESSES {
+        let fields = harness_rows(&tx, harness)?;
         if fields.is_empty() {
             continue;
         }
@@ -329,12 +329,12 @@ pub fn export_redacted(data_home: &Path, out_dir: &Path) -> Result<(usize, usize
         for mut f in fields {
             pseudonymize_identity(&mut f);
             let mut doc = build_usage_fact(&f).map_err(|p| {
-                format!("authority row (host {host}): {p:?} — 脱敏重建失败，先查 data_quality_issues")
+                format!("authority row (harness {harness}): {p:?} — 脱敏重建失败，先查 data_quality_issues")
             })?;
             strip_unrecoverable_keys(&mut doc);
             lines.push(doc.to_string());
         }
-        let dst = out_dir.join(format!("{host}.jsonl"));
+        let dst = out_dir.join(format!("{harness}.jsonl"));
         write_lines(&dst, &lines)?;
         files += 1;
         total += lines.len();
@@ -406,7 +406,7 @@ mod tests {
     fn mk_fact(event_id: &str) -> Value {
         let mut fields = serde_json::Map::new();
         fields.insert("machine_namespace".into(), json!("my-secret-ns"));
-        fields.insert("host".into(), json!("codex"));
+        fields.insert("harness".into(), json!("codex"));
         fields.insert("source_profile".into(), json!("--Users-admin-project--"));
         fields.insert("native_session_id".into(), json!("sess-abcdef"));
         // 真实形状：claude 侧是原生 message.uuid（审查 P1——良性字面量
@@ -428,9 +428,9 @@ mod tests {
 
     /// 生产双写路径（`sync` 的扁平批次变体）入权威库——测试不走手写 INSERT，
     /// 保证库内形状与真实 ingest 完全一致（形状来源纪律：先读产生方）。
-    fn seed(home: &Path, host: &str, ns: &str, facts: &[Value]) {
+    fn seed(home: &Path, harness: &str, ns: &str, facts: &[Value]) {
         let db = open_db(home);
-        let r = agent_vitals_ingest::sql_sync::write_flat_facts_to_authority(&db, host, ns, facts, 1_500)
+        let r = agent_vitals_ingest::sql_sync::write_flat_facts_to_authority(&db, harness, ns, facts, 1_500)
             .unwrap();
         assert_eq!(r.inserted, facts.len(), "种子事实必须全部入库");
     }
@@ -455,7 +455,7 @@ mod tests {
 
         // 逐字段对照模块头映射表。
         assert_eq!(doc["machine_namespace"], json!("my-secret-ns"), "身份原样");
-        assert_eq!(doc["host"], json!("codex"));
+        assert_eq!(doc["harness"], json!("codex"));
         assert_eq!(doc["source_profile"], json!("--Users-admin-project--"));
         assert_eq!(doc["native_session_id"], json!("sess-abcdef"));
         assert_eq!(doc["source_event_id"], fact["source_event_id"]);
@@ -498,7 +498,7 @@ mod tests {
         ] {
             assert!(!text.contains(banned), "导出不应含 SQL 簿记列 {banned}: {text}");
         }
-        // 无数据宿主不出文件（旧行为沿用）。
+        // 无数据执行环境不出文件（旧行为沿用）。
         assert!(!out.join("claude-code.jsonl").exists());
         assert!(!out.join("dsh.jsonl").exists());
         let _ = std::fs::remove_dir_all(&home);
@@ -643,7 +643,7 @@ mod tests {
             "machine_namespace".into(),
             json!(pseudonym("ns", "my-secret-ns")),
         );
-        manual.insert("host".into(), json!("codex"));
+        manual.insert("harness".into(), json!("codex"));
         manual.insert(
             "source_profile".into(),
             json!(pseudonym("profile", "--Users-admin-project--")),

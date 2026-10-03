@@ -341,11 +341,11 @@ def cost_report(usage, pricing):
 def cost_series(requests, providers, pricing):
     """逐请求费用序列（FR-04 的「费用」纵轴，工作台单会话图与 dsh-client 审计
     tab 共用）。与 `crates/agent-vitals-domain/src/domain/cost/mod.rs::cost_series` 及 dsh-client
-    宿主 `costSeriesFrom`（`integrations/dsh-client/src/host/index.ts`）是**同一规则的三个镜像**，
+    执行环境 `costSeriesFrom`（`integrations/dsh-client/src/harness/index.ts`）是**同一规则的三个镜像**，
     锁步一致。
 
     - 每笔 request 用 `_resolve_card(model, providers[model], pricing)` 定价格卡；
-      `is_peak` 为 None（宿主没上报时间戳）时**这一笔不计价**——累计值保持、
+      `is_peak` 为 None（执行环境没上报时间戳）时**这一笔不计价**——累计值保持、
       `priced` 不增，而不是按空闲价猜一档（猜出来的单价就是编数字）。累计曲线
       因此可能低估，`priced/total` 一并透出，展示层照实说。
     - 单笔费用 = (uncached/1e6)×input_uncached[tier] + (cache_read/1e6)×
@@ -558,7 +558,7 @@ def _card_is_time_varying(card):
 
 def _cache_write_rate(card):
     """缓存写入（cache_creation）单价：catalog 卡按 1h 档（5min 是 1.25×输入、
-    1h 是 2×——Claude Code 自报 costUSD 按 1h 计，host_costusd_note 说它与
+    1h 是 2×——Claude Code 自报 costUSD 按 1h 计，harness_costusd_note 说它与
     catalog 逐分吻合的前提就是 1h，照它走才能拿 cost-state 当差分 oracle）；
     没有 1h 档的卡（M2.7 的 `cache_write`、deepseek 无行 → 0）各取各的。"""
     r = _flat_rate(card, "cache_write_1hr")
@@ -692,7 +692,7 @@ def claude_session_cost(model_usage, pricing):
     cacheReadInputTokens/cacheCreationInputTokens/costUSD）→ 会话账金额。
     键名转 claude snake 后走 `_price_claude_map`——转换只有键名映射，不重算。
     `webSearchRequests`/`costUSD` 不参与计价（web search 没有 token 单价；
-    costUSD 对网关模型按默认卡 $5/$0.5/$25 计、高估 20–70×——host_costusd_note
+    costUSD 对网关模型按默认卡 $5/$0.5/$25 计、高估 20–70×——harness_costusd_note
     说清了，绝不能当账单数字）。modelUsage 为空/缺场 → None。
 
     `peak_resolved=False`：cost-state 的累计口径没有逐行 ts，压根不知道这些

@@ -1,11 +1,11 @@
-"""generic 插件宿主 validate 编排（HOST_MANIFEST_DSL_SPEC §5-§6）。
+"""generic 插件执行环境 validate 编排（HARNESS_MANIFEST_DSL_SPEC §5-§6）。
 
 `agent_vitals_runtime::plugin_ingest` 的 Python twin——**只读 validate 面**
 （Python 不长 writer，与 workbuddy-usage-facts 的 --write 同一条纪律；
 Rust-only 的 plugin-ingest --write 是唯一的落盘路径）。
 
 负载键序 = Rust serde 字段声明序（golden parity 的字节前提）：
-mode/gate/gate_problem/report/facts，report 内 slug→host→recipe→…
+mode/gate/gate_problem/report/facts，report 内 slug→harness→recipe→…
 """
 
 import hashlib
@@ -25,7 +25,7 @@ def _sha256_hex16(data):
 
 def _source_profile_for_root(slug, root_declared):
     digest = hashlib.sha256(("%s|%s" % (slug, root_declared)).encode("utf-8")).hexdigest()
-    return "host-%s" % digest[:8]
+    return "harness-%s" % digest[:8]
 
 
 def _expand_tilde_home(path, home):
@@ -86,7 +86,7 @@ def _candidate_to_fact_fields(ctx, source_profile, native_session_id,
         ctx["def"], ctx["manifest"], ctx["revision"], ctx["machine_namespace"])
     fields = {
         "machine_namespace": machine_namespace,
-        "host": manifest.facts_host,
+        "harness": manifest.facts_harness,
         "source_profile": source_profile,
         "native_session_id": native_session_id,
         "source_event_id": candidate["source_event_id"],
@@ -218,7 +218,7 @@ def run_plugin(manifest_path, files, machine_namespace, home):
 
     report = {
         "slug": manifest.slug,
-        "host": manifest.facts_host,
+        "harness": manifest.facts_harness,
         "recipe": defn.id,
         "manifest_revision": revision,
         "files": [],
@@ -256,7 +256,7 @@ def run_plugin(manifest_path, files, machine_namespace, home):
         if len(profiles) > 1:
             report["warnings"].append(
                 "session `%s` 出现在 %d 个 source_profile 下（跨 root）——"
-                "facts JSONL 按 profile 分行，authority 按 host+session 身份去重合并"
+                "facts JSONL 按 profile 分行，authority 按 harness+session 身份去重合并"
                 % (session_id, len(profiles)))
 
     # 汇总：日期范围 + 模型清单。

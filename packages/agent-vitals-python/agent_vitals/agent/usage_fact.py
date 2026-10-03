@@ -2,7 +2,7 @@
 （候选 #3）+ 迁移函数表的通用骨架（候选 #4）。
 
 **这不是一次数据平面迁移**：本模块只是候选 #3 描述的"共享序列化契约"这一层
-——build/validate/`fact_id` 三个纯函数 + 迁移链的通用 walker，没有任何 host
+——build/validate/`fact_id` 三个纯函数 + 迁移链的通用 walker，没有任何 harness
 adapter 被改造成产出 `UsageFact`、没有任何持久化格式被替换。现有四条账
 （dsh state 链 / codex 静态 fold / claude ledger / workbuddy credit_json）
 继续原样工作，本模块不触碰它们一个字节。这是 v0.7 spec 状态行明确写的
@@ -10,7 +10,7 @@ adapter 被改造成产出 `UsageFact`、没有任何持久化格式被替换。
 变更，随时可以被拿掉而不影响任何现有功能。
 
 **明确没做的**（诚实边界，不是遗漏）：
-- 没有把任何一个 host adapter 接上这份契约——那需要逐宿主的迁移评审
+- 没有把任何一个 harness adapter 接上这份契约——那需要逐执行环境的迁移评审
   （§0.3 的顺序约束），本模块只是评审前置的"契约先写清楚"那一步。
 - `billing_date` 派生列（§2.1 时间行）没有在这里实现——它依赖峰谷/归日规则
   版本，本身就是"版本化视图投影"（spec 原文），不是基本事实的一部分；放进
@@ -52,7 +52,7 @@ USAGE_FACT_FIELDS = (
     # 会话引用
     "session_key_ref", "session_key_orphan",
     # 来源
-    "host", "source_profile", "source_event_id", "source_revision", "adapter_version",
+    "harness", "source_profile", "source_event_id", "source_revision", "adapter_version",
     # 模型归属
     "provider_raw", "endpoint_host", "model_raw", "provider_id", "model_id", "normalization_version",
     "route_evidence_id", "attribution_version",
@@ -65,11 +65,11 @@ USAGE_FACT_FIELDS = (
     "uncached_input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens",
     # 计费归属
     # `billing_template_id`：Rust 侧 2e011fc（fix(v0.12) preserve billing evidence by
-    # pricing snapshot）加进契约，Python 漏跟——四宿主的 usage-fact 差分在带二进制时
+    # pricing snapshot）加进契约，Python 漏跟——四执行环境的 usage-fact 差分在带二进制时
     # 全红，被 E4a 的 workbuddy parity 逼出来（2026-09-11）。契约是一份字面量清单、
     # 两语言逐项比对，少一个键就是所有 emitter 的 `--json` 输出双侧不等。
     "billing_source", "billing_mode", "pricing_basis", "billing_template_id",
-    # 宿主金额
+    # 执行环境金额
     "amount_decimal", "currency", "amount_basis",
     # 套餐证据
     "account_ref", "billing_period_start", "billing_period_end", "product_scope",
@@ -79,7 +79,7 @@ USAGE_FACT_FIELDS = (
 # 6 个身份输入字段缺一不可（§2.1「统一幂等键」公式的入参）——不含 fact_id
 # 本身（那是这 6 个字段算出来的输出，不是输入）。
 _IDENTITY_INPUT_FIELDS = (
-    "machine_namespace", "host", "source_profile", "native_session_id",
+    "machine_namespace", "harness", "source_profile", "native_session_id",
     "source_event_id", "observation_kind",
 )
 
@@ -90,10 +90,10 @@ _TOKEN_FIELDS = (
 )
 
 
-def fact_id(machine_namespace, host, source_profile, native_session_id,
+def fact_id(machine_namespace, harness, source_profile, native_session_id,
            source_event_id, observation_kind):
     """`fact_id` 哈希——v0.7 spec §2.1「统一幂等键」公式：
-    `hash(machine_namespace, host, source_profile, native_session_id,
+    `hash(machine_namespace, harness, source_profile, native_session_id,
           source_event_id, observation_kind)`。
 
     用 FNV-1a 而不是密码学哈希：与 `usage.py::_compaction_identity` 同一条
@@ -103,7 +103,7 @@ def fact_id(machine_namespace, host, source_profile, native_session_id,
     钉住）。字段间用 `\\x1f`（unit separator，真实字段值里几乎不可能出现的
     控制字符）拼接，防止 `("ab","c")` 与 `("a","bc")` 撞出同一个哈希。
     """
-    joined = "\x1f".join([machine_namespace, host, source_profile,
+    joined = "\x1f".join([machine_namespace, harness, source_profile,
                           native_session_id, source_event_id, observation_kind])
     return "uf1-" + fnv1a64_hex(joined)
 
@@ -117,13 +117,13 @@ def build_usage_fact(fields):
     - `identity_basis` 未显式给出时默认 `"native"`；调用方在用「规范化原始
       记录 + 文件稳定身份」的 hash fallback 时**必须**显式传
       `identity_basis="derived-hash"`（§2.1 原文纪律），本函数不会替调用方
-      做这个判断——它不知道 `source_event_id` 是不是真的来自宿主原生 id。
+      做这个判断——它不知道 `source_event_id` 是不是真的来自执行环境原生 id。
     - token 度量字段若给出，必须是非负整数；给出非法值时报具体字段名，不
       静默清零或吞掉。
     - `fact_id`/`schema_version` 由本函数计算/stamp，调用方传了会被覆盖
       ——身份必须内部一致，不接受外部声称的身份。
     - `USAGE_FACT_FIELDS` 里未被 `fields` 覆盖的键，输出里统一置 `None`——
-      与「缺失与真实 0 必须可区分」的契约对应，`None` 是「这个宿主没有这项
+      与「缺失与真实 0 必须可区分」的契约对应，`None` 是「这个执行环境没有这项
       证据」，不是「这项是 0」。
     """
     fields = fields or {}

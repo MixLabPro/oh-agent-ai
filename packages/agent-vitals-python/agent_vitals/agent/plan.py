@@ -66,7 +66,7 @@ def _skill_lookup(skills):
 def build_plan(report, startup_rate=None):
     """把 scan 报告派生为省钱方案。`startup_rate` 是用户估算的每月启动次数
     （`--startup-rate`），只有它能让 per-startup 项填上 `events_per_month`。"""
-    host = report.get("host_selection") or ""
+    harness = report.get("harness_selection") or ""
 
     # —— 各源区块（缺区一律当 unavailable / 空，绝不给假数据）——
     trigger = report.get("trigger_data") or {}
@@ -230,7 +230,7 @@ def build_plan(report, startup_rate=None):
 
     return {
         "schema_version": "plan/1.0",
-        "host_selection": host,
+        "harness_selection": harness,
         "startup_rate_per_month": startup_rate,
         "diagnosis_refs": all_refs,
         "items": items,

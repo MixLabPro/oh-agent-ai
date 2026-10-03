@@ -2,10 +2,10 @@
 
 `codex_audit_projection` 与 `claude_audit_projection` 都是同一批 core dispatcher
 （Rust `match_behavior_canonical` + `match_trajectory_canonical`）的 Python 镜像
-——canonical session 的形状是 host-neutral 的（`tool_calls`/`tool_results`/
+——canonical session 的形状是 harness-neutral 的（`tool_calls`/`tool_results`/
 `turns`/`approvals`/`sandbox_modes` 五条 timeline + `meta`），所以求值器本体是
-**宿主无关**的，两个适配器共用这一份。别在这里给某一宿主开特例（SV607/608 的
-Claude host-capability degradation 是 dispatcher 层的事，在
+**执行环境无关**的，两个适配器共用这一份。别在这里给某一执行环境开特例（SV607/608 的
+Claude harness-capability degradation 是 dispatcher 层的事，在
 `claude_session_audit.py` 里做 override，不污染共享求值器）。
 
 与 Rust dispatchers 的对应关系：
@@ -63,7 +63,7 @@ def audit_projection(canonical):
     This is a Python mirror of Rust's canonical dispatchers
     (`match_behavior_canonical` + `match_trajectory_canonical`), rather than a
     second rollout parser.  An empty required timeline is `unavailable`; a
-    populated timeline with no match is `measured_zero`.  Host-specific
+    populated timeline with no match is `measured_zero`.  Harness-specific
     degradations (Claude's SV607/608) are applied by the caller, not here.
     """
     # CanonicalSession serializes timelines as top-level fields (the internal
@@ -128,7 +128,7 @@ def audit_projection(canonical):
                      ("SV607", ["ToolResults"], fs607), ("SV608", ["ToolResults"], fs608),
                      ("SV609", ["ApprovalDecisions"], fs609), ("SV610", ["SandboxModes"], fs610)))
 
-    # Trajectory family.  A host with no approval lifecycle still gets the
+    # Trajectory family.  A harness with no approval lifecycle still gets the
     # evaluation retained here so a future adapter fills it without a new rule
     # path (SV614's a/b then run over empty approvals → MeasuredZero, c over
     # sandbox → runnable).

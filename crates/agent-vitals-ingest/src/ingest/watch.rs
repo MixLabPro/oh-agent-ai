@@ -42,18 +42,18 @@ pub const DEBOUNCE: Duration = Duration::from_millis(1_200);
 /// 到点强制派发一次后开始下一窗；正确性仍由 tick 指纹对账保证。
 pub const MAX_DEBOUNCE: Duration = Duration::from_secs(5);
 
-/// tick 唤醒槽：watcher 去抖后 `wake_hosts`；tick 循环用
+/// tick 唤醒槽：watcher 去抖后 `wake_harnesses`；tick 循环用
 /// `wait_for_wake(&slot, TICK_PERIOD)` 代替 sleep——事件到 → 立刻醒并拿到
-/// **是哪些宿主醒了**，没事件 → 照旧按周期醒。feature 无关（无 watcher 时
+/// **是哪些执行环境醒了**，没事件 → 照旧按周期醒。feature 无关（无 watcher 时
 /// 没人 wake，行为与纯 sleep 完全一致）。
 ///
 /// **带身份的合并槽（LIGHT-PATH spec §5.1，取代 HARDENING §5.1 的匿名单槽）**：
-/// 槽内是 `BTreeSet<宿主>`——持续写入的活动期里，去抖窗产出的多余唤醒把宿主
-/// **并入**集合而不是排队：同一时刻至多一批 pending 宿主（上界 = 注册的
-/// FactsSource 宿主数，天然有界）。每次重 tick 都是全拓扑指纹对账，事件基数
-/// 没有语义；宿主身份是轻/重路由的唯一输入（LIGHT-PATH spec §5.2）。
+/// 槽内是 `BTreeSet<执行环境>`——持续写入的活动期里，去抖窗产出的多余唤醒把执行环境
+/// **并入**集合而不是排队：同一时刻至多一批 pending 执行环境（上界 = 注册的
+/// FactsSource 执行环境数，天然有界）。每次重 tick 都是全拓扑指纹对账，事件基数
+/// 没有语义；执行环境身份是轻/重路由的唯一输入（LIGHT-PATH spec §5.2）。
 ///
-/// 手写 Mutex+Condvar 而不是 `sync_channel`——通道装不下"合并后的宿主集合"
+/// 手写 Mutex+Condvar 而不是 `sync_channel`——通道装不下"合并后的执行环境集合"
 /// （满了只能丢弃，身份就丢了），而集合本身有界，不需要通道的背压语义。
 #[derive(Default)]
 pub struct WakeSlot {
@@ -63,7 +63,7 @@ pub struct WakeSlot {
 
 #[derive(Default)]
 struct SlotInner {
-    hosts: std::collections::BTreeSet<String>,
+    harnesses: std::collections::BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -74,13 +74,13 @@ pub struct TickWaker {
     merged: Arc<AtomicU64>,
 }
 
-/// `wake_hosts` 的诊断结果。调用方**不**据此分支（合并/新入对行为等价），
+/// `wake_harnesses` 的诊断结果。调用方**不**据此分支（合并/新入对行为等价），
 /// 只允许累计进程内健康计数。
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum WakeOutcome {
-    /// 槽此前为空——本次是 pending 的第一批宿主。
+    /// 槽此前为空——本次是 pending 的第一批执行环境。
     Queued,
-    /// 槽已有 pending 宿主——本次并入集合（或无新增）。
+    /// 槽已有 pending 执行环境——本次并入集合（或无新增）。
     Coalesced,
 }
 
@@ -113,13 +113,13 @@ impl TickWaker {
         }
     }
 
-    /// 并入一批宿主。空集合是显式 no-op（返回 `Coalesced`，不计数、不唤醒）。
-    pub fn wake_hosts(&self, hosts: impl IntoIterator<Item = impl AsRef<str>>) -> WakeOutcome {
+    /// 并入一批执行环境。空集合是显式 no-op（返回 `Coalesced`，不计数、不唤醒）。
+    pub fn wake_harnesses(&self, harnesses: impl IntoIterator<Item = impl AsRef<str>>) -> WakeOutcome {
         let mut guard = self.slot.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let was_empty = guard.hosts.is_empty();
+        let was_empty = guard.harnesses.is_empty();
         let mut inserted_any = false;
-        for host in hosts {
-            if guard.hosts.insert(host.as_ref().to_string()) {
+        for harness in harnesses {
+            if guard.harnesses.insert(harness.as_ref().to_string()) {
                 inserted_any = true;
             }
         }
@@ -151,7 +151,7 @@ impl TickWaker {
 /// tick 循环的一次等待结果。
 #[derive(Debug, PartialEq, Eq)]
 pub enum TickWait {
-    /// 有宿主被唤醒——立刻跑轻 tick，集合即待同步宿主（LIGHT-PATH §5.2）。
+    /// 有执行环境被唤醒——立刻跑轻 tick，集合即待同步执行环境（LIGHT-PATH §5.2）。
     Woken(std::collections::BTreeSet<String>),
     /// 等满周期——跑重 tick。
     TimedOut,
@@ -165,9 +165,9 @@ pub fn wait_for_wake(slot: &WakeSlot, period: Duration) -> TickWait {
     let deadline = std::time::Instant::now() + period;
     let mut guard = slot.inner.lock().unwrap_or_else(|e| e.into_inner());
     loop {
-        if !guard.hosts.is_empty() {
-            let hosts = std::mem::take(&mut guard.hosts);
-            return TickWait::Woken(hosts);
+        if !guard.harnesses.is_empty() {
+            let harnesses = std::mem::take(&mut guard.harnesses);
+            return TickWait::Woken(harnesses);
         }
         let now = std::time::Instant::now();
         if now >= deadline {
@@ -181,13 +181,13 @@ pub fn wait_for_wake(slot: &WakeSlot, period: Duration) -> TickWait {
     }
 }
 
-/// 一轮 tick 的类别（LIGHT-PATH spec §5.2）：`Light` 携带待同步宿主集合
+/// 一轮 tick 的类别（LIGHT-PATH spec §5.2）：`Light` 携带待同步执行环境集合
 /// ——desktop 的 tick 循环据此类路由到定向同步或全量重 tick。
 #[derive(Debug)]
 pub enum TickKind {
-    /// 全宿主对账 + 全部投影（5 分钟周期 / 防饥饿升级 / 轻路径失败升级）。
+    /// 全执行环境对账 + 全部投影（5 分钟周期 / 防饥饿升级 / 轻路径失败升级）。
     Heavy,
-    /// 只同步集合内宿主（唤醒驱动，秒级时延路径）。
+    /// 只同步集合内执行环境（唤醒驱动，秒级时延路径）。
     Light(std::collections::BTreeSet<String>),
 }
 
@@ -285,8 +285,8 @@ pub struct WatchRegistry {
 /// 一条注册项的路由命中。
 #[derive(Debug, PartialEq, Eq)]
 pub enum RouteHit {
-    /// 命中某宿主的源目录 → 唤醒 tick。
-    SourceHost(String),
+    /// 命中某执行环境的源目录 → 唤醒 tick。
+    SourceHarness(String),
     /// 命中第 i 个 watch-only 消费者（按注册序）。
     WatchOnly(usize),
 }
@@ -296,10 +296,10 @@ impl WatchRegistry {
         Self::default()
     }
 
-    /// 注册宿主源目录（递归监听）。路径不存在也允许注册——进 pending
+    /// 注册执行环境源目录（递归监听）。路径不存在也允许注册——进 pending
     /// 集合，出现后由 watcher 超时循环补挂。
-    pub fn register_source(&mut self, host: &str, path: PathBuf) {
-        self.sources.push((host.to_string(), path));
+    pub fn register_source(&mut self, harness: &str, path: PathBuf) {
+        self.sources.push((harness.to_string(), path));
     }
 
     /// 注册 watch-only 消费者（回调在 watcher 线程执行，必须快——
@@ -358,9 +358,9 @@ impl WatchRouter {
             return Vec::new();
         }
         let mut hits = Vec::new();
-        for (host, root) in &self.sources {
+        for (harness, root) in &self.sources {
             if starts_within(path, root) {
-                hits.push(RouteHit::SourceHost(host.clone()));
+                hits.push(RouteHit::SourceHarness(harness.clone()));
             }
         }
         for (root, cb_index) in &self.watch_only {
@@ -371,10 +371,10 @@ impl WatchRouter {
         hits
     }
 
-    /// 追加同一宿主源根的路径别名（规范化形式）。命中同一宿主，幂等
+    /// 追加同一执行环境源根的路径别名（规范化形式）。命中同一执行环境，幂等
     /// 语义不变（去抖合并）。
-    pub fn add_source_alias(&mut self, host: &str, path: PathBuf) {
-        self.sources.push((host.to_string(), path));
+    pub fn add_source_alias(&mut self, harness: &str, path: PathBuf) {
+        self.sources.push((harness.to_string(), path));
     }
 
     /// 追加同一 watch-only 根（回调下标不变）的路径别名。
@@ -393,22 +393,22 @@ fn starts_within(path: &Path, root: &Path) -> bool {
 /// （时钟在调用方：超时到了才 take_batch）。
 #[derive(Default)]
 pub struct Debouncer {
-    hosts: BTreeSet<String>,
+    harnesses: BTreeSet<String>,
     watch_only: BTreeSet<usize>,
 }
 
 /// 一批合并后的派发动作。
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct WatchBatch {
-    pub hosts: Vec<String>,
+    pub harnesses: Vec<String>,
     pub watch_only: Vec<usize>,
 }
 
 impl Debouncer {
     pub fn offer(&mut self, hit: RouteHit) {
         match hit {
-            RouteHit::SourceHost(host) => {
-                self.hosts.insert(host);
+            RouteHit::SourceHarness(harness) => {
+                self.harnesses.insert(harness);
             }
             RouteHit::WatchOnly(i) => {
                 self.watch_only.insert(i);
@@ -417,15 +417,15 @@ impl Debouncer {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.hosts.is_empty() && self.watch_only.is_empty()
+        self.harnesses.is_empty() && self.watch_only.is_empty()
     }
 
     /// 取走并清空当前批。
     pub fn take_batch(&mut self) -> WatchBatch {
         // BTreeSet 没有 drain——整体 mem::take（调用方拿走后 self 归零）。
-        let hosts = std::mem::take(&mut self.hosts);
+        let harnesses = std::mem::take(&mut self.harnesses);
         let watch_only = std::mem::take(&mut self.watch_only);
-        WatchBatch { hosts: hosts.into_iter().collect(), watch_only: watch_only.into_iter().collect() }
+        WatchBatch { harnesses: harnesses.into_iter().collect(), watch_only: watch_only.into_iter().collect() }
     }
 }
 
@@ -445,12 +445,12 @@ impl WatchRegistry {
         for descriptor in &topology.descriptors {
             match descriptor.class {
                 crate::sources::watch_topology::WatchRootClass::FactsSource => {
-                    registry.register_source(&descriptor.host, descriptor.path.clone());
+                    registry.register_source(&descriptor.harness, descriptor.path.clone());
                 }
                 crate::sources::watch_topology::WatchRootClass::CacheOnly => {
-                    let callback = cache_callback(&descriptor.host);
+                    let callback = cache_callback(&descriptor.harness);
                     registry.register_watch_only(
-                        &format!("cache:{}", descriptor.host),
+                        &format!("cache:{}", descriptor.harness),
                         descriptor.path.clone(),
                         callback,
                     );
@@ -526,7 +526,7 @@ fn add_canonical_alias(router: &mut WatchRouter, identity: &RootIdentity, path: 
         return;
     }
     match identity {
-        RootIdentity::Source(host) => router.add_source_alias(host, canon),
+        RootIdentity::Source(harness) => router.add_source_alias(harness, canon),
         RootIdentity::WatchOnly(i) => router.add_watch_only_alias(*i, canon),
     }
 }
@@ -650,7 +650,7 @@ mod supervised {
             self.identities = snapshot
                 .sources
                 .iter()
-                .map(|(host, p)| (p.clone(), RootIdentity::Source(host.clone())))
+                .map(|(harness, p)| (p.clone(), RootIdentity::Source(harness.clone())))
                 .chain(
                     snapshot
                         .watch_only
@@ -927,8 +927,8 @@ fn spawn_platform_watcher(initial: WatchRegistry, waker: TickWaker) -> WatcherHa
                         let batch = deb.take_batch();
                         batch_started_at = None;
                         last_routed_event_at = None;
-                        if !batch.hosts.is_empty() {
-                            if let WakeOutcome::Coalesced = waker.wake_hosts(&batch.hosts) {
+                        if !batch.harnesses.is_empty() {
+                            if let WakeOutcome::Coalesced = waker.wake_harnesses(&batch.harnesses) {
                                 coalesced += 1;
                             }
                             last_wake = Some(local_now_ms());
@@ -976,7 +976,7 @@ mod tests {
         PathBuf::from(p)
     }
 
-    /// 路由：源宿主命中、watch-only 命中、跨根互不串、边界按组件。
+    /// 路由：源执行环境命中、watch-only 命中、跨根互不串、边界按组件。
     #[test]
     fn router_routes_by_component_prefix() {
         let mut reg = WatchRegistry::new();
@@ -987,7 +987,7 @@ mod tests {
         let router = reg.router();
 
         let hits = router.route(Path::new("/home/u/.claude/projects/p-x/sess.jsonl"));
-        assert_eq!(hits, vec![RouteHit::SourceHost("claude-code".into())]);
+        assert_eq!(hits, vec![RouteHit::SourceHarness("claude-code".into())]);
 
         let hits = router.route(Path::new("/home/u/.claude/skills/foo/SKILL.md"));
         assert_eq!(hits, vec![RouteHit::WatchOnly(0)]);
@@ -997,7 +997,7 @@ mod tests {
         assert!(hits.is_empty(), "前缀必须按组件边界: {hits:?}");
 
         // 注册表外的路径
-        let hits = router.route(Path::new("/etc/hosts"));
+        let hits = router.route(Path::new("/etc/harnesses"));
         assert!(hits.is_empty());
     }
 
@@ -1012,18 +1012,18 @@ mod tests {
         }
     }
 
-    /// 去抖：窗口内多命中合并、宿主去重、take 后清空。
+    /// 去抖：窗口内多命中合并、执行环境去重、take 后清空。
     #[test]
     fn debouncer_coalesces_bursts() {
         let mut deb = Debouncer::default();
         for _ in 0..5 {
-            deb.offer(RouteHit::SourceHost("claude-code".into()));
+            deb.offer(RouteHit::SourceHarness("claude-code".into()));
         }
-        deb.offer(RouteHit::SourceHost("codex".into()));
+        deb.offer(RouteHit::SourceHarness("codex".into()));
         deb.offer(RouteHit::WatchOnly(2));
         deb.offer(RouteHit::WatchOnly(2));
         let batch = deb.take_batch();
-        assert_eq!(batch.hosts, vec!["claude-code".to_string(), "codex".to_string()],
+        assert_eq!(batch.harnesses, vec!["claude-code".to_string(), "codex".to_string()],
             "BTreeSet 保证去重 + 稳定序");
         assert_eq!(batch.watch_only, vec![2]);
         assert!(deb.take_batch() == WatchBatch::default(), "take 后清空");
@@ -1036,11 +1036,11 @@ mod tests {
     #[test]
     fn builtin_facts_roots_are_never_home_or_filesystem_root() {
         let user_home = PathBuf::from("/home/u");
-        for (host, path) in default_source_watch_roots(&user_home) {
-            assert_ne!(path, user_home, "{host} 不得监听整个 home");
-            assert_ne!(path, PathBuf::from("/"), "{host} 不得监听文件系统根");
-            assert!(path.starts_with(&user_home) || host == "dsh",
-                "{host} 的根 {path:?} 应在 home 下（dsh 环境配置除外）");
+        for (harness, path) in default_source_watch_roots(&user_home) {
+            assert_ne!(path, user_home, "{harness} 不得监听整个 home");
+            assert_ne!(path, PathBuf::from("/"), "{harness} 不得监听文件系统根");
+            assert!(path.starts_with(&user_home) || harness == "dsh",
+                "{harness} 的根 {path:?} 应在 home 下（dsh 环境配置除外）");
         }
     }
 
@@ -1051,8 +1051,8 @@ mod tests {
         let home = PathBuf::from("/home/u");
         let roots = default_skill_watch_roots(&home);
         assert!(!roots.is_empty(), "DEFAULT_ROOTS 里有 ~/ 根");
-        for (host, path) in &roots {
-            assert!(path.starts_with(&home), "{host}: {path:?} 应在 home 下");
+        for (harness, path) in &roots {
+            assert!(path.starts_with(&home), "{harness}: {path:?} 应在 home 下");
             let s = path.to_string_lossy();
             assert!(!s.contains("/./"), "项目本地根不得出现: {s}");
         }
@@ -1118,22 +1118,22 @@ mod tests {
         }
     }
 
-    /// waker：首批宿主入槽 = Queued，后续并入 = Coalesced；wait 取走集合
+    /// waker：首批执行环境入槽 = Queued，后续并入 = Coalesced；wait 取走集合
     /// 后槽清空。空入参是显式 no-op。
     #[test]
     fn tick_waker_delivers_and_never_panics() {
         let WakeChannel { waker, slot } = TickWaker::channel();
-        assert_eq!(waker.wake_hosts(["claude-code"]), WakeOutcome::Queued);
-        assert_eq!(waker.wake_hosts(["codex"]), WakeOutcome::Coalesced);
+        assert_eq!(waker.wake_harnesses(["claude-code"]), WakeOutcome::Queued);
+        assert_eq!(waker.wake_harnesses(["codex"]), WakeOutcome::Coalesced);
         assert_eq!(
-            waker.wake_hosts(std::iter::empty::<&str>()),
+            waker.wake_harnesses(std::iter::empty::<&str>()),
             WakeOutcome::Coalesced,
             "空入参 no-op（不计数不唤醒）",
         );
         assert_eq!(
             wait_for_wake(&slot, Duration::from_millis(5)),
             TickWait::Woken(["claude-code".to_string(), "codex".to_string()].into_iter().collect()),
-            "两个宿主都进了同一批集合（合并语义）",
+            "两个执行环境都进了同一批集合（合并语义）",
         );
         assert_eq!(
             wait_for_wake(&slot, Duration::from_millis(5)),
@@ -1153,8 +1153,8 @@ mod tests {
         let mut queued = 0u32;
         let mut coalesced = 0u32;
         for i in 0..10_000 {
-            let host = format!("host-{}", i % 3);
-            match waker.wake_hosts([&host]) {
+            let harness = format!("harness-{}", i % 3);
+            match waker.wake_harnesses([&harness]) {
                 WakeOutcome::Queued => queued += 1,
                 WakeOutcome::Coalesced => coalesced += 1,
             }
@@ -1162,25 +1162,25 @@ mod tests {
         assert_eq!(queued, 1, "只有第一批入槽");
         assert_eq!(coalesced, 9_999);
         assert_eq!(waker.coalesced_count(), 9_999, "诊断计数与结果一致");
-        // 槽内有界：只有 3 个去重后的宿主身份，不是 10k 条事件
+        // 槽内有界：只有 3 个去重后的执行环境身份，不是 10k 条事件
         match wait_for_wake(&slot, Duration::from_millis(0)) {
-            TickWait::Woken(hosts) => {
-                assert_eq!(hosts.len(), 3, "集合上界 = 去重宿主数: {hosts:?}");
+            TickWait::Woken(harnesses) => {
+                assert_eq!(harnesses.len(), 3, "集合上界 = 去重执行环境数: {harnesses:?}");
             }
             other => panic!("应当 Woken: {other:?}"),
         }
     }
 
-    /// 并发压力：多线程同时 wake_hosts，槽不 panic、集合无界增长。
+    /// 并发压力：多线程同时 wake_harnesses，槽不 panic、集合无界增长。
     #[test]
-    fn concurrent_wake_hosts_stay_bounded() {
+    fn concurrent_wake_harnesses_stay_bounded() {
         let WakeChannel { waker, slot } = TickWaker::channel();
         let handles: Vec<_> = (0..8)
             .map(|t| {
                 let w = waker.clone();
                 std::thread::spawn(move || {
                     for i in 0..1_000 {
-                        let _ = w.wake_hosts([format!("host-{}", (t + i) % 4)]);
+                        let _ = w.wake_harnesses([format!("harness-{}", (t + i) % 4)]);
                     }
                 })
             })
@@ -1189,7 +1189,7 @@ mod tests {
             h.join().unwrap();
         }
         match wait_for_wake(&slot, Duration::from_millis(0)) {
-            TickWait::Woken(hosts) => assert_eq!(hosts.len(), 4, "恰好 4 个去重宿主"),
+            TickWait::Woken(harnesses) => assert_eq!(harnesses.len(), 4, "恰好 4 个去重执行环境"),
             other => panic!("应当 Woken: {other:?}"),
         }
         assert_eq!(
@@ -1205,7 +1205,7 @@ mod tests {
     fn wait_helper_orders_blocked_sync_into_one_followup() {
         let WakeChannel { waker, slot } = TickWaker::channel();
         for _ in 0..5_000 {
-            let _ = waker.wake_hosts(["claude-code"]);
+            let _ = waker.wake_harnesses(["claude-code"]);
         }
         assert!(matches!(
             wait_for_wake(&slot, Duration::from_millis(5)),

@@ -2,7 +2,7 @@
 
 [Agent Vitals](../README.md) as a DeepSeek Harness profile bundle. Installing it makes
 `agent-vitals` available as a skill inside DSH, so a DSH agent can audit the *other*
-skill hosts on the machine.
+skill harnesses on the machine.
 
 ## Install
 
@@ -38,7 +38,7 @@ This bundle is deliberately thin, for reasons written up in
 
 ## Status
 
-DSH is health-checked via `--host dsh` (DSH-2). Description budget is reported
+DSH is health-checked via `--harness dsh` (DSH-2). Description budget is reported
 unavailable — DSH has no global budget, so per-description truncation (SV004) replaces
 SV001/SV002 — and loaded/trigger evidence comes from the session log and the registry
 snapshot. See [`docs/DSH_INTEGRATION.md`](../docs/DSH_INTEGRATION.md).

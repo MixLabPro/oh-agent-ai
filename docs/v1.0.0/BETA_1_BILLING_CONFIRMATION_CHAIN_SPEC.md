@@ -18,7 +18,7 @@
 | G2 | 保存前预览只算**当前统计月**，重算却按声明有效期**全历史**归因（`i64::MIN..MAX`）；预览 ≠ 实际写入范围 | **P0**（E203「预览与实际写入使用同一范围」失败） | `workbench.js:1865-1873` vs `authority.rs:2524` |
 | G3 | 声明一律 `effective_end = null`（开放到未来）；B06 明令 Beta「不自动扩展到未来记录」 | **P0**（范围纪律）；v1.3 起改为**结束选填**（留空＝持续有效），原推理已在 §3 事实 3 修正 / §5.4a | `workbench.js:1899` |
 | G4 | 预览没有金额，只有 tokens/事实/会话；REQ-026/AC27 要求「移出估算 X / 保持估算 X / 仍待确认 X」 | P1 | `BillingDeclarationImpactPreview` 无金额字段 |
-| G5 | REQ-023 的「宿主 × provider × 模型 × 路由证据」分组已在数据层实现（`summary.rs:908 unresolved_billing_groups`）但**零消费方**；UI 只从旧资产迁移候选 `billing_import_candidates` 出发，无旧资产的新用户看不到任何待确认组 | P1（E201 一般情形不成立） | `summary.rs:908`；无 Tauri 命令 |
+| G5 | REQ-023 的「执行环境 × provider × 模型 × 路由证据」分组已在数据层实现（`summary.rs:908 unresolved_billing_groups`）但**零消费方**；UI 只从旧资产迁移候选 `billing_import_candidates` 出发，无旧资产的新用户看不到任何待确认组 | P1（E201 一般情形不成立） | `summary.rs:908`；无 Tauri 命令 |
 | G6 | 保存与重算分成「保存」「应用」两次点击；只保存不应用会留下「声明已存在、数字未变、待处理列表也不显示」的半状态 | P1 | `workbench.js:1911-1912, 1919` |
 
 另有三处不改数字但要收口：修订级预览 `billing_declaration_impact_preview` 前端零调用（孤儿端点）；「稍后」的 30 天降级存在 webview `localStorage` 而不在权威库；声明的生效月边界硬编码北京时（`'+8 hours'`），与可配置统计时区无关。§8 给出决策。
@@ -45,16 +45,16 @@
 
 ### 2.2 不在范围（保持 D01/D02 延期状态，不得因本规格回流）
 
-- 付款/账单录入、CSV 导入、已确认支出预算（D01）。`host_bill_*` 命令保留只读兼容，不新增入口。
+- 付款/账单录入、CSV 导入、已确认支出预算（D01）。`harness_bill_*` 命令保留只读兼容，不新增入口。
 - 第三方价卡/倍率编辑、多账户套餐、「以后同类记录」自动声明（D02）。`relationship_kind = third_party` 在 Beta 只记录关系，不改变金额。
-- 跨宿主 canonical 归一（D05）：组键用 `host/raw` 消歧后的 `provider_id`/`model_id`，不合并实体。
+- 跨执行环境 canonical 归一（D05）：组键用 `harness/raw` 消歧后的 `provider_id`/`model_id`，不合并实体。
 - 在线价目更新（D06）。
 - 修改**已保存**声明的编辑表单：Beta 只提供「撤销后重新确认」，不提供原位编辑（这也是删除修订级预览端点的依据）。
 
 ### 2.3 计费边界（发布规格 §3.1，本规格不得放松）
 
 - 声明只改变**归因**（哪些用量在套餐内），永不产生「已付款」：用量本身不会被声明标成"付过了"，`actual spend` 里的按量档仍只来自账单/付款记录。
-  **但不含订阅月费**（v1.3 澄清）：用户在「明确计费方式」里声明的**月费**是自报的固定支出，按 `BillingBasis::FixedSubscription`（定义原话：「**用户声明的**固定订阅费用」）进入「实际支出」的订阅档——与账单录入的 `metered_actual`/`host_billed` 并列不混。这条与「用量不产生已付款」不矛盾：一个月费是**关系**层的自报固定成本，不是把某批 usage 标成付过。
+  **但不含订阅月费**（v1.3 澄清）：用户在「明确计费方式」里声明的**月费**是自报的固定支出，按 `BillingBasis::FixedSubscription`（定义原话：「**用户声明的**固定订阅费用」）进入「实际支出」的订阅档——与账单录入的 `metered_actual`/`harness_billed` 并列不混。这条与「用量不产生已付款」不矛盾：一个月费是**关系**层的自报固定成本，不是把某批 usage 标成付过。
 - 币种永不相加；金额永远带 `currency` 与 `basis`。
 - `unknown` 不是声明：不写 `billing_declarations`，不入队重算。
 - 原始 `usage_facts` 不因任何声明/撤销/重算而变；守恒用 `data-reimport-verify` 与事实计数对拍。
@@ -97,9 +97,9 @@ NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
 | 词 | 定义 | Beta 里的来源 |
 |---|---|---|
 | 候选（candidate） | 旧资产迁移出的「你可能有这个套餐」记录 | `billing_import_candidates` |
-| 待确认组（group） | 一个月内 `host × provider_id × model_id × evidence_basis × pricing_basis` 上仍按量估算或路由证据不是 `explicit-official-route` 的用量聚合 | `summary.rs:908 unresolved_billing_groups` |
+| 待确认组（group） | 一个月内 `harness × provider_id × model_id × evidence_basis × pricing_basis` 上仍按量估算或路由证据不是 `explicit-official-route` 的用量聚合 | `summary.rs:908 unresolved_billing_groups` |
 | 声明（declaration） | 用户对「这批用量如何付费」的回答；版本化 | `billing_declarations` + revisions |
-| 作用范围（scope） | 声明命中事实的条件：`host`、`provider_id`、`effective_start..=effective_end`（北京时间日期）、`scopes[]` | revision + scopes |
+| 作用范围（scope） | 声明命中事实的条件：`harness`、`provider_id`、`effective_start..=effective_end`（北京时间日期）、`scopes[]` | revision + scopes |
 | 影响预览（preview） | 在**与写入完全相同的范围**上只读计算：命中事实数/会话数/tokens，以及分币金额三分 | §5.5 |
 | 重算（recalc） | 把一个 `saved` 修订的命中事实写成归因并原子发布结果快照 | `billing_recalculation_run` |
 | 回执（receipt） | 保存后原位显示的结果：修订号、任务状态、范围、金额变化、撤销按钮 | §5.6 |
@@ -120,14 +120,14 @@ NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
 - 打开位置：设置 tab（`data-tab="sources"`，页内标题「设置」）的「计费与套餐」分区 `#settings-billing`（`ov-billing-review-panel` 就住在那里）。这是设置页规格的既定信息架构，不是数据源页；Draft v1 误读了 `switchTab("sources")`，本版更正，不再要求改成总览内抽屉。
 - 数据源：新增只读 Tauri 命令 `billing_confirmation_groups(month)`，返回 `runtime::summary::unresolved_billing_groups(month)` 的结果并补齐 `estimated_amounts[]`（§6 B1）。
 - 排序：默认按**估算金额**降序（同币内），无价卡的组按 tokens 降序排在有金额组之后；不得按创建顺序或 `candidate_id`。
-- 每组展示：宿主、provider、模型、路由证据（`evidence_basis` 的用户文案映射，见设置页规格的 reason code 表）、日期范围（`first/last_event_at_ms` 按统计时区）、会话数、tokens、名义估算（分币）、当前依据（`pricing_basis`）与置信状态。
+- 每组展示：执行环境、provider、模型、路由证据（`evidence_basis` 的用户文案映射，见设置页规格的 reason code 表）、日期范围（`first/last_event_at_ms` 按统计时区）、会话数、tokens、名义估算（分币）、当前依据（`pricing_basis`）与置信状态。
 - 组行只有一个主操作「确认计费方式」（打开 §5.3），没有「是我的套餐 / 不是」二选一（G1 的修法）。有候选证据的组附一行「来自旧版本套餐记录：<provider> <金额> 自 <月> 起」和一个文字链「这不是我的套餐」→ `candidate_resolve(dismissed)`，只处理候选，不碰用量。
 - 每次只展开一组。
 
-### 5.2a 批量：同宿主、同未知原因、同适用日期的组一起处理（v1.2）
+### 5.2a 批量：同执行环境、同未知原因、同适用日期的组一起处理（v1.2）
 
-- 弹窗打开时默认勾选所有与目标组 **批量键相同** 的组：`host × provider_id × evidence_basis × pricing_basis × effective_start × effective_end`（`workbench.js::billingBatchKey`）。勾选行文案固定：「将同时处理 N 个模型、M 个会话、X tokens（同一宿主、同一未知原因、同一适用日期）」。
-- 批量 = **一条声明、多条 `model` 作用域**（同 kind 并集），因此一次预览、一个修订、一个重算任务；预览的「移出」是各组求和，「保持」是同宿主同 provider 期间内未选中的其余事实。
+- 弹窗打开时默认勾选所有与目标组 **批量键相同** 的组：`harness × provider_id × evidence_basis × pricing_basis × effective_start × effective_end`（`workbench.js::billingBatchKey`）。勾选行文案固定：「将同时处理 N 个模型、M 个会话、X tokens（同一执行环境、同一未知原因、同一适用日期）」。
+- 批量 = **一条声明、多条 `model` 作用域**（同 kind 并集），因此一次预览、一个修订、一个重算任务；预览的「移出」是各组求和，「保持」是同执行环境同 provider 期间内未选中的其余事实。
 - 取消勾选只处理目标组；候选专属行（当月无用量）和已处理候选行不参与批量。
 
 ### 5.3 关系选择（REQ-021/024/029/030/031、AC05/AC09）
@@ -158,7 +158,7 @@ NOT EXISTS (SELECT 1 FROM billing_fact_attributions ba
 
 约束：
 
-- 同一宿主可有多条声明（不同 provider/模型/期间），但同一 `declaration_id` 的当前修订只有一条。
+- 同一执行环境可有多条声明（不同 provider/模型/期间），但同一 `declaration_id` 的当前修订只有一条。
 - 与仓库 Watchlist 冲突的证据不被订阅吞掉（E207）：组的 `evidence_basis` 若已是 `explicit-official-route` 以外的**明确相反证据**（例如显式 custom endpoint），选「官方订阅」时预览必须显示「仍待确认 X」而非移出。实现：预览与重算都只匹配 `evidence_basis` 与组一致的事实（§6 B2 的 `route` scope）。
 - `unknown` 永不持久化为声明（守卫测试 §7 R4）。
 
@@ -181,14 +181,14 @@ Beta 只开放两种范围（v1.3 起第二种的结束日可选）：
 
 ### 5.5 影响预览（REQ-026、AC27、E203、G2、G4）
 
-- 预览必须与写入使用**同一组参数**：`host, provider_id, effective_start, effective_end, scopes`——`window_start/end_ms` 不再由前端按统计月传，而由后端从 `effective_start..=effective_end` 推出（§6 B2）。前端不得再传 `billingMonthWindow(statisticsMonth())`。
+- 预览必须与写入使用**同一组参数**：`harness, provider_id, effective_start, effective_end, scopes`——`window_start/end_ms` 不再由前端按统计月传，而由后端从 `effective_start..=effective_end` 推出（§6 B2）。前端不得再传 `billingMonthWindow(statisticsMonth())`。
 - 返回三组数字，缺一不可：
   - **移出估算**：命中且当前为 `metered_estimate` 的事实 → tokens、会话数、分币金额；
-  - **保持估算**：同 host/provider/期间内**未命中** scope 的事实 → tokens、分币金额；
+  - **保持估算**：同 harness/provider/期间内**未命中** scope 的事实 → tokens、分币金额；
   - **仍待确认**：命中但 `evidence_basis` 与组不一致（冲突证据）或无价卡的事实 → tokens，金额标 `unresolved` 与原因码。
 - 金额口径 = 名义按量估算（`metered_estimate` 同一价卡版本），与总览「按量估算」卡片同源；由 `cost_breakdown` 的桶计价路径抽出的共享函数计算（§6 B1/B2），**不得**在预览里另写一套价格查询。
 - 非 `official_subscription` 的关系：预览仍显示三组，但「移出估算」恒为 0，并明示「此选项不改变金额」。
-- 文案模板：`预计从按量估算中移出 {tokens} tokens · {sessions} 个会话 · ¥{cny} / ${usd}；保持估算 {tokens}；仍待确认 {tokens}（{reason}）。范围：{host} · {provider} · {model} · {start}–{end}。` 币种缺项不显示，不写 0。
+- 文案模板：`预计从按量估算中移出 {tokens} tokens · {sessions} 个会话 · ¥{cny} / ${usd}；保持估算 {tokens}；仍待确认 {tokens}（{reason}）。范围：{harness} · {provider} · {model} · {start}–{end}。` 币种缺项不显示，不写 0。
 
 ### 5.6 保存 = 确认 + 入队（REQ-147、E204、G6）
 
@@ -202,7 +202,7 @@ Beta 只开放两种范围（v1.3 起第二种的结束日可选）：
 - 一致性来源不是「刷新调用」而是**§3 的唯一谓词**：任何面只要重新查询，就得到同一版本。
 - 完整顺序（v1.2）：用户补充归因 → 保存版本化修订 → 后端重新归因（`billing_fact_attributions`）→ 重算费用（结果快照原子发布）→ 刷新各面。桌面端的用量页按月缓存（`calendarLoadedMonth`）、会话与待处理懒加载缓存（`sessState.loaded` / `findState.loaded`）——重算成功与撤销成功后由 `refreshAfterBillingChange()` 统一作废三处缓存、重绘总览，并对当前正开着的用量/会话/待处理页立即重拉；其余页下次进入时重拉。**不是刷新页面**，数据来源仍是同一权威库。
 - 处理中：回执显示「正在重新归因并重算费用…」；超过轮询窗口仍未完成时明示「完成前各页继续显示上一版本」，任务留在「重算状态」列表。
-- 真机证据要求（T08）：同一隔离数据根上，保存前/后、撤销后三个时点各截：总览按量估算卡、日历该月合计、会话列表该组任一会话的成本依据、`data coverage --month`、MCP `cost_breakdown{group_by:[host,provider_id,billing_mode]}`。五处的移出金额必须逐位相等；`cost_breakdown` 的 `billing_mode='subscription'` 桶等于预览「移出估算」。
+- 真机证据要求（T08）：同一隔离数据根上，保存前/后、撤销后三个时点各截：总览按量估算卡、日历该月合计、会话列表该组任一会话的成本依据、`data coverage --month`、MCP `cost_breakdown{group_by:[harness,provider_id,billing_mode]}`。五处的移出金额必须逐位相等；`cost_breakdown` 的 `billing_mode='subscription'` 桶等于预览「移出估算」。
 - 性能：`billing_confirmation_groups` 与预览走 `SqlSummaryRepository` 直查；不得引入新的 fold 管线（CLAUDE.md 2026-09-05 事故）。
 
 ### 5.8 撤销（AC13、E205）
@@ -307,7 +307,7 @@ Beta 只开放两种范围（v1.3 起第二种的结束日可选）：
 - **D4 删除修订级预览端点（B5）**：删。理由：Beta 无原位编辑；保留会让 `generate_handler!` 暴露一条无 UI、无 mock、无守卫的命令。
 - **D5 撤销不重算**：维持数据层现状，理由见 §3 事实 2；回执文案说明「立即生效」。
 - **D6 非订阅关系不改金额**：维持并在 UI 明示（§5.3 结果说明列）。⏳ 产品是否接受「组织承担」在 Beta 只是标签——若不接受，需要 D01 的付款方模型，超出 Beta。
-- ⏳ **D7 组键是否含 `model_id`**：本规格按 REQ-023 含模型。若真机发现同 provider 多模型导致组过碎（用户要逐个确认），可退到 `host × provider × evidence_basis`，但 `scopes` 仍按模型写多条，不得写空 scope。
+- ⏳ **D7 组键是否含 `model_id`**：本规格按 REQ-023 含模型。若真机发现同 provider 多模型导致组过碎（用户要逐个确认），可退到 `harness × provider × evidence_basis`，但 `scopes` 仍按模型写多条，不得写空 scope。
 
 ## 9. 执行顺序与出口
 
@@ -362,7 +362,7 @@ skipped 208）、golden 15/15（Python 与 Rust 二进制各一遍）、全部 `
   2. 设置 › 价格目录只能写**价卡**与**归属**（`price_overrides` 的 `cards`/`routes`），写不了订阅——那条路用户也走不通；
   3. 订阅声明把结束日写成**今天**，即便接上了，月费也会在次月归零。
   声明行的 `amount_minor`/`currency` 此前**没有任何算钱的消费方**（只有内部 MCP 与「当前计费声明」列表读那张表），所以那 20 USD 在任何数字上都不出现。
-- **改动面**：`summary.rs` 新增 `declared_subscription_fees` + `apply_declared_subscription_fees`，月费落地抽成 `add_fixed_subscription_fee` 供价目表与声明两条来源共用；调用点仍是 `monthly_summary`（`db` 与 `apply_host_bills` 同处可取）。**声明优先**：同一 provider 上价目表那条让位，一笔月费不摊两次。`billing_declarations` 是当前态表、撤销会软删它 → **撤销即停止扣**。
+- **改动面**：`summary.rs` 新增 `declared_subscription_fees` + `apply_declared_subscription_fees`，月费落地抽成 `add_fixed_subscription_fee` 供价目表与声明两条来源共用；调用点仍是 `monthly_summary`（`db` 与 `apply_harness_bills` 同处可取）。**声明优先**：同一 provider 上价目表那条让位，一笔月费不摊两次。`billing_declarations` 是当前态表、撤销会软删它 → **撤销即停止扣**。
 - **四条边界**（单测钉住）：非 `official_subscription` 不摊（§3 事实 1）；金额或币种缺失不摊、不记 0（弹窗允许「金额暂不清楚」）；早于生效月不摊；晚于结束月不摊（到期后继续收月费是编造）。只进月、不进日。
 - **订阅改为持续有效**：`syncBillingDeclarationSteps` 的订阅分支不再写 `end = today`，改为勾上「持续有效」（结束日留空）。离开订阅（切按量/组织/中转）**必须一并撤回这个勾**——否则按量声明会被静默留成开放期（守卫 `verify-workbench-sources` 的 #5 断言抓到）。
 - **守卫**：`summary.rs` 三条单测，其中一条是**接线**测试（走 `monthly_summary` DTO）——只钉函数会漏掉「函数没被调用」这一类；`verify-workbench-sources.mjs` 的订阅路径断言改判 `effectiveEnd === null`，并新增离开订阅撤回勾选的断言。

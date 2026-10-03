@@ -1,13 +1,13 @@
-//! Typed MCP control plane for dynamically imported host/Trust profiles.
+//! Typed MCP control plane for dynamically imported harness/Trust profiles.
 //!
 //! An Agent may inspect the schema, validate a manifest, and stage a proposal.
 //! Staging is an explicit local write, guarded by `--allow-local-writes`; it
-//! never activates a host. Approval/revoke are UI-only operations exposed by
+//! never activates a harness. Approval/revoke are UI-only operations exposed by
 //! the desktop, so an Agent cannot silently add a collector or Trust sensor.
 
 use std::path::{Path, PathBuf};
 
-use agent_vitals_hosts::generic_manifest;
+use agent_vitals_harnesses::generic_manifest;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -19,7 +19,7 @@ const EVENT_LOG: &str = "trust-profile-events.jsonl";
 pub fn schema_spec() -> ToolSpec {
     ToolSpec {
         name: "trust_profile_schema",
-        description: "Return the supported declarative host/Trust profile schema. This is metadata only and never reads host logs.",
+        description: "Return the supported declarative harness/Trust profile schema. This is metadata only and never reads harness logs.",
         input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
         output_schema: json!({"type":"object"}),
     }
@@ -28,7 +28,7 @@ pub fn schema_spec() -> ToolSpec {
 pub fn list_spec() -> ToolSpec {
     ToolSpec {
         name: "trust_profile_list",
-        description: "List approved and pending local host/Trust profiles without returning local paths or raw observations.",
+        description: "List approved and pending local harness/Trust profiles without returning local paths or raw observations.",
         input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
         output_schema: json!({"type":"object"}),
     }
@@ -37,7 +37,7 @@ pub fn list_spec() -> ToolSpec {
 pub fn validate_spec() -> ToolSpec {
     ToolSpec {
         name: "trust_profile_validate",
-        description: "Validate a proposed declarative host manifest. Validation has no filesystem side effect.",
+        description: "Validate a proposed declarative harness manifest. Validation has no filesystem side effect.",
         input_schema: json!({"type":"object","properties":{"manifest":{"type":"object"}},"required":["manifest"],"additionalProperties":false}),
         output_schema: json!({"type":"object"}),
     }
@@ -46,7 +46,7 @@ pub fn validate_spec() -> ToolSpec {
 pub fn stage_spec() -> ToolSpec {
     ToolSpec {
         name: "trust_profile_stage",
-        description: "Stage a validated host/Trust manifest for user approval. It cannot activate, scan, or revoke a host.",
+        description: "Stage a validated harness/Trust manifest for user approval. It cannot activate, scan, or revoke a harness.",
         input_schema: json!({"type":"object","properties":{"manifest":{"type":"object"}},"required":["manifest"],"additionalProperties":false}),
         output_schema: json!({"type":"object"}),
     }
@@ -55,7 +55,7 @@ pub fn stage_spec() -> ToolSpec {
 pub fn status_spec() -> ToolSpec {
     ToolSpec {
         name: "trust_profile_proposal_status",
-        description: "Read pending host/Trust profile proposals and their validation status. Raw manifest paths and evidence are withheld.",
+        description: "Read pending harness/Trust profile proposals and their validation status. Raw manifest paths and evidence are withheld.",
         input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
         output_schema: json!({"type":"object"}),
     }
@@ -225,11 +225,11 @@ pub fn run_schema(data_home: &Path) -> Result<Value, ToolError> {
 }
 
 pub fn run_list(data_home: &Path) -> Result<Value, ToolError> {
-    let (hosts, errors) = crate::host_registry::scan_plugin_hosts(data_home);
-    let approved = hosts.into_iter().filter_map(|host| {
-        let trust = host.trust_profile.as_ref()?;
-        Some(json!({"slug": host.slug, "display_name": host.display_name,
-            "state": "approved", "manifest_hash": host.manifest_sha256,
+    let (harnesses, errors) = crate::harness_registry::scan_plugin_harnesses(data_home);
+    let approved = harnesses.into_iter().filter_map(|harness| {
+        let trust = harness.trust_profile.as_ref()?;
+        Some(json!({"slug": harness.slug, "display_name": harness.display_name,
+            "state": "approved", "manifest_hash": harness.manifest_sha256,
             "trust_roots_count": trust.roots.len(), "artifact_terms_count": trust.artifact_terms.len(),
             "extensions_count": trust.extensions.len(), "trust_adapter": trust.adapter.map(|adapter| adapter.as_str()),
             "watch_priority": trust.watch_priority.as_str()}))
@@ -288,14 +288,14 @@ pub fn run_stage(args: &Value, data_home: &Path, allow_local_writes: bool) -> Re
 }
 
 pub fn run_status(data_home: &Path) -> Result<Value, ToolError> {
-    let (hosts, _) = crate::host_registry::scan_plugin_hosts(data_home);
-    let approved = hosts.into_iter().filter(|host| host.trust_profile.is_some())
-        .map(|host| {
-            let manifest = std::fs::read(&host.manifest_path).ok().filter(|bytes| raw_manifest_hash(bytes) == host.manifest_sha256)
+    let (harnesses, _) = crate::harness_registry::scan_plugin_harnesses(data_home);
+    let approved = harnesses.into_iter().filter(|harness| harness.trust_profile.is_some())
+        .map(|harness| {
+            let manifest = std::fs::read(&harness.manifest_path).ok().filter(|bytes| raw_manifest_hash(bytes) == harness.manifest_sha256)
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-            manifest.map(|value| safe_manifest_summary(&value, "approved", &host.manifest_sha256))
-                .unwrap_or_else(|| json!({"slug":host.slug, "display_name":host.display_name, "state":"approved",
-                    "manifest_hash":host.manifest_sha256, "discovery_include_count":0, "trust_roots_count":0, "artifact_terms_count":0,
+            manifest.map(|value| safe_manifest_summary(&value, "approved", &harness.manifest_sha256))
+                .unwrap_or_else(|| json!({"slug":harness.slug, "display_name":harness.display_name, "state":"approved",
+                    "manifest_hash":harness.manifest_sha256, "discovery_include_count":0, "trust_roots_count":0, "artifact_terms_count":0,
                     "extensions_count":0, "trust_adapter":null, "watch_priority":null,
                     "source_scope_preview":null, "trust_scope_preview":null}))
         })
@@ -341,7 +341,7 @@ fn pending_summaries(data_home: &Path) -> Result<Vec<Value>, ToolError> {
 }
 
 /// UI-only approval primitive. MCP deliberately has no dispatch route to this
-/// function. The pending file is atomically installed as a normal host
+/// function. The pending file is atomically installed as a normal harness
 /// manifest, after revalidation, and then removed from the proposal queue.
 pub fn approve_staged(data_home: &Path, slug: &str, expected_manifest_hash: &str) -> Result<Value, String> {
     if !agent_vitals_runtime_slug_ok(slug) { return Err("invalid Trust profile slug".to_string()); }
@@ -351,12 +351,12 @@ pub fn approve_staged(data_home: &Path, slug: &str, expected_manifest_hash: &str
     if manifest_hash(&manifest) != expected_manifest_hash { return Err("proposal changed; review the latest scope before approving".to_string()); }
     let (parsed, _) = validate_manifest(&manifest).map_err(|error| error.message)?;
     if parsed.slug != slug { return Err("proposal slug mismatch".to_string()); }
-    let host_dir = data_home.join("hosts.d").join(slug);
-    std::fs::create_dir_all(&host_dir).map_err(|_| "could not create host directory".to_string())?;
-    let temporary = host_dir.join(".manifest.json.tmp");
-    std::fs::write(&temporary, &bytes).map_err(|_| "could not write host manifest".to_string())?;
-    std::fs::rename(&temporary, host_dir.join("manifest.json")).map_err(|_| "could not commit host manifest atomically".to_string())?;
-    std::fs::remove_file(pending).map_err(|_| "host activated but proposal cleanup failed".to_string())?;
+    let harness_dir = data_home.join("harnesses.d").join(slug);
+    std::fs::create_dir_all(&harness_dir).map_err(|_| "could not create harness directory".to_string())?;
+    let temporary = harness_dir.join(".manifest.json.tmp");
+    std::fs::write(&temporary, &bytes).map_err(|_| "could not write harness manifest".to_string())?;
+    std::fs::rename(&temporary, harness_dir.join("manifest.json")).map_err(|_| "could not commit harness manifest atomically".to_string())?;
+    std::fs::remove_file(pending).map_err(|_| "harness activated but proposal cleanup failed".to_string())?;
     record_event(data_home, "approved", slug);
     Ok(json!({"status":"approved", "slug":slug, "manifest_hash":raw_manifest_hash(&bytes)}))
 }
@@ -372,17 +372,17 @@ pub fn reject_staged(data_home: &Path, slug: &str, expected_manifest_hash: &str)
     Ok(json!({"status":"rejected", "slug":slug}))
 }
 
-/// UI-only revocation. Moving the approved directory out of `hosts.d` keeps a
-/// recoverable local copy while making the host disappear from the active
+/// UI-only revocation. Moving the approved directory out of `harnesses.d` keeps a
+/// recoverable local copy while making the harness disappear from the active
 /// registry on the next scan.
 pub fn revoke_approved(data_home: &Path, slug: &str, expected_manifest_hash: &str) -> Result<Value, String> {
     if !agent_vitals_runtime_slug_ok(slug) { return Err("invalid Trust profile slug".to_string()); }
-    let active = data_home.join("hosts.d").join(slug);
+    let active = data_home.join("harnesses.d").join(slug);
     if !active.exists() { return Err("approved profile not found".to_string()); }
     let manifest_bytes = std::fs::read(active.join("manifest.json"))
         .map_err(|_| "approved profile manifest is unavailable".to_string())?;
     if raw_manifest_hash(&manifest_bytes) != expected_manifest_hash { return Err("approved profile changed; reload before revoking".to_string()); }
-    let revoked_root = data_home.join("hosts-revoked");
+    let revoked_root = data_home.join("harnesses-revoked");
     std::fs::create_dir_all(&revoked_root).map_err(|_| "could not create revoked profile store".to_string())?;
     let destination = revoked_root.join(slug);
     if destination.exists() { return Err("a revoked profile with this slug already exists".to_string()); }
@@ -397,7 +397,7 @@ fn raw_manifest_hash(bytes: &[u8]) -> String {
 }
 
 fn agent_vitals_runtime_slug_ok(slug: &str) -> bool {
-    crate::host_registry::plugin_slug_ok(slug)
+    crate::harness_registry::plugin_slug_ok(slug)
 }
 
 #[cfg(test)]
@@ -478,13 +478,13 @@ mod tests {
         assert_eq!(pending["trust_scope_preview"]["home_relative_only"], true);
         assert_eq!(pending["discovery_include_count"], 1);
         assert!(!status.to_string().contains("~/minimax"), "scope preview must not expose local paths");
-        assert!(!home.join("hosts.d/minimax-code/manifest.json").exists());
+        assert!(!home.join("harnesses.d/minimax-code/manifest.json").exists());
         let proposal_hash = staged["data"]["manifest_hash"].as_str().unwrap();
         let approved = approve_staged(&home, "minimax-code", proposal_hash).unwrap();
         assert_eq!(approved["status"], "approved");
-        assert!(home.join("hosts.d/minimax-code/manifest.json").exists());
+        assert!(home.join("harnesses.d/minimax-code/manifest.json").exists());
         revoke_approved(&home, "minimax-code", approved["manifest_hash"].as_str().unwrap()).unwrap();
-        assert!(!home.join("hosts.d/minimax-code").exists());
+        assert!(!home.join("harnesses.d/minimax-code").exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -514,7 +514,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&changed).unwrap()).unwrap();
         assert!(approve_staged(&home, "minimax-code", &old_hash).unwrap_err().contains("proposal changed"));
         assert!(reject_staged(&home, "minimax-code", &old_hash).unwrap_err().contains("proposal changed"));
-        assert!(!home.join("hosts.d/minimax-code/manifest.json").exists());
+        assert!(!home.join("harnesses.d/minimax-code/manifest.json").exists());
         assert!(path.exists(), "stale reject must not delete the changed proposal");
         let _ = std::fs::remove_dir_all(&home);
     }

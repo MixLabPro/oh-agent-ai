@@ -6,7 +6,7 @@
 （`adapters/workbuddy_session.py`）→ derive → coverage（`agent/workbuddy_evidence.py`）
 → 组合（本模块）。
 
-**SV604/605 的 Unavailable 是本模块的 host-capability degradation（spec §3.1），
+**SV604/605 的 Unavailable 是本模块的 harness-capability degradation（spec §3.1），
 不是 core 规则改动。** WorkBuddy 的 `tool_calls` timeline 只有 bash（audit-log
 `commandPreview`）和 web_fetch（`WebFetch` target）两个子集可 join——write/edit
 工具调用只存在于会话匿名的 traces（file-history 有内容没路径）。SV604/605 是
@@ -18,15 +18,15 @@ Unavailable，理由写进 `reason`。**只在 WorkBuddy 路径生效**——Cla
 golden 字节零改动。
 
 SV604/605 的 override 放在本模块（dispatcher 层）、不在 `canonical_audit.py`
-（共享求值器）——与 Claude 的 SV607/608 同款纪律：宿主特例不进共享代码。
+（共享求值器）——与 Claude 的 SV607/608 同款纪律：执行环境特例不进共享代码。
 `workbuddy_audit_projection` 委托共享求值器算三态契约（spec §10 验收 #4），然后对
 rule_outcomes 做 override、重算 `summary.rules_unavailable`（Claude 侧健康会话
 3 → 5 同款；WorkBuddy 侧健康会话 5 → 7）。
 
-**成本块直接吃宿主账单**（spec §6.1/§9）：`session_usage.used`（tokens）+ 解析
+**成本块直接吃执行环境账单**（spec §6.1/§9）：`session_usage.used`（tokens）+ 解析
 `credit_json` 求和——但那求和是**积分（credit），不是人民币**。旧字段名 `cny` 把
 积分当货币，1000 积分才 ¥50、单请求积分中位 ~22，约 20× 高估（spec §3.1）。新契约
-`{tokens, credits, cash_cny, nominal_cny, nominal_basis, host_billed}`：`credits`
+`{tokens, credits, cash_cny, nominal_cny, nominal_basis, harness_billed}`：`credits`
 （诚实单位名，取代旧 `cny` 的同一求和值）+ `cash_cny`（现金口径实付，**恒 None**——
 本机无支付证据，填 0 是断言「确实没花」，我们不知道，§11 第 12 条）+ `nominal_cny`
 （`credits × 0.05`，公开加量包兑换价折算，落**名义栏**，永不进实付栏/预算分子）+
@@ -40,21 +40,21 @@ import math
 from pathlib import Path
 
 from agent_vitals.adapters import workbuddy_session, workbuddy_traces
-from agent_vitals.agent import canonical_audit, host_capability, workbuddy_evidence
+from agent_vitals.agent import canonical_audit, harness_capability, workbuddy_evidence
 
 
 def workbuddy_audit_projection(canonical):
     """family① + family④ 的审计投影：findings + 三态 rule_outcomes + summary。
 
-    委托共享求值器 `canonical_audit.audit_projection`（宿主无关），然后做唯一的
-    WorkBuddy 特例：把 SV604/605 从 MeasuredZero 覆盖成 Unavailable（host-capability
-    degradation，`host_capability.py`——表已下沉，这里是消费方）。**只覆盖
+    委托共享求值器 `canonical_audit.audit_projection`（执行环境无关），然后做唯一的
+    WorkBuddy 特例：把 SV604/605 从 MeasuredZero 覆盖成 Unavailable（harness-capability
+    degradation，`harness_capability.py`——表已下沉，这里是消费方）。**只覆盖
     MeasuredZero**：门控已因 timeline 空给 Unavailable（缺失信号）或给了 Findings
     （audit-log 里有真命令时 SV601-603 会命中）时保持原样——override 不吞真命中。
     覆盖后重算 `rules_unavailable`——共享求值器的数已经不反映 degrade 后的状态
     （健康会话 5 → 7）。"""
     proj = canonical_audit.audit_projection(canonical)
-    host_capability.degrade_rule_outcomes("workbuddy", proj["rule_outcomes"])
+    harness_capability.degrade_rule_outcomes("workbuddy", proj["rule_outcomes"])
     proj["summary"]["rules_unavailable"] = sum(
         1 for v in proj["rule_outcomes"].values() if v.get("status") == "unavailable")
     return proj
@@ -102,7 +102,7 @@ def workbuddy_session_list(home=None):
     # 键序是输出契约的一部分，不能重排）。
     schema_probe = workbuddy_session.read_workbuddy_schema_probe(root)
     return {
-        "host": "workbuddy",
+        "harness": "workbuddy",
         "sessions": sessions,
         "source_snapshot": source_snapshot,
         "schema_probe": schema_probe,
@@ -112,9 +112,9 @@ def workbuddy_session_list(home=None):
 def _render_list(out):
     """`workbuddy-session --list` 的人读呈现。缺席的字段一律 `-`（诚实缺失，不编造）；
     session_id 缺失 → 空串（`{sid:<28}` 留白，同 Rust）。与 Rust
-    `render_workbuddy_session_list` 逐字节对齐：`host: workbuddy\\n` +
+    `render_workbuddy_session_list` 逐字节对齐：`harness: workbuddy\\n` +
     `sessions: {n}\\n\\n` + 每行 `"{sid:<28}  {title}  {model}  {first} → {last}\\n"`。"""
-    s = "host: workbuddy\n"
+    s = "harness: workbuddy\n"
     sessions = out.get("sessions")
     sessions = sessions if isinstance(sessions, list) else []
     s += "sessions: %d\n\n" % len(sessions)
@@ -221,7 +221,7 @@ def _schema_drift_attempts_and_notes(probe):
         })
         notes.append(
             "schema-drift: %d known column(s) not found on this machine "
-            "— an older host version or a renamed column is possible; "
+            "— an older harness version or a renamed column is possible; "
             "any consumed column among the missing ones already degrades to "
             "null by the existing missing-column-reports-null rule"
             % missing_total)
@@ -275,7 +275,7 @@ _WB_UNBILLED_TO_CREDITS_NOTE = (
     "session not billed to credits: the platform credit ledger recorded no "
     "consumption (credits: 0.0 is a real measurement). The cause is NOT "
     "determinable from this machine \u2014 a self-configured route, a promotional "
-    "free tier, and host-side non-billing are indistinguishable here."
+    "free tier, and harness-side non-billing are indistinguishable here."
 )
 
 # spec §6.1/§9E.5 E5 的 `cost.tokens` 语义注记：`used` 是 session_usage 里**最后
@@ -292,12 +292,12 @@ _WB_TOKENS_ARE_LAST_CALL_NOTE = (
 
 
 # spec §10 B5：`lifecycle` 非 None 时附在 `notes` 的诚实注记——五个字段是原样
-# 浮出，其取值词表宿主未声明，所以这里不据其值过滤任何会话；过滤是消费方的
+# 浮出，其取值词表执行环境未声明，所以这里不据其值过滤任何会话；过滤是消费方的
 # 决定。Rust `sources/mod.rs::WB_LIFECYCLE_NOTE` 字节一致。
 _WB_LIFECYCLE_NOTE = (
     "lifecycle fields (status / source_mode / is_playground / deleted_at / "
     "is_background_automation) are surfaced verbatim; their value vocabularies "
-    "are not declared by the host, so no session is filtered on them here \u2014 "
+    "are not declared by the harness, so no session is filtered on them here \u2014 "
     "filtering is the consumer's decision"
 )
 
@@ -329,7 +329,7 @@ def _processed_tokens_from_spans(spans):
 
 def _cost_of(meta, processed_tokens):
     """spec §6.1 cost 块，键序 `{tokens, processed_tokens, credits, cash_cny,
-    nominal_cny, nominal_basis, host_billed}`（docs §9E.5 E5：processed 是新成员）。
+    nominal_cny, nominal_basis, harness_billed}`（docs §9E.5 E5：processed 是新成员）。
     tokens = `used`（session_usage 的**最后调用上下文 prompt_tokens 快照**，不是
     processed 总量，语义见 note）；processed_tokens = traces 四桶之和（无 trace
     证据 → None，不编 0）；credits = credit_json 求和（**积分**，不是货币）；
@@ -353,7 +353,7 @@ def _cost_of(meta, processed_tokens):
         "cash_cny": None,
         "nominal_cny": nominal_cents / 100.0,
         "nominal_basis": _WB_NOMINAL_BASIS,
-        "host_billed": True,
+        "harness_billed": True,
     }
 
 
@@ -457,7 +457,7 @@ def workbuddy_session_audit_json(home, session_id):
         notes.extend(drift_notes)
 
     return {
-        "host": "workbuddy",
+        "harness": "workbuddy",
         "session_id": session_id,
         "title": meta["title"],
         "model": ev["model"],

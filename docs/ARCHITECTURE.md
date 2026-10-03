@@ -9,17 +9,17 @@
 一句话形态：
 
 > **一个本地的、只读的、事后可查的 Agent 行为记录仪读取器。**
-> 它自己不记录 —— 它读宿主已经写在磁盘上的东西。
+> 它自己不记录 —— 它读执行环境已经写在磁盘上的东西。
 
 这一条决定其余所有事：**不需要提前安装就能回答「昨天那次会话干了什么」**。
 遥测要预配 exporter，hook 要预装，只有会话日志是可回溯的。代价是**只能看到
-宿主愿意记的东西**，所以 `Coverage` 不是补丁而是一等公民。
+执行环境愿意记的东西**，所以 `Coverage` 不是补丁而是一等公民。
 
 ```text
       dsh    codex    claude-code    workbuddy    openclaw    hermes
        │       │           │             │           │          │
   ┌────┴───────┴───────────┴─────────────┴───────────┴──────────┴───┐
-  │ L0  宿主已经写在磁盘上的东西                                       │
+  │ L0  执行环境已经写在磁盘上的东西                                       │
   │     会话日志(可追溯) · 遥测(需预配) · hook(需预装)                  │
   └────┬────────────────────────────────────────────────────┬────────┘
        │                                                    │
@@ -55,11 +55,11 @@
 
 ## 0.1 腰就是产品
 
-上半截是 **N 个宿主 × 3 种证据面**，下半截是 **3 种投递**。没有中间那道腰，只有
+上半截是 **N 个执行环境 × 3 种证据面**，下半截是 **3 种投递**。没有中间那道腰，只有
 两种下场：写 N×3 份实现，或者在拿不到数据的格子里填 `0`。
 
 后者不是假想。`Tencent/teamai-cli` 的 `readCodebuddyIndexOnce` 在同一个函数里
-返回四个伪造的零，每一个的正上方都有注释承认"这个宿主没有这项数据"
+返回四个伪造的零，每一个的正上方都有注释承认"这个执行环境没有这项数据"
 （RUNTIME_EVIDENCE_CONTRACT §14.9）。它的 dashboard 因此把 CodeBuddy 显示成
 "缓存读取 0 / 打断 0 / 工具拒绝 0"，与一次真正干净的会话无法区分。
 
@@ -112,7 +112,7 @@
 Installed      磁盘上存在 SKILL.md
    │
    ▼
-Enabled        所属 Plugin / Host 配置处于启用状态
+Enabled        所属 Plugin / Harness 配置处于启用状态
    │
    ▼
 Loaded         metadata 实际进入 Agent Capability Set
@@ -140,7 +140,7 @@ Successful     是否提升任务成功率                      ← v2
 | 级别 | 数据来源 | 可观测性 |
 |---|---|---|
 | Installed | 文件系统 | 确定 |
-| Enabled | `~/.claude.json` → `enabledPlugins` | 确定（Claude Code）/ unknown（其他宿主） |
+| Enabled | `~/.claude.json` → `enabledPlugins` | 确定（Claude Code）/ unknown（其他执行环境） |
 | Loaded | 上两级 + 层级判定 | 确定 / unknown |
 | Discoverable | 预算总量 + frontmatter 完整性 | **部分推断**——见 §1.2 |
 | Selected | 无直接数据 | 仅能给 candidates |
@@ -154,7 +154,7 @@ Successful     是否提升任务成功率                      ← v2
 
 - `true` — 预算未超、frontmatter 完整、未被 shadow
 - `at_risk` — 总量已超预算，本 skill 处于估算的风险区间内
-- `unknown` — 宿主无法提供预算判定所需数据
+- `unknown` — 执行环境无法提供预算判定所需数据
 
 「估算的风险区间」由扫描器给出名单：`description_budget.at_risk_skills`，
 与同一处的 `skills_possibly_dropped` **出自同一次累加**。`explain` 直接读它，
@@ -176,7 +176,7 @@ Successful     是否提升任务成功率                      ← v2
 
 - **未启用的插件副本**——读 `enabledPlugins` 判断
 - **同一插件在 `plugins/cache/` 与 `plugins/marketplaces/` 的两份**
-- **其他宿主的 skill**（`~/.codex/skills` 等）
+- **其他执行环境的 skill**（`~/.codex/skills` 等）
 
 > **预算、冲突、僵尸三项默认只按 `loaded` 那批算。**
 
@@ -188,10 +188,10 @@ Successful     是否提升任务成功率                      ← v2
 
 ## 1.4 观察者维度：可见性不是机器级的
 
-上面整个漏斗默认了一个隐含前提：**一台机器一个答案**。前五个宿主都成立，
+上面整个漏斗默认了一个隐含前提：**一台机器一个答案**。前五个执行环境都成立，
 所以这个前提一直没被写出来。DSH 让它不成立了。
 
-DSH 的 skill 注册表是「宿主层 + 每个 scope 一层」的分层结构，读取时把全局层
+DSH 的 skill 注册表是「执行环境层 + 每个 scope 一层」的分层结构，读取时把全局层
 与观察者 scope 的祖先链合并，近层同名项直接覆盖远层。于是同一台机器上：
 
 - agent A 看得到 `foo`，agent B 看不到 —— 因为 B 的 preset 层遮蔽了它
@@ -202,12 +202,12 @@ DSH 的 skill 注册表是「宿主层 + 每个 scope 一层」的分层结构�
 
 ```text
 funnel(skill)              ← 旧签名，机器级
-funnel(skill, observer)    ← 新签名，observer = 宿主里的一个能力作用域
+funnel(skill, observer)    ← 新签名，observer = 执行环境里的一个能力作用域
 ```
 
-`observer` 的宿主映射：
+`observer` 的执行环境映射：
 
-| 宿主 | observer | 取值 |
+| 执行环境 | observer | 取值 |
 |---|---|---|
 | claude-code / codex / hermes / workbuddy | 无分层 | 恒为单一隐式作用域 |
 | openclaw | agent | `--agent main` 等 |
@@ -217,8 +217,8 @@ funnel(skill, observer)    ← 新签名，observer = 宿主里的一个能力�
 `skills list --eligible --agent main` 本来就是按 agent 求证的，此前被当成特例
 塞进 `openclaw_runtime`；有了这一维之后它是同一个模型的正常取值。
 
-**向后兼容**：无分层宿主的 `observer` 只有一个取值，漏斗退化成今天的机器级
-形态，输出字段不变。分层宿主必须在每条记录上写明这条结论属于哪个 observer ——
+**向后兼容**：无分层执行环境的 `observer` 只有一个取值，漏斗退化成今天的机器级
+形态，输出字段不变。分层执行环境必须在每条记录上写明这条结论属于哪个 observer ——
 不写明的 `loaded: true` 在 DSH 上是没有意义的断言。
 
 ---
@@ -233,7 +233,7 @@ funnel(skill, observer)    ← 新签名，observer = 宿主里的一个能力�
 
   "id": "claude-code:personal:github",
   "name": "github",
-  "host": "claude-code",
+  "harness": "claude-code",
   "source": "personal",
   "namespace": null,
   "path": "~/.claude/skills/github",
@@ -350,13 +350,13 @@ pub enum Capability<T> {
 
 | 字段 | 何时为 null |
 |---|---|
-| `host_summaries[].runtime_verified_loaded_skills` | 该宿主无逐 skill 运行时接口，或探测失败 |
-| `host_summaries[].runtime_verified_unique_skills` | 同上 |
+| `harness_summaries[].runtime_verified_loaded_skills` | 该执行环境无逐 skill 运行时接口，或探测失败 |
+| `harness_summaries[].runtime_verified_unique_skills` | 同上 |
 | `openclaw_instances[].runtime_catalog_skills` | 该实例的运行时探测失败 |
-| `description_budget.*`（`available: false` 时） | 非 Claude Code / Codex 宿主 |
+| `description_budget.*`（`available: false` 时） | 非 Claude Code / Codex 执行环境 |
 | `trigger_data` 相关计数 | 非 Claude Code，或 `skillUsage` 读不到 |
 
-> **这条曾经被写成 `0`。**`host_summaries` 里 `claude-code` 那行会显示
+> **这条曾经被写成 `0`。**`harness_summaries` 里 `claude-code` 那行会显示
 > `runtime_verified_loaded_skills: 0` 而 `discoverable_skills: 31`，读者合理地
 > 理解为「31 个里一个都没被运行时证实」—— 而真相是 **Claude Code 根本没有
 > 逐 skill 的运行时接口可问**，这个字段对它永远不适用。
@@ -364,8 +364,8 @@ pub enum Capability<T> {
 > 一个看起来像测量结果的 `0`，比缺一列更糟：缺列会让人去问，`0` 会让人下结论。
 
 **`null` 必须配一条反向测试。**否则把字段改成恒为 `null` 也能通过「无证据时为
-null」的断言，那等于悄悄删掉了这个字段。正向覆盖用假宿主让探测成功，断言给出
-真实计数（`tests/test_host_stubs.py`）。
+null」的断言，那等于悄悄删掉了这个字段。正向覆盖用假执行环境让探测成功，断言给出
+真实计数（`tests/test_harness_stubs.py`）。
 
 ### `runtime_verified_unique_skills` 的口径
 
@@ -374,16 +374,16 @@ null」的断言，那等于悄悄删掉了这个字段。正向覆盖用假宿�
 1. **按组内任一副本算。**证据属于 skill，不属于某一份副本 —— Codex 按路径
    匹配运行时条目，可能只标中被遮蔽的那一份，此时说「这个 skill 没有证据」
    是错的。
-2. **不是运行时清单的条数。**「宿主说它有多少」与「我们报的这些有多少有证据」
+2. **不是运行时清单的条数。**「执行环境说它有多少」与「我们报的这些有多少有证据」
    是两个数；前者已在 `openclaw_instances[].runtime_catalog_skills` /
    `codex_runtime.catalog_skills` 报过。曾经 OpenClaw 分支在这里数的是前者，
    同一个字段名下两种含义。
 
 ---
 
-# 4. Host Adapter
+# 4. Harness Adapter
 
-每个宿主按**固定顺序**回答四个问题。顺序本身是契约的一部分：求证必须
+每个执行环境按**固定顺序**回答四个问题。顺序本身是契约的一部分：求证必须
 发生在磁盘遍历之后（要拿磁盘上的实例根去问），修正必须发生在求证之后
 （没有证据就什么都不改）。
 
@@ -394,13 +394,13 @@ Rust 在 `src/inventory.rs`。模块移动不得改变下面四阶段的顺序�
 | 阶段 | 问题 | claude-code | codex | openclaw | workbuddy | hermes | dsh◇ |
 |---|---|:-:|:-:|:-:|:-:|:-:|:-:|
 | 1. roots | 去哪些目录找 | 静态 | 静态 | 探测多实例 | 读清单 | 读配置 | 静态 + `$DSH_HOME` |
-| 2. probe | 能否向宿主本体求证 | – | app-server | 逐实例 CLI | – | – | 会话库 / 快照 |
+| 2. probe | 能否向执行环境本体求证 | – | app-server | 逐实例 CLI | – | – | 会话库 / 快照 |
 | 3. reconcile | 证据如何改写磁盘推断 | – | **additive** | **exclusive** | – | – | **historical** |
 | 4. facts | 报告里的自有字段 | `plugin_state` | `codex_runtime` | `openclaw_runtime` | `workbuddy_discovery` | – | `dsh_runtime` |
 
 `◇` dsh 一列已实现：probe 用会话库 / 快照、reconcile 是 **historical**，见
 [DSH_INTEGRATION.md](./DSH_INTEGRATION.md) 与 §4.1 第三种语义。当初列在这里
-是因为它引入了 §4.1 的第三种 reconcile 语义，那条对既有宿主的表述也有影响。
+是因为它引入了 §4.1 的第三种 reconcile 语义，那条对既有执行环境的表述也有影响。
 
 ## 4.1 reconcile 的两种语义，不能混
 
@@ -410,7 +410,7 @@ Rust 在 `src/inventory.rs`。模块移动不得改变下面四阶段的顺序�
   所以证据能**否定**磁盘推断。
 
 把 additive 写成 exclusive，会凭空判定一批 skill 未加载；反过来，则永远
-报不出「装了但没生效」。这是两个宿主之间唯一不可类推的地方。
+报不出「装了但没生效」。这是两个执行环境之间唯一不可类推的地方。
 
 ### 第三种语义：historical
 
@@ -423,13 +423,13 @@ DSH 引入了前两种都装不下的一类证据。Codex 与 OpenClaw 的求证
 （`session_id` + `seq` + 时间戳）。混进另外两种，就会把一个月前的
 `loaded: true` 说成当前状态。
 
-| 语义 | 回答 | 时间坐标 | 宿主 |
+| 语义 | 回答 | 时间坐标 | 执行环境 |
 |---|---|---|---|
 | additive | 此刻还有磁盘没覆盖到的 | 无 | codex |
 | exclusive | 此刻的全集就是这些 | 无 | openclaw |
 | **historical** | **当时那一轮是这些** | **必需** | **dsh** |
 
-对应的证据时效标注见 [HOST_ADAPTER_CONTRACT.md](./HOST_ADAPTER_CONTRACT.md) 的
+对应的证据时效标注见 [HARNESS_ADAPTER_CONTRACT.md](./HARNESS_ADAPTER_CONTRACT.md) 的
 `evidence_recency`。
 
 ## 4.2 为什么不是一个 trait
@@ -440,19 +440,19 @@ WorkBuddy 的 roots 来自一份清单文件而不是遍历。
 
 写成 trait 会给它们凭空造出两个空实现，然后把唯一真正要讲清楚的差异
 （§4.1 那条）藏进各自的 `reconcile` 里。改用一段固定流程加显式命名的字段：
-新增宿主时照着四个阶段填，**缺哪个阶段就是缺哪个能力，一眼可见**。
+新增执行环境时照着四个阶段填，**缺哪个阶段就是缺哪个能力，一眼可见**。
 
-> 本节此前是一份 `trait HostAdapter { detect / discover_skills / … }` 的草图。
+> 本节此前是一份 `trait HarnessAdapter { detect / discover_skills / … }` 的草图。
 > 它写在运行时求证这件事出现之前，因此整条 probe → reconcile 的线在里面
 > 不存在 —— 而那恰好是这个程序最容易出错、也最需要写下来的部分。
 
 运行时证据层（§10）沿用同一条判断：那边也是固定五阶段流水线
 （`locate → shape → extract → derive → coverage`）而不是 trait，理由相同 ——
-四个宿主的差异在于**哪些阶段存在**，空格本身就是要报告的能力缺失。
+四个执行环境的差异在于**哪些阶段存在**，空格本身就是要报告的能力缺失。
 
 ## 4.3 Capability Matrix
 
-不同宿主能拿到的数据不同，CLI 必须诚实显示：
+不同执行环境能拿到的数据不同，CLI 必须诚实显示：
 
 ```text
                    claude-code   codex   openclaw   workbuddy   hermes
@@ -468,14 +468,14 @@ Trigger Count           ✓          –         –          –         –
 Last Used               ✓          –         –          –         –
 ```
 
-`✓ 可获取` · `? 部分 / 不确定` · `– 该宿主无此概念或无数据`
+`✓ 可获取` · `? 部分 / 不确定` · `– 该执行环境无此概念或无数据`
 `*` 需运行时求证，探测失败时降为 `–`（**不是** `0`，见 §3.1）
 `†` 无可配置旋钮，用实测得到的回退值 8000
 
-dsh 已实现（见 [DSH_INTEGRATION.md](./DSH_INTEGRATION.md)），能力列与其他宿主
+dsh 已实现（见 [DSH_INTEGRATION.md](./DSH_INTEGRATION.md)），能力列与其他执行环境
 明显不同 —— `Description Budget` 恒为 `–`（DSH 无全局预算，改为逐条截断，是
 另一类发现）；`Trigger Count` 为 `✓` 且多出一维：会话日志能区分「用户显式
-调用」（invoked）与「模型自主选中」（selected），这是其他宿主都拿不到的数据。
+调用」（invoked）与「模型自主选中」（selected），这是其他执行环境都拿不到的数据。
 `Last Used` 反而是 `–`：证据的 `invoked`/`selected` 只是名字列表、**不带时间戳**，
 `last_used_days_ago` 因此恒为 None——「有触发数但不知新鲜度」由 lifecycle 的
 occasional 表达，绝不伪造一个最近使用时间（与 §3.1「探测失败降为 – 而不是 0」
@@ -484,7 +484,7 @@ occasional 表达，绝不伪造一个最近使用时间（与 §3.1「探测失
 
 上表是**能力上限**，不是本次结果。每份报告都要打印这一次实际拿到了什么 ——
 `codex_runtime.available`、`openclaw_runtime[].available`、
-`plugin_state.host_config_read`、`trigger_data` 各自说自己那一格。
+`plugin_state.harness_config_read`、`trigger_data` 各自说自己那一格。
 能力矩阵写在文档里，缺失必须显性化在输出里。
 
 ---
@@ -561,7 +561,7 @@ SV303  EXPENSIVE_AND_UNUSED             高成本 + 低使用
 
 路由
 SV401  OVERLAP_CANDIDATE                Lexical，待判定
-SV402  OVERLAP_CONFIRMED                In-host 或 --judge 判定
+SV402  OVERLAP_CONFIRMED                In-harness 或 --judge 判定
 
 安全
 SV501  PROMPT_INJECTION_PATTERN
@@ -573,8 +573,8 @@ SV506  CREDENTIAL_READ
 SV507  OBFUSCATED_EXEC
 SV508  PASSWORD_PROTECTED_ARCHIVE       带口令解包/解密（绕过内容检查）
 
-宿主
-SV901  CAPABILITY_UNAVAILABLE           本宿主拿不到某项数据
+执行环境
+SV901  CAPABILITY_UNAVAILABLE           本执行环境拿不到某项数据
 SV902  SKILL_UNREADABLE                 单个 skill 解析失败，已跳过（不影响其余）
 ```
 
@@ -732,7 +732,7 @@ CLI 化后风险比脚本形态更大三处：`--json` 给第三方工具、`sna
 [PRODUCT.md §3](./PRODUCT.md) 把 Evidence 与 Reasoning 描述为**并列的角色**；实现上它们是**串联的数据流**：
 
 ```text
-CLI  --json ─→  Skill Vital Record  ─→  In-host Skill 读取并推理
+CLI  --json ─→  Skill Vital Record  ─→  In-harness Skill 读取并推理
                 （schema_version 契约）        │
                                               ▼
                                       合并为最终诊断
@@ -747,7 +747,7 @@ CLI  --json ─→  Skill Vital Record  ─→  In-host Skill 读取并推理
 
 > **JSON schema 是双形态之间的正式接口，不是调试输出。**
 
-它同时服务四个消费者——In-host Skill、CI、IDE / Dashboard、以及未来的 Agent 自诊断：
+它同时服务四个消费者——In-harness Skill、CI、IDE / Dashboard、以及未来的 Agent 自诊断：
 
 ```text
 Agent 发现自己的 Skill 行为异常
@@ -769,20 +769,20 @@ Agent 发现自己的 Skill 行为异常
 Agent 实际做了什么、花了多少、跑了多久。契约在
 [RUNTIME_EVIDENCE_CONTRACT.md](./RUNTIME_EVIDENCE_CONTRACT.md)，本节只画结构。
 
-状态：设计，未实施。目标宿主 dsh / codex / claude-code / workbuddy。
+状态：设计，未实施。目标执行环境 dsh / codex / claude-code / workbuddy。
 
 ## 10.1 为什么要新加一层
 
 现在没有这一层。DSH 的事件词表（`tool/call`、`approval/asked`、`data.toolName`、
 `chunk.usage`）是直接写在 `crates/agent-vitals-core` 里读的，等于**让 DSH 的会话
-格式意外地成了通用接口**。装机层早在 2026-08 就有了 `HOST_ADAPTER_CONTRACT`，
+格式意外地成了通用接口**。装机层早在 2026-08 就有了 `HARNESS_ADAPTER_CONTRACT`，
 运行时层一直没有对应的那份。
 
 ## 10.2 分层
 
 ```text
 ┌───────────────────────────────────────────────────────────────────────┐
-│ L4  投递（三种，全部只读同一份结果，都不认识任何宿主）                    │
+│ L4  投递（三种，全部只读同一份结果，都不认识任何执行环境）                    │
 │     常驻一行   watch --oneline → xbar / tmux / prompt                  │
 │     按需报告   静态 HTML · TUI · dsh 嵌入 tab（特例，见 PRODUCT §5.9）   │
 │     管道       --json · --fail-on · 退出码                             │
@@ -811,12 +811,12 @@ Agent 实际做了什么、花了多少、跑了多久。契约在
 └───────────────────────────────────────────────────────────────────────┘
                                   ▲
 ┌───────────────────────────────────────────────────────────────────────┐
-│ L1  证据适配器（每宿主一份，自带 I/O）                                   │
+│ L1  证据适配器（每执行环境一份，自带 I/O）                                   │
 │     locate  →  shape  →  extract  →  derive  →  coverage              │
 └───────────────────────────────────────────────────────────────────────┘
                                   ▲
 ┌───────────────────────────────────────────────────────────────────────┐
-│ L0  宿主原始存储                                                        │
+│ L0  执行环境原始存储                                                        │
 │     dsh          JSONL                                                │
 │     codex        日期分区 JSONL（两种不兼容形态）                        │
 │     claude-code  项目哈希目录 JSONL（消息树，非事件流）                   │
@@ -826,7 +826,7 @@ Agent 实际做了什么、花了多少、跑了多久。契约在
 
 两条边界值得单独说：
 
-- **L2 是唯一的收口。**L3 以上不许再出现任何宿主词表。今天 core 里那些
+- **L2 是唯一的收口。**L3 以上不许再出现任何执行环境词表。今天 core 里那些
   `event.get("type") == "tool/call"` 全部要退到 L1。
 - **coverage 与 signals 同级、同时产出。**它不是事后补的元数据；`Coverage` 是
   `CanonicalSession` 的必填字段，缺了这层就退化成「事件流的同义词」——那正是
@@ -834,7 +834,7 @@ Agent 实际做了什么、花了多少、跑了多久。契约在
 
 ## 10.3 适配器是五阶段流水线，不是 trait
 
-同 §4.2 的理由，且这一层更明显：**四个宿主的差异不在于同一阶段怎么做，而在于
+同 §4.2 的理由，且这一层更明显：**四个执行环境的差异不在于同一阶段怎么做，而在于
 哪些阶段存在**。写成 trait 会给 claude-code 造一个空的 `shape`、给 dsh 造一个空的
 `derive`，然后把真正要讲清楚的差异藏进各自的实现里。
 
@@ -862,7 +862,7 @@ Coverage ──┘      │
 ```
 
 于是 core 的返回从 `Vec<Finding>` 变成 `(Vec<Finding>, Vec<RuleOutcome>)`：
-**每条规则 × 每个宿主，恒定产出三者之一**。
+**每条规则 × 每个执行环境，恒定产出三者之一**。
 
 这正是「把 Claude Code 翻译成 DSH 事件」那条捷径永远拿不到的性质——没有审批事件
 可翻译，它只会安安静静报出「0 个审批异常」。这与 §3.1「`null` 不是 `0`」、
@@ -870,13 +870,13 @@ Coverage ──┘      │
 
 ## 10.5 wasm 边界上移
 
-对现有四方 lockstep（Rust core ↔ Python ↔ wasm ↔ 宿主 TS）的结构性影响只有一处，
+对现有四方 lockstep（Rust core ↔ Python ↔ wasm ↔ 执行环境 TS）的结构性影响只有一处，
 但必须说清楚：
 
 ```text
               旧                                          新
    ┌────────────────────────┐                ┌────────────────────────┐
-   │ dsh.rs 读取器（DSH 专用）│                │ 适配器（每宿主一份）      │ ← 只在 Rust/Python 两侧
+   │ dsh.rs 读取器（DSH 专用）│                │ 适配器（每执行环境一份）      │ ← 只在 Rust/Python 两侧
    └───────────┬────────────┘                └───────────┬────────────┘
                │ 原始 DSH 事件                            │ CanonicalSession
                ▼                                         ▼
@@ -886,22 +886,22 @@ Coverage ──┘      │
                │                                         │
   wasm 边界 ───┤ audit_events(events, ws)                 │ audit_session(canonical)
                ▼                                         ▼
-   宿主投影自己喂原始事件                        宿主投影构造 CanonicalSession
+   执行环境投影自己喂原始事件                        执行环境投影构造 CanonicalSession
 ```
 
 - **适配器只有两方 lockstep**（Rust + Python），不进 wasm——它们是 I/O，wasm 里没有
   文件系统，也不该有。
 - **core 规则仍是四方**，与今天一致。
-- 附带收益：审计 tab 从此**能把 coverage 本身渲染出来**。「这个宿主测不了审批」
+- 附带收益：审计 tab 从此**能把 coverage 本身渲染出来**。「这个执行环境测不了审批」
   是一等信息，而不是一片看起来很干净的零。
 
 ## 10.6 与装机层的关系
 
-两层共享宿主身份与实例标识（`instance_id` / `conflict_domain`，§4），但**能力矩阵
+两层共享执行环境身份与实例标识（`instance_id` / `conflict_domain`，§4），但**能力矩阵
 是两张**：装机层的在 [PRODUCT_CAPABILITY_MATRIX.md](./PRODUCT_CAPABILITY_MATRIX.md)，
 运行时层的在 [RUNTIME_EVIDENCE_CONTRACT.md §13](./RUNTIME_EVIDENCE_CONTRACT.md)。
 
-一个宿主在两张表里的表现可以完全相反：Claude Code 装机层数据最全（唯一有
+一个执行环境在两张表里的表现可以完全相反：Claude Code 装机层数据最全（唯一有
 `Trigger Count` 与 `Last Used` 的），运行时层却没有任何审批与沙箱记录；WorkBuddy
 装机层多处不可得，运行时层却是唯一有哈希链审批证据的。**不要把任一张表当作
 另一张的近似。**

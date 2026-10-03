@@ -17,7 +17,7 @@ pub use agent_vitals_query::source_graph;
 #[doc(hidden)]
 pub use agent_vitals_query::ENV_LOCK;
 pub use agent_vitals_query::clock;
-pub use agent_vitals_query::fact_hosts;
+pub use agent_vitals_query::fact_harnesses;
 pub use agent_vitals_query::home;
 pub use agent_vitals_query::lease;
 pub use agent_vitals_query::logging;
@@ -31,7 +31,7 @@ pub use agent_vitals_query::price_overrides;
 pub use agent_vitals_query::pricing_catalog;
 pub use agent_vitals_query::sources;
 pub use agent_vitals_query::custom_sources;
-pub use agent_vitals_query::host_registry;
+pub use agent_vitals_query::harness_registry;
 pub use agent_vitals_query::session_sources;
 pub use agent_vitals_query::source_controls;
 pub use agent_vitals_query::sessions;

@@ -88,9 +88,9 @@
       "expected_class": "timeout"
     },
     {
-      "id": "classify-host-raw-unknown",
+      "id": "classify-harness-raw-unknown",
       "kind": "classify",
-      "input": "host:claude_4711",
+      "input": "harness:claude_4711",
       "expected_class": "unknown"
     },
     {

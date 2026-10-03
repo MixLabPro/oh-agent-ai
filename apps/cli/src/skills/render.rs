@@ -10,7 +10,7 @@ pub const DEFAULT_DORMANT_DAYS: i64 = 30;
 
 /// 生命周期：active / occasional / dormant / zombie / too-new / unknown。
 ///
-/// **宿主没有触发数据时一律 unknown**，不是 zombie —— 零触发与「问不到」是
+/// **执行环境没有触发数据时一律 unknown**，不是 zombie —— 零触发与「问不到」是
 /// 两件事，混起来会让用户删掉一个其实天天在用的 skill（不变量 12）。
 pub fn lifecycle_status(
     skill: &Value,
@@ -54,8 +54,8 @@ pub fn load_state(skill: &Value, shadowed: &[String]) -> &'static str {
         return "loaded";
     }
     let reason = skill.get("loaded_reason").and_then(|v| v.as_str()).unwrap_or("");
-    if reason.starts_with("other-host") {
-        return "other-host";
+    if reason.starts_with("other-harness") {
+        return "other-harness";
     }
     if reason.contains("not-enabled") || reason.contains("disabled") || reason.contains("filtered")
     {
@@ -201,7 +201,7 @@ fn build_rows(out: &Value, o: &ListOpts) -> Vec<Row> {
         "loaded" => 0,
         "shadowed" => 1,
         "disabled" => 2,
-        "other-host" => 3,
+        "other-harness" => 3,
         "unknown" => 4,
         _ => 9,
     };

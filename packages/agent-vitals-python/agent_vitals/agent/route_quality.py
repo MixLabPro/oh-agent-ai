@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""模型家族与「宿主原生模型」判定 ——「测试」tab v2（被动路线质量分析）词表。
+"""模型家族与「执行环境原生模型」判定 ——「测试」tab v2（被动路线质量分析）词表。
 
 与 Rust 侧 ``crates/agent-vitals-domain/src/domain/route_quality.rs`` 双语对拍：
 两侧断言同一份 ``fixtures/route_quality/vectors.json``。改词表 = 双语言一起过评审。
@@ -23,7 +23,7 @@ MODEL_FAMILIES = (
     "unknown",
 )
 
-_HOST_NATIVE: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+_HARNESS_NATIVE: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("claude-code", ("anthropic",)),
     ("codex", ("openai",)),
     # DeepSeek Harness 官方渠道即 deepseek 系；经中转也可能换模型，基准仍成立。
@@ -66,22 +66,22 @@ def model_family(model_id: str) -> str:
     return "unknown"
 
 
-def host_native_families(host: str) -> Optional[Tuple[str, ...]]:
-    for known, families in _HOST_NATIVE:
-        if host == known:
+def harness_native_families(harness: str) -> Optional[Tuple[str, ...]]:
+    for known, families in _HARNESS_NATIVE:
+        if harness == known:
             return families
     return None
 
 
-def quality_flag(host: str, model_id: str) -> str:
-    return family_flag(host, model_family(model_id))
+def quality_flag(harness: str, model_id: str) -> str:
+    return family_flag(harness, model_family(model_id))
 
 
-def family_flag(host: str, family: str) -> str:
+def family_flag(harness: str, family: str) -> str:
     """家族级标记（聚合层用——族名不是模型串，与 Rust 侧同一定义点）。"""
     if family == "synthetic":
         return "api_error"
-    native = host_native_families(host)
+    native = harness_native_families(harness)
     if native is None:
         return "no_baseline"
     return "native" if family in native else "non_native"

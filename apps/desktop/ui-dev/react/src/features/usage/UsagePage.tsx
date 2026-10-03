@@ -1,4 +1,4 @@
-import { hostName } from "../../lib/hostNames";
+import { harnessName } from "../../lib/harnessNames";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   listenAppEvents,
@@ -63,7 +63,7 @@ function costLinesLabel(lines: UsageDay["cost_lines"]): string {
 }
 
 function spendBasisLabel(spend: UsageSourceSummary["spend_by_basis"]): string {
-  const known = ["metered_actual", "host_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent", "other"];
+  const known = ["metered_actual", "harness_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent", "other"];
   const lines = Object.entries(spend).flatMap(([basis, amounts]) => Object.entries(amounts).filter(([, amount]) => amount > 0).map(([currency, amount]) => `${known.includes(basis) ? message(`usage.basis.${basis}` as MessageKey) : basis} ${formatMajorMoney(amount, currency)}`));
   return lines.length ? lines.join(" · ") : message("usage.noBillAmount");
 }
@@ -77,7 +77,7 @@ function monthTitle(month: string): string {
 }
 
 function sourceLabel(value: string | null): string {
-  return message(value ? "usage.hostFacts" : "usage.noHours");
+  return message(value ? "usage.harnessFacts" : "usage.noHours");
 }
 
 function freshnessLabel(value: UsageSourceSummary["freshness"]): string {
@@ -97,11 +97,11 @@ function dayTokens(day: UsageDay | undefined): number {
   return day?.total_tokens ?? 0;
 }
 
-function hostTokenLines(day: UsageDay | undefined): string {
-  if (!day) return message("usage.noObservedHosts");
+function harnessTokenLines(day: UsageDay | undefined): string {
+  if (!day) return message("usage.noObservedHarnesses");
   const values: Array<[string, number]> = [["DSH", day.dsh_tokens], ["CC", day.claude_tokens], ["CX", day.codex_tokens]];
   const lines = values.filter(([, tokens]) => tokens > 0).map(([label, tokens]) => `${label} ${tokensLabel(tokens)}`);
-  return lines.length ? lines.join(" · ") : message("usage.noObservedHosts");
+  return lines.length ? lines.join(" · ") : message("usage.noObservedHarnesses");
 }
 
 export function UsagePage() {
@@ -242,7 +242,7 @@ export function UsagePage() {
   // successfully-read older/newer source window with an explicit label.
   const sourceForDisplayedMonth = source?.month === displayedMonth ? source : null;
   const displayedTokens = sourceForDisplayedMonth?.total_tokens ?? (calendarForDisplayedMonth ? totals.tokens : null);
-  const hostTokens = sourceForDisplayedMonth ? Object.entries(sourceForDisplayedMonth.tokens_by_host)
+  const harnessTokens = sourceForDisplayedMonth ? Object.entries(sourceForDisplayedMonth.tokens_by_harness)
     .filter(([, value]) => value.total > 0).sort((a, b) => b[1].total - a[1].total) : [];
   const sourceForPanel = source;
   const layout = dateParts(displayedMonth);
@@ -268,7 +268,7 @@ export function UsagePage() {
         <article className="stat-card"><p className="eyebrow">{calendarForDisplayedMonth ? message("usage.calendarCost", language, { month: monthTitle(displayedMonth) }) : message("usage.sourceCost", language)}</p><p className="stat-value stat-value-compact">{calendarForDisplayedMonth ? (totals.byBasis.length ? totals.byBasis.map((entry) => `${formatMajorMoney(entry.amount, entry.currency)} (${message(`usage.basis.${entry.basis}` as MessageKey)})`).join(" · ") : message("usage.noCost")) : "—"}</p><p className="stat-detail">{sourceForDisplayedMonth ? `${spendBasisLabel(sourceForDisplayedMonth.spend_by_basis)} · ${message("usage.calendarNoSubscription", language)}` : message("usage.sourceUnaligned", language)}</p></article>
         <article className="stat-card"><p className="eyebrow">{sourceForDisplayedMonth ? message("usage.monthFreshness", language, { month: monthTitle(sourceForDisplayedMonth.month) }) : message("usage.freshness", language)}</p><p className="stat-value stat-value-compact">{sourceForDisplayedMonth ? freshnessLabel(sourceForDisplayedMonth.freshness) : "—"}</p><p className="stat-detail">{sourceForDisplayedMonth?.last_observed_at ? message("usage.lastObserved", language, { date: sourceForDisplayedMonth.last_observed_at }) : message("usage.sourceStateUnaligned", language)}</p></article>
       </section>
-      <section className="usage-host-summary" aria-label={message("usage.hostBreakdown", language)}>{hostTokens.length ? hostTokens.map(([host, value]) => <div key={host}><span>{hostName(host)}</span><strong>{tokensLabel(value.total)}</strong></div>) : <div><span>{message("usage.hostBreakdownShort", language)}</span><strong>—</strong></div>}<p>{message("usage.hostBreakdownNote", language, { month: monthTitle(displayedMonth) })}</p></section>
+      <section className="usage-harness-summary" aria-label={message("usage.harnessBreakdown", language)}>{harnessTokens.length ? harnessTokens.map(([harness, value]) => <div key={harness}><span>{harnessName(harness)}</span><strong>{tokensLabel(value.total)}</strong></div>) : <div><span>{message("usage.harnessBreakdownShort", language)}</span><strong>—</strong></div>}<p>{message("usage.harnessBreakdownNote", language, { month: monthTitle(displayedMonth) })}</p></section>
       <section className="usage-calendar-panel" aria-labelledby="usage-calendar-title">
         <div className="section-heading"><div><p className="eyebrow">{message("usage.calendar", language)}</p><h3 id="usage-calendar-title">{monthTitle(displayedMonth)}</h3></div><span className="count-badge">{message("count.days", language, { count: calendarForDisplayedMonth?.days.length ?? 0 })}</span></div>
         {calendarForDisplayedMonth && totals.tokens > 0 ? <div className="usage-calendar-grid" role="grid" aria-label={message("usage.calendarGrid", language, { month: monthTitle(displayedMonth) })}>
@@ -280,8 +280,8 @@ export function UsagePage() {
             const future = date > today;
             const selected = selectedDate === date;
             const value = metric === "tokens" ? (day ? tokensLabel(day.total_tokens) : "—") : (day ? (dayBasisGroups(day).map((group) => `${group.amount} (${message(`usage.basis.${group.basis}` as MessageKey)})`).join(" · ") || message("usage.noCost")) : "—");
-            const hosts = day && metric === "tokens" ? message("usage.dayHosts", language, { hosts: hostTokenLines(day) }) : "";
-            return <button className={`usage-calendar-cell ${day && day.total_tokens > 0 ? "usage-calendar-has-data" : ""} ${selected ? "usage-calendar-selected" : ""} ${future ? "usage-calendar-future" : ""}`} type="button" role="gridcell" key={date} disabled={future} aria-selected={selected} aria-label={message("usage.dayCell", language, { date, value, hosts, action: message(future ? "usage.futureDay" : "usage.openHour", language) })} onClick={() => setSelectedDate(date)}><span>{index + 1}</span>{metric === "cost" && day ? <strong className="usage-cost-lines">{dayBasisGroups(day).length ? dayBasisGroups(day).map((group) => <span key={group.basis + group.amount}>{group.amount}<small className="usage-basis-tag">{message(`usage.basisShort.${group.basis}` as MessageKey, language)}</small></span>) : message("usage.noCost", language)}</strong> : <strong>{value}</strong>}{metric === "tokens" && day && day.total_tokens > 0 && <small className="usage-host-breakdown">{hostTokenLines(day)}</small>}{metric === "cost" && day && day.total_tokens > 0 && <small>{day.cost_lines.length ? costLinesLabel(day.cost_lines) : `${tokensLabel(day.total_tokens)} tokens`}</small>}</button>;
+            const harnesses = day && metric === "tokens" ? message("usage.dayHarnesses", language, { harnesses: harnessTokenLines(day) }) : "";
+            return <button className={`usage-calendar-cell ${day && day.total_tokens > 0 ? "usage-calendar-has-data" : ""} ${selected ? "usage-calendar-selected" : ""} ${future ? "usage-calendar-future" : ""}`} type="button" role="gridcell" key={date} disabled={future} aria-selected={selected} aria-label={message("usage.dayCell", language, { date, value, harnesses, action: message(future ? "usage.futureDay" : "usage.openHour", language) })} onClick={() => setSelectedDate(date)}><span>{index + 1}</span>{metric === "cost" && day ? <strong className="usage-cost-lines">{dayBasisGroups(day).length ? dayBasisGroups(day).map((group) => <span key={group.basis + group.amount}>{group.amount}<small className="usage-basis-tag">{message(`usage.basisShort.${group.basis}` as MessageKey, language)}</small></span>) : message("usage.noCost", language)}</strong> : <strong>{value}</strong>}{metric === "tokens" && day && day.total_tokens > 0 && <small className="usage-harness-breakdown">{harnessTokenLines(day)}</small>}{metric === "cost" && day && day.total_tokens > 0 && <small>{day.cost_lines.length ? costLinesLabel(day.cost_lines) : `${tokensLabel(day.total_tokens)} tokens`}</small>}</button>;
           })}
         </div> : <div className="usage-empty">{message(calendarForDisplayedMonth ? "usage.emptyMeasured" : "usage.emptyUnavailable", language)}</div>}
         <p className="usage-note">{message(metric === "tokens" ? "usage.tokensNote" : "usage.costNote", language)}</p>
@@ -291,9 +291,9 @@ export function UsagePage() {
           <div className="section-heading"><div><p className="eyebrow">{message("usage.hourly", language)}</p><h3 id="usage-hourly-title">{selectedDate ? `${selectedDate}${selectedDate === today ? ` · ${message("usage.today", language)}` : ""}` : message("usage.selectDay", language)}</h3></div><div className="heading-side">{selectedDay && <span className="count-badge">{tokensLabel(dayTokens(selectedDay))}</span>}{selectedDate && <a className="inline-drill" href={sessionsDateHref(selectedDate)}>{message("usage.daySessions", language)} <span aria-hidden="true">→</span></a>}</div></div>
           {hourlyLoading && <p className="usage-empty">{message("usage.loadingHours", language)}</p>}
           {hourlyError && <p className="usage-empty" role="alert">{hourlyError}</p>}
-          {!hourlyLoading && !hourlyError && hourly && <><UsageTrendChart buckets={buildHourBuckets(hourly, undefined)} ariaLabel={message("usage.hourly", language)} showFailures={false} /><p className="usage-note">{message("usage.hourlyNote", language, { sources: Object.entries(hourly.hosts_available).map(([host, value]) => `${host}: ${sourceLabel(value)}`).join(" · ") })}</p></>}
+          {!hourlyLoading && !hourlyError && hourly && <><UsageTrendChart buckets={buildHourBuckets(hourly, undefined)} ariaLabel={message("usage.hourly", language)} showFailures={false} /><p className="usage-note">{message("usage.hourlyNote", language, { sources: Object.entries(hourly.harnesses_available).map(([harness, value]) => `${harness}: ${sourceLabel(value)}`).join(" · ") })}</p></>}
         </section>
-        <section className="usage-source-panel" aria-labelledby="usage-source-title"><div className="section-heading"><div><p className="eyebrow">{message("usage.sourceStatus", language)}</p><h3 id="usage-source-title">{message("usage.coverageFreshness", language)}</h3>{sourceForPanel && <p className="section-meta">{message("usage.window", language, { month: monthTitle(sourceForPanel.month) })}</p>}</div><span className="count-badge">{sourceForPanel ? `${sourceForPanel.coverage.measured_fields}/${sourceForPanel.coverage.total_fields}` : "—"}</span></div>{sourceForPanel ? <dl className="usage-source-list"><div><dt>{message("usage.recordedCharges", language)}</dt><dd>{Object.keys(sourceForPanel.actual_spend).length ? costsLabel(sourceForPanel.actual_spend) : message("usage.noData", language)}</dd></div><div><dt>{message("usage.status", language)}</dt><dd>{freshnessLabel(sourceForPanel.freshness)}</dd></div><div><dt>{message("usage.lastObservedLabel", language)}</dt><dd>{sourceForPanel.last_observed_at ?? message("usage.noTimeEvidence", language)}</dd></div><div><dt>{message("usage.unresolved", language)}</dt><dd>{sourceForPanel.has_unresolved ? message("usage.unresolvedYes", language) : message("usage.none", language)}</dd></div><div><dt>{message("usage.excludedHosts", language)}</dt><dd>{sourceForPanel.excluded_hosts.length ? sourceForPanel.excluded_hosts.join(", ") : message("usage.none", language)}</dd></div></dl> : <p className="usage-empty">{message("usage.sourceUnavailable", language)}</p>}<p className="usage-note">{message("usage.coverageNote", language)}</p></section>
+        <section className="usage-source-panel" aria-labelledby="usage-source-title"><div className="section-heading"><div><p className="eyebrow">{message("usage.sourceStatus", language)}</p><h3 id="usage-source-title">{message("usage.coverageFreshness", language)}</h3>{sourceForPanel && <p className="section-meta">{message("usage.window", language, { month: monthTitle(sourceForPanel.month) })}</p>}</div><span className="count-badge">{sourceForPanel ? `${sourceForPanel.coverage.measured_fields}/${sourceForPanel.coverage.total_fields}` : "—"}</span></div>{sourceForPanel ? <dl className="usage-source-list"><div><dt>{message("usage.recordedCharges", language)}</dt><dd>{Object.keys(sourceForPanel.actual_spend).length ? costsLabel(sourceForPanel.actual_spend) : message("usage.noData", language)}</dd></div><div><dt>{message("usage.status", language)}</dt><dd>{freshnessLabel(sourceForPanel.freshness)}</dd></div><div><dt>{message("usage.lastObservedLabel", language)}</dt><dd>{sourceForPanel.last_observed_at ?? message("usage.noTimeEvidence", language)}</dd></div><div><dt>{message("usage.unresolved", language)}</dt><dd>{sourceForPanel.has_unresolved ? message("usage.unresolvedYes", language) : message("usage.none", language)}</dd></div><div><dt>{message("usage.excludedHarnesses", language)}</dt><dd>{sourceForPanel.excluded_harnesses.length ? sourceForPanel.excluded_harnesses.join(", ") : message("usage.none", language)}</dd></div></dl> : <p className="usage-empty">{message("usage.sourceUnavailable", language)}</p>}<p className="usage-note">{message("usage.coverageNote", language)}</p></section>
       </section>
     </div>}
   </>;

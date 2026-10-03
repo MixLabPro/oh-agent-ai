@@ -21,7 +21,7 @@ use std::path::Path;
 /// §5.2：`vitals-core` 禁止依赖的对象——反过来的方向是允许的（binary/wasm
 /// 依赖它），这条只测这一个 crate 自己的 `[dependencies]`。
 const FORBIDDEN_DEPS: &[&str] =
-    &["agent-vitals-domain", "agent-vitals-hosts", "agent-vitals-wasm", "agent-vitals", "tauri"];
+    &["agent-vitals-domain", "agent-vitals-harnesses", "agent-vitals-wasm", "agent-vitals", "tauri"];
 
 /// §4.1：出现在公开类型/模块名字里通常意味着领域语义泄漏进了通用层。只扫
 /// 「名字」，不扫注释/文档字符串——注释里解释"为什么不叫 ToolCalls"完全合
@@ -159,7 +159,7 @@ fn public_item_identifiers_are_domain_free() {
     });
 }
 
-/// §4.1 补强，spec §20 DoD 第一条（"`crates/vitals-core` 不含宿主或 Agent
+/// §4.1 补强，spec §20 DoD 第一条（"`crates/vitals-core` 不含执行环境或 Agent
 /// 专属类型"）打勾之前需要的那一半：`public_item_identifiers_are_domain_free`
 /// 只扫声明行本身（`pub struct Foo {` 这一行的 `Foo`），扫不进花括号内部——
 /// `pub struct Foo { pub codex_session_id: String }` 会被那条测试放过，因为

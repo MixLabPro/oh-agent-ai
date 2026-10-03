@@ -4,7 +4,7 @@
 //! 凭据**只在发起探针的瞬间**从 cc-switch DB 或环境变量读入内存，作为子进程
 //! env 传给 claude/codex CLI，随后连同本值一起 Drop；不落库、不落盘、不进
 //! 日志。本类型的 `Debug` 手写脱敏（只打引用与 token 长度），防止 `{:?}` 意外
-//! 泄漏——与 hosts/ccswitch.rs「证据读取器永不复制凭据」是**两条并行的边界**：
+//! 泄漏——与 harnesses/ccswitch.rs「证据读取器永不复制凭据」是**两条并行的边界**：
 //! 那条服务于证据面（永不取出），这条服务于发起面（取出即用即弃）。
 
 use std::path::PathBuf;
@@ -40,7 +40,7 @@ fn dirs_home() -> Option<PathBuf> {
 /// id 按**文本**匹配（`CAST(id AS TEXT)`）：真机 cc-switch 的 id 是 UUID 字符串
 /// （`32242fef-…`），老版本按整数 parse 会把整台机器的中转引用全拒掉；
 /// 数值型 id（自建库/测试夹具）CAST 后同样是十进制文本，两种形状都命中。
-fn resolve_from_ccswitch(provider_row: &str, host_kind: &str) -> Result<LaunchCredential, String> {
+fn resolve_from_ccswitch(provider_row: &str, harness_kind: &str) -> Result<LaunchCredential, String> {
     let Some(path) = ccswitch_db_path() else {
         return Err("cc-switch credential requires $HOME".to_string());
     };
@@ -70,7 +70,7 @@ fn resolve_from_ccswitch(provider_row: &str, host_kind: &str) -> Result<LaunchCr
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
             format!(
-                "cc-switch provider row {provider_row} has no env.ANTHROPIC_AUTH_TOKEN (host_kind={host_kind})"
+                "cc-switch provider row {provider_row} has no env.ANTHROPIC_AUTH_TOKEN (harness_kind={harness_kind})"
             )
         })?
         .to_string();
@@ -83,14 +83,14 @@ fn resolve_from_ccswitch(provider_row: &str, host_kind: &str) -> Result<LaunchCr
 
 /// `credential_ref` 引用 → 发起凭据。支持 `env:VAR` 与 `ccswitch:<row>`；
 /// 其他格式报错（不猜）。
-pub fn resolve(credential_ref: &str, host_kind: &str) -> Result<LaunchCredential, String> {
+pub fn resolve(credential_ref: &str, harness_kind: &str) -> Result<LaunchCredential, String> {
     if let Some(var) = credential_ref.strip_prefix("env:") {
         let token = std::env::var(var)
             .map_err(|_| format!("environment variable {var} (credential_ref) is not set"))?;
         return Ok(LaunchCredential { base_url: None, auth_token: token });
     }
     if let Some(row) = credential_ref.strip_prefix("ccswitch:") {
-        return resolve_from_ccswitch(row, host_kind);
+        return resolve_from_ccswitch(row, harness_kind);
     }
     Err(format!(
         "unsupported credential_ref '{credential_ref}' (expected 'env:VAR' or 'ccswitch:<row>')"

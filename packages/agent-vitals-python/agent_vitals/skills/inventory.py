@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from ..adapters.claude import read_host_config
+from ..adapters.claude import read_harness_config
 from ..adapters.codex import apply_codex_runtime, read_codex_runtime
 from ..adapters.dsh import read_session_evidence, read_snapshot
 from ..adapters.hermes import read_hermes_external_dirs
@@ -21,7 +21,7 @@ from .discovery import collect, scan_skill_dir
 from ..util import norm
 
 
-def build_inventory(host, paths, default_roots, env=None, home=None, cwd=None,
+def build_inventory(harness, paths, default_roots, env=None, home=None, cwd=None,
                     runtime_json=None):
     """Collect disk inventory, probe selected runtimes, and reconcile evidence.
 
@@ -32,8 +32,8 @@ def build_inventory(host, paths, default_roots, env=None, home=None, cwd=None,
     home_path = Path(home) if home is not None else Path(os.path.expanduser("~"))
     cwd_path = Path(cwd) if cwd is not None else Path.cwd()
 
-    enabled_plugins, usage, host_config = read_host_config(home=home_path)
-    plugins_known = host_config is not None
+    enabled_plugins, usage, harness_config = read_harness_config(home=home_path)
+    plugins_known = harness_config is not None
 
     roots = list(default_roots)
     for path, metadata in read_openclaw_roots(home=home_path, env=environment):
@@ -50,10 +50,10 @@ def build_inventory(host, paths, default_roots, env=None, home=None, cwd=None,
                 **metadata, "workbuddy_welcome_mode": workbuddy_mode,
             }))
 
-    if host != "all":
-        roots = [root for root in roots if root[0] == host or
-                 (host == "claude-code" and root[0] == "claude-code-plugins")]
-    roots += [(host if host != "all" else "custom", path) for path in paths]
+    if harness != "all":
+        roots = [root for root in roots if root[0] == harness or
+                 (harness == "claude-code" and root[0] == "claude-code-plugins")]
+    roots += [(harness if harness != "all" else "custom", path) for path in paths]
 
     # DSH 会话日志证据在 inventory/discovery 阶段**读一次**，下传给
     # scan_skill_dir（A4）与 build_trigger（A9）。未设环境变量 → 无证据。
@@ -68,7 +68,7 @@ def build_inventory(host, paths, default_roots, env=None, home=None, cwd=None,
 
     openclaw_runtime = []
     if (environment.get("AGENT_VITALS_DISABLE_OPENCLAW_RUNTIME") != "1" and
-            host in ("all", "openclaw")):
+            harness in ("all", "openclaw")):
         instance_roots = sorted({
             root[2].get("instance_root") for root in roots
             if len(root) > 2 and root[0] == "openclaw" and root[2].get("instance_root")
@@ -83,11 +83,11 @@ def build_inventory(host, paths, default_roots, env=None, home=None, cwd=None,
         "available": False,
         "source": "codex app-server skills/list",
         "skills": [],
-        "errors": ["host not selected"],
+        "errors": ["harness not selected"],
     }
     if environment.get("AGENT_VITALS_DISABLE_CODEX_RUNTIME") == "1":
         codex_runtime["errors"] = ["disabled by AGENT_VITALS_DISABLE_CODEX_RUNTIME"]
-    elif host in ("all", "codex"):
+    elif harness in ("all", "codex"):
         codex_runtime = read_codex_runtime(cwd_path, env=environment)
         if codex_runtime["available"]:
             codex_runtime_scanner = lambda *args, **kwargs: scan_skill_dir(
@@ -101,7 +101,7 @@ def build_inventory(host, paths, default_roots, env=None, home=None, cwd=None,
         "roots": roots,
         "enabled_plugins": enabled_plugins,
         "usage": usage,
-        "host_config": host_config,
+        "harness_config": harness_config,
         "plugins_known": plugins_known,
         "workbuddy_mode": workbuddy_mode,
         "workbuddy_roots": workbuddy_roots,

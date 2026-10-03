@@ -110,11 +110,11 @@ if /* 重试配对不全 */ { issue_missing.push("complete retry baseline".to_st
 | 收口动作 | spec 明令「**不与 usage/cost 做不可靠的一对一硬归因**」。所以正确解法是**证明关联的唯一性**（例如靠 `capability_id` + 会话内序号），而不是强行 join |
 | 验收 | 要么给出唯一键并钉住守恒，要么把「不可唯一归因」写进契约并据此改判 EXPLAINED |
 
-### M4-7 · Q14 同 raw 模型名跨宿主（`usage_hourly`）
+### M4-7 · Q14 同 raw 模型名跨执行环境（`usage_hourly`）
 
 | 项 | 内容 |
 |---|---|
-| 现状（实测） | `identity_kind = {'host_raw'}` 每序列在场，key 带 host 消歧 ✅ |
+| 现状（实测） | `identity_kind = {'harness_raw'}` 每序列在场，key 带 harness 消歧 ✅ |
 | 缺什么 | spec §8 F8：「`provider_id` 归一表 §3.4 未建」；canonical 归一标注为 **v0.9.2+** |
 | 收口动作 | 建 `provider_id` 归一表；让 `usage_hourly group_by=provider` 与 `group_by=model` 在归一后等价 |
 | 边界 | spec 已把它挂到 **v0.9.2+**，不是 v1.0.0 —— 若维持该排期，此项应按 EXPLAINED 收口（引用 spec 的书面原因） |

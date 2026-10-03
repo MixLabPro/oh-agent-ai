@@ -5,7 +5,7 @@
 //! 他们复述机器已知的事实。本模块把这份事实变成路线档案的**候选**——注册与
 //! consent 仍是两步显式动作，发现本身零副作用、零凭据接触。
 //!
-//! 白名单纪律（与 `hosts/sources/ccswitch.rs` 同源）：只读
+//! 白名单纪律（与 `harnesses/sources/ccswitch.rs` 同源）：只读
 //! `id / app_type / name` 三列 + `settings_config` 里的
 //! `env.ANTHROPIC_BASE_URL` 与 `env.ANTHROPIC_MODEL` 两个键。凭据键
 //! （`ANTHROPIC_AUTH_TOKEN` 等）连值都不取出——`DiscoveredRoute` 没有放

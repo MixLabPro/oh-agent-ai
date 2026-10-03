@@ -31,7 +31,7 @@
 | 导航名 vs 分区名 vs 面板名三套写法：「计费与套餐 / 计费模板与套餐」「预算 / 预算与提醒 / 预算设置」「关于与诊断 / 帮助与诊断」 | `:372-377` vs `:381,441,476,536,558,590` | 用户点导航落到不同名字的分区，无法确认到位 |
 | 一个 panel 内两个 `panel-title`（预算设置、独立按量预算），中间夹「静默/恢复」按钮，按钮与下一标题零间距 | `:449-460` | 截图 y≈1060-1100 处按钮贴着标题 |
 | 「价格与显示」分区内容是统计时区 + 公共价格目录 | `:536-556` | 时区既不是价格也不是显示 |
-| 盒中盒：分区边框盒 → 白色宿主卡 → `<details>` → 按钮 | `.settings-section` + `.src-card` | 三层容器边界，视线无法判断层级 |
+| 盒中盒：分区边框盒 → 白色执行环境卡 → `<details>` → 按钮 | `.settings-section` + `.src-card` | 三层容器边界，视线无法判断层级 |
 
 ### 2.2 预算：三套表单、三个「保存」、单位是「分」
 
@@ -54,7 +54,7 @@
 ### 2.4 文案密度与术语
 
 - 页面共 **15 句**「不会上传 / 不会删除 / 不会阻止 / 不会自动推断 / 不会改变…」型免责说明；预算面板一项就有 3 句。
-- 宿主卡正面：`失败范围：1 个源 · file_missing`（原始 code 上卡面，违反总览规格 §8.3 与差距分析 §9.1）、「扫描源 12 · 最近日志」（内部术语）、脚注「扫描状态与会话查询相互独立」（实现细节）。
+- 执行环境卡正面：`失败范围：1 个源 · file_missing`（原始 code 上卡面，违反总览规格 §8.3 与差距分析 §9.1）、「扫描源 12 · 最近日志」（内部术语）、脚注「扫描状态与会话查询相互独立」（实现细节）。
 - 套餐确认行三个按钮「这是我的套餐 / 不是我的 / 确认计费方式」，前后两个语义重叠；标题「确认旧套餐信息」的"旧"无所指；行文「本月影响 18K tokens / 4 条事实 / 1 个会话」中"事实"是数据面词表。
 - 「实际账单记录」折叠内是完整的账单录入 + CSV 导入表单——Beta D01 明确延期，差距分析 §3 要求"不显示可操作入口"。
 
@@ -95,17 +95,17 @@
 | 设置项 | `div.setting > .setting-head`（标题 13px/600 + 说明 12px muted）+ `.setting-body` | 设置项之间 20px；同分区内用 1px 淡分隔 | 每分区 ≤ 5 |
 | 控件行 | `.setting-body` 内的 `.form-row` / 列表 / 状态行 | 见 §5 | — |
 
-`<details>` 只允许用于"次要诊断信息"（宿主卡的完整路径、关于页的版本 JSON），不允许用于藏一整个表单。
+`<details>` 只允许用于"次要诊断信息"（执行环境卡的完整路径、关于页的版本 JSON），不允许用于藏一整个表单。
 
 ## 4. 各分区规格
 
 ### 4.1 数据源
 
-**目的：** 看清每个宿主是否在正常读取、最近一次读到什么时候；需要时恢复、暂停、添加位置。
+**目的：** 看清每个执行环境是否在正常读取、最近一次读到什么时候；需要时恢复、暂停、添加位置。
 
 **4.1.1 来源列表**（替换现有 `src-cards` 大卡）
 
-每个宿主一行摘要，展开才看细节：
+每个执行环境一行摘要，展开才看细节：
 
 ```text
 Codex               ● 已连接    8 个会话 · 最近记录 09/13 21:00           [立即同步]  ▾
@@ -116,7 +116,7 @@ WorkBuddy           ○ 未检测到  实验支持                              
 
 | 字段 | 来源（`data_source_status().sources[]`，形状出处 `crates/agent-vitals-runtime/src/mcp/mod.rs:488-499`） | 规则 |
 |---|---|---|
-| 名称 | `host` → `HOST_DISPLAY` | WorkBuddy 追加「实验支持」灰标（差距分析 §5.5） |
+| 名称 | `harness` → `HARNESS_DISPLAY` | WorkBuddy 追加「实验支持」灰标（差距分析 §5.5） |
 | 状态点 + 词 | `connection_state`：connected→已连接 / needs_attention→需要处理 / paused→已暂停 / excluded→已停止读取 / not_detected→未检测到 / 其他→状态未知 | 颜色只在 needs_attention 用 danger，paused/excluded 用 muted，不用 warn 黄（暂停是用户选择，不是警告） |
 | 会话数 | `import_scope.sessions` | 0 且 not_detected 时显示「尚未导入」，不显示「0 个会话」 |
 | 最近记录 | `log.last_event_at_ms` → `MM/DD HH:MM` | null → 「尚无记录」。**与「最后成功同步」分开**（差距分析 §5.5）：同步时间显示在列表顶部一行，记录时间在每行 |
@@ -133,7 +133,7 @@ WorkBuddy           ○ 未检测到  实验支持                              
 
 **4.1.2 列表顶部一行**
 
-`上次同步：成功 22:00 · 自动同步已开启   [暂停自动同步]` —— 把现有 `src-toolbar` + `sync-row` + `src-banner` 三行合成一行；失败时这一行变为 `.notice.danger`（复用总览的 `.notice` 组件）：「部分来源读取失败：Claude Code。其他来源已继续同步。」并把该宿主行排到列表最前。「重载」按钮删除——切换 tab 已经懒加载，且列表顶部同步行的时间戳已经回答"是不是新的"。
+`上次同步：成功 22:00 · 自动同步已开启   [暂停自动同步]` —— 把现有 `src-toolbar` + `sync-row` + `src-banner` 三行合成一行；失败时这一行变为 `.notice.danger`（复用总览的 `.notice` 组件）：「部分来源读取失败：Claude Code。其他来源已继续同步。」并把该执行环境行排到列表最前。「重载」按钮删除——切换 tab 已经懒加载，且列表顶部同步行的时间戳已经回答"是不是新的"。
 
 **4.1.3 其他本机位置**
 
@@ -153,7 +153,7 @@ WorkBuddy           ○ 未检测到  实验支持                              
 | 候选行 | `openai · 20.00 USD/月 · 自 2026-09-01 起 · Codex` 第二行 `本月涉及 18K tokens · 1 个会话` | 去掉「4 条事实」；按钮改为两个：`是我的套餐`（次级）· `不是`（文字链），并在行尾加文字链 `改为其他计费方式…` 打开 `ov-billing-declaration-panel`——三按钮并列改为"二选一 + 例外入口"，消除「这是我的套餐」与「确认计费方式」的语义重叠 |
 | 当前计费声明 | `ov-billing-declarations-panel` | 说明压缩为「撤销后受影响用量恢复为按量/未定归类，历史记录保留。」 |
 | 重算状态 | `ov-billing-recalculation-panel` | 无任务时整项隐藏；有失败任务时用 `.notice.warn` + 「继续重算」次级按钮 |
-| 已有账单 | 新增只读列表（`host_bills_for_period`） | Beta D01：**不渲染录入表单与 CSV 导入**（现有 `ov-billing-record-panel` + `.billing-csv` 整段 `hidden`，DOM 保留供正式版）；有账单时列出「宿主 · 服务商 · 账期 · 金额 · 来源」，无账单整项隐藏。发布规格第 61 行：已有账单保留原币与口径可查看 |
+| 已有账单 | 新增只读列表（`harness_bills_for_period`） | Beta D01：**不渲染录入表单与 CSV 导入**（现有 `ov-billing-record-panel` + `.billing-csv` 整段 `hidden`，DOM 保留供正式版）；有账单时列出「执行环境 · 服务商 · 账期 · 金额 · 来源」，无账单整项隐藏。发布规格第 61 行：已有账单保留原币与口径可查看 |
 
 `ov-billing-declaration-panel`（确认计费方式表单）保持现有字段，但改为**从候选行或声明行触发的内联表单**，不是常驻 panel。
 
@@ -201,8 +201,8 @@ WorkBuddy           ○ 未检测到  实验支持                              
 |---|---|---|---|---|
 | 统计时区 | 下拉：「跟随系统（Asia/Shanghai）」+ 常用 IANA 列表 + 「其他…」文本输入 | `statistics_timezone_config` / `save_statistics_timezone_config` | 「决定"今天 / 本月"的边界；不改变记录时间和供应商计价时区。」 | 差距分析 §5.6：不要求手输 IANA；示例行「Asia/Shanghai、America/Los_Angeles…」删除 |
 | 价格目录 | 只读一行：`内置价目 catalog_2026_09 · 覆盖 N 个模型 · 随测试版更新` | `public_pricing_catalog_status` 只读 | — | 差距分析 §4「公共价格目录检查 → Beta 延期，隐藏可操作入口」：网络开关与「检查价格更新」按钮 `hidden`，DOM 保留 |
-| 本地保留期 | 数字 + 「个月」，默认 13 | `retention_config` / `save_retention_config` | 「过期记录在下一次本机维护时清理；不影响宿主原始日志。」 | 去掉「可设置 1–60 个月」独立行，改为输入框 `min/max` + 校验失败时行内提示 |
-| 导出当前月摘要 | `预览导出字段`（次级）→ 展示字段清单 + `下载 CSV`（次级） | 现有 | 「只含宿主、服务商、用量与金额口径，不含会话正文和路径。」 | 保持 |
+| 本地保留期 | 数字 + 「个月」，默认 13 | `retention_config` / `save_retention_config` | 「过期记录在下一次本机维护时清理；不影响执行环境原始日志。」 | 去掉「可设置 1–60 个月」独立行，改为输入框 `min/max` + 校验失败时行内提示 |
+| 导出当前月摘要 | `预览导出字段`（次级）→ 展示字段清单 + `下载 CSV`（次级） | 现有 | 「只含执行环境、服务商、用量与金额口径，不含会话正文和路径。」 | 保持 |
 
 ### 4.5 关于与诊断
 
@@ -244,7 +244,7 @@ WorkBuddy           ○ 未检测到  实验支持                              
 
 - 每个设置项 ≤ 1 句、≤ 40 字；
 - 「不会上传 / 不会删除 / 不会阻止」类承诺：合并进那一句或移到 hover `title`；隐私总承诺在关于页统一说一次；
-- 禁用词（正文）：事实、口径、宿主（改"工具"）、扫描源、fact、facts、bp、minor、profile、legacy、schema（版本表除外）、reason code 原文。
+- 禁用词（正文）：事实、口径、执行环境（改"工具"）、扫描源、fact、facts、bp、minor、profile、legacy、schema（版本表除外）、reason code 原文。
 
 ### 5.6 reason code 映射
 
@@ -266,7 +266,7 @@ WorkBuddy           ○ 未检测到  实验支持                              
 - 页面网格：`grid-template-columns: 152px 1fr; gap: 32px`；左栏 `position: sticky; top: 12px`；导航项 12px，当前分区（IntersectionObserver）高亮 accent 左边线。
 - 分区：无边框盒；h2 16px/600；分区间 `margin-top: 32px` + `border-top: 1px solid var(--panel-2)`。
 - 设置项：`.setting-head` 标题 13px/600 + 说明 12px muted；`.setting + .setting { margin-top: 20px; padding-top: 16px; border-top: 1px solid color-mix(panel-2, 50%) }`。
-- 宿主行：高 44px（可点击目标 ≥ 44px，E308），展开区缩进 16px、背景 `var(--panel)`。
+- 执行环境行：高 44px（可点击目标 ≥ 44px，E308），展开区缩进 16px、背景 `var(--panel)`。
 - 删除 CSS：`.page-intro`、`.eyebrow`（总览已不用，设置页头删除后无消费方）、`.settings-section` 边框、`.settings-primary-action`（横幅改用 `.notice.todo`）、`.deferred-feature`、`.src-toolbar`、`.sync-row`。
 - 主题：所有新颜色走现有 token（`--panel/--panel-2/--muted/--accent/--warn/--danger`），不引入 `--text-1` 一类未定义变量（总览事故）。
 
@@ -274,13 +274,13 @@ WorkBuddy           ○ 未检测到  实验支持                              
 
 | 分区 | 读 | 写 | 形状出处 |
 |---|---|---|---|
-| 数据源 | `data_source_status`、`sync_request_status`、`sync_pause_state`、`source_read_locations`、`custom_source_roots` | `trigger_sync`、`set_sync_paused`、`set_source_host_excluded`、`delete_imported_source_data`、`pick_custom_source_root`、`add_custom_source_root`、`remove_custom_source_root` | `mcp/mod.rs:450-500` |
-| 计费与套餐 | `billing_import_candidates`、`billing_candidate_impact_preview`、`billing_declarations`、`billing_recalculation_jobs`、`host_bills_for_period`（只读） | `resolve_billing_import_candidate`、`save_billing_declaration_revision`、`revoke_billing_declaration`、`enqueue_billing_recalculation`、`retry_billing_recalculation` | 现有 |
+| 数据源 | `data_source_status`、`sync_request_status`、`sync_pause_state`、`source_read_locations`、`custom_source_roots` | `trigger_sync`、`set_sync_paused`、`set_source_harness_excluded`、`delete_imported_source_data`、`pick_custom_source_root`、`add_custom_source_root`、`remove_custom_source_root` | `mcp/mod.rs:450-500` |
+| 计费与套餐 | `billing_import_candidates`、`billing_candidate_impact_preview`、`billing_declarations`、`billing_recalculation_jobs`、`harness_bills_for_period`（只读） | `resolve_billing_import_candidate`、`save_billing_declaration_revision`、`revoke_billing_declaration`、`enqueue_billing_recalculation`、`retry_billing_recalculation` | 现有 |
 | 预算 | `budget_profiles_status`、`budget_config`（只为 legacy 提示） | `save_budget_profile`、`snooze_budget_current_period`、`clear_budget_snooze` | `runtime/budget.rs:100-152` |
 | 统计与数据 | `statistics_timezone_config`、`public_pricing_catalog_status`、`retention_config` | `save_statistics_timezone_config`、`save_retention_config`（导出为前端生成） | `lib.rs:1687-1860` |
 | 关于与诊断 | `about_diagnostics` | `export_diagnostic_package`、`check_for_updates`、`open_trusted_releases_page` | `lib.rs:2038` |
 
-Beta 内不再从设置页调用：`save_budget_config`、`save_host_bill`、`save_host_bills`、`delete_host_bill`、`save_public_pricing_catalog_policy`、`update_public_pricing_catalog`（命令保留，UI 入口隐藏）。
+Beta 内不再从设置页调用：`save_budget_config`、`save_harness_bill`、`save_harness_bills`、`delete_harness_bill`、`save_public_pricing_catalog_policy`、`update_public_pricing_catalog`（命令保留，UI 入口隐藏）。
 
 **mock 修正（`tauri-mock.js`，每条注明出处）：**
 
@@ -308,7 +308,7 @@ Beta 内不再从设置页调用：`save_budget_config`、`save_host_bill`、`sa
 - `#ov-billing-record-panel`、`.billing-csv`、`#ov-pricing-catalog-network`、`#ov-pricing-catalog-update`、`#ov-budget-monthly-input` 均 `hidden`；
 - `#ov-about-versions` 可见且不在闭合 `<details>` 内；
 - 阈值文字含「80%」且页面无值为 `0.8` 的可见输入；
-- 每个宿主行高度 ≥ 44px；`删除已导入数据` 不在摘要行内。
+- 每个执行环境行高度 ≥ 44px；`删除已导入数据` 不在摘要行内。
 
 ### 9.2 vm 单测（`scripts/verify-workbench-kpi-decide.mjs` 同款）
 
@@ -343,8 +343,8 @@ S2–S5 互相独立，可并行；每步结束跑 `npm --prefix apps/desktop/ui
 
 | 类别 | 位置 | 项 |
 |---|---|---|
-| 金额相关，与用量事实同事务 | `agent-vitals.sqlite3` | `budget_profiles` / `budget_config` / `budget_snoozes` / `billing_import_candidates` / `billing_declarations(+_revisions,+_scopes)` / `billing_recalculation_*` / `host_bills` |
-| 纯偏好，各自一个 JSON 小文件 | `state/statistics-timezone.json`（`runtime/statistics_timezone.rs`）、`state/retention-config.json`（`retention.rs`）、`state/source-controls.json`（`source_controls.rs`）、`state/custom-sources.json`（`custom_sources.rs`）、`state/sync-control.json`（`sync_control.rs`） | 时区、保留月数、停止读取的宿主、其他本机位置、暂停自动同步 |
+| 金额相关，与用量事实同事务 | `agent-vitals.sqlite3` | `budget_profiles` / `budget_config` / `budget_snoozes` / `billing_import_candidates` / `billing_declarations(+_revisions,+_scopes)` / `billing_recalculation_*` / `harness_bills` |
+| 纯偏好，各自一个 JSON 小文件 | `state/statistics-timezone.json`（`runtime/statistics_timezone.rs`）、`state/retention-config.json`（`retention.rs`）、`state/source-controls.json`（`source_controls.rs`）、`state/custom-sources.json`（`custom_sources.rs`）、`state/sync-control.json`（`sync_control.rs`） | 时区、保留月数、停止读取的执行环境、其他本机位置、暂停自动同步 |
 | 运行状态（非偏好） | `state/budget-origin.json`（迁移标记）、`<data_home>/pricing-catalog-update.json`（上次检查结果）、`<data_home>/pricing-catalog-policy.json`（联网开关，`lib.rs:1742`） | — |
 
 划分规则从未写下来，这里写下：**影响金额计算的进库；纯偏好进文件；运行状态不是偏好。** 五个偏好文件是逐个功能加出来的，读者分散在 App（`lib.rs`/`overview.rs`）、CLI 与 MCP 控制面（`mcp/control_plane.rs:100-233`）、同步服务（`sync_service.rs`）和 Python 镜像（`agent/state.py:59` 直接读时区文件）。
@@ -360,7 +360,7 @@ S2–S5 互相独立，可并行；每步结束跑 `npm --prefix apps/desktop/ui
   "retention_months": 13,
   "sync": { "paused": false },
   "sources": {
-    "excluded_hosts": ["workbuddy"],
+    "excluded_harnesses": ["workbuddy"],
     "custom_roots": { "claude-code": ["/Volumes/work/.claude"] }
   },
   "pricing_catalog": { "network_enabled": false }

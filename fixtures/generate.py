@@ -213,7 +213,7 @@ def build(root: Path):
           "off-tool", name="off-tool", desc="Z" * 61,
           body="on disk, not in context\n")
 
-    # ── 其他宿主：在磁盘上，但不进 Claude Code 上下文 ────────
+    # ── 其他执行环境：在磁盘上，但不进 Claude Code 上下文 ────────
     skill(root / ".codex" / "skills", "codex-only",
           name="codex-only", desc="K" * 62)
     skill(root / ".cursor" / "skills", "cursor-only",
@@ -274,7 +274,7 @@ def build(root: Path):
     for n in ("oc-off", "oc-on", "oc-plain"):
         skill(oc / "skills", n, name=n, desc="O" * (70 + len(n)))
 
-    # ── 宿主配置 ───────────────────────────────────────────
+    # ── 执行环境配置 ───────────────────────────────────────────
     # enabledPlugins 的 dict 形态 + projects 里的第二处（scan.py 两处都读）
     # skillUsage 的裸名键与 <plugin>:<name> 键（lookup_usage 的两条路径）
     cfg = {

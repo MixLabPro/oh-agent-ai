@@ -25,7 +25,7 @@ esac
 
 case "$(uname -m)" in
   arm64) ;;
-  *) die "an arm64 macOS host is required (found $(uname -m))" ;;
+  *) die "an arm64 macOS harness is required (found $(uname -m))" ;;
 esac
 
 case "${SKIP_NOTARIZATION:-}" in

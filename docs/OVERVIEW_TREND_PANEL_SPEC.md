@@ -7,7 +7,7 @@
 > （`opened_at_ms` 本就是毫秒时间戳）。小时 token 复用既有
 > `read_hourly_distribution` 命令，不新增 token 读路径。
 
-状态：**已实施**（2026-10-01，v1.1）；其中「只做今日 / 不做切换 / 零新读路径」三条已被 `OVERVIEW_TREND_RANGE_SPEC.md` v2.0 取代（失败族规则、计数语义、null≠零、r6 仍有效）。来源：落地页「产品演示」的概念图里有「按宿主堆叠的每日
+状态：**已实施**（2026-10-01，v1.1）；其中「只做今日 / 不做切换 / 零新读路径」三条已被 `OVERVIEW_TREND_RANGE_SPEC.md` v2.0 取代（失败族规则、计数语义、null≠零、r6 仍有效）。来源：落地页「产品演示」的概念图里有「按执行环境堆叠的每日
 用量柱状图 + 有连续失败的日期高亮」（`website/landing/index.html` demo 区，明确标注为模拟
 数据）。真实应用一直没这个形态：用量在用量页是月历热图 + 当日小时柱，失败信号在总览发现
 条 / 发现页。本 spec 把演示承诺的「一眼看到用量走势 + 哪天在反复失败」落成总览顶部的一个
@@ -33,7 +33,7 @@
 **规则族**（与 `docs/AGENT_EXECUTION_PROBLEM_TAXONOMY.md` 注册的 trajectory 失败族一致）：
 `SV611`（同一调用连续重复 ≥3 次）、`SV612`（turn 死循环）、`SV613`（进度停滞：连续
 turn/工具失败），并兼容 legacy 规则名 `retry_loop`、`tool_failure`。列表是**规则级**而非
-宿主级——不写宿主特化 SQL（数据完整性 watchlist 的 host-agnostic 要求）。
+执行环境级——不写执行环境特化 SQL（数据完整性 watchlist 的 harness-agnostic 要求）。
 
 **计数语义**：某小时 = `opened_at_ms` 落入该统计日该小时的失败族 issue 实例数（含任意
 status：open / acknowledged / resolved / wontfix——标记表达「这小时发生过反复失败」这一

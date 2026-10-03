@@ -66,7 +66,7 @@ GUI / Cloud Sync / Team Dashboard         ×   （MVP 阶段）
 
 这是本产品的核心架构判断。
 
-**CLI 最擅长确定性证据，宿主模型最擅长语义判断。**两者是**并列的角色**，谁都不能替代谁。
+**CLI 最擅长确定性证据，执行环境模型最擅长语义判断。**两者是**并列的角色**，谁都不能替代谁。
 
 ```text
                     Agent Vitals Core
@@ -77,21 +77,21 @@ GUI / Cloud Sync / Team Dashboard         ×   （MVP 阶段）
           Evidence                  Reasoning
               │                         │
               ↓                         ↓
-             CLI                  In-host Skill
+             CLI                  In-harness Skill
               │                         │
               └────────────┬────────────┘
                            ↓
                        Diagnosis
 ```
 
-|  | **CLI**（Evidence Engine） | **In-host Skill**（Reasoning Layer） |
+|  | **CLI**（Evidence Engine） | **In-harness Skill**（Reasoning Layer） |
 |---|---|---|
 | 回答 | **What happened?** | **Why does it matter?** |
 | 产出 | `loaded=false` · `usage=0` · `budget=102%` · `shadowed=true` · `core_tokens=8200` | 「github 与 github-tools 文字相似度只有 0.41，但在『review this PR』这个 intent 上实际竞争」 |
 | 性质 | 确定性 · 可复现 · 可进 CI | 判断性 · 依赖上下文 · 无法离线复现 |
-| 成本 | 零依赖、不联网 | 零——宿主模型本来就在上下文里 |
+| 成本 | 零依赖、不联网 | 零——执行环境模型本来就在上下文里 |
 
-上表右下角那格是关键：**语义判断在宿主内是免费的**。一个独立 CLI 要拿到同等能力，得付 embedding 模型或 API key 的代价；而 skill 形态白得。
+上表右下角那格是关键：**语义判断在执行环境内是免费的**。一个独立 CLI 要拿到同等能力，得付 embedding 模型或 API key 的代价；而 skill 形态白得。
 
 > 实现上两者是串联的数据流（CLI 产出 JSON → Skill 读取并推理），见 [ARCHITECTURE.md §9](./ARCHITECTURE.md)。**角色并列、数据串联**，两句话不矛盾。
 
@@ -100,7 +100,7 @@ GUI / Cloud Sync / Team Dashboard         ×   （MVP 阶段）
 | 路径 | 成本 | 何时可用 | 输出命名 |
 |---|---|---|---|
 | Lexical（CLI 内置） | 免费 | 总是 | **`candidates`** — 待判定，不是结论 |
-| In-host Skill | 免费 | 在 Claude Code 等宿主内 | `overlap` — 可作结论 |
+| In-harness Skill | 免费 | 在 Claude Code 等执行环境内 | `overlap` — 可作结论 |
 | `--judge`（外部 API） | 需 key + 联网 | 显式开启 | `overlap` — 可作结论 |
 
 **CLI 不得把 Lexical 结果呈现为 conflict / overlap。**它只能说「这几对值得看一眼」，并给出两条升级路径。用 conflict 这个词而底下只有 Jaccard，第一批用户就会发现结论不可信——**这是最难挽回的信任**。
@@ -157,7 +157,7 @@ P0      诊断闭环
 ├── doctor
 ├── list
 ├── explain <name>
-└── overlap                     Lexical candidates + In-host 判定
+└── overlap                     Lexical candidates + In-harness 判定
 
 P0.5    历史与集成
 ├── snapshot
@@ -209,11 +209,11 @@ v1.x
 
 ```text
 overlap 的语义判断有两条路
-  · In-host Skill   免费、无需 key   ← P0 就有
+  · In-harness Skill   免费、无需 key   ← P0 就有
   · --judge         需 key + 联网    ← 推迟到 P1.5
 ```
 
-`--judge` 只服务「不在宿主内、且愿意配 key」的 CLI 用户——是补充路径而非主路径。**若没有双形态，`--judge` 就必须进 P0，整个 MVP 会被一个 API key 依赖卡住。**
+`--judge` 只服务「不在执行环境内、且愿意配 key」的 CLI 用户——是补充路径而非主路径。**若没有双形态，`--judge` 就必须进 P0，整个 MVP 会被一个 API key 依赖卡住。**
 
 ---
 
@@ -224,11 +224,11 @@ overlap 的语义判断有两条路
 ```text
 Agent Vitals 1.0
 ──────────────────────────────────────────────────
-Host    Claude Code 2.0.14
+Harness    Claude Code 2.0.14
         触发数据 ✓ · 加载判定 ✓ · 描述预算 ✓
 
 Skills  43 on disk → 31 loaded
-        未加载：插件未启用 8 · 其他宿主 3 · 其他 1
+        未加载：插件未启用 8 · 其他执行环境 3 · 其他 1
 
 CRITICAL — 4 个可执行问题
 
@@ -313,14 +313,14 @@ v0.1 把 `active / dormant / zombie / shadowed` 挤在一列。但前三者是**
 一个 skill 完全可以既 shadowed 又 active（生效的那份在被用，你改的那份没生效）——**这恰恰是最该被看见的情况**，单列设计会把它显示成 `shadowed` 并隐藏使用数据。见上表 `proj-deploy` 行。
 
 ```text
-LOAD   ∈ { loaded, shadowed, disabled, other-host, unknown }
+LOAD   ∈ { loaded, shadowed, disabled, other-harness, unknown }
 STATUS ∈ { active, occasional, dormant, zombie, too-new, unknown }
 ```
 
 ### 过滤
 
 ```bash
-agent-vitals list --unused --stale 30 --shadowed --host claude
+agent-vitals list --unused --stale 30 --shadowed --harness claude
 agent-vitals list --sort usage|cost|name --top 10 --json
 ```
 
@@ -491,7 +491,7 @@ Skills
 
 v0.1 输出 `Routing accuracy 75%`，是在声称「我知道 Agent 会选哪个 skill」。但实际 routing 取决于完整系统提示、**当时全部 description 的列表**、对话上下文和模型版本。
 
-离线 CLI 算不出这个；用外部 LLM 模拟，模拟的也是一个和真实宿主不同的上下文。
+离线 CLI 算不出这个；用外部 LLM 模拟，模拟的也是一个和真实执行环境不同的上下文。
 
 > **给出一个 75% 的精确数字，比不给更糟**——用户会照着它改描述，而它测的不是真实 routing。
 
@@ -500,22 +500,22 @@ v0.1 输出 `Routing accuracy 75%`，是在声称「我知道 Agent 会选哪个
 ```text
   这不是真实 routing 结果。实际选择还取决于完整系统提示、
   当时加载的全部 skill 列表和对话上下文。要验证真实行为，
-  在宿主内运行。
+  在执行环境内运行。
 ```
 
 ## 5.8 `watch` 有三种模式，不能写死成 fs watcher
 
-`watch` 排在 v1.x。这里锁定两件事：**监听对象由宿主决定**，且 **B、C 两种模式
+`watch` 排在 v1.x。这里锁定两件事：**监听对象由执行环境决定**，且 **B、C 两种模式
 共用一个游标、是一份实现**。
 
-| | **A** 无运行时记录的宿主 | **B** 目录发布（dsh） | **C** 运行时度量 |
+| | **A** 无运行时记录的执行环境 | **B** 目录发布（dsh） | **C** 运行时度量 |
 |---|---|---|---|
 | 监听什么 | skill 目录的文件系统事件 | 会话事件流（append-only） | **同一条**会话事件流 |
 | 每次事件 | 重扫全库 | 移动游标读增量 | 移动游标读增量 |
 | 消费的 Signal | —（走 fs，不经 Signal 层） | `SkillInvocations` + 目录发布 | `Usage` · `ContextWindow` · `ToolCalls` · `Compaction` |
 | 能看到 | 文件变了 | 目录重发（带确切条目）· skill 被调用 · **这一轮因发现不完整整个目录未发布** | 这次会话烧了多少 · 上下文还剩多少 · 刚做了该拦的事 · 刚被压缩掉多少 |
 | 成本 | fs watcher + 重扫 | 一个游标 | 同一个游标 |
-| 噪声 | 每次文件触碰 | 宿主按 digest 去重后才有事件 | 逐事件，需自己节流 |
+| 噪声 | 每次文件触碰 | 执行环境按 digest 去重后才有事件 | 逐事件，需自己节流 |
 
 B 列第四行是这条区分最初的价值所在：「这一轮目录整个没发布」在磁盘上永远看不
 出来，而它恰好是 dsh 上最难查的失效模式。
@@ -537,14 +537,14 @@ B 和 C 是**同一条 `locate` + 同一个游标 + 同一个 `extract`**，区�
 `requires`。写 §5.8 的时候没有这层抽象，只能把两种用途描述成两种实现；现在
 C 可以直接以 `requires` 的差异接进去。
 
-### 5.8.2 不要监听宿主已经在监听的东西
+### 5.8.2 不要监听执行环境已经在监听的东西
 
 在 dsh 上用 fs watcher 是**重复劳动**：DSH 的 `skill-filesystem` 自己就在监听目录，
 变更触发 `skills/change`，`tool-skill` 在目录内容 digest 变化时重发并落库。
-去监听同一批目录，等于更差地重算宿主已经算过并记下来的结论。
+去监听同一批目录，等于更差地重算执行环境已经算过并记下来的结论。
 
 > **未决**：这条对 Claude Code / Codex 是否同样成立尚未核实。两者都有 skill 热
-> 加载，若它们同样自己监听并留下记录，A 列的适用宿主会比本节假设的更少。落地
+> 加载，若它们同样自己监听并留下记录，A 列的适用执行环境会比本节假设的更少。落地
 > A 列之前先查这一条。
 
 ### 5.8.3 硬前提：折叠必须可从 turn 边界续
@@ -659,9 +659,9 @@ agent-vitals.5m.sh` 每个 tick 顺手调用）——"tick 看到会话文件停
 插件清单声明的是 `skills` / `mcp_servers` / `apps` / `hooks`，其余 `display_name`
 `logo` `brand_color` 是市场列表元数据，**没有 webview / panel / custom view 扩展点**。
 
-所以不该按「给每个宿主做一个 tab」规划。
+所以不该按「给每个执行环境做一个 tab」规划。
 
-### 5.9.1 客户端那 5,597 行本来就是宿主无关的
+### 5.9.1 客户端那 5,597 行本来就是执行环境无关的
 
 `dsh-client/src/client/` 全部 5,597 行代码，对 DSH 的依赖**只有一处，而且是
 `import type`**（编译期消失）：
@@ -680,7 +680,7 @@ skillAudit · skillAttribution · durationAudit · sessionCwd · loopCosts · pr
 
 全部走 `useProjection?.('name')`——**注意可选链**：缺哪个投影就是 `undefined`，
 组件已经逐投影降级。也就是说，运行时契约里的 coverage 模型，**UI 层其实已经
-实现了**：拿不到 `durationAudit` 的宿主传 `undefined` 即可，组件一行不用改。
+实现了**：拿不到 `durationAudit` 的执行环境传 `undefined` 即可，组件一行不用改。
 
 ### 5.9.2 四种投递方式
 
@@ -689,9 +689,9 @@ skillAudit · skillAttribution · durationAudit · sessionCwd · loopCosts · pr
 | **静态 HTML 导出** | `agent-vitals audit --html`，双击打开 | **全部** | 数据是快照，不实时；零服务器 |
 | 本地 serve | `agent-vitals serve` → localhost | 全部 | 要 daemon（§5.8.4） |
 | TUI | `agent-vitals audit --tui` | **0**，渲染需重写 | 不用浏览器，契合终端用户 |
-| 宿主插件 tab | 仅 dsh 可行 | 全部 | 其他宿主**无此扩展点** |
+| 执行环境插件 tab | 仅 dsh 可行 | 全部 | 其他执行环境**无此扩展点** |
 
-**默认选静态 HTML 导出**：复用最大、零常驻、一个文件可直接转发，且**宿主无关**——
+**默认选静态 HTML 导出**：复用最大、零常驻、一个文件可直接转发，且**执行环境无关**——
 同一个生成器同时服务 Codex / Claude Code / WorkBuddy，不是「为 Codex 做一个」。
 
 两条落地约束：
@@ -699,7 +699,7 @@ skillAudit · skillAttribution · durationAudit · sessionCwd · loopCosts · pr
 1. **`ExportPayload` 不能直接驱动 UI。** 它是扁平化的**摘要报告**（给人和机器读），
    不是 UI 的状态。静态 HTML 要内嵌的是上面那 15 个投影的原始形状。两份载荷
    **并存，不要合并**。
-2. **`HostHidden` 规则在这里更严**（RUNTIME_EVIDENCE_CONTRACT §3.2）。静态 HTML
+2. **`HarnessHidden` 规则在这里更严**（RUNTIME_EVIDENCE_CONTRACT §3.2）。静态 HTML
    天生是要转发的，而 Codex 的 `SecurityRiskScore` 会落进 rollout。默认排除、
    且把「排除了什么」写在页面上。
 
@@ -716,7 +716,7 @@ skillAudit · skillAttribution · durationAudit · sessionCwd · loopCosts · pr
 | `dormant` | 有历史触发，但超过 `dormant_days`（默认 30）未触发 |
 | `zombie` | 装够 `zombie_age_days`（默认 14）且**终身**零触发 |
 | `too-new` | 零触发但装机不足 `zombie_age_days` |
-| `unknown` | 宿主无触发数据 |
+| `unknown` | 执行环境无触发数据 |
 
 **阈值必须显示在输出末行。**没有阈值的状态词无法解释也无法复现。
 
@@ -738,7 +738,7 @@ skillAudit · skillAttribution · durationAudit · sessionCwd · loopCosts · pr
 
 ## 7.2 缺一列的报告有价值，编一列的没有
 
-三项能力依赖 Claude Code 的 `~/.claude.json`：描述预算、加载判定、触发数据。其他宿主上必须报为不可用。
+三项能力依赖 Claude Code 的 `~/.claude.json`：描述预算、加载判定、触发数据。其他执行环境上必须报为不可用。
 
 > **绝不用装机时间或 mtime 顶替缺失的触发数。**
 
@@ -775,8 +775,8 @@ P1.5   intent-fit · --judge · fix
 
 分层依据见 §5.0。直接复用现有能力：描述预算 · 上下文成本 · 覆盖冲突 · 触发数据 · 结构 · 安全 · 基线 · 脱敏。
 
-**观察者维度为什么排进 P1**：它不是新宿主，是补回漏斗一直缺的一维——`Loaded`
-之后每一级都该带「对谁而言」。它不依赖任何新宿主、不进双实现差分护栏的风险面
+**观察者维度为什么排进 P1**：它不是新执行环境，是补回漏斗一直缺的一维——`Loaded`
+之后每一级都该带「对谁而言」。它不依赖任何新执行环境、不进双实现差分护栏的风险面
 （ENGINEERING §6.8），但它是 DSH 适配器与 Phase 3 的共同前提。晚做要返工两次。
 OpenClaw 的 `--agent` 求证也会从特例回归为这一维的正常取值。
 
@@ -786,7 +786,7 @@ DSH 的两项工作各有依赖，单独排：
 
 ```text
 DSH-1  dsh bundle 上架          可与 P1 并行；约 20 行 JS，无扫描器副本
-DSH-2  dsh host adapter         双维护下写两遍（Python + Rust），排在 Rust 稳定之后
+DSH-2  dsh harness adapter         双维护下写两遍（Python + Rust），排在 Rust 稳定之后
 ```
 
 **DSH-2 的排期在「保留 Python、双维护永久并行」修订下重新表述（2026-08）。**不再有
@@ -820,7 +820,7 @@ Agent Vitals
 └── Context Vitals
 ```
 
-> **首发宿主是 dsh，不是 Claude Code。** 两条理由：
+> **首发执行环境是 dsh，不是 Claude Code。** 两条理由：
 >
 > 1. **边际成本**。DSH 的工具注册表与技能注册表是同一个模型——同样的分层、
 >    同样的近层覆盖远层、同样的层内 rank 决胜（其文档原话：skills registry 是
@@ -895,4 +895,4 @@ npx agent-vitals        # 零安装试用，转化率天花板
 1. **`explain` 对未加载 skill 的成本展示口径**——它不占上下文，但用户想知道「修好了会花多少」。倾向：展示但标注「当前未生效」。
 2. **`overlap` Layer 1 的阈值**——Jaccard 0.60 是拍的。需在真实技能库上标注一批样本反推，否则 candidates 列表要么全是噪声要么空。
 3. **`SV203` orphaned usage record 的呈现**——`skillUsage` 里有、磁盘上没有的记录，既可能说明用户真实高频用法，也可能只是改过名（改名会切断触发历史）。两者要能区分。
-4. **多宿主并存时的默认 scope**——只报 Claude Code 还是全报？倾向默认全扫描但按宿主分组，预算只对 Claude Code 计算。
+4. **多执行环境并存时的默认 scope**——只报 Claude Code 还是全报？倾向默认全扫描但按执行环境分组，预算只对 Claude Code 计算。

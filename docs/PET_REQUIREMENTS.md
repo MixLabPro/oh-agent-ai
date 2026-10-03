@@ -1,4 +1,4 @@
-# agent-vitals 跨宿主诊断引擎 + Pet 表现层 — 需求文档
+# agent-vitals 跨执行环境诊断引擎 + Pet 表现层 — 需求文档
 
 > 本文档面向我自己。聚焦决策与取舍，跳过背景解释。读者应当熟悉 agent-vitals 现状与 Codex Pet 生态。
 
@@ -14,9 +14,9 @@
 
 ## 0. 一句话目标
 
-**核心**：把 agent-vitals 现有的"DSH-centric 诊断能力"扩展成"host-agnostic 跨宿主诊断引擎" —— 能监听 DSH / Codex / Claude Code / Gemini 的实时事件，归一化后做问题检测（SV 码 + 异常模式 + 成本/时长折叠）。
+**核心**：把 agent-vitals 现有的"DSH-centric 诊断能力"扩展成"harness-agnostic 跨执行环境诊断引擎" —— 能监听 DSH / Codex / Claude Code / Gemini 的实时事件，归一化后做问题检测（SV 码 + 异常模式 + 成本/时长折叠）。
 
-**表现层**：在诊断引擎之上，加一个 Tauri Pet app 作为可视化消费者，**让用户养一只跨宿主的 pet**，pet 的状态由诊断引擎实时驱动。
+**表现层**：在诊断引擎之上，加一个 Tauri Pet app 作为可视化消费者，**让用户养一只跨执行环境的 pet**，pet 的状态由诊断引擎实时驱动。
 
 **Pet 是奖励，不是目标。** 没有诊断引擎，pet 只是装饰；有了诊断引擎，pet 是真实的"工作状态活体报告"。
 
@@ -28,13 +28,13 @@
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│ L1: Skill 静态发现（多 host）                            │
-│   discovery.rs → 6 host skills 目录扫描                  │
+│ L1: Skill 静态发现（多 harness）                            │
+│   discovery.rs → 6 harness skills 目录扫描                  │
 │   claude-code / codex / dsh / openclaw / workbuddy / gemini│
 │   子命令：scan / doctor / list / overlap / diff / explain│
 ├──────────────────────────────────────────────────────────┤
-│ L2: Host 运行时接口（单 host）                            │
-│   host.rs   → ~/.claude.json（enabled + usage）            │
+│ L2: Harness 运行时接口（单 harness）                            │
+│   harness.rs   → ~/.claude.json（enabled + usage）            │
 │   codex.rs  → codex app-server JSON-RPC                   │
 ├──────────────────────────────────────────────────────────┤
 │ L3: 行为事件审计（仅 DSH）                                │
@@ -51,17 +51,17 @@
 
 **关键观察**：
 
-- **L1 跨宿主**：扫描 skills 目录不挑 host
+- **L1 跨执行环境**：扫描 skills 目录不挑 harness
 - **L2-L4 全部 DSH-centric**：历史驱动力（DeepSeek 团队自家项目）
-- **"跨宿主"是表面的**：L1 的局部跨宿主遮盖了 L2-L4 的 DSH 偏置
+- **"跨执行环境"是表面的**：L1 的局部跨执行环境遮盖了 L2-L4 的 DSH 偏置
 - **CLAUDE.md 已埋下伏笔**："menu bar work (Rust-Tauri)" 提示了实时消费者方向
 
 ### 1.2 这次要解决的问题
 
 **L3 是 agent-vitals 最有价值的部分**（SV 码审计 + 成本折叠），但被 DSH 锁死了。我们要：
 
-1. **抽取事件层**：让 host 事件变成 host-agnostic 流
-2. **扩展诊断能力**：SV 码从 DSH 专属变成跨宿主通用（或按 host 分别命名）
+1. **抽取事件层**：让 harness 事件变成 harness-agnostic 流
+2. **扩展诊断能力**：SV 码从 DSH 专属变成跨执行环境通用（或按 harness 分别命名）
 3. **加长驻进程能力**：当前 CLI 是一次性的，未来要支持 `watch` / 后台守护
 4. **多消费者**：诊断引擎输出是统一的，CLI / Tauri Pet / menu bar / IDE 插件都可以消费
 
@@ -72,7 +72,7 @@ Pet 不是新产品 —— **它是诊断引擎的"可视化前端之一"**，�
 ```
 诊断引擎（核心）                  消费者层
 ──────────────                  ────────
-host-agnostic event stream  ──→ agent-vitals watch（CLI）
+harness-agnostic event stream  ──→ agent-vitals watch（CLI）
                               ──→ Tauri Pet（桌面悬浮）
                               ──→ 未来：menu bar / IDE插件 / Webhook
 ```
@@ -85,13 +85,13 @@ host-agnostic event stream  ──→ agent-vitals watch（CLI）
 
 ### 2.1 诊断引擎层（核心）
 
-> 小明同时用 Codex 跑任务、Claude Code 改代码、DSH 跑 agent。他跑 `agent-vitals watch --host all`，终端持续输出三只 agent 的实时诊断 —— 哪个在跑、哪个等审批、哪个检测到危险命令、token 累计多少。诊断引擎在后台跑，他不必再切到三个 host 的不同日志去看。
+> 小明同时用 Codex 跑任务、Claude Code 改代码、DSH 跑 agent。他跑 `agent-vitals watch --harness all`，终端持续输出三只 agent 的实时诊断 —— 哪个在跑、哪个等审批、哪个检测到危险命令、token 累计多少。诊断引擎在后台跑，他不必再切到三个 harness 的不同日志去看。
 
-> 小明今天收到一条告警："Claude Code session 检测到 3 次 SV603-like 模式（`rm -rf` 模式）" —— 这条告警来自诊断引擎在 Claude Code transcript 上跑 host-agnostic 规则，**而不是 DSH 专属规则**。
+> 小明今天收到一条告警："Claude Code session 检测到 3 次 SV603-like 模式（`rm -rf` 模式）" —— 这条告警来自诊断引擎在 Claude Code transcript 上跑 harness-agnostic 规则，**而不是 DSH 专属规则**。
 
 ### 2.2 Pet 层（消费者）
 
-> 小明同时跑三只 agent，桌面悬浮窗上的 boba（小熊猫）在三种状态间切换：Codex 在跑 → `running`，Claude 等审批 → `review`，DSH 失败 → `failed`。boba 的表情真实反映三个 host 的工作状态。
+> 小明同时跑三只 agent，桌面悬浮窗上的 boba（小熊猫）在三种状态间切换：Codex 在跑 → `running`，Claude 等审批 → `review`，DSH 失败 → `failed`。boba 的表情真实反映三个 harness 的工作状态。
 
 > 小明本月 token 预算 80% 用完，boba 当天持续 `tired` 状态（自定义）。安装 pet 30 天后，boba 累计 5 个 `happy` 天 + 3 个 `angry` 天 —— 后者来自诊断引擎检测到 9 次 SV603-like 模式。
 
@@ -99,9 +99,9 @@ host-agnostic event stream  ──→ agent-vitals watch（CLI）
 
 ## 3. 范围
 
-**迭代策略：先跑通 DSH PET（端到端验证架构），再复刻到其他 host。** 每个 Phase 都是"完整端到端 + 真实可用"，不是半成品等下一 host。
+**迭代策略：先跑通 DSH PET（端到端验证架构），再复刻到其他 harness。** 每个 Phase 都是"完整端到端 + 真实可用"，不是半成品等下一 harness。
 
-**复刻路径**：DSH Pet 跑通后，**复用 0a 的整套架构**（host-events crate 抽象、Event enum、Diagnoser、Tauri state machine、symlink 接管），**只新增每个 host 自己的 JSONL 解析器**。如果哪个 host 的解析器写不下去（字段对不上、概念不对应），**回到 core/pet/normalize.rs 扩展 Event enum**，但保证 DSH 现有路径 byte-for-byte 不变。
+**复刻路径**：DSH Pet 跑通后，**复用 0a 的整套架构**（harness-events crate 抽象、Event enum、Diagnoser、Tauri state machine、symlink 接管），**只新增每个 harness 自己的 JSONL 解析器**。如果哪个 harness 的解析器写不下去（字段对不上、概念不对应），**回到 core/pet/normalize.rs 扩展 Event enum**，但保证 DSH 现有路径 byte-for-byte 不变。
 
 ### 3.0 Phase 0 — 前置整备（**2 天**）★ 必须先做
 
@@ -112,7 +112,7 @@ host-agnostic event stream  ──→ agent-vitals watch（CLI）
 |---|---|---|---|
 | **0-1** | `src/cost.rs` → `crates/agent-vitals-core/src/domain/cost.rs`，根 crate 改 re-export，`include_str!` 路径跟着改 | 半天 | `src-tauri` 依赖不上计价，0a 的"复用 cost"是空话，只能再抄一份 |
 | **0-2** | `Event` enum 补 `UsageSampled` + `UsageIdentity`（见 4.3） | 半天 | pet 心情里"预算"那一项无从实现；compaction 的钱在归一化就丢 |
-| **0-3** | `host-events` 的 source 层**调 core 谓词**，残差哨兵下沉到 tail 层 | 1 天 | 每写一个新 host 解析器就新增一个静默漏算面（0b/0c 各一次） |
+| **0-3** | `harness-events` 的 source 层**调 core 谓词**，残差哨兵下沉到 tail 层 | 1 天 | 每写一个新 harness 解析器就新增一个静默漏算面（0b/0c 各一次） |
 
 **0-1 的额外收益**：CLAUDE.md 记的"cost 计算四方锁步"
 （`src/cost.rs` ↔ `cost.py` ↔ `dsh-client TS`）会降成三方 —— wasm 也能
@@ -124,7 +124,7 @@ host-agnostic event stream  ──→ agent-vitals watch（CLI）
 生效。**修最里面那层完全无效** —— 事件在 adapter 就被丢了，折叠层的哨兵
 永远看不到它，于是哨兵报出"0 处漏算"这个**假阴性**。
 
-Tauri/host-events 是**第 13 个消费者**。如果 source 层再写一份自己的
+Tauri/harness-events 是**第 13 个消费者**。如果 source 层再写一份自己的
 "哪些事件要 tail"，同一个 bug 会以同一个形状复现。
 
 **Phase 0 成功标准**：
@@ -137,11 +137,11 @@ Tauri/host-events 是**第 13 个消费者**。如果 source 层再写一份自�
 
 ### 3.1 Phase 0a — DSH Pet（**2 周**）★ 第一步
 
-**目标**：DSH 单 host 的端到端 Pet 跑通。**这一阶段是架构验证 + UX 验证** —— 跑通后才有资格扩到其他 host。
+**目标**：DSH 单 harness 的端到端 Pet 跑通。**这一阶段是架构验证 + UX 验证** —— 跑通后才有资格扩到其他 harness。
 
-- `crates/agent-vitals-host-events/` 新 crate（I/O 边界，独立于 core）
+- `crates/agent-vitals-harness-events/` 新 crate（I/O 边界，独立于 core）
 - **只**实现 `sources/dsh.rs`：wrap `core::dsh::read_session_log`，加增量监听
-- `crates/agent-vitals-core/src/pet/normalize.rs`：host-agnostic `Event` enum（先只装 DSH 一个变体）
+- `crates/agent-vitals-core/src/pet/normalize.rs`：harness-agnostic `Event` enum（先只装 DSH 一个变体）
 - `crates/agent-vitals-core/src/pet/diagnose.rs`：复用现有 SV601–SV614（DSH 路径不变）
 - `tail-offsets.json` 持久化：DSH session offset 重启续传
 - 新子命令：`agent-vitals watch dsh` —— 长驻监听 DSH
@@ -157,14 +157,14 @@ Tauri/host-events 是**第 13 个消费者**。如果 source 层再写一份自�
 
 ### 3.2 Phase 0b — Codex Pet（**2 周**）★ 第二步
 
-**目标**：复用 0a 架构，加 Codex rollout 解析器。**这一步验证 `host-events` crate 抽象足够通用。**
+**目标**：复用 0a 架构，加 Codex rollout 解析器。**这一步验证 `harness-events` crate 抽象足够通用。**
 
 - `sources/codex.rs`：**从零写** rollout JSONL 解析器
   - 解析 `session_meta` / `turn_context` / `response_item` / `event_msg`
   - 归一化到 `Event` enum（**应与 DSH 路径产生相同结构的 Event**）
 - `Event` enum 加 Codex 变体字段（如有 DSH 没有的）
-- `Diagnoser` 验证跨 host 同一规则对 DSH/Codex 同样工作
-- Tauri Pet app 加 DSH+Codex 双 host 并发
+- `Diagnoser` 验证跨 harness 同一规则对 DSH/Codex 同样工作
+- Tauri Pet app 加 DSH+Codex 双 harness 并发
 - 黄金测试覆盖 Codex rollout fixture
 
 **Phase 0b 成功标准**：
@@ -180,20 +180,20 @@ Tauri/host-events 是**第 13 个消费者**。如果 source 层再写一份自�
   - 解析 10 种 hook event（UserPromptSubmit / PreToolUse / PostToolUse / Notification / Stop / SessionStart / ...）
   - 归一化到 `Event` enum
 - `Diagnoser` 验证 Claude Code 上 SV 规则也工作
-- Tauri Pet app 三 host 并发
+- Tauri Pet app 三 harness 并发
 - 黄金测试覆盖 Claude transcript fixture
 
 **Phase 0c 成功标准**：
 1. Claude Code 跑任务时 pet 状态正确切换
-2. 三 host 同时活跃时聚合策略不闪动
-3. 三个 host 的同一逻辑事件产生等价 Event（核心抽象验证完成）
+2. 三 harness 同时活跃时聚合策略不闪动
+3. 三个 harness 的同一逻辑事件产生等价 Event（核心抽象验证完成）
 
 ### 3.4 Phase 1 — Gemini 补充（**3 天，可选**）
 
 - 用户 onboarding 弹窗
 - `~/.gemini/settings.json` 幂等注入 hook
 - 卸载 pet 时清理
-- 不引入新诊断能力，只补一个无 JSONL 的 host
+- 不引入新诊断能力，只补一个无 JSONL 的 harness
 
 ### 3.5 Pet 持久化与养成 — P2（Phase 0a 内同步）
 
@@ -213,7 +213,7 @@ Tauri/host-events 是**第 13 个消费者**。如果 source 层再写一份自�
 | ❌ Web 版 | Tauri 桌面是终态 |
 | ❌ pet 互动动画（摸头、喂食）| v1.1 后再说 |
 | ❌ 自定义 sprite 编辑器 | 用户用 Codex Pet 包 |
-| ❌ 复用 dsh-client sessionProjections | 浏览器宿主专属路径 |
+| ❌ 复用 dsh-client sessionProjections | 浏览器执行环境专属路径 |
 
 ---
 
@@ -240,20 +240,20 @@ Tauri/host-events 是**第 13 个消费者**。如果 source 层再写一份自�
 │  └────────────────────┬───────────────────────────────────┘  │
 │                       │                                          │
 │  ┌────────────────────▼───────────────────────────────────┐  │
-│  │ 诊断器：跨宿主问题检测                              │  │
-│  │  - SV 码扩展（host-agnostic 命名空间）              │  │
+│  │ 诊断器：跨执行环境问题检测                              │  │
+│  │  - SV 码扩展（harness-agnostic 命名空间）              │  │
 │  │  - 异常模式匹配（危险命令、审批超时、长 hook）│  │
 │  │  - 成本/时长折叠（复用现有 cost/duration）      │  │
 │  └────────────────────────────────────────────────────────┘  │
 │                            ↑ 事件流                              │
 │  ┌────────────────────────────────────────────────────────┐  │
-│  │ normalize.rs（core crate）：host-agnostic Event enum  │  │
+│  │ normalize.rs（core crate）：harness-agnostic Event enum  │  │
 │  └────────────────────┬───────────────────────────────────┘  │
 │                       │ 归一化                                   │
 ├────────────────────────────────────────────────────────────────┤
 │                   事件源层（I/O）                                │
 │  ┌────────────────────────────────────────────────────────┐  │
-│  │ crates/agent-vitals-host-events/                     │  │
+│  │ crates/agent-vitals-harness-events/                     │  │
 │  │  - tail.rs：notify crate 文件 append 监听           │  │
 │  │  - sources/dsh.rs       (wrap core::dsh)              │  │
 │  │  - sources/codex.rs     (从零写)                       │  │
@@ -272,10 +272,10 @@ agent-vitals/
 │   ├── agent-vitals-core/           # 现有：纯计算（不动结构）
 │   │   ├── src/...
 │   │   └── pet/                     # ← 新增：诊断引擎核心
-│   │       ├── normalize.rs         # host-agnostic Event enum
-│   │       └── diagnose.rs          # 跨宿主问题检测
+│   │       ├── normalize.rs         # harness-agnostic Event enum
+│   │       └── diagnose.rs          # 跨执行环境问题检测
 │   │
-│   ├── agent-vitals-host-events/    # ← 新增：I/O 边界
+│   ├── agent-vitals-harness-events/    # ← 新增：I/O 边界
 │   │   ├── src/
 │   │   │   ├── lib.rs               # trait EventSource
 │   │   │   ├── tail.rs              # notify 文件监听
@@ -315,17 +315,17 @@ agent-vitals/
 **Event enum（core::pet::normalize）：**
 
 ```rust
-pub enum Host { Dsh, Codex, ClaudeCode }
+pub enum Harness { Dsh, Codex, ClaudeCode }
 
 pub enum Event {
-    SessionStarted { host: Host, session_id: String, ts: Instant },
-    ToolCalled { host: Host, tool: String, ts: Instant },
-    ToolFinished { host: Host, tool: String, error: Option<ErrorCode>, ts: Instant },
-    ApprovalAsked { host: Host, approval_id: String, ts: Instant },
-    ApprovalDecided { host: Host, approval_id: String, allowed: bool, ts: Instant },
-    TurnEnded { host: Host, reason: TurnEndReason, ts: Instant },
-    CompactionStarted { host: Host, ts: Instant },
-    CompactionEnded { host: Host, ts: Instant },
+    SessionStarted { harness: Harness, session_id: String, ts: Instant },
+    ToolCalled { harness: Harness, tool: String, ts: Instant },
+    ToolFinished { harness: Harness, tool: String, error: Option<ErrorCode>, ts: Instant },
+    ApprovalAsked { harness: Harness, approval_id: String, ts: Instant },
+    ApprovalDecided { harness: Harness, approval_id: String, allowed: bool, ts: Instant },
+    TurnEnded { harness: Harness, reason: TurnEndReason, ts: Instant },
+    CompactionStarted { harness: Harness, ts: Instant },
+    CompactionEnded { harness: Harness, ts: Instant },
 
     /// **用量样本 —— pet 心情里"预算"那一项的唯一来源。**
     ///
@@ -349,7 +349,7 @@ pub enum Event {
     /// 只归一化两个边界事件，这笔钱在归一化那一步就丢了 —— 与 2026-08
     /// 那次"日历显示 0"是同一个形状的错误。
     UsageSampled {
-        host: Host,
+        harness: Harness,
         identity: UsageIdentity,
         buckets: [i64; 4],            // uncached_input / output / cache_read / cache_write
         model: Option<String>,
@@ -386,19 +386,19 @@ pub trait Diagnoser {
 
 pub struct Finding {
     pub code: DiagnosticCode,    // SV601 / SV603 / new...
-    pub host: Host,
+    pub harness: Harness,
     pub severity: Severity,
     pub message: String,
     pub ts: Instant,
 }
 ```
 
-**事件源接口（host-events crate）：**
+**事件源接口（harness-events crate）：**
 
 ```rust
 #[async_trait]
 pub trait EventSource: Send + Sync {
-    fn host(&self) -> Host;
+    fn harness(&self) -> Harness;
     /// 从 offset 开始监听，产出 Event 流
     fn tail(&self, from: u64) -> BoxStream<'static, Result<Event, ParseError>>;
 }
@@ -416,7 +416,7 @@ pub trait EventSource: Send + Sync {
 - Pet 依赖诊断引擎，不能反过来
 - 投资先打核心，可视化后做
 
-### ADR-002：新建 `agent-vitals-host-events` crate 隔离 I/O
+### ADR-002：新建 `agent-vitals-harness-events` crate 隔离 I/O
 
 **决策**：事件监听和 JSONL 解析放新 crate
 **理由**：
@@ -424,14 +424,14 @@ pub trait EventSource: Send + Sync {
 - 文件监听（notify crate）、hook 注入都是 I/O，不能进 core
 - 新 crate 是 I/O 边界，core 仍是纯函数
 
-### ADR-003：SV 码扩展策略 —— 通用码 + host-specific 后缀
+### ADR-003：SV 码扩展策略 —— 通用码 + harness-specific 后缀
 
 **决策**：
-- 跨 host 通用的问题用**通用码**（如 SV601 "高危 shell 命令" 在三个 host 都适用）
-- 仅特定 host 才有问题用**后缀码**（如 `SV611.DSH` 仅 DSH 有的事件类型）
+- 跨 harness 通用的问题用**通用码**（如 SV601 "高危 shell 命令" 在三个 harness 都适用）
+- 仅特定 harness 才有问题用**后缀码**（如 `SV611.DSH` 仅 DSH 有的事件类型）
 **理由**：
 - 完全独立命名会丢语义（如 DSH 的"工具调用 + 失败"和 Claude Code 的同名事件本质是同一种问题）
-- 完全统一命名会丢失 host 上下文（同一码在不同 host 含义微妙不同）
+- 完全统一命名会丢失 harness 上下文（同一码在不同 harness 含义微妙不同）
 
 ### ADR-004：Pull 优先于 Hook
 
@@ -453,10 +453,10 @@ pub trait EventSource: Send + Sync {
 
 ### ADR-006：单一权威 pet 目录 + symlink 接管
 
-**决策**：`~/.agent-vitals/pets/` 权威，其他 host 目录全部 symlink
+**决策**：`~/.agent-vitals/pets/` 权威，其他 harness 目录全部 symlink
 **理由**：
 - 单一来源真相，避免状态不一致
-- 现有 host 客户端无需修改（只读不在意 symlink）
+- 现有 harness 客户端无需修改（只读不在意 symlink）
 - 用户只装一次，UX 简单
 
 ### ADR-007：状态聚合先用"最新胜出"
@@ -464,7 +464,7 @@ pub trait EventSource: Send + Sync {
 **决策**：Phase 2 先用 last-write-wins + 去抖
 **理由**：
 - 实现最简，验证基本 UX
-- 多 host 并发场景少见（用户大多数时间只跑一个 agent）
+- 多 harness 并发场景少见（用户大多数时间只跑一个 agent）
 - 升级到"最严重胜出"只需替换聚合函数
 
 ### ADR-008：Pet 状态机放 Tauri，不放 core
@@ -534,11 +534,11 @@ Rust 侧的 `#[derive(Serialize)]` 结构与 JS 侧显式字段对齐（lockstep
 
 ## 6. 实施分阶段
 
-**核心原则：一次只搞一个 host，每个阶段都是端到端可演示的完整产品。**
+**核心原则：一次只搞一个 harness，每个阶段都是端到端可演示的完整产品。**
 
 ```
 P0a (2 周): DSH Pet 端到端      → 架构验证 + UX 验证
-P0b (2 周): + Codex rollout     → host-events crate 抽象验证
+P0b (2 周): + Codex rollout     → harness-events crate 抽象验证
 P0c (2 周): + Claude transcript → Event 归一化三层验证
 P1 (3 天):  + Gemini hook       → push 模式补充
 ```
@@ -554,7 +554,7 @@ P1 (3 天):  + Gemini hook       → push 模式补充
   - [ ] `crates/agent-vitals-wasm` 验证能 `use agent_vitals_core::cost`
 - [ ] **0-2** `core::pet::normalize` 的 `Event` 补 `UsageSampled` +
       `UsageIdentity`（两态：`Step{turn,step}` / `Standalone(id)`）
-- [ ] **0-3** `host-events` source 层调 core 谓词；残差哨兵下沉到 tail 层
+- [ ] **0-3** `harness-events` source 层调 core 谓词；残差哨兵下沉到 tail 层
   - [ ] 一条测试断言 source 与 core 用同一谓词（防第 13 份拷贝）
 
 **验收**：三条成功标准（见 3.0）全绿，且现有 645 Python / 143+192 Rust /
@@ -567,11 +567,11 @@ P1 (3 天):  + Gemini hook       → push 模式补充
 **目标**：从架构到 UX 全跑通 DSH 一条线
 
 **诊断引擎侧**：
-- [ ] `crates/agent-vitals-host-events/` 新 crate
+- [ ] `crates/agent-vitals-harness-events/` 新 crate
   - [ ] `tail.rs`：notify crate 文件 append 监听，offset-based
   - [ ] `offset_store.rs`：tail-offsets.json 持久化
 - [ ] `sources/dsh.rs`：wrap `core::dsh::read_session_log`，加增量
-- [ ] `core/pet/normalize.rs`：host-agnostic Event enum（先只装 DSH 变体）
+- [ ] `core/pet/normalize.rs`：harness-agnostic Event enum（先只装 DSH 变体）
 - [ ] `core/pet/diagnose.rs`：复用现有 SV601–SV614，**不改现有路径**
 - [ ] CLI 子命令 `watch dsh` —— 长驻监听 + JSON to stdout
 
@@ -579,7 +579,7 @@ P1 (3 天):  + Gemini hook       → push 模式补充
 - [ ] `src-tauri/` Tauri 工程脚手架
 - [ ] 浮窗配置（chromeless transparent 231×250）
 - [ ] `commands.rs`：`#[tauri::command]` 暴露
-- [ ] `state_machine.rs`：Event → Pet 9 状态聚合 + 去抖（单 host 版本）
+- [ ] `state_machine.rs`：Event → Pet 9 状态聚合 + 去抖（单 harness 版本）
 - [ ] `bootstrap.rs`：symlink 接管
 - [ ] 前端：sprite 渲染（CSS background-position）+ 状态气泡
 - [ ] pet.json schema 验证 + spritesheet 解码
@@ -602,9 +602,9 @@ P1 (3 天):  + Gemini hook       → push 模式补充
   - 归一化到 `Event` enum
 - [ ] `Event` enum 加 Codex 变体字段（如有 DSH 没有的）
 - [ ] `Diagnoser` 验证同一规则对 DSH/Codex 同样工作
-- [ ] Tauri Pet app 加 DSH+Codex 双 host 并发
-- [ ] `state_machine.rs` 升级到多 host 聚合（最新胜出 + 去抖）
-- [ ] `tail-offsets.json` 按 host 分别记录
+- [ ] Tauri Pet app 加 DSH+Codex 双 harness 并发
+- [ ] `state_machine.rs` 升级到多 harness 聚合（最新胜出 + 去抖）
+- [ ] `tail-offsets.json` 按 harness 分别记录
 - [ ] 黄金测试覆盖 Codex rollout fixture
 
 **Phase 0b 成功标准**：
@@ -623,29 +623,29 @@ P1 (3 天):  + Gemini hook       → push 模式补充
   - 解析 10 种 hook event
   - 归一化到 `Event` enum
 - [ ] `Diagnoser` 验证 Claude Code 上 SV 规则同样工作
-- [ ] Tauri Pet app 三 host 并发
+- [ ] Tauri Pet app 三 harness 并发
 - [ ] 黄金测试覆盖 Claude transcript fixture
 
 **Phase 0c 成功标准**：
 1. ✅ Claude Code 跑任务时 pet 状态正确切换
-2. ✅ 三 host 同时活跃时聚合不闪动
-3. ✅ 三个 host 同一逻辑事件产生等价 Event（核心抽象三层验证完成）
+2. ✅ 三 harness 同时活跃时聚合不闪动
+3. ✅ 三个 harness 同一逻辑事件产生等价 Event（核心抽象三层验证完成）
 
 ### Phase 1 — + Gemini hook（**可选，3 天**）
 
 - [ ] 用户 onboarding 弹窗
 - [ ] `~/.gemini/settings.json` 幂等注入 hook
 - [ ] 卸载 pet 时清理
-- [ ] 不引入新诊断能力，只补一个无 JSONL 的 host
+- [ ] 不引入新诊断能力，只补一个无 JSONL 的 harness
 
-### Phase 2 — 跨 host 一次性诊断（**1 周**）
+### Phase 2 — 跨 harness 一次性诊断（**1 周**）
 
-**目标**：现有 `behavior` / `duration-audit` 子命令支持跨 host
+**目标**：现有 `behavior` / `duration-audit` 子命令支持跨 harness
 
-- [ ] `behavior --host codex <rollout>` 复用诊断器
-- [ ] `behavior --host claude <transcript>` 复用诊断器
-- [ ] `duration-audit --host all` 跨 host 聚合
-- [ ] 黄金测试覆盖三个 host 的 fixture
+- [ ] `behavior --harness codex <rollout>` 复用诊断器
+- [ ] `behavior --harness claude <transcript>` 复用诊断器
+- [ ] `duration-audit --harness all` 跨 harness 聚合
+- [ ] 黄金测试覆盖三个 harness 的 fixture
 
 ### Phase 3 — Pet 养成与心情系统（**1 周**）
 
@@ -663,7 +663,7 @@ P1 (3 天):  + Gemini hook       → push 模式补充
 磁盘事件（JSONL append）
    │
    ▼
-host-events crate（notify + 解析）
+harness-events crate（notify + 解析）
    │
    ▼
 归一化（core::pet::normalize）
@@ -698,12 +698,12 @@ EventBus ──→ Tauri 后端 state_machine
 |---|---|
 | `core::dsh::parse_session_log` | `sources/dsh.rs` 的基础 |
 | `core::behavior::audit` | `diagnose.rs` 的现有规则集 |
-| `core::usage::token_by_model` | 跨 host 成本折叠 |
+| `core::usage::token_by_model` | 跨 harness 成本折叠 |
 | `core::usage::token_by_date_model` | 按 (日期, 模型) 折 —— 预算/日历口径 |
 | `core::duration::*` | 时长折叠，已在 core，可直接用 |
 | ~~`src/cost::cost_report`~~ | ⚠️ **当前复用不了，见下** |
-| `src/host.rs`（~/.claude.json 读取）| host 检测 |
-| `src/discovery.rs`（host 路径枚举）| 扩展为 EventSource 注册表 |
+| `src/harness.rs`（~/.claude.json 读取）| harness 检测 |
+| `src/discovery.rs`（harness 路径枚举）| 扩展为 EventSource 注册表 |
 
 > **⚠️ `cost_report` 现在在 binary crate 里，`src-tauri` depend 不上。**
 >
@@ -725,7 +725,7 @@ EventBus ──→ Tauri 后端 state_machine
 
 | 现有 | 不复用原因 |
 |---|---|
-| `dsh-client/src/host/index.ts::sessionProjections` | DSH 浏览器宿主专属路径，Pet 走独立路径 |
+| `dsh-client/src/harness/index.ts::sessionProjections` | DSH 浏览器执行环境专属路径，Pet 走独立路径 |
 | `dsh-client` 的 8 个投影 `apply()` 过滤器 | 浏览器专属；但**判据必须共用**，见下 |
 | `src/cli.rs::oneline/calendar` | Python 状态层 —— **v1 先不重写**，见下 |
 | `scripts/agent_vitals/agent/state.py` | 同上 |
@@ -752,10 +752,10 @@ EventBus ──→ Tauri 后端 state_machine
 
 | 现状 | 应该演进为 |
 |---|---|
-| `behavior <DSH log>` 专属 | `behavior --host all` 或 `behavior --host codex/claude/dsh` |
+| `behavior <DSH log>` 专属 | `behavior --harness all` 或 `behavior --harness codex/claude/dsh` |
 | `duration-audit <DSH log>` 专属 | 同上 |
-| `cost` 是 DSH 数据驱动 | 跨 host 聚合（host-agnostic Event → token_by_model）|
-| L4 dsh-client 仅 DSH 浏览器 | 未来扩展到其他 host 的浏览器宿主 |
+| `cost` 是 DSH 数据驱动 | 跨 harness 聚合（harness-agnostic Event → token_by_model）|
+| L4 dsh-client 仅 DSH 浏览器 | 未来扩展到其他 harness 的浏览器执行环境 |
 
 ---
 
@@ -765,13 +765,13 @@ EventBus ──→ Tauri 后端 state_machine
 |---|---|---|
 | Codex rollout JSONL 格式频繁变更 | Phase 0 解析器失效 | 锁定测试 fixture；版本断言（schema_version 字段）|
 | Claude Code transcript 路径 hash 算法变化 | 找不到文件 | 只用 glob 扫描 `~/.claude/projects/*/*.jsonl` |
-| 多 host tail 同时启动时 CPU 峰值 | CLI 卡顿 | 串行启动，每 200ms 一个 |
+| 多 harness tail 同时启动时 CPU 峰值 | CLI 卡顿 | 串行启动，每 200ms 一个 |
 | symlink 在 Windows 上权限问题 | Pet 接管失败 | 检测 OS + 退化为复制 |
 | Tauri 浮窗在 Wayland 上不稳 | Linux 演示失败 | fallback 到 menu bar tray icon |
 | Pet dex URL scheme 注册冲突 | 不能用 `petdex://<slug>` | 改用 `agent-vitals-pet://<slug>` |
-| 跨 host SV 码命名冲突 | 现有 DSH SV601 含义被覆盖 | 用 ADR-003 通用码 + 后缀命名空间 |
-| core crate 变 I/O 依赖 | wasm build 失效 | 严格 ADR-002，host-events 独立 crate |
-| **新 host 的新事件类型带 token 但没被解析** | **静默少算钱，无人发现** | **残差哨兵（守恒律 3.5）+ source 层宽进** |
+| 跨 harness SV 码命名冲突 | 现有 DSH SV601 含义被覆盖 | 用 ADR-003 通用码 + 后缀命名空间 |
+| core crate 变 I/O 依赖 | wasm build 失效 | 严格 ADR-002，harness-events 独立 crate |
+| **新 harness 的新事件类型带 token 但没被解析** | **静默少算钱，无人发现** | **残差哨兵（守恒律 3.5）+ source 层宽进** |
 | **source 层自写一份"哪些事件要 tail"** | 修 core 无效，bug 以旧形状复现 | Phase 0-3：source 调 core 谓词 + 测试断言 |
 | **Pet 与 CLI 数字不一致** | 用户不知道信哪个 | 跨投影相等测试（守恒律 3.6）|
 | **状态层过早重写成 Rust** | 丢掉刚钉稳的跨调用不变量 | v1 走 subprocess，见 8.2 |
@@ -786,10 +786,10 @@ EventBus ──→ Tauri 后端 state_machine
 
 | 层次 | 文件 | 引入时机 | 验证内容 |
 |---|---|---|---|
-| **单元** | `core/pet/diagnose.rs` | Phase 0a | 诊断规则、host-agnostic 命名 |
-| **Fixture** | `host-events/tests/fixtures/dsh/*.jsonl` | **Phase 0a（先有）** | DSH 解析器不退化 |
-| **Fixture** | `host-events/tests/fixtures/codex/*.jsonl` | Phase 0b | Codex rollout 解析（**需在本机装 Codex 后跑真实样本抓取**）|
-| **Fixture** | `host-events/tests/fixtures/claude/*.jsonl` | Phase 0c | Claude Code transcript 解析（**需在本机装 Claude Code 后跑真实样本**）|
+| **单元** | `core/pet/diagnose.rs` | Phase 0a | 诊断规则、harness-agnostic 命名 |
+| **Fixture** | `harness-events/tests/fixtures/dsh/*.jsonl` | **Phase 0a（先有）** | DSH 解析器不退化 |
+| **Fixture** | `harness-events/tests/fixtures/codex/*.jsonl` | Phase 0b | Codex rollout 解析（**需在本机装 Codex 后跑真实样本抓取**）|
+| **Fixture** | `harness-events/tests/fixtures/claude/*.jsonl` | Phase 0c | Claude Code transcript 解析（**需在本机装 Claude Code 后跑真实样本**）|
 | **黄金** | `tests/golden/watch_dsh.json` | Phase 0a | watch CLI byte-for-byte |
 | **黄金** | `tests/golden/watch_codex.json` | Phase 0b | 同上 |
 | **黄金** | `tests/golden/watch_claude.json` | Phase 0c | 同上 |
@@ -809,15 +809,15 @@ EventBus ──→ Tauri 后端 state_machine
 | 1. DSH 路径与现有实现 byte-for-byte 一致 | **Phase 0a**（黄金测试，**最高优先级**）|
 | 2. tail 续传（中断 + 重启）| Phase 0a |
 | 3. Pet 状态去抖 | Phase 0a |
-| **3.5. 残差哨兵在真实语料上为空** | **Phase 0a**（每个 host 各测一次）|
+| **3.5. 残差哨兵在真实语料上为空** | **Phase 0a**（每个 harness 各测一次）|
 | **3.6. Pet 与 CLI 对同一份数据算出同一个数** | **Phase 0a** |
 | 4. DSH + Codex 同事件等价 | Phase 0b |
-| 5. 三 host 聚合不闪动 | Phase 0c |
-| 6. 三 host 同逻辑事件等价 | Phase 0c |
+| 5. 三 harness 聚合不闪动 | Phase 0c |
+| 6. 三 harness 同逻辑事件等价 | Phase 0c |
 
-**第 3.5 条（残差哨兵）** —— 每个 host 的 fixture 上断言
+**第 3.5 条（残差哨兵）** —— 每个 harness 的 fixture 上断言
 `unaccounted_usage == []`。这是"新事件类型出现时不会静默漏算"的唯一
-自动化保障：宿主改格式、新增带 token 的事件类型时，这条直接变红，而不是
+自动化保障：执行环境改格式、新增带 token 的事件类型时，这条直接变红，而不是
 等用户在菜单栏上肉眼发现数字不对（2026-08 就是这么发现的）。
 
 > **哨兵有个反直觉的前提：它上面每一层都必须是"宽进"的。** 哨兵最初
@@ -844,7 +844,7 @@ EventBus ──→ Tauri 后端 state_machine
 
 ## 11. 开放问题
 
-1. **SV 码命名空间**：完全保留 DSH 数字命名 vs 引入 host 前缀（推荐后者）？
+1. **SV 码命名空间**：完全保留 DSH 数字命名 vs 引入 harness 前缀（推荐后者）？
 
 2. ~~**watch 长驻进程的进程模型**~~ → **已定：CLI 进程内，不上 launchd**
 
@@ -855,7 +855,7 @@ EventBus ──→ Tauri 后端 state_machine
 
 3. ~~**诊断引擎是否独立二进制**~~ → **已定：CLI 子命令 + NDJSON stdout**
 
-   `agent-vitals watch <host>` 一行一个诊断事件输出到 stdout，**它是诊断
+   `agent-vitals watch <harness>` 一行一个诊断事件输出到 stdout，**它是诊断
    引擎唯一稳定、可脚本化的出口**。Tauri / menu bar / 未来的 IDE 插件全都
    `spawn` 这个 CLI 读 stdout，**不各自 link core**。
 
@@ -872,7 +872,7 @@ EventBus ──→ Tauri 后端 state_machine
    不能各起一个 tail —— 否则 offset 文件会被两个进程互相覆盖，且两个
    界面会显示不一致的数字（守恒律 3.6）。
 
-5. **host-agnostic Event 的 EventMsg 字段取舍**：DSH event_msg 字段很多，哪些保留？
+5. **harness-agnostic Event 的 EventMsg 字段取舍**：DSH event_msg 字段很多，哪些保留？
 
    已知的一条硬约束：**带 token 的事件一个都不能省**。DSH 全量扫 38 个
    真实会话，带 token 的只有三种（`assistant/chunk`、`assistant/message`、
@@ -885,18 +885,18 @@ EventBus ──→ Tauri 后端 state_machine
 
 | 术语 | 含义 |
 |---|---|
-| **诊断引擎** | 跨 host 事件归一化 + 问题检测的核心能力 |
-| **Host** | coding agent 客户端（Codex / Claude Code / DSH / Gemini / OpenClaw / WorkBuddy）|
-| **Event** | host-agnostic 事件（core::pet::normalize 定义）|
+| **诊断引擎** | 跨 harness 事件归一化 + 问题检测的核心能力 |
+| **Harness** | coding agent 客户端（Codex / Claude Code / DSH / Gemini / OpenClaw / WorkBuddy）|
+| **Event** | harness-agnostic 事件（core::pet::normalize 定义）|
 | **Finding** | 诊断引擎输出的问题（含 SV 码）|
 | **EventBus** | tokio broadcast<Event>，多消费者订阅 |
 | **诊断器** | Event → Finding 的纯函数集（可插拔）|
 | **Pet** | 一个 sprite 包（pet.json + spritesheet），表现层概念 |
 | **9 状态** | pet 的 idle / running / running-right / running-left / waving / jumping / failed / waiting / review |
-| **Pull** | tail host 写入的 JSONL 日志 |
-| **Push** | 注册 hook 让 host 主动调用我们 |
+| **Pull** | tail harness 写入的 JSONL 日志 |
+| **Push** | 注册 hook 让 harness 主动调用我们 |
 | **权威位置** | `~/.agent-vitals/pets/`，pet 包数据的单一来源 |
-| **接管** | 把 pet 包从 host 自己的目录移到权威位置，用 symlink 兼容 |
+| **接管** | 把 pet 包从 harness 自己的目录移到权威位置，用 symlink 兼容 |
 
 ## 附录 B：关键文件路径
 
@@ -904,19 +904,19 @@ EventBus ──→ Tauri 后端 state_machine
 
 | 路径 | 引入 phase | 用途 |
 |---|---|---|
-| `crates/agent-vitals-host-events/src/lib.rs` | 0a | EventSource trait |
-| `crates/agent-vitals-host-events/src/tail.rs` | 0a | notify 文件监听 |
-| `crates/agent-vitals-host-events/src/offset_store.rs` | 0a | tail 续传 |
-| `crates/agent-vitals-host-events/src/sources/dsh.rs` | 0a | DSH 适配（wrap 现有） |
-| `crates/agent-vitals-core/src/pet/normalize.rs` | 0a | host-agnostic Event enum |
+| `crates/agent-vitals-harness-events/src/lib.rs` | 0a | EventSource trait |
+| `crates/agent-vitals-harness-events/src/tail.rs` | 0a | notify 文件监听 |
+| `crates/agent-vitals-harness-events/src/offset_store.rs` | 0a | tail 续传 |
+| `crates/agent-vitals-harness-events/src/sources/dsh.rs` | 0a | DSH 适配（wrap 现有） |
+| `crates/agent-vitals-core/src/pet/normalize.rs` | 0a | harness-agnostic Event enum |
 | `crates/agent-vitals-core/src/pet/diagnose.rs` | 0a | 诊断器 |
 | `src/watch.rs` | 0a | CLI `watch dsh` 子命令 |
 | `src-tauri/src/commands.rs` | 0a | Pet Tauri command handlers |
-| `src-tauri/src/state_machine.rs` | 0a | Pet 状态聚合（先单 host）|
+| `src-tauri/src/state_machine.rs` | 0a | Pet 状态聚合（先单 harness）|
 | `src-tauri/src/persistence.rs` | 0a | pet-state.json |
 | `src-tauri/src/bootstrap.rs` | 0a | symlink 接管 |
-| `crates/agent-vitals-host-events/src/sources/codex.rs` | **0b** | Codex rollout 适配（从零写）|
-| `crates/agent-vitals-host-events/src/sources/claude.rs` | **0c** | Claude Code 适配（从零写）|
+| `crates/agent-vitals-harness-events/src/sources/codex.rs` | **0b** | Codex rollout 适配（从零写）|
+| `crates/agent-vitals-harness-events/src/sources/claude.rs` | **0c** | Claude Code 适配（从零写）|
 | `docs/PET_REQUIREMENTS.md` | 0a | 本文档 |
 
 **Phase 0（前置）涉及的文件**：
@@ -935,6 +935,6 @@ EventBus ──→ Tauri 后端 state_machine
 |---|---|
 | `crates/agent-vitals-core/src/dsh.rs` | 不动；只被 sources/dsh.rs wrap |
 | `crates/agent-vitals-core/src/domain/behavior.rs` | 演进（扩展 SV 命名空间）|
-| `dsh-client/src/host/index.ts` | 不动；Pet 走独立路径 |
+| `dsh-client/src/harness/index.ts` | 不动；Pet 走独立路径 |
 | `scripts/agent_vitals/agent/state.py` | 不动；Pet 用 Rust 重写 |
 | `src/main.rs` CLI 子命令 | 增量加 `watch`，其他不动 |

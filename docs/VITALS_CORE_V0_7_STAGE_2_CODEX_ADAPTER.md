@@ -11,7 +11,7 @@
 >
 > 关联：`VITALS_CORE_V0_7_ADAPTER_DECISIONS.md`（决策 A/B/C/D + §4.2 修订）、
 > `VITALS_CORE_V0_7_DATA_PLANE_SPEC.md`、`VITALS_CORE_V0_7_STAGE_1_CLAUDE_ADAPTER.md`、
-> `crates/agent-vitals-core/src/adapters/hosts/codex/sessions/usage.rs`（+ Python 镜像 `codex_usage.py`）、
+> `crates/agent-vitals-core/src/adapters/harnesses/codex/sessions/usage.rs`（+ Python 镜像 `codex_usage.py`）、
 > `crates/agent-vitals-core/src/contracts/usage_fact.rs`（+ `usage_fact.py`）。
 
 ## 0. 当前结论
@@ -44,7 +44,7 @@ CLI。Stage 2 与 Stage 1 同构，差异只在 codex 线格式的四个映射�
 - 不改 `CODEX_TOKEN_FIELDS` 5 桶键序、不改 fold 的 5 桶输出形状（键序是字节一致
   的一部分，不能重排）；reasoning 子桶继续留在 fold 形状里做展示归因；
 - 不改 codex-cost / codex session navigation / 日历视图；
-- 不接入新宿主（dsh 是 Stage 3）；**不碰 workbuddy 流**。
+- 不接入新执行环境（dsh 是 Stage 3）；**不碰 workbuddy 流**。
 
 ## 2. 数据源与处理架构
 
@@ -84,14 +84,14 @@ model 游标为空 → 不 emit（`token_count_before_turn_context`）；连续 
 → 不 emit（同一计量复读）；其余 → emit。
 
 ```python
-# scripts/agent_vitals/agent/codex_usage_fact.py（host adapter，不进 Core）
+# scripts/agent_vitals/agent/codex_usage_fact.py（harness adapter，不进 Core）
 def codex_rollouts_to_usage_facts(
     paths, *, machine_namespace, source_profile,
 ) -> UsageFactEmitResult: ...      # paths：一个或多个 rollout 文件（§6.11 多路径）
 ```
 
 ```rust
-// src/agent/codex_usage_fact.rs（host adapter，与 Python 逐字节对齐）
+// src/agent/codex_usage_fact.rs（harness adapter，与 Python 逐字节对齐）
 pub fn codex_rollouts_to_usage_facts(
     paths: &[PathBuf], machine_namespace: &str, source_profile: &str, ...
 ) -> UsageFactEmitResult
@@ -101,7 +101,7 @@ pub fn codex_rollouts_to_usage_facts(
 codex-cost 同根）。同次发射内按 `source_event_id`（§3.3，rollout-stem 命名空间）
 去重：同一物理 rollout（同 stem）经 live/archive 双路进入时保留一条 + duplicate
 attempt（§3.5.3）；不同 stem（即便同一逻辑 session）**永不**共享 offset 命名空间、
-绝不误合并。Core 继续只负责宿主无关的 schema / builder / `fact_id`。
+绝不误合并。Core 继续只负责执行环境无关的 schema / builder / `fact_id`。
 
 共享观察者的归属（关键实现决策）：codex fold 的 token_count 分支在 **core**
 `codex_usage.rs` 是单一真相。Stage 2 建议先把该分支抽成一个共享 per-event 步骤
@@ -228,16 +228,16 @@ provenance」。逐条落到 codex：
    确定性派生）保证 writer 侧精确去重——emitter 只保证同一物理文件重读时产出
    相同 fact_id。
 
-### 3.6 host / observation_kind / time / source_profile
+### 3.6 harness / observation_kind / time / source_profile
 
 | 字段 | 值 |
 |---|---|
-| `host` | `"codex"` |
+| `harness` | `"codex"` |
 | `machine_namespace` | 调用方**必传且非空**，缺失或空串即调用级失败（exit 2），Stage 1c §9 同纪律 |
 | `source_profile` | 必填；locate/R2a 前的处理沿用 Stage 1 现状（Stage 1 遗留的
   `source_profile="default"` 属后续清理，不夹带进 Stage 2） |
 | `observation_kind` | **`"assistant-usage"`**（已拍板）——per-request delta model usage
-  与 Claude 同构；宿主差异由 `host` / `provider` / `model_raw` 表达，不另开
+  与 Claude 同构；执行环境差异由 `harness` / `provider` / `model_raw` 表达，不另开
   `"codex-usage"` |
 | `event_ts_utc` | 顶层 `timestamp`（回退 `payload.timestamp`）**原样串**；事件真无
   时间戳 → `None`，绝不编造。无时间仍可 emit（fold 无时间也进 by_model，§2.3） |
@@ -321,8 +321,8 @@ coverage：`{total_token_count_events, fact_rows, skip_rows}`。
 | native_session_id | **逻辑 session_id**（`session_meta.payload.session_id` ← `.id`）；`path.stem` 仅最后兜底（无 session_meta 文件自成一会话）；续接会话跨文件共享 |
 | reasoning → output | `fact.output = codex output_tokens`；reasoning ⊆ output **不叠加**；5 桶键序不动 |
 | 去重三源 | 影子=源限定（单载体）；累计复读=fold 谓词不 emit 不计 duplicate；同物理 rollout（同 stem）重收录=source_event_id duplicate 保留一份；**不宣称**跨-rollout 重放可靠去重 |
-| host / kind | host=`codex`；observation_kind=`assistant-usage`（宿主差异由 host/provider/model_raw 表达） |
-| 架构 | 共享 per-token_count 观察者（byte-neutral core fold refactor）+ emitter host adapter；不另起第四份 wire-shape |
+| harness / kind | harness=`codex`；observation_kind=`assistant-usage`（执行环境差异由 harness/provider/model_raw 表达） |
+| 架构 | 共享 per-token_count 观察者（byte-neutral core fold refactor）+ emitter harness adapter；不另起第四份 wire-shape |
 | 发射集 | == fold 的 by_model 消费集（含无时间样本） |
 | 发射域 | 本次传入的 rollout 路径集；同次发射内按 source_event_id（stem 命名空间）去重，异 stem 永不误合并 |
 | machine ns / source profile | machine ns 必传且非空，缺失或空串失败；source_profile 沿用 Stage 1 现状（locate/R2a 遗留） |

@@ -30,21 +30,21 @@
 
 ### 1.1 项目是什么
 
-`agent-vitals` 是装在宿主内的 **Skills 体检 + 会话行为审计 + Token 成本计价** 三合一工具，跨 6 个 Agent 宿主（Claude Code / Codex / DSH / WorkBuddy / OpenClaw / Hermes）。它本身就是一个 Agent Skill（`SKILL.md` 在根目录）。
+`agent-vitals` 是装在执行环境内的 **Skills 体检 + 会话行为审计 + Token 成本计价** 三合一工具，跨 6 个 Agent 执行环境（Claude Code / Codex / DSH / WorkBuddy / OpenClaw / Hermes）。它本身就是一个 Agent Skill（`SKILL.md` 在根目录）。
 
 ### 1.2 架构拓扑
 
 ```
 crates/
-├── vitals-core/                  v0.5.0   宿主无关审计 runtime（Event→Trajectory→Detector→Finding）
+├── vitals-core/                  v0.5.0   执行环境无关审计 runtime（Event→Trajectory→Detector→Finding）
 ├── agent-vitals-domain/          v1.3.0   contracts/ + domain/ + compatibility/
-├── agent-vitals-hosts/           v1.3.0   hosts/<h>/{sessions,skills,sources}/
+├── agent-vitals-harnesses/           v1.3.0   harnesses/<h>/{sessions,skills,sources}/
 ├── agent-vitals-runtime/         v1.3.0   空骨架：只有 HomeResolver
 └── agent-vitals-wasm/            v1.3.0   wasm-pack cdylib
 src/                                       binary (agent-vitals CLI) —— 正在变薄
 src-tauri/                                 独立 workspace（Tauri 菜单栏）
 scripts/agent_vitals/                      Python 并行实现
-dsh-client/                                DSH 审计 tab（host projection + client）
+dsh-client/                                DSH 审计 tab（harness projection + client）
 ```
 
 **关键事实**：
@@ -59,7 +59,7 @@ dsh-client/                                DSH 审计 tab（host projection + cl
 | Python 测试 | **1094**（215 skip，**1 red**） | 352 | **3.1× 过期** |
 | Rust 测试 | 144 | 144 | OK |
 | crates/agent-vitals-domain | ~10k 行 | — | — |
-| crates/agent-vitals-hosts | ~9.4k 行 | — | — |
+| crates/agent-vitals-harnesses | ~9.4k 行 | — | — |
 | scripts/agent_vitals | ~17k 行 | — | — |
 | dsh-client/src | ~2.7k 行 | — | — |
 | spec 文档 | 49 个 md | — | — |
@@ -71,8 +71,8 @@ dsh-client/                                DSH 审计 tab（host projection + cl
 v0.8 Phase D5 迁移中：
 - D1 wire/fold 分离 ✅
 - D2 cost.rs 切出 cost/claude.rs ✅
-- D3 agent-vitals-adapters → agent-vitals-hosts 改名 ✅
-- D4 DSH 会话 I/O 迁进 hosts/dsh/sources/ ✅
+- D3 agent-vitals-adapters → agent-vitals-harnesses 改名 ✅
+- D4 DSH 会话 I/O 迁进 harnesses/dsh/sources/ ✅
 - **D5 Claude/Codex/WorkBuddy session reader 迁移中**（工作区 dirty）
 - D6 state/takeover/discovery 迁入 runtime crate **未启**
 - D7 HomeResolver 迁入 runtime ✅
@@ -175,8 +175,8 @@ impl Drop for StateFlock {
 ```
 
 **约束**：
-- 加进 `agent-vitals-runtime`，**不加** `hosts` 或 `domain`（`dependency_budget.rs` 否定清单要更新）
-- `libc` 进 runtime 的 `[dependencies]`，**不进** hosts/domain
+- 加进 `agent-vitals-runtime`，**不加** `harnesses` 或 `domain`（`dependency_budget.rs` 否定清单要更新）
+- `libc` 进 runtime 的 `[dependencies]`，**不进** harnesses/domain
 - `LOCK_NB` 非阻塞——5min tick 拿不到锁就 skip 本次（**已有人写就让他写完**）
 - Python 端 `fcntl.flock` 同步加（CLI 兼容）
 
@@ -209,7 +209,7 @@ data_home()/
 ├── state/                    ← 已有，今天/本月账 + ledger + manifest
 ├── cache/r2a/                ← 已有，per-session envelope 摘要
 └── canonical/                ← 新增
-    ├── index.jsonl           ← 一行一 session: (session_id, host, date, signals[], finding_codes[], duration)
+    ├── index.jsonl           ← 一行一 session: (session_id, harness, date, signals[], finding_codes[], duration)
     └── <session_id>.json     ← CanonicalSession 完整序列化
 ```
 
@@ -219,7 +219,7 @@ data_home()/
 - schema 迁移：和 r2a 一样，**抬版本号一次冷启动**，不做就地迁移
 
 **新增 CLI**：
-- `agent-vitals query <filter>` —— 按 host / date / finding_code 过滤 + 列 session_id
+- `agent-vitals query <filter>` —— 按 harness / date / finding_code 过滤 + 列 session_id
 - `agent-vitals show <session_id>` —— 打印 CanonicalSession 摘要
 - `agent-vitals trace <session_id> <signal>` —— 打印某条 signal 的 timeline
 
@@ -230,7 +230,7 @@ data_home()/
 - 文档：补 `docs/CANONICAL_PERSISTENCE.md`
 
 **收益**：
-- 调查任何历史会话 instant lookup（不再依赖宿主 retention）
+- 调查任何历史会话 instant lookup（不再依赖执行环境 retention）
 - 跨会话 finding 模式分析（"SV612 在 2026 Q3 比 Q2 多 30%"）
 - DSH 审计 tab 可以展示历史会话 instant（不再每次 open tab 重 fold）
 - **不动 SQLite**——保持 xbar `cat state/*.json` 的简单性
@@ -285,7 +285,7 @@ pub fn live_fold_once(
 
 **CLI**：
 - `agent-vitals live <session_log>` —— 1s smart-poll loop，stdout 推 findings JSON
-- `agent-vitals live --push <host>` —— 接到 DSH 审计 tab 的 projection
+- `agent-vitals live --push <harness>` —— 接到 DSH 审计 tab 的 projection
 
 **代价**：
 - 代码：~120 行（live_fold.rs + 1 个新 CLI 子命令 + Tauri projection hook）
@@ -326,7 +326,7 @@ watcher = ["dep:notify", "dep:notify-debouncer-mini"]
 - Windows ReadDirectoryChangesW 同 FSEvents coalescing
 
 **代价**：
-- 代码：~300 行（`runtime/src/watcher.rs` + debouncer + 4 个 host 路径配置）
+- 代码：~300 行（`runtime/src/watcher.rs` + debouncer + 4 个 harness 路径配置）
 - 测试：FS 事件注入测试（inotify fake events）+ 跨平台 CI 矩阵
 - macOS / Linux / Windows 行为差异需要 separate test
 
@@ -341,7 +341,7 @@ watcher = ["dep:notify", "dep:notify-debouncer-mini"]
 
 ### 3.4 DSH 审计 tab live subscription 模式
 
-**现状**：`dsh-client/src/host/index.ts` 的 `sessionProjections` 框架是 query-driven（每次 tab 打开 re-fold）。DSH 是 in-process 的，**架构上支持 push**——但当前没实现。
+**现状**：`dsh-client/src/harness/index.ts` 的 `sessionProjections` 框架是 query-driven（每次 tab 打开 re-fold）。DSH 是 in-process 的，**架构上支持 push**——但当前没实现。
 
 **建议**：在 DSH harness 加一个 "audit-stream" subscription：
 
@@ -412,13 +412,13 @@ DSH 内部事件流 ──► sessionProjections.auditStream subscription
 
 **建议**：
 - `usage.rs` 按职责拆：`token_fold.rs` / `token_by_date_model.rs` / `codex_fold.rs` / `usage_fact.rs`（已经有文件，但可能没有完全切干净）
-- `claude_cost.rs` 迁进 `hosts/claude_code/sessions/`（纯）+ `sources/`（I/O），对应 Phase D5 已开始的迁移模式
+- `claude_cost.rs` 迁进 `harnesses/claude_code/sessions/`（纯）+ `sources/`（I/O），对应 Phase D5 已开始的迁移模式
 - `behavior.rs` 已是 detector 迁移的"旧入口"——legacy 路径**全部删掉**（`detect_svNNN_legacy` 全部删除，**Phase E 应该做的事**）
 
 **代价**：
 - 1-2 周
 - 锁步测试要全跑（golden parity 不能漂）
-- 边界守卫要加（拆出来的子文件必须还守 `domain_production_code_has_no_host_adapter_dependency`）
+- 边界守卫要加（拆出来的子文件必须还守 `domain_production_code_has_no_harness_adapter_dependency`）
 
 **收益**：
 - 单一文件不再成为认知瓶颈
@@ -469,16 +469,16 @@ def test_python_no_network_imports():
 
 ```rust
 // crates/agent-vitals-runtime/Cargo.toml 注释：
-// v0.8 Phase D6/D7：agent-vitals-runtime 装非宿主的本机机器
+// v0.8 Phase D6/D7：agent-vitals-runtime 装非执行环境的本机机器
 // 唯一 HomeResolver、state/ledger 存储、Skill/Session service 编排
 ```
 
-但当前 `src/agent/` 还有 18 个 .rs 文件是"非宿主本机"：
+但当前 `src/agent/` 还有 18 个 .rs 文件是"非执行环境本机"：
 
 ```
 behavior.rs, budget.rs, claude_cost.rs, claude_usage_fact.rs, codex_cost.rs,
 codex_session_audit.rs, codex_usage_fact.rs, cost.rs, dsh_usage_fact.rs,
-discovery.rs, host_runtime_registration.rs, oneline.rs, plan.rs, r2a_store.rs,
+discovery.rs, harness_runtime_registration.rs, oneline.rs, plan.rs, r2a_store.rs,
 session_sources.rs, state.rs, takeover.rs
 ```
 
@@ -487,13 +487,13 @@ CLAUDE.md 写 D6 是这件事，**D6 未启**。
 **建议**：按"是否纯函数 / 是否 IO / 是否编排"三档分：
 - 纯函数 → `agent-vitals-domain`（behavior / plan）
 - IO → `agent-vitals-runtime`（state / takeover / r2a_store / discovery / session_sources）
-- 编排 → `agent-vitals-runtime`（oneline / budget / claude_cost / codex_cost / *_usage_fact / host_runtime_registration）
+- 编排 → `agent-vitals-runtime`（oneline / budget / claude_cost / codex_cost / *_usage_fact / harness_runtime_registration）
 
 **代价**：D6 整阶段，2-4 周
 
 **收益**：
 - `src/agent/` 变薄到 ~500 行（基本是 cli handler）
-- `agent-vitals-runtime` 长出"非宿主本机机器"这层
+- `agent-vitals-runtime` 长出"非执行环境本机机器"这层
 - §3.1 / §3.2 / §3.3 的实施有明确的归处
 
 **优先级**：🟡 **中**。**v0.8 收口时必须做**。
@@ -541,7 +541,7 @@ CLAUDE.md 写 D6 是这件事，**D6 未启**。
 | 路径 | 触发条件 |
 |---|---|
 | **退役 Python 端 oneline/behavior** | DSH 审计 tab 完全用 wasm；ClawHub 形态不需要 Python 镜像 |
-| **保留 Python 但只保留 skills 静态扫描** | ClawHub in-host skill 形态只要 `scripts/scan.py`（CLAUDE.md 的"Python 端 stdlib-only"） |
+| **保留 Python 但只保留 skills 静态扫描** | ClawHub in-harness skill 形态只要 `scripts/scan.py`（CLAUDE.md 的"Python 端 stdlib-only"） |
 | **真永久并行** | 接受每年 X 个新规则 × 2 倍维护成本；X > 5 时退役 Python |
 
 **现在不决策的代价**：每个新规则加进来都得回答"Python 端要不要镜像"——这是隐性税。
@@ -653,7 +653,7 @@ CLAUDE.md 写 D6 是这件事，**D6 未启**。
 | **W3 manifest epoch 冲突** | 多进程并发 fold | 无 | §2.2 flock |
 | **W4 跨文件读不一致** | tick 写 + 菜单读多文件 | 无（仅展示） | §3.2 fast/slow tick 分离 |
 | **W5 半行 jsonl** | DSH 写到一半 oneline 读 | parse-fail-degraded | 已有效；**prefix 合法时漏**（待补 schema 校验） |
-| **W6 WorkBuddy SQLite** | 宿主写时我们读 | SQLite WAL | 宿主兜底，不算 race |
+| **W6 WorkBuddy SQLite** | 执行环境写时我们读 | SQLite WAL | 执行环境兜底，不算 race |
 
 ## 附录 B：文件位置速查
 
@@ -663,8 +663,8 @@ CLAUDE.md 写 D6 是这件事，**D6 未启**。
 | 原子写 | `src/agent/state.rs:109` |
 | 写序问题注释 | `src/agent/takeover.rs` 顶部 + `src/agent/oneline.rs:105` |
 | flock 决定注释 | `src/agent/state.rs:14-22` |
-| 降级铁律 | `crates/agent-vitals-hosts/src/hosts/dsh/sources.rs` 顶部 |
-| 依赖预算守卫 | `crates/agent-vitals-domain/tests/dependency_budget.rs`, `crates/agent-vitals-hosts/tests/dependency_budget.rs` |
+| 降级铁律 | `crates/agent-vitals-harnesses/src/harnesses/dsh/sources.rs` 顶部 |
+| 依赖预算守卫 | `crates/agent-vitals-domain/tests/dependency_budget.rs`, `crates/agent-vitals-harnesses/tests/dependency_budget.rs` |
 | Detector 迁移 | `crates/agent-vitals-domain/src/domain/detectors/svNNN.rs` |
 | 兼容 shim | `crates/agent-vitals-domain/src/compatibility/mod.rs` |
 | Runtime 空骨架 | `crates/agent-vitals-runtime/src/home.rs` (144 行) |

@@ -133,9 +133,9 @@ def _buckets_from(usage, seen=None):
     **一次都没出现过**，`cacheReadTokens` 出现 1348 次。（早先这条注释写的是
     「679 个样本」——那个数只数了 assistant/message 一种类型，漏了
     assistant/chunk；发现于事后核对真实日志时，已更正。）原来
-    `or 0` 把「宿主根本不报这个字段」和「宿主报了 0」合并成同一个 0，UI 于是
+    `or 0` 把「执行环境根本不报这个字段」和「执行环境报了 0」合并成同一个 0，UI 于是
     显示「缓存写 0」——一个被伪造出来的测量值。这与 CLAUDE.md 的纪律直接冲突：
-    缺列的报告有用，编造列的报告没用（host 能力缺失时降级、绝不臆造）。
+    缺列的报告有用，编造列的报告没用（harness 能力缺失时降级、绝不臆造）。
     """
     if seen is not None:
         for name in _SAMPLE_FIELDS:
@@ -320,7 +320,7 @@ def _opt_int(usage, key):
 
     与 `_buckets_from` 的「缺字段按 0」是**两种正确语义**：那边在求和（四桶之和
     必须与 DSH tokenUsage 逐字节相等），求和里缺项当 0 是对的；这里是逐请求的
-    测量值，缺项落 0 就是把「宿主没报」伪造成「测到 0」。
+    测量值，缺项落 0 就是把「执行环境没报」伪造成「测到 0」。
     """
     return _int_or_none(usage.get(key))
 
@@ -510,7 +510,7 @@ def dsh_usage_observations(events):
 
         # ── 开槽：身份形成的唯一边界（§3.3 三段公式，一律此刻算好并冻结）──
         if is_compaction and compaction_id is not None:
-            # 有 compactionId：compaction_id 是宿主原生标识 → native 身份，无 hash。
+            # 有 compactionId：compaction_id 是执行环境原生标识 → native 身份，无 hash。
             identity_basis = "native"
             source_event_id = "compaction:" + compaction_id
             identity_hash = None
@@ -822,11 +822,11 @@ def usage_fold_checkpoint(events):
 
 def usage_fold_render(state):
     """折叠状态 → `token_by_model` 的输出形状。"""
-    # 一个样本都没有时返回空列表：没有数据就不做「宿主不报这个字段」的断言，
-    # 与 host 能力缺失时「缺列而不是编列」是同一条纪律。
+    # 一个样本都没有时返回空列表：没有数据就不做「执行环境不报这个字段」的断言，
+    # 与 harness 能力缺失时「缺列而不是编列」是同一条纪律。
     unreported = [f for f in _SAMPLE_FIELDS if f not in state["seen"]] if state["samples"] else []
-    # `unaccounted_usage` 是 `unreported_fields` 的**对偶**：后者说「宿主
-    # 从没报过这个字段」，前者说「宿主报了 token，但我们没接住」。在证据
+    # `unaccounted_usage` 是 `unreported_fields` 的**对偶**：后者说「执行环境
+    # 从没报过这个字段」，前者说「执行环境报了 token，但我们没接住」。在证据
     # 模型里它就是 `Signal::Usage` 的 `unmetered` 计数——`evidence.rs` 的
     # 那句注释精确预言了这个 bug：「适配器不能靠"读不到就不算"来偷偷刷高
     # 自己的覆盖率」。按类型名排序保证确定性输出（Rust 侧用 BTreeMap 对齐）。
@@ -1252,7 +1252,7 @@ def _canonical_row(source, shape, fresh, total, cache_read, cache_write,
     绝不落 0。unavailable 顺序 = CANONICAL_DIMS 顺序（确定性，与 Rust 侧
     `usage.rs::canonical_row` 逐字节对齐）。
 
-    naive 是把 None 落 0 再拼一个空 unavailable 列表——那会把「宿主没报这个
+    naive 是把 None 落 0 再拼一个空 unavailable 列表——那会把「执行环境没报这个
     字段」编造成「测到 0」，正是 `unreported_fields` 当初要修的缺陷。
     """
     vals = [fresh, total, cache_read, cache_write, reasoning, legacy_total]

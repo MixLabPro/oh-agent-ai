@@ -4,10 +4,10 @@
 // 与 verify-workbench-skills.mjs 同一模式：静态断言打在真实文件上，行为断言
 // 跑在 vm 执行的真实 workbench.js 上。fixture 形状出处：
 //   · issues 组行 = agent-vitals-data issues.rs::issue_groups_with_sources 的
-//     json! 字段（rule/host/count/sessions_count/status_rollup/sample_evidence/
+//     json! 字段（rule/harness/count/sessions_count/status_rollup/sample_evidence/
 //     remedy/source_kind）+ store.rs budget_issue_group（source_kind:"budget"）；
 //   · freshness = runtime mcp/mod.rs::freshness（last_successful_sync_at +
-//     stale_hosts）。
+//     stale_harnesses）。
 // 覆盖：§6.1〔P1〕待办区无 SV6xx；§6.2 remedy 文案；§6.3 迁移计数反馈；
 // §6.4 首屏不扫会话日志（只调 sessions_issues / findings_freshness）；§6.5 新鲜度条。
 
@@ -124,7 +124,7 @@ const textOf = (node) => (node == null ? "" : String(node.textContent ?? "")
 const domText = (id) => textOf(elements[id]);
 
 const group = (over) => Object.assign({
-  group_id: "g", rule: "SV610", source_kind: "behavior", host: "dsh",
+  group_id: "g", rule: "SV610", source_kind: "behavior", harness: "dsh",
   severity: "warning", count: 10, sessions_count: 3, bucket: "2026-09-19",
   status_rollup: { open: 10, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 },
   sample_evidence: [], remedy: { remedy_id: "tighten-sandbox-mode", diagnostic_only: false },
@@ -161,7 +161,7 @@ sandbox.__issues2 = JSON.parse(JSON.stringify(sandbox.__issues1));
 sandbox.__issues2.issues[5].status_rollup.open = 29;
 sandbox.__freshness = {
   status: "ok",
-  freshness: { last_successful_sync_at: "2026-09-19T08:48:12.000+08:00", stale_hosts: ["workbuddy"] },
+  freshness: { last_successful_sync_at: "2026-09-19T08:48:12.000+08:00", stale_harnesses: ["workbuddy"] },
 };
 
 console.log("# §6.1〔P1〕首屏 = 待办区 + 收起的证据区，SV6xx 不进待办区");
@@ -185,7 +185,7 @@ console.log("# §6.5 新鲜度条");
   const syncAt = new Date("2026-09-19T08:48:12.000+08:00");
   const expectHm = `${String(syncAt.getHours()).padStart(2, "0")}:${String(syncAt.getMinutes()).padStart(2, "0")}`;
   ok(fresh.includes(expectHm), `新鲜度条显示数字截止时刻（本机钟面 ${expectHm}；got ${fresh}）`);
-  ok(fresh.includes("workbuddy"), "新鲜度条列出 stale 宿主");
+  ok(fresh.includes("workbuddy"), "新鲜度条列出 stale 执行环境");
 }
 console.log("# §6.2 remedy 文案");
 {
@@ -247,33 +247,33 @@ console.log("# §3.2/§4.6〔P2〕模型 × Harness 对比面");
   sandbox.__matrix = {
     month: "2026-09",
     rows: [
-      { host: "codex", model_id: "gpt-6-astra", provider_id: "cogfoundry.ai", sessions: 10,
+      { harness: "codex", model_id: "gpt-6-astra", provider_id: "cogfoundry.ai", sessions: 10,
         tokens: { uncached_input: 1, cache_read: 1, cache_write: 1, output: 1, total: 4 },
         cache_hit_ratio: null, has_subscription: false, waste_rate: null,
-        amounts: [], top_sessions: [], host_behavior: {} },
-      { host: "codex", model_id: "gpt-5.6-terra", provider_id: "shengsuanyun", sessions: 31,
+        amounts: [], top_sessions: [], harness_behavior: {} },
+      { harness: "codex", model_id: "gpt-5.6-terra", provider_id: "shengsuanyun", sessions: 31,
         tokens: { uncached_input: 1754, cache_read: 34448965, cache_write: 2304878, output: 119195, total: 36875892 },
         cache_hit_ratio: 0.9363, has_subscription: false, waste_rate: null,
         amounts: [{ amount_minor: 1408, currency: "USD", basis: "metered_estimate" }],
-        top_sessions: [], host_behavior: { SV610: 62 } },
-      { host: "claude-code", model_id: "deepseek-v4-flash-0731", provider_id: "<unknown>", sessions: 12,
+        top_sessions: [], harness_behavior: { SV610: 62 } },
+      { harness: "claude-code", model_id: "deepseek-v4-flash-0731", provider_id: "<unknown>", sessions: 12,
         tokens: { uncached_input: 44432002, cache_read: 12596736, cache_write: 0, output: 13030, total: 57041768 },
         cache_hit_ratio: 0.2211, has_subscription: false, waste_rate: null,
         amounts: [{ amount_minor: 6734, currency: "CNY", basis: "metered_estimate" }],
-        cost_provider_unresolved: true, top_sessions: [], host_behavior: {} },
-      { host: "claude-code", model_id: "glm-5.3", provider_id: "zhipu-glm", sessions: 3,
+        cost_provider_unresolved: true, top_sessions: [], harness_behavior: {} },
+      { harness: "claude-code", model_id: "glm-5.3", provider_id: "zhipu-glm", sessions: 3,
         tokens: { uncached_input: 1, cache_read: 2, cache_write: 0, output: 0, total: 3 },
         cache_hit_ratio: null, has_subscription: true, waste_rate: null,
-        amounts: [], top_sessions: [], host_behavior: {} },
+        amounts: [], top_sessions: [], harness_behavior: {} },
     ],
     notes: ["waste_rate 恒 null：waste 检测器仅 DSH 且尚未接入（spec §4.2，不用 0 冒充）"],
     findings_summary: [
       { kind: "cost_outlier", currency: "CNY",
-        outlier: { host: "claude-code", model_id: "deepseek-v4-flash-0731", provider_id: "<unknown>", per_session_minor: 561, cache_hit_ratio: 0.2211, uncached_tokens: 44432002 },
-        control: { host: "claude-code", model_id: "deepseek/deepseek-v4.1-flash", per_session_minor: 120, cache_hit_ratio: 0.997 },
+        outlier: { harness: "claude-code", model_id: "deepseek-v4-flash-0731", provider_id: "<unknown>", per_session_minor: 561, cache_hit_ratio: 0.2211, uncached_tokens: 44432002 },
+        control: { harness: "claude-code", model_id: "deepseek/deepseek-v4.1-flash", per_session_minor: 120, cache_hit_ratio: 0.997 },
         ratio_vs_control: 4.7, saving_minor: 5292, saving_pct: 79 },
       { kind: "marathon", session_ref: "sr_1f7589ece7184a8a8", span_hours: 49.8, tokens_total: 473030189, failures: 40,
-        combo: { host: "claude-code", model_id: "deepseek-v4-flash-0731" } },
+        combo: { harness: "claude-code", model_id: "deepseek-v4-flash-0731" } },
       { kind: "currency_split", currencies: ["CNY", "USD"], by_currency: { "CNY": { combos: 1, tokens: 637834281 }, "USD": { combos: 2, tokens: 48317587 } } },
     ],
   };
@@ -289,11 +289,11 @@ console.log("# §3.2/§4.6〔P2〕模型 × Harness 对比面");
     "多币种分列显示、各自带 ≈（永不相加）");
   ok(bodyText.includes("套餐内"), "订阅组合带套餐标记");
   ok((bodyText.match(/—/g) || []).length >= 2, "浪费率与无命中显示「—」不显示 0");
-  // 展开一行验证宿主级证据
+  // 展开一行验证执行环境级证据
   sandbox.toggleMatrixRow("codex/gpt-5.6-terra/shengsuanyun", { target: { closest: () => null } });
   const bodyText2 = domText("find-matrix-body");
-  ok(bodyText2.includes("宿主级证据") && bodyText2.includes("SV610 × 62"),
-    "展开行含宿主级行为标记（§4.7）");
+  ok(bodyText2.includes("执行环境级证据") && bodyText2.includes("SV610 × 62"),
+    "展开行含执行环境级行为标记（§4.7）");
   ok(bodyText2.includes("四桶"), "展开行含四桶 token");
 }
 
@@ -302,10 +302,10 @@ console.log("# §4.6〔P2-r2〕单币种排序分支与新增列");
   // 单币种（全 CNY）：metricSorted 必须为 true 且按单位会话成本降序——
   // 这是 §4.6 的核心指标路径，混合 fixture 覆盖不到。
   const single = [
-    { host: "a", model_id: "cheap-slow", provider_id: "p", sessions: 10,
+    { harness: "a", model_id: "cheap-slow", provider_id: "p", sessions: 10,
       tokens: { total: 100 }, cache_hit_ratio: null, has_subscription: false,
       amounts: [{ amount_minor: 5000, currency: "CNY", basis: "metered_estimate" }] },
-    { host: "a", model_id: "dear-fast", provider_id: "p", sessions: 2,
+    { harness: "a", model_id: "dear-fast", provider_id: "p", sessions: 2,
       tokens: { total: 50 }, cache_hit_ratio: null, has_subscription: false,
       amounts: [{ amount_minor: 3000, currency: "CNY", basis: "metered_estimate" }] },
   ];
@@ -375,7 +375,7 @@ console.log("# r3 预算归因卡 + 行为证据只读（用户反馈 2026-09-19
   await sandbox.loadDecisionMatrix();
   // 马拉松特征 + 前三截断：注入 4 条 CNY 行，其中一条带 49.8h 会话。
   const cnyRow = (model, minor, hit, span) => ({
-    host: "claude-code", model_id: model, provider_id: "p", sessions: 2,
+    harness: "claude-code", model_id: model, provider_id: "p", sessions: 2,
     tokens: { total: 1 }, cache_hit_ratio: hit, has_subscription: false,
     amounts: [{ amount_minor: minor, currency: "CNY", basis: "metered_estimate" }],
     top_sessions: span ? [{ session_ref: "sr_x", span_first_ms: 0, span_last_ms: span, tokens_total: 1 }] : [],

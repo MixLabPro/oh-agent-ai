@@ -62,7 +62,7 @@ class DiffCase(unittest.TestCase):
         env = isolated_home_env(self.tmp)
         for k in ("CODEX_RUNTIME", "OPENCLAW_RUNTIME", "WORKBUDDY_BUILTINS"):
             env["AGENT_VITALS_DISABLE_" + k] = "1"
-        r = subprocess.run(SCAN_CMD + ["--host", "claude-code", "--json", str(out)]
+        r = subprocess.run(SCAN_CMD + ["--harness", "claude-code", "--json", str(out)]
                            + list(extra),
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
@@ -169,15 +169,15 @@ class TestBaselineFailureIsExplicit(DiffCase):
 
 
 
-class TestRedactionDoesNotEatTheHostName(DiffCase):
+class TestRedactionDoesNotEatTheHarnessName(DiffCase):
     """第四次脱敏事故，方向与前三次相反：不是漏脱敏，是**过度脱敏**。
 
     `added_skills` / `removed_skills` 从裸名列表变成
-    `(host, instance_id, namespace, name)` 复合键之后，仍按裸数组序列化，
+    `(harness, instance_id, namespace, name)` 复合键之后，仍按裸数组序列化，
     而这两个键还留在 `SKILL_NAME_KEYS` 里。脱敏的 `collect()` 对**列表元素
     继承父键**（那是为裸名列表设计的），于是 `"claude-code"` 被当成 skill 名
-    收录，再被全文替换 —— 报告里 `host_selection`、`skills[].host_family`、
-    `conflict_domain` 全变成 `skill-00N`，而 `host_summaries` 的**键**不受
+    收录，再被全文替换 —— 报告里 `harness_selection`、`skills[].harness_family`、
+    `conflict_domain` 全变成 `skill-00N`，而 `harness_summaries` 的**键**不受
     影响。同一份报告里两种说法，读者无法判断哪个是真的。
 
     统计数字确实没变（脱敏的硬要求），但**报告已经读不懂了**。那条规矩的
@@ -190,18 +190,18 @@ class TestRedactionDoesNotEatTheHostName(DiffCase):
     让扫描器**自己**产出那个形状，这条才有判别力。
     """
 
-    def test_host_names_survive_redaction(self):
+    def test_harness_names_survive_redaction(self):
         write_skill(self.skills, "keep")
         base, _ = self.scan()
         write_skill(self.skills, "secret-client-tool")
         _, now = self.scan("--baseline", str(base), "--redact", "--redact-names")
 
-        self.assertEqual(now["host_selection"], "claude-code")
+        self.assertEqual(now["harness_selection"], "claude-code")
         for sk in now["skills"]:
-            self.assertEqual(sk["host_family"], "claude-code", sk)
+            self.assertEqual(sk["harness_family"], "claude-code", sk)
             self.assertEqual(sk["conflict_domain"], "claude-code", sk)
-        self.assertIn("claude-code", now["host_summaries"],
-                      "skills[] 与 host_summaries 必须还能对得上")
+        self.assertIn("claude-code", now["harness_summaries"],
+                      "skills[] 与 harness_summaries 必须还能对得上")
 
         # 对照组：skill 名照常脱敏 —— 否则上面几条可以靠「脱敏整个没生效」通过
         flat = json.dumps(now, ensure_ascii=False)
@@ -217,9 +217,9 @@ class TestRedactionDoesNotEatTheHostName(DiffCase):
         _, now = self.scan("--baseline", str(base))
         added = now["diff_vs_baseline"]["added_skills"]
         self.assertEqual(len(added), 1)
-        self.assertIsInstance(added[0], dict, "裸数组会让脱敏把宿主名当成 skill 名")
+        self.assertIsInstance(added[0], dict, "裸数组会让脱敏把执行环境名当成 skill 名")
         self.assertEqual(added[0]["name"], "newcomer")
-        self.assertEqual(added[0]["host"], "claude-code")
+        self.assertEqual(added[0]["harness"], "claude-code")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

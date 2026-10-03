@@ -2,44 +2,44 @@
   "schema_version": "1.0",
   "scanned_roots": [
     {
-      "host": "claude-code",
+      "harness": "claude-code",
       "path": ".claude/skills",
       "instance_id": null,
       "root_kind": null
     },
     {
-      "host": "claude-code",
+      "harness": "claude-code",
       "path": "~/.claude/skills",
       "instance_id": null,
       "root_kind": null
     },
     {
-      "host": "claude-code-plugins",
+      "harness": "claude-code-plugins",
       "path": "~/.claude/plugins",
       "instance_id": null,
       "root_kind": null
     },
     {
-      "host": "codex",
+      "harness": "codex",
       "path": "~/.codex/skills",
       "instance_id": null,
       "root_kind": null
     },
     {
-      "host": "cursor",
+      "harness": "cursor",
       "path": "~/.cursor/skills",
       "instance_id": null,
       "root_kind": null
     },
     {
-      "host": "openclaw",
+      "harness": "openclaw",
       "path": "~/instance-001/skills",
       "instance_id": "instance-001",
       "root_kind": "managed"
     }
   ],
-  "host_selection": "all",
-  "host_summaries": {
+  "harness_selection": "all",
+  "harness_summaries": {
     "claude-code": {
       "skills_on_disk": 32,
       "discoverable_skills": 31,
@@ -155,14 +155,14 @@
   "loaded_skills": 32,
   "unique_skills": 30,
   "plugin_state": {
-    "host_config_read": true,
+    "harness_config_read": true,
     "enabled_plugins": [
       "plugin-001@market-001",
       "plugin-002@market-001",
       "plugin-003@market-002",
       "plugin-004@market-001"
     ],
-    "note": "Disabled plugin copies remain on disk but do not enter context or count toward the budget. When host_config_read=false, plugin state is unknown and copies are treated as not loaded."
+    "note": "Disabled plugin copies remain on disk but do not enter context or count toward the budget. When harness_config_read=false, plugin state is unknown and copies are treated as not loaded."
   },
   "codex_runtime": {
     "available": false,
@@ -224,7 +224,7 @@
   "trigger_data": {
     "available": false,
     "source": "~/.claude.json -> skillUsage",
-    "entries_in_host_record": 6,
+    "entries_in_harness_record": 6,
     "counts_are": "lifetime cumulative, not last-30-days",
     "zombie_min_age_days": 14,
     "zombie_candidates": [],
@@ -371,7 +371,7 @@
   "tier1_pct_of_200k": 0.33,
   "conflicts": [
     {
-      "host": "claude-code",
+      "harness": "claude-code",
       "instance_id": null,
       "conflict_domain": "claude-code",
       "name": "skill-011",
@@ -393,7 +393,7 @@
       ]
     },
     {
-      "host": "claude-code",
+      "harness": "claude-code",
       "instance_id": null,
       "conflict_domain": "claude-code",
       "name": "skill-012",
@@ -415,7 +415,7 @@
       ]
     },
     {
-      "host": "claude-code",
+      "harness": "claude-code",
       "instance_id": null,
       "conflict_domain": "claude-code",
       "name": "skill-013",
@@ -443,7 +443,7 @@
       ]
     },
     {
-      "host": "claude-code",
+      "harness": "claude-code",
       "instance_id": null,
       "conflict_domain": "claude-code-plugins",
       "name": "skill-014",
@@ -465,14 +465,14 @@
       ]
     }
   ],
-  "precedence_note": "Overrides are compared only within one host. Claude Code: enterprise > personal > project > plugin; OpenClaw: workspace > project > personal > managed. Plugin skills are isolated by <plugin>:<name>, so equal bare names are not conflicts.",
-  "cross_host_note": "Hosts do not share context. Use host_summaries or --host for one runtime; do not interpret top-level Tier1 or description-budget values as a cross-host total.",
+  "precedence_note": "Overrides are compared only within one harness. Claude Code: enterprise > personal > project > plugin; OpenClaw: workspace > project > personal > managed. Plugin skills are isolated by <plugin>:<name>, so equal bare names are not conflicts.",
+  "cross_harness_note": "Harnesses do not share context. Use harness_summaries or --harness for one runtime; do not interpret top-level Tier1 or description-budget values as a cross-harness total.",
   "skills": [
     {
       "name": "skill-015",
       "dir_name": "skill-015",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -525,8 +525,8 @@
     {
       "name": "skill-016",
       "dir_name": "skill-016",
-      "host": "codex",
-      "host_family": "codex",
+      "harness": "codex",
+      "harness_family": "codex",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -579,8 +579,8 @@
     {
       "name": "skill-014",
       "dir_name": "skill-014",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plugin-001",
       "plugin_key": "plugin-001@market-001",
@@ -633,8 +633,8 @@
     {
       "name": "skill-014",
       "dir_name": "skill-014",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plugin-001",
       "plugin_key": "plugin-001@market-001",
@@ -687,8 +687,8 @@
     {
       "name": "skill-011",
       "dir_name": "skill-011",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "project",
       "namespace": null,
       "plugin_key": null,
@@ -741,8 +741,8 @@
     {
       "name": "skill-012",
       "dir_name": "skill-012",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "project",
       "namespace": null,
       "plugin_key": null,
@@ -795,8 +795,8 @@
     {
       "name": "skill-013",
       "dir_name": "skill-013",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "project",
       "namespace": null,
       "plugin_key": null,
@@ -849,8 +849,8 @@
     {
       "name": "skill-017",
       "dir_name": "skill-017",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plugin-002",
       "plugin_key": "plugin-002@market-001",
@@ -903,8 +903,8 @@
     {
       "name": "skill-017",
       "dir_name": "skill-017",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plugin-004",
       "plugin_key": "plugin-004@market-001",
@@ -957,8 +957,8 @@
     {
       "name": "skill-018",
       "dir_name": "skill-018",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plugin-003",
       "plugin_key": "plugin-003@market-002",
@@ -1011,8 +1011,8 @@
     {
       "name": "skill-013",
       "dir_name": "skill-013",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "enterprise",
       "namespace": null,
       "plugin_key": null,
@@ -1065,8 +1065,8 @@
     {
       "name": "skill-011",
       "dir_name": "skill-011",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1119,8 +1119,8 @@
     {
       "name": "skill-012",
       "dir_name": "skill-012",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1173,8 +1173,8 @@
     {
       "name": "skill-013",
       "dir_name": "skill-013",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1227,8 +1227,8 @@
     {
       "name": "skill-019",
       "dir_name": "skill-019",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plugin-002",
       "plugin_key": "plugin-002@market-001",
@@ -1281,8 +1281,8 @@
     {
       "name": "skill-020",
       "dir_name": "skill-020",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plugin-004",
       "plugin_key": "plugin-004@market-001",
@@ -1335,8 +1335,8 @@
     {
       "name": "skill-008",
       "dir_name": "skill-008",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1409,8 +1409,8 @@
     {
       "name": "skill-006",
       "dir_name": "skill-006",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1463,8 +1463,8 @@
     {
       "name": "skill-009",
       "dir_name": "skill-009",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1526,8 +1526,8 @@
     {
       "name": "skill-010",
       "dir_name": "skill-010",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1589,8 +1589,8 @@
     {
       "name": "skill-005",
       "dir_name": "skill-005",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1643,8 +1643,8 @@
     {
       "name": "skill-007",
       "dir_name": "skill-007",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1706,8 +1706,8 @@
     {
       "name": "skill-021",
       "dir_name": "skill-021",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1760,8 +1760,8 @@
     {
       "name": "skill-001",
       "dir_name": "skill-001",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1814,8 +1814,8 @@
     {
       "name": "skill-022",
       "dir_name": "skill-022",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1868,8 +1868,8 @@
     {
       "name": "skill-003",
       "dir_name": "skill-003",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1922,8 +1922,8 @@
     {
       "name": "skill-023",
       "dir_name": "skill-023",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1976,8 +1976,8 @@
     {
       "name": "skill-024",
       "dir_name": "skill-024",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -2030,8 +2030,8 @@
     {
       "name": "skill-025",
       "dir_name": "skill-025",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -2084,8 +2084,8 @@
     {
       "name": "skill-026",
       "dir_name": "skill-026",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -2138,8 +2138,8 @@
     {
       "name": "skill-002",
       "dir_name": "skill-002",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -2192,8 +2192,8 @@
     {
       "name": "skill-004",
       "dir_name": "skill-004",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -2246,8 +2246,8 @@
     {
       "name": "skill-027",
       "dir_name": "skill-027",
-      "host": "openclaw",
-      "host_family": "openclaw",
+      "harness": "openclaw",
+      "harness_family": "openclaw",
       "level": "managed",
       "namespace": null,
       "plugin_key": null,
@@ -2300,8 +2300,8 @@
     {
       "name": "skill-028",
       "dir_name": "skill-028",
-      "host": "openclaw",
-      "host_family": "openclaw",
+      "harness": "openclaw",
+      "harness_family": "openclaw",
       "level": "managed",
       "namespace": null,
       "plugin_key": null,
@@ -2354,8 +2354,8 @@
     {
       "name": "skill-029",
       "dir_name": "skill-029",
-      "host": "openclaw",
-      "host_family": "openclaw",
+      "harness": "openclaw",
+      "harness_family": "openclaw",
       "level": "managed",
       "namespace": null,
       "plugin_key": null,
@@ -2408,8 +2408,8 @@
     {
       "name": "skill-030",
       "dir_name": "skill-030",
-      "host": "cursor",
-      "host_family": "cursor",
+      "harness": "cursor",
+      "harness_family": "cursor",
       "level": "unknown",
       "namespace": null,
       "plugin_key": null,
@@ -2462,8 +2462,8 @@
     {
       "name": "skill-031",
       "dir_name": "skill-031",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plugin-005",
       "plugin_key": "plugin-005@market-002",

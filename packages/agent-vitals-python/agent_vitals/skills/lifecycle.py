@@ -14,7 +14,7 @@ def lifecycle_status(skill, trigger_available, zombie_age=ZOMBIE_MIN_AGE_DAYS,
                      dormant_days=DEFAULT_DORMANT_DAYS):
     """返回 active / occasional / dormant / zombie / too-new / unknown。
 
-    **宿主没有触发数据时一律 unknown**，不是 zombie —— 零触发与「问不到」
+    **执行环境没有触发数据时一律 unknown**，不是 zombie —— 零触发与「问不到」
     是两件事，混起来会让用户删掉一个其实天天在用的 skill（不变量 12）。
     """
     if not trigger_available:
@@ -50,8 +50,8 @@ def load_state(skill, shadowed_paths):
     if skill.get("loaded"):
         return "loaded"
     reason = skill.get("loaded_reason") or ""
-    if reason.startswith("other-host"):
-        return "other-host"
+    if reason.startswith("other-harness"):
+        return "other-harness"
     if "not-enabled" in reason or "disabled" in reason or "filtered" in reason:
         return "disabled"
     return "unknown"
@@ -123,7 +123,7 @@ def render_list(out, args):
     # 真正进了上下文的那批必须在最前面 —— 否则一堆未启用的大块头会把
     # 唯一生效的那个顶到屏幕外（实测：默认按 cost 排时正是如此）。
     load_rank = {"loaded": 0, "shadowed": 1, "disabled": 2,
-                 "other-host": 3, "unknown": 4}
+                 "other-harness": 3, "unknown": 4}
     key = {"usage": lambda r: -(r["uses"] or 0),
            "cost": lambda r: -(r["core"] or 0),
            "name": lambda r: r["name"]}[args.sort]

@@ -35,32 +35,32 @@
 printf '%s\n%s\n%s\n' \
  '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"uat","version":"1"}}}' \
  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
- '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"usage_hourly","arguments":{"date":"2026-09-10","group_by":"host"}}}' \
+ '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"usage_hourly","arguments":{"date":"2026-09-10","group_by":"harness"}}}' \
  | agent-vitals data-mcp serve
 ```
 - 失败态不冒充成功：不可读→Unavailable/未计价，绝不显示 ¥0/绿色安全。
 
 ---
 
-## 1. 单宿主读取失败隔离【Loop 1】→ AC15
+## 1. 单执行环境读取失败隔离【Loop 1】→ AC15
 
 - **路径**：构造一个真实读取失败（不可读目录、损坏日志或权限阻塞）→ 回到总览 → 手动同步。**不要**用“停止读取”替代失败注入：它应显示为“已排除”，不是 `failed_scope`。
-- **期望**：其他宿主照常刷新；横幅明说「部分来源读取失败/暂停」；受影响宿主卡显示 failed_scope 具体错误码。
-- **对拍**：`data coverage --json` 中受影响宿主 freshness 非骗"fresh"。
+- **期望**：其他执行环境照常刷新；横幅明说「部分来源读取失败/暂停」；受影响执行环境卡显示 failed_scope 具体错误码。
+- **对拍**：`data coverage --json` 中受影响执行环境 freshness 非骗"fresh"。
 - **UAT 记录**：`UAT: AC15 walked ✔`；修复后以隔离 HOME 注入目录级 `Permission denied`：CLI `EXIT=1` 且带 `[claude-code]`，桌面数据源页显示 `permission_denied`/“重新同步”，MCP `data_status` 显示 `health=warn`、`needs_attention`、`retry_sync`；Codex/DSH/WorkBuddy 仍继续同步，响应不泄露绝对路径。
 
 ## 2. 旧套餐 → 本地待确认候选【Loop 18-22】→ AC26
 
 - **路径**：用旧版本数据/历史价卡快照启动（或迁移一次）→ 打开总览。
-- **期望**：历史订阅落为「待确认候选」，**不进** host_bills/FixedSubscription；提示语言为「确认计费方式」，不含误导词「编辑/已省钱」。
-- **对拍**：`data-unresolved --month` 显示候选组；`data status` 的 host_bills 为空。
+- **期望**：历史订阅落为「待确认候选」，**不进** harness_bills/FixedSubscription；提示语言为「确认计费方式」，不含误导词「编辑/已省钱」。
+- **对拍**：`data-unresolved --month` 显示候选组；`data status` 的 harness_bills 为空。
 - **UAT 记录**：
 
 ## 3. 确认一组 → 官方订阅【Loop 24-28】→ AC27
 
-- **路径**：总览提示 → 侧边面板 → 选中一组（宿主×provider×模型×路由）→ 点确认 → 选作用范围 → 预览→保存。
+- **路径**：总览提示 → 侧边面板 → 选中一组（执行环境×provider×模型×路由）→ 点确认 → 选作用范围 → 预览→保存。
 - **期望**：预览「移出估算 X / 保持估算 X / 仍待确认 X」；保存后原处回执+可撤销；总览/会话/日历/CLI 同一结果版本。
-- **对拍**：`data coverage` 该宿主 amounts 出现对应 basis 变化；`data-unresolved` 该组消失。
+- **对拍**：`data coverage` 该执行环境 amounts 出现对应 basis 变化；`data-unresolved` 该组消失。
 - **UAT 记录**：
 
 ## 4. 撤销声明 → 版本化重算【Loop 41/12】→ AC13
@@ -80,7 +80,7 @@ printf '%s\n%s\n%s\n' \
 ## 6. CNY / USD 共存【既有双币】→ AC10
 
 - **路径**：本地有 claude-code（USD 订阅/估算）+ minimax（CNY）并行用量 → 开总览/月视图。
-- **期望**：同 host 不同币按 provider 分行、币种各标；**绝不**跨币相加成一个数；`total_summable` 保持单币可解释。
+- **期望**：同 harness 不同币按 provider 分行、币种各标；**绝不**跨币相加成一个数；`total_summable` 保持单币可解释。
 - **对拍**：`data coverage --json` 的 by_provider 各条目 currency 字段与 UI 行一致。
 - **UAT 记录**：
 
@@ -100,16 +100,16 @@ printf '%s\n%s\n%s\n' \
 
 ## 9. 全局暂停 / 排除 / 删除已导入数据【Loop 44-46】→ AC23
 
-- **路径**：数据源页 → 暂停全局自动同步 → 恢复；再对一个宿主依次执行排除（确认「已排除」）→ 恢复读取 → 删除已导入数据（确认框）。
-- **期望**：全局暂停及单宿主排除只影响未来读取；恢复读取后重新同步；删除确认后该宿主事实/会话/工作流程/路由证据/来源指纹清除，**宿主原始日志不动**；其他宿主数据保留。
-- **对拍**：`data coverage` 被删宿主行 Unavailable 且 facts 清空；另宿主计数不变。
+- **路径**：数据源页 → 暂停全局自动同步 → 恢复；再对一个执行环境依次执行排除（确认「已排除」）→ 恢复读取 → 删除已导入数据（确认框）。
+- **期望**：全局暂停及单执行环境排除只影响未来读取；恢复读取后重新同步；删除确认后该执行环境事实/会话/工作流程/路由证据/来源指纹清除，**执行环境原始日志不动**；其他执行环境数据保留。
+- **对拍**：`data coverage` 被删执行环境行 Unavailable 且 facts 清空；另执行环境计数不变。
 - **UAT 记录**：
 
-## 10. 自定义宿主根目录 → 同步接入【Loop 44】→ AC02（子集）
+## 10. 自定义执行环境根目录 → 同步接入【Loop 44】→ AC02（子集）
 
-- **路径**：设置 → 数据源 → 选择其他位置 → 目录选择器选一个真实宿主根 → 同步 → 回到总览。
-- **期望**：自定义根被对应宿主 scanner 枚举、与标准目录合并去重、继续原解析与 fact 生命周期（不另写格式解释）；非法路径/相对路径被拒绝。
-- **对拍**：`data status` 该宿主 sources 增加自定义根对应文件；`source_files` 出现新增路径指纹。
+- **路径**：设置 → 数据源 → 选择其他位置 → 目录选择器选一个真实执行环境根 → 同步 → 回到总览。
+- **期望**：自定义根被对应执行环境 scanner 枚举、与标准目录合并去重、继续原解析与 fact 生命周期（不另写格式解释）；非法路径/相对路径被拒绝。
+- **对拍**：`data status` 该执行环境 sources 增加自定义根对应文件；`source_files` 出现新增路径指纹。
 - **UAT 记录**：
 
 ---

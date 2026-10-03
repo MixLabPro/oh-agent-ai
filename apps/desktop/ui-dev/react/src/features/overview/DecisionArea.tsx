@@ -52,7 +52,7 @@ const D = {
   unreadable: { zh: "本月支出明细暂不可读，请刷新重试", en: "Monthly breakdown unreadable; retry" },
   unresolved: { zh: "存在未解析项", en: "has unresolved items" },
   unclassified: { zh: "无法归类", en: "unclassified" },
-  viaHost: { zh: "经", en: "via" },
+  viaHarness: { zh: "经", en: "via" },
   unknownProvider: { zh: "未知提供方", en: "unknown provider" },
   unattributed: { zh: "未归属", en: "unattributed" },
   noCurrency: { zh: "（币种未声明）", en: "(currency undeclared)" },
@@ -143,29 +143,29 @@ function QuotaWindowCard() {
 }
 
 type PaybackRow = {
-  provider: string; hosts: string[]; fee: number; listEq: number;
+  provider: string; harnesses: string[]; fee: number; listEq: number;
   currency: string | null; hasUnresolved: boolean;
 };
 
-/** 旧 groupByProvider 语义（workbench.js:4223-4251）：provider+currency 合并跨宿主行、
- *  金额相加、has_unresolved 取 OR（评审 P2-1）。by_host freshness React DTO 没有，豁免。
+/** 旧 groupByProvider 语义（workbench.js:4223-4251）：provider+currency 合并跨执行环境行、
+ *  金额相加、has_unresolved 取 OR（评审 P2-1）。by_harness freshness React DTO 没有，豁免。
  *  无法归类的行不丢（AGENTS.md 不丢未解析信号）：fee/listEq 全零但 has_unresolved
  *  的组保留展示 unresolved chip；纯按量组也保留（无值回 chip），不静默过滤（P2-3）。 */
 function paybackRows(monthly: UsageSourceSummary): PaybackRow[] {
   const groups = new Map<string, PaybackRow>();
   for (const [key, amount] of Object.entries(monthly.by_provider)) {
-    const [host, provider = host] = key.split("/");
+    const [harness, provider = harness] = key.split("/");
     const bases: Record<string, number> = amount.amounts_by_basis ?? {};
     if (!Object.keys(bases).length && !amount.has_unresolved) continue;
     const id = `${provider}|${amount.currency ?? ""}`;
     const row = groups.get(id) ?? {
-      provider, hosts: [], fee: 0, listEq: 0,
+      provider, harnesses: [], fee: 0, listEq: 0,
       currency: amount.currency, hasUnresolved: false,
     };
     row.fee += bases["fixed_subscription"] ?? 0;
     row.listEq += bases["api_equivalent"] ?? 0;
     row.hasUnresolved = row.hasUnresolved || amount.has_unresolved;
-    if (!row.hosts.includes(host)) row.hosts.push(host);
+    if (!row.harnesses.includes(harness)) row.harnesses.push(harness);
     groups.set(id, row);
   }
   return Array.from(groups.values())
@@ -185,7 +185,7 @@ function PaybackDualTrack({ monthly }: { monthly: UsageSourceSummary | null }) {
       <ul className="decision-payback-list">
         {rows.map((row) => (
           <li key={`${row.provider}|${row.currency ?? ""}`}>
-            <span className="decision-src">{providerLabel(row.provider)}{row.hosts.length > 1 ? <small>{currentLang() === "zh" ? "（" : "("}{t("viaHost")} {row.hosts.join(currentLang() === "zh" ? "、" : ", ")}{currentLang() === "zh" ? "）" : ")"}</small> : null}</span>
+            <span className="decision-src">{providerLabel(row.provider)}{row.harnesses.length > 1 ? <small>{currentLang() === "zh" ? "（" : "("}{t("viaHarness")} {row.harnesses.join(currentLang() === "zh" ? "、" : ", ")}{currentLang() === "zh" ? "）" : ")"}</small> : null}</span>
             <span className="decision-payback-line">
               {row.fee > 0 ? <span className="chip sub-chip">{t("fixedFee")} {fmtMoney(row.fee, row.currency)}</span> : null}
               {row.listEq > 0 ? <span className="chip diag-chip">{t("listEqRef")} {fmtMoney(row.listEq, row.currency)}</span> : null}

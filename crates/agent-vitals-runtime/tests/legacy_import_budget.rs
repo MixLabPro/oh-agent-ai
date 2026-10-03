@@ -24,7 +24,7 @@ const LEGACY_MODULES: &[&str] = &[
     // trust/
     "trust_audit", "trust_identity", "trust_runtime_monitor",
     // sources/
-    "custom_sources", "host_registry", "session_sources", "source_controls",
+    "custom_sources", "harness_registry", "session_sources", "source_controls",
 ];
 
 /// 2026-09-22 实测 274 处（完整 LEGACY_MODULES 口径；spec 原文估 220 与

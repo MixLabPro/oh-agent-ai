@@ -75,7 +75,7 @@
   // 序列的取值函数。cumulative 三态：
   //   false        原始值——缺值返回 null（断开）。
   //   true / "sum" delta 累计——缺值沿用上一格，从第一次测到才开始累计。
-  //   "carry"      宿主已给累计值——缺值沿用上一格，**不再累加**（DSH cost 轴：
+  //   "carry"      执行环境已给累计值——缺值沿用上一格，**不再累加**（DSH cost 轴：
   //                每行 cumulative_cost 已是截至该请求的总花费，再累一遍就双计）。
   function buildSeriesValues(points, name, cumulative) {
     var out = new Array(points.length);
@@ -308,7 +308,7 @@
     var n = points.length;
 
     if (n === 0) {
-      return '<div class="' + px + '-empty">无时间线数据（该宿主没有带时间/序号的可画点）。</div>';
+      return '<div class="' + px + '-empty">无时间线数据（该执行环境没有带时间/序号的可画点）。</div>';
     }
 
     var series = seriesNames(spec);

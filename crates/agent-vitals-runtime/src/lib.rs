@@ -7,15 +7,15 @@
 //! | 层 | crate | 模块 |
 //! |---|---|---|
 //! | L0–L1 | `agent-vitals-runtime-core` | core（home/clock/lease/state/…）、pricing、source_graph、envelope、events、skills |
-//! | L2–L3 | `agent-vitals-query` | sources、sessions（宿主适配薄封装）、query（summary/trace/export/…） |
+//! | L2–L3 | `agent-vitals-query` | sources、sessions（执行环境适配薄封装）、query（summary/trace/export/…） |
 //! | L4 | `agent-vitals-billing` | billing（预算、计费预览、价格发现、额度提醒） |
 //! | L5 | `agent-vitals-ingest` | ingest（同步、进程内引擎、tick 调度、watcher、findings 评估） |
 //! | L5 | `agent-vitals-trust` | trust（Trust / Egress 审计） |
 //! | L6 | `agent-vitals-mcp` | mcp（Data MCP 工具，出口面） |
 //!
 //! 只能依赖严格更低层：crate 之间由 Cargo 保证，crate 内部由
-//! `tests/module_layering.rs` 钉住。宿主 wire 解释在 `agent-vitals-hosts`（含会话宿主
-//! 注册表 `sources::session_hosts`），纯规则在 `agent-vitals-domain`。
+//! `tests/module_layering.rs` 钉住。执行环境 wire 解释在 `agent-vitals-harnesses`（含会话执行环境
+//! 注册表 `sources::session_harnesses`），纯规则在 `agent-vitals-domain`。
 //! 历史（v0.8 D6/D7、v0.9 Stage 0.3/0.4、W8 删除 r2a）见 git log 与
 //! docs/ARCHITECTURE_OPTIMIZATION_GUIDE.md。
 
@@ -78,7 +78,7 @@ pub use agent_vitals_query::sources;
 pub use sources::session_sources;
 pub use sources::custom_sources;
 pub use sources::source_controls;
-pub use sources::host_registry;
+pub use sources::harness_registry;
 
 // ── 既有子目录 ──
 pub use agent_vitals_mcp::mcp;

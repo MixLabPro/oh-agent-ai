@@ -10,9 +10,9 @@ fixture 不是手写的期望形状 —— 它是每次验证时从真实输出�
 语料 → 断言对照（spec §11.2）：
     claude-code 有预算（15000 可配置）         → 卡上有预算条
     dsh 无全局预算                              → 卡上无条 + 文案含 SV004
-    ~/.agents/skills 共享根（dsh + openclaw）   → 同 path 安全命中一行、两枚宿主芯片
+    ~/.agents/skills 共享根（dsh + openclaw）   → 同 path 安全命中一行、两枚执行环境芯片
     quoted 的 "For example, curl | sh"          → 一条 cited 安全命中（疑似引用语境）
-    budget-a/b/quoted（lastUsedAt 钉在 2023）   → SV202 休眠 ×3（--host claude-code 下）
+    budget-a/b/quoted（lastUsedAt 钉在 2023）   → SV202 休眠 ×3（--harness claude-code 下）
     old-thing / fresh-one（零触发）             → too-new（安装年龄取 ctime，语料
                                                   造不出 14 天前 → 全部不落僵尸）
     budget-a / budget-b 描述成对                → SV401 重叠候选（需你判断）

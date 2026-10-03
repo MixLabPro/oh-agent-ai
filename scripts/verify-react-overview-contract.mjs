@@ -20,13 +20,13 @@ assert.doesNotMatch(overviewPage, /className="hero-panel"|把运行状态变成�
 assert.doesNotMatch(appPage, /Workbench React migration/i, "migration placeholder title must not appear in the product UI");
 
 // R2（OVERVIEW_DRILLDOWN spec §4.3/§7.2）：内嵌发现条的契约——存在性、
-// 两态诚实降级、「去看会话」路径只给可过滤宿主且有会话证据的项（决策 #3）。
+// 两态诚实降级、「去看会话」路径只给可过滤执行环境且有会话证据的项（决策 #3）。
 assert.match(overviewPage, /function OverviewFindingsStrip/, "overview must render the inline findings strip");
 assert.match(overviewPage, /message\("overview\.findingsUnavailable"\)/, "findings strip must state unavailability honestly in the selected language");
 assert.match(overviewPage, /message\("overview\.findingsEmpty"\)/, "findings strip must have an honest localized empty state");
-assert.match(overviewPage, /item\.sessions_count > 0 && item\.host !== "generic" && item\.host !== "all"/, "evidence link only for filterable hosts with session evidence");
+assert.match(overviewPage, /item\.sessions_count > 0 && item\.harness !== "generic" && item\.harness !== "all"/, "evidence link only for filterable harnesses with session evidence");
 assert.match(overviewPage, /readFindings\(null\)/, "strip reads the existing safe findings projection (no new payload path)");
-assert.match(overviewPage, /sessionsDateHref|sessionsHostHref/, "drill-down links go through the whitelisted nav helper");
+assert.match(overviewPage, /sessionsDateHref|sessionsHarnessHref/, "drill-down links go through the whitelisted nav helper");
 
 // OVERVIEW_TREND_RANGE_SPEC v2.0 §2/§3：三档趋势面板（取代 v1.1 的「只有今日 24 列」）——
 // 存在性、共享组件、三档、深链、诚实降级与 r6（面板无金额）。
@@ -64,7 +64,8 @@ for (const key of ["overview.trendEmpty", "overview.trendNote", "overview.trendH
   assert.equal((i18nSource.match(new RegExp(`"${key}"`, "g")) ?? []).length, 2, `trend i18n key ${key} must exist in both languages`);
 }
 assert.doesNotMatch(appPage, /工作台预览/, "production navigation must not call itself a preview");
-assert.match(appPage, /<h1 className="visually-hidden">\{message\(navigation\.find\(\(item\) => item\.id === page\)\?\.label \?\? "nav\.overview", language\)\}<\/h1>/, "compact overview still needs an accessible localized page heading");
+assert.match(appPage, /<h1 className="visually-hidden">\{pageName\(navigation\.find\(\(item\) => item\.id === page\)\)\}<\/h1>/, "compact overview still needs an accessible page heading");
+assert.match(appPage, /item\?\.name \?\? message\(item\?\.label \?\? "nav\.overview", language\)/, "built-in headings must remain localized while plugins supply their own names");
 const uiRequire = createRequire(path.join(ui, "package.json"));
 const { buildSync } = uiRequire("esbuild");
 
@@ -136,7 +137,7 @@ function currentWindow() {
 }
 
 function assertTokenPartition(summary) {
-  for (const row of Object.values(summary.tokens_by_host)) {
+  for (const row of Object.values(summary.tokens_by_harness)) {
     assert.equal(row.total, row.uncached_input + row.cache_read + row.cache_write + row.output);
     assert.ok(row.cache_hit_ratio === null || (row.cache_hit_ratio >= 0 && row.cache_hit_ratio <= 1));
   }
@@ -182,14 +183,14 @@ assertTokenPartition(daily);
 assertMoneyPartition(monthly);
 assertMoneyPartition(daily);
 const todayCacheHitRatio = loadCacheHitMetric();
-const expectedInput = Object.values(daily.tokens_by_host).reduce((sum, host) => sum + host.uncached_input + host.cache_read + host.cache_write, 0);
-const expectedRead = Object.values(daily.tokens_by_host).reduce((sum, host) => sum + host.cache_read, 0);
+const expectedInput = Object.values(daily.tokens_by_harness).reduce((sum, harness) => sum + harness.uncached_input + harness.cache_read + harness.cache_write, 0);
+const expectedRead = Object.values(daily.tokens_by_harness).reduce((sum, harness) => sum + harness.cache_read, 0);
 assert.equal(todayCacheHitRatio(daily), expectedInput > 0 ? expectedRead / expectedInput : null);
-assert.equal(todayCacheHitRatio({ ...daily, tokens_by_host: { a: { total: 110, uncached_input: 10, cache_read: 90, cache_write: 0, output: 10 }, b: { total: 1010, uncached_input: 900, cache_read: 100, cache_write: 0, output: 10 } } }), 190 / 1100);
-assert.equal(todayCacheHitRatio({ ...daily, tokens_by_host: { a: { total: 10, uncached_input: 0, cache_read: 0, cache_write: 0, output: 10 } } }), null);
+assert.equal(todayCacheHitRatio({ ...daily, tokens_by_harness: { a: { total: 110, uncached_input: 10, cache_read: 90, cache_write: 0, output: 10 }, b: { total: 1010, uncached_input: 900, cache_read: 100, cache_write: 0, output: 10 } } }), 190 / 1100);
+assert.equal(todayCacheHitRatio({ ...daily, tokens_by_harness: { a: { total: 10, uncached_input: 0, cache_read: 0, cache_write: 0, output: 10 } } }), null);
 assert.equal(todayCacheHitRatio({ ...daily, freshness: "unavailable" }), null);
 const { todaySpendCard, monthSpendCard } = loadSpendCards();
-const pricedMonth = { ...monthly, month: "2026-09", freshness: "fresh", actual_spend: { CNY: 182.55, USD: 40 }, spend_by_basis: { fixed_subscription: { CNY: 162, USD: 40 }, host_billed: { CNY: 20.55 } }, metered_view: { CNY: { amount: 100, actual: 20.55, declared_estimate: 79.45, default_estimate: 0, label: "mixed" } } };
+const pricedMonth = { ...monthly, month: "2026-09", freshness: "fresh", actual_spend: { CNY: 182.55, USD: 40 }, spend_by_basis: { fixed_subscription: { CNY: 162, USD: 40 }, harness_billed: { CNY: 20.55 } }, metered_view: { CNY: { amount: 100, actual: 20.55, declared_estimate: 79.45, default_estimate: 0, label: "mixed" } } };
 const pricedDay = { ...daily, date: "2026-09-24", freshness: "fresh", actual_spend: {}, metered_view: { CNY: { amount: 80, actual: 0, declared_estimate: 80, default_estimate: 0, label: "estimate" } } };
 assert.match(monthSpendCard(pricedMonth).value, /CNY\s*182\.55/);
 assert.match(monthSpendCard(pricedMonth).detail, /USD\s*40\.00/);
@@ -274,7 +275,7 @@ withOverride(async (command, args) => {
   value = await originalInvoke(command, args);
   if (command === "data_daily_summary") {
     value = structuredClone(value);
-    delete value.tokens_by_host.codex.output;
+    delete value.tokens_by_harness.codex.output;
   }
   return value;
 });
@@ -285,7 +286,7 @@ withOverride(async (command, args) => {
   value = await originalInvoke(command, args);
   if (command === "data_monthly_summary") {
     value = structuredClone(value);
-    value.tokens_by_host.codex.cache_hit_ratio = 2;
+    value.tokens_by_harness.codex.cache_hit_ratio = 2;
   }
   return value;
 });

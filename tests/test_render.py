@@ -80,7 +80,7 @@ class RenderCase(unittest.TestCase):
 
     def run_list(self, *extra, cmd=None):
         env = isolated_home_env(self.tmp)
-        r = subprocess.run((cmd or SCAN_CMD) + ["list", "--host", "claude-code"]
+        r = subprocess.run((cmd or SCAN_CMD) + ["list", "--harness", "claude-code"]
                            + list(extra),
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
@@ -209,7 +209,7 @@ class OverlapCase(unittest.TestCase):
         env = isolated_home_env(self.tmp)
         for k in ("CODEX_RUNTIME", "OPENCLAW_RUNTIME", "WORKBUDDY_BUILTINS"):
             env["AGENT_VITALS_DISABLE_" + k] = "1"
-        r = subprocess.run((cmd or SCAN_CMD) + ["overlap", "--host", "claude-code"]
+        r = subprocess.run((cmd or SCAN_CMD) + ["overlap", "--harness", "claude-code"]
                            + list(extra),
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)

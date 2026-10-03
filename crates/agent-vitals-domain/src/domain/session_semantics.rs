@@ -1,15 +1,15 @@
-//! 宿主无关的会话语义——所有宿主适配器共用的一份规则。
+//! 执行环境无关的会话语义——所有执行环境适配器共用的一份规则。
 //!
-//! 此前这些规则在 `agent-vitals-hosts` 里按宿主各写一份：`fingerprint` /
-//! `safe_label` 在 dsh 有逐字相同的私有副本，「模型切换」在四个宿主各有一段
+//! 此前这些规则在 `agent-vitals-harnesses` 里按执行环境各写一份：`fingerprint` /
+//! `safe_label` 在 dsh 有逐字相同的私有副本，「模型切换」在四个执行环境各有一段
 //! `previous_model` 比较，调用指纹的公式在 claude / codex 各写一遍，Claude 的
 //! 「回合从哪开始」更是在 evidence（SV612、调用树）与 workflow（消耗诊断）两处
 //! 各有一个**结论不同**的判据——同一会话在两个视图里回合数对不上
 //! （SESSION_TRACE_DIAGNOSTICS_SPEC r6 P0「口径先于诊断」）。
 //!
-//! 分工：宿主只做 wire 翻译（这条原生记录是「新请求 / 中断 / 都不是」，参数
+//! 分工：执行环境只做 wire 翻译（这条原生记录是「新请求 / 中断 / 都不是」，参数
 //! 在哪个字段），语义（新请求开回合、中断记取消、指纹怎么算、何为切换）在这里
-//! 定一次。本模块不认识任何宿主名；`host_tag` 只是调用方给的指纹命名空间。
+//! 定一次。本模块不认识任何执行环境名；`harness_tag` 只是调用方给的指纹命名空间。
 
 use serde_json::Value;
 
@@ -23,7 +23,7 @@ pub fn fingerprint(value: &str) -> String {
 }
 
 /// 能力标识：普通名字原样保留；任何像自由文本的值（路径、命令、提示词）一律
-/// 哈希，畸形的宿主载荷不能借能力名把原文带进权威表。
+/// 哈希，畸形的执行环境载荷不能借能力名把原文带进权威表。
 pub fn safe_label(value: &str) -> String {
     if !value.is_empty()
         && value.len() <= 128
@@ -54,7 +54,7 @@ pub fn iso_to_epoch_ms(value: Option<&str>) -> Option<i64> {
     seconds.checked_mul(1000)?.checked_add(fraction_ms)
 }
 
-/// 宿主状态字 → 闭合词表 succeeded / failed / cancelled / unknown。
+/// 执行环境状态字 → 闭合词表 succeeded / failed / cancelled / unknown。
 /// 「没看到失败」不折算成成功：认不出的状态一律 unknown。
 pub fn outcome(status: Option<&str>, error_present: bool) -> &'static str {
     if error_present {
@@ -83,7 +83,7 @@ pub fn outcome(status: Option<&str>, error_present: bool) -> &'static str {
 ///   拿它当时间就是把"我们排的序"冒充成"观测到的时间"。
 ///
 /// **跨度跟随调用方的记录集合**：调用方喂的是分叉后的事件，跨度就是分叉后的。
-/// 这是有意的——跨度描述「**这份证据是从什么算出来的**」，不是「宿主磁盘上有什么」。
+/// 这是有意的——跨度描述「**这份证据是从什么算出来的**」，不是「执行环境磁盘上有什么」。
 pub fn session_span(times: impl IntoIterator<Item = i64>) -> Option<TimeSpan> {
     let mut iter = times.into_iter().map(to_epoch_ms);
     let first = iter.next()?;
@@ -98,18 +98,18 @@ pub fn session_span(times: impl IntoIterator<Item = i64>) -> Option<TimeSpan> {
 
 /// 调用指纹 = 工具名 + 规范化参数（`workflow_events.invocation_fingerprint`）。
 ///
-/// 此前各宿主只编码工具名，「同一调用重复失败」退化成「同一工具失败过两次」
+/// 此前各执行环境只编码工具名，「同一调用重复失败」退化成「同一工具失败过两次」
 /// ——真机 claude 的 119 组「重复失败」里多数是不同命令。参数经
 /// `canonical_json` 规范化（键序无关）后只以哈希出现；缺参数时退回工具名级，
-/// 不编造区分度。`host_tag` 是指纹命名空间（不同宿主的同名工具不互相碰撞）。
-pub fn invocation_fingerprint(host_tag: &str, name: &str, args: Option<&Value>) -> String {
+/// 不编造区分度。`harness_tag` 是指纹命名空间（不同执行环境的同名工具不互相碰撞）。
+pub fn invocation_fingerprint(harness_tag: &str, name: &str, args: Option<&Value>) -> String {
     match args {
         Some(args) if !args.is_null() => {
             let mut canonical = String::new();
             canonical_json(args, &mut canonical);
-            fingerprint(&format!("{host_tag}-tool:{name}:{canonical}"))
+            fingerprint(&format!("{harness_tag}-tool:{name}:{canonical}"))
         }
-        _ => fingerprint(&format!("{host_tag}-tool:{name}")),
+        _ => fingerprint(&format!("{harness_tag}-tool:{name}")),
     }
 }
 
@@ -129,15 +129,15 @@ impl ModelSwitchTracker {
     }
 }
 
-/// 宿主把一条用户侧原生记录翻译成的回合信号。什么算「新请求」是 wire 知识
-/// （归宿主）；信号怎么变成回合边界是语义（归本模块）。
+/// 执行环境把一条用户侧原生记录翻译成的回合信号。什么算「新请求」是 wire 知识
+/// （归执行环境）；信号怎么变成回合边界是语义（归本模块）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserTurnSignal {
     /// 用户向助手提的新请求：开新回合。
     Request,
     /// 用户中断当前回合：当前回合记为已取消（每回合至多一次）。
     Interrupt,
-    /// 其余（宿主回灌、注入、工具结果……）：不影响回合。
+    /// 其余（执行环境回灌、注入、工具结果……）：不影响回合。
     Other,
 }
 
@@ -233,10 +233,10 @@ mod tests {
         let a = invocation_fingerprint("claude", "Bash", Some(&json!({"command": "npm test", "timeout": 5})));
         let b = invocation_fingerprint("claude", "Bash", Some(&json!({"timeout": 5, "command": "npm test"})));
         let c = invocation_fingerprint("claude", "Bash", Some(&json!({"command": "ls"})));
-        let other_host = invocation_fingerprint("codex", "Bash", Some(&json!({"command": "npm test", "timeout": 5})));
+        let other_harness = invocation_fingerprint("codex", "Bash", Some(&json!({"command": "npm test", "timeout": 5})));
         assert_eq!(a, b);
         assert_ne!(a, c);
-        assert_ne!(a, other_host, "宿主命名空间隔离");
+        assert_ne!(a, other_harness, "执行环境命名空间隔离");
         assert!(!a.contains("npm"), "指纹不携带参数原文");
         assert_eq!(
             invocation_fingerprint("codex", "bash", None),

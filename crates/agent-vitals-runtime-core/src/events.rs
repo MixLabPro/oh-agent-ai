@@ -41,7 +41,7 @@ pub const EVENT_TYPES: &[(&str, EventClass)] = &[
     ("AuthorityRevisionAdvanced", EventClass::Domain),
     ("DeclarationSaved", EventClass::Domain),
     ("PriceCardSaved", EventClass::Domain),
-    ("HostSourceFailed", EventClass::Domain),
+    ("HarnessSourceFailed", EventClass::Domain),
     ("SourceRecovered", EventClass::Domain),
     ("McpToolInvoked", EventClass::Audit),
     ("TrustMonitorEvent", EventClass::Domain),
@@ -67,8 +67,8 @@ fn static_type(event_type: &str) -> Option<&'static str> {
 pub struct AppEvent {
     pub event_type: &'static str,
     pub occurred_at_ms: i64,
-    /// 宿主域事件携带；全局事件（计时器等）为 `None`。
-    pub host: Option<String>,
+    /// 执行环境域事件携带；全局事件（计时器等）为 `None`。
+    pub harness: Option<String>,
     /// 来源批次（sync_runs.run_id / IPC 序列），可空。
     pub correlation_id: Option<String>,
     pub producer: &'static str,
@@ -87,7 +87,7 @@ impl AppEvent {
         Self {
             event_type: "McpToolInvoked",
             occurred_at_ms: now_ms(),
-            host: None,
+            harness: None,
             // 进程内调用序号：event_id 唯一性材料（同毫秒同参数的重复调用不得
             // 互吞——审计日志不允许静默少计）+ 消费方的进程内顺序信号。
             correlation_id: Some(call_seq.to_string()),
@@ -113,7 +113,7 @@ impl AppEvent {
         Self {
             event_type: "TrustMonitorEvent",
             occurred_at_ms: now_ms(),
-            host: None,
+            harness: None,
             correlation_id: Some(run_id.to_string()),
             producer: "trust-runtime-monitor",
             payload: json!({
@@ -125,19 +125,19 @@ impl AppEvent {
         }
     }
 
-    /// `FactsIngested`：某宿主的事实批次已在权威库事务内落定。
+    /// `FactsIngested`：某执行环境的事实批次已在权威库事务内落定。
     ///
     /// `revision` = 本事务**提交后**的权威 revision（spec §5 声明的
-    /// `FactsIngested{host, run_id, revision}`）。生产者在事务内读当前值 + 1
+    /// `FactsIngested{harness, run_id, revision}`）。生产者在事务内读当前值 + 1
     /// （事务已插入事实，提交必然推进）；领域消费者可据此跳过 ≤ 已处理 revision 的批次。
     pub fn facts_ingested(
-        host: &str, run_id: &str, revision: u64,
+        harness: &str, run_id: &str, revision: u64,
         inserted: usize, rejected: usize, duplicate: usize,
     ) -> Self {
         Self {
             event_type: "FactsIngested",
             occurred_at_ms: now_ms(),
-            host: Some(host.to_string()),
+            harness: Some(harness.to_string()),
             correlation_id: Some(run_id.to_string()),
             producer: "sync_service",
             // inserted / rejected / duplicate 三个计数分开（独立验证发现：此前
@@ -154,13 +154,13 @@ impl AppEvent {
         // 身份 = 类型 + 事实键（时间戳 + correlation + payload 指纹）。同一次
         // 事实（同 run_id、同计数）重放得到同一 event_id → INSERT OR IGNORE
         // 吸收，生产者侧幂等不需要额外协议。
-        // 材料包含 host（独立验证发现）：同类型、同毫秒、同 correlation 的
-        // 两个不同宿主事件必须互不吸收——计时器类事件（correlation 为 NULL）
+        // 材料包含 harness（独立验证发现）：同类型、同毫秒、同 correlation 的
+        // 两个不同执行环境事件必须互不吸收——计时器类事件（correlation 为 NULL）
         // 尤其依赖这一维度。
         let material = format!(
             "{}\0{}\0{}\0{}\0{}",
             self.event_type,
-            self.host.as_deref().unwrap_or(""),
+            self.harness.as_deref().unwrap_or(""),
             self.occurred_at_ms,
             self.correlation_id.as_deref().unwrap_or(""),
             self.payload,
@@ -194,7 +194,7 @@ pub fn insert_outbox(conn: &Connection, event: &AppEvent, run_id: &str) -> Resul
     }
     conn.execute(
         "INSERT OR IGNORE INTO event_outbox(
-             event_id, event_type, schema_version, occurred_at_ms, host,
+             event_id, event_type, schema_version, occurred_at_ms, harness,
              correlation_id, producer, payload_json, ingested_run_id, created_at_ms)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         rusqlite::params![
@@ -202,7 +202,7 @@ pub fn insert_outbox(conn: &Connection, event: &AppEvent, run_id: &str) -> Resul
             event.event_type,
             EVENT_SCHEMA_VERSION,
             event.occurred_at_ms,
-            event.host,
+            event.harness,
             event.correlation_id,
             event.producer,
             event.payload.to_string(),
@@ -219,7 +219,7 @@ pub fn insert_outbox(conn: &Connection, event: &AppEvent, run_id: &str) -> Resul
 /// - `Domain`：读领域事件载荷，逐条处理（price-reconcile / quota / issue 评估器）；
 /// - `Audit`：读审计事件；
 /// - `Presentation`：展示层。**结构上拿不到载荷**——只能以 [`CoalescingConsumer`]
-///   身份参与 drain，得到「本轮有哪些类型 / 哪些宿主 / 多少条」的合并摘要，
+///   身份参与 drain，得到「本轮有哪些类型 / 哪些执行环境 / 多少条」的合并摘要，
 ///   再由 flush 派生失效信号。用 [`EventConsumer`] 声明 `Presentation` 角色在
 ///   `Dispatcher::new` 被拒绝。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -348,8 +348,8 @@ impl EventConsumer {
 pub struct Coalesced {
     /// 本轮 fold 成功的事件数。
     pub events: usize,
-    /// 触及的宿主（宿主域事件才有；全局事件不贡献）。
-    pub hosts: std::collections::BTreeSet<String>,
+    /// 触及的执行环境（执行环境域事件才有；全局事件不贡献）。
+    pub harnesses: std::collections::BTreeSet<String>,
     /// 触及的事件类型。
     pub types: std::collections::BTreeSet<&'static str>,
 }
@@ -469,7 +469,7 @@ impl Dispatcher {
             let interest = consumer.interest();
             // 兴趣集过滤进 SQL：不订阅的类型连行都不物化、不记账（spec 验收 9.4）。
             let sql = format!(
-                "SELECT o.event_id, o.event_type, o.schema_version, o.occurred_at_ms, o.host,
+                "SELECT o.event_id, o.event_type, o.schema_version, o.occurred_at_ms, o.harness,
                         o.correlation_id, o.producer, o.payload_json,
                         COALESCE(d.retry_count, 0)
                  FROM event_outbox o
@@ -509,7 +509,7 @@ impl Dispatcher {
             drop(stmt);
             let mut coalesced = Coalesced::default();
             for row in pending {
-                let (event_id, event_type, schema_version, occurred_at_ms, host,
+                let (event_id, event_type, schema_version, occurred_at_ms, harness,
                      correlation_id, _producer, payload_json, prior_retries) = row;
                 // 前向兼容：未来的 schema_version / 词表外类型只跳过并计数，
                 // 不让一条不认识的行卡住整个队列（spec §10.7 的闭集校验是
@@ -527,7 +527,7 @@ impl Dispatcher {
                         let event = AppEvent {
                             event_type: static_event_type,
                             occurred_at_ms,
-                            host,
+                            harness,
                             correlation_id,
                             producer: "",
                             payload: serde_json::from_str(&payload_json).unwrap_or(Value::Null),
@@ -538,8 +538,8 @@ impl Dispatcher {
                         // 只累积头部字段；载荷字符串在此被丢弃，永不解析。
                         coalesced.events += 1;
                         coalesced.types.insert(static_event_type);
-                        if let Some(h) = host {
-                            coalesced.hosts.insert(h);
+                        if let Some(h) = harness {
+                            coalesced.harnesses.insert(h);
                         }
                         Ok(())
                     }
@@ -572,14 +572,14 @@ impl Dispatcher {
 
 // ---- 失效信号与「变了才发」原语（RUNTIME_INVALIDATION spec §4.4 / §4.5）----
 
-/// 展示层的失效信号：权威 revision + 本轮 drain 触及的宿主（**下界**，不是精确集——
+/// 展示层的失效信号：权威 revision + 本轮 drain 触及的执行环境（**下界**，不是精确集——
 /// drain 时读到的 revision 可能超前于本轮 fold 的事件，spec §4.4 顺序注记）。
 /// 它不是 outbox 行；由 `CoalescingConsumer::flush` 派生、经
 /// [`ChangePublisher::publish_if_advanced`] 发射。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Invalidation {
     pub revision: u64,
-    pub hosts: std::collections::BTreeSet<String>,
+    pub harnesses: std::collections::BTreeSet<String>,
 }
 
 /// 「变了才发」发布器：进程内保存上次发布值，与之不同才调 `emit`。锁内只比较与
@@ -625,8 +625,8 @@ impl<T: PartialEq + Clone> ChangePublisher<T> {
 }
 
 impl ChangePublisher<Invalidation> {
-    /// revision **严格前进**才发（`>` 而非 `!=`）。同 revision 再来一次——哪怕 hosts
-    /// 不同——也吞掉：hosts 只是下界提示，revision 才是电平。
+    /// revision **严格前进**才发（`>` 而非 `!=`）。同 revision 再来一次——哪怕 harnesses
+    /// 不同——也吞掉：harnesses 只是下界提示，revision 才是电平。
     pub fn publish_if_advanced(&self, next: Invalidation, emit: impl FnOnce(&Invalidation)) -> bool {
         let advanced = {
             let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
@@ -771,7 +771,7 @@ mod tests {
         let bad = AppEvent {
             event_type: "NotARealEvent",
             occurred_at_ms: 1,
-            host: None,
+            harness: None,
             correlation_id: None,
             producer: "test",
             payload: serde_json::json!({}),
@@ -858,12 +858,12 @@ mod tests {
         emit(&db, &event, &run);
 
         // outbox 行断言
-        let (etype, host, payload): (String, Option<String>, String) = db.conn().query_row(
-            "SELECT event_type, host, payload_json FROM event_outbox",
+        let (etype, harness, payload): (String, Option<String>, String) = db.conn().query_row(
+            "SELECT event_type, harness, payload_json FROM event_outbox",
             [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         ).unwrap();
         assert_eq!(etype, "FactsIngested");
-        assert_eq!(host.as_deref(), Some("claude-code"));
+        assert_eq!(harness.as_deref(), Some("claude-code"));
         assert!(payload.contains("\"inserted\":25"), "载荷带 inserted: {payload}");
 
         // 消费者收到
@@ -877,14 +877,14 @@ mod tests {
         assert_eq!(report.delivered, 1);
         let recv = received.lock().unwrap().clone();
         assert_eq!(recv[0].event_type, "FactsIngested");
-        assert_eq!(recv[0].host.as_deref(), Some("claude-code"));
+        assert_eq!(recv[0].harness.as_deref(), Some("claude-code"));
         assert_eq!(recv[0].correlation_id.as_deref(), Some(run.as_str()));
         assert_eq!(recv[0].payload["inserted"], 25);
         drop(db);
         cleanup(&path);
     }
 
-    /// TrustMonitorEvent 端到端：全局事件（host=None）载荷完整到达消费者。
+    /// TrustMonitorEvent 端到端：全局事件（harness=None）载荷完整到达消费者。
     #[test]
     fn trust_monitor_event_end_to_end() {
         let path = tmp_db("e2e-trust");
@@ -903,7 +903,7 @@ mod tests {
         assert_eq!(report.delivered, 1);
         let recv = received.lock().unwrap().clone();
         assert_eq!(recv[0].event_type, "TrustMonitorEvent");
-        assert_eq!(recv[0].host, None, "全局事件 host=None");
+        assert_eq!(recv[0].harness, None, "全局事件 harness=None");
         assert_eq!(recv[0].payload["observations"], 5);
         assert_eq!(recv[0].payload["findings_upserted"], 2);
         drop(db);
@@ -1008,17 +1008,17 @@ mod tests {
     }
 
     /// 9.6：合成 1000 条 FactsIngested 一轮 drain → flush 恰 1 次，deliveries 1000 行，
-    /// hosts 为合成宿主集。9.9：flush 拿到的摘要结构上没有载荷。
+    /// harnesses 为合成执行环境集。9.9：flush 拿到的摘要结构上没有载荷。
     #[test]
-    fn coalescing_consumer_flushes_once_per_drain_with_hosts_and_no_payload() {
+    fn coalescing_consumer_flushes_once_per_drain_with_harnesses_and_no_payload() {
         let path = tmp_db("coalesce");
         let db = AuthorityDb::open(&path, 1).expect("open");
         let run = seed(&db);
-        let hosts = ["claude-code", "codex", "dsh", "workbuddy"];
+        let harnesses = ["claude-code", "codex", "dsh", "workbuddy"];
         db.with_immediate_txn(|conn| {
             for i in 0..1000u64 {
-                let host = hosts[(i % 4) as usize];
-                let mut e = AppEvent::facts_ingested(host, &run, i, 1, 0, 0);
+                let harness = harnesses[(i % 4) as usize];
+                let mut e = AppEvent::facts_ingested(harness, &run, i, 1, 0, 0);
                 e.occurred_at_ms = 1_000 + i as i64; // 身份材料含时间戳，保证 1000 条互不吸收
                 e.payload["secret-marker"] = json!("SENSITIVE-PAYLOAD");
                 insert_outbox(conn, &e, &run).map_err(db_err)?;
@@ -1037,8 +1037,8 @@ mod tests {
         let got = flushes.lock().unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].events, 1000);
-        let expect: std::collections::BTreeSet<String> = hosts.iter().map(|h| h.to_string()).collect();
-        assert_eq!(got[0].hosts, expect);
+        let expect: std::collections::BTreeSet<String> = harnesses.iter().map(|h| h.to_string()).collect();
+        assert_eq!(got[0].harnesses, expect);
         assert_eq!(got[0].types.iter().copied().collect::<Vec<_>>(), vec!["FactsIngested"]);
         // 9.9：结构保证——`Coalesced` 的 Debug 输出里不可能出现载荷字段。
         assert!(!format!("{:?}", got[0]).contains("SENSITIVE-PAYLOAD"));
@@ -1066,7 +1066,7 @@ mod tests {
         static FLUSHED: AtomicUsize = AtomicUsize::new(0);
         let dispatcher = Dispatcher::with_coalescing(
             vec![EventConsumer::new("failer", ConsumerInterest::domain(&[]), |e| {
-                if e.host.as_deref() == Some("codex") { Err("boom".into()) } else { Ok(()) }
+                if e.harness.as_deref() == Some("codex") { Err("boom".into()) } else { Ok(()) }
             })],
             vec![CoalescingConsumer::new("ui", ConsumerInterest::presentation(), |c| {
                 assert_eq!(c.events, 2);
@@ -1083,7 +1083,7 @@ mod tests {
     #[test]
     fn invalidation_publishes_only_when_revision_advances() {
         let publisher = ChangePublisher::<Invalidation>::new();
-        let inv = |r: u64| Invalidation { revision: r, hosts: Default::default() };
+        let inv = |r: u64| Invalidation { revision: r, harnesses: Default::default() };
         let mut emitted = Vec::new();
         assert!(publisher.publish_if_advanced(inv(5), |i| emitted.push(i.revision)));
         assert!(!publisher.publish_if_advanced(inv(5), |i| emitted.push(i.revision)), "same revision: swallowed");

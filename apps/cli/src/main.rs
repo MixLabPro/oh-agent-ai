@@ -1,9 +1,9 @@
-//! 扫描本机各 Agent 宿主的 skill 安装目录，输出成本清单（JSON）。
+//! 扫描本机各 Agent 执行环境的 skill 安装目录，输出成本清单（JSON）。
 //!
 //! 只做确定性统计，不做判断。判断交给调用它的 Agent。
 //!
 //! 关键设计：**区分「装在磁盘上」和「真的进了上下文」**。未启用的插件副本、
-//! 其他宿主（Codex 等）的 skill 都在磁盘上，但不占 Claude Code 的描述预算。
+//! 其他执行环境（Codex 等）的 skill 都在磁盘上，但不占 Claude Code 的描述预算。
 //! 把它们算进去会得出「预算超支」的假警报。
 //!
 //! 本文件是 scripts/scan.py 的移植。输出必须与之逐字节一致 ——
@@ -26,7 +26,7 @@ use util::norm;
 
 // v0.8 Phase E7.2：覆盖优先级排序（level_rank/level_rank_for/severity_rank/
 // conflict_rank/CODEX_FALLBACK_DESC_BUDGET/layer_of）+ JSON 字段取值助手
-// （s/i/f/b/chars）迁进 agent-vitals-domain（纯计算，不认识宿主 wire 格式，
+// （s/i/f/b/chars）迁进 agent-vitals-domain（纯计算，不认识执行环境 wire 格式，
 // 本该一直在那）。`analysis.rs`/`overlap.rs` 同一步跟着搬进 domain；
 // `layer_of` 原本因为 `discovery.rs` 还在二进制里而保留 re-export，E7.5
 // discovery.rs 也搬进库 crate 后这条 re-export 已无调用点，删掉——只有
@@ -60,10 +60,10 @@ fn non_negative(s: &str) -> Result<i64, String> {
     allow_negative_numbers = true
 )]
 struct Args {
-    /// Analyze one host; default: scan every supported host separately
+    /// Analyze one harness; default: scan every supported harness separately
     #[arg(long, global = true, default_value = "all",
           value_parser = ["all", "claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"])]
-    host: String,
+    harness: String,
 
     /// Additional scan path; repeatable
     #[arg(long = "path", global = true)]
@@ -173,7 +173,7 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
         /// Attach the full scan report to the JSON payload as "report". A consumer
-        /// that needs both the SV diagnostics and the host summaries then scans
+        /// that needs both the SV diagnostics and the harness summaries then scans
         /// once instead of twice (the desktop Skill tab; budget/trigger evidence
         /// lives in the report, SV codes in the diagnostics).
         #[arg(long = "with-report", requires = "rows_json")]
@@ -282,14 +282,14 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
     },
-    /// Print the HostProfile registry (v0.6 host-contract spec §5.1): the
-    /// four runtime hosts' declared structural capabilities (unmeasured
+    /// Print the HarnessProfile registry (v0.6 harness-contract spec §5.1): the
+    /// four runtime harnesses' declared structural capabilities (unmeasured
     /// signals, degraded rules, session-store/fold capability). This is the
     /// registry itself, not a per-session derive — see `docs/
-    /// VITALS_CORE_V0_6_HOST_CONTRACT_SPEC.md` §5.2 for what it does and does
+    /// VITALS_CORE_V0_6_HARNESS_CONTRACT_SPEC.md` §5.2 for what it does and does
     /// not answer.
-    Hosts {
-        /// Write hosts JSON to FILE; use - for stdout. Without this option,
+    Harnesses {
+        /// Write harnesses JSON to FILE; use - for stdout. Without this option,
         /// print a human table.
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
@@ -314,13 +314,13 @@ enum Cmd {
     /// Read-only diagnostic: emits the graph JSON (nodes / edges / coverage),
     /// writes no state. Nodes are ordered by (scope, ordinal) — never by
     /// timestamp; missing parent/time/status are counted in coverage, never
-    /// fabricated. Three-host closed vocabulary: claude-code / codex / dsh.
+    /// fabricated. Three-harness closed vocabulary: claude-code / codex / dsh.
     Trace {
         /// Path to a session file (jsonl; dsh accepts .zstd)
         session_file: PathBuf,
-        /// Which host's wire format to parse (claude-code / codex / dsh)
+        /// Which harness's wire format to parse (claude-code / codex / dsh)
         #[arg(long, value_parser = ["claude-code", "codex", "dsh"])]
-        host: String,
+        harness: String,
         /// machine_namespace component of SessionKey — required (spec §9);
         /// the CLI never invents one (missing exits 2)
         #[arg(long)]
@@ -364,7 +364,7 @@ enum Cmd {
     /// (P4 "sound" proof — Legacy + Paginated fold into the shared 19-signal model).
     ///
     /// Emits coverage JSON, not findings: Codex has no SV601-614 detectors yet
-    /// (detector decoupling is the deferred later phase). `--host codex` is the
+    /// (detector decoupling is the deferred later phase). `--harness codex` is the
     /// install-time probe surface and is unrelated to this subcommand.
     CodexEvidence {
         /// Path to the Codex rollout JSONL log (or use --roots)
@@ -420,7 +420,7 @@ enum Cmd {
     /// Audit a Claude Code session (`~/.claude/projects/**/*.jsonl`) into a
     /// CanonicalSession with §13 coverage + SV601–614 findings. Claude's tool
     /// results carry no reason codes, so SV607/608 degrade to Unavailable
-    /// (host capability, §12); SV609/610/614 are Unavailable via the empty
+    /// (harness capability, §12); SV609/610/614 are Unavailable via the empty
     /// approval/sandbox timelines. Stateless single call; `--list` enumerates.
     ClaudeSession {
         /// List all Claude sessions: id/title/model/cwd/date span
@@ -469,13 +469,13 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
         /// v0.9 Stage A: persist facts through the runtime ingest service into
-        /// <data_home>/facts/<host>.jsonl (exactly-once by fact_id). Rust-only
+        /// <data_home>/facts/<harness>.jsonl (exactly-once by fact_id). Rust-only
         /// by design — Python grows no writer (spec DoD #7); without this flag
         /// the output stays byte-identical to the Python implementation.
         #[arg(long)]
         write: bool,
     },
-    /// List validated manifest hosts (HOST_MANIFEST_DSL_SPEC §7.2 registry).
+    /// List validated manifest harnesses (HARNESS_MANIFEST_DSL_SPEC §7.2 registry).
     /// Read-only; broken manifests are reported, never fatal (degradation
     /// isolation). Python mirror lands with the parity task.
     ManifestList,
@@ -483,12 +483,12 @@ enum Cmd {
     /// written by the desktop check. CLI has no network transport — the fetch
     /// itself is desktop-owned, mirroring the pricing catalog.
     ManifestCatalogStatus,
-    /// Dry-run a manifest host (§6.5 first-install walkthrough): discovery + extraction +
+    /// Dry-run a manifest harness (§6.5 first-install walkthrough): discovery + extraction +
     /// fact_id stability + format guard. No writes. With --file, feed fixture
     /// files directly (golden/parity mode); otherwise discovery per manifest.
     /// Mirrors Python `scan.py manifest-validate`.
     ManifestValidate {
-        /// Path to hosts.d/<slug>/manifest.json
+        /// Path to harnesses.d/<slug>/manifest.json
         #[arg(long)]
         manifest: PathBuf,
         /// Optional explicit files (fixture mode); discovery otherwise
@@ -501,11 +501,11 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: bool,
     },
-    /// Ingest a manifest host (§6.5): validate gate -> facts JSONL (exactly-once)
+    /// Ingest a manifest harness (§6.5): validate gate -> facts JSONL (exactly-once)
     /// -> authority dual-write. Rust-only writer (Python grows no writer, same
     /// rule as workbuddy-usage-facts --write). Rerun-safe on every stage.
     ManifestIngest {
-        /// Path to hosts.d/<slug>/manifest.json (slug must match dir name)
+        /// Path to harnesses.d/<slug>/manifest.json (slug must match dir name)
         #[arg(long)]
         manifest: PathBuf,
         /// machine_namespace component of SessionKey — required (spec §9)
@@ -572,7 +572,7 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
         /// v0.9 Stage A: persist facts through the runtime ingest service into
-        /// <data_home>/facts/<host>.jsonl (exactly-once by fact_id). Rust-only
+        /// <data_home>/facts/<harness>.jsonl (exactly-once by fact_id). Rust-only
         /// by design — Python grows no writer (spec DoD #7); without this flag
         /// the output stays byte-identical to the Python implementation.
         #[arg(long)]
@@ -604,13 +604,13 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: Option<PathBuf>,
         /// v0.9 Stage A: persist facts through the runtime ingest service into
-        /// <data_home>/facts/<host>.jsonl (exactly-once by fact_id). Rust-only
+        /// <data_home>/facts/<harness>.jsonl (exactly-once by fact_id). Rust-only
         /// by design — Python grows no writer (spec DoD #7); without this flag
         /// the output stays byte-identical to the Python implementation.
         #[arg(long)]
         write: bool,
     },
-    /// Routine facts sync across all three hosts (locate, checkpoint diff,
+    /// Routine facts sync across all three harnesses (locate, checkpoint diff,
     /// emit, then SQL authority + legacy dual-write). Idempotent: re-runs
     /// skip unchanged files (source_files fingerprints) and dedup facts by
     /// fact_id. The machine namespace comes from machine.json (the sync
@@ -619,11 +619,11 @@ enum Cmd {
         /// Output the sync report as JSON
         #[arg(long = "json")]
         rows_json: bool,
-        /// Targeted sync (LIGHT-PATH spec §5.2): only run these hosts'
-        /// batches (comma-separated, e.g. `--hosts claude-code,codex`).
-        /// Absent = all hosts (default, byte-identical to the old form).
-        #[arg(long = "hosts")]
-        hosts: Option<String>,
+        /// Targeted sync (LIGHT-PATH spec §5.2): only run these harnesses'
+        /// batches (comma-separated, e.g. `--harnesses claude-code,codex`).
+        /// Absent = all harnesses (default, byte-identical to the old form).
+        #[arg(long = "harnesses")]
+        harnesses: Option<String>,
     },
     /// One-time import of the legacy facts JSONL into the SQL authority DB
     /// (spec 6.2.1: JSONL is the highest-fidelity migration source; same
@@ -645,23 +645,23 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: bool,
     },
-    /// Phase 2.8 (spec 5.3): explicit host-bill management. Host bills (WorkBuddy
+    /// Phase 2.8 (spec 5.3): explicit harness-bill management. Harness bills (WorkBuddy
     /// credit, subscription invoices, relay statements) are user-entered, not
     /// derived from our price cards. `set` upserts one; `list --month` shows a
     /// period; `delete --id` soft-deletes. Amounts are minor units (integer).
-    DataHostBill {
+    DataHarnessBill {
         #[arg(value_parser = ["set", "list", "delete"])]
         action: String,
         /// set/list/delete: billing period YYYY-MM (default: current for list)
         #[arg(long)]
         month: Option<String>,
-        /// set: host (e.g. workbuddy)
+        /// set: harness (e.g. workbuddy)
         #[arg(long)]
-        host: Option<String>,
+        harness: Option<String>,
         /// set: provider id (e.g. workbuddy)
         #[arg(long)]
         provider: Option<String>,
-        /// set: billing basis (host_billed | fixed_subscription | metered_actual | ...)
+        /// set: billing basis (harness_billed | fixed_subscription | metered_actual | ...)
         #[arg(long)]
         basis: Option<String>,
         /// set: amount in minor units (¥1.00 = 100)
@@ -682,9 +682,9 @@ enum Cmd {
     },
     /// Export facts from the SQL authority database (spec §9: both exports are
     /// generated from SQL queries). Identity fields verbatim; soft-deleted rows
-    /// excluded. Files land as <host>.jsonl
+    /// excluded. Files land as <harness>.jsonl
     DataExportPrivate {
-        /// Output directory (created on demand); files land as <host>.jsonl
+        /// Output directory (created on demand); files land as <harness>.jsonl
         #[arg(long)]
         out: PathBuf,
     },
@@ -694,7 +694,7 @@ enum Cmd {
     /// source as data-export-private. Spec §6: this is a SEPARATE
     /// write path from data-export-private by design — not a --redacted flag.
     DataExportRedacted {
-        /// Output directory (created on demand); files land as <host>.jsonl
+        /// Output directory (created on demand); files land as <harness>.jsonl
         #[arg(long)]
         out: PathBuf,
     },
@@ -724,8 +724,8 @@ enum Cmd {
         rows_json: bool,
     },
     /// Re-import the authoritative facts/*.jsonl into TWO throwaway temp DBs
-    /// (one round crashes after the first host, then reopens + re-migrates
-    /// idempotently) and diff the per-host, per-Beijing-month aggregates.
+    /// (one round crashes after the first harness, then reopens + re-migrates
+    /// idempotently) and diff the per-harness, per-Beijing-month aggregates.
     /// Proves Q12: re-running any month/day query is byte-identical to the
     /// first successful import, no half-commits. Never touches the live DB.
     /// This is the MCP-external half of migration self-check (spec §8.1.2);
@@ -738,7 +738,7 @@ enum Cmd {
     /// Audit a WorkBuddy session (`~/.workbuddy/` sqlite db + audit-log + file-history)
     /// into a CanonicalSession with §13 coverage + SV601–614 findings. The db
     /// `sessions` row is the join anchor across the four joinable surfaces (spec
-    /// §2.1; traces join via `trace.sessionId` since E1/E2); cost is the host-billed
+    /// §2.1; traces join via `trace.sessionId` since E1/E2); cost is the harness-billed
     /// credit_json (spec §9). Edit/Write spans feed SV604/605, span status feeds
     /// SV607/608, agent spans feed SubagentSpawns; Bash spans are not folded until
     /// E3 (audit-log stays the Bash source). Stateless single call; `--list` enumerates.
@@ -772,7 +772,7 @@ enum Cmd {
     /// authority DB's `budget_config`/`budget_snoozes` (spec §5.3), replacing
     /// alert.json/budget.json reads. Amounts are CNY minor units (integer cents).
     /// `alert` computes the full budget alert from the authority DB (SQL
-    /// equivalent of `budget show`), cross-host metered CNY.
+    /// equivalent of `budget show`), cross-harness metered CNY.
     BudgetSql {
         #[arg(value_parser = ["status", "profiles", "profile-set", "alert", "config-show", "config-set", "snooze-set", "snooze-clear"])]
         action: String,
@@ -833,7 +833,7 @@ enum Cmd {
         action: ProbeAction,
     },
     /// Passive route-quality report for the Test tab v2 (2026-09-20 pivot):
-    /// aggregates RECORDED usage facts by host × model family — actual model
+    /// aggregates RECORDED usage facts by harness × model family — actual model
     /// identity is hard evidence from protocol responses, no probe requests.
     RoutesQuality {
         /// Window length in days (default 90).
@@ -851,7 +851,7 @@ enum Cmd {
     /// concrete type past the call site (spec §3.1 dependency table). `--json`
     /// prints the frozen `to_json()` DTO verbatim; spec §3.1 makes it a
     /// contract violation to consume amounts while dropping
-    /// freshness/coverage/excluded_hosts, so both views surface all three.
+    /// freshness/coverage/excluded_harnesses, so both views surface all three.
     Data {
         #[command(subcommand)]
         action: DataAction,
@@ -873,16 +873,16 @@ enum TrustAction {
     Audit {
         /// Profile id to scan, or all
         #[arg(long, default_value = "all")]
-        host: String,
+        harness: String,
         /// Print the report as JSON to stdout
         #[arg(long)]
         json: bool,
     },
-    /// Read already persisted redacted Trust observations without scanning hosts.
+    /// Read already persisted redacted Trust observations without scanning harnesses.
     Evidence {
         /// Optional profile id filter.
         #[arg(long)]
-        host: Option<String>,
+        harness: Option<String>,
         /// Maximum most-recent evidence rows (1..=500).
         #[arg(long, default_value_t = 200)]
         limit: usize,
@@ -943,12 +943,12 @@ enum DataMcpAction {
 // `data` 子命令的子动作。Stage 0 的 repository 只有 `monthly_summary`/
 // `daily_summary` 两个查询（spec §3.1 的 `coverage_status(CoverageQuery)` 是
 // Stage B 的独立查询面）——MonthlySummary DTO 本身承载 coverage/excluded_
-// hosts，所以月视图命令沿用 spec 建议名 `coverage`，不另设第二个命令去打印
+// harnesses，所以月视图命令沿用 spec 建议名 `coverage`，不另设第二个命令去打印
 // 同一份 DTO 的另一种排版。帮助文本一律英文（test_regressions 钉 `--help`
 // 无 CJK——scanner-owned text 的纪律），中文设计注记只留在这里。
 #[derive(Subcommand)]
 enum DataAction {
-    /// Monthly cross-host summary (coverage, excluded hosts, freshness).
+    /// Monthly cross-harness summary (coverage, excluded harnesses, freshness).
     /// Missing data renders as "no data", never as zero.
     Coverage {
         /// Query a specific month (YYYY-MM) instead of the current statistics month
@@ -958,7 +958,7 @@ enum DataAction {
         #[arg(long)]
         json: bool,
     },
-    /// Single-day cross-host summary (statistics date, YYYY-MM-DD).
+    /// Single-day cross-harness summary (statistics date, YYYY-MM-DD).
     Daily {
         /// Statistics date to query (YYYY-MM-DD)
         #[arg(long)]
@@ -994,7 +994,7 @@ enum DataAction {
 /// `sessions` 子命令的子动作（v0.9.1 SQL 权威库收口：list/read/navigation
 /// 改走 `mcp::dispatch`，envelope 与 MCP `tools/call` 同源）。
 ///
-/// - `List`：`mcp::sessions_search(date|month, hosts?, hour?, min_tokens?, limit, cursor)`
+/// - `List`：`mcp::sessions_search(date|month, harnesses?, hour?, min_tokens?, limit, cursor)`
 ///   —— 参数名与 MCP 输入 schema 一致；`--day` 与 `--month` 二选一。
 /// - `Read`：`mcp::session_detail(session_ref, limit?, cursor?)` —— `session_ref`
 ///   是 MCP 返回的 HMAC（`sr_<32hex>`），不是原生 session key。
@@ -1025,7 +1025,7 @@ enum ProbeAction {
         label: Option<String>,
         /// claude-code | codex (P1 runs claude-code)
         #[arg(long, default_value = "claude-code")]
-        host_kind: String,
+        harness_kind: String,
         /// Official direct connection uses the CLI's own login; a relay endpoint goes here.
         #[arg(long)]
         endpoint: Option<String>,
@@ -1044,7 +1044,7 @@ enum ProbeAction {
     /// Show the CURRENT effective claude route (from ~/.claude/settings.json env,
     /// whitelisted: base_url + model only — credentials are never read). This is
     /// the default object of the tab's active test (spec §0 v1.2): test what the
-    /// host actually uses, no isolation injection.
+    /// harness actually uses, no isolation injection.
     Current {
         #[arg(long)]
         json: bool,
@@ -1056,7 +1056,7 @@ enum ProbeAction {
     },
     /// Run an L0 identity probe (single route, or paired A/B interleaved).
     /// --route-a current tests the CURRENT effective route (no isolation — the
-    /// host's own settings apply; the honest answer for cc-switch machines).
+    /// harness's own settings apply; the honest answer for cc-switch machines).
     Run {
         #[arg(long = "route-a")]
         route_a: String,
@@ -1091,7 +1091,7 @@ enum ProbeAction {
 #[derive(Subcommand)]
 enum SessionsAction {
     /// List sessions active in a statistics-timezone day or month (optional hour drill-down,
-    /// optional host / min_tokens filter). Output envelope is byte-identical to
+    /// optional harness / min_tokens filter). Output envelope is byte-identical to
     /// the MCP `sessions_search` tool result.
     List {
         /// Statistics day YYYY-MM-DD (exactly one of --day / --month)
@@ -1109,9 +1109,9 @@ enum SessionsAction {
         /// Restrict to this local statistics hour (0..=23). Requires --day.
         #[arg(long)]
         hour: Option<u32>,
-        /// Filter by host kind (repeatable: `--host-kind claude-code --host-kind codex`)
-        #[arg(long = "host-kind", value_name = "HOST")]
-        host_kind: Vec<String>,
+        /// Filter by harness kind (repeatable: `--harness-kind claude-code --harness-kind codex`)
+        #[arg(long = "harness-kind", value_name = "HARNESS")]
+        harness_kind: Vec<String>,
         /// Restrict to this exact model id
         #[arg(long)]
         model: Option<String>,
@@ -1160,8 +1160,8 @@ enum SessionsAction {
         #[arg(long)]
         json: bool,
     },
-    /// Multi-host navigation projection (today tokens + today session count +
-    /// recent N deep-link rows per host). The Tauri menu bar caches this envelope
+    /// Multi-harness navigation projection (today tokens + today session count +
+    /// recent N deep-link rows per harness). The Tauri menu bar caches this envelope
     /// and only re-renders (§6 决策 3）；today_tokens 走 SQL 权威库，
     /// recent[] 走 `mcp::sessions_search`。
     Navigation {
@@ -1171,7 +1171,7 @@ enum SessionsAction {
         /// Timezone of the projected day (valid IANA name; defaults to the configured/OS value).
         #[arg(long)]
         timezone: Option<String>,
-        /// How many recent rows per host; default 5
+        /// How many recent rows per harness; default 5
         #[arg(long, default_value_t = 5)]
         recent: usize,
         /// Print the envelope JSON to stdout
@@ -1194,7 +1194,7 @@ enum StateAction {
     /// Fenced: refuses unless the writer-manifest owner is "rust" (run
     /// `state takeover rust` first, or pass --shadow to rehearse on a copy).
     FoldSession {
-        /// fold-req JSON (session_id/host_kind/machine_namespace/oneline).
+        /// fold-req JSON (session_id/harness_kind/machine_namespace/oneline).
         /// Any old business-ledger fields are ignored.
         req: PathBuf,
         /// Shadow mode: skip the owner check and fold into whatever
@@ -1337,7 +1337,7 @@ fn render_codex_evidence(out: &Value) -> String {
 
     let mut s = String::new();
     s.push_str(&format!(
-        "host: {}\n",
+        "harness: {}\n",
         dash(Some(&Value::String("codex".into())))
     ));
     s.push_str(&format!("session: {}\n", dash(out.get("session_id"))));
@@ -1387,7 +1387,7 @@ fn render_codex_evidence(out: &Value) -> String {
 /// 同一个 Value 上读（形状唯一来源），Python 侧 `cli.py::_render_codex_roots`
 /// 逐字节对齐这一份。缺席的根不猜路径也不报错，只标 `(absent)`。
 fn render_codex_roots(out: &Value) -> String {
-    let mut s = String::from("host: codex\n");
+    let mut s = String::from("harness: codex\n");
     if let Some(roots) = out.get("roots").and_then(|v| v.as_array()) {
         for entry in roots {
             let (Some(kind), Some(path)) = (
@@ -1423,8 +1423,8 @@ fn render_codex_roots(out: &Value) -> String {
 /// 渲染只做呈现：null 一律落 `—`（没测到就标没测到，不假装 0），summary 不汇总
 /// token（per-startup 与 per-trigger 单位不可通约）。
 fn render_plan(out: &Value) -> String {
-    let host = out
-        .get("host_selection")
+    let harness = out
+        .get("harness_selection")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let startup = out.get("startup_rate_per_month").and_then(|v| v.as_i64());
@@ -1444,7 +1444,7 @@ fn render_plan(out: &Value) -> String {
         .unwrap_or(0);
 
     let mut s = String::new();
-    s.push_str(&format!("host: {host}\n"));
+    s.push_str(&format!("harness: {harness}\n"));
     match startup {
         Some(x) => s.push_str(&format!("startup rate per month: {x}\n")),
         None => s.push_str("startup rate per month: —\n"),
@@ -1498,7 +1498,7 @@ fn render_plan(out: &Value) -> String {
 }
 
 /// `codex-fold → 计价` 共享助手：从已折叠合并的 fold 出一个 `--json` 报告 dict
-/// （host/currency/month/today 外层包装 + report 键）。filter_key=None 不过滤
+/// （harness/currency/month/today 外层包装 + report 键）。filter_key=None 不过滤
 /// （all 视图）；want_hours=True 时报告带 hours（today 视图小时热力图）。空折叠
 /// 给全零结构而不是 None——调用方要的是「没有数据」而不是「崩了」，且包装是
 /// 固定契约（unaccounted/plan 透传，无时间归属、不随月过滤）。与 Python
@@ -1526,7 +1526,7 @@ fn codex_report_from_merged(
         // 重算模型轴：merge 的 by_model 只读 fold 的 by_model 字段，不读
         // by_hour_model——拿 merge 折回去得到的是空模型轴（真实 defect：
         // --month 整份报告静默变全零）。
-        by_model = agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
+        by_model = agent_vitals_harnesses::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
     }
     let pricing = agent_vitals_runtime::sessions::codex_cost::load_codex_pricing();
     let plan = merged["plan"].clone();
@@ -1541,7 +1541,7 @@ fn codex_report_from_merged(
     let report = report.unwrap_or_else(|| {
         // 空折叠：全零结构（同 handler 注释——透传 unaccounted/plan）。
         let mut tt = serde_json::Map::new();
-        for f in agent_vitals_hosts::codex_usage::CODEX_TOKEN_FIELDS {
+        for f in agent_vitals_harnesses::codex_usage::CODEX_TOKEN_FIELDS {
             tt.insert(f.to_string(), json!(0));
         }
         let mut base = serde_json::Map::new();
@@ -1558,7 +1558,7 @@ fn codex_report_from_merged(
         Value::Object(base)
     });
     let mut out = serde_json::Map::new();
-    out.insert("host".into(), json!("codex"));
+    out.insert("harness".into(), json!("codex"));
     out.insert("currency".into(), json!("USD"));
     out.insert(
         "month".into(),
@@ -1576,8 +1576,8 @@ fn codex_report_from_merged(
     Value::Object(out)
 }
 
-/// 统一看板内联的 codex 规范单块（docs/UNIFIED_COST_VIEW.md 的 1 号宿主契约）：
-/// {host, currency, today, default, views:{today,month,all}}。每个 view 即
+/// 统一看板内联的 codex 规范单块（docs/UNIFIED_COST_VIEW.md 的 1 号执行环境契约）：
+/// {harness, currency, today, default, views:{today,month,all}}。每个 view 即
 /// `codex_report_from_merged` 的一个报告。today 视图 want_hours=True；month
 /// 视图用调用方给的 month_key/month_out；all 视图不过滤。与 Python
 /// `cli.py::codex_calendar_blob` 同构。
@@ -1602,7 +1602,7 @@ fn codex_calendar_blob(
         codex_report_from_merged(merged, None, None, false),
     );
     let mut blob = serde_json::Map::new();
-    blob.insert("host".into(), json!("codex"));
+    blob.insert("harness".into(), json!("codex"));
     blob.insert("currency".into(), json!("USD"));
     blob.insert("today".into(), json!(today));
     blob.insert("default".into(), json!(default));
@@ -1612,7 +1612,7 @@ fn codex_calendar_blob(
 
 /// `codex-cost --html`：复用统一看板模板 calendar.html（退役独立 codex_cost.html，
 /// 一套视觉模板，见 docs/UNIFIED_COST_VIEW.md）。只内联 codex 规范单块 +
-/// `AGENT_VITALS_DEFAULT_HOST='codex'`（codex 视角的看板，不内联 DSH 块）。
+/// `AGENT_VITALS_DEFAULT_HARNESS='codex'`（codex 视角的看板，不内联 DSH 块）。
 /// JSON 经 `</script`/`<!--` 转义。与 Python `cli.py::_render_codex_cost_html`
 /// 同构（HTML 文件不参与差分，只需等价可解析的页面）。
 fn render_codex_cost_html(
@@ -1630,10 +1630,10 @@ fn render_codex_cost_html(
         .replace("<!--", "<\\!--");
     let inject =
         format!("<script id=\"agent-vitals-data-codex\" type=\"application/json\">{safe}</script>");
-    let host_inject = "<script>window.AGENT_VITALS_DEFAULT_HOST = 'codex';</script>";
+    let harness_inject = "<script>window.AGENT_VITALS_DEFAULT_HARNESS = 'codex';</script>";
     let html = TEMPLATE
         .replacen("</head>", &format!("{inject}\n</head>"), 1)
-        .replacen("</head>", &format!("{host_inject}\n</head>"), 1);
+        .replacen("</head>", &format!("{harness_inject}\n</head>"), 1);
     if let Some(parent) = output_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -1649,7 +1649,7 @@ fn render_codex_cost_html(
 /// 面）；金额一律带 basis 标签——estimate/api_equivalent 不冒充真实账单
 /// （spec §4）。不标货币符号：Stage 0 DTO 刻意不带 currency 字段（§8.4/0.4c
 /// 的决定：口径字段承载语义，混币永不相加），文本视图不重新发明。
-fn amount_parts(h: &agent_vitals_data::projection::HostAmount) -> Vec<String> {
+fn amount_parts(h: &agent_vitals_data::projection::HarnessAmount) -> Vec<String> {
     let mut parts: Vec<String> = h
         .amounts_by_basis
         .iter()
@@ -1657,7 +1657,7 @@ fn amount_parts(h: &agent_vitals_data::projection::HostAmount) -> Vec<String> {
         .collect();
     if parts.is_empty() {
         // 有观测、无钱（全 unknown 日）——不是 0，也不是账单（Unresolved
-        // 不得归零，见 summary.rs::claude_host_amount）。
+        // 不得归零，见 summary.rs::claude_harness_amount）。
         parts.push("no priceable amount (unresolved)".to_string());
     }
     if h.has_unresolved {
@@ -1666,7 +1666,7 @@ fn amount_parts(h: &agent_vitals_data::projection::HostAmount) -> Vec<String> {
     parts
 }
 
-fn freshness_tag(h: &agent_vitals_data::projection::HostAmount) -> String {
+fn freshness_tag(h: &agent_vitals_data::projection::HarnessAmount) -> String {
     use agent_vitals_data::projection::FreshnessState;
     let last = h.freshness.last_observed_at.as_deref().unwrap_or("-");
     match h.freshness.state {
@@ -1681,7 +1681,7 @@ fn freshness_tag(h: &agent_vitals_data::projection::HostAmount) -> String {
 
 fn print_monthly_summary_text(s: &agent_vitals_data::projection::MonthlySummary) {
     println!("month {}", s.month);
-    for (name, h) in &s.by_host {
+    for (name, h) in &s.by_harness {
         let amounts = amount_parts(h).join("  ");
         if h.freshness.state == agent_vitals_data::projection::FreshnessState::Unavailable {
             println!("  {name:<12} {}", freshness_tag(h));
@@ -1694,21 +1694,21 @@ fn print_monthly_summary_text(s: &agent_vitals_data::projection::MonthlySummary)
         "coverage {}/{} (denominator v{})",
         s.coverage.measured_fields, s.coverage.total_fields, s.coverage.denominator_version
     );
-    let excluded: Vec<&str> = s.excluded_hosts.iter().map(|x| x.as_str()).collect();
+    let excluded: Vec<&str> = s.excluded_harnesses.iter().map(|x| x.as_str()).collect();
     if excluded.is_empty() {
-        println!("excluded hosts: (none)");
+        println!("excluded harnesses: (none)");
     } else {
-        println!("excluded hosts: {}", excluded.join(", "));
+        println!("excluded harnesses: {}", excluded.join(", "));
     }
     println!(
-        "summable total: {:.2} (estimates/diagnostics excluded, see per-host basis)",
+        "summable total: {:.2} (estimates/diagnostics excluded, see per-harness basis)",
         s.total_summable()
     );
 }
 
 fn print_daily_summary_text(s: &agent_vitals_data::projection::DailySummary) {
     println!("date {}", s.date);
-    for (name, h) in &s.by_host {
+    for (name, h) in &s.by_harness {
         let amounts = amount_parts(h).join("  ");
         if h.freshness.state == agent_vitals_data::projection::FreshnessState::Unavailable {
             println!("  {name:<12} {}", freshness_tag(h));
@@ -1721,14 +1721,14 @@ fn print_daily_summary_text(s: &agent_vitals_data::projection::DailySummary) {
         "coverage {}/{} (denominator v{})",
         s.coverage.measured_fields, s.coverage.total_fields, s.coverage.denominator_version
     );
-    let excluded: Vec<&str> = s.excluded_hosts.iter().map(|x| x.as_str()).collect();
+    let excluded: Vec<&str> = s.excluded_harnesses.iter().map(|x| x.as_str()).collect();
     if excluded.is_empty() {
-        println!("excluded hosts: (none)");
+        println!("excluded harnesses: (none)");
     } else {
-        println!("excluded hosts: {}", excluded.join(", "));
+        println!("excluded harnesses: {}", excluded.join(", "));
     }
     println!(
-        "summable total: {:.2} (estimates/diagnostics excluded, see per-host basis)",
+        "summable total: {:.2} (estimates/diagnostics excluded, see per-harness basis)",
         s.total_summable()
     );
 }
@@ -1811,7 +1811,7 @@ fn main() {
 
     // Trust historical audit is a deliberately separate, local-only writer.
     // It runs before generic skill scanning: a user asking for this diagnostic
-    // must not also trigger unrelated host/file scans.
+    // must not also trigger unrelated harness/file scans.
     if let Some(Cmd::Trust { action }) = &args.cmd {
         let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
             eprintln!("trust: HOME is unavailable");
@@ -1820,14 +1820,14 @@ fn main() {
         let data_home = agent_vitals_runtime::home::data_home();
         let (profiles, profile_errors) = agent_vitals_runtime::trust_audit::profiles(&data_home, &home);
         match action {
-            TrustAction::Audit { host, json } => {
-                let targets: Vec<_> = if host == "all" {
+            TrustAction::Audit { harness, json } => {
+                let targets: Vec<_> = if harness == "all" {
                     profiles.iter().collect()
                 } else {
-                    profiles.iter().filter(|profile| profile.id() == host).collect()
+                    profiles.iter().filter(|profile| profile.id() == harness).collect()
                 };
                 if targets.is_empty() {
-                    eprintln!("trust audit: no valid profile `{host}`; run `agent-vitals trust profiles`");
+                    eprintln!("trust audit: no valid profile `{harness}`; run `agent-vitals trust profiles`");
                     std::process::exit(2);
                 }
                 let machine_namespace = agent_vitals_runtime::takeover::machine_namespace();
@@ -1842,17 +1842,17 @@ fn main() {
                         "reports": reports, "profile_errors": profile_errors,
                     })).unwrap_or_default()),
                     Ok(reports) => for report in reports {
-                        println!("{}: {} artifacts ({} new, {} duplicate), {} findings", report.host, report.discovered, report.inserted, report.duplicate, report.findings_upserted);
+                        println!("{}: {} artifacts ({} new, {} duplicate), {} findings", report.harness, report.discovered, report.inserted, report.duplicate, report.findings_upserted);
                     },
                     Err(error) => { eprintln!("trust audit failed: {error}"); std::process::exit(2); }
                 }
                 return;
             }
-            TrustAction::Evidence { host, limit, cursor, json } => {
-                match agent_vitals_runtime::trust::trust_audit::read_evidence_history(&data_home, host.as_deref(), *limit, cursor.as_deref()) {
+            TrustAction::Evidence { harness, limit, cursor, json } => {
+                match agent_vitals_runtime::trust::trust_audit::read_evidence_history(&data_home, harness.as_deref(), *limit, cursor.as_deref()) {
                     Ok(page) => {
                         let count = page.evidence.len();
-                        let payload = serde_json::json!({ "host": host, "evidence": page.evidence, "count": count, "next_cursor": page.next_cursor, "source": "authority_readonly" });
+                        let payload = serde_json::json!({ "harness": harness, "evidence": page.evidence, "count": count, "next_cursor": page.next_cursor, "source": "authority_readonly" });
                         if *json { println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default()); }
                         else { println!("{} persisted evidence rows", count); }
                     }
@@ -1877,7 +1877,7 @@ fn main() {
                 return;
             }
             TrustAction::Discover { json } => {
-                let candidates = agent_vitals_runtime::trust_audit::discover_host_candidates(&home, &profiles);
+                let candidates = agent_vitals_runtime::trust_audit::discover_harness_candidates(&home, &profiles);
                 let payload = serde_json::json!({"candidates": candidates, "profile_errors": profile_errors});
                 if *json { println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default()); }
                 else {
@@ -1998,11 +1998,11 @@ fn main() {
         }
     }
 
-    // v0.6 host-contract spec §5.1/§11-M0: print the core HostProfile registry
-    // as-is. `hosts_json()` is the byte-parity surface Python's
-    // `host_capability.hosts_json()` mirrors (G1).
-    if let Some(Cmd::Hosts { rows_json }) = &args.cmd {
-        let out = agent_vitals_domain::host_capability::hosts_json();
+    // v0.6 harness-contract spec §5.1/§11-M0: print the core HarnessProfile registry
+    // as-is. `harnesses_json()` is the byte-parity surface Python's
+    // `harness_capability.harnesses_json()` mirrors (G1).
+    if let Some(Cmd::Harnesses { rows_json }) = &args.cmd {
+        let out = agent_vitals_domain::harness_capability::harnesses_json();
         if let Some(path) = rows_json {
             let text = serde_json::to_string_pretty(&out).unwrap_or_default();
             if path == &PathBuf::from("-") {
@@ -2014,7 +2014,7 @@ fn main() {
                 println!("Wrote {}", path.display());
             }
         } else {
-            for h in out["hosts"].as_array().cloned().unwrap_or_default() {
+            for h in out["harnesses"].as_array().cloned().unwrap_or_default() {
                 let id = h["id"].as_str().unwrap_or("?");
                 let display = h["display"].as_str().unwrap_or("?");
                 let unmeasured = h["unmeasured_signals"]
@@ -2212,7 +2212,7 @@ session_store={store} fold={fold}"
     // （Tauri / MCP server）用的。
     if let Some(Cmd::Trace {
         session_file,
-        host,
+        harness,
         machine_namespace,
         source_profile,
         rows_json,
@@ -2229,14 +2229,14 @@ session_store={store} fold={fold}"
             .unwrap_or("unknown")
             .to_string();
         let key = agent_vitals_domain::contracts::session_key::SessionKey::new(
-            host,
+            harness,
             &native_id,
             source_profile,
             ns,
         );
-        let canonical = match agent_vitals_hosts::canonical_input::canonical_session_for_path(
+        let canonical = match agent_vitals_harnesses::canonical_input::canonical_session_for_path(
             session_file,
-            host,
+            harness,
         ) {
             Ok(c) => c,
             Err(e) => {
@@ -2286,9 +2286,9 @@ session_store={store} fold={fold}"
         // 原生 id——摘要足够回答「这会话里发生了什么、图缺什么」。
         let cov = &graph.coverage;
         println!(
-            "TraceGraph {} host={} nodes={} edges={}",
+            "TraceGraph {} harness={} nodes={} edges={}",
             graph.graph_id,
-            host,
+            harness,
             cov.total_nodes,
             cov.total_edges
         );
@@ -2394,7 +2394,7 @@ session_store={store} fold={fold}"
 
     // P4（docs/RUNTIME_EVIDENCE_CONTRACT.md §17）：Codex rollout → CanonicalSession
     // 的 "sound" 证明。输出 §13 coverage，不是 findings——Codex 还没有 SV601–614
-    // 检测器（detector decoupling 是后置的更大一摊，P4 明确不做）。`--host codex`
+    // 检测器（detector decoupling 是后置的更大一摊，P4 明确不做）。`--harness codex`
     // 是安装时探针的表面，与这个子命令无关（命名冲突见 codex_session.rs 顶部注释）。
     if let Some(Cmd::CodexEvidence {
         session_log,
@@ -2407,7 +2407,7 @@ session_store={store} fold={fold}"
                 .or_else(|_| std::env::var("USERPROFILE"))
                 .unwrap_or_default();
             let report =
-                agent_vitals_hosts::codex_session::codex_session_roots_report(Path::new(&home));
+                agent_vitals_harnesses::codex_session::codex_session_roots_report(Path::new(&home));
             if let Some(path) = rows_json {
                 let text = serde_json::to_string_pretty(&report).unwrap_or_default();
                 if path == &PathBuf::from("-") {
@@ -2427,7 +2427,7 @@ session_store={store} fold={fold}"
         let session_log = session_log
             .as_ref()
             .expect("session_log required unless --roots");
-        let parsed = agent_vitals_hosts::codex_session::read_codex_session_log(session_log);
+        let parsed = agent_vitals_harnesses::codex_session::read_codex_session_log(session_log);
         if parsed.get("degraded").and_then(|v| v.as_str()).is_some() {
             eprintln!("session log unavailable: unreadable, malformed, or empty");
             std::process::exit(2);
@@ -2476,9 +2476,9 @@ session_store={store} fold={fold}"
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_default();
-        let session_index = agent_vitals_hosts::codex_session::read_session_index(Path::new(&home));
+        let session_index = agent_vitals_harnesses::codex_session::read_session_index(Path::new(&home));
         let title = session_index.get(&session_id).cloned();
-        let evidence = agent_vitals_hosts::codex_evidence::build_codex_evidence(
+        let evidence = agent_vitals_harnesses::codex_evidence::build_codex_evidence(
             items,
             session_id,
             title,
@@ -2488,7 +2488,7 @@ session_store={store} fold={fold}"
             model,
         );
         if let Some(path) = rows_json {
-            let out = agent_vitals_hosts::codex_evidence::codex_evidence_json(&evidence);
+            let out = agent_vitals_harnesses::codex_evidence::codex_evidence_json(&evidence);
             let text = serde_json::to_string_pretty(&out).unwrap_or_default();
             if path == &PathBuf::from("-") {
                 println!("{text}");
@@ -2507,7 +2507,7 @@ session_store={store} fold={fold}"
         }
         print!(
             "{}",
-            render_codex_evidence(&agent_vitals_hosts::codex_evidence::codex_evidence_json(
+            render_codex_evidence(&agent_vitals_harnesses::codex_evidence::codex_evidence_json(
                 &evidence
             ))
         );
@@ -2715,7 +2715,7 @@ session_store={store} fold={fold}"
     }
 
     // Claude Code 会话审计。与 codex-session 同款 home 解析与缺省 --session =
-    // 最新；SV607/608 的 Unavailable 覆盖在 claude_session.rs（host-capability
+    // 最新；SV607/608 的 Unavailable 覆盖在 claude_session.rs（harness-capability
     // degradation，§12）。
     if let Some(Cmd::ClaudeSession {
         list,
@@ -2728,7 +2728,7 @@ session_store={store} fold={fold}"
             .unwrap_or_default();
         let home_path = Path::new(&home);
         if *list {
-            let out = agent_vitals_hosts::claude_session::claude_session_list(home_path);
+            let out = agent_vitals_harnesses::claude_session::claude_session_list(home_path);
             if let Some(path) = rows_json {
                 let text = serde_json::to_string_pretty(&out).unwrap_or_default();
                 if path == &PathBuf::from("-") {
@@ -2742,7 +2742,7 @@ session_store={store} fold={fold}"
             } else {
                 print!(
                     "{}",
-                    agent_vitals_hosts::claude_session::render_claude_session_list(&out)
+                    agent_vitals_harnesses::claude_session::render_claude_session_list(&out)
                 );
             }
             return;
@@ -2751,7 +2751,7 @@ session_store={store} fold={fold}"
         let session_id = match session {
             Some(s) => s.clone(),
             None => {
-                let list = agent_vitals_hosts::claude_session::claude_session_list(home_path);
+                let list = agent_vitals_harnesses::claude_session::claude_session_list(home_path);
                 let first = list
                     .get("sessions")
                     .and_then(|v| v.as_array())
@@ -2769,7 +2769,7 @@ session_store={store} fold={fold}"
             }
         };
         let Some(out) =
-            agent_vitals_hosts::claude_session::claude_session_audit_json(home_path, &session_id)
+            agent_vitals_harnesses::claude_session::claude_session_audit_json(home_path, &session_id)
         else {
             eprintln!("claude session not found or unreadable: {session_id}");
             std::process::exit(2);
@@ -2807,7 +2807,7 @@ session_store={store} fold={fold}"
 
     // ── v0.9 Stage A：emit → ingest 端到端接线（R4 §5 ingest_service）────
     // --write 把 emitter 的事实流经 runtime 共享 ingest service 落盘
-    // `<data_home>/facts/<host>.jsonl`：按事实自身 `host` 分组、fact_id
+    // `<data_home>/facts/<harness>.jsonl`：按事实自身 `harness` 分组、fact_id
     // exactly-once、写后重放自检。**唯一写路径**——sync_service（Stage B）
     // 也走 ingest_service，不在这里旁路直捅 writer。
     fn run_ingest(
@@ -2847,7 +2847,7 @@ session_store={store} fold={fold}"
 
     fn print_ingest_summary(report: &Option<agent_vitals_runtime::ingest_service::IngestReport>) {
         if let Some(r) = report {
-            for h in &r.hosts {
+            for h in &r.harnesses {
                 println!(
                     "ingest → {}: +{} appended, {} duplicate, {} invalid, total {}{}",
                     h.facts_path.display(),
@@ -3074,7 +3074,7 @@ session_store={store} fold={fold}"
                 std::process::exit(2);
             }
         };
-        let result = match agent_vitals_hosts::workbuddy_usage_fact::workbuddy_traces_to_usage_facts(
+        let result = match agent_vitals_harnesses::workbuddy_usage_fact::workbuddy_traces_to_usage_facts(
             root,
             &ns,
             source_profile,
@@ -3088,7 +3088,7 @@ session_store={store} fold={fold}"
         let write_report = run_ingest(*write, "workbuddy-usage-facts", &result.facts);
         if let Some(path) = rows_json {
             let payload = attach_write_report(
-                agent_vitals_hosts::workbuddy_usage_fact::to_payload_value(&result, &ns, source_profile),
+                agent_vitals_harnesses::workbuddy_usage_fact::to_payload_value(&result, &ns, source_profile),
                 &write_report,
             );
             let text = serde_json::to_string_pretty(&payload).unwrap_or_default();
@@ -3103,7 +3103,7 @@ session_store={store} fold={fold}"
         } else {
             print!(
                 "{}",
-                agent_vitals_hosts::workbuddy_usage_fact::to_human_summary(&result, root, &ns, source_profile)
+                agent_vitals_harnesses::workbuddy_usage_fact::to_human_summary(&result, root, &ns, source_profile)
             );
             print_ingest_summary(&write_report);
         }
@@ -3233,10 +3233,10 @@ session_store={store} fold={fold}"
         return;
     }
 
-    // sync-facts（Stage B 遗留收口）：三宿主例行 ingest——退休路径第 ① 步。
+    // sync-facts（Stage B 遗留收口）：三执行环境例行 ingest——退休路径第 ① 步。
     // 托盘 tick 未来也调这一条（不各自长文件枚举）。
-    if let Some(Cmd::SyncFacts { rows_json, hosts }) = &args.cmd {
-        let only_hosts: Option<std::collections::BTreeSet<String>> = hosts
+    if let Some(Cmd::SyncFacts { rows_json, harnesses }) = &args.cmd {
+        let only_harnesses: Option<std::collections::BTreeSet<String>> = harnesses
             .as_ref()
             .map(|list| {
                 list.split(',')
@@ -3244,12 +3244,12 @@ session_store={store} fold={fold}"
                     .filter(|h| !h.is_empty())
                     .collect::<std::collections::BTreeSet<_>>()
             })
-            // 空集合 = 过滤掉一切 = no-op 同步——手敲 `--hosts ""` 的守卫：
-            // 视同未给参（全宿主），与桌面侧的防呆一致。
+            // 空集合 = 过滤掉一切 = no-op 同步——手敲 `--harnesses ""` 的守卫：
+            // 视同未给参（全执行环境），与桌面侧的防呆一致。
             .filter(|set| !set.is_empty());
         match agent_vitals_runtime::sync_service::sync_facts_filtered(
             &agent_vitals_runtime::home::data_home(),
-            only_hosts.as_ref(),
+            only_harnesses.as_ref(),
         ) {
             Ok(report) => {
                 if *rows_json {
@@ -3268,10 +3268,10 @@ session_store={store} fold={fold}"
                             report.declarations_applied
                         );
                     }
-                    for h in &report.hosts {
+                    for h in &report.harnesses {
                         println!(
                             "  {:<12} seen {} synced {} skipped {} (+{} dup{})",
-                            h.host,
+                            h.harness,
                             h.files_seen,
                             h.files_synced,
                             h.files_skipped,
@@ -3284,18 +3284,18 @@ session_store={store} fold={fold}"
                         );
                     }
                 }
-                // 单宿主的坏文件不回滚其他宿主已经写入的事实，但也绝不能把
-                // 这轮报告成成功：桌面端需要据此把该宿主标成“需要处理”。
-                // 错误写 stderr，使桌面 `run_facts_sync` 能保留宿主名和原因。
-                let failed_hosts: Vec<_> = report.hosts.iter()
-                    .filter(|host| !host.errors.is_empty())
+                // 单执行环境的坏文件不回滚其他执行环境已经写入的事实，但也绝不能把
+                // 这轮报告成成功：桌面端需要据此把该执行环境标成“需要处理”。
+                // 错误写 stderr，使桌面 `run_facts_sync` 能保留执行环境名和原因。
+                let failed_harnesses: Vec<_> = report.harnesses.iter()
+                    .filter(|harness| !harness.errors.is_empty())
                     .collect();
-                if !failed_hosts.is_empty() {
-                    for host in failed_hosts {
+                if !failed_harnesses.is_empty() {
+                    for harness in failed_harnesses {
                         eprintln!(
                             "sync-facts partial failure [{}]: {}",
-                            host.host,
-                            host.errors.join(" | "),
+                            harness.harness,
+                            harness.errors.join(" | "),
                         );
                     }
                     std::process::exit(1);
@@ -3332,7 +3332,7 @@ session_store={store} fold={fold}"
             eprintln!("data-migrate failed: {e}");
             std::process::exit(2);
         }
-        // E05/v30 文件侧迁移（幂等）：先把 plugin- 期行重 stamp 到 host: 身份
+        // E05/v30 文件侧迁移（幂等）：先把 plugin- 期行重 stamp 到 harness: 身份
         // （与 authority v30 同拍板），再改 facts 文件名。挂在 data-migrate 而
         // 非仅靠 retention——CLI 调用图裁剪后后者不一定被链接，且这是显式
         // 维护命令，确定性触发优于等每日首轮。
@@ -3356,8 +3356,8 @@ session_store={store} fold={fold}"
             updated: 0,
             conflicts: 0,
         };
-        for host in agent_vitals_runtime::ingest_service::FACT_HOSTS {
-            let path = data_home.join("facts").join(format!("{host}.jsonl"));
+        for harness in agent_vitals_runtime::ingest_service::FACT_HARNESSES {
+            let path = data_home.join("facts").join(format!("{harness}.jsonl"));
             if !path.exists() {
                 continue;
             }
@@ -3367,11 +3367,11 @@ session_store={store} fold={fold}"
                     &run_id,
                     agent_vitals_runtime::sql_sync::now_ms(),
                 )?;
-                writer.import_facts_jsonl(host, &path)
+                writer.import_facts_jsonl(harness, &path)
             }) {
                 Ok(r) => {
                     println!(
-                        "  {host}: +{} inserted, {} duplicate, {} rejected",
+                        "  {harness}: +{} inserted, {} duplicate, {} rejected",
                         r.inserted, r.duplicate, r.rejected
                     );
                     total.inserted += r.inserted;
@@ -3386,7 +3386,7 @@ session_store={store} fold={fold}"
                         Some(&e.to_string()),
                         agent_vitals_runtime::sql_sync::now_ms(),
                     );
-                    eprintln!("data-migrate failed ({host}): {e}");
+                    eprintln!("data-migrate failed ({harness}): {e}");
                     std::process::exit(2);
                 }
             }
@@ -3629,11 +3629,11 @@ session_store={store} fold={fold}"
         return;
     }
 
-    // data host-bill（Phase 2.8，spec §5.3 显式管理 API）
-    if let Some(Cmd::DataHostBill {
+    // data harness-bill（Phase 2.8，spec §5.3 显式管理 API）
+    if let Some(Cmd::DataHarnessBill {
         action,
         month,
-        host,
+        harness,
         provider,
         basis,
         amount_minor,
@@ -3651,7 +3651,7 @@ session_store={store} fold={fold}"
         ) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("data host-bill: authority DB unavailable: {e}");
+                eprintln!("data harness-bill: authority DB unavailable: {e}");
                 std::process::exit(2);
             }
         };
@@ -3659,24 +3659,24 @@ session_store={store} fold={fold}"
         match action.as_str() {
             "set" => {
                 let (Some(h), Some(p), Some(per), Some(b), Some(amt), Some(cur)) = (
-                    host.as_deref(),
+                    harness.as_deref(),
                     provider.as_deref(),
                     month.as_deref(),
                     basis.as_deref(),
                     *amount_minor,
                     currency.as_deref(),
                 ) else {
-                    eprintln!("data host-bill set: --host --provider --month --basis --amount-minor --currency are all required");
+                    eprintln!("data harness-bill set: --harness --provider --month --basis --amount-minor --currency are all required");
                     std::process::exit(2);
                 };
                 let ev = evidence.as_deref().unwrap_or("");
                 let id = format!("{h}:{p}:{per}:{b}:{ev}");
                 match db
-                    .with_immediate_txn(|_c| db.host_bill_put(&id, h, p, per, b, amt, cur, ev, now))
+                    .with_immediate_txn(|_c| db.harness_bill_put(&id, h, p, per, b, amt, cur, ev, now))
                 {
-                    Ok(()) => println!("host bill saved: {id} = {amt} {cur} ({b})"),
+                    Ok(()) => println!("harness bill saved: {id} = {amt} {cur} ({b})"),
                     Err(e) => {
-                        eprintln!("data host-bill set failed: {e}");
+                        eprintln!("data harness-bill set failed: {e}");
                         std::process::exit(2);
                     }
                 }
@@ -3685,11 +3685,11 @@ session_store={store} fold={fold}"
                 let per = month
                     .clone()
                     .unwrap_or_else(agent_vitals_runtime::clock::current_month_beijing);
-                match db.host_bills_for_period(&per) {
+                match db.harness_bills_for_period(&per) {
                     Ok(rows) => {
                         if *rows_json {
                             let arr: Vec<Value> = rows.iter().map(|(h, p, b, a, c)| json!({
-                                "host": h, "provider": p, "basis": b, "amount_minor": a, "currency": c,
+                                "harness": h, "provider": p, "basis": b, "amount_minor": a, "currency": c,
                             })).collect();
                             println!(
                                 "{}",
@@ -3697,7 +3697,7 @@ session_store={store} fold={fold}"
                                     .unwrap_or_default()
                             );
                         } else {
-                            println!("Host bills ({per}):");
+                            println!("Harness bills ({per}):");
                             for (h, p, b, a, c) in &rows {
                                 println!("  {h}/{p} {b}: {a} {c}");
                             }
@@ -3707,30 +3707,30 @@ session_store={store} fold={fold}"
                         }
                     }
                     Err(e) => {
-                        eprintln!("data host-bill list failed: {e}");
+                        eprintln!("data harness-bill list failed: {e}");
                         std::process::exit(2);
                     }
                 }
             }
             "delete" => {
                 let Some(id) = bill_id.as_deref() else {
-                    eprintln!("data host-bill delete: --id required");
+                    eprintln!("data harness-bill delete: --id required");
                     std::process::exit(2);
                 };
-                match db.with_immediate_txn(|_c| db.host_bill_delete(id, now)) {
-                    Ok(true) => println!("host bill {id} soft-deleted"),
+                match db.with_immediate_txn(|_c| db.harness_bill_delete(id, now)) {
+                    Ok(true) => println!("harness bill {id} soft-deleted"),
                     Ok(false) => {
-                        eprintln!("data host-bill delete: no active bill with id {id}");
+                        eprintln!("data harness-bill delete: no active bill with id {id}");
                         std::process::exit(1);
                     }
                     Err(e) => {
-                        eprintln!("data host-bill delete failed: {e}");
+                        eprintln!("data harness-bill delete failed: {e}");
                         std::process::exit(2);
                     }
                 }
             }
             other => {
-                eprintln!("data host-bill: unknown action {other}");
+                eprintln!("data harness-bill: unknown action {other}");
                 std::process::exit(2);
             }
         }
@@ -3790,7 +3790,7 @@ session_store={store} fold={fold}"
             println!("  (~vendor = billing party still open; the row is the model vendor's)");
             for c in report["clusters"].as_array().map(|a| a.iter()).into_iter().flatten() {
                 let v = &c["auto_verdict"];
-                // 网关行的 `billing_party` 恒空，只印它会让同宿主的多行长得一模一样
+                // 网关行的 `billing_party` 恒空，只印它会让同执行环境的多行长得一模一样
                 // （簇主键含 model_vendor 才拆开，人眼却看不到那个维度）。
                 let party = match (v["billing_party"].as_str(), v["model_vendor"].as_str()) {
                     (Some(party), _) => party.to_string(),
@@ -3799,7 +3799,7 @@ session_store={store} fold={fold}"
                 };
                 println!(
                     "  {:<12} {:<12} {:<12} {:<18} {:<21} models={:<2} tokens={:<12} basis={}",
-                    c["host"].as_str().unwrap_or("?"),
+                    c["harness"].as_str().unwrap_or("?"),
                     party,
                     v["state"].as_str().unwrap_or("?"),
                     v["route_state"].as_str().unwrap_or("?"),
@@ -3854,7 +3854,7 @@ session_store={store} fold={fold}"
                 } else {
                     let verified = report["verified"].as_bool().unwrap_or(false);
                     println!(
-                        "Reimport verify: {} ({} rounds, {} host-months, facts A={} B={}, swept interrupted={})",
+                        "Reimport verify: {} ({} rounds, {} harness-months, facts A={} B={}, swept interrupted={})",
                         if verified { "VERIFIED — byte-identical" } else { "MISMATCH" },
                         report["rounds"],
                         report["buckets_compared"],
@@ -3865,7 +3865,7 @@ session_store={store} fold={fold}"
                     for d in report["diffs"].as_array().map(|a| a.iter()).into_iter().flatten() {
                         println!(
                             "  DIFF {}/{}: A={} B={}",
-                            d["host"], d["bj_month"], d["round_a"], d["round_b"]
+                            d["harness"], d["bj_month"], d["round_a"], d["round_b"]
                         );
                     }
                 }
@@ -3882,7 +3882,7 @@ session_store={store} fold={fold}"
     }
 
     // WorkBuddy 会话审计。与 claude/codex-session 同款 home 解析与缺省 --session =
-    // 最新；SV604/605 的 Unavailable 覆盖在 workbuddy_session.rs（host-capability
+    // 最新；SV604/605 的 Unavailable 覆盖在 workbuddy_session.rs（harness-capability
     // degradation，spec §3.1）。db 无行且 audit-log 无记录 → 不存在（exit 2）。
     if let Some(Cmd::WorkbuddySession {
         list,
@@ -3895,7 +3895,7 @@ session_store={store} fold={fold}"
             .unwrap_or_default();
         let home_path = Path::new(&home);
         if *list {
-            let out = agent_vitals_hosts::workbuddy_session::workbuddy_session_list(home_path);
+            let out = agent_vitals_harnesses::workbuddy_session::workbuddy_session_list(home_path);
             if let Some(path) = rows_json {
                 let text = serde_json::to_string_pretty(&out).unwrap_or_default();
                 if path == &PathBuf::from("-") {
@@ -3909,7 +3909,7 @@ session_store={store} fold={fold}"
             } else {
                 print!(
                     "{}",
-                    agent_vitals_hosts::workbuddy_session::render_workbuddy_session_list(&out)
+                    agent_vitals_harnesses::workbuddy_session::render_workbuddy_session_list(&out)
                 );
             }
             return;
@@ -3918,7 +3918,7 @@ session_store={store} fold={fold}"
         let session_id = match session {
             Some(s) => s.clone(),
             None => {
-                let list = agent_vitals_hosts::workbuddy_session::workbuddy_session_list(home_path);
+                let list = agent_vitals_harnesses::workbuddy_session::workbuddy_session_list(home_path);
                 let first = list
                     .get("sessions")
                     .and_then(|v| v.as_array())
@@ -3935,7 +3935,7 @@ session_store={store} fold={fold}"
                 }
             }
         };
-        let Some(out) = agent_vitals_hosts::workbuddy_session::workbuddy_session_audit_json(
+        let Some(out) = agent_vitals_harnesses::workbuddy_session::workbuddy_session_audit_json(
             home_path,
             &session_id,
         ) else {
@@ -4002,8 +4002,8 @@ session_store={store} fold={fold}"
                 .unwrap_or_else(|| "claude-sonnet-5".to_string());
             let route = agent_vitals_data::probe::ProbeRoute {
                 route_id: agent_vitals_probe::current_route::CURRENT_ROUTE_ID.to_string(),
-                label: "当前配置（宿主现在实际使用的路线）".to_string(),
-                host_kind: "claude-code".to_string(),
+                label: "当前配置（执行环境现在实际使用的路线）".to_string(),
+                harness_kind: "claude-code".to_string(),
                 endpoint_base_url: None,
                 credential_ref: None,
                 model_requested: model,
@@ -4016,7 +4016,7 @@ session_store={store} fold={fold}"
             route.route_id
         }
         match action {
-            ProbeAction::RoutesAdd { from_cc_switch, route_id, label, host_kind, endpoint, credential_ref, model } => {
+            ProbeAction::RoutesAdd { from_cc_switch, route_id, label, harness_kind, endpoint, credential_ref, model } => {
                 if *from_cc_switch {
                     if route_id.is_some() || label.is_some() || endpoint.is_some() || credential_ref.is_some() || model.is_some() {
                         eprintln!("--from-cc-switch 与 --label/--model/--route-id/--endpoint/--credential-ref 互斥（发现式注册不手填字段）");
@@ -4036,7 +4036,7 @@ session_store={store} fold={fold}"
                     let mut entries = Vec::new();
                     for route in &report.routes {
                         let route_id = agent_vitals_domain::source_identity::fnv1a64_hex(
-                            format!("{}|{host_kind}", route.label).as_bytes(),
+                            format!("{}|{harness_kind}", route.label).as_bytes(),
                         );
                         // 已存在的档案不动（put_route 虽保留 consent，但重复注册
                         // 会把 updated_at 无意义地刷新；幂等以「存在即跳过」为准）。
@@ -4061,7 +4061,7 @@ session_store={store} fold={fold}"
                         let stored = agent_vitals_data::probe::ProbeRoute {
                             route_id: route_id.clone(),
                             label: route.label.clone(),
-                            host_kind: host_kind.clone(),
+                            harness_kind: harness_kind.clone(),
                             endpoint_base_url: Some(route.base_url.clone()),
                             credential_ref: Some(format!("ccswitch:{}", route.provider_row)),
                             model_requested: route.model.clone(),
@@ -4096,13 +4096,13 @@ session_store={store} fold={fold}"
                     };
                     let route_id = route_id.clone().unwrap_or_else(|| {
                         agent_vitals_domain::source_identity::fnv1a64_hex(
-                            format!("{label}|{host_kind}").as_bytes(),
+                            format!("{label}|{harness_kind}").as_bytes(),
                         )
                     });
                     let route = agent_vitals_data::probe::ProbeRoute {
                         route_id: route_id.clone(),
                         label: label.clone(),
-                        host_kind: host_kind.clone(),
+                        harness_kind: harness_kind.clone(),
                         endpoint_base_url: endpoint.clone(),
                         credential_ref: credential_ref.clone(),
                         model_requested: model.clone(),
@@ -4119,7 +4119,7 @@ session_store={store} fold={fold}"
             }
             ProbeAction::Routes { json } => {
                 let mut stmt = match conn.prepare(
-                    "SELECT route_id, label, host_kind, endpoint_base_url, credential_ref,
+                    "SELECT route_id, label, harness_kind, endpoint_base_url, credential_ref,
                             model_requested, consent_granted_at_ms
                      FROM probe_routes ORDER BY created_at_ms",
                 ) {
@@ -4133,7 +4133,7 @@ session_store={store} fold={fold}"
                     Ok(serde_json::json!({
                         "route_id": row.get::<_, String>(0)?,
                         "label": row.get::<_, String>(1)?,
-                        "host_kind": row.get::<_, String>(2)?,
+                        "harness_kind": row.get::<_, String>(2)?,
                         "endpoint_base_url": row.get::<_, Option<String>>(3)?,
                         "credential_ref": row.get::<_, Option<String>>(4)?,
                         "model_requested": row.get::<_, String>(5)?,
@@ -4289,13 +4289,13 @@ session_store={store} fold={fold}"
                 if *json {
                     println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
                 } else {
-                    // 人读面：每宿主一段，族行 = 请求占比 + 请求/会话/token。
+                    // 人读面：每执行环境一段，族行 = 请求占比 + 请求/会话/token。
                     let text = |value: &serde_json::Value| value.as_str().unwrap_or("?").to_string();
                     let num = |value: &serde_json::Value| value.as_i64().unwrap_or(0);
-                    for host in report["hosts"].as_array().unwrap_or(&Vec::new()) {
+                    for harness in report["harnesses"].as_array().unwrap_or(&Vec::new()) {
                         println!("== {}（{} 请求 / {} 会话，近 {} 天）",
-                            text(&host["host"]), num(&host["totals"]["requests"]), num(&host["totals"]["sessions"]), days);
-                        for family in host["families"].as_array().unwrap_or(&Vec::new()) {
+                            text(&harness["harness"]), num(&harness["totals"]["requests"]), num(&harness["totals"]["sessions"]), days);
+                        for family in harness["families"].as_array().unwrap_or(&Vec::new()) {
                             println!("  {:<10} {:>5}%  {:>6} 请求  {:>4} 会话  {:>14} tokens  [{}]",
                                 text(&family["family"]),
                                 family["request_share"].as_f64().unwrap_or(0.0),
@@ -4332,7 +4332,7 @@ session_store={store} fold={fold}"
                 date_from,
                 date_to,
                 hour,
-                host_kind,
+                harness_kind,
                 model,
                 provider,
                 min_tokens,
@@ -4372,10 +4372,10 @@ session_store={store} fold={fold}"
                 if let Some(h) = hour {
                     args.insert("hour".into(), Value::Number((*h).into()));
                 }
-                if !host_kind.is_empty() {
+                if !harness_kind.is_empty() {
                     args.insert(
-                        "hosts".into(),
-                        Value::Array(host_kind.iter().cloned().map(Value::String).collect()),
+                        "harnesses".into(),
+                        Value::Array(harness_kind.iter().cloned().map(Value::String).collect()),
                     );
                 }
                 if let Some(model) = model {
@@ -4565,7 +4565,7 @@ session_store={store} fold={fold}"
             }
             "alert" => {
                 // SQL 权威面的 `budget show` 等价物：evaluate_alert 从权威库算
-                // （跨宿主按量 CNY 口径），不读 today.json/month.json/alert.json。
+                // （跨执行环境按量 CNY 口径），不读 today.json/month.json/alert.json。
                 let v = agent_vitals_runtime::budget::evaluate_alert_from_sql(
                     &agent_vitals_runtime::home::data_home(),
                 );
@@ -4720,14 +4720,14 @@ session_store={store} fold={fold}"
         self_root,
     };
 
-    let cfg = agent_vitals_hosts::hosts::claude_code::sources::skills::read_host_config(&home_n);
+    let cfg = agent_vitals_harnesses::harnesses::claude_code::sources::skills::read_harness_config(&home_n);
 
     // Session surface 负责读日志；Skill surface 只消费注入的证据。
     let (dsh_path, dsh_evidence) =
         agent_vitals_runtime::session_sources::read_dsh_skill_correlation();
     let inv = agent_vitals_runtime::skills::inventory::take(
         &agent_vitals_runtime::skills::inventory::Selection {
-            host: &args.host,
+            harness: &args.harness,
             extra_paths: &args.path,
             runtime_json: args.runtime_json.as_deref(),
         },
@@ -4742,7 +4742,7 @@ session_store={store} fold={fold}"
 
     // 采集到此为止；下面全是纯数据变换，交给 report。
     let rep = skills::report::build(&skills::report::ReportInput {
-        host: &args.host,
+        harness: &args.harness,
         all: args.all,
         budget,
         zombie_age: args.zombie_age,
@@ -4851,7 +4851,7 @@ session_store={store} fold={fold}"
                 drop(db);
                 let sync = agent_vitals_runtime::sync_service::force_codex_provider_replay(&dh)
                     .unwrap_or_else(|e| { eprintln!("provider replay sync failed: {e}"); std::process::exit(2); });
-                if sync.hosts.iter().any(|h| !h.errors.is_empty()) {
+                if sync.harnesses.iter().any(|h| !h.errors.is_empty()) {
                     eprintln!("provider replay encountered unreadable source files");
                     std::process::exit(2);
                 }
@@ -5090,7 +5090,7 @@ session_store={store} fold={fold}"
             let mut payload = serde_json::json!({
                 "schema_version": doc.get("schema_version"),
                 "run": util::run_id(&doc),
-                "host_selection": doc.get("host_selection"),
+                "harness_selection": doc.get("harness_selection"),
                 "diagnostics": ds,
                 "not_assessed": skills::doctor::NOT_ASSESSED.iter()
                     .map(|(c, n, w)| serde_json::json!({"code": c, "name": n, "reason": w}))
@@ -5272,7 +5272,7 @@ session_store={store} fold={fold}"
     let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
 
     // 预算不可用时**不能打印数字** —— 之前这里照着 `{}%` 的模板打，
-    // 多宿主下打出了 `描述预算 None%`：Python 的内部表示漏到了中文界面上，
+    // 多执行环境下打出了 `描述预算 None%`：Python 的内部表示漏到了中文界面上，
     // 而且它读起来像「用了 None 那么多」，而不是「这个口径不适用」。
     let bd = doc.get("description_budget");
     let budget_available = bd
@@ -5289,7 +5289,7 @@ session_store={store} fold={fold}"
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
         )
-    } else if args.host == "openclaw" {
+    } else if args.harness == "openclaw" {
         "configurable (not set for this instance)".to_string()
     } else {
         "unavailable".to_string()
@@ -5301,7 +5301,7 @@ session_store={store} fold={fold}"
         tier1_total: rep.tier1_total,
         budget_text,
         trigger_available: rep.trigger_available,
-        host: args.host.clone(),
+        harness: args.harness.clone(),
         oversized: rep.oversized,
         flagged: rep.flagged,
         all_cited: rep.all_cited,
@@ -5342,7 +5342,7 @@ struct SummaryCounts {
     tier1_total: i64,
     budget_text: String,
     trigger_available: bool,
-    host: String,
+    harness: String,
     oversized: usize,
     flagged: usize,
     all_cited: usize,
@@ -5352,7 +5352,7 @@ impl SummaryCounts {
     fn render(&self, path: &str) -> String {
         // OpenClaw 的「已加载」需要运行时证实，措辞必须换一套 ——
         // 在那里说「已加载 N 个」会把「记录数」说成「确定在上下文里」。
-        let active = if self.host == "openclaw" {
+        let active = if self.harness == "openclaw" {
             format!("{} runtime-visible records", self.loaded)
         } else {
             format!("{} loaded", self.loaded)
@@ -5389,7 +5389,7 @@ description budget {}, trigger data {}, {} split candidates, {} security finding
 // + error.code）——不写 JSON-RPC error，不破坏 envelope schema。
 
 /// `mcp::dispatch` 的 CLI 薄封装：`--json` 时直接 pretty-print envelope；非
-/// `--json` 时给一个简短的人读摘要（host / session 数 / 时间窗），envelope
+/// `--json` 时给一个简短的人读摘要（harness / session 数 / 时间窗），envelope
 /// 的全量字段仍在 JSON 路径里。
 ///
 /// 错误：把 `ToolError` 折成 `error_envelope` 再 print——spec §11 稳定错误码
@@ -5418,7 +5418,7 @@ fn dispatch_sessions(name: &'static str, args: Value, json_out: bool, data_home:
 }
 
 /// envelope → 人读摘要：sessions_search 给时间窗 + 命中数；session_detail 给
-/// host + 时间线长度 + total。非 `--json` 模式用，避免一坨 JSON 砸脸。
+/// harness + 时间线长度 + total。非 `--json` 模式用，避免一坨 JSON 砸脸。
 fn print_sessions_summary(name: &'static str, env: &Value) {
     let data = &env["data"];
     match name {
@@ -5436,11 +5436,11 @@ fn print_sessions_summary(name: &'static str, env: &Value) {
             );
         }
         "session_detail" => {
-            let host = data.get("host").and_then(Value::as_str).unwrap_or("?");
+            let harness = data.get("harness").and_then(Value::as_str).unwrap_or("?");
             let n = data["event_count"].as_i64().unwrap_or(0);
             let total = data["tokens"]["total"].as_i64().unwrap_or(0);
             let tl = data["timeline"].as_array().map(|a| a.len()).unwrap_or(0);
-            println!("session {host}: {n} events, {total} tokens, timeline page = {tl}");
+            println!("session {harness}: {n} events, {total} tokens, timeline page = {tl}");
         }
         _ => {
             // 不应到这里——CLI 只 dispatch 上面的两个工具名。
@@ -5451,41 +5451,41 @@ fn print_sessions_summary(name: &'static str, env: &Value) {
 
 /// `sessions navigation` 的 v2 实现：今日 token 走 SQL 权威库（与 r2a_store
 /// `sessions_navigation` 同源：`authority_day_token_totals`），`recent[]` 走
-/// `mcp::sessions_search({date, limit})`。三宿主行结构与旧 envelope 对齐
+/// `mcp::sessions_search({date, limit})`。三执行环境行结构与旧 envelope 对齐
 /// （Tauri 菜单栏渲染端 0 行改动，`fmtUSD(null) → "—"` 接受 null cost）。
 ///
-/// 失败降级（spec §0.1 不冒充）：单宿主失败 → 该宿主行 `unavailable`；top-level
+/// 失败降级（spec §0.1 不冒充）：单执行环境失败 → 该执行环境行 `unavailable`；top-level
 /// 失败 → envelope 整体退到 `error_envelope` 形态。
 fn sessions_navigation_v2(day_key: &str, timezone: &str, recent_n: usize, json_out: bool, data_home: &Path) {
     use agent_vitals_runtime::mcp;
     let data_home = data_home.to_path_buf();
 
-    // today_tokens：单次只读事务，逐 host 从 SQL 聚合出来。
-    let sql_totals = agent_vitals_data::authority_query::day_token_totals_by_host(&data_home, day_key);
-    // 导航宿主与可控来源共用动态注册表；保留原三宿主的菜单顺序，
+    // today_tokens：单次只读事务，逐 harness 从 SQL 聚合出来。
+    let sql_totals = agent_vitals_data::authority_query::day_token_totals_by_harness(&data_home, day_key);
+    // 导航执行环境与可控来源共用动态注册表；保留原三执行环境的菜单顺序，
     // 再追加 WorkBuddy 与热插拔插件。历史使用事实不依赖会话文件是否仍在。
-    let mut host_ids = vec!["dsh".to_string(), "codex".to_string(), "claude-code".to_string()];
-    for host in agent_vitals_runtime::sources::source_controls::supported_hosts_for(&data_home) {
-        if !host_ids.contains(&host) {
-            host_ids.push(host);
+    let mut harness_ids = vec!["dsh".to_string(), "codex".to_string(), "claude-code".to_string()];
+    for harness in agent_vitals_runtime::sources::source_controls::supported_harnesses_for(&data_home) {
+        if !harness_ids.contains(&harness) {
+            harness_ids.push(harness);
         }
     }
-    let mut hosts: Vec<Value> = Vec::with_capacity(host_ids.len());
-    for host in host_ids {
+    let mut harnesses: Vec<Value> = Vec::with_capacity(harness_ids.len());
+    for harness in harness_ids {
         let today_tokens = match sql_totals.as_ref() {
-            Some(rows) => match rows.get(&host) {
+            Some(rows) => match rows.get(&harness) {
                 Some(v) => json!({ "value": v, "basis": "sql-facts", "coverage": "complete" }),
                 None => json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null }),
             },
             None => json!({ "value": Value::Null, "basis": Value::Null, "coverage": Value::Null }),
         };
-        // recent[]：走 mcp::sessions_search，limit = recent_n；限本宿主。
+        // recent[]：走 mcp::sessions_search，limit = recent_n；限本执行环境。
         // 库不可读 / 该日无事实 → 空数组（envelope 形态保留，不冒充）。
         let mut search_args = serde_json::Map::new();
         search_args.insert("date".into(), Value::String(day_key.to_string()));
         search_args.insert(
-            "hosts".into(),
-            Value::Array(vec![Value::String(host.clone())]),
+            "harnesses".into(),
+            Value::Array(vec![Value::String(harness.clone())]),
         );
         search_args.insert(
             "limit".into(),
@@ -5520,7 +5520,7 @@ fn sessions_navigation_v2(day_key: &str, timezone: &str, recent_n: usize, json_o
                     })
                 })
                 .collect::<Vec<_>>(),
-            Err(_) => Vec::new(), // 单宿主失败 → 该宿主行降级，不污染其他宿主
+            Err(_) => Vec::new(), // 单执行环境失败 → 该执行环境行降级，不污染其他执行环境
         };
         let status = if sql_totals.is_none() {
             "unavailable"
@@ -5529,15 +5529,15 @@ fn sessions_navigation_v2(day_key: &str, timezone: &str, recent_n: usize, json_o
         } else {
             "partial"
         };
-        // today_sessions：SQL 在单 host 单日内的 session 数（distinct
+        // today_sessions：SQL 在单 harness 单日内的 session 数（distinct
         // session_key），与 r2a_store「今日碰过的会话」计数同语义。
         let today_sessions = agent_vitals_data::authority_query::day_session_count(
             &data_home,
             day_key,
-            &host,
+            &harness,
         );
-        hosts.push(json!({
-            "host_kind": host,
+        harnesses.push(json!({
+            "harness_kind": harness,
             "status": status,
             "today_tokens": today_tokens,
             "today_sessions": today_sessions,
@@ -5553,7 +5553,7 @@ fn sessions_navigation_v2(day_key: &str, timezone: &str, recent_n: usize, json_o
         "day_key": day_key,
         "timezone": timezone,
         "generated_at": agent_vitals_runtime::state::now_iso_utc(),
-        "hosts": hosts,
+        "harnesses": harnesses,
     });
     let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
     if json_out {
@@ -5566,9 +5566,9 @@ fn sessions_navigation_v2(day_key: &str, timezone: &str, recent_n: usize, json_o
 fn print_navigation_summary(env: &Value) {
     let day = env.get("day_key").and_then(Value::as_str).unwrap_or("?");
     println!("navigation {day}");
-    if let Some(arr) = env.get("hosts").and_then(Value::as_array) {
+    if let Some(arr) = env.get("harnesses").and_then(Value::as_array) {
         for h in arr {
-            let host = h.get("host_kind").and_then(Value::as_str).unwrap_or("?");
+            let harness = h.get("harness_kind").and_then(Value::as_str).unwrap_or("?");
             let status = h.get("status").and_then(Value::as_str).unwrap_or("?");
             let today = h
                 .get("today_tokens")
@@ -5578,7 +5578,7 @@ fn print_navigation_summary(env: &Value) {
                 .unwrap_or_else(|| "—".to_string());
             let n = h.get("today_sessions").and_then(Value::as_i64).unwrap_or(0);
             let recent = h.get("recent").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
-            println!("  {host} [{status}] today={today} tokens, {n} sessions, {recent} recent");
+            println!("  {harness} [{status}] today={today} tokens, {n} sessions, {recent} recent");
         }
     }
 }
@@ -5621,7 +5621,7 @@ mod codex_sql_tests {
         db.conn()
             .execute(
                 &format!(
-                    "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                    "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                          source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                          event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                          output_tokens, ingested_run_id, created_at_ms, updated_at_ms)

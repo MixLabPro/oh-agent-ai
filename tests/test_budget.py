@@ -81,7 +81,7 @@ class TestLoadConfig(unittest.TestCase):
             self.assertTrue(cfg["enabled"], "布尔默认也是默认")
 
     def test_malformed_config_does_not_crash(self):
-        """畸形配置文件 → 走默认,不抛。CLAUDE.md §host 能力缺失纪律。"""
+        """畸形配置文件 → 走默认,不抛。CLAUDE.md §harness 能力缺失纪律。"""
         with _IsolatedHome() as h:
             cfg_path = Path(h.tmpdir) / "config.toml"
             cfg_path.write_text("[budget]\n= broken\n", encoding="utf-8")

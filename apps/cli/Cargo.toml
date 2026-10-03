@@ -12,7 +12,7 @@ name = "agent-vitals"
 path = "src/main.rs"
 
 [dependencies]
-agent-vitals-hosts = { path = "../../crates/agent-vitals-hosts", features = ["sources"] }
+agent-vitals-harnesses = { path = "../../crates/agent-vitals-harnesses", features = ["sources"] }
 agent-vitals-domain = { path = "../../crates/agent-vitals-domain" }
 # v0.9 Stage 0.5：`data` 子命令经 `SummaryRepository` trait（data crate 定义）
 # 调 runtime 的 `JsonSummaryRepository`——CLI 拿 trait 对象，不 new 具体类型
@@ -31,7 +31,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 walkdir = "2"
 # v0.8 Phase D4：DSH 会话 `.zstd` 多帧解压（`ruzstd`）迁进
-# `agent-vitals-hosts` 的 `sources` feature——二进制经 `features = ["sources"]`
+# `agent-vitals-harnesses` 的 `sources` feature——二进制经 `features = ["sources"]`
 # 传递拿到，不再直接依赖。
 # WorkBuddy 会话审计的 sqlite 读取（`~/.workbuddy/workbuddy.db`）。仓库第一个 sqlite
 # reader；`bundled` 特性自带 sqlite3.c，不依赖系统 sqlite。「宿内 skill 零第三方库」

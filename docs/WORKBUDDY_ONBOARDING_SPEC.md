@@ -23,15 +23,15 @@
 1. **初稿 §6 把 Phase B 写成「新增 `SessionStore::workbuddy` + 翻 `session_store`
    声明」，全部作废。** `r2a_store.rs` 自 v0.9.1 PR #4 起标记 DEPRECATED、整文件
    behind `legacy-r2a` feature gate、计划 v0.9.3 由 PR #5 删除，删除清单**逐字包含**
-   「删 `host_runtime_registration.rs::session_store` 字段」。初稿是在一个正在被
-   删除的模块上加宿主、翻一个正在被删除的字段。正确形状见新 §7。
+   「删 `harness_runtime_registration.rs::session_store` 字段」。初稿是在一个正在被
+   删除的模块上加执行环境、翻一个正在被删除的字段。正确形状见新 §7。
 2. **初稿 §4.2 第 1 条「禁止 credit 折算进任何汇总面」过严。** `ATTRIBUTABLE_WASTE.md`
    §6.7 原文：「名义是度量衡（厘米可换英寸），实际是账（美元不能当人民币加进账本）」
    ——名义栏**允许**按显式声明、带日期的汇率折算。禁止的只是折算结果进**实付栏与
    预算分子**。正确形状见新 §5。
 
-初稿另有两处小错一并修正：CLI 子命令是 `data-host-bill`（连字符）不是 `data host-bill`；
-`sessions list --host-kind` 早已是自由字符串，不存在需要放开的词表。
+初稿另有两处小错一并修正：CLI 子命令是 `data-harness-bill`（连字符）不是 `data harness-bill`；
+`sessions list --harness-kind` 早已是自由字符串，不存在需要放开的词表。
 
 **v3（2026-09-11）——一处编造的分类、一处特例化设计，均经真机/代码推翻：**
 
@@ -43,8 +43,8 @@
    快照里**本来就有 `has_credits`**。改为「补既有抽象的第三个实例」（新 §5.0），
    Phase C 相应收缩到两条结构性项（新 §8.0）。
 
-v3 另新增：赠送积分**不产生** `host_bills` 行的语义澄清（§5.1.1）· 限免属名义栏且
-名义价值不为零（§5.1.2）· §6.7 倍数护栏对合法免费额度的**跨宿主假阳性**（§5.3.1，
+v3 另新增：赠送积分**不产生** `harness_bills` 行的语义澄清（§5.1.1）· 限免属名义栏且
+名义价值不为零（§5.1.2）· §6.7 倍数护栏对合法免费额度的**跨执行环境假阳性**（§5.3.1，
 应迁出本篇）· 抗拟核判据与证伪测试（§11 规则 16）。
 
 **v4（2026-09-11，Phase E 分析步）——traces 的 span 面实测推翻本篇的 token 前提：**
@@ -81,25 +81,25 @@ v3 另新增：赠送积分**不产生** `host_bills` 行的语义澄清（§5.1
    实付栏它贡献 0（积分为套餐赠送）；若用户在付 WorkBuddy/CodeBuddy 月费，那笔才是
    它的真实现金成本，走 `fixed_subscription` 手工录入，与积分数无关。
 5. **发 UsageFact ≠ 编造 token 桶**（§7.2 vs §9）：为进统一会话面而发四桶全 0 的
-   逐请求事实是诚实的（表达"此宿主不报分桶"）；把会话级聚合 `used` 拆进四桶冒充
+   逐请求事实是诚实的（表达"此执行环境不报分桶"）；把会话级聚合 `used` 拆进四桶冒充
    token 计量是编造，明确不做。
 
 ## 1. 现状清单（代码核实 2026-09-10）
 
 | 面 | 状态 | 落点 |
 |---|---|---|
-| 静态 skill 扫描 | ✅ | `hosts/workbuddy/sources/skills.rs` · `golden/host-workbuddy.json` |
-| 会话证据（CanonicalSession） | ✅ | `hosts/workbuddy/sessions/evidence.rs` |
-| 会话 I/O + CLI `workbuddy-session` | ✅ | `hosts/workbuddy/sources/mod.rs` · Python 镜像 · 六条差分 |
-| capability 声明面 | ✅ | `host_capability::HOSTS` 有 workbuddy 行（`session_store: false, fold: None`） |
+| 静态 skill 扫描 | ✅ | `harnesses/workbuddy/sources/skills.rs` · `golden/harness-workbuddy.json` |
+| 会话证据（CanonicalSession） | ✅ | `harnesses/workbuddy/sessions/evidence.rs` |
+| 会话 I/O + CLI `workbuddy-session` | ✅ | `harnesses/workbuddy/sources/mod.rs` · Python 镜像 · 六条差分 |
+| capability 声明面 | ✅ | `harness_capability::HARNESSES` 有 workbuddy 行（`session_store: false, fold: None`） |
 | 统一 `sessions list/read` | ❌ | 走 SQL（`mcp::sessions_search` / `session_detail`）；库里无 workbuddy 行 |
-| facts → SQL 权威库 | ❌ 刻意排除 | `ingest_service::FACT_HOSTS` 三宿主封闭词表 |
-| 金额面（by_host / by_provider / 预算 / 日历） | ❌ 刻意排除 | `summary.rs:29 PERMANENTLY_EXCLUDED_HOSTS` |
-| ~~`SessionStore`~~ | ⚠️ **待删** | `r2a_store.rs` DEPRECATED（PR #4）→ v0.9.3 删除（PR #5）；**不要在此加宿主** |
+| facts → SQL 权威库 | ❌ 刻意排除 | `ingest_service::FACT_HARNESSES` 三执行环境封闭词表 |
+| 金额面（by_harness / by_provider / 预算 / 日历） | ❌ 刻意排除 | `summary.rs:29 PERMANENTLY_EXCLUDED_HARNESSES` |
+| ~~`SessionStore`~~ | ⚠️ **待删** | `r2a_store.rs` DEPRECATED（PR #4）→ v0.9.3 删除（PR #5）；**不要在此加执行环境** |
 | traces（write/edit/subagent/duration 证据） | ❌ **可接但未接**（09-11 纠正） | 归属键 `trace.sessionId` 覆盖 22/23 会话；现有适配器按 09-02 错误结论标 Unavailable——Phase E |
 
 「排除」不是遗漏：`tests/test_v09_onboarding_fixtures.py::test_workbuddy_is_declared_but_excluded`
-**双向**钉死——注册表必须有它的行，`by_host` 必须没有它。任何一侧的擅自变更都是回归。
+**双向**钉死——注册表必须有它的行，`by_harness` 必须没有它。任何一侧的擅自变更都是回归。
 
 ## 2. 真机语料实测基线（2026-09-10）
 
@@ -155,7 +155,7 @@ v3 另新增：赠送积分**不产生** `host_bills` 行的语义澄清（§5.1
    `api.minimaxi.com`。vendor 是 UI 标签，`url` 才是路由证据。
 
 因此**分类只有两态**（① 积分轨证实 / ② 未计入积分），成因**不进分类维度**。
-已知成因至少三种——自配路由 · **限免促销** · 宿主未记账——且**成因是业务决策、按月变动**
+已知成因至少三种——自配路由 · **限免促销** · 执行环境未记账——且**成因是业务决策、按月变动**
 （促销会结束）。把成因检测写进规则，等于把一个促销期固化成产品概念（§4.2 规则 7、
 §11 规则 16）。
 
@@ -169,13 +169,13 @@ v3 另新增：赠送积分**不产生** `host_bills` 行的语义澄清（§5.1
 
 ```
 $ agent-vitals workbuddy-session --session ad447428-… --json -
-"cost": { "tokens": 133966, "cny": 1763.88, "host_billed": true }
+"cost": { "tokens": 133966, "cny": 1763.88, "harness_billed": true }
 ```
 
 `1763.88` 是**积分**。按官方加量包公开价（1,000 积分 = ¥50，2026-07-01 起）折算约
-**¥88.19**。字段名叫 `cny`、旁边站着 `host_billed: true`，任何下游只会当钱读。
+**¥88.19**。字段名叫 `cny`、旁边站着 `harness_billed: true`，任何下游只会当钱读。
 
-落点：`hosts/workbuddy/sources/mod.rs::cost_of`（Rust）↔
+落点：`harnesses/workbuddy/sources/mod.rs::cost_of`（Rust）↔
 `agent/workbuddy_session_audit.py:155`（Python）——两侧字面相同，差分门禁全绿，因为
 **两边错得一模一样**。
 
@@ -230,12 +230,12 @@ audit-log 的 `timestamp` 同样写成 ISO 串。**这是 2026-09-02 词表漂�
 2. **不把会话级聚合 `used` 拆进 usage_facts 四桶**（§9）。
 3. **不动 `assets/pricing.json`**：积分兑换价不是模型价卡，不长第四份价格拷贝。
 4. **不新增 `BillingBasis` 档**。五档词表有硬常量 `variant_count()` 与 `as_str`/
-   `from_wire` 双向映射，为一个宿主开第六档是把口径问题伪装成类型问题。
+   `from_wire` 双向映射，为一个执行环境开第六档是把口径问题伪装成类型问题。
 5. **不在 `r2a_store.rs` 上加任何 WorkBuddy 代码**（该模块待删，§7.1）。
 6. **不重建 wasm、不碰 DSH tab**；**不用 traces 猜 session**（`WORKBUDDY_INTEGRATION` §6/§12.2 延续）。
 7. **不为 WorkBuddy 设计专属配额机制**（§5.0）：它是「内部配额 + 第三方通道」这个
-   既有形状的第三个实例，要补的是抽象的实例，不是宿主的特例。
-8. **不由机器推断零积分成因**（§2.1）：自配路由 / 限免促销 / 宿主未记账三者不可分辨，
+   既有形状的第三个实例，要补的是抽象的实例，不是执行环境的特例。
+8. **不由机器推断零积分成因**（§2.1）：自配路由 / 限免促销 / 执行环境未记账三者不可分辨，
    且成因是**按月变动的业务决策**。成因归用户声明。
 9. **不把语料观测写成规则**（§11 规则 16）：观测进哨兵与展示，规则只建在结构性事实上。
 
@@ -252,24 +252,24 @@ audit-log 的 `timestamp` 同样写成 ISO 串。**这是 2026-09-02 词表漂�
 
 | | 内部配额单位 | 重置周期 | 第三方路由证据 |
 |---|---|---|---|
-| Codex | `used_percent`（宿主自报） | 滚动窗口 `window_minutes` | `billing_modes` 判定链②路由层 |
+| Codex | `used_percent`（执行环境自报） | 滚动窗口 `window_minutes` | `billing_modes` 判定链②路由层 |
 | Claude Code | `quotaLimits` five_hour / seven_day | 滚动窗口 | `ANTHROPIC_BASE_URL` / `AUTH_TOKEN` |
 | **WorkBuddy** | **credit（可数）** | **自然月，不结转** | **`models.json` 的 `url`** |
 
-`PROVIDER_ROUTE_ATTRIBUTION_SPEC.md` §6.4 早已这样规定：「WorkBuddy 和其他宿主：
+`PROVIDER_ROUTE_ATTRIBUTION_SPEC.md` §6.4 早已这样规定：「WorkBuddy 和其他执行环境：
 **复用相同的 adapter 输出契约**」。本篇前几版把它当特例设计，是没把这条读进去。
 
 **后果：不为 WorkBuddy 设计任何专属配额机制**（§4.2 规则 6）。要做的是补既有抽象
 的第三个实例：`sql_sync.rs` 把 `snapshot_kind` 写死成字面量 `'codex_quota'`——
-参数化即可；表 `host_runtime_snapshots` 本身已是 `(host, snapshot_kind)` 通用形状。
+参数化即可；表 `harness_runtime_snapshots` 本身已是 `(harness, snapshot_kind)` 通用形状。
 
-**一处不可抹平的保真度差异**：Codex/Claude 的分子分母都由宿主自报（`used_percent`
+**一处不可抹平的保真度差异**：Codex/Claude 的分子分母都由执行环境自报（`used_percent`
 已折算）；WorkBuddy **分子可测（credit_json）、分母不可观测**（会话表 30 列无余额
 字段，余额在服务端账户面）。所以它的 `QuotaConsumption` 是「分子 measured / 分母
 unavailable」——正是 Coverage 三态存在的意义，不是缺陷。
 
 **而可数单位带来另两家没有的能力**：积分 = 模型系数 × token（官方系数随促销变动），
-所以 `credit / token` 可**逐模型反推实测系数**。Codex/Claude 的 `used_percent` 是宿主
+所以 `credit / token` 可**逐模型反推实测系数**。Codex/Claude 的 `used_percent` 是执行环境
 折算后的结果，反推不出单价结构。这也解释了 memory 记的 credit/M 跨会话漂移
 60~13,000——不是账本错误，是模型混用。**只报实测系数，不与任何内置系数表对账**
 （内置表 = 把促销期快照固化成常量，§11 规则 16）。
@@ -280,21 +280,21 @@ unavailable」——正是 Coverage 三态存在的意义，不是缺陷。
 |---|---|---|
 | `nominal_cost`（名义，可比度量尺） | **¥215.39** = 4,307.76 credit × ¥0.05 | §6.7「名义**允许**按显式声明、带日期的汇率折算」 |
 | `metered_spend`（按量实付） | **0**（积分为套餐/活动赠送，无按量付费流） | 用户裁决 2026-09-02 |
-| `FixedSubscription` | **若用户在付 WorkBuddy/CodeBuddy 月费，那才是它的真实现金成本** | 走 `data-host-bill --basis fixed_subscription`，**与积分数无关** |
+| `FixedSubscription` | **若用户在付 WorkBuddy/CodeBuddy 月费，那才是它的真实现金成本** | 走 `data-harness-bill --basis fixed_subscription`，**与积分数无关** |
 | `unpriced_tokens` | **未计入积分**的 **962,116** token（§2.1 ②） | 成因不判定；其中已知有限免促销与自配路由，本机均无价卡 |
 
 **第三行是初稿完全漏掉的**：memory 记着「套餐费按基础设施成本不按积分摊销」——
 若确实在付月费，WorkBuddy 的现金成本不是 0，只是它跟积分数无关，不能由积分推出。
 
-#### 5.1.1 赠送积分**不产生** `host_bills` 行
+#### 5.1.1 赠送积分**不产生** `harness_bills` 行
 
-`BillingBasis::HostBilled` 的语义是**「这个数字由宿主产出，不是我们价卡算的」**
+`BillingBasis::HarnessBilled` 的语义是**「这个数字由执行环境产出，不是我们价卡算的」**
 ——它管*谁产出了这个数*，不管*钱有没有动*。所以：
 
-- **已购加量包** → 有账单 → `host_bills` 行，进总额、进预算，天经地义；
-- **赠送/赠送性积分** → **没有账单** → **根本不产生 `host_bills` 行**。
+- **已购加量包** → 有账单 → `harness_bills` 行，进总额、进预算，天经地义；
+- **赠送/赠送性积分** → **没有账单** → **根本不产生 `harness_bills` 行**。
 
-赠送积分不需要一个「该算多少钱」的答案。正确答案是它不产生金额行——`host_bills`
+赠送积分不需要一个「该算多少钱」的答案。正确答案是它不产生金额行——`harness_bills`
 的每一行都必须对应一张真实账单。这不是回避，这就是答案。
 
 #### 5.1.2 限免促销属**名义栏**，其名义价值不为零
@@ -340,7 +340,7 @@ unpriced（免费轨 11 会话）: 37,144,240 tok → 不进分母不计 0
 **规格**：WorkBuddy 名义单位成本的分母**只含积分轨 processed token**（`credit_json`
 求和 > 0 的会话）；未计入积分的 37,144,240 只进 `unpriced_tokens`，不进分母也不计 0。
 
-**两把尺不能相加**：其他宿主的名义是 `token × 官方卡`，WorkBuddy 的是
+**两把尺不能相加**：其他执行环境的名义是 `token × 官方卡`，WorkBuddy 的是
 `积分 × 兑换价`。并列可比，求和无意义——展示层必须并列不合计。
 
 ### 5.3 `nominal / actual` 倍数护栏
@@ -352,7 +352,7 @@ unpriced（免费轨 11 会话）: 37,144,240 tok → 不进分母不计 0
 #### 5.3.1 护栏对合法免费额度的假阳性——**已迁至 `ATTRIBUTABLE_WASTE.md` §6.7**（B7）
 
 发现于本篇（`hy3` 限免：nominal > 0、actual = 0，护栏会误报「计费声明错误」），但它
-是**跨宿主**口径缺口，不是 WorkBuddy 的附属条款。豁免分支的规格（先查已声明的免费
+是**跨执行环境**口径缺口，不是 WorkBuddy 的附属条款。豁免分支的规格（先查已声明的免费
 额度 → 有则显示「免费额度（已声明）」，无则维持原告警；成因归声明不归推断）现在
 住在 `ATTRIBUTABLE_WASTE.md` §6.7「护栏的第二种成因」段，本节只留指针。
 
@@ -369,7 +369,7 @@ unpriced（免费轨 11 会话）: 37,144,240 tok → 不进分母不计 0
   "cash_cny": null,
   "nominal_cny": 88.19,
   "nominal_basis": "pack-price-public:1000cr=50CNY@2026-07-01",
-  "host_billed": true
+  "harness_billed": true
 }
 ```
 
@@ -380,7 +380,7 @@ unpriced（免费轨 11 会话）: 37,144,240 tok → 不进分母不计 0
 | `cash_cny` | 现金口径实付 | **恒 `null`**——本机无支付证据。缺失报缺，**绝不填 0**（0 是「确实没花」的真测量，我们不知道） |
 | `nominal_cny` | `credits × 0.05`，**名义栏**输入（§5.1） | 可进名义汇总，**不可**进实付栏/预算分子 |
 | `nominal_basis` | 折算依据 + 日期的可追溯串 | 兑换价变更时改这里，不改静默数字 |
-| `host_billed` | 保留 | 宿主自己记账、非我方重计价 |
+| `harness_billed` | 保留 | 执行环境自己记账、非我方重计价 |
 
 **破坏性变更**：`cny` 键消失（改为语义明确的 `cash_cny` / `nominal_cny` 二分）。
 全仓库消费方只有两处（Rust/Python 各一），无外部读者。
@@ -394,12 +394,12 @@ unpriced（免费轨 11 会话）: 37,144,240 tok → 不进分母不计 0
 
 `audit-log.timestamp`、`sessions.created_at` / `updated_at` 三处统一：
 
-1. **字符串** → 走现有 ISO 路径（其他宿主与旧 fixture 的既有形状不回归）。
+1. **字符串** → 走现有 ISO 路径（其他执行环境与旧 fixture 的既有形状不回归）。
 2. **整数 / 浮点** → **按毫秒解释**（真机三处均为 13 位 epoch-ms），归一成
    `YYYY-MM-DDTHH:MM:SSZ` UTC 串。
 3. **合法性窗口**：归一结果落在 `[2000-01-01T00:00:00Z, now + 24h]` 之外 → 视为
    不可解析，报 `null` 并计入 `attempts`。**不做「10 位当秒、13 位当毫秒」的自动
-   嗅探**——那是在一个只观测到毫秒的宿主上发明一条无证据支撑的规则。
+   嗅探**——那是在一个只观测到毫秒的执行环境上发明一条无证据支撑的规则。
 4. 其余类型（bool / null / object）→ `null`。
 
 `date_span` 的排序在归一后按串字典序（= 时间序）进行，与既有实现一致。
@@ -410,8 +410,8 @@ unpriced（免费轨 11 会话）: 37,144,240 tok → 不进分母不计 0
 
 - §9 首句「`credit_json` = `{requestId: ¥}`」→ `{requestId: credit}`；
   「TOTAL ¥4307.76」→「TOTAL 4,307.76 credit（名义 ¥215.39；现金口径无实付证据）」。
-- §2.1 表 `session_usage` 行的「`credit_json`(宿主计费)」→「(宿主**积分**账单)」。
-- §9 输出契约段的 `{tokens, cny, host_billed}` → §6.1 的新形状。
+- §2.1 表 `session_usage` 行的「`credit_json`(执行环境计费)」→「(执行环境**积分**账单)」。
+- §9 输出契约段的 `{tokens, cny, harness_billed}` → §6.1 的新形状。
 
 ### 6.4 Phase A 验收
 
@@ -433,26 +433,26 @@ unpriced（免费轨 11 会话）: 37,144,240 tok → 不进分母不计 0
 
 ```sql
 -- crates/agent-vitals-data/src/authority_query.rs:907 SQL_SESSIONS_IN_WINDOW
-SELECT session_key, host, MIN(event_ts_ms), MAX(event_ts_ms), COUNT(*),
+SELECT session_key, harness, MIN(event_ts_ms), MAX(event_ts_ms), COUNT(*),
        SUM(uncached_input_tokens), … GROUP_CONCAT(DISTINCT COALESCE(model_id,'<unknown>'))
 FROM usage_facts
-WHERE host = ?1 AND observation_kind != 'legacy_aggregate'
+WHERE harness = ?1 AND observation_kind != 'legacy_aggregate'
   AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL AND session_key IS NOT NULL
   AND event_ts_ms >= ?2 AND event_ts_ms < ?3
 GROUP BY session_key
 ```
 
-`hosts` 为空时的宿主枚举同样是 `SELECT DISTINCT host FROM usage_facts`（同文件 :943）。
+`harnesses` 为空时的执行环境枚举同样是 `SELECT DISTINCT harness FROM usage_facts`（同文件 :943）。
 
 **推论**：一个会话出现在统一面，**当且仅当**它有至少一条带时间戳的非聚合 UsageFact。
 因此：
 
 - 「先接会话面、后谈成本面」的分层**没有落点**——它描述的是 r2a 时代的形状。
-- `sessions list --host-kind` 是自由 `Vec<String>`（`main.rs:809`）、`hosts` 过滤是
+- `sessions list --harness-kind` 是自由 `Vec<String>`（`main.rs:809`）、`harnesses` 过滤是
   自由字符串数组（`sessions_search.rs:31`）：**门早就开着**，无词表需要放开。
-- `sessions read` 已无逐宿主分支（`main.rs:3226` 直接 `dispatch("session_detail")`
+- `sessions read` 已无逐执行环境分支（`main.rs:3226` 直接 `dispatch("session_detail")`
   按 `session_ref` 查 SQL），**没有 branch 可加**。
-- `SessionStore::workbuddy` 是往待删模块里加宿主（§1 末行），**不做**。
+- `SessionStore::workbuddy` 是往待删模块里加执行环境（§1 末行），**不做**。
 
 ### 7.2 路径 1：发逐请求 UsageFact，进统一面
 
@@ -464,26 +464,26 @@ GROUP BY session_key
 
 | UsageFact 字段 | 取值 |
 |---|---|
-| `host` | `workbuddy`（需进 `ingest_service::FACT_HOSTS`） |
+| `harness` | `workbuddy`（需进 `ingest_service::FACT_HARNESSES`） |
 | `native_session_id` | db `sessions.id` |
-| `source_event_id` | `requestId`（宿主原生稳定 id） |
-| `observation_kind` | `host-credit-entry`（新值，非 `legacy_aggregate`，故不被 §7.1 查询排除） |
+| `source_event_id` | `requestId`（执行环境原生稳定 id） |
+| `observation_kind` | `harness-credit-entry`（新值，非 `legacy_aggregate`，故不被 §7.1 查询排除） |
 | `event_ts_utc` | 同会话 audit-log 里该 requestId 的**最早**时间戳（实测 64/100 可得） |
 | `time_basis` | `native`；**无时间戳的 36 条写 `null`** |
 | 四桶 token | **全 0** |
-| `amount_decimal` / `amount_basis` | credits / `host_billed` |
-| `source_usage_semantics` | 声明宿主原生粒度 |
+| `amount_decimal` / `amount_basis` | credits / `harness_billed` |
+| `source_usage_semantics` | 声明执行环境原生粒度 |
 
 三条纪律：
 
-1. **四桶全 0 是诚实的**，表达「此宿主不报分桶」；在 `sessions list` 里表现为该会话
+1. **四桶全 0 是诚实的**，表达「此执行环境不报分桶」；在 `sessions list` 里表现为该会话
    total=0、按 total 降序沉底。把 `used` 塞进 `uncached_input_tokens` 凑总量是编造桶
    （§9），**不可**。
 2. **36% 无时间戳的行写 `time_basis: null` 且 `event_ts_utc: null`**，与 DSH emitter
    的既有惯例一致（`dsh/sources/usage_fact.rs:112`「epoch 0 是真时间、不是无时间」）。
    **不发明会话级回退时间**——那是在没有分辨率的地方发明分辨率。代价如实：这些行
    入库但不进时间窗口查询。
-3. **`tokens_by_host["workbuddy"]` 必须继续被排除**。四桶全 0 会让它报 0 token，
+3. **`tokens_by_harness["workbuddy"]` 必须继续被排除**。四桶全 0 会让它报 0 token，
    那是 MeasuredZero 冒充真测量——workbuddy 留在 token DTO 的排除名单里。
 
 **可见性代价（如实）**：22 个会话里 **10 个**会出现在统一面（10/11 个有积分的会话
@@ -504,22 +504,22 @@ GROUP BY session_key
 
 **推荐路径 2，除非 WorkBuddy 恢复活跃使用。** 路径 1 的收益是 10/22 个历史会话出现
 在一个按 token 排序的列表里，而它们的 token 恒为 0（沉底）；成本是一个新
-`observation_kind`、一次 `FACT_HOSTS` 词表放开、以及在每个消费方逐一审计
+`observation_kind`、一次 `FACT_HARNESSES` 词表放开、以及在每个消费方逐一审计
 「workbuddy 是否该被排除」。**收益与成本不成比例**——除非语料重新增长。
 
 ### 7.5 Phase B 验收（若选路径 1）
 
-1. `sessions list --host-kind workbuddy --day <有数据的日>` 列出该日会话，
+1. `sessions list --harness-kind workbuddy --day <有数据的日>` 列出该日会话，
    token 列为 0，排序沉底。
-2. 其余三宿主的 `sessions list` 输出**逐字节不变**。
-3. `tokens_by_host` **无** workbuddy 键；`monthly_summary.excluded_hosts` 仍含它。
+2. 其余三执行环境的 `sessions list` 输出**逐字节不变**。
+3. `tokens_by_harness` **无** workbuddy 键；`monthly_summary.excluded_harnesses` 仍含它。
 4. 无时间戳的 36 条事实**在库里可查**（`data-status` 计数含它们）但**不进**任何
    时间窗口查询。
 5. `data-reimport-verify` 通过（幂等重放逐字节一致）。
 
 ## 8. Phase C：名义栏与真实账单（需拍板）
 
-> **2026-09-11 收缩**：本节前一版提了四件事（三宿主同构 · 配额计量 · 三桶分类 ·
+> **2026-09-11 收缩**：本节前一版提了四件事（三执行环境同构 · 配额计量 · 三桶分类 ·
 > 系数对账）。按 §11 规则 16 的判据筛掉拟核部分后，**只剩两条纯结构性的**（§8.0）。
 > 配额百分比 · 系数对账 · 成因分类**全部降级为「有数据时的展示」，不进规则层**——
 > 这样即使 WorkBuddy 改版或换用户，坏的最多是展示，不会是判定。
@@ -530,22 +530,22 @@ GROUP BY session_key
    「分子 measured / 分母 unavailable」（§5.0 末段）。这条不依赖任何语料数字。
    连带：`derive_coverage` 必须真的产出该信号计数——声明了就必须真能测，否则是
    `evidence.rs`「适配器不得用读不到的东西刷覆盖」那条纪律的反面。
-   同步面：`host_capability.rs` + Python 镜像 + `test_host_capability.py` /
-   `test_host_contract.py` 的 byte-parity 断言。
+   同步面：`harness_capability.rs` + Python 镜像 + `test_harness_capability.py` /
+   `test_harness_contract.py` 的 byte-parity 断言。
 2. **第三方 Key 走既有 `billing_modes` 判定链 + RouteEvidence**，**零 WorkBuddy
    专属逻辑**（`PROVIDER_ROUTE_ATTRIBUTION_SPEC.md` §6.4 已如此规定）。
 
 **架构影响**：若配额只**现算不落表**（22 会话、credit_json 求和，毫秒级），则
-**零表、零封闭词表、零同步管线**。若要落 `host_runtime_snapshots` 存历史，则因该表
+**零表、零封闭词表、零同步管线**。若要落 `harness_runtime_snapshots` 存历史，则因该表
 的 `ingested_run_id NOT NULL REFERENCES sync_runs(run_id)` 外键，WorkBuddy 必须进
-同步管线，要碰 `FACT_HOSTS` / `sync_service::batches` / `WIRED_HOSTS` 等 5 处宿主
-列表——**但按 §5.0 那不是给特例开口子，是让「支持配额快照的宿主」列表承认第三个
+同步管线，要碰 `FACT_HARNESSES` / `sync_service::batches` / `WIRED_HARNESSES` 等 5 处执行环境
+列表——**但按 §5.0 那不是给特例开口子，是让「支持配额快照的执行环境」列表承认第三个
 实例**。语料已停止增长，**建议先现算**。
 
 > **未验证的交互风险**：若用户声明 WorkBuddy 订阅并填 `amount_per_month`，
-> `declared_subscriptions` 是按 **provider** 枚举（不是 host），`apply_subscription_fees`
-> 会把它摊进 `by_provider`；而 WorkBuddy 在 `PERMANENTLY_EXCLUDED_HOSTS` 里，一旦
-> 落进 `by_provider` 就会触发 `contract_violations()` 的「排除的宿主不能同时贡献
+> `declared_subscriptions` 是按 **provider** 枚举（不是 harness），`apply_subscription_fees`
+> 会把它摊进 `by_provider`；而 WorkBuddy 在 `PERMANENTLY_EXCLUDED_HARNESSES` 里，一旦
+> 落进 `by_provider` 就会触发 `contract_violations()` 的「排除的执行环境不能同时贡献
 > 数据」。**此交互只读了一半代码，未跑测试验证**——真做 Phase C 前必须先确认。
 
 ### 8.1 名义栏（可做，风险低）
@@ -571,22 +571,22 @@ WorkBuddy 2026-08
 
 ```bash
 # 加量包实际购买
-agent-vitals data-host-bill set --host workbuddy --provider workbuddy \
-  --month 2026-08 --basis host_billed --amount-minor <分> --currency CNY \
+agent-vitals data-harness-bill set --harness workbuddy --provider workbuddy \
+  --month 2026-08 --basis harness_billed --amount-minor <分> --currency CNY \
   --evidence-ref "receipt:<订单号>"
 
 # 订阅月费（§5.1 第三行——与积分数无关）
-agent-vitals data-host-bill set --host workbuddy --provider workbuddy \
+agent-vitals data-harness-bill set --harness workbuddy --provider workbuddy \
   --month 2026-08 --basis fixed_subscription --amount-minor <分> --currency CNY \
   --evidence-ref "subscription:<账期>"
 ```
 
-`apply_host_bills`（`summary.rs:1153`）已把这类行折进 `by_provider["workbuddy/workbuddy"]`；
-`data-host-bill` 的 CLI help 原文即写着「Host bills (**WorkBuddy credit**, subscription
+`apply_harness_bills`（`summary.rs:1153`）已把这类行折进 `by_provider["workbuddy/workbuddy"]`；
+`data-harness-bill` 的 CLI help 原文即写着「Harness bills (**WorkBuddy credit**, subscription
 invoices…) are **user-entered, not derived from our price cards**」。
 
-此时且仅此时需同步：从 `PERMANENTLY_EXCLUDED_HOSTS` 摘除 workbuddy（否则
-`contract_violations()` 会正确地报「排除的宿主不能同时贡献数据」），并改写
+此时且仅此时需同步：从 `PERMANENTLY_EXCLUDED_HARNESSES` 摘除 workbuddy（否则
+`contract_violations()` 会正确地报「排除的执行环境不能同时贡献数据」），并改写
 `test_v09_onboarding_fixtures.py` 的金额面断言。
 
 **系统永不自动生成这两行**：`amount_minor` 必须来自用户提供的收据/账期，不能来自
@@ -598,7 +598,7 @@ invoices…) are **user-entered, not derived from our price cards**」。
 
 1. **无逐请求 token**：只有会话级 `used`。四桶任填其一都是编造构成。
 2. **无四桶语义**：WorkBuddy 不暴露缓存读写，`cache_hit_ratio` 无源。
-3. **借用其他宿主的卡计价**：§6.7 实测同一模型按不同卡计价相差 **46 倍**，借卡等于编价。
+3. **借用其他执行环境的卡计价**：§6.7 实测同一模型按不同卡计价相差 **46 倍**，借卡等于编价。
 
 工程面附注：WorkBuddy 是**单文件 sqlite + 目录账本**，与 `source_files` 的
 (size, mtime) 逐文件指纹模型不匹配——db 每写一次全库 mtime 就变，**文件指纹层面做
@@ -668,7 +668,7 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
 
 1. 归属 = `trace.sessionId` **字符串相等**；空/缺 → attempts，**不猜**。
 2. 无 sessionId 的 trace **不是另一类**——同名同形，只是没归属。它们的 usage 单列
-   `unattributed`（真实用量，不进任何会话，不当损坏）；成因等宿主声明。
+   `unattributed`（真实用量，不进任何会话，不当损坏）；成因等执行环境声明。
 3. `toolInput` / `toolOutput` **必须解一层 JSON**；解不开 → 该 span 的对应信号 unavailable
    + attempts，不猜。
 4. 四桶只从 span 级 `usage` 算；**`trace.totalTokens` 不读**（不可信）；`used` 不参与。
@@ -692,7 +692,7 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
 > 共同读取层。
 
 - [x] **E1 · traces 读取层 + fixture**（locate → shape → extract）
-      `hosts/workbuddy/sources/traces.rs` ↔ `adapters/workbuddy_traces.py`：枚举
+      `harnesses/workbuddy/sources/traces.rs` ↔ `adapters/workbuddy_traces.py`：枚举
       `traces/*/trace_*.json`，按 `trace.sessionId` 分组，解码 `toolInput`/`toolOutput`
       （只留 `usage`/`model`/`file_path`/`toolName`），ISO 时间戳走 A2 字符串路径；
       无 sessionId → `unattributed` 桶。fixture：`fixtures/workbuddy/workdir/.workbuddy/
@@ -714,8 +714,8 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
       轮转丢失约 30%）；命令文本只 59% 相等。没有身份键就没有 dedup，模糊合并是猜。
       audit-log 是 hash 链安全账本且更完整。**代价如实**：Bash 的 status/duration 只在
       span 里、无键可挂 → Bash 没有 tool_results。回归钉「文本完全相等也不合并」。
-- [x] **E4a · UsageFact emitter + 只读 CLI**（`hosts/workbuddy/sources/usage_fact.rs` ↔
-      `agent/workbuddy_usage_fact.py`；分期同 v0.7 三宿主先例：先内存 emit + 只读诊断，
+- [x] **E4a · UsageFact emitter + 只读 CLI**（`harnesses/workbuddy/sources/usage_fact.rs` ↔
+      `agent/workbuddy_usage_fact.py`；分期同 v0.7 三执行环境先例：先内存 emit + 只读诊断，
       不动词表、不写盘）
       与 Codex 同形：`observation_kind = "assistant-usage"`、identity = spanId（**native**，
       真机每 generation span 恰 1 条 usage，5,067/5,067）、time = span.startedAt（ISO ms
@@ -731,7 +731,7 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
       `tests/test_workbuddy_usage_fact.py` byte-parity。**实施注记**：真机 3,865 facts +
       155 skip + 1,202 unattributed = 5,222 generation span（恒等式钉回归）；两侧 `--json`
       逐字节一致。**顺带修了 main 预存的契约锁步断裂**：`2e011fc fix(v0.12)` 给 Rust
-      `USAGE_FACT_FIELDS` 加 `billing_template_id`、Python 没跟——四宿主 usage-fact 差分在
+      `USAGE_FACT_FIELDS` 加 `billing_template_id`、Python 没跟——四执行环境 usage-fact 差分在
       带二进制时全红（本地 `discover` 不带 `AGENT_VITALS_BIN` 故一直 skip；CI 会红）。
       加回那一个键后 codex/claude 转绿。**仍红且不在本分支范围**（基线 `88ae4a7` 自建
       二进制复现）：DSH usage-fact 差分 2 条（Python DSH emitter 在隔离 HOME 下读到路由
@@ -739,24 +739,24 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
       `api_equivalent` 计费档 2 条、data-status health 1 条——均为 main 的 v0.11/v0.12
       provider 工作遗留，与 `verify-workbench-traces.mjs` 同类。
 - [x] **E4b · 进封闭词表与同步管线**
-      `FACT_HOSTS` / `TRACE_HOSTS` / `reimport_verify::HOSTS` / `WIRED_HOSTS` /
-      `sync_service::batches` 全部 4→4（`reimport_verify::HOSTS` 复用 `FACT_HOSTS`
-      作 `const HOSTS = crate::ingest_service::FACT_HOSTS`，不再单开一份）；sync 的
+      `FACT_HARNESSES` / `TRACE_HARNESSES` / `reimport_verify::HARNESSES` / `WIRED_HARNESSES` /
+      `sync_service::batches` 全部 4→4（`reimport_verify::HARNESSES` 复用 `FACT_HARNESSES`
+      作 `const HARNESSES = crate::ingest_service::FACT_HARNESSES`，不再单开一份）；sync 的
       dirty-file 枚举 = `workbuddy_trace_files(root)`（locate 面），每文件一个
       source_id、`(size, mtime)` 指纹增量——纪律 7 的索引由 `source_files` 表免费
       得到；无 sessionId 的 trace 照落指纹（本轮已处理），不会每 tick 重读 686MB。
-      **tokens_by_host 含 workbuddy，由 SQL `host_window_tokens` 直读四桶真值**（非
-      §7.2 的「恒 0 冒充」）；`data-status`（facts/sources/covered_from/to，整宿主
+      **tokens_by_harness 含 workbuddy，由 SQL `harness_window_tokens` 直读四桶真值**（非
+      §7.2 的「恒 0 冒充」）；`data-status`（facts/sources/covered_from/to，整执行环境
       unpriced——裸模型名不许去撞 DSH 卡）/ `data-unresolved`（`workbuddy/unknown`
       逐模型 billing-route-unknown）/ `data-reimport-verify` / `workbuddy-usage-facts
       --write`（落 `<data_home>/facts/workbuddy.jsonl`）全部认 workbuddy。
       **金额面保持 excluded**：facts 一律 `provider_id: null`（§2.1 三轨不可判）→
       `amounts_by_basis` 恒空 + `has_unresolved` + `billing-route-unknown`，不进
-      by_provider，`summable_total` 不含它；`by_host` 有行是为了「有数据可见」——
-      excluded_hosts 因此是空集（DTO 语义「已知存在但本版本不产出数据」不再适用）。
+      by_provider，`summable_total` 不含它；`by_harness` 有行是为了「有数据可见」——
+      excluded_harnesses 因此是空集（DTO 语义「已知存在但本版本不产出数据」不再适用）。
       summary 全量接线的代价实测：`coverage 4/4`、`contract_violations` 空（单个
-      WIRED_HOSTS / `HOST_PROVIDER_MAP`（workbuddy → `&[]`）同表钉死）。
-      **统一会话面（§7.2 路径 1）自动成立且已实测**：`sessions list --host-kind
+      WIRED_HARNESSES / `HARNESS_PROVIDER_MAP`（workbuddy → `&[]`）同表钉死）。
+      **统一会话面（§7.2 路径 1）自动成立且已实测**：`sessions list --harness-kind
       workbuddy` 返回 23 个会话、token 四桶真的（2026-08 月 2,407 会话事件、
       452,073,138 tokens）、`cost_minor: null`；`sessions read` 200 条/页的事实
       时间线；`trace-ref` 在 canonical_input 的 workbuddy 分派下产出
@@ -789,7 +789,7 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
           last prompt 278,682）、`ef6c0fd7`（56,027 < 159,255）、`49525d61`
           （0 < 76,694——used 列缺值）、`4e20a4ee`（39,874 < 49,101）、
           `9e4b26f5`（used 107,319 **>** last prompt 83,910——13 天长会话）
-          。成因线索：used 是宿主聚合值的**某时点快照**，与「最后一次调用」的
+          。成因线索：used 是执行环境聚合值的**某时点快照**，与「最后一次调用」的
           拍照点不同步（压缩/重置后 used 停留早期，但末次调用 prompt 已长大；
           或者反之 used 拍在更晚）。`3acac645` 偏 0.5% 算界内。
 - [x] **E6 · 文档收口**
@@ -818,7 +818,7 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
       整数、credit 值改真机量级；builder 自校验数字同步。**必须最先做**——在 ISO 串
       fixture 上做整数兼容，测试既无法转红也无法转绿。
 - [x] **A2 · 时间戳归一**（§6.2）
-      `hosts/workbuddy/sources/mod.rs` 的 `date_span_of` + `workbuddy_session_meta`
+      `harnesses/workbuddy/sources/mod.rs` 的 `date_span_of` + `workbuddy_session_meta`
       ↔ `adapters/workbuddy_session.py` / `agent/workbuddy_session_audit.py`。
       字符串走旧路径、整数按毫秒、越界报 null 并进 attempts、不做秒/毫秒嗅探。
       **双侧同一 commit**。
@@ -827,7 +827,7 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
       `nominal_basis`；`credits` 取代原 `cny` 的求和值。键序两侧逐字节一致。
       非积分轨会话多发一条 `notes`（真实开销在用户自配 API 账户、本机不可见）。
       A4 的部分交付：`nominal_cny` 只活在 workbuddy 会话适配器、`PERMANENTLY_
-      EXCLUDED_HOSTS` 仍含 workbuddy——回归钉住（`TestNominalCnyNeverEntersASpendSummaryDto`）。
+      EXCLUDED_HARNESSES` 仍含 workbuddy——回归钉住（`TestNominalCnyNeverEntersASpendSummaryDto`）。
       evidence.rs 的整数时间戳 fold-in **推迟**：`TimelineEntry.time` 实际会进
       `audit` 投影输出，单改 Rust 会打破 Python↔Rust 差分，需 `workbuddy_evidence.py`
       的 `_parse_time` 同步——超出 A3 范围，留作独立项。
@@ -839,7 +839,7 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
       `WORKBUDDY_INTEGRATION.md` §9 两处 + §2.1 表一处 + §9 输出契约段；
       本篇状态行更新。
 - [x] **A6 · evidence.rs 整数时间戳 lockstep**（A3 推迟项）
-      `hosts/workbuddy/sessions/evidence.rs::parse_time` ↔
+      `harnesses/workbuddy/sessions/evidence.rs::parse_time` ↔
       `packages/agent-vitals-python/agent_vitals/agent/workbuddy_evidence.py::_parse_time`：
       整数/浮点按毫秒归一，固定上下界 `[2000-01-01, 2100-01-01)`（纯 crate 读不了时钟，
       不用 now 窗口）。`TimelineEntry.time` 会进 `audit` 投影，**双侧同一 commit** 且
@@ -849,14 +849,14 @@ prompt**——不是 0 token，是**未归属的真实用量**（成因未知，
       A3 首版 note 断言「the real spend is on the user's own API account (self-configured
       key + endpoint)」——真机 `hy3` 限免会话（平台送的，不存在那笔支出）当场证伪。
       改为「session not billed to credits … cause is NOT determinable — self-configured
-      route / promotional free tier / host-side non-billing are indistinguishable」；
+      route / promotional free tier / harness-side non-billing are indistinguishable」；
       Rust ↔ Python 同 commit；差分期望、fixture 自校验、回归测试同步改为断言
       **三种成因都点名为不可分辨且不单独指认任何一种**。
 
 **验收门禁**（每项 commit 前必跑，A5 仅需前两条）
 
 ```bash
-cargo test -p agent-vitals-hosts                    # workbuddy evidence + sources
+cargo test -p agent-vitals-harnesses                    # workbuddy evidence + sources
 python3 -m unittest discover tests                  # Python 全量
 AGENT_VITALS_BIN=target/release/agent-vitals python3 -m unittest tests.test_cli_matrix
 python3 tests/golden_runner.py                      # 15 张快照不得漂移
@@ -891,19 +891,19 @@ python3 tests/golden_runner.py                      # 15 张快照不得漂移
       已知列清单 = 2026-09-11 真机 30 列快照，**是声明的基线不是规则**（§11 规则 16）。
 - [x] **B5 · 生命周期字段浮出（不过滤）**（code，ASK P0-3 若不做）
       `status` / `source_mode` / `is_playground` / `deleted_at` / `is_background_automation`
-      按名读入 `--list` 行与会话 meta，缺列 null；**只浮出不过滤**（语义宿主未声明，过滤
-      是消费方的事），note 标注「语义未经宿主声明」。
+      按名读入 `--list` 行与会话 meta，缺列 null；**只浮出不过滤**（语义执行环境未声明，过滤
+      是消费方的事），note 标注「语义未经执行环境声明」。
 - [x] **B6 · `QuotaConsumption` 声明修正**（code，spec §8.0 第 1 条）
       从 WorkBuddy `unmeasured_signals` 移出；`derive_coverage` 产出 measured =
       `credit_json` 条目数（分子），分母 unavailable 由 note 说明。同步
-      `host_capability.rs` + Python 镜像 + `test_host_capability.py` / `test_host_contract.py`
-      byte-parity；`hosts --json` 输出会动，差分照冻。
+      `harness_capability.rs` + Python 镜像 + `test_harness_capability.py` / `test_harness_contract.py`
+      byte-parity；`harnesses --json` 输出会动，差分照冻。
 - [x] **B7 · §5.3.1 护栏假阳性迁入 `ATTRIBUTABLE_WASTE.md` §6.7**（doc-only）
       加「已声明免费额度」豁免分支的缺口记录；本 spec §5.3.1 改为指针。
 
-**明确不做（记录理由）**：ASK P1-4 的 `AutomationRuns` 宿主中立 signal——新增 `Signal`
-变体会改 `total_fields` / `denominator_version`（跨宿主、含 wasm），而 `automations`
-四表 **0 行**。为空表建跨宿主规则违反 §11 规则 16；等第一行数据出现再立项。
+**明确不做（记录理由）**：ASK P1-4 的 `AutomationRuns` 执行环境中立 signal——新增 `Signal`
+变体会改 `total_fields` / `denominator_version`（跨执行环境、含 wasm），而 `automations`
+四表 **0 行**。为空表建跨执行环境规则违反 §11 规则 16；等第一行数据出现再立项。
 
 ### 不在本清单内（不是待办，是决策门）
 
@@ -925,7 +925,7 @@ python3 tests/golden_runner.py                      # 15 张快照不得漂移
     对齐；纸面 schema 让差分门禁测错东西（§3.3，与 2026-09-02 词表漂移同一教训）。
 14. **`credits: 0.0` 不等于零开销，也不指认成因**：它只说明平台积分轨未消耗。
     可能是自配路由（花在用户自有 API 账户，本机不可观测）、**限免促销**（真免费）、
-    或宿主未记账——三者不可分辨（§2.1）。由 `notes` 说明「未计入积分，成因不判定」，
+    或执行环境未记账——三者不可分辨（§2.1）。由 `notes` 说明「未计入积分，成因不判定」，
     **不由数字冒充，也不由适配器指认**。
 15. **名义单位成本的分母只含积分轨 processed token**（§5.2）：全量分母会稀释单位成本
     （实测 8.3%、92.1% vs 7.9%——旧口径的「46%」建立在 `used` 上、已被 §5.2 作废），
@@ -939,7 +939,7 @@ python3 tests/golden_runner.py                      # 15 张快照不得漂移
     | `credit_json` 按 requestId 键控 | `¥0.05` 兑换价（07-01 前是 ¥38/1000） |
     | 会话表 30 列无余额字段 → 分母不可观测 | 4,000/月 配额（套餐档位不同） |
     | 轨道是会话/请求级而会话表不记路由 → 可混轨 | 这台机器恰好 3 个模型混轨 |
-    | 积分 = 模型系数 × token（宿主定价杠杆） | M2.5 `0.18` / M3 `0.25`（促销会变） |
+    | 积分 = 模型系数 × token（执行环境定价杠杆） | M2.5 `0.18` / M3 `0.25`（促销会变） |
 
     落地手法沿用仓库既有的**残差哨兵**纪律（`CLAUDE.md`：「宽进严出——机器发现，
     人来分类」）：**语料观测不进规则，进哨兵**。WorkBuddy 适配器已在做（不认识的
@@ -960,7 +960,7 @@ python3 tests/golden_runner.py                      # 15 张快照不得漂移
 
 ## 12. 与 v1.0.0 的关系
 
-`AGENT_VITALS_APP_V1_0_0_PRD.md` 首发宿主明写 **Codex / Claude Code / DSH**，全文零处
+`AGENT_VITALS_APP_V1_0_0_PRD.md` 首发执行环境明写 **Codex / Claude Code / DSH**，全文零处
 提及 WorkBuddy。因此：
 
 - **Phase A 与 v1.0.0 正交**，随时可做——它修的是既有代码正在输出的错误金额与空日期。

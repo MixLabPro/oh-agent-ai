@@ -3,7 +3,7 @@
 // 形状出处（形状来源纪律，CLAUDE.md）：
 // - insights：crates/agent-vitals-domain/src/domain/session_insights.rs::build_insights
 //   （axis / session / diagnostics / safety）+ crates/agent-vitals-query/src/query/
-//   session_insights.rs::session_insights（lanes / host / nominal_cost）。经 MCP
+//   session_insights.rs::session_insights（lanes / harness / nominal_cost）。经 MCP
 //   `session_trace(output = "insights")`，Tauri 命令 `session_trace` 转发 envelope。
 // - evidence：同文件 `session_trace_evidence`，Tauri 命令 `session_trace_evidence`
 //   直接返回 `{data}`（本地呈现层专属，不经 MCP）。
@@ -53,11 +53,11 @@ export type InsightDiagnostic = {
     disclaimer: string;
   };
 };
-export type LaneReason = "not_recorded_by_host" | "not_ingested" | "no_data_in_session";
+export type LaneReason = "not_recorded_by_harness" | "not_ingested" | "no_data_in_session";
 export type Lane = { state: "available" | "partial" | "unavailable"; coverage: number | null; reason: LaneReason | null };
 export type SafetyRule = { rule: string; severity: "critical" | "warning" | "info"; count: number; steps: number[] };
 export type SessionInsights = {
-  host: string;
+  harness: string;
   axis: {
     unit: "turn" | "assistant_call";
     turn_starts: number;
@@ -74,7 +74,7 @@ export type SessionInsights = {
     /// 无金额时的原因（§8.5「暂无可用计价依据」）。
     nominal_cost_reason: "no_pricing_snapshot" | "no_price_card" | null;
   };
-  /// 仍是工具名级旧指纹的失败次数（源日志已被宿主清理，无法按参数区分调用）。
+  /// 仍是工具名级旧指纹的失败次数（源日志已被执行环境清理，无法按参数区分调用）。
   quality: { legacy_fingerprints: number };
   diagnostics: InsightDiagnostic[];
   safety: { count: number; critical: number; rules: SafetyRule[] };
@@ -148,7 +148,7 @@ function lane(value: unknown, what: string): Lane {
   return {
     state: oneOf(o.state, `${what}.state`, ["available", "partial", "unavailable"] as const),
     coverage: optRatio(o.coverage, `${what}.coverage`),
-    reason: o.reason === undefined || o.reason === null ? null : oneOf(o.reason, `${what}.reason`, ["not_recorded_by_host", "not_ingested", "no_data_in_session"] as const),
+    reason: o.reason === undefined || o.reason === null ? null : oneOf(o.reason, `${what}.reason`, ["not_recorded_by_harness", "not_ingested", "no_data_in_session"] as const),
   };
 }
 
@@ -246,7 +246,7 @@ export function parseSessionInsights(value: unknown): SessionInsights {
   const safety = obj(data.safety, "safety");
   const lanes = obj(data.lanes, "lanes");
   return {
-    host: label(data.host, "宿主", 64),
+    harness: label(data.harness, "执行环境", 64),
     axis: {
       unit: oneOf(axis.unit, "axis.unit", ["turn", "assistant_call"] as const),
       turn_starts: count(axis.turn_starts, "axis.turn_starts"),

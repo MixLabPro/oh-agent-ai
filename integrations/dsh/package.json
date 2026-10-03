@@ -1,7 +1,7 @@
 {
   "name": "dsh-agent-vitals",
   "version": "1.4.0",
-  "description": "Agent Vitals as a DeepSeek Harness profile bundle: audits installed Agent Skills across hosts. Ships the skill instructions only — the scanner runs from PATH or a repo checkout, never from a bundled copy.",
+  "description": "Agent Vitals as a DeepSeek Harness profile bundle: audits installed Agent Skills across harnesses. Ships the skill instructions only — the scanner runs from PATH or a repo checkout, never from a bundled copy.",
   "type": "module",
   "main": "index.js",
   "exports": {

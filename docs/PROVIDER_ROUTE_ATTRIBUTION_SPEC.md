@@ -1,10 +1,10 @@
 # Provider Route Attribution and Fair-Market Metered Fallback
 
-状态：Draft，面向 v0.11.x 修复；适用于所有宿主和模型
+状态：Draft，面向 v0.11.x 修复；适用于所有执行环境和模型
 
 ## 1. 问题定义
 
-当前各宿主的 session log 对 provider 路由的记录能力不一致：
+当前各执行环境的 session log 对 provider 路由的记录能力不一致：
 
 - Codex 记录 `model_provider=custom`，但通常不记录 endpoint/provider identity；
 - DSH 已经记录 `provider_raw`；
@@ -12,12 +12,12 @@
 
 因此 `custom` 流量无法安全归因到 `cogfoundry.ai`，而只能显示为未解析的按量估算。
 
-本 spec 只允许使用宿主 session log 中的证据。不得使用当前配置、环境变量、账单流水或模型名推断历史 provider。
-计费兜底规则对 Codex、DSH、Claude Code、WorkBuddy 以及后续宿主统一生效。
+本 spec 只允许使用执行环境 session log 中的证据。不得使用当前配置、环境变量、账单流水或模型名推断历史 provider。
+计费兜底规则对 Codex、DSH、Claude Code、WorkBuddy 以及后续执行环境统一生效。
 
 ## 2. 目标
 
-1. 每个 host adapter 从原始 session log 提取其实际存在的 provider/route 原始证据。
+1. 每个 harness adapter 从原始 session log 提取其实际存在的 provider/route 原始证据。
 2. Python/Rust adapter 输出完全一致的字段和证据等级。
 3. 同一 session 内发生 route 切换时，usage fact 按事件时间继承正确路由。
 4. 有明确 endpoint/provider 时，将流量归因到规范 provider（例如 `cogfoundry.ai`）。
@@ -26,7 +26,7 @@
 
 ## 2.1 Custom 的计费兜底规则
 
-当任意宿主的 session 明确给出 `custom`、第三方 provider、或 provider 缺失，且没有足够的 provider route evidence 时：
+当任意执行环境的 session 明确给出 `custom`、第三方 provider、或 provider 缺失，且没有足够的 provider route evidence 时：
 
 ```text
 billing_mode   = metered
@@ -58,7 +58,7 @@ provider + model 的明确价卡
 → unpriced（没有可验证价卡）
 ```
 
-该顺序适用于 Codex、DSH、Claude Code、WorkBuddy 等所有宿主；provider identity 与价格来源必须分别展示。
+该顺序适用于 Codex、DSH、Claude Code、WorkBuddy 等所有执行环境；provider identity 与价格来源必须分别展示。
 
 ## 3. 非目标
 
@@ -182,15 +182,15 @@ Codex emitter 应在 `session_meta` 中写入非敏感 route snapshot：
 
 `model_provider_id=custom` 不等于 provider identity；新增 `provider_id`/`endpoint_host` 才是路由证据。
 
-## 6. Host adapter 实现
+## 6. Harness adapter 实现
 
 ### 6.0 分层边界
 
-宿主特有的 wire/session 解析必须位于 `agent-vitals-hosts/src/hosts/<host>/`：
+执行环境特有的 wire/session 解析必须位于 `agent-vitals-harnesses/src/harnesses/<harness>/`：
 
-- session 行格式、provider 字段路径、route timeline、host-specific normalization input：host adapter；
+- session 行格式、provider 字段路径、route timeline、harness-specific normalization input：harness adapter；
 - provider matcher、价卡回退、缓存/输入/输出计价公式：`agent-vitals-domain` 的通用 cost/provider 层；
-- SQL 写入、汇总、UI DTO：data/runtime/desktop，只消费统一 DTO，不重新解释 host wire。
+- SQL 写入、汇总、UI DTO：data/runtime/desktop，只消费统一 DTO，不重新解释 harness wire。
 
 现有 `crates/agent-vitals-runtime/src/sessions/codex_cost.rs` 是历史兼容入口，包含 Codex 专用
 fold 与价卡逻辑。实施时应将 route/provider 解析迁出 runtime；公平价解析抽到 domain，runtime
@@ -200,8 +200,8 @@ fold 与价卡逻辑。实施时应将 route/provider 解析迁出 runtime；公
 
 修改：
 
-- `crates/agent-vitals-hosts/src/hosts/codex/sources/mod.rs`
-- `crates/agent-vitals-hosts/src/hosts/codex/sources/usage_fact.rs`
+- `crates/agent-vitals-harnesses/src/harnesses/codex/sources/mod.rs`
+- `crates/agent-vitals-harnesses/src/harnesses/codex/sources/usage_fact.rs`
 - `packages/agent-vitals-python/agent_vitals/agent/codex_usage_fact.py`
 
 新增纯函数：
@@ -229,15 +229,15 @@ session_meta.payload.route
 
 继续保留 `model_raw`。只有 session log 新增明确 route 字段后，才填 provider evidence；在此之前不得由 `claude-*` 模型名推断 Anthropic。
 
-### 6.4 WorkBuddy 和其他宿主
+### 6.4 WorkBuddy 和其他执行环境
 
-复用相同的 adapter 输出契约：保留宿主原始 provider/model 字段，能提取 endpoint 就写入
-`RouteEvidence`；不能提取时仍进入统一的 `metered_estimate` 价格兜底。宿主专有的真实 credit
+复用相同的 adapter 输出契约：保留执行环境原始 provider/model 字段，能提取 endpoint 就写入
+`RouteEvidence`；不能提取时仍进入统一的 `metered_estimate` 价格兜底。执行环境专有的真实 credit
 账单若存在，属于独立的 actual billing source，不改变本 spec 的 session-only fallback。
 
 ## 7. 统一解析和标准化
 
-Host adapter 只提取原始证据；provider crate 负责标准化：
+Harness adapter 只提取原始证据；provider crate 负责标准化：
 
 ```text
 router.cogfoundry.ai / beta-router.cogfoundry.ai → cogfoundry.ai
@@ -257,7 +257,7 @@ openai 官方 endpoint → openai
 
 不新增账单表，不迁移旧事实的 provider identity。新增 emitter 后：
 
-重放沿用现有 host sync/reprocess 入口，不新增账单表或 provider 专用 SQL；实现必须把
+重放沿用现有 harness sync/reprocess 入口，不新增账单表或 provider 专用 SQL；实现必须把
 session-native route snapshot 逐事实写入 `route_evidence_id`，并可从原始 session log 重建。
 
 重放必须验证：

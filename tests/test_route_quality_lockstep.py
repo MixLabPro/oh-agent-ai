@@ -37,9 +37,9 @@ class RouteQualityLockstepTest(unittest.TestCase):
                     f"family({case['input']!r})",
                 )
                 self.assertEqual(
-                    quality_flag(case["host"], case["input"]),
+                    quality_flag(case["harness"], case["input"]),
                     case["expected_flag"],
-                    f"flag({case['host']!r}, {case['input']!r})",
+                    f"flag({case['harness']!r}, {case['input']!r})",
                 )
 
     def test_families_form_closed_set(self):

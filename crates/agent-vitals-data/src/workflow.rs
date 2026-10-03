@@ -1,6 +1,6 @@
-//! Authority storage for the host-neutral workflow event contract.
+//! Authority storage for the harness-neutral workflow event contract.
 //!
-//! This module intentionally contains no host parsing and no product scoring.
+//! This module intentionally contains no harness parsing and no product scoring.
 //! Adapters produce [`agent_vitals_domain::workflow::WorkflowEvent`]; the
 //! runtime supplies the source/run provenance; this module only validates and
 //! persists the redacted event rows with replay-safe identity semantics.
@@ -63,7 +63,7 @@ pub fn insert_events(
             ))
         })?;
         writer.upsert_session(
-            &key.host_kind,
+            &key.harness_kind,
             &key.machine_namespace,
             &key.native_id,
             Some(&key.source_profile),
@@ -239,7 +239,7 @@ pub fn insert_session_excerpts(
             ))
         })?;
         writer.upsert_session(
-            &key.host_kind,
+            &key.harness_kind,
             &key.machine_namespace,
             &key.native_id,
             Some(&key.source_profile),

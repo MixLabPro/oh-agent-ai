@@ -18,7 +18,7 @@ pub fn issues_spec() -> ToolSpec {
             "properties": {
                 "from": { "type": "string", "description": "Inclusive statistics date YYYY-MM-DD." },
                 "to": { "type": "string", "description": "Inclusive statistics date YYYY-MM-DD." },
-                "hosts": { "type": "array", "items": { "type": "string" } },
+                "harnesses": { "type": "array", "items": { "type": "string" } },
                 "skills": { "type": "array", "items": { "type": "string" } },
                 "group_by": { "type": "string", "enum": ["category", "fingerprint", "capability"] },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
@@ -290,7 +290,7 @@ fn retry_chain_rows(events: &[RetryEvent]) -> (Vec<Value>, bool) {
 fn load_retry_events(
     conn: &Connection,
     window: &Window,
-    hosts: &[String],
+    harnesses: &[String],
     skills: &[String],
 ) -> Result<Vec<RetryEvent>, ToolError> {
     let mut sql = String::from(
@@ -309,7 +309,7 @@ fn load_retry_events(
         SqlValue::Integer(window.end_ms),
     ];
     let mut next_param = 3;
-    append_scope_filter(&mut sql, &mut values, &mut next_param, hosts, skills);
+    append_scope_filter(&mut sql, &mut values, &mut next_param, harnesses, skills);
     sql.push_str(" ORDER BY e.session_key, e.capability_id, e.invocation_fingerprint, e.event_ts_ms, e.event_id");
     let mut statement = conn
         .prepare(&sql)
@@ -383,11 +383,11 @@ fn append_scope_filter(
     sql: &mut String,
     values: &mut Vec<SqlValue>,
     next_param: &mut usize,
-    hosts: &[String],
+    harnesses: &[String],
     capabilities: &[String],
 ) {
-    if !hosts.is_empty() {
-        let placeholders = (0..hosts.len())
+    if !harnesses.is_empty() {
+        let placeholders = (0..harnesses.len())
             .map(|_| {
                 let value = format!("?{next_param}");
                 *next_param += 1;
@@ -395,8 +395,8 @@ fn append_scope_filter(
             })
             .collect::<Vec<_>>()
             .join(",");
-        sql.push_str(&format!(" AND s.host IN ({placeholders})"));
-        values.extend(hosts.iter().cloned().map(SqlValue::Text));
+        sql.push_str(&format!(" AND s.harness IN ({placeholders})"));
+        values.extend(harnesses.iter().cloned().map(SqlValue::Text));
     }
     if !capabilities.is_empty() {
         let placeholders = (0..capabilities.len())
@@ -440,7 +440,7 @@ fn append_event_type_filter(
 fn workflow_count(
     conn: &Connection,
     window: &Window,
-    hosts: &[String],
+    harnesses: &[String],
     capabilities: &[String],
     event_types: &[&str],
 ) -> Result<i64, ToolError> {
@@ -454,47 +454,47 @@ fn workflow_count(
         SqlValue::Integer(window.end_ms),
     ];
     let mut next_param = 3;
-    append_scope_filter(&mut sql, &mut values, &mut next_param, hosts, capabilities);
+    append_scope_filter(&mut sql, &mut values, &mut next_param, harnesses, capabilities);
     append_event_type_filter(&mut sql, &mut values, &mut next_param, event_types);
     conn.query_row(&sql, params_from_iter(values.iter()), |row| row.get(0))
         .map_err(|e| ToolError::new("internal_error", format!("workflow event count failed: {e}")))
 }
 
-fn workflow_hosts(
+fn workflow_harnesses(
     conn: &Connection,
     window: &Window,
-    hosts: &[String],
+    harnesses: &[String],
     capabilities: &[String],
     event_types: &[&str],
 ) -> Result<Vec<String>, ToolError> {
     let mut sql = String::from(
-        "SELECT DISTINCT s.host FROM workflow_events e
+        "SELECT DISTINCT s.harness FROM workflow_events e
          JOIN sessions s ON s.session_key = e.session_key
          WHERE e.event_ts_ms >= ?1 AND e.event_ts_ms < ?2
-           AND s.host IS NOT NULL",
+           AND s.harness IS NOT NULL",
     );
     let mut values = vec![
         SqlValue::Integer(window.start_ms),
         SqlValue::Integer(window.end_ms),
     ];
     let mut next_param = 3;
-    append_scope_filter(&mut sql, &mut values, &mut next_param, hosts, capabilities);
+    append_scope_filter(&mut sql, &mut values, &mut next_param, harnesses, capabilities);
     append_event_type_filter(&mut sql, &mut values, &mut next_param, event_types);
-    sql.push_str(" ORDER BY s.host");
+    sql.push_str(" ORDER BY s.harness");
     let mut statement = conn
         .prepare(&sql)
-        .map_err(|e| ToolError::new("internal_error", format!("workflow host coverage query failed: {e}")))?;
+        .map_err(|e| ToolError::new("internal_error", format!("workflow harness coverage query failed: {e}")))?;
     let mut rows = statement
         .query(params_from_iter(values.iter()))
-        .map_err(|e| ToolError::new("internal_error", format!("workflow host coverage query failed: {e}")))?;
+        .map_err(|e| ToolError::new("internal_error", format!("workflow harness coverage query failed: {e}")))?;
     let mut out = Vec::new();
     while let Some(row) = rows
         .next()
-        .map_err(|e| ToolError::new("internal_error", format!("workflow host coverage row failed: {e}")))?
+        .map_err(|e| ToolError::new("internal_error", format!("workflow harness coverage row failed: {e}")))?
     {
         out.push(
             row.get(0)
-                .map_err(|e| ToolError::new("internal_error", format!("workflow host coverage row failed: {e}")))?,
+                .map_err(|e| ToolError::new("internal_error", format!("workflow harness coverage row failed: {e}")))?,
         );
     }
     Ok(out)
@@ -504,12 +504,12 @@ fn coverage(
     conn: &Connection,
     window: &Window,
     observed: i64,
-    hosts: &[String],
+    harnesses: &[String],
     capabilities: &[String],
     event_types: &[&str],
     missing: &[String],
 ) -> Result<Value, ToolError> {
-    let observed_hosts = workflow_hosts(conn, window, hosts, capabilities, event_types)?;
+    let observed_harnesses = workflow_harnesses(conn, window, harnesses, capabilities, event_types)?;
     // M4-1：`missing.is_empty()` 是本层**唯一**能报 complete 的判据。此前这里
     // 只有 unavailable / partial 两个分支，等于把「证据齐全」与「证据不全」都压成
     // partial——工具在结构上永远无法毕业，与真实数据质量无关。
@@ -528,8 +528,8 @@ fn coverage(
         "status": status,
         "source": "workflow_events",
         "observed_events": observed,
-        "observed_hosts": observed_hosts,
-        "host_scope": if hosts.is_empty() { Value::String("observed_hosts".to_string()) } else { json!(hosts) },
+        "observed_harnesses": observed_harnesses,
+        "harness_scope": if harnesses.is_empty() { Value::String("observed_harnesses".to_string()) } else { json!(harnesses) },
         "requested_from": super::ms_to_rfc3339_beijing(window.start_ms),
         "requested_to": super::ms_to_rfc3339_beijing(window.end_ms),
         "missing": missing,
@@ -540,13 +540,13 @@ fn coverage(
         } else {
             "workflow lifecycle and token/cost attribution evidence is still incomplete"
         },
-        "host_absence_is_not_missing": true
+        "harness_absence_is_not_missing": true
     }))
 }
 
 pub fn run_issues(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let window = parse_window(args)?;
-    let hosts = list_arg(args, "hosts")?;
+    let harnesses = list_arg(args, "harnesses")?;
     let skills = list_arg(args, "skills")?;
     let group_by = args.get("group_by").and_then(Value::as_str).unwrap_or("category");
     if !matches!(group_by, "category" | "fingerprint" | "capability") {
@@ -564,8 +564,8 @@ pub fn run_issues(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         SqlValue::Integer(window.end_ms),
     ];
     let mut next_param = 3;
-    if !hosts.is_empty() {
-        let placeholders = (0..hosts.len())
+    if !harnesses.is_empty() {
+        let placeholders = (0..harnesses.len())
             .map(|_| {
                 let value = format!("?{next_param}");
                 next_param += 1;
@@ -573,8 +573,8 @@ pub fn run_issues(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             })
             .collect::<Vec<_>>()
             .join(",");
-        filter_sql.push_str(&format!(" AND s.host IN ({placeholders})"));
-        values.extend(hosts.iter().cloned().map(SqlValue::Text));
+        filter_sql.push_str(&format!(" AND s.harness IN ({placeholders})"));
+        values.extend(harnesses.iter().cloned().map(SqlValue::Text));
     }
     if !skills.is_empty() {
         let placeholders = (0..skills.len())
@@ -659,11 +659,11 @@ pub fn run_issues(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let retry_observed = workflow_count(
         handle.conn(),
         &window,
-        &hosts,
+        &harnesses,
         &skills,
         &retry_event_types,
     )?;
-    let retry_events = load_retry_events(handle.conn(), &window, &hosts, &skills)?;
+    let retry_events = load_retry_events(handle.conn(), &window, &harnesses, &skills)?;
     let (retry_chains, retry_events_complete) = retry_chain_rows(&retry_events);
     let retry_evidence_status = if retry_observed == 0 {
         "unavailable"
@@ -672,7 +672,7 @@ pub fn run_issues(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     } else {
         "partial"
     };
-    let observed = workflow_count(handle.conn(), &window, &hosts, &skills, &[])?;
+    let observed = workflow_count(handle.conn(), &window, &harnesses, &skills, &[])?;
     if observed == 0 {
         warnings.push(json!({ "code": "workflow_coverage_insufficient", "message": "No accepted workflow events fall in the requested window; an empty issue list is not a proof of no issues." }));
     }
@@ -693,7 +693,7 @@ pub fn run_issues(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         handle.conn(),
         &window,
         observed,
-        &hosts,
+        &harnesses,
         &skills,
         &[],
         &issue_missing,
@@ -1011,24 +1011,24 @@ mod tests {
         let issues = run_issues(&args, &home).expect("issues");
         assert_eq!(issues["coverage"]["status"], "partial");
         assert_eq!(issues["coverage"]["observed_events"], 4);
-        assert_eq!(issues["coverage"]["observed_hosts"], json!(["dsh"]));
-        assert_eq!(issues["coverage"]["host_absence_is_not_missing"], true);
+        assert_eq!(issues["coverage"]["observed_harnesses"], json!(["dsh"]));
+        assert_eq!(issues["coverage"]["harness_absence_is_not_missing"], true);
         assert!(!issues["coverage"]["missing"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|item| item == "all host workflow adapters"));
+            .any(|item| item == "all harness workflow adapters"));
         assert_eq!(issues["data"]["issues"][0]["tokens"]["value"], serde_json::Value::Null);
         assert!(!issues.to_string().contains("call-1"));
 
         let filtered = run_issues(
-            &json!({"from": "2023-11-15", "to": "2023-11-15", "hosts": ["codex"]}),
+            &json!({"from": "2023-11-15", "to": "2023-11-15", "harnesses": ["codex"]}),
             &home,
         )
         .expect("filtered issues");
         assert_eq!(filtered["coverage"]["status"], "unavailable");
         assert_eq!(filtered["coverage"]["observed_events"], 0);
-        assert_eq!(filtered["coverage"]["observed_hosts"], json!([]));
+        assert_eq!(filtered["coverage"]["observed_harnesses"], json!([]));
 
         let skills = run_skills(
             &json!({"from": "2023-11-15", "to": "2023-11-15", "skills": ["beta"], "limit": 1}),
@@ -1038,7 +1038,7 @@ mod tests {
         assert_eq!(skills["data"]["skills"].as_array().unwrap().len(), 1);
         assert_eq!(skills["data"]["skills"][0]["skill"], "beta");
         assert_eq!(skills["coverage"]["observed_events"], 2);
-        assert_eq!(skills["coverage"]["observed_hosts"], json!(["dsh"]));
+        assert_eq!(skills["coverage"]["observed_harnesses"], json!(["dsh"]));
         assert_eq!(skills["data"]["skills"][0]["outcomes"], json!({"succeeded": 0, "failed": 1, "unknown": 0}));
         assert_eq!(skills["data"]["skills"][0]["finished_events"], 1);
         assert_eq!(skills["data"]["skills"][0]["duration_ms"]["average"], 9.0);
@@ -1068,9 +1068,9 @@ mod tests {
             start_ms: 1_700_000_000_000,
             end_ms: 1_700_000_100_000,
         };
-        let hosts = vec!["dsh".to_string()];
+        let harnesses = vec!["dsh".to_string()];
         let call = |observed: i64, missing: &[String]| {
-            coverage(db.conn(), &window, observed, &hosts, &[], &[], missing).expect("coverage")
+            coverage(db.conn(), &window, observed, &harnesses, &[], &[], missing).expect("coverage")
         };
 
         // 证据齐全（missing 为空）→ complete（修复前恒为 partial）

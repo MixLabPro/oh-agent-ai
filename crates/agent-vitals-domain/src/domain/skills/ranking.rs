@@ -1,8 +1,8 @@
 //! Skill 冲突/覆盖优先级排序——v0.8 Phase E7.2 从二进制 `main.rs` 迁来（原
 //! `pub(crate) fn level_rank`/`level_rank_for`/`severity_rank`/`conflict_rank`
 //! 与 `CODEX_FALLBACK_DESC_BUDGET`）。只移动不改写：这批函数只读已经采集好的
-//! `serde_json::Value` 记录字段（`host_family`/`level`/`conflict_domain`/…），
-//! 不碰文件系统、不认识任何宿主的 wire 格式，本该从一开始就在 domain 里，
+//! `serde_json::Value` 记录字段（`harness_family`/`level`/`conflict_domain`/…），
+//! 不碰文件系统、不认识任何执行环境的 wire 格式，本该从一开始就在 domain 里，
 //! 由 `apps/cli/src/main.rs` 的 `pub(crate) use` 保 call site 零改动
 //! （同 D 阶段 `split_lines`/`pyround` 的搬法）。golden 15+15 是行为不变的
 //! 唯一裁判——这批函数本身没有专门的单测，一直靠 `analysis`/`overlap`/
@@ -10,42 +10,42 @@
 
 use serde_json::Value;
 
-/// 覆盖优先级**按宿主而异**，不能只用一张表。
+/// 覆盖优先级**按执行环境而异**，不能只用一张表。
 ///
-/// Python 侧曾经是一张全局表，装的是 OpenClaw 的顺序却套用到每个宿主，
+/// Python 侧曾经是一张全局表，装的是 OpenClaw 的顺序却套用到每个执行环境，
 /// 于是 Claude Code 的 personal 与 project 被判反 —— 正是「与多数人直觉相反」
 /// 的那一对。判反的后果不是少一条信息，是把诊断方向整个指错。
 ///
-/// DSH 是第一个二维覆盖宿主（HOST_ADAPTER_CONTRACT §DSH）：先比 scope 层
-/// （近层同名直接赢），层内才用 rank 裁决。前五个宿主只有一个隐式层，所以
+/// DSH 是第一个二维覆盖执行环境（HARNESS_ADAPTER_CONTRACT §DSH）：先比 scope 层
+/// （近层同名直接赢），层内才用 rank 裁决。前五个执行环境只有一个隐式层，所以
 /// `level_rank_for` 返回 `(layer, rank)`：它们的 layer 恒为 0、rank 即原标量，
 /// 排序结果逐字节不变。
-pub fn level_rank_for(host_family: &str, level: &str, layer: &str) -> (u16, u16) {
-    if host_family == "dsh" {
+pub fn level_rank_for(harness_family: &str, level: &str, layer: &str) -> (u16, u16) {
+    if harness_family == "dsh" {
         return (dsh_layer_ordinal(layer), dsh_rank(level));
     }
-    (0, scalar_rank(host_family, level))
+    (0, scalar_rank(harness_family, level))
 }
 
-/// 前五个宿主 / 未知宿主的层内 rank（原标量；u8 拓宽为 u16 以统一二维键）。
-fn scalar_rank(host_family: &str, level: &str) -> u16 {
-    match host_family {
+/// 前五个执行环境 / 未知执行环境的层内 rank（原标量；u8 拓宽为 u16 以统一二维键）。
+fn scalar_rank(harness_family: &str, level: &str) -> u16 {
+    match harness_family {
         // OpenClaw：workspace > project > personal > managed
         "openclaw" => match level {
             "workspace" | "enterprise" => 0,
             "project" => 1,
             "personal" => 2,
             "managed" | "plugin" => 3,
-            "other-host" => 8,
+            "other-harness" => 8,
             _ => 9,
         },
-        // 其余（含未知宿主）按 Claude Code：enterprise > personal > project > plugin
+        // 其余（含未知执行环境）按 Claude Code：enterprise > personal > project > plugin
         _ => match level {
             "enterprise" => 0,
             "personal" => 1,
             "project" => 2,
             "plugin" => 3,
-            "other-host" => 8,
+            "other-harness" => 8,
             _ => 9,
         },
     }
@@ -77,13 +77,13 @@ fn dsh_layer_ordinal(layer: &str) -> u16 {
         .unwrap_or(DSH_LAYER_FAR)
 }
 
-/// 从记录里取覆盖层名。前五个宿主只有一个隐式层（返回 ""）。
+/// 从记录里取覆盖层名。前五个执行环境只有一个隐式层（返回 ""）。
 /// DSH 的层写在 conflict_domain 第三段（A5：`dsh:<DSH_HOME>:<layer>`）。
 pub fn layer_of(v: &Value) -> &str {
     let family = v
-        .get("host_family")
+        .get("harness_family")
         .and_then(|x| x.as_str())
-        .or_else(|| v.get("host").and_then(|x| x.as_str()))
+        .or_else(|| v.get("harness").and_then(|x| x.as_str()))
         .unwrap_or("");
     if family != "dsh" {
         return "";
@@ -98,9 +98,9 @@ pub fn layer_of(v: &Value) -> &str {
 
 pub fn level_rank(v: &Value) -> (u16, u16) {
     let family = v
-        .get("host_family")
+        .get("harness_family")
         .and_then(|x| x.as_str())
-        .or_else(|| v.get("host").and_then(|x| x.as_str()))
+        .or_else(|| v.get("harness").and_then(|x| x.as_str()))
         .unwrap_or("");
     let level = v.get("level").and_then(|x| x.as_str()).unwrap_or("");
     let layer = layer_of(v);

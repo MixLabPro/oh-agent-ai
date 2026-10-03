@@ -40,7 +40,7 @@ console.log("# 真实 CLI DTO × 真实 buildTimeline");
 const bin = `${root}/target/release/agent-vitals`;
 const fixture = `${root}/fixtures/dsh/session.jsonl.zstd`;
 const spec = JSON.parse(execFileSync(bin, [
-  "trace", fixture, "--host", "dsh", "--machine-namespace", "ns-ui",
+  "trace", fixture, "--harness", "dsh", "--machine-namespace", "ns-ui",
   "--timeline-series",
 ], { encoding: "utf8" }));
 ok(spec.points.length > 0 && spec.events.length > 0, `DTO 可用（points=${spec.points.length} events=${spec.events.length}）`);
@@ -108,9 +108,9 @@ const sandbox = {
       // --timeline-series 是布尔 flag 不吃值，"--json FILE" 才吃——照真实 CLI
       // 面拼参数，不发明（这里吃过的亏：多塞一个 "-" 直接 clap 报错）。
       // 这里的 fixture 只用来验证 timeline geometry；UI 调用本身必须携带
-      // opaque sessionRef，真实 IPC 再在受控宿主目录反查源文件。
+      // opaque sessionRef，真实 IPC 再在受控执行环境目录反查源文件。
       if (!args.sessionRef) throw new Error("missing sessionRef");
-      const cliArgs = ["trace", fixture, "--host", "dsh", "--machine-namespace", "ns-ui"];
+      const cliArgs = ["trace", fixture, "--harness", "dsh", "--machine-namespace", "ns-ui"];
       if (args.output === "graph") cliArgs.push("--json", "-");
       else cliArgs.push("--timeline-series");
       const out = execFileSync(bin, cliArgs, { encoding: "utf8" });
@@ -144,7 +144,7 @@ const ref = "sr_fixture_only_for_ui_contract";
 sandbox.renderDetailEnvelope({
   schema_version: "1", data_version: "1", coverage: {}, authority_revision: {},
   data: {
-    session_ref: ref, host: "dsh", event_count: 1, model_ids: ["fixture"],
+    session_ref: ref, harness: "dsh", event_count: 1, model_ids: ["fixture"],
     tokens: { total: 1 }, timeline: [], billing_breakdown: [], has_more: false,
   },
 });

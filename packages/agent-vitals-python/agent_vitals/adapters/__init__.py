@@ -1,2 +1,2 @@
-"""Host-specific discovery, runtime probing, and reconciliation adapters."""
+"""Harness-specific discovery, runtime probing, and reconciliation adapters."""
 

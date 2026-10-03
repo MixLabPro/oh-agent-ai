@@ -398,66 +398,66 @@ class TestDaysSince(unittest.TestCase):
 
 
 class TestLevelRank(unittest.TestCase):
-    """A6：`level_rank` 从标量改成 `(layer, rank)` 二维键，前五宿主必须原样。
+    """A6：`level_rank` 从标量改成 `(layer, rank)` 二维键，前五执行环境必须原样。
 
     DSH 是二维覆盖（先 scope 层、后层内 rank），所以 rank 键要带一层；但前
-    五个宿主只有一个隐式层，`layer` 必须恒 0、`rank` 必须是原标量 —— 这是
+    五个执行环境只有一个隐式层，`layer` 必须恒 0、`rank` 必须是原标量 —— 这是
     golden 12/12 逐字节一致的前提。这里直接钉住返回值，而不只钉下游排序。
     """
 
-    def test_five_hosts_layer_is_always_zero(self):
+    def test_five_harnesses_layer_is_always_zero(self):
         for family in ("claude-code", "codex", "openclaw", "hermes",
                        "workbuddy", "unknown"):
             for level in ("enterprise", "personal", "project", "plugin",
-                          "workspace", "managed", "other-host", "unknown", ""):
+                          "workspace", "managed", "other-harness", "unknown", ""):
                 with self.subTest(family=family, level=level):
-                    out = scan.level_rank({"host_family": family, "level": level})
+                    out = scan.level_rank({"harness_family": family, "level": level})
                     self.assertEqual(out[0], 0)
                     self.assertIsInstance(out[1], int)
 
     def test_claude_code_scalar_unchanged(self):
         self.assertEqual(
-            scan.level_rank({"host_family": "claude-code", "level": "enterprise"}),
+            scan.level_rank({"harness_family": "claude-code", "level": "enterprise"}),
             (0, 0))
         self.assertEqual(
-            scan.level_rank({"host_family": "claude-code", "level": "personal"}),
+            scan.level_rank({"harness_family": "claude-code", "level": "personal"}),
             (0, 1))
         self.assertEqual(
-            scan.level_rank({"host_family": "claude-code", "level": "project"}),
+            scan.level_rank({"harness_family": "claude-code", "level": "project"}),
             (0, 2))
         self.assertEqual(
-            scan.level_rank({"host_family": "claude-code", "level": "plugin"}),
+            scan.level_rank({"harness_family": "claude-code", "level": "plugin"}),
             (0, 3))
         self.assertEqual(
-            scan.level_rank({"host_family": "claude-code", "level": "other-host"}),
+            scan.level_rank({"harness_family": "claude-code", "level": "other-harness"}),
             (0, 8))
         self.assertEqual(
-            scan.level_rank({"host_family": "claude-code", "level": "unknown"}),
+            scan.level_rank({"harness_family": "claude-code", "level": "unknown"}),
             (0, 9))
 
     def test_openclaw_scalar_unchanged(self):
         self.assertEqual(
-            scan.level_rank({"host_family": "openclaw", "level": "workspace"}),
+            scan.level_rank({"harness_family": "openclaw", "level": "workspace"}),
             (0, 0))
         self.assertEqual(
-            scan.level_rank({"host_family": "openclaw", "level": "project"}),
+            scan.level_rank({"harness_family": "openclaw", "level": "project"}),
             (0, 1))
         self.assertEqual(
-            scan.level_rank({"host_family": "openclaw", "level": "personal"}),
+            scan.level_rank({"harness_family": "openclaw", "level": "personal"}),
             (0, 2))
         self.assertEqual(
-            scan.level_rank({"host_family": "openclaw", "level": "managed"}),
+            scan.level_rank({"harness_family": "openclaw", "level": "managed"}),
             (0, 3))
 
-    def test_host_fallback_via_legacy_host_field(self):
-        # level_rank 也能从旧字段 host 取 family（compat 公开面不变）。
+    def test_harness_fallback_via_legacy_harness_field(self):
+        # level_rank 也能从旧字段 harness 取 family（compat 公开面不变）。
         self.assertEqual(
-            scan.level_rank({"host": "claude-code", "level": "project"}), (0, 2))
+            scan.level_rank({"harness": "claude-code", "level": "project"}), (0, 2))
 
     def test_dsh_is_two_dimensional(self):
         """DSH 分支返回二维键，层序与层内 rank 各占一位，不再退化成标量。"""
         out = scan.level_rank({
-            "host_family": "dsh", "level": "project-dsh",
+            "harness_family": "dsh", "level": "project-dsh",
             "conflict_domain": "dsh:/home/u/.dsh:agent-main",
         })
         self.assertEqual(len(out), 2)
@@ -565,11 +565,11 @@ class TestDiffAgainst(unittest.TestCase):
     def test_added_and_removed(self):
         """条目是**有名字段的 dict**，不是裸的复合键数组。
 
-        方向一直是对的：同名 skill 在两个宿主里不是同一个，比对必须带宿主。
+        方向一直是对的：同名 skill 在两个执行环境里不是同一个，比对必须带执行环境。
         错的是序列化形状 —— 曾经是 `[["claude-code", null, "", "b"]]`，而脱敏
-        对列表元素继承父键，于是**宿主名被当成 skill 名收录并全文替换**，
-        report 里 host_selection / host_family / conflict_domain 全变成
-        `skill-003`，而 host_summaries 的键不受影响，同一份报告自相矛盾。
+        对列表元素继承父键，于是**执行环境名被当成 skill 名收录并全文替换**，
+        report 里 harness_selection / harness_family / conflict_domain 全变成
+        `skill-003`，而 harness_summaries 的键不受影响，同一份报告自相矛盾。
 
         改成 dict 之后每个字段各归各的键，`name` 仍然被脱敏（下面的
         TestRedaction 与 test_regressions 都依赖这一点）。
@@ -580,7 +580,7 @@ class TestDiffAgainst(unittest.TestCase):
         self.assertEqual(len(r["added_skills"]), 1)
         self.assertEqual(r["added_skills"][0]["name"], "b")
         self.assertEqual(set(r["added_skills"][0]),
-                         {"host", "instance_id", "namespace", "name"})
+                         {"harness", "instance_id", "namespace", "name"})
         self.assertEqual(len(r["removed_skills"]), 1)
         self.assertEqual(r["removed_skills"][0]["name"], "a")
 
@@ -594,12 +594,12 @@ class TestDiffAgainst(unittest.TestCase):
         r = self._run(prev, now)
         self.assertEqual([x["name"] for x in r["usage_delta"]], ["c", "a"])
         top = r["usage_delta"][0]
-        # 只断言语义字段；host / instance_id / namespace 是多宿主定位用的
+        # 只断言语义字段；harness / instance_id / namespace 是多执行环境定位用的
         self.assertEqual({k: top[k] for k in ("name", "delta", "now")},
                          {"name": "c", "delta": 10, "now": 12})
 
     def test_negative_delta_is_reported(self):
-        """计数理论上只增，但宿主重置过就会减。不能默默吞掉。"""
+        """计数理论上只增，但执行环境重置过就会减。不能默默吞掉。"""
         prev = self._base([{"name": "a", "loaded": True, "usage_count": 9}])
         now = self._base([{"name": "a", "loaded": True, "usage_count": 2}])
         self.assertEqual(self._run(prev, now)["usage_delta"][0]["delta"], -7)
@@ -1689,8 +1689,8 @@ class TestHookExecutions(unittest.TestCase):
     """执行时长审计 D4（hook 消费）。Rust 侧 `duration::tests::*_hook_*`/
     `hook_executions_*` 对齐。
 
-    ⚠️ 宿主前提尚未验证（DURATION_AUDIT_BACKLOG.md D4）：这层只证明 CLI 侧
-    的抽取逻辑正确，不代表 dsh-client 宿主投影已经接了 hook/* 事件——D6 故意
+    ⚠️ 执行环境前提尚未验证（DURATION_AUDIT_BACKLOG.md D4）：这层只证明 CLI 侧
+    的抽取逻辑正确，不代表 dsh-client 执行环境投影已经接了 hook/* 事件——D6 故意
     没把 hook/* 加进 RELEVANT_TYPES。
     """
 
@@ -1849,7 +1849,7 @@ class TestRequestMetrics(unittest.TestCase):
         self.assertEqual(got, self.EXPECTED, "键序 / null 位置 / 值必须与 Rust 侧一致")
 
     def test_missing_field_is_null_not_zero(self):
-        """缺字段落 null。落 0 就是把「宿主没报」伪造成「测到 0」。
+        """缺字段落 null。落 0 就是把「执行环境没报」伪造成「测到 0」。
 
         实测依据：真实会话 687 个请求点里 13 个缺 cacheReadTokens、687 个全部
         缺 cacheWriteTokens。给这些点补 0，曲线会在缺字段处莫名塌陷。
@@ -2003,7 +2003,7 @@ class TestDshUsageObservations(unittest.TestCase):
         self.assertIsNone(obs[0].turn)
         self.assertIsNone(obs[0].step)
         self.assertEqual(obs[0].compaction_id, "c1")
-        self.assertEqual(obs[0].identity_basis, "native", "compactionId 是宿主原生标识")
+        self.assertEqual(obs[0].identity_basis, "native", "compactionId 是执行环境原生标识")
         self.assertEqual(obs[0].source_event_id, "compaction:c1")
         self.assertIsNone(obs[0].first_sample_identity_hash, "有 id 无 hash")
         self.assertEqual(obs[0].model_raw, "deepseek-v4-flash",
@@ -2396,7 +2396,7 @@ class TestHourBuckets(unittest.TestCase):
 
     def test_unreported_fields_only_when_samples_present(self):
         """0 个样本时不输出「未上报字段」——与 token_by_model 同条纪律
-        （一个样本都没有就不下任何关于 host 能力的断言）。"""
+        （一个样本都没有就不下任何关于 harness 能力的断言）。"""
         # 只有 request/header，没有任何 usage 样本
         out = hour_buckets([
             {"type": "request/header", "seq": 1, "time": 1000,
@@ -2407,7 +2407,7 @@ class TestHourBuckets(unittest.TestCase):
 
     def test_missing_field_is_null_not_zero(self):
         """缺字段落 None / 0 桶里没值——与 _buckets_from 同条纪律
-        （host 没报 ≠ 测到 0；calendar 渲染时缺字段的格子不画假数据）。"""
+        （harness 没报 ≠ 测到 0；calendar 渲染时缺字段的格子不画假数据）。"""
         events = [
             {"type": "request/header", "seq": 1, "time": self.TUE_PEAK_1430,
              "data": {"header": {"config": {"model": "pro"}}}},
@@ -2419,7 +2419,7 @@ class TestHourBuckets(unittest.TestCase):
         out = hour_buckets(events)
         b = out["buckets"][0]
         self.assertEqual(b["uncached_input_tokens"], 100)
-        # unreported_fields 标记宿主真的没报这两个字段——calendar 渲染时
+        # unreported_fields 标记执行环境真的没报这两个字段——calendar 渲染时
         # 据此决定要不要画「缓存读 / 写 0」这种会误导的数字
         self.assertIn("cacheReadTokens", out["unreported_fields"])
         self.assertIn("cacheWriteTokens", out["unreported_fields"])
@@ -3081,7 +3081,7 @@ class TestCodexCoverage(unittest.TestCase):
             _cx_user_message(),
             {"type": "response_item", "timestamp": 0,
              "payload": {"type": "message", "role": "user",
-                         "content": [{"type": "input_text", "text": "<environment_context>host data</environment_context>"}]}},
+                         "content": [{"type": "input_text", "text": "<environment_context>harness data</environment_context>"}]}},
             {"type": "response_item", "timestamp": 0,
              "payload": {"type": "message", "role": "user", "content": []}},
             {"type": "response_item", "timestamp": 0,
@@ -3140,7 +3140,7 @@ class TestCodexEvidenceJson(unittest.TestCase):
 
     def test_all_20_signals_appear_in_coverage(self):
         out = self._build([_cx_event("mcp_tool_call_end")])
-        self.assertEqual(out["host"], "codex")
+        self.assertEqual(out["harness"], "codex")
         self.assertEqual(out["session_id"], "s1")
         self.assertIsNone(out["title"], "无索引态 → title 是 null，绝不编造")
         self.assertEqual(out["history_mode"], "legacy")
@@ -3190,9 +3190,9 @@ class TestCodexSessionRoots(unittest.TestCase):
             (arch / "rollout-c.jsonl").write_text("abc", encoding="utf-8")
 
             report = codex_session_roots_report(home=home)
-            # 外层键序：host → roots（字节一致的一部分）。
-            self.assertEqual(list(report.keys()), ["host", "roots"])
-            self.assertEqual(report["host"], "codex")
+            # 外层键序：harness → roots（字节一致的一部分）。
+            self.assertEqual(list(report.keys()), ["harness", "roots"])
+            self.assertEqual(report["harness"], "codex")
             self.assertEqual([r["kind"] for r in report["roots"]],
                              ["live", "archived"])
             # 根对象键序：kind → path → exists → file_count → total_bytes。
@@ -3312,7 +3312,7 @@ class TestCodexSessionIndex(unittest.TestCase):
 class CodexCostCharacterization(unittest.TestCase):
     """`codex-cost` 折叠/计价纯函数的精确值钉死。
 
-    这些数字对应 Rust 侧 `crates/agent-vitals-hosts/src/hosts/codex/sessions/usage.rs` 与
+    这些数字对应 Rust 侧 `crates/agent-vitals-harnesses/src/harnesses/codex/sessions/usage.rs` 与
     `src/codex_cost.rs` 的 `#[cfg(test)]` 钉同一批。夹具与手算期望见
     `fixtures/codex/cost/README.md`。**一个值变 = 折叠/计价行为变**，不是
     四舍五入——`cost_usd` 是 f64 原值（JSON 序列化两侧同最短表示，逐字节一致
@@ -3659,10 +3659,10 @@ class CodexCostCharacterization(unittest.TestCase):
         同 spec。数字来自 report，这里只钉格式。夹具带配额（plus 订阅）→ 标价
         重标 + plan 行。"""
         report = self._merged_report()
-        out = {"host": "codex", "currency": "USD", "month": None}
+        out = {"harness": "codex", "currency": "USD", "month": None}
         out.update(report)
         text = render_codex_cost(out)
-        self.assertIn("host: codex\n", text)
+        self.assertIn("harness: codex\n", text)
         self.assertIn("currency: USD\n", text)
         # 「剩余」= 100 − used；重置时间今天分支由 _reset_beijing_text_at 单测钉住
         #（夹具 resets_at 落在 08-28/09-02，套件在 09-02 跑时 secondary 恰是「今天」，
@@ -3693,7 +3693,7 @@ class CodexCostCharacterization(unittest.TestCase):
         f = self._fold("rollout-terra.jsonl")
         report = codex_cost_report(f["by_hour_model"], f["by_model"], f["unaccounted"],
                                    f["plan"], load_codex_pricing())
-        out = {"host": "codex", "currency": "USD", "month": None}
+        out = {"harness": "codex", "currency": "USD", "month": None}
         out.update(report)
         text = render_codex_cost(out)
         self.assertIn("total cost: $0.48 · total tokens: 370K\n", text)
@@ -3702,7 +3702,7 @@ class CodexCostCharacterization(unittest.TestCase):
 
     def test_render_codex_cost_with_month_line(self):
         report = self._merged_report()
-        out = {"host": "codex", "currency": "USD", "month": "2026-08"}
+        out = {"harness": "codex", "currency": "USD", "month": "2026-08"}
         out.update(report)
         text = render_codex_cost(out)
         self.assertIn("month: 2026-08\n", text)

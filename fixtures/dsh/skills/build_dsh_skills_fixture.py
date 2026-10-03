@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""生成 DSH-2 的目录树 fixture（C1：dsh 宿主的 skill 目录树）。
+"""生成 DSH-2 的目录树 fixture（C1：dsh 执行环境的 skill 目录树）。
 
 这份语料与 `fixtures/generate.py` 同源、同约束：它必须**完全确定**，因为它是
-未来 `host-dsh` golden 的输入。确定性靠两件事（与 generate.py 相同）：
+未来 `harness-dsh` golden 的输入。确定性靠两件事（与 generate.py 相同）：
 
 1. **HOME 隔离**。语料构造成一棵完整的 home 树，将来用 `HOME=<root>` +
-   `cwd=<root>/workdir` 跑 `--host dsh`。dsh 的 DEFAULT_ROOTS（`~/.dsh/skills`、
+   `cwd=<root>/workdir` 跑 `--harness dsh`。dsh 的 DEFAULT_ROOTS（`~/.dsh/skills`、
    `~/.agents/skills`、`./.dsh/skills`、`./.agents/skills`）整体落进语料，不碰真机。
 2. **mtime 显式设定**。冲突判定（shadowed_newer / intentional_override）靠
    mtime 比大小，不钉死就随生成时间变。
 
-与 generate.py 的区别：**这份树只给 dsh 宿主用，不进入现有扫描器的 golden**。
-`~/.agents/skills` 与 OpenClaw 共享（HOST_ADAPTER_CONTRACT §DSH），把它放进
+与 generate.py 的区别：**这份树只给 dsh 执行环境用，不进入现有扫描器的 golden**。
+`~/.agents/skills` 与 OpenClaw 共享（HARNESS_ADAPTER_CONTRACT §DSH），把它放进
 generate.py 的主树，OpenClaw 适配器会把它当 `shared-user` 根扫走，现有的
-`host-openclaw` 等 golden 就会变。所以单独一个脚本、单独一棵 home 树；将来
-C2（golden_runner 加 `host-dsh` case）再把它接进去。
+`harness-openclaw` 等 golden 就会变。所以单独一个脚本、单独一棵 home 树；将来
+C2（golden_runner 加 `harness-dsh` case）再把它接进去。
 
-根表（HOST_ADAPTER_CONTRACT §DSH，**层内** rank 越小越优先）：
+根表（HARNESS_ADAPTER_CONTRACT §DSH，**层内** rank 越小越优先）：
 
     100  <project>/.dsh/skills     project-dsh
     200  <project>/.agents/skills  project-agents

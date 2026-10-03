@@ -2,7 +2,7 @@
 //!
 //! 为什么下沉：这套轻/重决策、防饥饿、托盘节流、唤醒冷却的规则此前只活在 Tauri 的
 //! 线程闭包里，只能打成 `.app` 验证——LIGHT-PATH spec 的几条验收（「锁被占时不丢
-//! 宿主集合」「升级重 tick 要推进防饥饿时钟」「轻 tick 满额强制重」）没有一条能写
+//! 执行环境集合」「升级重 tick 要推进防饥饿时钟」「轻 tick 满额强制重」）没有一条能写
 //! 单元测试。这里是纯状态机：时间由调用方传入 `now`，不读时钟、不起线程、不碰 UI；
 //! 桌面只负责线程、锁、等待唤醒和把结果转成界面事件。规则与原闭包逐条等价。
 
@@ -13,7 +13,7 @@ use super::watch::TickKind;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SchedulerConfig {
-    /// 重 tick 周期（全宿主对账的兜底间隔）。
+    /// 重 tick 周期（全执行环境对账的兜底间隔）。
     pub tick_period: Duration,
     /// 连续轻 tick 达到该次数即强制重 tick（防饥饿，与周期到期谁先到算谁）。
     pub light_ticks_per_heavy: u32,
@@ -45,7 +45,7 @@ pub struct TickScheduler {
     last_heavy: Instant,
     last_tray: Instant,
     last_sync_finished: Instant,
-    /// 上一次唤醒带来的待同步宿主；None = 下一轮走重 tick。
+    /// 上一次唤醒带来的待同步执行环境；None = 下一轮走重 tick。
     pending: Option<BTreeSet<String>>,
 }
 
@@ -56,13 +56,13 @@ impl TickScheduler {
     }
 
     /// 拿到同步锁之后调用：决定本轮跑什么。**只有这里消费 pending**——锁被占时调用方
-    /// 不调这个函数，宿主集合保留到下一次（LIGHT-PATH 验收 #3：否则重试轮退化成重 tick）。
+    /// 不调这个函数，执行环境集合保留到下一次（LIGHT-PATH 验收 #3：否则重试轮退化成重 tick）。
     /// 重 tick 到期时 pending 一并丢弃（全量对账已覆盖）。
     pub fn plan(&mut self, now: Instant) -> PlannedTick {
         let heavy_due = self.light_run >= self.cfg.light_ticks_per_heavy
             || now.duration_since(self.last_heavy) >= self.cfg.tick_period;
         let kind = match self.pending.take() {
-            Some(hosts) if !heavy_due => TickKind::Light(hosts),
+            Some(harnesses) if !heavy_due => TickKind::Light(harnesses),
             _ => TickKind::Heavy,
         };
         let tray_due = now.duration_since(self.last_tray) >= self.cfg.tray_refresh_interval;
@@ -93,10 +93,10 @@ impl TickScheduler {
         self.last_sync_finished = now;
     }
 
-    /// watcher 唤醒：记下宿主集合（覆盖上一批——wait 每次取走槽里的全部），返回
+    /// watcher 唤醒：记下执行环境集合（覆盖上一批——wait 每次取走槽里的全部），返回
     /// 下一轮执行前还需等待的冷却（睡满剩余冷却再执行，不丢弃最后一批写入）。
-    pub fn woken(&mut self, hosts: BTreeSet<String>, cooldown: Duration, now: Instant) -> Option<Duration> {
-        self.pending = Some(hosts);
+    pub fn woken(&mut self, harnesses: BTreeSet<String>, cooldown: Duration, now: Instant) -> Option<Duration> {
+        self.pending = Some(harnesses);
         super::watch::cooldown_remaining_with(cooldown, self.last_sync_finished, now)
     }
 
@@ -115,12 +115,12 @@ mod tests {
         tray_refresh_interval: Duration::from_secs(300),
     };
 
-    fn hosts(list: &[&str]) -> BTreeSet<String> {
+    fn harnesses(list: &[&str]) -> BTreeSet<String> {
         list.iter().map(|h| h.to_string()).collect()
     }
 
     fn is_light(kind: &TickKind, expected: &[&str]) -> bool {
-        matches!(kind, TickKind::Light(set) if *set == hosts(expected))
+        matches!(kind, TickKind::Light(set) if *set == harnesses(expected))
     }
 
     #[test]
@@ -129,21 +129,21 @@ mod tests {
         let mut s = TickScheduler::new(CFG, t0);
         assert!(matches!(s.plan(t0).kind, TickKind::Heavy), "启动首轮无 pending → 重");
         s.heavy_finished(t0);
-        s.woken(hosts(&["codex"]), Duration::ZERO, t0 + Duration::from_secs(1));
+        s.woken(harnesses(&["codex"]), Duration::ZERO, t0 + Duration::from_secs(1));
         let plan = s.plan(t0 + Duration::from_secs(2));
         assert!(is_light(&plan.kind, &["codex"]));
         assert!(s.pending().is_none(), "plan 消费 pending");
     }
 
-    /// 验收 #3：锁被占时调用方不调 plan，宿主集合必须留到下一次，而不是退化成重 tick。
+    /// 验收 #3：锁被占时调用方不调 plan，执行环境集合必须留到下一次，而不是退化成重 tick。
     #[test]
     fn pending_survives_until_plan_is_called() {
         let t0 = Instant::now();
         let mut s = TickScheduler::new(CFG, t0);
         s.heavy_finished(t0);
-        s.woken(hosts(&["dsh"]), Duration::ZERO, t0);
+        s.woken(harnesses(&["dsh"]), Duration::ZERO, t0);
         // （锁被占：这里没有 plan 调用）
-        assert_eq!(s.pending(), Some(&hosts(&["dsh"])));
+        assert_eq!(s.pending(), Some(&harnesses(&["dsh"])));
         assert!(is_light(&s.plan(t0 + Duration::from_secs(5)).kind, &["dsh"]));
     }
 
@@ -154,12 +154,12 @@ mod tests {
         s.heavy_finished(t0);
         for i in 0..CFG.light_ticks_per_heavy {
             let now = t0 + Duration::from_secs(10 * (i as u64 + 1));
-            s.woken(hosts(&["codex"]), Duration::ZERO, now);
+            s.woken(harnesses(&["codex"]), Duration::ZERO, now);
             assert!(is_light(&s.plan(now).kind, &["codex"]), "第 {i} 轮仍轻");
             s.light_finished(LightOutcome::default(), now);
         }
         let now = t0 + Duration::from_secs(100);
-        s.woken(hosts(&["codex"]), Duration::ZERO, now);
+        s.woken(harnesses(&["codex"]), Duration::ZERO, now);
         assert!(matches!(s.plan(now).kind, TickKind::Heavy), "轻 tick 满额 → 强制重（防饥饿）");
         assert!(s.pending().is_none(), "重 tick 覆盖全量，pending 丢弃");
     }
@@ -170,7 +170,7 @@ mod tests {
         let mut s = TickScheduler::new(CFG, t0);
         s.heavy_finished(t0);
         let later = t0 + CFG.tick_period;
-        s.woken(hosts(&["codex"]), Duration::ZERO, later);
+        s.woken(harnesses(&["codex"]), Duration::ZERO, later);
         assert!(matches!(s.plan(later).kind, TickKind::Heavy));
     }
 
@@ -181,12 +181,12 @@ mod tests {
         let mut s = TickScheduler::new(CFG, t0);
         s.heavy_finished(t0);
         let t1 = t0 + Duration::from_secs(290);
-        s.woken(hosts(&["codex"]), Duration::ZERO, t1);
+        s.woken(harnesses(&["codex"]), Duration::ZERO, t1);
         assert!(is_light(&s.plan(t1).kind, &["codex"]));
         s.light_finished(LightOutcome { tray_refreshed: true, escalated: true }, t1);
         // 若没复位，t0+300 就到期成重；复位后到 t1+300 才到期。
         let t2 = t0 + Duration::from_secs(310);
-        s.woken(hosts(&["codex"]), Duration::ZERO, t2);
+        s.woken(harnesses(&["codex"]), Duration::ZERO, t2);
         assert!(is_light(&s.plan(t2).kind, &["codex"]));
     }
 
@@ -196,16 +196,16 @@ mod tests {
         let mut s = TickScheduler::new(CFG, t0);
         s.heavy_finished(t0);
         let t1 = t0 + Duration::from_secs(60);
-        s.woken(hosts(&["codex"]), Duration::ZERO, t1);
+        s.woken(harnesses(&["codex"]), Duration::ZERO, t1);
         assert!(!s.plan(t1).tray_due, "距上次托盘重建未满间隔");
         s.light_finished(LightOutcome::default(), t1);
         let t2 = t0 + CFG.tray_refresh_interval;
-        s.woken(hosts(&["codex"]), Duration::ZERO, t2);
+        s.woken(harnesses(&["codex"]), Duration::ZERO, t2);
         let plan = s.plan(t2);
         assert!(plan.tray_due);
         s.light_finished(LightOutcome { tray_refreshed: true, escalated: false }, t2);
         let t3 = t2 + Duration::from_secs(10);
-        s.woken(hosts(&["codex"]), Duration::ZERO, t3);
+        s.woken(harnesses(&["codex"]), Duration::ZERO, t3);
         assert!(!s.plan(t3).tray_due, "托盘刚重建过 → 节流钟推进");
     }
 
@@ -215,7 +215,7 @@ mod tests {
         let mut s = TickScheduler::new(CFG, t0);
         s.heavy_finished(t0);
         let cooldown = Duration::from_secs(30);
-        assert_eq!(s.woken(hosts(&["codex"]), cooldown, t0 + Duration::from_secs(10)), Some(Duration::from_secs(20)));
-        assert_eq!(s.woken(hosts(&["codex"]), cooldown, t0 + Duration::from_secs(40)), None);
+        assert_eq!(s.woken(harnesses(&["codex"]), cooldown, t0 + Duration::from_secs(10)), Some(Duration::from_secs(20)));
+        assert_eq!(s.woken(harnesses(&["codex"]), cooldown, t0 + Duration::from_secs(40)), None);
     }
 }

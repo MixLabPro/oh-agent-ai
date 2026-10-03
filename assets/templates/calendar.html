@@ -69,7 +69,7 @@
     数据）才会被用到。若价目表（pricing.json）改了，精算路径自动跟着走；
     只有这份 fallback 公式需要手动同步（与
     scripts/agent_vitals/cost.py::_price + crates/agent-vitals-domain/src/domain/cost/mod.rs
-    + dsh-client/src/host/index.ts::costReportFrom 平行）。
+    + dsh-client/src/harness/index.ts::costReportFrom 平行）。
     tests/test_pricing_lockstep.py 守价目表源头一致性，fallback 副本目前没
     自动测——这是已知的单点，接受它只是「大致近似」。
 
@@ -198,7 +198,7 @@
       color: var(--peak); font-weight: 500;
     }
 
-    /* ── 跨宿主今日总览（统一范式：今日所有 Agent 总花费 + 每宿主 mini 卡）── */
+    /* ── 跨执行环境今日总览（统一范式：今日所有 Agent 总花费 + 每执行环境 mini 卡）── */
     #overview { margin-bottom: var(--s5); }
     .overview-head {
       display: flex; align-items: baseline; justify-content: space-between;
@@ -410,13 +410,13 @@
       #render-root.view-codex table.model-table td { padding: 6px; }
     }
 
-    /* ── 宿主 + 视图切换（统一范式：宿主注册制）────────────────────── */
-    /* host-switch 复用 mode-switch 的分段控件视觉；两段叠成一列，宿主在上、
-     * 视图在下。DSH 是 0 号模板，Codex 是 1 号宿主。 */
+    /* ── 执行环境 + 视图切换（统一范式：执行环境注册制）────────────────────── */
+    /* harness-switch 复用 mode-switch 的分段控件视觉；两段叠成一列，执行环境在上、
+     * 视图在下。DSH 是 0 号模板，Codex 是 1 号执行环境。 */
     .switch-stack {
       display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
     }
-    .host-switch a.active {
+    .harness-switch a.active {
       background: var(--accent-soft); color: var(--accent);
     }
     .panel-sub code {
@@ -424,10 +424,10 @@
       padding: 1px 5px; border-radius: var(--r-sm); color: var(--accent);
     }
 
-    /* ── codex 宿主面板（作用域在 #render-root.view-codex 下）────────── */
+    /* ── codex 执行环境面板（作用域在 #render-root.view-codex 下）────────── */
     /* 与 DSH 共用同款设计 token 与 .panel/.day-cell/#tip，但网格密度不同
      * （codex 日格 56px vs DSH 88px）、且要多一套 model-table/quota 样式。
-     * 用宿主作用域类隔离，不污染 DSH 视图。 */
+     * 用执行环境作用域类隔离，不污染 DSH 视图。 */
     #render-root.view-codex table.model-table {
       width: 100%; min-width: 720px; border-collapse: collapse;
       font: 13px var(--mono);
@@ -533,12 +533,12 @@
         </div>
       </div>
       <div class="switch-stack">
-        <nav class="mode-switch host-switch" aria-label="切换宿主">
-          <a href="?host=dsh" id="link-host-dsh">DSH</a>
-          <a href="?host=codex" id="link-host-codex">Codex</a>
+        <nav class="mode-switch harness-switch" aria-label="切换执行环境">
+          <a href="?harness=dsh" id="link-harness-dsh">DSH</a>
+          <a href="?harness=codex" id="link-harness-codex">Codex</a>
         </nav>
         <nav class="mode-switch" id="mode-switch" aria-label="切换视图">
-          <!-- 由 JS 按当前宿主注入 -->
+          <!-- 由 JS 按当前执行环境注入 -->
         </nav>
       </div>
     </header>
@@ -547,8 +547,8 @@
 
     <section id="overview" hidden>
       <div class="overview-head">
-        <span class="overview-title">跨宿主今日总览</span>
-        <span class="overview-sub">今日总 token（币种无关求和）· 各币种花费（不编汇率）· 点卡片跳该宿主 today</span>
+        <span class="overview-title">跨执行环境今日总览</span>
+        <span class="overview-sub">今日总 token（币种无关求和）· 各币种花费（不编汇率）· 点卡片跳该执行环境 today</span>
       </div>
       <div class="summary" id="overview-cards">
         <!-- 由 JS 注入聚合卡 -->
@@ -703,7 +703,7 @@
     return "¥" + v.toFixed(2);
   }
 
-  // ── codex 宿主格式化（1 号宿主私有；与 src/codex_cost.rs 的 format_number /
+  // ── codex 执行环境格式化（1 号执行环境私有；与 src/codex_cost.rs 的 format_number /
   //    format_usd 同 spec——JS 只格式化，不重算任何价）────────────────────
   var TOKEN_FIELDS = [
     "uncached_input_tokens", "output_tokens", "cached_input_tokens",
@@ -777,26 +777,26 @@
   }
   var WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
 
-  /** 宿主 + 视图路由（统一范式，见 docs/UNIFIED_COST_VIEW.md）：
-   *  `?host=` 选宿主，`?file=` 选该宿主的视图。没有 `?host=` 时用注入的
-   *  `window.AGENT_VITALS_DEFAULT_HOST`（默认 "dsh"）——保证 xbar「打开
+  /** 执行环境 + 视图路由（统一范式，见 docs/UNIFIED_COST_VIEW.md）：
+   *  `?harness=` 选执行环境，`?file=` 选该执行环境的视图。没有 `?harness=` 时用注入的
+   *  `window.AGENT_VITALS_DEFAULT_HARNESS`（默认 "dsh"）——保证 xbar「打开
    *  日历」和 `calendar --source today` 与合并前的行为完全一致；没有
-   *  `?file=` 时用各宿主声明的 defaultMode（DSH 可被注入覆盖）。 */
-  function getHost() {
+   *  `?file=` 时用各执行环境声明的 defaultMode（DSH 可被注入覆盖）。 */
+  function getHarness() {
     var p = new URLSearchParams(location.search);
-    var fallback = (typeof window.AGENT_VITALS_DEFAULT_HOST === "string"
-                    && window.AGENT_VITALS_DEFAULT_HOST) || "dsh";
-    var h = (p.get("host") || fallback).toLowerCase();
-    return HOSTS[h] ? h : "dsh";
+    var fallback = (typeof window.AGENT_VITALS_DEFAULT_HARNESS === "string"
+                    && window.AGENT_VITALS_DEFAULT_HARNESS) || "dsh";
+    var h = (p.get("harness") || fallback).toLowerCase();
+    return HARNESSES[h] ? h : "dsh";
   }
-  function getMode(host) {
+  function getMode(harness) {
     var p = new URLSearchParams(location.search);
-    var cfg = HOSTS[host];
+    var cfg = HARNESSES[harness];
     var def = cfg.defaultMode;
-    if (host === "dsh" && typeof window.AGENT_VITALS_DEFAULT_MODE === "string"
+    if (harness === "dsh" && typeof window.AGENT_VITALS_DEFAULT_MODE === "string"
         && window.AGENT_VITALS_DEFAULT_MODE) {
       def = window.AGENT_VITALS_DEFAULT_MODE;
-    } else if (host === "codex") {
+    } else if (harness === "codex") {
       // codex 内联块的 default 字段驱动无 `?file=` 时的默认视图（codex-cost
       // --html 按请求月/全部/今天写 month|all|today，统一看板写 month）。
       var blk = document.getElementById("agent-vitals-data-codex");
@@ -811,12 +811,12 @@
     return cfg.modes.indexOf(f) >= 0 ? f : cfg.defaultMode;
   }
 
-  // ─── 宿主注册表（统一范式） ─────────────────────────────────────────
-  // 每个宿主声明：label / 视图模式 / 默认视图 / 内联数据布局 / 渲染适配器。
+  // ─── 执行环境注册表（统一范式） ─────────────────────────────────────────
+  // 每个执行环境声明：label / 视图模式 / 默认视图 / 内联数据布局 / 渲染适配器。
   // DSH 是 0 号模板（双块嵌入 + 既有渲染，tests/test_cli_m3 钉死）；Codex 是
-  // 1 号宿主（规范化单块 {views, default}）。新增宿主 = 往这里加一项，共享
-  // 核心不感知宿主字段。
-  var HOSTS = {
+  // 1 号执行环境（规范化单块 {views, default}）。新增执行环境 = 往这里加一项，共享
+  // 核心不感知执行环境字段。
+  var HARNESSES = {
     dsh: {
       label: "DSH",
       modes: ["today", "month"],
@@ -884,23 +884,23 @@
     }
   }
 
-  /** 宿主/视图切换：host-switch active + 链接（保留当前 file，目标宿主不支持
-   * 就落其默认）；mode-switch 按当前宿主 modes 重建。 */
-  function buildNav(host, mode) {
+  /** 执行环境/视图切换：harness-switch active + 链接（保留当前 file，目标执行环境不支持
+   * 就落其默认）；mode-switch 按当前执行环境 modes 重建。 */
+  function buildNav(harness, mode) {
     ["dsh", "codex"].forEach(function(h) {
-      var a = document.getElementById("link-host-" + h);
-      a.classList.toggle("active", h === host);
-      var cfg = HOSTS[h];
+      var a = document.getElementById("link-harness-" + h);
+      a.classList.toggle("active", h === harness);
+      var cfg = HARNESSES[h];
       var file = cfg.modes.indexOf(mode) >= 0 ? mode : cfg.defaultMode;
-      a.href = "?host=" + h + "&file=" + file;
+      a.href = "?harness=" + h + "&file=" + file;
     });
     var msw = document.getElementById("mode-switch");
     msw.innerHTML = "";
-    HOSTS[host].modes.forEach(function(m) {
+    HARNESSES[harness].modes.forEach(function(m) {
       var a = document.createElement("a");
-      a.href = "?host=" + host + "&file=" + m;
+      a.href = "?harness=" + harness + "&file=" + m;
       a.id = "link-" + m;
-      a.textContent = HOSTS[host].modeLabels[m] || m;
+      a.textContent = HARNESSES[harness].modeLabels[m] || m;
       a.className = (m === mode) ? "active" : "";
       msw.appendChild(a);
     });
@@ -952,23 +952,23 @@
    * 渲染，等用户喂数据。
    */
   function bootstrap() {
-    var host = getHost();
-    var cfg = HOSTS[host];
-    var mode = getMode(host);
+    var harness = getHarness();
+    var cfg = HARNESSES[harness];
+    var mode = getMode(harness);
     HOME = (typeof window.AGENT_VITALS_STATE_HOME === "string"
             && window.AGENT_VITALS_STATE_HOME) || STATE_HOME_DEFAULT;
     var url = cfg.fetchUrl ? cfg.fetchUrl(HOME, mode) : null;
 
-    // 宿主/视图切换 active 状态 + mode-switch 链接（按宿主 modes 注入）
-    buildNav(host, mode);
+    // 执行环境/视图切换 active 状态 + mode-switch 链接（按执行环境 modes 注入）
+    buildNav(harness, mode);
     document.title = "Agent Vitals · " + cfg.label + " · " + mode + " · M4";
 
     // ── 数据加载三段式 ──────────────────────────────────────────
-    // 1. **inline 优先** — calendar CLI 在渲染时把宿主数据内联进
+    // 1. **inline 优先** — calendar CLI 在渲染时把执行环境数据内联进
     //    `<script id="agent-vitals-data-…">`（DSH 双块 today|month，codex
     //    单块 {views}），这是唯一一条不需要网络/CORS 的路径,**保证 file://
     //    双击也能渲染**,而且每个 tab 都点得动。
-    // 2. fetch 备选 — 浏览器从 http:// 自托管站点拉 JSON（宿主声明了
+    // 2. fetch 备选 — 浏览器从 http:// 自托管站点拉 JSON（执行环境声明了
     //    fetchUrl 才走；codex 无状态文件，没有这一路）。
     // 3. file picker 兜底 — fetch 也失败时,用户手动选文件（DSH state 文件
     //    或 codex 报告 JSON）。
@@ -980,14 +980,14 @@
         // 按数据形状推断 mode（与文件选择器分支同一条判定）。
         if (loaded.inferred && loaded.inferred !== mode) {
           mode = loaded.inferred;
-          buildNav(host, mode);
+          buildNav(harness, mode);
           document.title = "Agent Vitals · " + cfg.label + " · " + mode + " · M4";
         }
         setStatus("已加载 inline 数据（旧格式按 schema 推断）");
       } else {
         setStatus("已加载 inline 数据（" + mode + ".json）");
       }
-      render(host, mode, loaded.data);
+      render(harness, mode, loaded.data);
       return;  // 成功就不走 fetch/file picker 了
     }
     if (loaded && loaded.stale) {
@@ -997,7 +997,7 @@
       // 显示成一句吓人的网络错误）。
       setStatus("今天还没有新的 DSH 会话（上一条记录停在 " +
                 (loaded.stale_date || "更早") + "），暂无数据。");
-      render(host, mode, (host === "dsh" && mode === "today")
+      render(harness, mode, (harness === "dsh" && mode === "today")
                         ? { buckets: {} } : { days: {} });
       return;
     }
@@ -1010,16 +1010,16 @@
       setStatus("尝试 fetch " + url + " …");
       tryFetch(url).then(function(data) {
         setStatus("fetch 成功（" + mode + ".json）");
-        render(host, mode, data);
+        render(harness, mode, data);
       }).catch(function() {
         // CORS / 404 / 权限——预期路径。给清晰的状态文案，不假装失败
         setStatus("fetch 失败：浏览器读取本地文件被 CORS 阻止。" +
                   "请用下方按钮选择 " + mode + ".json。", true);
       });
     } else {
-      // 宿主没有可 fetch 的外部数据源（如 codex 无状态文件），又没有内联——
+      // 执行环境没有可 fetch 的外部数据源（如 codex 无状态文件），又没有内联——
       // 直接说明，不装模作样走网络。
-      setStatus("该宿主（" + cfg.label + "）没有可 fetch 的外部数据源，且本文件" +
+      setStatus("该执行环境（" + cfg.label + "）没有可 fetch 的外部数据源，且本文件" +
                 "未内联其数据。请用 `agent-vitals calendar` 重新生成后打开。", true);
     }
 
@@ -1030,7 +1030,7 @@
       setStatus("读取 " + file.name + " …");
       loadFromFile(file).then(function(data) {
         setStatus("已加载 " + file.name);
-        if (host === "codex") {
+        if (harness === "codex") {
           // codex 文件：统一单块 {views} 或单份报告 dict（codex-cost --json）
           var view = (data && data.views) ? data.views[mode]
                      : (data && data.total_cost_usd !== undefined ? data : null);
@@ -1038,7 +1038,7 @@
             setStatus("该文件不是 codex 成本报告（缺 views / total_cost_usd）", true);
             return;
           }
-          render(host, mode, view);
+          render(harness, mode, view);
           return;
         }
         // DSH state 文件：智能推断 mode（含 buckets=hours 是 today；含 days
@@ -1048,7 +1048,7 @@
           setStatus("已加载 " + file.name + "（按 schema 推断为 " +
                     inferred + " 模式渲染）");
         }
-        render(host, inferred, data);
+        render(harness, inferred, data);
       }).catch(function(err) {
         setStatus(err.message, true);
       });
@@ -1057,24 +1057,24 @@
 
   // ─── 渲染 ──────────────────────────────────────────────────────────────
 
-  /** 全局：当前宿主 + 视图 + payload，供 DSH tooltip 复用 */
-  var CURRENT = { host: null, mode: null, payload: null };
+  /** 全局：当前执行环境 + 视图 + payload，供 DSH tooltip 复用 */
+  var CURRENT = { harness: null, mode: null, payload: null };
 
-  /** 渲染入口：按宿主注册表分发。先画跨宿主今日总览（best-effort，两宿主 today
-   *  数据都可能缺席），再调宿主的渲染适配器。#render-root 的 className 是宿主
+  /** 渲染入口：按执行环境注册表分发。先画跨执行环境今日总览（best-effort，两执行环境 today
+   *  数据都可能缺席），再调执行环境的渲染适配器。#render-root 的 className 是执行环境
    *  作用域（`.view-codex` 下的 CSS 全是 codex 私有样式），DSH 用空串。 */
-  function render(host, mode, view) {
-    CURRENT = { host: host, mode: mode, payload: view };
+  function render(harness, mode, view) {
+    CURRENT = { harness: harness, mode: mode, payload: view };
     var root = document.getElementById("render-root");
-    root.className = (host === "codex") ? "view-codex" : "";
+    root.className = (harness === "codex") ? "view-codex" : "";
     document.getElementById("summary").hidden = false;
-    renderOverview(overviewData(host, mode, view));
-    HOSTS[host].render(host, mode, view);
+    renderOverview(overviewData(harness, mode, view));
+    HARNESSES[harness].render(harness, mode, view);
   }
 
   /** DSH 渲染适配器（0 号模板）：写 #sub-line，委托给既有 renderToday/
    *  renderMonth——渲染逻辑一行不改，page-title 保持 M4 原串。 */
-  function renderDshView(host, mode, view) {
+  function renderDshView(harness, mode, view) {
     document.getElementById("sub-line").innerHTML =
       '数据源 <code>~/.agent-vitals/state/</code>' +
       ' · schema <code>1.0.0</code>';
@@ -1318,17 +1318,17 @@
     bindHover(grid, ".day-cell");
   }
 
-  // ── codex 宿主渲染（1 号宿主适配器）──────────────────────────────────
+  // ── codex 执行环境渲染（1 号执行环境适配器）──────────────────────────────────
   // 数据契约 = codex-cost 报告的同一份 dict（views 的每个成员）。JS 只渲染
   // server 已算好的 cost/tokens，不重算任何价。today 视图画小时条（hours 轴），
   // month/all 画日热力图（days 轴）——与 DSH 同一结构（小时 → 天聚合）。
 
   var DATA = null;   // codex 当前视图（formatReset 读 DATA.today）
 
-  function renderCodexView(host, mode, view) {
+  function renderCodexView(harness, mode, view) {
     DATA = view;
     document.getElementById("sub-line").innerHTML =
-      "host <code>codex</code> · currency <code>USD</code>" +
+      "harness <code>codex</code> · currency <code>USD</code>" +
       (view && view.month ? " · month <code>" + esc(view.month) + "</code>" : "");
     document.getElementById("page-title").textContent =
       "Codex 成本" + (view && view.month ? " · " + view.month : "");
@@ -1375,7 +1375,7 @@
   }
 
   /** 面板骨架：.panel + .panel-head（title + sub）+ .panel-body。动态创建——
-   *  统一模板只有一个宿主在渲染，不能像 codex_cost.html 那样静态占位。 */
+   *  统一模板只有一个执行环境在渲染，不能像 codex_cost.html 那样静态占位。 */
   function mkPanel(title, sub) {
     var panel = document.createElement("section");
     panel.className = "panel";
@@ -1725,16 +1725,16 @@
     }
   }
 
-  // ── 跨宿主今日总览 ─────────────────────────────────────────────────────
-  // 「今日所有 Agent 总花费 + 每宿主 mini 卡」是看板的第一层（见
-  // docs/UNIFIED_COST_VIEW.md）。数据 best-effort：当前视图（host, today）+
-  // 内联块。缺失的宿主就不出卡，不假装有数据。
+  // ── 跨执行环境今日总览 ─────────────────────────────────────────────────────
+  // 「今日所有 Agent 总花费 + 每执行环境 mini 卡」是看板的第一层（见
+  // docs/UNIFIED_COST_VIEW.md）。数据 best-effort：当前视图（harness, today）+
+  // 内联块。缺失的执行环境就不出卡，不假装有数据。
 
-  function overviewData(host, mode, view) {
+  function overviewData(harness, mode, view) {
     var items = [];
     // DSH today：当前 (dsh, today) 直接用 view；否则读内联 today 块。
     var dshToday = null;
-    if (host === "dsh" && mode === "today" && view) dshToday = view;
+    if (harness === "dsh" && mode === "today" && view) dshToday = view;
     if (!dshToday) {
       var blk = document.getElementById("agent-vitals-data-today");
       if (blk && blk.textContent.trim()) {
@@ -1753,11 +1753,11 @@
       } else {
         Object.keys(buckets).forEach(function(k) { cost += costOf(buckets[k]).total; });
       }
-      items.push({ host: "dsh", label: "DSH", currency: "¥", tokens: tok, cost: cost });
+      items.push({ harness: "dsh", label: "DSH", currency: "¥", tokens: tok, cost: cost });
     }
     // Codex today：当前 (codex, today) 直接用 view；否则读内联 codex 块。
     var codexToday = null;
-    if (host === "codex" && mode === "today" && view) codexToday = view;
+    if (harness === "codex" && mode === "today" && view) codexToday = view;
     if (!codexToday) {
       var cblk = document.getElementById("agent-vitals-data-codex");
       if (cblk && cblk.textContent.trim()) {
@@ -1768,7 +1768,7 @@
       }
     }
     if (codexToday) {
-      items.push({ host: "codex", label: "Codex", currency: "$",
+      items.push({ harness: "codex", label: "Codex", currency: "$",
                    tokens: sumTokens(codexToday.total_tokens),
                    cost: codexToday.total_cost_usd || 0 });
     }
@@ -1781,28 +1781,28 @@
     root.hidden = false;
     var cards = document.getElementById("overview-cards");
     cards.innerHTML = "";
-    // 跨宿主今日总 token：币种无关，直接求和。
+    // 跨执行环境今日总 token：币种无关，直接求和。
     var totalTok = 0;
     items.forEach(function(x) { totalTok += x.tokens; });
-    cards.appendChild(cardEl("今日跨宿主总 token", shortNum(totalTok),
-      items.length + " 个宿主 · 币种无关求和"));
+    cards.appendChild(cardEl("今日跨执行环境总 token", shortNum(totalTok),
+      items.length + " 个执行环境 · 币种无关求和"));
     // 各币种今日花费——不编汇率，¥/$ 分列（币种不同的花费不强行相加）。
     var byCur = {};
     items.forEach(function(x) {
       byCur[x.currency] = (byCur[x.currency] || 0) + x.cost;
     });
     Object.keys(byCur).forEach(function(cur) {
-      var hosts = items.filter(function(x) { return x.currency === cur; })
+      var harnesses = items.filter(function(x) { return x.currency === cur; })
                        .map(function(x) { return x.label; }).join(" / ");
       cards.appendChild(cardEl("今日花费 " + cur,
         cur === "¥" ? money(byCur[cur]) : fmtUsd(byCur[cur]),
-        hosts + " · 不编汇率，币种分开列"));
+        harnesses + " · 不编汇率，币种分开列"));
     });
-    // 每宿主 mini 卡：点击跳该宿主 today。
+    // 每执行环境 mini 卡：点击跳该执行环境 today。
     items.forEach(function(x) {
       var a = document.createElement("a");
       a.className = "card";
-      a.href = "?host=" + x.host + "&file=today";
+      a.href = "?harness=" + x.harness + "&file=today";
       a.innerHTML =
         '<div class="label">' + x.label + ' 今日</div>' +
         '<div class="value small">' + (x.currency === "¥" ? money(x.cost) : fmtUsd(x.cost)) + '</div>' +

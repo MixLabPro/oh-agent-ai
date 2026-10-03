@@ -121,8 +121,8 @@ emit。修复后：同 revision 突发的全量计算 ≤ `HEAVY_READ_PERMITS`�
 ### 2.5 轻 tick 7-9s 的构成（阶段 R5 处理，排序）
 
 1. tray_due 轮（每 300s）内联的 `read_overview`/assembly：4-6s（§2.3 修完后自然下降）；
-2. 被唤醒宿主为 codex 时 `~/.codex`（8.2GB/2.96 万文件）清单 walk 与 `walk_errors` 二趟
-   （`sync_service.rs:551-567`、`hosts/codex/sources/mod.rs:215-262`）；
+2. 被唤醒执行环境为 codex 时 `~/.codex`（8.2GB/2.96 万文件）清单 walk 与 `walk_errors` 二趟
+   （`sync_service.rs:551-567`、`harnesses/codex/sources/mod.rs:215-262`）；
 3. `scan_claude_quota` 每 tick 对 7 天窗内全部会话文件逐行 JSON 重解析，与脏文件无关
    （`sync_service.rs:295-326`、`quota.rs:30,222-259`）；
 4. 每 tick 无条件收尾：`migrate_legacy_subscription_snapshots`（遍历全部 pricing 快照 JSON，
@@ -180,7 +180,7 @@ emit。修复后：同 revision 突发的全量计算 ≤ `HEAVY_READ_PERMITS`�
    覆盖；trust 传感活跃时写事务推进 revision，`Invalidated` 本来就会来——双覆盖删一不丢）。
 2. `refreshActiveTab` 增加 per-revision 锁存：模块级 `let renderedRevision = -1` 与
    `let pendingRevision = -1`。dispatch 层：`Invalidated` 载荷携带 revision
-   （`workbench.js:225-226` 注释已声明 `{type, revision, hosts}`），
+   （`workbench.js:225-226` 注释已声明 `{type, revision, harnesses}`），
    `pendingRevision = Math.max(pendingRevision, revision)`，仅当
    `revision > renderedRevision` 才调 `refreshActiveTab()`（`SyncStatusChanged` 不带
    revision，不参与锁存，保持现状）。**锁存必须下沉进 wbPull 的尾随循环**：
@@ -272,7 +272,7 @@ workflow 空`。此类事务：offset/checkpoint/`last_seen_at_ms`/snapshot `obs
    overview/monthly/daily/MCP 任何一个 memoized 读面）。闭集外新增读方必须过 revision。
 
 **效果与诚实预期：** 活跃会话**真有增量**时 revision 照常前进（这是合法失效信号，本 spec
-不压制它）；收益来自零增量的唤醒（混合宿主、无关宿主活动、快照-only 轮）不再制造假失效。
+不压制它）；收益来自零增量的唤醒（混合执行环境、无关执行环境活动、快照-only 轮）不再制造假失效。
 风暴主力削减在 R1/R2，F4 是发射侧卫生。
 
 **测试：** 重复 ingest 同批文件第二轮 revision 不变（且第二轮 offset/checkpoint 已持久化、
@@ -298,7 +298,7 @@ emit + INFO 日志；`trust_monitor_record_result` 的每轮无条件 UPDATE sta
 ### 4.6 R4 · F6 —— trust 传感分期 A（按 trust spec，不重抄设计）
 
 实施 trust spec 的 P0 活动门控 + P3 六段子计时（§4.1/§4.4）：watcher 唤醒槽（`watch.rs:117`
-`wake_hosts`）暴露宿主最近活动时刻，trust tick 到点若冷却窗内无活跃宿主则整轮跳过
+`wake_harnesses`）暴露执行环境最近活动时刻，trust tick 到点若冷却窗内无活跃执行环境则整轮跳过
 （不 lsof、不开库、不 emit）；跳过轮按小时聚合记录。手动快照不走门控。
 本 spec 追加两小项：
 
@@ -319,7 +319,7 @@ authority 连接、无 emit）断言。
    （每 16 次轻 tick / 300s，`lib.rs:1613-1614`）。注意 sync-facts 是每 tick 新 spawn 的
    CLI 子进程，**进程内存缓存无效**，指纹必须落在权威库（checkpoint 即是）。
 2. **F7b codex 单趟 walk**：清单收集与 `walk_errors` 合并为一趟（`sync_service.rs:551-567`
-   、`hosts/codex/sources/mod.rs:215-262`），错误清单在遍历时顺带收集。
+   、`harnesses/codex/sources/mod.rs:215-262`），错误清单在遍历时顺带收集。
 3. **F7c 每 tick 收尾节流**：`migrate_legacy_subscription_snapshots`（幂等，`sql_sync.rs:85-133`）
    与 `snapshot_current_pricing` 移到重 tick 专属（或 24h 节流戳存 `schema_meta`）；
    `reconcile_candidate_claims`/`billing_apply_active_declarations` 保持每 tick（它们是
@@ -381,7 +381,7 @@ fail-closed 不变；golden/Python 零漂移。
 - **不引入前端时间去抖/节流定时器**（背压 spec §1.5）；FindingsPage 既有的 150ms 合并窗
   保留但不推广。
 - **不引入 per-key single-flight / Condvar / in-flight map**（背压 spec §5.1）。
-- **不做前端 per-host 定向刷新**（`Invalidated.hosts` 已携带，React 已解析，但第一期只用
+- **不做前端 per-harness 定向刷新**（`Invalidated.harnesses` 已携带，React 已解析，但第一期只用
   revision 整体锁存；定向刷新等 React 迁移完成后再议）。
 - **不改变任何 IPC 命令的输出契约、字段顺序、降级行为**；不刷新任何 golden。
 - **不合并「每次调用新开连接」的模式**（`AuthorityDb` 非 Sync、每线程自开是既有架构裁决，
@@ -423,7 +423,7 @@ Python 套件零漂移，才打勾。R1 无 Rust 改动，另需真机 bundle �
   - [x] 簿记静默提交（with_immediate_txn_decided + 三出口事实性裁决；判据与
     outbox 压制同源；快照/backfill/路由证据保守视为事实性——配额滚动窗口
     载荷是用户可见状态；revision_guard 唯一写者测试原样保持全绿）
-  - [x] 读方闭集枚举（实施期完成）：host_runtime_snapshots 载荷喂配额面
+  - [x] 读方闭集枚举（实施期完成）：harness_runtime_snapshots 载荷喂配额面
     （无 memo 的即时读，不受影响）；source_files.last_seen 喂覆盖度余量——
     经 revision-memo 的 summary 面在「仅无实效扫描」角落可能滞后一个真实
     revision，属外观性、可接受；机械守卫由「唯一写者」测试 + 静默契约测试
@@ -432,7 +432,7 @@ Python 套件零漂移，才打勾。R1 无 Rust 改动，另需真机 bundle �
     事件兜 TrustPage；record_result 单行心跳 UPDATE 保留——不推 revision、
     是 last_success 活性信号，偏差已在提交说明注明；desktop 141 绿）
 - [x] **R4（trust 传感分期 A）** — F6（acb4a86，2026-09-24）：P0 活动门控
-  （HostActivityTable 由 watcher 唤醒槽刷新；冷却窗 120s + 空闲确认窗 10min；
+  （HarnessActivityTable 由 watcher 唤醒槽刷新；冷却窗 120s + 空闲确认窗 10min；
   跳过轮零 lsof/零库/零事件/零锁 + 小时聚合日志）+ P3 六段子计时
   （lsof_spawn/parse/open/txn_insert/correlate/outbox_emit 单行 INFO）+
   interval 上限收敛（60s 硬顶移除，5..=3600 全域）；门控三行测试钉住
@@ -496,7 +496,7 @@ Python 套件零漂移，才打勾。R1 无 Rust 改动，另需真机 bundle �
 
 | 门 | 标准 |
 |---|---|
-| 空闲窗（无活跃宿主 ≥10min） | lsof spawn = 0；`TrustMonitorInvalidated` = 0；authority 写事务 = 0（P0 跳过轮零副作用，对拍 R4 门控测试） |
+| 空闲窗（无活跃执行环境 ≥10min） | lsof spawn = 0；`TrustMonitorInvalidated` = 0；authority 写事务 = 0（P0 跳过轮零副作用，对拍 R4 门控测试） |
 | 活跃小时 | trust 六段子计时（R4-P3）合计 ≤1.5s / 30s 轮预算（≤5% 占空比）；进程 CPU 均值 <15% |
 | 第 7 天稳态 | `correlate_selected` ≤50ms/轮（开窗或实测）；trust 相关内存无增长趋势 |
 | 通知零打扰 | `notifications_enabled=0` 默认下 `trust_monitor_alerts` 零新行 |

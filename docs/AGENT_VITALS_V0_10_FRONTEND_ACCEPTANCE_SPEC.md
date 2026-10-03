@@ -63,7 +63,7 @@ Findings 明细 ──┼→ 会话详情 → 查看轨迹 → Traces（自动�
 会话详情标题区必须包含：
 
 - 返回列表；
-- 会话标题、宿主、日期；
+- 会话标题、执行环境、日期；
 - 主动作“查看轨迹”；
 - 加载、不可用和已删除状态的就地反馈。
 
@@ -86,7 +86,7 @@ Traces Tab 可以保留手工 `session_ref` 输入作为诊断入口，但默认
 }
 ```
 
-- `window_session_count` 在应用 `host`、时间窗口、小时和 `min_tokens` 过滤后、分页前计算。
+- `window_session_count` 在应用 `harness`、时间窗口、小时和 `min_tokens` 过滤后、分页前计算。
 - `window_total_tokens` 保持 token 守恒用途，不得再作为条数 fallback。
 - UI 显示：`2026-09 共 24 个会话 · 6.36B tokens`。
 - 旧服务缺 `window_session_count` 时显示“已加载 N 个会话”；不得猜测总数。
@@ -96,11 +96,11 @@ Traces Tab 可以保留手工 `session_ref` 输入作为诊断入口，但默认
 前端维护：
 
 ```text
-traceContext = { sessionRef, title?, host?, origin }
+traceContext = { sessionRef, title?, harness?, origin }
 origin = sessions | finding | menubar | manual
 ```
 
-切换到 Traces 时只传 `session_ref` 给 IPC。标题和宿主仅用于展示，不参与服务端定位。
+切换到 Traces 时只传 `session_ref` 给 IPC。标题和执行环境仅用于展示，不参与服务端定位。
 盐轮换、会话删除或跨机器引用必须返回明确错误，不回退到原始路径。
 
 `origin` 是可追加的展示层枚举。v0.11.0 增加 `issue`，用于 Issue → Trace 的返回路径和

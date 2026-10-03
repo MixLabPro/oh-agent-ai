@@ -33,7 +33,7 @@ v0.9 facts / canonical / billing / coverage
 
 ### 2.1 TraceGraph
 
-使用 `TraceGraph`，而非把所有宿主强行称为 OTel Span。缺 parent/child、精确时间或 status 时，必须在 coverage 中标缺失。
+使用 `TraceGraph`，而非把所有执行环境强行称为 OTel Span。缺 parent/child、精确时间或 status 时，必须在 coverage 中标缺失。
 
 ```rust
 pub struct TraceGraph {
@@ -76,7 +76,7 @@ LLM evaluator 仅用于程序规则无法覆盖的语义问题；默认关闭、
 1. 至少一个可执行、低风险的 remedy；或
 2. 明确 `diagnostic-only`，说明为什么当前不能安全自动处理。
 
-首批 remedy 应优先覆盖可逆、可预览的动作，例如：禁用长期未触发且证据充分的 Skill、收紧重复工具调用策略、推荐合适模型/上下文策略、修复可验证的配置错误。禁止默认删除用户文件、改变宿主配置或进行网络 MCP probe。
+首批 remedy 应优先覆盖可逆、可预览的动作，例如：禁用长期未触发且证据充分的 Skill、收紧重复工具调用策略、推荐合适模型/上下文策略、修复可验证的配置错误。禁止默认删除用户文件、改变执行环境配置或进行网络 MCP probe。
 
 ## 5. 产品界面
 
@@ -86,7 +86,7 @@ Sessions   会话筛选、成本/失败/持续时间、下钻
 Traces     轨迹、节点图、时间线、覆盖与缺失说明
 Issues     问题、根因、证据、风险、状态
 Savings    potential / validated / realized 三层收益
-Settings   宿主、套餐/按量、数据源、隐私、LLM 授权与预算
+Settings   执行环境、套餐/按量、数据源、隐私、LLM 授权与预算
 ```
 
 Tauri 与 CLI 消费同一 Runtime projection DTO；状态栏只呈现摘要、同步状态和安全快捷入口，不承载复杂诊断。
@@ -101,8 +101,8 @@ agent-vitals-domain/
   contracts/{trace_graph,evaluation_result,issue,remedy,outcome}.rs
   domain/{metrics,evaluation,remediation,impact}/
 
-agent-vitals-hosts/src/hosts/<host>/sessions/trace.rs
-  # host wire → trace node / invocation / tool observation
+agent-vitals-harnesses/src/harnesses/<harness>/sessions/trace.rs
+  # harness wire → trace node / invocation / tool observation
 
 agent-vitals-runtime/
   trace_service.rs
@@ -128,7 +128,7 @@ CLI/Tauri 只发 command、请求授权并展示 DTO；不得复制 token/cost/f
 - Sessions、Traces 查询 DTO、时间线与节点图；
 - coverage 与降级显示。
 
-**门槛：**至少三宿主可生成确定性图；缺失关系不伪造。
+**门槛：**至少三执行环境可生成确定性图；缺失关系不伪造。
 
 ### v0.10-B：Issues & Remedies
 
@@ -180,7 +180,7 @@ CLI/Tauri 只发 command、请求授权并展示 DTO；不得复制 token/cost/f
 
 ### 10.1 设计原则（与 v0.9.1 数据面对齐）
 
-- **权威在 JSONL**：`<data_home>/facts/<host>.jsonl` 是 append-only 权威源，本规则不破。
+- **权威在 JSONL**：`<data_home>/facts/<harness>.jsonl` 是 append-only 权威源，本规则不破。
 - **SQLite 是状态投影**：只持久化需要状态机的实体（IssueInstance / ActionReceipt / OutcomeMeasurement）；可从 UsageFact 重算的派生数据**一律不入 schema**。
 - **幂等键统一**：所有新表主键与 `UNIQUE` constraint 用 `fnv1a64_hex(canonical_json(...))` 派生，规则与 v0.9.1 `source_identity::canonical_json` 一致——`§9` DoD 第 7 条的"同一输入重放不重复写"在 schema 层落地。
 - **派生数据不持久化**：TraceGraph / MetricDefinition result / EvaluationResult / TraceCoverage 走"现算 + 60s memo"模式（复用 `runtime::summary::codex_merged_cached` 同模式，按 home 键控），memo 失效条件 = session_facts 表新增行（用 `MAX(fact_id) WHERE session_key=?` 计数器对比）。
@@ -192,8 +192,8 @@ CLI/Tauri 只发 command、请求授权并展示 DTO；不得复制 token/cost/f
 
 ```sql
 CREATE TABLE issue_instances (
-    issue_id TEXT PRIMARY KEY,             -- fnv1a64_hex(canonical_json(host, issue_type, instance_fingerprint))
-    host TEXT NOT NULL,                    -- claude-code / codex / dsh / 'aggregate'
+    issue_id TEXT PRIMARY KEY,             -- fnv1a64_hex(canonical_json(harness, issue_type, instance_fingerprint))
+    harness TEXT NOT NULL,                    -- claude-code / codex / dsh / 'aggregate'
     session_key TEXT,                      -- nullable（aggregate-level issues 不绑会话；按 v0.9 evidence_ref 规则，写空串而非 NULL）
     issue_type TEXT NOT NULL,              -- 根因族 id（zombie_skill / duplicate_tool_call / ...）
     severity TEXT NOT NULL,                -- critical / warning / info
@@ -205,9 +205,9 @@ CREATE TABLE issue_instances (
     opened_at_ms INTEGER NOT NULL,
     closed_at_ms INTEGER,
     metadata_json TEXT,
-    UNIQUE(host, instance_fingerprint, status)  -- §9 DoD 第 7 条幂等性
+    UNIQUE(harness, instance_fingerprint, status)  -- §9 DoD 第 7 条幂等性
 );
-CREATE INDEX idx_issue_host_status ON issue_instances(host, status);
+CREATE INDEX idx_issue_harness_status ON issue_instances(harness, status);
 CREATE INDEX idx_issue_session ON issue_instances(session_key);
 ```
 
@@ -535,7 +535,7 @@ crates/agent-vitals-data/src/
 crates/agent-vitals-runtime/src/
   mcp/                      # sessions_search / session_detail / session_ref（Q04 已落 main）
   authority/                # AuthorityHandle / 健康检查
-  ingest_service.rs         # 三宿主 ingest 入口
+  ingest_service.rs         # 三执行环境 ingest 入口
   lease/                    # writer lease（O_EXCL + atomic rename）
 
 crates/agent-vitals-domain/src/
@@ -548,7 +548,7 @@ crates/agent-vitals-domain/src/
   domain/behavior/               # SV601-SV614 纯函数（v0.10-A 升级为 IssueInstance 聚合入口）
   domain/plan/                   # v0.9 plan 命令 ranked 规则（v0.10-B remedy catalog 种子，§11.11）
 
-crates/agent-vitals-hosts/src/hosts/<h>/sessions/
+crates/agent-vitals-harnesses/src/harnesses/<h>/sessions/
   # claude_code / codex / dsh 的 evidence.rs（canonical_session producer）
 ```
 
@@ -562,15 +562,15 @@ crates/agent-vitals-hosts/src/hosts/<h>/sessions/
 
 **改哪里**：`§7` v0.10-A 段门槛。
 
-**改成什么**：把 `**门槛：**至少三宿主可生成确定性图；缺失关系不伪造。` 替换为：
+**改成什么**：把 `**门槛：**至少三执行环境可生成确定性图；缺失关系不伪造。` 替换为：
 
 > **门槛：**
-> 1. 三宿主从 `CanonicalSession` 派生确定性图（**不重读 raw event**），输入源唯一；
+> 1. 三执行环境从 `CanonicalSession` 派生确定性图（**不重读 raw event**），输入源唯一；
 > 2. 缺失关系（parent / time / status）显式在 `TraceCoverage` 里标 `unavailable`，**不得补造**；
 > 3. CLI / Tauri IPC / HTML 三处对同一 `session_ref` 输出的 TraceGraph 节点列表 byte-identical（由 `tests/test_cli_matrix.py::both()` + `tests/mcp_smoke.py` S6 块守，模式同 S5 sessions 三消费面 parity）；
 > 4. TraceGraph memo 60s TTL（`Arc<RwLock<HashMap<session_ref, TraceGraph>>>`，按 home 键控），失效条件 = session_facts `MAX(fact_id) WHERE session_key=?` 计数器对比。
 
-**为什么**：v0.9 已经做了 claude/codex/dsh 三宿主 wire → `CanonicalSession`（`agent-vitals-domain/src/contracts/canonical.rs` + `crates/agent-vitals-hosts/src/hosts/<h>/sessions/`）。TraceGraph builder **必须从 CanonicalSession 派生**，否则会出现 v0.9.1 plan §1 列的同样问题——CLI / Tauri / HTML 三处对同一份数据有三份不同形状，TraceGraph builder 也会出现同样风险。
+**为什么**：v0.9 已经做了 claude/codex/dsh 三执行环境 wire → `CanonicalSession`（`agent-vitals-domain/src/contracts/canonical.rs` + `crates/agent-vitals-harnesses/src/harnesses/<h>/sessions/`）。TraceGraph builder **必须从 CanonicalSession 派生**，否则会出现 v0.9.1 plan §1 列的同样问题——CLI / Tauri / HTML 三处对同一份数据有三份不同形状，TraceGraph builder 也会出现同样风险。
 
 ---
 
@@ -592,9 +592,9 @@ crates/agent-vitals-hosts/src/hosts/<h>/sessions/
 
 **改成什么**：
 
-> 7. 同一输入重放不重复写 issue、action 或 outcome；幂等键字段为 `instance_fingerprint`，派生规则：`fnv1a64_hex(source_identity::canonical_json(UsageFact[]))`——与 v0.9 `UsageFact.fact_id` / `source_event_id` 同 `canonical_json` 序列化路径；同一输入必得同一指纹，重放同指纹同状态（`issue_instances.UNIQUE(host, instance_fingerprint, status)` / `outcome_measurements.UNIQUE(issue_id, metric_id, savings_kind, baseline_window_start_ms, observed_window_start_ms)`）不重写。
+> 7. 同一输入重放不重复写 issue、action 或 outcome；幂等键字段为 `instance_fingerprint`，派生规则：`fnv1a64_hex(source_identity::canonical_json(UsageFact[]))`——与 v0.9 `UsageFact.fact_id` / `source_event_id` 同 `canonical_json` 序列化路径；同一输入必得同一指纹，重放同指纹同状态（`issue_instances.UNIQUE(harness, instance_fingerprint, status)` / `outcome_measurements.UNIQUE(issue_id, metric_id, savings_kind, baseline_window_start_ms, observed_window_start_ms)`）不重写。
 
-**为什么**：v0.9.1 `sync_facts` 已经按 `(host, source_event_id, fact_id)` 去重，writer lease O_EXCL；spec §9 第 7 条原文未指定幂等键派生方式，无法在 review 时检查具体实现是否一致。明确派生规则后，schema 的 `UNIQUE` constraint（§10.2.1 / §10.2.5）与代码层的去重逻辑可在同一 PR 内同步落地。
+**为什么**：v0.9.1 `sync_facts` 已经按 `(harness, source_event_id, fact_id)` 去重，writer lease O_EXCL；spec §9 第 7 条原文未指定幂等键派生方式，无法在 review 时检查具体实现是否一致。明确派生规则后，schema 的 `UNIQUE` constraint（§10.2.1 / §10.2.5）与代码层的去重逻辑可在同一 PR 内同步落地。
 
 ---
 

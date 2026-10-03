@@ -17,7 +17,7 @@ function `toolInput` 只取 `file_path`。全量读（真机 686MB / 2.0s）。�
 那一层（E4b，Rust-only）：`workbuddy_trace_files` 是 locate 面、
 `read_workbuddy_trace_file` 是单文件 shape 面，全量读 = 两者复合；这里镜像两个入口
 只为钉「逐文件拼接 == 全量」的等式，Python 不长同步写路径。
-文件按路径字符串排序。与 Rust `hosts/workbuddy/sources/traces.rs` 逐字节对齐。
+文件按路径字符串排序。与 Rust `harnesses/workbuddy/sources/traces.rs` 逐字节对齐。
 """
 
 import json

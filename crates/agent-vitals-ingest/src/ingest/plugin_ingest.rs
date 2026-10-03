@@ -1,7 +1,7 @@
-//! 插件宿主摄入编排 + Candidate → UsageFact 喉咙（HOST_MANIFEST_DSL_SPEC
+//! 插件执行环境摄入编排 + Candidate → UsageFact 喉咙（HARNESS_MANIFEST_DSL_SPEC
 //! §5-§6、§9.2）。
 //!
-//! 职责边界：`agent-vitals-hosts::generic` 产「候选行」（recipe 三态），
+//! 职责边界：`agent-vitals-harnesses::generic` 产「候选行」（recipe 三态），
 //! 本模块把候选行组装进 `build_usage_fact` 的字段 map（身份/billing 锁/
 //! provenance 全部本体侧 stamp，manifest 无权提供 fact_id），并编排
 //! validate（dry-run）与 ingest --write（facts JSONL exactly-once +
@@ -18,12 +18,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use agent_vitals_domain::usage_fact::build_usage_fact;
-use agent_vitals_hosts::generic_candidate::CandidateUsageV1;
-use agent_vitals_hosts::generic_manifest::{self, PluginManifest};
-use agent_vitals_hosts::generic_recipe::{self, LineVerdict, RecipeDef};
+use agent_vitals_harnesses::generic_candidate::CandidateUsageV1;
+use agent_vitals_harnesses::generic_manifest::{self, PluginManifest};
+use agent_vitals_harnesses::generic_recipe::{self, LineVerdict, RecipeDef};
 use serde_json::{json, Value};
 
-use crate::host_registry::{scan_plugin_hosts, PluginHost};
+use crate::harness_registry::{scan_plugin_harnesses, PluginHarness};
 
 /// 单文件提取报告（如实三态计数 + 最多 8 条问题样例）。
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -48,7 +48,7 @@ pub struct PluginFileReport {
 #[derive(Debug, Default, serde::Serialize)]
 pub struct PluginRunReport {
     pub slug: String,
-    pub host: String,
+    pub harness: String,
     pub recipe: String,
     pub manifest_revision: String,
     pub files: Vec<PluginFileReport>,
@@ -97,7 +97,7 @@ pub fn load_manifest(manifest_path: &Path) -> Result<(PluginManifest, String), S
 }
 
 fn dotted_get<'a>(record: &'a Value, path: &str) -> &'a Value {
-    // 与 hosts::generic::recipe::dotted_get 同语义（空路径短路）。
+    // 与 harnesses::generic::recipe::dotted_get 同语义（空路径短路）。
     if path.is_empty() {
         return &Value::Null;
     }
@@ -117,7 +117,7 @@ fn source_profile_for_root(slug: &str, root_declared: &str) -> String {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(format!("{slug}|{root_declared}").as_bytes());
     let hex: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
-    format!("host-{hex}")
+    format!("harness-{hex}")
 }
 
 /// 候选行 → UsageFact 字段 map（§9.2 映射表）。**billing 锁在这里 stamp**：
@@ -142,7 +142,7 @@ fn candidate_to_fact_fields(
         (ctx.def, ctx.manifest, ctx.revision, ctx.machine_namespace);
     let mut m = serde_json::Map::new();
     m.insert("machine_namespace".into(), json!(machine_namespace));
-    m.insert("host".into(), json!(manifest.facts_host()));
+    m.insert("harness".into(), json!(manifest.facts_harness()));
     m.insert("source_profile".into(), json!(source_profile));
     m.insert("native_session_id".into(), json!(native_session_id));
     m.insert("source_event_id".into(), json!(candidate.source_event_id));
@@ -309,7 +309,7 @@ pub fn run_plugin(
     // 文件集：显式列表 or discovery。
     let mut units: Vec<(String, PathBuf, String, String)> = Vec::new(); // (rel, abs, session_id, profile)
     if files.is_empty() {
-        let report = agent_vitals_hosts::generic_discover::discover_files(&manifest, home)
+        let report = agent_vitals_harnesses::generic_discover::discover_files(&manifest, home)
             .map_err(|e| format!("discovery 失败：{e}"))?;
         for f in &report.files {
             let root_declared = manifest
@@ -317,7 +317,7 @@ pub fn run_plugin(
                 .iter()
                 .find(|r| {
                     let expanded =
-                        agent_vitals_hosts::generic_discover::expand_tilde_home(r, home);
+                        agent_vitals_harnesses::generic_discover::expand_tilde_home(r, home);
                     expanded
                         .canonicalize()
                         .map(|c| f.abs_path.starts_with(&c))
@@ -359,7 +359,7 @@ pub fn run_plugin(
 
     let mut out = PluginRunReport {
         slug: manifest.slug.clone(),
-        host: manifest.facts_host(),
+        harness: manifest.facts_harness(),
         recipe: def.id.to_string(),
         manifest_revision: revision.clone(),
         ..Default::default()
@@ -414,7 +414,7 @@ pub fn run_plugin(
             if profiles.len() > 1 {
                 out.warnings.push(format!(
                     "session `{session}` 出现在 {} 个 source_profile 下（跨 root）——\
-                     facts JSONL 按 profile 分行，authority 按 host+session 身份去重合并",
+                     facts JSONL 按 profile 分行，authority 按 harness+session 身份去重合并",
                     profiles.len()
                 ));
             }
@@ -491,7 +491,7 @@ pub fn plugin_ingest_write(
     let ingest = crate::ingest_service::ingest_facts(data_home, &facts)?;
     // authority 双写（§2 图：facts 后写 authority 先写语义对齐为「同一事务
     // 面」；这里沿用 sync_service 的 write_flat_facts_with_sources，SQL 侧
-    // exactly-once 由 (host, ns, session, event_id, kind) UNIQUE 承担）。
+    // exactly-once 由 (harness, ns, session, event_id, kind) UNIQUE 承担）。
     let authority = match open_authority_and_write(data_home, &report, &facts) {
         Ok(v) => v,
         Err(e) => {
@@ -521,7 +521,7 @@ fn open_authority_and_write(
     let no_overrides: std::collections::HashMap<String, crate::source_graph::SourceCheckpointOverride> = std::collections::HashMap::new();
     let outcome = crate::sql_sync::write_flat_facts_with_sources(
         &db,
-        &report.host,
+        &report.harness,
         // write_flat_facts_with_sources 需要 machine_namespace——从事实行取。
         facts
             .first()
@@ -534,7 +534,7 @@ fn open_authority_and_write(
         &no_overrides,
         facts,
         &[],
-        // session_excerpts：行为面素材，插件宿主不产（行为须官方，spec §1）。
+        // session_excerpts：行为面素材，插件执行环境不产（行为须官方，spec §1）。
         &[],
         None,
         None,
@@ -568,7 +568,7 @@ fn source_entries(report: &PluginRunReport) -> Vec<(PathBuf, (u64, u64))> {
     entries
 }
 
-/// 周期再摄取（zcode 宿主接入收尾，2026-09-23）：对**已安装**的全部插件
+/// 周期再摄取（zcode 执行环境接入收尾，2026-09-23）：对**已安装**的全部插件
 /// manifest 逐个执行 [`plugin_ingest_write`]——exactly-once 由事实层
 /// fact_id 幂等兜底（重放 = duplicate 计数，不双计）。单 manifest 失败
 /// 隔离为 Err 条目（坏 manifest 不得拖垮整轮 sync，tick 兜底语义）。
@@ -578,7 +578,7 @@ pub fn ingest_installed(
     data_home: &Path,
     user_home: &Path,
 ) -> Vec<(String, Result<Value, String>)> {
-    let (hosts, errors) = scan_plugin_hosts(data_home);
+    let (harnesses, errors) = scan_plugin_harnesses(data_home);
     let mut out = Vec::new();
     for e in errors {
         out.push((
@@ -586,7 +586,7 @@ pub fn ingest_installed(
             Err(format!("manifest 解析失败: {}", e.problem)),
         ));
     }
-    for h in hosts {
+    for h in harnesses {
         let result = plugin_ingest_write(&h.manifest_path, ns, data_home, user_home)
             .map_err(|e| format!("plugin_ingest_write: {e}"));
         out.push((h.slug.clone(), result));
@@ -596,15 +596,15 @@ pub fn ingest_installed(
 
 /// plugin-list 的负载：registry 内容 + 坏 manifest 报错。
 pub fn plugin_list(data_home: &Path) -> Value {
-    let (hosts, errors) = scan_plugin_hosts(data_home);
-    let host_values: Vec<Value> = hosts
+    let (harnesses, errors) = scan_plugin_harnesses(data_home);
+    let harness_values: Vec<Value> = harnesses
         .iter()
         .map(|h| {
             json!({
                 "slug": h.slug,
                 "display_name": h.display_name,
                 "recipe": h.recipe,
-                "host": format!("host:{}", h.slug),
+                "harness": format!("harness:{}", h.slug),
                 "manifest_revision": h.manifest_sha256,
                 "manifest_path": h.manifest_path.to_string_lossy(),
             })
@@ -619,12 +619,12 @@ pub fn plugin_list(data_home: &Path) -> Value {
             })
         })
         .collect();
-    json!({ "hosts": host_values, "errors": error_values })
+    json!({ "harnesses": harness_values, "errors": error_values })
 }
 
-/// 保留 host→PluginHost 的有序视图给调用方（BTreeMap 键序稳定）。
-pub fn plugin_hosts_by_slug(data_home: &Path) -> BTreeMap<String, PluginHost> {
-    scan_plugin_hosts(data_home)
+/// 保留 harness→PluginHarness 的有序视图给调用方（BTreeMap 键序稳定）。
+pub fn plugin_harnesses_by_slug(data_home: &Path) -> BTreeMap<String, PluginHarness> {
+    scan_plugin_harnesses(data_home)
         .0
         .into_iter()
         .map(|h| (h.slug.clone(), h))
@@ -650,10 +650,10 @@ mod tests {
         dir
     }
 
-    /// 布一个最小 zcode 形状的插件宿主：manifest 进 hosts.d/zcode/，
+    /// 布一个最小 zcode 形状的插件执行环境：manifest 进 harnesses.d/zcode/，
     /// 两份 rollout fixture。
-    fn setup_host(home: &Path) -> (PathBuf, Vec<PathBuf>) {
-        let manifest_dir = home.join("hosts.d/zcode");
+    fn setup_harness(home: &Path) -> (PathBuf, Vec<PathBuf>) {
+        let manifest_dir = home.join("harnesses.d/zcode");
         std::fs::create_dir_all(&manifest_dir).unwrap();
         let manifest = r#"{
             "manifest_version": 1,
@@ -705,7 +705,7 @@ mod tests {
     #[test]
     fn run_plugin_emits_facts_with_billing_lock_and_identity() {
         let home = tmp_home("emit");
-        let (manifest, files) = setup_host(&home);
+        let (manifest, files) = setup_harness(&home);
         let report = run_plugin(&manifest, &files, "m1", &home).unwrap();
         assert_eq!(report.emitted, 3);
         assert_eq!(report.skipped, 0);
@@ -713,9 +713,9 @@ mod tests {
         assert!(report.fact_id_stable);
         assert!(report.corpus_has_emit);
         assert_eq!(report.models, ["GLM-5.3"]);
-        assert_eq!(report.host, "host:zcode");
+        assert_eq!(report.harness, "harness:zcode");
         let f = &report.facts[0];
-        assert_eq!(f["host"], "host:zcode");
+        assert_eq!(f["harness"], "harness:zcode");
         assert_eq!(f["billing_mode"], "metered", "计价锁（§6.1）");
         assert_eq!(f["pricing_basis"], "metered_estimate");
         assert_eq!(f["machine_namespace"], "m1");
@@ -730,7 +730,7 @@ mod tests {
     #[test]
     fn zero_corpus_emit_is_refused_by_gate() {
         let home = tmp_home("zeroguard");
-        let (manifest, _files) = setup_host(&home);
+        let (manifest, _files) = setup_harness(&home);
         let empty = home.join("data/model-io-sess_empty.jsonl");
         std::fs::write(&empty, "{\"requestId\":\"x\",\"attempt\":1}\n").unwrap();
         let report = run_plugin(&manifest, &[empty], "m1", &home).unwrap();
@@ -742,8 +742,8 @@ mod tests {
     #[test]
     fn bad_manifest_dir_name_is_refused() {
         let home = tmp_home("dirname");
-        let (manifest, _files) = setup_host(&home);
-        let wrong = home.join("hosts.d/other.json");
+        let (manifest, _files) = setup_harness(&home);
+        let wrong = home.join("harnesses.d/other.json");
         std::fs::copy(&manifest, &wrong).unwrap();
         let e = run_plugin(&wrong, &[], "m1", &home).unwrap_err();
         assert!(e.contains("目录名"), "{e}");
@@ -755,26 +755,26 @@ mod tests {
         let home = tmp_home("e2e");
         let data_home = home.join("data-home");
         std::fs::create_dir_all(&data_home).unwrap();
-        let (manifest, _files) = setup_host(&home);
+        let (manifest, _files) = setup_harness(&home);
 
         let payload = plugin_ingest_write(&manifest, "m1", &data_home, &home).unwrap();
         let ingest = &payload["ingest"];
-        assert_eq!(ingest["hosts"][0]["appended"], 3, "首跑追加 3 条");
-        assert_eq!(ingest["hosts"][0]["duplicate"], 0);
+        assert_eq!(ingest["harnesses"][0]["appended"], 3, "首跑追加 3 条");
+        assert_eq!(ingest["harnesses"][0]["duplicate"], 0);
 
         // facts 文件落在 slug 命名空间。
-        let facts_file = data_home.join("facts/host-zcode.jsonl");
+        let facts_file = data_home.join("facts/harness-zcode.jsonl");
         assert!(facts_file.exists(), "{:?}", facts_file);
         assert_eq!(std::fs::read_to_string(&facts_file).unwrap().lines().count(), 3);
 
-        // authority 双写：usage_facts 有行（host = host:zcode）。
+        // authority 双写：usage_facts 有行（harness = harness:zcode）。
         let authority_path =
             agent_vitals_data::authority::default_authority_path(&data_home);
         let db = agent_vitals_data::authority::AuthorityDb::open(&authority_path, 0).unwrap();
         let count: i64 = db
             .conn()
             .query_row(
-                "SELECT COUNT(*) FROM usage_facts WHERE host = 'host:zcode'",
+                "SELECT COUNT(*) FROM usage_facts WHERE harness = 'harness:zcode'",
                 [],
                 |r| r.get(0),
             )
@@ -783,12 +783,12 @@ mod tests {
 
         // 重跑：两个阶段都 exactly-once。
         let payload2 = plugin_ingest_write(&manifest, "m1", &data_home, &home).unwrap();
-        assert_eq!(payload2["ingest"]["hosts"][0]["appended"], 0, "重跑零追加");
-        assert_eq!(payload2["ingest"]["hosts"][0]["duplicate"], 3);
+        assert_eq!(payload2["ingest"]["harnesses"][0]["appended"], 0, "重跑零追加");
+        assert_eq!(payload2["ingest"]["harnesses"][0]["duplicate"], 3);
         let count2: i64 = db
             .conn()
             .query_row(
-                "SELECT COUNT(*) FROM usage_facts WHERE host = 'host:zcode'",
+                "SELECT COUNT(*) FROM usage_facts WHERE harness = 'harness:zcode'",
                 [],
                 |r| r.get(0),
             )
@@ -798,15 +798,15 @@ mod tests {
         // retention 覆盖插件文件（registry 驱动）。
         let rep = crate::ingest_service::enforce_retention(&data_home, "2026-09").unwrap();
         assert!(
-            rep.get("host:zcode").is_some(),
-            "retention 输出含插件宿主：{rep}"
+            rep.get("harness:zcode").is_some(),
+            "retention 输出含插件执行环境：{rep}"
         );
 
-        // host-agnostic 下游：matrix 的 combo 查询面按 host 收纳（§7.4）。
+        // harness-agnostic 下游：matrix 的 combo 查询面按 harness 收纳（§7.4）。
         let n: i64 = db
             .conn()
             .query_row(
-                "SELECT COUNT(DISTINCT host) FROM usage_facts",
+                "SELECT COUNT(DISTINCT harness) FROM usage_facts",
                 [],
                 |r| r.get(0),
             )
@@ -820,7 +820,7 @@ mod tests {
         // fact 身份缺 machine_namespace → build_usage_fact 报 contract 问题计
         // invalid（喉咙不造默认值，spec §9）。
         let home = tmp_home("nons");
-        let (manifest, files) = setup_host(&home);
+        let (manifest, files) = setup_harness(&home);
         let report = run_plugin(&manifest, &files, "", &home).unwrap();
         assert_eq!(report.emitted, 0, "空 ns 不产事实");
         assert_eq!(report.invalid, 3, "如实计 invalid");

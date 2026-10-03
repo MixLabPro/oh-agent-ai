@@ -1,0 +1,74 @@
+use agent_vitals_data::authority::{AuthorityDb, default_authority_path};
+use agent_vitals_query::query::app_local::city_projection;
+
+#[test]
+#[ignore = "explicit local installation check; never used in CI"]
+fn local_installation_projection_smoke() {
+    let result = city_projection(&agent_vitals_query::home::data_home(), 30,
+        agent_vitals_query::clock::now_ms()).unwrap();
+    assert_eq!(result["source"], "local");
+    assert!(result["sessions"].as_array().unwrap().len() <= 500);
+    println!("Local projection: status={}, sessions={}, total={}, revision={}",
+        result["status"], result["coverage"]["returned"], result["coverage"]["total"], result["data_revision"]);
+}
+
+#[test]
+fn local_projection_is_bounded_redacted_window_scoped_and_honest() {
+    let dir = std::env::temp_dir().join(format!("av-app-local-{}-{}", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let now = 1_791_014_400_000i64;
+    assert_eq!(city_projection(&dir, 30, now), Err("data_unavailable"));
+    assert!(!default_authority_path(&dir).exists(), "read must not create an empty database");
+    assert_eq!(city_projection(&dir, 0, now), Err("invalid_window"));
+    let db = AuthorityDb::open(&default_authority_path(&dir), now).unwrap();
+    db.begin_run("fixture", "cli", now).unwrap();
+    for (key, harness, ts) in [("private-native-session", "codex", Some(now)),
+        ("old-session", "codex", Some(now - 40 * 86_400_000)),
+        ("unknown-session", "private-harness-name", None)] {
+        db.conn().execute("INSERT INTO sessions(session_key,harness,native_session_id,machine_namespace,last_observed_at_ms)
+            VALUES(?1,?2,?1,'private-machine',?3)", rusqlite::params![key,harness,now]).unwrap();
+        db.conn().execute("INSERT INTO usage_facts(fact_id,harness,machine_namespace,native_session_id,
+            session_key,source_event_id,observation_kind,event_ts_ms,uncached_input_tokens,cache_read_tokens,
+            cache_write_tokens,output_tokens,ingested_run_id,created_at_ms,updated_at_ms)
+            VALUES(?1,?2,'private-machine',?1,?1,'private-event','delta',?3,10,20,30,40,'fixture',?4,?4)",
+            rusqlite::params![key,harness,ts,now]).unwrap();
+    }
+    db.conn().execute("INSERT INTO session_excerpts(session_key,ordinal,role,excerpt,provenance,ingested_run_id)
+        VALUES('private-native-session',0,'user_first',?1,'truncated','fixture')",
+        ["帮我修复登录页".repeat(80)]).unwrap();
+    for (id, harness, status, opened) in [("public-issue", "codex", "open", now),
+        ("closed-issue", "codex", "closed", now), ("old-issue", "codex", "open", now - 40 * 86_400_000),
+        ("unknown-issue", "private-harness-name", "open", now)] {
+        db.conn().execute("INSERT INTO issue_instances(issue_id,machine_namespace,harness,issue_type,
+            instance_fingerprint,status,severity,evaluator_id,evaluator_version,evidence_fingerprint,opened_at_ms,metadata_json)
+            VALUES(?1,'private-machine',?2,'fixture',?1,?3,'warning','fixture','1',?1,?4,'{\"raw_error\":\"private-error\"}')",
+            rusqlite::params![id,harness,status,opened]).unwrap();
+    }
+    let result = city_projection(&dir, 30, now).unwrap();
+    assert_eq!(result["source"], "local");
+    assert_eq!(result["coverage"]["total"], 1);
+    assert_eq!(result["coverage"]["unknown_time"], 1);
+    assert_eq!(result["coverage"]["findings_state"], "partial");
+    assert_eq!(result["findings"], serde_json::json!([{"harness":"codex","severity":"warning","count":1}]));
+    assert_eq!(result["sessions"][0]["tokens"]["input"], 60);
+    assert_eq!(result["sessions"][0]["tokens"]["total"], 100);
+    let excerpt = &result["sessions"][0]["task_excerpts"][0];
+    assert!(excerpt["text"].as_str().unwrap().chars().count() <= 200);
+    assert_eq!(excerpt["provenance"], "truncated");
+    assert_eq!(excerpt["is_excerpt"], true);
+    let encoded = result.to_string();
+    for forbidden in ["private-native-session", "private-machine", "private-event", "private-harness-name", "private-error", "public-issue", "source_id", "native_event_id"] {
+        assert!(!encoded.contains(forbidden), "projection leaked {forbidden}");
+    }
+    let again = city_projection(&dir, 30, now).unwrap();
+    assert_eq!(result["sessions"][0]["id"], again["sessions"][0]["id"]);
+    let handle = result["sessions"][0]["id"].as_str().unwrap();
+    let (host_ref, harness) = agent_vitals_query::query::app_local::city_session_target(&dir, handle).unwrap();
+    assert_eq!(harness, "codex");
+    assert_ne!(host_ref, handle, "plugin and host handles must have separate scopes");
+    assert_eq!(agent_vitals_query::query::app_local::city_session_target(&dir, "private-native-session"), Err("invalid_session_handle"));
+    db.conn().execute("UPDATE usage_facts SET deleted_at_ms = ?1", [now]).unwrap();
+    assert_eq!(city_projection(&dir, 30, now).unwrap()["status"], "empty");
+    drop(db);
+    std::fs::remove_dir_all(dir).unwrap();
+}

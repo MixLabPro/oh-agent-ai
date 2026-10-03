@@ -152,7 +152,7 @@ pub fn execute(db: &AuthorityDb, config: &RunConfig, now_ms: i64) -> Result<Stri
             .credential_ref
             .as_deref()
             .map(|reference| {
-                resolve_credential(reference, &route.host_kind)
+                resolve_credential(reference, &route.harness_kind)
                     .map_err(|message| ProbeFailure(message, false))
             })
             .unwrap_or_else(|| {
@@ -216,7 +216,7 @@ pub fn execute(db: &AuthorityDb, config: &RunConfig, now_ms: i64) -> Result<Stri
                 if let Some(base) = &effective_base {
                     single["confounders"] = json!([{
                         "kind": "route_endpoint",
-                        "base_url_host": base.split('/').find(|s| s.contains('.')).unwrap_or("unparsed"),
+                        "base_url_harness": base.split('/').find(|s| s.contains('.')).unwrap_or("unparsed"),
                         "note": "中转臂的显式端点（官方直连臂此字段缺席 = env 已摘干净）",
                     }]);
                 }
@@ -321,7 +321,7 @@ mod tests {
             &ProbeRoute {
                 route_id: route_id.to_string(),
                 label: format!("label-{route_id}"),
-                host_kind: "claude-code".to_string(),
+                harness_kind: "claude-code".to_string(),
                 endpoint_base_url: None,
                 credential_ref: None, // 无引用 = 官方直连（CLI 登录态）——测试不碰真凭据
                 model_requested: model.to_string(),

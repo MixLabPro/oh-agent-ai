@@ -2,7 +2,7 @@
 
 > 状态：**讨论稿，待产品/架构确认**（2026-08-30 · Round 1 修订后）
 >
-> 本文把菜单栏迁移、跨宿主审计工作台、实时数据和 Python/Rust 边界收敛为一条
+> 本文把菜单栏迁移、跨执行环境审计工作台、实时数据和 Python/Rust 边界收敛为一条
 > 可实施路线。它不替代既有的规则/证据规格；它定义这些计算结果在常驻客户端如何
 > 被获取、更新和呈现。
 >
@@ -22,7 +22,7 @@
 
 ## 0. 结论
 
-Agent Vitals 的 Tauri 应用应成为一个**常驻的 Agent 健康入口与跨宿主审计工作台**，
+Agent Vitals 的 Tauri 应用应成为一个**常驻的 Agent 健康入口与跨执行环境审计工作台**，
 而不是 SwiftBar 菜单的一比一复刻，也不是把现有 HTML 页面塞进一个小浮层。
 
 产品分为三个互补投递面：
@@ -30,7 +30,7 @@ Agent Vitals 的 Tauri 应用应成为一个**常驻的 Agent 健康入口与跨
 ```text
 状态栏（高频一瞥 / 快速操作）
         ↓
-Tauri 主窗口（常驻工作台 / 历史 / 跨宿主）
+Tauri 主窗口（常驻工作台 / 历史 / 跨执行环境）
         ↓
 单文件 HTML（导出 / 分享 / 无客户端降级）
 ```
@@ -54,7 +54,7 @@ CLAUDE.md §Dual implementation）——方向是桌面与常驻能力由 Rust �
   「先证明 Rust 侧可承担，再删 Python 侧」为门槛，不静默放弃正确性。
 
 Python 不从仓库删除（短期）。它是 ClawHub/OpenClaw 零安装 Skill 的便携运行时、
-当前持久 state 的唯一写者与差分守卫宿主；「逐步弱化」不等于一步删干净——见 §7.1
+当前持久 state 的唯一写者与差分守卫执行环境；「逐步弱化」不等于一步删干净——见 §7.1
 四态生命周期与能力门转移条件。
 
 ---
@@ -67,7 +67,7 @@ Python 不从仓库删除（短期）。它是 ClawHub/OpenClaw 零安装 Skill 
 |---|---|---|
 | SwiftBar/xbar | 5 分钟 tick、预算摘要、最近审计、打开日历 | 小、静态、依赖 Python 脚本 |
 | Tauri demo | 托盘、弹窗、今日/本月/预算、Rust core 计价 | 不自动刷新、未读 alert/oneline、没有会话工作台 |
-| DSH client | 宿主内实时审计 tab、投影、React 审计组件 | 只能运行在 DSH 的 Cordis/Node 宿主内 |
+| DSH client | 执行环境内实时审计 tab、投影、React 审计组件 | 只能运行在 DSH 的 Cordis/Node 执行环境内 |
 | 单文件 HTML | Codex 会话审计、日历、可离线打开 | 静态快照，无法自行刷新 |
 
 用户在实际使用中有三个不同频率的场景：
@@ -135,7 +135,7 @@ Python 不从仓库删除（短期）。它是 ClawHub/OpenClaw 零安装 Skill 
 
 状态栏下拉/小面板应提供：
 
-- 当前或最近一次会话：宿主、模型、时长、token、成本估算、更新时间；
+- 当前或最近一次会话：执行环境、模型、时长、token、成本估算、更新时间；
 - 健康摘要：严重/警告数量与最高优先级 Finding（同样带“截至”时间）；
 - 配额与预算：订阅配额、日/月预算、snooze 和告警原因；
 - 最近 3–5 次会话；
@@ -162,7 +162,7 @@ Python 不从仓库删除（短期）。它是 ClawHub/OpenClaw 零安装 Skill 
 
 主窗口应支持：
 
-- 按宿主、日期、模型和会话筛选；
+- 按执行环境、日期、模型和会话筛选；
 - 从 Finding 跳到对应会话和证据位置；
 - 显示数据更新时间、覆盖率与 unavailable；
 - 以客户端页面展示实时/近实时数据；
@@ -176,7 +176,7 @@ partial coverage、source offline / permission denied、schema mismatch、fatal 
 
 “数据源状态”在 R2 是**只读诊断页**：显示根目录、权限、最后成功、schema 版本与
 修复指引，不暗示可编辑。若未来要编辑（预算、源路径、刷新频率、脱敏选项），必须
-单独里程碑定义 app-owned preferences 与 Python-owned `config.toml`/宿主配置的边界、
+单独里程碑定义 app-owned preferences 与 Python-owned `config.toml`/执行环境配置的边界、
 写入 API、锁/原子替换、校验与回滚，不在本规格内暗含。
 
 ### 3.3 单文件 HTML：可移植报告
@@ -218,9 +218,9 @@ Tauri Rust 主进程（命令、状态、监控）
 管线按“单一职责”重画——adapter 只做词汇/schema 转换，**不产出计算**：
 
 ```text
-SourceReader（宿主日志 / App Server / DSH 投影 / 落盘会话）
+SourceReader（执行环境日志 / App Server / DSH 投影 / 落盘会话）
         ↓
-HostNormalizer（词汇/schema 转换 → NormalizedEvidence 观测账本；不计算、不判 Coverage）
+HarnessNormalizer（词汇/schema 转换 → NormalizedEvidence 观测账本；不计算、不判 Coverage）
         ↓
 agent-vitals-core（唯一纯规则计算：CanonicalSession + cost + coverage + findings）
         ↓
@@ -234,7 +234,7 @@ SessionStore（Tauri 内存中的只读查询模型）
 
 **coverage 的归属只有一处**：`Measured / Unmetered / Unavailable` 是 core 规则语义，
 adapter 不得直接声明结果——否则 normalizer 会把「读不到」提前翻成 0，再让 core 对
-假 0 忠实地算。HostNormalizer 只产出**观测账本**：
+假 0 忠实地算。HarnessNormalizer 只产出**观测账本**：
 
 ```text
 NormalizedEvidence {
@@ -265,11 +265,11 @@ N-1/N/N+1 投影 fixture 与独立升级顺序测试钉住。
 约束：
 
 1. `CanonicalSession`、Coverage、Finding、Cost 的语义由 core 契约定义；客户端不重算。
-2. Tauri 前端只渲染 Rust 命令返回的数据，不读取任意宿主路径。
+2. Tauri 前端只渲染 Rust 命令返回的数据，不读取任意执行环境路径。
 3. **数据产出责任矩阵**（下表）是 R1 的先行契约：Python `oneline` / state 层继续是
    当前持久 state 的唯一写者；Tauri 第一阶段只读，Session Monitor 进入后也不得成为
    第二 state 写者。
-4. 所有路径访问在 Rust 侧限定为已注册宿主根目录，前端不能传入任意本机路径。
+4. 所有路径访问在 Rust 侧限定为已注册执行环境根目录，前端不能传入任意本机路径。
 5. 金额以不可脱离的 **Money DTO** 表示：`{amount, currency, pricing_basis,
    estimated}`；聚合 API 一律返回 `by_currency` map，**禁止默认跨币种求和**；状态栏
    预算只与同币种预算比较；跨币种筛选显示分组数字与“未汇率换算”注记。
@@ -322,18 +322,18 @@ R1a 读侧 tick（已完成）→ R1b `budget.evaluate()` 迁 core → R1c Rust 
 
 | 来源 | Live 最佳路径 | Tauri 第一阶段 | 长期路径 |
 |---|---|---|---|
-| DSH | 原生 `dsh-client` session projection | 读已落盘 state/会话做 post-hoc | 保持 DSH 原生 live；Tauri 提供历史/跨宿主视图 |
+| DSH | 原生 `dsh-client` session projection | 读已落盘 state/会话做 post-hoc | 保持 DSH 原生 live；Tauri 提供历史/跨执行环境视图 |
 | Codex | `codex app-server`（尚未实现） | `~/.codex/sessions` 事后/近实时读取 | App Server 作为实时 source，日志为回放降级 |
 | 其他 CLI | 各自可验证的运行时源 | 已有日志/状态适配 | 新 adapter 进入同一契约 |
 | HTML | 不适用 | 由已知 JSON 生成 | 导出/分享，不承担 live |
 
-因此不能把“监听两个目录”称为完整统一方案：DSH 有宿主 projection，且其 zstd 日志
+因此不能把“监听两个目录”称为完整统一方案：DSH 有执行环境 projection，且其 zstd 日志
 并不天然适合简单 offset tail；Codex App Server 才是 Codex 正式 live 路线。
 
 **会话身份、去重与接管（跨来源合约）**：
 
-- 定义不变的 **`SessionKey`** = host kind + host-native id + source profile /
-  machine namespace（只用宿主 `session_id` 会在不同宿主/机器上碰撞，也会让
+- 定义不变的 **`SessionKey`** = harness kind + harness-native id + source profile /
+  machine namespace（只用执行环境 `session_id` 会在不同执行环境/机器上碰撞，也会让
   App Server 回退 rollout、重连接管时把同一逻辑会话数成两笔成本）。
 - **machine namespace 是可重放派生的、持久在 app 自有 config 的随机 UUID**（可备份/
   迁移，默认不导出）：每次安装随机生成会让重装/恢复 cache 后同一日志变新会话；
@@ -481,7 +481,7 @@ listen("monitor-status")                 -> MonitorStatus
 
 `dsh-client` 不能整体嵌入 Tauri：
 
-- host 半份依赖 DSH Node/Cordis/sessionProjection；
+- harness 半份依赖 DSH Node/Cordis/sessionProjection；
 - client 入口依赖 DSH 的 module loader、slot 和 `useProjection()`；
 - Tauri 使用 `invoke()`，没有 DSH 的 `ConvViewProps`。
 
@@ -569,7 +569,7 @@ oracle diff，并加反例/变异测试。可以不在用户机器跑 Python，�
 2. ClawHub/OpenClaw 支持声明并校验 binary 依赖；
 3. Skill 的零安装/离线使用体验不退化；
 4. state 写入、预算、导出与迁移已在 Rust 有稳定实现（且仍与 Python 字节锁步）；
-5. 发布产物而非 checkout 能完成跨宿主端到端验证；
+5. 发布产物而非 checkout 能完成跨执行环境端到端验证；
 6. **artifact provenance**——一个审计供应链的工具，其 binary 供应链需要比普通
    CLI 更强的保证：每 OS/arch 受支持矩阵、不可变版本 pin、发行签名/校验和、SBOM/
    构建 provenance、下载前验证、离线缓存/手动安装路径、升级失败回滚与最低/最高
@@ -703,7 +703,7 @@ Rust core、Tauri、fixtures、contracts 同仓，以避免多仓协议漂移。
 - 日志变更后摘要在目标延迟（P95）内更新；
 - 文件事件丢失后 rescan 可恢复；
 - DSH zstd / 非 append-only 来源不使用未经证明的 offset tail；
-- monitor 不写入用户宿主配置，不制造第二个 state 写者；
+- monitor 不写入用户执行环境配置，不制造第二个 state 写者；
 - “安静后又 append”与“结束事件重复”不重复记账；
 - 压力 fixture 下闲置 CPU / P95 延迟 / 峰值内存达到 §5.3 预算。
 
@@ -738,7 +738,7 @@ Python）——状态写链 Rust 化（R1b–R1d 完成）+ 唯一写者接管�
 | 文件事件合并/遗漏 | debounce 仅作体验优化；cursor、字节谓词、幂等 fold、周期 rescan 才是正确性来源 |
 | 文件正在原子写入 | Rust 读取失败时保留最后有效快照并重试；不把 advisory lock 当跨语言协议 |
 | **多文件快照逻辑不一致**（新 oneline.json + 旧 alert.json 组合成假一致数字） | 共享 `snapshot_id`/`generated_at` 才组合；否则按区块显示各自时间戳与“部分更新”，禁跨快照拼接 |
-| DSH zstd 多帧 | 先走宿主 projection 或全量可信读取；未经测试不得 offset resume |
+| DSH zstd 多帧 | 先走执行环境 projection 或全量可信读取；未经测试不得 offset resume |
 | 成本口径分裂 | core/公共 JSON 为唯一来源；前端不计价；同一 versioned DTO 喂 Tauri/DSH/HTML，并对冻结 fixture 对账；规则变更 DoD 含 wasm 重建 + 拷贝 + 真实 fixture 验证 |
 | **跨来源会话重复 / 成本翻倍** | `SessionKey` + `SourceRevision` + 源优先级/接管状态机；断线→回退→重连无重复 fixture |
 | **跨币种混加** | Money DTO 带 currency；聚合返回 `by_currency`；菜单栏预算只与同币种比较 |
@@ -781,7 +781,7 @@ Python）——状态写链 Rust 化（R1b–R1d 完成）+ 唯一写者接管�
    （Python 保留 mirror，both() 钉死），不再“R1 不迁 budget 规则”。
 3. Tauri 首先只读 state；Session Monitor 进入后也不得擅自成为第二 state 写者。
    数据产出责任矩阵（§4.2）是 R1 先行契约。
-4. DSH 原生 tab 保留为 DSH 的最佳 live 面；Tauri 首先做 DSH post-hoc/跨宿主视图。
+4. DSH 原生 tab 保留为 DSH 的最佳 live 面；Tauri 首先做 DSH post-hoc/跨执行环境视图。
 5. Codex live 以 App Server 为后续独立项目；文件读取是回放和近实时降级。
 6. **渐进弱化 Python**：编排/IO 立即 Rust-only；纯规则按 §7.1 分档迁 core，每档
    「先锁步再删 Python 侧」；档 3（可选退役）以状态写链 Rust 化 + 差分守卫改造 +
@@ -793,7 +793,7 @@ Python）——状态写链 Rust 化（R1b–R1d 完成）+ 唯一写者接管�
     cache，严禁写 `~/.agent-vitals/state` 权威文件。
 11. **导出不信任前端整份 session**；后端按 session key + revision 从 SessionStore
     取冻结版本。
-12. **会话身份用 `SessionKey`（host kind + native id + namespace）**，不用裸
+12. **会话身份用 `SessionKey`（harness kind + native id + namespace）**，不用裸
     `session_id`。
 13. **R1 的 writer/调度定稿为 A：Rust 产出链**（§4.2 决策 13）——Tauri 不从子进程
     调 Python 计算，而是 R1b/R1c/R1d 逐段 Rust 化生产者；exactly-once 由 §4.3
@@ -810,21 +810,21 @@ Python）——状态写链 Rust 化（R1b–R1d 完成）+ 唯一写者接管�
 | 1. R1 只刷新读者，无新鲜 state 产出链 | Critical | §4.2 数据产出责任矩阵 + R1 二选一；R1 端到端验收 |
 | 2. “收缩后平行”违反 CLAUDE.md 永久差分锁步硬限 | Critical | **方向修正（用户）**：不撤回，升级为「渐进弱化 Python」RFC——§0/§2.3/§7.1/决策 6 重写；CLAUDE.md「永久双实现」条款**已修订**为分档弱化；锁步在仍有 Python 实现期间保留，每档转移以「先证明 Rust 可承担」为门槛 |
 | 3. R2 在 SessionStore 契约前承诺工作台 | Critical | §8 重排为 R2a（契约先行）+ R2b（UI/导出）；§12 映射表 |
-| 4. adapter/core/Store 单一职责混淆 | High | §4.2 管线重画为 SourceReader→HostNormalizer→core→SessionReport→Store；DSH 两种合法路径 |
+| 4. adapter/core/Store 单一职责混淆 | High | §4.2 管线重画为 SourceReader→HarnessNormalizer→core→SessionReport→Store；DSH 两种合法路径 |
 | 5. checkpoint 持久化与单一写者无边界 | High | §5.2 app cache 写权分界；R3 验收“删 cache 只影响性能” |
 | 6. 增量管线忽略 checkpoint 仅限 turn 边界 | High | §5.2 边界算法；决策 10 |
 | 7. 跨来源会话身份/去重/接管缺失 | High | §4.3 SessionKey/SourceRevision/接管状态机；R2a fixture |
 | 8. R1 多文件快照逻辑一致性 | High | §4.2 约束 6（snapshot_id / fingerprint）；R1 范围与验收；§9 |
 | 9. 数据过期被排最后，旧数据出高置信结论 | High | §3.1 health/freshness 正交；R1 验收；决策 8 |
 | 10. 导出 IPC 信任前端整份 session + 无隐私合约 | High | §5.4 导出签名改为 session_key+revision；save dialog/redact；决策 11 |
-| 11. 验收矩阵未覆盖 wasm/DSH/TS 宿主锁步 | High | §8 全局门禁矩阵（同一 raw fixture 走 Python/Rust/wasm+DSH 对账）；§9 DoD |
+| 11. 验收矩阵未覆盖 wasm/DSH/TS 执行环境锁步 | High | §8 全局门禁矩阵（同一 raw fixture 走 Python/Rust/wasm+DSH 对账）；§9 DoD |
 | 12. Token 日历缺对账合约 | High | §8 R2b 日历轴↔会话轴对账；`list_months`/`read_month`/partial 规则 |
 | 13. 会话完结/稳定窗口/导出时机无状态机 | Medium | §8 R3 状态机 Discovered→…→Finalized→Reopened/Error |
 | 14. IPC 无版本/分页/类型化错误/并发顺序 | Medium | §5.4 versioned envelope、cursor 分页、错误码、revision 忽略规则 |
 | 15. 实时目标未绑大日志成本/背压/资源上限 | Medium | §5.3 背压/降频/预算；R3 验收 |
 | 16. 主窗口无异常/加载流程 | Medium | §3.2 页面状态矩阵（七态） |
 | 17. “设置/数据来源”暗示可编辑 | Medium | §3.2 改名“数据源状态”并明确只读 |
-| 18. 跨宿主聚合未防币种相加 | Medium | §4.2 约束 5 Money DTO + by_currency；§9；决策 9 |
+| 18. 跨执行环境聚合未防币种相加 | Medium | §4.2 约束 5 Money DTO + by_currency；§9；决策 9 |
 | 19. “本地、匿名或用户可见”混淆存储与上报 | Low | §10 默认仅本地不上传；未来遥测独立决策门 |
 
 阶段映射（原 → 本版）：R0=R0 · R1=R1 · R2=R2b · R3=R2a（前置）· R4=R3 ·
@@ -842,7 +842,7 @@ R5=R4 · R6=R5。
 | 4. 三档范围与 R 编号冲突 | High | §7.1 改**能力门 G1（桌面去 Python）/ G2（便携分发退役）**，不用预测性 R 编号；§8 R5 对齐 |
 | 5. 差分守卫随 Python 退役失去独立 oracle | High | §7.1「Python 退役后仍需独立 oracle」；§7.2 条件 7；§9 风险行 |
 | 6. R2a 只定义 adapter 接口，无首次真实数据填充 | High | §8 R2a 加 initial population 子阶段 + per-source capability 表 + 真实语料验收 |
-| 7. HostNormalizer 与 core 同争 coverage/unmetered 所有权 | High | §4.2 管线改 `NormalizedEvidence { events, observed_signals, unsupported_signals, usage_shaped_unparsed }`；core 独占三态判定 |
+| 7. HarnessNormalizer 与 core 同争 coverage/unmetered 所有权 | High | §4.2 管线改 `NormalizedEvidence { events, observed_signals, unsupported_signals, usage_shaped_unparsed }`；core 独占三态判定 |
 | 8. snapshot_id 多文件不构成可恢复原子 generation | High | §4.2 约束 6 改可提交 generation（`current-snapshot.json` manifest + 原子替换 + 崩溃/孤儿清理测试） |
 | 9. 「信任带版本的 DSH wasm 投影」无兼容/降级规则 | High | §4.2 版本兼容矩阵（contract/engine/pricing 各 min/max + 字段进化规则 + 不兼容行为）；R2a N±1 fixture |
 | 10. SessionKey machine namespace/alias 无可重放派生算法 | High | §4.3 machine namespace = 持久 app-config 随机 UUID；按 source identity 表；alias 无证据显示「可能重复」 |

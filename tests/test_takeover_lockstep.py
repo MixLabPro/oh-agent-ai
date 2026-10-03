@@ -98,7 +98,7 @@ def _fold_req(session_id, tokens):
     return {
         "session_id": session_id,
         "session_log": "/logs/%s.jsonl" % session_id,
-        "host_kind": "dsh",
+        "harness_kind": "dsh",
         "machine_namespace": "ns-abc",
         "oneline": oneline,
     }

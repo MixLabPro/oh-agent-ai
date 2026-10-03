@@ -415,14 +415,14 @@ mod tests {
 
     #[test]
     fn rewrite_appends_limit_when_missing() {
-        let sql = "SELECT host FROM usage_facts";
+        let sql = "SELECT harness FROM usage_facts";
         let r = rewrite_with_limit(sql, 50);
         assert!(r.contains("LIMIT 50"));
     }
 
     #[test]
     fn rewrite_caps_existing_limit() {
-        let sql = "SELECT host FROM usage_facts LIMIT 10000";
+        let sql = "SELECT harness FROM usage_facts LIMIT 10000";
         let r = rewrite_with_limit(sql, 50);
         assert!(r.contains("LIMIT 50"), "got {r}");
         assert!(!r.contains("LIMIT 10000"), "got {r}");
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn rewrite_keeps_smaller_limit() {
-        let sql = "SELECT host FROM usage_facts LIMIT 5";
+        let sql = "SELECT harness FROM usage_facts LIMIT 5";
         let r = rewrite_with_limit(sql, 50);
         assert!(r.contains("LIMIT 5"));
     }
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn rewrite_handles_trailing_semicolon() {
-        let sql = "SELECT host FROM usage_facts;";
+        let sql = "SELECT harness FROM usage_facts;";
         let r = rewrite_with_limit(sql, 50);
         assert!(r.contains("LIMIT 50"), "got {r}");
         assert!(r.ends_with(';'), "got {r}");
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn rewrite_is_case_insensitive() {
-        let sql = "SELECT host FROM usage_facts limit 10000";
+        let sql = "SELECT harness FROM usage_facts limit 10000";
         let r = rewrite_with_limit(sql, 50);
         assert!(r.contains("LIMIT 50"), "got {r}");
         assert!(!r.contains("10000"), "got {r}");
@@ -474,7 +474,7 @@ mod tests {
     #[test]
     fn rewrite_does_not_match_quoted_identifier() {
         // 双引号标识符里的 LIMIT 不应被改写。
-        let sql = "SELECT host AS \"LIMIT 5\" FROM v_facts_safe";
+        let sql = "SELECT harness AS \"LIMIT 5\" FROM v_facts_safe";
         let r = rewrite_with_limit(sql, 50);
         assert!(r.contains("\"LIMIT 5\""), "引号标识符保持：{r}");
     }
@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn rewrite_handles_sql_with_quotes_correctly() {
         // 真实 LIMIT + 字符串里的 LIMIT 共存。
-        let sql = "SELECT * FROM v_facts_safe WHERE host = 'foo' LIMIT 10000";
+        let sql = "SELECT * FROM v_facts_safe WHERE harness = 'foo' LIMIT 10000";
         let r = rewrite_with_limit(sql, 50);
         assert!(r.contains("LIMIT 50"), "应被改写：{r}");
         assert!(!r.contains("10000"), "应截断 10000：{r}");
@@ -492,11 +492,11 @@ mod tests {
     fn rewrite_does_not_replace_in_substring_token() {
         // 验证 `find_last_limit` 词边界：colimit_audit 内的 `limit` 不能
         // 被误判为 LIMIT 关键字 → 没有 `LIMIT ` 词边界 → 走"追加"分支。
-        let sql = "SELECT host FROM colimit_audit";
+        let sql = "SELECT harness FROM colimit_audit";
         let r = rewrite_with_limit(sql, 50);
         // 追加分支：原 SQL 末尾接 " LIMIT 50"。"colimit_audit" 这个 token 保持原样
         // （没有在 colimit_audit 与 LIMIT 50 之间插入东西）。
-        assert_eq!(r, "SELECT host FROM colimit_audit LIMIT 50");
+        assert_eq!(r, "SELECT harness FROM colimit_audit LIMIT 50");
     }
 }
 

@@ -6,7 +6,7 @@
 //! 调研发现见 `docs/AGENT_VITALS_V0_8_PHASE_F_RESEARCH.md` §2。这里先落地风险
 //! 最低、确定性最高的切面：Claude Code 的工具调用名字本身就带着 MCP 服务器身份
 //! （`mcp__github__search_issues` 这种三段式），今天这些名字原样滚进通用
-//! `tool_calls` 桶（`hosts/claude_code/sessions/evidence.rs::normalize_tool_name`
+//! `tool_calls` 桶（`harnesses/claude_code/sessions/evidence.rs::normalize_tool_name`
 //! 的 `other => other` 分支），跟内置工具混在一起——本模块只是把这层身份剥出来，
 //! **不改动、不重算**现有的 `tool_calls`/SV611 桶，两者是同一批事件的两个独立
 //! 投影（与 skill invocation 同时喂 Session 的 `tool_calls` 和 Skill 的
@@ -14,11 +14,11 @@
 //!
 //! **命名约定目前只在 Claude Code 上被证实**：真实运行环境里 MCP 工具确凿以
 //! `mcp__<server>__<tool>` 三段式出现。Codex 的 `McpToolCall` item 类型已经在
-//! `hosts/codex/sessions/evidence.rs` 里被识别（计进 `Signal::ToolCalls`），但它
+//! `harnesses/codex/sessions/evidence.rs` 里被识别（计进 `Signal::ToolCalls`），但它
 //! 的 `name` 字段真实形状未经真机语料验证——本仓库自己的 Codex fixture
 //! （`fixtures/codex/paginated.jsonl`）里那条 `"mcp__github"` 是手写合成值，两段式，
 //! 不能当作证据。DSH/WorkBuddy 未调研。**因此本模块的解析函数只声明识别三段式
-//! 命名，不为任何宿主的 wire 形状背书**——调用方决定要不要在某个宿主上使用它。
+//! 命名，不为任何执行环境的 wire 形状背书**——调用方决定要不要在某个执行环境上使用它。
 //! Python 平行实现 `packages/agent-vitals-python/agent_vitals/agent/mcp.py`，
 //! 由 `tests/test_mcp.py` 的字符对字符钉测交叉锁定（尚无 CLI 命令，暂不进
 //! `both()` 差分——那需要 F2 的报告面落地之后才有 JSON 输出可比）。

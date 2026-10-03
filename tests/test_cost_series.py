@@ -98,7 +98,7 @@ class CostSeriesLockstepTests(unittest.TestCase):
                                msg="曲线终值必须等于 cost_report.total")
 
     def test_carries_unpriced_on_null_peak(self):
-        """对应 Rust `cost_series_carries_unpriced_on_null_peak`：is_peak 为 None（宿主
+        """对应 Rust `cost_series_carries_unpriced_on_null_peak`：is_peak 为 None（执行环境
         没上报时间戳）→ 这笔不计价，累计保持、priced 不增——不是按空闲价猜一档，
         也不是归零。缺 is_peak 键同 None。"""
         out = cost_series(REQUESTS_NULL_PEAK, {}, PRICING)

@@ -5,7 +5,7 @@
 
 ## 0. 背景：这条链已经通了
 
-宿主（Node）把原始 session 事件喂给 Rust 行为规则（wasm），算出 SV601–SV614 findings（单事件规则 + 轨迹级检测器），经
+执行环境（Node）把原始 session 事件喂给 Rust 行为规则（wasm），算出 SV601–SV614 findings（单事件规则 + 轨迹级检测器），经
 `behaviorFindings` projection 推给浏览器，`dsh-client` 的「审计」tab 用 `useProjection` 渲染。
 
 第一份真实数据已经能看出两个真问题（一个误报、一个真命中），说明**链路正确、规则引擎有效**；
@@ -111,7 +111,7 @@ fn detect_sv605(event: &Value) -> Option<String> {
 | Rust wasm | `crates/agent-vitals-wasm/src/lib.rs` | `audit_events(events_json, workspace_root)` 透传 |
 | Python | `scripts/agent_vitals/agent/behavior.py` | `match_behavior(events, workspace_root)` 双维护同步 |
 | 二进制 CLI | `src/behavior.rs`（薄封装） | `audit_session_log` 从 session log 头取 cwd 传入 |
-| 宿主插件 | `dsh-client/index.js` | 从 session header 取 `cwd`，透传给 wasm `audit_events` |
+| 执行环境插件 | `dsh-client/index.js` | 从 session header 取 `cwd`，透传给 wasm `audit_events` |
 
 ### 4.3 工作区根从哪来（待实现时验证）
 
@@ -119,7 +119,7 @@ fn detect_sv605(event: &Value) -> Option<String> {
 
 - **A. session 事件里带 cwd**：若 DSH 有 `session/start` 或 `workspace` 类事件携带 `cwd`，
   则在 projection 的 `apply` 里捕获进 `state.cwd`，`view` 时传给 wasm。
-- **B. 宿主插件直接从 session 对象读**：`ctx.on('session/event', (session) => session.header.cwd)`
+- **B. 执行环境插件直接从 session 对象读**：`ctx.on('session/event', (session) => session.header.cwd)`
   （token-meter 同款钩子），把 cwd 存进投影 state。
 
 倾向 A（cwd 随事件流走，fold 保持纯函数），若 DSH 无此类事件则退 B。
@@ -127,7 +127,7 @@ fn detect_sv605(event: &Value) -> Option<String> {
 ### 4.4 边界语义（要写进测试）
 
 - `workspace_root` 为空/未知时：SV605 **退化为当前行为**（只判绝对路径），绝不因拿不到
-  cwd 而漏报——宁可多报不误放（与「host 能力缺失时不伪造、缺列仍有价值」同一条纪律）。
+  cwd 而漏报——宁可多报不误放（与「harness 能力缺失时不伪造、缺列仍有价值」同一条纪律）。
 - 前缀判定必须按**路径段**边界，不能裸 `startsWith`（`/proj` 不应匹配 `/projects`）。
 - `/etc/`、`~/.ssh/authorized_keys` 等仍由 SV604 负责，SV605 不重复报（现有注释已约定）。
 
@@ -200,7 +200,7 @@ token 行下方：
 
 ## 6. 开放问题（已解决，2026-08-20）
 
-1. **cwd 的准确来源**（§4.3 A/B）——走 A：`dsh-client/src/host/index.ts` 监听
+1. **cwd 的准确来源**（§4.3 A/B）——走 A：`dsh-client/src/harness/index.ts` 监听
    `session/created`（首次 + 冷重放）和 `session/event`（活事件流）两个钩子，
    把 `session.header.cwd` 记进 `cwdBySession`，`behaviorFindings` 投影的
    `view()` 把它传给 wasm `audit_events(events_json, cwd)`。
@@ -209,7 +209,7 @@ token 行下方：
    `forkAt(seq)`（派生新会话）和只读 `scrollTop`，**没有 jump-to-seq 或跨
    tab 导航接口**。按预案降级为「复制 seq」——`AuditView.tsx` 的
    `copySeq()`，每行一个「复制」按钮，合并行（F4）复制该组全部 seq
-   （逗号分隔）。等宿主契约补上跳转能力后再升级。
+   （逗号分隔）。等执行环境契约补上跳转能力后再升级。
 3. **F3 三态标记的持久化**——先做纯前端方案：`localStorage`
    （`agent-vitals-audit:marks:v1`），键为 `JSON.stringify([rule, evidence])`
    ——与 F4 的合并键一致，标记一次即对整组「×N」生效。三态：

@@ -2,12 +2,12 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent 
 import { FxSection } from "./FxSection";
 import { PriceCardSection } from "./PriceCardSection";
 import { QuoteVariantsSection } from "./QuoteVariantsSection";
-import { hostName } from "../../lib/hostNames";
+import { harnessName } from "../../lib/harnessNames";
 import { stable } from "../../lib/stable";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
 import { formatMinorMoney, languagePreference, message, message as translate, setLanguagePreference, useLanguage, type AppLanguage, type LanguagePreference, type MessageKey } from "../../lib/i18n";
 import { isEditableCurrency, minorToEditableInput, suggestedInputCurrency, type EditableCurrency } from "../../lib/currencyPreference";
-import { FOLLOW_SYSTEM_TIMEZONE, fetchWatcherHealth, type WatcherHealthStatus, addCustomSourceRoot, amendBillingDeclaration, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, disableBudgetProfile, listenAppEvents, makeInvalidationGate, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHostControls, readSyncRequestStatus, readStatisticsSettings, readStatisticsTimezone, removeCustomSourceRoot, resolveBillingImportCandidate, retryBillingRecalculation, revokeBillingDeclaration, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHostExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHostControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
+import { FOLLOW_SYSTEM_TIMEZONE, fetchWatcherHealth, type WatcherHealthStatus, addCustomSourceRoot, amendBillingDeclaration, checkForUpdates, clearBudgetSnooze, deleteImportedSourceData, disableBudgetProfile, listenAppEvents, makeInvalidationGate, openTrustedReleasesPage, pickCustomSourceRoot, previewBillingDeclaration, readAboutDiagnostics, readBillingSettings, readBudgetSettings, readCustomSourceConfig, readMonthlyExportSummary, readQuotaReminderConfig, readSourceHealth, readSourceHarnessControls, readSyncRequestStatus, readStatisticsSettings, readStatisticsTimezone, removeCustomSourceRoot, resolveBillingImportCandidate, retryBillingRecalculation, revokeBillingDeclaration, safeUiError, saveBudgetProfile, saveBillingDeclaration, saveDiagnosticPackage, saveQuotaReminderConfig, saveRetentionMonths, saveStatisticsTimezone, setSourceHarnessExcluded, setSyncPaused, snoozeBudgetCurrentPeriod, triggerSync, type AboutDiagnosticsReport, type BillingSettingsReport, type BudgetSettingsReport, type CustomSourceReport, type MonthlyExportSummary, type QuotaReminderConfig, type SourceConnectionState, type SourceErrorKind, type SourceHealthReport, type SourceHarnessControls, type StatisticsSettingsReport, type UpdateCheckResult } from "../../lib/tauri";
 
 function sourceStateLabel(state: SourceConnectionState, language: AppLanguage): string {
   return message(`source.state.${state}` as MessageKey, language);
@@ -35,8 +35,8 @@ function sourceTone(state: SourceConnectionState): "success" | "warning" | "neut
   return "neutral";
 }
 
-function sourceLabel(host: string): string {
-  return hostName(host);
+function sourceLabel(harness: string): string {
+  return harnessName(harness);
 }
 
 function shortenPath(path: string): string {
@@ -126,8 +126,8 @@ function csvCell(value: string | number | null): string {
 }
 
 function exportCsv(summary: MonthlyExportSummary): string {
-  const header = ["统计月份", "宿主", "服务商", "tokens（宿主汇总）", "计价口径", "币种", "金额", "未定价/待确认", "证据口径", "价格口径", "新鲜度"];
-  const rows = summary.rows.map((row) => [summary.month, row.host, row.provider ?? "宿主汇总", row.tokens, row.basis, row.currency, row.amount === null ? null : row.amount.toFixed(6), row.unresolved ? "是" : "否", row.evidence_basis, row.pricing_method, row.freshness]);
+  const header = ["统计月份", "执行环境", "服务商", "tokens（执行环境汇总）", "计价口径", "币种", "金额", "未定价/待确认", "证据口径", "价格口径", "新鲜度"];
+  const rows = summary.rows.map((row) => [summary.month, row.harness, row.provider ?? "执行环境汇总", row.tokens, row.basis, row.currency, row.amount === null ? null : row.amount.toFixed(6), row.unresolved ? "是" : "否", row.evidence_basis, row.pricing_method, row.freshness]);
   return [header, ...rows].map((line) => line.map(csvCell).join(",")).join("\n") + "\n";
 }
 
@@ -388,7 +388,7 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
   const declarationScopes = declarationGroup?.model_id && declarationGroup.model_id !== "<unknown>"
     ? [{ scope_kind: "model" as const, scope_value: declarationGroup.model_id }]
     : [{ scope_kind: "provider" as const, scope_value: "unresolved" }];
-  // No recognisable model means nothing to narrow the declaration with; declarations no longer bind to a host,
+  // No recognisable model means nothing to narrow the declaration with; declarations no longer bind to a harness,
   // so an unscoped one would become a catch-all for all usage. Block it here (the data layer rejects it too).
   const declarationUnbounded = declarationScopes.every((scope) => scope.scope_kind === "provider");
   const previewDeclaration = async () => {
@@ -428,11 +428,11 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
       {hasCandidateHistory && <div className="settings-billing-todo"><div><strong>{tr(hasPending ? "billing.pendingTitle" : "billing.dismissedTitle")}</strong><span>{hasPending ? tr("billing.pendingCount", { count: pendingGroups.length + pendingCandidates.length }) : tr("billing.dismissedCount", { count: dismissedCandidates.length })}</span></div><button className="button button-primary" type="button" onClick={() => setExpanded((value) => !value)}>{tr(expanded ? "billing.hideCandidates" : "billing.showCandidates")}</button></div>}
       {!hasPending && report.groups_status === "ok" && report.candidates_status === "ok" && <p className="settings-billing-empty">{tr("billing.noPending")}</p>}
       {expanded && <div className="settings-billing-pending" aria-label={tr("billing.pendingAria")}>
-        {pendingGroups.slice(0, 32).map((group) => <article className="settings-billing-row" key={group.group_id}><div><strong>{group.host} · {group.provider_id} · {group.model_id}</strong><span>{tr("billing.groupSummary", { tokens: compactTokens(group.tokens), sessions: group.session_count, amounts: billingAmountText(group.estimated_amounts, language), evidence: tr(group.evidence_state === "unresolved" ? "billing.evidenceUnresolved" : group.evidence_state === "determined" ? "billing.evidenceDetermined" : "billing.evidenceNeedsReview") })}</span></div><div className="settings-billing-row-actions"><small>{group.effective_start}{group.effective_end && group.effective_end !== group.effective_start ? ` – ${group.effective_end}` : ""}</small><button className="button button-secondary button-small" type="button" onClick={() => openDeclaration(group)} disabled={declarationBusy !== null}>{tr("billing.declare")}</button></div></article>)}
+        {pendingGroups.slice(0, 32).map((group) => <article className="settings-billing-row" key={group.group_id}><div><strong>{group.harness} · {group.provider_id} · {group.model_id}</strong><span>{tr("billing.groupSummary", { tokens: compactTokens(group.tokens), sessions: group.session_count, amounts: billingAmountText(group.estimated_amounts, language), evidence: tr(group.evidence_state === "unresolved" ? "billing.evidenceUnresolved" : group.evidence_state === "determined" ? "billing.evidenceDetermined" : "billing.evidenceNeedsReview") })}</span></div><div className="settings-billing-row-actions"><small>{group.effective_start}{group.effective_end && group.effective_end !== group.effective_start ? ` – ${group.effective_end}` : ""}</small><button className="button button-secondary button-small" type="button" onClick={() => openDeclaration(group)} disabled={declarationBusy !== null}>{tr("billing.declare")}</button></div></article>)}
         {declarationGroup && <div className="settings-billing-declaration" role="dialog" aria-labelledby="settings-billing-declaration-title"><div className="settings-card-heading"><div><p className="eyebrow">{tr("billing.previewFirst")}</p><h4 id="settings-billing-declaration-title">{tr("billing.declareTitle", { provider: declarationGroup.provider_id, model: declarationGroup.model_id })}</h4></div><button className="button button-secondary button-small" type="button" onClick={() => setDeclarationGroup(null)} disabled={declarationBusy !== null}>{tr("billing.cancel")}</button></div><label><span>{tr("billing.relationship")}</span><select value={declarationKind} onChange={(event) => { setDeclarationKind(event.target.value as typeof declarationKind); setDeclarationImpact(null); }} disabled={declarationBusy !== null}><option value="official_api">{tr("billing.officialApi")}</option><option value="third_party">{tr("billing.thirdParty")}</option><option value="organization">{tr("billing.organization")}</option></select></label><p className="settings-data-help">{tr("billing.scopeDate", { scope: declarationScopes.map((scope) => `${scope.scope_kind}=${scope.scope_value}`).join(", "), start: declarationGroup.effective_start, end: declarationGroup.effective_end ? ` – ${declarationGroup.effective_end}` : tr("billing.continuing") })}</p>{declarationUnbounded && <p className="settings-budget-warning" role="alert">{tr("billing.needModel")}</p>}<div className="settings-billing-declaration-actions"><button className="button button-secondary" type="button" onClick={previewDeclaration} disabled={declarationBusy !== null || declarationUnbounded}>{tr(declarationBusy === "preview" ? "billing.previewing" : "billing.previewImpact")}</button>{declarationImpact && <button className="button button-primary" type="button" onClick={saveDeclaration} disabled={declarationBusy !== null}>{tr(declarationBusy === "save" ? "billing.saving" : "billing.confirmSave")}</button>}</div>{declarationImpact && <div className="settings-billing-preview" role="status"><strong>{tr("billing.impactCount", { tokens: compactTokens(declarationImpact.moved.tokens), sessions: declarationImpact.moved.session_count })}</strong><span>{tr(declarationImpact.changes_amounts ? "billing.impactMoney" : "billing.impactNoMoney")}</span>{declarationImpact.pending.tokens > 0 && <small>{tr("billing.pendingTokens", { tokens: compactTokens(declarationImpact.pending.tokens) })}</small>}</div>}
         </div>}
-        {pendingCandidates.map((candidate) => <article className="settings-billing-row" key={candidate.candidate_id}><div><strong>{candidate.provider_id} · {tr("billing.perMonth", { amount: minorToDecimal(candidate.amount_minor, candidate.currency, language) })} · {candidate.host}</strong><span>{tr("billing.candidateHistory", { start: candidate.billing_period_start, impact: candidate.impact ? tr("billing.candidateImpact", { tokens: compactTokens(candidate.impact.total_tokens), sessions: candidate.impact.session_count }) : "" })}</span></div><div className="settings-billing-row-actions"><small>{tr("billing.candidateNoChange")}</small><button className="button button-secondary button-small" type="button" onClick={() => changeCandidate(candidate.candidate_id, "dismiss")} disabled={candidateBusy !== null}>{tr(candidateBusy === candidate.candidate_id ? "billing.saving" : "billing.notMine")}</button></div></article>)}
-        {dismissedCandidates.length > 0 && <div className="settings-billing-list"><div className="settings-setting-label">{tr("billing.dismissedList")}</div>{dismissedCandidates.slice(0, 32).map((candidate) => <article className="settings-billing-row" key={candidate.candidate_id}><div><strong>{candidate.provider_id} · {candidate.host}</strong><span>{tr("billing.dismissedHelp")}</span></div><button className="button button-secondary button-small" type="button" onClick={() => changeCandidate(candidate.candidate_id, "reopen")} disabled={candidateBusy !== null}>{tr(candidateBusy === candidate.candidate_id ? "billing.saving" : "billing.reopen")}</button></article>)}</div>}
+        {pendingCandidates.map((candidate) => <article className="settings-billing-row" key={candidate.candidate_id}><div><strong>{candidate.provider_id} · {tr("billing.perMonth", { amount: minorToDecimal(candidate.amount_minor, candidate.currency, language) })} · {candidate.harness}</strong><span>{tr("billing.candidateHistory", { start: candidate.billing_period_start, impact: candidate.impact ? tr("billing.candidateImpact", { tokens: compactTokens(candidate.impact.total_tokens), sessions: candidate.impact.session_count }) : "" })}</span></div><div className="settings-billing-row-actions"><small>{tr("billing.candidateNoChange")}</small><button className="button button-secondary button-small" type="button" onClick={() => changeCandidate(candidate.candidate_id, "dismiss")} disabled={candidateBusy !== null}>{tr(candidateBusy === candidate.candidate_id ? "billing.saving" : "billing.notMine")}</button></div></article>)}
+        {dismissedCandidates.length > 0 && <div className="settings-billing-list"><div className="settings-setting-label">{tr("billing.dismissedList")}</div>{dismissedCandidates.slice(0, 32).map((candidate) => <article className="settings-billing-row" key={candidate.candidate_id}><div><strong>{candidate.provider_id} · {candidate.harness}</strong><span>{tr("billing.dismissedHelp")}</span></div><button className="button button-secondary button-small" type="button" onClick={() => changeCandidate(candidate.candidate_id, "reopen")} disabled={candidateBusy !== null}>{tr(candidateBusy === candidate.candidate_id ? "billing.saving" : "billing.reopen")}</button></article>)}</div>}
         <p className="settings-billing-deferred" role="note">{tr("billing.candidatePolicy")}</p>
       </div>}
       {report.declarations_status !== "unavailable" && report.declarations.length > 0 && <div className="settings-billing-list">
@@ -458,7 +458,7 @@ function BillingSection({ report, loading, error, onReload }: BillingSectionProp
         </article>)}
       </div>}
       {failedJobs.length > 0 && <div className="settings-billing-job-warning" role="alert"><div><strong>{tr("billing.jobWarning")}</strong><span>{tr("billing.jobWarningHelp")}</span></div><div className="settings-billing-job-list">{failedJobs.slice(0, 32).map((job) => <article className="settings-billing-job-row" key={job.job_id}><div><strong>{job.job_id}</strong><span>{tr(job.status === "cancelled" ? "billing.jobCancelled" : "billing.jobFailed")}{job.error_code ? ` · ${job.error_code}` : ""} · {tr("billing.jobRequested", { date: observedAt(job.requested_at_ms) })}</span></div><button className="button button-secondary button-small" type="button" onClick={() => retryJob(job.job_id)} disabled={retryJobId !== null}>{tr(retryJobId === job.job_id ? "billing.retrying" : "billing.retry")}</button></article>)}</div><small>{tr("billing.retryHelp")}</small></div>}
-      {report.bills_status !== "unavailable" && report.bills.length > 0 && <div className="settings-billing-list"><div className="settings-setting-label">{tr("billing.recordedBills")}</div>{report.bills.slice(0, 64).map((bill) => <div className="settings-billing-row" key={bill.bill_id}><div><strong>{bill.host} · {bill.provider_id}</strong><span>{minorToDecimal(bill.amount_minor, bill.currency, language)} · {tr(bill.billing_basis === "fixed_subscription" ? "billing.billSubscription" : bill.billing_basis === "host_billed" ? "billing.billHostBilled" : bill.billing_basis === "metered_actual" ? "billing.billMeteredActual" : "billing.unknownBasis")}</span></div><small>{bill.billing_period} · {tr(bill.has_evidence ? "billing.sourceRecorded" : "billing.sourceMissing")}</small></div>)}</div>}
+      {report.bills_status !== "unavailable" && report.bills.length > 0 && <div className="settings-billing-list"><div className="settings-setting-label">{tr("billing.recordedBills")}</div>{report.bills.slice(0, 64).map((bill) => <div className="settings-billing-row" key={bill.bill_id}><div><strong>{bill.harness} · {bill.provider_id}</strong><span>{minorToDecimal(bill.amount_minor, bill.currency, language)} · {tr(bill.billing_basis === "fixed_subscription" ? "billing.billSubscription" : bill.billing_basis === "harness_billed" ? "billing.billHarnessBilled" : bill.billing_basis === "metered_actual" ? "billing.billMeteredActual" : "billing.unknownBasis")}</span></div><small>{bill.billing_period} · {tr(bill.has_evidence ? "billing.sourceRecorded" : "billing.sourceMissing")}</small></div>)}</div>}
       {(report.groups_status === "unavailable" || report.candidates_status === "unavailable") && <p className="settings-billing-unavailable" role="alert">{tr("billing.pendingUnavailable")}</p>}
       {report.declarations_status === "unavailable" && <p className="settings-billing-unavailable" role="alert">{tr("billing.declarationsUnavailable")}</p>}
       {report.jobs_status === "unavailable" && <p className="settings-billing-unavailable" role="alert">{tr("billing.jobsUnavailable")}</p>}
@@ -640,18 +640,18 @@ function QuotaReminderSection({ config, loading, error, onReload }: QuotaReminde
   </section>;
 }
 
-function SourceRow({ source, syncing, sourceControlHost, deleteConfirmHost, deleteBusyHost, supportedHosts, onSync, onToggleExcluded, onRequestDelete, onCancelDelete, onDelete }: { source: SourceHealthReport["sources"][number]; syncing: boolean; sourceControlHost: string | null; deleteConfirmHost: string | null; deleteBusyHost: string | null; supportedHosts: string[]; onSync: () => void; onToggleExcluded: (source: SourceHealthReport["sources"][number]) => void; onRequestDelete: (source: SourceHealthReport["sources"][number]) => void; onCancelDelete: () => void; onDelete: (source: SourceHealthReport["sources"][number]) => void }) {
+function SourceRow({ source, syncing, sourceControlHarness, deleteConfirmHarness, deleteBusyHarness, supportedHarnesses, onSync, onToggleExcluded, onRequestDelete, onCancelDelete, onDelete }: { source: SourceHealthReport["sources"][number]; syncing: boolean; sourceControlHarness: string | null; deleteConfirmHarness: string | null; deleteBusyHarness: string | null; supportedHarnesses: string[]; onSync: () => void; onToggleExcluded: (source: SourceHealthReport["sources"][number]) => void; onRequestDelete: (source: SourceHealthReport["sources"][number]) => void; onCancelDelete: () => void; onDelete: (source: SourceHealthReport["sources"][number]) => void }) {
   const language = useLanguage();
   const tr = (key: MessageKey, parameters: Record<string, string | number> = {}) => message(key, language, parameters);
   const errorText = source.error_kinds.map((kind) => sourceErrorLabel(kind, language)).join(" · ");
   const imported = source.connection_state === "not_detected" && source.sessions === 0 ? tr("source.notImported") : tr("source.imported", { sessions: source.sessions, facts: source.facts });
-  const label = sourceLabel(source.host);
+  const label = sourceLabel(source.harness);
   const actionLabel = syncActionLabel(source.connection_state);
-  const controlLabel = supportedHosts.includes(source.host) ? sourceControlLabel(source.connection_state) : null;
-  const controlBusy = sourceControlHost === source.host;
-  const deleteAllowed = supportedHosts.includes(source.host) && (source.facts > 0 || source.sessions > 0);
-  const deleteConfirming = deleteConfirmHost === source.host;
-  const deleteBusy = deleteBusyHost === source.host;
+  const controlLabel = supportedHarnesses.includes(source.harness) ? sourceControlLabel(source.connection_state) : null;
+  const controlBusy = sourceControlHarness === source.harness;
+  const deleteAllowed = supportedHarnesses.includes(source.harness) && (source.facts > 0 || source.sessions > 0);
+  const deleteConfirming = deleteConfirmHarness === source.harness;
+  const deleteBusy = deleteBusyHarness === source.harness;
   return <article className="settings-source-row" tabIndex={0} aria-label={`${label}, ${sourceStateLabel(source.connection_state, language)}`}>
     <div className="settings-source-main">
       <div className={`settings-source-dot settings-source-dot-${sourceTone(source.connection_state)}`} aria-hidden="true" />
@@ -659,7 +659,7 @@ function SourceRow({ source, syncing, sourceControlHost, deleteConfirmHost, dele
     </div>
     <div className="settings-source-metrics"><span>{imported}</span><span>{tr("source.latestRecord", { time: observedAt(source.last_event_at_ms) })}</span>{source.failed_sources > 0 && <span className="settings-source-error">{tr("source.readFailed")} · {errorText || tr("source.readFailed")}</span>}</div>
     <div className="settings-source-scan">{tr("source.scannedFiles", { count: source.source_count })}<br /><small>{source.last_scanned_at_ms === null ? tr("source.notScanned") : tr("source.lastScanned", { time: observedAt(source.last_scanned_at_ms) })}</small></div>
-    <div className="settings-source-actions">{controlLabel && <button className="button button-secondary button-small settings-source-action" type="button" onClick={() => onToggleExcluded(source)} disabled={controlBusy || deleteBusy || syncing}>{controlBusy ? tr("source.saving") : controlLabel}</button>}{actionLabel && <button className="button button-secondary button-small settings-source-action" type="button" onClick={onSync} disabled={syncing || controlBusy || deleteBusy}>{syncing ? tr("source.syncing") : actionLabel}</button>}{deleteAllowed && !deleteConfirming && <button className="button button-danger button-small settings-source-action" type="button" onClick={() => onRequestDelete(source)} disabled={controlBusy || deleteBusy || syncing}>{tr("source.deleteImported")}</button>}{deleteConfirming && <div className="settings-source-delete-confirm" role="group" aria-label={tr("source.deleteConfirmAria", { host: label })}><strong>{tr("source.deleteConfirm", { facts: source.facts, sessions: source.sessions })}</strong><span>{tr("source.deleteScope")}</span><div><button className="button button-secondary button-small" type="button" onClick={onCancelDelete} disabled={deleteBusy}>{tr("source.cancel")}</button><button className="button button-danger button-small" type="button" onClick={() => onDelete(source)} disabled={deleteBusy}>{tr(deleteBusy ? "source.deleting" : "source.confirmDelete")}</button></div></div>}</div>
+    <div className="settings-source-actions">{controlLabel && <button className="button button-secondary button-small settings-source-action" type="button" onClick={() => onToggleExcluded(source)} disabled={controlBusy || deleteBusy || syncing}>{controlBusy ? tr("source.saving") : controlLabel}</button>}{actionLabel && <button className="button button-secondary button-small settings-source-action" type="button" onClick={onSync} disabled={syncing || controlBusy || deleteBusy}>{syncing ? tr("source.syncing") : actionLabel}</button>}{deleteAllowed && !deleteConfirming && <button className="button button-danger button-small settings-source-action" type="button" onClick={() => onRequestDelete(source)} disabled={controlBusy || deleteBusy || syncing}>{tr("source.deleteImported")}</button>}{deleteConfirming && <div className="settings-source-delete-confirm" role="group" aria-label={tr("source.deleteConfirmAria", { harness: label })}><strong>{tr("source.deleteConfirm", { facts: source.facts, sessions: source.sessions })}</strong><span>{tr("source.deleteScope")}</span><div><button className="button button-secondary button-small" type="button" onClick={onCancelDelete} disabled={deleteBusy}>{tr("source.cancel")}</button><button className="button button-danger button-small" type="button" onClick={() => onDelete(source)} disabled={deleteBusy}>{tr(deleteBusy ? "source.deleting" : "source.confirmDelete")}</button></div></div>}</div>
   </article>;
 }
 
@@ -685,7 +685,7 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
     }).then((unsubscribe) => { if (active) cleanup = unsubscribe; else unsubscribe(); });
     return () => { active = false; cleanup?.(); };
   }, []);
-  const [host, setHost] = useState<"codex" | "claude-code" | "dsh">("codex");
+  const [harness, setHarness] = useState<"codex" | "claude-code" | "dsh">("codex");
   const [root, setRoot] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -713,7 +713,7 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
     setActionError(null);
     setMessage(null);
     try {
-      const result = await addCustomSourceRoot(host, root.trim());
+      const result = await addCustomSourceRoot(harness, root.trim());
       if (!mounted.current) return;
       setMessage(tr(result.changed ? "sx.folderSavedSyncing" : "sx.folderAlreadySyncing"));
       onReload();
@@ -732,7 +732,7 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
     setActionError(null);
     setMessage(null);
     try {
-      const result = await removeCustomSourceRoot(source.host, source.root);
+      const result = await removeCustomSourceRoot(source.harness, source.root);
       if (!mounted.current) return;
       setMessage(tr(result.changed ? "sx.removed" : "sx.notInScope"));
       onReload();
@@ -751,15 +751,15 @@ function CustomSourceSection({ report, loading, error, onReload, onSync }: Custo
     {report?.status === "unavailable" && <div className="settings-source-state"><strong>{tr("sx.locUnavailable")}</strong><span>{tr("sx.locUnavailableHelp")}</span></div>}
     {report?.status === "ok" && <>
       <div className="settings-location-list" aria-label={tr("sx.stdLocations")}>
-        {Object.entries(report.locations).filter(([, path]) => path).map(([locationHost, path]) => <div className="settings-location-row" key={locationHost}><strong>{sourceLabel(locationHost)}</strong><span>{shortenPath(path as string)}</span><details><summary>{tr("sx.showPath")}</summary><code>{path}</code></details></div>)}
+        {Object.entries(report.locations).filter(([, path]) => path).map(([locationHarness, path]) => <div className="settings-location-row" key={locationHarness}><strong>{sourceLabel(locationHarness)}</strong><span>{shortenPath(path as string)}</span><details><summary>{tr("sx.showPath")}</summary><code>{path}</code></details></div>)}
       </div>
       <form className="settings-custom-form" onSubmit={addRoot}>
-        <label><span>{tr("sx.tool")}</span><select value={host} onChange={(event) => setHost(event.target.value as typeof host)}><option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="dsh">DeepSeek Harness</option></select></label>
+        <label><span>{tr("sx.tool")}</span><select value={harness} onChange={(event) => setHarness(event.target.value as typeof harness)}><option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="dsh">DeepSeek Harness</option></select></label>
         <label className="settings-custom-path"><span>{tr("sx.folder")}</span><input value={root} onChange={(event) => setRoot(event.target.value)} placeholder="/Volumes/…/sessions" autoComplete="off" /></label>
         <button className="button button-secondary" type="button" onClick={chooseRoot} disabled={saving}>{tr("sx.chooseFolder")}</button>
         <button className="button button-secondary" type="submit" disabled={saving || !root.trim()}>{saving ? tr("sx.saving") : tr("sx.addSync")}</button>
       </form>
-      {report.sources.length > 0 && <div className="settings-custom-list" aria-label={tr("sx.addedLocations")}>{report.sources.map((source) => <div className="settings-custom-row" key={`${source.host}:${source.root}`}><div><strong>{sourceLabel(source.host)}</strong><span>{shortenPath(source.root)}</span><details><summary>{tr("sx.showPath")}</summary><code>{source.root}</code></details></div><button className="button button-secondary button-small" type="button" onClick={() => removeRoot(source)} disabled={saving}>{tr("sx.removeLocation")}</button></div>)}</div>}
+      {report.sources.length > 0 && <div className="settings-custom-list" aria-label={tr("sx.addedLocations")}>{report.sources.map((source) => <div className="settings-custom-row" key={`${source.harness}:${source.root}`}><div><strong>{sourceLabel(source.harness)}</strong><span>{shortenPath(source.root)}</span><details><summary>{tr("sx.showPath")}</summary><code>{source.root}</code></details></div><button className="button button-secondary button-small" type="button" onClick={() => removeRoot(source)} disabled={saving}>{tr("sx.removeLocation")}</button></div>)}</div>}
       {report.sources.length === 0 && <p className="settings-custom-empty">{tr("sx.noneAdded")}</p>}
     </>}
     {actionError && <div className="error-banner" role="alert">{actionError}</div>}
@@ -786,14 +786,14 @@ function watcherStatusLabel(health: WatcherHealthStatus | null, language: AppLan
 export function SettingsPage({ focusSection = null, onSectionFocused }: { focusSection?: "settings-sources" | "settings-billing" | "settings-budget" | null; onSectionFocused?: () => void }) {
   const language = useLanguage();
   const [report, setReport] = useState<SourceHealthReport | null>(null);
-  const [sourceControls, setSourceControls] = useState<SourceHostControls | null>(null);
+  const [sourceControls, setSourceControls] = useState<SourceHarnessControls | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [sourceControlHost, setSourceControlHost] = useState<string | null>(null);
+  const [sourceControlHarness, setSourceControlHarness] = useState<string | null>(null);
   const [sourceControlError, setSourceControlError] = useState<string | null>(null);
   const [sourceControlMessage, setSourceControlMessage] = useState<string | null>(null);
-  const [deleteConfirmHost, setDeleteConfirmHost] = useState<string | null>(null);
-  const [deleteBusyHost, setDeleteBusyHost] = useState<string | null>(null);
+  const [deleteConfirmHarness, setDeleteConfirmHarness] = useState<string | null>(null);
+  const [deleteBusyHarness, setDeleteBusyHarness] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleteMessage, setDeleteMessage] = useState<string | null>(null);
   const [customReport, setCustomReport] = useState<CustomSourceReport | null>(null);
@@ -851,7 +851,7 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
     const sourceControlsRequestId = ++sourceControlsRequest.current;
     if (background !== true) setLoading(true);
     setError(null);
-    void readSourceHostControls().then((next) => {
+    void readSourceHarnessControls().then((next) => {
       if (settingsMounted.current && sourceControlsRequestId === sourceControlsRequest.current) setSourceControls((previous) => stable(previous, next));
     }).catch(() => {
       if (settingsMounted.current && sourceControlsRequestId === sourceControlsRequest.current) setSourceControls(null);
@@ -992,38 +992,38 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
   };
 
   const toggleSourceExcluded = async (source: SourceHealthReport["sources"][number]) => {
-    if (sourceControlHost) return;
+    if (sourceControlHarness) return;
     const excluded = source.connection_state !== "excluded";
-    setSourceControlHost(source.host);
+    setSourceControlHarness(source.harness);
     setSourceControlError(null);
     setSourceControlMessage(null);
     try {
-      const receipt = await setSourceHostExcluded(source.host, excluded);
+      const receipt = await setSourceHarnessExcluded(source.harness, excluded);
       if (!settingsMounted.current) return;
-      setSourceControlMessage(message(receipt.excluded ? "sx.readStopped" : "sx.readResumed", language, { host: sourceLabel(source.host) }));
+      setSourceControlMessage(message(receipt.excluded ? "sx.readStopped" : "sx.readResumed", language, { harness: sourceLabel(source.harness) }));
       refresh();
     } catch (reason: unknown) {
       if (settingsMounted.current) setSourceControlError(safeUiError(reason, "来源读取控制未保存"));
     } finally {
-      if (settingsMounted.current) setSourceControlHost(null);
+      if (settingsMounted.current) setSourceControlHarness(null);
     }
   };
 
   const deleteSourceData = async (source: SourceHealthReport["sources"][number]) => {
-    if (deleteBusyHost) return;
-    setDeleteBusyHost(source.host);
+    if (deleteBusyHarness) return;
+    setDeleteBusyHarness(source.harness);
     setDeleteError(null);
     setDeleteMessage(null);
     try {
-      const receipt = await deleteImportedSourceData(source.host);
+      const receipt = await deleteImportedSourceData(source.harness);
       if (!settingsMounted.current) return;
       setDeleteMessage(message("sx.deleted", language, { facts: receipt.facts, sessions: receipt.sessions, files: receipt.source_files, trust: receipt.trust_observations, routes: receipt.route_evidence, excerpts: receipt.session_excerpts }));
-      setDeleteConfirmHost(null);
+      setDeleteConfirmHarness(null);
       refresh();
     } catch (reason: unknown) {
       if (settingsMounted.current) setDeleteError(`${message("sx.deleteFailed", language)} ${safeUiError(reason, message("sx.tryLater", language))}`);
     } finally {
-      if (settingsMounted.current) setDeleteBusyHost(null);
+      if (settingsMounted.current) setDeleteBusyHarness(null);
     }
   };
 
@@ -1093,7 +1093,7 @@ export function SettingsPage({ focusSection = null, onSectionFocused }: { focusS
       {error && <div className="error-banner" role="alert">{message("sx.srcUnavailableErr", language, { error })}<button className="button button-secondary button-small" type="button" onClick={refresh}>{message("sx.retry", language)}</button></div>}
       <SettingsLoadingState loading={loading} hasData={Boolean(report)} title={message("sx.srcStatusName", language)} detail={message("sx.srcQueryOnly", language)} />
       {report?.status === "unavailable" && <div className="settings-source-state"><strong>{message("sx.srcUnavailable", language)}</strong><span>{message("sx.srcUnavailableHelp", language)}</span></div>}
-      {report?.status === "ok" && <div className="settings-source-list">{report.sources.length ? report.sources.map((source) => <SourceRow key={source.host} source={source} syncing={syncing} sourceControlHost={sourceControlHost} deleteConfirmHost={deleteConfirmHost} deleteBusyHost={deleteBusyHost} supportedHosts={sourceControls?.supported_hosts ?? []} onSync={runSync} onToggleExcluded={toggleSourceExcluded} onRequestDelete={(item) => { setDeleteError(null); setDeleteMessage(null); setDeleteConfirmHost(item.host); }} onCancelDelete={() => setDeleteConfirmHost(null)} onDelete={deleteSourceData} />) : <div className="settings-source-state"><strong>{message("sx.noSources", language)}</strong><span>{message("sx.noSourcesHelp", language)}</span></div>}</div>}
+      {report?.status === "ok" && <div className="settings-source-list">{report.sources.length ? report.sources.map((source) => <SourceRow key={source.harness} source={source} syncing={syncing} sourceControlHarness={sourceControlHarness} deleteConfirmHarness={deleteConfirmHarness} deleteBusyHarness={deleteBusyHarness} supportedHarnesses={sourceControls?.supported_harnesses ?? []} onSync={runSync} onToggleExcluded={toggleSourceExcluded} onRequestDelete={(item) => { setDeleteError(null); setDeleteMessage(null); setDeleteConfirmHarness(item.harness); }} onCancelDelete={() => setDeleteConfirmHarness(null)} onDelete={deleteSourceData} />) : <div className="settings-source-state"><strong>{message("sx.noSources", language)}</strong><span>{message("sx.noSourcesHelp", language)}</span></div>}</div>}
       {sourceControlError && <div className="error-banner" role="alert">{message("sx.ctrlUnsaved", language, { error: sourceControlError })}</div>}
       {sourceControlMessage && <p className="settings-sync-message" role="status" aria-live="polite">{sourceControlMessage}</p>}
       {deleteError && <div className="error-banner" role="alert">{deleteError}</div>}

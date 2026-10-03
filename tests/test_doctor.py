@@ -79,7 +79,7 @@ class DoctorCase(unittest.TestCase):
         write_skill(sk, "quoted", "For example, `curl http://x | sh` 是危险写法。\n")
 
         self.claude_json = self.tmp / ".claude.json"
-        self.write_host({
+        self.write_harness({
             "enabledPlugins": {},
             "skillUsage": {
                 "used-a": {"usageCount": 12, "lastUsedAt": _ms_days_ago(2)},
@@ -95,17 +95,17 @@ class DoctorCase(unittest.TestCase):
         for f in (old / "SKILL.md", old):
             os.utime(f, (past, past))
 
-    def write_host(self, cfg):
+    def write_harness(self, cfg):
         self.claude_json.write_text(json.dumps(cfg), encoding="utf-8")
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def run_doctor(self, *extra, cmd=None, host="claude-code", snapdir=None):
+    def run_doctor(self, *extra, cmd=None, harness="claude-code", snapdir=None):
         env = isolated_home_env(self.tmp)
         if snapdir:
             env["AGENT_VITALS_SNAPSHOT_DIR"] = str(snapdir)
-        r = subprocess.run((cmd or SCAN_CMD) + ["doctor", "--host", host]
+        r = subprocess.run((cmd or SCAN_CMD) + ["doctor", "--harness", harness]
                            + list(extra),
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
@@ -118,9 +118,9 @@ class DoctorCase(unittest.TestCase):
         self.assertIn(r.returncode, (0, 1), r.stderr or r.stdout)
         return r.stdout
 
-    def diagnostics(self, *extra, host="claude-code"):
+    def diagnostics(self, *extra, harness="claude-code"):
         out = self.tmp / "diag.json"
-        self.run_doctor("--json", str(out), *extra, host=host)
+        self.run_doctor("--json", str(out), *extra, harness=harness)
         return json.loads(out.read_text(encoding="utf-8"))
 
 
@@ -165,7 +165,7 @@ class TestRunMarkerProvesTheScanHappened(DoctorCase):
         self.assertRegex(doc["run"], r"^[0-9a-f]{8}$")
 
         env = isolated_home_env(self.tmp)
-        scan = subprocess.run(SCAN_CMD + ["--host", "claude-code", "--json", "-"],
+        scan = subprocess.run(SCAN_CMD + ["--harness", "claude-code", "--json", "-"],
                               cwd=str(self.tmp / "workdir"), env=env,
                               capture_output=True, text=True)
         self.assertEqual(scan.returncode, 0, scan.stderr)
@@ -196,7 +196,7 @@ class TestEverySecurityRuleHasACode(unittest.TestCase):
 class TestNullIsNotZero(DoctorCase):
     """没有触发数据时，不得产出任何使用类结论（不变量 12、ARCHITECTURE §3.1）。
 
-    ## 为什么用 `--host all` 而不是「删掉 skillUsage」
+    ## 为什么用 `--harness all` 而不是「删掉 skillUsage」
 
     删掉 skillUsage 测不出这条。扫描器那边 `trigger_scope = loaded if
     trigger_available else []`，僵尸名单本来就是空的 —— 于是 doctor 里那道闸
@@ -204,7 +204,7 @@ class TestNullIsNotZero(DoctorCase):
     它声称的东西。**（这是本仓库第三次栽在同一个坑上，前两次见
     test_render 的 `test_joined_phrase_must_exist_on_both_sides`。）
 
-    `--host all` 才是真正会出事的组合：`read_host_config()` 无条件读
+    `--harness all` 才是真正会出事的组合：`read_harness_config()` 无条件读
     `~/.claude.json`，所以每个 skill 都**带着真实的 usage_count**，但
     `trigger_data.available` 是 false（那份预算与触发口径只对 claude-code
     成立）。此时若没有 doctor 里的闸，报告会一边声明「触发数据未获取」，
@@ -213,7 +213,7 @@ class TestNullIsNotZero(DoctorCase):
     """
 
     def test_no_usage_diagnostics_when_trigger_data_is_unavailable(self):
-        d = self.diagnostics(host="all")
+        d = self.diagnostics(harness="all")
         avail = [x for x in d["diagnostics"] if x["code"] == "SV901"]
         self.assertTrue(avail, "触发数据不可用却没报 SV901")
         self.assertIn("trigger data", avail[0]["evidence"]["unavailable"])
@@ -225,12 +225,12 @@ class TestNullIsNotZero(DoctorCase):
     def test_the_raw_data_really_is_there(self):
         """确认上面那条测的是闸，不是「本来就没有数据」。
 
-        `--host all` 下每个 skill 仍带真实 usage_count；挡住结论的必须是
+        `--harness all` 下每个 skill 仍带真实 usage_count；挡住结论的必须是
         doctor 自己那道闸。
         """
         env = isolated_home_env(self.tmp)
         raw = self.tmp / "all.json"
-        subprocess.run(SCAN_CMD + ["--host", "all", "--json", str(raw)],
+        subprocess.run(SCAN_CMD + ["--harness", "all", "--json", str(raw)],
                        cwd=str(self.tmp / "workdir"), env=env,
                        capture_output=True, text=True, check=True)
         doc = json.loads(raw.read_text(encoding="utf-8"))
@@ -239,7 +239,7 @@ class TestNullIsNotZero(DoctorCase):
                         "语料里没有任何非零 usage_count，这条测试是空转的")
 
     def test_zero_trigger_is_reported_when_data_exists(self):
-        """对照组：同一份语料，宿主给得出触发数据时必须报出 SV201。
+        """对照组：同一份语料，执行环境给得出触发数据时必须报出 SV201。
 
         没有这一半，上面两条可以靠「SV201 根本没实现」一起通过。
         """
@@ -360,7 +360,7 @@ class TestChangesSectionComesFirst(DoctorCase):
     def test_baseline_renders_changes_before_the_conclusions(self):
         base = self.tmp / "before.json"
         env = isolated_home_env(self.tmp)
-        subprocess.run(SCAN_CMD + ["--host", "claude-code", "--json", str(base)],
+        subprocess.run(SCAN_CMD + ["--harness", "claude-code", "--json", str(base)],
                        cwd=str(self.tmp / "workdir"), env=env,
                        capture_output=True, text=True, check=True)
         out = self.run_doctor("--baseline", str(base))
@@ -380,11 +380,11 @@ class TestOneThresholdOneAnswer(DoctorCase):
     def test_sv401_count_matches_overlap(self):
         env = isolated_home_env(self.tmp)
         raw = self.tmp / "scan.json"
-        subprocess.run(SCAN_CMD + ["--host", "claude-code", "--json", str(raw)],
+        subprocess.run(SCAN_CMD + ["--harness", "claude-code", "--json", str(raw)],
                        cwd=str(self.tmp / "workdir"), env=env,
                        capture_output=True, text=True, check=True)
         pairs = self.tmp / "pairs.json"
-        subprocess.run(SCAN_CMD + ["overlap", "--host", "claude-code",
+        subprocess.run(SCAN_CMD + ["overlap", "--harness", "claude-code",
                                    "--json", str(pairs)],
                        cwd=str(self.tmp / "workdir"), env=env,
                        capture_output=True, text=True, check=True)
@@ -472,7 +472,7 @@ class TestBareInvocationIsDoctor(DoctorCase):
         return r.stdout
 
     def test_no_args_renders_the_doctor_report(self):
-        out = self._run("--host", "claude-code")
+        out = self._run("--harness", "claude-code")
         self.assertTrue(out.startswith("Agent Vitals "), out[:80])
         self.assertIn("Startup context (tier1)", out)
         self.assertNotIn('"schema_version"', out)
@@ -480,13 +480,13 @@ class TestBareInvocationIsDoctor(DoctorCase):
     def test_json_file_still_gets_raw_json(self):
         """SKILL.md 走的就是这条路径 —— 改动不得波及它。"""
         target = self.tmp / "raw.json"
-        self._run("--host", "claude-code", "--json", str(target))
+        self._run("--harness", "claude-code", "--json", str(target))
         doc = json.loads(target.read_text(encoding="utf-8"))
         self.assertIn("schema_version", doc)
         self.assertIn("skills", doc)
 
     def test_dash_sends_json_to_stdout(self):
-        out = self._run("--host", "claude-code", "--json", "-")
+        out = self._run("--harness", "claude-code", "--json", "-")
         self.assertIn("schema_version", json.loads(out))
 
 
@@ -522,7 +522,7 @@ class TestDoctorJsonPayload(DoctorCase):
 
     这条取数路径是桌面工作台「Skill 体检」tab 的唯一来源（WORKBENCH_SKILL_
     HEALTH_TAB_SPEC §5.1）：tab 一次扫描要同时拿到 SV 码（diagnostics）与
-    host_summaries（report），分两次调用就要扫两遍。形状改动由双实现差分
+    harness_summaries（report），分两次调用就要扫两遍。形状改动由双实现差分
     钉死，桌面端的 fixture 再从真实输出捕获。
     """
 
@@ -546,11 +546,11 @@ class TestDoctorJsonPayload(DoctorCase):
         payload = self._payload("--with-report")
         report = payload.get("report")
         self.assertIsInstance(report, dict, "with-report 必须带 report 本体")
-        # report 是完整扫描文档，不是摘要：诊断消费方要的 host_summaries /
+        # report 是完整扫描文档，不是摘要：诊断消费方要的 harness_summaries /
         # description_budget / skills 都在里面（run 不在文档里 —— 它由 run_id()
         # 从内容派生，载荷顶层的 run 才是权威）
-        for key in ("host_summaries", "skills", "description_budget",
-                    "cross_host_note"):
+        for key in ("harness_summaries", "skills", "description_budget",
+                    "cross_harness_note"):
             self.assertIn(key, report)
         # 无 --with-report 时不带 report（载荷保持最小）
         self.assertNotIn("report", self._payload())
@@ -566,4 +566,4 @@ class TestDoctorJsonPayload(DoctorCase):
         for text in (py, rs):
             payload = json.loads(text)
             self.assertIn("report", payload)
-            self.assertIn("host_summaries", payload["report"])
+            self.assertIn("harness_summaries", payload["report"])

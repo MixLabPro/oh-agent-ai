@@ -3,9 +3,9 @@
 //!
 //! 与旧 `store`（index.sqlite3）的本质区别（spec §1.1 不可变决策）：
 //! - 本库是**运行时权威数据源**，不是可重建投影；「删库 → 从 JSONL 重建」
-//!   不再是正常恢复方式。损坏 → 如实报错，恢复 = 用户备份 + 宿主原始日志
+//!   不再是正常恢复方式。损坏 → 如实报错，恢复 = 用户备份 + 执行环境原始日志
 //!   重放（§7 Phase 1），恢复不了就报 coverage 缺口，绝不静默回落另一本账。
-//! - `facts/*.jsonl` 降级为迁移/导出输入；宿主日志是不可信输入，必须经
+//! - `facts/*.jsonl` 降级为迁移/导出输入；执行环境日志是不可信输入，必须经
 //!   清洗校验才能进 `usage_facts`。
 //! - 所有写入走 `BEGIN IMMEDIATE` 事务 + `sync_runs` 记录；running 批次在
 //!   下次 open 时标 interrupted（§3.1）。
@@ -29,13 +29,15 @@ use crate::safe_query::authority_callback;
 /// 当前 DDL 版本。spec §3 的表结构变更递增；`migrations` 表（§3.5）记录的
 /// 是**数据迁移**（legacy import 等），与 DDL 版本刻意分开。
 ///
-/// v2（`host_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
+/// v2（`harness_runtime_snapshots`）走 `MIGRATE_V1_TO_V2` 升级。增量 7.5 的 4 个
 /// 脱敏只读 view（`v_facts_safe` / …）是**版本无关**的只读加法：`VIEWS_V1`
 /// 在每次 open 用 `CREATE VIEW IF NOT EXISTS` 幂等重建，不占版本号。
-pub const SCHEMA_VERSION: i64 = 30;
+// v31 is an internal-development breaking rename: host columns become harness.
+// Existing host-column databases must be rebuilt, never silently reinterpreted.
+pub const SCHEMA_VERSION: i64 = 31;
 
 /// 权威库默认路径：`<data_home>/agent-vitals.sqlite3`（spec §3）。
-/// 与旧 `index.sqlite3` 并存至 Phase 1 迁移框架完成导入后退役。
+/// 旧 `index.sqlite3` 是独立的遗留投影；本函数不导入、解释或删除它。
 pub fn default_authority_path(data_home: &Path) -> PathBuf {
     data_home.join("agent-vitals.sqlite3")
 }
@@ -56,11 +58,11 @@ pub fn latest_pricing_sync_overlay(conn: &Connection) -> rusqlite::Result<Option
     .optional()
 }
 
-/// `host_bills_for_period` 的一行：`(host, provider_id, billing_basis,
+/// `harness_bills_for_period` 的一行：`(harness, provider_id, billing_basis,
 /// amount_minor, currency)`。`amount_minor` 是最小货币单位整数——金额从不
 /// 以浮点入库（spec §5.3），折算在展示层。
-pub type HostBillRow = (String, String, String, i64, String);
-pub type HostBillDetailRow = (String, String, String, String, i64, String, String);
+pub type HarnessBillRow = (String, String, String, i64, String);
+pub type HarnessBillDetailRow = (String, String, String, String, i64, String, String);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustMonitorState {
@@ -78,10 +80,10 @@ pub struct TrustMonitorState {
 }
 
 /// 用户计费声明的一行：关系本身和付款/账单分开建模。金额可未知，不能以
-/// `host_bills` 的实付金额或公开价卡来填充。
+/// `harness_bills` 的实付金额或公开价卡来填充。
 /// `(declaration_id, provider_id, relationship_kind, subscription_name, amount_minor, currency,
-/// effective_start, effective_end, source_candidate_id)`——**没有宿主**：声明属于服务商账号，
-/// 按模型使用结算，宿主只是用量的来源壳（见 [`ALL_HOSTS`]）。
+/// effective_start, effective_end, source_candidate_id)`——**没有执行环境**：声明属于服务商账号，
+/// 按模型使用结算，执行环境只是用量的来源壳（见 [`ALL_HARNESSES`]）。
 pub type BillingDeclarationRow = (
     String, String, String, Option<String>, Option<i64>, Option<String>,
     String, Option<String>, Option<String>,
@@ -93,24 +95,24 @@ fn is_narrowing_scope(kind: &str) -> bool {
     matches!(kind, "account" | "route" | "model" | "session")
 }
 
-/// 「服务商未知」的答复却没有任何收窄作用域 = 对**所有宿主、所有服务商为空**的用量的兜底声明。
-/// 声明不再绑宿主之后，宿主不再替它兜住边界，所以这类声明既不允许写入、也不匹配任何事实
+/// 「服务商未知」的答复却没有任何收窄作用域 = 对**所有执行环境、所有服务商为空**的用量的兜底声明。
+/// 声明不再绑执行环境之后，执行环境不再替它兜住边界，所以这类声明既不允许写入、也不匹配任何事实
 /// （见 [`billing_declaration_fact_selection_with`]）：模型（或路由 / 账户 / 会话）是这类答复唯一的收窄依据。
 fn is_unbounded_unresolved(scopes: &[(&str, &str)]) -> bool {
     scopes.iter().any(|(kind, value)| *kind == "provider" && *value == "unresolved")
         && !scopes.iter().any(|(kind, _)| is_narrowing_scope(kind))
 }
 
-/// `billing_declarations.host` / `billing_declaration_revisions.host` 的**固定值**。
+/// `billing_declarations.harness` / `billing_declaration_revisions.harness` 的**固定值**。
 ///
-/// 计费声明是服务商账号上的关系（订阅、API Key、中转），结算按「服务商 + 模型」，与用量是从哪个宿主
+/// 计费声明是服务商账号上的关系（订阅、API Key、中转），结算按「服务商 + 模型」，与用量是从哪个执行环境
 /// 来的无关——同一个 GLM Lite 套餐在 Claude Code 和 ZCode 里是同一份，同一个中转账号在 Claude Code
-/// 和 Codex 里也是同一个账号。曾经声明按 `(宿主, 服务商)` 切分，同一服务商在每个宿主各留一份，
+/// 和 Codex 里也是同一个账号。曾经声明按 `(执行环境, 服务商)` 切分，同一服务商在每个执行环境各留一份，
 /// 生效期还会各自漂移，匹配时也要额外开「账号级」补丁。
 ///
-/// 该列因旧库的 `NOT NULL` 保留，只写这个常量、**任何谓词都不读它**——想把宿主重新当成匹配条件，
+/// 该列因旧库的 `NOT NULL` 保留，只写这个常量、**任何谓词都不读它**——想把执行环境重新当成匹配条件，
 /// 必须先改这条文档。需要收窄用声明的作用域（account / route / model / session）。
-pub const ALL_HOSTS: &str = "*";
+pub const ALL_HARNESSES: &str = "*";
 /// 声明修订的稳定读取行。修订为追加记录，绝不覆盖先前用户输入。
 pub type BillingDeclarationRevisionRow = (
     String,
@@ -223,8 +225,8 @@ pub struct BillingDeclarationFactSelection {
 /// 声明命中事实的**唯一**选择谓词。预览、重算归因与运行时计价三处都从这里拿
 /// `WHERE`，所以「预览说会移出的」与「重算真正归因的」不可能是两个集合。
 ///
-/// 规则：provider 相等（**不看宿主**，见 [`ALL_HOSTS`]）；事实有时间戳且落在 `effective_start..=effective_end`
-/// 的北京时间自然日内；旧月份边界兼容展开为该月首日/末日。宿主自报
+/// 规则：provider 相等（**不看执行环境**，见 [`ALL_HARNESSES`]）；事实有时间戳且落在 `effective_start..=effective_end`
+/// 的北京时间自然日内；旧月份边界兼容展开为该月首日/末日。执行环境自报
 /// `billing_mode='subscription'` 的事实不参与（它们本来
 /// 就不按量）；已被其他 saved 声明覆盖的事实不重复移出；作用域按 kind 取交集、
 /// 同 kind 取并集；`window` 只用于展示口径的额外时间窗。
@@ -236,17 +238,17 @@ pub fn billing_declaration_fact_selection(
 }
 
 /// [`billing_declaration_fact_selection`] 加一个开关：`account_level` 为真时，声明按**账号级**匹配——
-/// 订阅是账号的一份套餐，不是某个宿主的（GLM Lite 在 Claude Code 和 ZCode 里用的是同一份）。
+/// 订阅是账号的一份套餐，不是某个执行环境的（GLM Lite 在 Claude Code 和 ZCode 里用的是同一份）。
 ///
-/// 账号级匹配 B = 任何宿主上：`provider_id` 等于声明的服务商，**或** 服务商为空、模型无网关前缀、
-/// 且该宿主的原生厂商就是这个服务商（ZCode 的 `GLM-5.3`、Codex 的 `gpt-5.6-terra`：没有路由证据，
-/// 但显然是宿主自家官方路由）。模型前缀与宿主原生厂商来自数据文件，只接受安全字符，用 `substr`
+/// 账号级匹配 B = 任何执行环境上：`provider_id` 等于声明的服务商，**或** 服务商为空、模型无网关前缀、
+/// 且该执行环境的原生厂商就是这个服务商（ZCode 的 `GLM-5.3`、Codex 的 `gpt-5.6-terra`：没有路由证据，
+/// 但显然是执行环境自家官方路由）。模型前缀与执行环境原生厂商来自数据文件，只接受安全字符，用 `substr`
 /// 比较而不是 LIKE，避免 `_` `%` 被当通配符。
 ///
 /// - 普通官方订阅：只用 B。
 /// - 带 `("provider","unresolved")` 的官方订阅（MiniMax lite / GLM Lite）：A（用户对「服务商未知的
 ///   这些模型」的显式作答，受模型范围限制）**并上** B。
-/// - 其余声明（按量 / 中转 / 官方 API）：服务商 + 范围，同样**不看宿主**。
+/// - 其余声明（按量 / 中转 / 官方 API）：服务商 + 范围，同样**不看执行环境**。
 ///
 /// 开关由 [`default_coverage`] 决定，预览 / 重算 / 持续套用三处共用。
 #[allow(clippy::too_many_arguments)]
@@ -270,30 +272,30 @@ pub fn billing_declaration_fact_selection_with(
     // 声明本身仍记录用户选的服务商（计费主链规格 v1.2 §5.3a）。
     let provider_unresolved = scopes.iter()
         .any(|(kind, value)| *kind == "provider" && *value == "unresolved");
-    // 无收窄的「服务商未知」声明（旧库里留下的兜底声明）：宁可不匹配，也不去吞所有宿主上的未归属用量。
+    // 无收窄的「服务商未知」声明（旧库里留下的兜底声明）：宁可不匹配，也不去吞所有执行环境上的未归属用量。
     if is_unbounded_unresolved(scopes) {
         return BillingDeclarationFactSelection { where_sql: "0 = 1".to_owned(), params: Vec::new() };
     }
-    // A：显式匹配——服务商相等；「服务商未知」的组改成服务商为空（模型范围负责收窄）。**不看宿主**。
-    let host_bound = if provider_unresolved {
+    // A：显式匹配——服务商相等；「服务商未知」的组改成服务商为空（模型范围负责收窄）。**不看执行环境**。
+    let harness_bound = if provider_unresolved {
         "f.provider_id IS NULL AND ?1 IS NOT NULL"
     } else {
         "f.provider_id = ?1"
     };
     // B：账号级匹配。
     let account_condition = || -> String {
-        use agent_vitals_domain::attribution::{model_prefixes_of, native_hosts_of};
+        use agent_vitals_domain::attribution::{model_prefixes_of, native_harnesses_of};
         let safe = |text: &str, extra: &[char]| text.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || extra.contains(&c));
         let prefixes: Vec<String> = model_prefixes_of(provider_id).into_iter().filter(|p| safe(p, &['-', '.'])).collect();
-        let hosts: Vec<String> = native_hosts_of(provider_id).into_iter().filter(|h| safe(h, &['-', '.', ':', '_'])).collect();
-        if prefixes.is_empty() || hosts.is_empty() {
+        let harnesses: Vec<String> = native_harnesses_of(provider_id).into_iter().filter(|h| safe(h, &['-', '.', ':', '_'])).collect();
+        if prefixes.is_empty() || harnesses.is_empty() {
             return "f.provider_id = ?1".to_string();
         }
         let alternatives = prefixes.iter()
             .map(|p| format!("substr(lower(f.model_id), 1, {}) = '{}'", p.len(), p))
             .collect::<Vec<_>>().join(" OR ");
-        let host_list = hosts.iter().map(|h| format!("'{h}'")).collect::<Vec<_>>().join(", ");
-        format!("(f.provider_id = ?1 OR (f.provider_id IS NULL AND f.host IN ({host_list}) AND f.model_id IS NOT NULL AND instr(f.model_id, '/') = 0 AND ({alternatives})))")
+        let harness_list = harnesses.iter().map(|h| format!("'{h}'")).collect::<Vec<_>>().join(", ");
+        format!("(f.provider_id = ?1 OR (f.provider_id IS NULL AND f.harness IN ({harness_list}) AND f.model_id IS NOT NULL AND instr(f.model_id, '/') = 0 AND ({alternatives})))")
     };
     let mut where_sql = String::new();
     where_sql.push_str("
@@ -336,26 +338,26 @@ pub fn billing_declaration_fact_selection_with(
         scope_and.push_str(&format!(" AND {column} IN ({placeholders})"));
     }
     let matched = if !account_level {
-        format!("({host_bound}){scope_and}")
+        format!("({harness_bound}){scope_and}")
     } else if !provider_unresolved {
         format!("({}){scope_and}", account_condition())
     } else {
         // A（显式作答：服务商未知的事实，受模型范围限制）∪ B（账号级官方路由，不受模型范围限制）
-        format!("((({host_bound}){scope_and}) OR ({}))", account_condition())
+        format!("((({harness_bound}){scope_and}) OR ({}))", account_condition())
     };
     let where_sql = format!("f.deleted_at_ms IS NULL AND f.event_ts_ms IS NOT NULL AND {matched}{where_sql}");
     BillingDeclarationFactSelection { where_sql, params }
 }
 /// **官方订阅的默认覆盖**：订阅声明的模型清单不应是要逐个维护的白名单——Anthropic / OpenAI
 /// 每发一个新模型，用户都得回来补一遍声明（真机：`claude-sonnet-5-5` 因不在清单里，175M token
-/// 成了「归属不明」）。所以官方订阅默认覆盖「该宿主下该服务商」的全部模型，模型范围不再限制。
+/// 成了「归属不明」）。所以官方订阅默认覆盖「该执行环境下该服务商」的全部模型，模型范围不再限制。
 ///
 /// 只在三个条件**同时**成立时才去掉模型范围，否则原样返回：
 /// 1. 关系是 `official_subscription`；
 /// 2. 范围里没有 `("provider", "unresolved")`——那类声明是用户对「服务商未知」的事实作答，
-///    靠模型名识别（MiniMax lite / GLM Lite），去掉模型限制会把宿主下所有未知服务商的事实
+///    靠模型名识别（MiniMax lite / GLM Lite），去掉模型限制会把执行环境下所有未知服务商的事实
 ///    都错判成这个订阅；
-/// 3. 同宿主同服务商没有官方 API 声明——两种声明并存时，同一个 provider 下的用量可能是订阅
+/// 3. 同执行环境同服务商没有官方 API 声明——两种声明并存时，同一个 provider 下的用量可能是订阅
 ///    也可能是 API Key，应用无从区分，不替用户猜，保持显式模型清单。
 ///
 /// 账户 / 路由 / 会话范围照旧生效（用户主动收窄的意图不能被默认规则抹掉）。预览、重算、持续套用
@@ -370,7 +372,7 @@ pub fn attribution_scopes<'a>(
 ///
 /// - 范围：官方订阅且没有 `provider=unresolved`、也没有官方 API 声明 → 去掉模型范围（见 [`attribution_scopes`]）。
 /// - 账号级：官方订阅、没有官方 API 声明、且用户没有用路由 / 账户 / 会话范围主动收窄 → 为真。
-///   订阅是账号的套餐，覆盖该服务商在任何宿主上的官方路由（见 [`billing_declaration_fact_selection_with`]）。
+///   订阅是账号的套餐，覆盖该服务商在任何执行环境上的官方路由（见 [`billing_declaration_fact_selection_with`]）。
 ///   用户主动收窄过的声明，意图不能被默认规则抹掉。
 pub fn default_coverage<'a>(
     relationship_kind: &str, scopes: &[(&'a str, &'a str)], official_api_declared: bool,
@@ -390,7 +392,7 @@ type BillingDeclarationRevisionSnapshot = (
     i64, String, String, String, Option<String>, Option<i64>, Option<String>, String,
     Option<String>, Option<String>, Option<String>,
 );
-/// 旧版本发现、尚未被用户确认的订阅候选：`(id, host, provider, currency,
+/// 旧版本发现、尚未被用户确认的订阅候选：`(id, harness, provider, currency,
 /// amount_minor, period_start, status)`。候选不构成实际付款。
 pub type BillingImportCandidateRow = (String, String, String, String, i64, String, String);
 
@@ -479,7 +481,7 @@ CREATE TABLE sync_runs (
 
 CREATE TABLE source_files (
   source_id TEXT PRIMARY KEY,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   path_hash TEXT NOT NULL,                -- 不暴露本地路径
   native_session_id TEXT,
   size_bytes INTEGER NOT NULL,
@@ -494,12 +496,12 @@ CREATE TABLE source_files (
   byte_offset INTEGER,                    -- 增量续读位置；NULL = 首见/不支持
   parser_id TEXT,                         -- 解析器身份（"claude-jsonl" 等）
   dirty INTEGER NOT NULL DEFAULT 0,       -- 脏标记（watch/tick 填、调度器清）
-  UNIQUE(host, path_hash)
+  UNIQUE(harness, path_hash)
 );
 
 CREATE TABLE sessions (
   session_key TEXT PRIMARY KEY,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   native_session_id TEXT NOT NULL,
   machine_namespace TEXT NOT NULL,
   source_profile TEXT,
@@ -507,12 +509,12 @@ CREATE TABLE sessions (
   ended_at_ms INTEGER,
   last_observed_at_ms INTEGER NOT NULL,
   deleted_at_ms INTEGER,
-  UNIQUE(host, machine_namespace, native_session_id)
+  UNIQUE(harness, machine_namespace, native_session_id)
 );
 
 CREATE TABLE usage_facts (
   fact_id TEXT PRIMARY KEY,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   machine_namespace TEXT NOT NULL,
   native_session_id TEXT NOT NULL,
   session_key TEXT REFERENCES sessions(session_key),
@@ -536,22 +538,22 @@ CREATE TABLE usage_facts (
   CHECK (cache_read_tokens >= 0),
   CHECK (cache_write_tokens >= 0),
   CHECK (output_tokens >= 0),
-  UNIQUE(host, machine_namespace, native_session_id, source_event_id, observation_kind)
+  UNIQUE(harness, machine_namespace, native_session_id, source_event_id, observation_kind)
 );
 
-CREATE INDEX usage_facts_host_time
-  ON usage_facts(host, event_ts_ms) WHERE deleted_at_ms IS NULL;
+CREATE INDEX usage_facts_harness_time
+  ON usage_facts(harness, event_ts_ms) WHERE deleted_at_ms IS NULL;
 CREATE INDEX usage_facts_session_time
   ON usage_facts(session_key, event_ts_ms) WHERE deleted_at_ms IS NULL;
 CREATE INDEX usage_facts_provider_model_time
   ON usage_facts(provider_id, model_id, event_ts_ms) WHERE deleted_at_ms IS NULL;
 
-CREATE TABLE host_bills (
+CREATE TABLE harness_bills (
   bill_id TEXT PRIMARY KEY,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   provider_id TEXT NOT NULL,
   billing_period TEXT NOT NULL,           -- YYYY-MM
-  billing_basis TEXT NOT NULL,            -- fixed_subscription | host_billed | metered_actual
+  billing_basis TEXT NOT NULL,            -- fixed_subscription | harness_billed | metered_actual
   amount_minor INTEGER NOT NULL,
   currency TEXT NOT NULL,
   source_id TEXT REFERENCES source_files(source_id),
@@ -559,7 +561,7 @@ CREATE TABLE host_bills (
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
   deleted_at_ms INTEGER,
-  UNIQUE(host, provider_id, billing_period, billing_basis, evidence_ref)
+  UNIQUE(harness, provider_id, billing_period, billing_basis, evidence_ref)
 );
 
 CREATE TABLE pricing_snapshots (
@@ -634,30 +636,30 @@ CREATE INDEX workflow_events_error_time
   ON workflow_events(error_fingerprint, event_ts_ms)
   WHERE error_fingerprint IS NOT NULL;
 
--- v2：非账务但面向产品展示的宿主实时状态。不能塞进 usage_facts（不是用量），
--- 也不能继续由 UI 直接读宿主日志；payload 保留来源的完整、脱敏 JSON 形状。
-CREATE TABLE host_runtime_snapshots (
-  host TEXT NOT NULL,
+-- v2：非账务但面向产品展示的执行环境实时状态。不能塞进 usage_facts（不是用量），
+-- 也不能继续由 UI 直接读执行环境日志；payload 保留来源的完整、脱敏 JSON 形状。
+CREATE TABLE harness_runtime_snapshots (
+  harness TEXT NOT NULL,
   snapshot_kind TEXT NOT NULL,            -- 目前：codex_quota
   payload_json TEXT NOT NULL,
   observed_at_ms INTEGER NOT NULL,
   source_id TEXT REFERENCES source_files(source_id),
   ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id),
   updated_at_ms INTEGER NOT NULL,
-  PRIMARY KEY(host, snapshot_kind)
+  PRIMARY KEY(harness, snapshot_kind)
 );
 "#;
 
 const MIGRATE_V1_TO_V2: &str = r#"
-CREATE TABLE host_runtime_snapshots (
-  host TEXT NOT NULL,
+CREATE TABLE harness_runtime_snapshots (
+  harness TEXT NOT NULL,
   snapshot_kind TEXT NOT NULL,
   payload_json TEXT NOT NULL,
   observed_at_ms INTEGER NOT NULL,
   source_id TEXT REFERENCES source_files(source_id),
   ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id),
   updated_at_ms INTEGER NOT NULL,
-  PRIMARY KEY(host, snapshot_kind)
+  PRIMARY KEY(harness, snapshot_kind)
 );
 "#;
 
@@ -673,7 +675,7 @@ ALTER TABLE usage_facts ADD COLUMN attribution_version TEXT;
 
 CREATE TABLE route_evidence (
   evidence_id TEXT PRIMARY KEY,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   machine_namespace TEXT NOT NULL,
   native_session_id TEXT,
   provider_raw TEXT,
@@ -686,7 +688,7 @@ CREATE TABLE route_evidence (
   source_id TEXT REFERENCES source_files(source_id),
   ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id)
 );
-CREATE INDEX route_evidence_session ON route_evidence(host, machine_namespace, native_session_id);
+CREATE INDEX route_evidence_session ON route_evidence(harness, machine_namespace, native_session_id);
 CREATE TRIGGER usage_facts_route_evidence_insert_fk
 BEFORE INSERT ON usage_facts
 WHEN NEW.route_evidence_id IS NOT NULL
@@ -705,7 +707,7 @@ END;
 CREATE TABLE issue_instances (
   issue_id TEXT PRIMARY KEY,
   machine_namespace TEXT NOT NULL,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   session_key TEXT,
   issue_type TEXT NOT NULL,
   instance_fingerprint TEXT NOT NULL,
@@ -860,11 +862,11 @@ END;
 "#;
 
 // v1.0：旧公共价表中的个人订阅不是付款凭证。升级时保留为待确认候选，
-// 必须由用户接受后才写入 host_bills / FixedSubscription。
+// 必须由用户接受后才写入 harness_bills / FixedSubscription。
 const SCHEMA_V7_ADD: &str = r#"
 CREATE TABLE billing_import_candidates (
   candidate_id TEXT PRIMARY KEY,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   provider_id TEXT NOT NULL,
   currency TEXT NOT NULL,
   amount_minor INTEGER NOT NULL CHECK (amount_minor >= 0),
@@ -883,7 +885,7 @@ CREATE INDEX billing_import_candidates_status ON billing_import_candidates(statu
 const SCHEMA_V8_ADD: &str = r#"
 CREATE TABLE billing_declarations (
   declaration_id TEXT PRIMARY KEY,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   provider_id TEXT NOT NULL,
   relationship_kind TEXT NOT NULL CHECK (relationship_kind IN (
     'official_subscription', 'official_api', 'third_party', 'organization', 'unknown'
@@ -903,7 +905,7 @@ CREATE TABLE billing_declarations (
   CHECK (effective_end IS NULL OR effective_end >= effective_start)
 );
 CREATE INDEX billing_declarations_active_scope
-  ON billing_declarations(host, provider_id, effective_start, effective_end)
+  ON billing_declarations(harness, provider_id, effective_start, effective_end)
   WHERE deleted_at_ms IS NULL;
 "#;
 
@@ -916,7 +918,7 @@ CREATE TABLE billing_declaration_revisions (
   revision_number INTEGER NOT NULL CHECK (revision_number > 0),
   change_kind TEXT NOT NULL CHECK (change_kind IN ('saved', 'revoked')),
   supersedes_revision_id TEXT UNIQUE REFERENCES billing_declaration_revisions(revision_id),
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   provider_id TEXT NOT NULL,
   relationship_kind TEXT NOT NULL CHECK (relationship_kind IN (
     'official_subscription', 'official_api', 'third_party', 'organization', 'unknown'
@@ -1052,7 +1054,7 @@ CREATE INDEX billing_declaration_scopes_lookup
 /// v16（内容富化 + 源锚点：docs/v1.0.0/SCHEMA_V16_V17_ENRICHMENT_PROBE_SPEC.md §2，
 /// DDL 镜像同步进 SQL 权威库 spec §3.8）。workflow_events 补错误分类/摘录/尺寸/
 /// 锚点九列（词表 = domain crate `enrichment::ErrorClass` 的十值闭集），usage_facts
-/// 补 `reasoning_effort` 证据位（effort 被静默调低的被动证据，宿主报了才填），
+/// 补 `reasoning_effort` 证据位（effort 被静默调低的被动证据，执行环境报了才填），
 /// sessions 补 `probe_run_ref`（探针会话标记，成本视图过滤键）与任务画像占位，
 /// 新表 `session_excerpts` 承载任务意图三段式文本（提取算法 = domain
 /// `enrichment::make_excerpt`，Python 镜像 + 共享向量锁步）。
@@ -1141,14 +1143,14 @@ const SCHEMA_V17_ADD: &str = r#"
 CREATE TABLE IF NOT EXISTS probe_routes (
   route_id TEXT PRIMARY KEY,
   label TEXT NOT NULL,
-  host_kind TEXT NOT NULL CHECK (host_kind IN ('claude-code','codex')),
+  harness_kind TEXT NOT NULL CHECK (harness_kind IN ('claude-code','codex')),
   endpoint_base_url TEXT,
   credential_ref TEXT,
   model_requested TEXT NOT NULL,
   consent_granted_at_ms INTEGER,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
-  UNIQUE(label, host_kind)
+  UNIQUE(label, harness_kind)
 );
 CREATE TABLE IF NOT EXISTS probe_suites (
   suite_id TEXT PRIMARY KEY,
@@ -1224,7 +1226,7 @@ const SCHEMA_V18_ADD: &str = r#"
 CREATE TABLE IF NOT EXISTS trust_observations (
   observation_id TEXT PRIMARY KEY,
   machine_namespace TEXT NOT NULL,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   actor_id TEXT NOT NULL,
   actor_kind TEXT NOT NULL CHECK (actor_kind IN ('main','sidecar','helper','extension','unknown')),
   actor_version TEXT,
@@ -1253,8 +1255,8 @@ CREATE TABLE IF NOT EXISTS trust_observations (
   ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id),
   created_at_ms INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS trust_observations_host_time
-  ON trust_observations(host, observed_at_ms);
+CREATE INDEX IF NOT EXISTS trust_observations_harness_time
+  ON trust_observations(harness, observed_at_ms);
 CREATE INDEX IF NOT EXISTS trust_observations_actor_time
   ON trust_observations(machine_namespace, actor_id, observed_at_ms);
 CREATE INDEX IF NOT EXISTS trust_observations_expiry
@@ -1333,15 +1335,15 @@ ALTER TABLE trust_observations ADD COLUMN evidence_origin TEXT NOT NULL DEFAULT 
 /// 事件行与它描述的状态变更**同事务**写入；投递进度按 `(event_id, consumer_id)`
 /// 反连接计算——刻意不用 outbox 行上的单一 `delivered` 位：消费者注册面随进程
 /// 不同（CLI 一组、桌面一组），一个进程置位会让另一个进程的消费者永远看不到。
-/// `host` 列可空：宿主域事件（FactsIngested 等）携带，全局事件（计时器等）为
-/// NULL；`delete_imported_host_data` 据此级联清理。
+/// `harness` 列可空：执行环境域事件（FactsIngested 等）携带，全局事件（计时器等）为
+/// NULL；`delete_imported_harness_data` 据此级联清理。
 const SCHEMA_V23_ADD: &str = r#"
 CREATE TABLE IF NOT EXISTS event_outbox (
   event_id        TEXT PRIMARY KEY,
   event_type      TEXT NOT NULL,
   schema_version  INTEGER NOT NULL CHECK (schema_version >= 1),
   occurred_at_ms  INTEGER NOT NULL CHECK (occurred_at_ms >= 0),
-  host            TEXT,
+  harness            TEXT,
   correlation_id  TEXT,
   producer        TEXT NOT NULL,
   payload_json    TEXT NOT NULL,
@@ -1417,9 +1419,10 @@ fn ensure_schema_v26(conn: &Connection) -> Result<(), AuthorityError> {
 /// 显式保存过，任何迁移永不覆写）/ `dismissed`（询问被「稍后」，永不再问
 /// 且保持关）。本版**不翻默认**：fresh 种子行与存量行都是 `legacy_default`
 /// + enabled=0；翻默认是 R6c（前置：§7.5 24h soak），届时只改种子行。
-/// v30（发布前拍板 2026-10-01：未正式发布，不做老 id 兼容）：把 manifest 宿主
-/// 的旧 `plugin-` 期 fact_id 一次性重 stamp 到 `host:` 身份。标记 = source_profile
-/// 仍为 `plugin-` 前缀（v29 只折算了 host 列）。同事件新 id 已存在（重导先写
+///
+/// v30（发布前拍板 2026-10-01：未正式发布，不做老 id 兼容）：把 manifest 执行环境
+/// 的旧 `plugin-` 期 fact_id 一次性重 stamp 到 `harness:` 身份。标记 = source_profile
+/// 仍为 `plugin-` 前缀（v29 只折算了 harness 列）。同事件新 id 已存在（重导先写
 /// 入）时删除旧行保留新行；provenance 子行先随迁再改父键。幂等：无标记行即空转。
 fn ensure_schema_v30(conn: &Connection) -> Result<(), AuthorityError> {
     // 事实行改 fact_id 牵动子表（billing_fact_attributions /
@@ -1427,7 +1430,7 @@ fn ensure_schema_v30(conn: &Connection) -> Result<(), AuthorityError> {
     // 中途违约——事务内延迟到 COMMIT 统一校验，子表父表同批改。
     conn.execute_batch("PRAGMA defer_foreign_keys=ON")?;
     let mut statement = conn.prepare(
-        "SELECT fact_id, machine_namespace, host, source_profile, native_session_id, source_event_id, observation_kind
+        "SELECT fact_id, machine_namespace, harness, source_profile, native_session_id, source_event_id, observation_kind
          FROM usage_facts WHERE source_profile LIKE 'plugin-%'",
     )?;
     let rows = statement.query_map([], |row| {
@@ -1437,16 +1440,16 @@ fn ensure_schema_v30(conn: &Connection) -> Result<(), AuthorityError> {
         ))
     })?.collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    for (old_id, namespace, host, profile, session, event, kind) in rows {
-        let slug = host.strip_prefix("host:").map(str::to_string).unwrap_or_else(|| host.clone());
-        let new_host = format!("host:{slug}");
+    for (old_id, namespace, harness, profile, session, event, kind) in rows {
+        let slug = harness.strip_prefix("harness:").map(str::to_string).unwrap_or_else(|| harness.clone());
+        let new_harness = format!("harness:{slug}");
         let rest = profile.strip_prefix("plugin-").map(str::to_string).unwrap_or_else(|| profile.clone());
-        let new_profile = format!("host-{rest}");
+        let new_profile = format!("harness-{rest}");
         let new_id = agent_vitals_domain::contracts::usage_fact::fact_id(
-            &namespace, &new_host, &new_profile, &session, &event, &kind,
+            &namespace, &new_harness, &new_profile, &session, &event, &kind,
         );
         if new_id == old_id { continue; }
-        // 事件级 UNIQUE(host,ns,session,event,kind) 保证同事件的「新 id 行」
+        // 事件级 UNIQUE(harness,ns,session,event,kind) 保证同事件的「新 id 行」
         // 不可能与旧行共存（重导在新 key 下直接被拒）——所以这里只需 UPDATE；
         // 若仍撞 fact_id 主键（异事件哈希碰撞），事务失败整体回滚，响亮报错。
         conn.execute(
@@ -1546,7 +1549,7 @@ fn ensure_schema_v22(conn: &Connection) -> Result<(), AuthorityError> {
 /// 这种不必要的迁移负担。
 const VIEWS_V1: &str = r#"
 CREATE VIEW IF NOT EXISTS v_facts_safe AS
-  SELECT fact_id, host, observation_kind, source_profile,
+  SELECT fact_id, harness, observation_kind, source_profile,
          provider_id, provider_raw, billing_source, billing_mode,
          pricing_basis, billing_template_id, evidence_basis, normalization_version,
          route_evidence_id, attribution_version,
@@ -1556,7 +1559,7 @@ CREATE VIEW IF NOT EXISTS v_facts_safe AS
          ingested_run_id, created_at_ms, updated_at_ms, deleted_at_ms
   FROM usage_facts;
 CREATE VIEW IF NOT EXISTS v_sessions_safe AS
-  SELECT session_key, host, source_profile,
+  SELECT session_key, harness, source_profile,
          started_at_ms, ended_at_ms, last_observed_at_ms, deleted_at_ms
   FROM sessions;
 CREATE VIEW IF NOT EXISTS v_data_quality_safe AS
@@ -1594,7 +1597,7 @@ pub struct BudgetProfile {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HostImportedDataDeletion {
+pub struct HarnessImportedDataDeletion {
     pub facts: usize,
     pub sessions: usize,
     pub source_files: usize,
@@ -1723,6 +1726,13 @@ impl AuthorityDb {
         } else {
             None
         };
+        let legacy_host_columns: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_facts') WHERE name = 'host')",
+            [], |row| row.get(0),
+        )?;
+        if legacy_host_columns {
+            return Err(AuthorityError::OlderSchema { found: version.unwrap_or(0) });
+        }
         match version {
             Some(v) if v > super::authority::SCHEMA_VERSION => {
                 return Err(AuthorityError::NewerSchema {
@@ -2351,12 +2361,12 @@ impl AuthorityDb {
         ensure_schema_v26(conn)?;
         ensure_schema_v27(conn)?;
         conn.execute_batch(crate::extension_authority::SCHEMA_V28_ADD)?;
-        // v29（HOST_MANIFEST_DSL_SPEC §13.3）：host 字符串契约迁移 `plugin:` →
-        // `host:`。幂等 UPDATE，只改 host 列、不触碰任何其他事实字段；facts
+        // v29（HARNESS_MANIFEST_DSL_SPEC §13.3）：harness 字符串契约迁移 `plugin:` →
+        // `harness:`。幂等 UPDATE，只改 harness 列、不触碰任何其他事实字段；facts
         // 文件改名由 ingest 层 `migrate_manifest_facts_prefix` 配套完成（迁移
-        // 期间读写两侧都双认新旧前缀，见 host_registry/source_controls）。
+        // 期间读写两侧都双认新旧前缀，见 harness_registry/source_controls）。
         conn.execute_batch(
-            "UPDATE usage_facts SET host = 'host:' || substr(host, 8) WHERE host LIKE 'plugin:%';",
+            "UPDATE usage_facts SET harness = 'harness:' || substr(harness, 8) WHERE harness LIKE 'plugin:%';",
         )?;
         ensure_schema_v30(conn)?;
         conn.execute("UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
@@ -2494,59 +2504,59 @@ impl AuthorityDb {
         })
     }
 
-    /// 删除一个宿主由本 App 导入的可见数据。事实和会话采用既有软删除语义，
+    /// 删除一个执行环境由本 App 导入的可见数据。事实和会话采用既有软删除语义，
     /// 使历史计费归因外键仍完整；来源指纹被物理删除，恢复读取后才会重新导入。
-    /// 不触及用户手工账单、计费声明、价格快照或任何其他宿主。
-    pub fn delete_imported_host_data(
-        &self, host: &str, now_ms: i64,
-    ) -> Result<HostImportedDataDeletion, AuthorityError> {
+    /// 不触及用户手工账单、计费声明、价格快照或任何其他执行环境。
+    pub fn delete_imported_harness_data(
+        &self, harness: &str, now_ms: i64,
+    ) -> Result<HarnessImportedDataDeletion, AuthorityError> {
         self.with_immediate_txn(|conn| {
             let facts = conn.execute(
                 "UPDATE usage_facts SET deleted_at_ms = ?2, updated_at_ms = ?2
-                 WHERE host = ?1 AND deleted_at_ms IS NULL",
-                rusqlite::params![host, now_ms],
+                 WHERE harness = ?1 AND deleted_at_ms IS NULL",
+                rusqlite::params![harness, now_ms],
             )?;
             let sessions = conn.execute(
                 "UPDATE sessions SET deleted_at_ms = ?2
-                 WHERE host = ?1 AND deleted_at_ms IS NULL",
-                rusqlite::params![host, now_ms],
+                 WHERE harness = ?1 AND deleted_at_ms IS NULL",
+                rusqlite::params![harness, now_ms],
             )?;
             conn.execute(
-                "DELETE FROM workflow_events WHERE session_key IN (SELECT session_key FROM sessions WHERE host = ?1)
-                   OR source_id IN (SELECT source_id FROM source_files WHERE host = ?1)",
-                [host],
+                "DELETE FROM workflow_events WHERE session_key IN (SELECT session_key FROM sessions WHERE harness = ?1)
+                   OR source_id IN (SELECT source_id FROM source_files WHERE harness = ?1)",
+                [harness],
             )?;
-            conn.execute("DELETE FROM host_runtime_snapshots WHERE host = ?1", [host])?;
+            conn.execute("DELETE FROM harness_runtime_snapshots WHERE harness = ?1", [harness])?;
             // Trust observation 通过 source_id 间接引用 source_files，必须在源指纹
             // 清理前先删；关联表由 observation 的 ON DELETE CASCADE 清理。
             let trust_observations = conn.execute(
-                "DELETE FROM trust_observations WHERE host = ?1",
-                [host],
+                "DELETE FROM trust_observations WHERE harness = ?1",
+                [harness],
             )?;
             // Task excerpts are a separate projection keyed by session_key;
             // deleting sessions alone would leave user-visible task text behind.
             let session_excerpts = conn.execute(
                 "DELETE FROM session_excerpts WHERE session_key IN
-                   (SELECT session_key FROM sessions WHERE host = ?1)",
-                [host],
+                   (SELECT session_key FROM sessions WHERE harness = ?1)",
+                [harness],
             )?;
             // route_evidence 是导入的路由证据；清除其 ID 后再删行，避免已软
             // 删除的事实留下悬挂证据引用。
-            conn.execute("UPDATE usage_facts SET route_evidence_id = NULL WHERE host = ?1", [host])?;
-            let route_evidence = conn.execute("DELETE FROM route_evidence WHERE host = ?1", [host])?;
+            conn.execute("UPDATE usage_facts SET route_evidence_id = NULL WHERE harness = ?1", [harness])?;
+            let route_evidence = conn.execute("DELETE FROM route_evidence WHERE harness = ?1", [harness])?;
             // 已软删除的事实不再保留源文件关联，避免 source_files 外键阻碍
             // 指纹清理，也避免已删除数据继续关联可推断的来源元数据。
-            conn.execute("UPDATE usage_facts SET source_id = NULL WHERE host = ?1", [host])?;
-            let source_files = conn.execute("DELETE FROM source_files WHERE host = ?1", [host])?;
-            // 事件 outbox 的宿主域行随宿主数据一起清（含投递记录）——已删除
+            conn.execute("UPDATE usage_facts SET source_id = NULL WHERE harness = ?1", [harness])?;
+            let source_files = conn.execute("DELETE FROM source_files WHERE harness = ?1", [harness])?;
+            // 事件 outbox 的执行环境域行随执行环境数据一起清（含投递记录）——已删除
             // 数据的 FactsIngested 不该再驱动任何消费者（spec §4.2 级联）。
             conn.execute(
                 "DELETE FROM event_deliveries WHERE event_id IN
-                   (SELECT event_id FROM event_outbox WHERE host = ?1)",
-                [host],
+                   (SELECT event_id FROM event_outbox WHERE harness = ?1)",
+                [harness],
             )?;
-            conn.execute("DELETE FROM event_outbox WHERE host = ?1", [host])?;
-            Ok(HostImportedDataDeletion {
+            conn.execute("DELETE FROM event_outbox WHERE harness = ?1", [harness])?;
+            Ok(HarnessImportedDataDeletion {
                 facts, sessions, source_files, trust_observations, route_evidence, session_excerpts,
             })
         })
@@ -3301,11 +3311,11 @@ impl AuthorityDb {
         Ok(changed > 0)
     }
 
-    // ─────── v0.9.1 Phase 2.8：host_bills（spec §5.3 显式管理 API）───────
-    // 宿主自身账单（WorkBuddy 积分、订阅月费、中转对账单…）——**不是**从我们
+    // ─────── v0.9.1 Phase 2.8：harness_bills（spec §5.3 显式管理 API）───────
+    // 执行环境自身账单（WorkBuddy 积分、订阅月费、中转对账单…）——**不是**从我们
     // 的价卡派生，由用户显式录入，更新必须验证币种/账期/金额范围（§5.3）。
 
-    /// 录一条宿主账单。`bill_id` = `{host}:{provider}:{period}:{basis}:{evidence_ref}`
+    /// 录一条执行环境账单。`bill_id` = `{harness}:{provider}:{period}:{basis}:{evidence_ref}`
     /// 的稳定构造（调用方给），同键 upsert（更正金额）。`amount_minor` 最小
     /// 货币单位整数（¥1.00 = 100）。校验：period `YYYY-MM`、basis 五档之一、
     /// amount_minor ≥ 0、currency 非空——不合格 `Err`（不猜不默认）。
@@ -3315,10 +3325,10 @@ impl AuthorityDb {
     /// `ON CONFLICT` 落空、同一 bill_id 第二次录入撞 PRIMARY KEY 报错而不是 upsert
     /// （`bill_id` 构造里的 `{evidence_ref}` 段同样是空串，两侧对齐）。
     #[allow(clippy::too_many_arguments)]
-    pub fn host_bill_put(
+    pub fn harness_bill_put(
         &self,
         bill_id: &str,
-        host: &str,
+        harness: &str,
         provider_id: &str,
         billing_period: &str,
         billing_basis: &str,
@@ -3339,7 +3349,7 @@ impl AuthorityDb {
         if !matches!(
             billing_basis,
             "fixed_subscription"
-                | "host_billed"
+                | "harness_billed"
                 | "metered_actual"
                 | "metered_estimate"
                 | "api_equivalent"
@@ -3353,29 +3363,29 @@ impl AuthorityDb {
             return Err(bad("currency must be a three-letter uppercase code"));
         }
         self.conn.execute(
-            "INSERT INTO host_bills(bill_id, host, provider_id, billing_period, billing_basis,
+            "INSERT INTO harness_bills(bill_id, harness, provider_id, billing_period, billing_basis,
                  amount_minor, currency, evidence_ref, created_at_ms, updated_at_ms)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9)
-             ON CONFLICT(host, provider_id, billing_period, billing_basis, evidence_ref) DO UPDATE SET
+             ON CONFLICT(harness, provider_id, billing_period, billing_basis, evidence_ref) DO UPDATE SET
                  amount_minor = excluded.amount_minor, currency = excluded.currency,
                  updated_at_ms = excluded.updated_at_ms, deleted_at_ms = NULL",
             rusqlite::params![
-                bill_id, host, provider_id, billing_period, billing_basis,
+                bill_id, harness, provider_id, billing_period, billing_basis,
                 amount_minor, currency, evidence_ref, now_ms
             ],
         )?;
         Ok(())
     }
 
-    /// 某账期的所有活账单行 `(host, provider_id, basis, amount_minor, currency)`。
-    pub fn host_bills_for_period(
+    /// 某账期的所有活账单行 `(harness, provider_id, basis, amount_minor, currency)`。
+    pub fn harness_bills_for_period(
         &self,
         billing_period: &str,
-    ) -> Result<Vec<HostBillRow>, AuthorityError> {
+    ) -> Result<Vec<HarnessBillRow>, AuthorityError> {
         let mut stmt = self.conn.prepare(
-            "SELECT host, provider_id, billing_basis, amount_minor, currency FROM host_bills
+            "SELECT harness, provider_id, billing_basis, amount_minor, currency FROM harness_bills
              WHERE billing_period = ?1 AND deleted_at_ms IS NULL
-             ORDER BY host, provider_id, billing_basis",
+             ORDER BY harness, provider_id, billing_basis",
         )?;
         let rows = stmt
             .query_map(rusqlite::params![billing_period], |r| {
@@ -3393,13 +3403,13 @@ impl AuthorityDb {
 
     /// 带稳定 bill_id/evidence 的账单明细，供设置页更正或 soft-delete；
     /// 汇总仍使用上面的五列投影，避免把内部 id 扩散到旧 DTO。
-    pub fn host_bill_details_for_period(
+    pub fn harness_bill_details_for_period(
         &self, billing_period: &str,
-    ) -> Result<Vec<HostBillDetailRow>, AuthorityError> {
+    ) -> Result<Vec<HarnessBillDetailRow>, AuthorityError> {
         let mut stmt = self.conn.prepare(
-            "SELECT bill_id, host, provider_id, billing_basis, amount_minor, currency, evidence_ref
-             FROM host_bills WHERE billing_period = ?1 AND deleted_at_ms IS NULL
-             ORDER BY host, provider_id, billing_basis, bill_id",
+            "SELECT bill_id, harness, provider_id, billing_basis, amount_minor, currency, evidence_ref
+             FROM harness_bills WHERE billing_period = ?1 AND deleted_at_ms IS NULL
+             ORDER BY harness, provider_id, billing_basis, bill_id",
         )?;
         let rows = stmt.query_map(rusqlite::params![billing_period], |r| Ok((
             r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
@@ -3408,23 +3418,23 @@ impl AuthorityDb {
     }
 
     /// soft delete（查询默认过滤 `deleted_at_ms IS NULL`）。
-    pub fn host_bill_delete(&self, bill_id: &str, now_ms: i64) -> Result<bool, AuthorityError> {
+    pub fn harness_bill_delete(&self, bill_id: &str, now_ms: i64) -> Result<bool, AuthorityError> {
         let n = self.conn.execute(
-            "UPDATE host_bills SET deleted_at_ms = ?2 WHERE bill_id = ?1 AND deleted_at_ms IS NULL",
+            "UPDATE harness_bills SET deleted_at_ms = ?2 WHERE bill_id = ?1 AND deleted_at_ms IS NULL",
             rusqlite::params![bill_id, now_ms],
         )?;
         Ok(n > 0)
     }
 
-    pub fn host_bill_count(&self) -> Result<i64, AuthorityError> {
+    pub fn harness_bill_count(&self) -> Result<i64, AuthorityError> {
         Ok(self.conn.query_row(
-            "SELECT COUNT(*) FROM host_bills WHERE deleted_at_ms IS NULL",
+            "SELECT COUNT(*) FROM harness_bills WHERE deleted_at_ms IS NULL",
             [],
             |r| r.get(0),
         )?)
     }
 
-    /// 写入或更正本地计费声明。声明从不创建 `host_bills`，也不改写 facts。
+    /// 写入或更正本地计费声明。声明从不创建 `harness_bills`，也不改写 facts。
     #[allow(clippy::too_many_arguments)]
     pub fn billing_declaration_put(
         &self, declaration_id: &str, provider_id: &str, relationship_kind: &str,
@@ -3453,7 +3463,7 @@ impl AuthorityDb {
             )));
         }
         if let Some(candidate_id) = source_candidate_id {
-            // 候选是某个宿主配置里发现的线索（宿主只是证据来源）；声明属于服务商，只比对服务商。
+            // 候选是某个执行环境配置里发现的线索（执行环境只是证据来源）；声明属于服务商，只比对服务商。
             let candidate = self.conn.query_row(
                 "SELECT provider_id, status FROM billing_import_candidates WHERE candidate_id = ?1",
                 rusqlite::params![candidate_id],
@@ -3469,19 +3479,19 @@ impl AuthorityDb {
         }
         let changed = self.conn.execute(
             "INSERT INTO billing_declarations(
-                 declaration_id, host, provider_id, relationship_kind, subscription_name,
+                 declaration_id, harness, provider_id, relationship_kind, subscription_name,
                  amount_minor, currency, effective_start, effective_end, source_candidate_id,
                  evidence_ref, created_at_ms, updated_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
              ON CONFLICT(declaration_id) DO UPDATE SET
-               host = excluded.host, provider_id = excluded.provider_id,
+               harness = excluded.harness, provider_id = excluded.provider_id,
                relationship_kind = excluded.relationship_kind,
                subscription_name = excluded.subscription_name, amount_minor = excluded.amount_minor,
                currency = excluded.currency, effective_start = excluded.effective_start,
                effective_end = excluded.effective_end, source_candidate_id = excluded.source_candidate_id,
                evidence_ref = excluded.evidence_ref, updated_at_ms = excluded.updated_at_ms,
                deleted_at_ms = NULL",
-            rusqlite::params![declaration_id, ALL_HOSTS, provider_id, relationship_kind,
+            rusqlite::params![declaration_id, ALL_HARNESSES, provider_id, relationship_kind,
                 subscription_name, amount_minor, currency, effective_start, effective_end,
                 source_candidate_id, evidence_ref, now_ms],
         )?;
@@ -3515,15 +3525,15 @@ impl AuthorityDb {
         Ok(out)
     }
 
-    /// 该服务商的用量最多出现在哪个宿主（事实数最多；并列取字典序小的）。没有用量 → `None`。
+    /// 该服务商的用量最多出现在哪个执行环境（事实数最多；并列取字典序小的）。没有用量 → `None`。
     ///
-    /// 只用于**展示归位**：账号级的月费（订阅）不属于任何宿主，但汇总的 `by_provider` 键是
-    /// `宿主/服务商`，需要给它挑一个落点，选用量最集中的那个，月费就和该服务商的用量排在一起。
+    /// 只用于**展示归位**：账号级的月费（订阅）不属于任何执行环境，但汇总的 `by_provider` 键是
+    /// `执行环境/服务商`，需要给它挑一个落点，选用量最集中的那个，月费就和该服务商的用量排在一起。
     /// 不参与任何匹配或计价。
-    pub fn dominant_host_of_provider(&self, provider_id: &str) -> Result<Option<String>, AuthorityError> {
+    pub fn dominant_harness_of_provider(&self, provider_id: &str) -> Result<Option<String>, AuthorityError> {
         Ok(self.conn.query_row(
-            "SELECT host FROM usage_facts WHERE provider_id = ?1 AND deleted_at_ms IS NULL
-             GROUP BY host ORDER BY COUNT(*) DESC, host LIMIT 1",
+            "SELECT harness FROM usage_facts WHERE provider_id = ?1 AND deleted_at_ms IS NULL
+             GROUP BY harness ORDER BY COUNT(*) DESC, harness LIMIT 1",
             rusqlite::params![provider_id], |row| row.get(0),
         ).optional()?)
     }
@@ -3574,7 +3584,7 @@ impl AuthorityDb {
     }
 
     /// 保存一个追加式声明修订。作用范围只能缩小到已指定的账户、路由、模型或
-    /// 会话；空范围表示仅由声明本身的宿主/provider/有效期约束，绝不扩大历史。
+    /// 会话；空范围表示仅由声明本身的执行环境/provider/有效期约束，绝不扩大历史。
     #[allow(clippy::too_many_arguments)]
     pub fn billing_declaration_revision_save(
         &self, revision_id: &str, declaration_id: &str, supersedes_revision_id: Option<&str>,
@@ -3703,29 +3713,29 @@ impl AuthorityDb {
             };
             self.conn.execute(
                 "INSERT INTO billing_declarations(
-                     declaration_id, host, provider_id, relationship_kind, subscription_name,
+                     declaration_id, harness, provider_id, relationship_kind, subscription_name,
                      amount_minor, currency, effective_start, effective_end, source_candidate_id,
                      evidence_ref, created_at_ms, updated_at_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
                  ON CONFLICT(declaration_id) DO UPDATE SET
-                   host = excluded.host, provider_id = excluded.provider_id,
+                   harness = excluded.harness, provider_id = excluded.provider_id,
                    relationship_kind = excluded.relationship_kind, subscription_name = excluded.subscription_name,
                    amount_minor = excluded.amount_minor, currency = excluded.currency,
                    effective_start = excluded.effective_start, effective_end = excluded.effective_end,
                    source_candidate_id = excluded.source_candidate_id, evidence_ref = excluded.evidence_ref,
                    updated_at_ms = excluded.updated_at_ms, deleted_at_ms = NULL",
-                rusqlite::params![declaration_id, ALL_HOSTS, provider_id, relationship_kind,
+                rusqlite::params![declaration_id, ALL_HARNESSES, provider_id, relationship_kind,
                     subscription_name, amount_minor, currency, effective_start, effective_end,
                     source_candidate_id, evidence_ref, now_ms],
             )?;
             self.conn.execute(
                 "INSERT INTO billing_declaration_revisions(
                      revision_id, declaration_id, revision_number, change_kind, supersedes_revision_id,
-                     host, provider_id, relationship_kind, subscription_name, amount_minor, currency,
+                     harness, provider_id, relationship_kind, subscription_name, amount_minor, currency,
                      effective_start, effective_end, source_candidate_id, evidence_ref, created_at_ms)
                  VALUES (?1, ?2, ?3, 'saved', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 rusqlite::params![revision_id, declaration_id, revision_number, supersedes_revision_id,
-                    ALL_HOSTS, provider_id, relationship_kind, subscription_name, amount_minor, currency,
+                    ALL_HARNESSES, provider_id, relationship_kind, subscription_name, amount_minor, currency,
                     effective_start, effective_end, source_candidate_id, evidence_ref, now_ms],
             )?;
             for (scope_kind, scope_value) in scopes {
@@ -3795,7 +3805,7 @@ impl AuthorityDb {
             ).optional()?;
             if exists.is_some() { return Ok(false); }
             let prior: Option<BillingDeclarationRevisionSnapshot> = self.conn.query_row(
-                "SELECT revision_number, host, provider_id, relationship_kind, subscription_name,
+                "SELECT revision_number, harness, provider_id, relationship_kind, subscription_name,
                         amount_minor, currency, effective_start, effective_end, source_candidate_id, evidence_ref
                  FROM billing_declaration_revisions
                  WHERE revision_id = ?1 AND declaration_id = ?2 AND change_kind = 'saved'",
@@ -3803,7 +3813,7 @@ impl AuthorityDb {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?,
                     row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?)),
             ).optional()?;
-            let Some((number, host, provider_id, relationship_kind, subscription_name, amount_minor, currency,
+            let Some((number, harness, provider_id, relationship_kind, subscription_name, amount_minor, currency,
                 effective_start, effective_end, source_candidate_id, evidence_ref)) = prior else {
                 return Err(AuthorityError::Sqlite(rusqlite::Error::InvalidParameterName(
                     "billing declaration revoke must supersede the active revision".to_string(),
@@ -3824,11 +3834,11 @@ impl AuthorityDb {
             self.conn.execute(
                 "INSERT INTO billing_declaration_revisions(
                      revision_id, declaration_id, revision_number, change_kind, supersedes_revision_id,
-                     host, provider_id, relationship_kind, subscription_name, amount_minor, currency,
+                     harness, provider_id, relationship_kind, subscription_name, amount_minor, currency,
                      effective_start, effective_end, source_candidate_id, evidence_ref, created_at_ms)
                  VALUES (?1, ?2, ?3, 'revoked', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 rusqlite::params![revision_id, declaration_id, number + 1, supersedes_revision_id,
-                    host, provider_id, relationship_kind, subscription_name, amount_minor, currency,
+                    harness, provider_id, relationship_kind, subscription_name, amount_minor, currency,
                     effective_start, effective_end, source_candidate_id, evidence_ref, now_ms],
             )?;
             self.conn.execute(
@@ -3860,7 +3870,7 @@ impl AuthorityDb {
     ) -> Result<Vec<BillingDeclarationRevisionRow>, AuthorityError> {
         let mut stmt = self.conn.prepare(
             "SELECT revision_id, declaration_id, revision_number, change_kind, supersedes_revision_id,
-                    host, provider_id, relationship_kind, subscription_name, amount_minor, currency,
+                    harness, provider_id, relationship_kind, subscription_name, amount_minor, currency,
                     effective_start, effective_end, source_candidate_id, evidence_ref, created_at_ms
              FROM billing_declaration_revisions WHERE declaration_id = ?1 ORDER BY revision_number",
         )?;
@@ -3963,8 +3973,8 @@ impl AuthorityDb {
         })
     }
 
-    /// 该服务商是否存在**生效中**的官方 API 声明（最新修订是 `saved`），**不分宿主**：
-    /// 官方订阅是账号级的，API Key 同样可能在任何宿主上使用，两者并存时用量无从区分，
+    /// 该服务商是否存在**生效中**的官方 API 声明（最新修订是 `saved`），**不分执行环境**：
+    /// 官方订阅是账号级的，API Key 同样可能在任何执行环境上使用，两者并存时用量无从区分，
     /// 默认覆盖规则让位给显式范围，见 [`default_coverage`]。
     pub fn billing_official_api_declared(&self, provider_id: &str) -> Result<bool, AuthorityError> {
         Ok(self.conn.query_row(
@@ -4049,7 +4059,7 @@ impl AuthorityDb {
     /// 一修订一 job，job 就是「这条规则」的句柄），`created_at_ms` 记录本次套用时间。
     /// 幂等：`ON CONFLICT DO NOTHING`，水位重叠只会白查不会双写。
     ///
-    /// 顺序：订阅修订先于其他——选择谓词只排除 `subscription_covered`，同宿主同
+    /// 顺序：订阅修订先于其他——选择谓词只排除 `subscription_covered`，同执行环境同
     /// provider 的订阅与按量声明本不该重叠，但若用户两边都声明了，订阅先占位、按量
     /// 只拿剩下的（与保存顺序无关，结果确定）。
     ///
@@ -4200,7 +4210,7 @@ impl AuthorityDb {
     }
 
     /// 应用重启时恢复任务队列：把上次进程中断的 running 任务标为失败，
-    /// 再返回仍待执行的 queued 任务，由宿主启动 worker。只改变任务状态，
+    /// 再返回仍待执行的 queued 任务，由执行环境启动 worker。只改变任务状态，
     /// 不触碰事实、结果快照或归因表。
     pub fn billing_recalculation_recover(
         &self, now_ms: i64,
@@ -4347,12 +4357,12 @@ impl AuthorityDb {
     }
 
     /// 幂等写入一个待确认的旧订阅候选。相同候选不会重复；候选永远不写入
-    /// `host_bills`，必须由上层获得用户确认后另走明确账单写入。
+    /// `harness_bills`，必须由上层获得用户确认后另走明确账单写入。
     #[allow(clippy::too_many_arguments)]
     pub fn billing_import_candidate_put(
         &self,
         candidate_id: &str,
-        host: &str,
+        harness: &str,
         provider_id: &str,
         currency: &str,
         amount_minor: i64,
@@ -4360,7 +4370,7 @@ impl AuthorityDb {
         source_pricing_version: &str,
         now_ms: i64,
     ) -> Result<bool, AuthorityError> {
-        if candidate_id.is_empty() || host.is_empty() || provider_id.is_empty()
+        if candidate_id.is_empty() || harness.is_empty() || provider_id.is_empty()
             || currency.trim().is_empty() || amount_minor < 0
             || billing_period_start.len() != 7 || source_pricing_version.is_empty()
         {
@@ -4370,11 +4380,11 @@ impl AuthorityDb {
         }
         let changed = self.conn.execute(
             "INSERT INTO billing_import_candidates(
-                 candidate_id, host, provider_id, currency, amount_minor, billing_period_start,
+                 candidate_id, harness, provider_id, currency, amount_minor, billing_period_start,
                  source_pricing_version, status, created_at_ms, updated_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?8)
              ON CONFLICT(candidate_id) DO NOTHING",
-            rusqlite::params![candidate_id, host, provider_id, currency, amount_minor,
+            rusqlite::params![candidate_id, harness, provider_id, currency, amount_minor,
                 billing_period_start, source_pricing_version, now_ms],
         )?;
         Ok(changed > 0)
@@ -4393,7 +4403,7 @@ impl AuthorityDb {
         &self,
     ) -> Result<Vec<BillingImportCandidateRow>, AuthorityError> {
         let mut stmt = self.conn.prepare(
-            "SELECT candidate_id, host, provider_id, currency, amount_minor, billing_period_start, status
+            "SELECT candidate_id, harness, provider_id, currency, amount_minor, billing_period_start, status
              FROM billing_import_candidates
              ORDER BY provider_id, billing_period_start, candidate_id",
         )?;
@@ -4478,9 +4488,9 @@ impl AuthorityDb {
 
     /// 将先前错误自动导入的旧价表账单撤回。仅匹配专用 evidence 标签，绝不
     /// 触碰用户手工录入的账单。
-    pub fn revoke_legacy_pricing_host_bills(&self, now_ms: i64) -> Result<usize, AuthorityError> {
+    pub fn revoke_legacy_pricing_harness_bills(&self, now_ms: i64) -> Result<usize, AuthorityError> {
         Ok(self.conn.execute(
-            "UPDATE host_bills SET deleted_at_ms = ?1
+            "UPDATE harness_bills SET deleted_at_ms = ?1
              WHERE evidence_ref = 'legacy-pricing-catalog' AND deleted_at_ms IS NULL",
             rusqlite::params![now_ms],
         )?)
@@ -4549,25 +4559,25 @@ impl AuthorityDb {
 
     /// 只读连接访问（查询面在 Phase 3 接 repository；Phase 2 的 writer 也
     /// 走 with_immediate_txn——这个 getter 仅供测试与迁移框架）。
-    /// 读取一份宿主实时快照；调用方负责反序列化，并把损坏 payload 当数据质量
+    /// 读取一份执行环境实时快照；调用方负责反序列化，并把损坏 payload 当数据质量
     /// 问题而不是回落读取原始日志。
     pub fn runtime_snapshot_get(
         &self,
-        host: &str,
+        harness: &str,
         snapshot_kind: &str,
     ) -> Result<Option<(String, i64)>, AuthorityError> {
         self.conn
             .query_row(
-                "SELECT payload_json, observed_at_ms FROM host_runtime_snapshots
-                 WHERE host = ?1 AND snapshot_kind = ?2",
-                rusqlite::params![host, snapshot_kind],
+                "SELECT payload_json, observed_at_ms FROM harness_runtime_snapshots
+                 WHERE harness = ?1 AND snapshot_kind = ?2",
+                rusqlite::params![harness, snapshot_kind],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(AuthorityError::from)
     }
 
-    /// 写入一份宿主实时快照（`codex_quota` 之外的第二类消费方：Claude Pro 的
+    /// 写入一份执行环境实时快照（`codex_quota` 之外的第二类消费方：Claude Pro 的
     /// 窗口状态）。
     ///
     /// **只让更新的快照覆盖旧的**（`WHERE excluded.observed_at_ms >= ...`）——
@@ -4578,23 +4588,23 @@ impl AuthorityDb {
     /// 返回是否真的写入（`false` = 已有更新的观察，本次忽略）。
     pub fn runtime_snapshot_upsert(
         &self,
-        host: &str,
+        harness: &str,
         snapshot_kind: &str,
         payload_json: &str,
         observed_at_ms: i64,
         now_ms: i64,
     ) -> Result<bool, AuthorityError> {
         let changed = self.conn.execute(
-            "INSERT INTO host_runtime_snapshots(
-                 host, snapshot_kind, payload_json, observed_at_ms, source_id,
+            "INSERT INTO harness_runtime_snapshots(
+                 harness, snapshot_kind, payload_json, observed_at_ms, source_id,
                  ingested_run_id, updated_at_ms)
              VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)
-             ON CONFLICT(host, snapshot_kind) DO UPDATE SET
+             ON CONFLICT(harness, snapshot_kind) DO UPDATE SET
                  payload_json = excluded.payload_json,
                  observed_at_ms = excluded.observed_at_ms,
                  updated_at_ms = excluded.updated_at_ms
-             WHERE excluded.observed_at_ms >= host_runtime_snapshots.observed_at_ms",
-            rusqlite::params![host, snapshot_kind, payload_json, observed_at_ms, now_ms],
+             WHERE excluded.observed_at_ms >= harness_runtime_snapshots.observed_at_ms",
+            rusqlite::params![harness, snapshot_kind, payload_json, observed_at_ms, now_ms],
         )?;
         Ok(changed > 0)
     }
@@ -4606,6 +4616,19 @@ impl AuthorityDb {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_host_columns_require_rebuild_without_mutating_data() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT);
+            INSERT INTO schema_meta VALUES ('schema_version', '30');
+            CREATE TABLE usage_facts (host TEXT);
+            INSERT INTO usage_facts VALUES ('codex');").unwrap();
+        assert!(matches!(super::AuthorityDb::ensure_schema(&conn, 1),
+            Err(super::AuthorityError::OlderSchema { found: 30 })));
+        let retained: String = conn.query_row("SELECT host FROM usage_facts", [], |row| row.get(0)).unwrap();
+        assert_eq!(retained, "codex");
+    }
+
     /// R6a（REFRESH_STORM，v27）：enabled_source 四态的迁移不变量——
     /// 全新/迁移库种子 `legacy_default`；显式保存置 `user` 且重开库（迁移重跑）
     /// 不覆写；dismiss 置 `dismissed` 且不被后续 record_result 心跳冲掉。
@@ -4679,14 +4702,14 @@ mod tests {
                 "source_files",
                 "sessions",
                 "usage_facts",
-                "host_bills",
+                "harness_bills",
                 "pricing_snapshots",
                 "budget_config",
                 "budget_snoozes",
                 "data_quality_issues",
                 "migrations",
                 "workflow_events",
-                "host_runtime_snapshots",
+                "harness_runtime_snapshots",
                 "route_evidence",
                 "issue_instances",
                 "issue_status_transitions",
@@ -4771,7 +4794,7 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute_batch("DROP TABLE host_runtime_snapshots;")
+        conn.execute_batch("DROP TABLE harness_runtime_snapshots;")
             .unwrap();
         conn.execute_batch("COMMIT;").unwrap();
         drop(conn);
@@ -4789,7 +4812,7 @@ mod tests {
         let exists: i64 = upgraded
             .conn()
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'host_runtime_snapshots'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'harness_runtime_snapshots'",
                 [],
                 |r| r.get(0),
             )
@@ -4826,7 +4849,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, last_observed_at_ms)
+            "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, last_observed_at_ms)
              VALUES('sess-v15', 'claude-code', 'native-1', 'ns', 1)",
             [],
         )
@@ -4838,7 +4861,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key, source_event_id, observation_kind, event_ts_ms, ingested_run_id, created_at_ms, updated_at_ms)
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, session_key, source_event_id, observation_kind, event_ts_ms, ingested_run_id, created_at_ms, updated_at_ms)
              VALUES('fact-v15', 'claude-code', 'ns', 'native-1', 'sess-v15', 'evt-1', 'message', 1, 'run-v15', 1, 1)",
             [],
         )
@@ -4889,7 +4912,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(effort.is_none(), "reasoning_effort 必须为 NULL（宿主未报）");
+        assert!(effort.is_none(), "reasoning_effort 必须为 NULL（执行环境未报）");
 
         // CHECK 词表：闭集外拒绝、闭集内放行。
         let rejected = upgraded.conn().execute(
@@ -5096,35 +5119,35 @@ mod tests {
         let _ = std::fs::remove_file(&db);
     }
 
-    /// 事件级联（spec §4.2）：删除宿主导入数据时，该宿主的 outbox 行与投递
+    /// 事件级联（spec §4.2）：删除执行环境导入数据时，该执行环境的 outbox 行与投递
     /// 记录一起清，不留「已删除数据的事实还在驱动消费者」的悬空。
     #[test]
-    fn delete_imported_host_data_cascades_event_outbox() {
+    fn delete_imported_harness_data_cascades_event_outbox() {
         let db = tmp_db("delete-cascades-events");
         let seeded = AuthorityDb::open(&db, 1).unwrap();
         seeded.begin_run("run-e", "cli", 1).unwrap();
         seeded.conn().execute_batch(
             "INSERT INTO event_outbox(event_id, event_type, schema_version, occurred_at_ms,
-                 host, producer, payload_json, ingested_run_id, created_at_ms)
+                 harness, producer, payload_json, ingested_run_id, created_at_ms)
              VALUES ('e1', 'FactsIngested', 1, 1, 'zcode', 'sync_service', '{}', 'run-e', 1),
                     ('e2', 'FactsIngested', 1, 1, 'claude-code', 'sync_service', '{}', 'run-e', 1);
              INSERT INTO event_deliveries(event_id, consumer_id, delivered_at_ms)
              VALUES ('e1', 'price-reconcile', 2), ('e2', 'price-reconcile', 2);",
         ).unwrap();
-        seeded.delete_imported_host_data("zcode", 3).unwrap();
-        let host_events: i64 = seeded.conn().query_row(
-            "SELECT COUNT(*) FROM event_outbox WHERE host = 'zcode'", [], |r| r.get(0),
+        seeded.delete_imported_harness_data("zcode", 3).unwrap();
+        let harness_events: i64 = seeded.conn().query_row(
+            "SELECT COUNT(*) FROM event_outbox WHERE harness = 'zcode'", [], |r| r.get(0),
         ).unwrap();
         let other_events: i64 = seeded.conn().query_row(
-            "SELECT COUNT(*) FROM event_outbox WHERE host = 'claude-code'", [], |r| r.get(0),
+            "SELECT COUNT(*) FROM event_outbox WHERE harness = 'claude-code'", [], |r| r.get(0),
         ).unwrap();
         let dangling: i64 = seeded.conn().query_row(
             "SELECT COUNT(*) FROM event_deliveries d
              WHERE NOT EXISTS (SELECT 1 FROM event_outbox o WHERE o.event_id = d.event_id)",
             [], |r| r.get(0),
         ).unwrap();
-        assert_eq!((host_events, other_events, dangling), (0, 1, 0),
-            "宿主事件清空、他宿主保留、投递记录无悬挂");
+        assert_eq!((harness_events, other_events, dangling), (0, 1, 0),
+            "执行环境事件清空、他执行环境保留、投递记录无悬挂");
         let _ = std::fs::remove_file(&db);
     }
 
@@ -5258,7 +5281,7 @@ mod tests {
 
     #[test]
     fn probe_tables_enforce_vocabularies_fk_order_and_uniqueness() {
-        // 词表闭集（host_kind/kind/mode/status/outcome/verdict）、FK 顺序
+        // 词表闭集（harness_kind/kind/mode/status/outcome/verdict）、FK 顺序
         // （run 依赖 route+suite）、verdict 每 run 唯一、consent 语义位可 NULL。
         let db = tmp_db("v17-vocab");
         let authority = AuthorityDb::open(&db, 1).unwrap();
@@ -5272,7 +5295,7 @@ mod tests {
         // 合法链路：route（未授权，consent NULL 是合法存储态——发起请求由
         // runner 层拒，不是库层）→ suite → run → result → verdict。
         conn.execute_batch(
-            "INSERT INTO probe_routes(route_id, label, host_kind, model_requested, created_at_ms, updated_at_ms)
+            "INSERT INTO probe_routes(route_id, label, harness_kind, model_requested, created_at_ms, updated_at_ms)
              VALUES('rt1','官方直连','claude-code','claude-sonnet-5',1,1);
              INSERT INTO probe_suites(suite_id, version, kind, manifest_ref, manifest_sha256, rule_version, created_at_ms)
              VALUES('l0','1','l0_identity','probe/suites/l0/1/manifest.toml','deadbeef','stat-v1',1);
@@ -5431,7 +5454,7 @@ mod tests {
         assert!(authority.pending_billing_import_candidates().unwrap().is_empty());
         assert_eq!(authority.billing_import_candidates().unwrap()[0].6, "accepted",
             "the resolved state remains available for a persistent receipt and undo");
-        assert_eq!(authority.host_bill_count().unwrap(), 0,
+        assert_eq!(authority.harness_bill_count().unwrap(), 0,
             "a package declaration is not a payment record");
         assert!(!authority.billing_import_candidate_resolve("candidate", "dismissed", 3).unwrap(),
             "a resolved candidate cannot be silently rewritten by sync");
@@ -5464,7 +5487,7 @@ mod tests {
         assert_eq!(rows[0].4, Some(2_000));
         assert_eq!(rows[1].0, "decl-unknown");
         assert_eq!(rows[1].4, None, "unknown contract amount must remain unknown");
-        assert_eq!(authority.host_bill_count().unwrap(), 0,
+        assert_eq!(authority.harness_bill_count().unwrap(), 0,
             "a billing declaration must not masquerade as a payment record");
         assert!(authority.billing_declaration_put(
             "bad","openai", "official_subscription", None,
@@ -5480,7 +5503,7 @@ mod tests {
         assert!(authority.billing_declaration_put(
             "wrong-candidate","openai", "official_subscription", None,
             None, None, "2026-09", None, Some("candidate"), None, 4,
-        ).is_err(), "candidate must belong to the declaration host/provider and be accepted");
+        ).is_err(), "candidate must belong to the declaration harness/provider and be accepted");
         authority.billing_import_candidate_resolve("candidate", "accepted", 5).unwrap();
         assert!(authority.billing_declaration_put(
             "candidate-declaration","anthropic", "official_subscription", None,
@@ -5645,7 +5668,7 @@ mod tests {
             ("revision-1".to_string(), "model".to_string(), "gpt-5.6-sol".to_string()),
             ("revision-1".to_string(), "route".to_string(), "official-desktop".to_string()),
         ]);
-        assert_eq!(authority.host_bill_count().unwrap(), 0,
+        assert_eq!(authority.harness_bill_count().unwrap(), 0,
             "a scoped declaration remains distinct from a payment record");
         assert!(authority.billing_declaration_revision_save(
             "revision-2", "declaration", Some("revision-1"),"openai",
@@ -5676,7 +5699,7 @@ mod tests {
         assert!(!authority.billing_declaration_revision_revoke(
             "revision-3", "declaration", "revision-2", 6,
         ).unwrap(), "replaying the same revoke is idempotent");
-        assert_eq!(authority.host_bill_count().unwrap(), 0);
+        assert_eq!(authority.harness_bill_count().unwrap(), 0);
         let _ = std::fs::remove_file(&db);
     }
 
@@ -5693,7 +5716,7 @@ mod tests {
         assert!(authority.billing_declarations().unwrap().is_empty());
         assert!(authority.billing_declaration_revision_save(
             "invalid-kind", "declaration", None,"openai", "official_api", None,
-            None, None, "2026-09", None, None, None, &[("host", "codex")], 3,
+            None, None, "2026-09", None, None, None, &[("harness", "codex")], 3,
         ).is_err());
         assert!(authority.billing_declaration_revisions("declaration").unwrap().is_empty());
         let _ = std::fs::remove_file(&db);
@@ -5701,7 +5724,7 @@ mod tests {
 
     /// 「服务商未知」的组（事实 `provider_id IS NULL`）：声明记录用户选的服务商，
     /// 作用域 `provider=unresolved` 让预览与重算只命中 NULL-provider 的事实，
-    /// 不会把同宿主里已知 provider 的事实一起吞掉；反之普通声明也不会碰到它们。
+    /// 不会把同执行环境里已知 provider 的事实一起吞掉；反之普通声明也不会碰到它们。
     #[test]
     fn provider_unresolved_scope_targets_null_provider_facts_only() {
         let db = tmp_db("billing-provider-unresolved");
@@ -5709,7 +5732,7 @@ mod tests {
         authority.conn().execute_batch(
             "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
              VALUES('pu-run', 1, 'test', 'succeeded', 13);
-             INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+             INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                  session_key, observation_kind, provider_id, model_id, event_ts_ms, evidence_basis, billing_mode,
                  uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                  ingested_run_id, created_at_ms, updated_at_ms)
@@ -5760,14 +5783,14 @@ mod tests {
         authority.conn().execute_batch(
             "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
              VALUES('preview-run', 1, 'test', 'succeeded', 9);
-             INSERT INTO route_evidence(evidence_id, host, machine_namespace, native_session_id,
+             INSERT INTO route_evidence(evidence_id, harness, machine_namespace, native_session_id,
                  endpoint_host, account_ref, evidence_basis, ingested_run_id)
              VALUES('route-a', 'codex', 'machine', 'session-a', 'official', 'personal', 'test', 'preview-run'),
                    ('route-b', 'codex', 'machine', 'session-b', 'other', 'personal', 'test', 'preview-run');
-             INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, last_observed_at_ms)
+             INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, last_observed_at_ms)
              VALUES('session-a-key', 'codex', 'session-a', 'machine', 1000),
                    ('session-b-key', 'codex', 'session-b', 'machine', 3000);
-             INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+             INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                  session_key, observation_kind, provider_id, model_id, event_ts_ms, route_evidence_id,
                  uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                  ingested_run_id, created_at_ms, updated_at_ms)
@@ -5797,20 +5820,20 @@ mod tests {
             first_event_ts_ms: Some(1000), last_event_ts_ms: Some(1000),
             conflict_fact_count: 0, conflict_tokens: 0,
         });
-        assert_eq!(authority.host_bill_count().unwrap(), 0);
+        assert_eq!(authority.harness_bill_count().unwrap(), 0);
         authority.billing_recalculation_enqueue("preview-job", "preview-declaration", "preview-revision", 3).unwrap();
         assert!(authority.billing_recalculation_run("preview-job", 4).unwrap());
         let attribution: String = authority.conn().query_row(
             "SELECT fact_id FROM billing_fact_attributions WHERE job_id = 'preview-job'", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(attribution, "fact-1");
-        assert_eq!(authority.host_bill_count().unwrap(), 0);
+        assert_eq!(authority.harness_bill_count().unwrap(), 0);
         let _ = std::fs::remove_file(&db);
     }
 
     /// 计费主链规格 R1：预览命中的事实集合 == 重算归因的事实集合（同一谓词）。
     /// 夹具故意放三种不该被移出的事实：`conflict` 证据（E207，单列为仍待确认）、
-    /// 已被另一条 saved 声明覆盖的事实（不重复移出）、宿主自报 subscription 的
+    /// 已被另一条 saved 声明覆盖的事实（不重复移出）、执行环境自报 subscription 的
     /// 事实（本来就不按量）。此前预览按前端传的统计月窗口、重算按全历史，
     /// 「保存前显示的作用范围」与实际写入对不上。
     #[test]
@@ -5820,10 +5843,10 @@ mod tests {
         authority.conn().execute_batch(
             "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
              VALUES('r1-run', 1, 'test', 'succeeded', 13);
-             INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, last_observed_at_ms)
+             INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, last_observed_at_ms)
              VALUES('s1', 'codex', 'n1', 'machine', 1000), ('s2', 'codex', 'n2', 'machine', 3000),
                     ('s3', 'codex', 'n3', 'machine', 3500);
-             INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+             INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                  session_key, observation_kind, provider_id, model_id, event_ts_ms, evidence_basis, billing_mode,
                  uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                  ingested_run_id, created_at_ms, updated_at_ms)
@@ -5936,7 +5959,7 @@ mod tests {
         let day = |d: i64| 1_757_000_000_000 + d * 86_400_000; // 2025-09 附近的北京日
         let insert = |id: &str, provider: Option<&str>, model: &str, ts: i64, created: i64| {
             authority.conn().execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                      observation_kind, provider_id, model_id, event_ts_ms, evidence_basis,
                      uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                      ingested_run_id, created_at_ms, updated_at_ms)
@@ -6017,7 +6040,7 @@ mod tests {
         authority.billing_recalculation_enqueue("job-bounded", "decl-bounded", "rev-bounded", 6_100).unwrap();
         assert!(authority.billing_recalculation_run("job-bounded", 6_200).unwrap());
         authority.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                  observation_kind, provider_id, model_id, event_ts_ms, uncached_input_tokens,
                  ingested_run_id, created_at_ms, updated_at_ms)
              VALUES ('c-late', 'codex', 'm', 'c-late', 'c-late', 'token_count', 'openai', 'gpt-5.6-luna', ?1, 10,
@@ -6039,15 +6062,15 @@ mod tests {
         (db, authority)
     }
 
-    fn put_fact(authority: &AuthorityDb, id: &str, host: &str, provider: Option<&str>, model: &str, created: i64) {
+    fn put_fact(authority: &AuthorityDb, id: &str, harness: &str, provider: Option<&str>, model: &str, created: i64) {
         authority.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                  observation_kind, provider_id, model_id, event_ts_ms, evidence_basis,
                  uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                  ingested_run_id, created_at_ms, updated_at_ms)
              VALUES (?1, ?2, 'm', ?1, ?1, 'assistant-usage', ?3, ?4, 1757086400000, 'missing',
                  10, 0, 0, 0, 'dflt-run', ?5, ?5)",
-            rusqlite::params![id, host, provider, model, created],
+            rusqlite::params![id, harness, provider, model, created],
         ).unwrap();
     }
 
@@ -6057,7 +6080,7 @@ mod tests {
         ).unwrap() > 0
     }
 
-    /// 声明不再绑宿主之后，「服务商未知」的答复若没有任何收窄范围，就是对所有宿主、所有未归属用量的
+    /// 声明不再绑执行环境之后，「服务商未知」的答复若没有任何收窄范围，就是对所有执行环境、所有未归属用量的
     /// 兜底声明（真机：claude-code 2.46 万、codex 1.72 万、WorkBuddy 3874 条服务商为空的事实都会被吞）。
     /// 所以写入时拒绝，旧库里留下的这类声明则不匹配任何事实。
     #[test]
@@ -6125,25 +6148,25 @@ mod tests {
     /// 用户要求（2026-10-01）：Anthropic 发新模型不该要求我们发版或用户回来补声明。
     /// 真机：Claude Pro 声明只列了 sonnet-5 / opus-5，`claude-sonnet-5-5` 的 175M token 成了「归属不明」，
     /// 而它的事实早已带着 `provider_id = anthropic`（官方端点证据）。
-    /// 用户要求（2026-10-01）：计费绑定在服务商上、按模型使用结算，宿主只是壳。
+    /// 用户要求（2026-10-01）：计费绑定在服务商上、按模型使用结算，执行环境只是壳。
     /// 真机里同一个中转账号（shengsuanyun）在 Claude Code 与 Codex 各留一份声明、生效期还各自漂移；
-    /// 现在一份声明就够：不看宿主，任何宿主上归到该服务商的事实都属于这个账号。
-    /// 账号级月费要在 `宿主/服务商` 键下挑一个落点：用量最集中的宿主；没有用量则没有落点。
+    /// 现在一份声明就够：不看执行环境，任何执行环境上归到该服务商的事实都属于这个账号。
+    /// 账号级月费要在 `执行环境/服务商` 键下挑一个落点：用量最集中的执行环境；没有用量则没有落点。
     #[test]
-    fn the_dominant_host_of_a_provider_is_where_its_account_level_fee_is_shown() {
-        let (db, authority) = default_scope_fixture("billing-dominant-host");
+    fn the_dominant_harness_of_a_provider_is_where_its_account_level_fee_is_shown() {
+        let (db, authority) = default_scope_fixture("billing-dominant-harness");
         put_fact(&authority, "d1", "codex", Some("relay-x"), "m", 1);
         put_fact(&authority, "d2", "claude-code", Some("relay-x"), "m", 1);
         put_fact(&authority, "d3", "claude-code", Some("relay-x"), "m", 1);
         put_fact(&authority, "d4", "codex", Some("other"), "m", 1);
-        assert_eq!(authority.dominant_host_of_provider("relay-x").unwrap().as_deref(), Some("claude-code"));
-        assert_eq!(authority.dominant_host_of_provider("other").unwrap().as_deref(), Some("codex"));
-        assert_eq!(authority.dominant_host_of_provider("never-used").unwrap(), None);
+        assert_eq!(authority.dominant_harness_of_provider("relay-x").unwrap().as_deref(), Some("claude-code"));
+        assert_eq!(authority.dominant_harness_of_provider("other").unwrap().as_deref(), Some("codex"));
+        assert_eq!(authority.dominant_harness_of_provider("never-used").unwrap(), None);
         let _ = std::fs::remove_file(&db);
     }
 
     #[test]
-    fn a_billing_declaration_belongs_to_the_provider_not_to_a_host() {
+    fn a_billing_declaration_belongs_to_the_provider_not_to_a_harness() {
         let (db, authority) = default_scope_fixture("billing-provider-level");
         put_fact(&authority, "f-claude", "claude-code", Some("shengsuanyun"), "claude-sonnet-5", 100);
         put_fact(&authority, "f-codex", "codex", Some("shengsuanyun"), "gpt-5.6-sol", 100);
@@ -6156,29 +6179,29 @@ mod tests {
         authority.billing_recalculation_enqueue("job-gw", "decl-gw", "rev-gw", 300).unwrap();
         assert!(authority.billing_recalculation_run("job-gw", 400).unwrap());
         assert!(covered(&authority, "f-claude"));
-        assert!(covered(&authority, "f-codex"), "同一个服务商账号在另一个宿主上的用量属于同一份声明");
+        assert!(covered(&authority, "f-codex"), "同一个服务商账号在另一个执行环境上的用量属于同一份声明");
         assert!(!covered(&authority, "f-other"), "别的服务商不受影响");
-        // 预览与重算同一个谓词：不再有「按宿主」的数
+        // 预览与重算同一个谓词：不再有「按执行环境」的数
         let preview = authority.billing_declaration_impact_preview("rev-gw", None).unwrap();
         assert_eq!(preview.fact_count, 2);
-        // 结算币种按服务商记，不带宿主
+        // 结算币种按服务商记，不带执行环境
         let settlement = authority.declared_settlement_currencies().unwrap();
         assert_eq!(settlement.get("shengsuanyun").map(String::as_str), Some("CNY"));
         assert!(settlement.keys().all(|key| !key.contains('/')), "{settlement:?}");
-        // 存储里的宿主列是固定占位，没有任何谓词读它；列表行也不再暴露宿主
-        let stored: Vec<String> = authority.conn().prepare("SELECT DISTINCT host FROM billing_declarations")
+        // 存储里的执行环境列是固定占位，没有任何谓词读它；列表行也不再暴露执行环境
+        let stored: Vec<String> = authority.conn().prepare("SELECT DISTINCT harness FROM billing_declarations")
             .unwrap().query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
-        assert_eq!(stored, vec![ALL_HOSTS.to_string()]);
-        let revisions: Vec<String> = authority.conn().prepare("SELECT DISTINCT host FROM billing_declaration_revisions")
+        assert_eq!(stored, vec![ALL_HARNESSES.to_string()]);
+        let revisions: Vec<String> = authority.conn().prepare("SELECT DISTINCT harness FROM billing_declaration_revisions")
             .unwrap().query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
-        assert_eq!(revisions, vec![ALL_HOSTS.to_string()]);
+        assert_eq!(revisions, vec![ALL_HARNESSES.to_string()]);
         let _ = std::fs::remove_file(&db);
     }
 
-    /// 「服务商未知」的事实靠模型名认账（MiniMax lite / GLM Lite）：模型是结算依据，宿主不是。
+    /// 「服务商未知」的事实靠模型名认账（MiniMax lite / GLM Lite）：模型是结算依据，执行环境不是。
     #[test]
-    fn an_unresolved_provider_answer_matches_the_model_on_any_host() {
-        let (db, authority) = default_scope_fixture("billing-unresolved-any-host");
+    fn an_unresolved_provider_answer_matches_the_model_on_any_harness() {
+        let (db, authority) = default_scope_fixture("billing-unresolved-any-harness");
         put_fact(&authority, "f-a", "claude-code", None, "MiniMax-M3", 100);
         put_fact(&authority, "f-b", "codex", None, "MiniMax-M3", 100);
         put_fact(&authority, "f-c", "claude-code", None, "some-other-model", 100);
@@ -6208,16 +6231,16 @@ mod tests {
         // 重算之后才出现的新模型；以及一个「水位之前入库、从未被匹配过」的新模型事实（历史补算）。
         put_fact(&authority, "f-old-new-model", "claude-code", Some("anthropic"), "claude-sonnet-5-5", 250);
         put_fact(&authority, "f-later-new-model", "claude-code", Some("anthropic"), "claude-opus-5-5", 5_000);
-        // 别的服务商的事实不能被覆盖；同服务商别的宿主属于同一个账号，会被覆盖
+        // 别的服务商的事实不能被覆盖；同服务商别的执行环境属于同一个账号，会被覆盖
         put_fact(&authority, "f-other-provider", "claude-code", Some("minimax"), "MiniMax-M3", 5_000);
-        put_fact(&authority, "f-other-host", "codex", Some("anthropic"), "claude-sonnet-5-5", 5_000);
+        put_fact(&authority, "f-other-harness", "codex", Some("anthropic"), "claude-sonnet-5-5", 5_000);
         let report = authority.billing_apply_active_declarations(6_000).unwrap();
         assert_eq!(report.attributed, 3, "{report:?}");
         assert!(covered(&authority, "f-old-new-model"), "历史补算：水位之前入库的新模型事实也要被覆盖");
         assert!(covered(&authority, "f-later-new-model"));
         assert!(!covered(&authority, "f-other-provider"));
-        // 订阅是账号级的：别的宿主上、服务商明确为 anthropic 的事实同样属于这份 Claude Pro
-        assert!(covered(&authority, "f-other-host"), "账号级订阅覆盖该服务商在任何宿主上的官方路由");
+        // 订阅是账号级的：别的执行环境上、服务商明确为 anthropic 的事实同样属于这份 Claude Pro
+        assert!(covered(&authority, "f-other-harness"), "账号级订阅覆盖该服务商在任何执行环境上的官方路由");
         // 补算只做一次：再跑不新增，也不重复写。
         assert_eq!(authority.billing_apply_active_declarations(7_000).unwrap().attributed, 0);
         let _ = std::fs::remove_file(&db);
@@ -6239,7 +6262,7 @@ mod tests {
     }
 
     /// 例外 1：`provider=unresolved` 的订阅声明（MiniMax lite / GLM Lite 那类）靠模型名识别「服务商未知」的事实，
-    /// 去掉模型限制会把宿主下所有未知服务商的事实都错判成这个订阅。
+    /// 去掉模型限制会把执行环境下所有未知服务商的事实都错判成这个订阅。
     #[test]
     fn unresolved_provider_subscriptions_keep_their_model_list() {
         let (db, authority) = default_scope_fixture("billing-default-scope-unresolved");
@@ -6257,7 +6280,7 @@ mod tests {
         let _ = std::fs::remove_file(&db);
     }
 
-    /// 例外 2：同宿主同服务商还有官方 API 声明时，订阅 / API Key 无从区分，不替用户猜。
+    /// 例外 2：同执行环境同服务商还有官方 API 声明时，订阅 / API Key 无从区分，不替用户猜。
     #[test]
     fn a_coexisting_official_api_declaration_keeps_the_explicit_model_list() {
         let (db, authority) = default_scope_fixture("billing-default-scope-api");
@@ -6279,18 +6302,18 @@ mod tests {
         let _ = std::fs::remove_file(&db);
     }
 
-    /// 用户观察（2026-10-01）：宿主读自家模型，模型名不带服务商前缀；第三方云厂商 / 中转才加
+    /// 用户观察（2026-10-01）：执行环境读自家模型，模型名不带服务商前缀；第三方云厂商 / 中转才加
     /// `provider/` 路径前缀。所以 ZCode 的 `GLM-5.3`、Codex 的 `gpt-5.6-terra` 即使没有路由证据
-    /// （`provider_id` 为 NULL），也是宿主自家官方路由——官方订阅默认覆盖它们；而带前缀的、
-    /// 以及宿主读别家系列的（claude-code 下的 deepseek）都是第三方，不能被吞掉。
+    /// （`provider_id` 为 NULL），也是执行环境自家官方路由——官方订阅默认覆盖它们；而带前缀的、
+    /// 以及执行环境读别家系列的（claude-code 下的 deepseek）都是第三方，不能被吞掉。
     #[test]
     fn official_subscription_also_covers_native_models_that_lack_a_provider() {
         let (db, authority) = default_scope_fixture("billing-default-scope-native");
         // 真机分布：ZCode 的 GLM（provider 为空）、Codex 的 gpt（少量为空）
-        put_fact(&authority, "z-native", "host:zcode", None, "GLM-5.3", 100);
-        put_fact(&authority, "z-native-lower", "host:zcode", None, "glm-5.3-flash", 100);
-        put_fact(&authority, "z-gateway", "host:zcode", None, "bigmodel/glm-5.3-flash", 100);
-        put_fact(&authority, "z-foreign-family", "host:zcode", None, "deepseek-v4-flash", 100);
+        put_fact(&authority, "z-native", "harness:zcode", None, "GLM-5.3", 100);
+        put_fact(&authority, "z-native-lower", "harness:zcode", None, "glm-5.3-flash", 100);
+        put_fact(&authority, "z-gateway", "harness:zcode", None, "bigmodel/glm-5.3-flash", 100);
+        put_fact(&authority, "z-foreign-family", "harness:zcode", None, "deepseek-v4-flash", 100);
         put_fact(&authority, "x-native-null", "codex", None, "gpt-5.6-terra", 100);
         put_fact(&authority, "x-prefixed-own-vendor", "codex", None, "openai/gpt-5.6-luna", 100);
         put_fact(&authority, "x-relay-family", "codex", None, "deepseek/deepseek-v4.1-flash", 100);
@@ -6310,7 +6333,7 @@ mod tests {
         assert!(authority.billing_recalculation_run("job-plus", 410).unwrap());
         authority.billing_apply_active_declarations(6_000).unwrap();
         for id in ["z-native", "z-native-lower", "x-native-null"] {
-            assert!(covered(&authority, id), "{id}：宿主原生模型，服务商为空也应被官方订阅覆盖");
+            assert!(covered(&authority, id), "{id}：执行环境原生模型，服务商为空也应被官方订阅覆盖");
         }
         for id in ["z-gateway", "z-foreign-family", "x-prefixed-own-vendor", "x-relay-family", "c-foreign-family", "c-glm-via-claude"] {
             assert!(!covered(&authority, id), "{id}：带前缀 / 非原生系列是第三方路由，不能被默认覆盖吞掉");
@@ -6322,12 +6345,12 @@ mod tests {
         let _ = std::fs::remove_file(&db);
     }
 
-    /// 用户（2026-10-01）：订阅属于账号，不属于宿主——GLM Lite 在 Claude Code 里声明，ZCode 也在用这份套餐。
+    /// 用户（2026-10-01）：订阅属于账号，不属于执行环境——GLM Lite 在 Claude Code 里声明，ZCode 也在用这份套餐。
     #[test]
-    fn a_subscription_declared_on_one_host_covers_the_providers_native_models_on_another() {
+    fn a_subscription_declared_on_one_harness_covers_the_providers_native_models_on_another() {
         let (db, authority) = default_scope_fixture("billing-account-level");
-        put_fact(&authority, "z-native", "host:zcode", None, "GLM-5.3", 100);
-        put_fact(&authority, "z-gateway", "host:zcode", None, "bigmodel/glm-5.3-flash", 100);
+        put_fact(&authority, "z-native", "harness:zcode", None, "GLM-5.3", 100);
+        put_fact(&authority, "z-gateway", "harness:zcode", None, "bigmodel/glm-5.3-flash", 100);
         put_fact(&authority, "x-glm-on-codex", "codex", None, "glm-5.3", 100);
         put_fact(&authority, "c-listed", "claude-code", None, "glm-5.3-flash", 100);
         put_fact(&authority, "c-unlisted", "claude-code", None, "glm-5.4", 100);
@@ -6343,7 +6366,7 @@ mod tests {
         assert!(covered(&authority, "c-listed"), "原来的显式作答（Claude Code 下列出的模型）照旧");
         assert!(!covered(&authority, "c-unlisted"), "显式作答不自动扩到清单外的未知服务商模型");
         assert!(!covered(&authority, "z-gateway"), "带前缀 = 第三方路由");
-        assert!(!covered(&authority, "x-glm-on-codex"), "别的宿主上服务商未知的 GLM 模型不是原生，显式作答不跨宿主");
+        assert!(!covered(&authority, "x-glm-on-codex"), "别的执行环境上服务商未知的 GLM 模型不是原生，显式作答不跨执行环境");
         let _ = std::fs::remove_file(&db);
     }
 
@@ -6460,7 +6483,7 @@ mod tests {
             "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
              VALUES('migration-fixture', 1, 'migration', 'succeeded', 2);
              INSERT INTO usage_facts(
-               fact_id, host, machine_namespace, native_session_id, source_event_id,
+               fact_id, harness, machine_namespace, native_session_id, source_event_id,
                observation_kind, uncached_input_tokens, cache_read_tokens,
                cache_write_tokens, output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
              VALUES('fact-preserve', 'codex', 'ns', 'session', 'event', 'assistant-usage',
@@ -6540,7 +6563,7 @@ mod tests {
             "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
              VALUES('migration-fixture', 1, 'migration', 'succeeded', 3);
              INSERT INTO usage_facts(
-               fact_id, host, machine_namespace, native_session_id, source_event_id,
+               fact_id, harness, machine_namespace, native_session_id, source_event_id,
                observation_kind, uncached_input_tokens, ingested_run_id, created_at_ms, updated_at_ms)
              VALUES('fact-v3', 'codex', 'ns', 'session', 'event', 'assistant-usage',
                     88, 'migration-fixture', 1, 1);",
@@ -6803,7 +6826,7 @@ mod tests {
                 ("f-nodate", None),
             ] {
                 conn.execute(
-                    "INSERT INTO usage_facts(fact_id, host, machine_namespace,
+                    "INSERT INTO usage_facts(fact_id, harness, machine_namespace,
                          native_session_id, source_event_id, observation_kind,
                          event_ts_ms, ingested_run_id, created_at_ms, updated_at_ms)
                      VALUES (?1,'dsh','ns','s',?1,'token_count',?2,'run-1',1,1)",
@@ -6827,20 +6850,20 @@ mod tests {
     }
 
     #[test]
-    fn delete_imported_host_data_is_scoped_and_reimportable() {
-        let path = tmp_db("delete-imported-host");
+    fn delete_imported_harness_data_is_scoped_and_reimportable() {
+        let path = tmp_db("delete-imported-harness");
         let db = AuthorityDb::open(&path, 1).unwrap();
         db.conn().execute_batch(
             "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version) VALUES ('run', 1, 'test', 'succeeded', 12);
-             INSERT INTO source_files(source_id, host, path_hash, size_bytes, mtime_ns, parser_version, first_seen_at_ms, last_seen_at_ms) VALUES
+             INSERT INTO source_files(source_id, harness, path_hash, size_bytes, mtime_ns, parser_version, first_seen_at_ms, last_seen_at_ms) VALUES
                ('source-codex', 'codex', 'c', 1, 1, 1, 1, 1), ('source-dsh', 'dsh', 'd', 1, 1, 1, 1, 1);
-             INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, last_observed_at_ms) VALUES
+             INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, last_observed_at_ms) VALUES
                ('session-codex', 'codex', 'c', 'm', 1), ('session-dsh', 'dsh', 'd', 'm', 1);
-             INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key, source_event_id, observation_kind, source_id, ingested_run_id, created_at_ms, updated_at_ms) VALUES
+             INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, session_key, source_event_id, observation_kind, source_id, ingested_run_id, created_at_ms, updated_at_ms) VALUES
                ('fact-codex', 'codex', 'm', 'c', 'session-codex', 'e1', 'usage', 'source-codex', 'run', 1, 1),
                ('fact-dsh', 'dsh', 'm', 'd', 'session-dsh', 'e2', 'usage', 'source-dsh', 'run', 1, 1);
              INSERT INTO trust_observations(
-                 observation_id, machine_namespace, host, actor_id, actor_kind,
+                 observation_id, machine_namespace, harness, actor_id, actor_kind,
                  observed_at_ms, observation_kind, stage, evidence_level,
                  scope_classes_json, consent_state, collector_id, collector_version,
                  provenance_json, ingested_run_id, created_at_ms
@@ -6852,7 +6875,7 @@ mod tests {
         ).unwrap();
         db.conn().execute(
             "INSERT INTO route_evidence(
-                evidence_id, host, machine_namespace, native_session_id,
+                evidence_id, harness, machine_namespace, native_session_id,
                 evidence_basis, observed_at_ms, ingested_run_id
              ) VALUES ('route-codex', 'codex', 'm', 'c', 'test', 1, 'run')",
             [],
@@ -6866,18 +6889,18 @@ mod tests {
              VALUES ('session-codex', 0, 'user_first', 'redacted', 'scrubbed', 'run')",
             [],
         ).unwrap();
-        db.host_bill_put("bill-dsh", "dsh", "deepseek", "2026-09", "metered_actual", 100, "CNY", "user:receipt", 2).unwrap();
-        assert_eq!(db.delete_imported_host_data("codex", 3).unwrap(), HostImportedDataDeletion { facts: 1, sessions: 1, source_files: 1, trust_observations: 1, route_evidence: 1, session_excerpts: 1 });
+        db.harness_bill_put("bill-dsh", "dsh", "deepseek", "2026-09", "metered_actual", 100, "CNY", "user:receipt", 2).unwrap();
+        assert_eq!(db.delete_imported_harness_data("codex", 3).unwrap(), HarnessImportedDataDeletion { facts: 1, sessions: 1, source_files: 1, trust_observations: 1, route_evidence: 1, session_excerpts: 1 });
         let (codex_live, dsh_live, sources): (i64, i64, i64) = db.conn().query_row(
-            "SELECT SUM(host = 'codex' AND deleted_at_ms IS NULL), SUM(host = 'dsh' AND deleted_at_ms IS NULL), COUNT(*) FROM usage_facts", [],
+            "SELECT SUM(harness = 'codex' AND deleted_at_ms IS NULL), SUM(harness = 'dsh' AND deleted_at_ms IS NULL), COUNT(*) FROM usage_facts", [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         ).unwrap();
         assert_eq!((codex_live, dsh_live, sources), (0, 1, 2));
-        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM source_files WHERE host = 'codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM source_files WHERE harness = 'codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM session_excerpts WHERE session_key = 'session-codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM route_evidence WHERE host = 'codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM trust_observations WHERE host = 'dsh'", [], |r| r.get::<_, i64>(0)).unwrap(), 1, "other host trust observations remain");
-        assert_eq!(db.host_bill_count().unwrap(), 1, "manual bills are not imported source data");
+        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM route_evidence WHERE harness = 'codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM trust_observations WHERE harness = 'dsh'", [], |r| r.get::<_, i64>(0)).unwrap(), 1, "other harness trust observations remain");
+        assert_eq!(db.harness_bill_count().unwrap(), 1, "manual bills are not imported source data");
         let _ = std::fs::remove_file(path);
     }
 
@@ -6889,7 +6912,7 @@ mod tests {
         db.with_immediate_txn(|conn| {
             conn.execute_batch(
                 "INSERT INTO trust_observations(
-                    observation_id, machine_namespace, host, actor_id, actor_kind,
+                    observation_id, machine_namespace, harness, actor_id, actor_kind,
                     observed_at_ms, observation_kind, stage, evidence_level,
                     scope_classes_json, consent_state, collector_id, collector_version,
                     provenance_json, expires_at_ms, ingested_run_id, created_at_ms
@@ -6900,7 +6923,7 @@ mod tests {
                      'package_observed', 'E1', '[]', 'unavailable', 'test', 'v1', '{}', NULL, 'run', 1);",
             )?;
             let issue_id = crate::issues::upsert_issue(conn, &crate::issues::IssueInput {
-                machine_namespace: "machine", host: "zcode", session_key: None,
+                machine_namespace: "machine", harness: "zcode", session_key: None,
                 issue_type: "SV702", instance_fingerprint: "trust-retention", status: "open",
                 severity: "warning", evaluator_id: "trust", evaluator_version: "v1",
                 evidence_fingerprint: "evidence", opened_at_ms: 1, metadata_json: "{}",
@@ -7105,61 +7128,61 @@ mod tests {
         let _ = std::fs::remove_file(&db);
     }
 
-    /// Phase 2.8：`host_bills` 写入方——校验四项（period/basis/amount/currency）、
+    /// Phase 2.8：`harness_bills` 写入方——校验四项（period/basis/amount/currency）、
     /// 同键 upsert（更正金额，deleted 复活）、`for_period` 只回活行、soft delete。
     #[test]
-    fn host_bill_put_validates_and_upserts() {
+    fn harness_bill_put_validates_and_upserts() {
         let db = tmp_db("hbill");
         let a = AuthorityDb::open(&db, 1_000).unwrap();
-        assert_eq!(a.host_bill_count().unwrap(), 0);
+        assert_eq!(a.harness_bill_count().unwrap(), 0);
 
         // 四项校验——每条都必须 Err（不猜、不默认）。
         assert!(
-            a.host_bill_put("x", "wb", "wb", "2026-9", "host_billed", 100, "CNY", "", 1)
+            a.harness_bill_put("x", "wb", "wb", "2026-9", "harness_billed", 100, "CNY", "", 1)
                 .is_err(),
             "period 非 YYYY-MM"
         );
         assert!(
-            a.host_bill_put("x", "wb", "wb", "2026-09", "credits", 100, "CNY", "", 1)
+            a.harness_bill_put("x", "wb", "wb", "2026-09", "credits", 100, "CNY", "", 1)
                 .is_err(),
             "basis 不在五档词表"
         );
         assert!(
-            a.host_bill_put("x", "wb", "wb", "2026-09", "host_billed", -1, "CNY", "", 1)
+            a.harness_bill_put("x", "wb", "wb", "2026-09", "harness_billed", -1, "CNY", "", 1)
                 .is_err(),
             "amount_minor < 0"
         );
         assert!(
-            a.host_bill_put("x", "wb", "wb", "2026-09", "host_billed", 100, "  ", "", 1)
+            a.harness_bill_put("x", "wb", "wb", "2026-09", "harness_billed", 100, "  ", "", 1)
                 .is_err(),
             "currency 空"
         );
         assert!(
-            a.host_bill_put("x", "wb", "wb", "2026-09", "host_billed", 100, "cny", "", 1)
+            a.harness_bill_put("x", "wb", "wb", "2026-09", "harness_billed", 100, "cny", "", 1)
                 .is_err(),
             "currency 必须是三位大写代码"
         );
 
         // 正常录入 + 同键 upsert 更正金额。
-        a.host_bill_put(
+        a.harness_bill_put(
             "b1",
             "workbuddy",
             "workbuddy",
             "2026-09",
-            "host_billed",
+            "harness_billed",
             21_500,
             "CNY",
             "credit_json",
             1_000,
         )
         .unwrap();
-        assert_eq!(a.host_bill_count().unwrap(), 1);
-        a.host_bill_put(
+        assert_eq!(a.harness_bill_count().unwrap(), 1);
+        a.harness_bill_put(
             "b1",
             "workbuddy",
             "workbuddy",
             "2026-09",
-            "host_billed",
+            "harness_billed",
             30_000,
             "CNY",
             "credit_json",
@@ -7167,30 +7190,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            a.host_bill_count().unwrap(),
+            a.harness_bill_count().unwrap(),
             1,
-            "同 (host,provider,period,basis,evidence) → upsert 不新增"
+            "同 (harness,provider,period,basis,evidence) → upsert 不新增"
         );
 
         // evidence_ref 空串同样能 upsert（不撞 PRIMARY KEY）。
-        a.host_bill_put(
+        a.harness_bill_put(
             "b2:",
             "wb2",
             "wb2",
             "2026-09",
-            "host_billed",
+            "harness_billed",
             500,
             "CNY",
             "",
             1,
         )
         .unwrap();
-        a.host_bill_put(
+        a.harness_bill_put(
             "b2:",
             "wb2",
             "wb2",
             "2026-09",
-            "host_billed",
+            "harness_billed",
             700,
             "CNY",
             "",
@@ -7198,45 +7221,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            a.host_bill_count().unwrap(),
+            a.harness_bill_count().unwrap(),
             2,
             "空 evidence 也 upsert 而非新增/报错"
         );
-        a.host_bill_delete("b2:", 9).unwrap();
+        a.harness_bill_delete("b2:", 9).unwrap();
 
-        let rows = a.host_bills_for_period("2026-09").unwrap();
+        let rows = a.harness_bills_for_period("2026-09").unwrap();
         assert_eq!(
             rows,
             vec![(
                 "workbuddy".to_string(),
                 "workbuddy".to_string(),
-                "host_billed".to_string(),
+                "harness_billed".to_string(),
                 30_000,
                 "CNY".to_string()
             )]
         );
-        assert!(a.host_bills_for_period("2026-08").unwrap().is_empty());
+        assert!(a.harness_bills_for_period("2026-08").unwrap().is_empty());
 
         // soft delete → for_period 不再回它；重复 delete 返回 false。
-        assert!(a.host_bill_delete("b1", 3_000).unwrap());
-        assert!(!a.host_bill_delete("b1", 4_000).unwrap());
-        assert!(a.host_bills_for_period("2026-09").unwrap().is_empty());
-        assert_eq!(a.host_bill_count().unwrap(), 0);
+        assert!(a.harness_bill_delete("b1", 3_000).unwrap());
+        assert!(!a.harness_bill_delete("b1", 4_000).unwrap());
+        assert!(a.harness_bills_for_period("2026-09").unwrap().is_empty());
+        assert_eq!(a.harness_bill_count().unwrap(), 0);
 
         // upsert 到已 soft-deleted 的键 → 复活（deleted_at_ms = NULL）。
-        a.host_bill_put(
+        a.harness_bill_put(
             "b1",
             "workbuddy",
             "workbuddy",
             "2026-09",
-            "host_billed",
+            "harness_billed",
             12_000,
             "CNY",
             "credit_json",
             5_000,
         )
         .unwrap();
-        assert_eq!(a.host_bill_count().unwrap(), 1, "同键再录 → 复活");
+        assert_eq!(a.harness_bill_count().unwrap(), 1, "同键再录 → 复活");
         let _ = std::fs::remove_file(&db);
     }
 

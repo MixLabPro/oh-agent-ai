@@ -1,16 +1,16 @@
 """Pure report calculations over reconciled Skill inventory records."""
 
 
-LEVEL_RANK_BY_HOST = {
+LEVEL_RANK_BY_HARNESS = {
     "claude-code": {"enterprise": 0, "personal": 1, "project": 2, "plugin": 3,
-                    "other-host": 8, "unknown": 9},
+                    "other-harness": 8, "unknown": 9},
     "openclaw": {"workspace": 0, "project": 1, "personal": 2, "managed": 3,
-                 "enterprise": 0, "plugin": 3, "other-host": 8, "unknown": 9},
+                 "enterprise": 0, "plugin": 3, "other-harness": 8, "unknown": 9},
 }
-LEVEL_RANK = LEVEL_RANK_BY_HOST["claude-code"]
+LEVEL_RANK = LEVEL_RANK_BY_HARNESS["claude-code"]
 
 # DSH 的 discovery roots（**层内** rank，越小越优先）。词表出自
-# HOST_ADAPTER_CONTRACT.md §DSH 的根表。scope 层是另一个维度，不在这张表里。
+# HARNESS_ADAPTER_CONTRACT.md §DSH 的根表。scope 层是另一个维度，不在这张表里。
 DSH_LEVEL_RANK = {
     "project-dsh": 100, "project-agents": 200, "custom": 300,
     "user-dsh": 400, "user-agents": 500, "bundled": 600,
@@ -24,13 +24,13 @@ DSH_LAYER_FAR = 99
 
 
 def _layer_of(skill):
-    """返回覆盖层身份；前五个宿主只有一个隐式层，恒返回 ``""``。
+    """返回覆盖层身份；前五个执行环境只有一个隐式层，恒返回 ``""``。
 
     DSH 的层写在 ``conflict_domain`` 第三段（A5：``dsh:<DSH_HOME>:<layer>``）。
-    跨层同名是设计而非冲突（HOST_ADAPTER_CONTRACT §DSH），所以层必须进冲突
+    跨层同名是设计而非冲突（HARNESS_ADAPTER_CONTRACT §DSH），所以层必须进冲突
     判定键 —— 只有同层同名才比 rank。
     """
-    family = skill.get("host_family") or skill.get("host") or ""
+    family = skill.get("harness_family") or skill.get("harness") or ""
     if family != "dsh":
         return ""
     domain = skill.get("conflict_domain") or ""
@@ -41,8 +41,8 @@ def _layer_of(skill):
 
 
 def _layer_ordinal(skill):
-    """覆盖层序（近层小）。前五宿主恒 0；DSH 按 DSH_LAYER_ORDER 排近层优先。"""
-    family = skill.get("host_family") or skill.get("host") or ""
+    """覆盖层序（近层小）。前五执行环境恒 0；DSH 按 DSH_LAYER_ORDER 排近层优先。"""
+    family = skill.get("harness_family") or skill.get("harness") or ""
     if family != "dsh":
         return 0
     layer = _layer_of(skill)
@@ -57,21 +57,21 @@ def _layer_ordinal(skill):
 def level_rank(skill):
     """覆盖优先级，返回 ``(layer, rank)`` 二维键。
 
-    前五个宿主只有一个隐式层：``layer`` 恒 0、``rank`` 即原标量，排序结果
+    前五个执行环境只有一个隐式层：``layer`` 恒 0、``rank`` 即原标量，排序结果
     逐字节不变。DSH 是二维覆盖：先比 scope 层（近层同名直接赢），层内才用
     rank 裁决。
     """
-    family = skill.get("host_family") or skill.get("host") or ""
+    family = skill.get("harness_family") or skill.get("harness") or ""
     if family == "dsh":
         return (_layer_ordinal(skill), DSH_LEVEL_RANK.get(skill.get("level"), 999))
-    table = LEVEL_RANK_BY_HOST.get(family, LEVEL_RANK)
+    table = LEVEL_RANK_BY_HARNESS.get(family, LEVEL_RANK)
     return (0, table.get(skill.get("level"), 9))
 
 
 def select_scope(skills, include_all):
     loaded = [skill for skill in skills if skill["loaded"]]
     candidates = [skill for skill in skills if skill["loaded"] or
-                  (skill["host_family"] == "openclaw" and skill["discoverable"])]
+                  (skill["harness_family"] == "openclaw" and skill["discoverable"])]
     scope = skills if include_all else candidates
     by_key = {}
     for skill in scope:
@@ -96,7 +96,7 @@ def build_conflicts(by_key):
         else:
             kind, severity = "intentional_override", "medium"
         conflicts.append({
-            "host": winner["host_family"],
+            "harness": winner["harness_family"],
             "instance_id": winner["instance_id"],
             "conflict_domain": winner["conflict_domain"],
             "name": name,
@@ -113,9 +113,9 @@ def build_conflicts(by_key):
     return conflicts
 
 
-def build_budget(unique, host, include_all, budget, codex_fallback_budget):
-    is_codex = host == "codex"
-    is_dsh = host == "dsh"
+def build_budget(unique, harness, include_all, budget, codex_fallback_budget):
+    is_codex = harness == "codex"
+    is_dsh = harness == "dsh"
     effective_budget = codex_fallback_budget if is_codex else budget
     used = sum(len(group[0]["description"]) + len(group[0]["name"]) + 4 +
                (len(group[0]["path"]) + 1 if is_codex else 0) for group in unique)
@@ -130,7 +130,7 @@ def build_budget(unique, host, include_all, budget, codex_fallback_budget):
                 break
     longest = sorted(unique, key=lambda item: -len(item[0]["description"]))[:5]
     report = {
-        "available": host in ("claude-code", "codex"),
+        "available": harness in ("claude-code", "codex"),
         "scope": "all-on-disk" if include_all else "loaded-only",
         "counted_skills": len(unique),
         "budget_chars": effective_budget,
@@ -170,11 +170,11 @@ def build_budget(unique, host, include_all, budget, codex_fallback_budget):
     return report
 
 
-def build_trigger(loaded, usage, host, zombie_age, dsh_evidence=None,
+def build_trigger(loaded, usage, harness, zombie_age, dsh_evidence=None,
                   dsh_evidence_path=None):
-    if host == "dsh":
+    if harness == "dsh":
         return _build_dsh_trigger(loaded, dsh_evidence, dsh_evidence_path, zombie_age)
-    available = host == "claude-code" and bool(usage)
+    available = harness == "claude-code" and bool(usage)
     scope = loaded if available else []
     zombies = [skill for skill in scope if skill["usage_count"] == 0 and
                skill["installed_days_ago"] >= zombie_age]
@@ -183,7 +183,7 @@ def build_trigger(loaded, usage, host, zombie_age, dsh_evidence=None,
     return {
         "available": available,
         "source": "~/.claude.json -> skillUsage",
-        "entries_in_host_record": len(usage),
+        "entries_in_harness_record": len(usage),
         "counts_are": "lifetime cumulative, not last-30-days",
         "zombie_min_age_days": zombie_age,
         "zombie_candidates": [
@@ -330,37 +330,37 @@ def build_security(skills):
     }
 
 
-def build_host_summaries(skills, usage, codex_runtime, openclaw_runtime, budget,
+def build_harness_summaries(skills, usage, codex_runtime, openclaw_runtime, budget,
                          codex_fallback_budget, dsh_trigger_available=False):
-    """按宿主的分项。
+    """按执行环境的分项。
 
     `description_budget`（字符串状态）之后追加 `description_budget_detail`
-    （逐宿主数字）：多宿主模式下顶层预算恒不可用（分母不同的量相加就是编造），
-    而按宿主给出自己的 used/budget 是**并列不是合并** —— 每个宿主一条、各用
-    各的分母（与 Rust `analysis::host_summaries` 的 `description_budget_detail`
-    逐字节同构）。没有预算口径的宿主 available=false、数字全 null，绝不冒充 0。
+    （逐执行环境数字）：多执行环境模式下顶层预算恒不可用（分母不同的量相加就是编造），
+    而按执行环境给出自己的 used/budget 是**并列不是合并** —— 每个执行环境一条、各用
+    各的分母（与 Rust `analysis::harness_summaries` 的 `description_budget_detail`
+    逐字节同构）。没有预算口径的执行环境 available=false、数字全 null，绝不冒充 0。
     """
     summaries = {}
-    for host in ("claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"):
-        host_skills = [skill for skill in skills if skill["host_family"] == host]
-        loaded = [skill for skill in host_skills if skill["loaded"]]
-        discoverable = [skill for skill in host_skills if skill["discoverable"]]
-        scope = discoverable if host == "openclaw" else loaded
+    for harness in ("claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"):
+        harness_skills = [skill for skill in skills if skill["harness_family"] == harness]
+        loaded = [skill for skill in harness_skills if skill["loaded"]]
+        discoverable = [skill for skill in harness_skills if skill["discoverable"]]
+        scope = discoverable if harness == "openclaw" else loaded
         groups = {}
         for skill in scope:
             groups.setdefault((skill["instance_id"] or "", skill["namespace"] or "",
                                skill["name"]), []).append(skill)
         unique = [sorted(group, key=level_rank)[0] for group in groups.values()]
         runtime_evidence = (
-            codex_runtime["available"] if host == "codex" else
+            codex_runtime["available"] if harness == "codex" else
             any(runtime.get("available") for runtime in openclaw_runtime)
-            if host == "openclaw" else False)
+            if harness == "openclaw" else False)
         verified_unique = len({(skill["instance_id"], skill["namespace"] or "", skill["name"])
                                for skill in scope if skill["runtime_verified"]})
-        budget_detail_available = host == "claude-code" or (
-            host == "codex" and codex_runtime["available"])
+        budget_detail_available = harness == "claude-code" or (
+            harness == "codex" and codex_runtime["available"])
         if budget_detail_available:
-            is_codex = host == "codex"
+            is_codex = harness == "codex"
             denom = codex_fallback_budget if is_codex else budget
             used = sum(len(skill["description"]) + len(skill["name"]) + 4 +
                        (len(skill["path"]) + 1 if is_codex else 0) for skill in unique)
@@ -375,28 +375,28 @@ def build_host_summaries(skills, usage, codex_runtime, openclaw_runtime, budget,
         else:
             budget_detail = {
                 "available": False,
-                "source": "configurable" if host == "openclaw" else "not-available",
+                "source": "configurable" if harness == "openclaw" else "not-available",
                 "budget_chars": None,
                 "used_chars": None,
                 "pct_used": None,
                 "counted_skills": None,
             }
-        summaries[host] = {
-            "skills_on_disk": len(host_skills),
+        summaries[harness] = {
+            "skills_on_disk": len(harness_skills),
             "discoverable_skills": len(discoverable),
             "runtime_verified_loaded_skills": (
-                sum(1 for skill in host_skills if skill["runtime_verified"] and skill["loaded"])
+                sum(1 for skill in harness_skills if skill["runtime_verified"] and skill["loaded"])
                 if runtime_evidence else None),
             "runtime_verified_unique_skills": verified_unique if runtime_evidence else None,
             "unique_discoverable_skills": len(unique),
             "tier1_total_tokens": sum(skill["tier1_tokens"] for skill in unique),
-            "description_budget": ("available" if host == "claude-code" else
-                                   "official-estimate" if host == "codex" and
+            "description_budget": ("available" if harness == "claude-code" else
+                                   "official-estimate" if harness == "codex" and
                                    codex_runtime["available"] else
-                                   "configurable" if host == "openclaw" else "not-available"),
+                                   "configurable" if harness == "openclaw" else "not-available"),
             "description_budget_detail": budget_detail,
-            "trigger_data": ("available" if host == "claude-code" and bool(usage)
-                             else "available" if host == "dsh" and dsh_trigger_available
+            "trigger_data": ("available" if harness == "claude-code" and bool(usage)
+                             else "available" if harness == "dsh" and dsh_trigger_available
                              else "not-available"),
         }
     return summaries
@@ -405,10 +405,10 @@ def build_host_summaries(skills, usage, codex_runtime, openclaw_runtime, budget,
 def build_openclaw_instances(skills, openclaw_runtime):
     instances = {}
     ids = sorted({skill["instance_id"] for skill in skills
-                  if skill["host_family"] == "openclaw" and skill["instance_id"]})
+                  if skill["harness_family"] == "openclaw" and skill["instance_id"]})
     for instance_id in ids:
         instance_skills = [skill for skill in skills
-                           if skill["host_family"] == "openclaw" and
+                           if skill["harness_family"] == "openclaw" and
                            skill["instance_id"] == instance_id]
         discoverable = [skill for skill in instance_skills if skill["discoverable"]]
         disabled = [skill for skill in discoverable if skill["enabled_state"] is False]

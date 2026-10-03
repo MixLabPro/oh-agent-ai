@@ -1,15 +1,15 @@
 //! 采集：把「本机上装了什么」问出来，交给 report 去变换。
 //!
-//! # Host Adapter 契约
+//! # Harness Adapter 契约
 //!
-//! 每个宿主适配器按**固定顺序**回答四个问题。顺序是契约的一部分：
+//! 每个执行环境适配器按**固定顺序**回答四个问题。顺序是契约的一部分：
 //! 求证必须发生在磁盘遍历之后（要拿磁盘上的实例根去问），修正必须发生在
 //! 求证之后（没有证据就什么都不改）。
 //!
 //! | 阶段 | 问题 | 谁实现了 |
 //! |---|---|---|
-//! | 1. roots | 这个宿主会去哪些目录找 skill | 全部 |
-//! | 2. probe | 能不能向宿主本体求证「你到底看见了什么」 | codex、openclaw |
+//! | 1. roots | 这个执行环境会去哪些目录找 skill | 全部 |
+//! | 2. probe | 能不能向执行环境本体求证「你到底看见了什么」 | codex、openclaw |
 //! | 3. reconcile | 求到的证据怎么改写磁盘推断 | codex、openclaw |
 //! | 4. facts | 报告里那一块自有字段的原料 | workbuddy、codex、openclaw |
 //!
@@ -20,7 +20,7 @@
 //! 一份清单文件而不是遍历。写成 trait 会给它们凭空造出两个空实现，
 //! 然后把唯一真正要讲清楚的差异 —— 下面那条 additive / exclusive —— 藏进
 //! 各自的 `reconcile` 里。这里改用一段固定流程加显式命名的字段：
-//! 新增宿主时照着四个阶段填，缺哪个阶段就是缺哪个能力，一眼可见。
+//! 新增执行环境时照着四个阶段填，缺哪个阶段就是缺哪个能力，一眼可见。
 //!
 //! ## reconcile 的两种语义，不能混
 //!
@@ -34,7 +34,7 @@
 //!
 //! ## 探测不到 ≠ 探测到没有
 //!
-//! 每个 probe 在被禁用、宿主未选中、可执行文件不存在时，一律返回
+//! 每个 probe 在被禁用、执行环境未选中、可执行文件不存在时，一律返回
 //! `available: false` 外加一条说明为什么，**绝不返回一个空清单冒充结果**。
 //! 下游据此把相关计数报成 `null` 而非 `0`（ARCHITECTURE §3.1）。
 
@@ -43,24 +43,24 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use agent_vitals_hosts::skill_discovery::SourceMeta;
+use agent_vitals_harnesses::skill_discovery::SourceMeta;
 use super::scanner::{collect, Ctx, DEFAULT_ROOTS};
 use super::scanner as discovery;
-use agent_vitals_hosts::hosts::claude_code::skills::HostConfig;
+use agent_vitals_harnesses::harnesses::claude_code::skills::HarnessConfig;
 use agent_vitals_domain::util::norm;
-use agent_vitals_hosts::dsh_sources as dsh;
-// v0.8 Phase E7.6：codex.rs/workbuddy.rs/openclaw.rs 迁进 agent-vitals-hosts
+use agent_vitals_harnesses::dsh_sources as dsh;
+// v0.8 Phase E7.6：codex.rs/workbuddy.rs/openclaw.rs 迁进 agent-vitals-harnesses
 // （库 crate），E7.5 起本文件也迁进库 crate（agent-vitals-runtime）——同一批
 // import 路径继续有效，只是不再是"二进制 use 库"，是"库 use 库"。
-// codex 的 sources::skills 已经 re-export 了 hosts::codex::skills 的纯部分
+// codex 的 sources::skills 已经 re-export 了 harnesses::codex::skills 的纯部分
 // （CodexRuntime/apply_codex_runtime/…），一个别名两边都拿到。
-use agent_vitals_hosts::hosts::codex::sources::skills as codex;
-use agent_vitals_hosts::hosts::workbuddy::sources::skills as workbuddy;
-use agent_vitals_hosts::hosts::openclaw::sources::skills as openclaw;
+use agent_vitals_harnesses::harnesses::codex::sources::skills as codex;
+use agent_vitals_harnesses::harnesses::workbuddy::sources::skills as workbuddy;
+use agent_vitals_harnesses::harnesses::openclaw::sources::skills as openclaw;
 
-/// 本次要看哪个宿主、额外看哪些目录。
+/// 本次要看哪个执行环境、额外看哪些目录。
 pub struct Selection<'a> {
-    pub host: &'a str,
+    pub harness: &'a str,
     pub extra_paths: &'a [String],
     /// DSH 注册表快照（probe 证据，A11）。None = 未给 --runtime-json。
     pub runtime_json: Option<&'a Path>,
@@ -123,7 +123,7 @@ fn codex_not_probed(reason: &str) -> codex::CodexRuntime {
 pub fn take(
     sel: &Selection,
     home_n: &str,
-    cfg: &HostConfig,
+    cfg: &HarnessConfig,
     ctx: &Ctx,
     session_evidence: SessionEvidenceInput,
 ) -> Inventory {
@@ -170,15 +170,15 @@ pub fn take(
     for path in openclaw::read_hermes_external_dirs(home_n) {
         roots.push(("hermes".to_string(), norm(&path), SourceMeta::default()));
     }
-    // 宿主过滤发生在加 --path 之前：显式给的路径归到所选宿主名下。
-    if sel.host != "all" {
+    // 执行环境过滤发生在加 --path 之前：显式给的路径归到所选执行环境名下。
+    if sel.harness != "all" {
         roots.retain(|(h, _, _)| {
-            h == sel.host || (sel.host == "claude-code" && h == "claude-code-plugins")
+            h == sel.harness || (sel.harness == "claude-code" && h == "claude-code-plugins")
         });
     }
-    let custom_host = if sel.host == "all" { "custom" } else { sel.host };
+    let custom_harness = if sel.harness == "all" { "custom" } else { sel.harness };
     for p in sel.extra_paths {
-        roots.push((custom_host.to_string(), p.clone(), SourceMeta::default()));
+        roots.push((custom_harness.to_string(), p.clone(), SourceMeta::default()));
     }
 
     // 会话日志由 runtime/session source 读一次后注入。inventory 不定位、不打开
@@ -196,22 +196,22 @@ pub fn take(
     let mut skills = found.skills;
 
     // ── 阶段 2：probe ───────────────────────────────────
-    // Codex 的官方目录。只有它能回答「宿主真的看见了什么」，
+    // Codex 的官方目录。只有它能回答「执行环境真的看见了什么」，
     // 所以它的结论覆盖磁盘推断（runtime_verified）。
     let codex_runtime = if disabled("AGENT_VITALS_DISABLE_CODEX_RUNTIME") {
         codex_not_probed("disabled by AGENT_VITALS_DISABLE_CODEX_RUNTIME")
-    } else if sel.host == "all" || sel.host == "codex" {
+    } else if sel.harness == "all" || sel.harness == "codex" {
         codex::read_codex_runtime(
             &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             Duration::from_secs(20),
         )
     } else {
-        codex_not_probed("host not selected")
+        codex_not_probed("harness not selected")
     };
     // OpenClaw 的权威清单：逐实例问一次。
     let mut openclaw_runtimes: Vec<openclaw::OpenClawRuntime> = Vec::new();
     let openclaw_on = !disabled("AGENT_VITALS_DISABLE_OPENCLAW_RUNTIME")
-        && (sel.host == "all" || sel.host == "openclaw");
+        && (sel.harness == "all" || sel.harness == "openclaw");
     if openclaw_on {
         // 按实例根去重后排序：探测顺序会影响 openclaw_runtime 的输出次序
         let mut instance_roots: Vec<String> = roots

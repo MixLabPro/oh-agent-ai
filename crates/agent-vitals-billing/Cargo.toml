@@ -15,7 +15,7 @@ path = "src/lib.rs"
 agent-vitals-query = { path = "../agent-vitals-query" }
 agent-vitals-data = { path = "../agent-vitals-data" }
 agent-vitals-domain = { path = "../agent-vitals-domain" }
-agent-vitals-hosts = { path = "../agent-vitals-hosts", features = ["sources"] }
+agent-vitals-harnesses = { path = "../agent-vitals-harnesses", features = ["sources"] }
 agent-vitals-provider = { path = "../agent-vitals-provider" }
 rusqlite = { version = "0.31", features = ["bundled"] }
 jiff = "0.2"

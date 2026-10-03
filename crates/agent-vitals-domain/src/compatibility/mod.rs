@@ -181,7 +181,7 @@ mod tests {
 
     fn empty_session() -> CanonicalSession {
         CanonicalSession {
-            meta: SessionMeta { session_id: "s1".to_string(), host_id: "dsh", workspace_roots: vec![], model: None, span: None },
+            meta: SessionMeta { session_id: "s1".to_string(), harness_id: "dsh", workspace_roots: vec![], model: None, span: None },
             signals: SignalSet::EMPTY,
             coverage: EvidenceCoverage::new(),
             attempts: vec![],

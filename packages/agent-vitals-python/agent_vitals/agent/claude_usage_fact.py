@@ -284,7 +284,7 @@ def _observation_to_usage_fact(
     """
     fields = {
         "machine_namespace": obs.machine_namespace,
-        "host": "claude-code",
+        "harness": "claude-code",
         "source_profile": obs.source_profile,
         "native_session_id": obs.native_session_id,
         "source_event_id": obs.source_event_id,

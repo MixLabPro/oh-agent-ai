@@ -167,7 +167,7 @@ fixture，断言 chips 中不出现 `严重` 或出现的是 `0`，且标题数�
 seq 号占了一段视觉权重，等宽字体、右对齐，看起来像可点的锚点，实际不可点。
 （`ConvViewProps` 确实没有 jump-to-seq，设计稿 §6.2 已核实——这是**契约限制不是实现偷懒**。）
 
-**修法（不依赖宿主契约）**：
+**修法（不依赖执行环境契约）**：
 - 把 `#440338` 本身做成复制触发器，去掉旁边那个独立的「复制」按钮——
   **少一个按钮，且消除了「看起来能点」的误导**（顺带缓解 P2-1 的按钮墙）；
 - hover 时提示「点击复制 seq，可在轨迹 tab 搜索」。
@@ -359,7 +359,7 @@ interface ConvViewOwnerProps {
 | 「**Honest coverage**」：compaction 之前的步骤显式标注为近似 | 不确定性写在脸上 | **正是 P0-3 需要的先例**——同生态已经确立了这条纪律 |
 
 **最重要的一条**：dsh-context 用「Honest coverage」标注近似值，
-和本仓库「host 能力缺失时不伪造」是同一条纪律的两个实例。
+和本仓库「harness 能力缺失时不伪造」是同一条纪律的两个实例。
 **P0-3（¥1113.7 看起来像账单）在兄弟插件里已经有现成答案**，照做即可，不需要重新设计。
 
 ### 9.2 先砍掉一个假图表：现在的 TokenBar 不承载信息
@@ -448,7 +448,7 @@ dsh-context 的做法点破了症结：**堆叠条的价值全在分母**。
 
 | # | 改动 | 涉及文件（锁步） | 为什么必须 |
 |---|---|---|---|
-| **D1** | finding 增加 `turn` / `step` / `callId` 三字段 | `crates/agent-vitals-core/src/domain/behavior.rs` ↔ `scripts/agent_vitals/agent/behavior.py` ↔ wasm `audit_events` ↔ `dsh-client/src/host/index.ts` 的 zod schema ↔ golden 快照 | 没有 turn/step 就**没有 x 轴**，三张图一张都画不了；没有 callId 就永远接不上官方 inspect 通道（§8.2b） |
+| **D1** | finding 增加 `turn` / `step` / `callId` 三字段 | `crates/agent-vitals-core/src/domain/behavior.rs` ↔ `scripts/agent_vitals/agent/behavior.py` ↔ wasm `audit_events` ↔ `dsh-client/src/harness/index.ts` 的 zod schema ↔ golden 快照 | 没有 turn/step 就**没有 x 轴**，三张图一张都画不了；没有 callId 就永远接不上官方 inspect 通道（§8.2b） |
 | **D2** | `token_by_model` 保留 per-turn/step 明细，不只吐总和；**并新增 `modelSwitches: [{seq,time,from,to}]`、消费 `request/context` 取 `contextWindow`**（修订依据见 §12.3） | `usage.rs` ↔ `usage.py` ↔ wasm `token_by_model` ↔ dsh adapter 的 `RELEVANT_TYPES` | 图 1（成本曲线）与图 3（上下文曲线）的唯一数据源；`contextWindow` 是堆叠条唯一有意义的分母 |
 | **D3** | i18n 字典每条规则补 `rule_SVxxx_desc`（一句话触发条件） | `dsh-client/src/client/i18n.ts` | 二级详情里的「规则说明」；**零依赖、纯字典扩充，性价比最高** |
 | **D4** | `styles/index.ts` 从「导出 style 对象」改为「导出 CSS 文本 + 类名常量」 | `dsh-client/src/client/styles/index.ts` + `AuditView.tsx` 全量替换 | **内联 style 写不出 `:hover`** → 不做这条，§9.4 的 hover 预览/hover 显形操作栏一条都做不了（§12.2b）。注入管道 `ctx.effect` + `STYLES` 已存在，只是没用起来 |
@@ -493,8 +493,8 @@ dsh-context 的做法点破了症结：**堆叠条的价值全在分母**。
 |---|---|---|---|
 | 构建 | tsup，`exports: { ".", "./client" }` | 同 | ✅ 一致 |
 | 挂载 | `cordis.patch.yml` 单 insert 行 | 同 | ✅ 一致 |
-| 测试 | `host.test.mjs` + `client.test.mjs` + `repro-real-react.mjs` | `verify-host` + `verify` + `verify-render` | ✅ 一致（我们本来就是照它的 repro 建的） |
-| 宿主侧 | `sessionProjections.register(×2)` | 同（`behaviorFindings` + `tokenByModel`） | ✅ 一致 |
+| 测试 | `harness.test.mjs` + `client.test.mjs` + `repro-real-react.mjs` | `verify-harness` + `verify` + `verify-render` | ✅ 一致（我们本来就是照它的 repro 建的） |
+| 执行环境侧 | `sessionProjections.register(×2)` | 同（`behaviorFindings` + `tokenByModel`） | ✅ 一致 |
 | 客户端模块数 | 20 个 `src/client/*`，含独立 `styles.ts`(324 行) / `viewkit.ts` / `format.ts` | 4 个文件，`AuditView.tsx` 471 行独大 | ⚠️ 见 12.3 |
 
 **结论**：架构没有代差，差的是**客户端的组织方式**和**数据粒度**。
@@ -588,7 +588,7 @@ for (let r = 0; r < requests.length; r++) if (requests[r].seq >= ev.seq) { marke
 **「hover 图表驱动旁边面板」（linked views / brushing）是它最值钱的交互**，
 README 原话：「Hovering a bar also drives the Context browser beside it」。
 → 我们的对应形态：**悬停 findings 泳道上的某个点，下方表格滚动并高亮该条**；
-移开鼠标回到用户自己 pin 住的选择。这比「点击跳转」轻，且不需要任何宿主契约支持。
+移开鼠标回到用户自己 pin 住的选择。这比「点击跳转」轻，且不需要任何执行环境契约支持。
 
 它还额外做了两件小事，都值得抄：
 - **横向滚动的边缘渐变**：`edges` 状态跟踪 `scrollLeft`，两侧渐变提示「还有内容」；
@@ -1238,7 +1238,7 @@ token 派生洞察在上（P0），价格在下（P2）。原稿把两者一起�
 （会话 94997694 实测）。
 
 于是 UI 上那个「缓存写 0」读起来是「我们测到了零次缓存写入」，
-**真相却是「这个宿主根本不报缓存写入」**。
+**真相却是「这个执行环境根本不报缓存写入」**。
 
 这正是 CLAUDE.md 里最硬那条纪律的反例：
 

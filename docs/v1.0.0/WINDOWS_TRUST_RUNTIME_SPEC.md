@@ -132,7 +132,7 @@ W1 可将 ETW 进程事件与连接快照按 `(pid, creation_time, time_window)`
 vendor_api | object_storage | telemetry | eval | model_api | unknown
 ```
 
-host 只允许保存规范化 hostname（无 path/query/token）；无法经过受限 allowlist 分类时写 `unknown`。对象存储连接单独不能产生 SV709。
+harness 只允许保存规范化 hostname（无 path/query/token）；无法经过受限 allowlist 分类时写 `unknown`。对象存储连接单独不能产生 SV709。
 
 E4 需要进程归属可信且有出站字节计数。若 WFP 只提供连接状态、或计数来自无法归属的系统代理，最高仍为 E3。不得记录包正文、TLS 明文、端口之外的敏感协议字段。
 
@@ -190,7 +190,7 @@ minifilter 仍只上报事件摘要和分类，不上报文件内容。它能增
 
 `CanonicalSession.tool_calls` 中的 `tar/zip/curl/ossutil/rclone/scp` 等只在 domain 层生成闭集 `IntentHint`。Windows runtime 不读取 shell 文本来“补强” ETW/WFP 结论，也不把 `IntentHint` 写入 `trust_observations`、MCP、export 或 `provenance_json`。
 
-只有 process group 已由 Windows identity 规则验证，且 actor/workspace 使用本机 HMAC 引用时，未来才可把 hint 作为同一 Incident 的 `context`。它不能升级 stage/evidence、产生 SV70x 或通知；缺 join 条件则保持 `partial`。禁止用 host、PID、session_id、trajectory_id 或相近时间猜测归并。
+只有 process group 已由 Windows identity 规则验证，且 actor/workspace 使用本机 HMAC 引用时，未来才可把 hint 作为同一 Incident 的 `context`。它不能升级 stage/evidence、产生 SV70x 或通知；缺 join 条件则保持 `partial`。禁止用 harness、PID、session_id、trajectory_id 或相近时间猜测归并。
 
 ## 9. 权限、隐私与数据保留
 
@@ -199,7 +199,7 @@ minifilter 仍只上报事件摘要和分类，不上报文件内容。它能增
 3. ETW 默认 realtime only；显式诊断模式若写 `.etl`，必须告知用户、限制目录和时长，停止后自动删除，且不得进入 authority/MCP/export。
 4. 原始 path、PID、命令行和 raw endpoint 只存在于短生命周期内存结构；持久化只保留 HMAC 引用、闭集分类、计数、时间、collector/version、coverage 和丢失统计，以及不含 path/query/token 的规范化 hostname（若对应 observation 需要）。
 5. 采集器崩溃、队列溢出和异常消息必须经过脱敏；禁止把原始 Windows event payload 写入日志或崩溃报告。
-6. 继续遵守离线产品政策：任何 Trust observation、Finding、宿主标识或用户数据都不得随价目表/版本检查出网。
+6. 继续遵守离线产品政策：任何 Trust observation、Finding、执行环境标识或用户数据都不得随价目表/版本检查出网。
 
 ## 10. 能力状态与 IPC 合同
 

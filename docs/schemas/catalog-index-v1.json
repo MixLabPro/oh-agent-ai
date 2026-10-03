@@ -12,7 +12,7 @@
   },
   "$defs": {
     "capabilities": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
-    "slot": {"enum": ["host_manifest", "price_card", "model_alias", "endpoint_pattern", "trust_profile", "error_taxonomy", "behavior_patterns", "subscription_scope", "fx_reference", "quota_window", "duration_threshold", "slow_call_threshold", "attribution_signatures"]},
+    "slot": {"enum": ["harness_manifest", "price_card", "model_alias", "endpoint_pattern", "trust_profile", "error_taxonomy", "behavior_patterns", "subscription_scope", "fx_reference", "quota_window", "duration_threshold", "slow_call_threshold", "attribution_signatures"]},
     "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}(?![\\s\\S])"},
     "revision": {"type": "string", "pattern": "^[0-9a-f]{40}(?![\\s\\S])"},
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}(?![\\s\\S])"},

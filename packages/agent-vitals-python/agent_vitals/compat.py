@@ -4,12 +4,12 @@ import os
 from pathlib import Path
 
 from agent_vitals import __version__
-from agent_vitals.adapters.claude import lookup_usage, read_host_config
+from agent_vitals.adapters.claude import lookup_usage, read_harness_config
 from agent_vitals.adapters.codex import apply_codex_runtime as _apply_codex_runtime, find_codex_executable, read_codex_runtime
 from agent_vitals.adapters.hermes import read_hermes_external_dirs
 from agent_vitals.adapters.openclaw import apply_openclaw_runtime, find_openclaw_bundled_skills, read_openclaw_roots, read_openclaw_runtime
 from agent_vitals.adapters.workbuddy import WORKBUDDY_ORPHANED, _safe_segment, read_workbuddy_builtin_roots, read_workbuddy_welcome_mode, workbuddy_skill_active
-from agent_vitals.analysis import LEVEL_RANK, LEVEL_RANK_BY_HOST, level_rank
+from agent_vitals.analysis import LEVEL_RANK, LEVEL_RANK_BY_HARNESS, level_rank
 from agent_vitals.cli import CODEX_FALLBACK_DESC_BUDGET, DEFAULT_DESC_BUDGET, DEFAULT_ROOTS, SCHEMA_VERSION, ZOMBIE_MIN_AGE_DAYS, main
 from agent_vitals.diff import _diff_entry, _sorted_keys
 import agent_vitals.discovery as discovery_module
@@ -30,8 +30,8 @@ from agent_vitals.util import est_tokens, norm, safe_str
 HOME_N = norm(Path(os.path.expanduser("~")))
 CWD_N = norm(Path.cwd())
 
-def classify(skill_dir, host, *, home_n=None, cwd_n=None):
-    return discovery_module.classify(skill_dir, host, home_n or HOME_N, cwd_n or CWD_N)
+def classify(skill_dir, harness, *, home_n=None, cwd_n=None):
+    return discovery_module.classify(skill_dir, harness, home_n or HOME_N, cwd_n or CWD_N)
 
 def days_since(ms):
     return discovery_module.days_since(ms)
@@ -39,8 +39,8 @@ def days_since(ms):
 def redact(obj, names=False, name_map=None, *, home_n=None, cwd_n=None):
     return redact_module.redact(obj, names=names, name_map=name_map, home_n=home_n or HOME_N, cwd_n=cwd_n or CWD_N)
 
-def scan_skill_dir(skill_dir, host, enabled_plugins, usage, plugins_known, source_meta=None, *, home_n=None, cwd_n=None):
-    return discovery_module.scan_skill_dir(skill_dir, host, enabled_plugins, usage, plugins_known, source_meta, home_n=home_n or HOME_N, cwd_n=cwd_n or CWD_N)
+def scan_skill_dir(skill_dir, harness, enabled_plugins, usage, plugins_known, source_meta=None, *, home_n=None, cwd_n=None):
+    return discovery_module.scan_skill_dir(skill_dir, harness, enabled_plugins, usage, plugins_known, source_meta, home_n=home_n or HOME_N, cwd_n=cwd_n or CWD_N)
 
 def apply_codex_runtime(skills, runtime, *, scanner=None):
     return _apply_codex_runtime(skills, runtime, scanner or scan_skill_dir)

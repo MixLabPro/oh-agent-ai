@@ -6,7 +6,7 @@ use super::*;
 /// v0.9.1 Phase 3.1（`AGENT_VITALS_V0_9_1_SQL_AUTHORITY_MIGRATION_SPEC.md`
 /// §5.2）：`SummaryRepository` 的 SQL 权威库实现——`usage_facts` 取代
 /// month.json/ledger/codex fold 作为读源。**计价规则一个字不改**：DSH 走
-/// `dsh_host_amount`/`dsh_provider_amount`/`dsh_tokens`/`dsh_day_tokens`
+/// `dsh_harness_amount`/`dsh_provider_amount`/`dsh_tokens`/`dsh_day_tokens`
 /// （无缝复用，它们本就只认 `{total,peak_total}`/`{date:day}` 这两种
 /// `Value` 形状，不关心谁产出的），codex/claude 走上面拆出来的
 /// `_from_hours`/`_from_days` 核心——三条计价管线
@@ -15,8 +15,8 @@ use super::*;
 ///
 /// **权威库打不开（损坏/新版本）时不 panic、也不报错**——`SummaryRepository`
 /// 的 trait 签名不带 `Result`（Stage 0 定的形状，Phase 3 沿用），这里退化
-/// 成"这个窗口的三个宿主都没有数据"，与 JSON 路径在 month.json 缺失时的
-/// 行为一致（每个宿主的 `_from_hours`/`_from_days` 核心函数本来就把"空
+/// 成"这个窗口的三个执行环境都没有数据"，与 JSON 路径在 month.json 缺失时的
+/// 行为一致（每个执行环境的 `_from_hours`/`_from_days` 核心函数本来就把"空
 /// 输入"处理成 Unavailable，不是本结构体重新发明的分支）。真正的损坏诊断
 /// 走 `data doctor`/`data status`，不是这条查询路径的职责。
 pub struct SqlSummaryRepository {
@@ -124,38 +124,38 @@ impl SummaryRepository for SqlSummaryRepository {
             }
             _ => None,
         };
-        let mut by_host = BTreeMap::new();
-        by_host.insert(
+        let mut by_harness = BTreeMap::new();
+        by_harness.insert(
             "dsh".to_string(),
-            dsh_host_amount(dsh_cost.clone(), latest_day.as_deref()),
+            dsh_harness_amount(dsh_cost.clone(), latest_day.as_deref()),
         );
-        let (codex_amount, codex_tk) = codex_host_amount_provider_safe(
+        let (codex_amount, codex_tk) = codex_harness_amount_provider_safe(
             &db, bounds, &by_hour_model, None, &cards,
         );
-        by_host.insert("codex".to_string(), codex_amount);
+        by_harness.insert("codex".to_string(), codex_amount);
         let (claude_amount, claude_tk) =
-            claude_host_amount_with_tokens_from_days(&claude_days_map, &cards);
-        by_host.insert("claude-code".to_string(), claude_amount);
-        let (wb_amount, wb_tk) = workbuddy_host_amount_with_tokens(&db, bounds);
-        by_host.insert("workbuddy".to_string(), wb_amount);
+            claude_harness_amount_with_tokens_from_days(&claude_days_map, &cards);
+        by_harness.insert("claude-code".to_string(), claude_amount);
+        let (wb_amount, wb_tk) = workbuddy_harness_amount_with_tokens(&db, bounds);
+        by_harness.insert("workbuddy".to_string(), wb_amount);
         // legacy 兜底标记的消费方（degrade_claude_freshness_if_legacy_backed）：
         // 被聚合兜底的月份 claude 侧降为 Partial，必须在 aggregate_freshness
         // 之前生效，聚合新鲜度才能反映它。
         if let Some(db) = &db {
-            if let Some(claude_entry) = by_host.get_mut("claude-code") {
+            if let Some(claude_entry) = by_harness.get_mut("claude-code") {
                 degrade_claude_freshness_if_legacy_backed(db.conn(), &query.month, claude_entry);
             }
         }
 
-        let mut tokens_by_host = BTreeMap::new();
-        tokens_by_host.insert("dsh".to_string(), dsh_tokens(Some(&dsh_days), &query.month));
-        tokens_by_host.insert("codex".to_string(), codex_tk);
-        tokens_by_host.insert("claude-code".to_string(), claude_tk);
-        tokens_by_host.insert("workbuddy".to_string(), wb_tk);
-        restore_full_host_tokens(&db, bounds, &mut tokens_by_host);
-        // 插件宿主 tokens（zcode 接入收尾）：处理量可见、金额不入（L0 纪律）。
-        for (label, tk) in plugin_tokens_by_host(&self.data_home_path(), &db, bounds) {
-            tokens_by_host.insert(label, tk);
+        let mut tokens_by_harness = BTreeMap::new();
+        tokens_by_harness.insert("dsh".to_string(), dsh_tokens(Some(&dsh_days), &query.month));
+        tokens_by_harness.insert("codex".to_string(), codex_tk);
+        tokens_by_harness.insert("claude-code".to_string(), claude_tk);
+        tokens_by_harness.insert("workbuddy".to_string(), wb_tk);
+        restore_full_harness_tokens(&db, bounds, &mut tokens_by_harness);
+        // 插件执行环境 tokens（zcode 接入收尾）：处理量可见、金额不入（L0 纪律）。
+        for (label, tk) in plugin_tokens_by_harness(&self.data_home_path(), &db, bounds) {
+            tokens_by_harness.insert(label, tk);
         }
 
         let mut by_provider = BTreeMap::new();
@@ -176,26 +176,26 @@ impl SummaryRepository for SqlSummaryRepository {
         };
         apply_subscription_fees(&mut by_provider, &query.month, &cards, &declared);
         apply_declared_subscription_fees(&mut by_provider, &query.month, &declared);
-        // Phase 2.8：用户显式录入的宿主账单（WorkBuddy 积分 / 中转对账单…）→
-        // by_provider 对应条目的 basis 桶（`data host-bill set`）。
+        // Phase 2.8：用户显式录入的执行环境账单（WorkBuddy 积分 / 中转对账单…）→
+        // by_provider 对应条目的 basis 桶（`data harness-bill set`）。
         if let Some(db) = &db {
-            apply_host_bills(&mut by_provider, db, &query.month);
+            apply_harness_bills(&mut by_provider, db, &query.month);
         }
 
-        let freshness = aggregate_freshness(&by_host);
+        let freshness = aggregate_freshness(&by_harness);
         let last_observed_at = freshness.last_observed_at.clone();
         MonthlySummary {
             month: query.month.clone(),
-            by_host,
-            tokens_by_host,
+            by_harness,
+            tokens_by_harness,
             by_provider,
             coverage: agent_vitals_data::projection::CoverageStatus {
-                measured_fields: WIRED_HOSTS.len() as u64,
-                total_fields: (WIRED_HOSTS.len() + NOT_YET_WIRED_HOSTS.len()) as u64,
+                measured_fields: WIRED_HARNESSES.len() as u64,
+                total_fields: (WIRED_HARNESSES.len() + NOT_YET_WIRED_HARNESSES.len()) as u64,
                 denominator_version: 1,
             },
             freshness,
-            excluded_hosts: excluded_hosts(),
+            excluded_harnesses: excluded_harnesses(),
             last_observed_at,
         }
     }
@@ -213,43 +213,43 @@ impl SummaryRepository for SqlSummaryRepository {
             agent_vitals_domain::cost::priced_day(d, &pricing)
                 .unwrap_or_else(|| agent_vitals_domain::cost::bucket_cost(d, &pricing))
         });
-        let mut by_host = BTreeMap::new();
-        by_host.insert(
+        let mut by_harness = BTreeMap::new();
+        by_harness.insert(
             "dsh".to_string(),
-            dsh_host_amount(
+            dsh_harness_amount(
                 cost.clone(),
                 day_value.as_ref().map(|_| query.date.as_str()),
             ),
         );
-        let (codex_amount, codex_tk) = codex_host_amount_provider_safe(
+        let (codex_amount, codex_tk) = codex_harness_amount_provider_safe(
             &db, bounds, &by_hour_model, Some(&query.date), &cards,
         );
-        by_host.insert("codex".to_string(), codex_amount);
+        by_harness.insert("codex".to_string(), codex_amount);
         let (claude_amount, claude_tk) =
-            claude_host_amount_with_tokens_from_days(&claude_days_map, &cards);
-        by_host.insert("claude-code".to_string(), claude_amount);
-        let (wb_amount, wb_tk) = workbuddy_host_amount_with_tokens(&db, bounds);
-        by_host.insert("workbuddy".to_string(), wb_amount);
+            claude_harness_amount_with_tokens_from_days(&claude_days_map, &cards);
+        by_harness.insert("claude-code".to_string(), claude_amount);
+        let (wb_amount, wb_tk) = workbuddy_harness_amount_with_tokens(&db, bounds);
+        by_harness.insert("workbuddy".to_string(), wb_amount);
         // 日粒度的降级标记按「该日所属月」查（标记是 month scope 的）。
         if let Some(db) = &db {
             let month_of_date: String = query.date.chars().take(7).collect();
-            if let Some(claude_entry) = by_host.get_mut("claude-code") {
+            if let Some(claude_entry) = by_harness.get_mut("claude-code") {
                 degrade_claude_freshness_if_legacy_backed(db.conn(), &month_of_date, claude_entry);
             }
         }
 
-        let mut tokens_by_host = BTreeMap::new();
-        tokens_by_host.insert(
+        let mut tokens_by_harness = BTreeMap::new();
+        tokens_by_harness.insert(
             "dsh".to_string(),
             day_value.as_ref().map(dsh_day_tokens).unwrap_or_default(),
         );
-        tokens_by_host.insert("codex".to_string(), codex_tk);
-        tokens_by_host.insert("claude-code".to_string(), claude_tk);
-        tokens_by_host.insert("workbuddy".to_string(), wb_tk);
-        restore_full_host_tokens(&db, bounds, &mut tokens_by_host);
-        // 插件宿主 tokens（zcode 接入收尾）：与 monthly 同款——处理量可见、金额不入。
-        for (label, tk) in plugin_tokens_by_host(&self.data_home_path(), &db, bounds) {
-            tokens_by_host.insert(label, tk);
+        tokens_by_harness.insert("codex".to_string(), codex_tk);
+        tokens_by_harness.insert("claude-code".to_string(), claude_tk);
+        tokens_by_harness.insert("workbuddy".to_string(), wb_tk);
+        restore_full_harness_tokens(&db, bounds, &mut tokens_by_harness);
+        // 插件执行环境 tokens（zcode 接入收尾）：与 monthly 同款——处理量可见、金额不入。
+        for (label, tk) in plugin_tokens_by_harness(&self.data_home_path(), &db, bounds) {
+            tokens_by_harness.insert(label, tk);
         }
 
         let mut by_provider = BTreeMap::new();
@@ -262,42 +262,42 @@ impl SummaryRepository for SqlSummaryRepository {
         ));
         by_provider.extend(claude_provider_amounts_from_sql(&db, bounds, &claude_days_map, &cards));
 
-        let freshness = aggregate_freshness(&by_host);
+        let freshness = aggregate_freshness(&by_harness);
         let last_observed_at = freshness.last_observed_at.clone();
         DailySummary {
             date: query.date.clone(),
-            by_host,
-            tokens_by_host,
+            by_harness,
+            tokens_by_harness,
             by_provider,
             coverage: agent_vitals_data::projection::CoverageStatus {
-                measured_fields: WIRED_HOSTS.len() as u64,
-                total_fields: (WIRED_HOSTS.len() + NOT_YET_WIRED_HOSTS.len()) as u64,
+                measured_fields: WIRED_HARNESSES.len() as u64,
+                total_fields: (WIRED_HARNESSES.len() + NOT_YET_WIRED_HARNESSES.len()) as u64,
                 denominator_version: 1,
             },
             freshness,
-            excluded_hosts: excluded_hosts(),
+            excluded_harnesses: excluded_harnesses(),
             last_observed_at,
         }
     }
 
-    /// SQL 权威实现：逐 wired 宿主跑 `authority_query::coverage_status`
+    /// SQL 权威实现：逐 wired 执行环境跑 `authority_query::coverage_status`
     /// （三维分母 v1，见该函数 doc）。窗口 = 该月的北京毫秒边界；库打不开
     /// 或窗口非法 → 三维全 0（诚实「测不到覆盖」，不是满覆盖）。
     fn coverage_status(&self, month: &str) -> BTreeMap<String, CoverageStatus> {
         let db = self.open_db();
         let bounds = agent_vitals_data::authority_query::beijing_month_bounds_ms(month);
         let mut out = BTreeMap::new();
-        for host in WIRED_HOSTS {
+        for harness in WIRED_HARNESSES {
             let (measured, total) = match (&db, bounds) {
                 (Some(db), Some((start, end))) => {
-                    agent_vitals_data::coverage::status(db, host, start, end)
+                    agent_vitals_data::coverage::status(db, harness, start, end)
                         .map(|s| (s.measured_fields, s.total_fields))
                         .unwrap_or((0, 3))
                 }
                 _ => (0, 3),
             };
             out.insert(
-                (*host).to_string(),
+                (*harness).to_string(),
                 CoverageStatus {
                     measured_fields: measured,
                     total_fields: total,

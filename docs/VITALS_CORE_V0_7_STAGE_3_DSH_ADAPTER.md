@@ -19,7 +19,7 @@
 >   `compaction:<id>`，emitter 检出即抛、**不静默去重**（否则 UsageFact 总量与 fold
 >   总量对不上账）；「结构性不可能 duplicate」改为「正常语料预期不出现，strict
 >   invariant 守卫」；③ Core 边界表述修正——共享 observer 属 usage domain/core，
->   emitter/DSH 文件解析/CLI 属 host adapter（v3 §0 的「不进 Core」与 Commit 1 动
+>   emitter/DSH 文件解析/CLI 属 harness adapter（v3 §0 的「不进 Core」与 Commit 1 动
 >   `usage.py`/`usage.rs` 矛盾）；④ 措辞：同模型换 provider 是**同一会话内**。
 > - **已落地（2026-09-03）**：v4 规格通过 review，Commit 1（`ba01147`，canonical/FNV
 >   原语下沉 + `DshUsageObservation` 开槽即固化身份 + `request_metrics` 字节冻结）
@@ -49,7 +49,7 @@
   普通请求     source_event_id = "request:derived:{fnv1a64(canonical_json({turn, step, seq:first_sample_seq}))}"
                identity_basis  = "derived-hash"
   有 compactionId: source_event_id = "compaction:{compaction_id}"
-               identity_basis  = "native"        # compaction_id 是宿主原生标识
+               identity_basis  = "native"        # compaction_id 是执行环境原生标识
   无 compactionId: source_event_id = "compaction:derived:{first_sample_identity_hash}"
                identity_basis  = "derived-hash"  # hash 在开槽时对首样本 canonical 行算好并冻结
   ```
@@ -65,8 +65,8 @@
   `duplicate-source-event-id` 硬错误、**不静默去重**。正常语料预期不出现，由 strict
   invariant 守卫。
 - **event_ts_utc 统一 RFC3339 UTC 字符串**（固定毫秒 + `Z`，如
-  `2025-06-15T15:08:24.000Z`）。adapter 边界正是消除宿主 wire 差异的地方，不能把
-  「先判 host 再解析字段」推给下游。
+  `2025-06-15T15:08:24.000Z`）。adapter 边界正是消除执行环境 wire 差异的地方，不能把
+  「先判 harness 再解析字段」推给下游。
 - **归属失败 = 硬错误，不是空成功**（§4.1）：缺 header session id、或缺 cwd 且无显式
   profile → CLI exit 2 / library raise。诚实空集只留给「干净会话、post-fork 无
   usage」。因此 DSH 的 emit result **没有** attempts/malformed 类别（结构性不存在），
@@ -75,7 +75,7 @@
   成立。
 - **Core 边界**：共享 observer 属 usage domain/core（Python `agent/usage.py` ↔ Rust
   core `usage.rs`，与 request_metrics/fold 同层）；UsageFact emitter、DSH 文件解析、
-  文件 I/O、CLI 属 host adapter。Stage 3 **不把 DSH 文件解析或写盘职责放入 Core**。
+  文件 I/O、CLI 属 harness adapter。Stage 3 **不把 DSH 文件解析或写盘职责放入 Core**。
 - 实施拆两 commit，镜像 Stage 2：**Commit 1** = byte-neutral 共享 observer refactor
   （request_metrics 输出字节冻结，零漂移门）；**Commit 2** = UsageFact emitter +
   诊断 CLI + fixture + 验收。
@@ -97,7 +97,7 @@ adapter emit 工作的收尾（决策 C 顺序 claude→codex→dsh）。本阶�
 
 - **共享 observer 属 usage domain/core**（Python `agent/usage.py`、Rust core
   `usage.rs`——与 request_metrics/fold 所在同层）；**UsageFact emitter、DSH 文件
-  解析、文件 I/O 与 CLI 属 host adapter**（`agent/dsh_usage_fact.py` /
+  解析、文件 I/O 与 CLI 属 harness adapter**（`agent/dsh_usage_fact.py` /
   `src/agent/dsh_usage_fact.rs`）。**Stage 3 不把 DSH 文件解析或写盘职责放入 Core**。
 - **不重写/不新增 DSH 事件解释**：解码（`decode_zstd_multi_frame` /
   `read_session_text`）、reshape（`parse_session_log`）原样复用。
@@ -215,7 +215,7 @@ model/provider（与 fold/request_metrics 的「后到重判」一致：request_
 | UsageFact 字段 | 来源 | 备注 |
 |---|---|---|
 | `machine_namespace` | CLI 必填且非空（缺失或空串 exit 2） | 同 Stage 1/2：CLI 绝不读 machine.json 的 takeover identity |
-| `host` | 常量 `"dsh"` | == R2a host_kind |
+| `harness` | 常量 `"dsh"` | == R2a harness_kind |
 | `source_profile` | CLI 显式，否则 header cwd 派生 | §3.6；cwd 缺失 → 硬错误 |
 | `native_session_id` | 头行 `id` | 与 R2a 同源（`r2a_store.rs:1184`）；缺 → 硬错误 |
 | `source_event_id` | observation 固化字段（§3.3） | 无 path.stem；出账前查重 |
@@ -233,9 +233,9 @@ model/provider（与 fold/request_metrics 的「后到重判」一致：request_
 
 ### 3.2 token 四桶：None 与 0 必须可区分
 
-观察者的四桶是 `_opt_int` 语义（宿主没报 → None，缺项 ≠ 0，与 `_buckets_from` 求和按
+观察者的四桶是 `_opt_int` 语义（执行环境没报 → None，缺项 ≠ 0，与 `_buckets_from` 求和按
 0 是两种正确语义）。fact 原样带 None → `build_usage_fact` 校验非负整数、允许 None。
-**绝不**把缺失当 0 发——那会把「宿主没报 cacheReadTokens」伪造成「测到 0」。
+**绝不**把缺失当 0 发——那会把「执行环境没报 cacheReadTokens」伪造成「测到 0」。
 
 ### 3.3 source_event_id：首样本锚定、开槽固化，与 `identity_basis` 对齐
 
@@ -252,7 +252,7 @@ model/provider（与 fold/request_metrics 的「后到重判」一致：request_
 普通请求    source_event_id = "request:derived:{fnv1a64(canonical_json({turn, step, seq:first_sample_seq}))}"
             identity_basis  = "derived-hash"
 有 compactionId: source_event_id = "compaction:{compaction_id}"
-            identity_basis  = "native"          # compaction_id 是宿主原生标识
+            identity_basis  = "native"          # compaction_id 是执行环境原生标识
 无 compactionId: source_event_id = "compaction:derived:{first_sample_identity_hash}"
             identity_basis  = "derived-hash"    # hash 对首样本 canonical 行、开槽时算好冻结
 ```
@@ -268,7 +268,7 @@ model/provider（与 fold/request_metrics 的「后到重判」一致：request_
   value 字段，身份零变动。普通请求的 first_sample_seq 本身就是冻结值，因此 recompute
   与 freeze 等价——但为统一与防未来回归，observer 一律**存固化字段**，不重算。
 - **`identity_basis` 逐槽分**（v2 确立，v4 保留）：`build_usage_fact` 的纪律是
-  native = `source_event_id` **真的是宿主原生 id**，derived-hash = 对内容做的 hash
+  native = `source_event_id` **真的是执行环境原生 id**，derived-hash = 对内容做的 hash
   fallback（`usage_fact.py` docstring）。普通请求没有逐字原生 id（槽是 adapter 重构）
   → 对 canonical 身份元组做 hash、标 derived-hash（与 Stage 2 `_derived_event_id`
   「derived 必带 hash」同纪律）。compaction 有原生 `compactionId` → `compaction:<id>`
@@ -349,7 +349,7 @@ source_event_id/fact_id。规则：
 ### 3.6 event_ts_utc / time_basis / source_profile / strict 归属
 
 - **event_ts_utc = RFC3339 UTC，固定毫秒精度 + `Z`**：epoch-ms → 串的纯函数，Python
-  与 Rust **逐字节一致**（adapter 边界消除宿主 wire 差异，一次性支付格式契约，不能把
+  与 Rust **逐字节一致**（adapter 边界消除执行环境 wire 差异，一次性支付格式契约，不能把
   复杂度推给下游）。实现不加新依赖：Rust 侧按 repo 既有 Hinnant civil 纪律做整数
   `civil_from_secs`（core `usage.rs`/`budget.rs` 已有 civil-from-days，chrono **不是**
   依赖）；Python 侧用同一整数数学（不用 `datetime` 的 float `fromtimestamp(ms/1000)`，
@@ -390,7 +390,7 @@ Unavailable 继续跑，那是批处理语义；本 stage 的**单文件 emit CL
 打不开的会话就是这一次调用的失败。**故 emit result 没有 attempts / malformed 字段**：
 DSH 没有 codex 的 wire 行级 skip/unreadable/unattributed 类别（归属失败在**文件**层且
 已是硬错误）、也没有 duplicate 类别作为**正常成功路径**（duplicate 是硬错误分支，不进
-coverage）——硬套恒 0/恒空键会造假键。coverage 的键按宿主各异，claude_usage_fact 与
+coverage）——硬套恒 0/恒空键会造假键。coverage 的键按执行环境各异，claude_usage_fact 与
 codex_usage_fact 本就不同，此处一致。
 
 ### 4.2 coverage（DSH 专属键）
@@ -423,8 +423,8 @@ post-fork 用量」，不是错误、也不冒充覆盖——与 §4.1 的归属
 ## 5. 接口、CLI 与 commit 拆分
 
 ```python
-# scripts/agent_vitals/agent/dsh_usage_fact.py（host adapter，不进 Core）
-HOST = "dsh"
+# scripts/agent_vitals/agent/dsh_usage_fact.py（harness adapter，不进 Core）
+HARNESS = "dsh"
 OBSERVATION_KIND = "assistant-usage"
 
 class DshUsageFactError(Exception):
@@ -458,13 +458,13 @@ def dsh_session_to_usage_facts(path, *, machine_namespace: str,
 observer（§2.2，含 provider_raw/first_sample_seq/first_sample_identity_hash/固化身份/
 active 游标），request_metrics 改道其上、输出字节不变。**这层属 usage domain/core**：
 Python `agent/usage.py` + Rust core `usage.rs` 同改（与 request_metrics/fold 同层，
-不是 host adapter）。门禁：request_metrics 表征/对账、golden 零漂移、Python↔Rust
+不是 harness adapter）。门禁：request_metrics 表征/对账、golden 零漂移、Python↔Rust
 request_metrics parity 全绿。provider 游标、首样本锚、固化身份是**新携带字段**
 （request_metrics 不渲染 → 无输出影响），但它们的提取逻辑与 fold 同谓词，reconcile
 测试在 commit 1 内即可先行钉住 observer↔fold 一致（不依赖 emitter）。
 
 **Commit 2（emitter + CLI + fixture + 验收）**：`dsh_usage_fact.py`/`dsh_usage_fact.rs`
-+ CLI 双侧 + fixture + 测试（§6）全绿。**这层属 host adapter**，不进 Core。
++ CLI 双侧 + fixture + 测试（§6）全绿。**这层属 harness adapter**，不进 Core。
 
 ## 6. 验收测试
 
@@ -515,7 +515,7 @@ helper，不动现有产物。
      `"A"`/`"B"`（各自保留），而 `token_by_model` 聚合的 `providers["X"] ==
      "__ambiguous__"`——「原始证据在 fact、派生结论在聚合层」的分层被钉死。
    - 6c. **无 header model 证据的槽 → model_raw=None（非 "unknown"）**。
-7. **R2a SessionKey 对得上**：对同一文件，fact 的 `(host, machine_namespace,
+7. **R2a SessionKey 对得上**：对同一文件，fact 的 `(harness, machine_namespace,
    source_profile, native_session_id)` == R2a 四元 `SessionKey` 分量
    （`SessionKey::new("dsh", header.id, dsh_source_profile(cwd), ns)`，
    `r2a_store.rs:1184`）。
@@ -548,7 +548,7 @@ helper，不动现有产物。
 | 身份固化 | observer **开槽即固化** source_event_id/identity_basis（首样本锚），shadow 永不覆盖 | v3 无 id compaction 的 hash 输入误写「支配样本」→ append shadow 改写 fact_id |
 | duplicate 守卫 | 成功禁止重复 source_event_id；检出即抛 `duplicate-source-event-id` 硬错误，**不静默去重** | v3 称「结构性不可能 duplicate」——fold 只做相邻去重，非相邻同 compactionId 重现会 collide |
 | 槽措辞 | 相邻 run/相邻槽（`last` 比较语义），非「全局唯一 (turn,step) 槽」 | v3 §3.5 全局唯一表述与 fold 实际语义不符 |
-| Core 边界 | 共享 observer 属 usage domain/core（`usage.py`+core `usage.rs`）；emitter/DSH 文件解析/CLI 属 host adapter | v3 §0「不进 Core」与 Commit 1 动 usage.py/usage.rs 矛盾 |
+| Core 边界 | 共享 observer 属 usage domain/core（`usage.py`+core `usage.rs`）；emitter/DSH 文件解析/CLI 属 harness adapter | v3 §0「不进 Core」与 Commit 1 动 usage.py/usage.rs 矛盾 |
 | provider 措辞 | 同一会话内同模型切换 provider → 聚合层 ambiguous | v3 §0「跨会话」与 #6b/单会话聚合不符 |
 | `provider_raw` | 只存原始字符串/None；普通=支配样本时 header 游标 `config.provider`，compaction=自带 `data.provider` | v2 允许 `__ambiguous__` 进 fact |
 | `source_event_id` + basis | 普通=`request:derived:` + canonical 身份元组 hash / derived-hash；有 id compaction=`compaction:<id>` / **native**；无 id=`compaction:derived:{first_sample_identity_hash}` / derived-hash | v2 不含 hash 却标 derived-hash |
@@ -560,7 +560,7 @@ helper，不动现有产物。
 
 未变（二/三轮 review 已拍板）：RFC3339 UTC 固定毫秒、`time_basis` 显式判空、None
 token 不转 0、单 path 无跨文件去重、`observation_kind="assistant-usage"`、
-`source_usage_semantics="delta"`、host="dsh"、内存 emit 不夹带 R3 写链、不冒充解决 R3
+`source_usage_semantics="delta"`、harness="dsh"、内存 emit 不夹带 R3 写链、不冒充解决 R3
 增量重折与 Workbench 断更、workbuddy 排除。
 
 ## 8. 已知遗留 / 实施期定夺
@@ -598,7 +598,7 @@ token 不转 0、单 path 无跨文件去重、`observation_kind="assistant-usag
 - **「单文件结构性不可能 duplicate」**（v3）：fold 只做相邻去重，非相邻同 compactionId
   重现 collide；改 strict invariant（duplicate-source-event-id 守卫）兜底。
 - **「不进 Core」覆盖整个 stage**（v3 §0 措辞）：共享 observer 属 usage domain/core；
-  host adapter 边界只圈 emitter/DSH 文件解析/CLI。
+  harness adapter 边界只圈 emitter/DSH 文件解析/CLI。
 
 ## 10. 工作量（粗估）
 

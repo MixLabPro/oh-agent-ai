@@ -1,9 +1,9 @@
-//! v0.9.1 Phase 3.1：`usage_facts` → 各宿主计价函数期望的日/月/小时桶
+//! v0.9.1 Phase 3.1：`usage_facts` → 各执行环境计价函数期望的日/月/小时桶
 //! `Value` 形状——SQL 权威库版的 `store::dsh_days_map`（那份是旧
 //! `index.sqlite3`/`facts` 表的实现，本模块是同一形状对着新
 //! `agent-vitals.sqlite3`/`usage_facts` 表重做，字段名与时间列类型都变了，
 //! 不能共用查询字符串，但输出形状刻意保持一致——下游 `domain::cost::
-//! {month_cost,priced_day,bucket_cost}`/`hosts::codex_usage::{codex_by_model_
+//! {month_cost,priced_day,bucket_cost}`/`harnesses::codex_usage::{codex_by_model_
 //! from_hours,codex_aggregate_hours}`/`sessions::codex_cost::codex_cost_report`/
 //! `domain::cost::claude_day_cost` 全部不知道数字是从 JSONL 折叠出来的还是从
 //! SQL 聚合出来的，这正是"只有一套计价规则"纪律的落地方式（CLAUDE.md
@@ -73,8 +73,8 @@ macro_rules! local_hour_idx { () => { "((CAST(julianday(date(event_ts_ms / 1000,
 
 // v0.9.1 测试矩阵 §8 行 8「performance（不枚举原始日志/索引命中）」：所有
 // 窗口化聚合查询的 SQL 抽成 `const`，`prepare()` 与 `tests/query_plan.rs` 的
-// `EXPLAIN QUERY PLAN` 断言共用同一字符串——两处零漂移。断言内容：`host` +
-// `event_ts_ms` 范围必须命中部分索引 `usage_facts_host_time`（`WHERE
+// `EXPLAIN QUERY PLAN` 断言共用同一字符串——两处零漂移。断言内容：`harness` +
+// `event_ts_ms` 范围必须命中部分索引 `usage_facts_harness_time`（`WHERE
 // deleted_at_ms IS NULL` 与查询谓词一致），绝不 `SCAN usage_facts`（全表）。
 
 /// [`peaked_days_map`]：DSH 峰谷分桶（`(day, model, event_peak)` 三维聚合）。
@@ -83,7 +83,7 @@ pub(crate) const SQL_PEAKED_DAYS_MAP: &str = concat!("SELECT (", local_day_idx!(
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens)
          FROM usage_facts
-         WHERE host = ?3 AND observation_kind != 'legacy_aggregate'
+         WHERE harness = ?3 AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?4 AND event_ts_ms < ?5
            ", not_subscription_covered!(), "
@@ -110,13 +110,13 @@ pub enum BillingSource {
 }
 
 /// 一次计费窗口查询（AGENTS.md 数据完整性看守的计费面对偶：token 视图有
-/// host-agnostic 的 [`hourly_by_host_model`]，计费视图此前每个宿主各抄一份
+/// harness-agnostic 的 [`hourly_by_harness_model`]，计费视图此前每个执行环境各抄一份
 /// SQL——`codex_by_hour_model` / `claude_days` / `claude_legacy_days` 三份的
-/// WHERE 仅差 host 字面量与粒度。本查询把它收敛为参数；**新增宿主的计费
+/// WHERE 仅差 harness 字面量与粒度。本查询把它收敛为参数；**新增执行环境的计费
 /// 日/时视图 = 调这里，不再新写 SQL**）。
 #[derive(Clone, Copy, Debug)]
 pub struct BillingWindowQuery<'a> {
-    pub host: &'a str,
+    pub harness: &'a str,
     pub grain: BillingGrain,
     pub source: BillingSource,
     pub start_ms: i64,
@@ -158,7 +158,7 @@ pub(crate) fn billing_window_sql(q: &BillingWindowQuery<'_>) -> String {
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens)
          FROM usage_facts
-         WHERE host = ?5 AND {source_filter}
+         WHERE harness = ?5 AND {source_filter}
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
            {sub_filter}
@@ -170,9 +170,9 @@ pub(crate) fn billing_window_sql(q: &BillingWindowQuery<'_>) -> String {
 }
 
 /// 通用计费窗口聚合（四桶 SUM，按粒度 × 模型分组）。参数布局
-/// `?1=北京偏移 ?2=粒度毫秒 ?3/?4=窗口 ?5=host`——host 走参数绑定，
-/// 与 [`hourly_by_host_model`] 同款（单宿主 `host = ?` 命中
-/// `usage_facts_host_time` 部分索引）。
+/// `?1=北京偏移 ?2=粒度毫秒 ?3/?4=窗口 ?5=harness`——harness 走参数绑定，
+/// 与 [`hourly_by_harness_model`] 同款（单执行环境 `harness = ?` 命中
+/// `usage_facts_harness_time` 部分索引）。
 pub fn billing_window_tokens(
     conn: &Connection,
     q: &BillingWindowQuery<'_>,
@@ -185,7 +185,7 @@ pub fn billing_window_tokens(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(
-            rusqlite::params![BEIJING_OFFSET_MS, grain_ms, q.start_ms, q.end_ms, q.host],
+            rusqlite::params![BEIJING_OFFSET_MS, grain_ms, q.start_ms, q.end_ms, q.harness],
             |r| {
                 Ok(BillingWindowRow {
                     idx: r.get(0)?,
@@ -209,28 +209,28 @@ pub(crate) const SQL_CLAUDE_DECLARED_DAYS: &str = concat!("SELECT (", local_day_
                 SUM(cache_write_tokens), SUM(output_tokens)
          FROM usage_facts
          ", user_declared_join!(), "
-         WHERE host = 'claude-code' AND observation_kind != 'legacy_aggregate'
+         WHERE harness = 'claude-code' AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
            AND decl.fact_id IS NOT NULL
            ", not_subscription_covered!(), "
          GROUP BY day_idx, decl.declared_provider, model_id");
 
-/// [`hourly_by_host_model`] 三宿主 × 模型 × 小时聚合（增量 2 `usage_hourly`
+/// [`hourly_by_harness_model`] 三执行环境 × 模型 × 小时聚合（增量 2 `usage_hourly`
 /// 工具的 SQL 数据源）。从函数体抽出来便于 EXPLAIN QUERY PLAN 测试断言。
 ///
 /// **不排除订阅覆盖的事实**：这是 token 视图（`usage_hourly` 只报 token，cost 在
-/// `cost_breakdown`），处理量与「钱归谁」无关——与 `tokens_by_host`/`host_tokens_all`
+/// `cost_breakdown`），处理量与「钱归谁」无关——与 `tokens_by_harness`/`harness_tokens_all`
 /// 同一条纪律；曾带 `not_subscription_covered!` 导致 MCP 小时曲线之和 ≠ `data daily`
-/// 的 tokens_by_host（mcp_smoke Q01-Q03 MISMATCH，2026-09-17）。
+/// 的 tokens_by_harness（mcp_smoke Q01-Q03 MISMATCH，2026-09-17）。
 ///
-/// **单宿主** SQL：`host = ?5` 走 `usage_facts_host_time` 索引（与
-/// `codex_by_hour_model` / `claude_days` 同款）。三宿主聚合由 fn 把三个
-/// 单宿主查询的结果 in-memory 合并——OR + IN + positional params 三种
+/// **单执行环境** SQL：`harness = ?5` 走 `usage_facts_harness_time` 索引（与
+/// `codex_by_hour_model` / `claude_days` 同款）。三执行环境聚合由 fn 把三个
+/// 单执行环境查询的结果 in-memory 合并——OR + IN + positional params 三种
 /// 写法 SQLite planner 都会退化成 SCAN + temp B-tree（实测，2026-09-05
-/// tab 卡顿事故形状）。wired 宿主就 3 个（claude-code / codex / dsh），
+/// tab 卡顿事故形状）。wired 执行环境就 3 个（claude-code / codex / dsh），
 /// in-memory 合并成本可忽略；多于 3 个需要重新评估。
-pub(crate) const SQL_HOURLY_BY_HOST_MODEL: &str = concat!("SELECT host, COALESCE(model_id, '<unknown>'),
+pub(crate) const SQL_HOURLY_BY_HARNESS_MODEL: &str = concat!("SELECT harness, COALESCE(model_id, '<unknown>'),
                 CAST((", local_hour_idx!(), " + (?1 - ?1) + (?2 - ?2)) % 24 AS TEXT) AS local_hour,
                 SUM(uncached_input_tokens),
                 SUM(cache_read_tokens),
@@ -240,22 +240,22 @@ pub(crate) const SQL_HOURLY_BY_HOST_MODEL: &str = concat!("SELECT host, COALESCE
          WHERE observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-           AND host = ?5
-         GROUP BY host, model_id, local_hour");
+           AND harness = ?5
+         GROUP BY harness, model_id, local_hour");
 
-pub(crate) const SQL_HOURLY_BY_HOST_PROVIDER: &str = concat!("SELECT host, COALESCE(provider_id, '<unknown>'),
+pub(crate) const SQL_HOURLY_BY_HARNESS_PROVIDER: &str = concat!("SELECT harness, COALESCE(provider_id, '<unknown>'),
                 CAST((", local_hour_idx!(), " + (?1 - ?1) + (?2 - ?2)) % 24 AS TEXT) AS local_hour,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens)
          FROM usage_facts
          WHERE observation_kind != 'legacy_aggregate' AND deleted_at_ms IS NULL
            AND event_ts_ms IS NOT NULL AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-           AND host = ?5
-         GROUP BY host, provider_id, local_hour");
+           AND harness = ?5
+         GROUP BY harness, provider_id, local_hour");
 
-/// 「确认计费方式」的待确认组（REQ-023：宿主 × provider × 模型 × 路由证据 ×
+/// 「确认计费方式」的待确认组（REQ-023：执行环境 × provider × 模型 × 路由证据 ×
 /// 计价依据）。谓词：仍按量估算或路由证据不是明确官方路由、且未被当前 saved
-/// 声明覆盖、且不是宿主自报 subscription 的事实。运行时的组面板
+/// 声明覆盖、且不是执行环境自报 subscription 的事实。运行时的组面板
 /// （`runtime::billing_preview::confirmation_groups`）、总览摘要与待处理投影
 /// （`issues.rs`）三处共用这一条 SQL——组的定义只有一份。
 /// 「覆盖」认**任意归因种类**（subscription_covered / user_declared）：确认过
@@ -282,11 +282,11 @@ pub const SQL_UNRESOLVED_BILLING_FACT_WHERE: &str =
             OR COALESCE(f.evidence_basis, 'missing') != 'explicit-official-route')";
 
 pub const SQL_UNRESOLVED_BILLING_GROUPS: &str = concat!(
-    "SELECT f.host, COALESCE(f.provider_id, '<unknown>'), COALESCE(f.model_id, '<unknown>'),
+    "SELECT f.harness, COALESCE(f.provider_id, '<unknown>'), COALESCE(f.model_id, '<unknown>'),
             COALESCE(f.evidence_basis, 'missing'), COALESCE(f.pricing_basis, 'unavailable'),
             SUM(f.uncached_input_tokens + f.cache_read_tokens + f.cache_write_tokens + f.output_tokens),
             MIN(f.event_ts_ms), MAX(f.event_ts_ms),
-            COUNT(DISTINCT COALESCE(f.session_key, f.host || ':' || f.machine_namespace || ':' || f.native_session_id))
+            COUNT(DISTINCT COALESCE(f.session_key, f.harness || ':' || f.machine_namespace || ':' || f.native_session_id))
      FROM usage_facts f
      WHERE ",
     "f.deleted_at_ms IS NULL AND f.observation_kind != 'legacy_aggregate'
@@ -304,13 +304,13 @@ pub const SQL_UNRESOLVED_BILLING_GROUPS: &str = concat!(
        AND (COALESCE(f.pricing_basis, 'unavailable') = 'metered_estimate'
             OR COALESCE(f.evidence_basis, 'missing') != 'explicit-official-route')",
     "
-     GROUP BY f.host, f.provider_id, f.model_id, f.evidence_basis, f.pricing_basis
+     GROUP BY f.harness, f.provider_id, f.model_id, f.evidence_basis, f.pricing_basis
      ORDER BY SUM(f.uncached_input_tokens + f.cache_read_tokens + f.cache_write_tokens + f.output_tokens) DESC"
 );
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedBillingGroupRow {
-    pub host: String,
+    pub harness: String,
     pub provider_id: String,
     pub model_id: String,
     pub evidence_basis: String,
@@ -326,7 +326,7 @@ pub fn unresolved_billing_group_rows(
 ) -> rusqlite::Result<Vec<UnresolvedBillingGroupRow>> {
     let mut stmt = conn.prepare(SQL_UNRESOLVED_BILLING_GROUPS)?;
     let rows = stmt.query_map(rusqlite::params![start_ms, end_ms], |r| Ok(UnresolvedBillingGroupRow {
-        host: r.get(0)?, provider_id: r.get(1)?, model_id: r.get(2)?,
+        harness: r.get(0)?, provider_id: r.get(1)?, model_id: r.get(2)?,
         evidence_basis: r.get(3)?, pricing_basis: r.get(4)?, tokens: r.get(5)?,
         first_event_at_ms: r.get(6)?, last_event_at_ms: r.get(7)?, session_count: r.get(8)?,
     }))?;
@@ -338,7 +338,7 @@ pub(crate) const SQL_FACTS_PAGE_WINDOW: &str =
     "SELECT fact_id, native_session_id, model_id, event_ts_ms,
                 uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens
          FROM usage_facts
-         WHERE host = ?1 AND observation_kind != 'legacy_aggregate'
+         WHERE harness = ?1 AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?2 AND event_ts_ms < ?3
            AND (event_ts_ms, fact_id) > (?4, ?5)
@@ -440,10 +440,10 @@ impl Bucket4 {
     }
 }
 
-/// `usage_facts` 里一个宿主在 `[start_ms, end_ms)` 窗口内的日桶 map——与旧
+/// `usage_facts` 里一个执行环境在 `[start_ms, end_ms)` 窗口内的日桶 map——与旧
 /// `store::dsh_days_map`/`month.json` 的 `days` 同形（顶层 4 基础 + 4 `peak_`
 /// 前缀桶 + `by_model`：每个模型同样 8 键）。目前只有 DSH 走这条形状（唯一
-/// 按时段峰谷计价的宿主）；`model_id` 为 `NULL`（未归属）的事实只计入顶层
+/// 按时段峰谷计价的执行环境）；`model_id` 为 `NULL`（未归属）的事实只计入顶层
 /// 总量、不进 `by_model`——`domain::cost::priced_day` 靠这个缺口识别"这天
 /// 有一部分 token 没有模型归属"，回落 `fallback_price` 补齐，不是本函数的
 /// 职责。**实时行级事实专用**：显式排除 `observation_kind='legacy_aggregate'`
@@ -451,13 +451,13 @@ impl Bucket4 {
 /// 与 claude 那条路径写法一致，防止未来给 DSH 补历史聚合时悄悄踩坑）。
 pub fn peaked_days_map(
     conn: &Connection,
-    host: &str,
+    harness: &str,
     start_ms: i64,
     end_ms: i64,
 ) -> Result<Value, AuthorityError> {
     let mut stmt = conn.prepare(SQL_PEAKED_DAYS_MAP)?;
     let rows = stmt.query_map(
-        rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, host, start_ms, end_ms],
+        rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, harness, start_ms, end_ms],
         |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -535,10 +535,10 @@ pub fn claude_days(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<BTreeMap<String, Value>, AuthorityError> {
-    // 通用计费窗口（host=claude-code × Day × Realtime）——SQL 不再各宿主
+    // 通用计费窗口（harness=claude-code × Day × Realtime）——SQL 不再各执行环境
     // 手抄；输出折叠形状与历史逐字节一致（parity 测试钉住）。
     let rows = billing_window_tokens(conn, &BillingWindowQuery {
-        host: "claude-code",
+        harness: "claude-code",
         grain: BillingGrain::Day,
         source: BillingSource::Realtime,
         start_ms,
@@ -630,9 +630,9 @@ pub fn claude_legacy_days(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<BTreeMap<String, Value>, AuthorityError> {
-    // 通用计费窗口（host=claude-code × Day × LegacyAggregate）。
+    // 通用计费窗口（harness=claude-code × Day × LegacyAggregate）。
     let rows = billing_window_tokens(conn, &BillingWindowQuery {
-        host: "claude-code",
+        harness: "claude-code",
         grain: BillingGrain::Day,
         source: BillingSource::LegacyAggregate,
         start_ms,
@@ -642,10 +642,10 @@ pub fn claude_legacy_days(
 }
 
 /// codex 的实时行级事实 → `by_hour_model` 形状（`{"YYYY-MM-DDTHH":
-/// {model: {"standard": {5 桶}}}}`）——`hosts::codex_usage::{codex_by_model_
+/// {model: {"standard": {5 桶}}}}`）——`harnesses::codex_usage::{codex_by_model_
 /// from_hours, codex_aggregate_hours}` 与 `sessions::codex_cost::
 /// codex_cost_report` 的输入形状。**speed 恒 "standard"**：codex 的
-/// UsageFact emitter 从不记录 `service_tier`/speed（`hosts/codex/sources/
+/// UsageFact emitter 从不记录 `service_tier`/speed（`harnesses/codex/sources/
 /// usage_fact.rs` 只填 `model_raw`），但 `assets/codex_pricing.json` 的
 /// `_note` 明写"真实数据 service_tier 恒为 null → standard"——真机从未观测
 /// 到非 standard 速度，这不是精度损失，是如实反映数据。`reasoning_output_
@@ -659,10 +659,10 @@ pub fn codex_by_hour_model(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<Value, AuthorityError> {
-    // 通用计费窗口（host=codex × Hour × Realtime）——SQL 收敛；speeds 折叠
-    // 形状（codex 折叠器的 wire 形状）留在本函数，属合法宿主差异。
+    // 通用计费窗口（harness=codex × Hour × Realtime）——SQL 收敛；speeds 折叠
+    // 形状（codex 折叠器的 wire 形状）留在本函数，属合法执行环境差异。
     let rows = billing_window_tokens(conn, &BillingWindowQuery {
-        host: "codex",
+        harness: "codex",
         grain: BillingGrain::Hour,
         source: BillingSource::Realtime,
         start_ms,
@@ -716,7 +716,7 @@ pub fn codex_by_hour_provider_model(
                 SUM(cache_write_tokens), SUM(output_tokens)
          FROM usage_facts
          ", user_declared_join!(), "
-         WHERE host = 'codex' AND observation_kind != 'legacy_aggregate'
+         WHERE harness = 'codex' AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
            ", not_subscription_covered!(), "
@@ -743,9 +743,9 @@ pub fn codex_by_hour_provider_model(
     Ok(out.into_iter().map(|(p, h)| (p, Value::Object(h.into_iter().map(|(k,v)| (k, Value::Object(v))).collect()))).collect())
 }
 
-/// 一个宿主在窗口内的**全量** 4 桶 token（不排除订阅覆盖的事实）。`tokens_by_host`
+/// 一个执行环境在窗口内的**全量** 4 桶 token（不排除订阅覆盖的事实）。`tokens_by_harness`
 /// 是 L0 感知层分母——「处理了多少 token」与「这些 token 归谁付钱」是两个问题：
-/// 订阅覆盖只把事实移出**金额**面，token 本身照样发生过。此前 tokens_by_host 是从
+/// 订阅覆盖只把事实移出**金额**面，token 本身照样发生过。此前 tokens_by_harness 是从
 /// 金额面同一份聚合（`claude_days` / `codex_by_hour_model` / `peaked_days_map`，
 /// 全部带 `not_subscription_covered!`）顺手取的，codex 订阅声明一生效，本月用量
 /// 就从 2.8B 缩成 569M（2026-09-16 真机）。
@@ -754,13 +754,13 @@ pub fn codex_by_hour_provider_model(
 /// 选源**：同键实时优先、异键互补（legacy 只取 `event_peak = 0` 的 base 行），
 /// 与账单轴同一条分离纪律（`q_acceptance::separation_discipline_*`）。零事实 →
 /// None（不冒充 0）。
-pub fn host_tokens_all(
+pub fn harness_tokens_all(
     conn: &Connection,
-    host: &str,
+    harness: &str,
     start_ms: i64,
     end_ms: i64,
 ) -> Result<Option<(i64, i64, i64, i64)>, AuthorityError> {
-    let by_day = host_tokens_by_day_all(conn, host, start_ms, end_ms)?;
+    let by_day = harness_tokens_by_day_all(conn, harness, start_ms, end_ms)?;
     if by_day.is_empty() {
         return Ok(None);
     }
@@ -771,13 +771,13 @@ pub fn host_tokens_all(
     Ok(Some((t[0], t[1], t[2], t[3])))
 }
 
-/// [`host_tokens_all`] 的逐日版：`{YYYY-MM-DD: [u, cr, cw, o]}`，同一条「实时覆盖
+/// [`harness_tokens_all`] 的逐日版：`{YYYY-MM-DD: [u, cr, cw, o]}`，同一条「实时覆盖
 /// legacy、不排除订阅覆盖」的纪律——日历格子的 token 数读它（此前日历读金额面的
 /// `claude_days` / `codex_by_hour_model`，订阅声明一生效格子里的 token 跟着缩水，
 /// 与月总量、小时图对不上）。
-pub fn host_tokens_by_day_all(
+pub fn harness_tokens_by_day_all(
     conn: &Connection,
-    host: &str,
+    harness: &str,
     start_ms: i64,
     end_ms: i64,
 ) -> Result<BTreeMap<String, [i64; 4]>, AuthorityError> {
@@ -787,12 +787,12 @@ pub fn host_tokens_by_day_all(
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens)
          FROM usage_facts
-         WHERE host = ?3 AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
+         WHERE harness = ?3 AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?4 AND event_ts_ms < ?5
            AND (observation_kind != 'legacy_aggregate' OR event_peak = 0)
          GROUP BY day_idx, model_id, observation_kind = 'legacy_aggregate'"
     ))?;
-    let rows = stmt.query_map(rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, host, start_ms, end_ms], |r| {
+    let rows = stmt.query_map(rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, harness, start_ms, end_ms], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?,
             r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?))
     })?;
@@ -818,7 +818,7 @@ pub fn host_tokens_by_day_all(
 /// （data_contract::CoverageStatus 的同一条纪律）。
 pub const COVERAGE_DENOMINATOR_VERSION: u32 = 1;
 
-/// 一个宿主在 `[start_ms, end_ms)` 窗口内的三维 coverage（measured, total）。
+/// 一个执行环境在 `[start_ms, end_ms)` 窗口内的三维 coverage（measured, total）。
 /// `total` 恒 3，`measured` ∈ 0..=3；窗口零事实 → (0, 0, 0)——「从没观测到」
 /// 是三维全空，不是三维全满。分母定义见 [`COVERAGE_DENOMINATOR_VERSION`]：
 ///
@@ -828,7 +828,7 @@ pub const COVERAGE_DENOMINATOR_VERSION: u32 = 1;
 ///   `billing_route_of` 归属到已知 provider。认不出的模型（glm-* 无价卡、
 ///   moonshot 无声明）让本维不算 measured——与 `has_unresolved` 同源，
 ///   「看见了 token、钱不可归」就是覆盖缺口。
-/// - **sync 维**（refinement，2026-09-07）：`source_files` 该宿主的
+/// - **sync 维**（refinement，2026-09-07）：`source_files` 该执行环境的
 ///   `MAX(last_seen_at_ms) >= MAX(窗口内 event_ts_ms)`——窗口内最后一次
 ///   事件已被某次同步观测到。历史月份自然成立；托盘停摆时当前窗口归 0。
 ///   不读时钟（data crate 纪律），比较双方都来自库内。
@@ -837,7 +837,7 @@ pub const COVERAGE_DENOMINATOR_VERSION: u32 = 1;
 /// [`COVERAGE_DENOMINATOR_VERSION`]。
 pub fn coverage_status(
     conn: &Connection,
-    host: &str,
+    harness: &str,
     start_ms: i64,
     end_ms: i64,
 ) -> Result<(u64, u64), AuthorityError> {
@@ -845,9 +845,9 @@ pub fn coverage_status(
     // usage 维 + price 维的模型清单一次查询拿齐。
     let usage_measured: i64 = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM usage_facts
-             WHERE host = ?1 AND deleted_at_ms IS NULL
+             WHERE harness = ?1 AND deleted_at_ms IS NULL
                AND event_ts_ms IS NOT NULL AND event_ts_ms >= ?2 AND event_ts_ms < ?3)",
-        rusqlite::params![host, start_ms, end_ms],
+        rusqlite::params![harness, start_ms, end_ms],
         |r| r.get(0),
     )?;
     if usage_measured == 0 {
@@ -858,13 +858,13 @@ pub fn coverage_status(
     // 缺口同语义；当前 emitter 恒填 model_raw 所以库内为空）。
     let mut stmt = conn.prepare(
         "SELECT DISTINCT model_id FROM usage_facts
-         WHERE host = ?1 AND deleted_at_ms IS NULL AND model_id IS NOT NULL
+         WHERE harness = ?1 AND deleted_at_ms IS NULL AND model_id IS NOT NULL
            AND event_ts_ms >= ?2 AND event_ts_ms < ?3
            AND (uncached_input_tokens + cache_read_tokens
                 + cache_write_tokens + output_tokens) > 0",
     )?;
     let models: Vec<String> = stmt
-        .query_map(rusqlite::params![host, start_ms, end_ms], |r| r.get(0))?
+        .query_map(rusqlite::params![harness, start_ms, end_ms], |r| r.get(0))?
         .collect::<Result<_, _>>()?;
     let mut measured: u64 = 1; // usage 维已确认
     if !models.is_empty() {
@@ -876,20 +876,20 @@ pub fn coverage_status(
             measured += 1;
         }
     }
-    // sync 维：该宿主最近一次同步观测 ≥ 窗口内最后一次事件。
+    // sync 维：该执行环境最近一次同步观测 ≥ 窗口内最后一次事件。
     let max_event: Option<i64> = conn
         .query_row(
             "SELECT MAX(event_ts_ms) FROM usage_facts
-             WHERE host = ?1 AND deleted_at_ms IS NULL
+             WHERE harness = ?1 AND deleted_at_ms IS NULL
                AND event_ts_ms IS NOT NULL AND event_ts_ms >= ?2 AND event_ts_ms < ?3",
-            rusqlite::params![host, start_ms, end_ms],
+            rusqlite::params![harness, start_ms, end_ms],
             |r| r.get(0),
         )
         .unwrap_or(None);
     let max_seen: Option<i64> = conn
         .query_row(
-            "SELECT MAX(last_seen_at_ms) FROM source_files WHERE host = ?1",
-            rusqlite::params![host],
+            "SELECT MAX(last_seen_at_ms) FROM source_files WHERE harness = ?1",
+            rusqlite::params![harness],
             |r| r.get(0),
         )
         .unwrap_or(None);
@@ -902,7 +902,7 @@ pub fn coverage_status(
 }
 
 /// Q04 下钻的最小事实分页（3.7a，spec §4 `facts_page(filters, cursor)` 的
-/// 窗口切片版）：`[start_ms, end_ms)` × host × 可选小时过滤，按
+/// 窗口切片版）：`[start_ms, end_ms)` × harness × 可选小时过滤，按
 /// `(event_ts_ms, fact_id)` 稳定排序，cursor 分页（`limit` 行 + 下一页
 /// 起点键）。**排除 legacy_aggregate**——下钻消费的是行级事实，聚合行是
 /// 日轴账单不是会话证据（§4 分离纪律）。行形状 = Q04 需要的最小集：
@@ -924,7 +924,7 @@ pub struct FactPageRow {
 /// 漂移）；`None` = 首页。返回 (rows, has_more)。
 pub fn facts_page_window(
     conn: &Connection,
-    host: &str,
+    harness: &str,
     start_ms: i64,
     end_ms: i64,
     after_ts: Option<i64>,
@@ -934,7 +934,7 @@ pub fn facts_page_window(
     let mut stmt = conn.prepare(SQL_FACTS_PAGE_WINDOW)?;
     let rows = stmt.query_map(
         rusqlite::params![
-            host,
+            harness,
             start_ms,
             end_ms,
             after_ts.unwrap_or(i64::MIN),
@@ -960,19 +960,19 @@ pub fn facts_page_window(
     Ok((rows, has_more))
 }
 
-/// 三宿主统一的北京小时轴（3.5 Tier B：`hourly_distribution` 的 SQL 数据源
+/// 三执行环境统一的北京小时轴（3.5 Tier B：`hourly_distribution` 的 SQL 数据源
 /// ——取代旧 facts-index 投影，行级事实本就都在 `usage_facts`，旧索引是
-/// 可丢弃投影、权威读面没有理由绕它）。返回 `{host: {"HH": tokens}}`，
-/// tokens = 四桶之和，只装非零小时（与旧 `hours_by_host` 同形）。DSH 的
+/// 可丢弃投影、权威读面没有理由绕它）。返回 `{harness: {"HH": tokens}}`，
+/// tokens = 四桶之和，只装非零小时（与旧 `hours_by_harness` 同形）。DSH 的
 /// 峰谷维度在小时轴上不保留（小时分布是「活跃度」视图；峰谷计价走
 /// [`peaked_days_map`]）。
-pub fn hourly_by_host(
+pub fn hourly_by_harness(
     conn: &Connection,
     start_ms: i64,
     end_ms: i64,
 ) -> Result<BTreeMap<String, BTreeMap<String, i64>>, AuthorityError> {
     let mut stmt = conn.prepare(
-        concat!("SELECT host,
+        concat!("SELECT harness,
                 CAST((", local_hour_idx!(), " + (?1 - ?1) + (?2 - ?2)) % 24 AS TEXT) AS local_hour,
                 SUM(uncached_input_tokens + cache_read_tokens
                     + cache_write_tokens + output_tokens)
@@ -980,7 +980,7 @@ pub fn hourly_by_host(
          WHERE observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
-         GROUP BY host, local_hour"),
+         GROUP BY harness, local_hour"),
     )?;
     let rows = stmt.query_map(
         rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms],
@@ -994,9 +994,9 @@ pub fn hourly_by_host(
     )?;
     let mut out: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
     for row in rows {
-        let (host, hour, total) = row?;
+        let (harness, hour, total) = row?;
         if total > 0 {
-            out.entry(host)
+            out.entry(harness)
                 .or_default()
                 .insert(format!("{:0>2}", hour), total);
         }
@@ -1004,24 +1004,24 @@ pub fn hourly_by_host(
     Ok(out)
 }
 
-/// [`host_window_tokens`]：单宿主窗口四桶之和 + 最新北京日索引。
-pub(crate) const SQL_HOST_WINDOW_TOKENS: &str = concat!("SELECT COUNT(*),
+/// [`harness_window_tokens`]：单执行环境窗口四桶之和 + 最新北京日索引。
+pub(crate) const SQL_HARNESS_WINDOW_TOKENS: &str = concat!("SELECT COUNT(*),
                 COALESCE(SUM(uncached_input_tokens), 0),
                 COALESCE(SUM(cache_read_tokens), 0),
                 COALESCE(SUM(cache_write_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
                 MAX(", local_day_idx!(), " + (?1 - ?1) + (?2 - ?2))
          FROM usage_facts
-         WHERE host = ?3
+         WHERE harness = ?3
            AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?4 AND event_ts_ms < ?5");
 
-/// 一个宿主在窗口内的四桶之和（宿主无关的 L0 计量——`tokens_by_host` 的通用
-/// 数据源；有自己价卡管线的宿主仍走各自的 days/hours 查询，这个给**只有 token、
-/// 没有金额**的宿主用，E4b 的 workbuddy 是首个消费方）。
+/// 一个执行环境在窗口内的四桶之和（执行环境无关的 L0 计量——`tokens_by_harness` 的通用
+/// 数据源；有自己价卡管线的执行环境仍走各自的 days/hours 查询，这个给**只有 token、
+/// 没有金额**的执行环境用，E4b 的 workbuddy 是首个消费方）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostWindowTokens {
+pub struct HarnessWindowTokens {
     pub facts: i64,
     pub uncached_input: i64,
     pub cache_read: i64,
@@ -1031,17 +1031,17 @@ pub struct HostWindowTokens {
     pub latest_day: String,
 }
 
-/// `None` = 该宿主窗口内没有任何事实行（消费方必须渲染 unavailable，不能编 0）；
+/// `None` = 该执行环境窗口内没有任何事实行（消费方必须渲染 unavailable，不能编 0）；
 /// `Some` 且四桶全 0 = 同步过、真零。
-pub fn host_window_tokens(
+pub fn harness_window_tokens(
     conn: &Connection,
-    host: &str,
+    harness: &str,
     start_ms: i64,
     end_ms: i64,
-) -> Result<Option<HostWindowTokens>, AuthorityError> {
+) -> Result<Option<HarnessWindowTokens>, AuthorityError> {
     let row = conn.query_row(
-        SQL_HOST_WINDOW_TOKENS,
-        rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, host, start_ms, end_ms],
+        SQL_HARNESS_WINDOW_TOKENS,
+        rusqlite::params![BEIJING_OFFSET_MS, DAY_MS, harness, start_ms, end_ms],
         |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -1060,7 +1060,7 @@ pub fn host_window_tokens(
     if facts == 0 {
         return Ok(None);
     }
-    Ok(Some(HostWindowTokens {
+    Ok(Some(HarnessWindowTokens {
         facts,
         uncached_input: u,
         cache_read: cr,
@@ -1070,24 +1070,24 @@ pub fn host_window_tokens(
     }))
 }
 
-/// 一个北京日窗口内各宿主的 token 总量。与 [`hourly_by_host`] 不同，这里保留
+/// 一个北京日窗口内各执行环境的 token 总量。与 [`hourly_by_harness`] 不同，这里保留
 /// token 恰为零的事实行：调用方因此可以区分“已同步且真零”（map 中为 0）和
-/// “该宿主在窗口内没有任何 SQL 事实”（缺键，必须渲染为 unavailable/unknown，
+/// “该执行环境在窗口内没有任何 SQL 事实”（缺键，必须渲染为 unavailable/unknown，
 /// 不能编成 0）。
-pub fn token_totals_by_host(
+pub fn token_totals_by_harness(
     conn: &Connection,
     start_ms: i64,
     end_ms: i64,
 ) -> Result<BTreeMap<String, i64>, AuthorityError> {
     let mut stmt = conn.prepare(
-        "SELECT host,
+        "SELECT harness,
                 SUM(uncached_input_tokens + cache_read_tokens
                     + cache_write_tokens + output_tokens)
          FROM usage_facts
          WHERE observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?1 AND event_ts_ms < ?2
-         GROUP BY host",
+         GROUP BY harness",
     )?;
     let rows = stmt.query_map(rusqlite::params![start_ms, end_ms], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
@@ -1095,25 +1095,25 @@ pub fn token_totals_by_host(
     rows.collect::<Result<_, _>>().map_err(AuthorityError::from)
 }
 
-/// PR #2.3：`sessions navigation` 今日 token 的只读快照——按 host 聚合
+/// PR #2.3：`sessions navigation` 今日 token 的只读快照——按 harness 聚合
 /// `usage_facts` 在指定北京日内的 4 桶之和。返回 `None` = 库不可读（与
 /// r2a_store `authority_day_token_totals` 同语义）。
 ///
-/// 与 `token_totals_by_host` 同款 SQL，只是把 [start,end) ms 解析收敛到
+/// 与 `token_totals_by_harness` 同款 SQL，只是把 [start,end) ms 解析收敛到
 /// 这里，避免每个调用方各自做 `beijing_day_bounds_ms` 的 null 检查再 +1 行。
-pub fn day_token_totals_by_host(
+pub fn day_token_totals_by_harness(
     data_home: &std::path::Path,
     date: &str,
 ) -> Option<BTreeMap<String, i64>> {
     let (start_ms, end_ms) = beijing_day_bounds_ms(date)?;
     let path = crate::authority::default_authority_path(data_home);
     let db = crate::authority::AuthorityDb::open_readonly(&path).ok()?;
-    token_totals_by_host(db.conn(), start_ms, end_ms).ok()
+    token_totals_by_harness(db.conn(), start_ms, end_ms).ok()
 }
 
 /// PR #2.3：`sessions navigation` 今日 session 数（distinct `session_key`），
-/// 按 host 分组。SQL 权威库不可读 → 返回 `None`（CLI 降级到 0 而不是冒充）。
-pub fn day_session_count(data_home: &std::path::Path, date: &str, host: &str) -> Option<i64> {
+/// 按 harness 分组。SQL 权威库不可读 → 返回 `None`（CLI 降级到 0 而不是冒充）。
+pub fn day_session_count(data_home: &std::path::Path, date: &str, harness: &str) -> Option<i64> {
     let (start_ms, end_ms) = beijing_day_bounds_ms(date)?;
     let path = crate::authority::default_authority_path(data_home);
     let db = crate::authority::AuthorityDb::open_readonly(&path).ok()?;
@@ -1123,50 +1123,50 @@ pub fn day_session_count(data_home: &std::path::Path, date: &str, host: &str) ->
             "SELECT COUNT(DISTINCT session_key) FROM usage_facts
              WHERE observation_kind != 'legacy_aggregate'
                AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
-               AND host = ?1 AND event_ts_ms >= ?2 AND event_ts_ms < ?3",
-            rusqlite::params![host, start_ms, end_ms],
+               AND harness = ?1 AND event_ts_ms >= ?2 AND event_ts_ms < ?3",
+            rusqlite::params![harness, start_ms, end_ms],
             |r| r.get(0),
         )
         .ok()?;
     Some(n)
 }
 
-/// `(host, model)` 序列在 24 个北京小时桶上的 token 分计。
-pub type HostModelHourBuckets = BTreeMap<String, HourlyCell>;
+/// `(harness, model)` 序列在 24 个北京小时桶上的 token 分计。
+pub type HarnessModelHourBuckets = BTreeMap<String, HourlyCell>;
 
-/// `hourly_by_host_model` 返回值类型——`(host, model)` → 24 桶 map。
-pub type HostModelHourly = BTreeMap<(String, String), HostModelHourBuckets>;
+/// `hourly_by_harness_model` 返回值类型——`(harness, model)` → 24 桶 map。
+pub type HarnessModelHourly = BTreeMap<(String, String), HarnessModelHourBuckets>;
 
-/// `usage_hourly` 工具（spec §7.2）的 SQL 数据源：`(host, model, hour)` 三维
+/// `usage_hourly` 工具（spec §7.2）的 SQL 数据源：`(harness, model, hour)` 三维
 /// 聚合 + 四桶分计。`legacy_aggregate` 始终排除（聚合兜底行不可作小时轴可信值，
-/// 与 `hourly_by_host` 同一条窗口过滤纪律）。
+/// 与 `hourly_by_harness` 同一条窗口过滤纪律）。
 ///
-/// 返回 `HostModelHourly`——`hourly_by_host` 同款 (key, value) 形状 + `model`
-/// 第二维。`model_id` 是宿主 raw 值（spec §5.1 规则 4 + D3，`usage_facts.model_id`
+/// 返回 `HarnessModelHourly`——`hourly_by_harness` 同款 (key, value) 形状 + `model`
+/// 第二维。`model_id` 是执行环境 raw 值（spec §5.1 规则 4 + D3，`usage_facts.model_id`
 /// 暂未归一为 canonical）。
-pub fn hourly_by_host_model(
+pub fn hourly_by_harness_model(
     conn: &Connection,
     start_ms: i64,
     end_ms: i64,
-    hosts: &[String],
-) -> Result<HostModelHourly, AuthorityError> {
-    // 单宿主查询（`host = ?` 命中 `usage_facts_host_time` 索引）——三宿主
-    // 聚合用 in-memory 合并。详见 `SQL_HOURLY_BY_HOST_MODEL` 的注释。
-    let selected: Vec<String> = if hosts.is_empty() {
-        conn.prepare("SELECT DISTINCT host FROM usage_facts WHERE deleted_at_ms IS NULL ORDER BY host")?
+    harnesses: &[String],
+) -> Result<HarnessModelHourly, AuthorityError> {
+    // 单执行环境查询（`harness = ?` 命中 `usage_facts_harness_time` 索引）——三执行环境
+    // 聚合用 in-memory 合并。详见 `SQL_HOURLY_BY_HARNESS_MODEL` 的注释。
+    let selected: Vec<String> = if harnesses.is_empty() {
+        conn.prepare("SELECT DISTINCT harness FROM usage_facts WHERE deleted_at_ms IS NULL ORDER BY harness")?
             .query_map([], |r| r.get(0))?
             .collect::<Result<Vec<String>, _>>()?
     } else {
-        hosts.to_vec()
+        harnesses.to_vec()
     };
     if selected.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let mut out: HostModelHourly = BTreeMap::new();
-    for host in selected {
-        let mut stmt = conn.prepare(SQL_HOURLY_BY_HOST_MODEL)?;
+    let mut out: HarnessModelHourly = BTreeMap::new();
+    for harness in selected {
+        let mut stmt = conn.prepare(SQL_HOURLY_BY_HARNESS_MODEL)?;
         let rows = stmt.query_map(
-            rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms, host],
+            rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms, harness],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -1180,36 +1180,36 @@ pub fn hourly_by_host_model(
             },
         )?;
         for row in rows {
-            let (host, model, hour, uncached, cache_read, cache_write, output) = row?;
+            let (harness, model, hour, uncached, cache_read, cache_write, output) = row?;
             let cell = HourlyCell { uncached_input_tokens: uncached, cache_read_tokens: cache_read, cache_write_tokens: cache_write, output_tokens: output };
-            out.entry((host, model)).or_default().insert(format!("{:0>2}", hour), cell);
+            out.entry((harness, model)).or_default().insert(format!("{:0>2}", hour), cell);
         }
     }
     Ok(out)
 }
 
-pub fn hourly_by_host_provider(
+pub fn hourly_by_harness_provider(
     conn: &Connection,
     start_ms: i64,
     end_ms: i64,
-    hosts: &[String],
-) -> Result<HostModelHourly, AuthorityError> {
-    let selected: Vec<String> = if hosts.is_empty() {
-        conn.prepare("SELECT DISTINCT host FROM usage_facts WHERE deleted_at_ms IS NULL ORDER BY host")?
+    harnesses: &[String],
+) -> Result<HarnessModelHourly, AuthorityError> {
+    let selected: Vec<String> = if harnesses.is_empty() {
+        conn.prepare("SELECT DISTINCT harness FROM usage_facts WHERE deleted_at_ms IS NULL ORDER BY harness")?
             .query_map([], |r| r.get(0))?
             .collect::<Result<Vec<String>, _>>()?
-    } else { hosts.to_vec() };
-    let mut out: HostModelHourly = BTreeMap::new();
-    for host in selected {
-        let mut stmt = conn.prepare(SQL_HOURLY_BY_HOST_PROVIDER)?;
+    } else { harnesses.to_vec() };
+    let mut out: HarnessModelHourly = BTreeMap::new();
+    for harness in selected {
+        let mut stmt = conn.prepare(SQL_HOURLY_BY_HARNESS_PROVIDER)?;
         let rows = stmt.query_map(
-            rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms, host],
+            rusqlite::params![BEIJING_OFFSET_MS, HOUR_MS, start_ms, end_ms, harness],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
                 r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?)),
         )?;
         for row in rows {
-            let (host, provider, hour, uncached, cache_read, cache_write, output) = row?;
-            out.entry((host, provider)).or_default().insert(format!("{:0>2}", hour), HourlyCell {
+            let (harness, provider, hour, uncached, cache_read, cache_write, output) = row?;
+            out.entry((harness, provider)).or_default().insert(format!("{:0>2}", hour), HourlyCell {
                 uncached_input_tokens: uncached, cache_read_tokens: cache_read,
                 cache_write_tokens: cache_write, output_tokens: output,
             });
@@ -1218,7 +1218,7 @@ pub fn hourly_by_host_provider(
     Ok(out)
 }
 
-/// `(host, hour)` 单元——四桶原始计数 + 派生 `total`。`cache_hit_ratio` 与
+/// `(harness, hour)` 单元——四桶原始计数 + 派生 `total`。`cache_hit_ratio` 与
 /// `HourlyCell` 的 `HourlyCell::to_json()` 在响应层算（spec §6.2 诚实
 /// 返回原则：输入侧全零 → `null`，不外推 0）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1260,12 +1260,12 @@ impl HourlyCell {
 
 // ─────────────────────── Q04 会话下钻 ───────────────────────
 
-/// 一个会话在查询窗口（可再按北京小时过滤）内的聚合。`session_key` 内嵌宿主
+/// 一个会话在查询窗口（可再按北京小时过滤）内的聚合。`session_key` 内嵌执行环境
 /// 原生 id——**调用方（MCP 工具）必须 HMAC 成 `session_ref`，绝不原样返回**。
 #[derive(Debug, Clone)]
 pub struct SessionAgg {
     pub session_key: String,
-    pub host: String,
+    pub harness: String,
     pub first_event_ms: i64,
     pub last_event_ms: i64,
     pub event_count: i64,
@@ -1287,14 +1287,14 @@ impl SessionAgg {
     }
 }
 
-/// 单宿主 SQL（`host = ?1` 命中 `usage_facts_host_time`）。`?4 < 0` = 不按小时
+/// 单执行环境 SQL（`harness = ?1` 命中 `usage_facts_harness_time`）。`?4 < 0` = 不按小时
 /// 过滤；否则只算 `bj_hour == ?4` 的事实——**Q04 峰值下钻**要的正是「该小时
 /// 的会话构成」，SUM 因此自动被 WHERE 收窄到那一小时。
 /// 会话是 token/时间视图，**不排除订阅覆盖的事实**——订阅内的会话也发生过；曾排除
 /// 导致订阅声明一生效，会话列表与峰值小时下钻整段空掉（mcp_smoke Q04：峰值小时
 /// 13.8M tokens、构成会话 0 个，2026-09-17）。钱归谁由 `session_billing_buckets`
 /// 的 billing_mode 表达，不靠隐藏会话。
-const SQL_SESSIONS_IN_WINDOW: &str = concat!("SELECT session_key, host,
+const SQL_SESSIONS_IN_WINDOW: &str = concat!("SELECT session_key, harness,
             MIN(event_ts_ms), MAX(event_ts_ms), COUNT(*),
             SUM(uncached_input_tokens), SUM(cache_read_tokens),
             SUM(cache_write_tokens), SUM(output_tokens),
@@ -1303,7 +1303,7 @@ const SQL_SESSIONS_IN_WINDOW: &str = concat!("SELECT session_key, host,
                  + cache_write_tokens + output_tokens) ELSE 0 END),
             GROUP_CONCAT(DISTINCT COALESCE(model_id, '<unknown>'))
      FROM usage_facts
-     WHERE host = ?1
+     WHERE harness = ?1
        AND observation_kind != 'legacy_aggregate'
        AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
        AND session_key IS NOT NULL
@@ -1313,7 +1313,7 @@ const SQL_SESSIONS_IN_WINDOW: &str = concat!("SELECT session_key, host,
        AND (?8 IS NULL OR COALESCE(provider_id, '<unknown>') = ?8)
        GROUP BY session_key");
 
-/// 窗口内的会话聚合，跨 wired 宿主合并。`hour` = 北京小时过滤（`None` = 不过滤）；
+/// 窗口内的会话聚合，跨 wired 执行环境合并。`hour` = 北京小时过滤（`None` = 不过滤）；
 /// `min_tokens` = HAVING 门槛；按 `total` 降序 + `session_key` 升序稳定排序，
 /// keyset 分页（cursor = 上一页尾行的 `(total, session_key)`）。返回 (rows,
 /// has_more, window_total_tokens, window_session_count)——`window_total_tokens` 让调用方核对
@@ -1323,7 +1323,7 @@ pub fn sessions_in_window(
     conn: &Connection,
     start_ms: i64,
     end_ms: i64,
-    hosts: &[String],
+    harnesses: &[String],
     model: Option<&str>,
     provider: Option<&str>,
     hour: Option<u32>,
@@ -1333,7 +1333,7 @@ pub fn sessions_in_window(
     limit: usize,
 ) -> Result<(Vec<SessionAgg>, bool, i64, usize), AuthorityError> {
     sessions_in_window_ordered(
-        conn, start_ms, end_ms, hosts, model, provider, hour, min_tokens,
+        conn, start_ms, end_ms, harnesses, model, provider, hour, min_tokens,
         after_total, after_key, limit, false,
     )
 }
@@ -1347,7 +1347,7 @@ pub fn sessions_in_window_ordered(
     conn: &Connection,
     start_ms: i64,
     end_ms: i64,
-    hosts: &[String],
+    harnesses: &[String],
     model: Option<&str>,
     provider: Option<&str>,
     hour: Option<u32>,
@@ -1357,25 +1357,25 @@ pub fn sessions_in_window_ordered(
     limit: usize,
     oldest_first: bool,
 ) -> Result<(Vec<SessionAgg>, bool, i64, usize), AuthorityError> {
-    let selected: Vec<String> = if hosts.is_empty() {
-        conn.prepare("SELECT DISTINCT host FROM usage_facts WHERE deleted_at_ms IS NULL ORDER BY host")?
+    let selected: Vec<String> = if harnesses.is_empty() {
+        conn.prepare("SELECT DISTINCT harness FROM usage_facts WHERE deleted_at_ms IS NULL ORDER BY harness")?
             .query_map([], |r| r.get(0))?
             .collect::<Result<Vec<String>, _>>()?
     } else {
-        hosts.to_vec()
+        harnesses.to_vec()
     };
     let hour_param: i64 = hour.map(|h| h as i64).unwrap_or(-1);
 
     let mut all: Vec<SessionAgg> = Vec::new();
-    for host in selected {
+    for harness in selected {
         let mut stmt = conn.prepare(SQL_SESSIONS_IN_WINDOW)?;
         let rows = stmt.query_map(
-            rusqlite::params![host, start_ms, end_ms, hour_param, BEIJING_OFFSET_MS, HOUR_MS, model, provider],
+            rusqlite::params![harness, start_ms, end_ms, hour_param, BEIJING_OFFSET_MS, HOUR_MS, model, provider],
             |r| {
                 let models: Option<String> = r.get(10)?;
                 Ok(SessionAgg {
                     session_key: r.get(0)?,
-                    host: r.get(1)?,
+                    harness: r.get(1)?,
                     first_event_ms: r.get(2)?,
                     last_event_ms: r.get(3)?,
                     event_count: r.get(4)?,
@@ -1479,14 +1479,14 @@ pub fn session_facts_timeline(
     Ok((rows, has_more))
 }
 
-/// 会话行的宿主 + 元数据（`session_detail` 组 envelope 用）。`None` = 会话不存在
+/// 会话行的执行环境 + 元数据（`session_detail` 组 envelope 用）。`None` = 会话不存在
 /// 或已 soft-delete。
 pub fn session_row(
     conn: &Connection,
     session_key: &str,
 ) -> Result<Option<(String, Option<String>)>, AuthorityError> {
     conn.query_row(
-        "SELECT host, source_profile FROM sessions
+        "SELECT harness, source_profile FROM sessions
          WHERE session_key = ?1 AND deleted_at_ms IS NULL",
         rusqlite::params![session_key],
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
@@ -1503,13 +1503,13 @@ pub fn all_session_keys(conn: &Connection) -> Result<Vec<String>, AuthorityError
     rows.collect::<Result<_, _>>().map_err(AuthorityError::from)
 }
 
-/// 一个计费桶（同宿主、模型、provider、峰谷档）喂给
+/// 一个计费桶（同执行环境、模型、provider、峰谷档）喂给
 /// `agent_vitals_domain::cost::metered_estimate_minor` 的用量形状。会话成本分桶
 /// 与会话消耗诊断的回合名义成本（`query::session_insights`）共用这一份——
 /// 两处的桶形状一旦分叉，同一会话的两个金额就会对不上。
 /// `tokens` = `[uncached_input, cache_read, cache_write, output]`。
 pub fn billing_bucket_usage_json(
-    host: &str,
+    harness: &str,
     model_id: &str,
     provider_id: Option<&str>,
     peak: bool,
@@ -1517,7 +1517,7 @@ pub fn billing_bucket_usage_json(
 ) -> Value {
     let [uncached, cache_read, cache_write, output] = tokens;
     let at_peak = |value: i64| if peak { value } else { 0 };
-    if host == "claude-code" {
+    if harness == "claude-code" {
         json!({"by_model": { model_id: {
             "input_tokens": uncached, "cache_read_input_tokens": cache_read,
             "cache_creation_input_tokens": cache_write, "output_tokens": output,
@@ -1526,7 +1526,7 @@ pub fn billing_bucket_usage_json(
             "peak_cache_creation_input_tokens": at_peak(cache_write),
             "peak_output_tokens": at_peak(output),
         }}})
-    } else if host == "codex" {
+    } else if harness == "codex" {
         json!({"by_model": { model_id: {
             "uncached_input_tokens": uncached, "cached_input_tokens": cache_read,
             "cache_write_input_tokens": cache_write, "output_tokens": output,
@@ -1548,7 +1548,7 @@ pub fn billing_bucket_usage_json(
 /// 时，用补过缺卡的快照再算一次（`fill_missing_in_snapshot` 只补缺卡、不改已有
 /// 价，厂商调价不会改写历史）。返回 `(金额, 是否靠回补才算出来)`。
 pub fn price_with_sync_backfill(
-    host: &str,
+    harness: &str,
     usage: &Value,
     snapshot_payload: Option<&str>,
     sync_overlay: Option<&Value>,
@@ -1556,12 +1556,12 @@ pub fn price_with_sync_backfill(
     let Some(mut snapshot) = snapshot_payload.and_then(|p| serde_json::from_str::<Value>(p).ok()) else {
         return (None, false);
     };
-    if let Some(cost) = agent_vitals_domain::cost::metered_estimate_minor(host, usage, &snapshot) {
+    if let Some(cost) = agent_vitals_domain::cost::metered_estimate_minor(harness, usage, &snapshot) {
         return (Some(cost), false);
     }
     let Some(overlay) = sync_overlay else { return (None, false) };
     agent_vitals_domain::cost::sync_overlay::fill_missing_in_snapshot(&mut snapshot, overlay);
-    let cost = agent_vitals_domain::cost::metered_estimate_minor(host, usage, &snapshot);
+    let cost = agent_vitals_domain::cost::metered_estimate_minor(harness, usage, &snapshot);
     let backfilled = cost.is_some();
     (cost, backfilled)
 }
@@ -1599,7 +1599,7 @@ pub fn session_billing_buckets(
         "COALESCE(f.billing_mode, 'unknown')"
     };
     let query = format!(
-        "SELECT f.host, f.provider_id, f.provider_raw, COALESCE(f.model_id, '<unknown>'),
+        "SELECT f.harness, f.provider_id, f.provider_raw, COALESCE(f.model_id, '<unknown>'),
                 f.billing_template_id, {billing_mode_expr},
                 COALESCE(f.pricing_basis, 'unavailable'), COALESCE(f.evidence_basis, 'missing'),
                 f.event_peak, ps.pricing_version, ps.payload_json,
@@ -1613,7 +1613,7 @@ pub fn session_billing_buckets(
          )
          WHERE f.session_key = ?1 AND f.observation_kind != 'legacy_aggregate'
            AND f.deleted_at_ms IS NULL AND f.event_ts_ms IS NOT NULL
-         GROUP BY f.host, f.provider_id, f.provider_raw, f.model_id, f.billing_template_id,
+         GROUP BY f.harness, f.provider_id, f.provider_raw, f.model_id, f.billing_template_id,
                   {billing_mode_expr}, f.pricing_basis, f.evidence_basis, f.event_peak,
                   ps.pricing_version, ps.payload_json
          ORDER BY f.provider_id, f.provider_raw, f.model_id, f.billing_template_id, event_peak, ps.pricing_version",
@@ -1636,17 +1636,17 @@ pub fn session_billing_buckets(
         .and_then(|raw| serde_json::from_str(&raw).ok());
     let mut buckets = Vec::new();
     for row in rows {
-        let (host, provider_id, provider_raw, model_id, template_id, billing_mode, pricing_basis,
+        let (harness, provider_id, provider_raw, model_id, template_id, billing_mode, pricing_basis,
             evidence_basis, peak, pricing_version, pricing_payload, uncached, cache_read,
             cache_write, output, last_event_ms) = row?;
         let usage = billing_bucket_usage_json(
-            &host, &model_id, provider_id.as_deref(), peak != 0,
+            &harness, &model_id, provider_id.as_deref(), peak != 0,
             [uncached, cache_read, cache_write, output],
         );
         let (cost_minor, backfilled) = if billing_mode == "subscription" {
             (None, false)
         } else {
-            price_with_sync_backfill(&host, &usage, pricing_payload.as_deref(), sync_overlay.as_ref())
+            price_with_sync_backfill(&harness, &usage, pricing_payload.as_deref(), sync_overlay.as_ref())
         };
         let cost_minor = cost_minor.map(|cost| cost.to_json());
         // 补录的金额单独标出：它用的是事后才到的价卡，不是事件发生时就有的价格。
@@ -1815,7 +1815,7 @@ pub fn session_cost_view(
 ///
 /// `MAX(event_ts_ms)` 一并带出——用它去 `pricing_snapshot_asof` 选历史价卡
 /// 版本（Q13：调价日前后分别用正确的价表）。
-pub(crate) const SQL_SESSION_COST_BUCKETS: &str = "SELECT host, provider_id, COALESCE(model_id, '<unknown>') AS model,
+pub(crate) const SQL_SESSION_COST_BUCKETS: &str = "SELECT harness, provider_id, COALESCE(model_id, '<unknown>') AS model,
                 event_peak,
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens),
@@ -1840,9 +1840,9 @@ pub(crate) const SQL_SESSION_COST_BUCKETS: &str = "SELECT host, provider_id, COA
 /// - 价格表里没有任何模型可计价（`cost_report` 自身返 None）
 /// - `total` 不是有限非负数（NaN/Inf/负→不冒充）
 ///
-/// `BillingBasis::MeteredEstimate`：与 `host_bills` 的 `MeteredActual` 不同
+/// `BillingBasis::MeteredEstimate`：与 `harness_bills` 的 `MeteredActual` 不同
 /// 档位（spec §4 不冒充）。调用方拿到 basis 必须如实透出到 DTO，
-/// 不与 `host_bills` 加和进 `summable_total`。
+/// 不与 `harness_bills` 加和进 `summable_total`。
 pub fn session_cost_minor(
     conn: &Connection,
     session_key: &str,
@@ -1917,11 +1917,11 @@ fn session_cost_minor_legacy(
     let mut by_model: BTreeMap<String, Split> = BTreeMap::new();
     let mut codex_unknown: BTreeMap<String, Split> = BTreeMap::new();
     let mut providers: BTreeSet<String> = BTreeSet::new();
-    let mut host: Option<String> = None;
+    let mut harness: Option<String> = None;
     let mut max_ts: i64 = 0;
     for row in rows {
-        let (row_host, provider, model, peak, u, cr, cw, o, ts) = row?;
-        host = Some(row_host.clone());
+        let (row_harness, provider, model, peak, u, cr, cw, o, ts) = row?;
+        harness = Some(row_harness.clone());
         providers.insert(provider.as_deref().unwrap_or("<unknown>").to_string());
         let model_key = model.clone();
         let entry = by_model.entry(model).or_default();
@@ -1939,7 +1939,7 @@ fn session_cost_minor_legacy(
         if ts > max_ts {
             max_ts = ts;
         }
-        if row_host == "codex" && provider.as_deref() != Some("openai") {
+        if row_harness == "codex" && provider.as_deref() != Some("openai") {
             let entry = codex_unknown.entry(model_key).or_default();
             if peak != 0 {
                 entry.u_peak += u;
@@ -1984,7 +1984,7 @@ fn session_cost_minor_legacy(
 
     // Codex unknown/custom routes use the official USD card from the same
     // immutable snapshot. Explicit OpenAI subscription facts are excluded.
-    if host.as_deref() == Some("codex") && !codex_unknown.is_empty() {
+    if harness.as_deref() == Some("codex") && !codex_unknown.is_empty() {
         let mut codex_models = serde_json::Map::new();
         for (model, s) in &codex_unknown {
             codex_models.insert(
@@ -2007,12 +2007,12 @@ fn session_cost_minor_legacy(
         }
     }
 
-    // 3. 按宿主折成统一成本引擎需要的 by_model 形状。DSH 使用四个
+    // 3. 按执行环境折成统一成本引擎需要的 by_model 形状。DSH 使用四个
     //    uncached/cache_read/cache_write/output 字段；Claude 使用其原生的
     //    input/cache_read_input/cache_creation_input/output 字段。
     let mut by_model_json = serde_json::Map::new();
     for (model, s) in &by_model {
-        let value = if host.as_deref() == Some("claude-code") {
+        let value = if harness.as_deref() == Some("claude-code") {
             json!({
                 "input_tokens": s.u_off + s.u_peak,
                 "cache_read_input_tokens": s.cr_off + s.cr_peak,
@@ -2041,7 +2041,7 @@ fn session_cost_minor_legacy(
 
     // 4. 统一成本引擎：data 层只负责 SQL 聚合，不重复金额转换规则。
     Ok(agent_vitals_domain::cost::metered_estimate_minor(
-        host.as_deref().unwrap_or("dsh"),
+        harness.as_deref().unwrap_or("dsh"),
         &usage,
         &snap_pricing,
     ))
@@ -2088,7 +2088,7 @@ mod tests {
     fn insert_fact(
         db: &AuthorityDb,
         fact_id: &str,
-        host: &str,
+        harness: &str,
         model_id: Option<&str>,
         observation_kind: &str,
         event_ts_ms: i64,
@@ -2107,13 +2107,13 @@ mod tests {
             .unwrap();
         db.conn()
             .execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                      source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                      event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                      output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1, ?2, 'm', 'sess', ?1, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'run', 1, 1)",
                 rusqlite::params![
-                    fact_id, host, observation_kind, model_id, event_ts_ms, event_peak, u, cr, cw, o
+                    fact_id, harness, observation_kind, model_id, event_ts_ms, event_peak, u, cr, cw, o
                 ],
             )
             .unwrap();
@@ -2445,7 +2445,7 @@ mod tests {
             .unwrap();
         db.conn()
             .execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                      source_event_id, observation_kind, model_id, event_ts_ms, event_peak,
                      uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                      ingested_run_id, created_at_ms, updated_at_ms)
@@ -2461,12 +2461,12 @@ mod tests {
     }
 
     #[test]
-    fn hourly_by_host_buckets_all_hosts_into_beijing_hours() {
+    fn hourly_by_harness_buckets_all_harnesses_into_beijing_hours() {
         let path = tmp_db("hourly");
         let db = AuthorityDb::open(&path, 1).unwrap();
         db.begin_run("run", "cli", 1).unwrap();
         let (start, end) = beijing_day_bounds_ms("2026-09-05").unwrap();
-        // 三宿主各自一条：北京 01:00（UTC 17:00 前一日——用 day_start 直接
+        // 三执行环境各自一条：北京 01:00（UTC 17:00 前一日——用 day_start 直接
         // 加小时即北京语义）、北京 08:00、北京 23:00。legacy 行必须排除。
         insert_fact(
             &db,
@@ -2520,7 +2520,7 @@ mod tests {
             0,
             0,
         );
-        let out = hourly_by_host(db.conn(), start, end).unwrap();
+        let out = hourly_by_harness(db.conn(), start, end).unwrap();
         assert_eq!(out["claude-code"]["01"], 15, "四桶之和");
         assert_eq!(out["codex"]["08"], 22);
         assert_eq!(out["dsh"]["23"], 33);
@@ -2531,7 +2531,7 @@ mod tests {
     }
 
     #[test]
-    fn token_totals_by_host_keeps_zero_rows_and_excludes_legacy_aggregates() {
+    fn token_totals_by_harness_keeps_zero_rows_and_excludes_legacy_aggregates() {
         let path = tmp_db("token-totals");
         let db = AuthorityDb::open(&path, 1).unwrap();
         let (start, end) = beijing_day_bounds_ms("2026-09-05").unwrap();
@@ -2574,7 +2574,7 @@ mod tests {
             0,
             0,
         );
-        let totals = token_totals_by_host(db.conn(), start, end).unwrap();
+        let totals = token_totals_by_harness(db.conn(), start, end).unwrap();
         assert_eq!(totals.get("dsh"), Some(&33));
         assert_eq!(totals.get("codex"), Some(&0), "真零必须保留为一行");
         assert!(
@@ -2720,7 +2720,7 @@ mod tests {
         // sync 维：source_files.last_seen_at_ms ≥ 窗口内最后事件。
         db.conn()
             .execute(
-                "INSERT INTO source_files(source_id, host, path_hash, size_bytes, mtime_ns,
+                "INSERT INTO source_files(source_id, harness, path_hash, size_bytes, mtime_ns,
                      parser_version, first_seen_at_ms, last_seen_at_ms)
                  VALUES ('src1', 'dsh', 'h1', 1, 1, 1, 1, ?1)",
                 rusqlite::params![start + 2_000],
@@ -2820,7 +2820,7 @@ mod tests {
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens)
          FROM usage_facts
-         WHERE host = 'claude-code' AND observation_kind != 'legacy_aggregate'
+         WHERE harness = 'claude-code' AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
            ", not_subscription_covered!(), "
@@ -2830,7 +2830,7 @@ mod tests {
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens)
          FROM usage_facts
-         WHERE host = 'claude-code' AND observation_kind = 'legacy_aggregate'
+         WHERE harness = 'claude-code' AND observation_kind = 'legacy_aggregate'
            AND event_peak = 0 AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
          GROUP BY day_idx, model_id");
@@ -2839,7 +2839,7 @@ mod tests {
                 SUM(uncached_input_tokens), SUM(cache_read_tokens),
                 SUM(cache_write_tokens), SUM(output_tokens)
          FROM usage_facts
-         WHERE host = 'codex' AND observation_kind != 'legacy_aggregate'
+         WHERE harness = 'codex' AND observation_kind != 'legacy_aggregate'
            AND deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND event_ts_ms >= ?3 AND event_ts_ms < ?4
            ", not_subscription_covered!(), "
@@ -2906,9 +2906,9 @@ mod tests {
         );
 
         // codex：新旧各自按 hour_idx 折成 (idx, model, 四桶) 集合对拍（折叠
-        // 形状是宿主 wire 面，聚合语义对拍在行级）。
+        // 形状是执行环境 wire 面，聚合语义对拍在行级）。
         let new_rows = billing_window_tokens(db.conn(), &BillingWindowQuery {
-            host: "codex", grain: BillingGrain::Hour,
+            harness: "codex", grain: BillingGrain::Hour,
             source: BillingSource::Realtime, start_ms: s, end_ms: e,
         }).unwrap();
         let new_set: Vec<(i64, Option<String>, i64, i64, i64, i64)> = new_rows
@@ -2931,23 +2931,23 @@ mod tests {
     /// v0.9.1 测试矩阵 §8 行 8「performance（不枚举原始日志/索引命中）」。
     ///
     /// SQL 权威库的整个存在理由是「查询不枚举原始日志」——每个窗口化聚合
-    /// 必须命中 `usage_facts_host_time`（`(host, event_ts_ms)` 部分索引），
+    /// 必须命中 `usage_facts_harness_time`（`(harness, event_ts_ms)` 部分索引），
     /// 绝不 `SCAN usage_facts`（全表）。一个错的查询会**静默**退化成全表扫
     /// （功能对、性能崩），没有异常没有红测——只有真机 5 万行时的卡顿，正是
     /// 2026-09-05 tab 卡顿事故的形状。这条断言把「退化」变成编译期就该发现
     /// 的红。SQL 与 `prepare()` 共用 `SQL_*` const，零漂移。
     #[test]
-    fn windowed_queries_hit_the_host_time_index_never_full_scan() {
+    fn windowed_queries_hit_the_harness_time_index_never_full_scan() {
         let path = tmp_db("qplan");
         let db = AuthorityDb::open(&path, 1).unwrap();
-        // 三宿主各塞几行——EXPLAIN QUERY PLAN 不依赖行数，但有数据时 SQLite
+        // 三执行环境各塞几行——EXPLAIN QUERY PLAN 不依赖行数，但有数据时 SQLite
         // 更可能选真实计划而非退化到 "SCAN"（空表任何查询都 SCAN）。
         let (s, _e) = beijing_day_bounds_ms("2026-09-05").unwrap();
-        for (i, host) in ["dsh", "claude-code", "codex"].iter().enumerate() {
+        for (i, harness) in ["dsh", "claude-code", "codex"].iter().enumerate() {
             insert_fact(
                 &db,
                 &format!("f{i}a"),
-                host,
+                harness,
                 Some("m"),
                 "turn",
                 s + 3_600_000,
@@ -2960,7 +2960,7 @@ mod tests {
             insert_fact(
                 &db,
                 &format!("f{i}b"),
-                host,
+                harness,
                 Some("m"),
                 "turn",
                 s + 7_200_000,
@@ -3006,8 +3006,8 @@ mod tests {
         let page_limit = 50_i64;
         let page_params: [&dyn rusqlite::ToSql; 6] =
             [&"dsh", &s, &end, &page_after_ts, &page_after_id, &page_limit];
-        // `hourly_by_host_model` = 单宿主 SQL + 在 fn 内 in-memory 合并 3 宿主。
-        // EXPLAIN 只测一条 host 字面量是否命中索引——三宿主合并是 fn 行为，
+        // `hourly_by_harness_model` = 单执行环境 SQL + 在 fn 内 in-memory 合并 3 执行环境。
+        // EXPLAIN 只测一条 harness 字面量是否命中索引——三执行环境合并是 fn 行为，
         // 不在 SQL planner 视野内。
         let hourly_h_params: [&dyn rusqlite::ToSql; 5] =
             [&BEIJING_OFFSET_MS, &HOUR_MS, &s, &end, &"claude-code"];
@@ -3016,10 +3016,10 @@ mod tests {
         let no_provider: Option<&str> = None;
         let sessions_params: [&dyn rusqlite::ToSql; 8] =
             [&"dsh", &s, &end, &no_hour, &BEIJING_OFFSET_MS, &HOUR_MS, &no_model, &no_provider];
-        let host_window_params: [&dyn rusqlite::ToSql; 5] =
+        let harness_window_params: [&dyn rusqlite::ToSql; 5] =
             [&BEIJING_OFFSET_MS, &DAY_MS, &"workbuddy", &s, &end];
 
-        // 通用计费窗口（取代三份宿主手抄 SQL）：直接 EXPLAIN 构建器产物——
+        // 通用计费窗口（取代三份执行环境手抄 SQL）：直接 EXPLAIN 构建器产物——
         // 零漂移性质从「共享 const」升级为「测的就是运行时用的那条 SQL」。
         let billing_day_params: [&dyn rusqlite::ToSql; 5] =
             [&BEIJING_OFFSET_MS, &DAY_MS, &s, &end, &"claude-code"];
@@ -3028,26 +3028,26 @@ mod tests {
         for (name, sql, params) in [
             ("peaked_days_map", SQL_PEAKED_DAYS_MAP, &peak_params[..]),
             ("billing_day(claude)", &billing_window_sql(&BillingWindowQuery {
-                host: "claude-code", grain: BillingGrain::Day,
+                harness: "claude-code", grain: BillingGrain::Day,
                 source: BillingSource::Realtime, start_ms: s, end_ms: end,
             }), &billing_day_params[..]),
             ("billing_day(claude,legacy)", &billing_window_sql(&BillingWindowQuery {
-                host: "claude-code", grain: BillingGrain::Day,
+                harness: "claude-code", grain: BillingGrain::Day,
                 source: BillingSource::LegacyAggregate, start_ms: s, end_ms: end,
             }), &billing_day_params[..]),
             ("billing_hour(codex)", &billing_window_sql(&BillingWindowQuery {
-                host: "codex", grain: BillingGrain::Hour,
+                harness: "codex", grain: BillingGrain::Hour,
                 source: BillingSource::Realtime, start_ms: s, end_ms: end,
             }), &billing_hour_params[..]),
-            ("hourly_by_host_model", SQL_HOURLY_BY_HOST_MODEL, &hourly_h_params[..]),
+            ("hourly_by_harness_model", SQL_HOURLY_BY_HARNESS_MODEL, &hourly_h_params[..]),
             ("facts_page_window", SQL_FACTS_PAGE_WINDOW, &page_params[..]),
             ("sessions_in_window", SQL_SESSIONS_IN_WINDOW, &sessions_params[..]),
-            ("host_window_tokens", SQL_HOST_WINDOW_TOKENS, &host_window_params[..]),
+            ("harness_window_tokens", SQL_HARNESS_WINDOW_TOKENS, &harness_window_params[..]),
         ] {
             let p = plan(sql, params);
             assert!(
-                p.contains("USING INDEX usage_facts_host_time"),
-                "{name} 必须命中 usage_facts_host_time——计划：{p}"
+                p.contains("USING INDEX usage_facts_harness_time"),
+                "{name} 必须命中 usage_facts_harness_time——计划：{p}"
             );
             assert!(
                 !p.contains("SCAN usage_facts"),
@@ -3055,7 +3055,7 @@ mod tests {
             );
         }
 
-        // session_detail 时间线走 session_key 索引（不是 host_time）。
+        // session_detail 时间线走 session_key 索引（不是 harness_time）。
         let tl_ts = i64::MIN;
         let tl_id = "";
         let tl_limit = 50_i64;
@@ -3074,7 +3074,7 @@ mod tests {
     fn insert_session_fact(
         db: &AuthorityDb,
         fact_id: &str,
-        host: &str,
+        harness: &str,
         session_key: &str,
         model_id: &str,
         event_ts_ms: i64,
@@ -3090,22 +3090,22 @@ mod tests {
             .unwrap();
         db.conn()
             .execute(
-                "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace,
+                "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace,
                      source_profile, last_observed_at_ms)
                  VALUES (?1, ?2, ?3, 'm', 'default', 1) ON CONFLICT(session_key) DO NOTHING",
-                rusqlite::params![session_key, host, format!("native-{session_key}")],
+                rusqlite::params![session_key, harness, format!("native-{session_key}")],
             )
             .unwrap();
         db.conn()
             .execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                      session_key, source_event_id, observation_kind, model_id, event_ts_ms,
                      event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                      output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1, ?2, 'm', ?3, ?4, ?1, 'assistant-usage', ?5, ?6, ?7, ?8, 0, 0, 0,
                          'run', 1, 1)",
                 rusqlite::params![
-                    fact_id, host, format!("native-{session_key}"), session_key, model_id,
+                    fact_id, harness, format!("native-{session_key}"), session_key, model_id,
                     event_ts_ms, event_peak, tokens
                 ],
             )
@@ -3150,9 +3150,9 @@ mod tests {
         assert_eq!(wt22, 800, "Q04 不变式：会话之和 == 峰值小时总量");
         assert_eq!(count22, 2);
         assert_eq!(rows.iter().map(|s| s.total()).sum::<i64>(), 800);
-        assert!(rows.iter().all(|s| s.host == "claude-code"));
+        assert!(rows.iter().all(|s| s.harness == "claude-code"));
 
-        // host 过滤 + min_tokens。
+        // harness 过滤 + min_tokens。
         let (rows, _, _, _) =
             sessions_in_window(db.conn(), start, end, &["codex".into()], None, None, None, 0, None, None, 50)
                 .unwrap();
@@ -3241,7 +3241,7 @@ mod tests {
     //     形状 → pricing_snapshot.asof(MAX(event_ts_ms)) 选历史价卡（Q13）。
     // (2) 任意一环失败（无事实 / 无价卡 / 价卡脏 / 无可计模型）→ 返 None，
     //     不冒充零成本。
-    // (3) BillingBasis::MeteredEstimate——与 host_bills 的 MeteredActual 不同
+    // (3) BillingBasis::MeteredEstimate——与 harness_bills 的 MeteredActual 不同
     //     档位，DTO 上层不得求和进 summable_total。
 
     /// 一份精简 `assets/pricing.json` 片段，模型名直接对得上 fallback_provider
@@ -3276,7 +3276,7 @@ mod tests {
         // `deepseek-v4-pro` 卡键。
         let skey = "skey-cm-1";
         db.conn().execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+            "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
              VALUES (?1, 'dsh', 'native-cm-1', 'm', 'default', 1)",
             rusqlite::params![skey],
         ).unwrap();
@@ -3284,7 +3284,7 @@ mod tests {
         // 不需要 join 到 sessions）。本测试要 join 到 sessions 用 skey 过滤，
         // 所以直接走完整 INSERT——把 session_key 写对。
         let mut ins = db.conn().prepare(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                  session_key, source_event_id, observation_kind, provider_id, model_id,
                  event_ts_ms, event_peak, uncached_input_tokens, cache_read_tokens,
                  cache_write_tokens, output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
@@ -3331,7 +3331,7 @@ mod tests {
         //         = 4.5 + 4.5 + 2.7 = 11.70 元 → 1170 分（CNY=2）
         assert_eq!(mm.amount_minor, 1170, "8 桶折算 + peak 拆分 + 舍入到分");
 
-        // 任何不含 native id 的字符串——DTO 不泄宿主词表。
+        // 任何不含 native id 的字符串——DTO 不泄执行环境词表。
         let j = mm.to_json().to_string();
         assert!(!j.contains("native-cm-1"));
         assert!(!j.contains("dsh/deepseek-v4-pro-0813"));
@@ -3346,10 +3346,10 @@ mod tests {
         db.begin_run("run", "cli", 1).unwrap();
         let (start, _) = beijing_day_bounds_ms("2026-09-07").unwrap();
         let key = "skey-cross-snapshot";
-        db.conn().execute("INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms) VALUES (?1, 'dsh', 'native', 'm', 'default', 1)", [key]).unwrap();
+        db.conn().execute("INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, source_profile, last_observed_at_ms) VALUES (?1, 'dsh', 'native', 'm', 'default', 1)", [key]).unwrap();
         for (id, at) in [("before", start + 1_000), ("after", start + 3_000)] {
             db.conn().execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key, source_event_id, observation_kind, model_id, event_ts_ms, event_peak, uncached_input_tokens, ingested_run_id, created_at_ms, updated_at_ms)
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, session_key, source_event_id, observation_kind, model_id, event_ts_ms, event_peak, uncached_input_tokens, ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1, 'dsh', 'm', 'native', ?2, ?1, 'assistant-usage', 'dsh/deepseek-v4-pro-0813', ?3, 0, 1000000, 'run', 1, 1)",
                 rusqlite::params![id, key, at],
             ).unwrap();
@@ -3377,13 +3377,13 @@ mod tests {
         let (day_start, _) = beijing_day_bounds_ms("2026-09-23").unwrap();
         let skey = "skey-sync-backfill";
         db.conn().execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+            "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
              VALUES (?1, 'codex', 'native-backfill', 'm', 'default', 1)",
             rusqlite::params![skey],
         ).unwrap();
         for (id, model) in [("f-old", "gpt-5.6-luna"), ("f-new", "gpt-6-luna")] {
             db.conn().execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                      session_key, source_event_id, observation_kind, provider_id, model_id,
                      event_ts_ms, event_peak, uncached_input_tokens, output_tokens,
                      ingested_run_id, created_at_ms, updated_at_ms)
@@ -3424,12 +3424,12 @@ mod tests {
         let (day_start, _) = beijing_day_bounds_ms("2026-09-09").unwrap();
         let skey = "skey-codex-unknown";
         db.conn().execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+            "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
              VALUES (?1, 'codex', 'native-codex-unknown', 'm', 'default', 1)",
             rusqlite::params![skey],
         ).unwrap();
         db.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                  session_key, source_event_id, observation_kind, provider_id, model_id,
                  event_ts_ms, event_peak, uncached_input_tokens, cache_read_tokens,
                  cache_write_tokens, output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
@@ -3462,7 +3462,7 @@ mod tests {
         let (day_start, _) = beijing_day_bounds_ms("2026-09-09").unwrap();
         let skey = "skey-billing-buckets";
         db.conn().execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+            "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
              VALUES (?1, 'codex', 'native-bucket', 'm', 'default', 1)",
             rusqlite::params![skey],
         ).unwrap();
@@ -3471,7 +3471,7 @@ mod tests {
             ("f-openai", Some("openai"), 1_000_000, 0),
         ] {
             db.conn().execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                      session_key, source_event_id, observation_kind, provider_id, provider_raw,
                      billing_mode, pricing_basis, model_id, event_ts_ms, event_peak,
                      uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
@@ -3509,13 +3509,13 @@ mod tests {
         let (day_start, _) = beijing_day_bounds_ms("2026-09-09").unwrap();
         let skey = "skey-cross-provider";
         db.conn().execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+            "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
              VALUES (?1, 'codex', 'native-cross-provider', 'm', 'default', 1)",
             rusqlite::params![skey],
         ).unwrap();
         for (fact_id, provider) in [("f-openai", "openai"), ("f-cogfoundry", "cogfoundry.ai")] {
             db.conn().execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                      session_key, source_event_id, observation_kind, provider_id, model_id,
                      event_ts_ms, event_peak, uncached_input_tokens, ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1, 'codex', 'm', 'native-cross-provider', ?2, ?1, 'token_count', ?3,
@@ -3535,12 +3535,12 @@ mod tests {
         let (day_start, _) = beijing_day_bounds_ms("2026-09-09").unwrap();
         let skey = "skey-subscription";
         db.conn().execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+            "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
              VALUES (?1, 'codex', 'native-subscription', 'm', 'default', 1)",
             rusqlite::params![skey],
         ).unwrap();
         db.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                  session_key, source_event_id, observation_kind, provider_id, billing_mode, model_id,
                  event_ts_ms, event_peak, uncached_input_tokens, ingested_run_id, created_at_ms, updated_at_ms)
              VALUES ('f-sub', 'codex', 'm', 'native-subscription', ?1, 'f-sub', 'token_count',
@@ -3561,11 +3561,11 @@ mod tests {
         let (day_start, _) = beijing_day_bounds_ms("2026-09-09").unwrap();
         let skey = "skey-derived-subscription";
         db.conn().execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+            "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
              VALUES (?1, 'codex', 'native-derived', 'm', 'default', 1)", [skey],
         ).unwrap();
         db.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                  session_key, source_event_id, observation_kind, provider_id, model_id,
                  event_ts_ms, event_peak, uncached_input_tokens, ingested_run_id, created_at_ms, updated_at_ms)
              VALUES ('f-derived', 'codex', 'm', 'native-derived', ?1, 'f-derived', 'token_count',
@@ -3574,14 +3574,14 @@ mod tests {
         ).unwrap();
         db.conn().execute(
             "INSERT INTO billing_declarations(
-                declaration_id, host, provider_id, relationship_kind, effective_start,
+                declaration_id, harness, provider_id, relationship_kind, effective_start,
                 created_at_ms, updated_at_ms)
              VALUES ('decl-derived', 'codex', 'openai', 'official_subscription', '2026-09', 1, 1)",
             [],
         ).unwrap();
         db.conn().execute(
             "INSERT INTO billing_declaration_revisions(
-                revision_id, declaration_id, revision_number, change_kind, host, provider_id,
+                revision_id, declaration_id, revision_number, change_kind, harness, provider_id,
                 relationship_kind, effective_start, created_at_ms)
              VALUES ('rev-derived', 'decl-derived', 1, 'saved', 'codex', 'openai',
                      'official_subscription', '2026-09', 1)",
@@ -3606,7 +3606,7 @@ mod tests {
         assert_eq!(session_cost_minor(db.conn(), skey).unwrap(), None);
         db.conn().execute(
             "INSERT INTO billing_declaration_revisions(
-                revision_id, declaration_id, revision_number, change_kind, host, provider_id,
+                revision_id, declaration_id, revision_number, change_kind, harness, provider_id,
                 relationship_kind, effective_start, created_at_ms)
              VALUES ('rev-derived-pending', 'decl-derived', 2, 'saved', 'codex', 'openai',
                      'official_subscription', '2026-09', 2)", [],
@@ -3620,7 +3620,7 @@ mod tests {
         assert_eq!(session_cost_minor(db.conn(), skey).unwrap(), None);
         db.conn().execute(
             "INSERT INTO billing_declaration_revisions(
-                revision_id, declaration_id, revision_number, change_kind, host, provider_id,
+                revision_id, declaration_id, revision_number, change_kind, harness, provider_id,
                 relationship_kind, effective_start, created_at_ms)
              VALUES ('rev-derived-revoked', 'decl-derived', 3, 'revoked', 'codex', 'openai',
                      'official_subscription', '2026-09', 3)", [],
@@ -3637,12 +3637,12 @@ mod tests {
         let (day_start, _) = beijing_day_bounds_ms("2026-09-07").unwrap();
         let skey = "skey-cm-2";
         db.conn().execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+            "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
              VALUES (?1, 'dsh', 'native-cm-2', 'm', 'default', 1)",
             rusqlite::params![skey],
         ).unwrap();
         db.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                  session_key, source_event_id, observation_kind, provider_id, model_id,
                  event_ts_ms, event_peak, uncached_input_tokens, cache_read_tokens,
                  cache_write_tokens, output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
@@ -3672,13 +3672,13 @@ mod tests {
         let (day_start, _) = beijing_day_bounds_ms("2026-09-07").unwrap();
         let skey = "skey-cm-3";
         db.conn().execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+            "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
              VALUES (?1, 'dsh', 'native-cm-3', 'm', 'default', 1)",
             rusqlite::params![skey],
         ).unwrap();
         // 模型名落进所有 provider 的卡都查不到的位置。
         db.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                  session_key, source_event_id, observation_kind, provider_id, model_id,
                  event_ts_ms, event_peak, uncached_input_tokens, cache_read_tokens,
                  cache_write_tokens, output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
@@ -3715,8 +3715,8 @@ mod tests {
     // ── PR #2.3：CLI `sessions navigation` 的 SQL 只读快照 ─────────────
 
     #[test]
-    fn day_token_totals_by_host_groups_and_sums_within_beijing_day() {
-        // 2026-09-08 北京 10:00 / 14:00 各一条 fact（同 host 累加）；
+    fn day_token_totals_by_harness_groups_and_sums_within_beijing_day() {
+        // 2026-09-08 北京 10:00 / 14:00 各一条 fact（同 harness 累加）；
         // 跨日那条（次日 01:00）不进 09-08 的桶。
         let dir = tmp_db("navig_total");
         std::fs::create_dir_all(&dir).unwrap();
@@ -3729,7 +3729,7 @@ mod tests {
         // 跨日 fact：2026-09-09 北京 01:00 → 不计入 09-08 桶
         insert_fact(&db, "f4", "dsh", Some("m"), "assistant-usage", start + DAY_MS + 3_600_000, 0, 999, 0, 0, 0);
         drop(db);
-        let totals = day_token_totals_by_host(&dir, "2026-09-08").expect("库可读");
+        let totals = day_token_totals_by_harness(&dir, "2026-09-08").expect("库可读");
         assert_eq!(totals.get("dsh").copied(), Some(300), "10:00 + 14:00 = 300");
         assert_eq!(totals.get("claude-code").copied(), Some(50));
         // 跨日 fact 不计入（2026-09-08 的 end 是次日 00:00，[start,end) 半开）。
@@ -3737,19 +3737,19 @@ mod tests {
     }
 
     #[test]
-    fn day_token_totals_by_host_returns_none_when_authority_db_missing() {
+    fn day_token_totals_by_harness_returns_none_when_authority_db_missing() {
         // 库文件不存在 → None（CLI 降级到 `{value:null, basis:null}`，不冒充 0）。
         let dir = tmp_db("navig_missing");
         std::fs::create_dir_all(&dir).unwrap();
         // 不开库，路径存在但库文件不存在
-        let result = day_token_totals_by_host(&dir, "2026-09-08");
+        let result = day_token_totals_by_harness(&dir, "2026-09-08");
         assert!(result.is_none(), "无库 → None（不向上抛）");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn day_session_count_distinguishes_sessions_within_one_host() {
-        // 同一 host 三条 fact 两条不同 session_key；其它 host 不计入。
+    fn day_session_count_distinguishes_sessions_within_one_harness() {
+        // 同一 harness 三条 fact 两条不同 session_key；其它 harness 不计入。
         let dir = tmp_db("navig_count");
         std::fs::create_dir_all(&dir).unwrap();
         let path = crate::authority::default_authority_path(&dir);
@@ -3760,35 +3760,35 @@ mod tests {
             [],
         ).unwrap();
         // 先建 sessions 行（usage_facts.session_key FK → sessions.session_key，
-        // 且 (host, machine_namespace, native_session_id) 唯一）
-        for (skey, host, nat) in [
+        // 且 (harness, machine_namespace, native_session_id) 唯一）
+        for (skey, harness, nat) in [
             ("3:dsh|10:s1|2:n", "dsh", "nat-s1"),
             ("3:dsh|10:s2|2:n", "dsh", "nat-s2"),
             ("3:codex|10:s3|2:n", "codex", "nat-s3"),
         ] {
             db.conn().execute(
-                "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace,
+                "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace,
                      source_profile, last_observed_at_ms)
                  VALUES (?1, ?2, ?3, 'm', 'default', 1)
                  ON CONFLICT(session_key) DO NOTHING",
-                rusqlite::params![skey, host, nat],
+                rusqlite::params![skey, harness, nat],
             ).unwrap();
         }
         let (start, _) = beijing_day_bounds_ms("2026-09-08").unwrap();
-        for (fact_id, host, skey) in [
+        for (fact_id, harness, skey) in [
             ("f1", "dsh", "3:dsh|10:s1|2:n"),
             ("f2", "dsh", "3:dsh|10:s1|2:n"),
             ("f3", "dsh", "3:dsh|10:s2|2:n"),
             ("f4", "codex", "3:codex|10:s3|2:n"),
         ] {
             db.conn().execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                      session_key, source_event_id, observation_kind, provider_id, model_id,
                      event_ts_ms, event_peak, uncached_input_tokens, cache_read_tokens,
                      cache_write_tokens, output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1, ?2, 'm', ?4, ?3, ?1, 'assistant-usage', NULL, 'm', ?5, 0,
                          100, 0, 0, 0, 'run', 1, 1)",
-                rusqlite::params![fact_id, host, skey, &skey[5..skey.len()-4], start + 60_000],
+                rusqlite::params![fact_id, harness, skey, &skey[5..skey.len()-4], start + 60_000],
             ).unwrap();
         }
         drop(db);

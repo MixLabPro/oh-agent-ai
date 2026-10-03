@@ -7,7 +7,7 @@
 产出同一个字符串，否则"共享序列化契约"这个说法就是假的）。
 
 见该模块 docstring 里"明确没做的"清单——这不是数据平面迁移，只是候选 #3/#4
-描述的机制骨架，没有任何 host adapter 被接上。
+描述的机制骨架，没有任何 harness adapter 被接上。
 """
 
 import sys
@@ -26,7 +26,7 @@ from agent_vitals.agent.usage_fact import (  # noqa: E402
 )
 
 _IDENTITY = {
-    "machine_namespace": "m1", "host": "claude-code", "source_profile": "default",
+    "machine_namespace": "m1", "harness": "claude-code", "source_profile": "default",
     "native_session_id": "sess-1", "source_event_id": "evt-1",
     "observation_kind": "message",
 }
@@ -71,7 +71,7 @@ class BuildUsageFactCase(unittest.TestCase):
         self.assertEqual(out["native_session_id"], "sess-1")
         # 文档必须能独立复算 fact_id——从文档字段拼回 6 元组 → fact_id 字节相等。
         reconstructed = (
-            out["machine_namespace"], out["host"], out["source_profile"],
+            out["machine_namespace"], out["harness"], out["source_profile"],
             out["native_session_id"], out["source_event_id"], out["observation_kind"],
         )
         self.assertEqual(out["fact_id"], fact_id(*reconstructed),
@@ -79,12 +79,12 @@ class BuildUsageFactCase(unittest.TestCase):
 
     def test_rejects_missing_identity_fields_by_name(self):
         with self.assertRaises(ValueError) as cm:
-            build_usage_fact({"host": "claude-code"})
+            build_usage_fact({"harness": "claude-code"})
         problems = cm.exception.args[0]
         for k in ("machine_namespace", "source_profile", "native_session_id",
                   "source_event_id", "observation_kind"):
             self.assertTrue(any(k in p for p in problems), k)
-        self.assertFalse(any(p.endswith(" host") for p in problems))
+        self.assertFalse(any(p.endswith(" harness") for p in problems))
 
     def test_rejects_negative_token_fields(self):
         with self.assertRaises(ValueError) as cm:

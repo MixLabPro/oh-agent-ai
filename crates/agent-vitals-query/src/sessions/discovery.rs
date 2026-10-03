@@ -1,6 +1,6 @@
 //! DSH 会话根发现。
 //!
-//! 解析 DSH_HOME（env → 缺省 `~/.dsh`，与 `integrations/dsh-client/src/host/index.ts`
+//! 解析 DSH_HOME（env → 缺省 `~/.dsh`，与 `integrations/dsh-client/src/harness/index.ts`
 //! `sessionsRoot()` 同默认），walk `<DSH_HOME>/sessions/**/session.jsonl`，
 //! 用 takeover ledger 滤掉已折会话，取 mtime 最新的一条未折会话。
 //!
@@ -36,9 +36,9 @@ use std::time::SystemTime;
 use crate::takeover as tk_io;
 use agent_vitals_domain::takeover as tk;
 use crate::home::dsh_home;
-// W3：DSH 会话文件枚举 / 根报告 / workspace 索引搬到 hosts（纯 DSH 目录与文件
+// W3：DSH 会话文件枚举 / 根报告 / workspace 索引搬到 harnesses（纯 DSH 目录与文件
 // 格式解释）；这里只留 legacy `discover()`（折叠去重读 takeover 账本）并保留旧路径。
-pub use agent_vitals_hosts::hosts::dsh::sources::discovery::*;
+pub use agent_vitals_harnesses::harnesses::dsh::sources::discovery::*;
 
 /// 发现结果里的一条未折会话。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -1,9 +1,9 @@
 //! `summary` 域的目录化拆分（2026-09-23，纯机械移动零语义变化）：本 mod.rs
 //! 保留共享原语与对外的完整 re-export——**所有既有调用点（CLI/MCP/sync/
 //! export/桌面/q_acceptance）零改动**。子模块按职责分居：
-//! - `host_amounts` — 按宿主的金额/provider 折叠与 unresolved 下钻（宿主
-//!   知识的住所；未来宿主注册制的接缝在 `host_amounts` 内）
-//! - `subscriptions` — 订阅费/声明费/host bills 的计费政策应用
+//! - `harness_amounts` — 按执行环境的金额/provider 折叠与 unresolved 下钻（执行环境
+//!   知识的住所；未来执行环境注册制的接缝在 `harness_amounts` 内）
+//! - `subscriptions` — 订阅费/声明费/harness bills 的计费政策应用
 //! - `quotas` — codex/claude 配额快照（产品特性）
 //! - `bundle` — overview/calendar/hourly 投影（桌面与 IPC 面）
 //! - `repository` — `SummaryRepository` 的 daily/monthly 装配
@@ -15,29 +15,29 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use agent_vitals_data::projection::{
-    BillingBasis, CoverageStatus, DailySummary, Freshness, FreshnessState, HostAmount,
+    BillingBasis, CoverageStatus, DailySummary, Freshness, FreshnessState, HarnessAmount,
     MonthlySummary,
 };
 use agent_vitals_data::repository::{DailySummaryQuery, MonthlySummaryQuery, SummaryRepository};
 use serde_json::json;
 
 use agent_vitals_domain::cost::BillingMode;
-use agent_vitals_domain::data_contract::HostTokens;
+use agent_vitals_domain::data_contract::HarnessTokens;
 
 use crate::clock::{today_beijing, yesterday_beijing};
 
-/// Stage 0 的宿主接线状态：真正读数据的 vs. 还没接的。四宿主全接完后
-/// `NOT_YET_WIRED_HOSTS` 与 `PERMANENTLY_EXCLUDED_HOSTS` 都为空——`excluded_hosts`
-/// 是空集（DTO 语义「已知存在但本版本不产出数据」：现在没有这样的宿主）。
-/// 与 `ingest_service::FACT_HOSTS` 同表（`wired_hosts_match_fact_hosts` 钉住）。
-const WIRED_HOSTS: &[&str] = &["claude-code", "codex", "dsh", "workbuddy"];
-const NOT_YET_WIRED_HOSTS: &[&str] = &[];
-const PERMANENTLY_EXCLUDED_HOSTS: &[&str] = &[];
+/// Stage 0 的执行环境接线状态：真正读数据的 vs. 还没接的。四执行环境全接完后
+/// `NOT_YET_WIRED_HARNESSES` 与 `PERMANENTLY_EXCLUDED_HARNESSES` 都为空——`excluded_harnesses`
+/// 是空集（DTO 语义「已知存在但本版本不产出数据」：现在没有这样的执行环境）。
+/// 与 `ingest_service::FACT_HARNESSES` 同表（`wired_harnesses_match_fact_harnesses` 钉住）。
+const WIRED_HARNESSES: &[&str] = &["claude-code", "codex", "dsh", "workbuddy"];
+const NOT_YET_WIRED_HARNESSES: &[&str] = &[];
+const PERMANENTLY_EXCLUDED_HARNESSES: &[&str] = &[];
 
-fn excluded_hosts() -> BTreeSet<String> {
-    NOT_YET_WIRED_HOSTS
+fn excluded_harnesses() -> BTreeSet<String> {
+    NOT_YET_WIRED_HARNESSES
         .iter()
-        .chain(PERMANENTLY_EXCLUDED_HOSTS)
+        .chain(PERMANENTLY_EXCLUDED_HARNESSES)
         .map(|s| s.to_string())
         .collect()
 }
@@ -120,7 +120,7 @@ impl PricingCards {
                 Self { main, codex }
             }
             // 老快照只存了一半 → 整体退当前卡，不半用（半用会让 DSH 按历史卡、
-            // codex 按当前卡，跨宿主总额失去单一时点语义）。
+            // codex 按当前卡，跨执行环境总额失去单一时点语义）。
             _ => Self::current(),
         }
     }
@@ -129,7 +129,7 @@ impl PricingCards {
 /// `YYYY-MM-DD` 日键 → 新鲜度（今天/昨天 = Fresh，更早 = Stale）。Stage 0 的
 /// 近似口径（§8.5）：Partial 需要「源本身还活着吗」的信号，Stage B 才有。
 /// `last_observed_at` 统一 `{day}T00:00:00Z`——汇总层聚合按字符串序取最大，
-/// 各宿主必须同格式，字典序才等价于时间序。
+/// 各执行环境必须同格式，字典序才等价于时间序。
 fn day_freshness(day_key: &str) -> Freshness {
     let state = if day_key == today_beijing() || day_key == yesterday_beijing() {
         FreshnessState::Fresh
@@ -142,12 +142,12 @@ fn day_freshness(day_key: &str) -> Freshness {
     }
 }
 
-/// 汇总层的新鲜度 = **最新被观测到的宿主**的新鲜度。汇总回答的是「这份数据
-/// 最近还有没有在更新」，单看某一个宿主会在另一个宿主更新得更晚时谎报过期
-/// /谎报新鲜。全部宿主都 Unavailable（`last_observed_at=None`，不变式 3
+/// 汇总层的新鲜度 = **最新被观测到的执行环境**的新鲜度。汇总回答的是「这份数据
+/// 最近还有没有在更新」，单看某一个执行环境会在另一个执行环境更新得更晚时谎报过期
+/// /谎报新鲜。全部执行环境都 Unavailable（`last_observed_at=None`，不变式 3
 /// 保证 Unavailable 必带 None）→ 汇总 Unavailable。
-fn aggregate_freshness(by_host: &BTreeMap<String, HostAmount>) -> Freshness {
-    by_host
+fn aggregate_freshness(by_harness: &BTreeMap<String, HarnessAmount>) -> Freshness {
+    by_harness
         .values()
         .filter(|h| h.freshness.last_observed_at.is_some())
         .max_by_key(|h| h.freshness.last_observed_at.clone())
@@ -156,7 +156,7 @@ fn aggregate_freshness(by_host: &BTreeMap<String, HostAmount>) -> Freshness {
 }
 
 mod bundle;
-mod host_amounts;
+mod harness_amounts;
 mod quotas;
 mod repository;
 mod subscriptions;
@@ -168,31 +168,31 @@ pub use bundle::{
     codex_merged_from_sql, hourly_distribution, hourly_distribution_memoized,
     overview_bundle, overview_bundle_timed,
 };
-pub use host_amounts::{
+pub use harness_amounts::{
     merged_claude_days_for_tests, unresolved_billing_groups,
     unresolved_billing_groups_in, unresolved_detail,
 };
 pub use quotas::{claude_quota_status, codex_quota_snapshot};
-pub(crate) use quotas::HOST_PROVIDER_MAP;
+pub(crate) use quotas::HARNESS_PROVIDER_MAP;
 
 // 测试面：tests.rs 只 `use super::*`，两个测试直测的私有项经此可见
 //（lib 构建不引入）。
 #[cfg(test)]
-pub(crate) use host_amounts::codex_unresolved_rows;
+pub(crate) use harness_amounts::codex_unresolved_rows;
 pub use crate::home::codex_home;
 pub use repository::SqlSummaryRepository;
 
 // 跨子模块共享的内部项经本层中转（子模块只 `use super::*`，看不见兄弟的
-// 名字空间）：宿主折叠产物给 bundle/repository，计费政策应用给 repository。
-pub(crate) use host_amounts::{
-    claude_host_amount_with_tokens_from_days, codex_host_amount_provider_safe, plugin_tokens_by_host,
+// 名字空间）：执行环境折叠产物给 bundle/repository，计费政策应用给 repository。
+pub(crate) use harness_amounts::{
+    claude_harness_amount_with_tokens_from_days, codex_harness_amount_provider_safe, plugin_tokens_by_harness,
     codex_provider_amounts_from_sql,
-    dsh_day_tokens, dsh_host_amount, dsh_provider_amount, dsh_tokens,
+    dsh_day_tokens, dsh_harness_amount, dsh_provider_amount, dsh_tokens,
     degrade_claude_freshness_if_legacy_backed, fetch_windowed, merged_claude_days,
-    restore_full_host_tokens, workbuddy_host_amount_with_tokens,
+    restore_full_harness_tokens, workbuddy_harness_amount_with_tokens,
     claude_provider_amounts_from_sql,
 };
 pub(crate) use subscriptions::{
-    apply_declared_subscription_fees, apply_host_bills, apply_subscription_fees,
+    apply_declared_subscription_fees, apply_harness_bills, apply_subscription_fees,
     declared_subscription_fees,
 };

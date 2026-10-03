@@ -1352,6 +1352,6 @@
         "coverage": 1.0
       }
     },
-    "host": "claude-code"
+    "harness": "claude-code"
   }
 }

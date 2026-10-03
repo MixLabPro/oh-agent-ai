@@ -1,4 +1,4 @@
-//! Host-neutral contract for local Agent trust observations.
+//! Harness-neutral contract for local Agent trust observations.
 //!
 //! The contract deliberately describes locally observable stages, not a
 //! cloud-side use claim.  In particular, an upload attempt is not evidence
@@ -196,7 +196,7 @@ impl TrustConsentKind {
 pub struct TrustObservation {
     pub observation_id: String,
     pub machine_namespace: String,
-    pub host: String,
+    pub harness: String,
     pub actor_id: String,
     pub actor_kind: TrustActorKind,
     pub actor_version: Option<String>,
@@ -265,7 +265,7 @@ fn valid_provenance(value: &Value, depth: usize) -> bool {
 impl TrustObservation {
     pub fn validate(&self) -> Result<(), &'static str> {
         for value in [
-            self.observation_id.as_str(), self.machine_namespace.as_str(), self.host.as_str(),
+            self.observation_id.as_str(), self.machine_namespace.as_str(), self.harness.as_str(),
             self.actor_id.as_str(), self.collector_id.as_str(), self.collector_version.as_str(),
         ] {
             if !valid_ref(value) {
@@ -314,7 +314,7 @@ mod tests {
     fn observation() -> TrustObservation {
         TrustObservation {
             observation_id: "obs_01".into(), machine_namespace: "machine_01".into(),
-            host: "zcode".into(), actor_id: "actor_01".into(), actor_kind: TrustActorKind::Sidecar,
+            harness: "zcode".into(), actor_id: "actor_01".into(), actor_kind: TrustActorKind::Sidecar,
             actor_version: Some("3.14.0".into()), observed_at_ms: 1,
             observation_kind: TrustObservationKind::Package, stage: TrustStage::PackageObserved,
             evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref: Some("ws_01".into()),

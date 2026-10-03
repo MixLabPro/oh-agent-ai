@@ -10,8 +10,8 @@ rather than calendar time.
 Do not begin feature-by-feature Rust translation until all items pass:
 
 - Python oracle contains the current Codex, WorkBuddy, and OpenClaw adapters.
-- JSON schema represents capability state and host instance identity.
-- Host fixtures are deterministic and independent of the developer machine.
+- JSON schema represents capability state and harness instance identity.
+- Harness fixtures are deterministic and independent of the developer machine.
 - Golden files have been reviewed, not blindly regenerated.
 - Degradation behavior is covered for every external/runtime dependency.
 

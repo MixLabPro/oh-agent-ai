@@ -1,4 +1,4 @@
-//! **唯一 `HomeResolver`** —— 所有「数据根 / 宿主 home 目录」解析收敛于此。
+//! **唯一 `HomeResolver`** —— 所有「数据根 / 执行环境 home 目录」解析收敛于此。
 //!
 //! v0.8 Phase D7：`data_home` / `snapshot_dir` 从二进制 `src/skills/snapshot.rs`、
 //! `DSH_HOME` 从 `src/agent/discovery.rs` 迁进来。Python 侧镜像
@@ -58,7 +58,7 @@ where
 /// 真实 home 目录字符串」来脱敏日志尾，不是 `data_home()`（那是
 /// `~/.agent-vitals`，一个子目录，不是要擦掉的那个前缀本身）。仍然是唯一
 /// 一处读 `HOME`/`USERPROFILE`——不许诊断包那边再长一份。
-pub(crate) fn host_dir() -> PathBuf {
+pub(crate) fn harness_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
@@ -68,15 +68,15 @@ pub(crate) fn host_dir() -> PathBuf {
 /// 数据根目录（读进程 env）。`budget` / `state` / R2a store 共用，不许再长一份
 /// 「选哪个根」的逻辑。
 pub fn data_home() -> PathBuf {
-    data_home_from(&|name| std::env::var(name).ok(), host_dir())
+    data_home_from(&|name| std::env::var(name).ok(), harness_dir())
 }
 
 /// 快照目录（读进程 env）。
 pub fn snapshot_dir() -> PathBuf {
-    snapshot_dir_from(&|name| std::env::var(name).ok(), host_dir())
+    snapshot_dir_from(&|name| std::env::var(name).ok(), harness_dir())
 }
 
-/// `<DSH_HOME>` 根：`DSH_HOME` env → `~/.dsh` 缺省（与 `integrations/dsh-client/src/host/
+/// `<DSH_HOME>` 根：`DSH_HOME` env → `~/.dsh` 缺省（与 `integrations/dsh-client/src/harness/
 /// index.ts::sessionsRoot()` 同默认）。`DSH_HOME` 未设且 `HOME` 也未知 → `None`。
 /// `codex_home()`：rollout 根的解析与 CLI `codex-cost` handler 同一条
 /// （`HOME` → `USERPROFILE` → 空串；空串 join 出的相对路径不存在 → 枚举为

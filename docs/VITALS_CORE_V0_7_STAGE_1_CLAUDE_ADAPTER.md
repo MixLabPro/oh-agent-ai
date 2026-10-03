@@ -37,7 +37,7 @@ Adapter 尚未实现**：当前仓库没有 Claude observation extractor、Usage
 - 不持久化 UsageFact，不升级 ledger/archive/fold/Store schema；
 - 不把 Claude 私有字段引入 `agent-vitals-core`；
 - 不改 baseline、归日、残差哨兵或成本算法；
-- 不接入 Claude 之外的新宿主。
+- 不接入 Claude 之外的新执行环境。
 
 ## 2. 数据源与处理架构
 
@@ -69,7 +69,7 @@ def claude_jsonl_to_usage_facts(
 ```
 
 ```rust
-// src/agent/claude_usage_fact.rs（host adapter，不进 Core）
+// src/agent/claude_usage_fact.rs（harness adapter，不进 Core）
 pub fn claude_jsonl_to_usage_facts(
     path: &Path,
     machine_namespace: &str,
@@ -77,7 +77,7 @@ pub fn claude_jsonl_to_usage_facts(
 ) -> UsageFactEmitResult
 ```
 
-Core 继续只负责宿主无关的 schema、builder、`fact_id` 与迁移逻辑。
+Core 继续只负责执行环境无关的 schema、builder、`fact_id` 与迁移逻辑。
 
 ### 2.3 推荐数据流
 
@@ -259,7 +259,7 @@ Stage 1 完成必须满足 §6 全部验收项。
 | identity basis | native/fallback **按实际来源动态标记**（message.id 取到 → native；fallback → derived-hash） |
 | source profile | locate 阶段稳定派生，**必填**（与 R2a 共用规范化函数，不读取 Store） |
 | machine namespace | 调用方**必传**，缺失即失败（与 build_usage_fact 校验一致） |
-| 模块归属 | Claude host adapter（新文件 `claude_usage_fact.py`/`.rs`）；**Core 宿主无关** |
+| 模块归属 | Claude harness adapter（新文件 `claude_usage_fact.py`/`.rs`）；**Core 执行环境无关** |
 | 错误结果 | `facts + attempts + coverage`（坏数据不静默消失） |
 | Stage 1 输出 | 内存结果 + 只读诊断 CLI，**不持久化**（`UsageFact` 持久化留到后续 Data Plane 阶段） |
 
@@ -267,7 +267,7 @@ Stage 1 完成必须满足 §6 全部验收项。
 
 **Stage 1 验收**（spec §6）：extractor 重构后既有 fold/ledger/archive **golden 字节零漂移**、UsageFact emit per-message、Python/Rust 双实现 parity、只读诊断 CLI、真实 fixture 覆盖。
 
-**Stage 1 完成 ≠ v0.7 完成**：本 Stage 仅占 v0.7 候选 #3 三家 adapter 的第一阶段；候选 #3 主体未完成前 v0.7 spec §3 仍处于「明确仍未开始」状态（host adapter 改造 + 候选 #4 真实迁移 + atomic write/fsync）。
+**Stage 1 完成 ≠ v0.7 完成**：本 Stage 仅占 v0.7 候选 #3 三家 adapter 的第一阶段；候选 #3 主体未完成前 v0.7 spec §3 仍处于「明确仍未开始」状态（harness adapter 改造 + 候选 #4 真实迁移 + atomic write/fsync）。
 
 ## 10. 工作量估计
 

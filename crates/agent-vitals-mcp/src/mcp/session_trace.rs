@@ -2,7 +2,7 @@
 //! 对一个 `sessions_search` 返回的会话引用产出确定性 TraceGraph / timeline_series。
 //!
 //! **信任域说明（读代码前必读）**：本工具不接受路径。它解析安装级 HMAC
-//! `session_ref` 后，只在当前用户三宿主的固定目录反查 matching source，路径
+//! `session_ref` 后，只在当前用户三执行环境的固定目录反查 matching source，路径
 //! 始终留在进程内部。这既让 Sessions → Trace 可用，也不会把 MCP 变成任意本机
 //! 文件读取接口。
 //!
@@ -31,7 +31,7 @@ for ONE opaque session_ref returned by sessions_search. The server resolves that
 against this installation's authority sessions and reads only a matching source under the fixed \
 Claude Code/Codex/DSH roots; it never accepts caller-controlled file paths. Nodes are ordered by \
 (scope, ordinal), never by timestamp; missing parent/time/status are counted in coverage, never \
-fabricated. Three-host closed vocabulary: claude-code / codex / dsh.",
+fabricated. Three-harness closed vocabulary: claude-code / codex / dsh.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -85,11 +85,11 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     })?;
     if output == "insights" {
         // 只读权威库（不找源文件）：源日志轮换后诊断照样可用。
-        let host = authority_query::session_row(conn, &session_key)
+        let harness = authority_query::session_row(conn, &session_key)
             .map_err(|e| ToolError::new("internal_error", format!("authority query: {e}")))?
-            .map(|(host, _)| host)
+            .map(|(harness, _)| harness)
             .ok_or_else(|| ToolError::new("invalid_argument", "session not found"))?;
-        let data = crate::query::session_insights::session_insights(conn, &session_key, &host)
+        let data = crate::query::session_insights::session_insights(conn, &session_key, &harness)
             .map_err(|e| ToolError::new("internal_error", format!("insights query: {e}")))?;
         return Ok(build_envelope(
             conn,
@@ -97,7 +97,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             None,
             json!({
                 "mode": "diagnostic",
-                "host": host,
+                "harness": harness,
                 "session_ref": session_ref,
                 "output": output,
             }),
@@ -136,7 +136,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         None,
         json!({
             "mode": "diagnostic",
-            "host": key.host_kind,
+            "harness": key.harness_kind,
             "session_ref": session_ref,
             "output": output,
             // coverage 语义：envelope 的 coverage 描述**这次查询**的完整度，
@@ -174,7 +174,7 @@ mod insights_tests {
         let c = db.conn();
         c.execute("INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version) VALUES ('run',1,'cli','succeeded',2)", []).unwrap();
         c.execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+            "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
              VALUES (?1, 'claude-code', 'priv-ins-01', 'ns', 'default', 1)",
             rusqlite::params![SKEY],
         ).unwrap();
@@ -189,7 +189,7 @@ mod insights_tests {
             for k in 0..3i64 {
                 n += 1;
                 c.execute(
-                    "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key,
+                    "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, session_key,
                          source_event_id, observation_kind, model_id, event_ts_ms, event_peak,
                          uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                          ingested_run_id, created_at_ms, updated_at_ms)
@@ -209,7 +209,7 @@ mod insights_tests {
             ).unwrap();
         }
         c.execute(
-            "INSERT INTO issue_instances(issue_id, machine_namespace, host, session_key, issue_type,
+            "INSERT INTO issue_instances(issue_id, machine_namespace, harness, session_key, issue_type,
                  instance_fingerprint, status, severity, evaluator_id, evaluator_version,
                  evidence_fingerprint, opened_at_ms, metadata_json)
              VALUES ('iss1', 'ns', 'claude-code', ?1, 'SV601', 'fp1', 'open', 'critical', 'ev', '1', 'ef', ?3, ?2)",
@@ -230,7 +230,7 @@ mod insights_tests {
     fn insights_builds_the_turn_axis_and_diagnostics_from_the_authority_db_only() {
         let home = tmp_home("axis");
         let sref = seed(&home);
-        // 不存在任何宿主源文件：insights 只读权威库。
+        // 不存在任何执行环境源文件：insights 只读权威库。
         let env = insights(&home, &sref);
         let d = &env["data"];
         assert_eq!(d["axis"]["unit"], "turn");
@@ -344,7 +344,7 @@ mod insights_tests {
 
     fn fact(db: &AuthorityDb, id: &str, ts: i64, model: &str, read: i64, write: i64, unc: i64) {
         db.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, session_key,
                  source_event_id, observation_kind, model_id, event_ts_ms, event_peak,
                  uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                  ingested_run_id, created_at_ms, updated_at_ms)

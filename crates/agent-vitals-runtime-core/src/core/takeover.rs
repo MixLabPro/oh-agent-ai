@@ -16,7 +16,7 @@
 //! {
 //!   "session_id": "s1",              // 必填：native id（§4.3 由生产者派生）
 //!   "session_log": "/logs/s1.jsonl", // 仅身份参考，不读内容
-//!   "host_kind": "dsh",              // 缺省 "cli"
+//!   "harness_kind": "dsh",              // 缺省 "cli"
 //!   "machine_namespace": "ns-…",     // 必填：SessionKey 三要素之一（持久化
 //!                                    //   见 `machine_namespace()`，tick 负责取）
 //!   "oneline": {…}                   // write_oneline + append_session_history
@@ -170,8 +170,8 @@ pub fn fold_session(req: &Value, shadow: bool) -> Result<FoldOutcome, String> {
         ));
     }
 
-    let host_kind = req
-        .get("host_kind")
+    let harness_kind = req
+        .get("harness_kind")
         .and_then(Value::as_str)
         .unwrap_or("cli");
     let native_id = req.get("session_id").and_then(Value::as_str).unwrap_or("");
@@ -184,7 +184,7 @@ pub fn fold_session(req: &Value, shadow: bool) -> Result<FoldOutcome, String> {
         .ok_or_else(|| {
             "fold-session: machine_namespace required (state machine-namespace)".to_string()
         })?;
-    let key = tk::session_key(host_kind, native_id, ns);
+    let key = tk::session_key(harness_kind, native_id, ns);
 
     let ledger = read_ledger();
     if tk::ledger_folded(&ledger, &key) {
@@ -202,7 +202,7 @@ pub fn fold_session(req: &Value, shadow: bool) -> Result<FoldOutcome, String> {
     // 兼容性/状态展示用途；一旦代码读面切到 SQL，导航 tick 不得制造第二套账。
 
     // 提交点：ledger 先记（去重依据），manifest 后提交（代际 +1）。
-    let entry = tk::ledger_entry(host_kind, native_id, ns, &now, epoch + 1);
+    let entry = tk::ledger_entry(harness_kind, native_id, ns, &now, epoch + 1);
     write_ledger(&tk::ledger_record(&ledger, &key, &entry));
     write_manifest(&tk::mark_fold(&manifest, &now));
     Ok(FoldOutcome::Folded)
@@ -303,7 +303,7 @@ mod tests {
         json!({
             "session_id": session_id,
             "session_log": format!("/logs/{session_id}.jsonl"),
-            "host_kind": "dsh",
+            "harness_kind": "dsh",
             "machine_namespace": "ns-abc",
             "oneline": oneline,
         })

@@ -68,11 +68,11 @@ const REMEDY_KEYS: Record<string, [MessageKey, MessageKey]> = {
 const remedyOf = (id: string): [string, string] | undefined => { const keys = REMEDY_KEYS[id]; return keys ? [tx(keys[0]), tx(keys[1])] : undefined; };
 const NOTE_KEYS: Record<string, MessageKey> = { possible_cache_expiry: "ins.note.idle", after_model_change: "ins.note.model" };
 const noteText = (explanation: string): string | undefined => (NOTE_KEYS[explanation] ? tx(NOTE_KEYS[explanation]) : undefined);
-/// 线格式里没有缓存写入字段的宿主（codex / workbuddy 的用量只有 cached / uncached 两档）：
-/// 图例写「宿主不报告」，与「测到为 0」分开（§8.2）。
-const HOSTS_WITHOUT_CACHE_WRITE = new Set(["codex", "workbuddy"]);
+/// 线格式里没有缓存写入字段的执行环境（codex / workbuddy 的用量只有 cached / uncached 两档）：
+/// 图例写「执行环境不报告」，与「测到为 0」分开（§8.2）。
+const HARNESSES_WITHOUT_CACHE_WRITE = new Set(["codex", "workbuddy"]);
 
-const LANE_KEYS: Record<string, MessageKey> = { not_recorded_by_host: "ins.lane.host", not_ingested: "ins.lane.notIngested", no_data_in_session: "ins.lane.none" };
+const LANE_KEYS: Record<string, MessageKey> = { not_recorded_by_harness: "ins.lane.harness", not_ingested: "ins.lane.notIngested", no_data_in_session: "ins.lane.none" };
 const laneReason = (reason: string | null | undefined): string => (LANE_KEYS[reason ?? ""] ? tx(LANE_KEYS[reason ?? ""]) : tx("ins.reasonUnknown"));
 
 /// 回合区间文案：起止相同时只写一个数（真机截图里「回合 17–17」读起来像笔误）。
@@ -385,7 +385,7 @@ function Legend({ insights, unit }: { insights: SessionInsights; unit: string })
   const writes = insights.session.input.cache_write > 0;
   return <div className="insights-legend">
     <span><i className="sw read" />{tx("ins.cacheRead")}</span>
-    <span className={writes ? "" : "off"}><i className="sw write" />{tx(writes ? "ins.cacheWrite" : HOSTS_WITHOUT_CACHE_WRITE.has(insights.host) ? "ins.cacheWriteNoReport" : "ins.cacheWriteZero")}</span>
+    <span className={writes ? "" : "off"}><i className="sw write" />{tx(writes ? "ins.cacheWrite" : HARNESSES_WITHOUT_CACHE_WRITE.has(insights.harness) ? "ins.cacheWriteNoReport" : "ins.cacheWriteZero")}</span>
     <span><i className="sw unc" />{tx("ins.uncachedInput")}</span>
     <span><i className="sw line" />{tx("ins.peakInput")}</span>
     <span><i className="sw fail" />{tx("ins.toolFailed")}</span>

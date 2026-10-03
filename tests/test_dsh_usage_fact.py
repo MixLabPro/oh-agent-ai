@@ -185,7 +185,7 @@ class DshUsageFactEmitterCase(unittest.TestCase):
         f9, f10, f11 = res.facts
         # 6 身份字段
         for f in (f9, f10, f11):
-            self.assertEqual(f["host"], "dsh")
+            self.assertEqual(f["harness"], "dsh")
             self.assertEqual(f["machine_namespace"], NS)
             self.assertEqual(f["source_profile"], "---Users-alice-projects-demo--")
             self.assertEqual(f["native_session_id"], "sess-behavior-0001")
@@ -297,7 +297,7 @@ class DshUsageFactEmitterCase(unittest.TestCase):
         facts = {f["source_event_id"]: f for f in res.facts}
         f = facts["compaction:cmp-1"]
         self.assertEqual(f["identity_basis"], "native",
-                         "compactionId 是宿主原生标识 → native（非 hash fallback）")
+                         "compactionId 是执行环境原生标识 → native（非 hash fallback）")
         self.assertIsNone(f["turn"])
         self.assertIsNone(f["step"])
         self.assertEqual(f["model_raw"], "deepseek-v4-flash")
@@ -482,7 +482,7 @@ class DshUsageFactEmitterCase(unittest.TestCase):
 
     # ── #7 R2a SessionKey 对得上 ────────────────────────────────
     def test_identity_matches_r2a_session_key(self):
-        """acceptance #7：fact 的 (host, machine_namespace, source_profile,
+        """acceptance #7：fact 的 (harness, machine_namespace, source_profile,
         native_session_id) == R2a 四元 SessionKey 分量（SessionKey::new("dsh",
         header.id, dsh_source_profile(cwd), ns)）。对 resume 与 behavior 各验——
         身份字段与 R2a 同源，append/profile 派生都对得上。"""
@@ -495,7 +495,7 @@ class DshUsageFactEmitterCase(unittest.TestCase):
             self.assertEqual(header_id, exp_id)
             expect_profile = dsh_source_profile(cwd)
             for f in res.facts:
-                self.assertEqual((f["host"], f["machine_namespace"],
+                self.assertEqual((f["harness"], f["machine_namespace"],
                                   f["source_profile"], f["native_session_id"]),
                                  ("dsh", NS, expect_profile, header_id),
                                  "fact 身份四元 != R2a SessionKey 分量")
@@ -787,7 +787,7 @@ class DshUsageFactsBothTests(unittest.TestCase):
             for f in doc["facts"]:
                 self.assertIn(f["identity_basis"], bases, label)
                 bases[f["identity_basis"]] += 1
-                self.assertEqual(f["host"], "dsh", label)
+                self.assertEqual(f["harness"], "dsh", label)
                 self.assertEqual(f["observation_kind"], "assistant-usage", label)
             self.assertEqual(bases["derived-hash"], ids["derived-hash"], label)
             self.assertEqual(bases["native"], ids["native"], label)

@@ -432,7 +432,7 @@ def self_verify(root):
         "cash_cny": None,
         "nominal_cny": 2.1,
         "nominal_basis": "pack-price-public:1000cr=50CNY@2026-07-01",
-        "host_billed": True,
+        "harness_billed": True,
     }, cost
 
     # ── s2 审批流程会话 ──────────────────────────────────────────
@@ -473,7 +473,7 @@ def self_verify(root):
         "cash_cny": None,
         "nominal_cny": 0.0,
         "nominal_basis": "pack-price-public:1000cr=50CNY@2026-07-01",
-        "host_billed": True,
+        "harness_billed": True,
     }, cost
     full = workbuddy_session_audit.workbuddy_session_audit_json(root.parent, "s2")
     # spec §2.1：note 只说「未计入积分，成因不判定」，绝不指认是自配路由。
@@ -557,7 +557,7 @@ def self_verify(root):
     lifecycle_note = (
         "lifecycle fields (status / source_mode / is_playground / deleted_at / "
         "is_background_automation) are surfaced verbatim; their value "
-        "vocabularies are not declared by the host, so no session is filtered "
+        "vocabularies are not declared by the harness, so no session is filtered "
         "on them here — filtering is the consumer's decision")
     assert lifecycle_note in full1["notes"], full1["notes"]
     assert lifecycle_note in full["notes"], full["notes"]

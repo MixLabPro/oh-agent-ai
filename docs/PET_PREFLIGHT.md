@@ -247,7 +247,7 @@ async fn tail_receives_appended_event() {
 }
 ```
 
-**生成器**：在 `crates/agent-vitals-host-events/tests/` 下现写。
+**生成器**：在 `crates/agent-vitals-harness-events/tests/` 下现写。
 
 ### 4.3 Pet 包 sprite 测试 fixture
 
@@ -277,24 +277,24 @@ members = [
     ".",
     "crates/agent-vitals-core",
     "crates/agent-vitals-wasm",
-    "crates/agent-vitals-host-events",  # ← 新增
+    "crates/agent-vitals-harness-events",  # ← 新增
 ]
-default-members = [".", "crates/agent-vitals-core", "crates/agent-vitals-host-events"]
+default-members = [".", "crates/agent-vitals-core", "crates/agent-vitals-harness-events"]
 # wasm 仍然不进 default-members
 ```
 
-### 5.2 crates/agent-vitals-host-events/Cargo.toml
+### 5.2 crates/agent-vitals-harness-events/Cargo.toml
 
 ```toml
 [package]
-name = "agent-vitals-host-events"
+name = "agent-vitals-harness-events"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
-description = "Host event sourcing for agent-vitals — file watching and JSONL parsing across coding-agent CLIs."
+description = "Harness event sourcing for agent-vitals — file watching and JSONL parsing across coding-agent CLIs."
 
 [lib]
-name = "agent_vitals_host_events"
+name = "agent_vitals_harness_events"
 path = "src/lib.rs"
 
 [dependencies]
@@ -321,7 +321,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 agent-vitals-core = { path = "../crates/agent-vitals-core" }
-agent-vitals-host-events = { path = "../crates/agent-vitals-host-events" }
+agent-vitals-harness-events = { path = "../crates/agent-vitals-harness-events" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros"] }
@@ -344,7 +344,7 @@ tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros"] }
 
 Phase 0a 开工时新建的文件：
 ```
-crates/agent-vitals-host-events/
+crates/agent-vitals-harness-events/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs              # EventSource trait
@@ -382,10 +382,10 @@ src/pet.rs                  # pet 相关子命令（install/validate/list）
 > `bundle_dmg.sh --skip-jenkins`（跳过 Finder 排版，产物仍含 app + Applications
 > 链接），或 `CI=true cargo tauri build` 让 tauri 自动加 `--skip-jenkins`。
 
-### 阶段 B：host-events crate 起架（1 天）
+### 阶段 B：harness-events crate 起架（1 天）
 - [ ] 修改 workspace `Cargo.toml` 加新 crate
-- [ ] 新建 `crates/agent-vitals-host-events/Cargo.toml`
-- [ ] 写 `lib.rs`：定义 `EventSource` trait + `Host` enum
+- [ ] 新建 `crates/agent-vitals-harness-events/Cargo.toml`
+- [ ] 写 `lib.rs`：定义 `EventSource` trait + `Harness` enum
 - [ ] 写 `tail.rs`：notify-based 文件监听（offset-based）
 - [ ] 写 `offset_store.rs`：5s 持久化
 - [ ] 编译通过

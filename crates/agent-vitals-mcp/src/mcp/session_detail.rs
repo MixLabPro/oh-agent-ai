@@ -103,7 +103,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         )
     })?;
 
-    let (host, _profile) = authority_query::session_row(conn, &session_key)
+    let (harness, _profile) = authority_query::session_row(conn, &session_key)
         .map_err(|e| ToolError::new("internal_error", format!("authority query: {e}")))?
         .ok_or_else(|| ToolError::new("invalid_argument", "session_ref resolved but the session row is gone"))?;
 
@@ -161,7 +161,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
             json!({
                 "event_at": ms_to_rfc3339_beijing(f.event_ts_ms),
                 "model_id": f.model_id,
-                "identity_kind": "host_raw",
+                "identity_kind": "harness_raw",
                 "observation_kind": f.observation_kind,
                 "peak": f.event_peak,
                 "fact_id": f.fact_id,
@@ -246,12 +246,12 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
 
     let data = json!({
         "session_ref": session_ref,
-        "host": host,
+        "harness": harness,
         "first_event_at": first.map(ms_to_rfc3339_beijing),
         "last_event_at": last.map(ms_to_rfc3339_beijing),
         "event_count": n,
         "model_ids": models.into_iter().collect::<Vec<_>>(),
-        "identity_kind": "host_raw",
+        "identity_kind": "harness_raw",
         "tokens": {
             "uncached_input_tokens": u,
             "cache_read_tokens": cr,
@@ -308,14 +308,14 @@ mod tests {
             [],
         ).unwrap();
         db.conn().execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+            "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
              VALUES (?1, 'dsh', 'priv-abc-99', 'ns', 'default', 1)",
             rusqlite::params![skey],
         ).unwrap();
         let (start, _) = beijing_day_bounds_ms("2026-09-07").unwrap();
         for (i, (m, peak, tok)) in [("m-a", 0, 100), ("m-a", 0, 50), ("m-b", 1, 200)].iter().enumerate() {
             db.conn().execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, session_key,
                      source_event_id, observation_kind, model_id, event_ts_ms, event_peak,
                      uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                      ingested_run_id, created_at_ms, updated_at_ms)
@@ -351,7 +351,7 @@ mod tests {
         let (_skey, sref) = seed_session(&home);
         let env = run(&json!({ "session_ref": sref }), &home).unwrap();
         let d = &env["data"];
-        assert_eq!(d["host"], "dsh");
+        assert_eq!(d["harness"], "dsh");
         assert_eq!(d["event_count"], 3);
         assert_eq!(d["tokens"]["total"], 350);
         assert_eq!(d["model_ids"], json!(["m-a", "m-b"]));

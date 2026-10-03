@@ -1,7 +1,7 @@
 //! 计费声明的保存前影响预览（计费主链规格 §5.5）。
 //!
 //! 三组数字、同一谓词：`moved`（会被移出按量估算的事实）、`kept`（同
-//! 服务商/期间内**未**命中作用域（任何宿主）、继续按量估算的事实）、`pending`（命中但
+//! 服务商/期间内**未**命中作用域（任何执行环境）、继续按量估算的事实）、`pending`（命中但
 //! 证据为 `conflict`、既不移出也不归因的事实）。事实选择来自
 //! `authority::billing_declaration_fact_selection`——与重算归因同一条 `WHERE`；
 //! 金额来自 `mcp::cost_breakdown::price_fact_selection`——与 MCP `cost_breakdown`
@@ -78,17 +78,17 @@ pub fn declaration_impact_preview(
 /// 「确认计费方式」面板的数据源（规格 §5.2 / B1）：`summary::unresolved_billing_groups_in`
 /// 的组 + 同一批事实的分币估算金额。金额来自 `price_fact_selection` 跑
 /// `SQL_UNRESOLVED_BILLING_FACT_WHERE`（与组 SQL 共享的谓词），按组键
-/// `(host, provider, model, evidence_basis, pricing_basis)` 归并、不跨币种相加。
+/// `(harness, provider, model, evidence_basis, pricing_basis)` 归并、不跨币种相加。
 /// 排序：有金额的组按 `amount_minor` 降序，无价卡的组按 tokens 降序排在其后。
 pub fn confirmation_groups(db: &AuthorityDb, month: &str) -> Value {
-    confirmation_groups_with(db, month, &account_evidence_by_host(), &endpoint_evidence_by_host())
+    confirmation_groups_with(db, month, &account_evidence_by_harness(), &endpoint_evidence_by_harness())
 }
 
 /// 账户证据由调用方注入（测试不读真实 HOME）。
 pub fn confirmation_groups_with(
     db: &AuthorityDb, month: &str,
     accounts: &std::collections::BTreeMap<String, agent_vitals_provider::AccountEvidence>,
-    endpoints: &std::collections::BTreeMap<String, agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence>,
+    endpoints: &std::collections::BTreeMap<String, agent_vitals_harnesses::sources::endpoint_evidence::EndpointEvidence>,
 ) -> Value {
     let mut report = crate::summary::unresolved_billing_groups_in(db, month);
     if report["status"] != json!("ok") {
@@ -114,7 +114,7 @@ pub fn confirmation_groups_with(
     for row in &priced.rows {
         let key = row["key"].as_object().map(|key| format!(
             "{}|{}|{}|{}|{}|{month}",
-            key["host"].as_str().unwrap_or(""),
+            key["harness"].as_str().unwrap_or(""),
             key["provider"].as_str().unwrap_or("<unknown>"),
             key["model"].as_str().unwrap_or("<unknown>"),
             key["evidence_basis"].as_str().unwrap_or("missing"),
@@ -159,11 +159,11 @@ pub fn confirmation_groups_with(
         }
     });
     // E 类：workbuddy 是积分制，不是货币——不进待确认列表（规格 §0 表 E）。
-    // 积分制宿主（workbuddy）不进金额面：这是**宿主声明**，不是名字比较——
-    // `AttributionProfile::credits_only` 住在 `HostProfile`（§10.6），判定器只读声明。
+    // 积分制执行环境（workbuddy）不进金额面：这是**执行环境声明**，不是名字比较——
+    // `AttributionProfile::credits_only` 住在 `HarnessProfile`（§10.6），判定器只读声明。
     groups.retain(|group| {
-        let host = group["host"].as_str().unwrap_or("");
-        !agent_vitals_domain::host_capability::attribution_profile(host).credits_only
+        let harness = group["harness"].as_str().unwrap_or("");
+        !agent_vitals_domain::harness_capability::attribution_profile(harness).credits_only
             && group["tokens"].as_i64().unwrap_or(0) > 0
     });
     for group in groups.iter_mut() {
@@ -176,27 +176,27 @@ pub fn confirmation_groups_with(
     report
 }
 
-/// 账户级证据（L2）：每个宿主读一次白名单字段；文件缺失 → 无证据。
-fn account_evidence_by_host() -> std::collections::BTreeMap<String, agent_vitals_provider::AccountEvidence> {
+/// 账户级证据（L2）：每个执行环境读一次白名单字段；文件缺失 → 无证据。
+fn account_evidence_by_harness() -> std::collections::BTreeMap<String, agent_vitals_provider::AccountEvidence> {
     let mut out = std::collections::BTreeMap::new();
     let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else { return out; };
-    if let Some(e) = agent_vitals_hosts::claude_account::read_claude_account(&home) {
-        out.insert(e.host.clone(), e);
+    if let Some(e) = agent_vitals_harnesses::claude_account::read_claude_account(&home) {
+        out.insert(e.harness.clone(), e);
     }
-    if let Some(e) = agent_vitals_hosts::codex_account::read_codex_account(&home) {
-        out.insert(e.host.clone(), e);
+    if let Some(e) = agent_vitals_harnesses::codex_account::read_codex_account(&home) {
+        out.insert(e.harness.clone(), e);
     }
     out
 }
 
-/// 本机所有宿主的端点/配置证据（A12、§10.2 层②）。读取器在
-/// `agent-vitals-hosts::sources::endpoint_evidence`——判定器不认识任何宿主的文件格式，
-/// 只吃中立结构；每个宿主读不到就是没有条目（不猜）。
-fn endpoint_evidence_by_host() -> std::collections::BTreeMap<String, agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence> {
+/// 本机所有执行环境的端点/配置证据（A12、§10.2 层②）。读取器在
+/// `agent-vitals-harnesses::sources::endpoint_evidence`——判定器不认识任何执行环境的文件格式，
+/// 只吃中立结构；每个执行环境读不到就是没有条目（不猜）。
+fn endpoint_evidence_by_harness() -> std::collections::BTreeMap<String, agent_vitals_harnesses::sources::endpoint_evidence::EndpointEvidence> {
     let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
         return Default::default();
     };
-    agent_vitals_hosts::sources::endpoint_evidence::read_all(&home)
+    agent_vitals_harnesses::sources::endpoint_evidence::read_all(&home)
 }
 
 /// 证据里已能说明「走的是官方路由」的 basis（与 `workbench.js::BILLING_ROUTE_KNOWN_OFFICIAL` 同表）。
@@ -211,24 +211,24 @@ const ROUTE_KNOWN_OFFICIAL: [&str; 2] = ["explicit-official-route", "session-nat
 /// 目录里的 L0 厂商和白名单账户证据；`inferred` 永远到不了 determined。
 fn auto_verdict(
     group: &Value, accounts: &std::collections::BTreeMap<String, agent_vitals_provider::AccountEvidence>,
-    endpoints: &std::collections::BTreeMap<String, agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence>,
+    endpoints: &std::collections::BTreeMap<String, agent_vitals_harnesses::sources::endpoint_evidence::EndpointEvidence>,
 ) -> Value {
     use agent_vitals_provider::PlanKind;
-    let host = group["host"].as_str().unwrap_or("");
+    let harness = group["harness"].as_str().unwrap_or("");
     let provider = group["provider_id"].as_str().filter(|p| *p != "<unknown>").map(str::to_string);
     let model = group["model_id"].as_str().unwrap_or("");
     let evidence = group["evidence_basis"].as_str().unwrap_or("missing");
     let vendor = agent_vitals_domain::attribution::model_vendor(model);
     let vendor_name = vendor.as_ref().map(|v| v.vendor.clone());
     let gateway_named = vendor.as_ref().is_some_and(|v| v.gateway_named);
-    // 配置面证据（跨宿主，A12）：会话日志**不记**端点，只有启动配置记（各宿主读哪个文件
-    // 见 `agent_vitals_hosts::sources::endpoint_evidence`）。配置里的端点都不是该模型厂商的
+    // 配置面证据（跨执行环境，A12）：会话日志**不记**端点，只有启动配置记（各执行环境读哪个文件
+    // 见 `agent_vitals_harnesses::sources::endpoint_evidence`）。配置里的端点都不是该模型厂商的
     // 官方端点 → 请求经中转。强度 `config-current`(4) 低于会话级，所以它只能把
     // 「官方还是中转」这一问变成一次**确认**，永远不能单独判 determined。
-    use agent_vitals_hosts::sources::endpoint_evidence::model_tail;
-    let endpoint = endpoints.get(host);
+    use agent_vitals_harnesses::sources::endpoint_evidence::model_tail;
+    let endpoint = endpoints.get(harness);
     let config_source = endpoint.map(|e| e.source.clone());
-    let live_hosts: Vec<String> = endpoint.map(|e| e.endpoint_hosts.clone()).unwrap_or_default();
+    let live_endpoint_hostnames: Vec<String> = endpoint.map(|e| e.endpoint_hostnames.clone()).unwrap_or_default();
     // 时间线证据（`config-time-bound`，cc-switch 的 provider 表）：这批事实的时间窗
     // `[first, last]` 与每个中转的建立时刻比——**建立晚于窗口末尾的中转从候选里剔掉**
     // （它那时不存在，这批用量不可能经它；2026-09-17：胜算云 09-11 深夜才建，09-09 的
@@ -248,32 +248,32 @@ fn auto_verdict(
         json!({
             "endpoint_host": r.endpoint_host, "label": r.label, "created_at_ms": r.created_at_ms,
             "is_current": r.is_current, "active_at_ms": r.active_at_ms, "relation": relation,
-            "relay_label": agent_vitals_hosts::sources::endpoint_evidence::relay_label_of(&r.endpoint_host),
+            "relay_label": agent_vitals_harnesses::sources::endpoint_evidence::relay_label_of(&r.endpoint_host),
         })
     }).collect();
-    let excluded_hosts: Vec<&str> = config_timeline.iter()
+    let excluded_harnesses: Vec<&str> = config_timeline.iter()
         .filter(|t| t["relation"] == json!("excluded"))
         .filter_map(|t| t["endpoint_host"].as_str()).collect();
     // 历史条目只在**没有会话级官方证据**时才补进候选：官方形状的用量（provider 自报 +
     // session-native）不因为 cc-switch 里配置过中转就多一条 conflict。剔除则无条件——
     // 当前配置指向一个当时不存在的端点，对官方用量同样不构成矛盾。
     let timeline_applies = !(provider.is_some() && ROUTE_KNOWN_OFFICIAL.contains(&evidence));
-    let mut all_hosts: Vec<String> = live_hosts.iter()
-        .filter(|h| !excluded_hosts.contains(&h.as_str())).cloned().collect();
+    let mut all_endpoint_hostnames: Vec<String> = live_endpoint_hostnames.iter()
+        .filter(|h| !excluded_harnesses.contains(&h.as_str())).cloned().collect();
     let mut timeline_added = false;
     if timeline_applies {
         for t in &config_timeline {
             let (Some(h), Some(rel)) = (t["endpoint_host"].as_str(), t["relation"].as_str()) else { continue };
-            if rel != "excluded" && !all_hosts.iter().any(|x| x == h) {
-                all_hosts.push(h.to_string());
+            if rel != "excluded" && !all_endpoint_hostnames.iter().any(|x| x == h) {
+                all_endpoint_hostnames.push(h.to_string());
                 timeline_added = true;
             }
         }
-        all_hosts.sort();
-        all_hosts.dedup();
+        all_endpoint_hostnames.sort();
+        all_endpoint_hostnames.dedup();
     }
-    let live_host_excluded = endpoint.and_then(|e| e.endpoint_host.as_deref())
-        .is_some_and(|h| excluded_hosts.contains(&h));
+    let live_harness_excluded = endpoint.and_then(|e| e.endpoint_host.as_deref())
+        .is_some_and(|h| excluded_harnesses.contains(&h));
     // **厂商未知时"官方端点"无从谈起**：`official_for_vendor` 恒 false，会把配置里的每个
     // 端点都算成中转——连 `api.anthropic.com` 也能被当成中转名写进声明（验收审查 iteration 7 #1）。
     let vendor_known = vendor_name.is_some();
@@ -287,21 +287,21 @@ fn auto_verdict(
             .or_else(|| e.model_endpoints.iter().find(|(k, _)| model_tail(k) == model_tail(model)))
             .map(|(k, v)| (k.clone(), v.clone()))
     });
-    let model_host = per_model.as_ref().map(|(_, v)| v.clone());
+    let model_endpoint_host = per_model.as_ref().map(|(_, v)| v.clone());
     let (config_relay, config_relay_multiple, config_relay_ambiguous) = if !vendor_known {
         (None, false, false)
-    } else if let Some(single) = model_host.clone() {
+    } else if let Some(single) = model_endpoint_host.clone() {
         if official_for_vendor(&single) { (None, false, false) } else { (Some(single), false, false) }
     } else if endpoint.is_some_and(|e| e.per_model_config) {
-        // **逐模型配置里没有这条模型 → 这条模型没有端点证据**。宿主级列表在逐模型配置里
-        // 不是"这个宿主的端点"，而是"某些模型的端点"，拿它给别的模型下结论就是上一轮那个
+        // **逐模型配置里没有这条模型 → 这条模型没有端点证据**。执行环境级列表在逐模型配置里
+        // 不是"这个执行环境的端点"，而是"某些模型的端点"，拿它给别的模型下结论就是上一轮那个
         // 类别错误（验收审查 iteration 9 #1：`hy3`/`glm-5.2` 这类没进配置表的模型会被
         // 说成"经中转（api.minimaxi.com）"）。
         (None, false, false)
     } else {
-        let relays: Vec<&String> = all_hosts.iter().filter(|h| !official_for_vendor(h)).collect();
-        let official = all_hosts.len() - relays.len();
-        if all_hosts.len() == 1 && relays.len() == 1 {
+        let relays: Vec<&String> = all_endpoint_hostnames.iter().filter(|h| !official_for_vendor(h)).collect();
+        let official = all_endpoint_hostnames.len() - relays.len();
+        if all_endpoint_hostnames.len() == 1 && relays.len() == 1 {
             (relays.first().map(|h| (*h).clone()), false, false)
         } else if official == 0 && relays.len() > 1 {
             (None, true, false)
@@ -313,15 +313,15 @@ fn auto_verdict(
     };
     // 第二路配置证据（用户 2026-09-16 实测指出）：**官方端点不带厂商 id，中转才需要**。
     // **作用域必须跟着配置的形状走**：逐模型配置（workbuddy/pi）里"某个模型的 id 带前缀"
-    // 只是那个模型的事——同一条文件里 `deepseek/…` 与裸 `MiniMax-M3` 并存，拿前者当宿主级
-    // 信号会把 MiniMax 说成经中转（验收审查 iteration 8 #1）。宿主级配置（claude/codex/dsh，
-    // 一套映射管全部请求）才是对全宿主的陈述。
+    // 只是那个模型的事——同一条文件里 `deepseek/…` 与裸 `MiniMax-M3` 并存，拿前者当执行环境级
+    // 信号会把 MiniMax 说成经中转（验收审查 iteration 8 #1）。执行环境级配置（claude/codex/dsh，
+    // 一套映射管全部请求）才是对全执行环境的陈述。
     let config_gateway_named = endpoint.map(|e| {
         if e.per_model_config {
             // 这条模型自己有没有逐模型条目、且它的 id 带前缀。
             // 前缀只是"像中转"的信号；它指向的端点若就是该厂商的官方端点，则官方端点说了算
             // （验收审查 iteration 9 #2：`minimax/MiniMax-M3 → api.minimaxi.com` 不该判中转）。
-            per_model.as_ref().is_some_and(|(key, host)| key.contains('/') && !official_for_vendor(host))
+            per_model.as_ref().is_some_and(|(key, harness)| key.contains('/') && !official_for_vendor(harness))
         } else {
             !e.gateway_named_models.is_empty()
         }
@@ -329,18 +329,18 @@ fn auto_verdict(
     let relay_evidence = config_relay.is_some() || config_relay_multiple || config_gateway_named;
     // 展示用的端点必须是**判定实际用的那一个**（逐模型优先），否则行面会说
     // "经中转（api.minimaxi.com）"而按钮写着另一个名字（验收审查 iteration 8 #2）。
-    let config_host = model_host.clone().or_else(|| {
-        // 逐模型配置没有"宿主级端点"可言——没有条目就**什么都不显示**，不拿第一个配置的
+    let config_endpoint_host = model_endpoint_host.clone().or_else(|| {
+        // 逐模型配置没有"执行环境级端点"可言——没有条目就**什么都不显示**，不拿第一个配置的
         // 端点冒充（验收审查 iteration 9 #3）。当前端点被时间线剔除时同样不显示它——
         // 行面写着一个当时不存在的端点就是在说假话；剩下唯一候选时显示那个。
-        if live_host_excluded {
+        if live_harness_excluded {
             config_relay.clone()
         } else {
             endpoint.filter(|e| !e.per_model_config).and_then(|e| e.endpoint_host.clone())
         }
     });
     let mut basis: Vec<String> = Vec::new();
-    // `conflict` = 宿主自报的 provider 与会话级路由证据指的不是同一家。这样的事实本身
+    // `conflict` = 执行环境自报的 provider 与会话级路由证据指的不是同一家。这样的事实本身
     // 就没有归因（emitter 写 `provider_id=null` / `metered_estimate`），判定器更不能拿它
     // 产 `determined`：规格 §2「Conflict 单列，不归因」、不变量 P3「冲突不吞」。
     // 曾经它落进 provider_reported 分支，codex 的冲突事实 + `auth_mode=chatgpt`
@@ -350,7 +350,7 @@ fn auto_verdict(
         return json!({
             "model_vendor": vendor_name, "gateway_named": gateway_named,
             "route_state": "conflict", "route_basis": evidence,
-            "billing_party": null, "config_endpoint": config_host, "config_source": config_source,
+            "billing_party": null, "config_endpoint": config_endpoint_host, "config_source": config_source,
             "billing_mode": null, "relationship_kind": null,
             "plan": null, "state": "needs_input", "question": null,
             "basis": ["route.conflict"],
@@ -377,7 +377,7 @@ fn auto_verdict(
         }
         "relay_config"
     } else if provider.is_some() {
-        basis.push("host.provider_reported".to_string());
+        basis.push("harness.provider_reported".to_string());
         "provider_reported"
     } else if gateway_named {
         basis.push("model.gateway_named".to_string());
@@ -393,7 +393,7 @@ fn auto_verdict(
         basis.push("config.endpoint.ambiguous".to_string());
     }
     // 时间线痕迹：剔除了谁、谁只覆盖后半段、候选里有没有历史条目——都要在依据里可见。
-    if !excluded_hosts.is_empty() {
+    if !excluded_harnesses.is_empty() {
         basis.push("config.timeline.excluded".to_string());
     }
     if config_timeline.iter().any(|t| t["relation"] == json!("partial")) {
@@ -404,15 +404,15 @@ fn auto_verdict(
     }
     // 网关式命名与配置指向的中转：计费方都不是模型厂商。
     let billing_party = if route_state == "relay_config" {
-        // 经中转时付款方是中转，**绝不能落回宿主自报的模型厂商**（验收审查 iteration 5 #2：
+        // 经中转时付款方是中转，**绝不能落回执行环境自报的模型厂商**（验收审查 iteration 5 #2：
         // 旧写法 `provider.clone().or_else(…)` 先命中 provider，行里就会出现
         // "经中转 · 计费方=minimax" 这种自相矛盾的标签）。认不出注册域（IP / 公共后缀）
         // 或说不出是哪一家时留空，让用户在弹窗里写。
-        config_relay.as_deref().and_then(agent_vitals_hosts::sources::endpoint_evidence::relay_label_of)
+        config_relay.as_deref().and_then(agent_vitals_harnesses::sources::endpoint_evidence::relay_label_of)
     } else {
         provider.clone().or_else(|| if route_state == "gateway" { None } else { vendor_name.clone() })
     };
-    let account = accounts.get(host).filter(|a| Some(&a.vendor) == billing_party.as_ref());
+    let account = accounts.get(harness).filter(|a| Some(&a.vendor) == billing_party.as_ref());
     let mut plan = json!(null);
     let (state, relationship_kind, billing_mode) = match (route_state, account.map(|a| a.plan_kind)) {
         ("official", Some(PlanKind::Subscription)) => {
@@ -426,10 +426,10 @@ fn auto_verdict(
             ("determined", Some("official_api"), Some("metered"))
         }
         // codex：rollout 自报 openai + 账户 chatgpt 登录 → 请求走 ChatGPT 后端，按套餐计。
-        // 自报 provider + 账户订阅 → 官方订阅：**只有声明了这条性质的宿主**才走
-        // （codex 的 `model_provider`），不是 `host == "codex"` 的名字判断。
+        // 自报 provider + 账户订阅 → 官方订阅：**只有声明了这条性质的执行环境**才走
+        // （codex 的 `model_provider`），不是 `harness == "codex"` 的名字判断。
         ("provider_reported", Some(PlanKind::Subscription))
-            if agent_vitals_domain::host_capability::attribution_profile(host).provider_reported_implies_official => {
+            if agent_vitals_domain::harness_capability::attribution_profile(harness).provider_reported_implies_official => {
             let a = account.unwrap();
             basis.push(format!("account.{}", a.plan_label.clone().unwrap_or_else(|| "subscription".into())));
             plan = json!({ "label": a.plan_label, "channel": a.billing_channel, "anchor_date": a.anchor_date, "source": a.source });
@@ -451,7 +451,7 @@ fn auto_verdict(
         "route_basis": evidence,
         "billing_party": billing_party,
         // 配置证据原样带出，UI 才能说清"配置指向哪"（不是我们猜的）。
-        "config_endpoint": config_host,
+        "config_endpoint": config_endpoint_host,
         "config_source": config_source,
         // 时间线（cc-switch）：每个配置过的中转与这批事实时间窗的关系；`partial` 条目的
         // `tokens_before` / `facts_before` 由 `confirmation_groups_with` 用库补上。
@@ -477,14 +477,14 @@ fn fill_timeline_splits(db: &AuthorityDb, group: &Value, verdict: &mut Value, mo
         let Some(cutoff) = entry["created_at_ms"].as_i64() else { continue };
         let sql = format!(
             "SELECT COUNT(*), COALESCE(SUM(f.uncached_input_tokens + f.cache_read_tokens + f.cache_write_tokens + f.output_tokens), 0)
-             FROM usage_facts f WHERE {} AND f.host = ?3 AND COALESCE(f.provider_id, '<unknown>') = ?4
+             FROM usage_facts f WHERE {} AND f.harness = ?3 AND COALESCE(f.provider_id, '<unknown>') = ?4
                AND COALESCE(f.model_id, '<unknown>') = ?5 AND COALESCE(f.evidence_basis, 'missing') = ?6
                AND COALESCE(f.pricing_basis, 'unavailable') = ?7",
             agent_vitals_data::authority_query::SQL_UNRESOLVED_BILLING_FACT_WHERE,
         );
         let row: Result<(i64, i64), _> = db.conn().query_row(&sql, rusqlite::params![
             month_start_ms, cutoff,
-            group["host"].as_str().unwrap_or(""),
+            group["harness"].as_str().unwrap_or(""),
             group["provider_id"].as_str().unwrap_or("<unknown>"),
             group["model_id"].as_str().unwrap_or("<unknown>"),
             group["evidence_basis"].as_str().unwrap_or("missing"),
@@ -519,8 +519,8 @@ fn merge_timeline(into: &mut Value, from: &Value) {
     };
     let mut rows: Vec<Value> = into.as_array().cloned().unwrap_or_default();
     for f in from_rows {
-        let host = f["endpoint_host"].clone();
-        match rows.iter_mut().find(|r| r["endpoint_host"] == host) {
+        let harness = f["endpoint_host"].clone();
+        match rows.iter_mut().find(|r| r["endpoint_host"] == harness) {
             Some(existing) => {
                 let (er, fr) = (existing["relation"].as_str().unwrap_or(""), f["relation"].as_str().unwrap_or(""));
                 existing["relation"] = json!(merge_relation(er, fr));
@@ -538,7 +538,7 @@ fn merge_timeline(into: &mut Value, from: &Value) {
     *into = json!(rows);
 }
 
-/// 列表行 = `host × 计费方/厂商 × route_state × 判定状态`；模型折进 `models[]`，
+/// 列表行 = `harness × 计费方/厂商 × route_state × 判定状态`；模型折进 `models[]`，
 /// 数字求和、金额按币种归并。
 fn clusters_of(groups: &[Value]) -> Vec<Value> {
     let mut order: Vec<String> = Vec::new();
@@ -549,7 +549,7 @@ fn clusters_of(groups: &[Value]) -> Vec<Value> {
     let mut endpoints_seen: BTreeMap<String, std::collections::BTreeSet<Option<String>>> = BTreeMap::new();
     for group in groups {
         let v = &group["auto_verdict"];
-        // 行主键 = `host × (计费方 or 厂商) × route_state × 判定状态 × 日期`（规格 §5.1）。
+        // 行主键 = `harness × (计费方 or 厂商) × route_state × 判定状态 × 日期`（规格 §5.1）。
         // 空位补上 `model_vendor`：网关行的 `billing_party` 恒空，只按它分组会把
         // anthropic 与 deepseek 的网关模型并成一行、再用第一组的厂商当整行标签
         // （验收审查 iteration 3 #4）。
@@ -558,7 +558,7 @@ fn clusters_of(groups: &[Value]) -> Vec<Value> {
             .unwrap_or("<unknown>");
         let key = format!(
             "{}|{}|{}|{}|{}|{}",
-            group["host"].as_str().unwrap_or(""),
+            group["harness"].as_str().unwrap_or(""),
             party,
             v["route_state"].as_str().unwrap_or("unknown"),
             v["state"].as_str().unwrap_or("needs_input"),
@@ -569,7 +569,7 @@ fn clusters_of(groups: &[Value]) -> Vec<Value> {
             order.push(key.clone());
             json!({
                 "cluster_id": key,
-                "host": group["host"], "billing_party": v["billing_party"], "model_vendor": v["model_vendor"],
+                "harness": group["harness"], "billing_party": v["billing_party"], "model_vendor": v["model_vendor"],
                 "provider_id": group["provider_id"], "evidence_basis": group["evidence_basis"],
                 "pricing_basis": group["pricing_basis"],
                 "effective_start": group["effective_start"], "effective_end": group["effective_end"],
@@ -670,7 +670,7 @@ mod tests {
              VALUES ('run', 1, 'cli', 'succeeded', 13) ON CONFLICT(run_id) DO NOTHING", [],
         ).unwrap();
         db.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                  observation_kind, provider_id, model_id, event_ts_ms, event_peak, pricing_basis,
                  evidence_basis, billing_mode, uncached_input_tokens, cache_read_tokens,
                  cache_write_tokens, output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
@@ -693,7 +693,7 @@ mod tests {
     /// 规格 R5：预览「移出估算」的金额 == 重算后 MCP `cost_breakdown` 从按量桶里
     /// 消失、进入 `subscription` 桶的那部分——同一谓词、同一计价路径；且预览不写任何行。
     ///
-    /// 2026-10-01 语义变更：官方订阅默认覆盖「该宿主下该服务商」的全部模型，声明里列的模型清单
+    /// 2026-10-01 语义变更：官方订阅默认覆盖「该执行环境下该服务商」的全部模型，声明里列的模型清单
     /// 不再限制它（否则每个新模型都要用户回来补声明）。所以声明只列 `gpt-5.6-sol` 时，
     /// `gpt-5.6-luna` 也一起移出估算，`kept` 为空；曾断言「清单外的模型留在 kept」。
     #[test]
@@ -843,14 +843,14 @@ mod tests {
             "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
              VALUES ('run', 1, 'cli', 'succeeded', 14)", [],
         ).unwrap();
-        let insert = |fact: &str, host: &str, provider: Option<&str>, model: &str, evidence: &str, pricing: &str, ts: i64| {
+        let insert = |fact: &str, harness: &str, provider: Option<&str>, model: &str, evidence: &str, pricing: &str, ts: i64| {
             db.conn().execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                      observation_kind, provider_id, model_id, event_ts_ms, event_peak, pricing_basis, evidence_basis,
                      billing_mode, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                      ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1, ?2, 'm', 'sess', ?1, 'token_count', ?3, ?4, ?5, 0, ?6, ?7, 'metered', 1000, 0, 0, 10, 'run', 1, 1)",
-                rusqlite::params![fact, host, provider, model, ts, pricing, evidence],
+                rusqlite::params![fact, harness, provider, model, ts, pricing, evidence],
             ).unwrap();
         };
         insert("f-claude-official", "claude-code", Some("anthropic"), "claude-opus-5", "session-native", "route-observed", noon);
@@ -861,19 +861,19 @@ mod tests {
         insert("f-workbuddy", "workbuddy", None, "hy4-preview-f", "missing", "metered_estimate", noon + 5);
         let mut accounts = std::collections::BTreeMap::new();
         accounts.insert("claude-code".to_string(), AccountEvidence {
-            host: "claude-code".into(), vendor: "anthropic".into(), plan_kind: PlanKind::Subscription,
+            harness: "claude-code".into(), vendor: "anthropic".into(), plan_kind: PlanKind::Subscription,
             plan_label: Some("Claude Pro".into()), billing_channel: Some("apple_subscription".into()),
             anchor_date: Some("2025-07-20".into()), evidence_basis: EvidenceBasis::AccountTimeBound, source: "test".into(),
         });
         accounts.insert("codex".to_string(), AccountEvidence {
-            host: "codex".into(), vendor: "openai".into(), plan_kind: PlanKind::Subscription,
+            harness: "codex".into(), vendor: "openai".into(), plan_kind: PlanKind::Subscription,
             plan_label: Some("ChatGPT".into()), billing_channel: None, anchor_date: None,
             evidence_basis: EvidenceBasis::AccountTimeBound, source: "test".into(),
         });
         let report = confirmation_groups_with(&db, "2026-08", &accounts, &Default::default());
         assert_eq!(report["status"], json!("ok"), "{report}");
         let groups = report["groups"].as_array().unwrap();
-        assert!(groups.iter().all(|g| g["host"] != json!("workbuddy")), "credits host must not be pending");
+        assert!(groups.iter().all(|g| g["harness"] != json!("workbuddy")), "credits harness must not be pending");
         let verdict_of = |model: &str| groups.iter().find(|g| g["model_id"] == json!(model)).unwrap()["auto_verdict"].clone();
         let claude = verdict_of("claude-opus-5");
         assert_eq!(claude["state"], json!("determined"));
@@ -891,7 +891,7 @@ mod tests {
         let clusters = report["clusters"].as_array().unwrap();
         assert!(clusters.len() >= 4, "{clusters:?}");
         assert_eq!(clusters[0]["auto_verdict"]["state"], json!("determined"), "determined clusters come first");
-        assert!(clusters.iter().all(|c| c["host"] != json!("workbuddy")));
+        assert!(clusters.iter().all(|c| c["harness"] != json!("workbuddy")));
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -911,20 +911,20 @@ mod tests {
             "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
              VALUES ('run', 1, 'cli', 'succeeded', 14)", [],
         ).unwrap();
-        let insert = |fact: &str, host: &str, provider: Option<&str>, model: &str, evidence: &str,
+        let insert = |fact: &str, harness: &str, provider: Option<&str>, model: &str, evidence: &str,
                       pricing: &str, uncached: i64, output: i64, ts: i64| {
             db.conn().execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                      observation_kind, provider_id, model_id, event_ts_ms, event_peak, pricing_basis, evidence_basis,
                      billing_mode, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                      ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1, ?2, 'm', 'sess', ?1, 'token_count', ?3, ?4, ?5, 0, ?6, ?7, 'metered', ?8, 0, 0, ?9, 'run', 1, 1)",
-                rusqlite::params![fact, host, provider, model, ts, pricing, evidence, uncached, output],
+                rusqlite::params![fact, harness, provider, model, ts, pricing, evidence, uncached, output],
             ).unwrap();
         };
-        // 冲突事实：宿主自报 openai，但会话路由证据指向别家（emitter 真会这么写）。
+        // 冲突事实：执行环境自报 openai，但会话路由证据指向别家（emitter 真会这么写）。
         insert("f-conflict", "codex", Some("openai"), "gpt-5.6-sol", "conflict", "metered_estimate", 1000, 10, noon);
-        // 官方路由 + API key 账户 → 官方 API 按量（determined，不是订阅）。换一个宿主：
+        // 官方路由 + API key 账户 → 官方 API 按量（determined，不是订阅）。换一个执行环境：
         // claude-code 的账户是订阅，套不上 ApiKey 分支。
         insert("f-apikey", "dsh", Some("anthropic"), "claude-haiku-4-5", "session-native", "route-observed", 1000, 10, noon + 1);
         // 官方路由 + 无账户证据 → 只能问计费方式。
@@ -945,19 +945,19 @@ mod tests {
         let mut accounts = std::collections::BTreeMap::new();
         // claude-code 的账户是 anthropic 订阅；minimax 那行没有账户证据，不套用。
         accounts.insert("claude-code".to_string(), AccountEvidence {
-            host: "claude-code".into(), vendor: "anthropic".into(), plan_kind: PlanKind::Subscription,
+            harness: "claude-code".into(), vendor: "anthropic".into(), plan_kind: PlanKind::Subscription,
             plan_label: Some("Claude Pro".into()), billing_channel: None, anchor_date: Some("2025-07-20".into()),
             evidence_basis: EvidenceBasis::AccountTimeBound, source: "test".into(),
         });
         // 官方路由 + API key 账户 → 官方 API 按量：这是"API key 不是订阅"的唯一出处。
         accounts.insert("dsh".to_string(), AccountEvidence {
-            host: "dsh".into(), vendor: "anthropic".into(), plan_kind: PlanKind::ApiKey,
+            harness: "dsh".into(), vendor: "anthropic".into(), plan_kind: PlanKind::ApiKey,
             plan_label: None, billing_channel: None, anchor_date: None,
             evidence_basis: EvidenceBasis::AccountTimeBound, source: "test".into(),
         });
         // codex 登录的是 openai 但事实是冲突：既不能 determined，也不能拿到 ChatGPT 套餐。
         accounts.insert("codex".to_string(), AccountEvidence {
-            host: "codex".into(), vendor: "openai".into(), plan_kind: PlanKind::Subscription,
+            harness: "codex".into(), vendor: "openai".into(), plan_kind: PlanKind::Subscription,
             plan_label: Some("ChatGPT".into()), billing_channel: None, anchor_date: None,
             evidence_basis: EvidenceBasis::AccountTimeBound, source: "test".into(),
         });
@@ -1032,22 +1032,22 @@ mod tests {
             "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
              VALUES ('run', 1, 'cli', 'succeeded', 14)", [],
         ).unwrap();
-        let insert = |fact: &str, host: &str, model: &str, evidence: &str, ts: i64| {
+        let insert = |fact: &str, harness: &str, model: &str, evidence: &str, ts: i64| {
             db.conn().execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                      observation_kind, provider_id, model_id, event_ts_ms, event_peak, pricing_basis, evidence_basis,
                      billing_mode, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                      ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1, ?2, 'm', 'sess', ?1, 'token_count', NULL, ?3, ?4, 0, 'metered_estimate', ?5, 'metered', 1000, 0, 0, 10, 'run', 1, 1)",
-                rusqlite::params![fact, host, model, ts, evidence],
+                rusqlite::params![fact, harness, model, ts, evidence],
             ).unwrap();
         };
         insert("f-relay", "claude-code", "deepseek-v4-flash", "inferred", noon);
         insert("f-official-endpoint", "claude-code", "deepseek-v4-pro", "inferred", noon + 1);
-        // 官方形状（宿主 provider + session-native）与"配置指向中转"可以同时成立——
+        // 官方形状（执行环境 provider + session-native）与"配置指向中转"可以同时成立——
         // 中转代理 Anthropic 时会原样保留 req_01/msg_01 形状。
         db.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                  observation_kind, provider_id, model_id, event_ts_ms, event_peak, pricing_basis, evidence_basis,
                  billing_mode, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                  ingested_run_id, created_at_ms, updated_at_ms)
@@ -1056,11 +1056,11 @@ mod tests {
             rusqlite::params![noon + 2],
         ).unwrap();
         let mut endpoints = std::collections::BTreeMap::new();
-        endpoints.insert("claude-code".to_string(), agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence {
-            host: "claude-code".to_string(),
+        endpoints.insert("claude-code".to_string(), agent_vitals_harnesses::sources::endpoint_evidence::EndpointEvidence {
+            harness: "claude-code".to_string(),
             base_url: Some("https://router.shengsuanyun.com/api".to_string()),
             endpoint_host: Some("router.shengsuanyun.com".to_string()),
-            endpoint_hosts: vec!["router.shengsuanyun.com".to_string()],
+            endpoint_hostnames: vec!["router.shengsuanyun.com".to_string()],
             model_endpoints: Default::default(),
             per_model_config: false,
             provider_name: None,
@@ -1089,11 +1089,11 @@ mod tests {
         assert_eq!(official_shape["config_endpoint"], json!("router.shengsuanyun.com"));
         // 配置里列了多个端点（workbuddy 本机就配了三个）：只说"里面有中转"，不替用户挑一个
         // ——计费方留空、依据记 `config.endpoint.multiple`（验收审查 iteration 5 #5）。
-        let multi = agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence {
-            host: "claude-code".to_string(),
+        let multi = agent_vitals_harnesses::sources::endpoint_evidence::EndpointEvidence {
+            harness: "claude-code".to_string(),
             base_url: Some("https://a.example-relay.com/x".to_string()),
             endpoint_host: Some("a.example-relay.com".to_string()),
-            endpoint_hosts: vec!["a.example-relay.com".to_string(), "b.example-relay.com".to_string()],
+            endpoint_hostnames: vec!["a.example-relay.com".to_string(), "b.example-relay.com".to_string()],
             model_endpoints: Default::default(),
             per_model_config: false,
             provider_name: None,
@@ -1113,7 +1113,7 @@ mod tests {
         // 验收审查 iteration 7 #1：**厂商未知时"官方端点"无从谈起**——不能把配置里的
         // 每个端点都算成中转（旧写法会把 `api.anthropic.com` 说成中转名并写进声明）。
         db.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                  observation_kind, provider_id, model_id, event_ts_ms, event_peak, pricing_basis, evidence_basis,
                  billing_mode, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                  ingested_run_id, created_at_ms, updated_at_ms)
@@ -1128,10 +1128,10 @@ mod tests {
             "an unrecognised model vendor makes 'official endpoint' undefined — no relay claim: {unknown}");
         assert_eq!(unknown["billing_party"], json!(null));
         assert!(!unknown["basis"].as_array().unwrap().contains(&json!("config.endpoint")), "{unknown}");
-        // 经中转时计费方是中转，**不能落回宿主自报的模型厂商**（验收审查 iteration 5 #2：
+        // 经中转时计费方是中转，**不能落回执行环境自报的模型厂商**（验收审查 iteration 5 #2：
         // 旧写法会产出"经中转 · 计费方=minimax"这种自相矛盾的行）。
         db.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                  observation_kind, provider_id, model_id, event_ts_ms, event_peak, pricing_basis, evidence_basis,
                  billing_mode, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                  ingested_run_id, created_at_ms, updated_at_ms)
@@ -1144,13 +1144,13 @@ mod tests {
             .find(|g| g["model_id"] == json!("MiniMax-M3")).unwrap()["auto_verdict"].clone();
         assert_eq!(reported["route_state"], json!("relay_config"), "{reported}");
         assert_eq!(reported["billing_party"], json!("shengsuanyun.com"),
-            "the payer is the relay, never the host-reported model vendor: {reported}");
+            "the payer is the relay, never the harness-reported model vendor: {reported}");
         // 验收审查 iteration 7 #2：官方与中转**混着配**时不猜也不装作没看见——留依据、不给断言。
-        let mixed = agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence {
-            host: "claude-code".to_string(),
+        let mixed = agent_vitals_harnesses::sources::endpoint_evidence::EndpointEvidence {
+            harness: "claude-code".to_string(),
             base_url: Some("https://api.minimaxi.com/v1".to_string()),
             endpoint_host: Some("api.minimaxi.com".to_string()),
-            endpoint_hosts: vec!["api.minimaxi.com".to_string(), "alpha-relay.example".to_string()],
+            endpoint_hostnames: vec!["api.minimaxi.com".to_string(), "alpha-relay.example".to_string()],
             model_endpoints: Default::default(),
             per_model_config: false,
             provider_name: None,
@@ -1167,9 +1167,9 @@ mod tests {
         assert_ne!(mixed_verdict["route_state"], json!("relay_config"),
             "an official and a relay endpoint side by side is not a relay assertion: {mixed_verdict}");
         assert!(mixed_verdict["basis"].as_array().unwrap().contains(&json!("config.endpoint.ambiguous")), "{mixed_verdict}");
-        // 验收审查 iteration 7 #2 的另一半：**逐模型**端点优先于宿主级列表（workbuddy/pi 的形状）。
-        // 夹具配一个**真实可达**的宿主：只有 pi/workbuddy 会产出 `model_endpoints` +
-        // `per_model_config: true`（claude/codex/dsh 恒为宿主级），而 workbuddy 被
+        // 验收审查 iteration 7 #2 的另一半：**逐模型**端点优先于执行环境级列表（workbuddy/pi 的形状）。
+        // 夹具配一个**真实可达**的执行环境：只有 pi/workbuddy 会产出 `model_endpoints` +
+        // `per_model_config: true`（claude/codex/dsh 恒为执行环境级），而 workbuddy 被
         // `credits_only` 摘掉，所以用 pi（它没有注册人格 → NEUTRAL，正好也走通用路径）。
         // 配置侧的键全是带前缀的（真机 pi store 也有）；"裸 id"出现在**事实**侧
         // （`f-pi-deepseek` 是 `deepseek-v4-flash`），用来钉最后一段匹配。
@@ -1177,12 +1177,12 @@ mod tests {
         insert("f-pi-orphan", "pi", "deepseek-v4-flash-0731", "inferred", noon + 6);
         insert("f-pi-minimax", "pi", "MiniMax-M3", "inferred", noon + 7);
         insert("f-pi-deepseek-pro", "pi", "deepseek/deepseek-v4-pro-0813", "inferred", noon + 8);
-        let per_model = agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence {
-            host: "pi".to_string(),
+        let per_model = agent_vitals_harnesses::sources::endpoint_evidence::EndpointEvidence {
+            harness: "pi".to_string(),
             base_url: Some("https://api.minimaxi.com/v1".to_string()),
             endpoint_host: Some("api.minimaxi.com".to_string()),
             // 真机 workbuddy 文件里就是三个端点（含官方与两个中转）。
-            endpoint_hosts: vec!["api.minimaxi.com".to_string(), "beta-router.shengsuanyun.com".to_string(),
+            endpoint_hostnames: vec!["api.minimaxi.com".to_string(), "beta-router.shengsuanyun.com".to_string(),
                 "router.shengsuanyun.com".to_string()],
             model_endpoints: [
                 // 带前缀的键 + **官方**端点：前缀不该把官方端点说成中转（iteration 9 #2）。
@@ -1195,7 +1195,7 @@ mod tests {
             provider_name: Some("openai-codex".to_string()),
             // 真机形状：`observe_model` 会把**每个**带 `/` 的 id 收进来，而上面三条
             // `model_endpoints` 的键就是那三个 id —— 所以能产出那些端点的文件必然产出
-            // 这三条。这条列表**不是**对全宿主的陈述，拿它给 MiniMax 下结论就是
+            // 这三条。这条列表**不是**对全执行环境的陈述，拿它给 MiniMax 下结论就是
             // iteration 8 #1 抓到的缺陷（`per_model_config` 下判定器根本不读它）。
             gateway_named_models: vec![
                 "deepseek/deepseek-v4-flash".to_string(),
@@ -1210,14 +1210,14 @@ mod tests {
         pm_endpoints.insert("pi".to_string(), per_model);
         let pm_report = confirmation_groups_with(&db, "2026-08", &accounts, &pm_endpoints);
         let pm_groups = pm_report["groups"].as_array().unwrap();
-        let report_cluster_of = |report: &Value, host: &str, model: &str| -> Value {
+        let report_cluster_of = |report: &Value, harness: &str, model: &str| -> Value {
             report["clusters"].as_array().unwrap().iter()
-                .find(|c| c["host"] == json!(host)
+                .find(|c| c["harness"] == json!(harness)
                     && c["models"].as_array().is_some_and(|ms| ms.iter().any(|m| m["model_id"] == json!(model))))
                 .cloned().unwrap()
         };
         let pi_verdict = |model: &str| pm_groups.iter()
-            .find(|g| g["host"] == json!("pi") && g["model_id"] == json!(model)).unwrap()["auto_verdict"].clone();
+            .find(|g| g["harness"] == json!("pi") && g["model_id"] == json!(model)).unwrap()["auto_verdict"].clone();
         let minimax = pi_verdict("MiniMax-M3");
         assert_ne!(minimax["route_state"], json!("relay_config"),
             "the per-model endpoint for MiniMax is its official one: {minimax}");
@@ -1229,7 +1229,7 @@ mod tests {
         assert_eq!(deepseek["billing_party"], json!("shengsuanyun.com"),
             "the per-model endpoint names the relay exactly: {deepseek}");
         assert_eq!(deepseek["config_endpoint"], json!("beta-router.shengsuanyun.com"),
-            "the displayed endpoint must be the per-model one, not the first configured host: {deepseek}");
+            "the displayed endpoint must be the per-model one, not the first configured harness: {deepseek}");
         // 验收审查 iteration 9 #1/#3：配置表里**没有**这条模型时，逐模型配置对它就毫无证据——
         // 不能拿"某些模型的端点"下结论，也不能把第一个配置的端点冒充成它的（`hy3`/`glm-5.2`
         // 这类模型在真机就是这样）。
@@ -1248,15 +1248,15 @@ mod tests {
             "never display another model's endpoint as this one's: {orphan}");
         assert!(orphan["basis"].as_array().unwrap().is_empty() || !orphan["basis"].as_array().unwrap().iter().any(|b| b.as_str().unwrap_or("").starts_with("config.")),
             "{orphan}");
-        // 配置是整个宿主一份的（这是"当前配置"的语义，不是逐条的），所以同一宿主下
+        // 配置是整个执行环境一份的（这是"当前配置"的语义，不是逐条的），所以同一执行环境下
         // 另一个 deepseek 组同样是 relay_config——这正是我们要的：它不逐模型乱猜。
         assert_eq!(verdict_of("deepseek-v4-pro")["route_state"], json!("relay_config"));
         // 反过来：基址就是该厂商的官方端点时，不能凭空造出中转（同库换一份配置重跑）。
-        let official = agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence {
-            host: "claude-code".to_string(),
+        let official = agent_vitals_harnesses::sources::endpoint_evidence::EndpointEvidence {
+            harness: "claude-code".to_string(),
             base_url: Some("https://api.deepseek.com".to_string()),
             endpoint_host: Some("api.deepseek.com".to_string()),
-            endpoint_hosts: vec!["api.deepseek.com".to_string()],
+            endpoint_hostnames: vec!["api.deepseek.com".to_string()],
             model_endpoints: Default::default(),
             per_model_config: false,
             provider_name: None,
@@ -1269,11 +1269,11 @@ mod tests {
         official_endpoints.insert("claude-code".to_string(), official);
         // 只有前缀证据、没有基址：仍判经中转，但**说不出哪一家**（不猜），计费方留空，
         // 等用户在弹窗里写（用户 2026-09-16：官方不带厂商 id，中转才需要）。
-        let prefix_only = agent_vitals_hosts::sources::endpoint_evidence::EndpointEvidence {
-            host: "claude-code".to_string(),
+        let prefix_only = agent_vitals_harnesses::sources::endpoint_evidence::EndpointEvidence {
+            harness: "claude-code".to_string(),
             base_url: None,
             endpoint_host: None,
-            endpoint_hosts: Vec::new(),
+            endpoint_hostnames: Vec::new(),
             model_endpoints: Default::default(),
             per_model_config: false,
             provider_name: None,
@@ -1344,7 +1344,7 @@ mod tests {
         ).unwrap();
         let custom = |fact_id: &str, model: &str, ts: i64, tokens: i64| {
             db.conn().execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                      observation_kind, provider_id, model_id, event_ts_ms, event_peak, pricing_basis, evidence_basis,
                      billing_mode, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                      ingested_run_id, created_at_ms, updated_at_ms)
@@ -1362,15 +1362,15 @@ mod tests {
         // 官方形状（ChatGPT 订阅路径）：provider 自报 openai + session-native，09-09。
         seed_codex_fact(&db, "official-0909", "gpt-5.6-luna", at(9, 9), 500, 5);
 
-        use agent_vitals_hosts::sources::endpoint_evidence::{EndpointEvidence, RelayRecord};
+        use agent_vitals_harnesses::sources::endpoint_evidence::{EndpointEvidence, RelayRecord};
         use agent_vitals_provider::{AccountEvidence, EvidenceBasis};
         let mut endpoints = std::collections::BTreeMap::new();
         endpoints.insert("codex".to_string(), EndpointEvidence {
-            host: "codex".to_string(),
+            harness: "codex".to_string(),
             // 当前 config.toml 指向胜算云（同步那一刻的配置）。
             base_url: Some("https://router.shengsuanyun.com/api/v1".to_string()),
             endpoint_host: Some("router.shengsuanyun.com".to_string()),
-            endpoint_hosts: vec!["router.shengsuanyun.com".to_string()],
+            endpoint_hostnames: vec!["router.shengsuanyun.com".to_string()],
             model_endpoints: Default::default(),
             per_model_config: false,
             provider_name: None,
@@ -1388,8 +1388,8 @@ mod tests {
         let report = confirmation_groups_with(&db, "2026-09", &accounts, &endpoints);
         let groups = report["groups"].as_array().unwrap();
         let verdict_of = |model: &str| groups.iter().find(|g| g["model_id"] == json!(model)).unwrap()["auto_verdict"].clone();
-        let relation = |v: &Value, host: &str| v["config_timeline"].as_array().unwrap().iter()
-            .find(|t| t["endpoint_host"] == json!(host)).cloned().expect("timeline entry");
+        let relation = |v: &Value, harness: &str| v["config_timeline"].as_array().unwrap().iter()
+            .find(|t| t["endpoint_host"] == json!(harness)).cloned().expect("timeline entry");
 
         // 1. 整组早于胜算云建立 → 剔除；cogfoundry 成为唯一候选与计费方。
         let luna = verdict_of("openai/gpt-5.6-luna");

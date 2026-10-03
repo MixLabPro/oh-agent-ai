@@ -1,4 +1,4 @@
-"""Skill Vitals 静态体检子面：SKILL.md 扫描器 + 安装时宿主适配器。
+"""Skill Vitals 静态体检子面：SKILL.md 扫描器 + 安装时执行环境适配器。
 
 对应 Rust `src/skills/`。与 `agent/` 的边界见 package 顶层 docstring——
 **「skill 体检」是静态资产审计（本子包），「skill 执行」是会话内审计

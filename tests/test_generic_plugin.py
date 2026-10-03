@@ -1,6 +1,6 @@
-"""generic 插件宿主 Python twin 的行为测试（HOST_MANIFEST_DSL_SPEC §8）。
+"""generic 插件执行环境 Python twin 的行为测试（HARNESS_MANIFEST_DSL_SPEC §8）。
 
-与 Rust 的跨语言字节对齐由 golden case `host-generic-zcode` 钉（双拍）；
+与 Rust 的跨语言字节对齐由 golden case `harness-generic-zcode` 钉（双拍）；
 本文件钉 Python 侧行为不变量本身：三态边界、bool/int 纪律、event key
 编码、门禁拒绝。
 """
@@ -79,7 +79,7 @@ class ManifestRulesTest(unittest.TestCase):
     def test_schema_version_bounds_match_runtime_grammar(self):
         import re
         from agent_vitals.agent.generic_manifest import _release_version
-        schema_path = Path(__file__).resolve().parent.parent / "docs" / "schemas" / "host-manifest-v1.json"
+        schema_path = Path(__file__).resolve().parent.parent / "docs" / "schemas" / "harness-manifest-v1.json"
         rule = json.loads(schema_path.read_text(encoding="utf-8"))["properties"]["min_app_version"]
         for version in ("0.0.0", "1.4.0", "4294967295.4294967295.4294967295",
                         "4294967296.0.0", "1.4294967296.0", "1.0.4294967296",
@@ -89,7 +89,7 @@ class ManifestRulesTest(unittest.TestCase):
                 self.assertEqual(bool(accepted), _release_version(version) is not None)
 
     def test_shared_capability_fixtures(self):
-        fixture = Path(__file__).resolve().parent.parent / "fixtures" / "host-manifest-capabilities.json"
+        fixture = Path(__file__).resolve().parent.parent / "fixtures" / "harness-manifest-capabilities.json"
         for case in json.loads(fixture.read_text(encoding="utf-8")):
             with self.subTest(case=case):
                 value = zcode_manifest()
@@ -120,7 +120,7 @@ class ManifestRulesTest(unittest.TestCase):
         for minimum in ("0.0.0", APP_VERSION):
             v = zcode_manifest()
             v.update(min_app_version=minimum, requires={"recipes": list(RECIPE_IDS), "features": []})
-            self.assertEqual(parse_manifest(v).facts_host, "host:zcode")
+            self.assertEqual(parse_manifest(v).facts_harness, "harness:zcode")
         cases = [
             ({"min_app_version": "4294967295.0.0"}, "min_app_version"),
             ({"min_app_version": "01.0.0"}, "min_app_version"),
@@ -224,7 +224,7 @@ class GateAndE2ETest(unittest.TestCase):
             self.assertEqual(before, sorted(str(p.relative_to(tmp)) for p in Path(tmp).rglob("*")))
 
     def _setup(self, tmp):
-        manifest_dir = Path(tmp) / "hosts.d" / "zcode"
+        manifest_dir = Path(tmp) / "harnesses.d" / "zcode"
         manifest_dir.mkdir(parents=True)
         (manifest_dir / "manifest.json").write_text(
             json.dumps(zcode_manifest(), ensure_ascii=False), encoding="utf-8")
@@ -266,7 +266,7 @@ class GateAndE2ETest(unittest.TestCase):
             self.assertEqual(report["emitted"], 2)
             self.assertEqual(report["models"], ["GLM-5.3"])
             self.assertEqual(facts[0]["fact_id"][:4], "uf1-")
-            self.assertEqual(facts[0]["host"], "host:zcode")
+            self.assertEqual(facts[0]["harness"], "harness:zcode")
 
 
 if __name__ == "__main__":

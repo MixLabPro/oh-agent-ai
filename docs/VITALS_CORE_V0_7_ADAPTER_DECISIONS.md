@@ -1,4 +1,4 @@
-# Vitals Core v0.7 —— Host Adapter 改造立项决策（候选 #3）
+# Vitals Core v0.7 —— Harness Adapter 改造立项决策（候选 #3）
 
 > 状态：**已拍板 v1.0（2026-09-03 拍板）**——本文件是 spec §3 主体候选
 > #3 启动前的立项决策清单。每条决策已拍板（见 §5 决策汇总）；后续
@@ -43,7 +43,7 @@
 
 ### A.0 现状
 
-`crates/agent-vitals-core/src/adapters/hosts/codex/sessions/usage.rs:66-71` 的 5 桶
+`crates/agent-vitals-core/src/adapters/harnesses/codex/sessions/usage.rs:66-71` 的 5 桶
 `CODEX_TOKEN_FIELDS`：
 - `uncached_input_tokens`
 - `output_tokens`
@@ -58,7 +58,7 @@
 
 | 选项 | 描述 | 影响面 |
 |---|---|---|
-| **(a) 合并到 `output_tokens` [推荐]** | 把 `reasoning_output_tokens` 累加进 `output_tokens`，单字段出账 | DSH 计价面没有 reasoning 切分（`cost_report` / `priced_day` 都不读）；Claude Code 也不切分（`claude_session_cost` 同理）；合并是最小代价路径。`fact_id` 不变——同一 (host, session, event) 出同一个 hash。 |
+| **(a) 合并到 `output_tokens` [推荐]** | 把 `reasoning_output_tokens` 累加进 `output_tokens`，单字段出账 | DSH 计价面没有 reasoning 切分（`cost_report` / `priced_day` 都不读）；Claude Code 也不切分（`claude_session_cost` 同理）；合并是最小代价路径。`fact_id` 不变——同一 (harness, session, event) 出同一个 hash。 |
 | (b) 保留单独字段 | UsageFact 加 `reasoning_output_tokens`（schema_version=2 触发） | 需要先有真实持久化调用点才能产出 v2；与"未持久化 = 不增 schema_version"纪律相悖。属于提前埋字段。 |
 | (c) 丢弃 | 不进 UsageFact，token 数不进账 | 违反 spec §2「事实 Token 永远是 delta」纪律——`reasoning_output_tokens` 是真实 token 消费，丢即漏账。 |
 
@@ -75,7 +75,7 @@ codex_fold 的 5 桶 → UsageFact 4 型 snake：
 ### A.3 影响面
 
 - 计费：`cost_report` 不读 reasoning 切分——价格不变
-- R2a：SessionKey 仍按 `host_kind=native_id` 唯一定位，不漏事件
+- R2a：SessionKey 仍按 `harness_kind=native_id` 唯一定位，不漏事件
 - `fact_id`：同一事件 hash 不变（输入决定 hash）
 - 测试：需要新增 1 条 codex fold fixture + UsageFact emit 测试
 
@@ -101,7 +101,7 @@ DSH 用 `usage_events` 流（zstd 增量多帧 zstd 压缩）作为事实输入�
 adapters/dsh.py::usage_fold_state(events)
   → 事件级折叠（与现有同源，零新写）
   → 逐 event 投影 UsageFact（新增）：
-      fact_id = hash(machine_namespace, host=dsh, source_profile,
+      fact_id = hash(machine_namespace, harness=dsh, source_profile,
                      native_session_id, source_event_id=event_id,
                      observation_kind=message)
       schema_version = 1
@@ -177,7 +177,7 @@ dsh-storage-facts.md`）——同一文件每次会话可被增量压缩多次�
 ### D.0 一个待澄清的子决策
 
 候选 #3 把每个事件 emit 一个 UsageFact——但 `fact_id` 公式（§2.1）
-是 `hash(machine_namespace, host, source_profile, native_session_id,
+是 `hash(machine_namespace, harness, source_profile, native_session_id,
 source_event_id, observation_kind)`。三个待定项：
 
 1. **DSH 的 source_event_id 取什么**：事件 payload 自带 `id` 字段？
@@ -260,7 +260,7 @@ claude / DSH 两项不受影响，仍按 §D.1 执行。
    - 规格 v4 拍板（commit `6fe7e53`）：observer 开槽即固化身份、
      `duplicate-source-event-id` 硬错误守卫、归属失败 strict exit 2
    - 代码实施两步：`canonical/FNV` 原语下沉进 core `source_identity` +
-     `DshUsageObservation` 携固化身份（commit `ba01147`，四宿主共用 helper、
+     `DshUsageObservation` 携固化身份（commit `ba01147`，四执行环境共用 helper、
      `request_metrics` 输出字节冻结）+ `dsh_usage_fact.{py,rs}` emitter +
      `dsh-usage-facts` CLI + 23 验收（18 direct-call + 5 语料 byte-parity）
      （commit `753cbdc`）

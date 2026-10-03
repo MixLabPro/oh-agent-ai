@@ -5,9 +5,9 @@
   "after_fact_count": 20757,
   "fact_id_conservation": true,
   "sync_report": {
-    "hosts": [
+    "harnesses": [
       {
-        "host": "claude-code",
+        "harness": "claude-code",
         "files_seen": 213,
         "files_synced": 0,
         "files_skipped": 213,
@@ -18,7 +18,7 @@
         "errors": []
       },
       {
-        "host": "codex",
+        "harness": "codex",
         "files_seen": 89,
         "files_synced": 89,
         "files_skipped": 0,
@@ -29,7 +29,7 @@
         "errors": []
       },
       {
-        "host": "dsh",
+        "harness": "dsh",
         "files_seen": 60,
         "files_synced": 0,
         "files_skipped": 60,

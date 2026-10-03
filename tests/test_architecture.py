@@ -85,7 +85,7 @@ print("IMPORT_OK")
     def test_existing_adapters_do_not_depend_on_reports_or_cli(self):
         adapters = PACKAGE / "adapters"
         if not adapters.is_dir():
-            self.skipTest("Host adapters have not been extracted yet")
+            self.skipTest("Harness adapters have not been extracted yet")
 
         forbidden = {
             "agent_vitals.cli",

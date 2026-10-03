@@ -862,10 +862,15 @@ class ClaudeSyncBothTests(unittest.TestCase):
         self.assertEqual(set(got_py), set(got_rs))
         for rel, text in got_rs.items():
             self.assertEqual(got_py[rel], text, "state %s 逐字节不一致" % rel)
-        # 关键数字：66.6M 落 ledger["2026-09-02"]、197.5M 落 unaccounted。
+        # 固定九月 fixture 会随真实月份推进进入归档；不能把“已归档”误判为丢失。
+        # 关键数字：66.6M 落 2026-09-02 日桶、197.5M 落 unaccounted。
         ledger = json.loads(got_rs["state/claude-ledger.json"])
+        observed_days = dict(ledger["days"])
+        archive = json.loads(got_rs.get("state/claude-ledger-archive.json", "{}"))
+        for month in archive.get("months", {}).values():
+            observed_days.update(month.get("days", {}))
         self.assertEqual(
-            ledger["days"]["2026-09-02"]["deepseek-v4-flash"]
+            observed_days["2026-09-02"]["deepseek-v4-flash"]
             ["cache_read_input_tokens"], 66_600_000,
             "5.7 + 44.9 + 16.0 = 66.6M cache_read 正确归 09-02")
         self.assertEqual(
@@ -873,8 +878,8 @@ class ClaudeSyncBothTests(unittest.TestCase):
             ["cache_read_input_tokens"], 197_500_000,
             "33 + 92.2 + 72.3 = 197.5M cache_read 残差池（spec §5 后段点名数字）")
         # 旧算法 bug 反向断言：09-01 / 08-31 都不应出现这三个 session 的任何桶。
-        self.assertNotIn("2026-09-01", ledger["days"])
-        self.assertNotIn("2026-08-31", ledger["days"])
+        self.assertNotIn("2026-09-01", observed_days)
+        self.assertNotIn("2026-08-31", observed_days)
 
 
 if __name__ == "__main__":

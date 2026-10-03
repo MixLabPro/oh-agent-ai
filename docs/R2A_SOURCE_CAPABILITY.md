@@ -12,8 +12,8 @@
 > 2. **DSH 是第二大源，但当前 Python/Rust 读适配器一个文件都读不了**——本机全部
 >    58 份会话都是 `.jsonl.zstd`，而 `dsh.py`/`dsh.rs` 只认裸文本 `.jsonl`
 >    （对 `.zstd` 路径实测降级为 `non-json`）。多帧 zstd 解压只在
->    `scripts/dsh_autosync.py`（Python state 写者）与 `dsh-client/src/host/index.ts`
->    （Node 宿主插件）里存在，**Rust 二进制/核心 crate 没有 zstd 依赖**。R2a 若
+>    `scripts/dsh_autosync.py`（Python state 写者）与 `dsh-client/src/harness/index.ts`
+>    （Node 执行环境插件）里存在，**Rust 二进制/核心 crate 没有 zstd 依赖**。R2a 若
 >    要让 DSH 进 initial population，必须先给 Rust 侧补多帧 zstd 读取。
 > 3. **「zstd 日志并不天然适合简单 offset tail」被实测坐实**：58/58 份都是多帧
 >    zstd，单帧解压只出 15.5KB（丢 ~99.99%）；对压缩文件尾部 2MB 做 naive tail
@@ -46,7 +46,7 @@
 
 | 项 | 实测值 | 数据来源 |
 |---|---|---|
-| 根路径 | `$DSH_HOME/sessions/<project-slug>/<session-id>/session.jsonl[.zstd]`；本机 `$DSH_HOME` 未设 → `~/.dsh/sessions`（与 `dsh-client/src/host/index.ts::sessionsRoot` 同默认） | `echo $DSH_HOME`；`ls ~/.dsh/` |
+| 根路径 | `$DSH_HOME/sessions/<project-slug>/<session-id>/session.jsonl[.zstd]`；本机 `$DSH_HOME` 未设 → `~/.dsh/sessions`（与 `dsh-client/src/harness/index.ts::sessionsRoot` 同默认） | `echo $DSH_HOME`；`ls ~/.dsh/` |
 | 会话文件数 | 58 个 `session.jsonl.zstd`，跨 4 个 project：skill-vitals 32 / investment-research-team 20 / deepseek-harness 3 / dsh-article 3；**0 个裸 `.jsonl`** | `find ~/.dsh/sessions -name 'session.jsonl*'` |
 | 压缩 | 70.0MB → **215.8MB** 明文，ratio **3.1x**；min 399B / max 8.9MB | `zstandard` 解压实测 |
 | 行数 | 224,958 行（明文） | 解压后逐行实测 |
@@ -64,13 +64,13 @@
 
 | 维度 | Codex | DSH |
 |---|---|---|
-| 根发现路径 | `~/.codex/sessions/YYYY/MM/DD/`（`rglob("rollout-*.jsonl")`）+ `~/.codex/archived_sessions/`；**adapter 已实现** `codex_session_roots_report`（Python+Rust 锁步） | `$DSH_HOME/sessions/*/*/session.jsonl[.zstd]`；**adapter 只有 env 单文件注入**（`AGENT_VITALS_DSH_SESSION_LOG`），根发现只存在于 `dsh_autosync.py`/Node 宿主 |
+| 根发现路径 | `~/.codex/sessions/YYYY/MM/DD/`（`rglob("rollout-*.jsonl")`）+ `~/.codex/archived_sessions/`；**adapter 已实现** `codex_session_roots_report`（Python+Rust 锁步） | `$DSH_HOME/sessions/*/*/session.jsonl[.zstd]`；**adapter 只有 env 单文件注入**（`AGENT_VITALS_DSH_SESSION_LOG`），根发现只存在于 `dsh_autosync.py`/Node 执行环境 |
 | 支持格式 | 明文 append-only JSONL（无版本闸，按 §14.4 靠兼容 shim 演进） | 裸文本 `.jsonl`（`dsh.rs`/`dsh.py` 仅此）；`.zstd` 多帧**只有 `dsh_autosync.py`(Python) 和 `dsh-client`(Node) 能解** |
 | 是否全量读 | 是（adapter 按文件读全文，然后 core 折叠） | 是（当前只能全量；多帧 zstd 不支持增量 tail） |
 | 无权限/损坏行为 | 存在性探测：根缺席 → `exists=false` 零填充；空文件 → `missing-header`；坏行 → `non-json`；不可读 → `file-missing`；未知记录类型**保留进 items**（判损坏是 core 的事，进 `attempts`） | 同上（另多一个 `schema-version-mismatch`，`version` 必须整数 0，bool 被显式排除）；对 `.zstd` 路径目前**误判为 `non-json`**（不诚实——不是日志坏了，是 reader 不支持） |
 | coverage（实测一轮） | 55 会话；signals 见 §3；0 attempts、0 降级 | 58 会话；25,510 exec + 10,894 usage 事件；0 降级 |
 | 资源上限估计 | 544.4MB / 60,947 items；Python 全量 ~75s，Rust 更快；**单文件最坏 210.6MB（p90 1.6s）** | 215.8MB 明文 / 224,958 行；解压 + 解析 18.2s |
-| SessionKey 分量 | host=`codex`；native id=`session_meta.payload.session_id`（**逻辑会话，非文件名**——51% 续接）；source profile=`workspace_roots`（turn_context 最新非空）；machine namespace=**缺（未派生）** | host=`dsh`；native id=header `id`=`session-<uuid>`（全局唯一，=目录名）；source profile=project 目录（cwd slug）；machine namespace=**缺（未派生）** |
+| SessionKey 分量 | harness=`codex`；native id=`session_meta.payload.session_id`（**逻辑会话，非文件名**——51% 续接）；source profile=`workspace_roots`（turn_context 最新非空）；machine namespace=**缺（未派生）** | harness=`dsh`；native id=header `id`=`session-<uuid>`（全局唯一，=目录名）；source profile=project 目录（cwd slug）；machine namespace=**缺（未派生）** |
 | version/revision 信号 | 每条事件带 `timestamp`（ISO）；新文件=新会话或续接；append=新事件。`SessionRevision`=文件内最大 `timestamp`（或 file size/mtime） | `seq` 单调 + `time`；新帧=追加。`SessionRevision`=最大 seq/time（或末帧字节偏移） |
 | 增量 tail 可行性 | **可行**：明文 append-only，字节偏移 tail（cc-trace `ScanFileState.offset_bytes` 模型） | **不可行**：58/58 多帧 zstd，无帧索引；naive tail 实测报错。只能全量重解 + 按 seq 差分，或按帧边界跟踪（扫描压缩字节找 frame magic，只解新帧），或依赖 DSH 原生投影做 live（§4.3 已如此定） |
 
@@ -98,7 +98,7 @@
    侧需新增 zstd 依赖（注意 §7.1 G1 的「不依赖 zstandard」指的是**分发出去的
    宿内 Python skill** 不拉第三方库；Tauri/Rust 桌面运行时加一个 zstd crate 是另一
    条约束，需在 R2a 决策时确认——备选 `zstd`（C 绑定）/`ruzstd`（纯 Rust）/调用
-   Node 宿主路径）。
+   Node 执行环境路径）。
 2. **DSH 根目录发现**：`dsh.py`/`dsh.rs` 的 `read_session_evidence` 只吃
    `AGENT_VITALS_DSH_SESSION_LOG` 单文件/目录注入（注释明说「真机自动从
    `$DSH_HOME/sessions/` 发现留后续」）。R2a 需要给 DSH 补一个与
@@ -121,7 +121,7 @@
 `CANDIDATE_DIRS` 只含 claude-code / codex / openclaw / cc-switch，**没有 DSH，也不
 解 zstd**；是 legacy 通用 JSONL 字段探测器（非默认流程）。DSH 的读取在
 `dsh.py`/`dsh.rs`（裸 jsonl）、`dsh_autosync.py`（zstd，state 写者）、
-`dsh-client/src/host/index.ts`（Node 宿主插件，zstd）三处。
+`dsh-client/src/harness/index.ts`（Node 执行环境插件，zstd）三处。
 
 ---
 
@@ -156,7 +156,7 @@
 
 | 分量 | Codex | DSH |
 |---|---|---|
-| host kind | `codex`（`canonical.meta.host_id` 实测 = `codex`） | `dsh` |
+| harness kind | `codex`（`canonical.meta.harness_id` 实测 = `codex`） | `dsh` |
 | native id | `session_meta.payload.session_id`（实测 55/55 都有；缺时退回 `payload.id`） | 头行 `id` = `session-<uuid>`（实测 = 目录名，58/58） |
 | source profile | `workspace_roots`（turn_context 最新非空；sample 实测含本机路径） | project 目录名（cwd slug，如 `--Users-Admin-projects-project-skill-vitals--`）；头行 `cwd` 亦可 |
 | machine namespace | **缺**（推断：需按 §4.3 在 app config 落随机 UUID，禁止 hash 用户名/路径） | **缺**（同上） |

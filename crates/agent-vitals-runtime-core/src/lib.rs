@@ -1,7 +1,7 @@
 //! Agent Vitals runtime 地基层（W3 从 `agent-vitals-runtime` 拆出）。
 //!
 //! 模块层级（`agent-vitals-runtime/tests/module_layering.rs` 统一钉住）：
-//! - L0：`core`（时钟 / home / lease / state / SQL 权威标记 / 宿主词表）、
+//! - L0：`core`（时钟 / home / lease / state / SQL 权威标记 / 执行环境词表）、
 //!   `pricing`（价卡）、`source_graph`
 //! - L1：`envelope`（MCP 与查询共用的工具协议）、`events`（outbox）、`skills`
 //!
@@ -15,7 +15,7 @@
 // ── L0 ──
 pub mod core;
 pub use core::clock;
-pub use core::fact_hosts;
+pub use core::fact_harnesses;
 pub use core::home;
 pub use core::lease;
 pub use core::logging;

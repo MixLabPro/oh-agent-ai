@@ -1,6 +1,6 @@
 {
   "schema_version": "trust-egress-fixture-v1",
-  "host": "minimax-code",
+  "harness": "minimax-code",
   "observations": [
     {"stage":"package_observed","evidence_level":"E1","scope_classes":["workspace"],"destination_class":null},
     {"stage":"credential_observed","evidence_level":"E2","scope_classes":[],"destination_class":"vendor_api"}

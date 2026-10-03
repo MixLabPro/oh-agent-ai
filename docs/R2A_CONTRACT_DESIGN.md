@@ -23,9 +23,9 @@
 
 ### 1.1 为什么是四元组而不是裸 `session_id`
 
-`spec §4.3` 把会话身份定义为 **`SessionKey` = host kind + host-native id + source
+`spec §4.3` 把会话身份定义为 **`SessionKey` = harness kind + harness-native id + source
 profile / machine namespace**。裸 `session_id` 会在两种情况下把同一逻辑会话数成两笔
-成本：① 不同宿主/不同机器上 id 恰好相同（App Server 回退 rollout、重连接管时）；
+成本：① 不同执行环境/不同机器上 id 恰好相同（App Server 回退 rollout、重连接管时）；
 ② 同一台机器上**续接会话**——Codex 续接会话写新文件但保留原逻辑 `session_id`
 （`codex-corpus-facts` 实测 51% 文件名 UUID ≠ 逻辑 session_id）。所以去重的权威键
 必须是四元组，其中 native id 分量对 Codex 是**逻辑 session_id 而非文件名**。
@@ -33,13 +33,13 @@ profile / machine namespace**。裸 `session_id` 会在两种情况下把同一�
 `SessionKey` 序列化形状（**推断**，键序建议固定以便字节对账）：
 
 ```json
-{ "host_kind": "codex", "native_id": "<逻辑 session_id>",
+{ "harness_kind": "codex", "native_id": "<逻辑 session_id>",
   "source_profile": "/repo, /data", "machine_namespace": "<uuid>" }
 ```
 
-- `host_kind` + `native_id` 已足以在同一 namespace 内去重；`source_profile` 与
+- `harness_kind` + `native_id` 已足以在同一 namespace 内去重；`source_profile` 与
   `machine_namespace` 负责把「跨工作区同名」「跨机器同名」的碰撞拆开
-  （`spec §4.3`：只用宿主 `session_id` 会在不同宿主/机器上碰撞）。
+  （`spec §4.3`：只用执行环境 `session_id` 会在不同执行环境/机器上碰撞）。
 - **machine namespace 是隐私边界**（`spec §4.3`）：直接 hash 用户名/路径会把可识别
   信息稳定泄漏到导出，所以必须是「可重放派生、持久在 app 自有 config 的随机 UUID」。
 
@@ -47,7 +47,7 @@ profile / machine namespace**。裸 `session_id` 会在两种情况下把同一�
 
 | 分量 | 值 / 规则 | 依据 |
 |---|---|---|
-| host kind | `codex`（`canonical.meta.host_id` 实测 = `codex`） | `capability §5` |
+| harness kind | `codex`（`canonical.meta.harness_id` 实测 = `codex`） | `capability §5` |
 | native id 字段 | `session_meta.payload.session_id`（缺时退回 `payload.id`） | `codex_session.py:60-75` / `codex_session.rs:60-64`；`capability §5` |
 | 规范化 | 字符串原样；键存在但值非 string → 不取（Rust 与 Python 都用 `as_str` 门）；`session_id` 与 `id` 双缺 → 该 rollout 无法归入任何 SessionKey | `codex_session.py:104-109`；**推断**双缺处理 |
 | source profile | `workspace_roots`（`turn_context.payload.workspace_roots` **最新非空**一条）——「当前工作区」惯例，与 dsh 的 last_catalog_wins 同款 | `codex_session.py:72` / `codex_session.rs:64`；`capability §5` |
@@ -64,7 +64,7 @@ profile / machine namespace**。裸 `session_id` 会在两种情况下把同一�
 
 | 分量 | 值 / 规则 | 依据 |
 |---|---|---|
-| host kind | `dsh` | `capability §5` |
+| harness kind | `dsh` | `capability §5` |
 | native id 字段 | 头行 `id` = `session-<uuid>`（UUID 语义、全局唯一）；**目录名 ≠ header id 是常态**——实测 `~/.dsh/sessions/<project>/<id>/` 的会话目录名**混着裸 UUID 与 `session-<uuid>` 前缀**，discovery/join 必须读头行 `id`，不能用目录名当 id。此处修正 `capability §1.2` 的「目录名==id（58/58）」说法 | 实测事实（2026-08-30）；`dsh.rs` 头行字段 |
 | 规范化 | 字符串原样；header `type=="session"` 且 `version` 为整数 0（bool 显式排除）才认 | `dsh.py:139-149` / `dsh.rs:104-115` |
 | source profile | project 目录名 = 头行 `cwd` 的路径清洗：`/`→`-` 并包 `--`（实测如 `--Users-Admin-projects-project-skill-vitals--`）；58 个 zstd 会话分布 deepseek-harness 3 / investment-research-team 20 / skill-vitals 32 / dsh-article 3 | 实测事实（2026-08-30）；`capability §1.2/§5` |
@@ -122,7 +122,7 @@ profile」，不静默重排历史。」
 
 - Codex：按 `session_id`（非文件名）去重 + 续接文件家族合并（§1.2）。
 - DSH：header id 全局唯一（§1.3），天然无双计路径。
-- 跨来源（同一逻辑会话在 Codex 与 DSH 各有一份）**不合并**——host_kind 不同即不同
+- 跨来源（同一逻辑会话在 Codex 与 DSH 各有一份）**不合并**——harness_kind 不同即不同
   SessionKey；这是两套独立观测账本（`spec §4.3` 源优先级/接管状态机，App Server
   live 优先、rollout 回放补洞），R2a 不跨源归一。fixture 断言的是「**同源内**断线→
   回退→重连无重复」，不是「跨源合并」。
@@ -146,7 +146,7 @@ profile」，不静默重排历史。」
   "generated_at": "ISO8601",
   "source_statuses": { "codex": { "status": "ok", "roots": [...], "last_success": "...", "degraded": null },
                        "dsh":   { "status": "source-unavailable", "reason": "unsupported-compression", ... } },
-  "session_key": { "host_kind": "codex", "native_id": "...", "source_profile": "...", "machine_namespace": "<uuid>" },
+  "session_key": { "harness_kind": "codex", "native_id": "...", "source_profile": "...", "machine_namespace": "<uuid>" },
   "session_revision": "<派生自源的最大 timestamp/seq>",
   "session": { ... }
 }
@@ -231,13 +231,13 @@ cursor 分页。`SessionSummary` 字段（**推断**，全部来自既有字段�
 
 ```json
 { "session_key": {...}, "session_revision": "...", "title": "… | null",
-  "host_kind": "codex", "model": "…", "date_span": {"first": "...", "last": "..."},
+  "harness_kind": "codex", "model": "…", "date_span": {"first": "...", "last": "..."},
   "files": 3, "cost_usd": 1.23, "tokens_total": 45678, "findings_total": 2 }
 ```
 
 - `title` **必须可 null**：Codex 标题命中率 87% 不是 100%（`capability §3.2-5`），
   13% 会话无标题 → 诚实缺失，不是数据坏了。
-- 稳定排序 = `(host_kind, native_id)` 的字典序（**推断**，需全局稳定以便分页 cursor
+- 稳定排序 = `(harness_kind, native_id)` 的字典序（**推断**，需全局稳定以便分页 cursor
   定位）。
 
 ---
@@ -291,7 +291,7 @@ invoke("list_sessions", filter, cursor)                -> Page<SessionSummary[]>
 invoke("read_session", session_key, revision)          -> SessionReport
 ```
 
-- `list_sessions`：`filter` = 按宿主/日期/模型/会话筛选（`spec §3.2`）；`cursor` 携带
+- `list_sessions`：`filter` = 按执行环境/日期/模型/会话筛选（`spec §3.2`）；`cursor` 携带
   `(store_revision, filter_hash, last_key)`。返回 `Page { items, next_cursor | null,
   total, store_revision }`。稳定排序 + cursor 分页（§2.5）。
 - `read_session`：`session_key` 定位，`revision` 是 **`SessionRevision`**（派生自源，
@@ -367,7 +367,7 @@ invoke("read_session", session_key, revision)          -> SessionReport
 
 `docs/RUNTIME_EVIDENCE_CONTRACT.md` §4.2 定义五段式：**locate → shape → extract →
 derive → coverage**。I/O 在 adapter（locate/shape/extract），derive/coverage 在 core。
-`spec §4.2` 重画管线：SourceReader → HostNormalizer → core → versioned SessionReport →
+`spec §4.2` 重画管线：SourceReader → HarnessNormalizer → core → versioned SessionReport →
 SessionStore。adapter 只做**词汇/schema 转换**，产出 `NormalizedEvidence`：
 
 ```json
@@ -521,7 +521,7 @@ SessionStore 与之的关系是**只读消费者**：
    config 落随机 UUID，可重放派生、可备份迁移、默认不导出；重装丢失明示「新 profile」。
 4. **DSH 降级语义修正**（`capability §3.2-4`）：`.zstd` → `unsupported-compression`，
    不是 `non-json`。
-5. **SessionKey + 强类型 revision 类型**（`spec §4.3`）：host_kind / native_id /
+5. **SessionKey + 强类型 revision 类型**（`spec §4.3`）：harness_kind / native_id /
    source_profile / machine_namespace 四元组 + `SourceFingerprint` / `SessionRevision` /
    `StoreRevision`（`Schema/Engine/PricingVersion` 进 envelope）。
 6. **versioned SessionReport envelope + 版本矩阵**（`spec §5.4`/§4.2）：§2 的形状 +
@@ -546,7 +546,7 @@ SessionStore 与之的关系是**只读消费者**：
 
 | 契约点 | spec 位置 | 本文件节 |
 |---|---|---|
-| SessionKey = host kind + native id + source profile / machine namespace | §4.3 | §1.1 |
+| SessionKey = harness kind + native id + source profile / machine namespace | §4.3 | §1.1 |
 | machine namespace 可重放派生、app config 持久、默认不导出、重装明示新 profile | §4.3 | §1.4 |
 | 按源 identity 表；alias 只在有可验证 join key 时归一 | §4.3 | §1.2–1.3 |
 | 强类型 revision 四件套 | §4.3 | §1.5 |

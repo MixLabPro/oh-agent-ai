@@ -1,4 +1,4 @@
-//! §7.2 Provenance——一个观察值是宿主直接记录的、适配器推导出来的、纯估算
+//! §7.2 Provenance——一个观察值是执行环境直接记录的、适配器推导出来的、纯估算
 //! 的，还是被脱敏/截断过的（§4.4 Provenance-preserving）。
 //!
 //! 通用化自 `agent-vitals-domain::evidence::Provenance`：那边为了在每事件热路
@@ -12,7 +12,7 @@ use crate::signal::SignalId;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Provenance {
-    /// 宿主自己记录的数字。
+    /// 执行环境自己记录的数字。
     Measured,
     /// 适配器从别的信号推出来的。
     Derived { from: Vec<SignalId> },

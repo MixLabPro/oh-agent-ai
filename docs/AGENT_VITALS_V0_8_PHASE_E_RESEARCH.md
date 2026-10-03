@@ -1,6 +1,6 @@
 # v0.8 Phase E —— 目录搬迁（apps/ packages/ integrations/ assets/）
 
-> Phase D 的 crate 骨架（`vitals-core` ← `agent-vitals-domain` ← `agent-vitals-hosts`
+> Phase D 的 crate 骨架（`vitals-core` ← `agent-vitals-domain` ← `agent-vitals-harnesses`
 > ← `agent-vitals-runtime` ← binary/wasm/src-tauri）已到位。Phase E 是**纯目录搬迁**，
 > 零逻辑改动——但触到测试 harness 本身（每个 test 的路径、CI workflow、ClawHub 打包
 > 清单、golden runner、Python import），所以每步必须一次性搬完（不能半新半旧）。
@@ -32,9 +32,9 @@ E6  CI workflows 路径同步（verify.yml / release.yml / package-clawhub.yml�
   `working-directory` + `dsh-client/scripts/` → `integrations/dsh-client/…`。
 - `README.md`：`[dsh/README.md]` 链接 → `integrations/dsh/README.md`。
 - **wasm 拷贝目标**：`wasm-pack build` 后的 `.js`/`.wasm`/`.d.ts` 现在拷进
-  `integrations/dsh-client/`（committed build artifact，宿主 `readFileSync` 用）。
+  `integrations/dsh-client/`（committed build artifact，执行环境 `readFileSync` 用）。
 - **门禁全绿**：cargo test 32 binary（Rust 无 `dsh-client/` 硬引用）、
-  `integrations/dsh-client/scripts/verify{,-host,-timeline}.mjs`、
+  `integrations/dsh-client/scripts/verify{,-harness,-timeline}.mjs`、
   python 1145/226 skip、golden 15+15。
 
 ### E2 完成记录（2026-09-04）
@@ -46,7 +46,7 @@ E6  CI workflows 路径同步（verify.yml / release.yml / package-clawhub.yml�
   `"../../../target/release/agent-vitals"`（CLI 二进制 bundle 成资源，根 `target/` 现在深两级）。
 - `crates/vitals-core/tests/dependency_boundary.rs`：跨 workspace 边界检查
   `../../src-tauri/Cargo.toml` → `../../apps/desktop/src-tauri/Cargo.toml`。
-- ~8 处 test/script 路径：`tests/test_{host_contract,timeline_lockstep,state_history_rotate}.py`、
+- ~8 处 test/script 路径：`tests/test_{harness_contract,timeline_lockstep,state_history_rotate}.py`、
   `scripts/{make_menubar_icon,verify-timeline-geometry,verify-codex-session-timeline,
   verify-workbench-fold-bridge}.mjs` 的 `src-tauri/` / `../src-tauri/` → `apps/desktop/src-tauri/`。
 - `src-tauri/.gitignore`（`target/` + `gen/`）随目录一起走，无需改。
@@ -67,10 +67,10 @@ manifest（`[profile.release]` 仍只能在 workspace 根声明，留在根）�
 - `r2a_store.rs` 6 处 `env!("CARGO_MANIFEST_DIR")).join("fixtures")`（fixture 路径）
   插 `.join("../..")`——`CARGO_MANIFEST_DIR` 现在是 `apps/cli/`，仓库根 `fixtures/`
   深两级。
-- `crates/agent-vitals-domain/tests/host_contract.rs`：G2 三处源码自扫描的
+- `crates/agent-vitals-domain/tests/harness_contract.rs`：G2 三处源码自扫描的
   `"src/main.rs"` → `"apps/cli/src/main.rs"`。
 - Python：`test_classification.py::RS_SRC` = `ROOT / "apps" / "cli" / "src"`；
-  `test_host_contract.py::_SCAN_CLI_LOCATIONS` 同款路径。
+  `test_harness_contract.py::_SCAN_CLI_LOCATIONS` 同款路径。
 - **未迁**：`r2a_store.rs`（2708 行）+ `discovery.rs`（733 行）仍在 `apps/cli/src/agent/`
   ——spec §11 说它们该进 `agent-vitals-runtime/state/`，但两者与 CLI 成本/审计
   handler（`codex_session_audit`/`codex_cost`/`claude_cost`）深度交织，强行现在拆
@@ -119,7 +119,7 @@ packages/agent-vitals-python/agent_vitals`。核心设计张力：打包产物�
   `crates/agent-vitals-domain/src/domain/cost/mod.rs`（pricing.json）——
   `scripts/agent_vitals/` 段替换成 `packages/agent-vitals-python/agent_vitals/`，
   层数（`../..` 前缀）不变。
-- `crates/agent-vitals-domain/tests/host_contract.rs`：G2/G3 两处源码自扫描基准路径
+- `crates/agent-vitals-domain/tests/harness_contract.rs`：G2/G3 两处源码自扫描基准路径
   （`cli.py`、`agent/dsh_evidence.py` 等）同步，之前漏改导致 `cargo test` 两个 G2/G3
   断言直接报文件不存在。
 - 2 个 `.mjs`（`scripts/verify-codex-session-{timeline,findings}.mjs`）：
@@ -134,9 +134,9 @@ packages/agent-vitals-python/agent_vitals`。核心设计张力：打包产物�
   同步；顺手把一处更早就该改的 `src/behavior.rs`（应为 `apps/cli/src/agent/behavior.rs`）
   也修了。
 - **门禁全绿**：`cargo build/test/clippy --release` 全绿（包括修复后的
-  `host_contract.rs` G2/G3）、`cargo check -p agent-vitals-wasm`、
+  `harness_contract.rs` G2/G3）、`cargo check -p agent-vitals-wasm`、
   `apps/desktop/src-tauri cargo check`、5 个 `scripts/*.mjs` + `integrations/
-  dsh-client/scripts/verify-host.mjs`、python 1145 跑通两遍（纯 Python 与
+  dsh-client/scripts/verify-harness.mjs`、python 1145 跑通两遍（纯 Python 与
   `AGENT_VITALS_BIN=./target/release/agent-vitals` 差分各一遍，后者 skip=4）、
   golden 15+15 两实现字节一致。
 
@@ -186,13 +186,13 @@ subscriptions},templates,icons}` 树收窄——原因是这棵完整树连着**
   `tests/e2e_smoke.py`：`PRICING_JSON` 常量与直读路径同步到 `assets/`。
 - 2 个 `.mjs`（同 E4 改过的那两个）：模板路径从
   `packages/agent-vitals-python/agent_vitals/templates` 改成 `assets/templates`；
-  `integrations/dsh-client/scripts/verify-host.mjs` 的注释同步。
+  `integrations/dsh-client/scripts/verify-harness.mjs` 的注释同步。
 - 顺手抓到几处 E3/E4 遗留的过期路径注释（`cost.py`/`codex_cost.py`/
   `codex_session_audit.py` 里指向 `src/codex_cost.rs`/`scripts/agent_vitals/…`
   的旧路径），一起改掉。
 - **门禁全绿**：`cargo build/test/clippy --release`、wasm check、
   `apps/desktop/src-tauri` check、`scripts/verify-codex-session-{timeline,
-  findings}.mjs`、`integrations/dsh-client/scripts/verify-host.mjs`、python
+  findings}.mjs`、`integrations/dsh-client/scripts/verify-harness.mjs`、python
   1146 跑两遍（纯 Python + `AGENT_VITALS_BIN` 差分，后者 skip=4）、golden
   15+15 两实现字节一致。（`tests/e2e_smoke.py` 的 M1 `hour_buckets` 失败在改动
   前后一致复现——真机会话数据依赖，与本步无关，不在 `unittest discover tests`
@@ -211,7 +211,7 @@ dsh-client/**`。`package-clawhub.yml` 的路径已经在 E4/E5 里随打包内�
 真正找到并修的，是 E1-E5 各步散落的**注释里的过期路径**（功能不受影响，但
 读者会被带偏）——顺手在这一步一起清：
 
-- `crates/vitals-core/src/lib.rs` / `apps/cli/src/agent/host_runtime_
+- `crates/vitals-core/src/lib.rs` / `apps/cli/src/agent/harness_runtime_
   registration.rs`：裸 `src-tauri` → `apps/desktop/src-tauri`（E2 遗留）。
 - `crates/agent-vitals-domain/src/domain/cost/mod.rs`：裸 `src/agent/cost.rs`
   → `apps/cli/src/agent/cost.rs`（E3 遗留）；6 处裸 `dsh-client/...` →
@@ -219,8 +219,8 @@ dsh-client/**`。`package-clawhub.yml` 的路径已经在 E4/E5 里随打包内�
   一处 `dsh-client/pricing.json`）。
 - `crates/agent-vitals-runtime/src/home.rs`、`apps/cli/src/agent/discovery.rs`、
   `crates/agent-vitals-domain/src/domain/duration.rs`、`packages/agent-vitals-
-  python/agent_vitals/agent/{duration,cost}.py`：同款裸 `dsh-client/src/host/
-  index.ts` → `integrations/dsh-client/src/host/index.ts`。
+  python/agent_vitals/agent/{duration,cost}.py`：同款裸 `dsh-client/src/harness/
+  index.ts` → `integrations/dsh-client/src/harness/index.ts`。
 - `packages/agent-vitals-python/agent_vitals/agent/cost.py`：顺带发现的
   二次错误——E5 提交里我把价格表单源注释指向了 `dsh-client/client.js`（缺
   `integrations/` 前缀，且这个文件早在 tsup 迁移后就不存在了，真正的展示层

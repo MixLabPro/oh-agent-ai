@@ -85,16 +85,16 @@ impl QEnv {
     /// 静默吞错：撞 UNIQUE 只发生在「同 id 不同形状」的 fixture 笔误上，
     /// 而那也应该按幂等吸收（库内值是先到的权威）。
     #[allow(clippy::too_many_arguments)]
-    fn fact(&self, id: &str, host: &str, model: &str, ts_ms: i64, peak: i64, u: i64, o: i64) {
+    fn fact(&self, id: &str, harness: &str, model: &str, ts_ms: i64, peak: i64, u: i64, o: i64) {
         self.db
             .conn()
             .execute(
-                "INSERT OR IGNORE INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT OR IGNORE INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                      source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                      event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                      output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1, ?2, 'm', 's1', ?1, 'turn', NULL, ?3, ?4, ?5, ?6, 0, 0, ?7, 'run', 1, 1)",
-                rusqlite::params![id, host, model, ts_ms, peak, u, o],
+                rusqlite::params![id, harness, model, ts_ms, peak, u, o],
             )
             .unwrap();
     }
@@ -111,9 +111,9 @@ impl Drop for QEnv {
 }
 
 /// Q01：同一天 Claude 09:00 120 token、Codex 10:00 300 token——小时曲线
-/// 各归各模型、跨宿主总量一致（Q01 与 Q02 的合并判别值）。
+/// 各归各模型、跨执行环境总量一致（Q01 与 Q02 的合并判别值）。
 #[test]
-fn q01_q02_two_hosts_two_hours_tokens_land_separately_and_sum() {
+fn q01_q02_two_harnesses_two_hours_tokens_land_separately_and_sum() {
     let env = QEnv::new("q01");
     let d = env.day.clone();
     let s = env.day_start(&d);
@@ -122,14 +122,14 @@ fn q01_q02_two_hosts_two_hours_tokens_land_separately_and_sum() {
 
     let daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: d.clone() });
     assert!(daily.contract_violations().is_empty(), "{:?}", daily.contract_violations());
-    // 两宿主各自的 token 归属正确（Q01 的两个小时点）。
-    assert_eq!(daily.tokens_by_host["claude-code"].uncached_input, 120);
-    assert_eq!(daily.tokens_by_host["codex"].uncached_input, 300);
-    // Q02：宿主曲线分开显示，总量 = 各宿主之和，不重复计数。
-    let total: i64 = daily.tokens_by_host.values().map(|t| t.uncached_input).sum();
+    // 两执行环境各自的 token 归属正确（Q01 的两个小时点）。
+    assert_eq!(daily.tokens_by_harness["claude-code"].uncached_input, 120);
+    assert_eq!(daily.tokens_by_harness["codex"].uncached_input, 300);
+    // Q02：执行环境曲线分开显示，总量 = 各执行环境之和，不重复计数。
+    let total: i64 = daily.tokens_by_harness.values().map(|t| t.uncached_input).sum();
     assert_eq!(total, 420);
     assert_eq!(
-        daily.tokens_by_host["codex"].uncached_input + daily.tokens_by_host["claude-code"].uncached_input,
+        daily.tokens_by_harness["codex"].uncached_input + daily.tokens_by_harness["claude-code"].uncached_input,
         420
     );
 }
@@ -156,9 +156,9 @@ fn q03_beijing_month_start_0030_stays_in_the_month() {
     assert_eq!(aug["2026-08-31"]["uncached_input_tokens"], json!(7));
     // 月查询 DTO 侧同样只认北京月界。
     let summary = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month: "2026-09".to_string() });
-    assert_eq!(summary.tokens_by_host["dsh"].uncached_input, 50);
+    assert_eq!(summary.tokens_by_harness["dsh"].uncached_input, 50);
     let aug_summary = SqlSummaryRepository::new().monthly_summary(&MonthlySummaryQuery { month: "2026-08".to_string() });
-    assert_eq!(aug_summary.tokens_by_host["dsh"].uncached_input, 7);
+    assert_eq!(aug_summary.tokens_by_harness["dsh"].uncached_input, 7);
     let _ = m_end;
 }
 
@@ -175,7 +175,7 @@ fn q04_peak_hour_drilldown_sessions_sum_exactly_to_the_peak() {
         env.db
             .conn()
             .execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                      source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                      event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                      output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
@@ -229,7 +229,7 @@ fn q05_unpriced_model_shows_usage_with_unresolved_not_zero() {
 
     let daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: d });
     // 用量可见：token 照报（unpriced 不进金额分母，但处理量必须可见）。
-    assert_eq!(daily.tokens_by_host["claude-code"].uncached_input, 500);
+    assert_eq!(daily.tokens_by_harness["claude-code"].uncached_input, 500);
     // 不以 0 冒充：claude 侧 has_unresolved（ Moonshot 无声明无价卡 → 钱不可归）。
     let claude = &daily.by_provider["claude-code/unknown"];
     assert!(claude.has_unresolved, "无路由模型必须落 unresolved 条目");
@@ -237,33 +237,33 @@ fn q05_unpriced_model_shows_usage_with_unresolved_not_zero() {
     assert!(claude.amounts_by_basis.is_empty(), "{:?}", claude.amounts_by_basis);
 }
 
-/// Q11：某宿主 24 小时未同步——结果标 partial/stale，明确缺失宿主，不可
-/// 显示「完整总额」。fixture：三宿主中 dsh 有数据、codex/claude 全无 →
+/// Q11：某执行环境 24 小时未同步——结果标 partial/stale，明确缺失执行环境，不可
+/// 显示「完整总额」。fixture：三执行环境中 dsh 有数据、codex/claude 全无 →
 /// codex/claude 报 Unavailable 且不进总额（缺数据 ≠ ¥0）。
 #[test]
-fn q11_stale_host_is_explicitly_missing_not_a_zero() {
+fn q11_stale_harness_is_explicitly_missing_not_a_zero() {
     let env = QEnv::new("q11");
     let d = env.day.clone();
     let s = env.day_start(&d);
     env.fact("d1", "dsh", "deepseek-v4-flash", s + 1_000, 0, 10, 1);
 
     let daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: d.clone() });
-    // 有数据宿主照报；缺失宿主必须 Unavailable（不是 0）。
-    assert_eq!(daily.by_host["dsh"].freshness.state,
+    // 有数据执行环境照报；缺失执行环境必须 Unavailable（不是 0）。
+    assert_eq!(daily.by_harness["dsh"].freshness.state,
                agent_vitals_data::projection::FreshnessState::Fresh);
     for missing in ["codex", "claude-code"] {
         assert_eq!(
-            daily.by_host[missing].freshness.state,
+            daily.by_harness[missing].freshness.state,
             agent_vitals_data::projection::FreshnessState::Unavailable,
             "{missing} 没有数据必须显式缺失"
         );
-        assert!(daily.by_host[missing].amounts_by_basis.is_empty());
+        assert!(daily.by_harness[missing].amounts_by_basis.is_empty());
     }
-    // 总额只含真实有数据的宿主——"完整总额"在这个窗口不存在。
+    // 总额只含真实有数据的执行环境——"完整总额"在这个窗口不存在。
     assert!(daily.total_summable() >= 0.0);
-    // excluded_hosts 不该包含 codex/claude（接线了但没数据 ≠ 被排除）。
-    assert!(!daily.excluded_hosts.contains("codex"));
-    assert!(!daily.excluded_hosts.contains("claude-code"));
+    // excluded_harnesses 不该包含 codex/claude（接线了但没数据 ≠ 被排除）。
+    assert!(!daily.excluded_harnesses.contains("codex"));
+    assert!(!daily.excluded_harnesses.contains("claude-code"));
 }
 
 /// Q12：同一来源导入两次 + 中途模拟中断（半事务回滚）——重跑任意月/日查询
@@ -279,7 +279,7 @@ fn q12_double_import_with_interrupted_run_is_idempotent_and_rollback_safe() {
 
     let read_all = |_env: &QEnv| {
         SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: d.clone() })
-            .tokens_by_host["dsh"]
+            .tokens_by_harness["dsh"]
             .uncached_input
     };
     let baseline = read_all(&env);
@@ -290,7 +290,7 @@ fn q12_double_import_with_interrupted_run_is_idempotent_and_rollback_safe() {
         .db
         .with_immediate_txn(|conn| {
             conn.execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                      source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                      event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                      output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
@@ -310,12 +310,12 @@ fn q12_double_import_with_interrupted_run_is_idempotent_and_rollback_safe() {
     assert_eq!(read_all(&env), 33, "重放不双计、新事实正常入账");
 }
 
-/// Q14：同一原始模型名在不同宿主映射不同——这里钉「无法映射的显式
+/// Q14：同一原始模型名在不同执行环境映射不同——这里钉「无法映射的显式
 /// unknown/unresolved，不被并入相似名称」：同一 token 量的同名模型在
 /// claude（无声明 → unknown）与 codex（gpt-5.6 有声明）两侧分属不同
 /// 条目，互不并桶。
 #[test]
-fn q14_same_raw_name_across_hosts_or_unmapped_is_explicit() {
+fn q14_same_raw_name_across_harnesses_or_unmapped_is_explicit() {
     let env = QEnv::new("q14");
     let d = env.day.clone();
     let s = env.day_start(&d);
@@ -362,7 +362,7 @@ fn separation_discipline_realtime_and_legacy_do_not_add() {
     env.db
         .conn()
         .execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                  source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                  event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                  output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
@@ -375,7 +375,7 @@ fn separation_discipline_realtime_and_legacy_do_not_add() {
     let daily = SqlSummaryRepository::new().daily_summary(&DailySummaryQuery { date: d.clone() });
     // DTO 账单轴 = 实时 + legacy 兜底的**模型级合并**（3.2 收口语义）：
     // model-a 60 + model-b 200 = 260，不双计不漏计。
-    assert_eq!(daily.tokens_by_host["claude-code"].uncached_input, 260);
+    assert_eq!(daily.tokens_by_harness["claude-code"].uncached_input, 260);
     // 聚合数（ledger 路径）：model-b 的 200 经 claude_legacy_days 可见——
     // 「聚合数 = ledger 数」；它不含实时的 60（两轴不相加）。读出的键是
     // claude 词表（input_tokens），与 legacy_import 的写入映射对称。
@@ -404,8 +404,8 @@ fn separation_discipline_realtime_and_legacy_do_not_add() {
 }
 
 /// 2026-09-16 真机：codex 订阅声明覆盖 26,715 条事实后，本月用量从 2.8B 缩成 569M——
-/// `tokens_by_host` 与金额面共用了带「未被订阅覆盖」谓词的聚合。token 是「处理了多少」，
-/// 订阅覆盖只改「钱归谁」：覆盖后 tokens_by_host 不变、金额面的估算消失。
+/// `tokens_by_harness` 与金额面共用了带「未被订阅覆盖」谓词的聚合。token 是「处理了多少」，
+/// 订阅覆盖只改「钱归谁」：覆盖后 tokens_by_harness 不变、金额面的估算消失。
 #[test]
 fn subscription_coverage_moves_money_but_not_tokens() {
     let env = QEnv::new("cov-tokens");
@@ -416,7 +416,7 @@ fn subscription_coverage_moves_money_but_not_tokens() {
     env.db.conn().execute("UPDATE usage_facts SET provider_id = 'openai'", []).unwrap();
     let repo = SqlSummaryRepository::new();
     let before = repo.daily_summary(&DailySummaryQuery { date: d.clone() });
-    assert_eq!(before.tokens_by_host["codex"].total, 1_650_000);
+    assert_eq!(before.tokens_by_harness["codex"].total, 1_650_000);
     assert!(before.by_provider["codex/openai"].amounts_by_basis.contains_key(
         &agent_vitals_data::projection::BillingBasis::MeteredEstimate));
 
@@ -429,7 +429,7 @@ fn subscription_coverage_moves_money_but_not_tokens() {
     assert!(env.db.billing_recalculation_run("job-cov", 4).unwrap());
 
     let after = repo.daily_summary(&DailySummaryQuery { date: d.clone() });
-    assert_eq!(after.tokens_by_host["codex"].total, 1_650_000, "订阅覆盖不改变处理量");
+    assert_eq!(after.tokens_by_harness["codex"].total, 1_650_000, "订阅覆盖不改变处理量");
     // 日粒度没有月费可摊，条目可以整个消失；有条目也不得再带按量估算。
     let no_estimate = |m: &agent_vitals_data::projection::MonthlySummary| !m.by_provider.get("codex/openai")
         .is_some_and(|h| h.amounts_by_basis.contains_key(&agent_vitals_data::projection::BillingBasis::MeteredEstimate));
@@ -438,7 +438,7 @@ fn subscription_coverage_moves_money_but_not_tokens() {
         "覆盖后的事实不得再按量估算：{:?}", after.by_provider.get("codex/openai"));
     let month: String = d.chars().take(7).collect();
     let monthly = repo.monthly_summary(&MonthlySummaryQuery { month });
-    assert_eq!(monthly.tokens_by_host["codex"].total, 1_650_000);
+    assert_eq!(monthly.tokens_by_harness["codex"].total, 1_650_000);
     assert!(no_estimate(&monthly), "{:?}", monthly.by_provider.get("codex/openai"));
     assert_eq!(monthly.by_provider["codex/openai"].amounts_by_basis
         .get(&agent_vitals_data::projection::BillingBasis::FixedSubscription).copied(), Some(20.0),
@@ -484,7 +484,7 @@ fn user_declared_relay_usage_moves_from_default_to_declared_estimate() {
     assert_eq!(view["CNY"].declared_estimate, declared_amount);
     assert_eq!(view["CNY"].default_estimate, 0.0);
     assert!(view["CNY"].unattributed_providers.is_empty());
-    assert_eq!(after.tokens_by_host["claude-code"].total, before.tokens_by_host["claude-code"].total);
+    assert_eq!(after.tokens_by_harness["claude-code"].total, before.tokens_by_harness["claude-code"].total);
     // 日视图同样搬家。
     let daily = repo.daily_summary(&DailySummaryQuery { date: d });
     assert!(daily.by_provider.contains_key("claude-code/shengsuanyun"));
@@ -499,7 +499,7 @@ fn declared_provider_preserves_fallback_quote_currency() {
     let s = env.day_start(&d);
     env.fact("s1", "claude-code", "anthropic/claude-sonnet-5", s + 1_000, 0, 1_000_000, 100_000);
     env.fact("c1", "codex", "openai/gpt-5.6-luna", s + 2_000, 0, 1_000_000, 100_000);
-    // 声明属于服务商，按模型结算：两个宿主上的两个模型各答一次（模型就是收窄依据；
+    // 声明属于服务商，按模型结算：两个执行环境上的两个模型各答一次（模型就是收窄依据；
     // 作用域完全一致的两条声明会被重复保存守卫合并，不会各留一份）。
     for (model, decl, rev) in [("anthropic/claude-sonnet-5", "decl-ss-cc", "rev-ss-cc"), ("openai/gpt-5.6-luna", "decl-ss-cx", "rev-ss-cx")] {
         env.db.billing_declaration_revision_save(

@@ -47,8 +47,8 @@ python3 -m unittest tests.test_invariants             # 12 条验收门
 | `access` ×2 | **2** 命名空间 | 两个插件各一个，**不得**报成冲突 |
 | `dup-tool` ×2 | **3** cache/marketplaces | 同插件两份拷贝 → 同 `plugin_key` → `redundant`/low |
 | `plug-off` | **1** 磁盘≠上下文 | `enabledPlugins` 里显式 false，在磁盘上不进预算 |
-| `codex-only` `cursor-only` | **1** | 其他宿主，`loaded_reason=other-host:*` |
-| `.claude.json` | **12** 宿主数据 | `enabledPlugins` 的 dict 与 list（`projects` 下）两种形态；`skillUsage` 的裸名键与 `<plugin>:<name>` 键；`ghost-skill` 是有用量记录但磁盘上不存在的孤儿 |
+| `codex-only` `cursor-only` | **1** | 其他执行环境，`loaded_reason=other-harness:*` |
+| `.claude.json` | **12** 执行环境数据 | `enabledPlugins` 的 dict 与 list（`projects` 下）两种形态；`skillUsage` 的裸名键与 `<plugin>:<name>` 键；`ghost-skill` 是有用量记录但磁盘上不存在的孤儿 |
 
 `managed-enterprise/` 放在 `~/.claude/skills` **之下**是有意的：`DEFAULT_ROOTS` 里没有
 `/etc/claude/skills` 这类系统路径，所以 enterprise 级别只有在 skill 恰好落在某个被扫根
@@ -90,9 +90,9 @@ golden 会红。**先确认差异是不是预期的**，再 `--update`。
 
 ## DSH 目录树（skill 目录，C1，独立于上面的扫描语料）
 
-`dsh/skills/` 是 C1 的语料：一棵确定性的 dsh 宿主 skill 目录树，供未来的
-`host-dsh` golden 与 A7（跨 scope 层重名不算冲突）判定用。
+`dsh/skills/` 是 C1 的语料：一棵确定性的 dsh 执行环境 skill 目录树，供未来的
+`harness-dsh` golden 与 A7（跨 scope 层重名不算冲突）判定用。
 `dsh/skills/build_dsh_skills_fixture.py`（纯标准库）生成这棵树；它**不进
 `fixtures/generate.py` 的主树**——`~/.agents/skills` 与 OpenClaw 共享，放进主树
-会改掉现有 `host-openclaw` 等 golden。每一处重名的「同层/跨层」、root、rank 与
+会改掉现有 `harness-openclaw` 等 golden。每一处重名的「同层/跨层」、root、rank 与
 预期冲突见 `dsh/skills/README.md`。

@@ -23,7 +23,7 @@ Tauri 已完全替代、不再需要降级通道，`contrib/xbar/`、
   （adaptive floor / snooze / 日预算全丢）；③ 本次会话 / 最近审计列表 /
   dsh_autosync 调度未迁。
 - Python 包**不能移出项目**：它是 ClawHub 发行形态（`package-clawhub.yml`）、
-  差分守卫的宿主。~~状态层唯一写者~~ —— R1d 后状态写链迁到 Rust
+  差分守卫的执行环境。~~状态层唯一写者~~ —— R1d 后状态写链迁到 Rust
   （`src/agent/oneline.rs` 折账 + `core/state.rs` 落盘），Python 写链退休
   （§9「2026-08-31 更新」）。
 - 推荐路径：**分五阶段**推进，核心动作是「预算规则迁进 core crate」（cost.rs
@@ -54,7 +54,7 @@ fold」）。当前能力：托盘菜单（今日/本月/预算）+ 弹出面板
 | Rust 二进制 | `src/skills/*` + `src/agent/*` + `main.rs` | 二进制通道（npm/brew/cargo） | — |
 | Python 包 | `scripts/agent_vitals/`（skills/ agent/ adapters/ + cli.py） | **ClawHub 技能形态 + 状态层唯一写者** | `package-clawhub.yml:39-43` |
 | wasm crate | `audit_events` / `token_by_model` | DSH 审计 tab 的规则载体 | — |
-| dsh-client | host 投影 + client 渲染 + verify 脚本 | DSH 审计 tab | — |
+| dsh-client | harness 投影 + client 渲染 + verify 脚本 | DSH 审计 tab | — |
 | src-tauri | `overview.rs` + `lib.rs` + `ui/` | **新菜单栏消费者** | — |
 | contrib/xbar | `agent-vitals.5m.sh` | **旧菜单栏消费者** | — |
 | 状态层 | `~/.agent-vitals/state/` 8 个文件 | 跨消费者共享数据 | §3 |
@@ -63,7 +63,7 @@ fold」）。当前能力：托盘菜单（今日/本月/预算）+ 弹出面板
 
 ```
                  ┌──────────────────────────────────────────────┐
-                 │          数据源（只读，宿主）                   │
+                 │          数据源（只读，执行环境）                   │
                  │  DSH 会话 JSONL · Codex 会话 JSONL             │
                  │  ~/.claude.json · 磁盘 skills 目录             │
                  └──────────────┬───────────────────────────────┘
@@ -83,7 +83,7 @@ fold」）。当前能力：托盘菜单（今日/本月/预算）+ 弹出面板
                         │              │              │
      ┌──────────────────▼──┐   ┌───────▼────────┐   ┌▼──────────────┐
      │ ~/.agent-vitals/state│   │ dsh-client     │   │ CLI（双实现）  │
-     │ oneline/today/month │   │ host 投影→wasm │   │ doctor/oneline│
+     │ oneline/today/month │   │ harness 投影→wasm │   │ doctor/oneline│
      │ alert★/sessions/    │   │ client 渲染     │   │ codex-session │
      │ calendar/dsh_auto…  │   └────────────────┘   └───────────────┘
      └────┬────────────┬───┘
@@ -142,7 +142,7 @@ fold」）。当前能力：托盘菜单（今日/本月/预算）+ 弹出面板
 3. **状态层单一写者**（§3 表）：迁移不得新增写者；Tauri 若接管 tick 仍只读。
 4. **Python 与 Rust 永久平行，无 exit point**（CLAUDE.md「Dual implementation,
    differential guard」）：Python 是 ClawHub 技能形态（`package-clawhub.yml`）、
-   状态写者、差分守卫宿主。**结论：Python 包不移出**；但「规则」必须向 core
+   状态写者、差分守卫执行环境。**结论：Python 包不移出**；但「规则」必须向 core
    收敛（§7）。
 5. **空态诚实**：缺数据显示「—」/「尚无」，不摆全零冒充零花费
    （`src-tauri/README.md`「空态是诚实的」）。
@@ -220,7 +220,7 @@ overview.rs 数据管道、core::cost 折叠、托盘+面板骨架、空态诚�
 
 ### Phase 4 —— dsh_autosync 调度（先决策后实施）
 - 选项：① bundle 内嵌 `dsh_autosync.py`，tick 时 `python3` 子进程调用
-  （SwiftBar 同款，依赖宿主 python3+zstandard）；② Rust 重写检测逻辑
+  （SwiftBar 同款，依赖执行环境 python3+zstandard）；② Rust 重写检测逻辑
   （zstd-rs 解压 + mtime 静止窗口，零 Python 依赖，但 zstd 进 core 引入
   第三方依赖，需评估「被审计技能不得拉第三方」约束是否适用于菜单栏 app）。
 - 决策依据：菜单栏 app 不在 ClawHub 分发路径（`src-tauri/` 独立 workspace，
@@ -297,9 +297,9 @@ R2A_CONTRACT_DESIGN.md`（写作时 `dsh_autosync.py` 确实是唯一的 zstd �
 ## 11. Out of scope（明确不做）
 
 - **Tauri Pet**（`docs/PET_REQUIREMENTS.md` ADR-009..014 的宠物形态）——另一条
-  产品线，架构可复用（host-events + Diagnoser），但不在本迁移内。
+  产品线，架构可复用（harness-events + Diagnoser），但不在本迁移内。
 - 面板内嵌完整日历视图（保留逐日列表；calendar.html 继续由 oneline 产出）。
-- 多 host / 跨宿主菜单栏聚合。
+- 多 harness / 跨执行环境菜单栏聚合。
 - `budget.evaluate()` 之外的其他 Python 规则迁 core（如 state 合并逻辑——暂
   无消费者需要）。
 

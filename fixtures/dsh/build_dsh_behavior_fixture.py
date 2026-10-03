@@ -249,8 +249,8 @@ def build_behavior():
     events += [
         ("tool/call", tool_call(4, 1, "aaaaaaaa-0000-4000-8000-000000000031", "write", {"file_path": "~/.ssh/authorized_keys", "content": "ssh-rsa AAAAB3NzaC1yc2E..."}), None),
         ("tool/result", tool_result(4, 1, "aaaaaaaa-0000-4000-8000-000000000031", "wrote 2 lines", meta={"bytesWritten": 46}), "append"),
-        ("tool/call", tool_call(4, 1, "aaaaaaaa-0000-4000-8000-000000000032", "edit", {"file_path": "/etc/hosts", "old_string": "127.0.0.1 localhost", "new_string": "127.0.0.1 localhost evil.example"}), None),
-        ("tool/result", tool_result(4, 1, "aaaaaaaa-0000-4000-8000-000000000032", "edited /etc/hosts"), "append"),
+        ("tool/call", tool_call(4, 1, "aaaaaaaa-0000-4000-8000-000000000032", "edit", {"file_path": "/etc/harnesses", "old_string": "127.0.0.1 localhost", "new_string": "127.0.0.1 localhost evil.example"}), None),
+        ("tool/result", tool_result(4, 1, "aaaaaaaa-0000-4000-8000-000000000032", "edited /etc/harnesses"), "append"),
         # SV605：绝对路径但非敏感目标 → 只报 warning，不报 SV604。
         ("tool/call", tool_call(4, 1, "aaaaaaaa-0000-4000-8000-000000000033", "edit", {"file_path": "/tmp/notes.md", "old_string": "old", "new_string": "new"}), None),
         ("tool/result", tool_result(4, 1, "aaaaaaaa-0000-4000-8000-000000000033", "edited /tmp/notes.md"), "append"),
@@ -275,8 +275,8 @@ def build_behavior():
     events += [ts(6), ss(6, 1)]
     events += [
         # SV607：被沙箱拒绝（error.code = FS_SANDBOX_DENIED）。
-        ("tool/call", tool_call(6, 1, "aaaaaaaa-0000-4000-8000-000000000051", "bash", {"command": "cat /etc/hosts"}), None),
-        ("tool/result", tool_result(6, 1, "aaaaaaaa-0000-4000-8000-000000000051", "read /etc/hosts", error={"name": "FsError", "code": "FS_SANDBOX_DENIED"}), "append"),
+        ("tool/call", tool_call(6, 1, "aaaaaaaa-0000-4000-8000-000000000051", "bash", {"command": "cat /etc/harnesses"}), None),
+        ("tool/result", tool_result(6, 1, "aaaaaaaa-0000-4000-8000-000000000051", "read /etc/harnesses", error={"name": "FsError", "code": "FS_SANDBOX_DENIED"}), "append"),
         # SV608：工具超时（error.code = TOOL_TIMEOUT）。
         ("tool/call", tool_call(6, 1, "aaaaaaaa-0000-4000-8000-000000000052", "bash", {"command": "sleep 60"}), None),
         ("tool/result", tool_result(6, 1, "aaaaaaaa-0000-4000-8000-000000000052", "timed out", error={"name": "TimeoutError", "code": "TOOL_TIMEOUT"}), "append"),
@@ -574,7 +574,7 @@ def main():
 
     # SV604 敏感文件写（write/edit）：~/.ssh/authorized_keys 与 /etc/。
     assert find_tool(read_events, "write", "~/.ssh/authorized_keys") is not None, "SV604: missing authorized_keys write"
-    assert find_tool(read_events, "edit", "/etc/hosts") is not None, "SV604: missing /etc/ edit"
+    assert find_tool(read_events, "edit", "/etc/harnesses") is not None, "SV604: missing /etc/ edit"
 
     # SV605 工作区外写（write/edit，绝对但非敏感）。
     assert find_tool(read_events, "edit", "/tmp/notes.md") is not None, "SV605: missing non-sensitive abs path"

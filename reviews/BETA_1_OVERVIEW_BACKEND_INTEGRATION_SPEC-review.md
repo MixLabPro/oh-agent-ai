@@ -11,7 +11,7 @@
 
 **File**: `apps/desktop/src-tauri/ui/workbench.js:609,750`
 
-`loadOverviewData()` 已经请求并校验了 `data_source_status`，但 `renderOverview()` 仍调用 `sourcesBrief(monthly)`，而 `sourcesBrief()` 继续遍历 `monthly.by_host` 的 `freshness` 和 `has_unresolved`。这会让连接状态为 `needs_attention`、`paused` 或 `excluded` 的来源被错误计为正常，也让真正未探测到的来源无法按来源状态展示。它违反规格中“顶部来源摘要必须以 `data_source_status` 为准”的合同。
+`loadOverviewData()` 已经请求并校验了 `data_source_status`，但 `renderOverview()` 仍调用 `sourcesBrief(monthly)`，而 `sourcesBrief()` 继续遍历 `monthly.by_harness` 的 `freshness` 和 `has_unresolved`。这会让连接状态为 `needs_attention`、`paused` 或 `excluded` 的来源被错误计为正常，也让真正未探测到的来源无法按来源状态展示。它违反规格中“顶部来源摘要必须以 `data_source_status` 为准”的合同。
 
 **Fix**: 让 `sourcesBrief(report)` 只消费 `data_source_status` 的 `sources`，明确映射 `connected → 正常`、`needs_attention/paused/excluded → 需检查`、`not_detected → 尚未接入且不计入正常/需检查`，`status=unavailable` 显示“来源状态不可用”。调用改为 `sourcesBrief(data.sources)`，并补充对应 mock 合同断言。
 
@@ -61,7 +61,7 @@ Round 1 的两项高优先级问题均已修复：
 - `node scripts/verify-workbench-kpi-decide.mjs`
 - `python3 -m unittest discover -s tests -p 'test_*' -v`（1189 passed，208 skipped）
 - `cargo test --release`
-- `cargo test --release -p agent-vitals-runtime -p agent-vitals-hosts`
+- `cargo test --release -p agent-vitals-runtime -p agent-vitals-harnesses`
 - `cargo clippy --release --all-targets -- -D warnings`
 - `cargo build --release`
 - `git diff --check`

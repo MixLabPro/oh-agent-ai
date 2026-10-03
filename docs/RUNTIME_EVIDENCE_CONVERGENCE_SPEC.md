@@ -7,17 +7,17 @@
 > | 文中路径 | 现状 |
 > |---|---|
 > | `crates/agent-vitals-core/src/domain/usage.rs` | → `crates/agent-vitals-domain/src/domain/usage.rs` |
-> | `crates/agent-vitals-core/src/adapters/hosts/codex/sessions/usage.rs` | → `crates/agent-vitals-hosts/src/hosts/codex/sessions/usage.rs` |
+> | `crates/agent-vitals-core/src/adapters/harnesses/codex/sessions/usage.rs` | → `crates/agent-vitals-harnesses/src/harnesses/codex/sessions/usage.rs` |
 > | 计划中的 `crates/agent-vitals-core/src/timeaxis.rs` | **从未创建** |
 >
 > **§2 的「阶段 A timeaxis」没有落地。** 它要消的重复至今仍在：三个各写各的北京
-> 偏移常量（`domain/usage.rs:88` `BEIJING_OFFSET_SECS`、`hosts/codex/sessions/usage.rs:160`
+> 偏移常量（`domain/usage.rs:88` `BEIJING_OFFSET_SECS`、`harnesses/codex/sessions/usage.rs:160`
 > `BEIJING_OFFSET_HOURS`、`data/authority_query.rs:34` `BEIJING_OFFSET_MS`）与两个
-> 各写各的小时函数（`domain/usage.rs:92 beijing_hour`、`hosts/codex/.../codex_hour_of`）。
+> 各写各的小时函数（`domain/usage.rs:92 beijing_hour`、`harnesses/codex/.../codex_hour_of`）。
 >
 > **§7 里程碑表里的 `✅` 是「独立可 ship」可行性列，不是完成状态。**
 >
-> **这条失效率造成过实际误导**：`hosts/codex/sessions/evidence.rs` 的
+> **这条失效率造成过实际误导**：`harnesses/codex/sessions/evidence.rs` 的
 > `timeline_entry` 注释曾把「`started_at` 秒 vs DSH 毫秒的时间轴统一」挂给
 > 「timeaxis 阶段」——而本 spec 的 timeaxis 讲的是**时区偏移合并**，与字段单位
 > 无关。于是 `TraceNode.started_at_ms` 的单位漂移长期无人认领。该注释已更正，
@@ -27,7 +27,7 @@
 
 > 状态：spec（部分已落地，2026-08 更新现状）。配套：`ARCHITECTURE.md` §10（结构）、
 > `RUNTIME_EVIDENCE_CONTRACT.md` §17（P1–P6 阶段记录）。本文是 §17 之后
-> 的第二轮落地：**不再是加新宿主适配器，而是把已有的 DSH + Codex 两条路径
+> 的第二轮落地：**不再是加新执行环境适配器，而是把已有的 DSH + Codex 两条路径
 > 真正接到 `CanonicalSession` 上，兑现 §10.2「L2 是唯一收口」和 §10.5
 > 「wasm 边界上移」两条当时只画、没做的承诺。**
 
@@ -40,7 +40,7 @@
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| P1 | `evidence.rs` 类型层（`CanonicalSession`/`Signal`/`Coverage`/`RuleSpec`）+ §12 无宿主标识测试 | ✅ 已落地 |
+| P1 | `evidence.rs` 类型层（`CanonicalSession`/`Signal`/`Coverage`/`RuleSpec`）+ §12 无执行环境标识测试 | ✅ 已落地 |
 | P2 | `dsh_evidence.rs`（`build_dsh_evidence` + 临时桥 `reverse_project`） | ✅ 已落地 |
 | P3 | 规则 declare `requires` + coverage 注解（五组全过） | ✅ 已落地，**但 `reverse_project` 保留未删**（见下） |
 | P4 | `codex_evidence.rs` / `codex_session.rs`（两种不兼容形态吸进共享类型层） | ✅ 已落地 |
@@ -51,21 +51,21 @@
 
 > 「detector 们仍消费 `reverse_project` 重建的原始事件，**不直接迭代
 > `CanonicalSession`/`Signal` 数据**……改写 detector 内部被判定为
-> *对单宿主（DSH）系统而言不成比例*，故 `reverse_project` 保留未删。」
+> *对单执行环境（DSH）系统而言不成比例*，故 `reverse_project` 保留未删。」
 
 这句写于 P3 落地时。**现状已不同**：行为/轨迹两个规则族（behavior.rs SV601–610、
 trajectory.rs SV611–614）的 detector 已迁到直接吃 `&CanonicalSession`
 （`detect_sv601(&CanonicalSession)` 等，迭代 `s.turns.entries`/`s.tool_calls.entries`），
 `reverse_project` 现在只剩测试在调（`dsh_evidence.rs:566,575` 的 `#[cfg(test)]`）——
 「detector 们仍吃 reverse_project」已过时，但 reverse_project 本身没删（其余族
-的迁移未做完）。**现在 Codex 已经是第二宿主**，且它的 cost fold 已经写进 core
-（`codex_usage.rs`）却进不了 wasm、上不了审计 tab——正是「单宿主」这个前提
+的迁移未做完）。**现在 Codex 已经是第二执行环境**，且它的 cost fold 已经写进 core
+（`codex_usage.rs`）却进不了 wasm、上不了审计 tab——正是「单执行环境」这个前提
 失效的信号。本文要做的三件事，就是把当时「不成比例」的事，
-在第二宿主出现后变成「成比例」：
+在第二执行环境出现后变成「成比例」：
 
 1. **统一时间轴**：`BEIJING_OFFSET` 与「UTC→北京」各写了两份（DSH 用 epoch 毫秒、
    Codex 用 ISO 串），本应是一套。
-2. **DSH 词表清退到 L1**：§10.2 白纸黑字「L3 以上不许出现宿主词表」。行为/轨迹
+2. **DSH 词表清退到 L1**：§10.2 白纸黑字「L3 以上不许出现执行环境词表」。行为/轨迹
    两族的生产 detector 已清干净（吃 `&CanonicalSession`，不再碰原始事件）；残余
    硬编码在 `duration.rs`（8 处 `e.get("type")` 判等）与 `compaction.rs` 这类仍读
    原始事件流的折叠，`skill/subagent/waste` 待核——`dsh_evidence.rs`（L2 适配器）
@@ -83,7 +83,7 @@ trajectory.rs SV611–614）的 detector 已迁到直接吃 `&CanonicalSession`
    │
 阶段 B：DSH 词表清退 + 删除 reverse_project  ← 大改，golden corpus 是唯一等价证明
    │
-阶段 C：wasm 边界上移 + 审计 tab 多宿主化    ← 依赖 B，解锁 codex 上同一引擎
+阶段 C：wasm 边界上移 + 审计 tab 多执行环境化    ← 依赖 B，解锁 codex 上同一引擎
 ```
 
 **依赖关系**：C 需要规则读 `Signal`（B 的产物）才能接 `audit_session(canonical)`；
@@ -92,7 +92,7 @@ A 独立，但 A 先做能消掉 B/C 改动里会重复撞上的时区重复。
 **2026-08 进度**：B 的 detector 输入迁移在行为/轨迹两族已完成（detector 吃
 `&CanonicalSession`，`reverse_project` 仅测试在调），且门控修正 + 专门测试已实装
 §3 验收的 anti-fabrication 条目（见 §3）。A（timeaxis.rs）与 C（wasm
-`audit_session(canonical)` + tab 多宿主）均未动——C 仍是解锁 codex 上同一引擎
+`audit_session(canonical)` + tab 多执行环境）均未动——C 仍是解锁 codex 上同一引擎
 的关键。
 
 ---
@@ -105,7 +105,7 @@ A 独立，但 A 先做能消掉 B/C 改动里会重复撞上的时区重复。
 ### 现状（已核实）
 - `crates/agent-vitals-core/src/domain/usage.rs:72` `BEIJING_OFFSET_SECS: i64 = 8*3600` +
   `beijing_hour(time_ms)` + `hour_buckets`（输入 epoch 毫秒）
-- `crates/agent-vitals-core/src/adapters/hosts/codex/sessions/usage.rs:151` `BEIJING_OFFSET_HOURS: i64 = 8` +
+- `crates/agent-vitals-core/src/adapters/harnesses/codex/sessions/usage.rs:151` `BEIJING_OFFSET_HOURS: i64 = 8` +
   `codex_hour_of(event)`（输入 ISO 串）
 - `days_from_civil`/`civil_date_from_days`（Hinnant）已在 `usage.rs`，且
   `codex_usage.rs` 已 `super::usage::` 引用——时间轴收敛已走了一半。
@@ -140,8 +140,8 @@ A 独立，但 A 先做能消掉 B/C 改动里会重复撞上的时区重复。
 ## 3. 阶段 B —— DSH 词表清退 + 删除 `reverse_project`
 
 ### 目标
-core 规则不再直接读宿主事件，改读 `Signal` 数据；删掉 `reverse_project` 临时桥，
-兑现 §10.2「L2 是唯一收口，L3 以上不许出现宿主词表」。
+core 规则不再直接读执行环境事件，改读 `Signal` 数据；删掉 `reverse_project` 临时桥，
+兑现 §10.2「L2 是唯一收口，L3 以上不许出现执行环境词表」。
 
 ### 现状（已核实）
 原始事件读法的 DSH 词表残余已从 55 处下降（行为/轨迹两族生产 detector 已清
@@ -206,8 +206,8 @@ additive 的 coverage 注解，没动 detector）：
   恒空」不再是常态——防御的不变量是「空就是空」，而 Codex 的 approvals
   timeline 至今仍是这个形状（覆盖非零但 approvals 空 → SV609 Unavailable）。
   §17.1 的 anti-fabrication assertion 至此从「应有」变「实装」。
-- §12 测试 `shared_type_layer_has_no_host_identifiers_in_code` 全程绿（扩
-  `CanonicalSession` 时尤其不能把宿主字段塞进共享层）。
+- §12 测试 `shared_type_layer_has_no_harness_identifiers_in_code` 全程绿（扩
+  `CanonicalSession` 时尤其不能把执行环境字段塞进共享层）。
 
 ### 风险 & 回滚
 - golden corpus **只讲 DSH**，等价性只能靠 DSH 证——所以每族一个 PR、每 PR 三证，
@@ -217,7 +217,7 @@ additive 的 coverage 注解，没动 detector）：
 
 ---
 
-## 4. 阶段 C —— wasm 边界上移 + 审计 tab 多宿主化
+## 4. 阶段 C —— wasm 边界上移 + 审计 tab 多执行环境化
 
 ### 目标
 wasm 从「吃原始 DSH 事件」升到「吃 `CanonicalSession`」；codex 能进同一套
@@ -231,12 +231,12 @@ wasm 从「吃原始 DSH 事件」升到「吃 `CanonicalSession`」；codex 能
      dsh-client 现有投影无感过渡（字段只增不删不改语义）。
    - `codex_usage(canonical_or_fold_json) -> String`：导出 codex 折叠，供
      codex 侧投影用。**顺带把 P4.5 的 schema-drift sentinel 补上**（§14.4）。
-2. **审计 tab 外壳多宿主化**（`dsh-client/`）：
+2. **审计 tab 外壳多执行环境化**（`dsh-client/`）：
    - `timeline.ts` 的 `TimelineRow`/`EventKind` 从 DSH 4 桶 / DSH 事件泛化成
-     host-neutral（token 向量字段 + `host` 维度；`EventKind` 去掉 DSH 专属的
-     `compaction`/`subagent`/`skill`，改成宿主各自声明支持的事件 kind）。
-   - i18n 的 label 集拆成「骨架 key」+「每宿主 label 集」。
-   - host 侧投影：现有 DSH 投影不动；新增 codex 投影集
+     harness-neutral（token 向量字段 + `harness` 维度；`EventKind` 去掉 DSH 专属的
+     `compaction`/`subagent`/`skill`，改成执行环境各自声明支持的事件 kind）。
+   - i18n 的 label 集拆成「骨架 key」+「每执行环境 label 集」。
+   - harness 侧投影：现有 DSH 投影不动；新增 codex 投影集
      （`codexFindings`/`codexTokenByModel`/`codexCostReport`），折 rollout →
      wasm → 计价（USD）。**只做 token + 时间线 + 成本，行为 findings 诚实显示
      「无行为审计」**（codex 暂无行为规则，见 §10.4 三态，不伪造）。
@@ -245,7 +245,7 @@ wasm 从「吃原始 DSH 事件」升到「吃 `CanonicalSession`」；codex 能
 
 ### 验收
 - wasm 重建 + 重拷 `dsh-client/`；`dsh-client` 全量 `npm test`（含
-  `verify-host.mjs`）绿——证明 DSH 走新面行为不变。
+  `verify-harness.mjs`）绿——证明 DSH 走新面行为不变。
 - codex 语料喂 `audit_session`：审批/沙箱类规则报 `Unavailable`（不是 `[]`）。
 - 新 codex 投影在真实 rollout 上 byte-identical Python↔Rust（`test_cli_matrix`）。
 - `TimelineRow` 泛化后，DSH 的 `eventsIn === eventsOut` 与「缺数据留缺口」两条
@@ -259,8 +259,8 @@ wasm 从「吃原始 DSH 事件」升到「吃 `CanonicalSession`」；codex 能
 
 ## 5. 必须守住的不变量（三阶段全程）
 
-1. **§12**：共享类型层（`evidence.rs` 及其新增字段）不许出现宿主名
-   （`shared_type_layer_has_no_host_identifiers_in_code`）。
+1. **§12**：共享类型层（`evidence.rs` 及其新增字段）不许出现执行环境名
+   （`shared_type_layer_has_no_harness_identifiers_in_code`）。
 2. **golden 只讲 DSH**：任何改动以 `behavior --json` / goldens 逐字节不变为
    等价证明；等价性无法用 codex 语料自证。
 3. **三态 > 安静零**：拿不到的格子报 `Unavailable{missing[], reason}`，
@@ -274,15 +274,15 @@ wasm 从「吃原始 DSH 事件」升到「吃 `CanonicalSession`」；codex 能
 
 ## 6. 明确不做（本文范围外）
 
-- **P5 Claude Code / P6 WorkBuddy 适配器**：那是「加宿主」，本文是「让已有宿主
-  真用上 CanonicalSession」。两者正交，P5/P6 会**受益于** B 的收口（新宿主进来
+- **P5 Claude Code / P6 WorkBuddy 适配器**：那是「加执行环境」，本文是「让已有执行环境
+  真用上 CanonicalSession」。两者正交，P5/P6 会**受益于** B 的收口（新执行环境进来
   不用再造一套原始事件接口），但不在本文做。
-- **跨宿主「总花费」一个数**：¥ vs USD 不可加，汇率换算仍不做（`cli.py:713`）。
+- **跨执行环境「总花费」一个数**：¥ vs USD 不可加，汇率换算仍不做（`cli.py:713`）。
 - **codex 的行为规则（SV 码）**：B/C 只让 codex 能**诚实报 Unavailable**，
   不给 codex 发明 DSH 那套 SV601–614 的行为规则。codex 该有自己的规则是另一个
   需求。
 - **timeaxis 之外的折叠统一**：DSH 4 桶 vs Codex 5 桶的桶宽、计价维度**保持分叉**
-  （`ARCHITECTURE.md` §8.2「Bucket sets are per host」），本文只统一时间轴，不统一桶宽。
+  （`ARCHITECTURE.md` §8.2「Bucket sets are per harness」），本文只统一时间轴，不统一桶宽。
 
 ---
 

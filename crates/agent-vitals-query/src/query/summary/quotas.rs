@@ -5,8 +5,8 @@ use super::*;
 /// Codex 当前配额快照（决策卡「现在该用谁」的唯一正向余量源）。
 ///
 /// **为什么是独立函数而不是塞进 summary**：plan 是"当前状态"的单快照、不按
-/// 日期分桶（`hosts/codex/sessions/usage.rs` 的 doc），塞进月/日窗口 DTO 会
-/// 把"此刻余量"伪装成窗口数据。宿主字段由 Codex adapter 解析和校验；这里
+/// 日期分桶（`harnesses/codex/sessions/usage.rs` 的 doc），塞进月/日窗口 DTO 会
+/// 把"此刻余量"伪装成窗口数据。执行环境字段由 Codex adapter 解析和校验；这里
 /// 只从权威库读取 adapter 产出的快照，不二次解释：`{"plan_type", "has_credits",
 /// "limits": {"primary": {"used_percent", "window_minutes", "resets_at"}},
 /// "observed_at"}`——**窗口条在 `limits.primary` 之下、不在顶层**（审查 #1：
@@ -20,12 +20,12 @@ pub fn codex_quota_snapshot(home: &Path) -> Option<serde_json::Value> {
     let db = SqlSummaryRepository::new().open_db()?;
     let (payload, _observed_at_ms) = db.runtime_snapshot_get("codex", "codex_quota").ok()??;
     let plan: serde_json::Value = serde_json::from_str(&payload).ok()?;
-    agent_vitals_hosts::codex_usage::validate_quota_snapshot(&plan)
+    agent_vitals_harnesses::codex_usage::validate_quota_snapshot(&plan)
 }
 
 /// Claude Pro 的窗口状态（决策卡「现在该用谁」的 Claude 行）。
 ///
-/// **与 `codex_quota_snapshot` 同一条纪律**：只读权威库里的宿主快照，产品读面
+/// **与 `codex_quota_snapshot` 同一条纪律**：只读权威库里的执行环境快照，产品读面
 /// **不回退扫描 `~/.claude`**——库缺记录就诚实 `None`（宁可不显示，也不现扫）。
 ///
 /// **状态机在这里算完再交给展示层**，`now_secs` 由调用方注入：前端不做时间判断，
@@ -35,7 +35,7 @@ pub fn codex_quota_snapshot(home: &Path) -> Option<serde_json::Value> {
 /// **没有正向余量这回事**，所以这里只可能给出 `unknown` 或 `exhausted`，
 /// 永远不会有"剩余 N%"（spec §8.3.2 明令）。
 pub fn claude_quota_status(now_secs: i64) -> Option<serde_json::Value> {
-    use agent_vitals_hosts::claude_quota::{window_state, ClaudeQuotaSnapshot, WindowState};
+    use agent_vitals_harnesses::claude_quota::{window_state, ClaudeQuotaSnapshot, WindowState};
     let db = SqlSummaryRepository::new().open_db()?;
     let (payload, _observed_at_ms) = db.runtime_snapshot_get("claude-code", "claude_quota").ok()??;
     let value: serde_json::Value = serde_json::from_str(&payload).ok()?;
@@ -61,8 +61,8 @@ pub fn claude_quota_status(now_secs: i64) -> Option<serde_json::Value> {
             "state": "exhausted",
             "window": window,
             // 人类标签随 DTO 走：卡片、待处理任务、系统通知三处必须叫同一个名字，
-            // 而通知那条路径（Tauri）不依赖 hosts crate，只能从这里拿。
-            "window_label": agent_vitals_hosts::claude_quota::window_label(window),
+            // 而通知那条路径（Tauri）不依赖 harnesses crate，只能从这里拿。
+            "window_label": agent_vitals_harnesses::claude_quota::window_label(window),
             "resets_at": resets_at,
             "observed_at": snapshot.observed_at,
             "windows_recent": windows_recent,
@@ -70,10 +70,10 @@ pub fn claude_quota_status(now_secs: i64) -> Option<serde_json::Value> {
     })
 }
 
-/// 宿主 → 该宿主可能出现的 billing_source 提供方。接线知识（与
-/// `WIRED_HOSTS` 同类）：新宿主/新提供方接线时同步维护；漏登记的已声明
+/// 执行环境 → 该执行环境可能出现的 billing_source 提供方。接线知识（与
+/// `WIRED_HARNESSES` 同类）：新执行环境/新提供方接线时同步维护；漏登记的已声明
 /// 订阅会落 `unattributed/<provider>` 条目可见，不会静默消失。
-pub(crate) const HOST_PROVIDER_MAP: &[(&str, &[&str])] = &[
+pub(crate) const HARNESS_PROVIDER_MAP: &[(&str, &[&str])] = &[
     (
         "claude-code",
         &["anthropic", "minimax", "zhipu-glm", "moonshot"],

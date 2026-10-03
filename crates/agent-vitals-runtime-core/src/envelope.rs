@@ -145,7 +145,7 @@ pub fn build_envelope(
 
 /// spec §6.1 `coverage`：不依赖时间覆盖的工具（如 `data_status`）用这个。
 pub fn coverage_not_applicable() -> Value {
-    json!({ "status": "not_applicable", "missing_hosts": [] })
+    json!({ "status": "not_applicable", "missing_harnesses": [] })
 }
 
 /// spec §6.4.1 `as_of_run_id` 三态。共享给所有带时间窗的工具，防止各写一份漂移。
@@ -226,8 +226,8 @@ pub fn error_envelope(err: &ToolError) -> Value {
         "authority_revision": Value::Null,
         "generated_at": ms_to_rfc3339_beijing(crate::clock::now_ms()),
         "timezone": crate::clock::statistics_timezone_name(),
-        "coverage": { "status": "unavailable", "missing_hosts": [] },
-        "freshness": { "last_successful_sync_at": Value::Null, "stale_hosts": [] },
+        "coverage": { "status": "unavailable", "missing_harnesses": [] },
+        "freshness": { "last_successful_sync_at": Value::Null, "stale_harnesses": [] },
         "warnings": [],
         "data": Value::Null,
         "error": err.to_json(),
@@ -253,7 +253,7 @@ pub fn schema_version(conn: &Connection) -> i64 {
 /// observation_kind != 'legacy_aggregate'`——legacy 是聚合兜底行，
 /// `event_ts_ms` 是北京日 12:00 代表点；混进去会把 `max_observed_at`
 /// 推到 `covered_to` 之后，破坏 spec §6.1「本次答案基于哪一批已提交
-/// 数据」的不变量。这条过滤与 `per_host_breakdown` / `hourly_by_host` 同。
+/// 数据」的不变量。这条过滤与 `per_harness_breakdown` / `hourly_by_harness` 同。
 pub fn authority_revision(conn: &Connection, max_observed_at_ms: Option<i64>) -> Value {
     let last = conn
         .query_row(
@@ -287,27 +287,27 @@ pub fn authority_revision(conn: &Connection, max_observed_at_ms: Option<i64>) ->
 }
 
 /// `data_status` 及所有标准 envelope 的活跃数据新鲜度阈值。它回答的是「该
-/// 宿主最近一条实时 usage 事实是否已超过一天」；最近一次扫描时间另由
-/// `data.by_host.*.last_seen_at` 表示，二者不能混为一谈。
+/// 执行环境最近一条实时 usage 事实是否已超过一天」；最近一次扫描时间另由
+/// `data.by_harness.*.last_seen_at` 表示，二者不能混为一谈。
 pub const FRESHNESS_STALE_AFTER_MS: i64 = 24 * 60 * 60 * 1_000;
 
-/// 返回存在于实时事实或扫描源中的宿主，且其最后一条实时 usage fact 已超过
-/// 24 小时（没有任何实时事实同样视为 stale）。顺序由 SQL 固定为 host 升序，
+/// 返回存在于实时事实或扫描源中的执行环境，且其最后一条实时 usage fact 已超过
+/// 24 小时（没有任何实时事实同样视为 stale）。顺序由 SQL 固定为 harness 升序，
 /// 以保证 CLI / MCP envelope 可逐字节对账。
-pub fn stale_hosts(conn: &Connection, now_ms: i64) -> Vec<String> {
+pub fn stale_harnesses(conn: &Connection, now_ms: i64) -> Vec<String> {
     let mut stmt = match conn.prepare(
-        "SELECT host, MAX(event_ts_ms) AS last_fact_at_ms
+        "SELECT harness, MAX(event_ts_ms) AS last_fact_at_ms
          FROM usage_facts
          WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'
-         GROUP BY host
+         GROUP BY harness
          UNION
-         SELECT host, NULL
+         SELECT harness, NULL
          FROM source_files
-         WHERE host NOT IN (
-           SELECT DISTINCT host FROM usage_facts
+         WHERE harness NOT IN (
+           SELECT DISTINCT harness FROM usage_facts
            WHERE deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'
          )
-         ORDER BY host",
+         ORDER BY harness",
     ) {
         Ok(stmt) => stmt,
         Err(_) => return Vec::new(),
@@ -319,11 +319,11 @@ pub fn stale_hosts(conn: &Connection, now_ms: i64) -> Vec<String> {
         Err(_) => return Vec::new(),
     };
     rows.flatten()
-        .filter_map(|(host, last_fact_at_ms)| {
+        .filter_map(|(harness, last_fact_at_ms)| {
             (last_fact_at_ms
                 .map(|at| now_ms.saturating_sub(at) > FRESHNESS_STALE_AFTER_MS)
                 .unwrap_or(true))
-            .then_some(host)
+            .then_some(harness)
         })
         .collect()
 }
@@ -335,7 +335,7 @@ pub fn data_freshness_report(conn: &Connection) -> Value {
     freshness(conn)
 }
 
-/// spec §6 `freshness`。`stale_hosts` 由最新实时事实折成显式状态，避免只把
+/// spec §6 `freshness`。`stale_harnesses` 由最新实时事实折成显式状态，避免只把
 /// 原始 `covered_to` 留给每个 consumer 自己计算而发生口径漂移。
 pub fn freshness(conn: &Connection) -> Value {
     let last = conn
@@ -349,7 +349,7 @@ pub fn freshness(conn: &Connection) -> Value {
         .flatten();
     json!({
         "last_successful_sync_at": last.map(ms_to_rfc3339_beijing),
-        "stale_hosts": stale_hosts(conn, crate::clock::now_ms()),
+        "stale_harnesses": stale_harnesses(conn, crate::clock::now_ms()),
     })
 }
 

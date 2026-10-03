@@ -1,6 +1,6 @@
 //! 归因签名目录的纯规则层（BETA_1_AUTO_ATTRIBUTION_SPEC §2 L0/L1、§10 第③层）。
 //!
-//! 只回答两个宿主无关的问题：**这个模型是谁家的**（L0，`model_vendor`）和
+//! 只回答两个执行环境无关的问题：**这个模型是谁家的**（L0，`model_vendor`）和
 //! **这条记录像是打到了谁的端点**（L1，`route_shape`）。它不回答『谁收的钱』
 //! ——`provider_id` 仍由 `agent_vitals_provider::resolve_billing_attribution`
 //! 按证据强度决定；这里产出的 `Inferred` 永远不能单独把一批用量判成订阅。
@@ -84,23 +84,23 @@ fn vendor_by_prefix(catalog: &Value, model: &str) -> Option<String> {
     best.map(|(_, vendor)| vendor.to_string())
 }
 
-/// 宿主的原生厂商（`host_native_vendor` 表）：宿主读自家模型，模型名不带服务商前缀。
-/// 没有登记的宿主返回 `None`——不猜。
-pub fn host_native_vendor(host: &str) -> Option<String> {
-    host_native_vendor_in(&signatures(), host)
+/// 执行环境的原生厂商（`harness_native_vendor` 表）：执行环境读自家模型，模型名不带服务商前缀。
+/// 没有登记的执行环境返回 `None`——不猜。
+pub fn harness_native_vendor(harness: &str) -> Option<String> {
+    harness_native_vendor_in(&signatures(), harness)
 }
 
-pub fn host_native_vendor_in(catalog: &Value, host: &str) -> Option<String> {
-    catalog.pointer("/host_native_vendor")?.get(host)?.as_str().filter(|v| !v.is_empty()).map(str::to_string)
+pub fn harness_native_vendor_in(catalog: &Value, harness: &str) -> Option<String> {
+    catalog.pointer("/harness_native_vendor")?.get(harness)?.as_str().filter(|v| !v.is_empty()).map(str::to_string)
 }
 
-/// 原生厂商是 `vendor` 的所有宿主（`host_native_vendor` 表的反查）。
-pub fn native_hosts_of(vendor: &str) -> Vec<String> {
-    signatures().pointer("/host_native_vendor")
+/// 原生厂商是 `vendor` 的所有执行环境（`harness_native_vendor` 表的反查）。
+pub fn native_harnesses_of(vendor: &str) -> Vec<String> {
+    signatures().pointer("/harness_native_vendor")
         .and_then(Value::as_object)
         .map(|table| table.iter()
-            .filter(|(host, native)| !host.starts_with('_') && native.as_str() == Some(vendor))
-            .map(|(host, _)| host.clone()).collect())
+            .filter(|(harness, native)| !harness.starts_with('_') && native.as_str() == Some(vendor))
+            .map(|(harness, _)| harness.clone()).collect())
         .unwrap_or_default()
 }
 
@@ -112,11 +112,11 @@ pub fn model_prefixes_of(vendor: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 这个模型对该宿主是不是「自家原生」：**无网关前缀**，且模型厂商就是宿主的原生厂商。
+/// 这个模型对该执行环境是不是「自家原生」：**无网关前缀**，且模型厂商就是执行环境的原生厂商。
 /// 带前缀（`bigmodel/glm-5.3-flash`）= 第三方云厂商 / 中转；非原生系列（claude-code 下的 `deepseek-*`）
 /// = 第三方。两者都返回 false，仍需要用户声明它走哪个中转。
-pub fn is_host_native_model(host: &str, model: &str) -> bool {
-    let Some(native) = host_native_vendor(host) else { return false };
+pub fn is_harness_native_model(harness: &str, model: &str) -> bool {
+    let Some(native) = harness_native_vendor(harness) else { return false };
     model_vendor(model).is_some_and(|m| !m.gateway_named && m.vendor == native)
 }
 
@@ -188,19 +188,19 @@ fn matches(pattern: Option<&str>, value: &str) -> bool {
 }
 
 /// 官方端点主机名 → 厂商（边界感知：子域可以，包含厂商名的无关主机不算）。
-pub fn official_endpoint_vendor(host: &str) -> Option<String> {
+pub fn official_endpoint_vendor(harness: &str) -> Option<String> {
     let catalog = signatures();
-    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
-    let host = host.split_once("://").map(|(_, rest)| rest).unwrap_or(&host);
-    let host = host.split('/').next().unwrap_or(host);
-    let host = host.rsplit_once(':').filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit()))
-        .map(|(h, _)| h).unwrap_or(host);
+    let harness = harness.trim().trim_end_matches('.').to_ascii_lowercase();
+    let harness = harness.split_once("://").map(|(_, rest)| rest).unwrap_or(&harness);
+    let harness = harness.split('/').next().unwrap_or(harness);
+    let harness = harness.rsplit_once(':').filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit()))
+        .map(|(h, _)| h).unwrap_or(harness);
     let vendors = catalog.get("vendors")?.as_object()?;
     for (vendor, spec) in vendors {
         let Some(endpoints) = spec.get("official_endpoints").and_then(Value::as_array) else { continue };
         for endpoint in endpoints.iter().filter_map(Value::as_str) {
             let e = endpoint.to_ascii_lowercase();
-            if host == e || host.ends_with(&format!(".{e}")) {
+            if harness == e || harness.ends_with(&format!(".{e}")) {
                 return Some(vendor.clone());
             }
         }
@@ -220,14 +220,14 @@ pub fn official_endpoints_of(vendor: &str) -> Vec<String> {
 /// 这个主机名是不是该厂商的官方端点（边界感知，含子域；与 `official_endpoint_vendor`
 /// 同一套比较规则）。**用来判"配置里的基址是不是中转"**：不是官方端点 ≠ 一定中转，
 /// 但"是官方端点"就是官方——这个否定面足够让 L3 的那一问改成一次确认。
-pub fn is_official_endpoint(vendor: &str, host: &str) -> bool {
-    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
-    if host.is_empty() {
+pub fn is_official_endpoint(vendor: &str, harness: &str) -> bool {
+    let harness = harness.trim().trim_end_matches('.').to_ascii_lowercase();
+    if harness.is_empty() {
         return false;
     }
     official_endpoints_of(vendor).iter().any(|endpoint| {
         let e = endpoint.to_ascii_lowercase();
-        host == e || host.ends_with(&format!(".{e}"))
+        harness == e || harness.ends_with(&format!(".{e}"))
     })
 }
 
@@ -256,31 +256,31 @@ mod tests {
     }
 
     #[test]
-    fn host_native_models_have_no_gateway_prefix_and_belong_to_the_hosts_own_vendor() {
-        // 宿主读自家模型：无前缀（用户 2026-10-01 的观察）
-        assert!(is_host_native_model("claude-code", "claude-sonnet-5-5"));
-        assert!(is_host_native_model("codex", "gpt-5.6-terra"));
-        assert!(is_host_native_model("host:zcode", "GLM-5.3"), "大小写不敏感");
-        assert!(is_host_native_model("host:zcode", "glm-5.3-flash"));
+    fn harness_native_models_have_no_gateway_prefix_and_belong_to_the_harnesses_own_vendor() {
+        // 执行环境读自家模型：无前缀（用户 2026-10-01 的观察）
+        assert!(is_harness_native_model("claude-code", "claude-sonnet-5-5"));
+        assert!(is_harness_native_model("codex", "gpt-5.6-terra"));
+        assert!(is_harness_native_model("harness:zcode", "GLM-5.3"), "大小写不敏感");
+        assert!(is_harness_native_model("harness:zcode", "glm-5.3-flash"));
         // 第三方云厂商 / 中转给模型加路径前缀
-        assert!(!is_host_native_model("host:zcode", "bigmodel/glm-5.3-flash"));
-        assert!(!is_host_native_model("codex", "deepseek/deepseek-v4.1-flash"));
-        assert!(!is_host_native_model("codex", "openai/gpt-5.6-luna"), "即使前缀就是自家厂商，带前缀也是经过网关");
-        assert!(!is_host_native_model("claude-code", "anthropic/claude-sonnet-5"));
-        // 非原生系列：宿主读别家的模型 = 第三方路由
-        assert!(!is_host_native_model("claude-code", "deepseek-v4-flash"));
-        assert!(!is_host_native_model("claude-code", "MiniMax-M3"));
-        assert!(!is_host_native_model("claude-code", "glm-5.3-flash"));
-        // 没登记原生厂商的宿主 / 哨兵 / 空：不猜
-        assert!(!is_host_native_model("workbuddy", "hy4-preview-f"));
-        assert!(!is_host_native_model("claude-code", "<synthetic>"));
-        assert!(!is_host_native_model("claude-code", ""));
-        assert_eq!(host_native_vendor("host:zcode").as_deref(), Some("zhipu-glm"));
-        assert_eq!(host_native_vendor("nope"), None);
+        assert!(!is_harness_native_model("harness:zcode", "bigmodel/glm-5.3-flash"));
+        assert!(!is_harness_native_model("codex", "deepseek/deepseek-v4.1-flash"));
+        assert!(!is_harness_native_model("codex", "openai/gpt-5.6-luna"), "即使前缀就是自家厂商，带前缀也是经过网关");
+        assert!(!is_harness_native_model("claude-code", "anthropic/claude-sonnet-5"));
+        // 非原生系列：执行环境读别家的模型 = 第三方路由
+        assert!(!is_harness_native_model("claude-code", "deepseek-v4-flash"));
+        assert!(!is_harness_native_model("claude-code", "MiniMax-M3"));
+        assert!(!is_harness_native_model("claude-code", "glm-5.3-flash"));
+        // 没登记原生厂商的执行环境 / 哨兵 / 空：不猜
+        assert!(!is_harness_native_model("workbuddy", "hy4-preview-f"));
+        assert!(!is_harness_native_model("claude-code", "<synthetic>"));
+        assert!(!is_harness_native_model("claude-code", ""));
+        assert_eq!(harness_native_vendor("harness:zcode").as_deref(), Some("zhipu-glm"));
+        assert_eq!(harness_native_vendor("nope"), None);
         assert!(model_prefixes_of("zhipu-glm").contains(&"glm-".to_string()));
-        assert_eq!(native_hosts_of("zhipu-glm"), vec!["host:zcode".to_string()]);
-        assert_eq!(native_hosts_of("anthropic"), vec!["claude-code".to_string()]);
-        assert!(native_hosts_of("nobody").is_empty());
+        assert_eq!(native_harnesses_of("zhipu-glm"), vec!["harness:zcode".to_string()]);
+        assert_eq!(native_harnesses_of("anthropic"), vec!["claude-code".to_string()]);
+        assert!(native_harnesses_of("nobody").is_empty());
     }
 
     #[test]

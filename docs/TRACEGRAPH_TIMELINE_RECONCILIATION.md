@@ -91,9 +91,9 @@ spec = {
 
 ### 1.3 澄清一个撞名
 
-代码里搜 `native` 会命中 `hosts/*/sources/usage_fact.rs` 的 `time_basis: "native"` /
-`identity_basis: "native"`。**那是 basis 取值（「时间戳来自宿主原生字段」），与
-`timeline_series.points[].native`（宿主原生事件 id，Seq/Uuid/CallId/TurnId）是两个概念。**
+代码里搜 `native` 会命中 `harnesses/*/sources/usage_fact.rs` 的 `time_basis: "native"` /
+`identity_basis: "native"`。**那是 basis 取值（「时间戳来自执行环境原生字段」），与
+`timeline_series.points[].native`（执行环境原生事件 id，Seq/Uuid/CallId/TurnId）是两个概念。**
 v0.10 若引入 `native` 字段，必须在 doc 里点明这个撞名，否则会被当成同一个东西。
 
 ---
@@ -121,7 +121,7 @@ pub occurred_at_ms: Option<i64>,   // 只用于展示和时间窗口，不参与
 
 ### F-T2（P0）线性化未声明，废弃分叉没有去处
 
-Claude Code 的 transcript 是**消息树**（`uuid`/`parentUuid`），三个宿主日志里都躺着
+Claude Code 的 transcript 是**消息树**（`uuid`/`parentUuid`），三个执行环境日志里都躺着
 **用户放弃过的路径**。§5 不变量 1：树要显式选线性化，废弃分叉 → `unmetered`，
 **不归零、不静默合并**。
 
@@ -132,22 +132,22 @@ Claude Code 的 transcript 是**消息树**（`uuid`/`parentUuid`），三个宿
 **修**：`TraceNode` 增 `branch_state`（`live` / `abandoned` / `unknown`）；`TraceCoverage`
 增 `unmetered_nodes`。线性化在**投影函数**上声明，不在图上。
 
-> 附带一条好消息：**线性化有宿主信号可循，不用猜**。Claude Code 实测 281 条 `last-prompt`
+> 附带一条好消息：**线性化有执行环境信号可循，不用猜**。Claude Code 实测 281 条 `last-prompt`
 > 都带 `leafUuid` 指向当时的叶节点、`isSidechain` 标旁支；Codex 有 `thread_rolled_back`；
 > DSH 有 `seedLength` 前缀。adapter 是去**读**它，不是发明它。
 
-### F-T3（P1）`node_id` 是自造哈希，丢掉了宿主原生 id
+### F-T3（P1）`node_id` 是自造哈希，丢掉了执行环境原生 id
 
 R2.1 写「图节点/边**不得自造 ID**」，然后定义 `node_id = fnv1a64_hex(canonical_json(...))`
 ——哈希恰恰就是自造 id。真正的意思应该是「不得自造**join 键**」：§3.2 明确跨 scope join
-**只走 `native`**（宿主自己的 Seq/Uuid/CallId/TurnId），绝不走我们合成的 ordinal 或哈希。
+**只走 `native`**（执行环境自己的 Seq/Uuid/CallId/TurnId），绝不走我们合成的 ordinal 或哈希。
 
 **修**：`node_id` 保留作稳定主键（幂等用），但**必须同时保留 `native`**，并写明 join 只
 走 `native`。
 
 ### F-T4（P1）`metadata: serde_json::Value` 无约束，丢了「缺键不出现」
 
-§4 约束：`values` 的键集合由宿主声明，**缺的键不出现**（不是填 0 / null）——「这个宿主没测
+§4 约束：`values` 的键集合由执行环境声明，**缺的键不出现**（不是填 0 / null）——「这个执行环境没测
 这个维度」与「测了是 0」必须可区分。这正是本仓库 `Unavailable ≠ MeasuredZero` 纪律的呈现侧
 镜像。R2.1 的 `metadata` 是个自由 JSON，没有这条约束。
 
@@ -174,7 +174,7 @@ Codex `agent_thread_id` 只数覆盖率未提取；Claude Code 靠 `isSidechain`
 本身没问题，**但 5/19 的可靠性必须以 provenance 形式传导**，否则 v0.10 会把一个 26% 可靠的
 关系画成确定的因果边。
 
-**修**：subagent 边的 `provenance` 按宿主填；不可解析的父子进 `TraceCoverage.missing_parent`。
+**修**：subagent 边的 `provenance` 按执行环境填；不可解析的父子进 `TraceCoverage.missing_parent`。
 
 ### F-T7（P2）成本轴：Credits / Quota 不在 v0.10 模型里
 
@@ -213,12 +213,12 @@ CLAUDE.md 已写死「比例尺算错了不报错、只有人眼看出来」。
 
 | 层 | 干什么 | 归属 |
 |---|---|---|
-| 数据准备 | 原始事件 → points/events（折 token、分桶、选叶路径、映射 ordinal/native） | 宿主适配器 + envelope（Rust 侧） |
+| 数据准备 | 原始事件 → points/events（折 token、分桶、选叶路径、映射 ordinal/native） | 执行环境适配器 + envelope（Rust 侧） |
 | 几何 | points+events → SVG path/柱/点（比例尺、聚合、缺口断开） | 共享 client `.js` 纯函数（**已存在**） |
 | 渲染壳 | SVG → DOM/React/模板 | 每前端一份 |
 
-R2.1 §6.2 把 `trace_service.rs` 放 runtime、`hosts/<h>/sessions/trace.rs` 放 hosts，
-与「数据准备归宿主适配器」一致 ✅。
+R2.1 §6.2 把 `trace_service.rs` 放 runtime、`harnesses/<h>/sessions/trace.rs` 放 harnesses，
+与「数据准备归执行环境适配器」一致 ✅。
 
 **但 §6.2 列的 `vitals-core/graph.rs` 有边界风险**：`TRAJECTORY_TIMELINE_SPEC` §6 明写
 「**vitals-core 不碰时间线**」，且 `crates/vitals-core/tests/dependency_boundary.rs` 有

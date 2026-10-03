@@ -13,13 +13,13 @@ shared lib + wasm build (`apps/cli/src/` + `crates/`). The
 Python scanner is stdlib-only — no dependencies, no network calls; the Rust side has
 normal crates.io deps (clap/regex/serde/serde_json/sha2/walkdir) and the wasm crate adds
 wasm-bindgen. The "no network, no third-party supply chain" constraint still holds for
-what is *distributed* as the in-host skill: a skill that audits skills for supply-chain
+what is *distributed* as the in-harness skill: a skill that audits skills for supply-chain
 risk cannot itself pull third-party code at scan time.
 
 There is also a **DeepSeek Harness (DSH) integration**: `integrations/dsh/` (the installable
 profile bundle, still in this repo — no build, no deps; the `dsh/` name is a leftover from
 before Phase E1 moved it under `integrations/`). The other half, the dual-face audit
-plugin whose host half folds session events through the Rust behavior rules compiled to wasm
+plugin whose harness half folds session events through the Rust behavior rules compiled to wasm
 and whose client half renders a 「审计」tab, was **extracted to a standalone repository,
 `dsh-agent-vitals-audit`, on 2026-09-22** (its `npm` toolchain depends on private
 `@deepseek-ai/*` packages that can't be resolved from this environment/CI, and it was never
@@ -40,56 +40,56 @@ first, then a Chinese section anchored at `#中文`. When editing behaviour, bot
 
 ```
 Cargo.toml                  # 纯 [workspace] manifest（Phase E3 起；[profile.release] 留根，Cargo 规则）：
-                            #   apps/cli + crates/{vitals-core,agent-vitals-domain,agent-vitals-hosts,agent-vitals-runtime,agent-vitals-wasm}
+                            #   apps/cli + crates/{vitals-core,agent-vitals-domain,agent-vitals-harnesses,agent-vitals-runtime,agent-vitals-wasm}
 apps/cli/                   # Rust binary crate（the `agent-vitals` CLI），Phase E3 由根 src/ 迁来
   src/skills/               #   静态 SKILL.md 体检（analysis/security/doctor/discovery/…）
   src/agent/                #   会话行为/成本审计的 CLI 侧 I/O 接线：v0.7 UsageFact 发射器
                             #   （{claude,codex,dsh}_usage_fact）、成本折叠（cost/claude_cost，
                             #   后者只剩 fold 引擎，与 claude_usage_fact 双向耦合）、CLI 展示
-                            #   助手（oneline/plan）、宿主能力注册表（host_runtime_
+                            #   助手（oneline/plan）、执行环境能力注册表（harness_runtime_
                             #   registration）。behavior/codex_cost/codex_session_audit/
                             #   discovery/r2a_store 已整体迁进
                             #   agent-vitals-runtime::sessions（v0.9 Stage 0.3）。
   src/util.rs               #   二进制侧 util（split_lines/pyround 等 re-export 自 domain）
-crates/vitals-core/         # 宿主无关的通用审计机制（Event→Trajectory→Detector→Finding→Replay）；不认识 Agent/宿主
+crates/vitals-core/         # 执行环境无关的通用审计机制（Event→Trajectory→Detector→Finding→Replay）；不认识 Agent/执行环境
 crates/agent-vitals-data/   # v0.9 Stage A/B：数据面本体（spec §3.4/§5.1）。权威 UsageFact JSONL
                             #   的 writer/replay/保留滚动（evidence）+ SQLite **可重建**索引
                             #   （store，删库从 JSONL 重建）+ BillingContext（billing）——
                             #   索引是可丢弃投影，权威在 JSONL；只依赖 domain + rusqlite
                             #   （tests/dependency_budget.rs 钉边界），实现走 runtime::ingest_service
 crates/agent-vitals-domain/ # v0.8 Phase C：PURE computation + 词表契约，single source of truth。
-                            #   src/{contracts,domain,compatibility}/ + lib.rs。contracts/=宿主无关词表
-                            #   （evidence/host_capability/source_identity/usage_fact/r2a，只碰 serde_json）；
-                            #   domain/=跨宿主计算（Phase D1 起对任何宿主 wire 事件形状不知情）；
+                            #   src/{contracts,domain,compatibility}/ + lib.rs。contracts/=执行环境无关词表
+                            #   （evidence/harness_capability/source_identity/usage_fact/r2a，只碰 serde_json）；
+                            #   domain/=跨执行环境计算（Phase D1 起对任何执行环境 wire 事件形状不知情）；
                             #   compatibility/=vitals-core 桥。lib.rs 暴露嵌套 + 扁平两套路径。
-crates/agent-vitals-hosts/ # v0.8：一个 crate 装所有宿主的 wire 适配（D3 由 agent-vitals-adapters 改名）。
-                            #   hosts/<h>/sessions/=会话证据（纯，wasm 可链）：claude_code/codex/workbuddy evidence、
+crates/agent-vitals-harnesses/ # v0.8：一个 crate 装所有执行环境的 wire 适配（D3 由 agent-vitals-adapters 改名）。
+                            #   harnesses/<h>/sessions/=会话证据（纯，wasm 可链）：claude_code/codex/workbuddy evidence、
                             #   Codex usage fold、canonical_usage、Phase D1 起的 DSH evidence/audit/compaction/waste。
-                            #   hosts/<h>/{sources/（I/O，feature-gated）,skills/,capability.rs}=D4/D5 填。依赖 domain。
-                            #   W3：`sources::session_hosts` 会话宿主注册表（根 / 枚举 / findings 评估 / trace 定位），
-                            #   runtime 遍历它、不按宿主名分支；接新宿主 = 加一行 + 写 hosts/<h>/sources 实现。
+                            #   harnesses/<h>/{sources/（I/O，feature-gated）,skills/,capability.rs}=D4/D5 填。依赖 domain。
+                            #   W3：`sources::session_harnesses` 会话执行环境注册表（根 / 枚举 / findings 评估 / trace 定位），
+                            #   runtime 遍历它、不按执行环境名分支；接新执行环境 = 加一行 + 写 harnesses/<h>/sources 实现。
 crates/agent-vitals-runtime/ # **门面**（W3，2026-09-24）：自身无实现，原样 re-export 下面 6 个层 crate 的全部
                             #   模块与扁平别名，外部 `agent_vitals_runtime::X` 路径不变。`watcher` / `mcp-internal`
                             #   feature 只做转发。只能依赖严格更低层：crate 间由 Cargo 保证，crate 内由
                             #   `tests/module_layering.rs` 钉住（扫整个 runtime 家族）；内部代码写真实路径
                             #   （`crate::clock::now_ms`，不写兼容别名 `crate::sql_sync::now_ms`）。
-crates/agent-vitals-runtime-core/ # L0 core（home/clock/lease/state/SQL 权威标记/宿主词表）· pricing · source_graph
+crates/agent-vitals-runtime-core/ # L0 core（home/clock/lease/state/SQL 权威标记/执行环境词表）· pricing · source_graph
                             #   · L1 envelope（MCP/查询共用工具协议）· events（outbox）· skills。
-crates/agent-vitals-query/  # L2 sources（源配置/插件宿主/监听拓扑）· sessions（宿主适配的 runtime 薄封装：
+crates/agent-vitals-query/  # L2 sources（源配置/插件执行环境/监听拓扑）· sessions（执行环境适配的 runtime 薄封装：
                             #   供给时钟/时区/价卡）· L3 query（summary 仓储/trace/export/决策矩阵/读缓存）。
 crates/agent-vitals-billing/ # L4 billing：预算、计费预览与归因、价格发现、额度提醒。
-crates/agent-vitals-ingest/ # L5 写入侧：sync_service（发现走 hosts 会话宿主注册表）、engine（进程内同步，
+crates/agent-vitals-ingest/ # L5 写入侧：sync_service（发现走 harnesses 会话执行环境注册表）、engine（进程内同步，
                             #   桌面 tick 与 CLI `sync-facts` 共用）、scheduler（tick 轻/重调度状态机，有单测）、
                             #   findings_eval（同步后增量评估行为 findings → issue_instances）、watch、保留滚动。
 crates/agent-vitals-trust/  # L5 Trust / Egress 审计（与 ingest 同层互不依赖）。
 crates/agent-vitals-mcp/    # L6 Data MCP 工具应用层——出口面，脱敏红线在这里审（传输层在 apps/cli/src/mcp.rs）。
-crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over domain + hosts (audit_events), built with wasm-pack
+crates/agent-vitals-wasm/   # cdylib: wasm-bindgen wrapper over domain + harnesses (audit_events), built with wasm-pack
 scripts/scan.py             # thin entrypoint; stays here (documented `python3 scripts/scan.py`
                             #   command, and what the ClawHub package ships at scripts/scan.py) —
                             #   Phase E4 moved the package itself, this file just sys.path's to it
 packages/agent-vitals-python/
   agent_vitals/              # Python 包：同样拆 skills/（静态体检）+ agent/（会话/成本）子树；
-                            #   adapters/（宿主适配器）与 cli/compat/util/paths 留顶层。ClawHub 打包
+                            #   adapters/（执行环境适配器）与 cli/compat/util/paths 留顶层。ClawHub 打包
                             #   产物镜像同一相对结构（packages/agent-vitals-python/agent_vitals/），
                             #   scan.py 的一份 sys.path 逻辑在源仓库和打包产物里都成立
 scripts/probe_logs.py       # legacy fallback (not in the default flow)
@@ -98,14 +98,14 @@ assets/                      # v0.8 Phase E5：Rust/Python/dsh-agent-vitals-audi
                             #   codex_pricing.json/templates/{calendar,codex_session}.html。
                             #   Tauri icons/ 不在这里（留 apps/desktop/src-tauri/icons/，工具约定）
 SKILL.md                    # agent-facing driver: routes to doctor, names the SV codes
-references/                 # hosts.md (per-host evidence), judgment.md, guide.zh-CN.md
+references/                 # harnesses.md (per-harness evidence), judgment.md, guide.zh-CN.md
 docs/                       # design docs (ENGINEERING, DSH_INTEGRATION, AGENT_BEHAVIOR_AUDIT, …)
 integrations/dsh/           # DSH-1 profile bundle (registers agent-vitals as a DSH skill) — moved here in Phase E1
                             #   （dsh-client 曾是这里的邻居，2026-09-22 拆到独立仓库
                             #   dsh-agent-vitals-audit，见「What this repo is」一节）
 apps/desktop/src-tauri/     # 菜单栏 app（Tauri 2，**独立 workspace**，Phase E2 从根移进 apps/desktop/）：
                             #   托盘 + 工作台（总览 KPI 行/双轨账/决策卡、Token 日历）。
-                            #   金钱与计价委托 domain::cost，跨宿主查询走 runtime 的
+                            #   金钱与计价委托 domain::cost，跨执行环境查询走 runtime 的
                             #   SqlSummaryRepository（冻结 DTO；Phase 4.3 后是唯一实现），不长第四份拷贝
 fixtures/ + golden/         # test corpus + byte-for-byte scanner snapshots
 tests/                      # 28 Python test files（含分类守卫 tests/test_classification.py）
@@ -116,7 +116,7 @@ tests/                      # 28 Python test files（含分类守卫 tests/test_
 **skill 体检**——静态扫 SKILL.md/目录/触发数据；`agent/` 是 **skill 执行 + 成本**——
 审计一次会话里 skill 被调用得好不好（读运行证据，不是 SKILL.md 文本）。名字像
 扫描器的 `skill.py`/`skill.rs` 属 agent 家族（会话执行），**不进 skills/**；`codex.py`
-（安装时宿主扫描证据源）进 skills/，`codex_session.py`（会话读取）留 adapters/。
+（安装时执行环境扫描证据源）进 skills/，`codex_session.py`（会话读取）留 adapters/。
 Python 与 Rust 两侧同构，模块清单见 tests/test_classification.py 的家族 set。
 
 The **`agent-vitals-domain` crate is the single source of truth for pure rules**.
@@ -128,21 +128,21 @@ CLI — never a second copy.
 **v0.8 crate split (Phase C complete, Phase D in progress — `docs/AGENT_VITALS_V0_8_ARCHITECTURE_SPEC.md`).**
 The workspace is now four crates:
 
-- **`vitals-core`** — the host-agnostic engine (unchanged).
-- **`agent-vitals-domain`** — `contracts/` (host-agnostic vocabulary — `evidence`,
-  `host_capability`, `source_identity`, `usage_fact`, `r2a`) + `domain/` (pure business
-  computation — since Phase D1 it knows **no** host wire format) + `compatibility/` (the
+- **`vitals-core`** — the harness-agnostic engine (unchanged).
+- **`agent-vitals-domain`** — `contracts/` (harness-agnostic vocabulary — `evidence`,
+  `harness_capability`, `source_identity`, `usage_fact`, `r2a`) + `domain/` (pure business
+  computation — since Phase D1 it knows **no** harness wire format) + `compatibility/` (the
   `vitals-core` bridge). Depends on `vitals-core` + `regex` + `serde_json`.
-  `[dev-dependencies] agent-vitals-hosts` for `domain/usage.rs::tests` (exchange only
+  `[dev-dependencies] agent-vitals-harnesses` for `domain/usage.rs::tests` (exchange only
   `serde_json::Value`) and `tests/behavior_rules.rs` (an integration test — domain is
   compiled once there, so `build_dsh_evidence` fixtures returning `CanonicalSession` are
   fine; the same call inside an *inline* `#[cfg(test)]` hits `multiple versions of crate`).
   `lib.rs` re-exports both nested (`agent_vitals_domain::{contracts,domain}::X`) and flat
   (`agent_vitals_domain::{evidence,behavior,cost,…}::X`) paths.
-- **`agent-vitals-hosts`** (was `agent-vitals-adapters` until Phase D3) — one crate, one
-  folder per host: `hosts/<h>/sessions/` (session evidence — pure, wasm-linkable: all
+- **`agent-vitals-harnesses`** (was `agent-vitals-adapters` until Phase D3) — one crate, one
+  folder per harness: `harnesses/<h>/sessions/` (session evidence — pure, wasm-linkable: all
   `*_evidence`, Codex fold, `canonical_usage`, and the DSH session wire
-  `{evidence,audit,compaction,waste}` moved here in D1), plus `hosts/<h>/{sources/
+  `{evidence,audit,compaction,waste}` moved here in D1), plus `harnesses/<h>/{sources/
   (feature-gated I/O), skills/, capability.rs}` to be filled by D4/D5. Depends on
   `agent-vitals-domain`.
 
@@ -150,7 +150,7 @@ The workspace is now four crates:
 `compatibility/` dirs; B1 extracted the adapters crate; B2 (Phase C Step 3) moved
 `codex_usage` + `canonical_usage` into it; Step 4 consolidated `contracts` into
 `agent-vitals-domain` and deleted the one-cycle `agent-vitals-core` facade (the binary /
-wasm / hosts / `src-tauri` import `agent_vitals_domain::*` directly). Phase D1 moved the
+wasm / harnesses / `src-tauri` import `agent_vitals_domain::*` directly). Phase D1 moved the
 DSH session wire out of domain; D3 renamed the crate. Execution logs:
 `AGENT_VITALS_V0_8_PHASE_{C,D}_RESEARCH.md`.
 
@@ -158,19 +158,19 @@ DSH session wire out of domain; D3 renamed the crate. Execution logs:
 `crates/vitals-core/tests/dependency_boundary.rs`): `contracts/` stays serde_json-only
 (`contracts_module_stays_vocabulary_only`); `domain/` takes no fs/process/env/clock and
 holds no DSH wire module (`domain_holds_no_dsh_wire_module` +
-`domain_production_code_has_no_host_adapter_dependency`); dependency direction is one-way
-(`hosts → domain → vitals-core`); `vitals-core` names no Agent/host term and depends on no
+`domain_production_code_has_no_harness_adapter_dependency`); dependency direction is one-way
+(`harnesses → domain → vitals-core`); `vitals-core` names no Agent/harness term and depends on no
 `agent-vitals-*` crate.
 
 **Phase D done so far**: D1 (wire/fold), D2 (`cost.rs` split), D3 (crate rename), D4/D5
-(all host session readers — `src/dsh.rs` + `src/agent/{claude,codex,workbuddy}_session.rs` —
-moved to `agent-vitals-hosts/src/hosts/<h>/sources.rs` behind `#[cfg(feature = "sources")]`;
-`ruzstd`/`walkdir`/`rusqlite` are now optional deps of hosts under the `sources` feature;
+(all harness session readers — `src/dsh.rs` + `src/agent/{claude,codex,workbuddy}_session.rs` —
+moved to `agent-vitals-harnesses/src/harnesses/<h>/sources.rs` behind `#[cfg(feature = "sources")]`;
+`ruzstd`/`walkdir`/`rusqlite` are now optional deps of harnesses under the `sources` feature;
 the binary enables it, wasm sets `default-features = false`; `split_lines` moved to
 `agent-vitals-domain::util`), D7 (`agent-vitals-runtime` crate; `home` = the single
 `HomeResolver`), D6 (`state` / `budget` / `takeover` / `session_sources` / `clock` moved
 into `agent-vitals-runtime`; `civil_from_unix_secs` → `agent-vitals-domain::util`).
-**Phase D structural refactor is done** — the crate skeleton (domain / hosts / runtime /
+**Phase D structural refactor is done** — the crate skeleton (domain / harnesses / runtime /
 wasm + feature-gated `sources`) is in place. `apps/cli/src/agent/r2a_store.rs` and
 `discovery.rs` stay in the CLI crate — entangled with the CLI cost/audit handlers
 (`codex_session_audit` / `codex_cost` / `claude_cost`), they're legitimately CLI-side
@@ -191,7 +191,7 @@ verify-dsh-client.yml needed no changes, already workspace-root-relative or fixe
 swept up several stale `src-tauri`/`src/agent/cost.rs`/`dsh-client/...` path mentions left
 in comments by E1-E5) done. **Phase E (E1-E6) is complete.** Then Phase F (MCP).
 
-Guard: `agent-vitals-hosts/tests/dependency_budget.rs::io_tokens_only_appear_under_sources`
+Guard: `agent-vitals-harnesses/tests/dependency_budget.rs::io_tokens_only_appear_under_sources`
 — `std::fs`/`ruzstd`/`rusqlite`/… may appear only in files whose path contains `/sources`.
 
 ## Commands
@@ -205,9 +205,9 @@ python3 tests/golden_runner.py --diff      # …and show the first mismatch
 python3 tests/golden_runner.py --update    # re-freeze after an intended change (confirm first!)
 python3 -m unittest tests.test_invariants  # the 12-invariant acceptance gate
 
-# Rust — ~970 tests: binary (313) + agent-vitals-domain (431 lib + host_contract +
-# dependency_budget + 15 svNNN_parity) + agent-vitals-hosts (56 + dependency_budget)
-# + vitals-core (53 + boundary/replay/perf/pipeline). The wasm crate has no host-side
+# Rust — ~970 tests: binary (313) + agent-vitals-domain (431 lib + harness_contract +
+# dependency_budget + 15 svNNN_parity) + agent-vitals-harnesses (56 + dependency_budget)
+# + vitals-core (53 + boundary/replay/perf/pipeline). The wasm crate has no harness-side
 # tests; its build is wasm-pack (below).
 cargo test                                 # default members: binary + the 3 lib crates
 cargo clippy --release --all-targets -- -D warnings   # CI gate: scan path must not unwrap
@@ -268,17 +268,17 @@ because it is not a regex problem — the model does it from the `description` f
 ### The distinction the whole design turns on: disk ≠ context
 
 `total_skills_on_disk` and `loaded_skills` differ substantially. Disabled plugin copies,
-the same plugin under `plugins/cache/` and `plugins/marketplaces/`, and other hosts'
+the same plugin under `plugins/cache/` and `plugins/marketplaces/`, and other harnesses'
 skills all sit on disk while costing zero context. `classify()` → `loaded`/`loaded_reason`
 decides this per skill by reading `enabledPlugins` from `~/.claude.json`. **Budget,
 conflicts, and zombies are computed over `loaded` only.** `--all` exists purely to
 diagnose "why did only 15 of my 70 skills load" — never write a report from its budget
 numbers.
 
-### Host-capability degradation
+### Harness-capability degradation
 
 Three outputs require Claude Code's `~/.claude.json`: description budget (2.1),
-loaded-vs-disk (`enabledPlugins`), and trigger data (2.5, `skillUsage`). On other hosts
+loaded-vs-disk (`enabledPlugins`), and trigger data (2.5, `skillUsage`). On other harnesses
 these must report as unavailable. **Never substitute install time or mtime for a missing
 trigger count** — a report missing a column is useful; a report with a fabricated one is
 not. This principle extends to the behavior rules: when the workspace root is unknown,
@@ -323,13 +323,13 @@ is excluded entirely.
 不 summable；总览「按量费用」读 `MonthlySummary::metered_view()`（账单 > 归因估算 >
 默认估算，同计费方内取代、跨币分栏），预算 `estimate` profile 已用 = 该视图 + 订阅月费
 按天摊派。归因是**持续生效的规则**（`sync_facts` 末尾 `billing_apply_active_declarations`），
-不是保存时的一次物化。token 面（`tokens_by_host`、日历、小时图、会话列表）恒**全量**，
+不是保存时的一次物化。token 面（`tokens_by_harness`、日历、小时图、会话列表）恒**全量**，
 只有金额面排除订阅覆盖——两者曾共用一份聚合，订阅声明一生效用量就缩水。
 
-归属的粒度是 **(host, provider)** 而非 host：`HostAmount.amounts_by_basis` 一档
-只有一个数，claude-code 宿主内 anthropic(USD)+minimax(CNY) 同桶跨币相加就是
-编造——所以权威归属在 `MonthlySummary.by_provider`（键 `"host/provider"`，条目
-级 currency 单币）；`by_host` 保留币种分栏的旧口径（有测试钉着），**新增消费方
+归属的粒度是 **(harness, provider)** 而非 harness：`HarnessAmount.amounts_by_basis` 一档
+只有一个数，claude-code 执行环境内 anthropic(USD)+minimax(CNY) 同桶跨币相加就是
+编造——所以权威归属在 `MonthlySummary.by_provider`（键 `"harness/provider"`，条目
+级 currency 单币）；`by_harness` 保留币种分栏的旧口径（有测试钉着），**新增消费方
 一律读 by_provider**。计费模式来自 `pricing.json::catalog_2026_09.billing_modes`
 （`billing_route_of`，声明序即优先级、与价卡解耦——无价卡模型 glm-* 也能归属；
 `resolve_card_catalog` 靠价卡反查是已知缺陷面，别新增依赖它的归属逻辑）。
@@ -379,38 +379,38 @@ app 端 `fx_settings::save_synced` 用 `FxSnapshot::validate_update` 再校验�
 用户手动汇率仍优先于任何快照。`tests::the_published_fx_sync_file_is_accepted_by_the_app_validator`
 钉住「CI 能发布的文件 app 一定收得下」。
 
-### 计费声明属于服务商，不属于宿主（2026-10-01）
+### 计费声明属于服务商，不属于执行环境（2026-10-01）
 
-计费关系（订阅 / API Key / 中转 / 组织）是**服务商账号**上的事，结算按「服务商 + 模型」，宿主只是
+计费关系（订阅 / API Key / 中转 / 组织）是**服务商账号**上的事，结算按「服务商 + 模型」，执行环境只是
 用量的来源壳：同一个 GLM Lite 套餐在 Claude Code 与 ZCode 里是同一份，同一个中转账号在 Claude Code
-与 Codex 里也是同一个账号。曾经声明按 `(宿主, 服务商)` 切分，真机里同一服务商在每个宿主各留一份、
+与 Codex 里也是同一个账号。曾经声明按 `(执行环境, 服务商)` 切分，真机里同一服务商在每个执行环境各留一份、
 生效期各自漂移，匹配还要给订阅单开「账号级」补丁。
 
-- **数据层没有宿主参数**：`billing_declaration_put` / `revision_save` / `fact_selection(_with)` /
+- **数据层没有执行环境参数**：`billing_declaration_put` / `revision_save` / `fact_selection(_with)` /
   `impact_preview*` / `billing_official_api_declared` 都只收 `provider_id`；`BillingDeclarationRow`
-  与 MCP/Tauri 的声明 DTO 不带宿主。选事实的唯一谓词是 `f.provider_id = ?`（「服务商未知」的组是
-  `provider_id IS NULL` + 模型范围），**不看 `f.host`**；要收窄用 account / route / model / session 作用域。
-- **`host` 列只是旧库 `NOT NULL` 的占位**：写入固定值 `authority::ALL_HOSTS`（`"*"`），任何谓词都不读它。
-  想把宿主重新当匹配条件，必须先改 `ALL_HOSTS` 的文档并过评审——这正是被拆掉的耦合。
-- **导入候选保留宿主**（`billing_import_candidates.host`）：它是「在哪个宿主的配置里发现的线索」，属于证据来源；
+  与 MCP/Tauri 的声明 DTO 不带执行环境。选事实的唯一谓词是 `f.provider_id = ?`（「服务商未知」的组是
+  `provider_id IS NULL` + 模型范围），**不看 `f.harness`**；要收窄用 account / route / model / session 作用域。
+- **`harness` 列只是旧库 `NOT NULL` 的占位**：写入固定值 `authority::ALL_HARNESSES`（`"*"`），任何谓词都不读它。
+  想把执行环境重新当匹配条件，必须先改 `ALL_HARNESSES` 的文档并过评审——这正是被拆掉的耦合。
+- **导入候选保留执行环境**（`billing_import_candidates.harness`）：它是「在哪个执行环境的配置里发现的线索」，属于证据来源；
   把候选确认成声明时只比对服务商。
 - **结算币种按服务商记**（`declared_settlement_currencies()` → `provider → 币种`）；**月费按服务商只摊一次**
-  （旧的 `(宿主, 服务商)` 去重会让同一订阅在两个宿主各摊一份）。月费在 `by_provider`（键 `宿主/服务商`）
-  里要有个落点宿主，只用于展示：服务商自家宿主 > 用量最集中的宿主（`dominant_host_of_provider`）> `unattributed`。
-- **收窄靠作用域，不靠宿主**：「服务商未知」的答复（`("provider","unresolved")`，匹配 `provider_id IS NULL` 的事实）
-  **必须带** model / route / account / session 之一，否则它就是对所有宿主、所有未归属用量的兜底——写入时拒绝，
+  （旧的 `(执行环境, 服务商)` 去重会让同一订阅在两个执行环境各摊一份）。月费在 `by_provider`（键 `执行环境/服务商`）
+  里要有个落点执行环境，只用于展示：服务商自家执行环境 > 用量最集中的执行环境（`dominant_harness_of_provider`）> `unattributed`。
+- **收窄靠作用域，不靠执行环境**：「服务商未知」的答复（`("provider","unresolved")`，匹配 `provider_id IS NULL` 的事实）
+  **必须带** model / route / account / session 之一，否则它就是对所有执行环境、所有未归属用量的兜底——写入时拒绝，
   旧库里留下的这类声明选择谓词恒假（`0 = 1`，宁可不匹配也不吞用量）。确认弹窗对这类组始终写上组内模型，
   没有可识别模型（`<unknown>`）就拦下，不允许声明。
 - **重复保存守卫**：新声明与某条现行声明在服务商 / 关系 / 套餐 / 金额 / 币种 / 起止 / 作用域（集合相等）上完全一致，
   `billing_declaration_revision_save` 返回 `false` 不新建（连点保存曾留下两条一模一样的 minimax 声明）；
   Tauri 命令据此回 `duplicate: true` 且不入队重算。撤销过的声明不再占位。
-- **未做**：`by_provider` 的键仍是 `宿主/服务商`、待确认组仍按 `(宿主, 服务商, 模型)` 切——那是**用量视图**，
-  宿主是事实自带的来源维度，不是计费归属；改成服务商键会波及全部金额 DTO 与 golden，另立项。
+- **未做**：`by_provider` 的键仍是 `执行环境/服务商`、待确认组仍按 `(执行环境, 服务商, 模型)` 切——那是**用量视图**，
+  执行环境是事实自带的来源维度，不是计费归属；改成服务商键会波及全部金额 DTO 与 golden，另立项。
 
 ### v0.9.1 数据面维护（SQL 权威库操作面；Phase 4.3 后）
 
-- **布局**：`<data_home>/facts/<host>.jsonl`（append-only 权威源，宿主封闭
-  词表 claude-code/codex/dsh/workbuddy——E4b 起四宿主，见 docs/WORKBUDDY_ONBOARDING_SPEC.md §9E.5；workbuddy 金额面恒 unresolved）
+- **布局**：`<data_home>/facts/<harness>.jsonl`（append-only 权威源，执行环境封闭
+  词表 claude-code/codex/dsh/workbuddy——E4b 起四执行环境，见 docs/WORKBUDDY_ONBOARDING_SPEC.md §9E.5；workbuddy 金额面恒 unresolved）
   + `<data_home>/agent-vitals.sqlite3`（v0.9.1
   SQL 权威库——所有读经它）。**权威库不自愈**（与已退役的旧 `index.sqlite3`
   投影的本质区别）：`PRAGMA integrity_check` 失败 → `data-status` 报
@@ -467,10 +467,10 @@ app 端 `fx_settings::save_synced` 用 `FxSnapshot::validate_update` 再校验�
 - **红线字段例外（永不落盘）**：凭据（cc-switch token、API key）在任何我们拥有的
   库/文件里不落盘；probe/测试功能只允许内存直传子进程 env。金丝雀题面（L1 探针
   题库）按机密待遇：不进 MCP、不进导出、不进任何 agent 可读面。
-- **原文留源 + 锚点**：宿主原始日志是逐字存储的唯一样本；权威库只存分析增量与
+- **原文留源 + 锚点**：执行环境原始日志是逐字存储的唯一样本；权威库只存分析增量与
   锚点（source_id + native event id，行号/偏移做可自校验的加速 hints），不复制
   全文（GB 级会话）。原文 JSONL 段落查看是**本地呈现层专属能力**：呈现时读取、
-  永不落库、永不进 MCP/导出载荷；宿主轮换掉源日志后诚实降级为「源已过期，仅存
+  永不落库、永不进 MCP/导出载荷；执行环境轮换掉源日志后诚实降级为「源已过期，仅存
   库内脱敏投影」，不得静默 404。
 - **本政策不放宽项**：账务诚实纪律（`metered_estimate`、`has_unresolved`、不静默
   归因）、golden/Python-Rust 字节对等、以及新问题类先在
@@ -499,9 +499,9 @@ when the tier-3 exit conditions hold. While a rule's Python implementation still
 exists, divergence must not survive one CI run: both implementations run the same
 goldens byte-for-byte, and the `differential` job turns red the day they disagree.
 Rust serves the binary channels (npm/brew/cargo/Release); Python serves the ClawHub
-in-host skill form and cross-language readers. See `docs/ENGINEERING.md` §6.8.
+in-harness skill form and cross-language readers. See `docs/ENGINEERING.md` §6.8.
 
-### DSH audit: computation is host-side
+### DSH audit: computation is harness-side
 
 **This whole section describes the standalone `dsh-agent-vitals-audit` repo** (extracted from
 `integrations/dsh-client/` on 2026-09-22), kept here because the design still governs how this
@@ -510,12 +510,12 @@ repo's wasm crate and price table must be shaped to stay consumable by it — ev
 
 The browser cannot read raw session events (the client `SessionFace` only exposes
 projections, and approval/sandbox events are log-only). So behavior findings are
-computed on the **host** via a `sessionProjections` projection whose `view` calls the
+computed on the **harness** via a `sessionProjections` projection whose `view` calls the
 wasm `audit_events` over the raw event fold; the client reads `useProjection('behaviorFindings')`.
 The cost side (per-model token buckets) folds through the same core — the `tokenByModel`
 projection's `view` calls the wasm `token_by_model` — so the tab runs the *exact* engine the
 CLI `behavior` command runs (never a second copy). Pricing those buckets into money is
-*also* host-side now: the `costReport` projection (`integrations/dsh-client/src/host/index.ts`) reads
+*also* harness-side now: the `costReport` projection (`integrations/dsh-client/src/harness/index.ts`) reads
 `tokenByModel`'s fold and prices it against `integrations/dsh-client/pricing.json` — a build-time copy of
 the single-source `assets/pricing.json` (Rust embeds the source via
 `include_str!`; Node can `readFileSync` its own copy directly, unlike the browser). The client
@@ -525,7 +525,7 @@ short-name lookup used in badges/chips — guarded by `tests/test_pricing_lockst
 also byte-compares `integrations/dsh-client/pricing.json` against the source, catching a forgotten copy).
 See `docs/AUDIT_TAB_DESIGN.md` for the current optimization backlog.
 
-**The one exception to "computation is host-side": the timeline's geometry.** Turning
+**The one exception to "computation is harness-side": the timeline's geometry.** Turning
 `requests[]` into an SVG path is presentation, not measurement, so it lives client-side in
 `integrations/dsh-client/src/client/timeline.ts` — but as a *pure* module, exported through
 `index.cts`'s `__pure` (test-only surface) and asserted directly by
@@ -583,7 +583,7 @@ Codex 会话解析（`adapters/codex_session.py`）对齐了**三套 schema 里�
   custom_tool_call 与 function_call 都无 turn_id、turn sig 恒空报 **MeasuredZero**；SV611 只
   在挖出的 bash 子集上跑。
 
-`exec→bash`/`exit_code→error_code` 是 L2 适配器的宿主词表翻译（近似、可能误报）；「Codex
+`exec→bash`/`exit_code→error_code` 是 L2 适配器的执行环境词表翻译（近似、可能误报）；「Codex
 根本没有的维度 → MeasuredZero 而非 Unavailable」是已知代价，name-aware 门控是后续项。结构
 对齐由 `tests/test_canonical_schema.py` 逐字段对账 Rust `CanonicalSession`；非空形状由
 `test_populated_timelines_are_native_and_structured` 钉住，Legacy 回退由
@@ -609,7 +609,7 @@ turns the golden into a record of current behaviour and the test stops meaning a
 
 ### Tests read the real machine
 
-`run_scan()` with no `--path` scans the actual host directories of whoever runs it.
+`run_scan()` with no `--path` scans the actual harness directories of whoever runs it.
 `SCAN_CMD` is the Rust binary when `AGENT_VITALS_BIN` is set, else the Python scanner.
 `TestScannerExcludesItself.test_self_excluded` therefore passes `--self-root ROOT`
 explicitly: the binary has no `__file__` to infer its own skill dir from, and without the
@@ -642,8 +642,8 @@ lockstep; its reconciliation invariant — bucket sums must equal DSH's `tokenUs
 checked against a real session log in the CLI's `behavior` output.
 
 The **v0.7 UsageFact emitters** (`{claude,codex,dsh}_usage_fact.py` ↔
-`agent-vitals-hosts/hosts/<h>/sources/usage_fact.rs` — v0.9 Stage A 归位出
-apps/cli，CLI 经 `agent_vitals_hosts::*_usage_fact` re-export，driven by the
+`agent-vitals-harnesses/harnesses/<h>/sources/usage_fact.rs` — v0.9 Stage A 归位出
+apps/cli，CLI 经 `agent_vitals_harnesses::*_usage_fact` re-export，driven by the
 `{claude,codex,dsh}-usage-facts` CLIs)
 are Python↔Rust byte-parity locksteps pinned by `AGENT_VITALS_BIN` differential in
 `tests/test_{claude,codex,dsh}_usage_fact.py`. They share ONE identity primitive —
@@ -656,14 +656,14 @@ through; **no consumer may grow a second inline copy** (both packaging allow-lis
 in-memory + read-only diagnostic only — nothing is written to disk yet (see
 `docs/VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §7). E4b superseded the "deliberately
 excluded" decision (2026-09-11, docs/WORKBUDDY_ONBOARDING_SPEC.md §9E.5): WorkBuddy
-joined FACT_HOSTS and the sync pipeline — facts carry `provider_id: null`
+joined FACT_HARNESSES and the sync pipeline — facts carry `provider_id: null`
 (unresolved money by design, §2.1); the CLI `--write` and `sync-facts` are Rust-only,
 the Python mirror stays read-only diagnostic.
 
 **"Which events carry usage" is one predicate, and it was duplicated twelve times.** It
 lives in `usage.rs::usage_sample` (the authority), mirrored in `usage.py::_usage_sample`,
 and gated *earlier* by the DSH adapter (`dsh.rs`/`dsh.py::is_usage_event`) and *earlier
-still* by eight `apply()` filters in `src/host/index.ts` of the standalone `dsh-agent-vitals-audit`
+still* by eight `apply()` filters in `src/harness/index.ts` of the standalone `dsh-agent-vitals-audit`
 repo (now collapsed into one `carriesUsage()` helper). Each layer runs before the next, so **fixing the authority alone
 fixes nothing** — an event dropped by the adapter never reaches the fold, and one dropped by
 a projection's `apply()` never reaches wasm. That is exactly how `compaction/summary`'s real
@@ -676,8 +676,8 @@ as a plausible-looking turn number).
 
 The durable defense is not a longer whitelist but a **residual sentinel**: every fold reports
 `unaccounted_usage` — events it did *not* consume whose payload nonetheless contains the very
-token field names it knows how to read. It is the dual of `unreported_fields` ("the host never
-reported this field" vs. "the host reported tokens and we failed to catch them"), and in the
+token field names it knows how to read. It is the dual of `unreported_fields` ("the harness never
+reported this field" vs. "the harness reported tokens and we failed to catch them"), and in the
 evidence model it is `Signal::Usage`'s `unmetered` count — `evidence.rs` predicted this bug
 verbatim: *adapters must not inflate their own coverage by not counting what they cannot read*.
 Because of the layering, the sentinel is useless unless the layers above it are **permissive**:
@@ -752,10 +752,10 @@ dsh-client/pricing.json` 是 build 时复制出的运行时份、`styles/index.t
 prices are business data, not rules — they change without a golden `--update`. The
 **cost computation itself** (`cost_report`) is a fourth lockstep, one level up from the
 price table: `crates/agent-vitals-domain/src/domain/cost/mod.rs` ↔ `packages/agent-vitals-python/agent_vitals/agent/cost.py`
-↔ `src/host/index.ts::costReportFrom` in the standalone `dsh-agent-vitals-audit` repo all
+↔ `src/harness/index.ts::costReportFrom` in the standalone `dsh-agent-vitals-audit` repo all
 implement the same peak/off-peak-split pricing math over `{by_model, sequence}`; the CLI
 two-language parity is caught by `test_cli_matrix.py`'s `both()` differential, the TS mirror
-by that repo's own `scripts/verify-host.mjs` asserting real numbers against its checked-in
+by that repo's own `scripts/verify-harness.mjs` asserting real numbers against its checked-in
 `pricing.json` copy. (2026-08: cost 从二进制 `src/agent/cost.rs` 迁进 domain crate —— preflight
 Phase 0-1 —— 二进制侧退成 `pub use` 薄封装；`priced_day` 一并进 core
 （`cost.rs::priced_day` ↔ `cost.py::priced_day`，`tests/test_cost_priced_day.py` 交叉锁定），
@@ -766,11 +766,11 @@ Scan output must never be committed — `.gitignore` covers `skill-scan*.json`, 
 `integrations/dsh-client/` is now dead weight left over from before the 2026-09-22 extraction —
 harmless, but there is nothing left under that path to ignore). What used to be the committed
 `integrations/dsh-client/agent_vitals_wasm_bg.wasm` and `integrations/dsh-client/pricing.json`
-build-artifact exceptions (the host plugin `readFileSync`s both at runtime — the wasm binary
+build-artifact exceptions (the harness plugin `readFileSync`s both at runtime — the wasm binary
 and the price table `costReport` prices against — `wasm-opt` disabled so the wasm build needs
 no network, `pricing.json` a plain `cp` from `assets/pricing.json`) now live as the equivalent
 committed files in the standalone `dsh-agent-vitals-audit` repo; re-copy them by hand there
 whenever this repo's source changes — `tests/test_pricing_lockstep.py`'s
-`HostPricingCopyLockstepTests` used to byte-compare them and fail loudly on a forgotten copy,
+`HarnessPricingCopyLockstepTests` used to byte-compare them and fail loudly on a forgotten copy,
 but it can no longer see that repo's copy, so it now skips instead. The forgotten-copy failure
 mode this test used to catch is real again; there is no automated guard for it anymore.

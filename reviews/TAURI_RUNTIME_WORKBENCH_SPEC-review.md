@@ -38,11 +38,11 @@ R2 的页面和导出功能在数据来源、会话列表、会话详情和查�
 
 #### Issue 4 (High): adapter、core 与 SessionStore 的单一职责边界仍然混淆
 
-**Location**: §4.2 图中“宿主日志 / App Server / DSH projection → adapter → `CanonicalSession + cost + coverage + findings`”；约束 1 又说这些语义由 core 定义；§5.2 说 core “只接收已规范化的数据并做纯计算”。
+**Location**: §4.2 图中“执行环境日志 / App Server / DSH projection → adapter → `CanonicalSession + cost + coverage + findings`”；约束 1 又说这些语义由 core 定义；§5.2 说 core “只接收已规范化的数据并做纯计算”。
 
-图示可被理解为 adapter 直接产出 cost/findings，这会让 Codex adapter、DSH projection 和 Tauri 文件 adapter 各自带计算逻辑。对 DSH 而言，projection 本身已在宿主侧通过 wasm/core 计算；规格没有说 Tauri 是信任已计算投影、重算原始事件，还是混合两者。这是潜在的“第四份计算”入口。
+图示可被理解为 adapter 直接产出 cost/findings，这会让 Codex adapter、DSH projection 和 Tauri 文件 adapter 各自带计算逻辑。对 DSH 而言，projection 本身已在执行环境侧通过 wasm/core 计算；规格没有说 Tauri 是信任已计算投影、重算原始事件，还是混合两者。这是潜在的“第四份计算”入口。
 
-**Suggestion**: 将管线改画为“SourceReader → HostNormalizer（只做词汇/schema 转换并报 coverage/unmetered）→ `agent-vitals-core`（唯一纯规则计算）→ versioned `SessionReport`→ SessionStore”。对 DSH 单独写明两种合法路径及优先级：信任带 `contract_version`/`engine_version` 的 wasm projection，或读取原始事件后用同一 core 重算；不得在 adapter/SessionStore/UI 内再价或再判定 finding。
+**Suggestion**: 将管线改画为“SourceReader → HarnessNormalizer（只做词汇/schema 转换并报 coverage/unmetered）→ `agent-vitals-core`（唯一纯规则计算）→ versioned `SessionReport`→ SessionStore”。对 DSH 单独写明两种合法路径及优先级：信任带 `contract_version`/`engine_version` 的 wasm projection，或读取原始事件后用同一 core 重算；不得在 adapter/SessionStore/UI 内再价或再判定 finding。
 
 #### Issue 5 (High): checkpoint 持久化与“不制造第二 state 写者”之间没有可实施边界
 
@@ -64,9 +64,9 @@ R2 的页面和导出功能在数据来源、会话列表、会话详情和查�
 
 **Location**: §4.3 同时把 Codex rollout 和 App Server 定义为同一会话的 live/回放路径，把 DSH projection 和已落盘会话定义为两条路；§5.4 只用未定义的 `session_id`。
 
-当 App Server 断开后回退到 rollout、重连后再接管，或 DSH projection 与 post-hoc 日志同时可见时，系统需要知道这是同一逻辑会话而不是两笔成本。只用宿主的 `session_id` 也可能在不同宿主或机器上碰撞。缺少这个合约会导致重复会话、成本翻倍、事件逆序覆盖和 UI 跳转错位。
+当 App Server 断开后回退到 rollout、重连后再接管，或 DSH projection 与 post-hoc 日志同时可见时，系统需要知道这是同一逻辑会话而不是两笔成本。只用执行环境的 `session_id` 也可能在不同执行环境或机器上碰撞。缺少这个合约会导致重复会话、成本翻倍、事件逆序覆盖和 UI 跳转错位。
 
-**Suggestion**: 定义不变的 `SessionKey` （至少包含 host kind、host-native id、source profile/machine namespace）以及每条记录的 `SourceRevision`/fingerprint。补充源优先级和接管状态机：App Server live 优先、rollout 用于回放/补洞，不按总量盲合并；projection 与日志必须通过可验证的 alias 关系归一。增加断线→回退→重连的无重复 fixture。
+**Suggestion**: 定义不变的 `SessionKey` （至少包含 harness kind、harness-native id、source profile/machine namespace）以及每条记录的 `SourceRevision`/fingerprint。补充源优先级和接管状态机：App Server live 优先、rollout 用于回放/补洞，不按总量盲合并；projection 与日志必须通过可验证的 alias 关系归一。增加断线→回退→重连的无重复 fixture。
 
 #### Issue 8 (High): R1 没有解决多文件快照的逻辑一致性
 
@@ -92,7 +92,7 @@ R2 的页面和导出功能在数据来源、会话列表、会话详情和查�
 
 **Suggestion**: 将命令改为 `export_session_html(session_key, expected_revision, export_options)`，后端从 SessionStore 取得对应冻结版本并拒绝 revision 冲突。导出目标必须经 Tauri 原生 save dialog，后端检查规范化路径/符号链接；默认应启用已有 redact 管线，在确认页面列出未脱敏字段、缺失的 cwd/provenance 和“非账单”假设。补充带路径、密钥形态文本、无 cwd 和导出失败的验收。
 
-#### Issue 11 (High): 验收矩阵没有覆盖 wasm/DSH 锁步和已有 TS 宿主投影
+#### Issue 11 (High): 验收矩阵没有覆盖 wasm/DSH 锁步和已有 TS 执行环境投影
 
 **Location**: §6 计划复用 `dsh-client` 的类型、timeline、格式化和 export；§8 R2 验收只比较“Tauri 与 HTML”；§9 “成本口径分裂”也只写 core/公共 JSON 和 HTML/Tauri fixture。
 
@@ -142,17 +142,17 @@ R2 的页面和导出功能在数据来源、会话列表、会话详情和查�
 
 #### Issue 17 (Medium): “设置 / 数据来源”暗示可编辑，但写权威和配置所有权未定义
 
-**Location**: §3.2 导航中的“设置 / 数据来源”；§4.2 又要求 Tauri 第一阶段只读、路径仅限已注册宿主根目录；§11 决策 3 禁止第二 state 写者。
+**Location**: §3.2 导航中的“设置 / 数据来源”；§4.2 又要求 Tauri 第一阶段只读、路径仅限已注册执行环境根目录；§11 决策 3 禁止第二 state 写者。
 
-用户会自然期待在“设置”页修改预算、源路径、刷新频率或脱敏选项。若它只是只读诊断页，当前名称和快捷操作会误导；若允许编辑 `config.toml` 或宿主配置，则绕过了规格的只读/不修改宿主配置护栏。
+用户会自然期待在“设置”页修改预算、源路径、刷新频率或脱敏选项。若它只是只读诊断页，当前名称和快捷操作会误导；若允许编辑 `config.toml` 或执行环境配置，则绕过了规格的只读/不修改执行环境配置护栏。
 
-**Suggestion**: R2 先将其命名为“数据源状态”并明确只读，显示根目录、权限、最后成功、schema 版本和修复指引。如果后续要提供编辑，单独定义 app-owned preferences 与 Python-owned `config.toml`/宿主配置的边界、写入 API、锁/原子替换、校验和回滚，并作为新里程碑，不要暗含在 R2 里。
+**Suggestion**: R2 先将其命名为“数据源状态”并明确只读，显示根目录、权限、最后成功、schema 版本和修复指引。如果后续要提供编辑，单独定义 app-owned preferences 与 Python-owned `config.toml`/执行环境配置的边界、写入 API、锁/原子替换、校验和回滚，并作为新里程碑，不要暗含在 R2 里。
 
-#### Issue 18 (Medium): 跨宿主聚合没有防止不同币种被直接相加
+#### Issue 18 (Medium): 跨执行环境聚合没有防止不同币种被直接相加
 
-**Location**: §3.1 示例同时使用 `¥` 和 `$`；§3.2 支持跨宿主/模型/日期筛选与总览；§4.2 约束 5 只说“金额始终携带币种”。
+**Location**: §3.1 示例同时使用 `¥` 和 `$`；§3.2 支持跨执行环境/模型/日期筛选与总览；§4.2 约束 5 只说“金额始终携带币种”。
 
-携带币种不等于聚合安全。跨宿主总览、日历或状态栏“最高消耗”很容易将 CNY 与 USD 数值直接求和/排序，产生无意义的总额或错误预算状态。规格也没有承诺汇率来源，所以不应暗示可转换。
+携带币种不等于聚合安全。跨执行环境总览、日历或状态栏“最高消耗”很容易将 CNY 与 USD 数值直接求和/排序，产生无意义的总额或错误预算状态。规格也没有承诺汇率来源，所以不应暗示可转换。
 
 **Suggestion**: 把金额 DTO 定义为不可脱离的 `Money { amount, currency, pricing_basis, estimated }`，所有聚合 API 返回 `by_currency` map，严禁默认汇总不同币种。状态栏预算只能与同币种预算比较；跨币种筛选显示分组数字和“未汇率换算”。增加 CNY+USD 冻结 fixture，断言不出现单一 total。
 
@@ -199,21 +199,21 @@ R2 的页面和导出功能在数据来源、会话列表、会话详情和查�
 | 1 | R1 只刷新读者，却没有定义谁持续产出新鲜 state | Partially Resolved | §4.2 增加了责任矩阵和 A/B 选项，但未做选择；B 要保留 SwiftBar，却与“禁用 SwiftBar 后 state 更新”验收矛盾，A 也未定义 session log 发现与 exactly-once 调度。 |
 | 2 | Python/Rust 边界决策违反永久差分锁步硬限 | Resolved | 项目方向已明确变更，§0/§7.1 将其升格为分档 RFC，`CLAUDE.md` 也已同步修订；原“不得改边界”的反对不再适用，本轮改审查转移门。 |
 | 3 | R2 在 SessionStore 契约前承诺工作台 | Resolved | §8 已拆为 R2a 最小 Store/版本化 IPC 和 R2b UI/导出，并明确 R2a 是前置。 |
-| 4 | adapter、core 与 SessionStore 单一职责混淆 | Partially Resolved | 管线已重画，但 HostNormalizer 仍“报 coverage/unmetered”，core 又声称产出 coverage；DSH “信任投影”的版本不兼容行为也未定义。 |
+| 4 | adapter、core 与 SessionStore 单一职责混淆 | Partially Resolved | 管线已重画，但 HarnessNormalizer 仍“报 coverage/unmetered”，core 又声称产出 coverage；DSH “信任投影”的版本不兼容行为也未定义。 |
 | 5 | checkpoint 持久化与单一 state 写者无边界 | Resolved | §5.2 已将 Tauri cursor/checkpoint/index 限定在可删 app cache，禁止写权威 state，并增加失效/重建验收。 |
 | 6 | 增量管线忽略 checkpoint 仅限 turn 边界 | Resolved | §5.2 明确只持久 turn-boundary checkpoint、重放活跃 turn 尾部、无法判边界则全量回退；现有 Python/Rust resume 测试也支持该范围。 |
 | 7 | 跨来源会话身份、去重和接管缺失 | Partially Resolved | §4.3 新增 SessionKey/SourceRevision/源优先级骨架，但 machine namespace 的生成/持久和 App Server↔rollout、projection↔日志 alias 的可验证规则仍未给出。 |
 | 8 | R1 多文件快照逻辑不一致 | Partially Resolved | §4.2 增加 snapshot_id/generated_at 与禁止跨快照拼接，但逐文件写入仍不是原子事务，崩溃重启后也无法找回最后完整 generation；fingerprint 只证明文件稳定，不证明同次产出。 |
 | 9 | 数据过期被排在最后 | Resolved | §3.1 已将 freshness/availability 与 health 正交，且 R1 验收禁止 stale 时显示“正常/运行中”。 |
 | 10 | 导出 IPC 信任前端 session 且隐私合约不完整 | Partially Resolved | §5.4 已改为 session_key+revision、后端冻结版本、save dialog 和默认 redact，但 redact 覆盖面/失败策略、safe-share/raw 区分与文件打开权限仍未成为可验收合约。 |
-| 11 | 验收矩阵未覆盖 wasm/DSH/TS 宿主锁步 | Partially Resolved | R2a 加了 Python/Rust/wasm+DSH 冻结 fixture 对账，但尚未规定自动 CI 命令、DSH DTO 版本协商和旧插件与新 Tauri/core 并存时的兼容门。 |
+| 11 | 验收矩阵未覆盖 wasm/DSH/TS 执行环境锁步 | Partially Resolved | R2a 加了 Python/Rust/wasm+DSH 冻结 fixture 对账，但尚未规定自动 CI 命令、DSH DTO 版本协商和旧插件与新 Tauri/core 并存时的兼容门。 |
 | 12 | Token 日历缺少会话轴/历史/覆盖率对账 | Partially Resolved | R2b 增加了日历轴↔会话轴、archive、partial 验收，但 `list_months`/`read_month` 只出现在 §12 对照说明，没有进入 R2a/R2b 范围或 IPC 合约。 |
 | 13 | 会话完结/稳定窗口/导出时机无状态机 | Partially Resolved | R3 已列出 Discovered→Active→Quiescent→Finalized→Reopened/Error，但各 source 的转移证据、超时参数和 Reopened 后归档/导出处理仍留给实施者。 |
 | 14 | IPC 无版本/分页/类型化错误/并发顺序 | Partially Resolved | §5.4 补了 envelope、cursor、错误码和 revision 忽略规则，但 SourceRevision/session revision/store_revision 的类型与作用域混用，cursor 的快照一致性/失效也未定义。 |
 | 15 | 实时目标未绑大日志成本/背压/资源上限 | Partially Resolved | §5.3 加了 single-flight、worker pool、退避和降频，但所谓“§5.3 预算”没有任何数值，R3 验收仍无法判断通过/失败。 |
 | 16 | 主窗口无异常/加载流程 | Partially Resolved | §3.2 列出了七态及要求的信息，但尚无逐页“保留什么/文案/CTA/ARIA 通知”真值表和可执行的 UI 验收用例。 |
 | 17 | “设置/数据来源”暗示可编辑 | Resolved | §3.2 已改名为“数据源状态（只读）”，并把配置写入推迟到独立里程碑。 |
-| 18 | 跨宿主聚合可能直接相加异币种 | Resolved | §4.2 定义 Money DTO/by_currency，明禁默认跨币种求和，并纳入决策和风险护栏。 |
+| 18 | 跨执行环境聚合可能直接相加异币种 | Resolved | §4.2 定义 Money DTO/by_currency，明禁默认跨币种求和，并纳入决策和风险护栏。 |
 | 19 | 本地/匿名/用户可见指标边界混淆 | Partially Resolved | §10 已确立“默认仅本地、不上传”和遥测独立决策门，但存储路径、保留天数、大小上限仍只是“需写明”而非已定合约。 |
 
 ### Issues
@@ -266,13 +266,13 @@ R2a 要求 `list_sessions`/`read_session`、去重和冻结报告，却只有“
 
 **Suggestion**: 在 R2a 增加“initial population”子阶段和按 source 的 capability 表：每个源的根目录发现、支持格式、是否全量读、无权限/损坏行为、输出的 coverage 与资源上限。R2a 验收必须在隔离的仿真 HOME 中用 Codex + DSH 真实格式语料重建索引，重启后能从空 cache 得到稳定、相同的会话列表。R3 只增加 watcher/增量调度，不再首次引入数据发现。
 
-#### Issue 7 (High): HostNormalizer 与 core 仍同时声称 coverage/unmetered 所有权
+#### Issue 7 (High): HarnessNormalizer 与 core 仍同时声称 coverage/unmetered 所有权
 
-**Location**: §4.2 管线第 217–25 行（HostNormalizer “报 coverage / unmetered”，core 又产出 `CanonicalSession + cost + coverage + findings`）；约束 1。
+**Location**: §4.2 管线第 217–25 行（HarnessNormalizer “报 coverage / unmetered”，core 又产出 `CanonicalSession + cost + coverage + findings`）；约束 1。
 
 coverage 是用于区分 MeasuredZero 和 Unavailable 的规则语义，不应由 adapter 直接声明结果。但 adapter 又必须报告它观察到了哪些原始信号、哪些 usage-shaped 事件没有被识别；若两者都叫 coverage/unmetered，实施者容易在 normalizer 提前把“读不到”翻译为 0，再让 core 忠实地对假 0 计算。
 
-**Suggestion**: 定义中间类型 `NormalizedEvidence { events, observed_signals, unsupported_signals, usage_shaped_unparsed }`；HostNormalizer 只产出观测账本和未解析原始记录，不产出 Coverage/RuleOutcome。core 是将该账本转为 Measured/Unmetered/Unavailable 及 residual sentinel 的唯一地方。用“无原生 turn 边界但有非零事件计数”的 fixture 断言不会落成 MeasuredZero。
+**Suggestion**: 定义中间类型 `NormalizedEvidence { events, observed_signals, unsupported_signals, usage_shaped_unparsed }`；HarnessNormalizer 只产出观测账本和未解析原始记录，不产出 Coverage/RuleOutcome。core 是将该账本转为 Measured/Unmetered/Unavailable 及 residual sentinel 的唯一地方。用“无原生 turn 边界但有非零事件计数”的 fixture 断言不会落成 MeasuredZero。
 
 #### Issue 8 (High): snapshot_id 写进多个文件仍不构成可恢复的原子 generation
 
@@ -334,7 +334,7 @@ SourceRevision 是可能不可比较的源 fingerprint，StoreRevision 是整个
 
 **Location**: §6 第 418–31 行只说复用 `dsh-client` i18n；§3.2 新增七种页面状态和 CTA；§4.2 Money DTO 与 §5.4 类型化错误码。
 
-新增的 tray 文案、source/error 状态、日期时区、货币格式、数量复数和无障碍通知不会因为抽出了旧 `i18n.ts` 就自动完整。DSH 宿主语言和 Tauri OS/app locale 的来源也不同，如果不定 fallback，schema mismatch 等关键错误可能回退成英文 key 或空白。
+新增的 tray 文案、source/error 状态、日期时区、货币格式、数量复数和无障碍通知不会因为抽出了旧 `i18n.ts` 就自动完整。DSH 执行环境语言和 Tauri OS/app locale 的来源也不同，如果不定 fallback，schema mismatch 等关键错误可能回退成英文 key 或空白。
 
 **Suggestion**: 在 R2b 增加 i18n 合约：首发 locale（至少 zh-CN/en）、locale 选择/回退规则、UTC 事件时间与显示时区的分离、`Intl` 货币/数字/日期格式、复数和参数化错误消息、ARIA live 翻译。CI 要检查语言 key 集合对称和缺键，并对两个 locale 的 loading/empty/error、CNY/USD 和跨日边界做渲染验收。
 

@@ -1,7 +1,7 @@
 # v0.8 Phase D 代码调研 —— 结构重构（不含 v0.7 写盘）
 
 > 用户 2026-09-04：Phase D **只做结构重构 (a)**（`agent-vitals-runtime` crate +
-> `HomeResolver` + `hosts/<h>/sources/` 迁 I/O + `adapters`→`hosts` 改名 + wire/fold
+> `HomeResolver` + `harnesses/<h>/sources/` 迁 I/O + `adapters`→`harnesses` 改名 + wire/fold
 > 分离 + `cost.rs` 拆）。**不做** (b) v0.7 延期写盘（`UsageFact` writer / materialized
 > view / R2a 增量失效）与 (c) migration 框架 —— 那两项另立 goal。E 在 D 完全稳定后做。
 >
@@ -14,10 +14,10 @@
 | 面 | 现状 | 目标 |
 |---|---|---|
 | **纯计算 + 词表** | `agent-vitals-domain`（`contracts/` + `domain/` + `compatibility/`）| 不变 |
-| **DSH wire 解析** | `domain/dsh/{evidence,audit,compaction,waste}` + `domain/coords.rs`（登记债）| → `agent-vitals-hosts/hosts/dsh/sessions/` |
-| **host wire 适配** | `agent-vitals-adapters/hosts/<h>/sessions/`（Claude/Codex/WorkBuddy evidence）+ `canonical_usage.rs` | → `agent-vitals-hosts`（改名）+ `hosts/<h>/{skills,capability}` 补齐 |
-| **host I/O** | 二进制 `src/`：`dsh.rs`(zstd 938 行)、`agent/discovery.rs`(733)、`agent/{claude,codex,workbuddy}_session*.rs`、`agent/{claude,codex,dsh}_usage_fact.rs` | → `agent-vitals-hosts/hosts/<h>/sources/`（`#[cfg(feature="sources")]`，`ruzstd`/`rusqlite`/`walkdir` optional）|
-| **非宿主 runtime** | 二进制 `src/agent/`：`state.rs`(827)、`r2a_store.rs`(2708)、`takeover.rs`(571)、`budget.rs` state 部分、`session_sources.rs` | → 新 `agent-vitals-runtime` crate |
+| **DSH wire 解析** | `domain/dsh/{evidence,audit,compaction,waste}` + `domain/coords.rs`（登记债）| → `agent-vitals-harnesses/harnesses/dsh/sessions/` |
+| **harness wire 适配** | `agent-vitals-adapters/harnesses/<h>/sessions/`（Claude/Codex/WorkBuddy evidence）+ `canonical_usage.rs` | → `agent-vitals-harnesses`（改名）+ `harnesses/<h>/{skills,capability}` 补齐 |
+| **harness I/O** | 二进制 `src/`：`dsh.rs`(zstd 938 行)、`agent/discovery.rs`(733)、`agent/{claude,codex,workbuddy}_session*.rs`、`agent/{claude,codex,dsh}_usage_fact.rs` | → `agent-vitals-harnesses/harnesses/<h>/sources/`（`#[cfg(feature="sources")]`，`ruzstd`/`rusqlite`/`walkdir` optional）|
+| **非执行环境 runtime** | 二进制 `src/agent/`：`state.rs`(827)、`r2a_store.rs`(2708)、`takeover.rs`(571)、`budget.rs` state 部分、`session_sources.rs` | → 新 `agent-vitals-runtime` crate |
 | **HomeResolver** | 散在 `src/util.rs::data_home`、`agent/discovery.rs::dsh_home`、`src/main.rs` 里 8+ 处 `std::env::var("HOME")`、`src-tauri/overview.rs`、`scripts/agent_vitals/paths.py` | → `agent-vitals-runtime/user/home.rs` 单点 + 跨实现契约测试 |
 | **cost.rs** | `domain/cost.rs` 单文件 1842 行（`load_pricing`/`cost_report`/`cost_series`/`priced_day`/`bucket_cost`/`month_cost`/`today_cost`/`cost_block`/`claude_*_cost`/订阅估算）| 拆 `domain/cost/{pricing,report,series,day,claude}.rs`，扁平 re-export 不变 |
 
@@ -27,7 +27,7 @@
 **wire/fold 分离的拦路石**（同 Phase C §6ter）：`domain/behavior.rs` 的 inline
 `#[cfg(test)] mod tests` 用 `build_dsh_evidence` 造 `CanonicalSession` fixture
 （`canonical_from` / `canonical_with_coverage` + ~15–20 个测试）。`build_dsh_evidence`
-迁进 `agent-vitals-hosts` 后，inline test 跨 crate 传 `CanonicalSession` +
+迁进 `agent-vitals-harnesses` 后，inline test 跨 crate 传 `CanonicalSession` +
 `[dev-dependencies]` 成环 → `multiple versions of crate`。**解法**：那批测试 + helper
 搬去 `crates/agent-vitals-domain/tests/behavior_canonical.rs`（integration test —
 `agent-vitals-domain` 只编一遍，`agent_vitals_adapters` 作 dev-dep 无碍，见 Phase C
@@ -37,16 +37,16 @@ Step 3 已验证 `sv6*_parity.rs` 的同款用法）。
 
 ### D1 —— wire/fold 分离（Phase D 首项，清 Phase C 债）
 `domain/dsh/{evidence,audit,compaction,waste,mod}.rs` + `domain/coords.rs`
-→ `agent-vitals-adapters/src/hosts/dsh/sessions/{evidence,audit,compaction,waste,coords}.rs`。
-- `hosts/dsh/sessions/mod.rs`：从 `pub use agent_vitals_domain::dsh_evidence` 改真 `pub mod`。
-- adapters `lib.rs`：加 `pub use hosts::dsh::sessions::{audit,compaction,waste}` 扁平别名。
+→ `agent-vitals-adapters/src/harnesses/dsh/sessions/{evidence,audit,compaction,waste,coords}.rs`。
+- `harnesses/dsh/sessions/mod.rs`：从 `pub use agent_vitals_domain::dsh_evidence` 改真 `pub mod`。
+- adapters `lib.rs`：加 `pub use harnesses::dsh::sessions::{audit,compaction,waste}` 扁平别名。
 - `domain/lib.rs`：删 `pub mod domain::dsh`、删 `pub use domain::dsh::{...}`、删
   `pub use domain::{coords}`；`trajectory::coord_map` 与 `duration.rs` 改
   `use agent_vitals_adapters::…::coords`? **不行**（domain 不许依赖 adapters）——
   `coord_map` 本身是 trajectory 的 `pub(crate)`，`Coords` 状态机是 DSH wire。
-  两条路：(i) `coord_map` 一起迁进 `hosts/dsh/sessions/`，`duration.rs`/`skill.rs`
+  两条路：(i) `coord_map` 一起迁进 `harnesses/dsh/sessions/`，`duration.rs`/`skill.rs`
   改调 adapters；(ii) `Coords` 留 domain（它只认 `turn/step/call_id` 抽象字段名，
-  见 §11.5，勉强算 host-agnostic）。**倾向 (ii)**：`Coords` 留 `domain/coords.rs`，
+  见 §11.5，勉强算 harness-agnostic）。**倾向 (ii)**：`Coords` 留 `domain/coords.rs`，
   只迁 `evidence/audit/compaction/waste`（它们才真的 match `"tool/call"` 字符串）。
 - 二进制 `src/agent/behavior.rs:152-153`：`agent_vitals_domain::{compaction,waste}`
   → `agent_vitals_adapters::{compaction,waste}`。
@@ -59,7 +59,7 @@ Step 3 已验证 `sv6*_parity.rs` 的同款用法）。
   实际改的是新增 `domain_has_no_dsh_wire_module` 反向断言）。
 - **净效果**：`domain/` 生产代码对 DSH raw 事件形状彻底不知情。
 
-### D2 —— `cost.rs` 拆分（纯 domain 内部，零 host 耦合）—— ✅ 完成（2026-09-04）
+### D2 —— `cost.rs` 拆分（纯 domain 内部，零 harness 耦合）—— ✅ 完成（2026-09-04）
 
 `domain/cost.rs`（1842 行）→ `domain/cost/mod.rs`（1442）+ `domain/cost/claude.rs`（409）。
 切最清晰的一条缝：**Claude Code 语料计价（`catalog_2026_09` 第二面）**——`resolve_card_catalog`
@@ -73,42 +73,42 @@ Step 3 已验证 `sv6*_parity.rs` 的同款用法）。
 - `include_str!("../../../../scripts/…")` → `../../../../../scripts/…`（深一层）。
 - 语义零改：spec §9 的 `models/`+`billing/`+`projection/` 语义解耦另算（并入 Model
   Catalog 需求驱动时）。
-- 守卫：`host_contract.rs::g10_price_claude_map_has_exactly_the_three_registered_callers`
+- 守卫：`harness_contract.rs::g10_price_claude_map_has_exactly_the_three_registered_callers`
   的源码扫描路径 → `cost/claude.rs`。Python `cost.py` 不切，docstring 里
   `crates/agent-vitals-domain/src/domain/cost.rs` → `cost/mod.rs`。
 - **门禁全绿**：cargo test 29 binary、clippy -D warnings、`test_cli_matrix` `both()` 差分、
   `test_cost_*`/`test_catalog_pricing`/`test_canonical_cost`、golden 15+15。wasm 不受影响
   （`wasm/lib.rs` 不引 `cost`）。
 
-### D3 —— `agent-vitals-adapters` → `agent-vitals-hosts`
-- crate 改名，lib name `agent_vitals_hosts`。`agent_vitals_adapters::` → `agent_vitals_hosts::`
+### D3 —— `agent-vitals-adapters` → `agent-vitals-harnesses`
+- crate 改名，lib name `agent_vitals_harnesses`。`agent_vitals_adapters::` → `agent_vitals_harnesses::`
   全量 rename（binary / wasm / src-tauri / 各 tests）。
 - `Cargo.toml`：`ruzstd`/`rusqlite`/`walkdir` 加 `optional = true`，新 `[features] sources = [...]`
   （**先空**，D4/D5 往里填）；wasm 侧 `default-features = false`。
-- 目录补 `hosts/<h>/{skills/,capability.rs}` + `hosts/<h>/sources/`（空 `mod.rs`，
+- 目录补 `harnesses/<h>/{skills/,capability.rs}` + `harnesses/<h>/sources/`（空 `mod.rs`，
   `#[cfg(feature="sources")]`）+ `shared/{canonical_json,timestamp,identity}.rs` +
   `registry.rs`。Skill surface 现在住二进制 `src/skills/`——**不迁**（那是 Phase D5/E 的事，
   D3 只建骨架）。
-- 新 `tests/host_boundary.rs`：源码扫描守卫（`std::fs`/`Connection::open`/`ruzstd`/
+- 新 `tests/harness_boundary.rs`：源码扫描守卫（`std::fs`/`Connection::open`/`ruzstd`/
   `rusqlite` 只许在 `/sources/` 或 `mcp/probe.rs`）。
 
-### D4 —— DSH I/O → `hosts/dsh/sources/` —— ✅ 完成（2026-09-04）
+### D4 —— DSH I/O → `harnesses/dsh/sources/` —— ✅ 完成（2026-09-04）
 
 `src/dsh.rs`（938 行：DSH 会话 JSONL 读取器 + 多帧 zstd 解码 + snapshot 解析）
-**整体** `git mv` → `agent-vitals-hosts/src/hosts/dsh/sources.rs`，`#[cfg(feature = "sources")]`
-在 `hosts/dsh/mod.rs` 门控整个模块。
+**整体** `git mv` → `agent-vitals-harnesses/src/harnesses/dsh/sources.rs`，`#[cfg(feature = "sources")]`
+在 `harnesses/dsh/mod.rs` 门控整个模块。
 
-- `ruzstd` 从二进制 `Cargo.toml` → `agent-vitals-hosts` 的 `[dependencies] ruzstd = { optional = true }`
-  + `[features] sources = ["dep:ruzstd"]`。二进制 `agent-vitals-hosts = { features = ["sources"] }`；
+- `ruzstd` 从二进制 `Cargo.toml` → `agent-vitals-harnesses` 的 `[dependencies] ruzstd = { optional = true }`
+  + `[features] sources = ["dep:ruzstd"]`。二进制 `agent-vitals-harnesses = { features = ["sources"] }`；
   wasm `default-features = false`（§4.0）。
 - `split_lines` 提前迁进 `agent-vitals-domain::util`（DSH wire 解析要用；二进制
   `src/util.rs` 改 `pub use`）。
-- 二进制 6 处 `crate::dsh::X` → `agent_vitals_hosts::dsh_sources::X`（`lib.rs` 扁平别名，
+- 二进制 6 处 `crate::dsh::X` → `agent_vitals_harnesses::dsh_sources::X`（`lib.rs` 扁平别名，
   `#[cfg(feature = "sources")]`）；`src/main.rs` 删 `mod dsh;`。
 - **pure/impure 未细分**（`sessions/wire.rs` vs `sources/reader.rs`）——D4 的关键是「I/O
-  出二进制、进 hosts、feature-gated」，wasm 本就不碰 dsh.rs 任何函数，整块 gate 可行。
+  出二进制、进 harnesses、feature-gated」，wasm 本就不碰 dsh.rs 任何函数，整块 gate 可行。
   wire/fold 细分排后续（低价值）。
-- 守卫：`hosts/tests/dependency_budget.rs` 重写成 host_boundary——`io_tokens_only_appear_under_sources`
+- 守卫：`harnesses/tests/dependency_budget.rs` 重写成 harness_boundary——`io_tokens_only_appear_under_sources`
   （`std::fs`/`ruzstd`/… 只许路径含 `/sources`）+ 依赖白名单放行 `optional` I/O crate。
   移进 lib crate 后 3 个读 checked-in fixture 的测试改用 `CARGO_MANIFEST_DIR/../..` 绝对路径；
   `parse_snapshot` doc 里的 JSON 例子加 ```` ```text ```` 围栏（lib crate 跑 doctest）。
@@ -116,22 +116,22 @@ Step 3 已验证 `sv6*_parity.rs` 的同款用法）。
   src-tauri check、python 1145/226 skip、golden 15+15。
 
 **未迁**：`src/agent/discovery.rs`（DSH session 发现）—— 它 `use crate::agent::takeover`
-+ 读 ledger 状态，是 runtime 编排，随 D6 进 `agent-vitals-runtime`（不是 `hosts/dsh/sources/`）。
++ 读 ledger 状态，是 runtime 编排，随 D6 进 `agent-vitals-runtime`（不是 `harnesses/dsh/sources/`）。
 
-### D5 —— Codex / Claude / WorkBuddy session readers → `hosts/<h>/sources/` —— ✅ 完成（2026-09-04）
+### D5 —— Codex / Claude / WorkBuddy session readers → `harnesses/<h>/sources/` —— ✅ 完成（2026-09-04）
 
 `src/agent/{claude_session,codex_session,workbuddy_session}.rs`（689 + 542 + 486 行）
-**整体** `git mv` → `agent-vitals-hosts/src/hosts/<h>/sources.rs`，`#[cfg(feature = "sources")]`
-在各 `hosts/<h>/mod.rs` 门控。
+**整体** `git mv` → `agent-vitals-harnesses/src/harnesses/<h>/sources.rs`，`#[cfg(feature = "sources")]`
+在各 `harnesses/<h>/mod.rs` 门控。
 
 - `walkdir`（Claude/Codex 会话文件递归枚举）+ `rusqlite`（WorkBuddy sqlite 只读，
-  `bundled`）从二进制 `Cargo.toml` → `agent-vitals-hosts` 的 `optional` +
+  `bundled`）从二进制 `Cargo.toml` → `agent-vitals-harnesses` 的 `optional` +
   `[features] sources = [..., "dep:walkdir", "dep:rusqlite"]`。
-- 移入文件 import 修正：`agent_vitals_hosts::{claude_code,workbuddy}_evidence` →
+- 移入文件 import 修正：`agent_vitals_harnesses::{claude_code,workbuddy}_evidence` →
   `crate::…_evidence`；`crate::util::split_lines`（codex）→ `agent_vitals_domain::util::split_lines`。
-- hosts `lib.rs` 扁平别名 `claude_session` / `codex_session` / `workbuddy_session`
+- harnesses `lib.rs` 扁平别名 `claude_session` / `codex_session` / `workbuddy_session`
   （`#[cfg(feature = "sources")]`）。二进制 ~20 处 `agent::<h>_session::X` /
-  `crate::agent::<h>_session::X` → `agent_vitals_hosts::<h>_session::X`；`src/agent/mod.rs`
+  `crate::agent::<h>_session::X` → `agent_vitals_harnesses::<h>_session::X`；`src/agent/mod.rs`
   删 3 条 `pub mod`。
 - Python：`test_classification.py::RS_AGENT_FAMILY` 去 `claude_session`/`codex_session`/
   `workbuddy_session`（迁出 `src/agent/`）。
@@ -141,12 +141,12 @@ Step 3 已验证 `sv6*_parity.rs` 的同款用法）。
 **仍在二进制**：`{claude,codex,dsh}_usage_fact.rs`（emit 入口，读 session text 后
 调 domain 的 UsageFact emitter）、`codex_session_audit.rs`、`claude_cost.rs`/`codex_cost.rs`
 （调 session reader + cost）—— 这些是「读证据 → 调纯计算 → 出报告」的 CLI 接线，
-随 D6 进 `agent-vitals-runtime` 的 service 层，不是 `hosts/<h>/sources/`。
+随 D6 进 `agent-vitals-runtime` 的 service 层，不是 `harnesses/<h>/sources/`。
 
 ### D6 —— `agent-vitals-runtime` crate 装 state 层 —— ✅ 完成（2026-09-04）
 
 `src/agent/{state,budget,takeover,session_sources}.rs` `git mv` → `agent-vitals-runtime/src/`。
-runtime deps：`agent-vitals-domain` + `agent-vitals-hosts { features=["sources"] }` +
+runtime deps：`agent-vitals-domain` + `agent-vitals-harnesses { features=["sources"] }` +
 `serde` + `serde_json`。
 
 - 日期 helper：`civil_from_unix_secs`（纯）→ `agent-vitals-domain::util`；读时钟的
@@ -186,9 +186,9 @@ runtime deps：`agent-vitals-domain` + `agent-vitals-hosts { features=["sources"
 ```
 D1  wire/fold 分离          [中 + wasm 重建]   ✅ 完成（commit 6f9af88）
 D2  cost.rs 文件切分        [低，纯 domain]    ✅ 完成（commit 1bb232e：切出 cost/claude.rs）
-D3  adapters → hosts 改名   [中，机械面大]    ✅ 完成（commit c07da01，纯 rename）
+D3  adapters → harnesses 改名   [中，机械面大]    ✅ 完成（commit c07da01，纯 rename）
 D4  DSH I/O → sources/      [高，feature-gate 首用]  ✅ 完成（commit 6e1e130）
-D5  其他 host readers       [高，rusqlite 迁移]  ✅ 完成（commit 6f48e2e）
+D5  其他 harness readers       [高，rusqlite 迁移]  ✅ 完成（commit 6f48e2e）
 D7  HomeResolver 单点       [中]  ✅ 完成（commit 259a821——**先于 D6**）
 D6  agent-vitals-runtime    [高，state 层迁移]  ✅ 完成（本提交；state/budget/takeover/session_sources
                             + clock。r2a_store/discovery 因与 CLI handler 交织，转 Phase E 的 apps/cli 抽出）
@@ -197,7 +197,7 @@ D6  agent-vitals-runtime    [高，state 层迁移]  ✅ 完成（本提交；st
 **Phase D（结构重构）实质完成**。剩 `r2a_store` / `discovery` 两个 CLI-orchestrator
 的物理迁移，随 Phase E 把 `src/agent/{codex_cost,claude_cost,codex_session_audit,
 *_usage_fact,oneline,behavior,cost,plan}.rs` 抽进 `apps/cli` 时一起归位。Phase D 的
-crate 骨架（domain / hosts / runtime / wasm 四 crate + feature-gated sources）已到位。
+crate 骨架（domain / harnesses / runtime / wasm 四 crate + feature-gated sources）已到位。
 
 ### D7 完成记录（2026-09-04）
 
@@ -218,22 +218,22 @@ crate 骨架（domain / hosts / runtime / wasm 四 crate + feature-gated sources
 
 ### D3 完成记录（2026-09-04）
 
-`agent-vitals-adapters` → **`agent-vitals-hosts`**：`git mv` crate 目录、`name`/`lib.name`
-改 `agent_vitals_hosts`、`agent_vitals_adapters` → `agent_vitals_hosts` 全量 rename
+`agent-vitals-adapters` → **`agent-vitals-harnesses`**：`git mv` crate 目录、`name`/`lib.name`
+改 `agent_vitals_harnesses`、`agent_vitals_adapters` → `agent_vitals_harnesses` 全量 rename
 （52 处：binary/wasm/domain dev-dep/src-tauri/tests/Python docstring）、workspace
 `members`/`default-members` + 各 `Cargo.toml` dep 名。**纯改名**——`[features] sources`
-空壳与 `tests/host_boundary.rs` 守卫留给 D4（首个真实 I/O 迁移时一起加，不提前挂空）。
+空壳与 `tests/harness_boundary.rs` 守卫留给 D4（首个真实 I/O 迁移时一起加，不提前挂空）。
 
 门禁全绿：cargo test（29 binary）、clippy -D warnings、wasm-pack 重建 + verify-*.mjs、
 src-tauri check、python 1145/226 skip、golden 15+15。
 
 ### D1 完成记录（2026-09-04，本会话）
 
-`domain/dsh/{evidence,audit,compaction,waste,mod}.rs` → `agent-vitals-adapters/src/hosts/dsh/sessions/`。
+`domain/dsh/{evidence,audit,compaction,waste,mod}.rs` → `agent-vitals-adapters/src/harnesses/dsh/sessions/`。
 `Coords` 留 `domain/coords.rs`（决策 (ii)：`turn`/`step`/`call_id` 抽象字段名，
-host-agnostic；`trajectory::coord_map` / `duration` / `skill` 继续用）。
+harness-agnostic；`trajectory::coord_map` / `duration` / `skill` 继续用）。
 
-- adapters `lib.rs`：加 `pub use hosts::dsh::sessions::{audit, compaction, waste}` 扁平别名。
+- adapters `lib.rs`：加 `pub use harnesses::dsh::sessions::{audit, compaction, waste}` 扁平别名。
 - domain `lib.rs` / `domain/mod.rs`：删 `dsh` 模块与全部 `dsh::*` 别名。
 - 二进制 `src/agent/behavior.rs`：`agent_vitals_domain::{compaction,waste}` → `agent_vitals_adapters::…`。
 - wasm `lib.rs` + `Cargo.toml`：加 `agent-vitals-adapters` dep，`audit`/`compaction`/`waste`
@@ -245,14 +245,14 @@ host-agnostic；`trajectory::coord_map` / `duration` / `skill` 继续用）。
   compaction/waste` 的 inline 测试（+29）跟文件迁去 adapters。
 - 守卫：删 `domain_dsh_is_the_only_registered_layer2_wire_module`，新
   `domain_holds_no_dsh_wire_module`（`src/domain/dsh` 不存在）；
-  `domain_production_code_outside_dsh_…` → `domain_production_code_has_no_host_adapter_dependency`
+  `domain_production_code_outside_dsh_…` → `domain_production_code_has_no_harness_adapter_dependency`
   （去掉 dsh 例外，扫全 `src/domain/`）。
-- Python：`test_host_contract.py` 的 G3 matrix + G8 dsh 路径 →
-  `crates/agent-vitals-adapters/src/hosts/dsh/sessions/evidence.rs`；`util.py`/`behavior.py`/
+- Python：`test_harness_contract.py` 的 G3 matrix + G8 dsh 路径 →
+  `crates/agent-vitals-adapters/src/harnesses/dsh/sessions/evidence.rs`；`util.py`/`behavior.py`/
   `dsh_evidence.py` docstring 同步。
 
 **门禁全绿**：cargo test（binary 313 + domain 388 lib + behavior_rules 14 + adapters 85
-+ parity/host_contract/dependency_budget）、clippy -D warnings、wasm-pack 重建 +
++ parity/harness_contract/dependency_budget）、clippy -D warnings、wasm-pack 重建 +
 `dsh-client/scripts/verify-*.mjs` 7 个全过、src-tauri check、python 1145/226 skip、
 golden 15+15 逐字节。
 

@@ -55,10 +55,10 @@ assert.match(source, /const status = await readSyncRequestStatus\(requestId\);\s
 assert.match(source, /catch \(reason: unknown\) \{\s*if \(settingsMounted\.current\) \{\s*setSyncMessage\(null\);/u, "sync error state is not unmount guarded");
 assert.match(source, /finally \{\s*if \(settingsMounted\.current\) setSyncing\(false\);/u, "sync busy state is not unmount guarded");
 assert.match(source, /const paused = await setSyncPaused\([^\n]+\);\s*if \(!settingsMounted\.current\) return;/u, "pause completion does not stop after unmount");
-assert.match(source, /const receipt = await setSourceHostExcluded\([^\n]+\);\s*if \(!settingsMounted\.current\) return;/u, "source exclusion completion does not stop after unmount");
+assert.match(source, /const receipt = await setSourceHarnessExcluded\([^\n]+\);\s*if \(!settingsMounted\.current\) return;/u, "source exclusion completion does not stop after unmount");
 assert.match(source, /const receipt = await deleteImportedSourceData\([^\n]+\);\s*if \(!settingsMounted\.current\) return;/u, "source deletion completion does not stop after unmount");
 assert.match(source, /if \(settingsMounted\.current\) setPauseSaving\(false\);/u, "pause busy state is not unmount guarded");
-assert.match(source, /if \(settingsMounted\.current\) setSourceControlHost\(null\);/u, "source exclusion busy state is not unmount guarded");
-assert.match(source, /if \(settingsMounted\.current\) setDeleteBusyHost\(null\);/u, "source deletion busy state is not unmount guarded");
+assert.match(source, /if \(settingsMounted\.current\) setSourceControlHarness\(null\);/u, "source exclusion busy state is not unmount guarded");
+assert.match(source, /if \(settingsMounted\.current\) setDeleteBusyHarness\(null\);/u, "source deletion busy state is not unmount guarded");
 
 console.log("React Settings contract: OK (per-projection generations, unmount guard, pause receipt)");

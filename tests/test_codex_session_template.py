@@ -17,7 +17,7 @@
 #   退化成零长线段、area 退化成零宽三角形、三个 label 叠在同一点——整张图不可见，
 #   用户报「会话时间线没有渲染」，且没有任何测试抓住。修复：单桶改画居中柱。
 # - 折叠（2026-08-30）：Finding 队列把 10 个零覆盖信号一视同仁列成线索，其中 5 个
-#   是宿主线格式根本不提供的维度（结构缺口），任何会话都为零；KPI 分母 19 是永远
+#   是执行环境线格式根本不提供的维度（结构缺口），任何会话都为零；KPI 分母 19 是永远
 #   到不了的满分。修复：coverage 条目带 available 标记，折叠只把「available 且零」
 #   当会话线索，结构缺口折叠成一行静态说明，空态重新可达。
 
@@ -37,7 +37,7 @@ VERIFY_SCRIPTS = [
     # v0.10.0 Traces 渲染壳：真实 workbench.js × 真实 timeline.js × 真实 CLI
     # DTO 的完整渲染路径 + namespace 前端拦截 + 几何唯一份 grep。同理由。
     REPO / "scripts" / "verify-workbench-traces.mjs",
-    # v1.0 数据源页：独立状态契约、宿主注册表驱动、恢复动作。
+    # v1.0 数据源页：独立状态契约、执行环境注册表驱动、恢复动作。
     REPO / "scripts" / "verify-workbench-sources.mjs",
 ]
 

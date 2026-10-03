@@ -24,7 +24,7 @@ from .state import _atomic_write, _now_iso, _read, state_dir
 from .usage import _is_peak_slot
 
 # v0.6.x 前置正确性热修复（归日转正 + 峰谷分辨率 + 残差哨兵，三者同批——
-# 见 docs/VITALS_CORE_V0_6_HOST_CONTRACT_SPEC.md §5.3 条款 7 / §8 G10、
+# 见 docs/VITALS_CORE_V0_6_HARNESS_CONTRACT_SPEC.md §5.3 条款 7 / §8 G10、
 # docs/VITALS_CORE_V0_7_DATA_PLANE_SPEC.md §5）。claude-fold.json 在这次改动
 # 之前没有 schema_version：旧 checkpoint 的 tail_days 是在"cost-state 一来
 # 就清空"的旧算法下产生的，只保留最近一次基线之后的行，历史全部已经在写盘
@@ -62,7 +62,7 @@ PEAK_KEYS = ["peak_input_tokens", "peak_cache_read_input_tokens",
 
 def ledger_day_total_tokens(day):
     """ledger flat 日（{model: 4 型 snake}，rebuild_days 产出）→ 4 型 token 总量。
-    r2a.py 的 claude 宿主行「今日 token」走这里；SNAKE_KEYS 只此一处定义，别在
+    r2a.py 的 claude 执行环境行「今日 token」走这里；SNAKE_KEYS 只此一处定义，别在
     r2a 再抄一份键清单。非 dict 值（坏日）→ 0；但「读出 0」只发生在坏数据上，
     空日不落 ledger。
 
@@ -80,7 +80,7 @@ def ledger_day_total_tokens(day):
 
 def claude_ledger_day_tokens(day_key):
     """读 ledger 当日（day_key = 北京日）的 4 型 token 总量 → r2a.py
-    `sessions_navigation` 的 claude 宿主行「今日 token」（spec §5.2
+    `sessions_navigation` 的 claude 执行环境行「今日 token」（spec §5.2
     basis=ledger）。
 
     三种 None：ledger 不存在 / 无 `days` 键 / 当日缺席——都诚实报 None（托盘显

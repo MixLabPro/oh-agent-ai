@@ -3,7 +3,7 @@ import json
 import re
 from datetime import datetime
 
-LOCAL_SLOTS = frozenset(('host_manifest', 'price_card', 'model_alias', 'endpoint_pattern', 'trust_profile'))
+LOCAL_SLOTS = frozenset(('harness_manifest', 'price_card', 'model_alias', 'endpoint_pattern', 'trust_profile'))
 VENDOR_SLOTS = LOCAL_SLOTS | frozenset(('error_taxonomy', 'behavior_patterns', 'subscription_scope', 'fx_reference', 'quota_window', 'duration_threshold', 'slow_call_threshold', 'attribution_signatures'))
 
 

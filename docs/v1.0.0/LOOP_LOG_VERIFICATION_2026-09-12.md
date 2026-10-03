@@ -102,7 +102,7 @@ let end = (offset + page_size.clamp(1, 500)).min(values.len());
 
 > 归并后的**组数应显著小于命中数**（预期数十组量级）；若归并后仍是数百组，说明对象归一化过细（N1/N4/N7/N8 未落实）。
 
-真机实测 **4,495 条 → 786 组**（30 天窗 738 组）——正是规格预警的"数百组"。但根因不是对象归一化（N1–N10 经代码复核**均已正确落实**：`issue_group_key` → `issue_object` → `normalize_issue_object`，跨族/跨宿主由 key 结构保证不合并），而是**漏做了"证据归类"这一步**：
+真机实测 **4,495 条 → 786 组**（30 天窗 738 组）——正是规格预警的"数百组"。但根因不是对象归一化（N1–N10 经代码复核**均已正确落实**：`issue_group_key` → `issue_object` → `normalize_issue_object`，跨族/跨执行环境由 key 结构保证不合并），而是**漏做了"证据归类"这一步**：
 
 ```rust
 // crates/agent-vitals-data/src/issues.rs:551-553（issue_groups）
@@ -121,7 +121,7 @@ approval 2739 · sensitive-fs 1134 · shell 432 · trajectory 190
 
 | 归并键 | 组数 |
 |---|---|
-| 现状（`rule\|host\|object\|原始 evidence\|日桶`） | **786** |
+| 现状（`rule\|harness\|object\|原始 evidence\|日桶`） | **786** |
 | 改用 `category`（不叠日桶） | 340 |
 | 改用 `category`（叠日桶） | 564 |
 
@@ -138,7 +138,7 @@ billing_fact_attributions         0
 billing_declarations              0
 billing_declaration_revisions     0
 billing_declaration_scopes        0
-host_bills                        0
+harness_bills                        0
 ```
 
 Loop 14–33 的产物**代码在、单测过、schema 在**，但在真机上**一次都没有运行过**。这不是 bug，但意味着 REQ-143 / REQ-147 / REQ-148 / AC13 / AC27 目前**无法声称生效**——只有单测证据，没有端到端证据。日志在 Loop 42–47 多轮自认"独立验收未返回 verdict"，与此一致。
@@ -148,7 +148,7 @@ Loop 14–33 的产物**代码在、单测过、schema 在**，但在真机上**
 ### 4.4 【证据缺口】双预算与账单录入从未被使用
 
 - `budget_profiles = 0`，而 `budget_config = 1`（旧单币种：¥1/月、¥1/日、周 ¥180）——**用户仍走旧口径**，Loop 52–63 的双 profile 在真机上不体现；
-- `host_bills = 0`——账单录入（Loop 31–33）未使用；
+- `harness_bills = 0`——账单录入（Loop 31–33）未使用；
 - `billing_import_candidates = 3`——**这一条是真机有数据的**（Loop 7/8 的待确认候选），说明候选链路至少被真实触发过。
 
 ### 4.5 【已知】L2 详情真机未复验
@@ -228,7 +228,7 @@ SELECT COUNT(*) FROM issue_status_transitions;                           -- 75
 - 不声称任何 PRD 条款可通过 —— 本次未勾选、也未建议勾选任何条目；
 - 不声称 §3 之外的 Loop 全部正确 —— 未逐行复核全部 84 个 Loop 的实现细节，只验证了**日志点名的产物是否存在、真机是否有足迹**；
 - 不声称桌面 UI 的实际渲染 —— 未启动应用点击，界面结论均由 `workbench.js` / `store.rs` 源码与数据层实测 DTO 推导；
-- 未验证 workbuddy / hermes / pi 等新增宿主在本机语料上的表现。
+- 未验证 workbuddy / hermes / pi 等新增执行环境在本机语料上的表现。
 
 ---
 

@@ -2,8 +2,8 @@
 
 > 状态：**Draft v1.0（2026-09-27）**。
 > 触发：首发试点的痛点覆盖审计（2026-09-26）+ 审计修正。审计曾误判「Claude
-> 无小时分布」，核实后收回：`hourly_by_host` 自 v0.9.1 Phase 3.5 Tier B 起就是
-> 三宿主统一查询（`usage_facts` 行级事实 × 北京小时），UI 三宿主全画。剩余真缺口
+> 无小时分布」，核实后收回：`hourly_by_harness` 自 v0.9.1 Phase 3.5 Tier B 起就是
+> 三执行环境统一查询（`usage_facts` 行级事实 × 北京小时），UI 三执行环境全画。剩余真缺口
 > 是**点击穿透**与**内嵌发现项**两项，外加三处误导性化石。
 > 定位：让 landing page 的每张截图都有实物背书——痛点②（消耗突变找到对应任务）
 > 与痛点③（高消耗后知道原因和下一步）在首发四页内闭环。
@@ -19,7 +19,7 @@
 
 ## 0. 一句话结论
 
-三件事让首发四页真正覆盖痛点②③：**总览/用量页的日与宿主行一键穿透到过滤后的
+三件事让首发四页真正覆盖痛点②③：**总览/用量页的日与执行环境行一键穿透到过滤后的
 会话列表**（异常→会话从两步手工变一步）、**总览页内嵌 top 发现条**（「发现作为
 相关页面中的事项呈现」的落地，痛点③从无到有）、**清理小时分布的三处化石**
 （死参数/陈旧注释/特化测试名——它们刚误导过天天在仓库里干活的人）。全部为
@@ -58,7 +58,7 @@ additive 改动，不动计费口径、不动 golden 契约、不动 hourly 数�
 
 | 事实 | 证据 |
 |---|---|
-| 总览页宿主行纯展示，无任何导航接线 | `OverviewPage.tsx:114`（`overview-host-row` 只有 token 计数文本） |
+| 总览页执行环境行纯展示，无任何导航接线 | `OverviewPage.tsx:114`（`overview-harness-row` 只有 token 计数文本） |
 | 总览日条/用量页日格无「查当日会话」入口 | `UsagePage.tsx` 日值图例 `["DSH","CC","CX"]` 与小时图均为纯展示 |
 | React 无带参导航 | hash 路由只有页名（`pageFromHash`），无 query 解析 |
 | `sessions_list` 疑似无日期参数 | 需实施时核实（IPC 签名 + SQL WHERE；sessions 表有 `span_first/span_last` 可用） |
@@ -91,13 +91,13 @@ additive 改动，不动计费口径、不动 golden 契约、不动 hourly 数�
 
 ```
 数据面（不动）
-  usage_facts ──hourly_by_host──▶ 小时分布（三宿主，已统一）
+  usage_facts ──hourly_by_harness──▶ 小时分布（三执行环境，已统一）
   sessions(span_first/span_last) ──beijing_day_bounds──▶ [新增] 日期过滤 WHERE（可选参数）
   findings_groups_safe / decision_matrix_safe ──▶ [新增] 总览内嵌条（只读既有 DTO）
 
 动线（本 spec 新增的箭头）
   用量页日格 ──点击──▶ #sessions?date=YYYY-MM-DD ──▶ sessions_list(date) 首屏锁定
-  总览宿主行/日行 ──点击──▶ 同上
+  总览执行环境行/日行 ──点击──▶ 同上
   总览发现条(3) ──展开──▶ decision_matrix 行内证据锚点 ──跳──▶ 会话详情
 ```
 
@@ -110,11 +110,11 @@ additive 改动，不动计费口径、不动 golden 契约、不动 hourly 数�
 1. `hourly_distribution` / `hourly_distribution_memoized` 删 `codex_home` 参数
    （连带 `lib.rs` 命令与 `agent-vitals-query` 门面签名）；`calendar_month` 的
    同名参数实施时核实真伪，同死则同删。
-2. 命令 doc 注释改写为现实现：「三宿主统一——`usage_facts` 行级事实按北京小时
-   聚合（v0.9.1 Tier B）；`hosts_available` 如实标注每宿主在场与否；库打不开
-   = 全宿主缺席」。
+2. 命令 doc 注释改写为现实现：「三执行环境统一——`usage_facts` 行级事实按北京小时
+   聚合（v0.9.1 Tier B）；`harnesses_available` 如实标注每执行环境在场与否；库打不开
+   = 全执行环境缺席」。
 3. 测试改名 `read_hourly_distribution_matches_authority_facts_day`，并把断言
-   从「与 codex 日对拍」扩为「三宿主字段 + 来源标注」。
+   从「与 codex 日对拍」扩为「三执行环境字段 + 来源标注」。
 4. 验收：golden 16 条零漂移；Rust/React 既有契约全绿。
 
 ### 4.2 R1 · 点击穿透（~1 天）
@@ -125,7 +125,7 @@ additive 改动，不动计费口径、不动 golden 契约、不动 hourly 数�
    `invalid_argument` 错误（不静默忽略——与 MCP 面的参数纪律一致）。
 2. **React**：`pageFromHash` 扩展 query 解析（仅 `date`，URL-encoded，白名单
    页：sessions）；`navigate("sessions", { date })`；UsagePage 日格与
-   OverviewPage 宿主行/日行挂 `onClick`（含键盘可达性：`role="link"` +
+   OverviewPage 执行环境行/日行挂 `onClick`（含键盘可达性：`role="link"` +
    `tabIndex`，与既有 a11y 断言风格一致）。
 3. **SessionsPage**：首载读 hash 的 `date`，传入 invoke；页内显示「按 2026-09-27
    过滤 · 清除」chip（清除 = 去 query 重载，回到全量）。
@@ -162,14 +162,14 @@ additive 改动，不动计费口径、不动 golden 契约、不动 hourly 数�
 
 ## 6. 分期与进度（每阶段测试绿后打勾）
 
-- [x] **R0 化石清理**（6fb37f3）：hourly/calendar 双死参删除、注释改写三宿主
+- [x] **R0 化石清理**（6fb37f3）：hourly/calendar 双死参删除、注释改写三执行环境
   真相、测试改名；golden 16 零漂移
-- [x] **R1 点击穿透**（6fb37f3 + 验收修复 3b5b914）：后端零改动（day/host_kind
-  v0.9.1 已有），hash 深链 date/host 白名单 + day 窗 + 一次性消费 + hashchange
+- [x] **R1 点击穿透**（6fb37f3 + 验收修复 3b5b914）：后端零改动（day/harness_kind
+  v0.9.1 已有），hash 深链 date/harness 白名单 + day 窗 + 一次性消费 + hashchange
   跟随；契约断言入 sessions 脚本
-- [x] **R2 内嵌发现条**（6fb37f3 + 3b5b914）：top3 + 证据链接门控（可过滤宿主
+- [x] **R2 内嵌发现条**（6fb37f3 + 3b5b914）：top3 + 证据链接门控（可过滤执行环境
   且有会话证据）+ 两态降级；契约断言入 overview 脚本。**偏差记录**：条内
-  decision-matrix 展开未做（以宿主会话深链为证据路径的等价落法），真机
+  decision-matrix 展开未做（以执行环境会话深链为证据路径的等价落法），真机
   三动线手测待 bundle 后
 
 验收评审（2026-09-28）：首判不通过（4×P2），全部修复后复验 10/10 契约绿；
@@ -178,7 +178,7 @@ P2-4 契约扩展以字面包含断言落地（正则转义事故 aeb4e3e 已修
 ## 7. 验收标准
 
 1. **动线手测**（landing page 截图的实操背书）：用量页点一个高消耗日 → 会话页
-   首屏即该日列表且带过滤 chip；总览宿主行点击同理；发现条展开 → 点会话锚点
+   首屏即该日列表且带过滤 chip；总览执行环境行点击同理；发现条展开 → 点会话锚点
    → 会话详情打开。
 2. **契约**：verify:react 全绿（含扩展后的 overview/sessions 断言）；
    `sessions_list` 无参调用输出与改前逐字节一致（对拍测试钉住）。

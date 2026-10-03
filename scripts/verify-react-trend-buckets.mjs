@@ -51,13 +51,13 @@ assert.equal(t.niceMax(246000), 500000);
 assert.equal(t.niceMax(520000), 1000000);
 
 // —— 小时桶 ——
-const hourly = { date: "2026-10-01", hosts_available: {}, hours: Array.from({ length: 24 }, (_, hour) => ({ hour, dsh_tokens: hour === 9 ? 100 : null, claude_tokens: hour === 9 ? 50 : 0, codex_tokens: null })) };
+const hourly = { date: "2026-10-01", harnesses_available: {}, hours: Array.from({ length: 24 }, (_, hour) => ({ hour, dsh_tokens: hour === 9 ? 100 : null, claude_tokens: hour === 9 ? 50 : 0, codex_tokens: null })) };
 const hb = t.buildHourBuckets(hourly, { "9": 3 });
 assert.equal(hb.length, 24, "恒 24 桶");
 assert.equal(hb[9].failures, 3);
 assert.equal(hb[10].failures, 0, "读到失败表且该小时无失败 = 真零");
-assert.equal(t.bucketTotal(hb[9]), 150, "null 宿主按 0 计入合计，不抛");
-assert.equal(hb[9].codex, null, "读不到的宿主保持 null，不被洗成 0");
+assert.equal(t.bucketTotal(hb[9]), 150, "null 执行环境按 0 计入合计，不抛");
+assert.equal(hb[9].codex, null, "读不到的执行环境保持 null，不被洗成 0");
 assert.equal(t.buildHourBuckets(hourly, null)[9].failures, null, "失败表读不到 → failures null（不是 0）");
 const hbDown = t.buildHourBuckets(null, {});
 assert.ok(hbDown.every((b) => b.state === "unavailable") && hbDown.every((b) => t.bucketTotal(b) === 0), "小时数据读不到 → 全桶 unavailable");

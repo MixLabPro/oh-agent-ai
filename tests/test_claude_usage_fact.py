@@ -305,7 +305,7 @@ class ParseClaudeUsageRowCase(unittest.TestCase):
 
     def test_native_session_id_threads_through(self):
         """native_session_id 从 caller 注入，不从 rec 读——R2a SessionKey
-        第二层（host_kind/native_id/source_profile/machine_namespace）的
+        第二层（harness_kind/native_id/source_profile/machine_namespace）的
         第 2 段，与 locate 阶段稳定派生对齐。"""
         obs = parse_claude_usage_row(
             VALID_ASSISTANT,

@@ -281,7 +281,7 @@ def codex_session_list(home=None):
             "last": last,
         })
     sessions.sort(key=functools.cmp_to_key(_session_cmp))
-    return {"host": "codex", "currency": "USD", "sessions": sessions}
+    return {"harness": "codex", "currency": "USD", "sessions": sessions}
 
 
 def codex_session_audit_json(home, session_id):
@@ -328,7 +328,7 @@ def codex_session_audit_json(home, session_id):
     last_ts = max((f["last"] for f in files if f["last"] is not None), default=None)
 
     return {
-        "host": "codex",
+        "harness": "codex",
         "currency": "USD",
         "session_id": session_id,
         "title": index.get(session_id),
@@ -357,7 +357,7 @@ def codex_session_audit_json(home, session_id):
 def _render_list(out):
     """`codex-session --list` 的人读呈现——与 Rust `render_codex_session_list`
     逐字节对齐。缺席的字段一律 `-`（诚实缺失，不编造），行宽固定 28。"""
-    s = "host: codex\n"
+    s = "harness: codex\n"
     sessions = out.get("sessions") or []
     s += "sessions: %d\n\n" % len(sessions)
     for row in sessions:
@@ -382,7 +382,7 @@ def _render_audit(out):
     """`codex-session` 单会话深挖的人读呈现——与 Rust `render_codex_session`
     逐字节对齐。覆盖/信号/残差哨兵是最下面三行——终端里只看概要，详情在
     `--json` 或 `--html`。"""
-    s = "host: codex\n"
+    s = "harness: codex\n"
     sid = out.get("session_id")
     s += "session_id: %s\n" % (sid if isinstance(sid, str) else "")
     for key in ("title", "model", "cli_version", "history_mode"):
@@ -415,7 +415,7 @@ def _render_audit(out):
     cov = out.get("coverage")
     avail = 0
     if isinstance(cov, dict):
-        # 分母是宿主可用信号数，不是 19——结构缺口（available=false）任何会话
+        # 分母是执行环境可用信号数，不是 19——结构缺口（available=false）任何会话
         # 都为零，算进分母只会把「9/19」这种数字弄成永远到不了的满分。
         avail = sum(1 for c in cov.values()
                     if isinstance(c, dict) and c.get("available") is not False)

@@ -2,7 +2,7 @@
 
 **状态：** Draft v1（2026-09-16，基于本机权威库只读副本与本地配置的实测证据写成）  
 **关系：** 是 [计费确认主链规格](BETA_1_BILLING_CONFIRMATION_CHAIN_SPEC.md) v1.2 的上游——它决定「明确计费方式」列表里**该剩多少组**、弹窗里**该问几步**。PRD REQ-018「存在明确官方订阅/路由证据时自动应用并展示依据；没有明确信号时保留未知」、REQ-022「机器能确认的字段预填，每次只确认一条会改变结果的关系」、REQ-031「不能为了去掉黄色状态强迫用户猜测」是本文的边界。  
-**关联：** [发布规格](BETA_1_RELEASE_SPEC.md) B06；[Provider 路由归属规格](../PROVIDER_ROUTE_ATTRIBUTION_SPEC.md)；`crates/agent-vitals-provider/src/lib.rs`（`EvidenceBasis` / `resolve_billing_attribution`）；`docs/CLINE_HOST_ASSESSMENT.md` 等宿主评估。
+**关联：** [发布规格](BETA_1_RELEASE_SPEC.md) B06；[Provider 路由归属规格](../PROVIDER_ROUTE_ATTRIBUTION_SPEC.md)；`crates/agent-vitals-provider/src/lib.rs`（`EvidenceBasis` / `resolve_billing_attribution`）；`docs/CLINE_HARNESS_ASSESSMENT.md` 等执行环境评估。
 
 ## 0. 结论
 
@@ -18,7 +18,7 @@
 
 **A+B 共 66% 程序可以完整判定到计费方式；C 只差一个按厂商问一次的路由问题；真正只有用户知道的是 D 和月费金额。** 现在 30 组全部落到用户头上，根因不是证据不存在，而是：
 
-1. claude-code 适配器把 `provider_id/provider_raw/evidence_basis` 一律写成 `null/null/missing`（`crates/agent-vitals-hosts/src/hosts/claude_code/sources/usage_fact.rs:209-214`，注释「never infer Anthropic from the model name」——这条纪律对**计费方**是对的，但它连**模型厂商**和**每条记录里现成的路由证据**也一起放弃了）；
+1. claude-code 适配器把 `provider_id/provider_raw/evidence_basis` 一律写成 `null/null/missing`（`crates/agent-vitals-harnesses/src/harnesses/claude_code/sources/usage_fact.rs:209-214`，注释「never infer Anthropic from the model name」——这条纪律对**计费方**是对的，但它连**模型厂商**和**每条记录里现成的路由证据**也一起放弃了）；
 2. 账户级证据（Claude 订阅类型、Codex 登录方式）没有任何读取路径；
 3. 公共目录 `catalog_2026_09.billing_modes` 只声明了 `deepseek-v4*` 两条（`assets/pricing.json`），模型名族 → 厂商这层事实没有数据；
 4. `route_evidence` 表本月对 claude-code / codex 为空（实测：2026-09 claude-code 25,455 条事实、codex 18,295 条，`route_evidence_id` 全为 NULL；表里只有 8 月 dsh 的 53 行和 codex 的 1 行 config-current）。
@@ -29,7 +29,7 @@
 
 所有待确认组共同形状：`evidence_basis = missing`、`route_evidence_id = NULL`、`billing_mode = metered`、`pricing_basis = metered_estimate`。区别只在：
 
-| host | provider_id | provider_raw | 说明 |
+| harness | provider_id | provider_raw | 说明 |
 |---|---|---|---|
 | claude-code | NULL | NULL | 适配器不产 provider（§0 根因 1） |
 | codex | `openai` | `openai` | rollout 自报 `model_provider=openai`，路由证据仍缺（`resolve_billing_attribution` 的 `official_route_missing` 分支，`provider/src/lib.rs:166`） |
@@ -85,7 +85,7 @@
 
 | 现象 | 问题 | 本规格 |
 |---|---|---|
-| 列表按 **模型** 一行一行（同厂商 6 行 deepseek） | 用户要做的决定是按厂商/路由的，不是按模型的 | 行的主键改成 `host × model_vendor × route_state`；一个厂商一行，模型作为折叠清单 |
+| 列表按 **模型** 一行一行（同厂商 6 行 deepseek） | 用户要做的决定是按厂商/路由的，不是按模型的 | 行的主键改成 `harness × model_vendor × route_state`；一个厂商一行，模型作为折叠清单 |
 | 每行都要点「明确计费方式」 | A/B 类程序已能判定，用户只该**确认** | 行内直接展示「程序判定：anthropic · 官方 · Claude Pro（依据：账号类型 claude_pro · 请求 ID req_01…）」+ 单键「确认」；「不对，我来改」才进弹窗 |
 | 弹窗第 1 步问"哪家服务商" | L0 永远不该问 | 删除；预填并只读展示 |
 | 第 2 步问"官方还是中转" | A/B 有 SessionNative 证据不该问；C 该问但按厂商问一次 | 有 L1≥SessionNative 时隐藏并展示依据；`Inferred` 时才问 |
@@ -97,7 +97,7 @@
 
 ### 5.1 列表（设置 › 计费与套餐 › 待明确的计费方式）
 
-每行 = `host × model_vendor × route_state`，三种状态：
+每行 = `harness × model_vendor × route_state`，三种状态：
 
 1. **程序已判定**（A/B）：`claude-code · anthropic · 官方 · Claude Pro 订阅 · 每月 20 日 · 3 个模型 · 4.5B tokens` + 依据链（`账号 claude_pro · 请求 ID req_01… · 订阅自 2025-07-20`）+ 按钮「确认（$20/月）」「不对」。确认 = 一次点击写声明 + 重算（主链 §5.6），弹窗不出现。
 2. **差一问**（C）：`claude-code · deepseek · 3 个模型 · 1.57B tokens · 按量` + 「走的是 DeepSeek 官方端点还是中转？」两个按钮直接在行内；选官方 → 立即写声明（official_api，deepseek 价卡）；选中转 → 弹窗只剩"哪家 + 价卡（可暂不清楚）"。
@@ -122,16 +122,16 @@
 |---|---|---|---|
 | A1 | `assets/pricing.json` `catalog_2026_09` 新增 `model_vendors`（前缀 → 厂商）与 `id_shapes`（厂商 → `requestId`/`message.id` 形状） | 数据，不是规则；`tests/test_pricing_lockstep.py` 守三处副本 | L0 / L1 |
 | A2 | `crates/agent-vitals-domain/src/domain/cost/billing.rs` | `model_vendor_of(model) -> Option<&str>`；`billing_route_of` 不变 | L0 |
-| A3 | `crates/agent-vitals-hosts/src/hosts/claude_code/sources/usage_fact.rs` | 每条记录按 §1.2 形状产 `RouteEvidence`：`req_01`+`msg_01` → `provider_raw="anthropic"`, `endpoint_host="api.anthropic.com"`, `SessionNative`；厂商形状 → `provider_raw=<vendor>`, `Inferred`；`anthropic/`/`openai/` 前缀且无 `req_` → `Inferred` + `provider_raw="relay"`；写 `route_evidence` 行并回填 `route_evidence_id`。`provider_id` 仍由 `resolve_billing_attribution` 决定（不再是常量 null） | L1 |
+| A3 | `crates/agent-vitals-harnesses/src/harnesses/claude_code/sources/usage_fact.rs` | 每条记录按 §1.2 形状产 `RouteEvidence`：`req_01`+`msg_01` → `provider_raw="anthropic"`, `endpoint_host="api.anthropic.com"`, `SessionNative`；厂商形状 → `provider_raw=<vendor>`, `Inferred`；`anthropic/`/`openai/` 前缀且无 `req_` → `Inferred` + `provider_raw="relay"`；写 `route_evidence` 行并回填 `route_evidence_id`。`provider_id` 仍由 `resolve_billing_attribution` 决定（不再是常量 null） | L1 |
 | A4 | `crates/agent-vitals-provider/src/lib.rs::resolve_billing_attribution` | 增加 anthropic 官方分支（与 openai 分支对称：`provider_raw=anthropic` + `SessionNative` + 账户订阅证据 → `Subscription`/`session-provider`；无账户证据 → `Metered`/`route-observed`，`has_unresolved=false`） | L1+L2 |
-| A5 | 新 `crates/agent-vitals-hosts/src/hosts/claude_code/sources/account.rs` + `codex/sources/account.rs` | 读 §1.3 的字段（白名单三个 + `auth_mode`），产 `AccountEvidence{plan, billing_channel, anchor_date, basis=AccountTimeBound}`；**不读、不存、不序列化** email/accountUuid/token；feature-gated `sources` | L2 |
-| A6 | `crates/agent-vitals-runtime/src/billing_preview.rs::confirmation_groups` | 组键改 `host × model_vendor × route_state`；每组带 `auto_verdict{provider_id, route, billing_mode, plan, anchor_day, basis[], confidence}`；workbuddy 直接排除 | §5.1 |
+| A5 | 新 `crates/agent-vitals-harnesses/src/harnesses/claude_code/sources/account.rs` + `codex/sources/account.rs` | 读 §1.3 的字段（白名单三个 + `auth_mode`），产 `AccountEvidence{plan, billing_channel, anchor_date, basis=AccountTimeBound}`；**不读、不存、不序列化** email/accountUuid/token；feature-gated `sources` | L2 |
+| A6 | `crates/agent-vitals-runtime/src/billing_preview.rs::confirmation_groups` | 组键改 `harness × model_vendor × route_state`；每组带 `auto_verdict{provider_id, route, billing_mode, plan, anchor_day, basis[], confidence}`；workbuddy 直接排除 | §5.1 |
 | A7 | `crates/agent-vitals-data/src/authority_query.rs::SQL_UNRESOLVED_BILLING_GROUPS` | 分组列去掉 `model_id`（模型进 `models[]` 子列表），加 `provider_raw`；待处理投影同步 | §5.1 |
 | A8 | `apps/desktop/src-tauri/ui/workbench.js` | 列表三态渲染；「确认」直写声明（`evidence_ref=auto:…`）；弹窗只剩 L3 步骤；订阅步改为确认扣款日/月费；`<unknown>` 不上卡面 | §4/§5 |
 | A9 | `apps/desktop/src-tauri/src/lib.rs::validate_desktop_declaration` | 系统判定确认的声明允许 `effective_start = subscriptionCreatedAt`（早于本月）；`effective_end` 仍 ≤ 今天 | §5.2 |
-| A12 | 新 `crates/agent-vitals-hosts/src/sources/endpoint_evidence.rs`（跨宿主提取器；2026-09-16 泛化，原 claude 专用的 `hosts/claude_code/sources/config.rs` 已删除） | 逐宿主读取器（claude=`settings.json` 的 `env` 白名单 5 键；codex=`config.toml` 的 `[model_providers.*].base_url`；pi/workbuddy=逐模型 `baseUrl`/`url`；dsh=`settings.yaml` 的 `llm-*` 段）→ 中立 `EndpointEvidence{base_url, endpoint_host, endpoint_hosts, model_endpoints, provider_name, gateway_named_models}`，`ConfigCurrent`(4)。**逐模型端点优先**；没有时按宿主级列表：单个非官方端点敢点名，全是非官方且多个 → `config.endpoint.multiple`，官方与中转混配 → `config.endpoint.ambiguous`，厂商认不出 → 不做断言。凡判 `relay_config` 恒为 `one_question`（强度 4 不能单独判定）；与会话级官方形状并存时追加 `config.endpoint.conflict`（P5） | §2 L2 端点面 / §10.2 层② |
+| A12 | 新 `crates/agent-vitals-harnesses/src/sources/endpoint_evidence.rs`（跨执行环境提取器；2026-09-16 泛化，原 claude 专用的 `harnesses/claude_code/sources/config.rs` 已删除） | 逐执行环境读取器（claude=`settings.json` 的 `env` 白名单 5 键；codex=`config.toml` 的 `[model_providers.*].base_url`；pi/workbuddy=逐模型 `baseUrl`/`url`；dsh=`settings.yaml` 的 `llm-*` 段）→ 中立 `EndpointEvidence{base_url, endpoint_host, endpoint_hostnames, model_endpoints, provider_name, gateway_named_models}`，`ConfigCurrent`(4)。**逐模型端点优先**；没有时按执行环境级列表：单个非官方端点敢点名，全是非官方且多个 → `config.endpoint.multiple`，官方与中转混配 → `config.endpoint.ambiguous`，厂商认不出 → 不做断言。凡判 `relay_config` 恒为 `one_question`（强度 4 不能单独判定）；与会话级官方形状并存时追加 `config.endpoint.conflict`（P5） | §2 L2 端点面 / §10.2 层② |
 | A11 | 「确认」直写声明（阶段 2） |
-| A10 | `tests/`：`test_pricing_lockstep.py`（新目录段）、hosts 单测（每种 ID 形状一条 fixture）、`billing_preview` R-测（verdict 三态）、隐私测（任何 DTO/导出/日志不含 email/accountUuid） | | §7 |
+| A10 | `tests/`：`test_pricing_lockstep.py`（新目录段）、harnesses 单测（每种 ID 形状一条 fixture）、`billing_preview` R-测（verdict 三态）、隐私测（任何 DTO/导出/日志不含 email/accountUuid） | | §7 |
 
 阶段 2（A11）：`sync_service` 在 ingest 后跑 `auto_attribute()`，对满足 §5.3 条件的组写系统声明并入队；撤销与用户声明同一机制。
 
@@ -140,7 +140,7 @@
 - P1 隐私：`oauthAccount` 只读 `organizationType/billingType/subscriptionCreatedAt`；测试 grep 所有 DTO、`data-export-*`、诊断包不出现 `emailAddress`/`accountUuid`/`organizationUuid`。
 - P2 `Inferred` 不产订阅：任何 `evidence_basis=inferred` 的事实在没有用户确认前 `billing_mode` 只能是 `metered`。
 - P3 冲突不吞：L0 厂商与 L1 形状矛盾 → `Conflict`，进「仍待确认」，不进自动判定。
-- P4 词表不漂：`provider_id`/`by_provider`/MCP `cost_breakdown` 键与语义不变；`model_vendor` 是新增派生字段，`test_host_contract` 与 MCP 冒烟 0 MISMATCH。
+- P4 词表不漂：`provider_id`/`by_provider`/MCP `cost_breakdown` 键与语义不变；`model_vendor` 是新增派生字段，`test_harness_contract` 与 MCP 冒烟 0 MISMATCH。
 - P5 数字守恒：自动归因只写 `billing_fact_attributions`，`usage_facts` 计数与 token 总量不变（`data-reimport-verify`）。
 - 本机验收目标：待明确列表 30 组 → **≤ 7 行**（A 1 行确认、B 1 行确认、C 3 个厂商各 1 行一问、D 2 行）；A+B 确认后本月未归属 tokens 从 10.1B 降到 ≤ 3.3B。
 
@@ -159,44 +159,44 @@
 4. A9 + 弹窗收敛 + 测试。
 5. 阶段 2（A11）单独评审。
 
-## 10. 可扩展性：归因特征模板化，让新宿主 / 新厂商 / 新模型快速接入
+## 10. 可扩展性：归因特征模板化，让新执行环境 / 新厂商 / 新模型快速接入
 
-### 10.1 先看七个宿主各自给了什么（本仓库已评估的宿主）
+### 10.1 先看七个执行环境各自给了什么（本仓库已评估的执行环境）
 
 | 特征 | claude-code | codex | dsh | workbuddy | pi | hermes | cline |
 |---|---|---|---|---|---|---|---|
 | 模型名（raw） | ✅ | ✅ | ✅ | ✅ | ✅ `modelId` | ✅ | ✅ `metadata.modelId`（带厂商前缀 `anthropic/…`） |
-| 宿主自报 provider | ✗ | `model_provider`（openai / custom） | `provider_raw` | ✗（设计如此） | `model_change.provider` | `billing_provider`（`minimax-cn` / `auto`） | `provider` + `modelInfo` |
+| 执行环境自报 provider | ✗ | `model_provider`（openai / custom） | `provider_raw` | ✗（设计如此） | `model_change.provider` | `billing_provider`（`minimax-cn` / `auto`） | `provider` + `modelInfo` |
 | 端点 / base_url | 启动环境变量，日志不记 | `config.toml [model_providers.*].base_url` | ✗ | ✗ | `models-store.json` | `.env`（凭据文件，**不读**） | `providers.json` |
 | 请求 / 响应 ID 形状 | ✅ `requestId` + `message.id`（§1.2） | 部分 | ? | ✗ | ? | ? | ? |
 | 账户 / 套餐证据 | `oauthAccount.{organizationType,billingType,subscriptionCreatedAt}` | `auth.json auth_mode` + 配额快照 `plan_type` | ✗ | credit 积分 | ✗ | ✗ | ✗ |
-| 宿主自报成本 | ✗ | ✗ | ✗ | credit（非货币） | ✅ per-message `usage.cost`（provider-reported） | 列全 0 | ✅ `totalCost` + per-message |
+| 执行环境自报成本 | ✗ | ✗ | ✗ | credit（非货币） | ✅ per-message `usage.cost`（provider-reported） | 列全 0 | ✅ `totalCost` + per-message |
 | 本地价卡缓存 | ✗ | ✗ | ✗ | ✗ | `models-store.json` | `models_dev_cache.json`（213 provider / 7,126 带价） | 4 个网关的 `*_models.json` |
 
-结论：**没有一个特征是七个宿主都有的，但每个宿主都至少有两个**——所以归因不能是"每个宿主一套写死的 if"，也不能是"一套字段人人必填"，而应是一条**证据阶梯 + 可插拔的证据提取器**：宿主声明它能提供哪些提取器，缺的就是 `missing`，不猜。
+结论：**没有一个特征是七个执行环境都有的，但每个执行环境都至少有两个**——所以归因不能是"每个执行环境一套写死的 if"，也不能是"一套字段人人必填"，而应是一条**证据阶梯 + 可插拔的证据提取器**：执行环境声明它能提供哪些提取器，缺的就是 `missing`，不猜。
 
 ### 10.2 三层拆分：什么必须写代码，什么能做成模板（数据）
 
-| 层 | 内容 | 形态 | 新宿主接入要做的 | 新厂商 / 新模型接入要做的 |
+| 层 | 内容 | 形态 | 新执行环境接入要做的 | 新厂商 / 新模型接入要做的 |
 |---|---|---|---|---|
-| **① 线格式适配器**（已有） | 文件发现、JSONL/SQLite/zstd 解析、会话身份、token 桶语义与去重（`(turn,step)` vs `total_token_usage` 签名等） | **代码**（`hosts/<h>/sources`），不可模板化——每个宿主的去重规则都是踩过坑的 | 写一个（现状不变） | 不需要 |
-| **② 证据提取器**（本规格新增） | 从 ① 的记录/配置里取出 `AttributionEvidence` 候选：厂商前缀、ID 形状、端点、provider_raw、账户属性、自报成本 | **模板 + 少量代码**：一份宿主 `AttributionProfile`（声明用哪些提取器、字段在哪个 JSON 指针/文件），提取器本身是通用实现 | 填一份 profile（大多数宿主 5–10 行） | 不需要 |
-| **③ 判定器**（`agent-vitals-provider`） | 证据阶梯 L0–L3 的合成规则：强度比较、冲突判定、订阅判定 | **代码，宿主无关**；厂商知识全部外置到签名目录 | 不需要 | 不需要 |
+| **① 线格式适配器**（已有） | 文件发现、JSONL/SQLite/zstd 解析、会话身份、token 桶语义与去重（`(turn,step)` vs `total_token_usage` 签名等） | **代码**（`harnesses/<h>/sources`），不可模板化——每个执行环境的去重规则都是踩过坑的 | 写一个（现状不变） | 不需要 |
+| **② 证据提取器**（本规格新增） | 从 ① 的记录/配置里取出 `AttributionEvidence` 候选：厂商前缀、ID 形状、端点、provider_raw、账户属性、自报成本 | **模板 + 少量代码**：一份执行环境 `AttributionProfile`（声明用哪些提取器、字段在哪个 JSON 指针/文件），提取器本身是通用实现 | 填一份 profile（大多数执行环境 5–10 行） | 不需要 |
+| **③ 判定器**（`agent-vitals-provider`） | 证据阶梯 L0–L3 的合成规则：强度比较、冲突判定、订阅判定 | **代码，执行环境无关**；厂商知识全部外置到签名目录 | 不需要 | 不需要 |
 | **④ 厂商签名目录**（本规格新增数据） | 每个厂商：模型名前缀/正则、`vendor/` 前缀命名约定、请求/响应 ID 形状、官方端点主机名、套餐标记、价卡引用 | **纯数据**（`assets/attribution_signatures.json`，与 `pricing.json` 同一 lockstep 纪律） | 不需要 | 加一条签名（新模型通常只是前缀已覆盖，零改动） |
 
 现状对照：③ 里现在混着厂商知识——`provider/src/lib.rs` 的 `is_cogfoundry_host` / `is_openai_host` / `Some("openai") =>` / `model_provider == Some("openai")` 全是写死的（`:85-99`、`:140-156`）；`billing_route_of` 只认 `catalog_2026_09.billing_modes` 里的两条 deepseek。**模板化的第一步就是把这些常量搬进 ④**，判定器只剩阶梯规则。
 
 ### 10.3 有普适性的特征（可以进 ④ 的签名目录）
 
-按"跨厂商稳定、跨宿主可得"排序：
+按"跨厂商稳定、跨执行环境可得"排序：
 
 1. **模型名族**（L0）：每家厂商的命名前缀稳定多年（`claude-`、`gpt-`/`o`、`deepseek`、`MiniMax-`、`glm-`、`kimi`/`moonshot`、`hy`/`hunyuan`、`qwen`、`gemini`、`llama`）。普适性最高；新模型 95% 落在已有前缀里。
-2. **`vendor/model` 前缀命名**：OpenRouter / 胜算云 / Vercel Gateway / Cline 的通用约定——**名字本身就说明走了网关**，且前缀 = 模型厂商。这是"中转"最廉价的判定特征，七个宿主里 codex-custom、cline、hermes 都能用。
-3. **请求 / 响应 ID 形状**（L1）：每家 API 的 `id` 格式是文档级稳定的（Anthropic `msg_01…` / `req_01…`、OpenAI 兼容 `chatcmpl-…`、智谱 `msg_20…` 时间戳式、MiniMax/DeepSeek 32 位 hex）。只要宿主把原始响应写进日志就能用（claude-code 已证实；cline/pi 待核）。
+2. **`vendor/model` 前缀命名**：OpenRouter / 胜算云 / Vercel Gateway / Cline 的通用约定——**名字本身就说明走了网关**，且前缀 = 模型厂商。这是"中转"最廉价的判定特征，七个执行环境里 codex-custom、cline、hermes 都能用。
+3. **请求 / 响应 ID 形状**（L1）：每家 API 的 `id` 格式是文档级稳定的（Anthropic `msg_01…` / `req_01…`、OpenAI 兼容 `chatcmpl-…`、智谱 `msg_20…` 时间戳式、MiniMax/DeepSeek 32 位 hex）。只要执行环境把原始响应写进日志就能用（claude-code 已证实；cline/pi 待核）。
 4. **官方端点主机名**：`api.anthropic.com`、`api.openai.com`、`api.deepseek.com`、`open.bigmodel.cn`、`api.minimax.chat`……配置里出现即 `ConfigCurrent`，会话里出现即 `SessionNative`。`normalize_host` 的边界匹配逻辑已有，只是主机名表要外置。
-5. **宿主自报 provider 的词表映射**：`minimax-cn` → minimax、`auto` → unknown、`custom` → 中转——每个宿主一张小表，放 profile。
-6. **账户 / 套餐标记**：形状各异（claude 的 `organizationType`、codex 的 `auth_mode`、hermes/cline 是"配置里有该 provider 的 key 存在"→ 按量），但**抽象一致**：`AccountEvidence{plan_kind: subscription|api_key|credits|unknown, anchor_date?, channel?}`。profile 里声明"文件 + 字段白名单 + 取值映射"，读取器通用；**白名单之外一律不读**（隐私守卫跨宿主一次写好）。
-7. **宿主自报成本**：`provider-reported`（pi）> `host-reported`（cline totalCost）> `credits`（workbuddy）> `none`（hermes 全 0）；这是 `ATTRIBUTABLE_WASTE` §3 的 basis 分级，已有，只需 profile 声明字段位置。
+5. **执行环境自报 provider 的词表映射**：`minimax-cn` → minimax、`auto` → unknown、`custom` → 中转——每个执行环境一张小表，放 profile。
+6. **账户 / 套餐标记**：形状各异（claude 的 `organizationType`、codex 的 `auth_mode`、hermes/cline 是"配置里有该 provider 的 key 存在"→ 按量），但**抽象一致**：`AccountEvidence{plan_kind: subscription|api_key|credits|unknown, anchor_date?, channel?}`。profile 里声明"文件 + 字段白名单 + 取值映射"，读取器通用；**白名单之外一律不读**（隐私守卫跨执行环境一次写好）。
+7. **执行环境自报成本**：`provider-reported`（pi）> `harness-reported`（cline totalCost）> `credits`（workbuddy）> `none`（hermes 全 0）；这是 `ATTRIBUTABLE_WASTE` §3 的 basis 分级，已有，只需 profile 声明字段位置。
 
 ### 10.4 不能模板化、也不该模板化的
 
@@ -215,16 +215,16 @@
 ### 10.6 与现有架构的落点
 
 - ④ 签名目录：`assets/attribution_signatures.json`（Rust `include_str!`、Python `json.load`、dsh-client 复制），三方 lockstep 测试与 `pricing.json` 同款。
-- ② `AttributionProfile`：放进已有的 `contracts/host_capability.rs::HostProfile`（它已经按宿主声明 `signals`、`degraded_rules`、`fold`），新增 `attribution: &'static AttributionProfile { extractors: &[…], provider_raw_map: &[…], account_evidence: Option<AccountSource>, cost_report: CostBasis }`。注册路径 fail-closed 的纪律不变：不在 `HOSTS` 里的宿主任何提取器都不跑。
+- ② `AttributionProfile`：放进已有的 `contracts/harness_capability.rs::HarnessProfile`（它已经按执行环境声明 `signals`、`degraded_rules`、`fold`），新增 `attribution: &'static AttributionProfile { extractors: &[…], provider_raw_map: &[…], account_evidence: Option<AccountSource>, cost_report: CostBasis }`。注册路径 fail-closed 的纪律不变：不在 `HARNESSES` 里的执行环境任何提取器都不跑。
 - ③ 判定器：`agent-vitals-provider::resolve_billing_attribution` 改为接收 `&[AttributionEvidence]` + `&SignatureCatalog`，删除所有厂商常量；现有 `EvidenceBasis` 强度表不变。
-- 通用提取器实现放 `crates/agent-vitals-hosts/src/attribution/`（宿主无关，纯函数，wasm 可链）；I/O 型提取器（读配置/账户文件）挂 `sources` feature。
+- 通用提取器实现放 `crates/agent-vitals-harnesses/src/attribution/`（执行环境无关，纯函数，wasm 可链）；I/O 型提取器（读配置/账户文件）挂 `sources` feature。
 
-### 10.7 一个新宿主的接入清单（目标：半天）
+### 10.7 一个新执行环境的接入清单（目标：半天）
 
 1. ①：线格式适配器（已有流程，不变）。
-2. ②：在 `HostProfile` 里填 `attribution`：模型字段路径、provider_raw 字段 + 映射表、ID 字段路径（如有）、端点来源（会话字段 or 配置文件 + 键）、账户证据文件 + 字段白名单（如有）、自报成本字段 + basis。
+2. ②：在 `HarnessProfile` 里填 `attribution`：模型字段路径、provider_raw 字段 + 映射表、ID 字段路径（如有）、端点来源（会话字段 or 配置文件 + 键）、账户证据文件 + 字段白名单（如有）、自报成本字段 + basis。
 3. 跑同一套 `attribution` 夹具测试：每个提取器一条"有 → 命中 / 无 → missing"的用例；隐私测试自动覆盖新白名单。
-4. 不用改判定器、不用改 UI——列表三态和弹窗读的是 `auto_verdict`，宿主无关。
+4. 不用改判定器、不用改 UI——列表三态和弹窗读的是 `auto_verdict`，执行环境无关。
 
 Cline 就是现成的验证对象：`metadata.modelId = anthropic/claude-sonnet-4.6` 命中 10.3 第 2 条（网关命名），`providers.json` 命中第 4 条，`totalCost` 命中第 7 条——三条都是模板层就能吃下的，不需要为 Cline 写一行归因代码。
 
@@ -252,15 +252,15 @@ Cline 就是现成的验证对象：`metadata.modelId = anthropic/claude-sonnet-
 ### 11.2 两处有意的偏离（验收审查提出，记录为决策）
 
 1. **推断行 `provider_raw = null`**。`vendor_shape` / `gateway` 形状**不**把厂商写进 `provider_raw`：`normalize_provider` 会把非空 raw 直接变成 `provider_id`，"厂商形状一致"就冒充成了"计费方已定"（P3 不变量）。厂商只进 `auto_verdict.model_vendor`（派生），事实行保持 `provider_id = null`、`evidence_basis = inferred`。
-2. **`PARSER_VERSION` 升版是全局的**。它让所有宿主的 source 一次性重放（含 WorkBuddy），不是只重放 claude-code；代价是一次 25 s 的重放，换来的是不引入按宿主的版本表。事实幂等（`fact_id`），重放不产生重复。
-3. **判定器的冲突规则只对"宿主没有自报 provider"放开**。`model_provider = None`（Claude Code）时会话级路由证据是唯一真值；宿主自报了 provider（DSH `provider_raw`、Codex `openai`）的旧口径（provider-v0.11）原样保留——DSH 自报 deepseek 仍落 `metered_estimate`，Python `dsh_usage_fact.py` 与已入库事实都按它对齐，收紧要连同 `attribution_version` 一起升版。
+2. **`PARSER_VERSION` 升版是全局的**。它让所有执行环境的 source 一次性重放（含 WorkBuddy），不是只重放 claude-code；代价是一次 25 s 的重放，换来的是不引入按执行环境的版本表。事实幂等（`fact_id`），重放不产生重复。
+3. **判定器的冲突规则只对"执行环境没有自报 provider"放开**。`model_provider = None`（Claude Code）时会话级路由证据是唯一真值；执行环境自报了 provider（DSH `provider_raw`、Codex `openai`）的旧口径（provider-v0.11）原样保留——DSH 自报 deepseek 仍落 `metered_estimate`，Python `dsh_usage_fact.py` 与已入库事实都按它对齐，收紧要连同 `attribution_version` 一起升版。
 
 ### 11.3 真机结果（隔离副本重放，`isolated_sync.sh`）
 
 - claude-code 本月 25,323 条事实：12,272 → `session-native / anthropic / route-observed`，12,916 → `inferred`，135 `<synthetic>` → `missing`；归属冲突 0。
 - `data-status` `unresolved_tokens` 13.61B → 5.0B。
 - `billing-groups --month 2026-09`（真机，最终形态）：**30 行 → 9 簇**
-  - **2 程序判定（一键确认）**：`claude-code · anthropic`（Claude Pro，4.77B tokens，依据 `route.session-native + account.Claude Pro`）与 `codex · openai`（ChatGPT，2.24B，依据 `host.provider_reported + account.ChatGPT`）。
+  - **2 程序判定（一键确认）**：`claude-code · anthropic`（Claude Pro，4.77B tokens，依据 `route.session-native + account.Claude Pro`）与 `codex · openai`（ChatGPT，2.24B，依据 `harness.provider_reported + account.ChatGPT`）。
   - **6 差一问**：deepseek / minimax / zhipu-glm（`vendor_shape` → 问"官方端点还是中转"）与三个网关式命名簇（`gateway` → 同上）。共 ~3.1B tokens。
     （§11.4 #4 修好簇主键后，网关簇按厂商拆开：claude-code 的 `deepseek` 与 `zhipu-glm` 各成一行，
     所以是 **10 簇**，不再是 9——拆开是对的，标签不再借第一组的厂商名。）
@@ -276,7 +276,7 @@ Cline 就是现成的验证对象：`metadata.modelId = anthropic/claude-sonnet-
 | 1 | `auto_verdict` 把 `evidence_basis="conflict"` 归到 `provider_reported` | codex 自报 openai 而会话路由指向别家的冲突事实，配上 `auth_mode=chatgpt` 就成了「一键确认 ChatGPT 订阅」——违反 §2「Conflict 单列，不归因」与不变量 P3（此前只有写入侧的 `ConflictEvidence::Exclude` 兜住了钱，判定与标签是错的） | `conflict` 短路：`needs_input` + `route_state="conflict"`，`billing_party=null`，依据 `route.conflict` |
 | 2 | `ROUTE_KNOWN_OFFICIAL` 收 `account-time-bound`(6)/`config-time-bound`(5) | 低于 §2/§4 的 ≥ `SessionNative` 门槛：配置文件写着"官方"就能产一键订阅。今天无 emitter 产这两种 basis，属潜在洞 | 收窄为 `explicit-official-route` + `session-native`（前端同表同改） |
 | 3 | 簇渲染后，挂在有用量组上的旧资产候选被整行跳过 | 提示说"另有 N 条旧版本套餐记录待核对"，页面上却无处核对、无处忽略 | 候选折进对应簇行（证据行 +「这不是我的套餐」） |
-| 4 | 簇主键用 `billing_party`，网关行恒空 | 不同厂商的网关模型并成一行，再用第一组的厂商当整行标签——与 §5.1「行 = host × 厂商 × route_state」不符 | 主键改为 `billing_party or model_vendor` |
+| 4 | 簇主键用 `billing_party`，网关行恒空 | 不同厂商的网关模型并成一行，再用第一组的厂商当整行标签——与 §5.1「行 = harness × 厂商 × route_state」不符 | 主键改为 `billing_party or model_vendor` |
 | 5 | 从订阅切到按量时，程序写进去的订阅锚点留在 `effective_start` | 真机锚点 `2025-07-20` 会被写进一条**按量**声明 | 切走时撤回组自己的默认起止（只在值仍是程序写入的锚点时才撤，不动用户手改） |
 | 6 | `evidence_ref` 在挂了旧候选时丢掉 `auto:` 依据链 | 程序判定 + 候选并存时，追溯性只剩候选 id | 两段都记；簇行的 target 也带上原组的 `candidate`，`source_candidate_id` 不再丢 |
 
@@ -332,16 +332,16 @@ claude-code  shengsuanyun.com  one_question  relay_config  models=11  tokens=276
 **真机提示**：本机 claude-code 的 Claude Pro 声明（`evidence_ref=auto:route.session-native+account.Claude Pro`）
 正是这种形状——若那批用量实际也经胜算云，该声明需要重新核对。
 
-### 11.7 端点证据跨宿主化 + 宿主人格归位（A12 泛化，2026-09-16）
+### 11.7 端点证据跨执行环境化 + 执行环境人格归位（A12 泛化，2026-09-16）
 
 用户两条意见驱动：
 
-> 「其他宿主和模型供应商应该也有类似的逻辑，这个规则不仅仅在 claude」
-> 「agent-vitals-runtime 写了很多 adapter 层的逻辑吗？有一些 host 强相关的逻辑不是应该在宿主层处理吗」
+> 「其他执行环境和模型供应商应该也有类似的逻辑，这个规则不仅仅在 claude」
+> 「agent-vitals-runtime 写了很多 adapter 层的逻辑吗？有一些 harness 强相关的逻辑不是应该在执行环境层处理吗」
 
-**第一件：端点证据跨宿主化。** 真机勘测（只读）证明每个宿主都有端点配置，形状各不相同：
+**第一件：端点证据跨执行环境化。** 真机勘测（只读）证明每个执行环境都有端点配置，形状各不相同：
 
-| 宿主 | 文件 | 本机实测 |
+| 执行环境 | 文件 | 本机实测 |
 |---|---|---|
 | claude-code | `~/.claude/settings.json` `env` | `router.shengsuanyun.com/api`（中转） |
 | dsh | `~/.dsh/settings.yaml` | `agent-default-model.provider: deepseek-official`（用户写的标签）；**LLM 段 `llm-deepseek.baseURL` = `https://api.deepseek.com`（官方）**；中转只在 `web-search-deepseek` 段（搜索，不算 LLM） |
@@ -351,9 +351,9 @@ claude-code  shengsuanyun.com  one_question  relay_config  models=11  tokens=276
 | hermes | `.env` | **凭据文件，整体不读**（§10.1 定案） |
 | cline | `~/.cline/data/settings/providers.json` | 只有服务商**名**（`lastUsedProvider: shengsuanyun`）没有 URL——名字 ≠ 中转（可能是自建），故本期不用；留待"未知服务商名"的决策 |
 
-读取器落 `crates/agent-vitals-hosts/src/sources/endpoint_evidence.rs`（跨宿主 I/O 层，
+读取器落 `crates/agent-vitals-harnesses/src/sources/endpoint_evidence.rs`（跨执行环境 I/O 层，
 路径含 `/sources` 落进既有的 `io_tokens_only_appear_under_sources` 守卫）；判定器只吃中立的
-`EndpointEvidence`，不认识任何宿主的文件格式。每个读取器**白名单取键**：凭据就挨在同文件里
+`EndpointEvidence`，不认识任何执行环境的文件格式。每个读取器**白名单取键**：凭据就挨在同文件里
 （claude 的 `ANTHROPIC_AUTH_TOKEN`、workbuddy 的 `apiKey`、pi 的 `maxTokens`、cline 的 `tokenSource`），
 读取器连值都不复制，测试注入假令牌 + **穷举解构**（新增字段会编译失败）+ `{:?}` 断言。
 
@@ -363,39 +363,39 @@ claude-code  shengsuanyun.com  one_question  relay_config  models=11  tokens=276
 **第二件：逐模型端点（真机形状纠正）。** workbuddy 与 pi 的配置**本来就是逐模型的**——
 `~/.workbuddy/models.json` 每条 `{id, name, vendor, url}` 各自带端点（`MiniMax-M3 → api.minimaxi.com`、
 `deepseek/deepseek-v4-flash → beta-router.shengsuanyun.com`），pi 每模型带 `baseUrl`。
-把它们压成一个"宿主级端点列表"就丢了配对的精度（验收审查 iteration 7 #2），
+把它们压成一个"执行环境级端点列表"就丢了配对的精度（验收审查 iteration 7 #2），
 所以 `EndpointEvidence.model_endpoints` 逐模型记下来，判定器**逐模型端点优先**：
 同一条配置里 MiniMax 走官方、deepseek 走中转，各自判各自的。workbuddy 的读键也从
-不存在的 `model` 改成真机的 `id`（旧写法让这个宿主的前缀信号一直是死的，而测试用的
+不存在的 `model` 改成真机的 `id`（旧写法让这个执行环境的前缀信号一直是死的，而测试用的
 假键名把错误形状钉成了绿——正是 CLAUDE.md「形状来源纪律」警告的那种假绿）。
 
-宿主级列表仍在，规则收敛成三档：单个端点 → 敢点名；**全是**非官方端点且多于一个 →
+执行环境级列表仍在，规则收敛成三档：单个端点 → 敢点名；**全是**非官方端点且多于一个 →
 `config.endpoint.multiple`（不挑）；官方与中转**混着配** → `config.endpoint.ambiguous`
 （不给断言也不装作没看见）。厂商未知时（`model_vendor` 认不出）**一律不做中转断言**——
 那时"官方端点"无从谈起，旧写法会把 `api.anthropic.com` 也说成中转名（验收审查 iteration 7 #1）。
 
-**第三件：宿主强相关规则搬回宿主层。** 用户点出的正是本仓库自己的架构纪律
-（`HostProfile` = 宿主人格声明，`hosts/<h>/capability.rs` 为落点）。`billing_preview` 里
-原有的两处宿主名字判断已删除：
+**第三件：执行环境强相关规则搬回执行环境层。** 用户点出的正是本仓库自己的架构纪律
+（`HarnessProfile` = 执行环境人格声明，`harnesses/<h>/capability.rs` 为落点）。`billing_preview` 里
+原有的两处执行环境名字判断已删除：
 
 | 原写法 | 现写法 |
 |---|---|
-| `groups.retain(\|g\| g["host"] != "workbuddy" && …)` | `AttributionProfile::credits_only` 声明 |
-| `("provider_reported", Subscription) if host == "codex"` | `AttributionProfile::provider_reported_implies_official` 声明 |
+| `groups.retain(\|g\| g["harness"] != "workbuddy" && …)` | `AttributionProfile::credits_only` 声明 |
+| `("provider_reported", Subscription) if harness == "codex"` | `AttributionProfile::provider_reported_implies_official` 声明 |
 
 `AttributionProfile { provider_reported_implies_official, credits_only }` 进
-`contracts/host_capability.rs::HostProfile`（§10.6 早已写明它该落在这里），随
-`hosts --json` 序列化——**双实现契约**：Python `host_capability.py::HOSTS` 同步加字段，
-`test_cli_matrix::test_hosts_json_byte_parity` 逐字节比对。未知宿主 fail-closed 到
-`NEUTRAL`（不做任何特殊处理）。新增宿主接入 = 填一行声明，不改判定器。
+`contracts/harness_capability.rs::HarnessProfile`（§10.6 早已写明它该落在这里），随
+`harnesses --json` 序列化——**双实现契约**：Python `harness_capability.py::HARNESSES` 同步加字段，
+`test_cli_matrix::test_harnesses_json_byte_parity` 逐字节比对。未知执行环境 fail-closed 到
+`NEUTRAL`（不做任何特殊处理）。新增执行环境接入 = 填一行声明，不改判定器。
 
-**仍留在 runtime 的宿主名字**（本期未动，同一纪律的欠账）。这份清单是**抽样不是穷尽**——
-`agent-vitals-runtime` 里宿主名字面量实测 **171 处出现在非测试代码**（含测试共 460 行命中；
+**仍留在 runtime 的执行环境名字**（本期未动，同一纪律的欠账）。这份清单是**抽样不是穷尽**——
+`agent-vitals-runtime` 里执行环境名字面量实测 **171 处出现在非测试代码**（含测试共 460 行命中；
 `summary.rs` 46、`sessions/r2a_store.rs` 34、`skills/scanner.rs` 24、`sync_service.rs` 21…）（多数是注册表分派，
-如 `FACT_HOSTS`/`WIRED_HOSTS`/`TRACE_HOSTS` 与 `sync_service`/`trace_service` 的 host→函数分派，
-那是正当的路由）；**其中真正像"宿主名字决定一条规则"的**至少还有：
-`mcp/cost_breakdown.rs:405,416`（逐宿主计价语义）、`mcp/data_status.rs:252,256,258`（逐宿主状态语义）、
-`price_discovery.rs:40`（`ROUTE_UNCONFIRMED_EXEMPT_HOSTS`）、`sql_sync.rs:136`（provider→host 映射）、
+如 `FACT_HARNESSES`/`WIRED_HARNESSES`/`TRACE_HARNESSES` 与 `sync_service`/`trace_service` 的 harness→函数分派，
+那是正当的路由）；**其中真正像"执行环境名字决定一条规则"的**至少还有：
+`mcp/cost_breakdown.rs:405,416`（逐执行环境计价语义）、`mcp/data_status.rs:252,256,258`（逐执行环境状态语义）、
+`price_discovery.rs:40`（`ROUTE_UNCONFIRMED_EXEMPT_HARNESSES`）、`sql_sync.rs:136`（provider→harness 映射）、
 `skills/scanner.rs:206,226,234,237,251,357,362,371,472,485,503,580,640,660,715`、
 `skills/inventory.rs:176,203,214,219`、`sync_service.rs:84,136,170,214`、`r2a_store.rs:368,381,1570`。
 用 `/usr/bin/grep -nE '"(claude-code|codex|dsh|workbuddy)"' crates/agent-vitals-runtime/src -r`
@@ -403,7 +403,7 @@ claude-code  shengsuanyun.com  one_question  relay_config  models=11  tokens=276
 
 ### 11.8 逐模型配置的作用域（A12 收尾，iteration 8）
 
-验收审查发现上一轮修复里最严重的一条：**宿主级"模型映射带前缀"信号盖过了逐模型端点**。
+验收审查发现上一轮修复里最严重的一条：**执行环境级"模型映射带前缀"信号盖过了逐模型端点**。
 真机 `~/.workbuddy/models.json` 同时有 `deepseek/deepseek-v4-flash`（前缀）与裸 `MiniMax-M3`，
 前者让 `gateway_named_models` 非空，于是**同一个文件里那些自己配了官方端点的模型
 （MiniMax → api.minimaxi.com）也被判成"经中转"**，行面还会写"经中转（api.minimaxi.com）"。
@@ -412,7 +412,7 @@ claude-code  shengsuanyun.com  one_question  relay_config  models=11  tokens=276
 
 | 配置形状 | 前缀信号的作用域 |
 |---|---|
-| 宿主级（claude `env`、codex `config.toml`、dsh）——一套映射管全部请求 | 对全宿主成立 |
+| 执行环境级（claude `env`、codex `config.toml`、dsh）——一套映射管全部请求 | 对全执行环境成立 |
 | **逐模型**（workbuddy/pi）——每个模型一条 | **只对那条模型成立**（`per_model_config` 标记，判定器改为查该模型自己的条目） |
 
 同时修掉两处随之而来的问题：逐模型端点按"最后一段"匹配（配置常带前缀、事实常是上游裸名），
@@ -425,19 +425,19 @@ claude-code  shengsuanyun.com  one_question  relay_config  models=11  tokens=276
 
 ### 11.9 逐模型配置的**端点列表**也要按模型收口（iteration 9）
 
-§11.8 只把"前缀信号"按模型收口了，**端点列表**仍是宿主级的——同一类别错误的下半截。
+§11.8 只把"前缀信号"按模型收口了，**端点列表**仍是执行环境级的——同一类别错误的下半截。
 验收审查用一个真机会出现的输入点破：`hy3`（真机 291 条事实）、`glm-5.2`、`deepseek-v4-flash-0731`
 这些**没进配置表**的模型，会拿到 `relay_config` + `config_endpoint = api.minimaxi.com`
 （文件里第一个端点，恰好是 MiniMax 的**官方**端点），行面写成"经中转（…→ api.minimaxi.com）"。
-今天只在 UI 上不可见（workbuddy 行被 `credits_only` 摘掉），但任何未来非积分的逐模型宿主都会中招。
+今天只在 UI 上不可见（workbuddy 行被 `credits_only` 摘掉），但任何未来非积分的逐模型执行环境都会中招。
 
 三条收口（同一原则：**配置是对谁说的，证据就只能用在那个人身上**）：
 
 | 情形 | 处理 |
 |---|---|
-| 逐模型配置 + 该模型**没有**条目 | 这条模型**没有任何端点证据**（不退回宿主级列表，也不显示别人的端点） |
+| 逐模型配置 + 该模型**没有**条目 | 这条模型**没有任何端点证据**（不退回执行环境级列表，也不显示别人的端点） |
 | 前缀键指向的端点**是该厂商的官方端点** | 前缀不再算中转证据（`minimax/MiniMax-M3 → api.minimaxi.com` 不该判经中转） |
-| 展示用的 `config_endpoint` | 逐模型宿主只用**该模型自己的**端点；没有条目则留空——"第一个配置的端点"永远不冒充 |
+| 展示用的 `config_endpoint` | 逐模型执行环境只用**该模型自己的**端点；没有条目则留空——"第一个配置的端点"永远不冒充 |
 
 **夹具保真度**（这一轮同时修）：原来的逐模型夹具挂在 `claude-code` 上，而**没有任何读取器
 会产出这种组合**（claude/codex/dsh 恒 `per_model_config=false` 且无 `model_endpoints`；
@@ -458,7 +458,7 @@ pi/workbuddy 恒为 true）。夹具现在挂在 `pi`（真实可达的配对，
 "没有条目"（`null`）与具体端点算**不同的成员值**——这正是"簇里混着一个有端点、一个没有"的情形。
 
 **这一轮同时补上的测试洞**：§11.9 的 (b)（带前缀的键指向官方端点不算中转）**当时没有测试**——
-把 `&& !official_for_vendor(host)` 删掉，292 个测试全绿。夹具现在把 MiniMax 的键换成带前缀的
+把 `&& !official_for_vendor(harness)` 删掉，292 个测试全绿。夹具现在把 MiniMax 的键换成带前缀的
 `minimax/MiniMax-M3 → api.minimaxi.com`（真机 workbuddy 里带前缀的键都指向中转，所以这个输入
 只能构造），删掉该子句即变红。夹具的 `provider_name` 也改成 `read_pi` 真正会填的值
 （`Some(first provider key)`）——之前写 `None`，是读取器产不出的形状。

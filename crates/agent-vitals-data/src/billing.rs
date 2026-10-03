@@ -7,7 +7,7 @@
 //! 是订阅月费的唯一档位，spec §4"只能按周期单列"）。
 //!
 //! `UserProfile`（预算、可计量范围等用户偏好）在消费方真实需要之前保持
-//! 不实现——spec §4 的词表已在 `BillingBasis`/`HostAmount` 落位，加一个
+//! 不实现——spec §4 的词表已在 `BillingBasis`/`HarnessAmount` 落位，加一个
 //! 没有消费方的结构只会制造第二个"真相源"的幻觉。
 
 use serde_json::Value;

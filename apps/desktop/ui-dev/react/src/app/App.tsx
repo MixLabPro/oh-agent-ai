@@ -1,6 +1,6 @@
 import { stable, isBackground } from "../lib/stable";
-import { hydrateHostNames, useHostNames } from "../lib/hostNames";
-import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
+import { hydrateHarnessNames, useHarnessNames } from "../lib/harnessNames";
+import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { invoke, listen, listenAppEvents, makeInvalidationGate, readOverviewDetails, readOverviewSnapshot, readSourceDataRevision, safeUiError, type OverviewDetails, type OverviewSnapshot } from "../lib/tauri";
 import { FindingsPage } from "../features/findings/FindingsPage";
 import { TrustPage } from "../features/trust/TrustPage";
@@ -10,18 +10,18 @@ import { TestPage } from "../features/test/TestPage";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { SkillsPage } from "../features/skills/SkillsPage";
 import { OverviewPage } from "../features/overview/OverviewPage";
-// City 按需加载：three.js 只在进入城市页时才下载/解析，不拖慢工作台首屏。
-const CityPage = lazy(() => import("../features/city/CityPage").then((module) => ({ default: module.CityPage })));
+import { usePlugin } from "./plugins/usePlugin";
+import { plugins } from "./plugins/registry";
 import { StatusPill } from "../components/ui/StatusPill";
 import { hydrateLanguagePreference, message, useLanguage, type MessageKey } from "../lib/i18n";
 
-type Page = "overview" | "city" | "usage" | "sessions" | "findings" | "test" | "trust" | "skills" | "settings";
+type Page = string;
 type SettingSection = "settings-sources" | "settings-billing" | "settings-budget";
-type SessionNavigationTarget = { type: "sessionDetail"; session_ref: string; host_kind: string } | { type: "sessionList"; host_kind: string | null };
+type SessionNavigationTarget = { type: "sessionDetail"; session_ref: string; harness_kind: string } | { type: "sessionList"; harness_kind: string | null };
 
-const navigation: Array<{ id: Page; label: MessageKey }> = [
+const navigation: Array<{ id: Page; label?: MessageKey; name?: string }> = [
   { id: "overview", label: "nav.overview" },
-  { id: "city", label: "nav.city" },
+  ...plugins.map(({ id, name }) => ({ id, name })),
   { id: "usage", label: "nav.usage" },
   { id: "sessions", label: "nav.sessions" },
   { id: "findings", label: "nav.findings" },
@@ -38,11 +38,11 @@ function isPage(value: unknown): value is Page {
 function parseSessionNavigationTarget(value: unknown): SessionNavigationTarget | null {
   if (!value || typeof value !== "object") return null;
   const target = value as Record<string, unknown>;
-  if (target.type === "sessionDetail" && typeof target.session_ref === "string" && /^sr_[A-Za-z0-9_-]{8,128}$/.test(target.session_ref) && typeof target.host_kind === "string") {
-    return { type: "sessionDetail", session_ref: target.session_ref, host_kind: target.host_kind };
+  if (target.type === "sessionDetail" && typeof target.session_ref === "string" && /^sr_[A-Za-z0-9_-]{8,128}$/.test(target.session_ref) && typeof target.harness_kind === "string") {
+    return { type: "sessionDetail", session_ref: target.session_ref, harness_kind: target.harness_kind };
   }
-  if (target.type === "sessionList" && (target.host_kind === null || typeof target.host_kind === "string")) {
-    return { type: "sessionList", host_kind: target.host_kind as string | null };
+  if (target.type === "sessionList" && (target.harness_kind === null || typeof target.harness_kind === "string")) {
+    return { type: "sessionList", harness_kind: target.harness_kind as string | null };
   }
   return null;
 }
@@ -78,10 +78,13 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error
 
 export function App() {
   const language = useLanguage();
-  useHostNames();
-  useEffect(() => { void hydrateHostNames().catch(() => { /* 退回 prettify，不影响使用 */ }); }, []);
+  useHarnessNames();
+  useEffect(() => { void hydrateHarnessNames().catch(() => { /* 退回 prettify，不影响使用 */ }); }, []);
   useEffect(() => { void hydrateLanguagePreference().catch(() => { /* Keep the existing local preference visible; Settings can retry. */ }); }, []);
   const [page, setPage] = useState<Page>(pageFromHash);
+  const selectedPlugin = plugins.find((plugin) => plugin.id === page);
+  const pluginSlot = usePlugin(!!selectedPlugin, selectedPlugin ?? { id: "", name: "" });
+  const pageName = (item: (typeof navigation)[number] | undefined) => item?.name ?? message(item?.label ?? "nav.overview", language);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem("workbench.sidebarCollapsed") === "true"; } catch { return false; }
   });
@@ -208,7 +211,7 @@ export function App() {
     // 总览壳层：数据失效（revision 前进）或同步状态变化才重拉；WatcherHealth /
     // Trust 类事件与总览无关，不再触发这里的两个 invoke。
     const gate = makeInvalidationGate();
-    void listenAppEvents((event) => { if (gate(event) || event.type === "SyncStatusChanged" || event.type === "HostNavigationChanged") refresh(true); })
+    void listenAppEvents((event) => { if (gate(event) || event.type === "SyncStatusChanged" || event.type === "HarnessNavigationChanged") refresh(true); })
       .then((unsubscribe) => { if (active) cleanups = [unsubscribe]; else unsubscribe(); });
     return () => { active = false; cleanups.forEach((unsubscribe) => unsubscribe()); };
   }, [page, overviewRefresh]);
@@ -237,23 +240,24 @@ export function App() {
   return <AppErrorBoundary><div className={`app-shell desktop-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${nativeMac ? "native-mac" : ""}`}>
     <header className="desktop-toolbar" data-tauri-drag-region>
       <button className="button button-secondary sidebar-toggle" type="button" aria-label={message(sidebarCollapsed ? "toolbar.expand" : "toolbar.collapse", language)} aria-expanded={!sidebarCollapsed} aria-controls="workbench-sidebar" onClick={toggleSidebar}><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor"/><path d="M6 3v10" stroke="currentColor"/></svg></button>
-      <span className="desktop-toolbar-title" data-tauri-drag-region>{message(navigation.find((item) => item.id === page)?.label ?? "nav.overview", language)}</span>
+      <span className="desktop-toolbar-title" data-tauri-drag-region>{pageName(navigation.find((item) => item.id === page))}</span>
       <span className="desktop-drag-space" data-tauri-drag-region />
       <div id="desktop-toolbar-actions" className="desktop-toolbar-actions">
+        {pluginSlot.toolbar}
         {page === "overview" && <div className="header-actions"><StatusPill tone={headerStatus.tone}>{headerStatus.label}</StatusPill><button className="button button-secondary" type="button" disabled={overviewRefreshing} onClick={() => setOverviewRefresh((value) => value + 1)}>{message(overviewRefreshing ? "action.refreshing" : "action.refresh", language)}</button></div>}
       </div>
     </header>
     <aside id="workbench-sidebar" className="sidebar" aria-label={message("nav.label", language)} hidden={sidebarCollapsed}>
       <div className="brand"><span className="brand-mark" aria-hidden="true">av</span><div><strong>agent-vitals</strong><span>{message("sidebar.workspace", language)}</span></div></div>
       <nav className="nav-list">
-        {navigation.map((item) => <button key={item.id} className={`nav-item ${page === item.id ? "nav-item-active" : ""}`} aria-current={page === item.id ? "page" : undefined} type="button" onClick={() => navigate(item.id)}><span>{message(item.label, language)}</span></button>)}
+        {navigation.map((item) => <button key={item.id} className={`nav-item ${page === item.id ? "nav-item-active" : ""}`} aria-current={page === item.id ? "page" : undefined} type="button" onClick={() => navigate(item.id)}><span>{pageName(item)}</span></button>)}
       </nav>
       <div className="sidebar-footer"><StatusPill>{message("sidebar.offline", language)}</StatusPill><span>{message("sidebar.local", language)}</span></div>
     </aside>
-    <main className={`main-content ${page === "city" ? "city-main-content" : ""}`}>
-      <h1 className="visually-hidden">{message(navigation.find((item) => item.id === page)?.label ?? "nav.overview", language)}</h1>
+    <main className={`main-content ${selectedPlugin ? "plugin-main-content" : ""}`}>
+      <h1 className="visually-hidden">{pageName(navigation.find((item) => item.id === page))}</h1>
       {page === "overview" && error && <div className="error-banner" role="alert">{error} · {message("error.overviewStale", language)}</div>}
-      {page === "overview" ? <OverviewPage overview={overview} details={overviewDetails} /> : page === "city" ? <Suspense fallback={<div className="city-workspace city-suspense"><p>{message("city.loading", language)}</p></div>}><CityPage /></Suspense> : page === "usage" ? <UsagePage /> : page === "sessions" ? <SessionsPage navigationTarget={sessionTarget} onNavigationTargetApplied={clearSessionTarget} /> : page === "trust" ? <TrustPage /> : page === "test" ? <TestPage /> : page === "skills" ? <SkillsPage /> : page === "settings" ? <SettingsPage focusSection={focusSettingSection} onSectionFocused={clearSettingSectionTarget} /> : <FindingsPage onNavigateToAction={navigateToFindingAction} />}
+      {selectedPlugin ? pluginSlot.content : page === "overview" ? <OverviewPage overview={overview} details={overviewDetails} /> : page === "usage" ? <UsagePage /> : page === "sessions" ? <SessionsPage navigationTarget={sessionTarget} onNavigationTargetApplied={clearSessionTarget} /> : page === "trust" ? <TrustPage /> : page === "test" ? <TestPage /> : page === "skills" ? <SkillsPage /> : page === "settings" ? <SettingsPage focusSection={focusSettingSection} onSectionFocused={clearSettingSectionTarget} /> : <FindingsPage onNavigateToAction={navigateToFindingAction} />}
     </main>
   </div></AppErrorBoundary>;
 }

@@ -15,9 +15,9 @@
 ## 0. 一句话结论
 
 把旧总览决策区的两个组件按原语义移植到 React OverviewPage：**值回双轨**
-（逐 provider/host：申报月费 vs 名义 API 等价（参考），值回倍数三态 chip，
+（逐 provider/harness：申报月费 vs 名义 API 等价（参考），值回倍数三态 chip，
 未填月费给设置指引）与**套餐窗口卡**（Codex 真实余量 meter+重置时刻、
-Claude 三态永无百分比、无证据宿主只显利用率）——后端零改动（两个 quota
+Claude 三态永无百分比、无证据执行环境只显利用率）——后端零改动（两个 quota
 IPC 命令与 monthly DTO 既有），全部新文案走 i18n 双语，契约脚本钉住
 诚实红线（永无 Claude 百分比、值回措辞闭集、三态空态）。
 
@@ -68,8 +68,8 @@ OverviewPage
  │   ├─ 套餐窗口卡「现在该用谁」
  │   │    Codex（订阅）：[====剩余 42%====] 剩余 42% · 10-01 14:00 重置
  │   │    Claude Pro：已耗尽 · 10-01 03:00 重置 ｜ 状态未知（两种诚实态）
- │   │    （无证据宿主不进此卡，只在双轨里以利用率行呈现）
- │   └─ 值回双轨列表（按 provider，宿主为副行）
+ │   │    （无证据执行环境不进此卡，只在双轨里以利用率行呈现）
+ │   └─ 值回双轨列表（按 provider，执行环境为副行）
  │        订阅（固定月费）¥140 · 名义 API 等价 $322（参考）
  │        [值回月费 2.3×] ｜ [⚠ 没用够（只值回月费的 0.42×）]
  │        [未填写月费，去填写 ›]（链接 #settings / settings-billing）
@@ -101,8 +101,8 @@ OverviewPage
 
 ### 4.3 R3 · 值回双轨列表（~1.5 天）
 
-1. 数据：monthly `by_provider`（host 并入 provider 副行的既有分组语义，
-   与旧 `groupByProvider(byProvider, byHost)` 对齐；如 React 侧缺此分组
+1. 数据：monthly `by_provider`（harness 并入 provider 副行的既有分组语义，
+   与旧 `groupByProvider(byProvider, byHarness)` 对齐；如 React 侧缺此分组
    则在组件内实现同规则）。
 2. 行内容：provider 名 + `fixed_subscription` chip + `api_equivalent
    （参考）` chip（分币，不混加）+ 值回 chip 三态（§1-2 闭集）+
@@ -154,7 +154,7 @@ OverviewPage
 |---|---|
 | 值回倍数被读成"省钱承诺" | 措辞闭集 + 「非付款验证」小字 + 契约禁词 |
 | 过期 quota 快照误导 | 三重守卫客户端镜像 + 快照时间戳行 |
-| 分组规则与旧版漂移（provider×host） | 与旧 `groupByProvider` 同规则 + 测试数据对拍 |
+| 分组规则与旧版漂移（provider×harness） | 与旧 `groupByProvider` 同规则 + 测试数据对拍 |
 | i18n 缺英文致 us-launch 回归 | zh+en 同批落 + 契约断言键存在 |
 
 ## 9. 测试矩阵

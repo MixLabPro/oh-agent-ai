@@ -35,7 +35,7 @@ def plugin_identity(path_n: str):
     return plugin, marketplace
 
 
-def classify(skill_dir: Path, host: str, home_n=None, cwd_n=None):
+def classify(skill_dir: Path, harness: str, home_n=None, cwd_n=None):
     """Return the precedence level, namespace, and plugin key for one Skill."""
     home_n = home_n if home_n is not None else norm(Path(os.path.expanduser("~")))
     cwd_n = cwd_n if cwd_n is not None else norm(Path.cwd())
@@ -43,7 +43,7 @@ def classify(skill_dir: Path, host: str, home_n=None, cwd_n=None):
     plugin, marketplace = plugin_identity(path_n)
     if plugin:
         return "plugin", plugin, f"{plugin}@{marketplace}"
-    if host == "openclaw":
+    if harness == "openclaw":
         if "/workspace/skills" in path_n:
             return "workspace", None, None
         if "/plugin-skills/" in path_n:
@@ -58,13 +58,13 @@ def classify(skill_dir: Path, host: str, home_n=None, cwd_n=None):
             return "managed", None, None
         if re.match(re.escape(home_n) + r"/\.open[^/]*/skills(?:/|$)", path_n):
             return "managed", None, None
-    if host == "hermes":
+    if harness == "hermes":
         return (("personal", None, None) if
                 path_n.startswith(home_n + "/.hermes/skills") else
                 ("external", None, None))
-    if host == "codex":
+    if harness == "codex":
         return "personal", None, None
-    if host == "workbuddy":
+    if harness == "workbuddy":
         if (path_n.startswith(cwd_n + "/.codebuddy/skills") or
                 path_n.startswith(cwd_n + "/.workbuddy/skills")):
             return "project", None, None
@@ -73,7 +73,7 @@ def classify(skill_dir: Path, host: str, home_n=None, cwd_n=None):
         if "/.workbuddy/plugins/marketplaces/workbuddy-builtin/" in path_n:
             return "managed", None, None
         return "unknown", None, None
-    if host == "dsh":
+    if harness == "dsh":
         # DSH 的 level 只表示「落在哪条 discovery root」（rank 见 DSH_LEVEL_RANK）。
         # 这里的判定只回答文件系统层；scope 层由 A5 的 conflict_domain 第三段表达。
         # ~/.agents/skills 与 OpenClaw 共享，但 DSH 侧按 user-agents 归类，
@@ -106,7 +106,7 @@ def days_since(milliseconds, now=None):
     return round((current - milliseconds / 1000.0) / 86400.0, 1)
 
 
-def scan_skill_dir(skill_dir: Path, host: str, enabled_plugins, usage, plugins_known,
+def scan_skill_dir(skill_dir: Path, harness: str, enabled_plugins, usage, plugins_known,
                    source_meta=None, home_n=None, cwd_n=None, now=None,
                    dsh_evidence=None, dsh_snapshot=None):
     """Build one stable public Skill record from a directory."""
@@ -119,21 +119,21 @@ def scan_skill_dir(skill_dir: Path, host: str, enabled_plugins, usage, plugins_k
         return None
 
     fields, frontmatter_raw, body = parse_frontmatter(raw)
-    level, namespace, plugin_key = classify(skill_dir, host, home_n, cwd_n)
+    level, namespace, plugin_key = classify(skill_dir, harness, home_n, cwd_n)
     source_meta = source_meta or {}
     enabled_state, loaded_state, runtime_verified = None, None, False
     # DSH 的运行时证据字段（稀疏，与 openclaw 的 eligible 记录同一约定）：只有
-    # catalog-visible 时置值，其余宿主/其余 dsh 状态都不带这两个键。
+    # catalog-visible 时置值，其余执行环境/其余 dsh 状态都不带这两个键。
     runtime_status = None
     body_loaded_state = None
     # DSH 的证据源（契约「Evidence recency」）：probe（快照，此刻）vs log（会话日志，
-    # 当时）vs none（只有文件系统推断）。只有 dsh 才写进记录；其余宿主不带这个键。
+    # 当时）vs none（只有文件系统推断）。只有 dsh 才写进记录；其余执行环境不带这个键。
     evidence_recency = "none"
-    if host in ("codex", "openclaw", "hermes", "workbuddy", "custom"):
+    if harness in ("codex", "openclaw", "hermes", "workbuddy", "custom"):
         loaded, reason = True, level if level != "unknown" else "explicit-root"
-        if host == "workbuddy" and "/plugins/marketplaces/workbuddy-builtin/" in norm(skill_dir):
+        if harness == "workbuddy" and "/plugins/marketplaces/workbuddy-builtin/" in norm(skill_dir):
             reason = "workbuddy-builtin-marketplace-manifest"
-    elif host == "claude-code" and level in ("personal", "project", "enterprise"):
+    elif harness == "claude-code" and level in ("personal", "project", "enterprise"):
         loaded, reason = True, level
     elif level == "plugin":
         if not plugins_known:
@@ -174,7 +174,7 @@ def scan_skill_dir(skill_dir: Path, host: str, enabled_plugins, usage, plugins_k
             corpus_bytes += size
 
     name = safe_str(fields.get("name") or skill_dir.name)
-    if host == "openclaw":
+    if harness == "openclaw":
         configured = source_meta.get("skill_entries", {}).get(name)
         if isinstance(configured, dict) and configured.get("enabled") is False:
             enabled_state, loaded_state = False, False
@@ -185,7 +185,7 @@ def scan_skill_dir(skill_dir: Path, host: str, enabled_plugins, usage, plugins_k
         else:
             enabled_state, loaded_state = None, None
             loaded, reason = False, "openclaw-discoverable-runtime-unverified"
-    elif host == "workbuddy" and source_meta.get("workbuddy_package"):
+    elif harness == "workbuddy" and source_meta.get("workbuddy_package"):
         mode = source_meta.get("workbuddy_welcome_mode")
         if not workbuddy_skill_active(source_meta.get("workbuddy_legacy_name"), mode):
             loaded, reason = False, f"workbuddy-mode-filtered:{mode}"
@@ -194,7 +194,7 @@ def scan_skill_dir(skill_dir: Path, host: str, enabled_plugins, usage, plugins_k
             reason = (f"workbuddy-builtin-active-mode:{mode}" if mode else
                       "workbuddy-builtin-mode-unknown")
             enabled_state, loaded_state = (True, None) if mode else (None, None)
-    elif host == "dsh":
+    elif harness == "dsh":
         # DSH 的 loaded 有两个独立证据源（A4/A11），**先 probe 后 log**：
         #   probe（注册表快照，`--runtime-json`）回答「此刻这个 scope 解析出什么」；
         #   log（会话日志）回答「当时向模型发布了什么」。
@@ -237,10 +237,10 @@ def scan_skill_dir(skill_dir: Path, host: str, enabled_plugins, usage, plugins_k
                 else:
                     loaded, reason = False, "dsh-not-in-catalog"
     hits, last_ms, matched_key = lookup_usage(usage, name, namespace)
-    if host == "dsh" and dsh_evidence and not dsh_evidence.get("degraded"):
-        # DSH 的触发证据不读 claude.json 的 skillUsage——那是另一个宿主（Claude
+    if harness == "dsh" and dsh_evidence and not dsh_evidence.get("degraded"):
+        # DSH 的触发证据不读 claude.json 的 skillUsage——那是另一个执行环境（Claude
         # Code）的使用历史，与 DSH 的会话日志是两套账。日志里的 invoked（用户
-        # 显式 `/<name>`）与 selected（模型自主 tool/call 选中）才是本宿主的真实
+        # 显式 `/<name>`）与 selected（模型自主 tool/call 选中）才是本执行环境的真实
         # 触发数。两者都算「用过」：僵尸判定问的是「这个 skill 有没有产生过价值」，
         # 模型自主选中同样说明它在起作用——analysis._build_dsh_trigger 的
         # never_triggered 正是 never_selected ∩ never_invoked，两侧的计数语义
@@ -265,7 +265,7 @@ def scan_skill_dir(skill_dir: Path, host: str, enabled_plugins, usage, plugins_k
     description = fields.get("description", "")
     core_tokens = est_tokens(body)
     # DSH 的冲突域带 scope 层（A5：dsh:<DSH_HOME>:<layer>）。<DSH_HOME> 是 DSH
-    # 配置根（默认 ~/.dsh），与其他宿主的 home 一样用 home_n 做路径归一。
+    # 配置根（默认 ~/.dsh），与其他执行环境的 home 一样用 home_n 做路径归一。
     # 本波只有文件系统根：DSH 的 filesystem provider 只注册在**全局 scope 层**，
     # 所以 <layer> 恒为 "global"（占位）。真正的 preset / agent 层要等运行时证据
     # （后续波 A10），届时这里改从证据里取层，而不是硬编码 "global"。
@@ -273,15 +273,15 @@ def scan_skill_dir(skill_dir: Path, host: str, enabled_plugins, usage, plugins_k
     record = {
         "name": name,
         "dir_name": safe_str(skill_dir.name),
-        "host": host,
-        "host_family": "claude-code" if host.startswith("claude-code") else host,
+        "harness": harness,
+        "harness_family": "claude-code" if harness.startswith("claude-code") else harness,
         "level": level,
         "namespace": namespace,
         "plugin_key": plugin_key,
         "loaded": loaded,
         "loaded_reason": reason,
         "installed": True,
-        "discoverable": True if host == "openclaw" else loaded,
+        "discoverable": True if harness == "openclaw" else loaded,
         "enabled_state": enabled_state,
         "loaded_state": loaded_state,
         "runtime_verified": runtime_verified,
@@ -289,9 +289,9 @@ def scan_skill_dir(skill_dir: Path, host: str, enabled_plugins, usage, plugins_k
         "instance_root": source_meta.get("instance_root"),
         "config_path": source_meta.get("config_path"),
         "root_kind": source_meta.get("root_kind"),
-        "conflict_domain": (f"dsh:{dsh_home}:global" if host == "dsh"
+        "conflict_domain": (f"dsh:{dsh_home}:global" if harness == "dsh"
                             else f"openclaw:{source_meta.get('instance_id')}"
-                            if host == "openclaw" and source_meta.get("instance_id") else host),
+                            if harness == "openclaw" and source_meta.get("instance_id") else harness),
         "path": norm(skill_dir),
         "content_hash": hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12],
         "description": description,
@@ -322,8 +322,8 @@ def scan_skill_dir(skill_dir: Path, host: str, enabled_plugins, usage, plugins_k
         # 恒为 null——进了目录不等于正文被读过。
         record["runtime_status"] = runtime_status
         record["body_loaded_state"] = body_loaded_state
-    if host == "dsh":
-        # 证据源只对 dsh 有意义（其余宿主单一隐式 scope，契约不要求逐记录标注）。
+    if harness == "dsh":
+        # 证据源只对 dsh 有意义（其余执行环境单一隐式 scope，契约不要求逐记录标注）。
         # probe（快照）/ log（会话日志）/ none（文件系统推断）必须显式分开，否则
         # 一个月前的 log 证据与当下的 probe 证据并排渲染，报告就开始在时间上撒谎。
         record["evidence_recency"] = evidence_recency
@@ -343,20 +343,20 @@ def collect(roots, enabled_plugins, usage, plugins_known, home=None, cwd=None,
     home_n = norm(Path(home)) if home is not None else norm(Path(os.path.expanduser("~")))
     cwd_n = norm(Path(cwd)) if cwd is not None else norm(Path.cwd())
     for item in roots:
-        host, root = item[:2]
+        harness, root = item[:2]
         source_meta = item[2] if len(item) > 2 else {}
         base = _root_path(root, home)
         try:
             key = norm(base.resolve())
         except OSError:
             key = norm(base)
-        dedupe_key = (host, source_meta.get("instance_id"), key)
+        dedupe_key = (harness, source_meta.get("instance_id"), key)
         if dedupe_key in seen:
             continue
         seen.add(dedupe_key)
         if not base.is_dir():
             continue
-        scanned_roots.append({"host": host, "path": norm(base),
+        scanned_roots.append({"harness": harness, "path": norm(base),
                               "instance_id": source_meta.get("instance_id"),
                               "root_kind": source_meta.get("root_kind")})
         skill_files = ([base / "SKILL.md"] if source_meta.get("only_direct") else
@@ -365,7 +365,7 @@ def collect(roots, enabled_plugins, usage, plugins_known, home=None, cwd=None,
             if not skill_file.is_file():
                 continue
             record = scan_skill_dir(
-                skill_file.parent, host, enabled_plugins, usage, plugins_known,
+                skill_file.parent, harness, enabled_plugins, usage, plugins_known,
                 source_meta, home_n=home_n, cwd_n=cwd_n, dsh_evidence=dsh_evidence,
                 dsh_snapshot=dsh_snapshot)
             if record:
@@ -374,7 +374,7 @@ def collect(roots, enabled_plugins, usage, plugins_known, home=None, cwd=None,
                 unreadable.append({
                     "name": skill_file.parent.name,
                     "path": norm(skill_file.parent),
-                    "host": host,
+                    "harness": harness,
                     "reason": "SKILL.md exists but cannot be read (permission or I/O error)",
                 })
     return found, scanned_roots, unreadable

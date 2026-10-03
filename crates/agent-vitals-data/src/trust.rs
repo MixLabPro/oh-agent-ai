@@ -1,7 +1,7 @@
 //! Authority persistence for Finding 2.0 local trust observations.
 //!
 //! This module stores only the redacted, bounded contract from
-//! `agent_vitals_domain::trust`.  It intentionally has no host parsing,
+//! `agent_vitals_domain::trust`.  It intentionally has no harness parsing,
 //! correlation, notification, network interception, or raw-evidence reader.
 
 use agent_vitals_domain::trust::TrustObservation;
@@ -47,7 +47,7 @@ pub fn insert_observations(
             .map_err(|_| invalid("scope classes cannot be serialized"))?;
         let changed = conn.execute(
             "INSERT OR IGNORE INTO trust_observations(
-                 observation_id, machine_namespace, host, actor_id, actor_kind, actor_version,
+                 observation_id, machine_namespace, harness, actor_id, actor_kind, actor_version,
                  observed_at_ms, observation_kind, stage, evidence_level, evidence_origin, workspace_ref,
                  scope_classes_json, file_count, byte_count, destination_class, destination_host,
                  consent_kind, consent_state, source_id, native_event_id, source_line, source_byte_offset,
@@ -55,7 +55,7 @@ pub fn insert_observations(
                  ingested_run_id, created_at_ms)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)",
             params![
-                observation.observation_id, observation.machine_namespace, observation.host,
+                observation.observation_id, observation.machine_namespace, observation.harness,
                 observation.actor_id, observation.actor_kind.as_str(), observation.actor_version,
                 observation.observed_at_ms, observation.observation_kind.as_str(), observation.stage.as_str(),
                 observation.evidence_level.as_str(), observation.evidence_origin.as_str(), observation.workspace_ref, scope_classes_json,
@@ -138,7 +138,7 @@ mod tests {
 
     fn observation() -> TrustObservation {
         TrustObservation {
-            observation_id: "obs-1".into(), machine_namespace: "machine-1".into(), host: "zcode".into(),
+            observation_id: "obs-1".into(), machine_namespace: "machine-1".into(), harness: "zcode".into(),
             actor_id: "actor-1".into(), actor_kind: TrustActorKind::Sidecar, actor_version: Some("3.14.0".into()),
             observed_at_ms: 10, observation_kind: TrustObservationKind::Package, stage: TrustStage::PackageObserved,
             evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::LocalArtifact, workspace_ref: Some("ws-1".into()),
@@ -162,7 +162,7 @@ mod tests {
             let again = insert_observations(conn, &[observation()], "run", 2)?;
             assert_eq!((again.inserted, again.duplicate), (0, 1));
             let input = IssueInput {
-                machine_namespace: "machine-1", host: "zcode", session_key: None,
+                machine_namespace: "machine-1", harness: "zcode", session_key: None,
                 issue_type: "SV702", instance_fingerprint: "issue-1", status: "open", severity: "warning",
                 evaluator_id: "trust-egress-correlator", evaluator_version: "v1", evidence_fingerprint: "evidence-1",
                 opened_at_ms: 2, metadata_json: r#"{"stage":"package_observed","evidence_level":"E1"}"#,

@@ -14,12 +14,12 @@ use crate::state::{read_json, state_dir};
 use serde_json::Value;
 
 /// ledger 路径单点：`state_dir()/claude-ledger.json`。v0.9 Stage 0.4c 起
-/// `summary.rs` 的 claude 宿主金额也走这里——路径字面量只许出现这一处。
+/// `summary.rs` 的 claude 执行环境金额也走这里——路径字面量只许出现这一处。
 pub(crate) fn ledger_path() -> std::path::PathBuf {
     state_dir().join("claude-ledger.json")
 }
 
-/// ledger flat 日 → 4 型 token 总量。r2a_store 的 claude 宿主行「今日 token」与
+/// ledger flat 日 → 4 型 token 总量。r2a_store 的 claude 执行环境行「今日 token」与
 /// 托盘合并行的 `· N tokens` 都走这里。**求和委托 core `claude_day_total_tokens`**
 /// ——键清单只在 core 一处定义（托盘是 src-tauri crate，够不到 apps/cli，只能
 /// 用 core；本 crate 与 src-tauri 都归到 core，就不会长出第二份键集合）。
@@ -29,7 +29,7 @@ pub fn ledger_day_total_tokens(day: &Value) -> i64 {
 }
 
 /// 读 ledger 当日（day_key = 北京日）的 4 型 token 总量 → r2a `sessions
-/// navigation` 的 claude 宿主行「今日 token」（spec §5.2 basis=ledger）。
+/// navigation` 的 claude 执行环境行「今日 token」（spec §5.2 basis=ledger）。
 ///
 /// 三种 None：ledger 不存在 / 无 `days` 键 / 当日缺席——都诚实报 None（托盘显
 /// null/—，不编 0）。「空日不落 ledger」：days 里的日子全是 fold 真测到的桶
@@ -49,7 +49,7 @@ mod tests {
 
     #[test]
     fn ledger_day_total_tokens_sums_snake_keys_ignoring_extras() {
-        // r2a claude 宿主行走 `claude_ledger_day_tokens` → 这里。flat 日含真实
+        // r2a claude 执行环境行走 `claude_ledger_day_tokens` → 这里。flat 日含真实
         // 模型 + `<synthetic>`（全零，cost-state 里的 unknown 占位——0 不能贡献
         // 也不该炸）+ 无关装饰键：只数 SNAKE_KEYS 4 型，其余键一律无视。
         let day = json!({

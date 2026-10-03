@@ -10,8 +10,8 @@
 
 ## 0. 一句话
 
-> **v0.8 完成架构骨架（域/宿主/runtime/wasm 4 棵树 + feature gate + 锁步门禁）。**
-> **v0.9 开始挖数据价值——把 5 个宿主 × 6 类信号 × N 个 session 的数据真正变成可分析、可预测、可行动的洞察。**
+> **v0.8 完成架构骨架（域/执行环境/runtime/wasm 4 棵树 + feature gate + 锁步门禁）。**
+> **v0.9 开始挖数据价值——把 5 个执行环境 × 6 类信号 × N 个 session 的数据真正变成可分析、可预测、可行动的洞察。**
 
 ---
 
@@ -26,8 +26,8 @@
 | `r2a envelope` per-session cache | `data_home()/cache/r2a/<session>.json` | ~10-100KB / session | 已建（schema v3）|
 | `state/today.json` + `month.json` | 预聚合账单 | 每 5min tick 更新 | 已建 |
 | 14 条 SV 码 finding | `domain/detectors/svNNN.rs` | 每次 fold 跑 14 条 | 已建 |
-| DSH session.jsonl[.zstd] | 外部宿主文件 | 50-500KB / session | **只读** |
-| Claude / Codex / WorkBuddy 宿主 | 各自 wire 格式 | 同量级 | **只读** |
+| DSH session.jsonl[.zstd] | 外部执行环境文件 | 50-500KB / session | **只读** |
+| Claude / Codex / WorkBuddy 执行环境 | 各自 wire 格式 | 同量级 | **只读** |
 | fixtures/ | 测试用完整 session 集 | ~58 session 真机 + 6 个手工 | 已建 |
 
 ### 1.2 v0.9 之前的 3 个真缺口
@@ -35,7 +35,7 @@
 | 缺口 | 现状 | 后果 |
 |---|---|---|
 | **没有 effects 表** | `CanonicalSession` 只有 events（LLM/tool/人介入），**没有 effects（文件变更/测试/git）** | "Agent 刚才到底改了什么"答不上；6 项周看板 5 项无数据 |
-| **没有持久化 CanonicalSession** | 每次 fold 完即丢；下次重 fold | 调查历史会话要 raw jsonl（宿主 retention 不可控）|
+| **没有持久化 CanonicalSession** | 每次 fold 完即丢；下次重 fold | 调查历史会话要 raw jsonl（执行环境 retention 不可控）|
 | **没有 query 层** | `state/*.json` 是预聚合账单，**不可分组/不可 join** | "过去 30 天所有 Codex 失败会话"答不上 |
 
 **这 3 个缺口是 v0.9 的核心目标**。**其他都是战术**。
@@ -44,7 +44,7 @@
 
 #### ✅ v0.9 做
 
-1. **Effects 采集面**（hosts/<h>/sources/effects.rs）——**行业空白**
+1. **Effects 采集面**（harnesses/<h>/sources/effects.rs）——**行业空白**
 2. **CanonicalSession 持久化层**（state/canonical/）—— 解决 raw jsonl retention 风险
 3. **DuckDB 分析层**（state/analysis.duckdb）—— SQL-on-traces，不破"xbar cat JSON"哲学
 4. **Task type 弱标签**（6 类确定性规则）—— 方法论 §1 的"先有标签后有模型"
@@ -63,7 +63,7 @@
 4. **数据外传等组合规则**（读密钥 + 外发）—— 推到 v1.0
 5. **DB 反范式事件存储到 SQLite** —— 仍走 DuckDB（不引入第二份分析库）
 6. **完整的 LLM-driven 异常检测** —— 确定性规则先做满，ML 留 v1.x
-7. **改写 dsh 核心 / 自定义 UI 容器** —— 沿用 bundle + host adapter 模式
+7. **改写 dsh 核心 / 自定义 UI 容器** —— 沿用 bundle + harness adapter 模式
 
 ---
 
@@ -82,8 +82,8 @@ events  CanonicalSession (19 Signal + 5 Timeline)
 
 effects  EffectsRecord (file_change / test_result / git_op)
         ┌─────────────────────────────────────┐
-        │ hosts/<h>/sources/effects.rs        │
-        │ 跨 5 宿主 wire 适配                  │
+        │ harnesses/<h>/sources/effects.rs        │
+        │ 跨 5 执行环境 wire 适配                  │
         └─────────────────────────────────────┘
                           ↓
 canonical/<session_id>.json (持久化值类型)
@@ -151,18 +151,18 @@ agent-vitals query <sql> (新 CLI)
 
 ### 5.1 Effects 采集面（🔴 最高优先级）
 
-**目标**：跨 5 宿主采集 file_change / test_result / git_op 3 类 effects。
+**目标**：跨 5 执行环境采集 file_change / test_result / git_op 3 类 effects。
 
 **新增文件**：
 
 | 文件 | 行数预算 | 职责 |
 |---|---|---|
-| `crates/agent-vitals-hosts/src/hosts/dsh/sources/effects.rs` | ~300 | DSH: 读 `data.result.file_changes` / `data.result.exit_code` / `data.git` |
-| `crates/agent-vitals-hosts/src/hosts/codex/sources/effects.rs` | ~250 | Codex: 读 `turn_context.git` + `exec_command.result.aggregated_output` + `file_change` |
-| `crates/agent-vitals-hosts/src/hosts/claude_code/sources/effects.rs` | ~300 | Claude: 读 `file_history_snapshot` + `tool_use_result` |
-| `crates/agent-vitals-hosts/src/hosts/workbuddy/sources/effects.rs` | ~200 | WorkBuddy: 读 SQLite `audit_log` 表 |
+| `crates/agent-vitals-harnesses/src/harnesses/dsh/sources/effects.rs` | ~300 | DSH: 读 `data.result.file_changes` / `data.result.exit_code` / `data.git` |
+| `crates/agent-vitals-harnesses/src/harnesses/codex/sources/effects.rs` | ~250 | Codex: 读 `turn_context.git` + `exec_command.result.aggregated_output` + `file_change` |
+| `crates/agent-vitals-harnesses/src/harnesses/claude_code/sources/effects.rs` | ~300 | Claude: 读 `file_history_snapshot` + `tool_use_result` |
+| `crates/agent-vitals-harnesses/src/harnesses/workbuddy/sources/effects.rs` | ~200 | WorkBuddy: 读 SQLite `audit_log` 表 |
 | `crates/agent-vitals-domain/src/contracts/effects.rs` | ~150 | `EffectsRecord` + `FileChange` + `TestResult` + `GitOp` schema |
-| `tests/test_effects_*.py` + `crates/.../tests/effects_*.rs` | ~500 | 跨宿主 parity + character |
+| `tests/test_effects_*.py` + `crates/.../tests/effects_*.rs` | ~500 | 跨执行环境 parity + character |
 
 **Schema 草案**（`effects.rs`）：
 
@@ -201,8 +201,8 @@ pub struct GitOp {
 ```
 
 **验收**：
-- 5 宿主各 1 个 fixture（手工造：1 file change + 1 test run + 1 commit）
-- `effects.rs` 跨 5 宿主 parity test 字节级一致
+- 5 执行环境各 1 个 fixture（手工造：1 file change + 1 test run + 1 commit）
+- `effects.rs` 跨 5 执行环境 parity test 字节级一致
 - 现有 1094 项 Python 测试 + 144 项 Rust 测试不破
 
 ### 5.2 CanonicalSession 持久化（🟡 高）
@@ -493,7 +493,7 @@ GROUP BY onset_rule ORDER BY COUNT(*) DESC;
 
 | 周 | 目标 | 关键产出 |
 |---|---|---|
-| W1 | 5.1 effects 采集面 | 5 宿主 effects.rs + 5 fixture + parity |
+| W1 | 5.1 effects 采集面 | 5 执行环境 effects.rs + 5 fixture + parity |
 | W2 | 5.3 DuckDB schema + write 链 | 5 表 + oneline 集成 + 5min tick hook |
 | W3 | 5.4 task type + 5.5 token 4 桶 | 6 类分类 + 用法对齐 TraceLab |
 | W4 | 5.2 canonical 持久化 + 5.6 早期预警 | 30 天保留 + verdict 输出 |
@@ -504,7 +504,7 @@ GROUP BY onset_rule ORDER BY COUNT(*) DESC;
 
 **硬指标**（必须全过）：
 
-- ✅ effects 表跨 5 宿主各 1 fixture 跑通
+- ✅ effects 表跨 5 执行环境各 1 fixture 跑通
 - ✅ CanonicalSession 持久化 + 30 天保留
 - ✅ `state/analysis.duckdb` 5 表 schema 落 + 5 条示例 query 出正确结果
 - ✅ Token 4 桶 + Tool latency 双口径落地
@@ -536,7 +536,7 @@ GROUP BY onset_rule ORDER BY COUNT(*) DESC;
 
 | 风险 | 触发条件 | 缓解 |
 |---|---|---|
-| **effects 跨宿主 wire 不齐** | DSH / Codex / Claude 各自 effects 字段名/位置/形状都不同 | 每宿主独立 adapter + 各 1 fixture + parity 字节级 |
+| **effects 跨执行环境 wire 不齐** | DSH / Codex / Claude 各自 effects 字段名/位置/形状都不同 | 每执行环境独立 adapter + 各 1 fixture + parity 字节级 |
 | **DuckDB 编译时间 +50%** | bundled C++ 编译慢 | CI 缓存；MSRV 不破（1.74 OK）|
 | **`analysis.duckdb` 体积爆炸** | 5000+ session × 全 effects | 30 天保留 + 关键字段剥离（raw result_chars 不入）|
 | **task type 弱标签边界 case 多** | 真实 session 可能跨 6 类 | 边界用 `Unknown` 兜底，6 条 fixture 必须 cover 6 类 |
@@ -557,12 +557,12 @@ crates/agent-vitals-domain/src/domain/task_type.rs      # 5.4
 crates/agent-vitals-runtime/src/canonical_store.rs      # 5.2
 crates/agent-vitals-runtime/src/analysis_duckdb.rs      # 5.3
 crates/agent-vitals-runtime/src/duckdb_query.rs         # 5.8
-crates/agent-vitals-hosts/src/hosts/{dsh,codex,claude_code,workbuddy}/sources/effects.rs  # 5.1
+crates/agent-vitals-harnesses/src/harnesses/{dsh,codex,claude_code,workbuddy}/sources/effects.rs  # 5.1
 docs/V0_9_DATA_VALUE_MINING.md                          # 本文件
 docs/V0_9_QUERY_COOKBOOK.md                             # 5 条示例 query
 docs/V0_9_WEEKLY_DASHBOARD.md                           # 周看板输出格式
 docs/V0_9_TASK_TYPE_LABELS.md                           # 6 类弱标签判定
-docs/V0_9_EFFECTS_SCHEMA.md                             # effects 跨宿主 schema
+docs/V0_9_EFFECTS_SCHEMA.md                             # effects 跨执行环境 schema
 ```
 
 ### 改写

@@ -1,16 +1,16 @@
 //! `build_trace_graph`——v0.10.0 的核心纯函数（spec §2.1 / §2.1.1 / §6.1 「v0.9
 //! 锚点」同一条纪律：种子是已落地的 `CanonicalSession`，本模块不重新解析任何
-//! 宿主 wire 形状，也不做任何 I/O（domain crate 的边界，见
+//! 执行环境 wire 形状，也不做任何 I/O（domain crate 的边界，见
 //! `tests/dependency_budget.rs`）。
 //!
-//! **不是每宿主一份**（与 spec §6.2 字面列出的 `hosts/<h>/sessions/trace.rs`
-//! 有意的一处偏离，理由记在这里）：`CanonicalSession` 本身就是宿主中立的
-//! 投影——`behavior.rs`/`trajectory.rs` 的 SV601–614 已经证明"host-neutral
-//! 输入 + 一份纯函数"这个模式在三宿主上是可行且必须保持字节确定性的（spec
+//! **不是每执行环境一份**（与 spec §6.2 字面列出的 `harnesses/<h>/sessions/trace.rs`
+//! 有意的一处偏离，理由记在这里）：`CanonicalSession` 本身就是执行环境中立的
+//! 投影——`behavior.rs`/`trajectory.rs` 的 SV601–614 已经证明"harness-neutral
+//! 输入 + 一份纯函数"这个模式在三执行环境上是可行且必须保持字节确定性的（spec
 //! §3「v0.9 锚点」明写"直接复用 SV 规则的种子，不重写"）。给同一类输入的
-//! 三份"host-specific trace.rs"必须逐字节产出相同结果，那就不是三份代码，
+//! 三份"harness-specific trace.rs"必须逐字节产出相同结果，那就不是三份代码，
 //! 是一份代码的三次粘贴——本函数直接是 `CanonicalSession -> TraceGraph`
-//! 的单一实现，`agent-vitals-hosts` 侧只需要（未来）传对 `host_id` + `session_key`。
+//! 的单一实现，`agent-vitals-harnesses` 侧只需要（未来）传对 `harness_id` + `session_key`。
 //!
 //! **门槛对照（spec §7 v0.10.0）**：
 //! 1. 输入源唯一 = `&CanonicalSession`，不读 raw event —— 本函数签名就是这个承诺；
@@ -39,9 +39,9 @@ fn stable_id(seed: &Value) -> String {
 
 /// 把 canonical timeline 的时间戳归一到**毫秒**，供 `_ms` 契约字段使用。
 ///
-/// 为什么必须在**这里**归一：`TimelineEntry.time` 的单位由各宿主适配器各自
+/// 为什么必须在**这里**归一：`TimelineEntry.time` 的单位由各执行环境适配器各自
 /// 决定——Claude 的 timeline 构造器明写「`parse_iso` → **秒**」
-/// （`hosts/claude_code/sessions/evidence.rs`），Codex 与 DSH 是毫秒。而
+/// （`harnesses/claude_code/sessions/evidence.rs`），Codex 与 DSH 是毫秒。而
 /// `TraceNode.started_at_ms` 的契约注释声明它「用于展示与时间分桶」，名字又带
 /// `_ms`。真机实测（2026-09-13）：claude-code 节点是 `1788449204`（当毫秒 →
 /// 1970-01-21），codex 节点是 `1789132709000`（当毫秒 → 2026-09-11 正确）。
@@ -91,10 +91,10 @@ fn turn_status(end_reason_kind: &Option<String>) -> Option<TraceStatus> {
     }
 }
 
-/// `failed` 是宿主报的通用是/否信号（不是所有宿主都有——DSH 恒 `None`，只报
+/// `failed` 是执行环境报的通用是/否信号（不是所有执行环境都有——DSH 恒 `None`，只报
 /// `error_code`；Claude Code 的 `is_error` 是这种）；`error_code` 是原因级信号
 /// （DSH 报这个）。两个字段哪个有值都算「有失败信号」——两者都缺时才是真的
-/// 「不知道」，不能因为其中一个字段是这个宿主的空档就冒充没失败。
+/// 「不知道」，不能因为其中一个字段是这个执行环境的空档就冒充没失败。
 fn tool_result_status(failed: Option<bool>, error_code: &Option<String>) -> Option<TraceStatus> {
     if error_code.is_some() || failed == Some(true) {
         return Some(TraceStatus::Error);
@@ -162,7 +162,7 @@ fn tool_call_candidates(session: &CanonicalSession) -> Vec<Candidate> {
             };
             // 无 call_id 时的合成 fallback：只用于图内去重与展示定位，**不是
             // join 键**（spec §2.1「跨 scope join 只走 native」的 native 指
-            // 宿主原生 id；合成 id 永不参与跨 scope 关联）。
+            // 执行环境原生 id；合成 id 永不参与跨 scope 关联）。
             let native = e.call_id.clone().unwrap_or_else(|| {
                 format!(
                     "tool-call-seq-{}-{idx}",
@@ -226,13 +226,13 @@ pub fn build_trace_graph(session: &CanonicalSession, session_key: SessionKey) ->
     // 先建 node_id + turn_no -> node_id 映射（turn 节点），再回填 tool_call
     // 的 parent_node_id——两趟遍历是因为 parent 必须引用已经算好 node_id 的
     // turn 节点，顺序不可颠倒。
-    let host_id = session.meta.host_id;
+    let harness_id = session.meta.harness_id;
     let mut nodes: Vec<TraceNode> = Vec::with_capacity(sorted.len());
     let mut turn_node_id_by_no: BTreeMap<i64, String> = BTreeMap::new();
 
     for (ordinal, c) in sorted.iter().enumerate() {
         let node_id = stable_id(&json!({
-            "host": host_id,
+            "harness": harness_id,
             "session_key": session_key.to_json(),
             "scope": "main",
             "ordinal": ordinal as u64,
@@ -254,11 +254,11 @@ pub fn build_trace_graph(session: &CanonicalSession, session_key: SessionKey) ->
             node_type: c.node_type,
             fact_id: String::new(),
             // canonical timeline 本身就是非用量节点的可重放证据；值是 opaque
-            // 坐标而非宿主原生 id，避免把 native id 当跨节点 join 键泄露出去。
+            // 坐标而非执行环境原生 id，避免把 native id 当跨节点 join 键泄露出去。
             evidence_ref: format!(
                 "ce1-{}",
                 stable_id(&json!({
-                    "host": host_id,
+                    "harness": harness_id,
                     "session_key": session_key.to_json(),
                     "scope": "main",
                     "ordinal": ordinal,
@@ -334,7 +334,7 @@ pub fn build_trace_graph(session: &CanonicalSession, session_key: SessionKey) ->
     };
 
     let graph_id = stable_id(&json!({
-        "kind": "trace_graph", "host": host_id, "session_key": session_key.to_json(),
+        "kind": "trace_graph", "harness": harness_id, "session_key": session_key.to_json(),
     }));
     let fingerprint_seed: Vec<Value> = nodes
         .iter()
@@ -362,11 +362,11 @@ pub fn build_trace_graph(session: &CanonicalSession, session_key: SessionKey) ->
     }
 }
 
-// 单测（含用 `agent_vitals_hosts::dsh_evidence::build_dsh_evidence` 造真实
+// 单测（含用 `agent_vitals_harnesses::dsh_evidence::build_dsh_evidence` 造真实
 // `CanonicalSession` fixture 的那批）搬到 `tests/trace_graph.rs`——原因与
 // `tests/behavior_rules.rs` 头注同源：跨 crate 传 domain 类型的 inline lib
-// test 若同时依赖 `agent-vitals-hosts`（[dev-dependencies]），会在
-// `cargo test --lib` 时撞「multiple versions of crate」，因为 hosts crate
+// test 若同时依赖 `agent-vitals-harnesses`（[dev-dependencies]），会在
+// `cargo test --lib` 时撞「multiple versions of crate」，因为 harnesses crate
 // 自己又反向依赖 domain。集成测试（`tests/` 下独立编译单元）不受影响。
 
 // ────────────────────────── timeline_series 投影 ──────────────────────────

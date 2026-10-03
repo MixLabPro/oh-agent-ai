@@ -1,11 +1,11 @@
-//! 「测试」tab v2 的被动路线质量聚合：`usage_facts` 按 (host × 模型族 × 模型)
+//! 「测试」tab v2 的被动路线质量聚合：`usage_facts` 按 (harness × 模型族 × 模型)
 //! 分组，家族/官方性判定走 `domain::route_quality` 的封闭词表（不在这层写
 //! SQL CASE——词表只活在一处，Rust/Python 对拍钉住）。
 //!
-//! 诚实性：这是**读侧聚合**，不产生新事实。`model_id` 来自协议响应（宿主
+//! 诚实性：这是**读侧聚合**，不产生新事实。`model_id` 来自协议响应（执行环境
 //! emitter 已入库），「非官方模型」的判定强度就是模型串本身——不叠加推断；
 //! `synthetic` 族（claude CLI 请求失败时的本地占位）单列为 `api_error`，不
-//! 计入任何模型家族的用量。宿主没有登记基准（`host_native_families` 返回
+//! 计入任何模型家族的用量。执行环境没有登记基准（`harness_native_families` 返回
 //! None）时 `has_baseline=false`，UI 只展示家族分布、不做「非原生」结论。
 
 use std::collections::BTreeMap;
@@ -14,12 +14,12 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 
 use agent_vitals_domain::route_quality::{
-    family_flag, host_native_families, model_family, MODEL_FAMILIES,
+    family_flag, harness_native_families, model_family, MODEL_FAMILIES,
 };
 
 use crate::authority::AuthorityError;
 
-/// 按 (host, model_id, provider_raw, provider_id) 聚合的原料行。
+/// 按 (harness, model_id, provider_raw, provider_id) 聚合的原料行。
 struct ModelRow {
     requests: i64,
     tokens_total: i64,
@@ -49,7 +49,7 @@ pub fn route_quality_summary(
     // (a) 请求/token 聚合——usage_facts 直读（billing/行为事实表不碰）。
     let mut stmt = conn
         .prepare(
-            "SELECT host, model_id, COALESCE(provider_raw,''), COALESCE(provider_id,''),
+            "SELECT harness, model_id, COALESCE(provider_raw,''), COALESCE(provider_id,''),
                     COUNT(*),
                     SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens),
                     MAX(event_ts_ms)
@@ -74,13 +74,13 @@ pub fn route_quality_summary(
         })
         .map_err(to_authority_error)?;
 
-    // host → family → FamilyAgg；host 顺序、族顺序均 BTreeMap 确定化。
-    let mut hosts: BTreeMap<String, BTreeMap<String, FamilyAgg>> = BTreeMap::new();
+    // harness → family → FamilyAgg；harness 顺序、族顺序均 BTreeMap 确定化。
+    let mut harnesses: BTreeMap<String, BTreeMap<String, FamilyAgg>> = BTreeMap::new();
     for row in rows.flatten() {
-        let (host, model, provider_raw, provider_id, agg_row) = row;
+        let (harness, model, provider_raw, provider_id, agg_row) = row;
         let family = model_family(&model);
-        let entry = hosts
-            .entry(host.clone())
+        let entry = harnesses
+            .entry(harness.clone())
             .or_default()
             .entry(family.to_string())
             .or_default();
@@ -107,11 +107,11 @@ pub fn route_quality_summary(
         ));
     }
 
-    // (b) 会话数：同一会话可能用到多个模型——按 (host, model) 拉 DISTINCT
+    // (b) 会话数：同一会话可能用到多个模型——按 (harness, model) 拉 DISTINCT
     // 会话键，在 Rust 侧按族去重（SQL 里做族级 DISTINCT 会把词表复制进 SQL）。
     let mut session_stmt = conn
         .prepare(
-            "SELECT DISTINCT host, session_key, model_id FROM usage_facts
+            "SELECT DISTINCT harness, session_key, model_id FROM usage_facts
              WHERE event_ts_ms >= ?1 AND event_ts_ms <= ?2 AND deleted_at_ms IS NULL",
         )
         .map_err(to_authority_error)?;
@@ -124,21 +124,21 @@ pub fn route_quality_summary(
             ))
         })
         .map_err(to_authority_error)?;
-    for (host, session_key, model) in session_rows.flatten() {
+    for (harness, session_key, model) in session_rows.flatten() {
         if session_key.is_empty() {
             continue;
         }
-        if let Some(families) = hosts.get_mut(&host) {
+        if let Some(families) = harnesses.get_mut(&harness) {
             if let Some(entry) = families.get_mut(model_family(&model)) {
                 entry.sessions.insert(session_key);
             }
         }
     }
 
-    let host_reports: Vec<Value> = hosts
+    let harness_reports: Vec<Value> = harnesses
         .into_iter()
-        .map(|(host, families)| {
-            let native = host_native_families(&host);
+        .map(|(harness, families)| {
+            let native = harness_native_families(&harness);
             let total_requests: i64 = families.values().map(|f| f.requests).sum();
             let mut total_sessions = std::collections::BTreeSet::new();
             for family in families.values() {
@@ -149,7 +149,7 @@ pub fn route_quality_summary(
                 .map(|(family, agg)| {
                     // 家族级 flag 用 domain 的 family_flag（族名不是模型串，
                     // 不能拿 model_family 回转）——单一定义点在对拍模块里。
-                    let flag = family_flag(&host, &family);
+                    let flag = family_flag(&harness, &family);
                     json!({
                         "family": family,
                         "flag": flag,
@@ -166,7 +166,7 @@ pub fn route_quality_summary(
                 })
                 .collect();
             json!({
-                "host": host,
+                "harness": harness,
                 "has_baseline": native.is_some(),
                 "native_families": native.unwrap_or(&[]),
                 "totals": {
@@ -182,7 +182,7 @@ pub fn route_quality_summary(
         "since_ms": since_ms,
         "now_ms": now_ms,
         "families_vocabulary": MODEL_FAMILIES,
-        "hosts": host_reports,
+        "harnesses": harness_reports,
     }))
 }
 
@@ -195,7 +195,7 @@ mod tests {
     fn fact(
         conn: &Connection,
         id: &str,
-        host: &str,
+        harness: &str,
         session: &str,
         model: &str,
         provider_raw: Option<&str>,
@@ -204,7 +204,7 @@ mod tests {
         tokens: i64,
     ) {
         conn.execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                  observation_kind, session_key, provider_id, model_id, provider_raw, event_ts_ms,
                  pricing_basis, evidence_basis,
                  uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
@@ -212,7 +212,7 @@ mod tests {
              VALUES (?1, ?2, 'm', ?3, ?4, 'token_count', ?3, ?5, ?6, ?7, ?8,
                  'metered_estimate', 'missing', ?9, 0, 0, 0, 'run', 1, 1)",
             rusqlite::params![
-                id, host, session, format!("e-{id}"),
+                id, harness, session, format!("e-{id}"),
                 provider_id, model, provider_raw, ts, tokens
             ],
         )
@@ -233,11 +233,11 @@ mod tests {
              VALUES ('run', 1, 'cli', 'succeeded', 13)", [],
         )
         .unwrap();
-        for (session, host) in [("s1", "claude-code"), ("s2", "claude-code"), ("s3", "claude-code"), ("s9", "claude-code"), ("w1", "workbuddy")] {
+        for (session, harness) in [("s1", "claude-code"), ("s2", "claude-code"), ("s3", "claude-code"), ("s9", "claude-code"), ("w1", "workbuddy")] {
             conn.execute(
-                "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, last_observed_at_ms)
+                "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, last_observed_at_ms)
                  VALUES (?1, ?2, ?1, 'm', 1000)",
-                rusqlite::params![session, host],
+                rusqlite::params![session, harness],
             )
             .unwrap();
         }
@@ -251,12 +251,12 @@ mod tests {
         fact(conn, "f6", "claude-code", "s3", "<synthetic>", None, None, 150, 0);
         // 窗口外（早于 since）：不计入。
         fact(conn, "f7", "claude-code", "s9", "deepseek-v4-flash", None, None, 1, 999);
-        // 无基准宿主：只展示、不判非原生。
+        // 无基准执行环境：只展示、不判非原生。
         fact(conn, "f8", "workbuddy", "w1", "claude-sonnet-5", None, None, 120, 5);
 
         let report = route_quality_summary(conn, 100, 200).unwrap();
-        let hosts = report["hosts"].as_array().unwrap();
-        let claude = hosts.iter().find(|h| h["host"] == "claude-code").unwrap();
+        let harnesses = report["harnesses"].as_array().unwrap();
+        let claude = harnesses.iter().find(|h| h["harness"] == "claude-code").unwrap();
         assert_eq!(claude["has_baseline"], true);
         assert_eq!(claude["totals"]["requests"], 6);
         assert_eq!(claude["totals"]["sessions"], 3);
@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(synthetic["requests"], 1);
         assert_eq!(synthetic["tokens_total"], 0);
         assert_eq!(by_family("deepseek")["request_share"], 33.3);
-        let workbuddy = hosts.iter().find(|h| h["host"] == "workbuddy").unwrap();
+        let workbuddy = harnesses.iter().find(|h| h["harness"] == "workbuddy").unwrap();
         assert_eq!(workbuddy["has_baseline"], false);
         assert_eq!(workbuddy["families"][0]["flag"], "no_baseline");
         let _ = std::fs::remove_dir_all(&dir);

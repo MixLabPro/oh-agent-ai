@@ -116,29 +116,29 @@ pub fn data_status_report_quick(conn: &Connection, db_existed: bool, enabled: bo
 /// 桌面端和后续 MCP 工具可共享同一契约。
 pub fn source_status_report(conn: &Connection) -> Result<Value, String> {
     let mut sources = Vec::new();
-    for host in crate::ingest_service::FACT_HOSTS {
+    for harness in crate::ingest_service::FACT_HARNESSES {
         let source_stats = conn.query_row(
             "SELECT COUNT(*), MAX(last_seen_at_ms),
                     COALESCE(SUM(CASE WHEN last_error_code IS NOT NULL THEN 1 ELSE 0 END), 0)
-             FROM source_files WHERE host = ?1",
-            [host],
+             FROM source_files WHERE harness = ?1",
+            [harness],
             |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, i64>(2)?)),
-        ).map_err(|e| format!("source_files query failed for {host}: {e}"))?;
+        ).map_err(|e| format!("source_files query failed for {harness}: {e}"))?;
         let import_stats = conn.query_row(
             "SELECT COUNT(*), COUNT(DISTINCT session_key), MIN(event_ts_ms), MAX(event_ts_ms)
              FROM usage_facts
-             WHERE host = ?1 AND deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'",
-            [host],
+             WHERE harness = ?1 AND deleted_at_ms IS NULL AND observation_kind != 'legacy_aggregate'",
+            [harness],
             |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?,
                     r.get::<_, Option<i64>>(2)?, r.get::<_, Option<i64>>(3)?)),
-        ).map_err(|e| format!("usage_facts query failed for {host}: {e}"))?;
+        ).map_err(|e| format!("usage_facts query failed for {harness}: {e}"))?;
         let error_codes: Vec<String> = conn.prepare(
             "SELECT DISTINCT last_error_code FROM source_files
-             WHERE host = ?1 AND last_error_code IS NOT NULL ORDER BY last_error_code",
+             WHERE harness = ?1 AND last_error_code IS NOT NULL ORDER BY last_error_code",
         ).and_then(|mut stmt| {
-            stmt.query_map([host], |r| r.get::<_, String>(0))?
+            stmt.query_map([harness], |r| r.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()
-        }).map_err(|e| format!("source error query failed for {host}: {e}"))?;
+        }).map_err(|e| format!("source error query failed for {harness}: {e}"))?;
 
         let (source_count, scanned_at_ms, failed_count) = source_stats;
         let (fact_count, session_count, first_event_at_ms, last_event_at_ms) = import_stats;
@@ -152,8 +152,8 @@ pub fn source_status_report(conn: &Connection) -> Result<Value, String> {
             json!({ "kind": "sync", "label": "立即同步" })
         };
         sources.push(json!({
-            "source_id": format!("host:{host}"),
-            "host": host,
+            "source_id": format!("harness:{harness}"),
+            "harness": harness,
             "authorization": if failed_count > 0 { "unknown_or_failed" } else { "unknown" },
             "connection_state": state,
             "scan": { "last_scanned_at_ms": scanned_at_ms, "source_count": source_count },
@@ -293,7 +293,7 @@ mod tests {
             rusqlite::params![1_700_000_000_000_i64],
         ).unwrap();
         conn.execute(
-            "INSERT INTO source_files(source_id, host, path_hash, size_bytes, mtime_ns,
+            "INSERT INTO source_files(source_id, harness, path_hash, size_bytes, mtime_ns,
                                      parser_version, first_seen_at_ms, last_seen_at_ms,
                                      last_successful_run_id)
              VALUES ('src-real', 'claude-code', 'h-real', 0, 0, 1, ?1, ?1, 'run1'),
@@ -301,12 +301,12 @@ mod tests {
             rusqlite::params![real_ts, legacy_ts],
         ).unwrap();
         conn.execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, last_observed_at_ms)
+            "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, last_observed_at_ms)
              VALUES ('sess-real', 'claude-code', 'real-1', 'test', ?1), ('sess-legacy', 'claude-code', 'legacy-1', 'test', ?2)",
             rusqlite::params![real_ts, legacy_ts],
         ).unwrap();
         conn.execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                                      observation_kind, event_ts_ms, output_tokens,
                                      source_id, ingested_run_id, created_at_ms, updated_at_ms)
              VALUES ('f-real', 'claude-code', 'test', 'real-1', 'e1', 'assistant-usage', ?1, 100,
@@ -375,7 +375,7 @@ mod tests {
         let path = agent_vitals_data::authority::default_authority_path(&home);
         let db = AuthorityDb::open(&path, 1_700_000_000_000).unwrap();
         db.conn().execute(
-            "INSERT INTO source_files(source_id, host, path_hash, size_bytes, mtime_ns,
+            "INSERT INTO source_files(source_id, harness, path_hash, size_bytes, mtime_ns,
                  parser_version, first_seen_at_ms, last_seen_at_ms, last_error_code)
              VALUES ('src-c', 'codex', 'private-hash', 10, 1, 1, 100, 200, NULL),
                     ('src-d', 'dsh', 'other-private-hash', 10, 1, 1, 100, 300, 'permission')",
@@ -384,8 +384,8 @@ mod tests {
 
         let report = source_status_report(db.conn()).unwrap();
         let sources = report["sources"].as_array().unwrap();
-        let hosts: Vec<_> = sources.iter().map(|s| s["host"].as_str().unwrap()).collect();
-        assert_eq!(hosts, crate::ingest_service::FACT_HOSTS);
+        let harnesses: Vec<_> = sources.iter().map(|s| s["harness"].as_str().unwrap()).collect();
+        assert_eq!(harnesses, crate::ingest_service::FACT_HARNESSES);
         assert_eq!(sources[0]["connection_state"], "not_detected");
         assert_eq!(sources[1]["connection_state"], "connected");
         assert_eq!(sources[2]["connection_state"], "needs_attention");
@@ -428,7 +428,7 @@ mod tests {
             "session_trace",
             &json!({
                 "path": "/etc/passwd",
-                "host": "dsh",
+                "harness": "dsh",
                 "machine_namespace": "not-used",
             }),
             Path::new("/nonexistent-data-home"),

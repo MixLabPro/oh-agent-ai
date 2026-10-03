@@ -3,7 +3,7 @@
 These tests pin the three hard constraints from ENGINEERING §6.6.1 (npm-prebuilt
 only, no scanner copy, no build step) plus the sync rules the bundle would
 otherwise drift on silently: the DSH-facing SKILL.md must keep the root skill's
-name and description, and both bodies must list dsh as a supported host.
+name and description, and both bodies must list dsh as a supported harness.
 """
 
 import json
@@ -77,17 +77,17 @@ class DshBundleTests(unittest.TestCase):
         root_fm, _ = _frontmatter("SKILL.md")
         dsh_fm, _ = _frontmatter("integrations/dsh/SKILL.md")
         # 名字与描述是路由表面。两份 SKILL.md 一旦漂移，DSH 的目录就会与前
-        # 五个宿主给出不同的路由语义，而且只在装上去之后才被发现。
+        # 五个执行环境给出不同的路由语义，而且只在装上去之后才被发现。
         self.assertEqual(dsh_fm["name"], root_fm["name"])
         self.assertEqual(dsh_fm["description"], root_fm["description"])
 
-    def test_both_bodies_list_dsh_as_a_supported_host(self):
-        # DSH-2 落地后 dsh 是可体检宿主。两份 SKILL.md 都必须把 dsh 列为受支持
-        # 宿主（而非「暂不支持」），否则 agent 会在该扫描 DSH 的时候漏掉它。
+    def test_both_bodies_list_dsh_as_a_supported_harness(self):
+        # DSH-2 落地后 dsh 是可体检执行环境。两份 SKILL.md 都必须把 dsh 列为受支持
+        # 执行环境（而非「暂不支持」），否则 agent 会在该扫描 DSH 的时候漏掉它。
         for path in ("SKILL.md", "integrations/dsh/SKILL.md"):
             _, body = _frontmatter(path)
             self.assertIn("`dsh`", body, path)
-            self.assertNotIn("not yet a health-checked host", body, path)
+            self.assertNotIn("not yet a health-checked harness", body, path)
 
     def test_package_version_tracks_the_python_cli(self):
         manifest = json.loads((DSH / "package.json").read_text(encoding="utf-8"))

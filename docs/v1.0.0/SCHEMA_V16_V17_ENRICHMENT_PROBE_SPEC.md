@@ -21,14 +21,14 @@ V17 为「测试」tab 建探针面五表。两条总纪律贯穿全文：**旧�
 1. V16 覆盖：`workflow_events` 富化 + 源锚点、`usage_facts.reasoning_effort`、`sessions` 三列
    （`probe_run_ref` / `task_profile` / `task_profile_basis`）、新表 `session_excerpts`。
 2. V17 覆盖：`probe_routes` / `probe_suites` / `probe_runs` / `probe_results` / `probe_verdicts`。
-3. 判据：所有新增列 nullable；所有新词表用 CHECK 闭集；宿主没报的信号留 NULL；
+3. 判据：所有新增列 nullable；所有新词表用 CHECK 闭集；执行环境没报的信号留 NULL；
    派生值（task_profile）必须带 basis 标注（inferred 纪律的库内形态）。
 
 ## 2. V16 DDL（语义镜像；实现为幂等 `apply_schema_v16`，见 §8-2）
 
 ```sql
 -- workflow_events：错误分类/摘录/尺寸/锚点（旧行全 NULL = 未富化）
-ALTER TABLE workflow_events ADD COLUMN error_code TEXT;         -- 'http:429' | 'jsonrpc:-32601' | 'tool:…' | 'host:<raw>'
+ALTER TABLE workflow_events ADD COLUMN error_code TEXT;         -- 'http:429' | 'jsonrpc:-32601' | 'tool:…' | 'harness:<raw>'
 ALTER TABLE workflow_events ADD COLUMN error_class TEXT
   CHECK (error_class IS NULL OR error_class IN (
     'transport','rate_limit','auth','schema_violation','method_not_found',
@@ -37,7 +37,7 @@ ALTER TABLE workflow_events ADD COLUMN error_excerpt TEXT;      -- 错误首行�
 ALTER TABLE workflow_events ADD COLUMN args_excerpt TEXT;       -- 参数摘要截断，仅本地呈现
 ALTER TABLE workflow_events ADD COLUMN request_bytes INTEGER;
 ALTER TABLE workflow_events ADD COLUMN result_bytes INTEGER;
-ALTER TABLE workflow_events ADD COLUMN native_event_id TEXT;    -- 宿主原生 id（Seq|Uuid|CallId|TurnId），锚点重定位键
+ALTER TABLE workflow_events ADD COLUMN native_event_id TEXT;    -- 执行环境原生 id（Seq|Uuid|CallId|TurnId），锚点重定位键
 ALTER TABLE workflow_events ADD COLUMN source_line INTEGER;     -- 加速 hint，自校验（漂移按 native id 重扫）
 ALTER TABLE workflow_events ADD COLUMN source_byte_offset INTEGER;
 
@@ -45,7 +45,7 @@ CREATE INDEX workflow_events_error_class_time
   ON workflow_events(error_class, event_ts_ms) WHERE error_class IS NOT NULL;
 
 -- usage_facts：effort 被静默调低（2026-04 复盘同款失效模式）的被动证据位
-ALTER TABLE usage_facts ADD COLUMN reasoning_effort TEXT;       -- 宿主报了才填；NULL = 未报
+ALTER TABLE usage_facts ADD COLUMN reasoning_effort TEXT;       -- 执行环境报了才填；NULL = 未报
 
 -- sessions：探针标记 + 任务画像位（画像填充在 P3，列先占位）
 ALTER TABLE sessions ADD COLUMN probe_run_ref TEXT;             -- 探针工作区 cwd 识别，成本视图过滤键
@@ -70,13 +70,13 @@ CREATE INDEX session_excerpts_session ON session_excerpts(session_key, ordinal);
 
 `error_class` 词表定义在 `agent-vitals-domain`（闭合枚举 + 测试钉住），Python 镜像同名常量——
 分类是 Python/Rust 字节对等契约的一部分。`error_code` 语法：`家族:细节`，家族 ∈
-{`http`,`jsonrpc`,`tool`,`host`}；宿主原生码原样进 `host:`，不做二次猜测。
+{`http`,`jsonrpc`,`tool`,`harness`}；执行环境原生码原样进 `harness:`，不做二次猜测。
 
 ## 3. session_excerpts 提取算法（双语言字节对等，golden 走评审）
 
 1. **取材**：`user_first` = 会话首条纯文本用户消息（复用适配器 `is_pure_text_user`）；
    `user_turn` = 其后每条纯文本用户消息；`assistant_final` = 末条含文本的 assistant 消息；
-   `subagent_task` = 子代理任务 prompt（宿主支持则产，不支持的宿主如实缺行）。
+   `subagent_task` = 子代理任务 prompt（执行环境支持则产，不支持的执行环境如实缺行）。
 2. **归一**：去首尾 Unicode White_Space；内部空白原样保留（归一会改字节，不做）。
    空白集 = 25 字符全集，两侧共享同一份 `WS_CHARS` 字面量并以独立构造的测试钉住
    （Python `str.strip()` 多裁 `\x1c`–`\x1f`、内建 `\s` 同理多匹配——凡空白类
@@ -107,14 +107,14 @@ CREATE INDEX session_excerpts_session ON session_excerpts(session_key, ordinal);
 CREATE TABLE probe_routes (
   route_id TEXT PRIMARY KEY,
   label TEXT NOT NULL,
-  host_kind TEXT NOT NULL CHECK (host_kind IN ('claude-code','codex')),
+  harness_kind TEXT NOT NULL CHECK (harness_kind IN ('claude-code','codex')),
   endpoint_base_url TEXT,
   credential_ref TEXT,                       -- 'ccswitch:<provider_row>' | 'env:VAR_NAME'：引用，永不存凭据本体
   model_requested TEXT NOT NULL,
   consent_granted_at_ms INTEGER,             -- 用此凭据发起测试请求的显式授权时刻；NULL = 未授权不得跑
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
-  UNIQUE(label, host_kind)
+  UNIQUE(label, harness_kind)
 );
 
 CREATE TABLE probe_suites (
@@ -188,14 +188,14 @@ CREATE TABLE probe_verdicts (
 ```
 
 判定回流 findings 走现有 `issue_instances` 体系：`source_kind` 词表加 `'probe'`（登记制，不另起表）。
-金额一律 `*_minor + currency` 分币种（`host_bills` 同款纪律，永不跨币相加）。
+金额一律 `*_minor + currency` 分币种（`harness_bills` 同款纪律，永不跨币相加）。
 
 ## 5. 锚点语义（V16 `native_event_id` + `source_line/byte_offset`）
 
 1. 只存 `source_id + native_event_id + 行号/偏移 hints`，**不存本地路径**——`source_files.path_hash`
    的既有红线不动；现场路径解析归 trace_service（呈现时）。
 2. hint 自校验：展示前比对内容指纹，偏移漂移 → 按 native id 重扫定位（降级不失败）；
-   源日志被宿主轮换掉 → 诚实降级「源已过期，仅存库内投影」，不静默 404。
+   源日志被执行环境轮换掉 → 诚实降级「源已过期，仅存库内投影」，不静默 404。
 3. 锚点只在本地呈现层命令中使用——**载体是 CLI `trace-anchors`（本地子命令，
    直接读 authority，不经 mcp dispatch）**，不进 MCP 工具面、不进 MCP 载荷——
    把"去哪找原文"的地图发给有网的 agent 等于把原文发出去。（与发现 tab 规格
@@ -211,7 +211,7 @@ CREATE TABLE probe_verdicts (
 | `data-export-private` | 原样全带 |
 | 本地 UI | 全量（含原文查看器，呈现时读取） |
 
-注意（实现后修正，2026-09-19）：v0.9.1 起 sync 已停写 `facts/<host>.jsonl`（存量
+注意（实现后修正，2026-09-19）：v0.9.1 起 sync 已停写 `facts/<harness>.jsonl`（存量
 为遗留），excerpt **只进 authority DB**，不流经任何 JSONL——「facts 文件自此携带
 用户文本」的原设想不成立，敏感面就是 `agent-vitals.sqlite3` 本身（离线单机可接受；
 redacted 导出与 MCP 面的排除规则见上表与 §10-4/5 守护测试）。
@@ -309,4 +309,4 @@ requested / effort 不符）；§6 新增：「任务画像」（task_profile，
 3. `task_profile` 规则先行、语义分类 P3 —— **已采纳**。
 4. scrub span 替换标记固定为 `[…]` —— 已采纳（改字形=双语言同时改+golden 评审）。
 5. FTS：P1 用 LIKE，P3 评估 SQLite FTS5（含中文分词形态）。
-6. `subagent_task` 各宿主覆盖顺序（claude-code 先、codex 随后）——实现时按宿主成熟度排。
+6. `subagent_task` 各执行环境覆盖顺序（claude-code 先、codex 随后）——实现时按执行环境成熟度排。

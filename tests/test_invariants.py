@@ -39,16 +39,16 @@ class InvariantTest(unittest.TestCase):
     def setUpClass(cls):
         cls.default = load("default")
         cls.all = load("all")
-        # 预算与触发数据是 Claude Code 专有的，默认多宿主模式下不给。
-        # 验这两块必须用单宿主快照，否则测到的是「正确地拒绝回答」。
+        # 预算与触发数据是 Claude Code 专有的，默认多执行环境模式下不给。
+        # 验这两块必须用单执行环境快照，否则测到的是「正确地拒绝回答」。
         cls.cc = load("claude-code")
         cls.cc_all = load("claude-code-all")
         cls.zombie0 = load("zombie-age-0")
         cls.redacted = load("redacted")
-        cls.nocfg = load("no-host-config")
+        cls.nocfg = load("no-harness-config")
         cls.cwd_home = load("cwd-is-home")
-        cls.wb = load("host-workbuddy")
-        cls.oc = load("host-openclaw")
+        cls.wb = load("harness-workbuddy")
+        cls.oc = load("harness-openclaw")
         cls.by = {s["name"]: s for s in cls.default["skills"]}
 
     # ── 1 ────────────────────────────────────────────────
@@ -65,14 +65,14 @@ class InvariantTest(unittest.TestCase):
                         a["description_budget"]["used_chars"],
                         "默认口径必须比 --all 小，否则说明未启用的副本被算进了预算")
 
-    def test_01b_multi_host_refuses_to_total_the_budget(self):
-        """跨宿主不给预算总数 —— 加总多个互不共享的上下文没有意义。
+    def test_01b_multi_harness_refuses_to_total_the_budget(self):
+        """跨执行环境不给预算总数 —— 加总多个互不共享的上下文没有意义。
 
-        这不是缺功能，是拒绝给一个会被误读的数字（见 cross_host_note）。
+        这不是缺功能，是拒绝给一个会被误读的数字（见 cross_harness_note）。
         """
         self.assertFalse(self.default["description_budget"]["available"])
         self.assertEqual(self.default["description_budget"]["scope"], "not-available")
-        self.assertIn("cross_host_note", self.default)
+        self.assertIn("cross_harness_note", self.default)
 
     def test_01c_same_directory_reached_twice_is_scanned_once(self):
         """两种写法指向同一个目录时，只能扫一遍。
@@ -95,12 +95,12 @@ class InvariantTest(unittest.TestCase):
                          "出现了语料里不存在的冲突：%r" % names)
         seen = set()
         for s_ in d["skills"]:
-            key = (s_["host"], s_["path"])
+            key = (s_["harness"], s_["path"])
             self.assertNotIn(key, seen, "同一个 skill 被收录两次：%r" % (key,))
             seen.add(key)
 
     def test_01d_no_runtime_evidence_means_null_not_zero(self):
-        """拿不到运行时证据的宿主，计数必须是 null 而不是 0。
+        """拿不到运行时证据的执行环境，计数必须是 null 而不是 0。
 
         `0` 读起来是「问到了，是零个」，而真相是「问不到」。Claude Code /
         Hermes / WorkBuddy 压根没有逐 skill 的运行时接口；Codex 与 OpenClaw
@@ -112,17 +112,17 @@ class InvariantTest(unittest.TestCase):
         两处不一致。
 
         运行时**可用**时必须给出真实计数 —— 否则就是把一个坏值换成了永远的
-        null，那同样没用。正向覆盖在 tests/test_host_stubs.py（假宿主让探测
+        null，那同样没用。正向覆盖在 tests/test_harness_stubs.py（假执行环境让探测
         成功），那里断言 codex 1/1、openclaw 1/2。
         """
         for case in (self.default, self.cc, self.nocfg):
-            for host, summary in case["host_summaries"].items():
+            for harness, summary in case["harness_summaries"].items():
                 self.assertIsNone(summary["runtime_verified_loaded_skills"],
-                                  "%s 无运行时证据时不得给出数字" % host)
+                                  "%s 无运行时证据时不得给出数字" % harness)
                 self.assertIsNone(summary["runtime_verified_unique_skills"],
-                                  "%s 无运行时证据时不得给出数字" % host)
+                                  "%s 无运行时证据时不得给出数字" % harness)
         # 反向：可发现数不受影响，仍是实打实的计数
-        self.assertGreater(self.cc["host_summaries"]["claude-code"]["discoverable_skills"], 0)
+        self.assertGreater(self.cc["harness_summaries"]["claude-code"]["discoverable_skills"], 0)
 
     def test_01e_workbuddy_builtin_plugin_skills_are_counted(self):
         """WorkBuddy 的 builtin-plugin 包也带 skill，必须计入。
@@ -390,10 +390,10 @@ class InvariantTest(unittest.TestCase):
                          r["security"]["flagged_count"])
 
     # ── 12 ───────────────────────────────────────────────
-    def test_12_missing_host_data_reports_unavailable(self):
+    def test_12_missing_harness_data_reports_unavailable(self):
         """拿不到就报 unavailable，绝不用装机时间或 mtime 代替触发数。"""
         n = self.nocfg
-        self.assertFalse(n["plugin_state"]["host_config_read"])
+        self.assertFalse(n["plugin_state"]["harness_config_read"])
         self.assertFalse(n["trigger_data"]["available"])
         self.assertEqual(n["plugin_state"]["enabled_plugins"], [],
                          "读不到配置时不得凭空给出启用列表")
@@ -413,7 +413,7 @@ class InvariantTest(unittest.TestCase):
     def test_12b_available_flag_is_true_when_data_exists(self):
         """反向：有数据时必须报 available，否则降级逻辑写反了也测不出来。"""
         self.assertTrue(self.cc["trigger_data"]["available"])
-        self.assertTrue(self.cc["plugin_state"]["host_config_read"])
+        self.assertTrue(self.cc["plugin_state"]["harness_config_read"])
         used = [s for s in self.cc["skills"] if s["usage_count"] > 0]
         self.assertTrue(used, "语料里应有带触发数的 skill")
 

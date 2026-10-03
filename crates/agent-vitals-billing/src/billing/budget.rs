@@ -34,7 +34,7 @@ const BUDGET_ORIGIN_FILE: &str = "budget-origin.json";
 ///   默认估算，`data_contract::metered_view` 的同一条取代规则）——2026-09-17 之前只
 ///   读 `MeteredEstimate`，归因把估算搬进 `MeteredDeclared` 后卡片直接归零，用户看到
 ///   「¥0 / ¥500」以为没消耗。
-/// - `confirmed`（已确认支出预算）只看真实按量/宿主账单。
+/// - `confirmed`（已确认支出预算）只看真实按量/执行环境账单。
 ///
 /// 固定订阅和 API 等价值都不在这里——订阅月费按天摊进
 /// [`budget_profiles_status_sql_at`] 的 `subscription_*` 字段，与按量分开报。
@@ -44,13 +44,13 @@ pub fn budget_profile_spent_minor<'a, I>(
     currency: &str,
 ) -> i64
 where
-    I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
+    I: IntoIterator<Item = &'a agent_vitals_data::projection::HarnessAmount>,
 {
     use agent_vitals_data::projection::BillingBasis;
     let mut total = 0.0f64;
     for amount in amounts.into_iter().filter(|a| a.currency.as_deref() == Some(currency)) {
         let get = |b: BillingBasis| amount.amounts_by_basis.get(&b).copied().unwrap_or(0.0);
-        let actual = get(BillingBasis::MeteredActual) + get(BillingBasis::HostBilled);
+        let actual = get(BillingBasis::MeteredActual) + get(BillingBasis::HarnessBilled);
         total += match profile_id {
             // 同 provider 内账单取代估算，与 metered_view 一致。
             "estimate" => if actual > 0.0 { actual } else { get(BillingBasis::MeteredDeclared) + get(BillingBasis::MeteredEstimate) },
@@ -64,13 +64,13 @@ where
 /// 预算币种之外仍有可计入口径的金额时，已知金额只是下界，不能报安全。
 fn budget_profile_has_unconverted<'a, I>(amounts: I, profile_id: &str, currency: &str) -> bool
 where
-    I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
+    I: IntoIterator<Item = &'a agent_vitals_data::projection::HarnessAmount>,
 {
     use agent_vitals_data::projection::BillingBasis;
     amounts.into_iter().any(|amount| {
         if amount.currency.as_deref() == Some(currency) { return false; }
         let get = |b: BillingBasis| amount.amounts_by_basis.get(&b).copied().unwrap_or(0.0);
-        let actual = get(BillingBasis::MeteredActual) + get(BillingBasis::HostBilled);
+        let actual = get(BillingBasis::MeteredActual) + get(BillingBasis::HarnessBilled);
         (match profile_id {
             "estimate" => if actual > 0.0 { actual } else { get(BillingBasis::MeteredDeclared) + get(BillingBasis::MeteredEstimate) },
             "confirmed" => actual,
@@ -87,7 +87,7 @@ pub fn subscription_fees_minor<'a, I>(
     _pricing: &serde_json::Value,
 ) -> (i64, bool, Vec<String>)
 where
-    I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
+    I: IntoIterator<Item = &'a agent_vitals_data::projection::HarnessAmount>,
 {
     use agent_vitals_data::projection::BillingBasis;
     let mut total = 0.0f64;
@@ -95,11 +95,11 @@ where
     for amount in amounts {
         let Some(fee) = amount.amounts_by_basis.get(&BillingBasis::FixedSubscription).copied() else { continue };
         if fee <= 0.0 { continue; }
-        let Some(cur) = amount.currency.as_deref() else { skipped.push(amount.host_id.clone()); continue };
+        let Some(cur) = amount.currency.as_deref() else { skipped.push(amount.harness_id.clone()); continue };
         if cur == currency {
             total += fee;
         } else {
-            skipped.push(amount.host_id.clone());
+            skipped.push(amount.harness_id.clone());
         }
     }
     (agent_vitals_domain::util::pyround(total * 100.0, 0) as i64, false, skipped)
@@ -109,7 +109,7 @@ where
 ///
 /// 只折「同币相加之外」的订阅：每笔经 [`agent_vitals_domain::fx::FxPolicy::convert`]，
 /// 汇率缺失 / 币种未知 → 仍记入 `still_skipped`（预算继续报部分覆盖，不用默认常量顶）。
-/// 返回 (折算后的分, 每笔折算的出处, 仍未折算的宿主)。折算值永远是约数——调用方必须把
+/// 返回 (折算后的分, 每笔折算的出处, 仍未折算的执行环境)。折算值永远是约数——调用方必须把
 /// 出处写进预算 JSON 并在界面标 ≈；折算部分**不触发支出警报**（只提示）。
 pub fn subscription_fees_converted<'a, I>(
     amounts: I,
@@ -117,7 +117,7 @@ pub fn subscription_fees_converted<'a, I>(
     policy: &agent_vitals_domain::fx::FxPolicy,
 ) -> (i64, Vec<Value>, Vec<String>)
 where
-    I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
+    I: IntoIterator<Item = &'a agent_vitals_data::projection::HarnessAmount>,
 {
     use agent_vitals_data::projection::BillingBasis;
     use agent_vitals_domain::fx::RateSource;
@@ -127,13 +127,13 @@ where
     for amount in amounts {
         let Some(fee) = amount.amounts_by_basis.get(&BillingBasis::FixedSubscription).copied() else { continue };
         if fee <= 0.0 { continue; }
-        let Some(cur) = amount.currency.as_deref() else { skipped.push(amount.host_id.clone()); continue };
+        let Some(cur) = amount.currency.as_deref() else { skipped.push(amount.harness_id.clone()); continue };
         if cur == currency { continue; } // 同币已由 subscription_fees_minor 计入
         match policy.convert(fee, cur, currency) {
             Some(c) => {
                 total += c.target_amount;
                 notes.push(json!({
-                    "host": amount.host_id,
+                    "harness": amount.harness_id,
                     "from": c.source_currency,
                     "source_amount_minor": agent_vitals_domain::util::pyround(fee * 100.0, 0) as i64,
                     "rate": c.rate,
@@ -141,7 +141,7 @@ where
                     "rate_date": c.rate_date,
                 }));
             }
-            None => skipped.push(amount.host_id.clone()),
+            None => skipped.push(amount.harness_id.clone()),
         }
     }
     (agent_vitals_domain::util::pyround(total * 100.0, 0) as i64, notes, skipped)
@@ -166,7 +166,7 @@ pub fn budget_profile_has_unresolved<'a, I>(
     currency: &str,
 ) -> bool
 where
-    I: IntoIterator<Item = &'a agent_vitals_data::projection::HostAmount>,
+    I: IntoIterator<Item = &'a agent_vitals_data::projection::HarnessAmount>,
 {
     let relevant = match profile_id {
         "estimate" => &[
@@ -175,7 +175,7 @@ where
         ][..],
         "confirmed" => &[
             agent_vitals_data::projection::BillingBasis::MeteredActual,
-            agent_vitals_data::projection::BillingBasis::HostBilled,
+            agent_vitals_data::projection::BillingBasis::HarnessBilled,
         ][..],
         _ => return false,
     };
@@ -426,7 +426,7 @@ fn parse_scalar(text: &str) -> Value {
 /// 读 config.toml 的 `[budget]` 节并与默认值深合并 —— 镜像
 /// `budget.py::load_config`（极简 TOML 解析，不引 toml 依赖；merge 段在 core
 /// `merged_config`）。缺文件 / 缺节 / 缺字段一律走默认 —— 配置缺失降级而非
-/// 崩溃，与「host 能力缺失时不臆造」同一纪律。
+/// 崩溃，与「harness 能力缺失时不臆造」同一纪律。
 #[cfg(test)]
 fn load_config() -> Value {
     load_config_at(&data_home())
@@ -672,11 +672,11 @@ pub fn budget_show_month(month: &str, json_out: bool) {
 // 与上面的 `budget_show`（Python 差分看守的 legacy 链）是**并行新面**：
 // 配置源自权威库 `budget_config` 单行表（首次使用时从旧 config.toml 一次性
 // seed），支出源自 `SqlSummaryRepository::monthly_summary` 的 by_provider
-// CNY 列——但**只取按量档**（`MeteredActual + HostBilled`），排除
+// CNY 列——但**只取按量档**（`MeteredActual + HarnessBilled`），排除
 // `FixedSubscription`。**判断全部 minor 整数比较**（纪律 2「金额不落浮点」
 // ——pyround 一次之后不再回浮点）。
 //
-// 口径 = **跨宿主「按量实付」的成本闸门**（PM 决策 2026-09-07）：预算告警
+// 口径 = **跨执行环境「按量实付」的成本闸门**（PM 决策 2026-09-07）：预算告警
 // 的职责是对「越用越多、且用户当下能干预」的花钱设闸门——那就是按量实付。
 // 订阅月费月初已付、不因用户行为而变，摊进每 5 分钟刷新的告警分子只会让
 // 月初那天数字凭空涨一截然后整月杵着。订阅在完整面板单列「本月订阅
@@ -791,9 +791,9 @@ pub fn budget_status_sql_at(data_home: &Path, month: &str) -> Option<Value> {
             },
         )
     };
-    // 预算 = **跨宿主「按量实付」的成本闸门**（PM 决策 2026-09-07，见
+    // 预算 = **跨执行环境「按量实付」的成本闸门**（PM 决策 2026-09-07，见
     // docs/AGENT_VITALS_V0_9_1_IMPLEMENTATION_PLAN.md「预算口径」）：
-    // by_provider 的 CNY 列里取 `MeteredActual + HostBilled`——**排除
+    // by_provider 的 CNY 列里取 `MeteredActual + HarnessBilled`——**排除
     // FixedSubscription**。理由：订阅月费月初已付、不因用户当下行为而变，
     // 摊进每 5 分钟刷新的告警分子 = 拿一个拧不动的常数挤占闸门的判断空间
     // （月初那天数字凭空涨一截然后整月杵着）。订阅在完整面板单列一行
@@ -889,12 +889,12 @@ fn ms_to_iso_utc(ms: i64) -> String {
 /// `snoozed_until`/`today_cost`/`month_cost`/`monthly_cny`/`peak_over`/
 /// `adaptive_floor_applied`），托盘/CLI 直接消费。
 ///
-/// **口径 = 跨宿主「按量实付」CNY**（PM 决策 2026-09-07）。当前 CNY
+/// **口径 = 跨执行环境「按量实付」CNY**（PM 决策 2026-09-07）。当前 CNY
 /// MeteredActual 的唯一来源是 DSH（deepseek-official / shengsuanyun），与
 /// `budget_status_sql` 的 `metered_cny_minor` 同一条 by_provider CNY-summable
 /// 边界——claude relay 的 CNY 是 MeteredEstimate（`summable_into_total` 为
 /// false）、codex 是 ApiEquivalent、minimax/glm 是 FixedSubscription，都不进
-/// 按量预算。第二个 CNY MeteredActual 源出现时这里扩成多宿主 days 合并（届时
+/// 按量预算。第二个 CNY MeteredActual 源出现时这里扩成多执行环境 days 合并（届时
 /// 两侧背离即「有新按量源」信号）。
 ///
 /// `month_days` = DSH `peaked_days_map`（当月北京毫秒窗），与 `month.json` 的
@@ -993,15 +993,15 @@ mod tests {
 
     #[test]
     fn foreign_currency_subscriptions_convert_with_provenance_and_unknown_currencies_stay_skipped() {
-        use agent_vitals_data::projection::{BillingBasis, Freshness, HostAmount};
+        use agent_vitals_data::projection::{BillingBasis, Freshness, HarnessAmount};
         use agent_vitals_domain::fx::{FxPolicy, UserRate};
-        let host = |id: &str, currency: Option<&str>, fee: f64| {
+        let harness = |id: &str, currency: Option<&str>, fee: f64| {
             let mut by = BTreeMap::new();
             by.insert(BillingBasis::FixedSubscription, fee);
-            HostAmount { host_id: id.into(), amounts_by_basis: by, currency: currency.map(String::from), has_unresolved: false,
+            HarnessAmount { harness_id: id.into(), amounts_by_basis: by, currency: currency.map(String::from), has_unresolved: false,
                 evidence_basis: None, pricing_method: None, unresolved_reason: None, freshness: Freshness::unavailable() }
         };
-        let amounts = [host("minimax", Some("CNY"), 162.0), host("anthropic", Some("USD"), 40.0), host("odd", Some("XXX"), 9.0), host("nocur", None, 5.0)];
+        let amounts = [harness("minimax", Some("CNY"), 162.0), harness("anthropic", Some("USD"), 40.0), harness("odd", Some("XXX"), 9.0), harness("nocur", None, 5.0)];
         // 手动汇率 6.8：USD 40 → CNY 272
         let policy = FxPolicy::bundled().unwrap().with_user_rate(UserRate { from: "USD".into(), to: "CNY".into(), rate: 6.8, as_of: None }).unwrap();
         let (converted, notes, skipped) = subscription_fees_converted(amounts.iter(), "CNY", &policy);
@@ -1017,36 +1017,36 @@ mod tests {
         assert_eq!(notes[0]["rate_source"], "bundled_snapshot");
         assert!(notes[0]["rate_date"].as_str().is_some());
         // 同币种订阅不被重复计入
-        let (converted, _, _) = subscription_fees_converted([host("a", Some("CNY"), 100.0)].iter(), "CNY", &bundled);
+        let (converted, _, _) = subscription_fees_converted([harness("a", Some("CNY"), 100.0)].iter(), "CNY", &bundled);
         assert_eq!(converted, 0);
     }
 
     #[test]
     fn budget_profiles_sum_only_matching_currency_and_basis() {
-        use agent_vitals_data::projection::{BillingBasis, Freshness, HostAmount};
+        use agent_vitals_data::projection::{BillingBasis, Freshness, HarnessAmount};
         let mut estimate = BTreeMap::new();
         estimate.insert(BillingBasis::MeteredEstimate, 123.45);
         estimate.insert(BillingBasis::FixedSubscription, 999.0);
         let mut actual = BTreeMap::new();
         actual.insert(BillingBasis::MeteredActual, 200.0);
-        actual.insert(BillingBasis::HostBilled, 1.5);
+        actual.insert(BillingBasis::HarnessBilled, 1.5);
         let mut usd = BTreeMap::new();
         usd.insert(BillingBasis::MeteredEstimate, 77.0);
         let mut amounts = [
-            HostAmount {
-                host_id: "claude-code".into(), amounts_by_basis: estimate,
+            HarnessAmount {
+                harness_id: "claude-code".into(), amounts_by_basis: estimate,
                 currency: Some("CNY".into()), has_unresolved: false,
                 evidence_basis: None, pricing_method: None, unresolved_reason: None,
                 freshness: Freshness::unavailable(),
             },
-            HostAmount {
-                host_id: "dsh".into(), amounts_by_basis: actual,
+            HarnessAmount {
+                harness_id: "dsh".into(), amounts_by_basis: actual,
                 currency: Some("CNY".into()), has_unresolved: false,
                 evidence_basis: None, pricing_method: None, unresolved_reason: None,
                 freshness: Freshness::unavailable(),
             },
-            HostAmount {
-                host_id: "codex".into(), amounts_by_basis: usd,
+            HarnessAmount {
+                harness_id: "codex".into(), amounts_by_basis: usd,
                 currency: Some("USD".into()), has_unresolved: false,
                 evidence_basis: None, pricing_method: None, unresolved_reason: None,
                 freshness: Freshness::unavailable(),
@@ -1291,7 +1291,7 @@ mod tests {
     fn seed_fact_min(
         db: &agent_vitals_data::authority::AuthorityDb,
         fact_id: &str,
-        host: &str,
+        harness: &str,
         model: &str,
         ts_ms: i64,
         u: i64,
@@ -1306,12 +1306,12 @@ mod tests {
             .unwrap();
         db.conn()
             .execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                      source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                      event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                      output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1, ?2, 'm', 's', ?1, 'turn', NULL, ?3, ?4, 0, ?5, 0, 0, ?6, 'run', 1, 1)",
-                rusqlite::params![fact_id, host, model, ts_ms, u, o],
+                rusqlite::params![fact_id, harness, model, ts_ms, u, o],
             )
             .unwrap();
     }

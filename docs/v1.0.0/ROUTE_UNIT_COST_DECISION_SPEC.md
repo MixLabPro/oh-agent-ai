@@ -26,7 +26,7 @@
 
 | 词 | 定义 | 备注 |
 |---|---|---|
-| **线路 (route)** | `(host, provider, model_family)` | 决策粒度。同一模型经不同线路命中率差 4–30 倍（§3.4） |
+| **线路 (route)** | `(harness, provider, model_family)` | 决策粒度。同一模型经不同线路命中率差 4–30 倍（§3.4） |
 | **model_family** | 原始 `model_id` 归一后的模型族（§5.1.1） | **聚合前先归一**，否则同一线路拆成多行 |
 | **用量结构 (mix)** | 四桶占比 `{uncached, cache_read, cache_write, output}`，Σ=1 | 来自用户自己的 facts |
 | **命中率 (hit)** | `cache_read / (uncached + cache_read + cache_write)` | 复用 `domain/cost/billing.rs::cache_hit_ratio` |
@@ -198,7 +198,7 @@ estimated_excess      = Σ_d extra_cost_d
 ### 5.1 线路四桶逐日聚合（新增，runtime）
 
 ```sql
-SELECT host, provider_id, model_id, <统计时区日(event_ts_ms)> AS day,
+SELECT harness, provider_id, model_id, <统计时区日(event_ts_ms)> AS day,
        SUM(uncached_input_tokens), SUM(cache_read_tokens), SUM(cache_write_tokens), SUM(output_tokens),
        SUM(CASE WHEN event_peak THEN uncached_input_tokens + cache_read_tokens ELSE 0 END) AS peak_input,
        COUNT(*) AS facts
@@ -211,7 +211,7 @@ GROUP BY 1,2,3,4
 
 #### 5.1.1 线路身份：先归一再聚合
 
-SQL 按原始 `model_id` 分组只是取数；**在任何统计之前**，Rust 侧按 `route::model_family(model_id)` 把 `deepseek/deepseek-v4-flash`、`deepseek-v4-flash`、`custom-local:deepseek/deepseek-v4`、`deepseek-v4-flash-0731` 折到同一 `model_family`，再按 `(host, provider, model_family, day)` 合并四桶。归一规则在 domain（Rust ↔ Python 同步），是**显式映射表 + 后缀剥离规则**，未命中映射的 `model_id` 原样作为 family 并标 `family_mapped: false`。AC15 钉住：同一线路在 `routes` 中只出现一行。
+SQL 按原始 `model_id` 分组只是取数；**在任何统计之前**，Rust 侧按 `route::model_family(model_id)` 把 `deepseek/deepseek-v4-flash`、`deepseek-v4-flash`、`custom-local:deepseek/deepseek-v4`、`deepseek-v4-flash-0731` 折到同一 `model_family`，再按 `(harness, provider, model_family, day)` 合并四桶。归一规则在 domain（Rust ↔ Python 同步），是**显式映射表 + 后缀剥离规则**，未命中映射的 `model_id` 原样作为 family 并标 `family_mapped: false`。AC15 钉住：同一线路在 `routes` 中只出现一行。
 
 ### 5.2 provider 缺失 → 推断线路只显示、不结论
 
@@ -238,14 +238,14 @@ SQL 按原始 `model_id` 分组只是取数；**在任何统计之前**，Rust �
 
 - Codex：`data_codex_quota`（plan 快照，正向周期，仓库已读）。
 - Claude Pro：`quotaLimits` 拒绝事件（§8.3.1，仓库尚无读取器）。
-- 用户声明月费：`billing_declarations` / `host_bills`，只用于"值回月费倍数"，不提供额度。
+- 用户声明月费：`billing_declarations` / `harness_bills`，只用于"值回月费倍数"，不提供额度。
 
 ## 6. 架构落点
 
 | 层 | 内容 | 锁步 |
 |---|---|---|
 | `agent-vitals-domain::route`（新，纯） | `model_family`、`effective_unit_cost(mix, snapshot)`、`switch_first_round_cost`、`stability(hit_series, threshold)`、`route_threshold`、`w1_excess(series, threshold, snapshot)`、`rank_routes`、`weekly_rank_delta` | Rust ↔ Python (`agent_vitals/agent/route.py`) 差分；单测用 §3.4 / §4.6 真机数字钉住 |
-| `agent-vitals-hosts::claude_code` | `quota_limits` 读取器（§8.3.1） | Python 镜像；差分钉 36 条真机事件 |
+| `agent-vitals-harnesses::claude_code` | `quota_limits` 读取器（§8.3.1） | Python 镜像；差分钉 36 条真机事件 |
 | `agent-vitals-runtime::summary` | `route_daily_mix` SQL + memo；family 归一后聚合；`route_decision` DTO；`route_weekly_ranks` 重放 | 形状由 Rust 序列化定义，mock 注明出处 |
 | `agent-vitals-data` | `pricing_snapshots` 增加 fx 字段；`route_weekly_ranks` 投影表 | 可重建 |
 | Tauri | 命令 `route_decision { days }`；`quota_window_alerts` tick | 与 `data_codex_quota` 并发 |
@@ -262,7 +262,7 @@ SQL 按原始 `model_id` 分组只是取数；**在任何统计之前**，Rust �
   "overall_hit": 0.95,
   "routes": [
     {
-      "host": "claude-code", "provider": null, "provider_inferred": "deepseek", "model_family": "deepseek-v4-flash",
+      "harness": "claude-code", "provider": null, "provider_inferred": "deepseek", "model_family": "deepseek-v4-flash",
       "billing": "unknown",                       // metered | subscription | unknown（推断线路恒 unknown）
       "currency": "CNY",
       "tokens_window": 1416600000,
@@ -279,14 +279,14 @@ SQL 按原始 `model_id` 分组只是取数；**在任何统计之前**，Rust �
       "note": "路由待确认；按模型名参考估价"
     },
     {
-      "host": "codex", "provider": "openai", "provider_inferred": null, "model_family": "gpt-5.6-luna",
+      "harness": "codex", "provider": "openai", "provider_inferred": null, "model_family": "gpt-5.6-luna",
       "billing": "subscription", "currency": "USD",
       "steady_unit": 0.19, "switch_unit": 1.44, "unit_basis": "official-price-card",
       "marginal": 0,
       "quota": { "state": "available", "remaining_pct": 62, "resets_at": 1789000000, "observed_at": "2026-09-13T09:32:00Z" }
     },
     {
-      "host": "claude-code", "provider": "anthropic", "model_family": "claude-sonnet-5",
+      "harness": "claude-code", "provider": "anthropic", "model_family": "claude-sonnet-5",
       "billing": "subscription",
       "quota": { "state": "unknown", "window": "five_hour", "resets_at": null, "rejections_7d": 3, "fallback_available": true }
                                                   // Claude Pro 永无 remaining_pct；state ∈ exhausted|unknown
@@ -303,7 +303,7 @@ SQL 按原始 `model_id` 分组只是取数；**在任何统计之前**，Rust �
       "hit_median": 0.35, "excess_miss_tokens": 337000000, "estimated_excess_cny": 2932, "basis": "estimated",
       "peak_basis": "peak-upper-bound" }
   ],
-  "unpriced_routes": [ { "host": "claude-code", "model_family": "glm-5.3-flash", "tokens_window": 579000000 } ]
+  "unpriced_routes": [ { "harness": "claude-code", "model_family": "glm-5.3-flash", "tokens_window": 579000000 } ]
 }
 ```
 
@@ -413,7 +413,7 @@ unknown ──(rejected, resetsAt=R)──► exhausted until R ──(now ≥ R
 | AC15 | 同一 `model_family` 的多个原始 `model_id` 在 `routes` 中只出现一行；未命中映射的 id 原样保留并标记 | domain + runtime |
 | AC16 | 线路阈值 = 30 天中位 − 8pp（clamp 60–95%）；合格日 < 10 回退默认表；Codex 中位 94% 线路的 85% 日不判低于阈值 | domain 单测（真机夹具） |
 | AC17 | W1 金额按 §4.6 复算：胜算云事故日 `excess_miss ≈ 337M`、峰值估算 ≈ ¥2,932；缺 `P.u/P.r` 时金额 `null` 只报 tokens；< ¥10 显示"少量" | domain 单测（真机夹具） |
-| AC18 | Claude Code 读取器解析 36 条真机 `quotaLimits` 字段齐全；Python 差分一致 | hosts + 差分 |
+| AC18 | Claude Code 读取器解析 36 条真机 `quotaLimits` 字段齐全；Python 差分一致 | harnesses + 差分 |
 | AC19 | Claude Pro 三态转换正确；任何状态 DTO 无 `remaining_pct` | domain 单测 |
 | AC20 | 同 `(线路, resets_at, 档)` 只投递一次；同窗口多条 rejected 合并；开关关闭不投递 | runtime（复用 budget_notifications 夹具） |
 | AC21 | 通知正文在 `after_quota = null` 时不含"建议"子句 | runtime 单测 |
@@ -432,7 +432,7 @@ unknown ──(rejected, resetsAt=R)──► exhausted until R ──(now ≥ R
 ## 11. 开放问题
 
 1. `incident` 判定里"单日 token ≥ 窗口 20%"的权重——胜算云案例满足，但要防止一个重度使用日被误判为事故。
-2. 峰谷加权：`event_peak` 在 Claude Code 线路上是否可靠（DSH 有，其他宿主可能恒 0）。
+2. 峰谷加权：`event_peak` 在 Claude Code 线路上是否可靠（DSH 有，其他执行环境可能恒 0）。
 3. 推荐是否限定"最近 7 天实际在用的线路"（避免推荐三周没碰的线路）。
 4. 周排名候选集是否包含"本周没用但价卡有更新"的线路（新模型/降价提醒 vs 导购）。
 5. 自然周 vs 滚动 7 天：先自然周，滚动窗口留给趋势视图。

@@ -21,22 +21,22 @@ pub enum SyncRun {
     Paused,
     /// 暂停开关本身读不了：不猜，不跑。
     ControlUnreadable(String),
-    /// 同步跑完（宿主级读失败在 `report.hosts[].errors` 里，不算整轮失败——与 CLI
+    /// 同步跑完（执行环境级读失败在 `report.harnesses[].errors` 里，不算整轮失败——与 CLI
     /// 退出码 0 的语义一致）。
     Completed(SyncReport),
     /// 整轮失败（权威库打不开、锁拿不到、或 panic）。
     Failed(String),
 }
 
-/// 跑一轮同步。`hosts` 为定向同步的宿主集合；`None` 或空集合 = 全宿主（空集合
-/// 按全宿主处理，与 CLI `--hosts ""` 的守卫一致——否则就是一轮什么都不做的同步）。
-pub fn run_sync(data_home: &Path, hosts: Option<&BTreeSet<String>>) -> SyncRun {
+/// 跑一轮同步。`harnesses` 为定向同步的执行环境集合；`None` 或空集合 = 全执行环境（空集合
+/// 按全执行环境处理，与 CLI `--harnesses ""` 的守卫一致——否则就是一轮什么都不做的同步）。
+pub fn run_sync(data_home: &Path, harnesses: Option<&BTreeSet<String>>) -> SyncRun {
     match super::sync_control::is_paused(data_home) {
         Ok(true) => return SyncRun::Paused,
         Ok(false) => {}
         Err(error) => return SyncRun::ControlUnreadable(error),
     }
-    let only = hosts.filter(|set| !set.is_empty());
+    let only = harnesses.filter(|set| !set.is_empty());
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sync_facts_filtered(data_home, only))) {
         Ok(Ok(report)) => SyncRun::Completed(report),
         Ok(Err(error)) => SyncRun::Failed(error),
@@ -52,9 +52,9 @@ pub fn run_sync(data_home: &Path, hosts: Option<&BTreeSet<String>>) -> SyncRun {
     }
 }
 
-/// 同步报告的一行人话摘要（托盘 / 工作台状态面用）。宿主级错误如实计数，不吞。
+/// 同步报告的一行人话摘要（托盘 / 工作台状态面用）。执行环境级错误如实计数，不吞。
 pub fn summarize(report: &SyncReport) -> String {
-    let errors: usize = report.hosts.iter().map(|h| h.errors.len()).sum();
+    let errors: usize = report.harnesses.iter().map(|h| h.errors.len()).sum();
     let mut text = format!("新增 {} 条", report.total_appended);
     if errors > 0 {
         text.push_str(&format!("，{errors} 个文件读取失败（下轮重试）"));
@@ -89,8 +89,8 @@ mod tests {
     fn summary_counts_file_errors_honestly() {
         let mut report = SyncReport { total_appended: 3, ..Default::default() };
         assert_eq!(summarize(&report), "新增 3 条");
-        report.hosts.push(super::super::sync_service::HostSyncReport {
-            host: "codex".into(),
+        report.harnesses.push(super::super::sync_service::HarnessSyncReport {
+            harness: "codex".into(),
             errors: vec!["a".into(), "b".into()],
             ..Default::default()
         });

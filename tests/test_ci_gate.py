@@ -77,7 +77,7 @@ class GateCase(unittest.TestCase):
     def run_cmd(self, *argv, expect=None):
         env = isolated_home_env(self.tmp)
         env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
-        r = subprocess.run(SCAN_CMD + list(argv) + ["--host", "claude-code"],
+        r = subprocess.run(SCAN_CMD + list(argv) + ["--harness", "claude-code"],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
         if expect is not None:
@@ -187,10 +187,10 @@ class TestNewOnlyComparesDiagnostics(GateCase):
 
 
 class TestGlobalFlagsWorkBeforeSubcommand(GateCase):
-    """`scan.py --host claude-code list` 必须真的只扫 claude-code。
+    """`scan.py --harness claude-code list` 必须真的只扫 claude-code。
 
     argparse 的子解析器会把自己的默认值写进同一个 namespace，于是父级解析出的
-    `claude-code` 被子解析器的默认值 `all` 覆盖 —— **命令静默地扫了所有宿主，
+    `claude-code` 被子解析器的默认值 `all` 覆盖 —— **命令静默地扫了所有执行环境，
     而用户以为自己限定了一个**。
 
     这条从 `list` 落地起就在，一直没被发现，因为所有测试都把参数写在子命令
@@ -201,7 +201,7 @@ class TestGlobalFlagsWorkBeforeSubcommand(GateCase):
     没给就别碰这个属性。
     """
 
-    def _host_of(self, *argv):
+    def _hostname_of(self, *argv):
         env = isolated_home_env(self.tmp)
         env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
         out = self.tmp / "o.json"
@@ -209,15 +209,15 @@ class TestGlobalFlagsWorkBeforeSubcommand(GateCase):
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        return json.loads(out.read_text(encoding="utf-8"))["host_selection"]
+        return json.loads(out.read_text(encoding="utf-8"))["harness_selection"]
 
-    def test_host_before_and_after_agree(self):
-        self.assertEqual(self._host_of("--host", "claude-code"), "claude-code")
+    def test_harness_before_and_after_agree(self):
+        self.assertEqual(self._hostname_of("--harness", "claude-code"), "claude-code")
 
     def test_budget_before_subcommand_is_honoured(self):
         env = isolated_home_env(self.tmp)
         env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
-        r = subprocess.run(SCAN_CMD + ["--budget", "7", "--host", "claude-code",
+        r = subprocess.run(SCAN_CMD + ["--budget", "7", "--harness", "claude-code",
                                        "doctor", "--no-snapshot"],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
@@ -226,7 +226,7 @@ class TestGlobalFlagsWorkBeforeSubcommand(GateCase):
     def test_zombie_age_before_subcommand_is_honoured(self):
         env = isolated_home_env(self.tmp)
         env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
-        r = subprocess.run(SCAN_CMD + ["--zombie-age", "77", "--host", "claude-code",
+        r = subprocess.run(SCAN_CMD + ["--zombie-age", "77", "--harness", "claude-code",
                                        "list"],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
@@ -237,7 +237,7 @@ class TestGlobalFlagsWorkBeforeSubcommand(GateCase):
         env = isolated_home_env(self.tmp)
         env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.snaps)
         r = subprocess.run(SCAN_CMD + ["list", "--zombie-age", "88",
-                                       "--host", "claude-code"],
+                                       "--harness", "claude-code"],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True)
         self.assertIn("zombie=88d", r.stdout)
@@ -269,7 +269,7 @@ class TestGateIsRenderedAfterTheReport(GateCase):
         try:
             env = isolated_home_env(self.tmp)
             env["AGENT_VITALS_SNAPSHOT_DIR"] = str(ro / "snaps")
-            r = subprocess.run(SCAN_CMD + ["--host", "claude-code"],
+            r = subprocess.run(SCAN_CMD + ["--harness", "claude-code"],
                                cwd=str(self.tmp / "workdir"), env=env,
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 1, "退出码应当只由发现决定")
@@ -296,7 +296,7 @@ class TestBothImplementationsGateIdentically(GateCase):
                 for cmd, tag in ((py, "py"), (rs, "rs")):
                     env = isolated_home_env(self.tmp)
                     env["AGENT_VITALS_SNAPSHOT_DIR"] = str(self.tmp / ("snap-" + tag))
-                    r = subprocess.run(cmd + extra + ["--host", "claude-code"],
+                    r = subprocess.run(cmd + extra + ["--harness", "claude-code"],
                                        cwd=str(self.tmp / "workdir"), env=env,
                                        capture_output=True, text=True)
                     got.append((r.returncode, mask(r.stdout), mask(r.stderr)))

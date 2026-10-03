@@ -20,7 +20,7 @@ span 恰好一条 usage（真机 5,067/5,067）→ `source_event_id = spanId` �
 未归属 trace（无 `trace.sessionId`）按 Codex 先例计 `attempts["unattributed"]`，不发事实
 ——`native_session_id` 是身份必填字段，编一个就是编 session。
 
-与 Rust `hosts/workbuddy/sources/usage_fact.rs` 逐字节对齐（`tests/test_workbuddy_usage_fact.py`）。
+与 Rust `harnesses/workbuddy/sources/usage_fact.rs` 逐字节对齐（`tests/test_workbuddy_usage_fact.py`）。
 """
 
 from pathlib import Path
@@ -29,7 +29,7 @@ from typing import NamedTuple
 from ..adapters import workbuddy_traces
 from .usage_fact import build_usage_fact
 
-HOST = "workbuddy"
+HARNESS = "workbuddy"
 OBSERVATION_KIND = "assistant-usage"
 SKIP = "skip"
 UNREADABLE = "unreadable"
@@ -52,12 +52,12 @@ def _span_to_usage_fact(span, native_session_id, machine_namespace, source_profi
     started_at = span.get("started_at")
     fields = {
         "machine_namespace": machine_namespace,
-        "host": HOST,
+        "harness": HARNESS,
         "source_profile": source_profile,
         "native_session_id": native_session_id,
         "source_event_id": span["span_id"],
         "observation_kind": OBSERVATION_KIND,
-        # spanId 是宿主原生 id——不像 Codex 的 token_count 要靠字节偏移派生。
+        # spanId 是执行环境原生 id——不像 Codex 的 token_count 要靠字节偏移派生。
         "identity_basis": "native",
         # span.startedAt 原样 ISO 毫秒串；缺失 → None（诚实无观测时间）。
         "event_ts_utc": started_at,
@@ -88,7 +88,7 @@ def _span_to_usage_fact(span, native_session_id, machine_namespace, source_profi
 
 def workbuddy_traces_to_usage_facts(root, *, machine_namespace, source_profile="default"):
     """`<workbuddy_root>/traces/**` → `UsageFactEmitResult`。facts 按 trace 文件路径序、
-    span 原序。不写盘。root / traces 目录不存在 → OSError（CLI exit 2，与其他宿主的
+    span 原序。不写盘。root / traces 目录不存在 → OSError（CLI exit 2，与其他执行环境的
     usage-facts 同款：源不可读不冒充 0 事实）。"""
     root = Path(root)
     if not root.is_dir():
@@ -160,7 +160,7 @@ def _emit_trace(tr, machine_namespace, source_profile, out):
 
 
 __all__ = [
-    "HOST",
+    "HARNESS",
     "OBSERVATION_KIND",
     "UsageFactEmitResult",
     "workbuddy_trace_file_to_usage_facts",

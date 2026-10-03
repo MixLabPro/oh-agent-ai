@@ -418,12 +418,12 @@ pub fn approval_latencies(events: &[Value]) -> Value {
 /// 顺带给出 `decision`（`pass`/`deny`/其它）的分布计数——这是
 /// `GOVERNANCE_BACKLOG.md` 提到的"不需要基线就能用"的信号。
 ///
-/// ⚠️ **D4 的宿主前提尚未验证**：`integrations/dsh-client/src/host/index.ts` 的
+/// ⚠️ **D4 的执行环境前提尚未验证**：`integrations/dsh-client/src/harness/index.ts` 的
 /// `RELEVANT_TYPES` 目前没有收 `hook/*`（见
 /// `docs/audit-dashboard/DURATION_AUDIT_BACKLOG.md` D4）。这个函数在 CLI 侧
 /// （`src/dsh.rs` 的 `EXECUTION_EVENT_TYPES` 已经收了 `hook/*`，`behavior`
-/// 子命令能喂给它真实数据）立即可用；但"宿主能不能看到 hook 事件"没有任何
-/// 证据——D6 的宿主投影**故意不**把 `hook/*` 加进 `RELEVANT_TYPES`，直到有
+/// 子命令能喂给它真实数据）立即可用；但"执行环境能不能看到 hook 事件"没有任何
+/// 证据——D6 的执行环境投影**故意不**把 `hook/*` 加进 `RELEVANT_TYPES`，直到有
 /// 人拿真实会话实测过，不能按"只是加个过滤条件"的成本估进排期。
 pub fn hook_executions(events: &[Value]) -> Value {
     let events = &crate::util::post_fork(events)[..];

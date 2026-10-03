@@ -208,7 +208,7 @@ pub struct FileLease {
 }
 
 impl FileLease {
-    /// Keep a long-running host ingest lease alive without changing its
+    /// Keep a long-running harness ingest lease alive without changing its
     /// identity.  The lock body is atomically replaced, so contenders never
     /// observe a partial renewal.  Dropping the returned guard stops the
     /// heartbeat before the lease itself is released.

@@ -84,12 +84,12 @@ where
     claim_encoded_with(data_home, &encoded, now_ms, send)
 }
 
-/// 额度窗口提醒的键：`quota-window|<host>|<window>|<resets_at>`。
+/// 额度窗口提醒的键：`quota-window|<harness>|<window>|<resets_at>`。
 ///
 /// 键里带 `resets_at` 是刻意的：同一个窗口只提醒一次，**窗口重置后再撞窗是一条
 /// 新键**，因此会再提醒一次——正是"每周期最多一次"的语义。
-pub fn quota_window_delivery_key(host: &str, window: &str, resets_at: i64) -> String {
-    format!("quota-window|{host}|{window}|{resets_at}")
+pub fn quota_window_delivery_key(harness: &str, window: &str, resets_at: i64) -> String {
+    format!("quota-window|{harness}|{window}|{resets_at}")
 }
 
 /// 通用投递许可：键由调用方给出（如 [`quota_window_delivery_key`]）。

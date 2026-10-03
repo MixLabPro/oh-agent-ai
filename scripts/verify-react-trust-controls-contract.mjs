@@ -87,7 +87,7 @@ const evidenceCalls = [];
 const evidenceBridge = (() => {
   const sandbox = { module: { exports: {} }, exports: {}, require: uiRequire, console: { error() {}, warn() {}, log() {} }, Intl, Date, Math, Promise, setTimeout, clearTimeout, window: { __TAURI__: { core: { invoke: async (command, args) => {
     evidenceCalls.push({ command, args });
-    return { host: null, count: 1, next_cursor: longValidCursor, source: "authority_readonly", evidence: [evidenceDto] };
+    return { harness: null, count: 1, next_cursor: longValidCursor, source: "authority_readonly", evidence: [evidenceDto] };
   } } } } };
   vm.createContext(sandbox);
   vm.runInContext(built.outputFiles[0].text, sandbox, { filename: "tauri-trust-history.bundle.cjs" });
@@ -98,7 +98,7 @@ assert.equal(history.count, 1);
 assert.equal(history.evidence[0].kind, "package");
 assert.equal("raw_path" in history.evidence[0], false, "history parser must discard raw path fields");
 assert.equal(evidenceCalls[0].command, "trust_evidence_read");
-assert.equal(evidenceCalls[0].args.host, null);
+assert.equal(evidenceCalls[0].args.harness, null);
 assert.equal(evidenceCalls[0].args.limit, 200);
 assert.equal(evidenceCalls[0].args.cursor, null);
 assert.equal(history.next_cursor, longValidCursor, "history parser must accept the full 320-character cursor contract");
@@ -106,7 +106,7 @@ await evidenceBridge.readTrustEvidence(null, 200, history.next_cursor);
 assert.equal(evidenceCalls[1].args.cursor, history.next_cursor, "opaque history cursor must be forwarded unchanged");
 await assert.rejects(() => evidenceBridge.readTrustEvidence(null, 200, "../../private"), /游标不安全/);
 assert.match(trustPage, /tr\.loadOlder/);
-await assert.rejects(() => evidenceBridge.readTrustEvidence("../private", 200), /宿主标识不安全/);
+await assert.rejects(() => evidenceBridge.readTrustEvidence("../private", 200), /执行环境标识不安全/);
 await assert.rejects(() => evidenceBridge.readTrustEvidence(null, 501), /读取范围不安全/);
 
 const malformed = async (command) => command === "trust_profile_proposal_status"

@@ -15,7 +15,7 @@ path = "src/lib.rs"
 agent-vitals-query = { path = "../agent-vitals-query" }
 agent-vitals-data = { path = "../agent-vitals-data" }
 agent-vitals-domain = { path = "../agent-vitals-domain" }
-agent-vitals-hosts = { path = "../agent-vitals-hosts", features = ["sources"] }
+agent-vitals-harnesses = { path = "../agent-vitals-harnesses", features = ["sources"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

@@ -27,27 +27,27 @@ RS_SRC = ROOT / "apps" / "cli" / "src"  # v0.8 Phase E3：二进制从根 src/ �
 
 # 静态 SKILL.md 体检（skills/ 子树）——两实现的名单略有出入：
 # Python 有 lifecycle/snapshots，Rust 没有（这些函数在 core 或别处）；
-# Rust 有 host/render/codex/openclaw/workbuddy，Python 在 adapters/ 或 core。
-# v0.8 Phase E7（收口 D4/D5 当初该做但漏做的 Skill Surface 宿主归位）：
+# Rust 有 harness/render/codex/openclaw/workbuddy，Python 在 adapters/ 或 core。
+# v0.8 Phase E7（收口 D4/D5 当初该做但漏做的 Skill Surface 执行环境归位）：
 # E7.1 frontmatter、E7.2 analysis/overlap（连同它们依赖的 ranking 排序簇 +
 # s/i/f/b/chars 取值助手）、E7.3 security（拆出纯规则引擎 security_rules，
 # I/O 部分留 apps/cli 当薄壳，security 本身不搬）迁进 agent-vitals-domain/
 # src/domain/skills/；E7.4 snapshot（本机快照读写，I/O 天然属于 runtime，
-# 不需要像 security 那样拆）迁进 agent-vitals-runtime/src/skills/；E7.6 host
-# （Claude Code 宿主配置解释，拆出纯部分到 agent-vitals-hosts::hosts::
+# 不需要像 security 那样拆）迁进 agent-vitals-runtime/src/skills/；E7.6 harness
+# （Claude Code 执行环境配置解释，拆出纯部分到 agent-vitals-harnesses::harnesses::
 # claude_code::skills，I/O 部分到 …::sources::skills）+ workbuddy（marketplace
 # 解析 + welcomeMode 取证，路径穿越防护与 I/O 交织较深，整体不拆，迁进
-# …::hosts::workbuddy::sources::skills；`SourceMeta` 跨宿主共享类型先迁进
-# agent-vitals-hosts::skill_discovery 解除循环依赖）+ openclaw（首个
-# Skill-Surface-only 宿主，无 sessions/，整体不拆，迁进
-# …::hosts::openclaw::sources::skills）+ codex（协议报文构造/响应解析/运行时
-# 元数据合并拆到 …::hosts::codex::skills，子进程 I/O 到
+# …::harnesses::workbuddy::sources::skills；`SourceMeta` 跨执行环境共享类型先迁进
+# agent-vitals-harnesses::skill_discovery 解除循环依赖）+ openclaw（首个
+# Skill-Surface-only 执行环境，无 sessions/，整体不拆，迁进
+# …::harnesses::openclaw::sources::skills）+ codex（协议报文构造/响应解析/运行时
+# 元数据合并拆到 …::harnesses::codex::skills，子进程 I/O 到
 # …::sources::skills——该文件自己的模块头早就说清了这条纯/I/O 边界，本次只是
 # 落进 crate 边界）；E7.5 discovery（936 行，本仓库最复杂的单一函数集：目录
-# 遍历+按宿主分类+逐 skill 记录组装）+ inventory（跨宿主编排，依赖 E7.6 四个
-# 宿主适配器都已是库 crate 模块）+ security（I/O 薄壳，与 discovery 互相
+# 遍历+按执行环境分类+逐 skill 记录组装）+ inventory（跨执行环境编排，依赖 E7.6 四个
+# 执行环境适配器都已是库 crate 模块）+ security（I/O 薄壳，与 discovery 互相
 # 调用，必须一起迁）——三者一起迁进 agent-vitals-runtime::skills::
-# {scanner,inventory,security}（整体搬，不做"host 归属"式再拆分，同 D 阶段
+# {scanner,inventory,security}（整体搬，不做"harness 归属"式再拆分，同 D 阶段
 # 教训：先给一个正确的家，深层重构留后续）——都不再在 apps/cli/src/skills/，
 # 从 RS_SKILLS_FAMILY 里删掉；Python 侧对应模块暂未跟进搬迁，PY_SKILLS_FAMILY
 # 不变。apps/cli/src/skills/ 现在只剩 CLI 展示层（diff/doctor/explain/
@@ -70,20 +70,20 @@ PY_AGENT_FAMILY = {
     "behavior", "budget", "canonical_audit", "claude_cost", "claude_evidence",
     "attribution", "claude_session_audit", "claude_usage_fact", "codex_cost", "codex_evidence",
     "codex_session_audit", "codex_usage", "codex_usage_fact", "compaction",
-    "cost", "dsh_evidence", "dsh_usage_fact", "duration", "enrichment", "host_capability", "mcp", "plan",
+    "cost", "dsh_evidence", "dsh_usage_fact", "duration", "enrichment", "harness_capability", "mcp", "plan",
     "route_quality", "sessions_sql", "skill", "state", "subagent", "takeover", "trajectory", "usage",
     "usage_fact", "waste", "workbuddy_evidence", "workbuddy_session_audit",
     "workbuddy_usage_fact",  # spec §9E.5 E4a
-    # HOST_MANIFEST_DSL_SPEC §8.1：generic 插件宿主 twin（validate 只读面）。
+    # HARNESS_MANIFEST_DSL_SPEC §8.1：generic 插件执行环境 twin（validate 只读面）。
     "generic_manifest", "generic_plugin", "generic_recipe", "catalog_index", "extension_objects",
 }
 RS_AGENT_FAMILY = {
     "claude_cost",
     "cost",
-    "host_runtime_registration",
+    "harness_runtime_registration",
     "oneline", "plan",
-    # v0.8 Phase D4/D5：宿主会话读取器（dsh/claude/codex/workbuddy _session）迁进
-    # agent-vitals-hosts/hosts/<h>/sources.rs（feature = "sources"）。
+    # v0.8 Phase D4/D5：执行环境会话读取器（dsh/claude/codex/workbuddy _session）迁进
+    # agent-vitals-harnesses/harnesses/<h>/sources.rs（feature = "sources"）。
     # Phase D6：state / budget / takeover / session_sources 迁进 agent-vitals-runtime。
     # ——都不再在 src/agent/。
     # v0.9 Stage 0.3（docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md §6）：
@@ -92,9 +92,9 @@ RS_AGENT_FAMILY = {
     # r2a_store 本体都搬进了 agent_vitals_runtime::sessions（claude_cost 只
     # 搬走了其中一段 ledger 读取函数，模块本身仍留在这里，不从清单删）。
     # v0.9 Stage A（R4 §5.2 scope gap 收口）：UsageFact 发射器
-    # {claude,codex,dsh}_usage_fact 归位 agent-vitals-hosts/hosts/<h>/sources/
-    # usage_fact.rs——wire→fact 生产者由宿主 crate 拥有；行级原语下沉
-    # hosts/claude_code/sessions/usage.rs；CLI 只 re-export。
+    # {claude,codex,dsh}_usage_fact 归位 agent-vitals-harnesses/harnesses/<h>/sources/
+    # usage_fact.rs——wire→fact 生产者由执行环境 crate 拥有；行级原语下沉
+    # harnesses/claude_code/sessions/usage.rs；CLI 只 re-export。
 }
 
 
@@ -178,7 +178,7 @@ class ClassificationGuardTests(unittest.TestCase):
         """Skill surface 只能消费注入证据，不能自行打开 Session 日志。
 
         v0.8 Phase E7.5：inventory.rs 从 apps/cli/src/skills/ 迁进
-        agent-vitals-runtime/src/skills/（跨宿主编排，依赖 E7.6 的四个宿主
+        agent-vitals-runtime/src/skills/（跨执行环境编排，依赖 E7.6 的四个执行环境
         适配器都已是库 crate 模块）。W3（2026-09-24）随地基层整体拆进
         agent-vitals-runtime-core/src/skills/。
         """

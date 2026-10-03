@@ -1,12 +1,12 @@
 
 #!/usr/bin/env python3
 """
-扫描本机各 Agent 宿主的 skill 安装目录，输出成本清单（JSON）。
+扫描本机各 Agent 执行环境的 skill 安装目录，输出成本清单（JSON）。
 
 只做确定性统计，不做判断。判断交给调用它的 Agent。
 
-关键设计：**按宿主隔离「装在磁盘上」和「真的进了上下文」**。
-不同宿主的 skill 绝不能合并计算上下文预算或覆盖冲突。
+关键设计：**按执行环境隔离「装在磁盘上」和「真的进了上下文」**。
+不同执行环境的 skill 绝不能合并计算上下文预算或覆盖冲突。
 
 用法:
     python3 scan.py                    # 扫描默认路径
@@ -30,7 +30,7 @@ from agent_vitals import codex_usage as codex_usage_module
 from agent_vitals import cost as cost_module
 from agent_vitals.doctor import _doctor_snapshot, diagnose, render_doctor, render_gate
 from agent_vitals.explain import render_explain
-from agent_vitals import host_capability as host_capability_module
+from agent_vitals import harness_capability as harness_capability_module
 from agent_vitals.inventory import build_inventory
 from agent_vitals.lifecycle import render_list
 from agent_vitals.overlap import DEFAULT_OVERLAP_MIN, render_overlap
@@ -71,8 +71,8 @@ CODEX_FALLBACK_DESC_BUDGET = 8000
 # 判定「僵尸」前至少要装够这么多天。装了一天就说零触发没有意义。
 ZOMBIE_MIN_AGE_DAYS = 14
 
-# 各宿主的常见 skill 目录。找不到的会被静默跳过。
-# 同一个 host 的多个根目录按该宿主的优先级归类，绝不跨宿主比较。
+# 各执行环境的常见 skill 目录。找不到的会被静默跳过。
+# 同一个 harness 的多个根目录按该执行环境的优先级归类，绝不跨执行环境比较。
 DEFAULT_ROOTS = [
     ("claude-code", "./.claude/skills"),
     ("claude-code", "~/.claude/skills"),
@@ -81,7 +81,7 @@ DEFAULT_ROOTS = [
     ("openclaw", "./skills"),
     ("openclaw", "./.agents/skills"),
     # DSH 的 discovery roots（契约 §DSH，层内 rank 越小越优先）。~/.agents/skills
-    # 与 OpenClaw 共享，但两边要按各自的 rank 归类，绝不跨宿主合并判定。
+    # 与 OpenClaw 共享，但两边要按各自的 rank 归类，绝不跨执行环境合并判定。
     ("dsh", "./.dsh/skills"),
     ("dsh", "./.agents/skills"),
     ("dsh", "~/.dsh/skills"),
@@ -242,7 +242,7 @@ def codex_fold_merged(use_cache=True):
 
 
 def codex_report_from_merged(merged, filter_key, month_out, want_hours):
-    """从已折叠合并的 fold 出一个 `--json` 报告 dict（host/currency/month/today
+    """从已折叠合并的 fold 出一个 `--json` 报告 dict（harness/currency/month/today
     外层包装 + report 键）。filter_key=None 不过滤（all 视图）；`--today` 时
     want_hours=True（小时热力图数据）。空折叠给全零结构而不是 None——调用方
     要的是「没有数据」而不是「崩了」，且包装是固定契约（unaccounted/plan
@@ -272,15 +272,15 @@ def codex_report_from_merged(merged, filter_key, month_out, want_hours):
         }
         if want_hours:
             report["hours"] = []
-    out = {"host": "codex", "currency": "USD", "month": month_out,
+    out = {"harness": "codex", "currency": "USD", "month": month_out,
            "today": codex_cost_module.today_beijing()}
     out.update(report)
     return out
 
 
 def codex_calendar_blob(merged, month_key, month_out, default):
-    """统一看板内联的 codex 规范单块（docs/UNIFIED_COST_VIEW.md 的 1 号宿主
-    契约）：{host, currency, today, default, views:{today,month,all}}。每个 view
+    """统一看板内联的 codex 规范单块（docs/UNIFIED_COST_VIEW.md 的 1 号执行环境
+    契约）：{harness, currency, today, default, views:{today,month,all}}。每个 view
     即 `codex_report_from_merged` 的一个报告。today 视图 want_hours=True；
     month 视图用调用方给的 month_key/month_out（统一看板 = 当前月，codex-cost
     --html = 请求月）；all 视图不过滤。default = 无 `?file=` 时打开的视图。
@@ -291,7 +291,7 @@ def codex_calendar_blob(merged, month_key, month_out, default):
         "month": codex_report_from_merged(merged, month_key, month_out, False),
         "all": codex_report_from_merged(merged, None, None, False),
     }
-    return {"host": "codex", "currency": "USD", "today": today,
+    return {"harness": "codex", "currency": "USD", "today": today,
             "default": default, "views": views}
 
 
@@ -396,11 +396,11 @@ def _render_calendar_html(output_path, default_source="month"):
         if sidecar.resolve() != src.resolve():
             sidecar.write_text(json_text, encoding="utf-8")
         embedded.append(mode)
-    # ── codex 1 号宿主内联块（统一看板）─────────────────────────────────
-    # 规范化单块 {host, currency, today, default, views:{today,month,all}}
-    #（docs/UNIFIED_COST_VIEW.md）。与 DSH 双块并列内联，让跨宿主今日总览
-    # 一打开就有两张宿主卡。**扫描失败时降级**：不内联该块，codex host 落
-    # JS 的 empty-state，DSH 渲染不受影响（codex 只是新增宿主，不能拖垮
+    # ── codex 1 号执行环境内联块（统一看板）─────────────────────────────────
+    # 规范化单块 {harness, currency, today, default, views:{today,month,all}}
+    #（docs/UNIFIED_COST_VIEW.md）。与 DSH 双块并列内联，让跨执行环境今日总览
+    # 一打开就有两张执行环境卡。**扫描失败时降级**：不内联该块，codex harness 落
+    # JS 的 empty-state，DSH 渲染不受影响（codex 只是新增执行环境，不能拖垮
     # 既有看板）。default="month"（当前月）——与 DSH 的 default_source 同构。
     try:
         codex_merged = codex_fold_merged()
@@ -423,7 +423,7 @@ def _render_calendar_html(output_path, default_source="month"):
     html = html.replace(
         "</head>",
         "<script>window.AGENT_VITALS_DEFAULT_MODE = %r;</script>\n"
-        "<script>window.AGENT_VITALS_DEFAULT_HOST = 'dsh';</script>\n</head>"
+        "<script>window.AGENT_VITALS_DEFAULT_HARNESS = 'dsh';</script>\n</head>"
         % default_source, 1)
     out.write_text(html, encoding="utf-8")
     return embedded, out
@@ -507,7 +507,7 @@ def _render_codex_evidence(out):
     signals = [s for s in (out.get("signals") or []) if isinstance(s, str)]
 
     parts = []
-    parts.append("host: codex\n")
+    parts.append("harness: codex\n")
     parts.append("session: %s\n" % _dash(out.get("session_id")))
     parts.append("title: %s\n" % _dash(out.get("title")))
     parts.append("history_mode: %s\n" % _dash(out.get("history_mode")))
@@ -545,7 +545,7 @@ def _render_codex_roots(report):
     """`codex-evidence --roots` 的人读呈现——从 `codex_session_roots_report` 的
     同一个 dict 上读（形状唯一来源），Rust 侧 `main.rs::render_codex_roots`
     逐字节对齐这一份。缺席的根不猜路径也不报错，只标 `(absent)`。"""
-    parts = ["host: codex\n"]
+    parts = ["harness: codex\n"]
     roots = report.get("roots")
     if isinstance(roots, list):
         for entry in roots:
@@ -572,7 +572,7 @@ def _render_plan_human(payload):
     `—`（没测到就标没测到，不假装 0），summary 不汇总 token（per-startup 与
     per-trigger 单位不可通约）。"""
     parts = []
-    parts.append("host: %s" % (payload.get("host_selection") or ""))
+    parts.append("harness: %s" % (payload.get("harness_selection") or ""))
     startup = payload.get("startup_rate_per_month")
     if startup is None:
         parts.append("startup rate per month: —")
@@ -621,8 +621,8 @@ def _main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", action="version",
                     version="agent-vitals %s" % __version__)
-    ap.add_argument("--host", choices=("all", "claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"),
-                    default="all", help="Analyze one host; default: scan every supported host separately")
+    ap.add_argument("--harness", choices=("all", "claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"),
+                    default="all", help="Analyze one harness; default: scan every supported harness separately")
     ap.add_argument("--path", action="append", default=[],
                     help="Additional scan path; repeatable")
     ap.add_argument("--runtime-json", metavar="FILE",
@@ -681,7 +681,7 @@ def _main():
     p_doc.add_argument("--json", help="Write diagnostic JSON instead of a report")
     p_doc.add_argument("--with-report", action="store_true",
                        help="Attach the full scan report to the JSON payload as 'report'. "
-                            "A consumer that needs both the SV diagnostics and the host "
+                            "A consumer that needs both the SV diagnostics and the harness "
                             "summaries then scans once instead of twice.")
     p_doc.add_argument("--no-snapshot", action="store_true",
                        help="Do not save a snapshot or compare automatically")
@@ -725,19 +725,19 @@ def _main():
                                 "(tool calls / turns / steps / approvals / hooks)")
     p_dur.add_argument("session_log", help="Path to the DSH session JSONL log (file or directory)")
     p_dur.add_argument("--json", help="Write duration audit JSON to FILE; use - for stdout")
-    # v0.6 host-contract spec §5.1/§11-M0：打印 core HostProfile 注册表本身
-    # （四个 runtime 宿主声明的结构能力），与 Rust 侧 main.rs 的 Hosts 子命令
+    # v0.6 harness-contract spec §5.1/§11-M0：打印 core HarnessProfile 注册表本身
+    # （四个 runtime 执行环境声明的结构能力），与 Rust 侧 main.rs 的 Harnesses 子命令
     # 同一种结构，逐字节比对靠 test_cli_matrix 的 G1。
-    p_hosts = sub.add_parser("hosts",
-                             help="Print the HostProfile registry (v0.6 host-"
+    p_harnesses = sub.add_parser("harnesses",
+                             help="Print the HarnessProfile registry (v0.6 harness-"
                                   "contract spec §5.1): the four runtime "
-                                  "hosts' declared structural capabilities")
-    p_hosts.add_argument("--json", help="Write hosts JSON to FILE; use - for "
+                                  "harnesses' declared structural capabilities")
+    p_harnesses.add_argument("--json", help="Write harnesses JSON to FILE; use - for "
                                         "stdout. Without this option, print a "
                                         "human table.")
     # P4（docs/RUNTIME_EVIDENCE_CONTRACT.md §17）：Codex rollout → CanonicalSession
     # 的 "sound" 证明。输出 §13 coverage，不是 findings——Codex 还没有 SV601–614
-    # 检测器（detector decoupling 是后置的更大一摊，P4 明确不做）。`--host
+    # 检测器（detector decoupling 是后置的更大一摊，P4 明确不做）。`--harness
     # codex` 是安装时探针的表面，与这个子命令无关（命名冲突见
     # adapters/codex_session.py 顶部注释）。
     p_codex = sub.add_parser("codex-evidence",
@@ -753,7 +753,7 @@ def _main():
     # `codex-cost` 命令已退役（v0.9.1 Tier B，spec §5.2）：codex 成本报告改从
     # SQL 权威库（`authority_query::codex_by_hour_model`）读，不再全量 fold
     # `~/.codex` rollout。该数据源是 Rust `agent_vitals_data`（rusqlite）——
-    # ClawHub in-host skill 这一份是 stdlib-only、没有权威库，无法迁移，故整
+    # ClawHub in-harness skill 这一份是 stdlib-only、没有权威库，无法迁移，故整
     # 命令只由 Rust 二进制提供。`codex_cost.py` 模块本身保留（`calendar` 命令
     # 与 `codex-session` 仍用其纯函数）。
     # Codex 单会话审计：逐 session 成本 + 出处覆盖并集（套 DSH 审计 tab 版式）。
@@ -779,7 +779,7 @@ def _main():
     # Claude Code 单会话审计：coverage（§13 逐信号）+ SV601–614 findings。五段式
     # 流水线 locate→shape→extract（adapters/claude_session.py）→ derive→coverage
     # （agent/claude_evidence.py）→ 组合（agent/claude_session_audit.py）。SV607/608
-    # 的 Unavailable 是 host-capability degradation（§12），在 claude_session_audit
+    # 的 Unavailable 是 harness-capability degradation（§12），在 claude_session_audit
     # 里 override——Claude 的 tool_result 没有原因码词汇，error_code 结构性恒 None，
     # 原因级检测器读了也白读，MeasuredZero 是对「结构上读不到原因」撒谎。SV609/610/
     # 614 不需要 override：approvals/sandbox_modes timeline 恒空，门控已经如实给
@@ -789,7 +789,7 @@ def _main():
     p_claude_session = sub.add_parser(
         "claude-session",
         help="Audit ONE Claude Code session: provenance coverage + SV601-614 "
-             "findings (SV607/608 host-capability Unavailable)")
+             "findings (SV607/608 harness-capability Unavailable)")
     p_claude_session.add_argument("--list", action="store_true",
                                   help="List all Claude sessions (id/title/model/"
                                        "cwd/date span) — the id picker")
@@ -840,17 +840,17 @@ def _main():
     # source_event_id 按 rollout **stem** 命名空间（2026-09-03 拍板 D′：byte_offset
     # 只在单文件内唯一，逻辑 session 命名会把两份续接 rollout 的同 offset 同形行
     # 误并）。与 Rust 镜像同源字节。
-    # HOST_MANIFEST_DSL_SPEC §8.1：generic 插件宿主 validate 面（只读 dry-run；
+    # HARNESS_MANIFEST_DSL_SPEC §8.1：generic 插件执行环境 validate 面（只读 dry-run；
     # Python 不长 writer——plugin-ingest --write 是 Rust-only，与
     # workbuddy-usage-facts --write 同一条纪律）。负载与 Rust CLI 同键序。
     p_plugin_validate = sub.add_parser(
         "manifest-validate",
-        help="Dry-run a plugin manifest (HOST_MANIFEST_DSL_SPEC §6.5): "
+        help="Dry-run a plugin manifest (HARNESS_MANIFEST_DSL_SPEC §6.5): "
              "discovery + extraction + fact_id stability + format guard; "
              "read-only, no writes")
     p_plugin_validate.add_argument(
         "--manifest", required=True,
-        help="Path to hosts.d/<slug>/manifest.json")
+        help="Path to harnesses.d/<slug>/manifest.json")
     p_plugin_validate.add_argument(
         "--file", action="append", default=None,
         help="Explicit fixture files (repeatable); discovery per manifest "
@@ -933,10 +933,10 @@ def _main():
         help="Write UsageFact JSON to FILE; use - for stdout. Without this, "
              "print human summary.")
     # WorkBuddy 单会话审计：coverage（§13 逐信号）+ SV601–614 findings。与
-    # claude-session 同构；host-capability degradation 是 SV604/605（spec §3.1）——
+    # claude-session 同构；harness-capability degradation 是 SV604/605（spec §3.1）——
     # 只有 bash（audit-log commandPreview）与 web_fetch（WebFetch target）能 join，
     # write/edit 只在会话匿名的 traces 里，SV604/605 读不到写维度 → Unavailable。
-    # 成本直接吃 session_usage.credit_json 宿主账单（spec §9），pricing.json 零参与
+    # 成本直接吃 session_usage.credit_json 执行环境账单（spec §9），pricing.json 零参与
     # （不长第四份价格拷贝）。五段式流水线 locate→shape→extract
     # （adapters/workbuddy_session.py）→ derive→coverage（agent/workbuddy_evidence.py）
     # → 组合（agent/workbuddy_session_audit.py）。`--list` 只是选 id 的前置；缺省
@@ -945,8 +945,8 @@ def _main():
     p_workbuddy_session = sub.add_parser(
         "workbuddy-session",
         help="Audit ONE WorkBuddy session: provenance coverage + SV601-614 "
-             "findings (SV604/605 host-capability Unavailable; cost from "
-             "host-billed credit_json)")
+             "findings (SV604/605 harness-capability Unavailable; cost from "
+             "harness-billed credit_json)")
     p_workbuddy_session.add_argument("--list", action="store_true",
                                      help="List all WorkBuddy sessions (id/title/"
                                           "model/date span) — the id picker")
@@ -978,8 +978,8 @@ def _main():
                               "exclusive with --day.")
     p_slist.add_argument("--hour", type=int, default=None,
                          help="Hour-of-day filter 0..=23 (requires --day, not --month)")
-    p_slist.add_argument("--host-kind", action="append", default=None,
-                         help="Filter by host (repeatable). Wired: claude-code / "
+    p_slist.add_argument("--harness-kind", action="append", default=None,
+                         help="Filter by harness (repeatable). Wired: claude-code / "
                               "codex / dsh")
     p_slist.add_argument("--min-tokens", type=int, default=0,
                          help="Drop sessions with total tokens < N")
@@ -1012,8 +1012,8 @@ def _main():
                          help="Print the envelope as JSON to stdout")
     p_snav = sess_sub.add_parser(
         "navigation",
-        help="Multi-host navigation projection (Tauri menu bar: today tokens + "
-             "today sessions + recent N rows per host)",
+        help="Multi-harness navigation projection (Tauri menu bar: today tokens + "
+             "today sessions + recent N rows per harness)",
     )
     p_snav.add_argument("--day", default="",
                         help="Day to project (YYYY-MM-DD in the configured statistics timezone; "
@@ -1021,7 +1021,7 @@ def _main():
     p_snav.add_argument("--timezone", default=None,
                         help="Query-local IANA statistics timezone override; defaults to the saved or OS timezone")
     p_snav.add_argument("--recent", type=int, default=5,
-                        help="How many recent rows per host; default 5")
+                        help="How many recent rows per harness; default 5")
     p_snav.add_argument("--json", action="store_true",
                         help="Print the versioned envelope as JSON to stdout")
     # ──── M3: 跨会话聚合层（v1.x.x）── 三个新子命令 ─────────────────
@@ -1045,7 +1045,7 @@ def _main():
     p_cal.add_argument("--output", "-o", required=True,
                        help="Destination HTML path")
     # state：列出 / 清理 state 目录，或列出有数据的自然月。不接受
-    # --json/--host 等扫描期参数。
+    # --json/--harness 等扫描期参数。
     p_state = sub.add_parser("state", help="Inspect or clean the persisted state directory")
     p_state.add_argument("action", choices=("list", "clean", "months", "by-source", "by-model",
                                               "uncovered", "savings"),
@@ -1087,14 +1087,14 @@ def _main():
     # --fail-on / --ignore 对 behavior 同样有意义（闸门），但 --new-only 没有——
     # 一份会话日志是单次取证输入，没有「相对上次的新增发现」。这里显式补上
     # 前两个，让它们在子命令前后两个位置都能解析（对齐 Rust 的 global=true）。
-    # 不放进上面的 `for pp in (...)` 循环，是因为那批参数（--host/--path/--all…）
+    # 不放进上面的 `for pp in (...)` 循环，是因为那批参数（--harness/--path/--all…）
     # 都是扫描期参数，behavior 不跑扫描，一个都不该收。
     p_beh.add_argument("--fail-on", choices=("none", "critical", "warning", "info"),
                        default=argparse.SUPPRESS)
     p_beh.add_argument("--ignore", default=argparse.SUPPRESS)
     # 子命令要复用扫描参数，故把它们也挂到子解析器上
     for pp in (p_list, p_over, p_doc, p_plan, p_exp, p_snap, p_diff):
-        pp.add_argument("--host", choices=("all", "claude-code", "codex", "openclaw",
+        pp.add_argument("--harness", choices=("all", "claude-code", "codex", "openclaw",
                                            "hermes", "workbuddy", "dsh"), default=argparse.SUPPRESS)
         pp.add_argument("--path", action="append", default=argparse.SUPPRESS)
         pp.add_argument("--runtime-json", metavar="FILE", default=argparse.SUPPRESS)
@@ -1209,10 +1209,10 @@ def _main():
             sys.exit(behavior_module.behavior_gate(findings, args.fail_on, args.ignore))
         return
 
-    # v0.6 host-contract spec §5.1/§11-M0：打印 core HostProfile 注册表本身，
-    # 与 Rust 侧 main.rs 的 Hosts 子命令同一种结构（G1 byte-parity）。
-    if getattr(args, "cmd", None) == "hosts":
-        out = host_capability_module.hosts_json()
+    # v0.6 harness-contract spec §5.1/§11-M0：打印 core HarnessProfile 注册表本身，
+    # 与 Rust 侧 main.rs 的 Harnesses 子命令同一种结构（G1 byte-parity）。
+    if getattr(args, "cmd", None) == "harnesses":
+        out = harness_capability_module.harnesses_json()
         if args.json:
             text = json.dumps(out, ensure_ascii=False, indent=2)
             if args.json == "-":
@@ -1221,7 +1221,7 @@ def _main():
                 Path(args.json).write_text(text, encoding="utf-8")
                 print("Wrote %s" % args.json)
             return
-        for h in out["hosts"]:
+        for h in out["harnesses"]:
             print("%s (%s): unmeasured=%d degraded_rules=%d session_store=%s fold=%s" % (
                 h["id"], h["display"], len(h["unmeasured_signals"]),
                 len(h["degraded_rules"]), str(h["session_store"]).lower(),
@@ -1268,7 +1268,7 @@ def _main():
 
     # P4（docs/RUNTIME_EVIDENCE_CONTRACT.md §17）：Codex rollout → CanonicalSession
     # 的 "sound" 证明。输出 §13 coverage，不是 findings——Codex 还没有 SV601–614
-    # 检测器（detector decoupling 是后置的更大一摊，P4 明确不做）。`--host
+    # 检测器（detector decoupling 是后置的更大一摊，P4 明确不做）。`--harness
     # codex` 是安装时探针的表面，与这个子命令无关（命名冲突见
     # adapters/codex_session.py 顶部注释）。与 Rust 侧 main.rs 的 CodexEvidence
     # 子命令同一种结构（独立子命令 + --json 输出同一份 core 结果 + 人读呈现）。
@@ -1511,7 +1511,7 @@ def _main():
             print("Attempts: %s" % result.attempts)
         return
 
-    # HOST_MANIFEST_DSL_SPEC §8.1：plugin-validate handler——只读，负载键序
+    # HARNESS_MANIFEST_DSL_SPEC §8.1：plugin-validate handler——只读，负载键序
     # 与 Rust `plugin-validate --json` 一致（golden parity 面）。
     if getattr(args, "cmd", None) == "manifest-validate":
         from agent_vitals.agent import generic_plugin
@@ -1673,7 +1673,7 @@ def _main():
         return
 
     # WorkBuddy 单会话审计：coverage + SV601–614 findings（SV604/605 降级 Unavailable，
-    # 成本吃 credit_json 宿主账单）。与 claude-session 同构：--list 只是选 id 的前置
+    # 成本吃 credit_json 执行环境账单）。与 claude-session 同构：--list 只是选 id 的前置
     # （id/标题/模型/时间跨度，db sessions 表是索引）；缺省 --session = 最新；单会话
     # 深挖是 --json/纯 JSON 两路，无 --html（缺省输出就是 pretty JSON，Rust 同款）。
     if getattr(args, "cmd", None) == "workbuddy-session":
@@ -1737,7 +1737,7 @@ def _main():
                 "date": getattr(args, "day", None),
                 "month": getattr(args, "month", None),
                 "hour": getattr(args, "hour", None),
-                "hosts": getattr(args, "host_kind", None) or [],
+                "harnesses": getattr(args, "harness_kind", None) or [],
                 "min_tokens": getattr(args, "min_tokens", 0) or 0,
                 "limit": getattr(args, "page_size", 50) or 50,
                 "cursor": getattr(args, "cursor", None),
@@ -1765,15 +1765,15 @@ def _main():
             if getattr(args, "json", False):
                 print(json.dumps(nav, ensure_ascii=False, indent=2))
             else:
-                # 人读 fallback：列 hosts[] 每 host 今日 token / 会话数
+                # 人读 fallback：列 harnesses[] 每 harness 今日 token / 会话数
                 # + recent 行;非 workbench 调路径,简单展示即可。
                 print("navigation %s" % nav.get("day_key", day))
-                for h in nav.get("hosts", []):
+                for h in nav.get("harnesses", []):
                     tok = h.get("today_tokens", {})
                     val = tok.get("value") if isinstance(tok, dict) else None
                     today = ("—" if val is None else str(val))
                     print("  %-12s [%s] today=%s tokens, %d sessions, %d recent" % (
-                        h.get("host_kind"), h.get("status"), today,
+                        h.get("harness_kind"), h.get("status"), today,
                         h.get("today_sessions", 0), len(h.get("recent", [])),
                     ))
             return
@@ -1794,7 +1794,7 @@ def _main():
             print("window: %s" % window.get("label"))
             if "sessions" in data:
                 print("%-35s  %-10s  %-10s  %s" % (
-                    "session_ref", "host", "tokens", "events",
+                    "session_ref", "harness", "tokens", "events",
                 ))
                 for s in data["sessions"]:
                     tot = (s["tokens"]["uncached_input_tokens"]
@@ -1802,12 +1802,12 @@ def _main():
                            + s["tokens"]["cache_write_tokens"]
                            + s["tokens"]["output_tokens"])
                     print("%-35s  %-10s  %-10d  %d" % (
-                        s["session_ref"], s["host"], tot, s["event_count"],
+                        s["session_ref"], s["harness"], tot, s["event_count"],
                     ))
             elif "timeline" in data:
-                print("session_ref=%s host=%s total=%d events=%d" % (
+                print("session_ref=%s harness=%s total=%d events=%d" % (
                     data.get("session_ref"),
-                    data.get("host"),
+                    data.get("harness"),
                     data.get("tokens", {}).get("total", 0),
                     data.get("event_count", 0),
                 ))
@@ -2228,7 +2228,7 @@ def _main():
     zombie_age = args.zombie_age
     budget = args.budget
     inventory = build_inventory(
-        args.host, args.path, DEFAULT_ROOTS, env=os.environ,
+        args.harness, args.path, DEFAULT_ROOTS, env=os.environ,
         home=Path(os.path.expanduser("~")), cwd=Path.cwd(),
         runtime_json=getattr(args, "runtime_json", None))
     skills = inventory["skills"]
@@ -2237,7 +2237,7 @@ def _main():
     roots = inventory["roots"]
     enabled_plugins = inventory["enabled_plugins"]
     usage = inventory["usage"]
-    host_cfg = inventory["host_config"]
+    harness_cfg = inventory["harness_config"]
     plugins_known = inventory["plugins_known"]
     workbuddy_mode = inventory["workbuddy_mode"]
     workbuddy_roots = inventory["workbuddy_roots"]
@@ -2246,7 +2246,7 @@ def _main():
 
     out = build_report(
         inventory,
-        host=args.host,
+        harness=args.harness,
         include_all=args.all,
         budget=budget,
         codex_fallback_budget=CODEX_FALLBACK_DESC_BUDGET,
@@ -2339,9 +2339,9 @@ def _main():
         Path(args.json).write_text(text, encoding="utf-8")
         budget_text = (f"{budget_report['pct_used']}% ({budget_report['scope']})"
                        if budget_report["available"] else
-                       "configurable (not set for this instance)" if args.host == "openclaw" else "unavailable")
+                       "configurable (not set for this instance)" if args.harness == "openclaw" else "unavailable")
         active_text = (f"{len(loaded)} runtime-visible records"
-                       if args.host == "openclaw" else f"{len(loaded)} loaded")
+                       if args.harness == "openclaw" else f"{len(loaded)} loaded")
         print(f"Wrote {args.json}: {len(skills)} skills on disk, "
               f"{active_text}, "
               f"approximately {tier1_total} Tier1 tokens, "

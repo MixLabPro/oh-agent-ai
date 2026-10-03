@@ -51,7 +51,7 @@ flowchart LR
 
 前端只负责：并发请求、格式化、按状态显示和导航。金额归类、币种、计费依据、覆盖范围和未解决原因必须由 Domain/后端 DTO 给出，不能在 JavaScript 中根据模型名或来源路径推断。
 
-**形状来源纪律**（CLAUDE.md；2026-09-13 已在 mock 上抓出两处）：`tauri-mock.js` 的每个 fixture 必须注明产生方的 Rust 序列化函数与行号；渲染器与 fixture 不得各自手写期望形状互相印证。已修的两例：`sync.at` 曾用 `toISOString()`（UTC）而生产是 `overview.rs SyncStatus::ok → clock::local_timestamp_text`，格式 `"YYYY-MM-DD HH:MM:SS"`（统计时区本地时间，前端 `slice(11,16)` 取 HH:MM）；`total_actual_spend` 曾漏掉订阅月费，而 domain `data_contract.rs::total_actual_spend` 按币种把 `fixed_subscription + metered_actual + host_billed` 求和。
+**形状来源纪律**（CLAUDE.md；2026-09-13 已在 mock 上抓出两处）：`tauri-mock.js` 的每个 fixture 必须注明产生方的 Rust 序列化函数与行号；渲染器与 fixture 不得各自手写期望形状互相印证。已修的两例：`sync.at` 曾用 `toISOString()`（UTC）而生产是 `overview.rs SyncStatus::ok → clock::local_timestamp_text`，格式 `"YYYY-MM-DD HH:MM:SS"`（统计时区本地时间，前端 `slice(11,16)` 取 HH:MM）；`total_actual_spend` 曾漏掉订阅月费，而 domain `data_contract.rs::total_actual_spend` 按币种把 `fixed_subscription + metered_actual + harness_billed` 求和。
 
 **性能形状**（CLAUDE.md 2026-09-05 tab 卡顿事故）：总览一次渲染并发发起月/日/日历三个命令，每个都会折叠 Codex rollout；它们能不卡完全依赖 `runtime::summary::codex_merged_cached` 的进程级 60s memo（Arc 命中，锁内不深拷贝）。`data_codex_quota` 同样有 60s 缓存。**任何新增数据面（含 §6.3 的 `overview_bootstrap` 备选）必须走同一 memo**，自建枚举 + fold 管线就是事故复刻。
 
@@ -63,14 +63,14 @@ flowchart LR
 |---|---|---|---|---|
 | 顶部范围、最近同步 | `read_overview` | `sync{ok, stage, at, message}`（`at` 为统计时区本地 `"YYYY-MM-DD HH:MM:SS"`）、`fx{usd_cny, as_of}` | 显示「本月 · 已更新 HH:MM」 | 读取失败时显示“暂无法读取同步状态”；不阻塞其他区块 |
 | 顶部来源摘要 | `data_source_status` | 每个来源的启用、读取、健康/错误状态 | `n 个来源正常，m 个需检查`，点击进入设置的数据来源区 | 无已启用来源时显示“尚未连接数据来源”；状态未知不计作正常 |
-| “本月支出”卡 | `data_monthly_summary({ month })` | `actual_spend_by_basis{fixed_subscription\|metered_actual\|host_billed → {币种: 金额}}`（**既有 DTO 字段，本批次复用**，`data_contract.rs::actual_spend_by_basis`，各栏之和恒等于 `total_actual_spend`）、`by_provider`（名义）、`has_unresolved` | 按量费用 / 订阅月费分币分行，按官方价折算作脚注 | 无实际账单时该行显示「无数据」，不以 `0` 代替未知 |
-| “今日消耗”卡 | `data_daily_summary({ date })` | `tokens_by_host[h].{total, uncached_input, cache_read, cache_write, output}`（前端 `tokensSum` 求和，**DTO 无 `total_tokens`**）、`actual_spend_by_basis`、`freshness` | 展示今日 Token、按量费用及说明 | 当天无记录显示“今天还没有用量记录”；日期数据失败时单卡降级 |
+| “本月支出”卡 | `data_monthly_summary({ month })` | `actual_spend_by_basis{fixed_subscription\|metered_actual\|harness_billed → {币种: 金额}}`（**既有 DTO 字段，本批次复用**，`data_contract.rs::actual_spend_by_basis`，各栏之和恒等于 `total_actual_spend`）、`by_provider`（名义）、`has_unresolved` | 按量费用 / 订阅月费分币分行，按官方价折算作脚注 | 无实际账单时该行显示「无数据」，不以 `0` 代替未知 |
+| “今日消耗”卡 | `data_daily_summary({ date })` | `tokens_by_harness[h].{total, uncached_input, cache_read, cache_write, output}`（前端 `tokensSum` 求和，**DTO 无 `total_tokens`**）、`actual_spend_by_basis`、`freshness` | 展示今日 Token、按量费用及说明 | 当天无记录显示“今天还没有用量记录”；日期数据失败时单卡降级 |
 | “预算”卡 | `read_overview` | `budget{source, level, month_ratio, month_cost, monthly_cny, effective_daily_budget, generated_at, snoozed_until, reasons}` | 只展示已配置预算的进度与金额 | **未配置整卡隐藏**（UI/UX 差距分析 §4 第 80 行「仅配置后出现摘要卡；未配置不显示 0%」），入口 `设置预算 ›` 落在「本月已处理」行；不在总览展开编辑表单 |
 | “现在该用谁” | `data_codex_quota` + 月汇总 | `{plan_type, limits.primary{used_percent, resets_at}, observed_at}`；月汇总 `by_provider` 里的订阅月费 | 仅在新鲜、可解释的配额证据下显示保守提示 | 配额不可读、过期或其他提供商无证据时显示“暂无法给出建议” |
-| 本月使用情况 | `data_monthly_summary({ month })` | `tokens_by_host`（求和 + 日均） | 展示总 Token | 无记录显示零状态说明，不能暗示未采集数据为零 |
+| 本月使用情况 | `data_monthly_summary({ month })` | `tokens_by_harness`（求和 + 日均） | 展示总 Token | 无记录显示零状态说明，不能暗示未采集数据为零 |
 | 数据可信度 | `data_status` + 月汇总 | `data.{health, unresolved_tokens, unpriced_tokens, pricing.stale}`（**键名以此为准**） | 两条状态行：用量归属 / 价格齐全；颜色来自 `health` 而非百分比 | 数据状态读取失败时显示“读不到数据状态，无法确认这些数字是否完整” |
 | 待确认账单 | `billing_import_candidates`、`billing_declarations`、`billing_recalculation_jobs` | 候选项、声明版本、计算任务状态 | 显示待处理数量和影响范围，操作进入待处理/设置 | 无候选时不显示打扰性提示；读取失败不得假称“无需处理” |
-| 支出明细 | `data_monthly_summary({ month })` | `by_host`、`by_provider`、`actual_spend_by_basis` | 显示有明确数据依据的拆分 | 无可拆分金额时显示解释，不伪造占比 |
+| 支出明细 | `data_monthly_summary({ month })` | `by_harness`、`by_provider`、`actual_spend_by_basis` | 显示有明确数据依据的拆分 | 无可拆分金额时显示解释，不伪造占比 |
 | 最近几天 | `read_calendar_month({ month })` | 每日 Token、金额、完整性/状态 | 按当前月份展示最近有记录的日期 | 日历为空显示“本月还没有可展示的日记录” |
 
 ### 4.1 现有命令足以完成的首轮接入
@@ -96,12 +96,12 @@ billing_recalculation_jobs
 
 ## 5. 金额、计费依据与可信度规则
 
-1. `fixed_subscription`、`metered_actual` 与 `host_billed` 才能计入已确认实际支出；汇总必须使用后端的 `total_actual_spend` 和 `actual_spend_by_basis`。
+1. `fixed_subscription`、`metered_actual` 与 `harness_billed` 才能计入已确认实际支出；汇总必须使用后端的 `total_actual_spend` 和 `actual_spend_by_basis`。
 2. `metered_estimate` 和 `api_equivalent` 仅可作为估算/参考显示，必须带明确标签，不能混入“本月支出”主金额。
 3. 未知计费依据、未知币种、缺价格或路由证据冲突必须保留为未解决状态。前端不得将其归零、归为订阅，或按模型名称猜测提供商。
 4. 不同币种只能在后端有冻结汇率、明确换算范围和不确定性说明时合并展示；否则按币种拆分或显示无法合并。
 5. “今天还没有记录”只表示当前查询窗口内无可用事实，不表示主机没有使用。页面需同时呈现同步/来源状态，避免把采集失败误解为零用量。
-6. `sourcesBrief(monthly)` 不能继续以 `monthly.by_host` 推断来源健康度。月内有历史记录不代表来源当前可读；顶部来源摘要必须以 `data_source_status` 为准。
+6. `sourcesBrief(monthly)` 不能继续以 `monthly.by_harness` 推断来源健康度。月内有历史记录不代表来源当前可读；顶部来源摘要必须以 `data_source_status` 为准。
 
 ## 6. 加载、刷新与降级行为
 
@@ -176,7 +176,7 @@ billing_recalculation_jobs
 ### 8.3 后端实现要求
 
 - 保持 `apps/desktop/src-tauri/src/lib.rs` 中现有命令名称和参数兼容；
-- 从 Authority Repository/Domain DTO 返回 JSON，不允许前端读取数据库文件、宿主日志或本机路径；
+- 从 Authority Repository/Domain DTO 返回 JSON，不允许前端读取数据库文件、执行环境日志或本机路径；
 - 错误响应使用可行动、无敏感路径的错误码/原因。**沿用现有 `ERR_TEXT` 词表**（`workbench.js:180`：`database_missing / database_unreadable / schema_too_new / source-unavailable / not-found / stale-revision / schema-mismatch / permission`），新码只往这张表加，不另起第三套命名（现有已是下划线与连字符并存，先统一再扩）；
 - DTO 增加字段时保证旧字段语义不变；删除或改义字段须先更新 mock、前端合同测试和本规格。
 
@@ -184,7 +184,7 @@ billing_recalculation_jobs
 
 | 批次 | 交付内容 | 完成条件 |
 |---|---|---|
-| B1-M1.1：合同收口 | 冻结区块—命令映射；更新 mock fixture（注明形状出处）；未知命令报错；**建立 §8.1 数据访问层，把 `renderDecideCard` 的 `invoke` 与 6 个设置渲染（host bills / 保留期 / 统计时区 / 价格目录 / 关于诊断 / 预算设置）移出 `renderOverview`** | Vite 中所有总览命令有显式 fixture，合同测试可发现漏接命令；`renderOverview` 内无 `invoke` 以外的取数、无设置类渲染——不先立起这一层，M1.2–M1.4 每批都会再往里塞 |
+| B1-M1.1：合同收口 | 冻结区块—命令映射；更新 mock fixture（注明形状出处）；未知命令报错；**建立 §8.1 数据访问层，把 `renderDecideCard` 的 `invoke` 与 6 个设置渲染（harness bills / 保留期 / 统计时区 / 价格目录 / 关于诊断 / 预算设置）移出 `renderOverview`** | Vite 中所有总览命令有显式 fixture，合同测试可发现漏接命令；`renderOverview` 内无 `invoke` 以外的取数、无设置类渲染——不先立起这一层，M1.2–M1.4 每批都会再往里塞 |
 | B1-M1.2：KPI 接入 | 月支出、今日消耗、预算、本月使用、最近几天接真实 IPC | 在真实 `.app` 以受控数据验证成功、空记录、失败三种状态 |
 | B1-M1.3：可信度与来源 | 顶部来源摘要、同步状态、可信度提示接真实状态命令 | 来源异常不会被显示为“正常”，不完整数据不会显示成零 |
 | B1-M1.4：账单与决策降级 | 待确认账单接入；配额卡按证据降级 | 无账单和账单读取失败可区分；无替代路线证据时不推荐具体提供商 |
@@ -197,7 +197,7 @@ billing_recalculation_jobs
 
 - [ ] 在有完整数据的 Authority DB 中，三张 KPI、月度使用、支出明细和最近几天与同一统计时区下的后端返回一致（待真实 `.app` 验收）；
 - [x] 今日、月度和日历使用同一时区计算边界（loader 捕获窗口 + 契约测试覆盖）；
-- [x] 已确认实际支出不包含估算/API 等价金额；估算或未解决数据有可见说明（KPI 回归覆盖 `host_billed`/`metered_actual` 与估算隔离）；
+- [x] 已确认实际支出不包含估算/API 等价金额；估算或未解决数据有可见说明（KPI 回归覆盖 `harness_billed`/`metered_actual` 与估算隔离）；
 - [x] 来源状态来自 `data_source_status`，断开或错误的来源不会被计为正常（来源状态映射测试 + 浏览器 UAT）；
 - [x] 无来源、无记录、预算未配置、账单读取失败、配额不可读和数据过期都具有不同且准确的界面状态（隔离/空态/失败态契约测试）；
 - [x] 总览不会读取或展示用户的本机文件路径、原始会话内容、令牌或密钥（可见性与文本审计通过）；
@@ -227,6 +227,6 @@ billing_recalculation_jobs
 ### B1-M1.2–M1.4 实现核对（2026-09-13）
 
 - KPI、逐日记录、可信度与三类账单读取失败分别显示不可读状态；只有成功的空 DTO 才表示无记录。预算坏字段不补零，未配置预算仍隐藏。
-- 今日/月汇总参数、月用量日均和预算剩余天数使用 loader 捕获的同一统计窗口。按量已确认支出为 `metered_actual + host_billed`，订阅单列，估算不得混入。
+- 今日/月汇总参数、月用量日均和预算剩余天数使用 loader 捕获的同一统计窗口。按量已确认支出为 `metered_actual + harness_billed`，订阅单列，估算不得混入。
 - 配额卡保持中性；超过 24 小时、未来时间或已到重置时刻的快照不用于当前余量提示，无证据显示“暂无法给出建议”。这只是保守展示门槛，不实现线路决策。
 - 浏览器合同与 KPI 回归不替代真实 `.app` 的 Authority 受控数据验收；原生成功/空记录/失败验收仍待执行。

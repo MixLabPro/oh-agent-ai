@@ -1,6 +1,6 @@
 # Agent Vitals — 接入 DeepSeek Harness
 
-配套文档：[ARCHITECTURE.md](./ARCHITECTURE.md)（漏斗 / 观察者维度 / reconcile 语义） · [HOST_ADAPTER_CONTRACT.md](./HOST_ADAPTER_CONTRACT.md)（DSH 适配器契约） · [ENGINEERING.md](./ENGINEERING.md)（§6.6.1 bundle 分发） · [PRODUCT.md](./PRODUCT.md)（§8 排期）
+配套文档：[ARCHITECTURE.md](./ARCHITECTURE.md)（漏斗 / 观察者维度 / reconcile 语义） · [HARNESS_ADAPTER_CONTRACT.md](./HARNESS_ADAPTER_CONTRACT.md)（DSH 适配器契约） · [ENGINEERING.md](./ENGINEERING.md)（§6.6.1 bundle 分发） · [PRODUCT.md](./PRODUCT.md)（§8 排期）
 
 状态：设计，未实施。基线 deepseek-harness `47f9438`（0.1.0-rc.5），agent-vitals `54ef35e`。
 
@@ -13,16 +13,16 @@ DSH 接入是**两件互不依赖的事**，不要当成一件做：
 | | 方向 | 产物 | 排期 |
 |---|---|---|---|
 | **DSH-1 分发** | agent-vitals → DSH | `dsh-agent-vitals` bundle，让 DSH 用户装得上 | 可与 P1 并行 |
-| **DSH-2 能力** | DSH → agent-vitals | `dsh` 宿主适配器，让 DSH 自己被体检 | Rust 侧稳定之后（双维护，§5） |
+| **DSH-2 能力** | DSH → agent-vitals | `dsh` 执行环境适配器，让 DSH 自己被体检 | Rust 侧稳定之后（双维护，§5） |
 
 DSH-1 约 20 行 JS，一天。DSH-2 是真正的工作，**排在 Rust 侧稳定之后**（§5），且双维护下写两遍。
 
 还有第三件事已经先做了：DSH 暴露出漏斗缺一维，该修正与 DSH 无关也成立，
-已并入 [ARCHITECTURE §1.4](./ARCHITECTURE.md) 与 [契约的 observer 一节](./HOST_ADAPTER_CONTRACT.md)，排进 P1。
+已并入 [ARCHITECTURE §1.4](./ARCHITECTURE.md) 与 [契约的 observer 一节](./HARNESS_ADAPTER_CONTRACT.md)，排进 P1。
 
 ---
 
-# 1. DSH 的 skill 模型与前五个宿主差在哪
+# 1. DSH 的 skill 模型与前五个执行环境差在哪
 
 相同的部分：`SKILL.md` 格式、YAML frontmatter、渐进式披露、目录发现。
 **所以静态测量——上下文成本、安全扫描、语义重叠、结构检查——一行不用改。**
@@ -47,7 +47,7 @@ DSH-1 约 20 行 JS，一天。DSH-2 是真正的工作，**排在 Rust 侧稳�
 
 # 2. 两个证据源，先做便宜的那个
 
-DSH 是第一个**不需要宿主在跑就能拿到权威历史**的宿主。
+DSH 是第一个**不需要执行环境在跑就能拿到权威历史**的执行环境。
 
 | 证据源 | 回答 | recency | 需要 DSH 在跑 | 成本 |
 |---|---|---|---|---|
@@ -88,10 +88,10 @@ JSONL 会话日志，不是 SQLite。
 仓库零改动）：监听 `skills/change`，把 `{skills, complete}` 写到
 `$DSH_HOME/agent-vitals/snapshot.json`，scanner 用 `--runtime-json <file>` 摄入。
 
-**不要模仿 Codex 适配器去 spawn 宿主。** DSH 是插件运行时，反过来做更稳：没有
+**不要模仿 Codex 适配器去 spawn 执行环境。** DSH 是插件运行时，反过来做更稳：没有
 子进程、没有超时、没有 JSONL 解析，Codex 那五类失败模式一个都不存在。
 
-映射规则见[契约的 DSH 一节](./HOST_ADAPTER_CONTRACT.md)。要点：`complete === false`
+映射规则见[契约的 DSH 一节](./HARNESS_ADAPTER_CONTRACT.md)。要点：`complete === false`
 时全部降级为 `unknown`，**不是 `false`**——因为 DSH 在发现不完整的那一轮
 根本不发布目录，这不是「部分答案」，而是「这一轮所有 skill 对模型都不可见」。
 
@@ -155,7 +155,7 @@ per-agent / preset scope 需要枚举 scope 链，留到后续——那时快照
 
 ## 2.3 两者不可混为一谈
 
-这是新增 `evidence_recency` 字段的原因（[契约](./HOST_ADAPTER_CONTRACT.md)）。
+这是新增 `evidence_recency` 字段的原因（[契约](./HARNESS_ADAPTER_CONTRACT.md)）。
 一个月前的 `log` 证据说明不了现在，与 `probe` 证据并排渲染而不带时间坐标，
 报告就开始在时间上撒谎。对应的 reconcile 语义是 [ARCHITECTURE §4.1](./ARCHITECTURE.md) 新增的第三种：`historical`。
 
@@ -188,7 +188,7 @@ DSH 支持 skill 热加载，链路是：chokidar 检测（稳定阈值默认 20
 
 新增诊断码候选：**热重载不可达**（监听关闭，或该 project 根已被 LRU 驱逐）。
 它与 SV101 不是一回事——SV101 是有两份副本互相遮蔽，这一条是只有一份、
-但宿主根本没看见改动。
+但执行环境根本没看见改动。
 
 ---
 
@@ -198,8 +198,8 @@ DSH 支持 skill 热加载，链路是：chokidar 检测（稳定阈值默认 20
 
 | # | 改动 | 位置 |
 |---|---|---|
-| A1 | `--host` 增加 `dsh` | `cli.py:88` 与 `cli.py:152` **两处**（主 parser + 子命令循环） |
-| A2 | `DEFAULT_ROOTS` 增加 dsh 根 | `cli.py:65`，根表见[契约](./HOST_ADAPTER_CONTRACT.md) |
+| A1 | `--harness` 增加 `dsh` | `cli.py:88` 与 `cli.py:152` **两处**（主 parser + 子命令循环） |
+| A2 | `DEFAULT_ROOTS` 增加 dsh 根 | `cli.py:65`，根表见[契约](./HARNESS_ADAPTER_CONTRACT.md) |
 | A3 | `classify()` 增加 dsh 分支 | `discovery.py:38` |
 | A4 | `scan_skill_dir()` 的 loaded 判定 | `discovery.py:108`；磁盘只能证明 discoverable，`loaded` 留给证据 |
 | A5 | `conflict_domain` 加 dsh 规则 | `discovery.py:202`，层必须进 domain |
@@ -216,7 +216,7 @@ DSH 支持 skill 热加载，链路是：chokidar 检测（稳定阈值默认 20
 | # | 改动 |
 |---|---|
 | C1 | `fixtures/generate.py:84` 造 dsh 目录树，**必须同时有同层重名与跨层重名**，否则 A7 没法验 |
-| C2 | `tests/golden_runner.py:56` 场景表加 `host-dsh` + `golden/host-dsh.json` |
+| C2 | `tests/golden_runner.py:56` 场景表加 `harness-dsh` + `golden/harness-dsh.json` |
 | C3 | 手写会话库 fixture（complete / incomplete 两版），CI 不得依赖真跑 DSH |
 | C4 | 降级用例：证据缺失 / 畸形 / schema 不符，只降级对应能力，不丢磁盘测量与安全发现 |
 | C5 | 脱敏：`observer`、`session_id`、`instance_root` 等新字段必须进 `redact.py`，`test_properties.py` 的性质覆盖任意深度 |
@@ -224,10 +224,10 @@ DSH 支持 skill 热加载，链路是：chokidar 检测（稳定阈值默认 20
 
 ## 3.3 Rust 侧
 
-新建 `src/dsh.rs`，改 `host.rs` / `discovery.rs` / `inventory.rs` / `analysis.rs` / `main.rs`；
+新建 `src/dsh.rs`，改 `harness.rs` / `discovery.rs` / `inventory.rs` / `analysis.rs` / `main.rs`；
 `level_rank_for`（`main.rs:44`）从 `u8` 换成元组。
 
-**双维护下写两遍（Python + Rust）**——永久差分护栏（§6.8）意味着每个宿主适配器都要在两个实现里逐字节对齐，这正是 §5 的理由。
+**双维护下写两遍（Python + Rust）**——永久差分护栏（§6.8）意味着每个执行环境适配器都要在两个实现里逐字节对齐，这正是 §5 的理由。
 
 ---
 
@@ -237,7 +237,7 @@ DSH 支持 skill 热加载，链路是：chokidar 检测（稳定阈值默认 20
 
 ```
 agent-vitals/
-├── SKILL.md          ← 前五个宿主，不动
+├── SKILL.md          ← 前五个执行环境，不动
 ├── scripts/          ← 扫描器，不动
 └── dsh/              ← 新增
     ├── package.json      name: dsh-agent-vitals；dsh.bundle.patch；无 build
@@ -250,9 +250,9 @@ agent-vitals/
 
 发布后给仓库打 GitHub `dsh-plugin` topic。
 
-> **DSH-2 落地后，DSH-1 的 SKILL.md 不再声明 dsh 不是被体检的宿主**——该声明
-> 已随适配器就位解除。`--host dsh` 现在是正规入口；`--path` 指向 dsh 的 skill
-> 根仍会绕过运行时的 scope/rank 解析，结论不可靠，应改用 `--host dsh`。
+> **DSH-2 落地后，DSH-1 的 SKILL.md 不再声明 dsh 不是被体检的执行环境**——该声明
+> 已随适配器就位解除。`--harness dsh` 现在是正规入口；`--path` 指向 dsh 的 skill
+> 根仍会绕过运行时的 scope/rank 解析，结论不可靠，应改用 `--harness dsh`。
 
 ---
 
@@ -261,8 +261,8 @@ agent-vitals/
 2026-08 修订（双实现永久并行）后，两条「硬约束」的表述变了，但结论仍在：
 
 1. `RUST_PORT_PLAN.md` 的 entry criteria 已达成、Rust 侧已收敛（golden 12/12
-   逐字节一致）。多一个宿主**不再**推后 entry criteria —— 它已经过了。
-2. ENGINEERING §6.8 的并行维护期是**永久的**（双实现保留）。每个宿主适配器
+   逐字节一致）。多一个执行环境**不再**推后 entry criteria —— 它已经过了。
+2. ENGINEERING §6.8 的并行维护期是**永久的**（双实现保留）。每个执行环境适配器
    **写两遍**（Python + Rust），且永久增加一个 differential 变红的来源。
 
 所以 DSH-2 的开工时点是「Rust 侧稳定之后」，而不是等一个不存在的「Rust 替换

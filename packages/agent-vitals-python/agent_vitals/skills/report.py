@@ -3,7 +3,7 @@
 from .analysis import (
     build_budget,
     build_conflicts,
-    build_host_summaries,
+    build_harness_summaries,
     build_openclaw_instances,
     build_security,
     build_structure,
@@ -16,7 +16,7 @@ def _under_home(home_n, relative):
     return home_n.rstrip("/") + "/" + relative.lstrip("/")
 
 
-def build_report(inventory, *, host, include_all, budget, codex_fallback_budget,
+def build_report(inventory, *, harness, include_all, budget, codex_fallback_budget,
                  zombie_age, split_threshold, schema_version, home_n):
     """Return the complete unredacted report without performing any I/O."""
     skills = inventory["skills"]
@@ -27,9 +27,9 @@ def build_report(inventory, *, host, include_all, budget, codex_fallback_budget,
     unique = list(by_key.values())
     tier1_total = sum(group[0]["tier1_tokens"] for group in unique)
     budget_report = build_budget(
-        unique, host, include_all, budget, codex_fallback_budget)
+        unique, harness, include_all, budget, codex_fallback_budget)
     trigger_report = build_trigger(
-        loaded, usage, host, zombie_age,
+        loaded, usage, harness, zombie_age,
         dsh_evidence=inventory.get("dsh_evidence"),
         dsh_evidence_path=inventory.get("dsh_evidence_path"))
     structure_report = build_structure(candidates, loaded, split_threshold)
@@ -39,8 +39,8 @@ def build_report(inventory, *, host, include_all, budget, codex_fallback_budget,
     return {
         "schema_version": schema_version,
         "scanned_roots": inventory["scanned_roots"],
-        "host_selection": host,
-        "host_summaries": build_host_summaries(
+        "harness_selection": harness,
+        "harness_summaries": build_harness_summaries(
             skills, usage, codex_runtime, openclaw_runtime, budget,
             codex_fallback_budget,
             # 与 Rust report.rs 同口径：有会话日志证据且未 degraded 才算 available。
@@ -52,10 +52,10 @@ def build_report(inventory, *, host, include_all, budget, codex_fallback_budget,
         "loaded_skills": len(loaded),
         "unique_skills": len(unique),
         "plugin_state": {
-            "host_config_read": inventory["plugins_known"],
+            "harness_config_read": inventory["plugins_known"],
             "enabled_plugins": sorted(inventory["enabled_plugins"] or ()),
             "note": "Disabled plugin copies remain on disk but do not enter context or count toward the budget. "
-                    "When host_config_read=false, plugin state is unknown and copies are treated as not loaded.",
+                    "When harness_config_read=false, plugin state is unknown and copies are treated as not loaded.",
         },
         "codex_runtime": {
             "available": codex_runtime["available"],
@@ -92,11 +92,11 @@ def build_report(inventory, *, host, include_all, budget, codex_fallback_budget,
         "tier1_total_tokens": tier1_total,
         "tier1_pct_of_200k": round(tier1_total / 200000 * 100, 2),
         "conflicts": build_conflicts(by_key),
-        "precedence_note": "Overrides are compared only within one host. Claude Code: enterprise > personal > "
+        "precedence_note": "Overrides are compared only within one harness. Claude Code: enterprise > personal > "
                            "project > plugin; OpenClaw: workspace > project > personal > managed. Plugin skills "
                            "are isolated by <plugin>:<name>, so equal bare names are not conflicts.",
-        "cross_host_note": "Hosts do not share context. Use host_summaries or --host for one runtime; do not "
-                           "interpret top-level Tier1 or description-budget values as a cross-host total.",
+        "cross_harness_note": "Harnesses do not share context. Use harness_summaries or --harness for one runtime; do not "
+                           "interpret top-level Tier1 or description-budget values as a cross-harness total.",
         "skills": sorted(skills, key=lambda skill: (not skill["loaded"],
                                                     -skill["tier1_tokens"])),
     }

@@ -8,7 +8,7 @@ version = "1.4.0"
 dependencies = [
  "agent-vitals-data",
  "agent-vitals-domain",
- "agent-vitals-hosts",
+ "agent-vitals-harnesses",
  "agent-vitals-probe",
  "agent-vitals-runtime",
  "clap",
@@ -27,7 +27,7 @@ version = "1.4.0"
 dependencies = [
  "agent-vitals-data",
  "agent-vitals-domain",
- "agent-vitals-hosts",
+ "agent-vitals-harnesses",
  "agent-vitals-provider",
  "agent-vitals-query",
  "jiff",
@@ -51,14 +51,14 @@ dependencies = [
 name = "agent-vitals-domain"
 version = "1.4.0"
 dependencies = [
- "agent-vitals-hosts",
+ "agent-vitals-harnesses",
  "regex",
  "serde_json",
  "vitals-core",
 ]
 
 [[package]]
-name = "agent-vitals-hosts"
+name = "agent-vitals-harnesses"
 version = "1.4.0"
 dependencies = [
  "agent-vitals-domain",
@@ -80,7 +80,7 @@ dependencies = [
  "agent-vitals-billing",
  "agent-vitals-data",
  "agent-vitals-domain",
- "agent-vitals-hosts",
+ "agent-vitals-harnesses",
  "agent-vitals-provider",
  "agent-vitals-runtime-core",
  "jiff",
@@ -99,7 +99,7 @@ version = "1.4.0"
 dependencies = [
  "agent-vitals-data",
  "agent-vitals-domain",
- "agent-vitals-hosts",
+ "agent-vitals-harnesses",
  "agent-vitals-ingest",
  "agent-vitals-trust",
  "jiff",
@@ -132,7 +132,7 @@ version = "1.4.0"
 dependencies = [
  "agent-vitals-data",
  "agent-vitals-domain",
- "agent-vitals-hosts",
+ "agent-vitals-harnesses",
  "agent-vitals-ingest",
  "agent-vitals-runtime-core",
  "jiff",
@@ -151,7 +151,7 @@ dependencies = [
  "agent-vitals-billing",
  "agent-vitals-data",
  "agent-vitals-domain",
- "agent-vitals-hosts",
+ "agent-vitals-harnesses",
  "agent-vitals-ingest",
  "agent-vitals-mcp",
  "agent-vitals-provider",
@@ -173,7 +173,7 @@ version = "1.4.0"
 dependencies = [
  "agent-vitals-data",
  "agent-vitals-domain",
- "agent-vitals-hosts",
+ "agent-vitals-harnesses",
  "jiff",
  "regex",
  "rusqlite",
@@ -189,7 +189,7 @@ version = "1.4.0"
 dependencies = [
  "agent-vitals-data",
  "agent-vitals-domain",
- "agent-vitals-hosts",
+ "agent-vitals-harnesses",
  "agent-vitals-query",
  "rusqlite",
  "serde",
@@ -203,7 +203,7 @@ name = "agent-vitals-wasm"
 version = "1.4.0"
 dependencies = [
  "agent-vitals-domain",
- "agent-vitals-hosts",
+ "agent-vitals-harnesses",
  "serde_json",
  "wasm-bindgen",
 ]

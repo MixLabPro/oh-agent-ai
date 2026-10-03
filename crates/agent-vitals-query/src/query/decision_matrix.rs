@@ -1,13 +1,13 @@
 //! 「发现」tab ②模型 × Harness 对比的决策面数据（WORKBENCH_FINDINGS_TAB_SPEC §3.2/§4/§5.2）。
 //!
-//! 一行 = `(host, model_id, provider_id)` 组合；列 = 会话数、四桶 token、缓存命中、
+//! 一行 = `(harness, model_id, provider_id)` 组合；列 = 会话数、四桶 token、缓存命中、
 //! 名义成本（按币种/口径分列，永不相加）、贡献 Top 会话（不透明 session_ref）、
-//! 行为标记（**宿主级**，spec §4.7——多模型会话使 per-model 归组成为编造）。
+//! 行为标记（**执行环境级**，spec §4.7——多模型会话使 per-model 归组成为编造）。
 //!
 //! 诚实性边界（§1.4/§4）：
 //! - 输入侧全零 → `cache_hit_ratio: null`，不是 0；
 //! - `waste_rate` 恒 `null`——waste 检测器仅 DSH 且尚未接入（notes 带说明）；
-//! - 计价复用 `cost_breakdown`（单一价格事实源），按 `(host, model)` 合并，
+//! - 计价复用 `cost_breakdown`（单一价格事实源），按 `(harness, model)` 合并，
 //!   cost 行 provider 为空（归因未定）时挂 `cost_provider_unresolved: true`，
 //!   不冒充已归因；
 //! - 订阅内组合 `has_subscription: true` 且 amounts 可为空（§4.6 订阅行不参与排序）。
@@ -19,11 +19,11 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-// 组合键：host × model × provider（provider 缺失归 `<unknown>`，与
+// 组合键：harness × model × provider（provider 缺失归 `<unknown>`，与
 /// SQL_UNRESOLVED 的事实层语义一致，不编一个名字）。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Combo {
-    host: String,
+    harness: String,
     model: String,
     provider: String,
 }
@@ -40,24 +40,24 @@ pub fn decision_matrix(data_home: &Path, month: &str) -> Result<Value, String> {
         .map_err(|e| format!("authority_unavailable: {e}"))?;
 
     let mut rows = combo_rows(db.conn(), start_ms, end_ms)?;
-    let marks = host_behavior_marks(db.conn(), start_ms, end_ms);
+    let marks = harness_behavior_marks(db.conn(), start_ms, end_ms);
     // salt 读取失败不拖垮整个矩阵：Top 会话置空 + note 说明（验收条件 4——
     // 只读命令对 data_home 只读的环境也要能出表）。
     if let Err(e) = attach_top_sessions(db.conn(), start_ms, end_ms, data_home, &mut rows) {
         rows.values_mut().for_each(|r| r["top_sessions"] = json!([]));
         salt_note = Some(format!("贡献会话列表不可用（session_ref salt：{e}）"));
     }
-    // 撞限流频次列（§4.5）：SV607/608 宿主级命中 ÷ 宿主去重会话数 = 每会话均值。
-    let host_sessions = host_session_counts(db.conn(), start_ms, end_ms);
+    // 撞限流频次列（§4.5）：SV607/608 执行环境级命中 ÷ 执行环境去重会话数 = 每会话均值。
+    let harness_sessions = harness_session_counts(db.conn(), start_ms, end_ms);
     let failures = session_failure_counts(db.conn(), start_ms, end_ms);
 
-    // 计价：复用 cost_breakdown（同一价格事实源），按 (host, model) 合并。
+    // 计价：复用 cost_breakdown（同一价格事实源），按 (harness, model) 合并。
     let (from_day, to_day) = month_day_span(month)?;
     let mut cost_note: Option<String> = None;
     let cost_args = json!({"from": from_day, "to": to_day});
-    let mut cost_by_host_model: BTreeMap<(String, String), Vec<Value>> = BTreeMap::new();
+    let mut cost_by_harness_model: BTreeMap<(String, String), Vec<Value>> = BTreeMap::new();
     // amount 为 null 的 cost 行多半是申报订阅覆盖（cost_breakdown 的归因口径）——
-    // 记下 (host, model)，让这些组合按「订阅覆盖」而非「未计价」呈现（验收条件 2：
+    // 记下 (harness, model)，让这些组合按「订阅覆盖」而非「未计价」呈现（验收条件 2：
     // has_subscription 的原始 billing_mode 与申报归因的口径缝隙）。
     let mut subscription_covered: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
     let cost_result = crate::query::cost_breakdown::run(&cost_args, data_home);
@@ -68,17 +68,17 @@ pub fn decision_matrix(data_home: &Path, month: &str) -> Result<Value, String> {
         if let Some(breakdown) = cost["data"]["breakdown"].as_array() {
             for row in breakdown {
                 let key = &row["key"];
-                let host_m = key["host"].as_str().unwrap_or("<unknown>").to_string();
+                let harness_m = key["harness"].as_str().unwrap_or("<unknown>").to_string();
                 let model_m = key["model"].as_str().unwrap_or("<unknown>").to_string();
                 let amount = row.get("amount").cloned().unwrap_or(Value::Null);
                 if amount.is_null() {
-                    subscription_covered.insert((host_m, model_m));
+                    subscription_covered.insert((harness_m, model_m));
                     continue;
                 }
-                let host = key["host"].as_str().unwrap_or("<unknown>").to_string();
+                let harness = key["harness"].as_str().unwrap_or("<unknown>").to_string();
                 let model = key["model"].as_str().unwrap_or("<unknown>").to_string();
-                cost_by_host_model
-                    .entry((host, model))
+                cost_by_harness_model
+                    .entry((harness, model))
                     .or_default()
                     .push(json!({
                         "amount_minor": amount["amount_minor"],
@@ -91,22 +91,22 @@ pub fn decision_matrix(data_home: &Path, month: &str) -> Result<Value, String> {
         }
     }
     for row in rows.values_mut() {
-        let host = row["host"].as_str().unwrap_or("<unknown>").to_string();
+        let harness = row["harness"].as_str().unwrap_or("<unknown>").to_string();
         let model = row["model_id"].as_str().unwrap_or("<unknown>").to_string();
-        let amounts = cost_by_host_model.remove(&(host.clone(), model.clone()));
+        let amounts = cost_by_harness_model.remove(&(harness.clone(), model.clone()));
         let unresolved = amounts.as_ref().map(|list| list.iter().any(|a| {
             a["cost_provider"].is_null() && a["cost_provider_raw"].as_str() != Some("official")
         }));
         row["amounts"] = json!(amounts.unwrap_or_default());
         row["cost_provider_unresolved"] = json!(unresolved.unwrap_or(false));
-        if subscription_covered.contains(&(host.clone(), model.clone())) {
+        if subscription_covered.contains(&(harness.clone(), model.clone())) {
             row["has_subscription"] = json!(true);
         }
-        // 撞限流列（§4.5）：命中数 + 每会话均值（宿主级；会话数为 0 → 只给命中数）。
-        let hits = marks.get(&host)
+        // 撞限流列（§4.5）：命中数 + 每会话均值（执行环境级；会话数为 0 → 只给命中数）。
+        let hits = marks.get(&harness)
             .and_then(|m| m["SV607"].as_i64().unwrap_or(0).checked_add(m["SV608"].as_i64().unwrap_or(0)))
             .unwrap_or(0);
-        let sessions = host_sessions.get(&host).copied().unwrap_or(0);
+        let sessions = harness_sessions.get(&harness).copied().unwrap_or(0);
         row["limit_pressure"] = if hits > 0 {
             let per_session = if sessions > 0 {
                 Some((hits as f64 / sessions as f64 * 100.0).round() / 100.0)
@@ -117,8 +117,8 @@ pub fn decision_matrix(data_home: &Path, month: &str) -> Result<Value, String> {
         } else {
             Value::Null
         };
-        let host = row["host"].as_str().unwrap_or_default();
-        row["host_behavior"] = marks.get(host).cloned().unwrap_or(json!({}));
+        let harness = row["harness"].as_str().unwrap_or_default();
+        row["harness_behavior"] = marks.get(harness).cloned().unwrap_or(json!({}));
         for sess in row["top_sessions"].as_array_mut().unwrap_or(&mut Vec::new()) {
             // session_key 只在进程内做 failures 对齐，随后剥离——原生会话 id
             // 不出 IPC（§3.3 隐私边界；前端只拿 sr_ 不透明引用）。
@@ -134,9 +134,9 @@ pub fn decision_matrix(data_home: &Path, month: &str) -> Result<Value, String> {
 
     let mut notes = vec![
         "waste_rate 恒 null：waste 检测器仅 DSH 且尚未接入（spec §4.2，不用 0 冒充）".to_string(),
-        "host_behavior 为宿主级聚合（spec §4.7）：多模型会话使 per-model 归组成为编造".to_string(),
+        "harness_behavior 为执行环境级聚合（spec §4.7）：多模型会话使 per-model 归组成为编造".to_string(),
         "amounts 按币种/口径分列，永不跨币种相加（spec §1.5）".to_string(),
-        "指纹跨链（invocation_fingerprint × issues 重复组）推后至 P3：需要指纹→组合的宿主级对齐".to_string(),
+        "指纹跨链（invocation_fingerprint × issues 重复组）推后至 P3：需要指纹→组合的执行环境级对齐".to_string(),
     ];
     if let Some(note) = salt_note { notes.push(note); }
     if let Some(note) = cost_note { notes.push(note); }
@@ -150,7 +150,7 @@ pub fn decision_matrix(data_home: &Path, month: &str) -> Result<Value, String> {
     }))
 }
 
-// (host, model, provider) 分组聚合 + 每组合的 Top 会话挂载。
+// (harness, model, provider) 分组聚合 + 每组合的 Top 会话挂载。
 fn combo_rows(
     conn: &rusqlite::Connection,
     start_ms: i64,
@@ -158,7 +158,7 @@ fn combo_rows(
 ) -> Result<BTreeMap<Combo, Value>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT f.host, COALESCE(f.model_id, '<unknown>'), COALESCE(f.provider_id, '<unknown>'),
+            "SELECT f.harness, COALESCE(f.model_id, '<unknown>'), COALESCE(f.provider_id, '<unknown>'),
                     COUNT(DISTINCT f.session_key),
                     SUM(f.uncached_input_tokens), SUM(f.cache_read_tokens),
                     SUM(f.cache_write_tokens), SUM(f.output_tokens),
@@ -187,8 +187,8 @@ fn combo_rows(
         .map_err(|e| format!("decision_matrix query: {e}"))?;
     let mut out: BTreeMap<Combo, Value> = BTreeMap::new();
     for row in queried.flatten() {
-        let (host, model, provider, sessions, uncached, read, write, output, sub) = row;
-        let combo = Combo { host: host.clone(), model: model.clone(), provider: provider.clone() };
+        let (harness, model, provider, sessions, uncached, read, write, output, sub) = row;
+        let combo = Combo { harness: harness.clone(), model: model.clone(), provider: provider.clone() };
         let input_side = uncached + read + write;
         let ratio = if input_side == 0 {
             Value::Null
@@ -196,7 +196,7 @@ fn combo_rows(
             json!((read as f64 / input_side as f64 * 10_000.0).round() / 10_000.0)
         };
         out.insert(combo, json!({
-            "host": host, "model_id": model, "provider_id": provider,
+            "harness": harness, "model_id": model, "provider_id": provider,
             "sessions": sessions,
             "tokens": {
                 "uncached_input": uncached, "cache_read": read,
@@ -206,7 +206,7 @@ fn combo_rows(
             "cache_hit_ratio": ratio,
             "has_subscription": sub == 1,
             "waste_rate": Value::Null,
-            "amounts": [], "top_sessions": [], "host_behavior": {},
+            "amounts": [], "top_sessions": [], "harness_behavior": {},
         }));
     }
     Ok(out)
@@ -223,7 +223,7 @@ fn attach_top_sessions(
 ) -> Result<(), String> {
     let mut stmt = conn
         .prepare(
-            "SELECT f.host, COALESCE(f.model_id, '<unknown>'), COALESCE(f.provider_id, '<unknown>'),
+            "SELECT f.harness, COALESCE(f.model_id, '<unknown>'), COALESCE(f.provider_id, '<unknown>'),
                     f.session_key, MIN(f.event_ts_ms), MAX(f.event_ts_ms),
                     SUM(f.uncached_input_tokens + f.cache_read_tokens + f.cache_write_tokens + f.output_tokens)
              FROM usage_facts f
@@ -249,9 +249,9 @@ fn attach_top_sessions(
         .map_err(|e| format!("decision_matrix sessions query: {e}"))?;
     let mut per_combo: BTreeMap<Combo, Vec<(i64, String, i64, i64)>> = BTreeMap::new();
     for row in queried.flatten() {
-        let (host, model, provider, session_key, first, last, tokens) = row;
+        let (harness, model, provider, session_key, first, last, tokens) = row;
         per_combo
-            .entry(Combo { host, model, provider })
+            .entry(Combo { harness, model, provider })
             .or_default()
             .push((tokens, session_key, first, last));
     }
@@ -276,11 +276,11 @@ fn attach_top_sessions(
     Ok(())
 }
 
-// SV607/608/610 的宿主级聚合（spec §4.7）：按 (host, rule) 计数，挂到该宿主
-/// 的每一行作为「宿主级证据」，不做 per-model 归组。
-fn host_behavior_marks(conn: &rusqlite::Connection, start_ms: i64, end_ms: i64) -> BTreeMap<String, Value> {
+// SV607/608/610 的执行环境级聚合（spec §4.7）：按 (harness, rule) 计数，挂到该执行环境
+/// 的每一行作为「执行环境级证据」，不做 per-model 归组。
+fn harness_behavior_marks(conn: &rusqlite::Connection, start_ms: i64, end_ms: i64) -> BTreeMap<String, Value> {
     let Ok(mut stmt) = conn.prepare(
-        "SELECT host, issue_type, COUNT(*) FROM issue_instances
+        "SELECT harness, issue_type, COUNT(*) FROM issue_instances
          WHERE issue_type IN ('SV607', 'SV608', 'SV610')
            AND opened_at_ms >= ?1 AND opened_at_ms < ?2
          GROUP BY 1, 2",
@@ -294,17 +294,17 @@ fn host_behavior_marks(conn: &rusqlite::Connection, start_ms: i64, end_ms: i64) 
     };
     let mut out: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
     for row in queried.flatten() {
-        let (host, rule, count) = row;
-        out.entry(host).or_default().insert(rule, count);
+        let (harness, rule, count) = row;
+        out.entry(harness).or_default().insert(rule, count);
     }
-    out.into_iter().map(|(host, rules)| (host, json!(rules))).collect()
+    out.into_iter().map(|(harness, rules)| (harness, json!(rules))).collect()
 }
 
-// 宿主级去重会话数（§4.5 撞限流的分母）：一个会话可跨多模型组合，
-/// 分母必须按宿主去重，不能把各组合的会话数相加。
-fn host_session_counts(conn: &rusqlite::Connection, start_ms: i64, end_ms: i64) -> BTreeMap<String, i64> {
+// 执行环境级去重会话数（§4.5 撞限流的分母）：一个会话可跨多模型组合，
+/// 分母必须按执行环境去重，不能把各组合的会话数相加。
+fn harness_session_counts(conn: &rusqlite::Connection, start_ms: i64, end_ms: i64) -> BTreeMap<String, i64> {
     let Ok(mut stmt) = conn.prepare(
-        "SELECT f.host, COUNT(DISTINCT f.session_key) FROM usage_facts f
+        "SELECT f.harness, COUNT(DISTINCT f.session_key) FROM usage_facts f
          WHERE f.event_ts_ms >= ?1 AND f.event_ts_ms < ?2
            AND f.observation_kind != 'legacy_aggregate' AND f.deleted_at_ms IS NULL
            AND f.session_key IS NOT NULL AND f.session_key != ''
@@ -405,10 +405,10 @@ fn dig_findings(rows: &[Value]) -> Vec<Value> {
             out.push(json!({
                 "kind": "cost_outlier",
                 "currency": cur,
-                "outlier": { "host": outlier["host"], "model_id": outlier["model_id"], "provider_id": outlier["provider_id"],
+                "outlier": { "harness": outlier["harness"], "model_id": outlier["model_id"], "provider_id": outlier["provider_id"],
                     "per_session_minor": (out_ps * 100.0).round() as i64, "cache_hit_ratio": hit,
                     "uncached_tokens": outlier["tokens"]["uncached_input"] },
-                "control": { "host": control["host"], "model_id": control["model_id"],
+                "control": { "harness": control["harness"], "model_id": control["model_id"],
                     "per_session_minor": (ctl_ps * 100.0).round() as i64, "cache_hit_ratio": control["cache_hit_ratio"] },
                 "ratio_vs_control": ratio,
                 "saving_minor": saving_minor,
@@ -433,7 +433,7 @@ fn dig_findings(rows: &[Value]) -> Vec<Value> {
             "span_hours": (span_ms as f64 / 3600000.0 * 10.0).round() / 10.0,
             "tokens_total": sess["tokens_total"],
             "failures": sess["failures"],
-            "combo": { "host": row["host"], "model_id": row["model_id"] },
+            "combo": { "harness": row["harness"], "model_id": row["model_id"] },
         }));
     }
 
@@ -502,12 +502,12 @@ mod tests {
         dir
     }
 
-    fn seed_session(db: &AuthorityDb, host: &str, session: &str) {
+    fn seed_session(db: &AuthorityDb, harness: &str, session: &str) {
         db.conn()
             .execute(
-                "INSERT OR IGNORE INTO sessions(session_key, host, native_session_id, machine_namespace, last_observed_at_ms)
+                "INSERT OR IGNORE INTO sessions(session_key, harness, native_session_id, machine_namespace, last_observed_at_ms)
                  VALUES (?1, ?2, ?1, 'm', 1)",
-                rusqlite::params![session, host],
+                rusqlite::params![session, harness],
             )
             .unwrap();
     }
@@ -520,8 +520,8 @@ mod tests {
         tokens: (i64, i64, i64, i64),
         billing_mode: &str,
     ) {
-        let (host, model, provider) = combo;
-        seed_session(db, host, session);
+        let (harness, model, provider) = combo;
+        seed_session(db, harness, session);
         db.conn()
             .execute(
                 "INSERT OR IGNORE INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
@@ -531,33 +531,33 @@ mod tests {
             .unwrap();
         db.conn()
             .execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                      observation_kind, provider_id, model_id, event_ts_ms, event_peak, pricing_basis, evidence_basis,
                      billing_mode, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                      session_key, ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1, ?2, 'm', 's', ?1, 'token_count', ?3, ?4, ?5, 0, 'metered_estimate', 'missing',
                      ?6, ?7, ?8, ?9, ?10, ?11, 'run', 1, 1)",
                 rusqlite::params![
-                    format!("f-{host}-{model}-{session}-{ts}"), host, provider, model, ts,
+                    format!("f-{harness}-{model}-{session}-{ts}"), harness, provider, model, ts,
                     billing_mode, tokens.0, tokens.1, tokens.2, tokens.3, session
                 ],
             )
             .unwrap();
     }
 
-    fn seed_issue(db: &AuthorityDb, host: &str, rule: &str, at_ms: i64) {
+    fn seed_issue(db: &AuthorityDb, harness: &str, rule: &str, at_ms: i64) {
         db.conn()
             .execute(
-                "INSERT INTO issue_instances(issue_id, machine_namespace, host, session_key, issue_type,
+                "INSERT INTO issue_instances(issue_id, machine_namespace, harness, session_key, issue_type,
                      instance_fingerprint, status, severity, evaluator_id, evaluator_version,
                      evidence_fingerprint, opened_at_ms, metadata_json)
                  VALUES (?1, 'm', ?2, NULL, ?3, ?4, 'open', 'warning', 'ev', '1', 'fp', ?5, '{}')",
-                rusqlite::params![format!("i-{host}-{rule}-{at_ms}"), host, rule, format!("fp-{at_ms}"), at_ms],
+                rusqlite::params![format!("i-{harness}-{rule}-{at_ms}"), harness, rule, format!("fp-{at_ms}"), at_ms],
             )
             .unwrap();
     }
 
-    // 分组/命中/订阅标记/宿主级行为标记/Top 会话——空库之外的全部语义。
+    // 分组/命中/订阅标记/执行环境级行为标记/Top 会话——空库之外的全部语义。
     // 计价合并只验证结构（amounts 数组存在；空 = 无价，不冒充）。
     #[test]
     fn groups_combos_with_honest_nulls_and_top_sessions() {
@@ -574,10 +574,10 @@ mod tests {
 
         let mut rows = combo_rows(db.conn(), start, start + 30 * 86_400_000).unwrap();
         attach_top_sessions(db.conn(), start, start + 30 * 86_400_000, &home, &mut rows).unwrap();
-        let marks = host_behavior_marks(db.conn(), start, start + 30 * 86_400_000);
+        let marks = harness_behavior_marks(db.conn(), start, start + 30 * 86_400_000);
 
         let terra = rows.get(&Combo {
-            host: "codex".into(), model: "gpt-5.6-terra".into(), provider: "shengsuanyun".into(),
+            harness: "codex".into(), model: "gpt-5.6-terra".into(), provider: "shengsuanyun".into(),
         }).expect("terra combo").clone();
         assert_eq!(terra["sessions"], json!(2), "DISTINCT session_key 计会话：{terra}");
         assert_eq!(terra["tokens"]["total"], json!(1210));
@@ -589,11 +589,11 @@ mod tests {
         assert_eq!(top.len(), 2, "两会话都进 Top（上限 3）：{top:?}");
         assert_eq!(top[0]["tokens_total"], json!(1160), "按贡献降序：sess-a 在前（1050+110 两笔之和）");
         assert!(top[0]["session_ref"].as_str().unwrap_or("").starts_with("sr_"), "不透明引用");
-        assert_eq!(marks["codex"]["SV610"], json!(2), "宿主级计数：{marks:?}");
+        assert_eq!(marks["codex"]["SV610"], json!(2), "执行环境级计数：{marks:?}");
         assert!(!marks.contains_key("claude-code"));
 
         let opus = rows.get(&Combo {
-            host: "claude-code".into(), model: "claude-opus-5".into(), provider: "<unknown>".into(),
+            harness: "claude-code".into(), model: "claude-opus-5".into(), provider: "<unknown>".into(),
         }).expect("opus combo").clone();
         assert_eq!(opus["has_subscription"], json!(true));
         assert_eq!(opus["cache_hit_ratio"], json!(1.0), "全缓存读");
@@ -656,7 +656,7 @@ mod tests {
     }
 
     // 端到端（decision_matrix 本体）：Top 会话带 failures、session_key 被剥离、
-    // salt 自动创建、撞限流列挂宿主级数据（验收盲区 4/5 的直测）。
+    // salt 自动创建、撞限流列挂执行环境级数据（验收盲区 4/5 的直测）。
     #[test]
     fn decision_matrix_end_to_end_top_sessions_and_pressure() {
         let home = temp_home("e2e");
@@ -678,17 +678,17 @@ mod tests {
         assert!(top[0]["session_ref"].as_str().unwrap_or("").starts_with("sr_"));
         let pressure = &row["limit_pressure"];
         assert_eq!(pressure["hits"], json!(1), "SV607 ×1 计入撞限流：{pressure}");
-        assert_eq!(pressure["per_session"], json!(1.0), "宿主 1 个去重会话 → 均值 1.0");
+        assert_eq!(pressure["per_session"], json!(1.0), "执行环境 1 个去重会话 → 均值 1.0");
         let _ = std::fs::remove_dir_all(&home);
     }
 
     fn dig_row(model: &str, sessions: i64, amount_minor: i64, hit: Option<f64>, top_sessions: Value) -> Value {
         json!({
-            "host": "claude-code", "model_id": model, "provider_id": "p", "sessions": sessions,
+            "harness": "claude-code", "model_id": model, "provider_id": "p", "sessions": sessions,
             "tokens": { "uncached_input": 100, "cache_read": 100, "cache_write": 0, "output": 1, "total": 201 },
             "cache_hit_ratio": hit, "has_subscription": false, "waste_rate": null,
             "amounts": [{ "amount_minor": amount_minor, "currency": "CNY", "basis": "metered_estimate" }],
-            "top_sessions": top_sessions, "host_behavior": {},
+            "top_sessions": top_sessions, "harness_behavior": {},
         })
     }
 

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(path.join(repo, "apps/desktop/ui-dev/package.json"));
 const { buildSync } = require("esbuild");
-const out = buildSync({entryPoints:[path.join(repo,"apps/desktop/ui-dev/react/src/features/city/engine/cityRoadPaint.ts")],bundle:true,write:false,format:"cjs",platform:"node"});
+const out = buildSync({entryPoints:[path.join(repo,"apps/agent-city/ui/src/engine/cityRoadPaint.ts")],bundle:true,write:false,format:"cjs",platform:"node"});
 const mod={exports:{}};vm.runInNewContext(out.outputFiles[0].text,{module:mod,exports:mod.exports,Map,Set});
 const {roadPaintPlan}=mod.exports;
 const edge=(id,from,to,a,b,bridge=false,width=8)=>({id,from,to,points:[a,b],width,kind:"arterial",bridge});

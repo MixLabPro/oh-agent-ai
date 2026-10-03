@@ -2,44 +2,44 @@
   "schema_version": "1.0",
   "scanned_roots": [
     {
-      "host": "claude-code",
+      "harness": "claude-code",
       "path": ".claude/skills",
       "instance_id": null,
       "root_kind": null
     },
     {
-      "host": "claude-code",
+      "harness": "claude-code",
       "path": "<FIXTURES>/.claude/skills",
       "instance_id": null,
       "root_kind": null
     },
     {
-      "host": "claude-code-plugins",
+      "harness": "claude-code-plugins",
       "path": "<FIXTURES>/.claude/plugins",
       "instance_id": null,
       "root_kind": null
     },
     {
-      "host": "codex",
+      "harness": "codex",
       "path": "<FIXTURES>/.codex/skills",
       "instance_id": null,
       "root_kind": null
     },
     {
-      "host": "cursor",
+      "harness": "cursor",
       "path": "<FIXTURES>/.cursor/skills",
       "instance_id": null,
       "root_kind": null
     },
     {
-      "host": "openclaw",
+      "harness": "openclaw",
       "path": "<FIXTURES>/.openclaw/skills",
       "instance_id": ".openclaw",
       "root_kind": "managed"
     }
   ],
-  "host_selection": "all",
-  "host_summaries": {
+  "harness_selection": "all",
+  "harness_summaries": {
     "claude-code": {
       "skills_on_disk": 32,
       "discoverable_skills": 31,
@@ -155,14 +155,14 @@
   "loaded_skills": 32,
   "unique_skills": 32,
   "plugin_state": {
-    "host_config_read": true,
+    "harness_config_read": true,
     "enabled_plugins": [
       "plug-dup@mkt-a",
       "plug-one@mkt-a",
       "plug-three@mkt-b",
       "plug-two@mkt-a"
     ],
-    "note": "Disabled plugin copies remain on disk but do not enter context or count toward the budget. When host_config_read=false, plugin state is unknown and copies are treated as not loaded."
+    "note": "Disabled plugin copies remain on disk but do not enter context or count toward the budget. When harness_config_read=false, plugin state is unknown and copies are treated as not loaded."
   },
   "codex_runtime": {
     "available": false,
@@ -224,7 +224,7 @@
   "trigger_data": {
     "available": false,
     "source": "~/.claude.json -> skillUsage",
-    "entries_in_host_record": 6,
+    "entries_in_harness_record": 6,
     "counts_are": "lifetime cumulative, not last-30-days",
     "zombie_min_age_days": 14,
     "zombie_candidates": [],
@@ -371,7 +371,7 @@
   "tier1_pct_of_200k": 0.36,
   "conflicts": [
     {
-      "host": "claude-code",
+      "harness": "claude-code",
       "instance_id": null,
       "conflict_domain": "claude-code",
       "name": "dup-shadowed",
@@ -393,7 +393,7 @@
       ]
     },
     {
-      "host": "claude-code",
+      "harness": "claude-code",
       "instance_id": null,
       "conflict_domain": "claude-code",
       "name": "dup-override",
@@ -415,7 +415,7 @@
       ]
     },
     {
-      "host": "claude-code",
+      "harness": "claude-code",
       "instance_id": null,
       "conflict_domain": "claude-code",
       "name": "dup-identical",
@@ -443,7 +443,7 @@
       ]
     },
     {
-      "host": "claude-code",
+      "harness": "claude-code",
       "instance_id": null,
       "conflict_domain": "claude-code-plugins",
       "name": "dup-tool",
@@ -465,14 +465,14 @@
       ]
     }
   ],
-  "precedence_note": "Overrides are compared only within one host. Claude Code: enterprise > personal > project > plugin; OpenClaw: workspace > project > personal > managed. Plugin skills are isolated by <plugin>:<name>, so equal bare names are not conflicts.",
-  "cross_host_note": "Hosts do not share context. Use host_summaries or --host for one runtime; do not interpret top-level Tier1 or description-budget values as a cross-host total.",
+  "precedence_note": "Overrides are compared only within one harness. Claude Code: enterprise > personal > project > plugin; OpenClaw: workspace > project > personal > managed. Plugin skills are isolated by <plugin>:<name>, so equal bare names are not conflicts.",
+  "cross_harness_note": "Harnesses do not share context. Use harness_summaries or --harness for one runtime; do not interpret top-level Tier1 or description-budget values as a cross-harness total.",
   "skills": [
     {
       "name": "fm-edge",
       "dir_name": "fm-edge",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -525,8 +525,8 @@
     {
       "name": "codex-only",
       "dir_name": "codex-only",
-      "host": "codex",
-      "host_family": "codex",
+      "harness": "codex",
+      "harness_family": "codex",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -579,8 +579,8 @@
     {
       "name": "dup-tool",
       "dir_name": "dup-tool",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plug-dup",
       "plugin_key": "plug-dup@mkt-a",
@@ -633,8 +633,8 @@
     {
       "name": "dup-tool",
       "dir_name": "dup-tool",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plug-dup",
       "plugin_key": "plug-dup@mkt-a",
@@ -687,8 +687,8 @@
     {
       "name": "dup-identical",
       "dir_name": "dup-identical",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "project",
       "namespace": null,
       "plugin_key": null,
@@ -741,8 +741,8 @@
     {
       "name": "dup-override",
       "dir_name": "dup-override",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "project",
       "namespace": null,
       "plugin_key": null,
@@ -795,8 +795,8 @@
     {
       "name": "dup-shadowed",
       "dir_name": "dup-shadowed",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "project",
       "namespace": null,
       "plugin_key": null,
@@ -849,8 +849,8 @@
     {
       "name": "access",
       "dir_name": "access",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plug-one",
       "plugin_key": "plug-one@mkt-a",
@@ -903,8 +903,8 @@
     {
       "name": "access",
       "dir_name": "access",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plug-two",
       "plugin_key": "plug-two@mkt-a",
@@ -957,8 +957,8 @@
     {
       "name": "p3-tool",
       "dir_name": "p3-tool",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plug-three",
       "plugin_key": "plug-three@mkt-b",
@@ -1011,8 +1011,8 @@
     {
       "name": "dup-identical",
       "dir_name": "dup-identical",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1065,8 +1065,8 @@
     {
       "name": "dup-override",
       "dir_name": "dup-override",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1119,8 +1119,8 @@
     {
       "name": "dup-shadowed",
       "dir_name": "dup-shadowed",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1173,8 +1173,8 @@
     {
       "name": "dup-identical",
       "dir_name": "dup-identical",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "enterprise",
       "namespace": null,
       "plugin_key": null,
@@ -1227,8 +1227,8 @@
     {
       "name": "p1-tool",
       "dir_name": "p1-tool",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plug-one",
       "plugin_key": "plug-one@mkt-a",
@@ -1281,8 +1281,8 @@
     {
       "name": "p2-tool",
       "dir_name": "p2-tool",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plug-two",
       "plugin_key": "plug-two@mkt-a",
@@ -1335,8 +1335,8 @@
     {
       "name": "with-scripts",
       "dir_name": "with-scripts",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1409,8 +1409,8 @@
     {
       "name": "ev-example",
       "dir_name": "ev-example",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1472,8 +1472,8 @@
     {
       "name": "ev-quote",
       "dir_name": "ev-quote",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1535,8 +1535,8 @@
     {
       "name": "with-corpus",
       "dir_name": "with-corpus",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1589,8 +1589,8 @@
     {
       "name": "ev-plain",
       "dir_name": "ev-plain",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1652,8 +1652,8 @@
     {
       "name": "with-readme",
       "dir_name": "with-readme",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1706,8 +1706,8 @@
     {
       "name": "with-refs",
       "dir_name": "with-refs",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1760,8 +1760,8 @@
     {
       "name": "dense-core",
       "dir_name": "dense-core",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1814,8 +1814,8 @@
     {
       "name": "sparse-long",
       "dir_name": "sparse-long",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1868,8 +1868,8 @@
     {
       "name": "alpha",
       "dir_name": "alpha",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1922,8 +1922,8 @@
     {
       "name": "beta",
       "dir_name": "beta",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -1976,8 +1976,8 @@
     {
       "name": "fm-no-name",
       "dir_name": "fm-no-name",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -2030,8 +2030,8 @@
     {
       "name": "fm-binary",
       "dir_name": "fm-binary",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -2084,8 +2084,8 @@
     {
       "name": "fm-crlf",
       "dir_name": "fm-crlf",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -2138,8 +2138,8 @@
     {
       "name": "fm-no-desc",
       "dir_name": "fm-no-desc",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -2192,8 +2192,8 @@
     {
       "name": "fm-truncated",
       "dir_name": "fm-truncated",
-      "host": "claude-code",
-      "host_family": "claude-code",
+      "harness": "claude-code",
+      "harness_family": "claude-code",
       "level": "personal",
       "namespace": null,
       "plugin_key": null,
@@ -2246,8 +2246,8 @@
     {
       "name": "oc-plain",
       "dir_name": "oc-plain",
-      "host": "openclaw",
-      "host_family": "openclaw",
+      "harness": "openclaw",
+      "harness_family": "openclaw",
       "level": "managed",
       "namespace": null,
       "plugin_key": null,
@@ -2300,8 +2300,8 @@
     {
       "name": "oc-off",
       "dir_name": "oc-off",
-      "host": "openclaw",
-      "host_family": "openclaw",
+      "harness": "openclaw",
+      "harness_family": "openclaw",
       "level": "managed",
       "namespace": null,
       "plugin_key": null,
@@ -2354,8 +2354,8 @@
     {
       "name": "oc-on",
       "dir_name": "oc-on",
-      "host": "openclaw",
-      "host_family": "openclaw",
+      "harness": "openclaw",
+      "harness_family": "openclaw",
       "level": "managed",
       "namespace": null,
       "plugin_key": null,
@@ -2408,8 +2408,8 @@
     {
       "name": "cursor-only",
       "dir_name": "cursor-only",
-      "host": "cursor",
-      "host_family": "cursor",
+      "harness": "cursor",
+      "harness_family": "cursor",
       "level": "unknown",
       "namespace": null,
       "plugin_key": null,
@@ -2462,8 +2462,8 @@
     {
       "name": "off-tool",
       "dir_name": "off-tool",
-      "host": "claude-code-plugins",
-      "host_family": "claude-code",
+      "harness": "claude-code-plugins",
+      "harness_family": "claude-code",
       "level": "plugin",
       "namespace": "plug-off",
       "plugin_key": "plug-off@mkt-b",

@@ -13,7 +13,7 @@ const LOCAL_DAY_IDX_SQL: &str =
 
 /// Normalize an epoch timestamp to the authority contract (milliseconds).
 /// This is the single boundary conversion used by both new Issue writes and
-/// the idempotent repair of rows written by older host adapters.
+/// the idempotent repair of rows written by older harness adapters.
 ///
 /// 实现已下沉到 `agent_vitals_domain::util::to_epoch_ms` —— trace 契约
 /// （`domain/trace.rs` 的 `TraceNode.started_at_ms`）有**同一个**单位缺陷，
@@ -55,7 +55,7 @@ pub fn repair_issue_timestamp_units(conn: &Connection) -> rusqlite::Result<usize
 #[derive(Debug, Clone)]
 pub struct IssueInput<'a> {
     pub machine_namespace: &'a str,
-    pub host: &'a str,
+    pub harness: &'a str,
     pub session_key: Option<&'a str>,
     pub issue_type: &'a str,
     pub instance_fingerprint: &'a str,
@@ -106,7 +106,7 @@ fn failure_family_sql() -> String {
 ///
 /// 规则族是 trajectory 失败族（SV611 同调用连打 / SV612 turn 死循环 /
 /// SV613 进度停滞）加 legacy 名 `retry_loop` / `tool_failure`——规则级白名单，
-/// 不是宿主特化查询。计数含任意 status：标记表达「这小时发生过反复失败」的
+/// 不是执行环境特化查询。计数含任意 status：标记表达「这小时发生过反复失败」的
 /// 历史事实，用户对单条 issue 的 wontfix/resolved 处置不抹掉历史。小时桶与
 /// 用量小时分布（`read_hourly_distribution`）同一条统计时区日界。
 pub fn failure_hours_day(conn: &rusqlite::Connection, date: &str) -> Option<Value> {
@@ -191,7 +191,7 @@ pub fn remedy_for(issue_type: &str) -> RemedyCandidate {
         "SV610" => RemedyCandidate { remedy_id: "tighten-sandbox-mode", diagnostic_only: false },
         // family ② Trust/Egress rules are review guidance, never automatic
         // remediation. Nothing in an Observation authorizes killing a process,
-        // deleting a snapshot, changing a vendor setting, or blocking a host.
+        // deleting a snapshot, changing a vendor setting, or blocking a harness.
         "SV701" => RemedyCandidate { remedy_id: "review-workspace-scope", diagnostic_only: false },
         "SV702" => RemedyCandidate { remedy_id: "review-repository-history-scope", diagnostic_only: false },
         "SV703" => RemedyCandidate { remedy_id: "review-secondary-session-reporting", diagnostic_only: false },
@@ -230,12 +230,12 @@ pub fn upsert_issue(conn: &Connection, input: &IssueInput<'_>) -> rusqlite::Resu
     let issue_id = stable_issue_id(input);
     conn.execute(
         "INSERT INTO issue_instances(
-           issue_id, machine_namespace, host, session_key, issue_type,
+           issue_id, machine_namespace, harness, session_key, issue_type,
            instance_fingerprint, status, severity, evaluator_id, evaluator_version,
            evidence_fingerprint, opened_at_ms, metadata_json)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
          ON CONFLICT(machine_namespace, issue_type, instance_fingerprint) DO UPDATE SET
-           host=excluded.host, session_key=excluded.session_key,
+           harness=excluded.harness, session_key=excluded.session_key,
            severity=excluded.severity, evaluator_id=excluded.evaluator_id,
            evaluator_version=excluded.evaluator_version,
            evidence_fingerprint=excluded.evidence_fingerprint,
@@ -243,7 +243,7 @@ pub fn upsert_issue(conn: &Connection, input: &IssueInput<'_>) -> rusqlite::Resu
         rusqlite::params![
             issue_id,
             input.machine_namespace,
-            input.host,
+            input.harness,
             input.session_key,
             input.issue_type,
             input.instance_fingerprint,
@@ -454,12 +454,12 @@ fn issue_day_bucket(opened_at_ms: i64) -> String {
         })
 }
 
-fn issue_group_key(issue_type: &str, host: &str, fingerprint: &str, opened_at_ms: i64, metadata: &Value) -> String {
+fn issue_group_key(issue_type: &str, harness: &str, fingerprint: &str, opened_at_ms: i64, metadata: &Value) -> String {
     let object = issue_object(issue_type, fingerprint, metadata);
     let evidence_class = metadata.get("category").and_then(Value::as_str)
         .or_else(|| metadata.get("evidence").and_then(Value::as_str))
         .unwrap_or("<unknown>");
-    format!("{issue_type}\0{host}\0{object}\0{evidence_class}\0{}", issue_day_bucket(opened_at_ms))
+    format!("{issue_type}\0{harness}\0{object}\0{evidence_class}\0{}", issue_day_bucket(opened_at_ms))
 }
 
 fn issue_evidence_class(metadata: &Value) -> String {
@@ -487,7 +487,7 @@ fn redact_issue_sample_metadata(metadata: &Value) -> Value {
 #[derive(Default)]
 struct IssueGroupAccum {
     rule: String,
-    host: String,
+    harness: String,
     object: String,
     evidence_class: String,
     bucket: String,
@@ -514,7 +514,7 @@ fn status_index(value: &str) -> usize {
 fn projection_group(
     source_kind: &str,
     rule: &str,
-    host: &str,
+    harness: &str,
     object: &str,
     evidence_class: &str,
     opened_at_ms: i64,
@@ -524,7 +524,7 @@ fn projection_group(
     sample: Value,
     remedy_id: &'static str,
 ) -> Value {
-    let group_key = format!("{source_kind}\0{rule}\0{host}\0{object}\0{evidence_class}\0{}", issue_day_bucket(opened_at_ms));
+    let group_key = format!("{source_kind}\0{rule}\0{harness}\0{object}\0{evidence_class}\0{}", issue_day_bucket(opened_at_ms));
     let mut rollup = json!({"open": 0, "later": 0, "acknowledged": 0, "resolved": 0, "not_applicable": 0});
     let status_key = match status {
         "pending" | "open" => "open",
@@ -535,7 +535,7 @@ fn projection_group(
     if let Some(slot) = rollup.get_mut(status_key) { *slot = json!(count); }
     json!({
         "group_id": stable_hash(&group_key), "source_kind": source_kind, "rule": rule,
-        "host": host, "object": object, "evidence_class": evidence_class,
+        "harness": harness, "object": object, "evidence_class": evidence_class,
         "bucket": issue_day_bucket(opened_at_ms), "count": count,
         "first_seen_at_ms": opened_at_ms, "last_seen_at_ms": opened_at_ms,
         "severity": severity, "status_rollup": rollup, "sessions_count": 0,
@@ -610,11 +610,11 @@ fn merge_projection_groups(values: Vec<Value>) -> Vec<Value> {
 /// 措辞取中性 warning：被限流不是数据缺陷（REQ-062——只有数据丢失/解析失败/
 /// 明确超预算才进 danger 语气）。
 ///
-/// 幂等键是 `(scope_type='host', scope_key=host, code)`：同一宿主同一时刻只可能
+/// 幂等键是 `(scope_type='harness', scope_key=harness, code)`：同一执行环境同一时刻只可能
 /// 有一条这样的任务，重复同步只刷新 `last_seen_at_ms`。
 pub fn reconcile_quota_window_issue(
     conn: &Connection,
-    host: &str,
+    harness: &str,
     exhausted: Option<(i64, &str, &str)>, // (resets_at 秒, window, window_label)
     now_ms: i64,
 ) -> rusqlite::Result<()> {
@@ -622,7 +622,7 @@ pub fn reconcile_quota_window_issue(
     match exhausted {
         Some((resets_at, window, window_label)) => {
             let detail = json!({
-                "host": host,
+                "harness": harness,
                 "window": window,
                 "window_label": window_label,
                 "resets_at": resets_at,
@@ -631,14 +631,14 @@ pub fn reconcile_quota_window_issue(
                 "INSERT INTO data_quality_issues(
                      issue_id, scope_type, scope_key, code, severity,
                      first_seen_at_ms, last_seen_at_ms, resolved_at_ms, detail_json)
-                 VALUES (?1, 'host', ?2, ?3, 'warning', ?4, ?4, NULL, ?5)
+                 VALUES (?1, 'harness', ?2, ?3, 'warning', ?4, ?4, NULL, ?5)
                  ON CONFLICT(scope_type, scope_key, code) DO UPDATE SET
                      last_seen_at_ms = excluded.last_seen_at_ms,
                      resolved_at_ms = NULL,
                      detail_json = excluded.detail_json",
                 rusqlite::params![
-                    format!("quota-window:{host}"),
-                    host,
+                    format!("quota-window:{harness}"),
+                    harness,
                     CODE,
                     now_ms,
                     detail.to_string(),
@@ -648,16 +648,16 @@ pub fn reconcile_quota_window_issue(
         None => {
             conn.execute(
                 "UPDATE data_quality_issues SET resolved_at_ms = ?3
-                 WHERE scope_type = 'host' AND scope_key = ?1 AND code = ?2
+                 WHERE scope_type = 'harness' AND scope_key = ?1 AND code = ?2
                    AND resolved_at_ms IS NULL",
-                rusqlite::params![host, CODE, now_ms],
+                rusqlite::params![harness, CODE, now_ms],
             )?;
         }
     }
     Ok(())
 }
 
-/// 「待处理」的分组投影：读未解决的 `data_quality_issues`，按 (来源, 规则, 宿主,
+/// 「待处理」的分组投影：读未解决的 `data_quality_issues`，按 (来源, 规则, 执行环境,
 /// 对象) 归组。**公开**是因为断言它的接线契约（哪个 code 归到哪条规则、object
 /// 取哪个字段）需要在跨 crate 的测试里直接验证——那是本模块对外的主要合同。
 pub fn source_issue_groups(
@@ -681,7 +681,7 @@ pub fn source_issue_groups(
         let (issue_id, scope_type, _scope_key, code, severity, first, last, detail_raw) = row?;
         if to_ms.is_some_and(|to| first >= to) || from_ms.is_some_and(|from| last < from) { continue; }
         let detail = serde_json::from_str::<Value>(&detail_raw).unwrap_or_else(|_| json!({}));
-        let host = detail.get("host").and_then(Value::as_str).unwrap_or("<unknown>");
+        let harness = detail.get("harness").and_then(Value::as_str).unwrap_or("<unknown>");
         let rule = if code.contains("route") {
             // 「路由待确认」：本地用量归属没定下来（REQ-074 四类之一）。与缺价分开——
             // 一个要"确认计费方式"，一个要"补价卡"，合成一条用户不知道做什么。
@@ -709,12 +709,12 @@ pub fn source_issue_groups(
             // 绝不能端上去（总览规格 §4 第 84 行同一条纪律）。
             .or_else(|| detail.get("window_label").and_then(Value::as_str))
             .unwrap_or(&code);
-        values.push(projection_group("data_quality", rule, host, object, &code,
+        values.push(projection_group("data_quality", rule, harness, object, &code,
             first, 1, &severity, "open", json!({"issue_id": issue_id, "scope_type": scope_type, "code": code, "detail": detail}), "diagnostic-only"));
     }
 
     let mut stmt = conn.prepare(
-        "SELECT candidate_id, host, provider_id, currency, amount_minor,
+        "SELECT candidate_id, harness, provider_id, currency, amount_minor,
                 billing_period_start, status, created_at_ms
          FROM billing_import_candidates WHERE status = 'pending'
          ORDER BY candidate_id",
@@ -725,9 +725,9 @@ pub fn source_issue_groups(
         r.get::<_, String>(6)?, r.get::<_, i64>(7)?,
     )))?;
     for row in rows {
-        let (candidate_id, host, provider, currency, amount, period, status, created) = row?;
+        let (candidate_id, harness, provider, currency, amount, period, status, created) = row?;
         if to_ms.is_some_and(|to| created >= to) || from_ms.is_some_and(|from| created < from) { continue; }
-        values.push(projection_group("billing_candidate", "BILLING_CONFIRMATION", &host,
+        values.push(projection_group("billing_candidate", "BILLING_CONFIRMATION", &harness,
             &format!("{provider}:{period}"), &currency, created, 1, "warning", &status,
             json!({"candidate_id": candidate_id, "provider_id": provider, "currency": currency,
                 "amount_minor": amount, "billing_period_start": period, "is_bill": false}), "diagnostic-only"));
@@ -740,7 +740,7 @@ pub fn source_issue_groups(
     for row in crate::authority_query::unresolved_billing_group_rows(
         conn, from_ms.unwrap_or(i64::MIN), to_ms.unwrap_or(i64::MAX),
     )? {
-        values.push(projection_group("billing_group", "BILLING_CONFIRMATION", &row.host,
+        values.push(projection_group("billing_group", "BILLING_CONFIRMATION", &row.harness,
             &format!("{}:{}", row.provider_id, row.model_id), &row.evidence_basis,
             row.first_event_at_ms, 1, "warning", "open",
             json!({"provider_id": row.provider_id, "model_id": row.model_id,
@@ -751,16 +751,16 @@ pub fn source_issue_groups(
     }
 
     let mut stmt = conn.prepare(
-        "SELECT source_id, host, last_error_code, last_seen_at_ms
+        "SELECT source_id, harness, last_error_code, last_seen_at_ms
          FROM source_files WHERE last_error_code IS NOT NULL ORDER BY source_id",
     )?;
     let rows = stmt.query_map([], |r| Ok((
         r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?,
     )))?;
     for row in rows {
-        let (source_id, host, error, seen) = row?;
+        let (source_id, harness, error, seen) = row?;
         if to_ms.is_some_and(|to| seen >= to) || from_ms.is_some_and(|from| seen < from) { continue; }
-        values.push(projection_group("source_failure", "DATA_SOURCE_FAILURE", &host, &error,
+        values.push(projection_group("source_failure", "DATA_SOURCE_FAILURE", &harness, &error,
             "source_file", seen, 1, "warning", "open", json!({"source_id": source_id, "error_code": error}), "diagnostic-only"));
     }
     Ok(merge_projection_groups(values))
@@ -771,7 +771,7 @@ fn usage_growth_groups(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
     type UsageGrowthDay = (i64, i64, i64);
 
     let query = format!(
-        "SELECT host, COALESCE(provider_id, '<unknown>'),
+        "SELECT harness, COALESCE(provider_id, '<unknown>'),
                 COALESCE(billing_mode, '<unknown>'),
                 {LOCAL_DAY_IDX_SQL} AS day_idx,
                 SUM(uncached_input_tokens + cache_read_tokens + cache_write_tokens + output_tokens),
@@ -779,8 +779,8 @@ fn usage_growth_groups(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
          FROM usage_facts
          WHERE deleted_at_ms IS NULL AND event_ts_ms IS NOT NULL
            AND observation_kind != 'legacy_aggregate'
-         GROUP BY host, provider_id, billing_mode, day_idx
-         ORDER BY host, provider_id, billing_mode, day_idx"
+         GROUP BY harness, provider_id, billing_mode, day_idx
+         ORDER BY harness, provider_id, billing_mode, day_idx"
     );
     let mut stmt = conn.prepare(&query)?;
     let rows = stmt.query_map([], |r| Ok((
@@ -789,11 +789,11 @@ fn usage_growth_groups(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
     )))?;
     let mut by_scope: std::collections::BTreeMap<UsageGrowthScope, Vec<UsageGrowthDay>> = std::collections::BTreeMap::new();
     for row in rows {
-        let (host, provider, mode, day, tokens, last_event_ms) = row?;
-        by_scope.entry((host, provider, mode)).or_default().push((day, tokens, last_event_ms));
+        let (harness, provider, mode, day, tokens, last_event_ms) = row?;
+        by_scope.entry((harness, provider, mode)).or_default().push((day, tokens, last_event_ms));
     }
     let mut values = Vec::new();
-    for ((host, provider, mode), days) in by_scope {
+    for ((harness, provider, mode), days) in by_scope {
         if days.len() < 8 { continue; }
         let observed = days[days.len() - 1];
         let baseline: Vec<i64> = days[days.len() - 8..days.len() - 1].iter().map(|(_, n, _)| *n).collect();
@@ -802,10 +802,10 @@ fn usage_growth_groups(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
         let median = ordered[ordered.len() / 2];
         if median <= 0 || observed.1 < median.saturating_mul(2) { continue; }
         let bucket = agent_vitals_domain::usage::civil_date_from_days(observed.0);
-        let key = format!("usage-growth\0{host}\0{provider}\0{mode}\0{bucket}");
+        let key = format!("usage-growth\0{harness}\0{provider}\0{mode}\0{bucket}");
         values.push(json!({
             "group_id": stable_hash(&key), "source_kind": "usage_growth",
-            "rule": "USAGE_GROWTH", "host": host, "object": provider,
+            "rule": "USAGE_GROWTH", "harness": harness, "object": provider,
             "evidence_class": mode, "bucket": bucket, "count": 1,
             "first_seen_at_ms": observed.2,
             "last_seen_at_ms": observed.2,
@@ -834,7 +834,7 @@ fn usage_growth_groups(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
 /// 在 probe_verdicts；可关闭状态机是 P3 接线——本投影的组与 usage_growth
 /// 同为"读面证据"性质）。
 ///
-/// 复审修订：① 按 (verdict, host, 路线对, 日桶) 聚合——同日同组合的多次判定
+/// 复审修订：① 按 (verdict, harness, 路线对, 日桶) 聚合——同日同组合的多次判定
 /// 并成一组（count 累计），否则同 group_id 重复组会撑爆待处理面；② 尊重
 /// from_ms/to_ms 窗口（与 source_issue_groups 同纪律，旧判定会过期）；③ 成对
 /// run 的 object 同时携带 A↔B 双方标签（mismatch 可能是 B 侧——只挂 A 是
@@ -869,15 +869,15 @@ pub fn probe_verdict_groups(
         )
         .unwrap_or_else(|_| route_id.to_string())
     };
-    let host_of = |conn: &Connection, route_id: &str| -> String {
+    let harness_of = |conn: &Connection, route_id: &str| -> String {
         conn.query_row(
-            "SELECT host_kind FROM probe_routes WHERE route_id = ?1",
+            "SELECT harness_kind FROM probe_routes WHERE route_id = ?1",
             rusqlite::params![route_id],
             |row| row.get::<_, String>(0),
         )
         .unwrap_or_else(|_| "claude-code".to_string())
     };
-    // (verdict, host, object, bucket) → (首见, 末见, count, sample)。
+    // (verdict, harness, object, bucket) → (首见, 末见, count, sample)。
     type ProbeAccum = std::collections::BTreeMap<
         (String, String, String, String),
         (i64, i64, usize, Value),
@@ -896,12 +896,12 @@ pub fn probe_verdict_groups(
             }
         }
         let label_a = label_of(conn, &route_a);
-        let (host, object) = match &route_b {
+        let (harness, object) = match &route_b {
             Some(route_b_id) => {
                 let label_b = label_of(conn, route_b_id);
-                (host_of(conn, &route_a), format!("{label_a}↔{label_b}"))
+                (harness_of(conn, &route_a), format!("{label_a}↔{label_b}"))
             }
-            None => (host_of(conn, &route_a), label_a),
+            None => (harness_of(conn, &route_a), label_a),
         };
         let evidence: Value = serde_json::from_str(&evidence_raw).unwrap_or_else(|_| json!([]));
         // 嵌套链：外层条目是单报告，身份证据在内层 chain[0]（复审 F2——
@@ -922,7 +922,7 @@ pub fn probe_verdict_groups(
         });
         let key = (
             verdict.clone(),
-            host.clone(),
+            harness.clone(),
             object.clone(),
             issue_day_bucket(decided_at),
         );
@@ -934,10 +934,10 @@ pub fn probe_verdict_groups(
         entry.2 += 1;
     }
     let mut groups = Vec::new();
-    for ((verdict, host, object, _bucket), (first, last, count, sample)) in accum {
+    for ((verdict, harness, object, _bucket), (first, last, count, sample)) in accum {
         let severity = if verdict == "confirmed_mismatch" { "critical" } else { "warning" };
         groups.push(projection_group(
-            "probe", &verdict, &host, &object, "model_identity",
+            "probe", &verdict, &harness, &object, "model_identity",
             last, count, severity, "pending", sample, "diagnostic-only",
         ));
         // 首见时刻单独放回（projection_group 只收一个时刻）。
@@ -1013,7 +1013,7 @@ pub fn issue_groups(
     cursor: Option<&str>,
 ) -> rusqlite::Result<Value> {
     let mut sql = String::from(
-        "SELECT issue_id, host, session_key, issue_type, instance_fingerprint, status,
+        "SELECT issue_id, harness, session_key, issue_type, instance_fingerprint, status,
                 severity, evidence_fingerprint, opened_at_ms, metadata_json
          FROM issue_instances WHERE 1=1",
     );
@@ -1039,14 +1039,14 @@ pub fn issue_groups(
     })?;
     for row in rows {
         source_issue_count += 1;
-        let (issue_id, host, session, rule, fingerprint, status, severity, evidence, opened, metadata_raw) = row?;
+        let (issue_id, harness, session, rule, fingerprint, status, severity, evidence, opened, metadata_raw) = row?;
         let metadata = serde_json::from_str::<Value>(&metadata_raw).unwrap_or_else(|_| json!({}));
-        let key = issue_group_key(&rule, &host, &fingerprint, opened, &metadata);
+        let key = issue_group_key(&rule, &harness, &fingerprint, opened, &metadata);
         let object = issue_object(&rule, &fingerprint, &metadata);
         let evidence_class = issue_evidence_class(&metadata);
         let bucket = issue_day_bucket(opened);
         let entry = groups.entry(key).or_insert_with(|| IssueGroupAccum {
-            rule: rule.clone(), host: host.clone(), object: object.clone(),
+            rule: rule.clone(), harness: harness.clone(), object: object.clone(),
             evidence_class: evidence_class.clone(), bucket: bucket.clone(),
             first_seen_at_ms: opened, last_seen_at_ms: opened,
             severity: severity.clone(), remedy: remedy_for(&rule), ..Default::default()
@@ -1065,7 +1065,7 @@ pub fn issue_groups(
     let mut values: Vec<Value> = groups.into_iter().map(|(key, group)| {
         let actionability = match group.severity.as_str() { "critical" => 1.0, "warning" => 0.7, _ => 0.4 };
         json!({
-            "group_id": stable_hash(&key), "rule": group.rule, "host": group.host,
+            "group_id": stable_hash(&key), "rule": group.rule, "harness": group.harness,
             "object": group.object, "evidence_class": group.evidence_class, "bucket": group.bucket,
             "count": group.count, "first_seen_at_ms": group.first_seen_at_ms,
             "last_seen_at_ms": group.last_seen_at_ms, "severity": group.severity,
@@ -1100,7 +1100,7 @@ pub fn issue_group_instances(
     cursor: Option<&str>,
 ) -> rusqlite::Result<Value> {
     let mut stmt = conn.prepare(
-        "SELECT issue_id, host, session_key, issue_type, instance_fingerprint,
+        "SELECT issue_id, harness, session_key, issue_type, instance_fingerprint,
                 status, severity, evidence_fingerprint, opened_at_ms, closed_at_ms, metadata_json
          FROM issue_instances ORDER BY issue_id",
     )?;
@@ -1113,10 +1113,10 @@ pub fn issue_group_instances(
             r.get::<_, Option<i64>>(9)?, metadata))
     })?;
     for row in rows {
-        let (issue_id, host, session, rule, fingerprint, status, severity, evidence, opened, closed, metadata_raw) = row?;
+        let (issue_id, harness, session, rule, fingerprint, status, severity, evidence, opened, closed, metadata_raw) = row?;
         let metadata = serde_json::from_str::<Value>(&metadata_raw).unwrap_or_else(|_| json!({}));
-        if stable_hash(&issue_group_key(&rule, &host, &fingerprint, opened, &metadata)) != group_id { continue; }
-        matches.push(json!({"issue_id": issue_id, "host_kind": host, "session_key": session,
+        if stable_hash(&issue_group_key(&rule, &harness, &fingerprint, opened, &metadata)) != group_id { continue; }
+        matches.push(json!({"issue_id": issue_id, "harness_kind": harness, "session_key": session,
             "rule": rule, "status": status, "severity": severity, "evidence": evidence,
             "opened_at_ms": opened, "closed_at_ms": closed, "metadata": metadata}));
     }
@@ -1130,7 +1130,7 @@ pub fn issue_group_instances(
 /// JSON, while the authority row remains the source of truth for lifecycle.
 pub fn issue_instance(conn: &Connection, issue_id: &str) -> rusqlite::Result<Option<Value>> {
     conn.query_row(
-        "SELECT issue_id, host, session_key, issue_type, status, severity,
+        "SELECT issue_id, harness, session_key, issue_type, status, severity,
                 evidence_fingerprint, opened_at_ms, closed_at_ms, metadata_json
          FROM issue_instances WHERE issue_id = ?1",
         [issue_id],
@@ -1139,7 +1139,7 @@ pub fn issue_instance(conn: &Connection, issue_id: &str) -> rusqlite::Result<Opt
             let metadata = serde_json::from_str::<Value>(&metadata).unwrap_or_else(|_| json!({}));
             let issue_id: String = r.get(0)?;
             let issue_type: String = r.get(3)?;
-            let mut output = json!({"issue_id": issue_id, "host_kind": r.get::<_, String>(1)?,
+            let mut output = json!({"issue_id": issue_id, "harness_kind": r.get::<_, String>(1)?,
                 "session_key": r.get::<_, Option<String>>(2)?, "rule": issue_type,
                 "status": r.get::<_, String>(4)?, "severity": r.get::<_, String>(5)?,
                 "evidence": r.get::<_, String>(6)?, "opened_at_ms": r.get::<_, i64>(7)?,
@@ -1173,7 +1173,7 @@ mod tests {
         assert_eq!(issues_projection_count(db.conn()).unwrap(), 0, "空表 → 0（引导放行）");
         db.conn()
             .execute(
-                "INSERT INTO issue_instances(issue_id, machine_namespace, host, session_key, issue_type,
+                "INSERT INTO issue_instances(issue_id, machine_namespace, harness, session_key, issue_type,
                      instance_fingerprint, status, severity, evaluator_id, evaluator_version,
                      evidence_fingerprint, opened_at_ms, metadata_json)
                  VALUES ('i1', 'm', 'codex', NULL, 'SV610', 'fp', 'open', 'warning', 'ev', '1', 'ef', 1, '{}')",
@@ -1206,9 +1206,9 @@ mod tests {
         };
         assert_eq!(open(db.conn()), 1, "耗尽时应有且只有一条待处理任务");
 
-        // 同一窗口再次同步：不重复建（幂等键是 host+code），last_seen 前进。
+        // 同一窗口再次同步：不重复建（幂等键是 harness+code），last_seen 前进。
         reconcile_quota_window_issue(db.conn(), "claude-code", Some((2_000, "five_hour", "5 小时窗口")), 1_500).unwrap();
-        assert_eq!(open(db.conn()), 1, "同一宿主同一时刻只应有一条");
+        assert_eq!(open(db.conn()), 1, "同一执行环境同一时刻只应有一条");
         let last_seen: i64 = db.conn().query_row(
             "SELECT last_seen_at_ms FROM data_quality_issues WHERE scope_key = 'claude-code'",
             [], |r| r.get(0)).unwrap();
@@ -1257,7 +1257,7 @@ mod tests {
         let (day_start, day_end) = crate::authority_query::beijing_day_bounds_ms("2026-10-01").expect("10-01 日窗");
         let issue = |conn: &rusqlite::Connection, id: &str, rule: &str, at_ms: i64| {
             upsert_issue(conn, &IssueInput {
-                machine_namespace: "machine", host: "codex", session_key: Some("s"),
+                machine_namespace: "machine", harness: "codex", session_key: Some("s"),
                 issue_type: rule, instance_fingerprint: id, status: "open", severity: "warning",
                 evaluator_id: "t", evaluator_version: "1", evidence_fingerprint: "ev",
                 opened_at_ms: at_ms, metadata_json: "{}",
@@ -1298,7 +1298,7 @@ mod tests {
         let (d01, _) = crate::authority_query::beijing_day_bounds_ms("2026-10-01").unwrap();
         let issue = |id: &str, rule: &str, at_ms: i64| {
             upsert_issue(db.conn(), &IssueInput {
-                machine_namespace: "machine", host: "codex", session_key: Some("s"),
+                machine_namespace: "machine", harness: "codex", session_key: Some("s"),
                 issue_type: rule, instance_fingerprint: id, status: "open", severity: "warning",
                 evaluator_id: "t", evaluator_version: "1", evidence_fingerprint: "ev",
                 opened_at_ms: at_ms, metadata_json: "{}",
@@ -1331,7 +1331,7 @@ mod tests {
         let db = AuthorityDb::open(&dir.join("agent-vitals.sqlite3"), 1).unwrap();
         let (first, _) = crate::authority_query::beijing_day_bounds_ms("2026-10-01").unwrap();
         upsert_issue(db.conn(), &IssueInput {
-            machine_namespace: "machine", host: "codex", session_key: Some("s"),
+            machine_namespace: "machine", harness: "codex", session_key: Some("s"),
             issue_type: "SV613", instance_fingerprint: "first", status: "open", severity: "warning",
             evaluator_id: "t", evaluator_version: "1", evidence_fingerprint: "ev",
             opened_at_ms: first + 60_000, metadata_json: "{}",
@@ -1346,7 +1346,7 @@ mod tests {
     fn input<'a>(status: &'a str) -> IssueInput<'a> {
         IssueInput {
             machine_namespace: "machine",
-            host: "codex",
+            harness: "codex",
             session_key: Some("session"),
             issue_type: "retry_loop",
             instance_fingerprint: "fp-1",
@@ -1469,7 +1469,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("av-issue-time-{}", std::process::id()));
         let db = AuthorityDb::open(&path, 1).unwrap();
         db.conn().execute(
-            "INSERT INTO issue_instances(issue_id, machine_namespace, host, session_key,
+            "INSERT INTO issue_instances(issue_id, machine_namespace, harness, session_key,
              issue_type, instance_fingerprint, status, severity, evaluator_id,
              evaluator_version, evidence_fingerprint, opened_at_ms, metadata_json)
              VALUES ('legacy-time', 'machine', 'claude-code', 's1', 'SV601', 'fp-time',
@@ -1525,10 +1525,10 @@ mod tests {
             ("i3", "SV601", "codex", "rmdir", 3_i64),
             ("i4", "SV601", "dsh", "rm -rf", 4_i64),
         ];
-        for (id, rule, host, object, opened) in rows {
+        for (id, rule, harness, object, opened) in rows {
             let metadata = r#"{"category":"command","evidence":"command-pattern"}"#.to_string();
             let input = IssueInput {
-                machine_namespace: "machine", host, session_key: Some(id), issue_type: rule,
+                machine_namespace: "machine", harness, session_key: Some(id), issue_type: rule,
                 instance_fingerprint: &format!("{id}\0{rule}\0seq\0{object}"), status: "open",
                 severity: "warning", evaluator_id: "evaluator", evaluator_version: "1",
                 evidence_fingerprint: id, opened_at_ms: opened, metadata_json: &metadata,
@@ -1569,7 +1569,7 @@ mod tests {
                 r#"{"category":"command","evidence":"command-pattern"}"#
             };
             let input = IssueInput {
-                machine_namespace: "machine", host: "codex", session_key: Some("session"),
+                machine_namespace: "machine", harness: "codex", session_key: Some("session"),
                 issue_type: "SV601", instance_fingerprint: "fp-shared", status: "open",
                 severity: "warning", evaluator_id: "evaluator", evaluator_version: "1",
                 evidence_fingerprint: &format!("ev-{index}"), opened_at_ms: index + 1,
@@ -1596,18 +1596,18 @@ mod tests {
             "INSERT INTO data_quality_issues(issue_id, scope_type, scope_key, code, severity,
              first_seen_at_ms, last_seen_at_ms, detail_json)
              VALUES ('dq1', 'source', 'src-1', 'price_missing', 'warning', 10, 10, ?1)",
-            [r#"{"host":"codex","provider_id":"openai"}"#],
+            [r#"{"harness":"codex","provider_id":"openai"}"#],
         ).unwrap();
         db.conn().execute(
             "INSERT INTO data_quality_issues(issue_id, scope_type, scope_key, code, severity,
              first_seen_at_ms, last_seen_at_ms, detail_json)
              VALUES ('dq2', 'fact', 'attribution_conflict:fact-2', 'price_missing', 'warning', 11, 12, ?1)",
-            [r#"{"host":"codex","provider_id":"openai"}"#],
+            [r#"{"harness":"codex","provider_id":"openai"}"#],
         ).unwrap();
         db.billing_import_candidate_put("candidate-1", "claude-code", "minimax", "CNY", 11400,
             "2026-09", "pricing-v1", 10).unwrap();
         db.conn().execute(
-            "INSERT INTO source_files(source_id, host, path_hash, size_bytes, mtime_ns,
+            "INSERT INTO source_files(source_id, harness, path_hash, size_bytes, mtime_ns,
              parser_version, first_seen_at_ms, last_seen_at_ms, last_error_code)
              VALUES ('source-1', 'dsh', 'hash', 1, 1, 1, 10, 10, 'permission_denied')", [],
         ).unwrap();
@@ -1618,7 +1618,7 @@ mod tests {
              VALUES ('run', 1, 'cli', 'succeeded', 13)", [],
         ).unwrap();
         db.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                  observation_kind, provider_id, model_id, event_ts_ms, pricing_basis, evidence_basis,
                  uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                  ingested_run_id, created_at_ms, updated_at_ms)
@@ -1682,7 +1682,7 @@ mod tests {
         // runner 真实形状：evidence_chain_json = [ {verdict, evidence_chain_json:[{kind:"model_identity", requested, resolved}], route, repeat}, … ]
         let chain = r#"[{"verdict":"confirmed_mismatch","rule_version":"l0-identity-v1","statistic_json":{},"evidence_chain_json":[{"kind":"model_identity","requested":"m","resolved":"other","matched":false}],"route":"rt1","repeat":0}]"#;
         conn.execute_batch(&format!(
-            "INSERT INTO probe_routes(route_id, label, host_kind, model_requested, created_at_ms, updated_at_ms)
+            "INSERT INTO probe_routes(route_id, label, harness_kind, model_requested, created_at_ms, updated_at_ms)
              VALUES('rt1','官方直连','claude-code','claude-sonnet-5',1,1);
              INSERT INTO probe_suites(suite_id, version, kind, manifest_ref, manifest_sha256, rule_version, created_at_ms)
              VALUES('l0','1','l0_identity','x','h','l0-identity-v1',1);
@@ -1733,7 +1733,7 @@ mod tests {
         for day in 0..8_i64 {
             let tokens = if day == 7 { 250 } else { 100 };
             db.conn().execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                  source_event_id, observation_kind, provider_id, billing_mode, event_ts_ms,
                  output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
                  VALUES (?1, 'codex', 'machine', 'session', ?2, 'request', 'openai',

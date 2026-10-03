@@ -1,6 +1,6 @@
 //! `agent-vitals data-reimport-verify`（spec §8.1.2 / M0 D6 / Q12）——**MCP 外**
 //! 的隔离命令：把权威 `facts/*.jsonl` 在两个临时库里各重放一遍（其中一遍模拟
-//! 中途崩溃 + 幂等重跑），逐宿主 × 北京月比对聚合，证明「重跑任意月/日查询与
+//! 中途崩溃 + 幂等重跑），逐执行环境 × 北京月比对聚合，证明「重跑任意月/日查询与
 //! 首次成功导入完全一致，无半提交」。
 //!
 //! **绝不碰生产库**：facts JSONL 先复制进临时目录，临时库全部落 `tempdir`，
@@ -16,15 +16,15 @@ use std::path::Path;
 use agent_vitals_data::authority::{AuthorityDb, AuthorityError};
 use serde_json::{json, Value};
 
-/// `(host, 北京月)` → 聚合。
+/// `(harness, 北京月)` → 聚合。
 type Snapshot = BTreeMap<(String, String), Bucket>;
 
-/// 与 `ingest_service::FACT_HOSTS` 同表（facts JSONL 按宿主一文件，重导入按表枚举）。
-const HOSTS: [&str; 4] = crate::ingest_service::FACT_HOSTS;
+/// 与 `ingest_service::FACT_HARNESSES` 同表（facts JSONL 按执行环境一文件，重导入按表枚举）。
+const HARNESSES: [&str; 4] = crate::ingest_service::FACT_HARNESSES;
 /// 北京日 = UTC + 8h。
 const BJ_OFFSET_MS: i64 = 8 * 3_600 * 1_000;
 
-/// 一个 (host, 北京月) 的聚合指纹——`event_ts_ms` 解析不出月的归 `"undated"`。
+/// 一个 (harness, 北京月) 的聚合指纹——`event_ts_ms` 解析不出月的归 `"undated"`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Bucket {
     n: i64,
@@ -36,7 +36,7 @@ struct Bucket {
 
 fn snapshot(db: &AuthorityDb) -> Result<Snapshot, AuthorityError> {
     let mut stmt = db.conn().prepare(
-        "SELECT host,
+        "SELECT harness,
                 COALESCE(strftime('%Y-%m',
                     datetime((event_ts_ms + ?1) / 1000, 'unixepoch')), 'undated') AS bj_month,
                 COUNT(*),
@@ -46,8 +46,8 @@ fn snapshot(db: &AuthorityDb) -> Result<Snapshot, AuthorityError> {
                 COALESCE(SUM(output_tokens), 0)
          FROM usage_facts
          WHERE deleted_at_ms IS NULL
-         GROUP BY host, bj_month
-         ORDER BY host, bj_month",
+         GROUP BY harness, bj_month
+         ORDER BY harness, bj_month",
     )?;
     let rows = stmt.query_map([BJ_OFFSET_MS], |r| {
         Ok((
@@ -64,7 +64,7 @@ fn snapshot(db: &AuthorityDb) -> Result<Snapshot, AuthorityError> {
     rows.collect::<Result<_, _>>().map_err(AuthorityError::from)
 }
 
-/// 把 facts JSONL 迁进 `db`。`stop_after` 非空时在迁完该宿主后**直接返回**
+/// 把 facts JSONL 迁进 `db`。`stop_after` 非空时在迁完该执行环境后**直接返回**
 /// （不 `finish_run`）——模拟崩溃，让下一次 `open` 走中断清扫路径。
 fn migrate(
     db: &AuthorityDb,
@@ -74,17 +74,17 @@ fn migrate(
 ) -> Result<(), AuthorityError> {
     let run_id = crate::sql_sync::new_run_id("migration");
     db.begin_run(&run_id, "migration", now_ms)?;
-    for host in HOSTS {
-        let path = facts_dir.join(format!("{host}.jsonl"));
+    for harness in HARNESSES {
+        let path = facts_dir.join(format!("{harness}.jsonl"));
         if !path.exists() {
             continue;
         }
         db.with_immediate_txn(|conn| {
             let w = agent_vitals_data::fact_writer_sql::SqlFactWriter::new(conn, &run_id, now_ms)?;
-            w.import_facts_jsonl(host, &path)?;
+            w.import_facts_jsonl(harness, &path)?;
             Ok(())
         })?;
-        if stop_after == Some(host) {
+        if stop_after == Some(harness) {
             // 崩溃点：run 仍是 'running'，不 finish。
             return Ok(());
         }
@@ -99,10 +99,10 @@ fn copy_facts(data_home: &Path, tmp: &Path) -> Result<bool, AuthorityError> {
     let dst = tmp.join("facts");
     std::fs::create_dir_all(&dst).map_err(AuthorityError::Io)?;
     let mut any = false;
-    for host in HOSTS {
-        let s = src.join(format!("{host}.jsonl"));
+    for harness in HARNESSES {
+        let s = src.join(format!("{harness}.jsonl"));
         if s.exists() {
-            std::fs::copy(&s, dst.join(format!("{host}.jsonl"))).map_err(AuthorityError::Io)?;
+            std::fs::copy(&s, dst.join(format!("{harness}.jsonl"))).map_err(AuthorityError::Io)?;
             any = true;
         }
     }
@@ -152,12 +152,12 @@ fn run_inner(data_home: &Path, tmp: &Path, now_ms: i64) -> Result<Value, Authori
         snapshot(&db)?
     };
 
-    // Round B：迁到第一个宿主后"崩溃"（run 停在 running）→ 重新 open（中断清扫）
+    // Round B：迁到第一个执行环境后"崩溃"（run 停在 running）→ 重新 open（中断清扫）
     // → 完整迁移 → 再迁一遍（幂等重跑）。
     let path_b = tmp.join("b.sqlite3");
     {
         let db = AuthorityDb::open(&path_b, now_ms)?;
-        migrate(&db, &facts_dir, now_ms, Some(HOSTS[0]))?;
+        migrate(&db, &facts_dir, now_ms, Some(HARNESSES[0]))?;
     }
     let swept: i64 = {
         // open 会把 running → cancelled(interrupted)；数一下证明清扫发生了。
@@ -186,7 +186,7 @@ fn run_inner(data_home: &Path, tmp: &Path, now_ms: i64) -> Result<Value, Authori
         match (a.get(key), b.get(key)) {
             (Some(x), Some(y)) if x == y => {}
             (x, y) => diffs.push(json!({
-                "host": key.0,
+                "harness": key.0,
                 "bj_month": key.1,
                 "round_a": x.map(bucket_json),
                 "round_b": y.map(bucket_json),
@@ -205,7 +205,7 @@ fn run_inner(data_home: &Path, tmp: &Path, now_ms: i64) -> Result<Value, Authori
         "interrupted_runs_swept": swept,
         "idempotent_reruns": 1,
         "diffs": diffs,
-        "note": "round B: migrate → crash after first host → reopen (sweep) → full migrate → migrate again (idempotent)",
+        "note": "round B: migrate → crash after first harness → reopen (sweep) → full migrate → migrate again (idempotent)",
     }))
 }
 
@@ -227,7 +227,7 @@ mod tests {
         // 形状与真机 emitter 输出一致（无 fact_id：契约层派生）——同
         // `agent-vitals-data/tests/legacy_import_wiring.rs::live_fact`。
         json!({
-            "host": "claude-code", "machine_namespace": "default", "source_profile": "default",
+            "harness": "claude-code", "machine_namespace": "default", "source_profile": "default",
             "native_session_id": sid, "source_event_id": eid,
             "observation_kind": "token_count", "event_ts_utc": ts,
             "model_id": "claude-opus-4",
@@ -254,7 +254,7 @@ mod tests {
             home.join("facts/codex.jsonl"),
             format!("{}\n", {
                 let mut f: Value = serde_json::from_str(&fact("s2", "e3", "2026-09-05T10:00:00.000Z", 300, 30)).unwrap();
-                f["host"] = json!("codex");
+                f["harness"] = json!("codex");
                 f.to_string()
             }),
         )

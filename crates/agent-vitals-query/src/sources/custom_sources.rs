@@ -1,5 +1,5 @@
-//! 用户显式添加的宿主根目录。这里只保存“哪个宿主的哪一个根”；实际日志枚举
-//! 仍复用各宿主 adapter，避免 UI 另写一套格式解释或绕过事实去重。
+//! 用户显式添加的执行环境根目录。这里只保存“哪个执行环境的哪一个根”；实际日志枚举
+//! 仍复用各执行环境 adapter，避免 UI 另写一套格式解释或绕过事实去重。
 
 use std::path::{Path, PathBuf};
 
@@ -9,12 +9,12 @@ const CUSTOM_SOURCES_FILE: &str = "custom-sources.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomSourceRoot {
-    pub host: String,
+    pub harness: String,
     pub root: String,
 }
 
-fn valid_host(host: &str) -> bool {
-    matches!(host, "claude-code" | "codex" | "dsh")
+fn valid_harness(harness: &str) -> bool {
+    matches!(harness, "claude-code" | "codex" | "dsh")
 }
 
 pub fn custom_source_roots(data_home: &Path) -> Result<Vec<CustomSourceRoot>, String> {
@@ -29,16 +29,16 @@ pub fn custom_source_roots(data_home: &Path) -> Result<Vec<CustomSourceRoot>, St
     for source in &sources {
         validate_source(source)?;
     }
-    sources.sort_by(|left, right| left.host.cmp(&right.host).then(left.root.cmp(&right.root)));
+    sources.sort_by(|left, right| left.harness.cmp(&right.harness).then(left.root.cmp(&right.root)));
     sources.dedup();
     Ok(sources)
 }
 
 pub fn add_custom_source_root(
-    data_home: &Path, host: &str, root: &Path,
+    data_home: &Path, harness: &str, root: &Path,
 ) -> Result<bool, String> {
     let source = CustomSourceRoot {
-        host: host.to_string(),
+        harness: harness.to_string(),
         root: root.to_string_lossy().into_owned(),
     };
     validate_source(&source)?;
@@ -54,11 +54,11 @@ pub fn add_custom_source_root(
     Ok(true)
 }
 
-pub fn remove_custom_source_root(data_home: &Path, host: &str, root: &Path) -> Result<bool, String> {
+pub fn remove_custom_source_root(data_home: &Path, harness: &str, root: &Path) -> Result<bool, String> {
     let root = root.to_string_lossy();
     let mut sources = custom_source_roots(data_home)?;
     let before = sources.len();
-    sources.retain(|source| !(source.host == host && source.root == root));
+    sources.retain(|source| !(source.harness == harness && source.root == root));
     if sources.len() == before {
         return Ok(false);
     }
@@ -67,8 +67,8 @@ pub fn remove_custom_source_root(data_home: &Path, host: &str, root: &Path) -> R
 }
 
 fn validate_source(source: &CustomSourceRoot) -> Result<(), String> {
-    if !valid_host(&source.host) {
-        return Err("custom source host is not supported".to_string());
+    if !valid_harness(&source.harness) {
+        return Err("custom source harness is not supported".to_string());
     }
     let root = PathBuf::from(&source.root);
     if source.root.trim().is_empty() || !root.is_absolute() {
@@ -104,7 +104,7 @@ mod tests {
         assert!(add_custom_source_root(&home, "codex", &root).unwrap());
         assert!(!add_custom_source_root(&home, "codex", &root).unwrap());
         assert_eq!(custom_source_roots(&home).unwrap(), vec![CustomSourceRoot {
-            host: "codex".to_string(), root: root.to_string_lossy().into_owned(),
+            harness: "codex".to_string(), root: root.to_string_lossy().into_owned(),
         }]);
         assert!(remove_custom_source_root(&home, "codex", &root).unwrap());
         assert!(custom_source_roots(&home).unwrap().is_empty());

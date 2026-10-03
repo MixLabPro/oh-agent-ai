@@ -3,14 +3,14 @@
 //!
 //! **这不是一次数据平面迁移**：本模块只是候选 #3 描述的"共享序列化契约"这
 //! 一层——build/validate/`fact_id` 三个纯函数 + 迁移链的通用 walker，没有
-//! 任何 host adapter 被改造成产出 `UsageFact`、没有任何持久化格式被替换。
+//! 任何 harness adapter 被改造成产出 `UsageFact`、没有任何持久化格式被替换。
 //! 现有四条账（dsh state 链 / codex 静态 fold / claude ledger / workbuddy
 //! credit_json）继续原样工作，本模块不触碰它们一个字节。这是 v0.7 spec 状态
 //! 行明确写的"本版整体仍未立项"下，唯一能安全独立交付的一块：纯计算、零
 //! I/O、零现有格式变更，随时可以被拿掉而不影响任何现有功能。
 //!
 //! **明确没做的**（诚实边界，不是遗漏）：
-//! - 没有把任何一个 host adapter 接上这份契约——那需要逐宿主的迁移评审
+//! - 没有把任何一个 harness adapter 接上这份契约——那需要逐执行环境的迁移评审
 //!   （§0.3 的顺序约束），本模块只是评审前置的"契约先写清楚"那一步。
 //! - `billing_date` 派生列（§2.1 时间行）没有在这里实现——它依赖峰谷/归日
 //!   规则版本，本身就是"版本化视图投影"（spec 原文），不是基本事实的一部分；
@@ -55,7 +55,7 @@ pub const USAGE_FACT_FIELDS: &[&str] = &[
     "session_key_ref",
     "session_key_orphan",
     // 来源
-    "host",
+    "harness",
     "source_profile",
     "source_event_id",
     "source_revision",
@@ -90,7 +90,7 @@ pub const USAGE_FACT_FIELDS: &[&str] = &[
     "billing_mode",
     "pricing_basis",
     "billing_template_id",
-    // 宿主金额
+    // 执行环境金额
     "amount_decimal",
     "currency",
     "amount_basis",
@@ -108,7 +108,7 @@ pub const USAGE_FACT_FIELDS: &[&str] = &[
 /// `fact_id` 本身（那是这 6 个字段算出来的输出，不是输入）。
 const IDENTITY_INPUT_FIELDS: &[&str] = &[
     "machine_namespace",
-    "host",
+    "harness",
     "source_profile",
     "native_session_id",
     "source_event_id",
@@ -125,7 +125,7 @@ const TOKEN_FIELDS: &[&str] = &[
 ];
 
 /// `fact_id` 哈希——v0.7 spec §2.1「统一幂等键」公式：
-/// `hash(machine_namespace, host, source_profile, native_session_id,
+/// `hash(machine_namespace, harness, source_profile, native_session_id,
 ///       source_event_id, observation_kind)`。
 ///
 /// 用 FNV-1a 而不是密码学哈希：与 `usage::compaction_identity` 同一条纪律——
@@ -137,7 +137,7 @@ const TOKEN_FIELDS: &[&str] = &[
 /// `("ab","c")` 与 `("a","bc")` 撞出同一个哈希。
 pub fn fact_id(
     machine_namespace: &str,
-    host: &str,
+    harness: &str,
     source_profile: &str,
     native_session_id: &str,
     source_event_id: &str,
@@ -145,7 +145,7 @@ pub fn fact_id(
 ) -> String {
     let joined = [
         machine_namespace,
-        host,
+        harness,
         source_profile,
         native_session_id,
         source_event_id,
@@ -163,13 +163,13 @@ pub fn fact_id(
 /// - `identity_basis` 未显式给出时默认 `"native"`；调用方在用「规范化原始
 ///   记录 + 文件稳定身份」的 hash fallback 时**必须**显式传
 ///   `identity_basis="derived-hash"`（§2.1 原文纪律），本函数不会替调用方
-///   做这个判断——它不知道 `source_event_id` 是不是真的来自宿主原生 id。
+///   做这个判断——它不知道 `source_event_id` 是不是真的来自执行环境原生 id。
 /// - token 度量字段若给出，必须是非负整数；给出非法值时报具体字段名，不
 ///   静默清零或吞掉。
 /// - `fact_id`/`schema_version` 由本函数计算/stamp，调用方传了会被覆盖
 ///   （身份必须内部一致，不接受外部声称的身份）。
 /// - `USAGE_FACT_FIELDS` 里未被 `fields`覆盖的键，输出里统一置 `null`——
-///   与「缺失与真实 0 必须可区分」的契约对应，`null` 是「这个宿主没有这项
+///   与「缺失与真实 0 必须可区分」的契约对应，`null` 是「这个执行环境没有这项
 ///   证据」，不是「这项是 0」。
 pub fn build_usage_fact(fields: &Map<String, Value>) -> Result<Value, Vec<String>> {
     let mut problems = Vec::new();
@@ -363,7 +363,7 @@ mod tests {
     fn build_usage_fact_fills_all_fields_and_stamps_identity() {
         let mut fields = Map::new();
         fields.insert("machine_namespace".into(), json!("m1"));
-        fields.insert("host".into(), json!("claude-code"));
+        fields.insert("harness".into(), json!("claude-code"));
         fields.insert("source_profile".into(), json!("default"));
         fields.insert("native_session_id".into(), json!("sess-1"));
         fields.insert("source_event_id".into(), json!("evt-1"));
@@ -395,7 +395,7 @@ mod tests {
         let mut fields: Map<String, Value> = Map::new();
         for (k, v) in [
             ("machine_namespace", json!("m1")),
-            ("host", json!("claude-code")),
+            ("harness", json!("claude-code")),
             ("source_profile", json!("default")),
             ("native_session_id", json!("sess-1")),
             ("source_event_id", json!("evt-1")),
@@ -410,7 +410,7 @@ mod tests {
         // 从文档字段独立复算 fact_id → 必须字节相等。
         let reconstructed_fact_id = fact_id(
             out["machine_namespace"].as_str().unwrap(),
-            out["host"].as_str().unwrap(),
+            out["harness"].as_str().unwrap(),
             out["source_profile"].as_str().unwrap(),
             out["native_session_id"].as_str().unwrap(),
             out["source_event_id"].as_str().unwrap(),
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn build_usage_fact_rejects_missing_identity_fields_by_name() {
         let mut fields = Map::new();
-        fields.insert("host".into(), json!("claude-code"));
+        fields.insert("harness".into(), json!("claude-code"));
         let err = build_usage_fact(&fields).unwrap_err();
         // 5 个缺失字段各自报名字，不是一个笼统的"invalid"。
         assert!(err.iter().any(|m| m.contains("machine_namespace")));
@@ -436,7 +436,7 @@ mod tests {
         assert!(err.iter().any(|m| m.contains("observation_kind")));
         assert!(!err
             .iter()
-            .any(|m| m.contains("\"host\"") || m.ends_with(" host")));
+            .any(|m| m.contains("\"harness\"") || m.ends_with(" harness")));
     }
 
     #[test]
@@ -444,7 +444,7 @@ mod tests {
         let mut fields = Map::new();
         for (k, v) in [
             ("machine_namespace", "m1"),
-            ("host", "h"),
+            ("harness", "h"),
             ("source_profile", "p"),
             ("native_session_id", "s"),
             ("source_event_id", "e"),
@@ -462,7 +462,7 @@ mod tests {
         let mut fields = Map::new();
         for (k, v) in [
             ("machine_namespace", "m1"),
-            ("host", "h"),
+            ("harness", "h"),
             ("source_profile", "p"),
             ("native_session_id", "s"),
             ("source_event_id", "e"),

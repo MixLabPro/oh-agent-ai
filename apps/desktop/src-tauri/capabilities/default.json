@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "workbench 窗口默认能力：读 overview + 窗口显隐/拖动（无系统级权限）",
-  "windows": ["workbench"],
+  "webviews": ["workbench"],
   "permissions": [
     "core:default",
     "core:window:allow-show",

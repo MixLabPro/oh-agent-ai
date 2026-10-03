@@ -2,7 +2,7 @@
 //!
 //! 这个模块存在的理由：`est_tokens` 原先只住在 binary 的 `src/util.rs` 里，
 //! 于是 wasm 拿不到它。而 FR-04a 的上下文构成归因（回答「token 都去哪了」）
-//! 必须在浏览器侧算 —— 宿主投影的 `view()` 跑的是 wasm。同一个估算函数在两处
+//! 必须在浏览器侧算 —— 执行环境投影的 `view()` 跑的是 wasm。同一个估算函数在两处
 //! 各写一份就是本仓最不能接受的那类缺陷（never a second copy），所以下沉到
 //! core，binary 侧改为 re-export。
 
@@ -57,7 +57,7 @@ pub fn pyround(x: f64, n: usize) -> f64 {
 ///
 /// 与 `split('\n')` 的区别：CRLF 算一个终止符，且末尾终止符不产生空元素。
 /// v0.8 Phase D4 从二进制 `src/util.rs` 迁进 domain —— DSH wire 解析
-/// （`agent-vitals-hosts/hosts/dsh/sessions/wire.rs`）与扫描器都要按行切，
+/// （`agent-vitals-harnesses/harnesses/dsh/sessions/wire.rs`）与扫描器都要按行切，
 /// 一个纯 `&str` 实现，多个调用面。二进制侧 `src/util.rs` 改 re-export。
 pub fn split_lines(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
@@ -113,11 +113,11 @@ pub fn civil_from_unix_secs(secs: i64, offset_secs: i64) -> (i64, u32, u32) {
 /// 单位差异不是数据损坏，是**契约在缝上断了**，而断点不止一处。已经发生过两次：
 ///
 /// - `issue_instances.opened_at_ms`：写入点原样抄 `finding.time`，而 `finding.time`
-///   的单位由各宿主适配器决定，真机上 1,542/4,450 条落成 1970 日桶并被时间窗
+///   的单位由各执行环境适配器决定，真机上 1,542/4,450 条落成 1970 日桶并被时间窗
 ///   静默排除（`docs/v1.0.0/ISSUE_OPENED_AT_MS_UNIT_DRIFT.md`）。修法是**在边界
 ///   归一**，并明确禁止「在多个消费点各自内联猜单位」。
 /// - `TraceNode.started_at_ms`：同一根因。Claude 的 timeline 构造器明写
-///   「`parse_iso` → **秒**」（`hosts/claude_code/sessions/evidence.rs`），
+///   「`parse_iso` → **秒**」（`harnesses/claude_code/sessions/evidence.rs`），
 ///   Codex 是毫秒，而 `trace.rs` 把它原样填进名为 `_ms` 的字段。
 ///
 /// 所以这里是那个**单一具名函数**：谁要把纪元整数写进 `_ms` 字段，就调它。
@@ -262,7 +262,7 @@ use serde_json::Value;
 
 // ────────────────────────── JSON 字段取值助手 ──────────────────────────
 // v0.8 Phase E7.2：从二进制 main.rs 迁来（原 `pub(crate) fn s/i/f/b/chars`）
-// ——纯 `serde_json::Value` 字段读取 + 缺省值，不认识任何宿主/领域词汇，本该
+// ——纯 `serde_json::Value` 字段读取 + 缺省值，不认识任何执行环境/领域词汇，本该
 // 一直在这里。main.rs 改 `pub(crate) use agent_vitals_domain::util::{...}`
 // 保call site零改动（同 D 阶段 split_lines/pyround 的搬法）。
 
@@ -283,8 +283,8 @@ pub fn chars(v: &Value, k: &str) -> usize {
 }
 
 /// 统一成正斜杠，让所有路径判断在 Windows 上也成立——v0.8 Phase E7.6 从
-/// `apps/cli/src/util.rs` 迁来（`agent-vitals-hosts` 的 `workbuddy`/`openclaw`/
-/// `codex` 宿主适配器搬进库 crate 后也要用它，不能各写一份）。
+/// `apps/cli/src/util.rs` 迁来（`agent-vitals-harnesses` 的 `workbuddy`/`openclaw`/
+/// `codex` 执行环境适配器搬进库 crate 后也要用它，不能各写一份）。
 ///
 /// 移植清单第 6 条：不能依赖 `Path::display()` —— 它在 Windows 上产出反斜杠。
 /// 保留显式 normalize，所有路径判断走 normalized string。
@@ -310,7 +310,7 @@ pub fn norm(p: &std::path::Path) -> String {
 /// 字节 → 宽松 UTF-8（非法字节替换为 U+FFFD）+ universal newlines（`\r\n`/`\r`
 /// 都归一成 `\n`）——v0.8 Phase E7.6 从 `apps/cli/src/util.rs::read_lossy` 拆出
 /// 纯转换部分（该函数本身做 `std::fs::read`，是 I/O，留在二进制侧；
-/// `agent-vitals-hosts::hosts::claude_code::sources::skills::read_host_config`
+/// `agent-vitals-harnesses::harnesses::claude_code::sources::skills::read_harness_config`
 /// 读 `~/.claude.json` 需要同一份转换逻辑，不能各写一份 —— 两处的字节来源都是
 /// 真实文件，编码/换行异常的处理必须逐字节一致）。
 pub fn bytes_to_lossy_normalized(bytes: &[u8]) -> String {
@@ -346,7 +346,7 @@ pub fn bytes_to_lossy_normalized(bytes: &[u8]) -> String {
 ///
 /// ## 为什么**不能**用 `session/end-seed` 事件
 ///
-/// 初版就是那么做的（图省事：事件在流里，wasm 和宿主都拿得到，不用透传 header），
+/// 初版就是那么做的（图省事：事件在流里，wasm 和执行环境都拿得到，不用透传 header），
 /// 并且在 e4b0be69 上验证通过——那个会话的第一个 `end-seed` 正好等于 seedLength。
 /// **但那是巧合。**`session/end-seed` 标记的是「一段续种结束」，**会话每次被
 /// 重新唤醒都会触发**：真实日志 session-6b47acc7 完全没分叉（`seedLength` 缺席、
@@ -361,7 +361,7 @@ pub fn fork_boundary(events: &[Value]) -> Option<i64> {
         if e.get("type").and_then(|v| v.as_str()) != Some("session") {
             continue;
         }
-        // 顶层与 data 下都看一眼：CLI 侧读的是原始日志头（顶层），宿主侧是从
+        // 顶层与 data 下都看一眼：CLI 侧读的是原始日志头（顶层），执行环境侧是从
         // `session.header` 合成的（可能挂在 data 下）。
         let n = e
             .get("seedLength")

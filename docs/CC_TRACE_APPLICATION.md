@@ -237,7 +237,7 @@ Codex 的 `token_count` 事件自带 `rate_limits`，折叠直接读它（见 §
 `has_credits`（`credits.has_credits`）、`primary/secondary` 的 `used_percent`/
 `window_minutes`/`resets_at`、`observed_at`。这是**限速窗口的剩余情况**（如 5h/7d
 窗口已用百分比 + 重置时间 + 套餐身份），**不是**账号余额/配额——后者需要打官方
-wham/oauth 接口 + 凭据 + 网络，仍只能住宿主侧。因为 `plan_type` 现在来自日志，
+wham/oauth 接口 + 凭据 + 网络，仍只能住执行环境侧。因为 `plan_type` 现在来自日志，
 仪表盘对订阅套餐把每-token 美元诚实重标价成「按量标价」（账单 = 套餐固定费），
 而不臆造余额数字：`Cost::Quota` 变体依然没有活来源，我们不为凑维度去编一个。
 
@@ -245,8 +245,8 @@ wham/oauth 接口 + 凭据 + 网络，仍只能住宿主侧。因为 `plan_type`
 官方额度接口（Codex wham/usage、Claude oauth/usage）的 field-path 权威，凭据来源
 （auth.json、credentials.json、Keychain）与身份摘要方案全部现成。但做不做是一步产品
 决策：它把本产品从「审计你的技能 + 你的花费 + 你的窗口剩余」扩展到「跟踪你的账号
-余额」，需要网络请求与凭据处理——与本仓库「scan 时零网络」的约束冲突，只能住在宿主
-侧（Tauri 菜单栏 / dsh-client host），不可能进 in-host skill。若做，
+余额」，需要网络请求与凭据处理——与本仓库「scan 时零网络」的约束冲突，只能住在执行环境
+侧（Tauri 菜单栏 / dsh-client harness），不可能进 in-harness skill。若做，
 `docs/额度领域模型.md` 是唯一事实来源；`QuotaWindow`/`QuotaSnapshot` 的纪律照搬
 （未知窗口保留 `unknown`、`remainingPercent` clamp 0–100、身份 SHA-256 摘要落盘）。
 
@@ -260,7 +260,7 @@ cc-trace 的 CompactView、UsageDailyChart、QuotaProgress、HeroUI 风格、紧
 
 - 不把 cc-trace 的扫描器代码搬进来（不同项目、不同域模型，且没有行为审计）。
 - 不把本产品的技能审计/行为规则挂到 cc-trace 上——方向反了。
-- 不改 cc-trace 的账号额度实现进 in-host skill（零网络约束是铁律）。**日志里的
+- 不改 cc-trace 的账号额度实现进 in-harness skill（零网络约束是铁律）。**日志里的
   `rate_limits` 快照不是账号实现**——`codex-cost` 的 `plan` 块只是读取会话日志本就
   带着的字段（`plan_type`/`used_percent`/`window_minutes`/`resets_at`），零网络，
   不碰凭据，也不臆造余额。

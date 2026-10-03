@@ -68,7 +68,7 @@ jobs:
           printf -- '---\nname: smoke\ndescription: packaged artifact smoke test\n---\n\nBody.\n' \
             > "$tmpdir/.claude/skills/smoke/SKILL.md"
           printf '{"enabledPlugins": {}}' > "$tmpdir/.claude.json"
-          HOME="$tmpdir" "$BIN" --host claude-code --no-snapshot --json - > /dev/null
+          HOME="$tmpdir" "$BIN" --harness claude-code --no-snapshot --json - > /dev/null
         shell: bash
 
       - name: Package

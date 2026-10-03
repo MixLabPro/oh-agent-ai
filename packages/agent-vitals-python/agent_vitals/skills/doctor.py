@@ -52,12 +52,12 @@ SECURITY_SEVERITY = {"critical": "critical", "high": "warning", "medium": "warni
 # 必须自报家门。
 NOT_ASSESSED = [
     ("SV003", "DESCRIPTION_TOO_LONG", "There is no defensible threshold. What counts as long depends "
-                                      "on the host and total skill count."),
+                                      "on the harness and total skill count."),
     ("SV104", "PLUGIN_NOT_ENABLED", "A disabled plugin is normal, not a defect; it is counted under not loaded."),
     ("SV203", "ORPHANED_USAGE_RECORD", "Renaming breaks trigger history and cannot be distinguished from deletion "
                                        "(open PRODUCT §10 question)."),
     ("SV302", "HIGH_METADATA_COST", "Same as SV003: no defensible threshold."),
-    ("SV402", "OVERLAP_CONFIRMED", "Requires an in-host or --judge semantic decision; not implemented yet."),
+    ("SV402", "OVERLAP_CONFIRMED", "Requires an in-harness or --judge semantic decision; not implemented yet."),
 ]
 
 
@@ -259,21 +259,21 @@ def diagnose(out, split_threshold, overlap_min=DEFAULT_OVERLAP_MIN):
             caveats,
             evidence={"count": len(hits), "hits": hits[:20]}))
 
-    # ── 宿主能力 ──────────────────────────────────────────
+    # ── 执行环境能力 ──────────────────────────────────────────
     lacking = []
     if not b.get("available"):
         lacking.append("description budget")
     if not trig:
         lacking.append("trigger data")
-    if not (out.get("plugin_state", {}) or {}).get("host_config_read"):
+    if not (out.get("plugin_state", {}) or {}).get("harness_config_read"):
         lacking.append("load-state evidence")
     if lacking:
         ds.append(_diag(
             "SV901", "CAPABILITY_UNAVAILABLE", "info",
-            "This host does not provide: %s. Related judgments are omitted rather than treated as zero." % ", ".join(lacking),
-            "Only Claude Code provides these fields through ~/.claude.json; their absence on another host is not a failure.",
+            "This harness does not provide: %s. Related judgments are omitted rather than treated as zero." % ", ".join(lacking),
+            "Only Claude Code provides these fields through ~/.claude.json; their absence on another harness is not a failure.",
             ["Unavailable is not zero. Rendering the former as the latter would turn an unmeasured value into a decision."],
-            evidence={"unavailable": lacking, "host_selection": out.get("host_selection")}))
+            evidence={"unavailable": lacking, "harness_selection": out.get("harness_selection")}))
 
     unreadable = out.get("unreadable_skills", [])
     if unreadable:
@@ -396,13 +396,13 @@ def render_doctor(out, args):
         payload = {
             "schema_version": out.get("schema_version"),
             "run": run_id(out),
-            "host_selection": out.get("host_selection"),
+            "harness_selection": out.get("harness_selection"),
             "diagnostics": ds,
             "not_assessed": [{"code": c, "name": n, "reason": why}
                              for c, n, why in NOT_ASSESSED],
         }
         # --with-report：扫描报告本体并入同一份载荷（桌面 Skill tab 一次扫描
-        # 同时拿 SV 码与 host_summaries，免第二遍扫描）。与 Rust
+        # 同时拿 SV 码与 harness_summaries，免第二遍扫描）。与 Rust
         # `doctor --with-report` 逐字段对齐。
         if getattr(args, "with_report", False):
             payload["report"] = out
@@ -424,10 +424,10 @@ def render_doctor(out, args):
     # 另起一行会把那条断言变成检查一个不再存在的位置。
     print("Agent Vitals %s · run %s" % (__version__, run_id(out)))
     print("─" * 50)
-    print("Host    %s" % out.get("host_selection", "?"))
+    print("Harness    %s" % out.get("harness_selection", "?"))
     print("        trigger data %s · load evidence %s · description budget %s" % (
         "✓" if t.get("available") else "—",
-        "✓" if (out.get("plugin_state", {}) or {}).get("host_config_read") else "—",
+        "✓" if (out.get("plugin_state", {}) or {}).get("harness_config_read") else "—",
         "✓" if b.get("available") else "—"))
     print()
     print("Skills  %d on disk → %d loaded" % (out.get("total_skills_on_disk", 0), loaded_n))
@@ -490,9 +490,9 @@ def render_doctor(out, args):
         # 结论会从高估**翻转成低估**。
         if b.get("excludes_builtin_skills"):
             print("  ! Excludes built-in skills bundled in the CLI; actual usage is higher")
-        print("  ! The threshold varies by host version; override it with --budget")
+        print("  ! The threshold varies by harness version; override it with --budget")
     else:
-        print("  Unavailable — this host does not expose it, or its config is unreadable")
+        print("  Unavailable — this harness does not expose it, or its config is unreadable")
         print("  ! Unavailable does not mean zero characters used")
 
     print()

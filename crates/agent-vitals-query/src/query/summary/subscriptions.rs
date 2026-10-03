@@ -1,4 +1,4 @@
-//! 订阅费/声明费/host bills 的计费政策应用（「月费两条来源、声明优先」）。
+//! 订阅费/声明费/harness bills 的计费政策应用（「月费两条来源、声明优先」）。
 
 use super::*;
 
@@ -12,8 +12,8 @@ use super::*;
 ///
 /// 三条纪律：
 /// 1. **不付用量也在付**——用 `declared_subscriptions` 全量枚举，给没有用
-///    量条目的 provider 补建条目（零用量的月份不能谎报成零支出）。宿主归
-///    属查 [`HOST_PROVIDER_MAP`]；映射不到的声明落 `unattributed/<provider>`
+///    量条目的 provider 补建条目（零用量的月份不能谎报成零支出）。执行环境归
+///    属查 [`HARNESS_PROVIDER_MAP`]；映射不到的声明落 `unattributed/<provider>`
 ///    条目可见，不静默丢钱。
 /// 2. **账期过滤**——查询月早于 `billing_period_start`（缺省 `reported_at`）
 ///    的月份不摊：GLM 2026-09-05 才买，摊进 8 月就是编造历史支出（claude-pro
@@ -24,7 +24,7 @@ use super::*;
 ///
 /// 同一 provider 声明重复时 `declared_subscriptions` 的首条语义保证只摊一次。
 pub(crate) fn apply_subscription_fees(
-    by_provider: &mut BTreeMap<String, HostAmount>,
+    by_provider: &mut BTreeMap<String, HarnessAmount>,
     month: &str,
     cards: &PricingCards,
     declared: &[DeclaredSubscriptionFee],
@@ -50,20 +50,20 @@ pub(crate) fn apply_subscription_fees(
         if month < start_month.as_str() {
             continue;
         }
-        let host = HOST_PROVIDER_MAP
+        let harness = HARNESS_PROVIDER_MAP
             .iter()
             .find(|(_, providers)| providers.contains(&provider.as_str()))
-            .map(|(host, _)| host.to_string())
+            .map(|(harness, _)| harness.to_string())
             .unwrap_or_else(|| "unattributed".to_string());
-        add_fixed_subscription_fee(by_provider, &format!("{host}/{provider}"), &currency, amount);
+        add_fixed_subscription_fee(by_provider, &format!("{harness}/{provider}"), &currency, amount);
     }
 }
 
 /// 一条**已声明订阅**的月费（`billing_declarations` 当前态的一行）。
 pub(crate) struct DeclaredSubscriptionFee {
-    /// **展示落点**，不是归属：订阅属于服务商账号，`by_provider` 的键是 `宿主/服务商`，
-    /// 所以给它挑一个宿主放（见 [`fee_display_host`]）。
-    pub(crate) host: String,
+    /// **展示落点**，不是归属：订阅属于服务商账号，`by_provider` 的键是 `执行环境/服务商`，
+    /// 所以给它挑一个执行环境放（见 [`fee_display_harness`]）。
+    pub(crate) harness: String,
     pub(crate) provider: String,
     pub(crate) currency: String,
     pub(crate) amount: f64,
@@ -117,21 +117,21 @@ fn declared_fee_for_month(
 
 /// 把一笔月费落进 `by_provider` 的 `FixedSubscription` 档。
 ///
-/// `HostAmount` 只有一个币种位：零用量纯月费条目（如 glm 无 token 的月份）此前
+/// `HarnessAmount` 只有一个币种位：零用量纯月费条目（如 glm 无 token 的月份）此前
 /// currency 为 None，月费会掉进 `total_actual_spend` 的无币桶——用声明币种补齐；
 /// 与条目既有币种冲突（理论形状：同一 provider 两张币种不同的卡）时撤销币种 +
 /// unresolved，绝不冒充单币。价目表与用户声明两条来源共用这一份，落地方式必须
 /// 完全一致。
 fn add_fixed_subscription_fee(
-    by_provider: &mut BTreeMap<String, HostAmount>,
+    by_provider: &mut BTreeMap<String, HarnessAmount>,
     key: &str,
     currency: &str,
     amount: f64,
 ) {
     let entry = by_provider
         .entry(key.to_string())
-        .or_insert_with(|| HostAmount {
-            host_id: key.to_string(),
+        .or_insert_with(|| HarnessAmount {
+            harness_id: key.to_string(),
             amounts_by_basis: BTreeMap::new(),
             currency: None,
             has_unresolved: false,
@@ -154,14 +154,14 @@ fn add_fixed_subscription_fee(
     }
 }
 
-/// 账号级月费在 `by_provider`（键 `宿主/服务商`）里的落点宿主：服务商自家的宿主优先
-/// （anthropic → claude-code），其次是它用量最集中的宿主，都没有才是 `unattributed`。
-fn fee_display_host(db: &agent_vitals_data::authority::AuthorityDb, provider: &str) -> String {
-    HOST_PROVIDER_MAP
+/// 账号级月费在 `by_provider`（键 `执行环境/服务商`）里的落点执行环境：服务商自家的执行环境优先
+/// （anthropic → claude-code），其次是它用量最集中的执行环境，都没有才是 `unattributed`。
+fn fee_display_harness(db: &agent_vitals_data::authority::AuthorityDb, provider: &str) -> String {
+    HARNESS_PROVIDER_MAP
         .iter()
         .find(|(_, providers)| providers.contains(&provider))
-        .map(|(host, _)| host.to_string())
-        .or_else(|| db.dominant_host_of_provider(provider).ok().flatten())
+        .map(|(harness, _)| harness.to_string())
+        .or_else(|| db.dominant_harness_of_provider(provider).ok().flatten())
         .unwrap_or_else(|| "unattributed".to_string())
 }
 
@@ -180,7 +180,7 @@ pub(crate) fn declared_subscription_fees(
     let mut out = Vec::new();
     // **一个服务商只摊一次**：待确认组按"模型组"切，用户对同一订阅常会分
     // 两次声明（MiniMax-M3 一组、MiniMax-M2.7 一组），两条声明各带 ¥44——不去重就
-    // 是 ¥88/月的双计。订阅是服务商账号的套餐，与宿主无关，所以键是服务商本身；读取方 ORDER BY
+    // 是 ¥88/月的双计。订阅是服务商账号的套餐，与执行环境无关，所以键是服务商本身；读取方 ORDER BY
     // （provider_id, effective_start, declaration_id）保证留下的第一条是**最早生效**的那条。占坑放在**产出月费之后**：
     // 「金额暂不清楚」的声明不产出月费，不能把后来带金额的声明挡掉。多账户同服务商
     // 的订阅当前模型表达不了，属规格 §3.4 的修订范围，不用去重冒充支持。
@@ -195,7 +195,7 @@ pub(crate) fn declared_subscription_fees(
         else { continue; };
         if !seen.insert(provider.clone()) { continue; }
         out.push(DeclaredSubscriptionFee {
-            host: fee_display_host(db, &provider),
+            harness: fee_display_harness(db, &provider),
             provider,
             currency,
             amount,
@@ -219,7 +219,7 @@ pub(crate) fn declared_subscription_fees(
 /// 支出），**多一条**：有结束月且查询月晚于它就不摊——订阅到期后继续收月费是编造。
 /// 同样只进月、不进日（调用点只在 `monthly_summary`）。
 pub(crate) fn apply_declared_subscription_fees(
-    by_provider: &mut BTreeMap<String, HostAmount>,
+    by_provider: &mut BTreeMap<String, HarnessAmount>,
     month: &str,
     declared: &[DeclaredSubscriptionFee],
 ) {
@@ -228,48 +228,48 @@ pub(crate) fn apply_declared_subscription_fees(
         if fee.end_month.as_deref().is_some_and(|end| month > end) { continue; }
         add_fixed_subscription_fee(
             by_provider,
-            &format!("{}/{}", fee.host, fee.provider),
+            &format!("{}/{}", fee.harness, fee.provider),
             &fee.currency,
             fee.amount,
         );
     }
 }
 
-/// Phase 2.8（spec §5.3）：用户显式录入的 `host_bills` 行 → `by_provider` 对应
-/// 条目的 basis 桶。键 `{host}/{provider}`，与 `apply_subscription_fees` 同款
+/// Phase 2.8（spec §5.3）：用户显式录入的 `harness_bills` 行 → `by_provider` 对应
+/// 条目的 basis 桶。键 `{harness}/{provider}`，与 `apply_subscription_fees` 同款
 /// 「找不到条目就新建、有就叠加」。跨币不相加——同 provider 同 basis 出现
-/// 第二币种（理论上不该）→ 撤 currency + unresolved。`data host-bill set` 的
+/// 第二币种（理论上不该）→ 撤 currency + unresolved。`data harness-bill set` 的
 /// 唯一消费面。
 ///
-/// **在 `apply_subscription_fees` 之后跑**：主用途是 `host_billed`（WorkBuddy
+/// **在 `apply_subscription_fees` 之后跑**：主用途是 `harness_billed`（WorkBuddy
 /// credit_json、中转对账单——价卡派生不出来的），不与订阅声明重叠。若用户
-/// 又把已在 `pricing.json` 声明的订阅重复录成 `fixed_subscription` host_bill，
+/// 又把已在 `pricing.json` 声明的订阅重复录成 `fixed_subscription` harness_bill，
 /// 两者会叠进同一桶——那是录入责任（spec §5.3：这条路径专给非价卡来源），
 /// 不在这里去重。
-pub(crate) fn apply_host_bills(
-    by_provider: &mut BTreeMap<String, HostAmount>,
+pub(crate) fn apply_harness_bills(
+    by_provider: &mut BTreeMap<String, HarnessAmount>,
     db: &agent_vitals_data::authority::AuthorityDb,
     month: &str,
 ) {
-    let rows = match db.host_bills_for_period(month) {
+    let rows = match db.harness_bills_for_period(month) {
         Ok(r) => r,
         Err(_) => return,
     };
-    // `HostAmount` deliberately has one currency slot. Once a provider entry
+    // `HarnessAmount` deliberately has one currency slot. Once a provider entry
     // has received two currencies, retain neither amounts nor a currency label;
     // otherwise a later row could re-claim one currency and make mixed money
     // look like a valid single-currency total.
     let mut currency_conflicted = BTreeSet::new();
-    for (host, provider, basis_str, amount_minor, currency) in rows {
+    for (harness, provider, basis_str, amount_minor, currency) in rows {
         let Some(basis) = agent_vitals_domain::data_contract::BillingBasis::from_wire(&basis_str)
         else {
             continue;
         };
-        let key = format!("{host}/{provider}");
+        let key = format!("{harness}/{provider}");
         let entry = by_provider
             .entry(key.clone())
-            .or_insert_with(|| HostAmount {
-                host_id: key.clone(),
+            .or_insert_with(|| HarnessAmount {
+                harness_id: key.clone(),
                 amounts_by_basis: BTreeMap::new(),
                 currency: None,
                 has_unresolved: false,

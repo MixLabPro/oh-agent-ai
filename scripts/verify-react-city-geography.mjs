@@ -9,16 +9,17 @@ import { fileURLToPath } from "node:url";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ui = path.join(repo, "apps/desktop/ui-dev");
+const city = path.join(repo, "apps/agent-city/ui/src");
 const { buildSync } = createRequire(path.join(ui, "package.json"))("esbuild");
-const out = buildSync({ entryPoints: [path.join(ui, "react/src/features/city/engine/cityLayout.ts")], bundle: true, write: false, format: "cjs", platform: "node", logLevel: "silent" });
+const out = buildSync({ entryPoints: [path.join(city, "engine/cityLayout.ts")], bundle: true, write: false, format: "cjs", platform: "node", logLevel: "silent" });
 const mod = { exports: {} };
 vm.runInNewContext(out.outputFiles[0].text, { module: mod, exports: mod.exports, process, console, Math, Map, Set });
 const { layoutCity } = mod.exports;
 
-const hosts = ["codex", "claude-code", "dsh", "plugin:zcode"];
+const harnesses = ["codex", "claude-code", "dsh", "plugin:zcode"];
 const model = (count) => {
-  const buildings = Array.from({ length: count }, (_, i) => ({ id: `s${i}`, districtId: hosts[i % hosts.length], height: 3 + (i * 37) % 44, footprint: 7.2, startedAt: i * 1000 }));
-  return { buildings, districts: hosts.map((id) => ({ id, label: id, sessionCount: buildings.filter((b) => b.districtId === id).length, anomaly: null })) };
+  const buildings = Array.from({ length: count }, (_, i) => ({ id: `s${i}`, districtId: harnesses[i % harnesses.length], height: 3 + (i * 37) % 44, footprint: 7.2, startedAt: i * 1000 }));
+  return { buildings, districts: harnesses.map((id) => ({ id, label: id, sessionCount: buildings.filter((b) => b.districtId === id).length, anomaly: null })) };
 };
 
 /** 海岸轮廓的世界坐标极坐标剖面：72 个方位上的半径，按均值归一化（只比形状，不比大小）。 */

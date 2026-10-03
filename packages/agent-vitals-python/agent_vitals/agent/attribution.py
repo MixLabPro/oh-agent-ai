@@ -1,6 +1,6 @@
 """归因签名目录的纯规则层——Rust `agent_vitals_domain::attribution` 的镜像。
 
-只回答两个宿主无关的问题：这个模型是谁家的（L0 `model_vendor`）、这条记录像是
+只回答两个执行环境无关的问题：这个模型是谁家的（L0 `model_vendor`）、这条记录像是
 打到了谁的端点（L1 `route_shape`）。不回答「谁收的钱」。厂商知识全部来自
 `assets/attribution_signatures.json`（与 Rust `include_str!` 同一份文件），
 两边逐字节同判由 `tests/test_attribution_signatures.py` 与 claude emitter 的

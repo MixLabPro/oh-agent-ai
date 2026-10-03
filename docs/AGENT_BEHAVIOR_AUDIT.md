@@ -2,8 +2,8 @@
 
 > 状态：草案（待评审）
 > 归属：agent-vitals 文档库（本仓库是主项目）
-> 前置阅读：[DSH_INTEGRATION.md](./DSH_INTEGRATION.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [HOST_ADAPTER_CONTRACT.md](./HOST_ADAPTER_CONTRACT.md) · [PRODUCT.md](./PRODUCT.md §8)
-> 本文件取代此前误放入 `deepseek-harness` 仓库 `docs/design/agent-behavior-audit.md` 的版本。那份把功能设计成「在 DSH 内部新增客户端包、改 `bundle/web-app`」，方向错误；正确形态是 **agent-vitals 作为审计/治理工具，以插件（bundle + host adapter）接入 DSH，不改 deepseek-harness 核心**。
+> 前置阅读：[DSH_INTEGRATION.md](./DSH_INTEGRATION.md) · [ARCHITECTURE.md](./ARCHITECTURE.md) · [HARNESS_ADAPTER_CONTRACT.md](./HARNESS_ADAPTER_CONTRACT.md) · [PRODUCT.md](./PRODUCT.md §8)
+> 本文件取代此前误放入 `deepseek-harness` 仓库 `docs/design/agent-behavior-audit.md` 的版本。那份把功能设计成「在 DSH 内部新增客户端包、改 `bundle/web-app`」，方向错误；正确形态是 **agent-vitals 作为审计/治理工具，以插件（bundle + harness adapter）接入 DSH，不改 deepseek-harness 核心**。
 
 ---
 
@@ -11,12 +11,12 @@
 
 两句话把关系钉死：
 
-1. **agent-vitals 是主工具**——「审计并优化 Agent 的 Skill 行为」的专业工具；DSH 是它接入的**第六个宿主**。
+1. **agent-vitals 是主工具**——「审计并优化 Agent 的 Skill 行为」的专业工具；DSH 是它接入的**第六个执行环境**。
 2. **DSH 接入是插件形态，不是改 DSH 代码**。DSH_INTEGRATION.md 早已把这件事拆成互不依赖的两件：
    - **DSH-1 分发**：`dsh-agent-vitals` bundle（profile layer，约 20 行 JS，注册 `ctx.skills` provider，扫描仍调 PATH 上的 `agent-vitals` 二进制）。
-   - **DSH-2 能力**：`dsh` host adapter，读 DSH 会话日志 + 注册表快照，让 DSH 自己被体检。
+   - **DSH-2 能力**：`dsh` harness adapter，读 DSH 会话日志 + 注册表快照，让 DSH 自己被体检。
 
-本功能属于 **Phase 3 / Phase 4**（PRODUCT §8.2）：对象从「Skill」扩展到「Agent 行为」，首发宿主是 dsh——因为 DSH 是第一个**无需宿主在跑、就能离线读到权威执行历史**的宿主。
+本功能属于 **Phase 3 / Phase 4**（PRODUCT §8.2）：对象从「Skill」扩展到「Agent 行为」，首发执行环境是 dsh——因为 DSH 是第一个**无需执行环境在跑、就能离线读到权威执行历史**的执行环境。
 
 ## 2. 背景与目标
 
@@ -41,8 +41,8 @@ DSH 把 Agent 的每一步执行都落进了会话日志（append-only 的 `Sess
 | Skill Execution Funnel（ARCHITECTURE §1） | Installed→Enabled→Loaded→Discoverable→Selected→Triggered | 行为审计在 Triggered 之后追加「Followed→行为」维度 |
 | Diagnostic Engine（ARCHITECTURE §5） | SV 码 + severity + evidence + impact + recommendation + caveats | 行为发现复用同一诊断对象形态 |
 | 安全规则 SV501–SV508 | PIPE_TO_SHELL / BASE64_EXEC / RAW_IP_FETCH / HARDCODED_SECRET / CREDENTIAL_READ / OBFUSCATED_EXEC / PASSWORD_PROTECTED_ARCHIVE / PROMPT_INJECTION_PATTERN | 分类学直接平移到运行时信号 |
-| Host Adapter 四阶段（ARCHITECTURE §4） | roots → probe → reconcile → facts | `dsh` 适配器补齐后，行为证据挂在 `dsh_runtime` 事实下 |
-| `evidence_recency`（HOST_ADAPTER_CONTRACT） | probe / log / none | 行为证据天然是 `log`（带 session_id + seq + ts） |
+| Harness Adapter 四阶段（ARCHITECTURE §4） | roots → probe → reconcile → facts | `dsh` 适配器补齐后，行为证据挂在 `dsh_runtime` 事实下 |
+| `evidence_recency`（HARNESS_ADAPTER_CONTRACT） | probe / log / none | 行为证据天然是 `log`（带 session_id + seq + ts） |
 | 隐私/脱敏（ARCHITECTURE §8） | Local First，NO upload；`--redact --redact-names` | 行为发现含命令/路径/凭据片段，脱敏是硬要求 |
 | `snapshot`/`diff` 基线 | 两次扫描的差异 | 「安全监控」的时间维度 |
 
@@ -61,7 +61,7 @@ DSH 把 Agent 的每一步执行都落进了会话日志（append-only 的 `Sess
 
 ### 3.3 缺口
 
-- agent-vitals 的 `dsh` host adapter 是 **specified, not implemented**（HOST_ADAPTER_CONTRACT「DSH」一节、DSH_INTEGRATION §5）。
+- agent-vitals 的 `dsh` harness adapter 是 **specified, not implemented**（HARNESS_ADAPTER_CONTRACT「DSH」一节、DSH_INTEGRATION §5）。
 - agent-vitals 的安全扫描只扫 SKILL.md **内容**，**没有**「扫执行轨迹」的能力。
 - **没有**「行为发现」的数据对象、规则表、三态治理记录。
 
@@ -111,9 +111,9 @@ DSH 把 Agent 的每一步执行都落进了会话日志（append-only 的 `Sess
 
 ```text
 agent-vitals/
-├── SKILL.md                  # 前五个宿主，不动
+├── SKILL.md                  # 前五个执行环境，不动
 ├── scripts/  src/            # 扫描器 + 诊断引擎，行为审计作为新能力并入
-└── dsh/                      # 第六个宿主（DSH-1 bundle，新增）
+└── dsh/                      # 第六个执行环境（DSH-1 bundle，新增）
     ├── package.json          # name: dsh-agent-vitals；dsh.bundle.patch → cordis.patch.yml
     ├── cordis.patch.yml      # 一行 insert：注册 ctx.skills provider
     └── index.js              # ~20 行，resourceBase → ../，调 PATH 上的二进制
@@ -143,7 +143,7 @@ Skill Vital Record 的对象是 **skill**（一台机器上的一个能力条目
   "schema_version": "1.0",
 
   "id": "dsh:behavior:<session_id>:<seq>:<rule_id>",
-  "host": "dsh",
+  "harness": "dsh",
   "observer": "<agent/preset scope>",
 
   "finding": {
@@ -327,7 +327,7 @@ match(event) = event.type == "tool/call"
 | # | 产物 | 位置 | 说明 |
 |---|---|---|---|
 | 1 | `dsh/` bundle | agent-vitals 仓库根 | `package.json` 声明 `dsh.bundle.patch`，`index.js` 注册 `ctx.skills` provider |
-| 2 | `--host dsh` | `cli.py` / `src/host.rs` 两处 + `--runtime-json` 摄入 | DSH-2 adapter，读会话库 + 快照 |
+| 2 | `--harness dsh` | `cli.py` / `src/harness.rs` 两处 + `--runtime-json` 摄入 | DSH-2 adapter，读会话库 + 快照 |
 | 3 | 行为规则引擎 | `security` 模块 + `adapters/dsh.py` | 新能力，纯函数 |
 | 4 | 三态治理记录 | `snapshot` / 本地 store | 复用现有基线机制 |
 
@@ -337,7 +337,7 @@ DSH 仓库本身**零改动**。bundle 只发 npm 预构建、不带扫描器副
 
 对齐 PRODUCT §8.2 的 Phase 3/4：
 
-- **v1（能力打通）**：`--host dsh` 的静态扫描 + funnel 观察者维度落地（DSH_INTEGRATION §3.1 A1–A12）——先让 DSH 的 skill 被正确体检。
+- **v1（能力打通）**：`--harness dsh` 的静态扫描 + funnel 观察者维度落地（DSH_INTEGRATION §3.1 A1–A12）——先让 DSH 的 skill 被正确体检。
 - **v2（DSH-2 adapter）**：会话日志取证（`historical` reconcile）+ `trigger` 区分「用户显式调用 vs 模型自主选中」——这是行为审计的证据地基。
 - **v3（行为审计，本功能）**：行为规则引擎 + Behavior Finding + 三态标记 + snapshot/diff 监控。
 - **v4（治理，Phase 4 方向）**：Capability Registry / Approved Skills / Policy 的治理层。
@@ -354,7 +354,7 @@ DSH 仓库本身**零改动**。bundle 只发 npm 预构建、不带扫描器副
 
 ### 10.1 「审计」tab：客户端插件设计（方向 B）
 
-**形态**：一个**客户端插件 bundle**（浏览器侧），与 DSH-1 的 host bundle **分开**。参考
+**形态**：一个**客户端插件 bundle**（浏览器侧），与 DSH-1 的 harness bundle **分开**。参考
 `ui-trajectory`（DSH 里「轨迹」tab 的实现，`packages/client/ui-trajectory`）：
 
 - 包声明 `dsh.client`、导出 `/client` 浏览器入口，tsdown 打成浏览器 bundle。
@@ -363,12 +363,12 @@ DSH 仓库本身**零改动**。bundle 只发 npm 预构建、不带扫描器副
 - UI 只通过 `ctx.slots.register({ name, children, store, inject }, Component)` 组合，
   不碰 DSH 的 agent-loop、不改 DSH 核心。
 
-**数据流（关键架构决策）**：行为审计 findings 由**宿主侧**产出（host bundle 读会话日志 →
+**数据流（关键架构决策）**：行为审计 findings 由**执行环境侧**产出（harness bundle 读会话日志 →
 规则引擎 → findings），再以 **log-only session 事件**落库 + 广播，客户端插件像
 `ui-trajectory` 一样从 `session/event` 流渲染——与「轨迹」共用同一条数据通路，不另建 API：
 
 ```text
-host bundle（DSH-1 + 审计）
+harness bundle（DSH-1 + 审计）
   │  读会话日志 → 规则引擎 → findings
   │  findings 写成 log-only session 事件（如 type: "agent-vitals/finding"）
   ▼
@@ -385,18 +385,18 @@ session/event 流 ──► 客户端「审计」tab 渲染
 **依赖链（何时能在 GUI 看到）**：
 
 1. 行为审计端到端：规则引擎 ✅ → 证据读取器扩展 → findings 产出。
-2. host bundle 扩展：findings → log-only session 事件。
+2. harness bundle 扩展：findings → log-only session 事件。
 3. 客户端插件 bundle：「审计」tab。
 4. DSH web 构建 + `dsh plugin add` + 重启。
 
 **独立工作项提醒**：客户端插件是**浏览器端 TS/React 开发**，与现有的 Python / Rust /
-host-bundle JS 是不同技术栈，且要遵守 DSH 的 client 纪律（slot 体系、`dsh.client` 清单、
+harness-bundle JS 是不同技术栈，且要遵守 DSH 的 client 纪律（slot 体系、`dsh.client` 清单、
 `/client` 导出、100% 覆盖门槛，见 `packages/client/AGENTS.md`）。这块需单独排期，
 与扫描器/规则引擎的 Python+Rust 双实现是并行的两条线。
 
 ## 11. 附录：文件索引
 
-- agent-vitals 架构：[docs/ARCHITECTURE.md](./ARCHITECTURE.md)、[docs/HOST_ADAPTER_CONTRACT.md](./HOST_ADAPTER_CONTRACT.md)
+- agent-vitals 架构：[docs/ARCHITECTURE.md](./ARCHITECTURE.md)、[docs/HARNESS_ADAPTER_CONTRACT.md](./HARNESS_ADAPTER_CONTRACT.md)
 - DSH 接入：[docs/DSH_INTEGRATION.md](./DSH_INTEGRATION.md)、[docs/PRODUCT.md](./PRODUCT.md)、[docs/ENGINEERING.md](./ENGINEERING.md)
 - 扫描器/诊断：`scripts/scan.py`、`scripts/agent_vitals/`、`src/security.rs`、`src/discovery.rs`、`src/analysis.rs`、`src/dsh.rs`（拟）
 - DSH 会话日志/事件：`packages/core/session/src/types.ts`、`packages/session/session-persistence-jsonl/`、`packages/interaction/user-approval/`、`packages/sandbox/sandbox-policy/`

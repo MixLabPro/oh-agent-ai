@@ -2,7 +2,7 @@
 extract" 三段（五段式流水线 locate → shape → extract → derive → coverage，
 见 `docs/RUNTIME_EVIDENCE_CONTRACT.md` §4.2）。"derive → coverage" 两段在
 `scripts/agent_vitals/agent/codex_evidence.py`（与 Rust
-`crates/agent-vitals-hosts/src/hosts/codex/sessions/evidence.rs` 逐字节对齐），I/O 不进去。
+`crates/agent-vitals-harnesses/src/harnesses/codex/sessions/evidence.rs` 逐字节对齐），I/O 不进去。
 
 与 Rust `src/codex_session.rs` 逐字节对齐——两条实现产出同一份字典，字节序
 （键序）一致，`tests/test_cli_matrix.py::both()` 的差分靠的就是这份一致。
@@ -188,7 +188,7 @@ def codex_session_roots_report(home=None):
     `HOME` 环境变量，测试用 `isolated_home_env` 注入）。
 
     键序是字节一致的一部分，不能重排：根对象 kind → path → exists →
-    file_count → total_bytes；外层 host → roots。
+    file_count → total_bytes；外层 harness → roots。
     """
     if home is None:
         home = Path.home()
@@ -210,7 +210,7 @@ def codex_session_roots_report(home=None):
             "file_count": file_count,
             "total_bytes": total_bytes,
         })
-    return {"host": "codex", "roots": roots}
+    return {"harness": "codex", "roots": roots}
 
 
 def codex_rollout_files(home=None):

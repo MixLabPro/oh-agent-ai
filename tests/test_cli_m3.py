@@ -511,10 +511,10 @@ class TestCalendarCli(unittest.TestCase):
                 self.assertEqual(sidecar["date"], "2020-01-01")
 
     def test_calendar_embeds_codex_three_view_blob(self):
-        """统一看板（docs/UNIFIED_COST_VIEW.md 的 1 号宿主契约）：calendar
+        """统一看板（docs/UNIFIED_COST_VIEW.md 的 1 号执行环境契约）：calendar
         生成的文件必须内联 `agent-vitals-data-codex` 规范单块 =
-        {host, currency, today, default, views:{today,month,all}}。每个 view
-        即一份 codex 成本报告（host/currency/month/total_cost_usd/per_model/
+        {harness, currency, today, default, views:{today,month,all}}。每个 view
+        即一份 codex 成本报告（harness/currency/month/total_cost_usd/per_model/
         days/unaccounted_usage/plan；today 视图额外带 hours）。用**当前月**
         打戳的 rollout 保证 month/all 非空；today 视图无数据但契约键不能缺
         （JS 渲染按键存在性分派，缺键和空数据是两个分支）。
@@ -556,19 +556,19 @@ class TestCalendarCli(unittest.TestCase):
                 m = re.search(
                     r'<script id="agent-vitals-data-codex"[^>]*>(.*?)</script>',
                     html, re.DOTALL)
-                self.assertIsNotNone(m, "统一看板必须内联 codex 1 号宿主数据块")
+                self.assertIsNotNone(m, "统一看板必须内联 codex 1 号执行环境数据块")
                 blob = json.loads(m.group(1))
-                self.assertEqual(blob["host"], "codex")
+                self.assertEqual(blob["harness"], "codex")
                 self.assertEqual(blob["currency"], "USD")
                 self.assertEqual(blob["default"], "month")
                 self.assertEqual(set(blob["views"].keys()), {"today", "month", "all"})
                 month_view = blob["views"]["month"]
-                for key in ("host", "currency", "month", "total_cost_usd",
+                for key in ("harness", "currency", "month", "total_cost_usd",
                             "total_tokens", "per_model", "days",
                             "unpriced_tokens", "unaccounted_usage", "plan"):
                     self.assertIn(key, month_view,
                                   "month 视图缺契约键 %s" % key)
-                self.assertEqual(month_view["host"], "codex")
+                self.assertEqual(month_view["harness"], "codex")
                 self.assertTrue(month_view["per_model"],
                                 "当前月打戳的 rollout 应产出非空模型轴")
                 self.assertTrue(month_view["days"],
@@ -709,7 +709,7 @@ class TestCodexSessionHtml(unittest.TestCase):
                     html, re.DOTALL)
                 self.assertIsNotNone(m, "codex-session --html 必须内联审计数据块")
                 blob = json.loads(m.group(1))
-                self.assertEqual(blob["host"], "codex")
+                self.assertEqual(blob["harness"], "codex")
                 self.assertEqual(blob["session_id"], "rollout-sol")
                 self.assertEqual(blob["currency"], "USD")
 

@@ -13,7 +13,7 @@ compatibility re-exports are sound, and the watcher must remain an optional,
 best-effort **latency accelerator**. The filesystem event path must never become
 an authority writer or a second ingest implementation.
 
-Before describing the product as "real-time hot-plug host monitoring", the
+Before describing the product as "real-time hot-plug harness monitoring", the
 following gaps must be closed:
 
 1. coalesce wake requests so sustained filesystem activity cannot build an
@@ -93,7 +93,7 @@ end-to-end UI visibility.
 
 `TickWaker` currently uses an unbounded `std::sync::mpsc::channel`. Debouncing
 combines a burst inside one 1.2-second window, but it does not coalesce separate
-windows while `sync_tick` is busy. A host that appends logs continuously can
+windows while `sync_tick` is busy. A harness that appends logs continuously can
 therefore queue one full sync after another.
 
 Consequences:
@@ -114,8 +114,8 @@ known to the runtime without being installed into the watcher. They are still
 eventually discovered by manual sync or the periodic tick, but do not receive
 the advertised seconds-level acceleration.
 
-The risk is primarily product truthfulness: "host import" and "real-time" are
-not equivalent today. It also creates a maintenance trap in which adding a host
+The risk is primarily product truthfulness: "harness import" and "real-time" are
+not equivalent today. It also creates a maintenance trap in which adding a harness
 requires editing an unrelated desktop function.
 
 ### P2. Watcher health is invisible to the user
@@ -192,11 +192,11 @@ The following statements are release gates, not implementation suggestions.
    zero or one queued sync request. Additional events coalesce, never queue.
 4. **Dynamic source roots are declared, not guessed.** The source topology
    registry supplies roots and capabilities; UI code does not infer them from a
-   host slug or home-directory convention.
+   harness slug or home-directory convention.
 5. **Root policy is fail-closed.** A plugin/imported descriptor cannot request
    an unapproved absolute root, filesystem root, home root, symlink escape or
    unsupported recursive scope.
-6. **No raw paths on serving faces.** UI receives host labels and counts, not
+6. **No raw paths on serving faces.** UI receives harness labels and counts, not
    local root paths or native watcher error strings. MCP/export receive none.
 7. **No feature leakage.** Runtime default, CLI and wasm retain NoopWatcher
    behavior and must not acquire `notify` in their dependency graph.
@@ -253,7 +253,7 @@ Introduce a source-topology projection owned by `runtime::sources`:
 ```rust
 pub struct WatchRootDescriptor {
     pub key: WatchRootKey,             // stable opaque identifier
-    pub host: HostId,                  // validated built-in or plugin slug
+    pub harness: HarnessId,                  // validated built-in or plugin slug
     pub class: WatchRootClass,          // FactsSource | CacheOnly
     pub origin: WatchRootOrigin,        // BuiltIn | CustomApproved | Configured | PluginApproved
     pub path: PathBuf,                  // runtime-only; never a UI/MCP DTO
@@ -276,8 +276,8 @@ Dynamic roots are permitted only when all checks pass:
 
 | Check | Requirement |
 | --- | --- |
-| provenance | descriptor is a built-in root, a locally approved custom source, or an explicit built-in-host runtime configuration (`DSH_HOME`); plugin manifests are **deferred** — see the review note below |
-| host identity | slug passes the existing host registry validator |
+| provenance | descriptor is a built-in root, a locally approved custom source, or an explicit built-in-harness runtime configuration (`DSH_HOME`); plugin manifests are **deferred** — see the review note below |
+| harness identity | slug passes the existing harness registry validator |
 | lexical scope | normalized path is below an allowed per-user application-data prefix; `/`, home root and parent traversal are rejected |
 | canonical scope | canonicalized existing roots must remain below the same allowed prefix; a symlink escape is rejected |
 | role | manifest declares `FactsSource` or `CacheOnly`; arbitrary callbacks are not importable |
@@ -425,7 +425,7 @@ one pending receive and bounded memory.
    `default_source_watch_roots`; Phase B builds the descriptor projection on
    top and removes the remaining desktop-side construction entirely.)
 3. Add root policy validation and unit fixtures for valid/invalid built-in,
-   custom, plugin, symlink and excluded-host cases.
+   custom, plugin, symlink and excluded-harness cases.
 4. Retain the prior fixed-root behavior exactly for existing users.
 
 Exit criterion: startup descriptor snapshots produce the same built-in roots as
@@ -472,7 +472,7 @@ distinguished visually without exposing a local path.
 | ordering | wake while sync is running | one follow-up reconciliation, not N queued reconciliations |
 | fallback | drop all senders | periodic tick continues without panic |
 | routing | built-in/custom/plugin/cache-only descriptors | only matching root/class receives intended action |
-| security | root, home root, `..`, symlink escape, unknown host | descriptor rejected with closed reason code |
+| security | root, home root, `..`, symlink escape, unknown harness | descriptor rejected with closed reason code |
 | dynamic lifecycle | add/exclude/remove/re-add root | supervisor attachment set matches current topology revision |
 | native backend | macOS FSEvents write test | one wake within bounded timeout; remains an explicit platform test |
 | ingest E2E | temporary source mutation + fake sync runner | one reconciliation, authority revision/outbox forward, UI event emitted |
@@ -508,7 +508,7 @@ deterministic routing/coalescing/lifecycle tests may not be ignored.
 | native backend error | local diagnostic log, normalized reason code | IPC raw string, MCP, exports |
 | root counts/mode/revision | bounded IPC DTO and Settings UI | user analytics or outbound reporting |
 | coalesced wake count | process-local diagnostics/UI summary | billing/fact tables |
-| actual suspicious host behavior | existing trust observation/Finding flow | inferred solely from watcher health |
+| actual suspicious harness behavior | existing trust observation/Finding flow | inferred solely from watcher health |
 
 Watcher health is not proof that an Agent read, packaged or uploaded data. It
 must never influence trust Finding severity. Trust evidence continues to require
@@ -541,11 +541,11 @@ uploaded or used as telemetry.
 
 The current refactor is acceptable for release as a **fixed-root, best-effort
 low-latency accelerator with periodic fallback**. It is not yet acceptable to
-promise all imported/dynamic hosts are monitored in real time.
+promise all imported/dynamic harnesses are monitored in real time.
 
 Phase A is the first release-blocking hardening item if a frequently writing
-host can be present. Phases B–D are release-blocking before marketing or UI copy
-claims dynamic-host hot-plug or watcher-status transparency.
+harness can be present. Phases B–D are release-blocking before marketing or UI copy
+claims dynamic-harness hot-plug or watcher-status transparency.
 
 
 ---
@@ -569,7 +569,7 @@ these corrections:
    pins the measured baseline + 10.
 4. **Phase C trimmed: `PluginApproved` deferred** — the provenance row requires
    "validated signed/installed plugin manifest", and the repository has no
-   plugin-signing infrastructure (HOST_MANIFEST_DSL is unsigned). Implementing
+   plugin-signing infrastructure (HARNESS_MANIFEST_DSL is unsigned). Implementing
    plugin-origin roots would mean building a signing system first. Phase C as
    built covers `CustomApproved` only (custom-source lifecycle +
    source-control exclusion); plugin origin re-enters scope when signing
@@ -594,10 +594,10 @@ these corrections:
    are rejected for every origin; canonical escape checks still apply where a
    canonical form exists.
 8. **Configured roots are a narrow exception, not an import path** — an
-   explicit runtime configuration belonging to a known built-in host (currently
+   explicit runtime configuration belonging to a known built-in harness (currently
    only `DSH_HOME`) may use `Configured` provenance and therefore point outside
-   `user_home`. It is subject to the same `/`, home-root, `..`, and known-host
-   checks as `CustomApproved`; imported profiles and arbitrary host manifests
+   `user_home`. It is subject to the same `/`, home-root, `..`, and known-harness
+   checks as `CustomApproved`; imported profiles and arbitrary harness manifests
    cannot create it.
 
 9. **Watcher-triggered sync execution rate needed a floor (found in

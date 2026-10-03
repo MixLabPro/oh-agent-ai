@@ -21,10 +21,10 @@ impl Drop for Database {
     }
 }
 fn revision(id: &str, origin: RevisionOrigin) -> ExtensionRevision {
-    ExtensionRevision { revision_id:id.into(),slot_type:"host_manifest".into(),slot_id:"zcode".into(),
+    ExtensionRevision { revision_id:id.into(),slot_type:"harness_manifest".into(),slot_id:"zcode".into(),
         content_sha256:"a".repeat(64),origin,schema_version:1,capabilities:serde_json::json!({}),installed_at_ms:10 }
 }
-fn slots(id: &str) -> SlotMap { BTreeMap::from([(("host_manifest".into(),"zcode".into()),id.into())]) }
+fn slots(id: &str) -> SlotMap { BTreeMap::from([(("harness_manifest".into(),"zcode".into()),id.into())]) }
 
 #[test]
 fn fresh_and_v27_upgrade_have_identical_extension_state() {
@@ -84,8 +84,8 @@ fn provenance_is_in_fact_transaction_and_foreign_keys_reject_mismatches() {
     assert!(link_fact_in_transaction(db.conn(),"fact",1,"local","1.4.0").is_err());
     let mark=begin_immediate(db.conn()).unwrap();
     db.conn().execute("INSERT INTO sync_runs(run_id,trigger,status,schema_version,started_at_ms) VALUES('run','cli','running',?1,10)",params![SCHEMA_VERSION]).unwrap();
-    db.conn().execute_batch("INSERT INTO usage_facts(fact_id,host,machine_namespace,native_session_id,source_event_id,observation_kind,ingested_run_id,created_at_ms,updated_at_ms)
-        VALUES('fact','host:zcode','machine','session','event','usage','run',10,10);").unwrap();
+    db.conn().execute_batch("INSERT INTO usage_facts(fact_id,harness,machine_namespace,native_session_id,source_event_id,observation_kind,ingested_run_id,created_at_ms,updated_at_ms)
+        VALUES('fact','harness:zcode','machine','session','event','usage','run',10,10);").unwrap();
     assert!(link_fact_in_transaction(db.conn(),"fact",0,"local","1.4.0").is_err());
     assert!(link_fact_in_transaction(db.conn(),"missing",1,"local","1.4.0").is_err());
     link_fact_in_transaction(db.conn(),"fact",1,"local","1.4.0").unwrap();
@@ -96,8 +96,8 @@ fn provenance_is_in_fact_transaction_and_foreign_keys_reject_mismatches() {
     let _ = mark;
     let mark=begin_immediate(db.conn()).unwrap();
     db.conn().execute("INSERT INTO sync_runs(run_id,trigger,status,schema_version,started_at_ms) VALUES('run','cli','running',?1,10)",params![SCHEMA_VERSION]).unwrap();
-    db.conn().execute_batch("INSERT INTO usage_facts(fact_id,host,machine_namespace,native_session_id,source_event_id,observation_kind,ingested_run_id,created_at_ms,updated_at_ms)
-        VALUES('fact','host:zcode','machine','session','event','usage','run',10,10);").unwrap();
+    db.conn().execute_batch("INSERT INTO usage_facts(fact_id,harness,machine_namespace,native_session_id,source_event_id,observation_kind,ingested_run_id,created_at_ms,updated_at_ms)
+        VALUES('fact','harness:zcode','machine','session','event','usage','run',10,10);").unwrap();
     link_fact_in_transaction(db.conn(),"fact",1,"local","1.4.0").unwrap();
     commit_advancing_revision(db.conn(),mark).unwrap();
     drop(db);
@@ -106,8 +106,8 @@ fn provenance_is_in_fact_transaction_and_foreign_keys_reject_mismatches() {
     assert_eq!(count,1);
     let mark=begin_immediate(db.conn()).unwrap();
     db.conn().execute("UPDATE usage_facts SET event_ts_ms=10 WHERE fact_id='fact'",[]).unwrap();
-    db.conn().execute_batch("INSERT INTO usage_facts(fact_id,host,machine_namespace,native_session_id,source_event_id,observation_kind,ingested_run_id,event_ts_ms,created_at_ms,updated_at_ms)
-        VALUES('new-fact','host:zcode','machine','session','new-event','usage','run',30,10,10);").unwrap();
+    db.conn().execute_batch("INSERT INTO usage_facts(fact_id,harness,machine_namespace,native_session_id,source_event_id,observation_kind,ingested_run_id,event_ts_ms,created_at_ms,updated_at_ms)
+        VALUES('new-fact','harness:zcode','machine','session','new-event','usage','run',30,10,10);").unwrap();
     link_fact_in_transaction(db.conn(),"new-fact",1,"local","1.4.0").unwrap();
     commit_advancing_revision(db.conn(),mark).unwrap();
     assert_eq!(db.retention_usage_facts(20).unwrap(),1);
@@ -121,7 +121,7 @@ fn provenance_is_in_fact_transaction_and_foreign_keys_reject_mismatches() {
 #[test]
 fn raw_sql_vendor_null_source_is_rejected() {
     let path=Database::new(); let db=path.open();
-    assert!(db.conn().execute("INSERT INTO extension_revisions VALUES('bad','host_manifest','zcode',?1,'vendor-catalog',NULL,?2,?3,1,'{}',10)",
+    assert!(db.conn().execute("INSERT INTO extension_revisions VALUES('bad','harness_manifest','zcode',?1,'vendor-catalog',NULL,?2,?3,1,'{}',10)",
         params!["a".repeat(64),"b".repeat(40),"c".repeat(64)]).is_err());
 }
 
@@ -139,21 +139,21 @@ fn failed_v28_migration_does_not_advance_v27_stamp() {
 }
 
 #[test]
-fn v29_reopen_migrates_plugin_host_rows_to_host_prefix() {
+fn v29_reopen_migrates_plugin_harness_rows_to_harness_prefix() {
     let path=Database::new(); let db=path.open();
     let mark=begin_immediate(db.conn()).unwrap();
     db.conn().execute("INSERT INTO sync_runs(run_id,trigger,status,schema_version,started_at_ms) VALUES('run','cli','running',?1,10)",params![SCHEMA_VERSION]).unwrap();
-    db.conn().execute_batch("INSERT INTO usage_facts(fact_id,host,machine_namespace,native_session_id,source_event_id,observation_kind,ingested_run_id,created_at_ms,updated_at_ms)
+    db.conn().execute_batch("INSERT INTO usage_facts(fact_id,harness,machine_namespace,native_session_id,source_event_id,observation_kind,ingested_run_id,created_at_ms,updated_at_ms)
         VALUES('f1','plugin:zcode','m','s','e','usage','run',10,10);
-        INSERT INTO usage_facts(fact_id,host,machine_namespace,native_session_id,source_event_id,observation_kind,ingested_run_id,created_at_ms,updated_at_ms)
+        INSERT INTO usage_facts(fact_id,harness,machine_namespace,native_session_id,source_event_id,observation_kind,ingested_run_id,created_at_ms,updated_at_ms)
         VALUES('f2','codex','m','s','e','usage','run',10,10);").unwrap();
     commit_advancing_revision(db.conn(),mark).unwrap();
     drop(db);
-    // 重新 open → v29 迁移把 plugin: 行折算到 host:，官方宿主不动。
+    // 重新 open → v29 迁移把 plugin: 行折算到 harness:，官方执行环境不动。
     let db=path.open();
-    let hosts: Vec<(String,String)> = db.conn().prepare("SELECT fact_id,host FROM usage_facts ORDER BY fact_id").unwrap()
+    let harnesses: Vec<(String,String)> = db.conn().prepare("SELECT fact_id,harness FROM usage_facts ORDER BY fact_id").unwrap()
         .query_map([],|r|Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();
-    assert_eq!(hosts, vec![("f1".to_string(),"host:zcode".to_string()),("f2".to_string(),"codex".to_string())]);
+    assert_eq!(harnesses, vec![("f1".to_string(),"harness:zcode".to_string()),("f2".to_string(),"codex".to_string())]);
     let version:String=db.conn().query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r|r.get(0)).unwrap();
     assert_eq!(version,SCHEMA_VERSION.to_string());
 }
@@ -163,13 +163,13 @@ fn v28_stamped_database_upgrades_through_the_idempotent_band() {
     // 回归：v29 bump 曾把「上一发布版本 28」漏出幂等带，真机 28 库掉进
     // unsupported 分支被拒开。任何 v∈[27, 当前] 都必须能走加性尾事务升级。
     let path=Database::new();
-    { let db=path.open(); } // 建库到当前版本
+    { let _db=path.open(); } // 建库到当前版本
     {
         let conn=rusqlite::Connection::open(&path.0).unwrap();
         conn.execute_batch(
             "PRAGMA journal_mode=DELETE; UPDATE schema_meta SET value='28' WHERE key='schema_version';").unwrap();
     }
-    // 重开：28 → 29 走幂等带，扩展表 IF NOT EXISTS 补齐 + host 行迁移。
+    // 重开：28 → 29 走幂等带，扩展表 IF NOT EXISTS 补齐 + harness 行迁移。
     let db=path.open();
     let version:String=db.conn().query_row("SELECT value FROM schema_meta WHERE key='schema_version'",[],|r|r.get(0)).unwrap();
     assert_eq!(version,SCHEMA_VERSION.to_string());
@@ -188,10 +188,10 @@ fn v28_stamped_database_upgrades_through_the_idempotent_band() {
 }
 
 #[test]
-fn v30_restamps_plugin_profile_ids_to_host_identity() {
+fn v30_restamps_plugin_profile_ids_to_harness_identity() {
     use agent_vitals_domain::contracts::usage_fact::fact_id;
     let path=Database::new();
-    { let db=path.open(); }
+    { let _db=path.open(); }
     {
         let conn=rusqlite::Connection::open(&path.0).unwrap();
         conn.execute_batch("PRAGMA journal_mode=DELETE;").unwrap();
@@ -199,19 +199,19 @@ fn v30_restamps_plugin_profile_ids_to_host_identity() {
     let db=path.open();
     let mark=begin_immediate(db.conn()).unwrap();
     db.conn().execute("INSERT INTO sync_runs(run_id,trigger,status,schema_version,started_at_ms) VALUES('run','cli','running',?1,10)",params![SCHEMA_VERSION]).unwrap();
-    // 旧行：v29 后形态（host 已折算），source_profile 仍 plugin- —— v30 的标记。
-    let insert="INSERT INTO usage_facts(fact_id,host,machine_namespace,native_session_id,source_event_id,observation_kind,source_profile,ingested_run_id,created_at_ms,updated_at_ms) VALUES(?1,'host:zcode','m','s',?2,'usage',?3,'run',10,10)";
+    // 旧行：v29 后形态（harness 已折算），source_profile 仍 plugin- —— v30 的标记。
+    let insert="INSERT INTO usage_facts(fact_id,harness,machine_namespace,native_session_id,source_event_id,observation_kind,source_profile,ingested_run_id,created_at_ms,updated_at_ms) VALUES(?1,'harness:zcode','m','s',?2,'usage',?3,'run',10,10)";
     db.conn().execute(insert,params!["old-e1","e1","plugin-abcd"]).unwrap();
     db.conn().execute(insert,params!["old-e2","e2","plugin-abcd"]).unwrap();
     commit_advancing_revision(db.conn(),mark).unwrap();
     drop(db);
     let db=path.open(); // 重开 → v30
-    let new_e1=fact_id("m","host:zcode","host-abcd","s","e1","usage");
-    let new_e2=fact_id("m","host:zcode","host-abcd","s","e2","usage");
+    let new_e1=fact_id("m","harness:zcode","harness-abcd","s","e1","usage");
+    let new_e2=fact_id("m","harness:zcode","harness-abcd","s","e2","usage");
     for (old_id,new_id) in [("old-e1",new_e1.as_str()),("old-e2",new_e2.as_str())] {
         let profile:String=db.conn().query_row("SELECT source_profile FROM usage_facts WHERE fact_id=?1",params![new_id],|r|r.get(0))
             .unwrap_or_else(|_| panic!("{old_id} 应已重 stamp 为 {new_id}"));
-        assert_eq!(profile,"host-abcd");
+        assert_eq!(profile,"harness-abcd");
     }
     let leftover:i64=db.conn().query_row("SELECT COUNT(*) FROM usage_facts WHERE source_profile LIKE 'plugin-%' OR fact_id LIKE 'old-%'",[],|r|r.get(0)).unwrap();
     assert_eq!(leftover,0);

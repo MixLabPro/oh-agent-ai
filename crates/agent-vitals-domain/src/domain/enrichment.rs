@@ -19,7 +19,7 @@
 //!    字节对等。
 //! 4. **不追加省略号**。provenance 字段已经声明了截断，往文本里塞 `…` 是第二
 //!    份真值：下游一旦按长度/前缀匹配就会两边不一致。
-//! 5. **宿主原生码不猜分类**。`host:` 家族一律 `unknown`——拿不到语义的码，
+//! 5. **执行环境原生码不猜分类**。`harness:` 家族一律 `unknown`——拿不到语义的码，
 //!    诚实归 unknown，比一个看起来合理其实编造的类好（`evidence.rs`「adapter
 //!    不得用读不到的东西刷覆盖」同一条纪律）。
 //! 6. **scrubbed 优先于 truncated**。两个字段语义并存时，provenance 报"更保守
@@ -229,7 +229,7 @@ pub fn scrub_text(text: &str) -> ScrubOutcome {
 
 // ────────────────────────── 错误码分类 ──────────────────────────
 
-/// `error_code` 语法 `家族:细节`（家族 ∈ http/jsonrpc/tool/host）→ 闭集分类。
+/// `error_code` 语法 `家族:细节`（家族 ∈ http/jsonrpc/tool/harness）→ 闭集分类。
 /// 语法不合法或语义上不是错误（如 `http:200`）返回 `None`——`error_class` 列
 /// 存 NULL（"未断言"），绝不存一个编造的类（诚实性规则 5）。
 pub fn classify_error_code(code: &str) -> Option<ErrorClass> {
@@ -282,7 +282,7 @@ pub fn classify_error_code(code: &str) -> Option<ErrorClass> {
                 Some(ErrorClass::ToolPolicy)
             }
         }
-        "host" => Some(ErrorClass::Unknown), // 原生码透传，不猜（诚实性规则 5）
+        "harness" => Some(ErrorClass::Unknown), // 原生码透传，不猜（诚实性规则 5）
         _ => None,
     }
 }
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(classify_error_code("tool:enoent"), Some(ErrorClass::ToolPolicy));
         assert_eq!(classify_error_code("tool:timeout"), Some(ErrorClass::Timeout));
         assert_eq!(classify_error_code("tool:ETIMEDOUT"), Some(ErrorClass::Timeout));
-        assert_eq!(classify_error_code("host:claude_4711"), Some(ErrorClass::Unknown));
+        assert_eq!(classify_error_code("harness:claude_4711"), Some(ErrorClass::Unknown));
         assert_eq!(classify_error_code("ftp:550"), None, "家族闭集之外");
         assert_eq!(classify_error_code("http:"), None, "空细节");
         assert_eq!(classify_error_code("no-colon"), None);

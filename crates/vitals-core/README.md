@@ -1,6 +1,6 @@
 # vitals-core
 
-Host-agnostic behavioral audit runtime. Turns a stream of `CanonicalEvent`s
+Harness-agnostic behavioral audit runtime. Turns a stream of `CanonicalEvent`s
 into `Trajectory` + `Coverage`-gated `Detector` findings + a deterministic
 `ReplayReport` — without knowing anything about Agents, tool calls, Codex,
 DSH, or any other domain. See

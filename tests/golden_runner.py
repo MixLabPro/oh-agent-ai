@@ -32,7 +32,7 @@ GEN = ROOT / "fixtures" / "generate.py"
 GOLDEN_DIR = ROOT / "golden"
 
 # DSH 的语料与主树分开建（fixtures/dsh/skills/build_dsh_skills_fixture.py）：
-# ~/.agents/skills 与 OpenClaw 共享，放进主树会把 host-openclaw 等 golden 改掉。
+# ~/.agents/skills 与 OpenClaw 共享，放进主树会把 harness-openclaw 等 golden 改掉。
 DSH_GEN = ROOT / "fixtures" / "dsh" / "skills" / "build_dsh_skills_fixture.py"
 # DSH 触发证据（log）与 probe 快照。golden.jsonl 的目录名与 dsh 目录树**对齐**，
 # 这样 log 证据下 skill 会 loaded=true、never_triggered 非空 —— 空列表钉不住
@@ -52,9 +52,9 @@ DSH_SNAPSHOT = {
 }
 
 FIXTURE_GEN_BY_CASE = {
-    "host-dsh": DSH_GEN,
-    "host-dsh-log": DSH_GEN,
-    "host-dsh-probe": DSH_GEN,
+    "harness-dsh": DSH_GEN,
+    "harness-dsh-log": DSH_GEN,
+    "harness-dsh-probe": DSH_GEN,
 }
 
 # 扫描器命令。默认 Python oracle；设 AGENT_VITALS_BIN 即切到二进制。
@@ -65,46 +65,46 @@ if BIN:
     BIN = str(Path(BIN).resolve())
 SCAN_CMD = [BIN] if BIN else [sys.executable, str(ROOT / "scripts" / "scan.py")]
 
-# 每个 case 是 (golden 文件名, 额外参数, 是否需要宿主配置)
+# 每个 case 是 (golden 文件名, 额外参数, 是否需要执行环境配置)
 #
-# 描述预算与触发数据是 **Claude Code 专有**的：默认的 --host all 下两者都报
-# not-available，因为把多个宿主的预算加总起来没有意义（见输出里的
-# cross_host_note）。所以凡是验这两块的 case 都必须显式 --host claude-code，
-# 否则测的是「多宿主模式下正确地拒绝回答」，而不是那两块本身。
+# 描述预算与触发数据是 **Claude Code 专有**的：默认的 --harness all 下两者都报
+# not-available，因为把多个执行环境的预算加总起来没有意义（见输出里的
+# cross_harness_note）。所以凡是验这两块的 case 都必须显式 --harness claude-code，
+# 否则测的是「多执行环境模式下正确地拒绝回答」，而不是那两块本身。
 CASES = [
     ("default",       [],                              True),
     ("all",           ["--all"],                       True),
-    ("claude-code",     ["--host", "claude-code"],          True),
-    ("claude-code-all", ["--host", "claude-code", "--all"], True),
-    ("zombie-age-0",  ["--host", "claude-code", "--zombie-age", "0"], True),
+    ("claude-code",     ["--harness", "claude-code"],          True),
+    ("claude-code-all", ["--harness", "claude-code", "--all"], True),
+    ("zombie-age-0",  ["--harness", "claude-code", "--zombie-age", "0"], True),
     ("redacted",      ["--redact", "--redact-names"],  True),
-    # 宿主配置缺失 —— 不变量 12：拿不到就报 unavailable，绝不编造
-    ("no-host-config", [],                             False),
+    # 执行环境配置缺失 —— 不变量 12：拿不到就报 unavailable，绝不编造
+    ("no-harness-config", [],                             False),
     # cwd 就是语料根 —— 此时 `./.claude/skills` 与 `~/.claude/skills` 指向
     # **同一个目录**。不按 resolve 后的路径去重的话，同一批 skill 会被扫两遍，
     # 进而被当成「内容相同的两份副本」而**凭空报出一个不存在的冲突**。
     # 这个 case 是真机上踩出来的：从 home 跑才会显形，从 workdir 跑永远不会。
-    ("cwd-is-home",   ["--host", "claude-code"],       True),
-    # 单宿主分支各自有独立的预算口径与文案。没有这两个 case 时，
-    # `--host codex` 的 policy 文案在移植中悄悄漂移了一句都没人发现 ——
+    ("cwd-is-home",   ["--harness", "claude-code"],       True),
+    # 单执行环境分支各自有独立的预算口径与文案。没有这两个 case 时，
+    # `--harness codex` 的 policy 文案在移植中悄悄漂移了一句都没人发现 ——
     # golden 只覆盖跑过的分支。
-    ("host-codex",    ["--host", "codex"],             True),
-    ("host-openclaw", ["--host", "openclaw"],          True),
-    ("host-workbuddy", ["--host", "workbuddy"],        True),
+    ("harness-codex",    ["--harness", "codex"],             True),
+    ("harness-openclaw", ["--harness", "openclaw"],          True),
+    ("harness-workbuddy", ["--harness", "workbuddy"],        True),
     # DSH 三态证据源（evidence_recency）：none（文件系统推断）/ log（会话日志）/
     # probe（注册表快照）。三个 case 各钉一种 —— golden 只覆盖跑过的分支。
-    #   host-dsh       无证据 → 全 unknown，evidence_recency="none"
-    #   host-dsh-log   会话日志 → 目录名对齐，loaded=true，never_triggered 非空
-    #   host-dsh-probe 快照 → catalog-visible / not-in-catalog 分流，recency="probe"
-    ("host-dsh",       ["--host", "dsh"],              False),
-    ("host-dsh-log",   ["--host", "dsh"],              False),
-    ("host-dsh-probe", ["--host", "dsh", "--runtime-json", "{root}/snapshot.json"], False),
+    #   harness-dsh       无证据 → 全 unknown，evidence_recency="none"
+    #   harness-dsh-log   会话日志 → 目录名对齐，loaded=true，never_triggered 非空
+    #   harness-dsh-probe 快照 → catalog-visible / not-in-catalog 分流，recency="probe"
+    ("harness-dsh",       ["--harness", "dsh"],              False),
+    ("harness-dsh-log",   ["--harness", "dsh"],              False),
+    ("harness-dsh-probe", ["--harness", "dsh", "--runtime-json", "{root}/snapshot.json"], False),
     # **diff_vs_baseline 此前 0/11 覆盖。**验收时在这个洞里一次找出三处双实现
     # 分歧：added_skills 的形状、比对键只按 name（同名不同命名空间被并成一条）、
     # usage_delta 少三个字段。golden 只覆盖跑过的分支 —— 这一条把 diff 也钉住。
     # 基线是手写的 fixtures/diff-baseline.json，刻意造出新增 / 消失 /
     # 触发增量 / 同名不同命名空间四种情况。
-    ("diff-baseline", ["--host", "claude-code", "--baseline", "{root}/baseline.json"], True),
+    ("diff-baseline", ["--harness", "claude-code", "--baseline", "{root}/baseline.json"], True),
 ]
 
 # 个别 case 需要放开某个探测。
@@ -116,17 +116,17 @@ CASES = [
 # 对比 Codex / OpenClaw：那两个要起子进程问 PATH 上的可执行文件，HOME
 # 隔离拦不住，**永远不能在 golden 里打开**。
 ENV_BY_CASE = {
-    "host-workbuddy": {"AGENT_VITALS_DISABLE_WORKBUDDY_BUILTINS": "0"},
+    "harness-workbuddy": {"AGENT_VITALS_DISABLE_WORKBUDDY_BUILTINS": "0"},
     # OpenClaw 的**根发现**读的是语料里的 ~/.open*，在 HOME 隔离下确定；
     # 运行时探测（起子进程问 PATH 上的 openclaw）**仍然关着** ——
     # 那个 HOME 隔离拦不住，永远不能在 golden 里打开。
-    "host-openclaw": {"AGENT_VITALS_DISABLE_OPENCLAW_RUNTIME": "1"},
+    "harness-openclaw": {"AGENT_VITALS_DISABLE_OPENCLAW_RUNTIME": "1"},
     # DSH 会话日志证据来自环境变量（真机自动发现留后续）。指向语料根内的副本，
     # scrub 会把路径抹成 <FIXTURES>，不泄漏真机路径。
-    "host-dsh-log": {"AGENT_VITALS_DSH_SESSION_LOG": "{root}/session.jsonl"},
+    "harness-dsh-log": {"AGENT_VITALS_DSH_SESSION_LOG": "{root}/session.jsonl"},
 }
 
-# HOST_MANIFEST_DSL_SPEC §8.1：generic 插件宿主 case——**不走** scan.py 的
+# HARNESS_MANIFEST_DSL_SPEC §8.1：generic 插件执行环境 case——**不走** scan.py 的
 # `--json FILE` 扫描器契约，走 `manifest-validate` 的 stdout JSON 契约（Rust /
 # Python 两侧各自实现同一负载，本 runner 负责钉字节）。fixture 文件内联在
 # 这里（语料生成器 generate.py 不掺和），写入隔离 HOME 后 discovery 走
@@ -170,13 +170,13 @@ def _plugin_fixture_row(request_id, attempt, input_tokens):
 
 
 PLUGIN_CASES = {
-    "host-generic-zcode": {
+    "harness-generic-zcode": {
         "args": ["manifest-validate",
-                 "--manifest", "{root}/hosts.d/zcode/manifest.json",
+                 "--manifest", "{root}/harnesses.d/zcode/manifest.json",
                  "--machine-namespace", "golden",
                  "--json"],
         "files": {
-            "hosts.d/zcode/manifest.json": PLUGIN_FIXTURE_MANIFEST,
+            "harnesses.d/zcode/manifest.json": PLUGIN_FIXTURE_MANIFEST,
             "data/model-io-sess_aaa.jsonl": "\n".join([
                 _plugin_fixture_row("r1", 1, 100),
                 _plugin_fixture_row("r2", 1, 200),
@@ -218,7 +218,7 @@ VOLATILE = {"installed_days_ago", "last_used_days_ago"}
 # tests/test_regressions.py::TestCodexBudgetCountsPathLength 用行为测试保住，
 # 那条通过「把同一份语料放到更深的目录」验证增量，与绝对路径无关。
 VOLATILE_BY_CASE = {
-    "host-codex": {"used_chars", "pct_used", "over_by_chars",
+    "harness-codex": {"used_chars", "pct_used", "over_by_chars",
                    "skills_possibly_dropped"},
 }
 
@@ -234,11 +234,11 @@ def run_case(root: Path, extra, out: Path, cwd_is_root=False, env_extra=None):
     env = isolated_home_env(root)
     # DSH 会话日志证据来自环境变量；isolated_home_env 是 os.environ 的拷贝，
     # 开发者本机设过 AGENT_VITALS_DSH_SESSION_LOG 会泄漏进来，输出随机器而变。
-    # 先清掉，需要证据的 case 再通过 env_extra 显式注入（见 host-dsh-log）。
+    # 先清掉，需要证据的 case 再通过 env_extra 显式注入（见 harness-dsh-log）。
     env.pop("AGENT_VITALS_DSH_SESSION_LOG", None)
     # 预算默认值取自环境变量，必须钉死，否则开发者本地设过就对不上
     env["SLASH_COMMAND_TOOL_CHAR_BUDGET"] = "15000"
-    # 宿主运行时探测必须关掉。它们会去问本机真实装着的 Codex / OpenClaw /
+    # 执行环境运行时探测必须关掉。它们会去问本机真实装着的 Codex / OpenClaw /
     # WorkBuddy —— HOME 隔离拦不住这些（Codex 走的是 PATH 上的可执行文件，
     # 不是 home 下的目录）。开着的话快照取决于「这台机器装没装 Codex」，
     # 刚建立起来的确定性当场失效。
@@ -348,7 +348,7 @@ def canonicalize(data, root_str, case=None):
 
 
 def _run_plugin_case(root: Path, name: str):
-    """generic 插件宿主 case：写内联 fixture → 跑 manifest-validate（stdout
+    """generic 插件执行环境 case：写内联 fixture → 跑 manifest-validate（stdout
     JSON 契约）→ scrub。退出码非 0 = case 失败（gate refuse / 硬错误）。"""
     import json as _json
     root = root.resolve()
@@ -393,15 +393,15 @@ def produce(tmp: Path):
             (root / ".claude.json").unlink()
         # 基线 / DSH 会话日志 / probe 快照都要落在语料根里，scrub 才能把
         # 绝对路径抹成 <FIXTURES>。原来用 `any("{root}" in a for a in extra)`
-        # 判断是否拷基线，但那会把 host-dsh-probe 的 `--runtime-json
+        # 判断是否拷基线，但那会把 harness-dsh-probe 的 `--runtime-json
         # {root}/snapshot.json` 也误判成要拷 baseline.json。改成按 case 名
         # 精确分发。
         if name == "diff-baseline":
             shutil.copyfile(ROOT / "fixtures" / "diff-baseline.json",
                             root / "baseline.json")
-        elif name == "host-dsh-log":
+        elif name == "harness-dsh-log":
             shutil.copyfile(DSH_SESSION_LOG, root / "session.jsonl")
-        elif name == "host-dsh-probe":
+        elif name == "harness-dsh-probe":
             (root / "snapshot.json").write_text(json.dumps(DSH_SNAPSHOT),
                                                 encoding="utf-8")
         root_s = str(root).replace("\\", "/")

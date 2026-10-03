@@ -44,7 +44,7 @@ def beijing_day_to_utc_iso(day):
 
 
 def seed_authority_facts(binary, home, day, uncached_input=1_000_000, output=100_000):
-    """把三宿主各一条实时事实经公开迁移入口种进隔离 SQL 权威库。
+    """把三执行环境各一条实时事实经公开迁移入口种进隔离 SQL 权威库。
 
     v0.9.1 Phase 3.5 Tier A 起 `data coverage` / `data daily` 经
     `SummaryRepository` 读 `SqlSummaryRepository`（权威库），不再读 state 投影
@@ -55,18 +55,18 @@ def seed_authority_facts(binary, home, day, uncached_input=1_000_000, output=100
     一致（fact_id 由契约层派生，不信任外部 id）。模型名都在价目表内：
     deepseek-v4-flash 出 DSH 实测账单档与 claude CNY 估算档，gpt-5.6-sol 出
     codex 缺少官方订阅 scope 证据时保持 metered_estimate + unresolved；
-    三宿主 basis 各就各位的断言按当前 billing fallback 规则执行。
+    三执行环境 basis 各就各位的断言按当前 billing fallback 规则执行。
     """
     facts_dir = Path(home) / "data" / "facts"
     facts_dir.mkdir(parents=True, exist_ok=True)
     ts = beijing_day_to_utc_iso(day)
-    for host, session, model in (
+    for harness, session, model in (
         ("claude-code", "sess-seed-claude", "deepseek-v4-flash"),
         ("codex", "sess-seed-codex", "gpt-5.6-sol"),
         ("dsh", "sess-seed-dsh", "deepseek-v4-flash"),
     ):
         fact = {
-            "host": host,
+            "harness": harness,
             "machine_namespace": "default",
             "source_profile": "default",
             "native_session_id": session,
@@ -79,7 +79,7 @@ def seed_authority_facts(binary, home, day, uncached_input=1_000_000, output=100
             "cache_write_tokens": 0,
             "output_tokens": output,
         }
-        (facts_dir / (host + ".jsonl")).write_text(json.dumps(fact) + "\n")
+        (facts_dir / (harness + ".jsonl")).write_text(json.dumps(fact) + "\n")
     env = isolated_home_env(home)
     env["AGENT_VITALS_HOME"] = str(Path(home) / "data")
     proc = subprocess.run(

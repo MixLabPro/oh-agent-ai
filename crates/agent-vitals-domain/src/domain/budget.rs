@@ -247,7 +247,7 @@ pub fn evaluate_alert(
             }
         }
     } else {
-        reasons.push("no metered spend recorded for today yet (budget counts cross-host metered spend only)".to_string());
+        reasons.push("no metered spend recorded for today yet (budget counts cross-harness metered spend only)".to_string());
     }
 
     // 月预算：之前只把 month_cost/monthly_cny 算出来给 xbar 显示，从没真的参与过

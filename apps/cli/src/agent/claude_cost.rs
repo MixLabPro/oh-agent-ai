@@ -2,7 +2,7 @@
 //!
 //! 2026-09-02 用户决策 D1-D4 的落地：托盘的 Claude Code 分量 = **按模型族官方卡
 //! 折算**（catalog 计价面在 core `cost.rs`，钱在读取时算——本模块只折 token 桶）。
-//! 为什么独立数据面：DSH 的 month.json/today.json/alert.json/manifest 是 DSH 宿主
+//! 为什么独立数据面：DSH 的 month.json/today.json/alert.json/manifest 是 DSH 执行环境
 //! 语义（`tokenUsage` 4 桶、peak/off-peak、预算告警），Claude Code 的账单形状
 //! 完全不同（cost-state camelCase modelUsage、行级 snake usage、模型名带 gateway
 //! 前缀）——混进既有状态链会破坏它的不变量（month.json 只存当前月、merge_month
@@ -22,7 +22,7 @@
 //!   cost-state 里）。所以基线语义是 **replace 不是 add**：新 cost-state 到达时
 //!   整块替换旧基线、清空旧基线之后的尾差（那些行已被新基线包含），否则两条
 //!   同值 cost-state 会把整段会话计两遍——单测钉这条。
-//! - **costUSD 永不当账单**（catalog `host_costusd_note`）：对未知模型按默认卡
+//! - **costUSD 永不当账单**（catalog `harness_costusd_note`）：对未知模型按默认卡
 //!   $5/$0.5/$25 计，deepseek 网关模型高估 20-70×。本面只取 modelUsage 的 token
 //!   桶（camel → snake），钱留给读取时用 catalog 官方卡折算。
 //! - cost-state 无日界 → 基线**按 startTime（会话起始 ms）归到北京日**（v1
@@ -80,15 +80,15 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use agent_vitals_hosts::claude_code_usage::SNAKE_KEYS;
-use agent_vitals_hosts::claude_usage_fact::{parse_claude_usage_row, UNATTRIBUTED, UNREADABLE};
+use agent_vitals_harnesses::claude_code_usage::SNAKE_KEYS;
+use agent_vitals_harnesses::claude_usage_fact::{parse_claude_usage_row, UNATTRIBUTED, UNREADABLE};
 use agent_vitals_runtime::sessions::codex_cost::current_month_beijing;
-use agent_vitals_hosts::claude_session::claude_project_files;
+use agent_vitals_harnesses::claude_session::claude_project_files;
 use agent_vitals_runtime::state::{atomic_write_json, now_iso_utc, read_json, state_dir};
 use agent_vitals_runtime::takeover::require_rust_owner;
 
 /// v0.6.x 前置正确性热修复（归日转正 + 峰谷分辨率 + 残差哨兵，三者同批——
-/// 见 `docs/VITALS_CORE_V0_6_HOST_CONTRACT_SPEC.md` §5.3 条款 7 / §8 G10、
+/// 见 `docs/VITALS_CORE_V0_6_HARNESS_CONTRACT_SPEC.md` §5.3 条款 7 / §8 G10、
 /// `docs/VITALS_CORE_V0_7_DATA_PLANE_SPEC.md` §5）。`claude-fold.json` 在这次
 /// 改动之前没有 `schema_version`：旧 checkpoint 的 `tail_days` 是在"cost-state
 /// 一来就清空"的旧算法下产生的，只保留最近一次基线之后的行，历史已经在写盘
@@ -108,8 +108,8 @@ use agent_vitals_runtime::takeover::require_rust_owner;
 const FOLD_SCHEMA_VERSION: u64 = 3;
 
 /// 行级 usage 的 4 个计数键 / 短键旧形状 / 行级读取原语已归位
-/// `agent_vitals_hosts::claude_code_usage`（Stage A emitter 归位的同一批：
-/// fold 与 emitter 共享 extractor，emitter 住进 hosts 后原语必须先行）。
+/// `agent_vitals_harnesses::claude_code_usage`（Stage A emitter 归位的同一批：
+/// fold 与 emitter 共享 extractor，emitter 住进 harnesses 后原语必须先行）。
 const CAMEL_KEYS: [&str; 4] = [
     "inputTokens",
     "cacheReadInputTokens",
@@ -140,7 +140,7 @@ fn ledger_archive_path() -> std::path::PathBuf {
 }
 
 // v0.9 Stage 0.3：`ledger_day_total_tokens`/`claude_ledger_day_tokens`（r2a_store
-// 的 claude 宿主行「今日 token」读的这条只读取值路径，与本文件的 fold 引擎零
+// 的 claude 执行环境行「今日 token」读的这条只读取值路径，与本文件的 fold 引擎零
 // 交集）搬进了 `agent_vitals_runtime::sessions::claude_ledger`——见
 // docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md §6。`ledger_path()` 仍在本文件
 // 内被 `claude_sync` 用，原地保留。

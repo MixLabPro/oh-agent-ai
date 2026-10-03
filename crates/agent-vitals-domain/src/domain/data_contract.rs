@@ -5,14 +5,14 @@
 //! （Stage 0 的 JSON 读 adapter，还是 Stage B 的 SQLite repository）是
 //! `agent-vitals-data` crate 的事——本模块只回答"一份 MonthlySummary 必须长
 //! 什么样、字段之间不允许违反哪些约束"，两边都要构造同一批类型，任何一边
-//! 想抄近路（比如把 unresolved 悄悄记成 0，或者把排除的宿主又塞回
-//! by_host）在这里就会被 `contract_violations` 抓到。domain crate 不读文件、
+//! 想抄近路（比如把 unresolved 悄悄记成 0，或者把排除的执行环境又塞回
+//! by_harness）在这里就会被 `contract_violations` 抓到。domain crate 不读文件、
 //! 不连 SQLite（`tests/dependency_budget.rs` 钉住），本文件全程只是
 //! 结构体/枚举 + 纯函数。
 //!
 //! 三条硬性不变式，来自 spec 原文，不是本文件发明的：
-//! 1. spec §0.1「诚实展示」：`excluded_hosts` 里的宿主不能同时出现在
-//!    `by_host` 里——排除是显式声明的事实，不是"恰好没数据"的沉默现象。
+//! 1. spec §0.1「诚实展示」：`excluded_harnesses` 里的执行环境不能同时出现在
+//!    `by_harness` 里——排除是显式声明的事实，不是"恰好没数据"的沉默现象。
 //! 2. spec §4「unresolved：不得归零」：`BillingBasis::Unresolved` 从不作为
 //!    金额出现在 `amounts_by_basis` 里，只能通过 `has_unresolved` 标记存在
 //!    性；对称地，`total_summable()` 永远不会把它算进去伪装成确定数字。
@@ -21,7 +21,7 @@
 //!    的"没数据但有时间戳"。
 //!
 //! **序列化不用 `serde` derive**：本 crate 现有类型
-//! （`contracts::host_capability::HostProfile` 等）一律手写 `as_str()`/
+//! （`contracts::harness_capability::HarnessProfile` 等）一律手写 `as_str()`/
 //! `to_json()` 落 `serde_json::Value`，`serde` 派生宏从未是这个 crate 的
 //! 依赖；这里延续同一习惯，不为本文件单开第二套序列化路径。
 
@@ -48,10 +48,10 @@ pub enum BillingBasis {
     /// summable（估算不冒充实付），但 [`MeteredView`] 里它取代默认估算、被
     /// `MeteredActual`（账单）取代：`账单 > 归因估算 > 默认估算`。
     MeteredDeclared,
-    /// 宿主提供的账单/credits 消耗，无逐请求 token 归因——spec §4：
-    /// "可以按宿主账单口径汇总，不能重标为模型 API 成本"（WorkBuddy 的
+    /// 执行环境提供的账单/credits 消耗，无逐请求 token 归因——spec §4：
+    /// "可以按执行环境账单口径汇总，不能重标为模型 API 成本"（WorkBuddy 的
     /// credit_json 落在这一档，不是 metered_actual）。
-    HostBilled,
+    HarnessBilled,
     /// 套餐消耗的等价 API 标价——spec §4："只作诊断"，不计入用户账单总额。
     ApiEquivalent,
 }
@@ -61,23 +61,23 @@ impl BillingBasis {
     /// 与 `ApiEquivalent` 都不参与——它们分别是"估算"与"仅供诊断的等价值"，
     /// 混进用户看到的月度总额就是把不确定的数字伪装成确定的数字。
     pub fn summable_into_total(self) -> bool {
-        matches!(self, Self::FixedSubscription | Self::MeteredActual | Self::HostBilled)
+        matches!(self, Self::FixedSubscription | Self::MeteredActual | Self::HarnessBilled)
     }
 
-    /// `hosts --json`/`data coverage --json` 一贯的 snake_case 词汇。
+    /// `harnesses --json`/`data coverage --json` 一贯的 snake_case 词汇。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::FixedSubscription => "fixed_subscription",
             Self::MeteredActual => "metered_actual",
             Self::MeteredEstimate => "metered_estimate",
             Self::MeteredDeclared => "metered_declared",
-            Self::HostBilled => "host_billed",
+            Self::HarnessBilled => "harness_billed",
             Self::ApiEquivalent => "api_equivalent",
         }
     }
 
     /// `as_str` 的逆——从持久化/CLI 读回来的 snake_case 还原成 basis。不认识
-    /// 的字符串返回 `None`（`host_bills` 表里的 basis 由 `host_bill_put` 校验
+    /// 的字符串返回 `None`（`harness_bills` 表里的 basis 由 `harness_bill_put` 校验
     /// 过五档词表，理论上不会命中，但读侧不做"猜一个默认"这种事）。名字不用
     /// `from_str`——那会和 `std::str::FromStr` 撞（clippy::should_implement_trait），
     /// 而我们要的是 `Option` 而非 `Result<_, ()>`。
@@ -87,7 +87,7 @@ impl BillingBasis {
             "metered_actual" => Self::MeteredActual,
             "metered_declared" => Self::MeteredDeclared,
             "metered_estimate" => Self::MeteredEstimate,
-            "host_billed" => Self::HostBilled,
+            "harness_billed" => Self::HarnessBilled,
             "api_equivalent" => Self::ApiEquivalent,
             _ => return None,
         })
@@ -102,7 +102,7 @@ impl BillingBasis {
 /// 一次 `pyround` 的最细上报粒度 round 一次，父层金额 = 子项整数和
 ///（守恒由构造）。
 ///
-/// 这是一个**纯数据类型**——不读时钟、不引第三方、不认识宿主 wire 格式。
+/// 这是一个**纯数据类型**——不读时钟、不引第三方、不认识执行环境 wire 格式。
 /// `from_f64` / `sum_minor` / `minor_digits_for` 在 runtime crate 实现
 ///（它们有浮点舍入 / IO 状态），domain 这层只暴露数据形状。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +143,7 @@ impl MoneyMinor {
 /// "这个数字有多可信"，而不是"这个数字属于哪种账单"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CostBasis {
-    /// 直接从宿主证据读到的数字。
+    /// 直接从执行环境证据读到的数字。
     Measured,
     /// 从其他 measured 字段推导出来的数字（例如按价格表折算）。
     Derived,
@@ -165,16 +165,16 @@ impl CostBasis {
     }
 }
 
-/// spec §3.1/§0.1：一个范围（某宿主、某天、某月）的新鲜度状态。
+/// spec §3.1/§0.1：一个范围（某执行环境、某天、某月）的新鲜度状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FreshnessState {
     /// 已在预期窗口内观测到最新数据。
     Fresh,
-    /// 曾经观测到，但已超出预期新鲜窗口（宿主停更、同步滞后）。
+    /// 曾经观测到，但已超出预期新鲜窗口（执行环境停更、同步滞后）。
     Stale,
     /// 只观测到部分维度/部分时间段，不是完整覆盖。
     Partial,
-    /// 该宿主/范围从未被观测——不是"测量结果是零"，是"没有测量"
+    /// 该执行环境/范围从未被观测——不是"测量结果是零"，是"没有测量"
     /// （spec §0.1："不得渲染为 ¥0、正常或看似完整的总额"）。
     Unavailable,
 }
@@ -257,39 +257,39 @@ impl CoverageStatus {
     }
 }
 
-/// 一个宿主（或 billing_source 条目）在某个范围内的金额，按 [`BillingBasis`]
+/// 一个执行环境（或 billing_source 条目）在某个范围内的金额，按 [`BillingBasis`]
 /// 分桶——绝不是脱离来源的 scalar（spec §3.1："任何 UI 若只消费金额而丢弃
 /// 这些字段，视为契约违规"）。
 #[derive(Debug, Clone, PartialEq)]
-pub struct HostAmount {
-    pub host_id: String,
+pub struct HarnessAmount {
+    pub harness_id: String,
     /// `BillingBasis::Unresolved` 意义上没有金额，故 key 类型本身就排除了
     /// unresolved——见 `has_unresolved` 字段。
     pub amounts_by_basis: BTreeMap<BillingBasis, f64>,
     /// 条目级币种。**为什么现在才加**（Stage C 逼出的缺口）：订阅费摊入后
     /// `FixedSubscription` 的 20/114/118 是裸数字——UI 没法知道是 $20 还是
     /// ¥20，渲染出来就是编造币种。`by_provider` 条目天然单币（一个
-    /// billing_source 一张价卡）→ `Some`；`by_host` 条目可能混币
+    /// billing_source 一张价卡）→ `Some`；`by_harness` 条目可能混币
     /// （claude-code 的 CNY 估 + USD 折）→ `None`（币种仍由旧约定承载，
     /// 不假装声明）。`None` 不代表"没有币种"，代表"本条目未声明单币"。
     pub currency: Option<String>,
     pub has_unresolved: bool,
     /// Provider route evidence used by the read model. Kept separate from
-    /// `host_id`/billing basis so an estimate is never rendered as a real bill.
+    /// `harness_id`/billing basis so an estimate is never rendered as a real bill.
     pub evidence_basis: Option<String>,
     pub pricing_method: Option<String>,
     pub unresolved_reason: Option<String>,
     pub freshness: Freshness,
 }
 
-impl HostAmount {
-    /// spec §4"能否汇总"列为真的几档之和——用户会看到的、这个宿主贡献的
+impl HarnessAmount {
+    /// spec §4"能否汇总"列为真的几档之和——用户会看到的、这个执行环境贡献的
     /// 可信总额。**不存字段，每次算**：存字段会重蹈 `month.json` 三倍计数
     /// 事故的覆辙（同一个数字有两个来源，迟早对不上）。
     ///
     /// 显式 `fold(0.0, …)` 而不是 `.sum()`：实测（rustc，2026-09）对空迭代器
     /// `Sum<&f64>` 产出 **-0.0**，`serde_json` 会把它原样序列化成 "-0.0"——
-    /// 无数据宿主的 summable_total 在 `--json` 里显示成负零，读起来像"欠
+    /// 无数据执行环境的 summable_total 在 `--json` 里显示成负零，读起来像"欠
     /// 0 元"（Stage 0.5 的 `data coverage --json` 首次把这个形状暴露出来）。
     /// fold 的恒等元是显式的 +0.0，空表恒得 +0.0。
     pub fn summable_total(&self) -> f64 {
@@ -306,7 +306,7 @@ impl HostAmount {
             .map(|(basis, amount)| (basis.as_str().to_string(), json!(amount)))
             .collect();
         json!({
-            "host_id": self.host_id,
+            "harness_id": self.harness_id,
             "amounts_by_basis": Value::Object(by_basis),
             "summable_total": self.summable_total(),
             "currency": self.currency,
@@ -319,18 +319,18 @@ impl HostAmount {
     }
 
     fn contract_violations(&self, into: &mut Vec<String>) {
-        let where_ = format!("by_host[{}]", self.host_id);
+        let where_ = format!("by_harness[{}]", self.harness_id);
         self.freshness.contract_violations(into, &where_);
     }
 }
 
-/// 一个范围（宿主 × 窗口）的 token 计量——感知层的 L0（ATTRIBUTABLE_WASTE
+/// 一个范围（执行环境 × 窗口）的 token 计量——感知层的 L0（ATTRIBUTABLE_WASTE
 /// §6：`processed_tokens` 是 cost/M 的分母，「这份钱换来多少处理量」的回答）。
-/// 桶维度统一到四轴（uncached/cache_read/cache_write/output）：宿主词表不同
+/// 桶维度统一到四轴（uncached/cache_read/cache_write/output）：执行环境词表不同
 /// （DSH 四桶 / Claude 4 型 / Codex 5 桶），由各自 adapter 归一，父子字段有
 /// 包含关系的先去重再进（§6 原话）。
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct HostTokens {
+pub struct HarnessTokens {
     /// 四桶之和 = processed_tokens。
     pub total: i64,
     pub uncached_input: i64,
@@ -344,7 +344,7 @@ pub struct HostTokens {
     pub cache_hit_ratio: Option<f64>,
 }
 
-impl HostTokens {
+impl HarnessTokens {
     pub fn to_json(&self) -> Value {
         json!({
             "total": self.total,
@@ -363,37 +363,37 @@ impl HostTokens {
 pub struct MonthlySummary {
     /// "YYYY-MM"。
     pub month: String,
-    pub by_host: BTreeMap<String, HostAmount>,
-    /// 各宿主的 token 计量（L0 感知层分母）——与 `by_host` 同键。金额进不
+    pub by_harness: BTreeMap<String, HarnessAmount>,
+    /// 各执行环境的 token 计量（L0 感知层分母）——与 `by_harness` 同键。金额进不
     /// 去的（无价卡 glm-*）token 照常在这：unpriced 不进金额分母（§6.2），
     /// 但处理量本身必须可见，否则"这份钱换来多少处理量"对无价部分失明。
-    pub tokens_by_host: BTreeMap<String, HostTokens>,
-    /// **billing_source 视角**（ATTRIBUTABLE_WASTE §6.3「Host ≠
-    /// BillingSource」的 DTO 落地）：键 `"host/provider"`，每个实际收费方
-    /// 一条。为什么 by_host 装不下这个视角：`HostAmount.amounts_by_basis`
+    pub tokens_by_harness: BTreeMap<String, HarnessTokens>,
+    /// **billing_source 视角**（ATTRIBUTABLE_WASTE §6.3「Harness ≠
+    /// BillingSource」的 DTO 落地）：键 `"harness/provider"`，每个实际收费方
+    /// 一条。为什么 by_harness 装不下这个视角：`HarnessAmount.amounts_by_basis`
     /// 是 `BTreeMap<BillingBasis, f64>`，一个 basis 只有一个数——claude-code
     /// 的订阅桶里 anthropic 折 USD、minimax 折 CNY，同桶跨币相加就是编造
     /// （2026-09-05 实测逼出的结构缺陷，此前只能用"币种当 basis"的权协，
     /// 把有订阅的 MiniMax 判成 MeteredEstimate、没订阅的 moonshot 判成
     /// ApiEquivalent）。per-provider 条目币种天然单一，basis 就是真计费
-    /// 模式（经 `billing_modes` 声明解析）。**权威归属看这里**；`by_host`
-    /// 保留宿主视角的币种分栏（既有冻结口径，托盘/数据源 panel 在读）。
-    pub by_provider: BTreeMap<String, HostAmount>,
+    /// 模式（经 `billing_modes` 声明解析）。**权威归属看这里**；`by_harness`
+    /// 保留执行环境视角的币种分栏（既有冻结口径，托盘/数据源 panel 在读）。
+    pub by_provider: BTreeMap<String, HarnessAmount>,
     pub coverage: CoverageStatus,
     pub freshness: Freshness,
-    /// 已知存在但本版本不产出数据的宿主（例如 WorkBuddy 在 v0.9 Stage 0
+    /// 已知存在但本版本不产出数据的执行环境（例如 WorkBuddy 在 v0.9 Stage 0
     /// 之前）——这是显式声明，见 `apps/cli/src/agent/
-    /// host_runtime_registration.rs` 里 `workbuddy_has_neither_session_store_
+    /// harness_runtime_registration.rs` 里 `workbuddy_has_neither_session_store_
     /// nor_fold_registration` 已经钉住的现状，本类型只是把同一个事实抬到
-    /// 跨宿主查询层。
-    pub excluded_hosts: BTreeSet<String>,
+    /// 跨执行环境查询层。
+    pub excluded_harnesses: BTreeSet<String>,
     pub last_observed_at: Option<String>,
 }
 
 /// `total_actual_spend` 的按 basis 分栏版（月/日共用）：只收
 /// [`BillingBasis::summable_into_total`] 的三档，零金额不撑出币桶。
 fn actual_spend_by_basis(
-    by_provider: &BTreeMap<String, HostAmount>,
+    by_provider: &BTreeMap<String, HarnessAmount>,
 ) -> BTreeMap<BillingBasis, BTreeMap<String, f64>> {
     let mut out: BTreeMap<BillingBasis, BTreeMap<String, f64>> = BTreeMap::new();
     for h in by_provider.values() {
@@ -437,14 +437,14 @@ impl MeteredLabel {
 pub struct MeteredView {
     /// 该币种按量行要显示的数（三级取代后的和）。
     pub amount: f64,
-    /// 其中来自账单（`MeteredActual` + `HostBilled`）的部分。
+    /// 其中来自账单（`MeteredActual` + `HarnessBilled`）的部分。
     pub actual: f64,
     /// 其中来自已归因估算（`MeteredDeclared`）的部分。
     pub declared_estimate: f64,
     /// 其中来自默认估算（`MeteredEstimate`，目录猜的路由）的部分。
     pub default_estimate: f64,
     pub label: MeteredLabel,
-    /// 仍停留在默认估算（未归因）的 `host/provider` 条目——「待归因」提示用。
+    /// 仍停留在默认估算（未归因）的 `harness/provider` 条目——「待归因」提示用。
     pub unattributed_providers: Vec<String>,
 }
 
@@ -465,11 +465,11 @@ impl MeteredView {
 /// 账单与估算时只取账单（估算两档只进明细）；没有账单时归因估算与默认估算
 /// **不互斥**——同一 provider 可能一部分事实已归因、一部分没有（例如作用域
 /// 只盖了部分模型），两者相加、条目记为「有未归因部分」。零金额不撑桶。
-fn metered_view(by_provider: &BTreeMap<String, HostAmount>) -> BTreeMap<String, MeteredView> {
+fn metered_view(by_provider: &BTreeMap<String, HarnessAmount>) -> BTreeMap<String, MeteredView> {
     let mut out: BTreeMap<String, MeteredView> = BTreeMap::new();
     for (key, h) in by_provider {
         let get = |b: BillingBasis| h.amounts_by_basis.get(&b).copied().unwrap_or(0.0);
-        let actual = get(BillingBasis::MeteredActual) + get(BillingBasis::HostBilled);
+        let actual = get(BillingBasis::MeteredActual) + get(BillingBasis::HarnessBilled);
         let declared = get(BillingBasis::MeteredDeclared);
         let default = get(BillingBasis::MeteredEstimate);
         if actual == 0.0 && declared == 0.0 && default == 0.0 {
@@ -516,25 +516,25 @@ fn actual_spend_by_basis_json(m: &BTreeMap<BillingBasis, BTreeMap<String, f64>>)
 }
 
 impl MonthlySummary {
-    /// 所有宿主可汇总金额之和——见 [`HostAmount::summable_total`] 的同一条
+    /// 所有执行环境可汇总金额之和——见 [`HarnessAmount::summable_total`] 的同一条
     /// "不存字段、每次算"纪律（空负零的 fold 理由也在那边）。
     pub fn total_summable(&self) -> f64 {
-        self.by_host
+        self.by_harness
             .values()
-            .map(HostAmount::summable_total)
+            .map(HarnessAmount::summable_total)
             .fold(0.0, |a, b| a + b)
     }
 
     pub fn has_unresolved(&self) -> bool {
-        self.by_host.values().any(|h| h.has_unresolved)
+        self.by_harness.values().any(|h| h.has_unresolved)
     }
 
     /// **真实总支出，按币种分栏**（Stage C）：`by_provider` 条目的 summable
-    /// 档（FixedSubscription 月费 + MeteredActual + HostBilled）之和。与
-    /// [`Self::total_summable`]（by_host 视角、冻结语义）并存的原因：订阅
-    /// 费摊在 by_provider 条目上——只算 by_host 会把"这个月真实花了多少"
+    /// 档（FixedSubscription 月费 + MeteredActual + HarnessBilled）之和。与
+    /// [`Self::total_summable`]（by_harness 视角、冻结语义）并存的原因：订阅
+    /// 费摊在 by_provider 条目上——只算 by_harness 会把"这个月真实花了多少"
     /// 谎报成 0（2026-09 真机：total_summable=0 而订阅费 252 已在付）。
-    /// 跨币**分桶不相加**；键空串 = 条目未声明币种（`HostAmount.currency
+    /// 跨币**分桶不相加**；键空串 = 条目未声明币种（`HarnessAmount.currency
     /// == None`）的金额，不得冒充任何币。空 map = 没有任何真实支出条目。
     pub fn total_actual_spend(&self) -> BTreeMap<String, f64> {
         let mut out: BTreeMap<String, f64> = BTreeMap::new();
@@ -553,7 +553,7 @@ impl MonthlySummary {
     }
 
     /// [`Self::total_actual_spend`] 的按 basis 拆栏：同一条 summable 过滤、同一
-    /// 条零金额不撑桶纪律，只是把「按量实付 / 宿主账单 / 订阅月费」分开——
+    /// 条零金额不撑桶纪律，只是把「按量实付 / 执行环境账单 / 订阅月费」分开——
     /// 工作台「本月支出」卡要分行显示这三档而不是一个"含"字句，拆分逻辑放
     /// 在这里而不是 JS 里，`by_basis` 各栏之和恒等于 `total_actual_spend`
     /// （单测钉住）。
@@ -574,31 +574,31 @@ impl MonthlySummary {
     pub fn contract_violations(&self) -> Vec<String> {
         let mut violations = Vec::new();
 
-        for host in &self.excluded_hosts {
-            if self.by_host.contains_key(host) {
+        for harness in &self.excluded_harnesses {
+            if self.by_harness.contains_key(harness) {
                 violations.push(format!(
-                    "excluded_hosts 包含 {host}，但 by_host 里也有它——排除的宿主\
+                    "excluded_harnesses 包含 {harness}，但 by_harness 里也有它——排除的执行环境\
                      不能同时贡献数据，那不是排除，是遗漏"
                 ));
             }
-            // by_provider 键形如 "host/provider"：宿主部分被排除却仍有
+            // by_provider 键形如 "harness/provider"：执行环境部分被排除却仍有
             // provider 条目，同一条排除语义的漏网面。
             if self
                 .by_provider
                 .keys()
-                .any(|k| k.split('/').next() == Some(host.as_str()))
+                .any(|k| k.split('/').next() == Some(harness.as_str()))
             {
                 violations.push(format!(
-                    "excluded_hosts 包含 {host}，但 by_provider 里仍有它的条目——\
-                     排除的宿主不能同时贡献数据，那不是排除，是遗漏"
+                    "excluded_harnesses 包含 {harness}，但 by_provider 里仍有它的条目——\
+                     排除的执行环境不能同时贡献数据，那不是排除，是遗漏"
                 ));
             }
         }
 
         self.coverage.contract_violations(&mut violations, "coverage");
         self.freshness.contract_violations(&mut violations, "freshness");
-        for host_amount in self.by_host.values() {
-            host_amount.contract_violations(&mut violations);
+        for harness_amount in self.by_harness.values() {
+            harness_amount.contract_violations(&mut violations);
         }
         for provider_amount in self.by_provider.values() {
             provider_amount.contract_violations(&mut violations);
@@ -608,8 +608,8 @@ impl MonthlySummary {
     }
 
     pub fn to_json(&self) -> Value {
-        let by_host: serde_json::Map<String, Value> =
-            self.by_host.iter().map(|(id, amount)| (id.clone(), amount.to_json())).collect();
+        let by_harness: serde_json::Map<String, Value> =
+            self.by_harness.iter().map(|(id, amount)| (id.clone(), amount.to_json())).collect();
         let by_provider: serde_json::Map<String, Value> = self
             .by_provider
             .iter()
@@ -617,8 +617,8 @@ impl MonthlySummary {
             .collect();
         json!({
             "month": self.month,
-            "by_host": Value::Object(by_host),
-            "tokens_by_host": Value::Object(self.tokens_by_host.iter()
+            "by_harness": Value::Object(by_harness),
+            "tokens_by_harness": Value::Object(self.tokens_by_harness.iter()
                 .map(|(id, t)| (id.clone(), t.to_json())).collect()),
             "by_provider": Value::Object(by_provider),
             "total_summable": self.total_summable(),
@@ -628,40 +628,40 @@ impl MonthlySummary {
             "has_unresolved": self.has_unresolved(),
             "coverage": self.coverage.to_json(),
             "freshness": self.freshness.to_json(),
-            "excluded_hosts": self.excluded_hosts.iter().cloned().collect::<Vec<_>>(),
+            "excluded_harnesses": self.excluded_harnesses.iter().cloned().collect::<Vec<_>>(),
             "last_observed_at": self.last_observed_at,
         })
     }
 }
 
 /// spec §3.1 的日粒度对应物——字段集与 `MonthlySummary` 一致（含
-/// `excluded_hosts`），因为"今天这个宿主没接"跟"今天这个宿主接了但没数据"
+/// `excluded_harnesses`），因为"今天这个执行环境没接"跟"今天这个执行环境接了但没数据"
 /// 必须能区分，道理与月度相同。
 #[derive(Debug, Clone, PartialEq)]
 pub struct DailySummary {
     /// "YYYY-MM-DD"。
     pub date: String,
-    pub by_host: BTreeMap<String, HostAmount>,
-    /// 各宿主的 token 计量，与 [`MonthlySummary::tokens_by_host`] 同构。
-    pub tokens_by_host: BTreeMap<String, HostTokens>,
-    /// billing_source 视角，键 `"host/provider"`——与 [`MonthlySummary::
-    /// by_provider`] 同一结构同一理由（宿主内多提供方多币种，per-provider
+    pub by_harness: BTreeMap<String, HarnessAmount>,
+    /// 各执行环境的 token 计量，与 [`MonthlySummary::tokens_by_harness`] 同构。
+    pub tokens_by_harness: BTreeMap<String, HarnessTokens>,
+    /// billing_source 视角，键 `"harness/provider"`——与 [`MonthlySummary::
+    /// by_provider`] 同一结构同一理由（执行环境内多提供方多币种，per-provider
     /// 条目才是干净归属）。月费摊销**不进日粒度**（订阅费不是日发生额），
     /// 这里只装按量/等价折算流。
-    pub by_provider: BTreeMap<String, HostAmount>,
+    pub by_provider: BTreeMap<String, HarnessAmount>,
     pub coverage: CoverageStatus,
     pub freshness: Freshness,
-    pub excluded_hosts: BTreeSet<String>,
+    pub excluded_harnesses: BTreeSet<String>,
     pub last_observed_at: Option<String>,
 }
 
 impl DailySummary {
     /// 同 [`MonthlySummary::total_summable`]（fold 理由见
-    /// [`HostAmount::summable_total`]——空负零）。
+    /// [`HarnessAmount::summable_total`]——空负零）。
     pub fn total_summable(&self) -> f64 {
-        self.by_host
+        self.by_harness
             .values()
-            .map(HostAmount::summable_total)
+            .map(HarnessAmount::summable_total)
             .fold(0.0, |a, b| a + b)
     }
 
@@ -698,28 +698,28 @@ impl DailySummary {
 
     pub fn contract_violations(&self) -> Vec<String> {
         let mut violations = Vec::new();
-        for host in &self.excluded_hosts {
-            if self.by_host.contains_key(host) {
+        for harness in &self.excluded_harnesses {
+            if self.by_harness.contains_key(harness) {
                 violations.push(format!(
-                    "excluded_hosts 包含 {host}，但 by_host 里也有它——排除的宿主\
+                    "excluded_harnesses 包含 {harness}，但 by_harness 里也有它——排除的执行环境\
                      不能同时贡献数据，那不是排除，是遗漏"
                 ));
             }
             if self
                 .by_provider
                 .keys()
-                .any(|k| k.split('/').next() == Some(host.as_str()))
+                .any(|k| k.split('/').next() == Some(harness.as_str()))
             {
                 violations.push(format!(
-                    "excluded_hosts 包含 {host}，但 by_provider 里仍有它的条目——\
-                     排除的宿主不能同时贡献数据，那不是排除，是遗漏"
+                    "excluded_harnesses 包含 {harness}，但 by_provider 里仍有它的条目——\
+                     排除的执行环境不能同时贡献数据，那不是排除，是遗漏"
                 ));
             }
         }
         self.coverage.contract_violations(&mut violations, "coverage");
         self.freshness.contract_violations(&mut violations, "freshness");
-        for host_amount in self.by_host.values() {
-            host_amount.contract_violations(&mut violations);
+        for harness_amount in self.by_harness.values() {
+            harness_amount.contract_violations(&mut violations);
         }
         for provider_amount in self.by_provider.values() {
             provider_amount.contract_violations(&mut violations);
@@ -728,8 +728,8 @@ impl DailySummary {
     }
 
     pub fn to_json(&self) -> Value {
-        let by_host: serde_json::Map<String, Value> =
-            self.by_host.iter().map(|(id, amount)| (id.clone(), amount.to_json())).collect();
+        let by_harness: serde_json::Map<String, Value> =
+            self.by_harness.iter().map(|(id, amount)| (id.clone(), amount.to_json())).collect();
         let by_provider: serde_json::Map<String, Value> = self
             .by_provider
             .iter()
@@ -737,8 +737,8 @@ impl DailySummary {
             .collect();
         json!({
             "date": self.date,
-            "by_host": Value::Object(by_host),
-            "tokens_by_host": Value::Object(self.tokens_by_host.iter()
+            "by_harness": Value::Object(by_harness),
+            "tokens_by_harness": Value::Object(self.tokens_by_harness.iter()
                 .map(|(id, t)| (id.clone(), t.to_json())).collect()),
             "by_provider": Value::Object(by_provider),
             "total_summable": self.total_summable(),
@@ -747,7 +747,7 @@ impl DailySummary {
             "metered_view": metered_view_json(&self.metered_view()),
             "coverage": self.coverage.to_json(),
             "freshness": self.freshness.to_json(),
-            "excluded_hosts": self.excluded_hosts.iter().cloned().collect::<Vec<_>>(),
+            "excluded_harnesses": self.excluded_harnesses.iter().cloned().collect::<Vec<_>>(),
             "last_observed_at": self.last_observed_at,
         })
     }
@@ -765,11 +765,11 @@ mod tests {
         CoverageStatus { measured_fields: 3, total_fields: 5, denominator_version: 1 }
     }
 
-    fn host_amount(host: &str, basis: BillingBasis, amount: f64) -> HostAmount {
+    fn harness_amount(harness: &str, basis: BillingBasis, amount: f64) -> HarnessAmount {
         let mut amounts_by_basis = BTreeMap::new();
         amounts_by_basis.insert(basis, amount);
-        HostAmount {
-            host_id: host.to_string(),
+        HarnessAmount {
+            harness_id: harness.to_string(),
             amounts_by_basis,
             currency: None,
             has_unresolved: false,
@@ -783,11 +783,11 @@ mod tests {
     #[test]
     fn empty_summable_is_positive_zero_never_negative_zero() {
         // Stage 0.5 的 `data coverage --json` 暴露：空 `.sum()` 实测产出
-        // -0.0，serde_json 原样序列化成 "-0.0"——无数据宿主在冻结 DTO 里
+        // -0.0，serde_json 原样序列化成 "-0.0"——无数据执行环境在冻结 DTO 里
         // 显示负零，读起来像"欠 0 元"。fold(0.0, …) 钉住正零；序列化面
         // 一起断言（修算术不修序列化会漏另一半）。
-        let empty = HostAmount {
-            host_id: "dsh".to_string(),
+        let empty = HarnessAmount {
+            harness_id: "dsh".to_string(),
             amounts_by_basis: BTreeMap::new(),
             currency: None,
             has_unresolved: false,
@@ -803,12 +803,12 @@ mod tests {
 
         let summary = MonthlySummary {
             month: "2026-09".to_string(),
-            by_host: BTreeMap::from([("dsh".to_string(), empty)]),
+            by_harness: BTreeMap::from([("dsh".to_string(), empty)]),
             by_provider: BTreeMap::new(),
-            tokens_by_host: BTreeMap::new(),
+            tokens_by_harness: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: Freshness::unavailable(),
-            excluded_hosts: BTreeSet::new(),
+            excluded_harnesses: BTreeSet::new(),
             last_observed_at: None,
         };
         assert_eq!(summary.total_summable(), 0.0);
@@ -821,32 +821,32 @@ mod tests {
     #[test]
     fn metered_view_prefers_bill_over_declared_over_default_estimate() {
         // 有账单的 provider：估算只进明细，不进 amount。
-        let mut billed = host_amount("claude-code/shengsuanyun", BillingBasis::MeteredActual, 452.0);
+        let mut billed = harness_amount("claude-code/shengsuanyun", BillingBasis::MeteredActual, 452.0);
         billed.currency = Some("CNY".to_string());
         billed.amounts_by_basis.insert(BillingBasis::MeteredDeclared, 467.16);
         // 已归因、无账单：按归因估算显示。
-        let mut declared = host_amount("codex/shengsuanyun", BillingBasis::MeteredDeclared, 132.67);
+        let mut declared = harness_amount("codex/shengsuanyun", BillingBasis::MeteredDeclared, 132.67);
         declared.currency = Some("USD".to_string());
         // 未归因：默认估算，且要点名。
-        let mut unknown = host_amount("claude-code/deepseek-official", BillingBasis::MeteredEstimate, 216.57);
+        let mut unknown = harness_amount("claude-code/deepseek-official", BillingBasis::MeteredEstimate, 216.57);
         unknown.currency = Some("CNY".to_string());
         // 订阅条目：与按量视图无关。
-        let mut sub = host_amount("claude-code/anthropic", BillingBasis::FixedSubscription, 20.0);
+        let mut sub = harness_amount("claude-code/anthropic", BillingBasis::FixedSubscription, 20.0);
         sub.currency = Some("USD".to_string());
         sub.amounts_by_basis.insert(BillingBasis::ApiEquivalent, 114.6);
         let summary = MonthlySummary {
             month: "2026-09".to_string(),
-            by_host: BTreeMap::new(),
+            by_harness: BTreeMap::new(),
             by_provider: BTreeMap::from([
                 ("claude-code/shengsuanyun".to_string(), billed),
                 ("codex/shengsuanyun".to_string(), declared),
                 ("claude-code/deepseek-official".to_string(), unknown),
                 ("claude-code/anthropic".to_string(), sub),
             ]),
-            tokens_by_host: BTreeMap::new(),
+            tokens_by_harness: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: Freshness::unavailable(),
-            excluded_hosts: BTreeSet::new(),
+            excluded_harnesses: BTreeSet::new(),
             last_observed_at: None,
         };
         let view = summary.metered_view();
@@ -874,26 +874,26 @@ mod tests {
         // 严格等于 total_actual_spend（分币），否则卡面与结论句两处会各说
         // 各话。非 summable 档（api_equivalent / metered_estimate）不得出现；
         // 零金额不撑桶（与 total_actual_spend 同一纪律）。
-        let mut claude = host_amount("claude-code/anthropic", BillingBasis::FixedSubscription, 20.0);
+        let mut claude = harness_amount("claude-code/anthropic", BillingBasis::FixedSubscription, 20.0);
         claude.currency = Some("USD".to_string());
         claude.amounts_by_basis.insert(BillingBasis::ApiEquivalent, 114.6);
-        let mut dsh = host_amount("dsh/deepseek", BillingBasis::MeteredActual, 8.64);
+        let mut dsh = harness_amount("dsh/deepseek", BillingBasis::MeteredActual, 8.64);
         dsh.currency = Some("CNY".to_string());
         dsh.amounts_by_basis.insert(BillingBasis::MeteredEstimate, 9.0);
-        let mut zero = host_amount("codex/openai", BillingBasis::HostBilled, 0.0);
+        let mut zero = harness_amount("codex/openai", BillingBasis::HarnessBilled, 0.0);
         zero.currency = Some("USD".to_string());
         let summary = MonthlySummary {
             month: "2026-09".to_string(),
-            by_host: BTreeMap::new(),
+            by_harness: BTreeMap::new(),
             by_provider: BTreeMap::from([
                 ("claude-code/anthropic".to_string(), claude),
                 ("dsh/deepseek".to_string(), dsh),
                 ("codex/openai".to_string(), zero),
             ]),
-            tokens_by_host: BTreeMap::new(),
+            tokens_by_harness: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: Freshness::unavailable(),
-            excluded_hosts: BTreeSet::new(),
+            excluded_harnesses: BTreeSet::new(),
             last_observed_at: None,
         };
         let split = summary.actual_spend_by_basis();
@@ -905,7 +905,7 @@ mod tests {
             split.get(&BillingBasis::FixedSubscription),
             Some(&BTreeMap::from([("USD".to_string(), 20.0)]))
         );
-        assert!(!split.contains_key(&BillingBasis::HostBilled), "零金额不撑桶");
+        assert!(!split.contains_key(&BillingBasis::HarnessBilled), "零金额不撑桶");
         assert!(!split.contains_key(&BillingBasis::ApiEquivalent));
         assert!(!split.contains_key(&BillingBasis::MeteredEstimate));
         let mut recomposed: BTreeMap<String, f64> = BTreeMap::new();
@@ -918,7 +918,7 @@ mod tests {
         let json = summary.to_json();
         assert_eq!(json["actual_spend_by_basis"]["metered_actual"]["CNY"], 8.64);
         assert_eq!(json["actual_spend_by_basis"]["fixed_subscription"]["USD"], 20.0);
-        assert!(json["actual_spend_by_basis"].get("host_billed").is_none());
+        assert!(json["actual_spend_by_basis"].get("harness_billed").is_none());
     }
 
     #[test]
@@ -927,7 +927,7 @@ mod tests {
             BillingBasis::FixedSubscription,
             BillingBasis::MeteredActual,
             BillingBasis::MeteredEstimate,
-            BillingBasis::HostBilled,
+            BillingBasis::HarnessBilled,
             BillingBasis::ApiEquivalent,
         ] {
             assert_eq!(BillingBasis::from_wire(b.as_str()), Some(b));
@@ -942,18 +942,18 @@ mod tests {
         // 表格改了这条测试必须跟着改，不能各说各话。
         assert!(BillingBasis::FixedSubscription.summable_into_total());
         assert!(BillingBasis::MeteredActual.summable_into_total());
-        assert!(BillingBasis::HostBilled.summable_into_total());
+        assert!(BillingBasis::HarnessBilled.summable_into_total());
         assert!(!BillingBasis::MeteredEstimate.summable_into_total());
         assert!(!BillingBasis::ApiEquivalent.summable_into_total());
     }
 
     #[test]
-    fn host_amount_total_sums_only_summable_basis() {
+    fn harness_amount_total_sums_only_summable_basis() {
         let mut amounts_by_basis = BTreeMap::new();
         amounts_by_basis.insert(BillingBasis::MeteredActual, 10.0);
         amounts_by_basis.insert(BillingBasis::ApiEquivalent, 999.0); // 诊断用，不计入
-        let h = HostAmount {
-            host_id: "codex".to_string(),
+        let h = HarnessAmount {
+            harness_id: "codex".to_string(),
             amounts_by_basis,
             currency: None,
             has_unresolved: false,
@@ -966,31 +966,31 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_credit_billing_is_host_billed_not_metered_actual() {
-        // memory: workbuddy-data-facts——WorkBuddy 按宿主 credit_json 积分账单，
+    fn workbuddy_credit_billing_is_harness_billed_not_metered_actual() {
+        // memory: workbuddy-data-facts——WorkBuddy 按执行环境 credit_json 积分账单，
         // 不是逐请求 token 计价；混进 metered_actual 会让"这笔钱有没有 token
         // 证据支撑"这件事在下游变得不可判断。
-        let h = host_amount("workbuddy", BillingBasis::HostBilled, 215.0);
-        assert_eq!(h.summable_total(), 215.0); // host_billed 仍可汇总进总额
+        let h = harness_amount("workbuddy", BillingBasis::HarnessBilled, 215.0);
+        assert_eq!(h.summable_total(), 215.0); // harness_billed 仍可汇总进总额
         assert!(!h.amounts_by_basis.contains_key(&BillingBasis::MeteredActual));
     }
 
     #[test]
     fn monthly_summary_totals_only_the_summable_bases() {
-        let mut by_host = BTreeMap::new();
-        by_host.insert("codex".to_string(), host_amount("codex", BillingBasis::MeteredActual, 10.0));
-        by_host.insert(
+        let mut by_harness = BTreeMap::new();
+        by_harness.insert("codex".to_string(), harness_amount("codex", BillingBasis::MeteredActual, 10.0));
+        by_harness.insert(
             "claude-code".to_string(),
-            host_amount("claude-code", BillingBasis::MeteredEstimate, 999.0),
+            harness_amount("claude-code", BillingBasis::MeteredEstimate, 999.0),
         );
         let summary = MonthlySummary {
             month: "2026-09".to_string(),
-            by_host,
+            by_harness,
             by_provider: BTreeMap::new(),
-            tokens_by_host: BTreeMap::new(),
+            tokens_by_harness: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: fresh("2026-09-04T00:00:00Z"),
-            excluded_hosts: BTreeSet::new(),
+            excluded_harnesses: BTreeSet::new(),
             last_observed_at: Some("2026-09-04T00:00:00Z".to_string()),
         };
         assert_eq!(summary.total_summable(), 10.0);
@@ -998,19 +998,19 @@ mod tests {
     }
 
     #[test]
-    fn excluded_host_present_in_by_host_is_a_contract_violation() {
-        let mut by_host = BTreeMap::new();
-        by_host.insert("workbuddy".to_string(), host_amount("workbuddy", BillingBasis::HostBilled, 1.0));
-        let mut excluded_hosts = BTreeSet::new();
-        excluded_hosts.insert("workbuddy".to_string());
+    fn excluded_harness_present_in_by_harness_is_a_contract_violation() {
+        let mut by_harness = BTreeMap::new();
+        by_harness.insert("workbuddy".to_string(), harness_amount("workbuddy", BillingBasis::HarnessBilled, 1.0));
+        let mut excluded_harnesses = BTreeSet::new();
+        excluded_harnesses.insert("workbuddy".to_string());
         let summary = MonthlySummary {
             month: "2026-09".to_string(),
-            by_host,
+            by_harness,
             by_provider: BTreeMap::new(),
-            tokens_by_host: BTreeMap::new(),
+            tokens_by_harness: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: fresh("2026-09-04T00:00:00Z"),
-            excluded_hosts,
+            excluded_harnesses,
             last_observed_at: None,
         };
         let violations = summary.contract_violations();
@@ -1026,12 +1026,12 @@ mod tests {
         };
         let summary = MonthlySummary {
             month: "2026-09".to_string(),
-            by_host: BTreeMap::new(),
+            by_harness: BTreeMap::new(),
             by_provider: BTreeMap::new(),
-            tokens_by_host: BTreeMap::new(),
+            tokens_by_harness: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: bad,
-            excluded_hosts: BTreeSet::new(),
+            excluded_harnesses: BTreeSet::new(),
             last_observed_at: None,
         };
         let violations = summary.contract_violations();
@@ -1054,12 +1054,12 @@ mod tests {
         let bad = CoverageStatus { measured_fields: 9, total_fields: 5, denominator_version: 1 };
         let summary = MonthlySummary {
             month: "2026-09".to_string(),
-            by_host: BTreeMap::new(),
-            tokens_by_host: BTreeMap::new(),
+            by_harness: BTreeMap::new(),
+            tokens_by_harness: BTreeMap::new(),
             by_provider: BTreeMap::new(),
             coverage: bad,
             freshness: Freshness::unavailable(),
-            excluded_hosts: BTreeSet::new(),
+            excluded_harnesses: BTreeSet::new(),
             last_observed_at: None,
         };
         let violations = summary.contract_violations();
@@ -1068,16 +1068,16 @@ mod tests {
 
     #[test]
     fn daily_summary_mirrors_the_same_invariants() {
-        let mut by_host = BTreeMap::new();
-        by_host.insert("dsh".to_string(), host_amount("dsh", BillingBasis::MeteredActual, 3.5));
+        let mut by_harness = BTreeMap::new();
+        by_harness.insert("dsh".to_string(), harness_amount("dsh", BillingBasis::MeteredActual, 3.5));
         let summary = DailySummary {
             date: "2026-09-04".to_string(),
-            by_host,
+            by_harness,
             by_provider: BTreeMap::new(),
-            tokens_by_host: BTreeMap::new(),
+            tokens_by_harness: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: fresh("2026-09-04T12:00:00Z"),
-            excluded_hosts: BTreeSet::new(),
+            excluded_harnesses: BTreeSet::new(),
             last_observed_at: Some("2026-09-04T12:00:00Z".to_string()),
         };
         assert_eq!(summary.total_summable(), 3.5);
@@ -1089,24 +1089,24 @@ mod tests {
         // spec §3.1："任何 UI 若只消费金额而丢弃这些字段，视为契约违规"——
         // 这条测试钉住 to_json() 的输出形状本身带着 freshness/coverage，
         // 不是一个裸 number。
-        let mut by_host = BTreeMap::new();
-        by_host.insert("codex".to_string(), host_amount("codex", BillingBasis::MeteredActual, 10.0));
-        let mut excluded_hosts = BTreeSet::new();
-        excluded_hosts.insert("workbuddy".to_string());
+        let mut by_harness = BTreeMap::new();
+        by_harness.insert("codex".to_string(), harness_amount("codex", BillingBasis::MeteredActual, 10.0));
+        let mut excluded_harnesses = BTreeSet::new();
+        excluded_harnesses.insert("workbuddy".to_string());
         let summary = MonthlySummary {
             month: "2026-09".to_string(),
-            by_host,
+            by_harness,
             by_provider: BTreeMap::new(),
-            tokens_by_host: BTreeMap::new(),
+            tokens_by_harness: BTreeMap::new(),
             coverage: coverage_ok(),
             freshness: fresh("2026-09-04T00:00:00Z"),
-            excluded_hosts,
+            excluded_harnesses,
             last_observed_at: Some("2026-09-04T00:00:00Z".to_string()),
         };
         let v = summary.to_json();
         assert_eq!(v["total_summable"], json!(10.0));
-        assert_eq!(v["excluded_hosts"], json!(["workbuddy"]));
-        assert_eq!(v["by_host"]["codex"]["freshness"]["state"], json!("fresh"));
-        assert_eq!(v["by_host"]["codex"]["amounts_by_basis"]["metered_actual"], json!(10.0));
+        assert_eq!(v["excluded_harnesses"], json!(["workbuddy"]));
+        assert_eq!(v["by_harness"]["codex"]["freshness"]["state"], json!("fresh"));
+        assert_eq!(v["by_harness"]["codex"]["amounts_by_basis"]["metered_actual"], json!(10.0));
     }
 }

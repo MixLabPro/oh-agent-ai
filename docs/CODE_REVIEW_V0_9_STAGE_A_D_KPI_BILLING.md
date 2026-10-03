@@ -24,7 +24,7 @@
   根因三处同源：`crates/agent-vitals-runtime/src/summary.rs:714`（`codex_quota_snapshot`
   的 doc 注释写错返回形状）、`scripts/verify-workbench-kpi-decide.mjs:124,131`（stub
   按错误形状构造）。
-- **事实**：fold 的真实形状（`agent-vitals-hosts/src/hosts/codex/sessions/usage.rs::
+- **事实**：fold 的真实形状（`agent-vitals-harnesses/src/harnesses/codex/sessions/usage.rs::
   plan_from_rate_limits` :202-233）把 `primary`/`secondary` 收在 **`limits` 之下**：
   `{plan_type, has_credits, limits: {primary: {used_percent, window_minutes, resets_at}},
   observed_at}`。`data_codex_quota` 原样返回该 plan。前端 `quota.primary.used_percent`
@@ -46,7 +46,7 @@
 - **事实**：日度路径把**单个 day 对象**（键 = `uncached_input_tokens`/`by_model`
   等字段名）传进按 `{date: day}` map 设计的 `dsh_tokens`，其
   `date.starts_with(window)` 过滤对字段名键**永假** → 整天被跳过 → 恒返回
-  `HostTokens::default()`（全零 + `cache_hit_ratio: None`）。
+  `HarnessTokens::default()`（全零 + `cache_hit_ratio: None`）。
 - **后果**：KPI「今日 tokens」tile 静默漏掉 DSH 贡献；DSH-only 的日子显示
   「无数据」而实际有真实用量——正是 spec §0.1 / MeasuredZero≠Unavailable 纪律
   禁止的假零。`dsh_tokens` **无任何测试覆盖**（全文件仅定义 + 两处调用）。
@@ -56,9 +56,9 @@
   月度路径（键是日期、读顶层桶）在真机数据上**大多能读对**；只有「`by_model`
   有量、顶层零桶」的变形日（跨零点切片等，恰是 `summary.rs` 自家测试 fixture
   :1295 手写的形状）会静默漏计。每必现的是**日度**路径。
-- **修法**：拆出 `dsh_day_tokens(day: &Value) -> HostTokens`（顶层桶为权威、
+- **修法**：拆出 `dsh_day_tokens(day: &Value) -> HarnessTokens`（顶层桶为权威、
   `by_model` 逐模型累加作回退，镜像 `priced_day` 的双形状处理），月度逐日调用、
-  日度直接调用；补一个从真实形状 month.json 到 `tokens_by_host` 非零的端到端
+  日度直接调用；补一个从真实形状 month.json 到 `tokens_by_harness` 非零的端到端
   单测。
 
 ## #3（高）单位 tile 的跨币披露是死代码——混币相加标 "$/M" 无任何说明
@@ -137,7 +137,7 @@
 
 - **billing.rs 判定层**（Stage A）：`Unknown` 显式存在不默认、声明序即优先级有
   `billing_route_specific_declaration_wins_over_generic` 钉住、`preserve_order`
-  在 domain/hosts/cli 三处显式开启（「先专后泛」契约的承重墙）、「名义三件套
+  在 domain/harnesses/cli 三处显式开启（「先专后泛」契约的承重墙）、「名义三件套
   砍掉防第二份计价规则」的审阅修正方向正确。
 - **Stage C 摊费纪律**：零用量月份照摊（订阅费不付用量也在付）、账期过滤
   （GLM 9-05 前不摊）、只进月不进日，三条都写进了注释和测试。
@@ -156,7 +156,7 @@
 1. 形状来源 fixture 化：fold plan、month.json day 各钉一个最小 fixture 文件，
    Rust 单测与 `.mjs` 验证都从它读（前端验证已有「node+vm 执行真实文件」的
    好底子，缺的是**输入**也真实）。
-2. `dsh_tokens`/`dsh_day_tokens` 补从真实形状 month.json 到 `tokens_by_host`
+2. `dsh_tokens`/`dsh_day_tokens` 补从真实形状 month.json 到 `tokens_by_harness`
    非零的端到端断言（本次两条头部 bug 都是「生产者零测试、消费者合成 DTO
    测试」的夹缝产物）。
 3. `.mjs` 的 stub 一律注明形状出处（函数/行号），形状变更时同一 PR 必须同改。

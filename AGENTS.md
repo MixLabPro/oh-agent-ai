@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Agent Vitals maintains a Python compatibility implementation and a Rust workspace. The Rust CLI lives in `apps/cli/`; reusable logic is split across `crates/agent-vitals-{data,domain,hosts,runtime}` and `crates/vitals-core`. Python code is under `packages/agent-vitals-python/agent_vitals/`, with entry scripts in `scripts/`. Tests are in `tests/` for Python and beside each Rust crate in `tests/` modules. Golden outputs and fixtures live in `golden/` and `fixtures/`. Desktop Tauri code is in `apps/desktop/src-tauri/`, integrations in `integrations/`, shared runtime data in `assets/`, and design/specification material in `docs/`.
+Agent Vitals maintains a Python compatibility implementation and a Rust workspace. The Rust CLI lives in `apps/cli/`; reusable logic is split across `crates/agent-vitals-{data,domain,harnesses,runtime}` and `crates/vitals-core`. Python code is under `packages/agent-vitals-python/agent_vitals/`, with entry scripts in `scripts/`. Tests are in `tests/` for Python and beside each Rust crate in `tests/` modules. Golden outputs and fixtures live in `golden/` and `fixtures/`. Desktop Tauri code is in `apps/desktop/src-tauri/`, integrations in `integrations/`, shared runtime data in `assets/`, and design/specification material in `docs/`.
 
 ## Build, Test, and Development Commands
 
@@ -21,11 +21,11 @@ Agent Vitals maintains a Python compatibility implementation and a Rust workspac
 
 Do not run `rustfmt`, and do not run any auto-formatting command on an individual Rust file. This has previously reformatted hundreds of unrelated lines and obscured a small functional change. For Rust edits, preserve the surrounding formatting, inspect `git diff --stat` and the full diff immediately after editing, and use targeted manual formatting. A repository-wide formatter check may be used only as a read-only check (`cargo fmt --all -- --check`); it must not rewrite files unless the user explicitly requests a formatting-only change.
 
-Rust modules and functions use `snake_case`; types use `PascalCase`. Python uses four-space indentation, `snake_case`, standard-library-first solutions, and compatibility with Python 3.9 CI. Keep host-specific I/O in adapters/host crates and deterministic policy logic in core/domain modules. Preserve explicit JSON field ordering where output participates in golden tests.
+Rust modules and functions use `snake_case`; types use `PascalCase`. Python uses four-space indentation, `snake_case`, standard-library-first solutions, and compatibility with Python 3.9 CI. Keep harness-specific I/O in adapters/harness crates and deterministic policy logic in core/domain modules. Preserve explicit JSON field ordering where output participates in golden tests.
 
 ## Testing Guidelines
 
-Name Python tests `test_*.py` and `unittest.TestCase` classes descriptively. Add Rust integration tests under the affected crate’s `tests/` directory. There is no numeric coverage threshold; regression fixtures, malformed-input degradation tests, host contract tests, and Python/Rust lockstep checks are the acceptance criteria. Never refresh snapshots merely to silence a failure.
+Name Python tests `test_*.py` and `unittest.TestCase` classes descriptively. Add Rust integration tests under the affected crate’s `tests/` directory. There is no numeric coverage threshold; regression fixtures, malformed-input degradation tests, harness contract tests, and Python/Rust lockstep checks are the acceptance criteria. Never refresh snapshots merely to silence a failure.
 
 ## Data Integrity Watchlist
 
@@ -33,7 +33,7 @@ Codex session logs can carry `model_provider` and a routed endpoint such as
 `https://router.cogfoundry.ai/api/v1`. The emitter now preserves `provider_raw`,
 `provider_id`, `billing_source`, and billing basis through Python/Rust parity and
 SQLite ingestion. The generic authority query
-`facts_by_hour_model_provider(host, window)` must remain host-agnostic; adding a host
+`facts_by_hour_model_provider(harness, window)` must remain harness-agnostic; adding a harness
 must not require a new provider-specific SQL query. Reprocess affected Codex logs
 before reconciling costs. Current evidence for September 9, 2026 shows
 `openai/gpt-5.6-sol` and `openai/gpt-5.6-luna` in `model_provider=custom` sessions,
@@ -43,12 +43,12 @@ no provider marker may use the current endpoint only as `route-config-fallback`;
 facts that cannot be safely enriched remain under `<unknown>` and must be reported as
 metered estimates, never silently assigned to OpenAI.
 
-Cross-host audit status: DSH already persists provider evidence (`provider_raw` and the
+Cross-harness audit status: DSH already persists provider evidence (`provider_raw` and the
 provider/billing fields); Claude Code still has a similar unresolved route-evidence gap
 because its emitter intentionally keeps only `model_raw`. Treat Claude provider/billing
 classification as unavailable unless the source log contains explicit route evidence.
 
-Billing fallback rule: a host or model may be classified as `subscription` only when
+Billing fallback rule: a harness or model may be classified as `subscription` only when
 there is explicit evidence for an official subscription route and the applicable
 subscription scope. Custom endpoints, non-official routes, third-party gateways, and
 missing or conflicting route evidence must default to `metered_estimate` for reporting,
@@ -57,13 +57,18 @@ such usage, turn it into zero, or treat an API-equivalent estimate as an actual 
 
 ## Data Retention & Serving-Face Policy (2026-09-19)
 
-The product is an offline desktop app and the data experience comes first: the app never uploads user data. The only outbound requests today are the public pricing-catalog fetch and the release-version check, and neither carries user data. This premise is protected — do not add any code path that sends user data off-machine (telemetry, crash reports with payloads, cloud sync) without an explicit, reviewed product decision that also rewrites this section.
+The product is an offline desktop app and the data experience comes first: the app never uploads user data. Existing outbound paths fetch public pricing/FX catalogs, check release versions, and explicitly opt in to the official manifest index. The data-extension policy also permits commit-pinned official payload downloads. The application-layer project permits explicit opt-in downloads of the official application index and signed packages from fixed public HTTPS sources. Download consent, installation consent, and data grants are separate decisions. Production application installation and data access must satisfy signature, process-identity, sandbox, and authorization gates; this policy does not certify their implementation. No request may include local logs, machine identifiers, grants, credentials, or analytical user data. This premise is protected — do not add telemetry, payload-bearing crash reports, cloud sync, or any other user-data upload without an explicit, reviewed product decision that also rewrites this section.
 
 1. **Preserve analytical signal at ingest.** Adapters must no longer destroy signal for privacy reasons at ingestion. Extract and store structured derivations: error classification codes (HTTP status, JSON-RPC −32xxx, tool error taxonomy), truncated excerpts (~120 chars: error first line, argument summary), sizes and counts. Fingerprints (canonical args, `error_fingerprint`) remain as dedup/index keys, not as a replacement for the classified fields. Enrichment lands in new columns/tables with `Provenance` marked; existing fact-table contracts change only through reviewed golden updates — billing/behavior fact tables stay pure.
 2. **Serving faces stay redacted.** The MCP surface keeps its current redaction rules ("never expose raw errors or invocation arguments" in issues_summary and friends) — local agents are networked consumers, so anything served over data-mcp can leave the machine inside an agent's context. Export keeps the dual path (`data-export-private` explicit, `data-export-redacted` default). Redaction is a per-face projection applied at serving time; it is never a reason to drop data at ingest.
 3. **Secrets and canaries are never at-rest data.** Credentials (cc-switch tokens, API keys) are never persisted in anything we own; the probe/test feature may pass them in-memory as child-process env only. Canary task definitions (L1 probe suites) are confidential: never exposed via MCP, export, or any agent-readable surface.
-4. **Raw text lives in the hosts' logs, not in the authority DB.** Store anchors (source_id + native event id; line/byte offsets as self-validating acceleration hints) plus analytical increments, not full-text copies — sessions reach GB scale. Viewing raw JSONL segments is a local-presentation-only capability: read at presentation time, never persisted, never in MCP or export payloads; when the host rotates the source log away, degrade honestly to "source expired, only the redacted projection remains".
+4. **Raw text lives in the harnesses' logs, not in the authority DB.** Store anchors (source_id + native event id; line/byte offsets as self-validating acceleration hints) plus analytical increments, not full-text copies — sessions reach GB scale. Viewing raw JSONL segments is a local-presentation-only capability: read at presentation time, never persisted, never in MCP or export payloads; when the harness rotates the source log away, degrade honestly to "source expired, only the redacted projection remains".
 5. **Unchanged by this policy:** billing honesty (`metered_estimate`, `has_unresolved`, no silent attribution), golden/Python-Rust byte parity, and the rule that new problem classes are registered in `docs/AGENT_EXECUTION_PROBLEM_TAXONOMY.md` before emitters are written.
+6. **Scenario-scoped local application/plugin face (2026-10-03).** Data access depends on the application's deployment and presentation scenario, not a blanket ban on prompt-related fields.
+   - **Official built-in plugins:** a plugin bundled with Agent Vitals and registered in the official plugin descriptor may consume real local data through registered, versioned Rust projection handlers. For this same-host scenario, the host's registered plugin identity, active WebView instance, method allowlist, and declared data scope are the access boundary; separate package-signature, external-process identity, market installation, and broker-grant infrastructure are not prerequisites. This is a scoped exception to the independent-package gates above, not permission to load untrusted packages.
+   - **Field scope follows the feature:** session statistics and application-scoped opaque handles are permitted. When a documented local feature needs task context, its explicitly declared projection may additionally include existing scrubbed, bounded user-input/task excerpts, with role, provenance and truncation information; excerpts must not be presented as complete prompts. New sensitive fields require an explicit product decision and a reviewed projection contract/test update. Full prompts/raw JSONL, raw anchors, log paths, working directories, invocation arguments and raw errors are not enabled by this rule; full-text viewing remains a separate host-controlled local-presentation capability under item 4. Credentials and canaries remain prohibited.
+   - **Independent or externally installed applications:** retain package verification, platform process identity, sandbox restrictions, explicit installation/data authorization and local broker gates appropriate to that deployment. Grants must be checked per request and before response delivery; connection credentials remain in memory. Unverified packages and browser previews use synthetic/redacted fixtures, not real user data.
+   - **Common boundaries:** plugins never access the authority DB or harness logs directly and never receive arbitrary SQL or unrestricted host IPC. Rust performs the query and returns only the declared projection, checking the active authorized instance before access and response delivery. Missing data and denied/unsupported requests degrade explicitly. This face does not expand MCP or export permissions. No plugin may upload user data or use background external networking.
 
 ## Commit & Pull Request Guidelines
 

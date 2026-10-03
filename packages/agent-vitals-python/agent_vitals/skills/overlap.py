@@ -106,7 +106,7 @@ def _shared_display(a_text, b_text, inter, df):
 def overlap_pairs(out, min_jaccard, top=None):
     """两两比较描述的字面相似度。
 
-    只比**同一 conflict_domain 内、且真的进了上下文**的那批：不同宿主是
+    只比**同一 conflict_domain 内、且真的进了上下文**的那批：不同执行环境是
     互不相干的运行时，未加载的副本压根不在选择器里 —— 把它们算进来会报出
     一堆用户无法验证也无需处理的「重叠」。这与预算、冲突用的是同一条口径。
 
@@ -195,4 +195,4 @@ def render_overlap(out, args):
     print("      Let the model judge the description fields; this is not a regex problem.")
     print("    · overlap --judge (external model) is not implemented yet; see PRODUCT §5.4.")
     print()
-    print("  Scope: %d loaded skills, grouped by host; threshold --min %.2f" % (scope, args.min))
+    print("  Scope: %d loaded skills, grouped by harness; threshold --min %.2f" % (scope, args.min))

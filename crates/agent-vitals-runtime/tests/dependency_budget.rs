@@ -1,9 +1,9 @@
 //! `agent-vitals-runtime` 的可执行边界守卫（arch §3.2）。
 //!
-//! runtime 是**非宿主本机机器**：允许 I/O（state 存储、文件发现）、允许依赖
-//! `agent-vitals-hosts` / `agent-vitals-domain`（正向）、v0.9 Stage 0.4 起
+//! runtime 是**非执行环境本机机器**：允许 I/O（state 存储、文件发现）、允许依赖
+//! `agent-vitals-harnesses` / `agent-vitals-domain`（正向）、v0.9 Stage 0.4 起
 //! 也允许依赖 `agent-vitals-data`（spec §3.1 依赖表：`agent-vitals-data`
-//! 自己够不到 hosts，`SummaryRepository` 的实现只能落在这个同时认识两者
+//! 自己够不到 harnesses，`SummaryRepository` 的实现只能落在这个同时认识两者
 //! 的层，见 `docs/AGENT_VITALS_V0_9_STAGE0_RESEARCH.md` §8.1）。禁的是：
 //! - 反依赖二进制 / wasm（`agent-vitals` / `agent-vitals-wasm`）——方向是
 //!   `apps → runtime`，不是反过来；
@@ -53,7 +53,7 @@ fn runtime_dependency_direction_is_one_way() {
         assert!(
             !keys.iter().any(|k| k == forbidden),
             "agent-vitals-runtime/Cargo.toml [dependencies] must not reference `{forbidden}` — \
-             方向是 apps/desktop → runtime → hosts → domain，不是反过来；日期用手写 civil 数学"
+             方向是 apps/desktop → runtime → harnesses → domain，不是反过来；日期用手写 civil 数学"
         );
     }
 }

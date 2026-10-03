@@ -2,10 +2,10 @@
 extract → derive → coverage，"locate → shape → extract" 留在
 `scripts/agent_vitals/adapters/claude_session.py`，I/O 不在这里）。它把
 `~/.claude/projects/*.jsonl` 里抽出的原始记录折成 `evidence::CanonicalSession`
-的等价字典，覆盖计数按 `docs/RUNTIME_EVIDENCE_CONTRACT.md` §13 host coverage
+的等价字典，覆盖计数按 `docs/RUNTIME_EVIDENCE_CONTRACT.md` §13 harness coverage
 matrix 的 **Claude Code 列**逐条对应。
 
-与 Rust `crates/agent-vitals-hosts/src/hosts/claude_code/sessions/evidence.rs` 逐字节对齐——产出
+与 Rust `crates/agent-vitals-harnesses/src/harnesses/claude_code/sessions/evidence.rs` 逐字节对齐——产出
 同一个 `claude_evidence_json` 输出字典（键序一致），`tests/test_cli_matrix.py::
 both()` 的差分靠这份一致把关。
 
@@ -32,7 +32,7 @@ Unavailable 是 dispatcher 层的判定，不在本适配器：本适配器的�
 
 import json
 
-from .host_capability import host_profile
+from .harness_capability import harness_profile
 from ..util import session_span
 
 # 20 个 Signal 的声明序——`signals` 数组 / `coverage` 字典的输出顺序都靠这份显式
@@ -82,21 +82,21 @@ KNOWN_TYPES = frozenset((
 
 # §13 Claude Code 列明确 unavailable / 没有对应列的信号。`derive_coverage` 的
 # 置零与 `claude_evidence_json` 的 `available` 标记共用这一份清单，不准两处各写
-# 一份漂移。v0.6 host-contract spec §6/§11-M2a：宿主级 unmeasured 声明不再是
-# 本文件的字面量表，改从 `host_capability.HOSTS` 的 "claude-code" 行读（行上
+# 一份漂移。v0.6 harness-contract spec §6/§11-M2a：执行环境级 unmeasured 声明不再是
+# 本文件的字面量表，改从 `harness_capability.HARNESSES` 的 "claude-code" 行读（行上
 # 的值就是从这里原来的字面量表搬过去的，golden 字节不变）。
 #
 # `ApprovalDecisions` 是 first-slice 范围：§13 列值是 **partial——denials only,
 # derived+lossy**，靠匹配 tool-result 文本里的 marker string 恢复（§14.5），本次
 # 不实现——先诚实 Unavailable，后续项做 marker 恢复时从这里挪出来（这条注记的
-# 权威版本在 `host_capability.py` 的 `HOSTS` 行注释里）。
-_UNAVAILABLE_SIGNALS = tuple(host_profile("claude-code")["unmeasured_signals"])
+# 权威版本在 `harness_capability.py` 的 `HARNESSES` 行注释里）。
+_UNAVAILABLE_SIGNALS = tuple(harness_profile("claude-code")["unmeasured_signals"])
 
 # §14.5 的 SkillInvocations 说明文本——与 Rust 逐字节相同，差分测试靠它。
 _SKILL_INVOCATION_NOTE = (
     "Claude Code does not persist skill invocations as structured events; "
     "SkillInvocations coverage is a derived presence lower bound from `Skill` "
-    "tool calls, and offline inference may disagree with the host's runtime "
+    "tool calls, and offline inference may disagree with the harness's runtime "
     "decision."
 )
 _TURN_BOUNDARY_NOTE = (
@@ -277,7 +277,7 @@ def _user_prompt_text(content):
     return None
 
 
-_HOST_ECHO = ("<task-notification", "<local-command-stdout", "<local-command-stderr",
+_HARNESS_ECHO = ("<task-notification", "<local-command-stdout", "<local-command-stderr",
               "<local-command-caveat", "<bash-input", "<bash-stdout", "<bash-stderr",
               "[Request interrupted")
 _SETTINGS_ONLY = frozenset(("model", "effort", "clear", "compact", "fast", "config", "cost",
@@ -287,11 +287,11 @@ _SETTINGS_ONLY = frozenset(("model", "effort", "clear", "compact", "fast", "conf
 
 def turn_signal(record, has_turn):
     """user 记录的回合信号：`"request"` / `"interrupt"` / `"other"`。镜像 Rust
-    `hosts::claude_code::sessions::turns::turn_signal`——evidence 与 workflow 共用
+    `harnesses::claude_code::sessions::turns::turn_signal`——evidence 与 workflow 共用
     的唯一判据（此前本函数的前身 `is_pure_text_user` 把 skill 正文注入、
     `<task-notification>`、中断标记都算成新 turn）。首回合沿用历史判据
     `_text_content`（workflow 的 task_started event_id 依赖它）；其后排除 meta
-    注入、压缩摘要、宿主回灌与只改设置的斜杠命令。"""
+    注入、压缩摘要、执行环境回灌与只改设置的斜杠命令。"""
     if not isinstance(record, dict):
         return "other"
     message = record.get("message")
@@ -310,7 +310,7 @@ def turn_signal(record, has_turn):
     # 已排除 tool_result 数组并要求非空文本。
     if record.get("isMeta") is True or record.get("isCompactSummary") is True:
         return "other"
-    if text.startswith(_HOST_ECHO):
+    if text.startswith(_HARNESS_ECHO):
         return "other"
     if text.startswith("<command-name>/"):
         rest = text[len("<command-name>/"):]
@@ -345,7 +345,7 @@ def _timeline_entry(observation, seq, time, turn, call_id, ordinal):
 def _process_tool_result_blocks(record, tool_results, seq, time, turn, next_ordinal):
     """一条 tool_result user 的续写块 → `tool_results`。三态 is_error（§2.3）：
     - 键存在（true/false）→ `failed=Some(bool)`（失败理由被截断成布尔）；
-    - 键缺失 → `failed=None`（宿主记了结果、无失败信号）。
+    - 键缺失 → `failed=None`（执行环境记了结果、无失败信号）。
     `error_code` 恒 None（§3：Claude 无原因码来源，绝不伪造）。
     `next_ordinal` 是**跨块**的唯一序号（`evt-{ordinal}` 契约）——一条记录可含
     多个块，用记录序当 ordinal 会撞号。list 容器 = Python 缺引用的惯用替代。"""
@@ -418,7 +418,7 @@ def _flush_turn(turns, p, next_ordinal):
 
 
 def _populate_claude_timelines(records):
-    """跑一遍 `records`，把 Claude 线格式翻译成五个 host-neutral timeline（§11.5）
+    """跑一遍 `records`，把 Claude 线格式翻译成五个 harness-neutral timeline（§11.5）
     里的三条（approvals/sandbox_modes 恒空——§13 Claude 列两行 unavailable）：
     - `tool_calls`：assistant 的 `tool_use` 块 → §7 规范化名 + 确定性 args_text。
     - `tool_results`：user 的 `tool_result` 块 → 三态 is_error → `failed`。
@@ -719,7 +719,7 @@ def build_claude_evidence(raw_records, session_id):
     canonical = {
         "meta": {
             "session_id": session_id,
-            "host_id": "claude-code",
+            "harness_id": "claude-code",
             "workspace_roots": _first_cwd(raw_records),
             "model": _extract_model(raw_records),
             "span": session_span(native_times),
@@ -741,7 +741,7 @@ def claude_evidence_json(evidence):
     """evidence 字典 → `claude-evidence --json` 的输出形状。与 Rust
     `claude_evidence_json` 逐字节对齐——键序、嵌套结构、`attempts`/`notes` 的
     序列化都是这里单独控制的。`signals` 数组按 ALL_SIGNALS 序；`coverage` 20
-    键全量（unavailable 的也是全零四条，不是缺键）；`available` 标记宿主是否
+    键全量（unavailable 的也是全零四条，不是缺键）；`available` 标记执行环境是否
     提供该维度——false = 结构缺口，任何会话都为零，KPI 分母不算它。"""
     canonical = evidence["canonical"]
     sigset = set(canonical["signals"])
@@ -767,7 +767,7 @@ def claude_evidence_json(evidence):
     notes = [n["message"] if isinstance(n, dict) else n
              for n in canonical["notes"]]
     return {
-        "host": "claude-code",
+        "harness": "claude-code",
         "session_id": canonical["meta"]["session_id"],
         "workspace_roots": canonical["meta"]["workspace_roots"],
         "model": canonical["meta"]["model"],

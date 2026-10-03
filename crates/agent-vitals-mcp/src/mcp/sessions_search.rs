@@ -1,6 +1,6 @@
 //! `sessions_search` 工具（spec §7.6 / Q04 / U05）——列出一个时间窗（可再按
 //! 统计时区小时过滤）内的会话，逐会话聚合 token / 时间跨度 / 模型集，按 total 降序、
-//! keyset 分页。**只出 `session_ref`（HMAC），绝不出宿主原生 id / 路径 / 正文。**
+//! keyset 分页。**只出 `session_ref`（HMAC），绝不出执行环境原生 id / 路径 / 正文。**
 //!
 //! Q04 峰值下钻：`usage_hourly(date)` 给 `peak_hour` → `sessions_search(date,
 //! hour=peak_hour)` 给该小时的会话构成，`data.window_total_tokens` 让调用方核对
@@ -30,8 +30,8 @@ pub fn spec() -> ToolSpec {
                 "date_to": { "type": "string", "description": "Inclusive end date YYYY-MM-DD in the configured statistics timezone; must be paired with date_from." },
                 "hour": { "type": "integer", "minimum": 0, "maximum": 23,
                           "description": "Optional: only count each session's facts in this local statistics hour (for peak-hour drill-down). Requires date." },
-                "hosts": { "type": "array", "items": { "type": "string" },
-                           "description": "Optional host filter (claude-code / codex / dsh). Empty/missing = all known hosts." },
+                "harnesses": { "type": "array", "items": { "type": "string" },
+                           "description": "Optional harness filter (claude-code / codex / dsh). Empty/missing = all known harnesses." },
                 "model": { "type": "string", "description": "Optional exact model id filter; missing model facts use <unknown>." },
                 "provider": { "type": "string", "description": "Optional exact provider id filter; missing provider evidence uses <unknown>." },
                 "min_tokens": { "type": "integer", "minimum": 0,
@@ -134,8 +134,8 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         }
     };
 
-    let hosts: Vec<String> = args
-        .get("hosts")
+    let harnesses: Vec<String> = args
+        .get("harnesses")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
@@ -178,7 +178,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         None => (None, None),
     };
     let (rows, has_more, window_total, window_session_count) = authority_query::sessions_in_window_ordered(
-        conn, start_ms, end_ms, &hosts, model, provider, hour, min_tokens, after_total, after_key, limit, oldest_first,
+        conn, start_ms, end_ms, &harnesses, model, provider, hour, min_tokens, after_total, after_key, limit, oldest_first,
     )
     .map_err(|e| ToolError::new("internal_error", format!("authority query: {e}")))?;
 
@@ -212,12 +212,12 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
                 }));
             json!({
                 "session_ref": super::session_ref::session_ref(&salt, &s.session_key),
-                "host": s.host,
+                "harness": s.harness,
                 "first_event_at": ms_to_rfc3339_beijing(s.first_event_ms),
                 "last_event_at": ms_to_rfc3339_beijing(s.last_event_ms),
                 "event_count": s.event_count,
                 "model_ids": s.model_ids,
-                "identity_kind": "host_raw",
+                "identity_kind": "harness_raw",
                 "tokens": {
                     "uncached_input_tokens": s.uncached_input_tokens,
                     "cache_read_tokens": s.cache_read_tokens,
@@ -255,7 +255,7 @@ pub fn run(args: &Value, data_home: &Path) -> Result<Value, ToolError> {
         "status": "complete",
         "requested_from": ms_to_rfc3339_beijing(start_ms),
         "requested_to": ms_to_rfc3339_beijing(end_ms),
-        "missing_hosts": [],
+        "missing_harnesses": [],
     });
 
     Ok(build_envelope(
@@ -286,7 +286,7 @@ mod tests {
         AuthorityDb::open(&agent_vitals_data::authority::default_authority_path(home), 1).unwrap()
     }
 
-    fn fact(db: &AuthorityDb, id: &str, host: &str, skey: &str, ts: i64, tokens: i64) {
+    fn fact(db: &AuthorityDb, id: &str, harness: &str, skey: &str, ts: i64, tokens: i64) {
         db.conn()
             .execute(
                 "INSERT INTO sync_runs(run_id, started_at_ms, trigger, status, schema_version)
@@ -295,17 +295,17 @@ mod tests {
             )
             .unwrap();
         db.conn().execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
+            "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, source_profile, last_observed_at_ms)
              VALUES (?1, ?2, ?3, 'm', 'default', 1) ON CONFLICT(session_key) DO NOTHING",
-            rusqlite::params![skey, host, format!("nat-{skey}")],
+            rusqlite::params![skey, harness, format!("nat-{skey}")],
         ).unwrap();
         db.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, session_key,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, session_key,
                  source_event_id, observation_kind, model_id, event_ts_ms, event_peak,
                  uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                  ingested_run_id, created_at_ms, updated_at_ms)
              VALUES (?1, ?2, 'm', ?3, ?4, ?1, 'assistant-usage', 'm-x', ?5, 0, ?6, 0, 0, 0, 'run', 1, 1)",
-            rusqlite::params![id, host, format!("nat-{skey}"), skey, ts, tokens],
+            rusqlite::params![id, harness, format!("nat-{skey}"), skey, ts, tokens],
         ).unwrap();
     }
 

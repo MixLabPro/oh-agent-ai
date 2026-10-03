@@ -10,7 +10,7 @@ import { bucketTotal, niceMax, type TrendBucket } from "../features/usage/trendB
  * failures === null 是「标记不可用」，0 才是「读到零失败」，两者不得混同。
  *
  * 视觉（§0 评审）：柱宽随容器伸缩、无写死的 22px 上限（仅周档 7 根粗柱设 --trend-bar-max
- * 以免撑成巨块）；Y 轴三刻度；悬停/聚焦浮层给分宿主明细。
+ * 以免撑成巨块）；Y 轴三刻度；悬停/聚焦浮层给分执行环境明细。
  */
 export type UsageTrendChartProps = {
   buckets: TrendBucket[];

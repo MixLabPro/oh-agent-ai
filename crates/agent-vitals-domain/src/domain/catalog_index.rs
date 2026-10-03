@@ -11,7 +11,7 @@ pub fn parse_catalog(payload: &[u8]) -> Result<Value, &'static str> {
     serde_json::from_slice(payload).map_err(|_| "index_json")
 }
 pub fn local_allowed(slot: &str) -> bool {
-    matches!(slot, "host_manifest" | "price_card" | "model_alias" | "endpoint_pattern" | "trust_profile")
+    matches!(slot, "harness_manifest" | "price_card" | "model_alias" | "endpoint_pattern" | "trust_profile")
 }
 fn known(slot: &str) -> bool {
     local_allowed(slot) || matches!(slot, "error_taxonomy" | "behavior_patterns" | "subscription_scope" | "fx_reference" | "quota_window" | "duration_threshold" | "slow_call_threshold" | "attribution_signatures")

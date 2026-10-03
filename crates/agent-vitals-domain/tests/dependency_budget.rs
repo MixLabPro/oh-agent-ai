@@ -1,6 +1,6 @@
 //! v0.8 目标架构（`docs/AGENT_VITALS_V0_8_ARCHITECTURE_SPEC.md` §3.3 依赖预算 /
 //! §14.2 / §15 DoD）的**可执行守卫**。Phase C 把 `agent-vitals-core` 拆解，最终
-//! 收进单个 **`agent-vitals-domain`**：`contracts/`（宿主无关词表）+ `domain/`
+//! 收进单个 **`agent-vitals-domain`**：`contracts/`（执行环境无关词表）+ `domain/`
 //! （纯计算）+ `compatibility/`（vitals-core 桥）。中途的 `agent-vitals-contracts`
 //! 独立 crate 与 `agent-vitals-core` facade 都已撤销（见
 //! `AGENT_VITALS_V0_8_PHASE_C_RESEARCH.md` §6sexies）。本文件钉住
@@ -84,7 +84,7 @@ const FORBIDDEN_DEP_KEYS: &[&str] = &[
     //  ——列在这里挡它复活。
     "agent-vitals",
     "agent-vitals-core",
-    "agent-vitals-hosts",
+    "agent-vitals-harnesses",
     "agent-vitals-wasm",
 ];
 
@@ -278,7 +278,7 @@ pub fn pure() -> i32 { 1 + 1 }
 mod tests {
     use std::fs;
     #[test]
-    fn t() { let _ = fs::read_to_string(\"/etc/hosts\"); assert!(std::env::var(\"X\").is_err()); }
+    fn t() { let _ = fs::read_to_string(\"/etc/harnesses\"); assert!(std::env::var(\"X\").is_err()); }
 }
 ";
     let stripped = strip_test_modules_and_comments(synthetic);
@@ -310,7 +310,7 @@ fn source_root_is_an_explicit_facade_not_a_flat_module_dump() {
     // Phase C Step 4：`domain/` 计算 + `contracts/` 词表 + `compatibility/`
     // （vitals-core 桥）整体成 `agent-vitals-domain` crate；`agent-vitals-core`
     // facade 与独立的 `agent-vitals-contracts` crate 都已撤销，调用方直接
-    // `use agent_vitals_domain::*`。host `adapters/` 早在 Step 3 迁出。
+    // `use agent_vitals_domain::*`。harness `adapters/` 早在 Step 3 迁出。
     assert_eq!(
         entries,
         vec!["compatibility", "contracts", "domain", "lib.rs"],
@@ -318,22 +318,22 @@ fn source_root_is_an_explicit_facade_not_a_flat_module_dump() {
     );
 }
 
-/// 所有 host wire 适配（`claude_code`/`codex`/`workbuddy` evidence + Codex fold +
+/// 所有 harness wire 适配（`claude_code`/`codex`/`workbuddy` evidence + Codex fold +
 /// canonical 归一层 + Phase D1 起的 DSH `evidence`/`audit`/`compaction`/`waste`）
-/// 都在 `agent-vitals-hosts`，不在本 crate。
+/// 都在 `agent-vitals-harnesses`，不在本 crate。
 #[test]
-fn domain_crate_holds_no_host_adapter_directory() {
+fn domain_crate_holds_no_harness_adapter_directory() {
     assert!(
         !manifest_dir().join("src/adapters").exists(),
-        "host wire adapters belong in agent-vitals-hosts"
+        "harness wire adapters belong in agent-vitals-harnesses"
     );
     assert!(
-        !manifest_dir().join("src/hosts").exists(),
-        "no per-host folder in the domain crate — that is agent-vitals-hosts' shape"
+        !manifest_dir().join("src/harnesses").exists(),
+        "no per-harness folder in the domain crate — that is agent-vitals-harnesses' shape"
     );
 }
 
-/// `contracts/` 是**宿主无关词表**：只碰 `serde_json`，不 `use regex` /
+/// `contracts/` 是**执行环境无关词表**：只碰 `serde_json`，不 `use regex` /
 /// `vitals_core` / `crate::domain` / `crate::compatibility` / adapter。这条
 /// 钉住「adapters 与未来 runtime 能只依赖词表而不拉进 domain 计算」——即使
 /// 词表和计算现在同 crate，模块边界也不许糊。
@@ -351,7 +351,7 @@ fn contracts_module_stays_vocabulary_only() {
             "vitals_core",
             "crate::domain",
             "crate::compatibility",
-            "agent_vitals_hosts",
+            "agent_vitals_harnesses",
         ] {
             assert!(
                 !prod.contains(needle),
@@ -363,14 +363,14 @@ fn contracts_module_stays_vocabulary_only() {
     });
 }
 
-/// v0.8 Phase D1：`domain/dsh/` 整个迁进 `agent-vitals-hosts/hosts/dsh/sessions/`。
+/// v0.8 Phase D1：`domain/dsh/` 整个迁进 `agent-vitals-harnesses/harnesses/dsh/sessions/`。
 /// domain 里不再有任何 DSH-wire 解析模块——这条断言钉死它不复活。
 #[test]
 fn domain_holds_no_dsh_wire_module() {
     assert!(
         !manifest_dir().join("src/domain/dsh").exists(),
         "Phase D1: DSH wire 解析（evidence/audit/compaction/waste）已迁进 \
-         agent-vitals-hosts/hosts/dsh/sessions/——domain/dsh/ 不该再出现"
+         agent-vitals-harnesses/harnesses/dsh/sessions/——domain/dsh/ 不该再出现"
     );
 }
 
@@ -386,19 +386,19 @@ fn nested_paths_and_legacy_facade_resolve_to_the_same_items() {
     );
 }
 
-/// v0.8 Phase D1 起 `domain/` 的**生产**代码对任何宿主 wire 解析零依赖——DSH
+/// v0.8 Phase D1 起 `domain/` 的**生产**代码对任何执行环境 wire 解析零依赖——DSH
 /// wire 已迁出。`#[cfg(test)]` 里经 `[dev-dependencies]` 调 `canonical_tokens`
-/// （只换 `Value`）或 `agent_vitals_hosts::dsh_evidence::build_dsh_evidence`
+/// （只换 `Value`）或 `agent_vitals_harnesses::dsh_evidence::build_dsh_evidence`
 /// 造 fixture（`tests/behavior_rules.rs` 是 integration test，无成环）是允许的。
 #[test]
-fn domain_production_code_has_no_host_adapter_dependency() {
+fn domain_production_code_has_no_harness_adapter_dependency() {
     each_src_file(|path, content| {
         if !path.starts_with(manifest_dir().join("src/domain")) {
             return;
         }
         let prod = strip_test_modules_and_comments(content);
         for needle in [
-            "agent_vitals_hosts",
+            "agent_vitals_harnesses",
             "crate::adapters",
             "crate::claude_code_evidence",
             "crate::codex_evidence",
@@ -408,8 +408,8 @@ fn domain_production_code_has_no_host_adapter_dependency() {
         ] {
             assert!(
                 !prod.contains(needle),
-                "v0.8 Phase D1: production code in {} references `{needle}` — 宿主 wire \
-                 解释归 agent-vitals-hosts，domain 只算不解析",
+                "v0.8 Phase D1: production code in {} references `{needle}` — 执行环境 wire \
+                 解释归 agent-vitals-harnesses，domain 只算不解析",
                 path.strip_prefix(manifest_dir()).unwrap_or(path).display()
             );
         }

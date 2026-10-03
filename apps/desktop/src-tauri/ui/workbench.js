@@ -223,7 +223,7 @@ function showBanner(id, e, showReload) {
 
 // ---------- 事件桥：权威库失效 → 立即重拉当前 tab（Rust 侧 emit，见 lib.rs） ----------
 // Rust `sync_tick` 尾部在权威 revision **严格前进**时 emit `app-event`
-// （payload.type = Invalidated、负载 `{type, revision, hosts}`；RUNTIME_INVALIDATION
+// （payload.type = Invalidated、负载 `{type, revision, harnesses}`；RUNTIME_INVALIDATION
 // spec §4.4，取代了旧 FoldCompleted 的 200ms 时间去抖）。这里订阅单一出口，收到后
 // 重拉当前 tab 的概览数据，让工作台在托盘/外部手动同步完成的那一刻就刷新，而不是
 // 等下一个 5 分钟 tick 或窗口聚焦。领域事件（FactsIngested 等）不再逐条透传到
@@ -396,7 +396,7 @@ function subscribeNavEvent() {
 // 点击留到 init/focus/visibilitychange 时命中）。拿到 `SessionDetail` → 切会话
 // tab + showSession（最小对象，复用 openSessionFromFinding 范式——摘要卡缺字段
 // 显示「—」，完整数字由 sessions_read 的 envelope 分区填）；拿到 `SessionList`
-// → 切 tab + 设 host 过滤 + 重置分页 + 重新加载（v1 菜单不发射它，消费路径先
+// → 切 tab + 设 harness 过滤 + 重置分页 + 重新加载（v1 菜单不发射它，消费路径先
 // 落地，等「查看全部会话」回归）。apply 后 clear 是单点；apply 失败也 clear
 // （错误横幅已向用户说明，不无限重试，菜单再点会覆盖新目标）。
 async function pullFocusTarget() {
@@ -417,10 +417,10 @@ async function pullFocusTarget() {
         session_ref: t.session_ref,
         title: null,
         model: null,
-        host: t.host_kind || null,
+        harness: t.harness_kind || null,
       });
     } else if (t.type === "sessionList") {
-      sessFilter = t.host_kind || "all";
+      sessFilter = t.harness_kind || "all";
       updateFilterChips();
       // loadSessions(true) 同步置 loaded，切 tab 的懒加载不会再叠一次请求。
       loadSessions(true);
@@ -453,7 +453,7 @@ let calSelectedDate = null; // 当日按小时面板选中的日期（null = 今
 let calData = null;
 let calMetric = "tokens"; // 日历主数：tokens 或按来源口径的成本
 let sessState = { items: [], nextCursor: null, total: null, loaded: false, error: false };
-// 会话列表 host 过滤（spec §7.3）："all" | "dsh" | "codex"。过滤变化重置分页
+// 会话列表 harness 过滤（spec §7.3）："all" | "dsh" | "codex"。过滤变化重置分页
 // （游标语义是「全量翻页」，带旧过滤的游标续拉会混页）；深链 SessionList 目标
 // 也写这里。
 let sessFilter = "all";
@@ -610,9 +610,9 @@ function fmtFxApprox(m) { return "≈" + fmtCur(m.cny, "CNY"); }
 function fxNote(m) {
   return "混币按 ≈" + m.rate + " 折算" + (m.asOf ? "（" + m.asOf + "）" : "");
 }
-function tokensSum(tokensByHost) {
+function tokensSum(tokensByHarness) {
   let unc = 0, read = 0, write = 0, out = 0, total = 0;
-  for (const t of Object.values(tokensByHost || {})) {
+  for (const t of Object.values(tokensByHarness || {})) {
     unc += t.uncached_input || 0; read += t.cache_read || 0;
     write += t.cache_write || 0; out += t.output || 0; total += t.total || 0;
   }
@@ -698,7 +698,7 @@ function renderTrustRows(status, monthly) {
   }
   const d = status.data || {};
   const health = d.health || "ok";
-  const total = monthly ? tokensSum(monthly.tokens_by_host).total : null;
+  const total = monthly ? tokensSum(monthly.tokens_by_harness).total : null;
   // 这两行渲染在「本月已处理 …」下面，待确认面板也只处理当月——所以主数字用
   // **本月**口径（`*_tokens_month`，与 total_tokens_month 同跨度），全库累计只作
   // 历史脚注。此前主数字是全库累计：用户把当月全部归因完了提示照样亮着，因为
@@ -860,13 +860,13 @@ const overviewRecord = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const overviewNumber = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
 const overviewAmounts = (v) => overviewRecord(v) && Object.values(v).every(overviewNumber);
 function overviewSummaryValid(v) {
-  return overviewRecord(v) && overviewRecord(v.tokens_by_host)
-    && Object.values(v.tokens_by_host).every((t) => overviewRecord(t)
+  return overviewRecord(v) && overviewRecord(v.tokens_by_harness)
+    && Object.values(v.tokens_by_harness).every((t) => overviewRecord(t)
       && ["total", "uncached_input", "cache_read", "cache_write", "output"].every((k) => overviewNumber(t[k])))
-    && overviewRecord(v.by_provider) && overviewRecord(v.by_host)
+    && overviewRecord(v.by_provider) && overviewRecord(v.by_harness)
     && Object.values(v.by_provider).every((p) => overviewRecord(p) && overviewAmounts(p.amounts_by_basis)
       && (p.currency === null || typeof p.currency === "string"))
-    && Object.values(v.by_host).every(overviewRecord)
+    && Object.values(v.by_harness).every(overviewRecord)
     && overviewAmounts(v.total_actual_spend) && overviewRecord(v.actual_spend_by_basis)
     && Object.values(v.actual_spend_by_basis).every(overviewAmounts);
 }
@@ -885,7 +885,7 @@ const OVERVIEW_REQUESTS = Object.freeze([
       && Object.entries(v.days).every(([date, d]) => /^\d{4}-\d{2}-\d{2}$/.test(date) && date.startsWith(v.month + "-")
         && overviewRecord(d) && overviewNumber(d.total_tokens)
         && ["dsh_cost_cny", "claude_cost_cny", "claude_cost_usd", "codex_cost_usd"].every((k) => d[k] == null || overviewNumber(d[k]))) },
-  { key: "sources", command: "data_source_status", sections: ["sources"], valid: overviewList("sources", ["host", "connection_state"]) },
+  { key: "sources", command: "data_source_status", sections: ["sources"], valid: overviewList("sources", ["harness", "connection_state"]) },
   { key: "quality", command: "data_status", sections: ["trust"],
     valid: (v) => overviewRecord(v) && v.status === "ok" && overviewRecord(v.data)
       && typeof v.data.health === "string" && overviewNumber(v.data.unresolved_tokens)
@@ -904,7 +904,7 @@ const OVERVIEW_REQUESTS = Object.freeze([
         && (w.used_percent == null || overviewNumber(w.used_percent))
         && (w.resets_at == null || overviewNumber(w.resets_at)))))
       && typeof v.observed_at === "string") },
-  { key: "candidates", command: "billing_import_candidates", sections: ["billing"], valid: (v) => overviewList("candidates", ["candidate_id", "host", "provider_id", "status", "currency", "billing_period_start"])(v)
+  { key: "candidates", command: "billing_import_candidates", sections: ["billing"], valid: (v) => overviewList("candidates", ["candidate_id", "harness", "provider_id", "status", "currency", "billing_period_start"])(v)
       && v.candidates.every((c) => overviewNumber(c.amount_minor) && (c.impact == null ||
         (overviewRecord(c.impact) && (c.impact.status !== "ok" ||
           ["total_tokens", "fact_count", "session_count"].every((k) => overviewNumber(c.impact[k])))))) },
@@ -913,11 +913,11 @@ const OVERVIEW_REQUESTS = Object.freeze([
   // confirmation_groups 补）。金额行 {amount_minor, currency, basis} 永不跨币相加。
   { key: "billingGroups", command: "billing_confirmation_groups", sections: ["billing"],
     args: (w) => ({ month: w.month }),
-    valid: (v) => overviewList("groups", ["group_id", "host", "provider_id", "model_id", "evidence_basis", "effective_start", "effective_end"])(v)
+    valid: (v) => overviewList("groups", ["group_id", "harness", "provider_id", "model_id", "evidence_basis", "effective_start", "effective_end"])(v)
       && v.groups.every((g) => overviewNumber(g.tokens) && overviewNumber(g.session_count)
         && Array.isArray(g.estimated_amounts) && g.estimated_amounts.every((a) => overviewRecord(a)
           && typeof a.currency === "string" && Number.isFinite(a.amount_minor))) },
-  { key: "declarations", command: "billing_declarations", sections: ["billing"], valid: overviewList("declarations", ["declaration_id", "host", "provider_id", "relationship_kind", "effective_start", "current_revision_id"]) },
+  { key: "declarations", command: "billing_declarations", sections: ["billing"], valid: overviewList("declarations", ["declaration_id", "harness", "provider_id", "relationship_kind", "effective_start", "current_revision_id"]) },
   { key: "jobs", command: "billing_recalculation_jobs", sections: ["billing"], valid: overviewList("jobs", ["job_id", "status"]) },
 ]);
 
@@ -951,14 +951,14 @@ async function loadOverviewData() {
 
 // Settings-only reads start when the Settings (sources) tab is entered.
 // 已有账单：只读展示（规格 §4.2、§7 D3）。录入表单与 CSV 导入是 Beta 延期
-// 能力，DOM 保留但不显示；这里不再调用 renderHostBills（它绑定的是隐藏表单）。
+// 能力，DOM 保留但不显示；这里不再调用 renderHarnessBills（它绑定的是隐藏表单）。
 // 左栏导航高亮：滚动到哪个分区，对应导航项加 .current（规格 §3.1）。锚点跳转
 // 本身用原生 <a href="#id">，这里只负责高亮，不拦截点击。
 let settingsNavBound = false;
 function bindSettingsNav() {
   if (settingsNavBound) return;
   // document.querySelector 在真实浏览器里总有；guard 只是为了不让这个纯装饰性的
-  // 高亮功能在缺 DOM API 的宿主（测试沙箱、未来非浏览器渲染）里把整个
+  // 高亮功能在缺 DOM API 的执行环境（测试沙箱、未来非浏览器渲染）里把整个
   // loadSettingsData() 拖下水——同步抛出会让上面六个设置读取一个都不跑
   // （Promise.allSettled 接的是 loadSettingsData() 这一个 promise，不是内部
   // 每条 invoke，函数体前段抛出会让整个 await 链路提前失败）。
@@ -987,14 +987,14 @@ async function renderBillsReadOnly(period) {
   const list = document.getElementById("settings-bills-list");
   if (!section || !list) return;
   try {
-    const report = await invoke("host_bills_for_period", { billingPeriod: period });
+    const report = await invoke("harness_bills_for_period", { billingPeriod: period });
     const bills = report && report.status === "ok" ? (report.bills || []) : [];
     section.hidden = !bills.length;
     list.textContent = "";
     for (const bill of bills) {
       const row = document.createElement("div");
       row.className = "billing-review-row";
-      row.textContent = (HOST_DISPLAY[bill.host] || bill.host) + " · " + bill.provider_id + " · " +
+      row.textContent = (HARNESS_DISPLAY[bill.harness] || bill.harness) + " · " + bill.provider_id + " · " +
         (bill.billing_basis || "") + " · " + fmtCur(Number(bill.amount_minor || 0) / 100, bill.currency);
       list.appendChild(row);
     }
@@ -1089,7 +1089,7 @@ async function renderPriceRouteSettings() {
 }
 
 // 设置 › 价格目录 的「本月缺价卡的型号」清单（形状出处：runtime/src/mcp/data_status.rs
-// `unpriced_models_month`：{host, provider, model, tokens, covered}）。每行「补这张卡」
+// `unpriced_models_month`：{harness, provider, model, tokens, covered}）。每行「补这张卡」
 // 把服务商/型号预填进补卡表单并把光标放到第一个价格格；provider 为空（目录也认不出
 // 归属）时先引导去「声明归属」。
 function renderPriceMissingList(rows) {
@@ -1106,7 +1106,7 @@ function renderPriceMissingList(rows) {
     text.className = "src-custom-path";
     const providerLabel = r.provider ? (PROVIDER_LABEL[r.provider] || r.provider) : "服务商未知";
     text.textContent = r.model + " · 补到 " + providerLabel + " 的卡 · 本月 " + fmtTokens(Number(r.tokens || 0)) + " tokens · " +
-      (r.covered ? "在套餐内（只影响折算参考）" : "按量（影响按量费用）") + " · 经 " + (HOST_DISPLAY[r.host] || r.host);
+      (r.covered ? "在套餐内（只影响折算参考）" : "按量（影响按量费用）") + " · 经 " + (HARNESS_DISPLAY[r.harness] || r.harness);
     const fill = document.createElement("button");
     fill.className = "btn secondary";
     fill.type = "button";
@@ -1433,7 +1433,7 @@ async function renderOverview() {
   renderNoRecordsState(overview.sync, data.sources);
 
   // 预算 —— 读后端权威（level/ratio/snooze/reasons），不重算百分比。口径 =
-  // 「订阅月费按天摊派 + 跨宿主按量费用（三级口径）」（2026-09-17 产品定向，
+  // 「订阅月费按天摊派 + 跨执行环境按量费用（三级口径）」（2026-09-17 产品定向，
   // 取代 09-07 的「按量实付」单口径；见 budget.rs::budget_profiles_status_sql_at）。
   // `source` 两态都是权威：
   // "alert" = 旧 alert.json 快照（带 generated_at，可能过期）；"sql" = SQL
@@ -1485,7 +1485,7 @@ async function renderOverview() {
   }
   // 「预算已配置，但本月没有可计入的按量实付」是一件事，跟「读不到」是两件事。
   // 后端此时给的是 `monthly_cny: 1.0` + `month_cost: null` + `month_ratio: null`
-  // （口径 = 跨宿主按量实付，没确认计费方式前就是没有实付），旧代码把它塞进
+  // （口径 = 跨执行环境按量实付，没确认计费方式前就是没有实付），旧代码把它塞进
   // 通用兜底，显示「预算状态暂不可读，请刷新重试」——用户会去点刷新，而它永远
   // 刷不出来。这与「本月支出」那两栏是同一件事，措辞也对齐（REQ-043）。
   const budgetConfiguredButNoSpend = overviewRecord(b) && ["sql", "alert"].includes(b.source)
@@ -1588,7 +1588,7 @@ async function renderOverview() {
   // 数据根简写放设置→关于（规格 §4 第 95 行），不再经 note 漏回首屏。
   document.getElementById("ov-note").textContent = freshness + " · " + (overview.estimate_note || "");
 
-  // 「数据源」面板已并入费用明细（renderDualTrack 每行带 by_host 新鲜度）；
+  // 「数据源」面板已并入费用明细（renderDualTrack 每行带 by_harness 新鲜度）；
   // 详细数据源卡在设置→数据源。
 }
 
@@ -1793,7 +1793,7 @@ function renderQualityStatus(status) {
             button.disabled = false;
           }
         } else if (action.kind === "restore_backup") {
-          if (!window.confirm("选择一个已验证的权威数据库备份并恢复？\n\n当前数据库会先保留为 .pre-restore 备份；不会删除宿主原始日志。")) return;
+          if (!window.confirm("选择一个已验证的权威数据库备份并恢复？\n\n当前数据库会先保留为 .pre-restore 备份；不会删除执行环境原始日志。")) return;
           button.disabled = true;
           try {
             const restored = await invoke("restore_authority_backup");
@@ -2127,7 +2127,7 @@ function parseBillingCsvLine(line) {
 }
 
 function parseBillingCsv(text) {
-  const required = ["host", "provider_id", "billing_period", "billing_basis", "amount_minor", "currency", "evidence_ref"];
+  const required = ["harness", "provider_id", "billing_period", "billing_basis", "amount_minor", "currency", "evidence_ref"];
   const lines = String(text || "").split(/\r?\n/).filter((line) => line.trim());
   if (!lines.length || JSON.stringify(parseBillingCsvLine(lines[0])) !== JSON.stringify(required)) {
     return { rows: [], errors: ["第1行表头不匹配，必须使用模板字段"] };
@@ -2136,27 +2136,27 @@ function parseBillingCsv(text) {
   for (let i = 1; i < lines.length; i += 1) {
     const cells = parseBillingCsvLine(lines[i]);
     if (cells.length !== required.length) { errors.push("第" + (i + 1) + "行字段数错误"); continue; }
-    const [host, provider_id, billing_period, billing_basis, amountText, currency, evidence_ref] = cells;
+    const [harness, provider_id, billing_period, billing_basis, amountText, currency, evidence_ref] = cells;
     const amount_minor = Number(amountText);
-    const key = [host, provider_id, billing_period, billing_basis, evidence_ref].join("\u0000");
-    if (!host || !provider_id || !/^\d{4}-(0[1-9]|1[0-2])$/.test(billing_period) ||
-        !["fixed_subscription", "host_billed", "metered_actual", "metered_estimate", "api_equivalent"].includes(billing_basis) ||
+    const key = [harness, provider_id, billing_period, billing_basis, evidence_ref].join("\u0000");
+    if (!harness || !provider_id || !/^\d{4}-(0[1-9]|1[0-2])$/.test(billing_period) ||
+        !["fixed_subscription", "harness_billed", "metered_actual", "metered_estimate", "api_equivalent"].includes(billing_basis) ||
         !Number.isSafeInteger(amount_minor) || amount_minor < 0 || !/^[A-Z]{3}$/.test(currency) || !evidence_ref) {
       errors.push("第" + (i + 1) + "行字段值无效");
     } else if (seen.has(key)) {
       errors.push("第" + (i + 1) + "行与 CSV 内已有记录重复");
     } else {
       seen.add(key);
-      rows.push({ host, provider_id, billing_period, billing_basis, amount_minor, currency, evidence_ref });
+      rows.push({ harness, provider_id, billing_period, billing_basis, amount_minor, currency, evidence_ref });
     }
   }
   return { rows, errors };
 }
 
-// 与 authority::host_bill_put 的唯一键保持同构：重复导入同一行必须是更正/幂等，
+// 与 authority::harness_bill_put 的唯一键保持同构：重复导入同一行必须是更正/幂等，
 // 不能因为导入时间不同而生成另一条账单身份。
 function billingCsvBillId(row) {
-  return "csv-" + [row.host, row.provider_id, row.billing_period,
+  return "csv-" + [row.harness, row.provider_id, row.billing_period,
     row.billing_basis, row.evidence_ref].map(encodeURIComponent).join(":");
 }
 
@@ -2254,9 +2254,9 @@ function billingMissing(target) {
   return { provider, route, mode: true };
 }
 
-// 批量键：宿主、服务商、未知原因（证据 + 计价依据）、适用日期相同的组一起处理。
+// 批量键：执行环境、服务商、未知原因（证据 + 计价依据）、适用日期相同的组一起处理。
 function billingBatchKey(row) {
-  return [row.host, row.provider_id || "<unknown>", row.evidence_basis || "missing",
+  return [row.harness, row.provider_id || "<unknown>", row.evidence_basis || "missing",
     row.pricing_basis || "unavailable", row.effective_start || "", row.effective_end || ""].join("|");
 }
 
@@ -2344,7 +2344,7 @@ function openBillingDeclaration(target, rows, preset) {
     batchText.textContent = "将同时处理 " + all.length + " 个模型、" +
       all.reduce((sum, row) => sum + Number(row.session_count || 0), 0) + " 个会话、" +
       fmtTokens(all.reduce((sum, row) => sum + Number(row.tokens || 0), 0)) +
-      " tokens（同一宿主、同一未知原因、同一适用日期）";
+      " tokens（同一执行环境、同一未知原因、同一适用日期）";
   }
   const asks = [];
   if (missing.provider) asks.push("服务商");
@@ -2354,7 +2354,7 @@ function openBillingDeclaration(target, rows, preset) {
     const verdict = preset.verdict;
     const known = [];
     if (verdict && !missing.provider && verdict.billing_party) known.push("服务商 " + verdict.billing_party);
-    if (verdict && !missing.route) known.push(verdict.route_state === "official" ? "官方路由" : "宿主自报官方路由");
+    if (verdict && !missing.route) known.push(verdict.route_state === "official" ? "官方路由" : "执行环境自报官方路由");
     if (verdict && verdict.plan && verdict.plan.label) {
       known.push(verdict.plan.label + (verdict.plan.anchor_date ? "（每月 " + Number(verdict.plan.anchor_date.slice(8, 10)) + " 日续费，订阅自 " + verdict.plan.anchor_date + "）" : ""));
     }
@@ -2429,7 +2429,7 @@ function openBillingDeclaration(target, rows, preset) {
     billingDeclarationTarget.anchorApplied = false;
   }
   const amountText = billingAmountsText(target.estimated_amounts);
-  context.textContent = target.host + " · " + (missing.provider ? "服务商未知" : target.provider_id) +
+  context.textContent = target.harness + " · " + (missing.provider ? "服务商未知" : target.provider_id) +
     (target.model_id ? " · " + target.model_id : " · 全部模型");
   const stats = document.getElementById("ov-billing-declaration-stats");
   if (stats) {
@@ -2501,7 +2501,7 @@ function syncBillingOpenEnded() {
   }
 }
 
-// 作用范围一句话跟着批量勾选与日期变：宿主 · N 个模型（首个 等）· 起–止（北京时间）。
+// 作用范围一句话跟着批量勾选与日期变：执行环境 · N 个模型（首个 等）· 起–止（北京时间）。
 function syncBillingScopeText() {
   const target = billingDeclarationTarget;
   const scope = document.getElementById("ov-billing-scope-text");
@@ -2516,7 +2516,7 @@ function syncBillingScopeText() {
   // 不设结束日（勾了「持续有效」）时这里必须跟着说出来——否则那个「?」会被读成
   // "还没填完"，用户就会去填一个自己并不知道的日期。
   const rangeText = billingRangeText((start && start.value) || "", (end && end.value) || "");
-  scope.textContent = "作用范围：" + target.host + " · " +
+  scope.textContent = "作用范围：" + target.harness + " · " +
     (target.missing.provider ? "待选服务商" : target.provider_id) + " · " + modelText + " · " +
     (rangeText || "?") + "（北京时间日期）。";
 }
@@ -2538,8 +2538,8 @@ function billingDeclarationScopes() {
   if (providerUnresolved) scopes.push({ scope_kind: "provider", scope_value: "unresolved" });
   // 模型作用域：默认按计费方级匹配，之后同计费方的新模型名自动沿用（声明是持续生效的规则，不是模型
   // 清单快照），所以只在用户明确勾了「仅限这些模型」时写——**服务商未知的组除外**：那类声明匹配的是
-  // 「服务商为空」的事实，声明本身不再绑宿主，不带模型就成了对所有宿主、所有未知服务商用量的兜底，
-  // 会把别的中转 / 别的宿主的用量一并吞掉。模型是这类答复唯一的收窄依据，必须写。
+  // 「服务商为空」的事实，声明本身不再绑执行环境，不带模型就成了对所有执行环境、所有未知服务商用量的兜底，
+  // 会把别的中转 / 别的执行环境的用量一并吞掉。模型是这类答复唯一的收窄依据，必须写。
   const modelsOnly = document.getElementById("ov-billing-scope-models");
   if ((modelsOnly && modelsOnly.checked) || providerUnresolved) {
     for (const row of billingSelectedRows()) {
@@ -2715,7 +2715,7 @@ function billingPreviewText(impact, relationshipKind) {
     text += "；仍待确认 " + fmtTokens(Number(pending.tokens)) + " tokens（路由证据冲突，不会被声明吞掉）";
   }
   const models = (impact.scopes || []).filter((s) => s.scope_kind === "model").map((s) => s.scope_value);
-  text += "。范围：" + impact.host + " · " + impact.provider_id +
+  text += "。范围：" + impact.harness + " · " + impact.provider_id +
     (models.length > 3 ? " · " + models.length + " 个模型" : (models.length ? " · " + models.join("、") : "")) +
     " · " + billingRangeText(impact.effective_start, impact.effective_end) + "。";
   return text;
@@ -3034,7 +3034,7 @@ async function renderRetentionSettings() {
       save.disabled = true;
       try {
         await invoke("save_retention_config", { input: { months } });
-        show("已保存：下次本机维护将保留最近 " + months + " 个自然月；不会删除宿主原始日志。");
+        show("已保存：下次本机维护将保留最近 " + months + " 个自然月；不会删除执行环境原始日志。");
       } catch (e) {
         show("保存失败：" + errText(e));
         status.focus();
@@ -3179,15 +3179,15 @@ function csvCell(value) {
 // 当前视图导出刻意只消费已经渲染的月度权威 DTO；不查询会话详情，不重算价格，
 // 也不把本地路径、账户或原始日志写进临时文件。金额保留原币与 basis，不跨币相加。
 function summaryExportCsv(monthly) {
-  const header = ["record_kind", "window", "host", "provider", "tokens", "basis", "currency",
+  const header = ["record_kind", "window", "harness", "provider", "tokens", "basis", "currency",
     "amount", "amount_status", "evidence_basis", "pricing_method", "freshness",
     "last_observed_at", "coverage_measured_fields", "coverage_total_fields",
     "coverage_denominator_version", "summary_contract"];
   const rows = [header];
   if (!monthly || !monthly.month) return rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
   const coverage = monthly.coverage || {};
-  const common = (recordKind, host, provider, tokens, basis, currency, amount, amountStatus, source) => [
-    recordKind, monthly.month, host || "", provider || "", tokens == null ? "" : tokens,
+  const common = (recordKind, harness, provider, tokens, basis, currency, amount, amountStatus, source) => [
+    recordKind, monthly.month, harness || "", provider || "", tokens == null ? "" : tokens,
     basis || "", currency || "", amount == null ? "" : amount, amountStatus || "",
     source.evidence_basis || "", source.pricing_method || "", (source.freshness || {}).state || "",
     (source.freshness || {}).last_observed_at || monthly.last_observed_at || "",
@@ -3196,20 +3196,20 @@ function summaryExportCsv(monthly) {
     coverage.denominator_version == null ? "" : coverage.denominator_version,
     "monthly_summary/v1",
   ];
-  for (const [host, tokens] of Object.entries(monthly.tokens_by_host || {})) {
+  for (const [harness, tokens] of Object.entries(monthly.tokens_by_harness || {})) {
     const tokenTotal = tokens && tokens.total;
-    rows.push(common("host_tokens", host, "", tokenTotal, "", "", "", "observed", (monthly.by_host || {})[host] || {}));
+    rows.push(common("harness_tokens", harness, "", tokenTotal, "", "", "", "observed", (monthly.by_harness || {})[harness] || {}));
   }
-  for (const [hostProvider, source] of Object.entries(monthly.by_provider || {})) {
-    const divider = hostProvider.indexOf("/");
-    const host = divider >= 0 ? hostProvider.slice(0, divider) : hostProvider;
-    const provider = divider >= 0 ? hostProvider.slice(divider + 1) : "";
+  for (const [harnessProvider, source] of Object.entries(monthly.by_provider || {})) {
+    const divider = harnessProvider.indexOf("/");
+    const harness = divider >= 0 ? harnessProvider.slice(0, divider) : harnessProvider;
+    const provider = divider >= 0 ? harnessProvider.slice(divider + 1) : "";
     const amounts = source.amounts_by_basis || {};
     for (const [basis, amount] of Object.entries(amounts)) {
-      rows.push(common("provider_amount", host, provider, "", basis, source.currency || "", amount, "available", source));
+      rows.push(common("provider_amount", harness, provider, "", basis, source.currency || "", amount, "available", source));
     }
     if (source.has_unresolved) {
-      rows.push(common("provider_amount", host, provider, "", "", source.currency || "", "", "unresolved", source));
+      rows.push(common("provider_amount", harness, provider, "", "", source.currency || "", "", "unresolved", source));
     }
   }
   return rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
@@ -3452,8 +3452,8 @@ function renderBillingAmendment(row, declaration, amendButton) {
 }
 
 // 「明确计费方式」入口与面板（计费主链规格 §5.1/§5.2）。主体是**待确认组**
-// （`billing_confirmation_groups`：宿主 × provider × 模型 × 路由证据，带分币估算、
-// 按金额降序）；旧资产迁移候选只是组的一种证据来源，附在同宿主同 provider 的组
+// （`billing_confirmation_groups`：执行环境 × provider × 模型 × 路由证据，带分币估算、
+// 按金额降序）；旧资产迁移候选只是组的一种证据来源，附在同执行环境同 provider 的组
 // 下面；当月没有用量的候选单独成行。此前面板只从候选出发，没有旧资产的用户永远
 // 看不到待确认组（G5），而「是我的套餐」主按钮只翻候选状态、不归因（G1）。
 function billingEvidenceLabel(basis) {
@@ -3473,7 +3473,7 @@ function billingEvidenceLabel(basis) {
 function billingCandidateAsGroup(candidate) {
   const month = String(candidate.billing_period_start || "").slice(0, 7);
   return {
-    group_id: "candidate:" + candidate.candidate_id, host: candidate.host,
+    group_id: "candidate:" + candidate.candidate_id, harness: candidate.harness,
     provider_id: candidate.provider_id, model_id: null, evidence_basis: "missing",
     tokens: 0, session_count: 0, estimated_amounts: [],
     effective_start: monthStartDate(/^\d{4}-(0[1-9]|1[0-2])$/.test(month) ? month : statisticsMonth()),
@@ -3508,14 +3508,14 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     return;
   }
   const groups = groupsOk && Array.isArray(groupsReport.groups) ? groupsReport.groups : [];
-  // 三态行（自动归因规格 §5.1）：后端 `clusters` = 宿主 × 计费方/厂商 × 路由状态 ×
+  // 三态行（自动归因规格 §5.1）：后端 `clusters` = 执行环境 × 计费方/厂商 × 路由状态 ×
   // 判定状态；模型折进 models[]。程序已判定 → 一键「确认」（弹窗只剩订阅确认）；
   // 差一问 → 问题的选项直接放行内；需补充 → 进弹窗。没有 clusters（旧后端）时
   // 退回逐模型行。
   const clusters = groupsOk && Array.isArray(groupsReport.clusters) ? groupsReport.clusters : null;
   const candidates = candidatesOk && Array.isArray(candidatesReport.candidates) ? candidatesReport.candidates : [];
   const pendingCandidates = candidates.filter((c) => c.status === "pending");
-  // **待核对**的候选挂到同宿主同 provider 的第一组；挂不上的当月无用量，单独成行。
+  // **待核对**的候选挂到同执行环境同 provider 的第一组；挂不上的当月无用量，单独成行。
   // 已被某条有效声明采用（accepted）的候选**不能再挂到组上**：组的弹窗会把
   // `candidate_id` 当 `sourceCandidateId` 一起保存，而一张旧套餐记录只能归一条有效
   // 声明——2026-09-16 真机：anthropic 订阅早已声明，新会话进了待确认，弹窗又带上
@@ -3529,7 +3529,7 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     // 那一行自己带出（DTO 的 source_candidate_id / amount），这里不再占位。
     if (candidate.status === "accepted") continue;
     const owner = candidate.status === "pending"
-      ? rows.find((row) => row.host === candidate.host && row.provider_id === candidate.provider_id && !row.candidate)
+      ? rows.find((row) => row.harness === candidate.harness && row.provider_id === candidate.provider_id && !row.candidate)
       : null;
     if (owner) owner.candidate = candidate;
     else orphanCandidates.push(candidate);
@@ -3612,7 +3612,7 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
   // 套餐记录待核对"，页面上却无处可点（验收审查 iteration 3 #2）。
   const rowByGroupId = new Map(rows.filter((row) => row.group_id).map((row) => [row.group_id, row]));
   const clusterRowsOf = (cluster) => (cluster.models || []).map((m) => ({
-    group_id: m.group_id, host: cluster.host,
+    group_id: m.group_id, harness: cluster.harness,
     provider_id: cluster.provider_id || "<unknown>", model_id: m.model_id,
     evidence_basis: cluster.evidence_basis, pricing_basis: cluster.pricing_basis,
     tokens: m.tokens, session_count: m.session_count, estimated_amounts: m.estimated_amounts || [],
@@ -3629,9 +3629,9 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
   const basisText = (verdict) => (verdict.basis || []).map((b) => ({
     "route.session-native": "请求 ID 为官方格式", "route.explicit-official-route": "明确官方路由",
     "route.account-time-bound": "账户期证据", "route.config-time-bound": "配置期证据",
-    "host.provider_reported": "宿主自报服务商", "model.gateway_named": "网关式模型命名",
+    "harness.provider_reported": "执行环境自报服务商", "model.gateway_named": "网关式模型命名",
     "response_id.vendor_shape": "响应 ID 与厂商形状一致", "account.api_key": "账户使用 API key",
-    "route.conflict": "宿主自报与会话路由证据冲突", "config.endpoint": "配置里的端点", "config.gateway_named": "模型映射带厂商前缀（中转约定）",
+    "route.conflict": "执行环境自报与会话路由证据冲突", "config.endpoint": "配置里的端点", "config.gateway_named": "模型映射带厂商前缀（中转约定）",
     "config.endpoint.multiple": "配置里列了多个端点（其中至少一个是中转）",
     "config.endpoint.ambiguous": "配置里官方端点与中转同时存在（不确定这批走的是哪一个）",
     "config.endpoint.mixed": "这行里的模型各自配了不同端点（不替它们挑一个）",
@@ -3664,10 +3664,10 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
     const party = verdict.billing_party || null;
     const vendor = verdict.model_vendor || null;
     const who = party ? party : (vendor ? "计费方待定（模型厂商 " + vendor + "）" : "服务商未知");
-    const routeText = { official: "官方路由", provider_reported: "宿主自报官方", gateway: "经中转", relay_config: "经中转", vendor_shape: "厂商端点或中转", conflict: "路由证据冲突", unknown: "路由未知" }[verdict.route_state] || "路由未知";
+    const routeText = { official: "官方路由", provider_reported: "执行环境自报官方", gateway: "经中转", relay_config: "经中转", vendor_shape: "厂商端点或中转", conflict: "路由证据冲突", unknown: "路由未知" }[verdict.route_state] || "路由未知";
     const amount = billingAmountsText(cluster.estimated_amounts);
     const models = (cluster.models || []).map((m) => m.model_id).filter(Boolean);
-    let head = cluster.host + " · " + who + " · " + routeText;
+    let head = cluster.harness + " · " + who + " · " + routeText;
     if (verdict.route_state === "relay_config" && verdict.config_endpoint) {
       // 说清是**哪个文件**给出来的端点——曾经写死 "ANTHROPIC_BASE_URL"，codex/dsh/pi
       // 的行会因此说假话（验收审查 iteration 7 #3）。
@@ -3781,7 +3781,7 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
       actions.className = "billing-review-actions";
       if (row.resolvedCandidate) {
         detail.textContent = row.candidate.provider_id + " · " + billingCandidateAmount(row.candidate) +
-          "（" + row.host + "）· 已忽略：这不是你的套餐。";
+          "（" + row.harness + "）· 已忽略：这不是你的套餐。";
         const undo = document.createElement("button");
         undo.className = "chip-link";
         undo.textContent = "重新打开";
@@ -3801,7 +3801,7 @@ function renderBillingConfirmation(groupsReport, candidatesReport) {
         continue;
       }
       const rowAmount = billingAmountsText(row.estimated_amounts);
-      detail.textContent = row.host + " · " + row.provider_id + (row.model_id ? " · " + row.model_id : "") +
+      detail.textContent = row.harness + " · " + row.provider_id + (row.model_id ? " · " + row.model_id : "") +
         " · " + billingEvidenceLabel(row.evidence_basis) +
         " · " + billingRangeText(row.effective_start, row.effective_end) +
         " · " + Number(row.session_count || 0) + " 个会话 · " + fmtTokens(Number(row.tokens || 0)) + " tokens · " +
@@ -3902,7 +3902,7 @@ function renderBillingRecalculationJobs(report) {
   }
 }
 
-async function renderHostBills(period) {
+async function renderHarnessBills(period) {
   const existing = document.getElementById("ov-bill-existing");
   const status = document.getElementById("ov-bill-status");
   const save = document.getElementById("ov-bill-save");
@@ -3919,7 +3919,7 @@ async function renderHostBills(period) {
       const row = document.createElement("div");
       row.className = "billing-review-row";
       const detail = document.createElement("div");
-      detail.textContent = bill.host + " · " + bill.provider_id + " · " +
+      detail.textContent = bill.harness + " · " + bill.provider_id + " · " +
         bill.billing_basis + " · " + bill.amount_minor + " " + bill.currency;
       const remove = document.createElement("button");
       remove.className = "btn secondary";
@@ -3927,8 +3927,8 @@ async function renderHostBills(period) {
       remove.onclick = async () => {
         remove.disabled = true;
         try {
-          await invoke("delete_host_bill", { billId: bill.bill_id });
-          const refreshed = await invoke("host_bills_for_period", {
+          await invoke("delete_harness_bill", { billId: bill.bill_id });
+          const refreshed = await invoke("harness_bills_for_period", {
             billingPeriod: document.getElementById("ov-bill-period").value.trim(),
           });
           showBills(refreshed);
@@ -3945,7 +3945,7 @@ async function renderHostBills(period) {
   document.getElementById("ov-bill-period").value = period;
   if (save.dataset.bound === "1") {
     try {
-      showBills(await invoke("host_bills_for_period", { billingPeriod: period }));
+      showBills(await invoke("harness_bills_for_period", { billingPeriod: period }));
     } catch (_) { /* 账单是增强入口，不遮蔽总览 */ }
     return;
   }
@@ -3954,23 +3954,23 @@ async function renderHostBills(period) {
     save.disabled = true;
     status.hidden = false;
     try {
-      const host = document.getElementById("ov-bill-host").value.trim();
+      const harness = document.getElementById("ov-bill-harness").value.trim();
       const provider = document.getElementById("ov-bill-provider").value.trim();
       const billingPeriod = document.getElementById("ov-bill-period").value.trim();
       const amount = Number(document.getElementById("ov-bill-amount").value);
       const currency = document.getElementById("ov-bill-currency").value.trim();
       const evidence = document.getElementById("ov-bill-evidence").value.trim();
-      if (!host || !provider || !/^\d{4}-(0[1-9]|1[0-2])$/.test(billingPeriod) ||
+      if (!harness || !provider || !/^\d{4}-(0[1-9]|1[0-2])$/.test(billingPeriod) ||
           !Number.isSafeInteger(amount) || amount < 0 || !currency || !evidence) {
-        throw new Error("请填写宿主、服务商、有效账期、非负整数金额、币种和来源说明");
+        throw new Error("请填写执行环境、服务商、有效账期、非负整数金额、币种和来源说明");
       }
-      await invoke("save_host_bill", {
-        billId: "bill-" + Date.now().toString(36), host, providerId: provider,
+      await invoke("save_harness_bill", {
+        billId: "bill-" + Date.now().toString(36), harness, providerId: provider,
         billingPeriod, billingBasis: document.getElementById("ov-bill-basis").value,
         amountMinor: amount, currency, evidenceRef: evidence,
       });
       status.textContent = "账单已保存；它与订阅合同分开，不会改变已观测 tokens。";
-      const report = await invoke("host_bills_for_period", { billingPeriod });
+      const report = await invoke("harness_bills_for_period", { billingPeriod });
       showBills(report);
     } catch (e) {
       status.textContent = "保存失败：" + errText(e);
@@ -3993,15 +3993,15 @@ async function renderHostBills(period) {
   csvImport.onclick = async () => {
     csvImport.disabled = true;
     try {
-      await invoke("save_host_bills", { rows: csvRows.map((row, i) => ({
+      await invoke("save_harness_bills", { rows: csvRows.map((row, i) => ({
         bill_id: billingCsvBillId(row),
-        host: row.host, provider_id: row.provider_id, billing_period: row.billing_period,
+        harness: row.harness, provider_id: row.provider_id, billing_period: row.billing_period,
         billing_basis: row.billing_basis, amount_minor: row.amount_minor,
         currency: row.currency, evidence_ref: row.evidence_ref,
       })) });
       csvStatus.hidden = false;
       csvStatus.textContent = "已导入 " + csvRows.length + " 行账单记录。";
-      const report = await invoke("host_bills_for_period", { billingPeriod: period });
+      const report = await invoke("harness_bills_for_period", { billingPeriod: period });
       showBills(report);
     } catch (e) {
       csvImport.disabled = false;
@@ -4010,14 +4010,14 @@ async function renderHostBills(period) {
     }
   };
   try {
-    const report = await invoke("host_bills_for_period", { billingPeriod: period });
+    const report = await invoke("harness_bills_for_period", { billingPeriod: period });
     showBills(report);
   } catch (_) { /* 账单是增强入口，不遮蔽总览 */ }
 }
 
-// 「本月逐日」panel：read_calendar_month（逐日三宿主 token + 分币耗费）。
+// 「本月逐日」panel：read_calendar_month（逐日三执行环境 token + 分币耗费）。
 // 旧 read_month 的 DSH-only 日轴在 DSH 零用量月份只剩全零行，与总览页的
-// 跨宿主叙事自相矛盾——v0.9.1 Phase 4 已退役该命令。costs 每段带宿主前缀。
+// 跨执行环境叙事自相矛盾——v0.9.1 Phase 4 已退役该命令。costs 每段带执行环境前缀。
 function renderOverviewDays(cal) {
   const list = document.getElementById("ov-days-list");
   const empty = document.getElementById("ov-days-empty");
@@ -4035,10 +4035,10 @@ function renderOverviewDays(cal) {
   empty.hidden = true;
   for (const [date, d] of rows) {
     const costs = [];
-    if ((d.dsh_cost_cny || 0) > 0) costs.push(HOST_DISPLAY.dsh + " " + fmtCur(d.dsh_cost_cny, "CNY"));
-    if ((d.claude_cost_cny || 0) > 0) costs.push(HOST_DISPLAY["claude-code"] + " " + fmtCur(d.claude_cost_cny, "CNY"));
-    if ((d.claude_cost_usd || 0) > 0) costs.push(HOST_DISPLAY["claude-code"] + " " + fmtCur(d.claude_cost_usd, "USD"));
-    if ((d.codex_cost_usd || 0) > 0) costs.push(HOST_DISPLAY.codex + " " + fmtCur(d.codex_cost_usd, "USD"));
+    if ((d.dsh_cost_cny || 0) > 0) costs.push(HARNESS_DISPLAY.dsh + " " + fmtCur(d.dsh_cost_cny, "CNY"));
+    if ((d.claude_cost_cny || 0) > 0) costs.push(HARNESS_DISPLAY["claude-code"] + " " + fmtCur(d.claude_cost_cny, "CNY"));
+    if ((d.claude_cost_usd || 0) > 0) costs.push(HARNESS_DISPLAY["claude-code"] + " " + fmtCur(d.claude_cost_usd, "USD"));
+    if ((d.codex_cost_usd || 0) > 0) costs.push(HARNESS_DISPLAY.codex + " " + fmtCur(d.codex_cost_usd, "USD"));
     const li = document.createElement("li");
     li.innerHTML = `<span class="day-date">${date}</span>` +
       `<span class="day-tokens">${fmtTokens(d.total_tokens)} tokens</span>` +
@@ -4058,11 +4058,11 @@ function renderOverviewDays(cal) {
 function spendByBasis(dto, basis) {
   return ((dto && dto.actual_spend_by_basis) || {})[basis] || {};
 }
-// 按量实付 = metered_actual + host_billed：两档都是真实账单口径（宿主账单不能
+// 按量实付 = metered_actual + harness_billed：两档都是真实账单口径（执行环境账单不能
 // 重标为模型 API 成本，但同样回答"要付多少"），按币合并。
 function meteredSpend(dto) {
   const out = {};
-  for (const basis of ["metered_actual", "host_billed"]) {
+  for (const basis of ["metered_actual", "harness_billed"]) {
     for (const [c, v] of Object.entries(spendByBasis(dto, basis))) out[c] = (out[c] || 0) + v;
   }
   return out;
@@ -4138,12 +4138,12 @@ function renderSpendCards(daily, monthly, fx, window = { date: statisticsToday()
   const mView = monthly && monthly.metered_view ? meteredViewText(monthly) : { parts: fmtCurMap(meteredSpend(monthly)), title: "", unattributed: [], allActual: true };
   const mMetered = mView.parts;
   const mSubscription = fmtCurMap(spendByBasis(monthly, "fixed_subscription"));
-  const monthTokens = monthly ? tokensSum(monthly.tokens_by_host).total : 0;
+  const monthTokens = monthly ? tokensSum(monthly.tokens_by_harness).total : 0;
   // REQ-043：**未录入套餐/付款**时要写「尚未设置套餐或账单」，不能写「无数据」。
   // 「无数据」会被读成「读取失败 / 数据缺失」，而真相是「你还没声明计费方式，
   // 所以没有实付口径可算」——真实困惑案例（2026-09-14）：用户看到本月支出两栏
   // 都是「无数据」，以为读不到数据，其实只有名义成本可算。两栏的来源不同：
-  // 按量费用 = 账单（`host_bills` → metered_actual/host_billed），订阅月费 =
+  // 按量费用 = 账单（`harness_bills` → metered_actual/harness_billed），订阅月费 =
   // 价目表的 `catalog_2026_09.subscriptions` **加上**用户在「明确计费方式」里声明的
   // 月费（`billing_declarations`，summary.rs::apply_declared_subscription_fees）。
   // 三种空态必须分开：
@@ -4174,14 +4174,14 @@ function renderSpendCards(daily, monthly, fx, window = { date: statisticsToday()
           : "本月还没有用量记录";
   }
   // 今日消耗：tokens 主数 + 今日按量实付；名义只作脚注（IA 复核 §7）。
-  const tk = tokensSum(daily && daily.tokens_by_host);
+  const tk = tokensSum(daily && daily.tokens_by_harness);
   setAmount("ov-t-tokens", daily && tk.total > 0 ? fmtTokens(tk.total) + " tokens" : "无数据");
   const tSub = document.getElementById("ov-t-tokens-sub");
   if (tSub) tSub.textContent = daily && tk.total > 0 ? "今天处理的 token 数（含缓存读写）" : daily ? "今天还没有用量记录" : "今日数据暂不可读，请刷新重试";
   const tView = daily && daily.metered_view ? meteredViewText(daily) : { parts: fmtCurMap(meteredSpend(daily)), title: "", unattributed: [], allActual: true };
   const tMetered = tView.parts;
   // 与本月同一套空态区分（REQ-043）：「无数据」只在读不到 DTO 或今天没用量时用。
-  const todayTokens = daily ? tokensSum(daily.tokens_by_host).total : 0;
+  const todayTokens = daily ? tokensSum(daily.tokens_by_harness).total : 0;
   // 今天有用量但按量视图为空：要么没声明（提示去设置），要么**全在套餐内**——
   // 后者不是"尚未设置"，是"今天没花按量的钱"（2026-09-17：订阅覆盖后今日卡仍写
   // 「尚未设置套餐或账单」，用户以为归因失效）。套餐内的判据 = 月 DTO 有订阅月费。
@@ -4192,25 +4192,25 @@ function renderSpendCards(daily, monthly, fx, window = { date: statisticsToday()
     tMetered.length ? tView.title + " · 按价卡估算；账单按月校准，不摊到天" : "");
   renderNominalInto("ov-t-nominal", daily ? nominalFromByProvider(daily.by_provider) : {}, fx);
   // 本月用量行：规格 §4 的「已观测 tokens」与「名义成本」——首屏可见，不占卡。
-  const mtk = tokensSum(monthly && monthly.tokens_by_host);
+  const mtk = tokensSum(monthly && monthly.tokens_by_harness);
   const dayOfMonth = Number(window.date.slice(8)) || 1;
   setAmount("ov-m-tokens", monthly && mtk.total > 0 ? fmtTokens(mtk.total) + " tokens" : "无数据");
   const mtkSub = document.getElementById("ov-m-tokens-sub");
   if (mtkSub) {
-    const perHost = Object.entries(monthly && monthly.tokens_by_host || {})
+    const perHarness = Object.entries(monthly && monthly.tokens_by_harness || {})
       .filter(([, t]) => t && t.total > 0)
       .sort((a, b) => b[1].total - a[1].total)
-      .map(([host, t]) => (HOST_DISPLAY[host] || host) + " " + fmtTokens(t.total));
+      .map(([harness, t]) => (HARNESS_DISPLAY[harness] || harness) + " " + fmtTokens(t.total));
     mtkSub.textContent = monthly && mtk.total > 0
       ? "日均 " + fmtTokens(Math.round(mtk.total / dayOfMonth)) + "（含缓存读写）"
-        + (perHost.length ? " · " + perHost.join(" · ") : "")
+        + (perHarness.length ? " · " + perHarness.join(" · ") : "")
       : monthly ? "本月还没有用量记录" : "本月用量暂不可读，请刷新重试";
   }
 }
 
 // 费用明细（本月）：原「双轨账」+「数据源」合成一张表。**服务商是主键**（用户
-// 付钱的对象），宿主是副属性「经 X」——同一服务商经多个工具使用时合成一行
-// （同币种相加；币种不同则分行，不跨币相加），宿主并列成 chip，新鲜度取最差。
+// 付钱的对象），执行环境是副属性「经 X」——同一服务商经多个工具使用时合成一行
+// （同币种相加；币种不同则分行，不跨币相加），执行环境并列成 chip，新鲜度取最差。
 // 分组：订阅（固定月费）/ 按量（按用量付费）/ 无法归类。订阅利用率倍数 =
 // 标价折算 ÷ 月费，>50× 是「请核对套餐」的自检告警而非套利（§6.7 护栏）；
 // unresolved 条目只说「部分用量无法估价」，不当 0。evidence_basis /
@@ -4222,26 +4222,26 @@ const DUAL_LABEL = {
   metered_actual: "按量实付",
   metered_estimate: "按量估算",
   metered_declared: "按量估算（已归因）",
-  host_billed: "宿主账单",
+  harness_billed: "执行环境账单",
 };
 const FRESH_RANK = { unavailable: 0, fresh: 1, partial: 2, stale: 3 };
-function groupByProvider(byProvider, byHost) {
+function groupByProvider(byProvider, byHarness) {
   const groups = new Map(); // provider|currency -> row
   for (const [key, h] of Object.entries(byProvider)) {
-    const [host, provider = host] = key.split("/");
+    const [harness, provider = harness] = key.split("/");
     const bases = h.amounts_by_basis || {};
     if (!Object.keys(bases).length && !h.has_unresolved) continue;
     const currency = h.currency || "";
     const id = provider + "|" + currency;
-    const fs = ((byHost[host] || {}).freshness) || {};
+    const fs = ((byHarness[harness] || {}).freshness) || {};
     let row = groups.get(id);
     if (!row) {
-      row = { provider, currency, hosts: [], amounts: {}, has_unresolved: false,
+      row = { provider, currency, harnesses: [], amounts: {}, has_unresolved: false,
         pricing_methods: new Set(), evidence: new Set(), reasons: new Set(),
         freshness: { state: "unavailable", at: "" } };
       groups.set(id, row);
     }
-    row.hosts.push(host);
+    row.harnesses.push(harness);
     for (const [b, v] of Object.entries(bases)) row.amounts[b] = (row.amounts[b] || 0) + v;
     row.has_unresolved = row.has_unresolved || !!h.has_unresolved;
     if (h.pricing_method) row.pricing_methods.add(h.pricing_method);
@@ -4259,8 +4259,8 @@ function renderDualTrack(monthly) {
   const empty = document.getElementById("ov-dual-empty");
   list.textContent = "";
   const byProvider = (monthly && monthly.by_provider) || {};
-  const byHost = (monthly && monthly.by_host) || {};
-  const rows = groupByProvider(byProvider, byHost);
+  const byHarness = (monthly && monthly.by_harness) || {};
+  const rows = groupByProvider(byProvider, byHarness);
   if (!rows.length) {
     empty.hidden = false;
     empty.textContent = monthly ? "本月还没有可拆分的支出记录" : "本月支出明细暂不可读，请刷新重试";
@@ -4287,7 +4287,7 @@ function renderDualTrack(monthly) {
     list.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(ev); } });
   }
   const nameOf = (r) => escapeHtml(PROVIDER_LABEL[r.provider] || r.provider);
-  const viaOf = (r) => `<span class="via muted">经 ${r.hosts.map((h) => escapeHtml(HOST_DISPLAY[h] || h)).join("、")}</span>`;
+  const viaOf = (r) => `<span class="via muted">经 ${r.harnesses.map((h) => escapeHtml(HARNESS_DISPLAY[h] || h)).join("、")}</span>`;
   // hover 里放 reason code：证据来源 / 计价方式 / 未定价原因。
   const hoverOf = (r) => [
     r.evidence.size ? "证据来源 " + [...r.evidence].join(", ") : "",
@@ -4307,7 +4307,7 @@ function renderDualTrack(monthly) {
   for (const r of rows) {
     const bases = Object.keys(r.amounts);
     if (bases.includes("fixed_subscription") || bases.includes("api_equivalent")) subEntries.push(r);
-    else if (bases.some((b) => b.startsWith("metered") || b === "host_billed")) metered.push(r);
+    else if (bases.some((b) => b.startsWith("metered") || b === "harness_billed")) metered.push(r);
     else unresolved.push(r);
   }
   const unresolvedChip = '<span class="chip hostbilled">部分用量无法估价</span>';
@@ -4348,7 +4348,7 @@ function renderDualTrack(monthly) {
         label = r.pricing_methods.has("fair-market-fallback")
             ? "已归因 · 价卡未收录，按官方标价估算" : "已归因 · 按其价卡估算";
       }
-      const cls = b === "metered_actual" || b === "host_billed" ? "measured" : "estimate";
+      const cls = b === "metered_actual" || b === "harness_billed" ? "measured" : "estimate";
       return `<span class="chip ${cls}">${label} ${fmtCur(v, r.currency || null)}${cls === "estimate" ? "（参考）" : ""}</span>`;
     });
     if (r.has_unresolved) chips.push(unresolvedChip);
@@ -4487,15 +4487,15 @@ function syncDot(sync) {
 
 // v0.9 Stage 0.6 共用渲染器：把 data_monthly_summary 的 DTO 渲染成
 // 「数据源」panel。**核心纪律**（spec §0.1）：
-// - unavailable 宿主固定显示「无数据」，**绝不渲染 0.00**（空宿主 amount
+// - unavailable 执行环境固定显示「无数据」，**绝不渲染 0.00**（空执行环境 amount
 //   字段是空 map 不是 0，0.00 会让用户把"没测到"误读成"测到 0 元"——
 //   .sum() 产 -0.0 的负零事件就是这条纪律踩出来的，DTO 已修到正零），
 // - 金额一律带 basis 标签：metered_actual→「实测」、metered_estimate→「估算」、
 //   api_equivalent→「套餐等价·诊断」、fixed_subscription→「订阅」、
-//   host_billed→「宿主账单」，不允许裸数字；
+//   harness_billed→「执行环境账单」，不允许裸数字；
 // - **不带货币符号**——DTO 刻意不带 currency：claude 的 CNY 估与 USD 诊
 //   断混在同一 map，前端写 "¥549" 就是编造币种。
-// - staleness 必须挂在宿主行右侧（与数字同排），不许只藏到下方 note：
+// - staleness 必须挂在执行环境行右侧（与数字同排），不许只藏到下方 note：
 //   用户从卡片本身就能判断"是不是真的"，这是 2026-09-01 alert stale
 //   事故里 month.json 与 alert.json 自相矛盾的同款教训。
 const BASIS_LABEL = {
@@ -4504,11 +4504,11 @@ const BASIS_LABEL = {
   metered_declared: { label: "估算·已归因", cls: "estimate" },
   api_equivalent: { label: "套餐等价·诊断", cls: "diagnostic" },
   fixed_subscription: { label: "订阅", cls: "subscription" },
-  host_billed: { label: "宿主账单", cls: "hostbilled" },
+  harness_billed: { label: "执行环境账单", cls: "hostbilled" },
 };
 // id 顺序：DTO 给的 BTreeMap 键序就是事实序（白盒契约：白盒降级是从这点
 // 开始的——以后 summary 给排序时删这里）。
-const HOST_DISPLAY = {
+const HARNESS_DISPLAY = {
   "zcode": "ZCode",
   "dsh": "DeepSeek Harness",
   "claude-code": "Claude Code",
@@ -4548,14 +4548,14 @@ function pricingReasonText(reason) {
 
 const MIXED_CURRENCY = "__mixed__";
 
-// 跨宿主面板的金额必须分币。`by_host` 条目可能混币（claude-code 下 anthropic
+// 跨执行环境面板的金额必须分币。`by_harness` 条目可能混币（claude-code 下 anthropic
 // USD + minimax CNY），契约里 currency=None 就是"未声明单币"（data_contract.rs
-// HostAmount::currency）；此前渲染 `v.toFixed(2)` 裸数字，把 $20+¥49 显示成
+// HarnessAmount::currency）；此前渲染 `v.toFixed(2)` 裸数字，把 $20+¥49 显示成
 // 「订阅 69.00」——正是 CLAUDE.md 说的"同桶跨币相加就是编造"（2026-09-15 巡检）。
-// 权威归属在 by_provider（键 "host/provider"，条目级单币）：按宿主前缀收集，
-// 只在同币种内相加；没有 provider 归属时才回退到 by_host，且混币时不给数字。
-// 返回 [{basis, currency, amount}]，basis 顺序沿用 by_host 的 BTreeMap 键序。
-function hostAmountsByCurrency(hostId, hostRow, byProvider) {
+// 权威归属在 by_provider（键 "harness/provider"，条目级单币）：按执行环境前缀收集，
+// 只在同币种内相加；没有 provider 归属时才回退到 by_harness，且混币时不给数字。
+// 返回 [{basis, currency, amount}]，basis 顺序沿用 by_harness 的 BTreeMap 键序。
+function harnessAmountsByCurrency(harnessId, harnessRow, byProvider) {
   const out = [];
   const seen = new Set();
   const push = (basis, currency, amount) => {
@@ -4569,9 +4569,9 @@ function hostAmountsByCurrency(hostId, hostRow, byProvider) {
     }
   };
   const providerRows = Object.entries(byProvider || {})
-    .filter(([key]) => key.startsWith(hostId + "/"))
+    .filter(([key]) => key.startsWith(harnessId + "/"))
     .map(([, r]) => r);
-  const basisOrder = Object.keys(hostRow.amounts_by_basis || {});
+  const basisOrder = Object.keys(harnessRow.amounts_by_basis || {});
   if (providerRows.length > 0) {
     for (const r of providerRows) {
       if (!r.currency) continue;
@@ -4580,8 +4580,8 @@ function hostAmountsByCurrency(hostId, hostRow, byProvider) {
     out.sort((a, b) => basisOrder.indexOf(a.basis) - basisOrder.indexOf(b.basis));
     return out;
   }
-  for (const [basis, amount] of Object.entries(hostRow.amounts_by_basis || {})) {
-    push(basis, hostRow.currency || MIXED_CURRENCY, amount);
+  for (const [basis, amount] of Object.entries(harnessRow.amounts_by_basis || {})) {
+    push(basis, harnessRow.currency || MIXED_CURRENCY, amount);
   }
   return out;
 }
@@ -4593,28 +4593,28 @@ function renderSourcesPanel(dto, prefix) {
   list.innerHTML = "";
   meta.innerHTML = "";
 
-  const byHost = dto.by_host || {};
-  const keys = Object.keys(byHost);
+  const byHarness = dto.by_harness || {};
+  const keys = Object.keys(byHarness);
   const allUnavailable = keys.every(
-    (k) => !byHost[k].freshness || byHost[k].freshness.state === "unavailable"
+    (k) => !byHarness[k].freshness || byHarness[k].freshness.state === "unavailable"
   );
 
-  if (allUnavailable && (dto.excluded_hosts || []).length > 0
-      && Object.keys(byHost).length === 0) {
+  if (allUnavailable && (dto.excluded_harnesses || []).length > 0
+      && Object.keys(byHarness).length === 0) {
     empty.hidden = false;
-    empty.textContent = "本月无跨宿主数据";
+    empty.textContent = "本月无跨执行环境数据";
   } else {
     empty.hidden = true;
     for (const id of keys) {
-      const row = byHost[id];
+      const row = byHarness[id];
       const li = document.createElement("li");
       const fs = (row.freshness || {}).state || "unavailable";
       const unavailable = fs === "unavailable";
       li.className = unavailable ? "no-data" : "";
 
       const name = document.createElement("span");
-      name.className = "host";
-      name.textContent = HOST_DISPLAY[id] || id;
+      name.className = "harness";
+      name.textContent = HARNESS_DISPLAY[id] || id;
       li.appendChild(name);
 
       const basisEl = document.createElement("span");
@@ -4627,7 +4627,7 @@ function renderSourcesPanel(dto, prefix) {
         span.textContent = "无数据";
         basisEl.appendChild(span);
       } else {
-        const entries = hostAmountsByCurrency(id, row, dto.by_provider);
+        const entries = harnessAmountsByCurrency(id, row, dto.by_provider);
         if (entries.length === 0) {
           // 有观测日但全 unknown（claude 全 unknown 日等）：不算 unavailable，
           // 也不产金额——chip 标「无可计金额」+ has_unresolved=true 时再加
@@ -4644,7 +4644,7 @@ function renderSourcesPanel(dto, prefix) {
             chip.className = "chip " + meta2.cls;
             if (currency === MIXED_CURRENCY) {
               chip.textContent = meta2.label + " 币种未声明，见费用明细";
-              chip.title = "该宿主条目未声明单一币种（通常是多家服务商 $ 与 ¥ 混在一起），跨币相加没有意义；总览「费用明细」按服务商分币列出";
+              chip.title = "该执行环境条目未声明单一币种（通常是多家服务商 $ 与 ¥ 混在一起），跨币相加没有意义；总览「费用明细」按服务商分币列出";
             } else {
               chip.textContent = meta2.label + " " + fmtCur(amount, currency);
             }
@@ -4682,25 +4682,25 @@ function renderSourcesPanel(dto, prefix) {
   }
 
   // coverage + excluded + summable。summable 行是诚实窗口外的最后一道：
-  // 即便所有宿主都显示「无数据」，summable 也必须是 0 + 备注，而不是消失。
+  // 即便所有执行环境都显示「无数据」，summable 也必须是 0 + 备注，而不是消失。
   const cov = dto.coverage || { measured_fields: 0, total_fields: 0, denominator_version: 1 };
   const covLine = document.createElement("div");
   covLine.textContent = "数据覆盖 " + cov.measured_fields + "/" + cov.total_fields +
 "";
   meta.appendChild(covLine);
 
-  const excluded = dto.excluded_hosts || [];
+  const excluded = dto.excluded_harnesses || [];
   const excLine = document.createElement("div");
   if (excluded.length === 0) {
     excLine.textContent = "范围外：（无）";
   } else {
-    excLine.textContent = "范围外：" + excluded.map((h) => HOST_DISPLAY[h] || h).join("、");
+    excLine.textContent = "范围外：" + excluded.map((h) => HARNESS_DISPLAY[h] || h).join("、");
   }
   meta.appendChild(excLine);
 
   // summable 行：unavailable 时改显「无数据」红字 + 备注，绝不显 0.00。
   const summable = dto.total_summable;
-  const anyData = keys.some((k) => (byHost[k].freshness || {}).state !== "unavailable");
+  const anyData = keys.some((k) => (byHarness[k].freshness || {}).state !== "unavailable");
   const sumLine = document.createElement("div");
   sumLine.className = "summable" + (anyData ? "" : " no-data");
   if (anyData && summable > 0) {
@@ -4719,7 +4719,7 @@ function renderSourcesPanel(dto, prefix) {
     sumLine.textContent = "账单级实付：无数据";
     const note = document.createElement("span");
     note.className = "note";
-    note.textContent = "全部宿主 unavailable；spec §0.1 不得渲染为 ¥0 或看似完整的总额";
+    note.textContent = "全部执行环境 unavailable；spec §0.1 不得渲染为 ¥0 或看似完整的总额";
     sumLine.appendChild(note);
   }
   meta.appendChild(sumLine);
@@ -4732,7 +4732,7 @@ function renderSourcesPanelFailure(message, prefix) {
   list.innerHTML = "";
   meta.innerHTML = "";
   empty.hidden = false;
-  empty.textContent = "跨宿主源状态读取失败：" + message;
+  empty.textContent = "跨执行环境源状态读取失败：" + message;
 }
 
 // ---------- Token 日历 ----------
@@ -4754,7 +4754,7 @@ async function renderCalendar() {
   const monthInput = document.getElementById("cal-month");
   monthInput.value = calMonth;
 
-  // v0.9 Stage D：日历数据源切逐日跨宿主（read_calendar_month）——此前只画
+  // v0.9 Stage D：日历数据源切逐日跨执行环境（read_calendar_month）——此前只画
   // DSH 日轴，DSH 零用量月份让 claude/codex 的真实用量在日历上完全不可见
   // （2026-09 实测：57 亿 token 的月份显示一片空白）。旧 read_month 命令
   // v0.9.1 Phase 4 已退役。
@@ -4774,7 +4774,7 @@ async function renderCalendar() {
   grid.innerHTML = "";
 
   // 数据源 panel（v0.9 Stage 0.6 日历页月份级诚实状态）：并发拉
-  // data_monthly_summary，失败不拖垮方格（spec §0.1：日轴与跨宿主源各自
+  // data_monthly_summary，失败不拖垮方格（spec §0.1：日轴与跨执行环境源各自
   // 诚实渲染，不互相替代）。方格走 read_month 的 DSH 日轴数据，月级源
   // 状态走 data_monthly_summary——方格与月级源可能分别有/无数据，不许混为一谈。
   let calSourcesDto = null;
@@ -4801,7 +4801,7 @@ async function renderCalendar() {
     // 下方 sources panel 的渲染函数统一处理，这里只覆盖"金额存在"分支。
   }
 
-  // 逐日 map + 月合计（token 跨宿主可加；钱分币并列，口径各异不合并）。
+  // 逐日 map + 月合计（token 跨执行环境可加；钱分币并列，口径各异不合并）。
   const calDays = resp.days || {};
   const byDate = calDays;
   let monthTokens = 0;
@@ -4820,7 +4820,7 @@ async function renderCalendar() {
       ? "" : calSuffix;
     if (calSourcesDto) renderSourcesPanel(calSourcesDto, "cal-sources");
     document.getElementById("cal-note").textContent =
-      "三宿主该月都没有 token 入账（历史月数据按各自归档；当月无数据 = 还没折进账）。";
+      "三执行环境该月都没有 token 入账（历史月数据按各自归档；当月无数据 = 还没折进账）。";
     return;
   }
   empty.hidden = true;
@@ -4848,9 +4848,9 @@ async function renderCalendar() {
   const lead = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
   const dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
   const today = statisticsToday();
-  // DSH 的最后观测日（月级，来自 data_monthly_summary.by_host.dsh）——过期时
+  // DSH 的最后观测日（月级，来自 data_monthly_summary.by_harness.dsh）——过期时
   // 格子 tooltip 说明 ¥ 段缺席的含义（审查 UX#7）。
-  const dshRow = calSourcesDto && calSourcesDto.by_host && calSourcesDto.by_host.dsh;
+  const dshRow = calSourcesDto && calSourcesDto.by_harness && calSourcesDto.by_harness.dsh;
   const dshStale = dshRow && dshRow.freshness.state === "stale"
     ? (dshRow.freshness.last_observed_at || "").slice(0, 10) : null;
 
@@ -4867,7 +4867,7 @@ async function renderCalendar() {
     const dayTokens = row ? (row.total_tokens || 0) : 0;
     if (dayTokens > 0) {
       cell.classList.add("has-data");
-      // 副行：该日耗费，每段带宿主短前缀（审查 UX#6——三段无宿主的钱串只能
+      // 副行：该日耗费，每段带执行环境短前缀（审查 UX#6——三段无执行环境的钱串只能
       // 靠页脚图例反推，全 USD 时连顺序锚都没有）。口径各异不相加。
       const day = document.createElement("div");
       day.className = "d";
@@ -4886,13 +4886,13 @@ async function renderCalendar() {
         token.textContent = fmtTokens(dayTokens) + " tokens";
         cell.appendChild(token);
       }
-      // 副行按显示指标走：Tokens 模式列各宿主的 token（有用量的宿主都在，哪怕钱是
-      // 0——此前只列有钱的宿主，订阅覆盖的日子整行空白，看起来像"没有宿主"，
-      // 2026-09-17 反馈）；成本模式列各宿主的钱，用量在套餐内的写「套餐内」。
-      const hostTokens = [];
-      if ((row.dsh_tokens || 0) > 0) hostTokens.push("DSH " + fmtTokens(row.dsh_tokens));
-      if ((row.claude_tokens || 0) > 0) hostTokens.push("CC " + fmtTokens(row.claude_tokens));
-      if ((row.codex_tokens || 0) > 0) hostTokens.push("CX " + fmtTokens(row.codex_tokens));
+      // 副行按显示指标走：Tokens 模式列各执行环境的 token（有用量的执行环境都在，哪怕钱是
+      // 0——此前只列有钱的执行环境，订阅覆盖的日子整行空白，看起来像"没有执行环境"，
+      // 2026-09-17 反馈）；成本模式列各执行环境的钱，用量在套餐内的写「套餐内」。
+      const harnessTokens = [];
+      if ((row.dsh_tokens || 0) > 0) harnessTokens.push("DSH " + fmtTokens(row.dsh_tokens));
+      if ((row.claude_tokens || 0) > 0) harnessTokens.push("CC " + fmtTokens(row.claude_tokens));
+      if ((row.codex_tokens || 0) > 0) harnessTokens.push("CX " + fmtTokens(row.codex_tokens));
       const costOrPlan = [];
       if ((row.dsh_tokens || 0) > 0) costOrPlan.push((row.dsh_cost_cny || 0) > 0 ? "DSH " + fmtCur(row.dsh_cost_cny, "CNY") : "DSH 套餐内");
       if ((row.claude_tokens || 0) > 0) {
@@ -4902,15 +4902,15 @@ async function renderCalendar() {
         costOrPlan.push("CC " + (parts.length ? parts.join(" + ") : "套餐内"));
       }
       if ((row.codex_tokens || 0) > 0) costOrPlan.push((row.codex_cost_usd || 0) > 0 ? "CX " + fmtCur(row.codex_cost_usd, "USD") : "CX 套餐内");
-      const subParts = calMetric === "cost" ? costOrPlan : hostTokens;
+      const subParts = calMetric === "cost" ? costOrPlan : harnessTokens;
       if (subParts.length) {
         const cost = document.createElement("div");
         cost.className = "cost";
         cost.textContent = subParts.join(calMetric === "cost" ? " + " : " · ");
         cell.appendChild(cost);
       }
-      // tooltip：token 与耗费都按宿主逐行（审查 UX#6：耗费行此前是同一串
-      // 无宿主的 costs）；DSH 过期期间显式说明 ¥ 段缺席 = 未测到（UX#7）。
+      // tooltip：token 与耗费都按执行环境逐行（审查 UX#6：耗费行此前是同一串
+      // 无执行环境的 costs）；DSH 过期期间显式说明 ¥ 段缺席 = 未测到（UX#7）。
       cell.title =
         "DSH " + fmtTokens(row.dsh_tokens || 0) + "（" + fmtCur(row.dsh_cost_cny, "CNY") + "）" +
         "\nClaude " + fmtTokens(row.claude_tokens || 0) + "（" +
@@ -4954,17 +4954,17 @@ async function renderCalendar() {
   }
   document.getElementById("cal-note").textContent = calMetric === "cost"
     ? "方格主行 = 该日成本，按来源分别显示 CNY/USD；无成本证据显示“成本不可用”，不等于 ¥0。副行 = token 总量。点任意过去日 → 下方面板看该日按小时分布。"
-    : "方格主行 = 该日三宿主 token 总量（DSH + Claude Code + Codex）；副行 = 该日耗费，分宿主分币并列（DSH 实测 / Claude relay 估算 / Codex 等价标价，口径各异不相加）。点任意过去日 → 下方面板看该日按小时分布。";
+    : "方格主行 = 该日三执行环境 token 总量（DSH + Claude Code + Codex）；副行 = 该日耗费，分执行环境分币并列（DSH 实测 / Claude relay 估算 / Codex 等价标价，口径各异不相加）。点任意过去日 → 下方面板看该日按小时分布。";
 
-  // 月份级跨宿主概览：放在方格之后、note 之前。
+  // 月份级跨执行环境概览：放在方格之后、note 之前。
   if (calSourcesDto) renderSourcesPanel(calSourcesDto, "cal-sources");
 
   // 当日按小时（旧 calendar.html 小时格组件的工作台接入）——默认选中今天。
   renderHourly(calSelectedDate || today);
 }
 
-// 当日按小时分布。数据来源（read_hourly_distribution 的 hosts_available 值即
-// 来源，逐宿主如实渲染）：三宿主统一走权威库 "sql-facts"，该日无已 ingest
+// 当日按小时分布。数据来源（read_hourly_distribution 的 harnesses_available 值即
+// 来源，逐执行环境如实渲染）：三执行环境统一走权威库 "sql-facts"，该日无已 ingest
 // 事实则为 null。「来源标注让部分覆盖可见」：小时只含已 ingest 会话，
 // 值偏小不是 bug 是覆盖面——标注写进面板 note。
 async function renderHourly(date) {
@@ -4982,15 +4982,15 @@ async function renderHourly(date) {
     return;
   }
   const hours = resp.hours || [];
-  const src = resp.hosts_available || {};
-  const HOSTS = [
+  const src = resp.harnesses_available || {};
+  const HARNESSES = [
     ["dsh_tokens", "DSH", "hour-dsh"],
     ["claude_tokens", "CC", "hour-claude"],
     ["codex_tokens", "CX", "hour-codex"],
   ];
   let maxTotal = 0;
   const totals = hours.map((h) =>
-    HOSTS.reduce((s, [k]) => s + (h[k] || 0), 0)
+    HARNESSES.reduce((s, [k]) => s + (h[k] || 0), 0)
   );
   for (const v of totals) if (v > maxTotal) maxTotal = v;
   hours.forEach((h, i) => {
@@ -5000,14 +5000,14 @@ async function renderHourly(date) {
       (total > 0 && total === maxTotal ? " peak" : "");
     const hh = String(h.hour).padStart(2, "0");
     if (total === 0) {
-      // 全宿主该小时都没有测量——空格（虚线），不是 0。
-      cell.title = hh + ":00–" + hh + ":59 " + statisticsTimezoneName() + " · 该小时三宿主都没有已测用量";
+      // 全执行环境该小时都没有测量——空格（虚线），不是 0。
+      cell.title = hh + ":00–" + hh + ":59 " + statisticsTimezoneName() + " · 该小时三执行环境都没有已测用量";
     } else {
       const bar = document.createElement("div");
       bar.className = "hour-bar";
-      // 分段条：各宿主一段（高度占比 = 该宿主 / 全日峰值），从下往上堆。
-      // 分段高是**各自占总峰值的比**，不是互相归一——一眼能比跨宿主量级。
-      for (const [k, name, cls] of HOSTS) {
+      // 分段条：各执行环境一段（高度占比 = 该执行环境 / 全日峰值），从下往上堆。
+      // 分段高是**各自占总峰值的比**，不是互相归一——一眼能比跨执行环境量级。
+      for (const [k, name, cls] of HARNESSES) {
         const v = h[k] || 0;
         if (v <= 0) continue;
         const seg = document.createElement("div");
@@ -5020,7 +5020,7 @@ async function renderHourly(date) {
       lab.className = "hour-label";
       lab.textContent = hh;
       cell.appendChild(lab);
-      const lines = HOSTS
+      const lines = HARNESSES
         .map(([k, name]) => [name, h[k]])
         .filter(([, v]) => v != null && v > 0)
         .map(([name, v]) => name + " " + fmtTokens(v));
@@ -5028,19 +5028,19 @@ async function renderHourly(date) {
     }
     grid.appendChild(cell);
   });
-  // hosts_available 的值：Phase 3.5 Tier B 起三宿主统一 "sql-facts"（权威库
+  // harnesses_available 的值：Phase 3.5 Tier B 起三执行环境统一 "sql-facts"（权威库
   // 小时重放）或 null（该日没有已 ingest 的事实）——summary.rs hourly_distribution
   // 的 source() 闭包 + lib.rs `read_hourly_distribution_matches_calendar_codex_day`
   // 钉死。此前这里还在匹配已退役的 "today-json"/"facts-index"，Codex 写死
   // 「全量折算（fold）」：真机上 DSH/Claude 永远标「无小时数据」，与方格里明明
   // 有的柱子自相矛盾（2026-09-15 巡检）。按值如实渲染，不再认死字符串。
-  const hostNote = (label, value, missingHint) => value
+  const harnessNote = (label, value, missingHint) => value
     ? `${label}：已入库事实的小时重放（${value}；只含已 ingest 会话，可能偏小）`
     : `${label}：无小时数据（${missingHint}）`;
   const srcNote = [
-    hostNote("Codex", src.codex, "该日没有已 ingest 的 Codex 会话"),
-    hostNote("DSH", src.dsh, "该日会话未 ingest"),
-    hostNote("Claude", src.claude, "该日会话未 ingest"),
+    harnessNote("Codex", src.codex, "该日没有已 ingest 的 Codex 会话"),
+    harnessNote("DSH", src.dsh, "该日会话未 ingest"),
+    harnessNote("Claude", src.claude, "该日会话未 ingest"),
   ];
   note.textContent = srcNote.join(" · ") + "。空格 = 该小时没有已测用量（不是 0）。";
 }
@@ -5118,10 +5118,10 @@ async function fetchSessionsPage(gen) {
     if (modelVal) args.model = modelVal;
     const providerVal = document.getElementById("sess-provider").value.trim();
     if (providerVal) args.provider = providerVal;
-    // host 过滤（spec §7.3）：此命令的 Tauri 参数保持 Rust 的 snake_case 名称；
-    // 传 camelCase 会被当作缺省 None，导致列表静默退回全宿主。过滤变化时调用方
+    // harness 过滤（spec §7.3）：此命令的 Tauri 参数保持 Rust 的 snake_case 名称；
+    // 传 camelCase 会被当作缺省 None，导致列表静默退回全执行环境。过滤变化时调用方
     // 负责重置分页。
-    if (sessFilter !== "all") args.host_kind = sessFilter;
+    if (sessFilter !== "all") args.harness_kind = sessFilter;
     // cursor：v0.9.1 起是 mcp::sessions_search 的不透明串（`<total>:<key_len>:<key>`），
     // 直接透传，不需要 JSON.stringify（旧 r2a_store cursor 是 JSON 对象，
     // 那是 jsonl 重放路径里存的 filter_hash/store_revision，已退役）。
@@ -5174,7 +5174,7 @@ async function prefetchRemainingPages() {
 /// SessionList 与用户点击都写 sessFilter 后调这里，渲染只有一个入口。
 function updateFilterChips() {
   document.querySelectorAll("#sess-filter .chip").forEach((c) => {
-    c.classList.toggle("active", c.dataset.host === sessFilter);
+    c.classList.toggle("active", c.dataset.harness === sessFilter);
   });
 }
 
@@ -5221,7 +5221,7 @@ function renderSessions() {
     titleCell.appendChild(chev);
     tr.appendChild(titleCell);
     // v0.9.1 envelope 字段映射（mcp::sessions_search）：
-    //   host_kind       → host                       （旧 r2a DTO）
+    //   harness_kind       → harness                       （旧 r2a DTO）
     //   model (str)     → model_ids[0] || "—"         （Vec<String>；多模型取首个
     //                                                显示，详情 envelope.data
     //                                                .model_ids[] 里有完整清单）
@@ -5238,7 +5238,7 @@ function renderSessions() {
     //                                                findings 跨会话汇总从 findings
     //                                                tab 看，单会话 finding 数等 M4
     //                                                workflow_events 工具落地后回填）
-    tr.appendChild(td(s.host || "—"));
+    tr.appendChild(td(s.harness || "—"));
     tr.appendChild(td((Array.isArray(s.model_ids) && s.model_ids.length) ? s.model_ids[0] : "—"));
     const span = (s.first_event_at && s.last_event_at)
       ? s.first_event_at.slice(0, 10) + (s.first_event_at !== s.last_event_at ? " … " + s.last_event_at.slice(0, 10) : "")
@@ -5303,13 +5303,13 @@ function renderDetailSummary(s) {
   body.innerHTML = "";
   const cards = el("div", "detail-cards");
   cards.appendChild(detailCard("标题", titleText(s)));
-  // v0.9.1 list 行只有 host + model_ids[]，单模型取首个，多模型在详情 envelope
+  // v0.9.1 list 行只有 harness + model_ids[]，单模型取首个，多模型在详情 envelope
   // .data.model_ids[] 里有完整清单。
   cards.appendChild(detailCard("模型",
     (Array.isArray(s.model_ids) && s.model_ids.length) ? s.model_ids.join(", ") : "—"));
   // date_span → first_event_at / last_event_at（RFC3339 Beijing）
-  cards.appendChild(detailCard("宿主 / 日期",
-    (s.host || "—") + " · " + (s.first_event_at ? s.first_event_at.slice(0, 10) : "—")));
+  cards.appendChild(detailCard("执行环境 / 日期",
+    (s.harness || "—") + " · " + (s.first_event_at ? s.first_event_at.slice(0, 10) : "—")));
   // cost 列：list 行只有 cost_minor（i64 minor / 100），格式化交给 fmtCostMinor。
   // 命中时按 currency 标 USD/CNY；null → "—"（不拿 ¥0.00 冒充没花钱）。
   // envelope 到手后 refreshDetailCards 用真实 session 数据把卡片补上（envelope
@@ -5396,8 +5396,8 @@ function el(tag, cls) {
 // ---------- 单会话报告分区渲染 ----------
 //
 // 之前这里把整份 envelope `JSON.stringify` 成一个 <pre>——一个 DSH 会话实测
-// 286KB，用户点进去看到的是一堵文本墙，等于没有报告。现在按宿主拆分成分区：
-// 两份宿主的 session payload 形状几乎不相交（DSH：cost/context/waste/compaction/
+// 286KB，用户点进去看到的是一堵文本墙，等于没有报告。现在按执行环境拆分成分区：
+// 两份执行环境的 session payload 形状几乎不相交（DSH：cost/context/waste/compaction/
 // duration/subagents/rule_outcomes/*_coverage；Codex：audit/cost_report/coverage/
 // quota_trajectory/permission_transitions/turn_ends/effort/notes/…），所以
 // renderCodexSections / renderDshSections 各自认自己的键，认不到就整段不渲染，
@@ -6116,14 +6116,14 @@ function dshTimelineSection(session) {
   return sec;
 }
 
-// 会话时间线：把宿主 envelope 里的用量序列 + 事件投影到通用几何
+// 会话时间线：把执行环境 envelope 里的用量序列 + 事件投影到通用几何
 // （src-tauri/ui/timeline.js 的 TimelineGeometry.buildTimeline，spec §4 契约）。
 // 纯数据准备 + 渲染壳——比例尺/缺口/事件保真都在 timeline.js 的纯函数里，这里只
 // 负责把 DSH `requests` / Codex `cost_report.hours` 映射成 points/events。
-function timelineSection(session, host) {
+function timelineSection(session, harness) {
   // DSH 走上面的交互式渲染壳（3 纵轴/7 事件/游标/键盘，用户反馈「功能不完整」的
   // 对象）；Codex 信封没有逐请求 context/cost，升级对它是无中生有，保持静态图。
-  if (host === "dsh") return dshTimelineSection(session);
+  if (harness === "dsh") return dshTimelineSection(session);
 
   const geo = window.TimelineGeometry && window.TimelineGeometry.buildTimeline;
   if (!geo) return null; // timeline.js 没加载 → 不渲染这一节，不是报错
@@ -6136,7 +6136,7 @@ function timelineSection(session, host) {
   series = [{ name: "tokens", label: "token", cumulative: false }];
   title = "逐小时 token 用量（" + hours.length + " 小时）";
   // 事件叠加：Codex 的 findings 带 seq（事件空间、千级）+ severity/evidence，但
-  // 没有时间；turn_timeline 的 source_order 与 finding.seq 同号，且 hour 是宿主侧
+  // 没有时间；turn_timeline 的 source_order 与 finding.seq 同号，且 hour 是执行环境侧
   // 用核心 codex_hour_of 折好的**统计时区小时桶键**（与 cost_report.hours 同一把尺，
   // 浏览器不算第二遍时区转换）。这里只做两次字典查表：finding.seq →
   // turn_timeline.source_order → hour → 桶下标。seq 不在 turn_timeline 里
@@ -6187,7 +6187,7 @@ function sevBadge(severity) {
   return b;
 }
 
-// findings 在两个宿主里位置不同、形状略异，但都是 {rule,severity,evidence,…}。
+// findings 在两个执行环境里位置不同、形状略异，但都是 {rule,severity,evidence,…}。
 // 取 evidence 当展示文本（Codex 无 where/title），rule 当标签，其余进 title 悬停。
 function findingsSection(session) {
   const codexAudit = session.audit && Array.isArray(session.audit.findings) ? session.audit.findings : null;
@@ -6529,7 +6529,7 @@ function renderDetailEnvelope(env) {
   // v0.9.1 envelope shape（mcp::session_detail）：
   //   {schema_version, data_version, authority_state, authority_revision,
   //    generated_at, timezone, coverage, freshness, warnings,
-  //    data: {session_ref, host, first_event_at, last_event_at, event_count,
+  //    data: {session_ref, harness, first_event_at, last_event_at, event_count,
   //           model_ids[], identity_kind, tokens{4 buckets + total},
   //           cost_minor, timeline[{event_at, model_id, observation_kind,
   //           peak, fact_id, tokens}], has_more, next_cursor, note}}
@@ -6545,7 +6545,7 @@ function renderDetailEnvelope(env) {
   // 缺场值，envelope.data 是权威源——以它为准）
   refreshDetailCards(data);
 
-  // summary panel：host / event_count / model_ids / 时间范围 / token 4 桶 / cost_minor
+  // summary panel：harness / event_count / model_ids / 时间范围 / token 4 桶 / cost_minor
   body.appendChild(renderDetailSummaryPanel(data));
   body.appendChild(renderBillingBreakdown(data.billing_breakdown));
 
@@ -6660,7 +6660,7 @@ function downgradeBanner() {
   const t = el("div", "detail-section-title");
   t.textContent = "详情视图（v0.9.1 降级）";
   const body = el("div", "muted");
-  body.textContent = "会话详情从 SQL 权威库 envelope 渲染（host / tokens 4 桶 / cost_minor / 时间线 fact 流）。" +
+  body.textContent = "会话详情从 SQL 权威库 envelope 渲染（harness / tokens 4 桶 / cost_minor / 时间线 fact 流）。" +
     "旧 r2a envelope 的 DSH/Codex 专属分区（cost_report / audit.findings / requests / findings[] / " +
     "context / waste / compaction / duration / subagents / rule_outcomes 等）" +
     "等 M4 workflow_events MCP 工具落地后回填（PR #2.3a task #19）。" +
@@ -6679,7 +6679,7 @@ function renderDetailSummaryPanel(d) {
   sec.appendChild(t);
   const tk = d.tokens || {};
   const lines = [];
-  lines.push("host · " + (d.host || "—"));
+  lines.push("harness · " + (d.harness || "—"));
   lines.push("events · " + (d.event_count != null ? d.event_count : "—"));
   lines.push("models · " + (Array.isArray(d.model_ids) && d.model_ids.length ? d.model_ids.join(", ") : "—"));
   lines.push("时间 · " + (d.first_event_at || "—") + " … " + (d.last_event_at || "—"));
@@ -6879,12 +6879,12 @@ function renderFindings() {
     "共 " + total + " 条发现 · 规则 " + (findState.data.rules || []).length + " 条" +
     (findState.data.generated_at ? " · 生成于 " + findState.data.generated_at.slice(0, 16).replace("T", " ") : "");
 
-  // 源贡献 chips：按 host_kind 数明细，Claude Code/DSH/Codex 各几条。
+  // 源贡献 chips：按 harness_kind 数明细，Claude Code/DSH/Codex 各几条。
   const chips = document.getElementById("find-chips");
   chips.innerHTML = "";
   const bySrc = {};
   for (const f of rows) {
-    const k = f.host_kind || "?";
+    const k = f.harness_kind || "?";
     bySrc[k] = (bySrc[k] || 0) + 1;
   }
   for (const k of ["claude-code", "dsh", "codex"]) {
@@ -7030,7 +7030,7 @@ function issueScopeLabel(group) {
   const sessions = group.sessions_count != null ? group.sessions_count : group.sessions;
   const count = group.count != null ? group.count : group.hits;
   const parts = [];
-  if (group.host) parts.push(group.host);
+  if (group.harness) parts.push(group.harness);
   if (group.bucket) parts.push(String(group.bucket));
   if (sessions != null) parts.push(String(sessions) + " 个会话");
   if (count != null) parts.push(String(count) + " 条命中");
@@ -7207,7 +7207,7 @@ async function loadIssueGroupInstances(group, detailRow, cursor, append) {
       const cell = detailRow.firstElementChild;
       const sample = group.sample_evidence && group.sample_evidence[0] || {};
       const sourceLabel = issueSourceLabel(group.source_kind, group.rule);
-      const evidence = sample.error_code || sample.code || sample.provider_id || sample.detail?.host || "已保留摘要";
+      const evidence = sample.error_code || sample.code || sample.provider_id || sample.detail?.harness || "已保留摘要";
       cell.textContent = sourceLabel + "：" + evidence + " · " + String(group.count || 0) +
         " 条来源证据。该组是只读投影，不能按行为 Issue 关闭。";
       const action = el("button", "btn secondary");
@@ -7315,7 +7315,7 @@ async function showIssueInstanceDetail(issueId, line, seed) {
       ? issue.metadata : {};
     detail.textContent = "详情：" + JSON.stringify({
       issue_id: issue && issue.issue_id || issueId,
-      host_kind: issue && issue.host_kind || seed && seed.host_kind || null,
+      harness_kind: issue && issue.harness_kind || seed && seed.harness_kind || null,
       rule: issue && issue.rule || seed && seed.rule || null,
       status: issueStatusLabel(issue && issue.status || seed && seed.status || null),
       evidence: issue && issue.evidence || seed && seed.evidence || null,
@@ -7357,7 +7357,7 @@ function showFindReceipt(text) {
 
 // ── ② 模型 × Harness 对比（spec §3.2/§4，P2）────────────────────────────
 // 决策证据面：金额按币种/口径分列、永不相加（§1.5）；浪费率仅 DSH 有证据、
-// 未接入恒「—」（§4.2，不用 0 冒充）；host_behavior 是宿主级聚合（§4.7）。
+// 未接入恒「—」（§4.2，不用 0 冒充）；harness_behavior 是执行环境级聚合（§4.7）。
 const matrixState = { data: null, expanded: {}, error: null };
 
 async function loadDecisionMatrix() {
@@ -7429,7 +7429,7 @@ function sortMatrixRows(rows) {
 }
 
 function matrixRowKey(row) {
-  return row.host + "/" + row.model_id + "/" + row.provider_id;
+  return row.harness + "/" + row.model_id + "/" + row.provider_id;
 }
 
 /// 从②对比面的贡献会话下钻到会话详情（§6.7「查看轨迹」入口）：showSession
@@ -7441,7 +7441,7 @@ function openSessionFromMatrix(sess, row) {
     session_ref: sess.session_ref,
     title: null,
     model: row.model_id || null,
-    host_kind: row.host || null,
+    harness_kind: row.harness || null,
   });
 }
 
@@ -7463,16 +7463,16 @@ function digCardText(c) {
         + "主因缓存命中 " + Math.round((o.cache_hit_ratio || 0) * 100) + "%。切换后命中 "
         + Math.round((k.cache_hit_ratio || 0) * 100) + "% 的组合已被验证是替代方案。",
       gain: "该线月省 ≈" + digMoney(c.saving_minor, c.currency) + "（−" + c.saving_pct + "%）",
-      action: { label: "定位到行", run: () => digDrillToRow((o.host || "") + "/" + (o.model_id || "") + "/" + (o.provider_id || "")) },
+      action: { label: "定位到行", run: () => digDrillToRow((o.harness || "") + "/" + (o.model_id || "") + "/" + (o.provider_id || "")) },
     };
   }
   if (c.kind === "marathon") {
     return {
       title: "一个 " + c.span_hours + " 小时的马拉松会话吃掉 " + matrixTokens(c.tokens_total) + " token",
-      why: "工具失败 " + (c.failures || 0) + " 次仍在跑（" + (c.combo || {}).host + " · " + (c.combo || {}).model_id
+      why: "工具失败 " + (c.failures || 0) + " 次仍在跑（" + (c.combo || {}).harness + " · " + (c.combo || {}).model_id
         + "）。当前没有单会话熔断（发现 tab 待拍板 #2），一个会话可以无限烧。",
       gain: "拆任务 + 单会话熔断",
-      action: { label: "查看会话", run: () => openSessionFromMatrix({ session_ref: c.session_ref }, { host: (c.combo || {}).host, model_id: (c.combo || {}).model_id }) },
+      action: { label: "查看会话", run: () => openSessionFromMatrix({ session_ref: c.session_ref }, { harness: (c.combo || {}).harness, model_id: (c.combo || {}).model_id }) },
     };
   }
   if (c.kind === "currency_split") {
@@ -7594,7 +7594,7 @@ function renderMatrix() {
   // 低命中行挂命中旗（hit < 0.5 与后端规则一致）。
   const costOutlierKey = (() => {
     const c = ((matrixState.data || {}).findings_summary || []).find((x) => x.kind === "cost_outlier");
-    return c && c.outlier ? c.outlier.host + "/" + c.outlier.model_id + "/" + c.outlier.provider_id : null;
+    return c && c.outlier ? c.outlier.harness + "/" + c.outlier.model_id + "/" + c.outlier.provider_id : null;
   })();
   for (const row of sorted.order) {
     const key = matrixRowKey(row);
@@ -7604,9 +7604,9 @@ function renderMatrix() {
     tr.addEventListener("click", (ev) => toggleMatrixRow(key, ev));
 
     const comboCell = document.createElement("td");
-    const host = document.createElement("div");
-    host.textContent = row.host + " · " + row.model_id;
-    comboCell.appendChild(host);
+    const harness = document.createElement("div");
+    harness.textContent = row.harness + " · " + row.model_id;
+    comboCell.appendChild(harness);
     const tags = document.createElement("div");
     tags.className = "issue-subline";
     const tagBits = [row.provider_id];
@@ -7659,7 +7659,7 @@ function renderMatrix() {
     const ratio = row.cache_hit_ratio;
     tr.appendChild(num(ratio == null ? "—" : Math.round(ratio * 100) + "%"));
     tr.appendChild(num("—")); // 浪费率：仅 DSH，未接入（§4.2），不用 0 冒充
-    // 撞限流（§4.5）：SV607/608 宿主级命中 + 每会话均值；无命中 → 「—」。
+    // 撞限流（§4.5）：SV607/608 执行环境级命中 + 每会话均值；无命中 → 「—」。
     const pressure = row.limit_pressure;
     tr.appendChild(num(pressure
       ? String(pressure.hits) + " 次" + (pressure.per_session != null ? " · ≈" + pressure.per_session + "/会话" : "")
@@ -7678,11 +7678,11 @@ function renderMatrix() {
         " · 缓存读 " + matrixTokens(t.cache_read) + " · 缓存写 " + matrixTokens(t.cache_write) +
         " · 输出 " + matrixTokens(t.output);
       cell.appendChild(buckets);
-      const behavior = row.host_behavior || {};
+      const behavior = row.harness_behavior || {};
       if (Object.keys(behavior).length) {
         const b = document.createElement("div");
         b.className = "issue-subline";
-        b.textContent = "宿主级证据（spec §4.7，不按模型归组）：" +
+        b.textContent = "执行环境级证据（spec §4.7，不按模型归组）：" +
           Object.entries(behavior).map(([rule, count]) => rule + " × " + count).join(" · ");
         cell.appendChild(b);
       }
@@ -7827,7 +7827,7 @@ function budgetAttribution(group) {
     const marathon = (row.top_sessions || []).find((sess) => (sess.span_last_ms - sess.span_first_ms) > 24 * 3600000);
     if (marathon) traits.push("含 " + ((marathon.span_last_ms - marathon.span_first_ms) / 3600000).toFixed(1) + "h 马拉松会话");
     const line = document.createElement("div");
-    line.textContent = "· " + row.host + " · " + row.model_id + " — ≈¥" + (Number(amount.amount_minor || 0) / 100).toFixed(2)
+    line.textContent = "· " + row.harness + " · " + row.model_id + " — ≈¥" + (Number(amount.amount_minor || 0) / 100).toFixed(2)
       + "（占 " + share + "%）" + (traits.length ? " · " + traits.join(" · ") : "");
     box.appendChild(line);
   }
@@ -7910,7 +7910,7 @@ function toggleTodoInstances(group, row) {
   }
 }
 
-// 新鲜度条（spec §4.8/§6.5）：数字截止时刻 + stale 宿主名单。数据面 =
+// 新鲜度条（spec §4.8/§6.5）：数字截止时刻 + stale 执行环境名单。数据面 =
 // findings_freshness（runtime data_freshness_report，与 MCP envelope 同源）。
 /// §4.8 时间显示：当日只给 HH:MM；跨日必须带日期（"9月18日 23:43"）——同步
 /// 若是三天前的，光写 23:43 会让用户以为是今天。解析失败退回原串，不猜。
@@ -7937,7 +7937,7 @@ function renderFreshness(fresh) {
   const f = fresh.freshness || {};
   const parts = [];
   if (f.last_successful_sync_at) parts.push("数字截至 " + freshnessClock(f.last_successful_sync_at));
-  const stale = Array.isArray(f.stale_hosts) ? f.stale_hosts : [];
+  const stale = Array.isArray(f.stale_harnesses) ? f.stale_harnesses : [];
   if (stale.length) parts.push("超过 24h 未更新：" + stale.join("、"));
   bar.textContent = parts.length ? "新鲜度 · " + parts.join(" · ") : "新鲜度 · 数据完整";
 }
@@ -7959,7 +7959,7 @@ function issueRules(rows) {
 }
 
 // 从 Issues 明细跳转到该会话详情：切到会话 tab 的详情视图，用 issue 里能
-// 拿到的字段（session_key/title/model/host_kind）拼一个最小 list item 交给
+// 拿到的字段（session_key/title/model/harness_kind）拼一个最小 list item 交给
 // showSession。成本/token/findings 三个 summary 卡片会诚实地显示「—」（finding
 // 不含这些），完整数字在下方报告分区里。
 function openSessionFromFinding(f) {
@@ -7969,7 +7969,7 @@ function openSessionFromFinding(f) {
     session_key: f.session_key,
     title: f.title || null,
     model: f.model || null,
-    host_kind: f.host_kind || (f.session_key.host_kind) || null,
+    harness_kind: f.harness_kind || (f.session_key.harness_kind) || null,
   });
 }
 
@@ -8076,7 +8076,7 @@ function renderSources() {
     Number((source.failed_scope || {}).sources || 0) > 0
   );
   if (failedSources.length > 0) {
-    const details = failedSources.map((source) => HOST_DISPLAY[source.host] || source.host || "未知来源").join("、");
+    const details = failedSources.map((source) => HARNESS_DISPLAY[source.harness] || source.harness || "未知来源").join("、");
     showBanner(
       "src-banner",
       "部分来源读取失败：" + details + "。其他来源已继续同步；请在对应行展开后重新同步。",
@@ -8086,13 +8086,13 @@ function renderSources() {
 }
 
 function renderCustomSourceRoots() {
-  const host = document.getElementById("src-custom-host");
+  const harness = document.getElementById("src-custom-harness");
   const root = document.getElementById("src-custom-root");
   const choose = document.getElementById("src-custom-choose");
   const add = document.getElementById("src-custom-add");
   const list = document.getElementById("src-custom-list");
   const status = document.getElementById("src-custom-status");
-  if (!host || !root || !choose || !add || !list || !status) return;
+  if (!harness || !root || !choose || !add || !list || !status) return;
   const show = (text) => { status.hidden = false; status.textContent = text; };
   choose.onclick = async () => {
     choose.disabled = true;
@@ -8110,7 +8110,7 @@ function renderCustomSourceRoots() {
     if (!root.value) return;
     add.disabled = true;
     try {
-      const saved = await invoke("add_custom_source_root", { input: { host: host.value, root: root.value } });
+      const saved = await invoke("add_custom_source_root", { input: { harness: harness.value, root: root.value } });
       show(saved.changed ? "已添加目录，正在启动同步。" : "该目录已在读取范围内，正在重新同步。");
       await invoke("trigger_sync");
       await loadSources(true);
@@ -8123,7 +8123,7 @@ function renderCustomSourceRoots() {
     row.className = "src-custom-row";
     const text = document.createElement("div");
     text.className = "src-custom-path";
-    text.textContent = (HOST_DISPLAY[source.host] || source.host) + " · " + source.root;
+    text.textContent = (HARNESS_DISPLAY[source.harness] || source.harness) + " · " + source.root;
     const remove = document.createElement("button");
     remove.className = "btn secondary";
     remove.textContent = "移除读取位置";
@@ -8131,7 +8131,7 @@ function renderCustomSourceRoots() {
     remove.onclick = async () => {
       remove.disabled = true;
       try {
-        await invoke("remove_custom_source_root", { input: { host: source.host, root: source.root } });
+        await invoke("remove_custom_source_root", { input: { harness: source.harness, root: source.root } });
         show("已移除读取位置；已导入数据仍保留。");
         await loadSources(true);
       } catch (e) { remove.disabled = false; show("移除失败：" + errText(e)); status.focus(); }
@@ -8152,9 +8152,9 @@ const SRC_STATE_TEXT = {
 };
 
 function renderSourceRow(src) {
-  const key = src.host || src.source_id || "unknown";
+  const key = src.harness || src.source_id || "unknown";
   const row = el("div", "src-row");
-  row.dataset.host = key;
+  row.dataset.harness = key;
   const status = src.connection_state || "unknown";
   const [stateText, stateModifier] = SRC_STATE_TEXT[status] || ["状态未知", "muted"];
   const failed = (src.failed_scope && src.failed_scope.sources) || 0;
@@ -8167,7 +8167,7 @@ function renderSourceRow(src) {
   dot.textContent = "●";
   dot.setAttribute("aria-hidden", "true");
   const name = el("span", "src-row-name");
-  name.textContent = HOST_DISPLAY[key] || key;
+  name.textContent = HARNESS_DISPLAY[key] || key;
   if (key === "workbuddy") {
     const experimental = el("span", "chip");
     experimental.textContent = "实验支持";
@@ -8240,7 +8240,7 @@ function renderSourceRow(src) {
       event && event.stopPropagation();
       exclude.disabled = true;
       try {
-        await invoke("set_source_host_excluded", { input: { host: key, excluded: true } });
+        await invoke("set_source_harness_excluded", { input: { harness: key, excluded: true } });
         await loadSources(true);
       } catch (e) {
         exclude.disabled = false;
@@ -8255,12 +8255,12 @@ function renderSourceRow(src) {
   clear.title = "只删除本 App 中该来源的已导入数据；不会删除工具原始日志";
   clear.onclick = async (event) => {
     event && event.stopPropagation();
-    const name = HOST_DISPLAY[key] || key;
+    const name = HARNESS_DISPLAY[key] || key;
     if (!window.confirm("删除\u201c" + name + "\u201d已导入到本 App 的数据？\n\n将删除 " + (scope.facts ?? 0) + " 条记录、" + (scope.sessions ?? 0) +
         " 个会话；不会删除该工具的原始日志。该来源会同时停止读取，恢复读取后才会重新导入。")) return;
     clear.disabled = true;
     try {
-      const result = await invoke("delete_imported_source_data", { host: key });
+      const result = await invoke("delete_imported_source_data", { harness: key });
       showBanner("src-banner", "已删除 " + result.facts + " 条记录、" + result.sessions + " 个会话；原始日志未修改。", true);
       await loadSources(true);
     } catch (e) {
@@ -8288,16 +8288,16 @@ function fmtSourceTime(ms) {
   });
 }
 
-async function recoverSource(button, host, actionKind) {
+async function recoverSource(button, harness, actionKind) {
   const syncEl = document.getElementById("src-sync");
   button.disabled = true;
-  syncEl.textContent = (HOST_DISPLAY[host] || host) + "：正在扫描…";
+  syncEl.textContent = (HARNESS_DISPLAY[harness] || harness) + "：正在扫描…";
   try {
     if (actionKind === "resume_sync") {
       await invoke("set_sync_paused", { paused: false });
     }
     if (actionKind === "include_source") {
-      await invoke("set_source_host_excluded", { input: { host, excluded: false } });
+      await invoke("set_source_harness_excluded", { input: { harness, excluded: false } });
     }
     const requestId = await invoke("trigger_sync");
     if (!requestId) throw new Error("同步请求未返回追踪编号");
@@ -8443,12 +8443,12 @@ async function init() {
   document.getElementById("cal-month").addEventListener("change", (ev) => {
     if (ev.target.value) { calMonth = ev.target.value; renderCalendar(); }
   });
-  // host 过滤 chips（spec §7.3）：过滤变化 → 重置分页 + 重新加载（游标语义是
+  // harness 过滤 chips（spec §7.3）：过滤变化 → 重置分页 + 重新加载（游标语义是
   // 全量翻页，带旧过滤的游标续拉会混页）。
   document.querySelectorAll("#sess-filter .chip").forEach((c) => {
     c.addEventListener("click", () => {
-      if (c.dataset.host === sessFilter) return;
-      sessFilter = c.dataset.host;
+      if (c.dataset.harness === sessFilter) return;
+      sessFilter = c.dataset.harness;
       updateFilterChips();
       loadSessions(true);
     });
@@ -8668,12 +8668,12 @@ async function init() {
     evidenceList.replaceChildren();
     const safeReports = reports.filter((report) => report && typeof report === "object");
     const allEvidence = safeReports.flatMap((report) => Array.isArray(report.evidence)
-      ? report.evidence.map((item) => ({ ...item, host: report.host || "宿主" })) : []);
+      ? report.evidence.map((item) => ({ ...item, harness: report.harness || "执行环境" })) : []);
     const findingCount = safeReports.reduce((sum, report) => sum + Number(report.findings_upserted || 0), 0);
     verdict.textContent = findingCount ? findingCount + " 个风险 Finding" : "未形成风险结论";
     verdict.className = "trust-verdict " + (findingCount ? "trust-verdict-danger" : "trust-verdict-neutral");
     const overviewItems = [
-      ["扫描宿主", String(safeReports.length)],
+      ["扫描执行环境", String(safeReports.length)],
       ["结构化证据", String(allEvidence.length)],
       ["打包/快照", String(allEvidence.filter((item) => item.kind === "package").length)],
       ["出网尝试", String(allEvidence.filter((item) => item.stage === "egress_attempted" || item.stage === "egress_transmitted").length)],
@@ -8711,11 +8711,11 @@ async function init() {
       body.className = "trust-evidence-body";
       const title = document.createElement("div");
       title.className = "trust-evidence-title";
-      const host = document.createElement("strong");
-      host.textContent = item.host;
+      const harness = document.createElement("strong");
+      harness.textContent = item.harness;
       const kind = document.createElement("span");
       kind.textContent = labels[item.kind] || item.kind || "结构化证据";
-      title.append(host, kind);
+      title.append(harness, kind);
       const meta = document.createElement("div");
       meta.className = "trust-evidence-meta";
       const time = Number(item.observed_at_ms);
@@ -8748,7 +8748,7 @@ async function init() {
     button.disabled = true;
     button.textContent = "扫描中…";
     try {
-      const result = await invoke("trust_audit", { host: "all" });
+      const result = await invoke("trust_audit", { harness: "all" });
       const reports = Array.isArray(result && result.reports) ? result.reports : [];
       renderTrustAuditEvidence(reports);
       const summary = reports.map((report) => {
@@ -8759,7 +8759,7 @@ async function init() {
         if (Number(stages.remote_accepted || 0)) parts.push(Number(stages.remote_accepted) + " 条客户端记录的接受状态");
         if (Number(kinds.retry || 0)) parts.push(Number(kinds.retry) + " 条重试状态");
         if (!parts.length) parts.push(Number(report && report.discovered || 0) + " 条本地证据");
-        return (report && report.host || "宿主") + "：" + parts.join("、")
+        return (report && report.harness || "执行环境") + "：" + parts.join("、")
           + "；" + (Number(report && report.findings_upserted || 0)
             ? "已更新 " + Number(report.findings_upserted) + " 个风险 Finding"
             : "未生成可判定风险 Finding");
@@ -8767,7 +8767,7 @@ async function init() {
       status.hidden = false;
       status.textContent = summary.length
         ? "历史审计完成 · " + summary.join("；") + "。未生成 Finding 不等于未发生行为，只表示现有本机证据未满足某条风险规则。"
-        : "历史审计完成，但没有可报告的宿主结果。";
+        : "历史审计完成，但没有可报告的执行环境结果。";
       await loadFindings(true, false);
     } catch (error) {
       showBanner("find-banner", error, false);
@@ -8802,16 +8802,16 @@ async function init() {
 //
 // 纪律：tab 不重新测量、不重新判定 —— 每一个数字、每一条 SV 发现都从
 // `agent-vitals doctor --json - --with-report --no-snapshot` 的载荷里取
-// （spec §1 判断标准 1「同源」）。前端只做格式化与宿主归属（归属也只用
-// 载荷里已有的字段：冲突条目自带 host、重叠对自带 domain、安全命中按
+// （spec §1 判断标准 1「同源」）。前端只做格式化与执行环境归属（归属也只用
+// 载荷里已有的字段：冲突条目自带 harness、重叠对自带 domain、安全命中按
 // path 回查 report.skills，不自造键）。
 //
 // 「并列不合并」（spec §0/§3.5）：页头只出四类白名单合计（REQ-SK-03）；
-// 预算、Tier1、冲突、重叠、僵尸永不出跨宿主单一数字。每宿主各用各的
-// 预算分母，没有分母的宿主不画预算条。
+// 预算、Tier1、冲突、重叠、僵尸永不出跨执行环境单一数字。每执行环境各用各的
+// 预算分母，没有分母的执行环境不画预算条。
 
-const SK_HOST_ORDER = ["claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"];
-const SK_HOST_DISPLAY = {
+const SK_HARNESS_ORDER = ["claude-code", "codex", "openclaw", "hermes", "workbuddy", "dsh"];
+const SK_HARNESS_DISPLAY = {
   "claude-code": "Claude Code",
   "codex": "Codex",
   "openclaw": "OpenClaw",
@@ -8851,8 +8851,8 @@ const SK_NEED_JUDGEMENT = "需你判断 · 在终端跑 explain <name>，或让 
 function skNeedsJudgement(code) {
   return code === "SV401" || code.startsWith("SV5");
 }
-// 宿主无预算时的固定文案（spec §5.4）：不画条，dsh 追加逐条截断提示。
-const SK_NO_BUDGET_TEXT = "该宿主没有描述预算";
+// 执行环境无预算时的固定文案（spec §5.4）：不画条，dsh 追加逐条截断提示。
+const SK_NO_BUDGET_TEXT = "该执行环境没有描述预算";
 // 预算分母来源标签（与 README 兼容性表同词，spec §6.1）。
 const SK_BUDGET_SOURCE_TEXT = {
   "configurable": "可配置估算",
@@ -8860,9 +8860,9 @@ const SK_BUDGET_SOURCE_TEXT = {
 };
 
 // Skill 体检状态：首进不自动扫（spec §7 —— codex app-server 拉起是秒级开销，
-// 首屏空转不如让用户点「开始扫描」）。host 变化会按新 host 重新取数
-// （REQ-SK-04：单宿主视图 = doctor --host <h> 的可视化，取数必须带 --host）。
-let skState = { loaded: false, error: false, data: null, scanning: false, host: "all" };
+// 首屏空转不如让用户点「开始扫描」）。harness 变化会按新 harness 重新取数
+// （REQ-SK-04：单执行环境视图 = doctor --harness <h> 的可视化，取数必须带 --harness）。
+let skState = { loaded: false, error: false, data: null, scanning: false, harness: "all" };
 
 function skFmtNum(n) {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -8875,40 +8875,40 @@ function skEl(tag, cls, text) {
   return el;
 }
 
-function skHostChip(host) {
-  const chip = skEl("span", "chip", SK_HOST_DISPLAY[host] || host);
-  chip.dataset.host = host;
+function skHarnessChip(harness) {
+  const chip = skEl("span", "chip", SK_HARNESS_DISPLAY[harness] || harness);
+  chip.dataset.harness = harness;
   return chip;
 }
 
-// 每条诊断宿主归属：只用载荷已有字段。冲突条目自带 host；重叠对自带
+// 每条诊断执行环境归属：只用载荷已有字段。冲突条目自带 harness；重叠对自带
 // domain（= conflict_domain）；其余按 path / name 回查 report.skills。
 // 查不到的码（预算、能力缺失这类聚合项）返回空数组 —— 芯片区留空，
-// 绝不猜一个宿主写上去。
-function skDiagHosts(d, index) {
+// 绝不猜一个执行环境写上去。
+function skDiagHarnesses(d, index) {
   const code = d.code;
   const ev = d.evidence || {};
-  const hosts = [];
-  const push = (h) => { if (h && !hosts.includes(h)) hosts.push(h); };
+  const harnesses = [];
+  const push = (h) => { if (h && !harnesses.includes(h)) harnesses.push(h); };
   if (code === "SV101" || code === "SV102" || code === "SV103") {
-    (ev.conflicts || []).forEach((c) => push(c.host));
+    (ev.conflicts || []).forEach((c) => push(c.harness));
   } else if (code === "SV401") {
     (ev.pairs || []).forEach((p) => push(p.domain));
   } else if (code.startsWith("SV5")) {
-    (ev.hits || []).forEach((h) => skHostsFor(index, h.path, h.skill).forEach(push));
+    (ev.hits || []).forEach((h) => skHarnessesFor(index, h.path, h.skill).forEach(push));
   } else if (code === "SV105" || code === "SV902" || code === "SV201" || code === "SV303") {
-    (ev.skills || []).forEach((s) => skHostsFor(index, s.path, s.name).forEach(push));
+    (ev.skills || []).forEach((s) => skHarnessesFor(index, s.path, s.name).forEach(push));
   } else if (code === "SV202") {
-    (ev.skills || []).forEach((s) => skHostsFor(index, null, s.name).forEach(push));
+    (ev.skills || []).forEach((s) => skHarnessesFor(index, null, s.name).forEach(push));
   } else if (code === "SV301") {
-    (ev.skills || []).forEach((s) => skHostsFor(index, s.path, s.name).forEach(push));
+    (ev.skills || []).forEach((s) => skHarnessesFor(index, s.path, s.name).forEach(push));
   }
-  return hosts;
+  return harnesses;
 }
 
-// path → 宿主数组（多值）：`~/.agents/skills` 是 dsh 与 openclaw 的共享根，
-// 同一个目录会以两个 host_family 各出现一条 —— 真机实测形状。安全命中按
-// (path, rule, line) 去重后挂**两枚**宿主芯片（spec §3.2 文件类跨宿主去重）。
+// path → 执行环境数组（多值）：`~/.agents/skills` 是 dsh 与 openclaw 的共享根，
+// 同一个目录会以两个 harness_family 各出现一条 —— 真机实测形状。安全命中按
+// (path, rule, line) 去重后挂**两枚**执行环境芯片（spec §3.2 文件类跨执行环境去重）。
 function skIndexByPathAndName(report) {
   const byPath = {};
   const byName = {};
@@ -8917,7 +8917,7 @@ function skIndexByPathAndName(report) {
     (m[k] = m[k] || []).push(v);
   };
   (report && report.skills || []).forEach((s) => {
-    const fam = s.host_family || s.host;
+    const fam = s.harness_family || s.harness;
     add(byPath, s.path, fam);
     if (s.name && !(s.name in byName)) byName[s.name] = fam;
   });
@@ -8927,15 +8927,15 @@ function skIndexByPathAndName(report) {
   return { byPath, byName };
 }
 
-// 一条证据（带 path 或 name）的宿主归属数组。path 多宿主时全部列出。
-function skHostsFor(index, path, name) {
+// 一条证据（带 path 或 name）的执行环境归属数组。path 多执行环境时全部列出。
+function skHarnessesFor(index, path, name) {
   if (path && index.byPath[path]) return index.byPath[path];
   const byName = name ? index.byName[name] : null;
   return byName ? [byName] : [];
 }
 
 // 安全/结构发现行的收集：安全按 (path, rule, line) 去重（REQ-SK-03 第 3 条
-// 的去重键；同一 SKILL.md 装在两个宿主只有一条），结构取 SV105/SV902 的
+// 的去重键；同一 SKILL.md 装在两个执行环境只有一条），结构取 SV105/SV902 的
 // 每个 path。cited 只改排序（同严重度内沉底）+ 挂「疑似引用语境」标签，
 // 不降级、不隐藏（CLAUDE.md「Security heuristics sort, they never acquit」）。
 function skSecurityRows(payload) {
@@ -8953,7 +8953,7 @@ function skSecurityRows(payload) {
         kind: "security",
         path: h.path, rule: h.rule, line: h.line,
         severity: h.severity, cited: !!h.cited,
-        hosts: skHostsFor(index, h.path, h.skill),
+        harnesses: skHarnessesFor(index, h.path, h.skill),
         rank: sevRank[h.severity] != null ? sevRank[h.severity] : 9,
       });
     });
@@ -8978,7 +8978,7 @@ function skStructureRows(payload) {
         kind: "structure",
         code: d.code,
         path: key,
-        hosts: skHostsFor(index, s.path, s.name),
+        harnesses: skHarnessesFor(index, s.path, s.name),
       });
     });
   });
@@ -8986,13 +8986,13 @@ function skStructureRows(payload) {
 }
 
 // 页头白名单合计（REQ-SK-03 穷举，新增合计项要先改规格再改这里）：
-// 1) 已扫描 / 未检测到的宿主数；2) 去重 skill 目录数（规范化 path）；
+// 1) 已扫描 / 未检测到的执行环境数；2) 去重 skill 目录数（规范化 path）；
 // 3) 安全发现按严重度（含 cited 计数）；4) 结构问题数。
 // 纯函数：vm 测试拿它与安全分区行数比对（§11.2「页头安全合计 = 行数」）。
 function skillHealthTotals(payload) {
-  const hs = (payload.report && payload.report.host_summaries) || {};
+  const hs = (payload.report && payload.report.harness_summaries) || {};
   const scanned = [], missing = [];
-  SK_HOST_ORDER.forEach((h) => {
+  SK_HARNESS_ORDER.forEach((h) => {
     ((hs[h] || {}).skills_on_disk > 0 ? scanned : missing).push(h);
   });
   const dirs = {};
@@ -9007,8 +9007,8 @@ function skillHealthTotals(payload) {
   const severityText = worst === 0 ? "critical"
     : worst === 1 || worst === 2 ? "warning" : "none";
   return {
-    scannedHosts: scanned,
-    missingHosts: missing,
+    scannedHarnesses: scanned,
+    missingHarnesses: missing,
     dirCount: Object.keys(dirs).length,
     securityRowCount: rows.length,
     securityCited: rows.filter((r) => r.cited).length,
@@ -9024,15 +9024,15 @@ function skSeverityChip(sev) {
   return skEl("span", cls, sev);
 }
 
-// 一条诊断行：码 + 人话 + 宿主芯片 / 影响 / 行动 / caveat（spec §6.2）。
+// 一条诊断行：码 + 人话 + 执行环境芯片 / 影响 / 行动 / caveat（spec §6.2）。
 // caveat 逐条原样渲染、不折叠不改写（§5.4）。
-function skDiagRow(d, hosts, extraEvidence) {
+function skDiagRow(d, harnesses, extraEvidence) {
   const row = skEl("div", "sk-row");
   const head = skEl("div", "sk-row-head");
   const code = skEl("span", "sk-code " + d.severity, d.code);
   head.append(code);
   head.append(skEl("span", "sk-row-impact", SK_CODE_ZH[d.code] || d.name || ""));
-  (hosts || []).forEach((h) => head.append(skHostChip(h)));
+  (harnesses || []).forEach((h) => head.append(skHarnessChip(h)));
   row.append(head);
   if (d.impact) row.append(skEl("div", "sk-row-line", d.impact));
   const action = skEl("div", "sk-row-line");
@@ -9057,14 +9057,14 @@ function skEmptyToggle(id, hasRows) {
 }
 
 // 主渲染入口。payload = skills_doctor_report 的返回（doctor --json 载荷 +
-// desktop_meta）；hostFilter = "all" | 宿主 id。纯 DOM 组装，不取数、不计算
+// desktop_meta）；harnessFilter = "all" | 执行环境 id。纯 DOM 组装，不取数、不计算
 // 载荷之外的任何量。
-function renderSkillHealth(payload, hostFilter) {
+function renderSkillHealth(payload, harnessFilter) {
   const meta = payload.desktop_meta || {};
   const report = payload.report || {};
   const index = skIndexByPathAndName(report);
 
-  // ── 页头：扫描时间 · run · 过期标记；复现命令（含 --host 与 run）─────
+  // ── 页头：扫描时间 · run · 过期标记；复现命令（含 --harness 与 run）─────
   const scanMeta = document.getElementById("sk-scan-meta");
   scanMeta.textContent = "";
   if (meta.generated_at_ms) {
@@ -9077,29 +9077,29 @@ function renderSkillHealth(payload, hostFilter) {
       + (ageH > 24 ? " · 可能过期" : "");
   }
   const repro = document.getElementById("sk-repro");
-  repro.textContent = "在终端复现：agent-vitals doctor --host "
-    + (hostFilter || "all") + (payload.run ? "（run " + payload.run + "）" : "");
+  repro.textContent = "在终端复现：agent-vitals doctor --harness "
+    + (harnessFilter || "all") + (payload.run ? "（run " + payload.run + "）" : "");
 
-  // ── 宿主选择器灰显：未检测到的宿主注明「未检测到」，不隐藏（§4.2）──
-  const hostSel = document.getElementById("sk-host");
+  // ── 执行环境选择器灰显：未检测到的执行环境注明「未检测到」，不隐藏（§4.2）──
+  const harnessSel = document.getElementById("sk-harness");
   const totals = skillHealthTotals(payload);
-  Array.from(hostSel.options).forEach((opt) => {
+  Array.from(harnessSel.options).forEach((opt) => {
     if (opt.value === "all") return;
-    const missing = totals.missingHosts.includes(opt.value);
+    const missing = totals.missingHarnesses.includes(opt.value);
     opt.disabled = missing;
-    opt.textContent = (SK_HOST_DISPLAY[opt.value] || opt.value)
+    opt.textContent = (SK_HARNESS_DISPLAY[opt.value] || opt.value)
       + (missing ? "（未检测到）" : "");
   });
 
-  // ── 页头合计（REQ-SK-03 白名单四类；单宿主视图整行隐藏，REQ-SK-04）──
+  // ── 页头合计（REQ-SK-03 白名单四类；单执行环境视图整行隐藏，REQ-SK-04）──
   const totalsEl = document.getElementById("sk-totals");
   totalsEl.textContent = "";
-  totalsEl.hidden = hostFilter !== "all";
-  if (hostFilter === "all") {
+  totalsEl.hidden = harnessFilter !== "all";
+  if (harnessFilter === "all") {
     const parts = [];
-    parts.push("已扫描 " + totals.scannedHosts.length + " 个宿主"
-      + (totals.missingHosts.length
-        ? "（" + totals.missingHosts.map((h) => SK_HOST_DISPLAY[h] || h).join("、") + " 未检测到）"
+    parts.push("已扫描 " + totals.scannedHarnesses.length + " 个执行环境"
+      + (totals.missingHarnesses.length
+        ? "（" + totals.missingHarnesses.map((h) => SK_HARNESS_DISPLAY[h] || h).join("、") + " 未检测到）"
         : ""));
     parts.push(totals.dirCount + " 个 skill 目录");
     if (totals.securityRowCount > 0) {
@@ -9112,29 +9112,29 @@ function renderSkillHealth(payload, hostFilter) {
     totalsEl.textContent = parts.join(" · ");
   }
 
-  // ── 1. 宿主摘要卡行（§6.1）────────────────────────────────────
-  // 单宿主视图（REQ-SK-04）只渲染该宿主的卡 —— 其余宿主不在本次扫描里，
+  // ── 1. 执行环境摘要卡行（§6.1）────────────────────────────────────
+  // 单执行环境视图（REQ-SK-04）只渲染该执行环境的卡 —— 其余执行环境不在本次扫描里，
   // 给它们画「无发现」就是编数。
-  const cards = document.getElementById("sk-host-cards");
+  const cards = document.getElementById("sk-harness-cards");
   cards.textContent = "";
-  SK_HOST_ORDER.forEach((h) => {
-    if (hostFilter !== "all" && h !== hostFilter) return;
-    const hs = (report.host_summaries || {})[h];
+  SK_HARNESS_ORDER.forEach((h) => {
+    if (harnessFilter !== "all" && h !== harnessFilter) return;
+    const hs = (report.harness_summaries || {})[h];
     if (!hs) return;
     const detected = (hs.skills_on_disk || 0) > 0;
     const card = skEl("div", "sk-card");
     const head = skEl("div", "sk-card-head");
-    head.append(skEl("span", "sk-card-title", SK_HOST_DISPLAY[h] || h));
+    head.append(skEl("span", "sk-card-title", SK_HARNESS_DISPLAY[h] || h));
     if (!detected) {
       head.append(skEl("span", "chip", "未检测到"));
       card.append(head);
-      card.append(skEl("div", "sk-card-line muted", "扫描器找过了：本机没有 " + (SK_HOST_DISPLAY[h] || h) + " 的 skills 目录。"));
+      card.append(skEl("div", "sk-card-line muted", "扫描器找过了：本机没有 " + (SK_HARNESS_DISPLAY[h] || h) + " 的 skills 目录。"));
       cards.append(card);
       return;
     }
     card.append(head);
-    // 预算条：分母来自该宿主自己的 description_budget_detail；没有预算的
-    // 宿主不画条，写明原因（§5.4），dsh 追加逐条截断提示。
+    // 预算条：分母来自该执行环境自己的 description_budget_detail；没有预算的
+    // 执行环境不画条，写明原因（§5.4），dsh 追加逐条截断提示。
     const det = hs.description_budget_detail || {};
     if (det.available && det.budget_chars) {
       const pct = det.pct_used == null ? 0 : det.pct_used;
@@ -9168,12 +9168,12 @@ function renderSkillHealth(payload, hostFilter) {
       counts.append(skEl("span", "sk-card-line muted", " · 运行时核实 —"));
     }
     card.append(counts);
-    // 该宿主的 warning/critical 计数（§6.1 卡底 ⚠/✕，点击 = 切到该宿主）。
-    // 全部视图：按诊断的宿主归属计数；单宿主视图：载荷里全部诊断都属于
-    // 该宿主（扫描就是 --host <h>）。
+    // 该执行环境的 warning/critical 计数（§6.1 卡底 ⚠/✕，点击 = 切到该执行环境）。
+    // 全部视图：按诊断的执行环境归属计数；单执行环境视图：载荷里全部诊断都属于
+    // 该执行环境（扫描就是 --harness <h>）。
     let warn = 0, crit = 0;
     (payload.diagnostics || []).forEach((d) => {
-      const mine = hostFilter === "all" ? skDiagHosts(d, index).includes(h) : true;
+      const mine = harnessFilter === "all" ? skDiagHarnesses(d, index).includes(h) : true;
       if (!mine) return;
       if (d.severity === "critical") crit += 1;
       else if (d.severity === "warning") warn += 1;
@@ -9182,7 +9182,7 @@ function renderSkillHealth(payload, hostFilter) {
     if (crit) sevLine.append(skEl("span", "sk-code critical", "✕ " + crit));
     if (warn) sevLine.append(skEl("span", "sk-code warning", (crit ? " · " : "") + "⚠ " + warn));
     if (!crit && !warn) sevLine.append(skEl("span", "muted", "无 critical / warning"));
-    sevLine.dataset.host = h;
+    sevLine.dataset.harness = h;
     card.append(sevLine);
     cards.append(card);
   });
@@ -9193,7 +9193,7 @@ function renderSkillHealth(payload, hostFilter) {
   const actDiags = (payload.diagnostics || []).filter((d) => d.severity === "critical" || d.severity === "warning");
   skEmptyToggle("sk-act-now-empty", actDiags.length > 0);
   actDiags.forEach((d) => {
-    actList.append(skDiagRow(d, skDiagHosts(d, index)));
+    actList.append(skDiagRow(d, skDiagHarnesses(d, index)));
   });
 
   // ── 3. 安全与结构（§6.3）：行 = 去重发现；页头合计 = 行数 ────────────
@@ -9208,7 +9208,7 @@ function renderSkillHealth(payload, hostFilter) {
     head.append(skSeverityChip(r.severity));
     head.append(skEl("span", "sk-row-impact", r.rule));
     if (r.cited) head.append(skEl("span", "tag", "疑似引用语境（仅排序，不免检）"));
-    r.hosts.forEach((h) => head.append(skHostChip(h)));
+    r.harnesses.forEach((h) => head.append(skHarnessChip(h)));
     row.append(head);
     row.append(skEl("div", "sk-row-line", r.path + (r.line ? ":" + r.line : "")));
     secList.append(row);
@@ -9218,36 +9218,36 @@ function renderSkillHealth(payload, hostFilter) {
     const head = skEl("div", "sk-row-head");
     head.append(skEl("span", "sk-code warning", r.code));
     head.append(skEl("span", "sk-row-impact", SK_CODE_ZH[r.code] || "结构问题"));
-    r.hosts.forEach((h) => head.append(skHostChip(h)));
+    r.harnesses.forEach((h) => head.append(skHarnessChip(h)));
     row.append(head);
     row.append(skEl("div", "sk-row-line", r.path));
     secList.append(row);
   });
 
-  // ── 4. 冲突与重叠（§6.4）：按宿主分组，同宿主内才成对 ────────────────
+  // ── 4. 冲突与重叠（§6.4）：按执行环境分组，同执行环境内才成对 ────────────────
   const confList = document.getElementById("sk-conflicts-list");
   confList.textContent = "";
-  const confByHost = {};
+  const confByHarness = {};
   const confDiags = (payload.diagnostics || [])
     .filter((d) => ["SV101", "SV102", "SV103"].includes(d.code));
   confDiags.forEach((d) => {
     ((d.evidence || {}).conflicts || []).forEach((c) => {
-      const h = c.host || "unknown";
-      (confByHost[h] = confByHost[h] || []).push({ kind: "conflict", c });
+      const h = c.harness || "unknown";
+      (confByHarness[h] = confByHarness[h] || []).push({ kind: "conflict", c });
     });
   });
   (payload.diagnostics || []).forEach((d) => {
     if (d.code !== "SV401") return;
     ((d.evidence || {}).pairs || []).forEach((p) => {
       const h = p.domain || "unknown";
-      (confByHost[h] = confByHost[h] || []).push({ kind: "pair", p });
+      (confByHarness[h] = confByHarness[h] || []).push({ kind: "pair", p });
     });
   });
-  const confHosts = Object.keys(confByHost);
-  skEmptyToggle("sk-conflicts-empty", confHosts.length > 0);
-  confHosts.forEach((h) => {
-    confList.append(skEl("div", "sk-group-title", SK_HOST_DISPLAY[h] || h));
-    confByHost[h].forEach((item) => {
+  const confHarnesses = Object.keys(confByHarness);
+  skEmptyToggle("sk-conflicts-empty", confHarnesses.length > 0);
+  confHarnesses.forEach((h) => {
+    confList.append(skEl("div", "sk-group-title", SK_HARNESS_DISPLAY[h] || h));
+    confByHarness[h].forEach((item) => {
       if (item.kind === "conflict") {
         const c = item.c;
         const line = skEl("div", "sk-row-line sk-pair");
@@ -9269,23 +9269,23 @@ function renderSkillHealth(payload, hostFilter) {
     });
   });
 
-  // ── 5. 使用证据（§6.5）：只对提供触发数据的宿主列三列 ────────────────
+  // ── 5. 使用证据（§6.5）：只对提供触发数据的执行环境列三列 ────────────────
   const usageList = document.getElementById("sk-usage-list");
   usageList.textContent = "";
   const trigBlock = report.trigger_data || {};
-  const hsAll = report.host_summaries || {};
-  const triggerHosts = SK_HOST_ORDER.filter((h) => (
+  const hsAll = report.harness_summaries || {};
+  const triggerHarnesses = SK_HARNESS_ORDER.filter((h) => (
     (hsAll[h] || {}).skills_on_disk > 0 && (hsAll[h] || {}).trigger_data === "available"));
-  skEmptyToggle("sk-usage-empty", triggerHosts.length > 0);
-  triggerHosts.forEach((h) => {
-    const group = skEl("div", "sk-group-title", SK_HOST_DISPLAY[h] || h);
+  skEmptyToggle("sk-usage-empty", triggerHarnesses.length > 0);
+  triggerHarnesses.forEach((h) => {
+    const group = skEl("div", "sk-group-title", SK_HARNESS_DISPLAY[h] || h);
     usageList.append(group);
-    // 触发证据只在单宿主扫描时进入载荷（全部视图的顶层 trigger_data 恒
+    // 触发证据只在单执行环境扫描时进入载荷（全部视图的顶层 trigger_data 恒
     // 不可用 —— 那是「没采」，不是「没人用」，绝不冒充 0 条僵尸）。
-    const isThisPayload = (payload.host_selection === h);
+    const isThisPayload = (payload.harness_selection === h);
     if (!isThisPayload) {
       usageList.append(skEl("div", "sk-row-line muted",
-        "触发证据按宿主扫描时才采集（全部视图不提供，不冒充 0）—— 选中该宿主重新扫描可见。"));
+        "触发证据按执行环境扫描时才采集（全部视图不提供，不冒充 0）—— 选中该执行环境重新扫描可见。"));
       return;
     }
     const zombieDiag = (payload.diagnostics || []).find((d) => d.code === "SV201");
@@ -9303,8 +9303,8 @@ function renderSkillHealth(payload, hostFilter) {
     }
     usageList.append(line);
   });
-  if (triggerHosts.length === 0) {
-    usageList.append(skEl("div", "sk-row-line muted", "此扫描没有可用的触发数据宿主。"));
+  if (triggerHarnesses.length === 0) {
+    usageList.append(skEl("div", "sk-row-line muted", "此扫描没有可用的触发数据执行环境。"));
   }
 
   // ── 6. 本次未评估（§6.6）：原样列出，不得省略 ────────────────────────
@@ -9348,7 +9348,7 @@ async function loadSkillsDoctor(force) {
   setSkillsScanningUI(true, skState.loaded);
   try {
     const payload = await invoke("skills_doctor_report", {
-      host: skState.host,
+      harness: skState.harness,
       force: !!force,
       selfRoot: skState.selfRoot || null,
       budget: skState.budget || null,
@@ -9357,7 +9357,7 @@ async function loadSkillsDoctor(force) {
     skState.loaded = true;
     skState.scanning = false;
     setSkillsScanningUI(false, true);
-    renderSkillHealth(payload, skState.host);
+    renderSkillHealth(payload, skState.harness);
   } catch (e) {
     skState.scanning = false;
     skState.error = true;
@@ -9476,8 +9476,8 @@ function initSkillsTab() {
   document.getElementById("sk-cancel").addEventListener("click", async () => {
     await invoke("skills_scan_cancel").catch(() => null);
   });
-  document.getElementById("sk-host").addEventListener("change", (ev) => {
-    skState.host = ev.target.value || "all";
+  document.getElementById("sk-harness").addEventListener("change", (ev) => {
+    skState.harness = ev.target.value || "all";
     if (skState.loaded || skState.data) loadSkillsDoctor();
   });
   document.getElementById("sk-snapshot").addEventListener("click", async () => {
@@ -9513,12 +9513,12 @@ document.addEventListener("DOMContentLoaded", init);
 
 
 // ── 「测试」tab v2（2026-09-20 转向）─────────────────────────────────────
-// 默认面 = 被动路线质量报告（宿主 × 实际模型族，来自已入库 usage_facts 的
+// 默认面 = 被动路线质量报告（执行环境 × 实际模型族，来自已入库 usage_facts 的
 // 硬证据——模型串是协议响应原样，anthropic 官方不可能返回 deepseek/glm），
 // 不发任何探针请求。主动 L0 探针收进「高级」折叠区：隔离在 cc-switch 型
 // 机器上不成立（settings.json env 压制进程注入，spec §0 addendum）。
 // 渲染全部 DOM 构建 + textContent（安全纪律，复审 F1）：模型串/摘要字段
-// 来自宿主日志与中转协议响应——正是本 tab 要防的对手，绝不 innerHTML
+// 来自执行环境日志与中转协议响应——正是本 tab 要防的对手，绝不 innerHTML
 // 插值（CSP 为 null 的 webview 里注入即可 invoke 任意 IPC）。
 
 const testState = { routes: [], ticket: null, polling: null };
@@ -9545,8 +9545,8 @@ async function loadCurrentRouteHint() {
     label.textContent = "当前路线：读取失败（CLI 不可用？）";
     return;
   }
-  const host = (hint.base_url || "").replace(/^https?:\/\//, "").split("/")[0];
-  label.textContent = `当前路线：${host || "官方直连（无自定义端点）"}${hint.model ? ` · 默认模型 ${hint.model}` : ""}`;
+  const harness = (hint.base_url || "").replace(/^https?:\/\//, "").split("/")[0];
+  label.textContent = `当前路线：${harness || "官方直连（无自定义端点）"}${hint.model ? ` · 默认模型 ${hint.model}` : ""}`;
   if (hint.model && !modelInput.value) modelInput.value = hint.model;
 }
 
@@ -9640,46 +9640,46 @@ async function loadQualityReport() {
 }
 
 function renderQualityReport(report, days) {
-  const hostsBox = document.getElementById("test-quality-hosts");
+  const harnessesBox = document.getElementById("test-quality-harnesses");
   const summaryEl = document.getElementById("test-quality-summary");
   const foot = document.getElementById("test-quality-foot");
-  hostsBox.replaceChildren();
-  const hosts = Array.isArray(report.hosts) ? report.hosts : [];
-  for (const host of hosts) {
-    hostsBox.append(buildHostQualityPanel(host, days));
+  harnessesBox.replaceChildren();
+  const harnesses = Array.isArray(report.harnesses) ? report.harnesses : [];
+  for (const harness of harnesses) {
+    harnessesBox.append(buildHarnessQualityPanel(harness, days));
   }
-  summaryEl.textContent = hosts.length === 0
+  summaryEl.textContent = harnesses.length === 0
     ? "窗口内没有用量事实——先等一次同步"
-    : `${hosts.length} 个宿主 · 按协议响应里的实际模型判定`;
-  foot.replaceChildren("判定依据：模型串来自宿主协议响应原样（非推断）。「非官方模型」= 该宿主官方渠道不可能给出的模型族；「API 错误」= 请求失败时宿主写入的本地占位（<synthetic>）。");
+    : `${harnesses.length} 个执行环境 · 按协议响应里的实际模型判定`;
+  foot.replaceChildren("判定依据：模型串来自执行环境协议响应原样（非推断）。「非官方模型」= 该执行环境官方渠道不可能给出的模型族；「API 错误」= 请求失败时执行环境写入的本地占位（<synthetic>）。");
 }
 
-function buildHostQualityPanel(host, days) {
+function buildHarnessQualityPanel(harness, days) {
   const panel = document.createElement("div");
   panel.className = "panel";
   const title = document.createElement("div");
   title.className = "panel-title";
   const titleText = document.createElement("span");
-  titleText.textContent = `${host.host} · 近 ${days} 天 · ${host.totals ? host.totals.requests : 0} 请求 / ${host.totals ? host.totals.sessions : 0} 会话`;
+  titleText.textContent = `${harness.harness} · 近 ${days} 天 · ${harness.totals ? harness.totals.requests : 0} 请求 / ${harness.totals ? harness.totals.sessions : 0} 会话`;
   title.append(titleText);
 
-  const families = Array.isArray(host.families) ? host.families : [];
+  const families = Array.isArray(harness.families) ? harness.families : [];
   const nonNative = families.filter((f) => f.flag === "non_native");
   const apiErrors = families.find((f) => f.flag === "api_error");
   const nonNativeShare = nonNative.reduce((sum, f) => sum + (f.request_share || 0), 0);
 
   // 用户语言的结论行（notice 级别与总览通知同一套语义）。
   const notice = document.createElement("div");
-  if (!host.has_baseline) {
+  if (!harness.has_baseline) {
     notice.className = "notice";
-    notice.append(buildNoticeText("该宿主未登记官方模型基准", "只按模型族展示分布，不做「非官方」判定"));
+    notice.append(buildNoticeText("该执行环境未登记官方模型基准", "只按模型族展示分布，不做「非官方」判定"));
   } else if (nonNative.length > 0) {
     const level = nonNativeShare >= 20 ? "danger" : "warn";
     notice.className = `notice ${level}`;
     const names = nonNative.map((f) => QUALITY_FAMILY_LABELS[f.family] || f.family).join(" / ");
     notice.append(buildNoticeText(
       `${nonNativeShare.toFixed(1)}% 的请求实际运行在非官方模型上（${names}）`,
-      "依据：这些模型族不可能来自该宿主的官方渠道——响应模型串是协议原样",
+      "依据：这些模型族不可能来自该执行环境的官方渠道——响应模型串是协议原样",
     ));
   } else {
     notice.className = "notice ok";
@@ -9690,7 +9690,7 @@ function buildHostQualityPanel(host, days) {
     errorNotice.className = "notice warn";
     errorNotice.append(buildNoticeText(
       `${apiErrors.requests} 次请求失败（API 错误，涉及 ${apiErrors.sessions} 个会话）`,
-      "宿主在请求被拒/断流时写入的本地占位——常见为网关 402/断网",
+      "执行环境在请求被拒/断流时写入的本地占位——常见为网关 402/断网",
     ));
     panel.append(title, notice, errorNotice);
   } else {

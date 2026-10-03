@@ -21,12 +21,12 @@ ok(/generate_handler!\[[\s\S]*data_source_status,/.test(lib), "独立命令注�
 ok(/generate_handler!\[[\s\S]*sync_request_status,/.test(lib), "同步请求状态命令注册到 IPC");
 ok(js.includes('invoke("data_source_status")'), "数据源页消费独立命令");
 ok(!/sessions_list[\s\S]{0,160}source_statuses/.test(js), "不再从会话搜索读取源状态");
-ok(runtime.includes("crate::ingest_service::FACT_HOSTS"), "契约由已接线宿主注册表驱动");
+ok(runtime.includes("crate::ingest_service::FACT_HARNESSES"), "契约由已接线执行环境注册表驱动");
 for (const field of ["source_id", "authorization", "connection_state", "scan",
   "log", "import_scope", "failed_scope", "recovery_action"]) {
   ok(runtime.includes(`\"${field}\"`), `契约包含 ${field}`);
 }
-ok(js.includes("for (const source of ordered)"), "前端按返回集合渲染而非硬编码宿主");
+ok(js.includes("for (const source of ordered)"), "前端按返回集合渲染而非硬编码执行环境");
 ok(js.includes("recoverSource(button, key") && js.includes('invoke("trigger_sync")'),
   "未检测与失败状态都有恢复动作");
 ok(js.includes('invoke("sync_request_status", { requestId })'), "恢复动作按请求ID等待完成");
@@ -88,13 +88,13 @@ let lastPollArgs = null;
 const sourceDto = {
   status: "ok",
   sources: [
-    { source_id: "host:claude-code", host: "claude-code", connection_state: "not_detected",
+    { source_id: "harness:claude-code", harness: "claude-code", connection_state: "not_detected",
       scan: { source_count: 0 }, log: {}, import_scope: { facts: 0, sessions: 0 }, failed_scope: { sources: 0 },
       recovery_action: { kind: "scan_and_connect", label: "扫描并接入" } },
-    { source_id: "host:codex", host: "codex", connection_state: "connected",
+    { source_id: "harness:codex", harness: "codex", connection_state: "connected",
       scan: { source_count: 2 }, log: { last_event_at_ms: 1 }, import_scope: { facts: 4, sessions: 2 }, failed_scope: { sources: 0 },
       recovery_action: { kind: "sync", label: "立即同步" } },
-    { source_id: "host:dsh", host: "dsh", connection_state: "needs_attention",
+    { source_id: "harness:dsh", harness: "dsh", connection_state: "needs_attention",
       scan: { source_count: 1 }, log: {}, import_scope: { facts: 0, sessions: 0 },
       failed_scope: { sources: 1, error_codes: ["permission"] }, recovery_action: { kind: "retry_sync", label: "重新同步" } },
   ],
@@ -155,7 +155,7 @@ ok(dshDetail.children.some(child => child.title === "permission"), "原始 error
 ok(dshDetail.children.some(child => child.textContent.includes("没有读取权限")), "reason code 映射为人话（规格 §5.6）");
 ok(dshDetail.children.some(child => child.textContent.includes("不是新鲜数据")), "失败来源明确不宣称数据新鲜");
 ok(elements["src-banner"].hidden === false && elements["src-banner"].textContent.includes("DeepSeek Harness") && elements["src-banner"].textContent.includes("其他来源已继续同步"),
-  "部分失败横幅点名失败宿主并说明其他来源继续同步");
+  "部分失败横幅点名失败执行环境并说明其他来源继续同步");
 // 恢复动作现在住在展开区 .src-row-detail-actions 里（规格 §4.1.1），不再是
 // 卡片的直接子节点；按钮文字仍是契约 recovery_action.label 原样透传。
 const actionButtons = rows.flatMap(row =>
@@ -216,30 +216,30 @@ const month = sandbox.statisticsMonth();
 const monthStart = month + "-01";
 const today = new Date().toISOString().slice(0, 10);
 const groupsReport = { status: "ok", month, groups: [
-  { group_id: "codex|openai|gpt-5.6-sol|session-native|metered_estimate|" + month, host: "codex", provider_id: "openai",
+  { group_id: "codex|openai|gpt-5.6-sol|session-native|metered_estimate|" + month, harness: "codex", provider_id: "openai",
     model_id: "gpt-5.6-sol", evidence_basis: "session-native", pricing_basis: "metered_estimate", tokens: 1_650_000,
     first_event_at_ms: 1, last_event_at_ms: 2, session_count: 7, effective_start: month, effective_end: month,
     estimated_amounts: [{ amount_minor: 1892, currency: "USD", basis: "metered_estimate" }], unpriced_tokens: 0, unresolved_reason: null },
-  { group_id: "claude-code|minimax|MiniMax-M2.5|missing|metered_estimate|" + month, host: "claude-code", provider_id: "minimax",
+  { group_id: "claude-code|minimax|MiniMax-M2.5|missing|metered_estimate|" + month, harness: "claude-code", provider_id: "minimax",
     model_id: "MiniMax-M2.5", evidence_basis: "missing", pricing_basis: "metered_estimate", tokens: 980_000,
     first_event_at_ms: 1, last_event_at_ms: 2, session_count: 4, effective_start: month, effective_end: month,
     estimated_amounts: [{ amount_minor: 760, currency: "CNY", basis: "metered_estimate" }], unpriced_tokens: 0, unresolved_reason: null },
-  // 与 sol 同宿主、同 provider、同证据、同计价依据、同日期 → 同一批量键。
-  { group_id: "codex|openai|gpt-5.6-luna|session-native|metered_estimate|" + month, host: "codex", provider_id: "openai",
+  // 与 sol 同执行环境、同 provider、同证据、同计价依据、同日期 → 同一批量键。
+  { group_id: "codex|openai|gpt-5.6-luna|session-native|metered_estimate|" + month, harness: "codex", provider_id: "openai",
     model_id: "gpt-5.6-luna", evidence_basis: "session-native", pricing_basis: "metered_estimate", tokens: 120_000,
     first_event_at_ms: 1, last_event_at_ms: 2, session_count: 1, effective_start: month, effective_end: month,
     estimated_amounts: [{ amount_minor: 96, currency: "USD", basis: "metered_estimate" }], unpriced_tokens: 0, unresolved_reason: null },
   // 服务商未知的组：弹窗必须先问服务商。
-  { group_id: "claude-code|<unknown>|glm-5|missing|metered_estimate|" + month, host: "claude-code", provider_id: "<unknown>",
+  { group_id: "claude-code|<unknown>|glm-5|missing|metered_estimate|" + month, harness: "claude-code", provider_id: "<unknown>",
     model_id: "glm-5", evidence_basis: "missing", pricing_basis: "metered_estimate", tokens: 640_000,
     first_event_at_ms: 1, last_event_at_ms: 2, session_count: 3, effective_start: month, effective_end: month,
     estimated_amounts: [], unpriced_tokens: 640_000, unresolved_reason: "billing-route-unknown" },
-  { group_id: "codex|openai|gpt-mystery|missing|unavailable|" + month, host: "codex", provider_id: "openai",
+  { group_id: "codex|openai|gpt-mystery|missing|unavailable|" + month, harness: "codex", provider_id: "openai",
     model_id: "gpt-mystery", evidence_basis: "missing", pricing_basis: "unavailable", tokens: 18_000,
     first_event_at_ms: 1, last_event_at_ms: 2, session_count: 1, effective_start: month, effective_end: month,
     estimated_amounts: [], unpriced_tokens: 18_000, unresolved_reason: "no compatible price card" },
 ] };
-const candidatesReport = { status: "ok", candidates: [{ candidate_id: "candidate-test", host: "codex", provider_id: "openai",
+const candidatesReport = { status: "ok", candidates: [{ candidate_id: "candidate-test", harness: "codex", provider_id: "openai",
   amount_minor: 2000, currency: "USD", billing_period_start: "2026-06-01", status: "pending" }] };
 await sandbox.renderBillingConfirmation(groupsReport, candidatesReport);
 ok(elements["ov-billing-prompt"].hidden === false, "待确认组存在时显示入口提示");
@@ -257,14 +257,14 @@ ok(elements["ov-billing-review-panel"].hidden === false && reviewRows.length ===
 ok(reviewRows[0].children[0].textContent.includes("gpt-5.6-sol") && reviewRows[4].children[0].textContent.includes("无价卡"),
   "V3：金额最大的组在前，无价卡的组排最后");
 ok(reviewRows[0].children[0].children.some((child) => child.textContent.includes("来自旧版本套餐记录")),
-  "旧资产候选作为证据行挂在同宿主同 provider 的组下");
+  "旧资产候选作为证据行挂在同执行环境同 provider 的组下");
 const rowButtons = reviewRows.map((row) => row.children[1].children.map((b) => b.textContent));
 ok(rowButtons.every((labels) => labels.length === 1 && labels[0] === "明确计费方式"),
   "每组只有一个主操作「明确计费方式」");
 
 // 弹窗：路由已知（session-native）→ 只问计费方式；同类组默认批量。
 const billingCalls = [];
-const previewFixture = (args) => ({ status: "ok", host: args.host, provider_id: args.providerId,
+const previewFixture = (args) => ({ status: "ok", harness: args.harness, provider_id: args.providerId,
   relationship_kind: args.relationshipKind, effective_start: args.effectiveStart, effective_end: args.effectiveEnd,
   scopes: args.scopes, changes_amounts: args.relationshipKind === "official_subscription",
   moved: { fact_count: 24, session_count: 8, tokens: 1_770_000, unpriced_tokens: 0,
@@ -294,7 +294,7 @@ ok(elements["ov-billing-declaration-panel"].hidden === false && elements["ov-bil
   "路由证据已是官方（session-native）时只问计费方式，不问服务商与路由（缺什么问什么）");
 ok(elements["ov-billing-batch-row"].hidden === false && elements["ov-billing-batch"].checked === true
   && /将同时处理 2 个模型、8 个会话、1\.8M tokens/.test(elements["ov-billing-batch-text"].textContent),
-  "默认勾选同宿主、同未知原因、同日期的同类组并汇总模型/会话/tokens");
+  "默认勾选同执行环境、同未知原因、同日期的同类组并汇总模型/会话/tokens");
 ok(elements["ov-billing-batch-models"].hidden === true && elements["ov-billing-batch-models-toggle"].textContent === "查看这 2 个模型",
   "模型清单默认折叠，只留一个展开入口");
 elements["ov-billing-batch-models-toggle"].onclick();
@@ -343,7 +343,7 @@ await elements["ov-billing-save"].onclick();
 const previewCall = billingCalls.find((c) => c.command === "billing_candidate_impact_preview");
 ok(previewCall && previewCall.args.effectiveStart === monthStart && previewCall.args.effectiveEnd === null && previewCall.args.relationshipKind === "official_subscription"
   && previewCall.args.scopes.length === 0 && !("windowStartMs" in previewCall.args),
-  "预览参数 = 保存参数（宿主/provider/关系/起止日期），不传统计月窗口（G2）；持续有效默认计费方级作用域、不写模型清单快照");
+  "预览参数 = 保存参数（执行环境/provider/关系/起止日期），不传统计月窗口（G2）；持续有效默认计费方级作用域、不写模型清单快照");
 ok(elements["ov-billing-scope-row"].hidden === false && elements["ov-billing-scope-models"].checked === false
   && elements["ov-billing-scope-models-text"].textContent.includes("仅限这 2 个模型"),
   "「仅限这些模型」行可见、持续有效时默认不勾（新模型沿用声明）");
@@ -445,13 +445,13 @@ ok(elements["ov-billing-recalculation-panel"].hidden === false &&
 // 模型折进 models[]，旧的逐模型行只在没有 clusters 的旧后端上出现。
 const clusterModel = (model_id, tokens, session_count, group_id, amounts) => ({ model_id, tokens, session_count, group_id, estimated_amounts: amounts });
 const clusterReport = { status: "ok", month, groups: [], clusters: [
-  { cluster_id: "c-needs", host: "claude-code", billing_party: null, model_vendor: null, provider_id: "<unknown>",
+  { cluster_id: "c-needs", harness: "claude-code", billing_party: null, model_vendor: null, provider_id: "<unknown>",
     evidence_basis: "missing", pricing_basis: "unavailable", effective_start: month, effective_end: month,
     auto_verdict: { model_vendor: null, gateway_named: false, route_state: "unknown", route_basis: "missing", billing_party: null,
       billing_mode: null, relationship_kind: null, plan: null, state: "needs_input", question: null, basis: [] },
     models: [clusterModel("mystery-9", 18_000, 1, "g-mystery", [])], group_ids: ["g-mystery"], tokens: 18_000, session_count: 1,
     unpriced_tokens: 18_000, estimated_amounts: [] },
-  { cluster_id: "c-det", host: "claude-code", billing_party: "anthropic", model_vendor: "anthropic", provider_id: "anthropic",
+  { cluster_id: "c-det", harness: "claude-code", billing_party: "anthropic", model_vendor: "anthropic", provider_id: "anthropic",
     evidence_basis: "session-native", pricing_basis: "route-observed", effective_start: month, effective_end: month,
     auto_verdict: { model_vendor: "anthropic", gateway_named: false, route_state: "official", route_basis: "session-native",
       billing_party: "anthropic", billing_mode: "subscription", relationship_kind: "official_subscription",
@@ -461,25 +461,25 @@ const clusterReport = { status: "ok", month, groups: [], clusters: [
       clusterModel("claude-sonnet-5", 1_700_000, 12, "g-sonnet", [{ amount_minor: 5000, currency: "USD", basis: "metered_estimate" }])],
     group_ids: ["g-opus", "g-sonnet"], tokens: 4_700_000, session_count: 32, unpriced_tokens: 0,
     estimated_amounts: [{ amount_minor: 35000, currency: "USD", basis: "metered_estimate" }] },
-  { cluster_id: "c-route", host: "claude-code", billing_party: "zhipu-glm", model_vendor: "zhipu-glm", provider_id: "<unknown>",
+  { cluster_id: "c-route", harness: "claude-code", billing_party: "zhipu-glm", model_vendor: "zhipu-glm", provider_id: "<unknown>",
     evidence_basis: "inferred", pricing_basis: "metered_estimate", effective_start: month, effective_end: month,
     auto_verdict: { model_vendor: "zhipu-glm", gateway_named: false, route_state: "vendor_shape", route_basis: "inferred",
       billing_party: "zhipu-glm", billing_mode: "metered", relationship_kind: null, plan: null,
       state: "one_question", question: "route", basis: ["response_id.vendor_shape"] },
     models: [clusterModel("glm-5.3-flash", 640_000, 3, "g-glm", [])], group_ids: ["g-glm"], tokens: 640_000, session_count: 3,
     unpriced_tokens: 640_000, estimated_amounts: [] },
-  { cluster_id: "c-mode", host: "codex", billing_party: "openai", model_vendor: "openai", provider_id: "openai",
+  { cluster_id: "c-mode", harness: "codex", billing_party: "openai", model_vendor: "openai", provider_id: "openai",
     evidence_basis: "session-native", pricing_basis: "metered_estimate", effective_start: month, effective_end: month,
     auto_verdict: { model_vendor: "openai", gateway_named: false, route_state: "provider_reported", route_basis: "session-native",
       billing_party: "openai", billing_mode: null, relationship_kind: null, plan: null,
-      state: "one_question", question: "billing_mode", basis: ["host.provider_reported"] },
+      state: "one_question", question: "billing_mode", basis: ["harness.provider_reported"] },
     models: [clusterModel("gpt-5.6-sol", 1_650_000, 7, "g-sol", [{ amount_minor: 1892, currency: "USD", basis: "metered_estimate" }])],
     group_ids: ["g-sol"], tokens: 1_650_000, session_count: 7, unpriced_tokens: 0,
     estimated_amounts: [{ amount_minor: 1892, currency: "USD", basis: "metered_estimate" }] },
 ] };
 // 后端同时返回逐模型 groups（旧消费方）与 clusters；带 clusters 时前端按簇渲染、按簇计数。
 clusterReport.groups = clusterReport.clusters.flatMap((c) => c.models.map((m) => ({
-  group_id: m.group_id, host: c.host, provider_id: c.provider_id, model_id: m.model_id, evidence_basis: c.evidence_basis,
+  group_id: m.group_id, harness: c.harness, provider_id: c.provider_id, model_id: m.model_id, evidence_basis: c.evidence_basis,
   pricing_basis: c.pricing_basis, tokens: m.tokens, session_count: m.session_count, effective_start: c.effective_start,
   effective_end: c.effective_end, estimated_amounts: m.estimated_amounts, unpriced_tokens: 0, unresolved_reason: null,
   first_event_at_ms: 1, last_event_at_ms: 2, auto_verdict: c.auto_verdict })));
@@ -509,7 +509,7 @@ ok(rowText(1).includes("anthropic") && rowText(1).includes("Claude Pro 订阅 ·
 ok(rowButtons2(1).join("|") === "确认订阅并填写月费|不对，我来改", "程序判定行只剩一键确认与「不对，我来改」");
 ok(rowButtons2(2).join("|") === "zhipu-glm 官方端点|中转 / 第三方" && rowBasis(2).includes("已知：响应 ID 与厂商形状一致"),
   "差一问（路由）：问题的两个选项直接放在行内");
-ok(rowButtons2(3).join("|") === "订阅|按量 API|组织承担" && rowText(3).includes("宿主自报官方"),
+ok(rowButtons2(3).join("|") === "订阅|按量 API|组织承担" && rowText(3).includes("执行环境自报官方"),
   "差一问（计费方式）：三个选项直接放在行内");
 ok(rowButtons2(0).join("|") === "明确计费方式" && rowText(0).includes("服务商未知") && rowBasis(0).includes("缺少证据"),
   "需补充：仍是一个「明确计费方式」入口");
@@ -568,14 +568,14 @@ elements["ov-billing-close"].onclick();
 // #1 冲突证据单列：不归因、不给一键订阅。
 billingCalls.length = 0;
 const conflictReport = { status: "ok", month, clusters: [{
-  cluster_id: "c-conflict", host: "codex", billing_party: null, model_vendor: "openai", provider_id: "openai",
+  cluster_id: "c-conflict", harness: "codex", billing_party: null, model_vendor: "openai", provider_id: "openai",
   evidence_basis: "conflict", pricing_basis: "metered_estimate", effective_start: month, effective_end: month,
   auto_verdict: { model_vendor: "openai", gateway_named: false, route_state: "conflict", route_basis: "conflict",
     billing_party: null, billing_mode: null, relationship_kind: null, plan: null,
     state: "needs_input", question: null, basis: ["route.conflict"] },
   models: [clusterModel("gpt-5.6-sol", 1000, 1, "g-conflict", [])], group_ids: ["g-conflict"],
   tokens: 1000, session_count: 1, unpriced_tokens: 0, estimated_amounts: [] }], groups: [
-  { group_id: "g-conflict", host: "codex", provider_id: "openai", model_id: "gpt-5.6-sol", evidence_basis: "conflict",
+  { group_id: "g-conflict", harness: "codex", provider_id: "openai", model_id: "gpt-5.6-sol", evidence_basis: "conflict",
     pricing_basis: "metered_estimate", tokens: 1000, session_count: 1, effective_start: month, effective_end: month,
     estimated_amounts: [], unpriced_tokens: 0, unresolved_reason: null, first_event_at_ms: 1, last_event_at_ms: 2 }] };
 await sandbox.renderBillingConfirmation(conflictReport, { status: "ok", candidates: [] });
@@ -584,14 +584,14 @@ const conflictRow = elements["ov-billing-review-list"].children[0];
 ok(conflictRow.children[0].textContent.includes("路由证据冲突") && conflictRow.children[1].children.length === 1
   && conflictRow.children[1].children[0].textContent === "明确计费方式",
   "#1：证据冲突的行既不归因也不给一键订阅，只留「明确计费方式」");
-ok(conflictRow.children[0].children.map((c) => c.textContent).join("|").includes("宿主自报与会话路由证据冲突"),
-  "#1：冲突行的依据写清是宿主自报与会话路由证据打架");
+ok(conflictRow.children[0].children.map((c) => c.textContent).join("|").includes("执行环境自报与会话路由证据冲突"),
+  "#1：冲突行的依据写清是执行环境自报与会话路由证据打架");
 
 // #2 + #6：钉在有用量组上的旧资产候选跟着折进簇行，且不吞掉 auto: 依据链。
 billingCalls.length = 0;
 const candidateReport = JSON.parse(JSON.stringify(clusterReport));
 await sandbox.renderBillingConfirmation(candidateReport, { status: "ok", candidates: [{ candidate_id: "cand-cluster",
-  host: "claude-code", provider_id: "anthropic", amount_minor: 2000, currency: "USD",
+  harness: "claude-code", provider_id: "anthropic", amount_minor: 2000, currency: "USD",
   billing_period_start: "2026-06-01", status: "pending" }] });
 const detRow = elements["ov-billing-review-list"].children[1];
 const candLine = detRow.children[0].children.find((c) => c.textContent.includes("来自旧版本套餐记录"));
@@ -632,7 +632,7 @@ elements["ov-billing-close"].onclick();
 billingCalls.length = 0;
 const acceptedReport = JSON.parse(JSON.stringify(clusterReport));
 await sandbox.renderBillingConfirmation(acceptedReport, { status: "ok", candidates: [{ candidate_id: "cand-accepted",
-  host: "claude-code", provider_id: "anthropic", amount_minor: 2000, currency: "USD",
+  harness: "claude-code", provider_id: "anthropic", amount_minor: 2000, currency: "USD",
   billing_period_start: "2026-06-01", status: "accepted" }] });
 if (elements["ov-billing-review-panel"].hidden) await elements["ov-billing-review"].onclick();
 const acceptedRows = elements["ov-billing-review-list"].children;
@@ -658,7 +658,7 @@ elements["ov-billing-close"].onclick();
 // billing_preview.rs::auto_verdict 的 relay_config 分支 + relay_label_of）。
 billingCalls.length = 0;
 const relayReport = { status: "ok", month, clusters: [{
-  cluster_id: "c-relay", host: "claude-code", billing_party: "shengsuanyun.com", model_vendor: "deepseek",
+  cluster_id: "c-relay", harness: "claude-code", billing_party: "shengsuanyun.com", model_vendor: "deepseek",
   provider_id: "<unknown>", evidence_basis: "inferred", pricing_basis: "metered_estimate",
   effective_start: month, effective_end: month,
   auto_verdict: { model_vendor: "deepseek", gateway_named: false, route_state: "relay_config", route_basis: "inferred",
@@ -667,7 +667,7 @@ const relayReport = { status: "ok", month, clusters: [{
     relationship_kind: null, plan: null, state: "one_question", question: "route", basis: ["config.endpoint"] },
   models: [clusterModel("deepseek-v4-flash", 856_000_000, 35, "g-relay", [])], group_ids: ["g-relay"],
   tokens: 856_000_000, session_count: 35, unpriced_tokens: 856_000_000, estimated_amounts: [] }],
-  groups: [{ group_id: "g-relay", host: "claude-code", provider_id: "<unknown>", model_id: "deepseek-v4-flash",
+  groups: [{ group_id: "g-relay", harness: "claude-code", provider_id: "<unknown>", model_id: "deepseek-v4-flash",
     evidence_basis: "inferred", pricing_basis: "metered_estimate", tokens: 856_000_000, session_count: 35,
     effective_start: month, effective_end: month, estimated_amounts: [], unpriced_tokens: 856_000_000,
     unresolved_reason: "billing-route-unknown", first_event_at_ms: 1, last_event_at_ms: 2 }] };
@@ -701,7 +701,7 @@ elements["ov-billing-close"].onclick();
 // ——按钮文案只说"中转 / 第三方"，点开不预填任何人（否则一键确认会写下没人判过的字符串）。
 billingCalls.length = 0;
 const ambiguousReport = { status: "ok", month, clusters: [{
-  cluster_id: "c-multi", host: "workbuddy", billing_party: null, model_vendor: "deepseek", provider_id: "<unknown>",
+  cluster_id: "c-multi", harness: "workbuddy", billing_party: null, model_vendor: "deepseek", provider_id: "<unknown>",
   evidence_basis: "inferred", pricing_basis: "metered_estimate", effective_start: month, effective_end: month,
   auto_verdict: { model_vendor: "deepseek", gateway_named: false, route_state: "relay_config", route_basis: "inferred",
     billing_party: null, config_endpoint: "alpha-relay.example", config_source: "~/.workbuddy/models.json",
@@ -709,7 +709,7 @@ const ambiguousReport = { status: "ok", month, clusters: [{
     basis: ["config.endpoint.multiple"] },
   models: [clusterModel("deepseek-v4-flash", 1000, 1, "g-multi", [])], group_ids: ["g-multi"],
   tokens: 1000, session_count: 1, unpriced_tokens: 1000, estimated_amounts: [] }],
-  groups: [{ group_id: "g-multi", host: "workbuddy", provider_id: "<unknown>", model_id: "deepseek-v4-flash",
+  groups: [{ group_id: "g-multi", harness: "workbuddy", provider_id: "<unknown>", model_id: "deepseek-v4-flash",
     evidence_basis: "inferred", pricing_basis: "metered_estimate", tokens: 1000, session_count: 1,
     effective_start: month, effective_end: month, estimated_amounts: [], unpriced_tokens: 1000,
     unresolved_reason: "billing-route-unknown", first_event_at_ms: 1, last_event_at_ms: 2 }] };
@@ -729,7 +729,7 @@ elements["ov-billing-close"].onclick();
 // 于是每次 restep 都把结束日期打回默认（复验者在真实 workbench.js 上复现过）。
 billingCalls.length = 0;
 const noAnchorReport = { status: "ok", month, clusters: [{
-  cluster_id: "c-noanchor", host: "claude-code", billing_party: "anthropic", model_vendor: "anthropic",
+  cluster_id: "c-noanchor", harness: "claude-code", billing_party: "anthropic", model_vendor: "anthropic",
   provider_id: "anthropic", evidence_basis: "session-native", pricing_basis: "route-observed",
   effective_start: month, effective_end: month,
   auto_verdict: { model_vendor: "anthropic", gateway_named: false, route_state: "official", route_basis: "session-native",
@@ -737,7 +737,7 @@ const noAnchorReport = { status: "ok", month, clusters: [{
     state: "one_question", question: "billing_mode", basis: ["route.session-native"] },
   models: [clusterModel("claude-opus-5", 1000, 1, "g-noanchor", [])], group_ids: ["g-noanchor"],
   tokens: 1000, session_count: 1, unpriced_tokens: 0, estimated_amounts: [] }],
-  groups: [{ group_id: "g-noanchor", host: "claude-code", provider_id: "anthropic", model_id: "claude-opus-5",
+  groups: [{ group_id: "g-noanchor", harness: "claude-code", provider_id: "anthropic", model_id: "claude-opus-5",
     evidence_basis: "session-native", pricing_basis: "route-observed", tokens: 1000, session_count: 1,
     effective_start: month, effective_end: month, estimated_amounts: [], unpriced_tokens: 0,
     unresolved_reason: null, first_event_at_ms: 1, last_event_at_ms: 2, auto_verdict: null }] };
@@ -809,12 +809,12 @@ billingOverride = async (command, args) => {
   return undefined;
 };
 await sandbox.renderBillingDeclarations({ status: "ok", declarations: [
-  { declaration_id: "decl-mini", host: "claude-code", provider_id: "minimax",
+  { declaration_id: "decl-mini", harness: "claude-code", provider_id: "minimax",
     relationship_kind: "official_subscription", subscription_name: "MiniMax",
     amount_minor: 4400, currency: "CNY", effective_start: "2026-06-01", effective_end: null,
     source_candidate_id: null, current_revision_id: "rev-mini-1",
     scopes: [{ scope_kind: "model", scope_value: "MiniMax-M3" }, { scope_kind: "model", scope_value: "MiniMax-M2.7" }] },
-  { declaration_id: "decl-api", host: "claude-code", provider_id: "anthropic",
+  { declaration_id: "decl-api", harness: "claude-code", provider_id: "anthropic",
     relationship_kind: "official_api", subscription_name: null,
     amount_minor: null, currency: null, effective_start: "2026-06-01", effective_end: null,
     source_candidate_id: null, current_revision_id: "rev-api-1", scopes: [] },

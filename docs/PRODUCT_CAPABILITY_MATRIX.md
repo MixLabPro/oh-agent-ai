@@ -3,7 +3,7 @@
 Reports must distinguish measured facts, estimates, and unavailable data.
 
 Scope: **install-time** capabilities. The runtime (session-log) matrix — tool
-calls, usage, approvals, durations, per host — is §13 of
+calls, usage, approvals, durations, per harness — is §13 of
 [RUNTIME_EVIDENCE_CONTRACT.md](./RUNTIME_EVIDENCE_CONTRACT.md), and its
 reporting vocabulary extends the one below.
 
@@ -24,16 +24,16 @@ Use these phrases consistently:
 
 - **runtime verified**: returned by an authoritative runtime API.
 - **discoverable candidate**: present in a documented/configured search root.
-- **explicitly disabled**: disabled by host configuration.
+- **explicitly disabled**: disabled by harness configuration.
 - **candidate context cost**: metadata cost if all candidates are selected.
-- **not available**: the host exposes no verified source.
+- **not available**: the harness exposes no verified source.
 
 Do not call a discoverable candidate “loaded”. Do not call candidate context cost
 “actual context usage”. Do not interpret missing trigger data as zero usage.
 
-## Host views
+## Harness views
 
-OpenClaw is displayed as an instance tree, not a single flat host total:
+OpenClaw is displayed as an instance tree, not a single flat harness total:
 
 ```text
 OpenClaw

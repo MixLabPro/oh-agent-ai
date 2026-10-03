@@ -48,7 +48,7 @@ ALLOWED_PACKAGE_FILES = {
         "agent/dsh_usage_fact.py",
         "agent/duration.py",
         "agent/enrichment.py",
-        "agent/host_capability.py",
+        "agent/harness_capability.py",
         "agent/mcp.py",
         "agent/plan.py", "agent/route_quality.py", "agent/sessions_sql.py",
         "agent/skill.py", "agent/state.py",
@@ -58,10 +58,10 @@ ALLOWED_PACKAGE_FILES = {
         "agent/waste.py",
         "agent/workbuddy_evidence.py", "agent/workbuddy_session_audit.py",
         "agent/workbuddy_usage_fact.py",  # spec §9E.5 E4a
-        # HOST_MANIFEST_DSL_SPEC §8.1：generic 插件宿主 twin。
+        # HARNESS_MANIFEST_DSL_SPEC §8.1：generic 插件执行环境 twin。
         "agent/generic_manifest.py", "agent/generic_plugin.py", "agent/catalog_index.py", "agent/extension_objects.py",
         "agent/generic_recipe.py",
-        # adapters/：宿主适配器
+        # adapters/：执行环境适配器
         "adapters/__init__.py", "adapters/claude.py", "adapters/codex.py",
         "adapters/codex_session.py",
         "adapters/openclaw.py", "adapters/workbuddy.py", "adapters/hermes.py",
@@ -136,7 +136,7 @@ class ClawHubPackagingTests(unittest.TestCase):
         # 只靠「没报错」的门禁，与「一条都没跑」的门禁在 checks 页面上长得
         # 一模一样 —— verify.yml 为差分 job 明确拒绝过这种绿勾。
         self.assertIn("packaged smoke ok", workflow)
-        # 探测宿主要 20–30 秒且结果随 runner 而变；这道门测的是包完整性。
+        # 探测执行环境要 20–30 秒且结果随 runner 而变；这道门测的是包完整性。
         self.assertIn("AGENT_VITALS_DISABLE_CODEX_RUNTIME=1", workflow)
         self.assertIn("AGENT_VITALS_DISABLE_OPENCLAW_RUNTIME=1", workflow)
         # tag 与 __version__ 脱钩过六个版本，发布前必须校验。

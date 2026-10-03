@@ -7,7 +7,7 @@
 //! 用户自己的配置发起请求——测的就是用户每天在用的东西，失败（如 402）也是
 //! 诚实的答案。
 //!
-//! 白名单纪律（与 `discover.rs` / `hosts/ccswitch.rs` 同源）：只从
+//! 白名单纪律（与 `discover.rs` / `harnesses/ccswitch.rs` 同源）：只从
 //! `~/.claude/settings.json` 取 `env.ANTHROPIC_BASE_URL` 与
 //! `env.ANTHROPIC_MODEL` 两个键；`ANTHROPIC_AUTH_TOKEN` 等凭据**连值都不
 //! 读出**——`CurrentRouteHint` 没有放凭据的槽位，Debug 天然安全（测试钉住）。

@@ -8,7 +8,7 @@ repository = "https://github.com/MixLabPro/agent-vitals"
 license = "MIT"
 
 # W3 第 4 步：从 agent-vitals-runtime 拆出。只能依赖 runtime-core（地基层）与
-# data / domain / hosts；Cargo 保证它不可能反向依赖 billing / ingest / trust / mcp。
+# data / domain / harnesses；Cargo 保证它不可能反向依赖 billing / ingest / trust / mcp。
 
 [lib]
 name = "agent_vitals_query"
@@ -18,7 +18,7 @@ path = "src/lib.rs"
 agent-vitals-runtime-core = { path = "../agent-vitals-runtime-core" }
 agent-vitals-data = { path = "../agent-vitals-data" }
 agent-vitals-domain = { path = "../agent-vitals-domain" }
-agent-vitals-hosts = { path = "../agent-vitals-hosts", features = ["sources"] }
+agent-vitals-harnesses = { path = "../agent-vitals-harnesses", features = ["sources"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 jiff = "0.2"
 serde = "1"

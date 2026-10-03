@@ -1,5 +1,5 @@
 //! Pure provider identity and attribution logic for v0.11.
-//! This crate performs no I/O, SQL, network access, or host-log parsing.
+//! This crate performs no I/O, SQL, network access, or harness-log parsing.
 
 use serde::{Deserialize, Serialize};
 
@@ -66,7 +66,7 @@ impl BillingMode {
     }
 }
 
-/// 账户级证据的付费形态（自动归因规格 §2 L2）。跨宿主抽象一致：Claude 的
+/// 账户级证据的付费形态（自动归因规格 §2 L2）。跨执行环境抽象一致：Claude 的
 /// `oauthAccount.organizationType`、Codex 的 `auth.json auth_mode`、WorkBuddy 的
 /// 积分，都只落到这四个值之一。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,12 +88,12 @@ impl PlanKind {
     }
 }
 
-/// 账户级证据——**只有这些字段**。宿主读取器只允许把白名单里的账户属性映射到
+/// 账户级证据——**只有这些字段**。执行环境读取器只允许把白名单里的账户属性映射到
 /// 这里（套餐类型、付款渠道、账期锚点）；邮箱、账户/组织 UUID、令牌在类型上就
 /// 没有位置，不可能被序列化进任何 DTO / 导出（规格 §7 P1）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountEvidence {
-    pub host: String,
+    pub harness: String,
     /// 该账户对应的模型厂商 / 计费方（anthropic、openai …）。
     pub vendor: String,
     pub plan_kind: PlanKind,
@@ -118,7 +118,7 @@ pub struct BillingAttribution {
     pub has_unresolved: bool,
 }
 
-/// Normalizes a raw provider marker or endpoint host to a stable provider id.
+/// Normalizes a raw provider marker or endpoint hostname to a stable provider id.
 pub fn normalize_provider(
     provider_raw: Option<&str>,
     endpoint_host: Option<&str>,
@@ -142,8 +142,8 @@ pub fn normalize_provider(
     }
 }
 
-/// Host matching is deliberately boundary-aware: a URL/host may carry a port,
-/// trailing dot, or a subdomain, but an unrelated host containing the provider
+/// Hostname matching is deliberately boundary-aware: a URL/hostname may carry a port,
+/// trailing dot, or a subdomain, but an unrelated hostname containing the provider
 /// name must never be classified as that provider.
 fn normalize_host(raw: &str) -> String {
     let mut value = raw.trim().to_ascii_lowercase();
@@ -187,9 +187,9 @@ pub fn resolve_billing_attribution(
     // The session's explicit provider wins over a current-config hint. A
     // stronger conflicting route evidence is unresolved instead of silently
     // being called subscription.
-    // 宿主没有自报 provider（Claude Code：`model_provider = None`，路由证据来自
+    // 执行环境没有自报 provider（Claude Code：`model_provider = None`，路由证据来自
     // 请求 ID 形状）时，会话级路由证据就是唯一真值，不与任何人冲突（自动归因
-    // A4）。宿主自报了 provider 的旧口径原样保留——DSH 自报 deepseek 也会落
+    // A4）。执行环境自报了 provider 的旧口径原样保留——DSH 自报 deepseek 也会落
     // 「冲突/metered_estimate」，那是 provider-v0.11 的既有语义，Python
     // `dsh_usage_fact.py` 与已入库事实都按它对齐；收紧要连同 attribution_version
     // 一起升版，不在这一步顺手改。
@@ -354,7 +354,7 @@ mod tests {
             None
         );
     }
-    /// 自动归因 A4：Claude Code 没有宿主自报 provider，会话级路由证据（请求 ID
+    /// 自动归因 A4：Claude Code 没有执行环境自报 provider，会话级路由证据（请求 ID
     /// 形状 → anthropic / api.anthropic.com / session-native）是唯一真值——
     /// 计费方 anthropic、按量、route-observed、无未决；不能被当成与 openai 冲突。
     #[test]
@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(a.pricing_basis, "route-observed");
         assert_eq!(a.evidence_basis, EvidenceBasis::SessionNative);
         assert!(!a.has_unresolved);
-        // 宿主自报 openai 但会话路由指向别家 → 仍是冲突（既有语义不变）。
+        // 执行环境自报 openai 但会话路由指向别家 → 仍是冲突（既有语义不变）。
         let b = resolve_billing_attribution(Some("openai"), Some(&route));
         assert!(b.has_unresolved);
     }

@@ -105,7 +105,7 @@ fn observations_from_samples(
         let native = identity.event_ref(&format!("runtime:{minute_bucket}:{}", sample.pid));
         out.push(TrustObservation {
             observation_id: format!("runtime_package_{actor_id}_{minute_bucket}"), machine_namespace: machine_namespace.to_string(),
-            host: "unattributed-local-agent".to_string(), actor_id: actor_id.clone(), actor_kind: TrustActorKind::Unknown,
+            harness: "unattributed-local-agent".to_string(), actor_id: actor_id.clone(), actor_kind: TrustActorKind::Unknown,
             actor_version: None, observed_at_ms, observation_kind: TrustObservationKind::Package,
             stage: TrustStage::PackageObserved, evidence_level: TrustEvidenceLevel::E1LocalArtifact, evidence_origin: TrustEvidenceOrigin::RuntimeProcessMetadata,
             workspace_ref: None, scope_classes: {
@@ -124,7 +124,7 @@ fn observations_from_samples(
         if sample.established_connection {
             out.push(TrustObservation {
                 observation_id: format!("runtime_egress_{actor_id}_{minute_bucket}"), machine_namespace: machine_namespace.to_string(),
-                host: "unattributed-local-agent".to_string(), actor_id, actor_kind: TrustActorKind::Unknown,
+                harness: "unattributed-local-agent".to_string(), actor_id, actor_kind: TrustActorKind::Unknown,
                 actor_version: None, observed_at_ms, observation_kind: TrustObservationKind::Connection,
                 stage: TrustStage::EgressAttempted, evidence_level: TrustEvidenceLevel::E3NetworkAttempt, evidence_origin: TrustEvidenceOrigin::RuntimeProcessMetadata,
                 workspace_ref: None, scope_classes: {

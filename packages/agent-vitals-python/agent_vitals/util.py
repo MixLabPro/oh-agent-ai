@@ -9,7 +9,7 @@ import json
 _TOOL_CALL_TYPES = ("tool/call", "tool/code-dispatch-start", "tool/code-dispatch")
 
 # 事件 type → 计入哪个信号的覆盖计数。与 Rust
-# crates/agent-vitals-hosts/src/hosts/dsh/sessions/evidence.rs::derive_coverage 对齐，只镜像
+# crates/agent-vitals-harnesses/src/harnesses/dsh/sessions/evidence.rs::derive_coverage 对齐，只镜像
 # 目前 P3 各 group 实际用到的信号（不是完整 19 个）。approval/asked 和
 # approval/decided 是同一个"问了→给了结果"生命周期的两端，都算
 # ApprovalDecisions 的证据——与 Rust 那边这次一起修的 bug 对齐（之前只数了
@@ -159,7 +159,7 @@ def fork_boundary(events):
     （100%），分叉后那段只有 3.5% 重叠。
 
     **为什么不能用 `session/end-seed` 事件**：初版就是那么做的（事件在流里，
-    wasm 和宿主都拿得到，不用透传 header），并在 e4b0be69 上验证通过——那个
+    wasm 和执行环境都拿得到，不用透传 header），并在 e4b0be69 上验证通过——那个
     会话的第一个 end-seed 正好等于 seedLength。但那是巧合。`session/end-seed`
     标记的是「一段续种结束」，**会话每次被重新唤醒都会触发**：真实日志
     session-6b47acc7 完全没分叉（seedLength 缺席、parentSession 为空），却有
@@ -174,7 +174,7 @@ def fork_boundary(events):
         # 这种条目，但 skill.py 等纯函数消费者不再只吃它的输出）。
         if not isinstance(e, dict) or e.get("type") != "session":
             continue
-        # 顶层与 data 下都看一眼：CLI 读的是原始日志头（顶层），宿主侧是从
+        # 顶层与 data 下都看一眼：CLI 读的是原始日志头（顶层），执行环境侧是从
         # session.header 合成的（可能挂在 data 下）。
         n = e.get("seedLength")
         if n is None and isinstance(e.get("data"), dict):
@@ -216,7 +216,7 @@ def find_next_request(requests, after_request_seq):
 # ────────────────────────── 纪元时间归一与会话跨度 ──────────────────────────
 #
 # 镜像 Rust `agent_vitals_domain::util::to_epoch_ms` +
-# `agent_vitals_hosts::workflow_utils::session_span`。
+# `agent_vitals_harnesses::workflow_utils::session_span`。
 # 方案：`docs/v1.0.0/OBSERVED_SPAN_IMPLEMENTATION_PLAN.md`。
 
 EPOCH_SECONDS_CUTOFF = 100_000_000_000
@@ -259,7 +259,7 @@ def session_span(times):
 
 
 def iso_to_epoch_ms(value):
-    """ISO-8601 串 → **毫秒**。镜像 Rust `agent_vitals_hosts::workflow_utils::iso_to_epoch_ms`。
+    """ISO-8601 串 → **毫秒**。镜像 Rust `agent_vitals_harnesses::workflow_utils::iso_to_epoch_ms`。
 
     **为什么不直接用 `parse_iso`**：那个只到**秒**（`(secs, has_offset)`）。Codex 的
     跨度若只按秒算，就会与 Rust 侧（解析到毫秒小数位）不一致，而差分门是逐字节

@@ -11,7 +11,7 @@
 | [REMEDIATION_BACKLOG.md](REMEDIATION_BACKLOG.md) | 对着 `http://127.0.0.1:3080/` 做的视觉/交互验收，P0–P2 问题清单 | P0、P1 已全部完成 |
 | [SKILL_EXECUTION_BACKLOG.md](SKILL_EXECUTION_BACKLOG.md) | Skill 执行审计的开发任务清单（T1–T12）。**开工前先看它的 §0**——`SKILL_EXECUTION_AUDIT_PRD.md` §9.1 对现有数据能力的判断有四项要打折扣 | T1–T6、T8–T12 已完成（T7 自然作废）；§6 记了两项遗留 |
 | [GOVERNANCE_BACKLOG.md](GOVERNANCE_BACKLOG.md) | 对着一份 Agent 治理行业研究（成本断路器/per-task 预算/反循环恢复等）拆的 backlog，分「已覆盖／V2.1-V3 能做（G1-G4）／结构性做不到」三档。**开工前先看它的 §0**——插件只读投影、无执行前拦截钩子，这是 PRD §3.2 的显式边界，不是待修的缺口 | G1、G2、G3 已完成；G4（依赖 PRD V2.1 排期）待排期 |
-| [DURATION_AUDIT_BACKLOG.md](DURATION_AUDIT_BACKLOG.md) | 从 GOVERNANCE_BACKLOG 的"task 超时"分析里拆出来的独立 backlog：工具调用/turn/step 耗时、审批等待延迟、hook 消费——现状是一个都没算。**开工前先看它的 §0**——阈值判断留客户端，不进 core 规则引擎；`approval` 关联键是 `id` 不是 `callId`，是个真坑 | D1–D3、D5–D12 已完成；D4 的 core 抽取函数就绪但宿主接线（浏览器能否拿到 hook/* 事件）未验证，故意不接进 durationAudit 投影 |
+| [DURATION_AUDIT_BACKLOG.md](DURATION_AUDIT_BACKLOG.md) | 从 GOVERNANCE_BACKLOG 的"task 超时"分析里拆出来的独立 backlog：工具调用/turn/step 耗时、审批等待延迟、hook 消费——现状是一个都没算。**开工前先看它的 §0**——阈值判断留客户端，不进 core 规则引擎；`approval` 关联键是 `id` 不是 `callId`，是个真坑 | D1–D3、D5–D12 已完成；D4 的 core 抽取函数就绪但执行环境接线（浏览器能否拿到 hook/* 事件）未验证，故意不接进 durationAudit 投影 |
 | [prototype/dsh-native-v2.html](prototype/dsh-native-v2.html) | 可交互原型（DSH-native v2） | 参考用 |
 
 ## 两份没能拷进来的文件

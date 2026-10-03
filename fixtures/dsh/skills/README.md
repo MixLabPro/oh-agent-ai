@@ -1,7 +1,7 @@
 # DSH 目录树 fixture（skill 目录，C1）
 
-DSH-2 的测试语料 C1：一棵确定性的 dsh 宿主 skill 目录树，供未来的
-`host-dsh` golden（C2）与冲突判定（A7）用。它是**纯语料**——DSH 的扫描逻辑
+DSH-2 的测试语料 C1：一棵确定性的 dsh 执行环境 skill 目录树，供未来的
+`harness-dsh` golden（C2）与冲突判定（A7）用。它是**纯语料**——DSH 的扫描逻辑
 （A1–A10）还没写，本目录只造数据、不改扫描器、不进现有 golden。
 
 ```bash
@@ -9,9 +9,9 @@ python3 fixtures/dsh/skills/build_dsh_skills_fixture.py --into /tmp/dshfx --clea
 ```
 
 > 这份树**不进 `fixtures/generate.py` 的主树**，理由是 `~/.agents/skills` 与
-> OpenClaw 共享（[HOST_ADAPTER_CONTRACT §DSH](../../docs/HOST_ADAPTER_CONTRACT.md)）：
+> OpenClaw 共享（[HARNESS_ADAPTER_CONTRACT §DSH](../../docs/HARNESS_ADAPTER_CONTRACT.md)）：
 > 放进主树，OpenClaw 适配器会把它当 `shared-user` 根扫走，现有的
-> `host-openclaw` 等 golden 当场变红。所以单独一棵 home 树、单独一个脚本；
+> `harness-openclaw` 等 golden 当场变红。所以单独一棵 home 树、单独一个脚本；
 > C2 再接进 `tests/golden_runner.py`。
 
 ---

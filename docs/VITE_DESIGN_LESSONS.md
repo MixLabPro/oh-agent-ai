@@ -2,7 +2,7 @@
 
 > 状态：研究结论（2026-08-29）。基于 `vitejs/vite` @ main（浅克隆 `/tmp/vite`，2026-08-29）。
 > 目的：回答「从代码的角度，我们的架构要优化吗？能不能类比参考 Vite」——四个并行代码研究
-> （插件边界契约 / watch-HMR 增量重建 / 一源多目标 / core 保持宿主无关）的综合。
+> （插件边界契约 / watch-HMR 增量重建 / 一源多目标 / core 保持执行环境无关）的综合。
 > 配套：`RUNTIME_EVIDENCE_CONVERGENCE_SPEC.md`（收敛三阶段）、`DELIVERY_ARCHITECTURE.md`（三投递面）、
 > `ARCHITECTURE.md` §10（运行时证据层）。
 
@@ -13,7 +13,7 @@
 **Vite 不是我们的架构模板，但有三条设计纪律值得吸收、一条必须明确反着来：**
 
 1. **边界是真实接口，不是文档约定** —— 插件边界靠类型声明 + 运行时先滤后调落地，
-   不是靠文档里的「L3 不许出现宿主词表」。这是我们 Phase B 唯一要学的核心。
+   不是靠文档里的「L3 不许出现执行环境词表」。这是我们 Phase B 唯一要学的核心。
 2. **watch 增量重建靠「字节谓词门卫 + 下游幂等」，不靠防抖和墙钟** —— 恰好保住我们
    byte-identical 的铁律。
 3. **目标是一等对象**（Vite 的 `Environment` → 我们的 `DeliverySurface`）——把
@@ -29,7 +29,7 @@
 |---|---|---|
 | 语言 | 一语言（TS），一运行时 | 双语言（Rust core + Python 镜像）+ wasm，**差分测试守一致** |
 | 产物 | 一份源码 → dev/build/ssr/worker 多目标 | 一份 fold → DSH tab / HTML / Tauri 三投递面 |
-| 铁律 | 构建结果无需逐字节复现 | **golden 逐字节确定**；¥/USD 永不合并；core 无宿主词表 |
+| 铁律 | 构建结果无需逐字节复现 | **golden 逐字节确定**；¥/USD 永不合并；core 无执行环境词表 |
 | 边界 | 插件接口 + module graph | `CanonicalSession`/`Signal`/`RuleSpec`（§12 测试守） |
 
 Vite 最大的架构动作是「一语言多目标，零同步成本」——这正是我们**刻意反着来**的地方
@@ -66,7 +66,7 @@ Vite 最大的架构动作是「一语言多目标，零同步成本」——这
   只能往这张表加，不能在各 detector 里再散落信号判断。
 - **`reverse_project` 的存在就是「边界没做成」的镜像证据**。Vite 的方向是单向的
   （插件 → 规范化 module，绝无 module → 原始字节的桥）；我们却把规范化会话**反投影回
-  DSH 原始事件**（`dsh_evidence.rs:197`）让 9 个模块继续读宿主形状。Vite 没有也不会有
+  DSH 原始事件**（`dsh_evidence.rs:197`）让 9 个模块继续读执行环境形状。Vite 没有也不会有
   这个桥。**它被删掉的那天，DSH 词表才真正只剩 `dsh_evidence.rs::derive_coverage`
   （`dsh_evidence.rs:72-166`）一个家。**
 
@@ -83,7 +83,7 @@ Vite 最大的架构动作是「一语言多目标，零同步成本」——这
 
 > **✅ 已落地（2026-08）**：验收 = golden 逐字节不变 + 全测试绿（`cargo test` /
 > `clippy -D warnings` / 761 Python / `test_cli_matrix` 93 差分 / 15 goldens /
-> wasm 重建后 `dsh-client` verify-host 全过）。落地记录见
+> wasm 重建后 `dsh-client` verify-harness 全过）。落地记录见
 > `RUNTIME_EVIDENCE_CONTRACT.md` §17.1a「Phase B」：family ①（SV601–610）已
 > 前置门控、10 条 detector 改吃 `CanonicalSession` 时间线（`fn(&CanonicalSession)
 > -> RuleOutcome`）、`match_behavior` 变 shim、`rule_outcomes` 拆成
@@ -152,7 +152,7 @@ Vite 最大的架构动作是「一语言多目标，零同步成本」——这
   只许来自事件的 `time` 字段。防抖若做成「按时间合并写入」会让 fold 依赖墙钟——必须用
   偏移游标合并，不用 timer。
 - **zstd 源不能按字节续**。本机 DSH 会话是 `session.jsonl.zstd`，而 `src/dsh.rs:4-5` 只认
-  裸 `.jsonl`。压缩/非 append-only 源无法按偏移 resume。**实时审计第一版要么让 DSH 宿主
+  裸 `.jsonl`。压缩/非 append-only 源无法按偏移 resume。**实时审计第一版要么让 DSH 执行环境
   以 `compression:'none'` 落盘，要么先做 Codex 侧**（Codex 是明文 JSONL，字节偏移最简单）。
 
 ### 第一步（甚至不需要 watcher）
@@ -186,27 +186,27 @@ Vite 最大的架构动作是「一语言多目标，零同步成本」——这
 - **同构判定**：我们的「一份 fold，三投递面」与 Vite「一份 config+插件，dev/build/ssr
   各取用」是同一问题的**对偶**：Vite 在计算侧参数化（每环境 derive 自己的 transform
   管线），我们在渲染侧参数化（fold 算一次，DSH tab / HTML / Tauri 各自渲染）。
-  **注意 Vite 的 `Environment` 对应我们的投递面，不是宿主**——宿主是 fold 上游的证据源，
+  **注意 Vite 的 `Environment` 对应我们的投递面，不是执行环境**——执行环境是 fold 上游的证据源，
   对应 Vite 的「源码/文件系统」。
 - **我们差的一步**：有「一等投影」（DSH 侧 11 个 `sessionProjection`），但没有「一等
   投递面」——HTML/Tauri 作为另外两个投递面，没有一个类型承载「它们是谁、订阅哪几个投影、
   渲染上覆盖什么」，只能各写各的代码路径。「一份 fold 三投影」停在
   `DELIVERY_ARCHITECTURE.md:80` 的口号层面，没落成类型。
-- **第一步：渲染 overlay**。`dsh-client/src/host/index.ts` 各 `view()` 里内嵌的渲染策略
-  （`costReportFrom` 的 `currency`/`estimate_disclaimer`，`host/index.ts:186-234`；
-  `completeIf` 的 partial 语义，`host/index.ts:36-38`；`session_id` 注入，
-  `host/index.ts:579-581`）抽成一个「每面可覆盖的 policy 对象」，让 HTML/Tauri 复用同一
+- **第一步：渲染 overlay**。`dsh-client/src/harness/index.ts` 各 `view()` 里内嵌的渲染策略
+  （`costReportFrom` 的 `currency`/`estimate_disclaimer`，`harness/index.ts:186-234`；
+  `completeIf` 的 partial 语义，`harness/index.ts:36-38`；`session_id` 注入，
+  `harness/index.ts:579-581`）抽成一个「每面可覆盖的 policy 对象」，让 HTML/Tauri 复用同一
   fold 结果 + 各自 overlay。不碰 core、不碰 golden、不碰定价——纯投递面重构，却把口号
   变成代码事实。
 - **把「这个投影在哪个投递面可用」收敛成谓词**：现在是散在 11 个投影里的手写 Set
-  （`host/index.ts:421-440`，`carriesUsage` `412-418`）；Vite 比我们多的一步是把它做成
+  （`harness/index.ts:421-440`，`carriesUsage` `412-418`）；Vite 比我们多的一步是把它做成
   「解析期对每个环境显式求值」的谓词。
 
 ### 必须不抄的：Vite 的向后兼容 shim
 
 Vite 顶层 `ssr` 字段 merge 进 `environments.ssr`、环境内 `resolve` 又 merge 回顶层
 （`config.ts:1635-1776, 2210-2215`）——这是「目标专属字段渗出共享层」的活标本。我们若照
-抄成「加一个 `dsh` 顶层配置段、默认流进 DSH 投递面」，就正好犯「core 不许有宿主词表」
+抄成「加一个 `dsh` 顶层配置段、默认流进 DSH 投递面」，就正好犯「core 不许有执行环境词表」
 铁律。**overlay 只能改渲染层，不许改变 fold 的字节输出**（与「投递面不碰计算」一致）。
 
 ---
@@ -214,7 +214,7 @@ Vite 顶层 `ssr` 字段 merge 进 `environments.ssr`、环境内 `resolve` 又 
 ## 5. 必须反着来的：三态语义（静默跳过 = 编造）
 
 Vite 的 `filter` 不匹配就 `continue`——对构建工具是对的（不该 css 管 ts）。**对审计是
-错的**：一个缺 approval 事件的宿主若静默跳过审批规则，等于报 `measured-zero` 而不是
+错的**：一个缺 approval 事件的执行环境若静默跳过审批规则，等于报 `measured-zero` 而不是
 `Unavailable`。
 
 - 我们的 `RuleOutcome::Unavailable { missing, reason }`（`evidence.rs:350-357`）和 §10.4
@@ -252,7 +252,7 @@ Phase B  detector 新输入契约    —— 本研究的直接产出：
    │
 Phase C  wasm 边界上移           —— 依赖 B
    │        · canonicalize 收进 core，wasm 导出（避免 dsh-client TS 第四个副本）
-   │        · 审计 tab 多宿主化 = 引入 DeliverySurface（§4）
+   │        · 审计 tab 多执行环境化 = 引入 DeliverySurface（§4）
    │
 watch 实时审计                  —— 与 A/B/C 正交，可并行
         · resumability 差分测试 → 字节谓词门卫 → watcher（§3）
@@ -261,9 +261,9 @@ watch 实时审计                  —— 与 A/B/C 正交，可并行
 
 ### Timeline 的 T 必须是什么（新增的硬约束）
 
-`Timeline<Observed<T>>` 的 T **不得是 `Value`**，必须是宿主无关的窄类型（如
-`ToolCall { name, arguments }`）；宿主特有残余走 `evidence.rs:412` 规定的不透明 payload。
-若 T = `Value`，宿主字段会原样透传回来，§12 白守（`shared_type_layer_has_no_host_
+`Timeline<Observed<T>>` 的 T **不得是 `Value`**，必须是执行环境无关的窄类型（如
+`ToolCall { name, arguments }`）；执行环境特有残余走 `evidence.rs:412` 规定的不透明 payload。
+若 T = `Value`，执行环境字段会原样透传回来，§12 白守（`shared_type_layer_has_no_harness_
 identifiers_in_code`，`evidence.rs:534-561`）。canonicalize 收进 core 并在 wasm 导出，
 TS 侧只做 raw → wasm → render，规则逻辑降为零。
 
@@ -273,17 +273,17 @@ TS 侧只做 raw → wasm → render，规则逻辑降为零。
 
 1. **Vite 从不造「万能源文件格式」**。管线传 `code:string`，但从不把 CSS/Vue/wasm 统一成
    一个规范化 schema；类型知识靠插件 filter 声明 + handler 内部消化。方案 B 的「规范化
-   事件」正是造一个巨型 NormalizedEvent schema 让所有宿主往里塞——就是 `evidence.rs:412`
-   明确警告的「每宿主怪癖的并集」。
+   事件」正是造一个巨型 NormalizedEvent schema 让所有执行环境往里塞——就是 `evidence.rs:412`
+   明确警告的「每执行环境怪癖的并集」。
 2. **A 精确对应 Vite 的三件套**：统一钩子参数（`detect(&CanonicalSession)`）+ 声明式门控
    （`RuleSpec.requires` ≈ filter）+ 类型化明细（`Timeline<Observed<T>>` ≈ moduleType/
    ModuleNode）。§10.2 的图本来就画了 `Signal → Timeline<Observed<T>>`，A 是实装已设计
    字段，不是发明。
-3. **A 的同步税更低且随宿主数不变**：`Signal` 枚举已固定 19 个变体；新宿主只是往已有
-   Signal 的 timeline 里填数据，Signal 集合和 detector 都不变。B 每加一个宿主都要扩事件
-   枚举 + 迁移所有 detector，是随宿主数增长的税。
+3. **A 的同步税更低且随执行环境数不变**：`Signal` 枚举已固定 19 个变体；新执行环境只是往已有
+   Signal 的 timeline 里填数据，Signal 集合和 detector 都不变。B 每加一个执行环境都要扩事件
+   枚举 + 迁移所有 detector，是随执行环境数增长的税。
 4. **§12 护栏在 A 下更有意义**：A 的 T 是中性窄类型、由适配器填充，护栏直接守住；B 的
-   schema 更大，宿主字段更易渗漏。
+   schema 更大，执行环境字段更易渗漏。
 
 ---
 
@@ -299,7 +299,7 @@ apply/filter 声明）、`node/plugins/index.ts`（结构性排序 + filter 编�
 **我们**：`crates/agent-vitals-core/src/contracts/evidence.rs`（RuleSpec:336 / RuleOutcome:350 /
 CanonicalSession:413 / §12:534）、`behavior.rs`（rule_outcomes:462）、`dsh_evidence.rs`
 （derive_coverage:72 / reverse_project:197）、`usage.rs`（替换语义:402）、
-`dsh-client/src/host/index.ts`（costReportFrom:186 / carriesUsage:412 / apply:421-440）、
+`dsh-client/src/harness/index.ts`（costReportFrom:186 / carriesUsage:412 / apply:421-440）、
 `docs/RUNTIME_EVIDENCE_CONVERGENCE_SPEC.md`、`docs/DELIVERY_ARCHITECTURE.md`、
 `docs/CC_TRACE_APPLICATION.md`（ScanBatch:85-92）、`docs/RUNTIME_EVIDENCE_CONTRACT.md`
 （§10.2:441-483）。

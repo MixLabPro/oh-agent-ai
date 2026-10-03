@@ -7,11 +7,11 @@
 //! 二进制 crate 的模块**——所以 `sessions list` / `sessions read` 与 tick 的
 //! `oneline` 同款：spawn `agent-vitals` 二进制，stdout 就是 MCP envelope 的
 //! `structuredContent`（与 `tools/call` 同源），stderr 是类型化错误 JSON。
-//! 这是「不长第二份拷贝」的唯一路径（CLAUDE.md 写右边界：计算在宿主，
+//! 这是「不长第二份拷贝」的唯一路径（CLAUDE.md 写右边界：计算在执行环境，
 //! 浏览器/前端只渲染投影）。
 //!
 //! IPC 面只做参数翻译与 spawn：
-//!   · `sessions_list(day, host_kind, page_size, cursor) -> Result<Value, Value>`
+//!   · `sessions_list(day, harness_kind, page_size, cursor) -> Result<Value, Value>`
 //!   · `sessions_read(session_ref, page_size?, cursor?) -> Result<Value, Value>`
 //!   · `sessions_findings() -> Result<Value, Value>` —— spawn `sessions findings`：
 //!     先同步（行为 findings 由同步后的 `ingest::findings_eval` 增量评估），再读
@@ -87,7 +87,7 @@ fn beijing_today_yyyy_mm_dd() -> String {
 ///   --day | --month 必其一（IPC 这里传 day/month，None 时兜底为今天北京日期——
 ///   CLI 的 mutex 不允许两个都缺，新 SessionsAction 在「无 day 无 month」时报
 ///   "exactly one of --day / --month is required"，IPC 替前端拍今天的默认值）；
-///   --host-kind 可选（filter chip 透传）；--page-size 可选（缺省 50，二进制兜底）；
+///   --harness-kind 可选（filter chip 透传）；--page-size 可选（缺省 50，二进制兜底）；
 ///   --cursor 可选（透传 mcp::sessions_search 的不透明 cursor 串）。
 ///
 /// **day vs month**：前端 month picker 选了 2026-08 → IPC 透传 `month: "2026-08"`
@@ -97,7 +97,7 @@ fn beijing_today_yyyy_mm_dd() -> String {
 /// **旧 CLI 不再接受的 flag**：`--from` / `--to` / `--query` / `--hour`
 /// / `--min-tokens`——这些维度 r2a_store 没实现，与权威库 sessions_search 输入
 /// schema 对齐后已删。前端想用这些维度时需先扩 mcp::sessions_search 的 args
-/// schema，再回来加 IPC 参数；目前工作台只用到 day / month / host_kind / model / provider /
+/// schema，再回来加 IPC 参数；目前工作台只用到 day / month / harness_kind / model / provider /
 /// page_size / cursor。
 #[allow(clippy::too_many_arguments)]
 fn list_args(
@@ -105,7 +105,7 @@ fn list_args(
     month: &Option<String>,
     date_from: &Option<String>,
     date_to: &Option<String>,
-    host_kind: &Option<String>,
+    harness_kind: &Option<String>,
     model: &Option<String>,
     provider: &Option<String>,
     page_size: Option<usize>,
@@ -134,8 +134,8 @@ fn list_args(
         a.push("--day".into());
         a.push(d);
     }
-    if let Some(h) = host_kind {
-        a.push("--host-kind".into());
+    if let Some(h) = harness_kind {
+        a.push("--harness-kind".into());
         a.push(h.clone());
     }
     if let Some(m) = model {
@@ -389,11 +389,11 @@ fn run_json(mut cmd: Command) -> Result<Value, Value> {
         .map_err(|e| error_value("cancelled", &e.to_string()))
 }
 
-/// list_sessions：day/month/host/page_size/cursor → mcp::sessions_search envelope。
+/// list_sessions：day/month/harness/page_size/cursor → mcp::sessions_search envelope。
 /// async：spawn_blocking 把 CLI 子进程丢到阻塞线程池，主线程继续收托盘事件，
 /// 详见模块头注释。
 ///
-/// **参数扁平**（day / month / host_kind / model / provider / page_size / cursor 七件）是 Tauri
+/// **参数扁平**（day / month / harness_kind / model / provider / page_size / cursor 七件）是 Tauri
 /// IPC 契约的一部分——`workbench.js` 的 invoke 调用面就是这五个扁平参数，
 /// 改成结构体要连带改前端调用面。5 个参数本就在 lint 阈值内。
 ///
@@ -409,7 +409,7 @@ pub async fn sessions_list(
     month: Option<String>,
     date_from: Option<String>,
     date_to: Option<String>,
-    host_kind: Option<String>,
+    harness_kind: Option<String>,
     model: Option<String>,
     provider: Option<String>,
     page_size: Option<usize>,
@@ -427,7 +427,7 @@ pub async fn sessions_list(
         let Some(bin) = resolve_binary() else {
             return Err(no_binary());
         };
-        let args = list_args(&day, &month, &date_from, &date_to, &host_kind, &model, &provider, page_size, &cursor, &order);
+        let args = list_args(&day, &month, &date_from, &date_to, &harness_kind, &model, &provider, page_size, &cursor, &order);
         let mut cmd = Command::new(&bin);
         cmd.args(&args);
         // 与 tick 同款：显式钉死 AGENT_VITALS_HOME，权威库 / salt / 状态文件都
@@ -443,7 +443,7 @@ pub async fn sessions_list(
 /// async：与 sessions_list 同锁同池子（`StoreBuildLock` + `spawn_blocking`）。
 ///
 /// **session_ref 是不透明串**（`sr_<32hex>`），来自 list 行的
-/// `data.sessions[].session_ref`。前端不再持有 native_session_id / host_kind /
+/// `data.sessions[].session_ref`。前端不再持有 native_session_id / harness_kind /
 /// machine_namespace——HMAC 把 PII 屏蔽到 IPC 边界外，是 §5.1 的核心约束之一
 /// （spec §0.3「数据面 PII 边界」）。
 #[tauri::command]
@@ -505,10 +505,10 @@ pub async fn sessions_findings(
 /// the one CLI implementation so the desktop cannot grow a second scanner.
 #[tauri::command]
 pub async fn trust_audit(
-    host: String,
+    harness: String,
     state: tauri::State<'_, StoreBuildLock>,
 ) -> Result<Value, Value> {
-    if host.len() > 32 || !host.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')) {
+    if harness.len() > 32 || !harness.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')) {
         return Err(error_value("cancelled", "invalid trust audit profile id"));
     }
     let lock = state.inner().clone();
@@ -516,7 +516,7 @@ pub async fn trust_audit(
         let _guard = lock.acquire();
         let Some(bin) = resolve_binary() else { return Err(no_binary()); };
         let mut cmd = Command::new(&bin);
-        cmd.args(["trust", "audit", "--host", &host, "--json"]);
+        cmd.args(["trust", "audit", "--harness", &harness, "--json"]);
         cmd.env("AGENT_VITALS_HOME", data_home());
         run_json(cmd)
     })
@@ -528,14 +528,14 @@ pub async fn trust_audit(
 /// authority. Unlike trust_audit this command never scans client directories.
 #[tauri::command]
 pub async fn trust_evidence_read(
-    host: Option<String>,
+    harness: Option<String>,
     limit: Option<usize>,
     cursor: Option<String>,
     state: tauri::State<'_, StoreBuildLock>,
 ) -> Result<Value, Value> {
-    if let Some(value) = host.as_deref() {
+    if let Some(value) = harness.as_deref() {
         if value.is_empty() || value.len() > 32 || !value.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')) {
-            return Err(error_value("invalid-argument", "invalid trust evidence host"));
+            return Err(error_value("invalid-argument", "invalid trust evidence harness"));
         }
     }
     let limit = limit.unwrap_or(200);
@@ -550,7 +550,7 @@ pub async fn trust_evidence_read(
         let limit_text = limit.to_string();
         let mut cmd = Command::new(&bin);
         cmd.args(["trust", "evidence", "--limit", &limit_text, "--json"]);
-        if let Some(host) = host.as_deref() { cmd.args(["--host", host]); }
+        if let Some(harness) = harness.as_deref() { cmd.args(["--harness", harness]); }
         if let Some(cursor) = cursor.as_deref() { cmd.args(["--cursor", cursor]); }
         cmd.env("AGENT_VITALS_HOME", data_home());
         run_json(cmd)
@@ -829,9 +829,9 @@ fn safe_findings_rule(value: &str) -> String {
     if is_sv { value.to_string() } else { "OTHER".to_string() }
 }
 
-fn safe_findings_host(value: &str) -> String {
-    if let Some(slug) = value.strip_prefix("host:").or_else(|| value.strip_prefix("plugin:")) {
-        if agent_vitals_runtime::host_registry::plugin_slug_ok(slug) {
+fn safe_findings_harness(value: &str) -> String {
+    if let Some(slug) = value.strip_prefix("harness:").or_else(|| value.strip_prefix("plugin:")) {
+        if agent_vitals_runtime::harness_registry::plugin_slug_ok(slug) {
             return value.to_string();
         }
         return "generic".to_string();
@@ -986,7 +986,7 @@ fn safe_findings_group(row: &Value) -> Option<Value> {
     Some(json!({
         "group_id": group_ref,
         "rule": rule,
-        "host": safe_findings_host(row.get("host").and_then(Value::as_str).unwrap_or("generic")),
+        "harness": safe_findings_harness(row.get("harness").and_then(Value::as_str).unwrap_or("generic")),
         "action_kind": action_kind,
         "evidence_class": evidence_class,
         "count": count_total,
@@ -1081,7 +1081,7 @@ fn budget_issue_group(budget: &Value) -> Value {
     let severity = if level == "exceeded" { "critical" } else { "warning" };
     json!({
         "group_id": format!("fnv1a64:{}", agent_vitals_domain::source_identity::fnv1a64_hex(key.as_bytes())),
-        "source_kind": "budget", "rule": "BUDGET_THRESHOLD", "host": "all",
+        "source_kind": "budget", "rule": "BUDGET_THRESHOLD", "harness": "all",
         "object": month, "evidence_class": "budget", "bucket": month,
         "count": 1, "first_seen_at_ms": now_ms, "last_seen_at_ms": now_ms,
         "severity": severity, "status_rollup": {"open": 1, "later": 0, "acknowledged": 0, "resolved": 0, "not_applicable": 0},
@@ -1181,14 +1181,14 @@ fn safe_matrix_session_ref(value: &str) -> bool {
 
 fn safe_matrix_row(value: &Value) -> Option<Value> {
     let row = value.as_object()?;
-    let host = safe_findings_host(row.get("host").and_then(Value::as_str).unwrap_or("generic"));
+    let harness = safe_findings_harness(row.get("harness").and_then(Value::as_str).unwrap_or("generic"));
     let model = safe_matrix_text(row.get("model_id").and_then(Value::as_str).unwrap_or("<unknown>"), 128);
     let provider = safe_matrix_text(row.get("provider_id").and_then(Value::as_str).unwrap_or("<unknown>"), 128);
     let tokens = row.get("tokens").and_then(Value::as_object)?;
     let token_value = |key: &str| safe_matrix_count(tokens.get(key), 1_000_000_000_000_000).unwrap_or(0);
     let amounts = row.get("amounts").and_then(Value::as_array).map(|items| items.iter().take(8).filter_map(safe_matrix_amount).collect::<Vec<_>>()).unwrap_or_default();
     let top_sessions = row.get("top_sessions").and_then(Value::as_array).map(|items| items.iter().take(3).filter_map(safe_matrix_session).collect::<Vec<_>>()).unwrap_or_default();
-    let host_behavior = row.get("host_behavior").and_then(Value::as_object).map(|items| {
+    let harness_behavior = row.get("harness_behavior").and_then(Value::as_object).map(|items| {
         items.iter().filter_map(|(rule, count)| {
             if matches!(rule.as_str(), "SV607" | "SV608" | "SV610") {
                 Some((rule.clone(), json!(safe_matrix_count(Some(count), 1_000_000_000).unwrap_or(0))))
@@ -1202,7 +1202,7 @@ fn safe_matrix_row(value: &Value) -> Option<Value> {
         Some(json!({"hits": hits, "per_session": per_session}))
     });
     Some(json!({
-        "host": host,
+        "harness": harness,
         "model_id": model,
         "provider_id": provider,
         "sessions": safe_matrix_count(row.get("sessions"), 1_000_000_000).unwrap_or(0),
@@ -1212,7 +1212,7 @@ fn safe_matrix_row(value: &Value) -> Option<Value> {
         "waste_rate": safe_matrix_ratio(row.get("waste_rate")),
         "amounts": amounts,
         "top_sessions": top_sessions,
-        "host_behavior": host_behavior,
+        "harness_behavior": harness_behavior,
         "limit_pressure": limit_pressure,
         "cost_provider_unresolved": row.get("cost_provider_unresolved").and_then(Value::as_bool).unwrap_or(false),
     }))
@@ -1237,7 +1237,7 @@ fn safe_matrix_summary(value: &Value) -> Option<Value> {
     }
     if let Some(combo) = row.get("combo").and_then(|combo| {
         let combo = combo.as_object()?;
-        Some(json!({"host": safe_findings_host(combo.get("host").and_then(Value::as_str).unwrap_or("generic")), "model_id": safe_matrix_text(combo.get("model_id").and_then(Value::as_str).unwrap_or("<unknown>"), 128)}))
+        Some(json!({"harness": safe_findings_harness(combo.get("harness").and_then(Value::as_str).unwrap_or("generic")), "model_id": safe_matrix_text(combo.get("model_id").and_then(Value::as_str).unwrap_or("<unknown>"), 128)}))
     }) { out.insert("combo".to_string(), combo); }
     if let Some(session_ref) = row.get("session_ref").and_then(Value::as_str).filter(|value| safe_matrix_session_ref(value)) { out.insert("session_ref".to_string(), json!(session_ref)); }
     if let Some(currencies) = row.get("currencies").and_then(Value::as_array) {
@@ -1256,7 +1256,7 @@ fn safe_matrix_summary(value: &Value) -> Option<Value> {
 fn safe_matrix_summary_combo(value: &Value) -> Option<Value> {
     let row = value.as_object()?;
     Some(json!({
-        "host": safe_findings_host(row.get("host").and_then(Value::as_str).unwrap_or("generic")),
+        "harness": safe_findings_harness(row.get("harness").and_then(Value::as_str).unwrap_or("generic")),
         "model_id": safe_matrix_text(row.get("model_id").and_then(Value::as_str).unwrap_or("<unknown>"), 128),
         "provider_id": safe_matrix_text(row.get("provider_id").and_then(Value::as_str).unwrap_or("<unknown>"), 128),
         "per_session_minor": safe_matrix_count(row.get("per_session_minor"), 1_000_000_000_000_000).unwrap_or(0),
@@ -1268,7 +1268,7 @@ fn safe_matrix_summary_combo(value: &Value) -> Option<Value> {
 fn safe_decision_matrix(raw: &Value) -> Value {
     let rows = raw.get("rows").and_then(Value::as_array).map(|items| items.iter().take(500).filter_map(safe_matrix_row).collect::<Vec<_>>()).unwrap_or_default();
     let findings_summary = raw.get("findings_summary").and_then(Value::as_array).map(|items| items.iter().take(4).filter_map(safe_matrix_summary).collect::<Vec<_>>()).unwrap_or_default();
-    let mut limitations = vec!["waste_rate_unavailable", "host_behavior_host_level", "amounts_currency_separated", "fingerprint_link_deferred"];
+    let mut limitations = vec!["waste_rate_unavailable", "harness_behavior_harness_level", "amounts_currency_separated", "fingerprint_link_deferred"];
     for note in raw.get("notes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
         if note.contains("贡献会话列表不可用") && !limitations.contains(&"top_sessions_unavailable") { limitations.push("top_sessions_unavailable"); }
         if note.contains("计价管线不可用") && !limitations.contains(&"pricing_unavailable") { limitations.push("pricing_unavailable"); }
@@ -1297,7 +1297,7 @@ pub async fn decision_matrix_safe(month: Option<String>) -> Result<Value, Value>
 }
 
 /// User-owned Issue state transition. This command only changes the Issue
-/// lifecycle in the authority DB; it never edits a host file or executes a
+/// lifecycle in the authority DB; it never edits a harness file or executes a
 /// remedy. "acknowledged" is deliberately distinct from "closed".
 #[tauri::command]
 pub async fn issue_transition(
@@ -1428,10 +1428,10 @@ fn issue_severity_rank(value: &str) -> u8 {
 
 // ── Skill 体检 tab（WORKBENCH_SKILL_HEALTH_TAB_SPEC §5）────────────────
 //
-// 取数路径是一次子进程：`agent-vitals doctor --host <h|all> --json - --with-report
+// 取数路径是一次子进程：`agent-vitals doctor --harness <h|all> --json - --with-report
 // --no-snapshot [--self-root …] [--budget …]`。载荷 = 现有 doctor --json 形状
 // （diagnostics + not_assessed + report），桌面端只在其中**追加** `desktop_meta`
-// （generated_at_ms / from_cache / host）——字段只增不改，前端据此画「扫描于
+// （generated_at_ms / from_cache / harness）——字段只增不改，前端据此画「扫描于
 // hh:mm · 可能过期」，CLI 合同不被污染。
 //
 // 纪律（spec §3.6）：扫描是文件系统遍历 + 可能拉起 codex app-server，秒级开销，
@@ -1452,7 +1452,7 @@ struct SkillsScanInner {
 
 pub struct SkillsDoctorCache {
     payload: Arc<Value>,
-    host: String,
+    harness: String,
     self_root: Option<String>,
     budget: Option<i64>,
     generated_at_ms: i64,
@@ -1469,13 +1469,13 @@ impl SkillsScanState {
 
     fn cache_hit(
         &self,
-        host: &str,
+        harness: &str,
         self_root: &Option<String>,
         budget: &Option<i64>,
     ) -> Option<(Arc<Value>, i64)> {
         let g = self.inner().cached.lock().unwrap_or_else(|e| e.into_inner());
         let c = g.as_ref()?;
-        let same = c.host == host
+        let same = c.harness == harness
             && c.self_root == *self_root
             && c.budget == *budget;
         same.then(|| (c.payload.clone(), c.generated_at_ms))
@@ -1500,11 +1500,11 @@ impl SkillsScanState {
 /// `list_args` 同一纪律）。`--no-snapshot` 恒带：桌面每次刷新若都写快照，
 /// 30 份轮换会把 `diff` 的基线冲掉（spec §3.6）；「存为快照」是显式动作
 /// （`skills_snapshot_save`）。
-fn doctor_args(host: &str, self_root: &Option<String>, budget: &Option<i64>) -> Vec<String> {
+fn doctor_args(harness: &str, self_root: &Option<String>, budget: &Option<i64>) -> Vec<String> {
     let mut a: Vec<String> = vec![
         "doctor".into(),
-        "--host".into(),
-        host.into(),
+        "--harness".into(),
+        harness.into(),
         "--json".into(),
         "-".into(),
         "--with-report".into(),
@@ -1563,24 +1563,24 @@ fn doctor_command(bin: &Path, args: &[String], home: &Path) -> Command {
 }
 
 /// Skill 体检取数：一次 doctor 子进程拿 SV 诊断 + 扫描报告（spec §5.1）。
-/// 命中缓存（同 host/self-root/budget）直接返回，`desktop_meta.from_cache=true`；
+/// 命中缓存（同 harness/self-root/budget）直接返回，`desktop_meta.from_cache=true`；
 /// `force=true`（重新扫描按钮）忽略缓存。
 #[tauri::command]
 pub async fn skills_doctor_report(
     state: tauri::State<'_, StoreBuildLock>,
     scan: tauri::State<'_, SkillsScanState>,
-    host: Option<String>,
+    harness: Option<String>,
     self_root: Option<String>,
     budget: Option<i64>,
     force: Option<bool>,
 ) -> Result<Value, Value> {
-    let host = host.unwrap_or_else(|| "all".into());
+    let harness = harness.unwrap_or_else(|| "all".into());
     let self_root = self_root.filter(|s| !s.trim().is_empty());
     if !force.unwrap_or(false) {
-        if let Some((payload, at)) = scan.cache_hit(&host, &self_root, &budget) {
+        if let Some((payload, at)) = scan.cache_hit(&harness, &self_root, &budget) {
             let mut v = (*payload).clone();
             v["desktop_meta"] = json!({
-                "generated_at_ms": at, "from_cache": true, "host": host,
+                "generated_at_ms": at, "from_cache": true, "harness": harness,
             });
             return Ok(v);
         }
@@ -1592,7 +1592,7 @@ pub async fn skills_doctor_report(
         let Some(bin) = resolve_binary() else {
             return Err(no_binary());
         };
-        let args = doctor_args(&host, &self_root, &budget);
+        let args = doctor_args(&harness, &self_root, &budget);
         let mut cmd = doctor_command(&bin, &args, &data_home());
         let child = cmd.spawn().map_err(|e| error_value("cancelled", &e.to_string()))?;
         *scan.inner().running_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(child.id());
@@ -1623,11 +1623,11 @@ pub async fn skills_doctor_report(
         })?;
         let generated_at_ms = now_ms();
         payload["desktop_meta"] = json!({
-            "generated_at_ms": generated_at_ms, "from_cache": false, "host": host,
+            "generated_at_ms": generated_at_ms, "from_cache": false, "harness": harness,
         });
         let arc = scan.store(SkillsDoctorCache {
             payload: Arc::new(payload.clone()),
-            host,
+            harness,
             self_root,
             budget,
             generated_at_ms,
@@ -1753,10 +1753,10 @@ fn safe_skill_diff_label(value: Option<&Value>) -> Option<String> {
 
 fn safe_skill_diff_identity(value: &Value) -> Option<Value> {
     let object = value.as_object()?;
-    let host = safe_skill_diff_label(object.get("host"))?;
+    let harness = safe_skill_diff_label(object.get("harness"))?;
     let name = safe_skill_diff_label(object.get("name"))?;
     let mut output = serde_json::Map::new();
-    output.insert("host".into(), Value::String(host));
+    output.insert("harness".into(), Value::String(harness));
     output.insert("name".into(), Value::String(name));
     if let Some(namespace) = safe_skill_diff_label(object.get("namespace")) {
         output.insert("namespace".into(), Value::String(namespace));
@@ -2011,7 +2011,7 @@ mod tests {
     fn skills_diff_projection_drops_paths_and_marks_partial_rows() {
         let raw = json!({
             "baseline_file": "/Users/Admin/.agent-vitals/snapshots/private.json",
-            "added_skills": [{"host": "claude-code", "name": "safe-skill", "namespace": null, "instance_id": null}, {"host": "claude-code", "name": "/Users/Admin/private-skill"}],
+            "added_skills": [{"harness": "claude-code", "name": "safe-skill", "namespace": null, "instance_id": null}, {"harness": "claude-code", "name": "/Users/Admin/private-skill"}],
             "removed_skills": [],
             "usage_delta": [],
             "newly_judgeable": [],
@@ -2030,7 +2030,7 @@ mod tests {
 
         for unsafe_name in ["file:///Users/Admin/private", "C:/Users/Admin/private", "relative/path", "skill /Users/Admin/private"] {
             let raw = json!({
-                "added_skills": [{"host": "claude-code", "name": unsafe_name}],
+                "added_skills": [{"harness": "claude-code", "name": unsafe_name}],
                 "removed_skills": [], "usage_delta": [], "newly_judgeable": [],
                 "new_overlap_candidates": [], "new_security_findings": [],
             });
@@ -2046,7 +2046,7 @@ mod tests {
             "group_id": "fnv1a64:0123456789abcdef",
             "source_kind": "billing_candidate",
             "rule": "PRICE_COVERAGE",
-            "host": "minimax-code",
+            "harness": "minimax-code",
             "object": "/Users/Admin/project/private.rs",
             "evidence_class": "billing",
             "count": 1,
@@ -2063,7 +2063,7 @@ mod tests {
         let object = projected.as_object().expect("object projection");
         let keys: BTreeSet<&str> = object.keys().map(String::as_str).collect();
         let expected: BTreeSet<&str> = [
-            "group_id", "rule", "host", "action_kind", "evidence_class", "count",
+            "group_id", "rule", "harness", "action_kind", "evidence_class", "count",
             "first_seen_at_ms", "last_seen_at_ms", "severity", "status_rollup",
             "sessions_count", "sample_evidence", "read_only", "manual_follow_up",
         ].into_iter().collect();
@@ -2084,14 +2084,14 @@ mod tests {
     fn safe_findings_projection_degrades_unknown_enums_to_bounded_values() {
         let raw = json!({
             "group_id": "fnv1a64:0123456789abcdef", "source_kind": "unknown-source",
-            "rule": "evil\nrule", "host": "/private/path", "evidence_class": "command --token",
+            "rule": "evil\nrule", "harness": "/private/path", "evidence_class": "command --token",
             "count": 1, "first_seen_at_ms": 1, "last_seen_at_ms": 1, "severity": "evil",
             "status_rollup": {}, "sessions_count": 0, "sample_evidence": [],
             "remedy": {"diagnostic_only": true},
         });
         let projected = safe_findings_group(&raw).expect("safe group remains visible");
         assert_eq!(projected["rule"], "OTHER");
-        assert_eq!(projected["host"], "generic");
+        assert_eq!(projected["harness"], "generic");
         assert_eq!(projected["evidence_class"], "generic");
         assert_eq!(projected["severity"], "unknown");
         assert_eq!(projected["action_kind"], "other");
@@ -2123,7 +2123,7 @@ mod tests {
     fn safe_findings_projection_exposes_only_bounded_evidence_context() {
         let raw = json!({
             "group_id": "fnv1a64:0123456789abcdef", "source_kind": "behavior",
-            "rule": "SV709", "host": "plugin:zcode", "evidence_class": "egress",
+            "rule": "SV709", "harness": "plugin:zcode", "evidence_class": "egress",
             "count": 2, "first_seen_at_ms": 10, "last_seen_at_ms": 30,
             "severity": "critical", "status_rollup": {}, "sessions_count": 1,
             "sample_evidence": [{"issue_id": "native-secret", "evidence": "secret command",
@@ -2150,19 +2150,19 @@ mod tests {
     }
 
     #[test]
-    fn safe_findings_projection_preserves_dynamic_plugin_hosts_and_rejects_bad_ranges() {
+    fn safe_findings_projection_preserves_dynamic_plugin_harnesses_and_rejects_bad_ranges() {
         let plugin = json!({
             "group_id": "fnv1a64:0123456789abcdef", "source_kind": "behavior",
-            "rule": "SV709", "host": "plugin:zcode", "evidence_class": "egress",
+            "rule": "SV709", "harness": "plugin:zcode", "evidence_class": "egress",
             "count": 1, "first_seen_at_ms": 10, "last_seen_at_ms": 20,
             "severity": "critical", "status_rollup": {}, "sessions_count": 1,
             "sample_evidence": [],
         });
-        assert_eq!(safe_findings_group(&plugin).expect("valid plugin group")["host"], "plugin:zcode");
+        assert_eq!(safe_findings_group(&plugin).expect("valid plugin group")["harness"], "plugin:zcode");
 
         let invalid_range = json!({
             "group_id": "fnv1a64:0123456789abcdef", "source_kind": "behavior",
-            "rule": "SV709", "host": "plugin:../escape", "evidence_class": "egress",
+            "rule": "SV709", "harness": "plugin:../escape", "evidence_class": "egress",
             "count": 1, "first_seen_at_ms": 20, "last_seen_at_ms": 10,
             "severity": "critical", "status_rollup": {}, "sessions_count": 1,
             "sample_evidence": [],
@@ -2175,24 +2175,24 @@ mod tests {
         let raw = json!({
             "month": "2026-09",
             "rows": [{
-                "host": "plugin:zcode", "model_id": "/Users/Admin/private", "provider_id": "https://evil.example",
+                "harness": "plugin:zcode", "model_id": "/Users/Admin/private", "provider_id": "https://evil.example",
                 "sessions": 2, "tokens": {"uncached_input": 10, "cache_read": 20, "cache_write": 0, "output": 4, "total": 34},
                 "cache_hit_ratio": 0.6667, "has_subscription": false, "waste_rate": null,
                 "amounts": [{"amount_minor": 100, "currency": "CNY", "basis": "metered_estimate", "secret": "/private"}],
                 "top_sessions": [{"session_ref": "sr_0123456789", "session_key": "native-session-secret", "span_first_ms": 10, "span_last_ms": 20, "tokens_total": 34, "failures": 1}],
-                "host_behavior": {"SV610": 2, "EVIL": 99}, "limit_pressure": null,
+                "harness_behavior": {"SV610": 2, "EVIL": 99}, "limit_pressure": null,
                 "cost_provider_unresolved": false, "path": "/Users/Admin/private",
             }],
-            "findings_summary": [{"kind": "marathon", "currency": "C:/Users/Admin/private", "session_ref": "sr_0123456789", "span_hours": 25.0, "tokens_total": 34, "failures": 1, "combo": {"host": "plugin:zcode", "model_id": "file:/tmp/secret", "native": "/private"}}],
+            "findings_summary": [{"kind": "marathon", "currency": "C:/Users/Admin/private", "session_ref": "sr_0123456789", "span_hours": 25.0, "tokens_total": 34, "failures": 1, "combo": {"harness": "plugin:zcode", "model_id": "file:/tmp/secret", "native": "/private"}}],
             "notes": ["贡献会话列表不可用（session_ref salt：/private/path）", "raw note secret"],
         });
         let projected = safe_decision_matrix(&raw);
         assert_eq!(projected["schema_version"], "agent-vitals-decision-matrix/v1");
-        assert_eq!(projected["rows"][0]["host"], "plugin:zcode");
+        assert_eq!(projected["rows"][0]["harness"], "plugin:zcode");
         assert_eq!(projected["rows"][0]["model_id"], "<unknown>");
         assert_eq!(projected["rows"][0]["provider_id"], "<unknown>");
-        assert_eq!(projected["rows"][0]["host_behavior"]["SV610"], 2);
-        assert!(projected["rows"][0]["host_behavior"].get("EVIL").is_none());
+        assert_eq!(projected["rows"][0]["harness_behavior"]["SV610"], 2);
+        assert!(projected["rows"][0]["harness_behavior"].get("EVIL").is_none());
         assert!(projected.to_string().contains("top_sessions"));
         for secret in ["native-session-secret", "/Users/Admin/private", "raw note secret", "secret"] {
             assert!(!projected.to_string().contains(secret), "matrix secret leaked: {secret}");
@@ -2234,7 +2234,7 @@ mod tests {
         assert_eq!(
             list_args(some, &None, some, &None, &Some("x".to_string()), &None, &None, Some(7), &Some("c".to_string()), &None),
             vec!["sessions", "list", "--json",
-                 "--day", "x", "--host-kind", "x", "--page-size", "7",
+                 "--day", "x", "--harness-kind", "x", "--page-size", "7",
                  "--cursor", "c"]
         );
     }
@@ -2284,7 +2284,7 @@ mod tests {
         );
     }
 
-    /// month 模式 + 其它过滤：host-kind / page-size / cursor 仍可叠加。
+    /// month 模式 + 其它过滤：harness-kind / page-size / cursor 仍可叠加。
     /// 钉住「month 不是全替换、是个独立的窗口选择」。
     #[test]
     fn list_args_month_with_filters() {
@@ -2297,7 +2297,7 @@ mod tests {
             ),
             vec!["sessions", "list", "--json",
                  "--month", "2026-08",
-                 "--host-kind", "dsh",
+                 "--harness-kind", "dsh",
                  "--page-size", "100"]
         );
     }
@@ -2421,20 +2421,20 @@ mod tests {
         );
     }
 
-    /// doctor argv：固定段（host + stdout + with-report + no-snapshot）。
-    /// `--with-report` 是「一次扫描同时拿 SV 码与 host_summaries」的前提
+    /// doctor argv：固定段（harness + stdout + with-report + no-snapshot）。
+    /// `--with-report` 是「一次扫描同时拿 SV 码与 harness_summaries」的前提
     /// （spec §5.2）；`--no-snapshot` 恒带，桌面刷新不许把 diff 基线冲掉
     /// （spec §3.6）。
     #[test]
     fn doctor_args_is_fixed() {
         assert_eq!(
             doctor_args("all", &None, &None),
-            vec!["doctor", "--host", "all", "--json", "-", "--with-report", "--no-snapshot"]
+            vec!["doctor", "--harness", "all", "--json", "-", "--with-report", "--no-snapshot"]
         );
         assert_eq!(
             doctor_args("claude-code",
                         &Some("/tmp/self".to_string()), &Some(20000)),
-            vec!["doctor", "--host", "claude-code", "--json", "-", "--with-report",
+            vec!["doctor", "--harness", "claude-code", "--json", "-", "--with-report",
                  "--no-snapshot", "--self-root", "/tmp/self", "--budget", "20000"]
         );
     }

@@ -1,7 +1,7 @@
 //! Codex 公允价卡计算。
 //!
-//! 该模块只处理宿主无关的价格卡匹配与 token bucket 公式；session wire
-//! 解析仍由 `agent-vitals-hosts` 负责，runtime 仅保留历史 CLI 兼容包装。
+//! 该模块只处理执行环境无关的价格卡匹配与 token bucket 公式；session wire
+//! 解析仍由 `agent-vitals-harnesses` 负责，runtime 仅保留历史 CLI 兼容包装。
 
 use serde_json::Value;
 

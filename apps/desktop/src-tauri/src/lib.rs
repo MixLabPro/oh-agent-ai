@@ -10,6 +10,10 @@ mod store;
 mod budget_alerts;
 // Claude Pro 的额度窗口提醒：与预算提醒共用投递账本，但键按窗口取。
 mod quota_alerts;
+mod plugin_host;
+mod plugin_projections;
+#[cfg(all(feature = "plugin-isolation-probe", target_os = "macos"))]
+mod plugin_isolation_probe;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,30 +25,30 @@ use tauri::menu::{Menu, MenuBuilder, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
-use overview::{HostRow, HostsSnapshot, Overview, RecentSessionRow, SyncStatus};
+use overview::{HarnessRow, HarnessesSnapshot, Overview, RecentSessionRow, SyncStatus};
 
 /// 同步互斥：定时 tick 与「立即同步」（菜单/IPC）共用同一把锁，保证任意时刻至多
 /// 一轮 discover→oneline 在跑。oneline 写链本身有 fencing + exactly-once，锁不是
 /// 为了防重复写，是防两轮并发白白各折一遍 + 两次托盘重建。
 struct SyncLock(Mutex<()>);
 
-/// R4-P0（TRUST_SENSOR_OPTIMIZATION spec §4.1）：宿主最近活动时刻表。watcher
-/// 唤醒时刷新（LIGHT-PATH 的唤醒槽天然携带「哪个宿主刚有写入」）；trust 传感
-/// tick 到点据此门控——冷却窗内无活跃宿主且空闲确认窗未到 → 整轮跳过（不
+/// R4-P0（TRUST_SENSOR_OPTIMIZATION spec §4.1）：执行环境最近活动时刻表。watcher
+/// 唤醒时刷新（LIGHT-PATH 的唤醒槽天然携带「哪个执行环境刚有写入」）；trust 传感
+/// tick 到点据此门控——冷却窗内无活跃执行环境且空闲确认窗未到 → 整轮跳过（不
 /// lsof、不开库、不发事件）。进程内存、无持久化；条目按时限裁剪有界。
-struct HostActivityTable(std::sync::Mutex<std::collections::BTreeMap<String, std::time::Instant>>);
+struct HarnessActivityTable(std::sync::Mutex<std::collections::BTreeMap<String, std::time::Instant>>);
 
-/// 门控冷却窗：活动时刻在此窗内的宿主算「活跃」。
+/// 门控冷却窗：活动时刻在此窗内的执行环境算「活跃」。
 const TRUST_ACTIVITY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(120);
 /// 空闲确认窗：兜底「活动表漏记」（app 重启后表为空等），到期强制校准一轮。
 const TRUST_IDLE_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
 
-impl HostActivityTable {
-    fn mark(&self, hosts: impl IntoIterator<Item = impl AsRef<str>>) {
+impl HarnessActivityTable {
+    fn mark(&self, harnesses: impl IntoIterator<Item = impl AsRef<str>>) {
         let now = std::time::Instant::now();
         let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        for host in hosts {
-            guard.insert(host.as_ref().to_string(), now);
+        for harness in harnesses {
+            guard.insert(harness.as_ref().to_string(), now);
         }
         // 有界：只保留冷却窗 + 空闲确认窗内的条目。
         let horizon = TRUST_ACTIVITY_COOLDOWN + TRUST_IDLE_CONFIRM_WINDOW;
@@ -62,7 +66,7 @@ impl HostActivityTable {
 }
 
 /// R4-P0 门控决策（纯函数，测试钉住 spec §6 门控三行）：候选集为空且距上次
-/// 真实采样不足空闲确认窗 → 跳过。任何一者不满足（有活跃宿主 / 确认窗到期
+/// 真实采样不足空闲确认窗 → 跳过。任何一者不满足（有活跃执行环境 / 确认窗到期
 /// / 从未采样过——首启校准）→ 执行。
 fn trust_gate_should_sample(
     initial_sample_pending: bool,
@@ -171,7 +175,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146097 + doe - 719468
 }
 
-/// 同步 tick 周期（start_refresh_tick 的 sleep 与宿主区 stale 判定共用——
+/// 同步 tick 周期（start_refresh_tick 的 sleep 与执行环境区 stale 判定共用——
 /// 「2 × tick」是 spec §6 决策 5 的过期定义，周期改了 stale 窗口跟着改，不能
 /// 两处各写一个 5 分钟）。
 const TICK_PERIOD: std::time::Duration = std::time::Duration::from_secs(5 * 60);
@@ -180,7 +184,7 @@ const TICK_PERIOD: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 const SYNC_LOCK_RETRY_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// 通用过期判定：`generated_at` 年龄 > window。`stale_from`（预算 5 分钟）与
-/// `hosts_stale_from`（宿主区 2 × tick）共用；「无新鲜度信息」→ 不算过期，
+/// `harnesses_stale_from`（执行环境区 2 × tick）共用；「无新鲜度信息」→ 不算过期，
 /// 解析失败 → 也不算（机器写的文件不会走到，与工作台 `Invalid Date` 走不 stale
 /// 的现状一致）。
 fn stale_after(generated_at: Option<&str>, now_secs: i64, window_secs: i64) -> bool {
@@ -307,7 +311,7 @@ fn fmt_tokens(n: i64) -> String {
 }
 
 /// 托盘标题：菜单栏里图标旁那一段常驻文字。**只放今日 token**（「鸟头 + 64.4M」），
-/// 与工作台「今日消耗」KPI 对齐、同一个数（SQL daily DTO 的 `tokens_by_host`；库缺席
+/// 与工作台「今日消耗」KPI 对齐、同一个数（SQL daily DTO 的 `tokens_by_harness`；库缺席
 /// 才退回旧合并）。钱不进标题——用户定向 2026-09-17：状态栏要的是消耗量的直观信号，
 /// 价格在菜单与工作台里看。无今日数据诚实「—」，不臆造 0。
 fn today_title(ov: &Overview) -> String {
@@ -327,33 +331,33 @@ fn short_model(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or(name)
 }
 
-/// 宿主显示名映射（v0.6 host-contract spec §6/§11-M3，G7）：从 core
-/// `host_capability::HOSTS` 行的 `display` 字段读——真相源是 M0 建的注册表，
+/// 执行环境显示名映射（v0.6 harness-contract spec §6/§11-M3，G7）：从 core
+/// `harness_capability::HARNESSES` 行的 `display` 字段读——真相源是 M0 建的注册表，
 /// 这里不再是 Tauri 本地字面量表。展示名与数据侧的 `dsh`/`codex` 之类的键值
-/// 是两回事——与 `short_model` 同类性质，不落盘、不入快照。未知宿主（含未来
-/// 新加但本二进制还没升级到的宿主）原样透传，fail-open，不至于长得像个
-/// 错别字（`host_capability::host_profile` 的查询路径本就 fail-open——注册路径
+/// 是两回事——与 `short_model` 同类性质，不落盘、不入快照。未知执行环境（含未来
+/// 新加但本二进制还没升级到的执行环境）原样透传，fail-open，不至于长得像个
+/// 错别字（`harness_capability::harness_profile` 的查询路径本就 fail-open——注册路径
 /// 才 fail-closed，见 v0.6 spec §5.3 条款 2）。WorkBuddy 现在也能正确解析出
 /// "WorkBuddy"（此前的本地字面量表没收它，因为它没有托盘行——展示名与"有没有
 /// 折叠能力"是两件事，工作台的会话浏览面一直支持 workbuddy）。
-fn host_display_name(kind: &str) -> String {
-    agent_vitals_domain::host_capability::host_profile(kind)
+fn harness_display_name(kind: &str) -> String {
+    agent_vitals_domain::harness_capability::harness_profile(kind)
         .map(|h| h.display.to_string())
         .unwrap_or_else(|| {
-            if kind.starts_with("host:") || kind.starts_with("plugin:") {
-                agent_vitals_runtime::host_registry::plugin_display_name(&overview::data_home(), kind)
+            if kind.starts_with("harness:") || kind.starts_with("plugin:") {
+                agent_vitals_runtime::harness_registry::plugin_display_name(&overview::data_home(), kind)
             } else {
                 kind.to_string()
             }
         })
 }
 
-/// 界面用：全部 manifest 宿主的 `{ "host:<slug>": 显示名 }`。内置宿主的名字界面自带。
+/// 界面用：全部 manifest 执行环境的 `{ "harness:<slug>": 显示名 }`。内置执行环境的名字界面自带。
 #[tauri::command(async)]
-fn host_display_names() -> Value {
-    let (hosts, _) = agent_vitals_runtime::host_registry::scan_plugin_hosts(&overview::data_home());
+fn harness_display_names() -> Value {
+    let (harnesses, _) = agent_vitals_runtime::harness_registry::scan_plugin_harnesses(&overview::data_home());
     let mut map = serde_json::Map::new();
-    for host in hosts { map.insert(format!("host:{}", host.slug), Value::String(host.display_name)); }
+    for harness in harnesses { map.insert(format!("harness:{}", harness.slug), Value::String(harness.display_name)); }
     Value::Object(map)
 }
 
@@ -486,17 +490,17 @@ fn today_merged_tokens(ov: &Overview) -> i64 {
     dsh + ov.claude_today_tokens.unwrap_or(0)
 }
 
-/// L1 宿主行文案（spec §4/§8）：`<显示名> · <tokens|—> · <N 会话|—>`。两个
+/// L1 执行环境行文案（spec §4/§8）：`<显示名> · <tokens|—> · <N 会话|—>`。两个
 /// 测量字段都缺 → 单个 `· —`（unavailable 降级矩阵的形态）；只缺一个 → 该槽
 /// 位「—」另一个照常。`today_partial`（覆盖率 partial）→ token 加 `≈` 前缀：
 /// 快照的 coverage 是保守下界标注，渲染成精确值就是编造。
 #[cfg(test)]
-fn host_row_text(row: &HostRow) -> String {
-    host_row_text_localized(row, NativeUiLanguage::Chinese)
+fn harness_row_text(row: &HarnessRow) -> String {
+    harness_row_text_localized(row, NativeUiLanguage::Chinese)
 }
 
-fn host_row_text_localized(row: &HostRow, language: NativeUiLanguage) -> String {
-    let name = host_display_name(&row.host_kind);
+fn harness_row_text_localized(row: &HarnessRow, language: NativeUiLanguage) -> String {
+    let name = harness_display_name(&row.harness_kind);
     let token_part = row.today_tokens.map(|t| {
         let s = fmt_tokens(t);
         if row.today_partial { format!("≈{s}") } else { s }
@@ -533,11 +537,11 @@ fn beijing_hhmm(secs: i64) -> String {
     local[11..16].to_string()
 }
 
-/// 多宿主导航快照是否过期（spec §6 决策 5）：`generated_at` 年龄 > 2 × tick
-/// （10 分钟）→ 宿主子菜单底部挂「数据更新于 hh:mm · 可能已过期」。与
+/// 多执行环境导航快照是否过期（spec §6 决策 5）：`generated_at` 年龄 > 2 × tick
+/// （10 分钟）→ 执行环境子菜单底部挂「数据更新于 hh:mm · 可能已过期」。与
 /// `stale_from`（预算 5 分钟窗口）分开——两处「过期」的定义本来就不同，共用一个
-/// 窗口会把预算卡 5 分钟语义硬套到宿主快照上。
-fn hosts_stale_from(generated_at: Option<&str>, now_secs: i64) -> bool {
+/// 窗口会把预算卡 5 分钟语义硬套到执行环境快照上。
+fn harnesses_stale_from(generated_at: Option<&str>, now_secs: i64) -> bool {
     stale_after(generated_at, now_secs, 2 * TICK_PERIOD.as_secs() as i64)
 }
 
@@ -546,7 +550,7 @@ fn hosts_stale_from(generated_at: Option<&str>, now_secs: i64) -> bool {
 /// 一年后长得一模一样）；身份 = title（截断 24 字符）→ short_model → native_id
 /// 的 fallback 链；tokens 缺段省略。date 只做展示层折叠，`RecentSessionRow.date`
 /// 里存的完整 `YYYY-MM-DD` 原样保留。「当年」判定用北京年——与导航 day_key 的
-/// 日界一致（UTC 12-31 晚的会话在 UTC 年上跨年、北京年上不跨，整个多宿主导航
+/// 日界一致（UTC 12-31 晚的会话在 UTC 年上跨年、北京年上不跨，整个多执行环境导航
 /// 都按北京日界走）。
 fn recent_row_text(row: &RecentSessionRow, now_secs: i64) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -729,9 +733,9 @@ fn sync_line_text_localized(sync: &SyncStatus, language: NativeUiLanguage) -> St
         };
     }
     // `at` 是北京时间 `YYYY-MM-DD HH:MM:SS`，菜单只要 HH:MM。成功形态加
-    // 成功形态带覆盖宿主后缀（spec §4）：同步回路只折 DSH 会话 + 尾折 Claude 账
+    // 成功形态带覆盖执行环境后缀（spec §4）：同步回路只折 DSH 会话 + 尾折 Claude 账
     // （2026-09-02 起，tick 顺序见 sync_tick），Codex 没有同步循环——时间戳的覆盖范围
-    // 必须说清楚，不能让人以为它是全宿主的新鲜度。后缀写宿主名而不是内部术语
+    // 必须说清楚，不能让人以为它是全执行环境的新鲜度。后缀写执行环境名而不是内部术语
     // （曾写「DSH 折叠 + Claude 账」，用户看不懂）。
     match (language, sync.at.as_deref().and_then(|s| s.get(11..16))) {
         (NativeUiLanguage::English, Some(hhmm)) => format!("Last sync: {hhmm} succeeded · DeepSeek Harness, Claude Code"),
@@ -741,17 +745,17 @@ fn sync_line_text_localized(sync: &SyncStatus, language: NativeUiLanguage) -> St
     }
 }
 
-/// 托盘菜单的宿主区行树（spec §4/§5.3/§8）。纯数据——`build_menu_at` 只做
+/// 托盘菜单的执行环境区行树（spec §4/§5.3/§8）。纯数据——`build_menu_at` 只做
 /// `MenuRow` → Tauri `MenuItem/Submenu` 的机械翻译，菜单结构可以单测钉住，
-/// 不用起 AppHandle。只有 Item 与 Submenu：宿主区内的分隔线由 build_menu_at
-/// 在区块之间直接加，不属于行树（host_menu_rows 从不产 Separator）。
+/// 不用起 AppHandle。只有 Item 与 Submenu：执行环境区内的分隔线由 build_menu_at
+/// 在区块之间直接加，不属于行树（harness_menu_rows 从不产 Separator）。
 #[derive(Debug, PartialEq)]
 enum MenuRow {
     Item { id: String, text: String, enabled: bool },
     Submenu { id: String, text: String, rows: Vec<MenuRow> },
 }
 
-/// 宿主区菜单行（spec §4/§8 降级矩阵逐格）：
+/// 执行环境区菜单行（spec §4/§8 降级矩阵逐格）：
 /// · `status == "unavailable"` → L2 单行禁用「会话数据暂不可用」（空子菜单无
 ///   任何用户可操作物，禁用文案严格更有信息量——spec §8 原文对 cancelled 说不
 ///   渲染 L2，这里渲染禁用文案是**计划里注明的偏离**，更诚实）；
@@ -759,34 +763,34 @@ enum MenuRow {
 ///   可区分）；
 /// · 其余 → 最近会话行（id `session:{kind}:{i}`，排序/截取在数据层已完成，
 ///   这里只按序渲染）。
-/// stale（spec §6 决策 5）→ 每个宿主子菜单底部禁用项「数据更新于 hh:mm ·
+/// stale（spec §6 决策 5）→ 每个执行环境子菜单底部禁用项「数据更新于 hh:mm ·
 /// 可能已过期」（hh:mm 是北京时刻，`generated_at` UTC 转北京渲染）。
 #[cfg(test)]
-fn host_menu_rows(
-    hosts: &[HostRow],
+fn harness_menu_rows(
+    harnesses: &[HarnessRow],
     generated_at: Option<&str>,
     now_secs: i64,
 ) -> Vec<MenuRow> {
-    host_menu_rows_localized(hosts, generated_at, now_secs, NativeUiLanguage::Chinese)
+    harness_menu_rows_localized(harnesses, generated_at, now_secs, NativeUiLanguage::Chinese)
 }
 
-fn host_menu_rows_localized(
-    hosts: &[HostRow],
+fn harness_menu_rows_localized(
+    harnesses: &[HarnessRow],
     generated_at: Option<&str>,
     now_secs: i64,
     language: NativeUiLanguage,
 ) -> Vec<MenuRow> {
     let mut out = Vec::new();
-    for row in hosts {
+    for row in harnesses {
         let mut l2 = if row.status == "unavailable" {
             vec![MenuRow::Item {
-                id: format!("session:unavailable:{}", row.host_kind),
+                id: format!("session:unavailable:{}", row.harness_kind),
                 text: native_label(language, "Session data unavailable", "会话数据暂不可用").into(),
                 enabled: false,
             }]
         } else if row.recent.is_empty() {
             vec![MenuRow::Item {
-                id: format!("session:none:{}", row.host_kind),
+                id: format!("session:none:{}", row.harness_kind),
                 text: native_label(language, "No sessions yet", "尚无会话").into(),
                 enabled: false,
             }]
@@ -795,15 +799,15 @@ fn host_menu_rows_localized(
                 .iter()
                 .enumerate()
                 .map(|(i, r)| MenuRow::Item {
-                    id: format!("session:{}:{}", row.host_kind, i),
+                    id: format!("session:{}:{}", row.harness_kind, i),
                     text: recent_row_text(r, now_secs),
                     enabled: true,
                 })
                 .collect()
         };
-        if hosts_stale_from(generated_at, now_secs) {
+        if harnesses_stale_from(generated_at, now_secs) {
             l2.push(MenuRow::Item {
-                id: format!("session:stale:{}", row.host_kind),
+                id: format!("session:stale:{}", row.harness_kind),
                 text: format!(
                     "{}{}{}",
                     native_label(language, "Updated at ", "数据更新于 "),
@@ -817,8 +821,8 @@ fn host_menu_rows_localized(
             });
         }
         out.push(MenuRow::Submenu {
-            id: format!("host:{}", row.host_kind),
-            text: host_row_text_localized(row, language),
+            id: format!("harness:{}", row.harness_kind),
+            text: harness_row_text_localized(row, language),
             rows: l2,
         });
     }
@@ -827,7 +831,7 @@ fn host_menu_rows_localized(
 
 /// MenuRow 树 → Tauri 菜单项数组（机械翻译，`dyn IsMenuItem` trait 对象）。
 /// Submenu 用 `Submenu::with_id_and_items`（items 是 `&[&dyn IsMenuItem]`
-/// 切片）：子菜单带 id（`host:{kind}`），菜单事件才拿得到动态 id 做深链分发。
+/// 切片）：子菜单带 id（`harness:{kind}`），菜单事件才拿得到动态 id 做深链分发。
 /// 递归翻译 L2 项。
 fn menu_row_items<M: tauri::Manager<tauri::Wry>>(
     app: &M,
@@ -923,7 +927,7 @@ fn money_rows_text_fx(ov: &Overview, language: NativeUiLanguage, fx: Option<&Tra
         None => native_label(language, "Today’s metered cost: — (no data)", "今日按量成本：—（无数据）").to_string(),
     };
     // 本月行：同款合并，但 **只显示金额、去掉 `/ ¥600` 分母**（v1.3）。分母是 DSH
-    // 预算——合并后 ¥ 主账已跨宿主，拿 DSH 预算给整个合并总账当分母是把「本月花
+    // 预算——合并后 ¥ 主账已跨执行环境，拿 DSH 预算给整个合并总账当分母是把「本月花
     // 了多少」和「DSH 预算还剩多少」绑成一行；DSH 预算状态常驻在底部预算行
     // （budget_item）照常显示，这里不需要第二遍。
     //
@@ -983,15 +987,15 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
         builder = builder.item(&MenuItem::with_id(app, "daily", t, true, None::<&str>)?);
     }
     builder = builder.item(&month_item);
-    // 宿主区（spec §4）：每宿主一个子菜单——L1 = 显示名 · 今日 token · 会话数，
-    // L2 = 最近会话跳转行（结构由 host_menu_rows 纯函数钉住，§9.2）。平铺的
+    // 执行环境区（spec §4）：每执行环境一个子菜单——L1 = 显示名 · 今日 token · 会话数，
+    // L2 = 最近会话跳转行（结构由 harness_menu_rows 纯函数钉住，§9.2）。平铺的
     // 「最近会话」行随面板一起删除（2026-09-01 spec 修订）——最近会话入口收敛
-    // 到宿主子菜单里，顶层菜单只剩钱行与操作项。
+    // 到执行环境子菜单里，顶层菜单只剩钱行与操作项。
     builder = builder.separator();
     builder = append_menu_rows(
         builder,
         app,
-        &host_menu_rows_localized(&ov.hosts, ov.hosts_generated_at.as_deref(), now_secs, language),
+        &harness_menu_rows_localized(&ov.harnesses, ov.harnesses_generated_at.as_deref(), now_secs, language),
     )?;
     builder = builder.separator().item(&budget_item);
     // 本月订阅记录紧跟预算行，逐币种显示，明确不是付款凭证。无订阅不显示。
@@ -1025,11 +1029,11 @@ fn build_menu_at(app: &AppHandle, ov: &Overview, now_secs: i64) -> tauri::Result
         .separator()
         .item(&PredefinedMenuItem::quit(app, Some(native_label(language, "Quit", "退出")))?)
         .build()?;
-    // HostsCache：深链分发的映射依据（spec §9.2 #12）——缓存必须等于刚构建的
-    // 菜单用的宿主行，否则 `session:{kind}:{i}` 会查到错行。写在这里而不是
-    // refresh 里：startup warm-start（read_overview 带 hosts.json 旧快照）与
+    // HarnessesCache：深链分发的映射依据（spec §9.2 #12）——缓存必须等于刚构建的
+    // 菜单用的执行环境行，否则 `session:{kind}:{i}` 会查到错行。写在这里而不是
+    // refresh 里：startup warm-start（read_overview 带 harnesses.json 旧快照）与
     // 每轮 tick 的 build_menu 都经过同一写入点，缓存不会停在旧菜单。
-    app.state::<HostsCache>().0.lock().unwrap_or_else(|e| e.into_inner()).clone_from(&ov.hosts);
+    app.state::<HarnessesCache>().0.lock().unwrap_or_else(|e| e.into_inner()).clone_from(&ov.harnesses);
     Ok(menu)
 }
 
@@ -1082,7 +1086,7 @@ fn refresh(app: &AppHandle, ov: &overview::Overview) {
 }
 
 /// `sessions navigation` 一轮查询的硬超时（spec §6 决策 5）：20 秒后 kill。
-/// 冷 store 首建 30s+ 时首轮会超时——宿主区退化为上一轮快照（或 unavailable），
+/// 冷 store 首建 30s+ 时首轮会超时——执行环境区退化为上一轮快照（或 unavailable），
 /// 下一轮 tick（5 分钟后）重试，不阻塞托盘。工作台 IPC 的 `sessions list`
 /// 故意**没有**超时（冷构建 30s+ 是合法的，前端有 loading banner）——这里是
 /// tick 内的阻塞点，必须有界，否则一轮同步能把 SyncLock 占死 30 秒。
@@ -1093,7 +1097,7 @@ const NAVIGATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2
 /// 失败/超时一律 None——调用方决定是保留旧快照还是 degraded，这里不编造。
 ///
 /// stderr 与 discover 同款 G4 盲区：之前是 `piped()` 了却从未读过，子进程真正
-/// 报的错（比如时区非法、宿主目录不可读）在这三条 `None` 路径里全部消失。
+/// 报的错（比如时区非法、执行环境目录不可读）在这三条 `None` 路径里全部消失。
 fn run_navigation(bin: &Path, day: &str) -> Option<Value> {
     let timezone = agent_vitals_runtime::statistics_timezone::timezone_name(&overview::data_home())
         .ok()
@@ -1182,30 +1186,30 @@ fn run_navigation(bin: &Path, day: &str) -> Option<Value> {
     }
 }
 
-/// 一轮 tick 的宿主区刷新（spec §6 决策 5）：spawn `sessions navigation` →
-/// 快照落盘 hosts.json。**刷新失败不覆盖 hosts.json**——保留末次成功快照，它靠
+/// 一轮 tick 的执行环境区刷新（spec §6 决策 5）：spawn `sessions navigation` →
+/// 快照落盘 harnesses.json。**刷新失败不覆盖 harnesses.json**——保留末次成功快照，它靠
 /// generated_at 变旧自然转 stale，托盘显示「数据更新于 hh:mm · 可能已过期」
-/// 而不是整块消失或摆 0。二进制缺失同样静默（顶层钱行有自己的降级文案，宿主
+/// 而不是整块消失或摆 0。二进制缺失同样静默（顶层钱行有自己的降级文案，执行环境
 /// 区上一轮快照继续服务）。单飞由 SyncLock 保证——只在 sync_tick 里被调用，
 /// tick 与「立即同步」都持锁。
-fn refresh_hosts(app: &AppHandle) {
+fn refresh_harnesses(app: &AppHandle) {
     let Some(bin) = resolve_binary() else { return };
     let Some(snap) = run_navigation(&bin, &overview::today_beijing()) else {
         return;
     };
-    let hosts = overview::host_rows_from_navigation(&snap);
-    overview::save_hosts_at(
+    let harnesses = overview::harness_rows_from_navigation(&snap);
+    overview::save_harnesses_at(
         &overview::data_home(),
-        &HostsSnapshot {
+        &HarnessesSnapshot {
             generated_at: snap
                 .get("generated_at")
                 .and_then(Value::as_str)
                 .map(String::from),
-            hosts,
+            harnesses,
         },
     );
-    // hosts.json 与 authority revision 独立；只靠事实失效事件会让 React 保留旧宿主卡。
-    let _ = app.emit(APP_EVENT, serde_json::json!({ "type": "HostNavigationChanged" }));
+    // harnesses.json 与 authority revision 独立；只靠事实失效事件会让 React 保留旧执行环境卡。
+    let _ = app.emit(APP_EVENT, serde_json::json!({ "type": "HarnessNavigationChanged" }));
 }
 
 /// `agent-vitals` 二进制解析：`AGENT_VITALS_BIN` env 覆盖 → 与自身同目录 / 兄弟
@@ -1305,14 +1309,14 @@ struct NavTarget(Mutex<Option<String>>);
 
 /// 会话深链目标（spec §7.1）：强类型（serde tag `type` + camelCase 变体名），
 /// 不再是裸 `Value`。`sessionDetail`（L2 行 → 会话详情）与 `sessionList`（打开
-/// 会话列表按 host 过滤，为「查看全部会话」回归预留——v1 菜单只发射前者，
+/// 会话列表按 harness 过滤，为「查看全部会话」回归预留——v1 菜单只发射前者，
 /// §7.1）由 `type` 字段区分，工作台前端据此分发。v1 前端只消费（peek 回来 +
 /// apply 后 clear），不从前端发射。
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum WorkbenchTarget {
-    SessionList { host_kind: Option<String> },
-    SessionDetail { session_ref: String, host_kind: String },
+    SessionList { harness_kind: Option<String> },
+    SessionDetail { session_ref: String, harness_kind: String },
 }
 
 /// 会话深链的待消费目标（spec §7.2）：菜单 L2 点击 → `focus_session` 覆盖式存入、
@@ -1339,12 +1343,12 @@ impl FocusTarget {
     }
 }
 
-/// 最近一次托盘菜单构建用的宿主行（spec §9.2 #12 的映射依据）：动态菜单 id
+/// 最近一次托盘菜单构建用的执行环境行（spec §9.2 #12 的映射依据）：动态菜单 id
 /// `session:{kind}:{i}` 按 id 查行 → 行内 session_key → `SessionDetail`。由
 /// `build_menu_at` 每次构建后写入——缓存 == 刚构建的菜单；startup warm-start
-/// （read_overview 带 hosts.json 旧快照）与每轮 tick 都经过同一写入点，缓存
+/// （read_overview 带 harnesses.json 旧快照）与每轮 tick 都经过同一写入点，缓存
 /// 不会停在旧菜单。
-struct HostsCache(Mutex<Vec<HostRow>>);
+struct HarnessesCache(Mutex<Vec<HarnessRow>>);
 
 /// `SyncStatusChanged` 的 app-event 载荷（类型化信封，spec §1.3）。
 fn sync_status_payload(status: &SyncStatus) -> serde_json::Value {
@@ -1358,7 +1362,7 @@ fn sync_status_payload(status: &SyncStatus) -> serde_json::Value {
 /// drain——CLI 子进程已在 outbox 里落了 FactsIngested 等事实事件，这里以
 /// `desktop-ui` **合并型**消费者身份取走：逐行记账不变（at-least-once），但副作用
 /// 合并成一次 flush——读当前 revision，经 `InvalidationPublisher` 发至多一条
-/// `Invalidated{revision, hosts}`。展示层结构上拿不到载荷（`Coalesced` 没有那个
+/// `Invalidated{revision, harnesses}`。展示层结构上拿不到载荷（`Coalesced` 没有那个
 /// 字段），领域事件不再逐条透传给 webview。
 ///
 /// 消费者只 emit、不碰 drain 的连接（flush 自开只读连接读 revision，spec §6 自持资源）。
@@ -1375,7 +1379,7 @@ fn drain_event_bus(app: &AppHandle) {
     let dispatcher = match Dispatcher::with_coalescing(
         Vec::new(),
         vec![CoalescingConsumer::new("desktop-ui", ConsumerInterest::presentation(), move |c| {
-            publish_invalidation(&app2, c.hosts);
+            publish_invalidation(&app2, c.harnesses);
         })],
     ) {
         Ok(d) => d,
@@ -1389,28 +1393,28 @@ fn drain_event_bus(app: &AppHandle) {
     }
 }
 
-/// 读当前权威 revision，严格前进才向 webview 发 `Invalidated`。`hosts` 是本轮 drain
-/// 触及的宿主（下界提示；spec §4.4 顺序注记）；不经 outbox 的写（桌面 IPC 的声明/
-/// 价卡保存、`with_immediate_txn` 的任何提交）由 `sync_tick` 尾部的空 hosts 电平检查
+/// 读当前权威 revision，严格前进才向 webview 发 `Invalidated`。`harnesses` 是本轮 drain
+/// 触及的执行环境（下界提示；spec §4.4 顺序注记）；不经 outbox 的写（桌面 IPC 的声明/
+/// 价卡保存、`with_immediate_txn` 的任何提交）由 `sync_tick` 尾部的空 harnesses 电平检查
 /// 兜住——同 revision 的第二次调用被发布器吞掉，所以两条路径不会双发。
-fn publish_invalidation(app: &AppHandle, hosts: std::collections::BTreeSet<String>) {
+fn publish_invalidation(app: &AppHandle, harnesses: std::collections::BTreeSet<String>) {
     let path = agent_vitals_data::authority::default_authority_path(&overview::data_home());
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else { return };
     let Ok(revision) = db.revision() else { return };
     drop(db);
     let publisher = app.state::<InvalidationPublisher>();
     publisher.0.publish_if_advanced(
-        agent_vitals_runtime::events::Invalidation { revision, hosts },
+        agent_vitals_runtime::events::Invalidation { revision, harnesses },
         |inv| {
             agent_vitals_runtime::logging::log_info(
                 "emit",
-                &format!("Invalidated revision={} hosts={:?}", inv.revision, inv.hosts),
+                &format!("Invalidated revision={} harnesses={:?}", inv.revision, inv.harnesses),
             );
             let _ = app.emit(APP_EVENT, serde_json::json!({
                 "type": "Invalidated",
                 "schema_version": 1,
                 "revision": inv.revision,
-                "hosts": inv.hosts.iter().collect::<Vec<_>>(),
+                "harnesses": inv.harnesses.iter().collect::<Vec<_>>(),
             }));
         },
     );
@@ -1444,7 +1448,7 @@ const TRAY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 /// 防饥饿——另一条规则是 `TICK_PERIOD` 到期，谁先到算谁）。
 const LIGHT_TICKS_PER_HEAVY: u32 = 16;
 
-/// 重 tick：全宿主对账 + 全部投影（5 分钟周期 / 防饥饿升级 / 轻路径失败
+/// 重 tick：全执行环境对账 + 全部投影（5 分钟周期 / 防饥饿升级 / 轻路径失败
 /// 升级 / 手动同步）。与升级前行为逐项一致。
 fn sync_tick(app: &AppHandle) {
     let start = std::time::Instant::now();
@@ -1452,14 +1456,14 @@ fn sync_tick(app: &AppHandle) {
     agent_vitals_runtime::logging::log_info("sync", &format!("tick finished in {:?}", start.elapsed()));
 }
 
-/// 轻 tick（LIGHT-PATH spec §5.2）：唤醒驱动的定向同步。只跑被唤醒宿主的
+/// 轻 tick（LIGHT-PATH spec §5.2）：唤醒驱动的定向同步。只跑被唤醒执行环境的
 /// 批；跳过 navigation 子进程 / read_overview / alerts（对账责任整体留给
 /// 5 分钟重 tick）。**任一步失败即升级重 tick**（spec 不变量 5：轻失败
 /// 不得等于本轮没对账）。`tray_due` = 距上次托盘重建超过
 /// [`TRAY_REFRESH_INTERVAL`]；返回本轮是否刷新了托盘（调用方推进节流钟）。
 fn sync_tick_light(
     app: &AppHandle,
-    hosts: &std::collections::BTreeSet<String>,
+    harnesses: &std::collections::BTreeSet<String>,
     tray_due: bool,
 ) -> (bool, bool) {
     if overview::sync_is_paused() == Ok(true) {
@@ -1470,7 +1474,7 @@ fn sync_tick_light(
     let t0 = std::time::Instant::now();
     // W3：进程内同步（runtime `ingest::engine`），不再 spawn `discover`/`oneline`/
     // `claude-sync`/`sync-facts`。三个遗留步骤的产物已无读取方（见 engine 模块文档）。
-    let run = agent_vitals_runtime::ingest::engine::run_sync(&overview::data_home(), Some(hosts));
+    let run = agent_vitals_runtime::ingest::engine::run_sync(&overview::data_home(), Some(harnesses));
     let report = match run {
         agent_vitals_runtime::ingest::engine::SyncRun::Paused => return (false, false),
         agent_vitals_runtime::ingest::engine::SyncRun::Completed(report) => report,
@@ -1491,16 +1495,16 @@ fn sync_tick_light(
         "complete",
         format!(
             "定向同步 {:?} · {}",
-            hosts.iter().collect::<Vec<_>>(),
+            harnesses.iter().collect::<Vec<_>>(),
             agent_vitals_runtime::ingest::engine::summarize(&report)
         ),
     );
     overview::save_sync_status(&status);
     publish_sync_status(app, &status);
     timed("drain_event_bus", || drain_event_bus(app));
-    let hosts_for_invalidation = hosts.clone();
+    let harnesses_for_invalidation = harnesses.clone();
     timed("publish_invalidation", || {
-        publish_invalidation(app, hosts_for_invalidation)
+        publish_invalidation(app, harnesses_for_invalidation)
     });
     if tray_due {
         let ov = timed_value("read_overview", overview_snapshot_typed_sync);
@@ -1508,8 +1512,8 @@ fn sync_tick_light(
         agent_vitals_runtime::logging::log_info(
             "sync",
             &format!(
-                "轻 tick 完成（{} 个宿主，含托盘节流刷新），用时 {:?}",
-                hosts.len(),
+                "轻 tick 完成（{} 个执行环境，含托盘节流刷新），用时 {:?}",
+                harnesses.len(),
                 t0.elapsed()
             ),
         );
@@ -1518,8 +1522,8 @@ fn sync_tick_light(
     agent_vitals_runtime::logging::log_info(
         "sync",
         &format!(
-            "轻 tick 完成（{} 个宿主），用时 {:?}",
-            hosts.len(),
+            "轻 tick 完成（{} 个执行环境），用时 {:?}",
+            harnesses.len(),
             t0.elapsed()
         ),
     );
@@ -1552,7 +1556,7 @@ fn timed_value<T>(label: &str, f: impl FnOnce() -> T) -> T {
 /// 跳过托盘更新的分支（这正是「多数正常路径连 state 重读都不做」的修复：无未折
 /// 会话/二进制缺失/discover 失败也要刷新，把外部更新带进托盘）。
 /// 引擎结果 → 托盘 / 工作台的同步状态。成功一律 `complete`（React 白名单里唯一的
-/// 正常态，见 `sync_tick_light` 注释）；宿主级文件错误不算整轮失败（与 CLI 退出码 0
+/// 正常态，见 `sync_tick_light` 注释）；执行环境级文件错误不算整轮失败（与 CLI 退出码 0
 /// 同义），但如实写进 message。
 fn status_from_run(run: &agent_vitals_runtime::ingest::engine::SyncRun) -> SyncStatus {
     use agent_vitals_runtime::ingest::engine::{summarize, SyncRun};
@@ -1586,9 +1590,9 @@ fn sync_tick_inner(app: &AppHandle) {
     // 「变了才发」：内容相同的 SyncStatus 不再每 tick 重发（REVIEW G2）。工作台
     // 「正在整理」的生命周期由页面挂载时主动 read_sync_status + 进程首发覆盖。
     publish_sync_status(app, &status);
-    // 宿主区：sessions navigation（20s 硬超时；失败不覆盖 hosts.json——上一轮
+    // 执行环境区：sessions navigation（20s 硬超时；失败不覆盖 harnesses.json——上一轮
     // 快照继续渲染并自然转 stale，spec §6 决策 5）。
-    refresh_hosts(app);
+    refresh_harnesses(app);
     // 2026-09-23 真机验收：这份 overview 只查一次，`refresh`/`budget_alerts`/
     // `quota_alerts` 三处共用同一个引用——此前各自独立 `read_overview()`，
     // 一个 tick 里白算两三遍同一份重 SQL 聚合（budget_alerts 单独一项就是
@@ -1599,7 +1603,7 @@ fn sync_tick_inner(app: &AppHandle) {
     timed("quota_alerts", || quota_alerts::maybe_notify(app, &ov));
     // 事件总线 drain：无论本轮是否有新折账——drain 自己知道有没有（deliveries
     // 反连接），空轮是 no-op；崩溃残留也在此补投。desktop-ui 合并型消费者在
-    // flush 里发 `Invalidated`（带 hosts）。
+    // flush 里发 `Invalidated`（带 harnesses）。
     timed("drain_event_bus", || drain_event_bus(app));
     // 电平检查（spec §4.4）：不经 outbox 的写（DSH oneline 折账落库、桌面 IPC 的
     // 声明/价卡保存……）也要让 webview 失效——revision 前进才发；上面 flush 已发过
@@ -1637,15 +1641,15 @@ fn start_refresh_tick(
         loop {
             let lock = app.state::<SyncLock>();
             if let Ok(_guard) = lock.0.try_lock() {
-                // plan 只在拿到锁之后调用——锁被占的重试路径上宿主集合不丢（验收 #3）。
+                // plan 只在拿到锁之后调用——锁被占的重试路径上执行环境集合不丢（验收 #3）。
                 let plan = scheduler.plan(std::time::Instant::now());
                 match &plan.kind {
                     TickKind::Heavy => {
                         sync_tick(&app);
                         scheduler.heavy_finished(std::time::Instant::now());
                     }
-                    TickKind::Light(hosts) => {
-                        let (tray_refreshed, escalated) = sync_tick_light(&app, hosts, plan.tray_due);
+                    TickKind::Light(harnesses) => {
+                        let (tray_refreshed, escalated) = sync_tick_light(&app, harnesses, plan.tray_due);
                         scheduler.light_finished(
                             LightOutcome { tray_refreshed, escalated },
                             std::time::Instant::now(),
@@ -1659,14 +1663,14 @@ fn start_refresh_tick(
                 continue;
             }
             match wait_for_wake(&slot, TICK_PERIOD) {
-                TickWait::Woken(hosts) => {
-                    // R4-P0：watcher 唤醒 = 该宿主刚有写入——刷新 trust 门控的
+                TickWait::Woken(harnesses) => {
+                    // R4-P0：watcher 唤醒 = 该执行环境刚有写入——刷新 trust 门控的
                     // 活动时刻表（TRUST_SENSOR_OPTIMIZATION spec §4.1）。
-                    app.state::<HostActivityTable>().mark(&hosts);
+                    app.state::<HarnessActivityTable>().mark(&harnesses);
                     // 冷却下限（真机 2026-09-22 验收）：睡满剩余冷却再执行——不丢弃最后
                     // 一批写入；冷却窗本身是动态的（REVIEW P4 自看护）。
                     let cooldown = app.state::<WatcherCooldownOverride>().get();
-                    if let Some(remaining) = scheduler.woken(hosts, cooldown, std::time::Instant::now()) {
+                    if let Some(remaining) = scheduler.woken(harnesses, cooldown, std::time::Instant::now()) {
                         std::thread::sleep(remaining);
                     }
                 }
@@ -1736,7 +1740,7 @@ fn refresh_watch_topology(app: &AppHandle) {
             let skills = app.state::<store::SkillsScanState>().inner().clone();
             agent_vitals_runtime::ingest::watch::WatchRegistry::from_topology(
                 &topology,
-                move |_host| {
+                move |_harness| {
                     let skills = skills.clone();
                     std::sync::Arc::new(move || skills.invalidate())
                 },
@@ -1937,9 +1941,9 @@ fn start_source_watcher(app: &AppHandle)
                     );
                 }
                 let skills = app.state::<store::SkillsScanState>().inner().clone();
-                WatchRegistry::from_topology(&topology, move |host| {
+                WatchRegistry::from_topology(&topology, move |harness| {
                     let skills = skills.clone();
-                    let _ = host;
+                    let _ = harness;
                     std::sync::Arc::new(move || skills.invalidate())
                 })
             }
@@ -1987,11 +1991,11 @@ fn start_trust_monitor_tick(app: AppHandle) {
             }
 
             // R4-P0 活动门控（TRUST_SENSOR_OPTIMIZATION spec §4.1）：冷却窗内
-            // 无活跃宿主且空闲确认窗未到 → 整轮跳过——不 lsof、不开库、不发
+            // 无活跃执行环境且空闲确认窗未到 → 整轮跳过——不 lsof、不开库、不发
             // 事件、不碰 SyncLock。空闲确认窗到期强制校准一轮，兜活动表漏记。
             let gate = trust_gate_should_sample(
                 initial_sample_pending,
-                app.state::<HostActivityTable>()
+                app.state::<HarnessActivityTable>()
                     .any_active_within(TRUST_ACTIVITY_COOLDOWN),
                 last_sampled_at.elapsed(),
             );
@@ -2195,7 +2199,7 @@ fn show_workbench(app: &AppHandle) {
 }
 
 /// 信息行菜单 id → 工作台 tab 名。纯函数，单测钉住映射——切错 tab 的回归靠它挡。
-/// `session:{kind}:{i}` / `host:{kind}` 深链 id 不在这里（#11 的 WorkbenchTarget
+/// `session:{kind}:{i}` / `harness:{kind}` 深链 id 不在这里（#11 的 WorkbenchTarget
 /// 分发）；平铺「最近会话」行已删，「recent」id 不再存在。
 fn tab_for_menu_id(id: &str) -> Option<&'static str> {
     match id {
@@ -2233,32 +2237,32 @@ fn focus_budget_from_notification(app: AppHandle) -> Result<(), String> {
 }
 
 /// 动态菜单 id → 会话深链目标（spec §9.2 #12）。纯函数，单测钉住映射：
-/// · `session:{kind}:{i}` → 该宿主第 i 行 recent 的 `SessionDetail`。CLI v2 的导航
+/// · `session:{kind}:{i}` → 该执行环境第 i 行 recent 的 `SessionDetail`。CLI v2 的导航
 ///   投影通过兼容字段 `session_key` 携带不透明 `session_ref`；只接受安全引用，
 ///   不把 native session key 跨 IPC 边界传给 UI。
-/// · `host:{kind}` → `SessionList{host_kind: Some(kind)}`（v1 点击子菜单本身不产
+/// · `harness:{kind}` → `SessionList{harness_kind: Some(kind)}`（v1 点击子菜单本身不产
 ///   事件，发射点留给「查看全部会话」回归，§7.1）。
 /// · 禁用 id（`session:unavailable:{kind}` / `session:none:{kind}` /
 ///   `session:stale:{kind}`）→ None——禁用项点不到，事件即便到达也不该有目标。
-fn workbench_target_for_menu_id(id: &str, hosts: &[HostRow]) -> Option<WorkbenchTarget> {
+fn workbench_target_for_menu_id(id: &str, harnesses: &[HarnessRow]) -> Option<WorkbenchTarget> {
     let mut parts = id.splitn(3, ':');
     let head = parts.next()?;
     let kind = parts.next()?;
     match (head, kind) {
-        ("host", k) => Some(WorkbenchTarget::SessionList {
-            host_kind: Some(k.to_string()),
+        ("harness", k) => Some(WorkbenchTarget::SessionList {
+            harness_kind: Some(k.to_string()),
         }),
         ("session", k) if k == "unavailable" || k == "none" || k == "stale" => None,
         ("session", k) => {
             let i: usize = parts.next()?.parse().ok()?;
-            let row = hosts.iter().find(|r| r.host_kind == k)?;
+            let row = harnesses.iter().find(|r| r.harness_kind == k)?;
             let session_ref = row.recent.get(i)?.session_key.as_str()?;
             if !is_safe_session_ref(session_ref) {
                 return None;
             }
             Some(WorkbenchTarget::SessionDetail {
                 session_ref: session_ref.to_string(),
-                host_kind: k.to_string(),
+                harness_kind: k.to_string(),
             })
         }
         _ => None,
@@ -2313,7 +2317,7 @@ struct OverviewMemoEntry {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct OverviewStateStamp {
-    hosts: Option<(u128, u64)>,
+    harnesses: Option<(u128, u64)>,
     sync: Option<(u128, u64)>,
 }
 
@@ -2327,7 +2331,7 @@ fn overview_file_stamp(path: &Path) -> Option<(u128, u64)> {
 fn overview_state_stamp(data_home: &str) -> OverviewStateStamp {
     let state = Path::new(data_home).join("state");
     OverviewStateStamp {
-        hosts: overview_file_stamp(&state.join("hosts.json")),
+        harnesses: overview_file_stamp(&state.join("harnesses.json")),
         sync: overview_file_stamp(&state.join("last-sync.json")),
     }
 }
@@ -2583,7 +2587,7 @@ fn billing_import_candidates() -> Value {
     match db.billing_import_candidates() {
         Ok(rows) => serde_json::json!({
             "status": "ok",
-            "candidates": rows.into_iter().map(|(candidate_id, host, provider_id, currency, amount_minor, billing_period_start, status)| {
+            "candidates": rows.into_iter().map(|(candidate_id, harness, provider_id, currency, amount_minor, billing_period_start, status)| {
                 let impact = window.and_then(|(window_start_ms, window_end_ms)| {
                     db.billing_declaration_impact_preview_for(
                         &provider_id, &billing_period_start, None, &[],
@@ -2592,7 +2596,7 @@ fn billing_import_candidates() -> Value {
                 });
                 serde_json::json!({
                     "candidate_id": candidate_id,
-                    "host": host,
+                    "harness": harness,
                     "provider_id": provider_id,
                     "currency": currency,
                     "amount_minor": amount_minor,
@@ -2610,7 +2614,7 @@ fn billing_import_candidates() -> Value {
     }
 }
 
-/// 「确认计费方式」面板的待确认组（REQ-023）：宿主 × provider × 模型 × 路由证据 ×
+/// 「确认计费方式」面板的待确认组（REQ-023）：执行环境 × provider × 模型 × 路由证据 ×
 /// 计价依据，带分币估算金额、按金额降序。数据来自
 /// `runtime::billing_preview::confirmation_groups`（组 SQL 与待处理投影同一份，
 /// 金额与 MCP `cost_breakdown` 同一条计价路径）。此前面板只从旧资产迁移候选出发，
@@ -2662,9 +2666,9 @@ struct BillingScopeInput {
 }
 
 #[derive(Deserialize)]
-struct HostBillInput {
+struct HarnessBillInput {
     bill_id: String,
-    host: String,
+    harness: String,
     provider_id: String,
     billing_period: String,
     billing_basis: String,
@@ -2725,13 +2729,13 @@ struct RetentionConfigInput {
 
 #[derive(Deserialize)]
 struct CustomSourceRootInput {
-    host: String,
+    harness: String,
     root: String,
 }
 
 #[derive(Deserialize)]
-struct SourceHostControlInput {
-    host: String,
+struct SourceHarnessControlInput {
+    harness: String,
     excluded: bool,
 }
 
@@ -2744,7 +2748,7 @@ fn custom_source_roots() -> Value {
     }
 }
 
-/// 用户发起的原生目录选择。选择的是宿主根目录（包含 `.claude` / `.codex`
+/// 用户发起的原生目录选择。选择的是执行环境根目录（包含 `.claude` / `.codex`
 /// 或 `sessions` 的目录），取消不是错误；不会在此处读取或写入会话内容。
 #[tauri::command]
 fn pick_custom_source_root() -> Option<String> {
@@ -2756,7 +2760,7 @@ fn pick_custom_source_root() -> Option<String> {
 fn add_custom_source_root(app: AppHandle, input: CustomSourceRootInput) -> Result<Value, String> {
     let data_home = overview::data_home();
     let changed = agent_vitals_runtime::custom_sources::add_custom_source_root(
-        &data_home, &input.host, Path::new(&input.root),
+        &data_home, &input.harness, Path::new(&input.root),
     )?;
     // 配置已提交——新批准的自定义源即时获得秒级监听（Phase C 热插拔）。
     refresh_watch_topology(&app);
@@ -2767,17 +2771,17 @@ fn add_custom_source_root(app: AppHandle, input: CustomSourceRootInput) -> Resul
 fn remove_custom_source_root(app: AppHandle, input: CustomSourceRootInput) -> Result<Value, String> {
     let data_home = overview::data_home();
     let changed = agent_vitals_runtime::custom_sources::remove_custom_source_root(
-        &data_home, &input.host, Path::new(&input.root),
+        &data_home, &input.harness, Path::new(&input.root),
     )?;
     refresh_watch_topology(&app);
     Ok(serde_json::json!({ "status": "removed", "changed": changed }))
 }
 
 #[tauri::command]
-fn source_host_controls() -> Value {
+fn source_harness_controls() -> Value {
     let data_home = overview::data_home();
-    match agent_vitals_runtime::source_controls::excluded_hosts(&data_home) {
-        Ok(excluded_hosts) => serde_json::json!({ "status": "ok", "excluded_hosts": excluded_hosts, "supported_hosts": agent_vitals_runtime::source_controls::supported_hosts_for(&data_home) }),
+    match agent_vitals_runtime::source_controls::excluded_harnesses(&data_home) {
+        Ok(excluded_harnesses) => serde_json::json!({ "status": "ok", "excluded_harnesses": excluded_harnesses, "supported_harnesses": agent_vitals_runtime::source_controls::supported_harnesses_for(&data_home) }),
         Err(error) => serde_json::json!({ "status": "unavailable", "reason": error }),
     }
 }
@@ -2810,38 +2814,38 @@ fn source_read_locations() -> Value {
 }
 
 #[tauri::command]
-fn set_source_host_excluded(app: AppHandle, input: SourceHostControlInput) -> Result<Value, String> {
-    let changed = agent_vitals_runtime::source_controls::set_host_excluded(
-        &overview::data_home(), &input.host, input.excluded,
+fn set_source_harness_excluded(app: AppHandle, input: SourceHarnessControlInput) -> Result<Value, String> {
+    let changed = agent_vitals_runtime::source_controls::set_harness_excluded(
+        &overview::data_home(), &input.harness, input.excluded,
     )?;
-    // 配置已提交——监听拓扑即时跟上（排除 = 移除该宿主全部监听根）。
+    // 配置已提交——监听拓扑即时跟上（排除 = 移除该执行环境全部监听根）。
     refresh_watch_topology(&app);
     Ok(serde_json::json!({ "status": "saved", "changed": changed, "excluded": input.excluded }))
 }
 
 #[tauri::command]
-fn delete_imported_source_data(app: AppHandle, host: String) -> Result<Value, String> {
+fn delete_imported_source_data(app: AppHandle, harness: String) -> Result<Value, String> {
     let data_home = overview::data_home();
-    // 先禁止未来读取，再在同一宿主租约下清理 authority 投影。
-    let deleted = agent_vitals_runtime::source_controls::delete_imported_source_data(&data_home, &host)?;
+    // 先禁止未来读取，再在同一执行环境租约下清理 authority 投影。
+    let deleted = agent_vitals_runtime::source_controls::delete_imported_source_data(&data_home, &harness)?;
     refresh_watch_topology(&app);
     let receipt = serde_json::json!({
-        "status": "deleted", "host": host.clone(), "facts": deleted.facts,
+        "status": "deleted", "harness": harness.clone(), "facts": deleted.facts,
         "sessions": deleted.sessions, "source_files": deleted.source_files,
         "trust_observations": deleted.trust_observations,
         "route_evidence": deleted.route_evidence,
         "session_excerpts": deleted.session_excerpts,
     });
-    agent_vitals_runtime::logging::log_info("emit", &format!("SourceDataDeleted host={host}"));
+    agent_vitals_runtime::logging::log_info("emit", &format!("SourceDataDeleted harness={harness}"));
     let _ = app.emit(APP_EVENT, serde_json::json!({
-        "type": "SourceDataDeleted", "kind": "source_data_deleted", "host": host.clone(),
+        "type": "SourceDataDeleted", "kind": "source_data_deleted", "harness": harness.clone(),
         "facts": deleted.facts, "sessions": deleted.sessions,
         "source_files": deleted.source_files,
         "trust_observations": deleted.trust_observations,
         "route_evidence": deleted.route_evidence,
         "session_excerpts": deleted.session_excerpts,
     }));
-    let _ = app.emit("source-data-deleted", serde_json::json!({ "host": host }));
+    let _ = app.emit("source-data-deleted", serde_json::json!({ "harness": harness }));
     Ok(receipt)
 }
 
@@ -2887,13 +2891,13 @@ fn save_statistics_timezone_config(app: AppHandle, timezone: String) -> Result<V
     let saved = agent_vitals_runtime::statistics_timezone::save_timezone(&data_home, &timezone)?;
     let effective = agent_vitals_runtime::statistics_timezone::apply(&data_home)?;
     // The Workbench refreshes its active tab after the IPC returns, but the
-    // tray is a separate consumer and its host rows come from hosts.json. A
+    // tray is a separate consumer and its harness rows come from harnesses.json. A
     // plain menu rebuild would therefore retain the old day's navigation
     // snapshot. Re-run the bounded navigation refresh off the command thread,
     // then rebuild the tray from the newly written snapshot.
     let background_app = app.clone();
     std::thread::spawn(move || {
-        refresh_hosts(&background_app);
+        refresh_harnesses(&background_app);
         refresh(&background_app, overview_snapshot_typed_sync().as_ref());
     });
     refresh(&app, overview_snapshot_typed_sync().as_ref());
@@ -3083,70 +3087,6 @@ fn save_ui_language_config(app: AppHandle, language: String) -> Result<Value, St
     std::fs::rename(&temporary, target).map_err(|error| error.to_string())?;
     refresh(&app, overview_snapshot_typed_sync().as_ref());
     Ok(serde_json::json!({ "status": "saved", "language": language }))
-}
-
-const CITY_SEED_CONFIG_FILE: &str = "city-seed.json";
-
-/// 城市地形种子：第一次打开城市页时生成并落盘，之后永远读同一个——地图不能每次启动都变。
-/// 只有用户在城市页点「重新生成岛屿」才换。种子只来自本机（时间 + 进程 + 地址熵的 FNV 混合），
-/// 不关联账号或任何网络标识，也不离开本机。
-fn read_city_seed() -> Result<Option<u32>, String> {
-    let path = overview::data_home().join("state").join(CITY_SEED_CONFIG_FILE);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("city seed unreadable: {error}")),
-    };
-    let value: Value = serde_json::from_str(&text).map_err(|error| format!("city seed invalid: {error}"))?;
-    Ok(value.get("seed").and_then(Value::as_u64).and_then(|seed| u32::try_from(seed).ok()).filter(|seed| *seed > 0))
-}
-
-fn fresh_city_seed() -> u32 {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let marker = 0u8;
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in nanos.to_le_bytes().iter().chain(std::process::id().to_le_bytes().iter()).chain((&marker as *const u8 as usize).to_le_bytes().iter()) {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    // 0 保留给「未设置」。
-    ((hash ^ (hash >> 32)) as u32).max(1)
-}
-
-fn write_city_seed(seed: u32) -> Result<(), String> {
-    let directory = overview::data_home().join("state");
-    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let temporary = directory.join("city-seed.json.tmp");
-    let contents = serde_json::to_vec(&serde_json::json!({ "seed": seed })).map_err(|error| error.to_string())?;
-    std::fs::write(&temporary, contents).map_err(|error| error.to_string())?;
-    std::fs::rename(&temporary, directory.join(CITY_SEED_CONFIG_FILE)).map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn city_seed_config() -> Result<Value, String> {
-    if let Some(seed) = read_city_seed()? {
-        return Ok(serde_json::json!({ "status": "ok", "seed": seed, "created": false }));
-    }
-    let seed = fresh_city_seed();
-    write_city_seed(seed)?;
-    Ok(serde_json::json!({ "status": "ok", "seed": seed, "created": true }))
-}
-
-/// 手动指定种子（城市页的种子输入框，用于检查不同地形下的布局）。落盘后与自动生成的种子同等对待。
-#[tauri::command]
-fn set_city_seed(seed: u32) -> Result<Value, String> {
-    if seed == 0 { return Err("city seed must be a positive integer".to_string()); }
-    write_city_seed(seed)?;
-    Ok(serde_json::json!({ "status": "saved", "seed": seed }))
-}
-
-#[tauri::command]
-fn reset_city_seed() -> Result<Value, String> {
-    let previous = read_city_seed()?;
-    let mut seed = fresh_city_seed();
-    if Some(seed) == previous { seed = seed.wrapping_add(1).max(1); }
-    write_city_seed(seed)?;
-    Ok(serde_json::json!({ "status": "saved", "seed": seed }))
 }
 
 /// 每日同步叠加层（`.github/workflows/pricing-sync.yml` 每天生成）。app 拉到后与
@@ -3530,10 +3470,10 @@ fn fail_manifest_catalog_update(
 /// 本体当前支持的 slot/能力（E01 capability 协商的目录面镜像——来源是
 /// `generic_manifest::CapabilitySet::default()`，不维护第二份词表）。
 fn manifest_catalog_slot_support() -> std::collections::BTreeMap<String, agent_vitals_domain::domain::catalog_index::SlotSupport> {
-    let capabilities = agent_vitals_hosts::generic_manifest::CapabilitySet::default();
+    let capabilities = agent_vitals_harnesses::generic_manifest::CapabilitySet::default();
     let mut support = std::collections::BTreeMap::new();
     support.insert(
-        "host_manifest".to_string(),
+        "harness_manifest".to_string(),
         agent_vitals_domain::domain::catalog_index::SlotSupport {
             schemas: vec![1],
             capabilities: capabilities
@@ -3636,7 +3576,7 @@ async fn update_manifest_catalog() -> Result<Value, String> {
     use sha2::Digest;
     let index_sha256 = format!("{:x}", sha2::Sha256::digest(&bytes));
     let support = manifest_catalog_slot_support();
-    let capabilities = agent_vitals_hosts::generic_manifest::CapabilitySet::default();
+    let capabilities = agent_vitals_harnesses::generic_manifest::CapabilitySet::default();
     let highest = status
         .catalog_sequence
         .zip(status.index_sha256.as_deref().map(|hash| hash.to_string()))
@@ -3655,7 +3595,7 @@ async fn update_manifest_catalog() -> Result<Value, String> {
     let entry_count = index["entries"].as_array().map(|entries| entries.len());
     let supported_entries = index["entries"]
         .as_array()
-        .map(|entries| entries.iter().filter(|entry| entry["slot_type"] == "host_manifest").count());
+        .map(|entries| entries.iter().filter(|entry| entry["slot_type"] == "harness_manifest").count());
     status.state = "ok".into();
     status.last_success_at_ms = Some(now);
     status.catalog_sequence = index["catalog_sequence"].as_u64();
@@ -3690,7 +3630,7 @@ fn start_public_pricing_catalog_tick() {
 }
 
 /// 「发现」tab 新鲜度条的数据面（WORKBENCH_FINDINGS_TAB_SPEC §4.8）。
-/// 只读一个数：上次成功同步时刻 + stale 宿主名单（runtime 与 MCP envelope
+/// 只读一个数：上次成功同步时刻 + stale 执行环境名单（runtime 与 MCP envelope
 /// 同源），DB 打不开就如实报 unavailable，不编一个空名单。
 fn findings_freshness_state(report: &Value) -> &'static str {
     let Some(last) = report.get("last_successful_sync_at").and_then(Value::as_str) else {
@@ -3699,29 +3639,29 @@ fn findings_freshness_state(report: &Value) -> &'static str {
     if parse_rfc3339_secs(last).is_none() {
         return "unknown";
     }
-    let Some(stale_hosts) = report.get("stale_hosts").and_then(Value::as_array) else {
+    let Some(stale_harnesses) = report.get("stale_harnesses").and_then(Value::as_array) else {
         return "unknown";
     };
-    if stale_hosts.iter().any(|host| !host.is_string()) {
+    if stale_harnesses.iter().any(|harness| !harness.is_string()) {
         return "unknown";
     }
-    if !stale_hosts.is_empty() {
+    if !stale_harnesses.is_empty() {
         "stale"
     } else {
         "fresh"
     }
 }
 
-fn findings_safe_host_label(value: &Value) -> String {
-    let Some(host) = value.as_str() else { return "generic".to_string(); };
-    if let Some(slug) = host.strip_prefix("host:").or_else(|| host.strip_prefix("plugin:")) {
-        if agent_vitals_runtime::host_registry::plugin_slug_ok(slug) {
-            return host.to_string();
+fn findings_safe_harness_label(value: &Value) -> String {
+    let Some(harness) = value.as_str() else { return "generic".to_string(); };
+    if let Some(slug) = harness.strip_prefix("harness:").or_else(|| harness.strip_prefix("plugin:")) {
+        if agent_vitals_runtime::harness_registry::plugin_slug_ok(slug) {
+            return harness.to_string();
         }
         return "generic".to_string();
     }
-    if host.len() <= 32 && !host.is_empty() && host.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-')) {
-        host.to_string()
+    if harness.len() <= 32 && !harness.is_empty() && harness.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-')) {
+        harness.to_string()
     } else {
         "generic".to_string()
     }
@@ -3736,10 +3676,10 @@ fn findings_freshness() -> Value {
             let raw = agent_vitals_runtime::mcp::data_freshness_report(db.conn());
             let state = findings_freshness_state(&raw);
             let last = raw.get("last_successful_sync_at").cloned().unwrap_or(Value::Null);
-            let stale_hosts = raw.get("stale_hosts").and_then(Value::as_array).map(|hosts| hosts.iter().map(findings_safe_host_label).collect::<Vec<_>>()).unwrap_or_default();
+            let stale_harnesses = raw.get("stale_harnesses").and_then(Value::as_array).map(|harnesses| harnesses.iter().map(findings_safe_harness_label).collect::<Vec<_>>()).unwrap_or_default();
             serde_json::json!({
                 "status": "ok",
-                "freshness": {"state": state, "last_successful_sync_at": last, "stale_hosts": stale_hosts, "syncing": false},
+                "freshness": {"state": state, "last_successful_sync_at": last, "stale_harnesses": stale_harnesses, "syncing": false},
             })
         }
         Err(_) => serde_json::json!({ "status": "unavailable" }),
@@ -4215,7 +4155,7 @@ Drop `--allow-local-writes` for a strictly read-only server. With it, the only w
 
 ## Ground rules — keep the numbers honest
 
-1. **Three kinds of money, never merged.** `metered_actual` / `host_billed` = real bills; `fixed_subscription` = declared monthly fees; `metered_estimate` / `metered_declared` = price card × tokens. Carry the `≈` / "estimate" label into your answer. Never call an estimate a bill.
+1. **Three kinds of money, never merged.** `metered_actual` / `harness_billed` = real bills; `fixed_subscription` = declared monthly fees; `metered_estimate` / `metered_declared` = price card × tokens. Carry the `≈` / "estimate" label into your answer. Never call an estimate a bill.
 2. **Currencies are never added.** Report CNY and USD side by side. Only the overview's `metered_view` may show a converted `≈` figure, and it says so.
 3. **Gaps are gaps, not zero.** `unresolved`, `unpriced_tokens`, `has_unresolved`, `coverage.partial` mean "unknown". Say so; do not fill with 0.
 4. **Never invent prices.** `price_cards.card_put` only with a real source (a pricing page URL or the user's own statement) recorded in `source`. If you cannot find a price, skip that model and say so.
@@ -4236,7 +4176,7 @@ Every response is an envelope with `data`, `coverage`, `freshness` and `warnings
 
 **Data health** — `data_status` (sync, integrity, `unresolved_tokens_month`, `unpriced_metered_tokens_month`) + `data_quality_issues`; list what needs the user's hand, most valuable first.
 
-**Session drill-down** — `sessions_search` (window / host / model) → `session_detail` / `session_trace` by `session_ref`. Never ask for or echo native session ids or paths.
+**Session drill-down** — `sessions_search` (window / harness / model) → `session_detail` / `session_trace` by `session_ref`. Never ask for or echo native session ids or paths.
 
 **Hourly pattern** — `usage_hourly` for one day (tokens only; cost per hour lives in `cost_breakdown`).
 
@@ -4244,7 +4184,7 @@ Every response is an envelope with `data`, `coverage`, `freshness` and `warnings
 
 - Claude Code: save as `~/.claude/skills/agent-vitals-mcp/SKILL.md`.
 - Codex: save as `~/.codex/skills/agent-vitals-mcp/SKILL.md`.
-- Other hosts: any skills directory that reads `SKILL.md` frontmatter.
+- Other harnesses: any skills directory that reads `SKILL.md` frontmatter.
 
 安装后把上面的 MCP 接入命令执行一次即可；skill 只负责教 Agent 怎么用这些工具、怎么诚实地说数字。
 "#, shell_bin = shell_bin, bin = bin, tools = tools)
@@ -4315,7 +4255,7 @@ fn validate_desktop_declaration(
 }
 
 /// 保存一条可追溯的计费关系修订。声明当前态与不可变修订在同一个用户动作中
-/// 写入；scope 由前端显式传入，空数组表示只使用宿主/provider/有效期约束。
+/// 写入；scope 由前端显式传入，空数组表示只使用执行环境/provider/有效期约束。
 /// 官方订阅在保存成功后立即入队重算并返回 `job`——「保存」与「应用」曾是
 /// 两次点击，只保存不应用会留下声明已存在、数字未变、待处理也不显示的半状态
 /// （规格 G6）。入队失败不回滚修订（修订是不可变事实），回执如实带出。
@@ -4466,7 +4406,7 @@ fn revoke_billing_declaration(
     }))
 }
 
-/// 对尚未保存的声明做只读影响预览。参数就是保存时的参数（宿主、provider、
+/// 对尚未保存的声明做只读影响预览。参数就是保存时的参数（执行环境、provider、
 /// 关系、起止月、作用域）——不再由前端另传统计月窗口：预览范围必须等于写入范围
 /// （计费主链规格 G2/R1）。三组数字与分币金额由 `runtime::billing_preview` 用与重算
 /// 归因同一条谓词、与 MCP `cost_breakdown` 同一条计价路径算出。
@@ -4494,8 +4434,8 @@ fn billing_candidate_impact_preview(
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-fn save_host_bill(
-    bill_id: String, host: String, provider_id: String, billing_period: String,
+fn save_harness_bill(
+    bill_id: String, harness: String, provider_id: String, billing_period: String,
     billing_basis: String, amount_minor: i64, currency: String, evidence_ref: String,
 ) -> Result<Value, String> {
     let data_home = overview::data_home();
@@ -4503,15 +4443,15 @@ fn save_host_bill(
     let db = agent_vitals_data::authority::AuthorityDb::open(
         &path, agent_vitals_runtime::sql_sync::now_ms(),
     ).map_err(|error| error.to_string())?;
-    db.host_bill_put(
-        &bill_id, &host, &provider_id, &billing_period, &billing_basis,
+    db.harness_bill_put(
+        &bill_id, &harness, &provider_id, &billing_period, &billing_basis,
         amount_minor, &currency, &evidence_ref, agent_vitals_runtime::sql_sync::now_ms(),
     ).map_err(|error| error.to_string())?;
     Ok(serde_json::json!({ "status": "saved", "bill_id": bill_id }))
 }
 
 #[tauri::command]
-fn save_host_bills(rows: Vec<HostBillInput>) -> Result<Value, String> {
+fn save_harness_bills(rows: Vec<HarnessBillInput>) -> Result<Value, String> {
     if rows.is_empty() {
         return Err("no bill rows to import".to_string());
     }
@@ -4523,8 +4463,8 @@ fn save_host_bills(rows: Vec<HostBillInput>) -> Result<Value, String> {
     let now_ms = agent_vitals_runtime::sql_sync::now_ms();
     db.with_immediate_txn(|_| {
         for row in &rows {
-            db.host_bill_put(
-                &row.bill_id, &row.host, &row.provider_id, &row.billing_period,
+            db.harness_bill_put(
+                &row.bill_id, &row.harness, &row.provider_id, &row.billing_period,
                 &row.billing_basis, row.amount_minor, &row.currency, &row.evidence_ref, now_ms,
             )?;
         }
@@ -4534,28 +4474,28 @@ fn save_host_bills(rows: Vec<HostBillInput>) -> Result<Value, String> {
 }
 
 #[tauri::command(async)]
-fn host_bills_for_period(billing_period: String) -> Value {
+fn harness_bills_for_period(billing_period: String) -> Value {
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
     let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) else {
         return serde_json::json!({ "status": "unavailable", "bills": [] });
     };
-    match db.host_bill_details_for_period(&billing_period) {
-        Ok(rows) => serde_json::json!({ "status": "ok", "bills": rows.into_iter().map(|(bill_id, host, provider_id, billing_basis, amount_minor, currency, evidence_ref)| {
-            serde_json::json!({ "bill_id": bill_id, "host": host, "provider_id": provider_id, "billing_basis": billing_basis, "amount_minor": amount_minor, "currency": currency, "evidence_ref": evidence_ref })
+    match db.harness_bill_details_for_period(&billing_period) {
+        Ok(rows) => serde_json::json!({ "status": "ok", "bills": rows.into_iter().map(|(bill_id, harness, provider_id, billing_basis, amount_minor, currency, evidence_ref)| {
+            serde_json::json!({ "bill_id": bill_id, "harness": harness, "provider_id": provider_id, "billing_basis": billing_basis, "amount_minor": amount_minor, "currency": currency, "evidence_ref": evidence_ref })
         }).collect::<Vec<_>>() }),
         Err(error) => serde_json::json!({ "status": "unavailable", "reason": error.to_string(), "bills": [] }),
     }
 }
 
 #[tauri::command]
-fn delete_host_bill(bill_id: String) -> Result<Value, String> {
+fn delete_harness_bill(bill_id: String) -> Result<Value, String> {
     let data_home = overview::data_home();
     let path = agent_vitals_data::authority::default_authority_path(&data_home);
     let db = agent_vitals_data::authority::AuthorityDb::open(
         &path, agent_vitals_runtime::sql_sync::now_ms(),
     ).map_err(|error| error.to_string())?;
-    let deleted = db.host_bill_delete(
+    let deleted = db.harness_bill_delete(
         &bill_id, agent_vitals_runtime::sql_sync::now_ms(),
     ).map_err(|error| error.to_string())?;
     Ok(serde_json::json!({ "status": "deleted", "bill_id": bill_id, "deleted": deleted }))
@@ -4711,7 +4651,7 @@ fn billing_recalculation_jobs() -> Result<Value, String> {
 
 /// 工作台「数据源」页的独立契约。会话搜索只回答时间窗内的会话，不能再被
 /// 借来承载扫描健康；这里从 SQL authority 的 source_files / usage_facts 读取
-/// 每个已接线宿主的扫描、导入和失败范围。宿主集合复用 ingest registry，前端
+/// 每个已接线执行环境的扫描、导入和失败范围。执行环境集合复用 ingest registry，前端
 /// 不再硬编码两个卡片。路径只以 source_id/path_hash 留在库内，本 DTO 不泄露。
 #[tauri::command(async)]
 fn data_source_status() -> Value {
@@ -4727,14 +4667,14 @@ fn data_source_status() -> Value {
     let mut report = agent_vitals_runtime::mcp::source_status_report(db.conn()).unwrap_or_else(|reason| {
         serde_json::json!({ "status": "unavailable", "reason": reason, "sources": [] })
     });
-    let excluded_hosts = match agent_vitals_runtime::source_controls::excluded_hosts(&data_home) {
-        Ok(hosts) => hosts,
+    let excluded_harnesses = match agent_vitals_runtime::source_controls::excluded_harnesses(&data_home) {
+        Ok(harnesses) => harnesses,
         Err(error) => return serde_json::json!({ "status": "unavailable", "reason": error, "sources": [] }),
     };
     if let Some(sources) = report.get_mut("sources").and_then(Value::as_array_mut) {
         for source in sources {
-            let host = source.get("host").and_then(Value::as_str).unwrap_or("");
-            if excluded_hosts.contains(host) {
+            let harness = source.get("harness").and_then(Value::as_str).unwrap_or("");
+            if excluded_harnesses.contains(harness) {
                 source["connection_state"] = Value::String("excluded".into());
                 source["recovery_action"] = serde_json::json!({
                     "kind": "include_source", "label": "恢复读取"
@@ -4772,8 +4712,8 @@ fn set_sync_paused(paused: bool) -> Result<Value, String> {
 }
 
 /// 扫描器在发现目录权限/解析失败时可能尚未写出 source_files 行；最近同步状态
-/// 是这类失败的生产证据。把能明确归属的宿主标为需要处理；无法归属的 facts
-/// 同步失败影响全部宿主，不能伪装成三个“已连接”。
+/// 是这类失败的生产证据。把能明确归属的执行环境标为需要处理；无法归属的 facts
+/// 同步失败影响全部执行环境，不能伪装成三个“已连接”。
 fn merge_source_sync_failure(report: &mut Value, sync: &SyncStatus) {
     if sync.ok || sync.stage == "never" { return; }
     let message = sync.message.to_lowercase();
@@ -4782,11 +4722,11 @@ fn merge_source_sync_failure(report: &mut Value, sync: &SyncStatus) {
         .iter().any(|marker| message.contains(marker));
     for source in sources {
         if source.get("connection_state").and_then(Value::as_str) == Some("excluded") { continue; }
-        let host = source.get("host").and_then(Value::as_str).unwrap_or("");
+        let harness = source.get("harness").and_then(Value::as_str).unwrap_or("");
         let affected = if explicitly_scoped {
-            (host == "claude-code" && message.contains("claude"))
-                || (host == "codex" && message.contains("codex"))
-                || (host == "dsh" && (message.contains("dsh") || message.contains("deepseek")))
+            (harness == "claude-code" && message.contains("claude"))
+                || (harness == "codex" && message.contains("codex"))
+                || (harness == "dsh" && (message.contains("dsh") || message.contains("deepseek")))
         } else { true };
         if !affected { continue; }
         source["connection_state"] = Value::String("needs_attention".into());
@@ -4865,7 +4805,7 @@ where
 /// （`SqlSummaryRepository`，含 legacy_aggregate 深历史），与 CLI `data
 /// coverage` 同源。薄转发，无定价/无直读 state JSON。`--json` 与
 /// CLI `data coverage` 是**同一份冻结 DTO**（`data_contract.rs::to_json`），
-/// 工作台总览/日历两页的诚实字段（freshness/coverage/excluded_hosts）都从
+/// 工作台总览/日历两页的诚实字段（freshness/coverage/excluded_harnesses）都从
 /// 这里取，不许前端自己从金额反推"有没有数据"。
 #[tauri::command(async)]
 async fn data_monthly_summary(month: String) -> Value {
@@ -5196,9 +5136,9 @@ fn data_codex_quota() -> Option<Value> {
     )
 }
 
-/// Token 日历的逐日跨宿主数据（v0.9 Stage D——此前日历只画 DSH 日轴，
-/// DSH 零用量月份让 claude/codex 的真实用量在日历上不可见）。每天三宿主
-/// 各自 token + 耗费，钱不跨宿主不跨币合并（口径各异，格子副行分币并列）。
+/// Token 日历的逐日跨执行环境数据（v0.9 Stage D——此前日历只画 DSH 日轴，
+/// DSH 零用量月份让 claude/codex 的真实用量在日历上不可见）。每天三执行环境
+/// 各自 token + 耗费，钱不跨执行环境不跨币合并（口径各异，格子副行分币并列）。
 #[tauri::command(async)]
 async fn read_calendar_month(month: String) -> Value {
     run_heavy_read(move || {
@@ -5209,10 +5149,10 @@ async fn read_calendar_month(month: String) -> Value {
     .await
 }
 
-/// 单日按小时分布（北京小时）——三宿主统一（v0.9.1 Phase 3.5 Tier B 起）：
-/// `usage_facts` 行级事实按北京小时聚合（`authority_query::hourly_by_host`），
-/// dsh / codex / claude-code 一视同仁；`hosts_available` 如实标注每宿主在场
-/// 与否（`sql-facts`），库打不开 = 全宿主缺席。旧「codex=fold、claude=facts-index
+/// 单日按小时分布（北京小时）——三执行环境统一（v0.9.1 Phase 3.5 Tier B 起）：
+/// `usage_facts` 行级事实按北京小时聚合（`authority_query::hourly_by_harness`），
+/// dsh / codex / claude-code 一视同仁；`harnesses_available` 如实标注每执行环境在场
+/// 与否（`sql-facts`），库打不开 = 全执行环境缺席。旧「codex=fold、claude=facts-index
 /// 部分覆盖」的三路拼装与 `codex_home` 参数已随 Tier B 退役（R0 化石清理）。
 #[tauri::command(async)]
 async fn read_hourly_distribution(date: String) -> Value {
@@ -5370,10 +5310,16 @@ fn capture_workbench_screenshot(app: AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let context = tauri::generate_context!();
+    #[cfg(all(feature = "plugin-isolation-probe", target_os = "macos"))]
+    if let Some(report) = plugin_isolation_probe::report_argument() {
+        plugin_isolation_probe::run(report, context);
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .manage(SyncLock(Mutex::new(())))
-        .manage(HostActivityTable(std::sync::Mutex::new(
+        .manage(HarnessActivityTable(std::sync::Mutex::new(
             std::collections::BTreeMap::new(),
         )))
         .manage(SyncRequests(Mutex::new(std::collections::BTreeMap::new())))
@@ -5388,8 +5334,8 @@ pub fn run() {
         // 会话深链待消费目标（spec §7.2）：菜单 L2 → 工作台详情。与 NavTarget
         // 并存——不同维度（会话目标 vs tab 名），见 FocusTarget 注释。
         .manage(FocusTarget(Mutex::new(None)))
-        // 最近一次菜单构建用的宿主行（spec §9.2 #12 映射依据，见 build_menu_at）。
-        .manage(HostsCache(Mutex::new(Vec::new())))
+        // 最近一次菜单构建用的执行环境行（spec §9.2 #12 映射依据，见 build_menu_at）。
+        .manage(HarnessesCache(Mutex::new(Vec::new())))
         // R2a 冷构建串行锁：后台预热与用户点击并发 spawn CLI 时，后到者等锁 →
         // 直接命中 cache（见 store.rs StoreBuildLock 注释）。
         .manage(store::StoreBuildLock::new())
@@ -5406,7 +5352,16 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![
+        .manage(plugin_host::PluginHost::default())
+        .invoke_handler({
+            let handler: Box<dyn Fn(tauri::ipc::Invoke) -> bool + Send + Sync> = Box::new(tauri::generate_handler![
+            plugin_host::plugin_open,
+            plugin_host::plugin_close,
+            plugin_host::plugin_snapshot,
+            plugin_host::plugin_command,
+            plugin_host::plugin_message,
+            plugin_host::plugin_request,
+            plugin_host::plugin_invalidate,
             read_overview,
             data_status,
             billing_import_candidates,
@@ -5421,15 +5376,15 @@ pub fn run() {
             add_custom_source_root,
             remove_custom_source_root,
             watcher_health,
-            source_host_controls,
+            source_harness_controls,
             source_data_revision,
             source_read_locations,
-            set_source_host_excluded,
+            set_source_harness_excluded,
             delete_imported_source_data,
             retention_config,
             save_retention_config,
             statistics_timezone_config,
-            host_display_names,
+            harness_display_names,
             fx_status,
             save_reporting_currency_config,
             save_fx_manual_rate,
@@ -5438,9 +5393,6 @@ pub fn run() {
             save_statistics_timezone_config,
             ui_language_config,
             save_ui_language_config,
-            city_seed_config,
-            reset_city_seed,
-            set_city_seed,
             public_pricing_catalog_status,
             manifest_catalog_status,
             save_manifest_catalog_policy,
@@ -5467,10 +5419,10 @@ pub fn run() {
             mcp_setup_info,
             mcp_skill_text,
             export_mcp_skill,
-            save_host_bill,
-            save_host_bills,
-            host_bills_for_period,
-            delete_host_bill,
+            save_harness_bill,
+            save_harness_bills,
+            harness_bills_for_period,
+            delete_harness_bill,
             enqueue_billing_recalculation,
             retry_billing_recalculation,
             billing_recalculation_job_status,
@@ -5547,7 +5499,17 @@ pub fn run() {
             clear_focus_target,
             focus_budget_from_notification,
             capture_workbench_screenshot,
-        ])
+            ]);
+            move |invoke: tauri::ipc::Invoke| {
+                // The official fixture plugin must not inherit authority/log APIs.
+                if invoke.message.webview().label().starts_with("plugin-")
+                    && !matches!(invoke.message.command(), "plugin_message" | "plugin_request") {
+                    invoke.resolver.reject("plugin_command_unavailable");
+                    return true;
+                }
+                handler(invoke)
+            }
+        })
         .setup(|app| {
             if let Err(error) = agent_vitals_runtime::statistics_timezone::apply(
                 &overview::data_home(),
@@ -5593,13 +5555,13 @@ pub fn run() {
                         "workbench" => show_workbench(app),
                         "refresh" => sync_now(app),
                         _ => {
-                            let hosts = app
-                                .state::<HostsCache>()
+                            let harnesses = app
+                                .state::<HarnessesCache>()
                                 .0
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .clone();
-                            if let Some(target) = workbench_target_for_menu_id(id, &hosts) {
+                            if let Some(target) = workbench_target_for_menu_id(id, &harnesses) {
                                 focus_session_target(app, target);
                             } else if let Some(tab) = tab_for_menu_id(id) {
                                 focus_tab(app, tab);
@@ -5623,7 +5585,7 @@ pub fn run() {
             warm_authority_db(app.handle());
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running agent-vitals menubar");
 }
 
@@ -5693,7 +5655,7 @@ mod tests {
         assert!(trust_gate_should_sample(false, false, TRUST_IDLE_CONFIRM_WINDOW));
         assert!(trust_gate_should_sample(false, false, TRUST_IDLE_CONFIRM_WINDOW + Duration::from_secs(1)));
 
-        let table = HostActivityTable(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+        let table = HarnessActivityTable(std::sync::Mutex::new(std::collections::BTreeMap::new()));
         assert!(!table.any_active_within(TRUST_ACTIVITY_COOLDOWN), "空表不算活跃");
         table.mark(["claude-code"]);
         assert!(table.any_active_within(TRUST_ACTIVITY_COOLDOWN), "刚标记必须活跃");
@@ -5830,10 +5792,10 @@ mod tests {
             overview_memo_get(revision + 1, &data_home).expect("前进写回应生效");
         assert_eq!(after_advance, advance_marker, "更新的 revision 写回必须生效");
 
-        // 宿主和同步快照独立于 authority revision 更新，必须使同 revision 缓存失效。
+        // 执行环境和同步快照独立于 authority revision 更新，必须使同 revision 缓存失效。
         std::fs::create_dir_all(home.join("state")).unwrap();
-        std::fs::write(home.join("state/hosts.json"), "{} ").unwrap();
-        assert!(overview_memo_get(revision + 1, &data_home).is_none(), "宿主快照变化必须失效");
+        std::fs::write(home.join("state/harnesses.json"), "{} ").unwrap();
+        assert!(overview_memo_get(revision + 1, &data_home).is_none(), "执行环境快照变化必须失效");
         overview_memo_put(revision + 1, data_home.clone(), ov, advance_marker);
         std::fs::write(home.join("state/last-sync.json"), "{} ").unwrap();
         assert!(overview_memo_get(revision + 1, &data_home).is_none(), "同步状态变化必须失效");
@@ -5877,7 +5839,7 @@ mod tests {
                     conn.execute(
                         &format!(
                             "INSERT INTO event_outbox(event_id, event_type, schema_version, occurred_at_ms,
-                                 host, correlation_id, producer, payload_json, ingested_run_id, created_at_ms)
+                                 harness, correlation_id, producer, payload_json, ingested_run_id, created_at_ms)
                              VALUES ('evt-{i}', 'FactsIngested', 1, 1, 'dsh', 'run', 'sync_service', '{{}}', 'run', 1)"
                         ),
                         [],
@@ -5934,21 +5896,21 @@ mod tests {
 
     #[test]
     fn findings_freshness_never_calls_missing_sync_complete() {
-        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": null, "stale_hosts": []})), "not_yet_synced");
-        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": "2026-09-20T12:00:00+08:00", "stale_hosts": ["generic"]})), "stale");
-        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": "2026-09-20T12:00:00+08:00", "stale_hosts": []})), "fresh");
-        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": "not-a-timestamp", "stale_hosts": []})), "unknown");
+        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": null, "stale_harnesses": []})), "not_yet_synced");
+        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": "2026-09-20T12:00:00+08:00", "stale_harnesses": ["generic"]})), "stale");
+        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": "2026-09-20T12:00:00+08:00", "stale_harnesses": []})), "fresh");
+        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": "not-a-timestamp", "stale_harnesses": []})), "unknown");
         assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": "2026-09-20T12:00:00+08:00"})), "unknown");
-        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": "2026-09-20T12:00:00+08:00", "stale_hosts": [42]})), "unknown");
+        assert_eq!(findings_freshness_state(&serde_json::json!({"last_successful_sync_at": "2026-09-20T12:00:00+08:00", "stale_harnesses": [42]})), "unknown");
     }
 
     #[test]
-    fn findings_freshness_host_projection_is_bounded() {
-        assert_eq!(findings_safe_host_label(&serde_json::json!("zcode")), "zcode");
-        assert_eq!(findings_safe_host_label(&serde_json::json!("plugin:zcode")), "plugin:zcode");
-        assert_eq!(findings_safe_host_label(&serde_json::json!("plugin:../escape")), "generic");
-        assert_eq!(findings_safe_host_label(&serde_json::json!("/Users/Admin/private")), "generic");
-        assert_eq!(findings_safe_host_label(&serde_json::json!("host with spaces")), "generic");
+    fn findings_freshness_harness_projection_is_bounded() {
+        assert_eq!(findings_safe_harness_label(&serde_json::json!("zcode")), "zcode");
+        assert_eq!(findings_safe_harness_label(&serde_json::json!("plugin:zcode")), "plugin:zcode");
+        assert_eq!(findings_safe_harness_label(&serde_json::json!("plugin:../escape")), "generic");
+        assert_eq!(findings_safe_harness_label(&serde_json::json!("/Users/Admin/private")), "generic");
+        assert_eq!(findings_safe_harness_label(&serde_json::json!("harness with spaces")), "generic");
     }
 
     /// 规格 R6：「接受」不再是候选的直接决定——它曾经只翻状态、不归因、不重算，
@@ -5983,19 +5945,19 @@ mod tests {
     }
 
 
-    /// W3：同步状态映射。成功必须是 `complete`（React 唯一认的正常态）；宿主级文件
+    /// W3：同步状态映射。成功必须是 `complete`（React 唯一认的正常态）；执行环境级文件
     /// 错误不让整轮失败但要写进 message；整轮失败 / 暂停 / 开关不可读各有阶段名。
     #[test]
     fn sync_status_maps_engine_outcomes() {
         use agent_vitals_runtime::ingest::engine::SyncRun;
-        use agent_vitals_runtime::ingest::sync_service::{HostSyncReport, SyncReport};
+        use agent_vitals_runtime::ingest::sync_service::{HarnessSyncReport, SyncReport};
         let ok = status_from_run(&SyncRun::Completed(SyncReport { total_appended: 2, ..Default::default() }));
         assert!(ok.ok);
         assert_eq!((ok.stage.as_str(), ok.message.as_str()), ("complete", "新增 2 条"));
         let mut report = SyncReport::default();
-        report.hosts.push(HostSyncReport { host: "dsh".into(), errors: vec!["x".into()], ..Default::default() });
+        report.harnesses.push(HarnessSyncReport { harness: "dsh".into(), errors: vec!["x".into()], ..Default::default() });
         let partial = status_from_run(&SyncRun::Completed(report));
-        assert!(partial.ok, "宿主级文件错误不让整轮失败");
+        assert!(partial.ok, "执行环境级文件错误不让整轮失败");
         assert!(partial.message.contains("1 个文件读取失败"));
         let failed = status_from_run(&SyncRun::Failed("disk full".into()));
         assert!(!failed.ok);
@@ -6013,11 +5975,11 @@ mod tests {
 
 
     #[test]
-    fn source_status_applies_real_scanner_failure_only_to_named_host() {
+    fn source_status_applies_real_scanner_failure_only_to_named_harness() {
         let mut report = serde_json::json!({ "sources": [
-            { "host": "claude-code", "connection_state": "connected", "failed_scope": {} },
-            { "host": "codex", "connection_state": "connected", "failed_scope": {} },
-            { "host": "dsh", "connection_state": "not_detected", "failed_scope": {} }
+            { "harness": "claude-code", "connection_state": "connected", "failed_scope": {} },
+            { "harness": "codex", "connection_state": "connected", "failed_scope": {} },
+            { "harness": "dsh", "connection_state": "not_detected", "failed_scope": {} }
         ]});
         let sync = SyncStatus::fail("partial", "DSH permission denied".into());
         merge_source_sync_failure(&mut report, &sync);
@@ -6030,11 +5992,11 @@ mod tests {
     }
 
     #[test]
-    fn source_status_applies_unscoped_facts_failure_to_all_hosts() {
+    fn source_status_applies_unscoped_facts_failure_to_all_harnesses() {
         let mut report = serde_json::json!({ "sources": [
-            { "host": "claude-code", "connection_state": "connected", "failed_scope": {} },
-            { "host": "codex", "connection_state": "connected", "failed_scope": {} },
-            { "host": "dsh", "connection_state": "connected", "failed_scope": {} }
+            { "harness": "claude-code", "connection_state": "connected", "failed_scope": {} },
+            { "harness": "codex", "connection_state": "connected", "failed_scope": {} },
+            { "harness": "dsh", "connection_state": "connected", "failed_scope": {} }
         ]});
         merge_source_sync_failure(&mut report, &SyncStatus::fail("facts", "disk full".into()));
         assert!(report["sources"].as_array().unwrap().iter()
@@ -6042,23 +6004,23 @@ mod tests {
     }
 
     /// Stage 0.6 的 Data Query API 面是薄转发，但"薄"也要钉住：DTO 与 CLI
-    /// `data coverage` 同一份 `to_json()`（四宿主 by_host——WorkBuddy 自 E4b 起
+    /// `data coverage` 同一份 `to_json()`（四执行环境 by_harness——WorkBuddy 自 E4b 起
     /// 接线，只有 token 没有金额，见 docs/WORKBUDDY_ONBOARDING_SPEC.md §9E.5——
     /// excluded 空 + coverage 4/4），托盘侧不许长出第二种形状。真机结构性断言
     /// （金额值随机器变，形状不随）。
     #[test]
     fn data_monthly_summary_dto_matches_the_frozen_contract_shape() {
         let d = tauri::async_runtime::block_on(data_monthly_summary(overview::current_month_beijing()));
-        let keys: Vec<&String> = d["by_host"].as_object().unwrap().keys().collect();
+        let keys: Vec<&String> = d["by_harness"].as_object().unwrap().keys().collect();
         assert_eq!(keys, ["claude-code", "codex", "dsh", "workbuddy"]);
-        assert_eq!(d["excluded_hosts"], serde_json::json!([]));
+        assert_eq!(d["excluded_harnesses"], serde_json::json!([]));
         assert_eq!(d["coverage"]["measured_fields"], 4);
         assert_eq!(d["coverage"]["total_fields"], 4);
         // WorkBuddy 行永远没有金额（三轨请求级不可判，§2.1）。
-        assert_eq!(d["by_host"]["workbuddy"]["amounts_by_basis"], serde_json::json!({}));
-        // 冻结契约的三条不变式之一在托盘侧同样成立：excluded 与 by_host 不相交。
-        for host in d["excluded_hosts"].as_array().unwrap() {
-            assert!(d["by_host"].get(host.as_str().unwrap()).is_none());
+        assert_eq!(d["by_harness"]["workbuddy"]["amounts_by_basis"], serde_json::json!({}));
+        // 冻结契约的三条不变式之一在托盘侧同样成立：excluded 与 by_harness 不相交。
+        for harness in d["excluded_harnesses"].as_array().unwrap() {
+            assert!(d["by_harness"].get(harness.as_str().unwrap()).is_none());
         }
     }
 
@@ -6102,10 +6064,10 @@ mod tests {
             "concurrent executions under the gate must never exceed its permit count");
     }
 
-    /// Token 日历的跨宿主数据面（真机形状）：本机 2026-09 claude/codex 有
+    /// Token 日历的跨执行环境数据面（真机形状）：本机 2026-09 claude/codex 有
     /// 真实用量（DSH 才全零），日历聚合不得全零；钱的键分币齐全。
     #[test]
-    fn read_calendar_month_is_cross_host_not_dsh_only() {
+    fn read_calendar_month_is_cross_harness_not_dsh_only() {
         let v = tauri::async_runtime::block_on(read_calendar_month(overview::current_month_beijing()));
         let days = v["days"].as_object().expect("days map");
         let total: i64 = days.values().map(|d| d["total_tokens"].as_i64().unwrap_or(0)).sum();
@@ -6113,7 +6075,7 @@ mod tests {
         // 有用量的日子 token 与钱键齐全（分币），形状=日历格子渲染的输入。
         for (date, d) in days {
             assert!(d.get("dsh_tokens").is_some() && d.get("claude_tokens").is_some()
-                && d.get("codex_tokens").is_some(), "{date} 缺宿主 token 键");
+                && d.get("codex_tokens").is_some(), "{date} 缺执行环境 token 键");
             assert!(d.get("dsh_cost_cny").is_some() && d.get("claude_cost_cny").is_some()
                 && d.get("claude_cost_usd").is_some() && d.get("codex_cost_usd").is_some(),
                 "{date} 缺分币耗费键");
@@ -6146,8 +6108,8 @@ mod tests {
                 "codex 小时和 {hour_sum} 不得超过日历日总量 {cal_total}");
         assert!(hour_sum > 0, "codex 用量日的小时图不得全空（fold 全量历史）");
         // 来源标注合法（消费方按这个渲染覆盖面提示）。Phase 3.5 Tier B：
-        // 三宿主统一 `sql-facts`（hourly_distribution 切权威库后唯一来源）。
-        let src = &v["hosts_available"];
+        // 三执行环境统一 `sql-facts`（hourly_distribution 切权威库后唯一来源）。
+        let src = &v["harnesses_available"];
         assert_eq!(src["codex"], serde_json::json!("sql-facts"), "codex 来源切 SQL 后统一标注");
         assert!(src["dsh"].is_null() || src["dsh"] == "sql-facts",
                 "dsh 来源非法: {src}");
@@ -6168,12 +6130,12 @@ mod tests {
             metered_month: None,
             today_tokens_sql: None,
             sync: SyncStatus::default(),
-            hosts: vec![
-                overview::HostRow::unavailable("dsh"),
-                overview::HostRow::unavailable("codex"),
-                overview::HostRow::unavailable("claude-code"),
+            harnesses: vec![
+                overview::HarnessRow::unavailable("dsh"),
+                overview::HarnessRow::unavailable("codex"),
+                overview::HarnessRow::unavailable("claude-code"),
             ],
-            hosts_generated_at: None,
+            harnesses_generated_at: None,
             estimate_note: String::new(),
             claude_today: None,
             claude_month: None,
@@ -6328,23 +6290,23 @@ mod tests {
         assert!(daily_budget_text(&ov, FIXTURE_AT_SECS).is_none());
     }
 
-    /// host 显示名映射（spec §4）：dsh → DeepSeek Harness、codex → Codex、
-    /// claude-code → Claude Code（第三宿主行，D5）；未知宿主原样显示（未来加宿主
+    /// harness 显示名映射（spec §4）：dsh → DeepSeek Harness、codex → Codex、
+    /// claude-code → Claude Code（第三执行环境行，D5）；未知执行环境原样显示（未来加执行环境
     /// 不硬编码）。
     #[test]
-    fn host_display_name_maps_three_hosts_and_unknown() {
-        assert_eq!(host_display_name("dsh"), "DeepSeek Harness");
-        assert_eq!(host_display_name("codex"), "Codex");
-        assert_eq!(host_display_name("claude-code"), "Claude Code");
-        assert_eq!(host_display_name("future-host"), "future-host");
+    fn harness_display_name_maps_three_harnesses_and_unknown() {
+        assert_eq!(harness_display_name("dsh"), "DeepSeek Harness");
+        assert_eq!(harness_display_name("codex"), "Codex");
+        assert_eq!(harness_display_name("claude-code"), "Claude Code");
+        assert_eq!(harness_display_name("future-harness"), "future-harness");
     }
 
-    /// v0.6 host-contract spec §6/§11-M3：改从 `HOSTS` 行派生后，WorkBuddy
+    /// v0.6 harness-contract spec §6/§11-M3：改从 `HARNESSES` 行派生后，WorkBuddy
     /// 也能正确解析——它没有托盘行（`fold: None`），但工作台的会话浏览面
     /// 一直支持它，展示名不该因为没有折叠能力就缺席。
     #[test]
-    fn host_display_name_resolves_workbuddy_even_though_it_has_no_tray_row() {
-        assert_eq!(host_display_name("workbuddy"), "WorkBuddy");
+    fn harness_display_name_resolves_workbuddy_even_though_it_has_no_tray_row() {
+        assert_eq!(harness_display_name("workbuddy"), "WorkBuddy");
     }
 
     /// 托盘按量视图与 SQL `metered_view` 同币分栏，不用旧 FX 便利折算生成跨币总计。
@@ -6446,7 +6408,7 @@ mod tests {
         let (today, month) = money_rows_text(&ov);
         assert_eq!(today, "今日按量成本：CNY ¥12.34");
         assert_eq!(month, "本月按量成本：CNY ¥612.5", "分母已移除——预算只活在底部预算行");
-        // ③ 两宿主今天都无按量钱 → 今日诚实的 —；本月空 → ¥0 兜底。
+        // ③ 两执行环境今天都无按量钱 → 今日诚实的 —；本月空 → ¥0 兜底。
         let ov = ov_with(overview::BudgetAlert::default());
         let (today, month) = money_rows_text(&ov);
         assert_eq!(today, "今日按量成本：—（无数据）");
@@ -6576,35 +6538,35 @@ mod tests {
         assert_eq!(fmt_usd(0.0004), "<$0.01");
     }
 
-    /// L1 宿主行（spec §4/§8 矩阵逐格）：完整 → `显示名 · token · N 会话`；
+    /// L1 执行环境行（spec §4/§8 矩阵逐格）：完整 → `显示名 · token · N 会话`；
     /// 全缺 → 单个 `· —`（unavailable 形态）；只缺一个 → 该槽位「—」；
     /// partial 覆盖率 → token 加 `≈` 前缀（保守下界标注不能渲染成精确值）。
     #[test]
-    fn host_row_text_renders_values_dashes_and_approx() {
-        let full = HostRow {
-            host_kind: "dsh".into(),
+    fn harness_row_text_renders_values_dashes_and_approx() {
+        let full = HarnessRow {
+            harness_kind: "dsh".into(),
             status: "ready".into(),
             today_tokens: Some(1398214),
             today_partial: false,
             today_sessions: Some(3),
             recent: vec![],
         };
-        assert_eq!(host_row_text(&full), "DeepSeek Harness · 1.4M · 3 会话");
-        let partial = HostRow { today_partial: true, ..full.clone() };
-        assert_eq!(host_row_text(&partial), "DeepSeek Harness · ≈1.4M · 3 会话");
-        assert_eq!(host_row_text(&HostRow::unavailable("codex")), "Codex · —");
-        let no_sessions = HostRow {
+        assert_eq!(harness_row_text(&full), "DeepSeek Harness · 1.4M · 3 会话");
+        let partial = HarnessRow { today_partial: true, ..full.clone() };
+        assert_eq!(harness_row_text(&partial), "DeepSeek Harness · ≈1.4M · 3 会话");
+        assert_eq!(harness_row_text(&HarnessRow::unavailable("codex")), "Codex · —");
+        let no_sessions = HarnessRow {
             today_tokens: Some(500),
             today_sessions: None,
             ..full.clone()
         };
-        assert_eq!(host_row_text(&no_sessions), "DeepSeek Harness · 500 · —");
-        let no_tokens = HostRow {
+        assert_eq!(harness_row_text(&no_sessions), "DeepSeek Harness · 500 · —");
+        let no_tokens = HarnessRow {
             today_tokens: None,
             today_sessions: Some(2),
             ..full.clone()
         };
-        assert_eq!(host_row_text(&no_tokens), "DeepSeek Harness · — · 2 会话");
+        assert_eq!(harness_row_text(&no_tokens), "DeepSeek Harness · — · 2 会话");
     }
 
     #[test]
@@ -6614,15 +6576,15 @@ mod tests {
         let (today, month) = money_rows_text_localized(&ov, NativeUiLanguage::English);
         assert_eq!(today, "Today’s metered cost: — (no data)");
         assert_eq!(month, "Monthly metered cost: — (no data)");
-        let row = HostRow {
-            host_kind: "codex".into(),
+        let row = HarnessRow {
+            harness_kind: "codex".into(),
             status: "ready".into(),
             today_tokens: Some(15000),
             today_partial: true,
             today_sessions: Some(1),
             recent: vec![],
         };
-        assert_eq!(host_row_text_localized(&row, NativeUiLanguage::English), "Codex · ≈15K · 1 session");
+        assert_eq!(harness_row_text_localized(&row, NativeUiLanguage::English), "Codex · ≈15K · 1 session");
         let sync = SyncStatus { ok: false, stage: "error".into(), message: "本地路径错误".into(), at: None };
         assert_eq!(sync_line_text_localized(&sync, NativeUiLanguage::English), "⚠ Last sync failed; see Settings for details");
     }
@@ -6634,7 +6596,7 @@ mod tests {
     fn recent_row_text_formats_date_identity_and_tokens() {
         // FIXTURE_AT_SECS = 2026-08-30 → 北京年 2026。
         let row = RecentSessionRow {
-            session_key: serde_json::json!({"host_kind": "dsh", "native_id": "s1"}),
+            session_key: serde_json::json!({"harness_kind": "dsh", "native_id": "s1"}),
             title: Some("重构 r2a 查询".into()),
             date: Some("2026-08-28".into()),
             model: Some("deepseek/deepseek-v4-flash".into()),
@@ -6668,14 +6630,14 @@ mod tests {
         assert_eq!(recent_row_text(&no_tokens, FIXTURE_AT_SECS), "08-28 · 重构 r2a 查询");
     }
 
-    /// 宿主区结构（spec §4/§9.2）：固定两宿主子菜单（hosts 数组序 = dsh→codex），
-    /// L2 行 id `session:{kind}:{i}` 按序编号；unavailable 宿主 → L2 单行禁用
-    /// 「会话数据暂不可用」。平铺「最近会话」行已删——结构里只有宿主子菜单。
+    /// 执行环境区结构（spec §4/§9.2）：固定两执行环境子菜单（harnesses 数组序 = dsh→codex），
+    /// L2 行 id `session:{kind}:{i}` 按序编号；unavailable 执行环境 → L2 单行禁用
+    /// 「会话数据暂不可用」。平铺「最近会话」行已删——结构里只有执行环境子菜单。
     #[test]
-    fn host_menu_rows_builds_two_submenus_dsh_first() {
-        let hosts = vec![
-            HostRow {
-                host_kind: "dsh".into(),
+    fn harness_menu_rows_builds_two_submenus_dsh_first() {
+        let harnesses = vec![
+            HarnessRow {
+                harness_kind: "dsh".into(),
                 status: "ready".into(),
                 today_tokens: Some(15000),
                 today_partial: false,
@@ -6697,13 +6659,13 @@ mod tests {
                     },
                 ],
             },
-            HostRow::unavailable("codex"),
+            HarnessRow::unavailable("codex"),
         ];
-        let rows = host_menu_rows(&hosts, None, FIXTURE_AT_SECS);
+        let rows = harness_menu_rows(&harnesses, None, FIXTURE_AT_SECS);
         assert_eq!(rows.len(), 2);
         match &rows[0] {
             MenuRow::Submenu { id, text, rows: l2 } => {
-                assert_eq!(id, "host:dsh");
+                assert_eq!(id, "harness:dsh");
                 assert_eq!(text, "DeepSeek Harness · 15K · 1 会话");
                 assert_eq!(
                     *l2,
@@ -6727,7 +6689,7 @@ mod tests {
         }
         match &rows[1] {
             MenuRow::Submenu { id, text, rows: l2 } => {
-                assert_eq!(id, "host:codex");
+                assert_eq!(id, "harness:codex");
                 assert_eq!(text, "Codex · —");
                 assert_eq!(
                     *l2,
@@ -6744,23 +6706,23 @@ mod tests {
 
     /// 降级矩阵（spec §8）：ready + 零会话 → 禁用「尚无会话」（真零不是失败——
     /// 与 unavailable 的「会话数据暂不可用」必须可区分）；stale 快照（年龄 >
-    /// 2 × tick）→ 宿主子菜单底部「数据更新于 hh:mm · 可能已过期」，hh:mm 是
+    /// 2 × tick）→ 执行环境子菜单底部「数据更新于 hh:mm · 可能已过期」，hh:mm 是
     /// 北京时刻（UTC +8）。
     #[test]
-    fn host_menu_rows_degradation_and_stale_footer() {
-        let zero = vec![HostRow {
-            host_kind: "codex".into(),
+    fn harness_menu_rows_degradation_and_stale_footer() {
+        let zero = vec![HarnessRow {
+            harness_kind: "codex".into(),
             status: "ready".into(),
             today_tokens: Some(0),
             today_partial: false,
             today_sessions: Some(0),
             recent: vec![],
         }];
-        let rows = host_menu_rows(&zero, None, FIXTURE_AT_SECS);
+        let rows = harness_menu_rows(&zero, None, FIXTURE_AT_SECS);
         assert_eq!(
             rows[0],
             MenuRow::Submenu {
-                id: "host:codex".into(),
+                id: "harness:codex".into(),
                 text: "Codex · 0 · 0 会话".into(),
                 rows: vec![MenuRow::Item {
                     id: "session:none:codex".into(),
@@ -6773,8 +6735,8 @@ mod tests {
         // stale 窗口 = 2 × tick = 10 分钟：+9 分钟仍新鲜、+11 分钟过期。
         let fresh_now = FIXTURE_AT_SECS + 9 * 60;
         let stale_now = FIXTURE_AT_SECS + 11 * 60;
-        let hosts = vec![HostRow {
-            host_kind: "dsh".into(),
+        let harnesses = vec![HarnessRow {
+            harness_kind: "dsh".into(),
             status: "ready".into(),
             today_tokens: Some(100),
             today_partial: false,
@@ -6787,13 +6749,13 @@ mod tests {
                 tokens: None,
             }],
         }];
-        let fresh = host_menu_rows(&hosts, Some(FIXTURE_AT), fresh_now);
+        let fresh = harness_menu_rows(&harnesses, Some(FIXTURE_AT), fresh_now);
         assert!(!matches!(
             &fresh[0],
             MenuRow::Submenu { rows, .. }
                 if rows.iter().any(|r| matches!(r, MenuRow::Item { id, .. } if id == "session:stale:dsh"))
         ));
-        let stale = host_menu_rows(&hosts, Some(FIXTURE_AT), stale_now);
+        let stale = harness_menu_rows(&harnesses, Some(FIXTURE_AT), stale_now);
         match &stale[0] {
             MenuRow::Submenu { rows, .. } => assert_eq!(
                 rows.last(),
@@ -6836,7 +6798,7 @@ mod tests {
     #[test]
     /// 信息行点击 → React canonical page 的映射钉死。today/daily/month/budget 都是总览页的
     /// 数字，sync 是设置页；workbench/refresh 不是导航行；`recent` 已随平铺行
-    /// 删除（宿主导航的 L2 深链走 WorkbenchTarget，不走 tab 映射）。
+    /// 删除（执行环境导航的 L2 深链走 WorkbenchTarget，不走 tab 映射）。
     fn tab_for_menu_id_maps_info_rows_to_workbench_tabs() {
         for id in ["today", "daily", "month", "budget", "subscription"] {
             assert_eq!(tab_for_menu_id(id), Some("overview"), "id={id} 应跳总览");
@@ -6844,7 +6806,7 @@ mod tests {
         assert_eq!(tab_for_menu_id("sync"), Some("settings"));
         assert_eq!(tab_for_menu_id("today_tokens"), Some("usage"), "首行今日消耗点击要有去处");
         assert_eq!(tab_for_menu_id("skill_health"), Some("skills"), "托盘 Skill 体检点击要有去处");
-        for id in ["workbench", "refresh", "recent", "host:dsh", "session:dsh:0", "nope", ""] {
+        for id in ["workbench", "refresh", "recent", "harness:dsh", "session:dsh:0", "nope", ""] {
             assert_eq!(tab_for_menu_id(id), None, "id={id} 不是信息行导航");
         }
     }
@@ -7178,13 +7140,13 @@ mod tests {
     fn invalidation_replaces_fold_debounce_with_revision_level_compare() {
         use agent_vitals_runtime::events::{ChangePublisher, Invalidation};
         let publisher = ChangePublisher::<Invalidation>::new();
-        let inv = |r: u64, hosts: &[&str]| Invalidation {
-            revision: r, hosts: hosts.iter().map(|h| h.to_string()).collect(),
+        let inv = |r: u64, harnesses: &[&str]| Invalidation {
+            revision: r, harnesses: harnesses.iter().map(|h| h.to_string()).collect(),
         };
         let mut sent = Vec::new();
-        // drain flush 带 hosts 先发
+        // drain flush 带 harnesses 先发
         assert!(publisher.publish_if_advanced(inv(7, &["dsh"]), |i| sent.push(i.revision)));
-        // 同 tick 尾部的空 hosts 电平检查：同 revision → 吞
+        // 同 tick 尾部的空 harnesses 电平检查：同 revision → 吞
         assert!(!publisher.publish_if_advanced(inv(7, &[]), |i| sent.push(i.revision)));
         // 200ms 内的第二轮完成、库没变 → 吞（旧去抖窗的场景，现在靠 revision 判）
         assert!(!publisher.publish_if_advanced(inv(7, &["dsh"]), |i| sent.push(i.revision)));
@@ -7220,8 +7182,8 @@ mod tests {
     /// 一层薄壳，语义直接钉在 slot 上。
     #[test]
     fn focus_target_peek_persists_clear_resets_and_set_overwrites() {
-        let a = WorkbenchTarget::SessionDetail { session_ref: "sr_0123456789".into(), host_kind: "dsh".into() };
-        let b = WorkbenchTarget::SessionList { host_kind: Some("codex".into()) };
+        let a = WorkbenchTarget::SessionDetail { session_ref: "sr_0123456789".into(), harness_kind: "dsh".into() };
+        let b = WorkbenchTarget::SessionList { harness_kind: Some("codex".into()) };
         let slot = FocusTarget(Mutex::new(None));
         // 未设置 → None。
         assert_eq!(slot.peek(), None);
@@ -7237,40 +7199,40 @@ mod tests {
         assert_eq!(slot.peek(), None);
     }
 
-    /// serde round-trip：路由目标只含安全的不透明 session_ref 与宿主类型，
+    /// serde round-trip：路由目标只含安全的不透明 session_ref 与执行环境类型，
     /// 不泄露 native session key；外层 `type` tag 使用 camelCase 变体名。
     #[test]
     fn workbench_target_serde_round_trip_uses_opaque_session_ref() {
-        let detail = WorkbenchTarget::SessionDetail { session_ref: "sr_0123456789".into(), host_kind: "dsh".into() };
+        let detail = WorkbenchTarget::SessionDetail { session_ref: "sr_0123456789".into(), harness_kind: "dsh".into() };
         let v = serde_json::to_value(&detail).unwrap();
         assert_eq!(
             v,
             serde_json::json!({
                 "type": "sessionDetail",
                 "session_ref": "sr_0123456789",
-                "host_kind": "dsh"
+                "harness_kind": "dsh"
             })
         );
         // round-trip 闭合：同一 JSON 解析回原目标。
         let back: WorkbenchTarget = serde_json::from_value(v).unwrap();
         assert_eq!(back, detail);
-        // SessionList 变体：host_kind 可空（None = 全部，§7.1）。
-        let list = WorkbenchTarget::SessionList { host_kind: None };
+        // SessionList 变体：harness_kind 可空（None = 全部，§7.1）。
+        let list = WorkbenchTarget::SessionList { harness_kind: None };
         let lv = serde_json::to_value(&list).unwrap();
-        assert_eq!(lv, serde_json::json!({"type": "sessionList", "host_kind": null}));
+        assert_eq!(lv, serde_json::json!({"type": "sessionList", "harness_kind": null}));
         let back: WorkbenchTarget = serde_json::from_value(lv).unwrap();
         assert_eq!(back, list);
     }
 
     /// 动态菜单 id → WorkbenchTarget 映射：`session:{kind}:{i}` →
-    /// SessionDetail（不透明 ref 与行内一致）；`host:{kind}` → SessionList；禁用 id
+    /// SessionDetail（不透明 ref 与行内一致）；`harness:{kind}` → SessionList；禁用 id
     /// （unavailable/none/stale）→ None（禁用项点不到，事件即便到达也不该有
-    /// 目标）；越界索引/未知宿主 → None。
+    /// 目标）；越界索引/未知执行环境 → None。
     #[test]
     fn menu_ids_map_to_workbench_targets_and_disabled_ids_are_inert() {
-        let hosts = vec![
-            HostRow {
-                host_kind: "dsh".into(),
+        let harnesses = vec![
+            HarnessRow {
+                harness_kind: "dsh".into(),
                 status: "ready".into(),
                 today_tokens: Some(1500),
                 today_partial: false,
@@ -7294,34 +7256,34 @@ mod tests {
                     },
                 ],
             },
-            HostRow::unavailable("codex"),
+            HarnessRow::unavailable("codex"),
         ];
         // 正常 L2 → SessionDetail，不透明 ref 原样带出。
-        match workbench_target_for_menu_id("session:dsh:0", &hosts) {
-            Some(WorkbenchTarget::SessionDetail { session_ref, host_kind }) => {
+        match workbench_target_for_menu_id("session:dsh:0", &harnesses) {
+            Some(WorkbenchTarget::SessionDetail { session_ref, harness_kind }) => {
                 assert_eq!(session_ref, "sr_0123456789");
-                assert_eq!(host_kind, "dsh");
+                assert_eq!(harness_kind, "dsh");
             }
             other => panic!("session:dsh:0 应映射 SessionDetail，得 {other:?}"),
         }
         // 越界索引 → None。
-        assert_eq!(workbench_target_for_menu_id("session:dsh:5", &hosts), None);
+        assert_eq!(workbench_target_for_menu_id("session:dsh:5", &harnesses), None);
         // session_key 不可回传（null）→ None。
-        assert_eq!(workbench_target_for_menu_id("session:dsh:1", &hosts), None);
-        // 未知宿主 → None。
-        assert_eq!(workbench_target_for_menu_id("session:other:0", &hosts), None);
-        // host:{kind} → SessionList（v1 子菜单点击不产事件，发射点留给将来）。
+        assert_eq!(workbench_target_for_menu_id("session:dsh:1", &harnesses), None);
+        // 未知执行环境 → None。
+        assert_eq!(workbench_target_for_menu_id("session:other:0", &harnesses), None);
+        // harness:{kind} → SessionList（v1 子菜单点击不产事件，发射点留给将来）。
         assert_eq!(
-            workbench_target_for_menu_id("host:codex", &hosts),
-            Some(WorkbenchTarget::SessionList { host_kind: Some("codex".into()) })
+            workbench_target_for_menu_id("harness:codex", &harnesses),
+            Some(WorkbenchTarget::SessionList { harness_kind: Some("codex".into()) })
         );
         // 禁用 id 一律 None。
         assert_eq!(
-            workbench_target_for_menu_id("session:unavailable:codex", &hosts),
+            workbench_target_for_menu_id("session:unavailable:codex", &harnesses),
             None
         );
-        assert_eq!(workbench_target_for_menu_id("session:none:codex", &hosts), None);
-        assert_eq!(workbench_target_for_menu_id("session:stale:dsh", &hosts), None);
+        assert_eq!(workbench_target_for_menu_id("session:none:codex", &harnesses), None);
+        assert_eq!(workbench_target_for_menu_id("session:stale:dsh", &harnesses), None);
     }
 
     #[test]

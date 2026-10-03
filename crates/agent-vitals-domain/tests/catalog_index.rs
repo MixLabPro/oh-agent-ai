@@ -4,7 +4,7 @@ use serde_json::Value;
 
 fn fixture() -> Value { serde_json::from_str(include_str!("../../../fixtures/catalog-index-v1.json")).unwrap() }
 fn support() -> BTreeMap<String, SlotSupport> {
-    BTreeMap::from([("host_manifest".into(), SlotSupport { schemas: vec![1], capabilities: vec!["recipe:message".into()] })])
+    BTreeMap::from([("harness_manifest".into(), SlotSupport { schemas: vec![1], capabilities: vec!["recipe:message".into()] })])
 }
 #[test]
 fn shared_cases() {
@@ -30,7 +30,7 @@ fn dependencies_sequence_permissions() {
     index["entries"][0]["dependencies"][0]["sha256"] = serde_json::json!("d".repeat(64));
     assert_eq!(validate_catalog(&index, &support(), "1.4.0", &hash, None), Err("dependency_missing"));
     assert!(!local_allowed("subscription_scope"));
-    assert!(local_allowed("host_manifest"));
+    assert!(local_allowed("harness_manifest"));
 }
 #[test]
 fn timestamps_and_dependency_diamond() {
@@ -45,7 +45,7 @@ fn timestamps_and_dependency_diamond() {
     let template = index["entries"][0].clone();
     let entries: Vec<_> = ["a", "b", "c", "d"].iter().map(|id| { let mut e = template.clone(); e["slot_id"] = serde_json::json!(id); e }).collect();
     index["entries"] = serde_json::json!(entries);
-    let dep = |id: &str| serde_json::json!({"slot_type":"host_manifest", "slot_id":id, "revision":template["revision"], "sha256":template["sha256"]});
+    let dep = |id: &str| serde_json::json!({"slot_type":"harness_manifest", "slot_id":id, "revision":template["revision"], "sha256":template["sha256"]});
     index["entries"][0]["dependencies"] = serde_json::json!([dep("b"), dep("c")]);
     index["entries"][1]["dependencies"] = serde_json::json!([dep("d")]);
     index["entries"][2]["dependencies"] = serde_json::json!([dep("d")]);

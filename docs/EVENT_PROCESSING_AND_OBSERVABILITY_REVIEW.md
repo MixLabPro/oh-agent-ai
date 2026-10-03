@@ -41,7 +41,7 @@ GUI 语境下全部落入 launchd 空洞、诊断包只含配置状态不含任�
 | 5 | 修复后复验 | 30s 冷却版：空闲 0.0%、压测 ~8% |
 
 **因果链**：活动 agent 会话持续追加被监听目录 → 每个去抖窗（1.2s）合法唤醒
-sync tick → 每 tick 发射多个 app-event（SyncStatusChanged + 每宿主
+sync tick → 每 tick 发射多个 app-event（SyncStatusChanged + 每执行环境
 FactsIngested + FoldCompleted）→ **每个挂载页面的监听器收到任何事件都
 立即全量刷新**（Settings 一轮 = 7 个重 SQL invoke；多页并存则相乘）→
 重 SQL 在 tokio worker 上排队执行 → 多核钉死。
@@ -63,7 +63,7 @@ FS 事件（FSEvents）
               ├─ 子进程：discover / oneline / sync-facts
               ├─ 进程内：overview/tray 的 SQLite 聚合
               └─ app-event 发射：SyncStatusChanged（每 tick）、
-                 FactsIngested（每宿主每批）、FoldCompleted、
+                 FactsIngested（每执行环境每批）、FoldCompleted、
                  TrustMonitorEvent/Invalidated、WatcherHealthChanged(仅变化时)
                       └─ webview 每页监听器
                             └─ 【缺陷在此】收到事件 → 立即 invoke 重 SQL 全量刷新
@@ -135,7 +135,7 @@ React Query / SWR / RTK Query 已把这套变成事实标准，核心三条：
 | # | 缺陷 | 严重度 | 证据 | 业界对应 |
 |---|---|---|---|---|
 | **G1** | **事件→UI 是直推全量刷新，无失效化/在途去重/每投影最小间隔**——放大倍数 = 事件率 × 挂载页数 × 每页命令数，无上界 | **高**（本次事故的放大器；冷却只是砍了输入端） | 热栈全是刷新命令的 SQL；SettingsPage else 分支连刷 7 命令 | §3.2 三件套全缺 |
-| **G2** | **发射侧无变化去重**：SyncStatusChanged 每 tick 必发（内容可能完全没变）；FactsIngested 每宿主每批发（无变化时也发） | 中 | lib.rs sync_tick 尾部无条件 emit；对照 WatcherHealthChanged 已实现「仅变化时发」——正确模式已存在，未推广 | UI 框架的状态推送普遍带 equality 去重 |
+| **G2** | **发射侧无变化去重**：SyncStatusChanged 每 tick 必发（内容可能完全没变）；FactsIngested 每执行环境每批发（无变化时也发） | 中 | lib.rs sync_tick 尾部无条件 emit；对照 WatcherHealthChanged 已实现「仅变化时发」——正确模式已存在，未推广 | UI 框架的状态推送普遍带 equality 去重 |
 | **G3** | 全链路无统一速率预算：输入端（wake→tick）现在有了 30s 冷却，但 tick→events→pages 无预算 | 中 | G1+G2 的合成表述 | 令牌桶/预算是守护进程标配 |
 | **G4** | **无日志系统**：无框架、无落盘、生产 stderr 不可见 | **高**（把 G1-G3 的发现成本从分钟级抬到小时级） | §2.2 全表 | §3.3 |
 | **G5** | 无自看护：进程烧 6 核自己不知道，UI 也看不到 | 中 | 事故持续到人工发现 | 守护进程资源自监控 |
@@ -171,9 +171,9 @@ WatcherHealthChanged 的变化才发——这些模式正确，问题是**没有
   dispatch/billing declarations 的 warn 与 info）；
   `apps/cli/src/agent/oneline.rs` 1 处；`apps/cli/src/mcp.rs`（Data MCP
   server，2026-09-22 补）5 处（stdin 读错误/tool 错误/审计三处），生命周期
-  横幅两处保留原样直出 stderr、同时补一条 `log_info`（外部 MCP host 靠这两行
+  横幅两处保留原样直出 stderr、同时补一条 `log_info`（外部 MCP harness 靠这两行
   文本判活；这是本文当初没写进 P1 清单的一处，MCP server 的 stderr 能否被
-  host 留存不可控，本地这份文件是唯一能保证留下来的副本）；
+  harness 留存不可控，本地这份文件是唯一能保证留下来的副本）；
   桌面 `lib.rs` 10 处原生 `eprintln!`（event-bus/watch 拓扑/timezone/issue
   时间戳迁移）+ **`run_discover`/`run_navigation` 两处此前用 `.output().ok()?`
   /只读 stdout、子进程 stderr 从未读过一次的盲区**（现在 spawn 失败/非零

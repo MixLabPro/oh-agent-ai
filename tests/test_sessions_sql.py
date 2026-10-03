@@ -65,7 +65,7 @@ CREATE TABLE sync_runs (
 
 CREATE TABLE source_files (
   source_id TEXT PRIMARY KEY,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   path_hash TEXT NOT NULL,
   native_session_id TEXT,
   size_bytes INTEGER NOT NULL,
@@ -76,12 +76,12 @@ CREATE TABLE source_files (
   last_seen_at_ms INTEGER NOT NULL,
   last_successful_run_id TEXT REFERENCES sync_runs(run_id),
   last_error_code TEXT,
-  UNIQUE(host, path_hash)
+  UNIQUE(harness, path_hash)
 );
 
 CREATE TABLE sessions (
   session_key TEXT PRIMARY KEY,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   native_session_id TEXT NOT NULL,
   machine_namespace TEXT NOT NULL,
   source_profile TEXT,
@@ -89,12 +89,12 @@ CREATE TABLE sessions (
   ended_at_ms INTEGER,
   last_observed_at_ms INTEGER NOT NULL,
   deleted_at_ms INTEGER,
-  UNIQUE(host, machine_namespace, native_session_id)
+  UNIQUE(harness, machine_namespace, native_session_id)
 );
 
 CREATE TABLE usage_facts (
   fact_id TEXT PRIMARY KEY,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   machine_namespace TEXT NOT NULL,
   native_session_id TEXT NOT NULL,
   session_key TEXT REFERENCES sessions(session_key),
@@ -118,11 +118,11 @@ CREATE TABLE usage_facts (
   CHECK (cache_read_tokens >= 0),
   CHECK (cache_write_tokens >= 0),
   CHECK (output_tokens >= 0),
-  UNIQUE(host, machine_namespace, native_session_id, source_event_id, observation_kind)
+  UNIQUE(harness, machine_namespace, native_session_id, source_event_id, observation_kind)
 );
 
-CREATE INDEX usage_facts_host_time
-  ON usage_facts(host, event_ts_ms) WHERE deleted_at_ms IS NULL;
+CREATE INDEX usage_facts_harness_time
+  ON usage_facts(harness, event_ts_ms) WHERE deleted_at_ms IS NULL;
 CREATE INDEX usage_facts_session_time
   ON usage_facts(session_key, event_ts_ms) WHERE deleted_at_ms IS NULL;
 
@@ -133,15 +133,15 @@ CREATE TABLE pricing_snapshots (
   payload_json TEXT NOT NULL
 );
 
-CREATE TABLE host_runtime_snapshots (
-  host TEXT NOT NULL,
+CREATE TABLE harness_runtime_snapshots (
+  harness TEXT NOT NULL,
   snapshot_kind TEXT NOT NULL,
   payload_json TEXT NOT NULL,
   observed_at_ms INTEGER NOT NULL,
   source_id TEXT REFERENCES source_files(source_id),
   ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id),
   updated_at_ms INTEGER NOT NULL,
-  PRIMARY KEY(host, snapshot_kind)
+  PRIMARY KEY(harness, snapshot_kind)
 );
 
 CREATE TABLE data_quality_issues (
@@ -198,22 +198,22 @@ def _seed_authority(home: Path, *, with_pricing: bool = False) -> None:
         conn.close()
 
 
-def _add_session(conn, session_key: str, host: str, native_id: str,
+def _add_session(conn, session_key: str, harness: str, native_id: str,
                  ns: str = "m", profile: str = "default") -> None:
     conn.execute(
-        "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace,"
+        "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace,"
         " source_profile, last_observed_at_ms)"
         " VALUES (?, ?, ?, ?, ?, 1)",
-        (session_key, host, native_id, ns, profile),
+        (session_key, harness, native_id, ns, profile),
     )
 
 
-def _add_fact(conn, fact_id: str, host: str, session_key: str,
+def _add_fact(conn, fact_id: str, harness: str, session_key: str,
               ts_ms: int, *, uncached: int = 0, cache_read: int = 0,
               cache_write: int = 0, output: int = 0, peak: int = 0,
               model: str = "deepseek-v4-pro", provider: str = "deepseek-official",
               native_id: str = "nat-1") -> None:
-    # usage_facts 列序（schema v2 DDL，21 列）：fact_id, host,
+    # usage_facts 列序（schema v2 DDL，21 列）：fact_id, harness,
     # machine_namespace, native_session_id, session_key, source_event_id,
     # observation_kind, source_profile, provider_id, model_id, event_ts_ms,
     # event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
@@ -221,7 +221,7 @@ def _add_fact(conn, fact_id: str, host: str, session_key: str,
     # deleted_at_ms。source_profile / source_id / deleted_at_ms 三个
     # nullable 列置 None —— 测试不关心 source 文件与软删除语义。
     conn.execute(
-        "INSERT INTO usage_facts(fact_id, host, machine_namespace,"
+        "INSERT INTO usage_facts(fact_id, harness, machine_namespace,"
         " native_session_id, session_key, source_event_id, observation_kind,"
         " source_profile, provider_id, model_id, event_ts_ms, event_peak,"
         " uncached_input_tokens, cache_read_tokens, cache_write_tokens,"
@@ -229,7 +229,7 @@ def _add_fact(conn, fact_id: str, host: str, session_key: str,
         " updated_at_ms, deleted_at_ms)"
         " VALUES (?, ?, 'm', ?, ?, ?, 'assistant-usage', NULL, ?, ?,"
         " ?, ?, ?, ?, ?, ?, NULL, 'run', 1, 1, NULL)",
-        (fact_id, host, native_id, session_key, fact_id, provider, model,
+        (fact_id, harness, native_id, session_key, fact_id, provider, model,
          ts_ms, peak, uncached, cache_read, cache_write, output),
     )
 
@@ -549,7 +549,7 @@ class SeededEnvelopeTests(unittest.TestCase):
         self.assertEqual(env22["data"]["window_total_tokens"], 700)
         # hour=9 看到的应是 healthy01 会话
         s = env9["data"]["sessions"][0]
-        self.assertEqual(s["host"], "claude-code")
+        self.assertEqual(s["harness"], "claude-code")
 
     def test_cost_minor_null_without_pricing_snapshot(self):
         """无价卡 → cost_minor = null（spec §0.1）。"""

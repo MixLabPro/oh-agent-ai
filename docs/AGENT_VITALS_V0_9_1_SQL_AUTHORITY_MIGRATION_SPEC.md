@@ -1,7 +1,7 @@
 # Agent Vitals v0.9.1 SQL Authority Migration Spec
 
 > 状态：**已冻结（2026-09-06，Phase 0）**——实施期间的不可变决策见 §1.1；  
-> 前置：v0.9 已具备 UsageFact 清洗/身份、宿主读取、同步入口、SQLite 索引和冻结的 Summary DTO  
+> 前置：v0.9 已具备 UsageFact 清洗/身份、执行环境读取、同步入口、SQLite 索引和冻结的 Summary DTO
 > 目标：将运行时数据权威从「JSON state + 原始日志 + JSONL + SQLite 索引」收敛为 **SQLite 单一权威库**，以可恢复迁移和双轨对账避免错账。
 
 ## 1. 决策与非目标
@@ -11,25 +11,25 @@
 ### 1.1 本版本的不可变决策
 
 1. SQLite 是唯一的**运行时权威数据源**。CLI、Tauri、HTML、预算、日历、导出与对账均只能通过 SQL repository 查询。
-2. 宿主日志（Claude/Codex/DSH）只是不可信输入；它们必须先被清洗、校验和规范化，才可进入权威库。
+2. 执行环境日志（Claude/Codex/DSH）只是不可信输入；它们必须先被清洗、校验和规范化，才可进入权威库。
 3. `facts/*.jsonl` 降级为可选导出/迁移输入，不再是在线重建 SQLite 的权威源。`month.json`、`month-archive.json`、Claude ledger 和 Codex fold 仅在迁移期用于导入与对账。
 4. 任何写入都必须具有稳定幂等键、事务边界、来源指纹与可观测结果；不得允许 UI 或 CLI 直接写表。
-5. 切换到 SQL 读路径前必须通过双轨对账。未对账或对账失败的月份/宿主必须显示为 `partial` 或 `unavailable`，不得显示为零或完整。
+5. 切换到 SQL 读路径前必须通过双轨对账。未对账或对账失败的月份/执行环境必须显示为 `partial` 或 `unavailable`，不得显示为零或完整。
 
 ### 1.2 非目标
 
 - 不引入网络服务、云同步、ORM、DuckDB、watcher 或自动上传。
 - 不把原始对话正文写入数据库。
 - 不在 v0.9.1 实现 v0.10 的 TraceGraph、Issue、Action 或自动执行。
-- 不承诺把无法从原始宿主数据复原的旧聚合字段伪造为事实。
+- 不承诺把无法从原始执行环境数据复原的旧聚合字段伪造为事实。
 
 ## 2. 成功标准
 
 v0.9.1 可以发布，当且仅当：
 
-1. 新安装只创建 SQLite 数据库；所有产品读取不依赖旧 state JSON、JSONL 或宿主日志。
+1. 新安装只创建 SQLite 数据库；所有产品读取不依赖旧 state JSON、JSONL 或执行环境日志。
 2. 升级安装可重复、可中断、可恢复地迁移；重复运行不增加 token、成本或账单记录。
-3. 在可比较窗口，SQL 与旧链路按宿主/日/月的 token 精确一致；金额按币种精确到分（或规格中明确的最小货币单位）。
+3. 在可比较窗口，SQL 与旧链路按执行环境/日/月的 token 精确一致；金额按币种精确到分（或规格中明确的最小货币单位）。
 4. SQL 损坏、迁移中断、源文件截断、并发同步、重复事件和保留清理均不会静默产生漏计、双计或假零。
 5. CLI、Tauri、HTML、预算和导出使用同一 repository 与同一版本化 DTO。
 6. 旧读路径删除或编译期禁止；只保留受控的迁移 importer 与显式 legacy export。
@@ -40,8 +40,8 @@ SQL-first 不是技术替换本身，而是让用户能在一次查询内完成�
 
 | 用户问题 | 用户据此做的决策 | 最低验收结果 |
 |---|---|---|
-| “我今天什么时候最集中地使用 AI？” | 调整工作节奏、定位异常高峰 | 模型/宿主小时曲线可切换，峰值可下钻到会话 |
-| “哪一个模型和宿主花得最多？” | 预算控制、模型选择 | 按模型、宿主、提供方、币种、计费口径拆分，不跨币种伪合计 |
+| “我今天什么时候最集中地使用 AI？” | 调整工作节奏、定位异常高峰 | 模型/执行环境小时曲线可切换，峰值可下钻到会话 |
+| “哪一个模型和执行环境花得最多？” | 预算控制、模型选择 | 按模型、执行环境、提供方、币种、计费口径拆分，不跨币种伪合计 |
 | “这周哪些问题最反复？” | 优先修复高影响低效环节 | 重复错误、重复调用、重复拒绝按影响范围/频率/成本排序 |
 | “哪些 Skill 值得保留或优化？” | 推荐、修复、下线 Skill | 看到调用量、成功率、耗时、失败原因、重试率与趋势 |
 | “这个结论可信吗？” | 判断是否可据此行动 | 明示覆盖范围、最近同步时间、缺失来源和 unresolved 项 |
@@ -50,7 +50,7 @@ SQL-first 不是技术替换本身，而是让用户能在一次查询内完成�
 
 ## 3. 目标数据模型
 
-数据库文件位于 `<data_home>/agent-vitals.sqlite3`。启用 WAL、`foreign_keys=ON`、`busy_timeout`；由启动/同步入口执行 schema migration。所有表使用 UTC `created_at_ms`/`updated_at_ms`（整数毫秒），业务日/月在查询时按北京时区或宿主规定的时间口径计算。
+数据库文件位于 `<data_home>/agent-vitals.sqlite3`。启用 WAL、`foreign_keys=ON`、`busy_timeout`；由启动/同步入口执行 schema migration。所有表使用 UTC `created_at_ms`/`updated_at_ms`（整数毫秒），业务日/月在查询时按北京时区或执行环境规定的时间口径计算。
 
 ### 3.1 schema 元数据与运行批次
 
@@ -79,7 +79,7 @@ CREATE TABLE sync_runs (
 ```sql
 CREATE TABLE source_files (
   source_id TEXT PRIMARY KEY,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   path_hash TEXT NOT NULL,                -- 不暴露本地路径
   native_session_id TEXT,
   size_bytes INTEGER NOT NULL,
@@ -90,12 +90,12 @@ CREATE TABLE source_files (
   last_seen_at_ms INTEGER NOT NULL,
   last_successful_run_id TEXT REFERENCES sync_runs(run_id),
   last_error_code TEXT,
-  UNIQUE(host, path_hash)
+  UNIQUE(harness, path_hash)
 );
 
 CREATE TABLE sessions (
   session_key TEXT PRIMARY KEY,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   native_session_id TEXT NOT NULL,
   machine_namespace TEXT NOT NULL,
   source_profile TEXT,
@@ -103,7 +103,7 @@ CREATE TABLE sessions (
   ended_at_ms INTEGER,
   last_observed_at_ms INTEGER NOT NULL,
   deleted_at_ms INTEGER,
-  UNIQUE(host, machine_namespace, native_session_id)
+  UNIQUE(harness, machine_namespace, native_session_id)
 );
 ```
 
@@ -114,7 +114,7 @@ CREATE TABLE sessions (
 ```sql
 CREATE TABLE usage_facts (
   fact_id TEXT PRIMARY KEY,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   machine_namespace TEXT NOT NULL,
   native_session_id TEXT NOT NULL,
   session_key TEXT REFERENCES sessions(session_key),
@@ -138,11 +138,11 @@ CREATE TABLE usage_facts (
   CHECK (cache_read_tokens >= 0),
   CHECK (cache_write_tokens >= 0),
   CHECK (output_tokens >= 0),
-  UNIQUE(host, machine_namespace, native_session_id, source_event_id, observation_kind)
+  UNIQUE(harness, machine_namespace, native_session_id, source_event_id, observation_kind)
 );
 
-CREATE INDEX usage_facts_host_time
-  ON usage_facts(host, event_ts_ms) WHERE deleted_at_ms IS NULL;
+CREATE INDEX usage_facts_harness_time
+  ON usage_facts(harness, event_ts_ms) WHERE deleted_at_ms IS NULL;
 CREATE INDEX usage_facts_session_time
   ON usage_facts(session_key, event_ts_ms) WHERE deleted_at_ms IS NULL;
 CREATE INDEX usage_facts_provider_model_time
@@ -178,12 +178,12 @@ CREATE TABLE models (
 
 CREATE TABLE model_aliases (
   alias_id TEXT PRIMARY KEY,
-  host TEXT,                              -- NULL = 跨宿主别名
+  harness TEXT,                              -- NULL = 跨执行环境别名
   raw_model_name TEXT NOT NULL,
   model_id TEXT NOT NULL REFERENCES models(model_id),
   valid_from_ms INTEGER,
   valid_to_ms INTEGER,
-  UNIQUE(host, raw_model_name, valid_from_ms)
+  UNIQUE(harness, raw_model_name, valid_from_ms)
 );
 
 CREATE TABLE pricing_versions (
@@ -217,12 +217,12 @@ CREATE TABLE model_prices (
 价格按“最小货币单位 / `unit_tokens`”保存，禁止浮点。查询历史成本时必须按事实时间选择当时生效的价格版本；没有匹配价卡则输出 `unresolved`。用户自定义套餐、代理商价格和官方公开价格必须以不同 `source_kind` 并列展示，不能互相覆盖。
 
 ```sql
-CREATE TABLE host_bills (
+CREATE TABLE harness_bills (
   bill_id TEXT PRIMARY KEY,
-  host TEXT NOT NULL,
+  harness TEXT NOT NULL,
   provider_id TEXT NOT NULL,
   billing_period TEXT NOT NULL,           -- YYYY-MM
-  billing_basis TEXT NOT NULL,            -- fixed_subscription | host_billed | metered_actual
+  billing_basis TEXT NOT NULL,            -- fixed_subscription | harness_billed | metered_actual
   amount_minor INTEGER NOT NULL,
   currency TEXT NOT NULL,
   source_id TEXT REFERENCES source_files(source_id),
@@ -230,7 +230,7 @@ CREATE TABLE host_bills (
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
   deleted_at_ms INTEGER,
-  UNIQUE(host, provider_id, billing_period, billing_basis, evidence_ref)
+  UNIQUE(harness, provider_id, billing_period, billing_basis, evidence_ref)
 );
 
 CREATE TABLE budget_config (
@@ -315,22 +315,22 @@ CREATE INDEX workflow_events_error_time
 
 边界：不保存 prompt、工具参数、原始报错全文或对话正文。`error_fingerprint` 与 `invocation_fingerprint` 必须由脱敏规则生成；需要人工排查时，用户回到本机原始来源查看细节。
 
-### 3.7 宿主实时快照（schema v2）
+### 3.7 执行环境实时快照（schema v2）
 
-有些产品状态不是用量事实，也不能让桌面端绕过 authority 直接扫描宿主日志。
+有些产品状态不是用量事实，也不能让桌面端绕过 authority 直接扫描执行环境日志。
 例如 Codex 的“当前套餐、已用比例、重置时间”是单一的实时快照，而不是可按日
 相加的 token。schema v2 为这类状态提供独立表：
 
 ```sql
-CREATE TABLE host_runtime_snapshots (
-  host TEXT NOT NULL,
+CREATE TABLE harness_runtime_snapshots (
+  harness TEXT NOT NULL,
   snapshot_kind TEXT NOT NULL,            -- 当前：codex_quota
   payload_json TEXT NOT NULL,             -- 已清洗、脱敏的产品 DTO
   observed_at_ms INTEGER NOT NULL,
   source_id TEXT REFERENCES source_files(source_id),
   ingested_run_id TEXT NOT NULL REFERENCES sync_runs(run_id),
   updated_at_ms INTEGER NOT NULL,
-  PRIMARY KEY(host, snapshot_kind)
+  PRIMARY KEY(harness, snapshot_kind)
 );
 ```
 
@@ -348,7 +348,7 @@ CREATE TABLE host_runtime_snapshots (
 `data-export-redacted`）不因本节放宽——excerpt 类字段与锚点字段不出这两个面。
 
 ```sql
-ALTER TABLE workflow_events ADD COLUMN error_code TEXT;        -- 'http:429' | 'jsonrpc:-32601' | 'tool:…' | 'host:<raw>'
+ALTER TABLE workflow_events ADD COLUMN error_code TEXT;        -- 'http:429' | 'jsonrpc:-32601' | 'tool:…' | 'harness:<raw>'
 ALTER TABLE workflow_events ADD COLUMN error_class TEXT
   CHECK (error_class IS NULL OR error_class IN (
     'transport','rate_limit','auth','schema_violation','method_not_found',
@@ -357,13 +357,13 @@ ALTER TABLE workflow_events ADD COLUMN error_excerpt TEXT;     -- 错误首行�
 ALTER TABLE workflow_events ADD COLUMN args_excerpt TEXT;      -- 参数摘要截断，仅本地呈现
 ALTER TABLE workflow_events ADD COLUMN request_bytes INTEGER;
 ALTER TABLE workflow_events ADD COLUMN result_bytes INTEGER;
-ALTER TABLE workflow_events ADD COLUMN native_event_id TEXT;   -- 宿主原生 id，锚点重定位键
+ALTER TABLE workflow_events ADD COLUMN native_event_id TEXT;   -- 执行环境原生 id，锚点重定位键
 ALTER TABLE workflow_events ADD COLUMN source_line INTEGER;    -- 加速 hint，自校验
 ALTER TABLE workflow_events ADD COLUMN source_byte_offset INTEGER;
 CREATE INDEX workflow_events_error_class_time
   ON workflow_events(error_class, event_ts_ms) WHERE error_class IS NOT NULL;
 
-ALTER TABLE usage_facts ADD COLUMN reasoning_effort TEXT;      -- 宿主报了才填；NULL = 未报
+ALTER TABLE usage_facts ADD COLUMN reasoning_effort TEXT;      -- 执行环境报了才填；NULL = 未报
 
 ALTER TABLE sessions ADD COLUMN probe_run_ref TEXT;            -- 探针会话标记，成本视图过滤键
 ALTER TABLE sessions ADD COLUMN task_profile TEXT;
@@ -409,14 +409,14 @@ manifest 引用 + sha256，题面/判据/canary 串留文件系统按机密待�
 CREATE TABLE IF NOT EXISTS probe_routes (
   route_id TEXT PRIMARY KEY,
   label TEXT NOT NULL,
-  host_kind TEXT NOT NULL CHECK (host_kind IN ('claude-code','codex')),
+  harness_kind TEXT NOT NULL CHECK (harness_kind IN ('claude-code','codex')),
   endpoint_base_url TEXT,
   credential_ref TEXT,                       -- 'ccswitch:<row>' | 'env:VAR'：引用，永不存凭据本体
   model_requested TEXT NOT NULL,
   consent_granted_at_ms INTEGER,             -- NULL = 未授权，runner 拒绝发起
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL,
-  UNIQUE(label, host_kind)
+  UNIQUE(label, harness_kind)
 );
 CREATE TABLE IF NOT EXISTS probe_suites (
   suite_id TEXT PRIMARY KEY,
@@ -488,20 +488,20 @@ CREATE TABLE IF NOT EXISTS probe_verdicts (
 
 ## 4. SQL 查询模型
 
-不把金额/聚合复制成第二份可变真相。以 `usage_facts`、`host_bills`、价格快照和预算配置为基础建立 repository 查询；复杂查询可使用 SQL view，但 view 不持久化可写状态。
+不把金额/聚合复制成第二份可变真相。以 `usage_facts`、`harness_bills`、价格快照和预算配置为基础建立 repository 查询；复杂查询可使用 SQL view，但 view 不持久化可写状态。
 
 最少提供：
 
-- `daily_summary(date, host_scope, billing_scope)`；
-- `monthly_summary(month, host_scope, billing_scope)`；
-- `coverage_status(month, host_scope)`；
+- `daily_summary(date, harness_scope, billing_scope)`；
+- `monthly_summary(month, harness_scope, billing_scope)`；
+- `coverage_status(month, harness_scope)`；
 - `budget_status(month, now)`；
 - `facts_page(filters, cursor)`；
 - `sessions_page(filters, cursor)`；
-- `host_bills_page(filters, cursor)`；
+- `harness_bills_page(filters, cursor)`；
 - `sync_status()` 与 `data_quality_issues(filters)`。
 
-每个摘要必须同时返回金额、币种、basis、tokens、coverage、freshness、excluded hosts、`last_observed_at` 与 `data_version`。金额不能脱离来源/口径单独返回。
+每个摘要必须同时返回金额、币种、basis、tokens、coverage、freshness、excluded harnesses、`last_observed_at` 与 `data_version`。金额不能脱离来源/口径单独返回。
 
 **行轴/聚合轴分离纪律（审查收口，2026-09-06）**：`usage_facts` 里
 `observation_kind = 'legacy_aggregate'` 的行（§6.2.3 的 ledger 深历史聚合）
@@ -516,13 +516,13 @@ CREATE TABLE IF NOT EXISTS probe_verdicts (
 
 | 查询能力 | 用户看到什么 | 典型筛选 | 必须支持的下钻 |
 |---|---|---|---|
-| 今日小时分布 | 按小时的 token、成本、活跃会话曲线 | 日期、模型、宿主、提供方 | 小时 → 会话 → 相关事实/事件 |
-| 模型/宿主对比 | 用量、成本、成功率、重试率、平均耗时 | 日期范围、模型、宿主 | 条目 → 会话与失败事件 |
+| 今日小时分布 | 按小时的 token、成本、活跃会话曲线 | 日期、模型、执行环境、提供方 | 小时 → 会话 → 相关事实/事件 |
+| 模型/执行环境对比 | 用量、成本、成功率、重试率、平均耗时 | 日期范围、模型、执行环境 | 条目 → 会话与失败事件 |
 | 异常峰值解释 | 高于基线的小时及原因 | 日期、阈值 | 峰值 → 模型/Skill/工具/会话 |
-| 重复问题榜 | 重复错误、拒绝、无效调用 | 日期范围、宿主、严重度 | 问题 → 受影响会话和最近发生记录 |
+| 重复问题榜 | 重复错误、拒绝、无效调用 | 日期范围、执行环境、严重度 | 问题 → 受影响会话和最近发生记录 |
 | Skill 健康度 | 调用量、成功率、耗时、成本、重复率 | Skill、版本、日期范围 | Skill → 失败指纹/调用会话 |
 | 会话复盘 | 时间线、模型切换、调用结果、花费 | 会话 | 每个事件 → 关联用量/错误类别 |
-| 数据可信度 | 覆盖、同步新鲜度、未定价/缺失项 | 月份、宿主 | 缺口 → 来源文件/质量问题 |
+| 数据可信度 | 覆盖、同步新鲜度、未定价/缺失项 | 月份、执行环境 | 缺口 → 来源文件/质量问题 |
 
 ### 4.2 用户查询验收用例
 
@@ -531,7 +531,7 @@ CREATE TABLE IF NOT EXISTS probe_verdicts (
 | 编号 | 场景与输入 | 用户查询 | 预期结果 |
 |---|---|---|---|
 | Q01 | 同一天 Claude 在 09:00 有 120 token、Codex 在 10:00 有 300 token | “今天各模型的小时曲线” | 两个小时点分别归属正确模型；总览可切模型且总量一致 |
-| Q02 | 同一模型在不同宿主各有用量 | “今天各宿主的小时曲线” | 宿主曲线分开显示；总曲线等于各宿主之和，不重复计数 |
+| Q02 | 同一模型在不同执行环境各有用量 | “今天各执行环境的小时曲线” | 执行环境曲线分开显示；总曲线等于各执行环境之和，不重复计数 |
 | Q03 | 北京月初 00:30 的 UTC 前一天事件 | “本月用量” | 归属正确北京日/月，不落入上月或次月 |
 | Q04 | 一个峰值小时由三条不同会话事实构成 | 点击小时峰值 | 下钻列出三会话；会话 token 合计严格等于峰值 |
 | Q05 | 某模型有用量但缺价卡 | “本月成本排行” | 用量可见，成本显示 unresolved，不以 0 或估算冒充实际 |
@@ -540,10 +540,10 @@ CREATE TABLE IF NOT EXISTS probe_verdicts (
 | Q08 | Skill A 调用 20 次：16 成功、4 失败；Skill B 只调用 1 次 | “哪些 Skill 有问题” | A 显示 80% 成功率和失败分类；B 标为样本不足，不做质量结论 |
 | Q09 | Skill A 新版本失败率从 5% 升至 35% | “Skill 健康趋势” | 按版本识别回归并提示风险；不混淆两个版本 |
 | Q10 | 一个会话有模型切换、Skill 失败与成本峰值 | “为什么任务拖延” | 时间线按时间排序，并将失败/峰值关联到会话，不读取对话正文 |
-| Q11 | 某宿主 24 小时未同步 | “今日总览” | 结果标为 partial/stale，明确缺失宿主；不可显示“完整总额” |
+| Q11 | 某执行环境 24 小时未同步 | “今日总览” | 结果标为 partial/stale，明确缺失执行环境；不可显示“完整总额” |
 | Q12 | 导入同一来源两次并在中途模拟中断 | 重跑任意月/日查询 | token、成本、调用次数与首次成功导入完全一致，无半提交 |
 | Q13 | 同一模型在 9 月 1 日调价，且历史事件跨越调价日 | “本月成本排行” | 调价日前后分别使用正确价格版本；历史成本不会被当前价卡覆盖 |
-| Q14 | 同一个原始模型名在不同宿主映射到不同 canonical 模型 | “按模型/供应商对比” | 归属准确；无法映射的项目显式显示 unknown/unresolved，不被并入相似名称 |
+| Q14 | 同一个原始模型名在不同执行环境映射到不同 canonical 模型 | “按模型/供应商对比” | 归属准确；无法映射的项目显式显示 unknown/unresolved，不被并入相似名称 |
 
 Q01–Q05 是首批可见价值；Q06–Q10 依赖 `workflow_events`；Q11–Q14 是所有查询成立的可信度底线。
 
@@ -551,9 +551,9 @@ Q01–Q05 是首批可见价值；Q06–Q10 依赖 `workflow_events`；Q11–Q14
 
 ### 5.1 Create
 
-1. 发现宿主来源文件，建立或更新 `source_files`。
-2. 解析宿主 wire，生成 UsageFact/HostBillRecord candidate。
-3. 校验 schema、时间、token 非负、宿主词表与身份；不合格项写 `data_quality_issues`，不得入 `usage_facts`。
+1. 发现执行环境来源文件，建立或更新 `source_files`。
+2. 解析执行环境 wire，生成 UsageFact/HarnessBillRecord candidate。
+3. 校验 schema、时间、token 非负、执行环境词表与身份；不合格项写 `data_quality_issues`，不得入 `usage_facts`。
 4. 在一个 `BEGIN IMMEDIATE` 事务内：创建 `sync_runs`、upsert sessions/source metadata、`INSERT ... ON CONFLICT DO NOTHING` 写 facts/bills、记录结果、更新 checkpoint。
 5. 成功提交后才标记 `sync_runs=succeeded`。失败回滚业务写入、标记 run failed，并保留错误信息。
 
@@ -566,7 +566,7 @@ Q01–Q05 是首批可见价值；Q06–Q10 依赖 `workflow_events`；Q11–Q14
 - Codex rollout 全量 fold；
 - `facts/*.jsonl` 重放。
 
-宿主文件只可被 sync/import 命令读取。UI、CLI 和预算不得绕过 repository 执行 SQL 或读取文件。
+执行环境文件只可被 sync/import 命令读取。UI、CLI 和预算不得绕过 repository 执行 SQL 或读取文件。
 
 ### 5.3 Update
 
@@ -589,7 +589,7 @@ Q01–Q05 是首批可见价值；Q06–Q10 依赖 `workflow_events`；Q11–Q14
 detect legacy
   → create database + DDL
   → import legacy facts/state
-  → replay host sources
+  → replay harness sources
   → reconcile SQL vs legacy
   → enable SQL reads
   → freeze legacy writes
@@ -601,14 +601,14 @@ detect legacy
 ### 6.2 导入优先级
 
 1. 已有 `facts/*.jsonl`：按既有 `fact_id` 导入，作为最保真的已清洗事实。
-2. 宿主原始日志：重新解析并写入 SQL；用唯一键吸收与 JSONL 重叠的事实。
+2. 执行环境原始日志：重新解析并写入 SQL；用唯一键吸收与 JSONL 重叠的事实。
 3. Claude ledger、DSH `month.json`/archive：只用于补充无法从现存 raw source 重放的历史聚合；写为有明确 `source_kind=legacy_aggregate` 的记录，并标记 coverage 降级。
 4. `today.json`、`alert.json`：不迁移为事实；由 SQL 聚合和预算配置重算。
 5. 旧 JSON 永不覆盖更具体的 SQL fact；冲突必须产出 data-quality issue。
 
 ### 6.3 对账协议
 
-按 `host × month × token bucket` 比较：所有可比较 token 必须严格相等。金额按 `currency × basis × provider` 比较最小货币单位，禁止跨币种汇总。
+按 `harness × month × token bucket` 比较：所有可比较 token 必须严格相等。金额按 `currency × basis × provider` 比较最小货币单位，禁止跨币种汇总。
 
 允许例外只包括：旧状态缺少原始证据、旧聚合的已知历史 bug、或无法反演的订阅配置。每个例外必须有 issue code、范围、原因与用户可见的 partial 标记。
 
@@ -626,13 +626,13 @@ detect legacy
 
 - 建立 DDL migration runner、事务帮助器、`sync_runs`/`migrations`/质量问题表。
 - 将现有 SQLite index 迁移为新库或一次性导入，不再使用“删除 SQLite → 从 JSONL 重建”作为正常恢复方式。
-- 为损坏数据库提供恢复：从用户备份 + 宿主原始日志重新导入；若不能恢复，明确报告 coverage 缺口。
+- 为损坏数据库提供恢复：从用户备份 + 执行环境原始日志重新导入；若不能恢复，明确报告 coverage 缺口。
 
 ### Phase 2：清洗写入与同步
 
-- 将三宿主 emitter 改为向 SQL writer 写 candidate facts。
+- 将三执行环境 emitter 改为向 SQL writer 写 candidate facts。
 - 把 JSON checkpoint 迁到 `source_files`；将 lease 包住完整事务。
-- 加入 HostBillRecord 导入与价格快照写入。
+- 加入 HarnessBillRecord 导入与价格快照写入。
 - 提供 `data sync`、`data status`、`data repair`、`data migrate` 命令。
 
 ### Phase 3：SQL repository 与全部读路径切换
@@ -652,13 +652,13 @@ detect legacy
 必须新增或改造以下测试：
 
 1. schema migration：空安装、v0.9 升级、重复运行、半途中断、低版本恢复、高版本拒绝。
-2. ingest：同一事件重放、同一文件修改、文件截断/替换、坏行、跨宿主同名会话、并发同步。
+2. ingest：同一事件重放、同一文件修改、文件截断/替换、坏行、跨执行环境同名会话、并发同步。
 3. transaction：在 facts/bills/checkpoint/run 状态每个提交点故障注入，验证无半提交。
 4. CRUD：事实、账单、session、budget config、soft delete、retention 与分页/cursor。
 5. query：daily/monthly/coverage/budget 的时区边界、峰谷、跨月、跨币种、无数据与 unresolved。
 6. reconciliation：全量与增量 SQL-vs-legacy；任何差异必须给出可行动原因。
 7. client parity：CLI、Tauri 命令、HTML payload 都由同一 DTO 返回。
-8. performance：常见月查询不枚举宿主原始日志；索引命中计划与数据库大小增长受控。
+8. performance：常见月查询不枚举执行环境原始日志；索引命中计划与数据库大小增长受控。
 9. 用户查询验收：Q01–Q14 必须作为端到端 fixture 运行；其中 Q01–Q05、Q11–Q14 为 v0.9.1 release blocker，Q06–Q10 在 `workflow_events` 接入后成为 blocker。
 
 发布前的人工验收：真实机器迁移、断电/kill 后恢复、删除旧 JSON 后继续正常查询、删除 SQLite 后按恢复策略明确告警而不是回落到另一条隐式账本。
@@ -712,7 +712,7 @@ v0.9.1 的交付不是“新增一个 SQLite 表”，而是完成一次受控�
 - **继承与废止**：既有 `agent-vitals-data::store`（index.sqlite3,
   schema v2）保留至 Phase 1 迁移框架落地后一次性导入；「删库 →
   从 JSONL 重建」自新库启用起**不再是正常恢复方式**（§7 Phase 1），
-  恢复 = 用户备份 + 宿主原始日志重放 + coverage 缺口如实报告。
+  恢复 = 用户备份 + 执行环境原始日志重放 + coverage 缺口如实报告。
 - **claude 覆盖缺口定论**（迁移的输入边界）：ledger 深历史来自已轮转
   文件，不可从现文件重放——按 §6.2.3 作为 legacy_aggregate 导入并标
   coverage 降级，不伪造为行级事实。
@@ -759,7 +759,7 @@ v0.9.1 的交付不是“新增一个 SQLite 表”，而是完成一次受控�
 | `JsonSummaryRepository` | ✅ 删除 | Stage 2（b5ca48c）——struct + impl + 4 个 legacy 读 wrapper（claude/codex ledger·fold 读层）；`SummaryRepository` 只剩 `SqlSummaryRepository` |
 | `month.json`/`month-archive.json`/`today.json` 作业务读源 | ✅ 退役 | `SqlSummaryRepository` 与 `budget show` 都只读 SQL；Stage 5b 删除业务 state 写入口，DSH tick 仅保留导航快照 |
 | `alert.json` 作预算计算来源 | ✅ 退役 | `evaluate_alert_from_sql` 只读 authority；Stage 5b 删除 oneline 的 alert 写入 |
-| ledger / codex fold 在产品查询路径的直接读取 | ✅ 退役 | Stage 2 删除 repository wrapper，Stage 5b-c 把 `data-unresolved` 改为 authority，5b-d 把 `sessions navigation` 的三宿主今日 token 改为 authority；Codex quota 以 schema v2 `host_runtime_snapshots/codex_quota` 在同步事务写入、桌面端只读 SQL |
+| ledger / codex fold 在产品查询路径的直接读取 | ✅ 退役 | Stage 2 删除 repository wrapper，Stage 5b-c 把 `data-unresolved` 改为 authority，5b-d 把 `sessions navigation` 的三执行环境今日 token 改为 authority；Codex quota 以 schema v2 `harness_runtime_snapshots/codex_quota` 在同步事务写入、桌面端只读 SQL |
 | JSON checkpoint | ✅ 退役 | `sync_facts` 以 `source_files` 作为唯一差量索引；旧 checkpoint 仅首启迁入后改名留档，运行时不再读写 |
 | "SQLite 可由 JSONL 重建" 的权威语义 | ✅ 退役 | Stage 5a（8498023）——删旧 `agent_vitals_data::store` / `index.sqlite3` / `FactsIndex` / `data-rebuild-index`。权威库**不自愈**，恢复 = `rm agent-vitals.sqlite3* && data-migrate` |
 | legacy 代码只留 importer/export/fixture | ✅ | `legacy_import` 保留（`data-migrate --with-legacy-ledger` opt-in）；旧业务 state 的 merge/alert 写链、导航 token 与配额读路径均已迁出 |

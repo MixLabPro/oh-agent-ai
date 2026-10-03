@@ -1,7 +1,7 @@
 //! Browser wasm entry: pure behavior audit + cost folding over events already
 //! in memory.
 //!
-//! The contract is JSON in / JSON out — the host serializes the raw session
+//! The contract is JSON in / JSON out — the harness serializes the raw session
 //! events it has already read from disk into a JSON string, and these functions
 //! return the Behavior Finding list / per-model token report as JSON strings.
 //! No I/O here, and none possible: `match_behavior` and `usage::token_by_model`
@@ -25,8 +25,8 @@ pub fn audit_events(events_json: &str, workspace_root: &str) -> String {
     // 跑的是同一份 core 引擎。
     // raw-events → findings 的 DSH shim（phase C 起住 adapter，规则本体仍是 core
     // 的 `match_{behavior,trajectory}_canonical`——从不是第二份拷贝）。
-    let mut findings = agent_vitals_hosts::audit::match_behavior(&events, ws);
-    findings.extend(agent_vitals_hosts::audit::match_trajectory(&events));
+    let mut findings = agent_vitals_harnesses::audit::match_behavior(&events, ws);
+    findings.extend(agent_vitals_harnesses::audit::match_trajectory(&events));
     serde_json::to_string(&findings).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -35,7 +35,7 @@ pub fn audit_events(events_json: &str, workspace_root: &str) -> String {
 /// 与 `audit_events` 同契约：输入 `JSON.stringify(events)`，输出
 /// `JSON.stringify(token_by_model(events))`——`{"by_model": {...}, "sequence": [...]}`
 /// （snake_case）。CLI 与浏览器 tab 都走同一份 core 折叠（单一真相源）；tab 的
-/// 宿主半份把 usage 事件喂进来，客户端只读投影渲染。
+/// 执行环境半份把 usage 事件喂进来，客户端只读投影渲染。
 #[wasm_bindgen]
 pub fn token_by_model(events_json: &str) -> String {
     let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
@@ -69,7 +69,7 @@ pub fn hour_buckets(events_json: &str) -> String {
 /// `context_window` + 四桶）。时间线需要的是时间序列，聚合值画不出来。
 ///
 /// 输入需**额外包含 `request/context` 事件**（分母 `contextWindow` 的唯一来源）
-/// ——宿主侧 projection 的 `apply` 必须放行这个事件类型，否则每行 `context_window`
+/// ——执行环境侧 projection 的 `apply` 必须放行这个事件类型，否则每行 `context_window`
 /// 都是 `null`，`[上下文]` 视图按 FR-04 整体降级。
 #[wasm_bindgen]
 pub fn request_metrics(events_json: &str) -> String {
@@ -82,7 +82,7 @@ pub fn request_metrics(events_json: &str) -> String {
 ///
 /// 输入需包含 `request/header`（带 `header.system` / `header.tools`）以及承载
 /// `data.source.kind == "skill-catalog"` 的那些事件——技能目录不是专用事件类型，
-/// 它挂在 `user/message` / `agent/inbox/spliced` 等多种事件上，宿主 projection
+/// 它挂在 `user/message` / `agent/inbox/spliced` 等多种事件上，执行环境 projection
 /// 的 `apply` 必须按 `data.source` 判断而不是按 type 白名单，否则目录永远为 null。
 ///
 /// 输出三项都是 `est_tokens` **估算**，与 `request_metrics` 的 `context_tokens`
@@ -101,12 +101,12 @@ pub fn context_composition(events_json: &str) -> String {
 /// 自身不带 turn，靠 turn 边界顺延；只喂 compaction 事件的话每条 prune 的 turn
 /// 都会落成 null（真实日志上验证过这个坑）。
 ///
-/// `prunes[].shadowed_token_count` 是**宿主实测**的被丢弃 token 数，与
+/// `prunes[].shadowed_token_count` 是**执行环境实测**的被丢弃 token 数，与
 /// `context_composition` 的 est_tokens 估算 provenance 不同，展示层须分开标注。
 #[wasm_bindgen]
 pub fn compaction_events(events_json: &str) -> String {
     let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
-    let out = agent_vitals_hosts::compaction::compaction_events(&events);
+    let out = agent_vitals_harnesses::compaction::compaction_events(&events);
     serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
 }
 
@@ -125,7 +125,7 @@ pub fn subagent_spawns(events_json: &str) -> String {
 pub fn structural_waste(events_json: &str, requests_json: &str) -> String {
     let events: Vec<Value> = serde_json::from_str(events_json).unwrap_or_default();
     let requests: Vec<Value> = serde_json::from_str(requests_json).unwrap_or_default();
-    let out = agent_vitals_hosts::waste::detect_structural_waste(&events, &requests);
+    let out = agent_vitals_harnesses::waste::detect_structural_waste(&events, &requests);
     serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -159,7 +159,7 @@ pub fn skill_audit_enriched(events_json: &str, requests_json: &str, spawns_json:
 /// turn/step 时长 + 审批等待延迟，合并成一次 wasm 调用，与 `skill_audit` 的
 /// 单事件数组输入同一种契约。
 ///
-/// **D4（hook 消费）故意不在这里**——`duration::hook_executions` 的宿主前提
+/// **D4（hook 消费）故意不在这里**——`duration::hook_executions` 的执行环境前提
 /// （浏览器能不能拿到 `hook/*` 事件）还没有人拿真实会话验证过，在验证通过
 /// 之前不接进这条浏览器链路，只在 CLI 侧可用（`hook_executions` 本身已经
 /// 就绪，见 `crates/agent-vitals-domain/src/domain/duration.rs` 的模块级警告）。

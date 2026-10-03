@@ -1,10 +1,10 @@
-# v1.0.0-beta.1 计费三轴模型规格（宿主 × 模型 × 计费方/计费机制）
+# v1.0.0-beta.1 计费三轴模型规格（执行环境 × 模型 × 计费方/计费机制）
 
 **状态：** v1.0 Draft（2026-09-16）。**问题清单已按真机取证，§7 有 4 个待产品定夺的决策点，未定之前不动代码。**
 
 > **2026-09-17 修订（产品定向，已实装）——本节覆盖下文与 D02 冲突的条款：**
-> 1. **按量/中转声明改金额**：`user_declared` 归因的事实从 `MeteredEstimate` 搬到新档 `MeteredDeclared`，归到声明的计费方名下，价卡按「声明计费方的卡 → 原厂官方卡 → 宿主默认卡」解析；仍是估算档、不 summable。D02「按量声明不改金额」与 R4 **作废**。
-> 2. **KPI「按量费用」三级口径**：`metered_view` = 账单（`metered_actual`/`host_billed`）> 归因估算 > 默认估算，同计费方内取代、跨币分栏，带 `actual/estimate/mixed` 标签（`data_contract.rs`）。
+> 1. **按量/中转声明改金额**：`user_declared` 归因的事实从 `MeteredEstimate` 搬到新档 `MeteredDeclared`，归到声明的计费方名下，价卡按「声明计费方的卡 → 原厂官方卡 → 执行环境默认卡」解析；仍是估算档、不 summable。D02「按量声明不改金额」与 R4 **作废**。
+> 2. **KPI「按量费用」三级口径**：`metered_view` = 账单（`metered_actual`/`harness_billed`）> 归因估算 > 默认估算，同计费方内取代、跨币分栏，带 `actual/estimate/mixed` 标签（`data_contract.rs`）。
 > 3. **结算币种跟计费方走**：声明的 `settlement` 作用域（schema v15）> 目录卡片币种 > CNY；fallback 估算按 `fx_estimate` 折成结算币并标 `fair-market-fallback-fx`。
 > 4. **声明是持续生效的规则**：每轮 `sync-facts` 末尾把当前有效声明套用到新事实（`billing_apply_active_declarations`）；开放期声明覆盖之后的事实——§3「事实 3」的顾虑作废。作用域默认计费方级，模型清单只在勾「仅限这些模型」时写。
 > 5. **候选与声明一致性**：被有效声明占着的候选恒 `accepted`（reopen 拒绝、同步自愈）。
@@ -45,11 +45,11 @@
 
 | 轴 | 承载 | 值域 / 来源 | 备注 |
 |---|---|---|---|
-| **A 宿主 harness** | `usage_facts.host` | codex / claude-code / dsh / workbuddy | 只答"谁发起、谁记录"，**与钱无关** |
+| **A 执行环境 harness** | `usage_facts.harness` | codex / claude-code / dsh / workbuddy | 只答"谁发起、谁记录"，**与钱无关** |
 | **B 模型** | `usage_facts.model_id`（+ `provider_raw`） | 型号串 | 厂商线索：`attribution_signatures.json` 的 `model_prefixes`（minimax←`minimax`/`abab`；zhipu-glm←`glm-`/`chatglm`；alibaba←`qwen`/`qwq`）。**只答"哪家的模型"，不答"钱付给谁"** |
 | **C 计费方 provider** | `usage_facts.provider_id`（+ `billing_source`） | ①日志证据 ②价目表 `catalog_2026_09.billing_modes` 解析（`cost/billing.rs::billing_route_of`）③用户覆盖（`save_price_route`） | 解析不出 → NULL（真机 23,868 条 claude-code + 3,874 workbuddy + 2,544 codex） |
 | **D 计费机制** | `usage_facts.billing_mode` **+ 声明行的 `relationship_kind` + 归因行** | `metered` / `subscription` | **两套表示**，见 §2 |
-| **E 通道/证据** | `usage_facts.evidence_basis`（+ `route_evidence_id`） | session-native / explicit-official-route / inferred / conflict / config-current / env-current / missing | 判据：**先从型号名推厂商，再问"配置里的基址是不是该厂商的官方端点"**（`billing_preview.rs` 的 `official_for_vendor`，表在 `attribution_signatures.json`）。**不是**"相对于宿主厂商是不是第三方" |
+| **E 通道/证据** | `usage_facts.evidence_basis`（+ `route_evidence_id`） | session-native / explicit-official-route / inferred / conflict / config-current / env-current / missing | 判据：**先从型号名推厂商，再问"配置里的基址是不是该厂商的官方端点"**（`billing_preview.rs` 的 `official_for_vendor`，表在 `attribution_signatures.json`）。**不是**"相对于执行环境厂商是不是第三方" |
 | **F 付款人** | 仅存在于 `relationship_kind = organization` | 个人 / 组织 | 与机制正交，却被塞进同一个枚举 |
 
 **真机取证**（`agent-vitals.sqlite3` 只读副本）：
@@ -146,7 +146,7 @@ UI 再让**通道先说话**（`billingRelationshipFromSteps`：`route === "thir
 
 | 轴 | 权威来源 | 可撤销 | 用途 |
 |---|---|---|---|
-| A 宿主 | 事实行（宿主日志） | — | 分组维度 |
+| A 执行环境 | 事实行（执行环境日志） | — | 分组维度 |
 | B 模型 | 事实行 | — | 厂商线索、作用域 |
 | C 计费方 provider | 事实行（日志 → 目录 → **用户覆盖**） | 覆盖可删 | 归价卡；决定归到谁名下 |
 | **D 计费机制** | **声明（归因）**，事实行的 `billing_mode` 只作目录默认 | **是** | **唯一决定要不要改金额** |
@@ -206,11 +206,11 @@ UI 再让**通道先说话**（`billingRelationshipFromSteps`：`route === "thir
 
 | 钱的口径 | 权威 | 说明 |
 |---|---|---|
-| `fixed_subscription` 订阅月费 | **声明**（归因时填） | 已接通（主链规格 §10.3）。声明天然版本化、可撤销、带起止——比 `host_bills` 的平表更适合当权威 |
-| `metered_actual` / `host_billed` 按量实付 | **账单/付款记录**（`host_bills`） | 纪律原样保留：没有账单就没有这个数 |
+| `fixed_subscription` 订阅月费 | **声明**（归因时填） | 已接通（主链规格 §10.3）。声明天然版本化、可撤销、带起止——比 `harness_bills` 的平表更适合当权威 |
+| `metered_actual` / `harness_billed` 按量实付 | **账单/付款记录**（`harness_bills`） | 纪律原样保留：没有账单就没有这个数 |
 | 名义 / 估算 | 价卡 | 现状不变 |
 
-**取代规则（防双计，B11）**：同一 provider 同一月份，若存在 `host_bills` 的 `fixed_subscription` 行，**以账单为准、取代**声明那条月费，二者不相加（现状 `apply_host_bills` 在声明摊派之后叠加执行，会双计——真机 `host_bills` 为空，未触发，属潜伏）。
+**取代规则（防双计，B11）**：同一 provider 同一月份，若存在 `harness_bills` 的 `fixed_subscription` 行，**以账单为准、取代**声明那条月费，二者不相加（现状 `apply_harness_bills` 在声明摊派之后叠加执行，会双计——真机 `harness_bills` 为空，未触发，属潜伏）。
 
 **过期风险的处置（代替"不计入"）**：口径标注（自报 / 账单校准，`basis` 词表已有）；撤销即停（已有）；可选的 N 个月后温和再确认（不确认也照扣——把"可能过期"暴露出来，比制造数据缺失诚实）。
 
@@ -219,12 +219,12 @@ UI 再让**通道先说话**（`billingRelationshipFromSteps`：`route === "thir
 ### 3.4 订阅的存储与修改（2026-09-16 产品追问的定案）
 
 **Q：用户不用单独维护账单，数据层还要不要一张"订阅表"？**
-**A：不需要新表——`billing_declarations`（+ 不可变修订历史）就是订阅表。** 订阅事实需要的每个字段它都有：谁（host/provider）、什么套餐（`subscription_name`）、多少钱（`amount_minor`+`currency`）、从哪天起（`effective_start`，锚点即首次扣款日）、到哪天止（`effective_end` 可空＝持续有效）、完整审计（修订链）。§3.3 的月费摊派读的就是它。各表职责重划：
+**A：不需要新表——`billing_declarations`（+ 不可变修订历史）就是订阅表。** 订阅事实需要的每个字段它都有：谁（harness/provider）、什么套餐（`subscription_name`）、多少钱（`amount_minor`+`currency`）、从哪天起（`effective_start`，锚点即首次扣款日）、到哪天止（`effective_end` 可空＝持续有效）、完整审计（修订链）。§3.3 的月费摊派读的就是它。各表职责重划：
 
 | 表 | 职责 | 不再承担 |
 |---|---|---|
 | `billing_declarations` + revisions | **订阅登记**（关系+金额+期间，版本化、可撤销） | — |
-| `host_bills` | 只有账单才能证明的钱：`metered_actual`（按量实付）、`host_billed`（充值/积分消耗）；以及对声明月费的**校准**（B11 取代规则） | ~~订阅登记~~ |
+| `harness_bills` | 只有账单才能证明的钱：`metered_actual`（按量实付）、`harness_billed`（充值/积分消耗）；以及对声明月费的**校准**（B11 取代规则） | ~~订阅登记~~ |
 | 价目表 `catalog_2026_09` | 路由归属 + 价卡 | ~~`subscriptions` 段~~（从未存在，方向上也不再需要——订阅一律来自用户声明） |
 
 **Q：用户能不能修改订阅情况？**
@@ -241,7 +241,7 @@ UI 再让**通道先说话**（`billingRelationshipFromSteps`：`route === "thir
 1. **按月取价**：月费摊派当前只读当前态（一行一个金额），改价会**追溯改写历史**（¥44→¥49 会把 2025-07 起的所有月份都变成 ¥49）。修订链里每条 saved 修订自带金额+起止，摊派改为按月查"当月生效的那条修订"。
 2. **撤销不抹历史**：当前态被软删后，过去月份的月费一并消失——但那些月用户**真付过钱**。退订语义应是"修订链在今天终止"，过去的月份照摊。撤销"这条声明写错了"的语义则确实是全链作废——两种意图要用不同的修订形态区分（`amended` vs `revoked`）。
 
-**顺带修掉的双计风险（F9）**：待确认组按模型组切，同一订阅常被分两次声明（MiniMax-M3 一组、M2.7 一组），两条声明各带 ¥44——摊派不去重就是 ¥88/月。已修：`declared_subscription_fees` 按 host+provider 去重，留最早生效的一条（多账户同服务商的订阅当前模型表达不了，不冒充支持）。弹窗侧的同伴守卫（B14）：保存第二条同服务商订阅声明时提示"已有 ¥44/月 的订阅声明，重复声明会双计——请撤销旧的或等修改功能"。
+**顺带修掉的双计风险（F9）**：待确认组按模型组切，同一订阅常被分两次声明（MiniMax-M3 一组、M2.7 一组），两条声明各带 ¥44——摊派不去重就是 ¥88/月。已修：`declared_subscription_fees` 按 harness+provider 去重，留最早生效的一条（多账户同服务商的订阅当前模型表达不了，不冒充支持）。弹窗侧的同伴守卫（B14）：保存第二条同服务商订阅声明时提示"已有 ¥44/月 的订阅声明，重复声明会双计——请撤销旧的或等修改功能"。
 
 ## 4. 改动清单
 
@@ -257,10 +257,10 @@ UI 再让**通道先说话**（`billingRelationshipFromSteps`：`route === "thir
 | B8 | `ROUTE_KNOWN_OFFICIAL` / `BILLING_ROUTE_KNOWN_OFFICIAL` | 收敛为一份（Rust 侧为准，JS 从 DTO 拿或加一条守卫比对） | F5 |
 | B9 | `authority.rs::billing_declaration_put` | 删除（死代码） | F8 |
 | B10 | 非订阅声明的可见面 | 待 §7-D4 定：给标记 or 降级为备注 | F6 |
-| B11 | `summary.rs::apply_host_bills` | **取代规则**：同一 provider 同月存在 `host_bills` 的 `fixed_subscription` 行时，以账单为准、**取代**声明月费（现状是叠加，会双计；真机 `host_bills` 为空，潜伏） | §3.3 |
-| B12 | KPI「订阅月费」行 | 口径标注：自报（声明）/ 账单校准（有 `host_bills` 取代的月份），hover 展开 | §3.3 |
+| B11 | `summary.rs::apply_harness_bills` | **取代规则**：同一 provider 同月存在 `harness_bills` 的 `fixed_subscription` 行时，以账单为准、**取代**声明月费（现状是叠加，会双计；真机 `harness_bills` 为空，潜伏） | §3.3 |
+| B12 | KPI「订阅月费」行 | 口径标注：自报（声明）/ 账单校准（有 `harness_bills` 取代的月份），hover 展开 | §3.3 |
 | B13 | 弹窗「修改订阅」+ `summary.rs` 摊派 | **已落地（2026-09-16）**：当前计费声明面板的「修改订阅」内联表单追加 supersede 修订（改价/退订，作用域原样带回）；摊派 `declared_fee_for_month` **按修订链按月取价**——首修订允许回溯（订阅自始在付），后续修订只从**声明那个月**起改价（`created_at_ms` 定界，改价不重写历史）；**退订＝带结束日的修订**（过去的月照摊、到期停），**撤销＝全链作废**（写错了，任何月份都不摊）——两种意图用修订形态天然区分，不需要新增撤销模式 | §3.4 |
-| B14 | 弹窗保存校验 | 保存第二条同 host+provider 的订阅声明时提示已有声明（金额/起始日），拦双计于写入前 | §3.4、F9 |
+| B14 | 弹窗保存校验 | 保存第二条同 harness+provider 的订阅声明时提示已有声明（金额/起始日），拦双计于写入前 | §3.4、F9 |
 
 ## 5. 迁移
 
@@ -288,7 +288,7 @@ UI 再让**通道先说话**（`billingRelationshipFromSteps`：`route === "thir
 - **D2｜通道进不进声明？** **已定向：不进**（留在事实行）。"通道值不落库"成为显式设计；将来要按通道限定作用域，另加 `route_scope`。
 - **D3｜按量的第三方路由，是否继续按官方价估算？** **已定向：继续**（维持 D02，拿不到中转真实单价）。
 - **D4｜非订阅声明（按量/组织承担）要不要可见面？** 现在它们在任何数字/标记上都不出现（F6）。建议给一个"已声明：按量 / 组织承担"的小标记，否则用户会重复声明。**待定。**
-- **D5｜积分（HostBilled）要不要在声明里可选？** 用户的"积分是按量的变体"成立，但它已经是宿主账单口径（`host_bills`），是否需要在弹窗里单选，取决于是否要把它和"按量"分开显示。**待定。**
+- **D5｜积分（HarnessBilled）要不要在声明里可选？** 用户的"积分是按量的变体"成立，但它已经是执行环境账单口径（`harness_bills`），是否需要在弹窗里单选，取决于是否要把它和"按量"分开显示。**待定。**
 - **D6｜「这批用量是不是订阅内的」谁说了算？** **已定向：(i) 归因是唯一权威**——钱、「已解决」、会话投影三处都只认 `subscription_covered` 归因；事实行的 `billing_mode` 降级为定价提示（"这个型号不按 token 计价"），不参与"是否已解决"，也不单独改金额。三面立刻一致、撤销天然可逆、F2 死角消失。价格目录那条路径补一句说明：选了订阅模式而不声明关系时，这批用量不计价也不被覆盖。
 
 ## 8. 实施顺序与风险

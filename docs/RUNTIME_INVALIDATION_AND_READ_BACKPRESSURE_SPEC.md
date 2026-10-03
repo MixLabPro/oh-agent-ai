@@ -16,7 +16,7 @@
 ## 0. 一句话结论
 
 **领域事件与失效信号是两种东西，runtime 核心必须用类型把它们分开。** `FactsIngested`
-是边沿触发的领域事件（每宿主每批一条、at-least-once、给 price reconcile / 配额扫描 /
+是边沿触发的领域事件（每执行环境每批一条、at-least-once、给 price reconcile / 配额扫描 /
 issue 评估器）；展示层需要的是电平触发的失效信号（幂等、latest-wins、一千次变更与一次
 变更的处理结果相同）。今天 `desktop-ui` 消费者把前者逐条透传给 webview，放大倍数等于批次
 数。本 spec 做四件事：① 权威库 revision 标量；② 词表分类 + 消费者兴趣集，dispatcher 拒绝
@@ -44,7 +44,7 @@ revision 键控 memo + 只读打开 + 有界读闸门，让放大即使发生也
    ——由守卫测试逐一枚举（§10）。不用 SQLite trigger（跨表 trigger 维护成本与 schema 演进
    纪律冲突）。
 4. **展示层消费者不读领域事件载荷。** 词表带类别，消费者带角色与兴趣集，dispatcher 按兴趣
-   过滤；`Presentation` 角色只能以合并型消费者身份参与 drain（fold 只读 `host` 字段），声明
+   过滤；`Presentation` 角色只能以合并型消费者身份参与 drain（fold 只读 `harness` 字段），声明
    任何 `Domain` 类型兴趣由构造期与守卫测试双重拒绝（与 `dependency_budget.rs` 同纪律：边界
    靠测试而不靠评审）。
 5. **不引入时间去抖。** 时间去抖不确定、不可测；revision 比较是确定的。现有 `FoldEventDebounce`
@@ -85,12 +85,12 @@ tick 尾部 drain_event_bus                        ▼
         ├─ 领域消费者（price-reconcile / quota / issue-evaluator）
         │     兴趣 = Domain 类，逐事件处理，逐事件记账                  ← §4.2
         └─ 展示消费者 desktop-ui（CoalescingConsumer）
-              fold: 收集 hosts 集合（逐事件记账不变）
+              fold: 收集 harnesses 集合（逐事件记账不变）
               flush: revision = db.revision()
                      ChangePublisher<Invalidation>.publish_if_changed  ← §4.3–4.5
                             │ 至多一次 / drain
                             ▼
-                 app-event { type: "Invalidated", revision, hosts }
+                 app-event { type: "Invalidated", revision, harnesses }
                             │
 webview 页面：比 revision → 决定是否拉                                 ← §6
                             │
@@ -135,7 +135,7 @@ IPC 读命令 ─▶ ReadGate(permit) ─▶ spawn_blocking ─▶ SqlSummaryRep
   `tests/revision_guard.rs` 两条守卫（`BEGIN IMMEDIATE` 站点闭集 + revision 行唯一写者）。
   `FactsIngested.revision` 字段**未做**（留给 P0 收尾）。
 - `AppEvent::facts_ingested` 增加 `revision: u64` 参数，进 payload（补齐事件总线 spec §5
-  声明的 `FactsIngested{host, run_id, revision}`）。生产者在同一事务内先读 revision 再 +1
+  声明的 `FactsIngested{harness, run_id, revision}`）。生产者在同一事务内先读 revision 再 +1
   会引入顺序依赖，故 payload 携带的是**本事务提交后**的值 = 读到的当前值 + 1；测试钉住
   「payload.revision == 提交后 db.revision()」。
 - 跨进程语义：CLI `sync-facts` 子进程与桌面 tick 走同一入口，revision 在库内，桌面 drain
@@ -154,7 +154,7 @@ pub const EVENT_TYPES: &[(&str, EventClass)] = &[
     ("AuthorityRevisionAdvanced", EventClass::Domain), // 保留位：见 §4.4 注
     ("DeclarationSaved",         EventClass::Domain),
     ("PriceCardSaved",           EventClass::Domain),
-    ("HostSourceFailed",         EventClass::Domain),
+    ("HarnessSourceFailed",         EventClass::Domain),
     ("SourceRecovered",          EventClass::Domain),
     ("McpToolInvoked",           EventClass::Audit),
     ("TrustMonitorEvent",        EventClass::Domain),
@@ -176,7 +176,7 @@ pub struct ConsumerInterest {
   `AND o.event_type IN (…)`（按兴趣展开，空集按角色允许类别展开）。
 - **角色约束**（构造期 + 守卫测试双重）：`Presentation` 角色的 `types` 只允许为空且类别解析为
   空集——即展示消费者**不消费任何 outbox 行的载荷**，它只以合并型消费者身份参与 drain 以拿到
-  「本轮有事发生 + 哪些宿主」（§4.3）。`Domain` 角色可订阅 `Domain` 类；`Audit` 角色可订阅
+  「本轮有事发生 + 哪些执行环境」（§4.3）。`Domain` 角色可订阅 `Domain` 类；`Audit` 角色可订阅
   `Audit` 类。
 - 守卫测试 `presentation_consumer_cannot_subscribe_domain_events`：以 `Presentation` 角色构造
   含 `"FactsIngested"` 兴趣的消费者 → `Dispatcher::new` 返回 `Err(RoleViolation)`。
@@ -204,9 +204,9 @@ pub struct CoalescingConsumer<S> {
   丢失——这是可接受的，因为失效信号是电平语义，下一轮 drain 的 flush 或页面挂载时的主动拉都会
   重新对齐（§6）。反过来（先 flush 后记账）会在崩溃时重复投递领域事件，不可接受。
 - `DispatchReport` 增加 `flushed: usize`（本轮 flush 次数，测试与诊断面用）。
-- `desktop-ui` 消费者改为 `CoalescingConsumer<BTreeSet<String>>`：fold 收集 `event.host`；
+- `desktop-ui` 消费者改为 `CoalescingConsumer<BTreeSet<String>>`：fold 收集 `event.harness`；
   flush 见 §4.4。它的 `interest` 为 `Presentation` 角色、空类型集——drain 的 SQL 对它按
-  「所有 Domain 类」展开（它需要看到行才能收集 hosts），但 fold 闭包**只读 `host` 字段**，
+  「所有 Domain 类」展开（它需要看到行才能收集 harnesses），但 fold 闭包**只读 `harness` 字段**，
   载荷不透传。守卫测试 `presentation_fold_never_forwards_payload`：用含敏感占位 payload 的合成
   事件驱动 drain，断言 app-event 发射体中不含该占位。
 
@@ -216,19 +216,19 @@ pub struct CoalescingConsumer<S> {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Invalidation {
     pub revision: u64,
-    /// 本轮 drain 触及的宿主（闭集词表 claude-code/codex/dsh/workbuddy）；空 = 全局。
-    pub hosts: BTreeSet<String>,
+    /// 本轮 drain 触及的执行环境（闭集词表 claude-code/codex/dsh/workbuddy）；空 = 全局。
+    pub harnesses: BTreeSet<String>,
 }
 ```
 
 - flush 流程：`revision = db.revision()`（自持只读连接，spec §6 消费者自持资源纪律）→
-  `Invalidation { revision, hosts }` → `ChangePublisher::publish_if_advanced`（§4.5）。
+  `Invalidation { revision, harnesses }` → `ChangePublisher::publish_if_advanced`（§4.5）。
 - **电平比较**：进程内保存 `last_published: Option<u64>`；仅当 `revision > last_published`
   才发射。同一轮 drain 无论 fold 了多少事件，至多一次；revision 未前进的 tick 零发射
   （REVIEW P3 的验收「空转 5 分钟不产生 app-event」在此实现，不需要 SyncStatus 逐字段比较）。
 - **顺序注记**：drain 时读到的 revision 可能超前于本轮 fold 的事件（另一写者刚提交）。对失效
   信号安全（latest-wins，多失效无害）；对领域消费者无影响（它们仍逐条处理）。写进 spec 的
-  原因：将来有人想用 `Invalidation.hosts` 做精确差量时会踩到——`hosts` 是「至少这些」，不是
+  原因：将来有人想用 `Invalidation.harnesses` 做精确差量时会踩到——`harnesses` 是「至少这些」，不是
   「恰好这些」。
 - **`AuthorityRevisionAdvanced` 词表行的处置**：保留为 outbox 词表的保留位（与 `HourTicked` 同
   待遇，事件总线 spec §5 备注同款措辞），**不发射**。理由：它若逐次落 outbox 就违反 §1.1；
@@ -374,14 +374,14 @@ impl ReadGate {
 
 ## 6. UI 面配套（最小改动）
 
-- `app-event` 新类型 `Invalidated { revision: u64, hosts: string[] }`，登记进事件总线 spec §5
-  「直发 UI」组；`safeAppEvent` 的白名单解析它的两个字段（revision 限幅 u53，hosts 按宿主
+- `app-event` 新类型 `Invalidated { revision: u64, harnesses: string[] }`，登记进事件总线 spec §5
+  「直发 UI」组；`safeAppEvent` 的白名单解析它的两个字段（revision 限幅 u53，harnesses 按执行环境
   闭集过滤），其余类型仍只透 `type`。
 - `FoldCompleted` 退役：它的语义（「有新折账」）被 `Invalidated` 完全覆盖；`FoldEventDebounce`
   同删。`SyncStatusChanged` 保留（它是 UI 状态，不是数据失效）。
 - 页面最小纪律（不引入 React Query）：每个订阅者保存 `seenRevision`；收到 `Invalidated` 且
   `revision > seenRevision` 才拉；拉完更新。App 壳层、Usage、Sessions、Findings、Settings 主
-  effect 五处改法相同。**即使页面一行不改**，§4 已把每 tick 的 UI 事件从「≈2 + 宿主数」压到
+  effect 五处改法相同。**即使页面一行不改**，§4 已把每 tick 的 UI 事件从「≈2 + 执行环境数」压到
   1，§5 把重复拉的成本压到 memo 命中。
 - 事件类型过滤：`SettingsPage` 主 effect 与 `UsagePage`/`SessionsPage` 只对 `Invalidated`
   与 `SourceDataDeleted` 刷新，`WatcherHealthChanged`/`TrustMonitor*` 交给已按类型过滤的局部
@@ -395,7 +395,7 @@ impl ReadGate {
 |---|---|
 | dispatcher 内时间去抖 | §1.5；确定性优先 |
 | dispatcher 丢事件 / 按类型优先级丢弃 | outbox 是账务契约；事件总线 spec §4.3 的 mpsc 丢弃条款只针对进程内快通道，P0/P1 形态下该通道尚不存在 |
-| `Invalidation.hosts` 做精确差量刷新 | §4.4 顺序注记：hosts 是下界不是精确集 |
+| `Invalidation.harnesses` 做精确差量刷新 | §4.4 顺序注记：harnesses 是下界不是精确集 |
 | 把 FactsIngested 改成 UI 友好形状 | 领域事件形状是消费者契约；补 `revision` 字段即止 |
 | revision 走 SQLite trigger | §1.3 |
 | 引入 tokio Semaphore / React Query | 依赖纪律；std 原语与 20 行 hook 足够 |
@@ -427,7 +427,7 @@ impl ReadGate {
   - [x] `SyncStatusChanged`（`SyncStatusPublisher`）/ `WatcherHealthChanged` 迁到 `ChangePublisher`
   - [x] `FoldCompleted` / `FoldEventDebounce` / `fold_debounce_step` / `emit_fold_event` 退役
         （`ui/workbench.js` 确认随 `frontendDist: "ui"` 打包，同 PR 改写订阅与 fold-bridge 契约脚本）
-  - [x] React：`Invalidated` DTO 解析（revision 限幅 + hosts 闭集）、`makeInvalidationGate()`
+  - [x] React：`Invalidated` DTO 解析（revision 限幅 + harnesses 闭集）、`makeInvalidationGate()`
         共享闸门接入 App/Usage/Sessions/Findings/Settings 五处、Settings 按类型分流
         （`SourceDataDeleted` / `SyncStatusChanged` / 失效三分支）
   - [ ] 真机：1s/次受控写入 + Settings 页挂载，每 tick UI 事件 ≤ 2（留待真机验收）
@@ -463,7 +463,7 @@ impl ReadGate {
         mcp.rs` 模块头就写着「单连接串行」——一行读完整处理完才读下一行，
         `dispatch_with_permissions` 不起线程，同一个 serve 进程内**没有并发**
         可言。`ReadGate` 是并发调节阀，接一个从不并发的调用点等于什么都不做。
-        跨进程并发（多个 MCP host 各起一个 serve）不是 `ReadGate` 能管的——
+        跨进程并发（多个 MCP harness 各起一个 serve）不是 `ReadGate` 能管的——
         那是进程内静态信号量，管不到别的进程；这一层的保护已经是 P2 的
         `open_db_ro`（只读连接，不抢写锁）+ SQLite 自己的 WAL/`busy_timeout`。
   - [x] 诊断包 v2（2026-09-22，`apps/desktop/src-tauri/src/lib.rs`
@@ -483,7 +483,7 @@ impl ReadGate {
 | 9.3 | `Presentation` 角色订阅 `"FactsIngested"` | `Dispatcher::new` 返回 `RoleViolation` |
 | 9.4 | 兴趣集过滤 | 只订阅 `PriceCardSaved` 的消费者对 `FactsIngested` 行零投递、零记账 |
 | 9.5 | 迁移 v25→v26 幂等 | 两次迁移 revision 仍为 0，不重复插行 |
-| 9.6 | 合成 1000 条 FactsIngested 一轮 drain | `flushed == 1`，deliveries 1000 行，`Invalidation.hosts` = 合成宿主集 |
+| 9.6 | 合成 1000 条 FactsIngested 一轮 drain | `flushed == 1`，deliveries 1000 行，`Invalidation.harnesses` = 合成执行环境集 |
 | 9.7 | revision 未前进的连续两轮 drain | 第二轮 `publish_if_advanced` 返回 false，零 emit |
 | 9.8 | fold 中途一条返回 Err | 该行记 last_error，其余记成功，flush 仍恰一次 |
 | 9.9 | `presentation_fold_never_forwards_payload` | 敏感占位不出现在 emit 体 |

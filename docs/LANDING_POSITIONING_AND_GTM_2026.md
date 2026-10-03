@@ -15,7 +15,7 @@ Do not lead with “save money on AI coding.” Token dashboards and cost tracke
 
 > **你把工作交给 Agent。谁来检查 Agent？**
 
-The product mechanism is an **Agent work receipt**: a local, reviewable record of the usage, cost basis, failures, and session traces that supported hosts already leave on the machine.
+The product mechanism is an **Agent work receipt**: a local, reviewable record of the usage, cost basis, failures, and session traces that supported harnesses already leave on the machine.
 
 This is broader than coding, but it is not permission to claim universal office-agent coverage. The category can be broad while the support statement remains precise.
 
@@ -26,11 +26,11 @@ This is broader than coding, but it is not permission to claim universal office-
 | Local processing; no user session data upload | Implemented. Public pricing-catalog and release checks may use the network without user session data. | Lead with it as the primary trust proof. |
 | MIT open source | Implemented. | Show beside the primary CTA. |
 | No API key required | Implemented for local log reading. | Show beside the primary CTA. |
-| Cross-source usage overview | Implemented for the runtime sources represented in the desktop authority store; coverage differs by host. | Say “supported sources,” not “all agents.” |
-| Actual, estimated, subscription, and unresolved cost kept separate | Implemented in the data model and UI. Some hosts or sessions have no price evidence. | Say “cost basis,” not “exact bill.” |
+| Cross-source usage overview | Implemented for the runtime sources represented in the desktop authority store; coverage differs by harness. | Say “supported sources,” not “all agents.” |
+| Actual, estimated, subscription, and unresolved cost kept separate | Implemented in the data model and UI. Some harnesses or sessions have no price evidence. | Say “cost basis,” not “exact bill.” |
 | Session list and drill-down | Implemented. | Safe to show. |
 | Session trajectory and consumption diagnostics | Implemented for supported evidence: token composition, failures, input growth, cache behavior, and trace navigation. | Say “find clues / inspect evidence,” not “automatically optimize.” |
-| WorkBuddy runtime entry point | Implemented with session and usage evidence, but not the same cost/detail coverage as every other host. | Use it as the bridge to office work; disclose unequal coverage. |
+| WorkBuddy runtime entry point | Implemented with session and usage evidence, but not the same cost/detail coverage as every other harness. | Use it as the bridge to office work; disclose unequal coverage. |
 | OpenClaw and Hermes runtime observability | Not equivalent to core runtime sources today; current strength is install-time and Skill inspection. | Do not put them in a runtime-support logo wall. |
 | Judge whether the final deliverable is correct | Not implemented. | Explicitly deny this claim in FAQ. |
 | Guaranteed savings or ROI | Not implemented and not generally measurable from fixed subscriptions. | Never promise a percentage saved. |
@@ -67,7 +67,7 @@ Every Agent run should leave a receipt.
 
 - not a quality judge;
 - not a cloud team-observability platform;
-- not universal host coverage;
+- not universal harness coverage;
 - not a guaranteed savings engine.
 
 ## Landing hierarchy
@@ -76,7 +76,7 @@ Every Agent run should leave a receipt.
 2. **Mechanism:** “每次 Agent 工作，都应该留下一张收据。”
 3. **Proof:** local processing, MIT open source, no API key.
 4. **Demonstration:** source → session → failure/cost clue → trace.
-5. **Boundary:** exact supported hosts and unequal evidence coverage.
+5. **Boundary:** exact supported harnesses and unequal evidence coverage.
 6. **CTA:** “检查我的 Agent,” not “learn more.”
 
 ## Initial audience
@@ -89,7 +89,7 @@ Prioritize people who already run long or parallel Agent tasks and have experien
 - uses more than one local Agent;
 - handles local files that should not enter a third-party observability cloud.
 
-The first audience is still technical power users and AI-forward knowledge workers. Do not buy broad “productivity” traffic until office-host coverage and onboarding are strong enough for nontechnical users.
+The first audience is still technical power users and AI-forward knowledge workers. Do not buy broad “productivity” traffic until office-harness coverage and onboarding are strong enough for nontechnical users.
 
 ## Reddit playbook
 
@@ -124,7 +124,7 @@ Wait before targeting broad productivity communities. The product must first sho
 2. Share a redacted screenshot or 15-second video: overview → session → diagnostic → trace.
 3. Explain the accounting rule: estimates are not bills; unknown is not zero.
 4. Explain the privacy rule: local logs stay local; price/release checks carry no session data.
-5. Disclose limitations: macOS beta, unequal host coverage, no output-quality judgment.
+5. Disclose limitations: macOS beta, unequal harness coverage, no output-quality judgment.
 6. Ask one concrete question: “Which missing clue would help you decide whether a long Agent run was worth it?”
 7. Add the GitHub link after the question and disclose “I built this.”
 
@@ -141,7 +141,7 @@ Do not link in the opening paragraph. Present the work-receipt model, show the f
 - a teardown of one anonymized repeated-failure trace;
 - why “subscription equivalent cost” is not an actual bill;
 - how to audit local Agent logs without uploading them;
-- what the product cannot know from a given host's log format.
+- what the product cannot know from a given harness's log format.
 
 ## X playbook
 

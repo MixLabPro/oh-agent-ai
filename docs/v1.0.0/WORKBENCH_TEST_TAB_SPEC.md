@@ -20,7 +20,7 @@ fallback / 请求被改写两类已登记）· [路由归因 spec](../PROVIDER_R
 `--settings` 显式键又要求凭据离开「仅经子进程 env 传递」的红线。**默认面改为被动
 路线质量分析**（`routes-quality`：`usage_facts.model_id` 的实际模型族分布——协议
 响应原样，anthropic 官方不可能返回 deepseek/glm，是硬证据），主动 L0 探针降级为
-「高级」折叠区。用户语言也从「路线 A/B」改为「宿主 × 路线 × 实际模型」：用户关心
+「高级」折叠区。用户语言也从「路线 A/B」改为「执行环境 × 路线 × 实际模型」：用户关心
 "我用 claude-code 跑的请求，实际拿到的是什么模型、失败了多少"。词表与判定在
 `domain::route_quality`（Rust/Python 对拍 `fixtures/route_quality/vectors.json`）；
 `<synthetic>`（claude 请求失败的本地占位）单列 API 错误、不计任何模型族用量，
@@ -45,7 +45,7 @@ fallback / 请求被改写两类已登记）· [路由归因 spec](../PROVIDER_R
    - 判定输出永远带证据等级与「什么证据会改变结论」；
    - `underpowered` 是一等判定，不是失败态；
    - 凭据不落库不落盘（内存直传子进程 env）、金丝雀题面不进任何 agent 可读面；
-   - probe 会话（探针自身的宿主会话）在成本/用量视图默认排除、可显式筛入；
+   - probe 会话（探针自身的执行环境会话）在成本/用量视图默认排除、可显式筛入；
    - 探针流量不污染既有 golden/对拍面（runner 是新面，不改任何既有输出）。
 
 ## 2. 现状与前置
@@ -93,7 +93,7 @@ golden 纪律的判定层对应物——绝不为让某次跑通过而改阈值�
 
 | 层 | 落点 | 先例 |
 |---|---|---|
-| runner 逻辑 | 新 crate `agent-vitals-probe` + CLI `agent-vitals probe run/status/report`；统计/判定纯逻辑进 `agent-vitals-domain` | AGENTS.md：host I/O 在 adapter、确定性策略在 core/domain |
+| runner 逻辑 | 新 crate `agent-vitals-probe` + CLI `agent-vitals probe run/status/report`；统计/判定纯逻辑进 `agent-vitals-domain` | AGENTS.md：harness I/O 在 adapter、确定性策略在 core/domain |
 | 长任务 | DB job 行（`probe_runs.status` + `lease_owner` 文件锁）+ `probe_run_status` 轮询命令 | `billing_recalculation_jobs` 全套先例 |
 | 子进程 | spawn `claude -p --output-format stream-json` / `codex exec --json`；超时 kill + 输出完整性校验（claude -p 有偶发空输出/resume 挂起的已知 bug） | `run_navigation` 的 try_wait 轮询先例 |
 | 桌面端 | 像 sessions/findings 一样 spawn CLI 拿 JSON；tab 注册（`workbench.html` nav + `switchTab` 分支）；tray 深链走 `tab_for_menu_id` | 五 tab 既有骨架 |
@@ -137,7 +137,7 @@ golden 纪律的判定层对应物——绝不为让某次跑通过而改阈值�
 ## 11. 分期
 
 - **P1（runner 骨架）**：`agent-vitals-probe` crate + CLI（run/status/report）+ L0
-  身份探针（claude-code 首宿主：spawn `claude -p`、resolved model）+ 判定合并
+  身份探针（claude-code 首执行环境：spawn `claude -p`、resolved model）+ 判定合并
   （worst-of）+ job 模式 + 预算熔断 + consent 流。**显式延后（评审记录）**：
   thinking 出现率与上下文窗口阶梯不进 P1——前者依赖 claude CLI 的 thinking
   预算旗面（未核实的旗子不发明），后者单次成本高（阶梯要发大上下文请求），

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "id": "city",
+      "name": "City",
+      "entry": "plugins/AgentCity.plugin/ui/index.html",
+      "commandNamespace": "city",
+      "dataProjections": ["city:v1", "city-settings:v1"],
+      "allowLocalExports": true,
+      "navigationTargets": ["session"],
+      "source": "apps/agent-city/ui",
+      "debugProbeMarker": "__CITY_PROBE_SPIN__"
+    }
+  ]
+}

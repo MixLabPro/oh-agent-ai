@@ -34,7 +34,7 @@ from agent_vitals.plan import build_plan  # noqa: E402
 def full_report():
     return {
         "schema_version": "1.0",
-        "host_selection": "claude-code",
+        "harness_selection": "claude-code",
         "description_budget": {"available": True, "over_by_chars": 0, "pct_used": 90},
         "trigger_data": {"available": True, "zombie_min_age_days": 14,
                          "zombie_candidates": [{"name": "z1", "tier1_tokens": 100}]},
@@ -64,7 +64,7 @@ class PlanLockstep(unittest.TestCase):
         → resolve-shadow:0 c1(null)。pct_used=90 且 over_by=0 → budget 状态 SV001。"""
         p = build_plan(full_report(), startup_rate=30)
         self.assertEqual(p["schema_version"], "plan/1.0")
-        self.assertEqual(p["host_selection"], "claude-code")
+        self.assertEqual(p["harness_selection"], "claude-code")
         self.assertEqual(p["startup_rate_per_month"], 30)
 
         items = p["items"]

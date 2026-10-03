@@ -15,7 +15,7 @@
 //!
 //! 时钟注入点（Phase 1.5）：`now_ms()` 是本 crate 唯一读 `std::time` 的位置
 //! （runtime 允许读时钟，data 不读）——所有 `*_at_ms` 从这里取。
-//! `sync_host_sql` 进入时取一次 `now` 注入全程（一个批次 = 一格时间）；
+//! `sync_harness_sql` 进入时取一次 `now` 注入全程（一个批次 = 一格时间）；
 //! `migrate_json_checkpoint` 完全由调用方注入。模块内无其他 `std::time` 读取。
 
 use std::path::Path;
@@ -115,7 +115,7 @@ fn combined_pricing(overlay: Option<&Value>) -> (String, String) {
 ///
 /// 旧版把 `catalog_2026_09.subscriptions` 编进 `pricing.json`；升级后只有已
 /// 落库的历史快照还保留该线索。本迁移扫描全部快照，产出`pending`候选；只有
-/// 用户后续确认才能写入`host_bills`。此前版本误写的专用 legacy 账单会软删除，
+/// 用户后续确认才能写入`harness_bills`。此前版本误写的专用 legacy 账单会软删除，
 /// 用户手工账单不受影响。
 pub fn migrate_legacy_subscription_snapshots(
     db: &AuthorityDb,
@@ -131,7 +131,7 @@ fn migrate_legacy_subscription_snapshots_in_txn(
     db: &AuthorityDb,
     now_ms: i64,
 ) -> Result<usize, AuthorityError> {
-    db.revoke_legacy_pricing_host_bills(now_ms)?;
+    db.revoke_legacy_pricing_harness_bills(now_ms)?;
     let mut imported = 0usize;
     for (version, payload) in db.pricing_snapshot_payloads()? {
         let Ok(root) = serde_json::from_str::<Value>(&payload) else { continue };
@@ -152,12 +152,12 @@ fn migrate_legacy_subscription_snapshots_in_txn(
             ) else { continue };
             let Some(first_month) = valid_month_prefix(start) else { continue };
             let Some(amount_minor) = amount_to_minor(amount) else { continue };
-            let host = legacy_subscription_host(provider);
+            let harness = legacy_subscription_harness(provider);
             let candidate_id = format!(
-                "legacy-pricing-candidate:{version}:{host}:{provider}:{currency}:{amount_minor}:{first_month}"
+                "legacy-pricing-candidate:{version}:{harness}:{provider}:{currency}:{amount_minor}:{first_month}"
             );
             if db.billing_import_candidate_put(
-                &candidate_id, host, provider, currency, amount_minor, &first_month,
+                &candidate_id, harness, provider, currency, amount_minor, &first_month,
                 &version, now_ms,
             )? {
                 imported += 1;
@@ -167,7 +167,7 @@ fn migrate_legacy_subscription_snapshots_in_txn(
     Ok(imported)
 }
 
-fn legacy_subscription_host(provider: &str) -> &'static str {
+fn legacy_subscription_harness(provider: &str) -> &'static str {
     match provider {
         "anthropic" | "minimax" | "zhipu-glm" => "claude-code",
         _ => "unattributed",
@@ -321,9 +321,9 @@ pub fn migrate_json_checkpoint(
         let writer = SqlFactWriter::new(conn, &run_id, now_ms)?;
         let mut n = 0usize;
         for (path_key, entry) in files {
-            // 项缺 host/size/mtime → 不迁：该项在下次差量里会被当「新文件」
+            // 项缺 harness/size/mtime → 不迁：该项在下次差量里会被当「新文件」
             //（source_files 连一行都没有 → dirty → 重 emit），安全侧优先。
-            let Some(host) = entry.get("host").and_then(Value::as_str) else {
+            let Some(harness) = entry.get("harness").and_then(Value::as_str) else {
                 continue;
             };
             let (Some(size), Some(mtime)) = (
@@ -335,7 +335,7 @@ pub fn migrate_json_checkpoint(
             // 明文路径不落库：source_id = fnv1a64(路径) 由 writer 层算。
             // checkpoint 里不携带会话信息，native_session_id 不推断（None）。
             writer.upsert_source_file(
-                host,
+                harness,
                 std::path::Path::new(path_key),
                 size,
                 mtime,
@@ -370,7 +370,7 @@ pub fn migrate_json_checkpoint(
     Ok(count)
 }
 
-/// SQL 版例行同步的结果形状，与 `sync_service::HostSyncReport` 对齐（CLI
+/// SQL 版例行同步的结果形状，与 `sync_service::HarnessSyncReport` 对齐（CLI
 /// 渲染复用）。`files_skipped` 由调用方（差量计算侧）填，本模块收到的
 /// `dirty` 已经剔除了「指纹未变」的文件，故本模块不产生 skipped；
 /// `errors` = 「该文件本轮没进库」的明细，与 JSONL 版的诚实噪声同语义
@@ -417,7 +417,7 @@ fn outcome_is_factual(outcome: &SqlSyncOutcome) -> bool {
 /// 表示此前没有一次成功同步把该路径提交到 authority。
 pub fn source_file_fingerprint(
     db: &AuthorityDb,
-    host: &str,
+    harness: &str,
     path: &Path,
 ) -> Result<Option<(u64, u64, i64)>, AuthorityError> {
     let path_hash =
@@ -425,8 +425,8 @@ pub fn source_file_fingerprint(
     db.conn()
         .query_row(
             "SELECT size_bytes, mtime_ns, parser_version FROM source_files
-             WHERE host = ?1 AND path_hash = ?2",
-            rusqlite::params![host, path_hash],
+             WHERE harness = ?1 AND path_hash = ?2",
+            rusqlite::params![harness, path_hash],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)? as u64,
@@ -444,7 +444,7 @@ pub fn source_file_fingerprint(
 /// `source_files` fingerprint row; facts may share the batch source because
 /// their wire format does not preserve a one-file mapping.
 pub(crate) struct RuntimeSnapshotWrite<'a> {
-    /// 本轮要落库的宿主实时快照（通常 0 或 1 条；一个宿主一类）。
+    /// 本轮要落库的执行环境实时快照（通常 0 或 1 条；一个执行环境一类）。
     pub snapshots: Vec<RuntimeQuotaSnapshot<'a>>,
     /// schema 升级的一次性回填完成标记。它与本批 source 指纹同一事务提交，
     /// 因而不会在写入失败后错误地阻止下一轮重试。
@@ -453,27 +453,27 @@ pub(crate) struct RuntimeSnapshotWrite<'a> {
 
 /// 类型化的当前状态 + 已生成的兼容投影。
 ///
-/// `payload_json` 可以保留 Codex 的 `has_credits` 等宿主扩展，但它已经在
+/// `payload_json` 可以保留 Codex 的 `has_credits` 等执行环境扩展，但它已经在
 /// adapter 内生成；SQL 层只负责原样保存，不通过 JSON 路径提取业务字段。
-/// 一条待落库的宿主实时快照。
+/// 一条待落库的执行环境实时快照。
 ///
 /// **为什么不是 `&QuotaSnapshot`（Codex 的契约类型）**：2026-09-14 起这条路有第二个
 /// 消费方——Claude Pro 的窗口状态（`claude_quota`），它有自己的契约、不该被塞进
-/// Codex 的结构体。Runtime 本来就不解析宿主 wire（职责边界），所以这里只要
+/// Codex 的结构体。Runtime 本来就不解析执行环境 wire（职责边界），所以这里只要
 /// **已经由 adapter 校验过的** payload 与观察时刻。
 #[derive(Clone, Copy)]
 pub(crate) struct RuntimeQuotaSnapshot<'a> {
-    /// 落 `host_runtime_snapshots.snapshot_kind`（`codex_quota` / `claude_quota`）。
+    /// 落 `harness_runtime_snapshots.snapshot_kind`（`codex_quota` / `claude_quota`）。
     pub snapshot_kind: &'a str,
     pub payload_json: &'a str,
-    /// 观察时刻（epoch ms）——由宿主 adapter 从它自己的 wire 时间戳派生。
+    /// 观察时刻（epoch ms）——由执行环境 adapter 从它自己的 wire 时间戳派生。
     pub observed_at_ms: i64,
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_flat_facts_with_sources(
     db: &AuthorityDb,
-    host: &str,
+    harness: &str,
     machine_namespace: &str,
     sources: &[(std::path::PathBuf, (u64, u64))],
     checkpoint_overrides: &std::collections::HashMap<String, crate::source_graph::SourceCheckpointOverride>,
@@ -508,7 +508,7 @@ pub(crate) fn write_flat_facts_with_sources(
             );
             conn.execute(
                 "INSERT OR IGNORE INTO route_evidence(
-                   evidence_id, host, machine_namespace, provider_raw, endpoint_host,
+                   evidence_id, harness, machine_namespace, provider_raw, endpoint_host,
                    evidence_basis, observed_at_ms, ingested_run_id)
                  VALUES(?1, 'codex', ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
@@ -523,7 +523,7 @@ pub(crate) fn write_flat_facts_with_sources(
             )?;
         }
         for (path, (size_bytes, mtime_ns)) in sources {
-            writer.upsert_source_file(host, path, *size_bytes, *mtime_ns, None, PARSER_VERSION)?;
+            writer.upsert_source_file(harness, path, *size_bytes, *mtime_ns, None, PARSER_VERSION)?;
             // SourceGraph 检查点推进（spec §1.3 / §12）：与事实写入同事务。
             // B1 修复：增量文件的检查点用解析器给出的换行边界 + claude-jsonl-v1，
             // 而非无条件 stat size + FULL_PARSE_V0（后者在 in-flight 半行场景
@@ -534,7 +534,7 @@ pub(crate) fn write_flat_facts_with_sources(
                 None => (Some(*size_bytes), crate::source_graph::FULL_PARSE_V0),
             };
             crate::source_graph::advance_checkpoint(
-                conn, host, &hash,
+                conn, harness, &hash,
                 offset,
                 parser_id,
                 *size_bytes, *mtime_ns,
@@ -562,7 +562,7 @@ pub(crate) fn write_flat_facts_with_sources(
             return Ok(((), route_evidence.is_some()
                 || runtime_snapshot.as_ref().and_then(|write| write.backfill_marker).is_some()));
         }
-        let source_id = writer.upsert_batch_source(host)?;
+        let source_id = writer.upsert_batch_source(harness)?;
         // Route evidence is session-native and belongs to the fact that
         // observed it. Persist its session and source links before inserting
         // usage_facts so the FK trigger can validate every evidence id.
@@ -576,13 +576,13 @@ pub(crate) fn write_flat_facts_with_sources(
             }
             conn.execute(
                 "INSERT OR IGNORE INTO route_evidence(
-                   evidence_id, host, machine_namespace, native_session_id,
+                   evidence_id, harness, machine_namespace, native_session_id,
                    provider_raw, endpoint_host, evidence_basis, observed_at_ms,
                    source_id, ingested_run_id)
                  VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
                     evidence_id,
-                    fact.get("host").and_then(Value::as_str).unwrap_or(host),
+                    fact.get("harness").and_then(Value::as_str).unwrap_or(harness),
                     machine_namespace,
                     fact.get("native_session_id").and_then(Value::as_str),
                     fact.get("provider_raw").and_then(Value::as_str),
@@ -599,19 +599,19 @@ pub(crate) fn write_flat_facts_with_sources(
         if let Some(write) = runtime_snapshot.as_ref() {
             for snapshot in &write.snapshots {
                 conn.execute(
-                    "INSERT INTO host_runtime_snapshots(
-                         host, snapshot_kind, payload_json, observed_at_ms, source_id,
+                    "INSERT INTO harness_runtime_snapshots(
+                         harness, snapshot_kind, payload_json, observed_at_ms, source_id,
                          ingested_run_id, updated_at_ms)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                     ON CONFLICT(host, snapshot_kind) DO UPDATE SET
+                     ON CONFLICT(harness, snapshot_kind) DO UPDATE SET
                          payload_json = excluded.payload_json,
                          observed_at_ms = excluded.observed_at_ms,
                          source_id = excluded.source_id,
                          ingested_run_id = excluded.ingested_run_id,
                          updated_at_ms = excluded.updated_at_ms
-                     WHERE excluded.observed_at_ms >= host_runtime_snapshots.observed_at_ms",
+                     WHERE excluded.observed_at_ms >= harness_runtime_snapshots.observed_at_ms",
                     rusqlite::params![
-                        host,
+                        harness,
                         snapshot.snapshot_kind,
                         snapshot.payload_json,
                         snapshot.observed_at_ms,
@@ -678,7 +678,7 @@ pub(crate) fn write_flat_facts_with_sources(
             outcome.rejected += 1;
         }
         for (sid, profile, group) in groups {
-            writer.upsert_session(host, machine_namespace, &sid, Some(&profile), now)?;
+            writer.upsert_session(harness, machine_namespace, &sid, Some(&profile), now)?;
             let report = writer.insert_facts(&group, &source_id, &sid)?;
             outcome.inserted += report.inserted;
             outcome.duplicate += report.duplicate;
@@ -729,7 +729,7 @@ pub(crate) fn write_flat_facts_with_sources(
             crate::events::insert_outbox(
                 conn,
                 &crate::events::AppEvent::facts_ingested(
-                    host,
+                    harness,
                     &run_id,
                     revision_after_commit,
                     outcome.inserted,
@@ -772,10 +772,10 @@ pub(crate) fn write_flat_facts_with_sources(
 /// 本函数不做 I/O。
 ///
 /// Phase 3 读路径切换完成、`sql_authority_enabled` 设立后，旧链调用撤除，
-/// 本函数成为唯一写入（届时可并入 `sync_host_sql`）。
+/// 本函数成为唯一写入（届时可并入 `sync_harness_sql`）。
 pub fn write_facts_to_authority(
     db: &AuthorityDb,
-    host: &str,
+    harness: &str,
     machine_namespace: &str,
     files: &[(std::path::PathBuf, (u64, u64), Vec<Value>)],
     now: i64,
@@ -806,7 +806,7 @@ pub fn write_facts_to_authority(
                 None
             };
             let source_id =
-                w.upsert_source_file(host, path, *size_bytes, *mtime_ns, file_sid, PARSER_VERSION)?;
+                w.upsert_source_file(harness, path, *size_bytes, *mtime_ns, file_sid, PARSER_VERSION)?;
             if facts.is_empty() {
                 outcome.files_synced += 1;
                 continue;
@@ -862,7 +862,7 @@ pub fn write_facts_to_authority(
                 .map_err(AuthorityError::from)?;
             }
             for (sid, profile, group) in groups {
-                w.upsert_session(host, machine_namespace, &sid, Some(&profile), now)?;
+                w.upsert_session(harness, machine_namespace, &sid, Some(&profile), now)?;
                 let report = w.insert_facts(&group, &source_id, &sid)?;
                 outcome.inserted += report.inserted;
                 outcome.duplicate += report.duplicate;
@@ -887,12 +887,12 @@ pub fn write_facts_to_authority(
     }
 }
 
-/// 迁移期双写的**扁平批次**变体：宿主 emitter 产出的整批 facts（可能跨
-/// 多文件）一次写入。source 落为批次标记行 `{host}:sync`（批次级 provenance；
+/// 迁移期双写的**扁平批次**变体：执行环境 emitter 产出的整批 facts（可能跨
+/// 多文件）一次写入。source 落为批次标记行 `{harness}:sync`（批次级 provenance；
 /// 会话下钻靠事实自身的 native_session_id）。事务纪律同 write_facts_to_authority。
 pub fn write_flat_facts_to_authority(
     db: &AuthorityDb,
-    host: &str,
+    harness: &str,
     machine_namespace: &str,
     facts: &[Value],
     now: i64,
@@ -904,7 +904,7 @@ pub fn write_flat_facts_to_authority(
     let mut outcome = SqlSyncOutcome::default();
     let result: Result<(), AuthorityError> = db.with_immediate_txn(|conn| {
         let writer = SqlFactWriter::new(conn, &run_id, now)?;
-        let source_id = writer.upsert_batch_source(host)?;
+        let source_id = writer.upsert_batch_source(harness)?;
         let (groups, missing) = group_facts_by_session(facts);
         for f in &missing {
             conn.execute(
@@ -931,7 +931,7 @@ pub fn write_flat_facts_to_authority(
             outcome.rejected += 1;
         }
         for (sid, profile, group) in groups {
-            writer.upsert_session(host, machine_namespace, &sid, Some(&profile), now)?;
+            writer.upsert_session(harness, machine_namespace, &sid, Some(&profile), now)?;
             let report = writer.insert_facts(&group, &source_id, &sid)?;
             outcome.inserted += report.inserted;
             outcome.duplicate += report.duplicate;
@@ -965,10 +965,10 @@ pub fn retention_cutoff_ms(current_month: &str, months_back: u32) -> Option<i64>
     agent_vitals_domain::usage::ms_from_civil(total / 12, (total % 12 + 1) as u32, 1, 0, 0, 0)
 }
 
-/// 对单宿主执行 SQL 写入。
+/// 对单执行环境执行 SQL 写入。
 ///
 /// `dirty` = (路径, (size, mtime_ns)) 差集——**调用方算好**（sync_service 的
-/// 发现/差量复用不变）；`emit` = 宿主 emitter（同一函数）。本函数只管后
+/// 发现/差量复用不变）；`emit` = 执行环境 emitter（同一函数）。本函数只管后
 /// 半程：`sync_runs` 开批 → source_files/sessions/usage_facts 写入 → 收批。
 ///
 /// 协议（spec §5.1.4）：begin_run（trigger="cli"）→ 一个 `with_immediate_txn`
@@ -982,10 +982,10 @@ pub fn retention_cutoff_ms(current_month: &str, months_back: u32) -> Option<i64>
 /// - **全失败**（零文件成交且 errors 非空）：run 标 failed + Err 上抛。
 ///
 /// 批次的时间都取入口处 `now_ms()` 的一次读数（时钟注入点），不重复取。
-pub fn sync_host_sql(
+pub fn sync_harness_sql(
     db: &AuthorityDb,
     data_home: &Path,
-    host: &str,
+    harness: &str,
     machine_namespace: &str,
     dirty: &[(std::path::PathBuf, (u64, u64))],
     emit: impl Fn(&std::path::Path) -> Result<Vec<serde_json::Value>, String>,
@@ -996,7 +996,7 @@ pub fn sync_host_sql(
     db.begin_run(&run_id, TRIGGER_SYNC, now)
         .map_err(|e| format!("begin_run {run_id}: {e}"))?;
 
-    // **emit 在事务外**（审查 P2）：emit 是宿主日志 I/O + 解析（毫秒到秒
+    // **emit 在事务外**（审查 P2）：emit 是执行环境日志 I/O + 解析（毫秒到秒
     // 级），关进 BEGIN IMMEDIATE 会把写锁横跨 I/O 持有——并发读被无谓阻塞。
     // 先全部 emit 进内存，事务只包 DB 写入（spec §5.1.4 的事务语义指
     // 「写入原子性」，不要求把源读取也关进去）。文件级 emit 错误收集进
@@ -1038,7 +1038,7 @@ pub fn sync_host_sql(
                 None
             };
             let source_id =
-                w.upsert_source_file(host, path, *size_bytes, *mtime_ns, file_sid, PARSER_VERSION)?;
+                w.upsert_source_file(harness, path, *size_bytes, *mtime_ns, file_sid, PARSER_VERSION)?;
 
             if facts.is_empty() {
                 // 无事实但有源文件 → 仍算 synced（元数据被记录，本批无账）
@@ -1102,7 +1102,7 @@ pub fn sync_host_sql(
                 let profile_ref = profile.as_str();
                 // 会话 upsert：profile 用分组归一值（与 writer 键构造同款
                 // 缺省），insert 阶段逐事实键与组行字节一致。
-                w.upsert_session(host, machine_namespace, sid_ref, Some(profile_ref), now)?;
+                w.upsert_session(harness, machine_namespace, sid_ref, Some(profile_ref), now)?;
                 let report = w.insert_facts(&group, &source_id, sid_ref)?;
                 outcome.inserted += report.inserted;
                 outcome.duplicate += report.duplicate;
@@ -1219,7 +1219,7 @@ mod tests {
 
         // ③ 事实轮：revision +1，FactsIngested 落 outbox。
         let fact = serde_json::json!({
-            "host": "claude-code", "machine_namespace": "m", "source_profile": "default",
+            "harness": "claude-code", "machine_namespace": "m", "source_profile": "default",
             "native_session_id": "s1", "source_event_id": "e1",
             "observation_kind": "token_count",
             "event_ts_utc": "2026-09-23T01:02:03Z", "model_id": "claude-opus-4",
@@ -1294,7 +1294,7 @@ mod tests {
         // ② 拒收轮：缺 native_session_id → rejected>0 → 推进 + outbox。
         let r1 = db.revision().unwrap();
         let bad = serde_json::json!({
-            "host": "claude-code", "machine_namespace": "m", "source_profile": "default",
+            "harness": "claude-code", "machine_namespace": "m", "source_profile": "default",
             "source_event_id": "e-bad", "observation_kind": "token_count",
             "event_ts_utc": "2026-09-23T01:02:03Z", "model_id": "claude-opus-4",
             "uncached_input_tokens": 1, "output_tokens": 1,
@@ -1312,7 +1312,7 @@ mod tests {
         // 但 COALESCE 富集改了喂 memo 面的业务列 → 必须推 revision。
         let r2 = db.revision().unwrap();
         let base = serde_json::json!({
-            "host": "claude-code", "machine_namespace": "m", "source_profile": "default",
+            "harness": "claude-code", "machine_namespace": "m", "source_profile": "default",
             "native_session_id": "s-enrich", "source_event_id": "e-enrich",
             "observation_kind": "token_count",
             "event_ts_utc": "2026-09-23T01:02:04Z", "model_id": "claude-opus-4",
@@ -1327,7 +1327,7 @@ mod tests {
         assert_eq!(db.revision().unwrap(), r2 + 1, "首插轮推进");
         let r3 = db.revision().unwrap();
         let enriched_replay = serde_json::json!({
-            "host": "claude-code", "machine_namespace": "m", "source_profile": "default",
+            "harness": "claude-code", "machine_namespace": "m", "source_profile": "default",
             "native_session_id": "s-enrich", "source_event_id": "e-enrich",
             "observation_kind": "token_count",
             "event_ts_utc": "2026-09-23T01:02:04Z", "model_id": "claude-opus-4",
@@ -1458,7 +1458,7 @@ mod tests {
     fn sync_with_no_dirty_files_commits_a_succeeded_cli_run() {
         let home = tmp_home("emptysync");
         let db = open_db(&home);
-        let out = sync_host_sql(&db, &home, "claude-code", "ns-test", &[], |_| Ok(vec![])).unwrap();
+        let out = sync_harness_sql(&db, &home, "claude-code", "ns-test", &[], |_| Ok(vec![])).unwrap();
         assert_eq!(out.files_synced, 0);
         assert!(out.errors.is_empty());
         let (status, trigger): (String, String) = db
@@ -1482,7 +1482,7 @@ mod tests {
             (home.join("a.jsonl"), (0u64, 0u64)),
             (home.join("b.jsonl"), (0, 0)),
         ];
-        let err = sync_host_sql(&db, &home, "claude-code", "ns-test", &dirty, |_| {
+        let err = sync_harness_sql(&db, &home, "claude-code", "ns-test", &dirty, |_| {
             Err("boom".to_string())
         })
         .unwrap_err();
@@ -1542,8 +1542,8 @@ mod tests {
                 "schema_version": 1,
                 "machine_namespace": "m1",
                 "files": {
-                    "/data/claude/a.jsonl": {"size": 1024, "mtime_ns": 100, "host": "claude-code"},
-                    "/data/dsh/b.jsonl":    {"size": 2048, "mtime_ns": 200, "host": "dsh"}
+                    "/data/claude/a.jsonl": {"size": 1024, "mtime_ns": 100, "harness": "claude-code"},
+                    "/data/dsh/b.jsonl":    {"size": 2048, "mtime_ns": 200, "harness": "dsh"}
                 }
             }"#,
         )
@@ -1579,7 +1579,7 @@ mod tests {
         let cp = home.join("facts/.ingest-checkpoint.json");
         std::fs::write(
             &cp,
-            r#"{"schema_version":1,"files":{"/x.jsonl":{"size":1,"mtime_ns":1,"host":"dsh"}}}"#,
+            r#"{"schema_version":1,"files":{"/x.jsonl":{"size":1,"mtime_ns":1,"harness":"dsh"}}}"#,
         )
         .unwrap();
         let db = open_db(&home);
@@ -1606,7 +1606,7 @@ mod tests {
         let db = open_db(&home);
         let mut fields = serde_json::Map::new();
         fields.insert("machine_namespace".into(), serde_json::json!("ns-dup"));
-        fields.insert("host".into(), serde_json::json!("claude-code"));
+        fields.insert("harness".into(), serde_json::json!("claude-code"));
         fields.insert("source_profile".into(), serde_json::json!("default"));
         fields.insert("native_session_id".into(), serde_json::json!("sess-dup"));
         fields.insert("source_event_id".into(), serde_json::json!("evt-dup"));
@@ -1649,14 +1649,14 @@ mod tests {
     }
 
     #[test]
-    fn sync_hosts_wraps_facts_source_session_in_one_transaction() {
+    fn sync_harnesses_wraps_facts_source_session_in_one_transaction() {
         use agent_vitals_domain::usage_fact::build_usage_fact;
 
         let home = tmp_home("synce2e");
         let db = open_db(&home);
         let mut fields = serde_json::Map::new();
         fields.insert("machine_namespace".into(), serde_json::json!("ns-e2e"));
-        fields.insert("host".into(), serde_json::json!("claude-code"));
+        fields.insert("harness".into(), serde_json::json!("claude-code"));
         fields.insert("source_profile".into(), serde_json::json!("default"));
         fields.insert("native_session_id".into(), serde_json::json!("sess-1"));
         fields.insert("source_event_id".into(), serde_json::json!("evt-1"));
@@ -1674,7 +1674,7 @@ mod tests {
         let fact = build_usage_fact(&fields).unwrap();
 
         let dirty = vec![(home.join("sess-1.jsonl"), (1234u64, 5678u64))];
-        let out = sync_host_sql(&db, &home, "claude-code", "ns-e2e", &dirty, |_| {
+        let out = sync_harness_sql(&db, &home, "claude-code", "ns-e2e", &dirty, |_| {
             Ok(vec![fact.clone()])
         })
         .unwrap();
@@ -1720,7 +1720,7 @@ mod tests {
         let db = open_db(&home);
         let mut fields = serde_json::Map::new();
         fields.insert("machine_namespace".into(), serde_json::json!("ns-conflict"));
-        fields.insert("host".into(), serde_json::json!("codex"));
+        fields.insert("harness".into(), serde_json::json!("codex"));
         fields.insert("source_profile".into(), serde_json::json!("default"));
         fields.insert(
             "native_session_id".into(),
@@ -1751,7 +1751,7 @@ mod tests {
         let fact_id = fact["fact_id"].as_str().unwrap().to_string();
         assert_eq!(fact["evidence_basis"], "conflict");
         let dirty = vec![(home.join("sess-conflict.jsonl"), (1u64, 2u64))];
-        sync_host_sql(&db, &home, "codex", "ns-conflict", &dirty, |_| {
+        sync_harness_sql(&db, &home, "codex", "ns-conflict", &dirty, |_| {
             Ok(vec![fact.clone()])
         })
         .unwrap();
@@ -1786,18 +1786,18 @@ mod tests {
             }
         }}}).to_string();
         db.pricing_snapshot_put("legacy-user-pricing", "legacy", &payload, 1).unwrap();
-        db.host_bill_put(
+        db.harness_bill_put(
             "user-glm", "claude-code", "zhipu-glm", &month, "fixed_subscription",
             9_999, "CNY", "user-entry", 1,
         ).unwrap();
-        db.host_bill_put(
+        db.harness_bill_put(
             "old-auto-minimax", "claude-code", "minimax", &month, "fixed_subscription",
             11_400, "CNY", "legacy-pricing-catalog", 1,
         ).unwrap();
 
         assert_eq!(migrate_legacy_subscription_snapshots(&db, 2).unwrap(), 2);
-        let rows = db.host_bills_for_period(&month).unwrap();
-        assert!(!rows.iter().any(|(_host, provider, _basis, _amount, _currency)| provider == "minimax"),
+        let rows = db.harness_bills_for_period(&month).unwrap();
+        assert!(!rows.iter().any(|(_harness, provider, _basis, _amount, _currency)| provider == "minimax"),
             "unconfirmed legacy declaration must not remain an actual bill: {rows:?}");
         assert!(rows.contains(&(
             "claude-code".to_string(), "zhipu-glm".to_string(),
@@ -1805,9 +1805,9 @@ mod tests {
         )), "manual local bill must not be overwritten: {rows:?}");
         let candidates = db.pending_billing_import_candidates().unwrap();
         assert_eq!(candidates.len(), 2);
-        assert!(candidates.iter().all(|(_id, _host, _provider, _currency, _amount, _start, status)| status == "pending"));
+        assert!(candidates.iter().all(|(_id, _harness, _provider, _currency, _amount, _start, status)| status == "pending"));
         assert_eq!(migrate_legacy_subscription_snapshots(&db, 3).unwrap(), 0);
-        assert_eq!(db.host_bills_for_period(&month).unwrap(), rows);
+        assert_eq!(db.harness_bills_for_period(&month).unwrap(), rows);
         assert_eq!(db.pending_billing_import_candidates().unwrap(), candidates);
         std::fs::remove_dir_all(&home).unwrap();
     }
@@ -1826,7 +1826,7 @@ mod tests {
             }
         }}}).to_string();
         db.pricing_snapshot_put("legacy-user-pricing-rollback", "legacy", &payload, 1).unwrap();
-        db.host_bill_put(
+        db.harness_bill_put(
             "old-auto-minimax", "claude-code", "minimax", &month, "fixed_subscription",
             11_400, "CNY", "legacy-pricing-catalog", 1,
         ).unwrap();
@@ -1837,8 +1837,8 @@ mod tests {
         ).unwrap();
 
         assert!(migrate_legacy_subscription_snapshots(&db, 2).is_err());
-        let bills = db.host_bills_for_period(&month).unwrap();
-        assert!(bills.iter().any(|(_host, provider, _basis, amount, _currency)| {
+        let bills = db.harness_bills_for_period(&month).unwrap();
+        assert!(bills.iter().any(|(_harness, provider, _basis, amount, _currency)| {
             provider == "minimax" && *amount == 11_400
         }), "failed migration must roll back the legacy-bill revoke: {bills:?}");
         assert!(db.pending_billing_import_candidates().unwrap().is_empty());

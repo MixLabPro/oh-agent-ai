@@ -62,13 +62,13 @@ fn security_severity(worst: &str) -> &'static str {
 /// 「缺一列的报告有价值，编一列的没有」是同一条规矩。
 pub const NOT_ASSESSED: &[(&str, &str, &str)] = &[
     ("SV003", "DESCRIPTION_TOO_LONG",
-     "There is no defensible threshold. What counts as long depends on the host and total skill count."),
+     "There is no defensible threshold. What counts as long depends on the harness and total skill count."),
     ("SV104", "PLUGIN_NOT_ENABLED",
      "A disabled plugin is normal, not a defect; it is counted under not loaded."),
     ("SV203", "ORPHANED_USAGE_RECORD",
      "Renaming breaks trigger history and cannot be distinguished from deletion (open PRODUCT §10 question)."),
     ("SV302", "HIGH_METADATA_COST", "Same as SV003: no defensible threshold."),
-    ("SV402", "OVERLAP_CONFIRMED", "Requires an in-host or --judge semantic decision; not implemented yet."),
+    ("SV402", "OVERLAP_CONFIRMED", "Requires an in-harness or --judge semantic decision; not implemented yet."),
 ];
 
 /// 一条诊断。`caveats` 不是可选项（ARCHITECTURE §5.1）：带已知系统性偏差的
@@ -354,7 +354,7 @@ reporting is not suppressed. 'For example,' or an unmatched quote can fool this 
         ));
     }
 
-    // ── 宿主能力 ──────────────────────────────────────────
+    // ── 执行环境能力 ──────────────────────────────────────────
     let mut lacking: Vec<&str> = Vec::new();
     if !b(bud, "available") {
         lacking.push("description budget");
@@ -362,16 +362,16 @@ reporting is not suppressed. 'For example,' or an unmatched quote can fool this 
     if !trig {
         lacking.push("trigger data");
     }
-    if !b(out.get("plugin_state").unwrap_or(&empty), "host_config_read") {
+    if !b(out.get("plugin_state").unwrap_or(&empty), "harness_config_read") {
         lacking.push("load-state evidence");
     }
     if !lacking.is_empty() {
         ds.push(diag(
             "SV901", "CAPABILITY_UNAVAILABLE", "info",
-            format!("This host does not provide: {}. Related judgments are omitted rather than treated as zero.", lacking.join(", ")),
-            "Only Claude Code provides these fields through ~/.claude.json; their absence on another host is not a failure.".into(),
+            format!("This harness does not provide: {}. Related judgments are omitted rather than treated as zero.", lacking.join(", ")),
+            "Only Claude Code provides these fields through ~/.claude.json; their absence on another harness is not a failure.".into(),
             vec!["Unavailable is not zero. Rendering the former as the latter would turn an unmeasured value into a decision.".into()],
-            json!({"unavailable": lacking, "host_selection": out.get("host_selection")}),
+            json!({"unavailable": lacking, "harness_selection": out.get("harness_selection")}),
         ));
     }
 
@@ -483,10 +483,10 @@ pub fn render_doctor(out: &Value, o: &DoctorOpts) -> String {
 
     p!("Agent Vitals {} · run {}", o.version, run_id(out));
     p!("{}", "─".repeat(50));
-    p!("Host    {}", out.get("host_selection").and_then(|v| v.as_str()).unwrap_or("?"));
+    p!("Harness    {}", out.get("harness_selection").and_then(|v| v.as_str()).unwrap_or("?"));
     p!("        trigger data {} · load evidence {} · description budget {}",
        if b(trig_block, "available") { "✓" } else { "—" },
-       if b(out.get("plugin_state").unwrap_or(&empty), "host_config_read") { "✓" } else { "—" },
+       if b(out.get("plugin_state").unwrap_or(&empty), "harness_config_read") { "✓" } else { "—" },
        if b(bud, "available") { "✓" } else { "—" });
     p!("");
     p!("Skills  {} on disk → {} loaded",
@@ -575,9 +575,9 @@ pub fn render_doctor(out: &Value, o: &DoctorOpts) -> String {
         if b(bud, "excludes_builtin_skills") {
             p!("  ! Excludes built-in skills bundled in the CLI; actual usage is higher");
         }
-        p!("  ! The threshold varies by host version; override it with --budget");
+        p!("  ! The threshold varies by harness version; override it with --budget");
     } else {
-        p!("  Unavailable — this host does not expose it, or its config is unreadable");
+        p!("  Unavailable — this harness does not expose it, or its config is unreadable");
         p!("  ! Unavailable does not mean zero characters used");
     }
 

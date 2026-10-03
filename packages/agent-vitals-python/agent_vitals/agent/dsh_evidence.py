@@ -1,9 +1,9 @@
 """DSH execution_events → canonical session 的翻译层（Python 镜像）。
 
-Rust `crates/agent-vitals-hosts/src/hosts/dsh/sessions/evidence.rs::populate_timelines` 的
+Rust `crates/agent-vitals-harnesses/src/harnesses/dsh/sessions/evidence.rs::populate_timelines` 的
 Python 对应——把 execution_events 翻译成 `canonical_audit.py::audit_projection`
-消费的 5 条 host-neutral timeline（tool_calls/tool_results/approvals/
-sandbox_modes/turns）。v0.6 host-contract spec §7-C / §11-M1 交付：DSH 的
+消费的 5 条 harness-neutral timeline（tool_calls/tool_results/approvals/
+sandbox_modes/turns）。v0.6 harness-contract spec §7-C / §11-M1 交付：DSH 的
 Python behavior 审计从此和 claude/codex/workbuddy 一样，经共享求值器求值，
 不再自带一套直判逻辑（`behavior.py` 原来的 `match_behavior_gated` 直接吃裸
 DSH 事件 + `trajectory.py::match_trajectory` 各判各的两条路）。G3 的 dsh
@@ -15,7 +15,7 @@ Python 侧缺口（"pending M1"）在本模块存在后关闭。
 没有理由为这个模块单独写第二份；`trajectory.py`/`compaction.py` 也是同一批
 共享导入，见 `scripts/agent_vitals/__init__.py` 顶部注释的公开导入面。
 
-本模块只翻译，不判定——正则匹配住在 `canonical_audit.py`（宿主无关的共享
+本模块只翻译，不判定——正则匹配住在 `canonical_audit.py`（执行环境无关的共享
 求值器）；这里产出的 canonical dict 直接喂给它的 `audit_projection`。
 """
 
@@ -24,10 +24,10 @@ from ..util import session_span
 
 
 def _timeline_entry(observation, seq, time, turn, step, call_id, ordinal):
-    """一条 timeline entry。DSH 全部是宿主原生记录——逐事件 provenance 恒
+    """一条 timeline entry。DSH 全部是执行环境原生记录——逐事件 provenance 恒
     "measured"，没有推导/估算（与 Rust `dsh_evidence.rs::make_entry` 对齐；
     `provenance` 字段 `canonical_audit.py::audit_projection` 不读，只为跟其余
-    宿主适配器的 entry 形状保持一致）。"""
+    执行环境适配器的 entry 形状保持一致）。"""
     return {
         "observation": observation, "provenance": "measured",
         "seq": seq, "time": time, "turn": turn, "step": step,
@@ -46,7 +46,7 @@ def _flush_turn(turns, pending):
 
 def populate_timelines(execution_events):
     """跑一遍 `Coords`，把 execution_events 里的工具调用/结果/审批/沙箱/turn
-    事件翻译成五个 host-neutral timeline（§11.5）。与 Rust
+    事件翻译成五个 harness-neutral timeline（§11.5）。与 Rust
     `dsh_evidence.rs::populate_timelines` 逐字节对齐：边界事件先推进坐标、
     再对本事件取坐标，`ordinal` 是「在传入数组里的下标」；turn 生命周期是
     同一遍里额外跑的状态化 pass（`pending`），不是第二次遍历——`last_seq`
@@ -159,7 +159,7 @@ def build_dsh_canonical(execution_events, cwd=None, session_id=""):
                     if t is not None]
     meta = {
         "session_id": session_id,
-        "host_id": "dsh",
+        "harness_id": "dsh",
         "workspace_roots": [cwd] if cwd else [],
         "model": None,
         "span": session_span(native_times),

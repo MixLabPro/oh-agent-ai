@@ -65,7 +65,7 @@ const SENSITIVE_READ_COLUMNS: &[(&str, &str)] = &[
     // 行为证据，两个表的所有列一律拒绝读取。
     ("trust_observations", "observation_id"),
     ("trust_observations", "machine_namespace"),
-    ("trust_observations", "host"),
+    ("trust_observations", "harness"),
     ("trust_observations", "actor_id"),
     ("trust_observations", "actor_kind"),
     ("trust_observations", "actor_version"),
@@ -443,19 +443,19 @@ mod integration {
         ).unwrap();
         // 一行真实事实（不含敏感列填 NULL 让作者测试在 v_facts_safe 下确实无 native_session_id）。
         conn.execute(
-            "INSERT INTO source_files(source_id, host, path_hash, size_bytes, mtime_ns,
+            "INSERT INTO source_files(source_id, harness, path_hash, size_bytes, mtime_ns,
                                      parser_version, first_seen_at_ms, last_seen_at_ms,
                                      last_successful_run_id)
              VALUES ('src1', 'claude-code', 'ph1', 0, 0, 1, 1700000000000, 1700000000000, 'run1')",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO sessions(session_key, host, native_session_id, machine_namespace, last_observed_at_ms)
+            "INSERT INTO sessions(session_key, harness, native_session_id, machine_namespace, last_observed_at_ms)
              VALUES ('sk1', 'claude-code', 'native-1', 'ns-1', 1700000000000)",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                                      observation_kind, source_id, ingested_run_id, event_ts_ms,
                                      uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                                      created_at_ms, updated_at_ms)
@@ -465,7 +465,7 @@ mod integration {
         ).unwrap();
         conn.execute(
             "INSERT INTO trust_observations(
-                 observation_id, machine_namespace, host, actor_id, actor_kind,
+                 observation_id, machine_namespace, harness, actor_id, actor_kind,
                  observed_at_ms, observation_kind, stage, evidence_level,
                  scope_classes_json, consent_state, collector_id, collector_version,
                  provenance_json, ingested_run_id, created_at_ms
@@ -483,7 +483,7 @@ mod integration {
         let home = tmp_db("view-passes");
         seed_one_real(&home);
         let conn = open_authorizer_db(&home);
-        let mut stmt = conn.prepare("SELECT host, SUM(output_tokens) FROM v_facts_safe GROUP BY host").unwrap();
+        let mut stmt = conn.prepare("SELECT harness, SUM(output_tokens) FROM v_facts_safe GROUP BY harness").unwrap();
         let rows: Vec<(String, i64)> = stmt.query_map([], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         }).unwrap().map(Result::unwrap).collect();
@@ -517,7 +517,7 @@ fn real_select_on_sensitive_column_is_denied() {
         let conn = open_authorizer_db(&home);
         let _ = conn
             .execute(
-                "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id, source_event_id,
+                "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id, source_event_id,
                                          observation_kind, source_id, ingested_run_id, event_ts_ms,
                                          uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
                                          created_at_ms, updated_at_ms)
@@ -607,7 +607,7 @@ fn real_select_star_is_denied() {
             );
         }
         // 期望的正常列应在：
-        for expected in ["host", "model_id", "event_ts_ms", "output_tokens"] {
+        for expected in ["harness", "model_id", "event_ts_ms", "output_tokens"] {
             assert!(
                 names.iter().any(|n| n == expected),
                 "v_facts_safe missing expected column `{expected}`; columns={names:?}"

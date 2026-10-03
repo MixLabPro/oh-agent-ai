@@ -377,12 +377,12 @@ def codex_cost_report(by_hour_model, by_model, unaccounted, plan, pricing, want_
 
 
 def render_codex_cost(out):
-    """人读文本：host/月/币种 + 一行总费用 + 每模型一行。纯格式化——数字来自
-    `codex_cost_report` + CLI 的 host/currency/month 包装（`out` 即 `--json` 输出的
+    """人读文本：harness/月/币种 + 一行总费用 + 每模型一行。纯格式化——数字来自
+    `codex_cost_report` + CLI 的 harness/currency/month 包装（`out` 即 `--json` 输出的
     同一个 dict），这里不重算。空报告（None）由调用方处理，不打印假的 `$0` 行。
     Rust 侧 `main.rs::render_codex_cost` 逐字节对齐这一份。"""
     currency = out.get("currency", "USD")
-    host = out.get("host")
+    harness = out.get("harness")
     month = out.get("month")
     total = out.get("total_cost_usd", 0.0)
     unpriced = out.get("unpriced_tokens", 0)
@@ -390,8 +390,8 @@ def render_codex_cost(out):
     tt = out.get("total_tokens") or {}
 
     parts = []
-    if isinstance(host, str):
-        parts.append(f"host: {host}\n")
+    if isinstance(harness, str):
+        parts.append(f"harness: {harness}\n")
     if isinstance(month, str):
         parts.append(f"month: {month}\n")
     parts.append(f"currency: {currency}\n")

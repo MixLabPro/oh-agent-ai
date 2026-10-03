@@ -13,9 +13,9 @@ path = "src/lib.rs"
 
 # v0.9 Stage B：依赖 = domain（纯 DTO 契约）+ serde_json（facts 机制）+
 # rusqlite（可重建查询索引，spec §5.1 的计划内引入）。仍然**不接**
-# agent-vitals-hosts / runtime / 二进制——依赖方向单向（runtime → data →
-# domain；hosts 与 data 平行、互不依赖），`tests/dependency_budget.rs`
-# 钉住这条边界。rusqlite 用 bundled（与 hosts/cli 同版本 0.31，不新增
+# agent-vitals-harnesses / runtime / 二进制——依赖方向单向（runtime → data →
+# domain；harnesses 与 data 平行、互不依赖），`tests/dependency_budget.rs`
+# 钉住这条边界。rusqlite 用 bundled（与 harnesses/cli 同版本 0.31，不新增
 # sqlite3 二进制面）；不引 ORM（spec §5.1 明令）。
 [dependencies]
 agent-vitals-domain = { path = "../agent-vitals-domain" }

@@ -20,7 +20,7 @@ const detailSource = readFileSync(path.join(ui, "react/src/features/sessions/Ses
 // 解码永不抛（spec §8 守卫）、一次性消费（防刷新回滚用户窗口选择）。
 // 用字符串包含而非正则：断言的是源码里的字面文法串本身。
 assert.ok(navSource.includes(String.raw`\d{4}-\d{2}-\d{2}`), "date deep-link pattern must be the strict Beijing-day shape");
-assert.ok(navSource.includes(":[a-z0-9_-]{1,32}"), "host whitelist must accept plugin:<slug> hosts (parity with safeHostLabel)");
+assert.ok(navSource.includes(":[a-z0-9_-]{1,32}"), "harness whitelist must accept plugin:<slug> harnesses (parity with safeHarnessLabel)");
 assert.ok(navSource.includes("catch { return null; }"), "decodeURIComponent must be guarded — malformed hash must never crash the app");
 assert.ok(!navSource.includes("readSessionsDateFromHash"), "no dead deep-link exports");
 assert.ok(sessionsSource.includes('value="day"'), "sessions window picker must expose the day window (deep-link target)");

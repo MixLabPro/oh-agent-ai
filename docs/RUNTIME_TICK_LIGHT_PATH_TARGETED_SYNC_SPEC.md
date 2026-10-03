@@ -1,4 +1,4 @@
-# Tick Light-Path & Host-Targeted Sync Spec
+# Tick Light-Path & Harness-Targeted Sync Spec
 
 > 状态：**Draft for implementation**（2026-09-23）
 > 负责人：runtime、desktop
@@ -10,12 +10,12 @@
 ## 0. Decision summary
 
 昨夜（2026-09-22 16:04–16:28 UTC）的 CPU 风暴复盘定位了负载形状：**唤醒是
-全局的，同步管线也是全局的**——任一宿主的写入都唤醒跨全部宿主的完整
-tick。宿主越多、写入越频繁，负载按「活跃宿主数 × 全宿主管线成本」相乘。
+全局的，同步管线也是全局的**——任一执行环境的写入都唤醒跨全部执行环境的完整
+tick。执行环境越多、写入越频繁，负载按「活跃执行环境数 × 全执行环境管线成本」相乘。
 本 spec 把这个乘性关系拆成加性：
 
-1. **唤醒携带宿主身份**：单槽唤醒从"有事件"升级为"哪些宿主有事件"（合并语义不变）；
-2. **tick 分轻重**：唤醒驱动的轻 tick 只同步被唤醒的宿主 + drain 事件总线；
+1. **唤醒携带执行环境身份**：单槽唤醒从"有事件"升级为"哪些执行环境有事件"（合并语义不变）；
+2. **tick 分轻重**：唤醒驱动的轻 tick 只同步被唤醒的执行环境 + drain 事件总线；
    重 tick 保留 5 分钟周期、跑全管线（字节兼容现状），仍是正确性权威；
 3. **read_overview 按 revision 备忘**：IPC 侧同 revision 直接复用；
 4. **refresh 拆子计时 + 软预算**：给上轮 33.5s 爆炸一个可归因的观测面。
@@ -29,9 +29,9 @@ tick。宿主越多、写入越频繁，负载按「活跃宿主数 × 全宿主
 
 ```text
 sync_tick（重，现状唯一形态）
-├─ claude-sync / discover        ~40–330ms（walk + stat 全宿主全文件）
-├─ sync-facts                    1–3.4s（每宿主批：stat 对账 + 脏文件解析 + 计价）
-├─ refresh_hosts                 0.3–0.7s（spawn `sessions navigation` 子进程，20s 硬超时）
+├─ claude-sync / discover        ~40–330ms（walk + stat 全执行环境全文件）
+├─ sync-facts                    1–3.4s（每执行环境批：stat 对账 + 脏文件解析 + 计价）
+├─ refresh_harnesses                 0.3–0.7s（spawn `sessions navigation` 子进程，20s 硬超时）
 ├─ read_overview                 0.5–29.8s（重 SQL 聚合；e0b9f07 起每 tick 一次；
 │                                冷启动/大量积压时单条即可到 30s 量级，见 §1.2 更新）
 ├─ refresh                       1.7–22ms（`e0b9f07` 后只剩托盘三数字重建，吃 ov）
@@ -43,7 +43,7 @@ sync_tick（重，现状唯一形态）
 
 ### 1.2 风暴复盘结论（2026-09-22 16:00–16:28 UTC）
 
-- 单宿主（claude-code）持续写 transcript → tick 从 5 分钟周期被压到
+- 单执行环境（claude-code）持续写 transcript → tick 从 5 分钟周期被压到
   **约 1 次/分钟**，每次 7–10s 多线程；
 - `refresh` 两次爆炸到 **33.5s**（正常 21ms，~1000 倍）——当时 `refresh`
   内部还直接调 `read_overview()`，`e0b9f07` 拆分之前二者是同一个数字；
@@ -64,21 +64,21 @@ sync_tick（重，现状唯一形态）
 
 ### 1.3 规模化论证
 
-设宿主数 H、活跃（持续写入）宿主数 A：
+设执行环境数 H、活跃（持续写入）执行环境数 A：
 
-- 现状负载 ≈ **A 驱动的唤醒频率 × 全宿主管线成本(H)**——乘性；
+- 现状负载 ≈ **A 驱动的唤醒频率 × 全执行环境管线成本(H)**——乘性；
 - 每条维度各自也涨：discover/stat 对账 O(总文件数)，投影 O(全部派生状态)。
 
-目标形状：轻 tick ≈ **A × 各自增量同步**；全宿主对账与投影留在重 tick 的
-5 分钟周期里。新增一个被监听宿主的边际成本 ≈ 它自己的文件 stat。
+目标形状：轻 tick ≈ **A × 各自增量同步**；全执行环境对账与投影留在重 tick 的
+5 分钟周期里。新增一个被监听执行环境的边际成本 ≈ 它自己的文件 stat。
 
 ## 2. Problem statement
 
-**P0（乘性放大）**：任一宿主的写入唤醒全宿主管线。宿主越多，唤醒源越多、
-单次 tick 越重，两者相乘。昨晚单宿主活跃已把进程推到 3.5 核。
+**P0（乘性放大）**：任一执行环境的写入唤醒全执行环境管线。执行环境越多，唤醒源越多、
+单次 tick 越重，两者相乘。昨晚单执行环境活跃已把进程推到 3.5 核。
 
 **P1（管线固定形态）**：tick 无论唤醒来自谁、增量多小，都跑全部步骤——
-包括 `refresh_hosts` 的**子进程 spawn**（每 tick 一次，0.3–0.7s + 进程
+包括 `refresh_harnesses` 的**子进程 spawn**（每 tick 一次，0.3–0.7s + 进程
 churn）和 `read_overview` 重聚合（每 tick 一次，最大常规单步）。
 
 **P2（refresh 不透明）**：`refresh` 是单个不透明耗时数字。33.5s 爆炸的
@@ -97,7 +97,7 @@ churn）和 `read_overview` 重聚合（每 tick 一次，最大常规单步）�
 
 ### Goals
 
-1. 唤醒驱动的同步只覆盖被唤醒的宿主；未唤醒宿主的对账留给重 tick。
+1. 唤醒驱动的同步只覆盖被唤醒的执行环境；未唤醒执行环境的对账留给重 tick。
 2. 轻 tick 不 spawn 子进程、不跑全量投影重聚合；端到端（写 → UI 可见）
    时延保持秒级。
 3. 同一 authority revision 的 `read_overview` IPC 命中备忘缓存。
@@ -110,63 +110,63 @@ churn）和 `read_overview` 重聚合（每 tick 一次，最大常规单步）�
 - 事件直达解析 / watcher 线程碰权威库（HARDENING spec 不变量 1 沿用）；
 - tokio / 常驻 daemon / 第二个 DB 写者；
 - golden 输出、事实 schema、计费语义、Python/Rust 字节镜像的任何变更；
-- per-file 粒度的 UI 事件（UI 事件仍按宿主批次粒度）；
+- per-file 粒度的 UI 事件（UI 事件仍按执行环境批次粒度）；
 - trust 传感的采样模型（独立循环，不在本 spec 范围）。
 
 ## 4. Invariants（发布门，不是建议）
 
 1. **重 tick 是正确性权威**：轻 tick 丢失、重复、乱序只影响时延，不影响
    最终事实。重 tick 的 5 分钟周期不可被轻 tick 饥饿（见 §5.2 排序规则）。
-2. **一个权威库写者**：轻 tick 的宿主同步仍走 `sync_host` 既有路径
+2. **一个权威库写者**：轻 tick 的执行环境同步仍走 `sync_harness` 既有路径
    （lease + 事务），watcher 线程依旧不碰 DB。
-3. **codex 批原子性**：定向同步按宿主过滤批，codex 命中时仍整批喂入
-   （`sync_host` 本就是按宿主批调用——过滤发生在批级别，不拆批）。
+3. **codex 批原子性**：定向同步按执行环境过滤批，codex 命中时仍整批喂入
+   （`sync_harness` 本就是按执行环境批调用——过滤发生在批级别，不拆批）。
 4. **CacheOnly 根永不唤醒事实同步**（HARDENING §5.2 语义沿用）。
 5. **轻路径失败回落重路径**：轻 tick 任一步 Err → 立即降级执行重 tick
    （本轮），并记 WARN。不允许「轻路径失败 = 本轮没有对账」。
-6. **golden / 字节镜像零变化**：`sync_host`、`sync_facts`、事实写入路径
+6. **golden / 字节镜像零变化**：`sync_harness`、`sync_facts`、事实写入路径
    一行不动——本 spec 只动「哪些步骤在哪个 tick 跑」与「IPC 读侧缓存」。
 7. **无新依赖**：tokio/chrono 仍禁；唤醒槽继续手写（Mutex + Condvar）。
 
 ## 5. Target architecture
 
-### 5.1 唤醒槽：从"有事件"到"哪些宿主有事件"
+### 5.1 唤醒槽：从"有事件"到"哪些执行环境有事件"
 
 替换单槽 `sync_channel(1)`（HARDENING §5.1）为**带身份的合并槽**：
 
 ```rust
 pub struct WakeSlot {
-    inner: Mutex<SlotInner>,   // BTreeSet<HostId> pending + bool periodic_due
+    inner: Mutex<SlotInner>,   // BTreeSet<HarnessId> pending + bool periodic_due
     signal: Condvar,
 }
 pub enum WakeOutcome { Queued, Merged, Shutdown }
 impl WakeSlot {
-    pub fn wake_hosts(&self, hosts: impl IntoIterator<Item = HostId>) -> WakeOutcome;
-    /// tick 循环独占：取走全部待同步宿主；`timeout` 到期返回周期到期标记。
-    pub fn wait(&self, timeout: Duration) -> WakeBatch;   // WakeBatch { hosts, periodic }
+    pub fn wake_harnesses(&self, harnesses: impl IntoIterator<Item = HarnessId>) -> WakeOutcome;
+    /// tick 循环独占：取走全部待同步执行环境；`timeout` 到期返回周期到期标记。
+    pub fn wait(&self, timeout: Duration) -> WakeBatch;   // WakeBatch { harnesses, periodic }
 }
 ```
 
-- `wake_hosts` **永不阻塞、永不丢语义**：宿主并入 set（BTreeSet 保证去重
-  与稳定序），容量上界 = 注册的 FactsSource 宿主数（天然有界）；
+- `wake_harnesses` **永不阻塞、永不丢语义**：执行环境并入 set（BTreeSet 保证去重
+  与稳定序），容量上界 = 注册的 FactsSource 执行环境数（天然有界）；
 - `Shutdown`（所有 watcher 发送端消失）不 panic，退化为纯周期；
 - `self_monitor` 的冷却语义不变：节流期间 watcher 线程照旧按冷却推迟
-  `wake_hosts` 的调用时机（冷却在 watcher 侧，不在槽侧）；
-- 槽是 **feature 无关**的（NoopWatcher 编译下无人 `wake_hosts`，
+  `wake_harnesses` 的调用时机（冷却在 watcher 侧，不在槽侧）；
+- 槽是 **feature 无关**的（NoopWatcher 编译下无人 `wake_harnesses`，
   `wait(timeout)` 就是今天的 `sleep(TICK_PERIOD)`）。
 
 ### 5.2 tick 分类与步骤路由
 
 | 步骤 | 轻 tick（唤醒驱动） | 重 tick（5 分钟周期） |
 |---|---|---|
-| discover + stat 对账 | 仅被唤醒宿主的批 | **全宿主**（正确性权威） |
-| `sync_host`（解析+计价+写入） | 仅被唤醒宿主 | 全宿主 |
-| `refresh_hosts`（navigation 子进程） | 跳过 | 跑 |
+| discover + stat 对账 | 仅被唤醒执行环境的批 | **全执行环境**（正确性权威） |
+| `sync_harness`（解析+计价+写入） | 仅被唤醒执行环境 | 全执行环境 |
+| `refresh_harnesses`（navigation 子进程） | 跳过 | 跑 |
 | `read_overview` | 跳过（托盘节流到期时才跑，§5.3） | 跑 |
 | `refresh`（托盘） | 仅当距上次刷新 ≥300s（节流，§5.3 As-built + 收敛调查 P2 修正） | 跑（吃全量 ov） |
 | `budget_alerts` / `quota_alerts` | 跳过 | 跑 |
 | `drain_event_bus` | **跑**（事实落库 → 价格对账/UI 失效必须即时） | 跑 |
-| `publish_invalidation` | 跑（按被唤醒宿主的集合） | 跑 |
+| `publish_invalidation` | 跑（按被唤醒执行环境的集合） | 跑 |
 
 排序规则（防饥饿）：轻 tick 连续计数达到 `LIGHT_TICKS_PER_HEAVY`（缺省
 16）**或** 距上次重 tick ≥ `TICK_PERIOD`，下一个 tick 升级为重——两条
@@ -194,7 +194,7 @@ IPC 命令**（2026-09-23 调整——原方案挂在 `read_overview` 这一个 
 authority revision 键控单条缓存——revision 未变直接返回上次结果。缓存
 进程内存、单条（最新覆盖）、无持久化。轻 tick 不算全量 ov 意味着轻 tick
 后 UI 刷新会miss 备忘（revision 变了）→ 按 §5.2 轻 tick 本就不产全量
-Invalidated；UI 的宿主区数据走 FactsIngested 驱动的既有刷新路径。
+Invalidated；UI 的执行环境区数据走 FactsIngested 驱动的既有刷新路径。
 
 ### 5.4 refresh 子计时与软预算
 
@@ -206,9 +206,9 @@ Invalidated；UI 的宿主区数据走 FactsIngested 驱动的既有刷新路径
 
 ### 5.5 与既有机制的关系
 
-- **`WatcherSupervisor`**：拓扑替换不感知 tick 分类（唤醒槽收宿主集合，
+- **`WatcherSupervisor`**：拓扑替换不感知 tick 分类（唤醒槽收执行环境集合，
   与根的 attach 状态解耦）；
-- **`self_monitor`**：冷却仍作用于 watcher 侧 `wake_hosts` 调用时机；
+- **`self_monitor`**：冷却仍作用于 watcher 侧 `wake_harnesses` 调用时机；
   轻 tick 本身成本低，不新增节流面；
 - **`WatchRootClass::CacheOnly`**（skills 根）：维持现状——只触发缓存
   失效回调，不进唤醒槽；
@@ -220,15 +220,15 @@ Invalidated；UI 的宿主区数据走 FactsIngested 驱动的既有刷新路径
 ### Phase A — 唤醒槽带身份
 
 1. `WakeSlot` 替换 `sync_channel(1)`；`WakeOutcome::{Queued,Merged,Shutdown}`；
-2. desktop watcher 线程按路由命中的宿主集合调用 `wake_hosts`；
+2. desktop watcher 线程按路由命中的执行环境集合调用 `wake_harnesses`；
 3. tick 循环改 `wait(TICK_PERIOD)`；`periodic` 与轻/重升级规则落地。
 
-**Exit**：10k 次并发 `wake_hosts` 单测——槽内集合有界（≤宿主数）、合并
+**Exit**：10k 次并发 `wake_harnesses` 单测——槽内集合有界（≤执行环境数）、合并
 语义正确、无 panic；注入式时钟下轻/重升级排序可穷举。
 
 ### Phase B — 轻重 tick 路由
 
-1. `sync_tick` 按 §5.2 表路由；`sync_facts` 增加宿主过滤参数（默认全集，
+1. `sync_tick` 按 §5.2 表路由；`sync_facts` 增加执行环境过滤参数（默认全集，
    CLI 不变）；
 2. 轻 tick 失败升级重 tick + WARN；
 3. 托盘节流（300s，2026-09-23 P2 修正）——窄 SQL 查询经 As-built 修订改为节流 + revision 备忘（§5.3）。
@@ -259,10 +259,10 @@ revision 内连续调用只触发一次真实聚合（跨命令命中，不只�
 
 | 领域 | 测试 | 期望 |
 |---|---|---|
-| 唤醒槽 | 并发 `wake_hosts` 压力 | 集合有界、合并正确、`Shutdown` 不 panic |
+| 唤醒槽 | 并发 `wake_harnesses` 压力 | 集合有界、合并正确、`Shutdown` 不 panic |
 | 升级规则 | 注入时钟穷举轻/重切换 | 轻连发 16 次或 5 分钟到 → 重 |
 | 路由 | step-recorder 轻/重 tick | 轻集合 = §5.2 义务；重序列 = 现状逐项 |
-| 宿主过滤 | `sync_facts(hosts=["claude-code"])` | 只跑该宿主批；codex 批完整（既有 fixture 差分） |
+| 执行环境过滤 | `sync_facts(harnesses=["claude-code"])` | 只跑该执行环境批；codex 批完整（既有 fixture 差分） |
 | 托盘节流 | 轻 tick 步骤集合 step-recorder | 与 §5.2 义务一致；300s 内至多一次 read_overview（常量关系断言已落地） |
 | 备忘 | 同 revision 连续 IPC | 一次计算 |
 | 回落 | 轻 tick 注入 Err | 本轮升级重 tick + WARN |
@@ -275,11 +275,11 @@ revision 内连续调用只触发一次真实聚合（跨命令命中，不只�
 
 ## 8. Observability / privacy
 
-- tick 分类（light/heavy）进 tick 完成日志行；轻 tick 记被同步宿主集合；
+- tick 分类（light/heavy）进 tick 完成日志行；轻 tick 记被同步执行环境集合；
 - `read_overview` 托盘节流与备忘命中/未命中计数：进程内存 + 日志，不进
   authority DB、不进导出面、不上传；
-- 唤醒槽内宿主集合只在进程内存（宿主 slug 本就不是敏感面，但同样不进
-  IPC DTO——UI 已有的宿主标签来自既有 surface）。
+- 唤醒槽内执行环境集合只在进程内存（执行环境 slug 本就不是敏感面，但同样不进
+  IPC DTO——UI 已有的执行环境标签来自既有 surface）。
 
 ## 9. Rollout / rollback
 
@@ -291,7 +291,7 @@ revision 内连续调用只触发一次真实聚合（跨命令命中，不只�
 
 ## 10. Release decision
 
-Phase A+B 是「多宿主热插拔宣称」的规模化前置：没有它们，宿主数增长会
+Phase A+B 是「多执行环境热插拔宣称」的规模化前置：没有它们，执行环境数增长会
 按乘性放大 CPU（昨晚已实证）。Phase C/D 独立估值。全部四阶段完成前，
 产品措辞维持「固定根、尽力低时延加速器」（HARDENING §10 的既有判定）。
 

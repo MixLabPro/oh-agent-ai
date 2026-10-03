@@ -10,8 +10,8 @@
 
 | 期 | 对象 | 建议 | 理由 |
 |---|---|---|---|
-| **一期** | `SessionMeta.span` | ✅ **现在做** | 单值、四宿主都可算、语义无歧义、**立即有消费者价值**（解读 `MeasuredZero`/覆盖率时必需） |
-| **二期** | `SourceAttempt.observed_span` | ❌ **暂不做** | 它服务 §14.8.6 的「surface 2/3 参差左沿」场景，而**该场景在当前任何宿主都不存在**（见 §2）。给它填值 = 为不存在的场景发明数据 |
+| **一期** | `SessionMeta.span` | ✅ **现在做** | 单值、四执行环境都可算、语义无歧义、**立即有消费者价值**（解读 `MeasuredZero`/覆盖率时必需） |
+| **二期** | `SourceAttempt.observed_span` | ❌ **暂不做** | 它服务 §14.8.6 的「surface 2/3 参差左沿」场景，而**该场景在当前任何执行环境都不存在**（见 §2）。给它填值 = 为不存在的场景发明数据 |
 
 **这个拆分是本方案的核心判断。** 两个字段名字相近，但一个是「已存在能力的字段没接线」，另一个是「为未来场景预留的字段」。
 
@@ -26,7 +26,7 @@
 | `TimeSpan` **从未被构造** | `grep "TimeSpan {"` 只命中定义处 `evidence.rs:468` |
 | `Surface` 只产出过一种 | `SessionLog` ×3；`Telemetry`/`Hook`/`Traces` 在 Rust 与 Python 中产出次数**均为 0** |
 | 没有 per-signal span 的位置 | `SignalSet` 是 `u32` 位图；`Coverage` 是 `BTreeMap<Signal, CoverageCounts>`（只有计数） |
-| 四宿主原始记录**都有**时间字段 | claude `"timestamp"`（parse_iso → **秒**）、codex `"timestamp"`（ISO）、dsh `"time"`（**毫秒**）、workbuddy `"timestamp"` |
+| 四执行环境原始记录**都有**时间字段 | claude `"timestamp"`（parse_iso → **秒**）、codex `"timestamp"`（ISO）、dsh `"time"`（**毫秒**）、workbuddy `"timestamp"` |
 | codex 的 evidence 适配器**未读** timestamp | `sessions/evidence.rs` 里 `timestamp` 只出现在测试夹具；`sources/workflow.rs:31` 已用 `iso_to_epoch_ms` —— 可复用 |
 
 ### 1.1 规格怎么要求的
@@ -54,7 +54,7 @@
 
 §14.8.6 的场景成立需要**同时**满足两条：
 
-1. 某个宿主实现了 surface 2/3（Hook / Telemetry）；
+1. 某个执行环境实现了 surface 2/3（Hook / Telemetry）；
 2. 该表面的起始时间晚于 surface 1。
 
 **第 1 条就不成立**：`Surface::Telemetry` / `Hook` / `Traces` 在两个实现里产出次数都是 0。
@@ -64,7 +64,7 @@
 workbuddy 曾有最接近的候选（traces 是第二个表面），但 E2 已明确决定**把 traces 折进 timeline、
 不再记 attempt**（`workbuddy/sessions/evidence.rs:840` 的注释）。那是既有设计决策，本方案不改。
 
-**结论**：二期现在做，只能得到一个**没有任何真实输入**的字段。要么等某个宿主真的接了
+**结论**：二期现在做，只能得到一个**没有任何真实输入**的字段。要么等某个执行环境真的接了
 hook/telemetry，要么先做 §14.8.6 要求的 per-signal span（契约改造）——两者都不是本轮该顺手做的事。
 
 ---
@@ -98,10 +98,10 @@ hook/telemetry，要么先做 §14.8.6 要求的 per-signal span（契约改造�
 
 **产生方（8 处）**
 ```
-crates/agent-vitals-hosts/src/hosts/claude_code/sessions/evidence.rs:652
-crates/agent-vitals-hosts/src/hosts/codex/sessions/evidence.rs:960
-crates/agent-vitals-hosts/src/hosts/dsh/sessions/evidence.rs:469
-crates/agent-vitals-hosts/src/hosts/workbuddy/sessions/evidence.rs:858
+crates/agent-vitals-harnesses/src/harnesses/claude_code/sessions/evidence.rs:652
+crates/agent-vitals-harnesses/src/harnesses/codex/sessions/evidence.rs:960
+crates/agent-vitals-harnesses/src/harnesses/dsh/sessions/evidence.rs:469
+crates/agent-vitals-harnesses/src/harnesses/workbuddy/sessions/evidence.rs:858
 packages/agent-vitals-python/agent_vitals/agent/claude_evidence.py:644
 packages/agent-vitals-python/agent_vitals/agent/codex_evidence.py:811
 packages/agent-vitals-python/agent_vitals/agent/dsh_evidence.py:158
@@ -116,7 +116,7 @@ tests/test_canonical_schema.py   逐字段对账 Rust CanonicalSession
 tests/test_characterization.py   纯函数定值
 tests/test_regressions.py        含 observed_span 断言（:1471）——一期不动
 tests/test_timeline_ordinals.py  序列契约
-tests/test_host_contract.py      宿主契约
+tests/test_harness_contract.py      执行环境契约
 ```
 
 **代码引用点（读 `span` 的地方）**：目前**为零**——四个 `span:` 全是写 `None`，无读者。
@@ -124,7 +124,7 @@ tests/test_host_contract.py      宿主契约
 
 ### 3.4 验收判据
 
-1. **四宿主真机各取一个会话**：`span.start_ms` / `span.end_ms` 与该会话**首末事件的实际时间**一致
+1. **四执行环境真机各取一个会话**：`span.start_ms` / `span.end_ms` 与该会话**首末事件的实际时间**一致
    （对拍方式：`span` 与 `sessions list` 的 `first_event_at`/`last_event_at` 同一会话内自洽）。
 2. **空会话**（0 条原生记录）→ `span == null`，**不是** `{"start_ms":0,"end_ms":0}`。
 3. **单事件会话** → `start_ms == end_ms`，不是 `null`。
@@ -150,9 +150,9 @@ tests/test_host_contract.py      宿主契约
 
 | 前置 | 说明 | 性质 |
 |---|---|---|
-| **P-a** | 某宿主真的接一个 surface 2/3（hook 或 telemetry），使"参差左沿"成为**可观测事实** | 产品功能 |
+| **P-a** | 某执行环境真的接一个 surface 2/3（hook 或 telemetry），使"参差左沿"成为**可观测事实** | 产品功能 |
 | **P-b** | 把 `attempts` 从「失败/跳过记录」扩展为「**读取记录**」——每条成功读取的表面也产 attempt 并带 span | **契约语义变更**：会让 `attempts` 在健康会话上非空（当前真机 0 条），波及 golden、Python 锁步、所有证据 DTO |
-| **P-c** | 契约改造：给 `Coverage`（或新的 per-signal 结构）加 span 位置，兑现「每条 signal 自己的 span」 | 契约改造 + 四宿主 ×2 实现 |
+| **P-c** | 契约改造：给 `Coverage`（或新的 per-signal 结构）加 span 位置，兑现「每条 signal 自己的 span」 | 契约改造 + 四执行环境 ×2 实现 |
 
 **P-b 是最小可行路径**，但它会改变一直接受验收的形状（`attempts` 从空变非空），
 需要先写规格修订并取得确认——**不能作为"顺手补一个字段"混进来**。

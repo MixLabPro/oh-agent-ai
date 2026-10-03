@@ -19,7 +19,7 @@ v0.11.0 必须让 MCP、CLI、桌面控制台和菜单栏对同一批 SQL 权威
 
 ### 2.1 权威事实
 
-- 唯一产品读源：`agent-vitals.sqlite3` 的 `usage_facts`、`sessions`、`pricing_snapshots`、`host_bills`。
+- 唯一产品读源：`agent-vitals.sqlite3` 的 `usage_facts`、`sessions`、`pricing_snapshots`、`harness_bills`。
 - token 守恒：`uncached_input + cache_read + cache_write + output = total`。
 - 重复事实按 `fact_id` 去重；重放不得改变事实数量或 token 合计。
 - 观察不到的事实必须保留为缺失/未解析状态，不得静默丢弃。
@@ -71,7 +71,7 @@ pricing_snapshot {
 价格匹配键为：
 
 ```text
-(host, provider_id?, raw_model, normalized_model, billing_basis)
+(harness, provider_id?, raw_model, normalized_model, billing_basis)
 ```
 
 ### 3.2 价格来源与更新
@@ -162,7 +162,7 @@ SQL 的历史 `pricing_snapshots`，不得回读 `pricing.json`。
 `data_status` 必须同时报告：
 
 - authority health
-- 每个 host 的 coverage/freshness
+- 每个 harness 的 coverage/freshness
 - pricing snapshot 数量、最新版本和 stale 状态
 - unresolved token 数量
 - unpriced token 数量
@@ -195,7 +195,7 @@ SQL 的历史 `pricing_snapshots`，不得回读 `pricing.json`。
 以下状态必须进入总览告警，而不是只写日志：
 
 - DSH stale/missing：对应日期显示 coverage partial/unavailable。
-- `invalid_fact` 或其他开放质量问题：显示数量、影响宿主和影响 token。
+- `invalid_fact` 或其他开放质量问题：显示数量、影响执行环境和影响 token。
 - provider unknown/conflict：显示 unresolved token 和估算金额。
 - 价格快照过期或缺失：显示 pricing stale/unavailable。
 
@@ -225,7 +225,7 @@ v0.11.0 发布前必须：
 4. 任一缺失价格/缺失事实被输出为 0 且无告警。
 5. 两套价格文件产生不同金额，或价格版本无法追溯。
 6. 历史查询使用当前价格覆盖历史价格。
-7. stale host、invalid facts 或 unpriced tokens 未在总览中可见。
+7. stale harness、invalid facts 或 unpriced tokens 未在总览中可见。
 8. 发布物版本不是 `0.11.0`，或未能从干净构建复现。
 
 ## 10. 当前实现状态（2026-09-10）

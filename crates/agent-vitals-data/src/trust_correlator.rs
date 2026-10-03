@@ -44,7 +44,7 @@ pub struct TrustFindingSummary {
 struct ObservationRow {
     id: String,
     machine: String,
-    host: String,
+    harness: String,
     actor: String,
     workspace: Option<String>,
     observed_at_ms: i64,
@@ -60,7 +60,7 @@ struct ObservationRow {
 #[derive(Debug)]
 struct Incident {
     machine: String,
-    host: String,
+    harness: String,
     actor: String,
     workspace: Option<String>,
     bucket: i64,
@@ -188,10 +188,10 @@ fn incidents(rows: Vec<ObservationRow>) -> Vec<Incident> {
     let mut grouped: std::collections::BTreeMap<(String, String, String, String), Vec<ObservationRow>> = std::collections::BTreeMap::new();
     for row in rows {
         let workspace = row.workspace.clone().unwrap_or_else(|| "none".to_string());
-        grouped.entry((row.machine.clone(), row.host.clone(), row.actor.clone(), workspace)).or_default().push(row);
+        grouped.entry((row.machine.clone(), row.harness.clone(), row.actor.clone(), workspace)).or_default().push(row);
     }
     let mut out = Vec::new();
-    for ((machine, host, actor, workspace), mut rows) in grouped {
+    for ((machine, harness, actor, workspace), mut rows) in grouped {
         rows.sort_by_key(|row| (row.observed_at_ms, row.id.clone()));
         let mut window = Vec::new();
         for row in rows {
@@ -201,16 +201,16 @@ fn incidents(rows: Vec<ObservationRow>) -> Vec<Incident> {
             });
             if split && !window.is_empty() {
                 let bucket = window.first().map(|first: &ObservationRow| first.observed_at_ms.div_euclid(INCIDENT_WINDOW_MS)).unwrap_or(0);
-                out.push(Incident { machine: machine.clone(), host: host.clone(), actor: actor.clone(), workspace: (workspace != "none").then_some(workspace.clone()), bucket, rows: std::mem::take(&mut window) });
+                out.push(Incident { machine: machine.clone(), harness: harness.clone(), actor: actor.clone(), workspace: (workspace != "none").then_some(workspace.clone()), bucket, rows: std::mem::take(&mut window) });
             }
             window.push(row);
         }
         if !window.is_empty() {
             let bucket = window.first().map(|first: &ObservationRow| first.observed_at_ms.div_euclid(INCIDENT_WINDOW_MS)).unwrap_or(0);
-            out.push(Incident { machine: machine.clone(), host: host.clone(), actor: actor.clone(), workspace: (workspace != "none").then_some(workspace.clone()), bucket, rows: window });
+            out.push(Incident { machine: machine.clone(), harness: harness.clone(), actor: actor.clone(), workspace: (workspace != "none").then_some(workspace.clone()), bucket, rows: window });
         }
     }
-    out.sort_by_key(|incident| (incident.rows.first().map(|row| row.observed_at_ms).unwrap_or(0), incident.machine.clone(), incident.host.clone(), incident.actor.clone(), incident.bucket));
+    out.sort_by_key(|incident| (incident.rows.first().map(|row| row.observed_at_ms).unwrap_or(0), incident.machine.clone(), incident.harness.clone(), incident.actor.clone(), incident.bucket));
     out
 }
 
@@ -226,18 +226,18 @@ pub fn correlate(conn: &Connection) -> Result<TrustCorrelationReport, AuthorityE
 /// Project only observations created or refreshed by the current collector.
 /// An empty selection retains the full authority re-evaluation behavior used by
 /// migrations and tests. Incremental collectors must pass their own IDs so a
-/// harmless scan does not inflate its report with another host's old evidence.
+/// harmless scan does not inflate its report with another harness's old evidence.
 pub fn correlate_selected(
     conn: &Connection, observation_ids: &[String],
 ) -> Result<TrustCorrelationReport, AuthorityError> {
     let mut stmt = conn.prepare(
-        "SELECT observation_id, machine_namespace, host, actor_id, workspace_ref,
+        "SELECT observation_id, machine_namespace, harness, actor_id, workspace_ref,
                 observed_at_ms, stage, evidence_level, evidence_origin, scope_classes_json,
                 destination_class, consent_kind, consent_state
          FROM trust_observations ORDER BY observed_at_ms, observation_id",
     )?;
     let rows = stmt.query_map([], |row| Ok(ObservationRow {
-        id: row.get(0)?, machine: row.get(1)?, host: row.get(2)?, actor: row.get(3)?,
+        id: row.get(0)?, machine: row.get(1)?, harness: row.get(2)?, actor: row.get(3)?,
         workspace: row.get(4)?, observed_at_ms: row.get(5)?, stage: row.get(6)?,
         evidence_level: row.get(7)?, evidence_origin: row.get(8)?, scope_classes_json: row.get(9)?,
         destination_class: row.get(10)?, consent_kind: row.get(11)?, consent_state: row.get(12)?,
@@ -251,7 +251,7 @@ pub fn correlate_selected(
         for (issue_type, severity, metadata) in candidates(&incident) {
             let workspace = incident.workspace.as_deref().unwrap_or("none");
             let bucket = incident.bucket.to_string();
-            let instance = stable_fingerprint(&[issue_type, &incident.machine, &incident.host, &incident.actor, workspace, &bucket]);
+            let instance = stable_fingerprint(&[issue_type, &incident.machine, &incident.harness, &incident.actor, workspace, &bucket]);
             let ids = incident.rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
             let evidence = stable_fingerprint(&[issue_type, &ids.join("|"), metadata["evidence_level"].as_str().unwrap_or("E0")]);
             let previous: Option<(String, String, String)> = conn.query_row(
@@ -260,7 +260,7 @@ pub fn correlate_selected(
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             ).optional()?;
             let issue_id = upsert_issue(conn, &IssueInput {
-                machine_namespace: &incident.machine, host: &incident.host, session_key: None,
+                machine_namespace: &incident.machine, harness: &incident.harness, session_key: None,
                 issue_type, instance_fingerprint: &instance, status: "open", severity,
                 evaluator_id: EVALUATOR_ID, evaluator_version: EVALUATOR_VERSION,
                 evidence_fingerprint: &evidence, opened_at_ms: incident.rows.first().map(|row| row.observed_at_ms).unwrap_or(0),
@@ -302,7 +302,7 @@ pub fn correlate_selected(
     Ok(report)
 }
 
-/// Read the safe Trust Finding rollup without scanning host files.
+/// Read the safe Trust Finding rollup without scanning harness files.
 pub fn findings_summary(conn: &Connection) -> Result<Vec<TrustFindingSummary>, AuthorityError> {
     let mut stmt = conn.prepare(
         "SELECT issue_type, status, severity, COUNT(*), MAX(opened_at_ms) AS most_recent_at_ms
@@ -343,7 +343,7 @@ mod tests {
         db.begin_run("run", "test", 1).unwrap();
         db.conn().execute_batch(
             "INSERT INTO trust_observations(
-                observation_id, machine_namespace, host, actor_id, actor_kind, observed_at_ms,
+                observation_id, machine_namespace, harness, actor_id, actor_kind, observed_at_ms,
                 observation_kind, stage, evidence_level, workspace_ref, scope_classes_json,
                 destination_class, destination_host, consent_kind, consent_state, collector_id, collector_version,
                 provenance_json, ingested_run_id, created_at_ms
@@ -378,7 +378,7 @@ mod tests {
 
     fn row(id: &str, at: i64) -> ObservationRow {
         ObservationRow {
-            id: id.into(), machine: "m".into(), host: "h".into(), actor: "a".into(),
+            id: id.into(), machine: "m".into(), harness: "h".into(), actor: "a".into(),
             workspace: Some("w".into()), observed_at_ms: at, stage: "package_observed".into(),
             evidence_level: "E1".into(), evidence_origin: "local_artifact".into(), scope_classes_json: "[]".into(),
             destination_class: None, consent_kind: None, consent_state: "unavailable".into(),
@@ -407,7 +407,7 @@ mod tests {
         object.evidence_level = "E3".into();
         object.destination_class = Some("object_storage".into());
         let incident = Incident {
-            machine: "m".into(), host: "h".into(), actor: "a".into(), workspace: Some("w".into()),
+            machine: "m".into(), harness: "h".into(), actor: "a".into(), workspace: Some("w".into()),
             bucket: 0, rows: vec![object],
         };
         assert!(!candidates(&incident).iter().any(|(code, _, _)| *code == "SV709"));
@@ -420,7 +420,7 @@ mod tests {
         legacy.evidence_origin = "unknown_legacy".into();
         legacy.scope_classes_json = "[\"git_history\"]".into();
         let incident = Incident {
-            machine: "m".into(), host: "h".into(), actor: "a".into(), workspace: Some("w".into()),
+            machine: "m".into(), harness: "h".into(), actor: "a".into(), workspace: Some("w".into()),
             bucket: 0, rows: vec![legacy],
         };
         let metadata = candidates(&incident).into_iter().find(|(code, _, _)| *code == "SV702").unwrap().2;
@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn host_chain_fixtures_never_claim_remote_acceptance() {
+    fn harness_chain_fixtures_never_claim_remote_acceptance() {
         for raw in [
             include_str!("../../../fixtures/trust/zcode_complete_chain.json"),
             include_str!("../../../fixtures/trust/minimax_missing_chain.json"),
@@ -463,7 +463,7 @@ mod tests {
         let insert = |conn: &rusqlite::Connection, id: &str, stage: &str, level: &str, at: i64| {
             conn.execute(
                 "INSERT INTO trust_observations(
-                    observation_id, machine_namespace, host, actor_id, actor_kind, observed_at_ms,
+                    observation_id, machine_namespace, harness, actor_id, actor_kind, observed_at_ms,
                     observation_kind, stage, evidence_level, evidence_origin, workspace_ref, scope_classes_json,
                     destination_class, destination_host, consent_kind, consent_state, collector_id,
                     collector_version, provenance_json, ingested_run_id, created_at_ms)

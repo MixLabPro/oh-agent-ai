@@ -116,7 +116,7 @@ class CodexUsageFactEmitterCase(unittest.TestCase):
             self.assertNotIn("reasoning", f)
             self.assertEqual(f["source_usage_semantics"], "delta",
                              "发的是 last_token_usage per-request 增量")
-            self.assertEqual(f["host"], "codex")
+            self.assertEqual(f["harness"], "codex")
             self.assertEqual(f["observation_kind"], "assistant-usage")
             self.assertEqual(f["identity_basis"], "derived-hash",
                              "token_count 无原生 id → 恒 derived-hash（§3.3）")

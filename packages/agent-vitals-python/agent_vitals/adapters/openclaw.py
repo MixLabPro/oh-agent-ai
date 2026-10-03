@@ -122,7 +122,7 @@ def apply_openclaw_runtime(skills, runtimes):
         by_name = {metadata.get("name"): metadata
                    for metadata in runtime.get("skills", [])}
         for record in skills:
-            if (record["host_family"] != "openclaw" or
+            if (record["harness_family"] != "openclaw" or
                     record["instance_id"] != instance_id):
                 continue
             metadata = by_name.get(record["name"])

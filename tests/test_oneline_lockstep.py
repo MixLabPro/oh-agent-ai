@@ -48,7 +48,7 @@ _TS_FIELDS = {"folded_at", "last_fold_at", "generated_at", "archived_at"}
 # Python 侧才有的产物（文档化的行为差量，Rust 不产）：
 #   state/calendar.html —— 展示层产物，R1d 明确不刷（行为差量，见 oneline.rs 注释）；
 #   cache/codex-fold.json —— `_render_calendar_html` 内部扫**真机** ~/.codex 的缓存，
-#                           宿主相关、不可复现，Rust oneline 无对应产物；
+#                           执行环境相关、不可复现，Rust oneline 无对应产物；
 #   *.lock —— Python 的 flock 副作用。
 _DELTA_FILES = {
     "state/calendar.html", "cache/codex-fold.json",
@@ -101,7 +101,7 @@ def _run(cmd, home: Path, log: Path):
     # 真机用户目录全量扫描，既拖慢测试也让 fixture 不可复现。
     env["HOME"] = str(home)
     env["AGENT_VITALS_SNAPSHOT_DIR"] = str(home / "snap")
-    # 不让 Python 初始化扫到真机宿主（isolated_home_env 同款禁用）。
+    # 不让 Python 初始化扫到真机执行环境（isolated_home_env 同款禁用）。
     for adapter in ("CODEX_RUNTIME", "OPENCLAW_RUNTIME", "WORKBUDDY_BUILTINS"):
         env["AGENT_VITALS_DISABLE_" + adapter] = "1"
     env["AGENT_VITALS_DISABLE_OPENCLAW_BUNDLED"] = "1"

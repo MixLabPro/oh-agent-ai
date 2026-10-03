@@ -133,7 +133,7 @@ body{margin:0;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-pr
       <div class="sv-chartwrap" id="sv-timeline"></div></div>
     <div class="sv-subcard"><div class="sv-panel-sub">权限轨迹（只显示有效权限、sandbox 或 approval 改变的 turn）。</div>
       <div class="sv-kv" id="sv-permissions"></div></div>
-    <div class="sv-subcard"><div class="sv-panel-sub">按源记录顺序的审计事件。source_order 是 rollout 中的位置，不冒充宿主 seq。</div>
+    <div class="sv-subcard"><div class="sv-panel-sub">按源记录顺序的审计事件。source_order 是 rollout 中的位置，不冒充执行环境 seq。</div>
       <div id="sv-turn-events"></div></div>
   </section>
 
@@ -142,7 +142,7 @@ body{margin:0;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-pr
     <div class="sv-subcard"><div class="sv-panel-sub">会话元数据与证据来源。degraded 文件（不可读 / 非 JSON / 空）不编造，
       缺席字段显示 —。</div>
       <div class="sv-kv" id="sv-provenance"></div></div>
-    <div class="sv-subcard"><div class="sv-panel-sub">20 信号覆盖（跨文件并集：任一 rollout 文件覆盖即覆盖；宿主线格式不提供的维度在表中标「结构缺口」）。</div>
+    <div class="sv-subcard"><div class="sv-panel-sub">20 信号覆盖（跨文件并集：任一 rollout 文件覆盖即覆盖；执行环境线格式不提供的维度在表中标「结构缺口」）。</div>
       <div class="sv-costwrap" id="sv-coverage"></div></div>
   </section>
 
@@ -208,7 +208,7 @@ if (!D) {
     var note = (unacc && unacc.length ? unacc.length + ' 条残差 · ' : '无残差 · ') + gapCount + ' 条会话缺口';
     var struct = '';
     if (unavail.length) {
-      struct = '<div class="sv-insight">宿主线格式不提供的维度（任何 Codex 会话都为零，' +
+      struct = '<div class="sv-insight">执行环境线格式不提供的维度（任何 Codex 会话都为零，' +
         '是结构缺口不是会话缺陷）：' + esc(unavail.join(' · ')) + '</div>';
     }
     return { availCount: availCount, availHit: availHit, gapCount: gapCount,
@@ -363,7 +363,7 @@ if (!D) {
   // 序列的取值函数。cumulative 三态：
   //   false        原始值——缺值返回 null（断开）。
   //   true / "sum" delta 累计——缺值沿用上一格，从第一次测到才开始累计。
-  //   "carry"      宿主已给累计值——缺值沿用上一格，**不再累加**（DSH cost 轴：
+  //   "carry"      执行环境已给累计值——缺值沿用上一格，**不再累加**（DSH cost 轴：
   //                每行 cumulative_cost 已是截至该请求的总花费，再累一遍就双计）。
   function buildSeriesValues(points, name, cumulative) {
     var out = new Array(points.length);
@@ -596,7 +596,7 @@ if (!D) {
     var n = points.length;
 
     if (n === 0) {
-      return '<div class="' + px + '-empty">无时间线数据（该宿主没有带时间/序号的可画点）。</div>';
+      return '<div class="' + px + '-empty">无时间线数据（该执行环境没有带时间/序号的可画点）。</div>';
     }
 
     var series = seriesNames(spec);
@@ -694,7 +694,7 @@ if (!D) {
   var tl = document.getElementById('sv-timeline');
   var hoursPts = (CR.hours || []).map(function (h, i) { return { ordinal: i, values: { tokens: h.tokens } }; });
   var hoursMax = 0; for (var hi = 0; hi < hoursPts.length; hi++) if (hoursPts[hi].values.tokens > hoursMax) hoursMax = hoursPts[hi].values.tokens;
-  // 事件叠加：finding.seq → turn_timeline.source_order → hour（宿主折好的北京小时
+  // 事件叠加：finding.seq → turn_timeline.source_order → hour（执行环境折好的北京小时
   // 桶键）→ 桶下标。hour 不在任何桶里（那个小时没有用量）→ 诚实跳过，不画在
   // 猜的位置上。turn_timeline 是几何的「对齐字典」，不是第二份事件源。
   var hourToOrd = {}; for (var hi2 = 0; hi2 < (CR.hours || []).length; hi2++) hourToOrd[CR.hours[hi2].hour] = hi2;

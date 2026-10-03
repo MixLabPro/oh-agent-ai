@@ -46,7 +46,7 @@
 
 ## 1. 任务清单
 
-### P0 — 数据通路（core → wasm → 宿主投影）
+### P0 — 数据通路（core → wasm → 执行环境投影）
 
 #### D1 · 新建 `crates/agent-vitals-core/src/domain/duration.rs`：通用工具调用耗时
 把 `skill.rs` 里"`callId` 配对 `tool/call`↔`tool/result`、算 `duration_ms`"这段逻辑
@@ -103,7 +103,7 @@
   暗示"本该有结果但配对失败"，`pending` 是"确实还没决定"，两者对用户的含义不同，
   UI 措辞也要分开，不能都显示成"—"）。
 
-#### D4 · Hook 消费抽取（core 已完成，宿主前提仍未验证）
+#### D4 · Hook 消费抽取（core 已完成，执行环境前提仍未验证）
 
 `crates/agent-vitals-core/src/domain/duration.rs::hook_executions` /
 `scripts/agent_vitals/agent/duration.py::hook_executions` 已实现——直接抽取
@@ -112,22 +112,22 @@ harness 算好的值），带 `decision` 分布计数。CLI 侧（`src/dsh.rs` �
 `EXECUTION_EVENT_TYPES` 已收 `hook/*`）立即可用，测试齐全（core 8 个 +
 Python characterization 6 个 + degradation 5 个，含双侧手工逐字节钉同一串）。
 
-**但 D6 的宿主接线（把 `hook/*` 加进 `dsh-client/src/host/index.ts` 的
+**但 D6 的执行环境接线（把 `hook/*` 加进 `dsh-client/src/harness/index.ts` 的
 `RELEVANT_TYPES`）故意没做**——下面这段原始的"开工前必须先验证"依然成立，
-本次开发环境里没有真实 DSH 宿主可以跑一遍实测，无法诚实地把这一项标记为
+本次开发环境里没有真实 DSH 执行环境可以跑一遍实测，无法诚实地把这一项标记为
 "已验证"。不做的选择本身就是在执行下面这条纪律：验证不通过（或验证不了）
 就不能把成本估进"只是加个过滤条件"。等有人拿真实会话跑通验证之后，再补
-D6 那一侧的接线——`hook_executions` 本身已经就绪，届时只是把它接进宿主投影，
+D6 那一侧的接线——`hook_executions` 本身已经就绪，届时只是把它接进执行环境投影，
 不需要再动 core。
 
 > ⚠️ **开工前必须先验证一件事，否则这一项可能整个落空。**
 > `hook/invoked`/`hook/result` 在 CLI 侧确实进了 `EXECUTION_EVENT_TYPES`
-> （`src/dsh.rs`，读的是落盘 JSONL），但**宿主侧从来没有收集过它们**：
-> `dsh-client/src/host/index.ts` 的 `RELEVANT_TYPES` 只有 `tool/*`、`approval/*`、
+> （`src/dsh.rs`，读的是落盘 JSONL），但**执行环境侧从来没有收集过它们**：
+> `dsh-client/src/harness/index.ts` 的 `RELEVANT_TYPES` 只有 `tool/*`、`approval/*`、
 > `sandbox/mode` 和四个 turn/step 边界 + `session/end-seed`，`hook/*` 一个都不在。
-> 也就是说「宿主能不能看到 hook 事件」目前**没有任何证据**——它可能像 approval 一样
-> 照常推送（只是没人订阅），也可能压根不进宿主的实时事件流。
-> **验证方法**：在宿主 `apply()` 里临时放行 `hook/*` 并打一条日志，拿真实会话跑一遍
+> 也就是说「执行环境能不能看到 hook 事件」目前**没有任何证据**——它可能像 approval 一样
+> 照常推送（只是没人订阅），也可能压根不进执行环境的实时事件流。
+> **验证方法**：在执行环境 `apply()` 里临时放行 `hook/*` 并打一条日志，拿真实会话跑一遍
 > （或直接问 DSH 侧的事件流契约）。**验证不通过就把 D4 从本 backlog 划掉**，别按
 > "只是加个过滤条件"的成本估进排期——这正是 `SKILL_EXECUTION_BACKLOG.md` §0 那张
 > "声称 vs 实际"表要防的同一类误判。
@@ -153,8 +153,8 @@ D6 那一侧的接线——`hook_executions` 本身已经就绪，届时只是�
 - ⚠️ wasm↔CLI 漂移没有自动测试守，手工拿同一份 fixture 两边对一遍（`behavior.jsonl`
   就有 turn 9–14 的轨迹级案例，够用来对拍）
 
-#### D6 · 宿主 `durationAudit` 投影
-- 改：`dsh-client/src/host/index.ts`
+#### D6 · 执行环境 `durationAudit` 投影
+- 改：`dsh-client/src/harness/index.ts`
 - ⚠️ `stateVersion` 必填非负整数——这次是全新投影，从 `1` 起（不是延续
   `skillAudit` 的版本号，两个投影独立计数）
 - ⚠️ `apply()` 必须展开前态（`{...state, …}`），返回裸字面量会静默丢
@@ -165,13 +165,13 @@ D6 那一侧的接线——`hook_executions` 本身已经就绪，届时只是�
 - 事件收集范围：新投影自己的过滤集合 = `skillAudit` 的 `SKILL_EXEC_TYPES`
   （`tool/call`/`tool/result`/`turn/*`/`step/*`）**加上** `approval/asked`/
   `approval/decided`（D3 要）和 `hook/invoked`/`hook/result`（D4 要）。
-  三者在宿主侧的现状**各不相同**，别当成一类：
-  | 事件 | CLI（`src/dsh.rs`） | 宿主（`host/index.ts`） |
+  三者在执行环境侧的现状**各不相同**，别当成一类：
+  | 事件 | CLI（`src/dsh.rs`） | 执行环境（`harness/index.ts`） |
   |---|---|---|
   | `tool/*`·`turn/*`·`step/*` | ✅ 在 `EXECUTION_EVENT_TYPES` | ✅ `skillAudit` 与 `behaviorFindings` 都在收 |
-  | `approval/asked`·`approval/decided` | ✅ | ✅ 已在 `behaviorFindings` 的 `RELEVANT_TYPES`（SV609/610/614 靠它）——**已验证宿主拿得到**，新投影照抄即可 |
-  | `hook/invoked`·`hook/result` | ✅ | ❌ **任何投影都没收过**，宿主能否拿到未经验证（见 D4 的前置验证） |
-- 测试：`dsh-client/scripts/verify-host.mjs`
+  | `approval/asked`·`approval/decided` | ✅ | ✅ 已在 `behaviorFindings` 的 `RELEVANT_TYPES`（SV609/610/614 靠它）——**已验证执行环境拿得到**，新投影照抄即可 |
+  | `hook/invoked`·`hook/result` | ✅ | ❌ **任何投影都没收过**，执行环境能否拿到未经验证（见 D4 的前置验证） |
+- 测试：`dsh-client/scripts/verify-harness.mjs`
 
 ---
 
@@ -219,7 +219,7 @@ D6 那一侧的接线——`hook_executions` 本身已经就绪，届时只是�
 的判断有几项要打折扣"是同一类问题——原文的假设值得先核实，不是照单实现。
 
 **Hook 面板没做**——D4/D6 已经决定 `durationAudit` 投影不携带 `hook/*`
-数据（宿主前提未验证），渲染一个永远拿不到数据的面板不是"占位"，是假装
+数据（执行环境前提未验证），渲染一个永远拿不到数据的面板不是"占位"，是假装
 有一个从没生效过的功能。`verify-render.mjs` 专门断言了"审计 tab 里不出现
 Hook 相关文案"这条边界，防止以后有人顺手把它加回来又忘了检查前提。
 
@@ -300,7 +300,7 @@ D1（通用工具调用耗时，用户最直接能感知"这次卡在哪一步"�
 ## 4. 全程纪律（与 `SKILL_EXECUTION_BACKLOG.md` 一致，不重复造轮子）
 
 1. **四方 lockstep**：core（Rust）↔ `scripts/agent_vitals/`（Python）↔ wasm（重编译
-   并拷贝）↔ 宿主 TS。差分 golden 守 Python↔Rust；wasm↔CLI 漂移没有自动测试，必须
+   并拷贝）↔ 执行环境 TS。差分 golden 守 Python↔Rust；wasm↔CLI 漂移没有自动测试，必须
    手工验
 2. **golden `--update` 前逐字确认**——不过本 backlog 的改动大概率不touch
    `scan.py` 的 `context_composition` 路径（`duration.rs` 走的是 `execution_events`，

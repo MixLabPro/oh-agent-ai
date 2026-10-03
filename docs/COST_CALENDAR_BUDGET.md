@@ -758,6 +758,6 @@ M10         CI 集成测试 + golden fixtures
 | PRODUCT.md | §5.8 加 watch --oneline 的具体交付物；§9 指标加 "Calendar attach rate" |
 | ARCHITECTURE.md | §0.3 补充「跨机器同步不做」；§7 加 [budget] 节 schema；§8.2 补充状态文件归档语义 |
 | ENGINEERING.md | §6.8 双实现差分护栏加 oneline.json / budget.json |
-| HOST_ADAPTER_CONTRACT.md | 不变 |
+| HARNESS_ADAPTER_CONTRACT.md | 不变 |
 | RUNTIME_EVIDENCE_CONTRACT.md | 不变（运行时层与本需求解耦）|
 | AGENT_BEHAVIOR_AUDIT.md | 不变（单 session 审计，与本需求正交）|

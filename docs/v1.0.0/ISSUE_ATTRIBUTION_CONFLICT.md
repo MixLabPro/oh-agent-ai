@@ -25,7 +25,7 @@ open_quality_issues_by_code: { "invalid_fact": 16951 }
 |---|---|---|
 | E1 | 冲突记录总数 | 16,951，全部 `code='invalid_fact'`，`scope_type='fact'`，severity=`warning` |
 | E2 | scope_key 形态 | `attribution_conflict:<fact_id>` 单条一事实，**未归并** |
-| E3 | 宿主分布 | 全部为 `codex`（claude-code / dsh 各 0） |
+| E3 | 执行环境分布 | 全部为 `codex`（claude-code / dsh 各 0） |
 | E4 | 存量归属（冲突侧） | 16,009 条 = `billing_mode=subscription, pricing_basis=session-provider, provider_id=openai, evidence_basis=session-native`；924 条 = `metered/metered_estimate, provider=NULL, evidence_basis=config-current`；18 条 = `metered/metered_estimate, provider=openai, evidence_basis=missing` |
 | E5 | 版本字段 | 冲突侧与非冲突侧**都是** `attribution_version=provider-v0.11`、`normalization_version=provider-v0.11`（同版本，**不是版本升级**） |
 | E6 | 时间 | `first_seen` 集中在 2026-09-10 03:22–03:30；`last_seen` 延伸至 2026-09-11 10:43 |
@@ -120,7 +120,7 @@ Ok(existing.iter().zip(incoming.iter())
 - 只允许覆写 9 个**归属/派生**列；`fact_id`/`source_event_id`/`native_session_id`/`event_ts_ms`/
   `observation_kind`/四桶 token/`source_id`/`ingested_run_id` **一律不动**。
 - 覆写必须与 token 守恒自检同事务（沿用 `force-codex-provider-replay` 的守恒断言）。
-- `usage_facts` 的 `UNIQUE(host, machine_namespace, native_session_id, source_event_id,
+- `usage_facts` 的 `UNIQUE(harness, machine_namespace, native_session_id, source_event_id,
   observation_kind)` 不受影响（键未变）。
 
 ### 7.3 回填（一次，幂等）
@@ -162,7 +162,7 @@ Ok(existing.iter().zip(incoming.iter())
 
 ### 7.4 面（surface）纪律
 
-- `open_quality_issues_by_code` 与待处理队列：若未来仍出现真冲突，**按宿主/provider/模式归并**
+- `open_quality_issues_by_code` 与待处理队列：若未来仍出现真冲突，**按执行环境/provider/模式归并**
   （REQ-073），不得一条一待办。
 - informational 记录不得计入 `health`。
 
@@ -197,7 +197,7 @@ Ok(existing.iter().zip(incoming.iter())
 2. `usage_fact.rs` 的 `provider-v0.12` → **`v0.13`**（2 处：normalization / attribution）
 3. 独立 target 目录构建 release CLI
 4. 复制真机 data home → 沙盒（db + machine.json + facts）
-5. `AGENT_VITALS_HOME=<沙盒> <演练CLI> data replay-provider-evidence --host codex`
+5. `AGENT_VITALS_HOME=<沙盒> <演练CLI> data replay-provider-evidence --harness codex`
 
 **结果（四条断言全过）**：
 

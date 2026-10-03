@@ -25,7 +25,7 @@
 
 1. **不是「省了多少钱」**——省多少要么反事实、要么基准差,都不可复核;且 Codex 订阅制、DSH 按量,绝对钱数不可统一。
 2. **必须是 measured 的**——每一笔浪费点名、带证据,不许估算冒充测量。
-3. **统一结构,不伪造可比性**——宿主可以共用同一套卡片和归因分类;不同币种、
+3. **统一结构,不伪造可比性**——执行环境可以共用同一套卡片和归因分类;不同币种、
    不同 billing mode、不同证据覆盖下的绝对数值不强行横比。
 
 产品指标分三层,各自回答一个问题:
@@ -46,7 +46,7 @@
 
 UI 可以统一叫「确认浪费率」,但必须同时标 `basis=spend|usage`。固定套餐没有边际
 token 账单,不得先把套餐费摊成伪单价再冒充 confirmed waste spend。用总成本/总用量
-直接作分母,一个什么都测不到的宿主会得到漂亮的 0%,所以审计覆盖率必须同屏。
+直接作分母,一个什么都测不到的执行环境会得到漂亮的 0%,所以审计覆盖率必须同屏。
 `eligible` 不是固定要求四桶全有,而是满足**该规则 + 该 provider/billing mode**所需
 字段、且事件能归因到请求;provider 不适用的桶不因缺场被误判为不合格。
 
@@ -95,7 +95,7 @@ WasteClaim {
     token_bucket,       // input / cache_read / output / …
     amount,
     currency,
-    host_id,            // 执行宿主,不等于收费方
+    harness_id,            // 执行执行环境,不等于收费方
     billing_source,     // 套餐/API/credits 的实际归属
     billing_mode,       // subscription / metered / credits / unknown
     pricing_basis,
@@ -143,7 +143,7 @@ basis 取值表(当前证据属性,诚实标出):
 |---|---|
 | **是什么** | 命中率低于阈值**只产生告警**,不直接归因。改名为嫌疑——「本可命中」是推测,不是测量 |
 | **eligibility(全部满足才可评估)** | provider 缓存语义已知;排除首次请求;按模型族分别计算;排除模型切换边界;最小请求数;W1 所需的 uncached/cache_read 字段完整;会话路径已线性化 |
-| **阈值** | 90% 是**默认告警阈值**,不是归因阈值——DSH 93% / Codex 95.7% 两个总体值推不出所有模型/任务/宿主共用 90%;按宿主+模型族校准 |
+| **阈值** | 90% 是**默认告警阈值**,不是归因阈值——DSH 93% / Codex 95.7% 两个总体值推不出所有模型/任务/执行环境共用 90%;按执行环境+模型族校准 |
 | **升级路径** | 已知生产缓存事故 + 请求级因果证据可进入 human/evidence-confirmed;稳定前缀只到 inferred;受控前后实验只到 benchmark-counterfactual,不冒充生产实付浪费 |
 | **金额公式(即使估算,也是增量价差,不是全部未缓存费用)** | `excess_miss = max(0, uncached − (1−target_hit_rate) × eligible_input)`;金额交给 provider-specific pricing 函数(需考虑 cache creation/write 语义),结果标 `estimated` |
 | **诚实性边界** | 首次请求、模型切换、provider 差异、分支/恢复、compaction、TTL、system prompt/工具列表变化、正常新增上下文——全部**不是**浪费,是数据属性 |
@@ -164,7 +164,7 @@ v1 把三个不同概念混在一个 W2 里,拆开:
 ### W3 Review Queue(原名「长尾异常」,移出分子)
 
 - 长尾 ≠ 浪费,复核前不计数——v1 已承认,本版**贯彻到底**:不存在 `W3_flag_cost`。
-- `median × 10` 必须按宿主、模型、时间段、请求数或任务规模**分组**,否则一个合法的大型 session 必然被标异常。
+- `median × 10` 必须按执行环境、模型、时间段、请求数或任务规模**分组**,否则一个合法的大型 session 必然被标异常。
 - 人工确认后记录的是**明确的浪费请求或金额**,不是「整个异常 session」:
 
 ```text
@@ -179,7 +179,7 @@ session_key | session_revision | confirmed_request_ids | confirmed_amount
 | 项 | 定义 |
 |---|---|
 | **展示形式** | `estimated resident opportunity = estimated tier1 tokens × observed/declared exposure count`(启动次数取 plan.rs 的 `startup_rate`——只有用户显式提供,没有可靠月度数据就填 `unavailable`) |
-| **为什么不进 measured** | `tier1_tokens` 是 tokenizer 估算;`loaded` 只证明 **catalog-visible**,不证明正文被读(`HOST_ADAPTER_CONTRACT.md` 的 `body_loaded_state: null` / `runtime_status: catalog-visible`);`skillUsage=0` 是终身零触发,不证明该 skill 没有发现/约束/安全价值 |
+| **为什么不进 measured** | `tier1_tokens` 是 tokenizer 估算;`loaded` 只证明 **catalog-visible**,不证明正文被读(`HARNESS_ADAPTER_CONTRACT.md` 的 `body_loaded_state: null` / `runtime_status: catalog-visible`);`skillUsage=0` 是终身零触发,不证明该 skill 没有发现/约束/安全价值 |
 | **升级为 measured 的路径** | 请求头能明确测出该 skill 的实际常驻片段时才可能 |
 | **诚实性边界** | 只算 `loaded` 的僵尸(`enabledPlugins` 判定);盘上未 loaded 副本不计 |
 
@@ -211,7 +211,7 @@ bug 后时段成本 / 两个时段总成本
 
 **不可**表述为「浪费率从 98.7% 降到 1.3%」。
 
-当前状态:两宿主(Codex / DSH post-08-18)都**还没有可进分子的确认浪费数据**——北极星暂无实测值,这是诚实的现状;`COST_BASELINE.md` / `CLAUDE_CODE_CORPUS.md` 的快照数字全部是「估算机会/告警」级。
+当前状态:两执行环境(Codex / DSH post-08-18)都**还没有可进分子的确认浪费数据**——北极星暂无实测值,这是诚实的现状;`COST_BASELINE.md` / `CLAUDE_CODE_CORPUS.md` 的快照数字全部是「估算机会/告警」级。
 
 ---
 
@@ -261,13 +261,13 @@ metered_cost_per_mtok
 - `pricing_basis=exact/partial` 目前只说明 `by_model` 覆盖是否完整,不说明报价等于实付。
   价格表必须带 `pricing_version / effective_at / priced_at`;否则更新价表会重写历史月份。
 
-### 6.3 Host 与 BillingSource 分离
+### 6.3 Harness 与 BillingSource 分离
 
-Host 是执行壳,不是收费方。Claude Code 可同时使用 Anthropic 套餐、Anthropic API、
+Harness 是执行壳,不是收费方。Claude Code 可同时使用 Anthropic 套餐、Anthropic API、
 DeepSeek、MiniMax、Kimi 等;同一会话甚至可以混用。每份 usage 应先归属:
 
 ```text
-host_id        = claude-code | codex | dsh | …
+harness_id        = claude-code | codex | dsh | …
 billing_source = plan/account/provider identity
 billing_mode   = subscription | metered | credits | unknown
 provider       = usage sample 的模型服务方
@@ -358,20 +358,20 @@ $176.86 vs 5min $110.54,**差额占名义总额 5.2%**。会话日志不记录�
 **派生:名义/实际倍数**(`nominal_cost / actual_cost`)表达套餐或中转带来的折扣杠杆,并
 自带一条护栏:**倍数 > 50× 时不得显示「值 N 倍」,应告警「计费声明与实际用量不符」**。
 实测 anthropic 族 380×——$20/月的 Claude Pro 物理上承载不了 33.3 亿 token,该倍数暴露的
-是 billing_source 声明错误(实为中转路由),不是套利收益。与 §6.3「Host ≠ BillingSource」
+是 billing_source 声明错误(实为中转路由),不是套利收益。与 §6.3「Harness ≠ BillingSource」
 互为印证:倍数异常是归属错误的自检信号。
 
 **护栏的第二种成因——已声明的免费额度(2026-09-11 补,发现于 WorkBuddy 接入)**:上面的
 护栏隐含假定「极端倍数只有归属错误一种成因」。实测证伪:WorkBuddy 的 `hy3` 是平台推广
 自家模型的**限免**,nominal > 0、actual = 0,倍数无定义/趋于无穷——而这**不是**声明错误,
-平台确实免费给了。同一形状会出现在任何宿主的新模型推广期、任何厂商的免费额度上,
+平台确实免费给了。同一形状会出现在任何执行环境的新模型推广期、任何厂商的免费额度上,
 **不是 WorkBuddy 特有**。护栏因此需要一条豁免分支:
 
 - 展示层遇 actual = 0 且 nominal > 0 时,**先查是否有已声明的免费额度**(声明形状与
   `catalog_2026_09.subscriptions` 同类:provider / 模型或范围 / 起止日期 / `reported_at`);
   有声明 → 显示「名义 ¥X · 免费额度(已声明)」,**不**报「计费声明与实际用量不符」;
 - 无声明 → 维持原告警。**成因归用户声明,不归机器推断**:「这是限免」与「这是自配路由」
-  「这是宿主未记账」在本机数据上不可分辨(`WORKBUDDY_ONBOARDING_SPEC.md` §2.1),机器
+  「这是执行环境未记账」在本机数据上不可分辨(`WORKBUDDY_ONBOARDING_SPEC.md` §2.1),机器
   只能报「actual 为零、成因未声明」;
 - 限免的 token 仍是**真消耗、真产出**,名义价值不为零——这正是本节「不扣促销」的定义;
   它们进名义栏,显示的是**已捕获价值**(与浪费相反),不进任何实付栏。
@@ -430,8 +430,8 @@ $176.86 vs 5min $110.54,**差额占名义总额 5.2%**。会话日志不记录�
 5. **baseline 必须带语料期标签**:DSH 08-18 前数据(bug 期)不进任何计算(`COST_BASELINE.md` §2);Claude Code 语料日期范围已实测(08-03 → 09-02)但**无已知事故分界**,只做结构不做前后对照(`CLAUDE_CODE_CORPUS.md` §7);其钱化是 catalog-provider 估算且分事件级/逻辑级两档(回声 1.99x),不冒充账单(§6)。
 6. **无基线不告警(FR-05)**——结构性浪费(SV-COST)与相对浪费(缓存)分开;混进来用户会觉得系统冤枉自己的正常行为。
 7. **分母诚实**——浪费率不用总成本作分母,审计覆盖率必须同屏;eligible 按规则与
-   provider 需要的字段判断,不是机械要求所有宿主四桶全有。
-8. **Host ≠ BillingSource**——执行入口不决定收费方;混合路由逐 usage 归属,归属未知
+   provider 需要的字段判断,不是机械要求所有执行环境四桶全有。
+8. **Harness ≠ BillingSource**——执行入口不决定收费方;混合路由逐 usage 归属,归属未知
    就 unavailable。
 9. **感知不冒充归因**——cost/M 可以做顶层产品指标,但它是摊销/混合效率,不能单凭
    变高或变低证明浪费。
@@ -456,11 +456,11 @@ $176.86 vs 5min $110.54,**差额占名义总额 5.2%**。会话日志不记录�
 
 1. `WasteClaim` 统一声明(core 类型 + 互斥证明测试)——可加总分子的前提。
 2. 审计覆盖率计算:eligible audited cost 按规则/provider 所需字段 + 事件可归因判定进 core。
-3. W1 eligibility 实现(按模型族、排除首请求/切换边界、最小请求数)+ 90% 阈值降级为**告警阈值**,按宿主/模型族可配。
+3. W1 eligibility 实现(按模型族、排除首请求/切换边界、最小请求数)+ 90% 阈值降级为**告警阈值**,按执行环境/模型族可配。
 4. W3 人工确认记录结构(`reviewer`/`reviewed_at`/`confirmed_request_ids`),复核结果写入带 revision 的记录,可复现。
 5. W4 exposure count 来源(启动次数)与 `catalog-visible ≠ body loaded` 的展示拆分。
 6. **BillingSource + 套餐金额输入位**:按账户/账期记录 user-reported invoice 与
-   allocated amount;没有就 unavailable,不按 host 猜套餐。**输入位已落地**(2026-09-02:
+   allocated amount;没有就 unavailable,不按 harness 猜套餐。**输入位已落地**(2026-09-02:
    `pricing.json catalog_2026_09.subscriptions` 记 Claude Pro $20/月、MiniMax ¥114/月,
    basis=user-reported-invoice,锁步测试覆盖;Claude Code 语料已按订阅口径重算,见
    `CLAUDE_CODE_CORPUS.md` §6)。**账单确认**与历史价格快照仍待。

@@ -234,7 +234,7 @@ class TestUnreadableSkillIsReportedNotDropped(unittest.TestCase):
         e = [x for x in self.data["unreadable_skills"]
              if x["path"].endswith("locked-away")][0]
         self.assertTrue(e.get("reason"), "必须说明为什么读不了")
-        self.assertTrue(e.get("host"), "必须说明是哪个宿主的根下发现的")
+        self.assertTrue(e.get("harness"), "必须说明是哪个执行环境的根下发现的")
 
     def test_warning_also_goes_to_stderr(self):
         """只写进 JSON 不够 —— 直接在终端跑的人同样需要知道清点不完整。"""

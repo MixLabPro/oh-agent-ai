@@ -1,10 +1,10 @@
-import { hostName } from "../../lib/hostNames";
+import { harnessName } from "../../lib/harnessNames";
 import { useEffect, useState } from "react";
 import { StatusPill } from "../../components/ui/StatusPill";
-import { readFindings, readUsageCalendar, readUsageHourly, type FindingGroup, type OverviewDetails, type OverviewSnapshot, type SummaryHostTokens, type UsageCalendar, type UsageHourly } from "../../lib/tauri";
+import { readFindings, readUsageCalendar, readUsageHourly, type FindingGroup, type OverviewDetails, type OverviewSnapshot, type SummaryHarnessTokens, type UsageCalendar, type UsageHourly } from "../../lib/tauri";
 import { UsageTrendChart } from "../../components/UsageTrendChart";
 import { bucketTotal, buildDayBuckets, buildHourBuckets, monthDates, monthOf, weekDates, weekExtraMonth, type TrendBucket, type TrendRange } from "../usage/trendBuckets";
-import { sessionsDateHref, sessionsHostHref } from "../../lib/nav";
+import { sessionsDateHref, sessionsHarnessHref } from "../../lib/nav";
 import { todayCacheHitRatio } from "./cacheHit";
 import { applyConversion, monthSpendCard, todaySpendCard } from "./spendCards";
 import { useConvertedAmounts } from "../../lib/fx";
@@ -25,7 +25,7 @@ function moneyDetail(values: Record<string, number>): string {
 
 function basisLabel(value: string): string {
   const key = `overview.basis.${value}` as MessageKey;
-  return ["metered_actual", "host_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent", "other"].includes(value) ? message(key) : value;
+  return ["metered_actual", "harness_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent", "other"].includes(value) ? message(key) : value;
 }
 
 function basisLines(values: Record<string, Record<string, number>>): string {
@@ -33,7 +33,7 @@ function basisLines(values: Record<string, Record<string, number>>): string {
   return lines.length ? lines.join(" · ") : message("overview.noActualSpend");
 }
 
-function hostTokensLabel(value: SummaryHostTokens): string {
+function harnessTokensLabel(value: SummaryHarnessTokens): string {
   return `${tokensLabel(value.total)} · ${message("overview.cacheHit", undefined, { ratio: value.cache_hit_ratio == null ? "—" : (value.cache_hit_ratio * 100).toFixed(1) })}`;
 }
 
@@ -57,8 +57,8 @@ function budgetStatusLabel(level: string): string {
   return message(`overview.budget.${known}` as MessageKey);
 }
 
-function hostStatusLabel(status: OverviewSnapshot["host_rows"][number]["status"]): string {
-  return message(`overview.host.${status}` as MessageKey);
+function harnessStatusLabel(status: OverviewSnapshot["harness_rows"][number]["status"]): string {
+  return message(`overview.harness.${status}` as MessageKey);
 }
 
 function syncStageLabel(stage: string): string {
@@ -159,7 +159,7 @@ function TrendPanel({ details }: { details: OverviewDetails }) {
  * R2（OVERVIEW_DRILLDOWN spec §4.3）：总览内嵌发现条——画布首发承诺
  * 「发现作为相关页面中的事项呈现」的落地。只读 findings_groups_safe 的
  * 既有脱敏投影（零新载荷字段），top 3；每项给「去看证据」的可达路径
- * （宿主会话深链）。两态诚实降级：服务不可用如实说，零发现是诚实空态。
+ * （执行环境会话深链）。两态诚实降级：服务不可用如实说，零发现是诚实空态。
  */
 function OverviewFindingsStrip() {
   const [state, setState] = useState<"loading" | "ok" | "unavailable">("loading");
@@ -185,9 +185,9 @@ function OverviewFindingsStrip() {
         {items.map((item) => (
           <li key={item.group_id} className={`overview-finding severity-${item.severity}`}>
             <span className="finding-rule">{item.rule}</span>
-            <small>{hostName(item.host)} · {message("overview.findingCounts", undefined, { cases: item.count, sessions: item.sessions_count })}</small>
-            {item.sessions_count > 0 && item.host !== "generic" && item.host !== "all" && item.host
-              ? <a className="inline-drill" href={sessionsHostHref(item.host)}>{message("overview.openSessions")} <span aria-hidden="true">→</span></a>
+            <small>{harnessName(item.harness)} · {message("overview.findingCounts", undefined, { cases: item.count, sessions: item.sessions_count })}</small>
+            {item.sessions_count > 0 && item.harness !== "generic" && item.harness !== "all" && item.harness
+              ? <a className="inline-drill" href={sessionsHarnessHref(item.harness)}>{message("overview.openSessions")} <span aria-hidden="true">→</span></a>
               : null}
           </li>
         ))}
@@ -206,8 +206,8 @@ export function OverviewPage({ overview, details }: { overview: OverviewSnapshot
   const monthConversion = useConvertedAmounts(monthBase.amounts);
   if (!overview) return <section className="empty-state" aria-live="polite"><p className="eyebrow">{message("overview.loading", language)}</p><h2>{message("overview.preparing", language)}</h2><p>{message("overview.loadingDetail", language)}</p></section>;
   const budgetTone = overview.budget.level === "over" ? "warning" : overview.budget.level === "warn" ? "warning" : overview.budget.level === "ok" ? "success" : "neutral";
-  const measuredHosts = details?.monthly && details.monthly.freshness !== "unavailable" && details.monthly.freshness !== "unknown"
-    ? Object.values(details.monthly.tokens_by_host).filter((host) => host.total > 0).length : null;
+  const measuredHarnesses = details?.monthly && details.monthly.freshness !== "unavailable" && details.monthly.freshness !== "unknown"
+    ? Object.values(details.monthly.tokens_by_harness).filter((harness) => harness.total > 0).length : null;
   const cacheHit = todayCacheHitRatio(details?.daily ?? null);
   // 报告币种折算（后端算、带出处）；折不了就保持分币种。
   const todaySpend = applyConversion(todayBase, todayConversion);
@@ -218,7 +218,7 @@ export function OverviewPage({ overview, details }: { overview: OverviewSnapshot
       <StatCard label={message("overview.todayTokens", language)} value={tokensLabel(overview.today_tokens)} detail={overview.today_tokens == null ? message("overview.noToday", language) : cacheHit == null ? message("overview.noCacheRatio", language) : message("overview.cacheRatio", language, { ratio: (cacheHit * 100).toFixed(2) })} />
       <StatCard label={message("overview.todayCost", language)} value={todaySpend.value} detail={todaySpend.detail} />
       <StatCard label={message("overview.monthSpend", language)} value={monthSpend.value} detail={monthSpend.detail} />
-      <StatCard label={message("overview.activeHosts", language)} value={measuredHosts == null ? "—" : String(measuredHosts)} detail={measuredHosts == null ? message("overview.noMonthlyCoverage", language) : message("overview.hostsObserved", language)} />
+      <StatCard label={message("overview.activeHarnesses", language)} value={measuredHarnesses == null ? "—" : String(measuredHarnesses)} detail={measuredHarnesses == null ? message("overview.noMonthlyCoverage", language) : message("overview.harnessesObserved", language)} />
     </section>
     {details && <TrendPanel details={details} />}
     <section className="overview-detail-grid" aria-label={message("overview.authoritativeSummaries", language)}>
@@ -231,10 +231,10 @@ export function OverviewPage({ overview, details }: { overview: OverviewSnapshot
         {(() => { const state = summaryState(details?.daily?.freshness ?? "unavailable"); return <StatusPill tone={state.tone}>{details?.daily ? `${state.label} · ${details.daily.coverage.measured_fields}/${details.daily.coverage.total_fields}` : state.label}</StatusPill>; })()}
       </section>
     </section>
-    {details?.monthly && details.monthly.freshness !== "unavailable" && details.monthly.freshness !== "unknown" && <section className="overview-host-panel" aria-labelledby="overview-month-host-title">
-      <div className="section-heading"><div><p className="eyebrow">{message("overview.hostBreakdown", language)}</p><h3 id="overview-month-host-title">{message("overview.hostTokens", language)}</h3></div><span className="count-badge">{message("overview.hostCount", language, { count: Object.values(details.monthly.tokens_by_host).filter((host) => host.total > 0).length })}</span></div>
-      <div className="overview-host-list">{Object.entries(details.monthly.tokens_by_host).filter(([, tokens]) => tokens.total > 0).map(([host, tokens]) => <article className="overview-host-row" key={host}><div><strong>{hostName(host)}</strong><span>{hostTokensLabel(tokens)}</span></div><b>{message("overview.tokensValue", language, { value: tokensLabel(tokens.total) })}</b></article>)}</div>
-      {Object.values(details.monthly.tokens_by_host).some((host) => host.total === 0) && <p className="overview-empty">{message("overview.hostsNoUsage", language, { hosts: Object.entries(details.monthly.tokens_by_host).filter(([, tokens]) => tokens.total === 0).map(([host]) => host).join(", ") })}</p>}
+    {details?.monthly && details.monthly.freshness !== "unavailable" && details.monthly.freshness !== "unknown" && <section className="overview-harness-panel" aria-labelledby="overview-month-harness-title">
+      <div className="section-heading"><div><p className="eyebrow">{message("overview.harnessBreakdown", language)}</p><h3 id="overview-month-harness-title">{message("overview.harnessTokens", language)}</h3></div><span className="count-badge">{message("overview.harnessCount", language, { count: Object.values(details.monthly.tokens_by_harness).filter((harness) => harness.total > 0).length })}</span></div>
+      <div className="overview-harness-list">{Object.entries(details.monthly.tokens_by_harness).filter(([, tokens]) => tokens.total > 0).map(([harness, tokens]) => <article className="overview-harness-row" key={harness}><div><strong>{harnessName(harness)}</strong><span>{harnessTokensLabel(tokens)}</span></div><b>{message("overview.tokensValue", language, { value: tokensLabel(tokens.total) })}</b></article>)}</div>
+      {Object.values(details.monthly.tokens_by_harness).some((harness) => harness.total === 0) && <p className="overview-empty">{message("overview.harnessesNoUsage", language, { harnesses: Object.entries(details.monthly.tokens_by_harness).filter(([, tokens]) => tokens.total === 0).map(([harness]) => harness).join(", ") })}</p>}
       <p className="overview-empty">{message("overview.costScope", language)}</p>
     </section>}
     <DecisionArea monthly={details?.monthly ?? null} />
@@ -253,9 +253,9 @@ export function OverviewPage({ overview, details }: { overview: OverviewSnapshot
         <button className="button button-secondary" type="button" onClick={() => { window.location.hash = "trust"; }}>{message("overview.viewTrust", language)}</button>
       </section>
     </div>
-    <section className="overview-host-panel" aria-labelledby="overview-host-title">
-      <div className="section-heading"><div><p className="eyebrow">{message("overview.hostCoverage", language)}</p><h3 id="overview-host-title">{message("overview.localAgents", language)}</h3></div><span className="count-badge">{overview.host_rows.length ? overview.host_rows.length : overview.hosts == null ? "—" : overview.hosts}</span></div>
-      {overview.host_rows.length ? <div className="overview-host-list">{overview.host_rows.map((host) => <a className="overview-host-row overview-drill" key={host.host} href={sessionsHostHref(host.host)} title={message("overview.openHost", language, { host: hostName(host.host) })}><div><strong>{hostName(host.host)}</strong><span>{host.today_sessions == null ? message("overview.hostSessionsUnavailable", language) : message("count.sessions", language, { count: host.today_sessions })} · {hostStatusLabel(host.status)}</span></div><b>{tokensLabel(host.today_tokens)} token</b></a>)}</div> : <p className="overview-empty">{message("overview.hostSnapshotMissing", language)}</p>}
+    <section className="overview-harness-panel" aria-labelledby="overview-harness-title">
+      <div className="section-heading"><div><p className="eyebrow">{message("overview.harnessCoverage", language)}</p><h3 id="overview-harness-title">{message("overview.localAgents", language)}</h3></div><span className="count-badge">{overview.harness_rows.length ? overview.harness_rows.length : overview.harnesses == null ? "—" : overview.harnesses}</span></div>
+      {overview.harness_rows.length ? <div className="overview-harness-list">{overview.harness_rows.map((harness) => <a className="overview-harness-row overview-drill" key={harness.harness} href={sessionsHarnessHref(harness.harness)} title={message("overview.openHarness", language, { harness: harnessName(harness.harness) })}><div><strong>{harnessName(harness.harness)}</strong><span>{harness.today_sessions == null ? message("overview.harnessSessionsUnavailable", language) : message("count.sessions", language, { count: harness.today_sessions })} · {harnessStatusLabel(harness.status)}</span></div><b>{tokensLabel(harness.today_tokens)} token</b></a>)}</div> : <p className="overview-empty">{message("overview.harnessSnapshotMissing", language)}</p>}
     </section>
   </>;
 }

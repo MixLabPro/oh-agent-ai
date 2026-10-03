@@ -58,11 +58,11 @@ fn provenance_to_vitals(p: crate::evidence::Provenance) -> Provenance {
     }
 }
 
-/// `SessionMeta.host_id` → `SourceRef.source_type`。此前硬编码 `dsh_session`——
-/// Codex 输入过桥也拿到 DSH 来源（§4 的误标 bug）。现在按宿主登记：已知宿主
-/// 走专属形状，未登记的走 `{host}_session` 通用形状，落到 `dsh` 名下一律不许。
-fn source_type_for(host_id: &str) -> String {
-    match host_id {
+/// `SessionMeta.harness_id` → `SourceRef.source_type`。此前硬编码 `dsh_session`——
+/// Codex 输入过桥也拿到 DSH 来源（§4 的误标 bug）。现在按执行环境登记：已知执行环境
+/// 走专属形状，未登记的走 `{harness}_session` 通用形状，落到 `dsh` 名下一律不许。
+fn source_type_for(harness_id: &str) -> String {
+    match harness_id {
         "dsh" => "dsh_session".to_string(),
         "codex" => "codex_session".to_string(),
         "claude-code" => "claude_code_session".to_string(),
@@ -148,7 +148,7 @@ fn base_event(
 /// 出正确的顺序，不是替 Engine 决定顺序）。
 pub fn canonical_session_to_vitals(session: &CanonicalSession) -> Result<Vec<CanonicalEvent>, CompatibilityError> {
     let actor_id = if session.meta.session_id.is_empty() { ANONYMOUS_ACTOR } else { session.meta.session_id.as_str() };
-    let source_type = source_type_for(session.meta.host_id);
+    let source_type = source_type_for(session.meta.harness_id);
     let mut events = Vec::new();
 
     for entry in &session.tool_calls.entries {
@@ -293,7 +293,7 @@ mod tests {
 
     fn empty_session() -> CanonicalSession {
         CanonicalSession {
-            meta: SessionMeta { session_id: "session-1".to_string(), host_id: "dsh", workspace_roots: vec![], model: None, span: None },
+            meta: SessionMeta { session_id: "session-1".to_string(), harness_id: "dsh", workspace_roots: vec![], model: None, span: None },
             signals: SignalSet::EMPTY,
             coverage: Coverage::new(),
             attempts: vec![],
@@ -409,12 +409,12 @@ mod tests {
     }
 
     #[test]
-    fn source_type_follows_host_id_not_hardcoded_dsh() {
+    fn source_type_follows_harness_id_not_hardcoded_dsh() {
         // §4 的误标 bug：`source_type` 硬编码 `dsh_session`，Codex 输入过桥也拿到
-        // DSH 来源。现在按 `SessionMeta.host_id` 生成——codex 输入必须拿到
+        // DSH 来源。现在按 `SessionMeta.harness_id` 生成——codex 输入必须拿到
         // `codex_session`，而不是被标成 dsh。
         let mut session = empty_session();
-        session.meta.host_id = "codex";
+        session.meta.harness_id = "codex";
         session.tool_calls.entries.push(entry(ToolCallObservation { name: "bash".to_string(), args_text: "ls".to_string() }, 1, 1001, None, None, None, 0));
 
         let events = canonical_session_to_vitals(&session).unwrap();

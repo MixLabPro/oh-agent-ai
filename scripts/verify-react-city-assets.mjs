@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const dir = path.join(repo, "apps/desktop/ui-dev/react/src/features/city/assets");
+const dir = path.join(repo, "apps/agent-city/ui/src/assets");
 const BUDGET = 5 * 1024 * 1024;
 const files = fs.readdirSync(dir, { recursive: true }).map(String).filter((name) => !path.basename(name).startsWith(".") && fs.statSync(path.join(dir, name)).isFile());
 const licenses = fs.readFileSync(path.join(dir, "LICENSES.md"), "utf8");

@@ -50,7 +50,7 @@ SOURCES = {
 # 同步范围：我们的服务商 id → 各源里原厂自己的标识。
 # minimax / deepseek 不在范围内：底表是人民币卡（DeepSeek 还有峰谷价），单一美元
 # 数字表达不了，且三源对 DeepSeek 互相矛盾——这两家继续由维护者手工维护。
-# google / xai 暂不纳入：还没有会产出它们用量的宿主，Gemini 还有长上下文分档。
+# google / xai 暂不纳入：还没有会产出它们用量的执行环境，Gemini 还有长上下文分档。
 CATALOG_PROVIDERS = {
     # ours: (models.dev 服务商, litellm_provider, litellm 键前缀, openrouter 前缀, 模型 id 过滤)
     "anthropic": ("anthropic", "anthropic", "", "anthropic", r"^claude-"),

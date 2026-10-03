@@ -43,7 +43,7 @@ pub fn spec() -> ToolSpec {
         }),
         output_schema: json!({
             "type": "object",
-            "description": "Standard envelope. missing_list → {month, models:[{host, provider, model, tokens, covered}]}; card_list → {cards, routes}; mutations → receipt {changed, provider_id, model_id}."
+            "description": "Standard envelope. missing_list → {month, models:[{harness, provider, model, tokens, covered}]}; card_list → {cards, routes}; mutations → receipt {changed, provider_id, model_id}."
         }),
     }
 }

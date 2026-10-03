@@ -67,7 +67,7 @@ class HostileCase(unittest.TestCase):
             env["AGENT_VITALS_DISABLE_" + k] = "1"
         started = time.time()
         try:
-            r = subprocess.run(SCAN_CMD + ["--host", "claude-code", "--json", str(out)]
+            r = subprocess.run(SCAN_CMD + ["--harness", "claude-code", "--json", str(out)]
                                + list(extra),
                                cwd=str(self.tmp / "workdir"), env=env,
                                capture_output=True, text=True, timeout=TIMEOUT)
@@ -211,7 +211,7 @@ class TestWorkBuddyManifestIsUntrustedInput(HostileCase):
         out = self.tmp / "wb.json"
         env = isolated_home_env(self.tmp)
         env["AGENT_VITALS_DISABLE_WORKBUDDY_BUILTINS"] = "0"
-        r = subprocess.run(SCAN_CMD + ["--host", "workbuddy", "--json", str(out)],
+        r = subprocess.run(SCAN_CMD + ["--harness", "workbuddy", "--json", str(out)],
                            cwd=str(self.tmp / "workdir"), env=env,
                            capture_output=True, text=True, timeout=TIMEOUT)
         self.assertEqual(r.returncode, 0, r.stderr)

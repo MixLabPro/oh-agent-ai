@@ -7,9 +7,9 @@ description: Audit installed Agent Skills: which actually load, what they cost i
 
 Audit an installed skill library and report cost versus value with concrete actions.
 
-## Host support
+## Harness support
 
-Supported hosts: `claude-code`, `codex`, `openclaw`, `hermes`, `workbuddy`, `dsh`.
+Supported harnesses: `claude-code`, `codex`, `openclaw`, `hermes`, `workbuddy`, `dsh`.
 
 On `dsh` (DeepSeek Harness), description budget is unavailable — there is no global
 budget, so per-description truncation (SV004) replaces SV001/SV002 — and loaded/trigger
@@ -17,10 +17,10 @@ evidence comes from the session log and the registry snapshot, not a live plugin
 
 ## Run the scanner
 
-The scanner is not bundled. Install it once, then run one host at a time:
+The scanner is not bundled. Install it once, then run one harness at a time:
 
 ```bash
-agent-vitals doctor --host claude-code
+agent-vitals doctor --harness claude-code
 ```
 
 If the standalone binary is not on PATH yet, use a repository checkout instead:
@@ -28,10 +28,10 @@ If the standalone binary is not on PATH yet, use a repository checkout instead:
 ```bash
 git clone https://github.com/MixLabPro/agent-vitals
 cd agent-vitals
-python3 scripts/scan.py doctor --host claude-code
+python3 scripts/scan.py doctor --harness claude-code
 ```
 
-Never combine context budgets or conflicts across hosts — run one report per runtime.
+Never combine context budgets or conflicts across harnesses — run one report per runtime.
 Use `--path <dir>` only when the inventory is clearly incomplete, and `--all` only to
 diagnose why installed copies did not load.
 

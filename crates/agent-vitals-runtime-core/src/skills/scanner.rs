@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use agent_vitals_domain::skills::frontmatter::parse_frontmatter;
-use agent_vitals_hosts::hosts::claude_code::skills::lookup_usage;
+use agent_vitals_harnesses::harnesses::claude_code::skills::lookup_usage;
 use agent_vitals_domain::util::{est_tokens, norm, pyround};
 
 use super::security::security_scan;
@@ -23,10 +23,10 @@ fn read_lossy(p: &Path) -> Option<String> {
     Some(agent_vitals_domain::util::bytes_to_lossy_normalized(&bytes))
 }
 
-/// 各宿主的常见 skill 目录。找不到的会被静默跳过。
-/// host 为 "claude-code*" 的才可能进 Claude Code 的上下文。
+/// 各执行环境的常见 skill 目录。找不到的会被静默跳过。
+/// harness 为 "claude-code*" 的才可能进 Claude Code 的上下文。
 pub const DEFAULT_ROOTS: [(&str, &str); 18] = [
-    // 项目本地根排在 home 根**之前**：两者同属 claude-code 宿主，
+    // 项目本地根排在 home 根**之前**：两者同属 claude-code 执行环境，
     // scanned_roots 的顺序会进输出，顺序错了 golden 就对不上。
     ("claude-code", "./.claude/skills"),
     ("claude-code", "~/.claude/skills"),
@@ -35,7 +35,7 @@ pub const DEFAULT_ROOTS: [(&str, &str); 18] = [
     ("openclaw", "./skills"),
     ("openclaw", "./.agents/skills"),
     // DSH 的 discovery roots（契约 §DSH，层内 rank 越小越优先）。~/.agents/skills
-    // 与 OpenClaw 共享，但两边按各自的 rank 归类，绝不跨宿主合并判定。
+    // 与 OpenClaw 共享，但两边按各自的 rank 归类，绝不跨执行环境合并判定。
     ("dsh", "./.dsh/skills"),
     ("dsh", "./.agents/skills"),
     ("dsh", "~/.dsh/skills"),
@@ -69,12 +69,12 @@ fn plugin_path_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"/plugins/(cache|marketplaces)/([^/]+)/(.+?)/skills/").unwrap())
 }
 
-// v0.8 Phase E7.6：SourceMeta 迁进 agent-vitals-hosts::skill_discovery——
-// openclaw/workbuddy 的宿主适配器也要用它，而它们要迁进库 crate（库不能反过来
+// v0.8 Phase E7.6：SourceMeta 迁进 agent-vitals-harnesses::skill_discovery——
+// openclaw/workbuddy 的执行环境适配器也要用它，而它们要迁进库 crate（库不能反过来
 // 依赖本二进制），SourceMeta 必须先搬。E7.5 起本文件自己也迁进了库 crate，
 // 不再需要 `pub use` 桥给二进制侧——直接 `use`（无消费者在本 crate 外还要经
 // scanner 转手拿 SourceMeta）。
-use agent_vitals_hosts::skill_discovery::SourceMeta;
+use agent_vitals_harnesses::skill_discovery::SourceMeta;
 
 /// 扫描上下文。Python 版把这些放在模块级全局里，这里显式传递。
 pub struct Ctx {
@@ -180,7 +180,7 @@ pub struct Classification {
 ///
 /// 命名空间用于去重：插件里的 skill 按 `<plugin>:<name>` 隔离，
 /// 所以 discord 和 telegram 各有一个 `access` 并不是冲突（不变量 2）。
-pub fn classify(skill_dir: &Path, host: &str, ctx: &Ctx) -> Classification {
+pub fn classify(skill_dir: &Path, harness: &str, ctx: &Ctx) -> Classification {
     let resolved = skill_dir
         .canonicalize()
         .unwrap_or_else(|_| skill_dir.to_path_buf());
@@ -201,9 +201,9 @@ pub fn classify(skill_dir: &Path, host: &str, ctx: &Ctx) -> Classification {
     };
     let under = |base: &str| s.starts_with(&format!("{}{}", base, ""));
 
-    // 层级词汇**按宿主而异**。同一个 personal 在 Claude Code 与 OpenClaw
+    // 层级词汇**按执行环境而异**。同一个 personal 在 Claude Code 与 OpenClaw
     // 里指的不是同一个目录，覆盖优先级也不同（见 main.rs 的 level_rank_for）。
-    if host == "openclaw" {
+    if harness == "openclaw" {
         if s.contains("/workspace/skills") {
             return plain("workspace");
         }
@@ -223,7 +223,7 @@ pub fn classify(skill_dir: &Path, host: &str, ctx: &Ctx) -> Classification {
             return plain("managed");
         }
     }
-    if host == "hermes" {
+    if harness == "hermes" {
         return if under(&format!("{}/.hermes/skills", ctx.home_n)) {
             plain("personal")
         } else {
@@ -231,10 +231,10 @@ pub fn classify(skill_dir: &Path, host: &str, ctx: &Ctx) -> Classification {
         };
     }
     // Codex 只有一个用户级根，不区分层级。
-    if host == "codex" {
+    if harness == "codex" {
         return plain("personal");
     }
-    if host == "workbuddy" {
+    if harness == "workbuddy" {
         if under(&format!("{}/.codebuddy/skills", ctx.cwd_n))
             || under(&format!("{}/.workbuddy/skills", ctx.cwd_n))
         {
@@ -248,7 +248,7 @@ pub fn classify(skill_dir: &Path, host: &str, ctx: &Ctx) -> Classification {
         }
         return plain("unknown");
     }
-    if host == "dsh" {
+    if harness == "dsh" {
         // DSH 的 level 只表示「落在哪条 discovery root」（rank 见 main.rs 的 dsh_rank）。
         // 这里只回答文件系统层；scope 层由 conflict_domain 第三段（A5）表达。
         // ~/.agents/skills 与 OpenClaw 共享，但 DSH 侧按 user-agents 归类，
@@ -324,7 +324,7 @@ fn mtime_of(p: &Path) -> Option<f64> {
 #[allow(clippy::too_many_arguments)]
 pub fn scan_skill_dir(
     skill_dir: &Path,
-    host: &str,
+    harness: &str,
     enabled_plugins: Option<&HashSet<String>>,
     usage: &Map<String, Value>,
     plugins_known: bool,
@@ -340,26 +340,26 @@ pub fn scan_skill_dir(
     let raw = read_lossy(&md)?;
 
     let fm = parse_frontmatter(&raw);
-    let cls = classify(skill_dir, host, ctx);
+    let cls = classify(skill_dir, harness, ctx);
 
-    // 是否被所属宿主发现。Claude 插件是唯一能由本机配置精确判定启用状态的来源。
+    // 是否被所属执行环境发现。Claude 插件是唯一能由本机配置精确判定启用状态的来源。
     let (mut loaded, why): (bool, String) = if matches!(
-        host,
+        harness,
         "codex" | "openclaw" | "hermes" | "workbuddy" | "custom"
     ) {
-        // 显式根下的 skill 一律算被该宿主发现；这些宿主没有等价于
+        // 显式根下的 skill 一律算被该执行环境发现；这些执行环境没有等价于
         // enabledPlugins 的本机配置可查。
         let why = if cls.level == "unknown" {
             "explicit-root".to_string()
         } else {
             cls.level.to_string()
         };
-        if host == "openclaw" {
+        if harness == "openclaw" {
             // OpenClaw **可发现 != 已加载**。openclaw.json 只能证明「被显式
             // 关掉」；「没被关掉」不等于「进了上下文」，那只有运行时目录能证实。
             // 三种理由必须分开写 —— 把「没证实」当「已加载」就是编造证据。
             (false, String::new()) // 真实取值在下面按 skill 名查表后决定
-        } else if host == "workbuddy"
+        } else if harness == "workbuddy"
             && norm(skill_dir).contains("/plugins/marketplaces/workbuddy-builtin/")
         {
             (true, "workbuddy-builtin-marketplace-manifest".to_string())
@@ -368,7 +368,7 @@ pub fn scan_skill_dir(
         }
     } else {
         match cls.level {
-        "personal" | "project" | "enterprise" if host == "claude-code" => {
+        "personal" | "project" | "enterprise" if harness == "claude-code" => {
             (true, cls.level.to_string())
         }
         "plugin" => {
@@ -463,13 +463,13 @@ pub fn scan_skill_dir(
     // 曾经这里硬编码 null，把「明确不在」也报成了「不知道」。
     let mut loaded_state = Value::Null;
     // DSH 的运行时证据字段（稀疏，与 openclaw 的 eligible 记录同一约定）：只有
-    // catalog-visible 时置值，其余宿主/其余 dsh 状态都不带这两个键。
+    // catalog-visible 时置值，其余执行环境/其余 dsh 状态都不带这两个键。
     let mut dsh_catalog_visible = false;
     // DSH 的证据源（契约「Evidence recency」）：probe（快照，此刻）vs log（会话
-    // 日志，当时）vs none（只有文件系统推断）。只有 dsh 才写进记录；其余宿主不带
+    // 日志，当时）vs none（只有文件系统推断）。只有 dsh 才写进记录；其余执行环境不带
     // 这个键。
     let mut evidence_recency = "none";
-    let why = if host == "openclaw" {
+    let why = if harness == "openclaw" {
         match meta.skill_entries.get(&name) {
             Some(Value::Object(e)) if e.get("enabled") == Some(&json!(false)) => {
                 enabled_state = json!(false);
@@ -482,11 +482,11 @@ pub fn scan_skill_dir(
             }
             _ => "openclaw-discoverable-runtime-unverified".to_string(),
         }
-    } else if host == "workbuddy" && meta.workbuddy_package.is_some() {
+    } else if harness == "workbuddy" && meta.workbuddy_package.is_some() {
         // WorkBuddy 按 welcomeMode 过滤注入。模式未知时**不过滤** ——
         // 宁可多报一个「可能在」，也不要因为读不到日志就把 skill 抹掉。
         let mode = meta.workbuddy_welcome_mode.as_deref();
-        if !agent_vitals_hosts::hosts::workbuddy::sources::skills::skill_active(meta.workbuddy_legacy_name.as_deref(), mode) {
+        if !agent_vitals_harnesses::harnesses::workbuddy::sources::skills::skill_active(meta.workbuddy_legacy_name.as_deref(), mode) {
             enabled_state = json!(false);
             loaded_state = json!(false); // 模式过滤掉 = 明确不在
             loaded = false;
@@ -500,7 +500,7 @@ pub fn scan_skill_dir(
                 None => "workbuddy-builtin-mode-unknown".to_string(),
             }
         }
-    } else if host == "dsh" {
+    } else if harness == "dsh" {
         // DSH 的 loaded 有两个独立证据源：快照（probe，A11）与会话日志（log，A4）。
         // probe 更新鲜（`evidence_recency` 为此区分时间坐标），所以快照存在且未降级
         // 时优先；快照缺失/畸形才退回 log。快照 `complete==false` 时**整轮不发布
@@ -567,9 +567,9 @@ pub fn scan_skill_dir(
     };
 
     let (hits, last_ms, matched_key) = lookup_usage(usage, &name, cls.namespace.as_deref());
-    // DSH 的触发证据不读 claude.json 的 skillUsage——那是另一个宿主（Claude Code）
+    // DSH 的触发证据不读 claude.json 的 skillUsage——那是另一个执行环境（Claude Code）
     // 的使用历史，与 DSH 的会话日志是两套账。日志里的 invoked（用户显式 `/<name>`）
-    // 与 selected（模型自主 tool/call 选中）才是本宿主的真实触发数。两者都算
+    // 与 selected（模型自主 tool/call 选中）才是本执行环境的真实触发数。两者都算
     // 「用过」：僵尸判定问的是「这个 skill 有没有产生过价值」，模型自主选中同样
     // 说明它在起作用——skills::analysis::trigger_dsh 的 never_triggered 正是
     // never_selected ∩ never_invoked，两侧的计数语义必须一致。
@@ -577,7 +577,7 @@ pub fn scan_skill_dir(
     // invoked/selected 只是名字列表、没有时间戳，所以 last_used_days_ago 保持
     // None（「有触发数但不知新鲜度」由 lifecycle 的 occasional 表达，绝不伪造
     // 最近使用时间）；usage_key_matched 同理为 None。
-    let (hits, last_ms, matched_key) = if host == "dsh"
+    let (hits, last_ms, matched_key) = if harness == "dsh"
         && dsh_evidence.is_some_and(|ev| ev.get("degraded").and_then(|d| d.as_str()).is_none())
     {
         let count_trigger = |key: &str| {
@@ -622,11 +622,11 @@ pub fn scan_skill_dir(
     let content_hash: String = format!("{:x}", hash.finalize()).chars().take(12).collect();
 
     let mut rec = Map::new();
-    let host_family = if host.starts_with("claude-code") { "claude-code" } else { host };
+    let harness_family = if harness.starts_with("claude-code") { "claude-code" } else { harness };
     rec.insert("name".into(), json!(name));
     rec.insert("dir_name".into(), json!(dir_name));
-    rec.insert("host".into(), json!(host));
-    rec.insert("host_family".into(), json!(host_family));
+    rec.insert("harness".into(), json!(harness));
+    rec.insert("harness_family".into(), json!(harness_family));
     rec.insert("level".into(), json!(cls.level));
     rec.insert("namespace".into(), json!(cls.namespace));
     rec.insert("plugin_key".into(), json!(cls.plugin_key));
@@ -637,7 +637,7 @@ pub fn scan_skill_dir(
     // 这个区分正是 discoverable 与 loaded 分成两个字段的原因。
     rec.insert(
         "discoverable".into(),
-        json!(if host == "openclaw" { true } else { loaded }),
+        json!(if harness == "openclaw" { true } else { loaded }),
     );
     // 三个尚无证据来源的字段。**必须是 null 而不是 false** ——
     // 「判定不了」与「判定为否」在报告里含义完全不同（不变量 12）。
@@ -648,21 +648,21 @@ pub fn scan_skill_dir(
     rec.insert("instance_root".into(), SourceMeta::opt(&meta.instance_root));
     rec.insert("config_path".into(), SourceMeta::opt(&meta.config_path));
     rec.insert("root_kind".into(), SourceMeta::opt(&meta.root_kind));
-    // 同名 skill 只会在同一宿主内争抢；跨宿主是独立运行时。
+    // 同名 skill 只会在同一执行环境内争抢；跨执行环境是独立运行时。
     // OpenClaw 还要再按实例分 —— 两个实例里的同名 skill 不是冲突。
     //
     // DSH 的冲突域带 scope 层（A5：dsh:<DSH_HOME>:<layer>）。<DSH_HOME> 是 DSH
-    // 配置根（默认 ~/.dsh），与其他宿主的 home 一样用 ctx.home_n 做路径归一。
+    // 配置根（默认 ~/.dsh），与其他执行环境的 home 一样用 ctx.home_n 做路径归一。
     // 本波只有文件系统根：DSH 的 filesystem provider 只注册在**全局 scope 层**，
     // 所以 <layer> 恒为 "global"（占位）。真正的 preset / agent 层要等运行时证据
     // （后续波 A10），届时改从证据里取层，而不是硬编码 "global"。
     let dsh_home = format!("{}/.dsh", ctx.home_n);
-    rec.insert("conflict_domain".into(), if host == "dsh" {
+    rec.insert("conflict_domain".into(), if harness == "dsh" {
         json!(format!("dsh:{}:global", dsh_home))
     } else {
-        match (host, &meta.instance_id) {
+        match (harness, &meta.instance_id) {
             ("openclaw", Some(id)) => json!(format!("openclaw:{}", id)),
-            _ => json!(host),
+            _ => json!(harness),
         }
     });
     rec.insert("path".into(), json!(norm(skill_dir)));
@@ -712,8 +712,8 @@ pub fn scan_skill_dir(
         rec.insert("runtime_status".into(), json!("catalog-visible"));
         rec.insert("body_loaded_state".into(), Value::Null);
     }
-    if host == "dsh" {
-        // 证据源只对 dsh 有意义（其余宿主单一隐式 scope，契约不要求逐记录标注）。
+    if harness == "dsh" {
+        // 证据源只对 dsh 有意义（其余执行环境单一隐式 scope，契约不要求逐记录标注）。
         // probe（快照）/ log（会话日志）/ none（文件系统推断）必须显式分开，否则
         // 一个月前的 log 证据与当下的 probe 证据并排渲染，报告就开始在时间上撒谎。
         rec.insert("evidence_recency".into(), json!(evidence_recency));
@@ -741,7 +741,7 @@ pub fn collect(
     let mut unreadable = Vec::new();
     let mut seen: Vec<(String, Option<String>, String)> = Vec::new();
 
-    for (host, root, meta) in roots {
+    for (harness, root, meta) in roots {
         let base = expand_root(root, &ctx.home_n);
 
         // **按 resolve 之后的路径去重。**两个不同写法可以指向同一个目录 ——
@@ -750,10 +750,10 @@ pub fn collect(
         // 当成「一个 skill 有两份内容相同的副本」，**凭空报出一个不存在的
         // 冲突**。清点不准只是不准，编造一个问题是另一回事。
         //
-        // 去重键要带 host 与 instance_id：同一个物理目录可以合法地属于两个
+        // 去重键要带 harness 与 instance_id：同一个物理目录可以合法地属于两个
         // OpenClaw 实例，那种情况不是重复。
         let key = (
-            host.clone(),
+            harness.clone(),
             meta.instance_id.clone(),
             norm(&base.canonicalize().unwrap_or_else(|_| base.clone())),
         );
@@ -765,7 +765,7 @@ pub fn collect(
         if !base.is_dir() {
             continue;
         }
-        scanned_roots.push(json!({"host": host, "path": norm(&base),
+        scanned_roots.push(json!({"harness": harness, "path": norm(&base),
                                   "instance_id": SourceMeta::opt(&meta.instance_id),
                                   "root_kind": SourceMeta::opt(&meta.root_kind)}));
 
@@ -788,7 +788,7 @@ pub fn collect(
                 Some(d) => d,
                 None => continue,
             };
-            match scan_skill_dir(dir, host, enabled_plugins, usage, plugins_known, ctx, meta,
+            match scan_skill_dir(dir, harness, enabled_plugins, usage, plugins_known, ctx, meta,
                                  dsh_evidence, dsh_snapshot) {
                 Some(rec) => skills.push(rec),
                 None => {
@@ -798,7 +798,7 @@ pub fn collect(
                         unreadable.push(json!({
                             "name": dir.file_name().and_then(|s| s.to_str()).unwrap_or(""),
                             "path": norm(dir),
-                            "host": host,
+                            "harness": harness,
                             "reason": "SKILL.md exists but cannot be read (permission or I/O error)",
                         }));
                     }
@@ -822,7 +822,7 @@ pub fn group_by_key(scope: &[Value]) -> Vec<(String, Vec<usize>)> {
     let mut order: Vec<String> = Vec::new();
     let mut map: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, s) in scope.iter().enumerate() {
-        // 同名 skill 只会在同一宿主内争抢；跨宿主是独立运行时，不是冲突。
+        // 同名 skill 只会在同一执行环境内争抢；跨执行环境是独立运行时，不是冲突。
         // DSH 的覆盖层也进键：跨层同名是设计不是冲突，只有同层同名才比 rank。
         let domain = s["conflict_domain"].as_str().unwrap_or("");
         let layer = agent_vitals_domain::skills::ranking::layer_of(s);

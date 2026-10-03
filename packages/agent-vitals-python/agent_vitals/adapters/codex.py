@@ -127,7 +127,7 @@ def read_codex_runtime(cwd: Path, timeout=20, env=None, executable_finder=None):
 
 def apply_codex_runtime(skills, runtime, scan_skill):
     """Add runtime-only Skills and overlay authoritative metadata by path."""
-    by_path = {(skill["host_family"], norm(Path(skill["path"]).resolve())): skill
+    by_path = {(skill["harness_family"], norm(Path(skill["path"]).resolve())): skill
                for skill in skills}
     for metadata in runtime.get("skills", []):
         skill_file = Path(metadata.get("path", ""))

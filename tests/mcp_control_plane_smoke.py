@@ -2,7 +2,7 @@
 """隔离验证 Data MCP 的类型化控制面读写边界。
 
 脚本只使用临时 AGENT_VITALS_HOME；写入需要显式 ``--allow-local-writes``，
-导入数据删除还需要二次确认串。不会调用 sync_facts，避免烟测读取真实宿主日志。
+导入数据删除还需要二次确认串。不会调用 sync_facts，避免烟测读取真实执行环境日志。
 """
 
 import argparse
@@ -78,10 +78,10 @@ def main():
 
     calls = [
         (10, "control_plane", {"action": "custom_sources"}),
-        (11, "control_plane", {"action": "custom_source_add", "host": "codex",
+        (11, "control_plane", {"action": "custom_source_add", "harness": "codex",
                                 "root": str(custom_root)}),
         (12, "control_plane", {"action": "custom_sources"}),
-        (13, "control_plane", {"action": "source_exclusion_set", "host": "codex",
+        (13, "control_plane", {"action": "source_exclusion_set", "harness": "codex",
                                 "excluded": True}),
         (14, "control_plane", {"action": "source_status"}),
         (15, "control_plane", {"action": "retention_set", "months": 24}),
@@ -95,12 +95,12 @@ def main():
         (27, "control_plane", {"action": "pricing_catalog_policy_set", "network_enabled": True}),
         (28, "control_plane", {"action": "pricing_catalog_status"}),
         (25, "control_plane", {"action": "sync_facts"}),
-        (21, "control_plane", {"action": "source_data_delete", "host": "codex"}),
-        (22, "control_plane", {"action": "source_data_delete", "host": "codex",
+        (21, "control_plane", {"action": "source_data_delete", "harness": "codex"}),
+        (22, "control_plane", {"action": "source_data_delete", "harness": "codex",
                                 "confirmation": "DELETE_IMPORTED_SOURCE_DATA"}),
-        (23, "control_plane", {"action": "source_exclusion_set", "host": "codex",
+        (23, "control_plane", {"action": "source_exclusion_set", "harness": "codex",
                                 "excluded": False}),
-        (24, "control_plane", {"action": "custom_source_remove", "host": "codex",
+        (24, "control_plane", {"action": "custom_source_remove", "harness": "codex",
                                 "root": str(custom_root)}),
     ]
     results = run_server(args.bin, home, calls, allow_writes=True)
@@ -115,9 +115,9 @@ def main():
     initial, _ = data(results, 10)
     listed, _ = data(results, 12)
     assert initial["sources"]["configured_count"] == 0
-    assert listed["sources"]["configured_count"] == 1 and listed["sources"]["hosts"] == ["codex"]
+    assert listed["sources"]["configured_count"] == 1 and listed["sources"]["harnesses"] == ["codex"]
     status, _ = data(results, 14)
-    codex = next(item for item in status["source_status"]["sources"] if item["host"] == "codex")
+    codex = next(item for item in status["source_status"]["sources"] if item["harness"] == "codex")
     assert codex["connection_state"] == "excluded"
     retention, _ = data(results, 16)
     assert retention["months"] == 24

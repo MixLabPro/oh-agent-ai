@@ -16,7 +16,7 @@
 2. **outbox 事务性是唯一可靠性来源**。事件必须与它描述的状态变更在**同一 SQLite 事务**内落 `event_outbox` 行；进程内通道只优化延迟，永不承担可靠性。禁止"先写库再发事件"的双写。
 3. **单一 UI 出口**。对 webview 只有 `app.emit("app-event", typed_event)` 一个出口；`FOLD_EVENT` / `SYNC_STATUS_EVENT` 收编进该出口，去抖收敛到分发层一份。
 4. **旁路面永不上总线**：tick 流水线编排、MCP `tools/call`、CLI 查询子进程、billing 事实写入（golden 逐字节面）、`doctor::diagnose` 纯函数。见 §8。
-5. **trust 传感器独立于被审计者**。trust P2 的进程外传感器（FSEvents / fd 采样 / 连接轮询）经 `TrustMonitorEvent` 接入总线；**宿主 agentic-loop hook 永不作为 trust 面信号源**（被审计者控制传感器 = 信任面失守），hook 仅可作为 canonical 面的增强源（§9）。
+5. **trust 传感器独立于被审计者**。trust P2 的进程外传感器（FSEvents / fd 采样 / 连接轮询）经 `TrustMonitorEvent` 接入总线；**执行环境 agentic-loop hook 永不作为 trust 面信号源**（被审计者控制传感器 = 信任面失守），hook 仅可作为 canonical 面的增强源（§9）。
 6. **每条事件带 `schema_version` 与 correlation id**（复用 `ingested_run_id` / `sync_runs.run_id`），事件词表按 authority schema 的兼容纪律演进：只增不删不改语义。
 7. **at-least-once 投递，消费者幂等**。补投意味着同一条事件可能到达两次；幂等键 = `(event_id, consumer_id)`，由消费侧维护。
 
@@ -56,10 +56,10 @@
 │  │   慢通道：outbox tailer（读 event_outbox，崩溃后补投，与幂等重放同构）         │ │
 │  │                                                                             │ │
 │  │   事件词表（过去时，全部带 schema_version + ingested_run_id 作 correlation）   │ │
-│  │   ├─ FactsIngested{host, run_id, revision}                                   │ │
+│  │   ├─ FactsIngested{harness, run_id, revision}                                   │ │
 │  │   ├─ AuthorityRevisionAdvanced{revision}                                     │ │
 │  │   ├─ DeclarationSaved / PriceCardSaved                                        │ │
-│  │   ├─ HostSourceFailed{host,error} / SourceRecovered{host}                     │ │
+│  │   ├─ HarnessSourceFailed{harness,error} / SourceRecovered{harness}                     │ │
 │  │   ├─ McpToolInvoked{tool, args_fingerprint, latency_ms, ok}   ◄── 审计旁路    │ │
 │  │   ├─ TrustMonitorEvent{run_id, observations, inserted…}        ◄── P2 传感器   │ │
 │  │   └─ HourTicked / DayRolled（statistics_timezone 口径）                       │ │
@@ -134,7 +134,7 @@ CREATE INDEX event_outbox_pending ON event_outbox(created_at_ms, event_id);
 
 **实施修订（v1.2）**：投递进度不用 outbox 行上的单一 `delivered` 位，而按 `(event_id, consumer_id)` **反连接**计算——消费者注册面随进程不同（CLI 一组、桌面一组），一个进程置位会让另一个进程的消费者永远看不到。因此索引为普通的 `(created_at_ms, event_id)`（终态行靠 retention 清理离开热区），`event_deliveries(event_id, consumer_id, delivered_at_ms, last_error, PRIMARY KEY(event_id, consumer_id))` 记录消费进度。
 
-**retention（v1.4 勘正）**：事件体保留 7 天；**投递记录随事件走**——deliveries 是反连接的去重账本，事件存活期间删它的 delivery 会让反连接重新发现该事件 = 重投递（本稿 v1.1 写的「deliveries 独立保留 30 天」是重投递陷阱，作废）。清理顺序固定：扫孤儿 delivery（事件已亡）→ 删到期事件的 delivery → 删事件本体，一事务。清理挂在每日 maintenance run（`retention_event_outbox`，与 usage_facts/session_excerpts 同一趟），陷阱判别由 `retention_event_outbox_never_deletes_delivery_of_live_event` 钉住。`delete_imported_host_data(host)` 先删该宿主事件的 deliveries 再删 outbox 行（host 为列，全局事件 NULL 不受影响），已由级联测试钉住。
+**retention（v1.4 勘正）**：事件体保留 7 天；**投递记录随事件走**——deliveries 是反连接的去重账本，事件存活期间删它的 delivery 会让反连接重新发现该事件 = 重投递（本稿 v1.1 写的「deliveries 独立保留 30 天」是重投递陷阱，作废）。清理顺序固定：扫孤儿 delivery（事件已亡）→ 删到期事件的 delivery → 删事件本体，一事务。清理挂在每日 maintenance run（`retention_event_outbox`，与 usage_facts/session_excerpts 同一趟），陷阱判别由 `retention_event_outbox_never_deletes_delivery_of_live_event` 钉住。`delete_imported_harness_data(harness)` 先删该执行环境事件的 deliveries 再删 outbox 行（harness 为列，全局事件 NULL 不受影响），已由级联测试钉住。
 
 ### 4.3 投递语义
 
@@ -148,11 +148,11 @@ CREATE INDEX event_outbox_pending ON event_outbox(created_at_ms, event_id);
 
 | 事件 | 生产者 | 触发时机 | 首批消费者 |
 |---|---|---|---|
-| `FactsIngested{host, run_id, revision}` | sync_service / plugin_ingest | 某宿主事实批次事务提交 | price reconcile、配额窗口扫描、issue 评估器、（P2）trust correlate |
-| `AuthorityRevisionAdvanced{revision}` | **保留位（无生产者，2026-09-22 修订）**——`RUNTIME_INVALIDATION_AND_READ_BACKPRESSURE_SPEC.md` §4.1/§4.4 裁定：revision 的逐次推进是**派生投影**，不逐条落 outbox（那会把写放大带回总线）；UI 失效走 `ChangePublisher` 直发 `Invalidated{revision, hosts}`（仅 revision 严格前进时），词表仍登记本行以维持闭集稳定 | —（经直发 `Invalidated` 信号服务 webview/tray） |
+| `FactsIngested{harness, run_id, revision}` | sync_service / plugin_ingest | 某执行环境事实批次事务提交 | price reconcile、配额窗口扫描、issue 评估器、（P2）trust correlate |
+| `AuthorityRevisionAdvanced{revision}` | **保留位（无生产者，2026-09-22 修订）**——`RUNTIME_INVALIDATION_AND_READ_BACKPRESSURE_SPEC.md` §4.1/§4.4 裁定：revision 的逐次推进是**派生投影**，不逐条落 outbox（那会把写放大带回总线）；UI 失效走 `ChangePublisher` 直发 `Invalidated{revision, harnesses}`（仅 revision 严格前进时），词表仍登记本行以维持闭集稳定 | —（经直发 `Invalidated` 信号服务 webview/tray） |
 | `DeclarationSaved{scope}` | 桌面 IPC（计费声明保存） | 声明/修订落库 | billing 重算入队、（预留）影响预览 |
 | `PriceCardSaved{provider, model_fingerprint}` | 桌面 IPC（补卡保存） | 价卡落库 | 未计价重算 |
-| `HostSourceFailed{host, error_code}` / `SourceRecovered{host}` | sync_service | 源读取失败/恢复 | 通知、MTTR 时序（审计流） |
+| `HarnessSourceFailed{harness, error_code}` / `SourceRecovered{harness}` | sync_service | 源读取失败/恢复 | 通知、MTTR 时序（审计流） |
 | `McpToolInvoked{tool, args_fingerprint, latency_ms, ok}` | CLI serve 传输层（`handle_tools_call`） | 外部 MCP `tools/call` 返回后（旁路） | MCP 访问日志、慢查询/失败率 |
 | `HourTicked` / `DayRolled` | **保留位（未发射）** | — | 迭代 3 分析裁决：所列消费（清理/去重窗口/stale 检查）都是幂等自愈的维护动作——按 now 全量清比按事件滚动更简单可靠，没有消费者需要顺序信号之前不发射（发射无人消费的事件只填 outbox）。有第一个真实消费者时再接线并撤本标注 |
 | `TrustMonitorEvent{run_id, observations, inserted, findings_upserted}` | trust 传感（快照模式已接线；P2 常驻复用同通道） | 传感运行事务内、有新观察时（迭代 4 勘正：载荷为**运行级批次摘要**，单观察明细在 trust_observations；correlate 保持同事务内联——事件是通知不是指令，拆出去会丢失 correlate 对自身写入的原子可见性） | 桌面 UI 刷新（webview 类型分发）；P2 起通知消费者（§7.2 门槛） |
@@ -188,14 +188,14 @@ CREATE INDEX event_outbox_pending ON event_outbox(created_at_ms, event_id);
 ## 8. trust 传感器接入（P2 对接点）
 
 ```
-FSEvents watcher（宿主根目录写事件，无归属）─┐
+FSEvents watcher（执行环境根目录写事件，无归属）─┐
 fd 表采样（libproc，同 uid，类别化后即丢）───┼─► 聚合窗口(10–60s，削峰) ─► TrustMonitorEvent ─► 总线
 连接/字节轮询 ──────────────────────────────┘
 ```
 
 - 传感器是 `TrustMonitorEvent` 的**唯一**生产者；correlator 与通知是普通消费者；
 - 采样缺口写入事件 payload（`sample_interval_ms`），消费者据此知道"未见 ≠ 未发生"的置信边界；
-- **宿主 agentic-loop hook 不接**：hook 配置在宿主 settings 内，被审计者可摘除传感器——trust 面的传感器必须住在被审计进程之外。hook 仅可作为 canonical 面（SV601–614）的增强源，带 `collector_id` provenance 与双源指纹去重。该边界同时登记进 `AGENT_EXECUTION_PROBLEM_TAXONOMY.md`。
+- **执行环境 agentic-loop hook 不接**：hook 配置在执行环境 settings 内，被审计者可摘除传感器——trust 面的传感器必须住在被审计进程之外。hook 仅可作为 canonical 面（SV601–614）的增强源，带 `collector_id` provenance 与双源指纹去重。该边界同时登记进 `AGENT_EXECUTION_PROBLEM_TAXONOMY.md`。
 
 ## 9. 分期
 
@@ -211,7 +211,7 @@ fd 表采样（libproc，同 uid，类别化后即丢）───┼─► 聚�
 3. 快通道满载丢弃只影响 audit/maintenance 级事件，`dropped_count` 可查；
 4. P0 完成后 `sync_service.rs:499` 的内联 reconcile 调用消失，price reconcile 由事件驱动，golden 15/16 全绿（行为等价）；
 5. webview 侧只存在 `app-event` 一个 listen 入口；
-6. `delete_imported_host_data` 后无悬空 outbox 行；
+6. `delete_imported_harness_data` 后无悬空 outbox 行；
 7. 词表外事件类型在 dispatcher 层被拒绝并计数（闭集校验）；
 8. update_hook 回调被禁用（模拟失效）时，轮询兜底在 5 秒内完成同等投递（§4.3 双通道等价性）。
 

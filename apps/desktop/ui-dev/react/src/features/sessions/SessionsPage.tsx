@@ -1,4 +1,4 @@
-import { hostName } from "../../lib/hostNames";
+import { harnessName } from "../../lib/harnessNames";
 import { stable, isBackground } from "../../lib/stable";
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import {
@@ -31,7 +31,7 @@ const costStates: Array<{ value: SessionsCostFilter; label: MessageKey }> = [
 
 const DEFAULT_STATISTICS_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 const SESSIONS_VIEW_STATE_KEY = "agent-vitals.sessions-view.v1";
-type SessionNavigationTarget = { type: "sessionDetail"; session_ref: string; host_kind: string } | { type: "sessionList"; host_kind: string | null };
+type SessionNavigationTarget = { type: "sessionDetail"; session_ref: string; harness_kind: string } | { type: "sessionList"; harness_kind: string | null };
 
 function loadSessionsViewState(): { filters: SessionsFilters; selectedSessionRef: string | null } | null {
   try {
@@ -48,7 +48,7 @@ function loadSessionsViewState(): { filters: SessionsFilters; selectedSessionRef
         month: typeof filters.month === "string" && /^\d{4}-\d{2}$/.test(filters.month) ? filters.month : fallback.month,
         day: date(filters.day, fallback.day),
         date_from: date(filters.date_from, fallback.date_from), date_to: date(filters.date_to, fallback.date_to),
-        host_kind: typeof filters.host_kind === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(filters.host_kind) ? filters.host_kind : "all",
+        harness_kind: typeof filters.harness_kind === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(filters.harness_kind) ? filters.harness_kind : "all",
         model: typeof filters.model === "string" ? filters.model.slice(0, 120) : "",
         provider: typeof filters.provider === "string" ? filters.provider.slice(0, 120) : "",
       } as SessionsFilters,
@@ -67,7 +67,7 @@ function dateInTimezone(timezone: string, date = new Date()): string {
 
 function filtersForTimezone(timezone: string): SessionsFilters {
   const today = dateInTimezone(timezone);
-  return { window: "month", month: today.slice(0, 7), day: today, date_from: shiftDate(today, -6), date_to: today, host_kind: "all", model: "", provider: "", cost_status: "all" };
+  return { window: "month", month: today.slice(0, 7), day: today, date_from: shiftDate(today, -6), date_to: today, harness_kind: "all", model: "", provider: "", cost_status: "all" };
 }
 
 function shiftDate(date: string, days: number): string {
@@ -91,7 +91,7 @@ function dayLabel(value: string | null, language: AppLanguage): string {
 }
 
 function sessionTitle(row: SessionRow, language: AppLanguage): string {
-  return message("sessions.sessionTitle", language, { host: hostName(row.host), date: dayLabel(row.first_event_at, language) });
+  return message("sessions.sessionTitle", language, { harness: harnessName(row.harness), date: dayLabel(row.first_event_at, language) });
 }
 
 function costStateLabel(status: SessionCostStatus, language: AppLanguage): string {
@@ -107,7 +107,7 @@ function costLabel(row: SessionRow): string {
 }
 
 function costBasisLabel(basis: string, language: AppLanguage): string {
-  const known = ["metered_actual", "host_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent"];
+  const known = ["metered_actual", "harness_billed", "fixed_subscription", "metered_declared", "metered_estimate", "api_equivalent"];
   return message(known.includes(basis) ? `usage.basis.${basis}` as MessageKey : "usage.basis.other", language);
 }
 
@@ -119,7 +119,7 @@ function serverArgs(filters: SessionsFilters, cursor: string | null, timezone: s
   if (filters.window === "day") args.day = filters.day;
   if (filters.window === "7d") { args.date_from = shiftDate(today, -6); args.date_to = today; }
   if (filters.window === "custom") { args.date_from = filters.date_from; args.date_to = filters.date_to; }
-  if (filters.host_kind !== "all") args.host_kind = filters.host_kind;
+  if (filters.harness_kind !== "all") args.harness_kind = filters.harness_kind;
   if (filters.model.trim()) args.model = filters.model.trim();
   if (filters.provider.trim()) args.provider = filters.provider.trim();
   return args;
@@ -132,14 +132,14 @@ function updateFilter(setFilters: Dispatch<SetStateAction<SessionsFilters>>, key
 export function SessionsPage({ navigationTarget = null, onNavigationTargetApplied }: { navigationTarget?: SessionNavigationTarget | null; onNavigationTargetApplied?: () => void }) {
   const language = useLanguage();
   const initialViewState = useMemo(() => loadSessionsViewState(), []);
-  // R1 深链（OVERVIEW_DRILLDOWN spec §4.2）：#sessions?date=…&host=… 优先于
+  // R1 深链（OVERVIEW_DRILLDOWN spec §4.2）：#sessions?date=…&harness=… 优先于
   // 恢复的 view-state——深链是用户此刻的意图；切换窗口控件即离开 day 态。
-  // date 与 host 可组合（同时过滤）。**一次性消费**：应用后立即 replaceState
+  // date 与 harness 可组合（同时过滤）。**一次性消费**：应用后立即 replaceState
   // 去掉 query——否则 F5 会用旧深链压回用户后来切好的窗口（验收 P2-1）。
   const deepLinkToFilters = (base: SessionsFilters, deep: ReturnType<typeof readSessionsDeepLinkFromHash>): SessionsFilters => {
-    if (!deep.date && !deep.host) return base;
+    if (!deep.date && !deep.harness) return base;
     let next: SessionsFilters = deep.date ? { ...base, window: "day" as const, day: deep.date } : base;
-    if (deep.host) next = { ...next, host_kind: deep.host };
+    if (deep.harness) next = { ...next, harness_kind: deep.harness };
     return next;
   };
   const consumeDeepLink = () => {
@@ -158,7 +158,7 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
   useEffect(() => {
     const onHashChange = () => {
       const deep = readSessionsDeepLinkFromHash();
-      if (deep.date || deep.host) {
+      if (deep.date || deep.harness) {
         setFilters((current) => deepLinkToFilters(current, deep));
         consumeDeepLink();
       }
@@ -207,12 +207,12 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
   useEffect(() => {
     try { window.sessionStorage.setItem(SESSIONS_VIEW_STATE_KEY, JSON.stringify({ filters, selectedSessionRef })); } catch { /* Optional UI preference; authority data remains unaffected. */ }
   }, [filters, selectedSessionRef]);
-  const serverKey = useMemo(() => JSON.stringify([filters.window, filters.month, filters.day, filters.date_from, filters.date_to, filters.host_kind, filters.model, filters.provider]), [filters]);
+  const serverKey = useMemo(() => JSON.stringify([filters.window, filters.month, filters.day, filters.date_from, filters.date_to, filters.harness_kind, filters.model, filters.provider]), [filters]);
   const visibleRows = useMemo(() => filters.cost_status === "all" ? rows : rows.filter((row) => row.cost_status.state === filters.cost_status), [filters.cost_status, rows]);
 
   useEffect(() => {
     if (!navigationTarget) return;
-    setFilters((current) => ({ ...current, host_kind: navigationTarget.host_kind || "all" }));
+    setFilters((current) => ({ ...current, harness_kind: navigationTarget.harness_kind || "all" }));
     setSelectedSessionRef(navigationTarget.type === "sessionDetail" ? navigationTarget.session_ref : null);
     onNavigationTargetApplied?.();
   }, [navigationTarget, onNavigationTargetApplied]);
@@ -222,7 +222,7 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
     void readStatisticsTimezone().catch(() => ({ timezone: DEFAULT_STATISTICS_TIMEZONE })).then(({ timezone }) => {
       if (!active) return;
       setStatisticsTimezone(timezone);
-      if (!dateFiltersTouched.current) setFilters((current) => ({ ...filtersForTimezone(timezone), host_kind: current.host_kind }));
+      if (!dateFiltersTouched.current) setFilters((current) => ({ ...filtersForTimezone(timezone), harness_kind: current.harness_kind }));
       setTimezoneReady(true);
     });
     return () => { active = false; };
@@ -332,8 +332,8 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
       {filters.window === "day" && <Field label={message("sessions.date", language)} htmlFor="sessions-day"><DateInput id="sessions-day" type="date" value={filters.day} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "day", event.target.value); }} /></Field>}
       {filters.window === "month" && <Field label={message("sessions.month", language)} htmlFor="sessions-month"><DateInput id="sessions-month" type="month" value={filters.month} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "month", event.target.value); }} /></Field>}
       {filters.window === "custom" && <><Field label={message("sessions.startDate", language)} htmlFor="sessions-date-from"><DateInput id="sessions-date-from" type="date" value={filters.date_from} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "date_from", event.target.value); }} /></Field><Field label={message("sessions.endDate", language)} htmlFor="sessions-date-to"><DateInput id="sessions-date-to" type="date" value={filters.date_to} onChange={(event) => { dateFiltersTouched.current = true; updateFilter(setFilters, "date_to", event.target.value); }} /></Field></>}
-      <Field label={message("sessions.host", language)} htmlFor="sessions-host"><TextInput id="sessions-host" list="session-host-options" value={filters.host_kind === "all" ? "" : filters.host_kind} placeholder={message("sessions.allHosts", language)} onChange={(event) => updateFilter(setFilters, "host_kind", event.target.value || "all")} /></Field>
-      <datalist id="session-host-options"><option value="codex" /><option value="claude-code" /><option value="dsh" /><option value="workbuddy" /><option value="zcode" /><option value="minimax-code" /></datalist>
+      <Field label={message("sessions.harness", language)} htmlFor="sessions-harness"><TextInput id="sessions-harness" list="session-harness-options" value={filters.harness_kind === "all" ? "" : filters.harness_kind} placeholder={message("sessions.allHarnesses", language)} onChange={(event) => updateFilter(setFilters, "harness_kind", event.target.value || "all")} /></Field>
+      <datalist id="session-harness-options"><option value="codex" /><option value="claude-code" /><option value="dsh" /><option value="workbuddy" /><option value="zcode" /><option value="minimax-code" /></datalist>
       <Field label={message("sessions.model", language)} htmlFor="sessions-model"><TextInput id="sessions-model" value={filters.model} placeholder={message("sessions.exactMatch", language)} onChange={(event) => updateFilter(setFilters, "model", event.target.value)} /></Field>
       <Field label={message("sessions.provider", language)} htmlFor="sessions-provider"><TextInput id="sessions-provider" value={filters.provider} placeholder={message("sessions.exactMatch", language)} onChange={(event) => updateFilter(setFilters, "provider", event.target.value)} /></Field>
       <Field label={message("sessions.billingStatus", language)} htmlFor="sessions-cost"><SelectInput id="sessions-cost" value={filters.cost_status} onChange={(event) => updateFilter(setFilters, "cost_status", event.target.value)}>{costStates.map((state) => <option key={state.value} value={state.value}>{message(state.label, language)}</option>)}</SelectInput></Field>
@@ -351,8 +351,8 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
     <section className="sessions-panel" aria-labelledby="sessions-list-title">
       <div className="section-heading"><div><p className="eyebrow">{message("sessions.safeProjection", language)}</p><h3 id="sessions-list-title">{message("sessions.list", language)}</h3></div><span className="count-badge">{message(nextCursor ? "sessions.moreAvailable" : "sessions.loadedBadge", language)}</span></div>
       {loading && rows.length === 0 ? <div className="sessions-state" role="status"><strong>{message("sessions.loading", language)}</strong><p>{message("sessions.loadingDetail", language)}</p></div> : visibleRows.length === 0 ? <div className="sessions-state"><strong>{message(error ? "sessions.cannotDisplay" : rows.length ? "sessions.noBillingMatch" : "sessions.empty", language)}</strong><p>{message(error ? "sessions.retryHelp" : "sessions.emptyHelp", language)}</p></div> : <>
-        <div className="sessions-table-wrap"><table className="sessions-table"><thead><tr><th scope="col">{message("sessions.column.session", language)}</th><th scope="col">{message("sessions.column.hostModel", language)}</th><th scope="col">{message("sessions.column.time", language)}</th><th scope="col">{message("sessions.column.tokens", language)}</th><th scope="col">{message("sessions.column.cost", language)}</th><th scope="col">{message("sessions.column.status", language)}</th></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.session_ref} className={`sessions-table-row-clickable ${row.session_ref === selectedSessionRef ? "sessions-row-selected" : ""}`} tabIndex={0} role="button" aria-pressed={row.session_ref === selectedSessionRef} onClick={(event) => openSessionDetail(row.session_ref, event.currentTarget)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openSessionDetail(row.session_ref, event.currentTarget); } }}><td><strong>{sessionTitle(row, language)}</strong><code>{row.session_ref.slice(0, 15)}…</code></td><td>{hostName(row.host)}<small>{row.model_ids.length ? row.model_ids.map((id) => modelLabel(id, language)).join(" · ") : message("sessions.unknownModel", language)}</small></td><td>{dateLabel(row.first_event_at, language)}<small>{row.last_event_at ? message("sessions.until", language, { time: dateLabel(row.last_event_at, language) }) : message("sessions.unknownEnd", language)}</small></td><td><strong>{compact(row.tokens.total)}</strong><small>{message("sessions.eventPeak", language, { count: row.event_count, peak: compact(row.peak_tokens) })}</small></td><td><strong>{costLabel(row)}</strong><small>{row.cost_minor ? costBasisLabel(row.cost_minor.basis, language) : message("sessions.noAmount", language)}</small></td><td><span className={`session-cost-state session-cost-${row.cost_status.state}`} title={costStateLabel(row.cost_status, language)}>{costStateLabel(row.cost_status, language)}</span></td></tr>)}</tbody></table></div>
-        <div className="sessions-card-list">{visibleRows.map((row) => <article className={`session-card session-card-clickable ${row.session_ref === selectedSessionRef ? "sessions-row-selected" : ""}`} key={row.session_ref} tabIndex={0} role="button" aria-pressed={row.session_ref === selectedSessionRef} onClick={(event) => openSessionDetail(row.session_ref, event.currentTarget)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openSessionDetail(row.session_ref, event.currentTarget); } }}><div className="session-card-heading"><strong>{sessionTitle(row, language)}</strong><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateShort(row.cost_status.state, language)}</span></div><p>{row.host} · {row.model_ids.map((id) => modelLabel(id, language)).join(" · ") || message("sessions.unknownModel", language)}</p><div><span>{compact(row.tokens.total)} tokens · {message("sessions.eventCount", language, { count: row.event_count })}</span><strong>{costLabel(row)}</strong></div><small>{dateLabel(row.first_event_at, language)} · {message("sessions.until", language, { time: dateLabel(row.last_event_at, language) })}</small><code>{row.session_ref.slice(0, 15)}…</code></article>)}</div>
+        <div className="sessions-table-wrap"><table className="sessions-table"><thead><tr><th scope="col">{message("sessions.column.session", language)}</th><th scope="col">{message("sessions.column.harnessModel", language)}</th><th scope="col">{message("sessions.column.time", language)}</th><th scope="col">{message("sessions.column.tokens", language)}</th><th scope="col">{message("sessions.column.cost", language)}</th><th scope="col">{message("sessions.column.status", language)}</th></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.session_ref} className={`sessions-table-row-clickable ${row.session_ref === selectedSessionRef ? "sessions-row-selected" : ""}`} tabIndex={0} role="button" aria-pressed={row.session_ref === selectedSessionRef} onClick={(event) => openSessionDetail(row.session_ref, event.currentTarget)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openSessionDetail(row.session_ref, event.currentTarget); } }}><td><strong>{sessionTitle(row, language)}</strong><code>{row.session_ref.slice(0, 15)}…</code></td><td>{harnessName(row.harness)}<small>{row.model_ids.length ? row.model_ids.map((id) => modelLabel(id, language)).join(" · ") : message("sessions.unknownModel", language)}</small></td><td>{dateLabel(row.first_event_at, language)}<small>{row.last_event_at ? message("sessions.until", language, { time: dateLabel(row.last_event_at, language) }) : message("sessions.unknownEnd", language)}</small></td><td><strong>{compact(row.tokens.total)}</strong><small>{message("sessions.eventPeak", language, { count: row.event_count, peak: compact(row.peak_tokens) })}</small></td><td><strong>{costLabel(row)}</strong><small>{row.cost_minor ? costBasisLabel(row.cost_minor.basis, language) : message("sessions.noAmount", language)}</small></td><td><span className={`session-cost-state session-cost-${row.cost_status.state}`} title={costStateLabel(row.cost_status, language)}>{costStateLabel(row.cost_status, language)}</span></td></tr>)}</tbody></table></div>
+        <div className="sessions-card-list">{visibleRows.map((row) => <article className={`session-card session-card-clickable ${row.session_ref === selectedSessionRef ? "sessions-row-selected" : ""}`} key={row.session_ref} tabIndex={0} role="button" aria-pressed={row.session_ref === selectedSessionRef} onClick={(event) => openSessionDetail(row.session_ref, event.currentTarget)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openSessionDetail(row.session_ref, event.currentTarget); } }}><div className="session-card-heading"><strong>{sessionTitle(row, language)}</strong><span className={`session-cost-state session-cost-${row.cost_status.state}`}>{costStateShort(row.cost_status.state, language)}</span></div><p>{row.harness} · {row.model_ids.map((id) => modelLabel(id, language)).join(" · ") || message("sessions.unknownModel", language)}</p><div><span>{compact(row.tokens.total)} tokens · {message("sessions.eventCount", language, { count: row.event_count })}</span><strong>{costLabel(row)}</strong></div><small>{dateLabel(row.first_event_at, language)} · {message("sessions.until", language, { time: dateLabel(row.last_event_at, language) })}</small><code>{row.session_ref.slice(0, 15)}…</code></article>)}</div>
         {nextCursor && <div className="sessions-more"><Button type="button" onClick={() => void loadMore()} busy={loadingMore} disabled={loading}>{message(loadingMore ? "sessions.loadingMore" : "sessions.loadMore", language)}</Button></div>}
       </>}
     </section>
@@ -362,7 +362,7 @@ export function SessionsPage({ navigationTarget = null, onNavigationTargetApplie
       <div className="sessions-overlay-backdrop" onClick={closeSessionDetail} />
       <div className="sessions-overlay-panel" role="dialog" aria-modal="true" aria-label={message("sessions.detail", language)}>
         <div className="sessions-overlay-bar"><button type="button" className="sessions-overlay-close" onClick={closeSessionDetail} aria-label={message("sessions.closeDetail", language)}>×</button></div>
-        <div className="sessions-overlay-body"><SessionDetail row={selectedRow} sessionRef={selectedSessionRef} hostKind={filters.host_kind} refreshKey={detailRefreshKey} onBack={closeSessionDetail} /></div>
+        <div className="sessions-overlay-body"><SessionDetail row={selectedRow} sessionRef={selectedSessionRef} harnessKind={filters.harness_kind} refreshKey={detailRefreshKey} onBack={closeSessionDetail} /></div>
       </div>
     </>}
   </div>;

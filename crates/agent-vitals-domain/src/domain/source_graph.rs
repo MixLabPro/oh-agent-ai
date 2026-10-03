@@ -1,7 +1,7 @@
 //! SourceGraph 纯策略面（AGENT_VITALS_SOURCE_GRAPH_INFRASTRUCTURE_SPEC §4-§6）。
 //!
-//! P3 从 runtime 下沉：宿主 crate 要实现 `SourceParser`，而依赖方向是
-//! runtime → hosts，trait 必须住在共同下游 domain。这里只装**纯数据 + 纯判定 +
+//! P3 从 runtime 下沉：执行环境 crate 要实现 `SourceParser`，而依赖方向是
+//! runtime → harnesses，trait 必须住在共同下游 domain。这里只装**纯数据 + 纯判定 +
 //! 插件位契约**：
 //! - `FileCheckpoint` / `Invalidation` / `classify` — 软硬失效判定（spec §6 表）；
 //! - `SourceParser` / `ParserDescriptor` / `ParseContext` / `ParseOutput` —
@@ -9,8 +9,8 @@
 //! - `PARSER_VERSION` — 事实解析器世代号（sql_sync 的重放纪律共用）。
 //!
 //! **不装**：SQL 封装（read/advance/mark_dirty/dirty_set 在 runtime，data 访问）、
-//! 宿主 wire 解释（`agent-vitals-hosts::parsers` 注册表，spec §11 非目标明文
-//! 「不在 infra 里做任何宿主 wire 解释」）、watcher（P2 notify）。
+//! 执行环境 wire 解释（`agent-vitals-harnesses::parsers` 注册表，spec §11 非目标明文
+//! 「不在 infra 里做任何执行环境 wire 解释」）、watcher（P2 notify）。
 //!
 //! 语义纪律（spec §1.3）：offset 只由解析成功的事务推进——半途崩溃 offset 不动，
 //! 下轮重读同一段，fact_id 幂等吸收。与 outbox §1.2 同一条教训。
@@ -52,10 +52,10 @@ use crate::contracts::workflow::{SessionExcerpt, WorkflowEvent};
 /// 不升这个号，存量源不重放，上述各点都只对新文件生效。
 pub const PARSER_VERSION: i64 = 6;
 
-/// P0 阶段的解析器标记——sync_host 与 advance_checkpoint 共用（失配会导致
+/// P0 阶段的解析器标记——sync_harness 与 advance_checkpoint 共用（失配会导致
 /// 每 tick 永久全量重扫，已被 sync_is_incremental_across_runs 钉住，但共享
-/// 常量从源头消灭失配面）。P1 增量解析器接入后逐宿主替换为各自 id
-/// （claude-code → `claude-jsonl-v1`）；保持全量路径的宿主（codex 批 emitter /
+/// 常量从源头消灭失配面）。P1 增量解析器接入后逐执行环境替换为各自 id
+/// （claude-code → `claude-jsonl-v1`）；保持全量路径的执行环境（codex 批 emitter /
 /// dsh zstd / workbuddy sqlite）继续以本 id 落检查点。
 pub const FULL_PARSE_V0: &str = "full-parse-v0";
 
@@ -63,7 +63,7 @@ pub const FULL_PARSE_V0: &str = "full-parse-v0";
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FileCheckpoint {
     pub source_id: String,
-    pub host: String,
+    pub harness: String,
     pub path_hash: String,
     /// 磁盘当前值（stat）
     pub size_bytes: u64,
@@ -163,7 +163,7 @@ pub fn path_hash(path: &std::path::Path) -> String {
 /// 调度器把三个面一并交给既有写入路径。
 ///
 /// **new_offset** 是换行边界（不是 stat size——与 P0 full-parse-v0 语义
-/// 不同，见 classify 的 F2 注释）。全量-only 宿主（无增量能力）的
+/// 不同，见 classify 的 F2 注释）。全量-only 执行环境（无增量能力）的
 /// `new_offset` 无语义，落 0、调度器不覆写检查点。
 pub struct ParseOutput {
     pub facts: Vec<Value>,
@@ -173,7 +173,7 @@ pub struct ParseOutput {
 }
 
 /// 解析器描述符（注册表的行）：身份 + 能力申报。发现层（skip vs 处理）与
-/// emit 层（增量 vs 全量）都以此为唯一依据——runtime 不允许出现 host 字符串
+/// emit 层（增量 vs 全量）都以此为唯一依据——runtime 不允许出现 harness 字符串
 /// 特判的解析路由（P3 收编目标）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ParserDescriptor {
@@ -182,13 +182,13 @@ pub struct ParserDescriptor {
 }
 
 /// 逐文件解析的调用上下文。machine_namespace 是事实身份的必需盐
-/// （所有 emitter 都要）；source_profile 是宿主内 profile 隔离键。
+/// （所有 emitter 都要）；source_profile 是执行环境内 profile 隔离键。
 pub struct ParseContext<'a> {
     pub machine_namespace: &'a str,
     pub source_profile: &'a str,
 }
 
-/// SourceParser 插件位（spec §5.2 冻结接口，P3 起由宿主 crate 实现）。
+/// SourceParser 插件位（spec §5.2 冻结接口，P3 起由执行环境 crate 实现）。
 /// **逐文件**语义；跨批 emitter（codex 的整批折叠 + 跨文件去重）装不进这个
 /// 形状，走 descriptor 申报 + 独立批路径。
 ///

@@ -10,7 +10,7 @@ DSH 默认会话持久化是 `session-persistence-jsonl`，落盘在
 skill 形态独有的诚实降级。`.jsonl` 只依赖标准库 `json`。逐行读、逐行
 `json.loads`；任何一行不是合法 JSON 就降级，**绝不假装「读到了 0 条」**——报
 0 次会直接伪造出假的 SV201。格式见 `fixtures/dsh/README.md` 与
-`docs/HOST_ADAPTER_CONTRACT.md` 的 DSH 一节。
+`docs/HARNESS_ADAPTER_CONTRACT.md` 的 DSH 一节。
 
 R2a 的 DSH population 也消费本模块：`dsh_session_files` /
 `dsh_session_roots_report` / `read_workspace_index` / `parse_workspace_index`
@@ -66,7 +66,7 @@ EXECUTION_EVENT_TYPES = frozenset((
     "step/start",
     "turn/end",
     "step/end",
-    # compaction/*：时间线的 ✂ 标记，prune 的 shadowedTokenCount 是宿主实测的
+    # compaction/*：时间线的 ✂ 标记，prune 的 shadowedTokenCount 是执行环境实测的
     # 被丢弃 token 数（FR-04b 的浪费量来源）。放在**执行事件**而不是 usage 事件
     # 里，是因为 compaction_events 要靠这里已有的 turn/start·turn/end 给 prune
     # 顺延 turn —— prune 自身不带 turn，挂进 usage_events 会全部落成 null。
@@ -590,7 +590,7 @@ def dsh_session_roots_report(dsh_home):
             "file_count": len(files),
             "total_bytes": sum(_file_bytes(f) for f in files),
         })
-    return {"host": "dsh", "roots": roots}
+    return {"harness": "dsh", "roots": roots}
 
 
 def parse_workspace_index(text):

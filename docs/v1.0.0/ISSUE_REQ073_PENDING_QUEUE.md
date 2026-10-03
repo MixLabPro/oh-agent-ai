@@ -49,7 +49,7 @@
 ```
 SV610 2617 · SV605 1102 · SV601 379 · SV611 120 · SV613 67
 SV614 56 · SV604 32 · SV603 25 · SV602 20 · SV609 20 · SV607 12
-按宿主: codex 2767 / claude-code 1527 / dsh 156
+按执行环境: codex 2767 / claude-code 1527 / dsh 156
 evaluator: 全部 legacy-finding@v0.11
 ```
 
@@ -62,13 +62,13 @@ evaluator: 全部 legacy-finding@v0.11
 ### 3.1 归并键（四维）
 
 ```
-group_key = (rule, host, object_norm, evidence_class, day_bucket)
+group_key = (rule, harness, object_norm, evidence_class, day_bucket)
 ```
 
 | 维 | 来源 | 归一化规则 |
 |---|---|---|
 | 问题族 | `issue_type` | 原样（SV6xx） |
-| 宿主 | `host` | 原样 |
+| 执行环境 | `harness` | 原样 |
 | **对象** | fingerprint 第 4 段 | **按族归一**（见 3.2） |
 | **时间范围** | `opened_at_ms` → 北京日 | 日桶（窗口可选周） |
 | **证据类** | `metadata.evidence` + `category` | 归类（同族下区分"重复/失败/超限/越权"） |
@@ -83,7 +83,7 @@ group_key = (rule, host, object_norm, evidence_class, day_bucket)
 | SV610 / SV614（权限模式） | 原样（值域小） | `danger-full-access` |
 | SV611 / SV613（描述） | 剥离计数与序号后取前缀 | `read 连续重复 3 次` → `read 连续重复`；`进度停滞: 连续 4 个工具失败…` → `进度停滞: 连续工具失败` |
 
-**纪律**：归一化只做"同义合并"，不得跨越族或宿主；剥离后的串不得丢语义（如 `rm` 与 `rmdir` 不可合并）。归一化函数须**纯函数 + 单测覆盖每个族**。
+**纪律**：归一化只做"同义合并"，不得跨越族或执行环境；剥离后的串不得丢语义（如 `rm` 与 `rmdir` 不可合并）。归一化函数须**纯函数 + 单测覆盖每个族**。
 
 #### 3.2.1 P1 验收清单（对象归一化，逐条可勾）
 
@@ -95,20 +95,20 @@ group_key = (rule, host, object_norm, evidence_class, day_bucket)
 | N1 | 命令族取首 token | `rm -rf` 与 `rm -f` → **同一组** | 真机 SV601 `rm -rf` |
 | N2 | 首 token 不跨可执行名合并 | `rm` 与 `rmdir` → **不同组** | 防过度归并 |
 | N3 | 命令族忽略参数差异 | `sudo apt install x` 与 `sudo rm y` → 同一组 `sudo` | 真机 SV602 `sudo` |
-| N4 | 路径族取父目录 | `~/.ssh/authorized_keys` 与 `~/.ssh/known_hosts` → 同一组 `~/.ssh/*` | 真机 SV604 |
-| N5 | 路径族不跨目录合并 | `~/.ssh/id_rsa` 与 `/etc/hosts` → 不同组 | — |
+| N4 | 路径族取父目录 | `~/.ssh/authorized_keys` 与 `~/.ssh/known_harnesses` → 同一组 `~/.ssh/*` | 真机 SV604 |
+| N5 | 路径族不跨目录合并 | `~/.ssh/id_rsa` 与 `/etc/harnesses` → 不同组 | — |
 | N6 | 权限模式族原样 | `danger-full-access` 各自成组 | 真机 SV610（2617 条，最大组） |
 | N7 | 描述族剥离计数 | `read 连续重复 3 次` 与 `…重复 7 次` → 同一组 | 真机 SV611 |
 | N8 | 描述族剥离序号 | `连续 4 个工具失败（首个 …）` 与 `连续 9 个…` → 同一组 | 真机 SV613 |
 | N9 | 跨族不合并 | 同 object 不同 rule（如 `danger-full-access` 出现在 SV610 与 SV614）→ **必须两组** | REQ-073 分族 |
-| N10 | 跨宿主不合并 | 同 rule 同 object 不同 host → 不同组 | REQ-073 |
+| N10 | 跨执行环境不合并 | 同 rule 同 object 不同 harness → 不同组 | REQ-073 |
 
 **真机参考量级**（4,450 条命中的分布，用于判断归并是否"过粗/过细"）：
 
 ```
 SV610 2617 · SV605 1102 · SV601 379 · SV611 120 · SV613 67
 SV614 56 · SV604 32 · SV603 25 · SV602 20 · SV609 20 · SV607 12
-宿主: codex 2767 / claude-code 1527 / dsh 156
+执行环境: codex 2767 / claude-code 1527 / dsh 156
 ```
 
 归并后的**组数应显著小于命中数**（预期数十组量级）；若归并后仍是数百组，说明对象归一化过细（N1/N4/N7/N8 未落实）。
@@ -118,7 +118,7 @@ SV614 56 · SV604 32 · SV603 25 · SV602 20 · SV609 20 · SV607 12
 ```json
 {
   "group_id": "<hash of group_key>",
-  "rule": "SV610", "host": "codex",
+  "rule": "SV610", "harness": "codex",
   "object": "danger-full-access", "evidence_class": "权限越权",
   "bucket": "2026-09-12",
   "count": 194, "first_seen_at_ms": …, "last_seen_at_ms": …,
@@ -157,7 +157,7 @@ SV614 56 · SV604 32 · SV603 25 · SV602 20 · SV609 20 · SV607 12
 ## 6. 自动动作边界（REQ-079）
 
 首发自动动作**仅限**本 App 配置、重新扫描、重新估算。
-`remedy_for()` 的 3 条映射需扩充为「证据 + 操作建议」，且**一律不得自动改宿主文件或执行 shell**——宿主侧只提供证据与建议。
+`remedy_for()` 的 3 条映射需扩充为「证据 + 操作建议」，且**一律不得自动改执行环境文件或执行 shell**——执行环境侧只提供证据与建议。
 
 ## 7. 来源统一（REQ-074 六族）
 
@@ -191,7 +191,7 @@ SV614 56 · SV604 32 · SV603 25 · SV602 20 · SV609 20 · SV607 12
 4. 跨族不合并：同 object 不同 rule 必须两组。
 5. 状态迁移：五态各有历史行；"知道了"不关闭问题。
 6. 两类分列：可回答/不可回答不混句。
-7. 自动动作白名单：断言不存在"改宿主文件/执行 shell"的路径。
+7. 自动动作白名单：断言不存在"改执行环境文件/执行 shell"的路径。
 
 ## 10. 明确不做
 

@@ -1,5 +1,5 @@
 """Claude 回合判据的 Python 镜像（`claude_evidence.turn_signal`）逐例对齐 Rust
-`hosts::claude_code::sessions::turns::turn_signal` 的单测。
+`harnesses::claude_code::sessions::turns::turn_signal` 的单测。
 
 回归背景（SESSION_TRACE_DIAGNOSTICS_SPEC r6 P0）：evidence 曾用「字符串或不含
 tool_result 的数组」开 turn，把 skill 正文注入、`<task-notification>`、中断标记都

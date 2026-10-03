@@ -65,7 +65,7 @@ impl ProbeVerdict {
 // ────────────────────────── L0 观察 → 判定 ──────────────────────────
 
 /// 一次 L0 身份探针的观察结果（runner 从 `claude -p --output-format stream-json`
-/// 的事件流里抽取；字段缺失 = 宿主/中转没给，保持 `None`）。
+/// 的事件流里抽取；字段缺失 = 执行环境/中转没给，保持 `None`）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct L0Observation {
     /// 路线档案里声明的请求模型（别名形态）。
@@ -74,7 +74,7 @@ pub struct L0Observation {
     pub resolved_model: Option<String>,
     /// 四桶 usage（uncached_input, cache_read, cache_write, output）。
     pub usage: Option<(i64, i64, i64, i64)>,
-    /// 会话 id（探针自己也是宿主会话——回填 probe_results.session_key 的原料）。
+    /// 会话 id（探针自己也是执行环境会话——回填 probe_results.session_key 的原料）。
     pub native_session_id: Option<String>,
 }
 

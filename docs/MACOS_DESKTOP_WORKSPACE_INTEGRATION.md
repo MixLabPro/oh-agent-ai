@@ -8,14 +8,14 @@ The independent `react/prototypes/macos.html` is a mock interaction study, not a
 new backend contract. Do not ingest its numbers, session titles, file paths,
 confidence labels or acknowledgement state into production.
 
-Preserve host-agnostic ingestion, domain rules, billing honesty, authority data,
-MCP redaction, dynamic host registration and revision-based invalidation.
+Preserve harness-agnostic ingestion, domain rules, billing honesty, authority data,
+MCP redaction, dynamic harness registration and revision-based invalidation.
 The desktop redesign does not itself require an authority schema migration.
 
 ## Architecture
 
 ```text
-Host adapters -> Runtime ingestion/orchestration -> Domain calculations
+Harness adapters -> Runtime ingestion/orchestration -> Domain calculations
                          |                              |
                          +--------> Authority <---------+
                                       |
@@ -66,17 +66,17 @@ platforms' decorated-window fallback. Do not call this release-ready before UAT.
 - Wide windows use a list plus a side inspector; narrow windows stack the
   inspector after the list. Filters and selected opaque reference are preserved
   in `sessionStorage` (presentation-only; no authority data is written).
-- No global search/sort is claimed. Existing host/model/provider filters are
+- No global search/sort is claimed. Existing harness/model/provider filters are
   explicitly server-side query filters; cost-state filtering is on loaded rows.
 - Trust evidence is the primary surface. Profile approval/revoke and notification
   suppression controls are folded into a secondary disclosure.
-- Added `trust evidence --limit [--host] [--cursor] --json` and the Tauri
+- Added `trust evidence --limit [--harness] [--cursor] --json` and the Tauri
   `trust_evidence_read` command. It reads a bounded allowlist projection with
   SQLite read-only flags; it does not run profile discovery or filesystem audit.
   No schema change was needed. UI refresh and monitor invalidation reload this
   saved evidence independently from an explicit “本地审计” scan.
 - History uses keyset pagination by `(observed_at_ms, observation_id)` and binds
-  each opaque cursor to its originating host filter; reusing it with another
+  each opaque cursor to its originating harness filter; reusing it with another
   filter is rejected instead of silently skipping rows. The UI labels
   additional pages as older evidence; the cursor never appears as visible
   evidence text. Runtime, Tauri, and React accept the same bounded 320-character
@@ -101,7 +101,7 @@ Audit existing query capabilities before adding commands:
 
 1. **Done for current Trust history surface:** saved evidence is read separately
    from executing an audit, keyset-paginated in bounded pages of at most 500,
-   host-filterable, expiry-filtered, and parsed through the redacted DTO allowlist.
+   harness-filterable, expiry-filtered, and parsed through the redacted DTO allowlist.
    The existing evidence anchors are HMAC-safe references. Missing/expired native
    source material is represented only by the remaining safe projection.
 2. **Done for Overview's daily/monthly/calendar panels:** one Tauri command
@@ -143,7 +143,7 @@ Audit existing query capabilities before adding commands:
 Current closeout (2026-09-24): implementation and automated contracts are green
 for the desktop shell, Sessions split inspector and saved Trust evidence read.
 Read-only Agent acceptance passed for the integration, revision snapshot, and
-cursor contracts, including cross-host cursor rejection and the maximum-length
+cursor contracts, including cross-harness cursor rejection and the maximum-length
 React cursor case. The reviewer found a duplicate Tauri command registration;
 it was removed and re-reviewed. The revision overlap path is bracketed and
 retries, but automated tests currently cover stable and reported-inconsistent

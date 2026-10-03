@@ -13,9 +13,9 @@ DSH observer   ─┤
 UsageFact ID   ─┘
 ```
 
-**过渡归属**：本模块暂居包顶层，只为让两处调用方（agent 子树、将来 host
+**过渡归属**：本模块暂居包顶层，只为让两处调用方（agent 子树、将来 harness
 adapter）能同一处引用。这是 Agent UsageFact/source-event 身份契约，不是任意
-领域都要的通用机制——将来拆出 `agent-vitals-hosts` 包时，本模块整体迁往
+领域都要的通用机制——将来拆出 `agent-vitals-harnesses` 包时，本模块整体迁往
 `shared/source_identity.py`。
 
 Rust 平行实现：`crates/agent-vitals-domain/src/contracts/source_identity.rs`（同字节）。

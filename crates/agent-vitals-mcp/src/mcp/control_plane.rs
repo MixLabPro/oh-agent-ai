@@ -35,7 +35,7 @@ pub fn spec() -> ToolSpec {
             "type": "object",
             "properties": {
                 "action": { "type": "string", "enum": ACTIONS },
-                "host": { "type": "string" },
+                "harness": { "type": "string" },
                 "root": { "type": "string" },
                 "excluded": { "type": "boolean" },
                 "confirmation": { "type": "string" },
@@ -107,8 +107,8 @@ fn read_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, ToolE
         "custom_sources" => json!({ "action": action, "sources": custom_sources(data_home)? }),
         "source_controls" => json!({
             "action": action,
-            "excluded_hosts": crate::source_controls::excluded_hosts(data_home).map_err(local_error)?,
-            "supported_hosts": crate::source_controls::supported_hosts_for(data_home)
+            "excluded_harnesses": crate::source_controls::excluded_harnesses(data_home).map_err(local_error)?,
+            "supported_harnesses": crate::source_controls::supported_harnesses_for(data_home)
         }),
         "retention_get" => json!({
             "action": action,
@@ -184,33 +184,33 @@ fn read_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, ToolE
 fn write_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, ToolError> {
     let data = match action {
         "custom_source_add" => {
-            let host = required_string(args, "host")?;
+            let harness = required_string(args, "harness")?;
             let root = PathBuf::from(required_string(args, "root")?);
-            let changed = crate::custom_sources::add_custom_source_root(data_home, host, &root)
+            let changed = crate::custom_sources::add_custom_source_root(data_home, harness, &root)
                 .map_err(local_error)?;
-            json!({ "action": action, "host": host, "changed": changed })
+            json!({ "action": action, "harness": harness, "changed": changed })
         }
         "custom_source_remove" => {
-            let host = required_string(args, "host")?;
+            let harness = required_string(args, "harness")?;
             let root = PathBuf::from(required_string(args, "root")?);
-            let changed = crate::custom_sources::remove_custom_source_root(data_home, host, &root)
+            let changed = crate::custom_sources::remove_custom_source_root(data_home, harness, &root)
                 .map_err(local_error)?;
-            json!({ "action": action, "host": host, "changed": changed })
+            json!({ "action": action, "harness": harness, "changed": changed })
         }
         "source_exclusion_set" => {
-            let host = required_string(args, "host")?;
+            let harness = required_string(args, "harness")?;
             let excluded = args.get("excluded").and_then(Value::as_bool)
                 .ok_or_else(|| ToolError::new("invalid_argument", "`excluded` is required"))?;
-            let changed = crate::source_controls::set_host_excluded(data_home, host, excluded)
+            let changed = crate::source_controls::set_harness_excluded(data_home, harness, excluded)
                 .map_err(local_error)?;
-            json!({ "action": action, "host": host, "excluded": excluded, "changed": changed })
+            json!({ "action": action, "harness": harness, "excluded": excluded, "changed": changed })
         }
         "source_data_delete" => {
             require_confirmation(args, "DELETE_IMPORTED_SOURCE_DATA")?;
-            let host = required_string(args, "host")?;
-            let deleted = crate::source_controls::delete_imported_source_data(data_home, host)
+            let harness = required_string(args, "harness")?;
+            let deleted = crate::source_controls::delete_imported_source_data(data_home, harness)
                 .map_err(local_error)?;
-            json!({ "action": action, "host": host, "excluded": true,
+            json!({ "action": action, "harness": harness, "excluded": true,
                 "deleted": { "facts": deleted.facts, "sessions": deleted.sessions,
                     "source_files": deleted.source_files,
                     "trust_observations": deleted.trust_observations,
@@ -295,11 +295,11 @@ fn write_run(action: &str, args: &Value, data_home: &Path) -> Result<Value, Tool
 
 fn source_status(data_home: &Path, conn: &rusqlite::Connection) -> Result<Value, ToolError> {
     let mut report = super::source_status_report(conn).map_err(local_error)?;
-    let excluded = crate::source_controls::excluded_hosts(data_home).map_err(local_error)?;
+    let excluded = crate::source_controls::excluded_harnesses(data_home).map_err(local_error)?;
     if let Some(sources) = report.get_mut("sources").and_then(Value::as_array_mut) {
         for source in sources {
-            let host = source.get("host").and_then(Value::as_str).unwrap_or("");
-            if excluded.contains(host) {
+            let harness = source.get("harness").and_then(Value::as_str).unwrap_or("");
+            if excluded.contains(harness) {
                 source["connection_state"] = Value::String("excluded".to_string());
                 source["recovery_action"] = json!({ "kind": "include_source", "label": "恢复读取" });
             }
@@ -327,7 +327,7 @@ fn custom_sources(data_home: &Path) -> Result<Value, ToolError> {
     // supplied to the typed add/remove action.
     Ok(json!({
         "configured_count": sources.len(),
-        "hosts": sources.iter().map(|source| source.host.as_str()).collect::<Vec<_>>(),
+        "harnesses": sources.iter().map(|source| source.harness.as_str()).collect::<Vec<_>>(),
     }))
 }
 
@@ -488,7 +488,7 @@ mod tests {
             [],
         ).unwrap();
         db.conn().execute(
-            "INSERT INTO usage_facts(fact_id, host, machine_namespace, native_session_id,
+            "INSERT INTO usage_facts(fact_id, harness, machine_namespace, native_session_id,
                  source_event_id, observation_kind, provider_id, model_id, event_ts_ms,
                  event_peak, uncached_input_tokens, cache_read_tokens, cache_write_tokens,
                  output_tokens, ingested_run_id, created_at_ms, updated_at_ms)
@@ -519,13 +519,13 @@ mod tests {
         let daily1 = run(&json!({ "action": "daily_summary", "date": date }), &home, false).unwrap();
         let daily2 = run(&json!({ "action": "daily_summary", "date": date }), &home, false).unwrap();
         assert_eq!(daily1["data"], daily2["data"], "repeat calls must agree byte-for-byte");
-        assert!(daily1["data"]["summary"]["tokens_by_host"].is_object(), "must be the full DTO shape, not a stub");
+        assert!(daily1["data"]["summary"]["tokens_by_harness"].is_object(), "must be the full DTO shape, not a stub");
         assert_eq!(daily1["data"]["date"], date);
 
         let monthly1 = run(&json!({ "action": "monthly_summary", "month": month }), &home, false).unwrap();
         let monthly2 = run(&json!({ "action": "monthly_summary", "month": month }), &home, false).unwrap();
         assert_eq!(monthly1["data"], monthly2["data"], "repeat calls must agree byte-for-byte");
-        assert!(monthly1["data"]["summary"]["by_host"].is_object(), "must be the full DTO shape, not a stub");
+        assert!(monthly1["data"]["summary"]["by_harness"].is_object(), "must be the full DTO shape, not a stub");
         assert_eq!(monthly1["data"]["month"], month);
 
         let _ = std::fs::remove_dir_all(&home);

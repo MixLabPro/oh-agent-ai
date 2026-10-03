@@ -9,12 +9,12 @@
   `agent-vitals-runtime` 的 lease/ingest/export/summary/state、CLI data-*
   接线、emitter 归位 diff），每条 finding 追到具体行号与触发条件才定性。
 - **gate 实测（全部本审计实跑，非引用既有记录）**：
-  - `cargo test` 全 crate 通过（binary 313 / domain 431+ / hosts 56+ /
+  - `cargo test` 全 crate 通过（binary 313 / domain 431+ / harnesses 56+ /
     vitals-core 53+，exit 0）；
   - `cargo clippy --release --all-targets -- -D warnings` exit 0；
   - `AGENT_VITALS_BIN=<release 二进制> python3 tests/golden_runner.py`
     ——15/15 逐字节一致；
-  - usage-fact 三宿主差分 `tests.test_{claude,codex,dsh}_usage_fact`
+  - usage-fact 三执行环境差分 `tests.test_{claude,codex,dsh}_usage_fact`
     ——55/55 通过；
   - `AGENT_VITALS_BIN=… python3 -m unittest discover tests`
     ——**1164 项通过（skipped=4，为无 hypothesis 环境的可选项）**，与
@@ -34,11 +34,11 @@
 | 交付物 | 落点 | 审计验证方式 |
 |---|---|---|
 | UsageFact append-only writer：fact_id exactly-once、崩溃尾面**修复**（半行截断/缺封口补 `\n`）、中间坏行拒绝 | `agent-vitals-data/src/evidence.rs` | 精读 + 4 个尾面/去重测试核对 |
-| emitter 归位宿主 sources 层（行级原语下沉纯层，CLI re-export） | `agent-vitals-hosts/hosts/<h>/sources/usage_fact.rs` + `claude_code/sessions/usage.rs` + `dsh/sessions/header.rs` | diff 确认为纯搬迁 + re-export；parity 55/55 |
-| Runtime ingest service：封闭宿主词表、按事实 host 分组落盘、写后重放自检、lease 接线 | `agent-vitals-runtime/src/ingest_service.rs` | 精读 + 8 项单测 |
+| emitter 归位执行环境 sources 层（行级原语下沉纯层，CLI re-export） | `agent-vitals-harnesses/harnesses/<h>/sources/usage_fact.rs` + `claude_code/sessions/usage.rs` + `dsh/sessions/header.rs` | diff 确认为纯搬迁 + re-export；parity 55/55 |
+| Runtime ingest service：封闭执行环境词表、按事实 harness 分组落盘、写后重放自检、lease 接线 | `agent-vitals-runtime/src/ingest_service.rs` | 精读 + 8 项单测 |
 | SQLite 可重建索引：fact_id 主键、版本迁移=整库重建、损坏自愈、事务回滚防假零 | `agent-vitals-data/src/store.rs` | 精读 + 7 项单测（含删库/损坏/回滚） |
 | writer lease：O_EXCL + **原子 rename 陈旧偷取**（unlink+create 的无主窗口缺陷已修并有测试钉住） | `agent-vitals-runtime/src/lease.rs` | 精读（发现 #1，见下） |
-| data-reconcile：索引 vs DTO 逐宿主三态（measured/no-facts/index-only）、同月窗对月窗（P1-3 已修） | `ingest_service.rs::reconcile_index_vs_dto` + `store.rs::tokens_by_host(month)` | 精读 + 单测 |
+| data-reconcile：索引 vs DTO 逐执行环境三态（measured/no-facts/index-only）、同月窗对月窗（P1-3 已修） | `ingest_service.rs::reconcile_index_vs_dto` + `store.rs::tokens_by_harness(month)` | 精读 + 单测 |
 | data-unresolved：逐模型四类原因下钻（codex 两层 by_model 形状 P1-1 已修） | `summary.rs::unresolved_detail` + `codex_unresolved_rows` | 精读 + 形状钉测 |
 | 保留滚动：13 个自然月（cutoff = current − 12，fencepost 钉死）、无日期行保留、幂等 | `evidence.rs::retain` + `ingest_service.rs::enforce_retention` + `month_shift` | 精读 + fencepost/跨年/0 钳制单测（发现 #2，见下） |
 | 脱敏导出双路径：四身份字段 fnv1a64 伪名化 + fact_id 契约层重 stamp | `agent-vitals-runtime/src/export.rs` | 精读（发现 #3，见下） |
@@ -61,7 +61,7 @@
 ### 0.3 遗留项（文档已如实标注，非本次审计新发现）
 
 - checkpoint / sync_service（连带 §7.1 watcher 门槛未触发）；
-- generation transaction（intent → manifest）与 `HostBillRecord`（待 WorkBuddy 范围确认）；
+- generation transaction（intent → manifest）与 `HarnessBillRecord`（待 WorkBuddy 范围确认）；
 - CanonicalSession snapshot writer（Stage A 记录的剩余项）；
 - coverage projection 完整化（DoD #5 后半）；
 - 四项数据缺口等用户输入（中转 cache_read 单价 / GLM 价卡 / ChatGPT Plus 月费 / 汇率）——非工程阻塞。
@@ -107,7 +107,7 @@
   `retention` 落 `None`。但 `RebuildOutcome` 的文档写的是「None = ……或
   retention 失败（**错误已上 stderr**）」——实际没有任何 stderr 输出；CLI 渲染
   只在 `Some(ret)` 时打印 retention 行。调用方拿到的 `None` 无法区分
-  「权威里没有需要滚动的宿主文件」与「滚动失败」。
+  「权威里没有需要滚动的执行环境文件」与「滚动失败」。
 - **后果**：这条注释自称是审查 P2 的修复（「丢掉报告 = 滚动对操作者不可观测」），
   而修复本身恰恰还留着一个不可观测口：I/O 类失败（权限、磁盘满）下，用户以为
   保留滚动做了，实际一条没删——`retain` 是对权威 JSONL 的**不可逆重写**，

@@ -1,4 +1,4 @@
-"""v0.7 Stage 3 commit 2：DSH 会话 → UsageFact emitter（host adapter，不进 Core）。
+"""v0.7 Stage 3 commit 2：DSH 会话 → UsageFact emitter（harness adapter，不进 Core）。
 
 把一份 DSH 会话文件（明文 JSONL 或 zstd 多帧）的 **post-fork 逐请求消耗**重放成
 `UsageFact` 事实流。spec `docs/VITALS_CORE_V0_7_STAGE_3_DSH_ADAPTER.md`（v4）的
@@ -37,7 +37,7 @@ from ..adapters.dsh_source_profile import dsh_header, dsh_source_profile
 from .usage import dsh_usage_observations, usage_fold_checkpoint
 from .usage_fact import build_usage_fact
 
-HOST = "dsh"                # == R2a host_kind
+HARNESS = "dsh"                # == R2a harness_kind
 OBSERVATION_KIND = "assistant-usage"  # 与 claude/codex 同词汇
 
 # 读/解码错误码 → 人读消息。Rust 镜像产出同一字符串（parity 消息同码）。
@@ -122,7 +122,7 @@ def dsh_session_to_usage_facts(
 
     - `source_profile=None` → 从 header cwd 派生（`dsh_source_profile`）；cwd 缺失
       → raise `unattributed`（不给 actionable 之外的空成功）。
-    - 身份字段（host/machine_namespace/source_profile/native_session_id/
+    - 身份字段（harness/machine_namespace/source_profile/native_session_id/
       source_event_id/observation_kind）都来自 observer 固化身份或本函数参数——
       R2a 四元对齐即验收 #7。
     - 归属失败 / duplicate → raise `DshUsageFactError`（不返回空成功、不静默去重）。
@@ -209,7 +209,7 @@ def _observation_to_usage_fact(obs, machine_namespace, native_session_id, profil
     """
     fields = {
         "machine_namespace": machine_namespace,
-        "host": HOST,
+        "harness": HARNESS,
         "source_profile": profile,
         "native_session_id": native_session_id,
         "source_event_id": obs.source_event_id,
@@ -254,7 +254,7 @@ def _observation_to_usage_fact(obs, machine_namespace, native_session_id, profil
 
 
 __all__ = [
-    "HOST",
+    "HARNESS",
     "OBSERVATION_KIND",
     "DshUsageFactError",
     "DshUsageFactEmitResult",

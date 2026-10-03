@@ -44,13 +44,13 @@ projects."<path>".enabledMcpjsonServers / disabledMcpjsonServers    # 数组，�
 redact.py`/`redact.rs` 处理的是路径和人名，不是 API key/token 形态的机密，
 需要一份新的、更保守的默认策略（"选择性透出"而不是"选择性隐藏"）。
 
-### 2.2 Session 证据——`mcp__` 命名约定已经在两个宿主的 wire 里出现
+### 2.2 Session 证据——`mcp__` 命名约定已经在两个执行环境的 wire 里出现
 
 - **Claude Code**：工具调用在 `tool_use.name` 里用 `mcp__<server>__<tool>` 命名
   （三段式，`__` 分隔）——这是笔者所在运行环境自身的 MCP 工具命名约定，可
   100% 确认，但**本仓库现有的 Claude Code fixture 语料库里还没有一条这种
   样本**（`grep mcp__ fixtures/` 只命中 Codex 语料，Claude Code 语料为空）。
-  `crates/agent-vitals-hosts/src/hosts/claude_code/sessions/evidence.rs`
+  `crates/agent-vitals-harnesses/src/harnesses/claude_code/sessions/evidence.rs`
   的 `normalize_tool_name()` 目前对未知名字走 `other => other` 透传分支——
   `mcp__` 前缀的名字今天原样进 `tool_calls` 桶，**没有被拆成"哪个服务器"**，
   和内置工具（Bash/Read/…）混在同一个计数里。
@@ -114,7 +114,7 @@ review。这与 Phase D/E「一路做完」不同——不是规模问题，是�
 
 ## 4. 本刀不做
 
-- Codex/DSH/WorkBuddy 的 MCP 证据（命名约定未证实的宿主不编数据）。
+- Codex/DSH/WorkBuddy 的 MCP 证据（命名约定未证实的执行环境不编数据）。
 - `~/.claude.json` 之外的 MCP 配置源（例如项目根 `.mcp.json` 文件本身——
   `enabledMcpjsonServers`/`disabledMcpjsonServers` 暗示它存在但本刀未直接读取，
   `~/.claude.json` 里的镜像字段已经够 F1b 用）。

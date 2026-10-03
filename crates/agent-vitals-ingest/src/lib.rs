@@ -2,7 +2,7 @@
 //!
 //! 例行同步（`sync_service`：发现 → SourceGraph 差量 → emit → 权威库写入 → findings 评估）、
 //! 进程内同步引擎（`engine`）与 tick 调度状态机（`scheduler`）、文件监听（`watch`，
-//! `watcher` feature）、插件宿主再摄取、保留滚动、暂停开关。同步收尾触发价格对账，所以在
+//! `watcher` feature）、插件执行环境再摄取、保留滚动、暂停开关。同步收尾触发价格对账，所以在
 //! billing 之上；trust / mcp 不依赖它的写路径以外的东西。
 
 // ── 下层 re-export（来自 `agent-vitals-billing` 的全部根名字）──
@@ -17,7 +17,7 @@ pub use agent_vitals_billing::source_graph;
 #[doc(hidden)]
 pub use agent_vitals_billing::ENV_LOCK;
 pub use agent_vitals_billing::clock;
-pub use agent_vitals_billing::fact_hosts;
+pub use agent_vitals_billing::fact_harnesses;
 pub use agent_vitals_billing::home;
 pub use agent_vitals_billing::lease;
 pub use agent_vitals_billing::logging;
@@ -31,7 +31,7 @@ pub use agent_vitals_billing::price_overrides;
 pub use agent_vitals_billing::pricing_catalog;
 pub use agent_vitals_billing::sources;
 pub use agent_vitals_billing::custom_sources;
-pub use agent_vitals_billing::host_registry;
+pub use agent_vitals_billing::harness_registry;
 pub use agent_vitals_billing::session_sources;
 pub use agent_vitals_billing::source_controls;
 pub use agent_vitals_billing::sessions;

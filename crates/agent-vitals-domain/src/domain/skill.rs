@@ -294,7 +294,7 @@ pub fn skill_invocations_enriched(
         .collect();
 
     let sessions_discovered = all_agents.len() as i64;
-    let sessions_covered = all_agents.len() as i64; // placeholder — actual read is host-side
+    let sessions_covered = all_agents.len() as i64; // placeholder — actual read is harness-side
 
     json!({
         "enriched": enriched,

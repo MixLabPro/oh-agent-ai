@@ -13,7 +13,7 @@ from agent_vitals.agent.catalog_index import local_allowed, parse_catalog, valid
 class CatalogIndexTests(unittest.TestCase):
     def setUp(self):
         self.index = json.loads((ROOT / 'fixtures/catalog-index-v1.json').read_text())
-        self.support = {'host_manifest': {'schemas': [1], 'capabilities': ['recipe:message']}}
+        self.support = {'harness_manifest': {'schemas': [1], 'capabilities': ['recipe:message']}}
 
     def check(self, index=None, highest=None):
         return validate_catalog(index or self.index, self.support, '1.4.0', 'c' * 64, highest)
@@ -47,7 +47,7 @@ class CatalogIndexTests(unittest.TestCase):
             self.check()
 
     def test_permissions_and_limits(self):
-        self.assertTrue(local_allowed('host_manifest'))
+        self.assertTrue(local_allowed('harness_manifest'))
         self.assertFalse(local_allowed('subscription_scope'))
         self.index['entries'] *= 1025
         with self.assertRaisesRegex(ValueError, 'entries_limit'):
@@ -103,6 +103,6 @@ class CatalogIndexTests(unittest.TestCase):
             self.assertIsNone(re.search(ver['not']['pattern'], value))
         for value in ('4294967296.0.0', '0.5000000000.0', '0.0.9999999999'):
             self.assertIsNotNone(re.search(ver['not']['pattern'], value))
-        for spec, value in ((schema['properties']['published_at'], '2026-10-01T00:00:00Z'), (fields['entry']['properties']['payload_path'], 'catalog/host.json')):
+        for spec, value in ((schema['properties']['published_at'], '2026-10-01T00:00:00Z'), (fields['entry']['properties']['payload_path'], 'catalog/harness.json')):
             self.assertIsNotNone(re.search(spec['pattern'], value))
             self.assertIsNone(re.search(spec['pattern'], value + '\n'))

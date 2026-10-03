@@ -49,9 +49,9 @@
 
 这些是现有架构里做对了的部分。重构要**保住**它们，不能把它们当作障碍绕过去：
 
-- **依赖方向单向**：`hosts → domain → vitals-core`，`data → domain`，`runtime → {data, domain, hosts}`。
+- **依赖方向单向**：`harnesses → domain → vitals-core`，`data → domain`，`runtime → {data, domain, harnesses}`。
   新增 crate 时，必须在对应的 `tests/dependency_budget.rs` 里加上方向断言。
-- **domain 纯度**：不碰 fs/process/env/clock，不认识宿主的 wire 格式
+- **domain 纯度**：不碰 fs/process/env/clock，不认识执行环境的 wire 格式
   （`domain_holds_no_dsh_wire_module` 等守卫）。
 - **I/O 只出现在 `/sources` 路径下**（`io_tokens_only_appear_under_sources`）。
 - **数据面权威**：facts JSONL 是 append-only 的权威源；`agent-vitals.sqlite3` 是 SQL 权威库；
@@ -180,15 +180,15 @@ crates/agent-vitals-runtime/         # 过渡期门面：pub use 以上各 crate
 - ✅ 分层守卫 `crates/agent-vitals-runtime/tests/module_layering.rs`（`b160bfd`）。
 - ✅ 拆出 `agent-vitals-runtime-core`（L0–L1，约 6.9k 行，`62ab747`）。
 - ✅ W8 先行（`77ff4ff`、`b6afc21`）：行为 findings 改为同步后增量评估，r2a 整体删除（见 W8）。
-- ✅ 宿主注册表（`7a1ffca`）：`agent-vitals-hosts::sources::session_hosts`；runtime 的宿主 wire 代码
-  （Codex 计价/会话审计、DSH 行为审计/会话发现，约 1.7k 行）搬进 hosts。
+- ✅ 执行环境注册表（`7a1ffca`）：`agent-vitals-harnesses::sources::session_harnesses`；runtime 的执行环境 wire 代码
+  （Codex 计价/会话审计、DSH 行为审计/会话发现，约 1.7k 行）搬进 harnesses。
 - ✅ 进程内同步引擎 + tick 调度状态机（`1ee3d2c`），桌面 tick 改用它们并移除遗留的
   discover/oneline/claude-sync 子进程（`e441d90`，顺带修复「每次成功同步都显示为失败」）。
 - ✅ 拆 crate（`0fe6d37`…`5971be9`）：query（L2–L3）→ billing（L4）→ ingest、trust（L5）→ mcp（L6）；
   `agent-vitals-runtime` 成为纯门面。
 - ⚠️ 未做 `.app` 真机验证（桌面 tick 行为已变，CLAUDE.md 要求在主仓库构建 `.app` 验证）。
 - 遗留：runtime 门面的 `[dependencies]` 仍列着已不直接使用的 crate（其 `tests/` 在用部分）；
-  `sync_host` 内部仍有 codex 批量 emit 的宿主分支；`watch_topology` 的默认监听根与注册表的
+  `sync_harness` 内部仍有 codex 批量 emit 的执行环境分支；`watch_topology` 的默认监听根与注册表的
   默认根是两份约定；CLI 的 `oneline` / `claude-sync` / `discover` 命令本身未删。
 - 后续可做：把 ingest 对 billing 的依赖反转成注入式消费者（`sync_service.rs` 的 price-reconcile），
   ingest 就能下沉到 query 之下；`query::cost_breakdown` 里的 MCP `spec()` 外壳应该移回 mcp。
@@ -285,7 +285,7 @@ crates/agent-vitals-runtime/         # 过渡期门面：pub use 以上各 crate
 ### W6 [P2] 统一依赖版本与 workspace
 
 **问题证据**：`apps/desktop/src-tauri` 是独立 workspace，有自己的 `Cargo.lock`；
-`rusqlite = 0.31 bundled` 在 cli / data / probe / runtime / hosts 里分别声明。目前两边版本碰巧一致。
+`rusqlite = 0.31 bundled` 在 cli / data / probe / runtime / harnesses 里分别声明。目前两边版本碰巧一致。
 
 **步骤**
 1. 根 `Cargo.toml` 加 `[workspace.dependencies]`，放入 `rusqlite`、`serde`、`serde_json`、`regex`、
@@ -319,12 +319,12 @@ crates/agent-vitals-runtime/         # 过渡期门面：pub use 以上各 crate
 
 ---
 
-### W8 [P2] 遗留清理：r2a、legacy 标记、宿主分派
+### W8 [P2] 遗留清理：r2a、legacy 标记、执行环境分派
 
 > ✅ 已完成（2026-09-24，`77ff4ff`/`b6afc21`）：原计划「直接删」的前提不成立——r2a 是行为
 > findings 写入 Issues 表的唯一生产者，且 React 切换后无人触发。改为同步后增量评估
 > （`ingest/findings_eval.rs`，身份与 r2a 逐字段一致），再整体删除 r2a。
-> 宿主分派注册表也已完成（见 W3 进度）。
+> 执行环境分派注册表也已完成（见 W3 进度）。
 
 1. **r2a 退役**：CLI Findings 仍走 `agent_vitals_runtime::sessions::r2a_store::sessions_findings`
    （`apps/cli/src/main.rs:4341`，说明在 `:997`）。
@@ -332,43 +332,43 @@ crates/agent-vitals-runtime/         # 过渡期门面：pub use 以上各 crate
    然后移除 CLI 的 `features = ["legacy-r2a"]`，再删除 `r2a_store.rs`、`legacy-r2a` feature，
    以及 Python 的 `r2a.py`（后者与 W1 协调）。
    改之前先对真机数据做一次新旧输出比对，差异写进 PR。
-2. **宿主分派注册表**：在 `agent-vitals-hosts` 定义
-   `trait HostSource { fn kind() -> HostKind; fn discover(&self, home) -> Vec<PathBuf>; fn canonical_session(..); fn quota(..) -> Option<..> }`
+2. **执行环境分派注册表**：在 `agent-vitals-harnesses` 定义
+   `trait HarnessSource { fn kind() -> HarnessKind; fn discover(&self, home) -> Vec<PathBuf>; fn canonical_session(..); fn quota(..) -> Option<..> }`
    和一个静态注册表。把 `runtime/src/query/trace_service.rs:143-168`、`query/summary/quotas.rs`、
-   `hosts/src/sources/{parsers,canonical_input}.rs` 里的 `"claude-code" => …` 字符串 match 换成查注册表。
-   目标：以后接入 Pi 或 Hermes 时，**只新增**一个 `HostSource` 实现，不用改 query 层。
+   `harnesses/src/sources/{parsers,canonical_input}.rs` 里的 `"claude-code" => …` 字符串 match 换成查注册表。
+   目标：以后接入 Pi 或 Hermes 时，**只新增**一个 `HarnessSource` 实现，不用改 query 层。
 3. **legacy 标记**：671 处 `legacy|deprecated|TODO|FIXME`。输出一份分类清单
    （已失效可删 / 有 issue 待办 / 是描述历史的注释），**只删「已失效可删」这一类**，其余只登记。
 
-**验收**：`legacy-r2a` 在仓库里 grep 不到；`trace_service.rs` 不再有宿主字符串 match；legacy 标记减少的数量写进 PR。
+**验收**：`legacy-r2a` 在仓库里 grep 不到；`trace_service.rs` 不再有执行环境字符串 match；legacy 标记减少的数量写进 PR。
 
 ---
 
-### W10 [P2] domain 去宿主化：会话语义只定义一次
+### W10 [P2] domain 去执行环境化：会话语义只定义一次
 
-**背景（2026-09-27 盘点）**：`agent-vitals-domain` 的职责是宿主无关规则，但仍有按宿主名写死的
-分支；反过来，`agent-vitals-hosts` 里有本该宿主无关的会话语义被每个宿主各写一份。
+**背景（2026-09-27 盘点）**：`agent-vitals-domain` 的职责是执行环境无关规则，但仍有按执行环境名写死的
+分支；反过来，`agent-vitals-harnesses` 里有本该执行环境无关的会话语义被每个执行环境各写一份。
 
 **已完成（会话消耗诊断 P0 顺手收口）**：
 - 新增 `domain::session_semantics`：`fingerprint` / `safe_label` / `iso_to_epoch_ms` / `outcome` /
-  `session_span`（原 `hosts::workflow_utils`，dsh 另有逐字副本）、`invocation_fingerprint`
-  （原 claude / codex 各一份）、`ModelSwitchTracker`（原四个宿主各一段 `previous_model` 比较）、
-  `UserTurnSignal` + `TurnTracker`（回合语义）。`hosts::workflow_utils` 退为 re-export。
-- Claude 的回合判据收成一份 `hosts::claude_code::sessions::turns::turn_signal`，evidence（SV612、
+  `session_span`（原 `harnesses::workflow_utils`，dsh 另有逐字副本）、`invocation_fingerprint`
+  （原 claude / codex 各一份）、`ModelSwitchTracker`（原四个执行环境各一段 `previous_model` 比较）、
+  `UserTurnSignal` + `TurnTracker`（回合语义）。`harnesses::workflow_utils` 退为 re-export。
+- Claude 的回合判据收成一份 `harnesses::claude_code::sessions::turns::turn_signal`，evidence（SV612、
   调用树、UserPrompts 覆盖）与 workflow（`task_started`）共用；Python 镜像
   `claude_evidence.turn_signal`，`tests/test_claude_turns.py` 钉住。此前两处结论不同，同一会话在调用树
   与消耗诊断里回合数对不上。
 
-**待做（按宿主名分支的 domain 代码）**：
+**待做（按执行环境名分支的 domain 代码）**：
 
 | 位置 | 现状 | 目标 |
 |---|---|---|
-| `domain/cost/mod.rs::metered_estimate_minor` | `host == "codex" / "claude-code"` 选价卡与桶形状 | 调用方传入规范化的四桶 + 价卡目录；宿主差异留在 hosts 的 usage 适配 |
-| `domain/usage.rs`（`SOURCE_CODEX`、`canonical_tokens` 按 source 选形状） | 按来源切换 token 桶字段名 | 宿主适配器先产规范桶，domain 只折叠规范桶 |
-| `domain/canonical_audit.rs` | 按宿主 id 决定 SV607/608 降级 | 由宿主能力声明（`host_capability`）驱动，不认宿主名 |
+| `domain/cost/mod.rs::metered_estimate_minor` | `harness == "codex" / "claude-code"` 选价卡与桶形状 | 调用方传入规范化的四桶 + 价卡目录；执行环境差异留在 harnesses 的 usage 适配 |
+| `domain/usage.rs`（`SOURCE_CODEX`、`canonical_tokens` 按 source 选形状） | 按来源切换 token 桶字段名 | 执行环境适配器先产规范桶，domain 只折叠规范桶 |
+| `domain/canonical_audit.rs` | 按执行环境 id 决定 SV607/608 降级 | 由执行环境能力声明（`harness_capability`）驱动，不认执行环境名 |
 
 **完成标准**：`agent-vitals-domain/tests/dependency_budget.rs` 增加一条守卫——`src/domain/` 生产代码
-（`#[cfg(test)]` 之外）不出现宿主名字面量（`"claude-code"`、`"codex"`、`"dsh"`、`"workbuddy"`），
+（`#[cfg(test)]` 之外）不出现执行环境名字面量（`"claude-code"`、`"codex"`、`"dsh"`、`"workbuddy"`），
 以上三处迁完后打开。
 
 ### W9 [P2] 拆大文件与整理文档

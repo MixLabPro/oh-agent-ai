@@ -31,23 +31,23 @@ fn hourly_distribution_with_db(
 ) -> serde_json::Value {
     // v0.9.1 Phase 3.5 Tier B：数据源从「today.json + 旧 facts-index + codex
     // fold 三路拼装」整体切换到 SQL 权威库——行级事实本就都在 `usage_facts`
-    // （`authority_query::hourly_by_host` 三宿主统一），旧 facts-index 是可
+    // （`authority_query::hourly_by_harness` 三执行环境统一），旧 facts-index 是可
     // 丢弃投影，权威读面没有理由绕它再走一遍 JSONL 重建；today.json/fold
     // 是禁读清单成员（spec §5.2），product 读面在此全部退役。
     let bounds = agent_vitals_data::authority_query::beijing_day_bounds_ms(date);
-    let by_host: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>> =
+    let by_harness: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>> =
         match (db, bounds) {
             (Some(db), Some((start, end))) => {
-                agent_vitals_data::authority_query::hourly_by_host(db.conn(), start, end)
+                agent_vitals_data::authority_query::hourly_by_harness(db.conn(), start, end)
                     .unwrap_or_default()
             }
             _ => Default::default(),
         };
     // 来源标注如实切换：全部来自权威库的行级事实（legacy_aggregate 不进
-    // 小时轴——它是日轴账单不是会话证据）。库打不开 = 全宿主缺席。
-    let source = |host: &str| -> Option<&str> {
-        by_host
-            .get(host)
+    // 小时轴——它是日轴账单不是会话证据）。库打不开 = 全执行环境缺席。
+    let source = |harness: &str| -> Option<&str> {
+        by_harness
+            .get(harness)
             .filter(|m| !m.is_empty())
             .map(|_| "sql-facts")
     };
@@ -56,14 +56,14 @@ fn hourly_distribution_with_db(
         let key = format!("{hh:02}");
         hours.push(serde_json::json!({
             "hour": hh,
-            "dsh_tokens": by_host.get("dsh").and_then(|m| m.get(&key)).copied(),
-            "codex_tokens": by_host.get("codex").and_then(|m| m.get(&key)).copied(),
-            "claude_tokens": by_host.get("claude-code").and_then(|m| m.get(&key)).copied(),
+            "dsh_tokens": by_harness.get("dsh").and_then(|m| m.get(&key)).copied(),
+            "codex_tokens": by_harness.get("codex").and_then(|m| m.get(&key)).copied(),
+            "claude_tokens": by_harness.get("claude-code").and_then(|m| m.get(&key)).copied(),
         }));
     }
     serde_json::json!({
         "date": date,
-        "hosts_available": {
+        "harnesses_available": {
             "dsh": source("dsh"),
             "codex": source("codex"),
             "claude": source("claude-code"),
@@ -72,11 +72,11 @@ fn hourly_distribution_with_db(
     })
 }
 
-/// Token 日历的逐日跨宿主数据（v0.9 Stage D——日历此前只画 DSH 日轴，
+/// Token 日历的逐日跨执行环境数据（v0.9 Stage D——日历此前只画 DSH 日轴，
 /// 2026-09 实测：DSH 全零月让 57 亿 token 的 claude/codex 用量在日历上
 /// 完全不可见，用户看到一片空白）。
 ///
-/// 每天三宿主各自计量 + 计价，**钱不跨宿主不跨币合并**（口径各异：DSH
+/// 每天三执行环境各自计量 + 计价，**钱不跨执行环境不跨币合并**（口径各异：DSH
 /// 实测、claude relay 估算、codex 等价标价——格子副行分币并列，主行是
 /// 托盘 `read_overview` 的 SQL 权威数据面（Phase 4 §5.2：菜单栏不再直读
 /// `state/{today,month,claude-ledger}.json`）。开库一次，返回三份与旧 state
@@ -162,7 +162,7 @@ pub fn overview_bundle_timed(data_home: &Path) -> (OverviewBundle, BundleTimings
     )
 }
 
-/// token 总量，token 才是跨宿主可加的量）。返回 `{"month", "days":
+/// token 总量，token 才是跨执行环境可加的量）。返回 `{"month", "days":
 /// {date: {...}}}`，无数据日字段缺省为 0/缺键——调用方以
 /// `total_tokens == 0` 判定"这天没有用量"。
 pub fn calendar_month(month: &str) -> serde_json::Value {
@@ -213,7 +213,7 @@ fn calendar_month_with_db(
         })
     }
 
-    // v0.9.1 Phase 3.5 Tier B：三宿主数据源统一为 SQL 权威库（与
+    // v0.9.1 Phase 3.5 Tier B：三执行环境数据源统一为 SQL 权威库（与
     // SqlSummaryRepository::monthly_summary 同一条 fetch_windowed 管线）——
     // month.json/ledger/fold 全部退出 product 读面（spec §5.2 禁读清单）。
     // 计价函数与旧路径共用同一批核心（priced_day/claude_day_cost/
@@ -292,7 +292,7 @@ fn calendar_month_with_db(
         e["codex_tokens"] =
             json!(e.get("codex_tokens").and_then(|v| v.as_i64()).unwrap_or(0) + tokens);
     }
-    let by_model = agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
+    let by_model = agent_vitals_harnesses::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
     if let Some(report) = crate::sessions::codex_cost::codex_cost_report(
         &by_hour_model,
         &by_model,
@@ -313,12 +313,12 @@ fn calendar_month_with_db(
         }
     }
 
-    // 格子里的 token 数换回**全量**（`host_tokens_by_day_all`）：上面三段的 token 是
+    // 格子里的 token 数换回**全量**（`harness_tokens_by_day_all`）：上面三段的 token 是
     // 顺着金额面的聚合取的（排除订阅覆盖），钱照那样算是对的，token 不是——订阅内的
-    // token 同样发生过（与 `tokens_by_host` / `hourly_distribution` 同一条纪律）。
+    // token 同样发生过（与 `tokens_by_harness` / `hourly_distribution` 同一条纪律）。
     if let (Some(db), Some((start, end))) = (db, bounds) {
-        for (host, key) in [("dsh", "dsh_tokens"), ("claude-code", "claude_tokens"), ("codex", "codex_tokens")] {
-            let Ok(by_day) = agent_vitals_data::authority_query::host_tokens_by_day_all(db.conn(), host, start, end)
+        for (harness, key) in [("dsh", "dsh_tokens"), ("claude-code", "claude_tokens"), ("codex", "codex_tokens")] {
+            let Ok(by_day) = agent_vitals_data::authority_query::harness_tokens_by_day_all(db.conn(), harness, start, end)
             else { continue };
             for (date, b) in by_day {
                 let e = day_entry(&mut days, &date);
@@ -326,7 +326,7 @@ fn calendar_month_with_db(
             }
         }
     }
-    // total_tokens 最后统一算（三宿主都已落位）。
+    // total_tokens 最后统一算（三执行环境都已落位）。
     for (_, e) in days.iter_mut() {
         let g = |k: &str| e.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
         e["total_tokens"] = json!(g("dsh_tokens") + g("claude_tokens") + g("codex_tokens"));
@@ -386,7 +386,7 @@ pub fn codex_merged_from_sql(data_home: &Path) -> (serde_json::Value, Option<Str
             path.display()
         )
     });
-    let by_model = agent_vitals_hosts::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
+    let by_model = agent_vitals_harnesses::codex_usage::codex_by_model_from_hours(&by_hour_model, None);
     (
         json!({
             "by_hour_model": by_hour_model,

@@ -1,4 +1,4 @@
-import { hostName } from "../../lib/hostNames";
+import { harnessName } from "../../lib/harnessNames";
 import { stable } from "../../lib/stable";
 import { useEffect, useRef, useState } from "react";
 import { ToolbarActions } from "../../components/ui/ToolbarActions";
@@ -20,7 +20,7 @@ import {
   safeUiError,
   type TrustAuditReport,
   type TrustEvidence,
-  type TrustHostCandidate,
+  type TrustHarnessCandidate,
   type TrustMonitorConfig,
   type TrustRuntimeSnapshot,
   type TrustProfileSummary,
@@ -126,9 +126,9 @@ function profileScopeText(profile: TrustProfileSummary): string {
 
 export function TrustPage() {
   useLanguage();
-  const [candidates, setCandidates] = useState<TrustHostCandidate[]>([]);
+  const [candidates, setCandidates] = useState<TrustHarnessCandidate[]>([]);
   const [profileErrors, setProfileErrors] = useState<string[]>([]);
-  const [selectedHost, setSelectedHost] = useState<string | null>(null);
+  const [selectedHarness, setSelectedHarness] = useState<string | null>(null);
   const [report, setReport] = useState<TrustAuditReport | null>(null);
   const [evidenceHistory, setEvidenceHistory] = useState<TrustEvidence[]>([]);
   const [evidenceCursor, setEvidenceCursor] = useState<string | null>(null);
@@ -145,7 +145,7 @@ export function TrustPage() {
   const [snapshot, setSnapshot] = useState<TrustRuntimeSnapshot | null>(null);
   const [snapshotLoading, setSnapshotLoading] = useState(false);
   const [expandedEvidence, setExpandedEvidence] = useState<string | null>(null);
-  const [auditLoadingHost, setAuditLoadingHost] = useState<string | null>(null);
+  const [auditLoadingHarness, setAuditLoadingHarness] = useState<string | null>(null);
   const [profileStatus, setProfileStatus] = useState<TrustProfileStatus>({ pending: [], approved: [] });
   const [suppressions, setSuppressions] = useState<TrustSuppression[]>([]);
   const [controlsLoading, setControlsLoading] = useState(true);
@@ -285,9 +285,9 @@ export function TrustPage() {
       if (!active || event.type !== "SourceDataDeleted") return;
       auditRequest.current += 1;
       setReport(() => null);
-      setSelectedHost(null);
+      setSelectedHarness(null);
       setExpandedEvidence(null);
-      setAuditLoadingHost(null);
+      setAuditLoadingHarness(null);
       setMonitorFeedback(tx("tr.projDeleted"));
       setEvidenceHistory([]);
       void refreshEvidenceHistory();
@@ -303,7 +303,7 @@ export function TrustPage() {
     void listenAppEvents((event) => {
       if (!active || event.type !== "TrustMonitorInvalidated") return;
       setReport(null);
-      setSelectedHost(null);
+      setSelectedHarness(null);
       void refreshEvidenceHistory(null, false, true);
       void readTrustMonitorConfig().then((value) => {
         if (!active) return;
@@ -372,7 +372,7 @@ export function TrustPage() {
       .then((value) => {
         setSnapshot(value);
         setReport(null);
-        setSelectedHost(null);
+        setSelectedHarness(null);
         void refreshEvidenceHistory();
         setMonitorFeedback(value.observations > 0
           ? tx("tr.snapRecorded", { n: value.observations })
@@ -382,17 +382,17 @@ export function TrustPage() {
       .finally(() => setSnapshotLoading(false));
   };
 
-  const runAudit = (host: string) => {
+  const runAudit = (harness: string) => {
     const requestId = ++auditRequest.current;
-    setSelectedHost(host);
+    setSelectedHarness(harness);
     setExpandedEvidence(null);
-    setAuditLoadingHost(host);
-    setLoading(tx("tr.readingHost", { host }));
+    setAuditLoadingHarness(harness);
+    setLoading(tx("tr.readingHarness", { harness }));
     setError(null);
-    void auditTrust(host)
+    void auditTrust(harness)
       .then(async (result) => { if (requestId === auditRequest.current) { setReport(result); setLoading(""); await refreshEvidenceHistory(); } })
       .catch((reason: unknown) => { if (requestId === auditRequest.current) { setError(errorMessage(reason)); setLoading(""); } })
-      .finally(() => { if (requestId === auditRequest.current) setAuditLoadingHost(null); });
+      .finally(() => { if (requestId === auditRequest.current) setAuditLoadingHarness(null); });
   };
 
   const displayedEvidence = report?.evidence ?? evidenceHistory;
@@ -404,8 +404,8 @@ export function TrustPage() {
     </ToolbarActions>
     {loading && <p className="inline-status" role="status">{loading}</p>}
     {error && <div className="error-banner" role="alert">{error}</div>}
-    {auditLoadingHost && report && <div className="trust-refresh-status" role="status">{tx("tr.refreshingHost", { host: auditLoadingHost })}</div>}
-    {!auditLoadingHost && error && report && <div className="trust-refresh-status trust-refresh-status-error" role="status">{tx("tr.auditIncomplete", { host: report.host })}</div>}
+    {auditLoadingHarness && report && <div className="trust-refresh-status" role="status">{tx("tr.refreshingHarness", { harness: auditLoadingHarness })}</div>}
+    {!auditLoadingHarness && error && report && <div className="trust-refresh-status trust-refresh-status-error" role="status">{tx("tr.auditIncomplete", { harness: report.harness })}</div>}
     {profileErrors.length > 0 && <div className="callout"><strong>{tx("tr.partialConfig")}</strong><span>{tx("tr.configWarnings", { n: profileErrors.length })}</span></div>}
     <details className="trust-control-disclosure">
       <summary>{tx("tr.controlsSummary")} <span>{tx("tr.pendingEnabled", { pending: profileStatus.pending.length, enabled: profileStatus.approved.length })}</span></summary>
@@ -492,17 +492,17 @@ export function TrustPage() {
       {monitorFeedback && <p className="monitor-feedback" role="status">{monitorFeedback}</p>}
     </section>
     <div className="trust-layout">
-      <section className="trust-card" aria-label={tx("tr.discoveredHosts")}>
-        <div className="trust-card-heading"><div><p className="eyebrow">{tx("tr.coverage")}</p><h3>{tx("tr.localHosts")}</h3></div><span className="count-badge">{candidates.length}</span></div>
-        {candidates.length === 0 && !loading ? <div className="mini-empty">{tx("tr.noHosts")}</div> : <div className="host-list">
-          {candidates.map((candidate) => <article className={`host-row ${selectedHost === candidate.id ? "host-row-selected" : ""}`} key={candidate.id}>
+      <section className="trust-card" aria-label={tx("tr.discoveredHarnesses")}>
+        <div className="trust-card-heading"><div><p className="eyebrow">{tx("tr.coverage")}</p><h3>{tx("tr.localHarnesses")}</h3></div><span className="count-badge">{candidates.length}</span></div>
+        {candidates.length === 0 && !loading ? <div className="mini-empty">{tx("tr.noHarnesses")}</div> : <div className="harness-list">
+          {candidates.map((candidate) => <article className={`harness-row ${selectedHarness === candidate.id ? "harness-row-selected" : ""}`} key={candidate.id}>
             <div><strong>{candidate.id}</strong><p>{tx(candidate.detected ? "tr.dirFound" : "tr.dirNotFound")} · {candidate.coverage_state}</p></div>
-            <button className="button button-primary-small" type="button" disabled={!candidate.detected || !candidate.artifact_profile_available || Boolean(loading)} onClick={() => runAudit(candidate.id)}>{selectedHost === candidate.id && report ? tx("tr.done") : tx("tr.localAudit")}</button>
+            <button className="button button-primary-small" type="button" disabled={!candidate.detected || !candidate.artifact_profile_available || Boolean(loading)} onClick={() => runAudit(candidate.id)}>{selectedHarness === candidate.id && report ? tx("tr.done") : tx("tr.localAudit")}</button>
           </article>)}
         </div>}
       </section>
       <section className="trust-card" aria-label={tx("tr.auditResult")} aria-live="polite">
-          <div className="trust-card-heading"><div><p className="eyebrow">{report ? `${hostName(report.host)} · ${tx(report.host === selectedHost ? "tr.justAudited" : "tr.lastAudit")}` : tx("tr.historyEvidence")}</p><h3>{displayedEvidence.length}{evidenceCursor && !report ? "+" : ""} {tx("tr.evidenceWord", { n: displayedEvidence.length })}</h3></div><div className="trust-evidence-actions"><span className={`status-pill ${report ? "status-pill-success" : ""}`}><span aria-hidden="true" className="status-dot" />{report ? tx("tr.localResult") : tx("tr.readOnlyHistory")}</span><button className="button button-secondary button-small" type="button" onClick={() => { setReport(null); setSelectedHost(null); void refreshEvidenceHistory(); }} disabled={evidenceLoading}>{evidenceLoading ? tx("tr.loadingDots") : tx("tr.refreshHistory")}</button></div></div>
+          <div className="trust-card-heading"><div><p className="eyebrow">{report ? `${harnessName(report.harness)} · ${tx(report.harness === selectedHarness ? "tr.justAudited" : "tr.lastAudit")}` : tx("tr.historyEvidence")}</p><h3>{displayedEvidence.length}{evidenceCursor && !report ? "+" : ""} {tx("tr.evidenceWord", { n: displayedEvidence.length })}</h3></div><div className="trust-evidence-actions"><span className={`status-pill ${report ? "status-pill-success" : ""}`}><span aria-hidden="true" className="status-dot" />{report ? tx("tr.localResult") : tx("tr.readOnlyHistory")}</span><button className="button button-secondary button-small" type="button" onClick={() => { setReport(null); setSelectedHarness(null); void refreshEvidenceHistory(); }} disabled={evidenceLoading}>{evidenceLoading ? tx("tr.loadingDots") : tx("tr.refreshHistory")}</button></div></div>
           {report && <div className="trust-summary"><span>{tx("tr.inserted")} {report.inserted}</span><span>{tx("tr.duplicate")} {report.duplicate}</span><span>{tx("tr.findingUpdates")} {report.findings_upserted}</span></div>}
           {evidenceError && <div className="error-banner" role="alert">{tx("tr.historyUnavail", { error: evidenceError })}</div>}
           {evidenceLoading && <p className="inline-status" role="status">{tx("tr.readingSaved")}</p>}

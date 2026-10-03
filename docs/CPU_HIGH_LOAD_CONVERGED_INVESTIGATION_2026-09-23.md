@@ -88,7 +88,7 @@ refresh（托盘重建）      ms 级  (n=310)
 
 | 组件 | 隔离实测 |
 |---|---|
-| `claude_days` + `peaked_days` SQL（含 GROUP BY，186 分组） | **45ms**（命中索引 `usage_facts_host_time`） |
+| `claude_days` + `peaked_days` SQL（含 GROUP BY，186 分组） | **45ms**（命中索引 `usage_facts_harness_time`） |
 | `claude_legacy_days`（legacy 聚合查询，核订增补） | **145ms**（当前 0 分组） |
 | DB 打开序列（busy_timeout + journal_mode + user_version + repair） | **12–22ms** |
 | 每次 open 的 DDL churn（DROP/CREATE VIEW 写事务） | 5–20ms |
@@ -119,9 +119,9 @@ trust 关闭窗口里，**21–32s 的峰值消失了，2.2–2.5s 的基线仍�
    2.2s 基线是固定开销。若开销可治到 ~100ms，30s 全量刷新占空比仅 0.3%，
    「读侧增量」要解决的问题届时不存在。
 2. 长期若要更快刷新，正确的增量位是**写时维护聚合**（sync 写事实的同一事务
-   upsert `(host, day, model) → 4 桶 SUM` 裸聚合表），配两层分离：裸聚合不含
+   upsert `(harness, day, model) → 4 桶 SUM` 裸聚合表），配两层分离：裸聚合不含
    任何规则（订阅/归因/价目只在呈现折叠层生效，输入仅 ~186 组、微秒级）；
-   失效边（PARSER_VERSION 重放 / 源删除 / 宿主排除）走 wholesale 重算。
+   失效边（PARSER_VERSION 重放 / 源删除 / 执行环境排除）走 wholesale 重算。
 3. **不做读时差量**：订阅规则变更后已折算增量的回退边界极多，双计风险
    踩计费诚实红线（AGENTS.md）。
 
@@ -197,7 +197,7 @@ A∩B = 空集   ← 全部换新，不是稳定驻留
 ### 4.2 机制
 
 worker 空闲分支每 `DEBOUNCE`(1.2s) 触发一次 `state.retry_pending()`，对 pending
-根（实测 `pending_roots=4`，多为不存在的宿主 skills 目录）逐个 `try_attach`。
+根（实测 `pending_roots=4`，多为不存在的执行环境 skills 目录）逐个 `try_attach`。
 macOS 上 notify 的 `watch()` 对不存在路径**每次尝试都启动 FSEventStream（含 runloop
 线程）再以 PathNotFound 失败销毁**。⇒ 空闲时每 1.2s 制造一轮线程生灭。
 
@@ -229,7 +229,7 @@ macOS 上 notify 的 `watch()` 对不存在路径**每次尝试都启动 FSEvent
 | 依赖预算 / golden 双世界 | ✅ 有 |
 | 升级规则（注入时钟穷举轻/重切换） | ❌ 无 |
 | 路由 step-recorder | ❌ 全仓库零命中 |
-| 宿主过滤 `sync_facts(hosts=…)` | ❌ 无断言 |
+| 执行环境过滤 `sync_facts(harnesses=…)` | ❌ 无断言 |
 | **托盘节流「60s 内至多一次 read_overview」** | ❌ **无——正是本次漏掉的那条** |
 | 备忘（同 revision 连续 IPC） | ❌ 无 |
 | 回落（轻 tick 注入 Err 升级） | ❌ 无 |
