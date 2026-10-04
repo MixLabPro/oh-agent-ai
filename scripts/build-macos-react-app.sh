@@ -14,6 +14,7 @@ case "$(uname -s)" in
 esac
 
 echo "build-macos-react-app: verifying React bundle and candidate config"
+(cd "$repo_root/apps/agent-city/ui" && npm run typecheck)
 (cd "$repo_root/apps/desktop/ui-dev" && npm run verify:react)
 
 echo "build-macos-react-app: building bundled CLI"
