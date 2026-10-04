@@ -28,6 +28,7 @@ import { Mp4Writer } from "./mp4Muxer";
 import { layoutCity, type CityLayout } from "./cityLayout";
 import { CityParts, type QualityLevel } from "./cityParts";
 import { skyStateAt, type CitySkyPreset } from "./citySky";
+import { MIAMI_COASTAL } from "./citySeaside";
 import { CityAurora } from "./cityAurora";
 import { CityAmbient } from "./cityAmbient";
 import { CityWildlife } from "./cityWildlife";
@@ -443,7 +444,7 @@ export class CityEngine {
       this.parts.dispose();
       this.parts = null;
     }
-    const layout = layoutCity(model, reuse ? this.layout : null, this.seed);
+    const layout = layoutCity(model, reuse ? this.layout : null, this.seed, MIAMI_COASTAL);
     this.layout = layout;
     this.parts = new CityParts(model, layout, previousDisplays);
     if (this.assets) this.parts.applyAssets(this.assets);

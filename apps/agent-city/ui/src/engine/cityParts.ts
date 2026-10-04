@@ -9,6 +9,7 @@
 
 import * as THREE from "three";
 import { builtFractionAt, hashSeed, type CityBuilding, type CityModel } from "../cityModel";
+import { MIAMI_COASTAL, promenadePolyline } from "./citySeaside";
 import { fbm } from "./cityNoise";
 import type { CityLayout, DistrictLayout, Parcel, Vec2 } from "./cityLayout";
 import { activeTheme, skyYawOf } from "./cityTheme";
@@ -425,6 +426,8 @@ export class CityParts {
       this.buildCivics();
       this.buildLandmarks();
       this.buildSeaMountains();
+      this.buildPromenade();
+      this.buildSeasideHotels();
       this.treeMesh = this.buildTrees();
       const carResult = this.buildCars();
       this.carMesh = carResult.mesh;
@@ -633,6 +636,16 @@ export class CityParts {
    *  分类只看图集颜色与海拔：深灰低饱和=沥青，浅灰=人行道，绿=草，暖浅=沙，近水面的沙=滩涂。 */
   private installGroundDetail(material: THREE.MeshLambertMaterial): void {
     const uniforms: Record<string, { value: unknown }> = { uDetail: { value: 0 } };
+    // 海滨带（VICE B2）：条带以采样数组直接进 shader——免烘焙纹理、任意分辨率精确。
+    // vec4 = (waterline.x, waterline.z, inward.x, inward.z)；宽度经标量 uniform。
+    const seaside = this.layout.seaside;
+    const seasideSamples: THREE.Vector4[] = seaside && !seaside.degraded
+      ? seaside.samples.filter((sample) => sample.valid).slice(0, 24).map((sample) => new THREE.Vector4(sample.waterline.x, sample.waterline.z, sample.inward.x, sample.inward.z))
+      : [];
+    uniforms.uSeasideN = { value: seasideSamples.length };
+    uniforms.uSeaside = { value: seasideSamples };
+    uniforms.uSeaWet = { value: MIAMI_COASTAL.wetSandWidth };
+    uniforms.uSeaOuter = { value: MIAMI_COASTAL.bandOuter };
     for (const name of ["Asphalt", "Concrete", "Sand", "Mud", "Grass"]) {
       uniforms[`u${name}C`] = { value: null };
       uniforms[`u${name}N`] = { value: null };
@@ -646,8 +659,28 @@ export class CityParts {
         .replace("#include <project_vertex>", "#include <project_vertex>\nvCityWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;");
       const samplers = ["Asphalt", "Concrete", "Sand", "Mud", "Grass"].map((n) => `uniform sampler2D u${n}C; uniform sampler2D u${n}N; uniform vec3 u${n}Mean;`).join("\n");
       shader.fragmentShader = shader.fragmentShader
-        .replace("#include <common>", `#include <common>\nvarying vec3 vCityWorld;\nuniform float uDetail;\n${samplers}`)
+        .replace("#include <common>", `#include <common>\nvarying vec3 vCityWorld;\nuniform float uDetail;\n${samplers}\nuniform vec4 uSeaside[24];\nuniform int uSeasideN;\nuniform float uSeaWet;\nuniform float uSeaOuter;`)
         .replace("#include <map_fragment>", `#include <map_fragment>
+  // ── 海滨带：干湿沙由条带几何直接推出（湿沙靠水、干沙靠内陆）。不依赖
+  //  RGB 分类与图集——uDetail 未就绪（无照片素材）时干湿层次仍然成立。
+  if (uSeasideN > 0) {
+    float bestLat = 1e9; float bestAlong = -1e9;
+    for (int i = 0; i < 24; i += 1) {
+      if (i >= uSeasideN) break;
+      vec4 s = uSeaside[i];
+      vec2 d = vCityWorld.xz - s.xy;
+      float along = dot(d, s.zw);
+      float lat = abs(dot(d, vec2(-s.w, s.z)));
+      if (lat < bestLat) { bestLat = lat; bestAlong = along; }
+    }
+    float inBand = step(0.0, bestAlong) * (1.0 - smoothstep(uSeaOuter - 3.0, uSeaOuter, bestAlong));
+    float inStrip = inBand * (1.0 - smoothstep(10.0, 18.0, bestLat));
+    float wetness = (1.0 - smoothstep(uSeaWet - 1.5, uSeaWet + 2.0, bestAlong));
+    vec3 drySand = vec3(0.93, 0.86, 0.71);
+    vec3 wetSand = vec3(0.74, 0.64, 0.47);
+    vec3 sand = mix(drySand, wetSand, clamp(wetness, 0.0, 1.0));
+    diffuseColor.rgb = mix(diffuseColor.rgb, sand, inStrip * 0.9);
+  }
 #ifdef USE_MAP
   if (uDetail > 0.5) {
     vec3 base = diffuseColor.rgb;
@@ -1808,6 +1841,33 @@ export class CityParts {
     const spots: Array<{ x: number; z: number; y: number; seed: number }> = [];
     for (const district of this.layout.districts) spots.push(...district.trees);
     spots.push(...(this.layout.parkTrees ?? []));
+    // 海滨步道棕榈列（VICE B3）：沿步道折线 ~9 单位间距、两侧交错，走同一份
+    // treeSpots——进 treeMesh（棕榈几何）与 applyFlora（真实生态带管线）双路径。
+    {
+      const seaside = this.layout.seaside;
+      if (seaside && !seaside.degraded) {
+        const polyline = promenadePolyline(seaside);
+        const terrain = this.layout.terrain;
+        let row = 0;
+        for (let i = 1; i < polyline.length - 1; i += 1) {
+          const a = polyline[i - 1]; const b = polyline[i]; const c = polyline[i + 1];
+          const segLen = Math.hypot(b.x - a.x, b.z - a.z);
+          const steps = Math.max(1, Math.floor(segLen / 9));
+          for (let s = 1; s <= steps; s += 1) {
+            const t = s / (steps + 1);
+            const x = a.x + (b.x - a.x) * t; const z = a.z + (b.z - a.z) * t;
+            const tangent = { x: (c.x - a.x), z: (c.z - a.z) };
+            const tl = Math.hypot(tangent.x, tangent.z) || 1;
+            const side = row % 2 === 0 ? 2.8 : -2.8;
+            const px = x + (-tangent.z / tl) * side; const pz = z + (tangent.x / tl) * side;
+            row += 1;
+            const y = terrain.height(px, pz);
+            if (y < 0.5 || y > 6) continue;
+            spots.push({ x: px, z: pz, y, seed: hashSeed(`palmtree:${px.toFixed(1)}:${pz.toFixed(1)}`) });
+          }
+        }
+      }
+    }
     if (theme.streetTreeSpacing > 0) {
       const terrain = this.layout.terrain;
       const roads = new SegmentIndex(this.layout.roadEdges.map((edge) => edge.points));
@@ -1929,6 +1989,87 @@ export class CityParts {
       this.disposables.push(material); // 几何由 cityFlora 缓存共享，不随 parts 销毁
     });
     if (this.floraMeshes.length) this.treeMesh.visible = false;
+  }
+
+  /** 滨海步道（VICE B3）：沿 promenade 折线的浅色铺装缎带——人行道语义，不进
+   *  roadEdges/carPaths（机动车不会开上步道）。单 BufferGeometry，静态缓存段。 */
+  private buildPromenade(): void {
+    const seaside = this.layout.seaside;
+    if (!seaside || seaside.degraded) return;
+    const polyline = promenadePolyline(seaside);
+    if (polyline.length < 2) return;
+    const half = 3.2;
+    const positions: number[] = [];
+    for (let i = 1; i < polyline.length; i += 1) {
+      const a = polyline[i - 1]; const b = polyline[i];
+      const dx = b.x - a.x; const dz = b.z - a.z;
+      const len = Math.hypot(dx, dz) || 1;
+      const nx = -dz / len * half; const nz = dx / len * half;
+      const ay = this.layout.terrain.height(a.x, a.z) + 0.07;
+      const by = this.layout.terrain.height(b.x, b.z) + 0.07;
+      positions.push(a.x + nx, ay, a.z + nz, a.x - nx, ay, a.z - nz, b.x - nx, by, b.z - nz,
+                     a.x + nx, ay, a.z + nz, b.x - nx, by, b.z - nz, b.x + nx, by, b.z + nz);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
+    geometry.computeVertexNormals();
+    const material = new THREE.MeshLambertMaterial({ color: "#e8ddc8" });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = "city-promenade";
+    mesh.receiveShadow = true;
+    this.group.add(mesh);
+    this.disposables.push(geometry, material);
+  }
+
+  /** 海滨酒店排（VICE B4 样板）：酒店线上的粉彩 Art Deco 低层装饰楼——宽体量、
+   *  阶梯平顶、水平遮阳带。纯装饰：不进 Session 拾取/统计/生长（数据楼语义不变）。
+   *  单 InstancedMesh（墙身）+ 单 InstancedMesh（檐带），确定性 seed。 */
+  private buildSeasideHotels(): void {
+    const seaside = this.layout.seaside;
+    if (!seaside || seaside.degraded) return;
+    const valid = seaside.samples.filter((sample) => sample.valid);
+    if (valid.length < 3) return;
+    const wallGeometry = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+    const wallMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff" });
+    const trimMaterial = new THREE.MeshLambertMaterial({ color: "#fff6ea" });
+    const trimGeometry = new THREE.BoxGeometry(1, 1, 1);
+    const palette = ["#ffd2c4", "#c4f4f6", "#ffe9c4", "#e3d2ff"];
+    const count = Math.min(4, Math.max(2, Math.floor(valid.length / 5)));
+    const wallMesh = new THREE.InstancedMesh(wallGeometry, wallMaterial, count * 2);
+    const trimMesh = new THREE.InstancedMesh(trimGeometry, trimMaterial, count * 2);
+    wallMesh.castShadow = wallMesh.receiveShadow = true;
+    let cursor = 0;
+    for (let i = 0; i < count; i += 1) {
+      const sample = valid[Math.floor(((i + 0.5) / count) * (valid.length - 1))];
+      const seed = hashSeed(`seasidehotel:${i}:${sample.azimuth}`);
+      const yaw = Math.atan2(sample.inward.x, -sample.inward.z);
+      const width = 11 + seed * 5;
+      const height = 9 + hashSeed(`seasidehotelh:${i}`) * 7;
+      const ground = this.layout.terrain.height(sample.hotelLine.x, sample.hotelLine.z);
+      // 墙身（贴酒店线，立面朝海）。
+      this.compose(sample.hotelLine.x, ground, sample.hotelLine.z, yaw, width, height, 9);
+      wallMesh.setMatrixAt(cursor, this.matrix);
+      wallMesh.setColorAt(cursor, this.color.set(palette[i % palette.length]));
+      // 阶梯退台（上层缩进体量）。
+      this.compose(sample.hotelLine.x, ground + height, sample.hotelLine.z, yaw, width * 0.62, 2.6 + seed * 1.6, 7.4);
+      wallMesh.setMatrixAt(cursor + 1, this.matrix);
+      wallMesh.setColorAt(cursor + 1, this.color.set(palette[i % palette.length]));
+      // 水平遮阳带：沿海立面两道出挑薄板。
+      for (let band = 0; band < 2; band += 1) {
+        const y = ground + height * (0.32 + band * 0.3);
+        const outward = { x: -sample.inward.x, z: -sample.inward.z };
+        const trimX = sample.hotelLine.x + outward.x * 0.8;
+        const trimZ = sample.hotelLine.z + outward.z * 0.8;
+        this.compose(trimX, y, trimZ, yaw, width * 0.94, 0.55, 0.9);
+        trimMesh.setMatrixAt(i * 2 + band, this.matrix);
+      }
+      cursor += 2;
+    }
+    wallMesh.count = cursor;
+    wallMesh.name = "city-seaside-hotels";
+    if (wallMesh.instanceColor) wallMesh.instanceColor.needsUpdate = true;
+    this.group.add(wallMesh, trimMesh);
+    this.disposables.push(wallGeometry, wallMaterial, trimGeometry, trimMaterial);
   }
 
   private buildTrees(): THREE.InstancedMesh {

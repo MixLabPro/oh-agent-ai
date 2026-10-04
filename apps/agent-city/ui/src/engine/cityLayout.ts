@@ -97,12 +97,13 @@ function aggregateOverflow(districtId: string, anchor: Vec2, overflow: CityModel
 }
 
 /** The seed controls geography, never harness count, token ranking or time window. */
-export function layoutCity(model: CityModel, previous?: CityLayout | null, seed = 1927): CityLayout {
+export function layoutCity(model: CityModel, previous?: CityLayout | null, seed = 1927, coastal: import("./citySeaside").CoastalConfig | null = null): CityLayout {
   // 规模档位由会话总数分档：档位内刷新/分页不改地图；跨档时岛按原形状放大。
   const tier = scaleTierFor(model.buildings.length);
-  const planKey = `${seed}:${tier}`;
+  // plans 缓存键携带海滨配置身份（profile+version）：同 seed 不同配置不得复用旧规划。
+  const planKey = `${seed}:${tier}:${coastal ? `${coastal.profile}:v${coastal.version}` : "none"}`;
   let plan = plans.get(planKey);
-  if (!plan) { plan = createCityPlan(seed, tier); plans.set(planKey, plan); }
+  if (!plan) { plan = createCityPlan(seed, tier, coastal); plans.set(planKey, plan); }
   const parcels = plan.blocks.flatMap((block) => block.parcels);
   const parcelIndex = new Map(parcels.map((parcel) => [parcel.id, parcel]));
   const assigned = new Map<string, Parcel>();
