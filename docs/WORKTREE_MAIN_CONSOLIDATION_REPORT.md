@@ -24,6 +24,10 @@ City 出口变化使 seed 42 航拍相对加速度超过原断言。原因是距
 
 官网旧 City debug bundle 已用当前生产 bundle 重建。生成 JS 中的 GLSL 保留空白，`.gitattributes` 仅对生成目录禁用对应空白检查；源码仍通过 diff 检查。
 
+浏览器截图又发现官网切换 iframe 后舞台高度折叠：mock canvas 同时脱离文档流。保留 canvas 的正常布局后，ready 状态舞台高度实测 476.3px，截图显示 3D 城市。补充仅驻留内存的 `city-settings` 示例种子接口，消除官网预览的无意义保存告警。
+
+原生探针首次在 `formal_instance_not_disposed` 失败，原因是旧断言要求离开 City 即销毁，与当前挂起复用生命周期不符。更新探针分别检查挂起、返回复用/resume 与显式销毁；错误、卡死、渲染进程退出和恢复检查保留。
+
 ## 验证
 
 - `cargo test --release`：通过。
@@ -33,8 +37,9 @@ City 出口变化使 seed 42 航拍相对加速度超过原断言。原因是距
 - catalog/价卡专项 Python：25 项通过；`verify_catalog.py` 镜像逐字节一致。
 - Python 与 Rust 各 16 项 golden：通过，无 golden 更新。
 - City typecheck、宿主 `verify:react`、`verify:city`、插件架构与布局 source guard：通过。
-- 官网浏览器检查：Agent City 导航和滚入视口懒加载 iframe 已观察到；此证据不等于逐帧视觉验收。
-- 全量 Python、原生故障注入及正式 bundle：执行中，完成后补记。
+- 全量 Python：1,284 项通过；指定新 Rust CLI 后再跑完整套件同样通过，8 项按测试条件跳过。
+- 官网浏览器检查：Agent City 导航、滚入视口懒加载 iframe、实际 3D 画面及 ready 状态非零舞台高度已观察到；此证据不等于逐帧视觉验收。
+- 原生故障注入及正式 bundle：执行中，完成后补记。
 
 ## 保留的边界
 

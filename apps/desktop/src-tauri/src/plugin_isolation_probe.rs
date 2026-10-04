@@ -50,7 +50,7 @@ fn isolation_probe_event(webview: Webview, state: tauri::State<'_, ProbeState>, 
         else { data.city_pulses.insert(label.to_owned(), Instant::now()); }
         return Ok(());
     }
-    if !["ui_ready", "runtime_error", "unhandled_rejection", "host_navigation_alive", "host_exit_navigation_alive", "window_seven_ready", "cinema_started", "cinema_stopped", "stale_rejected", "formal_unresponsive", "formal_reload"].contains(&code.as_str()) {
+    if !["ui_ready", "runtime_error", "unhandled_rejection", "host_navigation_alive", "host_exit_navigation_alive", "window_seven_ready", "cinema_started", "cinema_stopped", "stale_rejected", "formal_unresponsive", "formal_reload", "formal_disposed"].contains(&code.as_str()) {
         return Err("probe_code_unavailable".into());
     }
     if code == "ui_ready" { state.0.lock().unwrap().ready.insert(label.to_owned()); }
@@ -269,6 +269,23 @@ fn formal_exercise(app: &tauri::AppHandle, state: &ProbeState) -> Result<(), Str
     wait_until(state, "formal_exit_retry_timeout", |data| data.ready.contains("plugin-city-4"))?;
     host.eval("document.querySelector('.sidebar .nav-item').click()").map_err(|_| "formal_navigation_failed")?;
     std::thread::sleep(Duration::from_millis(700));
+    if app.get_webview("plugin-city-4").is_none() { return Err("formal_suspended_instance_missing".into()); }
+    let snapshot = crate::plugin_host::plugin_snapshot(host.clone(), app.state())?;
+    if !snapshot["events"].as_array().is_some_and(|events| events.iter().any(|event| event["code"] == "suspended")) {
+        return Err("formal_instance_not_suspended".into());
+    }
+    record(state, HOST, "formal_instance_suspended", Vec::new());
+    host.eval("document.querySelectorAll('.sidebar .nav-item')[1].click()").map_err(|_| "formal_navigation_failed")?;
+    std::thread::sleep(Duration::from_millis(700));
+    let snapshot = crate::plugin_host::plugin_snapshot(host.clone(), app.state())?;
+    if snapshot["instanceId"] != "plugin-city-4" { return Err("formal_instance_not_reused".into()); }
+    if !snapshot["events"].as_array().is_some_and(|events| events.iter().any(|event| event["code"] == "resumed")) {
+        return Err("formal_instance_not_resumed".into());
+    }
+    record(state, HOST, "formal_instance_reused", Vec::new());
+    host.eval("window.__TAURI__.core.invoke('plugin_close',{instanceId:'plugin-city-4'}).then(()=>window.__TAURI__.core.invoke('isolation_probe_event',{code:'formal_disposed'}))")
+        .map_err(|_| "formal_dispose_failed")?;
+    wait_until(state, "formal_dispose_timeout", |data| data.codes.contains("formal_disposed"))?;
     if app.get_webview("plugin-city-4").is_some() { return Err("formal_instance_not_disposed".into()); }
     record(state, HOST, "formal_plugin_flow_passed", Vec::new());
     Ok(())

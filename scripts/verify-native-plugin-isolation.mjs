@@ -54,7 +54,7 @@ if (report.status === "passed") {
   for (const code of ["runtime_error", "unhandled_rejection"]) {
     assert.ok(report.events.some((event) => event.code === code && event.frames.some((frame) => frame.original?.source.endsWith("src/debug/isolationFaults.ts"))), `${code}: missing original source location`);
   }
-  for (const code of ["unresponsive_detected", "host_navigation_alive", "renderer_terminated", "instance_disposed", "restart_succeeded"]) {
+  for (const code of ["unresponsive_detected", "host_navigation_alive", "renderer_terminated", "instance_disposed", "restart_succeeded", "formal_instance_suspended", "formal_instance_reused", "formal_disposed"]) {
     assert.ok(report.events.some((event) => event.code === code), `${code}: missing lifecycle evidence`);
   }
 }

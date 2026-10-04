@@ -68,6 +68,7 @@
   }
 
   let frame = null;
+  let fixtureSeed = 74031;
 
   function respond(message, requestId, result) {
     frame?.contentWindow?.postMessage(
@@ -84,6 +85,17 @@
     const { requestId, command, args } = message;
     if (command === 'plugin_request') {
       const request = args?.request;
+      if (request?.method === 'data.read' && request.payload?.projection === 'city-settings'
+        && request.payload.version === 1 && ['read', 'write'].includes(request.payload.action)) {
+        const seed = request.payload.seed;
+        const valid = request.payload.action === 'read'
+          || (Number.isInteger(seed) && seed >= 1 && seed <= 4294967295);
+        if (valid && request.payload.action === 'write') fixtureSeed = seed;
+        respond(message, requestId, valid
+          ? { version: 1, requestId: request.requestId, ok: true, result: { seed: fixtureSeed }, error: null }
+          : { version: 1, requestId: request.requestId, ok: false, result: null, error: { code: 'invalid_seed', retryable: false } });
+        return;
+      }
       const ok = request?.method === 'data.read'
         && request?.payload?.projection === 'city'
         && [7, 30, 90, 366].includes(request.payload.windowDays);
