@@ -13,7 +13,8 @@
 //! 官方卡折算）：服务 claude 会话账/托盘第三执行环境列，不参与 DSH 账。它只进新
 //! 函数，`cost_report`/`priced_day` 等 DSH 路径字节不变——两条面不许互相改价。
 //!
-//! 价格表的单一真相源是 `assets/pricing.json`（v0.8 Phase E5 从 Python 包内搬到
+//! 价格表权威源是 `catalog/pricing/pricing.json`；`assets/pricing.json` 是 CI 校验的
+//! 逐字节兼容镜像（v0.8 Phase E5 从 Python 包内搬到
 //! 仓库根——三方共读，不是 Python 包私有数据；这里 `include_str!` 内嵌、Python 侧
 //! 爬回仓库根读同一份文件；`integrations/dsh-client/pricing.json` 是 build 时复制
 //! 出的运行时份，lockstep 测试对齐）。缓存写入报价表没有行 → 按 0 计（不臆造价格）。高峰时段为

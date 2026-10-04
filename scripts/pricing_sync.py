@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""每日价卡同步：三个公开结构化价格源 → `assets/pricing-sync.json` 叠加层。
+"""每日价卡同步：公开价格源 → catalog/pricing 叠加层及 assets 兼容镜像。
 
     python3 scripts/pricing_sync.py              # 拉取三源，只打印报告
     python3 scripts/pricing_sync.py --write      # 有变化才改写叠加层
@@ -38,7 +38,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "assets"
-OVERLAY_PATH = ASSETS / "pricing-sync.json"
+CATALOG_PRICING = ROOT / "catalog" / "pricing"
+OVERLAY_PATH = CATALOG_PRICING / "pricing-sync.json"
+sys.path.insert(0, str(ROOT))
+from scripts.catalog_mirror import synchronize, atomic_bytes, validate_paths
 SCHEMA = "agent-vitals-pricing-sync/v1"
 
 SOURCES = {
@@ -358,23 +361,30 @@ def report(overlay: dict, changed: bool) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--write", action="store_true", help="有变化时改写 assets/pricing-sync.json")
+    ap.add_argument("--write", action="store_true", help="更新 catalog 叠加层及 assets 兼容镜像")
+    ap.add_argument("--root", type=Path, default=ROOT, help="价卡仓库根目录（离线测试）")
     ap.add_argument("--sources-dir", type=Path, help="从本地目录读三源 JSON（离线/测试）")
-    ap.add_argument("--overlay", type=Path, default=OVERLAY_PATH)
+    ap.add_argument("--overlay", type=Path, help="自定义输出（不更新仓库镜像）")
     ap.add_argument("--today", help="覆盖日期（测试用，YYYY-MM-DD）")
     args = ap.parse_args(argv)
+    overlay_path = args.overlay or args.root / "catalog/pricing/pricing-sync.json"
+    if args.write and args.overlay is None:
+        validate_paths(args.root, allow_missing_mirrors=True)
 
     sources = load_sources(args.sources_dir)
-    base_pricing = json.loads((ASSETS / "pricing.json").read_text())
-    base_codex = json.loads((ASSETS / "codex_pricing.json").read_text())
+    base_pricing = json.loads((args.root / "catalog/pricing/pricing.json").read_text(encoding="utf-8"))
+    base_codex = json.loads((args.root / "catalog/pricing/codex_pricing.json").read_text(encoding="utf-8"))
     overlay = build_overlay(sources, base_pricing, base_codex)
 
-    previous = json.loads(args.overlay.read_text()) if args.overlay.exists() else None
+    previous = json.loads(overlay_path.read_text(encoding="utf-8")) if overlay_path.exists() else None
     today = args.today or _dt.datetime.now(_dt.timezone.utc).date().isoformat()
     final, changed = finalize(overlay, previous, today)
     sys.stdout.write(report(final, changed))
     if args.write and changed:
-        args.overlay.write_text(json.dumps(final, ensure_ascii=False, indent=2, sort_keys=False) + "\n")
+        atomic_bytes(overlay_path, (json.dumps(final, ensure_ascii=False, indent=2, sort_keys=False) + "\n").encode("utf-8"))
+    if args.write and args.overlay is None:
+        synchronize(args.root, write=True)
+        synchronize(args.root)
     return 0
 
 

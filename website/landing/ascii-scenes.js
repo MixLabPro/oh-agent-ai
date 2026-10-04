@@ -254,6 +254,7 @@
   }
 
   const factories = { woodpecker, receipt };
+
   document.querySelectorAll('[data-ascii]').forEach(el => {
     const make = factories[el.dataset.ascii];
     if (!make) return;

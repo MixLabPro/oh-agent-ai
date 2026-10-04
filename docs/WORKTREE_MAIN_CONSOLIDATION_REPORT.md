@@ -1,0 +1,48 @@
+# Worktree 归并执行报告
+
+日期：2026-10-04。范围是收齐已有工作，不是宣称扩展规格所有阶段完成。
+
+## 来源与恢复
+
+- 原 main 备份：`codex/backup-main-20261004`，执行基线 `735f6fa3`。
+- 主工作区全部源码检查点：`codex/snapshot-primary-20261004` / `94d3579a`。
+- City dirty 工作区检查点：`codex/snapshot-city-20261004` / `0e01b207`。
+- wildlife 未跟踪旧版检查脚本：`codex/snapshot-wildlife-20261004` / `805eea17`；较完整的新版本已归并，不用旧脚本覆盖。
+- 复用 E08 checkout，在 `codex/main-consolidation` 整合最新 main、City 唯一变化与主工作区源码；保留原提交历史和备份分支，不 force push。
+
+## 保留的变化
+
+1. E08 与 harness 命名基线；旧 host 文件没有覆盖现行注册和 authority v31。
+2. City 高架出口/空间索引/植被避让，以及 resize UAT 原始证据。
+3. 桌面官方 catalog opt-in、payload 预览/确认、序号下限恢复和流式大小限制；使用新 harness API。
+4. catalog 价卡兼容镜像、发布门、CI、官网 City iframe 与当前独立插件的生产预编译资源；保留素材许可证。
+5. 修正架构文档：City 是与 Overview 平级的官方前端插件，不是独立 macOS City App。Rust 查询及版本化 projection 属于 Agent Vitals 本体。
+
+## 本轮发现的回归
+
+City 出口变化使 seed 42 航拍相对加速度超过原断言。原因是距离映射到曲线时弧长采样过稀；`cityCinematic.ts` 将采样数从 4,000 提高至 16,000 后，5 个 seed 的 full/short 原检查全部通过，未放宽阈值。
+
+官网旧 City debug bundle 已用当前生产 bundle 重建。生成 JS 中的 GLSL 保留空白，`.gitattributes` 仅对生成目录禁用对应空白检查；源码仍通过 diff 检查。
+
+## 验证
+
+- `cargo test --release`：通过。
+- `cargo clippy --release --all-targets -- -D warnings`：通过。
+- `cargo build --release`：通过，authority schema v31。
+- 桌面 `cargo test --release --lib`：160 项通过，含 catalog 新增 3 项。
+- catalog/价卡专项 Python：25 项通过；`verify_catalog.py` 镜像逐字节一致。
+- Python 与 Rust 各 16 项 golden：通过，无 golden 更新。
+- City typecheck、宿主 `verify:react`、`verify:city`、插件架构与布局 source guard：通过。
+- 官网浏览器检查：Agent City 导航和滚入视口懒加载 iframe 已观察到；此证据不等于逐帧视觉验收。
+- 全量 Python、原生故障注入及正式 bundle：执行中，完成后补记。
+
+## 保留的边界
+
+- catalog 目前是空 harness index：验证了 0 个 commit-pinned payload，不能声称真实发行 payload 安装验收完成。
+- resize UAT 的约 0.43 秒捕获间隔不能排除单帧闪黑，不能写成已彻底修复。
+- E00/E09–E15 和 E08 全规格剩余矩阵不因分支归并标记完成。
+- 官网仅使用示例数据；插件不得直读 authority DB / harness 日志，不增加任何用户数据上传路径。
+
+## 主分支与清理
+
+待全部验证结束后，将主工作区 fast-forward 到整合分支，普通 push 同步远端，再归档冗余 checkout。保留源码检查点及历史分支用于恢复；11 个共享 node_modules 只解除符号链接本身，不删除共享目标。

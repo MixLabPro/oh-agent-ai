@@ -82,14 +82,15 @@ app 发版。
 
 ### 应用层边界（2026-10-03）
 
-本规格管理声明式数据扩展；含可执行代码的插件APP由
-[应用层规格](AGENT_VITALS_APP_LAYER_ARCHITECTURE_SPEC.md) v0.2管理。
-官方City使用独立app index、签名清单、应用对象目录、应用台账与授权协议，
-不得作为harness_manifest/content_pack安装，也不得将执行包存入payload.json对象库。
-可复用哈希、预览绑定和generation/CAS原语；数据目录来源不授予应用执行信任。
-city:v1是单独授权的app-local面，不扩大MCP权限。content_pack的多文件契约和
-新索引版本后置；严格catalog-index-v1保持原契约。当前主线为City M0–M2，
-数据扩展仅收尾已启动批次，余项保留台账。
+本规格管理声明式数据扩展；前端插件由
+[应用层规格](AGENT_VITALS_APP_LAYER_ARCHITECTURE_SPEC.md) 管理。
+City 是随 Agent Vitals 发布的官方内置前端插件，与 Overview 平级；桌面使用
+独立 WebView，浏览器预览使用 iframe。Rust 本体提供注册、版本化的数据 projection。
+City 不作为 harness_manifest/content_pack 安装，不把执行包写入数据对象库。
+独立应用发布、插件市场及外部安装规范为后续路线，不属于当前插件 MVP。
+数据目录来源不授予应用执行信任；插件身份、活动实例和方法/字段范围按应用层
+规格与 AGENTS.md 检查。该本地插件面不扩大 MCP/export 权限。content_pack
+多文件契约和新索引版本后置；catalog-index-v1 保持原契约，余项保留台账。
 
 ```
 ┌─ 统一扩展注册面（ExtensionRegistry：统一生命周期，按类型执法）─────┐

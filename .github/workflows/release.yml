@@ -16,7 +16,19 @@ permissions:
   contents: write
 
 jobs:
+  catalog_contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - run: python3 scripts/verify_catalog.py
+
   build:
+    needs: catalog_contract
     name: build ${{ matrix.asset }}
     runs-on: ${{ matrix.os }}
     strategy:

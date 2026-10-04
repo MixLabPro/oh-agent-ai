@@ -355,7 +355,7 @@ fn harness_display_name(kind: &str) -> String {
 /// 界面用：全部 manifest 执行环境的 `{ "harness:<slug>": 显示名 }`。内置执行环境的名字界面自带。
 #[tauri::command(async)]
 fn harness_display_names() -> Value {
-    let (harnesses, _) = agent_vitals_runtime::harness_registry::scan_plugin_harnesses(&overview::data_home());
+    let (harnesses, _) = agent_vitals_runtime::harness_registry::scan_active_plugin_harnesses(&overview::data_home());
     let mut map = serde_json::Map::new();
     for harness in harnesses { map.insert(format!("harness:{}", harness.slug), Value::String(harness.display_name)); }
     Value::Object(map)
@@ -3365,10 +3365,9 @@ async fn update_public_pricing_catalog() -> Result<Value, String> {
 // ── 官方 manifest 目录（E06，扩展架构 §8.2）────────────────────────────
 // 与公共价卡同一条纪律：HTTP 只在桌面层；请求固定公共 HTTPS 地址、不带任何
 // 用户数据；默认关闭、显式 opt-in；失败只写状态文件，绝不影响已装内容。
-// 本批次交付「索引拉取 + 校验 + 缓存 + 状态面」；payload 下载与激活确认随
-// E06 后续批次接入——状态如实标注 supported_entries，不冒充已可安装。
+// 索引检查与 harness payload 预览/确认分开；支持的条目数不代表已安装数量。
 const MANIFEST_CATALOG_INDEX_URL: &str =
-    "https://raw.githubusercontent.com/MixLabPro/agent-vitals/main/catalog/index.json";
+    agent_vitals_runtime::ingest::vendor_manifest_install::OFFICIAL_INDEX_URL;
 const MANIFEST_CATALOG_STATUS_FILE: &str = "manifest-catalog-update.json";
 const MANIFEST_CATALOG_POLICY_FILE: &str = "manifest-catalog-policy.json";
 const MANIFEST_CATALOG_CHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
@@ -3434,6 +3433,19 @@ fn read_manifest_catalog_status(data_home: &Path) -> ManifestCatalogStatus {
         })
 }
 
+fn read_manifest_catalog_status_for_update(data_home: &Path) -> Result<ManifestCatalogStatus, String> {
+    use std::io::Read;
+    let file = match std::fs::File::open(manifest_catalog_status_path(data_home)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(read_manifest_catalog_status(data_home)),
+        Err(error) => return Err(format!("read catalog status failed: {error}")),
+    };
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|e| format!("read catalog status failed: {e}"))?;
+    if bytes.len() > 1024 * 1024 { return Err("catalog status bytes limit".into()); }
+    serde_json::from_slice(&bytes).map_err(|e| format!("catalog status invalid; update refused: {e}"))
+}
+
 fn write_manifest_catalog_status(
     data_home: &Path,
     status: &ManifestCatalogStatus,
@@ -3470,25 +3482,61 @@ fn fail_manifest_catalog_update(
 /// 本体当前支持的 slot/能力（E01 capability 协商的目录面镜像——来源是
 /// `generic_manifest::CapabilitySet::default()`，不维护第二份词表）。
 fn manifest_catalog_slot_support() -> std::collections::BTreeMap<String, agent_vitals_domain::domain::catalog_index::SlotSupport> {
-    let capabilities = agent_vitals_harnesses::generic_manifest::CapabilitySet::default();
-    let mut support = std::collections::BTreeMap::new();
-    support.insert(
-        "harness_manifest".to_string(),
-        agent_vitals_domain::domain::catalog_index::SlotSupport {
-            schemas: vec![1],
-            capabilities: capabilities
-                .recipes
-                .iter()
-                .map(|recipe| format!("recipe:{recipe}"))
-                .chain(capabilities.features.iter().map(|feature| format!("feature:{feature}")))
-                .collect(),
-        },
-    );
-    support
+    agent_vitals_runtime::ingest::vendor_manifest_install::harness_slot_support()
 }
 
 fn manifest_catalog_cache_path(data_home: &Path) -> PathBuf {
     data_home.join("cache").join("catalog").join("index.json")
+}
+
+const MANIFEST_CATALOG_INDEX_MAX_BYTES: usize = 4 * 1024 * 1024;
+static MANIFEST_CATALOG_UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn append_manifest_catalog_chunk(bytes: &mut Vec<u8>, chunk: &[u8]) -> Result<(), &'static str> {
+    if chunk.len() > MANIFEST_CATALOG_INDEX_MAX_BYTES.saturating_sub(bytes.len()) {
+        return Err("manifest catalog response exceeds 4 MiB limit");
+    }
+    bytes.extend_from_slice(chunk);
+    Ok(())
+}
+
+fn accepted_manifest_catalog_floor(
+    data_home: &Path,
+    status: &ManifestCatalogStatus,
+    support: &std::collections::BTreeMap<String, agent_vitals_domain::domain::catalog_index::SlotSupport>,
+    app_version: &str,
+) -> Result<Option<(u64, String)>, String> {
+    let mut highest = match (status.catalog_sequence, status.index_sha256.as_deref()) {
+        (Some(sequence), Some(hash)) => Some((sequence, hash.to_string())),
+        (None, None) => None,
+        _ => return Err("manifest catalog status has an incomplete sequence/hash pair".into()),
+    };
+    let path = manifest_catalog_cache_path(data_home);
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(highest),
+        Err(error) => return Err(format!("read manifest catalog cache failed: {error}")),
+    };
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    file.take((MANIFEST_CATALOG_INDEX_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes).map_err(|e| format!("read manifest catalog cache failed: {e}"))?;
+    let index = agent_vitals_domain::domain::catalog_index::parse_catalog(&bytes)
+        .map_err(|e| format!("cached manifest catalog invalid: {e}"))?;
+    use sha2::Digest;
+    let hash = format!("{:x}", sha2::Sha256::digest(&bytes));
+    agent_vitals_domain::domain::catalog_index::validate_catalog(
+        &index, support, app_version, &hash, None)
+        .map_err(|e| format!("cached manifest catalog invalid: {e}"))?;
+    let sequence = index["catalog_sequence"].as_u64().ok_or("cached catalog has no sequence")?;
+    match &highest {
+        Some((previous, _)) if sequence < *previous => {},
+        Some((previous, previous_hash)) if sequence == *previous && hash != *previous_hash => {
+            return Err("manifest catalog cache/status sequence conflict".into());
+        }
+        _ => highest = Some((sequence, hash)),
+    }
+    Ok(highest)
 }
 
 fn write_manifest_catalog_index_cache(data_home: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -3524,12 +3572,13 @@ fn save_manifest_catalog_policy(network_enabled: bool) -> Result<Value, String> 
 #[tauri::command]
 async fn update_manifest_catalog() -> Result<Value, String> {
     let data_home = overview::data_home();
+    let _update_guard = MANIFEST_CATALOG_UPDATE_LOCK.lock().await;
     let policy = read_manifest_catalog_policy(&data_home);
     if !policy.network_enabled {
         return Err("manifest 目录联网检查未开启；请先明确允许访问公共目录服务".into());
     }
     let now = agent_vitals_runtime::core::clock::now_ms();
-    let mut status = read_manifest_catalog_status(&data_home);
+    let mut status = read_manifest_catalog_status_for_update(&data_home)?;
     if status.next_check_at_ms.is_some_and(|next| now < next)
         || status
             .last_checked_at_ms
@@ -3541,17 +3590,13 @@ async fn update_manifest_catalog() -> Result<Value, String> {
     status.last_checked_at_ms = Some(now);
     status.failure_reason = None;
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .user_agent("agent-vitals-manifest-catalog-check/1")
-        .build()
-    {
+    let client = match manifest_catalog_client() {
         Ok(client) => client,
         Err(error) => {
             return fail_manifest_catalog_update(&data_home, &mut status, "failed", format!("create manifest catalog client failed: {error}"))
         }
     };
-    let response = match client.get(MANIFEST_CATALOG_INDEX_URL).send().await {
+    let mut response = match client.get(MANIFEST_CATALOG_INDEX_URL).send().await {
         Ok(response) => response,
         Err(error) => {
             return fail_manifest_catalog_update(&data_home, &mut status, "failed", format!("manifest catalog request failed: {error}"))
@@ -3560,15 +3605,23 @@ async fn update_manifest_catalog() -> Result<Value, String> {
     if !response.status().is_success() {
         return fail_manifest_catalog_update(&data_home, &mut status, "failed", format!("manifest catalog returned HTTP {}", response.status()));
     }
-    if response.content_length().is_some_and(|length| length > 4 * 1024 * 1024) {
+    if response.content_length().is_some_and(|length| length > MANIFEST_CATALOG_INDEX_MAX_BYTES as u64) {
         return fail_manifest_catalog_update(&data_home, &mut status, "failed", "manifest catalog response exceeds 4 MiB limit".into());
     }
-    let bytes = match response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return fail_manifest_catalog_update(&data_home, &mut status, "failed", format!("read manifest catalog response failed: {error}"))
+    let mut bytes = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if let Err(reason) = append_manifest_catalog_chunk(&mut bytes, &chunk) {
+                    return fail_manifest_catalog_update(&data_home, &mut status, "failed", reason.into());
+                }
+            }
+            Ok(None) => break,
+            Err(error) => {
+                return fail_manifest_catalog_update(&data_home, &mut status, "failed", format!("read manifest catalog response failed: {error}"))
+            }
         }
-    };
+    }
     let index = match agent_vitals_domain::domain::catalog_index::parse_catalog(&bytes) {
         Ok(index) => index,
         Err(reason) => return fail_manifest_catalog_update(&data_home, &mut status, "rejected", reason.into()),
@@ -3577,10 +3630,10 @@ async fn update_manifest_catalog() -> Result<Value, String> {
     let index_sha256 = format!("{:x}", sha2::Sha256::digest(&bytes));
     let support = manifest_catalog_slot_support();
     let capabilities = agent_vitals_harnesses::generic_manifest::CapabilitySet::default();
-    let highest = status
-        .catalog_sequence
-        .zip(status.index_sha256.as_deref().map(|hash| hash.to_string()))
-        .map(|(sequence, hash)| (sequence, hash));
+    let highest = match accepted_manifest_catalog_floor(&data_home, &status, &support, &capabilities.app_version) {
+        Ok(highest) => highest,
+        Err(reason) => return fail_manifest_catalog_update(&data_home, &mut status, "rejected", reason),
+    };
     let highest_ref = highest.as_ref().map(|(sequence, hash)| (*sequence, hash.as_str()));
     if let Err(reason) = agent_vitals_domain::domain::catalog_index::validate_catalog(
         &index,
@@ -3614,6 +3667,107 @@ async fn update_manifest_catalog() -> Result<Value, String> {
         "activation": "payload 下载与激活确认需要显式确认命令（扩展架构 §8.2），本命令只拉取并缓存索引",
         "last_success_at_ms": now,
     }))
+}
+
+fn manifest_catalog_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder().timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none()).user_agent("agent-vitals-manifest-catalog-check/1")
+        .build()
+}
+
+async fn fetch_official_manifest_bytes(client: &reqwest::Client, url: &str,
+    limit: usize) -> Result<Vec<u8>, String> {
+    let mut response = client.get(url).send().await.map_err(|e| format!("catalog request failed: {e}"))?;
+    if !response.status().is_success() { return Err(format!("catalog returned HTTP {}", response.status())); }
+    if response.content_length().is_some_and(|length| length > limit as u64) {
+        return Err("catalog response bytes limit".into());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| format!("catalog response read failed: {e}"))? {
+        if chunk.len() > limit.saturating_sub(bytes.len()) { return Err("catalog response bytes limit".into()); }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+/// Fetch the exact official dependency group and preview it. A matching confirm
+/// hash repeats the fetch and local impact calculation before one ledger CAS.
+#[tauri::command]
+async fn install_manifest_catalog_harness(slug: String, release_local_pins: Vec<String>,
+    confirm: Option<String>) -> Result<Value, String> {
+    let _update_guard = MANIFEST_CATALOG_UPDATE_LOCK.lock().await;
+    let data_home = overview::data_home();
+    if !read_manifest_catalog_policy(&data_home).network_enabled {
+        return Err("manifest 目录联网检查未开启；请先明确允许访问公共目录服务".into());
+    }
+    read_manifest_catalog_status_for_update(&data_home)?;
+    match install_manifest_catalog_harness_internal(data_home.clone(), slug, release_local_pins, confirm).await {
+        Ok(result) => Ok(result),
+        Err(reason) => {
+            let mut status = read_manifest_catalog_status_for_update(&data_home)?;
+            status.last_checked_at_ms = Some(agent_vitals_runtime::core::clock::now_ms());
+            fail_manifest_catalog_update(&data_home, &mut status, "failed", reason)
+        }
+    }
+}
+
+async fn install_manifest_catalog_harness_internal(data_home: PathBuf, slug: String,
+    release_local_pins: Vec<String>, confirm: Option<String>) -> Result<Value, String> {
+    use agent_vitals_runtime::ingest::vendor_manifest_install as vendor;
+    use sha2::Digest;
+    let client = manifest_catalog_client().map_err(|e| format!("create catalog client failed: {e}"))?;
+    let download_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let index_bytes = tokio::time::timeout_at(download_deadline,
+        fetch_official_manifest_bytes(&client, MANIFEST_CATALOG_INDEX_URL, MANIFEST_CATALOG_INDEX_MAX_BYTES))
+        .await.map_err(|_| "catalog dependency group download timed out")??;
+    let index = agent_vitals_domain::domain::catalog_index::parse_catalog(&index_bytes).map_err(str::to_string)?;
+    let index_hash = format!("{:x}", sha2::Sha256::digest(&index_bytes));
+    let mut status = read_manifest_catalog_status_for_update(&data_home)?;
+    let support = manifest_catalog_slot_support();
+    let capabilities = agent_vitals_harnesses::generic_manifest::CapabilitySet::default();
+    let floor = accepted_manifest_catalog_floor(&data_home, &status, &support, &capabilities.app_version)?;
+    agent_vitals_domain::domain::catalog_index::validate_catalog(&index, &support,
+        &capabilities.app_version, &index_hash, floor.as_ref().map(|(seq, hash)| (*seq, hash.as_str())))
+        .map_err(str::to_string)?;
+    let entries = vendor::harness_dependency_group(&index_bytes, &slug)?;
+    let mut payloads = std::collections::BTreeMap::new();
+    let mut total = 0_usize;
+    for entry in &entries {
+        if !read_manifest_catalog_policy(&data_home).network_enabled {
+            return Err("manifest 目录联网许可已撤销".into());
+        }
+        let url = vendor::official_payload_url(entry)?;
+        let remaining = vendor::MAX_GROUP_BYTES.saturating_sub(total);
+        let limit = agent_vitals_runtime::core::extension_objects::MAX_PAYLOAD_BYTES.min(remaining);
+        let bytes = tokio::time::timeout_at(download_deadline, fetch_official_manifest_bytes(&client, &url, limit))
+            .await.map_err(|_| "catalog dependency group download timed out")??;
+        total += bytes.len();
+        if entry["sha256"] != format!("{:x}", sha2::Sha256::digest(&bytes)) {
+            return Err(format!("catalog payload hash mismatch: {}", entry["slot_id"]));
+        }
+        payloads.insert(entry["slot_id"].as_str().ok_or("catalog identity")?.to_string(), bytes);
+    }
+    // Persist the accepted index, never payloads in local override directories.
+    write_manifest_catalog_index_cache(&data_home, &index_bytes)?;
+    let now = agent_vitals_runtime::core::clock::now_ms();
+    status.state = "ok".into();
+    status.source_url = MANIFEST_CATALOG_INDEX_URL.into();
+    status.last_checked_at_ms = Some(now);
+    status.last_success_at_ms = Some(now);
+    status.catalog_sequence = index["catalog_sequence"].as_u64();
+    status.index_sha256 = Some(index_hash);
+    status.entry_count = index["entries"].as_array().map(Vec::len);
+    status.supported_entries = status.entry_count;
+    status.failure_reason = None;
+    status.failure_count = 0;
+    status.next_check_at_ms = Some(now.saturating_add(MANIFEST_CATALOG_CHECK_INTERVAL_MS));
+    write_manifest_catalog_status(&data_home, &status)?;
+    let home = PathBuf::from(std::env::var("HOME").map_err(|_| "user home unavailable")?);
+    let machine_namespace = agent_vitals_runtime::takeover::machine_namespace();
+    tauri::async_runtime::spawn_blocking(move || vendor::install_official_harness_group(
+        &index_bytes, &slug, &payloads, &release_local_pins, &machine_namespace,
+        &data_home, &home, &[], confirm.as_deref()))
+        .await.map_err(|e| format!("catalog installer task failed: {e}"))?
 }
 
 fn start_public_pricing_catalog_tick() {
@@ -5397,6 +5551,7 @@ pub fn run() {
             manifest_catalog_status,
             save_manifest_catalog_policy,
             update_manifest_catalog,
+            install_manifest_catalog_harness,
             save_public_pricing_catalog_policy,
             update_public_pricing_catalog,
             restore_authority_backup,
@@ -5591,6 +5746,80 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manifest_catalog_http_enforces_stream_limits_and_refuses_redirects() {
+        use std::io::{Read, Write};
+        fn server(response: &'static [u8]) -> (String, std::thread::JoinHandle<()>) {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let worker = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut request = [0; 4096];
+                stream.read(&mut request).unwrap();
+                stream.write_all(response).unwrap();
+            });
+            (url, worker)
+        }
+        let (url, worker) = server(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n");
+        let result = tauri::async_runtime::block_on(async {
+            super::fetch_official_manifest_bytes(&super::manifest_catalog_client().unwrap(), &url, 6).await
+        });
+        assert!(result.unwrap_err().contains("bytes limit"));
+        worker.join().unwrap();
+        let (url, worker) = server(b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let result = tauri::async_runtime::block_on(async {
+            super::fetch_official_manifest_bytes(&super::manifest_catalog_client().unwrap(), &url, 6).await
+        });
+        assert!(result.unwrap_err().contains("HTTP 302"));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn manifest_catalog_floor_recovers_from_cached_index() {
+        let data_home = std::env::temp_dir().join(format!(
+            "agent-vitals-catalog-floor-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let path = super::manifest_catalog_cache_path(&data_home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = br#"{"index_schema_version":1,"catalog_sequence":7,"published_at":"2026-10-01T00:00:00Z","entries":[]}"#;
+        std::fs::write(&path, bytes).unwrap();
+        let support = super::manifest_catalog_slot_support();
+        let app_version = agent_vitals_harnesses::generic_manifest::CapabilitySet::default().app_version;
+        let mut status = super::ManifestCatalogStatus::default();
+        let result = super::accepted_manifest_catalog_floor(&data_home, &status, &support, &app_version).unwrap();
+        assert_eq!(result.as_ref().map(|(sequence, _)| *sequence), Some(7));
+        status.catalog_sequence = Some(7);
+        status.index_sha256 = Some("0".repeat(64));
+        assert!(super::accepted_manifest_catalog_floor(&data_home, &status, &support, &app_version).is_err());
+        status.catalog_sequence = Some(8);
+        assert_eq!(super::accepted_manifest_catalog_floor(&data_home, &status, &support, &app_version).unwrap(),
+            Some((8, "0".repeat(64))));
+        status.catalog_sequence = Some(6);
+        assert_eq!(super::accepted_manifest_catalog_floor(&data_home, &status, &support, &app_version).unwrap()
+            .as_ref().map(|(sequence, _)| *sequence), Some(7));
+        std::fs::write(super::manifest_catalog_status_path(&data_home), b"{corrupt").unwrap();
+        assert!(super::read_manifest_catalog_status_for_update(&data_home).is_err());
+        assert_eq!(std::fs::read(super::manifest_catalog_status_path(&data_home)).unwrap(), b"{corrupt");
+        std::fs::write(&path, vec![b' '; super::MANIFEST_CATALOG_INDEX_MAX_BYTES + 1]).unwrap();
+        assert!(super::accepted_manifest_catalog_floor(&data_home, &status, &support, &app_version)
+            .unwrap_err().contains("index_bytes_limit"));
+        std::fs::remove_dir_all(&data_home).unwrap();
+    }
+
+    #[test]
+    fn manifest_catalog_chunk_limit_is_enforced_without_content_length() {
+        let mut bytes = Vec::new();
+        super::append_manifest_catalog_chunk(&mut bytes, &[1, 2]).unwrap();
+        super::append_manifest_catalog_chunk(&mut bytes,
+            &vec![0; super::MANIFEST_CATALOG_INDEX_MAX_BYTES - 2]).unwrap();
+        assert_eq!(bytes.len(), super::MANIFEST_CATALOG_INDEX_MAX_BYTES);
+        assert!(super::append_manifest_catalog_chunk(&mut bytes, &[3]).is_err());
+        assert_eq!(bytes.len(), super::MANIFEST_CATALOG_INDEX_MAX_BYTES);
+    }
+
     #[test]
     fn official_usd_card_is_returned_in_its_own_currency_never_converted() {
         let result = super::official_price_card(

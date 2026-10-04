@@ -31,3 +31,15 @@ is run with the Apple ID app-specific password:
 ## Before publishing
 
 Verify the public desktop release, installation instructions, and supported harness versions. If a production screenshot replaces the illustrative window, use redacted or dedicated demo data. No product event collection is authorized by this page.
+
+## Agent City 3D 钩子（city3d/）
+
+`#city` 段默认渲染零依赖的 canvas mock（`city-mock.js`）；当 `city3d/index.html`
+存在时，`city-host.js` 在滚入视口后懒加载同源 iframe（apps/agent-city/ui 的
+插件构建产物），经 `av-plugin-rpc` v1 postMessage 信道以 `PluginRequestV1`
+拉取 `CityProjectionV1`（本页返回确定性示例数据，`source:"fixture"`），
+并透传 locale/suspend/resume。产物缺失、WebGL 不可用或
+prefers-reduced-motion 时自动保持 canvas mock，不报错。
+
+产物构建（需 codex/app-layer-city 合入后）：
+`node tools/build-city3d.mjs`（npm ci + vite build → 拷贝 dist 到本目录）。

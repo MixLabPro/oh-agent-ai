@@ -68,7 +68,6 @@ codex/app-layer-city从本地main的564c6726c7194fd72ab42051ed510c80061ca4d7
 main的verify:city脚本引用了未跟踪的verify-react-city-infrastructure.mjs；
 经审阅，仅迁入这一基线检查脚本（实际执行生产桥梁方法并检查布局），
 没有迁入City运行时代码。Three.js CJS弃用和大chunk提示仍为已知告警。
-
 ## M0 下一步与证据
 
 C1冻结签名规范、manifest/index及目标物理路径；C3并行冻结projection schemas、

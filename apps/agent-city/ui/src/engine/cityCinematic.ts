@@ -219,7 +219,9 @@ function planRoute(layout: CityLayout, model: CityModel, heights: Map<string, { 
   // 时间表按「弧长」均匀建立（不是曲线参数 t）：CatmullRom 的 t 按控制点序号均分，关键帧密的地方
   // t 与距离严重不成比例，按 t 建表再插值会在那里出现单帧的速度骤降骤升（画面一顿）。
   const SAMPLES = 1600;
-  positionCurve.arcLengthDivisions = 4000;
+  // Dense arc-length sampling keeps short, tightly curved district exits from
+  // introducing a speed discontinuity when mapping distance back to the curve.
+  positionCurve.arcLengthDivisions = 16000;
   const totalLength = positionCurve.getLength() || 1;
   const altitudeAtU = (u: number) => {
     const point = positionCurve.getPointAt(Math.min(1, Math.max(0, u)));
