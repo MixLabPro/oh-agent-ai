@@ -148,6 +148,31 @@ async function openWorkbench({ noWebGL = false, failModule = false } = {}) {
 }
 
 function city(page) { return page.frameLocator("iframe"); }
+/** iframe 会被宿主重建（错误恢复/失效刷新）：跨步骤持有的 frame 句柄可能失效。
+ *  对 iframe 内状态读写与条件等待一律经本助手——按需重取、失效重试（最长 5s），
+ *  条件等待以轮询 Promise 表达（等价 waitForFunction 语义，重建风暴下仍收敛）。 */
+async function cityEvaluate(page, fn, arg) {
+  let lastError;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const frame = page.frames().find((item) => item.url().includes("AgentCity.plugin"));
+    if (frame) {
+      try { return await frame.evaluate(fn, arg); }
+      catch (error) { lastError = error; }
+    }
+    await page.waitForTimeout(500);
+  }
+  throw lastError ?? new Error("city iframe never became available");
+}
+/** 轮询等待（waitForFunction 的重建安全版）：fn 返回真值即完成。 */
+async function cityWaitFor(page, fn, timeoutMs = 20000, arg) {
+  const started = Date.now();
+  for (;;) {
+    const value = await cityEvaluate(page, fn, arg);
+    if (value) return value;
+    if (Date.now() - started > timeoutMs) throw new Error("cityWaitFor timeout");
+    await page.waitForTimeout(250);
+  }
+}
 function summary(page, index) { return city(page).locator(".city-stats strong").nth(index); }
 async function expectSummary(page, sessions, tokens) {
   // Resolve the live child document on every sample after instance replacement.
@@ -284,11 +309,13 @@ try {
     return slot && frame && Math.abs(slot.width - frame.width) < 1 && Math.abs(slot.height - frame.height) < 1;
   });
   // Regression for resize callbacks clearing a canvas AFTER the render rAF.
-  await frame.evaluate(() => { window.citySurface.undrawnFrames = 0; window.citySurface.resets = 0; });
+  // iframe 可能已被宿主重建（错误恢复）：本段起全部经 cityEvaluate/cityWaitFor。
+  await cityEvaluate(page, () => { window.citySurface.undrawnFrames = 0; window.citySurface.resets = 0; });
   for (const [width, height] of [[960, 680], [1200, 820], [1040, 740], [980, 710], [1100, 760]]) {
     await page.setViewportSize({ width, height });
-    await frame.waitForFunction(() => {
+    await cityWaitFor(page, () => {
       const canvas = document.querySelector(".city-canvas");
+      if (!canvas || !canvas.parentElement) return false;
       const gl = canvas.getContext("webgl2"), info = gl.getExtension("WEBGL_debug_renderer_info");
       const software = !!info && /swiftshader|llvmpipe|software|softpipe/i.test(String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)));
       const width = canvas.parentElement.clientWidth, height = canvas.parentElement.clientHeight;
@@ -296,10 +323,10 @@ try {
       return canvas.width === Math.floor(width * ratio) && canvas.height === Math.floor(height * ratio);
     });
   }
-  const surface = await frame.evaluate(() => window.citySurface);
-  assert.ok(surface.resets > 0, "continuous resize must actually resize the drawing buffer");
+  const surface = await cityEvaluate(page, () => window.citySurface);
+  assert.ok(surface && surface.resets > 0, "continuous resize must actually resize the drawing buffer");
   assert.equal(surface.undrawnFrames, 0, "buffer resets must be drawn before the rAF callback yields");
-  const contextRecovery = await frame.evaluate(async () => {
+  const contextRecovery = await cityEvaluate(page, async () => {
     const canvas = document.querySelector(".city-canvas");
     const extension = canvas.getContext("webgl2").getExtension("WEBGL_lose_context");
     if (!extension) return false;
@@ -312,7 +339,7 @@ try {
     return window.cityDrawCalls;
   });
   assert.notEqual(contextRecovery, false, "software WebGL must expose the loss/recovery test extension");
-  await frame.waitForFunction((before) => window.cityDrawCalls > before, contextRecovery);
+  await cityWaitFor(page, (before) => window.cityDrawCalls > before, 30000, contextRecovery);
   const cityInstanceBeforeSwitch = await page.evaluate(async () => (await window.__TAURI__.core.invoke("plugin_snapshot")).instanceId);
   await page.evaluate(() => {
     window.pluginResumeRefreshes = 0;
@@ -322,7 +349,7 @@ try {
       return invoke(command, args);
     };
   });
-  await frame.evaluate(() => { window.cityRetentionMarker = "same-scene"; });
+  await cityEvaluate(page, () => { window.cityRetentionMarker = "same-scene"; });
   await page.getByRole("button", { name: "隐藏标签", exact: true }).click();
   await page.getByRole("button", { name: "显示标签", exact: true }).waitFor();
   await page.locator(".sidebar").getByRole("button", { name: /^(Overview|总览)$/ }).click();
