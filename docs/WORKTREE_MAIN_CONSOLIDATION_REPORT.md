@@ -52,4 +52,11 @@ City 出口变化使 seed 42 航拍相对加速度超过原断言。原因是距
 
 ## 主分支与清理
 
-待全部验证结束后，将主工作区 fast-forward 到整合分支，普通 push 同步远端，再归档冗余 checkout。保留源码检查点及历史分支用于恢复；11 个共享 node_modules 只解除符号链接本身，不删除共享目标。
+主工作区已 fast-forward 到整合提交 `133becbf`，并普通 push 同步远端；此后本报告的收尾提交不改变已验收源码。执行结束仅保留主工作区，worktree 从 20 个降至 1 个。
+
+- 17 个旧 `.claude/worktrees` 已核对后正常移除，保留历史分支及 wildlife 源码快照；11 个共享 node_modules 仅解除符号链接本身，共享目标仍存在。
+- 两个 Codex worktree 已完成可恢复归档，任务附件中可恢复；没有删除其分支或源码检查点。
+- 停止了待移除 checkout 的两个旧 Vite 服务及本轮临时 HTTP 服务，关闭临时浏览器标签。
+- 最新非 probe bundle 已放到主工作区 `apps/desktop/src-tauri/target/release/bundle/macos/agent-vitals.app`，复制后再次验证通过；旧 bundle 保存在同目录 `agent-vitals.pre-consolidation-20261004.app`。
+- 本轮 native 隔离报告另存同目录 `native-isolation-20261004.json`。以上是被忽略的本地构建/验证产物，不是源码发布内容。
+- `/Applications/agent-vitals.app` 未替换，正在运行的安装版本未更改。未使用 force push、hard reset 或强制 worktree remove。
