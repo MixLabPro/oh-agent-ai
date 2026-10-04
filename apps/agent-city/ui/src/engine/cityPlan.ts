@@ -11,6 +11,7 @@
  */
 import { hashSeed } from "../cityModel";
 import { fbm, smoothstep } from "./cityNoise";
+import { buildSeasideBand, MIAMI_COASTAL, seasideStripContains, type CoastalConfig, type SeasideBand, type SeasideWorld } from "./citySeaside";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
 
 export function segmentDistance(p: Vec2, a: Vec2, b: Vec2): number {
@@ -88,7 +89,7 @@ type Shape = {
   bays: Array<{ at: number; depth: number; width: number }>;
 };
 
-export function createCityPlan(seed: number, tier = 2) {
+export function createCityPlan(seed: number, tier = 2, config: CoastalConfig | null = null) {
   const random = (key: string) => hashSeed(`${seed}:${key}`);
   // 岛形参数（与半径无关）：放大时形状不变。
   const shape: Shape = {
@@ -97,20 +98,22 @@ export function createCityPlan(seed: number, tier = 2) {
     harmonics: [2, 3, 5].map((k) => ({ k, a: 0.05 + random(`h${k}`) * (k === 2 ? 0.16 : 0.1), p: random(`hp${k}`) * Math.PI * 2 })),
     bays: Array.from({ length: 1 + Math.floor(random("bays") * 3) }, (_, i) => ({ at: random(`bay${i}`) * Math.PI * 2, depth: 0.14 + random(`bayd${i}`) * 0.18, width: 0.18 + random(`bayw${i}`) * 0.25 })),
   };
-  const biome: Biome = BIOMES[Math.floor(random("biome") * BIOMES.length) % BIOMES.length];
+  // 海滨配置（VICE B1）：提供 config 时强制生态带（miami-coastal → tropical），
+  // 否则保持原有随机五选一——无配置调用方行为不变。
+  const biome: Biome = config ? config.biome : BIOMES[Math.floor(random("biome") * BIOMES.length) % BIOMES.length];
   // 先按档位估一个半径，再按实测地块数校正（最多 4 次）：面积 ∝ R²。
   let radius = 390 * Math.sqrt(tier);
-  let plan = buildPlan(seed, radius, shape, biome);
+  let plan = buildPlan(seed, radius, shape, biome, config);
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const parcels = plan.blocks.reduce((sum, block) => sum + block.parcels.length, 0);
     if (parcels >= targetParcels(tier)) break;
     radius *= Math.sqrt(targetParcels(tier) / Math.max(1, parcels)) * 1.04;
-    plan = buildPlan(seed, radius, shape, biome);
+    plan = buildPlan(seed, radius, shape, biome, config);
   }
   return { ...plan, scaleTier: tier, biome };
 }
 
-function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
+function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: CoastalConfig | null) {
   const random = (key: string) => hashSeed(`${seed}:${key}`);
   const phase = random("river") * 3;
 
@@ -391,6 +394,29 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
     return d;
   };
 
+  // ── 海滨带（VICE B1）：选段避开港口与河口朝向；街区/地块避开保留带。
+  // 港口已按「离核心最近海岸」放置，其方位由站点位置推出；河口 = 海岸点中离河中线近的两侧。
+  let seaside: SeasideBand | null = null;
+  if (config) {
+    const blockedAzimuths: Array<{ at: number; halfWidth: number }> = [];
+    const azimuthOf = (p: Vec2) => { let a = Math.atan2(p.z - core.z, p.x - core.x); if (a < 0) a += Math.PI * 2; return a; };
+    for (const site of publicSites) if (site.kind === "harbor") blockedAzimuths.push({ at: azimuthOf(site), halfWidth: (30 * Math.PI) / 180 });
+    if (hasRiver) {
+      for (const point of coast) {
+        if (Math.abs(point.x - riverX(point.z)) < riverWidth(point.z) + 30) blockedAzimuths.push({ at: azimuthOf(point), halfWidth: (14 * Math.PI) / 180 });
+      }
+    }
+    const world: SeasideWorld = {
+      landSignedDistance: coastDistance,
+      height,
+      slope: (x, z) => Math.hypot(height(x + 1, z) - height(x - 1, z), height(x, z + 1) - height(x, z - 1)) / 2,
+      riverDistance: (x, z) => (hasRiver ? Math.abs(x - riverX(z)) - riverWidth(z) : Infinity),
+      reservations: [...publicSites, ...landmarks].map((site) => ({ x: site.x, z: site.z, radius: site.radius })),
+      blockedAzimuths,
+    };
+    seaside = buildSeasideBand(coast, core, world, config, seed);
+  }
+
   const zoneFor = (center: Vec2): Zone => {
     // 分区由地理与骨架决定：核心附近 downtown、临海 waterfront、主干道两侧 commercial、其余 residential。
     if (Math.hypot(center.x - core.x, center.z - core.z) < 0.24 * R) return "downtown";
@@ -424,6 +450,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
       // 四角都在本扇区内（不和相邻扇区的街网重叠）、可建、离主干道与环线高架留出路幅。
       if (polygon.some((p) => !angleBetween(Math.atan2(p.z - core.z, p.x - core.x), sector.lo, sector.hi))) continue;
       if (polygon.some((p) => !buildable(p.x, p.z))) continue;
+      // 海滨保留带（水线→带外缘）内不生成街区：沙滩/步道/酒店排用地。
+      if (seaside && polygon.some((p) => seasideStripContains(seaside, p, 4))) continue;
       if (polygon.some((p, k) => { const q = polygon[(k + 1) % 4]; return !buildable((p.x + q.x) / 2, (p.z + q.z) / 2); })) continue;
       if ([center, ...polygon].some((p) => trunkIndex.closerThan(p, 10))) continue;
       if ([center, ...polygon].some((p) => ringIndex.closerThan(p, 9))) continue;
@@ -542,7 +570,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
   const boundsRadius = Math.max(bbox.maxX - bbox.minX, bbox.maxZ - bbox.minZ) / 2 + 40;
   const extent = Math.ceil((Math.max(Math.abs(bbox.minX), Math.abs(bbox.maxX), Math.abs(bbox.minZ), Math.abs(bbox.maxZ)) + 260) * 2 / 100) * 100;
   return { blocks, roadNodes: [...nodes.values()], roadEdges: [...edges.values()], terrain, extent, coast, river, publicSites, parkTrees,
-    urbanBounds, bridges, boundsRadius, carPaths, districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks: withBridgeLandmark(landmarks, bridges, random) };
+    urbanBounds, bridges, boundsRadius, carPaths, districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks: withBridgeLandmark(landmarks, bridges, random), seaside };
 }
 
 /** 悬索大桥：有河桥时，以一定概率把最长的那座替换成悬索桥（地标，不改路网）。 */

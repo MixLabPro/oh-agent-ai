@@ -52,6 +52,8 @@ export type CityLayout = {
   /** 海岸外扩环状航道（折线）与两侧装饰远山。 */
   civics: CivicSite[];
   landmarks: Landmark[];
+  /** VICE B1 海滨带：提供 coastal config 时存在；无配置为 null（旧行为）。 */
+  seaside: import("./citySeaside").SeasideBand | null;
   gardens: GardenSite[];
   boatLoops: Vec2[][]; seaMountains: Array<{ center: Vec2; radius: number; height: number; seed: number }>;
 };
