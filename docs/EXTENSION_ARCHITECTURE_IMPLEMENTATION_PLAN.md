@@ -211,8 +211,9 @@ E08 的实际身份统一为 `harness_manifest` / `harness:` / `harness`，DNS
 验证（在 `codex/e08-city-closeout`）：workspace `cargo test --release` 通过；
 `cargo clippy --release --all-targets -- -D warnings` 通过；`cargo build --release`
 通过；Python 与 release CLI 的 16 个 golden cases 逐字节一致。Python 全量
-`unittest discover` 跑了 1274 项，首次有 1 项 `verify-workbench-traces.mjs`
-失败，发生时桌面 bundle 正并行重建；打包完成后该脚本及对应单测独立复跑通过。
+`unittest discover` 最终 1274 项通过（210 项按测试条件跳过）。第一次运行有
+1 项 `verify-workbench-traces.mjs` 失败，当时桌面 bundle 正并行重建；打包完成后
+脚本及对应单测独立复跑通过，随后全量顺序复跑无失败。
 带 release CLI 的 `test_harness_contract.py` 20 项和 `test_ci_gate.py` 19 项
 均通过。City 侧 desktop React build、City package build/typecheck、7 项
 `verify:city` 检查、City 布局检查、插件架构检查与 native isolation 检查通过；
