@@ -17,6 +17,7 @@ import type { LoadedFlora } from "./cityFlora";
 import { makeCityTexture, makeDecoFacadeTexture, makeFacadeTexture, makeLabelSprite, paletteFor } from "./cityTextures";
 import type { TerrainField } from "./cityLayout";
 import { createRenderCanvas } from "./renderCanvas";
+import { SegmentIndex } from "./cityPlan";
 
 const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
 /** 单位圆柱（半径 1、高 1、底面为原点）：sx/sz 当半径、sy 当高度。 */
@@ -35,7 +36,9 @@ function expresswayDeckHeights(points: Array<{ x: number; z: number }>, groundAt
   const along: number[] = [0];
   for (let i = 1; i < points.length; i += 1) along.push(along[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].z - points[i - 1].z));
   const total = along[along.length - 1] || 1;
+  const closed = Math.hypot(points[0].x - points[points.length - 1].x, points[0].z - points[points.length - 1].z) < 0.01;
   return points.map((point, i) => {
+    if (closed) return EXPRESSWAY_DECK_Y;
     const edge = Math.min(along[i], total - along[i]);
     const u = Math.min(1, edge / EXPRESSWAY_RAMP);
     const ease = u * u * (3 - 2 * u);
@@ -782,6 +785,12 @@ export class CityParts {
         for (const side of [-1, 1]) {
           const offset = side * (edge.width / 2 - 0.15);
           add(x + Math.sin(yaw) * offset, deckTop, z + Math.cos(yaw) * offset, length, 0.65, 0.3, "#b9bcb2", 0, yaw);
+          const lineOffset = side * (edge.width / 2 - 0.65);
+          add(x + Math.sin(yaw) * lineOffset, deckTop + 0.015, z + Math.cos(yaw) * lineOffset, length, 0.025, 0.12, "#e4dfc9", 0, yaw);
+        }
+        for (let distance = 2; distance < length - 1; distance += 6) {
+          const t = (distance + 1) / length;
+          add(a.x + (b.x - a.x) * t, deckTop + 0.015, a.z + (b.z - a.z) * t, Math.min(2, length - distance), 0.025, 0.14, "#dfd1a5", 0, yaw);
         }
         for (let distance = 16; distance < length - 12; distance += 32) {
           const t = distance / length;
@@ -1801,6 +1810,12 @@ export class CityParts {
     spots.push(...(this.layout.parkTrees ?? []));
     if (theme.streetTreeSpacing > 0) {
       const terrain = this.layout.terrain;
+      const roads = new SegmentIndex(this.layout.roadEdges.map((edge) => edge.points));
+      const highways = new SegmentIndex(this.layout.highways ?? []);
+      const roadClearance = Math.max(0, ...this.layout.roadEdges.map((edge) => edge.width / 2)) + 1.2;
+      const slots = this.layout.districts.flatMap((district) => [...district.slots.values()]);
+      const buildings = new SegmentIndex(slots.map((slot) => [slot, slot]));
+      const buildingClearance = slots.reduce((radius, slot) => Math.max(radius, Math.hypot(slot.width, slot.depth) / 2 + 1.2), 0);
       for (const edge of this.layout.roadEdges) {
         if (edge.bridge) continue;
         const [a, b] = edge.points;
@@ -1817,6 +1832,9 @@ export class CityParts {
           const z = a.z + dz * along + dx * offset * side;
           const y = terrain.height(x, z);
           if (y < 1.2) continue;
+          const point = { x, z };
+          if (roads.closerThan(point, roadClearance) || highways.closerThan(point, EXPRESSWAY_DECK_WIDTH / 2 + 2)) continue;
+          if (buildings.closerThan(point, buildingClearance)) continue;
           spots.push({ x, z, y, seed: hashSeed(`street:${edge.id}:${index}`) });
         }
       }

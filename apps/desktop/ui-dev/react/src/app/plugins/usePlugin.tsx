@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke, listenAppEvents } from "../../lib/tauri";
 import { message, useLanguage } from "../../lib/i18n";
 
@@ -21,6 +21,10 @@ export function usePlugin(active: boolean, { id: pluginId, name }: PluginPresent
   const locale = useLanguage();
   const localeRef = useRef(locale); localeRef.current = locale;
   const currentId = useRef<string | null>(null);
+  const syncLayoutRef = useRef<(() => Promise<void>) | null>(null);
+  // React layout changes (including position-only changes) should not wait for
+  // a ResizeObserver plus another animation frame before moving the native view.
+  useLayoutEffect(() => { if (active) void syncLayoutRef.current?.(); });
   useEffect(() => {
     const rect = slot.current?.getBoundingClientRect();
     if (active && currentId.current && rect && rect.width > 0 && rect.height > 0) {
@@ -34,7 +38,6 @@ export function usePlugin(active: boolean, { id: pluginId, name }: PluginPresent
     let id: string | null = null;
     let ticking = false;
     let observer: ResizeObserver | null = null;
-    let resizeFrame: number | null = null;
     let layoutRunning = false;
     let layoutPending = false;
     let lastBounds = "";
@@ -70,20 +73,16 @@ export function usePlugin(active: boolean, { id: pluginId, name }: PluginPresent
               const next = bounds();
               const key = JSON.stringify(next);
               if (key === lastBounds) continue;
-              await invoke("plugin_open", { pluginId, bounds: next, restart: false, instanceId: id, locale: localeRef.current });
+              await invoke("plugin_open", { pluginId, bounds: next, restart: false, instanceId: id, boundsOnly: true });
               lastBounds = key;
             }
           } catch { if (!cancelled) setError("plugin_layout_failed"); }
           finally { layoutRunning = false; }
         };
-        observer = new ResizeObserver(() => {
-          if (resizeFrame !== null) return;
-          resizeFrame = window.requestAnimationFrame(() => {
-            resizeFrame = null;
-            if (!cancelled && id) void syncLayout();
-          });
-        });
+        syncLayoutRef.current = syncLayout;
+        observer = new ResizeObserver(() => { if (!cancelled && id) void syncLayout(); });
         if (slot.current) observer.observe(slot.current);
+        void syncLayout();
       } catch (reason) { if (!cancelled) setError(reason === "plugin_assets_missing" ? "plugin_assets_missing" : "plugin_create_failed"); }
     };
     void start();
@@ -120,7 +119,7 @@ export function usePlugin(active: boolean, { id: pluginId, name }: PluginPresent
     return () => {
       cancelled = true; observer?.disconnect(); unsubscribe(); window.clearInterval(timer);
       currentId.current = null;
-      if (resizeFrame !== null) window.cancelAnimationFrame(resizeFrame);
+      syncLayoutRef.current = null;
       window.removeEventListener("__AV_PLUGIN_STATUS__", onStatus);
       if (id) lifecycle.current = invoke("plugin_close", { instanceId: id, suspend: true }).catch(() => {});
     };

@@ -21,6 +21,16 @@ fn ensure_native_attachment(app: &tauri::AppHandle, view: &Webview) -> Result<()
     let id = view.label().to_owned();
     view.with_webview(move |platform| {
         let child = platform.inner() as *mut objc::runtime::Object;
+        // CSS only covers committed page pixels. WebKit can expose its own
+        // under-page fill while resizing; use the public macOS 12+ property.
+        unsafe {
+            let supports_fill: bool = msg_send![child, respondsToSelector: sel!(setUnderPageBackgroundColor:)];
+            if supports_fill {
+                let color: *mut objc::runtime::Object = msg_send![objc::class!(NSColor),
+                    colorWithSRGBRed: 22.0_f64 / 255.0 green: 40.0_f64 / 255.0 blue: 61.0_f64 / 255.0 alpha: 1.0_f64];
+                let _: () = msg_send![child, setUnderPageBackgroundColor: color];
+            }
+        }
         let window = native as *mut objc::runtime::Object;
         let attached: *mut objc::runtime::Object = unsafe { msg_send![child, window] };
         let repaired = attached != window;
@@ -226,8 +236,10 @@ fn start_watchdog(app: &tauri::AppHandle, state: &PluginHost) {
 }
 
 #[tauri::command]
-pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::State<'_, PluginHost>, plugin_id: String, bounds: Bounds, restart: bool, instance_id: Option<String>, locale: Option<String>) -> Result<String, String> {
+pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::State<'_, PluginHost>, plugin_id: String, bounds: Bounds, restart: bool, instance_id: Option<String>, locale: Option<String>, bounds_only: Option<bool>) -> Result<String, String> {
     host_only(&webview)?;
+    let bounds_only = bounds_only.unwrap_or(false);
+    if bounds_only && (restart || instance_id.is_none()) { return Err("plugin_instance_mismatch".into()); }
     let definition = definitions().iter().find(|plugin| plugin.id == plugin_id).ok_or("plugin_unknown")?;
     let locale = if locale.as_deref() == Some("en") { "en" } else { "zh-Hans" };
     let _operation = state.1.lock().unwrap();
@@ -250,10 +262,16 @@ pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::
     // Never hold the state lock while scheduling native main-thread operations.
     if let Some(id) = current_id {
         if let Some(view) = app.get_webview(&id) {
+            if bounds_only && state.0.lock().unwrap().current.as_ref().is_some_and(|i| i.suspended || i.failed.is_some()) {
+                return Err("plugin_instance_unavailable".into());
+            }
             view.set_bounds(tauri::Rect {
                 position: tauri::LogicalPosition::new(bounds.x, bounds.y).into(),
                 size: tauri::LogicalSize::new(bounds.width, bounds.height).into(),
             }).map_err(|_| "plugin_layout_failed")?;
+            // Geometry updates must not show/resume the plugin, reset its locale,
+            // or repeatedly enqueue native attachment inspection.
+            if bounds_only { return Ok(id); }
             view.show().map_err(|_| "plugin_layout_failed")?;
             ensure_native_attachment(&app, &view)?;
             let _ = view.eval(format!("window.__AV_PLUGIN_LOCALE__ = '{}'; window.dispatchEvent(new Event('__AV_PLUGIN_LOCALE_CHANGED__'));", locale));
@@ -264,6 +282,7 @@ pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::
             return Ok(id);
         }
     }
+    if bounds_only { return Err("plugin_instance_unavailable".into()); }
     let old = state.0.lock().unwrap().current.take();
     if let Some(old) = old { if let Some(view) = app.get_webview(&old.id) { let _ = view.close(); } }
     let id = {

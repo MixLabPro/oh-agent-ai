@@ -30,7 +30,7 @@
 .desktop-toolbar-actions:empty { display: none; }
 .plugin-toolbar { display: flex; align-items: center; gap: 6px; overflow-x: auto; max-width: 100%; }
 .plugin-toolbar > * { flex-shrink: 0; }
-.native-plugin-slot { height: 100%; width: 100%; min-height: 0; overflow: auto; }
+.native-plugin-slot { height: 100%; width: 100%; min-height: 0; overflow: auto; background: var(--plugin-surface-background, #16283d); color: #edf3fc; }
 .native-plugin-slot .plugin-fallback { padding: 24px; }
 .desktop-toolbar-actions .usage-toolbar,
 .desktop-toolbar-actions .skills-toolbar,

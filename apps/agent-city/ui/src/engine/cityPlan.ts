@@ -48,7 +48,8 @@ export class SegmentIndex {
   /** 点到任一路段的距离是否小于 d（d 不超过一个格宽，查询 3×3 格）。 */
   closerThan(p: Vec2, d: number): boolean {
     const gx = Math.floor(p.x / this.cell); const gz = Math.floor(p.z / this.cell);
-    for (let dx = -1; dx <= 1; dx += 1) for (let dz = -1; dz <= 1; dz += 1) {
+    const reach = Math.ceil(d / this.cell);
+    for (let dx = -reach; dx <= reach; dx += 1) for (let dz = -reach; dz <= reach; dz += 1) {
       const list = this.cells.get(`${gx + dx}:${gz + dz}`);
       if (list) for (const [a, b] of list) if (segmentDistance(p, a, b) < d) return true;
     }
@@ -337,6 +338,44 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome) {
     else { if (run.length >= 6) ringRuns.push(run); run = []; }
   }
   if (run.length >= 6) ringRuns.push(run);
+  // Highway fragments stop at the coast today, where the deck still hangs above
+  // the ground. Trim each end to buildable land, then connect it to a nearby arterial.
+  for (let r = ringRuns.length - 1; r >= 0; r -= 1) {
+    const points = ringRuns[r];
+    if (Math.hypot(points[0].x - points[points.length - 1].x, points[0].z - points[points.length - 1].z) < 0.01) continue;
+    const safe = (p: Vec2) => buildable(p.x, p.z);
+    while (points.length > 6 && !safe(points[0])) points.shift();
+    while (points.length > 6 && !safe(points[points.length - 1])) points.pop();
+    if (points.length <= 6) { ringRuns.splice(r, 1); continue; }
+    const exits: Vec2[] = [];
+    for (const end of [points[0], points[points.length - 1]]) {
+      const candidates: Array<{ p: Vec2; distance: number }> = [];
+      for (const edge of edges.values()) {
+        if (edge.bridge) continue;
+        const [a, b] = edge.points;
+        const dx = b.x - a.x; const dz = b.z - a.z;
+        const t = Math.max(0, Math.min(1, ((end.x - a.x) * dx + (end.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
+        const p = key({ x: a.x + t * dx, z: a.z + t * dz });
+        const distance = Math.hypot(p.x - end.x, p.z - end.z);
+        const samples = Math.max(1, Math.ceil(distance / 4));
+        let clear = true;
+        for (let k = 0; k <= samples; k += 1) {
+          if (!safe({ x: end.x + (p.x - end.x) * k / samples, z: end.z + (p.z - end.z) * k / samples })) { clear = false; break; }
+        }
+        if (clear) candidates.push({ p, distance });
+      }
+      candidates.sort((a, b) => a.distance - b.distance);
+      if (candidates[0]) exits.push(candidates[0].p);
+    }
+    if (exits.length !== 2) { ringRuns.splice(r, 1); continue; }
+    ringRuns[r] = [exits[0], ...points, exits[1]].filter((p, i, all) => i === 0 || Math.hypot(p.x - all[i - 1].x, p.z - all[i - 1].z) > 0.01);
+    for (const endpoint of exits) for (const edge of [...edges.values()]) {
+      if (edge.bridge || segmentDistance(endpoint, edge.points[0], edge.points[1]) > 0.02) continue;
+      edges.delete(edge.id);
+      addEdge(edge.points[0], endpoint, true);
+      addEdge(endpoint, edge.points[1], true);
+    }
+  }
   // 公共用地与地标先于环线选址，名义位置可能正压在高架上（clearsHighways 守卫只覆盖了地块/配套/花园）：
   // 环线只取决于核心点与岛半径，所以这里把压线的预留地原地重新贴到不压高架的位置；街区与地块都在此之后生成。
   for (const site of [...publicSites, ...landmarks]) {

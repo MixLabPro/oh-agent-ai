@@ -1,5 +1,5 @@
 .city-app, .city-app * { box-sizing: border-box; }
-.city-app { position: relative; flex: 1; min-height: 0; width: 100%; height: 100%; overflow: hidden; border-radius: 14px; color: #edf3fc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: radial-gradient(ellipse at 50% 54%, #16283d 0, #0a1321 47%, #080e18 100%); }
+.city-app { position: relative; flex: 1; min-height: 0; width: 100%; height: 100%; overflow: hidden; border-radius: 0; color: #edf3fc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: radial-gradient(ellipse at 50% 54%, #16283d 0, #0a1321 47%, #080e18 100%); }
 .city-app .city-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .city-app .city-scene-message { position: absolute; inset: 45% 36px auto; margin: 0; text-align: center; color: #aebdd0; font-size: 13px; }
 .city-app .city-header { position: absolute; top: 30px; left: 36px; right: 36px; display: flex; justify-content: space-between; align-items: flex-start; pointer-events: none; }
@@ -63,12 +63,13 @@
 .city-feature-error { color: #ffd2bc; }.city-feature-error button { float: right; }.city-perf { position: absolute; right: 20px; top: 10px; font-size: 11px; }
 @media (max-width: 700px) {
   .city-app .city-header { left: 18px; right: 18px; top: 16px; }.city-app .city-header h1 { font-size: 23px; }
-  .city-legend { display: none; }.city-app .city-stats { left: 16px; bottom: 164px; padding: 10px; gap: 10px; }
+  .city-legend { display: none; }.city-app .city-stats { left: 16px; bottom: 204px; padding: 10px; gap: 10px; }
   .city-export-preview { top: 104px; right: 12px; width: min(360px, calc(100% - 24px)); }
   .city-app:has(.city-export-preview) .city-detail-panel { top: 194px; left: 12px; right: 12px; width: auto; z-index: 4; }
   .city-app:has(.city-detail-panel) .city-export-preview canvas { display: none; }
-  .city-app .city-stats div { min-width: 65px; }.city-app footer { bottom: 146px; left: 16px; right: 16px; }
-  .city-timeline { left: 12px; right: 12px; grid-template-columns: auto 1fr; }.city-timeline > span { grid-column: 1; }
+  .city-app .city-stats div { min-width: 65px; }.city-app footer { bottom: 176px; left: 16px; right: 16px; }
+  .city-timeline { left: 12px; right: 12px; grid-template-columns: auto minmax(0, 1fr); max-height: 150px; overflow-y: auto; }.city-timeline > span { grid-column: 1; }
+  .city-timeline > button:last-of-type { grid-column: 1 / -1; }
   .city-detail-panel { right: 12px; left: 12px; top: 104px; width: auto; max-height: calc(100% - 275px); }
 }
 @media (prefers-reduced-motion: reduce) { .city-app *, .city-app *::before, .city-app *::after { animation: none !important; transition: none !important; } }
