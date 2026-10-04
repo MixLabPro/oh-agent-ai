@@ -24,6 +24,21 @@ pub fn supported_hosts_for(data_home: &Path) -> Vec<String> {
     let mut hosts = HOSTS.iter().map(|host| (*host).to_string()).collect::<Vec<_>>();
     let (plugins, _) = crate::host_registry::scan_plugin_hosts(data_home);
     hosts.extend(plugins.into_iter().map(|plugin| format!("host:{}", plugin.slug)));
+    // Installed history remains controllable when input disappears or activation
+    // changes during a pinned ingest. Never drop its stop-reading rule.
+    let path = agent_vitals_data::authority::default_authority_path(data_home);
+    if let Ok(db) = agent_vitals_data::authority::AuthorityDb::open_readonly(&path) {
+        if let Ok(mut statement) = db.conn().prepare(
+            "SELECT DISTINCT slot_id FROM extension_revisions WHERE slot_type='host_manifest'"
+        ) {
+            if let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) {
+                hosts.extend(rows.flatten().filter(|slug| crate::host_registry::plugin_slug_ok(slug))
+                    .map(|slug| format!("host:{slug}")));
+            }
+        }
+    }
+    hosts.sort();
+    hosts.dedup();
     hosts
 }
 

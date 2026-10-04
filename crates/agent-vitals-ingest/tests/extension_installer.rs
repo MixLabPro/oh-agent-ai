@@ -73,7 +73,40 @@ fn slot_map(id: &str) -> SlotMap {
     BTreeMap::from([(("host_manifest".to_string(), "zcode".to_string()), id.to_string())])
 }
 fn ticket(expected: i64, revisions: Vec<ExtensionRevision>, map: SlotMap) -> PreviewTicket {
-    PreviewTicket { expected_generation: expected, engine_version: "1.4.0".to_string(), action: ActivationAction::Activate, new_revisions: revisions, target_map: map }
+    PreviewTicket { expected_generation: expected, engine_version: "1.4.0".to_string(), action: ActivationAction::Activate, new_revisions: revisions, target_map: map, local_input: None }
+}
+
+#[test]
+fn preview_hash_binds_vendor_capabilities_and_unambiguous_slot_fields() {
+    let (_fixture, _db, store) = Fixture::new();
+    let vendor = revision("vendor", RevisionOrigin::VendorCatalog {
+        source:"catalog".into(), commit:"b".repeat(40), index_sha256:"c".repeat(64),
+    }, &store, br#"{"manifest_version":1}"#);
+    let original = ticket(0, vec![vendor], slot_map("vendor"));
+    let hash = original.preview_sha256();
+    let mut changed = original.clone();
+    changed.new_revisions[0].origin = RevisionOrigin::VendorCatalog {
+        source:"different-catalog".into(), commit:"b".repeat(40), index_sha256:"c".repeat(64),
+    };
+    assert_ne!(changed.preview_sha256(), hash);
+    for (commit, index_sha256) in [("d".repeat(40), "c".repeat(64)), ("b".repeat(40), "d".repeat(64))] {
+        changed = original.clone();
+        changed.new_revisions[0].origin = RevisionOrigin::VendorCatalog {
+            source:"catalog".into(), commit, index_sha256,
+        };
+        assert_ne!(changed.preview_sha256(), hash);
+    }
+    changed = original.clone();
+    changed.new_revisions[0].capabilities = serde_json::json!({"features":["changed"]});
+    assert_ne!(changed.preview_sha256(), hash);
+    let mut left = ticket(0, vec![], BTreeMap::from([(("a\tb".into(), "c".into()), "r".into())]));
+    let right = ticket(0, vec![], BTreeMap::from([(("a".into(), "b\tc".into()), "r".into())]));
+    assert_ne!(left.preview_sha256(), right.preview_sha256(), "field separators must not alias tickets");
+    left.new_revisions = original.new_revisions.clone();
+    left.new_revisions[0].capabilities = serde_json::from_str(r#"{"b":{"y":2,"x":1},"a":0}"#).unwrap();
+    let mut reordered = left.clone();
+    reordered.new_revisions[0].capabilities = serde_json::from_str(r#"{"a":0,"b":{"x":1,"y":2}}"#).unwrap();
+    assert_eq!(left.preview_sha256(), reordered.preview_sha256());
 }
 
 #[test]

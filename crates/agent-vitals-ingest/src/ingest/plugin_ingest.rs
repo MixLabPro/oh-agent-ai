@@ -15,6 +15,7 @@
 //! 单文件零 target 只标黄——混合目录不误伤，spec §4.3 修订案）。
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use agent_vitals_domain::usage_fact::build_usage_fact;
@@ -68,6 +69,9 @@ pub struct PluginRunReport {
     pub warnings: Vec<String>,
     #[serde(skip_serializing)]
     pub facts: Vec<Value>,
+    /// Opaque exact-input digest for local preview binding; not a serving field.
+    #[serde(skip_serializing)]
+    pub corpus_fingerprint: String,
 }
 
 /// 加载并校验 manifest 文件（含 slug == 目录名检查）。`--file` 模式下
@@ -75,7 +79,11 @@ pub struct PluginRunReport {
 pub fn load_manifest(manifest_path: &Path) -> Result<(PluginManifest, String), String> {
     let raw = std::fs::read(manifest_path)
         .map_err(|e| format!("manifest `{}` 不可读：{e}", manifest_path.display()))?;
-    let value: Value = serde_json::from_slice(&raw)
+    parse_manifest_bytes(manifest_path, &raw)
+}
+
+pub(crate) fn parse_manifest_bytes(manifest_path: &Path, raw: &[u8]) -> Result<(PluginManifest, String), String> {
+    let value: Value = serde_json::from_slice(raw)
         .map_err(|e| format!("manifest `{}` 不是合法 JSON：{e}", manifest_path.display()))?;
     let manifest = generic_manifest::parse_manifest(value)
         .map_err(|e| format!("manifest 校验失败：{e}"))?;
@@ -91,7 +99,7 @@ pub fn load_manifest(manifest_path: &Path) -> Result<(PluginManifest, String), S
         ));
     }
     use sha2::Digest;
-    let digest = sha2::Sha256::digest(&raw);
+    let digest = sha2::Sha256::digest(raw);
     let revision: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
     Ok((manifest, revision))
 }
@@ -302,14 +310,35 @@ pub fn run_plugin(
     home: &Path,
 ) -> Result<PluginRunReport, String> {
     let (manifest, revision) = load_manifest(manifest_path)?;
-    let def = generic_recipe::recipe_def(&manifest.recipe)
-        .ok_or_else(|| format!("未知 recipe `{}`", manifest.recipe))?;
-    generic_recipe::check_overrides(def, &manifest).map_err(|e| format!("overrides 校验失败：{e}"))?;
+    run_manifest(manifest, revision, files, machine_namespace, home)
+}
 
-    // 文件集：显式列表 or discovery。
-    let mut units: Vec<(String, PathBuf, String, String)> = Vec::new(); // (rel, abs, session_id, profile)
+struct CapturedUnit {
+    rel: String,
+    abs: PathBuf,
+    session_id: String,
+    profile: String,
+    content: Option<String>,
+}
+
+const MAX_FROZEN_CORPUS_BYTES: usize = 64 * 1024 * 1024;
+
+fn read_frozen_file(path: &Path, remaining: usize) -> Result<String, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("文件 `{}` 不可读：{e}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take((remaining as u64) + 1).read_to_end(&mut bytes)
+        .map_err(|e| format!("文件 `{}` 不可读：{e}", path.display()))?;
+    if bytes.len() > remaining {
+        return Err("frozen preview corpus exceeds 64 MiB; use a bounded sample".into());
+    }
+    String::from_utf8(bytes).map_err(|_| format!("文件 `{}` 不是 UTF-8", path.display()))
+}
+
+fn capture_corpus(manifest: &PluginManifest, files: &[PathBuf], home: &Path, freeze: bool) -> Result<Vec<CapturedUnit>, String> {
+    let mut units: Vec<(String, PathBuf, String, String)> = Vec::new();
     if files.is_empty() {
-        let report = agent_vitals_hosts::generic_discover::discover_files(&manifest, home)
+        let report = agent_vitals_hosts::generic_discover::discover_files(manifest, home)
             .map_err(|e| format!("discovery 失败：{e}"))?;
         for f in &report.files {
             let root_declared = manifest
@@ -349,6 +378,39 @@ pub fn run_plugin(
         }
     }
     units.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut total = 0usize;
+    units.into_iter().map(|(rel, abs, session_id, profile)| {
+        let content = if freeze {
+            let remaining = MAX_FROZEN_CORPUS_BYTES.saturating_sub(total);
+            let value = read_frozen_file(&abs, remaining)?;
+            total = total.checked_add(value.len()).ok_or("frozen preview corpus size overflow")?;
+            if total > MAX_FROZEN_CORPUS_BYTES { return Err("frozen preview corpus exceeds 64 MiB; use a bounded sample".into()); }
+            Some(value)
+        } else { None };
+        Ok(CapturedUnit { rel, abs, session_id, profile, content })
+    }).collect()
+}
+
+fn run_manifest(
+    manifest: PluginManifest,
+    revision: String,
+    files: &[PathBuf],
+    machine_namespace: &str,
+    home: &Path,
+) -> Result<PluginRunReport, String> {
+    let captured = capture_corpus(&manifest, files, home, false)?;
+    run_captured_manifest(manifest, revision, &captured, machine_namespace)
+}
+
+fn run_captured_manifest(
+    manifest: PluginManifest,
+    revision: String,
+    units: &[CapturedUnit],
+    machine_namespace: &str,
+) -> Result<PluginRunReport, String> {
+    let def = generic_recipe::recipe_def(&manifest.recipe)
+        .ok_or_else(|| format!("未知 recipe `{}`", manifest.recipe))?;
+    generic_recipe::check_overrides(def, &manifest).map_err(|e| format!("overrides 校验失败：{e}"))?;
 
     let ctx = ThroatCtx {
         def,
@@ -364,17 +426,42 @@ pub fn run_plugin(
         manifest_revision: revision.clone(),
         ..Default::default()
     };
-    for (rel, abs, session_id, profile) in &units {
-        let content = std::fs::read_to_string(abs)
-            .map_err(|e| format!("文件 `{}` 不可读：{e}", abs.display()))?;
+    use sha2::Digest;
+    let mut corpus_hash = sha2::Sha256::new();
+    let mut ids_again = Vec::new();
+    for value in ["manifest-corpus/v1", machine_namespace] {
+        corpus_hash.update((value.len() as u64).to_be_bytes());
+        corpus_hash.update(value.as_bytes());
+    }
+    for unit in units {
+        let CapturedUnit { rel, abs, session_id, profile, content } = unit;
+        let owned;
+        let content = match content {
+            Some(content) => content.as_str(),
+            None => {
+                owned = std::fs::read_to_string(abs)
+                    .map_err(|e| format!("文件 `{}` 不可读：{e}", abs.display()))?;
+                &owned
+            }
+        };
         let (report, mut facts) = extract_file(
             &ctx,
             profile,
             rel,
             abs,
             session_id,
-            &content,
+            content,
         );
+        // Both replays use these exact bytes. Never reread a live log merely
+        // to claim extractor determinism (tokens can change without ID drift).
+        let (_, replay) = extract_file(&ctx, profile, rel, abs, session_id, content);
+        ids_again.extend(replay.iter().filter_map(|fact|
+            fact.get("fact_id").and_then(Value::as_str).map(String::from)));
+        for value in [rel.as_bytes(), abs.as_os_str().as_encoded_bytes(), session_id.as_bytes(),
+            profile.as_bytes(), content.as_bytes()] {
+            corpus_hash.update((value.len() as u64).to_be_bytes());
+            corpus_hash.update(value);
+        }
         out.emitted += report.emitted;
         out.skipped += report.skipped;
         out.invalid += report.invalid;
@@ -383,6 +470,7 @@ pub fn run_plugin(
         out.files.push(report);
         out.facts.append(&mut facts);
     }
+    out.corpus_fingerprint = format!("{:x}", corpus_hash.finalize());
 
     // 汇总：日期范围 + 模型清单。
     let mut models = std::collections::BTreeSet::new();
@@ -407,7 +495,7 @@ pub fn run_plugin(
     {
         let mut by_session: BTreeMap<&str, std::collections::BTreeSet<&str>> =
             BTreeMap::new();
-        for (session, profile) in units.iter().map(|(_r, _a, s, p)| (s.as_str(), p.as_str())) {
+        for (session, profile) in units.iter().map(|unit| (unit.session_id.as_str(), unit.profile.as_str())) {
             by_session.entry(session).or_default().insert(profile);
         }
         for (session, profiles) in &by_session {
@@ -427,31 +515,134 @@ pub fn run_plugin(
         .iter()
         .filter_map(|f| f.get("fact_id").and_then(Value::as_str).map(String::from))
         .collect();
-    out.fact_id_stable = {
-        // 第二遍：重跑同样的提取循环（纯函数 ⇒ 确定性；这一步同时验证
-        // build_usage_fact 的 fact_id 与字段 map 一一对应，无隐藏状态）。
-        let mut ids_again = Vec::new();
-        for (rel, abs, session_id, profile) in &units {
-            let Ok(content) = std::fs::read_to_string(abs) else {
-                continue;
-            };
-            let (_, facts2) = extract_file(
-                &ctx,
-                profile,
-                rel,
-                abs,
-                session_id,
-                &content,
-            );
-            for f in facts2 {
-                if let Some(id) = f.get("fact_id").and_then(Value::as_str) {
-                    ids_again.push(id.to_string());
-                }
+    out.fact_id_stable = ids_once == ids_again;
+    Ok(out)
+}
+
+/// Redacted local impact summary; identities and source contents stay internal.
+#[derive(Debug, serde::Serialize)]
+pub struct ManifestImpact {
+    pub captured_files: usize,
+    pub coverage: &'static str,
+    pub previous_facts: usize,
+    pub candidate_facts: usize,
+    pub previous_emitted: usize,
+    pub candidate_emitted: usize,
+    pub previous_skipped: usize,
+    pub candidate_skipped: usize,
+    pub previous_invalid: usize,
+    pub candidate_invalid: usize,
+    pub changed_tokens: usize,
+    pub changed_models: usize,
+    pub changed_timestamps: usize,
+    pub impact_sha256: String,
+    #[serde(skip_serializing)]
+    pub corpus_fingerprint: String,
+}
+
+/// Pure local preview: no authority writes and no source contents in its output.
+/// Replayed reports must prove they captured the same corpus. Updates cannot
+/// change identities implicitly; an explicit migration is a separate operation.
+pub fn preview_manifest_impact(
+    previous: Option<&PluginRunReport>,
+    candidate: &PluginRunReport,
+) -> Result<ManifestImpact, String> {
+    validate_gate(candidate)?;
+    if candidate.corpus_fingerprint.len() != 64 || !candidate.corpus_fingerprint.bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        return Err("preview requires a captured corpus fingerprint".into());
+    }
+    fn facts_by_id(report: &PluginRunReport) -> Result<BTreeMap<&str, &Value>, String> {
+        let mut facts = BTreeMap::new();
+        for fact in &report.facts {
+            let id = fact.get("fact_id").and_then(Value::as_str).filter(|id| !id.is_empty())
+                .ok_or("preview fact has no identity")?;
+            if let Some(prior) = facts.insert(id, fact) {
+                if prior != fact { return Err("preview contains conflicting duplicate identities".into()); }
             }
         }
-        ids_once == ids_again
+        if facts.is_empty() { return Err("preview has no captured facts".into()); }
+        Ok(facts)
+    }
+    let next = facts_by_id(candidate)?;
+    let old = match previous {
+        Some(previous) => {
+            validate_gate(previous)?;
+            if previous.corpus_fingerprint != candidate.corpus_fingerprint {
+                return Err("preview input changed; recapture the same corpus before comparison".into());
+            }
+            if previous.host != candidate.host { return Err("preview host identity drift".into()); }
+            let facts = facts_by_id(previous)?;
+            if !facts.keys().eq(next.keys()) { return Err("preview fact identity drift; explicit migration required".into()); }
+            facts
+        }
+        None => BTreeMap::new(),
     };
-    Ok(out)
+    let mut impact = ManifestImpact {
+        captured_files:candidate.files.len(), coverage:"captured-files-only",
+        previous_facts:old.len(), candidate_facts:next.len(),
+        previous_emitted:previous.map_or(0, |report| report.emitted), candidate_emitted:candidate.emitted,
+        previous_skipped:previous.map_or(0, |report| report.skipped), candidate_skipped:candidate.skipped,
+        previous_invalid:previous.map_or(0, |report| report.invalid), candidate_invalid:candidate.invalid,
+        changed_tokens:0, changed_models:0, changed_timestamps:0, impact_sha256:String::new(),
+        corpus_fingerprint:candidate.corpus_fingerprint.clone() };
+    for (id, new) in &next {
+        if let Some(prior) = old.get(id) {
+            if ["uncached_input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens"]
+                .iter().any(|key| prior.get(*key) != new.get(*key)) { impact.changed_tokens += 1; }
+            if prior.get("model_raw") != new.get("model_raw") { impact.changed_models += 1; }
+            if prior.get("event_ts_utc") != new.get("event_ts_utc") { impact.changed_timestamps += 1; }
+        }
+    }
+    use sha2::Digest;
+    let payload = json!({"schema":"manifest-impact/v1", "engine":env!("CARGO_PKG_VERSION"),
+        "host":candidate.host, "corpus":candidate.corpus_fingerprint,
+        "coverage":impact.coverage, "captured_files":impact.captured_files,
+        "previous_emitted":impact.previous_emitted, "candidate_emitted":impact.candidate_emitted,
+        "previous_skipped":impact.previous_skipped, "candidate_skipped":impact.candidate_skipped,
+        "previous_invalid":impact.previous_invalid, "candidate_invalid":impact.candidate_invalid,
+        "previous_recipe":previous.map(|report| report.recipe.as_str()), "candidate_recipe":candidate.recipe,
+        "previous_revision":previous.map(|report| report.manifest_revision.as_str()),
+        "candidate_revision":candidate.manifest_revision, "old":old, "new":next});
+    impact.impact_sha256 = format!("{:x}", sha2::Sha256::digest(
+        super::extension_installer::canonical_value(&payload).to_string().as_bytes()));
+    Ok(impact)
+}
+
+/// Replay one immutable recipe over a bounded, frozen corpus.
+pub(crate) fn frozen_manifest_replay(manifest: PluginManifest, revision: String,
+    files: &[PathBuf], machine_namespace: &str, home: &Path) -> Result<PluginRunReport, String> {
+    if machine_namespace.is_empty() { return Err("replay requires machine namespace".into()); }
+    let captured = capture_corpus(&manifest, files, home, true)?;
+    let report = run_captured_manifest(manifest, revision, &captured, machine_namespace)?;
+    validate_gate(&report)?;
+    Ok(report)
+}
+
+/// Capture each selected source once, then run both recipes over those bytes.
+/// A change to discovery or session declarations needs an explicit identity
+/// migration; otherwise reusing candidate-derived source keys would hide it.
+pub fn preview_captured_manifest_change(
+    previous: Option<(PluginManifest, String)>,
+    candidate: (PluginManifest, String),
+    files: &[PathBuf],
+    machine_namespace: &str,
+    home: &Path,
+) -> Result<ManifestImpact, String> {
+    if machine_namespace.is_empty() { return Err("preview requires machine namespace".into()); }
+    let (candidate_manifest, candidate_revision) = candidate;
+    if let Some((prior, _)) = &previous {
+        if prior.slug != candidate_manifest.slug || prior.roots != candidate_manifest.roots
+            || prior.include != candidate_manifest.include
+            || prior.session_pattern.as_str() != candidate_manifest.session_pattern.as_str() {
+            return Err("preview source identity declaration drift; explicit migration required".into());
+        }
+    }
+    let captured = capture_corpus(&candidate_manifest, files, home, true)?;
+    let prior = previous.map(|(manifest, revision)|
+        run_captured_manifest(manifest, revision, &captured, machine_namespace)).transpose()?;
+    let candidate = run_captured_manifest(candidate_manifest, candidate_revision, &captured, machine_namespace)?;
+    preview_manifest_impact(prior.as_ref(), &candidate)
 }
 
 /// validate 的判定门（§6.5）：返回 Ok(()) 或可操作拒绝原因。
@@ -477,9 +668,10 @@ pub fn validate_gate(report: &PluginRunReport) -> Result<(), String> {
     Ok(())
 }
 
-/// ingest --write：validate 门 → facts JSONL（exactly-once）→ authority
-/// 双写。任何一步失败如实报错；两阶段各自 exactly-once，重跑安全。
-pub fn plugin_ingest_write(
+/// ingest --write：validate 门 → authority → facts JSONL 镜像。
+/// authority 失败不写镜像；镜像失败可重跑修复，两阶段各自 exactly-once。
+#[cfg(test)]
+fn plugin_ingest_write(
     manifest_path: &Path,
     machine_namespace: &str,
     data_home: &Path,
@@ -488,18 +680,10 @@ pub fn plugin_ingest_write(
     let mut report = run_plugin(manifest_path, &[], machine_namespace, home)?;
     validate_gate(&report).map_err(|e| format!("validate 拒绝安装：{e}"))?;
     let facts = std::mem::take(&mut report.facts);
-    let ingest = crate::ingest_service::ingest_facts(data_home, &facts)?;
-    // authority 双写（§2 图：facts 后写 authority 先写语义对齐为「同一事务
-    // 面」；这里沿用 sync_service 的 write_flat_facts_with_sources，SQL 侧
-    // exactly-once 由 (host, ns, session, event_id, kind) UNIQUE 承担）。
-    let authority = match open_authority_and_write(data_home, &report, &facts) {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(format!(
-                "authority 双写失败（facts JSONL 已落盘、重跑不双计）：{e}"
-            ));
-        }
-    };
+    let authority = open_authority_and_write(data_home, &report, &facts)
+        .map_err(|e| format!("authority 写入失败（未写 facts JSONL 镜像）：{e}"))?;
+    let ingest = crate::ingest_service::ingest_facts(data_home, &facts)
+        .map_err(|e| format!("facts JSONL 镜像失败（authority 已提交，重跑可修复）：{e}"))?;
     let payload = json!({
         "mode": "ingest",
         "report": serde_json::to_value(&report).unwrap_or(Value::Null),
@@ -509,17 +693,27 @@ pub fn plugin_ingest_write(
     Ok(payload)
 }
 
+#[cfg(test)]
 fn open_authority_and_write(
     data_home: &Path,
     report: &PluginRunReport,
     facts: &[Value],
+) -> Result<Value, String> {
+    open_authority_and_write_extension(data_home, report, facts, None)
+}
+
+fn open_authority_and_write_extension(
+    data_home: &Path,
+    report: &PluginRunReport,
+    facts: &[Value],
+    extension: Option<&agent_vitals_data::fact_writer_sql::ExtensionFactContext>,
 ) -> Result<Value, String> {
     let authority_path = agent_vitals_data::authority::default_authority_path(data_home);
     let now = crate::clock::now_ms();
     let db = agent_vitals_data::authority::AuthorityDb::open(&authority_path, now)
         .map_err(|e| format!("authority open: {e}"))?;
     let no_overrides: std::collections::HashMap<String, crate::source_graph::SourceCheckpointOverride> = std::collections::HashMap::new();
-    let outcome = crate::sql_sync::write_flat_facts_with_sources(
+    let outcome = crate::sql_sync::write_flat_facts_with_sources_and_extension(
         &db,
         &report.host,
         // write_flat_facts_with_sources 需要 machine_namespace——从事实行取。
@@ -539,8 +733,17 @@ fn open_authority_and_write(
         None,
         None,
         now,
+        extension,
     )
     .map_err(|e| format!("authority write: {e}"))?;
+    // A successful transaction can still reject individual inputs. Do not mirror
+    // the unfiltered input batch as if every row had been accepted by authority.
+    if outcome.rejected > 0 || !outcome.errors.is_empty() {
+        return Err(format!(
+            "authority 未完整接受输入（accepted rows 已提交）：rejected={}, errors={:?}",
+            outcome.rejected, outcome.errors,
+        ));
+    }
     Ok(json!({
         "files_synced": outcome.files_synced,
         "files_skipped": outcome.files_skipped,
@@ -568,8 +771,8 @@ fn source_entries(report: &PluginRunReport) -> Vec<(PathBuf, (u64, u64))> {
     entries
 }
 
-/// 周期再摄取（zcode 宿主接入收尾，2026-09-23）：对**已安装**的全部插件
-/// manifest 逐个执行 [`plugin_ingest_write`]——exactly-once 由事实层
+/// 周期再摄取：仅消费 authority 激活的不可变 manifest，整轮固定 generation。
+/// `.d` 是候选输入，不自动安装。exactly-once 由事实层
 /// fact_id 幂等兜底（重放 = duplicate 计数，不双计）。单 manifest 失败
 /// 隔离为 Err 条目（坏 manifest 不得拖垮整轮 sync，tick 兜底语义）。
 /// 返回 (slug, 摘要 or 错误) 列表供调用方记入 report.errors/log。
@@ -578,19 +781,92 @@ pub fn ingest_installed(
     data_home: &Path,
     user_home: &Path,
 ) -> Vec<(String, Result<Value, String>)> {
+    match ingest_active_generation(ns, data_home, user_home) {
+        Ok(out) => out,
+        Err(error) => vec![("extension-registry".into(), Err(error))],
+    }
+}
+
+type InstalledIngestResults = Vec<(String, Result<Value, String>)>;
+
+fn ingest_active_generation(
+    ns: &str,
+    data_home: &Path,
+    user_home: &Path,
+) -> Result<InstalledIngestResults, String> {
+    ingest_active_generation_after_pin(ns, data_home, user_home, || {})
+}
+
+fn ingest_active_generation_after_pin(
+    ns: &str,
+    data_home: &Path,
+    user_home: &Path,
+    after_pin: impl FnOnce(),
+) -> Result<InstalledIngestResults, String> {
+    let authority_path = agent_vitals_data::authority::default_authority_path(data_home);
+    if !authority_path.exists() { return Ok(unactivated_candidates(data_home, &[])); }
+    let db = agent_vitals_data::authority::AuthorityDb::open(&authority_path, crate::clock::now_ms())
+        .map_err(|e| format!("extension authority: {e}"))?;
+    // One SELECT snapshot pins the whole host set, not a fresh pointer per host.
+    let mut stmt = db.conn().prepare(
+        "SELECT a.generation,s.slot_id,s.revision_id,r.content_sha256
+         FROM extension_active a JOIN extension_activation_slots s ON s.generation=a.generation
+         JOIN extension_revisions r ON r.revision_id=s.revision_id
+         WHERE s.slot_type='host_manifest' ORDER BY s.slot_id"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?,
+        r.get::<_, String>(2)?, r.get::<_, String>(3)?)))
+        .map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    drop(stmt);
+    drop(db);
+    after_pin();
+    if rows.is_empty() { return Ok(unactivated_candidates(data_home, &[])); }
+    let active_slugs: Vec<String> = rows.iter().map(|row| row.1.clone()).collect();
+    let store = agent_vitals_runtime_core::core::extension_objects::ObjectStore::open(
+        &data_home.join("state/extensions"))
+        .map_err(|e| format!("extension objects: {e}"))?;
+    let mut out = unactivated_candidates(data_home, &active_slugs);
+    for (generation, slug, revision_id, hash) in rows {
+        let result = (|| {
+            let host = format!("host:{slug}");
+            let _lease = crate::lease::acquire_blocking(
+                &crate::source_controls::host_data_lock_path(data_home, &host)?,
+                "manifest-ingest", 600_000, 10_000,
+            ).map_err(|e| format!("manifest lease: {e}"))?;
+            if crate::source_controls::excluded_hosts(data_home)?.contains(&host) {
+                return Ok(json!({"mode":"ingest", "host":host, "skipped":"source_excluded",
+                    "generation":generation}));
+            }
+            let value = store.load(&hash).map_err(|e| format!("active object: {e}"))?;
+            let manifest = generic_manifest::parse_manifest(value).map_err(|e| e.to_string())?;
+            if manifest.slug != slug { return Err("active manifest slug does not match slot".into()); }
+            super::extension_installer::ensure_compiled_sources_exclusive(&manifest, user_home, data_home)?;
+            let mut report = run_manifest(manifest, hash[..16].to_string(), &[], ns, user_home)?;
+            validate_gate(&report)?;
+            let facts = std::mem::take(&mut report.facts);
+            let context = agent_vitals_data::fact_writer_sql::ExtensionFactContext {
+                generation, revision_id, engine_version: env!("CARGO_PKG_VERSION").to_string(),
+            };
+            let authority = open_authority_and_write_extension(data_home, &report, &facts, Some(&context))?;
+            let ingest = crate::ingest_service::ingest_facts(data_home, &facts)
+                .map_err(|e| format!("facts mirror failed (authority committed): {e}"))?;
+            Ok(json!({"mode":"ingest", "report":report, "ingest":ingest, "authority":authority,
+                "generation":generation}))
+        })();
+        out.push((slug, result));
+    }
+    Ok(out)
+}
+
+fn unactivated_candidates(data_home: &Path, active: &[String]) -> Vec<(String, Result<Value, String>)> {
     let (hosts, errors) = scan_plugin_hosts(data_home);
-    let mut out = Vec::new();
-    for e in errors {
-        out.push((
-            e.manifest_path.to_string_lossy().to_string(),
-            Err(format!("manifest 解析失败: {}", e.problem)),
-        ));
-    }
-    for h in hosts {
-        let result = plugin_ingest_write(&h.manifest_path, ns, data_home, user_home)
-            .map_err(|e| format!("plugin_ingest_write: {e}"));
-        out.push((h.slug.clone(), result));
-    }
+    let mut out: Vec<_> = hosts.into_iter().filter(|host| !active.contains(&host.slug))
+        .map(|host| (host.slug, Err("manifest is an unactivated candidate; explicit preview and activation required".into())))
+        .collect();
+    out.extend(errors.into_iter().filter(|error| {
+        !active.iter().any(|slug| error.manifest_path == data_home.join("hosts.d").join(slug).join("manifest.json"))
+    }).map(|error| (error.manifest_path.to_string_lossy().to_string(), Err(error.problem))));
     out
 }
 
@@ -703,6 +979,209 @@ mod tests {
     }
 
     #[test]
+    fn local_impact_preview_counts_changes_without_writes_or_raw_output() {
+        let home = tmp_home("impact-counts");
+        let (manifest, files) = setup_host(&home);
+        let old = run_plugin(&manifest, &files, "m1", &home).unwrap();
+        let mut candidate = run_plugin(&manifest, &files, "m1", &home).unwrap();
+        let unchanged = preview_manifest_impact(Some(&old), &candidate).unwrap();
+        assert_eq!((unchanged.previous_facts, unchanged.candidate_facts), (3, 3));
+        assert_eq!(unchanged.captured_files, 2);
+        assert_eq!(unchanged.coverage, "captured-files-only");
+        assert_eq!((unchanged.previous_emitted, unchanged.candidate_emitted), (old.emitted, candidate.emitted));
+        assert_eq!((unchanged.previous_skipped, unchanged.candidate_skipped), (old.skipped, candidate.skipped));
+        assert_eq!((unchanged.previous_invalid, unchanged.candidate_invalid), (old.invalid, candidate.invalid));
+        assert_eq!((unchanged.changed_tokens, unchanged.changed_models, unchanged.changed_timestamps), (0, 0, 0));
+        assert_eq!(unchanged.impact_sha256,
+            preview_manifest_impact(Some(&old), &candidate).unwrap().impact_sha256);
+        candidate.skipped += 1;
+        assert_ne!(unchanged.impact_sha256,
+            preview_manifest_impact(Some(&old), &candidate).unwrap().impact_sha256);
+        candidate.skipped -= 1;
+        candidate.files.pop();
+        assert_ne!(unchanged.impact_sha256,
+            preview_manifest_impact(Some(&old), &candidate).unwrap().impact_sha256);
+        candidate = run_plugin(&manifest, &files, "m1", &home).unwrap();
+        candidate.facts[0]["uncached_input_tokens"] = json!(101);
+        candidate.facts[0]["cache_read_tokens"] = json!(6);
+        candidate.facts[0]["cache_write_tokens"] = json!(7);
+        candidate.facts[0]["output_tokens"] = json!(100);
+        candidate.facts[1]["model_raw"] = json!("private-model-marker");
+        candidate.facts[2]["event_ts_utc"] = json!("2026-09-20T15:18:41.337Z");
+        let changed = preview_manifest_impact(Some(&old), &candidate).unwrap();
+        assert_eq!((changed.changed_tokens, changed.changed_models, changed.changed_timestamps), (1, 1, 1));
+        assert_ne!(unchanged.impact_sha256, changed.impact_sha256);
+        let output = serde_json::to_string(&changed).unwrap();
+        for fact in &candidate.facts {
+            assert!(!output.contains(fact["fact_id"].as_str().unwrap()));
+        }
+        assert!(!output.contains("private-model-marker"));
+        assert!(!output.contains("2026-09-20"));
+        assert!(!output.contains(&home.to_string_lossy().to_string()));
+        assert!(!output.contains(&candidate.corpus_fingerprint));
+        assert!(!agent_vitals_data::authority::default_authority_path(&home).exists());
+        assert!(!home.join("facts").exists());
+        let first_install = preview_manifest_impact(None, &candidate).unwrap();
+        assert_eq!((first_install.previous_facts, first_install.candidate_facts), (0, 3));
+        assert_eq!((first_install.previous_emitted, first_install.previous_skipped, first_install.previous_invalid), (0, 0, 0));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn local_impact_preview_rejects_scope_host_and_identity_drift() {
+        let home = tmp_home("impact-drift");
+        let (manifest, files) = setup_host(&home);
+        let old = run_plugin(&manifest, &files, "m1", &home).unwrap();
+        let mut candidate = run_plugin(&manifest, &files, "m1", &home).unwrap();
+        candidate.corpus_fingerprint = "a".repeat(64);
+        assert!(preview_manifest_impact(Some(&old), &candidate).unwrap_err().contains("input changed"));
+        candidate.corpus_fingerprint = old.corpus_fingerprint.clone();
+        candidate.host = "host:other".into();
+        assert!(preview_manifest_impact(Some(&old), &candidate).unwrap_err().contains("host identity drift"));
+        candidate.host = old.host.clone();
+        candidate.facts[0]["fact_id"] = json!("private-drift-id");
+        let error = preview_manifest_impact(Some(&old), &candidate).unwrap_err();
+        assert!(error.contains("fact identity drift"));
+        assert!(!error.contains("private-drift-id"));
+        candidate.facts[0] = old.facts[0].clone();
+        candidate.facts.pop();
+        assert!(preview_manifest_impact(Some(&old), &candidate).unwrap_err().contains("fact identity drift"));
+        candidate.corpus_fingerprint = "bad".into();
+        assert!(preview_manifest_impact(None, &candidate).unwrap_err().contains("fingerprint"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn local_impact_preview_deduplicates_equal_facts_and_rejects_conflicts() {
+        let home = tmp_home("impact-duplicates");
+        let (manifest, files) = setup_host(&home);
+        let mut old = run_plugin(&manifest, &files, "m1", &home).unwrap();
+        let mut candidate = run_plugin(&manifest, &files, "m1", &home).unwrap();
+        candidate.facts.push(candidate.facts[0].clone());
+        let impact = preview_manifest_impact(Some(&old), &candidate).unwrap();
+        assert_eq!(impact.candidate_facts, 3);
+        candidate.facts.last_mut().unwrap()["output_tokens"] = json!(12345);
+        assert!(preview_manifest_impact(Some(&old), &candidate).unwrap_err().contains("conflicting duplicate"));
+        candidate.facts.pop();
+        let mut conflict = old.facts[0].clone();
+        conflict["output_tokens"] = json!(12345);
+        old.facts.push(conflict);
+        assert!(preview_manifest_impact(Some(&old), &candidate).unwrap_err().contains("conflicting duplicate"));
+        old.facts.pop();
+        candidate.facts[0].as_object_mut().unwrap().remove("fact_id");
+        assert!(preview_manifest_impact(Some(&old), &candidate).unwrap_err().contains("no identity"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn corpus_fingerprint_binds_content_even_when_fact_ids_do_not_change() {
+        let home = tmp_home("corpus-content");
+        let (manifest, files) = setup_host(&home);
+        let before = run_plugin(&manifest, &files, "m1", &home).unwrap();
+        let repeated = run_plugin(&manifest, &files, "m1", &home).unwrap();
+        assert_eq!(before.corpus_fingerprint, repeated.corpus_fingerprint);
+        assert_eq!(before.corpus_fingerprint.len(), 64);
+        assert!(before.corpus_fingerprint.bytes().all(|b| b.is_ascii_hexdigit()));
+
+        let content = std::fs::read_to_string(&files[0]).unwrap();
+        let mut rows: Vec<Value> = content.lines().map(|line|
+            serde_json::from_str(line).unwrap()).collect();
+        rows[0]["response"]["providerMetadata"]["anthropic"]["usage"]["input_tokens"] = json!(101);
+        let changed = rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+        std::fs::write(&files[0], changed).unwrap();
+        let after = run_plugin(&manifest, &files, "m1", &home).unwrap();
+        let ids = |report: &PluginRunReport| report.facts.iter()
+            .map(|fact| fact["fact_id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(&before), ids(&after), "token change must preserve event identity");
+        assert_eq!(after.facts[0]["uncached_input_tokens"], 101);
+        assert!(before.fact_id_stable && after.fact_id_stable);
+        assert_ne!(before.corpus_fingerprint, after.corpus_fingerprint);
+        let serialized = serde_json::to_string(&after).unwrap();
+        assert!(!serialized.contains("corpus_fingerprint"));
+        assert!(!serialized.contains(&after.corpus_fingerprint));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn captured_corpus_is_reused_for_old_and_candidate_after_source_changes() {
+        let home = tmp_home("shared-capture");
+        let (manifest_path, files) = setup_host(&home);
+        let (manifest, revision) = load_manifest(&manifest_path).unwrap();
+        let captured = capture_corpus(&manifest, &files, &home, true).unwrap();
+        let (previous_manifest, previous_revision) = load_manifest(&manifest_path).unwrap();
+        let old = run_captured_manifest(previous_manifest, previous_revision, &captured, "m1").unwrap();
+        std::fs::write(&files[0], "changed after capture\n").unwrap();
+        let candidate = run_captured_manifest(manifest, revision, &captured, "m1").unwrap();
+        assert_eq!(old.corpus_fingerprint, candidate.corpus_fingerprint);
+        assert_eq!(old.facts, candidate.facts);
+        assert_eq!(preview_manifest_impact(Some(&old), &candidate).unwrap().changed_tokens, 0);
+        let live = run_plugin(&manifest_path, &files, "m1", &home).unwrap();
+        assert_ne!(candidate.corpus_fingerprint, live.corpus_fingerprint);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn frozen_reader_honors_remaining_bytes_before_decoding() {
+        let home = tmp_home("bounded-capture");
+        let path = home.join("source.jsonl");
+        std::fs::write(&path, "abcd").unwrap();
+        assert_eq!(read_frozen_file(&path, 4).unwrap(), "abcd");
+        assert!(read_frozen_file(&path, 3).unwrap_err().contains("64 MiB"));
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(read_frozen_file(&path, 0).unwrap(), "");
+        std::fs::write(&path, "x").unwrap();
+        assert!(read_frozen_file(&path, 0).unwrap_err().contains("64 MiB"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn shared_preview_rejects_source_identity_declaration_changes() {
+        let home = tmp_home("declaration-drift");
+        let (manifest_path, files) = setup_host(&home);
+        let previous = load_manifest(&manifest_path).unwrap();
+        let candidate = load_manifest(&manifest_path).unwrap();
+        let impact = preview_captured_manifest_change(Some(previous), candidate,
+            &files, "m1", &home).unwrap();
+        assert_eq!((impact.previous_facts, impact.candidate_facts), (3, 3));
+        let (mut previous, revision) = load_manifest(&manifest_path).unwrap();
+        previous.roots.push("~/different-root".into());
+        let error = preview_captured_manifest_change(Some((previous, revision)),
+            load_manifest(&manifest_path).unwrap(), &files, "m1", &home).unwrap_err();
+        assert!(error.contains("source identity declaration drift"));
+        let (mut previous, revision) = load_manifest(&manifest_path).unwrap();
+        previous.include.push("other/**".into());
+        assert!(preview_captured_manifest_change(Some((previous, revision)),
+            load_manifest(&manifest_path).unwrap(), &files, "m1", &home)
+            .unwrap_err().contains("source identity declaration drift"));
+        let (mut previous, revision) = load_manifest(&manifest_path).unwrap();
+        previous.session_pattern = "^different-(?P<id>[^/]+)\\.jsonl$".parse().unwrap();
+        assert!(preview_captured_manifest_change(Some((previous, revision)),
+            load_manifest(&manifest_path).unwrap(), &files, "m1", &home)
+            .unwrap_err().contains("source identity declaration drift"));
+        let (mut previous, revision) = load_manifest(&manifest_path).unwrap();
+        previous.slug = "other".into();
+        assert!(preview_captured_manifest_change(Some((previous, revision)),
+            load_manifest(&manifest_path).unwrap(), &files, "m1", &home)
+            .unwrap_err().contains("source identity declaration drift"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn corpus_fingerprint_binds_source_membership_and_namespace() {
+        let home = tmp_home("corpus-membership");
+        let (manifest, files) = setup_host(&home);
+        let all = run_plugin(&manifest, &files, "m1", &home).unwrap();
+        let subset = run_plugin(&manifest, &files[..1], "m1", &home).unwrap();
+        assert_ne!(all.corpus_fingerprint, subset.corpus_fingerprint);
+        let other_namespace = run_plugin(&manifest, &files, "m2", &home).unwrap();
+        assert_ne!(all.corpus_fingerprint, other_namespace.corpus_fingerprint);
+        // Different explicit-list order describes the same sorted source set.
+        let reversed = run_plugin(&manifest, &[files[1].clone(), files[0].clone()], "m1", &home).unwrap();
+        assert_eq!(all.corpus_fingerprint, reversed.corpus_fingerprint);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn run_plugin_emits_facts_with_billing_lock_and_identity() {
         let home = tmp_home("emit");
         let (manifest, files) = setup_host(&home);
@@ -747,6 +1226,142 @@ mod tests {
         std::fs::copy(&manifest, &wrong).unwrap();
         let e = run_plugin(&wrong, &[], "m1", &home).unwrap_err();
         assert!(e.contains("目录名"), "{e}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn installed_ingest_uses_active_object_and_links_provenance() {
+        use agent_vitals_data::extension_authority::*;
+        use agent_vitals_runtime_core::core::extension_objects::ObjectStore;
+        use sha2::Digest;
+        let home = tmp_home("active-ingest");
+        let data_home = home.join("data-home");
+        let (manifest, _files) = setup_host(&home);
+        let root = data_home.join("state/extensions");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = ObjectStore::open(&root).unwrap();
+        let raw = std::fs::read(&manifest).unwrap();
+        let candidate = data_home.join("hosts.d/zcode/manifest.json");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, &raw).unwrap();
+        let hash = format!("{:x}", sha2::Sha256::digest(&raw));
+        let staging = store.stage(&raw).unwrap();
+        store.install(Path::new(&staging), &hash).unwrap();
+        let db = agent_vitals_data::authority::AuthorityDb::open(
+            &agent_vitals_data::authority::default_authority_path(&data_home), 1).unwrap();
+        let revision = ExtensionRevision { revision_id:"local-zcode-1".into(),
+            slot_type:"host_manifest".into(), slot_id:"zcode".into(), content_sha256:hash.clone(),
+            origin:RevisionOrigin::Local, schema_version:1, capabilities:json!({}), installed_at_ms:1 };
+        let slots = std::collections::BTreeMap::from([
+            (("host_manifest".into(), "zcode".into()), revision.revision_id.clone())]);
+        activate(db.conn(), 0, &[revision], &slots, &"b".repeat(64), ActivationAction::Activate, 1).unwrap();
+        // The mutable candidate may change after activation; it is not consumed.
+        std::fs::write(&candidate, "not JSON anymore").unwrap();
+        let results = ingest_active_generation_after_pin("m1", &data_home, &home, || {
+            // Simulate uninstall after the SELECT: this run must keep generation 1.
+            activate(db.conn(), 1, &[], &std::collections::BTreeMap::new(),
+                &"c".repeat(64), ActivationAction::Uninstall, 2).unwrap();
+        }).unwrap();
+        assert_eq!(results.len(), 1);
+        let payload = results[0].1.as_ref().unwrap();
+        assert_eq!(payload["generation"], 1);
+        assert_eq!(payload["authority"]["inserted"], 3);
+        let links: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM extension_fact_provenance WHERE generation=1 AND revision_id='local-zcode-1'",
+            [], |r| r.get(0)).unwrap();
+        assert_eq!(links, 3);
+        activate(db.conn(), 2, &[], &slots, &"d".repeat(64), ActivationAction::Rollback, 3).unwrap();
+        let replay = ingest_installed("m1", &data_home, &home);
+        assert_eq!(replay[0].1.as_ref().unwrap()["ingest"]["hosts"][0]["appended"], 0);
+        crate::source_controls::set_host_excluded(&data_home, "host:zcode", true).unwrap();
+        let stopped = ingest_installed("m1", &data_home, &home);
+        assert_eq!(stopped[0].1.as_ref().unwrap()["skipped"], "source_excluded");
+        crate::source_controls::set_host_excluded(&data_home, "host:zcode", false).unwrap();
+        // Corruption must fail closed, even if a mutable candidate is available.
+        std::fs::write(&candidate, &raw).unwrap();
+        std::fs::write(root.join("objects").join(&hash).join("payload.json"), "{}").unwrap();
+        let broken = ingest_installed("m1", &data_home, &home);
+        assert!(broken[0].1.as_ref().unwrap_err().contains("active object"));
+        assert_eq!(db.conn().query_row("SELECT COUNT(*) FROM usage_facts", [],
+            |r| r.get::<_, i64>(0)).unwrap(), 3);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn mutable_candidate_is_not_automatically_activated() {
+        let home = tmp_home("candidate-only");
+        let data_home = home.join("data-home");
+        let (manifest, _) = setup_host(&home);
+        std::fs::create_dir_all(&data_home).unwrap();
+        let candidate = data_home.join("hosts.d/zcode");
+        std::fs::create_dir_all(&candidate).unwrap();
+        std::fs::copy(manifest, candidate.join("manifest.json")).unwrap();
+        let db = agent_vitals_data::authority::AuthorityDb::open(
+            &agent_vitals_data::authority::default_authority_path(&data_home), 1).unwrap();
+        let result = ingest_installed("m1", &data_home, &home);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].1.as_ref().unwrap_err().contains("unactivated candidate"));
+        assert!(!data_home.join("facts/host-zcode.jsonl").exists());
+        drop(db);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn authority_rejected_input_is_not_reported_as_mirrorable() {
+        let home = tmp_home("authority-reject");
+        let data_home = home.join("data-home");
+        let (manifest, _files) = setup_host(&home);
+        let mut report = run_plugin(&manifest, &[], "m1", &home).unwrap();
+        let mut facts = std::mem::take(&mut report.facts);
+        for fact in &mut facts {
+            fact.as_object_mut().unwrap().remove("native_session_id");
+        }
+        let err = open_authority_and_write(&data_home, &report, &facts).unwrap_err();
+        assert!(err.contains("未完整接受输入"), "{err}");
+        assert!(!data_home.join("facts/host-zcode.jsonl").exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn authority_failure_does_not_write_facts_mirror() {
+        let home = tmp_home("authority-first");
+        let data_home = home.join("data-home");
+        let (manifest, _files) = setup_host(&home);
+        let authority_path = agent_vitals_data::authority::default_authority_path(&data_home);
+        std::fs::create_dir_all(authority_path.parent().unwrap()).unwrap();
+        // A directory at the database path deterministically rejects SQLite open.
+        std::fs::create_dir(&authority_path).unwrap();
+        let err = plugin_ingest_write(&manifest, "m1", &data_home, &home).unwrap_err();
+        assert!(err.contains("未写 facts JSONL 镜像"), "{err}");
+        assert!(!data_home.join("facts/host-zcode.jsonl").exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn mirror_failure_can_be_repaired_without_double_counting_authority() {
+        let home = tmp_home("mirror-repair");
+        let data_home = home.join("data-home");
+        let (manifest, _files) = setup_host(&home);
+        std::fs::create_dir_all(&data_home).unwrap();
+        let facts_dir = data_home.join("facts");
+        std::fs::write(&facts_dir, "block mirror directory").unwrap();
+        let err = plugin_ingest_write(&manifest, "m1", &data_home, &home).unwrap_err();
+        assert!(err.contains("authority 已提交"), "{err}");
+        let authority_path = agent_vitals_data::authority::default_authority_path(&data_home);
+        let db = agent_vitals_data::authority::AuthorityDb::open(&authority_path, 0).unwrap();
+        let count = || db.conn().query_row(
+            "SELECT COUNT(*) FROM usage_facts WHERE host = 'host:zcode'", [],
+            |r| r.get::<_, i64>(0),
+        ).unwrap();
+        assert_eq!(count(), 3);
+        std::fs::remove_file(&facts_dir).unwrap();
+        let repaired = plugin_ingest_write(&manifest, "m1", &data_home, &home).unwrap();
+        assert_eq!(repaired["ingest"]["hosts"][0]["appended"], 3);
+        assert_eq!(count(), 3);
+        let replay = plugin_ingest_write(&manifest, "m1", &data_home, &home).unwrap();
+        assert_eq!(replay["ingest"]["hosts"][0]["appended"], 0);
+        assert_eq!(count(), 3);
         let _ = std::fs::remove_dir_all(&home);
     }
 

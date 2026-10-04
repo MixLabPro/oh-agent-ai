@@ -35,7 +35,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           ref: ${{ inputs.release_tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: 检查官方目录与兼容镜像
+        run: python3 scripts/verify_catalog.py
 
       - name: Set up Node 20 for React shadow bundle
         uses: actions/setup-node@v4

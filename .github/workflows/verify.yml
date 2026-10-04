@@ -22,6 +22,19 @@ permissions:
   contents: read
 
 jobs:
+  catalog_contract:
+    name: 官方目录发布契约
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: 检查兼容镜像及 commit-pinned payload
+        run: python3 scripts/verify_catalog.py
+
   # ── 0. 这个分支上有没有 Rust ────────────────────────────
   #
   # 探测**必须是独立 job**，不能是 job 内的第一个 step。

@@ -38,6 +38,12 @@ fn plugin_tokens_by_host_lists_installed_and_stays_silent_when_absent() {
     )
     .unwrap();
 
+    // Candidate discovery is not activation: confirm through the real lifecycle first.
+    let manifest = data_home.join("hosts.d/zcode/manifest.json");
+    let preview = agent_vitals_ingest::ingest::local_manifest_install::local_manifest_install(
+        &manifest, "ns-tk", &data_home, &user_home, &[], None).unwrap();
+    agent_vitals_ingest::ingest::local_manifest_install::local_manifest_install(
+        &manifest, "ns-tk", &data_home, &user_home, &[], preview["preview_sha256"].as_str()).unwrap();
     // 走正式 ingest（exactly-once + authority 落库），再验 tokens 可见性。
     let results = agent_vitals_ingest::plugin_ingest::ingest_installed("ns-tk", &data_home, &user_home);
     assert_eq!(results.len(), 1, "恰一个已装 manifest: {results:?}");
@@ -1938,4 +1944,3 @@ fn open_db_ro_returns_none_without_creating_the_file() {
     assert!(!path.exists(), "a read must never create the authority database");
     let _ = std::fs::remove_dir_all(&dir);
 }
-

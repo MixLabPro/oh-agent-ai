@@ -163,7 +163,7 @@ fn v28_stamped_database_upgrades_through_the_idempotent_band() {
     // 回归：v29 bump 曾把「上一发布版本 28」漏出幂等带，真机 28 库掉进
     // unsupported 分支被拒开。任何 v∈[27, 当前] 都必须能走加性尾事务升级。
     let path=Database::new();
-    { let db=path.open(); } // 建库到当前版本
+    { let _db=path.open(); } // 建库到当前版本
     {
         let conn=rusqlite::Connection::open(&path.0).unwrap();
         conn.execute_batch(
@@ -191,7 +191,7 @@ fn v28_stamped_database_upgrades_through_the_idempotent_band() {
 fn v30_restamps_plugin_profile_ids_to_host_identity() {
     use agent_vitals_domain::contracts::usage_fact::fact_id;
     let path=Database::new();
-    { let db=path.open(); }
+    { let _db=path.open(); }
     {
         let conn=rusqlite::Connection::open(&path.0).unwrap();
         conn.execute_batch("PRAGMA journal_mode=DELETE;").unwrap();

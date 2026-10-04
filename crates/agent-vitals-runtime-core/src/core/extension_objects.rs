@@ -41,6 +41,14 @@ fn sync(path: &Path) -> Result<(), &'static str> { io(io(File::open(path))?.sync
 
 pub struct ObjectStore { root: PathBuf }
 impl ObjectStore {
+    /// Query faces must not create directories or repair storage on read.
+    pub fn open_readonly(root: &Path) -> Result<Self, &'static str> {
+        directory(root)?;
+        let root = io(root.canonicalize())?;
+        directory(&root.join("objects"))?;
+        Ok(Self { root })
+    }
+
     /// Root must already exist and be a dedicated application-owned directory.
     pub fn open(root: &Path) -> Result<Self, &'static str> {
         directory(root)?;

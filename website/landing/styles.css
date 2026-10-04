@@ -414,3 +414,26 @@ dialog h2 { margin-top: 16px; font-size: 26px; font-weight: 650; letter-spacing:
 }
 
 html[data-av-lang="zh"] .vis::after { content: "示例"; }
+
+/* Agent City 钩子段 */
+.city-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, .65fr); gap: 48px; align-items: center; }
+.city-points { margin: 0; padding: 0; list-style: none; display: grid; gap: 22px; }
+.city-points li { padding-left: 26px; position: relative; }
+.city-points li::before { content: "▪"; position: absolute; left: 0; top: 0; color: var(--mint); font-size: 14px; }
+.city-points h3 { font-size: 16px; font-weight: 600; }
+.city-points p { font-size: 14px; color: var(--muted); }
+.city-fine { text-align: center; margin-top: 22px; }
+#city-canvas { display: block; width: 100%; height: auto; background: #141a3c; }
+/* 3D 插件舞台：canvas 先行成像，iframe 就绪后淡入接管（city-host.js 控制） */
+.city-stage { position: relative; }
+.city-stage #city-frame,
+.city-3d-ready #city-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+#city-frame { border: 0; background: transparent; opacity: 0; transition: opacity .6s ease; }
+.city-3d-ready #city-frame { opacity: 1; }
+.city-3d-ready #city-canvas { visibility: hidden; }
+/* 画布尺寸由 JS 从外壳宽度推导：figure 是收缩包裹容器，width:100% + aspect-ratio
+   会形成自引用死循环（clientWidth 解析到浏览器上限 16777216px）。 */
+.city-scope { min-width: 0; }
+@media (max-width: 860px) {
+  .city-grid { grid-template-columns: 1fr; gap: 28px; }
+}

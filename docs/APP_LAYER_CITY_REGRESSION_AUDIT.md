@@ -47,13 +47,18 @@ City 展示已载入/窗口内总数，并说明统计和回放只覆盖已载�
 - `node scripts/verify-city-migration.mjs`：通过；验证数据驱动起点、边界/空数据/无效日期、扇翼、行人数量和移动、时间倒回确定性、几何及材质释放。
 - `npm --prefix apps/agent-city/ui run typecheck`：通过。
 - `npm --prefix apps/desktop/ui-dev run verify:city`：通过；资源、31 seeds 地理、布局/交通/地址稳定、数据 provider、5 seeds 航拍、基础设施与路面测试。
-- 本轮最终 bundle 构建、浏览器实际交互、真实 Worker 影片测试：结果待补，不能提前计为通过。
+- 最新 bundle 构建通过，主程序 SHA-256：`616ee314eeff42f90654ab557b63dd1ff719257fb1698fd2e3762a33bedb01e6`；未替换 `/Applications`。
+- 串行 `--recovery-only` 浏览器回归通过：种子、照片、导出取消、回放、同实例 Tab 保留与暂停恢复、英中同步、resize 同帧重绘、上下文恢复、第二插件接入/失败重试、数据状态及 sender 校验。该参数不覆盖全部故意注入的渲染异常，不概括为全部测试通过。
+- 生产 Worker 的真实 WebM 编码/解码通过：76 帧、74 次实际帧预览、320×180、1,084,336 bytes、75.374683 秒；UI 计时器 449 次、rAF 879 次，真实点击响应正常。这是低分辨率测试，不替代原生 1080p 成片验收。
+- Rust `cargo test -p agent-vitals-query --test app_local --release`：1 项通过、1 项显式本机安装检查忽略。回放/生命感测试另在 UTC 和 America/New_York 时区通过。
 - 本轮最新原生 bundle 的种子、照片/视频、下钻、Tab 保留、语言和黑闪验收：**待完成**。Computer Use 当前报告 Mac 锁屏，必须由用户手动解锁；不能绕过，也不能引用旧安装的表现替代本轮验收。
 - 不修改 /Applications 安装、不自动提交/合并，不因源码迁入就宣称恢复原 City 全部行为。
 
-## 后续非阻断增强
+## 后续范围与未闭合验收
 
-分页及完整历史体验、多个插件缓存池、持续帧级黑闪检测属于后续明确工作。当前原生 UAT 未完成不是已闭合项；待解锁后应对本轮 bundle 记录路径、主程序 hash、实际操作与导出产物，更新本审计及 UAT 报告。
+最新解锁复测补充：e0510962407a22f4bb3908c38bd1815e99a54d70cbac0bf547d971d152e05706 原生候选连续渲染及航拍运动通过；Tab 保留 plugin-city-1 和标签状态，隐藏停止/恢复继续绘制通过；窗口 zoom 后继续绘制。原生挂载 attached=true、repaired=false，不能将恢复归因于挂载修正。仍未闭合连续帧级黑闪、最新完整导出/种子/下钻；宿主 AX 有中文标签残留。之前“航拍未持续运动”是旧候选观察，不再作为最新候选的当前表现。完整操作与日志见 UAT 报告最新章节。
+
+分页及完整历史体验、多个插件缓存池属于后续明确范围。2026-10-04 用户解锁后已执行原生冷启动：616ee314… 候选触发 plugin_boot_timeout；真实投影和心跳正常，hidden=true、首帧未绘制。同步首帧候选 e6ae80b57e3ce8791683f85cc8853a5b4dd248a3e2d7373f5f18263d9a5dcb0a 已显示英文真实场景及 City ready，但 hidden=true、frameAgeMs 持续增长，航拍未持续运动。首帧改善不等于调度问题解决；原生 UAT 和黑闪验收仍未通过。上文锁屏状态仅记录此前测试，不再是当前阻断。详见 worktree 的 CITY_NATIVE_UAT_2026-10-03.md 最新补充。
 
 ## 独立复核（2026-10-04，ZCode 侧）
 

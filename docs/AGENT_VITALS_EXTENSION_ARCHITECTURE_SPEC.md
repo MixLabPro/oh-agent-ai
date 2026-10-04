@@ -78,6 +78,17 @@ app 发版。
 
 ## §3 架构总览
 
+### 应用层边界（2026-10-03）
+
+本规格管理声明式数据扩展；含可执行代码的插件 APP 由
+[应用层规格](AGENT_VITALS_APP_LAYER_ARCHITECTURE_SPEC.md) v0.2 管理。
+官方 City 使用独立 app index、签名清单、应用对象目录、应用台账与授权协议，
+不得作为 host_manifest/content_pack 安装，也不得把可执行包存入 payload.json
+对象库。可复用哈希校验、预览绑定和 generation/CAS 原语，不能由数据目录来源
+推导可执行应用信任。city:v1 属于独立授权的 app-local face，不扩大 MCP 权限。
+content_pack 的多文件契约及新索引版本后置；严格 catalog-index-v1 保持原契约。
+当前优先交付独立 City 的 M0–M2；数据扩展仅收尾已启动批次，余项保留台账。
+
 ```
 ┌─ 统一扩展注册面（ExtensionRegistry：统一生命周期，按类型执法）─────┐
 │  slot 类型：host_manifest · endpoint_pattern · price_card ·        │
@@ -291,9 +302,9 @@ authority 增加逻辑记录（具体 SQL migration 随实现评审）：
   固定完整 commit 取。这是来源通道与完整性校验，不是独立发布签名；仓库
   发布权限被攻破时，攻击者可同时替换 index 与 payload。签名体系后置到
   P3 再议；vendor-only 不等于具有密码学发布者证明。
-- 网络边界：唯一新增出站 = 官方目录拉取（pricing catalog 同类，opt-in、
+- 网络边界：本数据扩展规格新增出站 = 官方目录拉取（pricing catalog 同类，opt-in、
   不带用户数据）；实施合入时同步更新 AGENTS.md 网络边界一句；
-- 执行边界：永不执行 manifest 携带的代码；脚本 adapter（P1.5）仅默认关闭的
+- 执行边界：永不执行数据扩展 manifest 携带的代码；脚本 adapter（P1.5）仅默认关闭的
   开发者模式，须先过能力沙箱评审，且不可经任何目录分发；
 - 信任插槽逐项按 §4.1 执法，不按分档推断权限。声明式输入仍须有 payload
   字节、条目数、路径/正则长度和运行资源上限；不能因“无代码”而取消限额。

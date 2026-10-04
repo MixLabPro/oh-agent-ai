@@ -31,6 +31,15 @@ pub struct SqlInsertReport {
     pub enriched: usize,
 }
 
+/// Immutable extension selection pinned before parsing a batch. Duplicate facts
+/// keep their original provenance; this context only applies to new inserts.
+#[derive(Debug, Clone)]
+pub struct ExtensionFactContext {
+    pub generation: i64,
+    pub revision_id: String,
+    pub engine_version: String,
+}
+
 /// SQL 事实写入器。绑定 sync_runs 批次与注入时钟。
 #[derive(Debug)]
 pub struct SqlFactWriter<'a> {
@@ -341,6 +350,25 @@ impl<'a> SqlFactWriter<'a> {
         source_id: &str,
         native_session_id: &str,
     ) -> Result<SqlInsertReport, AuthorityError> {
+        self.insert_facts_with_extension(facts, source_id, native_session_id, None)
+    }
+
+    /// Link new facts in the caller's write transaction. A relation failure must
+    /// propagate so the caller rolls back facts, checkpoints and invalidations.
+    pub fn insert_facts_with_extension(
+        &self,
+        facts: &[serde_json::Value],
+        source_id: &str,
+        native_session_id: &str,
+        extension: Option<&ExtensionFactContext>,
+    ) -> Result<SqlInsertReport, AuthorityError> {
+        if let Some(context) = extension {
+            if self.conn.is_autocommit() || context.engine_version.is_empty() {
+                return Err(AuthorityError::from(rusqlite::Error::InvalidParameterName(
+                    "extension facts require a write transaction and engine version".to_string(),
+                )));
+            }
+        }
         let mut report = SqlInsertReport::default();
         for fact in facts {
             let obj = match fact.as_object() {
@@ -603,6 +631,15 @@ impl<'a> SqlFactWriter<'a> {
                 }
             }
             if n > 0 {
+                if let Some(context) = extension {
+                    crate::extension_authority::link_fact_in_transaction(
+                        self.conn, r.s("fact_id").unwrap_or_default(), context.generation,
+                        &context.revision_id, &context.engine_version,
+                    ).map_err(|error| match error {
+                        crate::extension_authority::ExtensionError::Sql(error) => AuthorityError::from(error),
+                        other => AuthorityError::from(rusqlite::Error::InvalidParameterName(format!("{other:?}"))),
+                    })?;
+                }
                 report.inserted += 1
             } else {
                 // **payload 冲突可观测（审查 §5.3 收口）**：同 fact_id 已在库

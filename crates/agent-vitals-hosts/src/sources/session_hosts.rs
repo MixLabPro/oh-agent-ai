@@ -25,6 +25,19 @@ pub struct HostRoots<'a> {
     pub dsh_home: Option<&'a Path>,
 }
 
+/// Concrete usage directories protected from a second manifest identity.
+/// Unlike default_root (an adapter argument), these delimit actual input scope.
+pub fn usage_source_roots(roots: &HostRoots<'_>) -> Vec<(&'static str, PathBuf)> {
+    let mut scopes = vec![
+        ("claude-code", roots.user_home.join(".claude/projects")),
+        ("codex", roots.user_home.join(".codex/sessions")),
+        ("codex", roots.user_home.join(".codex/archived_sessions")),
+        ("workbuddy", crate::workbuddy_session::workbuddy_root(roots.user_home)),
+    ];
+    if let Some(home) = roots.dsh_home { scopes.push(("dsh", home.join("sessions"))); }
+    scopes
+}
+
 /// findings 评估的上下文。`codex_index_cache` 是 Codex「路径 → session_id」索引的缓存
 /// 文件（调用方决定放哪，runtime 放 `<data_home>/facts/.codex-session-index.json`）。
 pub struct FindingsCtx<'a> {

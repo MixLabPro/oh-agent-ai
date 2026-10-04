@@ -3,9 +3,9 @@
 //!
 //! 「加宿主四处一起改」的账面开口点：`ingest_service::FACT_HOSTS` 保持官方
 //! 四宿主常量不动（行为面词表 `TRACE_HOSTS` 的封闭性不受影响），manifest 宿主以
-//! `host:<slug>` 形态经本模块并入账面路由。扫描只读 hosts.d，校验失败的
-//! manifest **不进 registry** 并以可操作错误上报——半坏目录不得拖死官方四
-//! 宿主的摄入（降级隔离）。
+//! `host:<slug>` 形态经本模块并入账面路由。hosts.d 扫描只产生候选；
+//! 激活 registry 从 authority 固定快照加载不可变对象。坏对象逐宿主隔离，
+//! 不回退到可变候选，不影响其余宿主。
 
 use std::path::{Path, PathBuf};
 
@@ -31,7 +31,7 @@ pub struct PluginHost {
 /// 按 `-`/`_` 分词首字母大写（`my-agent` → `My Agent`）。非插件标识原样返回。
 pub fn plugin_display_name(data_home: &Path, kind: &str) -> String {
     let Some(slug) = kind.strip_prefix("host:").or_else(|| kind.strip_prefix("plugin:")) else { return kind.to_string(); };
-    let (hosts, _) = scan_plugin_hosts(data_home);
+    let (hosts, _) = scan_active_plugin_hosts(data_home);
     if let Some(found) = hosts.iter().find(|host| host.slug == slug) {
         if !found.display_name.trim().is_empty() { return found.display_name.clone(); }
     }
@@ -51,6 +51,53 @@ fn prettify_slug(slug: &str) -> String {
 pub struct PluginHostError {
     pub manifest_path: PathBuf,
     pub problem: String,
+}
+
+type HostRegistryScan = (Vec<PluginHost>, Vec<PluginHostError>);
+
+/// Read the activated registry only. Mutable `.d` files are candidates, not
+/// authorization. A corrupt object fails closed without falling back to input.
+pub fn scan_active_plugin_hosts(data_home: &Path) -> (Vec<PluginHost>, Vec<PluginHostError>) {
+    let path = agent_vitals_data::authority::default_authority_path(data_home);
+    if !path.exists() { return (Vec::new(), Vec::new()); }
+    let load = || -> Result<HostRegistryScan, String> {
+        let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+            .map_err(|e| e.to_string())?;
+        let mut statement = db.conn().prepare(
+            "SELECT s.slot_id,r.content_sha256 FROM extension_active a
+             JOIN extension_activation_slots s ON s.generation=a.generation
+             JOIN extension_revisions r ON r.revision_id=s.revision_id
+             WHERE s.slot_type='host_manifest' ORDER BY s.slot_id"
+        ).map_err(|e| e.to_string())?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        if rows.is_empty() { return Ok((Vec::new(), Vec::new())); }
+        let root = data_home.join("state/extensions");
+        let store = agent_vitals_runtime_core::core::extension_objects::ObjectStore::open_readonly(&root)
+            .map_err(str::to_string)?;
+        let mut hosts = Vec::new();
+        let mut errors = Vec::new();
+        for (slug, hash) in rows {
+            let object_path = root.join("objects").join(&hash).join("payload.json");
+            let result = (|| -> Result<PluginHost, String> {
+                let manifest = generic_manifest::parse_manifest(store.load(&hash).map_err(str::to_string)?)
+                    .map_err(|e| e.to_string())?;
+                if manifest.slug != slug { return Err("active manifest slug does not match slot".into()); }
+                Ok(PluginHost { slug, display_name:manifest.display_name, recipe:manifest.recipe,
+                    manifest_path:object_path.clone(),
+                    manifest_sha256:hash[..16].to_string(), trust_profile:manifest.trust })
+            })();
+            match result {
+                Ok(host) => hosts.push(host),
+                Err(problem) => errors.push(PluginHostError { manifest_path:object_path, problem }),
+            }
+        }
+        Ok((hosts, errors))
+    };
+    match load() {
+        Ok(result) => result,
+        Err(problem) => (Vec::new(), vec![PluginHostError { manifest_path:path, problem }]),
+    }
 }
 
 /// 扫描 `<data_home>/hosts.d/*/manifest.json`。目录不存在 = 无插件宿主
@@ -155,6 +202,85 @@ fn sha256_hex16(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn active_registry_home(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("av-active-registry-{tag}-{}-{}",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()))
+    }
+
+    fn active_registry_manifest(slug: &str, name: &str) -> serde_json::Value {
+        serde_json::json!({"manifest_version":1,"slug":slug,"display":{"name":name},
+            "discovery":{"roots":["~/r"],"include":["*.jsonl"]},
+            "source":{"format":"jsonl"},
+            "session":{"from":"filename","pattern":r"^s_(?P<id>.+)\.jsonl$"},
+            "recipe":"request-usage-anthropic-v1","event_key":{"paths":["requestId"]}})
+    }
+
+    #[test]
+    fn mutable_candidates_do_not_authorize_active_registry_or_display() {
+        let home = active_registry_home("candidate");
+        let candidate = home.join("hosts.d/zcode/manifest.json");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, active_registry_manifest("zcode", "Candidate Name").to_string()).unwrap();
+        assert_eq!(scan_plugin_hosts(&home).0.len(), 1);
+        assert!(scan_active_plugin_hosts(&home).0.is_empty());
+        assert_eq!(plugin_display_name(&home, "host:zcode"), "Zcode");
+        assert!(!agent_vitals_data::authority::default_authority_path(&home).exists(),
+            "query must not create authority for an unactivated candidate");
+        let db = agent_vitals_data::authority::AuthorityDb::open(
+            &agent_vitals_data::authority::default_authority_path(&home), 1).unwrap();
+        let (hosts, errors) = scan_active_plugin_hosts(&home);
+        assert!(hosts.is_empty()); assert!(errors.is_empty());
+        assert!(!home.join("state/extensions").exists());
+        drop(db);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn active_object_names_win_and_corruption_is_isolated_without_read_writes() {
+        use agent_vitals_data::extension_authority::*;
+        use sha2::Digest;
+        let home = active_registry_home("objects");
+        let root = home.join("state/extensions");
+        std::fs::create_dir_all(root.join("objects")).unwrap();
+        let db = agent_vitals_data::authority::AuthorityDb::open(
+            &agent_vitals_data::authority::default_authority_path(&home), 1).unwrap();
+        let mut revisions = Vec::new();
+        let mut slots = std::collections::BTreeMap::new();
+        let mut hashes = std::collections::BTreeMap::new();
+        for (slug, name) in [("zcode", "Activated ZCode"), ("other", "Activated Other")] {
+            let raw = active_registry_manifest(slug, name).to_string().into_bytes();
+            let hash = format!("{:x}", sha2::Sha256::digest(&raw));
+            let object = root.join("objects").join(&hash).join("payload.json");
+            std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+            std::fs::write(&object, raw).unwrap();
+            let candidate = home.join("hosts.d").join(slug).join("manifest.json");
+            std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+            std::fs::write(candidate, active_registry_manifest(slug, "Mutable Name").to_string()).unwrap();
+            let id = format!("local-{slug}");
+            slots.insert(("host_manifest".into(), slug.into()), id.clone());
+            revisions.push(ExtensionRevision { revision_id:id, slot_type:"host_manifest".into(),
+                slot_id:slug.into(), content_sha256:hash.clone(), origin:RevisionOrigin::Local,
+                schema_version:1, capabilities:serde_json::json!({}), installed_at_ms:1 });
+            hashes.insert(slug, hash);
+        }
+        activate(db.conn(), 0, &revisions, &slots, &"b".repeat(64), ActivationAction::Activate, 1).unwrap();
+        let (hosts, errors) = scan_active_plugin_hosts(&home);
+        assert_eq!(hosts.len(), 2); assert!(errors.is_empty());
+        assert_eq!(plugin_display_name(&home, "host:zcode"), "Activated ZCode");
+        assert!(!root.join("staging").exists(), "read-only registry must not create staging");
+        std::fs::write(root.join("objects").join(&hashes["zcode"]).join("payload.json"), "{}").unwrap();
+        let (hosts, errors) = scan_active_plugin_hosts(&home);
+        assert_eq!(hosts.len(), 1); assert_eq!(hosts[0].slug, "other");
+        assert_eq!(hosts[0].display_name, "Activated Other");
+        assert_eq!(errors.len(), 1); assert!(errors[0].problem.contains("object_hash"));
+        assert_eq!(plugin_display_name(&home, "host:zcode"), "Zcode",
+            "damaged active content must not borrow a mutable candidate name");
+        assert!(!root.join("staging").exists());
+        drop(db);
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn plugin_display_name_hides_the_internal_prefix() {

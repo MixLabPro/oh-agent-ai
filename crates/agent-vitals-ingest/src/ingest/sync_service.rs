@@ -471,6 +471,10 @@ pub fn sync_facts_filtered(
     // 配置损坏时宁可不启动同步，也不能先清理一部分旧事实再报告错误。
     let custom_sources = crate::custom_sources::custom_source_roots(data_home)
         .map_err(|error| format!("custom source configuration failed: {error}"))?;
+    let source_home = PathBuf::from(std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default());
+    super::extension_installer::ensure_active_compiled_sources_exclusive(data_home, &source_home)
+        .map_err(|error| format!("source exclusivity failed: {error}"))?;
     // Validate the control file before maintenance writes; the authoritative
     // decision is re-read under each host lease immediately before import.
     crate::source_controls::excluded_hosts(data_home)

@@ -7,7 +7,8 @@ peak 份额按高峰价，加总成一个真实发生的费用——不再是「
 数，猜不出实际该按哪个算」的区间估算。与 `crates/agent-vitals-domain/src/domain/cost/mod.rs` 逐字节一致，由
 `tests/test_cli_matrix.py` 的 `both()` 差分看守。
 
-价格表的单一真相源是 `assets/pricing.json`（v0.8 Phase E5 从包内搬到仓库根的
+价格表的权威源是 `catalog/pricing/pricing.json`，`assets/pricing.json` 是CI校验的
+逐字节兼容镜像（v0.8 Phase E5 从包内搬到仓库根的
 `assets/`——它被 Rust、Python、DSH client 三方共读，不是 Python 包私有数据；
 Rust 侧用 `include_str!` 内嵌、本模块用 `Path(__file__).resolve().parents[4]`
 爬回仓库根读同一份文件；`integrations/dsh-client/src/client/styles/index.ts`

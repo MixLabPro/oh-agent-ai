@@ -1417,6 +1417,7 @@ fn ensure_schema_v26(conn: &Connection) -> Result<(), AuthorityError> {
 /// 显式保存过，任何迁移永不覆写）/ `dismissed`（询问被「稍后」，永不再问
 /// 且保持关）。本版**不翻默认**：fresh 种子行与存量行都是 `legacy_default`
 /// + enabled=0；翻默认是 R6c（前置：§7.5 24h soak），届时只改种子行。
+///
 /// v30（发布前拍板 2026-10-01：未正式发布，不做老 id 兼容）：把 manifest 宿主
 /// 的旧 `plugin-` 期 fact_id 一次性重 stamp 到 `host:` 身份。标记 = source_profile
 /// 仍为 `plugin-` 前缀（v29 只折算了 host 列）。同事件新 id 已存在（重导先写
