@@ -483,6 +483,54 @@ enum Cmd {
     /// written by the desktop check. CLI has no network transport — the fetch
     /// itself is desktop-owned, mirroring the pricing catalog.
     ManifestCatalogStatus,
+    /// Preview or explicitly activate a local harness manifest. No network or fact writes.
+    ManifestInstall {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        machine_namespace: String,
+        /// Optional bounded file sample; discovery is used when omitted.
+        #[arg(long = "file")]
+        files: Vec<PathBuf>,
+        /// Exact preview_sha256 returned by the preceding dry run.
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long = "json")]
+        rows_json: bool,
+    },
+    /// Preview or confirm removal of one active harness manifest slot.
+    ManifestUninstall {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        confirm: Option<String>,
+    },
+    /// Preview or confirm rollback of one harness to a historically active revision.
+    ManifestRollback {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        machine_namespace: String,
+        #[arg(long = "file")]
+        files: Vec<PathBuf>,
+        #[arg(long)]
+        confirm: Option<String>,
+    },
+    /// Explicit historical replay into a separate immutable result; never rewrites bills.
+    ManifestRecompute {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        machine_namespace: String,
+        #[arg(long = "file")]
+        files: Vec<PathBuf>,
+        #[arg(long)]
+        confirm: Option<String>,
+    },
     /// Dry-run a manifest harness (§6.5 first-install walkthrough): discovery + extraction +
     /// fact_id stability + format guard. No writes. With --file, feed fixture
     /// files directly (golden/parity mode); otherwise discovery per manifest.
@@ -501,9 +549,7 @@ enum Cmd {
         #[arg(long = "json")]
         rows_json: bool,
     },
-    /// Ingest a manifest harness (§6.5): validate gate -> facts JSONL (exactly-once)
-    /// -> authority dual-write. Rust-only writer (Python grows no writer, same
-    /// rule as workbuddy-usage-facts --write). Rerun-safe on every stage.
+    /// Retired direct-write command. Install with preview/confirm, then use sync.
     ManifestIngest {
         /// Path to harnesses.d/<slug>/manifest.json (slug must match dir name)
         #[arg(long)]
@@ -2970,6 +3016,53 @@ session_store={store} fold={fold}"
         return;
     }
 
+    if let Some(Cmd::ManifestInstall { manifest, machine_namespace, files, confirm, rows_json: _ }) = &args.cmd {
+        let home = std::env::var("HOME").unwrap_or_default();
+        match agent_vitals_runtime::ingest::local_manifest_install::local_manifest_install(
+            manifest, machine_namespace, &agent_vitals_runtime::core::home::data_home(),
+            Path::new(&home), files, confirm.as_deref()) {
+            Ok(payload) => println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default()),
+            Err(error) => { eprintln!("manifest-install failed: {error}"); std::process::exit(2); }
+        }
+        return;
+    }
+
+    if let Some(Cmd::ManifestUninstall { slug, confirm }) = &args.cmd {
+        let data_home = agent_vitals_runtime::core::home::data_home();
+        match agent_vitals_runtime::ingest::local_manifest_lifecycle::local_harness_change(
+            &data_home, Path::new(""), slug,
+            agent_vitals_runtime::ingest::local_manifest_lifecycle::HarnessChange::Uninstall,
+            &[], None, confirm.as_deref()) {
+            Ok(payload) => println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default()),
+            Err(error) => { eprintln!("manifest-uninstall failed: {error}"); std::process::exit(2); }
+        }
+        return;
+    }
+
+    if let Some(Cmd::ManifestRollback { slug, revision, machine_namespace, files, confirm }) = &args.cmd {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let data_home = agent_vitals_runtime::core::home::data_home();
+        match agent_vitals_runtime::ingest::local_manifest_lifecycle::local_harness_change(
+            &data_home, Path::new(&home), slug,
+            agent_vitals_runtime::ingest::local_manifest_lifecycle::HarnessChange::Rollback { revision_id: revision },
+            files, Some(machine_namespace), confirm.as_deref()) {
+            Ok(payload) => println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default()),
+            Err(error) => { eprintln!("manifest-rollback failed: {error}"); std::process::exit(2); }
+        }
+        return;
+    }
+
+    if let Some(Cmd::ManifestRecompute { slug, revision, machine_namespace, files, confirm }) = &args.cmd {
+        let home = std::env::var("HOME").unwrap_or_default();
+        match agent_vitals_runtime::ingest::manifest_recompute::recompute(
+            &agent_vitals_runtime::core::home::data_home(), Path::new(&home), slug,
+            revision, machine_namespace, files, confirm.as_deref()) {
+            Ok(payload) => println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default()),
+            Err(error) => { eprintln!("manifest-recompute failed: {error}"); std::process::exit(2); }
+        }
+        return;
+    }
+
     if let Some(Cmd::ManifestValidate {
         manifest,
         files,
@@ -3022,38 +3115,9 @@ session_store={store} fold={fold}"
         rows_json: _,
     }) = &args.cmd
     {
-        // machine_namespace 必传（spec §9）——与 workbuddy/codex 同款纪律：
-        // CLI 不读 takeover 身份补齐，缺失 exit 2。
-        let Some(ns) = machine_namespace.as_deref().filter(|s| !s.is_empty()) else {
-            eprintln!(
-                "manifest-ingest: --machine-namespace is required \
-                 (v0.7 spec §9: caller-provided; a CLI default would write state)"
-            );
-            std::process::exit(2);
-        };
-        if !*write {
-            eprintln!(
-                "manifest-ingest: pass --write to persist (without it use \
-                 manifest-validate for the read-only dry-run)"
-            );
-            std::process::exit(2);
-        }
-        let home = std::env::var("HOME").unwrap_or_default();
-        match agent_vitals_runtime::plugin_ingest::plugin_ingest_write(
-            manifest,
-            ns,
-            &agent_vitals_runtime::home::data_home(),
-            Path::new(&home),
-        ) {
-            Ok(payload) => {
-                println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
-            }
-            Err(e) => {
-                eprintln!("manifest-ingest failed: {e}");
-                std::process::exit(2);
-            }
-        }
-        return;
+        let _ = (manifest, machine_namespace, write);
+        eprintln!("manifest-ingest --write is retired: use manifest-install with explicit preview/confirm, then run the normal sync for active manifests");
+        std::process::exit(2);
     }
 
     if let Some(Cmd::WorkbuddyUsageFacts {

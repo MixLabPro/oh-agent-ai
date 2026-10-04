@@ -5,6 +5,10 @@ pub mod engine;
 pub mod extension_installer;
 pub mod findings_eval;
 pub mod ingest_service;
+pub mod local_manifest_install;
+pub mod local_manifest_lifecycle;
+pub mod manifest_recompute;
+pub mod vendor_manifest_install;
 /// 兼容路径：writer lease 是基础设施（sources / billing 也要拿锁），W3 下沉到 `core::lease`。
 pub use crate::core::lease;
 pub mod plugin_ingest;
@@ -21,4 +25,3 @@ pub mod sync_control;
 pub mod sync_service;
 // P2 watcher（spec §9-P2）：文件事件 → 去抖 → 唤醒 tick + watch-only 消费者。
 pub mod watch;
-

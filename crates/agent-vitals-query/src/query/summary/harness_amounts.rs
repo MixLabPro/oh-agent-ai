@@ -1416,30 +1416,29 @@ pub(crate) fn fetch_windowed(
 /// 真机）。这里用 `harness_tokens_all` 把三执行环境的 4 桶换回全量；命中率照 domain
 /// 的同一条公式重算。SQL 读不到时保留金额面的数（比冒充 0 诚实）。WorkBuddy
 /// 不在这里：它的 4 桶来自 `workbuddy_harness_amount_with_tokens` 自己的全量查询。
-/// 插件执行环境（`plugin:<slug>`）的 tokens 行（zcode 执行环境接入收尾，2026-09-23）。
+/// manifest 执行环境（`harness:<slug>`）的 tokens 行。
 /// **只有处理量、没有金额**——与 workbuddy 上线时同一条 L0 纪律（§9E.5：
 /// 处理量必须可见，金额等 billing 声明面）；`harness_tokens_all` 是 harness 参数化
-/// 的通用查询，天然覆盖任意 harness 值。已安装 manifest 才有行（harnesses.d 是
-/// 机器本地配置，测试/golden 的 fixture data_home 下扫描结果为空——输出
-/// 零漂移）。
+/// 的通用查询，天然覆盖任意 harness 值。执行环境集合来自窗口内有效事实，而非
+/// 可变候选或当前激活集合；卸载不抹掉历史处理量。
 pub(crate) fn plugin_tokens_by_harness(
-    data_home: &std::path::Path,
+    _data_home: &std::path::Path,
     db: &Option<agent_vitals_data::authority::AuthorityDb>,
     bounds: Option<(i64, i64)>,
 ) -> Vec<(String, HarnessTokens)> {
     let (Some(db), Some((start, end))) = (db, bounds) else {
         return Vec::new();
     };
-    let (harnesses, errors) = crate::harness_registry::scan_plugin_harnesses(data_home);
-    for e in errors {
-        crate::core::logging::log_warn(
-            "summary",
-            &format!("plugin manifest {} 解析失败: {}", e.manifest_path.display(), e.problem),
-        );
-    }
+    let harnesses = match agent_vitals_data::authority_query::token_totals_by_harness(db.conn(), start, end) {
+        Ok(harnesses) => harnesses,
+        Err(error) => {
+            crate::core::logging::log_warn("summary", &format!("manifest usage query failed: {error}"));
+            return Vec::new();
+        }
+    };
     let mut out = Vec::new();
-    for h in harnesses {
-        let harness_label = format!("harness:{}", h.slug);
+    for harness_label in harnesses.into_keys().filter(|harness| harness.strip_prefix("harness:")
+        .is_some_and(crate::harness_registry::plugin_slug_ok)) {
         let Ok(Some((u, cr, cw, o))) =
             agent_vitals_data::authority_query::harness_tokens_all(db.conn(), &harness_label, start, end)
         else {
@@ -1517,5 +1516,99 @@ mod fx_regression_tests {
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].0, "claude-code/shengsuanyun/USD");
         assert_eq!(first[0].1.currency.as_deref(), Some("USD"));
+    }
+}
+
+#[cfg(test)]
+mod manifest_history_tests {
+    use super::plugin_tokens_by_harness;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use agent_vitals_data::authority::AuthorityDb;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    struct Fixture { home: PathBuf, db: Option<AuthorityDb> }
+    impl Fixture {
+        fn new() -> Self {
+            let home = std::env::temp_dir().join(format!("vitals-manifest-history-{}-{}",
+                std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            let db = AuthorityDb::open(&agent_vitals_data::authority::default_authority_path(&home), 1).unwrap();
+            db.begin_run("history", "cli", 1).unwrap();
+            Self { home, db: Some(db) }
+        }
+        fn insert(&self, id: &str, harness: &str, time: i64, deleted: Option<i64>, tokens: [i64; 4]) {
+            self.db.as_ref().unwrap().conn().execute(
+                "INSERT INTO usage_facts(fact_id,harness,machine_namespace,native_session_id,
+                 source_event_id,observation_kind,event_ts_ms,deleted_at_ms,
+                 uncached_input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,
+                 ingested_run_id,created_at_ms,updated_at_ms)
+                 VALUES(?1,?2,'machine','session',?1,'token_count',?3,?4,?5,?6,?7,?8,'history',1,1)",
+                rusqlite::params![id, harness, time, deleted, tokens[0], tokens[1], tokens[2], tokens[3]]).unwrap();
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            drop(self.db.take());
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
+    }
+
+    #[test]
+    fn historical_facts_survive_missing_candidate_and_empty_activation() {
+        use agent_vitals_data::extension_authority::*;
+        let fixture = Fixture::new();
+        fixture.insert("retained", "harness:zcode", 1000, None, [100, 50, 10, 5]);
+        let conn = fixture.db.as_ref().unwrap().conn();
+        let revision = ExtensionRevision { revision_id:"removed-harness".into(),
+            slot_type:"harness_manifest".into(), slot_id:"zcode".into(), content_sha256:"a".repeat(64),
+            origin:RevisionOrigin::Local, schema_version:1, capabilities:json!({}), installed_at_ms:1 };
+        let slots = BTreeMap::from([(("harness_manifest".into(), "zcode".into()), "removed-harness".into())]);
+        activate(conn, 0, &[revision], &slots, &"b".repeat(64), ActivationAction::Activate, 1).unwrap();
+        activate(conn, 1, &[], &BTreeMap::new(), &"c".repeat(64), ActivationAction::Uninstall, 2).unwrap();
+        assert!(!fixture.home.join("harnesses.d").exists());
+        let generation: i64 = fixture.db.as_ref().unwrap().conn().query_row(
+            "SELECT generation FROM extension_active", [], |row| row.get(0)).unwrap();
+        assert_eq!(generation, 2);
+        assert!(generation_slots(conn, generation).unwrap().is_empty());
+        let rows = plugin_tokens_by_harness(&fixture.home, &fixture.db, Some((1000, 2000)));
+        assert_eq!(rows.len(), 1); assert_eq!(rows[0].0, "harness:zcode");
+        assert_eq!(rows[0].1.total, 165);
+        assert_eq!((rows[0].1.uncached_input, rows[0].1.cache_read,
+            rows[0].1.cache_write, rows[0].1.output), (100, 50, 10, 5));
+    }
+
+    #[test]
+    fn deleted_outside_window_and_invalid_harnesses_are_not_displayed() {
+        let fixture = Fixture::new();
+        fixture.insert("deleted", "harness:deleted", 1500, Some(1600), [10, 0, 0, 0]);
+        fixture.insert("before", "harness:before", 999, None, [10, 0, 0, 0]);
+        fixture.insert("after", "harness:after", 2000, None, [10, 0, 0, 0]);
+        fixture.insert("official", "codex", 1500, None, [10, 0, 0, 0]);
+        fixture.insert("invalid", "harness:../escape", 1500, None, [10, 0, 0, 0]);
+        assert!(plugin_tokens_by_harness(&fixture.home, &fixture.db, Some((1000, 2000))).is_empty());
+    }
+
+    #[test]
+    fn observed_zero_token_harness_remains_visible() {
+        let fixture = Fixture::new();
+        fixture.insert("zero", "harness:zero", 1000, None, [0, 0, 0, 0]);
+        let rows = plugin_tokens_by_harness(&fixture.home, &fixture.db, Some((1000, 2000)));
+        assert_eq!(rows.len(), 1); assert_eq!(rows[0].0, "harness:zero");
+        assert_eq!(rows[0].1.total, 0);
+    }
+
+    #[test]
+    fn valid_candidate_without_facts_does_not_create_usage_row() {
+        let fixture = Fixture::new();
+        let candidate = fixture.home.join("harnesses.d/zcode/manifest.json");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, serde_json::json!({"manifest_version":1,"slug":"zcode",
+            "display":{"name":"ZCode"},"discovery":{"roots":["~/r"],"include":["*.jsonl"]},
+            "source":{"format":"jsonl"},"session":{"from":"filename","pattern":r"^s_(?P<id>.+)\.jsonl$"},
+            "recipe":"request-usage-anthropic-v1","event_key":{"paths":["requestId"]}}).to_string()).unwrap();
+        assert_eq!(crate::harness_registry::scan_plugin_harnesses(&fixture.home).0.len(), 1);
+        assert!(plugin_tokens_by_harness(&fixture.home, &fixture.db, Some((1000, 2000))).is_empty());
     }
 }

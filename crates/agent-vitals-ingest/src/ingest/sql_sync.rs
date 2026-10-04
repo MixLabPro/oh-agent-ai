@@ -484,6 +484,26 @@ pub(crate) fn write_flat_facts_with_sources(
     runtime_snapshot: Option<RuntimeSnapshotWrite<'_>>,
     now: i64,
 ) -> Result<SqlSyncOutcome, String> {
+    write_flat_facts_with_sources_and_extension(db, harness, machine_namespace, sources,
+        checkpoint_overrides, facts, workflow_events, session_excerpts,
+        route_evidence, runtime_snapshot, now, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_flat_facts_with_sources_and_extension(
+    db: &AuthorityDb,
+    harness: &str,
+    machine_namespace: &str,
+    sources: &[(std::path::PathBuf, (u64, u64))],
+    checkpoint_overrides: &std::collections::HashMap<String, crate::source_graph::SourceCheckpointOverride>,
+    facts: &[Value],
+    workflow_events: &[WorkflowEvent],
+    session_excerpts: &[agent_vitals_domain::contracts::workflow::SessionExcerpt],
+    route_evidence: Option<&agent_vitals_provider::RouteEvidence>,
+    runtime_snapshot: Option<RuntimeSnapshotWrite<'_>>,
+    now: i64,
+    extension: Option<&agent_vitals_data::fact_writer_sql::ExtensionFactContext>,
+) -> Result<SqlSyncOutcome, String> {
     let run_id = new_run_id(TRIGGER_SYNC);
     db.begin_run(&run_id, TRIGGER_SYNC, now)
         .map_err(|e| format!("begin_run {run_id}: {e}"))?;
@@ -679,7 +699,7 @@ pub(crate) fn write_flat_facts_with_sources(
         }
         for (sid, profile, group) in groups {
             writer.upsert_session(harness, machine_namespace, &sid, Some(&profile), now)?;
-            let report = writer.insert_facts(&group, &source_id, &sid)?;
+            let report = writer.insert_facts_with_extension(&group, &source_id, &sid, extension)?;
             outcome.inserted += report.inserted;
             outcome.duplicate += report.duplicate;
             outcome.rejected += report.rejected;
@@ -1160,6 +1180,64 @@ mod tests {
 
     fn open_db(home: &Path) -> AuthorityDb {
         AuthorityDb::open(&home.join("agent-vitals.sqlite3"), 1_000).unwrap()
+    }
+
+    #[test]
+    fn extension_link_failure_rolls_back_checkpoint_facts_sessions_and_outbox() {
+        use agent_vitals_data::extension_authority::*;
+        use agent_vitals_data::fact_writer_sql::ExtensionFactContext;
+        let home = tmp_home("extension-atomic");
+        let db = open_db(&home);
+        let revision = ExtensionRevision { revision_id:"local-zcode".into(),
+            slot_type:"harness_manifest".into(), slot_id:"zcode".into(), content_sha256:"a".repeat(64),
+            origin:RevisionOrigin::Local, schema_version:1, capabilities:serde_json::json!({}), installed_at_ms:1 };
+        let slots = std::collections::BTreeMap::from([
+            (("harness_manifest".into(), "zcode".into()), "local-zcode".into())]);
+        activate(db.conn(), 0, &[revision], &slots, &"b".repeat(64), ActivationAction::Activate, 1).unwrap();
+        let src = home.join("zcode.jsonl");
+        let overrides = std::collections::HashMap::new();
+        write_flat_facts_with_sources(&db, "harness:zcode", "m", &[(src.clone(), (10, 10))],
+            &overrides, &[], &[], &[], None, None, 1_000).unwrap();
+        let before = db.revision().unwrap();
+        let fact = serde_json::json!({"harness":"harness:zcode", "machine_namespace":"m",
+            "source_profile":"default", "native_session_id":"s1", "source_event_id":"e1",
+            "observation_kind":"token_count", "event_ts_utc":"2026-09-23T01:02:03Z",
+            "model_id":"claude-opus-4", "uncached_input_tokens":100,
+            "cache_read_tokens":50, "cache_write_tokens":10, "output_tokens":5});
+        let mut context = ExtensionFactContext { generation:0, revision_id:"local-zcode".into(),
+            engine_version:"1.4.0".into() };
+        assert!(write_flat_facts_with_sources_and_extension(&db, "harness:zcode", "m",
+            &[(src.clone(), (99, 99))], &overrides, std::slice::from_ref(&fact),
+            &[], &[], None, None, 2_000, Some(&context)).is_err());
+        assert_eq!(db.revision().unwrap(), before);
+        for table in ["usage_facts", "extension_fact_provenance", "sessions", "event_outbox"] {
+            let count: i64 = db.conn().query_row(&format!("SELECT COUNT(*) FROM {table}"), [],
+                |row| row.get(0)).unwrap();
+            assert_eq!(count, 0, "{table} must not survive a failed source link");
+        }
+        let checkpoint = crate::source_graph::read_checkpoint(db.conn(), "harness:zcode",
+            &crate::source_graph::path_hash(&src)).unwrap().unwrap();
+        assert_eq!(checkpoint.byte_offset, Some(10), "failed batch must not advance checkpoint");
+        let source: (i64, i64) = db.conn().query_row(
+            "SELECT size_bytes,mtime_ns FROM source_files WHERE harness='harness:zcode'", [],
+            |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(source, (10, 10));
+        context.generation = 1;
+        let accepted = write_flat_facts_with_sources_and_extension(&db, "harness:zcode", "m",
+            &[(src.clone(), (99, 99))], &overrides, std::slice::from_ref(&fact),
+            &[], &[], None, None, 3_000, Some(&context)).unwrap();
+        assert_eq!(accepted.inserted, 1);
+        assert_eq!(db.revision().unwrap(), before + 1);
+        let checkpoint = crate::source_graph::read_checkpoint(db.conn(), "harness:zcode",
+            &crate::source_graph::path_hash(&src)).unwrap().unwrap();
+        assert_eq!(checkpoint.byte_offset, Some(99));
+        for table in ["usage_facts", "extension_fact_provenance", "sessions", "event_outbox"] {
+            let count: i64 = db.conn().query_row(&format!("SELECT COUNT(*) FROM {table}"), [],
+                |row| row.get(0)).unwrap();
+            assert_eq!(count, 1, "{table} commits together on retry");
+        }
+        drop(db);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

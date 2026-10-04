@@ -32,7 +32,7 @@ City按需复用已有校验/来源/事务原语，可执行包、签名和独�
 | E05 | harness 前缀迁移及完整消费面守卫、billing 估算锁 | E03 | 迁移预览/备份/恢复、SQL/MCP/行为面拒绝、受控 golden parity | 本轮验收通过（一项测试欠账登记） |
 | E06 | 官方目录 opt-in 客户端、CLI/MCP、更新与确认、来源状态 | E04,E05 | 禁网无请求、同源约束、离线加载/回滚、来源不可伪造 | 索引面验收通过；payload 下载与激活确认待下批次 |
 | E07 | catalog 仓库布局、价卡兼容镜像与发布 CI | E02 | 旧 URL/schema 兼容、镜像漂移检查、客户端缺价降级 | 待实施 |
-| E08 | 应急旁名互斥、升级漂移、退出与显式重算 | E05,E06 | 同源范围重叠拒绝、重放不双计、封账保持测试 | 待实施 |
+| E08 | 应急旁名互斥、升级漂移、退出与显式重算 | E05,E06 | 同源范围重叠拒绝、重放不双计、账单/封账保持测试 | 本轮实施与验收通过；E15 全规格矩阵仍待 |
 | E09 | P1 桌面导入向导、徽标、KPI/矩阵、卸载与状态呈现 | E06,E08 | UI 截图/交互验证、脱敏与历史来源保留 | 待实施 |
 | E10 | MAN-3/4 会话身份、时基与 provider 证据槽 | E01,E05 | 原始 provider 优先、时间未知降级、身份稳定与 parity | 待实施 |
 | E11 | MAN-1 多源 join、MAN-2 json/rotated | E10 | join 缺失/重复、轮转重放、差分/树形 recipe fixture | 待实施 |
@@ -187,3 +187,38 @@ UNIQUE(harness,ns,session,event,kind) 保证新旧 id 不可能由常规摄入�
 target 目录竞态（18:40 提交 63583b58、18:43 清空 bundle 目录、共享 rlib 被
 陈旧复用），曾触发一次误判与一次过重的 `cargo clean -p`（清掉 26.6GB 共享
 构建缓存）；后续构建请避免双会话同时 cargo。
+
+### E08 收尾记录（2026-10-04，最新 City/harness 基线）
+
+本轮在 City 最近代码 `3a9ae0a3`（含 harness 重命名）上先合入本地 `main`
+并保留 City 的最新插件布局同步改动，再移植 E08；没有改动原始工作区。
+E08 的实际身份统一为 `harness_manifest` / `harness:` / `harness`，DNS
+字段 `endpoint_host` 保持其网络语义，不属于 harness 命名迁移。
+
+实现范围：
+
+- 对已编译 harness、已安装 manifest、新候选及丢失/符号链接路径按 canonical
+  source roots 检查范围冲突；拒绝会造成同一来源被两个 manifest 声明的激活。
+- local/vendor manifest 安装、确认、撤销/卸载都经同一 revision/object 与
+  activation ledger 路径；卸载只撤销当前激活，不删除历史来源和 facts。
+- 新增 `manifest-recompute` 显式历史回放：只允许指定当前激活的
+  `harness_manifest` revision；预览绑定固定语料、命名空间和结果哈希，确认后
+  输出隔离的不可变结果对象。重复确认幂等，既有 facts、官方账单归因与封账
+  数据保持不变。它不自动重写 billing 或迁移封账。
+- CLI 暴露 `--harness`，使用当前注册表枚举；city plugin 继续是前端项目，
+  本轮没有把 Rust 扩展功能放进 City 插件。
+
+验证（在 `codex/e08-city-closeout`）：workspace `cargo test --release` 通过；
+`cargo clippy --release --all-targets -- -D warnings` 通过；`cargo build --release`
+通过；Python 与 release CLI 的 16 个 golden cases 逐字节一致。Python 全量
+`unittest discover` 跑了 1274 项，首次有 1 项 `verify-workbench-traces.mjs`
+失败，发生时桌面 bundle 正并行重建；打包完成后该脚本及对应单测独立复跑通过。
+带 release CLI 的 `test_harness_contract.py` 20 项和 `test_ci_gate.py` 19 项
+均通过。City 侧 desktop React build、City package build/typecheck、7 项
+`verify:city` 检查、City 布局检查、插件架构检查与 native isolation 检查通过；
+第一次插件架构检查读到重建前的旧 bundle（误含 City chunk），由最新源码重建后
+复验通过。`git diff --check` 通过。
+
+边界：这些证据完成 E08 的本分支实现，不代表 P1.5、E00、E07、E09–E15 或
+整个扩展架构已完成；E15 仍需逐项对照 §12 做整体验收。本地 `main` 尚未被
+合并或推送。
