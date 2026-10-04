@@ -7,6 +7,7 @@
 - 原 main 备份：`codex/backup-main-20261004`，执行基线 `735f6fa3`。
 - 主工作区全部源码检查点：`codex/snapshot-primary-20261004` / `94d3579a`。
 - City dirty 工作区检查点：`codex/snapshot-city-20261004` / `0e01b207`。
+- 清理前发现 City 新增 UX 文档，另保存为 `f7378f89` 并合入；`CITY_UX_SPEC.md` 的场景优先/HUD 目标仍是待实现、待验收。
 - wildlife 未跟踪旧版检查脚本：`codex/snapshot-wildlife-20261004` / `805eea17`；较完整的新版本已归并，不用旧脚本覆盖。
 - 复用 E08 checkout，在 `codex/main-consolidation` 整合最新 main、City 唯一变化与主工作区源码；保留原提交历史和备份分支，不 force push。
 
@@ -39,7 +40,8 @@ City 出口变化使 seed 42 航拍相对加速度超过原断言。原因是距
 - City typecheck、宿主 `verify:react`、`verify:city`、插件架构与布局 source guard：通过。
 - 全量 Python：1,284 项通过；指定新 Rust CLI 后再跑完整套件同样通过，8 项按测试条件跳过。
 - 官网浏览器检查：Agent City 导航、滚入视口懒加载 iframe、实际 3D 画面及 ready 状态非零舞台高度已观察到；此证据不等于逐帧视觉验收。
-- 原生故障注入及正式 bundle：执行中，完成后补记。
+- 原生 `.app` 故障注入：通过；独立渲染 PID、runtime error / rejection 源码定位、卡死/进程退出后宿主存活、恢复、过期消息拒绝、正式插件挂起/复用/显式销毁均通过。机器本地报告：`/var/folders/_b/g4fllrs95g3bgmcb1v8_0mh00000gp/T/agent-vitals-plugin-probe-VCtrQH/native-isolation.json`。
+- 正式（非 probe）bundle：`bash scripts/build-macos-react-app.sh` 通过，应用与 CLI 均为 arm64，CLI 1.4.0 / authority v31；本地诊断构建未做 Developer ID 签名，不是已签名发行包。
 
 ## 保留的边界
 
