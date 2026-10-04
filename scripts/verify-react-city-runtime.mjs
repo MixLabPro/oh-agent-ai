@@ -180,12 +180,13 @@ try {
     const completed = await result;
     if (completed.error) throw completed.error;
     const film = completed.film;
-    assert.equal(film.signature, "1a45dfa3");
+    assert.equal(film.signature, "ftyp");
+    assert.equal(film.type, "video/mp4");
     assert.ok(film.bytes > 1024 && film.frames > 10 && film.pulses > 10);
     assert.ok(film.uiFrames > 10 && film.uiResponsive, "interactive renderer and button must remain alive during export");
     assert.equal(film.width, 320); assert.equal(film.height, 180);
     assert.ok(Number.isFinite(film.duration) && film.duration > 10);
-    console.log("City real WebM encode/decode:", JSON.stringify(film));
+    console.log("City real MP4 encode/decode:", JSON.stringify(film));
     await filmPage.close();
   } else {
   const { page, errors } = await openWorkbench();

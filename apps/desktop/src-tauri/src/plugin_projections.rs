@@ -19,7 +19,7 @@ pub fn read(allowed: &[String], method: &str, payload: &Value) -> Result<Value, 
             let days = payload["windowDays"].as_u64().ok_or("invalid_window")?;
             if !matches!(days, 7 | 30 | 90 | 366) { return Err("invalid_window"); }
             agent_vitals_runtime::query::app_local::city_projection(&crate::overview::data_home(), days as u16,
-                agent_vitals_runtime::clock::now_ms())
+                agent_vitals_runtime::core::clock::now_ms())
         }
         _ => Err("projection_unavailable"),
     }

@@ -48,7 +48,7 @@ window.runCityFilmTest = async () => {
       },
       workerFactory: () => new Worker(window.filmWorkerUrl, { type: "module" }),
     }).finally(() => { window.requestAnimationFrame = originalRaf; });
-    const signature = [...new Uint8Array(await blob.slice(0, 4).arrayBuffer())].map(n => n.toString(16).padStart(2, "0")).join("");
+    const signature = new TextDecoder().decode(await blob.slice(4, 8).arrayBuffer());
     const video = document.createElement("video");
     const url = URL.createObjectURL(blob);
     try {

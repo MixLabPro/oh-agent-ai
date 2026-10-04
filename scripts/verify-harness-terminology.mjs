@@ -16,7 +16,9 @@ assert.ok(!existsSync(path.join(repo, "docs/schemas/host-manifest-v1.json")));
 assert.match(read("Cargo.toml"), /crates\/agent-vitals-harnesses/);
 assert.match(read("apps/desktop/src-tauri/src/lib.rs"), /plugin_host::PluginHost/);
 assert.match(read("apps/agent-city/ui/src/CityApp.tsx"), /from "\.\/host"/);
-assert.match(read("apps/agent-city/ui/src/data/provider.ts"), /harness: string/);
+assert.match(read("apps/agent-city/ui/src/data/provider.ts"), /CityProjectionV1 = CityUiProjectionV1/);
+assert.match(read("packages/agent-vitals-app-sdk/src/city-ui-projection.ts"), /harness: string/);
+assert.doesNotMatch(read("packages/agent-vitals-app-sdk/src/city-ui-projection.ts"), /\bhost: string/);
 assert.doesNotMatch(read("apps/agent-city/ui/src/data/provider.ts"), /\bhost: string/);
 assert.match(read("crates/agent-vitals-data/src/authority.rs"), /SCHEMA_VERSION: i64 = 31/);
 // Network hostname evidence is not an Agent execution environment identifier.

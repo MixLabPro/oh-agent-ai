@@ -1,4 +1,5 @@
 import { CityEngine } from "../engine/CityEngine";
+import { cinematicCopy } from "../engine/cinematicCopy";
 import type { FilmJob, FilmWorkerMessage } from "./filmProtocol";
 
 const send = (message: FilmWorkerMessage) => self.postMessage(message);
@@ -52,12 +53,7 @@ self.onmessage = async (event: MessageEvent<{ type: "start"; job: FilmJob } | { 
         previewPending = true; lastPreview = performance.now();
         self.postMessage({ type: "preview", bitmap, frame }, { transfer: [bitmap] });
       },
-      describe: (card) => {
-        const tokens = job.model.stats.tokensTotal.toLocaleString();
-        if (card.kind === "title") return { eyebrow: "AGENT VITALS", title: `${job.model.stats.renderedSessions} 个会话，一座城市`, subtitle: `${job.model.windowLabel} · ${tokens} tokens` };
-        if (card.kind === "district") return { eyebrow: "执行环境城区", title: card.text, subtitle: `${card.detail ?? ""} 个会话` };
-        return { title: tokens, subtitle: `${job.model.districts.length} 个城区 · token · 非费用账单` };
-      },
+      describe: (card) => cinematicCopy(job.model, card, job.locale === "en" ? "en" : "zh-Hans"),
       onProgress: (frame, total) => {
         const percent = Math.floor(frame / total * 100);
         if (percent !== reported || frame === total) { reported = percent; send({ type: "progress", frame, total }); }
@@ -65,7 +61,7 @@ self.onmessage = async (event: MessageEvent<{ type: "start"; job: FilmJob } | { 
     });
     send({ type: "complete", blob });
   } catch (error) {
-    const known = ["invalid_export_job", "background_export_unavailable", "background_webgl_unavailable", "export_memory_limit", "no WebM-capable video encoder"];
+    const known = ["invalid_export_job", "background_export_unavailable", "background_webgl_unavailable", "export_memory_limit", "mp4_encoder_unavailable"];
     send({ type: "error", code: error instanceof Error && known.includes(error.message) ? error.message : "background_export_failed" });
   } finally { clearInterval(pulse); engine?.dispose(); }
 };

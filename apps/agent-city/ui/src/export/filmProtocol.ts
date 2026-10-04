@@ -5,6 +5,7 @@ import type { CinematicCut } from "../engine/cityCinematic";
 export type FilmJob = {
   model: CityModel; seed: number; cut: CinematicCut;
   width: number; height: number; fps: number; bitrate: number;
+  locale?: "en" | "zh-Hans";
 };
 export type FilmWorkerMessage =
   | { type: "ready" }

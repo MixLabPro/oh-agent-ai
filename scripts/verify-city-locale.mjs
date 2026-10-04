@@ -17,7 +17,8 @@ vm.runInNewContext(source, { window, module, exports: module.exports, require, U
 const { cityText, cityView } = module.exports;
 for (const [zh, en] of [["城市设置", "City settings"], ["执行环境城区", "Harness districts"],
   ["30 天", "30 days"], ["取消导出 · 25%", "Cancel export · 25%"],
-  ["暂停回放", "Pause replay"], ["会话详情", "Session details"]]) {
+  ["暂停回放", "Pause replay"], ["会话详情", "Session details"],
+  ["当前环境不支持 H.264 MP4 编码，可使用拍照；不会生成改名的 WebM 文件。", "This environment does not support H.264 MP4 encoding. Photos remain available; no renamed WebM file will be produced."]]) {
   assert.equal(cityText(zh, "en"), en);
   assert.equal(cityText(zh, "zh-Hans"), zh);
 }
@@ -28,3 +29,15 @@ const excerpt = React.createElement("blockquote", null, "城市设置");
 assert.equal(cityView(excerpt, "en"), excerpt, "user excerpts must never be translated");
 assert.equal(cityText("用户原文，不应翻译", "en"), "用户原文，不应翻译");
 console.log("City locale: passed (catalog, dynamic labels, accessibility, zh fallback, raw excerpt preservation).");
+const copyCode = buildSync({ entryPoints: [path.join(repo, "apps/agent-city/ui/src/engine/cinematicCopy.ts")],
+  bundle: true, write: false, format: "cjs" }).outputFiles[0].text;
+const copyModule = { exports: {} };
+vm.runInNewContext(copyCode, { module: copyModule, exports: copyModule.exports });
+const model = { stats: { renderedSessions: 264, tokensTotal: 1234567 }, windowLabel: "最近 30 天", districts: [{}, {}] };
+const title = { kind: "title", text: "", atSec: 0, untilSec: 2 };
+assert.equal(copyModule.exports.cinematicCopy(model, title, "en").title, "264 sessions, one city");
+assert.equal(copyModule.exports.cinematicCopy(model, title, "en").subtitle, "Last 30 days · 1,234,567 tokens");
+assert.equal(copyModule.exports.cinematicCopy(model, title, "zh-Hans").title, "264 个会话，一座城市");
+assert.equal(copyModule.exports.cinematicCopy(model, { ...title, kind: "district", text: "Codex", detail: "81" }, "en").subtitle, "81 sessions");
+assert.equal(copyModule.exports.cinematicCopy(model, { ...title, kind: "finale" }, "en").subtitle, "2 districts · Loaded tokens · Not a bill");
+console.log("Cinematic locale: passed (shared foreground/Worker copy, title, range, district, finale).");

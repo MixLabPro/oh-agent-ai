@@ -25,7 +25,7 @@ const environment = { module, exports: module.exports, Worker: TestWorker, Offsc
   clearInterval: (id) => timers.delete(id) };
 vm.runInNewContext(code, environment);
 const { runFilmJob, supportsBackgroundFilm } = module.exports;
-const job = { model: {}, seed: 42, cut: "short", width: 320, height: 180, fps: 1, bitrate: 120000 };
+const job = { model: {}, seed: 42, cut: "short", locale: "en", width: 320, height: 180, fps: 1, bitrate: 120000 };
 function start(onPreview) {
   const worker = new TestWorker(); const controller = new AbortController(); const progress = [];
   const promise = runFilmJob(job, { signal: controller.signal, workerFactory: () => worker,
@@ -37,10 +37,11 @@ let task = start();
 task.worker.emit({ type: "ready" });
 task.worker.emit({ type: "ready" });
 assert.equal(task.worker.posts.length, 1, "start is acknowledged only once");
+assert.equal(task.worker.posts[0].job.locale, "en", "export captures the plugin language in the Worker job");
 task.worker.emit({ type: "progress", frame: 1, total: 5 });
 task.worker.emit({ type: "progress", frame: 6, total: 5 });
 assert.deepEqual(task.progress, [[1, 5]]);
-const blob = new Blob(["synthetic webm"], { type: "video/webm" });
+const blob = new Blob(["synthetic mp4"], { type: "video/mp4" });
 task.worker.emit({ type: "complete", blob });
 assert.equal(await task.promise, blob);
 assert.equal(task.worker.terminated, 1);
@@ -85,6 +86,10 @@ task.worker.emit({ type: "error", code: "export_memory_limit" });
 await assert.rejects(task.promise, /export_memory_limit/);
 task = start(); task.worker.emit(null);
 await assert.rejects(task.promise, /background_export_failed/);
+task = start(); task.worker.emit({ type: "complete", blob: new Blob(["wrong container"], { type: "video/webm" }) });
+await assert.rejects(task.promise, /background_export_failed/);
+task = start(); task.worker.emit({ type: "error", code: "mp4_encoder_unavailable" });
+await assert.rejects(task.promise, /mp4_encoder_unavailable/);
 task = start(); task.worker.onerror({ preventDefault() {} });
 await assert.rejects(task.promise, /background_export_failed/);
 const aborted = new AbortController(); aborted.abort();
@@ -97,21 +102,26 @@ await assert.rejects(runFilmJob(job, { signal: new AbortController().signal, onP
 assert.equal(timers.size, 0, "every outcome must clean up its timer");
 console.log("City film jobs: passed (ready/start, progress, preview acknowledgement/bitmap release/late frames/callback and transport errors, completion, immediate cancel, boot/hang deadlines, worker errors, memory-limit propagation, unsupported capability and cleanup).");
 
-const muxerPath = new URL("../apps/agent-city/ui/src/engine/webmMuxer.ts", import.meta.url);
-const muxerSource = readFileSync(muxerPath, "utf8");
-function writerFrom(source) {
-  const output = buildSync({ stdin: { contents: source, loader: "ts" }, bundle: true, write: false, format: "cjs" }).outputFiles[0].text;
-  const module = { exports: {} }; vm.runInNewContext(output, { module, exports: module.exports, Blob, TextEncoder, Uint8Array, ArrayBuffer, DataView });
-  return new module.exports.WebmWriter({ codec: "V_VP8", width: 320, height: 180 });
+const muxerCode = buildSync({ entryPoints: [new URL("../apps/agent-city/ui/src/engine/mp4Muxer.ts", import.meta.url).pathname],
+  bundle: true, external: ["mp4-muxer"], write: false, format: "cjs" }).outputFiles[0].text;
+const writes = []; let writeFailure = false;
+class TestMuxer {
+  constructor(options) { this.options = options; assert.equal(options.video.codec, "avc");
+    assert.equal(options.video.frameRate, 30); assert.equal(options.video.width, 320); assert.equal(options.video.height, 180);
+    assert.equal(options.fastStart, "in-memory"); assert.equal(options.firstTimestampBehavior, "strict"); }
+  addVideoChunk(packet, metadata) { if (writeFailure) throw new Error("muxer failure"); writes.push([packet, metadata]); }
+  finalize() { this.options.target.buffer = new Uint8Array([1, 2, 3]).buffer; }
 }
-const legacySource = muxerSource.replace(/    const body = \[info, tracks, \.\.\.clusters\];[\s\S]*?\{ type: "video\/webm" \}\);/,
-  '    const body = concat([info, tracks, ...clusters]); const segment = element(ID.Segment, body); return new Blob([ebml as BlobPart, segment as BlobPart], { type: "video/webm" });');
-assert.notEqual(legacySource, muxerSource, "reference writer must use the original whole-file copies");
-const optimized = writerFrom(muxerSource), legacy = writerFrom(legacySource);
-for (let index = 0; index < 90; index++) {
-  const bytes = new Uint8Array(1000).fill(index);
-  optimized.addChunk(index * 500, index % 4 === 0, bytes);
-  legacy.addChunk(index * 500, index % 4 === 0, bytes);
-}
-assert.deepEqual(new Uint8Array(await optimized.finish(45000).arrayBuffer()), new Uint8Array(await legacy.finish(45000).arrayBuffer()));
-console.log("City WebM muxer: lower-copy Blob assembly preserves byte-for-byte output.");
+const muxerModule = { exports: {} };
+vm.runInNewContext(muxerCode, { module: muxerModule, exports: muxerModule.exports, Blob, DOMException,
+  require: () => ({ ArrayBufferTarget: class {}, Muxer: TestMuxer }) });
+let writer = new muxerModule.exports.Mp4Writer(30, 320, 180); await writer.start();
+const metadata = { decoderConfig: { codec: "avc1.640028", description: new Uint8Array([1]) } };
+writer.addChunk({ timestamp: 0 }, metadata); writer.addChunk({ timestamp: 33333 });
+const mp4 = await writer.finish(); assert.equal(mp4.type, "video/mp4"); assert.equal(mp4.size, 3);
+assert.equal(writes.length, 2); assert.equal(writes[0][1], metadata); assert.equal(writes[1][0].timestamp, 33333);
+writeFailure = true; writer = new muxerModule.exports.Mp4Writer(30, 320, 180); await writer.start(); writer.addChunk({ timestamp: 0 }, metadata);
+await assert.rejects(writer.drain(), /muxer failure/); await writer.cancel();
+writeFailure = false; writer = new muxerModule.exports.Mp4Writer(30, 320, 180); await writer.start(); await writer.cancel();
+await assert.rejects(writer.drain(), { name: "AbortError" });
+console.log("City MP4 muxer: passed (AVC track, metadata, ordered writes, draining, MP4 MIME, error and cancel cleanup).");

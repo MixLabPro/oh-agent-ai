@@ -74,6 +74,8 @@ for frame in 0 ..< ceil(durationSec × fps):
 
 ### 5.2 编码
 
+2026-10-04 实施更新：默认使用 WebCodecs H.264 + MP4，不启用 MediaRecorder/WebM 回退；保留固定帧时间戳及 Worker 隔离。采用经本轮范围评审的 MIT `mp4-muxer@5.2.2`，版本锁定和许可证随包。详见 `CITY_MP4_EXPORT_2026-10-04.md`（含上游停止维护风险）。下面为原始方案比较。
+
 - 首选 WebCodecs `VideoEncoder`（H.264，MP4 封装）；不可用时退回 `MediaRecorder` + `canvas.captureStream(0)` 手动 `requestFrame()`（WebM/VP9）。
 - MP4 封装需要一个 muxer。**不引入第三方依赖**的前提下，优先评估 WebView 是否原生支持；
   若必须引入，限 MIT/Apache、纯 JS、打包进前端产物，单独过依赖评审。
@@ -211,7 +213,7 @@ agent-vitals
 
 | # | 问题 | 选项 | 建议 |
 | --- | --- | --- | --- |
-| D1 | 视频 MP4 封装是否允许引入 muxer 依赖 | 允许（单独评审）/ 只出 WebM | 先只出 WebM，P1 后再评估 |
+| D1 | 视频 MP4 封装是否允许引入 muxer 依赖 | 允许（单独评审）/ 只出 WebM | 2026-10-04：采用锁版 MIT muxer，默认 MP4；维护风险见 MP4 导出说明 |
 | D2 | 水印形式 | 「agent-vitals」文字 / 加图标 / 可关闭 | 文字，不可关闭（标准档）、可关闭（仅城市档） |
 | D3 | 个人化地形 | 做 / 不做 / 做但默认关 | 做但默认关，设置里开启 |
 | D4 | 配乐 | 不做 / CC0 入库 / 用户自选文件 | 不做（本 SPEC 范围外） |

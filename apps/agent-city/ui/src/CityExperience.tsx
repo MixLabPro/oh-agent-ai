@@ -8,6 +8,7 @@ import { paletteFor } from "./engine/cityTextures";
 import { invokeHost, embedded, pluginLocale } from "./host";
 import type { PluginResponseV1 } from "@agent-vitals/app-sdk";
 import { runFilmJob, supportsBackgroundFilm } from "./export/filmJob";
+import { cinematicCopy } from "./engine/cinematicCopy";
 import { cityText, cityView, useCityLanguage } from "./i18n";
 
 const dateLabel = (ms: number) => new Date(ms).toLocaleString(pluginLocale() === "en" ? "en-US" : "zh-CN");
@@ -140,9 +141,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
   const describe = (c: CinematicCard) => {
     const model = modelRef.current;
     if (!model) return null;
-    if (c.kind === "title") return { eyebrow: "AGENT VITALS", title: cityText(`${model.stats.renderedSessions} 个会话，一座城市`, pluginLocale()), subtitle: `${cityText(model.windowLabel, pluginLocale())} · ${tokens(model.stats.tokensTotal)} tokens` };
-    if (c.kind === "district") return { eyebrow: cityText("执行环境城区", pluginLocale()), title: c.text, subtitle: cityText(`${c.detail ?? ""} 个会话`, pluginLocale()) };
-    return { title: tokens(model.stats.tokensTotal), subtitle: cityText(`${model.districts.length} 个城区 · 已载入的 token · 非费用账单`, pluginLocale()) };
+    return cinematicCopy(model, c, pluginLocale());
   };
   const photo = async () => {
     if (!engine.current || busy || abort.current) return;
@@ -158,7 +157,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
     const controller = new AbortController(); abort.current = controller; setFilm({ frame: 0, total: 1 });
     previewRef.current?.getContext("2d")?.clearRect(0, 0, 640, 360);
     try {
-      const blob = await runFilmJob({ model: structuredClone(modelRef.current), seed, cut, width: 1920, height: 1080, fps: 30, bitrate: 12_000_000 }, {
+      const blob = await runFilmJob({ model: structuredClone(modelRef.current), seed, cut, locale: pluginLocale(), width: 1920, height: 1080, fps: 30, bitrate: 12_000_000 }, {
         signal: controller.signal,
         onPreview: (bitmap) => {
           const canvas = previewRef.current;
@@ -169,13 +168,14 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
         onProfile: (width, height, software) => { if (mounted.current) setFilm((value) => value ? { ...value, width, height, software } : value); },
         onProgress: (frame, total) => { if (mounted.current) setFilm((value) => value ? { ...value, frame, total } : value); },
       });
-      if (mounted.current) download(blob, `agent-city-${cut}-${Date.now()}.webm`);
+      if (mounted.current) download(blob, `agent-city-${cut}-${Date.now()}.mp4`);
     } catch (reason) {
       if (mounted.current && !(reason instanceof DOMException && reason.name === "AbortError")) {
         const code = reason instanceof Error ? reason.message : "background_export_failed";
         setError(code === "export_memory_limit" ? "视频超过导出内存上限，请改用短片。"
           : code === "background_export_timeout" ? "后台导出无响应，任务已终止；City 可以继续使用。"
-          : ["background_export_unavailable", "background_webgl_unavailable", "no WebM-capable video encoder"].includes(code)
+          : code === "mp4_encoder_unavailable" ? "当前环境不支持 H.264 MP4 编码，可使用拍照；不会生成改名的 WebM 文件。"
+          : ["background_export_unavailable", "background_webgl_unavailable"].includes(code)
             ? "当前环境不支持后台视频导出，可使用拍照；不会在界面线程执行导出。"
             : "后台视频导出失败，City 可以继续使用。");
       }
@@ -265,7 +265,7 @@ export function CityExperience({ ui, disabled, cinema }: { ui: ReturnType<typeof
       <button onClick={ui.reseed} disabled={locked}>{ui.confirmSeed ? "确认重新生成（4 秒内）" : "重新生成岛屿"}</button>
       <p>只改变地形与布局，不删除会话数据。种子保存于插件私有本地状态。</p>
       <label htmlFor="city-cut">航拍与视频长度</label><select id="city-cut" value={ui.cut} disabled={locked} onChange={(e) => ui.setCut(e.target.value as CinematicCut)}><option value="short">短片</option><option value="full">完整航线</option></select>
-      <p>拍照保存 PNG；视频后台逐帧生成 30 FPS WebM，并显示实际生成画面的低帧率预览。硬件渲染为 1080p，软件渲染降至 360p。导出中暂停拍照，避免并发导出和保存；离开 City 会取消任务。不上传数据。</p>
+      <p>拍照保存 PNG；视频后台逐帧生成 30 FPS MP4（H.264），并显示实际生成画面的低帧率预览。硬件渲染为 1080p，软件渲染降至 360p。导出中暂停拍照，避免并发导出和保存；离开 City 会取消任务。不上传数据。</p>
       {ui.film && <p role="status" aria-atomic="true">航拍导出 {Math.round(ui.film.frame / ui.film.total * 100)}% · 关闭设置不取消导出</p>}
       {!supportsBackgroundFilm() && <p>当前环境不支持后台视频导出；可使用拍照。</p>}
       <label htmlFor="city-session">选择会话（键盘入口）</label><select id="city-session" value={ui.selected ?? ""} disabled={disabled || ui.busy} onChange={(e) => { ui.setSelected(e.target.value || null); if (e.target.value) ui.focusBuilding(e.target.value); ui.setOptions(false); }}>
