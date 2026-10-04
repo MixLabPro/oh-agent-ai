@@ -59,3 +59,23 @@ City 展示已载入/窗口内总数，并说明统计和回放只覆盖已载�
 最新解锁复测补充：e0510962407a22f4bb3908c38bd1815e99a54d70cbac0bf547d971d152e05706 原生候选连续渲染及航拍运动通过；Tab 保留 plugin-city-1 和标签状态，隐藏停止/恢复继续绘制通过；窗口 zoom 后继续绘制。原生挂载 attached=true、repaired=false，不能将恢复归因于挂载修正。仍未闭合连续帧级黑闪、最新完整导出/种子/下钻；宿主 AX 有中文标签残留。之前“航拍未持续运动”是旧候选观察，不再作为最新候选的当前表现。完整操作与日志见 UAT 报告最新章节。
 
 分页及完整历史体验、多个插件缓存池属于后续明确范围。2026-10-04 用户解锁后已执行原生冷启动：616ee314… 候选触发 plugin_boot_timeout；真实投影和心跳正常，hidden=true、首帧未绘制。同步首帧候选 e6ae80b57e3ce8791683f85cc8853a5b4dd248a3e2d7373f5f18263d9a5dcb0a 已显示英文真实场景及 City ready，但 hidden=true、frameAgeMs 持续增长，航拍未持续运动。首帧改善不等于调度问题解决；原生 UAT 和黑闪验收仍未通过。上文锁屏状态仅记录此前测试，不再是当前阻断。详见 worktree 的 CITY_NATIVE_UAT_2026-10-03.md 最新补充。
+
+## 独立复核（2026-10-04，ZCode 侧）
+
+对修订版自报的关键声明逐项独立验证（复核者在主检出执行，非引用自报）：
+
+| 声明 | 复核结果 |
+| --- | --- |
+| B2 回放起点数据驱动 | ✅ `replayRange.ts` 语义与基线 `timelineStartMs` 等价（最早已装载会话的本地零点，夹在窗口内） |
+| B3 鸟/行人迁入 | ✅ `flapQuaternion`/`class Pedestrians` 在新路径；且行人位置改为 `seed 起点 + elapsed` 推导（`cityWildlife.ts:563`），倒回可复现——比基线实现（dt 累积）更适合导出，是改进而非等价迁移 |
+| B1 真实数据 | ✅ `app_local.rs` 只读查询 authority + 宿主 `plugin_projections.rs`；fixture 仅 standalone/隔离路径，嵌入失败不回落；UI 如实标注「载入 N/M」 |
+| 下钻宿主链路 | ✅ `plugin_projections.rs` 以 opaque handle 解析（`invalid_session_handle` 错误路径在位），不泄露原始路径 |
+| `verify-city-migration.mjs` 通过 | ✅ 复核者实际运行通过（回放起点/扇翼/行人/倒回/释放/空场景） |
+| `verify:city` 通过 | ✅ 复核者在其 worktree 实际运行 6/6 通过，含新增「数据 provider：版本化窗口/standalone fixture/脱敏 DTO/无嵌入回落」契约门 |
+| 原生 UAT | 未复核（其自报待完成：Computer Use 被 Mac 锁屏阻断）。同意其结论：**在原生 UAT 补齐前不计为闭合** |
+
+### 复核结论
+
+- 修订版自报与代码事实**一致**，无夸大；其对旧审计两处总括表述的撤回（渲染层无退化、fixture 替代）成立且已被本轮证据更新。
+- 唯一实质范围差异保持为其自报的第 3 节：**500 条近期会话上限、无 oldest-first 分页**（诚实标注，非隐藏退化）。若产品要求全历史生长叙事（366 天窗的老城），仍需补分页协议。
+- 待办不变：原生 UAT（解锁后）、852 文件落盘提交、schema v31 与 E06 轮协调。
