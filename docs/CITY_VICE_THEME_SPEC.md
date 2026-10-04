@@ -10,6 +10,18 @@
 
 **边界（硬约束）**：只致敬不复刻——不使用 GTA 商标/字体/城市名/载具型号；元素为公共文化符号（救生塔/霓虹/游艇本身不属于任何版权方）。
 
+## 1.5 外部依据（2026-10-05 网络检索三轮）
+
+网络对「Vice City 记忆点」的高频共识与本地诊断一致，并补充三个元素：
+1. **霓虹粉/青夜景**为最高频记忆点——夜晚比白天更「一眼懂」（"neon-soaked"、招牌映湿地面的意象反复出现）；
+2. **Ocean Drive 海滨大道 + Art Deco 粉彩酒店**是被引最多的单一地标（对称立面、横阳台排、Colony Hotel 式竖霓虹牌）；
+3. **"Welcome to Vice City" 入城牌**在现实-游戏地标对照报道中被点名——最直白的解码线索；
+4. **加载画面公式**（粉紫日落 + 棕榈剪影）是 synthwave 时代「Vice City 风」的通用视觉语言——天空浓度本身就是记忆点而非背景。
+
+依据：[GTA Wiki – Vice City](https://gta.fandom.com/zh/wiki/Vice_City_(3D%E4%B8%96%E7%95%8C))、[Rockstar 官网](https://www.rockstargames.com/zh/games/vicecity)、[Miami New Times – 现实地标对照](https://www.miaminewtimes.com/location/map-these-20-miami-spots-are-in-gta-vice-city-10557459)、[IGN 中国 – GTA6 预告 99 细节](https://www.ign.com.cn/grand-theft-auto-vi/47542/feature/gta-6-yu-gao-pian-zhong-de-99-ge-xi-jie)、[vicehubx](https://vicehubx.com)、[GetStarrd](https://www.getstarrd.app/blog/gta-6-poster)。
+
+据此修订：新增 F8（Ocean Drive 街段）、F9（Welcome 招牌），F7 天空浓度升入第一批。版权边界重申：招牌文字不用 "Vice City" 字样（用 "MIAMI 1986" 或纯图形），Art Deco 为公共建筑风格。
+
 ## 2. 目标与非目标
 
 **目标**
@@ -43,12 +55,18 @@
 - landing 页 City 预览卡片补一句副标："A love letter to 1986 Vice City"（与 §1 边界一致：只提文化致敬，不提商标）。
 - i18n 双语键同步增改；不影响任何契约（纯展示字符串）。
 
+**F7 天空浓度**（依 §1.5-4 从第二批升入）：`skyGrade.amount 0.62 → 0.72–0.78`、天顶紫加深一档——粉紫日落 + 棕榈剪影本身即加载画面级记忆点（数值试调，验收时防压过黄昏读数与水色）。
+
+**F8 Ocean Drive 海滨大道段**（依 §1.5-2，第二梯队中优先）：南向滨海带选一段，3–4 栋**粉彩 Art Deco 风**中低楼（对称立面、横阳台排线条、楼顶竖霓虹牌——Colony Hotel 意象），沿弧形大道排布；把 F2 的竖霓虹从「个别楼」升级为「一条街的连续意象」，记忆密度最高。建筑为程序几何组合（阳台=横条板阵列），不建贴图。
+
+**F9 Welcome 招牌**（依 §1.5-3）：入口视线方向（主桥/机场路来向）一块 "WELCOME TO MIAMI 1986" 霓虹牌（牌架 + 双色霓虹描边字带；**不用 Vice City 字样**），日暗夜亮沿用 nightGlow 门控。一句话成本，解码效率最高。
+
 ### 第二批：追加符号（第一批验收后按效果排期）
 
 **F4 游艇改造**：船队实例中 1–2 艘换白色飞桥游艇（现有双盒船身 + 飞桥层 + 桅杆细柱），沿用现有航道与尾迹——比斯坎湾意象。
 **F5 滨海棋盘格步道**：一段滨海步行道铺粉/白棋盘格（地面图集加一版棋盘通道，纹理级改动）。
 **F6 霓虹拱门地标**：地标体系加一座半圆拱（Torus 半圆 + 双色霓虹 + 拱下光斑），进入 `landmarks` 确定性布点。
-**F7 天空浓度**：`skyGrade.amount 0.62 → 0.72–0.78`、天顶紫加深——推向 GTA 片头的紫罗兰浓度（数值试调，防止压过黄昏读数）。
+（F7 已升入第一批，见下。）
 
 ## 4. 不变契约
 
@@ -66,6 +84,9 @@
 | F2a 调色 | 0 |
 | F2b 竖管 | ≤+1 draw call（3–5 楼 × 每楼 ≤40 管，instanced） |
 | F3 文案 | 0 |
+| F7 天空 | 0（uniform 值） |
+| F8 大道段 | ≤+1 draw call（3–4 栋组合楼，instanced；阳台线条并入楼体几何） |
+| F9 招牌 | ≤+1 draw call |
 | 第二批各项 | 各 ≤1 draw call |
 | 帧率底线 | 集显 30fps 不变（当前实测 64–120fps，余量充足） |
 
@@ -75,10 +96,13 @@
 - F1：塔在沙带上、条纹日夜可见、无穿模、不压地块。
 - F2：黄昏/夜晚霓虹读作招牌而非描边；白天无霓虹残留；bloom 不过曝（检查天际线无白色糊块）。
 - F3：主题文案与 landing 副标双语正确。
+- F7：黄昏相紫罗兰浓度提升且不压过水色/楼色（对照调参前后截图）。
+- F8：大道段日夜均读作「一条粉彩霓虹街」；建筑不压地块/道路；与现有滨海布景（码头/渔市）不重叠。
+- F9：牌面从主入口方向可见；文字为 MIAMI 1986（非 Vice City）；夜间进 bloom 但字形可辨。
 - 回归：verify:city 六项 + verify:react 全绿；20 种子 geography 契约不涉及（F1 不动布局）。
 
 ## 7. 分期与提交
 
-- 批次一：F1 + F2 + F3（一次视觉验收）。提交 `feat(city): vice-city symbols — lifeguard towers, neon signage, naming`。
-- 批次二：F4→F7 按验收效果逐个追加，各独立提交。
+- 批次一：F1 + F2 + F3 + F7 + F8 + F9（一次视觉验收——六个符号齐了才可能过「一眼测试」；F8 是其中工作量最大的单件）。提交 `feat(city): vice-city symbols — lifeguard towers, ocean drive, neon signage, welcome sign`。
+- 批次二：F4（游艇）+ F5（棋盘格）+ F6（霓虹拱门）按验收效果逐个追加，各独立提交。
 - 署名：本 spec 为原创设计决策（公共文化符号 + 现有自建资产），无第三方代码引入；若 F4/F6 参考 tinyskies Boat/地标实现，按移植台账纪律标注。
