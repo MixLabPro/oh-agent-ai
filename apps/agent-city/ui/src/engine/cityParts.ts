@@ -363,6 +363,7 @@ type StaticCity = {
   waterAssetUniforms: Record<string, { value: unknown }> | null;
   landmarkSpinners: Array<{ object: THREE.Object3D; axis: "x" | "y" | "z"; speed: number }>;
   nightLights: NightLights | null;
+  context: { bodies: THREE.InstancedMesh; crowns: THREE.InstancedMesh; matrices: Float32Array } | null;
 };
 let staticCityCache: StaticCity | null = null;
 
@@ -494,6 +495,7 @@ export class CityParts {
         waterAssetUniforms: this.waterAssetUniforms,
         landmarkSpinners: this.landmarkSpinners,
         nightLights: this.nightLights,
+        context: this.context,
       };
       staticCityCache = staticCity;
       // this.group 曾是静态组：让位给动态组，静态组挂为其子节点。
@@ -516,6 +518,7 @@ export class CityParts {
     this.waterAssetUniforms = staticCity.waterAssetUniforms;
     this.landmarkSpinners = staticCity.landmarkSpinners;
     this.nightLights = staticCity.nightLights;
+    this.context = staticCity.context;
     this.captureAnimationOrigin();
     this.waterUniforms = (this.water.material as THREE.ShaderMaterial).uniforms as unknown as {
       uTime: { value: number };
@@ -1889,8 +1892,53 @@ export class CityParts {
     }
     bodies.name = "city-vice-context-facades";
     crowns.name = "city-vice-context-rooftops";
+    // F2：记下每栋的完整矩阵（落成态），回放时按进度在 y 方向缩放写回。
+    const matrices = new Float32Array(buildings.length * 32);
+    for (let index = 0; index < buildings.length; index += 1) {
+      bodies.getMatrixAt(index, this.matrix); this.matrix.toArray(matrices, index * 32);
+      crowns.getMatrixAt(index, this.matrix); this.matrix.toArray(matrices, index * 32 + 16);
+    }
+    this.context = { bodies, crowns, matrices };
     this.group.add(bodies, crowns);
     this.disposables.push(bodyGeometry, bodyMaterial, facade, crownGeometry, crownMaterial);
+  }
+
+  private context: { bodies: THREE.InstancedMesh; crowns: THREE.InstancedMesh; matrices: Float32Array } | null = null;
+  private contextTarget = new Float32Array(0);
+  private contextProgress = new Float32Array(0);
+  private readonly contextScratch = new THREE.Matrix4();
+  private readonly contextScale = new THREE.Matrix4();
+
+  /** 背景楼进度 → 矩阵：落成态矩阵左乘「以楼底为原点的 y 缩放」（BOX/塔几何都以底面为原点，直接右乘缩放即可）。 */
+  private writeContext(): void {
+    const context = this.context;
+    if (!context) return;
+    const count = Math.min(this.contextProgress.length, context.bodies.count);
+    for (let index = 0; index < count; index += 1) {
+      const t = this.contextProgress[index];
+      const ease = t * t * (3 - 2 * t);
+      for (const [mesh, offset] of [[context.bodies, 0], [context.crowns, 16]] as const) {
+        this.contextScratch.fromArray(context.matrices, index * 32 + offset);
+        // 屋顶冠在楼顶：楼还在长时先藏起（就地缩放会悬在半空），封顶后再出现。
+        if (ease <= 0.001 || (offset === 16 && ease < 0.999)) this.contextScratch.makeScale(0, 0, 0).setPosition(0, -40, 0);
+        else if (ease < 0.999) this.contextScratch.multiply(this.contextScale.makeScale(1, ease, 1));
+        mesh.setMatrixAt(index, this.contextScratch);
+      }
+    }
+    context.bodies.instanceMatrix.needsUpdate = true;
+    context.crowns.instanceMatrix.needsUpdate = true;
+  }
+
+  private updateContext(dt: number): void {
+    let dirty = false;
+    for (let index = 0; index < this.contextTarget.length; index += 1) {
+      const current = this.contextProgress[index];
+      const target = this.contextTarget[index];
+      if (current === target) continue;
+      this.contextProgress[index] = target > current ? Math.min(target, current + dt / 1.2) : Math.max(target, current - dt / 0.6);
+      dirty = true;
+    }
+    if (dirty) this.writeContext();
   }
 
   /** 海平线远山：低模锥形剪影 + fbm 顶点扰动，两侧海域各一座。 */
@@ -3139,6 +3187,9 @@ export class CityParts {
     this.cursor = cursor;
     this.live = live;
     (this.layout.civics ?? []).forEach((civic, index) => { this.civicTarget[index] = live || cursor >= civic.unlockAt ? 1 : 0; });
+    const context = this.layout.contextBuildings ?? [];
+    if (this.contextTarget.length !== context.length) { this.contextTarget = new Float32Array(context.length).fill(1); this.contextProgress = new Float32Array(context.length).fill(1); }
+    context.forEach((building, index) => { this.contextTarget[index] = live || cursor >= building.appearAt ? 1 : 0; });
     for (const runtime of this.runtimes) {
       runtime.target = builtFractionAt(runtime.building, cursor, live, paceMsPerSec);
       if (live && runtime.building.active) runtime.target = Math.max(runtime.target, runtime.building.builtFraction);
@@ -3158,6 +3209,8 @@ export class CityParts {
    *  动画循环追赶，整城会先闪满高、再被压回时间轴进度——数据加载不应改变城市
    *  已呈现的样子。 */
   snapToTargets(): void {
+    this.contextProgress.set(this.contextTarget);
+    this.writeContext();
     for (const runtime of this.runtimes) {
       if (!runtime.settled) continue; // 新楼交给 update 循环长入
       runtime.display = runtime.target;
@@ -3365,6 +3418,7 @@ export class CityParts {
     this.waterUniforms.uTime.value = elapsed;
     if (this.flagTime) this.flagTime.value = elapsed;
     this.updateCivics(dt);
+    this.updateContext(dt);
     for (const spinner of this.landmarkSpinners) spinner.object.rotation[spinner.axis] += spinner.speed * dt;
 
     let dirty = false;
@@ -3518,6 +3572,8 @@ export class CityParts {
   /** 把所有随帧累加的动画状态放回起点，楼与配套直接落到目标进度（不再有生长插值）。
    *  胶片导出开拍前调用：同一份数据 + seed，任何时候导出都从同一个状态开始。 */
   resetAnimation(): void {
+    this.contextProgress.set(this.contextTarget);
+    this.writeContext();
     for (const car of this.cars) car.distance = originOf(car, car.distance);
     this.applyCarDensity();
     for (const boat of this.boats) boat.distance = originOf(boat, boat.distance);

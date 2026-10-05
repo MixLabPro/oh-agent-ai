@@ -120,6 +120,12 @@ for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
   const repeated = layoutCity(input, null, 523001688, MIAMI_COASTAL, "full");
   assert(layout.contextBuildings.length >= 140, `low-volume Miami city still has broad urban fabric (${layout.contextBuildings.length})`);
   console.log(`Vice City low-volume context buildings: ${layout.contextBuildings.length}`);
+  // F2：背景楼按次序在数据窗口前 85% 内逐个落成（回放起点是空地）。
+  const starts = input.buildings.map((building) => building.startedAt);
+  const windowStart = input.windowStartMs ?? Math.min(...starts);
+  const windowEnd = input.windowEndMs ?? Math.max(...starts);
+  for (const building of layout.contextBuildings) assert(Number.isFinite(building.appearAt) && building.appearAt >= windowStart && building.appearAt <= windowStart + (windowEnd - windowStart) * 0.85 + 1, `${building.id} appears inside the data window`);
+  for (let i = 1; i < layout.contextBuildings.length; i += 1) assert(layout.contextBuildings[i].appearAt >= layout.contextBuildings[i - 1].appearAt, "backdrop appears in placement order");
   assert.deepEqual(layout.contextBuildings, repeated.contextBuildings, "environment buildings are deterministic for a seed and session set");
   const sessionLots = new Set(layout.districts.flatMap((district) => [...district.slots.values()].map((parcel) => parcel.id)));
   const civicLots = new Set(layout.civics.map((civic) => civic.parcelId));

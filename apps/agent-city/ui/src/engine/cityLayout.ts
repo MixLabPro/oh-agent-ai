@@ -40,7 +40,9 @@ export type BackdropMode = "auto" | "off" | "full";
 export const BACKDROP_KEEP_OUT = 60;
 export const BACKDROP_PER_SESSION = 0.35;
 
-export type ContextBuilding = Vec2 & { id: string; y: number; yaw: number; width: number; depth: number; height: number; seed: number; zone: Zone };
+export type ContextBuilding = Vec2 & { id: string; y: number; yaw: number; width: number; depth: number; height: number; seed: number; zone: Zone;
+  /** F2：回放到这一刻才落成（按选址次序均匀铺在数据窗口前 85%）——回放起点是空地，城市随时间填满。 */
+  appearAt: number };
 export const CIVIC_PER_SESSIONS = 45;
 const CIVIC_ORDER: CivicKind[] = ["school", "mall", "hospital"];
 
@@ -335,10 +337,20 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
           : parcel.zone === "commercial" ? 20 + buildingSeed * 28
             : parcel.zone === "waterfront" ? 16 + buildingSeed * 20
               : 8 + buildingSeed * 14,
-        seed: buildingSeed, zone: parcel.zone,
+        seed: buildingSeed, zone: parcel.zone, appearAt: 0,
       });
       if (selected.length >= target) break;
     }
+  }
+  {
+    // 数据窗口缺省（测试夹具/旧调用方）时退回会话起始时刻的范围，绝不产出 NaN。
+    const starts = model.buildings.map((building) => building.startedAt).filter(Number.isFinite);
+    const windowStart = Number.isFinite(model.windowStartMs) ? model.windowStartMs : (starts.length ? Math.min(...starts) : 0);
+    const windowEnd = Number.isFinite(model.windowEndMs) ? model.windowEndMs : (starts.length ? Math.max(...starts) : windowStart);
+    const span = Math.max(0, windowEnd - windowStart);
+    contextBuildings.forEach((building, index) => {
+      building.appearAt = windowStart + ((index + 0.5) / contextBuildings.length) * span * 0.85;
+    });
   }
   const districts = model.districts.map((district, districtIndex): DistrictLayout => {
     const buildings = model.buildings.filter((building) => building.districtId === district.id && assigned.has(building.id));
