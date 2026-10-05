@@ -345,6 +345,8 @@ function volcanoGeometry(radius: number, rimHeight: number, seed: number): THREE
 
 type StaticCity = {
   seed: number;
+  landmarkWindows: CityParts["landmarkWindows"];
+  lifeguardGlowMaterial: THREE.MeshBasicMaterial | null;
   layout: CityLayout;
   group: THREE.Group;
   disposables: Array<{ dispose: () => void }>;
@@ -500,6 +502,8 @@ export class CityParts {
         landmarkSpinners: this.landmarkSpinners,
         nightLights: this.nightLights,
         context: this.context,
+        landmarkWindows: this.landmarkWindows,
+        lifeguardGlowMaterial: this.lifeguardGlowMaterial,
       };
       staticCityCache = staticCity;
       // this.group 曾是静态组：让位给动态组，静态组挂为其子节点。
@@ -523,6 +527,9 @@ export class CityParts {
     this.landmarkSpinners = staticCity.landmarkSpinners;
     this.nightLights = staticCity.nightLights;
     this.context = staticCity.context;
+    // 夜间材质随静态城一起复用：曾只缓存网格不缓存这两个引用，缓存命中后救生塔灯与地标亮窗夜里不再亮。
+    this.landmarkWindows = staticCity.landmarkWindows;
+    this.lifeguardGlowMaterial = staticCity.lifeguardGlowMaterial;
     this.captureAnimationOrigin();
     this.waterUniforms = (this.water.material as THREE.ShaderMaterial).uniforms as unknown as {
       uTime: { value: number };
@@ -1431,7 +1438,25 @@ export class CityParts {
         facade.repeat.set(3, floors);
         // 少量自发光托底：暖色夕照下纯 Lambert 白墙读成米褐色（截图实测），粉彩鳍读成暗红/墨绿。
         const wall = new THREE.MeshLambertMaterial({ map: facade, emissive: new THREE.Color("#3a3936"), emissiveMap: facade });
-        this.disposables.push(wall, facade);
+        // 夜景亮窗：玻璃幕墙夜里要开灯（真机夜景：双塔窗格全暗）。一张 4 层高的亮窗图（黑墙 + 暖色窗格，
+        // 随机约 30% 熄灯），按层平铺；setNightGlow 在夜里把 emissiveMap 换成它并按夜色加亮。
+        const litCanvas = createRenderCanvas(); litCanvas.width = 64; litCanvas.height = 256;
+        const lctx = litCanvas.getContext("2d");
+        if (lctx) {
+          lctx.fillStyle = "#000000"; lctx.fillRect(0, 0, 64, 256);
+          for (let floor = 0; floor < 4; floor += 1) for (let cell = 0; cell < 4; cell += 1) {
+            const on = hashSeed(`twin-window:${floor}:${cell}`);
+            if (on < 0.3) continue;
+            lctx.fillStyle = on > 0.85 ? "#bfe9ff" : "#ffd89a";
+            lctx.fillRect(4 + cell * 14 + 2, floor * 64 + 18, 12, 30);
+          }
+        }
+        const lit = new THREE.CanvasTexture(litCanvas as HTMLCanvasElement);
+        lit.colorSpace = THREE.SRGBColorSpace;
+        lit.wrapS = lit.wrapT = THREE.RepeatWrapping;
+        lit.repeat.set(3, floors / 4);
+        this.landmarkWindows.push({ material: wall, day: facade, lit, dayEmissive: new THREE.Color("#3a3936") });
+        this.disposables.push(wall, facade, lit);
         const eyebrow = material("#ffffff", 0.25);
         for (const side of [-1, 1]) {
           const accent = material(side < 0 ? "#8fe0e6" : "#f7b3cf", 0.3);
@@ -3530,6 +3555,7 @@ export class CityParts {
    *  theme 切换会重设 uSelfLit 基线，下一次昼夜 tick 会在其上再抬升。 */
   private nightGlow = 0;
   private lifeguardGlowMaterial: THREE.MeshBasicMaterial | null = null;
+  landmarkWindows: Array<{ material: THREE.MeshLambertMaterial; day: THREE.Texture; lit: THREE.Texture; dayEmissive: THREE.Color }> = [];
   private signageNeonMaterial: THREE.MeshBasicMaterial | null = null;
   private yachtMesh: THREE.InstancedMesh | null = null;
   private yachtIndices: number[] = [];
@@ -3557,6 +3583,12 @@ export class CityParts {
       lights.neon.color.setRGB(1, 1, 1).multiplyScalar(night * 2.6);
       // 白天整体关掉：近黑的实例色在日光下读作一块块深色方块（桥塔上的霓虹点实测）。
       lights.neon.visible = night > 0.04;
+    }
+    // 地标玻璃幕墙：夜里换亮窗贴图并加亮，白天回到立面贴图 + 少量托底自发光。
+    for (const entry of this.landmarkWindows) {
+      const lit = night > 0.05;
+      if (lit) { entry.material.emissiveMap = entry.lit; entry.material.emissive.setRGB(1, 1, 1).multiplyScalar(0.25 + night * 1.6); }
+      else { entry.material.emissiveMap = entry.day; entry.material.emissive.copy(entry.dayEmissive); }
     }
     // 救生塔夜间指示灯（VICE S1）：独立 MeshBasic，不依赖路灯照亮。
     if (this.lifeguardGlowMaterial) {
