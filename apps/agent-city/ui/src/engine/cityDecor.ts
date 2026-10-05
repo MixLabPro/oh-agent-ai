@@ -34,7 +34,7 @@ export function describeDecor(id: string): DecorInfo | null {
     case "massing":
       return { title: "聚合楼群", category: "超出容量的会话", body: "会话数超过城市容量（4000 栋）时，多出来的会话合并成低细节楼群显示。" };
     case "seaside":
-      return { title: "海滨设施", category: "城市风貌 · 装饰", body: "沙滩、遮阳伞、躺椅、救生塔与游艇等海滨装饰。不代表任何会话。" };
+      return { title: "海滨设施", category: "城市风貌 · 装饰", body: "沙滩、遮阳伞、躺椅、沙排场、游客、救生塔与游艇等海滨装饰。不代表任何会话。" };
     case "volcano":
       return { title: "火山", category: "远景 · 装饰", body: "海平线上的远景火山。不代表任何会话。" };
     default:
@@ -50,7 +50,7 @@ export function decorKindForName(name: string): string | null {
   if (name.startsWith("city-public-sites-")) return "site";
   if (name === "city-vice-context-facades" || name === "city-vice-context-rooftops") return "backdrop";
   if (name === "city-massing") return "massing";
-  if (name === "city-lifeguard-towers" || name === "city-yachts" || name === "city-beach-furniture") return "seaside";
+  if (name === "city-lifeguard-towers" || name === "city-yachts" || name === "city-beach-furniture" || name === "city-beach-people" || name === "city-volleyball-courts") return "seaside";
   if (name === "city-sea-volcano") return "volcano";
   return null;
 }

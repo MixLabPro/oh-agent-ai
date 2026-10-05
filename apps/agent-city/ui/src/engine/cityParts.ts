@@ -2253,6 +2253,26 @@ export class CityParts {
     const dry = this.layout.coastalConfig?.drySandWidth ?? 14;
     type Spot = { x: number; z: number; yaw: number; seed: number };
     const spots: Spot[] = [];
+    // 沙排场：沿每段连续海岸累计弧长，每 ~110 单位一块（段首留 30），场地长轴沿岸、居干沙中线。
+    const courts: Spot[] = [];
+    for (const run of validRuns(seaside)) {
+      let walked = 0; let next = 30;
+      for (let i = 1; i < run.length; i += 1) {
+        const a = run[i - 1]; const b = run[i];
+        const length = Math.hypot(b.waterline.x - a.waterline.x, b.waterline.z - a.waterline.z);
+        while (next <= walked + length) {
+          const t = (next - walked) / length;
+          const inx = a.inward.x + (b.inward.x - a.inward.x) * t; const inz = a.inward.z + (b.inward.z - a.inward.z) * t;
+          const norm = Math.hypot(inx, inz) || 1;
+          const depth = (wet + dry) / 2 + 0.5;
+          const x = a.waterline.x + (b.waterline.x - a.waterline.x) * t + (inx / norm) * depth;
+          const z = a.waterline.z + (b.waterline.z - a.waterline.z) * t + (inz / norm) * depth;
+          if (this.layout.terrain.height(x, z) > 0.2) courts.push({ x, z, yaw: Math.atan2(inx, inz), seed: hashSeed(`court:${courts.length}`) });
+          next += 110;
+        }
+        walked += length;
+      }
+    }
     for (const run of validRuns(seaside)) for (let i = 1; i < run.length; i += 1) {
       const a = run[i - 1]; const b = run[i];
       const length = Math.hypot(b.waterline.x - a.waterline.x, b.waterline.z - a.waterline.z);
@@ -2266,9 +2286,11 @@ export class CityParts {
         const x = a.waterline.x + (b.waterline.x - a.waterline.x) * t + (inx / norm) * depth;
         const z = a.waterline.z + (b.waterline.z - a.waterline.z) * t + (inz / norm) * depth;
         if (this.layout.terrain.height(x, z) < 0.2) continue;
+        if (courts.some((court) => Math.hypot(court.x - x, court.z - z) < 12)) continue; // 给沙排场让位
         spots.push({ x, z, yaw: Math.atan2(inx, inz), seed });
       }
     }
+    this.buildBeachLife(courts, spots, wet);
     if (!spots.length) return;
     const colors = ["#ff5fa8", "#00c2d1", "#ffb03a", "#ffffff", "#7a5cff", "#ff6b4a"];
     const poleGeometry = new THREE.CylinderGeometry(0.07, 0.07, 2.4, 5).translate(0, 1.2, 0);
@@ -2307,6 +2329,97 @@ export class CityParts {
     }
     this.group.add(poles, canopies, loungers);
     this.disposables.push(poleGeometry, canopyGeometry, box, poleMaterial, canopyMaterial, loungerMaterial);
+  }
+
+  /** 沙排场 + 沙滩人物。人物是静态的、真实比例（身高 ~1.75，躺椅长 1.9，与之同尺度），
+   *  比楼小得多：曾经的街区行人是刻意超比例的人偶，且沿车行路网走（真机：「在公路上走」）。
+   *  人形 = 双腿 + 躯干（衣色）+ 双臂 + 头（肤色），两个 InstancedMesh 共用矩阵。 */
+  private buildBeachLife(courts: Array<{ x: number; z: number; yaw: number; seed: number }>, spots: Array<{ x: number; z: number; yaw: number; seed: number }>, wet: number): void {
+    const dummy = new THREE.Object3D();
+    const box = (w: number, h: number, d: number, x: number, y: number, z = 0) => new THREE.BoxGeometry(w, h, d).translate(x, y + h / 2, z);
+    const clothesParts = [box(0.15, 0.82, 0.18, -0.1, 0), box(0.15, 0.82, 0.18, 0.1, 0), box(0.4, 0.58, 0.22, 0, 0.82)];
+    const skinParts = [box(0.1, 0.56, 0.11, -0.26, 0.86), box(0.1, 0.56, 0.11, 0.26, 0.86), new THREE.SphereGeometry(0.13, 8, 6).translate(0, 1.6, 0)];
+    const clothesGeometry = mergeGeometries(clothesParts);
+    const skinGeometry = mergeGeometries(skinParts);
+    [...clothesParts, ...skinParts].forEach((g) => g.dispose());
+    type Pose = { x: number; z: number; yaw: number; lying?: boolean; seed: number };
+    const people: Pose[] = [];
+    const local = (spot: { x: number; z: number; yaw: number }, across: number, along: number) => {
+      // 局部 z = 内向（朝陆），局部 x = 沿岸。
+      const sx = Math.sin(spot.yaw); const sz = Math.cos(spot.yaw);
+      return { x: spot.x + sx * across + sz * along, z: spot.z + sz * across - sx * along };
+    };
+    // 每块沙排场 4 名球员，两边各二，面向球网。
+    for (const court of courts) for (let k = 0; k < 4; k += 1) {
+      const side = k < 2 ? -1 : 1; const lane = k % 2 === 0 ? -1.6 : 1.6;
+      const p = local(court, lane, side * (3.2 + hashSeed(`player:${court.x}:${k}`) * 1.6));
+      people.push({ ...p, yaw: court.yaw + (side < 0 ? Math.PI / 2 : -Math.PI / 2), seed: hashSeed(`pl:${court.x}:${k}`) });
+    }
+    // 伞下：约三分之一的伞旁有人躺在躺椅上，另有少数站着。
+    for (const spot of spots) {
+      if (spot.seed > 0.66) people.push({ ...local(spot, -1.6, 0.7), yaw: spot.yaw, lying: true, seed: spot.seed });
+      else if (spot.seed < 0.3) people.push({ ...local(spot, 0.4, -1.4), yaw: spot.yaw + spot.seed * 6, seed: spot.seed });
+    }
+    // 水边散步的人：湿沙上，零星分布。
+    for (const spot of spots) if (spot.seed > 0.4 && spot.seed < 0.52) {
+      const p = local(spot, -(spot.seed * 0 + (wet * 0.5 + 2)), 0);
+      people.push({ ...p, yaw: spot.yaw + Math.PI / 2, seed: spot.seed });
+    }
+    if (people.length) {
+      const clothesMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff" });
+      const skinMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff" });
+      const clothes = new THREE.InstancedMesh(clothesGeometry, clothesMaterial, people.length);
+      const skin = new THREE.InstancedMesh(skinGeometry, skinMaterial, people.length);
+      const outfits = ["#ff5fa8", "#00a6b8", "#ffb03a", "#f4f1ea", "#3b4a8c", "#e2483d", "#2f8f5b"];
+      const tones = ["#f1c9a5", "#d9a77c", "#b07a52", "#7a4e33"];
+      people.forEach((person, i) => {
+        const y = this.layout.terrain.height(person.x, person.z);
+        dummy.position.set(person.x, y + (person.lying ? 0.36 : 0), person.z);
+        // 躺着 = 绕局部 x 轴放倒 90°，头朝内陆（躺椅靠背一侧）。
+        dummy.rotation.set(person.lying ? -Math.PI / 2 : 0, person.yaw + (person.lying ? Math.PI : 0), 0, "YXZ");
+        dummy.scale.setScalar(0.92 + person.seed * 0.16);
+        dummy.updateMatrix();
+        clothes.setMatrixAt(i, dummy.matrix); skin.setMatrixAt(i, dummy.matrix);
+        clothes.setColorAt(i, this.color.set(outfits[Math.floor(person.seed * 7919) % outfits.length]));
+        skin.setColorAt(i, this.color.set(tones[Math.floor(person.seed * 104729) % tones.length]));
+      });
+      for (const mesh of [clothes, skin]) {
+        mesh.castShadow = true;
+        mesh.instanceMatrix.needsUpdate = true;
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+        mesh.name = "city-beach-people";
+      }
+      this.group.add(clothes, skin);
+      this.disposables.push(clothesMaterial, skinMaterial);
+    }
+    this.disposables.push(clothesGeometry, skinGeometry);
+    // 沙排场：白色边线 + 两根网柱 + 球网（场地 14×7，长轴沿岸）。
+    if (courts.length) {
+      const unit = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+      const courtMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff" });
+      const parts = new THREE.InstancedMesh(unit, courtMaterial, courts.length * 8);
+      let n = 0;
+      const put = (spot: { x: number; z: number; yaw: number }, across: number, along: number, w: number, h: number, d: number, y: number, color: string) => {
+        const p = local(spot, across, along);
+        dummy.position.set(p.x, this.layout.terrain.height(p.x, p.z) + y, p.z);
+        dummy.rotation.set(0, spot.yaw, 0); dummy.scale.set(w, h, d); dummy.updateMatrix();
+        parts.setMatrixAt(n, dummy.matrix); parts.setColorAt(n, this.color.set(color)); n += 1;
+      };
+      for (const court of courts) {
+        put(court, -3.5, 0, 14, 0.04, 0.14, 0.01, "#f6f2e6"); put(court, 3.5, 0, 14, 0.04, 0.14, 0.01, "#f6f2e6");
+        put(court, 0, -7, 0.14, 0.04, 7, 0.01, "#f6f2e6"); put(court, 0, 7, 0.14, 0.04, 7, 0.01, "#f6f2e6");
+        put(court, -4.1, 0, 0.12, 2.45, 0.12, 0, "#e9e4d6"); put(court, 4.1, 0, 0.12, 2.45, 0.12, 0, "#e9e4d6");
+        put(court, 0, 0, 0.03, 0.9, 8.2, 1.5, "#6f7b84");   // 球网（纯黑像一块板，灰调读作网）
+        put(court, 0, 0, 0.05, 0.08, 8.2, 2.4, "#f6f2e6");  // 网顶白带
+      }
+      parts.count = n;
+      parts.castShadow = true;
+      parts.instanceMatrix.needsUpdate = true;
+      if (parts.instanceColor) parts.instanceColor.needsUpdate = true;
+      parts.name = "city-volleyball-courts";
+      this.group.add(parts);
+      this.disposables.push(unit, courtMaterial);
+    }
   }
 
   private buildTrees(): THREE.InstancedMesh {
