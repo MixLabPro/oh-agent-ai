@@ -105,19 +105,19 @@ export function createCityPlan(seed: number, tier = 2, config: CoastalConfig | n
   // 否则保持原有随机五选一——无配置调用方行为不变。
   const biome: Biome = config ? config.biome : BIOMES[Math.floor(random("biome") * BIOMES.length) % BIOMES.length];
   // 先按档位估一个半径，再按实测地块数校正（最多 4 次）：面积 ∝ R²。
-  // 起始估计按旧标定（390 半径 ≈ 400 会话的地皮）换算到每档 2000，再按实测地块数校正。
+  // 起始估计：390 半径 ≈ 一档 400 会话的地皮，再按实测地块数校正。
   let radius = 390 * Math.sqrt(tier);
-  let plan = buildPlan(seed, radius, shape, biome, config);
+  let plan = buildPlan(seed, radius, shape, biome, config, tier);
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const parcels = plan.blocks.reduce((sum, block) => sum + block.parcels.length, 0);
     if (parcels >= targetParcels(tier)) break;
     radius *= Math.sqrt(targetParcels(tier) / Math.max(1, parcels)) * 1.04;
-    plan = buildPlan(seed, radius, shape, biome, config);
+    plan = buildPlan(seed, radius, shape, biome, config, tier);
   }
   return { ...plan, scaleTier: tier, biome };
 }
 
-function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: CoastalConfig | null) {
+function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: CoastalConfig | null, tier: number) {
   const random = (key: string) => hashSeed(`${seed}:${key}`);
   const phase = random("river") * 3;
 
@@ -257,7 +257,9 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       { kind: "ferris-wheel", weight: 2, site: () => { const shore = shoreOrder[Math.floor(shoreOrder.length * 0.45)]; return { at: inwardFrom(shore, 0.08), radius: 26, clearance: 14, yaw: -Math.atan2(shore.z - core.z, shore.x - core.x) + Math.PI / 2 }; } },
       { kind: "pagoda", weight: biome === "eastasian" ? 5 : 1, site: () => ({ at: { x: hillDir.x * (hillLine - 80), z: hillDir.z * (hillLine - 80) }, radius: 18, clearance: 18, yaw: hillAngle }) },
     ];
-    const count = 2 + (random("landmarkCount") < 0.5 ? 1 : 0);
+    // 数量随岛规模增长：1 档 4 座，每两档多一座，最多 7 座。曾固定抽 2–3 座：摩天轮只在 16/60 个种子里出现，
+    // 真机反馈「原来的吊桥和摩天轮为什么没看见」。
+    const count = Math.min(7, 4 + Math.floor((tier - 1) / 2));
     const pool = [...candidates];
     // Vice City 的第一眼轮廓需要一座 downtown 高塔；若完全按抽签，某些种子会
     // 只抽到灯塔/摩天轮/低矮文化馆，低会话量时整座城就像空地块规划图。
@@ -268,10 +270,24 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       const skylineIndex = pool.findIndex((candidate) => candidate.kind === skylineKind);
       if (skylineIndex >= 0) {
         const skyline = pool.splice(skylineIndex, 1)[0];
+        // 双子塔与扭转塔二选一：固定高塔占位后，另一座不再进抽签池（曾在 5 档岛上两座同时出现）。
+        for (let k = pool.length - 1; k >= 0; k -= 1) if (pool[k].kind === "twin-towers" || pool[k].kind === "twist-tower") pool.splice(k, 1);
         const site = skyline.site();
         if (site) {
           const q = snap(site.at, site.clearance, taken(), site.radius);
           landmarks.push({ id: `landmark:${skyline.kind}`, kind: skyline.kind, x: q.x, z: q.z, yaw: site.yaw, radius: site.radius });
+        }
+      }
+    }
+    // 摩天轮是海滨城的第二个固定标志（与高塔一样不代表会话），其余仍由种子抽选。
+    if (config?.profile === "miami-coastal") {
+      const wheelIndex = pool.findIndex((candidate) => candidate.kind === "ferris-wheel");
+      if (wheelIndex >= 0) {
+        const wheel = pool.splice(wheelIndex, 1)[0];
+        const site = wheel.site();
+        if (site) {
+          const q = snap(site.at, site.clearance, taken(), site.radius);
+          landmarks.push({ id: `landmark:${wheel.kind}`, kind: wheel.kind, x: q.x, z: q.z, yaw: site.yaw, radius: site.radius });
         }
       }
     }
@@ -706,9 +722,9 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     urbanBounds, bridges, boundsRadius, carPaths, districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks: withBridgeLandmark(landmarks, bridges, random), seaside };
 }
 
-/** 悬索大桥：有河桥时，以一定概率把最长的那座替换成悬索桥（地标，不改路网）。 */
-function withBridgeLandmark(landmarks: Landmark[], bridges: CityLayout["bridges"], random: (key: string) => number): Landmark[] {
-  if (!bridges.length || random("suspension") > 0.55) return landmarks;
+/** 悬索大桥：有河桥时把最长的那座做成悬索桥（地标，不改路网）。曾按 55% 概率：用户的岛恰好没抽中。 */
+function withBridgeLandmark(landmarks: Landmark[], bridges: CityLayout["bridges"], _random: (key: string) => number): Landmark[] {
+  if (!bridges.length) return landmarks;
   const longest = [...bridges].sort((a, b) => b.length - a.length)[0];
   return [...landmarks, { id: "landmark:suspension-bridge", kind: "suspension-bridge", x: longest.from.x, z: longest.from.z, to: longest.to, yaw: longest.angle, radius: 0 }];
 }
