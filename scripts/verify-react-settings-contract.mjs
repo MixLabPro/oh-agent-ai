@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const source = readFileSync(path.join(repo, "apps/desktop/ui-dev/react/src/features/settings/SettingsPage.tsx"), "utf8");
+const bridge = readFileSync(path.join(repo, "apps/desktop/ui-dev/react/src/lib/tauri.ts"), "utf8");
+const i18n = readFileSync(path.join(repo, "apps/desktop/ui-dev/react/src/lib/i18n.ts"), "utf8");
 
 for (const name of ["sourceRequest", "sourceControlsRequest", "customRequest", "budgetRequest", "billingRequest", "dataRequest", "aboutRequest", "quotaReminderRequest"]) {
   assert.match(source, new RegExp(`const ${name} = useRef\\(0\\)`), `${name} generation missing`);
@@ -60,5 +62,11 @@ assert.match(source, /const receipt = await deleteImportedSourceData\([^\n]+\);\
 assert.match(source, /if \(settingsMounted\.current\) setPauseSaving\(false\);/u, "pause busy state is not unmount guarded");
 assert.match(source, /if \(settingsMounted\.current\) setSourceControlHarness\(null\);/u, "source exclusion busy state is not unmount guarded");
 assert.match(source, /if \(settingsMounted\.current\) setDeleteBusyHarness\(null\);/u, "source deletion busy state is not unmount guarded");
+assert.match(source, /event\.type === "SyncStatusChanged"\)\s*\{\s*\/\/[^\n]*\n\s*refresh\(true\);/u, "dynamic source health does not refresh after sync status changes");
+for (const kind of ["manifest_or_source_invalid", "source_busy", "authority_unavailable", "source_unavailable", "ingest_failed"]) {
+  assert.ok(bridge.includes(`"${kind}"`), `dynamic source error kind ${kind} is not accepted by the frontend bridge`);
+  assert.ok(i18n.includes(`source.error.${kind}`), `dynamic source error kind ${kind} has no localized label`);
+}
+assert.match(source, /source\.error_kinds\.map\(\(kind\) => sourceErrorLabel\(kind, language\)\)/u, "source diagnostic labels are not rendered in Settings");
 
-console.log("React Settings contract: OK (per-projection generations, unmount guard, pause receipt)");
+console.log("React Settings contract: OK (per-projection generations, sync refresh, dynamic error labels, unmount guard, pause receipt)");

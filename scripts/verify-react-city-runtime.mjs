@@ -127,7 +127,7 @@ async function openWorkbench({ noWebGL = false, failModule = false } = {}) {
         { id: "fixture-session-002", harness: "claude_code", first_event_at: "2026-09-28T14:05:00Z", last_event_at: "2026-09-28T14:51:00Z", tokens: { input: 8700, output: 2200, total: 10900 } },
         { id: "fixture-session-003", harness: "codex", first_event_at: "2026-09-17T07:20:00Z", last_event_at: "2026-09-17T08:02:00Z", tokens: { input: 22100, output: 5400, total: 27500 } },
       ].filter((session) => session.first_event_at >= from);
-      return { protocol: "city:v1", generated_at: "2026-10-03T12:00:00Z", window: { days, label: `最近 ${days} 天`, from, to: "2026-10-03T00:00:00Z" }, sessions: mode === "malformed" ? null : sessions, findings: mode === "malformedEffect" ? null : [], coverage: { total: sessions.length, returned: sessions.length, truncated: false, unknown_time: 0 }, status: mode.startsWith("malformed") ? "ready" : mode };
+      return { protocol: "city:v2", source: "fixture", harnesses: [{ id: "codex", display_name: "Codex", capabilities: { session_statistics: { available: true }, findings: { available: true, reason: null } } }, { id: "claude_code", display_name: "Claude Code", capabilities: { session_statistics: { available: true }, findings: { available: true, reason: null } } }], generated_at: "2026-10-03T12:00:00Z", window: { days, label: `最近 ${days} 天`, from, to: "2026-10-03T00:00:00Z" }, sessions: mode === "malformed" ? null : sessions, findings: mode === "malformedEffect" ? null : [], coverage: { total: sessions.length, returned: sessions.length, truncated: false, unknown_time: 0 }, status: mode.startsWith("malformed") ? "ready" : mode };
     };
   }, { noWebGL, failModule });
   await page.goto(origin);

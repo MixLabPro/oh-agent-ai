@@ -27,7 +27,8 @@ vm.runInNewContext(out.outputFiles[0].text, {
 const { tauriCityDataProvider } = mod.exports;
 for (const windowDays of [7, 30, 90, 366]) {
   const projection = await tauriCityDataProvider.getProjection({ windowDays });
-  assert.equal(projection.protocol, "city:v1");
+  assert.equal(projection.protocol, "city:v2");
+  assert(Array.isArray(projection.harnesses));
   assert.equal(projection.window.days, windowDays);
   assert.equal(projection.status, "ready");
   assert(projection.sessions.every((session) => !("title" in session) && !("path" in session) && !("prompt" in session)));

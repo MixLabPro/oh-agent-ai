@@ -4,6 +4,8 @@
 许可状态：仓库无 LICENSE 文件；作者已明确授权参考与移植（2026-10 会话中确认）。**纪律：所有移植在对应模块头注释与提交信息中标注出处**（先例：`cityAmbient.ts` 模块头、各 feat 提交信息）。
 本文是完整的移植决策记录：已移植、可移植未移植、不移植，以及移植中沉淀的方法论教训。
 
+2026-10-04 范围更新：用户已明确增加可选的飞机任务游戏模式，详见 [CITY_GAME_MODE_IMPLEMENTATION_PLAN.md](CITY_GAME_MODE_IMPLEMENTATION_PLAN.md)。下文原“不移植玩法”结论针对数据展示模式；现在选择性借鉴 Plane/CameraRig/RaceManager，并将 PackageQuest 留作第二阶段。Game 总控、多人后端及整套成长/战斗体系仍不整体迁入。FlightControls 的“零增量”估算不适用于完整游戏模式。
+
 ## 1. 源码结构总览
 
 ```text
@@ -19,7 +21,7 @@ client/src/       audio / network / ui / runtime / utils
 server/src/       Node + Prisma 多人后端（rooms、routes、paintball、terrain 同步）
 ```
 
-对 Agent City 有价值的是**世界/渲染/生命感/操控**四类；玩法与多人系统对数据可视化城市无对应物（见 §4）。
+对 Agent City 数据模式有价值的是**世界/渲染/生命感/操控**四类；新增游戏模式可选择性借鉴穿环与配送，按独立存档和任务状态机实施。多人系统仍不进入范围。
 
 ## 2. 已移植台账（14 项）
 
@@ -44,7 +46,7 @@ server/src/       Node + Prisma 多人后端（rooms、routes、paintball、terr
 
 | # | 模块 | 用途 | 对接点 | 成本 |
 | --- | --- | --- | --- | --- |
-| 1 | **FlightControls + CameraRig** | WASD 探索模式的手感（速度积分/阻尼/转向惯性——上架调过的参数） | CityEngine 探索模式（已立项） | 读文件取参数，~0 新增 |
+| 1 | **FlightControls + Plane + CameraRig** | 飞机输入、运动和追尾手感；参数需按城市尺度重调 | 游戏模式 G1，见实施方案 | 非零：输入生命周期、平面运动、碰撞、相机与暂停恢复 |
 | 2 | **NpcPlanes + BiplaneMesh** | 水上飞机班线 / 渡轮进港 | 生机方向清单第 5 项 | 低模三件套 + 航线循环 |
 | 3 | **Trail.ts + Contrails.ts** | 飞机凝结尾迹；船尾迹升级为连续航迹 | 与 #2 同批 | ribbon 工具类 |
 | 4 | **OceanFishMesh 跃出弧线** | 鲸/海豚跃（远海偶发，日期+时段 seed） | 生机方向第 6 项 | 翻滚弧线 + 水花 |
@@ -52,7 +54,7 @@ server/src/       Node + Prisma 多人后端（rooms、routes、paintball、terr
 
 ## 4. 不移植清单（一句理由）
 
-- **玩法全家**（Game 总控/Carpet 系/SkyGremlins/Void 系/MoonThreat/CosmicPortal/Package/Race/Rings/Paintball/Upgrade/Progression/Campsite 系）：游戏机制对数据可视化无对应物；给数据加游戏化外壳伤害诚实性。
+- **整套玩法系统**（Game 总控/Carpet 系/SkyGremlins/Void 系/MoonThreat/CosmicPortal/Paintball/Upgrade/Campsite 系）：不整体移植。Race/Rings 和 Plane 作为独立游戏模式参考，Package 留第二阶段；Progression 只借鉴存档思路。游戏成绩不改写真实工作数据或解释为真实任务完成度。
 - **SkyJellyfish**：视觉出色但属幻想生物，Miami 数据城市语境突兀。
 - **Braziers/EternalFlame 系**：火盆/永恒之火与海滨基调不合（火山口微光已覆盖「火」）。
 - **GodRays**：体积光后处理，现有 bloom+GTAO 预算外。
@@ -70,10 +72,7 @@ server/src/       Node + Prisma 多人后端（rooms、routes、paintball、terr
 
 ## 6. 建议排期
 
-1. FlightControls 手感参数 → 随 WASD 探索模式一批（零增量）；
-2. 班机/渡轮航线 + 尾迹（§3 #2#3）；
-3. 鲸跃（§3 #4）；
-4. LensFlare 视黄昏相验收结果决定。
+当前优先执行游戏模式方案的 G1 飞行练习、G2 穿环任务、G3 存档与原生验收。原有环境增强候选保留为后续：班机/渡轮航线与尾迹（§3 #2#3）、鲸跃（§3 #4）、LensFlare。它们不作为第一版游戏模式的前置条件。
 
 ## 附录：78 个 game/ 模块分类索引
 

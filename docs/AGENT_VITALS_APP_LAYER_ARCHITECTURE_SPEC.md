@@ -1,7 +1,9 @@
 # Agent City 插件化与 Rust/UI 分层架构
 
 版本：v1.6 · 日期：2026-10-03
-状态：City 前端 fixture 与通用插件 RPC 已接入；Rust 数据 provider 未实现；人工布局/焦点验收待完成
+状态：原生 City 已接入 Rust 本地数据投影；通用 harness 数据接口修复推进中；完整安装/布局/焦点验收不由单元测试代替。
+
+当前数据规范见 [APP_PLUGIN_HARNESS_DATA_CONTRACT.md](APP_PLUGIN_HARNESS_DATA_CONTRACT.md) 与 [CITY_LOCAL_DATA_PROJECTION.md](CITY_LOCAL_DATA_PROJECTION.md)。后文 fixture 阶段的测试记录属于历史证据，不能视为当前数据限制。
 
 ## 1. 目标
 
@@ -11,7 +13,7 @@ Agent City 是 Agent Vitals 工作台中的一个可独立维护的功能插件�
 
 目标方案是独立预编译 UI 产物，由宿主的插件容器加载到单独的嵌入式 WebView；宿主不直接 import City 的 React 组件、引擎或 CSS。具体进程隔离能力必须先在本机 Tauri/WebKit 上验证。目录抽离、React ErrorBoundary、iframe 或创建两个 WebView 本身均不能作为独立进程隔离的证据。
 
-MVP 仅接入官方 City 插件，使用合成 fixture。独立应用发行、动态原生库、第三方安装器和市场不属于本轮目标。
+MVP 接入官方 City 插件：原生读取声明的真实本地投影，浏览器预览使用合成 fixture。通用 App Plugin 只关心有哪些 harness 及可用数据能力，不区分内置或热插拔。独立应用发行、动态原生库、第三方安装器和市场不属于本轮目标。
 
 浏览器开发/测试使用独立 iframe 加载同一预编译 City UI，transport 改为 postMessage，复用版本、实例、工具栏与命令 DTO；桌面版继续使用原生 IPC/WebView。浏览器只提供 UI 与消息链路测试，不保证独立进程或死循环隔离。该开发入口只提供合成 fixture，见 [CITY_BROWSER_PREVIEW.md](CITY_BROWSER_PREVIEW.md)。
 
@@ -25,7 +27,7 @@ apps/
     ui-dev/react/src/app/               宿主导航与 tab 挂载
       plugins/                         通用插件视图插槽与故障提示
     src-tauri/src/plugin_host.rs        实例生命周期、视图布局、消息路由、后台 watchdog
-    src-tauri/src/plugin_host.rs        通用请求/响应边界与生命周期管理
+    src-tauri/src/plugin_projections.rs 已登记投影与通用 harness 数据服务分发
     src-tauri/src/lib.rs                注册宿主服务
 ```
 
@@ -33,7 +35,7 @@ apps/
 
 源码位于 `apps/agent-city`；当前预编译资源目录为 `plugins/AgentCity.plugin/ui/{index.html,assets/}`，`.plugin` 仅为普通目录命名。固定官方插槽的 ID、标题、入口和版本由宿主定义；本轮没有独立 manifest 文件或市场安装规范。
 
-插件前后端只约定通用 `PluginRequestV1` / `PluginResponseV1` 信封（版本、实例、请求 ID、方法、JSON payload/result、稳定错误码）。City 的领域 DTO 归 City 前端，不放入 Rust 通用宿主接口。当前没有注册 Rust 数据 provider；City MVP 使用前端合成 fixture，通用请求明确返回 `provider_unavailable`。后续真实数据服务由 Agent Vitals Rust 核心按授权规则注册 provider，不改变传输信封。若 City 后续包含自有 Rust 可执行业务，需放入可独立终止的插件宿主子进程，通过 IPC 消费核心服务；不能把插件代码经 `#[path] mod` 或动态原生库装入核心后声称故障已隔离。插件 UI 的错误边界也不能保护 Rust 核心进程。
+插件前后端通过通用 `PluginRequestV1` / `PluginResponseV1` 信封通信（版本、实例、请求 ID、方法、JSON payload/result、稳定错误码）。公开投影类型放在 SDK；通用 PluginHost 不解释 City DTO，Rust 独立 handler 提供已登记的本地数据服务。未知 provider 明确返回 unavailable，不使用 fixture 冒充本机数据。若插件包含自有 Rust 可执行业务，需放入可独立终止的子进程，通过 IPC 消费核心服务；不能把插件代码经 `#[path] mod` 或动态原生库装入核心后声称故障已隔离。插件 UI 的错误边界也不能保护 Rust 核心进程。
 
 ## 3. 运行与依赖关系
 
@@ -49,7 +51,7 @@ Agent Vitals：同一个原生窗口
              Rust 核心 provider → 通用 JSON result
 ```
 
-独立运行环境嵌入同一个窗口；窗口数量、应用数量和进程数量是不同的设计维度。进入 City tab 时创建实例，离开时销毁并清理订阅；再次进入或重试创建新实例，窗口范围、画质和视角恢复默认值。本轮不实现暂停后保留场景状态。
+独立运行环境嵌入同一个窗口；窗口数量、应用数量和进程数量是不同的设计维度。首次进入创建实例，离开 tab 暂停并清理宿主订阅，返回时复用并重新校验/刷新数据；失败重试或明确 dispose 才销毁重建。插件不得依赖暂停期间收到所有失效事件。
 
 插件通过独立 transport 调用小型 host API。控制消息携带 `version: 1`、`instanceId`、类型及命令的 `requestId`；工具栏快照携带递增 revision。数据请求使用通用信封传递 `method` 和 JSON `payload`，响应按 requestId 对应；City 自行解释其领域数据。宿主控制超时和恢复，不能依赖已卡死插件中的计时器。
 

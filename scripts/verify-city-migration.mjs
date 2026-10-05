@@ -21,20 +21,42 @@ assert.equal(replayStartMs([{ first_event_at: "bad" }], from, to), from);
 assert.equal(replayStartMs([{ first_event_at: new Date(from - 86400000).toISOString() }], from, to), from);
 assert.equal(replayStartMs([{ first_event_at: new Date(to + 86400000).toISOString() }], from, to), from);
 const { CityWildlife } = load("engine/cityWildlife.ts");
+const { CityAmbient } = load("engine/cityAmbient.ts");
 const loop = [{ x: 0, z: 0 }, { x: 100, z: 0 }, { x: 100, z: 100 }, { x: 0, z: 100 }];
 const wildlife = new CityWildlife({ x: 50, z: 50 }, 150, [], [], [loop], () => 3);
 const wings = wildlife.group.getObjectByName("city-bird-wings");
 const birds = wildlife.group.getObjectByName("city-birds");
 const people = wildlife.group.getObjectByName("city-pedestrians");
 assert.equal(wings.count, birds.count * 2);
+wings.geometry.computeBoundingBox();
+assert.ok(wings.geometry.boundingBox.max.y - wings.geometry.boundingBox.min.y >= 0.05, "bird wings retain visible low-poly thickness");
+birds.geometry.computeBoundingBox();
+assert.ok(birds.geometry.boundingBox.max.x > 1 && birds.geometry.boundingBox.min.x < -1, "bird silhouette includes beak and tail");
 assert.ok(people.count > 0 && people.count <= 220);
 wildlife.setNight(0, to); wildlife.update(0, 0);
 const start = Array.from(people.instanceMatrix.array);
+const birdStart = Array.from(birds.instanceMatrix.array);
 const wingStart = Array.from(wings.instanceMatrix.array);
+const birdPositions = Array.from({ length: birds.count }, (_, i) => [birdStart[i * 16 + 12], birdStart[i * 16 + 13], birdStart[i * 16 + 14]]);
+let nearestBirds = Infinity;
+for (let i = 0; i < birdPositions.length; i += 1) for (let j = i + 1; j < birdPositions.length; j += 1) {
+  nearestBirds = Math.min(nearestBirds, Math.hypot(
+    birdPositions[i][0] - birdPositions[j][0],
+    birdPositions[i][1] - birdPositions[j][1],
+    birdPositions[i][2] - birdPositions[j][2],
+  ));
+}
+assert.ok(nearestBirds > 10, `bird instances must remain visually separated (nearest: ${nearestBirds.toFixed(1)})`);
+const firstFlockY = birdPositions.slice(0, 7).reduce((sum, p) => sum + p[1], 0) / 7;
+const secondFlockY = birdPositions.slice(7).reduce((sum, p) => sum + p[1], 0) / 7;
+assert.ok(Math.abs(secondFlockY - firstFlockY) > 30, "separate flocks occupy distinct altitude bands");
 wildlife.update(1, 1);
+assert.notDeepEqual(Array.from(birds.instanceMatrix.array), birdStart, "flock follows a moving route");
 assert.notDeepEqual(Array.from(wings.instanceMatrix.array), wingStart);
 assert.notDeepEqual(Array.from(people.instanceMatrix.array), start);
 wildlife.update(0, 0);
+assert.deepEqual(Array.from(birds.instanceMatrix.array), birdStart, "flight path rewinds deterministically");
+assert.deepEqual(Array.from(wings.instanceMatrix.array), wingStart, "wing phase rewinds deterministically");
 assert.deepEqual(Array.from(people.instanceMatrix.array), start, "replay/export rewind is deterministic");
 let disposed = 0;
 for (const mesh of [birds, wings, people]) {
@@ -44,4 +66,22 @@ for (const mesh of [birds, wings, people]) {
 wildlife.dispose(); assert.equal(disposed, 6);
 const empty = new CityWildlife({ x: 0, z: 0 }, 150, [], [], [], () => 0);
 assert.equal(empty.group.getObjectByName("city-pedestrians"), undefined); empty.dispose();
-console.log("City migration: passed (data-driven/clamped replay, flapping wings, bounded moving walkers, rewind, disposal, empty scene).");
+const ambient = new CityAmbient({ x: 0, z: 0 }, 150, () => -10, []);
+const balloons = ambient.group.children.filter((child) => child.name === "city-hot-air-balloon");
+assert.equal(balloons.length, 3);
+for (const balloon of balloons) {
+  assert.equal(balloon.children.length, 6, "balloon envelope, basket, cables, burner, and two night lights");
+  const envelope = balloon.children[0], basket = balloon.children[1];
+  assert.ok(envelope.geometry.getAttribute("color"), "balloon envelope has panel colors");
+  assert.ok(basket.geometry.getAttribute("color"), "basket has woven bands");
+  envelope.geometry.computeBoundingBox();
+  assert.ok(envelope.geometry.boundingBox.max.y - envelope.geometry.boundingBox.min.y >= 21, "balloon envelope has a tapered upright profile");
+  const balloonLights = balloon.children.filter((child) => child.isPointLight);
+  assert.equal(balloonLights.length, 2, "balloon includes envelope and basket point lights");
+}
+ambient.setNight(0.8);
+assert.ok(balloons.every((balloon) => balloon.children.filter((child) => child.isPointLight).every((light) => light.visible && light.intensity > 0)), "balloon warm lights switch on at night");
+ambient.setNight(0);
+assert.ok(balloons.every((balloon) => balloon.children.filter((child) => child.isPointLight).every((light) => !light.visible)), "balloon lights switch off during daytime");
+ambient.dispose();
+console.log("City migration: passed (replay, wildlife motion/formation, balloon geometry, bounded walkers, rewind, disposal, empty scene).");

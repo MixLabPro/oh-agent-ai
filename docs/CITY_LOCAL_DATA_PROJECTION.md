@@ -6,17 +6,17 @@
 
 `City → app SDK plugin_request → Rust PluginHost → plugin_projections → query::app_local → readonly AuthorityDb`
 
-`apps/desktop/plugins.json` 的 `dataProjections: ["city:v1", "city-settings:v1"]` 声明允许的投影及私有设置接口。PluginHost 校验发送 WebView、活动实例与请求信封；查询在阻塞任务中执行，不持有实例锁；响应交付前重新检查实例是否仍有效。业务分发在 `plugin_projections.rs`，通用 PluginHost 不解释 City 的参数。
+`apps/desktop/plugins.json` 的 `dataProjections: ["city:v2", "city-settings:v1", "harnesses:v1"]` 声明允许的投影及私有设置接口。PluginHost 校验发送 WebView、活动实例与请求信封；查询在阻塞任务中执行，不持有实例锁；响应交付前重新检查实例是否仍有效。业务分发在 `plugin_projections.rs`，通用 PluginHost 不解释 City 的参数。
 
 ## MVP 契约
 
-请求：`method: "data.read"`，`payload: { projection: "city", version: 1, windowDays: 7 | 30 | 90 | 366 }`。
+请求：`method: "data.read"`，`payload: { projection: "city", version: 2, windowDays: 7 | 30 | 90 | 366 }`。
 
-共享类型：SDK `CityUiProjectionV1`。这是已有同窗 UI 的 `protocol: "city:v1"` 契约，不是旧独立应用设计中的分页 `CityDataProjectionV1`，不得声称两者互通。
+共享类型：SDK `CityUiProjectionV2`，`protocol: "city:v2"`。v2 使用通用 `HarnessPublicIdentityV1`，不再限制为四个内置来源；内部同批升级，没有 v1 回退。它不是旧独立应用设计中的分页 `CityDataProjectionV1`。
 
 - 时间窗为滚动 UTC `[now - days, now]`，token 仅累计窗口内、未删除的 facts；输入包含 uncached/cache-read/cache-write。
 - 最多 500 个会话，按最近事件排序；覆盖字段报告窗口会话总数、实际返回数、截断状态，以及未定时 facts 涉及的会话数（后者无法归属时间窗）。不分页。
-- 会话 ID 使用安装盐、City 作用域的单向标识，不返回原生 ID、机器标识或数据库主键。执行环境名称只返回官方词表或 `unknown`。
+- 会话 ID 使用安装盐、City 作用域的单向标识，不返回原生 ID、机器标识或数据库主键。`harnesses` 返回统一身份、名称和统计/findings 能力，内置与动态来源使用同一结构；插件不得解析 id 前缀。卸载来源的历史统计继续可见；元数据不可用时由宿主以合法 slug 降级名称，不回退可变候选。无法验证的身份才归为 `unknown`。
 - 每个会话最多 2 条已有用户输入摘录（优先首次输入，再取最近后续输入），重新执行 scrub/长度限制；首次最多 200 字符，后续最多 120 字符。附 `role / provenance / is_excerpt`，不提供原始事件锚点。摘录是会话上下文，不保证发生在本次统计窗口内。
 - `source: "local"` 与 `data_revision` 标识真实库快照；只读事务确保覆盖和会话来自同一快照。不新建缺失数据库，不执行迁移。
 - 费用尚未投影，在模型中标为 unavailable。Findings 只包含窗口内创建、状态为 open/later 的 issue_instances，按官方执行环境与 severity 汇总；不含异常文本、来源健康和探针结果，`findings_state: "partial"`，空数组不是“没有异常”的证明。当前没有独立的来源新鲜度认证。

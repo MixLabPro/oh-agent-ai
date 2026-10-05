@@ -2,6 +2,8 @@
 
 版本：v1.6 · 日期：2026-10-03
 
+2026-10-04 当前规范：原生已有 Rust 本地数据 provider，City 正在升级 v2 并复用通用 harness 身份；App Plugin 不区分来源接入机制。接口见 [APP_PLUGIN_HARNESS_DATA_CONTRACT.md](APP_PLUGIN_HARNESS_DATA_CONTRACT.md)，修复进度见 [HARNESS_INTEGRATION_COMPLETENESS_REPAIR_SPEC.md](HARNESS_INTEGRATION_COMPLETENESS_REPAIR_SPEC.md)。下文早期 fixture 迭代记录不代表当前能力；不能据此宣布本次完整验收通过。
+
 ## 目标
 
 按最新目标重新安排三个迭代：City 必须独立构建、隔离运行、通过通用协议请求宿主能力，由宿主管理生命周期和故障恢复。City 仍是同一原生窗口内与 Overview 平级的 tab。当前目录抽离和 React 错误边界是已有基础，不代表该目标完成。
@@ -12,7 +14,7 @@
 - Rust 核心提供可信投影服务；插件自有可执行逻辑不能编译进核心进程后声称风险已隔离。
 - Overview 与 City 在同一导航、同一窗口下平级切换。
 - 保留宿主统一顶部工具栏；City 用描述消息声明工具项和状态，宿主渲染，命令经 PluginHost 投递到 City。禁止跨 WebView Portal、组件和回调共享。
-- 插件与 Rust 使用通用版本化请求/响应信封；MVP City 数据由前端合成 fixture 展示，Rust 尚未接入数据 provider。
+- 插件与 Rust 使用通用版本化请求/响应信封；原生通过登记投影读取本地真实数据，浏览器和独立预览只使用合成 fixture。
 - 宿主 build/typecheck/Rust 测试通过，City 守卫通过。
 - 缺失 City 产物、插件异常、受控死循环和 City 执行环境退出均不阻断 Overview；宿主可独立重建 City。WebGL 不可用时仍显示摘要。
 
@@ -43,10 +45,10 @@
   └─ City WebView：预编译 UI / CityEngine
            │ 通用 request/response、失效事件
            ▼
-       Rust PluginHost → 通用 provider 插槽（当前未注册）
+       Rust PluginHost → 登记 provider / 通用 harness 查询接口
 ```
 
-MVP 仅用合成 fixture，不读取本机日志或数据库。请求/响应信封定义在 app SDK；City fixture 和领域 DTO 留在 City 前端。后续 Rust provider 遵守仓库 `AGENTS.md` 的本地 serving-face 约束。
+原生由 Rust 读取 authority 并投影，插件不直接读取日志或数据库。请求/响应信封与公开数据类型定义在 app SDK；City fixture 留在前端。provider 遵守仓库 `AGENTS.md` 的本地 serving-face 约束。暂停/复用/明确销毁遵循当前实现，不再将每次离开 tab 等同于 dispose。
 
 ## 暂不做
 
@@ -54,7 +56,7 @@ MVP 仅用合成 fixture，不读取本机日志或数据库。请求/响应信�
 - 第三方市场、动态原生库和复杂接入 SDK；内置插件描述符/预编译产物加载与运行隔离属于本轮范围。
 - 真实数据 grant/broker 的生产身份与安装授权流程；这些以后单独设计，不在 MVP 伪称完成。
 
-## 当前状态（2026-10-03）
+## 早期 fixture 阶段验收记录（2026-10-03，非当前规范）
 
 - City 独立源码位于 `apps/agent-city/ui`，独立构建资源打包到 `plugins/AgentCity.plugin/ui`；宿主 App 不 import City，正式 bundle 不含 City/Three chunk。City fixture 保留在前端；Rust `PluginHost` 提供通用版本化请求/响应信封，尚无数据 provider 时返回 `provider_unavailable`。
 - 正式 `plugin_host.rs` 和通用 `usePlugin` 管理同窗原生子 WebView、布局与消息；展示名称由调用方配置，City 是当前接入实例，原生适配器仍只注册 City。离开 tab 销毁，重试使用新实例。Rust 后台 watchdog 提供 15 秒启动、5 秒心跳/命令期限，独立于宿主 JS 轮询；失败状态不被旧消息或自动重载覆盖。

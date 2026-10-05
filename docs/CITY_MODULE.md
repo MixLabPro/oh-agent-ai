@@ -4,6 +4,8 @@
 
 ## 本轮设计范围
 
+可选飞机游戏模式的范围、模块和三轮实施计划见 [CITY_GAME_MODE_IMPLEMENTATION_PLAN.md](CITY_GAME_MODE_IMPLEMENTATION_PLAN.md)。该功能尚待实现，复用城市渲染与布局，任务及成绩独立于真实分析数据。
+
 2026-10-04 UI/UX 新目标见 [场景优先与渐进式 HUD SPEC](CITY_UX_SPEC.md)。以下为原有城市空间方案记录；其中“HUD 沿用现有产品”的呈现约定已被新 SPEC 取代，数据与布局契约不变。新版默认采用少量 HUD、按需统计与回放，不以旧版仪表盘式布局作为最终目标。
 
 城市画布采用 redesign-overhaul：从独立圆岛改为共享沿海平原、街区和地块。HUD、主导航、Harness 配色、SessionDetail、数据接口、时间轴语义沿用现有产品。
