@@ -182,6 +182,20 @@ for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
     console.log(`Backdrop auto: ${sessions} sessions -> ${auto.contextBuildings.length} context buildings`);
   }
 }
+// 海滨酒店是会话楼：酒店地块（hotel:<i>/0）只由会话占用；背景楼与配套不得占；会话少时没有酒店。
+// 曾是一排装饰酒店——无论有没有数据都立着、点了没反应（用户：「海滨酒店为什么不能作为执行环境的会话楼」）。
+{
+  for (const [sessions, seed] of [[3, 523001688], [700, 42], [2000, 7]]) {
+    const input = model(sessions, ["codex", "claude-code", "dsh"]);
+    const layout = layoutCity(input, null, seed, MIAMI_COASTAL);
+    const hotelSlots = layout.districts.flatMap((district) => [...district.slots.values()]).filter((parcel) => parcel.blockId.startsWith("hotel:"));
+    for (const building of layout.contextBuildings) assert(!building.id.includes("hotel:"), "backdrop never takes a hotel lot");
+    for (const civic of layout.civics) assert(!civic.parcelId.startsWith("hotel:"), "civics never take a hotel lot");
+    assert.equal(new Set(hotelSlots.map((parcel) => parcel.id)).size, hotelSlots.length, "one session per hotel lot");
+    if (sessions === 3) assert.equal(hotelSlots.length, 0, "a 3-session city has no hotels");
+    console.log(`Hotel lots: ${sessions} sessions -> ${hotelSlots.length} session hotels`);
+  }
+}
 // 配套按服务半径铺开：同一座岛上任意两座配套至少隔 60，学校多数落在居住区、商场多数落在商业区/市中心。
 {
   const layout = layoutCity(model(1000), null, 42);

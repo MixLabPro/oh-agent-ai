@@ -89,6 +89,25 @@ export type SeasideBand = {
 /** Dense enough to read as a hotel frontage at aerial scale, with a hard cap to bound instances. */
 export const seasideHotelCount = (validSampleCount: number): number => Math.min(18, Math.max(8, Math.floor(validSampleCount * 0.62)));
 
+/** 海滨酒店地块（会话楼用）：酒店线上等距的宽地块，朝海。
+ *  酒店曾是装饰——无论有没有数据都立着一排、点了没反应（用户：「为什么海滨酒店不能作为执行环境的会话楼？」）。
+ *  现在它们是会话地块：所在城区的会话长到海边时才落楼，没被占用的地块什么都不画。
+ *  位置/尺寸公式与旧装饰酒店一致（数量、采样间隔、宽 20–29、进深 11.2、朝向 atan2(inward.x, inward.z)）。 */
+export function seasideHotelLots(band: SeasideBand | null): Array<{ id: string; x: number; z: number; yaw: number; width: number; depth: number }> {
+  if (!band || band.degraded) return [];
+  const valid = band.samples.filter((sample) => sample.valid);
+  if (valid.length < 3) return [];
+  const count = seasideHotelCount(valid.length);
+  const lots: Array<{ id: string; x: number; z: number; yaw: number; width: number; depth: number }> = [];
+  for (let i = 0; i < count; i += 1) {
+    const sample = valid[Math.floor(((i + 0.5) / count) * (valid.length - 1))];
+    const seed = hashSeed(`seasidehotel:${i}:${sample.azimuth}`);
+    lots.push({ id: `hotel:${i}`, x: sample.hotelLine.x, z: sample.hotelLine.z, yaw: Math.atan2(sample.inward.x, sample.inward.z),
+      width: (30 + seed * 14) * 0.65, depth: 16 * 0.7 });
+  }
+  return lots;
+}
+
 /** 规划层注入的世界判定（全部为近似即可；coastDistance 是保守下界）。 */
 export type SeasideWorld = {
   /** 带符号离岸距离近似：陆正海负。 */

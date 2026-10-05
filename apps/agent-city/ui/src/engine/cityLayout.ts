@@ -1,7 +1,7 @@
 /** Geography and public planning are fixed; sessions occupy reserved parcels. */
 import { hashSeed, type CityModel } from "../cityModel";
 import { clearsHighways, createCityPlan, scaleTierFor, type Biome, type Landmark } from "./cityPlan";
-import { seasideStripContains, type CoastalConfig } from "./citySeaside";
+import { seasideHotelLots, seasideStripContains, type CoastalConfig } from "./citySeaside";
 
 export type Vec2 = { x: number; z: number };
 export type Zone = "downtown" | "residential" | "commercial" | "waterfront";
@@ -134,7 +134,15 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const planKey = `${seed}:${tier}:${coastalKey}`;
   let plan = plans.get(planKey);
   if (!plan) { plan = createCityPlan(seed, tier, coastal); plans.set(planKey, plan); }
-  const parcels = plan.blocks.flatMap((block) => block.parcels);
+  // 海滨酒店地块并入可落楼街区（单地块合成街区，朝海、宽 20–29）：酒店只在有会话落户时才出现。
+  // 只进本函数的落楼候选，不改缓存的 plan、不进返回的 layout.blocks（地面贴图/规划守卫看到的规划不变），
+  // 配套选址与背景楼仍只看 plan.blocks——酒店地块留给会话。
+  const hotelBlocks: CityBlock[] = seasideHotelLots(plan.seaside).map((lot) => ({
+    id: lot.id, districtId: "", x: lot.x, z: lot.z, width: lot.width, depth: lot.depth, zone: "waterfront" as Zone, polygon: [],
+    parcels: [{ id: `${lot.id}/0`, blockId: lot.id, x: lot.x, z: lot.z, yaw: lot.yaw, zone: "waterfront" as Zone, width: lot.width, depth: lot.depth }],
+  }));
+  const blocks = [...plan.blocks, ...hotelBlocks];
+  const parcels = blocks.flatMap((block) => block.parcels);
   const parcelIndex = new Map(parcels.map((parcel) => [parcel.id, parcel]));
   const assigned = new Map<string, Parcel>();
   const used = new Set<string>();
@@ -196,7 +204,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   const core = plan.core;
   const wedgeStart = hashSeed(`${seed}:wedge`) * Math.PI * 2;
   const angleFrom = (p: Vec2) => (((Math.atan2(p.z - core.z, p.x - core.x) - wedgeStart) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
-  const usableBlocks = plan.blocks.filter((block) => block.parcels.length > 0)
+  const usableBlocks = blocks.filter((block) => block.parcels.length > 0)
     .sort((a, b) => angleFrom(a) - angleFrom(b) || a.id.localeCompare(b.id));
   const totalLots = usableBlocks.reduce((sum, block) => sum + block.parcels.length, 0);
   const wedgeOf = new Map<string, string>(); // blockId → districtId

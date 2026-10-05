@@ -9,7 +9,7 @@
 
 import * as THREE from "three";
 import { builtFractionAt, hashSeed, type CityBuilding, type CityModel } from "../cityModel";
-import { MIAMI_COASTAL, promenadeSegments, seasideHotelCount } from "./citySeaside";
+import { MIAMI_COASTAL, promenadeSegments } from "./citySeaside";
 import { fbm } from "./cityNoise";
 import type { CityLayout, DistrictLayout, Parcel, Vec2 } from "./cityLayout";
 import { activeTheme, skyYawOf } from "./cityTheme";
@@ -461,9 +461,9 @@ export class CityParts {
       this.buildUrbanContext();
       this.buildSeaMountains();
       this.buildPromenade();
-      this.buildSeasideHotels();
+      // 装饰酒店排已退役：酒店地块交给会话（cityLayout hotelBlocks），只有落户的会话才成楼。
       this.buildLifeguardTowers();
-      this.buildSeasideSignage();
+      // 酒店招牌随装饰酒店一起退役（它们挂在不存在的楼面上）。
       this.treeMesh = this.buildTrees();
       const carResult = this.buildCars();
       this.carMesh = carResult.mesh;
@@ -2185,94 +2185,6 @@ export class CityParts {
     this.disposables.push(geometry, material);
   }
 
-  /** 海滨酒店排（VICE B4 样板）：酒店线上的粉彩 Art Deco 低层装饰楼——宽体量、
-   *  阶梯平顶、水平遮阳带、临海立面竖向壁柱。纯装饰：不进 Session 拾取/统计/生长
-   *  （数据楼语义不变）；细节合批为一个额外 InstancedMesh。 */
-  private buildSeasideHotels(): void {
-    const seaside = this.layout.seaside;
-    if (!seaside || seaside.degraded) return;
-    const valid = seaside.samples.filter((sample) => sample.valid);
-    if (valid.length < 3) return;
-    const wallGeometry = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
-    // 墙面带窗格（装饰艺术立面贴图，乘酒店粉彩色）：曾是无窗的纯色盒子，近看粗糙（真机截图）。
-    const hotelFacade = makeDecoFacadeTexture();
-    hotelFacade.colorSpace = THREE.SRGBColorSpace;
-    hotelFacade.repeat.set(4, 3);
-    const wallMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff", map: hotelFacade });
-    const trimMaterial = new THREE.MeshLambertMaterial({ color: "#fff6ea" });
-    const detailMaterial = new THREE.MeshLambertMaterial({ color: "#fff0d7" });
-    const trimGeometry = new THREE.BoxGeometry(1, 1, 1);
-    const detailGeometry = new THREE.BoxGeometry(1, 1, 1);
-    const palette = ["#ffb8a0", "#a8e8ec", "#ffd8a0", "#d8c0ff"];
-    const count = seasideHotelCount(valid.length);
-    const wallMesh = new THREE.InstancedMesh(wallGeometry, wallMaterial, count * 3);
-    const trimMesh = new THREE.InstancedMesh(trimGeometry, trimMaterial, count * 2);
-    // 传统 Art Deco 酒店最易识别的是竖向强调线；一栋三根壁柱合并成同一批次，
-    // 近景不再只是几块粉彩长方体，远景仍保留干净轮廓。
-    const detailMesh = new THREE.InstancedMesh(detailGeometry, detailMaterial, count * 3);
-    wallMesh.castShadow = wallMesh.receiveShadow = true;
-    detailMesh.castShadow = true;
-    let cursor = 0;
-    for (let i = 0; i < count; i += 1) {
-      const sample = valid[Math.floor(((i + 0.5) / count) * (valid.length - 1))];
-      const seed = hashSeed(`seasidehotel:${i}:${sample.azimuth}`);
-      // compose 的约定：局部 z 轴 = (sin yaw, cos yaw)。要让进深轴沿岸线法向（立面朝海），yaw = atan2(inward.x, inward.z)。
-      // 曾写 atan2(inward.x, -inward.z)：只有 inward.z = 0 处才对，其它岸段楼体相对岸线斜转，沿「朝海」偏移的
-      // 遮阳带/壁柱/霓虹招牌从楼的侧面戳出来（真机截图：白色横杆伸出墙外）。
-      const yaw = Math.atan2(sample.inward.x, sample.inward.z);
-      // 酒店是城市身份地标，沿街形成连续但留缝的 frontage，不随会话数稀疏成几处孤岛。
-      // 单体保持 30–44 宽、20–33 高；数量由有效岸线采样推导并封顶，实例仍复用同批次。
-      // 体量 ×0.65（20–29 宽、16–25 高）：曾 30–44 × 24–38，远大于会话地块楼，海滨抢走了数据城区的视觉重心（真机截图）。
-      const width = (30 + seed * 14) * 0.65;
-      const height = (24 + hashSeed(`seasidehotelh:${i}`) * 14) * 0.65;
-      const depth = 16 * 0.7;
-      const crownHeight = 4.2 + seed * 2.4;
-      const ground = this.layout.terrain.height(sample.hotelLine.x, sample.hotelLine.z);
-      const outward = { x: -sample.inward.x, z: -sample.inward.z };
-      const right = { x: Math.cos(yaw), z: -Math.sin(yaw) };
-      // 墙身（贴酒店线，立面朝海）。
-      this.compose(sample.hotelLine.x, ground, sample.hotelLine.z, yaw, width, height, depth);
-      wallMesh.setMatrixAt(cursor, this.matrix);
-      wallMesh.setColorAt(cursor, this.color.set(palette[i % palette.length]));
-      // 阶梯退台（上层缩进体量）。
-      this.compose(sample.hotelLine.x, ground + height, sample.hotelLine.z, yaw, width * 0.68, crownHeight, depth * 0.72);
-      wallMesh.setMatrixAt(cursor + 1, this.matrix);
-      wallMesh.setColorAt(cursor + 1, this.color.set(palette[i % palette.length]));
-      // Third, narrower crown tier makes the Miami Beach silhouette legible
-      // from the aerial camera while staying inside the same instanced batch.
-      const crownTopHeight = 1.8 + seed * 1.2;
-      this.compose(sample.hotelLine.x, ground + height + crownHeight, sample.hotelLine.z, yaw, width * 0.42, crownTopHeight, depth * 0.48);
-      wallMesh.setMatrixAt(cursor + 2, this.matrix);
-      wallMesh.setColorAt(cursor + 2, this.color.set(palette[(i + 1) % palette.length]));
-      // 竖向壁柱落在朝海立面外表皮，分列于左右与中央；尺度随楼高变化，
-      // 但位置避开两道出挑遮阳带的最外沿，避免看起来像穿模的栏杆。
-      for (let pilaster = 0; pilaster < 3; pilaster += 1) {
-        const across = (pilaster - 1) * width * 0.32;
-        const x = sample.hotelLine.x + right.x * across + outward.x * (depth / 2 + 0.16);
-        const z = sample.hotelLine.z + right.z * across + outward.z * (depth / 2 + 0.16);
-        this.compose(x, ground + height * 0.5, z, yaw, pilaster === 1 ? 0.72 : 0.5, height * 0.82, 0.32);
-        detailMesh.setMatrixAt(i * 3 + pilaster, this.matrix);
-      }
-      // 水平遮阳带：两道出挑薄板，中心越过墙身外表皮 0.7；此前偏移不足，
-      // 薄板埋进墙里，近景会看成墙面色块而不是 Miami 风格的遮阳檐。
-      for (let band = 0; band < 2; band += 1) {
-        const y = ground + height * (0.32 + band * 0.3);
-        const trimX = sample.hotelLine.x + outward.x * (depth / 2 + 0.7);
-        const trimZ = sample.hotelLine.z + outward.z * (depth / 2 + 0.7);
-        this.compose(trimX, y, trimZ, yaw, width * 1.03, 0.62, 2.4);
-        trimMesh.setMatrixAt(i * 2 + band, this.matrix);
-      }
-      cursor += 3;
-    }
-    wallMesh.count = cursor;
-    detailMesh.count = count * 3;
-    wallMesh.name = "city-seaside-hotels";
-    detailMesh.name = "city-seaside-hotel-art-deco-details";
-    if (wallMesh.instanceColor) wallMesh.instanceColor.needsUpdate = true;
-    this.group.add(wallMesh, trimMesh, detailMesh);
-    this.disposables.push(wallGeometry, wallMaterial, hotelFacade, trimGeometry, trimMaterial, detailGeometry, detailMaterial);
-  }
-
   /** 救生塔（VICE S1）：架高值守小屋 + 平台 + 檐顶 + 楼梯——架高结构是
    *  Lifeguard Tower 的第一特征（不是灯塔的窄圆柱）。条纹为辅助色。夜间
    *  自发光由独立 MeshBasic 材质驱动（不依赖路灯照亮），随 setNightGlow 亮起。
@@ -2361,67 +2273,6 @@ export class CityParts {
     glowMesh.visible = false; // 白天不亮，setNightGlow 驱动
     this.group.add(structureMesh, stripeMesh, glowMesh);
     this.disposables.push(box, structureMaterial, stripeMaterial, glowMaterial);
-  }
-
-  /** 酒店招牌与霓虹（VICE S2）：竖向灯牌（blade sign）挂朝海立面 + 水平饰带
-   *  （fascia band）沿酒店顶线。原创设计——不是 GTA 招牌的复刻，是 Miami 海滨
-   *  Art Deco 酒店普遍有的标牌语汇。竖牌用双色自发光（品红/青交替），夜间
-   *  随 setNightGlow 亮起；稳定对象 ID = 酒店 sample 方位（不随排名迁移）。 */
-  private buildSeasideSignage(): void {
-    const seaside = this.layout.seaside;
-    if (!seaside || seaside.degraded) return;
-    const valid = seaside.samples.filter((s) => s.valid);
-    if (valid.length < 3) return;
-    const count = seasideHotelCount(valid.length);
-    const neonMaterial = new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false });
-    this.signageNeonMaterial = neonMaterial;
-    const bladeGeometry = new THREE.BoxGeometry(1, 1, 0.12);
-    const bladeMesh = new THREE.InstancedMesh(bladeGeometry, neonMaterial, count * 2);
-    const fasciaGeometry = new THREE.BoxGeometry(1, 0.28, 0.12);
-    const fasciaMesh = new THREE.InstancedMesh(fasciaGeometry, neonMaterial, count);
-    bladeMesh.name = "city-seaside-signage";
-    const neonColors = ["#ff2fb2", "#00e5ff", "#ff8a3c", "#b44dff"];
-    for (let i = 0; i < count; i += 1) {
-      const sample = valid[Math.floor(((i + 0.5) / count) * (valid.length - 1))];
-      const seed = hashSeed(`signage:${i}:${sample.azimuth}`);
-      // compose 的约定：局部 z 轴 = (sin yaw, cos yaw)。要让进深轴沿岸线法向（立面朝海），yaw = atan2(inward.x, inward.z)。
-      // 曾写 atan2(inward.x, -inward.z)：只有 inward.z = 0 处才对，其它岸段楼体相对岸线斜转，沿「朝海」偏移的
-      // 遮阳带/壁柱/霓虹招牌从楼的侧面戳出来（真机截图：白色横杆伸出墙外）。
-      const yaw = Math.atan2(sample.inward.x, sample.inward.z);
-      const outward = { x: -sample.inward.x, z: -sample.inward.z };
-      const right = { x: Math.cos(yaw), z: -Math.sin(yaw) };
-      // 与 buildSeasideHotels 同一套体量（×0.65 / 进深 ×0.7）：招牌挂在缩小后的朝海立面上，不悬空。
-      const height = (24 + hashSeed(`seasidehotelh:${i}`) * 14) * 0.65;
-      const width = (30 + hashSeed(`seasidehotel:${i}:${sample.azimuth}`) * 14) * 0.65;
-      const facadeOffset = (16 * 0.7) / 2;
-      const ground = this.layout.terrain.height(sample.hotelLine.x, sample.hotelLine.z);
-      const color = neonColors[i % neonColors.length];
-      // 竖向灯牌：挂朝海立面偏一侧，从檐口垂下；双面板（正反各一块）。
-      const bladeH = 5 + seed * 3;
-      const bladeW = 1.4 + seed * 0.5;
-      const bladeX = sample.hotelLine.x + outward.x * (facadeOffset + 0.7) + right.x * width * 0.28;
-      const bladeZ = sample.hotelLine.z + outward.z * (facadeOffset + 0.7) + right.z * width * 0.28;
-      this.compose(bladeX, ground + height * 0.72, bladeZ, yaw, bladeW, bladeH, 1);
-      bladeMesh.setMatrixAt(i * 2, this.matrix);
-      bladeMesh.setColorAt(i * 2, this.color.set(color));
-      // 背面板（错开 0.3 深度）。
-      this.compose(bladeX + outward.x * 0.3, ground + height * 0.72, bladeZ + outward.z * 0.3, yaw, bladeW, bladeH, 1);
-      bladeMesh.setMatrixAt(i * 2 + 1, this.matrix);
-      bladeMesh.setColorAt(i * 2 + 1, this.color.set(color));
-      // 水平饰带：沿酒店顶线一圈微弱霓虹——夜间的建筑轮廓线。
-      const fasciaX = sample.hotelLine.x + outward.x * (facadeOffset + 0.5);
-      const fasciaZ = sample.hotelLine.z + outward.z * (facadeOffset + 0.5);
-      this.compose(fasciaX, ground + height + 0.4, fasciaZ, yaw, width * 0.9, 1, 1);
-      fasciaMesh.setMatrixAt(i, this.matrix);
-      fasciaMesh.setColorAt(i, this.color.set(color));
-    }
-    bladeMesh.count = count * 2;
-    if (bladeMesh.instanceColor) bladeMesh.instanceColor.needsUpdate = true;
-    if (fasciaMesh.instanceColor) fasciaMesh.instanceColor.needsUpdate = true;
-    bladeMesh.visible = false;
-    fasciaMesh.visible = false;
-    this.group.add(bladeMesh, fasciaMesh);
-    this.disposables.push(bladeGeometry, neonMaterial, fasciaGeometry);
   }
 
   private buildTrees(): THREE.InstancedMesh {
@@ -3047,6 +2898,9 @@ export class CityParts {
     if (building.archetype !== "tower" && building.archetype !== "landmark") widths[0] = Math.max(widths[0], streetWidth);
     widths[0] = Math.min(widths[0], runtime.slot.width - 0.8);
     widths[1] = Math.min(widths[1], runtime.slot.depth - 2);
+    // 海滨酒店地块上的会话楼：铺满宽地块成为一栋酒店（低楼走装饰艺术立面，见 facadeFor 的海滨规则）。
+    // 楼高仍由 token 决定——酒店是会话，不是装饰。
+    if (runtime.slot.blockId.startsWith("hotel:")) widths = [runtime.slot.width * 0.92, runtime.slot.depth * 0.9];
 
     // Parcel frontage owns orientation; podium, shaft and roof share it.
     const yaw = runtime.slot.yaw;
