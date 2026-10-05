@@ -3,6 +3,7 @@ import { observeLocale, pluginLocale } from "./host";
 
 // Plugin-owned presentation catalog. Business DTOs and user excerpts are not translated.
 const english: Record<string, string> = {
+  "收起回放": "Collapse replay",
   "当前环境不支持 H.264 MP4 编码，可使用拍照；不会生成改名的 WebM 文件。": "This environment does not support H.264 MP4 encoding. Photos remain available; no renamed WebM file will be produced.",
   "已载入": "Loaded", "统计及回放仅覆盖已载入会话；最多 500 条近期会话，不代表完整历史。": "Statistics and replay cover loaded sessions only: up to 500 recent sessions, not complete history.",
   "时间范围": "Time range", "画质": "Quality", "自动": "Auto", "高画质": "High", "节能": "Eco",

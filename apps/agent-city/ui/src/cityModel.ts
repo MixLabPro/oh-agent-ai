@@ -32,11 +32,6 @@ export type CityFindingGroup = {
   status_rollup: { open: number; later: number };
 };
 
-function harnessName(harness: string): string {
-  const labels: Record<string, string> = { codex: "Codex", claude: "Claude Code", "claude-code": "Claude Code", claude_code: "Claude Code", dsh: "Agent Vitals", workbuddy: "WorkBuddy" };
-  return labels[harness] ?? harness;
-}
-
 /** 会话被视为"正在施工"的窗口：last_event 距今 10 分钟内。 */
 export const ACTIVE_WINDOW_MS = 10 * 60_000;
 
@@ -188,6 +183,7 @@ function anomalyFromFindings(groups: CityFindingGroup[]): DistrictAnomaly | null
 }
 
 export type CityModelInput = {
+  harnessNames?: Record<string, string>;
   rows: CitySessionRow[];
   findings: CityFindingGroup[];
   windowStartMs: number;
@@ -310,7 +306,7 @@ export function buildCityModel(input: CityModelInput): CityModel {
     const tokensTotal = harnessRows.reduce((sum, row) => sum + row.tokens.total, 0);
     districts.push({
       id: harnessId,
-      label: harnessName(harnessId),
+      label: input.harnessNames?.[harnessId] ?? harnessId,
       sessionCount: input.truncated && perHarnessQuota < harnessRows.length ? input.totalSessions : harnessRows.length,
       tokensTotal,
       activeCount: districtActive,
