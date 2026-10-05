@@ -32,8 +32,21 @@ export type CityFindingGroup = {
   status_rollup: { open: number; later: number };
 };
 
-/** 会话被视为"正在施工"的窗口：last_event 距今 10 分钟内。 */
+/** 会话被视为"正在施工"的窗口：last_event 距今 10 分钟内。
+ *  仅用于挑选「已收工」样本算 p95 楼高标尺；「活跃」的定义见 isActiveToday。 */
 export const ACTIVE_WINDOW_MS = 10 * 60_000;
+
+/** 活跃 = 今天（本机本地日）有过事件——与菜单栏「N sessions」同一口径。
+ *  曾是「last_event 距今 10 分钟内」：City 显示 0 active，而菜单栏同时显示今天 2 个 session（真机截图），
+ *  两处说的不是一件事。本地日界与菜单栏一致（宿主 today 按本地时区切日）。 */
+export function startOfLocalDay(ms: number): number {
+  const day = new Date(ms);
+  day.setHours(0, 0, 0, 0);
+  return day.getTime();
+}
+export function isActiveToday(lastEventMs: number, generatedAt: number): boolean {
+  return lastEventMs >= startOfLocalDay(generatedAt) && lastEventMs <= generatedAt + 60_000;
+}
 
 /** 单独成楼的 session 上限；超出部分按区聚合为背景楼群（massing）。 */
 export const RENDER_CAP = 1_400;
@@ -246,7 +259,7 @@ export function buildCityModel(input: CityModelInput): CityModel {
     for (const row of rendered) {
       const startedAt = parseMs(row.first_event_at, input.windowStartMs);
       const endedAt = parseMs(row.last_event_at, startedAt);
-      const active = generatedAt - endedAt <= ACTIVE_WINDOW_MS;
+      const active = isActiveToday(endedAt, generatedAt);
       if (active) districtActive += 1;
       const seed = hashSeed(row.session_ref);
       const height = tokensToHeight(row.tokens.total);
@@ -310,7 +323,8 @@ export function buildCityModel(input: CityModelInput): CityModel {
       label: input.harnessNames?.[harnessId] ?? harnessId,
       sessionCount: input.truncated && perHarnessQuota < harnessRows.length ? input.totalSessions : harnessRows.length,
       tokensTotal,
-      activeCount: districtActive,
+      // 聚合进背景楼群的会话也计入（菜单栏不区分是否单独成楼）。
+      activeCount: districtActive + overflow.filter((row) => isActiveToday(parseMs(row.last_event_at, 0), generatedAt)).length,
       anomaly: anomalyFromFindings(findingsByHarness.get(harnessId) ?? []),
     });
   }
@@ -328,7 +342,7 @@ export function buildCityModel(input: CityModelInput): CityModel {
       aggregatedSessions,
       totalSessions: Math.max(input.totalSessions, input.rows.length),
       tokensTotal,
-      activeCount: buildings.reduce((sum, building) => sum + (building.active ? 1 : 0), 0),
+      activeCount: districts.reduce((sum, district) => sum + district.activeCount, 0),
       truncated: input.truncated,
     },
     rows: rowsIndex,
