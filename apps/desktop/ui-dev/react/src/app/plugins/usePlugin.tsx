@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke, listenAppEvents } from "../../lib/tauri";
 import { message, useLanguage } from "../../lib/i18n";
+import { pluginCreationCode, pluginCreationHelp } from "./pluginDiagnostics";
 
-type Tool = { id: string; commandId: string; label: string; kind: "button" | "select"; enabled: boolean; value: string | null; options: Array<{ value: string; label: string }> };
+type Tool = { id: string; commandId: string; label: string; kind: "button" | "select"; enabled: boolean; placement?: "primary" | "overflow"; value: string | null; options: Array<{ value: string; label: string }> };
 type Snapshot = { instanceId: string; status: "loading" | "ready" | "failed"; error: string | null; items: Tool[]; pending: string | null; events: Array<{ atMs: number; code: string }> };
 
 export type PluginPresentation = { id: string; name: string };
@@ -16,6 +17,7 @@ export function usePlugin(active: boolean, { id: pluginId, name }: PluginPresent
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const lifecycle = useRef<Promise<unknown>>(Promise.resolve());
   const opened = useRef({ pluginId: "", attempt: -1 });
   const locale = useLanguage();
@@ -83,7 +85,12 @@ export function usePlugin(active: boolean, { id: pluginId, name }: PluginPresent
         observer = new ResizeObserver(() => { if (!cancelled && id) void syncLayout(); });
         if (slot.current) observer.observe(slot.current);
         void syncLayout();
-      } catch (reason) { if (!cancelled) setError(reason === "plugin_assets_missing" ? "plugin_assets_missing" : "plugin_create_failed"); }
+      } catch (reason) {
+        if (!cancelled) {
+          opened.current = { pluginId: "", attempt: -1 };
+          setError(pluginCreationCode(reason));
+        }
+      }
     };
     void start();
     void listenAppEvents((event) => {
@@ -100,13 +107,16 @@ export function usePlugin(active: boolean, { id: pluginId, name }: PluginPresent
         setSnapshot(next);
         if (next.status === "failed") {
           observer?.disconnect();
+          opened.current = { pluginId: "", attempt: -1 };
           setError(next.error ?? "plugin_failed");
           await invoke("plugin_close", { instanceId: id });
           id = null;
         }
       } catch {
         if (!cancelled) {
-          observer?.disconnect(); setError("plugin_status_unavailable");
+          observer?.disconnect();
+          opened.current = { pluginId: "", attempt: -1 };
+          setError("plugin_status_unavailable");
           const target = id; id = null;
           if (target) await invoke("plugin_close", { instanceId: target }).catch(() => {});
         }
@@ -134,13 +144,14 @@ export function usePlugin(active: boolean, { id: pluginId, name }: PluginPresent
   const retry = () => setAttempt((value) => value + 1);
   const disabled = busy || !!snapshot?.pending || snapshot?.status !== "ready" || !!error;
   const toolbar = active ? <div className="plugin-toolbar" aria-label={message("plugin.toolbar", locale, { name })} aria-busy={busy || !!snapshot?.pending}>
-    {snapshot?.items.map((tool) => tool.kind === "select"
+    {snapshot?.items.filter((tool) => tool.placement !== "overflow" || moreOpen).map((tool) => tool.kind === "select"
       ? <select key={tool.id} aria-label={tool.label} title={tool.label} value={tool.value ?? ""} disabled={disabled || !tool.enabled} onChange={(event) => void execute(tool, event.target.value)}>{tool.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
       : <button key={tool.id} className="button button-secondary" type="button" disabled={disabled || !tool.enabled} onClick={() => void execute(tool)}>{tool.label}</button>)}
+    {snapshot?.items.some((tool) => tool.placement === "overflow") && <button className="button button-secondary" type="button" aria-expanded={moreOpen} onClick={() => setMoreOpen(!moreOpen)}>{message(moreOpen ? "plugin.less" : "plugin.more", locale)}</button>}
     {error && <><span role="status">{error}</span><button className="button button-secondary" type="button" onClick={retry}>{message("plugin.retryNamed", locale, { name })}</button></>}
   </div> : null;
   const content = <div className="native-plugin-slot" ref={slot} aria-label={message("plugin.content", locale, { name })}>
-    {error ? <section className="plugin-fallback empty-state" role="alert"><h2>{message("plugin.failedTitle", locale, { name })}</h2><p>{error}</p><button className="button button-secondary" onClick={retry}>{message("plugin.retryNamed", locale, { name })}</button><details><summary>{message("plugin.diagnostics", locale)}</summary><pre>{JSON.stringify({ instanceId: snapshot?.instanceId, events: snapshot?.events ?? [] }, null, 2)}</pre></details></section>
+    {error ? <section className="plugin-fallback empty-state" role="alert"><h2>{message("plugin.failedTitle", locale, { name })}</h2><p>{error}</p><p>{pluginCreationHelp(error, locale === "en")}</p><button className="button button-secondary" onClick={retry}>{message("plugin.retryNamed", locale, { name })}</button><details><summary>{message("plugin.diagnostics", locale)}</summary><pre>{JSON.stringify({ pluginId, phase: snapshot ? "runtime" : "creation", code: error, instanceId: snapshot?.instanceId, events: snapshot?.events ?? [] }, null, 2)}</pre></details></section>
       : <p className="plugin-fallback" role="status">{message(snapshot?.status === "ready" ? "plugin.ready" : "plugin.loading", locale, { name })}</p>}
   </div>;
   return { toolbar, content };

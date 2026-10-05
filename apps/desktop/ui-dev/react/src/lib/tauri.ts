@@ -230,7 +230,7 @@ export type SkillScanSettings = { self_root: string; budget: number | null };
 export type SkillExportReceipt = { status: "saved" | "cancelled"; upload_performed: false };
 
 export type SourceConnectionState = "connected" | "needs_attention" | "paused" | "excluded" | "not_detected" | "unknown";
-export type SourceErrorKind = "permission_denied" | "file_missing" | "all_files_failed" | "db_error" | "migration_failed" | "read_failed";
+export type SourceErrorKind = "permission_denied" | "file_missing" | "all_files_failed" | "db_error" | "migration_failed" | "manifest_or_source_invalid" | "source_busy" | "authority_unavailable" | "source_unavailable" | "ingest_failed" | "read_failed";
 export type SourceHealthRow = {
   harness: string;
   connection_state: SourceConnectionState;
@@ -816,6 +816,7 @@ function safeHarnessLabel(value: unknown): string {
   if (typeof value !== "string") return "generic";
   const candidate = value;
   if (/^plugin:[a-z][a-z0-9-]{0,31}$/.test(candidate)) return candidate;
+  if (/^harness:[a-z][a-z0-9_-]{0,31}$/.test(candidate)) return candidate;
   return /^[a-z][a-z0-9_-]{0,31}$/.test(candidate) ? candidate : "generic";
 }
 
@@ -884,6 +885,7 @@ function sourceErrorKind(value: unknown): SourceErrorKind {
   if (raw === "all_files_failed") return "all_files_failed";
   if (raw === "db_error") return "db_error";
   if (raw === "migration_failed") return "migration_failed";
+  if (raw === "manifest_or_source_invalid" || raw === "source_busy" || raw === "authority_unavailable" || raw === "source_unavailable" || raw === "ingest_failed") return raw;
   return "read_failed";
 }
 
@@ -896,7 +898,7 @@ function parseSourceHealth(value: unknown, pauseValue: unknown, overviewValue: u
   const root = record(value, "source health");
   const status = boundedEnum(root.status ?? "unavailable", "source health status", ["ok", "unavailable"], "unavailable") as SourceHealthReport["status"];
   const sources = requiredArray(root.sources, "source health sources");
-  if (sources.length > 32) throw new Error("source health sources 超出上限");
+  if (sources.length > 128) throw new Error("source health sources 超出上限");
   const rows = sources.map((item) => {
     const row = record(item, "source health row");
     const scan = row.scan == null ? {} : record(row.scan, "source health scan");

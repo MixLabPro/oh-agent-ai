@@ -79,7 +79,17 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error
 export function App() {
   const language = useLanguage();
   useHarnessNames();
-  useEffect(() => { void hydrateHarnessNames().catch(() => { /* 退回 prettify，不影响使用 */ }); }, []);
+  useEffect(() => {
+    let active = true;
+    let unsubscribe = () => {};
+    const refresh = () => { if (active) void hydrateHarnessNames().catch(() => { /* Preserve the last known names. */ }); };
+    refresh();
+    const gate = makeInvalidationGate();
+    void listenAppEvents((event) => { if (gate(event)) refresh(); }).then((cleanup) => {
+      if (!active) cleanup(); else unsubscribe = cleanup;
+    }).catch(() => {});
+    return () => { active = false; unsubscribe(); };
+  }, []);
   useEffect(() => { void hydrateLanguagePreference().catch(() => { /* Keep the existing local preference visible; Settings can retry. */ }); }, []);
   const [page, setPage] = useState<Page>(pageFromHash);
   const selectedPlugin = plugins.find((plugin) => plugin.id === page);

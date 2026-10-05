@@ -13,6 +13,7 @@ const BUILTIN: Record<string, string> = {
 };
 
 let manifestNames: Record<string, string> = {};
+let hydrationSequence = 0;
 const listeners = new Set<() => void>();
 
 function prettifySlug(slug: string): string {
@@ -21,15 +22,17 @@ function prettifySlug(slug: string): string {
 
 export function harnessName(kind: string | null | undefined): string {
   if (!kind) return "—";
-  if (BUILTIN[kind]) return BUILTIN[kind];
   if (manifestNames[kind]) return manifestNames[kind];
+  if (BUILTIN[kind]) return BUILTIN[kind];
   return kind.startsWith("harness:") ? prettifySlug(kind.slice("harness:".length)) : kind;
 }
 
-/** 启动时取一次 harness 显示名。失败静默：退回 prettify。 */
+/** Refresh from the authoritative public identity list at startup/invalidation. */
 export async function hydrateHarnessNames(): Promise<void> {
   if (!hasNativeBridge()) return;
+  const sequence = ++hydrationSequence;
   const result = await invoke<Record<string, unknown>>("harness_display_names");
+  if (sequence !== hydrationSequence) return;
   const next: Record<string, string> = {};
   for (const [kind, name] of Object.entries(result ?? {})) if (typeof name === "string" && name.trim()) next[kind] = name;
   if (JSON.stringify(next) === JSON.stringify(manifestNames)) return;

@@ -106,6 +106,7 @@ export function CityApp() {
       cost_status: { state: "unavailable", reason: "cost_not_projected", has_unresolved: true },
     }));
     const model = buildCityModel({
+      harnessNames: Object.fromEntries(projection.harnesses.map((h) => [h.id, h.display_name])),
       rows,
       findings: projection.findings.map((finding) => ({
         harness: finding.harness,
@@ -122,7 +123,7 @@ export function CityApp() {
     });
     experience.modelRef.current = model;
     experience.setModel(model);
-    const signature = JSON.stringify([projection.window, projection.sessions, projection.findings]);
+    const signature = JSON.stringify([projection.window, projection.harnesses, projection.sessions, projection.findings]);
     if (signature !== fingerprint.current) {
       engineRef.current.applyModel(model, appliedWindow.current === projection.window.days);
       appliedWindow.current = projection.window.days;
@@ -138,7 +139,6 @@ export function CityApp() {
   }, [projection, labels, quality, cinema, experience.busy]);
 
   const dataAvailable = projection !== null && projection.status !== "unavailable";
-  const totalTokens = dataAvailable ? projection.sessions.reduce((sum, session) => sum + session.tokens.total, 0) : null;
   const sceneReady = dataAvailable && projection.status !== "empty" && !sceneUnavailable && firstModelFrame;
   const toolbarReady = dataLoaded && (sceneUnavailable || !dataAvailable || projection.status === "empty" || firstModelFrame);
   const tools: Tool[] = [
@@ -184,25 +184,12 @@ export function CityApp() {
     <section className="city-app" aria-label="Agent City">
       <canvas className="city-canvas" ref={canvasRef} aria-label="Agent City 三维城市" style={{ visibility: sceneMessage ? "hidden" : "visible" }} />
       {sceneMessage && <p className="city-scene-message" role="status">{sceneMessage}</p>}
-      <header className="city-header">
-        <div>
-          <div className="eyebrow">AGENT VITALS · LOCAL APP</div>
-          <h1>Agent City</h1>
-          <p>{status}</p>
-          {dataAvailable && <p>{cityText("已载入", language)} {projection.coverage.returned}/{projection.coverage.total} · {cityText("统计及回放仅覆盖已载入会话；最多 500 条近期会话，不代表完整历史。", language)}</p>}
-        </div>
-        {!embedded() && <div className="city-local-toolbar">{tools.map((tool) => tool.kind === "select"
+      {!embedded() && <header className="city-header">
+        <div className="city-local-toolbar">{tools.map((tool) => tool.kind === "select"
           ? <select key={tool.id} aria-label={tool.label} value={tool.value} disabled={!tool.enabled} onChange={(event) => execute(tool.commandId, event.target.value)}>{tool.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
-          : <button key={tool.id} disabled={!tool.enabled} onClick={() => execute(tool.commandId)}>{tool.label}</button>)}</div>}
-      </header>
-      <section className="city-stats" aria-label="城市摘要">
-        <div><span>会话</span><strong>{dataAvailable ? projection.coverage.returned : "—"}</strong></div>
-        <div><span>Token</span><strong>{totalTokens?.toLocaleString() ?? "—"}</strong></div>
-        <div><span>活跃</span><strong>{dataAvailable ? experience.model?.stats.activeCount ?? "—" : "—"}</strong></div>
-        {experience.model && experience.model.stats.aggregatedSessions + (engineRef.current?.overflowCount ?? 0) > 0 && <div><span>聚合</span><strong>{experience.model.stats.aggregatedSessions + (engineRef.current?.overflowCount ?? 0)}</strong></div>}
-      </section>
-      <CityExperience ui={experience} disabled={!sceneReady} cinema={cinema} />
-      <footer>Agent Vitals City 模块 · {projection?.source === "local" ? "本机只读投影 · 不上传数据" : "本地演示数据 · 尚未接入真实数据源"}</footer>
+          : <button key={tool.id} disabled={!tool.enabled} onClick={() => execute(tool.commandId)}>{tool.label}</button>)}</div>
+      </header>}
+      <CityExperience ui={experience} disabled={!sceneReady} cinema={cinema} status={status} />
     </section>
   ), language);
 }

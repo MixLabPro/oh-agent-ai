@@ -1,7 +1,7 @@
 import { invokeHost } from "../host";
-import type { PluginRequestV1, PluginResponseV1, CityUiProjectionV1 } from "@agent-vitals/app-sdk";
+import type { PluginRequestV1, PluginResponseV1, CityUiProjectionV2 } from "@agent-vitals/app-sdk";
 
-export type CityProjectionV1 = CityUiProjectionV1;
+export type CityProjectionV1 = CityUiProjectionV2;
 
 export interface CityDataProvider {
   getProjection(input: { windowDays: 7 | 30 | 90 | 366 }): Promise<CityProjectionV1>;
@@ -18,7 +18,10 @@ function fixtureProjection(windowDays: 7 | 30 | 90 | 366): CityProjectionV1 {
   ];
   const sessions = allSessions.filter((session) => session.first_event_at >= from);
   return {
-    protocol: "city:v1",
+    protocol: "city:v2",
+    source: "fixture",
+    harnesses: [{ id: "codex", display_name: "Codex" }, { id: "claude_code", display_name: "Claude Code" }].map((h) => ({ ...h,
+      capabilities: { session_statistics: { available: true }, findings: { available: true, reason: null } } })),
     generated_at: "2026-10-03T12:00:00Z",
     window: { days: windowDays, label: `最近 ${windowDays} 天`, from, to: "2026-10-03T00:00:00Z" },
     sessions,
@@ -49,7 +52,7 @@ export const tauriCityDataProvider: CityDataProvider = {
       instanceId: window.__AV_PLUGIN_INSTANCE__ ?? "city-standalone",
       requestId: `city-request-${++requestSequence}`,
       method: "data.read",
-      payload: { projection: "city", version: 1, windowDays },
+      payload: { projection: "city", version: 2, windowDays },
     };
     const standalone = !window.__AV_PLUGIN_INSTANCE__;
     if (standalone || window.__CITY_ISOLATION_FIXTURE__) return fixtureProjection(windowDays);
