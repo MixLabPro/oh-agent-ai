@@ -325,6 +325,9 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   };
   const inRiver = (x: number, z: number) => hasRiver && coastDistance(x, z) > 0 && Math.abs(x - riverX(z)) < riverWidth(z);
 
+  // 市政广场（核心处，半径 44）外环路半径：主干道都接在这一圈上，广场四周是路、中间不走车。
+  const PLAZA_RING = 52;
+  const SHORE_SITE_KINDS = new Set(["harbor", "lighthouse", "sail-opera", "ferris-wheel"]);
   // 主干道：5–6 条，均分方位 + 抖动；指向山脊的方向（与山脊方位夹角 < 40°）不修路。
   const trunkCount = 5 + Math.floor(random("trunks") * 2);
   const trunkBase = random("trunkBase") * Math.PI * 2;
@@ -334,11 +337,13 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     const angle = trunkBase + (i / trunkCount) * Math.PI * 2 + (random(`trunkJ${i}`) - 0.5) * 0.35;
     const dir = { x: Math.cos(angle), z: Math.sin(angle) };
     if (dir.x * hillDir.x + dir.z * hillDir.z > Math.cos((40 * Math.PI) / 180)) continue;
-    const points: Vec2[] = [core];
+    // 主干道从市政广场外环出发（环形广场 = 环岛），不再穿过广场中心。
+    const start = { x: core.x + dir.x * PLAZA_RING, z: core.z + dir.z * PLAZA_RING };
+    const points: Vec2[] = [start];
     let water = 0;
-    let lastLand: Vec2 = core;
+    let lastLand: Vec2 = start;
     let farBank = 0;
-    for (let step = 1; step < 400; step += 1) {
+    for (let step = Math.ceil(PLAZA_RING / 12) + 1; step < 400; step += 1) {
       const q = { x: core.x + dir.x * step * 12, z: core.z + dir.z * step * 12 };
       if (inRiver(q.x, q.z)) {
         // 入水前的最后一个陆地点作为桥头（曾用「每 3 步才记一次」的上一个路点，桥头最多退回岸上 36）。
@@ -347,6 +352,12 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       }
       // Riverbank setbacks are not obstacles to a road crossing the river.
       if (coastDistance(q.x, q.z) <= 0 || hillProj(q.x, q.z) >= hillLine - 12) break;
+      // 岸边用地（港口/灯塔/歌剧院/摩天轮）：主干道到它门口为止，这一段就是它的入口路。
+      // 曾一路穿过去直到海边（港口中心离主干道 1 单位）。
+      if (water === 0 && [...publicSites, ...landmarks].some((site) => SHORE_SITE_KINDS.has(site.kind) && Math.hypot(q.x - site.x, q.z - site.z) < site.radius + 4)) {
+        if (points[points.length - 1] !== lastLand) points.push(lastLand);
+        break;
+      }
       if (water > 0) {
         // 对岸退界最多再铺 3 步（36）桥面就落地：曾一直延伸到「可建设」地块为止——对岸是一长条不可建的
         // 低地/海岸带时，「桥」在干地上又铺了两百多单位（扩到 1 档 2000 栋的大岛后 seed 2175747322 实测）。
@@ -371,6 +382,22 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     trunks.push({ angle, points });
   }
   trunks.sort((p, q) => p.angle - q.angle);
+  // 广场环路：经过每条主干道的起点，其余按 24 等分补点；跨河/不可建的弧段不修。
+  {
+    const angles = [...trunks.map((t) => ((t.angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)),
+      ...Array.from({ length: 24 }, (_, i) => (i / 24) * Math.PI * 2)].sort((a, b) => a - b)
+      .filter((a, i, all) => i === 0 || a - all[i - 1] > 0.08);
+    const ringPoint = (a: number) => {
+      const trunk = trunks.find((t) => Math.abs((((t.angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)) - a) < 1e-9);
+      return trunk ? trunk.points[0] : { x: core.x + Math.cos(a) * PLAZA_RING, z: core.z + Math.sin(a) * PLAZA_RING };
+    };
+    for (let i = 0; i < angles.length; i += 1) {
+      const a = ringPoint(angles[i]); const b = ringPoint(angles[(i + 1) % angles.length]);
+      const mid = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
+      if (inRiver(mid.x, mid.z) || inRiver(a.x, a.z) || inRiver(b.x, b.z) || coastDistance(mid.x, mid.z) <= 0) continue;
+      addEdge(a, b, true);
+    }
+  }
   const trunkIndex = new SegmentIndex(trunks.map((trunk) => trunk.points));
   const distanceToTrunks = (p: Vec2) => {
     let d = Infinity;
@@ -436,6 +463,36 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     const q = snap(site, siteClearance(site.kind, site.radius), others, site.radius, (c) => clearsHighways(c, site.radius * 2, site.radius * 2, ringRuns));
     site.x = q.x; site.z = q.z;
   }
+  // ── 用地临街（R2）：内陆的公共用地与地标贴到最近主干道的一侧（边缘离路肩 6），朝向与道路对齐。
+  // 曾在主干道之前按地理选址、之后互不避让：车站中心正压在主干道上，10 个对象没有一个与门前道路对齐。
+  // 岸边对象（港口、灯塔、歌剧院、摩天轮）保持海岸位置，稍后补一条入口路。
+  const SHORE_BOUND = new Set([...SHORE_SITE_KINDS, "civic"]); // civic = 核心广场，四周是环路
+  const trunkSegments = trunks.flatMap((trunk) => trunk.points.slice(1).map((b, k) => [trunk.points[k], b] as const))
+    .filter(([a, b]) => !bridges.some((bridge) => bridge.to === b || bridge.from === a && bridge.to === b));
+  for (const site of [...publicSites, ...landmarks]) {
+    if (!site.radius || SHORE_BOUND.has(site.kind)) continue;
+    const ranked = trunkSegments.map(([a, b]) => ({ a, b, d: segmentDistance(site, a, b) })).sort((x, y) => x.d - y.d).slice(0, 4);
+    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
+    let placed = false;
+    for (const { a, b } of ranked) {
+      const dx = b.x - a.x; const dz = b.z - a.z; const len = Math.hypot(dx, dz) || 1;
+      const t = Math.max(0.2, Math.min(0.8, ((site.x - a.x) * dx + (site.z - a.z) * dz) / (len * len)));
+      const foot = { x: a.x + dx * t, z: a.z + dz * t };
+      let nx = -dz / len; let nz = dx / len;
+      if ((site.x - foot.x) * nx + (site.z - foot.z) * nz < 0) { nx = -nx; nz = -nz; }
+      for (const sign of [1, -1]) {
+        const offset = site.radius + 12;
+        const q = { x: foot.x + nx * sign * offset, z: foot.z + nz * sign * offset };
+        if (!buildable(q.x, q.z) || landClearance(q.x, q.z) < site.radius * 0.6) continue;
+        if (distanceToTrunks(q) < site.radius + 8) continue;               // 别的主干道也不能穿过它
+        if (!clearsHighways(q, site.radius * 2, site.radius * 2, ringRuns)) continue;
+        if (others.some((o) => Math.hypot(o.x - q.x, o.z - q.z) < o.radius + site.radius + 10)) continue;
+        site.x = q.x; site.z = q.z; site.yaw = -Math.atan2(dz, dx);
+        placed = true; break;
+      }
+      if (placed) break;
+    }
+  }
   const ringIndex = new SegmentIndex(ringRuns);
   const distanceToRing = (p: Vec2) => {
     let d = Infinity;
@@ -480,7 +537,6 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   }
   // 两端都接入陆侧主干道，避免只有拓扑连通但车辆到大道时会瞬移/断头。
   // 连接线按 4 单位采样，避让水面、陡坡、海岸和市政/地标预留地。
-  const trunkRoadNodes = trunks.flatMap((trunk) => trunk.points.map((p) => key(p)));
   const safeRoadLink = (a: Vec2, b: Vec2) => {
     const distance = Math.hypot(b.x - a.x, b.z - a.z);
     const steps = Math.max(1, Math.ceil(distance / 4));
@@ -491,14 +547,68 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     }
     return true;
   };
+  // ── 接入路（Parish–Müller 式 localConstraints）：把一个端点「垂直」接到最近的已有路段上，
+  // 落点把那条路切成 T 路口；落点离路段端点 <12 时吸附到端点（不留碎段）。拒绝：与被接道路夹角 <60°、
+  // 与其它道路交叉、穿过水面/陡坡/预留地。曾经直连「700/400 内最近的主干道节点」：
+  // 不看角度、不看沿途道路——真机里那束 X 形长斜线与 8° 锐角路口都出自这里（docs/CITY_ROAD_PLANNING_AUDIT.md）。
+  const crosses = (a: Vec2, b: Vec2, c: Vec2, d: Vec2) => {
+    const o = (p: Vec2, q: Vec2, r: Vec2) => (q.x - p.x) * (r.z - p.z) - (q.z - p.z) * (r.x - p.x);
+    return o(a, b, c) * o(a, b, d) < 0 && o(c, d, a) * o(c, d, b) < 0;
+  };
+  const clearAngle = (at: Vec2, toward: Vec2) => {
+    const id = roadNodeId(key(at));
+    const ux = toward.x - at.x; const uz = toward.z - at.z; const ul = Math.hypot(ux, uz) || 1;
+    for (const edge of edges.values()) {
+      if (edge.from !== id && edge.to !== id) continue;
+      const other = edge.from === id ? edge.points[edge.points.length - 1] : edge.points[0];
+      const vx = other.x - at.x; const vz = other.z - at.z; const vl = Math.hypot(vx, vz) || 1;
+      if ((ux * vx + uz * vz) / (ul * vl) > Math.cos((35 * Math.PI) / 180)) return false;
+    }
+    return true;
+  };
+  const connectToNetwork = (endpoint: Vec2, maxDistance: number, arterial: boolean, exclude: (edge: RoadEdge) => boolean = () => false, minAngle = 60): boolean => {
+    let best: { edge: RoadEdge; p: Vec2; d: number } | null = null;
+    for (const edge of edges.values()) {
+      if (edge.bridge || exclude(edge)) continue;
+      const [a, b] = edge.points;
+      const dx = b.x - a.x; const dz = b.z - a.z; const len = Math.hypot(dx, dz) || 1;
+      const t = Math.max(0, Math.min(1, ((endpoint.x - a.x) * dx + (endpoint.z - a.z) * dz) / (len * len)));
+      let p = key({ x: a.x + dx * t, z: a.z + dz * t });
+      if (t * len < 12) p = a; else if ((1 - t) * len < 12) p = b;
+      const d = Math.hypot(p.x - endpoint.x, p.z - endpoint.z);
+      if (d < 0.5 || d > maxDistance || (best && d >= best.d)) continue;
+      // 夹角：落在路段中段时要求接近垂直（≥60°）；吸附到端点时由端点处的其它路决定，不再限制。
+      const onEnd = p === a || p === b;
+      if (!onEnd) {
+        const cos = Math.abs(((p.x - endpoint.x) * dx + (p.z - endpoint.z) * dz) / (d * len));
+        if (cos > Math.cos((minAngle * Math.PI) / 180)) continue;
+      }
+      if (!safeRoadLink(endpoint, p)) continue;
+      // 两端都不能和已有道路成 <35° 的夹角：吸附到端点时曾不查角度，接入路沿着被接道路折回去（0° 重叠 / 10° 三角）。
+      if (!clearAngle(p, endpoint) || !clearAngle(endpoint, p)) continue;
+      let blocked = false;
+      for (const other of edges.values()) {
+        if (other === edge) continue;
+        if (crosses(endpoint, p, other.points[0], other.points[1])) { blocked = true; break; }
+      }
+      if (blocked) continue;
+      best = { edge, p, d };
+    }
+    if (!best) return false;
+    const { edge, p } = best;
+    const [a, b] = edge.points;
+    if (p !== a && p !== b) {
+      edges.delete(edge.id);
+      const primary = edge.width >= 12; const art = edge.kind === "arterial";
+      addEdge(a, p, art, false, primary); addEdge(p, b, art, false, primary);
+    }
+    addEdge(endpoint, p, arterial);
+    return true;
+  };
   for (const segment of coastalRoadRuns) {
     if (segment.length < 2) continue;
     for (const endpoint of [segment[0], segment[segment.length - 1]]) {
-      const target = trunkRoadNodes
-        .map((candidate) => ({ candidate, distance: Math.hypot(candidate.x - endpoint.x, candidate.z - endpoint.z) }))
-        .filter((entry) => entry.distance < 700 && safeRoadLink(endpoint, entry.candidate))
-        .sort((a, b) => a.distance - b.distance)[0];
-      if (target) addEdge(endpoint, target.candidate, true);
+      connectToNetwork(endpoint, 160, true, (edge) => coastalRoadEdgeIds.has(edge.id));
     }
   }
 
@@ -557,12 +667,13 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       if (polygon.some((p, k) => { const q = polygon[(k + 1) % 4]; return !buildable((p.x + q.x) / 2, (p.z + q.z) / 2); })) continue;
       if ([center, ...polygon].some((p) => trunkIndex.closerThan(p, 10))) continue;
       if ([center, ...polygon].some((p) => ringIndex.closerThan(p, 9))) continue;
-      const reserved = reservations().some((site) => polygonDistance(site, polygon) > -site.radius);
+      // 压到预留地的格子整格不生成（曾只是不放地块、四条边照样成路——支路穿过公园/广场）。
+      if (reservations().some((site) => polygonDistance(site, polygon) > -site.radius)) continue;
       const zone = zoneFor(center);
       const id = `plan:${sectorIndex}:${i}:${j}`; const parcels: Parcel[] = [];
       const sideLength = Math.hypot(polygon[1].x - polygon[0].x, polygon[1].z - polygon[0].z);
       const columnCount = Math.max(3, Math.floor((sideLength - 14) / 7.2));
-      for (let side = 0; side < 2 && !reserved; side += 1) for (let index = 0; index < columnCount; index += 1) {
+      for (let side = 0; side < 2; side += 1) for (let index = 0; index < columnCount; index += 1) {
         const a = polygon[side === 0 ? 0 : 3]; const b = polygon[side === 0 ? 1 : 2];
         const length = Math.hypot(b.x - a.x, b.z - a.z); const dx = (b.x - a.x) / length; const dz = (b.z - a.z) / length;
         const t = (index + 0.5) / columnCount; const inset = side === 0 ? 12 : -12;
@@ -582,18 +693,28 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     }
   });
 
-  // At both ends, prefer a short legal link to a nearby district street. This
-  // makes the coast road a usable route, not an isolated scenic stripe.
+  // 街网生成后再给大道两端各补一条到街区街道的接入路（同一套 localConstraints）。
   for (const segment of coastalRoadRuns) {
     if (segment.length < 2) continue;
-    for (const endpoint of [key(segment[0]), key(segment[segment.length - 1])]) {
-      const target = [...nodes.values()]
-        .filter((candidate) => !coastalRoadNodeIds.has(candidate.id))
-        .map((candidate) => ({ candidate, distance: Math.hypot(candidate.x - endpoint.x, candidate.z - endpoint.z) }))
-        .filter((entry) => entry.distance > 0.1 && entry.distance < 260 && safeRoadLink(endpoint, entry.candidate))
-        .sort((a, b) => a.distance - b.distance)[0];
-      if (target) addEdge(endpoint, target.candidate, false);
+    for (const endpoint of [segment[0], segment[segment.length - 1]]) connectToNetwork(endpoint, 160, false, (edge) => coastalRoadEdgeIds.has(edge.id));
+  }
+
+  // 入口路（R2）：仍离路较远的用地/地标（岸边对象，或找不到临街位置的）从朝向最近道路的边缘
+  // 拉一条支路接入路网——门前要有路（真机：双子塔、摩天轮、港口门前无路）。
+  for (const site of [...publicSites, ...landmarks]) {
+    if (!site.radius) continue;
+    let nearest: { p: Vec2; d: number } | null = null;
+    for (const edge of edges.values()) {
+      if (edge.bridge) continue;
+      const [a, b] = edge.points; const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
+      const t = Math.max(0, Math.min(1, ((site.x - a.x) * dx + (site.z - a.z) * dz) / l2));
+      const p = { x: a.x + dx * t, z: a.z + dz * t }; const d = Math.hypot(p.x - site.x, p.z - site.z);
+      if (!nearest || d < nearest.d) nearest = { p, d };
     }
+    if (!nearest || nearest.d <= site.radius + 14) continue;
+    const ux = (nearest.p.x - site.x) / nearest.d; const uz = (nearest.p.z - site.z) / nearest.d;
+    const gate = key({ x: site.x + ux * (site.radius + 6), z: site.z + uz * (site.radius + 6) });
+    connectToNetwork(gate, 240, false);
   }
 
   // 连通：各扇区街网可能被河/保留用地切成几块。并查集找连通分量，每个不含核心的分量用一条支路
@@ -603,18 +724,38 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     const find = (x: string): string => { let r = x; while (parent.get(r) !== r) r = parent.get(r)!; let c = x; while (parent.get(c) !== r) { const n = parent.get(c)!; parent.set(c, r); c = n; } return r; };
     for (const id of nodes.keys()) parent.set(id, id);
     for (const edge of edges.values()) { const ra = find(edge.from); const rb = find(edge.to); if (ra !== rb) parent.set(ra, rb); }
-    const coreId = roadNodeId(key(core));
-    const trunkNodes = trunks.flatMap((trunk) => trunk.points.map((p) => key(p)));
-    const groups = new Map<string, RoadNode[]>();
-    for (const node of nodes.values()) { const r = find(node.id); const list = groups.get(r); if (list) list.push(node); else groups.set(r, [node]); }
-    for (const [root, members] of groups) {
-      if (nodes.has(coreId) && root === find(coreId)) continue;
-      let best: { a: RoadNode; b: Vec2; d: number } | null = null;
-      for (const a of members) for (const b of trunkNodes) {
-        const d = Math.hypot(a.x - b.x, a.z - b.z);
-        if (!best || d < best.d) best = { a, b, d };
+    const coreId = trunks.length ? roadNodeId(key(trunks[0].points[0])) : roadNodeId(key(core));
+    // 每个孤立分量按 localConstraints 垂直接入「含核心的分量」；接上一个就重算分量。
+    // 逐级放宽：严格（≤220、≥60°）→ 放远放宽（≤400、≥35°）→ 最后才退回旧的直连最近节点，保证全网连通。
+    const coreRoot = () => find(coreId);
+    const recompute = () => {
+      for (const id of nodes.keys()) if (!parent.has(id)) parent.set(id, id);
+      for (const edge of edges.values()) { const ra = find(edge.from); const rb = find(edge.to); if (ra !== rb) parent.set(ra, rb); }
+    };
+    for (let pass = 0; pass < 3; pass += 1) {
+      recompute();
+      const groupsNow = new Map<string, RoadNode[]>();
+      for (const node of nodes.values()) { const r = find(node.id); const list = groupsNow.get(r); if (list) list.push(node); else groupsNow.set(r, [node]); }
+      for (const [root, members] of groupsNow) {
+        if (!nodes.has(coreId) || root === coreRoot()) continue;
+        const target = coreRoot();
+        const outside = (edge: RoadEdge) => find(edge.from) !== target;
+        const ordered = [...members].sort((a, b) => distanceToTrunks(a) - distanceToTrunks(b)).slice(0, 12);
+        let linked = false;
+        for (const member of ordered) {
+          if (pass === 0 ? connectToNetwork(member, 220, false, outside) : connectToNetwork(member, 400, false, outside, 35)) { linked = true; break; }
+        }
+        if (!linked && pass === 2) {
+          let best: { a: RoadNode; b: RoadNode; d: number } | null = null;
+          for (const a of members) for (const b of nodes.values()) {
+            if (find(b.id) !== target) continue;
+            const d = Math.hypot(a.x - b.x, a.z - b.z);
+            if (!best || d < best.d) best = { a, b, d };
+          }
+          if (best) addEdge(best.a, best.b, false);
+        }
+        recompute();
       }
-      if (best && best.d < 400) addEdge(best.a, best.b, false);
     }
   }
 
@@ -718,6 +859,24 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   const urbanBounds = { left: bbox.minX + 30, right: bbox.maxX - 30, north: bbox.minZ + 30, south: bbox.maxZ - 30 };
   const boundsRadius = Math.max(bbox.maxX - bbox.minX, bbox.maxZ - bbox.minZ) / 2 + 40;
   const extent = Math.ceil((Math.max(Math.abs(bbox.minX), Math.abs(bbox.maxX), Math.abs(bbox.minZ), Math.abs(bbox.maxZ)) + 260) * 2 / 100) * 100;
+  // 接入路把已有路段切成 T 路口后，车流折线还按旧端点走：把落在线段上的路口节点按顺序插回去。
+  {
+    const allNodes = [...nodes.values()];
+    for (let r = 0; r < carPaths.length; r += 1) {
+      const route = carPaths[r]; const out: Vec2[] = [route[0]];
+      for (let i = 1; i < route.length; i += 1) {
+        const a = route[i - 1]; const b = route[i];
+        const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
+        const between = allNodes
+          .map((n) => ({ n, t: ((n.x - a.x) * dx + (n.z - a.z) * dz) / l2 }))
+          .filter(({ n, t }) => t > 1e-4 && t < 1 - 1e-4 && segmentDistance(n, a, b) < 0.02)
+          .sort((x, y) => x.t - y.t);
+        for (const { n } of between) out.push({ x: n.x, z: n.z });
+        out.push(b);
+      }
+      carPaths[r] = out;
+    }
+  }
   return { blocks, roadNodes: [...nodes.values()], roadEdges: [...edges.values()], terrain, extent, coast, river, publicSites, parkTrees,
     urbanBounds, bridges, boundsRadius, carPaths, districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks: withBridgeLandmark(landmarks, bridges, random), seaside };
 }
