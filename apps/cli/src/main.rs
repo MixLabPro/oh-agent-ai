@@ -479,6 +479,11 @@ enum Cmd {
     /// Read-only; broken manifests are reported, never fatal (degradation
     /// isolation). Python mirror lands with the parity task.
     ManifestList,
+    /// Read-only combined harness registration/data inventory; never activates candidates.
+    HarnessInventory {
+        #[arg(long, default_value_t = 30)]
+        window_days: u16,
+    },
     /// Local manifest-catalog check status (E06): reads the status/policy files
     /// written by the desktop check. CLI has no network transport — the fetch
     /// itself is desktop-owned, mirroring the pricing catalog.
@@ -2988,6 +2993,14 @@ session_store={store} fold={fold}"
     // event id 按 rollout stem 命名空间——同 stem 的 byte-identical 复本去重、
     // 异 stem 永不误合并。与 Python `scan.py codex-usage-facts --json -` 字节相等
     // （parity 钉测在 tests/test_codex_usage_fact.py）。
+    if let Some(Cmd::HarnessInventory { window_days }) = &args.cmd {
+        match agent_vitals_runtime::query::app_harnesses::inventory(&agent_vitals_runtime::home::data_home(),
+            *window_days, agent_vitals_runtime::core::clock::now_ms()) {
+            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap_or_default()),
+            Err(code) => { eprintln!("{code}"); std::process::exit(1); }
+        }
+        return;
+    }
     if let Some(Cmd::ManifestList) = &args.cmd {
         let payload = agent_vitals_runtime::plugin_ingest::plugin_list(
             &agent_vitals_runtime::home::data_home(),

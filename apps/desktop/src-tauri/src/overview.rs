@@ -65,6 +65,7 @@ pub struct BudgetAlert {
 /// 可展示的记录，而不是只进 stderr。`read_overview` 把它放进 Overview，UI 据此
 /// 决定主入口要不要示警、给不给「立即同步」入口。
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct SyncStatus {
     /// 本轮同步是否成功结束（无未折会话也是成功——「没活干」不是故障）。
     pub ok: bool,
@@ -75,21 +76,40 @@ pub struct SyncStatus {
     pub message: String,
     /// 本轮尝试的北京时间（`YYYY-MM-DD HH:MM:SS`）。无 chrono 依赖，用 `beijing_timestamp`。
     pub at: Option<String>,
+    /// Local-only receipts for active dynamic harness manifests. Error text and paths
+    /// are intentionally omitted; this file is not an MCP/plugin data source.
+    pub dynamic_harnesses: Vec<DynamicHarnessSyncReceipt>,
+}
+
+pub(crate) fn local_timestamp_now() -> String {
+    beijing_timestamp(now_unix_secs())
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DynamicHarnessSyncReceipt {
+    pub harness: String,
+    /// `ok`, `empty`, or `failed`.
+    pub state: String,
+    /// Closed error vocabulary; never raw parser/OS error text.
+    pub error_code: Option<String>,
+    pub observed_at: String,
+    pub appended: usize,
+    pub duplicate: usize,
 }
 
 impl Default for SyncStatus {
     fn default() -> Self {
-        Self { ok: false, stage: "never".into(), message: "尚未同步".into(), at: None }
+        Self { ok: false, stage: "never".into(), message: "尚未同步".into(), at: None, dynamic_harnesses: Vec::new() }
     }
 }
 
 impl SyncStatus {
     pub fn ok(stage: &str, message: String) -> Self {
-        Self { ok: true, stage: stage.into(), message, at: Some(beijing_timestamp(now_unix_secs())) }
+        Self { ok: true, stage: stage.into(), message, at: Some(beijing_timestamp(now_unix_secs())), dynamic_harnesses: Vec::new() }
     }
 
     pub fn fail(stage: &str, message: String) -> Self {
-        Self { ok: false, stage: stage.into(), message, at: Some(beijing_timestamp(now_unix_secs())) }
+        Self { ok: false, stage: stage.into(), message, at: Some(beijing_timestamp(now_unix_secs())), dynamic_harnesses: Vec::new() }
     }
 }
 
@@ -1418,6 +1438,29 @@ mod tests {
         assert!(!back.ok && back.stage == "oneline");
         assert_eq!(back.message, "oneline 失败（exit 1）：boom");
         assert!(back.at.is_some());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn legacy_sync_status_defaults_dynamic_receipts() {
+        let legacy = serde_json::json!({"ok":true,"stage":"complete","message":"新增 0 条","at":null});
+        let status: SyncStatus = serde_json::from_value(legacy).unwrap();
+        assert!(status.dynamic_harnesses.is_empty());
+    }
+
+    #[test]
+    fn dynamic_harness_receipt_survives_local_status_persistence() {
+        let tmp = std::env::temp_dir().join(format!("sv-dynamic-sync-receipt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut status = SyncStatus::ok("complete", "新增 0 条".into());
+        status.dynamic_harnesses.push(DynamicHarnessSyncReceipt {
+            harness: "harness:zcode".into(), state: "failed".into(),
+            error_code: Some("source_unavailable".into()), observed_at: "2026-10-05 12:00:00".into(),
+            appended: 0, duplicate: 0,
+        });
+        save_sync_status_at(&tmp, &status);
+        let restored = load_sync_status(&tmp);
+        assert_eq!(restored.dynamic_harnesses, status.dynamic_harnesses);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

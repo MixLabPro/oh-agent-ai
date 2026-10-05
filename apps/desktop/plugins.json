@@ -6,7 +6,7 @@
       "name": "City",
       "entry": "plugins/AgentCity.plugin/ui/index.html",
       "commandNamespace": "city",
-      "dataProjections": ["city:v1", "city-settings:v1"],
+      "dataProjections": ["city:v2", "city-settings:v1", "harnesses:v1"],
       "allowLocalExports": true,
       "navigationTargets": ["session"],
       "source": "apps/agent-city/ui",

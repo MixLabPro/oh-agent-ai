@@ -104,6 +104,16 @@ fn definitions() -> &'static [PluginDefinition] {
     }).plugins
 }
 
+fn native_create_failure_code(error: &tauri::Error) -> &'static str {
+    match error {
+        tauri::Error::AssetNotFound(_) => "plugin_assets_missing",
+        tauri::Error::WebviewLabelAlreadyExists(_) => "plugin_instance_conflict",
+        tauri::Error::InvalidWindowHandle | tauri::Error::WindowNotFound => "plugin_parent_unavailable",
+        tauri::Error::Runtime(_) => "plugin_webview_create_failed",
+        _ => "plugin_create_failed",
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tool {
@@ -112,6 +122,8 @@ pub struct Tool {
     label: String,
     kind: String,
     enabled: bool,
+    #[serde(default)]
+    placement: Option<String>,
     value: Option<String>,
     #[serde(default)]
     options: Vec<Choice>,
@@ -236,6 +248,7 @@ fn start_watchdog(app: &tauri::AppHandle, state: &PluginHost) {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri command arguments are the stable frontend IPC surface.
 pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::State<'_, PluginHost>, plugin_id: String, bounds: Bounds, restart: bool, instance_id: Option<String>, locale: Option<String>, bounds_only: Option<bool>) -> Result<String, String> {
     host_only(&webview)?;
     let bounds_only = bounds_only.unwrap_or(false);
@@ -336,14 +349,20 @@ pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::
         builder,
         tauri::LogicalPosition::new(bounds.x, bounds.y), tauri::LogicalSize::new(bounds.width, bounds.height),
     );
-    if result.is_err() {
-        if let Some(current) = state.0.lock().unwrap().current.as_mut() { current.failed = Some("plugin_create_failed"); }
-        return Err("plugin_create_failed".into());
-    }
-    if let Ok(view) = result {
-        ensure_native_attachment(&app, &view)?;
-        let _ = view.set_focus();
-    }
+    let view = match result {
+        Ok(view) => view,
+        Err(error) => {
+            let code = native_create_failure_code(&error);
+            agent_vitals_runtime::logging::log_error("plugin_host", &format!("native child WebView creation failed ({code}): {error}"));
+            if let Some(current) = state.0.lock().unwrap().current.as_mut() {
+                current.failed = Some(code);
+                note(current, code);
+            }
+            return Err(code.into());
+        }
+    };
+    ensure_native_attachment(&app, &view)?;
+    let _ = view.set_focus();
     Ok(id)
 }
 
@@ -447,7 +466,7 @@ pub fn plugin_command(app: tauri::AppHandle, webview: Webview, state: tauri::Sta
         (i.id.clone(), request)
     };
     let envelope = json!({"version": 1, "instanceId": id, "requestId": request, "commandId": command_id, "value": value});
-    app.get_webview(&id).ok_or("plugin_view_unavailable")?.eval(&format!(
+    app.get_webview(&id).ok_or("plugin_view_unavailable")?.eval(format!(
         "window.dispatchEvent(new CustomEvent('__AV_PLUGIN_COMMAND__', {{detail: {envelope}}}));"
     )).map_err(|_| "plugin_delivery_failed")?;
     Ok(request)
@@ -468,7 +487,7 @@ pub async fn plugin_request(app: tauri::AppHandle, webview: Webview, state: taur
     let (allowed, navigation, plugin_id) = {
         let host = state.0.lock().unwrap();
         let i = host.current.as_ref().ok_or("plugin_instance_unavailable")?;
-        if i.id != webview.label() || i.failed.is_some() || request.instance_id != i.id {
+        if i.id != webview.label() || i.failed.is_some() || i.suspended || request.instance_id != i.id {
             return Err("plugin_instance_mismatch".into());
         }
         if let Err(code) = validate_plugin_request(&request) {
@@ -483,7 +502,7 @@ pub async fn plugin_request(app: tauri::AppHandle, webview: Webview, state: taur
         let target = tauri::async_runtime::spawn_blocking(move || crate::plugin_projections::session_target(&plugin_id, &payload))
             .await.map_err(|_| "plugin_query_failed".to_string())?;
         let host = state.0.lock().unwrap();
-        if !host.current.as_ref().is_some_and(|i| i.id == request.instance_id && i.failed.is_none()) { return Err("plugin_instance_mismatch".into()); }
+        if !host.current.as_ref().is_some_and(|i| i.id == request.instance_id && i.failed.is_none() && !i.suspended) { return Err("plugin_instance_mismatch".into()); }
         let (session_ref, harness_kind) = match target { Ok(value) => value, Err(code) => return Ok(plugin_request_error(request.request_id, code, false)) };
         drop(host);
         crate::focus_session_target(&app, crate::WorkbenchTarget::SessionDetail { session_ref, harness_kind });
@@ -492,15 +511,15 @@ pub async fn plugin_request(app: tauri::AppHandle, webview: Webview, state: taur
     let method = request.method.clone();
     let payload = request.payload.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        crate::plugin_projections::read(&allowed, &method, &payload)
+        crate::plugin_projections::read_for_plugin(&allowed, &method, &payload, &plugin_id)
     }).await.map_err(|_| "plugin_query_failed".to_string())?;
     let host = state.0.lock().unwrap();
-    if !host.current.as_ref().is_some_and(|i| i.id == request.instance_id && i.failed.is_none()) {
+    if !host.current.as_ref().is_some_and(|i| i.id == request.instance_id && i.failed.is_none() && !i.suspended) {
         return Err("plugin_instance_mismatch".into());
     }
     Ok(match result {
         Ok(value) => PluginResponseV1 { version: 1, request_id: request.request_id, ok: true, result: Some(value), error: None },
-        Err(code) => plugin_request_error(request.request_id, code, code == "data_unavailable"),
+        Err(code) => plugin_request_error(request.request_id, code, matches!(code, "data_unavailable" | "revision_changed")),
     })
 }
 
@@ -622,5 +641,16 @@ mod tests {
         assert!(valid_tools("metrics", &tools));
         assert!(!valid_tools("city", &tools));
         assert!(!definitions().is_empty());
+    }
+
+    #[test]
+    fn native_create_failures_map_to_stable_non_sensitive_categories() {
+        assert_eq!(native_create_failure_code(&tauri::Error::AssetNotFound("private/path".into())), "plugin_assets_missing");
+        assert_eq!(native_create_failure_code(&tauri::Error::WebviewLabelAlreadyExists("private-label".into())), "plugin_instance_conflict");
+        assert_eq!(native_create_failure_code(&tauri::Error::InvalidWindowHandle), "plugin_parent_unavailable");
+        assert_eq!(native_create_failure_code(&tauri::Error::WindowNotFound), "plugin_parent_unavailable");
+        let private = tauri::Error::Io(std::io::Error::other("/Users/private/secret"));
+        assert_eq!(native_create_failure_code(&private), "plugin_create_failed");
+        assert!(!native_create_failure_code(&private).contains("/Users"));
     }
 }

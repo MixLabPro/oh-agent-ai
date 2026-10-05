@@ -4,6 +4,7 @@
 
 pub mod cost_breakdown;
 pub mod app_local;
+pub mod app_harnesses;
 pub mod decision_matrix;
 pub mod export;
 pub mod read_gate;

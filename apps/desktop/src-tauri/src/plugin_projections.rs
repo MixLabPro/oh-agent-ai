@@ -7,7 +7,23 @@ pub fn session_target(plugin_id: &str, payload: &Value) -> Result<(String, Strin
     agent_vitals_runtime::query::app_local::city_session_target(&crate::overview::data_home(), handle)
 }
 
+#[cfg(test)]
 pub fn read(allowed: &[String], method: &str, payload: &Value) -> Result<Value, &'static str> {
+    read_for_plugin(allowed, method, payload, "host-test")
+}
+
+pub fn read_for_plugin(allowed: &[String], method: &str, payload: &Value, plugin_id: &str) -> Result<Value, &'static str> {
+    if matches!(method, "harnesses.list" | "harnesses.sessions") {
+        if payload["version"].as_u64() != Some(1) { return Err("unsupported_version"); }
+        if !allowed.iter().any(|key| key == "harnesses:v1") { return Err("projection_denied"); }
+        let home = crate::overview::data_home();
+        if method == "harnesses.list" { return agent_vitals_runtime::query::app_harnesses::list(&home); }
+        let id = payload["harness_id"].as_str().ok_or("harness_unavailable")?;
+        let days = payload["windowDays"].as_u64().filter(|n| matches!(n, 7 | 30 | 90 | 366)).ok_or("invalid_window")?;
+        let revision = payload["data_revision"].as_u64().ok_or("revision_required")?;
+        return agent_vitals_runtime::query::app_harnesses::sessions(&home, id, days as u16,
+            agent_vitals_runtime::core::clock::now_ms(), revision, plugin_id);
+    }
     if method != "data.read" { return Err("method_unavailable"); }
     let name = payload["projection"].as_str().ok_or("projection_unavailable")?;
     let version = payload["version"].as_u64().ok_or("projection_unavailable")?;
@@ -15,7 +31,7 @@ pub fn read(allowed: &[String], method: &str, payload: &Value) -> Result<Value, 
     if !allowed.contains(&key) { return Err("projection_denied"); }
     match key.as_str() {
         "city-settings:v1" => city_settings(payload),
-        "city:v1" => {
+        "city:v2" => {
             let days = payload["windowDays"].as_u64().ok_or("invalid_window")?;
             if !matches!(days, 7 | 30 | 90 | 366) { return Err("invalid_window"); }
             agent_vitals_runtime::query::app_local::city_projection(&crate::overview::data_home(), days as u16,
@@ -64,8 +80,10 @@ mod tests {
     #[test]
     fn projections_are_explicitly_scoped_and_windows_bounded() {
         assert_eq!(read(&[], "data.read", &json!({"projection":"city","version":1,"windowDays":30})), Err("projection_denied"));
-        assert_eq!(read(&["city:v1".into()], "sql", &json!({})), Err("method_unavailable"));
-        assert_eq!(read(&["city:v1".into()], "data.read", &json!({"projection":"city","version":1,"windowDays":65566})), Err("invalid_window"));
+        assert_eq!(read(&["city:v2".into()], "sql", &json!({})), Err("method_unavailable"));
+        assert_eq!(read(&["city:v2".into()], "data.read", &json!({"projection":"city","version":2,"windowDays":65566})), Err("invalid_window"));
+        assert_eq!(read(&[], "harnesses.list", &json!({"version":1})), Err("projection_denied"));
+        assert_eq!(read(&["harnesses:v1".into()], "harnesses.list", &json!({"version":2})), Err("unsupported_version"));
     }
 
     #[test]

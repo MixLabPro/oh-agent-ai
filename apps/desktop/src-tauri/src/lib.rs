@@ -355,10 +355,19 @@ fn harness_display_name(kind: &str) -> String {
 /// 界面用：全部 manifest 执行环境的 `{ "harness:<slug>": 显示名 }`。内置执行环境的名字界面自带。
 #[tauri::command(async)]
 fn harness_display_names() -> Value {
-    let (harnesses, _) = agent_vitals_runtime::harness_registry::scan_active_plugin_harnesses(&overview::data_home());
     let mut map = serde_json::Map::new();
-    for harness in harnesses { map.insert(format!("harness:{}", harness.slug), Value::String(harness.display_name)); }
+    if let Ok(list) = agent_vitals_runtime::query::app_harnesses::list(&overview::data_home()) {
+        if let Some(items) = list["harnesses"].as_array() {
+            for item in items { if let Some(id) = item["id"].as_str() { map.insert(id.into(), item["display_name"].clone()); } }
+        }
+    }
     Value::Object(map)
+}
+
+#[tauri::command(async)]
+fn harness_inventory(window_days: u16) -> Result<Value, String> {
+    agent_vitals_runtime::query::app_harnesses::inventory(&overview::data_home(), window_days,
+        agent_vitals_runtime::core::clock::now_ms()).map_err(str::to_string)
 }
 
 /// 读 claude 估报告（core `claude_day_cost` / 当月聚合 `currency_totals`）的单侧
@@ -904,6 +913,7 @@ fn money_rows_text(ov: &Overview) -> (String, String) {
     money_rows_text_localized(ov, NativeUiLanguage::Chinese)
 }
 
+#[cfg(test)]
 fn money_rows_text_localized(ov: &Overview, language: NativeUiLanguage) -> (String, String) {
     money_rows_text_fx(ov, language, None)
 }
@@ -943,7 +953,7 @@ fn money_rows_text_fx(ov: &Overview, language: NativeUiLanguage, fx: Option<&Tra
     // 任一成分是估算就整个币种段标 `≈`（订阅是声明值，本身不带估算）。曾叫「本月按量成本」，
     // 订阅月费不在里面，用户看到 — 而下面预算行有数，读起来互相矛盾。
     // 库缺席（旧载荷兜底）时拿不到订阅明细，只能给按量，所以保持旧标签「按量成本」不撒谎。
-    let has_subscription = ov.subscription_month_by_currency.as_ref().map_or(false, |m| m.values().any(|minor| *minor > 0));
+    let has_subscription = ov.subscription_month_by_currency.as_ref().is_some_and(|m| m.values().any(|minor| *minor > 0));
     let merged_path = ov.metered_month.is_some() || has_subscription;
     let month_money = if merged_path {
         month_cost_text(ov, fx, language)
@@ -1293,12 +1303,12 @@ struct InvalidationPublisher(
     agent_vitals_runtime::events::ChangePublisher<agent_vitals_runtime::events::Invalidation>,
 );
 
-/// `SyncStatusChanged` 的「变了才发」发布器（spec §4.5）：ok/stage/message 三元组
+/// `SyncStatusChanged` 的「变了才发」发布器（spec §4.5）：ok/stage/message/逐动态来源回执
 /// 与上次相同就不发。此前每 tick 必发，是 REVIEW G2 的实例之一。页面挂载时都会
 /// 主动 `read_sync_status`，所以「首次扫描要让工作台结束正在整理」由主动拉满足，
 /// 不再依赖每 tick 必发；进程启动后首次仍必发（`last = None`）。
 struct SyncStatusPublisher(
-    agent_vitals_runtime::events::ChangePublisher<(bool, String, String)>,
+    agent_vitals_runtime::events::ChangePublisher<(bool, String, String, Vec<overview::DynamicHarnessSyncReceipt>)>,
 );
 
 /// 菜单栏「信息行」点击产生的导航目标（React canonical page ID）。持久存目标是因为窗口未建/未
@@ -1423,7 +1433,7 @@ fn publish_invalidation(app: &AppHandle, harnesses: std::collections::BTreeSet<S
 /// `SyncStatusChanged`：变了才发（spec §4.5）。
 fn publish_sync_status(app: &AppHandle, status: &SyncStatus) {
     let publisher = app.state::<SyncStatusPublisher>();
-    let key = (status.ok, status.stage.clone(), status.message.clone());
+    let key = sync_status_publish_key(status);
     publisher.0.publish_if_changed(key, |_| {
         agent_vitals_runtime::logging::log_info(
             "emit",
@@ -1431,6 +1441,10 @@ fn publish_sync_status(app: &AppHandle, status: &SyncStatus) {
         );
         let _ = app.emit(APP_EVENT, sync_status_payload(status));
     });
+}
+
+fn sync_status_publish_key(status: &SyncStatus) -> (bool, String, String, Vec<overview::DynamicHarnessSyncReceipt>) {
+    (status.ok, status.stage.clone(), status.message.clone(), status.dynamic_harnesses.clone())
 }
 
 /// `sync_tick_inner` 的计时外壳（REVIEW P1「事件链路打点：tick 开始/结束与
@@ -1491,7 +1505,7 @@ fn sync_tick_light(
     // 成功一律上报 `complete`：React 的同步状态只认 `complete` 为正常（boundedEnum
     // 白名单），此前轻 tick 报 `light`、重 tick 报 `discover`/`fold`，每次成功都被
     // 数据源页显示成失败。
-    let status = SyncStatus::ok(
+    let mut status = SyncStatus::ok(
         "complete",
         format!(
             "定向同步 {:?} · {}",
@@ -1499,6 +1513,10 @@ fn sync_tick_light(
             agent_vitals_runtime::ingest::engine::summarize(&report)
         ),
     );
+    // Light sync is scoped to compiled harnesses and never attempts manifest ingest.
+    // Its successful status must not erase dynamic-source diagnostics from the last
+    // full sync.
+    status.dynamic_harnesses = overview::load_sync_status(&overview::data_home()).dynamic_harnesses;
     overview::save_sync_status(&status);
     publish_sync_status(app, &status);
     timed("drain_event_bus", || drain_event_bus(app));
@@ -1565,16 +1583,66 @@ fn status_from_run(run: &agent_vitals_runtime::ingest::engine::SyncRun) -> SyncS
         SyncRun::ControlUnreadable(error) => {
             SyncStatus::fail("control", format!("同步控制状态不可读：{error}"))
         }
-        SyncRun::Completed(report) => SyncStatus::ok("complete", summarize(report)),
+        SyncRun::Completed(report) => {
+            let mut status = SyncStatus::ok("complete", summarize(report));
+            status.dynamic_harnesses = dynamic_harness_receipts(report);
+            status
+        }
         SyncRun::Failed(error) => SyncStatus::fail("facts", error.clone()),
     }
+}
+
+fn dynamic_harness_receipts(
+    report: &agent_vitals_runtime::ingest::sync_service::SyncReport,
+) -> Vec<overview::DynamicHarnessSyncReceipt> {
+    use std::collections::BTreeSet;
+    let dynamic_slugs = report.harnesses.iter()
+        .filter_map(|entry| entry.harness.strip_prefix("harness:"))
+        .filter(|slug| agent_vitals_runtime::sources::harness_registry::plugin_slug_ok(slug))
+        .collect::<BTreeSet<_>>();
+    let observed_at = overview::local_timestamp_now();
+    dynamic_slugs.into_iter().filter_map(|slug| {
+        let harness = format!("harness:{slug}");
+        let entry = report.harnesses.iter().find(|entry| entry.harness == harness)?;
+        let error_code = entry.errors.first().map(|error| classify_dynamic_harness_error(error));
+        Some(overview::DynamicHarnessSyncReceipt {
+            harness,
+            state: if error_code.is_some() { "failed".into() }
+                else if entry.appended == 0 && entry.duplicate == 0 { "empty".into() }
+                else { "ok".into() },
+            error_code,
+            observed_at: observed_at.clone(),
+            appended: entry.appended,
+            duplicate: entry.duplicate,
+        })
+    }).collect()
+}
+
+fn classify_dynamic_harness_error(error: &str) -> String {
+    let error = error.to_ascii_lowercase();
+    if error.contains("permission") || error.contains("denied") { "permission_denied" }
+    else if error.contains("lease") || error.contains("lock") { "source_busy" }
+    // Do not classify from `manifest`/`json` alone: normal source read errors
+    // commonly include paths ending in `manifest.json` or `session.jsonl`.
+    else if error.contains("parse") || error.contains("malformed") || error.contains("invalid json")
+        || error.contains("not valid json") || error.contains("不是合法 json")
+        || error.contains("校验失败") || error.starts_with("active object:")
+        || (error.contains("slug `") && error.contains("不一致")) { "manifest_or_source_invalid" }
+    else if error.contains("authority") || error.contains("database") || error.contains("sqlite") { "authority_unavailable" }
+    else if error.contains("source") || error.contains("file") || error.contains("read") { "source_unavailable" }
+    else { "ingest_failed" }.into()
 }
 
 fn sync_tick_inner(app: &AppHandle) {
     // W3：进程内同步引擎（暂停判定也在引擎里）。遗留的 discover/oneline/claude-sync
     // 三步已移除——产物（oneline.json / sessions.jsonl / claude-fold.json）无读取方。
     let run = agent_vitals_runtime::ingest::engine::run_sync(&overview::data_home(), None);
-    let status = status_from_run(&run);
+    let mut status = status_from_run(&run);
+    if status.stage != "complete" {
+        // Pausing or a whole-run failure says nothing new about each previously
+        // active manifest. Preserve its last concrete receipt until a retry runs.
+        status.dynamic_harnesses = overview::load_sync_status(&overview::data_home()).dynamic_harnesses;
+    }
     if matches!(
         run,
         agent_vitals_runtime::ingest::engine::SyncRun::Paused
@@ -2949,7 +3017,7 @@ fn fx_status() -> Value {
         "rate_date": rate_date,
         "rate_age_days": age,
         // 超过 14 天标过期：界面据此提示「汇率已过期」，数字仍显示但必须带 ≈ 与日期。
-        "rate_stale": age.map_or(true, |days| days > 14),
+        "rate_stale": age.is_none_or(|days| days > 14),
         "rate_source": if synced { "synced_snapshot" } else { "bundled_snapshot" },
         "rate_fetched_at_ms": fetched_at_ms,
         "supported_currencies": policy.snapshot().rates_per_usd.keys().collect::<Vec<_>>(),
@@ -4821,6 +4889,7 @@ fn data_source_status() -> Value {
     let mut report = agent_vitals_runtime::mcp::source_status_report(db.conn()).unwrap_or_else(|reason| {
         serde_json::json!({ "status": "unavailable", "reason": reason, "sources": [] })
     });
+    merge_dynamic_harness_sources(&mut report, db.conn(), &overview_snapshot_typed_sync().sync.dynamic_harnesses);
     let excluded_harnesses = match agent_vitals_runtime::source_controls::excluded_harnesses(&data_home) {
         Ok(harnesses) => harnesses,
         Err(error) => return serde_json::json!({ "status": "unavailable", "reason": error, "sources": [] }),
@@ -4849,6 +4918,85 @@ fn data_source_status() -> Value {
         }
     }
     report
+}
+
+fn merge_dynamic_harness_sources(report: &mut Value, conn: &rusqlite::Connection, receipts: &[overview::DynamicHarnessSyncReceipt]) {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut slugs = BTreeSet::new();
+    if let Ok(mut statement) = conn.prepare(
+        "SELECT s.slot_id FROM extension_active a JOIN extension_activation_slots s
+         ON s.generation=a.generation WHERE s.slot_type='harness_manifest'"
+    ) {
+        if let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) {
+            slugs.extend(rows.flatten().filter(|slug| agent_vitals_runtime::sources::harness_registry::plugin_slug_ok(slug)));
+        }
+    }
+    if let Ok(mut statement) = conn.prepare(
+        "SELECT DISTINCT slot_id FROM extension_revisions WHERE slot_type='harness_manifest'"
+    ) {
+        if let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) {
+            slugs.extend(rows.flatten().filter(|slug| agent_vitals_runtime::sources::harness_registry::plugin_slug_ok(slug)));
+        }
+    }
+    if let Ok(mut statement) = conn.prepare("SELECT DISTINCT harness FROM source_files WHERE harness LIKE 'harness:%'") {
+        if let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) {
+            slugs.extend(rows.flatten().filter_map(|id| id.strip_prefix("harness:").map(str::to_owned))
+                .filter(|slug| agent_vitals_runtime::sources::harness_registry::plugin_slug_ok(slug)));
+        }
+    }
+    if let Ok(mut statement) = conn.prepare("SELECT DISTINCT harness FROM usage_facts WHERE harness LIKE 'harness:%'") {
+        if let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) {
+            slugs.extend(rows.flatten().filter_map(|id| id.strip_prefix("harness:").map(str::to_owned))
+                .filter(|slug| agent_vitals_runtime::sources::harness_registry::plugin_slug_ok(slug)));
+        }
+    }
+    let receipt_by_slug = receipts.iter().filter_map(|receipt| receipt.harness.strip_prefix("harness:")
+        .map(|slug| (slug.to_owned(), receipt))).collect::<BTreeMap<_, _>>();
+    let Some(sources) = report.get_mut("sources").and_then(Value::as_array_mut) else { return };
+    for slug in slugs.into_iter().take(124) {
+        let harness = format!("harness:{slug}");
+        let source_stats = conn.query_row(
+            "SELECT COUNT(*), MAX(last_seen_at_ms),
+                    COALESCE(SUM(CASE WHEN last_error_code IS NOT NULL THEN 1 ELSE 0 END), 0)
+             FROM source_files WHERE harness=?1",
+            [&harness], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, i64>(2)?))
+        ).unwrap_or((0, None, 0));
+        let import_stats = conn.query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT session_key), MIN(event_ts_ms), MAX(event_ts_ms)
+             FROM usage_facts WHERE harness=?1 AND deleted_at_ms IS NULL AND observation_kind!='legacy_aggregate'",
+            [&harness], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<i64>>(2)?, row.get::<_, Option<i64>>(3)?))
+        ).unwrap_or((0, 0, None, None));
+        let active = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM extension_active a JOIN extension_activation_slots s
+             ON s.generation=a.generation WHERE s.slot_type='harness_manifest' AND s.slot_id=?1)",
+            [&slug], |row| row.get::<_, bool>(0)
+        ).unwrap_or(false);
+        let receipt = receipt_by_slug.get(&slug).copied();
+        let failed = source_stats.2 > 0 || receipt.is_some_and(|item| item.state == "failed");
+        let state = if failed { "needs_attention" }
+            else if source_stats.0 > 0 || receipt.is_some() { "connected" }
+            else { "not_detected" };
+        let mut error_codes = Vec::new();
+        if source_stats.2 > 0 { error_codes.push(Value::String("source_unavailable".into())); }
+        if let Some(code) = receipt.and_then(|item| item.error_code.as_deref()) {
+            if !error_codes.iter().any(|existing| existing.as_str() == Some(code)) { error_codes.push(Value::String(code.into())); }
+        }
+        let recovery_action = if !active { serde_json::json!({"kind":"none","label":"历史来源"}) }
+            else if failed { serde_json::json!({"kind":"retry_sync","label":"重新同步"}) }
+            else { serde_json::json!({"kind":"sync","label":"立即同步"}) };
+        sources.push(serde_json::json!({
+            "source_id": harness, "harness": harness, "registration_state": if active { "active" } else { "historical" },
+            "authorization": "unknown", "connection_state": state,
+            "scan": { "last_scanned_at_ms": source_stats.1, "source_count": source_stats.0 },
+            "log": { "last_event_at_ms": import_stats.3 },
+            "import_scope": { "facts": import_stats.0, "sessions": import_stats.1,
+                "first_event_at_ms": import_stats.2, "last_event_at_ms": import_stats.3 },
+            "failed_scope": { "sources": if failed { source_stats.2.max(1) } else { 0 }, "error_codes": error_codes,
+                "last_attempt": receipt.map(|item| serde_json::json!({"state":item.state,"observed_at":item.observed_at,
+                    "appended":item.appended,"duplicate":item.duplicate})) },
+            "recovery_action": recovery_action
+        }));
+    }
 }
 
 #[tauri::command(async)]
@@ -5539,6 +5687,7 @@ pub fn run() {
             save_retention_config,
             statistics_timezone_config,
             harness_display_names,
+            harness_inventory,
             fx_status,
             save_reporting_currency_config,
             save_fx_manual_rate,
@@ -5756,7 +5905,8 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
                 let mut request = [0; 4096];
-                stream.read(&mut request).unwrap();
+                let bytes_read = stream.read(&mut request).unwrap();
+                assert!(bytes_read > 0, "client should send an HTTP request");
                 stream.write_all(response).unwrap();
             });
             (url, worker)
@@ -6193,6 +6343,100 @@ mod tests {
         assert_eq!((failed.stage.as_str(), failed.message.as_str()), ("facts", "disk full"));
         assert_eq!(status_from_run(&SyncRun::Paused).stage, "paused");
         assert!(!status_from_run(&SyncRun::ControlUnreadable("io".into())).ok);
+    }
+
+    #[test]
+    fn dynamic_harness_receipts_are_safe_and_retry_replaces_failure() {
+        use agent_vitals_runtime::ingest::sync_service::{HarnessSyncReport, SyncReport};
+        for (raw, expected) in [
+            ("permission denied at /private/log.json", "permission_denied"),
+            ("manifest parse failed at /private/manifest.json", "manifest_or_source_invalid"),
+            ("manifest lease lock held", "source_busy"),
+            ("authority database sqlite unavailable", "authority_unavailable"),
+            ("source file read failed at /private/input.jsonl", "source_unavailable"),
+            ("unexpected internal failure /private/path", "ingest_failed"),
+        ] {
+            assert_eq!(classify_dynamic_harness_error(raw), expected);
+        }
+        let mut failed = SyncReport::default();
+        failed.harnesses.push(HarnessSyncReport {
+            harness: "harness:zcode".into(),
+            errors: vec!["manifest parse failed at /Users/private/secret.json".into()],
+            ..Default::default()
+        });
+        let failure = dynamic_harness_receipts(&failed);
+        assert_eq!(failure.len(), 1);
+        assert_eq!(failure[0].state, "failed");
+        assert_eq!(failure[0].error_code.as_deref(), Some("manifest_or_source_invalid"));
+        assert!(!serde_json::to_string(&failure).unwrap().contains("/Users/private"));
+        assert!(!serde_json::to_string(&failure).unwrap().contains("secret.json"));
+
+        let mut recovered = SyncReport::default();
+        recovered.harnesses.push(HarnessSyncReport { harness: "harness:zcode".into(), ..Default::default() });
+        let retry = dynamic_harness_receipts(&recovered);
+        assert_eq!(retry[0].state, "empty", "zero-event success is still an observed success");
+        assert_eq!(retry[0].error_code, None, "successful retry clears prior error");
+    }
+
+    #[test]
+    fn dynamic_harness_source_projection_combines_active_history_and_receipt() {
+        use agent_vitals_runtime::ingest::sync_service::{HarnessSyncReport, SyncReport};
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE extension_active(singleton INTEGER, generation INTEGER);
+            CREATE TABLE extension_activation_slots(generation INTEGER, slot_type TEXT, slot_id TEXT);
+            CREATE TABLE extension_revisions(revision_id TEXT, slot_type TEXT, slot_id TEXT);
+            CREATE TABLE source_files(harness TEXT, last_seen_at_ms INTEGER, last_error_code TEXT);
+            CREATE TABLE usage_facts(harness TEXT, deleted_at_ms INTEGER, observation_kind TEXT,
+                session_key TEXT, event_ts_ms INTEGER);
+            INSERT INTO extension_active VALUES(1, 3);
+            INSERT INTO extension_activation_slots VALUES(3, 'harness_manifest', 'zcode');
+            INSERT INTO extension_revisions VALUES('retired-revision', 'harness_manifest', 'retired-agent');
+            INSERT INTO source_files VALUES('harness:oldplug', 100, NULL);
+            INSERT INTO usage_facts VALUES('harness:oldplug', NULL, 'event', 's1', 90);")
+            .unwrap();
+        let data_home = std::env::temp_dir().join(format!("av-dynamic-receipt-{}-{}", std::process::id(),
+            agent_vitals_runtime::core::clock::now_ms()));
+        let mut failed_report = SyncReport::default();
+        failed_report.harnesses.push(HarnessSyncReport {
+            harness: "harness:zcode".into(),
+            errors: vec!["source file read failed at /Users/private/events.jsonl".into()],
+            ..Default::default()
+        });
+        let failed_status = status_from_run(&agent_vitals_runtime::ingest::engine::SyncRun::Completed(failed_report));
+        overview::save_sync_status_at(&data_home, &failed_status);
+        let persisted_failure = overview::load_sync_status(&data_home);
+        assert_eq!(persisted_failure.dynamic_harnesses[0].error_code.as_deref(), Some("source_unavailable"));
+        let mut report = serde_json::json!({"status":"ok","sources":[]});
+        merge_dynamic_harness_sources(&mut report, &conn, &persisted_failure.dynamic_harnesses);
+        let rows = report["sources"].as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        let active = rows.iter().find(|row| row["harness"] == "harness:zcode").unwrap();
+        assert_eq!(active["registration_state"], "active");
+        assert_eq!(active["connection_state"], "needs_attention");
+        assert_eq!(active["failed_scope"]["error_codes"][0], "source_unavailable");
+        assert!(!active.to_string().contains("/Users/"));
+        let history = rows.iter().find(|row| row["harness"] == "harness:oldplug").unwrap();
+        assert_eq!(history["registration_state"], "historical");
+        assert_eq!(history["connection_state"], "connected");
+        let revision_only = rows.iter().find(|row| row["harness"] == "harness:retired-agent").unwrap();
+        assert_eq!(revision_only["registration_state"], "historical");
+        assert_eq!(revision_only["connection_state"], "not_detected");
+
+        let mut success_report = SyncReport::default();
+        success_report.harnesses.push(HarnessSyncReport { harness: "harness:zcode".into(), ..Default::default() });
+        let recovered_status = status_from_run(&agent_vitals_runtime::ingest::engine::SyncRun::Completed(success_report));
+        overview::save_sync_status_at(&data_home, &recovered_status);
+        let persisted_recovery = overview::load_sync_status(&data_home);
+        assert_eq!(persisted_recovery.dynamic_harnesses[0].state, "empty");
+        assert_eq!(persisted_recovery.dynamic_harnesses[0].error_code, None);
+        let mut recovered_projection = serde_json::json!({"status":"ok","sources":[]});
+        merge_dynamic_harness_sources(&mut recovered_projection, &conn, &persisted_recovery.dynamic_harnesses);
+        let recovered = recovered_projection["sources"].as_array().unwrap().iter()
+            .find(|row| row["harness"] == "harness:zcode").unwrap();
+        assert_eq!(recovered["connection_state"], "connected");
+        assert_eq!(recovered["failed_scope"]["error_codes"], serde_json::json!([]));
+        assert_eq!(recovered["failed_scope"]["last_attempt"]["state"], "empty");
+        let _ = std::fs::remove_dir_all(data_home);
     }
 
     #[test]
@@ -6737,7 +6981,7 @@ mod tests {
         let eur = TrayFx { target: "EUR".into(), policy: agent_vitals_domain::fx::FxPolicy::bundled().unwrap() };
         let (_, month) = money_rows_text_fx(&ov, NativeUiLanguage::English, Some(&eur));
         let eur_amount = month.split("≈EUR ").nth(1).and_then(|t| t.split(' ').next()).unwrap_or("");
-        assert!(eur_amount.split('.').nth(1).map_or(false, |frac| frac.len() == 2), "EUR 应两位小数：{month}");
+        assert!(eur_amount.split('.').nth(1).is_some_and(|frac| frac.len() == 2), "EUR 应两位小数：{month}");
         let jpy = TrayFx { target: "JPY".into(), policy: agent_vitals_domain::fx::FxPolicy::bundled().unwrap() };
         let (_, month) = money_rows_text_fx(&ov, NativeUiLanguage::English, Some(&jpy));
         let jpy_amount = month.split("≈JPY ").nth(1).and_then(|t| t.split(' ').next()).unwrap_or("");
@@ -6814,7 +7058,7 @@ mod tests {
             recent: vec![],
         };
         assert_eq!(harness_row_text_localized(&row, NativeUiLanguage::English), "Codex · ≈15K · 1 session");
-        let sync = SyncStatus { ok: false, stage: "error".into(), message: "本地路径错误".into(), at: None };
+        let sync = SyncStatus { ok: false, stage: "error".into(), message: "本地路径错误".into(), at: None, dynamic_harnesses: Vec::new() };
         assert_eq!(sync_line_text_localized(&sync, NativeUiLanguage::English), "⚠ Last sync failed; see Settings for details");
     }
 
@@ -7008,6 +7252,7 @@ mod tests {
             stage: "discover".into(),
             message: "无未折 DSH 会话".into(),
             at: Some("2026-09-01 09:50:52".into()),
+            dynamic_harnesses: Vec::new(),
         };
         assert_eq!(sync_line_text(&ok), "上次同步：09:50 成功（DeepSeek Harness、Claude Code）");
         let never = SyncStatus::default();
@@ -7017,6 +7262,7 @@ mod tests {
             stage: "fold".into(),
             message: "oneline 失败".into(),
             at: Some("2026-09-01 09:50:52".into()),
+            dynamic_harnesses: Vec::new(),
         };
         assert_eq!(sync_line_text(&failed), "⚠ 上次同步失败：oneline 失败");
         // at 缺场（老状态文件）也不能崩，退化成不带时间的成功。
@@ -7384,18 +7630,25 @@ mod tests {
         assert_eq!(sent, vec![7, 8]);
     }
 
-    /// SyncStatusChanged 变了才发：同三元组连续两轮只发一次，message 变了再发。
+    /// SyncStatusChanged 变了才发：摘要相同但动态逐源结果改变时也必须刷新。
     #[test]
     fn sync_status_publishes_only_on_change() {
         use agent_vitals_runtime::events::ChangePublisher;
-        let publisher = ChangePublisher::<(bool, String, String)>::new();
-        let key = |s: &SyncStatus| (s.ok, s.stage.clone(), s.message.clone());
+        let publisher = ChangePublisher::<(bool, String, String, Vec<overview::DynamicHarnessSyncReceipt>)>::new();
+        let key = sync_status_publish_key;
         let mut n = 0;
         assert!(publisher.publish_if_changed(key(&SyncStatus::ok("discover", "无未折 DSH 会话".into())), |_| n += 1));
         assert!(!publisher.publish_if_changed(key(&SyncStatus::ok("discover", "无未折 DSH 会话".into())), |_| n += 1));
         assert!(publisher.publish_if_changed(key(&SyncStatus::ok("fold", "已折入 s1".into())), |_| n += 1));
         assert!(publisher.publish_if_changed(key(&SyncStatus::fail("fold", "oneline 失败".into())), |_| n += 1));
-        assert_eq!(n, 3);
+        let mut with_dynamic = SyncStatus::ok("complete", "新增 0 条".into());
+        assert!(publisher.publish_if_changed(key(&with_dynamic), |_| n += 1));
+        with_dynamic.dynamic_harnesses.push(overview::DynamicHarnessSyncReceipt {
+            harness: "harness:zcode".into(), state: "failed".into(), error_code: Some("source_unavailable".into()),
+            observed_at: "2026-10-05 12:00:00".into(), appended: 0, duplicate: 0,
+        });
+        assert!(publisher.publish_if_changed(key(&with_dynamic), |_| n += 1));
+        assert_eq!(n, 5);
     }
 
     #[test]

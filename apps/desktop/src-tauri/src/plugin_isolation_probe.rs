@@ -97,11 +97,12 @@ pub(crate) const OBSERVER: &str = r#"
   setInterval(() => {
     send('heartbeat');
     const host = document.querySelector('.sidebar .nav-item');
-    const city = document.querySelector('.city-stats strong');
-    if (!ready && (host || (city?.textContent === '3' && window.__CITY_ISOLATION_FAULTS__))) {
+    const city = document.querySelector('.city-summary-trigger');
+    const summary = city?.textContent?.trim() ?? '';
+    if (!ready && (host || (summary.startsWith('3 会话') && window.__CITY_ISOLATION_FAULTS__))) {
       ready = true; send('ui_ready');
     }
-    if (!seven && city?.textContent === '2') { seven = true; send('window_seven_ready'); }
+    if (!seven && summary.startsWith('2 会话')) { seven = true; send('window_seven_ready'); }
     const playing = [...document.querySelectorAll('.plugin-toolbar button')].some(b=>b.textContent==='停止航拍');
     if (playing && !cinema) { cinema = true; send('cinema_started'); }
     if (!playing && cinema) { cinema = false; send('cinema_stopped'); }

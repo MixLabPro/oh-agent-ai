@@ -106,6 +106,7 @@ dependencies = [
  "objc",
  "reqwest",
  "rfd",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

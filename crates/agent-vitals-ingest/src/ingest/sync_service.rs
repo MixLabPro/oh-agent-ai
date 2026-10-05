@@ -804,7 +804,13 @@ pub fn sync_facts_filtered(
     // 「include/recipe 与数据不匹配」的 manifest（零 emit 拒写）。
     if only.is_none() {
         let user_home_for_plugins = user_home.clone();
+        let active_dynamic_slugs = active_harness_manifest_slugs(data_home);
         for (slug, result) in crate::plugin_ingest::ingest_installed(&ns, data_home, &user_home_for_plugins) {
+            if !active_dynamic_slugs.as_ref().is_ok_and(|active| active.contains(&slug)) {
+                // Candidate manifests and registry-level diagnostics are not active
+                // data sources and must not appear as source-health failures.
+                continue;
+            }
             match result {
                 Ok(payload) => {
                     // 验收修正：appended 在 ingest.harnesses[0]（IngestReport 嵌套层），
@@ -815,6 +821,18 @@ pub fn sync_facts_filtered(
                         .and_then(|h| h.get("appended"))
                         .and_then(Value::as_i64)
                         .unwrap_or(0);
+                    let duplicate = payload["ingest"]["harnesses"]
+                        .as_array()
+                        .and_then(|harnesses| harnesses.first())
+                        .and_then(|h| h.get("duplicate"))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0);
+                    report.harnesses.push(HarnessSyncReport {
+                        harness: format!("harness:{slug}"),
+                        appended: appended.max(0) as usize,
+                        duplicate: duplicate.max(0) as usize,
+                        ..Default::default()
+                    });
                     if appended > 0 {
                         crate::core::logging::log_info(
                             "sync",
@@ -948,6 +966,22 @@ pub fn sync_facts_filtered(
         }
     }
     Ok(report)
+}
+
+fn active_harness_manifest_slugs(data_home: &Path) -> Result<std::collections::BTreeSet<String>, String> {
+    let path = agent_vitals_data::authority::default_authority_path(data_home);
+    if !path.exists() { return Ok(std::collections::BTreeSet::new()); }
+    let db = agent_vitals_data::authority::AuthorityDb::open_readonly(&path)
+        .map_err(|error| format!("extension authority: {error}"))?;
+    let mut statement = db.conn().prepare(
+        "SELECT s.slot_id FROM extension_active a JOIN extension_activation_slots s
+         ON s.generation=a.generation WHERE s.slot_type='harness_manifest' ORDER BY s.slot_id"
+    ).map_err(|error| error.to_string())?;
+    let slugs = statement.query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(slugs)
 }
 
 /// Force a Codex source replay for attribution migrations. This deliberately

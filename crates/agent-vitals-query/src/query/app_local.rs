@@ -32,6 +32,7 @@ pub fn city_projection(data_home: &Path, days: u16, now: i64) -> Result<Value, &
     let salt = load_or_create_salt(data_home).map_err(|_| "data_unavailable")?;
     db.conn().execute_batch("BEGIN DEFERRED").map_err(|_| "data_unavailable")?;
     let revision = db.revision().map_err(|_| "data_unavailable")?;
+    let identities = super::app_harnesses::identities(db.conn(), data_home)?;
     let sql = "SELECT s.session_key, s.harness, MIN(f.event_ts_ms), MAX(f.event_ts_ms),
         SUM(f.uncached_input_tokens + f.cache_read_tokens + f.cache_write_tokens),
         SUM(f.output_tokens), COUNT(*)
@@ -66,7 +67,7 @@ pub fn city_projection(data_home: &Path, days: u16, now: i64) -> Result<Value, &
                 }
             }
         }
-        let public_harness = if crate::fact_harnesses::FACT_HARNESSES.contains(&harness.as_str()) { harness.as_str() } else { "unknown" };
+        let public_harness = if identities.contains_key(&harness) { harness.as_str() } else { "unknown" };
         sessions.push(json!({"id": session_ref(&salt, &format!("app:city:{key}")), "harness": public_harness,
             "first_event_at": timestamp(first)?, "last_event_at": timestamp(last)?, "event_count": events,
             "tokens": {"input": input, "output": output, "total": input.checked_add(output).ok_or("data_unavailable")?},
@@ -95,7 +96,8 @@ pub fn city_projection(data_home: &Path, days: u16, now: i64) -> Result<Value, &
         }
     }
     db.conn().execute_batch("COMMIT").map_err(|_| "data_unavailable")?;
-    Ok(json!({"protocol": "city:v1", "source": "local", "data_revision": revision,
+    Ok(json!({"protocol": "city:v2", "source": "local", "data_revision": revision,
+        "harnesses": super::app_harnesses::public_identities(&identities),
         "generated_at": timestamp(now)?,
         "window": {"days": days, "label": format!("最近 {days} 天"), "from": timestamp(from)?, "to": timestamp(now)?},
         "coverage": {"total": total, "returned": sessions.len(), "truncated": total > sessions.len() as i64,

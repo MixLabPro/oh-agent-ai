@@ -54,8 +54,12 @@ pub fn run_sync(data_home: &Path, harnesses: Option<&BTreeSet<String>>) -> SyncR
 
 /// 同步报告的一行人话摘要（托盘 / 工作台状态面用）。执行环境级错误如实计数，不吞。
 pub fn summarize(report: &SyncReport) -> String {
-    let errors: usize = report.harnesses.iter().map(|h| h.errors.len()).sum();
+    let errors: usize = report.harnesses.iter().filter(|h| !h.harness.starts_with("harness:")).map(|h| h.errors.len()).sum();
+    let dynamic_errors: usize = report.harnesses.iter().filter(|h| h.harness.starts_with("harness:")).map(|h| h.errors.len()).sum();
     let mut text = format!("新增 {} 条", report.total_appended);
+    if dynamic_errors > 0 {
+        text.push_str(&format!("，{dynamic_errors} 个动态 harness 接入失败"));
+    }
     if errors > 0 {
         text.push_str(&format!("，{errors} 个文件读取失败（下轮重试）"));
     }
@@ -95,5 +99,14 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(summarize(&report), "新增 3 条，2 个文件读取失败（下轮重试）");
+    }
+
+    #[test]
+    fn summary_distinguishes_dynamic_manifest_failures_from_file_errors() {
+        let mut report = SyncReport::default();
+        report.harnesses.push(super::super::sync_service::HarnessSyncReport {
+            harness: "harness:zcode".into(), errors: vec!["manifest parse failed".into()], ..Default::default()
+        });
+        assert_eq!(summarize(&report), "新增 0 条，1 个动态 harness 接入失败");
     }
 }
