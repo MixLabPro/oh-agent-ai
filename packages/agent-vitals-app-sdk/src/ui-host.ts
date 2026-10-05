@@ -1,4 +1,4 @@
-export type Tool = { id: string; commandId: string; label: string; kind: "button" | "select"; enabled: boolean; value?: string; options?: Array<{ value: string; label: string }> };
+export type Tool = { id: string; commandId: string; label: string; kind: "button" | "select"; enabled: boolean; placement?: "primary" | "overflow"; value?: string; options?: Array<{ value: string; label: string }> };
 export type Command = { version: number; instanceId: string; requestId: string; commandId: string; value?: string };
 declare global { interface Window {
   __AV_PLUGIN_INSTANCE__?: string;
@@ -68,7 +68,16 @@ export function connect(handler: (command: Command) => void) {
   return () => window.removeEventListener("__AV_PLUGIN_COMMAND__", receive);
 }
 export function observeHealth(state?: () => Record<string, number | boolean>) {
-  const fault = () => { void publish("runtime.error").catch(() => {}); };
+  const fault = (event: Event) => {
+    // Chromium reports a deferred ResizeObserver delivery as a window error.
+    // It is a non-fatal layout diagnostic, not an uncaught plugin exception;
+    // treating it as a crash would tear down otherwise healthy embedded views.
+    if (event instanceof ErrorEvent && [
+      "ResizeObserver loop completed with undelivered notifications.",
+      "ResizeObserver loop limit exceeded",
+    ].includes(event.message)) return;
+    void publish("runtime.error").catch(() => {});
+  };
   let pulses = 0;
   const timer = window.setInterval(() => {
     void publish("heartbeat", ++pulses % 4 === 0 ? { diagnostic: {

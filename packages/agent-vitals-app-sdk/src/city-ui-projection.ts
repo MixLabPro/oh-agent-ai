@@ -1,6 +1,8 @@
 /** Official same-host City MVP contract. Not the legacy paginated app-local schema. */
-export type CityUiProjectionV1 = {
-  protocol: "city:v1";
+import type { HarnessPublicIdentityV1 } from "./harness-data.js";
+export type CityUiProjectionV2 = {
+  protocol: "city:v2";
+  harnesses: HarnessPublicIdentityV1[];
   source?: "local" | "fixture";
   data_revision?: number;
   generated_at: string | null;

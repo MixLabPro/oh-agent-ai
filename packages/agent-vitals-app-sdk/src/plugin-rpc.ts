@@ -13,7 +13,7 @@ export interface PluginResponseV1<TResult = unknown> {
   ok: boolean;
   result: TResult | null;
   error: {
-    code: "invalid_request" | "unsupported_version" | "provider_unavailable";
+    code: string;
     retryable: boolean;
   } | null;
 }
