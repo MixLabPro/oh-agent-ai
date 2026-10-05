@@ -76,8 +76,10 @@ export type Landmark = Vec2 & { id: string; kind: LandmarkKind; yaw: number; rad
 const BIOMES: Biome[] = ["tropical", "temperate", "boreal", "savanna", "eastasian"];
 
 /** 每档对应的目标地块数（SPEC §4.2：400 会话一档 × 1.35 余量给公共用地、花园、配套与道路损耗）。 */
-export const SESSIONS_PER_TIER = 400;
-export const MAX_TIER = 5;
+// 档位：1 档 = 初始规划，地皮容纳 2000 栋会话楼；超出原容积率时扩展大陆到 2 档 = 4000 栋。
+// 曾是每档 400、最多 5 档（上限 2000）：一年的会话放不下，多出来的被聚合成背景楼群。
+export const SESSIONS_PER_TIER = 2_000;
+export const MAX_TIER = 2;
 export function scaleTierFor(sessions: number): number {
   return Math.max(1, Math.min(MAX_TIER, Math.ceil(sessions / SESSIONS_PER_TIER)));
 }
@@ -102,7 +104,8 @@ export function createCityPlan(seed: number, tier = 2, config: CoastalConfig | n
   // 否则保持原有随机五选一——无配置调用方行为不变。
   const biome: Biome = config ? config.biome : BIOMES[Math.floor(random("biome") * BIOMES.length) % BIOMES.length];
   // 先按档位估一个半径，再按实测地块数校正（最多 4 次）：面积 ∝ R²。
-  let radius = 390 * Math.sqrt(tier);
+  // 起始估计按旧标定（390 半径 ≈ 400 会话的地皮）换算到每档 2000，再按实测地块数校正。
+  let radius = 390 * Math.sqrt(tier * (SESSIONS_PER_TIER / 400));
   let plan = buildPlan(seed, radius, shape, biome, config);
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const parcels = plan.blocks.reduce((sum, block) => sum + block.parcels.length, 0);
@@ -316,13 +319,22 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     if (dir.x * hillDir.x + dir.z * hillDir.z > Math.cos((40 * Math.PI) / 180)) continue;
     const points: Vec2[] = [core];
     let water = 0;
+    let lastLand: Vec2 = core;
+    let farBank = 0;
     for (let step = 1; step < 400; step += 1) {
       const q = { x: core.x + dir.x * step * 12, z: core.z + dir.z * step * 12 };
-      if (inRiver(q.x, q.z)) { water += 12; if (water > 140) break; continue; } // 河：最多跨 140
+      if (inRiver(q.x, q.z)) {
+        // 入水前的最后一个陆地点作为桥头（曾用「每 3 步才记一次」的上一个路点，桥头最多退回岸上 36）。
+        if (water === 0 && points[points.length - 1] !== lastLand) points.push(lastLand);
+        water += 12; if (water > 140) break; continue; // 河：最多跨 140
+      }
       // Riverbank setbacks are not obstacles to a road crossing the river.
       if (coastDistance(q.x, q.z) <= 0 || hillProj(q.x, q.z) >= hillLine - 12) break;
       if (water > 0) {
-        if (!buildable(q.x, q.z)) continue; // Extend the deck across the far-bank setback.
+        // 对岸退界最多再铺 3 步（36）桥面就落地：曾一直延伸到「可建设」地块为止——对岸是一长条不可建的
+        // 低地/海岸带时，「桥」在干地上又铺了两百多单位（扩到 1 档 2000 栋的大岛后 seed 2175747322 实测）。
+        if (!buildable(q.x, q.z) && farBank < 3) { farBank += 1; continue; }
+        farBank = 0;
         // 刚过完河：把对岸点接上，这一段是桥。
         const from = points[points.length - 1];
         bridges.push({ from, to: q, angle: Math.atan2(q.z - from.z, q.x - from.x), length: Math.hypot(q.x - from.x, q.z - from.z) });
@@ -331,6 +343,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         water = 0;
         continue;
       }
+      lastLand = q;
       if (step % 3 === 0) points.push(q);
     }
     if (points.length < 3) continue;

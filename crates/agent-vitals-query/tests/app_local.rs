@@ -7,7 +7,10 @@ fn local_installation_projection_smoke() {
     let result = city_projection(&agent_vitals_query::home::data_home(), 30,
         agent_vitals_query::clock::now_ms()).unwrap();
     assert_eq!(result["source"], "local");
-    assert!(result["sessions"].as_array().unwrap().len() <= 500);
+    assert!(result["sessions"].as_array().unwrap().len() <= 4_000);
+    // 由远到近：first_event_at 单调不减（城市生长与回放的顺序）。
+    let firsts: Vec<&str> = result["sessions"].as_array().unwrap().iter().map(|s| s["first_event_at"].as_str().unwrap()).collect();
+    assert!(firsts.windows(2).all(|w| w[0] <= w[1]), "sessions are returned oldest first");
     println!("Local projection: status={}, sessions={}, total={}, revision={}",
         result["status"], result["coverage"]["returned"], result["coverage"]["total"], result["data_revision"]);
 }

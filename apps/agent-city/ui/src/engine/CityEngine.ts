@@ -697,7 +697,11 @@ export class CityEngine {
   private handleClick(): void {
     if (!this.parts) return;
     const id = this.pick();
-    if (id) {
+    if (id && id.startsWith("decor:")) {
+      // 非会话建筑：只弹说明，不飞镜头、不画选中环（那是会话楼的语义）。
+      this.parts.setSelected(null);
+      this.options.onSelect?.(id);
+    } else if (id) {
       this.parts.setSelected(id);
       this.focusBuilding(id);
       this.options.onSelect?.(id);
@@ -710,11 +714,15 @@ export class CityEngine {
   private pick(): string | null {
     if (!this.parts || !this.pointerClient) return null;
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    const hits = this.raycaster.intersectObjects(this.parts.raycastTargets, false);
+    // 会话楼与非会话建筑一起测，取最近的命中：站在海滨酒店前点它，得到的是酒店说明而不是背后的会话楼。
+    const hits = this.raycaster.intersectObjects([...this.parts.raycastTargets, ...this.parts.decorTargets], false);
     for (const hit of hits) {
-      if (hit.instanceId === undefined) continue;
-      const id = this.parts.idAt(hit.object, hit.instanceId);
-      if (id) return id;
+      if (hit.instanceId !== undefined) {
+        const id = this.parts.idAt(hit.object, hit.instanceId);
+        if (id) return id;
+      }
+      const decor = this.parts.decorAt(hit.object, hit.instanceId);
+      if (decor) return decor;
     }
     return null;
   }

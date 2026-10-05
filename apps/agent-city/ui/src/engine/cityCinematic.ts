@@ -41,7 +41,8 @@ export type CinematicCut = "full" | "short";
 /** cut="short"：只飞最高楼附近约 125° 的一段弧线（开场推近 → 绕向最高楼 → 拉升），适合分享的 30–45 秒版。 */
 /** 短版片长上限：分享片 30–45 秒，最长不超过 ~52 秒（守卫 18–55）。 */
 const SHORT_MAX_SECONDS = 52;
-const SHORT_SWEEPS = [1.4, 1.2, 1.0, 0.85];
+// 2000 栋的 1 档大岛航线更长：再给两档更窄的弧，短片仍压在 52s 内。
+const SHORT_SWEEPS = [1.4, 1.2, 1.0, 0.85, 0.7, 0.55];
 
 export function planCinematic(layout: CityLayout, model: CityModel, heights: Map<string, { x: number; z: number; height: number; ground: number }>, options: { cut?: CinematicCut } = {}): CinematicPlan {
   if (options.cut !== "short") return planRoute(layout, model, heights, options, Math.PI * 2);

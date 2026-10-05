@@ -177,13 +177,34 @@ export function buildSeasideBand(coast: Vec2[], center: Vec2, world: SeasideWorl
     const midAzimuth = azimuthOf(coast[(start + Math.round(samplesPerWindow / 2)) % n]);
     const outward = normalizeAngle(midAzimuth);
     const orientationBonus = Math.max(0, 1 - angleDelta(outward, config.preferredAzimuth) / Math.max(0.001, config.azimuthTolerance));
-    const blocked = world.blockedAzimuths.some((b) => angleDelta(outward, b.at) < b.halfWidth);
+    // 任一采样点落进封锁方位就算压线（曾只看中点方位：海岸有海湾时一段可跨 100° 以上，
+    // 港口夹在段内而中点仍离它 30° 开外——扩到 4000 栋的 2 档大岛 seed 1013904323 实测海滨段压港口）。
+    const blocked = world.blockedAzimuths.some((b) => angleDelta(outward, b.at) < b.halfWidth
+      || samples.some((sample) => angleDelta(sample.azimuth, b.at) < b.halfWidth));
     const validRatio = samples.filter((s) => s.valid).length / samples.length;
     const score = validRatio + orientationBonus * 0.5 - (blocked ? 2 : 0) + hashSeed(`seaside-score:${seed}:${start}`) * 0.05;
     if (!best || score > best.score) best = { from: start, score, samples };
   }
   const id = `seaside:${seed}`;
   if (!best) return { id, azimuthFrom: 0, azimuthTo: 0, samples: [], validRatio: 0, degraded: true, reason: "no-coast" };
+  // 相邻合法采样之间的大道弦线若跨海（海湾），在此断开：采样数跟海岸点数走、不随岛半径增长，
+  // 扩到 4000 栋的 2 档大岛上相邻采样相距 60–120，直弦会切过海湾（seed 1788458157 实测滨海大道穿海）。
+  {
+    let previous: SeasideSample | null = null;
+    for (const sample of best.samples) {
+      if (!sample.valid) { previous = null; continue; }
+      if (previous) {
+        const a = previous.boulevard; const b = sample.boulevard;
+        let wet = false;
+        for (let t = 0.1; t < 1 && !wet; t += 0.1) {
+          const x = a.x + (b.x - a.x) * t; const z = a.z + (b.z - a.z) * t;
+          if (world.landSignedDistance(x, z) <= 0 || world.height(x, z) <= 0.5) wet = true;
+        }
+        if (wet) { sample.valid = false; previous = null; continue; }
+      }
+      previous = sample;
+    }
+  }
   const validRatio = best.samples.filter((s) => s.valid).length / best.samples.length;
   const azimuthFrom = azimuthOf(coast[best.from]);
   const azimuthTo = azimuthOf(coast[(best.from + samplesPerWindow - 1) % n]);

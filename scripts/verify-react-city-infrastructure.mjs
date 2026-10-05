@@ -58,7 +58,8 @@ for (const seed of [1927, 42, 1485618003, 987654]) {
   }
   assert.deepEqual(plan.highways, createCityPlan(seed, 2).highways, `seed ${seed}: deterministic exits`);
 }
-for (const tier of [1, 2, 5]) {
+// 档位只有两档：1 = 初始 2000 栋，2 = 扩展 4000 栋（scaleTierFor 夹在 MAX_TIER = 2）。
+for (const tier of [1, 2]) {
   const plan = createCityPlan(1485618003, tier);
   for (const block of plan.blocks) for (const parcel of block.parcels) {
     assert(clearsHighways(parcel, parcel.width, parcel.depth, plan.highways), `tier ${tier}: expressway footprint guard`);

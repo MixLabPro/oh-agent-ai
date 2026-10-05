@@ -5,7 +5,9 @@ use agent_vitals_domain::enrichment::{ExcerptRole, make_excerpt};
 use serde_json::{Value, json};
 use super::session_ref::{load_or_create_salt, session_ref};
 
-const SESSION_CAP: usize = 500;
+/// City 一次载入的会话上限：366 天窗口内最多 4000 条（岛初始规划 2000 栋、扩展到 4000 栋）。
+/// 曾是 500：一年的数据只载入最近 500 条，城市是被截断的半年历史。
+pub const SESSION_CAP: usize = 4_000;
 
 /// Host-only drilldown bridge: resolve a City handle without exposing raw keys to the plugin.
 pub fn city_session_target(data_home: &Path, handle: &str) -> Result<(String, String), &'static str> {
@@ -46,12 +48,17 @@ pub fn city_projection(data_home: &Path, days: u16, now: i64) -> Result<Value, &
             r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, i64>(6)?))
     }).map_err(|_| "data_unavailable")?;
     let mut sessions = Vec::new();
-    for row in rows {
-        let (key, harness, first, last, input, output, events) = row.map_err(|_| "data_unavailable")?;
-        let mut excerpts_stmt = db.conn().prepare("SELECT role, excerpt, provenance FROM session_excerpts
-            WHERE session_key = ?1 AND role IN ('user_first','user_turn')
-            ORDER BY CASE role WHEN 'user_first' THEN 0 ELSE 1 END, ordinal DESC LIMIT 2")
-            .map_err(|_| "data_unavailable")?;
+    // 摘录查询只准备一次（4000 条会话逐条 prepare 是可感知的延迟）。
+    let mut excerpts_stmt = db.conn().prepare_cached("SELECT role, excerpt, provenance FROM session_excerpts
+        WHERE session_key = ?1 AND role IN ('user_first','user_turn')
+        ORDER BY CASE role WHEN 'user_first' THEN 0 ELSE 1 END, ordinal DESC LIMIT 2")
+        .map_err(|_| "data_unavailable")?;
+    let mut ordered = Vec::new();
+    for row in rows { ordered.push(row.map_err(|_| "data_unavailable")?); }
+    // 超过上限时保留最近的 SESSION_CAP 条（SQL 按最近活动倒序 LIMIT），再按创建时间由远到近输出——
+    // 城市由内向外生长、回放从最早的会话开始（与旧版分页载入的「旧 → 新」口径一致）。
+    ordered.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
+    for (key, harness, first, last, input, output, events) in ordered {
         let excerpts_rows = excerpts_stmt.query_map([&key], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
         }).map_err(|_| "data_unavailable")?;

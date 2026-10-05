@@ -27,6 +27,8 @@ const { createCityPlan, layoutCity, polygonDistance, MIAMI_COASTAL, seasideStrip
 
 const normalizeAngle = (a) => { let r = a % (Math.PI * 2); if (r < 0) r += Math.PI * 2; return r; };
 const angleDelta = (a, b) => { const d = Math.abs(normalizeAngle(a) - normalizeAngle(b)); return Math.min(d, Math.PI * 2 - d); };
+// 档位：1 = 初始规划（≤2000 栋，默认），2 = 扩展大陆（≤4000 栋）。两档都要过：CITY_SEASIDE_TIER=2 跑扩展档。
+const TIER = Number(process.env.CITY_SEASIDE_TIER ?? 1);
 const seeds = Array.from({ length: 20 }, (_, i) => (i * 2654435761 + 97) >>> 0 || 1);
 
 assert.equal(seasideHotelCount(4), 8, "a short valid coast still gets a readable hotel row");
@@ -37,7 +39,7 @@ assert.equal(seasideHotelCount(80), 18, "large coast frontage remains instance-b
 {
   const biomes = new Set();
   for (const seed of seeds) {
-    const plan = createCityPlan(seed, 2);
+    const plan = createCityPlan(seed, TIER);
     assert.equal(plan.seaside, null, `seed ${seed}: 无配置时 seaside 必须为 null`);
     assert.ok(plan.blocks.length > 0, `seed ${seed}: 无配置仍生成街区`);
     biomes.add(plan.biome);
@@ -47,8 +49,8 @@ assert.equal(seasideHotelCount(80), 18, "large coast frontage remains instance-b
 
 // 2) 确定性：同 seed 同 config 两次构建，seaside 逐位相等。
 {
-  const a = createCityPlan(seeds[0], 2, MIAMI_COASTAL).seaside;
-  const b = createCityPlan(seeds[0], 2, MIAMI_COASTAL).seaside;
+  const a = createCityPlan(seeds[0], TIER, MIAMI_COASTAL).seaside;
+  const b = createCityPlan(seeds[0], TIER, MIAMI_COASTAL).seaside;
   assert.deepEqual(a, b, "同 seed 同配置的 seaside 必须确定性相等");
 }
 
@@ -56,7 +58,7 @@ assert.equal(seasideHotelCount(80), 18, "large coast frontage remains instance-b
 {
   let validBands = 0;
   for (const seed of seeds) {
-    const plan = createCityPlan(seed, 2, MIAMI_COASTAL);
+    const plan = createCityPlan(seed, TIER, MIAMI_COASTAL);
     const band = plan.seaside;
     assert.ok(plan.landmarks.some((landmark) => landmark.kind === "twin-towers" || landmark.kind === "twist-tower"),
       `seed ${seed}: Vice City silhouette must include one deterministic downtown high-rise landmark`);
@@ -84,7 +86,9 @@ assert.equal(seasideHotelCount(80), 18, "large coast frontage remains instance-b
       const harbor = plan.publicSites.find((site) => site.kind === "harbor");
       if (harbor) {
         const harborAzimuth = normalizeAngle(Math.atan2(harbor.z - plan.core.z, harbor.x - plan.core.x));
-        const mid = (band.azimuthFrom + band.azimuthTo) / 2;
+        // 跨 0° 的段（如 306° → 23°）不能直接取算术平均（得 164°）：按顺时针跨度取中点。
+        const span = (band.azimuthTo - band.azimuthFrom + Math.PI * 2) % (Math.PI * 2);
+        const mid = (band.azimuthFrom + span / 2) % (Math.PI * 2);
         assert.ok(angleDelta(mid, harborAzimuth) > (25 * Math.PI) / 180, `seed ${seed}: 海滨段不得压港口朝向`);
       }
       // 步道合法连续段：段内间距 ≤ 15+ε；段数 ≥ 1；不做跨缺口搭桥。
@@ -128,7 +132,7 @@ assert.equal(seasideHotelCount(80), 18, "large coast frontage remains instance-b
 // 4) 降级路径：不可能的净空阈值 → degraded + reason，规划不炸、街区照常。
 {
   const impossible = { ...MIAMI_COASTAL, maxCoastalHeight: -1 };
-  const plan = createCityPlan(seeds[1], 2, impossible);
+  const plan = createCityPlan(seeds[1], TIER, impossible);
   assert.ok(plan.seaside.degraded, "不可能阈值必须降级");
   assert.ok(typeof plan.seaside.reason === "string" && plan.seaside.reason.length > 0, "降级必须带原因");
   assert.ok(plan.blocks.length > 0, "降级不影响街区生成");
@@ -149,8 +153,8 @@ assert.equal(seasideHotelCount(80), 18, "large coast frontage remains instance-b
 // 6) 参数级缓存身份（审查 #5）：同 profile/version 改参数 → 不同海滨带。
 {
   const modified = { ...MIAMI_COASTAL, maxCoastalHeight: -1 };
-  const normal = createCityPlan(seeds[2], 2, MIAMI_COASTAL).seaside;
-  const degraded = createCityPlan(seeds[2], 2, modified).seaside;
+  const normal = createCityPlan(seeds[2], TIER, MIAMI_COASTAL).seaside;
+  const degraded = createCityPlan(seeds[2], TIER, modified).seaside;
   assert.equal(normal.degraded, false, "标准配置应产出有效海滨带");
   assert.equal(degraded.degraded, true, "修改参数后必须独立降级（不能复用旧规划）");
   const emptyModel = { buildings: [], districts: [] };

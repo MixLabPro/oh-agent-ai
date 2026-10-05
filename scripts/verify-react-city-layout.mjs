@@ -197,9 +197,10 @@ for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
 }
 // 跨档地址映射：整体长大而不是整体洗牌——每栋楼落在「放大后的原位置」附近。
 {
-  const before = layoutCity(model(700), null, 42);
-  const after = layoutCity(model(900), before, 42);
-  assert(after.scaleTier > before.scaleTier, "700 -> 900 sessions crosses a tier");
+  // 档位边界：1 档 = 2000 栋，超出扩展到 2 档（4000 栋）。
+  const before = layoutCity(model(1900), null, 42);
+  const after = layoutCity(model(2100), before, 42);
+  assert(after.scaleTier > before.scaleTier, "1900 -> 2100 sessions crosses a tier");
   const ratio = after.islandRadius / before.islandRadius;
   const was = new Map(before.districts.flatMap((d) => [...d.slots]));
   const now = new Map(after.districts.flatMap((d) => [...d.slots]));
@@ -209,12 +210,12 @@ for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
     kept += 1;
     if (Math.hypot(next.x - parcel.x * ratio, next.z - parcel.z * ratio) <= 120) moved += 1;
   }
-  assert(kept >= 650, `buildings survive a tier change (${kept}/700)`);
+  assert(kept >= 1770, `buildings survive a tier change (${kept}/1900)`);
   assert(moved / kept >= 0.9, `a tier change keeps buildings near their scaled position (${moved}/${kept})`);
 }
-// 跨档：同一种子从档位 2 到 4，岛只放大不变形（归一化轮廓逐点重合）。
+// 跨档：同一种子从 1 档到 2 档，岛只放大不变形（归一化轮廓逐点重合）。
 {
-  const small = layoutCity(model(700), null, 42); const big = layoutCity(model(1500), null, 42);
+  const small = layoutCity(model(1500), null, 42); const big = layoutCity(model(3000), null, 42);
   assert(big.scaleTier > small.scaleTier, "more sessions move to a larger tier");
   const ratio = big.islandRadius / small.islandRadius;
   assert(ratio > 1.2, "a larger tier grows the island");

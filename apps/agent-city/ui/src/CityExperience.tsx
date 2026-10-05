@@ -10,6 +10,7 @@ import { invokeHost, embedded, pluginLocale } from "./host";
 import type { PluginResponseV1 } from "@agent-vitals/app-sdk";
 import { runFilmJob, supportsBackgroundFilm } from "./export/filmJob";
 import { cinematicCopy } from "./engine/cinematicCopy";
+import { describeDecor, isDecorId } from "./engine/cityDecor";
 import { cityText, cityView, useCityLanguage } from "./i18n";
 
 const dateLabel = (ms: number) => new Date(ms).toLocaleString(pluginLocale() === "en" ? "en-US" : "zh-CN");
@@ -86,14 +87,20 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
   }, []);
 
   const clearSelection = () => { setSelected(null); setDetails(false); engine.current?.setSelected(null); };
+  // 区的显示名（ZCode 而不是 harness:zcode）：悬停提示与详情面板共用。
+  const districtLabel = (id: string) => modelRef.current?.districts.find((district) => district.id === id)?.label ?? id;
   const callbacks = useMemo(() => ({
     onSelect(id: string | null) { setSelected(id); setDetails(false); },
     onHover(id: string | null, x: number, y: number) {
       const tooltip = tooltipRef.current;
       if (!tooltip) return;
-      const building = modelRef.current?.buildings.find((b) => b.id === id);
-      if (!building) { tooltip.style.opacity = "0"; return; }
-      tooltip.textContent = `${building.districtId} · ${tokens(building.tokensTotal)} tokens${building.aggregated ? ` · ${building.extraCount}${pluginLocale() === "en" ? " aggregated sessions" : " 个聚合会话"}` : ""}`;
+      const decor = id && isDecorId(id) ? describeDecor(id) : null;
+      const building = decor ? undefined : modelRef.current?.buildings.find((b) => b.id === id);
+      if (!building && !decor) { tooltip.style.opacity = "0"; return; }
+      if (decor) {
+        const locale = pluginLocale();
+        tooltip.textContent = `${cityText(decor.title, locale)} · ${cityText(decor.category, locale)}`;
+      } else if (building) tooltip.textContent = `${districtLabel(building.districtId)} · ${tokens(building.tokensTotal)} tokens${building.aggregated ? ` · ${building.extraCount}${pluginLocale() === "en" ? " aggregated sessions" : " 个聚合会话"}` : ""}`;
       tooltip.style.opacity = "1";
       tooltip.style.transform = `translate(${Math.min(x + 14, Math.max(8, window.innerWidth - 270))}px, ${Math.min(y + 14, window.innerHeight - 60)}px)`;
     },
@@ -192,7 +199,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
       }
     } finally { abort.current = null; if (mounted.current) setFilm(null); }
   };
-  const refreshSelection = () => { if (selected && !modelRef.current?.buildings.some((b) => b.id === selected)) clearSelection(); else engine.current?.setSelected(selected); };
+  const refreshSelection = () => { if (selected && !isDecorId(selected) && !modelRef.current?.buildings.some((b) => b.id === selected)) clearSelection(); else engine.current?.setSelected(isDecorId(selected) ? null : selected); };
   const openHostSession = async () => {
     if (!selected || !embedded() || projection?.source !== "local") { setError("合成会话没有宿主日志详情，请使用原生真实数据模式。"); return; }
     const requestId = `city-open-${++requests.current}`;
@@ -250,9 +257,19 @@ export function CityExperience({ ui, disabled, cinema, status }: { ui: ReturnTyp
       <div className="city-cinema-top" /><div className="city-cinema-bottom"><span style={{ transform: `scaleX(${ui.progress})` }} /></div>
       {card && <div className="city-cinema-card"><p>{"eyebrow" in card ? card.eyebrow : ""}</p><h2>{card.title}</h2><p>{card.subtitle}</p></div>}
     </div>}
+    {ui.selected && isDecorId(ui.selected) && !cinema && (() => {
+      const info = describeDecor(ui.selected);
+      if (!info) return null;
+      return <aside className="city-detail-panel" aria-label="建筑详情">
+        <button className="city-close" aria-label="关闭建筑详情" onClick={ui.clearSelection}>×</button>
+        <p>{info.category}</p><h2>{info.title}</h2>
+        <p>{info.body}</p>
+        <p>这不是会话楼：没有 token、时间或会话详情可钻取。</p>
+      </aside>;
+    })()}
     {selected && !cinema && <aside className="city-detail-panel" aria-label="建筑详情">
       <button className="city-close" aria-label="关闭建筑详情" onClick={ui.clearSelection}>×</button>
-      <p>建筑 · {selected.aggregated ? "聚合会话" : "会话"}</p><h2>{selected.districtId}</h2>
+      <p>建筑 · {selected.aggregated ? "聚合会话" : "会话"}</p><h2>{model?.districts.find((d) => d.id === selected.districtId)?.label ?? selected.districtId}</h2>
       <dl><dt>Token</dt><dd>{tokens(selected.tokensTotal)}</dd><dt>状态</dt><dd>{selected.active ? "活跃 · 施工中" : "非活跃 · 已封顶"}</dd>
         <dt>进度估算</dt><dd>{Math.round(selected.builtFraction * 100)}%</dd><dt>起始时间</dt><dd>{dateLabel(selected.startedAt)}</dd>
         <dt>事件数</dt><dd>{session?.event_count ?? "未投影"}</dd><dt>费用</dt><dd>尚未接入</dd></dl>

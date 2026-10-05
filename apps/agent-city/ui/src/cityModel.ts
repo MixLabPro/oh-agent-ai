@@ -49,7 +49,8 @@ export function isActiveToday(lastEventMs: number, generatedAt: number): boolean
 }
 
 /** 单独成楼的 session 上限；超出部分按区聚合为背景楼群（massing）。 */
-export const RENDER_CAP = 1_400;
+// 与宿主 SESSION_CAP 同为 4000：载入的每个会话都能单独成楼（岛 1 档 2000 栋、2 档扩到 4000 栋）。
+export const RENDER_CAP = 4_000;
 // 数据装载上限不在这里：宿主查询 `crates/agent-vitals-query/src/query/app_local.rs::SESSION_CAP`（最近 500 条）
 // 是唯一真相源，UI 只显示宿主回报的 coverage.returned/total。曾在此留一个从未被引用的 LOAD_CAP = 4_500，
 // 与界面文案「最多 500 条」互相矛盾（CITY_DATA_LEGIBILITY_SPEC P6）。
@@ -240,7 +241,20 @@ export function buildCityModel(input: CityModelInput): CityModel {
     return rightTokens - leftTokens;
   });
 
-  const perHarnessQuota = Math.max(40, Math.floor(RENDER_CAP / Math.max(harnessIds.length, 1)));
+  // 单独成楼的配额：总数不超过 RENDER_CAP 时人人有楼；超过才按各执行环境会话数比例分（最大余数法）。
+  // 曾按执行环境个数均分（1400/N）：5 个执行环境时每个只有 280 栋，会话多的执行环境大半被聚合。
+  const totalRows = input.rows.length;
+  const quotaOf = new Map<string, number>();
+  if (totalRows <= RENDER_CAP) for (const id of harnessIds) quotaOf.set(id, byHarness.get(id)!.length);
+  else {
+    const exact = harnessIds.map((id) => ({ id, value: (byHarness.get(id)!.length / totalRows) * RENDER_CAP }));
+    for (const item of exact) quotaOf.set(item.id, Math.floor(item.value));
+    let left = RENDER_CAP - [...quotaOf.values()].reduce((sum, value) => sum + value, 0);
+    for (const item of [...exact].sort((a, b) => (b.value - Math.floor(b.value)) - (a.value - Math.floor(a.value)) || (a.id < b.id ? -1 : 1))) {
+      if (left <= 0) break;
+      quotaOf.set(item.id, quotaOf.get(item.id)! + 1); left -= 1;
+    }
+  }
 
   for (const harnessId of harnessIds) {
     const harnessRows = byHarness.get(harnessId)!;
@@ -252,6 +266,7 @@ export function buildCityModel(input: CityModelInput): CityModel {
       .sort((left, right) => left - right);
     const p95 = closedTokens.length >= 8 ? percentile(closedTokens, 0.95) : Math.max(percentile(tokenSortedAll, 0.95), 1);
 
+    const perHarnessQuota = quotaOf.get(harnessId) ?? harnessRows.length;
     const rendered = harnessRows.slice(0, perHarnessQuota);
     const overflow = harnessRows.slice(perHarnessQuota);
     let districtActive = 0;
@@ -321,7 +336,8 @@ export function buildCityModel(input: CityModelInput): CityModel {
     districts.push({
       id: harnessId,
       label: input.harnessNames?.[harnessId] ?? harnessId,
-      sessionCount: input.truncated && perHarnessQuota < harnessRows.length ? input.totalSessions : harnessRows.length,
+      // 本区载入的会话数（含聚合）。曾在截断时写成全城 totalSessions——每个区都显示同一个全城总数。
+      sessionCount: harnessRows.length,
       tokensTotal,
       // 聚合进背景楼群的会话也计入（菜单栏不区分是否单独成楼）。
       activeCount: districtActive + overflow.filter((row) => isActiveToday(parseMs(row.last_event_at, 0), generatedAt)).length,

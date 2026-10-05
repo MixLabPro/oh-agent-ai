@@ -15,6 +15,7 @@ import type { CityLayout, DistrictLayout, Parcel, Vec2 } from "./cityLayout";
 import { activeTheme, skyYawOf } from "./cityTheme";
 import type { CityAssets } from "./cityAssets";
 import type { LoadedFlora } from "./cityFlora";
+import { decorKindForName } from "./cityDecor";
 import { makeCityTexture, makeDecoFacadeTexture, makeFacadeTexture, makeLabelSprite, paletteFor } from "./cityTextures";
 import type { TerrainField } from "./cityLayout";
 import { createRenderCanvas } from "./renderCanvas";
@@ -1439,7 +1440,12 @@ export class CityParts {
       } else if (landmark.kind === "twin-towers") {
         const h = Math.min(cap, 62);
         for (const side of [-1, 1]) {
-          const wall = side < 0 ? material("#72cbd2") : material("#e99ab8");
+          // 玻璃幕墙立面（与会话塔楼同一种窗格贴图，乘塔身粉彩色）：曾是无窗的纯色长方体，近看粗糙（真机截图）。
+          const facade = makeFacadeTexture(2, side < 0 ? 211 : 223);
+          facade.colorSpace = THREE.SRGBColorSpace;
+          facade.repeat.set(3, Math.max(4, Math.round(h / 12.4)));
+          const wall = new THREE.MeshLambertMaterial({ color: side < 0 ? "#9fdde2" : "#f2bdd1", map: facade });
+          this.disposables.push(wall, facade);
           mesh(new THREE.BoxGeometry(12, h, 12).translate(0, h / 2, 0), wall, group, side * 13, 0, 0);
           mesh(new THREE.ConeGeometry(3.8, 12, 8).translate(0, 6, 0), steel, group, side * 13, h, 0);
         }
@@ -2188,7 +2194,11 @@ export class CityParts {
     const valid = seaside.samples.filter((sample) => sample.valid);
     if (valid.length < 3) return;
     const wallGeometry = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
-    const wallMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff" });
+    // 墙面带窗格（装饰艺术立面贴图，乘酒店粉彩色）：曾是无窗的纯色盒子，近看粗糙（真机截图）。
+    const hotelFacade = makeDecoFacadeTexture();
+    hotelFacade.colorSpace = THREE.SRGBColorSpace;
+    hotelFacade.repeat.set(4, 3);
+    const wallMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff", map: hotelFacade });
     const trimMaterial = new THREE.MeshLambertMaterial({ color: "#fff6ea" });
     const detailMaterial = new THREE.MeshLambertMaterial({ color: "#fff0d7" });
     const trimGeometry = new THREE.BoxGeometry(1, 1, 1);
@@ -2212,9 +2222,10 @@ export class CityParts {
       const yaw = Math.atan2(sample.inward.x, sample.inward.z);
       // 酒店是城市身份地标，沿街形成连续但留缝的 frontage，不随会话数稀疏成几处孤岛。
       // 单体保持 30–44 宽、20–33 高；数量由有效岸线采样推导并封顶，实例仍复用同批次。
-      const width = 30 + seed * 14;
-      const height = 24 + hashSeed(`seasidehotelh:${i}`) * 14;
-      const depth = 16;
+      // 体量 ×0.65（20–29 宽、16–25 高）：曾 30–44 × 24–38，远大于会话地块楼，海滨抢走了数据城区的视觉重心（真机截图）。
+      const width = (30 + seed * 14) * 0.65;
+      const height = (24 + hashSeed(`seasidehotelh:${i}`) * 14) * 0.65;
+      const depth = 16 * 0.7;
       const crownHeight = 4.2 + seed * 2.4;
       const ground = this.layout.terrain.height(sample.hotelLine.x, sample.hotelLine.z);
       const outward = { x: -sample.inward.x, z: -sample.inward.z };
@@ -2259,7 +2270,7 @@ export class CityParts {
     detailMesh.name = "city-seaside-hotel-art-deco-details";
     if (wallMesh.instanceColor) wallMesh.instanceColor.needsUpdate = true;
     this.group.add(wallMesh, trimMesh, detailMesh);
-    this.disposables.push(wallGeometry, wallMaterial, trimGeometry, trimMaterial, detailGeometry, detailMaterial);
+    this.disposables.push(wallGeometry, wallMaterial, hotelFacade, trimGeometry, trimMaterial, detailGeometry, detailMaterial);
   }
 
   /** 救生塔（VICE S1）：架高值守小屋 + 平台 + 檐顶 + 楼梯——架高结构是
@@ -2379,15 +2390,17 @@ export class CityParts {
       const yaw = Math.atan2(sample.inward.x, sample.inward.z);
       const outward = { x: -sample.inward.x, z: -sample.inward.z };
       const right = { x: Math.cos(yaw), z: -Math.sin(yaw) };
-      const height = 24 + hashSeed(`seasidehotelh:${i}`) * 14;
-      const width = 30 + hashSeed(`seasidehotel:${i}:${sample.azimuth}`) * 14;
+      // 与 buildSeasideHotels 同一套体量（×0.65 / 进深 ×0.7）：招牌挂在缩小后的朝海立面上，不悬空。
+      const height = (24 + hashSeed(`seasidehotelh:${i}`) * 14) * 0.65;
+      const width = (30 + hashSeed(`seasidehotel:${i}:${sample.azimuth}`) * 14) * 0.65;
+      const facadeOffset = (16 * 0.7) / 2;
       const ground = this.layout.terrain.height(sample.hotelLine.x, sample.hotelLine.z);
       const color = neonColors[i % neonColors.length];
       // 竖向灯牌：挂朝海立面偏一侧，从檐口垂下；双面板（正反各一块）。
       const bladeH = 5 + seed * 3;
       const bladeW = 1.4 + seed * 0.5;
-      const bladeX = sample.hotelLine.x + outward.x * 8.7 + right.x * width * 0.28;
-      const bladeZ = sample.hotelLine.z + outward.z * 8.7 + right.z * width * 0.28;
+      const bladeX = sample.hotelLine.x + outward.x * (facadeOffset + 0.7) + right.x * width * 0.28;
+      const bladeZ = sample.hotelLine.z + outward.z * (facadeOffset + 0.7) + right.z * width * 0.28;
       this.compose(bladeX, ground + height * 0.72, bladeZ, yaw, bladeW, bladeH, 1);
       bladeMesh.setMatrixAt(i * 2, this.matrix);
       bladeMesh.setColorAt(i * 2, this.color.set(color));
@@ -2396,9 +2409,9 @@ export class CityParts {
       bladeMesh.setMatrixAt(i * 2 + 1, this.matrix);
       bladeMesh.setColorAt(i * 2 + 1, this.color.set(color));
       // 水平饰带：沿酒店顶线一圈微弱霓虹——夜间的建筑轮廓线。
-      const fasciaX = sample.hotelLine.x + outward.x * 8.5;
-      const fasciaZ = sample.hotelLine.z + outward.z * 8.5;
-      this.compose(fasciaX, ground + height + 4.2, fasciaZ, yaw, width * 0.9, 1, 1);
+      const fasciaX = sample.hotelLine.x + outward.x * (facadeOffset + 0.5);
+      const fasciaZ = sample.hotelLine.z + outward.z * (facadeOffset + 0.5);
+      this.compose(fasciaX, ground + height + 0.4, fasciaZ, yaw, width * 0.9, 1, 1);
       fasciaMesh.setMatrixAt(i, this.matrix);
       fasciaMesh.setColorAt(i, this.color.set(color));
     }
@@ -3291,6 +3304,39 @@ export class CityParts {
   setLabelsVisible(visible: boolean): void {
     this.labelsVisible = visible;
     for (const label of this.labels) label.visible = visible;
+  }
+
+  private decorTargetsCache: THREE.Object3D[] | null = null;
+
+  /** 非会话建筑的拾取目标（酒店、地标、配套、市政设施、背景楼、聚合楼群、海滨装饰、火山）：
+   *  首次使用时沿场景树按网格名收集一次；它们曾不在拾取范围内，点了毫无反应。 */
+  get decorTargets(): THREE.Object3D[] {
+    if (this.decorTargetsCache) return this.decorTargetsCache;
+    const out: THREE.Object3D[] = [];
+    this.group.traverse((object) => {
+      if (!(object as THREE.Mesh).isMesh || !object.visible) return;
+      for (let node: THREE.Object3D | null = object; node; node = node.parent) {
+        if (decorKindForName(node.name)) { out.push(object); return; }
+      }
+    });
+    this.decorTargetsCache = out;
+    return out;
+  }
+
+  /** 命中的非会话网格 → `decor:<kind>[:<detail>]`；配套按实例反查学校/商场/医院。 */
+  decorAt(mesh: THREE.Object3D, instanceId: number | undefined): string | null {
+    for (let node: THREE.Object3D | null = mesh; node; node = node.parent) {
+      const kind = decorKindForName(node.name);
+      if (!kind) continue;
+      if (kind === "civic" && instanceId !== undefined) {
+        const meshIndex = this.civicMeshes.indexOf(mesh as THREE.InstancedMesh);
+        const piece = this.civicPieces.find((item) => item.mesh === meshIndex && item.index === instanceId);
+        const civic = piece ? (this.layout.civics ?? [])[piece.civic] : undefined;
+        return civic ? `decor:civic:${civic.kind}` : "decor:civic";
+      }
+      return `decor:${kind}`;
+    }
+    return null;
   }
 
   idAt(mesh: THREE.Object3D, instanceId: number): string | null {
