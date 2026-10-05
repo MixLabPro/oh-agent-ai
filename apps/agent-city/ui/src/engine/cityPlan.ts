@@ -76,10 +76,11 @@ export type Landmark = Vec2 & { id: string; kind: LandmarkKind; yaw: number; rad
 const BIOMES: Biome[] = ["tropical", "temperate", "boreal", "savanna", "eastasian"];
 
 /** 每档对应的目标地块数（SPEC §4.2：400 会话一档 × 1.35 余量给公共用地、花园、配套与道路损耗）。 */
-// 档位：1 档 = 初始规划，地皮容纳 2000 栋会话楼；超出原容积率时扩展大陆到 2 档 = 4000 栋。
-// 曾是每档 400、最多 5 档（上限 2000）：一年的会话放不下，多出来的被聚合成背景楼群。
-export const SESSIONS_PER_TIER = 2_000;
-export const MAX_TIER = 2;
+// 档位：每档 400 栋，按会话数逐档扩张大陆，最多 10 档 = 4000 栋（一年的会话）。
+// 曾一度改成「1 档就预留 2000 栋」：会话少时整座岛空旷得像荒地（真机截图反馈），
+// 所以初始面积回到原版的 400 栋一档，随数据逐步长大。
+export const SESSIONS_PER_TIER = 400;
+export const MAX_TIER = 10;
 export function scaleTierFor(sessions: number): number {
   return Math.max(1, Math.min(MAX_TIER, Math.ceil(sessions / SESSIONS_PER_TIER)));
 }
@@ -105,7 +106,7 @@ export function createCityPlan(seed: number, tier = 2, config: CoastalConfig | n
   const biome: Biome = config ? config.biome : BIOMES[Math.floor(random("biome") * BIOMES.length) % BIOMES.length];
   // 先按档位估一个半径，再按实测地块数校正（最多 4 次）：面积 ∝ R²。
   // 起始估计按旧标定（390 半径 ≈ 400 会话的地皮）换算到每档 2000，再按实测地块数校正。
-  let radius = 390 * Math.sqrt(tier * (SESSIONS_PER_TIER / 400));
+  let radius = 390 * Math.sqrt(tier);
   let plan = buildPlan(seed, radius, shape, biome, config);
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const parcels = plan.blocks.reduce((sum, block) => sum + block.parcels.length, 0);
@@ -430,9 +431,9 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 港口已按「离核心最近海岸」放置，其方位由站点位置推出；河口 = 海岸点中离河中线近的两侧。
   let seaside: SeasideBand | null = null;
   if (config) {
-    const blockedAzimuths: Array<{ at: number; halfWidth: number }> = [];
+    const blockedAzimuths: Array<{ at: number; halfWidth: number; weight?: number }> = [];
     const azimuthOf = (p: Vec2) => { let a = Math.atan2(p.z - core.z, p.x - core.x); if (a < 0) a += Math.PI * 2; return a; };
-    for (const site of publicSites) if (site.kind === "harbor") blockedAzimuths.push({ at: azimuthOf(site), halfWidth: (30 * Math.PI) / 180 });
+    for (const site of publicSites) if (site.kind === "harbor") blockedAzimuths.push({ at: azimuthOf(site), halfWidth: (30 * Math.PI) / 180, weight: 3 });
     if (hasRiver) {
       for (const point of coast) {
         if (Math.abs(point.x - riverX(point.z)) < riverWidth(point.z) + 30) blockedAzimuths.push({ at: azimuthOf(point), halfWidth: (14 * Math.PI) / 180 });

@@ -27,7 +27,7 @@ const { createCityPlan, layoutCity, polygonDistance, MIAMI_COASTAL, seasideStrip
 
 const normalizeAngle = (a) => { let r = a % (Math.PI * 2); if (r < 0) r += Math.PI * 2; return r; };
 const angleDelta = (a, b) => { const d = Math.abs(normalizeAngle(a) - normalizeAngle(b)); return Math.min(d, Math.PI * 2 - d); };
-// 档位：1 = 初始规划（≤2000 栋，默认），2 = 扩展大陆（≤4000 栋）。两档都要过：CITY_SEASIDE_TIER=2 跑扩展档。
+// 档位：每档 400 栋，1 = 初始规划（默认），10 = 满档 4000 栋：CITY_SEASIDE_TIER=10 跑满档。
 const TIER = Number(process.env.CITY_SEASIDE_TIER ?? 1);
 const seeds = Array.from({ length: 20 }, (_, i) => (i * 2654435761 + 97) >>> 0 || 1);
 

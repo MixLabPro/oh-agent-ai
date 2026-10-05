@@ -118,7 +118,7 @@ export type SeasideWorld = {
   riverDistance: (x: number, z: number) => number;
   reservations: Array<{ x: number; z: number; radius: number }>;
   /** 排除朝向（港口/河口等），at 为方位角、halfWidth 为半宽。 */
-  blockedAzimuths: Array<{ at: number; halfWidth: number }>;
+  blockedAzimuths: Array<{ at: number; halfWidth: number; weight?: number }>;
 };
 
 const normalizeAngle = (a: number): number => {
@@ -198,10 +198,12 @@ export function buildSeasideBand(coast: Vec2[], center: Vec2, world: SeasideWorl
     const orientationBonus = Math.max(0, 1 - angleDelta(outward, config.preferredAzimuth) / Math.max(0.001, config.azimuthTolerance));
     // 任一采样点落进封锁方位就算压线（曾只看中点方位：海岸有海湾时一段可跨 100° 以上，
     // 港口夹在段内而中点仍离它 30° 开外——扩到 4000 栋的 2 档大岛 seed 1013904323 实测海滨段压港口）。
-    const blocked = world.blockedAzimuths.some((b) => angleDelta(outward, b.at) < b.halfWidth
-      || samples.some((sample) => angleDelta(sample.azimuth, b.at) < b.halfWidth));
+    // 压线惩罚取命中项的最大权重（港口 3 > 河口默认 2）：原版大小的 1 档小岛上，港口 ±30° 加两侧河口
+    // 可能让每个窗口都压线，等权时会选中压港口的段（seed 4055617001 实测），此时宁可压河口。
+    const blocked = world.blockedAzimuths.reduce((worst, b) => (angleDelta(outward, b.at) < b.halfWidth
+      || samples.some((sample) => angleDelta(sample.azimuth, b.at) < b.halfWidth) ? Math.max(worst, b.weight ?? 2) : worst), 0);
     const validRatio = samples.filter((s) => s.valid).length / samples.length;
-    const score = validRatio + orientationBonus * 0.5 - (blocked ? 2 : 0) + hashSeed(`seaside-score:${seed}:${start}`) * 0.05;
+    const score = validRatio + orientationBonus * 0.5 - blocked + hashSeed(`seaside-score:${seed}:${start}`) * 0.05;
     if (!best || score > best.score) best = { from: start, score, samples };
   }
   const id = `seaside:${seed}`;
@@ -223,6 +225,12 @@ export function buildSeasideBand(coast: Vec2[], center: Vec2, world: SeasideWorl
       }
       previous = sample;
     }
+    // 断开后孤立的单个合法采样连不成路段（offsetSegments 丢弃单点段），却会被当成
+    // 「大道起点」——1 档小岛 seed 387277014 实测：首个合法采样不在任何车行路上。
+    const s = best.samples;
+    s.forEach((sample, i) => {
+      if (sample.valid && !s[i - 1]?.valid && !s[i + 1]?.valid) sample.valid = false;
+    });
   }
   const validRatio = best.samples.filter((s) => s.valid).length / best.samples.length;
   const azimuthFrom = azimuthOf(coast[best.from]);
