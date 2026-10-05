@@ -89,6 +89,7 @@ export class CityEngine {
   private aurora: CityAurora | null = null;
   private ambient: CityAmbient | null = null;
   private wildlife: CityWildlife | null = null;
+  private themeName = activeTheme().name;
   private rain: RainOverlay | null = null;
   private rainbow: RainbowArch | null = null;
   private fillLight: THREE.DirectionalLight | null = null;
@@ -553,6 +554,24 @@ export class CityEngine {
     // Frame the city rather than leaving excessive ocean margin: screenshots
     // showed the street fabric occupying too little of the default view.
     const fit = 0.95 * Math.max(1, 1 / this.camera.aspect);
+    // 海滨锚定取景（VICE B5）：有海滨带时，默认视角从海侧看向酒店街——
+    // 「酒店—步道—棕榈—沙滩—浅海」的断面在首屏即可辨认（识别锚点）。
+    const seaside = this.layout?.seaside;
+    if (seaside && !seaside.degraded && seaside.samples.length) {
+      const valid = seaside.samples.filter((s) => s.valid);
+      if (valid.length) {
+        const mid = valid[Math.floor(valid.length / 2)];
+        // 相机在海侧（水线外 0.75×bounds），看向酒店线后方的城心。
+        const out = { x: -mid.inward.x, z: -mid.inward.z };
+        const camX = mid.waterline.x + out.x * bounds * 0.55;
+        const camZ = mid.waterline.z + out.z * bounds * 0.55;
+        const camY = bounds * 0.42;
+        // 保证视线不全被楼挡：稍微抬高并偏向城心侧。
+        const kx = this.cityCenter.x - camX; const kz = this.cityCenter.z - camZ;
+        const kl = Math.hypot(kx, kz) || 1;
+        return { x: camX - (kx / kl) * bounds * 0.2, y: camY, z: camZ - (kz / kl) * bounds * 0.2 };
+      }
+    }
     return { x: this.cityCenter.x + bounds * 0.86 * fit, y: bounds * 1.05 * fit, z: this.cityCenter.z + bounds * 1.16 * fit };
   }
 
@@ -1114,7 +1133,7 @@ export class CityEngine {
     if (Math.abs(hour - this.lastSkyHour) < (this.cinematic ? 0.0005 : 0.02)) return;
     this.lastSkyHour = hour;
     this.applyDayMix(hour);
-    const sky = skyStateAt(hour);
+    const sky = skyStateAt(hour, this.themeName);
     this.applySky(sky);
     // 天气（按日期确定性）：航拍/胶片导出走晴朗（可复现），回放与实况按当天。
     if (!this.cinematic) this.applyWeather(this.cursorMs ?? Date.now());

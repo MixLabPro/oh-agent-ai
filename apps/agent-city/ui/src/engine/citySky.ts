@@ -10,6 +10,7 @@
  */
 
 import * as THREE from "three";
+import type { CityTheme } from "./cityTheme";
 
 export type CitySkyPreset = {
   /** 天穹三段渐变（顶/中/地平线）。 */
@@ -77,6 +78,24 @@ const NIGHT: CitySkyPreset = {
 };
 
 /** 一天的关键帧：小时 → 档位（相邻关键帧线性过渡，黎明/黄昏各 ~1.5h）。 */
+/**
+ * 分时主题注入（VICE B5）：theme 提供各时段覆盖端点——同一套主题色不再灌满
+ * 全天（白天/黄昏/夜晚各有自己的天色/水色/灯光端点）。只覆盖主题声明的字段，
+ * 未声明字段保持关键帧默认值。当前 Miami 皮肤覆盖：白天青蓝水、黄昏粉紫天 +
+ * 青水（修「DUSK 水色偏灰黄」）、夜晚暖窗与道路可辨轮廓。
+ */
+type SkyOverrides = { day?: Partial<CitySkyPreset>; dusk?: Partial<CitySkyPreset>; night?: Partial<CitySkyPreset> };
+const THEME_SKY: Partial<Record<string, SkyOverrides>> = {
+  miami: {
+    day: { waterShallow: "#52dbe0", waterDeep: "#1a86c4", hemiGround: "#d6c4a8" },
+    dusk: { top: "#3d2a7a", middle: "#d84a94", horizon: "#ff9a6b", fog: "#e08a72",
+            waterShallow: "#4ecfd6", waterDeep: "#15759f",
+            sunColor: "#ffb072", fillColor: "#e8a0b8" },
+    night: { top: "#1a1245", middle: "#2e1f5e", horizon: "#4a3570", fog: "#3a2a55",
+             waterShallow: "#1a4a5e", waterDeep: "#0d2a3e" },
+  },
+};
+
 const KEYFRAMES: Array<{ hour: number; preset: CitySkyPreset }> = [
   { hour: 0, preset: NIGHT },
   { hour: 5, preset: NIGHT },
@@ -113,8 +132,10 @@ function lerpColorInto(target: THREE.Color, a: string, b: string, t: number): vo
   target.copy(colorA).lerp(colorB, t);
 }
 
-/** hour ∈ [0,24) → 插值出的环境状态（写入复用的 scratch 对象，避免每帧分配）。 */
-export function skyStateAt(hour: number): CitySkyPreset {
+/** hour ∈ [0,24) → 插值出的环境状态（写入复用的 scratch 对象，避免每帧分配）。
+ *  theme 时按分时覆盖端点（见 THEME_SKY）：仅覆盖声明字段，其余保持关键帧默认。 */
+export function skyStateAt(hour: number, theme?: string): CitySkyPreset {
+  const overrides = theme ? THEME_SKY[theme] : undefined;
   const clamped = ((hour % 24) + 24) % 24;
   let from = KEYFRAMES[0];
   let to = KEYFRAMES[KEYFRAMES.length - 1];
@@ -128,8 +149,11 @@ export function skyStateAt(hour: number): CitySkyPreset {
       break;
     }
   }
-  const a = from.preset;
-  const b = to.preset;
+  const phase = from === KEYFRAMES[0] || from === KEYFRAMES[1] ? "night"
+    : from === KEYFRAMES[2] ? "dusk" : from === KEYFRAMES[4] ? "day" : from === KEYFRAMES[5] ? "dusk" : "night";
+  const phaseTo = to === KEYFRAMES[3] ? "day" : to === KEYFRAMES[6] || to === KEYFRAMES[7] ? "night" : to === KEYFRAMES[2] || to === KEYFRAMES[5] ? "dusk" : phase;
+  const a = { ...from.preset, ...(overrides?.[phase as keyof SkyOverrides] ?? {}) };
+  const b = { ...to.preset, ...(overrides?.[phaseTo as keyof SkyOverrides] ?? {}) };
   // 颜色字段插值成 hex 字符串（保持 preset 类型简单）；数值字段线性。
   const writeColor = (slot: ColorSlot) => {
     colorA.set(a[slot]);
