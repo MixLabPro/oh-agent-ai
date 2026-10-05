@@ -459,6 +459,8 @@ export class CityParts {
       this.buildSeaMountains();
       this.buildPromenade();
       this.buildSeasideHotels();
+      this.buildLifeguardTowers();
+      this.buildSeasideSignage();
       this.treeMesh = this.buildTrees();
       const carResult = this.buildCars();
       this.carMesh = carResult.mesh;
@@ -2205,6 +2207,149 @@ export class CityParts {
     this.disposables.push(wallGeometry, wallMaterial, trimGeometry, trimMaterial, detailGeometry, detailMaterial);
   }
 
+  /** 救生塔（VICE S1）：架高值守小屋 + 平台 + 檐顶 + 楼梯——架高结构是
+   *  Lifeguard Tower 的第一特征（不是灯塔的窄圆柱）。条纹为辅助色。夜间
+   *  自发光由独立 MeshBasic 材质驱动（不依赖路灯照亮），随 setNightGlow 亮起。
+   *  合法沙带内最多 3 座，确定性 seed。 */
+  private buildLifeguardTowers(): void {
+    const seaside = this.layout.seaside;
+    if (!seaside || seaside.degraded) return;
+    const valid = seaside.samples.filter((s) => s.valid);
+    if (valid.length < 5) return;
+    const count = Math.min(3, Math.max(2, Math.floor(valid.length / 7)));
+    const structureMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff" });
+    const stripeMaterial = new THREE.MeshLambertMaterial({ color: "#f4efe4" });
+    const glowMaterial = new THREE.MeshBasicMaterial({ color: "#ffca7a", toneMapped: false });
+    this.lifeguardGlowMaterial = glowMaterial;
+    const box = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+    const structureMesh = new THREE.InstancedMesh(box, structureMaterial, count * 6);
+    const stripeMesh = new THREE.InstancedMesh(box, stripeMaterial, count * 4);
+    const glowMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.5, 6, 5), glowMaterial, count);
+    structureMesh.castShadow = true;
+    const palettes = [
+      { wall: "#ff5fa8", accent: "#fff4ec" },
+      { wall: "#00c2d1", accent: "#fff4ec" },
+      { wall: "#ff8a3c", accent: "#fff4ec" },
+    ];
+    let cursor = 0;
+    for (let t = 0; t < count; t += 1) {
+      // 在沙带内均匀散布（避开酒店位），偏移到湿沙外缘附近。
+      const sample = valid[Math.floor(((t + 0.3) / count) * (valid.length - 1))];
+      const seed = hashSeed(`lifeguard:${t}`);
+      const ground = this.layout.terrain.height(sample.dryOuter.x, sample.dryOuter.z);
+      const yaw = Math.atan2(sample.inward.x, -sample.inward.z);
+      const pal = palettes[t % palettes.length];
+      const legH = 2.6 + seed * 0.8;
+      const hutW = 3.2 + seed * 0.8;
+      const hutH = 2.2 + seed * 0.5;
+      const x = sample.dryOuter.x; const z = sample.dryOuter.z;
+      // 四根立柱（架高是第一特征）。
+      for (let leg = 0; leg < 4; leg += 1) {
+        const lx = x + (leg % 2 === 0 ? -1 : 1) * (hutW / 2 - 0.25);
+        const lz = z + (leg < 2 ? -1 : 1) * (1.1);
+        this.compose(lx, ground, lz, yaw, 0.28, legH, 0.28);
+        structureMesh.setMatrixAt(cursor + leg, this.matrix);
+        structureMesh.setColorAt(cursor + leg, this.color.set("#8a7a68"));
+      }
+      cursor += 4;
+      // 平台。
+      this.compose(x, ground + legH, z, yaw, hutW + 0.6, 0.22, 2.6);
+      structureMesh.setMatrixAt(cursor, this.matrix);
+      structureMesh.setColorAt(cursor, this.color.set(pal.wall));
+      // 值守小屋（条纹墙身）。
+      this.compose(x, ground + legH + 0.22, z, yaw, hutW, hutH, 2.2);
+      structureMesh.setMatrixAt(cursor + 1, this.matrix);
+      structureMesh.setColorAt(cursor + 1, this.color.set(pal.wall));
+      cursor += 2;
+      // 檐顶（出挑薄板 + 中央通风塔）。
+      this.compose(x, ground + legH + 0.22 + hutH, z, yaw, hutW + 1.0, 0.18, 3.0);
+      structureMesh.setMatrixAt(cursor, this.matrix);
+      structureMesh.setColorAt(cursor, this.color.set(pal.accent));
+      this.compose(x, ground + legH + 0.22 + hutH + 0.18, z, yaw, 0.8, 0.7, 0.8);
+      structureMesh.setMatrixAt(cursor + 1, this.matrix);
+      structureMesh.setColorAt(cursor + 1, this.color.set(pal.accent));
+      cursor += 2;
+      // 楼梯（斜向薄板从地面到平台，简化为两级踏步面板）。
+      const outward = { x: -sample.inward.x, z: -sample.inward.z };
+      for (let step = 0; step < 3; step += 1) {
+        const sy = ground + (legH * (step + 1)) / 4;
+        const sx = x + outward.x * (1.4 + step * 0.7);
+        const sz = z + outward.z * (1.4 + step * 0.7);
+        this.compose(sx, sy, sz, yaw, 1.2, 0.12, 0.45);
+        stripeMesh.setMatrixAt(t * 3 + step, this.matrix);
+      }
+      // 条纹：小屋顶部一圈色环。
+      this.compose(x, ground + legH + 0.22 + hutH * 0.65, z, yaw, hutW + 0.05, 0.3, 2.25);
+      stripeMesh.setMatrixAt(t * 3 + 2, this.matrix); // wait this would overwrite the 3rd step
+      // 夜间指示灯（小屋顶部小光球）。
+      this.compose(x, ground + legH + 0.22 + hutH + 0.18 + 0.7, z, 0, 1, 1, 1);
+      glowMesh.setMatrixAt(t, this.matrix);
+    }
+    structureMesh.count = cursor;
+    stripeMesh.count = count * 4;
+    structureMesh.name = "city-lifeguard-towers";
+    if (structureMesh.instanceColor) structureMesh.instanceColor.needsUpdate = true;
+    glowMesh.visible = false; // 白天不亮，setNightGlow 驱动
+    this.group.add(structureMesh, stripeMesh, glowMesh);
+    this.disposables.push(box, structureMaterial, stripeMaterial, glowMaterial);
+  }
+
+  /** 酒店招牌与霓虹（VICE S2）：竖向灯牌（blade sign）挂朝海立面 + 水平饰带
+   *  （fascia band）沿酒店顶线。原创设计——不是 GTA 招牌的复刻，是 Miami 海滨
+   *  Art Deco 酒店普遍有的标牌语汇。竖牌用双色自发光（品红/青交替），夜间
+   *  随 setNightGlow 亮起；稳定对象 ID = 酒店 sample 方位（不随排名迁移）。 */
+  private buildSeasideSignage(): void {
+    const seaside = this.layout.seaside;
+    if (!seaside || seaside.degraded) return;
+    const valid = seaside.samples.filter((s) => s.valid);
+    if (valid.length < 3) return;
+    const count = seasideHotelCount(valid.length);
+    const neonMaterial = new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false });
+    this.signageNeonMaterial = neonMaterial;
+    const bladeGeometry = new THREE.BoxGeometry(1, 1, 0.12);
+    const bladeMesh = new THREE.InstancedMesh(bladeGeometry, neonMaterial, count * 2);
+    const fasciaGeometry = new THREE.BoxGeometry(1, 0.28, 0.12);
+    const fasciaMesh = new THREE.InstancedMesh(fasciaGeometry, neonMaterial, count);
+    bladeMesh.name = "city-seaside-signage";
+    const neonColors = ["#ff2fb2", "#00e5ff", "#ff8a3c", "#b44dff"];
+    for (let i = 0; i < count; i += 1) {
+      const sample = valid[Math.floor(((i + 0.5) / count) * (valid.length - 1))];
+      const seed = hashSeed(`signage:${i}:${sample.azimuth}`);
+      const yaw = Math.atan2(sample.inward.x, -sample.inward.z);
+      const outward = { x: -sample.inward.x, z: -sample.inward.z };
+      const right = { x: Math.cos(yaw), z: -Math.sin(yaw) };
+      const height = 24 + hashSeed(`seasidehotelh:${i}`) * 14;
+      const width = 30 + hashSeed(`seasidehotel:${i}:${sample.azimuth}`) * 14;
+      const ground = this.layout.terrain.height(sample.hotelLine.x, sample.hotelLine.z);
+      const color = neonColors[i % neonColors.length];
+      // 竖向灯牌：挂朝海立面偏一侧，从檐口垂下；双面板（正反各一块）。
+      const bladeH = 5 + seed * 3;
+      const bladeW = 1.4 + seed * 0.5;
+      const bladeX = sample.hotelLine.x + outward.x * 8.7 + right.x * width * 0.28;
+      const bladeZ = sample.hotelLine.z + outward.z * 8.7 + right.z * width * 0.28;
+      this.compose(bladeX, ground + height * 0.72, bladeZ, yaw, bladeW, bladeH, 1);
+      bladeMesh.setMatrixAt(i * 2, this.matrix);
+      bladeMesh.setColorAt(i * 2, this.color.set(color));
+      // 背面板（错开 0.3 深度）。
+      this.compose(bladeX + outward.x * 0.3, ground + height * 0.72, bladeZ + outward.z * 0.3, yaw, bladeW, bladeH, 1);
+      bladeMesh.setMatrixAt(i * 2 + 1, this.matrix);
+      bladeMesh.setColorAt(i * 2 + 1, this.color.set(color));
+      // 水平饰带：沿酒店顶线一圈微弱霓虹——夜间的建筑轮廓线。
+      const fasciaX = sample.hotelLine.x + outward.x * 8.5;
+      const fasciaZ = sample.hotelLine.z + outward.z * 8.5;
+      this.compose(fasciaX, ground + height + 4.2, fasciaZ, yaw, width * 0.9, 1, 1);
+      fasciaMesh.setMatrixAt(i, this.matrix);
+      fasciaMesh.setColorAt(i, this.color.set(color));
+    }
+    bladeMesh.count = count * 2;
+    if (bladeMesh.instanceColor) bladeMesh.instanceColor.needsUpdate = true;
+    if (fasciaMesh.instanceColor) fasciaMesh.instanceColor.needsUpdate = true;
+    bladeMesh.visible = false;
+    fasciaMesh.visible = false;
+    this.group.add(bladeMesh, fasciaMesh);
+    this.disposables.push(bladeGeometry, neonMaterial, fasciaGeometry);
+  }
+
   private buildTrees(): THREE.InstancedMesh {
     const spots = this.treeSpots();
     const palm = activeTheme().vegetation === "palm";
@@ -2284,6 +2429,29 @@ export class CityParts {
     mesh.frustumCulled = false;
     this.group.add(mesh);
     this.disposables.push(geometry, material, hull, cabin);
+    // 飞桥游艇（VICE S3）：2 艘白色豪华游艇——船体+飞桥层+桅杆。比斯坎湾意象。
+    // 单独批次（几何更复杂），复用现有航道与尾迹系统。
+    {
+      const yachtCount = 2;
+      const flybridge = new THREE.BoxGeometry(3.4, 1.4, 2.2).translate(-1.8, 4.2, 0);
+      const radarArch = new THREE.BoxGeometry(0.3, 2.2, 2.4).translate(-3.6, 5.4, 0);
+      const bowSpray = new THREE.ConeGeometry(0.5, 2.5, 4).rotateZ(-Math.PI / 2).translate(6.5, 0.8, 0);
+      const yachtGeometry = mergeGeometries([hull.clone(), cabin.clone(), flybridge, radarArch, bowSpray]);
+      const yachtMaterial = new THREE.MeshLambertMaterial({ color: "#f8f6f0" });
+      const yachtMesh = new THREE.InstancedMesh(yachtGeometry, yachtMaterial, yachtCount);
+      yachtMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      yachtMesh.frustumCulled = false;
+      yachtMesh.name = "city-yachts";
+      // 挑 2 艘船的位置替换为游艇（索引 0 和 lane 1 的 0 号）。
+      this.yachtIndices = boats.length > 0 ? [0, Math.min(boats.length - 1, 3)] : [];
+      this.yachtMesh = yachtMesh;
+      this.yachtMesh.count = this.yachtIndices.length;
+      for (let y = 0; y < this.yachtIndices.length; y += 1) {
+        yachtMesh.setColorAt(y, this.color.set(y === 0 ? "#f8f6f0" : "#e8e4d8"));
+      }
+      this.group.add(yachtMesh);
+      this.disposables.push(yachtGeometry, yachtMaterial, flybridge, radarArch, bowSpray);
+    }
     // 尾迹泡沫（tinyskies WakeTrail 手法）：船尾定期吐软圆斑，漂移放大后消散。
     // 径向渐变贴图让圆斑边缘衰减——纯色圆片读作沙盘贴纸，不像浪花。
     const foamCanvas = createRenderCanvas();
@@ -3085,6 +3253,10 @@ export class CityParts {
   /** 夜晚城市亮窗：抬升立面自发光，保留 theme 基线下限（白天≈基线不变）。
    *  theme 切换会重设 uSelfLit 基线，下一次昼夜 tick 会在其上再抬升。 */
   private nightGlow = 0;
+  private lifeguardGlowMaterial: THREE.MeshBasicMaterial | null = null;
+  private signageNeonMaterial: THREE.MeshBasicMaterial | null = null;
+  private yachtMesh: THREE.InstancedMesh | null = null;
+  private yachtIndices: number[] = [];
 
   setNightGlow(selfLit: number): void {
     this.nightGlow = selfLit;
@@ -3109,6 +3281,26 @@ export class CityParts {
       lights.neon.color.setRGB(1, 1, 1).multiplyScalar(night * 2.6);
       // 白天整体关掉：近黑的实例色在日光下读作一块块深色方块（桥塔上的霓虹点实测）。
       lights.neon.visible = night > 0.04;
+    }
+    // 救生塔夜间指示灯（VICE S1）：独立 MeshBasic，不依赖路灯照亮。
+    if (this.lifeguardGlowMaterial) {
+      const parent = this.lifeguardGlowMaterial.opacity !== undefined;
+      this.lifeguardGlowMaterial.transparent = true;
+      this.lifeguardGlowMaterial.opacity = night;
+      // 通过材质找到 mesh 并切可见性。
+      this.group.traverse((child) => {
+        if (child instanceof THREE.InstancedMesh && child.material === this.lifeguardGlowMaterial) {
+          child.visible = night > 0.05;
+        }
+      });
+    }
+    // 酒店招牌霓虹（VICE S2）：白天完全熄灭，夜间亮起。
+    if (this.signageNeonMaterial) {
+      this.group.traverse((child) => {
+        if (child instanceof THREE.InstancedMesh && child.material === this.signageNeonMaterial) {
+          child.visible = night > 0.05;
+        }
+      });
     }
   }
 
@@ -3243,6 +3435,18 @@ export class CityParts {
       }
     });
     this.boatMesh.instanceMatrix.needsUpdate = true;
+    // 飞桥游艇（VICE S3）：在对应船位渲染游艇（隐藏原船实例色→改为游艇色）。
+    if (this.yachtMesh && this.yachtIndices.length) {
+      for (let y = 0; y < this.yachtIndices.length; y += 1) {
+        const boat = this.boats[this.yachtIndices[y]];
+        if (!boat) continue;
+        const sample = samplePolyline(boat.path, boat.distance);
+        const bob = Math.sin(elapsed * 0.9 + boat.phase) * 0.12;
+        this.compose(sample.x, -0.3 + bob, sample.z, Math.atan2(-sample.dz, sample.dx), 1, 1, 1);
+        this.yachtMesh.setMatrixAt(y, this.matrix);
+      }
+      this.yachtMesh.instanceMatrix.needsUpdate = true;
+    }
     // 尾迹推进：放大 + 漂移，寿命 2.8s 后藏起。
     let wakesMoved = false;
     for (let index = 0; index < this.wakes.length; index += 1) {
