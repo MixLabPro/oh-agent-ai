@@ -12,9 +12,7 @@ import { hashSeed } from "../cityModel";
 
 type Mountain = { center: { x: number; z: number }; radius: number; height: number; seed: number };
 
-/** V 字鸟群：3D 低模鸟——纺锤身体 + 楔形尾 + 双侧独立扇动的翼（tinyskies BirdFlock
- *  手法，作者授权参考）。曾用扁平剪影：侧视是一条线、多数角度读不出鸟形；双翼
- *  扇动 + 扇/滑翔交替才是任何距离下「是一只鸟」的第一特征。 */
+/** V 字鸟群：低模身体含头/喙/尾羽，宽阔后掠翼独立扑动，远景仍保持鸟形剪影。 */
 class BirdFlocks {
   private readonly bodyMesh: THREE.InstancedMesh;
   private readonly wingMesh: THREE.InstancedMesh;
@@ -38,20 +36,29 @@ class BirdFlocks {
 
   constructor(center: { x: number; z: number }, radius: number) {
     this.center = { ...center };
-    // 身体：沿 +x（前进方向）拉长的纺锤 + 后方楔形尾；翼：薄三角从翼根向 +z 展开并
-    // 后掠，右翼复用同一几何、按 z 镜像摆放（DoubleSide 吃负缩放）。
-    const body = new THREE.SphereGeometry(0.3, 6, 5).scale(2.4, 0.85, 0.8);
-    const tail = new THREE.ConeGeometry(0.3, 0.85, 4).rotateZ(Math.PI / 2).translate(-0.95, 0.02, 0).scale(1, 0.16, 1);
-    const bodyGeometry = mergeGeometries([body, tail]);
-    body.dispose(); tail.dispose();
+    // +x 为前进方向：胸腹纺锤、独立头部和喙、扇开的三片尾羽合并为一个低模网格。
+    const body = new THREE.SphereGeometry(0.31, 7, 5).scale(2.25, 0.88, 0.84);
+    const head = new THREE.SphereGeometry(0.21, 6, 5).translate(0.58, 0.11, 0);
+    const beak = new THREE.ConeGeometry(0.105, 0.42, 5).rotateZ(-Math.PI / 2).translate(0.88, 0.09, 0);
+    const tailParts = [-0.22, 0, 0.22].map((spread) =>
+      new THREE.ConeGeometry(0.16, 0.78, 4).rotateZ(Math.PI / 2).translate(-0.93, 0.03, spread).scale(1, 0.42, 0.7));
+    const bodyGeometry = mergeGeometries([body, head, beak, ...tailParts]);
+    [body, head, beak, ...tailParts].forEach((part) => part.dispose());
+    bodyGeometry.computeVertexNormals();
+    // 后掠翼有分明的初级飞羽轮廓，不再是两片光滑的平三角。
     const wingShape = new THREE.Shape();
-    wingShape.moveTo(0, 0); wingShape.lineTo(-0.45, 1.55); wingShape.lineTo(-1.0, 1.9); wingShape.lineTo(-0.55, 0.2); wingShape.closePath();
-    const wingGeometry = new THREE.ShapeGeometry(wingShape).rotateX(Math.PI / 2);
-    this.bodyMaterial = new THREE.MeshLambertMaterial({ color: "#454b52", transparent: true });
-    this.wingMaterial = new THREE.MeshLambertMaterial({ color: "#3d434a", transparent: true, side: THREE.DoubleSide });
-    // tinyskies BirdFlock 的 V 位（头鸟在前，两翼逐级后撤）；×30 拉到城市尺度。
-    this.offsets = [[0, 0], [-0.13, -0.085], [-0.13, 0.085], [-0.26, -0.17], [-0.26, 0.17], [-0.39, -0.25], [-0.39, 0.25]]
-      .map(([back, side]) => [back * 30, side * 30] as [number, number]);
+    wingShape.moveTo(0.08, 0.12);
+    wingShape.lineTo(0.18, 0.62); wingShape.lineTo(-0.16, 1.22); wingShape.lineTo(-0.48, 1.88);
+    wingShape.lineTo(-0.82, 1.62); wingShape.lineTo(-1.08, 1.82); wingShape.lineTo(-1.17, 1.43);
+    wingShape.lineTo(-1.48, 1.58); wingShape.lineTo(-1.48, 1.18); wingShape.lineTo(-1.78, 1.28);
+    wingShape.lineTo(-1.65, 0.88); wingShape.lineTo(-1.38, 0.42); wingShape.lineTo(-0.92, 0.08);
+    wingShape.closePath();
+    const wingGeometry = new THREE.ExtrudeGeometry(wingShape, { depth: 0.06, bevelEnabled: false }).rotateX(Math.PI / 2);
+    this.bodyMaterial = new THREE.MeshLambertMaterial({ color: "#465362", transparent: true, flatShading: true });
+    this.wingMaterial = new THREE.MeshLambertMaterial({ color: "#354353", transparent: true, side: THREE.DoubleSide, flatShading: true });
+    // 头鸟在前，两翼逐级后撤；间距按翼展留白，避免远景各鸟融合成一团。
+    this.offsets = [[0, 0], [0.13, -0.085], [0.13, 0.085], [0.26, -0.17], [0.26, 0.17], [0.39, -0.25], [0.39, 0.25]]
+      .map(([back, side]) => [back * 90, side * 90] as [number, number]);
     const total = this.offsets.length * 2;
     this.bodyMesh = new THREE.InstancedMesh(bodyGeometry, this.bodyMaterial, total);
     this.bodyMesh.name = "city-birds";
@@ -64,14 +71,31 @@ class BirdFlocks {
     for (let index = 0; index < 2; index += 1) {
       const seed = hashSeed(`flock:${index}`);
       this.flocks.push({
-        orbit: seed * Math.PI * 2,
-        radius: radius * (0.35 + seed * 0.4),
-        altitude: 70 + seed * 50,
-        speed: (0.05 + seed * 0.018) * (index === 0 ? 1 : -1),
-        phase: seed * 7,
+        // String hashes are close for flock:0/1; index offsets explicitly separate routes and levels.
+        orbit: seed * Math.PI * 2 + index * Math.PI,
+        radius: radius * (0.36 + index * 0.23 + seed * 0.035),
+        altitude: 64 + index * 42 + seed * 8,
+        speed: (0.046 + index * 0.008 + seed * 0.012) * (index === 0 ? 1 : -1),
+        phase: seed * 7 + index * 1.7,
         bob: 0.55 + seed * 0.4,
       });
     }
+  }
+
+  /** Smooth deterministic closed route: a broad loop with gentle crosswind bends, not a perfect orbit. */
+  private pathAt(flock: { radius: number; altitude: number; phase: number }, angle: number) {
+    const r = flock.radius;
+    const a2 = angle * 2 + flock.phase;
+    const a3 = angle * 3 - flock.phase * 0.73;
+    const x = r * Math.cos(angle) + r * 0.11 * Math.sin(a2) + r * 0.035 * Math.sin(a3);
+    const z = r * 0.84 * Math.sin(angle) + r * 0.09 * Math.cos(a2) - r * 0.025 * Math.cos(a3);
+    const dx = -r * Math.sin(angle) + r * 0.22 * Math.cos(a2) + r * 0.105 * Math.cos(a3);
+    const dz = r * 0.84 * Math.cos(angle) - r * 0.18 * Math.sin(a2) + r * 0.075 * Math.sin(a3);
+    const ddx = -r * Math.cos(angle) - r * 0.44 * Math.sin(a2) - r * 0.315 * Math.sin(a3);
+    const ddz = -r * 0.84 * Math.sin(angle) - r * 0.36 * Math.cos(a2) + r * 0.225 * Math.cos(a3);
+    const y = flock.altitude + 7 * Math.sin(a2) + 2.5 * Math.sin(a3);
+    const dy = 14 * Math.cos(a2) + 7.5 * Math.cos(a3);
+    return { x, z, dx, dz, ddx, ddz, y, dy };
   }
 
   setDaylight(daylight: number): void {
@@ -87,18 +111,33 @@ class BirdFlocks {
     let index = 0;
     for (const flock of this.flocks) {
       const angle = flock.orbit + elapsed * flock.speed;
+      const direction = Math.sign(flock.speed);
+      // A shared slow envelope keeps both wings in rhythm; only the trailing rows lag slightly.
+      const flapEnv = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(elapsed * 0.31 + flock.phase));
       for (const [back, side] of this.offsets) {
-        const along = angle - Math.sign(flock.speed) * back / flock.radius;
-        const x = this.center.x + Math.cos(along) * (flock.radius + side * Math.sin(along));
-        const z = this.center.z + Math.sin(along) * (flock.radius + side * -Math.cos(along));
-        const flap = Math.sin(elapsed * 8.5 + flock.phase + back * 1.9 + side * 3.1);
-        // 扇/滑翔交替：环境量慢变，扇翼幅度在 0.25–1 间起伏，滑翔段近乎平翼。
-        const flapEnv = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(elapsed * 0.31 + flock.phase + side));
+        // back 为正的队尾距离：顺/逆时针都沿飞行方向的反向退位，不会越过领鸟。
+        const along = angle - direction * back / flock.radius;
+        const path = this.pathAt(flock, along);
+        const tangentLength = Math.hypot(path.dx, path.dz) || 1;
+        const tangentX = path.dx * direction / tangentLength;
+        const tangentZ = path.dz * direction / tangentLength;
+        const flap = Math.sin(elapsed * 8.5 + flock.phase - back * 0.035 + side * 0.002);
         const flapAngle = 0.12 + (0.1 + 0.85 * flapEnv) * flap;
-        this.position.set(x, flock.altitude + flap * flock.bob, z);
-        this.euler.set(flap * 0.12, -angle - Math.sign(flock.speed) * Math.PI / 2, flap * 0.18);
+        const normalX = -tangentZ;
+        const normalZ = tangentX;
+        const velocity = tangentLength * Math.abs(flock.speed);
+        const turn = (path.dx * path.ddz - path.dz * path.ddx) * direction;
+        const curvature = turn / Math.max(1, tangentLength * tangentLength * tangentLength);
+        const bank = Math.max(-0.38, Math.min(0.38, Math.atan(curvature * velocity * velocity / 9.81)));
+        const pitch = Math.atan2(path.dy * flock.speed, velocity || 1);
+        this.position.set(
+          this.center.x + path.x + normalX * side,
+          path.y + flap * flock.bob,
+          this.center.z + path.z + normalZ * side,
+        );
+        this.euler.set(bank + flap * 0.018, Math.atan2(-tangentZ, tangentX), pitch, "YXZ");
         this.birdQuaternion.setFromEuler(this.euler);
-        this.scaleVector.setScalar(3 * (0.92 + flap * 0.06));
+        this.scaleVector.setScalar(2.2 * (0.96 + flap * 0.04));
         this.matrix.compose(this.position, this.birdQuaternion, this.scaleVector);
         this.bodyMesh.setMatrixAt(index, this.matrix);
         // 左翼：绕前进轴 (+x) 抬/压；右翼反相 + z 镜像——两翼同起同落。

@@ -6,6 +6,7 @@
  */
 
 import * as THREE from "three";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { hashSeed } from "../cityModel";
 
 /** 海面水龙卷：半透明水柱（顶点扭转+摆动）+ 底部浪环，缓慢漂移、周期隐现。 */
@@ -80,10 +81,15 @@ class SeaSpout {
   }
 }
 
-/** 热气球：球+筐低模，缓慢上升漂移，升出视野后从低处重来。 */
+/** 热气球：分片色带气囊、收口、细吊索和锥台篮筐；固定低模，缓慢漂移。 */
 class HotAirBalloon {
   readonly group = new THREE.Group();
   private readonly envelope: THREE.Mesh;
+  private readonly envelopeMaterial: THREE.MeshLambertMaterial;
+  private readonly basketMaterial: THREE.MeshLambertMaterial;
+  private readonly burnerMaterial: THREE.MeshLambertMaterial;
+  private readonly envelopeLight: THREE.PointLight;
+  private readonly basketLight: THREE.PointLight;
   private readonly baseY: number;
   private readonly rise: number;
   private readonly sway: number;
@@ -98,23 +104,78 @@ class HotAirBalloon {
     this.rise = 1.6 + seed * 1.4;
     this.sway = 0.4 + seed * 0.6;
     this.baseY = 70 + seed * 40;
-    const envelopeGeometry = new THREE.SphereGeometry(9, 14, 12).scale(1, 1.18, 1);
-    const envelopeMaterial = new THREE.MeshLambertMaterial({ color });
-    this.envelope = new THREE.Mesh(envelopeGeometry, envelopeMaterial);
-    this.envelope.position.y = 10;
+    const envelopeGeometry = new THREE.LatheGeometry([
+      new THREE.Vector2(0.12, 0), new THREE.Vector2(0.42, 0.7),
+      new THREE.Vector2(1.5, 1.8), new THREE.Vector2(4.5, 3.6),
+      new THREE.Vector2(7.5, 6.8), new THREE.Vector2(8.8, 10.5),
+      new THREE.Vector2(8.7, 14), new THREE.Vector2(7.4, 17.2),
+      new THREE.Vector2(5.2, 19.7), new THREE.Vector2(2.8, 21.2),
+      new THREE.Vector2(0.3, 22),
+    ], 16);
+    const base = new THREE.Color(color);
+    const light = base.clone().lerp(new THREE.Color("#fff2d5"), 0.58);
+    const shadow = base.clone().lerp(new THREE.Color("#26374d"), 0.24);
+    const positions = envelopeGeometry.getAttribute("position");
+    const colors = new Float32Array(positions.count * 3);
+    for (let vertex = 0; vertex < positions.count; vertex += 1) {
+      const angle = Math.atan2(positions.getZ(vertex), positions.getX(vertex));
+      const gore = Math.floor((((angle / (Math.PI * 2)) + 1) % 1) * 16);
+      const panel = gore % 4 === 0 ? light : gore % 4 === 1 ? base : gore % 4 === 2 ? shadow : base;
+      colors[vertex * 3] = panel.r; colors[vertex * 3 + 1] = panel.g; colors[vertex * 3 + 2] = panel.b;
+    }
+    envelopeGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    this.envelopeMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff", vertexColors: true, flatShading: true, emissive: "#ff994d", emissiveIntensity: 0 });
+    this.envelope = new THREE.Mesh(envelopeGeometry, this.envelopeMaterial);
+    this.envelope.position.y = 8;
     this.envelope.castShadow = true;
-    const basketGeometry = new THREE.BoxGeometry(3.4, 2.6, 3.4);
-    const basketMaterial = new THREE.MeshLambertMaterial({ color: "#8a6a4c" });
-    const basket = new THREE.Mesh(basketGeometry, basketMaterial);
-    const ropesGeometry = new THREE.BoxGeometry(3.0, 5.2, 3.0);
-    const ropesMaterial = new THREE.MeshLambertMaterial({ color: "#5d5648", transparent: true, opacity: 0.55 });
+    // 四根向气囊收口汇聚的细索代替原来像一整块柱体的粗“绳架”。
+    const cableParts: THREE.BufferGeometry[] = [];
+    for (const x of [-1, 1]) for (const z of [-1, 1]) {
+      const lower = new THREE.Vector3(x * 1.05, 1.25, z * 1.05);
+      const upper = new THREE.Vector3(x * 0.25, 8.65, z * 0.25);
+      const direction = upper.clone().sub(lower);
+      const cable = new THREE.CylinderGeometry(0.055, 0.08, direction.length(), 5);
+      const pose = new THREE.Matrix4().compose(
+        lower.clone().add(upper).multiplyScalar(0.5),
+        new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize()),
+        new THREE.Vector3(1, 1, 1),
+      );
+      cable.applyMatrix4(pose);
+      cableParts.push(cable);
+    }
+    const ropesGeometry = mergeGeometries(cableParts);
+    cableParts.forEach((part) => part.dispose());
+    const ropesMaterial = new THREE.MeshLambertMaterial({ color: "#665344" });
     const ropes = new THREE.Mesh(ropesGeometry, ropesMaterial);
-    ropes.position.y = 3.6;
-    this.group.add(this.envelope, basket, ropes);
+    const basketGeometry = new THREE.CylinderGeometry(1.5, 1.18, 2.6, 4, 5).rotateY(Math.PI / 4);
+    const basketColors = new Float32Array(basketGeometry.getAttribute("position").count * 3);
+    const basketPosition = basketGeometry.getAttribute("position");
+    for (let vertex = 0; vertex < basketPosition.count; vertex += 1) {
+      const band = Math.floor((basketPosition.getY(vertex) + 1.3) * 2.8);
+      const weave = band % 2 === 0 ? new THREE.Color("#9b704a") : new THREE.Color("#775337");
+      basketColors[vertex * 3] = weave.r; basketColors[vertex * 3 + 1] = weave.g; basketColors[vertex * 3 + 2] = weave.b;
+    }
+    basketGeometry.setAttribute("color", new THREE.BufferAttribute(basketColors, 3));
+    this.basketMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff", vertexColors: true, flatShading: true, emissive: "#ffae63", emissiveIntensity: 0 });
+    const basket = new THREE.Mesh(basketGeometry, this.basketMaterial);
+    const burnerGeometry = new THREE.IcosahedronGeometry(0.3, 0);
+    this.burnerMaterial = new THREE.MeshLambertMaterial({ color: "#e98936", emissive: "#ff8b36", emissiveIntensity: 0 });
+    const burner = new THREE.Mesh(burnerGeometry, this.burnerMaterial);
+    burner.position.set(0, 1.55, 0);
+    this.envelopeLight = new THREE.PointLight("#ffb766", 0, 125, 2);
+    this.envelopeLight.position.set(0, 17, 0);
+    this.envelopeLight.castShadow = false;
+    this.envelopeLight.visible = false;
+    this.basketLight = new THREE.PointLight("#ffbd76", 0, 48, 2);
+    this.basketLight.position.set(0, 4.2, 0);
+    this.basketLight.castShadow = false;
+    this.basketLight.visible = false;
+    this.group.add(this.envelope, basket, ropes, burner, this.envelopeLight, this.basketLight);
     this.group.position.set(spawn.x, this.baseY, spawn.z);
     this.group.name = "city-hot-air-balloon";
     this.geometries = [envelopeGeometry, basketGeometry, ropesGeometry];
-    this.materials = [envelopeMaterial, basketMaterial, ropesMaterial];
+    this.geometries.push(burnerGeometry);
+    this.materials = [this.envelopeMaterial, this.basketMaterial, ropesMaterial, this.burnerMaterial];
   }
 
   private readonly geometries: THREE.BufferGeometry[] = [];
@@ -134,6 +195,16 @@ class HotAirBalloon {
     this.group.position.z += Math.cos(this.t * 0.026) * 0.14 * this.sway;
     this.group.rotation.z = Math.sin(this.t * 0.11) * 0.05;
     this.group.rotation.x = Math.cos(this.t * 0.09) * 0.04;
+  }
+
+  setNight(night: number): void {
+    this.envelopeMaterial.emissiveIntensity = night * 0.62;
+    this.basketMaterial.emissiveIntensity = night * 0.28;
+    this.burnerMaterial.emissiveIntensity = night * 1.7;
+    this.envelopeLight.intensity = night * 24;
+    this.envelopeLight.visible = night > 0.02;
+    this.basketLight.intensity = night * 6;
+    this.basketLight.visible = night > 0.02;
   }
 
   dispose(): void {
@@ -259,6 +330,7 @@ export class CityAmbient {
 
   setNight(night: number): void {
     this.lanterns?.setNight(night);
+    this.balloons.forEach((balloon) => balloon.setNight(night));
     for (const spout of this.spouts) {
       spout.night = night;
       (spout.mesh.material as THREE.MeshBasicMaterial).color.setRGB(0.86, 0.96, 1).multiplyScalar(1 - night * 0.75);
