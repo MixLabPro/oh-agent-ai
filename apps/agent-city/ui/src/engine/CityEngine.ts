@@ -140,7 +140,7 @@ export class CityEngine {
   private dayMix = 0;
   /** 地形种子：未拿到前不渲染城市（否则先闪一座默认岛再跳成用户自己的岛）。 */
   private seed: number | null = null;
-  private backdrop: BackdropMode = "auto";
+  private backdrop: BackdropMode = "off"; // 默认纯数据城市（用户：不要没有作用的建筑）
   private composer: EffectComposer | null = null;
   /** 当前后处理链的配置键（主题霓虹 × AO）：变化时重建，避免每帧判断哪些 pass 该在。 */
   private composerKey = "";

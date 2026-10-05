@@ -41,7 +41,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
   const [cut, setCut] = useState<CinematicCut>("short");
   // 背景楼档位（F4）：按本机浏览器存储（与种子不同，不经宿主 city-settings 投影——那需要宿主侧改动，见 SPEC §4 F4 注）。
   const [backdrop, setBackdropState] = useState<BackdropMode>(() => {
-    try { const saved = localStorage.getItem("city.backdrop"); return saved === "off" || saved === "full" ? saved : "auto"; } catch { return "auto"; }
+    try { const saved = localStorage.getItem("city.backdrop"); return saved === "auto" || saved === "full" ? saved : "off"; } catch { return "off"; }
   });
   const setBackdrop = (mode: BackdropMode) => {
     setBackdropState(mode);

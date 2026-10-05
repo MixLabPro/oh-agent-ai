@@ -33,7 +33,7 @@ self.onmessage = async (event: MessageEvent<{ type: "start"; job: FilmJob } | { 
     if (software && (job.width > 640 || job.height > 360)) { job.width = 640; job.height = 360; canvas.width = 640; canvas.height = 360; }
     send({ type: "profile", width: job.width, height: job.height, software });
     engine = new CityEngine({ canvas, headless: true });
-    engine.setBackdrop(job.backdrop ?? "auto");
+    engine.setBackdrop(job.backdrop ?? "off");
     engine.setSeed(job.seed);
     // Independent eco renderer limits shared-GPU pressure. UI quality/camera changes
     // never alter the frozen export and the UI canvas is never transferred away.
