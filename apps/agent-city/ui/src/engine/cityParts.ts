@@ -427,6 +427,7 @@ export class CityParts {
   private readonly scaleVector = new THREE.Vector3();
   private readonly positionVector = new THREE.Vector3();
   private readonly color = new THREE.Color();
+  private readonly hsl = { h: 0, s: 0, l: 0 };
   private cursor = Number.NaN;
   private live = true;
   private labelsVisible = true;
@@ -1868,7 +1869,10 @@ export class CityParts {
       const colors = colorsByZone[building.zone] ?? colorsByZone.commercial;
       this.compose(building.x, building.y, building.z, building.yaw, building.width, building.height, building.depth);
       bodies.setMatrixAt(index, this.matrix);
-      bodies.setColorAt(index, this.color.set(colors[Math.floor(building.seed * colors.length) % colors.length]));
+      // F3：降饱和、略压明度——远看仍是统一天际线，近看一眼分出「我的楼」（会话楼保持执行环境色相与屋顶霓虹）。
+      this.color.set(colors[Math.floor(building.seed * colors.length) % colors.length]);
+      this.color.getHSL(this.hsl);
+      bodies.setColorAt(index, this.color.setHSL(this.hsl.h, this.hsl.s * 0.45, this.hsl.l * 0.92));
       const roofScale = building.zone === "residential" ? 0.88 : 0.68;
       this.compose(building.x, building.y + building.height, building.z, building.yaw, building.width * roofScale, 1.2 + building.seed * 2.1, building.depth * roofScale);
       crowns.setMatrixAt(index, this.matrix);

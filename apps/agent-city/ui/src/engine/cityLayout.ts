@@ -31,6 +31,15 @@ export type GardenSite = Vec2 & { id: string; districtId: string; blockId: strin
 export type CivicKind = "school" | "mall" | "hospital";
 export type CivicSite = Vec2 & { id: string; kind: CivicKind; districtId: string; parcelId: string; y: number; yaw: number; width: number; depth: number; unlockAt: number };
 /** 非会话型城市肌理：只填充未占用的内陆/沿岸街区，不进入统计、拾取或回放。 */
+/** 背景楼策略（CITY_DATA_LEGIBILITY_SPEC F1/F4）：
+ *  - auto（默认）：数量随会话数缩放（×0.35），离会话楼 < BACKDROP_KEEP_OUT 不放，优先远离数据、靠近核心——
+ *    远景天际线让给氛围，城区之间留给数据；
+ *  - off：纯数据城市（零背景楼）；
+ *  - full：VICE 批次原行为（贴着会话城区填满 224–280 栋）。 */
+export type BackdropMode = "auto" | "off" | "full";
+export const BACKDROP_KEEP_OUT = 60;
+export const BACKDROP_PER_SESSION = 0.35;
+
 export type ContextBuilding = Vec2 & { id: string; y: number; yaw: number; width: number; depth: number; height: number; seed: number; zone: Zone };
 export const CIVIC_PER_SESSIONS = 45;
 const CIVIC_ORDER: CivicKind[] = ["school", "mall", "hospital"];
@@ -105,7 +114,7 @@ function aggregateOverflow(districtId: string, anchor: Vec2, overflow: CityModel
 }
 
 /** The seed controls geography, never harness count, token ranking or time window. */
-export function layoutCity(model: CityModel, previous?: CityLayout | null, seed = 1927, coastal: CoastalConfig | null = null): CityLayout {
+export function layoutCity(model: CityModel, previous?: CityLayout | null, seed = 1927, coastal: CoastalConfig | null = null, backdrop: BackdropMode = "auto"): CityLayout {
   // 规模档位由会话总数分档：档位内刷新/分页不改地图；跨档时岛按原形状放大。
   const tier = scaleTierFor(model.buildings.length);
   // plans 缓存键携带海滨配置身份（profile+version）：同 seed 不同配置不得复用旧规划。
@@ -255,7 +264,8 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   // 空白规划图。背景楼只从空置地块取址，避开数据楼/整块花园/市政设施/高架
   // /酒店海滨保留带；优先填充会话城区周围，再向城市核心扩散，不加入会话统计。
   const contextBuildings: ContextBuilding[] = [];
-  if (coastal?.profile === "miami-coastal") {
+  if (coastal?.profile === "miami-coastal" && backdrop !== "off") {
+    const full = backdrop === "full";
     const reserved = new Set([...used, ...civics.map((civic) => civic.parcelId)]);
     const coreRadius = plan.islandRadius;
     const sessionSlots = [...assigned.values()];
@@ -274,12 +284,22 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
         let sessionDistance = Infinity;
         for (const slot of sessionSlots) sessionDistance = Math.min(sessionDistance, Math.hypot(parcel.x - slot.x, parcel.z - slot.z));
         const coreDistance = Math.hypot(parcel.x - core.x, parcel.z - core.z);
-        return { parcel, rank: Math.min(sessionDistance, coreDistance * 0.85) + hashSeed(`vice-context-rank:${seed}:${parcel.id}`) * 14 };
+        const jitter = hashSeed(`vice-context-rank:${seed}:${parcel.id}`) * 14;
+        // full：VICE 原排序（贴近会话楼优先）。auto：离会话楼越远越先、仍偏向核心——
+        // 城区之间与城区边缘留给数据（真机截图：背景楼贴着城区外缘，host 分区读不出来）。
+        const rank = full
+          ? Math.min(sessionDistance, coreDistance * 0.85) + jitter
+          : coreDistance * 0.6 - Math.min(sessionDistance, 240) * 0.8 + jitter;
+        return { parcel, rank, sessionDistance };
       })
+      .filter((candidate) => full || candidate.sessionDistance >= BACKDROP_KEEP_OUT)
       .sort((a, b) => a.rank - b.rank || a.parcel.id.localeCompare(b.parcel.id));
-    const target = Math.min(280, 224 + (tier - 1) * 24);
+    const cap = Math.min(280, 224 + (tier - 1) * 24);
+    // auto：楼量随数据（3 个会话不该是一座 200 栋的城——真机/无头照片实测）。
+    const target = full ? cap : Math.min(cap, Math.round(model.buildings.length * BACKDROP_PER_SESSION));
     const selected: typeof candidates = [];
     for (const candidate of candidates) {
+      if (selected.length >= target) break; // target 可为 0（auto 下极少会话）
       const parcel = candidate.parcel;
       const buildingSeed = hashSeed(`vice-context:${seed}:${parcel.id}`);
       // Background facades were needle-thin at aerial scale because they used

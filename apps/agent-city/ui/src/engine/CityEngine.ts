@@ -25,7 +25,7 @@ import { loadBiomeFlora } from "./cityFlora";
 import { planCinematic, type CinematicCut, type CinematicPlan } from "./cityCinematic";
 import { drawFilmOverlay, type FilmCardText } from "./cityFilmOverlay";
 import { Mp4Writer } from "./mp4Muxer";
-import { layoutCity, type CityLayout } from "./cityLayout";
+import { layoutCity, type CityLayout, type BackdropMode } from "./cityLayout";
 import { CityParts, type QualityLevel } from "./cityParts";
 import { skyStateAt, type CitySkyPreset } from "./citySky";
 import { MIAMI_COASTAL } from "./citySeaside";
@@ -139,6 +139,7 @@ export class CityEngine {
   private dayMix = 0;
   /** 地形种子：未拿到前不渲染城市（否则先闪一座默认岛再跳成用户自己的岛）。 */
   private seed: number | null = null;
+  private backdrop: BackdropMode = "auto";
   private composer: EffectComposer | null = null;
   /** 当前后处理链的配置键（主题霓虹 × AO）：变化时重建，避免每帧判断哪些 pass 该在。 */
   private composerKey = "";
@@ -425,6 +426,13 @@ export class CityEngine {
     this.updateScene(0);
   }
 
+  /** 背景楼策略（CITY_DATA_LEGIBILITY_SPEC F4）：换档即重排背景楼（会话楼地址不变）。 */
+  setBackdrop(mode: BackdropMode): void {
+    if (mode === this.backdrop) return;
+    this.backdrop = mode;
+    if (this.model && this.seed !== null) this.applyModel(this.model, true);
+  }
+
   setSeed(seed: number): void {
     if (seed === this.seed) return;
     const first = this.seed === null;
@@ -445,7 +453,7 @@ export class CityEngine {
       this.parts.dispose();
       this.parts = null;
     }
-    const layout = layoutCity(model, reuse ? this.layout : null, this.seed, MIAMI_COASTAL);
+    const layout = layoutCity(model, reuse ? this.layout : null, this.seed, MIAMI_COASTAL, this.backdrop);
     this.layout = layout;
     this.parts = new CityParts(model, layout, previousDisplays);
     if (this.assets) this.parts.applyAssets(this.assets);

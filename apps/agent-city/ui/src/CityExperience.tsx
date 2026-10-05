@@ -4,6 +4,7 @@ import type { CityProjectionV1 } from "./data/provider";
 import { citySeed, randomSeed } from "./data/seed";
 import type { CityEngine, EngineStats } from "./engine/CityEngine";
 import type { CinematicCard, CinematicCut, CinematicPlan } from "./engine/cityCinematic";
+import type { BackdropMode } from "./engine/cityLayout";
 import { paletteFor } from "./engine/cityTextures";
 import { invokeHost, embedded, pluginLocale } from "./host";
 import type { PluginResponseV1 } from "@agent-vitals/app-sdk";
@@ -37,6 +38,15 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(3600);
   const [cut, setCut] = useState<CinematicCut>("short");
+  // 背景楼档位（F4）：按本机浏览器存储（与种子不同，不经宿主 city-settings 投影——那需要宿主侧改动，见 SPEC §4 F4 注）。
+  const [backdrop, setBackdropState] = useState<BackdropMode>(() => {
+    try { const saved = localStorage.getItem("city.backdrop"); return saved === "off" || saved === "full" ? saved : "auto"; } catch { return "auto"; }
+  });
+  const setBackdrop = (mode: BackdropMode) => {
+    setBackdropState(mode);
+    try { localStorage.setItem("city.backdrop", mode); } catch { /* 存储不可用：本次会话内仍生效 */ }
+  };
+  useEffect(() => { engine.current?.setBackdrop(backdrop); }, [backdrop]);
   const [film, setFilm] = useState<{ frame: number; total: number; width?: number; height?: number; software?: boolean } | null>(null);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -66,6 +76,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
         if (!active) return;
         if (saved === null) await citySeed("write", value);
         if (!active) return;
+        engine.current?.setBackdrop(backdrop); // 首次布局前就用已存档位，避免先按 auto 排一遍再换
         engine.current?.setSeed(value); setSeed(value); setSeedDraft(String(value));
       } catch {
         if (active) { engine.current?.setSeed(74031); setError("岛屿种子无法保存，本次使用临时种子。"); }
@@ -157,7 +168,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
     const controller = new AbortController(); abort.current = controller; setFilm({ frame: 0, total: 1 });
     previewRef.current?.getContext("2d")?.clearRect(0, 0, 640, 360);
     try {
-      const blob = await runFilmJob({ model: structuredClone(modelRef.current), seed, cut, locale: pluginLocale(), width: 1920, height: 1080, fps: 30, bitrate: 12_000_000 }, {
+      const blob = await runFilmJob({ model: structuredClone(modelRef.current), seed, cut, backdrop, locale: pluginLocale(), width: 1920, height: 1080, fps: 30, bitrate: 12_000_000 }, {
         signal: controller.signal,
         onPreview: (bitmap) => {
           const canvas = previewRef.current;
@@ -194,7 +205,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
   };
   return { modelRef, model, setModel, tooltipRef, callbacks, selected, setSelected, clearSelection, details, setDetails, options, setOptions,
     seed, seedDraft, setSeedDraft, seedBusy, confirmSeed, applySeed, reseed, cursor, playing, speed, setSpeed,
-    cut, setCut, film, photoBusy, busy, error, setError, stats, card, progress, seek, replay, live, previewRef,
+    cut, setCut, backdrop, setBackdrop, film, photoBusy, busy, error, setError, stats, card, progress, seek, replay, live, previewRef,
     describe, photo, exportFilm, refreshSelection, openHostSession, projection,
     focusDistrict: (id: string) => engine.current?.focusDistrict(id),
     focusBuilding: (id: string) => engine.current?.focusBuilding(id) };
@@ -223,7 +234,7 @@ export function CityExperience({ ui, disabled, cinema, status }: { ui: ReturnTyp
         <span className="city-district-meta">{district.sessionCount} 会话 · {district.activeCount} 活跃</span>
         {district.anomaly && <span className="city-district-meta">{district.anomaly.severity} · {district.anomaly.count} 条异常（部分投影）</span>}
       </button>)}
-      <p className="city-context-note">粉彩高层为城市背景 · 不计入会话</p>
+      <p className="city-context-note">灰调背景楼为城市氛围 · 不计入会话</p>
     </section>}
     {!cinema && <section className="city-timeline" aria-label="时间回放">
       <button type="button" onClick={ui.replay} disabled={locked}>{ui.playing ? "暂停回放" : "播放回放"}</button>
@@ -265,6 +276,8 @@ export function CityExperience({ ui, disabled, cinema, status }: { ui: ReturnTyp
       </form>
       <button onClick={ui.reseed} disabled={locked}>{ui.confirmSeed ? "确认重新生成（4 秒内）" : "重新生成岛屿"}</button>
       <p>只改变地形与布局，不删除会话数据。种子保存于插件私有本地状态。</p>
+      <label htmlFor="city-backdrop">城市背景楼</label><select id="city-backdrop" value={ui.backdrop} disabled={locked} onChange={(e) => ui.setBackdrop(e.target.value as BackdropMode)}><option value="auto">自动（随会话数，不挤占城区）</option><option value="off">关闭（纯数据城市）</option><option value="full">繁华（铺满城区周边）</option></select>
+      <p>背景楼只是城市氛围，不是会话，不可点击，不计入统计。</p>
       <label htmlFor="city-cut">航拍与视频长度</label><select id="city-cut" value={ui.cut} disabled={locked} onChange={(e) => ui.setCut(e.target.value as CinematicCut)}><option value="short">短片</option><option value="full">完整航线</option></select>
       <p>拍照保存 PNG；视频后台逐帧生成 30 FPS MP4（H.264），并显示实际生成画面的低帧率预览。硬件渲染为 1080p，软件渲染降至 360p。导出中暂停拍照，避免并发导出和保存；离开 City 会取消任务。不上传数据。</p>
       {ui.film && <p role="status" aria-atomic="true">航拍导出 {Math.round(ui.film.frame / ui.film.total * 100)}% · 关闭设置不取消导出</p>}

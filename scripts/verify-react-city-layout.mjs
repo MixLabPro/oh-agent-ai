@@ -115,8 +115,9 @@ for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
 // Vice City 环境楼群：低会话量时依然有城区肌理，但只占空置商业地块，且绝不伪装成会话数据。
 {
   const input = model(3, ["codex", "claude-code", "dsh"]);
-  const layout = layoutCity(input, null, 523001688, MIAMI_COASTAL);
-  const repeated = layoutCity(input, null, 523001688, MIAMI_COASTAL);
+  // 「繁华」档 = VICE 原行为（F4 full）：下面的断言照旧钉住它。
+  const layout = layoutCity(input, null, 523001688, MIAMI_COASTAL, "full");
+  const repeated = layoutCity(input, null, 523001688, MIAMI_COASTAL, "full");
   assert(layout.contextBuildings.length >= 140, `low-volume Miami city still has broad urban fabric (${layout.contextBuildings.length})`);
   console.log(`Vice City low-volume context buildings: ${layout.contextBuildings.length}`);
   assert.deepEqual(layout.contextBuildings, repeated.contextBuildings, "environment buildings are deterministic for a seed and session set");
@@ -153,6 +154,26 @@ for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
     const a = layout.contextBuildings[i]; const b = layout.contextBuildings[j];
     const clearance = Math.hypot(a.width, a.depth) / 2 + Math.hypot(b.width, b.depth) / 2 + 2;
     assert(Math.hypot(a.x - b.x, a.z - b.z) >= clearance, "context building footprints do not overlap");
+  }
+}
+// 背景楼「自动」档（CITY_DATA_LEGIBILITY_SPEC F1）：楼量随会话数、离会话楼 ≥ 60、绝不贴着城区填。
+// 曾恒为「繁华」：3 个会话的城里 200+ 栋背景楼紧贴城区外缘，host 分区读不出来、数据量也读不出来（真机截图）。
+// 「关闭」档：零背景楼。
+{
+  for (const [sessions, seed] of [[3, 523001688], [50, 7], [700, 42]]) {
+    const input = model(sessions, ["codex", "claude-code", "dsh"]);
+    const auto = layoutCity(input, null, seed, MIAMI_COASTAL, "auto");
+    const off = layoutCity(input, null, seed, MIAMI_COASTAL, "off");
+    const expected = Math.round(sessions * 0.35);
+    assert(auto.contextBuildings.length <= expected, `auto backdrop scales with data: ${sessions} sessions -> ${auto.contextBuildings.length} (<= ${expected})`);
+    assert.equal(off.contextBuildings.length, 0, "off backdrop is a data-only city");
+    const slots = auto.districts.flatMap((district) => [...district.slots.values()]);
+    for (const building of auto.contextBuildings) {
+      const nearest = Math.min(...slots.map((slot) => Math.hypot(slot.x - building.x, slot.z - building.z)));
+      assert(nearest >= 60, `${building.id} keeps out of session districts (${nearest.toFixed(1)} < 60)`);
+    }
+    assert.deepEqual(addresses(auto), addresses(off), "backdrop mode never moves a session building");
+    console.log(`Backdrop auto: ${sessions} sessions -> ${auto.contextBuildings.length} context buildings`);
   }
 }
 // 配套按服务半径铺开：同一座岛上任意两座配套至少隔 60，学校多数落在居住区、商场多数落在商业区/市中心。

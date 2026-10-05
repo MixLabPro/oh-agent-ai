@@ -19,7 +19,8 @@ self.onmessage = async (event: MessageEvent<{ type: "start"; job: FilmJob } | { 
       || !Number.isInteger(job.height) || job.height < 1 || job.height > 1080
       || !Number.isInteger(job.fps) || job.fps < 1 || job.fps > 30
       || !Number.isFinite(job.bitrate) || job.bitrate < 1 || job.bitrate > 12_000_000
-      || !["short", "full"].includes(job.cut)) throw new Error("invalid_export_job");
+      || !["short", "full"].includes(job.cut)
+      || (job.backdrop !== undefined && !["auto", "off", "full"].includes(job.backdrop))) throw new Error("invalid_export_job");
     if (typeof OffscreenCanvas === "undefined" || typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined") throw new Error("background_export_unavailable");
     const canvas = new OffscreenCanvas(job.width, job.height);
     const context = canvas.getContext("webgl2", { powerPreference: "low-power", antialias: true });
@@ -32,6 +33,7 @@ self.onmessage = async (event: MessageEvent<{ type: "start"; job: FilmJob } | { 
     if (software && (job.width > 640 || job.height > 360)) { job.width = 640; job.height = 360; canvas.width = 640; canvas.height = 360; }
     send({ type: "profile", width: job.width, height: job.height, software });
     engine = new CityEngine({ canvas, headless: true });
+    engine.setBackdrop(job.backdrop ?? "auto");
     engine.setSeed(job.seed);
     // Independent eco renderer limits shared-GPU pressure. UI quality/camera changes
     // never alter the frozen export and the UI canvas is never transferred away.
