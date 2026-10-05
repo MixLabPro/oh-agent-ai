@@ -9,7 +9,7 @@
 
 import * as THREE from "three";
 import { builtFractionAt, hashSeed, type CityBuilding, type CityModel } from "../cityModel";
-import { MIAMI_COASTAL, promenadeSegments } from "./citySeaside";
+import { MIAMI_COASTAL, promenadeSegments, validRuns } from "./citySeaside";
 import { fbm } from "./cityNoise";
 import type { CityLayout, DistrictLayout, Parcel, Vec2 } from "./cityLayout";
 import { activeTheme, skyYawOf } from "./cityTheme";
@@ -463,6 +463,7 @@ export class CityParts {
       this.buildPromenade();
       // 装饰酒店排已退役：酒店地块交给会话（cityLayout hotelBlocks），只有落户的会话才成楼。
       this.buildLifeguardTowers();
+      this.buildBeachFurniture();
       // 酒店招牌随装饰酒店一起退役（它们挂在不存在的楼面上）。
       this.treeMesh = this.buildTrees();
       const carResult = this.buildCars();
@@ -674,22 +675,7 @@ export class CityParts {
    *  分类只看图集颜色与海拔：深灰低饱和=沥青，浅灰=人行道，绿=草，暖浅=沙，近水面的沙=滩涂。 */
   private installGroundDetail(material: THREE.MeshLambertMaterial): void {
     const uniforms: Record<string, { value: unknown }> = { uDetail: { value: 0 } };
-    // 海滨带（VICE B2）：条带以采样数组直接进 shader——免烘焙纹理、任意分辨率精确。
-    // vec4 = (waterline.x, waterline.z, inward.x, inward.z)；宽度经标量 uniform。
-    const seaside = this.layout.seaside;
-    const coastalConfig = this.layout.coastalConfig ?? MIAMI_COASTAL;
-    // 容量固定 24（shader 声明 uSeaside[24]）：Three.js 上传定长数组要求实参与
-    // 声明严格等长——可变长度会撞 undefined.toArray。有效数单独经 uSeasideN。
-    const SEASIDE_CAPACITY = 24;
-    const valid = seaside && !seaside.degraded ? seaside.samples.filter((sample) => sample.valid) : [];
-    const seasideSamples: THREE.Vector4[] = Array.from({ length: SEASIDE_CAPACITY }, (_, i) => {
-      const sample = valid[i];
-      return sample ? new THREE.Vector4(sample.waterline.x, sample.waterline.z, sample.inward.x, sample.inward.z) : new THREE.Vector4();
-    });
-    uniforms.uSeasideN = { value: Math.min(valid.length, SEASIDE_CAPACITY) };
-    uniforms.uSeaside = { value: seasideSamples };
-    uniforms.uSeaWet = { value: coastalConfig.wetSandWidth };
-    uniforms.uSeaOuter = { value: coastalConfig.bandOuter };
+    // 海滨沙滩不在 shader 里：画进地面贴图（makeCityTexture），道路才能压在它上面。
     for (const name of ["Asphalt", "Concrete", "Sand", "Mud", "Grass"]) {
       uniforms[`u${name}C`] = { value: null };
       uniforms[`u${name}N`] = { value: null };
@@ -703,28 +689,8 @@ export class CityParts {
         .replace("#include <project_vertex>", "#include <project_vertex>\nvCityWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;");
       const samplers = ["Asphalt", "Concrete", "Sand", "Mud", "Grass"].map((n) => `uniform sampler2D u${n}C; uniform sampler2D u${n}N; uniform vec3 u${n}Mean;`).join("\n");
       shader.fragmentShader = shader.fragmentShader
-        .replace("#include <common>", `#include <common>\nvarying vec3 vCityWorld;\nuniform float uDetail;\n${samplers}\nuniform vec4 uSeaside[24];\nuniform int uSeasideN;\nuniform float uSeaWet;\nuniform float uSeaOuter;`)
+        .replace("#include <common>", `#include <common>\nvarying vec3 vCityWorld;\nuniform float uDetail;\n${samplers}`)
         .replace("#include <map_fragment>", `#include <map_fragment>
-  // ── 海滨带：干湿沙由条带几何直接推出（湿沙靠水、干沙靠内陆）。不依赖
-  //  RGB 分类与图集——uDetail 未就绪（无照片素材）时干湿层次仍然成立。
-  if (uSeasideN > 0) {
-    float bestLat = 1e9; float bestAlong = -1e9;
-    for (int i = 0; i < 24; i += 1) {
-      if (i >= uSeasideN) break;
-      vec4 s = uSeaside[i];
-      vec2 d = vCityWorld.xz - s.xy;
-      float along = dot(d, s.zw);
-      float lat = abs(dot(d, vec2(-s.w, s.z)));
-      if (lat < bestLat) { bestLat = lat; bestAlong = along; }
-    }
-    float inBand = step(0.0, bestAlong) * (1.0 - smoothstep(uSeaOuter - 3.0, uSeaOuter, bestAlong));
-    float inStrip = inBand * (1.0 - smoothstep(10.0, 18.0, bestLat));
-    float wetness = (1.0 - smoothstep(uSeaWet - 1.5, uSeaWet + 2.0, bestAlong));
-    vec3 drySand = vec3(0.93, 0.86, 0.71);
-    vec3 wetSand = vec3(0.74, 0.64, 0.47);
-    vec3 sand = mix(drySand, wetSand, clamp(wetness, 0.0, 1.0));
-    diffuseColor.rgb = mix(diffuseColor.rgb, sand, inStrip * 0.9);
-  }
 #ifdef USE_MAP
   if (uDetail > 0.5) {
     vec3 base = diffuseColor.rgb;
@@ -735,7 +701,8 @@ export class CityParts {
     float wC = (1.0 - smoothstep(0.08, 0.22, sat)) * smoothstep(0.16, 0.36, lum);
     float wG = smoothstep(0.005, 0.05, base.g - max(base.r, base.b));
     float wS = smoothstep(0.02, 0.09, base.r - base.b) * smoothstep(0.18, 0.4, lum) * (1.0 - wG);
-    float wet = 1.0 - smoothstep(0.5, 1.9, vCityWorld.y);
+    // 只在水线附近算滩涂：曾用 0.5–1.9，海拔低的整片沙滩都被染成泥色（真机：沙滩发褐、看不出是沙滩）。
+    float wet = 1.0 - smoothstep(0.15, 0.6, vCityWorld.y);
     float wM = wS * wet;
     wS *= 1.0 - wet;
     float sum = wA + wC + wG + wS + wM;
@@ -757,7 +724,7 @@ export class CityParts {
     diffuseColor.rgb *= 1.0 + 0.55 * strength * (nrm.x * 0.6 - nrm.y * 0.45);
     // 滩涂：向泥色偏、压暗，像刚退潮的湿岸。
     vec3 mud = texture2D(uMudC, p / 9.0).rgb;
-    diffuseColor.rgb = mix(diffuseColor.rgb, mud * 0.9, 0.5 * wM / sum * strength);
+    diffuseColor.rgb = mix(diffuseColor.rgb, mud * 0.9, 0.3 * wM / sum * strength);
   }
 #endif`);
     };
@@ -2194,7 +2161,8 @@ export class CityParts {
     if (!seaside || seaside.degraded) return;
     const valid = seaside.samples.filter((s) => s.valid);
     if (valid.length < 5) return;
-    const count = Math.min(3, Math.max(2, Math.floor(valid.length / 7)));
+    // 约每 4 个合法采样（~150 单位海岸）一座，最多 8 座；曾最多 3 座，长海岸上几乎看不见。
+    const count = Math.min(8, Math.max(2, Math.floor(valid.length / 4)));
     const structureMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff" });
     const stripeMaterial = new THREE.MeshLambertMaterial({ color: "#f4efe4" });
     const glowMaterial = new THREE.MeshBasicMaterial({ color: "#ffca7a", toneMapped: false });
@@ -2202,6 +2170,7 @@ export class CityParts {
     const box = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
     const structureMesh = new THREE.InstancedMesh(box, structureMaterial, count * 6);
     const stripeMesh = new THREE.InstancedMesh(box, stripeMaterial, count * 4);
+    stripeMesh.castShadow = true;
     const glowMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.5, 6, 5), glowMaterial, count);
     structureMesh.castShadow = true;
     const palettes = [
@@ -2257,11 +2226,11 @@ export class CityParts {
         const sx = x + outward.x * (1.4 + step * 0.7);
         const sz = z + outward.z * (1.4 + step * 0.7);
         this.compose(sx, sy, sz, yaw, 1.2, 0.12, 0.45);
-        stripeMesh.setMatrixAt(t * 3 + step, this.matrix);
+        stripeMesh.setMatrixAt(t * 4 + step, this.matrix);
       }
       // 条纹：小屋顶部一圈色环。
       this.compose(x, ground + legH + 0.22 + hutH * 0.65, z, yaw, hutW + 0.05, 0.3, 2.25);
-      stripeMesh.setMatrixAt(t * 3 + 2, this.matrix); // wait this would overwrite the 3rd step
+      stripeMesh.setMatrixAt(t * 4 + 3, this.matrix); // 曾写 t*3+2：覆盖第三级踏步，且相邻塔的槽位互相踩
       // 夜间指示灯（小屋顶部小光球）。
       this.compose(x, ground + legH + 0.22 + hutH + 0.18 + 0.7, z, 0, 1, 1, 1);
       glowMesh.setMatrixAt(t, this.matrix);
@@ -2273,6 +2242,71 @@ export class CityParts {
     glowMesh.visible = false; // 白天不亮，setNightGlow 驱动
     this.group.add(structureMesh, stripeMesh, glowMesh);
     this.disposables.push(box, structureMaterial, stripeMaterial, glowMaterial);
+  }
+
+  /** 沙滩设施：遮阳伞（伞杆 + 伞面）与躺椅，成组散布在干沙上——真机反馈「看不到沙滩和海滨设施」。
+   *  沿连续合法岸段每 ~9 单位一组，位置/颜色由确定性 hash 抖动；救生塔附近留空。 */
+  private buildBeachFurniture(): void {
+    const seaside = this.layout.seaside;
+    if (!seaside || seaside.degraded) return;
+    const wet = this.layout.coastalConfig?.wetSandWidth ?? 7;
+    const dry = this.layout.coastalConfig?.drySandWidth ?? 14;
+    type Spot = { x: number; z: number; yaw: number; seed: number };
+    const spots: Spot[] = [];
+    for (const run of validRuns(seaside)) for (let i = 1; i < run.length; i += 1) {
+      const a = run[i - 1]; const b = run[i];
+      const length = Math.hypot(b.waterline.x - a.waterline.x, b.waterline.z - a.waterline.z);
+      for (let d = 4; d < length; d += 9) {
+        const t = d / length;
+        const seed = hashSeed(`beach:${Math.round(a.waterline.x)}:${Math.round(a.waterline.z)}:${d}`);
+        if (seed < 0.18) continue; // 留一些空沙滩
+        const inx = a.inward.x + (b.inward.x - a.inward.x) * t; const inz = a.inward.z + (b.inward.z - a.inward.z) * t;
+        const norm = Math.hypot(inx, inz) || 1;
+        const depth = wet + 1.5 + seed * (dry - wet - 2.5);
+        const x = a.waterline.x + (b.waterline.x - a.waterline.x) * t + (inx / norm) * depth;
+        const z = a.waterline.z + (b.waterline.z - a.waterline.z) * t + (inz / norm) * depth;
+        if (this.layout.terrain.height(x, z) < 0.2) continue;
+        spots.push({ x, z, yaw: Math.atan2(inx, inz), seed });
+      }
+    }
+    if (!spots.length) return;
+    const colors = ["#ff5fa8", "#00c2d1", "#ffb03a", "#ffffff", "#7a5cff", "#ff6b4a"];
+    const poleGeometry = new THREE.CylinderGeometry(0.07, 0.07, 2.4, 5).translate(0, 1.2, 0);
+    const canopyGeometry = new THREE.ConeGeometry(1.6, 0.7, 8).translate(0, 2.55, 0);
+    const box = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+    const poleMaterial = new THREE.MeshLambertMaterial({ color: "#f2ede2" });
+    const canopyMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff" });
+    const loungerMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff" });
+    const poles = new THREE.InstancedMesh(poleGeometry, poleMaterial, spots.length);
+    const canopies = new THREE.InstancedMesh(canopyGeometry, canopyMaterial, spots.length);
+    const loungers = new THREE.InstancedMesh(box, loungerMaterial, spots.length * 2);
+    canopies.castShadow = true;
+    let lounger = 0;
+    spots.forEach((spot, i) => {
+      const y = this.layout.terrain.height(spot.x, spot.z);
+      this.compose(spot.x, y, spot.z, spot.yaw + spot.seed * 0.6, 1, 1, 1);
+      poles.setMatrixAt(i, this.matrix);
+      canopies.setMatrixAt(i, this.matrix);
+      canopies.setColorAt(i, this.color.set(colors[Math.floor(spot.seed * 997) % colors.length]));
+      // 两张躺椅并排、朝海（局部 z = 内向，椅子摆在伞的朝海一侧）。
+      const sx = Math.sin(spot.yaw); const sz = Math.cos(spot.yaw);
+      for (const side of [-0.7, 0.7]) {
+        const lx = spot.x - sx * 1.6 + sz * side; const lz = spot.z - sz * 1.6 - sx * side;
+        this.compose(lx, y + 0.05, lz, spot.yaw, 0.6, 0.28, 1.9);
+        loungers.setMatrixAt(lounger, this.matrix);
+        loungers.setColorAt(lounger, this.color.set(spot.seed > 0.6 ? "#fff4ec" : "#4fd1d9"));
+        lounger += 1;
+      }
+    });
+    loungers.count = lounger;
+    for (const mesh of [poles, canopies, loungers]) {
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.name = "city-beach-furniture";
+      mesh.receiveShadow = true;
+    }
+    this.group.add(poles, canopies, loungers);
+    this.disposables.push(poleGeometry, canopyGeometry, box, poleMaterial, canopyMaterial, loungerMaterial);
   }
 
   private buildTrees(): THREE.InstancedMesh {

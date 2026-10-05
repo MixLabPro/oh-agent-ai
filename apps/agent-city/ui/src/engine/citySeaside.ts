@@ -302,6 +302,18 @@ function offsetSegments(band: SeasideBand, pointOf: (sample: SeasideSample) => V
   return segments;
 }
 
+/** 连续合法采样段（≥2 个）：沙滩多边形与沙滩设施沿它铺，无效采样处断开。 */
+export function validRuns(band: SeasideBand): SeasideSample[][] {
+  const runs: SeasideSample[][] = [];
+  let current: SeasideSample[] = [];
+  for (const sample of band.samples) {
+    if (sample.valid) current.push(sample);
+    else { if (current.length >= 2) runs.push(current); current = []; }
+  }
+  if (current.length >= 2) runs.push(current);
+  return runs;
+}
+
 export const promenadeSegments = (band: SeasideBand): Vec2[][] => offsetSegments(band, (sample) => sample.promenade);
 /** Valid vehicle-road centerlines; invalid river/terrain/reservation samples split the route. */
 export const boulevardSegments = (band: SeasideBand): Vec2[][] => offsetSegments(band, (sample) => sample.boulevard);
