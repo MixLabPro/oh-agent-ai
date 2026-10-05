@@ -25,7 +25,7 @@ const mod = { exports: {} };
 vm.runInNewContext(out.outputFiles[0].text, { module: mod, exports: mod.exports, require, process, console, setTimeout, clearTimeout, Float64Array, Float32Array, Uint16Array, Uint32Array, Int32Array, Uint8Array, Map, Set, Math, JSON });
 const { layoutCity, planCinematic } = mod.exports;
 
-const harnesses = ["codex", "claude-code", "plugin:zcode", "dsh"];
+const harnesses = ["codex", "claude-code", "harness:zcode", "dsh"];
 const count = 700;
 const buildings = Array.from({ length: count }, (_, index) => ({
   id: `session:${index}`, districtId: harnesses[index % harnesses.length], height: 6 + (index * 37) % 90,

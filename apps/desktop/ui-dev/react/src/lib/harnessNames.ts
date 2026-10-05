@@ -10,6 +10,9 @@ import { hasNativeBridge, invoke } from "./tauri";
 const BUILTIN: Record<string, string> = {
   "claude-code": "Claude Code", codex: "Codex", dsh: "DeepSeek Harness", workbuddy: "WorkBuddy",
   openclaw: "OpenClaw", hermes: "Hermes", pi: "Pi",
+  // trust 审计面（zcode/minimax checkpoint 适配器）用裸 slug 作为身份，不带 `harness:` 前缀；
+  // 显示名与 Rust 侧 builtin_profiles 保持一致，避免 findings 行显示原始小写 id。
+  zcode: "ZCode", "minimax-code": "MiniMax Code",
 };
 
 let manifestNames: Record<string, string> = {};

@@ -23,7 +23,9 @@ export type DistrictPalette = {
 
 export function paletteFor(harnessId: string): DistrictPalette {
   const theme = activeTheme();
-  return theme.harnesses[harnessId] ?? theme.fallback;
+  // 迁移期兼容：旧事实/旧缓存里的 `plugin:` 前缀折算到现行 `harness:` 命名空间再查表。
+  const key = harnessId.startsWith("plugin:") ? `harness:${harnessId.slice("plugin:".length)}` : harnessId;
+  return theme.harnesses[key] ?? theme.fallback;
 }
 
 function canvas2d(width: number, height: number): { canvas: RenderCanvas; ctx: RenderContext2D } {

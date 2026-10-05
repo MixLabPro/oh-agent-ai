@@ -15,7 +15,7 @@ const mod = { exports: {} };
 vm.runInNewContext(out.outputFiles[0].text, { module: mod, exports: mod.exports, process, console, setTimeout, clearTimeout });
 const { layoutCity, MIAMI_COASTAL } = mod.exports;
 
-function model(count, harnesses = ["codex", "claude-code", "dsh", "plugin:zcode"]) {
+function model(count, harnesses = ["codex", "claude-code", "dsh", "harness:zcode"]) {
   const buildings = Array.from({ length: count }, (_, index) => ({
     id: `session:${index}`, districtId: harnesses[index % harnesses.length], height: 2.6 + index % 46,
     footprint: 7.2, startedAt: index * 1000,
@@ -83,7 +83,7 @@ validate(expanded, expandedInput);
 for (const [id, address] of Object.entries(addresses(first))) assert.deepEqual(addresses(expanded)[id], address, "pagination retains existing addresses");
 const changed = { ...expandedInput, buildings: expandedInput.buildings.map((building) => ({ ...building, height: 48, startedAt: 0 })) };
 assert.deepEqual(addresses(layoutCity(changed, expanded)), addresses(expanded), "token growth and replay timing do not move buildings");
-const additionalHarness = model(1400, ["codex", "claude-code", "dsh", "plugin:zcode", "new-harness"]);
+const additionalHarness = model(1400, ["codex", "claude-code", "dsh", "harness:zcode", "new-harness"]);
 validate(layoutCity(additionalHarness, expanded), additionalHarness);
 // 城市配套（学校/商场/医院）：数量随会话规模增长、只占没有会话楼的整街区、落成时刻随规模单调、刷新不搬家。
 const civicCount = (count) => layoutCity(model(count)).civics.length;

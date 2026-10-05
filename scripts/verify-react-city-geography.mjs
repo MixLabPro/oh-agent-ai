@@ -16,7 +16,7 @@ const mod = { exports: {} };
 vm.runInNewContext(out.outputFiles[0].text, { module: mod, exports: mod.exports, process, console, Math, Map, Set });
 const { layoutCity } = mod.exports;
 
-const harnesses = ["codex", "claude-code", "dsh", "plugin:zcode"];
+const harnesses = ["codex", "claude-code", "dsh", "harness:zcode"];
 const model = (count) => {
   const buildings = Array.from({ length: count }, (_, i) => ({ id: `s${i}`, districtId: harnesses[i % harnesses.length], height: 3 + (i * 37) % 44, footprint: 7.2, startedAt: i * 1000 }));
   return { buildings, districts: harnesses.map((id) => ({ id, label: id, sessionCount: buildings.filter((b) => b.districtId === id).length, anomaly: null })) };

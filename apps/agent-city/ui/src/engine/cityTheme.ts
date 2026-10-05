@@ -76,13 +76,15 @@ const MIAMI: CityTheme = {
   trunk: "#a98462",
   foliage: "#2fbf77",
   streetTreeSpacing: 17,
-  // 四个执行环境各占一个色相（珊瑚/青/薄荷/紫），粉彩楼身 + 饱和屋顶，保证一眼可分。
+  // 每个执行环境一个色相（珊瑚/青/薄荷/靛/紫/粉），粉彩楼身 + 饱和屋顶，保证一眼可分。
+  // manifest 安装的宿主一律按 `harness:<slug>` 键；`plugin:` 是迁移期旧前缀，查表时折算。
   harnesses: {
     "claude-code": { wall: "#ffd2c4", roof: "#ff6f9f", accent: "#ff6f6f", park: "#7fd6a4" },
     codex: { wall: "#c4f4f6", roof: "#3cc3d2", accent: "#27c4d6", park: "#7fd6a4" },
     dsh: { wall: "#c8f7e0", roof: "#45d0a2", accent: "#34d29c", park: "#7fd6a4" },
-    "plugin:zcode": { wall: "#e3d2ff", roof: "#9a6cf5", accent: "#9a6bff", park: "#7fd6a4" },
-    "minimax-code": { wall: "#ffc9ea", roof: "#ea58ac", accent: "#ff5cb8", park: "#7fd6a4" },
+    workbuddy: { wall: "#c9d8ff", roof: "#5a7bff", accent: "#4d7cff", park: "#7fd6a4" },
+    "harness:zcode": { wall: "#e3d2ff", roof: "#9a6cf5", accent: "#9a6bff", park: "#7fd6a4" },
+    "harness:minimax-code": { wall: "#ffc9ea", roof: "#ea58ac", accent: "#ff5cb8", park: "#7fd6a4" },
   },
   fallback: { wall: "#f6e6cf", roof: "#d9a98c", accent: "#e8a07a", park: "#86d6a6" },
 };

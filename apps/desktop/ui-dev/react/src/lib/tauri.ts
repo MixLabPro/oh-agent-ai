@@ -2319,7 +2319,7 @@ export async function readFindings(cursor: string | null = null): Promise<Findin
     totals: { issues: 2, findings: 2, critical: 1, warning: 1, info: 0, sessions: 2, sessions_total: 5 },
     rules: [{ rule: "SV709", severity: "critical", category: "object_storage_egress", hits: 1, sessions: 1 }, { rule: "PRICE_COVERAGE", severity: "warning", category: "billing", hits: 1, sessions: 1 }],
     issues: [
-      { group_id: "fnv1a64:0123456789abcdef", action_kind: "behavior", rule: "SV709", harness: "plugin:zcode", evidence_class: "egress", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "critical", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:2222222222222222", observed_first_at_ms: 1789891200000, observed_last_at_ms: 1789891200000, evidence_level: "E3", stage: "egress_attempted", evidence_origin: "network_metadata", scope_classes: ["git_history"], observation_count: 1, file_count: null, byte_count: 3145728, destination_class: "object_storage", confidence: "high" }], read_only: true, manual_follow_up: false },
+      { group_id: "fnv1a64:0123456789abcdef", action_kind: "behavior", rule: "SV709", harness: "zcode", evidence_class: "egress", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "critical", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:2222222222222222", observed_first_at_ms: 1789891200000, observed_last_at_ms: 1789891200000, evidence_level: "E3", stage: "egress_attempted", evidence_origin: "network_metadata", scope_classes: ["git_history"], observation_count: 1, file_count: null, byte_count: 3145728, destination_class: "object_storage", confidence: "high" }], read_only: true, manual_follow_up: false },
       { group_id: "fnv1a64:1111111111111111", action_kind: "billing", rule: "PRICE_COVERAGE", harness: "minimax-code", evidence_class: "billing", count: 1, first_seen_at_ms: 1789891200000, last_seen_at_ms: 1789891200000, severity: "warning", status_rollup: { open: 1, later: 0, acknowledged: 0, resolved: 0, not_applicable: 0 }, sessions_count: 1, sample_evidence: [{ available: true, reference: "fnv1a64:3333333333333333", observed_first_at_ms: 1789891200000, observed_last_at_ms: 1789891200000, evidence_level: null, stage: null, evidence_origin: "local_artifact", scope_classes: [], observation_count: 1, file_count: null, byte_count: null, destination_class: null, confidence: "medium" }], read_only: false, manual_follow_up: true },
     ], next_cursor: null, refreshed: false,
   });
@@ -2336,8 +2336,8 @@ export async function readDecisionMatrix(): Promise<DecisionMatrixReport> {
   const handler = globalTauri()?.core?.invoke;
   if (!handler) return parseDecisionMatrix({
     schema_version: "agent-vitals-decision-matrix/v1", status: "ok", month: "2026-09",
-    rows: [{ harness: "plugin:zcode", model_id: "glm-5", provider_id: "zhipu", sessions: 4, tokens: { uncached_input: 1200, cache_read: 8800, cache_write: 300, output: 900, total: 11200 }, cache_hit_ratio: 0.8544, has_subscription: false, waste_rate: null, amounts: [{ amount_minor: 781, currency: "CNY", basis: "metered_estimate" }], top_sessions: [{ session_ref: "sr_0123456789", span_first_ms: 1789891200000, span_last_ms: 1789894800000, tokens_total: 6400, failures: 2 }], harness_behavior: { SV610: 2 }, limit_pressure: { hits: 1, per_session: 0.25 }, cost_provider_unresolved: false }],
-    findings_summary: [{ kind: "marathon", session_ref: "sr_0123456789", span_hours: 25.2, tokens_total: 11200, failures: 2, combo: { harness: "plugin:zcode", model_id: "glm-5" }}],
+    rows: [{ harness: "harness:zcode", model_id: "glm-5", provider_id: "zhipu", sessions: 4, tokens: { uncached_input: 1200, cache_read: 8800, cache_write: 300, output: 900, total: 11200 }, cache_hit_ratio: 0.8544, has_subscription: false, waste_rate: null, amounts: [{ amount_minor: 781, currency: "CNY", basis: "metered_estimate" }], top_sessions: [{ session_ref: "sr_0123456789", span_first_ms: 1789891200000, span_last_ms: 1789894800000, tokens_total: 6400, failures: 2 }], harness_behavior: { SV610: 2 }, limit_pressure: { hits: 1, per_session: 0.25 }, cost_provider_unresolved: false }],
+    findings_summary: [{ kind: "marathon", session_ref: "sr_0123456789", span_hours: 25.2, tokens_total: 11200, failures: 2, combo: { harness: "zcode", model_id: "glm-5" }}],
     limitations: ["waste_rate_unavailable", "harness_behavior_harness_level", "amounts_currency_separated", "fingerprint_link_deferred"],
   });
   return parseDecisionMatrix(await handler("decision_matrix_safe", { month: null }));
@@ -2494,7 +2494,7 @@ export async function readRouteQuality(days: 30 | 90 | 365): Promise<RouteQualit
     now_ms: now,
     families_vocabulary: [...routeFamilies],
     harnesses: [{
-      harness: "plugin:zcode",
+      harness: "harness:zcode",
       has_baseline: true,
       native_families: ["glm"],
       totals: { requests: 12, sessions: 3 },

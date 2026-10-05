@@ -220,3 +220,6 @@ jobs:
       - name: City 专项守卫
         working-directory: apps/desktop/ui-dev
         run: npm run verify:city
+      - name: 术语与命名边界守卫
+        working-directory: apps/desktop/ui-dev
+        run: npm run verify:terminology
