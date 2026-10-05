@@ -37,8 +37,9 @@ export const ACTIVE_WINDOW_MS = 10 * 60_000;
 
 /** 单独成楼的 session 上限；超出部分按区聚合为背景楼群（massing）。 */
 export const RENDER_CAP = 1_400;
-/** 数据装载上限（分页累计），避免超大历史窗口线性拖垮首屏。 */
-export const LOAD_CAP = 4_500;
+// 数据装载上限不在这里：宿主查询 `crates/agent-vitals-query/src/query/app_local.rs::SESSION_CAP`（最近 500 条）
+// 是唯一真相源，UI 只显示宿主回报的 coverage.returned/total。曾在此留一个从未被引用的 LOAD_CAP = 4_500，
+// 与界面文案「最多 500 条」互相矛盾（CITY_DATA_LEGIBILITY_SPEC P6）。
 
 export type BuildingArchetype = "tower" | "slab" | "midrise" | "block" | "landmark";
 

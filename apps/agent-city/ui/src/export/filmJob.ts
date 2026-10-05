@@ -58,7 +58,7 @@ export function runFilmJob(job: FilmJob, options: {
       } else if (message.type === "progress" && Number.isInteger(message.frame) && Number.isInteger(message.total) && message.total > 0 && message.frame >= 0 && message.frame <= message.total) {
         try { options.onProgress(message.frame, message.total); } catch { finish(new Error("background_export_failed")); }
       } else if (message.type === "complete") {
-        if (!(message.blob instanceof Blob) || message.blob.type !== "video/mp4" || message.blob.size === 0) finish(new Error("background_export_failed"));
+        if (!(message.blob instanceof Blob) || (message.blob.type !== "video/mp4" && message.blob.type !== "video/webm") || message.blob.size === 0) finish(new Error("background_export_failed"));
         else finish(undefined, message.blob);
       } else if (message.type === "error") finish(new Error(message.code));
     };

@@ -4,8 +4,8 @@ import { observeLocale, pluginLocale } from "./host";
 // Plugin-owned presentation catalog. Business DTOs and user excerpts are not translated.
 const english: Record<string, string> = {
   "收起回放": "Collapse replay",
-  "当前环境不支持 H.264 MP4 编码，可使用拍照；不会生成改名的 WebM 文件。": "This environment does not support H.264 MP4 encoding. Photos remain available; no renamed WebM file will be produced.",
-  "已载入": "Loaded", "统计及回放仅覆盖已载入会话；最多 500 条近期会话，不代表完整历史。": "Statistics and replay cover loaded sessions only: up to 500 recent sessions, not complete history.",
+  "当前环境没有可用的视频编码器（H.264 / VP9 / VP8），可使用拍照。": "No video encoder is available here (H.264 / VP9 / VP8). Photos remain available.",
+  "已载入": "Loaded",
   "时间范围": "Time range", "画质": "Quality", "自动": "Auto", "高画质": "High", "节能": "Eco",
   "隐藏标签": "Hide labels", "显示标签": "Show labels", "重置视角": "Reset view", "航拍": "Aerial tour", "停止航拍": "Stop tour",
   "正在拍照": "Taking photo", "拍照": "Photo", "导出视频": "Export video", "取消导出": "Cancel export", "取消导出 · ": "Cancel export · ",
@@ -28,7 +28,7 @@ const english: Record<string, string> = {
   "岛屿种子": "Island seed", "应用种子": "Apply seed", "确认重新生成（4 秒内）": "Confirm regeneration (within 4 sec)", "重新生成岛屿": "Regenerate island",
   "只改变地形与布局，不删除会话数据。种子保存于插件私有本地状态。": "Changes terrain and layout only; session data is retained. The seed is stored in private local plugin state.",
   "航拍与视频长度": "Tour and video length", "短片": "Short", "完整航线": "Full route", "选择会话（键盘入口）": "Select session (keyboard)", "请选择": "Select a session",
-  "拍照保存 PNG；视频后台逐帧生成 30 FPS MP4（H.264），并显示实际生成画面的低帧率预览。硬件渲染为 1080p，软件渲染降至 360p。导出中暂停拍照，避免并发导出和保存；离开 City 会取消任务。不上传数据。": "Photos save as PNG. Video renders frame by frame in the background to 30 FPS MP4 (H.264) with previews of actual output frames. Hardware: 1080p; software: 360p. Photos are disabled during video export. Leaving City cancels export. No data is uploaded.",
+  "拍照保存 PNG；视频后台逐帧生成 30 FPS MP4（H.264；环境不支持时改为 WebM），并显示实际生成画面的低帧率预览。硬件渲染为 1080p，软件渲染降至 360p。导出中暂停拍照，避免并发导出和保存；离开 City 会取消任务。不上传数据。": "Photos save as PNG. Video renders frame by frame in the background to 30 FPS MP4 (H.264; WebM where H.264 is unavailable) with previews of actual output frames. Hardware: 1080p; software: 360p. Photos are disabled during video export. Leaving City cancels export. No data is uploaded.",
   "当前环境不支持后台视频导出；可使用拍照。": "Background video export is unavailable; photos are supported.",
   "航拍导出预览": "Aerial export preview", "后台实际生成的航拍画面": "Actual background-rendered aerial frame", "航拍导出 ": "Aerial export ", "% · 关闭设置不取消导出": "% · Closing settings does not cancel export",
   " · 软件渲染": " · Software rendering", "实际生成帧 · 预览最多 2 FPS，成片 30 FPS": "Actual output frames · Preview up to 2 FPS; video 30 FPS", "关闭提示": "Dismiss",

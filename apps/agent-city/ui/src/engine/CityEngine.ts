@@ -25,6 +25,7 @@ import { loadBiomeFlora } from "./cityFlora";
 import { planCinematic, type CinematicCut, type CinematicPlan } from "./cityCinematic";
 import { drawFilmOverlay, type FilmCardText } from "./cityFilmOverlay";
 import { Mp4Writer } from "./mp4Muxer";
+import { WebmFilmWriter, type WebmCodec } from "./webmMuxer";
 import { layoutCity, type CityLayout, type BackdropMode } from "./cityLayout";
 import { CityParts, type QualityLevel } from "./cityParts";
 import { skyStateAt, type CitySkyPreset } from "./citySky";
@@ -920,7 +921,7 @@ export class CityEngine {
     this.options.onCinematic?.(0, state.plan, true);
   }
 
-  /** 逐帧导出航拍（H.264 MP4）。
+  /** 逐帧导出航拍（H.264 MP4；无 H.264 时 VP9/VP8 WebM，见 F5）。
    *  确定性：不读墙钟——每一帧用固定步长 1/fps 推进 elapsed、相机、昼夜与所有动画，再渲染、叠字、交给编码器；
    *  时间戳取自帧序号，所以渲染比实时慢多少都不影响成片速度（MediaRecorder 做不到这一点）。
    *  需要 WebCodecs H.264；不支持时明确报错，不伪装或静默切换容器。 */
@@ -935,6 +936,7 @@ export class CityEngine {
     if (!this.layout || !this.model || !this.parts) throw new Error("city not ready");
     if (typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined") throw new Error("WebCodecs unavailable");
     let config: VideoEncoderConfig | null = null;
+    let container: { kind: "mp4" } | { kind: "webm"; codec: WebmCodec } = { kind: "mp4" };
     // Level 4.0 covers 1080p30. Baseline fallback accommodates stricter encoders.
     for (const codec of ["avc1.640028", "avc1.420028"]) {
       const candidate: VideoEncoderConfig = { codec, width: options.width, height: options.height,
@@ -942,14 +944,22 @@ export class CityEngine {
       const support = await VideoEncoder.isConfigSupported(candidate);
       if (support.supported) { config = candidate; break; }
     }
-    if (!config) throw new Error("mp4_encoder_unavailable");
+    // F5：没有 H.264（部分 Linux/Chromium 构建）时退到 VP9/VP8 WebM——明确的 WebM 文件，不是改名的 MP4。
+    if (!config) {
+      for (const [codec, webm] of [["vp09.00.10.08", "V_VP9"], ["vp8", "V_VP8"]] as const) {
+        const candidate: VideoEncoderConfig = { codec, width: options.width, height: options.height, bitrate: options.bitrate, framerate: options.fps, latencyMode: "realtime" };
+        const support = await VideoEncoder.isConfigSupported(candidate);
+        if (support.supported) { config = candidate; container = { kind: "webm", codec: webm }; break; }
+      }
+    }
+    if (!config) throw new Error("video_encoder_unavailable");
 
     // 暂停实时循环，接管渲染。
     this.stopLoop();
     const wasQuality = this.quality;
     const savedElapsed = this.elapsed;
     let encoder: VideoEncoder | null = null;
-    let writer: Mp4Writer | null = null;
+    let writer: Mp4Writer | WebmFilmWriter | null = null;
     let completed = false;
     try {
     this.exportSize = { width: options.width, height: options.height };
@@ -969,7 +979,7 @@ export class CityEngine {
     if (!plan) throw new Error("cinematic unavailable");
     const film = createRenderCanvas(options.width, options.height);
     const ctx = renderContext2D(film);
-    writer = new Mp4Writer(options.fps, options.width, options.height);
+    writer = container.kind === "mp4" ? new Mp4Writer(options.fps, options.width, options.height) : new WebmFilmWriter(container.codec, options.fps, options.width, options.height);
     await writer.start();
     let encodeError: unknown = null;
     let encodedBytes = 0;

@@ -63,7 +63,7 @@ self.onmessage = async (event: MessageEvent<{ type: "start"; job: FilmJob } | { 
     });
     send({ type: "complete", blob });
   } catch (error) {
-    const known = ["invalid_export_job", "background_export_unavailable", "background_webgl_unavailable", "export_memory_limit", "mp4_encoder_unavailable"];
+    const known = ["invalid_export_job", "background_export_unavailable", "background_webgl_unavailable", "export_memory_limit", "video_encoder_unavailable"];
     send({ type: "error", code: error instanceof Error && known.includes(error.message) ? error.message : "background_export_failed" });
   } finally { clearInterval(pulse); engine?.dispose(); }
 };

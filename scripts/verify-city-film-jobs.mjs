@@ -86,10 +86,14 @@ task.worker.emit({ type: "error", code: "export_memory_limit" });
 await assert.rejects(task.promise, /export_memory_limit/);
 task = start(); task.worker.emit(null);
 await assert.rejects(task.promise, /background_export_failed/);
-task = start(); task.worker.emit({ type: "complete", blob: new Blob(["wrong container"], { type: "video/webm" }) });
+// F5（CITY_DATA_LEGIBILITY_SPEC）：无 H.264 的环境明确导出 WebM——video/webm 是合法成片；其它容器仍拒收。
+const webm = new Blob(["synthetic webm"], { type: "video/webm" });
+task = start(); task.worker.emit({ type: "complete", blob: webm });
+assert.equal(await task.promise, webm);
+task = start(); task.worker.emit({ type: "complete", blob: new Blob(["wrong container"], { type: "video/quicktime" }) });
 await assert.rejects(task.promise, /background_export_failed/);
-task = start(); task.worker.emit({ type: "error", code: "mp4_encoder_unavailable" });
-await assert.rejects(task.promise, /mp4_encoder_unavailable/);
+task = start(); task.worker.emit({ type: "error", code: "video_encoder_unavailable" });
+await assert.rejects(task.promise, /video_encoder_unavailable/);
 task = start(); task.worker.onerror({ preventDefault() {} });
 await assert.rejects(task.promise, /background_export_failed/);
 const aborted = new AbortController(); aborted.abort();
@@ -125,3 +129,19 @@ await assert.rejects(writer.drain(), /muxer failure/); await writer.cancel();
 writeFailure = false; writer = new muxerModule.exports.Mp4Writer(30, 320, 180); await writer.start(); await writer.cancel();
 await assert.rejects(writer.drain(), { name: "AbortError" });
 console.log("City MP4 muxer: passed (AVC track, metadata, ordered writes, draining, MP4 MIME, error and cancel cleanup).");
+
+// F5（CITY_DATA_LEGIBILITY_SPEC）：WebM 回退封装与 Mp4Writer 同接口，产出真正的 WebM（EBML 头 + video/webm）。
+const webmCode = buildSync({ entryPoints: [new URL("../apps/agent-city/ui/src/engine/webmMuxer.ts", import.meta.url).pathname],
+  bundle: true, write: false, format: "cjs" }).outputFiles[0].text;
+const webmModule = { exports: {} };
+vm.runInNewContext(webmCode, { module: webmModule, exports: webmModule.exports, Blob, DOMException, Uint8Array, DataView, ArrayBuffer, TextEncoder, Math, Number });
+const chunk = (timestamp, type) => ({ timestamp, type, byteLength: 4, copyTo(target) { target.set([1, 2, 3, 4]); } });
+let webmWriter = new webmModule.exports.WebmFilmWriter("V_VP9", 30, 320, 180); await webmWriter.start();
+webmWriter.addChunk(chunk(0, "key")); webmWriter.addChunk(chunk(33333, "delta"));
+const webmBlob = await webmWriter.finish();
+assert.equal(webmBlob.type, "video/webm");
+const head = new Uint8Array(await webmBlob.arrayBuffer()).slice(0, 4);
+assert.deepEqual([...head], [0x1a, 0x45, 0xdf, 0xa3], "WebM starts with the EBML magic, not a renamed MP4");
+webmWriter = new webmModule.exports.WebmFilmWriter("V_VP8", 30, 320, 180); await webmWriter.start(); await webmWriter.cancel();
+await assert.rejects(webmWriter.drain(), { name: "AbortError" });
+console.log("City WebM fallback writer: passed (Mp4Writer-compatible interface, EBML header, video/webm MIME, cancel).");

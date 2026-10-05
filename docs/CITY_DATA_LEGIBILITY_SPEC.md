@@ -1,6 +1,6 @@
 # Agent City：数据可读性回归修复 SPEC（2026-10-05）
 
-状态：批次 1（F1/F3/F4）、批次 2（F2）已实现（2026-10-05）；批次 3 待做。基线：`main` @ `c035cf9d`（城市已拆为独立包 `apps/agent-city/ui/`，VICE 海滨批次、场景优先 HUD、后台导出 worker 均已合入）。
+状态：批次 1–3 已实现（2026-10-05）；F6 的「提高上限/恢复分页」与 F7 的「稳定键重构」留作后续（见各节「实现注」）。基线：`main` @ `c035cf9d`（城市已拆为独立包 `apps/agent-city/ui/`，VICE 海滨批次、场景优先 HUD、后台导出 worker 均已合入）。
 范围：规划层的「背景楼」策略、回放叙事、会话载入上限、视频导出兼容性、i18n 键。**不改** seed→地形、街网骨架、城区楔形、配套/花园/地标选址、VICE 海滨带与 Art Deco 造型。
 
 ## 1. 背景：两版设计的取舍
@@ -102,9 +102,15 @@ if (coastal?.profile === "miami-coastal") {           // CityEngine.ts:448 恒�
 - 文案改为由常量插值生成，不再写死数字；`verify-react-city-data.mjs` 增加断言：文案数字 == 生效上限。
 - 若生效上限确为 500：恢复旧版「366 天窗口、旧→新分页懒加载直到 `LOAD_CAP`」（`aa8643ab`）。
 
+实现注（F5）：候选编码器在 H.264 之后追加 VP9 → VP8，命中时走 `webmMuxer.ts::WebmFilmWriter`（从 `8092fa79` 恢复的封装器 + 与 `Mp4Writer` 同接口的适配层）；文件名与 MIME 随实际容器（`.webm`/`video/webm`），界面写明「不支持时改为 WebM」——不改名、不伪装。错误码 `mp4_encoder_unavailable` → `video_encoder_unavailable`（三种编码器都不可用时）。
+
+实现注（F6）：查明真相源是宿主 `crates/agent-vitals-query/src/query/app_local.rs::SESSION_CAP = 500`（按最近活动倒序 LIMIT）；UI 显示宿主回报的 `coverage.returned/total`，与真实截断一致。矛盾来自 `cityModel.ts` 里从未被引用的 `LOAD_CAP = 4_500` 和一条无人使用的「最多 500 条」目录文案——两者已删除。**提高 500 上限或恢复按时间窗口分页需要宿主（Rust）与 `city:v2` 协议改动**，不在本次范围，另开任务。
+
 ### F7 i18n 键（解决 P7）
 
 `i18n.tsx` 改为稳定键（`city.backdrop.note` 等）→ `{ zh, en }`；新增守卫：所有 `t(...)` 调用的键在两种语言都存在（复用 `verify-react-i18n-billing.mjs` 的检查方式）。
+
+实现注（F7）：先落守卫 `scripts/verify-city-i18n-catalog.mjs`——抽出 `.tsx` 里所有含中文的字面量与 JSX 文本，逐条要求英文目录有对应（或被 `cityText` 的替换链/就地三元覆盖）。它立刻抓到了本次 F5 修改导出说明时英文失配的真实回归。全量改成稳定键（`city.backdrop.note` → `{zh,en}`）牵涉全部 UI 文案，留作后续重构；守卫已消除「静默丢失」这一风险本身。
 
 ## 5. 不变契约
 

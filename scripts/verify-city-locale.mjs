@@ -18,7 +18,7 @@ const { cityText, cityView } = module.exports;
 for (const [zh, en] of [["城市设置", "City settings"], ["执行环境城区", "Harness districts"],
   ["30 天", "30 days"], ["取消导出 · 25%", "Cancel export · 25%"],
   ["暂停回放", "Pause replay"], ["会话详情", "Session details"],
-  ["当前环境不支持 H.264 MP4 编码，可使用拍照；不会生成改名的 WebM 文件。", "This environment does not support H.264 MP4 encoding. Photos remain available; no renamed WebM file will be produced."]]) {
+  ["当前环境没有可用的视频编码器（H.264 / VP9 / VP8），可使用拍照。", "No video encoder is available here (H.264 / VP9 / VP8). Photos remain available."]]) {
   assert.equal(cityText(zh, "en"), en);
   assert.equal(cityText(zh, "zh-Hans"), zh);
 }
