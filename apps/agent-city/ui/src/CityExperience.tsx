@@ -200,7 +200,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
     focusBuilding: (id: string) => engine.current?.focusBuilding(id) };
 }
 
-export function CityExperience({ ui, disabled, cinema }: { ui: ReturnType<typeof useCityExperience>; disabled: boolean; cinema: boolean }) {
+export function CityExperience({ ui, disabled, cinema, status }: { ui: ReturnType<typeof useCityExperience>; disabled: boolean; cinema: boolean; status?: string }) {
   const language = useCityLanguage();
   const model = ui.model;
   const selected = model?.buildings.find((b) => b.id === ui.selected);
