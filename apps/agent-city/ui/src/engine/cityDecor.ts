@@ -50,7 +50,7 @@ export function decorKindForName(name: string): string | null {
   if (name.startsWith("city-public-sites-")) return "site";
   if (name === "city-vice-context-facades" || name === "city-vice-context-rooftops") return "backdrop";
   if (name === "city-massing") return "massing";
-  if (name === "city-lifeguard-towers" || name === "city-yachts" || name === "city-beach-furniture" || name === "city-beach-people" || name === "city-volleyball-courts") return "seaside";
+  if (name === "city-lifeguard-towers" || name === "city-yachts" || name === "city-beach-furniture" || name === "city-beach-people" || name === "city-volleyball-courts" || name === "city-promenade-props") return "seaside";
   if (name === "city-sea-volcano") return "volcano";
   return null;
 }

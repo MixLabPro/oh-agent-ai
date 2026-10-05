@@ -11,7 +11,6 @@ import type { CityLayout } from "./cityLayout";
 import { hashSeed } from "../cityModel";
 import { activeTheme, groundFor } from "./cityTheme";
 import { roadPaintPlan } from "./cityRoadPaint";
-import { validRuns } from "./citySeaside";
 import { createRenderCanvas, renderContext2D, type RenderCanvas, type RenderContext2D } from "./renderCanvas";
 
 export type DistrictPalette = {
@@ -203,24 +202,8 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
     polygon(block.polygon.map((p)=>({x:block.x+(p.x-block.x)*0.88,z:block.z+(p.z-block.z)*0.88})),block.parcels.length?hardscape:lawnTint);
     for (const parcel of block.parcels) orientedRect(parcel.x,parcel.z,parcel.width-0.3,parcel.depth-0.3,parcel.yaw,viceMiami ? viceLotPaving[parcel.zone] : "#bcb8ac");
   }
-  // 海滨沙滩：画进地面贴图、在道路之前——道路压在沙滩外缘之上。曾由地形 shader 在采样点附近
-  // 混沙色：它画在贴图之后，把滨海大道整段盖成沙色（真机只剩断续的虚线），且只覆盖每个采样点
-  // ±10–18 的斑块（采样相距 30–50）——看不到连续的沙滩。
-  const seaside = layout.seaside;
-  if (seaside && !seaside.degraded) {
-    const sea = (sample: { waterline: {x:number;z:number}; inward: {x:number;z:number} }, d: number) =>
-      ({ x: sample.waterline.x + sample.inward.x * d, z: sample.waterline.z + sample.inward.z * d });
-    const wet = layout.coastalConfig?.wetSandWidth ?? 7;
-    const dry = layout.coastalConfig?.drySandWidth ?? 14;
-    for (const run of validRuns(seaside)) {
-      const strip = (from: number, to: number, color: string) =>
-        polygon([...run.map((sample) => sea(sample, from)), ...[...run].reverse().map((sample) => sea(sample, to))], color);
-      strip(-6, dry + 1.5, "#f4e7c6");   // 干沙（比岛面亮一档，沙滩一眼可辨）
-      strip(-6, wet, "#d2bb8f");         // 湿沙
-      strip(-6, 1.2, "#e9f1ee");         // 浪花线
-      strip(dry + 1.5, dry + 3, "#cbb98f"); // 沙滩与步道之间的矮墙/路缘
-    }
-  }
+  // 沙滩不画进这张贴图：2048px 铺满全岛只有 ~1.3px/单位，沙带与水线边缘糊成一片（真机近景）。
+  // 沙滩改成贴地网格（cityParts.buildBeachRibbon），色带边缘由几何决定、与贴图分辨率无关。
   const { runs, junctions } = roadPaintPlan(layout.roadEdges);
   ctx.lineCap="butt"; ctx.lineJoin="round";
   // Paint ALL sidewalks before ANY asphalt: neighboring caps cannot cut white seams into roads.

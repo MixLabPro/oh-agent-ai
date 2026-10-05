@@ -20,6 +20,7 @@ import { makeCityTexture, makeDecoFacadeTexture, makeFacadeTexture, makeLabelSpr
 import type { TerrainField } from "./cityLayout";
 import { createRenderCanvas } from "./renderCanvas";
 import { SegmentIndex } from "./cityPlan";
+import { roadPaintPlan } from "./cityRoadPaint";
 
 const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
 /** Low-poly Art Deco tower silhouette: chamfered corners, podium, and stepped crown. */
@@ -460,6 +461,7 @@ export class CityParts {
       this.buildLandmarks();
       this.buildUrbanContext();
       this.buildSeaMountains();
+      this.buildBeachRibbon();
       this.buildPromenade();
       // 装饰酒店排已退役：酒店地块交给会话（cityLayout hotelBlocks），只有落户的会话才成楼。
       this.buildLifeguardTowers();
@@ -1293,21 +1295,27 @@ export class CityParts {
       poolMesh.setMatrixAt(lamps, this.matrix);
       lamps += 1;
     };
-    for (const edge of this.layout.roadEdges) {
-      if (edge.bridge || edge.kind !== "arterial") continue;
-      const [a, b] = edge.points;
-      const length = Math.hypot(b.x - a.x, b.z - a.z);
-      if (length < 18) continue;
-      const dx = (b.x - a.x) / length; const dz = (b.z - a.z) / length;
-      const nx = -dz; const nz = dx;
-      const yaw = -Math.atan2(dz, dx);
-      const count = Math.max(1, Math.floor(length / spacing));
-      for (let i = 0; i < count; i += 1) {
-        const t = ((i + 0.5) / count) * length;
-        const side = i % 2 === 0 ? 1 : -1; // 两侧交错
-        const x = a.x + dx * t + nx * side * (edge.width / 2 + 0.9);
-        const z = a.z + dz * t + nz * side * (edge.width / 2 + 0.9);
-        lamp(x, z, nx * side, nz * side, Math.max(0, this.layout.terrain.height(x, z)), yaw);
+    // 沿合并后的整条路（roadPaintPlan 的 run）按弧长每 30 放一盏，间距跨路段累计。曾逐条路段放、
+    // 且跳过 <18 的段：滨海大道细分成 ~15 的短段，整条一盏灯都没有（真机夜景：海滨道路漆黑）。
+    for (const run of roadPaintPlan(this.layout.roadEdges).runs) {
+      if (run.kind !== "arterial") continue;
+      let walked = 0; let next = spacing / 2; let index = 0;
+      for (let i = 1; i < run.points.length; i += 1) {
+        const a = run.points[i - 1]; const b = run.points[i];
+        const length = Math.hypot(b.x - a.x, b.z - a.z);
+        if (length < 1e-3) continue;
+        const dx = (b.x - a.x) / length; const dz = (b.z - a.z) / length;
+        const nx = -dz; const nz = dx;
+        const yaw = -Math.atan2(dz, dx);
+        while (next <= walked + length) {
+          const t = next - walked;
+          const side = index % 2 === 0 ? 1 : -1; // 两侧交错
+          const x = a.x + dx * t + nx * side * (run.width / 2 + 0.9);
+          const z = a.z + dz * t + nz * side * (run.width / 2 + 0.9);
+          lamp(x, z, nx * side, nz * side, Math.max(0, this.layout.terrain.height(x, z)), yaw);
+          next += spacing; index += 1;
+        }
+        walked += length;
       }
     }
     // 公园：沿园路一圈路灯（外圈 8 盏），灯头朝内。
@@ -2144,12 +2152,59 @@ export class CityParts {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
     geometry.computeVertexNormals();
-    const material = new THREE.MeshLambertMaterial({ color: "#d4c8a8" });
+    // 粉色铺装（迈阿密步道的辨识色）：曾用 #d4c8a8，和干沙几乎同色，真机上步道看不出来。
+    const material = new THREE.MeshLambertMaterial({ color: "#e7b3a3" });
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = "city-promenade";
     mesh.receiveShadow = true;
     this.group.add(mesh);
     this.disposables.push(geometry, material);
+    // 朝海一侧的白色矮墙（隔开沙滩与步道）+ 朝陆一侧每 ~16 单位一盏路灯。
+    const unit = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+    const furniture = new THREE.MeshLambertMaterial({ color: "#ffffff" });
+    type Piece = { x: number; y: number; z: number; yaw: number; w: number; h: number; d: number; color: string };
+    const pieces: Piece[] = [];
+    for (const polyline of segments) {
+      let sinceLamp = 8;
+      for (let i = 1; i < polyline.length; i += 1) {
+        const a = polyline[i - 1]; const b = polyline[i];
+        const dx = b.x - a.x; const dz = b.z - a.z;
+        const len = Math.hypot(dx, dz) || 1;
+        // 左法线 (-dz, dx)；朝海一侧 = 地形更低的一侧。
+        let nx = -dz / len; let nz = dx / len;
+        const mx = (a.x + b.x) / 2; const mz = (a.z + b.z) / 2;
+        if (this.layout.terrain.height(mx + nx * 8, mz + nz * 8) > this.layout.terrain.height(mx - nx * 8, mz - nz * 8)) { nx = -nx; nz = -nz; }
+        const yaw = -Math.atan2(dz, dx);
+        const wx = mx + nx * (half + 0.2); const wz = mz + nz * (half + 0.2);
+        pieces.push({ x: wx, y: this.layout.terrain.height(wx, wz), z: wz, yaw, w: len + 0.3, h: 0.55, d: 0.35, color: "#f7f3ea" });
+        for (let d = 0; d < len; d += 1) {
+          sinceLamp += 1;
+          if (sinceLamp < 16) continue;
+          sinceLamp = 0;
+          const t = d / len;
+          const lx = a.x + dx * t - nx * (half - 0.4); const lz = a.z + dz * t - nz * (half - 0.4);
+          const ly = this.layout.terrain.height(lx, lz);
+          pieces.push({ x: lx, y: ly, z: lz, yaw, w: 0.14, h: 3.6, d: 0.14, color: "#3c4650" });
+          pieces.push({ x: lx, y: ly + 3.6, z: lz, yaw, w: 0.5, h: 0.22, d: 0.5, color: "#fff1c9" });
+        }
+      }
+    }
+    if (pieces.length) {
+      const props = new THREE.InstancedMesh(unit, furniture, pieces.length);
+      pieces.forEach((piece, i) => {
+        this.positionVector.set(piece.x, piece.y, piece.z);
+        this.euler.set(0, piece.yaw, 0); this.quaternion.setFromEuler(this.euler);
+        this.scaleVector.set(piece.w, piece.h, piece.d);
+        this.matrix.compose(this.positionVector, this.quaternion, this.scaleVector);
+        props.setMatrixAt(i, this.matrix); props.setColorAt(i, this.color.set(piece.color));
+      });
+      props.castShadow = true;
+      props.instanceMatrix.needsUpdate = true;
+      if (props.instanceColor) props.instanceColor.needsUpdate = true;
+      props.name = "city-promenade-props";
+      this.group.add(props);
+    }
+    this.disposables.push(unit, furniture);
   }
 
   /** 救生塔（VICE S1）：架高值守小屋 + 平台 + 檐顶 + 楼梯——架高结构是
@@ -2420,6 +2475,79 @@ export class CityParts {
       this.group.add(parts);
       this.disposables.push(unit, courtMaterial);
     }
+  }
+
+  /** 沙滩网格：沿整条海岸线（地形的岸线就是这条 96 点折线）铺贴地色带——浪花 / 湿沙 / 干沙，
+   *  每条色带是独立的平面四边形，边缘锐利。海滨段铺全宽（干沙 + 路缘），其余海岸铺窄的自然沙滩；
+   *  山坡/悬崖、港口与河口处不铺。曾只有海滨那 85° 一段有沙滩，且画在低分辨率贴图里（真机：糊、少）。
+   *  向海一侧延伸到水下 6 单位，水线由水面与地形自然相交给出。 */
+  private buildBeachRibbon(): void {
+    const coast = this.layout.coast;
+    if (!coast || coast.length < 3) return;
+    const terrain = this.layout.terrain;
+    const config = this.layout.coastalConfig;
+    const wet = config?.wetSandWidth ?? 7;
+    const fullDepth = (config?.drySandWidth ?? 20) + 3;
+    const naturalDepth = 10;
+    const seaside = this.layout.seaside && !this.layout.seaside.degraded ? this.layout.seaside : null;
+    const seasidePoints = seaside ? seaside.samples.filter((s) => s.valid).map((s) => s.waterline) : [];
+    const harbors = this.layout.publicSites.filter((site) => site.kind === "harbor");
+    const river = this.layout.river ?? [];
+    const nearRiver = (x: number, z: number) => river.some((p) => Math.hypot(p.x - x, p.z - z) < 34);
+    const n = coast.length;
+    // 每个岸点：内向法线 + 沙滩进深（0 = 不铺）。
+    const vertex = coast.map((p, i) => {
+      const prev = coast[(i - 1 + n) % n]; const next = coast[(i + 1) % n];
+      let nx = -(next.z - prev.z); let nz = next.x - prev.x;
+      const len = Math.hypot(nx, nz) || 1; nx /= len; nz /= len;
+      if (terrain.height(p.x + nx * 8, p.z + nz * 8) < terrain.height(p.x - nx * 8, p.z - nz * 8)) { nx = -nx; nz = -nz; }
+      let depth = seasidePoints.some((q) => Math.hypot(q.x - p.x, q.z - p.z) < 0.5) ? fullDepth : naturalDepth;
+      if (terrain.height(p.x + nx * depth, p.z + nz * depth) > 5) depth = 0;         // 山坡/悬崖
+      if (harbors.some((h) => Math.hypot(h.x - p.x, h.z - p.z) < h.radius + 26)) depth = 0;
+      if (nearRiver(p.x, p.z)) depth = 0;
+      return { p, nx, nz, depth };
+    });
+    const positions: number[] = []; const colors: number[] = [];
+    const bands: Array<[number, number, THREE.Color]> = [];
+    const foam = new THREE.Color("#eef5f2"); const wetSand = new THREE.Color("#cdb487"); const drySand = new THREE.Color("#f3e5c2");
+    const point = (x: number, z: number, nx: number, nz: number, d: number) => {
+      const px = x + nx * d; const pz = z + nz * d;
+      return [px, terrain.height(px, pz) + 0.05, pz];
+    };
+    for (let i = 0; i < n; i += 1) {
+      const a = vertex[i]; const b = vertex[(i + 1) % n];
+      if (!a.depth || !b.depth) continue;
+      const length = Math.hypot(b.p.x - a.p.x, b.p.z - a.p.z);
+      const steps = Math.max(1, Math.ceil(length / 5)); // 细分贴地，避免长边中段被地形顶穿
+      for (let k = 0; k < steps; k += 1) {
+        const t0 = k / steps; const t1 = (k + 1) / steps;
+        const at = (t: number) => {
+          const nx = a.nx + (b.nx - a.nx) * t; const nz = a.nz + (b.nz - a.nz) * t; const l = Math.hypot(nx, nz) || 1;
+          return { x: a.p.x + (b.p.x - a.p.x) * t, z: a.p.z + (b.p.z - a.p.z) * t, nx: nx / l, nz: nz / l, depth: a.depth + (b.depth - a.depth) * t };
+        };
+        const s0 = at(t0); const s1 = at(t1);
+        bands.length = 0;
+        bands.push([-6, 1.0, foam], [1.0, Math.min(wet, s0.depth - 1), wetSand], [Math.min(wet, s0.depth - 1), s0.depth, drySand]);
+        for (const [from, to, color] of bands) {
+          const to1 = color === drySand ? s1.depth : to;
+          const q = [point(s0.x, s0.z, s0.nx, s0.nz, from), point(s1.x, s1.z, s1.nx, s1.nz, from),
+                     point(s1.x, s1.z, s1.nx, s1.nz, to1), point(s0.x, s0.z, s0.nx, s0.nz, to)];
+          for (const index of [0, 2, 1, 0, 3, 2]) { positions.push(...q[index]); colors.push(color.r, color.g, color.b); }
+        }
+      }
+    }
+    if (!positions.length) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
+    geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(colors), 3));
+    geometry.computeVertexNormals();
+    // 法线朝向依赖岸线绕向：双面渲染，省掉判绕向。
+    const material = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = "city-beach";
+    mesh.receiveShadow = true;
+    this.group.add(mesh);
+    this.disposables.push(geometry, material);
   }
 
   private buildTrees(): THREE.InstancedMesh {
