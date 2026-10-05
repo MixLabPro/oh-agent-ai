@@ -9,7 +9,7 @@
 
 import * as THREE from "three";
 import { builtFractionAt, hashSeed, type CityBuilding, type CityModel } from "../cityModel";
-import { MIAMI_COASTAL, promenadePolyline } from "./citySeaside";
+import { MIAMI_COASTAL, promenadeSegments, seasideHotelCount } from "./citySeaside";
 import { fbm } from "./cityNoise";
 import type { CityLayout, DistrictLayout, Parcel, Vec2 } from "./cityLayout";
 import { activeTheme, skyYawOf } from "./cityTheme";
@@ -21,6 +21,35 @@ import { createRenderCanvas } from "./renderCanvas";
 import { SegmentIndex } from "./cityPlan";
 
 const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+/** Low-poly Art Deco tower silhouette: chamfered corners, podium, and stepped crown. */
+function artDecoTowerGeometry(): THREE.BufferGeometry {
+  const profiles: Array<[number, number]> = [
+    [0, 0.92], [0.08, 1], [0.14, 0.88], [0.82, 0.88],
+    [0.9, 0.78], [0.95, 0.68], [1, 0.68],
+  ];
+  const corners: Array<[number, number]> = [
+    [-0.36, -0.5], [0.36, -0.5], [0.5, -0.36], [0.5, 0.36],
+    [0.36, 0.5], [-0.36, 0.5], [-0.5, 0.36], [-0.5, -0.36],
+  ];
+  const positions: number[] = []; const uvs: number[] = []; const indices: number[] = [];
+  profiles.forEach(([y, scale], ring) => corners.forEach(([x, z], corner) => {
+    positions.push(x * scale, y, z * scale);
+    uvs.push(corner / corners.length, y);
+    if (ring > 0) {
+      const previous = (ring - 1) * corners.length + corner;
+      const next = (ring - 1) * corners.length + (corner + 1) % corners.length;
+      const current = ring * corners.length + corner;
+      const currentNext = ring * corners.length + (corner + 1) % corners.length;
+      indices.push(previous, current, currentNext, previous, currentNext, next);
+    }
+  }));
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
+}
 /** 单位圆柱（半径 1、高 1、底面为原点）：sx/sz 当半径、sy 当高度。 */
 const CYLINDER = new THREE.CylinderGeometry(1, 1, 1, 14).translate(0, 0.5, 0);
 /** 区界高架桥面：BOX 底面在 DECK_Y、厚 DECK_THICKNESS，行车面在两者之和。
@@ -412,8 +441,9 @@ export class CityParts {
 
     // ── 静态城（seed 决定）：缓存命中则整段复用，重建只花在建筑层 ──────
     let staticCity = staticCityCache && staticCityCache.seed === layout.seed && staticCityCache.layout.scaleTier === layout.scaleTier
+      && staticCityCache.layout.coastalConfigKey === layout.coastalConfigKey
       && staticCityCache.layout.highways === layout.highways
-      && JSON.stringify([staticCityCache.layout.civics, staticCityCache.layout.gardens]) === JSON.stringify([layout.civics, layout.gardens]) ? staticCityCache : null;
+      && JSON.stringify([staticCityCache.layout.civics, staticCityCache.layout.gardens, staticCityCache.layout.contextBuildings]) === JSON.stringify([layout.civics, layout.gardens, layout.contextBuildings]) ? staticCityCache : null;
     if (!staticCity) {
       staticCityCache?.disposables.forEach((disposable) => disposable.dispose());
       const staticBucket: Array<{ dispose: () => void }> = [];
@@ -425,6 +455,7 @@ export class CityParts {
       this.buildPublicSites();
       this.buildCivics();
       this.buildLandmarks();
+      this.buildUrbanContext();
       this.buildSeaMountains();
       this.buildPromenade();
       this.buildSeasideHotels();
@@ -639,13 +670,19 @@ export class CityParts {
     // 海滨带（VICE B2）：条带以采样数组直接进 shader——免烘焙纹理、任意分辨率精确。
     // vec4 = (waterline.x, waterline.z, inward.x, inward.z)；宽度经标量 uniform。
     const seaside = this.layout.seaside;
-    const seasideSamples: THREE.Vector4[] = seaside && !seaside.degraded
-      ? seaside.samples.filter((sample) => sample.valid).slice(0, 24).map((sample) => new THREE.Vector4(sample.waterline.x, sample.waterline.z, sample.inward.x, sample.inward.z))
-      : [];
-    uniforms.uSeasideN = { value: seasideSamples.length };
+    const coastalConfig = this.layout.coastalConfig ?? MIAMI_COASTAL;
+    // 容量固定 24（shader 声明 uSeaside[24]）：Three.js 上传定长数组要求实参与
+    // 声明严格等长——可变长度会撞 undefined.toArray。有效数单独经 uSeasideN。
+    const SEASIDE_CAPACITY = 24;
+    const valid = seaside && !seaside.degraded ? seaside.samples.filter((sample) => sample.valid) : [];
+    const seasideSamples: THREE.Vector4[] = Array.from({ length: SEASIDE_CAPACITY }, (_, i) => {
+      const sample = valid[i];
+      return sample ? new THREE.Vector4(sample.waterline.x, sample.waterline.z, sample.inward.x, sample.inward.z) : new THREE.Vector4();
+    });
+    uniforms.uSeasideN = { value: Math.min(valid.length, SEASIDE_CAPACITY) };
     uniforms.uSeaside = { value: seasideSamples };
-    uniforms.uSeaWet = { value: MIAMI_COASTAL.wetSandWidth };
-    uniforms.uSeaOuter = { value: MIAMI_COASTAL.bandOuter };
+    uniforms.uSeaWet = { value: coastalConfig.wetSandWidth };
+    uniforms.uSeaOuter = { value: coastalConfig.bandOuter };
     for (const name of ["Asphalt", "Concrete", "Sand", "Mud", "Grass"]) {
       uniforms[`u${name}C`] = { value: null };
       uniforms[`u${name}N`] = { value: null };
@@ -1356,12 +1393,13 @@ export class CityParts {
     return { heads, pools, strips, neon };
   }
 
-  /** 致敬型地标（程序化几何，不复刻具体建筑）。高度上限 = 全城最高会话楼 × 0.9：天际线焦点仍是会话楼。 */
+  /** 致敬型地标（程序化几何，不复刻具体建筑）。城市身份地标有 70 单位最低天际线预算，
+   *  不随会话数缩小；会话楼仍保留真实 token 高度，数据建筑与装饰地标语义分离。 */
   private buildLandmarks(): void {
     const landmarks = this.layout.landmarks ?? [];
     if (!landmarks.length) return;
     const tallest = Math.max(30, ...this.model.buildings.map((building) => building.height));
-    const cap = tallest * 0.9;
+    const cap = Math.max(70, tallest * 0.9);
     const neon = activeTheme().neon;
     const material = (color: string, emissive = 0) => {
       const m = new THREE.MeshLambertMaterial({ color, emissive: new THREE.Color(color).multiplyScalar(emissive) });
@@ -1395,16 +1433,30 @@ export class CityParts {
       } else if (landmark.kind === "twin-towers") {
         const h = Math.min(cap, 62);
         for (const side of [-1, 1]) {
-          mesh(new THREE.BoxGeometry(8, h, 8).translate(0, h / 2, 0), material("#9fb3c0"), group, side * 9, 0, 0);
-          mesh(new THREE.ConeGeometry(3, 10, 8).translate(0, 5, 0), steel, group, side * 9, h, 0);
+          const wall = side < 0 ? material("#72cbd2") : material("#e99ab8");
+          mesh(new THREE.BoxGeometry(12, h, 12).translate(0, h / 2, 0), wall, group, side * 13, 0, 0);
+          mesh(new THREE.ConeGeometry(3.8, 12, 8).translate(0, 6, 0), steel, group, side * 13, h, 0);
         }
-        mesh(new THREE.BoxGeometry(10, 2.4, 3).translate(0, 1.2, 0), steel, group, 0, h * 0.55, 0); // 天桥连廊
+        // 双塔连廊 + 粉彩色差是 Miami skyline 的远景剪影线索。
+        mesh(new THREE.BoxGeometry(15, 2.4, 3).translate(0, 1.2, 0), steel, group, 0, h * 0.55, 0);
       } else if (landmark.kind === "twist-tower") {
         const h = Math.min(cap, 66);
         const floors = 22;
+        const floorGeometry = new THREE.BoxGeometry(1, 1, 1);
+        const floorMaterial = material("#ffffff");
+        const floorMesh = new THREE.InstancedMesh(floorGeometry, floorMaterial, floors);
+        const palette = ["#68c9d0", "#d78db3", "#9b9be0"];
         for (let i = 0; i < floors; i += 1) {
-          mesh(new THREE.BoxGeometry(9, h / floors * 0.92, 9).translate(0, (h / floors) * 0.46, 0), material(i % 2 ? "#a9c3cf" : "#93aebb"), group, 0, (i * h) / floors, 0, (i / floors) * Math.PI * 0.5);
+          this.compose(0, ((i + 0.5) * h) / floors, 0, (i / floors) * Math.PI * 0.5, 12, (h / floors) * 0.9, 12);
+          floorMesh.setMatrixAt(i, this.matrix);
+          floorMesh.setColorAt(i, this.color.set(palette[i % palette.length]));
         }
+        floorMesh.instanceMatrix.needsUpdate = true;
+        if (floorMesh.instanceColor) floorMesh.instanceColor.needsUpdate = true;
+        floorMesh.castShadow = floorMesh.receiveShadow = true;
+        floorMesh.name = "city-landmark-twisting-deco-tower";
+        group.add(floorMesh);
+        this.disposables.push(floorGeometry, floorMaterial);
       } else if (landmark.kind === "arch") {
         const h = Math.min(cap, 26);
         for (const side of [-1, 1]) mesh(new THREE.BoxGeometry(5, h, 7).translate(0, h / 2, 0), white, group, side * 8, 0, 0);
@@ -1788,6 +1840,53 @@ export class CityParts {
     mesh.name = "city-massing";
   }
 
+  /** Deterministic Miami skyline fabric on vacant inner commercial lots.
+   *  Decorative only: no session id, label, hit target, growth or HUD count.
+   *  Two instanced batches keep the skyline affordable even on low-end GPUs. */
+  private buildUrbanContext(): void {
+    const buildings = this.layout.contextBuildings ?? [];
+    if (!buildings.length) return;
+    const facade = makeDecoFacadeTexture();
+    facade.colorSpace = THREE.SRGBColorSpace;
+    facade.repeat.set(8, 5.5); // one facade tile per chamfered face; 2-floor tile × 5.5 gives ~11-floor rhythm.
+    const bodyGeometry = artDecoTowerGeometry();
+    const bodyMaterial = new THREE.MeshLambertMaterial({ map: facade });
+    const bodies = new THREE.InstancedMesh(bodyGeometry, bodyMaterial, buildings.length);
+    const crownGeometry = BOX.clone();
+    const crownMaterial = new THREE.MeshLambertMaterial({ color: "#f4e5d3" });
+    const crowns = new THREE.InstancedMesh(crownGeometry, crownMaterial, buildings.length);
+    const colorsByZone: Record<string, string[]> = {
+      downtown: ["#91c8cf", "#d89bb6", "#b4a4d5", "#dfc49a"],
+      commercial: ["#a8c9bf", "#d9ad9e", "#c5b9a2", "#9dbdcc"],
+      waterfront: ["#e6c6a9", "#e5a8ad", "#b1d3cd", "#ead6b9"],
+      residential: ["#c8c2a9", "#b5c3b0", "#d5bfa9", "#b8c3c5"],
+    };
+    for (let index = 0; index < buildings.length; index += 1) {
+      const building = buildings[index];
+      const colors = colorsByZone[building.zone] ?? colorsByZone.commercial;
+      this.compose(building.x, building.y, building.z, building.yaw, building.width, building.height, building.depth);
+      bodies.setMatrixAt(index, this.matrix);
+      bodies.setColorAt(index, this.color.set(colors[Math.floor(building.seed * colors.length) % colors.length]));
+      const roofScale = building.zone === "residential" ? 0.88 : 0.68;
+      this.compose(building.x, building.y + building.height, building.z, building.yaw, building.width * roofScale, 1.2 + building.seed * 2.1, building.depth * roofScale);
+      crowns.setMatrixAt(index, this.matrix);
+      crowns.setColorAt(index, this.color.set(building.zone === "downtown"
+        ? colors[(Math.floor(building.seed * colors.length) + 1) % colors.length]
+        : colors[Math.floor(building.seed * colors.length) % colors.length]).multiplyScalar(building.zone === "residential" ? 0.9 : 1.05));
+    }
+    for (const mesh of [bodies, crowns]) {
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      mesh.frustumCulled = false;
+    }
+    bodies.name = "city-vice-context-facades";
+    crowns.name = "city-vice-context-rooftops";
+    this.group.add(bodies, crowns);
+    this.disposables.push(bodyGeometry, bodyMaterial, facade, crownGeometry, crownMaterial);
+  }
+
   /** 海平线远山：低模锥形剪影 + fbm 顶点扰动，两侧海域各一座。 */
   private buildSeaMountains(): void {
     const mountains = this.layout.seaMountains ?? [];
@@ -1846,24 +1945,28 @@ export class CityParts {
     {
       const seaside = this.layout.seaside;
       if (seaside && !seaside.degraded) {
-        const polyline = promenadePolyline(seaside);
         const terrain = this.layout.terrain;
         let row = 0;
-        for (let i = 1; i < polyline.length - 1; i += 1) {
-          const a = polyline[i - 1]; const b = polyline[i]; const c = polyline[i + 1];
-          const segLen = Math.hypot(b.x - a.x, b.z - a.z);
-          const steps = Math.max(1, Math.floor(segLen / 9));
-          for (let s = 1; s <= steps; s += 1) {
-            const t = s / (steps + 1);
-            const x = a.x + (b.x - a.x) * t; const z = a.z + (b.z - a.z) * t;
-            const tangent = { x: (c.x - a.x), z: (c.z - a.z) };
-            const tl = Math.hypot(tangent.x, tangent.z) || 1;
-            const side = row % 2 === 0 ? 2.8 : -2.8;
-            const px = x + (-tangent.z / tl) * side; const pz = z + (tangent.x / tl) * side;
-            row += 1;
-            const y = terrain.height(px, pz);
-            if (y < 0.5 || y > 6) continue;
-            spots.push({ x: px, z: pz, y, seed: hashSeed(`palmtree:${px.toFixed(1)}:${pz.toFixed(1)}`) });
+        // 逐合法连续段种植（段间已被净空校验切断，不跨缺口搭桥）。
+        for (const segment of promenadeSegments(seaside)) {
+          for (let i = 1; i < segment.length; i += 1) {
+            const a = segment[i - 1]; const b = segment[i];
+            const next = segment[Math.min(segment.length - 1, i + 1)];
+            const prev = segment[Math.max(0, i - 2)];
+            const segLen = Math.hypot(b.x - a.x, b.z - a.z);
+            const steps = Math.max(1, Math.floor(segLen / 9));
+            for (let s = 1; s <= steps; s += 1) {
+              const t = s / (steps + 1);
+              const x = a.x + (b.x - a.x) * t; const z = a.z + (b.z - a.z) * t;
+              const tangent = { x: (next.x - prev.x), z: (next.z - prev.z) };
+              const tl = Math.hypot(tangent.x, tangent.z) || 1;
+              const side = row % 2 === 0 ? 2.8 : -2.8;
+              const px = x + (-tangent.z / tl) * side; const pz = z + (tangent.x / tl) * side;
+              row += 1;
+              const y = terrain.height(px, pz);
+              if (y < 0.5 || y > 6) continue;
+              spots.push({ x: px, z: pz, y, seed: hashSeed(`palmtree:${px.toFixed(1)}:${pz.toFixed(1)}`) });
+            }
           }
         }
       }
@@ -1996,10 +2099,10 @@ export class CityParts {
   private buildPromenade(): void {
     const seaside = this.layout.seaside;
     if (!seaside || seaside.degraded) return;
-    const polyline = promenadePolyline(seaside);
-    if (polyline.length < 2) return;
+    const segments = promenadeSegments(seaside);
     const half = 3.2;
     const positions: number[] = [];
+    for (const polyline of segments)
     for (let i = 1; i < polyline.length; i += 1) {
       const a = polyline[i - 1]; const b = polyline[i];
       const dx = b.x - a.x; const dz = b.z - a.z;
@@ -2007,8 +2110,9 @@ export class CityParts {
       const nx = -dz / len * half; const nz = dx / len * half;
       const ay = this.layout.terrain.height(a.x, a.z) + 0.07;
       const by = this.layout.terrain.height(b.x, b.z) + 0.07;
-      positions.push(a.x + nx, ay, a.z + nz, a.x - nx, ay, a.z - nz, b.x - nx, by, b.z - nz,
-                     a.x + nx, ay, a.z + nz, b.x - nx, by, b.z - nz, b.x + nx, by, b.z + nz);
+      // 逆时针（从上往下看）绕序 → 法线朝上；曾生成朝下法线被背面剔除（俯视消失）。
+      positions.push(a.x + nx, ay, a.z + nz, b.x - nx, by, b.z - nz, a.x - nx, ay, a.z - nz,
+                     a.x + nx, ay, a.z + nz, b.x + nx, by, b.z + nz, b.x - nx, by, b.z - nz);
     }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
@@ -2022,8 +2126,8 @@ export class CityParts {
   }
 
   /** 海滨酒店排（VICE B4 样板）：酒店线上的粉彩 Art Deco 低层装饰楼——宽体量、
-   *  阶梯平顶、水平遮阳带。纯装饰：不进 Session 拾取/统计/生长（数据楼语义不变）。
-   *  单 InstancedMesh（墙身）+ 单 InstancedMesh（檐带），确定性 seed。 */
+   *  阶梯平顶、水平遮阳带、临海立面竖向壁柱。纯装饰：不进 Session 拾取/统计/生长
+   *  （数据楼语义不变）；细节合批为一个额外 InstancedMesh。 */
   private buildSeasideHotels(): void {
     const seaside = this.layout.seaside;
     if (!seaside || seaside.degraded) return;
@@ -2032,44 +2136,73 @@ export class CityParts {
     const wallGeometry = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
     const wallMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff" });
     const trimMaterial = new THREE.MeshLambertMaterial({ color: "#fff6ea" });
+    const detailMaterial = new THREE.MeshLambertMaterial({ color: "#fff0d7" });
     const trimGeometry = new THREE.BoxGeometry(1, 1, 1);
+    const detailGeometry = new THREE.BoxGeometry(1, 1, 1);
     const palette = ["#ffd2c4", "#c4f4f6", "#ffe9c4", "#e3d2ff"];
-    const count = Math.min(4, Math.max(2, Math.floor(valid.length / 5)));
-    const wallMesh = new THREE.InstancedMesh(wallGeometry, wallMaterial, count * 2);
+    const count = seasideHotelCount(valid.length);
+    const wallMesh = new THREE.InstancedMesh(wallGeometry, wallMaterial, count * 3);
     const trimMesh = new THREE.InstancedMesh(trimGeometry, trimMaterial, count * 2);
+    // 传统 Art Deco 酒店最易识别的是竖向强调线；一栋三根壁柱合并成同一批次，
+    // 近景不再只是几块粉彩长方体，远景仍保留干净轮廓。
+    const detailMesh = new THREE.InstancedMesh(detailGeometry, detailMaterial, count * 3);
     wallMesh.castShadow = wallMesh.receiveShadow = true;
+    detailMesh.castShadow = true;
     let cursor = 0;
     for (let i = 0; i < count; i += 1) {
       const sample = valid[Math.floor(((i + 0.5) / count) * (valid.length - 1))];
       const seed = hashSeed(`seasidehotel:${i}:${sample.azimuth}`);
       const yaw = Math.atan2(sample.inward.x, -sample.inward.z);
-      const width = 11 + seed * 5;
-      const height = 9 + hashSeed(`seasidehotelh:${i}`) * 7;
+      // 酒店是城市身份地标，沿街形成连续但留缝的 frontage，不随会话数稀疏成几处孤岛。
+      // 单体保持 30–44 宽、20–33 高；数量由有效岸线采样推导并封顶，实例仍复用同批次。
+      const width = 30 + seed * 14;
+      const height = 24 + hashSeed(`seasidehotelh:${i}`) * 14;
+      const depth = 16;
+      const crownHeight = 4.2 + seed * 2.4;
       const ground = this.layout.terrain.height(sample.hotelLine.x, sample.hotelLine.z);
+      const outward = { x: -sample.inward.x, z: -sample.inward.z };
+      const right = { x: Math.cos(yaw), z: -Math.sin(yaw) };
       // 墙身（贴酒店线，立面朝海）。
-      this.compose(sample.hotelLine.x, ground, sample.hotelLine.z, yaw, width, height, 9);
+      this.compose(sample.hotelLine.x, ground, sample.hotelLine.z, yaw, width, height, depth);
       wallMesh.setMatrixAt(cursor, this.matrix);
       wallMesh.setColorAt(cursor, this.color.set(palette[i % palette.length]));
       // 阶梯退台（上层缩进体量）。
-      this.compose(sample.hotelLine.x, ground + height, sample.hotelLine.z, yaw, width * 0.62, 2.6 + seed * 1.6, 7.4);
+      this.compose(sample.hotelLine.x, ground + height, sample.hotelLine.z, yaw, width * 0.68, crownHeight, depth * 0.72);
       wallMesh.setMatrixAt(cursor + 1, this.matrix);
       wallMesh.setColorAt(cursor + 1, this.color.set(palette[i % palette.length]));
-      // 水平遮阳带：沿海立面两道出挑薄板。
+      // Third, narrower crown tier makes the Miami Beach silhouette legible
+      // from the aerial camera while staying inside the same instanced batch.
+      const crownTopHeight = 1.8 + seed * 1.2;
+      this.compose(sample.hotelLine.x, ground + height + crownHeight, sample.hotelLine.z, yaw, width * 0.42, crownTopHeight, depth * 0.48);
+      wallMesh.setMatrixAt(cursor + 2, this.matrix);
+      wallMesh.setColorAt(cursor + 2, this.color.set(palette[(i + 1) % palette.length]));
+      // 竖向壁柱落在朝海立面外表皮，分列于左右与中央；尺度随楼高变化，
+      // 但位置避开两道出挑遮阳带的最外沿，避免看起来像穿模的栏杆。
+      for (let pilaster = 0; pilaster < 3; pilaster += 1) {
+        const across = (pilaster - 1) * width * 0.32;
+        const x = sample.hotelLine.x + right.x * across + outward.x * (depth / 2 + 0.16);
+        const z = sample.hotelLine.z + right.z * across + outward.z * (depth / 2 + 0.16);
+        this.compose(x, ground + height * 0.5, z, yaw, pilaster === 1 ? 0.72 : 0.5, height * 0.82, 0.32);
+        detailMesh.setMatrixAt(i * 3 + pilaster, this.matrix);
+      }
+      // 水平遮阳带：两道出挑薄板，中心越过墙身外表皮 0.7；此前偏移不足，
+      // 薄板埋进墙里，近景会看成墙面色块而不是 Miami 风格的遮阳檐。
       for (let band = 0; band < 2; band += 1) {
         const y = ground + height * (0.32 + band * 0.3);
-        const outward = { x: -sample.inward.x, z: -sample.inward.z };
-        const trimX = sample.hotelLine.x + outward.x * 0.8;
-        const trimZ = sample.hotelLine.z + outward.z * 0.8;
-        this.compose(trimX, y, trimZ, yaw, width * 0.94, 0.55, 0.9);
+        const trimX = sample.hotelLine.x + outward.x * (depth / 2 + 0.7);
+        const trimZ = sample.hotelLine.z + outward.z * (depth / 2 + 0.7);
+        this.compose(trimX, y, trimZ, yaw, width * 1.03, 0.62, 2.4);
         trimMesh.setMatrixAt(i * 2 + band, this.matrix);
       }
-      cursor += 2;
+      cursor += 3;
     }
     wallMesh.count = cursor;
+    detailMesh.count = count * 3;
     wallMesh.name = "city-seaside-hotels";
+    detailMesh.name = "city-seaside-hotel-art-deco-details";
     if (wallMesh.instanceColor) wallMesh.instanceColor.needsUpdate = true;
-    this.group.add(wallMesh, trimMesh);
-    this.disposables.push(wallGeometry, wallMaterial, trimGeometry, trimMaterial);
+    this.group.add(wallMesh, trimMesh, detailMesh);
+    this.disposables.push(wallGeometry, wallMaterial, trimGeometry, trimMaterial, detailGeometry, detailMaterial);
   }
 
   private buildTrees(): THREE.InstancedMesh {

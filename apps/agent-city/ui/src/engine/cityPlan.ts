@@ -11,7 +11,7 @@
  */
 import { hashSeed } from "../cityModel";
 import { fbm, smoothstep } from "./cityNoise";
-import { buildSeasideBand, MIAMI_COASTAL, seasideStripContains, type CoastalConfig, type SeasideBand, type SeasideWorld } from "./citySeaside";
+import { boulevardSegments, buildSeasideBand, MIAMI_COASTAL, seasideStripContains, type CoastalConfig, type SeasideBand, type SeasideWorld } from "./citySeaside";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
 
 export function segmentDistance(p: Vec2, a: Vec2, b: Vec2): number {
@@ -255,7 +255,24 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     ];
     const count = 2 + (random("landmarkCount") < 0.5 ? 1 : 0);
     const pool = [...candidates];
-    for (let n = 0; n < count && pool.length; n += 1) {
+    // Vice City 的第一眼轮廓需要一座 downtown 高塔；若完全按抽签，某些种子会
+    // 只抽到灯塔/摩天轮/低矮文化馆，低会话量时整座城就像空地块规划图。
+    // 高塔属于固定城市地标，不代表会话、不进数据统计；具体造型仍由 seed 决定。
+    if (config?.profile === "miami-coastal") {
+      const skylineKinds: LandmarkKind[] = ["twin-towers", "twist-tower"];
+      const skylineKind = skylineKinds[Math.floor(random("miami-skyline") * skylineKinds.length)];
+      const skylineIndex = pool.findIndex((candidate) => candidate.kind === skylineKind);
+      if (skylineIndex >= 0) {
+        const skyline = pool.splice(skylineIndex, 1)[0];
+        const site = skyline.site();
+        if (site) {
+          const q = snap(site.at, site.clearance, taken(), site.radius);
+          landmarks.push({ id: `landmark:${skyline.kind}`, kind: skyline.kind, x: q.x, z: q.z, yaw: site.yaw, radius: site.radius });
+        }
+      }
+    }
+    // 高塔已占一席；余下地标保持种子抽选。
+    for (let n = landmarks.length; n < count && pool.length; n += 1) {
       const total = pool.reduce((sum, c) => sum + c.weight, 0);
       let pick = random(`landmark${n}`) * total;
       let index = 0;
@@ -276,13 +293,15 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 主干道从核心放射、沿陆地延伸到海边，过河处自动成桥；环线高架绕核心一圈（沿陆地断续）；
   // 主干道之间每个扇区各铺一张朝向沿扇区放射方向的街网——不再是全岛一张方格（曾经整张方格盖在岛上）。
   const nodes = new Map<string, RoadNode>(); const edges = new Map<string, RoadEdge>();
+  const coastalRoadEdgeIds = new Set<string>();
+  const coastalRoadNodeIds = new Set<string>();
   const key = (p: Vec2) => ({ x: Math.round(p.x * 100) / 100, z: Math.round(p.z * 100) / 100 });
-  const addEdge = (a0: Vec2, b0: Vec2, arterial: boolean, bridge = false) => {
+  const addEdge = (a0: Vec2, b0: Vec2, arterial: boolean, bridge = false, primary = false) => {
     const a = key(a0); const b = key(b0);
     const from = roadNodeId(a); const to = roadNodeId(b); if (from === to) return;
     const id = [from, to].sort().join("/");
     nodes.set(from, { ...a, id: from }); nodes.set(to, { ...b, id: to });
-    if (!edges.has(id)) edges.set(id, { id, from, to, width: arterial ? 8 : 5, kind: arterial ? "arterial" : "local", points: [a, b], bridge });
+    if (!edges.has(id)) edges.set(id, { id, from, to, width: primary ? 12 : arterial ? 8 : 5, kind: arterial ? "arterial" : "local", points: [a, b], bridge });
   };
   const inRiver = (x: number, z: number) => hasRiver && coastDistance(x, z) > 0 && Math.abs(x - riverX(z)) < riverWidth(z);
 
@@ -307,7 +326,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         // 刚过完河：把对岸点接上，这一段是桥。
         const from = points[points.length - 1];
         bridges.push({ from, to: q, angle: Math.atan2(q.z - from.z, q.x - from.x), length: Math.hypot(q.x - from.x, q.z - from.z) });
-        addEdge(from, q, true, true);
+        addEdge(from, q, true, true, true);
         points.push(q);
         water = 0;
         continue;
@@ -317,7 +336,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     if (points.length < 3) continue;
     for (let k = 1; k < points.length; k += 1) {
       const isBridge = bridges.some((bridge) => bridge.to === points[k]);
-      if (!isBridge) addEdge(points[k - 1], points[k], true);
+      if (!isBridge) addEdge(points[k - 1], points[k], true, false, true);
     }
     trunks.push({ angle, points });
   }
@@ -417,6 +436,42 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     seaside = buildSeasideBand(coast, core, world, config, seed);
   }
 
+  // 滨海大道位于酒店排与棕榈步道之间。只消费合法连续岸段；无效样本处断开，
+  // 不把水口/陡岸/港区缺口直线跨接。路段复用主干道宽度、路面纹理与路缘批次。
+  const coastalRoadRuns = seaside && !seaside.degraded ? boulevardSegments(seaside).map((segment) => segment.map(key)) : [];
+  for (const segment of coastalRoadRuns) {
+    for (let k = 1; k < segment.length; k += 1) {
+      const a = key(segment[k - 1]); const b = key(segment[k]);
+      addEdge(a, b, true, false, true);
+      const aId = roadNodeId(a); const bId = roadNodeId(b);
+      coastalRoadNodeIds.add(aId); coastalRoadNodeIds.add(bId);
+      coastalRoadEdgeIds.add([aId, bId].sort().join("/"));
+    }
+  }
+  // 两端都接入陆侧主干道，避免只有拓扑连通但车辆到大道时会瞬移/断头。
+  // 连接线按 4 单位采样，避让水面、陡坡、海岸和市政/地标预留地。
+  const trunkRoadNodes = trunks.flatMap((trunk) => trunk.points.map((p) => key(p)));
+  const safeRoadLink = (a: Vec2, b: Vec2) => {
+    const distance = Math.hypot(b.x - a.x, b.z - a.z);
+    const steps = Math.max(1, Math.ceil(distance / 4));
+    for (let i = 0; i <= steps; i += 1) {
+      const p = { x: a.x + (b.x - a.x) * i / steps, z: a.z + (b.z - a.z) * i / steps };
+      if (!buildable(p.x, p.z) || terrain.slope(p.x, p.z) > 0.9) return false;
+      if (reservations().some((site) => Math.hypot(p.x - site.x, p.z - site.z) < site.radius + 5)) return false;
+    }
+    return true;
+  };
+  for (const segment of coastalRoadRuns) {
+    if (segment.length < 2) continue;
+    for (const endpoint of [segment[0], segment[segment.length - 1]]) {
+      const target = trunkRoadNodes
+        .map((candidate) => ({ candidate, distance: Math.hypot(candidate.x - endpoint.x, candidate.z - endpoint.z) }))
+        .filter((entry) => entry.distance < 700 && safeRoadLink(endpoint, entry.candidate))
+        .sort((a, b) => a.distance - b.distance)[0];
+      if (target) addEdge(endpoint, target.candidate, true);
+    }
+  }
+
   const zoneFor = (center: Vec2): Zone => {
     // 分区由地理与骨架决定：核心附近 downtown、临海 waterfront、主干道两侧 commercial、其余 residential。
     if (Math.hypot(center.x - core.x, center.z - core.z) < 0.24 * R) return "downtown";
@@ -440,7 +495,24 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     const v = { x: -u.z, z: u.x };
     const du = 44 + random(`du${sectorIndex}`) * 10;
     const dv = 40 + random(`dv${sectorIndex}`) * 12;
-    const at = (i: number, j: number): Vec2 => ({ x: core.x + u.x * i * du + v.x * j * dv, z: core.z + u.z * i * du + v.z * j * dv });
+    // A shared, seed-keyed displacement at every grid junction breaks the
+    // perfect Manhattan checkerboard without opening cracks between blocks.
+    // Keep it below 12% of the narrowest block span so junctions become organic
+    // at aerial scale without folding adjacent block quads.
+    const nodeOffsets = new Map<string, Vec2>();
+    const at = (i: number, j: number): Vec2 => {
+      const id = `${i}:${j}`;
+      let offset = nodeOffsets.get(id);
+      if (!offset) {
+        const amplitude = 5.2;
+        offset = {
+          x: (random(`grid:${sectorIndex}:${id}:x`) - 0.5) * amplitude * 2,
+          z: (random(`grid:${sectorIndex}:${id}:z`) - 0.5) * amplitude * 2,
+        };
+        nodeOffsets.set(id, offset);
+      }
+      return { x: core.x + u.x * i * du + v.x * j * dv + offset.x, z: core.z + u.z * i * du + v.z * j * dv + offset.z };
+    };
     const reachCells = Math.ceil((R * 1.6) / Math.min(du, dv));
     for (let i = 1; i < reachCells; i += 1) for (let j = -reachCells; j < reachCells; j += 1) {
       const polygon = [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)];
@@ -465,6 +537,9 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         const length = Math.hypot(b.x - a.x, b.z - a.z); const dx = (b.x - a.x) / length; const dz = (b.z - a.z) / length;
         const t = (index + 0.5) / columnCount; const inset = side === 0 ? 12 : -12;
         const p = { x: a.x + dx * (7 + (length - 14) * t) - dz * inset, z: a.z + dz * (7 + (length - 14) * t) + dx * inset };
+        // Warped corners can leave an interior parcel inside the curved beach
+        // reserve even when all four block corners are outside it.
+        if (seaside && seasideStripContains(seaside, p, 1)) continue;
         if (polygonDistance(p, polygon) < 3.6 + 5) continue;
         if (reservations().some((site) => Math.hypot(p.x - site.x, p.z - site.z) < site.radius + 9)) continue;
         if (!clearsHighways(p, 7.2, 8, ringIndex)) continue;
@@ -476,6 +551,20 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       polygon.forEach((p, e) => addEdge(p, polygon[(e + 1) % 4], e % 2 === 0 ? j % 3 === 0 : i % 3 === 0));
     }
   });
+
+  // At both ends, prefer a short legal link to a nearby district street. This
+  // makes the coast road a usable route, not an isolated scenic stripe.
+  for (const segment of coastalRoadRuns) {
+    if (segment.length < 2) continue;
+    for (const endpoint of [key(segment[0]), key(segment[segment.length - 1])]) {
+      const target = [...nodes.values()]
+        .filter((candidate) => !coastalRoadNodeIds.has(candidate.id))
+        .map((candidate) => ({ candidate, distance: Math.hypot(candidate.x - endpoint.x, candidate.z - endpoint.z) }))
+        .filter((entry) => entry.distance > 0.1 && entry.distance < 260 && safeRoadLink(endpoint, entry.candidate))
+        .sort((a, b) => a.distance - b.distance)[0];
+      if (target) addEdge(endpoint, target.candidate, false);
+    }
+  }
 
   // 连通：各扇区街网可能被河/保留用地切成几块。并查集找连通分量，每个不含核心的分量用一条支路
   // 接到最近的主干道节点（主干道都从核心出发，彼此已连通）。
@@ -552,6 +641,36 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     parkTrees.push({ x, z, y: height(x, z), seed: random(`tree${i}`) });
   }
   const carPaths = blocks.filter((b, i) => b.parcels.length > 0 && i % 7 === 0).map((b) => [...b.polygon, b.polygon[0]]);
+  // 海滨大道车流沿海岸单向行驶，再通过真实路网回到起点；找不到完整地面回路时
+  // 不生成假路线。返程搜索排除大道自身边，避免车辆在两端掉头后原路折返。
+  const roadReturnPath = (from: Vec2, to: Vec2): Vec2[] | null => {
+    const start = roadNodeId(key(from)); const goal = roadNodeId(key(to));
+    const adjacency = new Map<string, string[]>();
+    for (const id of nodes.keys()) adjacency.set(id, []);
+    for (const edge of edges.values()) {
+      if (coastalRoadEdgeIds.has(edge.id)) continue;
+      adjacency.get(edge.from)?.push(edge.to); adjacency.get(edge.to)?.push(edge.from);
+    }
+    const previous = new Map<string, string | null>([[start, null]]); const queue = [start];
+    for (let i = 0; i < queue.length && !previous.has(goal); i += 1) {
+      for (const next of adjacency.get(queue[i]) ?? []) if (!previous.has(next)) { previous.set(next, queue[i]); queue.push(next); }
+    }
+    if (!previous.has(goal)) return null;
+    const path: string[] = [];
+    for (let cursor: string | null = goal; cursor; cursor = previous.get(cursor) ?? null) path.push(cursor);
+    return path.reverse().map((id) => nodes.get(id)!).filter(Boolean).map(({ x, z }) => ({ x, z }));
+  };
+  for (const segment of coastalRoadRuns) {
+    if (segment.length < 2) continue;
+    const homeward = roadReturnPath(segment[segment.length - 1], segment[0]);
+    if (homeward && homeward.length > 1) carPaths.push([...segment, ...homeward.slice(1)]);
+    else {
+      // Some valid beach segments have only one safe district-road access because
+      // the opposite end is screened by river mouths/reservations. Keep deterministic
+      // shuttle traffic on the rendered boulevard rather than wrapping/teleporting.
+      carPaths.push([...segment, ...segment.slice(0, -1).reverse()]);
+    }
+  }
 
   // 城区锚点：第一名执行环境在核心，其余绕核心等角分布再贴陆地，彼此至少隔 ~200。
   const anchorsPlaced: Array<Vec2 & { radius: number }> = [];

@@ -162,6 +162,19 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
   const mixRgb = (a0: number[], b0: number[], t: number) => a0.map((v, i) => v + (b0[i] - v) * t);
   const paving = toHex(mixRgb([197, 192, 179], groundColors.sand, 0.45));
   const lawnTint = toHex(mixRgb([145, 165, 127], groundColors.lawn, 0.6));
+  const viceMiami = layout.coastalConfig?.profile === "miami-coastal";
+  const viceBlockPaving: Record<string, string> = {
+    downtown: "#d8c0b5",
+    commercial: "#c8d3cc",
+    waterfront: "#e8c4be",
+    residential: "#cbd8ce",
+  };
+  const viceLotPaving: Record<string, string> = {
+    downtown: "#c3b9b0",
+    commercial: "#b9c4bd",
+    waterfront: "#d8b8b2",
+    residential: "#becbc3",
+  };
   for (let iz = 0; iz < 384; iz += 1) for (let ix = 0; ix < 384; ix += 1) {
     const x = (ix / 383 - 0.5) * layout.extent;
     const z = (iz / 383 - 0.5) * layout.extent;
@@ -183,8 +196,9 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
     ctx.fillStyle=color;ctx.fillRect(-width*scale/2,-depth*scale/2,width*scale,depth*scale);ctx.restore();
   };
   for (const block of layout.blocks) {
-    polygon(block.polygon.map((p)=>({x:block.x+(p.x-block.x)*0.88,z:block.z+(p.z-block.z)*0.88})),block.parcels.length?paving:lawnTint);
-    for (const parcel of block.parcels) orientedRect(parcel.x,parcel.z,parcel.width-0.3,parcel.depth-0.3,parcel.yaw,"#bcb8ac");
+    const hardscape = viceMiami ? viceBlockPaving[block.zone] : paving;
+    polygon(block.polygon.map((p)=>({x:block.x+(p.x-block.x)*0.88,z:block.z+(p.z-block.z)*0.88})),block.parcels.length?hardscape:lawnTint);
+    for (const parcel of block.parcels) orientedRect(parcel.x,parcel.z,parcel.width-0.3,parcel.depth-0.3,parcel.yaw,viceMiami ? viceLotPaving[parcel.zone] : "#bcb8ac");
   }
   const { runs, junctions } = roadPaintPlan(layout.roadEdges);
   ctx.lineCap="butt"; ctx.lineJoin="round";

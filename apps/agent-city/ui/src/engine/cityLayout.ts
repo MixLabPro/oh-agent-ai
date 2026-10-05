@@ -1,6 +1,7 @@
 /** Geography and public planning are fixed; sessions occupy reserved parcels. */
 import { hashSeed, type CityModel } from "../cityModel";
 import { clearsHighways, createCityPlan, scaleTierFor, type Biome, type Landmark } from "./cityPlan";
+import { seasideStripContains, type CoastalConfig } from "./citySeaside";
 
 export type Vec2 = { x: number; z: number };
 export type Zone = "downtown" | "residential" | "commercial" | "waterfront";
@@ -29,6 +30,8 @@ export type DistrictLayout = {
 export type GardenSite = Vec2 & { id: string; districtId: string; blockId: string; y: number; yaw: number; width: number; depth: number; seed: number };
 export type CivicKind = "school" | "mall" | "hospital";
 export type CivicSite = Vec2 & { id: string; kind: CivicKind; districtId: string; parcelId: string; y: number; yaw: number; width: number; depth: number; unlockAt: number };
+/** 非会话型城市肌理：只填充未占用的内陆/沿岸街区，不进入统计、拾取或回放。 */
+export type ContextBuilding = Vec2 & { id: string; y: number; yaw: number; width: number; depth: number; height: number; seed: number; zone: Zone };
 export const CIVIC_PER_SESSIONS = 45;
 const CIVIC_ORDER: CivicKind[] = ["school", "mall", "hospital"];
 
@@ -54,6 +57,11 @@ export type CityLayout = {
   landmarks: Landmark[];
   /** VICE B1 海滨带：提供 coastal config 时存在；无配置为 null（旧行为）。 */
   seaside: import("./citySeaside").SeasideBand | null;
+  /** 海滨配置参数指纹，用于静态场景缓存失效。 */
+  coastalConfigKey: string;
+  coastalConfig: CoastalConfig | null;
+  /** 低数据量也保留城市轮廓；这些环境楼明确不代表会话。 */
+  contextBuildings: ContextBuilding[];
   gardens: GardenSite[];
   boatLoops: Vec2[][]; seaMountains: Array<{ center: Vec2; radius: number; height: number; seed: number }>;
 };
@@ -97,11 +105,22 @@ function aggregateOverflow(districtId: string, anchor: Vec2, overflow: CityModel
 }
 
 /** The seed controls geography, never harness count, token ranking or time window. */
-export function layoutCity(model: CityModel, previous?: CityLayout | null, seed = 1927, coastal: import("./citySeaside").CoastalConfig | null = null): CityLayout {
+export function layoutCity(model: CityModel, previous?: CityLayout | null, seed = 1927, coastal: CoastalConfig | null = null): CityLayout {
   // 规模档位由会话总数分档：档位内刷新/分页不改地图；跨档时岛按原形状放大。
   const tier = scaleTierFor(model.buildings.length);
   // plans 缓存键携带海滨配置身份（profile+version）：同 seed 不同配置不得复用旧规划。
-  const planKey = `${seed}:${tier}:${coastal ? `${coastal.profile}:v${coastal.version}` : "none"}`;
+  // 缓存键含参数指纹：同 profile/version 改参数（如 maxCoastalHeight）必须产生
+  // 新规划——曾只带 profile:version，参数变化时复用旧海滨带（审查 #5 复现）。
+  const coastalKey = coastal
+    ? `${coastal.profile}:v${coastal.version}:${[
+        coastal.preferredAzimuth, coastal.azimuthTolerance, coastal.segmentArc,
+        coastal.wetSandWidth, coastal.drySandWidth, coastal.promenadeOffset,
+        coastal.hotelOffset, coastal.bandOuter, coastal.maxCoastalSlope,
+        coastal.maxCoastalHeight, coastal.riverMargin, coastal.siteMargin,
+        coastal.minValidRatio,
+      ].join(",")}`
+    : "none";
+  const planKey = `${seed}:${tier}:${coastalKey}`;
   let plan = plans.get(planKey);
   if (!plan) { plan = createCityPlan(seed, tier, coastal); plans.set(planKey, plan); }
   const parcels = plan.blocks.flatMap((block) => block.parcels);
@@ -232,6 +251,75 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     if (overflow.length) massing.push(...aggregateOverflow(district.id, anchor, overflow, parcels, plan));
   }
   const civics = placeCivics(model, parcels, used, assigned, previous ?? null, plan);
+  // 海滨迈阿密是一个已经建成的城市，即使当前窗口只有少量会话也不应退化成
+  // 空白规划图。背景楼只从空置地块取址，避开数据楼/整块花园/市政设施/高架
+  // /酒店海滨保留带；优先填充会话城区周围，再向城市核心扩散，不加入会话统计。
+  const contextBuildings: ContextBuilding[] = [];
+  if (coastal?.profile === "miami-coastal") {
+    const reserved = new Set([...used, ...civics.map((civic) => civic.parcelId)]);
+    const coreRadius = plan.islandRadius;
+    const sessionSlots = [...assigned.values()];
+    const candidates = plan.blocks
+      .flatMap((block) => block.parcels)
+      .filter((parcel) => {
+        const radius = Math.hypot(parcel.x - core.x, parcel.z - core.z);
+        return !reserved.has(parcel.id)
+          && radius <= coreRadius * 0.94
+          && plan.terrain.buildable(parcel.x, parcel.z)
+          && plan.terrain.slope(parcel.x, parcel.z) < 0.55
+          && clearsHighways(parcel, parcel.width * 0.84, parcel.depth * 0.84, plan.highways)
+          && (!plan.seaside || !seasideStripContains(plan.seaside, parcel, 2));
+      })
+      .map((parcel) => {
+        let sessionDistance = Infinity;
+        for (const slot of sessionSlots) sessionDistance = Math.min(sessionDistance, Math.hypot(parcel.x - slot.x, parcel.z - slot.z));
+        const coreDistance = Math.hypot(parcel.x - core.x, parcel.z - core.z);
+        return { parcel, rank: Math.min(sessionDistance, coreDistance * 0.85) + hashSeed(`vice-context-rank:${seed}:${parcel.id}`) * 14 };
+      })
+      .sort((a, b) => a.rank - b.rank || a.parcel.id.localeCompare(b.parcel.id));
+    const target = Math.min(280, 224 + (tier - 1) * 24);
+    const selected: typeof candidates = [];
+    for (const candidate of candidates) {
+      const parcel = candidate.parcel;
+      const buildingSeed = hashSeed(`vice-context:${seed}:${parcel.id}`);
+      // Background facades were needle-thin at aerial scale because they used
+      // only 76–88% of a 7.2-unit frontage. Give towers a wider street-facing
+      // podium while keeping their depth close to the parcel footprint.
+      const width = parcel.width * (1.16 + buildingSeed * 0.24);
+      const depth = parcel.depth * (0.9 + buildingSeed * 0.14);
+      const clearanceRadius = Math.hypot(width, depth) / 2 + 1;
+      const halfDiagonal = Math.hypot(width, depth) / 2;
+      if (sessionSlots.some((slot) => Math.hypot(slot.x - parcel.x, slot.z - parcel.z) < halfDiagonal + Math.hypot(slot.width, slot.depth) / 2 + 2)) continue;
+      if (civics.some((site) => Math.hypot(site.x - parcel.x, site.z - parcel.z) < halfDiagonal + Math.hypot(site.width, site.depth) / 2 + 2)) continue;
+      if (plan.roadEdges.some((edge) => {
+        const [a, b] = edge.points;
+        const dx = b.x - a.x; const dz = b.z - a.z;
+        const t = Math.max(0, Math.min(1, ((parcel.x - a.x) * dx + (parcel.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
+        const distance = Math.hypot(parcel.x - a.x - dx * t, parcel.z - a.z - dz * t);
+        return distance < halfDiagonal + edge.width / 2 + 0.5;
+      })) continue;
+      if (selected.some((other) => {
+        const otherSeed = hashSeed(`vice-context:${seed}:${other.parcel.id}`);
+        const otherWidth = other.parcel.width * (1.16 + otherSeed * 0.24);
+        const otherDepth = other.parcel.depth * (0.9 + otherSeed * 0.14);
+        const otherRadius = Math.hypot(otherWidth, otherDepth) / 2 + 1;
+        return Math.hypot(other.parcel.x - parcel.x, other.parcel.z - parcel.z) < clearanceRadius + otherRadius;
+      })) continue;
+      selected.push(candidate);
+      contextBuildings.push({
+        id: `context:${parcel.id}`, x: parcel.x, z: parcel.z,
+        y: Math.max(0.3, plan.terrain.height(parcel.x, parcel.z)), yaw: parcel.yaw,
+        width,
+        depth,
+        height: parcel.zone === "downtown" ? 38 + buildingSeed * 34
+          : parcel.zone === "commercial" ? 20 + buildingSeed * 28
+            : parcel.zone === "waterfront" ? 16 + buildingSeed * 20
+              : 8 + buildingSeed * 14,
+        seed: buildingSeed, zone: parcel.zone,
+      });
+      if (selected.length >= target) break;
+    }
+  }
   const districts = model.districts.map((district, districtIndex): DistrictLayout => {
     const buildings = model.buildings.filter((building) => building.districtId === district.id && assigned.has(building.id));
     const slots = new Map(buildings.map((building) => [building.id, assigned.get(building.id)!]));
@@ -263,7 +351,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     { center: { x: centroid.x + 980, z: centroid.z - 320 }, radius: 120, height: 88, seed: 71 },
     { center: { x: centroid.x - 1020, z: centroid.z + 260 }, radius: 150, height: 108, seed: 37 },
   ];
-  return { ...plan, districts, seed, massing, civics, gardens, boatLanes: [], decorMountains: [], boatLoops, seaMountains };
+  return { ...plan, districts, seed, massing, civics, gardens, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings };
 }
 
 /** 配套选址：会话楼先占地，配套只拿剩下的地块（绝不挤走会话）。

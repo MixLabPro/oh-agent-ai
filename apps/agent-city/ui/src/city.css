@@ -31,6 +31,7 @@
 .city-legend button { display: grid; grid-template-columns: 12px minmax(0, 1fr); width: 100%; text-align: left; gap: 4px 8px; margin-bottom: 6px; font-size: 12px; }
 .city-legend button > span:first-child { width: 10px; height: 10px; margin-top: 3px; border-radius: 3px; }
 .city-legend button > .city-district-meta { grid-column: 2; min-width: 0; color: var(--city-muted); font-size: 11px; line-height: 1.5; overflow-wrap: break-word; }
+.city-legend .city-context-note { margin: 8px 0 0; padding-top: 8px; border-top: 1px solid var(--city-border); color: var(--city-muted); font-size: 10px; line-height: 1.4; }
 .city-timeline { position: absolute; left: 24px; right: 24px; bottom: 18px; padding: 12px; background: var(--city-surface); border: 1px solid var(--city-border); border-radius: 12px; display: grid; grid-template-columns: auto minmax(60px, 1fr) auto auto auto; gap: 8px; align-items: center; font-size: 12px; }
 .city-timeline input { width: 100%; accent-color: #80caff; }
 .city-timeline > span { min-width: 48px; }

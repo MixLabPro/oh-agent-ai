@@ -15,18 +15,23 @@ const { buildSync } = createRequire(path.join(ui, "package.json"))("esbuild");
 const out = buildSync({
   stdin: {
     contents: `export { createCityPlan, polygonDistance } from ${JSON.stringify(path.join(city, "engine/cityPlan.ts"))};
-export { MIAMI_COASTAL, seasideStripContains, promenadePolyline, encodeDistance, decodeDistance, distanceQuantizationError } from ${JSON.stringify(path.join(city, "engine/citySeaside.ts"))};`,
+export { layoutCity } from ${JSON.stringify(path.join(city, "engine/cityLayout.ts"))};
+export { MIAMI_COASTAL, seasideStripContains, promenadeSegments, boulevardSegments, seasideHotelCount, encodeDistance, decodeDistance, distanceQuantizationError } from ${JSON.stringify(path.join(city, "engine/citySeaside.ts"))};`,
     resolveDir: city,
   },
   bundle: true, write: false, format: "cjs", platform: "node", logLevel: "silent",
 });
 const mod = { exports: {} };
 vm.runInNewContext(out.outputFiles[0].text, { module: mod, exports: mod.exports, process, console, Math, Map, Set });
-const { createCityPlan, polygonDistance, MIAMI_COASTAL, seasideStripContains, promenadePolyline, encodeDistance, decodeDistance, distanceQuantizationError } = mod.exports;
+const { createCityPlan, layoutCity, polygonDistance, MIAMI_COASTAL, seasideStripContains, promenadeSegments, boulevardSegments, seasideHotelCount, encodeDistance, decodeDistance, distanceQuantizationError } = mod.exports;
 
 const normalizeAngle = (a) => { let r = a % (Math.PI * 2); if (r < 0) r += Math.PI * 2; return r; };
 const angleDelta = (a, b) => { const d = Math.abs(normalizeAngle(a) - normalizeAngle(b)); return Math.min(d, Math.PI * 2 - d); };
 const seeds = Array.from({ length: 20 }, (_, i) => (i * 2654435761 + 97) >>> 0 || 1);
+
+assert.equal(seasideHotelCount(4), 8, "a short valid coast still gets a readable hotel row");
+assert.equal(seasideHotelCount(22), 13, "the default coast uses enough Deco frontage to read as a district");
+assert.equal(seasideHotelCount(80), 18, "large coast frontage remains instance-bounded");
 
 // 1) 无配置：旧行为不变（seaside 为 null，生态带仍随机）。
 {
@@ -53,16 +58,19 @@ const seeds = Array.from({ length: 20 }, (_, i) => (i * 2654435761 + 97) >>> 0 |
   for (const seed of seeds) {
     const plan = createCityPlan(seed, 2, MIAMI_COASTAL);
     const band = plan.seaside;
+    assert.ok(plan.landmarks.some((landmark) => landmark.kind === "twin-towers" || landmark.kind === "twist-tower"),
+      `seed ${seed}: Vice City silhouette must include one deterministic downtown high-rise landmark`);
     assert.ok(band, `seed ${seed}: 应产出海滨带`);
     if (!band.degraded) validBands += 1;
     for (const sample of band.samples) {
       if (!sample.valid) continue;
       const d = (p) => Math.hypot(p.x - sample.waterline.x, p.z - sample.waterline.z);
       assert.ok(d(sample.wetOuter) < d(sample.dryOuter) && d(sample.dryOuter) < d(sample.promenade)
-        && d(sample.promenade) < d(sample.hotelLine) && d(sample.hotelLine) < d(sample.outer),
-        `seed ${seed}: 偏移顺序必须沿内向法线单调（湿沙靠水、干沙靠内陆）`);
+        && d(sample.promenade) < d(sample.boulevard) && d(sample.boulevard) < d(sample.hotelLine) && d(sample.hotelLine) < d(sample.outer),
+        `seed ${seed}: 空间顺序必须是海水→湿沙→干沙→棕榈步道→滨海大道→酒店→城区`);
       // 独立陆海校验：酒店线在海岸多边形内部（polygonDistance 内正外负）。
       assert.ok(polygonDistance(sample.hotelLine, plan.coast) > 0, `seed ${seed}: 酒店线必须在陆地上`);
+      assert.ok(polygonDistance(sample.boulevard, plan.coast) > 0, `seed ${seed}: 滨海大道必须在陆地上`);
       assert.ok(sample.inward.x * sample.inward.x + sample.inward.z * sample.inward.z > 0.99,
         `seed ${seed}: 内向法线必须是单位向量`);
     }
@@ -79,13 +87,39 @@ const seeds = Array.from({ length: 20 }, (_, i) => (i * 2654435761 + 97) >>> 0 |
         const mid = (band.azimuthFrom + band.azimuthTo) / 2;
         assert.ok(angleDelta(mid, harborAzimuth) > (25 * Math.PI) / 180, `seed ${seed}: 海滨段不得压港口朝向`);
       }
-      // 步道折线连续（补点后相邻距 ≤ 31）。
-      const polyline = promenadePolyline(band);
-      assert.ok(polyline.length >= 2, `seed ${seed}: 步道折线至少两点`);
-      for (let i = 1; i < polyline.length; i += 1) {
-        assert.ok(Math.hypot(polyline[i].x - polyline[i - 1].x, polyline[i].z - polyline[i - 1].z) <= 31,
-          `seed ${seed}: 步道折线缺口必须补点（间距 ≤31）`);
+      // 步道合法连续段：段内间距 ≤ 15+ε；段数 ≥ 1；不做跨缺口搭桥。
+      const segments = promenadeSegments(band);
+      assert.ok(segments.length >= 1, `seed ${seed}: 至少一段合法步道`);
+      for (const segment of segments) {
+        for (let i = 1; i < segment.length; i += 1) {
+          const gap = Math.hypot(segment[i].x - segment[i - 1].x, segment[i].z - segment[i - 1].z);
+          assert.ok(gap <= 17, `seed ${seed}: 段内间距 ${gap.toFixed(1)} ≤17（缺口必须切段，不搭桥）`);
+        }
       }
+      const boulevards = boulevardSegments(band);
+      assert.ok(boulevards.length >= 1, `seed ${seed}: 至少一段合法滨海大道`);
+      for (const segment of boulevards) {
+        for (let i = 1; i < segment.length; i += 1) {
+          const gap = Math.hypot(segment[i].x - segment[i - 1].x, segment[i].z - segment[i - 1].z);
+          assert.ok(gap <= 17, `seed ${seed}: 大道连续段间距 ${gap.toFixed(1)} ≤17（无效河口/岸段必须断开）`);
+          assert.ok(plan.terrain.height((segment[i].x + segment[i - 1].x) / 2, (segment[i].z + segment[i - 1].z) / 2) > 0.5,
+            `seed ${seed}: 滨海大道不可穿海`);
+        }
+      }
+      const routeSample = band.samples.find((sample) => sample.valid);
+      assert.ok(plan.roadEdges.some((edge) => edge.width === 12 && edge.points.some((point) => Math.hypot(point.x - routeSample.boulevard.x, point.z - routeSample.boulevard.z) < 0.01)),
+        `seed ${seed}: 规划的大道应进入真实车行路网并继承主干道路幅`);
+      const coastalTraffic = plan.carPaths.find((path) => path.some((point) => Math.hypot(point.x - routeSample.boulevard.x, point.z - routeSample.boulevard.z) < 0.01));
+      assert.ok(coastalTraffic, `seed ${seed}: 至少一条机动车回路应经过滨海大道`);
+      assert.deepEqual(coastalTraffic[0], coastalTraffic.at(-1), `seed ${seed}: 滨海车流回路必须闭合，不可在端点瞬移`);
+      const roadPairs = new Set(plan.roadEdges.map((edge) => edge.points.map((point) => `${point.x}:${point.z}`).sort().join("/")));
+      for (let i = 1; i < coastalTraffic.length; i += 1) {
+        assert.ok(roadPairs.has([coastalTraffic[i - 1], coastalTraffic[i]].map((point) => `${point.x}:${point.z}`).sort().join("/")),
+          `seed ${seed}: 滨海车流只能沿已渲染道路移动 (${JSON.stringify([coastalTraffic[i - 1], coastalTraffic[i]])})`);
+      }
+      // 全降级 → 零段。
+      assert.equal(promenadeSegments({ ...band, degraded: true }).length, 0, `seed ${seed}: 降级时步道为零段`);
+      assert.equal(boulevardSegments({ ...band, degraded: true }).length, 0, `seed ${seed}: 降级时大道为零段`);
     }
   }
   assert.ok(validBands >= 18, `20 种子至少 18 个非降级海滨带（实际 ${validBands}）`);
@@ -111,5 +145,32 @@ const seeds = Array.from({ length: 20 }, (_, i) => (i * 2654435761 + 97) >>> 0 |
   assert.ok(distanceQuantizationError(range) < MIAMI_COASTAL.wetSandWidth, "量化误差必须小于湿沙过渡宽度");
 }
 
-console.log(`City seaside: determinism, offsets, land boundary, strip exclusion, harbor avoidance, degradation, encoding budget passed (${validCount(seeds)} seeds).`);
+
+// 6) 参数级缓存身份（审查 #5）：同 profile/version 改参数 → 不同海滨带。
+{
+  const modified = { ...MIAMI_COASTAL, maxCoastalHeight: -1 };
+  const normal = createCityPlan(seeds[2], 2, MIAMI_COASTAL).seaside;
+  const degraded = createCityPlan(seeds[2], 2, modified).seaside;
+  assert.equal(normal.degraded, false, "标准配置应产出有效海滨带");
+  assert.equal(degraded.degraded, true, "修改参数后必须独立降级（不能复用旧规划）");
+  const emptyModel = { buildings: [], districts: [] };
+  const cachedNormal = layoutCity(emptyModel, null, seeds[2], MIAMI_COASTAL);
+  const cachedModified = layoutCity(emptyModel, null, seeds[2], modified);
+  assert.equal(cachedNormal.seaside.degraded, false, "标准布局缓存应保存有效海滨带");
+  assert.equal(cachedModified.seaside.degraded, true, "layoutCity 缓存键必须纳入全部配置参数");
+  assert.notEqual(cachedNormal.coastalConfigKey, cachedModified.coastalConfigKey, "静态场景可用配置指纹判断失效");
+}
+
+// 7) 浏览器默认演示种子：用户截图验收时的首屏必须能规划出海滨酒店样板。
+{
+  const previewSeed = 523001688;
+  const previewPlan = createCityPlan(previewSeed, 1, MIAMI_COASTAL);
+  const validSamples = previewPlan.seaside.samples.filter((sample) => sample.valid).length;
+  assert.ok(previewPlan.landmarks.some((landmark) => landmark.kind === "twin-towers" || landmark.kind === "twist-tower"),
+    "browser preview must contain the Vice City skyline landmark");
+  assert.ok(!previewPlan.seaside.degraded && validSamples >= 3, "browser preview must have hotel samples");
+  console.log(`Browser preview seed ${previewSeed}: seaside degraded=${previewPlan.seaside.degraded}, valid samples=${validSamples}/${previewPlan.seaside.samples.length}, Deco hotels=${seasideHotelCount(validSamples)} / ${seasideHotelCount(validSamples) * 8} batched pieces, skyline=${previewPlan.landmarks.find((landmark) => landmark.kind === "twin-towers" || landmark.kind === "twist-tower")?.kind}`);
+}
+
+console.log(`City seaside: determinism, offsets, land boundary, strip exclusion, harbor avoidance, degradation, segments, param cache identity, encoding budget passed (${validCount(seeds)} seeds).`);
 function validCount(s) { return s.length; }

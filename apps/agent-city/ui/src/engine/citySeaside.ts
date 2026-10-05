@@ -27,6 +27,7 @@ export type CoastalConfig = {
   wetSandWidth: number;
   drySandWidth: number;
   promenadeOffset: number;
+  boulevardOffset: number;
   hotelOffset: number;
   bandOuter: number;
   /** 校验阈值。 */
@@ -48,8 +49,9 @@ export const MIAMI_COASTAL: CoastalConfig = {
   wetSandWidth: 7,
   drySandWidth: 14,
   promenadeOffset: 18,
-  hotelOffset: 27,
-  bandOuter: 38,
+  boulevardOffset: 30,
+  hotelOffset: 48,
+  bandOuter: 64,
   maxCoastalSlope: 0.9,
   maxCoastalHeight: 6,
   riverMargin: 26,
@@ -65,6 +67,7 @@ export type SeasideSample = {
   wetOuter: Vec2;
   dryOuter: Vec2;
   promenade: Vec2;
+  boulevard: Vec2;
   hotelLine: Vec2;
   outer: Vec2;
   /** 酒店线处地面高度。 */
@@ -82,6 +85,9 @@ export type SeasideBand = {
   degraded: boolean;
   reason?: string;
 };
+
+/** Dense enough to read as a hotel frontage at aerial scale, with a hard cap to bound instances. */
+export const seasideHotelCount = (validSampleCount: number): number => Math.min(18, Math.max(8, Math.floor(validSampleCount * 0.62)));
 
 /** 规划层注入的世界判定（全部为近似即可；coastDistance 是保守下界）。 */
 export type SeasideWorld = {
@@ -129,17 +135,23 @@ function buildSample(point: Vec2, inward: Vec2, azimuth: number, world: SeasideW
   const wetOuter = offset(point, inward, config.wetSandWidth);
   const dryOuter = offset(point, inward, config.drySandWidth);
   const promenade = offset(point, inward, config.promenadeOffset);
+  const boulevard = offset(point, inward, config.boulevardOffset);
   const hotelLine = offset(point, inward, config.hotelOffset);
   const outer = offset(point, inward, config.bandOuter);
   const groundY = world.height(hotelLine.x, hotelLine.z);
   let valid = true;
   let reason: string | undefined;
   if (world.landSignedDistance(hotelLine.x, hotelLine.z) <= 2) { valid = false; reason = "hotel-line-off-land"; }
+  else if (world.landSignedDistance(boulevard.x, boulevard.z) <= 4) { valid = false; reason = "boulevard-off-land"; }
   else if (world.slope(promenade.x, promenade.z) > config.maxCoastalSlope) { valid = false; reason = "steep-promenade"; }
+  else if (world.slope(boulevard.x, boulevard.z) > config.maxCoastalSlope) { valid = false; reason = "steep-boulevard"; }
   else if (groundY > config.maxCoastalHeight) { valid = false; reason = "high-ground"; }
+  else if (world.height(boulevard.x, boulevard.z) > config.maxCoastalHeight) { valid = false; reason = "boulevard-high-ground"; }
   else if (world.riverDistance(promenade.x, promenade.z) < config.riverMargin) { valid = false; reason = "river"; }
+  else if (world.riverDistance(boulevard.x, boulevard.z) < config.riverMargin) { valid = false; reason = "river-boulevard"; }
   else if (world.reservations.some((site) => Math.hypot(hotelLine.x - site.x, hotelLine.z - site.z) < site.radius + config.siteMargin)) { valid = false; reason = "reservation"; }
-  return { azimuth, waterline: point, inward, wetOuter, dryOuter, promenade, hotelLine, outer, groundY, valid, reason };
+  else if (world.reservations.some((site) => Math.hypot(boulevard.x - site.x, boulevard.z - site.z) < site.radius + config.siteMargin)) { valid = false; reason = "boulevard-reservation"; }
+  return { azimuth, waterline: point, inward, wetOuter, dryOuter, promenade, boulevard, hotelLine, outer, groundY, valid, reason };
 }
 
 /**
@@ -213,25 +225,38 @@ const lateralHalfOf = (band: SeasideBand, index: number, sample: SeasideSample):
   return (Number.isFinite(nearest) ? nearest : 28) / 2 + 1;
 };
 
-/** 步道中心折线（棕榈列/铺装消费）：无效采样在相邻有效点之间线性补点，保持折线连续。 */
-export function promenadePolyline(band: SeasideBand): Vec2[] {
-  const valid = band.samples.filter((sample) => sample.valid).map((sample) => sample.promenade);
-  if (valid.length < 2) return valid;
-  const points: Vec2[] = [valid[0]];
-  for (let index = 1; index < valid.length; index += 1) {
-    const a = valid[index - 1];
-    const b = valid[index];
-    const gap = Math.hypot(b.x - a.x, b.z - a.z);
-    // 间距超过常规采样距 → 中间存在无效采样，按 ~15 单位间距线性补足（无上限：
-    // 连续多个无效采样的长缺口也要连续，曾用 min(3,…) 上限在 4+ 连续无效时断裂）。
-    if (gap > 30) {
-      const fill = Math.max(1, Math.ceil(gap / 15) - 1);
-      for (let k = 1; k <= fill; k += 1) points.push({ x: a.x + (b.x - a.x) * (k / (fill + 1)), z: a.z + (b.z - a.z) * (k / (fill + 1)) });
+/**
+ * 步道合法连续段（棕榈列/铺装消费）：按无效采样切分为多段——**不做跨缺口搭桥**。
+ * 曾把两侧有效点直接连线补点，等于穿河/穿坡/穿设施铺装，把净空校验的结论倒
+ * 回去了。段内按 ~15 单位细分（地形高度查询在消费端逐点做）。返回 ≥0 段折线。
+ */
+function offsetSegments(band: SeasideBand, pointOf: (sample: SeasideSample) => Vec2): Vec2[][] {
+  if (band.degraded) return [];
+  const segments: Vec2[][] = [];
+  let current: Vec2[] = [];
+  const pushSegment = () => { if (current.length >= 2) segments.push(current); current = []; };
+  for (const sample of band.samples) {
+    if (!sample.valid) { pushSegment(); continue; }
+    const p = pointOf(sample);
+    if (current.length) {
+      const a = current[current.length - 1];
+      const gap = Math.hypot(p.x - a.x, p.z - a.z);
+      if (gap > 15) {
+        // 当前点与前一点之间没有无效采样，合法海岸采样本身可相距 >30；
+        // 在连续有效段内细分地形点，不把稀疏采样误判成净空缺口。
+        const fill = Math.ceil(gap / 15) - 1;
+        for (let k = 1; k <= fill; k += 1) current.push({ x: a.x + (p.x - a.x) * (k / (fill + 1)), z: a.z + (p.z - a.z) * (k / (fill + 1)) });
+      }
     }
-    points.push(b);
+    current.push(p);
   }
-  return points;
+  pushSegment();
+  return segments;
 }
+
+export const promenadeSegments = (band: SeasideBand): Vec2[][] => offsetSegments(band, (sample) => sample.promenade);
+/** Valid vehicle-road centerlines; invalid river/terrain/reservation samples split the route. */
+export const boulevardSegments = (band: SeasideBand): Vec2[][] => offsetSegments(band, (sample) => sample.boulevard);
 
 /** B2 数据纹理的有符号距离编码/解码（RGBA8 的 R 通道）。 */
 export const encodeDistance = (d: number, range: number): number => Math.max(0, Math.min(1, (d / range + 1) / 2));

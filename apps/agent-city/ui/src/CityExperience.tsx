@@ -223,6 +223,7 @@ export function CityExperience({ ui, disabled, cinema }: { ui: ReturnType<typeof
         <span className="city-district-meta">{district.sessionCount} 会话 · {district.activeCount} 活跃</span>
         {district.anomaly && <span className="city-district-meta">{district.anomaly.severity} · {district.anomaly.count} 条异常（部分投影）</span>}
       </button>)}
+      <p className="city-context-note">粉彩高层为城市背景 · 不计入会话</p>
     </section>}
     {!cinema && <section className="city-timeline" aria-label="时间回放">
       <button type="button" onClick={ui.replay} disabled={locked}>{ui.playing ? "暂停回放" : "播放回放"}</button>
@@ -232,7 +233,7 @@ export function CityExperience({ ui, disabled, cinema }: { ui: ReturnType<typeof
         <option value="600">每秒 10 分钟</option><option value="3600">每秒 1 小时</option><option value="14400">每秒 4 小时</option>
       </select>
       <button type="button" onClick={ui.live} disabled={locked || ui.cursor === null}>回到实时</button>
-      <p>楼高表示 token 规模；施工状态和生长进度是可视化估算，不代表任务完成度。</p>
+      <p>会话楼高表示 token 规模；施工状态和生长进度是可视化估算，不代表任务完成度。</p>
     </section>}
     {cinema && <div className="city-cinematic-overlay" aria-live="polite">
       <div className="city-cinema-top" /><div className="city-cinema-bottom"><span style={{ transform: `scaleX(${ui.progress})` }} /></div>

@@ -550,7 +550,9 @@ export class CityEngine {
 
   private homeView(): { x: number; y: number; z: number } {
     const bounds = Math.max(120, this.boundsRadius);
-    const fit = 1.2 * Math.max(1, 1 / this.camera.aspect);
+    // Frame the city rather than leaving excessive ocean margin: screenshots
+    // showed the street fabric occupying too little of the default view.
+    const fit = 0.95 * Math.max(1, 1 / this.camera.aspect);
     return { x: this.cityCenter.x + bounds * 0.86 * fit, y: bounds * 1.05 * fit, z: this.cityCenter.z + bounds * 1.16 * fit };
   }
 
@@ -590,7 +592,10 @@ export class CityEngine {
     const anchor = this.parts.districtAnchor(districtId);
     if (!anchor) return false;
     this.attracted = false;
-    const distance = anchor.radius * 2.6;
+    // A low-volume district has radius's 30-unit floor; 2.6× pushed the camera
+    // inside the new pastel context skyline and clipped the tower crowns. Keep
+    // a useful neighborhood view while scaling out naturally for larger districts.
+    const distance = Math.max(108, anchor.radius * 3);
     const direction = new THREE.Vector3().subVectors(this.camera.position, this.controls.target).setY(0).normalize();
     if (direction.lengthSq() < 0.01) direction.set(0.8, 0, 0.6).normalize();
     const position = new THREE.Vector3(anchor.x, anchor.y, anchor.z).addScaledVector(direction, distance).add(new THREE.Vector3(0, distance * 0.7, 0));

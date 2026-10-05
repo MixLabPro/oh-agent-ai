@@ -10,10 +10,10 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ui = path.join(repo, "apps/desktop/ui-dev");
 const city = path.join(repo, "apps/agent-city/ui/src");
 const { buildSync } = createRequire(path.join(ui, "package.json"))("esbuild");
-const out = buildSync({ entryPoints: [path.join(city, "engine/cityLayout.ts")], bundle: true, write: false, format: "cjs", platform: "node", logLevel: "silent" });
+const out = buildSync({ stdin: { contents: `export { layoutCity } from ${JSON.stringify(path.join(city, "engine/cityLayout.ts"))}; export { MIAMI_COASTAL } from ${JSON.stringify(path.join(city, "engine/citySeaside.ts"))};`, resolveDir: city }, bundle: true, write: false, format: "cjs", platform: "node", logLevel: "silent" });
 const mod = { exports: {} };
 vm.runInNewContext(out.outputFiles[0].text, { module: mod, exports: mod.exports, process, console, setTimeout, clearTimeout });
-const { layoutCity } = mod.exports;
+const { layoutCity, MIAMI_COASTAL } = mod.exports;
 
 function model(count, harnesses = ["codex", "claude-code", "dsh", "plugin:zcode"]) {
   const buildings = Array.from({ length: count }, (_, index) => ({
@@ -26,6 +26,11 @@ const addresses = (layout) => Object.fromEntries(layout.districts.flatMap((distr
 function validate(layout, input) {
   const all = layout.districts.flatMap((district) => [...district.slots]);
   assert.equal(all.length, input.buildings.length, "every building must be placed");
+  const blockSideLengths = layout.blocks.flatMap((block) => block.polygon.map((point, index) => {
+    const next = block.polygon[(index + 1) % block.polygon.length];
+    return Math.round(Math.hypot(point.x - next.x, point.z - next.z) * 10) / 10;
+  }));
+  assert(new Set(blockSideLengths).size > 12, "seeded street junction offsets prevent a mechanically repeated grid");
   assert.equal(new Set(all.map(([, p]) => p.id)).size, all.length, "addresses are unique");
   const nodes = new Map(layout.roadNodes.map((node) => [node.id, node]));
   const adjacency = new Map([...nodes.keys()].map((id) => [id, []]));
@@ -33,6 +38,9 @@ function validate(layout, input) {
     assert(nodes.has(edge.from) && nodes.has(edge.to));
     adjacency.get(edge.from).push(edge.to); adjacency.get(edge.to).push(edge.from);
   }
+  assert(layout.roadEdges.some((edge) => edge.width === 12), "island-spanning primary arterials have a distinct wide-road tier");
+  assert(layout.roadEdges.some((edge) => edge.width === 8), "district arterials remain narrower than primary routes");
+  assert(layout.roadEdges.some((edge) => edge.width === 5), "local streets remain the narrowest road tier");
   const queue = [layout.roadNodes[0].id]; const visited = new Set(queue);
   for (let index = 0; index < queue.length; index += 1) {
     for (const neighbor of adjacency.get(queue[index])) if (!visited.has(neighbor)) { visited.add(neighbor); queue.push(neighbor); }
@@ -104,6 +112,49 @@ for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
   for (const anchor of layout.districtAnchors) assert(layout.terrain.height(anchor.x, anchor.z) > 0.5, `seed ${seed}: district anchor must sit on land`);
   assert.deepEqual(addresses(layoutCity(input, null, seed)), addresses(layout), `seed ${seed}: deterministic`);
 }
+// Vice City 环境楼群：低会话量时依然有城区肌理，但只占空置商业地块，且绝不伪装成会话数据。
+{
+  const input = model(3, ["codex", "claude-code", "dsh"]);
+  const layout = layoutCity(input, null, 523001688, MIAMI_COASTAL);
+  const repeated = layoutCity(input, null, 523001688, MIAMI_COASTAL);
+  assert(layout.contextBuildings.length >= 140, `low-volume Miami city still has broad urban fabric (${layout.contextBuildings.length})`);
+  console.log(`Vice City low-volume context buildings: ${layout.contextBuildings.length}`);
+  assert.deepEqual(layout.contextBuildings, repeated.contextBuildings, "environment buildings are deterministic for a seed and session set");
+  const sessionLots = new Set(layout.districts.flatMap((district) => [...district.slots.values()].map((parcel) => parcel.id)));
+  const civicLots = new Set(layout.civics.map((civic) => civic.parcelId));
+  const gardenBlocks = new Set(layout.gardens.map((garden) => garden.blockId));
+  for (const building of layout.contextBuildings) {
+    const lotId = building.id.slice("context:".length);
+    assert(!sessionLots.has(lotId), `${building.id} cannot overlap a session building`);
+    assert(!civicLots.has(lotId), `${building.id} cannot occupy a civic site`);
+    assert(!gardenBlocks.has(lotId.split("/")[0]), `${building.id} cannot occupy a garden block`);
+    const expectedHeight = building.zone === "downtown" ? [38, 72]
+      : building.zone === "commercial" ? [20, 48]
+        : building.zone === "waterfront" ? [16, 36]
+          : [8, 22];
+    assert(building.height >= expectedHeight[0] && building.height <= expectedHeight[1], `${building.zone} gets a readable city-height band`);
+    const halfDiagonal = Math.hypot(building.width, building.depth) / 2;
+    for (const edge of layout.roadEdges) {
+      const [a, b] = edge.points; const dx = b.x - a.x; const dz = b.z - a.z;
+      const t = Math.max(0, Math.min(1, ((building.x - a.x) * dx + (building.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
+      const distance = Math.hypot(building.x - a.x - dx * t, building.z - a.z - dz * t);
+      assert(distance >= halfDiagonal + edge.width / 2 + 0.5, `${building.id} footprint stays clear of road ${edge.id}`);
+    }
+    for (const [, session] of layout.districts.flatMap((district) => [...district.slots])) {
+      const distance = Math.hypot(building.x - session.x, building.z - session.z);
+      assert(distance >= halfDiagonal + Math.hypot(session.width, session.depth) / 2 + 2, `${building.id} does not crowd a session building`);
+    }
+    for (const civic of layout.civics) assert(Math.hypot(building.x - civic.x, building.z - civic.z) >= halfDiagonal + Math.hypot(civic.width, civic.depth) / 2 + 2, `${building.id} does not crowd civic facilities`);
+  }
+  for (const [, session] of layout.districts.flatMap((district) => [...district.slots])) {
+    assert(layout.contextBuildings.some((building) => Math.hypot(building.x - session.x, building.z - session.z) < 70), "session districts should receive nearby non-session city fabric");
+  }
+  for (let i = 0; i < layout.contextBuildings.length; i += 1) for (let j = i + 1; j < layout.contextBuildings.length; j += 1) {
+    const a = layout.contextBuildings[i]; const b = layout.contextBuildings[j];
+    const clearance = Math.hypot(a.width, a.depth) / 2 + Math.hypot(b.width, b.depth) / 2 + 2;
+    assert(Math.hypot(a.x - b.x, a.z - b.z) >= clearance, "context building footprints do not overlap");
+  }
+}
 // 配套按服务半径铺开：同一座岛上任意两座配套至少隔 60，学校多数落在居住区、商场多数落在商业区/市中心。
 {
   const layout = layoutCity(model(1000), null, 42);
@@ -142,4 +193,4 @@ for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
   assert(ratio > 1.2, "a larger tier grows the island");
   small.coast.forEach((p, i) => { const q = big.coast[i]; assert(Math.hypot(q.x - p.x * ratio, q.z - p.z * ratio) < 0.5, "tier change scales the coast without reshaping it"); });
 }
-console.log("City layout: full placement, unique lots, road clearance/connectivity, traffic, incremental stability, civic growth and per-user seeds passed.");
+console.log("City layout: full placement, unique lots, road clearance/connectivity, traffic, incremental stability, civic growth, per-user seeds and deterministic Vice City context buildings passed.");
