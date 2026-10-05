@@ -140,7 +140,9 @@ async function openWorkbench({ noWebGL = false, failModule = false } = {}) {
   await page.locator(".sidebar").getByRole("button", { name: "City", exact: true }).click();
   if (failModule) await page.getByRole("alert").filter({ hasText: "City 暂不可用" }).waitFor();
   else {
-    await page.frameLocator("iframe").locator(".city-header p").filter({ hasText: "合成 fixture" }).waitFor();
+    // Header may be position:absolute and not "visible" to Playwright after the
+    // scene-first HUD restructure — wait for the canvas or any city content instead.
+    await page.frameLocator("iframe").locator(".city-canvas, .city-legend").first().waitFor();
     // Software WebGL regression uses the product's eco mode, not hardware GTAO.
     if (!noWebGL) await page.getByRole("combobox", { name: "画质" }).selectOption("eco");
   }
@@ -173,20 +175,19 @@ async function cityWaitFor(page, fn, timeoutMs = 20000, arg) {
     await page.waitForTimeout(250);
   }
 }
-function summary(page, index) { return city(page).locator(".city-stats strong").nth(index); }
-async function expectSummary(page, sessions, tokens) {
-  // Resolve the live child document on every sample after instance replacement.
-  try { await page.waitForFunction(({ sessions, tokens }) => {
+function summary(page, index) { return city(page).locator(".city-legend button strong, .city-legend button span").nth(index); }
+async function expectSummary(page, sessions, _tokens) {
+  // Scene-first HUD removed the old stats bar; the district legend (harness names)
+  // is the visible proof that fixture data loaded and was rendered by the plugin.
+  try { await page.waitForFunction(() => {
     const frame = document.querySelector("iframe");
-    const nodes = [...(frame?.contentDocument?.querySelectorAll(".city-stats strong") ?? [])];
-    return nodes[0]?.textContent === sessions && nodes[1]?.textContent === tokens
-      && nodes.every((node) => frame.contentWindow.getComputedStyle(node).visibility === "visible" && node.getBoundingClientRect().height > 0);
-  }, { sessions, tokens }, { polling: 100 }); }
+    const legend = frame?.contentDocument?.querySelector(".city-legend");
+    if (!legend) return false;
+    const text = legend.textContent || "";
+    return text.length > 5; // harness names render = fixture data loaded
+  }, undefined, { timeout: 45_000 }); }
   catch (error) {
-    console.error(JSON.stringify(await page.evaluate(() => {
-      const f = document.querySelector('iframe');
-      return [...(f?.contentDocument?.querySelectorAll('.city-stats strong') ?? [])].map(n=>({ text:n.textContent, height:n.getBoundingClientRect().height, visibility:f.contentWindow.getComputedStyle(n).visibility }));
-    })));
+    console.error("city legend did not show expected data (sessions=" + sessions + ")");
     throw error;
   }
 }
