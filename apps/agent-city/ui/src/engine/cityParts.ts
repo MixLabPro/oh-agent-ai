@@ -1954,7 +1954,7 @@ export class CityParts {
             const next = segment[Math.min(segment.length - 1, i + 1)];
             const prev = segment[Math.max(0, i - 2)];
             const segLen = Math.hypot(b.x - a.x, b.z - a.z);
-            const steps = Math.max(1, Math.floor(segLen / 9));
+            const steps = Math.max(1, Math.floor(segLen / 7));
             for (let s = 1; s <= steps; s += 1) {
               const t = s / (steps + 1);
               const x = a.x + (b.x - a.x) * t; const z = a.z + (b.z - a.z) * t;
@@ -2100,7 +2100,7 @@ export class CityParts {
     const seaside = this.layout.seaside;
     if (!seaside || seaside.degraded) return;
     const segments = promenadeSegments(seaside);
-    const half = 3.2;
+    const half = 4.2;
     const positions: number[] = [];
     for (const polyline of segments)
     for (let i = 1; i < polyline.length; i += 1) {
@@ -2117,7 +2117,7 @@ export class CityParts {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
     geometry.computeVertexNormals();
-    const material = new THREE.MeshLambertMaterial({ color: "#e8ddc8" });
+    const material = new THREE.MeshLambertMaterial({ color: "#d4c8a8" });
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = "city-promenade";
     mesh.receiveShadow = true;
@@ -2139,7 +2139,7 @@ export class CityParts {
     const detailMaterial = new THREE.MeshLambertMaterial({ color: "#fff0d7" });
     const trimGeometry = new THREE.BoxGeometry(1, 1, 1);
     const detailGeometry = new THREE.BoxGeometry(1, 1, 1);
-    const palette = ["#ffd2c4", "#c4f4f6", "#ffe9c4", "#e3d2ff"];
+    const palette = ["#ffb8a0", "#a8e8ec", "#ffd8a0", "#d8c0ff"];
     const count = seasideHotelCount(valid.length);
     const wallMesh = new THREE.InstancedMesh(wallGeometry, wallMaterial, count * 3);
     const trimMesh = new THREE.InstancedMesh(trimGeometry, trimMaterial, count * 2);
