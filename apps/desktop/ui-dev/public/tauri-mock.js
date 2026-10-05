@@ -1223,9 +1223,11 @@
       const payload = request.payload || {};
       if (request.method !== "data.read") throw new Error("unsupported_method");
       if (payload.projection === "city-settings") {
-        if (payload.action === "write" && Number.isInteger(payload.seed)) localStorage.setItem("city.seed", String(payload.seed));
-        const saved = Number(localStorage.getItem("city.seed"));
-        return { seed: Number.isInteger(saved) && saved > 0 && saved <= 4294967295 ? saved : null };
+        // 预览默认固定一个有河的岛（没有种子时插件会随机抽，约 18% 的种子设计上无河，
+        // 预览里看不到河曾被当成回归）。用「重新生成岛屿」写入的新种子仍会被记住。
+        if (payload.action === "write" && Number.isInteger(payload.seed)) localStorage.setItem("city.preview-seed", String(payload.seed));
+        const saved = Number(localStorage.getItem("city.preview-seed"));
+        return { seed: Number.isInteger(saved) && saved > 0 && saved <= 4294967295 ? saved : 1703294958 };
       }
       if (payload.projection !== "city") throw new Error("unsupported_projection");
       const days = [7, 30, 90, 366].includes(payload.windowDays) ? payload.windowDays : 30;
