@@ -1899,7 +1899,7 @@ export class CityParts {
         // 冒烟的那座（CityWildlife 选最高的）是火山：火山体直接移植 tinyskies Volcano.ts 的 buildVolcanoGeometry
         // （作者授权）——带火山口的车削轮廓、噪声扭曲成不规则岩体、顶点色从青褐山脚→灰烬→焦黑火山口→岩浆芯。
         // 曾是一个光秃的浅色圆锥，读作「海上一顶帽子」（拍照实测）。烟柱从 height/2 的火山口冒出。
-        const mesh = new THREE.Mesh(volcanoGeometry(mountain.radius, mountain.height / 2, this.layout.seed), new THREE.MeshLambertMaterial({ vertexColors: true, fog: false }));
+        const mesh = new THREE.Mesh(volcanoGeometry(mountain.radius, mountain.height / 2, this.layout.seed), new THREE.MeshLambertMaterial({ vertexColors: true })); // 吃雾：远海处与海面一同淡入天色，曾 fog:false 在雾化的海平线上悬浮成飞碟（真机截图）
         mesh.position.set(mountain.center.x, -2, mountain.center.z);
         mesh.name = "city-sea-volcano";
         this.group.add(mesh);
@@ -2154,7 +2154,10 @@ export class CityParts {
     for (let i = 0; i < count; i += 1) {
       const sample = valid[Math.floor(((i + 0.5) / count) * (valid.length - 1))];
       const seed = hashSeed(`seasidehotel:${i}:${sample.azimuth}`);
-      const yaw = Math.atan2(sample.inward.x, -sample.inward.z);
+      // compose 的约定：局部 z 轴 = (sin yaw, cos yaw)。要让进深轴沿岸线法向（立面朝海），yaw = atan2(inward.x, inward.z)。
+      // 曾写 atan2(inward.x, -inward.z)：只有 inward.z = 0 处才对，其它岸段楼体相对岸线斜转，沿「朝海」偏移的
+      // 遮阳带/壁柱/霓虹招牌从楼的侧面戳出来（真机截图：白色横杆伸出墙外）。
+      const yaw = Math.atan2(sample.inward.x, sample.inward.z);
       // 酒店是城市身份地标，沿街形成连续但留缝的 frontage，不随会话数稀疏成几处孤岛。
       // 单体保持 30–44 宽、20–33 高；数量由有效岸线采样推导并封顶，实例仍复用同批次。
       const width = 30 + seed * 14;
@@ -2237,7 +2240,10 @@ export class CityParts {
       const sample = valid[Math.floor(((t + 0.3) / count) * (valid.length - 1))];
       const seed = hashSeed(`lifeguard:${t}`);
       const ground = this.layout.terrain.height(sample.dryOuter.x, sample.dryOuter.z);
-      const yaw = Math.atan2(sample.inward.x, -sample.inward.z);
+      // compose 的约定：局部 z 轴 = (sin yaw, cos yaw)。要让进深轴沿岸线法向（立面朝海），yaw = atan2(inward.x, inward.z)。
+      // 曾写 atan2(inward.x, -inward.z)：只有 inward.z = 0 处才对，其它岸段楼体相对岸线斜转，沿「朝海」偏移的
+      // 遮阳带/壁柱/霓虹招牌从楼的侧面戳出来（真机截图：白色横杆伸出墙外）。
+      const yaw = Math.atan2(sample.inward.x, sample.inward.z);
       const pal = palettes[t % palettes.length];
       const legH = 2.6 + seed * 0.8;
       const hutW = 3.2 + seed * 0.8;
@@ -2315,7 +2321,10 @@ export class CityParts {
     for (let i = 0; i < count; i += 1) {
       const sample = valid[Math.floor(((i + 0.5) / count) * (valid.length - 1))];
       const seed = hashSeed(`signage:${i}:${sample.azimuth}`);
-      const yaw = Math.atan2(sample.inward.x, -sample.inward.z);
+      // compose 的约定：局部 z 轴 = (sin yaw, cos yaw)。要让进深轴沿岸线法向（立面朝海），yaw = atan2(inward.x, inward.z)。
+      // 曾写 atan2(inward.x, -inward.z)：只有 inward.z = 0 处才对，其它岸段楼体相对岸线斜转，沿「朝海」偏移的
+      // 遮阳带/壁柱/霓虹招牌从楼的侧面戳出来（真机截图：白色横杆伸出墙外）。
+      const yaw = Math.atan2(sample.inward.x, sample.inward.z);
       const outward = { x: -sample.inward.x, z: -sample.inward.z };
       const right = { x: Math.cos(yaw), z: -Math.sin(yaw) };
       const height = 24 + hashSeed(`seasidehotelh:${i}`) * 14;
