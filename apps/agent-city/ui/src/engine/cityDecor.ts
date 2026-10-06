@@ -7,16 +7,12 @@
  * 文案是中文原文，英文走 i18n.tsx 的目录（cityView 渲染时替换）。
  */
 
+import { CIVIC_LABELS, LANDMARK_LABELS } from "./models/registry";
+
 export type DecorInfo = { title: string; category: string; body: string };
 
-const LANDMARK_NAMES: Record<string, string> = {
-  "tv-tower": "电视塔", "sail-opera": "帆形歌剧院", arch: "凯旋拱门", pagoda: "宝塔", lighthouse: "灯塔",
-  "ferris-wheel": "摩天轮", "suspension-bridge": "悬索桥", "truss-bridge": "桁架桥", "twin-towers": "双子塔", "twist-tower": "扭转塔",
-  "twisting-deco-tower": "扭转装饰艺术塔",
-  airport: "机场岛",
-  "villa-complex": "地中海庄园",
-};
-const CIVIC_NAMES: Record<string, string> = { school: "学校", mall: "商场", hospital: "医院" };
+const LANDMARK_NAMES = LANDMARK_LABELS; // 名称表在 models/registry.ts（单一来源）
+const CIVIC_NAMES = CIVIC_LABELS;
 
 export function isDecorId(id: string | null | undefined): boolean {
   return typeof id === "string" && id.startsWith("decor:");

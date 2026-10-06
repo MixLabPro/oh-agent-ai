@@ -29,7 +29,9 @@ assert.equal(B.useOfZone("residential"), "residential");
 assert.equal(B.nightFactor(0.05), 0, "daytime selfLit is not night");
 assert.equal(B.nightFactor(1), 1);
 
-const parts = fs.readFileSync(path.join(engine, "cityParts.ts"), "utf8");
+// 地标造型已拆到 models/landmarks/*.ts（桥塔霓虹在 suspensionBridge.ts）：夜景代码检查读 cityParts + 全部造型文件。
+const modelsDir = path.join(engine, "models/landmarks");
+const parts = [path.join(engine, "cityParts.ts"), ...fs.readdirSync(modelsDir).map((f) => path.join(modelsDir, f))].map((f) => fs.readFileSync(f, "utf8")).join("\n");
 const eng = fs.readFileSync(path.join(engine, "CityEngine.ts"), "utf8");
 assert(!/uniforms\.uSelfLit\.value = themeBase;/.test(parts), "walls must dim at night (uSelfLit tied to night)");
 assert(!/setColorAt\(roofCount, new THREE\.Color\(palette\.accent\)\.multiplyScalar\(3\.2\)\)/.test(parts), "roof neon must be gated to tall/hotel via the budget");
