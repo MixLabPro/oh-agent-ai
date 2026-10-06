@@ -612,6 +612,27 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       else { if (current.length >= 3) coastRoadRuns.push(current); current = ok[i] ? [pts[i]] : []; }
     }
     if (current.length >= 3) coastRoadRuns.push(current);
+    // ── 河岸路（规划总纲 S2）：河是城市的另一条「边界」，两岸各一条沿河道路（离河道边缘 14），
+    // 遇主干道/桥头/预留地断开，段端稍后以 T 路口接入。与环岛滨海路共用一套接入、避让与街网退让逻辑。
+    if (hasRiver) {
+      const existingArterial = new SegmentIndex([...edges.values()].filter((edge) => edge.width >= 8 && !edge.bridge).map((edge) => edge.points));
+      const riverUsable = (q: Vec2) => coastDistance(q.x, q.z) > 14 && !inRiver(q.x, q.z) && landClearance(q.x, q.z) > 8
+        && hillProj(q.x, q.z) < hillLine - 12 && height(q.x, q.z) < 6
+        && !(seaside && seasideStripContains(seaside, q, 6))
+        && !reservations().some((site) => Math.hypot(q.x - site.x, q.z - site.z) < site.radius + 8)
+        && !ringIndex.closerThan(q, 10) && !existingArterial.closerThan(q, 22);
+      for (const side of [-1, 1]) {
+        let runPts: Vec2[] = [];
+        for (let z = bbox.minZ; z <= bbox.maxZ; z += 20) {
+          const q = { x: riverX(z) + side * (riverWidth(z) + 14), z };
+          const last = runPts[runPts.length - 1];
+          const chordOk = !last || riverUsable({ x: (last.x + q.x) / 2, z: (last.z + q.z) / 2 });
+          if (riverUsable(q) && chordOk) runPts.push(q);
+          else { if (runPts.length >= 3) coastRoadRuns.push(runPts); runPts = riverUsable(q) ? [q] : []; }
+        }
+        if (runPts.length >= 3) coastRoadRuns.push(runPts);
+      }
+    }
     // 主干级（宽 12）：与海滨大道同级，平行的街网道路据此降级为支路。
     for (const runPts of coastRoadRuns) for (let k = 1; k < runPts.length; k += 1) addEdge(runPts[k - 1], runPts[k], true, false, true);
   }
@@ -806,7 +827,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 环岛滨海路段端接入路网；离它 ≤16 的街网节点以 T 路口接上（街区一直排到沿海路）。
   for (const runPts of coastRoadRuns) for (const end of [runPts[0], runPts[runPts.length - 1]]) {
     if (Math.hypot(end.x - runPts[0].x, end.z - runPts[0].z) < 0.01 && end !== runPts[0]) continue;
-    connectToNetwork(end, 160, true, (edge) => coastRoadRuns.some((r) => r.some((q) => Math.hypot(q.x - edge.points[0].x, q.z - edge.points[0].z) < 0.01) && r.some((q) => Math.hypot(q.x - edge.points[1].x, q.z - edge.points[1].z) < 0.01)));
+    connectToNetwork(end, 160, false, (edge) => coastRoadRuns.some((r) => r.some((q) => Math.hypot(q.x - edge.points[0].x, q.z - edge.points[0].z) < 0.01) && r.some((q) => Math.hypot(q.x - edge.points[1].x, q.z - edge.points[1].z) < 0.01)));
   }
   for (const node of [...nodes.values()]) {
     if (!coastRoadIndex.closerThan(node, 16) || coastRoadIndex.closerThan(node, 0.5)) continue;
