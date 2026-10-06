@@ -2351,7 +2351,7 @@ export class CityParts {
     // 朝海一侧的白色矮墙（隔开沙滩与步道）+ 朝陆一侧每 ~16 单位一盏路灯。
     const unit = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
     const furniture = new THREE.MeshLambertMaterial({ color: "#ffffff" });
-    type Piece = { x: number; y: number; z: number; yaw: number; w: number; h: number; d: number; color: string };
+    type Piece = { x: number; y: number; z: number; yaw: number; w: number; h: number; d: number; color: string; glow?: boolean };
     const pieces: Piece[] = [];
     for (const polyline of segments) {
       let sinceLamp = 8;
@@ -2374,7 +2374,7 @@ export class CityParts {
           const lx = a.x + dx * t - nx * (half - 0.4); const lz = a.z + dz * t - nz * (half - 0.4);
           const ly = this.layout.terrain.height(lx, lz);
           pieces.push({ x: lx, y: ly, z: lz, yaw, w: 0.14, h: 3.6, d: 0.14, color: "#3c4650" });
-          pieces.push({ x: lx, y: ly + 3.6, z: lz, yaw, w: 0.5, h: 0.22, d: 0.5, color: "#fff1c9" });
+          pieces.push({ x: lx, y: ly + 3.6, z: lz, yaw, w: 0.5, h: 0.22, d: 0.5, color: "#fff1c9", glow: true });
         }
       }
     }
@@ -2392,6 +2392,22 @@ export class CityParts {
       if (props.instanceColor) props.instanceColor.needsUpdate = true;
       props.name = "city-promenade-props";
       this.group.add(props);
+      // 夜里亮灯：灯头另起一批，用路灯灯头同一份自发光材质（setNightGlow 已按夜色驱动、白天熄灭）。
+      // 曾与灯杆同一 Lambert 批次，夜里步道一片漆黑（剩余项清单「步道路灯夜里不亮」）。
+      const heads = pieces.filter((piece) => piece.glow);
+      if (heads.length && this.nightLights) {
+        const glowMesh = new THREE.InstancedMesh(unit, this.nightLights.heads, heads.length);
+        heads.forEach((piece, i) => {
+          this.positionVector.set(piece.x, piece.y + 0.01, piece.z);
+          this.euler.set(0, piece.yaw, 0); this.quaternion.setFromEuler(this.euler);
+          this.scaleVector.set(piece.w * 1.05, piece.h * 1.1, piece.d * 1.05);
+          this.matrix.compose(this.positionVector, this.quaternion, this.scaleVector);
+          glowMesh.setMatrixAt(i, this.matrix);
+        });
+        glowMesh.instanceMatrix.needsUpdate = true;
+        glowMesh.name = "city-promenade-props";
+        this.group.add(glowMesh);
+      }
     }
     this.disposables.push(unit, furniture);
   }
