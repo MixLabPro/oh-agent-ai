@@ -10,6 +10,9 @@
 import * as THREE from "three";
 import { builtFractionAt, hashSeed, type CityBuilding, type CityModel } from "../cityModel";
 import { MIAMI_COASTAL, promenadeSegments, validRuns } from "./citySeaside";
+import { HOTEL_CROWN_MAX_FINS, hotelCrownPlan, type CrownPiece } from "./cityHotelCrown";
+import { roadsideSignPlan, rooftopSignPlan, type RooftopSignPlan } from "./citySkylineProps";
+import { buildVillaComplex } from "./cityLandmarkVilla";
 import { fbm } from "./cityNoise";
 import type { CityLayout, DistrictLayout, Parcel, Vec2 } from "./cityLayout";
 import { activeTheme, skyYawOf } from "./cityTheme";
@@ -115,6 +118,12 @@ type BuildingRuntime = {
   roofKind: number;
   /** 全城 token 最多的会话：专属冠顶 + 灯环 + 光束。 */
   hero: boolean;
+  /** 海滨酒店冠（L-1）：crownBase = 鳍片实例起点（-1 = 无冠）；方案建模期算一次存住，逐帧只写矩阵。 */
+  crownBase: number;
+  crown: { fins: CrownPiece[]; stripY: number } | null;
+  /** 屋顶立牌（L-2）：四批次（柱×2/板×1/框×4/条×n）共用的牌位起点（-1 = 无牌）。 */
+  signBase: number;
+  signPlan: RooftopSignPlan | null;
 };
 
 /** terrain 非空 → 车贴地行驶；桥面路径 terrain 为空、y 固定。 */
@@ -407,6 +416,16 @@ export class CityParts {
   private readonly beaconMesh: THREE.InstancedMesh;
   private readonly craneMastMesh: THREE.InstancedMesh;
   private readonly craneArmMesh: THREE.InstancedMesh;
+  /** 海滨酒店冠（L-1）：鳍片箱心锚定（cityHotelCrown 的 y 语义），冠底霓虹带实例色跨 bloom 阈值。 */
+  private readonly crownFinMesh: THREE.InstancedMesh;
+  private readonly crownStripMesh: THREE.InstancedMesh;
+  /** 屋顶立牌/路边广告牌（L-2）：柱/板哑光件，框/条是实例色霓虹载体；牌位上限 24 屋顶 + 8 路边。 */
+  private readonly signPostMesh: THREE.InstancedMesh;
+  private readonly signPanelMesh: THREE.InstancedMesh;
+  private readonly signFrameMesh: THREE.InstancedMesh;
+  private readonly signStripeMesh: THREE.InstancedMesh;
+  /** 已编址的牌位总数（屋顶 + 路边）；四批次的 count 按它 ×件数 收口。 */
+  private signPostCount = 0;
   private readonly treeMesh: THREE.InstancedMesh;
   /** 生态带植被网格（加载完成后替换程序化树；每个树种一个）。 */
   private floraMeshes: THREE.InstancedMesh[] = [];
@@ -629,6 +648,20 @@ export class CityParts {
     this.beaconMesh = this.makeInstanced(new THREE.SphereGeometry(0.32, 8, 6), new THREE.MeshBasicMaterial({ color: "#ffb02e" }), 96);
     this.craneMastMesh = this.makeInstanced(new THREE.BoxGeometry(0.85, 1, 0.85).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#ffb400", emissive: "#6b4300" }), 48);
     this.craneArmMesh = this.makeInstanced(new THREE.BoxGeometry(1, 0.32, 0.32), new THREE.MeshLambertMaterial({ color: "#ffb400", emissive: "#6b4300" }), 48);
+    // 海滨酒店冠：容量按「已落户的酒店地块」预留（有会话落户才有楼，没落户的空地块不需要冠）。
+    {
+      const hotelSlots = new Set<string>();
+      for (const district of this.layout.districts) for (const parcel of district.slots.values()) if (parcel.blockId.startsWith("hotel:")) hotelSlots.add(parcel.id);
+      this.crownFinMesh = this.makeInstanced(new THREE.BoxGeometry(1, 1, 1), selfLitMaterial(0.18), Math.max(1, hotelSlots.size * HOTEL_CROWN_MAX_FINS));
+      this.crownFinMesh.castShadow = true;
+      this.crownStripMesh = this.makeInstanced(BOX, new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false }), Math.max(1, hotelSlots.size));
+      this.crownStripMesh.castShadow = false;
+    }
+    // 屋顶立牌/路边广告牌：牌位索引统一编址（屋顶 0..23，路边 24..31），四批次按 位×件数 取下标。
+    this.signPostMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#8a929c" }), 64);
+    this.signPanelMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#f6f2e8" }), 32);
+    this.signFrameMesh = this.makeInstanced(BOX, new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false }), 128);
+    this.signStripeMesh = this.makeInstanced(BOX, new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false }), 96);
 
     // ── 动态层：溢出楼群 / 信标 / 标签 / 选中环 / 建筑运行时 ────────────
     this.buildMassing();
@@ -1590,6 +1623,14 @@ export class CityParts {
           y += 4.4;
         }
         mesh(new THREE.CylinderGeometry(0.2, 0.35, 6, 6).translate(0, 3, 0), material("#c9a24a"), group, 0, y, 0);
+      } else if (landmark.kind === "villa-complex") {
+        // 地中海庄园（L-3）：整组由 cityLandmarkVilla 程序化拼装（白灰泥主体 + 临水拱廊 +
+        // 红陶四坡顶 + 钟塔），seed 从地标 id 派生——同 seed 同庄园。
+        const build = buildVillaComplex(hashSeed(landmark.id), neon);
+        build.group.traverse((object) => { if ((object as THREE.Mesh).isMesh) { object.castShadow = true; object.receiveShadow = true; } });
+        group.add(build.group);
+        this.disposables.push(...build.disposables);
+        this.landmarkSpinners.push(...build.spinners);
       } else if (landmark.kind === "suspension-bridge" && landmark.to) {
         // 悬索桥：沿既有过河桥加两座门式塔与主缆、吊索（路网不变，只是换造型）。
         // 桥面高度与 buildInfrastructure 的桥面一致（两端地形高度的较大者）；塔、吊索都以它为底。
@@ -3268,6 +3309,8 @@ export class CityParts {
     let craneCount = 0;
     const shaftCursor = [0, 0, 0, 0];
     let decoCursor = 0;
+    let crownCursor = 0;
+    let signCursor = 0;
 
     const ordered = [...this.model.buildings].sort((left, right) => left.startedAt - right.startedAt);
     for (const building of ordered) {
@@ -3301,6 +3344,10 @@ export class CityParts {
         deco: -1,
         roofKind: 0,
         hero: false,
+        crownBase: -1,
+        crown: null,
+        signBase: -1,
+        signPlan: null,
       };
 
       runtime.facade = this.facadeFor(building);
@@ -3347,6 +3394,30 @@ export class CityParts {
       // 乘 3.2 让亮度越过 bloom 阈值（MeshBasicMaterial 不吃光照，toneMapped=false 保留 HDR 值）。
       this.neonMesh.setColorAt(roofCount, new THREE.Color(palette.accent).multiplyScalar(3.2));
       roofCount += 1;
+      // 海滨酒店冠（L-1）：方案在建模期算一次存住；冠底霓虹带走独立实例（neonMesh 与 roofCount
+      // 是 1:1 索引，每楼可变条数会破坏该映射）。
+      if (slot.blockId.startsWith("hotel:")) {
+        const plan = hotelCrownPlan(slot.width, slot.depth, building.height, building.seed);
+        if (plan) {
+          runtime.crown = plan;
+          runtime.crownBase = crownCursor;
+          this.crownStripMesh.setColorAt(crownCursor, new THREE.Color(palette.accent).multiplyScalar(3.2));
+          crownCursor += 1;
+        }
+      } else if (runtime.roofKind === 0 && slot.zone === "commercial" && building.height >= 24 && signCursor < 24) {
+        // 屋顶立牌（L-2）：商业区高楼的尺度符号；已有尖顶/退台冠的楼让位（roofKind ≠ 0 不立牌）。
+        // roofY 传 0：模块给的件 y 都是「屋顶面相对高度」，写矩阵时再加地面 + 楼高。
+        const plan = rooftopSignPlan(slot.width, slot.depth, 0, building.seed);
+        if (plan) {
+          runtime.signPlan = plan;
+          runtime.signBase = signCursor;
+          const frameColor = new THREE.Color(palette.accent).multiplyScalar(3.2);
+          plan.frame.forEach((_, k) => this.signFrameMesh.setColorAt(signCursor * 4 + k, frameColor));
+          const stripeColors = [new THREE.Color(palette.accent).multiplyScalar(2.4), new THREE.Color("#f8f4ea").multiplyScalar(2.4), new THREE.Color(palette.roof).multiplyScalar(2.4)];
+          plan.stripes.forEach((_, k) => this.signStripeMesh.setColorAt(signCursor * 3 + k, stripeColors[k % 3]));
+          signCursor += 1;
+        }
+      }
       runtime.scaffold = scaffoldCount;
       scaffoldCount += 1;
       if (this.formOf(building) === "landmark" && antennaCount < 94) {
@@ -3398,10 +3469,64 @@ export class CityParts {
     if (this.decoCornerMesh.instanceColor) this.decoCornerMesh.instanceColor.needsUpdate = true;
     if (this.decoTrimMesh.instanceColor) this.decoTrimMesh.instanceColor.needsUpdate = true;
     this.craneArmMesh.count = craneCount;
+    this.crownStripMesh.count = crownCursor;
+    if (this.crownStripMesh.instanceColor) this.crownStripMesh.instanceColor.needsUpdate = true;
+    this.buildRoadsideSigns(signCursor);
+    // 路边牌占位后才知道四批次的实际用量：屋顶牌 0..signCursor-1，路边牌 signCursor..。
+    this.signPostMesh.count = this.signPostCount * 2;
+    this.signPanelMesh.count = this.signPostCount;
+    this.signFrameMesh.count = this.signPostCount * 4;
+    this.signStripeMesh.count = this.signPostCount * 3;
+    if (this.signFrameMesh.instanceColor) this.signFrameMesh.instanceColor.needsUpdate = true;
+    if (this.signStripeMesh.instanceColor) this.signStripeMesh.instanceColor.needsUpdate = true;
 
     // 初次落矩阵：回访的楼按已知高度写（settled），新到的楼从 display=0 藏起，
     // 由 update 循环长入——immediate=true 会按 target 写满高，新楼会先闪一下。
     for (const runtime of this.runtimes) this.applyConstruction(runtime, runtime.settled);
+  }
+
+  /** 路边双柱广告牌（L-2）：主干道长段中点的外侧净空点，静态摆件；牌位编址接在屋顶牌之后。
+   *  与屋顶牌共用四批次网格，但不动施工状态——路面和牌不随会话生长。 */
+  private buildRoadsideSigns(rooftopCount: number): void {
+    const edges = (this.layout.roadEdges ?? []).filter((edge) => !edge.bridge && edge.kind === "arterial" && edge.width >= 8);
+    const candidates = edges
+      .map((edge) => ({ edge, a: edge.points[0], b: edge.points[edge.points.length - 1] }))
+      .filter(({ a, b }) => Math.hypot(b.x - a.x, b.z - a.z) >= 60)
+      .sort((p, q) => Math.hypot(q.b.x - q.a.x, q.b.z - q.a.z) - Math.hypot(p.b.x - p.a.x, p.b.z - p.a.z));
+    // 宿主边自己距牌位 ≥ 10（width/2+6），closerThan(7) 命中的只会是路口和邻路。
+    const otherRoads = new SegmentIndex((this.layout.roadEdges ?? []).map((edge) => [edge.points[0], edge.points[edge.points.length - 1]]));
+    const placed: Vec2[] = [];
+    let cursor = rooftopCount;
+    for (const { edge, a, b } of candidates) {
+      if (cursor >= 32 || placed.length >= 8) break;
+      const len = Math.hypot(b.x - a.x, b.z - a.z);
+      const mid = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
+      const normal = { x: -(b.z - a.z) / len, z: (b.x - a.x) / len };
+      const pos = { x: mid.x + normal.x * (edge.width / 2 + 6), z: mid.z + normal.z * (edge.width / 2 + 6) };
+      const groundY = this.layout.terrain.height(pos.x, pos.z);
+      if (groundY < 0.5) continue; // 水面/桥上不立牌
+      if (otherRoads.closerThan(pos, 7)) continue;
+      if (placed.some((p) => Math.hypot(p.x - pos.x, p.z - pos.z) < 140)) continue;
+      // 面板法线（局部 +Z）朝道路法向：牌面平行道路，双向车流都读到（模块两面同构图）。
+      const yaw = Math.atan2(normal.x, normal.z);
+      const plan = roadsideSignPlan(yaw, groundY, hashSeed(`roadsign:${pos.x.toFixed(1)}:${pos.z.toFixed(1)}`));
+      const place = (pieces: Array<{ x: number; y: number; z: number; sx: number; sy: number; sz: number; rotY: number }>, mesh: THREE.InstancedMesh, stride: number) => {
+        pieces.forEach((piece, index) => {
+          this.compose(piece.x, piece.y, piece.z, piece.rotY, piece.sx, piece.sy, piece.sz);
+          mesh.setMatrixAt(cursor * stride + index, this.matrix);
+        });
+      };
+      place(plan.pieces.slice(0, 2), this.signPostMesh, 2);
+      place([plan.pieces[2]], this.signPanelMesh, 1);
+      place(plan.frame, this.signFrameMesh, 4);
+      place(plan.stripes, this.signStripeMesh, 3);
+      // 路边牌不属于任何执行环境城区，框/条用主题外的中性 Vice 色板（与街区霓虹不抢色相）。
+      plan.frame.forEach((_, k) => this.signFrameMesh.setColorAt(cursor * 4 + k, new THREE.Color("#38e8ff").multiplyScalar(3.2)));
+      plan.stripes.forEach((_, k) => this.signStripeMesh.setColorAt(cursor * 3 + k, new THREE.Color(k % 2 ? "#ff4fd8" : "#ffd166").multiplyScalar(2.4)));
+      placed.push(pos);
+      cursor += 1;
+    }
+    this.signPostCount = cursor;
   }
 
   private compose(x: number, y: number, z: number, rotationY: number, sx: number, sy: number, sz: number): void {
@@ -3528,6 +3653,43 @@ export class CityParts {
       this.compose(awning.x, g + 2.7, awning.z, yaw, awningOn ? widths[0] * 0.66 : 0, awningOn ? 0.28 : 0, awningOn ? 1.7 : 0);
       this.decoTrimMesh.setMatrixAt(runtime.deco * 2 + 1, this.matrix);
     }
+    // 海滨酒店冠（L-1）：封顶才戴上。鳍片几何是箱心锚定（crownFinMesh 用了不带 translate 的
+    // BoxGeometry），所以 y 直接写 fin.y；冠底霓虹带走底面锚定的 BOX，底边贴 stripY。
+    if (runtime.crown && runtime.crownBase >= 0) {
+      const capped = fraction > 0.985;
+      const crownLocal = (lx: number, lz: number) => ({ x: x + lx * Math.cos(yaw) + lz * Math.sin(yaw), z: z - lx * Math.sin(yaw) + lz * Math.cos(yaw) });
+      runtime.crown.fins.forEach((fin, index) => {
+        if (!capped) this.compose(x, -40, z, 0, 0, 0, 0);
+        else {
+          const p = crownLocal(fin.x, fin.z);
+          this.compose(p.x, g + fin.y, p.z, yaw, fin.sx, fin.sy, fin.sz);
+        }
+        this.crownFinMesh.setMatrixAt(runtime.crownBase + index, this.matrix);
+      });
+      if (!capped) this.compose(x, -40, z, 0, 0, 0, 0);
+      else this.compose(x, g + runtime.crown.stripY, z, yaw, runtime.slot.width * 0.88, 0.28, runtime.slot.depth * 0.8);
+      this.crownStripMesh.setMatrixAt(runtime.crownBase, this.matrix);
+    }
+    // 屋顶立牌（L-2）：封顶后立起；件 y 是屋顶面相对高度（建模期 roofY 传 0），世界 y = 地面 + 楼高。
+    if (runtime.signPlan && runtime.signBase >= 0) {
+      const capped = fraction > 0.985;
+      const signY = g + h;
+      const signLocal = (lx: number, lz: number) => ({ x: x + lx * Math.cos(yaw) + lz * Math.sin(yaw), z: z - lx * Math.sin(yaw) + lz * Math.cos(yaw) });
+      const place = (pieces: Array<{ x: number; y: number; z: number; sx: number; sy: number; sz: number; rotY: number }>, mesh: THREE.InstancedMesh, stride: number) => {
+        pieces.forEach((piece, index) => {
+          if (!capped) this.compose(x, -40, z, 0, 0, 0, 0);
+          else {
+            const p = signLocal(piece.x, piece.z);
+            this.compose(p.x, signY + piece.y, p.z, yaw + piece.rotY, piece.sx, piece.sy, piece.sz);
+          }
+          mesh.setMatrixAt(runtime.signBase * stride + index, this.matrix);
+        });
+      };
+      place(runtime.signPlan.posts, this.signPostMesh, 2);
+      place([runtime.signPlan.panel], this.signPanelMesh, 1);
+      place(runtime.signPlan.frame, this.signFrameMesh, 4);
+      place(runtime.signPlan.stripes, this.signStripeMesh, 3);
+    }
     // 天线（landmark 封顶后立起）。
     if (runtime.antenna >= 0) {
       const done = fraction > 0.985;
@@ -3582,6 +3744,16 @@ export class CityParts {
       if (runtime.hero && this.heroParts) this.placeHeroCrown(0, -40, 0, 0, 0, 0, false);
     }
     if (runtime.scaffold >= 0) this.scaffoldMesh.setMatrixAt(runtime.scaffold, this.matrix);
+    if (runtime.crown && runtime.crownBase >= 0) {
+      for (let index = 0; index < runtime.crown.fins.length; index += 1) this.crownFinMesh.setMatrixAt(runtime.crownBase + index, this.matrix);
+      this.crownStripMesh.setMatrixAt(runtime.crownBase, this.matrix);
+    }
+    if (runtime.signPlan && runtime.signBase >= 0) {
+      for (let index = 0; index < 2; index += 1) this.signPostMesh.setMatrixAt(runtime.signBase * 2 + index, this.matrix);
+      this.signPanelMesh.setMatrixAt(runtime.signBase, this.matrix);
+      for (let index = 0; index < 4; index += 1) this.signFrameMesh.setMatrixAt(runtime.signBase * 4 + index, this.matrix);
+      for (let index = 0; index < 3; index += 1) this.signStripeMesh.setMatrixAt(runtime.signBase * 3 + index, this.matrix);
+    }
     if (runtime.antenna >= 0) this.antennaMesh.setMatrixAt(runtime.antenna, this.matrix);
     if (runtime.beacon >= 0) this.beaconMesh.setMatrixAt(runtime.beacon, this.matrix);
     if (runtime.craneMast >= 0) {
@@ -3641,6 +3813,12 @@ export class CityParts {
     this.scaffoldMesh.instanceMatrix.needsUpdate = true;
     this.antennaMesh.instanceMatrix.needsUpdate = true;
     this.craneMastMesh.instanceMatrix.needsUpdate = true;
+    this.crownFinMesh.instanceMatrix.needsUpdate = true;
+    this.crownStripMesh.instanceMatrix.needsUpdate = true;
+    this.signPostMesh.instanceMatrix.needsUpdate = true;
+    this.signPanelMesh.instanceMatrix.needsUpdate = true;
+    this.signFrameMesh.instanceMatrix.needsUpdate = true;
+    this.signStripeMesh.instanceMatrix.needsUpdate = true;
   }
 
   setQualityLevel(level: QualityLevel): void {
@@ -3895,6 +4073,12 @@ export class CityParts {
       this.scaffoldMesh.instanceMatrix.needsUpdate = true;
       this.antennaMesh.instanceMatrix.needsUpdate = true;
       this.craneMastMesh.instanceMatrix.needsUpdate = true;
+      this.crownFinMesh.instanceMatrix.needsUpdate = true;
+      this.crownStripMesh.instanceMatrix.needsUpdate = true;
+      this.signPostMesh.instanceMatrix.needsUpdate = true;
+      this.signPanelMesh.instanceMatrix.needsUpdate = true;
+      this.signFrameMesh.instanceMatrix.needsUpdate = true;
+      this.signStripeMesh.instanceMatrix.needsUpdate = true;
     }
 
     // 吊车臂：活跃楼的节奏 = 繁忙度。

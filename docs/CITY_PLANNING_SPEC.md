@@ -133,6 +133,11 @@ seed, scaleTier
 | ferris-wheel 摩天轮 | 圆环 + 辐条 + 吊厢，缓慢转动 | 海滨分区 |
 | suspension-bridge 悬索大桥 | 双塔 + 主缆 + 吊索，替换一座过河桥 | 河最宽处 |
 | twin-towers 双子塔 / twist-tower 扭转塔 | 两座连廊塔 / 逐层旋转的塔 | downtown，与会话地标塔错开 |
+| villa-complex 地中海庄园 | 白灰泥横带楼 + 临水拱廊 + 红陶四坡顶 + 端头钟塔（低层纪念性，总高 ≤30） | 海湾内侧静水岸（与帆顶剧院错开）；tropical 生态权重 4，其余 1 |
+
+海滨会话酒店的格栅鳍片冠、商业楼顶立牌与主干道双柱广告牌不是独立地标：它们分别随酒店封顶
+（`hotelCrownPlan`，约 1/3 平顶）、商业高楼封顶（`rooftopSignPlan`，约 1/5 出牌）出现，规格见
+CITY_LANDMARK_BACKLOG.md 的 L-1/L-2。
 
 地标为纯装饰：不进统计、不可拾取、不占会话地块；不改「token 最多的会话是天际线焦点」的规则（地标高度上限为该会话楼高的 0.9）。
 

@@ -13,6 +13,7 @@ const LANDMARK_NAMES: Record<string, string> = {
   "tv-tower": "电视塔", "sail-opera": "帆形歌剧院", arch: "凯旋拱门", pagoda: "宝塔", lighthouse: "灯塔",
   "ferris-wheel": "摩天轮", "suspension-bridge": "悬索桥", "twin-towers": "双子塔", "twist-tower": "扭转塔",
   "twisting-deco-tower": "扭转装饰艺术塔",
+  "villa-complex": "地中海庄园",
 };
 const CIVIC_NAMES: Record<string, string> = { school: "学校", mall: "商场", hospital: "医院" };
 
