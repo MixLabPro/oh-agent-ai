@@ -40,7 +40,7 @@ target/
 # npm 包（dsh/）的本地依赖。dsh-client/ 2026-09-22 拆到独立仓库
 # dsh-agent-vitals-audit，这条 ignore 规则随目录一起搬走了。
 integrations/dsh/node_modules/
-node_modules/
+node_modules
 lib/
 # The React Workbench bridge is source, not a generated native library.
 !apps/desktop/ui-dev/react/src/lib/

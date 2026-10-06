@@ -71,7 +71,7 @@ export function clearsHighways(p: Vec2, width: number, depth: number, highways: 
 export type Biome = "tropical" | "temperate" | "boreal" | "savanna" | "eastasian";
 
 /** 致敬型地标（SPEC §4.4）：程序化几何、不复刻具体建筑；纯装饰，不占会话地块、不进统计。 */
-export type LandmarkKind = "tv-tower" | "sail-opera" | "arch" | "pagoda" | "lighthouse" | "ferris-wheel" | "suspension-bridge" | "twin-towers" | "twist-tower";
+export type LandmarkKind = "tv-tower" | "sail-opera" | "arch" | "pagoda" | "lighthouse" | "ferris-wheel" | "suspension-bridge" | "twin-towers" | "twist-tower" | "villa-complex";
 export type Landmark = Vec2 & { id: string; kind: LandmarkKind; yaw: number; radius: number; to?: Vec2 };
 const BIOMES: Biome[] = ["tropical", "temperate", "boreal", "savanna", "eastasian"];
 
@@ -255,6 +255,10 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       { kind: "lighthouse", weight: 2, site: () => { const shore = shoreOrder[shoreOrder.length - 1]; return { at: inwardFrom(shore, 0.04), radius: 12, clearance: 6, yaw: 0 }; } },
       { kind: "ferris-wheel", weight: 2, site: () => { const shore = shoreOrder[Math.floor(shoreOrder.length * 0.45)]; return { at: inwardFrom(shore, 0.08), radius: 26, clearance: 14, yaw: -Math.atan2(shore.z - core.z, shore.x - core.x) + Math.PI / 2 }; } },
       { kind: "pagoda", weight: biome === "eastasian" ? 5 : 1, site: () => ({ at: { x: hillDir.x * (hillLine - 80), z: hillDir.z * (hillLine - 80) }, radius: 18, clearance: 18, yaw: hillAngle }) },
+      // 地中海庄园：低层纪念性地标，天际线里「横向白楼 + 红陶坡顶」的断点。热带海滨优先；
+      // 站位与帆顶剧院（shoreOrder[3]）错开；拱廊面（局部 +Z）朝向放置点看到的局部岸线方向，
+      // 大岛上这与「朝城心反向」并不重合——平行水线才能读成滨海庄园。
+      { kind: "villa-complex", weight: biome === "tropical" ? 4 : 1, site: () => { const shore = shoreOrder[Math.min(shoreOrder.length - 1, 5)]; const at = inwardFrom(shore, 0.08); return { at, radius: 34, clearance: 16, yaw: Math.atan2(shore.x - at.x, shore.z - at.z) }; } },
     ];
     const count = 2 + (random("landmarkCount") < 0.5 ? 1 : 0);
     const pool = [...candidates];
