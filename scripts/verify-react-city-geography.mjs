@@ -71,7 +71,11 @@ for (const seed of seeds) {
     assert(gap >= 100, `seed ${seed}: districts ${centers[i].id} and ${centers[j].id} crowd together (${gap.toFixed(2)} apart)`);
   }
   // 致敬型地标：每岛 2–4 座（含可能的悬索桥），在陆地上，不压任何会话地块。
-  assert(layout.landmarks.length >= 2 && layout.landmarks.length <= 4, `seed ${seed}: ${layout.landmarks.length} landmarks`);
+  // 地标数随档位增长（1 档 4 座、最多 7 座）+ 有河桥时的悬索桥；同类不重复，双子塔与扭转塔二选一。
+  assert(layout.landmarks.length >= 2 && layout.landmarks.length <= 8, `seed ${seed}: ${layout.landmarks.length} landmarks`);
+  const kinds = layout.landmarks.map((landmark) => landmark.kind);
+  assert(new Set(kinds).size === kinds.length, `seed ${seed}: duplicate landmark kind`);
+  assert(!(kinds.includes("twin-towers") && kinds.includes("twist-tower")), `seed ${seed}: both skyline towers`);
   const lots = layout.districts.flatMap((d) => [...d.slots.values()]);
   // The elevated ring lives outside roadEdges: ground-road guards cannot protect it.
   for (const lot of lots) for (const run of layout.highways) for (let i = 1; i < run.length; i += 1) {

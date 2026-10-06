@@ -11,6 +11,7 @@ import type { PluginResponseV1 } from "@agent-vitals/app-sdk";
 import { runFilmJob, supportsBackgroundFilm } from "./export/filmJob";
 import { cinematicCopy } from "./engine/cinematicCopy";
 import { describeDecor, isDecorId } from "./engine/cityDecor";
+import { CATALOG_GROUPS, CATALOG_KIND_LABEL, CITY_CATALOG } from "./cityCatalog";
 import { cityText, cityView, useCityLanguage } from "./i18n";
 
 const dateLabel = (ms: number) => new Date(ms).toLocaleString(pluginLocale() === "en" ? "en-US" : "zh-CN");
@@ -30,6 +31,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
   const [selected, setSelected] = useState<string | null>(null);
   const [details, setDetails] = useState(false);
   const [options, setOptions] = useState(false);
+  const [catalog, setCatalog] = useState(false);
   const [seed, setSeed] = useState(74031);
   const [seedDraft, setSeedDraft] = useState("74031");
   const [seedBusy, setSeedBusy] = useState(true);
@@ -41,7 +43,7 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
   const [cut, setCut] = useState<CinematicCut>("short");
   // 背景楼档位（F4）：按本机浏览器存储（与种子不同，不经宿主 city-settings 投影——那需要宿主侧改动，见 SPEC §4 F4 注）。
   const [backdrop, setBackdropState] = useState<BackdropMode>(() => {
-    try { const saved = localStorage.getItem("city.backdrop"); return saved === "off" || saved === "full" ? saved : "auto"; } catch { return "auto"; }
+    try { const saved = localStorage.getItem("city.backdrop"); return saved === "auto" || saved === "full" ? saved : "off"; } catch { return "off"; }
   });
   const setBackdrop = (mode: BackdropMode) => {
     setBackdropState(mode);
@@ -210,21 +212,25 @@ export function useCityExperience(engine: RefObject<CityEngine | null>, projecti
       if (response.version !== 1 || response.requestId !== requestId || !response.ok || !response.result?.opened) throw new Error("session_unavailable");
     } catch { if (mounted.current) setError("无法打开宿主会话详情，数据可能已删除或当前实例已失效。"); }
   };
-  return { modelRef, model, setModel, tooltipRef, callbacks, selected, setSelected, clearSelection, details, setDetails, options, setOptions,
+  return { modelRef, model, setModel, tooltipRef, callbacks, selected, setSelected, clearSelection, details, setDetails, options, setOptions, catalog, setCatalog,
     seed, seedDraft, setSeedDraft, seedBusy, confirmSeed, applySeed, reseed, cursor, playing, speed, setSpeed,
     cut, setCut, backdrop, setBackdrop, film, photoBusy, busy, error, setError, stats, card, progress, seek, replay, live, previewRef,
     describe, photo, exportFilm, refreshSelection, openHostSession, projection,
     focusDistrict: (id: string) => engine.current?.focusDistrict(id),
+    focusCatalog: (id: string) => engine.current?.focusCatalog(id) ?? false,
     focusBuilding: (id: string) => engine.current?.focusBuilding(id) };
 }
 
-export function CityExperience({ ui, disabled, cinema, status }: { ui: ReturnType<typeof useCityExperience>; disabled: boolean; cinema: boolean; status?: string }) {
+export function CityExperience({ ui, disabled, cinema, status, quality, onQuality }: { ui: ReturnType<typeof useCityExperience>; disabled: boolean; cinema: boolean; status?: string; quality: string; onQuality: (value: string) => void }) {
   const language = useCityLanguage();
   const model = ui.model;
   const selected = model?.buildings.find((b) => b.id === ui.selected);
   const session = ui.projection?.sessions.find((s) => s.id === ui.selected);
   const card = ui.card ? ui.describe(ui.card) : null;
   const locked = disabled || cinema || ui.busy;
+  // 建筑说明：非模态侧栏（不用 dialog），飞到实时模型时城市仍可见、可旋转查看；开关在顶部工具栏（city.catalog）。
+  const catalog = ui.catalog; const setCatalog = ui.setCatalog;
+  const [missing, setMissing] = useState<string | null>(null);
   const slider = !model || ui.cursor === null ? 1000 : Math.max(0, Math.min(1000,
     Math.round((ui.cursor - model.windowStartMs) / Math.max(1, model.windowEndMs - model.windowStartMs) * 1000)));
   const debug = new URLSearchParams(location.search).has("cityDebug");
@@ -243,6 +249,19 @@ export function CityExperience({ ui, disabled, cinema, status }: { ui: ReturnTyp
       </button>)}
       <p className="city-context-note">灰调背景楼为城市氛围 · 不计入会话</p>
     </section>}
+    {catalog && !cinema && <aside className="city-catalog" aria-label="建筑说明">
+      <button className="city-close" aria-label="关闭建筑说明" onClick={() => setCatalog(false)}>×</button>
+      <h2>建筑说明</h2>
+      <p>City 里每类建筑的样子与用途。「代表会话」的楼来自你的数据；其余是城市规模配套或装饰。点「查看实时模型」把镜头飞到岛上的实物。</p>
+      {CATALOG_GROUPS.map((group) => <section key={group}><h3 className="city-catalog-group">{group}</h3><ul>{CITY_CATALOG.filter((entry) => entry.group === group).map((entry) => <li key={entry.id}>
+        <img src={entry.image} alt="" loading="lazy" width="180" height="113" />
+        <div><p className={`city-catalog-kind city-catalog-${entry.kind}`}>{CATALOG_KIND_LABEL[entry.kind]}</p>
+          <h3>{entry.title}</h3><p>{entry.body}</p>
+          <button disabled={locked} onClick={() => setMissing(ui.focusCatalog(entry.id) ? null : entry.id)}>查看实时模型</button>
+          {missing === entry.id && <p role="status">当前岛上还没有这类建筑。</p>}
+        </div>
+      </li>)}</ul></section>)}
+    </aside>}
     {!cinema && <section className="city-timeline" aria-label="时间回放">
       <button type="button" onClick={ui.replay} disabled={locked}>{ui.playing ? "暂停回放" : "播放回放"}</button>
       <input aria-label="时间游标" type="range" min="0" max="1000" value={slider} disabled={locked} onChange={(e) => ui.seek(Number(e.target.value))} />
@@ -295,6 +314,7 @@ export function CityExperience({ ui, disabled, cinema, status }: { ui: ReturnTyp
       <p>只改变地形与布局，不删除会话数据。种子保存于插件私有本地状态。</p>
       <label htmlFor="city-backdrop">城市背景楼</label><select id="city-backdrop" value={ui.backdrop} disabled={locked} onChange={(e) => ui.setBackdrop(e.target.value as BackdropMode)}><option value="auto">自动（随会话数，不挤占城区）</option><option value="off">关闭（纯数据城市）</option><option value="full">繁华（铺满城区周边）</option></select>
       <p>背景楼只是城市氛围，不是会话，不可点击，不计入统计。</p>
+      <label htmlFor="city-quality">画质</label><select id="city-quality" value={quality} onChange={(e) => onQuality(e.target.value)}><option value="auto">自动</option><option value="high">高画质</option><option value="eco">节能</option></select>
       <label htmlFor="city-cut">航拍与视频长度</label><select id="city-cut" value={ui.cut} disabled={locked} onChange={(e) => ui.setCut(e.target.value as CinematicCut)}><option value="short">短片</option><option value="full">完整航线</option></select>
       <p>拍照保存 PNG；视频后台逐帧生成 30 FPS MP4（H.264；环境不支持时改为 WebM），并显示实际生成画面的低帧率预览。硬件渲染为 1080p，软件渲染降至 360p。导出中暂停拍照，避免并发导出和保存；离开 City 会取消任务。不上传数据。</p>
       {ui.film && <p role="status" aria-atomic="true">航拍导出 {Math.round(ui.film.frame / ui.film.total * 100)}% · 关闭设置不取消导出</p>}

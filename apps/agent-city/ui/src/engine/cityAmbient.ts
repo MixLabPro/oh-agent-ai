@@ -103,7 +103,8 @@ class HotAirBalloon {
     this.spawn = { ...spawn };
     this.rise = 1.6 + seed * 1.4;
     this.sway = 0.4 + seed * 0.6;
-    this.baseY = 70 + seed * 40;
+    // 尺度统一（G3）：曾整只 ~30 高、悬在 70–110，比楼还大（多视角评估）。整体缩到 0.55，高度随之下调。
+    this.baseY = 48 + seed * 26;
     const envelopeGeometry = new THREE.LatheGeometry([
       new THREE.Vector2(0.12, 0), new THREE.Vector2(0.42, 0.7),
       new THREE.Vector2(1.5, 1.8), new THREE.Vector2(4.5, 3.6),
@@ -172,6 +173,7 @@ class HotAirBalloon {
     this.basketLight.visible = false;
     this.group.add(this.envelope, basket, ropes, burner, this.envelopeLight, this.basketLight);
     this.group.position.set(spawn.x, this.baseY, spawn.z);
+    this.group.scale.setScalar(0.55);
     this.group.name = "city-hot-air-balloon";
     this.geometries = [envelopeGeometry, basketGeometry, ropesGeometry];
     this.geometries.push(burnerGeometry);

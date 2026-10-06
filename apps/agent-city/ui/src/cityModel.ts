@@ -1,3 +1,4 @@
+import { DetMath as Math } from "./engine/detMath"; // 跨引擎确定性：见 engine/detMath.ts
 /**
  * City 模型层：把 Agent Vitals 的业务数据（Session / Harness / Token / Finding / 时间）
  * 映射成一座"数据城市"的中性模型。本文件不依赖任何渲染库——三维引擎只消费

@@ -60,6 +60,19 @@ function validate(layout, input) {
       assert(gap >= halfDiagonal + edge.width / 2 + 0.5, `parcel ${parcel.id} overlaps road ${edge.id} (gap ${gap.toFixed(1)})`);
     }
   }
+  // 海滨酒店地块（无论是否已有楼）按真实朝向矩形不得压路：曾 17% 的酒店地块压在后加的接入路/环岛路上（真机：楼占在路上）。
+  for (const parcel of layout.blocks.filter((block) => block.id.startsWith("hotel:")).flatMap((block) => block.parcels)) {
+    const ax = Math.sin(parcel.yaw); const az = Math.cos(parcel.yaw); const bx = az; const bz = -ax;
+    for (const edge of layout.roadEdges) {
+      const [a, b] = edge.points; const len = Math.hypot(b.x - a.x, b.z - a.z);
+      for (let d = 0; d <= len; d += 1.5) {
+        const t = len ? d / len : 0;
+        const dx = a.x + (b.x - a.x) * t - parcel.x; const dz = a.z + (b.z - a.z) * t - parcel.z;
+        assert(!(Math.abs(dx * bx + dz * bz) < parcel.width / 2 + edge.width / 2 + 0.5 && Math.abs(dx * ax + dz * az) < parcel.depth / 2 + edge.width / 2 + 0.5),
+          `hotel lot ${parcel.id} overlaps road ${edge.id}`);
+      }
+    }
+  }
   const edgePairs = new Set(layout.roadEdges.map((edge) => [edge.from, edge.to].sort().join("/")));
   for (const district of layout.districts) for (const route of district.carPaths) {
     assert.deepEqual({ ...route[0] }, { ...route.at(-1) }, "traffic circuits close without teleporting");

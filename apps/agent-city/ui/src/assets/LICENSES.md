@@ -36,3 +36,15 @@ License: Creative Commons Zero, CC0 — per the kit's `License.txt`). Copied unm
 | `flora/tree_pineRoundA.glb`, `flora/tree_pineTallA_detailed.glb`, `flora/tree_pineDefaultA.glb`, `flora/tree_cone_dark.glb` | boreal / highland |
 | `flora/tree_plateau.glb`, `flora/tree_thin.glb`, `flora/plant_bushTriangle.glb` | savanna |
 | `flora/tree_default_fall.glb`, `flora/tree_simple_fall.glb`, `flora/tree_tall.glb` | east-asian garden |
+
+## Building guide thumbnails (`catalog/`)
+
+Renders of Agent City's own procedural geometry (no third-party models), captured from the browser
+preview on 2026-10-07 and compressed to 360 px JPEG for the in-app 「建筑说明」 list. Project-owned; same
+licence as the repository.
+
+`catalog/session-tower.jpg`, `catalog/session-slab.jpg`, `catalog/session-deco.jpg`, `catalog/session-hotel.jpg`,
+`catalog/district-landmark.jpg`, `catalog/twin-towers.jpg`, `catalog/villa.jpg`, `catalog/ferris-wheel.jpg`,
+`catalog/sail-opera.jpg`, `catalog/suspension-bridge.jpg`, `catalog/truss-bridge.jpg`, `catalog/harbor.jpg`,
+`catalog/civic.jpg`, `catalog/beach.jpg`,
+`catalog/civic-hall.jpg`, `catalog/station.jpg`, `catalog/stadium.jpg`, `catalog/observation-tower.jpg`, `catalog/park.jpg`, `catalog/expressway.jpg`, `catalog/lighthouse.jpg`, `catalog/twist-tower.jpg`, `catalog/tv-tower.jpg`, `catalog/arch.jpg`, `catalog/pagoda.jpg`, `catalog/signs.jpg`

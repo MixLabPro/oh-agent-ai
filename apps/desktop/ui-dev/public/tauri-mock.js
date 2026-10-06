@@ -1212,4 +1212,46 @@
     event: { listen: () => Promise.resolve(() => {}) },
     notification: null,
   };
+
+  // City 插件的浏览器预览数据源（browser-plugin-host.js 经 __AV_BROWSER_PROVIDERS__.city 转发）。
+  // City 迁成插件后这里一直缺席：网页预览的 City 只显示「数据暂不可用」，岛屿种子也存不了。
+  // 复用上面的 citySessions（700 条确定性模拟会话），按真实宿主的 city:v2 形状返回；种子存 localStorage。
+  const cityHarnessId = (harness) => (harness === "plugin:zcode" ? "harness:zcode" : harness);
+  const cityHarnessNames = { codex: "Codex", "claude-code": "Claude Code", "harness:zcode": "ZCode", dsh: "DeepSeek Harness" };
+  window.__AV_BROWSER_PROVIDERS__ = Object.assign(window.__AV_BROWSER_PROVIDERS__ || {}, {
+    city: async (request) => {
+      const payload = request.payload || {};
+      if (request.method !== "data.read") throw new Error("unsupported_method");
+      if (payload.projection === "city-settings") {
+        // 预览默认固定一个有河的岛（没有种子时插件会随机抽，约 18% 的种子设计上无河，
+        // 预览里看不到河曾被当成回归）。用「重新生成岛屿」写入的新种子仍会被记住。
+        if (payload.action === "write" && Number.isInteger(payload.seed)) localStorage.setItem("city.preview-seed", String(payload.seed));
+        const saved = Number(localStorage.getItem("city.preview-seed"));
+        return { seed: Number.isInteger(saved) && saved > 0 && saved <= 4294967295 ? saved : 1703294958 };
+      }
+      if (payload.projection !== "city") throw new Error("unsupported_projection");
+      const days = [7, 30, 90, 366].includes(payload.windowDays) ? payload.windowDays : 30;
+      const now = Date.now();
+      const from = now - days * 86400000;
+      const inWindow = citySessions
+        .filter((session) => Date.parse(session.last_event_at) >= from)
+        .sort((left, right) => Date.parse(left.first_event_at) - Date.parse(right.first_event_at));
+      const sessions = inWindow.map((session) => ({
+        id: session.session_ref, harness: cityHarnessId(session.harness),
+        first_event_at: session.first_event_at, last_event_at: session.last_event_at, event_count: session.event_count,
+        tokens: { input: session.tokens.total - session.tokens.output_tokens, output: session.tokens.output_tokens, total: session.tokens.total },
+        task_excerpts: [],
+      }));
+      return {
+        protocol: "city:v2", source: "fixture", data_revision: 1,
+        harnesses: Object.entries(cityHarnessNames).map(([id, display_name]) => ({ id, display_name,
+          capabilities: { session_statistics: { available: true }, findings: { available: id !== "harness:zcode", reason: id === "harness:zcode" ? "findings_not_supported" : null } } })),
+        generated_at: new Date(now).toISOString(),
+        window: { days, label: `最近 ${days} 天`, from: new Date(from).toISOString(), to: new Date(now).toISOString() },
+        coverage: { total: sessions.length, returned: sessions.length, truncated: false, unknown_time: 0, findings_state: "partial" },
+        status: sessions.length ? "ready" : "empty", sessions,
+        findings: [{ harness: "codex", severity: "warning", count: 3 }, { harness: "claude-code", severity: "info", count: 2 }],
+      };
+    },
+  });
 })();

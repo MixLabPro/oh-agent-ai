@@ -1,3 +1,4 @@
+import { DetMath as Math } from "./detMath"; // 跨引擎确定性：见 detMath.ts
 /**
  * 海滨带契约（CITY_VICE_THEME_TECHNICAL_DESIGN §1 / B1）：把「环岛一圈 waterfront」
  * 收敛为一段连续、朝向良好的海滨街面，并向下游输出沙带/步道/酒店排的空间数据。
@@ -47,11 +48,12 @@ export const MIAMI_COASTAL: CoastalConfig = {
   azimuthTolerance: 1.2,
   segmentArc: (85 * Math.PI) / 180,
   wetSandWidth: 7,
-  drySandWidth: 14,
-  promenadeOffset: 18,
-  boulevardOffset: 30,
-  hotelOffset: 48,
-  bandOuter: 64,
+  // 沙滩加宽 6（真机反馈「沙滩略微再宽一些」，还要放得下沙排场），其后各带整体内移 6。
+  drySandWidth: 20,
+  promenadeOffset: 24,
+  boulevardOffset: 36,
+  hotelOffset: 54,
+  bandOuter: 70,
   maxCoastalSlope: 0.9,
   maxCoastalHeight: 6,
   riverMargin: 26,
@@ -118,7 +120,7 @@ export type SeasideWorld = {
   riverDistance: (x: number, z: number) => number;
   reservations: Array<{ x: number; z: number; radius: number }>;
   /** 排除朝向（港口/河口等），at 为方位角、halfWidth 为半宽。 */
-  blockedAzimuths: Array<{ at: number; halfWidth: number }>;
+  blockedAzimuths: Array<{ at: number; halfWidth: number; weight?: number }>;
 };
 
 const normalizeAngle = (a: number): number => {
@@ -198,10 +200,12 @@ export function buildSeasideBand(coast: Vec2[], center: Vec2, world: SeasideWorl
     const orientationBonus = Math.max(0, 1 - angleDelta(outward, config.preferredAzimuth) / Math.max(0.001, config.azimuthTolerance));
     // 任一采样点落进封锁方位就算压线（曾只看中点方位：海岸有海湾时一段可跨 100° 以上，
     // 港口夹在段内而中点仍离它 30° 开外——扩到 4000 栋的 2 档大岛 seed 1013904323 实测海滨段压港口）。
-    const blocked = world.blockedAzimuths.some((b) => angleDelta(outward, b.at) < b.halfWidth
-      || samples.some((sample) => angleDelta(sample.azimuth, b.at) < b.halfWidth));
+    // 压线惩罚取命中项的最大权重（港口 3 > 河口默认 2）：原版大小的 1 档小岛上，港口 ±30° 加两侧河口
+    // 可能让每个窗口都压线，等权时会选中压港口的段（seed 4055617001 实测），此时宁可压河口。
+    const blocked = world.blockedAzimuths.reduce((worst, b) => (angleDelta(outward, b.at) < b.halfWidth
+      || samples.some((sample) => angleDelta(sample.azimuth, b.at) < b.halfWidth) ? Math.max(worst, b.weight ?? 2) : worst), 0);
     const validRatio = samples.filter((s) => s.valid).length / samples.length;
-    const score = validRatio + orientationBonus * 0.5 - (blocked ? 2 : 0) + hashSeed(`seaside-score:${seed}:${start}`) * 0.05;
+    const score = validRatio + orientationBonus * 0.5 - blocked + hashSeed(`seaside-score:${seed}:${start}`) * 0.05;
     if (!best || score > best.score) best = { from: start, score, samples };
   }
   const id = `seaside:${seed}`;
@@ -220,9 +224,20 @@ export function buildSeasideBand(coast: Vec2[], center: Vec2, world: SeasideWorl
           if (world.landSignedDistance(x, z) <= 0 || world.height(x, z) <= 0.5) wet = true;
         }
         if (wet) { sample.valid = false; previous = null; continue; }
+        // 凹岸处内偏 36 的大道折线会反折（偏移曲线自交）：大道这一步与水线这一步方向相反/几乎为零就断开。
+        // 曾由恰好无效的采样切断；用地挪位后该采样变合法，大道沿自身折回、两条重叠（seed 1703326634 1 档实测）。
+        const wx = sample.waterline.x - previous.waterline.x; const wz = sample.waterline.z - previous.waterline.z;
+        const bx = b.x - a.x; const bz = b.z - a.z;
+        if (bx * wx + bz * wz < 0.25 * Math.hypot(wx, wz) * Math.hypot(bx, bz) || Math.hypot(bx, bz) < 4) { sample.valid = false; previous = null; continue; }
       }
       previous = sample;
     }
+    // 断开后孤立的单个合法采样连不成路段（offsetSegments 丢弃单点段），却会被当成
+    // 「大道起点」——1 档小岛 seed 387277014 实测：首个合法采样不在任何车行路上。
+    const s = best.samples;
+    s.forEach((sample, i) => {
+      if (sample.valid && !s[i - 1]?.valid && !s[i + 1]?.valid) sample.valid = false;
+    });
   }
   const validRatio = best.samples.filter((s) => s.valid).length / best.samples.length;
   const azimuthFrom = azimuthOf(coast[best.from]);
@@ -292,6 +307,18 @@ function offsetSegments(band: SeasideBand, pointOf: (sample: SeasideSample) => V
   }
   pushSegment();
   return segments;
+}
+
+/** 连续合法采样段（≥2 个）：沙滩多边形与沙滩设施沿它铺，无效采样处断开。 */
+export function validRuns(band: SeasideBand): SeasideSample[][] {
+  const runs: SeasideSample[][] = [];
+  let current: SeasideSample[] = [];
+  for (const sample of band.samples) {
+    if (sample.valid) current.push(sample);
+    else { if (current.length >= 2) runs.push(current); current = []; }
+  }
+  if (current.length >= 2) runs.push(current);
+  return runs;
 }
 
 export const promenadeSegments = (band: SeasideBand): Vec2[][] => offsetSegments(band, (sample) => sample.promenade);

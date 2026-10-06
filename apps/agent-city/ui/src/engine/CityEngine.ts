@@ -140,7 +140,7 @@ export class CityEngine {
   private dayMix = 0;
   /** 地形种子：未拿到前不渲染城市（否则先闪一座默认岛再跳成用户自己的岛）。 */
   private seed: number | null = null;
-  private backdrop: BackdropMode = "auto";
+  private backdrop: BackdropMode = "off"; // 默认纯数据城市（用户：不要没有作用的建筑）
   private composer: EffectComposer | null = null;
   /** 当前后处理链的配置键（主题霓虹 × AO）：变化时重建，避免每帧判断哪些 pass 该在。 */
   private composerKey = "";
@@ -613,6 +613,75 @@ export class CityEngine {
     const position = new THREE.Vector3(anchor.x, anchor.ground, anchor.z).addScaledVector(direction, distance).add(new THREE.Vector3(0, distance * 0.62, 0));
     this.flyTo(position, { x: anchor.x, y: anchor.ground + Math.max(4, anchor.height * 0.45), z: anchor.z }, 850);
     return true;
+  }
+
+  /** 建筑说明「查看实时模型」：把相机飞到该类建筑在本岛上的一个实例（与 cityCatalog 的 id 对应）。找不到返回 false。 */
+  focusCatalog(id: string): boolean {
+    const target = this.catalogTarget(id);
+    if (!target) return false;
+    const [x, y, z, d] = target;
+    this.flyTo({ x: x + d * 0.8, y: y + d * 0.45, z: z + d * 0.8 }, { x, y, z }, 1100);
+    return true;
+  }
+
+  /** 建筑说明条目在本岛上的取景点 [x, y, z, 距离]；本岛没有该类建筑时返回 null。 */
+  catalogTarget(id: string): number[] | null {
+    const L = this.layout; const P = this.parts; const model = this.model;
+    if (!L || !P || !model) return null;
+    const slots = new Map(L.districts.flatMap((district) => [...district.slots]));
+    const pick = (pred: (b: CityModel["buildings"][number], s: { blockId: string }) => boolean) => {
+      for (const building of model.buildings) {
+        const slot = slots.get(building.id);
+        if (slot && pred(building, slot)) return [slot.x, building.height * 0.5, slot.z, Math.max(45, building.height * 2.2 + 25)];
+      }
+      return null;
+    };
+    const landmark = (kind: string, h: number, d: number) => {
+      const l = (L.landmarks ?? []).find((x) => x.kind === kind);
+      return l ? [l.to ? (l.x + l.to.x) / 2 : l.x, h, l.to ? (l.z + l.to.z) / 2 : l.z, d] : null;
+    };
+    const suspension = (L.landmarks ?? []).find((l) => l.kind === "suspension-bridge");
+    const truss = (L.bridges ?? []).find((b) => !(suspension && Math.hypot(b.from.x - suspension.x, b.from.z - suspension.z) < 1));
+    const harbor = L.publicSites.find((s) => s.kind === "harbor");
+    const sample = L.seaside?.samples.filter((q) => q.valid)[0];
+    const districtLandmark = (L.districtLandmarks ?? [])[0];
+    const site = (kind: string, h: number, d: number) => { const s = L.publicSites.find((x) => x.kind === kind); return s ? [s.x, h, s.z, d] : null; };
+    const targets: Record<string, () => number[] | null> = {
+      "session-tower": () => pick((b) => P.formOf(b) === "tower" && b.height > 25),
+      "session-slab": () => pick((b) => P.formOf(b) === "slab" && b.height > 12),
+      "session-deco": () => pick((b, s) => P.facadeFor(b) === 3 && !s.blockId.startsWith("hotel:")),
+      "session-hotel": () => pick((_b, s) => s.blockId.startsWith("hotel:")),
+      "district-landmark": () => (districtLandmark ? [districtLandmark.x, 45, districtLandmark.z, 150] : null),
+      "twin-towers": () => landmark("twin-towers", 38, 160),
+      villa: () => landmark("villa-complex", 8, 80),
+      "ferris-wheel": () => landmark("ferris-wheel", 26, 95),
+      "sail-opera": () => landmark("sail-opera", 10, 75),
+      "suspension-bridge": () => landmark("suspension-bridge", 12, 95),
+      "truss-bridge": () => (truss ? [(truss.from.x + truss.to.x) / 2, 4, (truss.from.z + truss.to.z) / 2, 55] : null),
+      harbor: () => (harbor ? [harbor.x, 6, harbor.z, 75] : null),
+      civic: () => ((L.civics ?? [])[0] ? [(L.civics ?? [])[0].x, 5, (L.civics ?? [])[0].z, 55] : null),
+      beach: () => (sample ? [sample.dryOuter.x, 2, sample.dryOuter.z, 34] : null),
+      "civic-hall": () => site("civic", 10, 95),
+      station: () => site("station", 6, 95),
+      stadium: () => site("stadium", 6, 100),
+      "observation-tower": () => site("tower", 28, 90),
+      park: () => site("park", 3, 95),
+      "tv-tower": () => landmark("tv-tower", 34, 120),
+      arch: () => landmark("arch", 16, 120),
+      lighthouse: () => landmark("lighthouse", 14, 95),
+      "twist-tower": () => landmark("twist-tower", 34, 130),
+      pagoda: () => landmark("pagoda", 14, 70),
+      signs: () => {
+        // 广告牌（L-2）：取第一组已摆放的立牌/路边牌立柱（未用槽位被藏在 y = -40）。
+        const mesh = (P as unknown as { signPostMesh?: THREE.InstancedMesh }).signPostMesh;
+        if (!mesh) return null;
+        const m = new THREE.Matrix4();
+        for (let i = 0; i < mesh.count; i += 1) { mesh.getMatrixAt(i, m); if (m.elements[13] > -5) return [m.elements[12], m.elements[13] + 7, m.elements[14], 48]; }
+        return null;
+      },
+      expressway: () => { const run = (L.highways ?? [])[0]; const p = run?.[Math.floor((run?.length ?? 0) / 3)]; return p ? [p.x, 8, p.z, 70] : null; },
+    };
+    return targets[id]?.() ?? null;
   }
 
   focusDistrict(districtId: string): boolean {

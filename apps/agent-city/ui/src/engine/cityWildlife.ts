@@ -531,111 +531,14 @@ class Fireflies {
   }
 }
 
-/** 街区行人（tinyskies PersonGenerator 的宏观版，作者授权参考）：沿街区周界内缩
- *  出的人行道环线行走。模型城市尺度的超比例人偶（高 ~2.2 单位）——航拍中读作沿
- *  街流动的点阵，「城市有生机」最便宜的表达。确定性 seed；不走车道；夜间照常
- *  （迈阿密的夜生活）。单 InstancedMesh，双向行走。 */
-class Pedestrians {
-  private readonly mesh: THREE.InstancedMesh;
-  private readonly material: THREE.MeshLambertMaterial;
-  private readonly walkers: Array<{ points: Array<{ x: number; z: number }>; cumulative: number[]; total: number; distance: number; speed: number; phase: number }> = [];
-  private readonly matrix = new THREE.Matrix4();
-  private readonly quaternion = new THREE.Quaternion();
-  private readonly euler = new THREE.Euler();
-  private readonly position = new THREE.Vector3();
-  private readonly scaleVector = new THREE.Vector3();
-  private readonly color = new THREE.Color();
-  private readonly ground: (x: number, z: number) => number;
-
-  constructor(loops: Array<Array<{ x: number; z: number }>>, ground: (x: number, z: number) => number, cap = 220) {
-    this.ground = ground;
-    const body = new THREE.CylinderGeometry(0.26, 0.34, 1.35, 5).translate(0, 0.68, 0);
-    const head = new THREE.SphereGeometry(0.21, 6, 5).translate(0, 1.58, 0);
-    const geometry = mergeGeometries([body, head]);
-    body.dispose(); head.dispose();
-    this.material = new THREE.MeshLambertMaterial({ color: "#ffffff" });
-    this.mesh = new THREE.InstancedMesh(geometry, this.material, Math.max(1, cap));
-    this.mesh.name = "city-pedestrians";
-    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.mesh.frustumCulled = false;
-    const palette = ["#d8d3c8", "#b8c4cc", "#c9a08a", "#8f9aa4", "#d9b48a", "#7f8b94", "#c8ccd0"];
-    let cursor = 0;
-    loops.forEach((loop, loopIndex) => {
-      if (loop.length < 3 || cursor >= cap) return;
-      // 街区多边形边贴路缘：向质心内缩 ~3.2 单位即人行道。
-      const cx = loop.reduce((sum, p) => sum + p.x, 0) / loop.length;
-      const cz = loop.reduce((sum, p) => sum + p.z, 0) / loop.length;
-      const inset = loop.map((p) => {
-        const dx = cx - p.x; const dz = cz - p.z;
-        const len = Math.hypot(dx, dz) || 1;
-        return { x: p.x + (dx / len) * 3.2, z: p.z + (dz / len) * 3.2 };
-      });
-      const cumulative = [0];
-      for (let i = 1; i <= inset.length; i += 1) {
-        const a = inset[i - 1]; const b = inset[i % inset.length];
-        cumulative.push(cumulative[i - 1] + Math.hypot(b.x - a.x, b.z - a.z));
-      }
-      const total = cumulative[cumulative.length - 1];
-      if (total < 40) return;
-      const count = Math.min(16, Math.max(6, Math.round(total / 55)));
-      for (let i = 0; i < count && cursor < cap; i += 1) {
-        const seed = hashSeed(`ped:${loopIndex}:${i}`);
-        this.walkers.push({
-          points: inset, cumulative, total,
-          distance: seed * total,
-          speed: (seed > 0.5 ? 1 : -1) * (1.15 + hashSeed(`peds:${loopIndex}:${i}`) * 0.75),
-          phase: hashSeed(`pedp:${loopIndex}:${i}`) * Math.PI * 2,
-        });
-        this.mesh.setColorAt(cursor, this.color.set(palette[Math.floor(hashSeed(`pedc:${loopIndex}:${i}`) * palette.length)]));
-        cursor += 1;
-      }
-    });
-    this.mesh.count = cursor;
-  }
-
-  readonly group = new THREE.Group();
-
-  update(dt: number, elapsed: number): void {
-    if (!this.walkers.length) return;
-    for (let index = 0; index < this.walkers.length; index += 1) {
-      const walker = this.walkers[index];
-      const distance = ((walker.distance + walker.speed * elapsed) % walker.total + walker.total) % walker.total;
-      let segment = 1;
-      while (segment < walker.cumulative.length - 1 && walker.cumulative[segment] < distance) segment += 1;
-      const a = walker.points[segment - 1];
-      const b = walker.points[segment % walker.points.length];
-      const span = walker.cumulative[segment] - walker.cumulative[segment - 1] || 1;
-      const t = (distance - walker.cumulative[segment - 1]) / span;
-      const x = a.x + (b.x - a.x) * t;
-      const z = a.z + (b.z - a.z) * t;
-      const bob = Math.abs(Math.sin(elapsed * 6 + walker.phase)) * 0.05;
-      this.position.set(x, this.ground(x, z) + bob, z);
-      this.euler.set(0, Math.atan2(-(b.z - a.z), b.x - a.x), 0);
-      this.quaternion.setFromEuler(this.euler);
-      this.scaleVector.set(1, 1, 1);
-      this.matrix.compose(this.position, this.quaternion, this.scaleVector);
-      this.mesh.setMatrixAt(index, this.matrix);
-    }
-    this.mesh.instanceMatrix.needsUpdate = true;
-  }
-
-  dispose(): void {
-    this.mesh.geometry.dispose();
-    this.material.dispose();
-    this.group.removeFromParent();
-  }
-
-  get object3d(): THREE.Object3D {
-    return this.mesh;
-  }
-}
+// 街区行人已退役：它们沿车行路网环线走（看着像在公路上走），且是刻意超比例的人偶（比楼还显眼）。
+// 行人改成沙滩上的静态人物（cityParts.buildBeachLife），比例与躺椅一致。
 
 export class CityWildlife {
   private readonly birds: BirdFlocks;
   private readonly meteors: MeteorShower;
   private readonly volcano: VolcanoPlume | null;
   private readonly fireflies: Fireflies | null;
-  private readonly pedestrians: Pedestrians | null;
   readonly group = new THREE.Group();
 
   constructor(center: { x: number; z: number }, radius: number, parkTrees: Array<{ x: number; z: number; y: number }>, seaMountains: Mountain[], carPaths: Array<Array<{ x: number; z: number }>>, ground: (x: number, z: number) => number) {
@@ -648,8 +551,6 @@ export class CityWildlife {
     if (this.volcano) this.group.add(this.volcano.group);
     this.fireflies = parkTrees.length ? new Fireflies(parkTrees) : null;
     if (this.fireflies) this.group.add(this.fireflies.points);
-    this.pedestrians = carPaths.length ? new Pedestrians(carPaths, ground) : null;
-    if (this.pedestrians) this.group.add(this.pedestrians.object3d);
   }
 
   setNight(night: number, nowMs: number): void {
@@ -671,7 +572,6 @@ export class CityWildlife {
     this.meteors.update(dt);
     this.volcano?.update(dt);
     this.fireflies?.update(dt, elapsed);
-    this.pedestrians?.update(dt, elapsed);
   }
 
   dispose(): void {
@@ -679,7 +579,6 @@ export class CityWildlife {
     this.meteors.dispose();
     this.volcano?.dispose();
     this.fireflies?.dispose();
-    this.pedestrians?.dispose();
     this.group.removeFromParent();
   }
 }

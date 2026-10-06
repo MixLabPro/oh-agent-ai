@@ -11,6 +11,7 @@ import type { CityLayout } from "./cityLayout";
 import { hashSeed } from "../cityModel";
 import { activeTheme, groundFor } from "./cityTheme";
 import { roadPaintPlan } from "./cityRoadPaint";
+import { polygonDistance } from "./cityPlan";
 import { createRenderCanvas, renderContext2D, type RenderCanvas, type RenderContext2D } from "./renderCanvas";
 
 export type DistrictPalette = {
@@ -177,13 +178,18 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
     waterfront: "#d8b8b2",
     residential: "#becbc3",
   };
+  const urbanGround = mixRgb(groundColors.sand, groundColors.lawn, 0.42);
+  const coastDistanceOf = (x: number, z: number) => polygonDistance({ x, z }, layout.coast);
   for (let iz = 0; iz < 384; iz += 1) for (let ix = 0; ix < 384; ix += 1) {
     const x = (ix / 383 - 0.5) * layout.extent;
     const z = (iz / 383 - 0.5) * layout.extent;
     const h = layout.terrain.height(x, z);
     const noise = hashSeed(`ground:${ix}:${iz}`) * 7;
     const g = groundColors;
-    const color = h < 0 ? g.sea : h < 2.5 ? g.sand : h < 9 ? g.lawn : h < 35 ? g.grass : g.rock;
+    // G2：海岸 30 内才是沙；内陆低平原（高 1.2，同样 < 2.5）曾一律按沙色画，整座城看起来像沙漠。
+    // 内陆改成偏草坪的浅色地面（迈阿密是「绿 + 白 + 粉彩」，不是黄沙）。
+    const inland = h >= 0 && h < 2.5 && coastDistanceOf(x, z) > 30;
+    const color = h < 0 ? g.sea : inland ? urbanGround : h < 2.5 ? g.sand : h < 9 ? g.lawn : h < 35 ? g.grass : g.rock;
     const index = (iz * 384 + ix) * 4;
     pixels.data[index] = color[0] + noise; pixels.data[index+1] = color[1] + noise; pixels.data[index+2] = color[2] + noise; pixels.data[index+3] = 255;
   }
@@ -197,11 +203,19 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
     const [px,py]=toPixel(x,z); ctx.save(); ctx.translate(px,py); ctx.rotate(-yaw);
     ctx.fillStyle=color;ctx.fillRect(-width*scale/2,-depth*scale/2,width*scale,depth*scale);ctx.restore();
   };
+  // 空置街区（G1）：不铺地块，画成带深浅斑驳的自然绿地——城市只铺到建成区与预留圈。
+  const wildGreen = toHex(mixRgb([150, 176, 118], groundColors.lawn, 0.35));
   for (const block of layout.blocks) {
+    if (block.vacant) {
+      polygon(block.polygon.map((p)=>({x:block.x+(p.x-block.x)*1.02,z:block.z+(p.z-block.z)*1.02})), wildGreen);
+      continue;
+    }
     const hardscape = viceMiami ? viceBlockPaving[block.zone] : paving;
     polygon(block.polygon.map((p)=>({x:block.x+(p.x-block.x)*0.88,z:block.z+(p.z-block.z)*0.88})),block.parcels.length?hardscape:lawnTint);
     for (const parcel of block.parcels) orientedRect(parcel.x,parcel.z,parcel.width-0.3,parcel.depth-0.3,parcel.yaw,viceMiami ? viceLotPaving[parcel.zone] : "#bcb8ac");
   }
+  // 沙滩不画进这张贴图：2048px 铺满全岛只有 ~1.3px/单位，沙带与水线边缘糊成一片（真机近景）。
+  // 沙滩改成贴地网格（cityParts.buildBeachRibbon），色带边缘由几何决定、与贴图分辨率无关。
   const { runs, junctions } = roadPaintPlan(layout.roadEdges);
   ctx.lineCap="butt"; ctx.lineJoin="round";
   // Paint ALL sidewalks before ANY asphalt: neighboring caps cannot cut white seams into roads.
