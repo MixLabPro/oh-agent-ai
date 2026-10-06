@@ -9,17 +9,36 @@ import type { Vec2 } from "./cityLayout";
 export type AirportPlan = { shore: Vec2; centre: Vec2; yaw: number; outward: Vec2 };
 
 /** 在海岸上挑一个点：离核心最远方向里、离港口与海滨景观段都远的岸点。 */
-export function planAirport(coast: Vec2[], core: Vec2, avoid: Vec2[]): AirportPlan | null {
+/** 把非桥路段按 ~20 采样成点集，供选址判断「岸点离路多远」。 */
+export function roadSamples(edges: Array<{ points: Vec2[]; bridge?: boolean }>): Vec2[] {
+  const out: Vec2[] = [];
+  for (const e of edges) {
+    if (e.bridge) continue;
+    const a = e.points[0]; const b = e.points[e.points.length - 1];
+    const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / 20));
+    for (let k = 0; k <= n; k += 1) out.push({ x: a.x + ((b.x - a.x) * k) / n, z: a.z + ((b.z - a.z) * k) / n });
+  }
+  return out;
+}
+
+export function planAirport(coast: Vec2[], core: Vec2, avoid: Vec2[], roads: Vec2[] = []): AirportPlan | null {
   if (coast.length < 8) return null;
+  // 堤道陆地端必须落在路网上（用户截图：堤道接到没有路的山岬上）：岸点 30 内有路的优先，其次才是纯按远近。
   let best: { p: Vec2; score: number } | null = null;
   for (const p of coast) {
     const far = Math.hypot(p.x - core.x, p.z - core.z);
     const clear = Math.min(...avoid.map((a) => Math.hypot(a.x - p.x, a.z - p.z)), 999);
     if (clear < 160) continue;
-    const score = far + clear * 0.5;
+    let road = Infinity; for (const r of roads) road = Math.min(road, Math.hypot(r.x - p.x, r.z - p.z));
+    const score = far + clear * 0.5 + (roads.length ? (road <= 30 ? 1000 : -road) : 0);
     if (!best || score > best.score) best = { p, score };
   }
   if (!best) return null;
+  if (roads.length) { // 起点吸附到最近路点（≤40），堤道从路上起步
+    let nearest = roads[0]; let nd = Infinity;
+    for (const r of roads) { const d = Math.hypot(r.x - best.p.x, r.z - best.p.z); if (d < nd) { nd = d; nearest = r; } }
+    if (nd <= 40) best = { p: { x: nearest.x, z: nearest.z }, score: best.score };
+  }
   const len = Math.hypot(best.p.x - core.x, best.p.z - core.z) || 1;
   const outward = { x: (best.p.x - core.x) / len, z: (best.p.z - core.z) / len };
   const centre = { x: best.p.x + outward.x * 140, z: best.p.z + outward.z * 140 };
@@ -65,8 +84,16 @@ export function buildAirport(plan: AirportPlan, disposables: Array<{ dispose: ()
   add(new THREE.SphereGeometry(0.7, 8, 6), nightHead ?? mat("#ff3b3b"), 80, 37.2, 34);
   // 跑道边灯（夜间与路灯同批次材质，白天不亮）。
   if (nightHead) for (let x = -L / 2 + 14; x <= L / 2 - 14; x += 14) for (const z of [-30, -6]) add(new THREE.BoxGeometry(0.6, 0.4, 0.6), nightHead, x, 1.6, z);
-  // L-5 多跨堤道：岸点 → 机场岛近岸边缘，薄板桥面 + 每 20 一排架墩 + 两侧护栏，桥面中部微拱。
-  const start = plan.shore; const end = { x: plan.centre.x - plan.outward.x * (W / 2), z: plan.centre.z - plan.outward.z * (W / 2) };
+  buildCauseway(group, plan.shore, { x: plan.centre.x - plan.outward.x * (W / 2), z: plan.centre.z - plan.outward.z * (W / 2) }, mat, add);
+  return group;
+}
+
+/** L-5 多跨堤道：薄板桥面 + 每 20 一排架墩 + 两侧护栏，桥面中部微拱；机场岛与歌剧院岛共用。 */
+export function buildCauseway(
+  group: THREE.Group, start: Vec2, end: Vec2,
+  mat: (color: string) => THREE.Material,
+  add: (geometry: THREE.BufferGeometry, material: THREE.Material, x: number, y: number, z: number, ry?: number, parent?: THREE.Object3D) => THREE.Mesh,
+): void {
   const span = Math.hypot(end.x - start.x, end.z - start.z);
   const yaw = -Math.atan2(end.z - start.z, end.x - start.x);
   const steps = Math.max(4, Math.round(span / 20));
@@ -79,5 +106,4 @@ export function buildAirport(plan: AirportPlan, disposables: Array<{ dispose: ()
     const px = start.x + (end.x - start.x) * t1; const pz = start.z + (end.z - start.z) * t1;
     add(new THREE.BoxGeometry(1.6, deck + 2, 10).translate(0, -(deck + 2) / 2, 0), mat("#a9aaa0"), px, deck, pz, yaw, group);  // 排架墩
   }
-  return group;
 }

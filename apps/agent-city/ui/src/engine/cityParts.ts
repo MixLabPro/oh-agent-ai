@@ -23,7 +23,7 @@ import { makeCityTexture, makeDecoFacadeTexture, makeFacadeTexture, makeLabelSpr
 import type { TerrainField } from "./cityLayout";
 import { createRenderCanvas } from "./renderCanvas";
 import { SegmentIndex, polygonDistance } from "./cityPlan";
-import { buildAirport, planAirport } from "./cityAirport";
+import { buildAirport, planAirport, roadSamples } from "./cityAirport";
 import { roadPaintPlan } from "./cityRoadPaint";
 
 const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
@@ -486,9 +486,9 @@ export class CityParts {
       this.buildMarina();
       {
         // L-4 机场岛 + L-5 堤道：避开港口与海滨景观段。
-        const avoid = [...this.layout.publicSites.filter((x) => x.kind === "harbor"), ...(this.layout.seaside && !this.layout.seaside.degraded ? this.layout.seaside.samples.filter((x) => x.valid).map((x) => x.waterline) : [])];
+        const avoid = [...this.layout.publicSites.filter((x) => x.kind === "harbor"), ...(this.layout.landmarks ?? []).filter((x) => x.kind === "sail-opera"), ...(this.layout.seaside && !this.layout.seaside.degraded ? this.layout.seaside.samples.filter((x) => x.valid).map((x) => x.waterline) : [])];
         const core = this.layout.core ?? { x: 0, z: 0 };
-        const plan = planAirport(this.layout.coast, core, avoid);
+        const plan = planAirport(this.layout.coast, core, avoid, roadSamples(this.layout.roadEdges));
         if (plan) this.group.add(buildAirport(plan, this.disposables, this.nightLights?.heads ?? null));
       }
       this.buildCivics();
@@ -1696,6 +1696,12 @@ export class CityParts {
         mesh(new THREE.BoxGeometry(5, 2.2, 3).translate(0, 1.1, 0), bronze, group, 0, h + 8.4, 0);            // 顶部雕像组（抽象体块）
         mesh(new THREE.ConeGeometry(1.1, 3.4, 6).translate(0, 1.7, 0), bronze, group, 0, h + 10.6, 0);
       } else if (landmark.kind === "sail-opera") {
+        if (landmark.shore) {
+          // 海上小岛：圆形填海平台 + 护岸石；岸点到岛缘的堤道是规划里的桥路段（路网渲染出桥面/护栏/桥墩），不再重复画；平台顶面 y=0.3 与岸滩齐平。
+          const base = group.position.y;
+          mesh(new THREE.CylinderGeometry(landmark.radius + 2, landmark.radius + 4, 3.6, 28).translate(0, -1.8, 0), material("#cfc9b8"), group, 0, 0.3 - base, 0);
+          mesh(new THREE.CylinderGeometry(landmark.radius + 4.5, landmark.radius + 5, 1, 28).translate(0, -0.5, 0), material("#9c968a"), group, 0, -0.4 - base, 0);
+        }
         mesh(new THREE.BoxGeometry(46, 3, 26).translate(0, 1.5, 0), material("#d9d3c2"), group, 0, 0, 0);
         // 帆：半个穹顶（半球再切一半）拉成薄而高的壳，开口朝前；双面材质（开口里也要看得见内壁）。
         const sail = new THREE.MeshLambertMaterial({ color: "#f6f4ee", side: THREE.DoubleSide });

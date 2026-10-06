@@ -73,7 +73,8 @@ export type Biome = "tropical" | "temperate" | "boreal" | "savanna" | "eastasian
 
 /** 致敬型地标（SPEC §4.4）：程序化几何、不复刻具体建筑；纯装饰，不占会话地块、不进统计。 */
 export type LandmarkKind = "tv-tower" | "sail-opera" | "arch" | "pagoda" | "lighthouse" | "ferris-wheel" | "suspension-bridge" | "twin-towers" | "twist-tower" | "villa-complex";
-export type Landmark = Vec2 & { id: string; kind: LandmarkKind; yaw: number; radius: number; to?: Vec2 };
+/** shore：海上小岛地标（歌剧院）的堤道陆地端；有它即「立在水中的岛上」，不适用陆地/岸滩规则。 */
+export type Landmark = Vec2 & { id: string; kind: LandmarkKind; yaw: number; radius: number; to?: Vec2; shore?: Vec2 };
 const BIOMES: Biome[] = ["tropical", "temperate", "boreal", "savanna", "eastasian"];
 
 /** 每档对应的目标地块数（SPEC §4.2：400 会话一档 × 1.35 余量给公共用地、花园、配套与道路损耗）。 */
@@ -643,6 +644,25 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       if (found) { site.x = found.x; site.z = found.z; }
     }
   }
+  // 帆形歌剧院改立在海上小岛、以堤道连岸（用户：「歌剧院不应该在河里，需要在海上」「范式和机场一样」）。
+  // 取离当前位置最近的几个岸点，岸外 radius+40 处整个占地圈必须是深水（不在河口），且离港口/其它用地够远。
+  for (const site of landmarks) {
+    if (site.kind !== "sail-opera") continue;
+    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
+    const targets = [...coast].sort((a, b) => Math.hypot(a.x - site.x, a.z - site.z) - Math.hypot(b.x - site.x, b.z - site.z)).slice(0, 40);
+    for (const shore of targets) {
+      const len = Math.hypot(shore.x - core.x, shore.z - core.z) || 1;
+      const out = { x: (shore.x - core.x) / len, z: (shore.z - core.z) / len };
+      const c = { x: shore.x + out.x * (site.radius + 40), z: shore.z + out.z * (site.radius + 40) };
+      let deep = true;
+      for (let k = 0; k < 16 && deep; k += 1) { const t = (k / 16) * Math.PI * 2; const r = k % 2 ? site.radius : site.radius * 0.6; const x = c.x + Math.cos(t) * r; const z = c.z + Math.sin(t) * r; if (height(x, z) > -0.8 || inRiver(x, z) || (hasRiver && Math.abs(x - riverX(z)) < riverWidth(z) + 60)) deep = false; }
+      if (!deep || others.some((o) => Math.hypot(o.x - c.x, o.z - c.z) < o.radius + site.radius + (o.kind === "harbor" ? 120 : 30))) continue;
+      if (height(shore.x - out.x * 6, shore.z - out.z * 6) < 0.3) continue; // 堤道陆地端要踩在实地上
+      site.x = c.x; site.z = c.z; site.shore = { x: shore.x - out.x * 6, z: shore.z - out.z * 6 };
+      site.yaw = -Math.atan2(out.z, out.x);
+      break;
+    }
+  }
   const ringIndex = new SegmentIndex(ringRuns);
   const distanceToRing = (p: Vec2) => {
     let d = Infinity;
@@ -1082,21 +1102,31 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 拉一条支路接入路网——门前要有路（真机：双子塔、摩天轮、港口门前无路）。
   for (const site of [...publicSites, ...landmarks]) {
     if (!site.radius) continue;
+    // 海上岛地标：先铺堤道桥（岛缘 → 岸点），再从岸点往路网接路。
+    const landmarkSite = site as typeof site & { shore?: Vec2 };
+    const ref: Vec2 = landmarkSite.shore ?? site;
+    if (landmarkSite.shore) {
+      const l = Math.hypot(site.x - ref.x, site.z - ref.z) || 1;
+      const edgePt = key({ x: site.x - ((site.x - ref.x) / l) * site.radius * 0.9, z: site.z - ((site.z - ref.z) / l) * site.radius * 0.9 });
+      const shorePt = key(ref);
+      addEdge(shorePt, edgePt, false, true, false);
+      bridges.push({ from: shorePt, to: edgePt, angle: Math.atan2(edgePt.z - shorePt.z, edgePt.x - shorePt.x), length: Math.hypot(edgePt.x - shorePt.x, edgePt.z - shorePt.z) });
+    }
     let nearest: { p: Vec2; d: number; edge: RoadEdge } | null = null;
     for (const edge of edges.values()) {
       if (edge.bridge) continue;
       const [a, b] = edge.points; const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
-      const t = Math.max(0, Math.min(1, ((site.x - a.x) * dx + (site.z - a.z) * dz) / l2));
-      const p = { x: a.x + dx * t, z: a.z + dz * t }; const d = Math.hypot(p.x - site.x, p.z - site.z);
+      const t = Math.max(0, Math.min(1, ((ref.x - a.x) * dx + (ref.z - a.z) * dz) / l2));
+      const p = { x: a.x + dx * t, z: a.z + dz * t }; const d = Math.hypot(p.x - ref.x, p.z - ref.z);
       if (!nearest || d < nearest.d) nearest = { p, d, edge };
     }
-    if (!nearest || nearest.d <= site.radius + 14) continue;
-    const ux = (nearest.p.x - site.x) / nearest.d; const uz = (nearest.p.z - site.z) / nearest.d;
+    if (!nearest || nearest.d <= (landmarkSite.shore ? 6 : site.radius + 14)) continue;
+    const ux = (nearest.p.x - ref.x) / nearest.d; const uz = (nearest.p.z - ref.z) / nearest.d;
     // 岸边地标（灯塔在岬角尖上）门口常是不可建的岸滩：沿朝路方向往里走到可建地面再起路。
-    let reach = site.radius + 6;
+    let reach = landmarkSite.shore ? 0 : site.radius + 6;
     // 不再向内陆走到可建地：岬角灯塔会走 100+，入口路从远处的路边起步、根本到不了地标（用户：门前要有路）。
     // 门口在不可建岸滩时，由下方的「全程在陆上」兜底直连。
-    const gate = key({ x: site.x + ux * reach, z: site.z + uz * reach });
+    const gate = key({ x: ref.x + ux * reach, z: ref.z + uz * reach });
     if (!connectToNetwork(gate, 240, false) && !connectToNetwork(gate, 700, false, () => false, 35)) {
       // 兜底：岸边地标贴回水边后常在岬角上，到最近路面要穿过不可建的岸滩。在最近 6 个路面点里取第一条
       // 「全程在陆上、不穿河、不穿其它用地」的直线连过去，并在落点切开宿主路段成 T 路口。
