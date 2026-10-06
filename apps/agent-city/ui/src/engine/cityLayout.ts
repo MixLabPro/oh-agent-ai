@@ -137,7 +137,23 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
   // 海滨酒店地块并入可落楼街区（单地块合成街区，朝海、宽 20–29）：酒店只在有会话落户时才出现。
   // 只进本函数的落楼候选，不改缓存的 plan、不进返回的 layout.blocks（地面贴图/规划守卫看到的规划不变），
   // 配套选址与背景楼仍只看 plan.blocks——酒店地块留给会话。
-  const hotelBlocks: CityBlock[] = seasideHotelLots(plan.seaside).map((lot) => ({
+  // 酒店地块在路网之后才排：环岛滨海路的接入路、被裁的主干道接回大道等都可能从地块上穿过（真机：楼压在路上）。
+  // 按地块的真实朝向矩形检查——外扩半个路幅 + 0.5——压路的地块不发放。
+  const lotClearOfRoads = (lot: { x: number; z: number; yaw: number; width: number; depth: number }) => {
+    const ax = Math.sin(lot.yaw); const az = Math.cos(lot.yaw); // 局部 z 轴（进深）
+    const bx = az; const bz = -ax;                               // 局部 x 轴（面宽）
+    for (const edge of plan.roadEdges) {
+      const [a, b] = edge.points; const len = Math.hypot(b.x - a.x, b.z - a.z);
+      const pad = edge.width / 2 + 0.5;
+      for (let d = 0; d <= len; d += 1.5) {
+        const t = len ? d / len : 0;
+        const dx = a.x + (b.x - a.x) * t - lot.x; const dz = a.z + (b.z - a.z) * t - lot.z;
+        if (Math.abs(dx * bx + dz * bz) < lot.width / 2 + pad && Math.abs(dx * ax + dz * az) < lot.depth / 2 + pad) return false;
+      }
+    }
+    return true;
+  };
+  const hotelBlocks: CityBlock[] = seasideHotelLots(plan.seaside).filter(lotClearOfRoads).map((lot) => ({
     id: lot.id, districtId: "", x: lot.x, z: lot.z, width: lot.width, depth: lot.depth, zone: "waterfront" as Zone, polygon: [],
     parcels: [{ id: `${lot.id}/0`, blockId: lot.id, x: lot.x, z: lot.z, yaw: lot.yaw, zone: "waterfront" as Zone, width: lot.width, depth: lot.depth }],
   }));
