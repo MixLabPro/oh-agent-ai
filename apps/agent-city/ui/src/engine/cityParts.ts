@@ -24,6 +24,7 @@ import type { TerrainField } from "./cityLayout";
 import { createRenderCanvas } from "./renderCanvas";
 import { SegmentIndex, polygonDistance } from "./cityPlan";
 import { buildAirport, planAirport, roadSamples } from "./cityAirport";
+import { LIGHT_BUDGET, activeBoost, lampTier, nightFactor, useOfZone, windowRate } from "./cityLightBudget";
 import { roadPaintPlan } from "./cityRoadPaint";
 
 const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
@@ -145,6 +146,9 @@ type FacadeUniforms = {
   uSelfLit: { value: number };
   /** 夜里亮窗：0 = 全灭，≈1 = 夜档（每扇窗按 hash 决定亮不亮，只发光窗格、墙面不发光）。 */
   uWindowGlow: { value: number };
+  /** 本地时段亮灯率：住宅 / 办公（cityLightBudget.windowRate）。 */
+  uRateRes: { value: number };
+  uRateOff: { value: number };
   uGrid: { value: THREE.Vector2 };
   /** 玻璃反射：天空全景（与天空球、水面同一张图、同一套调色），只作用在窗格上。 */
   uEnv: { value: THREE.Texture | null };
@@ -174,10 +178,11 @@ function facadeMaterial(map: THREE.Texture, uniforms: FacadeUniforms, key: strin
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
-      .replace("#include <common>", "#include <common>\nattribute float aFloors;\nuniform float uRows;\nuniform float uPhotoRows;\nuniform float uTileWidth;\nvarying vec2 vPhotoUv;\nvarying vec3 vFacadeWorld;\nvarying vec3 vFacadeNormal;\nvarying float vBuildSeed;")
+      .replace("#include <common>", "#include <common>\nattribute float aFloors;\nattribute vec2 aLight;\nvarying vec2 vLight;\nuniform float uRows;\nuniform float uPhotoRows;\nuniform float uTileWidth;\nvarying vec2 vPhotoUv;\nvarying vec3 vFacadeWorld;\nvarying vec3 vFacadeNormal;\nvarying float vBuildSeed;")
       .replace("#include <project_vertex>", `#include <project_vertex>
 vFacadeWorld = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;
 vBuildSeed = fract(sin(dot(instanceMatrix[3].xz, vec2(12.9898, 78.233))) * 43758.5453);
+vLight = aLight;
 // 盒子的面法线是轴向的：经实例矩阵（只有 yaw + 缩放）变换后归一化即为世界法线。
 vFacadeNormal = normalize(mat3(modelMatrix) * mat3(instanceMatrix) * objectNormal);`)
       // 照片 UV 横向按「这个面的真实宽度 / 一块照片的宽度」平铺。宽度从实例矩阵读：
@@ -204,6 +209,9 @@ varying vec2 vPhotoUv;
 varying vec3 vFacadeWorld;
 varying vec3 vFacadeNormal;
 varying float vBuildSeed;
+varying vec2 vLight;
+uniform float uRateRes;
+uniform float uRateOff;
 uniform float uWindowGlow;
 uniform vec2 uGrid;
 float facadeWindow = 0.0;
@@ -231,13 +239,23 @@ totalEmissiveRadiance += diffuseColor.rgb * uSelfLit;
 // 曾把 uSelfLit 抬到 0.58 作用在整个立面颜色上——墙和窗一起发光，整栋楼是一块奶白色的纸盒。
 if (uWindowGlow > 0.02) {
   vec2 cell = floor(vec2(vMapUv.x * uGrid.x, vMapUv.y * uGrid.y));
-  // N2：亮灯与亮度/色温都有分布——多数窗暗、少数很亮（平方分布），色温在 2400K 暖黄到 5000K 冷白间连续，
-  // 不再是「等亮度、二选一」的 LED 点阵（荧光玩具感的主因之一）。
-  float on = step(cellHash(cell, vBuildSeed), (0.28 + 0.5 * vBuildSeed) * smoothstep(0.1, 0.95, uWindowGlow));
+  // N2：亮灯与亮度/色温都有分布——多数窗暗、少数很亮（平方分布），色温 2400K 暖黄到 5000K 冷白连续；
+  // 亮灯率随本地时段（uRateRes/uRateOff）与用途变化：办公楼整层同亮同灭（按楼层 hash），住宅零星；
+  // 活跃会话（vLight.y）夜里更亮（cityLightBudget.activeBoost 的 GLSL 镜像）。
+  float office = vLight.x;
+  float rate = mix(uRateRes, uRateOff, office);
+  rate = mix(rate, min(1.0, max(0.45, rate + 0.25)), vLight.y);
+  float perWindow = cellHash(cell, vBuildSeed);
+  float perFloor = cellHash(vec2(0.0, cell.y), vBuildSeed + 7.0);
+  float pick = mix(perWindow, perFloor, 0.75 * office);
+  float on = step(pick, rate * (0.55 + 0.9 * vBuildSeed) * smoothstep(0.1, 0.95, uWindowGlow));
   float h2 = cellHash(cell + 31.0, vBuildSeed);
   float temp = cellHash(cell + 17.0, vBuildSeed);
   vec3 lamp = mix(vec3(1.0, 0.62, 0.28), vec3(0.78, 0.88, 1.0), smoothstep(0.55, 1.0, temp));
   totalEmissiveRadiance += lamp * facadeWindow * on * uWindowGlow * (0.3 + 1.7 * h2 * h2);
+  // 窗下漏光：亮窗正下方的墙面极弱地被照亮（强度 ×0.12），窗不再是孤立的亮块。
+  float below = smoothstep(0.38, 0.0, fract(vMapUv.y * uGrid.y));
+  totalEmissiveRadiance += lamp * (1.0 - facadeWindow) * on * uWindowGlow * 0.12 * below * (0.3 + 1.7 * h2 * h2) * 0.5;
 }`)
       // 光照算完之后再混反射：玻璃的颜色主要来自它映出的天空，不受漫反射光的明暗支配。
       .replace("#include <opaque_fragment>", `if (uEnvStrength > 0.0) {
@@ -413,6 +431,8 @@ export class CityParts {
   private readonly decoCornerMesh: THREE.InstancedMesh;
   private nightLights: NightLights | null = null;
   private terrainUniforms: Record<string, { value: unknown }> | null = null;
+  private spillTexture: THREE.Texture | null = null;
+  private nightHour = 21;
   private flagTime: { value: number } | null = null;
   private waterAssetUniforms: Record<string, { value: unknown }> | null = null;
   /** 屋顶霓虹描边：比屋顶略大的自发光薄板，露出的一圈即霓虹；仅日落主题。 */
@@ -458,6 +478,7 @@ export class CityParts {
   private readonly scaleVector = new THREE.Vector3();
   private readonly positionVector = new THREE.Vector3();
   private readonly color = new THREE.Color();
+  private readonly spillWhite = new THREE.Color();
   private readonly hsl = { h: 0, s: 0, l: 0 };
   private cursor = Number.NaN;
   private live = true;
@@ -599,6 +620,7 @@ export class CityParts {
       const capacity = facadeCounts[variant] + 8;
       const geometry = BOX.clone();
       geometry.setAttribute("aFloors", new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1));
+      geometry.setAttribute("aLight", new THREE.InstancedBufferAttribute(new Float32Array(capacity * 2), 2)); // x = 办公用途(0/1)，y = 活跃会话(0/1)
       // 装饰艺术立面一块平铺画 2 层，其余程序化立面沿用一层一块。
       const uniforms: FacadeUniforms = {
         // 一块纹理覆盖几层楼：程序化立面画的是 4 层（makeFacadeTexture），装饰艺术画 2 层。
@@ -610,6 +632,8 @@ export class CityParts {
         uTileWidth: { value: 1 },
         uSelfLit: { value: 0.24 },
         uWindowGlow: { value: 0 },
+        uRateRes: { value: 0.4 },
+        uRateOff: { value: 0.4 },
         uGrid: { value: new THREE.Vector2(...(FACADE_GRIDS[variant] ?? [4, 4])) },
         uEnv: { value: null },
         uEnvStrength: { value: 0 },
@@ -750,7 +774,7 @@ export class CityParts {
    *  在图集颜色上按材质类别叠加世界坐标平铺的照片细节（颜色比值 + 法线明暗），
    *  分类只看图集颜色与海拔：深灰低饱和=沥青，浅灰=人行道，绿=草，暖浅=沙，近水面的沙=滩涂。 */
   private installGroundDetail(material: THREE.MeshLambertMaterial): void {
-    const uniforms: Record<string, { value: unknown }> = { uDetail: { value: 0 } };
+    const uniforms: Record<string, { value: unknown }> = { uDetail: { value: 0 }, uNightDim: { value: 0 }, uSpill: { value: null }, uSpillGain: { value: 0 }, uExtent: { value: this.layout.extent } };
     // 海滨沙滩不在 shader 里：画进地面贴图（makeCityTexture），道路才能压在它上面。
     for (const name of ["Asphalt", "Concrete", "Sand", "Mud", "Grass"]) {
       uniforms[`u${name}C`] = { value: null };
@@ -765,7 +789,9 @@ export class CityParts {
         .replace("#include <project_vertex>", "#include <project_vertex>\nvCityWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;");
       const samplers = ["Asphalt", "Concrete", "Sand", "Mud", "Grass"].map((n) => `uniform sampler2D u${n}C; uniform sampler2D u${n}N; uniform vec3 u${n}Mean;`).join("\n");
       shader.fragmentShader = shader.fragmentShader
-        .replace("#include <common>", `#include <common>\nvarying vec3 vCityWorld;\nuniform float uDetail;\n${samplers}`)
+        .replace("#include <common>", `#include <common>\nvarying vec3 vCityWorld;\nuniform float uDetail;\nuniform float uNightDim;\nuniform sampler2D uSpill;\nuniform float uSpillGain;\nuniform float uExtent;\n${samplers}`)
+        // N1/N3：夜里地面主题色压暗；楼的窗光外溢（uSpill）只加在地面上，亮度随亮灯率。
+        .replace("#include <emissivemap_fragment>", `#include <emissivemap_fragment>\ndiffuseColor.rgb *= mix(1.0, ${LIGHT_BUDGET.ambient.groundDim.toFixed(2)}, uNightDim);\nif (uSpillGain > 0.001) { vec2 suv = vCityWorld.xz / uExtent + 0.5; totalEmissiveRadiance += texture2D(uSpill, suv).rgb * uSpillGain; }`)
         .replace("#include <map_fragment>", `#include <map_fragment>
 #ifdef USE_MAP
   if (uDetail > 0.5) {
@@ -813,6 +839,57 @@ export class CityParts {
     this.waterAssetUniforms.uMirror.value = texture;
     this.waterAssetUniforms.uHasMirror.value = texture ? 1 : 0;
     if (matrix) (this.waterAssetUniforms.uMirrorMatrix.value as THREE.Matrix4).copy(matrix);
+  }
+
+  /** N3 夜间光照叠层：把每栋亮窗的楼按其占地画成暖色径向光斑（低分辨率画布），在地面与水面 shader 里按
+   *  uSpillGain 叠加——窗光「漏」到楼脚与岸边水面，而不是楼自己孤立地亮。静态建一次，亮度随时段在 setNightHour 里调。 */
+  private buildGroundSpill(): void {
+    const uniforms = this.terrainUniforms;
+    if (!uniforms) return;
+    const size = 1024;
+    const canvas = createRenderCanvas();
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, size, size);
+    ctx.globalCompositeOperation = "lighter";
+    const extent = this.layout.extent;
+    for (const runtime of this.runtimes) {
+      const s = runtime.slot;
+      const reach = (Math.hypot(s.width, s.depth) / 2 + LIGHT_BUDGET.overlay.radius) / extent * size;
+      const px = (s.x / extent + 0.5) * size; const pz = (s.z / extent + 0.5) * size;
+      const power = Math.min(1, runtime.building.height / 70) * (useOfZone(s.zone) === "office" ? 1 : 0.6) * runtime.building.builtFraction;
+      if (power < 0.04) continue;
+      const g = ctx.createRadialGradient(px, pz, 0, px, pz, reach);
+      g.addColorStop(0, `rgba(255,170,90,${(0.5 * power).toFixed(3)})`);
+      g.addColorStop(1, "rgba(255,170,90,0)");
+      ctx.fillStyle = g; ctx.fillRect(px - reach, pz - reach, reach * 2, reach * 2);
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    (uniforms.uSpill.value as THREE.Texture | null)?.dispose();
+    uniforms.uSpill.value = texture;
+    if (this.waterAssetUniforms?.uSpill) this.waterAssetUniforms.uSpill.value = texture;
+    this.spillTexture = texture;
+  }
+
+  /** 本地小时 → 住宅/办公亮灯率（cityLightBudget.windowRate），驱动立面窗光与地面/水面光斑的强度。 */
+  setNightHour(hour: number): void {
+    this.nightHour = hour;
+    const res = windowRate(hour, "residential"); const off = windowRate(hour, "office");
+    for (const uniforms of this.facadeUniforms) { uniforms.uRateRes.value = res; uniforms.uRateOff.value = off; }
+    this.applyNightOverlay();
+  }
+
+  private applyNightOverlay(): void {
+    const night = nightFactor(this.nightGlow);
+    const t = this.terrainUniforms;
+    if (t) {
+      t.uNightDim.value = night;
+      t.uSpillGain.value = night * LIGHT_BUDGET.overlay.gain * (0.4 + 0.6 * Math.max(windowRate(this.nightHour, "residential"), windowRate(this.nightHour, "office")));
+    }
+    const w = this.waterAssetUniforms as unknown as Record<string, { value: unknown }> | null;
+    if (w?.uSpillGain && t) w.uSpillGain.value = t.uSpillGain.value;
   }
 
   setNightWater(night: number): void {
@@ -1439,8 +1516,11 @@ export class CityParts {
     const stripMesh = this.makeInstanced(BOX, strips, 2200);
     const spacing = 30;
     let lamps = 0;
-    const lamp = (x: number, z: number, nx: number, nz: number, base: number, yaw: number, poolReach = 3.2, poolRadius = 9.5) => {
+    const lamp = (x: number, z: number, nx: number, nz: number, base: number, yaw: number, poolReach = 3.2, poolRadius = 9.5, tier = 1) => {
       if (lamps >= 4600) return;
+      poolRadius *= 0.6 + 0.4 * tier; // N3：路灯按道路等级分档——主干最亮最大，支路/步道小而暗
+      headMesh.setColorAt(lamps, this.color.setScalar(0.5 + 0.5 * tier));
+      poolMesh.setColorAt(lamps, this.color.setScalar(0.4 + 0.6 * tier));
       this.compose(x, base, z, 0, 1, 4.6, 1);
       poles.setMatrixAt(lamps, this.matrix);
       // 灯头悬在路中心一侧（臂长 0.7），朝路面。
@@ -1454,6 +1534,7 @@ export class CityParts {
     // 且跳过 <18 的段：滨海大道细分成 ~15 的短段，整条一盏灯都没有（真机夜景：海滨道路漆黑）。
     for (const run of roadPaintPlan(this.layout.roadEdges).runs) {
       if (run.kind !== "arterial") continue;
+      const tier = lampTier(run.width);
       let walked = 0; let next = spacing / 2; let index = 0;
       for (let i = 1; i < run.points.length; i += 1) {
         const a = run.points[i - 1]; const b = run.points[i];
@@ -1467,8 +1548,8 @@ export class CityParts {
           const side = index % 2 === 0 ? 1 : -1; // 两侧交错
           const x = a.x + dx * t + nx * side * (run.width / 2 + 0.9);
           const z = a.z + dz * t + nz * side * (run.width / 2 + 0.9);
-          lamp(x, z, nx * side, nz * side, Math.max(0, this.layout.terrain.height(x, z)), yaw);
-          next += spacing; index += 1;
+          lamp(x, z, nx * side, nz * side, Math.max(0, this.layout.terrain.height(x, z)), yaw, 3.2, 9.5, tier);
+          next += spacing * (tier >= 1 ? 1 : tier >= 0.6 ? 1.2 : 1.5); index += 1;
         }
         walked += length;
       }
@@ -1505,6 +1586,7 @@ export class CityParts {
     }
     poles.count = lamps; headMesh.count = lamps; poolMesh.count = lamps;
     for (const mesh of [poles, headMesh, poolMesh]) { mesh.instanceMatrix.needsUpdate = true; mesh.frustumCulled = false; }
+    for (const mesh of [headMesh, poolMesh]) if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     // 高架灯带：沿环线两侧护栏上沿的发光细条（桥面高 8.2，护栏在 ±5.1）。
     let strip = 0;
     for (const run of this.layout.highways ?? []) {
@@ -1894,7 +1976,7 @@ export class CityParts {
             list.forEach((b, i) => {
               this.matrix.compose(this.positionVector.set(b[0], b[1], b[2]), this.quaternion.identity(), this.scaleVector.set(1, 1, 1));
               instanced.setMatrixAt(i, this.matrix);
-              if (neonTint) instanced.setColorAt(i, this.color.set(i % 2 === 0 ? "#38e8ff" : "#ff4fd8"));
+              if (neonTint) instanced.setColorAt(i, this.color.set(i % 2 === 0 ? "#38e8ff" : "#ff4fd8").lerp(this.spillWhite.set("#fff1dc"), 1 - LIGHT_BUDGET.neon.bridgeSaturation)); // N4：桥塔霓虹降饱和
             });
             instanced.instanceMatrix.needsUpdate = true;
             if (instanced.instanceColor) instanced.instanceColor.needsUpdate = true;
@@ -3451,6 +3533,9 @@ export class CityParts {
         uMirrorMatrix: { value: new THREE.Matrix4() },
         uHasMirror: { value: 0 },
         uNight: { value: 0 },
+        uSpill: { value: null as THREE.Texture | null },
+        uSpillGain: { value: 0 },
+        uExtent: { value: this.layout.extent },
         uSkyTex: { value: null as THREE.Texture | null },
         uHasAssets: { value: 0 },
         uGradeTop: { value: new THREE.Color(activeTheme().skyGrade.top) },
@@ -3479,6 +3564,9 @@ export class CityParts {
         uniform mat4 uMirrorMatrix;
         uniform float uHasMirror;
         uniform float uNight;
+        uniform sampler2D uSpill;
+        uniform float uSpillGain;
+        uniform float uExtent;
         uniform sampler2D uSkyTex;
         uniform float uHasAssets;
         uniform vec3 uGradeTop;
@@ -3604,6 +3692,8 @@ export class CityParts {
           float footprint = length(fwidth(p));
           ripples *= (1.0 - smoothstep(0.5, 1.6, footprint)) * (1.0 - smoothstep(650.0, 1100.0, dist));
           color += vec3(0.88, 0.95, 1.0) * ripples * 0.16 * (1.0 - uNight * 0.75);
+          // N3 水面窗光倒影：岸边亮窗的楼把暖光洒在近岸水面，随涟漪碎成亮带（只在有光斑的地方）。
+          if (uSpillGain > 0.001) { vec3 spill = texture2D(uSpill, vWorld.xz / uExtent + 0.5).rgb; color += spill * uSpillGain * (0.55 + 0.9 * ripples); }
           // 太阳反射带里的涟漪更亮（碎金）：只在日间。
           color += vec3(1.0, 0.98, 0.9) * ripples * sunPath * 0.55 * (1.0 - uNight);
           // ── 岸线涟漪（tinyskies Globe 手法，作者授权移植）──────────────────
@@ -3725,12 +3815,14 @@ export class CityParts {
       runtime.shaftPrimary = shaftCursor[runtime.facade];
       mesh.setColorAt(runtime.shaftPrimary, runtime.paletteWall);
       (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftPrimary, Math.max(2, Math.round(building.height / 3.1)));
+      (mesh.geometry.getAttribute("aLight") as THREE.InstancedBufferAttribute).setXY(runtime.shaftPrimary, useOfZone(zone) === "office" ? 1 : 0, building.active ? 1 : 0);
       instanceMap.set(runtime.shaftPrimary, building.id);
       shaftCursor[runtime.facade] += 1;
       if (wantsUpper) {
         runtime.shaftUpper = shaftCursor[runtime.facade];
         mesh.setColorAt(runtime.shaftUpper, runtime.paletteWall.clone().multiplyScalar(0.94));
         (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftUpper, Math.max(2, Math.round((building.height * 0.28) / 3.1)));
+        (mesh.geometry.getAttribute("aLight") as THREE.InstancedBufferAttribute).setXY(runtime.shaftUpper, useOfZone(zone) === "office" ? 1 : 0, building.active ? 1 : 0);
         instanceMap.set(runtime.shaftUpper, building.id);
         shaftCursor[runtime.facade] += 1;
       }
@@ -3749,7 +3841,7 @@ export class CityParts {
       this.roofProfiles.forEach((mesh, index) => mesh.setColorAt(roofCount, profileColors[index]));
       // 乘 3.2 让亮度越过 bloom 阈值（MeshBasicMaterial 不吃光照，toneMapped=false 保留 HDR 值）。
       // N1：霓虹描边只留给高楼与酒店冠，普通会话楼不再每栋一圈彩边（荧光玩具感）；其余实例色置黑 = 不发光。
-      this.neonMesh.setColorAt(roofCount, new THREE.Color(palette.accent).multiplyScalar(building.height >= 24 || slot.blockId.startsWith("hotel:") ? 3.2 : 0));
+      this.neonMesh.setColorAt(roofCount, new THREE.Color(palette.accent).multiplyScalar(building.height >= 24 || slot.blockId.startsWith("hotel:") ? LIGHT_BUDGET.neon.roof : 0));
       roofCount += 1;
       // 海滨酒店冠（L-1）：方案在建模期算一次存住；冠底霓虹带走独立实例（neonMesh 与 roofCount
       // 是 1:1 索引，每楼可变条数会破坏该映射）。
@@ -3794,6 +3886,7 @@ export class CityParts {
       this.runtimes.push(runtime);
       this.runtimeById.set(building.id, runtime);
     }
+    this.buildGroundSpill();
 
     this.shaftMeshes.forEach((mesh, variant) => {
       mesh.count = shaftCursor[variant];
@@ -4335,7 +4428,8 @@ export class CityParts {
     this.nightGlow = selfLit;
     // 电灯用自己的「夜」量：DAY 档 selfLit = 0.05（立面的白天余光），直接拿来点灯会让正午的光斑/霓虹
     // 越过 0.03/0.04 的开灯阈值、灯头也带着亮度（审计实测正午灯全开）。≤0.1 一律算白天 = 0。
-    const night = Math.max(0, (selfLit - 0.1) / 0.9);
+    const night = nightFactor(selfLit);
+    this.applyNightOverlay();
     const beamMaterial = this.heroParts?.beam?.material as THREE.MeshBasicMaterial | undefined;
     if (beamMaterial) {
       beamMaterial.visible = night > 0.05;
@@ -4346,19 +4440,19 @@ export class CityParts {
       // 电灯白天完全熄灭（0），随 night 线性亮起：此前留的 0.12/0.1「白天底线」
       // 在 4600 盏灯的规模下肉眼可见，读作「灯没关」；灯杆由 Lambert 灰呈现，
       // 灯头不需要白天亮度。
-      lights.heads.color.setRGB(1, 0.78, 0.45).multiplyScalar(night * 3.2);
-      lights.pools.color.setRGB(1, 0.62, 0.3).multiplyScalar(night * 0.9);
+      lights.heads.color.setRGB(1, 0.78, 0.45).multiplyScalar(night * LIGHT_BUDGET.street.head);
+      lights.pools.color.setRGB(1, 0.62, 0.3).multiplyScalar(night * LIGHT_BUDGET.street.pool);
       lights.pools.visible = night > 0.03;
-      lights.strips.color.setRGB(1, 0.7, 0.4).multiplyScalar(night * 2.4);
+      lights.strips.color.setRGB(1, 0.7, 0.4).multiplyScalar(night * LIGHT_BUDGET.street.strip);
       // 霓虹/边缘光：实例色决定色相（青/洋红/暖白），这里只管亮度；白天熄灭。
-      lights.neon.color.setRGB(1, 1, 1).multiplyScalar(night * 2.6);
+      lights.neon.color.setRGB(1, 1, 1).multiplyScalar(night * LIGHT_BUDGET.neon.bridge);
       // 白天整体关掉：近黑的实例色在日光下读作一块块深色方块（桥塔上的霓虹点实测）。
       lights.neon.visible = night > 0.04;
     }
     // 地标玻璃幕墙：夜里换亮窗贴图并加亮，白天回到立面贴图 + 少量托底自发光。
     for (const entry of this.landmarkWindows) {
       const lit = night > 0.05;
-      if (lit) { entry.material.emissiveMap = entry.lit; entry.material.emissive.setRGB(1, 1, 1).multiplyScalar(0.25 + night * 1.6); }
+      if (lit) { entry.material.emissiveMap = entry.lit; entry.material.emissive.setRGB(1, 1, 1).multiplyScalar(LIGHT_BUDGET.landmark.base + night * LIGHT_BUDGET.landmark.gain); }
       else { entry.material.emissiveMap = entry.day; entry.material.emissive.copy(entry.dayEmissive); }
     }
     // 救生塔夜间指示灯（VICE S1）：独立 MeshBasic，不依赖路灯照亮。
