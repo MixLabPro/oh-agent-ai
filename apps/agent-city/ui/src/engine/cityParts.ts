@@ -1671,6 +1671,12 @@ export class CityParts {
           const m = mesh(shell, sail, group, -15 + i * 9.5, 3, 0, 0);
           m.rotation.z = -0.18;
         }
+        // 细化：壳下的玻璃幕墙门厅（壳与平台之间的深色玻璃带 + 竖棂）、通往平台的大台阶、临水步道栏杆。
+        const glass = material("#3f5f6e");
+        mesh(new THREE.BoxGeometry(34, 5, 14).translate(0, 2.5, 0), glass, group, -1, 3, 0);
+        for (let k = 0; k < 12; k += 1) mesh(new THREE.BoxGeometry(0.3, 5, 0.3).translate(0, 2.5, 0), material("#e8eef0"), group, -17.5 + k * 3, 3, 7.05);
+        for (let k = 0; k < 5; k += 1) mesh(new THREE.BoxGeometry(18, 0.6, 1.6).translate(0, 0.3, 0), material("#e2dccd"), group, 0, k * 0.6, 13 + k * 1.6 - 8 * 0.6);
+        mesh(new THREE.BoxGeometry(46, 0.9, 0.25).translate(0, 0.45, 0), material("#f2efe6"), group, 0, 3, -13);
       } else if (landmark.kind === "lighthouse") {
         const h = Math.min(cap, 32);
         const bands = 6;
@@ -1718,9 +1724,17 @@ export class CityParts {
         }
         const wheel = new THREE.Group();
         wheel.position.set(0, radius + 4, 0);
-        const ring = new THREE.Mesh(new THREE.TorusGeometry(radius, 0.45, 6, 48), material("#e8eef0", neon ? 0.6 : 0));
-        this.disposables.push(ring.geometry);
-        wheel.add(ring);
+        // 细化：双轮缘（前后两圈 + 横撑）、中心轮毂与轴、圆筒形吊舱（带窗带）、底部登乘平台与售票亭。
+        for (const z of [-1.2, 1.2]) {
+          const ring = new THREE.Mesh(new THREE.TorusGeometry(radius, 0.4, 6, 48), material("#e8eef0", neon ? 0.6 : 0));
+          ring.position.z = z; this.disposables.push(ring.geometry); wheel.add(ring);
+        }
+        const hub = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.6, 3.4, 16).rotateX(Math.PI / 2), steel);
+        this.disposables.push(hub.geometry); wheel.add(hub);
+        mesh(new THREE.CylinderGeometry(0.5, 0.5, 8, 10).rotateX(Math.PI / 2), steel, group, 0, radius + 4, 0);
+        mesh(new THREE.BoxGeometry(14, 1, 8).translate(0, 0.5, 0), material("#d9d3c2"), group, 0, 0, 0);
+        mesh(new THREE.BoxGeometry(4, 3, 3).translate(0, 1.5, 0), material("#ff6f61"), group, 8.5, 0, 2);
+        mesh(new THREE.BoxGeometry(4.6, 0.3, 3.6).translate(0, 0.15, 0), material("#f2efe6"), group, 8.5, 3, 2);
         const cabins = 16;
         for (let i = 0; i < cabins; i += 1) {
           const t = (i / cabins) * Math.PI * 2;
@@ -1728,10 +1742,17 @@ export class CityParts {
           spoke.rotation.z = t;
           this.disposables.push(spoke.geometry);
           wheel.add(spoke);
-          const cabin = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), material(["#ff6f61", "#ffd166", "#06d6a0", "#118ab2"][i % 4], neon ? 0.5 : 0));
-          cabin.position.set(Math.cos(t) * radius, Math.sin(t) * radius, 0);
+          for (const z of [-1.2, 1.2]) {
+            const rim = new THREE.Mesh(new THREE.BoxGeometry(0.18, radius, 0.18).translate(0, radius / 2, 0), steel);
+            rim.rotation.z = t; rim.position.z = z; this.disposables.push(rim.geometry); wheel.add(rim);
+          }
+          const cabin = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.2, 2.4, 10).rotateX(Math.PI / 2), material(["#ff6f61", "#ffd166", "#06d6a0", "#118ab2"][i % 4], neon ? 0.5 : 0));
+          cabin.position.set(Math.cos(t) * radius, Math.sin(t) * radius - 1.3, 0);
           this.disposables.push(cabin.geometry);
           wheel.add(cabin);
+          const band = new THREE.Mesh(new THREE.CylinderGeometry(1.25, 1.25, 0.7, 10).rotateX(Math.PI / 2), material("#2f4552"));
+          band.position.set(Math.cos(t) * radius, Math.sin(t) * radius - 1.1, 0);
+          this.disposables.push(band.geometry); wheel.add(band);
         }
         group.add(wheel);
         this.landmarkSpinners.push({ object: wheel, axis: "z", speed: 0.08 });
@@ -1747,6 +1768,16 @@ export class CityParts {
           mesh(new THREE.BoxGeometry(w, 3.6, w).translate(0, 1.8, 0), wall, group, 0, y, 0);
           // 檐：四棱锥扁台，比墙宽一圈，角略上翘的感觉靠「宽而薄」。
           mesh(new THREE.ConeGeometry(w * 0.95, 1.6, 4).rotateY(Math.PI / 4).translate(0, 0.8, 0), roof, group, 0, y + 3.6, 0);
+          // 细化：四角起翘（檐角小斜块）、每层平座栏杆、正面门洞。
+          for (const [cx, cz] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+            const tip = mesh(new THREE.BoxGeometry(0.5, 0.4, 1.6), roof, group, cx * w * 0.66, y + 3.7, cz * w * 0.66);
+            tip.rotation.y = Math.atan2(cx, cz); tip.rotation.x = -0.5;
+          }
+          for (const side of [-1, 1]) {
+            mesh(new THREE.BoxGeometry(w + 0.4, 0.5, 0.15).translate(0, 0.25, 0), material("#e8d9b0"), group, 0, y + 0.1, side * (w / 2 + 0.2));
+            mesh(new THREE.BoxGeometry(0.15, 0.5, w + 0.4).translate(0, 0.25, 0), material("#e8d9b0"), group, side * (w / 2 + 0.2), y + 0.1, 0);
+          }
+          mesh(new THREE.BoxGeometry(w * 0.3, 2.2, 0.15).translate(0, 1.1, 0), material("#3a2a22"), group, 0, y + 0.6, w / 2 + 0.05);
           y += 4.4;
         }
         mesh(new THREE.CylinderGeometry(0.2, 0.35, 6, 6).translate(0, 3, 0), material("#c9a24a"), group, 0, y, 0);

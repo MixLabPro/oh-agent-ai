@@ -651,6 +651,7 @@ export class CityEngine {
       "session-tower": () => pick((b) => P.formOf(b) === "tower" && b.height > 25),
       "session-slab": () => pick((b) => P.formOf(b) === "slab" && b.height > 12),
       "session-deco": () => pick((b, s) => P.facadeFor(b) === 3 && !s.blockId.startsWith("hotel:")),
+      "hero-tower": () => { let best: CityModel["buildings"][number] | null = null; for (const b of model.buildings) if (!best || b.tokensTotal > best.tokensTotal) best = b; const slot = best ? slots.get(best.id) : null; return best && slot ? [slot.x, best.height * 0.6, slot.z, Math.max(60, best.height * 2.4)] : null; },
       "session-hotel": () => pick((_b, s) => s.blockId.startsWith("hotel:")),
       "district-landmark": () => (districtLandmark ? [districtLandmark.x, 45, districtLandmark.z, 150] : null),
       "twin-towers": () => landmark("twin-towers", 38, 160),

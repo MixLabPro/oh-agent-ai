@@ -324,7 +324,8 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
     })()}
     {selected && !cinema && <aside className="city-detail-panel" aria-label="建筑详情">
       <button className="city-close" aria-label="关闭建筑详情" onClick={ui.clearSelection}>×</button>
-      <p>建筑 · {selected.aggregated ? "聚合会话" : "会话"}</p><h2>{model?.districts.find((d) => d.id === selected.districtId)?.label ?? selected.districtId}</h2>
+      <p>建筑 · {selected.aggregated ? "聚合会话" : "会话"}</p>
+      {model && selected.tokensTotal >= Math.max(...model.buildings.map((b) => b.tokensTotal)) && <p className="city-hero-note">全城之最：本窗口 token 最多的会话。它戴尖顶冠，夜里顶上亮一道探照光柱，方便在全城找到它。</p>}<h2>{model?.districts.find((d) => d.id === selected.districtId)?.label ?? selected.districtId}</h2>
       <dl><dt>Token</dt><dd>{tokens(selected.tokensTotal)}</dd><dt>状态</dt><dd>{selected.active ? "活跃 · 施工中" : "非活跃 · 已封顶"}</dd>
         <dt>进度估算</dt><dd>{Math.round(selected.builtFraction * 100)}%</dd><dt>起始时间</dt><dd>{dateLabel(selected.startedAt)}</dd>
         <dt>事件数</dt><dd>{session?.event_count ?? "未投影"}</dd><dt>费用</dt><dd>尚未接入</dd></dl>

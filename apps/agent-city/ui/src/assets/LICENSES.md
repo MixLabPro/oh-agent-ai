@@ -48,4 +48,5 @@ licence as the repository.
 `catalog/sail-opera.jpg`, `catalog/suspension-bridge.jpg`, `catalog/truss-bridge.jpg`, `catalog/harbor.jpg`,
 `catalog/beach.jpg`,
 `catalog/civic-hall.jpg`, `catalog/station.jpg`, `catalog/stadium.jpg`, `catalog/observation-tower.jpg`, `catalog/park.jpg`, `catalog/expressway.jpg`, `catalog/lighthouse.jpg`, `catalog/twist-tower.jpg`, `catalog/tv-tower.jpg`, `catalog/arch.jpg`, `catalog/pagoda.jpg`, `catalog/signs.jpg`,
-`catalog/hospital.jpg`, `catalog/school.jpg`, `catalog/mall.jpg`, `catalog/garden.jpg`
+`catalog/hospital.jpg`, `catalog/school.jpg`, `catalog/mall.jpg`, `catalog/garden.jpg`,
+`catalog/hero-tower.jpg`

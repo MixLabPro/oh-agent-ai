@@ -12,6 +12,7 @@ import sessionTower from "./assets/catalog/session-tower.jpg";
 import sessionSlab from "./assets/catalog/session-slab.jpg";
 import sessionDeco from "./assets/catalog/session-deco.jpg";
 import sessionHotel from "./assets/catalog/session-hotel.jpg";
+import heroTower from "./assets/catalog/hero-tower.jpg";
 import districtLandmark from "./assets/catalog/district-landmark.jpg";
 import twinTowers from "./assets/catalog/twin-towers.jpg";
 import twistTower from "./assets/catalog/twist-tower.jpg";
@@ -48,6 +49,7 @@ export const CITY_CATALOG: CatalogEntry[] = [
   { id: "session-slab", group: "会话楼", image: sessionSlab, title: "会话板楼 / 街坊楼", kind: "data", source: "cityParts.buildRuntimes / formOf", body: "同样代表一次会话；区内地价较低的地块长成宽而浅的板楼或街坊楼。形态只随地价变化，楼高仍由 token 决定。" },
   { id: "session-deco", group: "会话楼", image: sessionDeco, title: "海滨装饰艺术楼", kind: "data", source: "cityParts.facadeFor (facade 3)", body: "临海区较矮的会话楼换成迈阿密装饰艺术风格：粉彩墙面、水平饰带、阶梯楼冠。仍是一次会话。" },
   { id: "session-hotel", group: "会话楼", image: sessionHotel, title: "海滨酒店", kind: "data", source: "cityLayout hotelBlocks + cityHotelCrown", body: "落在海滨酒店地块上的会话楼铺满宽地块成为一栋酒店，部分带白色格栅屋顶冠。只有有会话落户时才出现。" },
+  { id: "hero-tower", group: "会话楼", image: heroTower, title: "全城之最", kind: "data", source: "cityParts.buildHeroCrown", body: "本窗口 token 最多的那一次会话：楼顶加区色尖顶冠，黄昏与夜里顶上亮一道探照光柱，在全城一眼找到它。楼高仍由它自己的 token 决定。" },
   { id: "district-landmark", group: "地标", image: districtLandmark, title: "城区地标", kind: "scale", source: "cityParts.buildDistrictLandmarks", body: "每个执行环境城区在景观湖旁立一座三级收分的装饰艺术塔，取区色，城区标签立在它上方。每个会话加高一截，回放时随会话逐层加盖；点击查看该城区的会话、活跃与异常。" },
   { id: "twin-towers", group: "地标", image: twinTowers, title: "双子塔", kind: "decor", source: "cityParts.buildLandmarks", body: "迈阿密热带装饰艺术风格的城市地标：眉檐遮阳板、粉彩竖鳍、阶梯塔冠与霓虹勾边，夜里亮窗。由岛屿种子挑选，不代表会话。" },
   { id: "twist-tower", group: "地标", image: twistTower, title: "扭转塔", kind: "decor", source: "cityParts.buildLandmarks", body: "逐层扭转的粉彩塔楼，与双子塔二选一，构成市中心天际线。由岛屿种子挑选，不代表会话。" },
