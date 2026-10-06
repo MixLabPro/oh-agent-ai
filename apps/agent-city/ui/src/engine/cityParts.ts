@@ -448,6 +448,7 @@ export class CityParts {
     // ── 静态城（seed 决定）：缓存命中则整段复用，重建只花在建筑层 ──────
     let staticCity = staticCityCache && staticCityCache.seed === layout.seed && staticCityCache.layout.scaleTier === layout.scaleTier
       && staticCityCache.layout.coastalConfigKey === layout.coastalConfigKey
+      && staticCityCache.layout.activityKey === layout.activityKey // G1：建成区变化 → 地面与路网重画
       && staticCityCache.layout.highways === layout.highways
       && JSON.stringify([staticCityCache.layout.civics, staticCityCache.layout.gardens, staticCityCache.layout.contextBuildings]) === JSON.stringify([layout.civics, layout.gardens, layout.contextBuildings]) ? staticCityCache : null;
     if (!staticCity) {

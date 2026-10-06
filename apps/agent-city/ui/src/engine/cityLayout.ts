@@ -9,6 +9,8 @@ export type Parcel = Vec2 & { id: string; blockId: string; yaw: number; zone: Zo
 export type CityBlock = {
   id: string; districtId: string; x: number; z: number; width: number; depth: number;
   zone: Zone; parcels: Parcel[]; polygon: Vec2[];
+  /** 无楼且不在已建街区旁的预留圈内：地面画成自然绿地，不铺地块（G1「街区随建成量生长」）。 */
+  vacant?: boolean;
 };
 export type RoadNode = Vec2 & { id: string };
 export type RoadEdge = { id: string; from: string; to: string; width: number; kind: "arterial" | "local"; points: Vec2[]; bridge?: boolean };
@@ -52,6 +54,8 @@ export type CityLayout = {
   /** G1：规模档位、生态带与城市核心点（下游取景/航拍/植被读这里，不再假设岛在原点、固定大小）。 */
   scaleTier: number; biome: Biome; core: Vec2; islandRadius: number;
   seed: number; districts: DistrictLayout[]; blocks: CityBlock[]; roadNodes: RoadNode[]; roadEdges: RoadEdge[];
+  /** 哪些街区已建/预留的指纹：静态城缓存（地面贴图）据此判断是否重画。 */
+  activityKey?: string;
   terrain: TerrainField; extent: number; coast: Vec2[]; river: Vec2[]; publicSites: PublicSite[];
   parkTrees: Array<Vec2 & { y: number; seed: number }>;
   urbanBounds: { left: number; right: number; north: number; south: number };
@@ -407,7 +411,84 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     { center: { x: centroid.x + 980, z: centroid.z - 320 }, radius: 120, height: 88, seed: 71 },
     { center: { x: centroid.x - 1020, z: centroid.z + 260 }, radius: 150, height: 108, seed: 37 },
   ];
-  return { ...plan, districts, seed, massing, civics, gardens, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings };
+  const grown = growWithBuildings(plan, used, districts);
+  return { ...plan, ...grown, districts, seed, massing, civics, gardens, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings };
+}
+
+/**
+ * G1「街区随建成量生长」（docs/CITY_SENSE_REVIEW.md）：街网只铺到已有楼的街区，
+ * 其余街区是自然绿地、服务它们的支路与次干道不修。真机多视角评估：30 天 ~380 栋楼却铺满整岛街网，
+ * 七成街区是空地块，像一张分地图而不是城市。主干道、环线、环岛/河岸路、桥照旧（城市骨架先行）。
+ * 连通：去掉支路后若某个仍有活动的分量与主网断开，就按 BFS 把被去掉的边一圈圈加回来直到连上；
+ * 完全无活动的碎片分量整段删掉。车流只保留仍沿真实路段走的回路。
+ */
+function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<string>, districts: DistrictLayout[]) {
+  const active = plan.blocks.filter((block) => block.parcels.some((parcel) => used.has(parcel.id)));
+  // 只有已落楼（会话楼/配套/小花园）的街区算建成；下一栋楼来时它所在街区才铺开（布局每次随数据重算）。
+  // 曾留一圈 75 的预留：几乎罩住全部街区，街网照旧铺满（截图验收没看到变化）。
+  const live = new Set(active.map((block) => block.id));
+  const blocks = plan.blocks.map((block) => (live.has(block.id) ? block : { ...block, vacant: true }));
+  const anchors: Array<{ x: number; z: number; r: number }> = [
+    ...active.map((block) => ({ x: block.x, z: block.z, r: Math.hypot(block.width, block.depth) / 2 + 4 })),
+    ...[...plan.publicSites, ...(plan.landmarks ?? [])].filter((site) => site.radius).map((site) => ({ x: site.x, z: site.z, r: site.radius + 16 })),
+    ...seasideHotelLots(plan.seaside).map((lot) => ({ x: lot.x, z: lot.z, r: 26 })),
+  ];
+  const serves = (edge: RoadEdge) => {
+    const [a, b] = edge.points; const m = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
+    return anchors.some((anchor) => Math.hypot(anchor.x - m.x, anchor.z - m.z) < anchor.r);
+  };
+  // 骨架（宽 12、桥）永远保留；宽 ≤8 的街道只在服务活动区时保留。
+  const keep = new Set(plan.roadEdges.filter((edge) => edge.bridge || edge.width >= 12 || serves(edge)).map((edge) => edge.id));
+  const dropped = plan.roadEdges.filter((edge) => !keep.has(edge.id));
+  const components = () => {
+    const parent = new Map<string, string>();
+    const find = (x: string): string => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x)!)!); x = parent.get(x)!; } return x; };
+    for (const edge of plan.roadEdges) if (keep.has(edge.id)) for (const id of [edge.from, edge.to]) if (!parent.has(id)) parent.set(id, id);
+    for (const edge of plan.roadEdges) if (keep.has(edge.id)) { const a = find(edge.from); const b = find(edge.to); if (a !== b) parent.set(a, b); }
+    return { parent, find };
+  };
+  const primaryId = plan.roadEdges.find((edge) => edge.width >= 12 && !edge.bridge)?.from;
+  for (let guard = 0; guard < 200 && primaryId; guard += 1) {
+    const { parent, find } = components();
+    const main = find(primaryId);
+    const stray = [...parent.keys()].filter((id) => find(id) !== main);
+    if (!stray.length) break;
+    // 碎片里有没有活动：它的边是否服务活动区。
+    const strayRoots = new Set(stray.map(find));
+    let changed = false;
+    for (const root of strayRoots) {
+      const members = new Set(stray.filter((id) => find(id) === root));
+      // 含骨架（宽 12 / 桥）或服务活动区的分量必须接回主网；只有纯空置支路碎片才删。
+      const hasLife = plan.roadEdges.some((edge) => keep.has(edge.id) && members.has(edge.from) && (edge.width >= 12 || edge.bridge || serves(edge)));
+      if (!hasLife) { for (const edge of plan.roadEdges) if (keep.has(edge.id) && members.has(edge.from) && edge.width < 12 && !edge.bridge) keep.delete(edge.id); changed = true; continue; }
+      // 只加回一条最短的接回路径（经被删边 BFS 到主网任一节点）；曾整圈整圈加回，几乎把空置街网全长回来了。
+      const viaDropped = new Map<string, RoadEdge[]>();
+      for (const edge of dropped) if (!keep.has(edge.id)) for (const id of [edge.from, edge.to]) (viaDropped.get(id) ?? viaDropped.set(id, []).get(id)!).push(edge);
+      const back = new Map<string, RoadEdge | null>([...members].map((id) => [id, null]));
+      const queue = [...members]; let reached: string | null = null;
+      for (let q = 0; q < queue.length && !reached; q += 1) {
+        for (const edge of viaDropped.get(queue[q]) ?? []) {
+          const next = edge.from === queue[q] ? edge.to : edge.from;
+          if (back.has(next)) continue;
+          back.set(next, edge); queue.push(next);
+          if (parent.has(next) && find(next) === main) { reached = next; break; }
+        }
+      }
+      for (let cursor = reached; cursor && back.get(cursor); ) {
+        const edge = back.get(cursor)!; keep.add(edge.id); changed = true;
+        cursor = edge.from === cursor ? edge.to : edge.from;
+      }
+    }
+    if (!changed) break;
+  }
+  const roadEdges = plan.roadEdges.filter((edge) => keep.has(edge.id));
+  const nodeIds = new Set(roadEdges.flatMap((edge) => [edge.from, edge.to]));
+  const roadNodes = plan.roadNodes.filter((node) => nodeIds.has(node.id));
+  const pairs = new Set(roadEdges.map((edge) => [edge.from, edge.to].sort().join("/")));
+  for (const district of districts) {
+    district.carPaths = district.carPaths.filter((route) => route.every((p, i) => i === 0 || pairs.has([`${route[i - 1].x}:${route[i - 1].z}`, `${p.x}:${p.z}`].sort().join("/"))));
+  }
+  return { blocks, roadEdges, roadNodes, activityKey: [...live].sort().join(",") };
 }
 
 /** 配套选址：会话楼先占地，配套只拿剩下的地块（绝不挤走会话）。

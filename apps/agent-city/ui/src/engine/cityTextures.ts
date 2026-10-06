@@ -197,7 +197,13 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
     const [px,py]=toPixel(x,z); ctx.save(); ctx.translate(px,py); ctx.rotate(-yaw);
     ctx.fillStyle=color;ctx.fillRect(-width*scale/2,-depth*scale/2,width*scale,depth*scale);ctx.restore();
   };
+  // 空置街区（G1）：不铺地块，画成带深浅斑驳的自然绿地——城市只铺到建成区与预留圈。
+  const wildGreen = toHex(mixRgb([150, 176, 118], groundColors.lawn, 0.35));
   for (const block of layout.blocks) {
+    if (block.vacant) {
+      polygon(block.polygon.map((p)=>({x:block.x+(p.x-block.x)*1.02,z:block.z+(p.z-block.z)*1.02})), wildGreen);
+      continue;
+    }
     const hardscape = viceMiami ? viceBlockPaving[block.zone] : paving;
     polygon(block.polygon.map((p)=>({x:block.x+(p.x-block.x)*0.88,z:block.z+(p.z-block.z)*0.88})),block.parcels.length?hardscape:lawnTint);
     for (const parcel of block.parcels) orientedRect(parcel.x,parcel.z,parcel.width-0.3,parcel.depth-0.3,parcel.yaw,viceMiami ? viceLotPaving[parcel.zone] : "#bcb8ac");
