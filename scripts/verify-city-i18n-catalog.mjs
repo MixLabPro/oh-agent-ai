@@ -16,7 +16,8 @@ const keys = new Set([...catalogBody.matchAll(/"((?:[^"\\]|\\.)*)"\s*:/g)].map((
 const patterns = [/^ 天$/, /^取消导出 · $/, /^ 个会话，一座城市$/, /^ 个会话$/, /^ 个城区 · 已载入的 token · 非费用账单$/, /^本机真实数据/];
 const cjk = /[㐀-鿿]/;
 const cityTextBody = i18n.slice(i18n.indexOf("export function cityText"), i18n.indexOf("export function cityView"));
-const files = fs.readdirSync(src).filter((f) => f.endsWith(".tsx") && f !== "i18n.tsx");
+// engine/cityDecor.ts 是非会话建筑说明面板的文案源（cityView 渲染时查表）：曾不在扫描范围内，文案改了两轮目录都没跟上。
+const files = [...fs.readdirSync(src).filter((f) => f.endsWith(".tsx") && f !== "i18n.tsx"), "engine/cityDecor.ts"];
 const missing = [];
 for (const file of files) {
   const text = fs.readFileSync(path.join(src, file), "utf8")

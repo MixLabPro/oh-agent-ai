@@ -460,6 +460,7 @@ export class CityParts {
       this.buildDistrictExpressways();
       this.nightLights = this.buildNightLights();
       this.buildPublicSites();
+      this.buildMarina();
       this.buildCivics();
       this.buildLandmarks();
       this.buildUrbanContext();
@@ -1546,7 +1547,8 @@ export class CityParts {
           this.landmarkSpinners.push({ object: beam, axis: "y", speed: 0.9 });
         }
       } else if (landmark.kind === "ferris-wheel") {
-        const radius = Math.min(cap * 0.45, 20);
+        // 远景里曾显得很小（多视角评估）：半径 20 → 26。
+        const radius = Math.min(cap * 0.5, 26);
         for (const side of [-1, 1]) {
           mesh(new THREE.BoxGeometry(1, radius + 4, 1).translate(0, (radius + 4) / 2, 0), steel, group, -4, 0, side * 3).rotation.z = side * 0.18;
           mesh(new THREE.BoxGeometry(1, radius + 4, 1).translate(0, (radius + 4) / 2, 0), steel, group, 4, 0, side * 3).rotation.z = -side * 0.18;
@@ -2619,6 +2621,65 @@ export class CityParts {
     this.disposables.push(geometry, material);
   }
 
+  /** 港口码头（G3「水上活动」）：港口用地朝开阔水面的方向伸出 4 条白色栈桥，两侧泊着游艇/小艇。
+   *  曾只有一块灰色港区地坪，水上几乎没有生活（多视角评估）。方向取港口周边最深的一侧，栈桥从岸线起步。 */
+  private buildMarina(): void {
+    const harbor = this.layout.publicSites.find((site) => site.kind === "harbor");
+    if (!harbor) return;
+    const terrain = this.layout.terrain;
+    let best = { angle: 0, depth: Infinity };
+    for (let k = 0; k < 24; k += 1) {
+      const angle = (k / 24) * Math.PI * 2;
+      const h = terrain.height(harbor.x + Math.cos(angle) * (harbor.radius + 24), harbor.z + Math.sin(angle) * (harbor.radius + 24));
+      if (h < best.depth) best = { angle, depth: h };
+    }
+    if (best.depth > -0.5) return;
+    const ux = Math.cos(best.angle); const uz = Math.sin(best.angle);
+    let shore = harbor.radius * 0.5;
+    while (shore < harbor.radius + 40 && terrain.height(harbor.x + ux * shore, harbor.z + uz * shore) > 0) shore += 1;
+    const yaw = -Math.atan2(uz, ux);
+    const vx = -uz; const vz = ux;
+    const unit = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+    const deck = new THREE.MeshLambertMaterial({ color: "#f3efe6" });
+    const hulls = new THREE.MeshLambertMaterial({ color: "#ffffff" });
+    const piers = new THREE.InstancedMesh(unit, deck, 8);
+    const boats = new THREE.InstancedMesh(unit, hulls, 40);
+    const cabinMaterial = new THREE.MeshLambertMaterial({ color: "#f7f5ef" });
+    const cabins = new THREE.InstancedMesh(unit, cabinMaterial, 40);
+    let p = 0; let b = 0;
+    for (let i = 0; i < 4; i += 1) {
+      const lateral = (i - 1.5) * 12;
+      const length = 30 + (i % 2) * 6;
+      const sx = harbor.x + ux * (shore - 3) + vx * lateral; const sz = harbor.z + uz * (shore - 3) + vz * lateral;
+      const cx = sx + ux * length / 2; const cz = sz + uz * length / 2;
+      this.compose(cx, 0.35, cz, yaw, length, 0.35, 2.2);
+      piers.setMatrixAt(p++, this.matrix);
+      // 栈桥两侧每隔 6 泊一条船（长 7–9），颜色按种子在白/海军蓝/珊瑚之间。
+      // 截图验收：每 6 一条时船挤成一整块、把栈桥都盖住了——改为每 8 一个泊位、约四成空位，船体收窄并加白色舱室。
+      for (let along = 7; along < length - 3 && b < 40; along += 8) for (const side of [-1, 1]) {
+        const seed = hashSeed(`marina:${i}:${along}:${side}`);
+        if (seed < 0.45 || b >= 40) continue;
+        const bx = sx + ux * along + vx * side * 3.6; const bz = sz + uz * along + vz * side * 3.6;
+        const len = 6 + seed * 2;
+        this.compose(bx, -0.15, bz, yaw + Math.PI / 2, 2.1, 1.2, len);
+        boats.setMatrixAt(b, this.matrix);
+        boats.setColorAt(b, this.color.set(seed > 0.85 ? "#1f3b5c" : seed > 0.7 ? "#e8775f" : "#ffffff"));
+        this.compose(bx - ux * len * 0.08, 1.0, bz - uz * len * 0.08, yaw + Math.PI / 2, 1.5, 0.9, len * 0.4);
+        cabins.setMatrixAt(b, this.matrix);
+        b += 1;
+      }
+    }
+    piers.count = p; boats.count = b; cabins.count = b;
+    for (const mesh of [piers, boats, cabins]) {
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      mesh.name = "city-marina";
+    }
+    this.group.add(piers, boats, cabins);
+    this.disposables.push(unit, deck, hulls, cabinMaterial);
+  }
+
   private buildTrees(): THREE.InstancedMesh {
     const spots = this.treeSpots();
     const palm = activeTheme().vegetation === "palm";
@@ -2809,10 +2870,12 @@ export class CityParts {
       texture.colorSpace = THREE.SRGBColorSpace;
       const material = new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true, sizeAttenuation: false });
       const sprite = new THREE.Sprite(material);
-      const height = 0.018;
+      // 标签略放大，且彼此靠近（<150）时逐个抬高，避免重叠（多视角评估：标签小且叠在一起）。
+      const height = 0.024;
       sprite.scale.set(height * aspect, height, 1);
       sprite.renderOrder = 20;
-      sprite.position.set(district.center.x, district.plaza.y + 45, district.center.z);
+      const crowd = this.labels.filter((other) => Math.hypot(other.position.x - district.center.x, other.position.z - district.center.z) < 150).length;
+      sprite.position.set(district.center.x, district.plaza.y + 45 + crowd * 34, district.center.z);
       this.group.add(sprite);
       this.labels.push(sprite);
       this.disposables.push(material, texture);
