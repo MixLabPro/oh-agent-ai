@@ -1061,6 +1061,18 @@ export class CityParts {
           const tangent = Math.atan2(19.5 * Math.cos(t), -27 * Math.sin(t));
           box(lx, 0, lz, 10.5, index % 4 === 0 ? 11 : 8, 5.5, index % 4 === 0 ? "#c05a4f" : "#dcd8ca", -tangent);
         }
+        // 细化（用户「请细化这些建筑模型」）：球场草坪与白线、内圈低看台、看台上方悬挑顶棚、端头记分牌。
+        box(0, 0, 0, 34, 0.3, 21, "#4f8a4a");
+        box(0, 0.3, 0, 34, 0.04, 0.25, "#f2f2ea"); box(-16.8, 0.3, 0, 0.25, 0.04, 21, "#f2f2ea"); box(16.8, 0.3, 0, 0.25, 0.04, 21, "#f2f2ea");
+        box(0, 0.3, -10.4, 34, 0.04, 0.25, "#f2f2ea"); box(0, 0.3, 10.4, 34, 0.04, 0.25, "#f2f2ea");
+        for (let index = 0; index < segments; index += 1) {
+          const t = ((index + 0.5) / segments) * Math.PI * 2;
+          const tangent = Math.atan2(15 * Math.cos(t), -22 * Math.sin(t));
+          box(Math.cos(t) * 22, 0, Math.sin(t) * 15, 7.5, 3.6, 3.2, index % 2 ? "#3f6f9a" : "#e0dccd", -tangent); // 内圈低看台
+          const tr = Math.atan2(19.5 * Math.cos(t), -27 * Math.sin(t));
+          box(Math.cos(t) * 25.5, 12, Math.sin(t) * 18.2, 10.5, 0.4, 7.5, "#f4f2ec", -tr);                       // 悬挑顶棚
+        }
+        box(0, 12.5, -21.5, 12, 5, 0.8, "#2a3036"); glow(0, 13.2, -21.05, 10.8, 3.6, 0.1, "#7fe3ff");            // 记分牌
         for (const [lx, lz] of [[-30, -22], [30, -22], [-30, 22], [30, 22]]) {
           cyl(lx, 0, lz, 0.55, 24, "#9aa0a0");
           glow(lx, 24, lz, 4, 1.4, 2.4, "#fff3c4"); // 泛光灯塔灯头：夜里发光
@@ -1072,9 +1084,16 @@ export class CityParts {
           glow(Math.cos(t) * 27, index % 4 === 0 ? 11.1 : 8.1, Math.sin(t) * 19.5, 10.5, 0.22, 0.22, index % 2 === 0 ? "#38e8ff" : "#ff4fd8", -tangent);
         }
       } else if (site.kind === "tower") {
+        // 细化：入口门厅、塔身电梯井竖条、深色玻璃观景舱（竖棂）、上层小观景环。
         cyl(0, 0, 0, 6.5, 3.2, "#c4c7c6");
+        box(0, 0, 7.2, 8, 4.2, 5, "#e4e1d8"); box(0, 4.2, 7.2, 9, 0.4, 6, "#7fb4c2");
         cyl(0, 3.2, 0, 2.3, 42, "#cfd3d6");
-        cyl(0, 42, 0, 6.4, 3.8, "#eaf0f2");
+        box(0, 3.2, 2.2, 0.9, 38.8, 0.5, "#9fb4bd");
+        cyl(0, 42, 0, 6.4, 0.9, "#eaf0f2");
+        cyl(0, 42.9, 0, 6.1, 2.2, "#2f4552");
+        for (let k = 0; k < 12; k += 1) { const t = (k / 12) * Math.PI * 2; box(Math.cos(t) * 6.15, 42.9, Math.sin(t) * 6.15, 0.25, 2.2, 0.25, "#eaf0f2"); }
+        cyl(0, 45.1, 0, 6.6, 0.7, "#eaf0f2");
+        cyl(0, 52, 0, 3, 1.2, "#eaf0f2");
         cyl(0, 45.8, 0, 4.2, 2.2, "#7fb4c2");
         cyl(0, 48, 0, 0.45, 15, "#d45a4a");
         // 观景台与塔身腰线霓虹 + 天线红色航空灯。
@@ -1551,10 +1570,33 @@ export class CityParts {
         group.add(floorMesh);
         this.disposables.push(floorGeometry, floorMaterial);
       } else if (landmark.kind === "arch") {
+        // 凯旋门（细化）：基座 → 两侧墩身（每面一对附柱）→ 半圆拱券开口 → 檐口 → 顶楼（attic）→ 顶部雕像组。
+        // 曾是两根方柱 + 横梁（用户：「请细化这些建筑模型」）。全部为通用古典语汇，不参照具体建筑。
         const h = Math.min(cap, 26);
-        for (const side of [-1, 1]) mesh(new THREE.BoxGeometry(5, h, 7).translate(0, h / 2, 0), white, group, side * 8, 0, 0);
-        mesh(new THREE.BoxGeometry(21, 6, 7.4).translate(0, 3, 0), white, group, 0, h, 0);
-        mesh(new THREE.BoxGeometry(22, 1, 8).translate(0, 0.5, 0), material("#d9d3c2"), group, 0, h + 6, 0);
+        const stone = material("#ece5d6"); const trim = material("#d6ccb7"); const bronze = material("#8a7a52");
+        const W = 26; const D = 9; const pierW = 7.5; const openW = W - pierW * 2; const springY = h * 0.55;
+        mesh(new THREE.BoxGeometry(W + 3, 1.6, D + 3).translate(0, 0.8, 0), trim, group, 0, 0, 0);            // 基座
+        for (const side of [-1, 1]) {
+          const cx = side * (openW / 2 + pierW / 2);
+          mesh(new THREE.BoxGeometry(pierW, h, D).translate(0, h / 2, 0), stone, group, cx, 1.6, 0);          // 墩身
+          for (const face of [-1, 1]) for (const k of [-1, 1]) {                                              // 每面一对附柱
+            mesh(new THREE.CylinderGeometry(0.55, 0.6, h - 2.4, 10).translate(0, (h - 2.4) / 2, 0), trim, group, cx + k * 2.4, 2.8, face * (D / 2 + 0.35));
+            mesh(new THREE.BoxGeometry(1.6, 0.8, 1.2).translate(0, 0.4, 0), trim, group, cx + k * 2.4, 1.6, face * (D / 2 + 0.35));
+          }
+          mesh(new THREE.BoxGeometry(3.4, 4.2, 0.4), bronze, group, cx, springY + 3, D / 2 + 0.25);          // 浮雕板
+        }
+        // 拱券：开口上方实体，减去半圆——用半圆柱面（内侧）+ 两侧拱肩块近似。
+        mesh(new THREE.BoxGeometry(openW, h - springY - openW / 2, D).translate(0, (h - springY - openW / 2) / 2, 0), stone, group, 0, 1.6 + springY + openW / 2, 0);
+        const vault = new THREE.CylinderGeometry(openW / 2, openW / 2, D, 24, 1, true, Math.PI / 2, Math.PI).rotateX(Math.PI / 2);
+        const vaultMesh = mesh(vault, material("#e2dac8"), group, 0, 1.6 + springY, 0);
+        (vaultMesh.material as THREE.MeshLambertMaterial).side = THREE.DoubleSide;
+        mesh(new THREE.TorusGeometry(openW / 2 + 0.3, 0.35, 6, 24, Math.PI), trim, group, 0, 1.6 + springY, D / 2 + 0.05);        // 拱圈线脚
+        mesh(new THREE.BoxGeometry(W + 1.6, 1.1, D + 1.6).translate(0, 0.55, 0), trim, group, 0, h + 1.6, 0); // 檐口
+        mesh(new THREE.BoxGeometry(W - 2, 5, D - 1).translate(0, 2.5, 0), stone, group, 0, h + 2.7, 0);       // 顶楼
+        mesh(new THREE.BoxGeometry(W - 6, 2.2, 0.3), bronze, group, 0, h + 5.2, (D - 1) / 2 + 0.2);           // 题铭板（无文字）
+        mesh(new THREE.BoxGeometry(W - 1, 0.7, D).translate(0, 0.35, 0), trim, group, 0, h + 7.7, 0);
+        mesh(new THREE.BoxGeometry(5, 2.2, 3).translate(0, 1.1, 0), bronze, group, 0, h + 8.4, 0);            // 顶部雕像组（抽象体块）
+        mesh(new THREE.ConeGeometry(1.1, 3.4, 6).translate(0, 1.7, 0), bronze, group, 0, h + 10.6, 0);
       } else if (landmark.kind === "sail-opera") {
         mesh(new THREE.BoxGeometry(46, 3, 26).translate(0, 1.5, 0), material("#d9d3c2"), group, 0, 0, 0);
         // 帆：半个穹顶（半球再切一半）拉成薄而高的壳，开口朝前；双面材质（开口里也要看得见内壁）。
@@ -1574,8 +1616,23 @@ export class CityParts {
           const r0 = 3.4 - (i / bands) * 1.4; const r1 = 3.4 - ((i + 1) / bands) * 1.4;
           mesh(new THREE.CylinderGeometry(r1, r0, h / bands, 14).translate(0, h / bands / 2, 0), i % 2 ? red : white, group, 0, (i * h) / bands, 0);
         }
-        mesh(new THREE.CylinderGeometry(2.2, 2.2, 3, 10).translate(0, 1.5, 0), material("#fff2c0", 1.5), group, 0, h, 0);
-        mesh(new THREE.ConeGeometry(2.8, 3, 10).translate(0, 1.5, 0), red, group, 0, h + 3, 0);
+        // 细化：石砌基座 + 守塔人小屋、塔顶环形观景廊（廊板 + 栏杆立柱）、玻璃灯室（竖棂）与穹顶通风帽。
+        mesh(new THREE.CylinderGeometry(4.6, 5, 1.6, 16).translate(0, 0.8, 0), material("#b9b2a2"), group, 0, -0.2, 0);
+        mesh(new THREE.BoxGeometry(7, 3.6, 5).translate(0, 1.8, 0), white, group, 6.2, 0, 0);
+        mesh(new THREE.BoxGeometry(7.6, 0.5, 5.6).translate(0, 0.25, 0), red, group, 6.2, 3.6, 0);
+        mesh(new THREE.CylinderGeometry(3.1, 3.1, 0.35, 18).translate(0, 0.17, 0), material("#3c4650"), group, 0, h, 0);   // 观景廊板
+        for (let k = 0; k < 16; k += 1) {
+          const t = (k / 16) * Math.PI * 2;
+          mesh(new THREE.BoxGeometry(0.12, 1.1, 0.12).translate(0, 0.55, 0), material("#3c4650"), group, Math.cos(t) * 2.95, h + 0.35, Math.sin(t) * 2.95);
+        }
+        mesh(new THREE.TorusGeometry(2.95, 0.07, 4, 32).rotateX(Math.PI / 2), material("#3c4650"), group, 0, h + 1.45, 0);
+        mesh(new THREE.CylinderGeometry(2, 2, 3, 12).translate(0, 1.5, 0), material("#fff2c0", 1.5), group, 0, h + 0.35, 0);
+        for (let k = 0; k < 8; k += 1) {
+          const t = (k / 8) * Math.PI * 2;
+          mesh(new THREE.BoxGeometry(0.14, 3, 0.14).translate(0, 1.5, 0), material("#2d343b"), group, Math.cos(t) * 2.02, h + 0.35, Math.sin(t) * 2.02);
+        }
+        mesh(new THREE.SphereGeometry(2.4, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2), red, group, 0, h + 3.35, 0);
+        mesh(new THREE.CylinderGeometry(0.25, 0.35, 1.4, 8).translate(0, 0.7, 0), material("#2d343b"), group, 0, h + 5.6, 0);
         if (neon) {
           // 旋转光束：两束对向的加色锥，绕竖轴转（进 bloom）。
           const beamMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color("#fff2c0").multiplyScalar(1.6), transparent: true, opacity: 0.08, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
