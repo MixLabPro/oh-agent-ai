@@ -58,8 +58,8 @@ for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
 const report = Object.entries(bad).map(([k, v]) => `${k} ${v.length}`).join(", ");
 // 上限：沿用规划守卫口径——0 容忍穿路/压地块/凯旋门不骑路；陆地与入口给少量余量（岸边地形噪声）。
 assert.equal(bad.arch.length, 0, `arch must straddle a main road:\n  ${bad.arch.join("\n  ")}`);
-// 已知遗留 2 例（seed 1703342472：1 档庄园被环海路穿过、2 档双子塔被环海路擦过 14<0.7R），待 F1 迭代闭环（CITY_ROAD_F1_ALGORITHM_SPEC）收敛，其余必须为 0。
-assert(bad.through.length <= 2, `roads through sites:\n  ${bad.through.join("\n  ")}`);
+// F1 闭环（cityPlan 终筛前的「路穿用地」修复循环）之后不再有容忍项：必须为 0。
+assert(bad.through.length === 0, `roads through sites:\n  ${bad.through.join("\n  ")}`);
 assert.equal(bad.parcel.length, 0, `lots inside sites:\n  ${bad.parcel.slice(0, 8).join("\n  ")}`);
 assert(bad.overlap.length <= 2, `overlapping sites:\n  ${bad.overlap.join("\n  ")}`);
 assert(bad.wet.length <= 3, `sites standing in water:\n  ${bad.wet.join("\n  ")}`);

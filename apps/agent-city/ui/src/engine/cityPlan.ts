@@ -1393,6 +1393,52 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       if (!ok) carPaths.splice(r, 1);
     }
   }
+  // ── F1 闭环（CITY_ROAD_F1_ALGORITHM_SPEC）：路网不是一次生成就完事——所有改路步骤（接入路、断头路收尾、
+  // 碎边合并）之后，量一遍「路穿过用地」，只对有问题的用地修复，再量，直到没有问题或 6 轮。曾只在各步骤里各修各的，
+  // 后一步改了路/地标位置，前一步接好的关系就失效（场景依赖守卫长期容忍 2 例穿路：庄园、双子塔）。
+  // 修复手段：沿「路 → 用地中心」方向把用地推到离路 0.85 半径（占地仍在干地、不入河、不压其它用地/高架/地块）。
+  {
+    const movable = [...publicSites, ...landmarks].filter((s) => s.radius && s.kind !== "civic" && s.kind !== "arch" && !(s as { shore?: Vec2 }).shore);
+    const solid = [...edges.values()].filter((e) => !e.bridge);
+    const nearestRoad = (x: number, z: number) => {
+      let best: { d: number; q: Vec2 } | null = null;
+      for (const e of solid) {
+        const [a, b] = e.points; const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
+        const t = Math.max(0, Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / l2));
+        const q = { x: a.x + dx * t, z: a.z + dz * t }; const d = Math.hypot(q.x - x, q.z - z);
+        if (!best || d < best.d) best = { d, q };
+      }
+      return best;
+    };
+    const wetAt = (site: { radius: number }, x: number, z: number) => { let n = 0; for (let k = 0; k < 16; k += 1) { const t = (k / 16) * Math.PI * 2; const r = k % 2 ? site.radius : site.radius * 0.6; const px = x + Math.cos(t) * r; const pz = z + Math.sin(t) * r; if (height(px, pz) < 0.5 || inRiver(px, pz)) n += 1; } return n; };
+    for (let round = 0; round < 6; round += 1) {
+      let moved = 0;
+      for (const site of movable) {
+        const near = nearestRoad(site.x, site.z);
+        if (!near || near.d >= site.radius * 0.7) continue;
+        const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
+        const away = near.d > 0.5 ? { x: (site.x - near.q.x) / near.d, z: (site.z - near.q.z) / near.d } : { x: 1, z: 0 };
+        const wet0 = wetAt(site, site.x, site.z);
+        const tryDirs = [away, { x: -away.z, z: away.x }, { x: away.z, z: -away.x }];
+        let done = false;
+        for (const dir of tryDirs) {
+          for (let push = 4; push <= site.radius * 0.9 && !done; push += 3) {
+            const nx = site.x + dir.x * push; const nz = site.z + dir.z * push;
+            const probe = nearestRoad(nx, nz);
+            if (!probe || probe.d < site.radius * 0.85) continue;
+            if (wetAt(site, nx, nz) > Math.max(3, wet0) || height(nx, nz) <= 0.5) continue;
+            if (others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) continue;
+            if (!clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns)) continue;
+            if (distanceToTrunks({ x: nx, z: nz }) < site.radius * 0.7) continue;
+            site.x = nx; site.z = nz; done = true; moved += 1;
+            for (const block of blocks) block.parcels = block.parcels.filter((p) => Math.hypot(p.x - nx, p.z - nz) >= site.radius);
+          }
+          if (done) break;
+        }
+      }
+      if (!moved) break;
+    }
+  }
   // 终筛：所有改路步骤（接入路、断头路收尾、碎边合并）之后，对每个地块统一核对「到任何路段的距离」。
   // 曾放在断头路收尾与碎边合并之前：那两步新增/移动的路段会压到地块上（凯旋门骑路改位后布局守卫抓到 gap 6.2）。
   // 块级检查只看街区四角与中心到主干道的距离，边中点更近的地块会漏过；连接支路又长达上百单位直穿街区、
