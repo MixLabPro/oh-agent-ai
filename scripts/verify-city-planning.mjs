@@ -53,12 +53,11 @@ for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
     let d = Infinity;
     for (const edge of plan.roadEdges) if (!edge.bridge) d = Math.min(d, segDist(site, edge.points[0], edge.points.at(-1)));
     if (site.kind !== "civic" && site.kind !== "arch" && d < site.radius * 0.7) totals.inside += 1; // 凯旋门按设计骑在路上
-    // 海上岛地标（歌剧院，5bef3160）的门在堤道岸点 site.shore：规划层从岸点接路，堤道桥本身
-    // 就是岛上的通道。far 从岸点量——从岛心量且排除桥会把每个海上岛都误报成无门（曾 31>3 假红）。
-    const door = site.shore ?? site;
-    let doorD = Infinity;
-    for (const edge of plan.roadEdges) if (!edge.bridge) doorD = Math.min(doorD, segDist(door, edge.points[0], edge.points.at(-1)));
-    if (doorD > site.radius + 20) totals.far += 1;
+    // 海上岛地标（歌剧院，5bef3160）的门是堤道：堤道桥本身就是门前的路（分支版语义），
+    // 且规划层保证岸点 site.shore 接有非桥路——曾从岛心量且排除桥，把每个海上岛误报成无门（31>3 假红）。
+    let dAny = d;
+    for (const edge of plan.roadEdges) if (edge.bridge) dAny = Math.min(dAny, segDist(site, edge.points[0], edge.points.at(-1)));
+    if (dAny > site.radius + 20) totals.far += 1;
   }
   // 主干道不扎堆：不共享节点、彼此 < 25、夹角 < 15° 且侧向重叠的段对。
   const arterials = plan.roadEdges.filter((edge) => edge.kind === "arterial" && !edge.bridge);

@@ -367,7 +367,7 @@ export class CityEngine {
         composer.addPass(ao);
       }
       // 阈值取 HDR 值：霓虹（×3.2）越线，被光照的沙地/天空不会整片泛光。
-      if (wantBloom) composer.addPass(new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 1.0, 0.6, 2.0));
+      if (wantBloom) composer.addPass(new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.55, 0.4, 2.6));
       composer.addPass(new OutputPass());
       composer.setPixelRatio(this.renderer.getPixelRatio());
       composer.setSize(size.x, size.y);
@@ -1355,6 +1355,8 @@ export class CityEngine {
       this.wildlife?.setNight(sky.stars, this.cinematic ? (this.model?.windowEndMs ?? 0) : (this.cursorMs ?? Date.now()));
       // 夜晚城市亮窗：立面自发光抬升（保留 theme 基线的下限）。
       this.parts.setNightGlow(sky.selfLit);
+      // N1：夜里曝光压低约 0.35 EV，暗是底色、光源才有层次。
+      this.renderer.toneMappingExposure = activeTheme().exposure * (1 - 0.22 * Math.min(1, Math.max(0, (sky.selfLit - 0.1) / 0.9)));
       this.parts.applySelfLit(this.themeSelfLit);
       this.parts.setNightWater(skyUniforms.uNight.value as number);
     }

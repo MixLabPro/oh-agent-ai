@@ -231,10 +231,13 @@ totalEmissiveRadiance += diffuseColor.rgb * uSelfLit;
 // 曾把 uSelfLit 抬到 0.58 作用在整个立面颜色上——墙和窗一起发光，整栋楼是一块奶白色的纸盒。
 if (uWindowGlow > 0.02) {
   vec2 cell = floor(vec2(vMapUv.x * uGrid.x, vMapUv.y * uGrid.y));
+  // N2：亮灯与亮度/色温都有分布——多数窗暗、少数很亮（平方分布），色温在 2400K 暖黄到 5000K 冷白间连续，
+  // 不再是「等亮度、二选一」的 LED 点阵（荧光玩具感的主因之一）。
   float on = step(cellHash(cell, vBuildSeed), (0.28 + 0.5 * vBuildSeed) * smoothstep(0.1, 0.95, uWindowGlow));
-  float warm = step(0.35, cellHash(cell + 17.0, vBuildSeed));
-  vec3 lamp = mix(vec3(0.62, 0.8, 1.0), vec3(1.0, 0.72, 0.36), warm);
-  totalEmissiveRadiance += lamp * facadeWindow * on * uWindowGlow * 2.3;
+  float h2 = cellHash(cell + 31.0, vBuildSeed);
+  float temp = cellHash(cell + 17.0, vBuildSeed);
+  vec3 lamp = mix(vec3(1.0, 0.62, 0.28), vec3(0.78, 0.88, 1.0), smoothstep(0.55, 1.0, temp));
+  totalEmissiveRadiance += lamp * facadeWindow * on * uWindowGlow * (0.3 + 1.7 * h2 * h2);
 }`)
       // 光照算完之后再混反射：玻璃的颜色主要来自它映出的天空，不受漫反射光的明暗支配。
       .replace("#include <opaque_fragment>", `if (uEnvStrength > 0.0) {
@@ -3746,7 +3749,8 @@ export class CityParts {
       const profileColors = [roofColor, new THREE.Color(palette.accent).lerp(new THREE.Color("#e8eef0"), 0.55), runtime.paletteWall.clone().multiplyScalar(0.96), new THREE.Color("#7fae6a")];
       this.roofProfiles.forEach((mesh, index) => mesh.setColorAt(roofCount, profileColors[index]));
       // 乘 3.2 让亮度越过 bloom 阈值（MeshBasicMaterial 不吃光照，toneMapped=false 保留 HDR 值）。
-      this.neonMesh.setColorAt(roofCount, new THREE.Color(palette.accent).multiplyScalar(3.2));
+      // N1：霓虹描边只留给高楼与酒店冠，普通会话楼不再每栋一圈彩边（荧光玩具感）；其余实例色置黑 = 不发光。
+      this.neonMesh.setColorAt(roofCount, new THREE.Color(palette.accent).multiplyScalar(building.height >= 24 || slot.blockId.startsWith("hotel:") ? 3.2 : 0));
       roofCount += 1;
       // 海滨酒店冠（L-1）：方案在建模期算一次存住；冠底霓虹带走独立实例（neonMesh 与 roofCount
       // 是 1:1 索引，每楼可变条数会破坏该映射）。
@@ -4388,7 +4392,9 @@ export class CityParts {
   applySelfLit(themeBase: number): void {
     for (const uniforms of this.facadeUniforms) {
       // 夜里不再抬升墙面自发光（只点亮窗格，见 uWindowGlow）；墙面保持主题基线。
-      uniforms.uSelfLit.value = themeBase;
+      // N1：墙面按自身颜色发光是「塑料」感的来源——夜里把基线随夜色压到 ~10%，只有窗格是光源。
+      const night = Math.max(0, (this.nightGlow - 0.1) / 0.9);
+      uniforms.uSelfLit.value = themeBase * (1 - 0.9 * Math.min(1, night));
       uniforms.uWindowGlow.value = this.nightGlow;
     }
   }
