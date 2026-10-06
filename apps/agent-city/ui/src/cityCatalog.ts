@@ -36,6 +36,7 @@ import school from "./assets/catalog/school.jpg";
 import mall from "./assets/catalog/mall.jpg";
 import garden from "./assets/catalog/garden.jpg";
 import harbor from "./assets/catalog/harbor.jpg";
+import airport from "./assets/catalog/airport.jpg";
 import signs from "./assets/catalog/signs.jpg";
 import beach from "./assets/catalog/beach.jpg";
 
@@ -73,6 +74,7 @@ export const CITY_CATALOG: CatalogEntry[] = [
   { id: "mall", group: "公共建筑", image: mall, title: "商场", kind: "scale", source: "cityParts.buildCivics (mall)", body: "大体量低层商场：玻璃中庭、屋顶停车场、招牌塔与临街入口。随城市规模出现，不代表单个会话。" },
   { id: "garden", group: "公共建筑", image: garden, title: "城区花园与景观湖", kind: "scale", source: "cityParts.buildGardens", body: "每个执行环境城区中心的花园与景观湖，城区地标立在它旁边；城区的会话楼从这里向外生长。有会话的城区才出现。" },
   { id: "harbor", group: "海滨与港口", image: harbor, title: "港口与码头", kind: "decor", source: "cityParts.buildPublicSites (harbor)+ buildMarina", body: "集装箱堆场、龙门吊、白色筒仓，以及伸入水面的游艇码头。属于岛屿规划的公共用地，不代表会话。" },
+  { id: "airport", group: "海滨与港口", image: airport, title: "机场岛与堤道", kind: "decor", source: "cityAirport.buildAirport", body: "主岛外浅水区的填海机场：跑道与端头标线、壳形航站楼与登机桥、塔台，由一条多跨堤道连回主岛；夜里跑道边灯亮起。不代表会话。" },
   { id: "signs", group: "海滨与港口", image: signs, title: "广告牌", kind: "decor", source: "citySkylineProps (roadsideSignPlan / rooftopSignPlan)", body: "主干道旁的双柱广告牌与商业楼顶立牌，抽象色条加霓虹边框，不含文字。不代表会话。" },
   { id: "beach", group: "海滨与港口", image: beach, title: "海滨设施", kind: "decor", source: "cityParts.buildBeach* / buildPromenade / buildLifeguardTowers", body: "沙滩、遮阳伞与躺椅、沙排场、救生塔、粉色滨海步道与路灯。沿建成区附近的海岸铺设，不代表会话。" },
 ];

@@ -166,7 +166,8 @@ for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
     }
     for (const civic of layout.civics) assert(Math.hypot(building.x - civic.x, building.z - civic.z) >= halfDiagonal + Math.hypot(civic.width, civic.depth) / 2 + 2, `${building.id} does not crowd civic facilities`);
   }
-  for (const [, session] of layout.districts.flatMap((district) => [...district.slots])) {
+  // 海滨酒店地块上的会话楼除外：背景楼按设计不进海滨保留带，酒店排周边本就没有背景肌理（酒店地块现由各城区共享）。
+  for (const [, session] of layout.districts.flatMap((district) => [...district.slots]).filter(([, s]) => !s.blockId.startsWith("hotel:"))) {
     assert(layout.contextBuildings.some((building) => Math.hypot(building.x - session.x, building.z - session.z) < 70), "session districts should receive nearby non-session city fabric");
   }
   for (let i = 0; i < layout.contextBuildings.length; i += 1) for (let j = i + 1; j < layout.contextBuildings.length; j += 1) {

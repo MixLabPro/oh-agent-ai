@@ -284,6 +284,15 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     districtLandmarks.push({ districtId: district.id, parcelId: spot.id, x: spot.x, z: spot.z, yaw: spot.yaw, y: plan.terrain.height(spot.x, spot.z) });
   }
 
+  // 为商场预留整块的商业/市中心街区：会话楼现在优先占好地段，曾把这些街区都占成「部分有楼」，商场找不到整块（布局守卫）。
+  // 配套仍在会话落楼之后按城区质心选址（placeCivics），落楼前锁住、选址前释放。
+  const civicTotal = model.buildings.length === 0 ? 0 : Math.max(2, Math.min(30, Math.floor(model.buildings.length / CIVIC_PER_SESSIONS)));
+  const mallReserve = plan.blocks
+    .filter((block) => (block.zone === "commercial" || block.zone === "downtown") && block.parcels.length > 0 && block.parcels.every((p) => !used.has(p.id)) && clearsHighways(block, block.width, block.depth, plan.highways))
+    .sort((a, b) => Math.hypot(a.x - core.x, a.z - core.z) - Math.hypot(b.x - core.x, b.z - core.z) || a.id.localeCompare(b.id))
+    .slice(0, Math.ceil(civicTotal / 3) + 1);
+  for (const block of mallReserve) for (const parcel of block.parcels) used.add(parcel.id);
+
   // 落楼：每个执行环境在自己的小区里按 (startedAt, −height, id) 从花园向外取地块——回放时看得见小区从中心长出来。
   // 小区装满（会话数相对配额偏多）才溢出到小区外最近的空地块；全城都满才进背景楼群。
   // 已落位的会话保留地址（见上方 previous），刷新不搬家。
@@ -298,13 +307,25 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     // 距花园排序 + 小于一个地块间距（~7）的哈希抖动：既不排成机械同心环，又保住
     // 「越新的会话越靠外」的回放生长波前（曾用 ±30 抖动——远大于地块间距，约
     // 五分之一的楼会落在当前前沿之内，回放叙事读起来像乱序）。
-    const score = (p: Parcel) => Math.hypot(p.x - anchor.x, p.z - anchor.z) + hashSeed(p.id) * 6;
-    const inside = blocksOf(district.id).flatMap((block) => block.parcels).filter((parcel) => !used.has(parcel.id)).sort((a, b) => score(a) - score(b) || a.id.localeCompare(b.id));
+    // 区内优先占用「好地段」：downtown/商业/海滨/酒店地块的距离分减 60/40/45（实测 97% 的楼落在住宅区——花园锚点远离核心与主干道，
+    // 按纯距离生长永远够不着它们）。仍以花园为中心向外长，只是好地段先被填上。
+    const ZONE_BONUS: Record<string, number> = { downtown: 60, commercial: 40, waterfront: 45 };
+    const hotelReady = buildings.length >= 20; // 小城市（守卫：3 个会话的城不出酒店）不享受酒店加分
+    const score = (p: Parcel) => Math.hypot(p.x - anchor.x, p.z - anchor.z) - (p.blockId.startsWith("hotel:") ? (hotelReady ? 220 : 0) : ZONE_BONUS[p.zone] ?? 0) + hashSeed(p.id) * 6;
+    // 海滨酒店地块是全城共享的度假用地：任何城区都可落楼（曾只在楔形扇区内取地，酒店地块不属于任何扇区，冠一顶都没有）。
+    // 每块酒店地块归离它最近的城区（锚点距离），并给 220 的落位加分——酒店离花园锚点上百单位，按距离生长永远轮不到（实测 0 顶冠）。
+    const nearestDistrict = (b: CityBlock) => [...anchorOf].sort((x, y) => Math.hypot(x[1].x - b.x, x[1].z - b.z) - Math.hypot(y[1].x - b.x, y[1].z - b.z))[0]?.[0];
+    const inside = [...blocksOf(district.id), ...(buildings.length >= 20 ? hotelBlocks.filter((b) => nearestDistrict(b) === district.id) : [])].flatMap((block) => block.parcels).filter((parcel) => !used.has(parcel.id)).sort((a, b) => score(a) - score(b) || a.id.localeCompare(b.id));
     const overflow: typeof buildings = [];
     let cursor = 0;
     for (const building of buildings) {
       while (cursor < inside.length && used.has(inside[cursor].id)) cursor += 1;
       let parcel: Parcel | undefined = inside[cursor];
+      // C-1 近岸高度梯度：楼高 > 26 的会话楼不占海滨地块，让给低层（迈阿密剖面：低层临水、塔楼退后）。楼高仍由 token 决定，只换位置。
+      if (parcel && building.height > 26 && parcel.zone === "waterfront") {
+        const inland = inside.find((p, k) => k > cursor && !used.has(p.id) && p.zone !== "waterfront");
+        if (inland) { used.add(inland.id); assigned.set(building.id, inland); continue; }
+      }
       if (parcel) cursor += 1;
       else parcel = parcels.filter((candidate) => !used.has(candidate.id)).sort((a, b) => score(a) - score(b) || a.id.localeCompare(b.id))[0];
       if (!parcel) { overflow.push(building); continue; }
@@ -313,6 +334,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     }
     if (overflow.length) massing.push(...aggregateOverflow(district.id, anchor, overflow, parcels, plan));
   }
+  for (const block of mallReserve) for (const parcel of block.parcels) used.delete(parcel.id);
   const civics = placeCivics(model, parcels, used, assigned, previous ?? null, plan);
   // 海滨迈阿密是一个已经建成的城市，即使当前窗口只有少量会话也不应退化成
   // 空白规划图。背景楼只从空置地块取址，避开数据楼/整块花园/市政设施/高架

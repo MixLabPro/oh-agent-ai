@@ -67,7 +67,8 @@ export function hotelCrownPlan(
   // 脏数据防御：非正数的槽位/楼高画不出任何合法冠。
   if (!(slotWidth > 0) || !(slotDepth > 0) || !(buildingHeight > 0)) return null;
   // 矮楼不给冠：低层装饰艺术酒店有自己的水平饰带语言，再叠格栅梳齿会互相打架。
-  if (buildingHeight < 12) return null;
+  // 矮楼门限放宽到 6：装饰艺术酒店多为低层（曾 <12 不给冠，海滨几乎一顶冠都没有）。
+  if (buildingHeight < 6) return null;
   // seed 门控：≈35% 平顶。阈值 0.35 落在契约的 30–40% 与 backlog「60–80% 加冠」交集内。
   if (crownRand(seed, "hotel-crown-gate") < 0.35) return null;
 

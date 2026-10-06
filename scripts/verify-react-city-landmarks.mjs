@@ -73,7 +73,8 @@ assert.equal(crown.HOTEL_CROWN_MAX_FINS, 9);
   }
   const rate = crowned / total;
   assert.ok(rate >= 0.3 && rate <= 0.75, `crown rate within the design band (${(rate * 100).toFixed(0)}%)`);
-  for (const height of [4, 8, 11.9]) assert.equal(crown.hotelCrownPlan(25, 11.2, height, 0.9), null, `low hotels stay flat-top (h=${height})`);
+  // 矮楼门限 12 → 6（装饰艺术酒店多为低层，用户：冠在真实种子上 0 实例）。
+  for (const height of [3, 5, 5.9]) assert.equal(crown.hotelCrownPlan(25, 11.2, height, 0.9), null, `low hotels stay flat-top (h=${height})`);
 }
 
 // ── L-2 招牌：出牌率带、屋顶缘自查、路边牌恒有方案、确定性 ──
@@ -94,7 +95,7 @@ const signs = run(bundle("citySkylineProps.ts", `import * as THREE from "three";
     assert.deepEqual(plan, again, "rooftop plan is deterministic");
   }
   const rate = signsUp / total;
-  assert.ok(rate >= 0.1 && rate <= 0.35, `rooftop sign rate within the design band (${(rate * 100).toFixed(0)}%)`);
+  assert.ok(rate >= 0.3 && rate <= 0.6, `rooftop sign rate within the design band (45% target; candidates widened beyond the commercial zone) (${(rate * 100).toFixed(0)}%)`);
   for (const yaw of [0, 1.2, Math.PI / 2, 4]) {
     const plan = signs.roadsideSignPlan(yaw, 3, 0.42);
     assert.equal(plan.pieces.length, 3, "two posts plus one panel");

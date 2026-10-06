@@ -107,6 +107,13 @@ function planRoute(layout: CityLayout, model: CityModel, heights: Map<string, { 
   if (hero.height > 30) {
     features.push({ angle: Math.atan2(hero.z - center.z, hero.x - center.x), radius: Math.hypot(hero.x - center.x, hero.z - center.z) + 90, height: Math.max(40, hero.height * 0.85), look: { x: hero.x, y: hero.ground + hero.height * 0.6, z: hero.z } });
   }
+  // C-3 三层景深（backlog）：海滨段中点外 25 的低空（24），前景棕榈步道 → 中景低层海滨带 → 远景城中塔群（注视全城之最）。
+  const seaside = layout.seaside && !layout.seaside.degraded ? layout.seaside.samples.filter((s) => s.valid) : [];
+  if (seaside.length > 4) {
+    const s = seaside[Math.floor(seaside.length / 2)];
+    features.push({ angle: Math.atan2(s.waterline.z - center.z, s.waterline.x - center.x), radius: Math.hypot(s.waterline.x - center.x, s.waterline.z - center.z) + 25, height: 24,
+      look: { x: hero.x, y: hero.ground + Math.max(12, hero.height * 0.5), z: hero.z } });
+  }
   const longestBridge = [...(layout.bridges ?? [])].sort((a, b) => b.length - a.length)[0];
   if (longestBridge) {
     const mid = { x: (longestBridge.from.x + longestBridge.to.x) / 2, z: (longestBridge.from.z + longestBridge.to.z) / 2 };

@@ -23,6 +23,7 @@ import { makeCityTexture, makeDecoFacadeTexture, makeFacadeTexture, makeLabelSpr
 import type { TerrainField } from "./cityLayout";
 import { createRenderCanvas } from "./renderCanvas";
 import { SegmentIndex, polygonDistance } from "./cityPlan";
+import { buildAirport, planAirport } from "./cityAirport";
 import { roadPaintPlan } from "./cityRoadPaint";
 
 const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
@@ -118,6 +119,8 @@ type BuildingRuntime = {
   roofKind: number;
   /** 全城 token 最多的会话：专属冠顶 + 灯环 + 光束。 */
   hero: boolean;
+  /** L-6 圆筒玻璃塔实例下标（-1 = 普通方楼）。 */
+  cylinder: number;
   /** 海滨酒店冠（L-1）：crownBase = 鳍片实例起点（-1 = 无冠）；方案建模期算一次存住，逐帧只写矩阵。 */
   crownBase: number;
   crown: { fins: CrownPiece[]; stripY: number } | null;
@@ -413,6 +416,7 @@ export class CityParts {
   private readonly neonMesh: THREE.InstancedMesh;
   private readonly scaffoldMesh: THREE.InstancedMesh;
   private readonly antennaMesh: THREE.InstancedMesh;
+  private readonly cylinderMesh: THREE.InstancedMesh;
   private readonly beaconMesh: THREE.InstancedMesh;
   private readonly craneMastMesh: THREE.InstancedMesh;
   private readonly craneArmMesh: THREE.InstancedMesh;
@@ -480,6 +484,13 @@ export class CityParts {
       this.nightLights = this.buildNightLights();
       this.buildPublicSites();
       this.buildMarina();
+      {
+        // L-4 机场岛 + L-5 堤道：避开港口与海滨景观段。
+        const avoid = [...this.layout.publicSites.filter((x) => x.kind === "harbor"), ...(this.layout.seaside && !this.layout.seaside.degraded ? this.layout.seaside.samples.filter((x) => x.valid).map((x) => x.waterline) : [])];
+        const core = this.layout.core ?? { x: 0, z: 0 };
+        const plan = planAirport(this.layout.coast, core, avoid);
+        if (plan) this.group.add(buildAirport(plan, this.disposables, this.nightLights?.heads ?? null));
+      }
       this.buildCivics();
       this.buildLandmarks();
       this.buildTrussBridges();
@@ -645,6 +656,20 @@ export class CityParts {
     this.neonMesh.castShadow = false;
     this.scaffoldMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#e0a83f", transparent: true, opacity: 0.24, depthWrite: false }), total);
     this.scaffoldMesh.castShadow = false;
+    {
+      // L-6 圆筒玻璃塔（backlog）：竖向条纹幕墙，夜里亮窗（landmarkWindows 同一套白天/夜间贴图切换）。
+      const day = createRenderCanvas(); day.width = 64; day.height = 32; const dctx = day.getContext("2d");
+      if (dctx) { dctx.fillStyle = "#6f9fb4"; dctx.fillRect(0, 0, 64, 32); dctx.fillStyle = "#e8eef2"; for (let x = 0; x < 64; x += 8) dctx.fillRect(x, 0, 1.5, 32); dctx.fillRect(0, 30, 64, 2); }
+      const lit = createRenderCanvas(); lit.width = 64; lit.height = 32; const lctx = lit.getContext("2d");
+      if (lctx) { lctx.fillStyle = "#000"; lctx.fillRect(0, 0, 64, 32); for (let x = 0; x < 64; x += 8) { const on = hashSeed(`cyl-window:${x}`); if (on < 0.3) continue; lctx.fillStyle = on > 0.8 ? "#bfe9ff" : "#ffd89a"; lctx.fillRect(x + 2, 4, 5, 22); } }
+      const dayTex = new THREE.CanvasTexture(day as HTMLCanvasElement); const litTex = new THREE.CanvasTexture(lit as HTMLCanvasElement);
+      for (const t of [dayTex, litTex]) { t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(3, 10); }
+      const glass = new THREE.MeshLambertMaterial({ color: "#ffffff", map: dayTex, emissive: new THREE.Color("#000000"), emissiveMap: dayTex });
+      this.landmarkWindows.push({ material: glass, day: dayTex, lit: litTex, dayEmissive: new THREE.Color("#000000") });
+      this.disposables.push(dayTex, litTex);
+      this.cylinderMesh = this.makeInstanced(new THREE.CylinderGeometry(0.5, 0.5, 1, 20).translate(0, 0.5, 0), glass, 64);
+      this.cylinderMesh.name = "city-shafts-cylinder";
+    }
     this.antennaMesh = this.makeInstanced(new THREE.CylinderGeometry(0.09, 0.16, 1, 5).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#5d6470" }), 96);
     this.beaconMesh = this.makeInstanced(new THREE.SphereGeometry(0.32, 8, 6), new THREE.MeshBasicMaterial({ color: "#ffb02e" }), 96);
     this.craneMastMesh = this.makeInstanced(new THREE.BoxGeometry(0.85, 1, 0.85).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#ffb400", emissive: "#6b4300" }), 48);
@@ -1616,7 +1641,18 @@ export class CityParts {
         const h = Math.min(cap, 66);
         const floors = 22;
         const floorGeometry = new THREE.BoxGeometry(1, 1, 1);
-        const floorMaterial = material("#ffffff");
+        // 每层一条窗带（白墙上的深色玻璃带），夜里换成暖色亮窗——曾是纯色楼板，夜里整栋漆黑（真机夜景截图）。
+        const bandDay = createRenderCanvas(); bandDay.width = 64; bandDay.height = 16;
+        const dctx = bandDay.getContext("2d");
+        if (dctx) { dctx.fillStyle = "#ffffff"; dctx.fillRect(0, 0, 64, 16); dctx.fillStyle = "#3f5662"; dctx.fillRect(0, 4, 64, 8); dctx.fillStyle = "#ffffff"; for (let x = 0; x < 64; x += 8) dctx.fillRect(x, 4, 1, 8); }
+        const bandLit = createRenderCanvas(); bandLit.width = 64; bandLit.height = 16;
+        const lctx = bandLit.getContext("2d");
+        if (lctx) { lctx.fillStyle = "#000000"; lctx.fillRect(0, 0, 64, 16); for (let x = 0; x < 64; x += 8) { const on = hashSeed(`twist-window:${x}`); if (on < 0.25) continue; lctx.fillStyle = on > 0.85 ? "#bfe9ff" : "#ffd89a"; lctx.fillRect(x + 1, 4, 7, 8); } }
+        const dayTex = new THREE.CanvasTexture(bandDay as HTMLCanvasElement); const litTex = new THREE.CanvasTexture(bandLit as HTMLCanvasElement);
+        for (const t of [dayTex, litTex]) { t.colorSpace = THREE.SRGBColorSpace; t.wrapS = THREE.RepeatWrapping; t.repeat.set(1, 1); } // 64px = 8 扇窗/面
+        const floorMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff", map: dayTex, emissive: new THREE.Color("#000000"), emissiveMap: dayTex });
+        this.landmarkWindows.push({ material: floorMaterial, day: dayTex, lit: litTex, dayEmissive: new THREE.Color("#000000") });
+        this.disposables.push(floorMaterial, dayTex, litTex);
         const floorMesh = new THREE.InstancedMesh(floorGeometry, floorMaterial, floors);
         const palette = ["#68c9d0", "#d78db3", "#9b9be0"];
         for (let i = 0; i < floors; i += 1) {
@@ -1908,6 +1944,8 @@ export class CityParts {
             const off = face === "n" ? -d / 2 : face === "s" ? d / 2 : face === "w" ? -w / 2 : w / 2;
             const fx = alongX ? cx : cx + off + Math.sign(off) * 0.08; const fz = alongX ? cz + off + Math.sign(off) * 0.08 : cz;
             box(fx, y, fz, alongX ? len : 0.16, 1.25, alongX ? 0.16 : len, glass);
+            // 夜间亮窗：窗带外侧一条暖色发光带（夜灯批次，白天隐藏）——曾只有深色玻璃，夜里配套建筑一片黑。
+            glow(fx + (alongX ? 0 : Math.sign(off) * 0.06), y + 0.15, fz + (alongX ? Math.sign(off) * 0.06 : 0), alongX ? len * 0.98 : 0.05, 0.95, alongX ? 0.05 : len * 0.98, (Math.floor(y) + face.charCodeAt(0)) % 5 === 0 ? "#3a4a55" : "#7a6244");
             const count = Math.max(2, Math.floor(len / 2.4));
             for (let k = 1; k < count; k += 1) {
               const t = -len / 2 + (k * len) / count;
@@ -3612,6 +3650,7 @@ export class CityParts {
     let antennaCount = 0;
     let beaconCount = 0;
     let craneCount = 0;
+    let cylinderCount = 0;
     const shaftCursor = [0, 0, 0, 0];
     let decoCursor = 0;
     let crownCursor = 0;
@@ -3649,6 +3688,7 @@ export class CityParts {
         deco: -1,
         roofKind: 0,
         hero: false,
+        cylinder: -1,
         crownBase: -1,
         crown: null,
         signBase: -1,
@@ -3671,6 +3711,8 @@ export class CityParts {
       const mesh = this.shaftMeshes[runtime.facade];
       const instanceMap = this.shaftIdByInstance[runtime.facade];
       const wantsUpper = this.formOf(building) === "tower" || this.formOf(building) === "landmark";
+      const zone = this.zoneById.get(building.id);
+      if (this.formOf(building) === "tower" && zone !== "waterfront" && hashSeed(`cylinder:${building.id}`) < 0.14 && cylinderCount < 64) { runtime.cylinder = cylinderCount; cylinderCount += 1; }
       runtime.shaftPrimary = shaftCursor[runtime.facade];
       mesh.setColorAt(runtime.shaftPrimary, runtime.paletteWall);
       (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftPrimary, Math.max(2, Math.round(building.height / 3.1)));
@@ -3709,7 +3751,7 @@ export class CityParts {
           this.crownStripMesh.setColorAt(crownCursor, new THREE.Color(palette.accent).multiplyScalar(3.2));
           crownCursor += 1;
         }
-      } else if (runtime.roofKind === 0 && slot.zone === "commercial" && building.height >= 24 && signCursor < 24) {
+      } else if (runtime.roofKind === 0 && (slot.zone === "commercial" || slot.zone === "downtown" || (this.percentileOf(building) ?? 0) >= 0.6) && building.height >= 18 && signCursor < 24) {
         // 屋顶立牌（L-2）：商业区高楼的尺度符号；已有尖顶/退台冠的楼让位（roofKind ≠ 0 不立牌）。
         // roofY 传 0：模块给的件 y 都是「屋顶面相对高度」，写矩阵时再加地面 + 楼高。
         const plan = rooftopSignPlan(slot.width, slot.depth, 0, building.seed);
@@ -3725,7 +3767,9 @@ export class CityParts {
       }
       runtime.scaffold = scaffoldCount;
       scaffoldCount += 1;
-      if (this.formOf(building) === "landmark" && antennaCount < 94) {
+      // C-2 轮廓配件：≥24 高、无尖顶冠（roofKind 0）的楼按种子约三成立天线 + 航空灯，打断板楼单调的天际线（backlog C-2）。
+      const roofline = runtime.roofKind === 0 && !slot.blockId.startsWith("hotel:") && building.height >= 24 && hashSeed(`roofline:${building.id}`) < 0.32;
+      if ((this.formOf(building) === "landmark" || roofline) && antennaCount < 94) {
         runtime.antenna = antennaCount;
         antennaCount += 1;
         runtime.beacon = beaconCount;
@@ -3767,6 +3811,7 @@ export class CityParts {
     if (this.roofMesh.instanceColor) this.roofMesh.instanceColor.needsUpdate = true;
     this.scaffoldMesh.count = scaffoldCount;
     this.antennaMesh.count = antennaCount;
+    this.cylinderMesh.count = cylinderCount;
     this.beaconMesh.count = beaconCount;
     this.craneMastMesh.count = craneCount;
     this.decoCornerMesh.count = decoCursor;
@@ -3897,6 +3942,13 @@ export class CityParts {
       } else {
         this.compose(x, shaftBottom, z, yaw, widths[0], shaftHeight, widths[1]);
       }
+      if (runtime.cylinder >= 0) {
+        // 圆筒塔：圆柱取代方形主体与退台（直径取较短边 × 1.1），方楼实例藏起。
+        const dia = Math.min(widths[0], widths[1]) * 1.1;
+        this.compose(x, shaftBottom, z, yaw, dia, Math.max(0, g + built - shaftBottom), dia);
+        this.cylinderMesh.setMatrixAt(runtime.cylinder, this.matrix);
+        this.compose(x, -40, z, 0, 0, 0, 0);
+      }
       this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftPrimary, this.matrix);
     }
     // 退台段（tower/landmark）。
@@ -3907,6 +3959,7 @@ export class CityParts {
       } else {
         this.compose(x, g + h * split, z, yaw, widths[0] * 0.72, upperHeight, widths[1] * 0.72);
       }
+      if (runtime.cylinder >= 0) this.compose(x, -40, z, 0, 0, 0, 0);
       this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftUpper, this.matrix);
     }
     if (runtime.podium >= 0) {
@@ -4047,6 +4100,7 @@ export class CityParts {
     const building = runtime.building;
     if (runtime.shaftPrimary >= 0) this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftPrimary, this.matrix);
     if (runtime.shaftUpper >= 0) this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftUpper, this.matrix);
+    if (runtime.cylinder >= 0) this.cylinderMesh.setMatrixAt(runtime.cylinder, this.matrix);
     if (runtime.podium >= 0) this.podiumMesh.setMatrixAt(runtime.podium, this.matrix);
     if (runtime.deco >= 0) {
       this.decoCornerMesh.setMatrixAt(runtime.deco, this.matrix);
@@ -4129,7 +4183,7 @@ export class CityParts {
     this.roofMesh.instanceMatrix.needsUpdate = true;
     this.neonMesh.instanceMatrix.needsUpdate = true;
     this.scaffoldMesh.instanceMatrix.needsUpdate = true;
-    this.antennaMesh.instanceMatrix.needsUpdate = true;
+    this.antennaMesh.instanceMatrix.needsUpdate = true; this.cylinderMesh.instanceMatrix.needsUpdate = true;
     this.craneMastMesh.instanceMatrix.needsUpdate = true;
     this.crownFinMesh.instanceMatrix.needsUpdate = true;
     this.crownStripMesh.instanceMatrix.needsUpdate = true;
@@ -4394,7 +4448,7 @@ export class CityParts {
       this.roofMesh.instanceMatrix.needsUpdate = true;
       this.neonMesh.instanceMatrix.needsUpdate = true;
       this.scaffoldMesh.instanceMatrix.needsUpdate = true;
-      this.antennaMesh.instanceMatrix.needsUpdate = true;
+      this.antennaMesh.instanceMatrix.needsUpdate = true; this.cylinderMesh.instanceMatrix.needsUpdate = true;
       this.craneMastMesh.instanceMatrix.needsUpdate = true;
       this.crownFinMesh.instanceMatrix.needsUpdate = true;
       this.crownStripMesh.instanceMatrix.needsUpdate = true;
