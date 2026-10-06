@@ -2928,14 +2928,15 @@ export class CityParts {
     if (this.decoCornerMesh.instanceColor) this.decoCornerMesh.instanceColor.needsUpdate = true;
     if (this.decoTrimMesh.instanceColor) this.decoTrimMesh.instanceColor.needsUpdate = true;
     this.craneArmMesh.count = craneCount;
-    this.crownStripMesh.count = crownCursor;
+    // 霓虹载体（冠底带/牌框/色条）与 neonMesh 同一门控：非霓虹主题整体收起，物理件（鳍片/柱/板）常在。
+    this.crownStripMesh.count = activeTheme().neon ? crownCursor : 0;
     if (this.crownStripMesh.instanceColor) this.crownStripMesh.instanceColor.needsUpdate = true;
     this.buildRoadsideSigns(signCursor);
     // 路边牌占位后才知道四批次的实际用量：屋顶牌 0..signCursor-1，路边牌 signCursor..。
     this.signPostMesh.count = this.signPostCount * 2;
     this.signPanelMesh.count = this.signPostCount;
-    this.signFrameMesh.count = this.signPostCount * 4;
-    this.signStripeMesh.count = this.signPostCount * 3;
+    this.signFrameMesh.count = activeTheme().neon ? this.signPostCount * 4 : 0;
+    this.signStripeMesh.count = activeTheme().neon ? this.signPostCount * 3 : 0;
     if (this.signFrameMesh.instanceColor) this.signFrameMesh.instanceColor.needsUpdate = true;
     if (this.signStripeMesh.instanceColor) this.signStripeMesh.instanceColor.needsUpdate = true;
 
