@@ -286,6 +286,16 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     }
     // 摩天轮是海滨城的第二个固定标志（与高塔一样不代表会话），其余仍由种子抽选。
     if (config?.profile === "miami-coastal") {
+      // 地中海庄园与摩天轮一样是海滨城固定地标（用户：「没有看见这些城市地标建筑物」——抽签抽不到就永远看不见）。
+      const villaIndex = pool.findIndex((candidate) => candidate.kind === "villa-complex");
+      if (villaIndex >= 0) {
+        const villa = pool.splice(villaIndex, 1)[0];
+        const site = villa.site();
+        if (site) {
+          const q = snap(site.at, site.clearance, taken(), site.radius);
+          landmarks.push({ id: `landmark:${villa.kind}`, kind: villa.kind, x: q.x, z: q.z, yaw: site.yaw, radius: site.radius });
+        }
+      }
       const wheelIndex = pool.findIndex((candidate) => candidate.kind === "ferris-wheel");
       if (wheelIndex >= 0) {
         const wheel = pool.splice(wheelIndex, 1)[0];

@@ -22,7 +22,7 @@ import { decorKindForName } from "./cityDecor";
 import { makeCityTexture, makeDecoFacadeTexture, makeFacadeTexture, makeLabelSprite, paletteFor } from "./cityTextures";
 import type { TerrainField } from "./cityLayout";
 import { createRenderCanvas } from "./renderCanvas";
-import { SegmentIndex } from "./cityPlan";
+import { SegmentIndex, polygonDistance } from "./cityPlan";
 import { roadPaintPlan } from "./cityRoadPaint";
 
 const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
@@ -482,6 +482,7 @@ export class CityParts {
       this.buildMarina();
       this.buildCivics();
       this.buildLandmarks();
+      this.buildTrussBridges();
       this.buildDistrictLandmarks();
       this.buildUrbanContext();
       this.buildSeaMountains();
@@ -1101,6 +1102,13 @@ export class CityParts {
         glow(0, 0.55, -r * 0.6, r * 1.5, 0.25, 0.25, "#ffb366");
         for (const [lx, lz] of [[-r * 0.65, r * 0.38], [-r * 0.65, r * 0.62], [r * 0.15, r * 0.38], [r * 0.15, r * 0.62]]) glow(lx, 17.6, lz, 1.4, 0.7, 1.4, "#fff1c4");
         glow(-r * 0.25 + r * 0.55 + 7, 17.2, r * 0.5, 0.9, 0.9, 0.9, "#ff3b3b");
+        // 筒仓组（backlog L-8）：堆场另一端 3 座白色筒仓 + 浅灰穹盖 + 顶部连廊，工业港的第二种轮廓（与龙门吊互补）。
+        for (let k = 0; k < 3; k += 1) {
+          const sx = r * 0.5 + k * 6.4; const sz = -r * 0.42;
+          cyl(sx, 0.5, sz, 2.8, 15 + k * 1.5, "#ecebe4");
+          cyl(sx, 15.5 + k * 1.5, sz, 2.2, 1.2, "#c9ccc8");
+        }
+        box(r * 0.5 + 6.4, 17.6, -r * 0.42, 14, 0.8, 1.2, "#b8bbb4");
         for (const lx of [-r * 0.6, 0, r * 0.6]) {
           cyl(lx, 0.5, -r * 0.2, 0.18, 12, "#8a9096");
           glow(lx, 12.5, -r * 0.2, 1.6, 0.5, 1.6, "#fff1c4");
@@ -2345,6 +2353,10 @@ export class CityParts {
     if (!slots.length) return [];
     const near = new SegmentIndex(slots.map((slot) => [slot, slot]));
     const terrain = this.layout.terrain;
+    const byWidth = new Map<number, Vec2[][]>();
+    for (const edge of this.layout.roadEdges) (byWidth.get(edge.width) ?? byWidth.set(edge.width, []).get(edge.width)!).push(edge.points);
+    const roadIndex = [...byWidth].map(([width, runs]) => ({ clearance: width / 2 + 4.2 + 0.8, index: new SegmentIndex(runs) }));
+    const clearOfRoads = (q: Vec2) => roadIndex.every(({ clearance, index }) => !index.closerThan(q, clearance));
     const out: Vec2[][] = [];
     for (const run of this.layout.coastRoads ?? []) {
       let current: Vec2[] = [];
@@ -2353,14 +2365,33 @@ export class CityParts {
         const len = Math.hypot(b.x - a.x, b.z - a.z) || 1;
         let nx = -(b.z - a.z) / len; let nz = (b.x - a.x) / len;
         const p = run[i];
-        if (terrain.height(p.x + nx * 12, p.z + nz * 12) > terrain.height(p.x - nx * 12, p.z - nz * 12)) { nx = -nx; nz = -nz; }
-        const q = { x: p.x + nx * 9, z: p.z + nz * 9 };
-        if (near.closerThan(p, 160) && terrain.height(q.x, q.z) > 0.4) current.push(q);
+        // 朝海一侧按到海岸线的距离判：沙滩与内陆平原同高（1.2），比地形高度时近似抛硬币——步道被铺到了陆侧（截图验收）。
+        if (Math.abs(polygonDistance({ x: p.x + nx * 12, z: p.z + nz * 12 }, this.layout.coast)) > Math.abs(polygonDistance({ x: p.x - nx * 12, z: p.z - nz * 12 }, this.layout.coast))) { nx = -nx; nz = -nz; }
+        // 离路中线 13：路半宽 6 + 步道半宽 4.2 + 2.8 间隙。曾是 9——比两者半宽之和 10.2 还小，步道压在马路上（真机截图）。
+        // 弯道处偏移点仍可能落进本路或别的路：按各路实际半宽逐点检查，压路处断开步道。
+        const q = { x: p.x + nx * 13, z: p.z + nz * 13 };
+        if (near.closerThan(p, 160) && terrain.height(q.x, q.z) > 0.4 && clearOfRoads(q)) current.push(q);
         else { if (current.length >= 3) out.push(current); current = []; }
       }
       if (current.length >= 3) out.push(current);
     }
-    return out;
+    // 逐 3 单位加密并再查一次：点距 ~20，横穿两点之间的支路/接入路会漏检（截图验收：斜向接入路压过步道）。
+    const dense: Vec2[][] = [];
+    for (const segment of out) {
+      let piece: Vec2[] = [];
+      for (let i = 0; i < segment.length; i += 1) {
+        const a = segment[i]; const b = segment[i + 1];
+        const steps = b ? Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / 3)) : 1;
+        for (let k = 0; k < steps; k += 1) {
+          const t = b ? k / steps : 0;
+          const q = b ? { x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t } : a;
+          if (clearOfRoads(q)) piece.push(q);
+          else { if (piece.length >= 4) dense.push(piece); piece = []; }
+        }
+      }
+      if (piece.length >= 4) dense.push(piece);
+    }
+    return dense;
   }
 
   private buildPromenade(segments: Vec2[][]): void {
@@ -2853,6 +2884,61 @@ export class CityParts {
     }
     this.group.add(piers, boats, cabins);
     this.disposables.push(unit, deck, hulls, cabinMaterial);
+  }
+
+  /** 红色穿式桁架桥（backlog L-7）：悬索桥之外、跨距 40–160 的过河桥加一套格构桁架——上下弦 + 竖杆 + 交替斜腹杆，
+   *  深红涂装。只换造型不改路网（同悬索桥做法）；桥面高度与 buildInfrastructure 一致。 */
+  private buildTrussBridges(): void {
+    const suspension = (this.layout.landmarks ?? []).find((l) => l.kind === "suspension-bridge");
+    const bridges = (this.layout.bridges ?? []).filter((b) => b.length >= 40 && b.length <= 160
+      && !(suspension && Math.hypot(b.from.x - suspension.x, b.from.z - suspension.z) < 1));
+    if (!bridges.length) return;
+    const unit = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+    const red = new THREE.MeshLambertMaterial({ color: "#a8322a" });
+    const bars: Array<[number, number, number, number, number, number, number, number]> = []; // x y z len thick rotY tilt
+    for (const bridge of bridges) {
+      const dx = bridge.to.x - bridge.from.x; const dz = bridge.to.z - bridge.from.z; const len = Math.hypot(dx, dz);
+      const ux = dx / len; const uz = dz / len; const nx = -uz; const nz = ux;
+      const yaw = -Math.atan2(dz, dx);
+      const deckY = Math.max(this.layout.terrain.height(bridge.from.x, bridge.from.z), this.layout.terrain.height(bridge.to.x, bridge.to.z));
+      const H = 7; const panels = Math.max(4, Math.round(len / 9)); const step = len / panels;
+      for (const side of [-1, 1]) {
+        const ox = nx * side * 6.6; const oz = nz * side * 6.6;
+        const at = (t: number) => ({ x: bridge.from.x + ux * t + ox, z: bridge.from.z + uz * t + oz });
+        const mid = at(len / 2);
+        bars.push([mid.x, deckY + H, mid.z, len, 0.6, yaw, 0, 0]);          // 上弦
+        bars.push([mid.x, deckY + 0.2, mid.z, len, 0.6, yaw, 0, 0]);        // 下弦
+        for (let i = 0; i <= panels; i += 1) {
+          const p = at(i * step);
+          bars.push([p.x, deckY, p.z, 0.45, H, yaw, 0, 1]);                 // 竖杆
+          if (i < panels) {
+            const q = at((i + 0.5) * step);
+            bars.push([q.x, deckY, q.z, 0.4, Math.hypot(step, H), yaw, (i % 2 ? 1 : -1) * Math.atan2(step, H), 1]); // 斜腹杆
+          }
+        }
+      }
+      // 顶部横撑（每两格一根），让桁架从远处读成「穿式」而不是两片护栏。
+      for (let i = 0; i <= panels; i += 2) {
+        const t = i * step; const x = bridge.from.x + ux * t; const z = bridge.from.z + uz * t;
+        bars.push([x, deckY + H, z, 13.2, 0.5, yaw + Math.PI / 2, 0, 0]);
+      }
+    }
+    const mesh = new THREE.InstancedMesh(unit, red, bars.length);
+    bars.forEach(([x, y, z, a, b, rotY, tilt, vertical], i) => {
+      this.positionVector.set(x, y, z);
+      this.euler.set(0, rotY, vertical ? tilt : 0, "YXZ");
+      // 横向件：长度沿局部 x；竖向件：高度沿局部 y、绕局部 z 倾斜成斜腹杆。
+      if (vertical) this.scaleVector.set(a, b, a); else this.scaleVector.set(a, b, b);
+      if (!vertical) this.positionVector.y -= b / 2;
+      this.quaternion.setFromEuler(this.euler);
+      this.matrix.compose(this.positionVector, this.quaternion, this.scaleVector);
+      mesh.setMatrixAt(i, this.matrix);
+    });
+    mesh.castShadow = true;
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.name = "city-landmark-truss-bridge";
+    this.group.add(mesh);
+    this.disposables.push(unit, red);
   }
 
   private buildTrees(): THREE.InstancedMesh {
