@@ -645,6 +645,7 @@ export class CityEngine {
     const harbor = L.publicSites.find((s) => s.kind === "harbor");
     const sample = L.seaside?.samples.filter((q) => q.valid)[0];
     const districtLandmark = (L.districtLandmarks ?? [])[0];
+    const civicOf = (kind: string) => { const c = (L.civics ?? []).find((x) => x.kind === kind); return c ? [c.x, 8, c.z, 60] : null; };
     const site = (kind: string, h: number, d: number) => { const s = L.publicSites.find((x) => x.kind === kind); return s ? [s.x, h, s.z, d] : null; };
     const targets: Record<string, () => number[] | null> = {
       "session-tower": () => pick((b) => P.formOf(b) === "tower" && b.height > 25),
@@ -659,7 +660,8 @@ export class CityEngine {
       "suspension-bridge": () => landmark("suspension-bridge", 12, 95),
       "truss-bridge": () => (truss ? [(truss.from.x + truss.to.x) / 2, 4, (truss.from.z + truss.to.z) / 2, 55] : null),
       harbor: () => (harbor ? [harbor.x, 6, harbor.z, 75] : null),
-      civic: () => ((L.civics ?? [])[0] ? [(L.civics ?? [])[0].x, 5, (L.civics ?? [])[0].z, 55] : null),
+      hospital: () => civicOf("hospital"), school: () => civicOf("school"), mall: () => civicOf("mall"),
+      garden: () => { const g = (L.gardens ?? [])[0]; return g ? [g.x, 2, g.z, 60] : null; },
       beach: () => (sample ? [sample.dryOuter.x, 2, sample.dryOuter.z, 34] : null),
       "civic-hall": () => site("civic", 10, 95),
       station: () => site("station", 6, 95),
@@ -790,7 +792,7 @@ export class CityEngine {
         const id = this.parts.idAt(hit.object, hit.instanceId);
         if (id) return id;
       }
-      const decor = this.parts.decorAt(hit.object, hit.instanceId);
+      const decor = this.parts.decorAt(hit.object, hit.instanceId, hit.point);
       if (decor) return decor;
     }
     return null;

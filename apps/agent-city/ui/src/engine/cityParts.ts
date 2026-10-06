@@ -1033,6 +1033,51 @@ export class CityParts {
         cyl(0, 11.7, 0, r * 0.27, 4.2, "#d6c9a8");
         cyl(0, 15.9, 0, r * 0.2, 3.4, "#5fa7a3");
         cyl(0, 19.3, 0, 0.4, 6, "#c9b98f");
+        // 细化：门廊三角山花、正门台阶、两翼窗带、穹顶鼓座窗与顶部灯笼亭、广场前旗杆。
+        box(0, 10.6, r * 0.36, r * 0.86, 0.5, 3.2, "#e9e1cd");
+        for (let k = 0; k < 6; k += 1) box(0, 11.1 + k * 0.45, r * 0.36, r * 0.86 * (1 - k / 6), 0.45, 3.2, "#f2ebda");
+        for (let k = 0; k < 4; k += 1) box(0, k * 0.4, r * 0.46 + k * 0.9, r * 0.5, 0.4, 1, "#ddd3bd");
+        for (const sx of [-1, 1]) for (let k = 0; k < 3; k += 1) box(sx * r * 0.3, 3 + k * 2.6, r * 0.28, r * 0.24, 1.2, 0.2, "#5c6e78");
+        for (let k = 0; k < 10; k += 1) { const t = (k / 10) * Math.PI * 2; box(Math.cos(t) * r * 0.27, 13, Math.sin(t) * r * 0.27, 1, 1.8, 1, "#4a5a63"); }
+        cyl(0, 25.3, 0, 1.2, 1.6, "#f2ebda");
+        // 市政厅 = 全城的功能性标志（用户：随城市规模升级 + 提供全城信息）。
+        // 升级阶段按岛屿档位（每档约 400 会话）：1–2 镇政厅（基础）→ 3–4 加两翼与正面时钟 → 5–7 加高鼓座与钟楼 → 8–10 议会大厦（灯笼亭穹顶 + 两侧塔楼 + 长阶）。
+        const tier = this.layout.scaleTier ?? 1;
+        const stage = tier >= 8 ? 4 : tier >= 5 ? 3 : tier >= 3 ? 2 : 1;
+        if (stage >= 2) {
+          for (const sx of [-1, 1]) {
+            box(sx * r * 0.62, 1.6, -r * 0.05, r * 0.36, 7, r * 0.42, "#ece4d2");
+            box(sx * r * 0.62, 8.6, -r * 0.05, r * 0.4, 0.7, r * 0.46, "#cdbf9f");
+            for (let k = 0; k < 2; k += 1) box(sx * r * 0.62, 3 + k * 2.6, r * 0.16 + 0.1, r * 0.28, 1.2, 0.2, "#5c6e78");
+          }
+          cyl(0, 12.6, r * 0.33, 1.4, 0.3, "#f6f0e2"); box(0, 12.7, r * 0.33 + 0.2, 0.15, 1.1, 0.1, "#2a3036");
+        }
+        if (stage >= 3) {
+          cyl(0, 15.9, 0, r * 0.24, 2.6, "#e9e1cd");
+          for (let k = 0; k < 12; k += 1) { const t = (k / 12) * Math.PI * 2; box(Math.cos(t) * r * 0.24, 16.2, Math.sin(t) * r * 0.24, 0.8, 1.6, 0.8, "#4a5a63"); }
+          box(r * 0.5, 0, -r * 0.3, 5, 26, 5, "#ece4d2"); box(r * 0.5, 26, -r * 0.3, 6, 1, 6, "#cdbf9f");
+          cyl(r * 0.5, 22, -r * 0.3 + 2.6, 1.6, 0.3, "#f6f0e2");
+        }
+        if (stage >= 4) {
+          for (const sx of [-1, 1]) { box(sx * r * 0.82, 0, r * 0.25, 5, 22, 5, "#ece4d2"); cyl(sx * r * 0.82, 22, r * 0.25, 2.2, 4, "#5fa7a3"); }
+          for (let k = 0; k < 8; k += 1) box(0, k * 0.4, r * 0.62 + k * 1.1, r * 0.7, 0.4, 1.2, "#ddd3bd");
+          cyl(0, 27, 0, 2, 3, "#f2ebda"); cyl(0, 30, 0, 0.3, 4, "#c9b98f");
+        }
+        // 广场前一排城区旗：每个执行环境一面区色旗，旗杆高度 = 6 + 14 × 该城区会话占比（从空中就能读出各城区份额）。
+        const total = this.model.districts.reduce((t, d) => t + d.sessionCount, 0) || 1;
+        const districts = this.model.districts.filter((d) => d.sessionCount > 0);
+        districts.forEach((district, i) => {
+          const fx = (i - (districts.length - 1) / 2) * 5.5;
+          const pole = 6 + 14 * (district.sessionCount / total);
+          cyl(fx, 0, r * 0.78, 0.15, pole, "#d9d9d4");
+          box(fx + 1.2, pole - 1.6, r * 0.78, 2.4, 1.4, 0.08, paletteFor(district.id).accent);
+        });
+        // 异常信标：任一城区有异常时穹顶顶上亮信标（critical 红 / warning 琥珀 / info 青），点击市政厅看是哪个城区。
+        const severities = this.model.districts.map((d) => d.anomaly?.severity).filter(Boolean);
+        if (severities.length) {
+          const color = severities.includes("critical") ? "#ff3b3b" : severities.includes("warning") ? "#ffb02e" : "#46e6ff";
+          box(0, 32.5, 0, 1.4, 1.4, 1.4, color); glow(0, 32.5, 0, 1.6, 1.6, 1.6, color);
+        }
         // 檐口一圈暖白边缘光 + 门廊柱脚洗墙光 + 穹顶青色腰线。
         for (const sz of [-1, 1]) glow(0, 11.7, sz * r * 0.31, r * 0.98, 0.22, 0.22, "#ffe2a8");
         for (const sx of [-1, 1]) glow(sx * r * 0.49, 11.7, 0, 0.22, 0.22, r * 0.62, "#ffe2a8");
@@ -1047,6 +1092,16 @@ export class CityParts {
         box(0, 0, -r * 0.62, r * 1.3, 11, 7, "#d9cdb5");
         cyl(r * 0.5, 11, -r * 0.62, 1.6, 10, "#c8bba0");
         cyl(r * 0.5, 21, -r * 0.62, 2.1, 1.2, "#f4efe0");
+        // 细化：站房拱形大窗与入口雨篷、雨棚屋脊、站台上停靠的列车（车头 + 3 节车厢）。
+        for (let k = -2; k <= 2; k += 1) box(k * r * 0.22, 2, -r * 0.62 + 3.55, r * 0.14, 6.5, 0.15, "#5c7380");
+        box(0, 3.8, -r * 0.62 + 4.6, r * 0.5, 0.35, 2.4, "#8e9a9c");
+        box(0, 7.95, 0, r * 1.4, 0.8, 1.2, "#7c878a");
+        for (let car = 0; car < 4; car += 1) {
+          const z = -r * 0.42 + car * 9.5;
+          box(-10, 0.85, z, 3, 3.2, 9, car === 0 ? "#e8eef0" : "#d8dde0");
+          box(-10, 2.6, z, 3.05, 0.9, 8.6, "#3a5866");
+          box(-10, 0.85, z, 3.1, 0.35, 9, car % 2 ? "#ff6fae" : "#38c3c9");
+        }
         // 站房钟面发光 + 雨棚两侧边缘光 + 站台边线。
         glow(r * 0.5, 21.15, -r * 0.62, 1.7, 0.9, 1.7, "#fff3cf");
         for (const sz of [-1, 1]) glow(0, 7.5, sz * r * 0.45, r * 1.4, 0.22, 0.22, "#58e0ff");
@@ -1484,6 +1539,12 @@ export class CityParts {
         mesh(new THREE.SphereGeometry(5.5, 18, 12).scale(1, 0.55, 1), white, group, 0, h * 0.72, 0);
         mesh(new THREE.TorusGeometry(6.2, 0.5, 6, 32).rotateX(Math.PI / 2), material("#7fb4c2", neon ? 0.8 : 0.2), group, 0, h * 0.72, 0);
         mesh(new THREE.CylinderGeometry(0.25, 0.45, h * 0.24, 6).translate(0, h * 0.12, 0), red, group, 0, h * 0.78, 0);
+        // 细化：裙房入口、塔基三脚支撑、塔身两道环形检修平台、球舱下方深色玻璃观景层、天线上的航空灯球。
+        mesh(new THREE.CylinderGeometry(8, 8.5, 4, 16).translate(0, 2, 0), white, group, 0, 0, 0);
+        for (let k = 0; k < 3; k += 1) { const t = (k / 3) * Math.PI * 2; const leg = mesh(new THREE.BoxGeometry(1.4, 14, 1.4).translate(0, 7, 0), steel, group, Math.cos(t) * 4.5, 3, Math.sin(t) * 4.5); leg.rotation.z = Math.cos(t) * 0.18; leg.rotation.x = -Math.sin(t) * 0.18; }
+        for (const f of [0.3, 0.5]) mesh(new THREE.CylinderGeometry(3.4, 3.4, 0.5, 14), white, group, 0, h * f, 0);
+        mesh(new THREE.CylinderGeometry(5.2, 4.6, 1.8, 18).translate(0, 0.9, 0), material("#2f4552"), group, 0, h * 0.72 - 3.8, 0);
+        mesh(new THREE.SphereGeometry(0.6, 8, 6), material("#ff3b3b", 1.5), group, 0, h * 0.78 + h * 0.24, 0);
       } else if (landmark.kind === "twin-towers") {
         // Miami Tropical Deco 双塔：白色塔身 + 浅青玻璃带窗、每层带一道白色「眉檐」遮阳板、四角粉彩竖鳍、
         // 阶梯式（ziggurat）塔冠与霓虹勾边。曾用夜景窗格贴图乘粉彩色：贴图本身偏暗，乘出来两栋漆黑（真机截图）。
@@ -1574,8 +1635,9 @@ export class CityParts {
         // 曾是两根方柱 + 横梁（用户：「请细化这些建筑模型」）。全部为通用古典语汇，不参照具体建筑。
         const h = Math.min(cap, 26);
         const stone = material("#ece5d6"); const trim = material("#d6ccb7"); const bronze = material("#8a7a52");
-        const W = 26; const D = 9; const pierW = 7.5; const openW = W - pierW * 2; const springY = h * 0.55;
-        mesh(new THREE.BoxGeometry(W + 3, 1.6, D + 3).translate(0, 0.8, 0), trim, group, 0, 0, 0);            // 基座
+        const W = 31; const D = 9; const pierW = 7.5; const openW = W - pierW * 2; const springY = h * 0.55; // 开口 16：骑在 12 宽主干道上 const openW = W - pierW * 2; const springY = h * 0.55;
+        // 基座只在两墩下：开口里是路面，不能被基座盖住（骑路后截图发现）。
+        for (const side of [-1, 1]) mesh(new THREE.BoxGeometry(pierW + 1.5, 1.6, D + 3).translate(0, 0.8, 0), trim, group, side * (openW / 2 + pierW / 2 + 0.75), 0, 0);
         for (const side of [-1, 1]) {
           const cx = side * (openW / 2 + pierW / 2);
           mesh(new THREE.BoxGeometry(pierW, h, D).translate(0, h / 2, 0), stone, group, cx, 1.6, 0);          // 墩身
@@ -1805,11 +1867,40 @@ export class CityParts {
         glows.push({ civic: civicIndex, mesh: 2, index: glows.length, x: q.x, y: base + ly, z: q.z, sx, sy, sz, yaw: civic.yaw, baseY: base });
         colors[2].push(color);
       };
+      // 细化（用户：医院等没有窗户和门）：给一块体量的四个立面排窗——每层一条深色窗带，竖向窗棂隔成单窗。
+      // (cx, cz) 体量中心，w×d 体量平面，h 高度；faces 选哪几面（"n"=−z、"s"=+z、"w"=−x、"e"=+x）。
+      const windows = (cx: number, cz: number, w: number, d: number, h: number, faces: string, glass = "#4f6b78") => {
+        for (let y = 2; y + 1.2 <= h - 0.8; y += 3.1) {
+          for (const face of faces) {
+            const alongX = face === "n" || face === "s";
+            const len = (alongX ? w : d) * 0.86;
+            const off = face === "n" ? -d / 2 : face === "s" ? d / 2 : face === "w" ? -w / 2 : w / 2;
+            const fx = alongX ? cx : cx + off + Math.sign(off) * 0.08; const fz = alongX ? cz + off + Math.sign(off) * 0.08 : cz;
+            box(fx, y, fz, alongX ? len : 0.16, 1.25, alongX ? 0.16 : len, glass);
+            const count = Math.max(2, Math.floor(len / 2.4));
+            for (let k = 1; k < count; k += 1) {
+              const t = -len / 2 + (k * len) / count;
+              box(alongX ? fx + t : fx + Math.sign(off) * 0.02, y, alongX ? fz + Math.sign(off) * 0.02 : fz + t, alongX ? 0.28 : 0.2, 1.25, alongX ? 0.2 : 0.28, "#f2efe6");
+            }
+          }
+        }
+      };
+      // 正门：门洞（深色）+ 两扇玻璃门 + 雨篷 + 台阶，开在 +z 立面。
+      const entrance = (cx: number, faceZ: number, w: number, canopy: string) => {
+        box(cx, 0, faceZ + 0.1, w, 3, 0.2, "#2c3a42");
+        for (const k of [-1, 1]) box(cx + k * w * 0.22, 0, faceZ + 0.22, w * 0.38, 2.6, 0.06, "#7fb6c8");
+        box(cx, 3.2, faceZ + 1.2, w * 1.3, 0.3, 2.4, canopy);
+        box(cx, 0, faceZ + 1.6, w * 1.2, 0.3, 1.6, "#d8d3c6");
+      };
       if (civic.kind === "school") {
         // U 形教学楼 + 操场（绿茵 + 红色跑道）+ 旗杆。
         box(-W * 0.38, 0, -D * 0.18, W * 0.2, 9, D * 0.6, "#e9d9b8");
         box(W * 0.38, 0, -D * 0.18, W * 0.2, 9, D * 0.6, "#e9d9b8");
         box(0, 0, -D * 0.42, W * 0.96, 11, D * 0.16, "#f1e4c6");
+        windows(0, -D * 0.42, W * 0.96, D * 0.16, 11, "ns");
+        windows(-W * 0.38, -D * 0.18, W * 0.2, D * 0.6, 9, "we");
+        windows(W * 0.38, -D * 0.18, W * 0.2, D * 0.6, 9, "we");
+        entrance(0, -D * 0.42 + D * 0.08, 4, "#b5533c");
         box(0, 11, -D * 0.42, W * 0.96, 0.6, D * 0.18, "#b5533c");
         box(0, 0.05, D * 0.22, W * 0.62, 0.12, D * 0.42, "#b8574a");
         box(0, 0.1, D * 0.22, W * 0.5, 0.14, D * 0.3, "#6fa65a");
@@ -1822,6 +1913,8 @@ export class CityParts {
       } else if (civic.kind === "mall") {
         // 大体量低层 + 玻璃中庭 + 屋顶停车场 + 招牌塔。
         box(0, 0, 0, W, 10, D, "#d9d3c7");
+        windows(W * 0.12, 0, W * 0.7, D, 10, "nse", "#5f8796");
+        for (const k of [-1, 0, 1]) entrance(W * 0.12 + k * W * 0.2, D / 2, 4.5, "#ff6f61");
         box(0, 10, 0, W * 0.98, 0.4, D * 0.98, "#6e7275");
         for (let row = -2; row <= 2; row += 1) box(W * 0.15, 10.45, row * D * 0.16, W * 0.5, 0.06, 0.25, "#e8e3c8");
         box(-W * 0.3, 0, 0, W * 0.24, 13, D * 0.5, "#6f9fb6");
@@ -1839,13 +1932,22 @@ export class CityParts {
         box(W * 0.32, 0, D * 0.06, W * 0.3, 12, D * 0.34, "#ecefea");
         cyl(0, 22, 0, Math.min(W, D) * 0.16, 0.4, "#5d6266");
         box(0, 22.42, 0, Math.min(W, D) * 0.16, 0.05, 1.2, "#f2f2ee");
-        box(0, 16, D * 0.225, 1.4, 5, 0.3, "#e0352b");
-        box(0, 16, D * 0.225, 5, 1.4, 0.3, "#e0352b");
-        box(0, 0, D * 0.36, W * 0.3, 3.4, 4, "#d84a3d");
-        glow(0, 16, D * 0.235, 1.2, 4.8, 0.1, "#ff4a3d"); // 红十字发光
-        glow(0, 16, D * 0.235, 4.8, 1.2, 0.1, "#ff4a3d");
+        // 红十字：白底方牌 + 等长十字，两条臂中心重合（曾横臂底边与竖臂底边齐平，读作倒 T「⊥」）。前后两面都挂。
+        for (const face of [1, -1]) {
+          const fz = face * (D * 0.22 + 0.12);
+          box(0, 14.6, fz, 7, 7, 0.2, "#ffffff");
+          box(0, 15.4, fz + face * 0.12, 1.8, 5.4, 0.2, "#e0352b");
+          box(0, 17.2, fz + face * 0.12, 5.4, 1.8, 0.2, "#e0352b");
+          glow(0, 15.4, fz + face * 0.24, 1.6, 5.2, 0.06, "#ff4a3d");
+          glow(0, 17.2, fz + face * 0.24, 5.2, 1.6, 0.06, "#ff4a3d");
+        }
+        windows(0, 0, W * 0.34, D * 0.44, 13.5, "nsew", "#6c8fa0");
+        windows(-W * 0.32, D * 0.06, W * 0.3, D * 0.34, 12, "nsw", "#6c8fa0");
+        windows(W * 0.32, D * 0.06, W * 0.3, D * 0.34, 12, "nse", "#6c8fa0");
+        // 急诊入口：红色雨篷挂在正门外（曾是一块红色实心方块挡在楼前）。
+        entrance(0, D * 0.22, 6, "#d84a3d");
+        box(W * 0.2, 0, D * 0.22 + 2, 0.3, 3.2, 0.3, "#d8dcdc"); box(W * 0.2, 3.2, D * 0.22 + 2, 1.8, 1.8, 0.2, "#d84a3d");
         glow(0, 22.2, 0, W * 0.34, 0.22, D * 0.44, "#7fe8ff");
-        glow(0, 3.5, D * 0.36 + 2, W * 0.3, 0.22, 0.22, "#ff4a3d");
       }
     });
     const build = (geometry: THREE.BufferGeometry, pieces: Piece[], palette: string[], name: string) => {
@@ -1973,12 +2075,36 @@ export class CityParts {
   /** 城区地标（S5「每个区也需要有自己的地标建筑物」）：离城区中心最近的空地块上一座三级收分的装饰艺术塔，
    *  墙身取区色粉彩、玻璃带窗、霓虹勾边与塔尖，夜里亮窗（与双子塔同一套 landmarkWindows）。
    *  高度取本区最高会话楼 × 1.15（58–110）——城区天际线的峰值；装饰，不代表会话。 */
+  /** 城区地标高度（绝对口径，用户确认）：下限 = 全城最高会话楼 × 1.1（≈40，不低于会话楼），每个会话 +0.37，上限 160。
+   *  只随本区会话数增长，别的城区增长不会把它压矮；回放中按「截至游标已开始的会话数」逐层加盖（applyCursor）。
+   *  实测（700 模拟会话）：DeepSeek 43 → 56，ZCode 82 → 70，Claude Code 120 → 84，Codex 135 → 90。
+   *  曾按「最少 → 最多城区」相对插值：最大城区恒为 90、最小恒为 40，全体同比增长时高度不变，别区增长还会变矮。 */
+  districtLandmarkHeight(districtId: string, sessions?: number): number {
+    const own = sessions ?? this.model.districts.find((d) => d.id === districtId)?.sessionCount ?? 0;
+    const floor = Math.max(30, ...this.model.buildings.map((b) => b.height)) * 1.1;
+    return Math.min(160, floor + 0.37 * own);
+  }
+
+  private districtLandmarkGroups: THREE.Object3D[] | null = null;
+  /** 回放：地标按截至游标已开始的会话数缩放到对应高度（live 时为完整高度）。 */
+  private applyDistrictLandmarkGrowth(cursor: number, live: boolean): void {
+    if (!this.districtLandmarkGroups) {
+      this.districtLandmarkGroups = [];
+      this.group.traverse((o) => { if (o.name.startsWith("city-landmark-district:")) this.districtLandmarkGroups!.push(o); });
+    }
+    for (const group of this.districtLandmarkGroups) {
+      const id = group.name.slice("city-landmark-district:".length);
+      const started = live ? undefined : this.model.buildings.filter((b) => b.districtId === id && b.startedAt <= cursor).length;
+      const full = this.districtLandmarkHeight(id);
+      group.scale.y = started === undefined ? 1 : Math.max(0.05, this.districtLandmarkHeight(id, started) / full);
+    }
+  }
+
   private buildDistrictLandmarks(): void {
     const neon = activeTheme().neon;
     for (const spot of this.layout.districtLandmarks ?? []) {
       const palette = paletteFor(spot.districtId);
-      const tallest = Math.max(0, ...this.model.buildings.filter((b) => b.districtId === spot.districtId).map((b) => b.height));
-      const h = Math.max(58, Math.min(110, tallest * 1.15));
+      const h = this.districtLandmarkHeight(spot.districtId);
       const day = createRenderCanvas(); day.width = 64; day.height = 64;
       const dctx = day.getContext("2d");
       if (dctx) {
@@ -3192,8 +3318,13 @@ export class CityParts {
       const height = 0.024;
       sprite.scale.set(height * aspect, height, 1);
       sprite.renderOrder = 20;
-      const crowd = this.labels.filter((other) => Math.hypot(other.position.x - district.center.x, other.position.z - district.center.z) < 150).length;
-      sprite.position.set(district.center.x, district.plaza.y + 45 + crowd * 34, district.center.z);
+      // 标签立在本区地标正上方（用户：把城区标签放到地标建筑上方）；没有地标时退回城区中心上空。
+      const landmark = (this.layout.districtLandmarks ?? []).find((l) => l.districtId === district.id);
+      if (landmark) sprite.position.set(landmark.x, Math.max(0.3, landmark.y) + this.districtLandmarkHeight(district.id) + 22, landmark.z);
+      else {
+        const crowd = this.labels.filter((other) => Math.hypot(other.position.x - district.center.x, other.position.z - district.center.z) < 150).length;
+        sprite.position.set(district.center.x, district.plaza.y + 45 + crowd * 34, district.center.z);
+      }
       this.group.add(sprite);
       this.labels.push(sprite);
       this.disposables.push(material, texture);
@@ -3925,6 +4056,7 @@ export class CityParts {
     const context = this.layout.contextBuildings ?? [];
     if (this.contextTarget.length !== context.length) { this.contextTarget = new Float32Array(context.length).fill(1); this.contextProgress = new Float32Array(context.length).fill(1); }
     context.forEach((building, index) => { this.contextTarget[index] = live || cursor >= building.appearAt ? 1 : 0; });
+    this.applyDistrictLandmarkGrowth(cursor, live);
     for (const runtime of this.runtimes) {
       runtime.target = builtFractionAt(runtime.building, cursor, live, paceMsPerSec);
       if (live && runtime.building.active) runtime.target = Math.max(runtime.target, runtime.building.builtFraction);
@@ -4052,7 +4184,7 @@ export class CityParts {
   }
 
   /** 命中的非会话网格 → `decor:<kind>[:<detail>]`；配套按实例反查学校/商场/医院。 */
-  decorAt(mesh: THREE.Object3D, instanceId: number | undefined): string | null {
+  decorAt(mesh: THREE.Object3D, instanceId: number | undefined, point?: THREE.Vector3): string | null {
     for (let node: THREE.Object3D | null = mesh; node; node = node.parent) {
       const kind = decorKindForName(node.name);
       if (!kind) continue;
@@ -4061,6 +4193,11 @@ export class CityParts {
         const piece = this.civicPieces.find((item) => item.mesh === meshIndex && item.index === instanceId);
         const civic = piece ? (this.layout.civics ?? [])[piece.civic] : undefined;
         return civic ? `decor:civic:${civic.kind}` : "decor:civic";
+      }
+      // 公共用地是一批合并网格：按命中点找最近的用地，市政厅（civic）面板展示全城信息。
+      if (kind === "site" && point) {
+        const site = [...this.layout.publicSites].sort((a, b) => Math.hypot(a.x - point.x, a.z - point.z) - Math.hypot(b.x - point.x, b.z - point.z))[0];
+        if (site && Math.hypot(site.x - point.x, site.z - point.z) < site.radius * 1.4) return `decor:site:${site.kind}`;
       }
       return `decor:${kind}`;
     }

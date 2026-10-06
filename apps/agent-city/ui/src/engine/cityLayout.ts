@@ -269,6 +269,21 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     gardens.push({ id: `garden:${district.id}`, districtId: district.id, blockId: block.id, x: block.x, z: block.z, y: plan.terrain.height(block.x, block.z), yaw: block.parcels[0].yaw, width: block.width, depth: block.depth, seed: hashSeed(`garden:${district.id}`) });
   }
 
+  // 城区地标（用户：地标尽量放在城区中心、与景观湖配套）：先于会话落楼，在花园（景观湖）街区旁最近的空地块占位，
+  // 城区的楼再从花园向外长。曾在落楼之后取「离锚点最近的空地块」——内圈已被会话楼占满，地标落到城区边缘。
+  const districtLandmarks: DistrictLandmark[] = [];
+  for (const district of ranked) {
+    if (!model.buildings.some((building) => building.districtId === district.id)) continue;
+    const garden = gardens.find((g) => g.districtId === district.id);
+    const centre = garden ?? anchorOf.get(district.id)!;
+    const spot = plan.blocks.flatMap((block) => block.parcels)
+      .filter((parcel) => !used.has(parcel.id) && clearsHighways(parcel, 16, 16, plan.highways))
+      .sort((a, b) => Math.hypot(a.x - centre.x, a.z - centre.z) - Math.hypot(b.x - centre.x, b.z - centre.z) || a.id.localeCompare(b.id))[0];
+    if (!spot) continue;
+    used.add(spot.id);
+    districtLandmarks.push({ districtId: district.id, parcelId: spot.id, x: spot.x, z: spot.z, yaw: spot.yaw, y: plan.terrain.height(spot.x, spot.z) });
+  }
+
   // 落楼：每个执行环境在自己的小区里按 (startedAt, −height, id) 从花园向外取地块——回放时看得见小区从中心长出来。
   // 小区装满（会话数相对配额偏多）才溢出到小区外最近的空地块；全城都满才进背景楼群。
   // 已落位的会话保留地址（见上方 previous），刷新不搬家。
@@ -299,19 +314,6 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     if (overflow.length) massing.push(...aggregateOverflow(district.id, anchor, overflow, parcels, plan));
   }
   const civics = placeCivics(model, parcels, used, assigned, previous ?? null, plan);
-  // 城区地标：每个有楼的城区在离其中心（花园锚点）最近的空地块上立一座地标——城区天际线的峰值与识别物。
-  // 在背景楼与 G1 生长剪枝之前占位，地块所在街区因此算「已建」。
-  const districtLandmarks: DistrictLandmark[] = [];
-  for (const district of ranked) {
-    if (!model.buildings.some((building) => building.districtId === district.id && assigned.has(building.id))) continue;
-    const anchor = anchorOf.get(district.id)!;
-    const spot = plan.blocks.flatMap((block) => block.parcels)
-      .filter((parcel) => !used.has(parcel.id) && clearsHighways(parcel, 16, 16, plan.highways))
-      .sort((a, b) => Math.hypot(a.x - anchor.x, a.z - anchor.z) - Math.hypot(b.x - anchor.x, b.z - anchor.z) || a.id.localeCompare(b.id))[0];
-    if (!spot) continue;
-    used.add(spot.id);
-    districtLandmarks.push({ districtId: district.id, parcelId: spot.id, x: spot.x, z: spot.z, yaw: spot.yaw, y: plan.terrain.height(spot.x, spot.z) });
-  }
   // 海滨迈阿密是一个已经建成的城市，即使当前窗口只有少量会话也不应退化成
   // 空白规划图。背景楼只从空置地块取址，避开数据楼/整块花园/市政设施/高架
   // /酒店海滨保留带；优先填充会话城区周围，再向城市核心扩散，不加入会话统计。
@@ -527,7 +529,7 @@ function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<st
   for (const district of districts) {
     district.carPaths = district.carPaths.filter((route) => route.every((p, i) => i === 0 || pairs.has([`${route[i - 1].x}:${route[i - 1].z}`, `${p.x}:${p.z}`].sort().join("/"))));
   }
-  return { blocks, roadEdges, roadNodes, activityKey: [...live].sort().join(",") };
+  return { blocks, roadEdges, roadNodes, activityKey: [...live].sort().join(",") + "|" + districts.map((d) => `${d.id}:${d.sessionCount}:${d.anomaly?.severity ?? ""}`).join(",") }; // 会话数→地标/城区旗，异常→市政厅信标
 }
 
 /** 配套选址：会话楼先占地，配套只拿剩下的地块（绝不挤走会话）。

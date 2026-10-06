@@ -12,6 +12,7 @@ import { runFilmJob, supportsBackgroundFilm } from "./export/filmJob";
 import { cinematicCopy } from "./engine/cinematicCopy";
 import { describeDecor, isDecorId } from "./engine/cityDecor";
 import { CATALOG_GROUPS, CATALOG_KIND_LABEL, CITY_CATALOG } from "./cityCatalog";
+import { scaleTierFor } from "./engine/cityPlan";
 import { cityText, cityView, useCityLanguage } from "./i18n";
 
 const dateLabel = (ms: number) => new Date(ms).toLocaleString(pluginLocale() === "en" ? "en-US" : "zh-CN");
@@ -276,7 +277,42 @@ export function CityExperience({ ui, disabled, cinema, status, quality, onQualit
       <div className="city-cinema-top" /><div className="city-cinema-bottom"><span style={{ transform: `scaleX(${ui.progress})` }} /></div>
       {card && <div className="city-cinema-card"><p>{"eyebrow" in card ? card.eyebrow : ""}</p><h2>{card.title}</h2><p>{card.subtitle}</p></div>}
     </div>}
-    {ui.selected && isDecorId(ui.selected) && !cinema && (() => {
+    {ui.selected === "decor:site:civic" && !cinema && model && (() => {
+      // 市政厅 = 全城的功能性标志：面板展示全城概况（用户：「市政广场的市政厅能提供哪些功能性信息」）。
+      const total = model.stats.totalSessions || 1;
+      const tier = scaleTierFor(model.buildings.length);
+      const stage = tier >= 8 ? "议会大厦" : tier >= 5 ? "市政中心" : tier >= 3 ? "市政厅" : "镇政厅";
+      const ranked = [...model.districts].sort((a, b) => b.sessionCount - a.sessionCount);
+      const alerts = ranked.filter((d) => d.anomaly);
+      return <aside className="city-detail-panel" aria-label="建筑详情">
+        <button className="city-close" aria-label="关闭建筑详情" onClick={ui.clearSelection}>×</button>
+        <p>市政厅 · 全城概况</p><h2>{stage}</h2>
+        <dl><dt>会话</dt><dd>{model.stats.totalSessions}</dd><dt>今日活跃</dt><dd>{model.stats.activeCount}</dd>
+          <dt>已载入 token</dt><dd>{tokens(model.stats.tokensTotal)}</dd><dt>时间窗口</dt><dd>{model.windowLabel}</dd>
+          <dt>岛屿档位</dt><dd>{tier} / 10（每档约 400 个会话）</dd></dl>
+        <h3>城区份额</h3>
+        {ranked.map((d) => <button key={d.id} className="city-civic-share" disabled={locked} onClick={() => ui.focusDistrict(d.id)}>
+          <span style={{ background: paletteFor(d.id).accent, width: `${Math.max(4, (d.sessionCount / total) * 100)}%` }} />
+          {d.label} · {d.sessionCount} · {Math.round((d.sessionCount / total) * 100)}%</button>)}
+        {alerts.length ? <><h3>异常</h3>{alerts.map((d) => <p key={d.id}>{d.label} · {d.anomaly!.severity} · {d.anomaly!.count} 条（部分投影）</p>)}</> : <p>当前没有城区异常。</p>}
+        <p>市政厅随岛屿档位升级；广场前的城区旗高度表示各城区会话占比，穹顶信标表示有城区异常。</p>
+      </aside>;
+    })()}
+    {ui.selected && ui.selected.startsWith("decor:landmark:district:") && !cinema && (() => {
+      // 城区地标 = 城区的功能性标志：面板展示该执行环境城区的数据（用户：把城区信息放到「城区地标」说明上）。
+      const districtId = ui.selected.slice("decor:landmark:district:".length);
+      const district = model?.districts.find((d) => d.id === districtId);
+      if (!district) return null;
+      return <aside className="city-detail-panel" aria-label="建筑详情">
+        <button className="city-close" aria-label="关闭建筑详情" onClick={ui.clearSelection}>×</button>
+        <p>城区地标 · 执行环境城区</p><h2>{district.label}</h2>
+        <dl><dt>会话</dt><dd>{district.sessionCount}</dd><dt>今日活跃</dt><dd>{district.activeCount}</dd>
+          {district.anomaly && <><dt>异常</dt><dd>{district.anomaly.severity} · {district.anomaly.count} 条（部分投影）</dd></>}</dl>
+        <p>地标高度随本区会话数增长：会话越多，地标越高。</p>
+        <button disabled={locked} onClick={() => ui.focusDistrict(district.id)}>聚焦城区</button>
+      </aside>;
+    })()}
+    {ui.selected && isDecorId(ui.selected) && !ui.selected.startsWith("decor:landmark:district:") && ui.selected !== "decor:site:civic" && !cinema && (() => {
       const info = describeDecor(ui.selected);
       if (!info) return null;
       return <aside className="city-detail-panel" aria-label="建筑详情">

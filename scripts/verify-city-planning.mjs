@@ -52,7 +52,7 @@ for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
   for (const site of [...plan.publicSites, ...plan.landmarks.filter((landmark) => landmark.radius)]) {
     let d = Infinity;
     for (const edge of plan.roadEdges) if (!edge.bridge) d = Math.min(d, segDist(site, edge.points[0], edge.points.at(-1)));
-    if (site.kind !== "civic" && d < site.radius * 0.7) totals.inside += 1;
+    if (site.kind !== "civic" && site.kind !== "arch" && d < site.radius * 0.7) totals.inside += 1; // 凯旋门按设计骑在路上
     if (d > site.radius + 20) totals.far += 1;
   }
   // 主干道不扎堆：不共享节点、彼此 < 25、夹角 < 15° 且侧向重叠的段对。

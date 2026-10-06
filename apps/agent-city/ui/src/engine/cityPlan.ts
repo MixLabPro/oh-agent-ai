@@ -514,8 +514,38 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   const SHORE_BOUND = new Set([...SHORE_SITE_KINDS, "civic"]); // civic = 核心广场，四周是环路
   const trunkSegments = trunks.flatMap((trunk) => trunk.points.slice(1).map((b, k) => [trunk.points[k], b] as const))
     .filter(([a, b]) => !bridges.some((bridge) => bridge.to === b || bridge.from === a && bridge.to === b));
+  // 岸边地标（歌剧院、摩天轮、灯塔、庄园）向核心方向内移，直到占地圈 16 点里落在水上的 ≤3 个——
+  // 曾按「离核心最近的海岸点」放下就不管了，约三分之一占地悬在海面上（场景依赖守卫抓到）。港口本就临水，除外。
+  for (const site of landmarks) {
+    if (!site.radius || !SHORE_SITE_KINDS.has(site.kind)) continue;
+    const wetCount = (c: Vec2) => { let n = 0; for (let k = 0; k < 16; k += 1) { const t = (k / 16) * Math.PI * 2; const r = k % 2 ? site.radius : site.radius * 0.6; if (height(c.x + Math.cos(t) * r, c.z + Math.sin(t) * r) < 0.5) n += 1; } return n; };
+    const dx = core.x - site.x; const dz = core.z - site.z; const len = Math.hypot(dx, dz) || 1;
+    // 每步都要求中心仍在陆上、不在河里：直线朝核心走可能跨过河道（geography 守卫 seed 3668352332 抓到摩天轮进河）。
+    for (let step = 0; step < 20 && wetCount(site) > 3; step += 1) {
+      const nx = site.x + (dx / len) * 3; const nz = site.z + (dz / len) * 3;
+      if (height(nx, nz) <= 0.5 || inRiver(nx, nz)) break;
+      site.x = nx; site.z = nz;
+    }
+  }
+  // 跨路地标（门式）：凯旋门骑在主干道上、道路从拱券开口穿过——曾与其它用地一样贴到路旁，门下是草地
+  // （用户截图：「凯旋门下面不是路？建筑物缺少约束」）。取最近主干道中段，开口轴（局部 z）沿道路方向。
+  const STRADDLE = new Set(["arch"]);
+  for (const site of landmarks) {
+    if (!STRADDLE.has(site.kind)) continue;
+    const ranked = trunkSegments.map(([a, b]) => ({ a, b, d: segmentDistance(site, a, b) })).sort((x, y) => x.d - y.d);
+    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
+    for (const { a, b } of ranked) {
+      const dx = b.x - a.x; const dz = b.z - a.z; const len = Math.hypot(dx, dz);
+      if (len < 20) continue;
+      const q = { x: a.x + dx * 0.5, z: a.z + dz * 0.5 };
+      if (!buildable(q.x, q.z) || !footprintDry(q, site.radius)) continue;
+      if (others.some((o) => Math.hypot(o.x - q.x, o.z - q.z) < o.radius + site.radius + 10)) continue;
+      site.x = q.x; site.z = q.z; site.yaw = Math.atan2(dx, dz);
+      break;
+    }
+  }
   for (const site of [...publicSites, ...landmarks]) {
-    if (!site.radius || SHORE_BOUND.has(site.kind)) continue;
+    if (!site.radius || SHORE_BOUND.has(site.kind) || STRADDLE.has(site.kind)) continue;
     const ranked = trunkSegments.map(([a, b]) => ({ a, b, d: segmentDistance(site, a, b) })).sort((x, y) => x.d - y.d).slice(0, 4);
     const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
     let placed = false;
@@ -546,7 +576,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     }
   }
   for (const site of [...publicSites, ...landmarks]) {
-    if (!site.radius || SHORE_BOUND.has(site.kind) || (landClearance(site.x, site.z) >= site.radius + 4 && footprintDry(site, site.radius))) continue;
+    if (!site.radius || SHORE_BOUND.has(site.kind) || STRADDLE.has(site.kind) || (landClearance(site.x, site.z) >= site.radius + 4 && footprintDry(site, site.radius))) continue;
     const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius).map((o) => ({ x: o.x, z: o.z, radius: o.radius }));
     const q = snap(site, siteClearance(site.kind, site.radius), others, site.radius,
       (c) => landClearance(c.x, c.z) >= site.radius + 4 && footprintDry(c, site.radius) && distanceToTrunks(c) >= site.radius + 8 && clearsHighways(c, site.radius * 2, site.radius * 2, ringRuns));
@@ -658,7 +688,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         && hillProj(q.x, q.z) < hillLine - 12 && height(q.x, q.z) < 6
         && !(seaside && seasideStripContains(seaside, q, 6))
         && !reservations().some((site) => Math.hypot(q.x - site.x, q.z - site.z) < site.radius + 8)
-        && !ringIndex.closerThan(q, 10) && !existingArterial.closerThan(q, 22);
+        && !ringIndex.closerThan(q, 10) && !existingArterial.closerThan(q, 28); // 28 > 规划守卫的「拥挤」阈值 25：曾 22，地标改位后 24–25 处并行被计为拥挤
       for (const side of [-1, 1]) {
         let runPts: Vec2[] = [];
         for (let z = bbox.minZ; z <= bbox.maxZ; z += 20) {
@@ -1041,30 +1071,6 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     }
   }
 
-  // 终筛：主干道、桥、连接支路都定型后，对每个地块统一核对「到任何路段的距离」。
-  // 块级检查只看街区四角与中心到主干道的距离，边中点更近的地块会漏过；连接支路又长达上百单位直穿街区、
-  // 且在地块之后才加入——布局守卫抓到过 gap 6.4 的压路地块。
-  {
-    const CELL = 60;
-    const grid = new Map<string, RoadEdge[]>();
-    for (const edge of edges.values()) {
-      const [a0, b0] = edge.points;
-      for (let gx = Math.floor(Math.min(a0.x, b0.x) / CELL) - 1; gx <= Math.floor(Math.max(a0.x, b0.x) / CELL) + 1; gx += 1)
-        for (let gz = Math.floor(Math.min(a0.z, b0.z) / CELL) - 1; gz <= Math.floor(Math.max(a0.z, b0.z) / CELL) + 1; gz += 1) {
-          const key2 = `${gx}:${gz}`;
-          const list = grid.get(key2);
-          if (list) list.push(edge); else grid.set(key2, [edge]);
-        }
-    }
-    for (const block of blocks) {
-      block.parcels = block.parcels.filter((parcel) => {
-        const need = Math.hypot(parcel.width, parcel.depth) / 2;
-        return (grid.get(`${Math.floor(parcel.x / CELL)}:${Math.floor(parcel.z / CELL)}`) ?? []).every((edge) =>
-          segmentDistance(parcel, edge.points[0], edge.points[1]) >= need + edge.width / 2 + 0.5);
-      });
-    }
-  }
-
   const parkTrees: CityLayout["parkTrees"] = [];
   const spanX = bbox.maxX - bbox.minX + 120; const spanZ = bbox.maxZ - bbox.minZ + 120;
   // 路段按 60 单位网格分桶：逐棵树对全部路段算距离是百万级运算（单岛 0.2–1 s 的主要来源）。
@@ -1221,6 +1227,31 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       if (!ok) carPaths.splice(r, 1);
     }
   }
+  // 终筛：所有改路步骤（接入路、断头路收尾、碎边合并）之后，对每个地块统一核对「到任何路段的距离」。
+  // 曾放在断头路收尾与碎边合并之前：那两步新增/移动的路段会压到地块上（凯旋门骑路改位后布局守卫抓到 gap 6.2）。
+  // 块级检查只看街区四角与中心到主干道的距离，边中点更近的地块会漏过；连接支路又长达上百单位直穿街区、
+  // 且在地块之后才加入——布局守卫抓到过 gap 6.4 的压路地块。
+  {
+    const CELL = 60;
+    const grid = new Map<string, RoadEdge[]>();
+    for (const edge of edges.values()) {
+      const [a0, b0] = edge.points;
+      for (let gx = Math.floor(Math.min(a0.x, b0.x) / CELL) - 1; gx <= Math.floor(Math.max(a0.x, b0.x) / CELL) + 1; gx += 1)
+        for (let gz = Math.floor(Math.min(a0.z, b0.z) / CELL) - 1; gz <= Math.floor(Math.max(a0.z, b0.z) / CELL) + 1; gz += 1) {
+          const key2 = `${gx}:${gz}`;
+          const list = grid.get(key2);
+          if (list) list.push(edge); else grid.set(key2, [edge]);
+        }
+    }
+    for (const block of blocks) {
+      block.parcels = block.parcels.filter((parcel) => {
+        const need = Math.hypot(parcel.width, parcel.depth) / 2;
+        return (grid.get(`${Math.floor(parcel.x / CELL)}:${Math.floor(parcel.z / CELL)}`) ?? []).every((edge) =>
+          segmentDistance(parcel, edge.points[0], edge.points[1]) >= need + edge.width / 2 + 0.5);
+      });
+    }
+  }
+
   return { blocks, roadNodes: [...nodes.values()], roadEdges: [...edges.values()], terrain, extent, coast, river, publicSites, parkTrees,
     urbanBounds, bridges, boundsRadius, carPaths, coastRoads: coastRoadRuns.slice(0, coastalRunCount), districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks: withBridgeLandmark(landmarks, bridges, random), seaside };
 }
