@@ -24,6 +24,7 @@ export function describeDecor(id: string): DecorInfo | null {
   const [, kind, detail] = id.split(":");
   switch (kind) {
     case "landmark":
+      if (detail === "district") return { title: "城区地标", category: "城区地标 · 装饰", body: "每个执行环境城区在自己中心立一座地标，取区色、高于本区最高的会话楼。不代表任何会话。" };
       return { title: LANDMARK_NAMES[detail] ?? "地标", category: "致敬地标 · 装饰", body: "由岛屿种子挑选的城市地标。不代表任何会话，不随数据变化。" };
     case "civic":
       return { title: CIVIC_NAMES[detail] ?? "城市配套", category: "城市配套 · 随规模增长", body: "会话越多，城市配套越多（约每 45 个会话一座）。它反映城市规模，不代表单个会话。" };

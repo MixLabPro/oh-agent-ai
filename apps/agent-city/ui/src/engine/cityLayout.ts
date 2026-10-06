@@ -1,6 +1,6 @@
 /** Geography and public planning are fixed; sessions occupy reserved parcels. */
 import { hashSeed, type CityModel } from "../cityModel";
-import { clearsHighways, createCityPlan, scaleTierFor, type Biome, type Landmark } from "./cityPlan";
+import { clearsHighways, createCityPlan, polygonDistance, scaleTierFor, type Biome, type Landmark } from "./cityPlan";
 import { seasideHotelLots, seasideStripContains, type CoastalConfig } from "./citySeaside";
 
 export type Vec2 = { x: number; z: number };
@@ -25,7 +25,12 @@ export type DistrictLayout = {
   river: Vec2[] | null; riverHalfWidth: number; trees: Array<Vec2 & { y: number; seed: number }>;
   plaza: Vec2 & { y: number }; anomaly: { severity: "critical" | "warning" | "info"; count: number } | null;
   sessionCount: number;
+  /** 地价（0–1，S5）：离城区中心/城市核心越近、临主干道、临海越高。建筑形态随它变化（高 → 塔楼、低 → 板楼），
+   *  楼高仍由 token 决定——地价只改「长成什么样」，不改「有多大」。 */
+  landValue: Map<string, number>;
 };
+/** 城区地标（S5「每区一个地标」）：落在离城区中心最近的空地块上，取区色；装饰，不代表会话。 */
+export type DistrictLandmark = { districtId: string; parcelId: string; x: number; z: number; yaw: number; y: number };
 /** 城市配套：学校 / 商场 / 医院。数量随会话规模增长（每 CIVIC_PER_SESSIONS 个会话一座），
  *  落成时刻 = 城市长到那个规模的时刻——回放时看得见「城市在发展」。纯装饰，不进统计、不可拾取。 */
 /** 小区中心花园：每个执行环境城区锚点处预留一个整街区（湖 + 假山 + 亭 + 环湖树），楼从四周向外长。 */
@@ -56,6 +61,7 @@ export type CityLayout = {
   seed: number; districts: DistrictLayout[]; blocks: CityBlock[]; roadNodes: RoadNode[]; roadEdges: RoadEdge[];
   /** 哪些街区已建/预留的指纹：静态城缓存（地面贴图）据此判断是否重画。 */
   activityKey?: string;
+  districtLandmarks?: DistrictLandmark[];
   terrain: TerrainField; extent: number; coast: Vec2[]; river: Vec2[]; publicSites: PublicSite[];
   parkTrees: Array<Vec2 & { y: number; seed: number }>;
   urbanBounds: { left: number; right: number; north: number; south: number };
@@ -290,6 +296,19 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     if (overflow.length) massing.push(...aggregateOverflow(district.id, anchor, overflow, parcels, plan));
   }
   const civics = placeCivics(model, parcels, used, assigned, previous ?? null, plan);
+  // 城区地标：每个有楼的城区在离其中心（花园锚点）最近的空地块上立一座地标——城区天际线的峰值与识别物。
+  // 在背景楼与 G1 生长剪枝之前占位，地块所在街区因此算「已建」。
+  const districtLandmarks: DistrictLandmark[] = [];
+  for (const district of ranked) {
+    if (!model.buildings.some((building) => building.districtId === district.id && assigned.has(building.id))) continue;
+    const anchor = anchorOf.get(district.id)!;
+    const spot = plan.blocks.flatMap((block) => block.parcels)
+      .filter((parcel) => !used.has(parcel.id) && clearsHighways(parcel, 16, 16, plan.highways))
+      .sort((a, b) => Math.hypot(a.x - anchor.x, a.z - anchor.z) - Math.hypot(b.x - anchor.x, b.z - anchor.z) || a.id.localeCompare(b.id))[0];
+    if (!spot) continue;
+    used.add(spot.id);
+    districtLandmarks.push({ districtId: district.id, parcelId: spot.id, x: spot.x, z: spot.z, yaw: spot.yaw, y: plan.terrain.height(spot.x, spot.z) });
+  }
   // 海滨迈阿密是一个已经建成的城市，即使当前窗口只有少量会话也不应退化成
   // 空白规划图。背景楼只从空置地块取址，避开数据楼/整块花园/市政设施/高架
   // /酒店海滨保留带；优先填充会话城区周围，再向城市核心扩散，不加入会话统计。
@@ -380,6 +399,22 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
       building.appearAt = windowStart + ((index + 0.5) / contextBuildings.length) * span * 0.85;
     });
   }
+  // 地价场（S5，参照 Lechner 等的用地价值）：城区中心 50%、城市核心 20%、临主干道 15%、临海 15%。
+  const primaryRoads = plan.roadEdges.filter((edge) => edge.width >= 12 && !edge.bridge);
+  const landValueAt = (p: Vec2, anchor: Vec2) => {
+    const clamp = (v: number) => Math.max(0, Math.min(1, v));
+    const centre = 1 - clamp(Math.hypot(p.x - anchor.x, p.z - anchor.z) / 180);
+    const coreness = 1 - clamp(Math.hypot(p.x - core.x, p.z - core.z) / (plan.islandRadius * 0.8));
+    let road = Infinity;
+    for (const edge of primaryRoads) {
+      const [a, b] = edge.points; const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
+      const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / l2));
+      road = Math.min(road, Math.hypot(p.x - a.x - dx * t, p.z - a.z - dz * t));
+    }
+    const shore = polygonDistance(p, plan.coast);
+    return clamp(0.5 * centre + 0.2 * coreness + 0.15 * (road < 30 ? 1 - road / 30 : 0) + 0.15 * (shore < 120 ? 1 - shore / 120 : 0));
+  };
+
   const districts = model.districts.map((district, districtIndex): DistrictLayout => {
     const buildings = model.buildings.filter((building) => building.districtId === district.id && assigned.has(building.id));
     const slots = new Map(buildings.map((building) => [building.id, assigned.get(building.id)!]));
@@ -398,6 +433,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
       river: plan!.river, riverHalfWidth: 18, trees: [], plaza,
       anomaly: district.anomaly ? { severity: district.anomaly.severity, count: district.anomaly.count } : null,
       sessionCount: district.sessionCount,
+      landValue: new Map(buildings.map((building) => [building.id, landValueAt(assigned.get(building.id)!, anchorOf.get(district.id) ?? core)])),
     };
   });
   // 海岸外扩航道：把海岸折线径向外推成闭环，船沿海岸线巡航。
@@ -412,7 +448,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     { center: { x: centroid.x - 1020, z: centroid.z + 260 }, radius: 150, height: 108, seed: 37 },
   ];
   const grown = growWithBuildings(plan, used, districts);
-  return { ...plan, ...grown, districts, seed, massing, civics, gardens, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings };
+  return { ...plan, ...grown, districtLandmarks, districts, seed, massing, civics, gardens, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings };
 }
 
 /**

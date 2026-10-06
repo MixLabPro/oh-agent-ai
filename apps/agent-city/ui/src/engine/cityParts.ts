@@ -463,6 +463,7 @@ export class CityParts {
       this.buildMarina();
       this.buildCivics();
       this.buildLandmarks();
+      this.buildDistrictLandmarks();
       this.buildUrbanContext();
       this.buildSeaMountains();
       this.buildBeachRibbon();
@@ -556,7 +557,7 @@ export class CityParts {
     const facadeCounts = [0, 0, 0, 0];
     for (const building of model.buildings) {
       if (!zoneById.has(building.id)) continue;
-      facadeCounts[this.facadeFor(building)] += building.archetype === "tower" || building.archetype === "landmark" ? 2 : 1;
+      facadeCounts[this.facadeFor(building)] += this.formOf(building) === "tower" || this.formOf(building) === "landmark" ? 2 : 1;
     }
     facades.forEach((texture, variant) => {
       const capacity = facadeCounts[variant] + 8;
@@ -1796,7 +1797,7 @@ export class CityParts {
     if (facade === 3) return 0; // 装饰艺术楼有自己的阶梯冠
     const zone = this.zoneById.get(building.id);
     const r = building.seed;
-    if (building.archetype === "landmark" || building.archetype === "tower") return r > 0.66 ? 2 : r > 0.3 ? 3 : 0;
+    if (this.formOf(building) === "landmark" || this.formOf(building) === "tower") return r > 0.66 ? 2 : r > 0.3 ? 3 : 0;
     if ((zone === "residential" || zone === "waterfront") && building.height < 30) return r < 0.55 ? 1 : 0;
     if (zone === "commercial") return r < 0.4 ? 4 : r < 0.6 ? 3 : 0;
     if (zone === "downtown") return r < 0.35 ? 3 : 0;
@@ -1861,13 +1862,104 @@ export class CityParts {
 
   /** 分区驱动立面：downtown 玻璃 / commercial 横带 / residential 窗洞 /
    *  waterfront 混合。无地块信息的楼（不应出现）退回模型层的 hash 立面。 */
+  /** 城区地标（S5「每个区也需要有自己的地标建筑物」）：离城区中心最近的空地块上一座三级收分的装饰艺术塔，
+   *  墙身取区色粉彩、玻璃带窗、霓虹勾边与塔尖，夜里亮窗（与双子塔同一套 landmarkWindows）。
+   *  高度取本区最高会话楼 × 1.15（58–110）——城区天际线的峰值；装饰，不代表会话。 */
+  private buildDistrictLandmarks(): void {
+    const neon = activeTheme().neon;
+    for (const spot of this.layout.districtLandmarks ?? []) {
+      const palette = paletteFor(spot.districtId);
+      const tallest = Math.max(0, ...this.model.buildings.filter((b) => b.districtId === spot.districtId).map((b) => b.height));
+      const h = Math.max(58, Math.min(110, tallest * 1.15));
+      const day = createRenderCanvas(); day.width = 64; day.height = 64;
+      const dctx = day.getContext("2d");
+      if (dctx) {
+        dctx.fillStyle = "#ffffff"; dctx.fillRect(0, 0, 64, 64);
+        dctx.fillStyle = "#9fd6e0"; dctx.fillRect(6, 16, 52, 34);
+        dctx.fillStyle = "#c8ecf2"; dctx.fillRect(6, 16, 52, 6);
+        dctx.fillStyle = "#eeeeee"; for (let x = 6; x < 64; x += 13) dctx.fillRect(x, 16, 2, 34);
+      }
+      const lit = createRenderCanvas(); lit.width = 64; lit.height = 256;
+      const lctx = lit.getContext("2d");
+      if (lctx) {
+        lctx.fillStyle = "#000000"; lctx.fillRect(0, 0, 64, 256);
+        for (let floor = 0; floor < 4; floor += 1) for (let cell = 0; cell < 4; cell += 1) {
+          const on = hashSeed(`district-window:${spot.districtId}:${floor}:${cell}`);
+          if (on < 0.3) continue;
+          lctx.fillStyle = on > 0.85 ? "#bfe9ff" : "#ffd89a";
+          lctx.fillRect(6 + cell * 13 + 1, floor * 64 + 16, 11, 34);
+        }
+      }
+      const floors = Math.max(8, Math.round(h / 4));
+      const dayTexture = new THREE.CanvasTexture(day as HTMLCanvasElement);
+      const litTexture = new THREE.CanvasTexture(lit as HTMLCanvasElement);
+      for (const texture of [dayTexture, litTexture]) { texture.colorSpace = THREE.SRGBColorSpace; texture.wrapS = texture.wrapT = THREE.RepeatWrapping; }
+      dayTexture.repeat.set(3, floors); litTexture.repeat.set(3, floors / 4);
+      const pastel = new THREE.Color(palette.accent).lerp(new THREE.Color("#ffffff"), 0.55);
+      const wall = new THREE.MeshLambertMaterial({ map: dayTexture, color: pastel, emissive: new THREE.Color("#3a3936"), emissiveMap: dayTexture });
+      this.landmarkWindows.push({ material: wall, day: dayTexture, lit: litTexture, dayEmissive: new THREE.Color("#3a3936") });
+      const trim = new THREE.MeshLambertMaterial({ color: "#ffffff", emissive: new THREE.Color("#ffffff").multiplyScalar(0.2) });
+      const glow = new THREE.MeshLambertMaterial({ color: palette.accent, emissive: new THREE.Color(palette.accent).multiplyScalar(neon ? 1.4 : 0.45) });
+      const group = new THREE.Group();
+      group.name = `city-landmark-district:${spot.districtId}`;
+      group.position.set(spot.x, Math.max(0.3, spot.y), spot.z);
+      group.rotation.y = spot.yaw;
+      const add = (geometry: THREE.BufferGeometry, material: THREE.Material, y: number) => {
+        const mesh = new THREE.Mesh(geometry, material); mesh.position.y = y; mesh.castShadow = true; mesh.receiveShadow = true;
+        group.add(mesh); this.disposables.push(geometry);
+      };
+      add(new THREE.BoxGeometry(17, 4, 17).translate(0, 2, 0), trim, 0);                          // 裙楼
+      let y = 4;
+      for (const [w, share] of [[12, 0.55], [9.5, 0.27], [7, 0.18]] as Array<[number, number]>) {
+        const height = (h - 4) * share;
+        add(new THREE.BoxGeometry(w, height, w).translate(0, height / 2, 0), wall, y);
+        add(new THREE.BoxGeometry(w + 0.6, 0.45, w + 0.6), glow, y + height);                      // 每级霓虹勾边
+        y += height;
+      }
+      add(new THREE.CylinderGeometry(0.2, 0.5, 9, 6).translate(0, 4.5, 0), trim, y);              // 塔尖
+      this.group.add(group);
+      this.disposables.push(dayTexture, litTexture, wall, trim, glow);
+    }
+  }
+
+  private landValueCache: Map<string, number> | null = null;
+  /** 地价驱动形态（S5，用户「同区建筑颜色风格一致，但形态随地块价值变化」）：区内地价前 25% 读作
+   *  塔楼（细、退台、塔冠），后 30% 读作板楼/街坊楼（宽、浅）；中段保留数据给的原型；数据地标原样。
+   *  楼高不动——token 决定大小，地价只决定长成什么样。 */
+  private formOf(building: CityBuilding): CityBuilding["archetype"] {
+    if (building.archetype === "landmark") return "landmark";
+    if (!this.landValueCache) {
+      this.landValueCache = new Map();
+      // 区内相对地价（百分位）：绝对值在各区都偏低（实测最高 0.55），绝对阈值一栋塔都切不出来；
+      // 地价本来就是相对的——区内最贵的四分之一盖塔楼，最便宜的三成盖板楼/街坊楼。
+      for (const district of this.layout.districts) {
+        const ranked = [...(district.landValue ?? [])].sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0]));
+        ranked.forEach(([id], index) => this.landValueCache!.set(id, ranked.length > 1 ? index / (ranked.length - 1) : 0.5));
+      }
+    }
+    const percentile = this.landValueCache.get(building.id);
+    if (percentile === undefined) return building.archetype;
+    return percentile >= 0.75 ? "tower" : percentile < 0.3 ? (building.seed < 0.5 ? "slab" : "block") : building.archetype;
+  }
+
+  private percentileOf(building: CityBuilding): number | undefined {
+    if (!this.landValueCache) this.formOf(building);
+    return this.landValueCache?.get(building.id);
+  }
+
+
   private facadeFor(building: CityBuilding): number {
     const zone = this.zoneById.get(building.id);
     if (!zone) return building.facade;
     // 海滨（非地标、楼高 ≤ 36）→ 装饰艺术灰泥立面：粉彩墙、水平饰带、圆角转角。曾限定「低于 22」，
     // 但楼高由 token 决定，真实会话几乎都高于 22，一栋都没命中；迈阿密海滨的装饰艺术酒店本来也有十几层。
     // 楼高仍由 token 决定（数据语义不变），只是低矮的海滨楼换一种建筑语汇。
-    if (zone === "waterfront" && building.height <= 36 && building.archetype !== "landmark") return 3;
+    if (zone === "waterfront" && building.height <= 36 && this.formOf(building) !== "landmark") return 3;
+    // S5：地块只有 ~7 宽，体量差异被地块裁平（截图验收：同区仍千篇一律）。地价改由材质读出来——
+    // 区内最贵的四分之一用玻璃幕墙（downtown 立面），最便宜的三成用住宅立面。
+    const percentile = this.percentileOf(building);
+    if (percentile !== undefined && percentile >= 0.75) return 2;
+    if (percentile !== undefined && percentile < 0.3) return 0;
     if (zone === "downtown") return 2;
     if (zone === "commercial") return 1;
     if (zone === "residential") return 0;
@@ -3184,7 +3276,7 @@ export class CityParts {
       }
       const mesh = this.shaftMeshes[runtime.facade];
       const instanceMap = this.shaftIdByInstance[runtime.facade];
-      const wantsUpper = building.archetype === "tower" || building.archetype === "landmark";
+      const wantsUpper = this.formOf(building) === "tower" || this.formOf(building) === "landmark";
       runtime.shaftPrimary = shaftCursor[runtime.facade];
       mesh.setColorAt(runtime.shaftPrimary, runtime.paletteWall);
       (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftPrimary, Math.max(2, Math.round(building.height / 3.1)));
@@ -3198,7 +3290,7 @@ export class CityParts {
         shaftCursor[runtime.facade] += 1;
       }
 
-      const needsPodium = building.archetype !== "tower" && building.archetype !== "landmark";
+      const needsPodium = this.formOf(building) !== "tower" && this.formOf(building) !== "landmark";
       if (needsPodium) {
         runtime.podium = podiumCount;
         this.podiumMesh.setColorAt(podiumCount, runtime.paletteWall.clone().multiplyScalar(0.88));
@@ -3215,7 +3307,7 @@ export class CityParts {
       roofCount += 1;
       runtime.scaffold = scaffoldCount;
       scaffoldCount += 1;
-      if (building.archetype === "landmark" && antennaCount < 94) {
+      if (this.formOf(building) === "landmark" && antennaCount < 94) {
         runtime.antenna = antennaCount;
         antennaCount += 1;
         runtime.beacon = beaconCount;
@@ -3293,16 +3385,16 @@ export class CityParts {
     const h = building.height;
     const fp = building.footprint;
     const built = Math.max(0.5, fraction * h);
-    const split = building.archetype === "tower" || building.archetype === "landmark" ? 0.72 : 1;
+    const split = this.formOf(building) === "tower" || this.formOf(building) === "landmark" ? 0.72 : 1;
     const podiumHeight = runtime.podium >= 0 ? Math.min(built, 1.5) : 0;
 
     let widths: [number, number];
-    if (building.archetype === "slab") widths = [fp * 1.3, fp * 0.58];
-    else if (building.archetype === "block") widths = [fp * 1.2, fp * 0.85];
-    else if (building.archetype === "tower" || building.archetype === "landmark") widths = [fp * 0.86, fp * 0.55];
+    if (this.formOf(building) === "slab") widths = [fp * 1.3, fp * 0.58];
+    else if (this.formOf(building) === "block") widths = [fp * 1.2, fp * 0.85];
+    else if (this.formOf(building) === "tower" || this.formOf(building) === "landmark") widths = [fp * 0.72, fp * 0.72]; // 细方塔（曾 0.86×0.55，与板楼裁平后难分）
     else widths = [fp, fp];
     const streetWidth = runtime.slot.width * (runtime.slot.zone === "downtown" ? 0.8 : 0.88);
-    if (building.archetype !== "tower" && building.archetype !== "landmark") widths[0] = Math.max(widths[0], streetWidth);
+    if (this.formOf(building) !== "tower" && this.formOf(building) !== "landmark") widths[0] = Math.max(widths[0], streetWidth);
     widths[0] = Math.min(widths[0], runtime.slot.width - 0.8);
     widths[1] = Math.min(widths[1], runtime.slot.depth - 2);
     // 海滨酒店地块上的会话楼：铺满宽地块成为一栋酒店（低楼走装饰艺术立面，见 facadeFor 的海滨规则）。
