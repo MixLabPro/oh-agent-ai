@@ -143,7 +143,8 @@ export function CityApp() {
   const toolbarReady = dataLoaded && (sceneUnavailable || !dataAvailable || projection.status === "empty" || firstModelFrame);
   const tools: Tool[] = [
     { id: "window", commandId: "city.window", label: "时间范围", kind: "select", enabled: !cinema && !experience.busy, value: String(windowDays), options: windowOptions.map((days) => ({ value: String(days), label: `${days} 天` })) },
-    { id: "quality", commandId: "city.quality", label: "画质", kind: "select", enabled: !sceneUnavailable && !experience.busy, value: quality, options: [{ value: "auto", label: "自动" }, { value: "high", label: "高画质" }, { value: "eco", label: "节能" }] },
+    // 工具栏上限 8 项（host 校验）：画质移入城市设置，让位给「建筑说明」（用户：按钮放在顶部导航）。
+    { id: "catalog", commandId: "city.catalog", label: "建筑说明", kind: "button", enabled: !cinema },
     { id: "labels", commandId: "city.labels", label: labels ? "隐藏标签" : "显示标签", kind: "button", enabled: sceneReady && !cinema && !experience.busy },
     { id: "reset", commandId: "city.reset", label: "重置视角", kind: "button", enabled: sceneReady && !cinema && !experience.busy },
     { id: "cinema", commandId: "city.cinema", label: cinema ? "停止航拍" : "航拍", kind: "button", enabled: sceneReady && !experience.busy },
@@ -171,10 +172,11 @@ export function CityApp() {
       case "city.photo": void experience.photo(); break;
       case "city.film": void experience.exportFilm(); break;
       case "city.settings": experience.setOptions(!experience.options); break;
+      case "city.catalog": experience.setCatalog(!experience.catalog); break;
       default: throw new Error("command_unavailable");
     }
   };
-  useEffect(() => connect((command) => execute(command.commandId, command.value)), [windowDays, quality, labels, cinema, experience.busy, experience.cut, experience.options, experience.film]);
+  useEffect(() => connect((command) => execute(command.commandId, command.value)), [windowDays, quality, labels, cinema, experience.busy, experience.cut, experience.options, experience.catalog, experience.film]);
   // Publishing the first toolbar is the host's ready handshake. An empty scene
   // or loaded DTO alone must not arm the runtime watchdog during shader boot.
   useEffect(() => { if (toolbarReady) publishToolbar(tools); }, [language, toolbarReady, windowDays, quality, labels, cinema, sceneReady, sceneUnavailable, experience.busy, experience.film?.frame, experience.film?.total]);
@@ -189,7 +191,8 @@ export function CityApp() {
           ? <select key={tool.id} aria-label={tool.label} value={tool.value} disabled={!tool.enabled} onChange={(event) => execute(tool.commandId, event.target.value)}>{tool.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
           : <button key={tool.id} disabled={!tool.enabled} onClick={() => execute(tool.commandId)}>{tool.label}</button>)}</div>
       </header>}
-      <CityExperience ui={experience} disabled={!sceneReady} cinema={cinema} status={status} />
+      <CityExperience ui={experience} disabled={!sceneReady} cinema={cinema} status={status} quality={quality}
+        onQuality={(value) => { if (["auto", "high", "eco"].includes(value)) { engineRef.current?.setQualityMode(value as EngineQualityMode); setQuality(value as EngineQualityMode); } }} />
     </section>
   ), language);
 }

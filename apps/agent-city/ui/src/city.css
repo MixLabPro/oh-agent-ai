@@ -104,3 +104,22 @@
   .city-app:has(.city-export-preview) .city-detail-panel { width: calc(100% - 32px); top: 180px; max-height: calc(100% - 212px - var(--city-timeline-height)); }
   .city-app:has(.city-export-preview) .city-legend { visibility: hidden; }
 }
+
+/* 建筑说明侧栏（非模态：飞到实时模型时城市仍可见） */
+.city-legend .city-catalog-open { display: block; margin-top: 8px; width: 100%; text-align: center; grid-template-columns: none; writing-mode: horizontal-tb; white-space: nowrap; }
+.city-catalog { position: absolute; top: 12px; right: 12px; bottom: 170px; width: min(420px, calc(100% - 24px)); overflow-y: auto;
+  background: rgba(16, 28, 44, 0.94); color: #e8eef4; border-radius: 12px; padding: 14px 16px; z-index: 6; box-shadow: 0 8px 28px rgba(0,0,0,0.35); }
+.city-catalog h2 { margin: 0 0 6px; font-size: 16px; }
+.city-catalog > p { font-size: 12px; opacity: 0.8; margin: 0 0 10px; }
+.city-catalog ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.city-catalog li { display: grid; grid-template-columns: 150px 1fr; gap: 10px; align-items: start; }
+.city-catalog img { width: 150px; height: auto; border-radius: 8px; display: block; }
+.city-catalog h3 { margin: 2px 0 4px; font-size: 14px; }
+.city-catalog li p { margin: 0 0 6px; font-size: 12px; line-height: 1.45; }
+.city-catalog-kind { display: inline-block; font-size: 11px !important; padding: 1px 8px; border-radius: 999px; }
+.city-catalog-data { background: #1f6f5c; }
+.city-catalog-scale { background: #6b5a1f; }
+.city-catalog-decor { background: #3b4a63; }
+@media (max-width: 640px) { .city-catalog li { grid-template-columns: 1fr; } .city-catalog img { width: 100%; } }
+
+.city-catalog-group { margin: 14px 0 8px; font-size: 13px; opacity: 0.85; border-bottom: 1px solid rgba(255,255,255,0.15); padding-bottom: 4px; }

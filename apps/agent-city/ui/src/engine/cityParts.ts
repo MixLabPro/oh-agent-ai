@@ -1977,7 +1977,7 @@ export class CityParts {
   /** 地价驱动形态（S5，用户「同区建筑颜色风格一致，但形态随地块价值变化」）：区内地价前 25% 读作
    *  塔楼（细、退台、塔冠），后 30% 读作板楼/街坊楼（宽、浅）；中段保留数据给的原型；数据地标原样。
    *  楼高不动——token 决定大小，地价只决定长成什么样。 */
-  private formOf(building: CityBuilding): CityBuilding["archetype"] {
+  formOf(building: CityBuilding): CityBuilding["archetype"] {
     if (building.archetype === "landmark") return "landmark";
     if (!this.landValueCache) {
       this.landValueCache = new Map();
@@ -1999,7 +1999,7 @@ export class CityParts {
   }
 
 
-  private facadeFor(building: CityBuilding): number {
+  facadeFor(building: CityBuilding): number {
     const zone = this.zoneById.get(building.id);
     if (!zone) return building.facade;
     // 海滨（非地标、楼高 ≤ 36）→ 装饰艺术灰泥立面：粉彩墙、水平饰带、圆角转角。曾限定「低于 22」，
@@ -3574,11 +3574,19 @@ export class CityParts {
   /** 路边双柱广告牌（L-2）：主干道长段中点的外侧净空点，静态摆件；牌位编址接在屋顶牌之后。
    *  与屋顶牌共用四批次网格，但不动施工状态——路面和牌不随会话生长。 */
   private buildRoadsideSigns(rooftopCount: number): void {
-    const edges = (this.layout.roadEdges ?? []).filter((edge) => !edge.bridge && edge.kind === "arterial" && edge.width >= 8);
-    const candidates = edges
-      .map((edge) => ({ edge, a: edge.points[0], b: edge.points[edge.points.length - 1] }))
-      .filter(({ a, b }) => Math.hypot(b.x - a.x, b.z - a.z) >= 60)
-      .sort((p, q) => Math.hypot(q.b.x - q.a.x, q.b.z - q.a.z) - Math.hypot(p.b.x - p.a.x, p.b.z - p.a.z));
+    // 按合并后的整条路取候选：路网被 T 路口切分、滨海路按 ~15 细分后，单条路段几乎没有 ≥60 的，
+    // 曾因此一块牌都没立（实例全藏在 y=-40，建筑说明取景时发现）。整条路 ≥60 时取其最长一段的中点。
+    const candidates = roadPaintPlan(this.layout.roadEdges ?? [])
+      .runs.filter((run) => run.kind === "arterial" && run.width >= 8)
+      .flatMap((run) => {
+        let best: { a: Vec2; b: Vec2; len: number } | null = null; let total = 0;
+        for (let i = 1; i < run.points.length; i += 1) {
+          const a = run.points[i - 1]; const b = run.points[i]; const len = Math.hypot(b.x - a.x, b.z - a.z);
+          total += len; if (!best || len > best.len) best = { a, b, len };
+        }
+        return best && total >= 60 && best.len >= 14 ? [{ edge: { width: run.width }, a: best.a, b: best.b, total }] : [];
+      })
+      .sort((p, q) => q.total - p.total);
     // 宿主边自己距牌位 ≥ 10（width/2+6），closerThan(7) 命中的只会是路口和邻路。
     const otherRoads = new SegmentIndex((this.layout.roadEdges ?? []).map((edge) => [edge.points[0], edge.points[edge.points.length - 1]]));
     const placed: Vec2[] = [];
@@ -3597,8 +3605,12 @@ export class CityParts {
       const yaw = Math.atan2(normal.x, normal.z);
       const plan = roadsideSignPlan(yaw, groundY, hashSeed(`roadsign:${pos.x.toFixed(1)}:${pos.z.toFixed(1)}`));
       const place = (pieces: Array<{ x: number; y: number; z: number; sx: number; sy: number; sz: number; rotY: number }>, mesh: THREE.InstancedMesh, stride: number) => {
+        // 件的 x/z 是牌的局部偏移（未旋转）：按 compose 约定（局部 x = (cos, −sin)，局部 z = (sin, cos)）旋转后加上牌位。
+        // 曾直接当世界坐标写——全城路边牌都叠在原点附近，路边一块都看不到（建筑说明取景时发现）。
+        const c = Math.cos(yaw); const sn = Math.sin(yaw);
         pieces.forEach((piece, index) => {
-          this.compose(piece.x, piece.y, piece.z, piece.rotY, piece.sx, piece.sy, piece.sz);
+          const wx = pos.x + piece.x * c + piece.z * sn; const wz = pos.z - piece.x * sn + piece.z * c;
+          this.compose(wx, piece.y, wz, piece.rotY, piece.sx, piece.sy, piece.sz);
           mesh.setMatrixAt(cursor * stride + index, this.matrix);
         });
       };
