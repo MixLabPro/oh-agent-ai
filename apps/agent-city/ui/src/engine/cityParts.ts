@@ -467,7 +467,9 @@ export class CityParts {
       this.buildUrbanContext();
       this.buildSeaMountains();
       this.buildBeachRibbon();
-      this.buildPromenade();
+      const seaside = this.layout.seaside;
+      if (seaside && !seaside.degraded) this.buildPromenade(promenadeSegments(seaside));
+      this.buildPromenade(this.urbanPromenadeSegments());
       // 装饰酒店排已退役：酒店地块交给会话（cityLayout hotelBlocks），只有落户的会话才成楼。
       this.buildLifeguardTowers();
       this.buildBeachFurniture();
@@ -2134,11 +2136,12 @@ export class CityParts {
     // treeSpots——进 treeMesh（棕榈几何）与 applyFlora（真实生态带管线）双路径。
     {
       const seaside = this.layout.seaside;
-      if (seaside && !seaside.degraded) {
+      const promenades = [...(seaside && !seaside.degraded ? promenadeSegments(seaside) : []), ...this.urbanPromenadeSegments()]; // S3：城区岸段步道也有棕榈列
+      if (promenades.length) {
         const terrain = this.layout.terrain;
         let row = 0;
         // 逐合法连续段种植（段间已被净空校验切断，不跨缺口搭桥）。
-        for (const segment of promenadeSegments(seaside)) {
+        for (const segment of promenades) {
           for (let i = 1; i < segment.length; i += 1) {
             const a = segment[i - 1]; const b = segment[i];
             const next = segment[Math.min(segment.length - 1, i + 1)];
@@ -2294,10 +2297,33 @@ export class CityParts {
 
   /** 滨海步道（VICE B3）：沿 promenade 折线的浅色铺装缎带——人行道语义，不进
    *  roadEdges/carPaths（机动车不会开上步道）。单 BufferGeometry，静态缓存段。 */
-  private buildPromenade(): void {
-    const seaside = this.layout.seaside;
-    if (!seaside || seaside.degraded) return;
-    const segments = promenadeSegments(seaside);
+  /** S3「滨海景观带随用地走」：环岛滨海路在建成区（会话楼 160 内）旁的岸段，向海一侧 9 处铺同一套步道
+   *  （粉色铺装 + 白色矮墙 + 路灯）。曾只有海滨那一段 85° 弧有景观带，住宅区一直排到海边、景观带却停了（真机截图）。 */
+  private urbanPromenadeSegments(): Vec2[][] {
+    const slots = this.layout.districts.flatMap((district) => [...district.slots.values()]);
+    if (!slots.length) return [];
+    const near = new SegmentIndex(slots.map((slot) => [slot, slot]));
+    const terrain = this.layout.terrain;
+    const out: Vec2[][] = [];
+    for (const run of this.layout.coastRoads ?? []) {
+      let current: Vec2[] = [];
+      for (let i = 0; i < run.length; i += 1) {
+        const a = run[Math.max(0, i - 1)]; const b = run[Math.min(run.length - 1, i + 1)];
+        const len = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+        let nx = -(b.z - a.z) / len; let nz = (b.x - a.x) / len;
+        const p = run[i];
+        if (terrain.height(p.x + nx * 12, p.z + nz * 12) > terrain.height(p.x - nx * 12, p.z - nz * 12)) { nx = -nx; nz = -nz; }
+        const q = { x: p.x + nx * 9, z: p.z + nz * 9 };
+        if (near.closerThan(p, 160) && terrain.height(q.x, q.z) > 0.4) current.push(q);
+        else { if (current.length >= 3) out.push(current); current = []; }
+      }
+      if (current.length >= 3) out.push(current);
+    }
+    return out;
+  }
+
+  private buildPromenade(segments: Vec2[][]): void {
+    if (!segments.length) return;
     const half = 4.2;
     const positions: number[] = [];
     for (const polyline of segments)

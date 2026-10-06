@@ -62,6 +62,8 @@ export type CityLayout = {
   seed: number; districts: DistrictLayout[]; blocks: CityBlock[]; roadNodes: RoadNode[]; roadEdges: RoadEdge[];
   /** 哪些街区已建/预留的指纹：静态城缓存（地面贴图）据此判断是否重画。 */
   activityKey?: string;
+  /** 环岛滨海路段（不含河岸路），S3 滨海景观带沿其在建成区附近的岸段铺设。 */
+  coastRoads?: Vec2[][];
   districtLandmarks?: DistrictLandmark[];
   terrain: TerrainField; extent: number; coast: Vec2[]; river: Vec2[]; publicSites: PublicSite[];
   parkTrees: Array<Vec2 & { y: number; seed: number }>;
