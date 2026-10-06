@@ -801,16 +801,52 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     };
     const reachCells = Math.ceil((R * 1.6) / Math.min(du, dv));
     for (let i = 1; i < reachCells; i += 1) for (let j = aligned ? 0 : -reachCells; j < reachCells; j += 1) {
-      const polygon = [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)];
-      const center = at(i + 0.5, j + 0.5);
+      let polygon = [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)];
+      let center = at(i + 0.5, j + 0.5);
       const centerAngle = Math.atan2(center.z - core.z, center.x - core.x);
       if (!angleBetween(centerAngle, sector.lo, sector.hi)) continue;
       // 四角都在本扇区内（不和相邻扇区的街网重叠）、可建、离主干道与环线高架留出路幅。
-      if (polygon.some((p) => !angleBetween(Math.atan2(p.z - core.z, p.x - core.x), sector.lo, sector.hi))) continue;
+      // S4「街区形状由大地块决定」：跨出扇区的格子不再整格丢弃（曾留下锯齿边、主干道两侧空一圈），
+      // 而是沿扇区两条边界射线（内收 10）裁切——斜向主干道旁的街区成为三角形/梯形，一直排到路边。
+      let clipped = false;
+      let onClipLine: (p: Vec2) => boolean = () => false; // 裁切线上的边是临主干道的界面，不修成街道
+      if (polygon.some((p) => !angleBetween(Math.atan2(p.z - core.z, p.x - core.x), sector.lo, sector.hi))) {
+        const lo = { x: Math.cos(sector.lo), z: Math.sin(sector.lo) }; const hi = { x: Math.cos(sector.hi), z: Math.sin(sector.hi) };
+        const insideLo = (p: Vec2) => lo.x * (p.z - core.z) - lo.z * (p.x - core.x) - 10;   // 逆时针侧为正
+        const insideHi = (p: Vec2) => -(hi.x * (p.z - core.z) - hi.z * (p.x - core.x)) - 10; // 顺时针侧为正
+        const clip = (poly: Vec2[], f: (p: Vec2) => number) => {
+          const out: Vec2[] = [];
+          for (let k = 0; k < poly.length; k += 1) {
+            const a = poly[k]; const b = poly[(k + 1) % poly.length];
+            const fa = f(a); const fb = f(b);
+            if (fa >= 0) out.push(a);
+            if ((fa >= 0) !== (fb >= 0)) { const t = fa / (fa - fb); out.push({ x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t }); }
+          }
+          return out;
+        };
+        polygon = clip(clip(polygon, insideLo), insideHi);
+        onClipLine = (p: Vec2) => Math.abs(insideLo(p)) < 0.01 || Math.abs(insideHi(p)) < 0.01;
+        if (polygon.length < 3) continue;
+        let area = 0; for (let k = 0; k < polygon.length; k += 1) { const a = polygon[k]; const b = polygon[(k + 1) % polygon.length]; area += a.x * b.z - b.x * a.z; }
+        if (Math.abs(area) / 2 < 350) continue;
+        // 尖角 <50° 的裁切块不要：它的街道会在尖角处相交成锐角路口（初版 30 岛锐角 2 → 45）。保留梯形与钝形块。
+        let minAngle = Math.PI;
+        for (let k = 0; k < polygon.length; k += 1) {
+          const prev = polygon[(k + polygon.length - 1) % polygon.length]; const cur = polygon[k]; const next = polygon[(k + 1) % polygon.length];
+          const ux = prev.x - cur.x; const uz = prev.z - cur.z; const vx = next.x - cur.x; const vz = next.z - cur.z;
+          const lu = Math.hypot(ux, uz); const lv = Math.hypot(vx, vz);
+          if (lu < 1e-6 || lv < 1e-6) continue;
+          minAngle = Math.min(minAngle, Math.acos(Math.max(-1, Math.min(1, (ux * vx + uz * vz) / (lu * lv)))));
+        }
+        if (minAngle < (50 * Math.PI) / 180) continue;
+        center = { x: polygon.reduce((t, p) => t + p.x, 0) / polygon.length, z: polygon.reduce((t, p) => t + p.z, 0) / polygon.length };
+        if (!angleBetween(Math.atan2(center.z - core.z, center.x - core.x), sector.lo, sector.hi)) continue;
+        clipped = true;
+      }
       if (polygon.some((p) => !buildable(p.x, p.z))) continue;
       // 海滨保留带（水线→带外缘）内不生成街区：沙滩/步道/酒店排用地。
       if (seaside && polygon.some((p) => seasideStripContains(seaside, p, 4))) continue;
-      if (polygon.some((p, k) => { const q = polygon[(k + 1) % 4]; return !buildable((p.x + q.x) / 2, (p.z + q.z) / 2); })) continue;
+      if (polygon.some((p, k) => { const q = polygon[(k + 1) % polygon.length]; return !buildable((p.x + q.x) / 2, (p.z + q.z) / 2); })) continue;
       if ([center, ...polygon].some((p) => trunkIndex.closerThan(p, 7))) continue;
       if ([center, ...polygon].some((p) => ringIndex.closerThan(p, 9))) continue;
       if ([center, ...polygon].some((p) => coastRoadIndex.closerThan(p, 7))) continue;
@@ -818,12 +854,21 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       if (reservations().some((site) => polygonDistance(site, polygon) > -site.radius)) continue;
       const zone = zoneFor(center);
       const id = `plan:${sectorIndex}:${i}:${j}`; const parcels: Parcel[] = [];
-      const sideLength = Math.hypot(polygon[1].x - polygon[0].x, polygon[1].z - polygon[0].z);
-      const columnCount = Math.max(3, Math.floor((sideLength - 14) / 7.2));
-      for (let side = 0; side < 2; side += 1) for (let index = 0; index < columnCount; index += 1) {
-        const a = polygon[side === 0 ? 0 : 3]; const b = polygon[side === 0 ? 1 : 2];
+      // 裁切出的三角/梯形街区：沿最长边排一排临街地块（内收朝多边形内侧）。
+      let front = 0;
+      if (clipped) for (let k = 1; k < polygon.length; k += 1) {
+        const len = (q: number) => Math.hypot(polygon[(q + 1) % polygon.length].x - polygon[q].x, polygon[(q + 1) % polygon.length].z - polygon[q].z);
+        if (len(k) > len(front)) front = k;
+      }
+      const sideLength = clipped ? Math.hypot(polygon[(front + 1) % polygon.length].x - polygon[front].x, polygon[(front + 1) % polygon.length].z - polygon[front].z)
+        : Math.hypot(polygon[1].x - polygon[0].x, polygon[1].z - polygon[0].z);
+      const columnCount = Math.max(clipped ? 1 : 3, Math.floor((sideLength - 14) / 7.2));
+      for (let side = 0; side < (clipped ? 1 : 2); side += 1) for (let index = 0; index < columnCount; index += 1) {
+        const a = clipped ? polygon[front] : polygon[side === 0 ? 0 : 3]; const b = clipped ? polygon[(front + 1) % polygon.length] : polygon[side === 0 ? 1 : 2];
         const length = Math.hypot(b.x - a.x, b.z - a.z); const dx = (b.x - a.x) / length; const dz = (b.z - a.z) / length;
-        const t = (index + 0.5) / columnCount; const inset = side === 0 ? 12 : -12;
+        const t = (index + 0.5) / columnCount;
+        let inset = side === 0 ? 12 : -12;
+        if (clipped) { const mx = (a.x + b.x) / 2; const mz = (a.z + b.z) / 2; if (-dz * (center.x - mx) + dx * (center.z - mz) < 0) inset = -12; }
         const p = { x: a.x + dx * (7 + (length - 14) * t) - dz * inset, z: a.z + dz * (7 + (length - 14) * t) + dx * inset };
         // Warped corners can leave an interior parcel inside the curved beach
         // reserve even when all four block corners are outside it.
@@ -837,9 +882,11 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       blocks.push({ id, districtId: "", ...center, width: du, depth: dv, zone, parcels, polygon: polygon.map(k) });
       // 每 3 条网格线一条主干级街道（宽 8），其余为支路。
       polygon.forEach((p, e) => {
-        const q = polygon[(e + 1) % 4];
+        const q = polygon[(e + 1) % polygon.length];
         // 贴着主干道的那条边不再单修一条平行支路：主干道本身就是这排街区的临街道路。
         if (trunkIndex.closerThan(p, 12) && trunkIndex.closerThan(q, 12)) { frontNodes.push(p, q); return; }
+        // 裁切线上的边：不修街道（曾在没有主干道的扇区边界上与相邻扇区街网斜交成锐角路口，30 岛 2 → 39）。
+        if (onClipLine(p) && onClipLine(q)) { frontNodes.push(p, q); return; }
         // 与主干道/滨海大道近乎平行（<15°）且很近：≤12 视为同一条路不修，≤25 降为支路——不再并排出现两条大路。
         const parallel = parallelPrimaryGap(p, q);
         if (parallel <= 12) { frontNodes.push(p, q); return; }
@@ -857,6 +904,34 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     if (!coastRoadIndex.closerThan(node, 16) || coastRoadIndex.closerThan(node, 0.5)) continue;
     connectToNetwork(node, 18, false, (edge) => edge.width < 12 || !coastRoadIndex.closerThan(edge.points[0], 0.5));
   }
+  // 节点落在别的路段中间时把那条路段切开（S4 裁切块的边沿网格线只走到裁切点，与相邻整格的同线整边重叠成 0° 「锐角」）：
+  // 重叠的共线边因此变成共享路段，T 接点成为真正的路口。按 60 分桶避免 O(N·E)。
+  {
+    for (let pass = 0; pass < 3; pass += 1) {
+      const CELL = 60; const buckets = new Map<string, RoadEdge[]>();
+      for (const edge of edges.values()) {
+        if (edge.bridge) continue;
+        const [a, b] = edge.points;
+        for (let gx = Math.floor(Math.min(a.x, b.x) / CELL); gx <= Math.floor(Math.max(a.x, b.x) / CELL); gx += 1)
+          for (let gz = Math.floor(Math.min(a.z, b.z) / CELL); gz <= Math.floor(Math.max(a.z, b.z) / CELL); gz += 1) {
+            const k = `${gx}:${gz}`; (buckets.get(k) ?? buckets.set(k, []).get(k)!).push(edge);
+          }
+      }
+      let split = 0;
+      for (const node of [...nodes.values()]) {
+        const host = (buckets.get(`${Math.floor(node.x / CELL)}:${Math.floor(node.z / CELL)}`) ?? []).find((edge) =>
+          edges.has(edge.id) && edge.from !== node.id && edge.to !== node.id && segmentDistance(node, edge.points[0], edge.points[1]) < 0.05
+          && Math.hypot(node.x - edge.points[0].x, node.z - edge.points[0].z) > 0.5 && Math.hypot(node.x - edge.points[1].x, node.z - edge.points[1].z) > 0.5);
+        if (!host) continue;
+        edges.delete(host.id);
+        const primary = host.width >= 12; const art = host.kind === "arterial";
+        addEdge(host.points[0], node, art, false, primary); addEdge(node, host.points[1], art, false, primary);
+        split += 1;
+      }
+      if (!split) break;
+    }
+  }
+
   // 横街接入主干道：首排街区的角点（及离主干道 ≤16 的街网节点）垂直接到主干道上，形成 T 路口。
   {
     const seen = new Set<string>();
