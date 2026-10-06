@@ -2769,6 +2769,7 @@ export class CityParts {
     const shaftCursor = [0, 0, 0, 0];
     let decoCursor = 0;
     let crownCursor = 0;
+    let crownFinCursor = 0;
     let signCursor = 0;
 
     const ordered = [...this.model.buildings].sort((left, right) => left.startedAt - right.startedAt);
@@ -2860,6 +2861,7 @@ export class CityParts {
         if (plan) {
           runtime.crown = plan;
           runtime.crownBase = crownCursor;
+          crownFinCursor += plan.fins.length;
           this.crownStripMesh.setColorAt(crownCursor, new THREE.Color(palette.accent).multiplyScalar(3.2));
           crownCursor += 1;
         }
@@ -2929,6 +2931,8 @@ export class CityParts {
     if (this.decoTrimMesh.instanceColor) this.decoTrimMesh.instanceColor.needsUpdate = true;
     this.craneArmMesh.count = craneCount;
     // 霓虹载体（冠底带/牌框/色条）与 neonMesh 同一门控：非霓虹主题整体收起，物理件（鳍片/柱/板）常在。
+    // 鳍片按实际片数收口——曾漏设 count（makeInstanced 初始为 0），城里所有酒店冠都不渲染。
+    this.crownFinMesh.count = crownFinCursor;
     this.crownStripMesh.count = activeTheme().neon ? crownCursor : 0;
     if (this.crownStripMesh.instanceColor) this.crownStripMesh.instanceColor.needsUpdate = true;
     this.buildRoadsideSigns(signCursor);
