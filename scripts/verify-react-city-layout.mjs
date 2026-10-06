@@ -216,6 +216,12 @@ for (const seed of [7, 42, 2026, 31337, 99991, 123456789, 4294967295]) {
   const civics = layout.civics;
   assert(civics.length >= 10, `enough civic buildings to judge spread (${civics.length})`);
   for (let i = 0; i < civics.length; i += 1) for (let j = i + 1; j < civics.length; j += 1) assert(Math.hypot(civics[i].x - civics[j].x, civics[i].z - civics[j].z) >= 60, "civic buildings keep their distance");
+  // 大门朝路（用户：医院门前没有路）：配套正门（局部 +z）外 8 处离最近路面 ≤ 15。
+  for (const civic of civics) {
+    const q = { x: civic.x + Math.sin(civic.yaw) * (civic.depth / 2 + 8), z: civic.z + Math.cos(civic.yaw) * (civic.depth / 2 + 8) };
+    const gap = Math.min(...layout.roadEdges.filter((e) => !e.bridge).map((e) => { const [a, b] = e.points; const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz || 1; const t = Math.max(0, Math.min(1, ((q.x - a.x) * dx + (q.z - a.z) * dz) / l2)); return Math.hypot(q.x - a.x - dx * t, q.z - a.z - dz * t) - e.width / 2; }));
+    assert(gap <= 15, `${civic.id} (${civic.kind}) entrance faces a road (gap ${gap.toFixed(1)})`);
+  }
   const zoneOf = (civic) => layout.blocks.find((block) => block.id === civic.parcelId)?.zone;
   const schools = civics.filter((civic) => civic.kind === "school");
   const malls = civics.filter((civic) => civic.kind === "mall");

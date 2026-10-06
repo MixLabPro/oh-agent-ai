@@ -474,7 +474,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     { center: { x: centroid.x + 980, z: centroid.z - 320 }, radius: 120, height: 88, seed: 71 },
     { center: { x: centroid.x - 1020, z: centroid.z + 260 }, radius: 150, height: 108, seed: 37 },
   ];
-  const grown = growWithBuildings(plan, used, districts);
+  const grown = growWithBuildings(plan, used, districts, civics);
   return { ...plan, ...grown, districtLandmarks, districts, seed, massing, civics, gardens, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings };
 }
 
@@ -485,8 +485,10 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
  * 连通：去掉支路后若某个仍有活动的分量与主网断开，就按 BFS 把被去掉的边一圈圈加回来直到连上；
  * 完全无活动的碎片分量整段删掉。车流只保留仍沿真实路段走的回路。
  */
-function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<string>, districts: DistrictLayout[]) {
-  const active = plan.blocks.filter((block) => block.parcels.some((parcel) => used.has(parcel.id)));
+function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<string>, districts: DistrictLayout[], civics: CivicSite[]) {
+  // 配套（学校/商场/医院）占的整街区也算已建：曾不算，周围街道被生长剪枝删掉，医院门前没有路（真机截图）。
+  const civicBlocks = new Set(civics.map((c) => c.parcelId));
+  const active = plan.blocks.filter((block) => civicBlocks.has(block.id) || block.parcels.some((parcel) => used.has(parcel.id)));
   // 只有已落楼（会话楼/配套/小花园）的街区算建成；下一栋楼来时它所在街区才铺开（布局每次随数据重算）。
   // 曾留一圈 75 的预留：几乎罩住全部街区，街网照旧铺满（截图验收没看到变化）。
   const live = new Set(active.map((block) => block.id));
@@ -617,7 +619,20 @@ function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, ass
     }
     if (!parcel) return;
     taken.add(parcel.id);
-    out.push({ id, kind, districtId: owner, parcelId: parcel.id, x: parcel.x, z: parcel.z, y: plan.terrain.height(parcel.x, parcel.z), yaw: parcel.yaw, width: parcel.width, depth: parcel.depth, unlockAt });
+    // 大门朝路（用户：医院门前没有路）：在街区朝向的四个方向里，选正门（局部 +z）外 8 处离道路最近的那个。
+    const roadGap = (q: Vec2) => Math.min(...plan.roadEdges.filter((e) => !e.bridge).map((e) => {
+      const [a, b] = e.points; const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
+      const t = Math.max(0, Math.min(1, ((q.x - a.x) * dx + (q.z - a.z) * dz) / l2));
+      return Math.hypot(q.x - a.x - dx * t, q.z - a.z - dz * t) - e.width / 2;
+    }));
+    let yaw = parcel.yaw; let best = Infinity;
+    for (let k = 0; k < 4; k += 1) {
+      const y = parcel.yaw + (k * Math.PI) / 2; const half = (k % 2 ? parcel.width : parcel.depth) / 2;
+      const gap = roadGap({ x: parcel.x + Math.sin(y) * (half + 8), z: parcel.z + Math.cos(y) * (half + 8) });
+      if (gap < best) { best = gap; yaw = y; }
+    }
+    const swap = Math.round((yaw - parcel.yaw) / (Math.PI / 2)) % 2 !== 0;
+    out.push({ id, kind, districtId: owner, parcelId: parcel.id, x: parcel.x, z: parcel.z, y: plan.terrain.height(parcel.x, parcel.z), yaw, width: swap ? parcel.depth : parcel.width, depth: swap ? parcel.width : parcel.depth, unlockAt });
   });
   return out;
 }

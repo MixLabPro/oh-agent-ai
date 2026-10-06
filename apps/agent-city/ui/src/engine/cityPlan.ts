@@ -234,10 +234,12 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   place("east-stadium", "stadium", around(turn + 4.8, 0.45 * R), 49, 0.2);
   {
     // 港口：离核心最近的一段海岸内侧（码头离市中心不远）。
-    const shore = [...coast].sort((a, b) => Math.hypot(a.x - core.x, a.z - core.z) - Math.hypot(b.x - core.x, b.z - core.z))[0];
-    // 中心放在岸线内侧固定距离（0.7×半径），码头边缘贴水：曾按到核心距离的 12% 内移，核心远时港口落在内陆沙地上。
+    // 取离核心 ≥150 的最近岸点：核心贴海时（用户种子）曾取到市政广场旁的岸点，再被避让推进内陆，港口落在市中心（真机截图）。
+    const byDistance = [...coast].sort((a, b) => Math.hypot(a.x - core.x, a.z - core.z) - Math.hypot(b.x - core.x, b.z - core.z));
+    const shore = byDistance.find((p) => Math.hypot(p.x - core.x, p.z - core.z) >= 150) ?? byDistance[0];
+    // 中心只内移 10：码头半边伸向水面（buildMarina 的栈桥由此入海）。
     const toCore = Math.max(1, Math.hypot(core.x - shore.x, core.z - shore.z));
-    const inset = Math.min(37 * 0.7, toCore * 0.5);
+    const inset = Math.min(10, toCore * 0.5);
     const inward = { x: shore.x + ((core.x - shore.x) / toCore) * inset, z: shore.z + ((core.z - shore.z) / toCore) * inset };
     place("working-harbor", "harbor", inward, 37, -Math.atan2(shore.z - core.z, shore.x - core.x));
   }
@@ -353,7 +355,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
 
   // 市政广场（核心处，半径 44）外环路半径：主干道都接在这一圈上，广场四周是路、中间不走车。
   const PLAZA_RING = 52;
-  const SHORE_SITE_KINDS = new Set(["harbor", "lighthouse", "sail-opera", "ferris-wheel"]);
+  const SHORE_SITE_KINDS = new Set(["harbor", "lighthouse", "sail-opera", "ferris-wheel", "villa-complex"]); // 庄园：临水拱廊，同属岸边地标
   // 主干道：5–6 条，均分方位 + 抖动；指向山脊的方向（与山脊方位夹角 < 40°）不修路。
   const trunkCount = 5 + Math.floor(random("trunks") * 2);
   const trunkBase = random("trunkBase") * Math.PI * 2;
@@ -534,7 +536,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     // 每步都要求中心仍在陆上、不在河里：直线朝核心走可能跨过河道（geography 守卫 seed 3668352332 抓到摩天轮进河）。
     for (let step = 0; step < 20 && wetCount(site) > 3; step += 1) {
       const nx = site.x + (dx / len) * 3; const nz = site.z + (dz / len) * 3;
-      if (height(nx, nz) <= 0.5 || inRiver(nx, nz)) break;
+      if (height(nx, nz) <= 0.5 || inRiver(nx, nz) || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4) break; // 也不推到主干道上
       site.x = nx; site.z = nz;
     }
   }
@@ -593,6 +595,53 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     const q = snap(site, siteClearance(site.kind, site.radius), others, site.radius,
       (c) => landClearance(c.x, c.z) >= site.radius + 4 && footprintDry(c, site.radius) && distanceToTrunks(c) >= site.radius + 8 && clearsHighways(c, site.radius * 2, site.radius * 2, ringRuns));
     site.x = q.x; site.z = q.z;
+  }
+  // 港口最后贴回岸线：前面的避让（离其它用地、离环线高架）会把它推进内陆，港口离水上百（用户截图：港口在市中心）。
+  // 朝最近的岸点逐步移动，直到中心离岸 ≤ 12（码头半边伸进水面）。
+  for (const site of publicSites) {
+    if (site.kind !== "harbor") continue;
+    let nearest = coast[0];
+    for (const q of coast) if (Math.hypot(q.x - site.x, q.z - site.z) < Math.hypot(nearest.x - site.x, nearest.z - site.z)) nearest = q;
+    for (let step = 0; step < 80 && coastDistance(site.x, site.z) > 12; step += 1) {
+      const dx = nearest.x - site.x; const dz = nearest.z - site.z; const len = Math.hypot(dx, dz) || 1;
+      site.x += (dx / len) * 3; site.z += (dz / len) * 3;
+    }
+    site.yaw = -Math.atan2(nearest.z - core.z, nearest.x - core.x);
+  }
+  // 岸边地标（帆形歌剧院、灯塔、摩天轮、庄园）同样贴回岸线（用户：「类似悉尼歌剧院的建筑不是应该在水边吗」）：
+  // 朝最近岸点移动到中心离岸 ≈ 0.7 半径，同时占地圈 16 点落水不超过 3（立在水边、不悬空）。
+  for (const site of landmarks) {
+    if (!site.radius || !SHORE_SITE_KINDS.has(site.kind)) continue;
+    const wet = (x: number, z: number) => { let n = 0; for (let k = 0; k < 16; k += 1) { const t = (k / 16) * Math.PI * 2; const r = k % 2 ? site.radius : site.radius * 0.6; const px = x + Math.cos(t) * r; const pz = z + Math.sin(t) * r; if (height(px, pz) < 0.5 || inRiver(px, pz) || (hasRiver && Math.abs(px - riverX(pz)) < riverWidth(pz) + 14)) n += 1; } return n; }; // 河道及两岸 14 内也算水：歌剧院曾立在河口上（用户截图）
+    const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
+    // 试最近的 8 个岸点，取最终离岸最近的落点（一条路径被别的用地挡住时换个方向贴岸）。
+    const targets = [...coast].sort((a, b) => Math.hypot(a.x - site.x, a.z - site.z) - Math.hypot(b.x - site.x, b.z - site.z)).slice(0, 8);
+    let best = { x: site.x, z: site.z, d: coastDistance(site.x, site.z) };
+    for (const target of targets) {
+      let x = site.x; let z = site.z;
+      for (let step = 0; step < 100 && coastDistance(x, z) > site.radius * 0.7; step += 1) {
+        const dx = target.x - x; const dz = target.z - z; const len = Math.hypot(dx, dz) || 1;
+        const nx = x + (dx / len) * 3; const nz = z + (dz / len) * 3;
+        if (wet(nx, nz) > 3 || inRiver(nx, nz) || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4 || !clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns) || others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) break; // 不滑到主干道上
+        x = nx; z = nz;
+      }
+      const d = coastDistance(x, z);
+      if (d < best.d) best = { x, z, d };
+    }
+    if (wet(best.x, best.z) <= 3 && (distanceToTrunks(best) >= site.radius * 0.7 || distanceToTrunks(site) < site.radius * 0.7)) { site.x = best.x; site.z = best.z; } // 落点压到主干道上就留在原位
+    // 仍有 >3 点在水上（原位本就半悬空，核心方向也可能隔着水）：在 70 内按距离由近到远搜一个占地干燥、不压主干道/其它用地的落点。
+    if (wet(site.x, site.z) > 3) {
+      let found: Vec2 | null = null;
+      for (let rr = 6; rr <= 70 && !found; rr += 6) {
+        for (let k = 0; k < 24 && !found; k += 1) {
+          const a = (k / 24) * Math.PI * 2; const nx = site.x + Math.cos(a) * rr; const nz = site.z + Math.sin(a) * rr;
+          if (wet(nx, nz) > 2 || height(nx, nz) <= 0.5 || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4) continue;
+          if (!clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns) || others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) continue;
+          found = { x: nx, z: nz };
+        }
+      }
+      if (found) { site.x = found.x; site.z = found.z; }
+    }
   }
   const ringIndex = new SegmentIndex(ringRuns);
   const distanceToRing = (p: Vec2) => {
@@ -1033,21 +1082,72 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 拉一条支路接入路网——门前要有路（真机：双子塔、摩天轮、港口门前无路）。
   for (const site of [...publicSites, ...landmarks]) {
     if (!site.radius) continue;
-    let nearest: { p: Vec2; d: number } | null = null;
+    let nearest: { p: Vec2; d: number; edge: RoadEdge } | null = null;
     for (const edge of edges.values()) {
       if (edge.bridge) continue;
       const [a, b] = edge.points; const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
       const t = Math.max(0, Math.min(1, ((site.x - a.x) * dx + (site.z - a.z) * dz) / l2));
       const p = { x: a.x + dx * t, z: a.z + dz * t }; const d = Math.hypot(p.x - site.x, p.z - site.z);
-      if (!nearest || d < nearest.d) nearest = { p, d };
+      if (!nearest || d < nearest.d) nearest = { p, d, edge };
     }
     if (!nearest || nearest.d <= site.radius + 14) continue;
     const ux = (nearest.p.x - site.x) / nearest.d; const uz = (nearest.p.z - site.z) / nearest.d;
     // 岸边地标（灯塔在岬角尖上）门口常是不可建的岸滩：沿朝路方向往里走到可建地面再起路。
     let reach = site.radius + 6;
-    while (reach < nearest.d - 4 && !buildable(site.x + ux * reach, site.z + uz * reach)) reach += 4;
+    // 不再向内陆走到可建地：岬角灯塔会走 100+，入口路从远处的路边起步、根本到不了地标（用户：门前要有路）。
+    // 门口在不可建岸滩时，由下方的「全程在陆上」兜底直连。
     const gate = key({ x: site.x + ux * reach, z: site.z + uz * reach });
-    if (!connectToNetwork(gate, 240, false)) connectToNetwork(gate, 700, false, () => false, 35);
+    if (!connectToNetwork(gate, 240, false) && !connectToNetwork(gate, 700, false, () => false, 35)) {
+      // 兜底：岸边地标贴回水边后常在岬角上，到最近路面要穿过不可建的岸滩。在最近 6 个路面点里取第一条
+      // 「全程在陆上、不穿河、不穿其它用地」的直线连过去，并在落点切开宿主路段成 T 路口。
+      const blockers = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
+      const candidates: Array<{ p: Vec2; d: number; edge: RoadEdge }> = [];
+      for (const edge of edges.values()) {
+        if (edge.bridge) continue;
+        const [ea, eb] = edge.points; const ex = eb.x - ea.x; const ez = eb.z - ea.z; const el = ex * ex + ez * ez || 1;
+        const t = Math.max(0, Math.min(1, ((gate.x - ea.x) * ex + (gate.z - ea.z) * ez) / el));
+        const p = { x: ea.x + ex * t, z: ea.z + ez * t };
+        candidates.push({ p, d: Math.hypot(p.x - gate.x, p.z - gate.z), edge });
+      }
+      candidates.sort((x, y) => x.d - y.d);
+      // 返回连线上的水段（首/末水点）：无水 = 纯陆路；水段 ≤ 84 且两端是干地 = 可架短桥（岸边地标常与路网隔着河，
+      // 守卫抓到 3 例「门前无路」）；更宽或被其它用地挡住则不连。
+      const clear = (to: Vec2): { span: [Vec2, Vec2] | null } | null => {
+        const n = Math.max(4, Math.ceil(Math.hypot(to.x - gate.x, to.z - gate.z) / 6));
+        let first = -1; let last = -1;
+        for (let k = 1; k < n; k += 1) {
+          const x = gate.x + (to.x - gate.x) * (k / n); const z = gate.z + (to.z - gate.z) * (k / n);
+          if (height(x, z) <= 0.5 || inRiver(x, z)) { if (first < 0) first = k; last = k; }
+          if (blockers.some((o) => Math.hypot(o.x - x, o.z - z) < o.radius + 2)) return null;
+          if (Math.hypot(site.x - x, site.z - z) < site.radius) return null;
+        }
+        if (first < 0) return { span: null };
+        if (last - first + 1 > 14 || first < 1 || last > n - 2) return null;
+        for (let k = first; k <= last; k += 1) { // 水段必须连续（中间不能又是陆地再入水）
+          const x = gate.x + (to.x - gate.x) * (k / n); const z = gate.z + (to.z - gate.z) * (k / n);
+          if (!(height(x, z) <= 0.5 || inRiver(x, z))) return null;
+        }
+        const at = (k: number) => ({ x: gate.x + (to.x - gate.x) * (k / n), z: gate.z + (to.z - gate.z) * (k / n) });
+        return { span: [at(first - 1), at(last + 1)] };
+      };
+      const picked = candidates.slice(0, 40).map((c) => ({ c, plan: clear(c.p) })).find((x) => x.plan);
+      const pick = picked?.c;
+      if (pick) {
+        const host = pick.edge; const join = key(pick.p);
+        if (edges.has(host.id) && roadNodeId(join) !== host.from && roadNodeId(join) !== host.to) {
+          edges.delete(host.id);
+          addEdge(host.points[0], join, host.kind === "arterial", false, host.width >= 12);
+          addEdge(join, host.points[1], host.kind === "arterial", false, host.width >= 12);
+        }
+        const span = picked!.plan!.span;
+        if (span) { // 门口 → 近岸 → 桥 → 对岸 → 接入点
+          addEdge(gate, span[0], false);
+          addEdge(span[0], span[1], false, true, false);
+          bridges.push({ from: span[0], to: span[1], angle: Math.atan2(span[1].z - span[0].z, span[1].x - span[0].x), length: Math.hypot(span[1].x - span[0].x, span[1].z - span[0].z) });
+          addEdge(span[1], join, false);
+        } else addEdge(gate, join, false);
+      }
+    }
   }
 
   // 连通：各扇区街网可能被河/保留用地切成几块。并查集找连通分量，每个不含核心的分量用一条支路
@@ -1217,7 +1317,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       const ends = [...nodes.values()].filter((n) => deg.get(n.id) === 1);
       for (const end of ends) {
         if (!nodes.has(end.id) || degree().get(end.id) !== 1) continue;
-        if (sitesForGate.some((site) => Math.hypot(site.x - end.x, site.z - end.z) < site.radius + 16)) continue; // 用地入口
+        if (sitesForGate.some((site) => Math.hypot(site.x - end.x, site.z - end.z) < site.radius + 60)) continue; // 用地入口（门前接入点可能内移到岸滩以外，60 内都算）
         if (coastDistance(end.x, end.z) < 30 || inRiver(end.x, end.z)) continue;                              // 通到海边/河边的自然终点
         // 悬挂链：从断头一路走到度 ≠ 2 的节点。
         const chain: RoadEdge[] = []; let cursor = end.id; let length = 0; const d2 = degree();

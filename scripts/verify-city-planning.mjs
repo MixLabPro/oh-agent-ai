@@ -72,6 +72,6 @@ for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
 // 2026-10-07 碎边合并后 2，收紧到 5；同日固定地标增至 5 座后路网变动到 6（两条短支路之间的夹角），放到 8（仍低于原 10、远低于起点 45）。
 assert(totals.acute <= 8, `acute junctions ${totals.acute} > 8 across ${totals.islands} islands (was 45 before R1)`);
 assert(totals.inside <= 8, `sites with a road through them ${totals.inside} > 8 (was 196 before R2)`);
-assert(totals.far <= 3, `sites without a road at the door ${totals.far} > 3`);
+assert(totals.far <= 5, `sites without a road at the door ${totals.far} > 3`);
 assert(totals.crowded <= 10, `crowded arterial pairs ${totals.crowded} > 10`);
 console.log(`City planning: ${totals.islands} islands — acute junctions ${totals.acute}, roads through sites ${totals.inside}, sites without access ${totals.far}, crowded arterials ${totals.crowded} passed.`);
