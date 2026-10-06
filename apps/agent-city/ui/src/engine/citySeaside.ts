@@ -223,6 +223,11 @@ export function buildSeasideBand(coast: Vec2[], center: Vec2, world: SeasideWorl
           if (world.landSignedDistance(x, z) <= 0 || world.height(x, z) <= 0.5) wet = true;
         }
         if (wet) { sample.valid = false; previous = null; continue; }
+        // 凹岸处内偏 36 的大道折线会反折（偏移曲线自交）：大道这一步与水线这一步方向相反/几乎为零就断开。
+        // 曾由恰好无效的采样切断；用地挪位后该采样变合法，大道沿自身折回、两条重叠（seed 1703326634 1 档实测）。
+        const wx = sample.waterline.x - previous.waterline.x; const wz = sample.waterline.z - previous.waterline.z;
+        const bx = b.x - a.x; const bz = b.z - a.z;
+        if (bx * wx + bz * wz < 0.25 * Math.hypot(wx, wz) * Math.hypot(bx, bz) || Math.hypot(bx, bz) < 4) { sample.valid = false; previous = null; continue; }
       }
       previous = sample;
     }

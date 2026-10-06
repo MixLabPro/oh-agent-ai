@@ -74,6 +74,36 @@
 
 R1 与 R2 可以在现有代码上直接做，预计 1–2 轮；R3 是骨架替换，需要先出一版对比图再决定是否推进。
 
+## 4b. 规划总纲：先「城市结构」后「细节绘制」（用户 2026-10-06 第二轮反馈）
+
+用户：「真正的城市是根据环境生长的……需要有一个综合性的算法作为指引，然后再到具体的细节绘制。」
+现有 `buildPlan` 是「各画各的」：主干道放射、环线画圈、扇区铺格子、海滨带只取一段 85° 弧、用地按地理点选址——
+没有一层回答「这块地是什么、为什么在这里、和旁边是什么关系」。参照的理论与论文：
+
+| 来源 | 给我们的规则 |
+|---|---|
+| Lynch《城市意象》[The Image of the City](https://www.cooldavis.org/wp-content/uploads/2022/03/THE_IMAGE_OF_THE_CITY_Kevin_Lynch.pdf)（路径/边界/区域/节点/地标） | **海岸线与河岸是「边界」**，边界要被路径看见：沿岸、沿河要有连续道路；地标要立在节点（路口、广场）上并可见 |
+| Lechner, Watson, Wilensky [Procedural Modeling of Land Use in Cities](https://www.researchgate.net/publication/277289480_Procedural_Modeling_of_Land_Use_in_Cities)（agent 选址） | **用地由价值场决定**：商业/酒店追逐「临水 + 交通可达 + 靠近核心」的地价高点，住宅要「离商业近、离工业远」 |
+| Weber, Müller, Wonka, Gross [Interactive Geometric Simulation of 4D Cities](https://www.peterwonka.net/Publications/pdfs/2009.EG.Weber.UrbanSimulation.FinalVersion.pdf) | **生长顺序**：路网从已开发区边缘按可达性扩展，街区由路网围合，随时间填充 |
+| Vanegas et al. [Procedural Generation of Parcels](https://twak.org/project/parcels/)（OBB 递归切分） | **街区形状由大地块决定**：路网围出的面（三角、扇形、梯形）再按最小外接矩形递归切成临街地块，不是统一正方形 |
+| [ProbableTrain/MapGenerator](https://github.com/probabletrain/mapgenerator) 张量场 | 街道方向场：岸线/河流附近顺着边界走，核心附近放射，其余网格 |
+
+由此得到管线（每层只读上一层的结果）：
+
+1. **地理层**：陆地、海岸、河流、山体 → 可建性、临水距离、坡度。
+2. **结构层（Lynch）**：边界道路（环岛滨海路、河岸路）+ 放射主干道 + 环线 + 节点（核心广场、桥头、主干道与滨海路交点）。
+3. **价值与用地层（Lechner）**：地价 = 临水 × 可达性 × 离核心距离；海滨景观带 = 「临海 + 住宅/商业密集」的岸段（不是固定一段弧）；
+   酒店/商场/景点放在价值高点与节点上；住宅（会话楼）填其余。
+4. **街区层（Vanegas）**：路网围合的面 → 按面形状（三角/扇形/梯形）递归切地块，全部临街。
+5. **细节层**：建筑、景观、灯光（现有渲染）。
+
+小步快跑的顺序（每步截图验收）：
+- **S1** 地标/用地不得压水（双子塔进河）+ **环岛滨海路**：沿整条海岸可建处一条连续道路，与海滨大道衔接。
+- **S2** **河岸路**：河两岸各一条沿河道路，桥头接入。
+- **S3** **海滨景观带随用地走**：沙滩、步道、大道覆盖「临海且邻近住宅/商业」的所有岸段，而非一段固定弧。
+- **S4** **街区 = 路网面**：用结构层道路围出的面替换扇区格子，面内按形状切地块（三角/扇形街区出现）。
+- **S5** 价值场选址：酒店、商场、地标落在价值高点与节点上。
+
 ## 5. R1 + R2 结果（2026-10-06）
 
 ![R1+R2 之后](images/city-road-audit-1703294958-after-r1r2.png)
