@@ -1002,6 +1002,29 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     if ((edgeBuckets.get(`${Math.floor(x / CELL)}:${Math.floor(z / CELL)}`) ?? []).some((e) => segmentDistance({ x, z }, e.points[0], e.points[1]) < e.width / 2 + 3)) continue;
     parkTrees.push({ x, z, y: height(x, z), seed: random(`tree${i}`) });
   }
+  // ── 碎边合并：长度 <5 的非桥路段把两端并成一个节点。接入路吸附到离已有路口几单位处时会留下 0–4 长的碎边，
+  // 与广场环路等形成 <30° 的「锐角路口」（30 岛中 10 个锐角全部是这种形状）。
+  const sliverSkip = new Set<string>();
+  for (let pass = 0; pass < 50; pass += 1) {
+    // 宽 12 的骨架（海滨大道按 ~15 细分、段间可能 <5）不合并：并掉会打断大道的车流回路（seaside 守卫）。
+    const sliver = [...edges.values()].find((e) => !sliverSkip.has(e.id) && !e.bridge && e.width < 12 && Math.hypot(e.points[1].x - e.points[0].x, e.points[1].z - e.points[0].z) < 5);
+    if (!sliver) break;
+    // 保留挂着骨架（宽 12）的那一端：并掉海滨大道端点会让大道车流回路引用不存在的节点（seaside 守卫 10 档）。
+    const touchesPrimary = (id: string) => [...edges.values()].some((e) => e !== sliver && e.width >= 12 && (e.from === id || e.to === id));
+    const fromPrimary = touchesPrimary(sliver.from); const toPrimary = touchesPrimary(sliver.to);
+    if (fromPrimary && toPrimary) { sliverSkip.add(sliver.id); continue; }
+    edges.delete(sliver.id);
+    const keepId = toPrimary ? sliver.to : sliver.from;
+    const keepNode = nodes.get(keepId)!; const dropId = keepId === sliver.from ? sliver.to : sliver.from;
+    for (const e of [...edges.values()]) {
+      if (e.from !== dropId && e.to !== dropId) continue;
+      edges.delete(e.id);
+      const other = e.from === dropId ? e.points[1] : e.points[0];
+      addEdge(keepNode, other, e.kind === "arterial", e.bridge ?? false, e.width >= 12);
+    }
+    nodes.delete(dropId);
+  }
+
   const carPaths = blocks.filter((b, i) => b.parcels.length > 0 && i % 7 === 0).map((b) => [...b.polygon, b.polygon[0]]);
   // 海滨大道车流沿海岸单向行驶，再通过真实路网回到起点；找不到完整地面回路时
   // 不生成假路线。返程搜索排除大道自身边，避免车辆在两端掉头后原路折返。
