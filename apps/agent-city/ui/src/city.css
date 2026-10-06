@@ -123,3 +123,5 @@
 @media (max-width: 640px) { .city-catalog li { grid-template-columns: 1fr; } .city-catalog img { width: 100%; } }
 
 .city-catalog-group { margin: 14px 0 8px; font-size: 13px; opacity: 0.85; border-bottom: 1px solid rgba(255,255,255,0.15); padding-bottom: 4px; }
+.city-civic-share { display: block; position: relative; width: 100%; text-align: left; margin: 4px 0; overflow: hidden; }
+.city-civic-share span { position: absolute; left: 0; top: 0; bottom: 0; opacity: 0.35; }

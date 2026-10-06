@@ -12,6 +12,7 @@ import sessionTower from "./assets/catalog/session-tower.jpg";
 import sessionSlab from "./assets/catalog/session-slab.jpg";
 import sessionDeco from "./assets/catalog/session-deco.jpg";
 import sessionHotel from "./assets/catalog/session-hotel.jpg";
+import heroTower from "./assets/catalog/hero-tower.jpg";
 import districtLandmark from "./assets/catalog/district-landmark.jpg";
 import twinTowers from "./assets/catalog/twin-towers.jpg";
 import twistTower from "./assets/catalog/twist-tower.jpg";
@@ -30,8 +31,12 @@ import station from "./assets/catalog/station.jpg";
 import stadium from "./assets/catalog/stadium.jpg";
 import observationTower from "./assets/catalog/observation-tower.jpg";
 import park from "./assets/catalog/park.jpg";
-import civic from "./assets/catalog/civic.jpg";
+import hospital from "./assets/catalog/hospital.jpg";
+import school from "./assets/catalog/school.jpg";
+import mall from "./assets/catalog/mall.jpg";
+import garden from "./assets/catalog/garden.jpg";
 import harbor from "./assets/catalog/harbor.jpg";
+import airport from "./assets/catalog/airport.jpg";
 import signs from "./assets/catalog/signs.jpg";
 import beach from "./assets/catalog/beach.jpg";
 
@@ -45,7 +50,8 @@ export const CITY_CATALOG: CatalogEntry[] = [
   { id: "session-slab", group: "会话楼", image: sessionSlab, title: "会话板楼 / 街坊楼", kind: "data", source: "cityParts.buildRuntimes / formOf", body: "同样代表一次会话；区内地价较低的地块长成宽而浅的板楼或街坊楼。形态只随地价变化，楼高仍由 token 决定。" },
   { id: "session-deco", group: "会话楼", image: sessionDeco, title: "海滨装饰艺术楼", kind: "data", source: "cityParts.facadeFor (facade 3)", body: "临海区较矮的会话楼换成迈阿密装饰艺术风格：粉彩墙面、水平饰带、阶梯楼冠。仍是一次会话。" },
   { id: "session-hotel", group: "会话楼", image: sessionHotel, title: "海滨酒店", kind: "data", source: "cityLayout hotelBlocks + cityHotelCrown", body: "落在海滨酒店地块上的会话楼铺满宽地块成为一栋酒店，部分带白色格栅屋顶冠。只有有会话落户时才出现。" },
-  { id: "district-landmark", group: "地标", image: districtLandmark, title: "城区地标", kind: "scale", source: "cityParts.buildDistrictLandmarks", body: "每个执行环境城区在自己中心立一座三级收分的装饰艺术塔，取区色、高于本区最高的会话楼，是城区天际线的峰值。有会话的城区才出现。" },
+  { id: "hero-tower", group: "会话楼", image: heroTower, title: "全城之最", kind: "data", source: "cityParts.buildHeroCrown", body: "本窗口 token 最多的那一次会话：楼顶加区色尖顶冠，黄昏与夜里顶上亮一道探照光柱，在全城一眼找到它。楼高仍由它自己的 token 决定。" },
+  { id: "district-landmark", group: "地标", image: districtLandmark, title: "城区地标", kind: "scale", source: "cityParts.buildDistrictLandmarks", body: "每个执行环境城区在景观湖旁立一座三级收分的装饰艺术塔，取区色，城区标签立在它上方。每个会话加高一截，回放时随会话逐层加盖；点击查看该城区的会话、活跃与异常。" },
   { id: "twin-towers", group: "地标", image: twinTowers, title: "双子塔", kind: "decor", source: "cityParts.buildLandmarks", body: "迈阿密热带装饰艺术风格的城市地标：眉檐遮阳板、粉彩竖鳍、阶梯塔冠与霓虹勾边，夜里亮窗。由岛屿种子挑选，不代表会话。" },
   { id: "twist-tower", group: "地标", image: twistTower, title: "扭转塔", kind: "decor", source: "cityParts.buildLandmarks", body: "逐层扭转的粉彩塔楼，与双子塔二选一，构成市中心天际线。由岛屿种子挑选，不代表会话。" },
   { id: "tv-tower", group: "地标", image: tvTower, title: "电视塔", kind: "decor", source: "cityParts.buildLandmarks", body: "细高塔身加观景球舱与霓虹环，市中心的竖向标志。由岛屿种子挑选，不代表会话。" },
@@ -63,8 +69,12 @@ export const CITY_CATALOG: CatalogEntry[] = [
   { id: "stadium", group: "公共建筑", image: stadium, title: "体育场", kind: "decor", source: "cityParts.buildPublicSites (stadium)", body: "环形看台加红色立柱，内含草坪球场，夜里有泛光灯。不代表会话。" },
   { id: "observation-tower", group: "公共建筑", image: observationTower, title: "观景塔", kind: "decor", source: "cityParts.buildPublicSites (tower)", body: "细身观景塔，顶部圆形观景台与红色天线。不代表会话。" },
   { id: "park", group: "公共建筑", image: park, title: "城市公园", kind: "decor", source: "cityParts.buildPublicSites / cityTextures (park)", body: "椭圆草坪与环形园路，一圈路灯，林木由规划层种植。不代表会话。" },
-  { id: "civic", group: "公共建筑", image: civic, title: "学校 / 商场 / 医院", kind: "scale", source: "cityParts.buildCivics", body: "会话越多，城市配套越多（约每 45 个会话一座），反映城市规模而非单个会话。" },
+  { id: "hospital", group: "公共建筑", image: hospital, title: "医院", kind: "scale", source: "cityParts.buildCivics (hospital)", body: "白色主楼加两翼，正反两面红十字，急诊入口带红色雨篷，屋顶停机坪。会话越多城市配套越多（约每 45 个会话一座），反映城市规模而非单个会话。" },
+  { id: "school", group: "公共建筑", image: school, title: "学校", kind: "scale", source: "cityParts.buildCivics (school)", body: "U 形教学楼加红色跑道操场与旗杆。随城市规模出现，不代表单个会话。" },
+  { id: "mall", group: "公共建筑", image: mall, title: "商场", kind: "scale", source: "cityParts.buildCivics (mall)", body: "大体量低层商场：玻璃中庭、屋顶停车场、招牌塔与临街入口。随城市规模出现，不代表单个会话。" },
+  { id: "garden", group: "公共建筑", image: garden, title: "城区花园与景观湖", kind: "scale", source: "cityParts.buildGardens", body: "每个执行环境城区中心的花园与景观湖，城区地标立在它旁边；城区的会话楼从这里向外生长。有会话的城区才出现。" },
   { id: "harbor", group: "海滨与港口", image: harbor, title: "港口与码头", kind: "decor", source: "cityParts.buildPublicSites (harbor)+ buildMarina", body: "集装箱堆场、龙门吊、白色筒仓，以及伸入水面的游艇码头。属于岛屿规划的公共用地，不代表会话。" },
+  { id: "airport", group: "海滨与港口", image: airport, title: "机场岛与堤道", kind: "decor", source: "cityAirport.buildAirport", body: "主岛外浅水区的填海机场：跑道与端头标线、壳形航站楼与登机桥、塔台，由一条多跨堤道连回主岛；夜里跑道边灯亮起。不代表会话。" },
   { id: "signs", group: "海滨与港口", image: signs, title: "广告牌", kind: "decor", source: "citySkylineProps (roadsideSignPlan / rooftopSignPlan)", body: "主干道旁的双柱广告牌与商业楼顶立牌，抽象色条加霓虹边框，不含文字。不代表会话。" },
   { id: "beach", group: "海滨与港口", image: beach, title: "海滨设施", kind: "decor", source: "cityParts.buildBeach* / buildPromenade / buildLifeguardTowers", body: "沙滩、遮阳伞与躺椅、沙排场、救生塔、粉色滨海步道与路灯。沿建成区附近的海岸铺设，不代表会话。" },
 ];

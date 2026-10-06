@@ -23,6 +23,7 @@ import { makeCityTexture, makeDecoFacadeTexture, makeFacadeTexture, makeLabelSpr
 import type { TerrainField } from "./cityLayout";
 import { createRenderCanvas } from "./renderCanvas";
 import { SegmentIndex, polygonDistance } from "./cityPlan";
+import { buildAirport, planAirport, roadSamples } from "./cityAirport";
 import { roadPaintPlan } from "./cityRoadPaint";
 
 const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
@@ -118,6 +119,8 @@ type BuildingRuntime = {
   roofKind: number;
   /** 全城 token 最多的会话：专属冠顶 + 灯环 + 光束。 */
   hero: boolean;
+  /** L-6 圆筒玻璃塔实例下标（-1 = 普通方楼）。 */
+  cylinder: number;
   /** 海滨酒店冠（L-1）：crownBase = 鳍片实例起点（-1 = 无冠）；方案建模期算一次存住，逐帧只写矩阵。 */
   crownBase: number;
   crown: { fins: CrownPiece[]; stripY: number } | null;
@@ -413,6 +416,7 @@ export class CityParts {
   private readonly neonMesh: THREE.InstancedMesh;
   private readonly scaffoldMesh: THREE.InstancedMesh;
   private readonly antennaMesh: THREE.InstancedMesh;
+  private readonly cylinderMesh: THREE.InstancedMesh;
   private readonly beaconMesh: THREE.InstancedMesh;
   private readonly craneMastMesh: THREE.InstancedMesh;
   private readonly craneArmMesh: THREE.InstancedMesh;
@@ -480,6 +484,13 @@ export class CityParts {
       this.nightLights = this.buildNightLights();
       this.buildPublicSites();
       this.buildMarina();
+      {
+        // L-4 机场岛 + L-5 堤道：避开港口与海滨景观段。
+        const avoid = [...this.layout.publicSites.filter((x) => x.kind === "harbor"), ...(this.layout.landmarks ?? []).filter((x) => x.kind === "sail-opera"), ...(this.layout.seaside && !this.layout.seaside.degraded ? this.layout.seaside.samples.filter((x) => x.valid).map((x) => x.waterline) : [])];
+        const core = this.layout.core ?? { x: 0, z: 0 };
+        const plan = planAirport(this.layout.coast, core, avoid, roadSamples(this.layout.roadEdges));
+        if (plan) this.group.add(buildAirport(plan, this.disposables, this.nightLights?.heads ?? null));
+      }
       this.buildCivics();
       this.buildLandmarks();
       this.buildTrussBridges();
@@ -645,6 +656,20 @@ export class CityParts {
     this.neonMesh.castShadow = false;
     this.scaffoldMesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#e0a83f", transparent: true, opacity: 0.24, depthWrite: false }), total);
     this.scaffoldMesh.castShadow = false;
+    {
+      // L-6 圆筒玻璃塔（backlog）：竖向条纹幕墙，夜里亮窗（landmarkWindows 同一套白天/夜间贴图切换）。
+      const day = createRenderCanvas(); day.width = 64; day.height = 32; const dctx = day.getContext("2d");
+      if (dctx) { dctx.fillStyle = "#6f9fb4"; dctx.fillRect(0, 0, 64, 32); dctx.fillStyle = "#e8eef2"; for (let x = 0; x < 64; x += 8) dctx.fillRect(x, 0, 1.5, 32); dctx.fillRect(0, 30, 64, 2); }
+      const lit = createRenderCanvas(); lit.width = 64; lit.height = 32; const lctx = lit.getContext("2d");
+      if (lctx) { lctx.fillStyle = "#000"; lctx.fillRect(0, 0, 64, 32); for (let x = 0; x < 64; x += 8) { const on = hashSeed(`cyl-window:${x}`); if (on < 0.3) continue; lctx.fillStyle = on > 0.8 ? "#bfe9ff" : "#ffd89a"; lctx.fillRect(x + 2, 4, 5, 22); } }
+      const dayTex = new THREE.CanvasTexture(day as HTMLCanvasElement); const litTex = new THREE.CanvasTexture(lit as HTMLCanvasElement);
+      for (const t of [dayTex, litTex]) { t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(3, 10); }
+      const glass = new THREE.MeshLambertMaterial({ color: "#ffffff", map: dayTex, emissive: new THREE.Color("#000000"), emissiveMap: dayTex });
+      this.landmarkWindows.push({ material: glass, day: dayTex, lit: litTex, dayEmissive: new THREE.Color("#000000") });
+      this.disposables.push(dayTex, litTex);
+      this.cylinderMesh = this.makeInstanced(new THREE.CylinderGeometry(0.5, 0.5, 1, 20).translate(0, 0.5, 0), glass, 64);
+      this.cylinderMesh.name = "city-shafts-cylinder";
+    }
     this.antennaMesh = this.makeInstanced(new THREE.CylinderGeometry(0.09, 0.16, 1, 5).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#5d6470" }), 96);
     this.beaconMesh = this.makeInstanced(new THREE.SphereGeometry(0.32, 8, 6), new THREE.MeshBasicMaterial({ color: "#ffb02e" }), 96);
     this.craneMastMesh = this.makeInstanced(new THREE.BoxGeometry(0.85, 1, 0.85).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#ffb400", emissive: "#6b4300" }), 48);
@@ -1033,6 +1058,51 @@ export class CityParts {
         cyl(0, 11.7, 0, r * 0.27, 4.2, "#d6c9a8");
         cyl(0, 15.9, 0, r * 0.2, 3.4, "#5fa7a3");
         cyl(0, 19.3, 0, 0.4, 6, "#c9b98f");
+        // 细化：门廊三角山花、正门台阶、两翼窗带、穹顶鼓座窗与顶部灯笼亭、广场前旗杆。
+        box(0, 10.6, r * 0.36, r * 0.86, 0.5, 3.2, "#e9e1cd");
+        for (let k = 0; k < 6; k += 1) box(0, 11.1 + k * 0.45, r * 0.36, r * 0.86 * (1 - k / 6), 0.45, 3.2, "#f2ebda");
+        for (let k = 0; k < 4; k += 1) box(0, k * 0.4, r * 0.46 + k * 0.9, r * 0.5, 0.4, 1, "#ddd3bd");
+        for (const sx of [-1, 1]) for (let k = 0; k < 3; k += 1) box(sx * r * 0.3, 3 + k * 2.6, r * 0.28, r * 0.24, 1.2, 0.2, "#5c6e78");
+        for (let k = 0; k < 10; k += 1) { const t = (k / 10) * Math.PI * 2; box(Math.cos(t) * r * 0.27, 13, Math.sin(t) * r * 0.27, 1, 1.8, 1, "#4a5a63"); }
+        cyl(0, 25.3, 0, 1.2, 1.6, "#f2ebda");
+        // 市政厅 = 全城的功能性标志（用户：随城市规模升级 + 提供全城信息）。
+        // 升级阶段按岛屿档位（每档约 400 会话）：1–2 镇政厅（基础）→ 3–4 加两翼与正面时钟 → 5–7 加高鼓座与钟楼 → 8–10 议会大厦（灯笼亭穹顶 + 两侧塔楼 + 长阶）。
+        const tier = this.layout.scaleTier ?? 1;
+        const stage = tier >= 8 ? 4 : tier >= 5 ? 3 : tier >= 3 ? 2 : 1;
+        if (stage >= 2) {
+          for (const sx of [-1, 1]) {
+            box(sx * r * 0.62, 1.6, -r * 0.05, r * 0.36, 7, r * 0.42, "#ece4d2");
+            box(sx * r * 0.62, 8.6, -r * 0.05, r * 0.4, 0.7, r * 0.46, "#cdbf9f");
+            for (let k = 0; k < 2; k += 1) box(sx * r * 0.62, 3 + k * 2.6, r * 0.16 + 0.1, r * 0.28, 1.2, 0.2, "#5c6e78");
+          }
+          cyl(0, 12.6, r * 0.33, 1.4, 0.3, "#f6f0e2"); box(0, 12.7, r * 0.33 + 0.2, 0.15, 1.1, 0.1, "#2a3036");
+        }
+        if (stage >= 3) {
+          cyl(0, 15.9, 0, r * 0.24, 2.6, "#e9e1cd");
+          for (let k = 0; k < 12; k += 1) { const t = (k / 12) * Math.PI * 2; box(Math.cos(t) * r * 0.24, 16.2, Math.sin(t) * r * 0.24, 0.8, 1.6, 0.8, "#4a5a63"); }
+          box(r * 0.5, 0, -r * 0.3, 5, 26, 5, "#ece4d2"); box(r * 0.5, 26, -r * 0.3, 6, 1, 6, "#cdbf9f");
+          cyl(r * 0.5, 22, -r * 0.3 + 2.6, 1.6, 0.3, "#f6f0e2");
+        }
+        if (stage >= 4) {
+          for (const sx of [-1, 1]) { box(sx * r * 0.82, 0, r * 0.25, 5, 22, 5, "#ece4d2"); cyl(sx * r * 0.82, 22, r * 0.25, 2.2, 4, "#5fa7a3"); }
+          for (let k = 0; k < 8; k += 1) box(0, k * 0.4, r * 0.62 + k * 1.1, r * 0.7, 0.4, 1.2, "#ddd3bd");
+          cyl(0, 27, 0, 2, 3, "#f2ebda"); cyl(0, 30, 0, 0.3, 4, "#c9b98f");
+        }
+        // 广场前一排城区旗：每个执行环境一面区色旗，旗杆高度 = 6 + 14 × 该城区会话占比（从空中就能读出各城区份额）。
+        const total = this.model.districts.reduce((t, d) => t + d.sessionCount, 0) || 1;
+        const districts = this.model.districts.filter((d) => d.sessionCount > 0);
+        districts.forEach((district, i) => {
+          const fx = (i - (districts.length - 1) / 2) * 5.5;
+          const pole = 6 + 14 * (district.sessionCount / total);
+          cyl(fx, 0, r * 0.78, 0.15, pole, "#d9d9d4");
+          box(fx + 1.2, pole - 1.6, r * 0.78, 2.4, 1.4, 0.08, paletteFor(district.id).accent);
+        });
+        // 异常信标：任一城区有异常时穹顶顶上亮信标（critical 红 / warning 琥珀 / info 青），点击市政厅看是哪个城区。
+        const severities = this.model.districts.map((d) => d.anomaly?.severity).filter(Boolean);
+        if (severities.length) {
+          const color = severities.includes("critical") ? "#ff3b3b" : severities.includes("warning") ? "#ffb02e" : "#46e6ff";
+          box(0, 32.5, 0, 1.4, 1.4, 1.4, color); glow(0, 32.5, 0, 1.6, 1.6, 1.6, color);
+        }
         // 檐口一圈暖白边缘光 + 门廊柱脚洗墙光 + 穹顶青色腰线。
         for (const sz of [-1, 1]) glow(0, 11.7, sz * r * 0.31, r * 0.98, 0.22, 0.22, "#ffe2a8");
         for (const sx of [-1, 1]) glow(sx * r * 0.49, 11.7, 0, 0.22, 0.22, r * 0.62, "#ffe2a8");
@@ -1047,6 +1117,16 @@ export class CityParts {
         box(0, 0, -r * 0.62, r * 1.3, 11, 7, "#d9cdb5");
         cyl(r * 0.5, 11, -r * 0.62, 1.6, 10, "#c8bba0");
         cyl(r * 0.5, 21, -r * 0.62, 2.1, 1.2, "#f4efe0");
+        // 细化：站房拱形大窗与入口雨篷、雨棚屋脊、站台上停靠的列车（车头 + 3 节车厢）。
+        for (let k = -2; k <= 2; k += 1) box(k * r * 0.22, 2, -r * 0.62 + 3.55, r * 0.14, 6.5, 0.15, "#5c7380");
+        box(0, 3.8, -r * 0.62 + 4.6, r * 0.5, 0.35, 2.4, "#8e9a9c");
+        box(0, 7.95, 0, r * 1.4, 0.8, 1.2, "#7c878a");
+        for (let car = 0; car < 4; car += 1) {
+          const z = -r * 0.42 + car * 9.5;
+          box(-10, 0.85, z, 3, 3.2, 9, car === 0 ? "#e8eef0" : "#d8dde0");
+          box(-10, 2.6, z, 3.05, 0.9, 8.6, "#3a5866");
+          box(-10, 0.85, z, 3.1, 0.35, 9, car % 2 ? "#ff6fae" : "#38c3c9");
+        }
         // 站房钟面发光 + 雨棚两侧边缘光 + 站台边线。
         glow(r * 0.5, 21.15, -r * 0.62, 1.7, 0.9, 1.7, "#fff3cf");
         for (const sz of [-1, 1]) glow(0, 7.5, sz * r * 0.45, r * 1.4, 0.22, 0.22, "#58e0ff");
@@ -1061,6 +1141,18 @@ export class CityParts {
           const tangent = Math.atan2(19.5 * Math.cos(t), -27 * Math.sin(t));
           box(lx, 0, lz, 10.5, index % 4 === 0 ? 11 : 8, 5.5, index % 4 === 0 ? "#c05a4f" : "#dcd8ca", -tangent);
         }
+        // 细化（用户「请细化这些建筑模型」）：球场草坪与白线、内圈低看台、看台上方悬挑顶棚、端头记分牌。
+        box(0, 0, 0, 34, 0.3, 21, "#4f8a4a");
+        box(0, 0.3, 0, 34, 0.04, 0.25, "#f2f2ea"); box(-16.8, 0.3, 0, 0.25, 0.04, 21, "#f2f2ea"); box(16.8, 0.3, 0, 0.25, 0.04, 21, "#f2f2ea");
+        box(0, 0.3, -10.4, 34, 0.04, 0.25, "#f2f2ea"); box(0, 0.3, 10.4, 34, 0.04, 0.25, "#f2f2ea");
+        for (let index = 0; index < segments; index += 1) {
+          const t = ((index + 0.5) / segments) * Math.PI * 2;
+          const tangent = Math.atan2(15 * Math.cos(t), -22 * Math.sin(t));
+          box(Math.cos(t) * 22, 0, Math.sin(t) * 15, 7.5, 3.6, 3.2, index % 2 ? "#3f6f9a" : "#e0dccd", -tangent); // 内圈低看台
+          const tr = Math.atan2(19.5 * Math.cos(t), -27 * Math.sin(t));
+          box(Math.cos(t) * 25.5, 12, Math.sin(t) * 18.2, 10.5, 0.4, 7.5, "#f4f2ec", -tr);                       // 悬挑顶棚
+        }
+        box(0, 12.5, -21.5, 12, 5, 0.8, "#2a3036"); glow(0, 13.2, -21.05, 10.8, 3.6, 0.1, "#7fe3ff");            // 记分牌
         for (const [lx, lz] of [[-30, -22], [30, -22], [-30, 22], [30, 22]]) {
           cyl(lx, 0, lz, 0.55, 24, "#9aa0a0");
           glow(lx, 24, lz, 4, 1.4, 2.4, "#fff3c4"); // 泛光灯塔灯头：夜里发光
@@ -1072,9 +1164,16 @@ export class CityParts {
           glow(Math.cos(t) * 27, index % 4 === 0 ? 11.1 : 8.1, Math.sin(t) * 19.5, 10.5, 0.22, 0.22, index % 2 === 0 ? "#38e8ff" : "#ff4fd8", -tangent);
         }
       } else if (site.kind === "tower") {
+        // 细化：入口门厅、塔身电梯井竖条、深色玻璃观景舱（竖棂）、上层小观景环。
         cyl(0, 0, 0, 6.5, 3.2, "#c4c7c6");
+        box(0, 0, 7.2, 8, 4.2, 5, "#e4e1d8"); box(0, 4.2, 7.2, 9, 0.4, 6, "#7fb4c2");
         cyl(0, 3.2, 0, 2.3, 42, "#cfd3d6");
-        cyl(0, 42, 0, 6.4, 3.8, "#eaf0f2");
+        box(0, 3.2, 2.2, 0.9, 38.8, 0.5, "#9fb4bd");
+        cyl(0, 42, 0, 6.4, 0.9, "#eaf0f2");
+        cyl(0, 42.9, 0, 6.1, 2.2, "#2f4552");
+        for (let k = 0; k < 12; k += 1) { const t = (k / 12) * Math.PI * 2; box(Math.cos(t) * 6.15, 42.9, Math.sin(t) * 6.15, 0.25, 2.2, 0.25, "#eaf0f2"); }
+        cyl(0, 45.1, 0, 6.6, 0.7, "#eaf0f2");
+        cyl(0, 52, 0, 3, 1.2, "#eaf0f2");
         cyl(0, 45.8, 0, 4.2, 2.2, "#7fb4c2");
         cyl(0, 48, 0, 0.45, 15, "#d45a4a");
         // 观景台与塔身腰线霓虹 + 天线红色航空灯。
@@ -1465,6 +1564,12 @@ export class CityParts {
         mesh(new THREE.SphereGeometry(5.5, 18, 12).scale(1, 0.55, 1), white, group, 0, h * 0.72, 0);
         mesh(new THREE.TorusGeometry(6.2, 0.5, 6, 32).rotateX(Math.PI / 2), material("#7fb4c2", neon ? 0.8 : 0.2), group, 0, h * 0.72, 0);
         mesh(new THREE.CylinderGeometry(0.25, 0.45, h * 0.24, 6).translate(0, h * 0.12, 0), red, group, 0, h * 0.78, 0);
+        // 细化：裙房入口、塔基三脚支撑、塔身两道环形检修平台、球舱下方深色玻璃观景层、天线上的航空灯球。
+        mesh(new THREE.CylinderGeometry(8, 8.5, 4, 16).translate(0, 2, 0), white, group, 0, 0, 0);
+        for (let k = 0; k < 3; k += 1) { const t = (k / 3) * Math.PI * 2; const leg = mesh(new THREE.BoxGeometry(1.4, 14, 1.4).translate(0, 7, 0), steel, group, Math.cos(t) * 4.5, 3, Math.sin(t) * 4.5); leg.rotation.z = Math.cos(t) * 0.18; leg.rotation.x = -Math.sin(t) * 0.18; }
+        for (const f of [0.3, 0.5]) mesh(new THREE.CylinderGeometry(3.4, 3.4, 0.5, 14), white, group, 0, h * f, 0);
+        mesh(new THREE.CylinderGeometry(5.2, 4.6, 1.8, 18).translate(0, 0.9, 0), material("#2f4552"), group, 0, h * 0.72 - 3.8, 0);
+        mesh(new THREE.SphereGeometry(0.6, 8, 6), material("#ff3b3b", 1.5), group, 0, h * 0.78 + h * 0.24, 0);
       } else if (landmark.kind === "twin-towers") {
         // Miami Tropical Deco 双塔：白色塔身 + 浅青玻璃带窗、每层带一道白色「眉檐」遮阳板、四角粉彩竖鳍、
         // 阶梯式（ziggurat）塔冠与霓虹勾边。曾用夜景窗格贴图乘粉彩色：贴图本身偏暗，乘出来两栋漆黑（真机截图）。
@@ -1536,7 +1641,18 @@ export class CityParts {
         const h = Math.min(cap, 66);
         const floors = 22;
         const floorGeometry = new THREE.BoxGeometry(1, 1, 1);
-        const floorMaterial = material("#ffffff");
+        // 每层一条窗带（白墙上的深色玻璃带），夜里换成暖色亮窗——曾是纯色楼板，夜里整栋漆黑（真机夜景截图）。
+        const bandDay = createRenderCanvas(); bandDay.width = 64; bandDay.height = 16;
+        const dctx = bandDay.getContext("2d");
+        if (dctx) { dctx.fillStyle = "#ffffff"; dctx.fillRect(0, 0, 64, 16); dctx.fillStyle = "#3f5662"; dctx.fillRect(0, 4, 64, 8); dctx.fillStyle = "#ffffff"; for (let x = 0; x < 64; x += 8) dctx.fillRect(x, 4, 1, 8); }
+        const bandLit = createRenderCanvas(); bandLit.width = 64; bandLit.height = 16;
+        const lctx = bandLit.getContext("2d");
+        if (lctx) { lctx.fillStyle = "#000000"; lctx.fillRect(0, 0, 64, 16); for (let x = 0; x < 64; x += 8) { const on = hashSeed(`twist-window:${x}`); if (on < 0.25) continue; lctx.fillStyle = on > 0.85 ? "#bfe9ff" : "#ffd89a"; lctx.fillRect(x + 1, 4, 7, 8); } }
+        const dayTex = new THREE.CanvasTexture(bandDay as HTMLCanvasElement); const litTex = new THREE.CanvasTexture(bandLit as HTMLCanvasElement);
+        for (const t of [dayTex, litTex]) { t.colorSpace = THREE.SRGBColorSpace; t.wrapS = THREE.RepeatWrapping; t.repeat.set(1, 1); } // 64px = 8 扇窗/面
+        const floorMaterial = new THREE.MeshLambertMaterial({ color: "#ffffff", map: dayTex, emissive: new THREE.Color("#000000"), emissiveMap: dayTex });
+        this.landmarkWindows.push({ material: floorMaterial, day: dayTex, lit: litTex, dayEmissive: new THREE.Color("#000000") });
+        this.disposables.push(floorMaterial, dayTex, litTex);
         const floorMesh = new THREE.InstancedMesh(floorGeometry, floorMaterial, floors);
         const palette = ["#68c9d0", "#d78db3", "#9b9be0"];
         for (let i = 0; i < floors; i += 1) {
@@ -1551,11 +1667,41 @@ export class CityParts {
         group.add(floorMesh);
         this.disposables.push(floorGeometry, floorMaterial);
       } else if (landmark.kind === "arch") {
+        // 凯旋门（细化）：基座 → 两侧墩身（每面一对附柱）→ 半圆拱券开口 → 檐口 → 顶楼（attic）→ 顶部雕像组。
+        // 曾是两根方柱 + 横梁（用户：「请细化这些建筑模型」）。全部为通用古典语汇，不参照具体建筑。
         const h = Math.min(cap, 26);
-        for (const side of [-1, 1]) mesh(new THREE.BoxGeometry(5, h, 7).translate(0, h / 2, 0), white, group, side * 8, 0, 0);
-        mesh(new THREE.BoxGeometry(21, 6, 7.4).translate(0, 3, 0), white, group, 0, h, 0);
-        mesh(new THREE.BoxGeometry(22, 1, 8).translate(0, 0.5, 0), material("#d9d3c2"), group, 0, h + 6, 0);
+        const stone = material("#ece5d6"); const trim = material("#d6ccb7"); const bronze = material("#8a7a52");
+        const W = 31; const D = 9; const pierW = 7.5; const openW = W - pierW * 2; const springY = h * 0.55; // 开口 16：骑在 12 宽主干道上 const openW = W - pierW * 2; const springY = h * 0.55;
+        // 基座只在两墩下：开口里是路面，不能被基座盖住（骑路后截图发现）。
+        for (const side of [-1, 1]) mesh(new THREE.BoxGeometry(pierW + 1.5, 1.6, D + 3).translate(0, 0.8, 0), trim, group, side * (openW / 2 + pierW / 2 + 0.75), 0, 0);
+        for (const side of [-1, 1]) {
+          const cx = side * (openW / 2 + pierW / 2);
+          mesh(new THREE.BoxGeometry(pierW, h, D).translate(0, h / 2, 0), stone, group, cx, 1.6, 0);          // 墩身
+          for (const face of [-1, 1]) for (const k of [-1, 1]) {                                              // 每面一对附柱
+            mesh(new THREE.CylinderGeometry(0.55, 0.6, h - 2.4, 10).translate(0, (h - 2.4) / 2, 0), trim, group, cx + k * 2.4, 2.8, face * (D / 2 + 0.35));
+            mesh(new THREE.BoxGeometry(1.6, 0.8, 1.2).translate(0, 0.4, 0), trim, group, cx + k * 2.4, 1.6, face * (D / 2 + 0.35));
+          }
+          mesh(new THREE.BoxGeometry(3.4, 4.2, 0.4), bronze, group, cx, springY + 3, D / 2 + 0.25);          // 浮雕板
+        }
+        // 拱券：开口上方实体，减去半圆——用半圆柱面（内侧）+ 两侧拱肩块近似。
+        mesh(new THREE.BoxGeometry(openW, h - springY - openW / 2, D).translate(0, (h - springY - openW / 2) / 2, 0), stone, group, 0, 1.6 + springY + openW / 2, 0);
+        const vault = new THREE.CylinderGeometry(openW / 2, openW / 2, D, 24, 1, true, Math.PI / 2, Math.PI).rotateX(Math.PI / 2);
+        const vaultMesh = mesh(vault, material("#e2dac8"), group, 0, 1.6 + springY, 0);
+        (vaultMesh.material as THREE.MeshLambertMaterial).side = THREE.DoubleSide;
+        mesh(new THREE.TorusGeometry(openW / 2 + 0.3, 0.35, 6, 24, Math.PI), trim, group, 0, 1.6 + springY, D / 2 + 0.05);        // 拱圈线脚
+        mesh(new THREE.BoxGeometry(W + 1.6, 1.1, D + 1.6).translate(0, 0.55, 0), trim, group, 0, h + 1.6, 0); // 檐口
+        mesh(new THREE.BoxGeometry(W - 2, 5, D - 1).translate(0, 2.5, 0), stone, group, 0, h + 2.7, 0);       // 顶楼
+        mesh(new THREE.BoxGeometry(W - 6, 2.2, 0.3), bronze, group, 0, h + 5.2, (D - 1) / 2 + 0.2);           // 题铭板（无文字）
+        mesh(new THREE.BoxGeometry(W - 1, 0.7, D).translate(0, 0.35, 0), trim, group, 0, h + 7.7, 0);
+        mesh(new THREE.BoxGeometry(5, 2.2, 3).translate(0, 1.1, 0), bronze, group, 0, h + 8.4, 0);            // 顶部雕像组（抽象体块）
+        mesh(new THREE.ConeGeometry(1.1, 3.4, 6).translate(0, 1.7, 0), bronze, group, 0, h + 10.6, 0);
       } else if (landmark.kind === "sail-opera") {
+        if (landmark.shore) {
+          // 海上小岛：圆形填海平台 + 护岸石；岸点到岛缘的堤道是规划里的桥路段（路网渲染出桥面/护栏/桥墩），不再重复画；平台顶面 y=0.3 与岸滩齐平。
+          const base = group.position.y;
+          mesh(new THREE.CylinderGeometry(landmark.radius + 2, landmark.radius + 4, 3.6, 28).translate(0, -1.8, 0), material("#cfc9b8"), group, 0, 0.3 - base, 0);
+          mesh(new THREE.CylinderGeometry(landmark.radius + 4.5, landmark.radius + 5, 1, 28).translate(0, -0.5, 0), material("#9c968a"), group, 0, -0.4 - base, 0);
+        }
         mesh(new THREE.BoxGeometry(46, 3, 26).translate(0, 1.5, 0), material("#d9d3c2"), group, 0, 0, 0);
         // 帆：半个穹顶（半球再切一半）拉成薄而高的壳，开口朝前；双面材质（开口里也要看得见内壁）。
         const sail = new THREE.MeshLambertMaterial({ color: "#f6f4ee", side: THREE.DoubleSide });
@@ -1567,6 +1713,12 @@ export class CityParts {
           const m = mesh(shell, sail, group, -15 + i * 9.5, 3, 0, 0);
           m.rotation.z = -0.18;
         }
+        // 细化：壳下的玻璃幕墙门厅（壳与平台之间的深色玻璃带 + 竖棂）、通往平台的大台阶、临水步道栏杆。
+        const glass = material("#3f5f6e");
+        mesh(new THREE.BoxGeometry(34, 5, 14).translate(0, 2.5, 0), glass, group, -1, 3, 0);
+        for (let k = 0; k < 12; k += 1) mesh(new THREE.BoxGeometry(0.3, 5, 0.3).translate(0, 2.5, 0), material("#e8eef0"), group, -17.5 + k * 3, 3, 7.05);
+        for (let k = 0; k < 5; k += 1) mesh(new THREE.BoxGeometry(18, 0.6, 1.6).translate(0, 0.3, 0), material("#e2dccd"), group, 0, k * 0.6, 13 + k * 1.6 - 8 * 0.6);
+        mesh(new THREE.BoxGeometry(46, 0.9, 0.25).translate(0, 0.45, 0), material("#f2efe6"), group, 0, 3, -13);
       } else if (landmark.kind === "lighthouse") {
         const h = Math.min(cap, 32);
         const bands = 6;
@@ -1574,8 +1726,23 @@ export class CityParts {
           const r0 = 3.4 - (i / bands) * 1.4; const r1 = 3.4 - ((i + 1) / bands) * 1.4;
           mesh(new THREE.CylinderGeometry(r1, r0, h / bands, 14).translate(0, h / bands / 2, 0), i % 2 ? red : white, group, 0, (i * h) / bands, 0);
         }
-        mesh(new THREE.CylinderGeometry(2.2, 2.2, 3, 10).translate(0, 1.5, 0), material("#fff2c0", 1.5), group, 0, h, 0);
-        mesh(new THREE.ConeGeometry(2.8, 3, 10).translate(0, 1.5, 0), red, group, 0, h + 3, 0);
+        // 细化：石砌基座 + 守塔人小屋、塔顶环形观景廊（廊板 + 栏杆立柱）、玻璃灯室（竖棂）与穹顶通风帽。
+        mesh(new THREE.CylinderGeometry(4.6, 5, 1.6, 16).translate(0, 0.8, 0), material("#b9b2a2"), group, 0, -0.2, 0);
+        mesh(new THREE.BoxGeometry(7, 3.6, 5).translate(0, 1.8, 0), white, group, 6.2, 0, 0);
+        mesh(new THREE.BoxGeometry(7.6, 0.5, 5.6).translate(0, 0.25, 0), red, group, 6.2, 3.6, 0);
+        mesh(new THREE.CylinderGeometry(3.1, 3.1, 0.35, 18).translate(0, 0.17, 0), material("#3c4650"), group, 0, h, 0);   // 观景廊板
+        for (let k = 0; k < 16; k += 1) {
+          const t = (k / 16) * Math.PI * 2;
+          mesh(new THREE.BoxGeometry(0.12, 1.1, 0.12).translate(0, 0.55, 0), material("#3c4650"), group, Math.cos(t) * 2.95, h + 0.35, Math.sin(t) * 2.95);
+        }
+        mesh(new THREE.TorusGeometry(2.95, 0.07, 4, 32).rotateX(Math.PI / 2), material("#3c4650"), group, 0, h + 1.45, 0);
+        mesh(new THREE.CylinderGeometry(2, 2, 3, 12).translate(0, 1.5, 0), material("#fff2c0", 1.5), group, 0, h + 0.35, 0);
+        for (let k = 0; k < 8; k += 1) {
+          const t = (k / 8) * Math.PI * 2;
+          mesh(new THREE.BoxGeometry(0.14, 3, 0.14).translate(0, 1.5, 0), material("#2d343b"), group, Math.cos(t) * 2.02, h + 0.35, Math.sin(t) * 2.02);
+        }
+        mesh(new THREE.SphereGeometry(2.4, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2), red, group, 0, h + 3.35, 0);
+        mesh(new THREE.CylinderGeometry(0.25, 0.35, 1.4, 8).translate(0, 0.7, 0), material("#2d343b"), group, 0, h + 5.6, 0);
         if (neon) {
           // 旋转光束：两束对向的加色锥，绕竖轴转（进 bloom）。
           const beamMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color("#fff2c0").multiplyScalar(1.6), transparent: true, opacity: 0.08, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
@@ -1599,9 +1766,17 @@ export class CityParts {
         }
         const wheel = new THREE.Group();
         wheel.position.set(0, radius + 4, 0);
-        const ring = new THREE.Mesh(new THREE.TorusGeometry(radius, 0.45, 6, 48), material("#e8eef0", neon ? 0.6 : 0));
-        this.disposables.push(ring.geometry);
-        wheel.add(ring);
+        // 细化：双轮缘（前后两圈 + 横撑）、中心轮毂与轴、圆筒形吊舱（带窗带）、底部登乘平台与售票亭。
+        for (const z of [-1.2, 1.2]) {
+          const ring = new THREE.Mesh(new THREE.TorusGeometry(radius, 0.4, 6, 48), material("#e8eef0", neon ? 0.6 : 0));
+          ring.position.z = z; this.disposables.push(ring.geometry); wheel.add(ring);
+        }
+        const hub = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.6, 3.4, 16).rotateX(Math.PI / 2), steel);
+        this.disposables.push(hub.geometry); wheel.add(hub);
+        mesh(new THREE.CylinderGeometry(0.5, 0.5, 8, 10).rotateX(Math.PI / 2), steel, group, 0, radius + 4, 0);
+        mesh(new THREE.BoxGeometry(14, 1, 8).translate(0, 0.5, 0), material("#d9d3c2"), group, 0, 0, 0);
+        mesh(new THREE.BoxGeometry(4, 3, 3).translate(0, 1.5, 0), material("#ff6f61"), group, 8.5, 0, 2);
+        mesh(new THREE.BoxGeometry(4.6, 0.3, 3.6).translate(0, 0.15, 0), material("#f2efe6"), group, 8.5, 3, 2);
         const cabins = 16;
         for (let i = 0; i < cabins; i += 1) {
           const t = (i / cabins) * Math.PI * 2;
@@ -1609,10 +1784,17 @@ export class CityParts {
           spoke.rotation.z = t;
           this.disposables.push(spoke.geometry);
           wheel.add(spoke);
-          const cabin = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), material(["#ff6f61", "#ffd166", "#06d6a0", "#118ab2"][i % 4], neon ? 0.5 : 0));
-          cabin.position.set(Math.cos(t) * radius, Math.sin(t) * radius, 0);
+          for (const z of [-1.2, 1.2]) {
+            const rim = new THREE.Mesh(new THREE.BoxGeometry(0.18, radius, 0.18).translate(0, radius / 2, 0), steel);
+            rim.rotation.z = t; rim.position.z = z; this.disposables.push(rim.geometry); wheel.add(rim);
+          }
+          const cabin = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.2, 2.4, 10).rotateX(Math.PI / 2), material(["#ff6f61", "#ffd166", "#06d6a0", "#118ab2"][i % 4], neon ? 0.5 : 0));
+          cabin.position.set(Math.cos(t) * radius, Math.sin(t) * radius - 1.3, 0);
           this.disposables.push(cabin.geometry);
           wheel.add(cabin);
+          const band = new THREE.Mesh(new THREE.CylinderGeometry(1.25, 1.25, 0.7, 10).rotateX(Math.PI / 2), material("#2f4552"));
+          band.position.set(Math.cos(t) * radius, Math.sin(t) * radius - 1.1, 0);
+          this.disposables.push(band.geometry); wheel.add(band);
         }
         group.add(wheel);
         this.landmarkSpinners.push({ object: wheel, axis: "z", speed: 0.08 });
@@ -1628,6 +1810,16 @@ export class CityParts {
           mesh(new THREE.BoxGeometry(w, 3.6, w).translate(0, 1.8, 0), wall, group, 0, y, 0);
           // 檐：四棱锥扁台，比墙宽一圈，角略上翘的感觉靠「宽而薄」。
           mesh(new THREE.ConeGeometry(w * 0.95, 1.6, 4).rotateY(Math.PI / 4).translate(0, 0.8, 0), roof, group, 0, y + 3.6, 0);
+          // 细化：四角起翘（檐角小斜块）、每层平座栏杆、正面门洞。
+          for (const [cx, cz] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+            const tip = mesh(new THREE.BoxGeometry(0.5, 0.4, 1.6), roof, group, cx * w * 0.66, y + 3.7, cz * w * 0.66);
+            tip.rotation.y = Math.atan2(cx, cz); tip.rotation.x = -0.5;
+          }
+          for (const side of [-1, 1]) {
+            mesh(new THREE.BoxGeometry(w + 0.4, 0.5, 0.15).translate(0, 0.25, 0), material("#e8d9b0"), group, 0, y + 0.1, side * (w / 2 + 0.2));
+            mesh(new THREE.BoxGeometry(0.15, 0.5, w + 0.4).translate(0, 0.25, 0), material("#e8d9b0"), group, side * (w / 2 + 0.2), y + 0.1, 0);
+          }
+          mesh(new THREE.BoxGeometry(w * 0.3, 2.2, 0.15).translate(0, 1.1, 0), material("#3a2a22"), group, 0, y + 0.6, w / 2 + 0.05);
           y += 4.4;
         }
         mesh(new THREE.CylinderGeometry(0.2, 0.35, 6, 6).translate(0, 3, 0), material("#c9a24a"), group, 0, y, 0);
@@ -1748,11 +1940,42 @@ export class CityParts {
         glows.push({ civic: civicIndex, mesh: 2, index: glows.length, x: q.x, y: base + ly, z: q.z, sx, sy, sz, yaw: civic.yaw, baseY: base });
         colors[2].push(color);
       };
+      // 细化（用户：医院等没有窗户和门）：给一块体量的四个立面排窗——每层一条深色窗带，竖向窗棂隔成单窗。
+      // (cx, cz) 体量中心，w×d 体量平面，h 高度；faces 选哪几面（"n"=−z、"s"=+z、"w"=−x、"e"=+x）。
+      const windows = (cx: number, cz: number, w: number, d: number, h: number, faces: string, glass = "#4f6b78") => {
+        for (let y = 2; y + 1.2 <= h - 0.8; y += 3.1) {
+          for (const face of faces) {
+            const alongX = face === "n" || face === "s";
+            const len = (alongX ? w : d) * 0.86;
+            const off = face === "n" ? -d / 2 : face === "s" ? d / 2 : face === "w" ? -w / 2 : w / 2;
+            const fx = alongX ? cx : cx + off + Math.sign(off) * 0.08; const fz = alongX ? cz + off + Math.sign(off) * 0.08 : cz;
+            box(fx, y, fz, alongX ? len : 0.16, 1.25, alongX ? 0.16 : len, glass);
+            // 夜间亮窗：窗带外侧一条暖色发光带（夜灯批次，白天隐藏）——曾只有深色玻璃，夜里配套建筑一片黑。
+            glow(fx + (alongX ? 0 : Math.sign(off) * 0.06), y + 0.15, fz + (alongX ? Math.sign(off) * 0.06 : 0), alongX ? len * 0.98 : 0.05, 0.95, alongX ? 0.05 : len * 0.98, (Math.floor(y) + face.charCodeAt(0)) % 5 === 0 ? "#3a4a55" : "#7a6244");
+            const count = Math.max(2, Math.floor(len / 2.4));
+            for (let k = 1; k < count; k += 1) {
+              const t = -len / 2 + (k * len) / count;
+              box(alongX ? fx + t : fx + Math.sign(off) * 0.02, y, alongX ? fz + Math.sign(off) * 0.02 : fz + t, alongX ? 0.28 : 0.2, 1.25, alongX ? 0.2 : 0.28, "#f2efe6");
+            }
+          }
+        }
+      };
+      // 正门：门洞（深色）+ 两扇玻璃门 + 雨篷 + 台阶，开在 +z 立面。
+      const entrance = (cx: number, faceZ: number, w: number, canopy: string) => {
+        box(cx, 0, faceZ + 0.1, w, 3, 0.2, "#2c3a42");
+        for (const k of [-1, 1]) box(cx + k * w * 0.22, 0, faceZ + 0.22, w * 0.38, 2.6, 0.06, "#7fb6c8");
+        box(cx, 3.2, faceZ + 1.2, w * 1.3, 0.3, 2.4, canopy);
+        box(cx, 0, faceZ + 1.6, w * 1.2, 0.3, 1.6, "#d8d3c6");
+      };
       if (civic.kind === "school") {
         // U 形教学楼 + 操场（绿茵 + 红色跑道）+ 旗杆。
         box(-W * 0.38, 0, -D * 0.18, W * 0.2, 9, D * 0.6, "#e9d9b8");
         box(W * 0.38, 0, -D * 0.18, W * 0.2, 9, D * 0.6, "#e9d9b8");
         box(0, 0, -D * 0.42, W * 0.96, 11, D * 0.16, "#f1e4c6");
+        windows(0, -D * 0.42, W * 0.96, D * 0.16, 11, "ns");
+        windows(-W * 0.38, -D * 0.18, W * 0.2, D * 0.6, 9, "we");
+        windows(W * 0.38, -D * 0.18, W * 0.2, D * 0.6, 9, "we");
+        entrance(0, -D * 0.42 + D * 0.08, 4, "#b5533c");
         box(0, 11, -D * 0.42, W * 0.96, 0.6, D * 0.18, "#b5533c");
         box(0, 0.05, D * 0.22, W * 0.62, 0.12, D * 0.42, "#b8574a");
         box(0, 0.1, D * 0.22, W * 0.5, 0.14, D * 0.3, "#6fa65a");
@@ -1765,6 +1988,8 @@ export class CityParts {
       } else if (civic.kind === "mall") {
         // 大体量低层 + 玻璃中庭 + 屋顶停车场 + 招牌塔。
         box(0, 0, 0, W, 10, D, "#d9d3c7");
+        windows(W * 0.12, 0, W * 0.7, D, 10, "nse", "#5f8796");
+        for (const k of [-1, 0, 1]) entrance(W * 0.12 + k * W * 0.2, D / 2, 4.5, "#ff6f61");
         box(0, 10, 0, W * 0.98, 0.4, D * 0.98, "#6e7275");
         for (let row = -2; row <= 2; row += 1) box(W * 0.15, 10.45, row * D * 0.16, W * 0.5, 0.06, 0.25, "#e8e3c8");
         box(-W * 0.3, 0, 0, W * 0.24, 13, D * 0.5, "#6f9fb6");
@@ -1782,13 +2007,22 @@ export class CityParts {
         box(W * 0.32, 0, D * 0.06, W * 0.3, 12, D * 0.34, "#ecefea");
         cyl(0, 22, 0, Math.min(W, D) * 0.16, 0.4, "#5d6266");
         box(0, 22.42, 0, Math.min(W, D) * 0.16, 0.05, 1.2, "#f2f2ee");
-        box(0, 16, D * 0.225, 1.4, 5, 0.3, "#e0352b");
-        box(0, 16, D * 0.225, 5, 1.4, 0.3, "#e0352b");
-        box(0, 0, D * 0.36, W * 0.3, 3.4, 4, "#d84a3d");
-        glow(0, 16, D * 0.235, 1.2, 4.8, 0.1, "#ff4a3d"); // 红十字发光
-        glow(0, 16, D * 0.235, 4.8, 1.2, 0.1, "#ff4a3d");
+        // 红十字：白底方牌 + 等长十字，两条臂中心重合（曾横臂底边与竖臂底边齐平，读作倒 T「⊥」）。前后两面都挂。
+        for (const face of [1, -1]) {
+          const fz = face * (D * 0.22 + 0.12);
+          box(0, 14.6, fz, 7, 7, 0.2, "#ffffff");
+          box(0, 15.4, fz + face * 0.12, 1.8, 5.4, 0.2, "#e0352b");
+          box(0, 17.2, fz + face * 0.12, 5.4, 1.8, 0.2, "#e0352b");
+          glow(0, 15.4, fz + face * 0.24, 1.6, 5.2, 0.06, "#ff4a3d");
+          glow(0, 17.2, fz + face * 0.24, 5.2, 1.6, 0.06, "#ff4a3d");
+        }
+        windows(0, 0, W * 0.34, D * 0.44, 13.5, "nsew", "#6c8fa0");
+        windows(-W * 0.32, D * 0.06, W * 0.3, D * 0.34, 12, "nsw", "#6c8fa0");
+        windows(W * 0.32, D * 0.06, W * 0.3, D * 0.34, 12, "nse", "#6c8fa0");
+        // 急诊入口：红色雨篷挂在正门外（曾是一块红色实心方块挡在楼前）。
+        entrance(0, D * 0.22, 6, "#d84a3d");
+        box(W * 0.2, 0, D * 0.22 + 2, 0.3, 3.2, 0.3, "#d8dcdc"); box(W * 0.2, 3.2, D * 0.22 + 2, 1.8, 1.8, 0.2, "#d84a3d");
         glow(0, 22.2, 0, W * 0.34, 0.22, D * 0.44, "#7fe8ff");
-        glow(0, 3.5, D * 0.36 + 2, W * 0.3, 0.22, 0.22, "#ff4a3d");
       }
     });
     const build = (geometry: THREE.BufferGeometry, pieces: Piece[], palette: string[], name: string) => {
@@ -1916,12 +2150,36 @@ export class CityParts {
   /** 城区地标（S5「每个区也需要有自己的地标建筑物」）：离城区中心最近的空地块上一座三级收分的装饰艺术塔，
    *  墙身取区色粉彩、玻璃带窗、霓虹勾边与塔尖，夜里亮窗（与双子塔同一套 landmarkWindows）。
    *  高度取本区最高会话楼 × 1.15（58–110）——城区天际线的峰值；装饰，不代表会话。 */
+  /** 城区地标高度（绝对口径，用户确认）：下限 = 全城最高会话楼 × 1.1（≈40，不低于会话楼），每个会话 +0.37，上限 160。
+   *  只随本区会话数增长，别的城区增长不会把它压矮；回放中按「截至游标已开始的会话数」逐层加盖（applyCursor）。
+   *  实测（700 模拟会话）：DeepSeek 43 → 56，ZCode 82 → 70，Claude Code 120 → 84，Codex 135 → 90。
+   *  曾按「最少 → 最多城区」相对插值：最大城区恒为 90、最小恒为 40，全体同比增长时高度不变，别区增长还会变矮。 */
+  districtLandmarkHeight(districtId: string, sessions?: number): number {
+    const own = sessions ?? this.model.districts.find((d) => d.id === districtId)?.sessionCount ?? 0;
+    const floor = Math.max(30, ...this.model.buildings.map((b) => b.height)) * 1.1;
+    return Math.min(160, floor + 0.37 * own);
+  }
+
+  private districtLandmarkGroups: THREE.Object3D[] | null = null;
+  /** 回放：地标按截至游标已开始的会话数缩放到对应高度（live 时为完整高度）。 */
+  private applyDistrictLandmarkGrowth(cursor: number, live: boolean): void {
+    if (!this.districtLandmarkGroups) {
+      this.districtLandmarkGroups = [];
+      this.group.traverse((o) => { if (o.name.startsWith("city-landmark-district:")) this.districtLandmarkGroups!.push(o); });
+    }
+    for (const group of this.districtLandmarkGroups) {
+      const id = group.name.slice("city-landmark-district:".length);
+      const started = live ? undefined : this.model.buildings.filter((b) => b.districtId === id && b.startedAt <= cursor).length;
+      const full = this.districtLandmarkHeight(id);
+      group.scale.y = started === undefined ? 1 : Math.max(0.05, this.districtLandmarkHeight(id, started) / full);
+    }
+  }
+
   private buildDistrictLandmarks(): void {
     const neon = activeTheme().neon;
     for (const spot of this.layout.districtLandmarks ?? []) {
       const palette = paletteFor(spot.districtId);
-      const tallest = Math.max(0, ...this.model.buildings.filter((b) => b.districtId === spot.districtId).map((b) => b.height));
-      const h = Math.max(58, Math.min(110, tallest * 1.15));
+      const h = this.districtLandmarkHeight(spot.districtId);
       const day = createRenderCanvas(); day.width = 64; day.height = 64;
       const dctx = day.getContext("2d");
       if (dctx) {
@@ -3135,8 +3393,13 @@ export class CityParts {
       const height = 0.024;
       sprite.scale.set(height * aspect, height, 1);
       sprite.renderOrder = 20;
-      const crowd = this.labels.filter((other) => Math.hypot(other.position.x - district.center.x, other.position.z - district.center.z) < 150).length;
-      sprite.position.set(district.center.x, district.plaza.y + 45 + crowd * 34, district.center.z);
+      // 标签立在本区地标正上方（用户：把城区标签放到地标建筑上方）；没有地标时退回城区中心上空。
+      const landmark = (this.layout.districtLandmarks ?? []).find((l) => l.districtId === district.id);
+      if (landmark) sprite.position.set(landmark.x, Math.max(0.3, landmark.y) + this.districtLandmarkHeight(district.id) + 22, landmark.z);
+      else {
+        const crowd = this.labels.filter((other) => Math.hypot(other.position.x - district.center.x, other.position.z - district.center.z) < 150).length;
+        sprite.position.set(district.center.x, district.plaza.y + 45 + crowd * 34, district.center.z);
+      }
       this.group.add(sprite);
       this.labels.push(sprite);
       this.disposables.push(material, texture);
@@ -3393,6 +3656,7 @@ export class CityParts {
     let antennaCount = 0;
     let beaconCount = 0;
     let craneCount = 0;
+    let cylinderCount = 0;
     const shaftCursor = [0, 0, 0, 0];
     let decoCursor = 0;
     let crownCursor = 0;
@@ -3431,6 +3695,7 @@ export class CityParts {
         deco: -1,
         roofKind: 0,
         hero: false,
+        cylinder: -1,
         crownBase: -1,
         crown: null,
         signBase: -1,
@@ -3453,6 +3718,8 @@ export class CityParts {
       const mesh = this.shaftMeshes[runtime.facade];
       const instanceMap = this.shaftIdByInstance[runtime.facade];
       const wantsUpper = this.formOf(building) === "tower" || this.formOf(building) === "landmark";
+      const zone = this.zoneById.get(building.id);
+      if (this.formOf(building) === "tower" && zone !== "waterfront" && hashSeed(`cylinder:${building.id}`) < 0.14 && cylinderCount < 64) { runtime.cylinder = cylinderCount; cylinderCount += 1; }
       runtime.shaftPrimary = shaftCursor[runtime.facade];
       mesh.setColorAt(runtime.shaftPrimary, runtime.paletteWall);
       (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftPrimary, Math.max(2, Math.round(building.height / 3.1)));
@@ -3492,7 +3759,7 @@ export class CityParts {
           this.crownStripMesh.setColorAt(crownCursor, new THREE.Color(palette.accent).multiplyScalar(3.2));
           crownCursor += 1;
         }
-      } else if (runtime.roofKind === 0 && slot.zone === "commercial" && building.height >= 24 && signCursor < 24) {
+      } else if (runtime.roofKind === 0 && (slot.zone === "commercial" || slot.zone === "downtown" || (this.percentileOf(building) ?? 0) >= 0.6) && building.height >= 18 && signCursor < 24) {
         // 屋顶立牌（L-2）：商业区高楼的尺度符号；已有尖顶/退台冠的楼让位（roofKind ≠ 0 不立牌）。
         // roofY 传 0：模块给的件 y 都是「屋顶面相对高度」，写矩阵时再加地面 + 楼高。
         const plan = rooftopSignPlan(slot.width, slot.depth, 0, building.seed);
@@ -3508,7 +3775,9 @@ export class CityParts {
       }
       runtime.scaffold = scaffoldCount;
       scaffoldCount += 1;
-      if (this.formOf(building) === "landmark" && antennaCount < 94) {
+      // C-2 轮廓配件：≥24 高、无尖顶冠（roofKind 0）的楼按种子约三成立天线 + 航空灯，打断板楼单调的天际线（backlog C-2）。
+      const roofline = runtime.roofKind === 0 && !slot.blockId.startsWith("hotel:") && building.height >= 24 && hashSeed(`roofline:${building.id}`) < 0.32;
+      if ((this.formOf(building) === "landmark" || roofline) && antennaCount < 94) {
         runtime.antenna = antennaCount;
         antennaCount += 1;
         runtime.beacon = beaconCount;
@@ -3550,6 +3819,7 @@ export class CityParts {
     if (this.roofMesh.instanceColor) this.roofMesh.instanceColor.needsUpdate = true;
     this.scaffoldMesh.count = scaffoldCount;
     this.antennaMesh.count = antennaCount;
+    this.cylinderMesh.count = cylinderCount;
     this.beaconMesh.count = beaconCount;
     this.craneMastMesh.count = craneCount;
     this.decoCornerMesh.count = decoCursor;
@@ -3683,6 +3953,13 @@ export class CityParts {
       } else {
         this.compose(x, shaftBottom, z, yaw, widths[0], shaftHeight, widths[1]);
       }
+      if (runtime.cylinder >= 0) {
+        // 圆筒塔：圆柱取代方形主体与退台（直径取较短边 × 1.1），方楼实例藏起。
+        const dia = Math.min(widths[0], widths[1]) * 1.1;
+        this.compose(x, shaftBottom, z, yaw, dia, Math.max(0, g + built - shaftBottom), dia);
+        this.cylinderMesh.setMatrixAt(runtime.cylinder, this.matrix);
+        this.compose(x, -40, z, 0, 0, 0, 0);
+      }
       this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftPrimary, this.matrix);
     }
     // 退台段（tower/landmark）。
@@ -3693,6 +3970,7 @@ export class CityParts {
       } else {
         this.compose(x, g + h * split, z, yaw, widths[0] * 0.72, upperHeight, widths[1] * 0.72);
       }
+      if (runtime.cylinder >= 0) this.compose(x, -40, z, 0, 0, 0, 0);
       this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftUpper, this.matrix);
     }
     if (runtime.podium >= 0) {
@@ -3833,6 +4111,7 @@ export class CityParts {
     const building = runtime.building;
     if (runtime.shaftPrimary >= 0) this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftPrimary, this.matrix);
     if (runtime.shaftUpper >= 0) this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftUpper, this.matrix);
+    if (runtime.cylinder >= 0) this.cylinderMesh.setMatrixAt(runtime.cylinder, this.matrix);
     if (runtime.podium >= 0) this.podiumMesh.setMatrixAt(runtime.podium, this.matrix);
     if (runtime.deco >= 0) {
       this.decoCornerMesh.setMatrixAt(runtime.deco, this.matrix);
@@ -3873,6 +4152,7 @@ export class CityParts {
     const context = this.layout.contextBuildings ?? [];
     if (this.contextTarget.length !== context.length) { this.contextTarget = new Float32Array(context.length).fill(1); this.contextProgress = new Float32Array(context.length).fill(1); }
     context.forEach((building, index) => { this.contextTarget[index] = live || cursor >= building.appearAt ? 1 : 0; });
+    this.applyDistrictLandmarkGrowth(cursor, live);
     for (const runtime of this.runtimes) {
       runtime.target = builtFractionAt(runtime.building, cursor, live, paceMsPerSec);
       if (live && runtime.building.active) runtime.target = Math.max(runtime.target, runtime.building.builtFraction);
@@ -3914,7 +4194,7 @@ export class CityParts {
     this.roofMesh.instanceMatrix.needsUpdate = true;
     this.neonMesh.instanceMatrix.needsUpdate = true;
     this.scaffoldMesh.instanceMatrix.needsUpdate = true;
-    this.antennaMesh.instanceMatrix.needsUpdate = true;
+    this.antennaMesh.instanceMatrix.needsUpdate = true; this.cylinderMesh.instanceMatrix.needsUpdate = true;
     this.craneMastMesh.instanceMatrix.needsUpdate = true;
     this.crownFinMesh.instanceMatrix.needsUpdate = true;
     this.crownStripMesh.instanceMatrix.needsUpdate = true;
@@ -4000,7 +4280,7 @@ export class CityParts {
   }
 
   /** 命中的非会话网格 → `decor:<kind>[:<detail>]`；配套按实例反查学校/商场/医院。 */
-  decorAt(mesh: THREE.Object3D, instanceId: number | undefined): string | null {
+  decorAt(mesh: THREE.Object3D, instanceId: number | undefined, point?: THREE.Vector3): string | null {
     for (let node: THREE.Object3D | null = mesh; node; node = node.parent) {
       const kind = decorKindForName(node.name);
       if (!kind) continue;
@@ -4009,6 +4289,11 @@ export class CityParts {
         const piece = this.civicPieces.find((item) => item.mesh === meshIndex && item.index === instanceId);
         const civic = piece ? (this.layout.civics ?? [])[piece.civic] : undefined;
         return civic ? `decor:civic:${civic.kind}` : "decor:civic";
+      }
+      // 公共用地是一批合并网格：按命中点找最近的用地，市政厅（civic）面板展示全城信息。
+      if (kind === "site" && point) {
+        const site = [...this.layout.publicSites].sort((a, b) => Math.hypot(a.x - point.x, a.z - point.z) - Math.hypot(b.x - point.x, b.z - point.z))[0];
+        if (site && Math.hypot(site.x - point.x, site.z - point.z) < site.radius * 1.4) return `decor:site:${site.kind}`;
       }
       return `decor:${kind}`;
     }
@@ -4174,7 +4459,7 @@ export class CityParts {
       this.roofMesh.instanceMatrix.needsUpdate = true;
       this.neonMesh.instanceMatrix.needsUpdate = true;
       this.scaffoldMesh.instanceMatrix.needsUpdate = true;
-      this.antennaMesh.instanceMatrix.needsUpdate = true;
+      this.antennaMesh.instanceMatrix.needsUpdate = true; this.cylinderMesh.instanceMatrix.needsUpdate = true;
       this.craneMastMesh.instanceMatrix.needsUpdate = true;
       this.crownFinMesh.instanceMatrix.needsUpdate = true;
       this.crownStripMesh.instanceMatrix.needsUpdate = true;

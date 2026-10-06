@@ -120,7 +120,8 @@ export function rooftopSignPlan(roofWidth: number, roofDepth: number, roofY: num
   if (roofWidth < ROOF_FIT_LONG && roofDepth < ROOF_FIT_LONG) return null;
   if (Math.min(roofWidth, roofDepth) < ROOF_FIT_CROSS) return null;
   // 出牌概率 ~20%：数量上限守卫要求「有上下限」，函数内判定让调用方只做分区/楼高筛选。
-  if (sub(seed, 0) >= 0.2) return null;
+  // 出牌率 20% → 45%：候选已改为区内地价前列的楼（cityParts），不再只限 commercial 专区。
+  if (sub(seed, 0) >= 0.45) return null;
 
   // 牌的长轴贴屋顶的长边：面板宽 6 沿 roofWidth 时 yaw=0，沿 roofDepth 时 yaw=π/2。
   const yaw = roofWidth >= roofDepth ? 0 : Math.PI / 2;

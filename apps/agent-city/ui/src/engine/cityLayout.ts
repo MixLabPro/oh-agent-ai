@@ -269,6 +269,30 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     gardens.push({ id: `garden:${district.id}`, districtId: district.id, blockId: block.id, x: block.x, z: block.z, y: plan.terrain.height(block.x, block.z), yaw: block.parcels[0].yaw, width: block.width, depth: block.depth, seed: hashSeed(`garden:${district.id}`) });
   }
 
+  // 城区地标（用户：地标尽量放在城区中心、与景观湖配套）：先于会话落楼，在花园（景观湖）街区旁最近的空地块占位，
+  // 城区的楼再从花园向外长。曾在落楼之后取「离锚点最近的空地块」——内圈已被会话楼占满，地标落到城区边缘。
+  const districtLandmarks: DistrictLandmark[] = [];
+  for (const district of ranked) {
+    if (!model.buildings.some((building) => building.districtId === district.id)) continue;
+    const garden = gardens.find((g) => g.districtId === district.id);
+    const centre = garden ?? anchorOf.get(district.id)!;
+    const spot = plan.blocks.flatMap((block) => block.parcels)
+      .filter((parcel) => !used.has(parcel.id) && clearsHighways(parcel, 16, 16, plan.highways))
+      .sort((a, b) => Math.hypot(a.x - centre.x, a.z - centre.z) - Math.hypot(b.x - centre.x, b.z - centre.z) || a.id.localeCompare(b.id))[0];
+    if (!spot) continue;
+    used.add(spot.id);
+    districtLandmarks.push({ districtId: district.id, parcelId: spot.id, x: spot.x, z: spot.z, yaw: spot.yaw, y: plan.terrain.height(spot.x, spot.z) });
+  }
+
+  // 为商场预留整块的商业/市中心街区：会话楼现在优先占好地段，曾把这些街区都占成「部分有楼」，商场找不到整块（布局守卫）。
+  // 配套仍在会话落楼之后按城区质心选址（placeCivics），落楼前锁住、选址前释放。
+  const civicTotal = model.buildings.length === 0 ? 0 : Math.max(2, Math.min(30, Math.floor(model.buildings.length / CIVIC_PER_SESSIONS)));
+  const mallReserve = plan.blocks
+    .filter((block) => (block.zone === "commercial" || block.zone === "downtown") && block.parcels.length > 0 && block.parcels.every((p) => !used.has(p.id)) && clearsHighways(block, block.width, block.depth, plan.highways))
+    .sort((a, b) => Math.hypot(a.x - core.x, a.z - core.z) - Math.hypot(b.x - core.x, b.z - core.z) || a.id.localeCompare(b.id))
+    .slice(0, Math.ceil(civicTotal / 3) + 1);
+  for (const block of mallReserve) for (const parcel of block.parcels) used.add(parcel.id);
+
   // 落楼：每个执行环境在自己的小区里按 (startedAt, −height, id) 从花园向外取地块——回放时看得见小区从中心长出来。
   // 小区装满（会话数相对配额偏多）才溢出到小区外最近的空地块；全城都满才进背景楼群。
   // 已落位的会话保留地址（见上方 previous），刷新不搬家。
@@ -283,13 +307,25 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     // 距花园排序 + 小于一个地块间距（~7）的哈希抖动：既不排成机械同心环，又保住
     // 「越新的会话越靠外」的回放生长波前（曾用 ±30 抖动——远大于地块间距，约
     // 五分之一的楼会落在当前前沿之内，回放叙事读起来像乱序）。
-    const score = (p: Parcel) => Math.hypot(p.x - anchor.x, p.z - anchor.z) + hashSeed(p.id) * 6;
-    const inside = blocksOf(district.id).flatMap((block) => block.parcels).filter((parcel) => !used.has(parcel.id)).sort((a, b) => score(a) - score(b) || a.id.localeCompare(b.id));
+    // 区内优先占用「好地段」：downtown/商业/海滨/酒店地块的距离分减 60/40/45（实测 97% 的楼落在住宅区——花园锚点远离核心与主干道，
+    // 按纯距离生长永远够不着它们）。仍以花园为中心向外长，只是好地段先被填上。
+    const ZONE_BONUS: Record<string, number> = { downtown: 60, commercial: 40, waterfront: 45 };
+    const hotelReady = buildings.length >= 20; // 小城市（守卫：3 个会话的城不出酒店）不享受酒店加分
+    const score = (p: Parcel) => Math.hypot(p.x - anchor.x, p.z - anchor.z) - (p.blockId.startsWith("hotel:") ? (hotelReady ? 220 : 0) : ZONE_BONUS[p.zone] ?? 0) + hashSeed(p.id) * 6;
+    // 海滨酒店地块是全城共享的度假用地：任何城区都可落楼（曾只在楔形扇区内取地，酒店地块不属于任何扇区，冠一顶都没有）。
+    // 每块酒店地块归离它最近的城区（锚点距离），并给 220 的落位加分——酒店离花园锚点上百单位，按距离生长永远轮不到（实测 0 顶冠）。
+    const nearestDistrict = (b: CityBlock) => [...anchorOf].sort((x, y) => Math.hypot(x[1].x - b.x, x[1].z - b.z) - Math.hypot(y[1].x - b.x, y[1].z - b.z))[0]?.[0];
+    const inside = [...blocksOf(district.id), ...(buildings.length >= 20 ? hotelBlocks.filter((b) => nearestDistrict(b) === district.id) : [])].flatMap((block) => block.parcels).filter((parcel) => !used.has(parcel.id)).sort((a, b) => score(a) - score(b) || a.id.localeCompare(b.id));
     const overflow: typeof buildings = [];
     let cursor = 0;
     for (const building of buildings) {
       while (cursor < inside.length && used.has(inside[cursor].id)) cursor += 1;
       let parcel: Parcel | undefined = inside[cursor];
+      // C-1 近岸高度梯度：楼高 > 26 的会话楼不占海滨地块，让给低层（迈阿密剖面：低层临水、塔楼退后）。楼高仍由 token 决定，只换位置。
+      if (parcel && building.height > 26 && parcel.zone === "waterfront") {
+        const inland = inside.find((p, k) => k > cursor && !used.has(p.id) && p.zone !== "waterfront");
+        if (inland) { used.add(inland.id); assigned.set(building.id, inland); continue; }
+      }
       if (parcel) cursor += 1;
       else parcel = parcels.filter((candidate) => !used.has(candidate.id)).sort((a, b) => score(a) - score(b) || a.id.localeCompare(b.id))[0];
       if (!parcel) { overflow.push(building); continue; }
@@ -298,20 +334,8 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     }
     if (overflow.length) massing.push(...aggregateOverflow(district.id, anchor, overflow, parcels, plan));
   }
+  for (const block of mallReserve) for (const parcel of block.parcels) used.delete(parcel.id);
   const civics = placeCivics(model, parcels, used, assigned, previous ?? null, plan);
-  // 城区地标：每个有楼的城区在离其中心（花园锚点）最近的空地块上立一座地标——城区天际线的峰值与识别物。
-  // 在背景楼与 G1 生长剪枝之前占位，地块所在街区因此算「已建」。
-  const districtLandmarks: DistrictLandmark[] = [];
-  for (const district of ranked) {
-    if (!model.buildings.some((building) => building.districtId === district.id && assigned.has(building.id))) continue;
-    const anchor = anchorOf.get(district.id)!;
-    const spot = plan.blocks.flatMap((block) => block.parcels)
-      .filter((parcel) => !used.has(parcel.id) && clearsHighways(parcel, 16, 16, plan.highways))
-      .sort((a, b) => Math.hypot(a.x - anchor.x, a.z - anchor.z) - Math.hypot(b.x - anchor.x, b.z - anchor.z) || a.id.localeCompare(b.id))[0];
-    if (!spot) continue;
-    used.add(spot.id);
-    districtLandmarks.push({ districtId: district.id, parcelId: spot.id, x: spot.x, z: spot.z, yaw: spot.yaw, y: plan.terrain.height(spot.x, spot.z) });
-  }
   // 海滨迈阿密是一个已经建成的城市，即使当前窗口只有少量会话也不应退化成
   // 空白规划图。背景楼只从空置地块取址，避开数据楼/整块花园/市政设施/高架
   // /酒店海滨保留带；优先填充会话城区周围，再向城市核心扩散，不加入会话统计。
@@ -450,7 +474,7 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
     { center: { x: centroid.x + 980, z: centroid.z - 320 }, radius: 120, height: 88, seed: 71 },
     { center: { x: centroid.x - 1020, z: centroid.z + 260 }, radius: 150, height: 108, seed: 37 },
   ];
-  const grown = growWithBuildings(plan, used, districts);
+  const grown = growWithBuildings(plan, used, districts, civics);
   return { ...plan, ...grown, districtLandmarks, districts, seed, massing, civics, gardens, boatLanes: [], decorMountains: [], boatLoops, seaMountains, coastalConfigKey: coastalKey, coastalConfig: coastal, contextBuildings };
 }
 
@@ -461,8 +485,10 @@ export function layoutCity(model: CityModel, previous?: CityLayout | null, seed 
  * 连通：去掉支路后若某个仍有活动的分量与主网断开，就按 BFS 把被去掉的边一圈圈加回来直到连上；
  * 完全无活动的碎片分量整段删掉。车流只保留仍沿真实路段走的回路。
  */
-function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<string>, districts: DistrictLayout[]) {
-  const active = plan.blocks.filter((block) => block.parcels.some((parcel) => used.has(parcel.id)));
+function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<string>, districts: DistrictLayout[], civics: CivicSite[]) {
+  // 配套（学校/商场/医院）占的整街区也算已建：曾不算，周围街道被生长剪枝删掉，医院门前没有路（真机截图）。
+  const civicBlocks = new Set(civics.map((c) => c.parcelId));
+  const active = plan.blocks.filter((block) => civicBlocks.has(block.id) || block.parcels.some((parcel) => used.has(parcel.id)));
   // 只有已落楼（会话楼/配套/小花园）的街区算建成；下一栋楼来时它所在街区才铺开（布局每次随数据重算）。
   // 曾留一圈 75 的预留：几乎罩住全部街区，街网照旧铺满（截图验收没看到变化）。
   const live = new Set(active.map((block) => block.id));
@@ -527,7 +553,7 @@ function growWithBuildings(plan: ReturnType<typeof createCityPlan>, used: Set<st
   for (const district of districts) {
     district.carPaths = district.carPaths.filter((route) => route.every((p, i) => i === 0 || pairs.has([`${route[i - 1].x}:${route[i - 1].z}`, `${p.x}:${p.z}`].sort().join("/"))));
   }
-  return { blocks, roadEdges, roadNodes, activityKey: [...live].sort().join(",") };
+  return { blocks, roadEdges, roadNodes, activityKey: [...live].sort().join(",") + "|" + districts.map((d) => `${d.id}:${d.sessionCount}:${d.anomaly?.severity ?? ""}`).join(",") }; // 会话数→地标/城区旗，异常→市政厅信标
 }
 
 /** 配套选址：会话楼先占地，配套只拿剩下的地块（绝不挤走会话）。
@@ -593,7 +619,20 @@ function placeCivics(model: CityModel, parcels: Parcel[], used: Set<string>, ass
     }
     if (!parcel) return;
     taken.add(parcel.id);
-    out.push({ id, kind, districtId: owner, parcelId: parcel.id, x: parcel.x, z: parcel.z, y: plan.terrain.height(parcel.x, parcel.z), yaw: parcel.yaw, width: parcel.width, depth: parcel.depth, unlockAt });
+    // 大门朝路（用户：医院门前没有路）：在街区朝向的四个方向里，选正门（局部 +z）外 8 处离道路最近的那个。
+    const roadGap = (q: Vec2) => Math.min(...plan.roadEdges.filter((e) => !e.bridge).map((e) => {
+      const [a, b] = e.points; const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
+      const t = Math.max(0, Math.min(1, ((q.x - a.x) * dx + (q.z - a.z) * dz) / l2));
+      return Math.hypot(q.x - a.x - dx * t, q.z - a.z - dz * t) - e.width / 2;
+    }));
+    let yaw = parcel.yaw; let best = Infinity;
+    for (let k = 0; k < 4; k += 1) {
+      const y = parcel.yaw + (k * Math.PI) / 2; const half = (k % 2 ? parcel.width : parcel.depth) / 2;
+      const gap = roadGap({ x: parcel.x + Math.sin(y) * (half + 8), z: parcel.z + Math.cos(y) * (half + 8) });
+      if (gap < best) { best = gap; yaw = y; }
+    }
+    const swap = Math.round((yaw - parcel.yaw) / (Math.PI / 2)) % 2 !== 0;
+    out.push({ id, kind, districtId: owner, parcelId: parcel.id, x: parcel.x, z: parcel.z, y: plan.terrain.height(parcel.x, parcel.z), yaw, width: swap ? parcel.depth : parcel.width, depth: swap ? parcel.width : parcel.depth, unlockAt });
   });
   return out;
 }

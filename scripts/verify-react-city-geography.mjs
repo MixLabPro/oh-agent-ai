@@ -94,7 +94,9 @@ for (const seed of seeds) {
   for (const landmark of layout.landmarks) {
     landmarkKinds.add(landmark.kind);
     if (landmark.kind === "suspension-bridge") continue;
-    assert(layout.terrain.height(landmark.x, landmark.z) > 0.5, `seed ${seed}: ${landmark.id} on land`);
+    // 海上岛地标（歌剧院）：岛心在水里、堤道岸点在实地上；其余必须立在陆地上。
+    if (landmark.shore) assert(layout.terrain.height(landmark.shore.x, landmark.shore.z) > 0.2 && layout.terrain.height(landmark.x, landmark.z) < -0.8, `seed ${seed}: ${landmark.id} island/causeway placement`);
+    else assert(layout.terrain.height(landmark.x, landmark.z) > 0.5, `seed ${seed}: ${landmark.id} on land`);
     for (const lot of lots) assert(Math.hypot(lot.x - landmark.x, lot.z - landmark.z) >= landmark.radius, `seed ${seed}: ${landmark.id} sits on session lot ${lot.id}`);
   }
   profiles.push(profile(layout.coast));

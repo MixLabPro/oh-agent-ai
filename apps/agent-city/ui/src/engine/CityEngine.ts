@@ -33,6 +33,7 @@ import { MIAMI_COASTAL } from "./citySeaside";
 import { CityAurora } from "./cityAurora";
 import { CityAmbient } from "./cityAmbient";
 import { CityWildlife } from "./cityWildlife";
+import { planAirport, roadSamples } from "./cityAirport";
 import { RainbowArch, RainOverlay, weatherAt } from "./cityWeather";
 import { createRenderCanvas, renderContext2D, type RenderCanvas } from "./renderCanvas";
 
@@ -645,11 +646,13 @@ export class CityEngine {
     const harbor = L.publicSites.find((s) => s.kind === "harbor");
     const sample = L.seaside?.samples.filter((q) => q.valid)[0];
     const districtLandmark = (L.districtLandmarks ?? [])[0];
+    const civicOf = (kind: string) => { const c = (L.civics ?? []).find((x) => x.kind === kind); return c ? [c.x, 8, c.z, 60] : null; };
     const site = (kind: string, h: number, d: number) => { const s = L.publicSites.find((x) => x.kind === kind); return s ? [s.x, h, s.z, d] : null; };
     const targets: Record<string, () => number[] | null> = {
       "session-tower": () => pick((b) => P.formOf(b) === "tower" && b.height > 25),
       "session-slab": () => pick((b) => P.formOf(b) === "slab" && b.height > 12),
       "session-deco": () => pick((b, s) => P.facadeFor(b) === 3 && !s.blockId.startsWith("hotel:")),
+      "hero-tower": () => { let best: CityModel["buildings"][number] | null = null; for (const b of model.buildings) if (!best || b.tokensTotal > best.tokensTotal) best = b; const slot = best ? slots.get(best.id) : null; return best && slot ? [slot.x, best.height * 0.6, slot.z, Math.max(60, best.height * 2.4)] : null; },
       "session-hotel": () => pick((_b, s) => s.blockId.startsWith("hotel:")),
       "district-landmark": () => (districtLandmark ? [districtLandmark.x, 45, districtLandmark.z, 150] : null),
       "twin-towers": () => landmark("twin-towers", 38, 160),
@@ -658,8 +661,10 @@ export class CityEngine {
       "sail-opera": () => landmark("sail-opera", 10, 75),
       "suspension-bridge": () => landmark("suspension-bridge", 12, 95),
       "truss-bridge": () => (truss ? [(truss.from.x + truss.to.x) / 2, 4, (truss.from.z + truss.to.z) / 2, 55] : null),
+      airport: () => { const avoid = [...L.publicSites.filter((x) => x.kind === "harbor"), ...(L.landmarks ?? []).filter((x) => x.kind === "sail-opera"), ...(L.seaside && !L.seaside.degraded ? L.seaside.samples.filter((x) => x.valid).map((x) => x.waterline) : [])]; const a = planAirport(L.coast, L.core ?? { x: 0, z: 0 }, avoid, roadSamples(L.roadEdges)); return a ? [a.centre.x, 6, a.centre.z, 230] : null; },
       harbor: () => (harbor ? [harbor.x, 6, harbor.z, 75] : null),
-      civic: () => ((L.civics ?? [])[0] ? [(L.civics ?? [])[0].x, 5, (L.civics ?? [])[0].z, 55] : null),
+      hospital: () => civicOf("hospital"), school: () => civicOf("school"), mall: () => civicOf("mall"),
+      garden: () => { const g = (L.gardens ?? [])[0]; return g ? [g.x, 2, g.z, 60] : null; },
       beach: () => (sample ? [sample.dryOuter.x, 2, sample.dryOuter.z, 34] : null),
       "civic-hall": () => site("civic", 10, 95),
       station: () => site("station", 6, 95),
@@ -790,7 +795,7 @@ export class CityEngine {
         const id = this.parts.idAt(hit.object, hit.instanceId);
         if (id) return id;
       }
-      const decor = this.parts.decorAt(hit.object, hit.instanceId);
+      const decor = this.parts.decorAt(hit.object, hit.instanceId, hit.point);
       if (decor) return decor;
     }
     return null;
