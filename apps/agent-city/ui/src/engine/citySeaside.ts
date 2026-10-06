@@ -1,3 +1,4 @@
+import { DetMath as Math } from "./detMath"; // 跨引擎确定性：见 detMath.ts
 /**
  * 海滨带契约（CITY_VICE_THEME_TECHNICAL_DESIGN §1 / B1）：把「环岛一圈 waterfront」
  * 收敛为一段连续、朝向良好的海滨街面，并向下游输出沙带/步道/酒店排的空间数据。

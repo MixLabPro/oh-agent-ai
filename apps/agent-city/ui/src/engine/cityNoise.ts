@@ -1,3 +1,4 @@
+import { DetMath as Math } from "./detMath"; // 跨引擎确定性：见 detMath.ts
 /**
  * Seeded 确定性噪声：地形生成的唯一随机源。同一 district.id 永远生成同一片地理，
  * 刷新/增量加载不改变地貌（与楼位确定性同一条纪律）。

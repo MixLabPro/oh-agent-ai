@@ -1,3 +1,4 @@
+import { DetMath as Math } from "./detMath"; // 跨引擎确定性：见 detMath.ts
 /** Geography and public planning are fixed; sessions occupy reserved parcels. */
 import { hashSeed, type CityModel } from "../cityModel";
 import { clearsHighways, createCityPlan, polygonDistance, scaleTierFor, type Biome, type Landmark } from "./cityPlan";

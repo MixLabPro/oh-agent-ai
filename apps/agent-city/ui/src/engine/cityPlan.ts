@@ -1,3 +1,4 @@
+import { DetMath as Math } from "./detMath"; // 跨引擎确定性：见 detMath.ts
 /**
  * Seeded, data-independent geography and municipal land reservations.
  *
