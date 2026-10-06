@@ -335,7 +335,28 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   const trunks: Array<{ angle: number; points: Vec2[] }> = [];
   const bridges: CityLayout["bridges"] = [];
   for (let i = 0; i < trunkCount; i += 1) {
-    const angle = trunkBase + (i / trunkCount) * Math.PI * 2 + (random(`trunkJ${i}`) - 0.5) * 0.35;
+    const nominal = trunkBase + (i / trunkCount) * Math.PI * 2 + (random(`trunkJ${i}`) - 0.5) * 0.35;
+    // 桥址取最窄处（规划旧债 D-桥址，CITY_ROAD_SIMULATION_PROPOSAL §1）：主干道是从核心出发的射线，过河位置
+    // 曾由抖动角度偶然决定。在 ±0.14 弧度内选过河跨距最短的角度；跨距相同取偏移最小者，尽量不动原规划。
+    const waterSpan = (a: number) => {
+      const d = { x: Math.cos(a), z: Math.sin(a) };
+      let span = 0; let entered = false;
+      for (let step = Math.ceil(PLAZA_RING / 12) + 1; step < 400; step += 1) {
+        const q = { x: core.x + d.x * step * 12, z: core.z + d.z * step * 12 };
+        if (inRiver(q.x, q.z)) { span += 12; entered = true; continue; }
+        if (entered || coastDistance(q.x, q.z) <= 0) break;
+      }
+      return span;
+    };
+    let angle = nominal;
+    if (hasRiver) {
+      let best = { offset: 0, span: waterSpan(nominal) };
+      if (best.span > 0) for (let k = -7; k <= 7; k += 1) {
+        const offset = k * 0.02; const span = waterSpan(nominal + offset);
+        if (span > 0 && (span < best.span || (span === best.span && Math.abs(offset) < Math.abs(best.offset)))) best = { offset, span };
+      }
+      angle = nominal + best.offset;
+    }
     const dir = { x: Math.cos(angle), z: Math.sin(angle) };
     if (dir.x * hillDir.x + dir.z * hillDir.z > Math.cos((40 * Math.PI) / 180)) continue;
     // 主干道从市政广场外环出发（环形广场 = 环岛），不再穿过广场中心。
