@@ -2071,30 +2071,38 @@ export class CityParts {
       const terrain = this.layout.terrain;
       const roads = new SegmentIndex(this.layout.roadEdges.map((edge) => edge.points));
       const highways = new SegmentIndex(this.layout.highways ?? []);
-      const roadClearance = Math.max(0, ...this.layout.roadEdges.map((edge) => edge.width / 2)) + 1.2;
+      // G2 热带绿化：沿合并后的整条路（roadPaintPlan run）按弧长种行道树，间距跨路段累计；路幅分档做净空。
+      // 曾逐条路段种且跳过 <20 的段（多数路已被切成 ~15 的短段），净空又统一按最宽路（7.2）算——
+      // 5 宽支路旁的树（离中线 4.9）全被拒，城市里几乎看不到行道树（多视角评估「像沙漠」）。
+      const byWidth = new Map<number, Vec2[][]>();
+      for (const edge of this.layout.roadEdges) if (!edge.bridge) (byWidth.get(edge.width) ?? byWidth.set(edge.width, []).get(edge.width)!).push(edge.points);
+      const widthIndex = [...byWidth].map(([width, runs]) => ({ clearance: width / 2 + 1.2, index: new SegmentIndex(runs) }));
+      const clearOfRoads = (p: Vec2) => widthIndex.every(({ clearance, index }) => !index.closerThan(p, clearance));
       const slots = this.layout.districts.flatMap((district) => [...district.slots.values()]);
       const buildings = new SegmentIndex(slots.map((slot) => [slot, slot]));
       const buildingClearance = slots.reduce((radius, slot) => Math.max(radius, Math.hypot(slot.width, slot.depth) / 2 + 1.2), 0);
-      for (const edge of this.layout.roadEdges) {
-        if (edge.bridge) continue;
-        const [a, b] = edge.points;
-        const length = Math.hypot(b.x - a.x, b.z - a.z);
-        if (length < 20) continue;
-        const dx = (b.x - a.x) / length;
-        const dz = (b.z - a.z) / length;
-        const spacing = theme.streetTreeSpacing * (edge.kind === "arterial" ? 0.8 : 1);
-        // 两端各留出路口宽度，沿路两侧交错栽种。
-        for (let along = 9, index = 0; along < length - 9; along += spacing, index += 1) {
-          const side = index % 2 === 0 ? 1 : -1;
-          const offset = edge.width / 2 + 2.4;
-          const x = a.x + dx * along - dz * offset * side;
-          const z = a.z + dz * along + dx * offset * side;
-          const y = terrain.height(x, z);
-          if (y < 1.2) continue;
-          const point = { x, z };
-          if (roads.closerThan(point, roadClearance) || highways.closerThan(point, EXPRESSWAY_DECK_WIDTH / 2 + 2)) continue;
-          if (buildings.closerThan(point, buildingClearance)) continue;
-          spots.push({ x, z, y, seed: hashSeed(`street:${edge.id}:${index}`) });
+      for (const run of roadPaintPlan(this.layout.roadEdges).runs) {
+        const spacing = theme.streetTreeSpacing * (run.kind === "arterial" ? 0.8 : 1);
+        let walked = 0; let next = 9; let index = 0;
+        for (let i = 1; i < run.points.length; i += 1) {
+          const a = run.points[i - 1]; const b = run.points[i];
+          const length = Math.hypot(b.x - a.x, b.z - a.z);
+          if (length < 1e-3) continue;
+          const dx = (b.x - a.x) / length; const dz = (b.z - a.z) / length;
+          while (next <= walked + length) {
+            const along = next - walked; next += spacing;
+            const side = index % 2 === 0 ? 1 : -1; index += 1;
+            const offset = run.width / 2 + 2.4;
+            const x = a.x + dx * along - dz * offset * side;
+            const z = a.z + dz * along + dx * offset * side;
+            const y = terrain.height(x, z);
+            if (y < 1.2) continue;
+            const point = { x, z };
+            if (!clearOfRoads(point) || highways.closerThan(point, EXPRESSWAY_DECK_WIDTH / 2 + 2)) continue;
+            if (buildings.closerThan(point, buildingClearance)) continue;
+            spots.push({ x, z, y, seed: hashSeed(`street:${Math.round(x)}:${Math.round(z)}`) });
+          }
+          walked += length;
         }
       }
     }

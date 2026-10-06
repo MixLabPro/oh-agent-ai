@@ -11,6 +11,7 @@ import type { CityLayout } from "./cityLayout";
 import { hashSeed } from "../cityModel";
 import { activeTheme, groundFor } from "./cityTheme";
 import { roadPaintPlan } from "./cityRoadPaint";
+import { polygonDistance } from "./cityPlan";
 import { createRenderCanvas, renderContext2D, type RenderCanvas, type RenderContext2D } from "./renderCanvas";
 
 export type DistrictPalette = {
@@ -177,13 +178,18 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
     waterfront: "#d8b8b2",
     residential: "#becbc3",
   };
+  const urbanGround = mixRgb(groundColors.sand, groundColors.lawn, 0.42);
+  const coastDistanceOf = (x: number, z: number) => polygonDistance({ x, z }, layout.coast);
   for (let iz = 0; iz < 384; iz += 1) for (let ix = 0; ix < 384; ix += 1) {
     const x = (ix / 383 - 0.5) * layout.extent;
     const z = (iz / 383 - 0.5) * layout.extent;
     const h = layout.terrain.height(x, z);
     const noise = hashSeed(`ground:${ix}:${iz}`) * 7;
     const g = groundColors;
-    const color = h < 0 ? g.sea : h < 2.5 ? g.sand : h < 9 ? g.lawn : h < 35 ? g.grass : g.rock;
+    // G2：海岸 30 内才是沙；内陆低平原（高 1.2，同样 < 2.5）曾一律按沙色画，整座城看起来像沙漠。
+    // 内陆改成偏草坪的浅色地面（迈阿密是「绿 + 白 + 粉彩」，不是黄沙）。
+    const inland = h >= 0 && h < 2.5 && coastDistanceOf(x, z) > 30;
+    const color = h < 0 ? g.sea : inland ? urbanGround : h < 2.5 ? g.sand : h < 9 ? g.lawn : h < 35 ? g.grass : g.rock;
     const index = (iz * 384 + ix) * 4;
     pixels.data[index] = color[0] + noise; pixels.data[index+1] = color[1] + noise; pixels.data[index+2] = color[2] + noise; pixels.data[index+3] = 255;
   }
