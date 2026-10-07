@@ -343,6 +343,9 @@ pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::
     let initialization = format!("window.__AV_PLUGIN_INSTANCE__ = {}; window.__AV_PLUGIN_LOCALE__ = '{}';", serde_json::to_string(&id).unwrap(), locale);
     let allow_local_exports = definition.allow_local_exports;
     let builder = WebviewBuilder::new(&id, WebviewUrl::App(definition.entry.clone().into()))
+        // Resize white flash: the WebView's own NSView background must match
+        // the City theme's dark surface, not the system default white.
+        .background_color(tauri::utils::config::Color(22, 40, 61, 255))
         // An active child shares a window with the host WebView. WebKit's
         // inactive scheduling must not suspend its health timer/first frame.
         // Leaving the tab hides/pauses the retained instance.
