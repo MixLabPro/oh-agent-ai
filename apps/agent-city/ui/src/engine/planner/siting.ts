@@ -58,18 +58,21 @@ export function resiteViolatingSites(ctx: RepairContext): number {
   };
   let moved = 0;
   for (const s of all) {
-    if (!violates(s)) continue;
-    let chosen: Vec2 | null = null;
-    for (let radius = 6; radius <= 120 && !chosen; radius += 6) {
-      for (let k = 0; k < 20 && !chosen; k += 1) {
-        const a = (k / 20) * Math.PI * 2 + radius * 0.37; // 每圈错开起始角，免得候选排成同一条射线
-        const p = { x: s.x + Math.cos(a) * radius, z: s.z + Math.sin(a) * radius };
-        if (acceptable(s, p.x, p.z)) chosen = p;
+    if (violates(s)) {
+      let chosen: Vec2 | null = null;
+      for (let radius = 6; radius <= 120 && !chosen; radius += 6) {
+        for (let k = 0; k < 20 && !chosen; k += 1) {
+          const a = (k / 20) * Math.PI * 2 + radius * 0.37; // 每圈错开起始角，免得候选排成同一条射线
+          const p = { x: s.x + Math.cos(a) * radius, z: s.z + Math.sin(a) * radius };
+          if (acceptable(s, p.x, p.z)) chosen = p;
+        }
       }
+      if (chosen) { s.x = chosen.x; s.z = chosen.z; moved += 1; }
     }
-    if (!chosen) continue;
-    s.x = chosen.x; s.z = chosen.z; moved += 1;
-    for (const block of ctx.blocks) block.parcels = block.parcels.filter((pc) => Math.hypot(pc.x - s.x, pc.z - s.z) >= s.radius);
+    // 无论是否挪过，都用地标实际底座半径 + 9 清空周边地块——曾只对「挪过的」
+    // 用裸 radius 过滤，未挪的地标没有二次清地，会话楼贴到地标底座（如 TV 塔
+    // 底座直径 17，地块中心 4.3–9.1 即重叠）。
+    for (const block of ctx.blocks) block.parcels = block.parcels.filter((pc) => Math.hypot(pc.x - s.x, pc.z - s.z) >= s.radius + 9);
   }
   return moved;
 }

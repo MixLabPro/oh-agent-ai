@@ -104,8 +104,14 @@ export function seasideHotelLots(band: SeasideBand | null): Array<{ id: string; 
   for (let i = 0; i < count; i += 1) {
     const sample = valid[Math.floor(((i + 0.5) / count) * (valid.length - 1))];
     const seed = hashSeed(`seasidehotel:${i}:${sample.azimuth}`);
+    const width = (30 + seed * 14) * 0.65;
+    // 最小净距：两座酒店用地中心至少隔 max(两座宽度和的一半 + 4, 32)，防短岸
+    // 段上相邻采样太近导致酒店体量互相交错（曾只按采样均匀分布，短岸时未查间距）。
+    const minGap = Math.max(width * 0.5 + 16, 32);
+    const tooClose = lots.some((lot) => Math.hypot(lot.x - sample.hotelLine.x, lot.z - sample.hotelLine.z) < minGap);
+    if (tooClose) continue;
     lots.push({ id: `hotel:${i}`, x: sample.hotelLine.x, z: sample.hotelLine.z, yaw: Math.atan2(sample.inward.x, sample.inward.z),
-      width: (30 + seed * 14) * 0.65, depth: 16 * 0.7 });
+      width, depth: 16 * 0.7 });
   }
   return lots;
 }
