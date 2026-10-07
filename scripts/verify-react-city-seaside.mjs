@@ -110,7 +110,10 @@ assert.equal(seasideHotelCount(80), 18, "large coast frontage remains instance-b
             `seed ${seed}: 滨海大道不可穿海`);
         }
       }
-      const routeSample = band.samples.find((sample) => sample.valid);
+      // 取「真正成路的」大道段的起点：第一个合法样本可能是只有 1 个点的孤立段，孤立段不成路、没有车流回路（设计如此）。
+      const routeSegment = boulevards.find((segment) => segment.length >= 2);
+      assert.ok(routeSegment, `seed ${seed}: 至少一段 ≥2 点的大道`);
+      const routeSample = { boulevard: routeSegment[0] };
       assert.ok(plan.roadEdges.some((edge) => edge.width === 12 && edge.points.some((point) => Math.hypot(point.x - routeSample.boulevard.x, point.z - routeSample.boulevard.z) < 0.01)),
         `seed ${seed}: 规划的大道应进入真实车行路网并继承主干道路幅`);
       const coastalTraffic = plan.carPaths.find((path) => path.some((point) => Math.hypot(point.x - routeSample.boulevard.x, point.z - routeSample.boulevard.z) < 0.01));

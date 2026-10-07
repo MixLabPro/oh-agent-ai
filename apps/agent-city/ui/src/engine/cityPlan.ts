@@ -229,6 +229,9 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     publicSites.push({ id, kind, x: q.x, z: q.z, radius, yaw });
   };
   place("civic-square", "civic", core, 44, -0.15);
+  // 广场被 snap 推离核心点（核心离水/河不够远）时，环岛、放射主干道、高架都还围着旧核心点画，于是市政广场孤零零
+  // 偏在一旁、环岛中间是空的（用户截图；30 岛里 10 个岛偏 12–60）。广场挪到哪里，核心点就跟到哪里。
+  { const plaza = publicSites[publicSites.length - 1]; core = { x: plaza.x, z: plaza.z }; }
   place("observation-tower", "tower", around(turn + 0.9, 0.16 * R), 26, 0);
   place("central-station", "station", around(turn + 2.2, 0.38 * R), 46, 0.12);
   place("riverside-park", "park", hasRiver ? { x: riverX(core.z + 0.18 * R) + riverWidth(core.z) + 60, z: core.z + 0.18 * R } : around(turn + 3.6, 0.3 * R), 47, 0);
@@ -485,6 +488,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         const dx = b.x - a.x; const dz = b.z - a.z;
         const t = Math.max(0, Math.min(1, ((end.x - a.x) * dx + (end.z - a.z) * dz) / (dx * dx + dz * dz || 1)));
         const p = key({ x: a.x + t * dx, z: a.z + t * dz });
+        if (Math.hypot(p.x - core.x, p.z - core.z) < 110) continue; // 出口不能落在环岛附近：高架贴到市政广场（半径 44 + 避让 ≈ 69）会把广场推离核心点
         const distance = Math.hypot(p.x - end.x, p.z - end.z);
         const samples = Math.max(1, Math.ceil(distance / 4));
         let clear = true;
@@ -526,6 +530,8 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     return true;
   };
   const SHORE_BOUND = new Set([...SHORE_SITE_KINDS, "civic"]); // civic = 核心广场，四周是环路
+  // 桥头（过河桥两端）：用地不能贴着桥头——桥头必须接一条路回路网，那条路就只能从用地里穿过（庄园落在桥头旁 21，规划守卫抓到）。
+  const nearBridgeEnd = (x: number, z: number, radius: number) => bridges.some((b) => Math.hypot(b.from.x - x, b.from.z - z) < radius + 14 || Math.hypot(b.to.x - x, b.to.z - z) < radius + 14);
   const trunkSegments = trunks.flatMap((trunk) => trunk.points.slice(1).map((b, k) => [trunk.points[k], b] as const))
     .filter(([a, b]) => !bridges.some((bridge) => bridge.to === b || bridge.from === a && bridge.to === b));
   // 岸边地标（歌剧院、摩天轮、灯塔、庄园）向核心方向内移，直到占地圈 16 点里落在水上的 ≤3 个——
@@ -537,7 +543,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     // 每步都要求中心仍在陆上、不在河里：直线朝核心走可能跨过河道（geography 守卫 seed 3668352332 抓到摩天轮进河）。
     for (let step = 0; step < 20 && wetCount(site) > 3; step += 1) {
       const nx = site.x + (dx / len) * 3; const nz = site.z + (dz / len) * 3;
-      if (height(nx, nz) <= 0.5 || inRiver(nx, nz) || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4) break; // 也不推到主干道上
+      if (height(nx, nz) <= 0.5 || inRiver(nx, nz) || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4 || nearBridgeEnd(nx, nz, site.radius)) break; // 也不推到主干道/桥头上
       site.x = nx; site.z = nz;
     }
   }
@@ -623,7 +629,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       for (let step = 0; step < 100 && coastDistance(x, z) > site.radius * 0.7; step += 1) {
         const dx = target.x - x; const dz = target.z - z; const len = Math.hypot(dx, dz) || 1;
         const nx = x + (dx / len) * 3; const nz = z + (dz / len) * 3;
-        if (wet(nx, nz) > 3 || inRiver(nx, nz) || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4 || !clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns) || others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) break; // 不滑到主干道上
+        if (wet(nx, nz) > 3 || inRiver(nx, nz) || nearBridgeEnd(nx, nz, site.radius) || distanceToTrunks({ x: nx, z: nz }) < site.radius + 4 || !clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns) || others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) break; // 不滑到主干道上
         x = nx; z = nz;
       }
       const d = coastDistance(x, z);
@@ -1158,6 +1164,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
           if (!(height(x, z) <= 0.5 || inRiver(x, z))) return null;
         }
         const at = (k: number) => ({ x: gate.x + (to.x - gate.x) * (k / n), z: gate.z + (to.z - gate.z) * (k / n) });
+        if (Math.hypot(at(first - 1).x - site.x, at(first - 1).z - site.z) < site.radius + 2) return null; // 桥头不能落在用地圈里：路会从用地中间穿过（庄园跨河时）
         return { span: [at(first - 1), at(last + 1)] };
       };
       const picked = candidates.slice(0, 40).map((c) => ({ c, plan: clear(c.p) })).find((x) => x.plan);
@@ -1388,7 +1395,11 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     // 贴主干道那条边不再单独成路：绕街区一圈的车流若经过不存在的路段就整条丢弃（不让车开在没有路的地方）。
     const pairs = new Set([...edges.values()].map((edge) => [edge.from, edge.to].sort().join("/")));
     for (let r = carPaths.length - 1; r >= 0; r -= 1) {
-      const route = carPaths[r];
+      // 碎边合并/断头清理后，折线里可能留下相距 <1 的两个点（原来的碎边已并成一个节点）：把中间点并掉再核对，
+      // 不因为一个 0.4 长的碎边就丢掉整条 220 点的车流回路（海滨大道回路因此消失，滨海车流守卫抓到）。
+      const raw = carPaths[r];
+      const route = raw.filter((q, i) => i === 0 || i === raw.length - 1 || Math.hypot(q.x - raw[i + 1].x, q.z - raw[i + 1].z) >= 1);
+      carPaths[r] = route;
       const ok = route.every((p, i) => i === 0 || pairs.has([roadNodeId(key(route[i - 1])), roadNodeId(key(p))].sort().join("/")));
       if (!ok) carPaths.splice(r, 1);
     }
@@ -1458,10 +1469,11 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
         const others = [...publicSites, ...landmarks].filter((o) => o !== site && o.radius);
         const away = near.d > 0.5 ? { x: (site.x - near.q.x) / near.d, z: (site.z - near.q.z) / near.d } : { x: 1, z: 0 };
         const wet0 = wetAt(site, site.x, site.z);
-        const tryDirs = [away, { x: -away.z, z: away.x }, { x: away.z, z: -away.x }];
+        // 沿「离路」方向优先，再试两侧与四个斜向（路穿过用地、而用地一侧临河时只有斜着挪得开）；最大推 1.3 半径。
+        const diag = Math.SQRT1_2; const tryDirs = [away, { x: -away.z, z: away.x }, { x: away.z, z: -away.x }, { x: (away.x - away.z) * diag, z: (away.z + away.x) * diag }, { x: (away.x + away.z) * diag, z: (away.z - away.x) * diag }, { x: -away.x, z: -away.z }];
         let done = false;
         for (const dir of tryDirs) {
-          for (let push = 4; push <= site.radius * 0.9 && !done; push += 3) {
+          for (let push = 4; push <= site.radius * 1.3 && !done; push += 3) {
             const nx = site.x + dir.x * push; const nz = site.z + dir.z * push;
             const probe = nearestRoad(nx, nz);
             if (!probe || probe.d < site.radius * 0.85) continue;
