@@ -8,7 +8,8 @@ import { activeTheme } from "../cityTheme";
 import { roadPaintPlan } from "../cityRoadPaint";
 import { createRenderCanvas } from "../renderCanvas";
 import type { CityLayout } from "../cityLayout";
-import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, expresswayDeckHeights, type NightLights } from "../cityParts";
+import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, expresswayDeckHeights } from "./shared";
+import type { NightLights } from "./types";
 
 /** 立面 uniforms 里夜景用到的那几项（完整 FacadeUniforms 仍在 cityParts.ts，另一路搬迁中，这里只取结构子集）。 */
 type NightFacadeUniforms = {
