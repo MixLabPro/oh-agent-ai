@@ -10,7 +10,7 @@ import { paletteFor } from "../cityTextures";
 import { createRenderCanvas } from "../renderCanvas";
 import { LANDMARK_BUILDERS } from "../models/registry";
 import type { LandmarkHost } from "../models/landmarkContext";
-import type { NightLights } from "../cityParts";
+import type { NightLights } from "../render/types";
 
 export interface LandmarkSystemHost {
   model: CityModel;
