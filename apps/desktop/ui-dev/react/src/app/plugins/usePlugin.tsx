@@ -65,6 +65,7 @@ export function usePlugin(active: boolean, { id: pluginId, name }: PluginPresent
         // Refresh the retained instance on resume without rebuilding its UI.
         if (!restart) await invoke("plugin_invalidate", { instanceId: id }).catch(() => {});
         if (cancelled) return;
+        let layoutSeq = 0;
         const syncLayout = async () => {
           layoutPending = true;
           if (layoutRunning) return;
@@ -75,7 +76,10 @@ export function usePlugin(active: boolean, { id: pluginId, name }: PluginPresent
               const next = bounds();
               const key = JSON.stringify(next);
               if (key === lastBounds) continue;
-              await invoke("plugin_open", { pluginId, bounds: next, restart: false, instanceId: id, boundsOnly: true });
+              layoutSeq += 1;
+              // P0: epoch-ms timestamp for Rust-side jsToRxMs measurement.
+              const jsTs = performance.timeOrigin + performance.now();
+              await invoke("plugin_open", { pluginId, bounds: next, restart: false, instanceId: id, boundsOnly: true, jsTs, seq: layoutSeq });
               lastBounds = key;
             }
           } catch { if (!cancelled) setError("plugin_layout_failed"); }

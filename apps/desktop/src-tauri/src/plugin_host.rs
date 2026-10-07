@@ -186,6 +186,19 @@ fn host_only(view: &Webview) -> Result<(), String> {
     if view.label() == "workbench" { Ok(()) } else { Err("plugin_host_only".into()) }
 }
 
+/// P0 layout sync instrumentation: records jsToRxMs / rxToSetMs per bounds update.
+fn note_layout_sync(instance: &mut Instance, js_to_rx_ms: u64, rx_to_set_ms: u64, seq: u64) {
+    if instance.events.len() == 100 { instance.events.remove(0); }
+    instance.events.push(json!({
+        "atMs": instance.started.elapsed().as_millis() as u64,
+        "code": "layout_sync",
+        "jsToRxMs": js_to_rx_ms,
+        "rxToSetMs": rx_to_set_ms,
+        "seq": seq,
+    }));
+    persist_diagnostics(instance);
+}
+
 fn note(instance: &mut Instance, code: &str) {
     if instance.events.len() == 100 { instance.events.remove(0); }
     instance.events.push(json!({"atMs": instance.started.elapsed().as_millis() as u64, "code": code,
@@ -249,7 +262,12 @@ fn start_watchdog(app: &tauri::AppHandle, state: &PluginHost) {
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // Tauri command arguments are the stable frontend IPC surface.
-pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::State<'_, PluginHost>, plugin_id: String, bounds: Bounds, restart: bool, instance_id: Option<String>, locale: Option<String>, bounds_only: Option<bool>) -> Result<String, String> {
+pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::State<'_, PluginHost>, plugin_id: String, bounds: Bounds, restart: bool, instance_id: Option<String>, locale: Option<String>, bounds_only: Option<bool>, js_ts: Option<f64>, seq: Option<u64>) -> Result<String, String> {
+    let t_rx_instant = std::time::Instant::now();
+    let t_rx_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
     host_only(&webview)?;
     let bounds_only = bounds_only.unwrap_or(false);
     if bounds_only && (restart || instance_id.is_none()) { return Err("plugin_instance_mismatch".into()); }
@@ -282,9 +300,18 @@ pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::
                 position: tauri::LogicalPosition::new(bounds.x, bounds.y).into(),
                 size: tauri::LogicalSize::new(bounds.width, bounds.height).into(),
             }).map_err(|_| "plugin_layout_failed")?;
-            // Geometry updates must not show/resume the plugin, reset its locale,
-            // or repeatedly enqueue native attachment inspection.
-            if bounds_only { return Ok(id); }
+            // P0: record layout sync timing on the hot bounds-only path.
+            // js_ts is an epoch-ms timestamp from the frontend (performance.timeOrigin + performance.now()).
+            if bounds_only {
+                let rx_to_set = t_rx_instant.elapsed().as_millis() as u64;
+                let js_to_rx = js_ts
+                    .map(|ts| t_rx_epoch.saturating_sub(ts as u64))
+                    .unwrap_or(0);
+                if let Some(i) = state.0.lock().unwrap().current.as_mut() {
+                    note_layout_sync(i, js_to_rx, rx_to_set, seq.unwrap_or(0));
+                }
+                return Ok(id);
+            }
             view.show().map_err(|_| "plugin_layout_failed")?;
             ensure_native_attachment(&app, &view)?;
             let _ = view.eval(format!("window.__AV_PLUGIN_LOCALE__ = '{}'; window.dispatchEvent(new Event('__AV_PLUGIN_LOCALE_CHANGED__'));", locale));
