@@ -222,8 +222,32 @@ export function makeCityTexture(layout: CityLayout): THREE.Texture {
   for (const road of runs) {
     ctx.strokeStyle="#d4cfc2";ctx.lineWidth=(road.width+2.4)*scale;strokePolyline(ctx,road.points,toPixel,false);
   }
+  // 换宽度/换等级的两路交界点（主干 12 → 次干 8 → 支路 5）：roadPaintPlan 在这里把一条路断成两段，平头线帽在拐弯处留
+  // 楔形缺口、宽度跳变像「路断了」（用户截图：断断续续的路）。只有 ≥3 路的路口才补过圆——这里补上，人行道与沥青各一盘。
+  const seams: Array<{ x: number; z: number; width: number; arterial: boolean }> = [];
+  {
+    const incident = new Map<string, typeof layout.roadEdges>();
+    for (const edge of layout.roadEdges) if (!edge.bridge) for (const id of [edge.from, edge.to]) (incident.get(id) ?? incident.set(id, []).get(id)!).push(edge);
+    const nodeById = new Map(layout.roadNodes.map((node) => [node.id, node]));
+    for (const [id, list] of incident) {
+      if (list.length !== 2 || junctions.has(id)) continue;
+      const [first, second] = list;
+      if (first.width === second.width && first.kind === second.kind) continue;
+      const node = nodeById.get(id);
+      if (node) seams.push({ x: node.x, z: node.z, width: Math.min(first.width, second.width), // 取窄的那条：取宽的会在 12→5 处鼓出一个黑疙瘩
+         arterial: first.kind === "arterial" || second.kind === "arterial" });
+    }
+  }
+  for (const seam of seams) {
+    const [x,y]=toPixel(seam.x,seam.z);
+    ctx.fillStyle="#d4cfc2";ctx.beginPath();ctx.arc(x,y,(seam.width+2.4)*scale/2,0,Math.PI*2);ctx.fill();
+  }
   for (const road of runs) {
     ctx.strokeStyle=road.kind==="arterial"?"#505b60":"#646c6b";ctx.lineWidth=road.width*scale;strokePolyline(ctx,road.points,toPixel,false);
+  }
+  for (const seam of seams) {
+    const [x,y]=toPixel(seam.x,seam.z);
+    ctx.fillStyle=seam.arterial?"#505b60":"#646c6b";ctx.beginPath();ctx.arc(x,y,seam.width*scale/2,0,Math.PI*2);ctx.fill();
   }
   // Fill junction centers after pavement passes, without separate round endcaps.
   for (const node of layout.roadNodes) if (junctions.has(node.id)) {

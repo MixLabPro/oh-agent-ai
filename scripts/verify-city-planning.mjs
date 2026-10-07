@@ -30,11 +30,18 @@ const segDist = (p, a, b) => {
   const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / l2));
   return Math.hypot(p.x - a.x - dx * t, p.z - a.z - dz * t);
 };
-const totals = { acute: 0, inside: 0, far: 0, crowded: 0, islands: 0 };
+const totals = { acute: 0, inside: 0, far: 0, crowded: 0, islands: 0, loose: 0 };
 for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
   const seed = 1703294958 + i * 7919;
   const plan = createCityPlan(seed, tier, MIAMI_COASTAL);
   totals.islands += 1;
+  // 内陆断头（F1 修复 B/C 之后）：度为 1、离岸 ≥ 2.5、离任何用地边缘 > 12 的路端——路停在半路、对面就是另一段路。
+  {
+    const deg = new Map(); for (const e of plan.roadEdges) if (!e.bridge) for (const id of [e.from, e.to]) deg.set(id, (deg.get(id) || 0) + 1);
+    const nodes = new Map(plan.roadNodes.map((n) => [n.id, n]));
+    const sites = [...plan.publicSites, ...plan.landmarks].filter((s) => s.radius);
+    for (const [id, d] of deg) { if (d !== 1) continue; const q = nodes.get(id); if (!q || plan.terrain.height(q.x, q.z) < 2.5) continue; if (sites.some((s) => Math.hypot(s.x - q.x, s.z - q.z) < s.radius + 12)) continue; totals.loose += 1; }
+  }
   // 锐角路口：三路及以上的路口，相邻两条路夹角 < 30°。
   const incident = new Map();
   for (const edge of plan.roadEdges) for (const id of [edge.from, edge.to]) (incident.get(id) ?? incident.set(id, []).get(id)).push(edge);
@@ -76,6 +83,7 @@ for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
 // 2026-10-07 碎边合并后 2，收紧到 5；同日固定地标增至 5 座后路网变动到 6（两条短支路之间的夹角），放到 8（仍低于原 10、远低于起点 45）。
 assert(totals.acute <= 8, `acute junctions ${totals.acute} > 8 across ${totals.islands} islands (was 45 before R1)`);
 assert(totals.inside <= 8, `sites with a road through them ${totals.inside} > 8 (was 196 before R2)`);
+assert(totals.loose <= 8, `loose inland road ends ${totals.loose} > 8 over 30 islands`);
 assert(totals.far <= 5, `sites without a road at the door ${totals.far} > 3`);
 assert(totals.crowded <= 10, `crowded arterial pairs ${totals.crowded} > 10`);
-console.log(`City planning: ${totals.islands} islands — acute junctions ${totals.acute}, roads through sites ${totals.inside}, sites without access ${totals.far}, crowded arterials ${totals.crowded} passed.`);
+console.log(`City planning: ${totals.islands} islands — acute junctions ${totals.acute}, roads through sites ${totals.inside}, sites without access ${totals.far}, crowded arterials ${totals.crowded}, loose inland ends ${totals.loose} passed.`);

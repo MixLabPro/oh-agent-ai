@@ -34,6 +34,7 @@ import { CityAurora } from "./cityAurora";
 import { CityAmbient } from "./cityAmbient";
 import { CityWildlife } from "./cityWildlife";
 import { planAirport, roadSamples } from "./cityAirport";
+import { LIGHT_BUDGET, nightFactor } from "./cityLightBudget";
 import { RainbowArch, RainOverlay, weatherAt } from "./cityWeather";
 import { createRenderCanvas, renderContext2D, type RenderCanvas } from "./renderCanvas";
 
@@ -661,7 +662,7 @@ export class CityEngine {
       "sail-opera": () => landmark("sail-opera", 10, 75),
       "suspension-bridge": () => landmark("suspension-bridge", 12, 95),
       "truss-bridge": () => (truss ? [(truss.from.x + truss.to.x) / 2, 4, (truss.from.z + truss.to.z) / 2, 55] : null),
-      airport: () => { const avoid = [...L.publicSites.filter((x) => x.kind === "harbor"), ...(L.landmarks ?? []).filter((x) => x.kind === "sail-opera"), ...(L.seaside && !L.seaside.degraded ? L.seaside.samples.filter((x) => x.valid).map((x) => x.waterline) : [])]; const a = planAirport(L.coast, L.core ?? { x: 0, z: 0 }, avoid, roadSamples(L.roadEdges)); return a ? [a.centre.x, 6, a.centre.z, 230] : null; },
+      airport: () => { const avoid = [...L.publicSites.filter((x) => x.kind === "harbor"), ...(L.landmarks ?? []).filter((x) => x.kind === "sail-opera"), ...(L.seaside && !L.seaside.degraded ? L.seaside.samples.filter((x) => x.valid).map((x) => x.waterline) : [])]; const a = planAirport(L.coast, L.core ?? { x: 0, z: 0 }, avoid, roadSamples(L.roadEdges), (x, z) => L.terrain.height(x, z) < -0.6); return a ? [a.centre.x, 6, a.centre.z, 230] : null; },
       harbor: () => (harbor ? [harbor.x, 6, harbor.z, 75] : null),
       hospital: () => civicOf("hospital"), school: () => civicOf("school"), mall: () => civicOf("mall"),
       garden: () => { const g = (L.gardens ?? [])[0]; return g ? [g.x, 2, g.z, 60] : null; },
@@ -1233,6 +1234,7 @@ export class CityEngine {
     if (Math.abs(hour - this.lastSkyHour) < (this.cinematic ? 0.0005 : 0.02)) return;
     this.lastSkyHour = hour;
     this.applyDayMix(hour);
+    this.parts?.setNightHour(hour);
     const sky = skyStateAt(hour, this.themeName);
     this.applySky(sky);
     // 天气（按日期确定性）：航拍/胶片导出走晴朗（可复现），回放与实况按当天。
@@ -1356,7 +1358,7 @@ export class CityEngine {
       // 夜晚城市亮窗：立面自发光抬升（保留 theme 基线的下限）。
       this.parts.setNightGlow(sky.selfLit);
       // N1：夜里曝光压低约 0.35 EV，暗是底色、光源才有层次。
-      this.renderer.toneMappingExposure = activeTheme().exposure * (1 - 0.22 * Math.min(1, Math.max(0, (sky.selfLit - 0.1) / 0.9)));
+      this.renderer.toneMappingExposure = activeTheme().exposure * (1 - LIGHT_BUDGET.ambient.exposureCut * nightFactor(sky.selfLit));
       this.parts.applySelfLit(this.themeSelfLit);
       this.parts.setNightWater(skyUniforms.uNight.value as number);
     }
