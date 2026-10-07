@@ -5,25 +5,15 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import vm from "node:vm";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { cachedPlan, loadCity } from "./city-kit/index.mjs";
 
-const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const ui = path.join(repo, "apps/desktop/ui-dev");
-const city = path.join(repo, "apps/agent-city/ui/src");
-const { buildSync } = createRequire(path.join(ui, "package.json"))("esbuild");
-const out = buildSync({
-  stdin: {
-    contents: `export { createCityPlan, polygonDistance } from ${JSON.stringify(path.join(city, "engine/cityPlan.ts"))};
-export { layoutCity } from ${JSON.stringify(path.join(city, "engine/cityLayout.ts"))};
-export { MIAMI_COASTAL, seasideStripContains, promenadeSegments, boulevardSegments, seasideHotelCount, encodeDistance, decodeDistance, distanceQuantizationError } from ${JSON.stringify(path.join(city, "engine/citySeaside.ts"))};`,
-    resolveDir: city,
-  },
-  bundle: true, write: false, format: "cjs", platform: "node", logLevel: "silent",
+// 原生加载 + 进程内缓存（CITY_ARCHITECTURE 迁移步 1）。确定性断言（同 seed 两次生成相等）直接调 rawPlan，不走缓存。
+const { createCityPlan: rawPlan, layoutCity, polygonDistance, MIAMI_COASTAL, seasideStripContains, promenadeSegments, boulevardSegments, seasideHotelCount, encodeDistance, decodeDistance, distanceQuantizationError } = await loadCity({
+  "engine/cityPlan.ts": ["createCityPlan", "polygonDistance"],
+  "engine/cityLayout.ts": ["layoutCity"],
+  "engine/citySeaside.ts": ["MIAMI_COASTAL", "seasideStripContains", "promenadeSegments", "boulevardSegments", "seasideHotelCount", "encodeDistance", "decodeDistance", "distanceQuantizationError"],
 });
-const mod = { exports: {} };
-vm.runInNewContext(out.outputFiles[0].text, { module: mod, exports: mod.exports, process, console, Math, Map, Set });
-const { createCityPlan, layoutCity, polygonDistance, MIAMI_COASTAL, seasideStripContains, promenadeSegments, boulevardSegments, seasideHotelCount, encodeDistance, decodeDistance, distanceQuantizationError } = mod.exports;
+const createCityPlan = (seed, tier, config) => cachedPlan(rawPlan, seed, tier, config);
 
 const normalizeAngle = (a) => { let r = a % (Math.PI * 2); if (r < 0) r += Math.PI * 2; return r; };
 const angleDelta = (a, b) => { const d = Math.abs(normalizeAngle(a) - normalizeAngle(b)); return Math.min(d, Math.PI * 2 - d); };
@@ -49,8 +39,8 @@ assert.equal(seasideHotelCount(80), 18, "large coast frontage remains instance-b
 
 // 2) 确定性：同 seed 同 config 两次构建，seaside 逐位相等。
 {
-  const a = createCityPlan(seeds[0], TIER, MIAMI_COASTAL).seaside;
-  const b = createCityPlan(seeds[0], TIER, MIAMI_COASTAL).seaside;
+  const a = rawPlan(seeds[0], TIER, MIAMI_COASTAL).seaside;
+  const b = rawPlan(seeds[0], TIER, MIAMI_COASTAL).seaside;
   assert.deepEqual(a, b, "同 seed 同配置的 seaside 必须确定性相等");
 }
 

@@ -11,25 +11,19 @@ const engine = path.join(repo, "apps/agent-city/ui/src/engine");
 const require = createRequire(path.join(repo, "apps/desktop/ui-dev/package.json"));
 const THREE = require("three");
 const { buildSync } = require("esbuild");
-const source = fs.readFileSync(path.join(engine, "cityParts.ts"), "utf8");
-// Execute the production infrastructure method without a DOM/WebGL context.
-const start = source.indexOf("  private buildInfrastructure(): void {");
-const end = source.indexOf("  private buildDistrictExpressways(): void {", start);
-assert(start >= 0 && end > start);
-const method = source.slice(start, end);
+// Execute the production infrastructure function (systems/roadSystem.ts) without a DOM/WebGL context.
 const bundle = buildSync({ stdin: {
   contents: `import * as THREE from "three";
     import { createCityPlan, clearsHighways, SegmentIndex, segmentDistance } from "./cityPlan";
+    import { buildInfrastructure } from "./systems/roadSystem";
     export { createCityPlan, clearsHighways, SegmentIndex, segmentDistance };
-    const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
     export class Harness {
       layout; mesh; positionVector = new THREE.Vector3(); euler = new THREE.Euler();
       quaternion = new THREE.Quaternion(); scaleVector = new THREE.Vector3();
       matrix = new THREE.Matrix4(); color = new THREE.Color();
       constructor(layout) { this.layout = layout; }
       makeInstanced(geometry, material, count) { return this.mesh = new THREE.InstancedMesh(geometry, material, count); }
-      run() { this.buildInfrastructure(); }
-      ${method}
+      run() { buildInfrastructure(this); }
     }`, resolveDir: engine, loader: "ts",
 }, bundle: true, write: false, format: "cjs", platform: "node", external: ["three"], logLevel: "silent" });
 const mod = { exports: {} };
