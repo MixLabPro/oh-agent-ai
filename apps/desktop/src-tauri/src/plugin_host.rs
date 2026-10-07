@@ -187,23 +187,6 @@ fn valid_bounds(bounds: &Bounds) -> bool {
         && bounds.x >= 0.0 && bounds.y >= 0.0 && bounds.width >= 1.0 && bounds.height >= 1.0
 }
 
-/// Resize white flash: the window's contentView itself must have a dark
-/// background. During resize, the plugin WebView briefly exposes the
-/// contentView before it repaints at the new size — white contentView
-/// = white flash even when the WebView's own background is dark.
-#[cfg(target_os = "macos")]
-fn set_window_content_background(app: &tauri::AppHandle) {
-    use objc::{msg_send, sel, sel_impl};
-    let Some(window) = app.get_window("workbench") else { return };
-    let Ok(ns_window) = window.ns_window() else { return };
-    let window = ns_window as *mut objc::runtime::Object;
-    unsafe {
-        let color: *mut objc::runtime::Object = msg_send![objc::class!(NSColor),
-            colorWithSRGBRed: 22.0_f64 / 255.0 green: 40.0_f64 / 255.0 blue: 61.0_f64 / 255.0 alpha: 1.0_f64];
-        let _: () = msg_send![window, setBackgroundColor: color];
-    }
-}
-
 fn host_only(view: &Webview) -> Result<(), String> {
     if view.label() == "workbench" { Ok(()) } else { Err("plugin_host_only".into()) }
 }
@@ -336,7 +319,6 @@ pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::
             }
             view.show().map_err(|_| "plugin_layout_failed")?;
             ensure_native_attachment(&app, &view)?;
-            set_window_content_background(&app);
             let _ = view.eval(format!("window.__AV_PLUGIN_LOCALE__ = '{}'; window.dispatchEvent(new Event('__AV_PLUGIN_LOCALE_CHANGED__'));", locale));
             let _ = view.eval("window.dispatchEvent(new Event('__AV_PLUGIN_RESUMED__'))");
             if let Some(i) = state.0.lock().unwrap().current.as_mut() {
