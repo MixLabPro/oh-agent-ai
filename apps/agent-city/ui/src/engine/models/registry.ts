@@ -6,7 +6,7 @@ import { tvTowerModel } from "./landmarks/tvTower";
 import { drawTwinTowers } from "./landmarks/twinTowers";
 import { drawTwistTower } from "./landmarks/twistTower";
 import { archModel } from "./landmarks/arch";
-import { drawSailOpera } from "./landmarks/sailOpera";
+import { sailOperaModel } from "./landmarks/sailOpera";
 import { drawLighthouse } from "./landmarks/lighthouse";
 import { drawFerrisWheel } from "./landmarks/ferrisWheel";
 import { pagodaModel } from "./landmarks/pagoda";
@@ -14,7 +14,7 @@ import { drawVillaComplex } from "./landmarks/villaComplex";
 import { drawSuspensionBridge } from "./landmarks/suspensionBridge";
 
 /** 已声明化（BuildingModel）的建筑；其余 kind 仍走下面的手写 drawX（批 1 逐个迁）。守卫 verify-city-models 按这张表驱动。 */
-export const BUILDING_MODELS: BuildingModel[] = [tvTowerModel, pagodaModel, archModel];
+export const BUILDING_MODELS: BuildingModel[] = [tvTowerModel, pagodaModel, archModel, sailOperaModel];
 const modelBuilder = (model: BuildingModel) => compiledBuilder(model, hashSeed);
 
 /**
@@ -26,7 +26,7 @@ export const LANDMARK_BUILDERS: Record<string, (ctx: LandmarkCtx) => void> = {
   "twin-towers": drawTwinTowers,
   "twist-tower": drawTwistTower,
   "arch": modelBuilder(archModel),
-  "sail-opera": drawSailOpera,
+  "sail-opera": modelBuilder(sailOperaModel),
   "lighthouse": drawLighthouse,
   "ferris-wheel": drawFerrisWheel,
   "pagoda": modelBuilder(pagodaModel),

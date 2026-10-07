@@ -44,6 +44,7 @@ function baseGeometry(part: Part): THREE.BufferGeometry {
       const phi = part.phi ?? [0, Math.PI * 2];
       const theta = part.theta ?? [0, Math.PI];
       const g = new THREE.SphereGeometry(rx, w, h, phi[0], phi[1], theta[0], theta[1]);
+      if (part.stretch) return g.scale(...part.stretch);
       return ry === rx && rz === rx ? g : g.scale(1, ry / rx, rz / rx);
     }
     case "torus": {
@@ -69,6 +70,7 @@ function placed(part: Part): THREE.BufferGeometry {
     if (part.kind !== "box" && part.kind !== "cylinder" && part.kind !== "cone") throw new Error(`buildingCompiler: anchor "base" is only defined for box/cylinder/cone (got ${part.kind})`);
     g.translate(0, part.size[1] / 2, 0);
   }
+  if (part.shift) g.translate(...part.shift);
   return g;
 }
 
@@ -107,7 +109,8 @@ export function compileBuilding(plan: BuildingPlan, target: CompileTarget, input
 /** 把一个 model 包成旧的 LandmarkCtx 造型函数（registry 用它让 buildLandmarks 的 kind 分发不变）。 */
 export function compiledBuilder(model: BuildingModel, seedOf: (id: string) => number) {
   return (ctx: { group: THREE.Group; material: MaterialFactory; cap: number; neon: boolean; landmark: { id: string; radius: number }; host: { disposables: Array<{ dispose: () => void }> } }): void => {
-    const input: GeometryInput = { seed: seedOf(ctx.landmark.id), radius: ctx.landmark.radius, sizing: { cap: ctx.cap, neon: ctx.neon ? 1 : 0 } };
+    const shore = (ctx.landmark as { shore?: { x: number; z: number } }).shore;
+    const input: GeometryInput = { seed: seedOf(ctx.landmark.id), radius: ctx.landmark.radius, sizing: { cap: ctx.cap, neon: ctx.neon ? 1 : 0, baseY: ctx.group.position.y }, ...(shore ? { siting: { shore: [shore.x, shore.z] as [number, number] } } : {}) };
     compileBuilding(model.geometry(input), { group: ctx.group, material: ctx.material, disposables: ctx.host.disposables }, input);
   };
 }

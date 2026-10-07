@@ -59,6 +59,8 @@ type PartCommon = {
   anchor?: "base" | "center"; // base = y 为底面：几何沿 +y 平移半高（仅 box/cylinder/cone；这三种缺省 base，其余缺省 center）
   rot?: Vec3; // 网格欧拉角（xyz 序）
   bake?: BakedRotation;
+  /** 烘焙平移（几何自身 translate，在 anchor 平移之后）；旧造型把几何整体 translate(0,-h/2,0) 之类的写法靠它逐位保留。 */
+  shift?: Vec3;
   role: PartRole;
   color?: string; // hex 或令牌 "district:wall" / "district:roof" / "district:accent"
   side?: "front" | "double";
@@ -77,7 +79,7 @@ export type Part =
   | (PartCommon & { kind: "cylinder"; size: Vec3; radiusTop?: number; open?: boolean; /** 角度范围 [thetaStart, thetaLength]，缺省整圈（半圆拱券内壁用）。 */ arc?: [number, number]; segments?: number })
   | (PartCommon & { kind: "cone"; size: Vec3; segments?: number })
   /** size = 三轴半径（非均匀时在球几何上烘焙缩放）；segments = [经向, 纬向]。 */
-  | (PartCommon & { kind: "sphere"; size: Vec3; segments?: [number, number]; phi?: [number, number]; theta?: [number, number] })
+  | (PartCommon & { kind: "sphere"; size: Vec3; /** 烘焙非均匀缩放：先建半径 size[0] 的球再 scale(stretch)，逐位复刻旧 `new SphereGeometry(r).scale(a,b,c)`；缺省时由 size 三轴半径推出。 */ stretch?: Vec3; segments?: [number, number]; phi?: [number, number]; theta?: [number, number] })
   /** segments = [管截面, 环向]；arc 缺省整圈。 */
   | (PartCommon & { kind: "torus"; radius: number; tube: number; arc?: number; segments?: [number, number] })
   | (PartCommon & { kind: "tube"; radius: number; points: Vec3[]; segments?: number; radialSegments?: number })
