@@ -9,17 +9,16 @@
 
 import * as THREE from "three";
 import { builtFractionAt, hashSeed, type CityBuilding, type CityModel } from "../cityModel";
-import { MIAMI_COASTAL, promenadeSegments, validRuns } from "./citySeaside";
+import { promenadeSegments, validRuns } from "./citySeaside";
 import { HOTEL_CROWN_MAX_FINS, hotelCrownPlan, type CrownPiece } from "./cityHotelCrown";
 import { roadsideSignPlan, rooftopSignPlan, type RooftopSignPlan } from "./citySkylineProps";
 import { buildVillaComplex } from "./cityLandmarkVilla";
-import { fbm } from "./cityNoise";
 import type { CityLayout, DistrictLayout, Parcel, Vec2 } from "./cityLayout";
 import { activeTheme, skyYawOf } from "./cityTheme";
 import type { CityAssets } from "./cityAssets";
 import type { LoadedFlora } from "./cityFlora";
 import { decorKindForName } from "./cityDecor";
-import { makeCityTexture, makeDecoFacadeTexture, makeFacadeTexture, makeLabelSprite, paletteFor } from "./cityTextures";
+import { makeDecoFacadeTexture, makeFacadeTexture, makeLabelSprite, paletteFor } from "./cityTextures";
 import type { TerrainField } from "./cityLayout";
 import { createRenderCanvas } from "./renderCanvas";
 import { SegmentIndex, polygonDistance } from "./cityPlan";
@@ -28,6 +27,9 @@ import { LANDMARK_BUILDERS } from "./models/registry";
 import type { LandmarkHost } from "./models/landmarkContext";
 import { LIGHT_BUDGET, activeBoost, lampTier, nightFactor, useOfZone, windowRate } from "./cityLightBudget";
 import { roadPaintPlan } from "./cityRoadPaint";
+import { buildGroundSpill, buildSeaMountains, buildTerrain, buildWater, type TerrainHost } from "./systems/terrainSystem";
+import { applyFlora, buildTrees, type NatureHost } from "./systems/natureSystem";
+import { applyCarDensity, buildBoats, buildCars, buildClouds, placeCar, type AmbientHost } from "./systems/ambientSystem";
 
 const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
 /** Low-poly Art Deco tower silhouette: chamfered corners, podium, and stepped crown. */
@@ -65,7 +67,7 @@ const CYLINDER = new THREE.CylinderGeometry(1, 1, 1, 14).translate(0, 0.5, 0);
  *  路灯曾按 8.2（板底）立杆，光斑埋进桥面板、又因半径大于半幅桥宽漏到桥下地面。 */
 const EXPRESSWAY_DECK_Y = 8.2;
 const EXPRESSWAY_DECK_THICKNESS = 0.9;
-const EXPRESSWAY_DECK_WIDTH = 10.5;
+export const EXPRESSWAY_DECK_WIDTH = 10.5;
 const EXPRESSWAY_DECK_TOP = EXPRESSWAY_DECK_Y + EXPRESSWAY_DECK_THICKNESS;
 /** 高架两端的匝道长度：环线在海岸/山体处断开成几段，段尾曾悬在 8.2 高的半空、下面是沙地（拍照实测）。 */
 const EXPRESSWAY_RAMP = 90;
@@ -133,8 +135,8 @@ type BuildingRuntime = {
 };
 
 /** terrain 非空 → 车贴地行驶；桥面路径 terrain 为空、y 固定。 */
-type CarPath = { points: Vec2[]; cumulative: number[]; total: number; y: number; terrain: TerrainField | null };
-type Car = { path: CarPath; distance: number; speed: number };
+export type CarPath = { points: Vec2[]; cumulative: number[]; total: number; y: number; terrain: TerrainField | null };
+export type Car = { path: CarPath; distance: number; speed: number };
 
 /** 每块立面平铺里的窗格数（列 × 行）：与 makeFacadeTexture 画的窗格对齐，亮灯按窗格取 hash。 */
 const FACADE_GRIDS: Array<[number, number]> = [[5, 4], [1, 4], [4, 4], [1, 2]];
@@ -277,17 +279,7 @@ if (uWindowGlow > 0.02) {
   return material;
 }
 
-function polyCumulative(points: Vec2[]): { cumulative: number[]; total: number } {
-  const cumulative = [0];
-  let total = 0;
-  for (let index = 1; index < points.length; index += 1) {
-    total += Math.hypot(points[index].x - points[index - 1].x, points[index].z - points[index - 1].z);
-    cumulative.push(total);
-  }
-  return { cumulative, total };
-}
-
-function samplePolyline(path: CarPath, distance: number): { x: number; z: number; dx: number; dz: number } {
+export function samplePolyline(path: CarPath, distance: number): { x: number; z: number; dx: number; dz: number } {
   const d = ((distance % path.total) + path.total) % path.total;
   let index = 1;
   while (index < path.cumulative.length - 1 && path.cumulative[index] < d) index += 1;
@@ -315,67 +307,13 @@ export type NightLights = { heads: THREE.MeshBasicMaterial; pools: THREE.MeshBas
 const animationOrigin = new WeakMap<object, number>();
 const carBaseSpeed = new WeakMap<object, number>();
 /** 车的原速：第一次见到时记下（构造时 speed 还是原值），低画质藏车不再丢失它。 */
-function baseSpeedOf(car: { speed: number }): number {
+export function baseSpeedOf(car: { speed: number }): number {
   if (!carBaseSpeed.has(car)) carBaseSpeed.set(car, car.speed);
   return carBaseSpeed.get(car) as number;
 }
 function originOf(owner: object, value: number): number {
   if (!animationOrigin.has(owner)) animationOrigin.set(owner, value);
   return animationOrigin.get(owner) as number;
-}
-
-/** 火山体：移植 tinyskies Volcano.ts::buildVolcanoGeometry。原版 S=0.35、H=1.25 的单位尺度换成
- *  「底半径 = radius、火山口高 = rimHeight」；原版的 3D simplex 噪声换成本仓库的 fbm（三轴投影组合）。 */
-function volcanoGeometry(radius: number, rimHeight: number, seed: number): THREE.BufferGeometry {
-  const S = radius / 1.39; // 原版底半径 (0.24 + 1.15)·S
-  const yScale = rimHeight / S; // 原版火山口高 S·H；这里按目标高度换算
-  const profile: THREE.Vector2[] = [
-    new THREE.Vector2(0.0 * S, 0.88 * S), new THREE.Vector2(0.06 * S, 0.88 * S), new THREE.Vector2(0.09 * S, 0.94 * S),
-    new THREE.Vector2(0.12 * S, 0.98 * S), new THREE.Vector2(0.18 * S, 1.0 * S), new THREE.Vector2(0.24 * S, 0.98 * S),
-  ];
-  const steps = 24;
-  for (let i = 1; i <= steps; i += 1) {
-    const t = i / steps;
-    profile.push(new THREE.Vector2(0.24 * S + Math.pow(t, 1.6) * 1.15 * S, (1 - t) * 0.98 * S));
-  }
-  // LatheGeometry 按点序决定面朝向：原版自上而下排点（配 DoubleSide 材质），这里翻成自下而上，单面材质下外侧朝外。
-  const geometry = new THREE.LatheGeometry(profile.reverse(), 32);
-  const position = geometry.attributes.position as THREE.BufferAttribute;
-  // fbm ≈ -1..1；原版 terrainNoise 是 0..1，换算过来（曾直接当 0..1 用，扭曲量翻三倍、山脚戳出黑色尖刺）。
-  const noise3 = (x: number, y: number, z: number, octaves: number) => (fbm(x + z * 0.71, y + z * 1.37, seed + 77, octaves) + fbm(z + y * 0.53, x - y * 0.91, seed + 131, octaves)) * 0.25 + 0.5;
-  const rimY = S;
-  for (let i = 0; i < position.count; i += 1) {
-    const x = position.getX(i); const y = position.getY(i); const z = position.getZ(i);
-    const r = Math.hypot(x, z);
-    if (r < 0.001) { position.setY(i, y * yScale); continue; }
-    const t = y / rimY;
-    const warp = (noise3((x / S) * 4, (y / S) * 4, (z / S) * 4, 4) - 0.5) * 2;
-    const slopeBand = Math.sin(t * Math.PI);
-    const radialScale = 1 + warp * 0.25 * Math.max(slopeBand, (1 - t) * 0.6);
-    position.setX(i, x * radialScale);
-    position.setZ(i, z * radialScale);
-    position.setY(i, (y + warp * 0.08 * S * slopeBand) * yScale);
-  }
-  const colors = new Float32Array(position.count * 3);
-  for (let i = 0; i < position.count; i += 1) {
-    const x = position.getX(i); const y = position.getY(i) / yScale; const z = position.getZ(i);
-    const r = Math.hypot(x, z);
-    const t = Math.max(0, y / rimY);
-    const cNoise = noise3((x / S) * 10, (y / S) * 10, (z / S) * 10, 3);
-    const tMod = Math.max(0, Math.min(1, t + (cNoise - 0.5) * 0.25));
-    let c: [number, number, number];
-    if (tMod > 0.88 && r < 0.1 * S) c = [0.85, 0.25, 0.05]; // 岩浆芯
-    else if (tMod > 0.82) c = [0.16, 0.1, 0.08]; // 焦黑火山口
-    else if (tMod > 0.55) { const k = (tMod - 0.55) / 0.27; c = [0.38 + (0.16 - 0.38) * k, 0.24 + (0.1 - 0.24) * k, 0.18 + (0.08 - 0.18) * k]; }
-    else { const k = Math.min(1, tMod / 0.55); c = [0.28 + 0.1 * k, 0.32 - 0.08 * k, 0.22 - 0.04 * k]; } // 青褐山脚
-    const highlight = (cNoise - 0.5) * 0.1;
-    colors[i * 3] = Math.max(0, Math.min(1, c[0] + highlight));
-    colors[i * 3 + 1] = Math.max(0, Math.min(1, c[1] + highlight));
-    colors[i * 3 + 2] = Math.max(0, Math.min(1, c[2] + highlight));
-  }
-  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-  geometry.computeVertexNormals();
-  return geometry;
 }
 
 type StaticCity = {
@@ -748,92 +686,7 @@ export class CityParts {
     return mesh;
   }
 
-  /** 地形 mesh：高度场位移的 PlaneGeometry；UV 与区纹理的世界映射严格一致。 */
-  private buildTerrain(): void {
-    {
-      const extent = this.layout.extent;
-      const segments = 192;
-      const geometry = new THREE.PlaneGeometry(extent, extent, segments, segments).rotateX(-Math.PI / 2);
-      const position = geometry.attributes.position as THREE.BufferAttribute;
-      for (let index = 0; index < position.count; index += 1) {
-        const worldX = position.getX(index);
-        const worldZ = position.getZ(index);
-        position.setXYZ(index, worldX, this.layout.terrain.height(worldX, worldZ), worldZ);
-      }
-      geometry.computeVertexNormals();
-      const texture = makeCityTexture(this.layout);
-      texture.colorSpace = THREE.SRGBColorSpace;
-      const material = new THREE.MeshLambertMaterial({ map: texture });
-      this.installGroundDetail(material);
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.receiveShadow = true;
-      this.group.add(mesh);
-      this.disposables.push(geometry, material, texture);
-    }
-  }
-
-  /** 地面细节：全城图集（2048–4096²）只够画「哪里是路/沙/草」，近看糊成色块。
-   *  在图集颜色上按材质类别叠加世界坐标平铺的照片细节（颜色比值 + 法线明暗），
-   *  分类只看图集颜色与海拔：深灰低饱和=沥青，浅灰=人行道，绿=草，暖浅=沙，近水面的沙=滩涂。 */
-  private installGroundDetail(material: THREE.MeshLambertMaterial): void {
-    const uniforms: Record<string, { value: unknown }> = { uDetail: { value: 0 }, uNightDim: { value: 0 }, uSpill: { value: null }, uSpillGain: { value: 0 }, uExtent: { value: this.layout.extent } };
-    // 海滨沙滩不在 shader 里：画进地面贴图（makeCityTexture），道路才能压在它上面。
-    for (const name of ["Asphalt", "Concrete", "Sand", "Mud", "Grass"]) {
-      uniforms[`u${name}C`] = { value: null };
-      uniforms[`u${name}N`] = { value: null };
-      uniforms[`u${name}Mean`] = { value: new THREE.Vector3(0.5, 0.5, 0.5) };
-    }
-    this.terrainUniforms = uniforms;
-    material.onBeforeCompile = (shader) => {
-      Object.assign(shader.uniforms, uniforms);
-      shader.vertexShader = shader.vertexShader
-        .replace("#include <common>", "#include <common>\nvarying vec3 vCityWorld;")
-        .replace("#include <project_vertex>", "#include <project_vertex>\nvCityWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;");
-      const samplers = ["Asphalt", "Concrete", "Sand", "Mud", "Grass"].map((n) => `uniform sampler2D u${n}C; uniform sampler2D u${n}N; uniform vec3 u${n}Mean;`).join("\n");
-      shader.fragmentShader = shader.fragmentShader
-        .replace("#include <common>", `#include <common>\nvarying vec3 vCityWorld;\nuniform float uDetail;\nuniform float uNightDim;\nuniform sampler2D uSpill;\nuniform float uSpillGain;\nuniform float uExtent;\n${samplers}`)
-        // N1/N3：夜里地面主题色压暗；楼的窗光外溢（uSpill）只加在地面上，亮度随亮灯率。
-        .replace("#include <emissivemap_fragment>", `#include <emissivemap_fragment>\ndiffuseColor.rgb *= mix(1.0, ${LIGHT_BUDGET.ambient.groundDim.toFixed(2)}, uNightDim);\nif (uSpillGain > 0.001) { vec2 suv = vCityWorld.xz / uExtent + 0.5; totalEmissiveRadiance += texture2D(uSpill, suv).rgb * uSpillGain; }`)
-        .replace("#include <map_fragment>", `#include <map_fragment>
-#ifdef USE_MAP
-  if (uDetail > 0.5) {
-    vec3 base = diffuseColor.rgb;
-    float lum = dot(base, vec3(0.2126, 0.7152, 0.0722));
-    float mx = max(base.r, max(base.g, base.b));
-    float sat = (mx - min(base.r, min(base.g, base.b))) / max(mx, 1e-3);
-    float wA = (1.0 - smoothstep(0.12, 0.3, sat)) * (1.0 - smoothstep(0.05, 0.14, lum));
-    float wC = (1.0 - smoothstep(0.08, 0.22, sat)) * smoothstep(0.16, 0.36, lum);
-    float wG = smoothstep(0.005, 0.05, base.g - max(base.r, base.b));
-    float wS = smoothstep(0.02, 0.09, base.r - base.b) * smoothstep(0.18, 0.4, lum) * (1.0 - wG);
-    // 只在水线附近算滩涂：曾用 0.5–1.9，海拔低的整片沙滩都被染成泥色（真机：沙滩发褐、看不出是沙滩）。
-    float wet = 1.0 - smoothstep(0.15, 0.6, vCityWorld.y);
-    float wM = wS * wet;
-    wS *= 1.0 - wet;
-    float sum = wA + wC + wG + wS + wM;
-    float strength = smoothstep(0.05, 0.45, sum);
-    sum += 1e-4;
-    vec2 p = vCityWorld.xz;
-    vec3 ratio = (wA * texture2D(uAsphaltC, p / 7.0).rgb / uAsphaltMean
-      + wC * texture2D(uConcreteC, p / 5.5).rgb / uConcreteMean
-      + wS * texture2D(uSandC, p / 13.0).rgb / uSandMean
-      + wM * texture2D(uMudC, p / 9.0).rgb / uMudMean
-      + wG * mix(vec3(1.0), texture2D(uGrassC, p / 34.0).rgb / uGrassMean, 0.45)) / sum;
-    vec3 nrm = (wA * (texture2D(uAsphaltN, p / 7.0).xyz * 2.0 - 1.0)
-      + wC * (texture2D(uConcreteN, p / 5.5).xyz * 2.0 - 1.0)
-      + wS * (texture2D(uSandN, p / 13.0).xyz * 2.0 - 1.0)
-      + wM * (texture2D(uMudN, p / 9.0).xyz * 2.0 - 1.0)
-      + wG * 0.4 * (texture2D(uGrassN, p / 34.0).xyz * 2.0 - 1.0)) / sum;
-    diffuseColor.rgb *= mix(vec3(1.0), clamp(ratio, 0.35, 1.8), 0.8 * strength);
-    // 法线贴图做「固定光向」的明暗起伏：地面近似水平，省掉切线空间，代价是凹凸不随太阳转。
-    diffuseColor.rgb *= 1.0 + 0.55 * strength * (nrm.x * 0.6 - nrm.y * 0.45);
-    // 滩涂：向泥色偏、压暗，像刚退潮的湿岸。
-    vec3 mud = texture2D(uMudC, p / 9.0).rgb;
-    diffuseColor.rgb = mix(diffuseColor.rgb, mud * 0.9, 0.3 * wM / sum * strength);
-  }
-#endif`);
-    };
-    material.customProgramCacheKey = () => "city-terrain-detail";
-  }
+  private buildTerrain(): void { buildTerrain(this as unknown as TerrainHost); }
 
   /** 平面镜反射输入：texture=null 关闭（省电档，或相机在水面以下）。 */
   setMirror(texture: THREE.Texture | null, matrix: THREE.Matrix4 | null): void {
@@ -843,37 +696,7 @@ export class CityParts {
     if (matrix) (this.waterAssetUniforms.uMirrorMatrix.value as THREE.Matrix4).copy(matrix);
   }
 
-  /** N3 夜间光照叠层：把每栋亮窗的楼按其占地画成暖色径向光斑（低分辨率画布），在地面与水面 shader 里按
-   *  uSpillGain 叠加——窗光「漏」到楼脚与岸边水面，而不是楼自己孤立地亮。静态建一次，亮度随时段在 setNightHour 里调。 */
-  private buildGroundSpill(): void {
-    const uniforms = this.terrainUniforms;
-    if (!uniforms) return;
-    const size = 1024;
-    const canvas = createRenderCanvas();
-    canvas.width = canvas.height = size;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, size, size);
-    ctx.globalCompositeOperation = "lighter";
-    const extent = this.layout.extent;
-    for (const runtime of this.runtimes) {
-      const s = runtime.slot;
-      const reach = (Math.hypot(s.width, s.depth) / 2 + LIGHT_BUDGET.overlay.radius) / extent * size;
-      const px = (s.x / extent + 0.5) * size; const pz = (s.z / extent + 0.5) * size;
-      const power = Math.min(1, runtime.building.height / 70) * (useOfZone(s.zone) === "office" ? 1 : 0.6) * runtime.building.builtFraction;
-      if (power < 0.04) continue;
-      const g = ctx.createRadialGradient(px, pz, 0, px, pz, reach);
-      g.addColorStop(0, `rgba(255,170,90,${(0.5 * power).toFixed(3)})`);
-      g.addColorStop(1, "rgba(255,170,90,0)");
-      ctx.fillStyle = g; ctx.fillRect(px - reach, pz - reach, reach * 2, reach * 2);
-    }
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    (uniforms.uSpill.value as THREE.Texture | null)?.dispose();
-    uniforms.uSpill.value = texture;
-    if (this.waterAssetUniforms?.uSpill) this.waterAssetUniforms.uSpill.value = texture;
-    this.spillTexture = texture;
-  }
+  private buildGroundSpill(): void { buildGroundSpill(this as unknown as TerrainHost); }
 
   /** 本地小时 → 住宅/办公亮灯率（cityLightBudget.windowRate），驱动立面窗光与地面/水面光斑的强度。 */
   setNightHour(hour: number): void {
@@ -2137,221 +1960,9 @@ export class CityParts {
     if (dirty) this.writeContext();
   }
 
-  /** 海平线远山：低模锥形剪影 + fbm 顶点扰动，两侧海域各一座。 */
-  private buildSeaMountains(): void {
-    const mountains = this.layout.seaMountains ?? [];
-    if (!mountains.length) return;
-    const volcano = [...mountains].sort((a, b) => b.height - a.height)[0];
-    for (const mountain of mountains) {
-      if (mountain === volcano) {
-        // 冒烟的那座（CityWildlife 选最高的）是火山：火山体直接移植 tinyskies Volcano.ts 的 buildVolcanoGeometry
-        // （作者授权）——带火山口的车削轮廓、噪声扭曲成不规则岩体、顶点色从青褐山脚→灰烬→焦黑火山口→岩浆芯。
-        // 曾是一个光秃的浅色圆锥，读作「海上一顶帽子」（拍照实测）。烟柱从 height/2 的火山口冒出。
-        const mesh = new THREE.Mesh(volcanoGeometry(mountain.radius, mountain.height / 2, this.layout.seed), new THREE.MeshLambertMaterial({ vertexColors: true })); // 吃雾：远海处与海面一同淡入天色，曾 fog:false 在雾化的海平线上悬浮成飞碟（真机截图）
-        mesh.position.set(mountain.center.x, -2, mountain.center.z);
-        mesh.name = "city-sea-volcano";
-        this.group.add(mesh);
-        this.disposables.push(mesh.geometry, mesh.material as THREE.Material);
-        continue;
-      }
-      const geometry = new THREE.ConeGeometry(mountain.radius, mountain.height, 11, 4);
-      const position = geometry.attributes.position as THREE.BufferAttribute;
-      const colors = new Float32Array(position.count * 3);
-      const rock = new THREE.Color("#a9a496");
-      const high = new THREE.Color("#d6d0c2");
-      const tint = new THREE.Color();
-      for (let index = 0; index < position.count; index += 1) {
-        const x = position.getX(index);
-        const y = position.getY(index);
-        const z = position.getZ(index);
-        const wobble = 1 + fbm(x * 0.03 + mountain.seed, z * 0.03 - mountain.seed, mountain.seed, 3) * 0.22;
-        position.setX(index, x * wobble);
-        position.setZ(index, z * wobble);
-        tint.copy(rock).lerp(high, Math.max(0, (y + mountain.height / 2) / mountain.height));
-        colors[index * 3] = tint.r;
-        colors[index * 3 + 1] = tint.g;
-        colors[index * 3 + 2] = tint.b;
-      }
-      geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-      geometry.computeVertexNormals();
-      const material = new THREE.MeshLambertMaterial({ vertexColors: true, fog: false });
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.position.set(mountain.center.x, 0, mountain.center.z);
-      mesh.name = "city-sea-mountain";
-      this.group.add(mesh);
-      this.disposables.push(geometry, material);
-    }
-  }
+  private buildSeaMountains(): void { buildSeaMountains(this as unknown as TerrainHost); }
 
-  /** 树位：规划层的 parkTrees（此前算出来却从没渲染，district.trees 恒为空）+
-   *  棕榈主题下沿街行道树（避开桥、水面和路口）。 */
-  private treeSpots(): Array<{ x: number; z: number; y: number; seed: number }> {
-    const theme = activeTheme();
-    const spots: Array<{ x: number; z: number; y: number; seed: number }> = [];
-    for (const district of this.layout.districts) spots.push(...district.trees);
-    spots.push(...(this.layout.parkTrees ?? []));
-    // 海滨步道棕榈列（VICE B3）：沿步道折线 ~9 单位间距、两侧交错，走同一份
-    // treeSpots——进 treeMesh（棕榈几何）与 applyFlora（真实生态带管线）双路径。
-    {
-      const seaside = this.layout.seaside;
-      const promenades = [...(seaside && !seaside.degraded ? promenadeSegments(seaside) : []), ...this.urbanPromenadeSegments()]; // S3：城区岸段步道也有棕榈列
-      if (promenades.length) {
-        const terrain = this.layout.terrain;
-        let row = 0;
-        // 逐合法连续段种植（段间已被净空校验切断，不跨缺口搭桥）。
-        for (const segment of promenades) {
-          for (let i = 1; i < segment.length; i += 1) {
-            const a = segment[i - 1]; const b = segment[i];
-            const next = segment[Math.min(segment.length - 1, i + 1)];
-            const prev = segment[Math.max(0, i - 2)];
-            const segLen = Math.hypot(b.x - a.x, b.z - a.z);
-            const steps = Math.max(1, Math.floor(segLen / 7));
-            for (let s = 1; s <= steps; s += 1) {
-              const t = s / (steps + 1);
-              const x = a.x + (b.x - a.x) * t; const z = a.z + (b.z - a.z) * t;
-              const tangent = { x: (next.x - prev.x), z: (next.z - prev.z) };
-              const tl = Math.hypot(tangent.x, tangent.z) || 1;
-              const side = row % 2 === 0 ? 2.8 : -2.8;
-              const px = x + (-tangent.z / tl) * side; const pz = z + (tangent.x / tl) * side;
-              row += 1;
-              const y = terrain.height(px, pz);
-              if (y < 0.5 || y > 6) continue;
-              spots.push({ x: px, z: pz, y, seed: hashSeed(`palmtree:${px.toFixed(1)}:${pz.toFixed(1)}`) });
-            }
-          }
-        }
-      }
-    }
-    if (theme.streetTreeSpacing > 0) {
-      const terrain = this.layout.terrain;
-      const roads = new SegmentIndex(this.layout.roadEdges.map((edge) => edge.points));
-      const highways = new SegmentIndex(this.layout.highways ?? []);
-      // G2 热带绿化：沿合并后的整条路（roadPaintPlan run）按弧长种行道树，间距跨路段累计；路幅分档做净空。
-      // 曾逐条路段种且跳过 <20 的段（多数路已被切成 ~15 的短段），净空又统一按最宽路（7.2）算——
-      // 5 宽支路旁的树（离中线 4.9）全被拒，城市里几乎看不到行道树（多视角评估「像沙漠」）。
-      const byWidth = new Map<number, Vec2[][]>();
-      for (const edge of this.layout.roadEdges) if (!edge.bridge) (byWidth.get(edge.width) ?? byWidth.set(edge.width, []).get(edge.width)!).push(edge.points);
-      const widthIndex = [...byWidth].map(([width, runs]) => ({ clearance: width / 2 + 1.2, index: new SegmentIndex(runs) }));
-      const clearOfRoads = (p: Vec2) => widthIndex.every(({ clearance, index }) => !index.closerThan(p, clearance));
-      const slots = this.layout.districts.flatMap((district) => [...district.slots.values()]);
-      const buildings = new SegmentIndex(slots.map((slot) => [slot, slot]));
-      const buildingClearance = slots.reduce((radius, slot) => Math.max(radius, Math.hypot(slot.width, slot.depth) / 2 + 1.2), 0);
-      for (const run of roadPaintPlan(this.layout.roadEdges).runs) {
-        const spacing = theme.streetTreeSpacing * (run.kind === "arterial" ? 0.8 : 1);
-        let walked = 0; let next = 9; let index = 0;
-        for (let i = 1; i < run.points.length; i += 1) {
-          const a = run.points[i - 1]; const b = run.points[i];
-          const length = Math.hypot(b.x - a.x, b.z - a.z);
-          if (length < 1e-3) continue;
-          const dx = (b.x - a.x) / length; const dz = (b.z - a.z) / length;
-          while (next <= walked + length) {
-            const along = next - walked; next += spacing;
-            const side = index % 2 === 0 ? 1 : -1; index += 1;
-            const offset = run.width / 2 + 2.4;
-            const x = a.x + dx * along - dz * offset * side;
-            const z = a.z + dz * along + dx * offset * side;
-            const y = terrain.height(x, z);
-            if (y < 1.2) continue;
-            const point = { x, z };
-            if (!clearOfRoads(point) || highways.closerThan(point, EXPRESSWAY_DECK_WIDTH / 2 + 2)) continue;
-            if (buildings.closerThan(point, buildingClearance)) continue;
-            spots.push({ x, z, y, seed: hashSeed(`street:${Math.round(x)}:${Math.round(z)}`) });
-          }
-          walked += length;
-        }
-      }
-    }
-    return spots;
-  }
-
-  /** 圆冠树：树干 + 二十面体树冠。 */
-  private roundTreeGeometry(): THREE.BufferGeometry {
-    const theme = activeTheme();
-    const trunk = new THREE.CylinderGeometry(0.14, 0.2, 0.9, 5).translate(0, 0.45, 0);
-    const crown = new THREE.IcosahedronGeometry(0.78, 0).translate(0, 1.35, 0);
-    return this.tintedMerge([[trunk, theme.trunk], [crown, theme.foliage]]);
-  }
-
-  /** 棕榈：略弯的细高树干 + 一圈下垂的羽叶（每片叶 = 前倾的扁长方体）。 */
-  private palmGeometry(): THREE.BufferGeometry {
-    const theme = activeTheme();
-    const height = 4.6;
-    const trunk = new THREE.CylinderGeometry(0.1, 0.19, height, 6).translate(0, height / 2, 0);
-    // 树干顶端微微偏向一侧，避免整齐得像电线杆。
-    const position = trunk.getAttribute("position") as THREE.BufferAttribute;
-    for (let index = 0; index < position.count; index += 1) {
-      const t = position.getY(index) / height;
-      position.setX(index, position.getX(index) + t * t * 0.55);
-    }
-    trunk.computeVertexNormals();
-    const parts: Array<[THREE.BufferGeometry, string]> = [[trunk, theme.trunk]];
-    const fronds = 8;
-    for (let index = 0; index < fronds; index += 1) {
-      const frond = new THREE.BoxGeometry(2.3, 0.05, 0.42).translate(1.15, 0, 0);
-      frond.rotateZ(-0.42 - (index % 2) * 0.22); // 叶尖下垂
-      frond.rotateY((index / fronds) * Math.PI * 2);
-      frond.translate(0.55, height - 0.05, 0);
-      parts.push([frond, index % 3 === 0 ? "#27a868" : theme.foliage]);
-    }
-    return this.tintedMerge(parts);
-  }
-
-  private tintedMerge(parts: Array<[THREE.BufferGeometry, string]>): THREE.BufferGeometry {
-    let total = 0;
-    for (const [geometry] of parts) total += geometry.getAttribute("position").count;
-    const colors = new Float32Array(total * 3);
-    let offset = 0;
-    const color = new THREE.Color();
-    for (const [geometry, hex] of parts) {
-      color.set(hex);
-      for (let index = 0; index < geometry.getAttribute("position").count; index += 1) {
-        colors[offset++] = color.r;
-        colors[offset++] = color.g;
-        colors[offset++] = color.b;
-      }
-    }
-    const merged = mergeGeometries(parts.map(([geometry]) => geometry));
-    merged.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-    for (const [geometry] of parts) geometry.dispose();
-    return merged;
-  }
-
-  /** 用生态带模型替换程序化树：树位不变（同一份 treeSpots），按确定性 hash 分给各树种。 */
-  applyFlora(flora: LoadedFlora): void {
-    if (!flora.length || this.floraMeshes.length) return;
-    const spots = this.treeSpots();
-    const total = flora.reduce((sum, item) => sum + item.species.weight, 0);
-    const buckets: Array<typeof spots> = flora.map(() => []);
-    for (const spot of spots) {
-      let pick = hashSeed(`flora:${spot.x.toFixed(1)}:${spot.z.toFixed(1)}`) * total;
-      let index = 0;
-      while (index < flora.length - 1 && pick >= flora[index].species.weight) { pick -= flora[index].species.weight; index += 1; }
-      buckets[index].push(spot);
-    }
-    flora.forEach(({ species, geometry }, index) => {
-      const list = buckets[index];
-      if (!list.length) return;
-      const material = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
-      const mesh = new THREE.InstancedMesh(geometry, material, list.length);
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      const tint = species.tint ? new THREE.Color(species.tint) : null;
-      list.forEach((spot, i) => {
-        const size = species.height * (0.8 + spot.seed * 0.45);
-        this.compose(spot.x, spot.y - 0.1, spot.z, spot.seed * Math.PI * 2, size, size, size);
-        mesh.setMatrixAt(i, this.matrix);
-        // 染色树种（樱花/枫）：实例色乘在顶点色上，树干也会被染——用浅色乘数只轻推色相。
-        mesh.setColorAt(i, tint ? this.color.copy(tint).lerp(new THREE.Color("#ffffff"), 0.25 + spot.seed * 0.2) : this.color.set("#ffffff").multiplyScalar(0.88 + spot.seed * 0.2));
-      });
-      mesh.instanceMatrix.needsUpdate = true;
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-      mesh.name = `city-flora-${index}`;
-      this.group.add(mesh);
-      this.floraMeshes.push(mesh);
-      this.disposables.push(material); // 几何由 cityFlora 缓存共享，不随 parts 销毁
-    });
-    if (this.floraMeshes.length) this.treeMesh.visible = false;
-  }
+  applyFlora(flora: LoadedFlora): void { applyFlora(this as unknown as NatureHost, flora); }
 
   /** 滨海步道（VICE B3）：沿 promenade 折线的浅色铺装缎带——人行道语义，不进
    *  roadEdges/carPaths（机动车不会开上步道）。单 BufferGeometry，静态缓存段。 */
@@ -2950,167 +2561,13 @@ export class CityParts {
     this.disposables.push(unit, red);
   }
 
-  private buildTrees(): THREE.InstancedMesh {
-    const spots = this.treeSpots();
-    const palm = activeTheme().vegetation === "palm";
-    const treeGeometry = palm ? this.palmGeometry() : this.roundTreeGeometry();
-    const material = new THREE.MeshLambertMaterial({ vertexColors: true });
-    const mesh = new THREE.InstancedMesh(treeGeometry, material, Math.max(spots.length, 1));
-    mesh.castShadow = true;
-    spots.forEach((spot, index) => {
-      const scale = palm ? 1.25 + spot.seed * 0.7 : 0.8 + spot.seed * 0.9;
-      this.compose(spot.x, spot.y - 0.1, spot.z, spot.seed * Math.PI * 2, scale, scale, scale);
-      mesh.setMatrixAt(index, this.matrix);
-    });
-    mesh.count = spots.length;
-    this.group.add(mesh);
-    this.disposables.push(treeGeometry, material);
-    return mesh;
-  }
+  private buildTrees(): THREE.InstancedMesh { return buildTrees(this as unknown as NatureHost); }
 
-  private buildCars(): { mesh: THREE.InstancedMesh; cars: Car[] } {
-    const paths: CarPath[] = [];
-    for (const district of this.layout.districts) {
-      for (const path of district.carPaths) {
-        const { cumulative, total } = polyCumulative(path);
-        paths.push({ points: path, cumulative, total, y: 0.08, terrain: district.terrain });
-      }
-    }
-    const cars: Car[] = [];
-    paths.forEach((path, pathIndex) => {
-      const count = 3;
-      for (let index = 0; index < count; index += 1) {
-        const seed = hashSeed(`car:${pathIndex}:${index}`);
-        cars.push({ path, distance: (index / count) * path.total + seed * 5, speed: 6.5 + seed * 6 });
-      }
-    });
-    const carColors = ["#f8f5ec", "#c96f4a", "#4d7ca8", "#3f8f7a", "#d8a13c", "#8d5a5a"];
-    const geometry = new THREE.BoxGeometry(2.5, 0.8, 1.2).translate(0, 0.4, 0);
-    const material = new THREE.MeshLambertMaterial({ color: "#ffffff" });
-    const mesh = new THREE.InstancedMesh(geometry, material, Math.max(cars.length, 1));
-    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    cars.forEach((car, index) => {
-      const tint = carColors[Math.floor(hashSeed(`carc:${index}`) * carColors.length)];
-      mesh.setColorAt(index, this.color.set(tint));
-    });
-    mesh.count = cars.length;
-    mesh.frustumCulled = false;
-    this.group.add(mesh);
-    this.disposables.push(geometry, material);
-    return { mesh, cars };
-  }
+  private buildCars(): { mesh: THREE.InstancedMesh; cars: Car[] } { return buildCars(this as unknown as AmbientHost); }
 
-  private buildBoats(): { mesh: THREE.InstancedMesh; boats: Array<{ path: CarPath; distance: number; speed: number; phase: number; wakeTimer: number }>; wakeMesh: THREE.InstancedMesh; wakes: Array<{ x: number; z: number; birth: number; driftX: number; driftZ: number }> } {
-    // 船沿海岸外扩航道巡航（折线推进，与车辆同一套采样）。
-    const boats: ReturnType<CityParts["buildBoats"]>["boats"] = [];
-    this.layout.boatLoops?.forEach((loop, laneIndex) => {
-      const { cumulative, total } = polyCumulative(loop);
-      const count = 3 + (laneIndex % 2);
-      for (let index = 0; index < count; index += 1) {
-        boats.push({
-          path: { points: loop, cumulative, total, y: -0.3, terrain: null },
-          distance: (index / count) * total + hashSeed(`bd:${laneIndex}:${index}`) * 40,
-          speed: (laneIndex % 2 === 0 ? 1 : -1) * (2.6 + hashSeed(`bs:${laneIndex}:${index}`) * 1.6),
-          phase: hashSeed(`bp:${laneIndex}:${index}`) * Math.PI * 2,
-          wakeTimer: hashSeed(`bt:${laneIndex}:${index}`) * 0.3,
-        });
-      }
-    });
-    const hull = new THREE.BoxGeometry(11.5, 2, 4).translate(0, 1, 0);
-    const cabin = new THREE.BoxGeometry(4.3, 1.8, 2.9).translate(1.4, 2.9, 0);
-    const geometry = mergeGeometries([hull, cabin]);
-    const material = new THREE.MeshLambertMaterial({ color: "#f2efe6" });
-    const mesh = new THREE.InstancedMesh(geometry, material, Math.max(boats.length, 1));
-    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    boats.forEach((boat, index) => {
-      mesh.setColorAt(index, this.color.set(index % 3 === 0 ? "#c96f4a" : index % 3 === 1 ? "#5d7f9a" : "#e8e2d5"));
-    });
-    mesh.count = boats.length;
-    mesh.frustumCulled = false;
-    this.group.add(mesh);
-    this.disposables.push(geometry, material, hull, cabin);
-    // 飞桥游艇（VICE S3）：2 艘白色豪华游艇——船体+飞桥层+桅杆。比斯坎湾意象。
-    // 单独批次（几何更复杂），复用现有航道与尾迹系统。
-    {
-      const yachtCount = 2;
-      const flybridge = new THREE.BoxGeometry(3.4, 1.4, 2.2).translate(-1.8, 4.2, 0);
-      const radarArch = new THREE.BoxGeometry(0.3, 2.2, 2.4).translate(-3.6, 5.4, 0);
-      const bowSpray = new THREE.ConeGeometry(0.5, 2.5, 4).rotateZ(-Math.PI / 2).translate(6.5, 0.8, 0);
-      const yachtGeometry = mergeGeometries([hull.clone(), cabin.clone(), flybridge, radarArch, bowSpray]);
-      const yachtMaterial = new THREE.MeshLambertMaterial({ color: "#f8f6f0" });
-      const yachtMesh = new THREE.InstancedMesh(yachtGeometry, yachtMaterial, yachtCount);
-      yachtMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-      yachtMesh.frustumCulled = false;
-      yachtMesh.name = "city-yachts";
-      // 挑 2 艘船的位置替换为游艇（索引 0 和 lane 1 的 0 号）。
-      this.yachtIndices = boats.length > 0 ? [0, Math.min(boats.length - 1, 3)] : [];
-      this.yachtMesh = yachtMesh;
-      this.yachtMesh.count = this.yachtIndices.length;
-      for (let y = 0; y < this.yachtIndices.length; y += 1) {
-        yachtMesh.setColorAt(y, this.color.set(y === 0 ? "#f8f6f0" : "#e8e4d8"));
-      }
-      this.group.add(yachtMesh);
-      this.disposables.push(yachtGeometry, yachtMaterial, flybridge, radarArch, bowSpray);
-    }
-    // 尾迹泡沫（tinyskies WakeTrail 手法）：船尾定期吐软圆斑，漂移放大后消散。
-    // 径向渐变贴图让圆斑边缘衰减——纯色圆片读作沙盘贴纸，不像浪花。
-    const foamCanvas = createRenderCanvas();
-    foamCanvas.width = foamCanvas.height = 64;
-    const foamCtx = foamCanvas.getContext("2d");
-    if (foamCtx) {
-      const gradient = foamCtx.createRadialGradient(32, 32, 0, 32, 32, 32);
-      gradient.addColorStop(0, "rgba(255,255,255,0.95)");
-      gradient.addColorStop(0.45, "rgba(255,255,255,0.4)");
-      gradient.addColorStop(1, "rgba(255,255,255,0)");
-      foamCtx.fillStyle = gradient;
-      foamCtx.fillRect(0, 0, 64, 64);
-    }
-    const foamTexture = new THREE.CanvasTexture(foamCanvas);
-    const foamMaterial = new THREE.MeshBasicMaterial({ color: "#eef6f7", map: foamTexture, transparent: true, opacity: 0.5, depthWrite: false, toneMapped: false });
-    const wakeGeometry = new THREE.CircleGeometry(1, 10).rotateX(-Math.PI / 2);
-    const wakeMesh = new THREE.InstancedMesh(wakeGeometry, foamMaterial, 128);
-    wakeMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    wakeMesh.frustumCulled = false;
-    wakeMesh.renderOrder = 1;
-    const wakes: Array<{ x: number; z: number; birth: number; driftX: number; driftZ: number }> = [];
-    for (let index = 0; index < 128; index += 1) {
-      wakes.push({ x: 0, z: 0, birth: -1, driftX: 0, driftZ: 0 });
-      this.compose(0, -60, 0, 0, 0.0001, 0.0001, 0.0001);
-      wakeMesh.setMatrixAt(index, this.matrix);
-    }
-    this.group.add(wakeMesh);
-    this.disposables.push(foamTexture, foamMaterial, wakeGeometry);
-    return { mesh, boats, wakeMesh, wakes };
-  }
+  private buildBoats(): { mesh: THREE.InstancedMesh; boats: Array<{ path: CarPath; distance: number; speed: number; phase: number; wakeTimer: number }>; wakeMesh: THREE.InstancedMesh; wakes: Array<{ x: number; z: number; birth: number; driftX: number; driftZ: number }> } { return buildBoats(this as unknown as AmbientHost); }
 
-  private buildClouds(): { mesh: THREE.InstancedMesh; clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }> } {
-    const clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }> = [];
-    const bounds = this.layout.boundsRadius + 40;
-    for (let index = 0; index < 3; index += 1) {
-      const seed = hashSeed(`cloud:${index}`);
-      clouds.push({
-        x: (seed - 0.5) * bounds * 2,
-        z: (hashSeed(`cz:${index}`) - 0.5) * bounds * 2,
-        y: 220 + seed * 44,
-        speed: 0.65 + seed * 0.7,
-        scale: 0.5 + seed * 0.4,
-      });
-    }
-    const geometry = new THREE.SphereGeometry(1, 8, 6);
-    const material = new THREE.MeshLambertMaterial({ color: "#ffffff", transparent: true, opacity: 0.88, fog: false });
-    const mesh = new THREE.InstancedMesh(geometry, material, clouds.length);
-    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    clouds.forEach((cloud, index) => {
-      const blob = 9.5 * cloud.scale;
-      this.compose(cloud.x, cloud.y, cloud.z, 0, blob * 1.6, blob * 0.34, blob * 0.8);
-      mesh.setMatrixAt(index, this.matrix);
-    });
-    mesh.count = clouds.length;
-    mesh.frustumCulled = false;
-    this.group.add(mesh);
-    this.disposables.push(geometry, material);
-    return { mesh, clouds };
-  }
+  private buildClouds(): { mesh: THREE.InstancedMesh; clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }> } { return buildClouds(this as unknown as AmbientHost); }
 
   private buildAnomalyMarkers(): void {
     for (const district of this.layout.districts) {
@@ -3157,255 +2614,7 @@ export class CityParts {
     }
   }
 
-  private buildWater(): THREE.Mesh {
-    const geometry = new THREE.PlaneGeometry(9000, 9000, 1, 1).rotateX(-Math.PI / 2);
-    // 岸线深度图（tinyskies Globe 的 oceanDepth 等价物）：构建期把 -height/16 采样
-    // 进单通道纹理（384²，随静态城缓存一次性烘焙）。水面是 1×1 段平面没有顶点
-    // 可烘，纹理方案逐像素平滑；河床 height<0 同样被采到，河岸也起涟漪。
-    const DEPTH_TEX = 384;
-    const DEPTH_WORLD = 1500;
-    const depthData = new Uint8Array(DEPTH_TEX * DEPTH_TEX);
-    for (let y = 0; y < DEPTH_TEX; y += 1) {
-      for (let x = 0; x < DEPTH_TEX; x += 1) {
-        const worldX = (x / (DEPTH_TEX - 1) - 0.5) * DEPTH_WORLD * 2;
-        const worldZ = (y / (DEPTH_TEX - 1) - 0.5) * DEPTH_WORLD * 2;
-        const h = this.layout.terrain.height(worldX, worldZ);
-        depthData[y * DEPTH_TEX + x] = Math.max(0, Math.min(255, Math.round((-h / 16) * 255)));
-      }
-    }
-    const depthTexture = new THREE.DataTexture(depthData, DEPTH_TEX, DEPTH_TEX, THREE.RedFormat, THREE.UnsignedByteType);
-    depthTexture.minFilter = THREE.LinearFilter;
-    depthTexture.magFilter = THREE.LinearFilter;
-    depthTexture.wrapS = THREE.ClampToEdgeWrapping;
-    depthTexture.wrapT = THREE.ClampToEdgeWrapping;
-    depthTexture.needsUpdate = true;
-    this.disposables.push(depthTexture);
-    const material = new THREE.ShaderMaterial({
-      uniforms: {
-        uTime: { value: 0 },
-        uSun: { value: new THREE.Vector3(0.55, 0.75, 0.36).normalize() },
-        uDeep: { value: new THREE.Color(activeTheme().water.deep) },
-        uShallow: { value: new THREE.Color(activeTheme().water.shallow) },
-        uSky: { value: new THREE.Color(activeTheme().water.sky) },
-        uDepth: { value: depthTexture },
-        uDepthWorld: { value: DEPTH_WORLD },
-        // 与 scene.background 同色：ShaderMaterial 不吃 scene.fog，水面远处要自己淡出到天空色，
-        // 否则 2600 见方的水面直边会像「世界边缘」露在天空下。
-        uFog: { value: new THREE.Color(activeTheme().skyHorizon) },
-        uFogRange: { value: new THREE.Vector2(...activeTheme().waterFog) },
-        uNormal: { value: null as THREE.Texture | null },
-        // 平面镜反射（引擎每帧把镜像相机看到的场景渲染进来）：岸边的楼、山、桥倒映在水里。
-        uMirror: { value: null as THREE.Texture | null },
-        uMirrorMatrix: { value: new THREE.Matrix4() },
-        uHasMirror: { value: 0 },
-        uNight: { value: 0 },
-        uSpill: { value: null as THREE.Texture | null },
-        uSpillGain: { value: 0 },
-        uExtent: { value: this.layout.extent },
-        uSkyTex: { value: null as THREE.Texture | null },
-        uHasAssets: { value: 0 },
-        uGradeTop: { value: new THREE.Color(activeTheme().skyGrade.top) },
-        uGradeHorizon: { value: new THREE.Color(activeTheme().skyGrade.horizon) },
-        uGradeAmount: { value: activeTheme().skyGrade.amount },
-        uSkyYaw: { value: skyYawOf(activeTheme()) },
-      },
-      vertexShader: /* glsl */ `
-        varying vec3 vWorld;
-        void main() {
-          vec4 world = modelMatrix * vec4(position, 1.0);
-          vWorld = world.xyz;
-          gl_Position = projectionMatrix * viewMatrix * world;
-        }
-      `,
-      fragmentShader: /* glsl */ `
-        uniform float uTime;
-        uniform vec3 uSun;
-        uniform vec3 uDeep;
-        uniform vec3 uShallow;
-        uniform vec3 uSky;
-        uniform vec3 uFog;
-        uniform vec2 uFogRange;
-        uniform sampler2D uNormal;
-        uniform sampler2D uMirror;
-        uniform mat4 uMirrorMatrix;
-        uniform float uHasMirror;
-        uniform float uNight;
-        uniform sampler2D uSpill;
-        uniform float uSpillGain;
-        uniform float uExtent;
-        uniform sampler2D uSkyTex;
-        uniform float uHasAssets;
-        uniform vec3 uGradeTop;
-        uniform vec3 uGradeHorizon;
-        uniform float uGradeAmount;
-        uniform float uSkyYaw;
-        uniform sampler2D uDepth;
-        uniform float uDepthWorld;
-        varying vec3 vWorld;
-        // 与天空球同一套采样 + 调色：反射和远处淡出都要与天空完全一致，否则地平线出现接缝。
-        vec3 skyAt(vec3 dir) {
-          dir = normalize(dir);
-          vec2 uv = vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5 + uSkyYaw, asin(clamp(dir.y, 0.002, 1.0)) / 3.1415927 + 0.5);
-          vec3 photo = texture2D(uSkyTex, uv).rgb;
-          vec3 tint = mix(uGradeHorizon, uGradeTop, smoothstep(0.0, 0.6, max(dir.y, 0.0)));
-          return mix(photo, photo * tint * 1.55, uGradeAmount);
-        }
-        // 水面法线贴图（512²）在该 uv 处的 mip 级：0 = 1 texel/像素，每 +1 = 降采样一倍。
-        float waterMip(vec2 uv) {
-          vec2 d = fwidth(uv) * 512.0;
-          return log2(max(max(d.x, d.y), 1e-4));
-        }
-        float rHash(vec2 c) { return fract(sin(dot(c, vec2(127.1, 311.7))) * 43758.5453); }
-        vec2 rHash2(vec2 c) { return fract(sin(vec2(dot(c, vec2(127.1, 311.7)), dot(c, vec2(269.5, 183.3)))) * 43758.5453); }
-        // 平滑值噪声（格点哈希 + smoothstep 插值）：没有周期，等值线不成点阵。
-        float valueNoise(vec2 q) {
-          vec2 i = floor(q);
-          vec2 f = fract(q);
-          vec2 u = f * f * (3.0 - 2.0 * f);
-          float a = rHash(i);
-          float b = rHash(i + vec2(1.0, 0.0));
-          float c = rHash(i + vec2(0.0, 1.0));
-          float e = rHash(i + vec2(1.0, 1.0));
-          return mix(mix(a, b, u.x), mix(c, e, u.x), u.y);
-        }
-        // 一层涟漪：格距 cell；查 3×3 邻格（中心在格内 0.15–0.85、半径 ≤ 0.85 格，跨格的环也能画到）。
-        float rippleLayer(vec2 p, float cell, float t, float seed) {
-          vec2 g = floor(p / cell);
-          float acc = 0.0;
-          for (int i = -1; i <= 1; i++) {
-            for (int j = -1; j <= 1; j++) {
-              vec2 c = g + vec2(float(i), float(j));
-              float period = 3.0 + rHash(c + seed) * 5.0;              // 时间：每格自己的周期
-              float phase = t / period + rHash(c + seed + 7.1);        // …且错相
-              float cycle = floor(phase);
-              float age = fract(phase);
-              float alive = step(0.45, rHash(c + cycle * 3.3 + seed + 1.7)); // 约一半轮次不出现
-              vec2 center = (c + 0.15 + rHash2(c + cycle * 13.7 + seed) * 0.7) * cell; // 位置：每轮重抽
-              float maxR = cell * (0.3 + 0.55 * rHash(c + cycle * 5.9 + seed + 4.2)); // 大小：每轮随机
-              float r = age * maxR;
-              float width = 0.7 + r * 0.06;
-              float ring = 1.0 - smoothstep(0.0, width, abs(length(p - center) - r));
-              acc += ring * (1.0 - age) * (1.0 - age) * alive;
-            }
-          }
-          return acc;
-        }
-        // 离岸深度（构建期烘焙）：0 = 水线，1 = 深水；纹理外一律深水。
-        float shoreDepth(vec2 p) {
-          vec2 uv = p / (uDepthWorld * 2.0) + 0.5;
-          if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
-          return texture2D(uDepth, uv).r;
-        }
-        void main() {
-          vec2 p = vWorld.xz;
-          // 不再用解析波（几组平面波之和）做法线：平面波相加本身是二维干涉点阵，波峰周期性对齐，
-          // 镜面高光 pow(·,64) 在每个波峰上点出一颗一模一样的白椭圆，满海排成格子（拍照实测：
-          // 关掉碎光、法线贴图、镜面倒影、尾迹之后椭圆都还在）。法线只来自下面旋转错开的法线贴图层，
-          // 起伏的随机感交给随机涟漪。
-          vec3 n = vec3(0.0, 1.0, 0.0);
-          if (uHasAssets > 0.5) {
-            // 两层反向滚动的法线贴图：细碎波纹不再是规则的正弦格。
-            // 曾是 p/46、p/19 两层轴对齐平铺：同一块贴图每 46 单位原样复制，掠射角下菲涅尔
-            // 反射把每块的法线偏转放大成一颗暗椭圆，全海排成规则点阵。现在三层各自旋转到
-            // 非轴向、尺度互不整除（重复周期错开），再用低频场混合权重，平铺不再对齐成格。
-            vec2 pa = mat2(0.857, 0.515, -0.515, 0.857) * p;   // 31°
-            vec2 pb = mat2(0.682, -0.731, 0.731, 0.682) * p;   // -47°
-            vec2 pc = mat2(0.276, 0.961, -0.961, 0.276) * p;   // 74°
-            vec2 uvA = pa / 41.3 + vec2(uTime * 0.010, uTime * 0.006);
-            vec2 uvB = pb / 15.7 - vec2(uTime * 0.007, -uTime * 0.011);
-            vec2 uvC = pc / 113.0 + vec2(uTime * 0.004, -uTime * 0.003);
-            vec3 a = texture2D(uNormal, uvA).xyz * 2.0 - 1.0;
-            vec3 b = texture2D(uNormal, uvB).xyz * 2.0 - 1.0;
-            vec3 c = texture2D(uNormal, uvC).xyz * 2.0 - 1.0;
-            // 旋转只把点阵转斜，不消除周期（上一版修复的错）。真正成格的原因：一层平铺在屏幕上
-            // 只有几十像素时，512² 贴图被 mip 降采样 ~3 级，细节滤光、只剩「以平铺尺寸为周期」的
-            // 低频分量——一张干净的正弦格，再被掠射菲涅尔放大。按各层自己的 mip 级淡出：细节一旦
-            // 被滤掉就不再贡献法线，留下的起伏由下面 wave() 的解析法线（非格点平面波）接管。
-            float wA = 1.0 - smoothstep(1.0, 2.5, waterMip(uvA));
-            float wB = 1.0 - smoothstep(1.0, 2.5, waterMip(uvB));
-            float wC = 1.0 - smoothstep(1.0, 2.5, waterMip(uvC));
-            float mixW = 0.5 + 0.5 * sin(p.x * 0.013 + p.y * 0.017) * sin(p.y * 0.011 - p.x * 0.007);
-            vec3 t = a * wA * (0.6 + 0.4 * mixW) + b * wB * (1.0 - 0.4 * mixW) + c * wC * 0.7;
-            float strength = 0.28;
-            n = normalize(vec3(t.x * strength + n.x * 0.5, 1.0, t.y * strength + n.z * 0.5));
-          }
-          vec3 view = normalize(cameraPosition - vWorld);
-          float fresnel = pow(1.0 - max(dot(n, view), 0.0), 2.4);
-          vec3 base = mix(uShallow, uDeep, clamp(length(p) / 420.0, 0.0, 1.0));
-          vec3 skyColor = uHasAssets > 0.5 ? mix(skyAt(reflect(-view, n)), uSky, uNight) : uSky; // 夜里不再倒映晚霞照片
-          if (uHasMirror > 0.5) {
-            // 镜像贴图按投影坐标采样，再用波纹法线扰动：倒影随水波轻晃而不是一面硬镜子。
-            vec4 projected = uMirrorMatrix * vec4(vWorld, 1.0);
-            vec2 mirrorUv = projected.xy / projected.w + n.xz * 0.035;
-            skyColor = texture2D(uMirror, mirrorUv).rgb;
-          }
-          // 有镜面倒影时反射占比更高：平静海面在斜视角下几乎就是一面镜子。
-          float reflectance = uHasMirror > 0.5 ? 0.04 + fresnel * 0.9 : (uHasAssets > 0.5 ? 0.12 + fresnel * 0.78 : fresnel * 0.6);
-          vec3 color = mix(base, skyColor, reflectance);
-          float specular = pow(max(dot(reflect(-normalize(uSun), n), view), 0.0), 64.0);
-          color += vec3(1.0, 0.97, 0.88) * specular * 1.05;
-          // ── 随机涟漪 ─────────────────────────────────────────────────────
-          // 曾是 sin×sin×sin 的「碎光」乘积场 × 正弦掩码 × 波峰门控：正弦的乘积本身是周期点阵，
-          // 满海排成规则的白椭圆（拍照实测，关掉法线贴图/镜面/尾迹都还在）。现在是真正的涟漪：
-          // 海面按格子划分，每格每一轮——中心在格内随机重抽（位置随机）、周期 3–8 秒且各自错相
-          // 并有约一半轮次不出现（时间随机）、最大半径随机（大小随机）；两层不同格距（22/47，
-          // 第二层旋转）混出大小涟漪。全部由 uTime 与哈希决定：导出仍可复现。
-          float dist = distance(cameraPosition, vWorld);
-          float sunPath = smoothstep(0.55, 0.95, dot(reflect(-normalize(uSun), n), view));
-          float ripples = rippleLayer(p, 22.0, uTime, 0.0)
-            + rippleLayer(mat2(0.6, 0.8, -0.8, 0.6) * p, 47.0, uTime * 0.8, 31.0) * 0.75;
-          // 环宽 ~1 单位：屏幕上一像素已经大于环宽时淡出（远处不闪成噪点），再进雾前柔和收尾。
-          float footprint = length(fwidth(p));
-          ripples *= (1.0 - smoothstep(0.5, 1.6, footprint)) * (1.0 - smoothstep(650.0, 1100.0, dist));
-          color += vec3(0.88, 0.95, 1.0) * ripples * 0.16 * (1.0 - uNight * 0.75);
-          // N3 水面窗光倒影：岸边亮窗的楼把暖光洒在近岸水面，随涟漪碎成亮带（只在有光斑的地方）。
-          if (uSpillGain > 0.001) { vec3 spill = texture2D(uSpill, vWorld.xz / uExtent + 0.5).rgb; color += spill * uSpillGain * (0.55 + 0.9 * ripples); }
-          // 太阳反射带里的涟漪更亮（碎金）：只在日间。
-          color += vec3(1.0, 0.98, 0.9) * ripples * sunPath * 0.55 * (1.0 - uNight);
-          // ── 岸线涟漪（tinyskies Globe 手法，作者授权移植）──────────────────
-          // 只此一件：fract(深度×频率−时间) 生成向岸滚动的白色波纹带，sin 噪声让
-          // 条带不规则、深度衰减离岸消失。深度驱动、空间上低频（条带宽 ~10-30 单
-          // 位），远处（700–1400）柔和淡出防混叠；不动碎光、不加开阔海面浪花。
-          float d = shoreDepth(p);
-          if (d < 0.8) {
-            float dayFade = 1.0 - uNight * 0.6;
-            // 条带的不规则来自哈希值噪声（非周期），不再是两个正弦之和——深度在大片浅滩/陆下近乎常数时，
-            // 条带退化成噪声的等值线，正弦和的等值线是一张规则的椭圆点阵，满海一圈圈白椭圆（拍照实测）。
-            float nz = (valueNoise(p * 0.035 + vec2(uTime * 0.05, -uTime * 0.03)) - 0.5) * 0.09
-              + (valueNoise(p * 0.09 - vec2(uTime * 0.04, uTime * 0.06)) - 0.5) * 0.04;
-            float contour = fract((d + nz) * 4.0 - uTime * 0.42);
-            // 只在深度真的在变的地方画（靠近真实岸线）：用 2 单位差分估深度梯度，平坦处不画条带。
-            float grad = length(vec2(shoreDepth(p + vec2(2.0, 0.0)) - d, shoreDepth(p + vec2(0.0, 2.0)) - d)) * 0.5;
-            float band = smoothstep(0.45, 0.7, contour) * (1.0 - smoothstep(0.75, 1.0, contour));
-            // 只留最靠岸的一窄条：窄河里深度处处都浅，曾整条河铺满白色条带、读作结冰（拍照实测）。
-            float depthFade = 1.0 - smoothstep(0.03, 0.3, d);
-            float bandFade = 1.0 - smoothstep(700.0, 1400.0, dist);
-            float slopeFade = smoothstep(0.0012, 0.004, grad);
-            color = mix(color, vec3(0.9, 0.97, 0.98), band * depthFade * bandFade * slopeFade * 0.45 * dayFade);
-          }
-          gl_FragColor = vec4(color, 1.0);
-          #include <tonemapping_fragment>
-          // 雾混在色调映射之后：scene.background 不经色调映射，先混再映射会让远水发灰、与天空出现色带。
-          vec3 fogColor = uFog;
-          if (uHasAssets > 0.5) {
-            // 远处淡出到「这个方向地平线上的天空」，而不是一个常数色。
-            vec3 horizonDir = normalize(vec3(vWorld.x - cameraPosition.x, 0.0, vWorld.z - cameraPosition.z));
-            fogColor = skyAt(horizonDir + vec3(0.0, 0.01, 0.0));
-          }
-          // 夜里远海淡出到夜雾色：skyAt 采样的是黄昏照片，天穹入夜后换成渐变，水面却一直淡出到照片里的
-          // 晚霞——23 点远海一整条粉红光带（用户截图「光照污染」）。
-          fogColor = mix(fogColor, uSky, uNight); // uSky 每个 tick 按当前档位的雾色更新；uFog 是主题常量（迈阿密的晚霞橙），夜里不能用
-          gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, smoothstep(uFogRange.x, uFogRange.y, dist));
-          #include <colorspace_fragment>
-        }
-      `,
-    });
-    this.waterAssetUniforms = material.uniforms as Record<string, { value: unknown }>;
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.position.y = -0.55;
-    this.disposables.push(geometry, material);
-    return mesh;
-  }
+  private buildWater(): THREE.Mesh { return buildWater(this as unknown as TerrainHost); }
 
   private buildRuntimes(): void {
     const districtsById = new Map(this.layout.districts.map((district) => [district.id, district]));
@@ -3973,29 +3182,9 @@ export class CityParts {
     this.applyCarDensity();
   }
 
-  /** 低画质只开一半车：多出来的车缩成 0（藏起），速度从「原速」取回。
-   *  曾直接把 speed 写成 0 且不留原速：掉到 Q0 一次，那一半车整场会话都冻在原地（升档也不恢复），
-   *  冻结时的矩阵还取决于掉档那一刻——同一座城两次导出的车位置不同。 */
-  private applyCarDensity(): void {
-    const visibleCars = Math.floor(this.cars.length * this.carKeep);
-    this.cars.forEach((car, index) => {
-      const speed = baseSpeedOf(car);
-      car.speed = index < visibleCars ? speed : 0;
-      this.placeCar(car, index, index < visibleCars);
-    });
-    this.carMesh.instanceMatrix.needsUpdate = true;
-  }
+  private applyCarDensity(): void { applyCarDensity(this as unknown as AmbientHost); }
 
-  private placeCar(car: Car, index: number, visible: boolean): void {
-    if (!visible) {
-      this.compose(0, -40, 0, 0, 0, 0, 0);
-    } else {
-      const sample = samplePolyline(car.path, car.distance);
-      const y = car.path.terrain ? car.path.terrain.height(sample.x, sample.z) + car.path.y : car.path.y;
-      this.compose(sample.x - sample.dz * 1.2, y + 0.04, sample.z + sample.dx * 1.2, Math.atan2(-sample.dz, sample.dx), 1, 1, 1);
-    }
-    this.carMesh.setMatrixAt(index, this.matrix);
-  }
+  private placeCar(car: Car, index: number, visible: boolean): void { placeCar(this as unknown as AmbientHost, car, index, visible); }
 
   /** 航拍时隐藏「计划高度」脚手架壳：低机位下它是悬在天上的半透明大方块。 */
   setScaffoldVisible(visible: boolean): void {
@@ -4400,7 +3589,7 @@ export class CityParts {
 }
 
 /** 简易几何合并（部件都是 position/normal/uv 布局，不值得引 utils）。 */
-function mergeGeometries(geometries: THREE.BufferGeometry[]): THREE.BufferGeometry {
+export function mergeGeometries(geometries: THREE.BufferGeometry[]): THREE.BufferGeometry {
   const merged = new THREE.BufferGeometry();
   for (const name of ["position", "normal", "uv"] as const) {
     const first = geometries[0].getAttribute(name);
