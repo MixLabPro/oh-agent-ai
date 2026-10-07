@@ -21,28 +21,46 @@ export function roadSamples(edges: Array<{ points: Vec2[]; bridge?: boolean }>):
   return out;
 }
 
-export function planAirport(coast: Vec2[], core: Vec2, avoid: Vec2[], roads: Vec2[] = []): AirportPlan | null {
+export function planAirport(coast: Vec2[], core: Vec2, avoid: Vec2[], roads: Vec2[] = [], isWater?: (x: number, z: number) => boolean): AirportPlan | null {
   if (coast.length < 8) return null;
   // 堤道陆地端必须落在路网上（用户截图：堤道接到没有路的山岬上）：岸点 30 内有路的优先，其次才是纯按远近。
-  let best: { p: Vec2; score: number } | null = null;
+  // 整个平台（240×110 + 护岸，沿海岸平行铺开）必须全在水里（用户截图：机场压在陆地上——海岸弯曲时长边的一头会伸到岸上）：
+  // 按得分从高到低试岸点，每个岸点试 140/170/200/240 四个离岸距离，平台范围按 20 间距采样全部入水才通过。
+  const ranked: Array<{ p: Vec2; score: number }> = [];
   for (const p of coast) {
     const far = Math.hypot(p.x - core.x, p.z - core.z);
     const clear = Math.min(...avoid.map((a) => Math.hypot(a.x - p.x, a.z - p.z)), 999);
     if (clear < 160) continue;
     let road = Infinity; for (const r of roads) road = Math.min(road, Math.hypot(r.x - p.x, r.z - p.z));
-    const score = far + clear * 0.5 + (roads.length ? (road <= 30 ? 1000 : -road) : 0);
-    if (!best || score > best.score) best = { p, score };
+    ranked.push({ p, score: far + clear * 0.5 + (roads.length ? (road <= 30 ? 1000 : -road) : 0) });
   }
-  if (!best) return null;
-  if (roads.length) { // 起点吸附到最近路点（≤40），堤道从路上起步
-    let nearest = roads[0]; let nd = Infinity;
-    for (const r of roads) { const d = Math.hypot(r.x - best.p.x, r.z - best.p.z); if (d < nd) { nd = d; nearest = r; } }
-    if (nd <= 40) best = { p: { x: nearest.x, z: nearest.z }, score: best.score };
+  ranked.sort((a, b) => b.score - a.score);
+  const L = 240 + 12; const W = 110 + 12;
+  const footprintWet = (centre: Vec2, yaw: number): boolean => {
+    if (!isWater) return true;
+    const c = Math.cos(yaw); const sn = Math.sin(yaw);
+    for (let lx = -L / 2; lx <= L / 2 + 0.1; lx += 20) for (let lz = -W / 2; lz <= W / 2 + 0.1; lz += 20) {
+      // three 的 rotation.y = θ：本地 (lx, lz) → 世界 (lx·cosθ + lz·sinθ, −lx·sinθ + lz·cosθ)
+      if (!isWater(centre.x + lx * c + lz * sn, centre.z - lx * sn + lz * c)) return false;
+    }
+    return true;
+  };
+  for (const cand of ranked) {
+    const len = Math.hypot(cand.p.x - core.x, cand.p.z - core.z) || 1;
+    const outward = { x: (cand.p.x - core.x) / len, z: (cand.p.z - core.z) / len };
+    let shore = cand.p;
+    if (roads.length) { // 起点吸附到最近路点（≤40），堤道从路上起步
+      let nearest = roads[0]; let nd = Infinity;
+      for (const r of roads) { const d = Math.hypot(r.x - cand.p.x, r.z - cand.p.z); if (d < nd) { nd = d; nearest = r; } }
+      if (nd <= 40) shore = { x: nearest.x, z: nearest.z };
+    }
+    for (const dist of [140, 170, 200, 240]) {
+      const centre = { x: cand.p.x + outward.x * dist, z: cand.p.z + outward.z * dist };
+      const yaw = Math.atan2(outward.x, outward.z);
+      if (footprintWet(centre, yaw)) return { shore, centre, outward, yaw };
+    }
   }
-  const len = Math.hypot(best.p.x - core.x, best.p.z - core.z) || 1;
-  const outward = { x: (best.p.x - core.x) / len, z: (best.p.z - core.z) / len };
-  const centre = { x: best.p.x + outward.x * 140, z: best.p.z + outward.z * 140 };
-  return { shore: best.p, centre, outward, yaw: Math.atan2(outward.x, outward.z) };
+  return null;
 }
 
 /** 生成机场岛 + 堤道网格组（单一 Group，名字以 city-landmark-airport 开头供拾取）。 */

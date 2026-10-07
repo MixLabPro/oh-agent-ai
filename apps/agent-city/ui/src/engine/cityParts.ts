@@ -514,7 +514,7 @@ export class CityParts {
         // L-4 机场岛 + L-5 堤道：避开港口与海滨景观段。
         const avoid = [...this.layout.publicSites.filter((x) => x.kind === "harbor"), ...(this.layout.landmarks ?? []).filter((x) => x.kind === "sail-opera"), ...(this.layout.seaside && !this.layout.seaside.degraded ? this.layout.seaside.samples.filter((x) => x.valid).map((x) => x.waterline) : [])];
         const core = this.layout.core ?? { x: 0, z: 0 };
-        const plan = planAirport(this.layout.coast, core, avoid, roadSamples(this.layout.roadEdges));
+        const plan = planAirport(this.layout.coast, core, avoid, roadSamples(this.layout.roadEdges), (x, z) => this.layout.terrain.height(x, z) < -0.6);
         if (plan) this.group.add(buildAirport(plan, this.disposables, this.nightLights?.heads ?? null));
       }
       this.buildCivics();
