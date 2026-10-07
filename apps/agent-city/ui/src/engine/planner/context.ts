@@ -1,6 +1,7 @@
 import type { Landmark } from "../cityPlan";
 import type { CityBlock, PublicSite, Vec2 } from "../cityLayout";
 import type { Network } from "./network";
+import type { Geography } from "./geography";
 
 /**
  * 规划尾部修复遍用到的成员（CITY_ARCHITECTURE §2 迁移步 5b；V2 步 2b-lite 起路网原语走 network 对象）。
@@ -19,12 +20,12 @@ export interface RepairContext {
   ringRuns: Vec2[][];
   coast: Vec2[];
   core: Vec2;
-  nearBridgeEnd: (x: number, z: number, radius: number) => boolean;
-  distanceToTrunks: (p: Vec2) => number;
-  /** 两点连线能否通过（不过水、不穿预留地、坡度可走）。 */
-  safeRoadLink: (a: Vec2, b: Vec2) => boolean;
-  /** 线段 ab 与 cd 是否真相交（不含共端点）。 */
-  crosses: (a: Vec2, b: Vec2, c: Vec2, d: Vec2) => boolean;
+  /** 主干折线（distanceToTrunks 经 footprint.polylineDistance 计算）。 */
+  trunkRuns: Vec2[][];
+  /** 过河桥（nearBridgeEnd 经 footprint 纯函数计算）。 */
+  bridges: Array<{ from: Vec2; to: Vec2 }>;
+  /** 地理阶段产物（safeRoadLink 的 buildable/slope 来源）。 */
+  geo: Geography;
   SHORE_SITE_KINDS: Set<string>;
   /** 车流折线（海滨大道回路、街区回路）：去冗余的修复不得拆掉它们走的路段，否则整条回路被丢弃。 */
   carPaths: Vec2[][];

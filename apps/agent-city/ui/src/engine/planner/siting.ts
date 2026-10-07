@@ -1,7 +1,7 @@
 import { DetMath as Math } from "../detMath";
 import { clearsHighways } from "../cityPlan";
 import type { Vec2 } from "../cityLayout";
-import { polylineDistance, wetCount } from "./footprint";
+import { nearBridgeEnd, polylineDistance, wetCount } from "./footprint";
 import type { RepairContext } from "./context";
 
 // 选址后置（CITY_ARCHITECTURE §6 步）：候选表 + 路网后落位。
@@ -34,7 +34,7 @@ export function resiteViolatingSites(ctx: RepairContext): number {
     if (ctx.height(x, z) <= 0.5 || wetCount(geo, { x, z }, s.radius, { river: true }) > limit(s)) return false;
     if (all.some((o) => o !== s && Math.hypot(o.x - x, o.z - z) < o.radius + s.radius)) return false;
     if (!clearsHighways({ x, z }, s.radius * 2, s.radius * 2, ctx.ringRuns)) return false;
-    if (ctx.distanceToTrunks({ x, z }) < s.radius * 0.7 || ctx.nearBridgeEnd(x, z, s.radius)) return false;
+    if (polylineDistance(ctx.trunkRuns, { x, z }) < s.radius * 0.7 || nearBridgeEnd(ctx.bridges, x, z, s.radius)) return false;
     const road = nearestRoad(x, z);
     return road >= s.radius * 0.85 && road <= s.radius + 20;
   };

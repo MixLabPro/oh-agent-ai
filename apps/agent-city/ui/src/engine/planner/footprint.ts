@@ -87,3 +87,28 @@ export function polylineClosest(runs: Vec2[][], p: Vec2): { d: number; q: Vec2 }
   }
   return best;
 }
+
+// ── 2c：从 buildPlan 迁出的三个纯几何谓词 + 安全线检查（原 RepairContext 闭包成员，D5 收尾）──
+
+/** 桥头避让：用地不能贴着过河桥两端（桥头必须留出接路空间）。 */
+export function nearBridgeEnd(bridges: Array<{ from: Vec2; to: Vec2 }>, x: number, z: number, radius: number): boolean {
+  return bridges.some((b) => Math.hypot(b.from.x - x, b.from.z - z) < radius + 14 || Math.hypot(b.to.x - x, b.to.z - z) < radius + 14);
+}
+
+/** 线段 ab 与 cd 是否真相交（不含共端点）。 */
+export function crosses(a: Vec2, b: Vec2, c: Vec2, d: Vec2): boolean {
+  const o = (p: Vec2, q: Vec2, r: Vec2) => (q.x - p.x) * (r.z - p.z) - (q.z - p.z) * (r.x - p.x);
+  return o(a, b, c) * o(a, b, d) < 0 && o(c, d, a) * o(c, d, b) < 0;
+}
+
+/** 两点连线能否通过（可建、坡度可走、不穿预留地）。reservations = publicSites + landmarks。 */
+export function safeRoadLink(geo: { buildable: (x: number, z: number) => boolean; terrain: { slope: (x: number, z: number) => number } }, reservations: Array<{ x: number; z: number; radius: number }>, a: Vec2, b: Vec2): boolean {
+  const distance = Math.hypot(b.x - a.x, b.z - a.z);
+  const steps = Math.max(1, Math.ceil(distance / 4));
+  for (let i = 0; i <= steps; i += 1) {
+    const p = { x: a.x + (b.x - a.x) * i / steps, z: a.z + (b.z - a.z) * i / steps };
+    if (!geo.buildable(p.x, p.z) || geo.terrain.slope(p.x, p.z) > 0.9) return false;
+    if (reservations.some((site) => Math.hypot(p.x - site.x, p.z - site.z) < site.radius + 5)) return false;
+  }
+  return true;
+}

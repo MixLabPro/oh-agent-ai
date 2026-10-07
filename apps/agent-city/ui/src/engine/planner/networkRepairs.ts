@@ -2,6 +2,7 @@ import { DetMath as Math } from "../detMath";
 import { segmentDistance } from "../cityPlan";
 import type { RoadEdge } from "../cityLayout";
 import { addNetworkEdge, keyOf } from "./network";
+import { crosses, safeRoadLink } from "./footprint";
 import type { RepairContext } from "./context";
 
 // 路网修复手段（CITY_ROAD_NETWORK_SPEC §6：no-parallel / no-acute / no-loose-end）。与 repairs.ts 不同，这些会**改变**规划结果
@@ -173,9 +174,9 @@ export function joinNearMissEnds(ctx: RepairContext): number {
     }
     if (!best) continue;
     const target = keyOf(best.p);
-    if (!ctx.safeRoadLink(node, target)) continue;
+    if (!safeRoadLink(ctx.geo, [...ctx.publicSites, ...ctx.landmarks], node, target)) continue;
     let crossing = false;
-    for (const e of ctx.network.edges.values()) if (e !== best.edge && ctx.crosses(node, target, e.points[0], e.points[1])) { crossing = true; break; }
+    for (const e of ctx.network.edges.values()) if (e !== best.edge && crosses(node, target, e.points[0], e.points[1])) { crossing = true; break; }
     if (crossing) continue;
     const [a, b] = best.edge.points;
     const onEnd = (target.x === a.x && target.z === a.z) || (target.x === b.x && target.z === b.z);
