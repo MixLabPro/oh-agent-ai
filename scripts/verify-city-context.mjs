@@ -68,9 +68,8 @@ for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
 const report = Object.entries(bad).map(([k, v]) => `${k} ${v.length}`).join(", ");
 // 上限：沿用规划守卫口径——0 容忍穿路/压地块/凯旋门不骑路；陆地与入口给少量余量（岸边地形噪声）。
 assert.equal(bad.arch.length, 0, `arch must straddle a main road:\n  ${bad.arch.join("\n  ")}`);
-// F1 闭环（cityPlan 终筛前的「路穿用地」修复循环）之后只容忍 1 例已知情形：seed 1703310796 1 档的庄园落在桥头旁 21，
-// 桥头要接路回路网、那条路只能从庄园里穿过，而庄园一侧临河推不开。根治需要把岸边地标放到道路之后再选址（待做）。
-assert(bad.through.length <= 1 && bad.through.every((x) => x.startsWith("1703310796/t1 villa-complex")), `roads through sites:\n  ${bad.through.join("\n  ")}`);
+// F1 闭环（cityPlan 终筛前的「路穿用地」修复循环，含沿海岸换位兜底）之后不再有容忍项：必须为 0。
+assert(bad.through.length === 0, `roads through sites:\n  ${bad.through.join("\n  ")}`);
 assert(bad.frontage.length <= 2, `stations/stadiums set back from the road:\n  ${bad.frontage.join("\n  ")}`);
 assert.equal(bad.parcel.length, 0, `lots inside sites:\n  ${bad.parcel.slice(0, 8).join("\n  ")}`);
 assert(bad.overlap.length <= 2, `overlapping sites:\n  ${bad.overlap.join("\n  ")}`);

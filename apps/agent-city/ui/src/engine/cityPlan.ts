@@ -1486,6 +1486,26 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
           }
           if (done) break;
         }
+        // 兜底：附近推不开（岸边用地夹在海与路之间、桥头贴着它）——沿海岸换一个位置：从近到远逐个试海岸点，
+        // 取「向核心内移 0.7 半径」处，满足同样的条件，再加上不贴桥头，且离路在 [0.85 半径, 半径+20]（门前有路）。
+        if (!done && (SHORE_SITE_KINDS.has(site.kind)) && !(site as { shore?: Vec2 }).shore) {
+          const ranked2 = [...coast].sort((u, v) => Math.hypot(u.x - site.x, u.z - site.z) - Math.hypot(v.x - site.x, v.z - site.z));
+          // 向内移 0.7 / 1.0 / 1.5 / 2.0 个半径各试一次：沿海大道离水线 ~22，贴岸 0.7 半径的位置正好压在它上面，
+          // 退到大道内侧（岸边用地与海之间隔一条路）也算临水。
+          const slots = ranked2.slice(0, 400).flatMap((q) => [0.7, 1.0, 1.5, 2.0].map((f) => ({ q, f })));
+          for (let idx = 0; idx < slots.length && !done; idx += 1) {
+            const { q, f } = slots[idx]; const lx = core.x - q.x; const lz = core.z - q.z; const ll = Math.hypot(lx, lz) || 1;
+            const nx = q.x + (lx / ll) * site.radius * f; const nz = q.z + (lz / ll) * site.radius * f;
+            const probe = nearestRoad(nx, nz);
+            if (!probe || probe.d < site.radius * 0.85 || probe.d > site.radius + 20) continue;
+            if (wetAt(site, nx, nz) > 3 || height(nx, nz) <= 0.5 || nearBridgeEnd(nx, nz, site.radius)) continue;
+            if (others.some((o) => Math.hypot(o.x - nx, o.z - nz) < o.radius + site.radius)) continue;
+            if (!clearsHighways({ x: nx, z: nz }, site.radius * 2, site.radius * 2, ringRuns)) continue;
+            if (distanceToTrunks({ x: nx, z: nz }) < site.radius * 0.7) continue;
+            site.x = nx; site.z = nz; done = true; moved += 1;
+            for (const block of blocks) block.parcels = block.parcels.filter((pc) => Math.hypot(pc.x - nx, pc.z - nz) >= site.radius);
+          }
+        }
       }
       if (!moved) break;
     }
