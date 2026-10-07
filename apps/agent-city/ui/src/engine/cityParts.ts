@@ -34,6 +34,8 @@ import { applyFlora, buildTrees, type NatureHost } from "./systems/natureSystem"
 import { applyCarDensity, buildBoats, buildCars, buildClouds, placeCar, type AmbientHost } from "./systems/ambientSystem";
 import { buildInfrastructure, buildDistrictExpressways, buildTrussBridges, type RoadHost } from "./systems/roadSystem";
 import { urbanPromenadeSegments, buildPromenade, buildBeachFurniture, buildBeachRibbon, buildMarina, buildLifeguardTowers, type SeasideHost } from "./systems/seasideSystem";
+import { applySelfLit, applyNightOverlay, buildNightLights, setNightGlow, setNightHour, setNightWater, setSkyMix, type NightHost } from "./render/nightLighting";
+import { anchorFor, anchors, buildLabels, decorAt, decorTargets, hideOverlaysForPhoto, idAt, makeGroundRing, setHovered, setLabelsVisible, setSelected, type UiOverlayHost } from "./systems/uiOverlays";
 
 export const BOX = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
 /** Low-poly Art Deco tower silhouette: chamfered corners, podium, and stepped crown. */
@@ -679,16 +681,7 @@ export class CityParts {
     return mesh;
   }
 
-  private makeGroundRing(color: string): THREE.Mesh {
-    const geometry = new THREE.RingGeometry(0.86, 1, 40).rotateX(-Math.PI / 2);
-    const material = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, depthWrite: false });
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.visible = false;
-    mesh.renderOrder = 3;
-    this.group.add(mesh);
-    this.disposables.push(geometry, material);
-    return mesh;
-  }
+  private makeGroundRing(color: string): THREE.Mesh { return makeGroundRing(this as unknown as UiOverlayHost, color); }
 
   private buildTerrain(): void { buildTerrain(this as unknown as TerrainHost); }
 
@@ -703,34 +696,14 @@ export class CityParts {
   private buildGroundSpill(): void { buildGroundSpill(this as unknown as TerrainHost); }
 
   /** 本地小时 → 住宅/办公亮灯率（cityLightBudget.windowRate），驱动立面窗光与地面/水面光斑的强度。 */
-  setNightHour(hour: number): void {
-    this.nightHour = hour;
-    const res = windowRate(hour, "residential"); const off = windowRate(hour, "office");
-    for (const uniforms of this.facadeUniforms) { uniforms.uRateRes.value = res; uniforms.uRateOff.value = off; }
-    this.applyNightOverlay();
-  }
+  setNightHour(hour: number): void { setNightHour(this as unknown as NightHost, hour); }
 
-  private applyNightOverlay(): void {
-    const night = nightFactor(this.nightGlow);
-    const t = this.terrainUniforms;
-    if (t) {
-      t.uNightDim.value = night;
-      t.uSpillGain.value = night * LIGHT_BUDGET.overlay.gain * (0.4 + 0.6 * Math.max(windowRate(this.nightHour, "residential"), windowRate(this.nightHour, "office")));
-    }
-    const w = this.waterAssetUniforms as unknown as Record<string, { value: unknown }> | null;
-    if (w?.uSpillGain && t) w.uSpillGain.value = t.uSpillGain.value;
-  }
+  private applyNightOverlay(): void { applyNightOverlay(this as unknown as NightHost); }
 
-  setNightWater(night: number): void {
-    if (this.waterAssetUniforms) this.waterAssetUniforms.uNight.value = night;
-  }
+  setNightWater(night: number): void { setNightWater(this as unknown as NightHost, night); }
 
   /** 昼夜天空混合量（0 = 黄昏/夜，1 = 白天）：水面与玻璃反射的粉紫调色量随白天程度衰减。 */
-  setSkyMix(dayMix: number): void {
-    const amount = activeTheme().skyGrade.amount * (1 - dayMix);
-    if (this.waterAssetUniforms) this.waterAssetUniforms.uGradeAmount.value = amount;
-    for (const uniforms of this.facadeUniforms) uniforms.uGradeAmount.value = amount;
-  }
+  setSkyMix(dayMix: number): void { setSkyMix(this as unknown as NightHost, dayMix); }
 
   /** 素材到齐后原地换上：地面细节、照片立面、灰泥法线、水面法线与天空反射。 */
   applyAssets(assets: CityAssets): void {
@@ -812,128 +785,7 @@ export class CityParts {
 
   /** 夜间照明（静态，随 seed 缓存）：沿主干道两侧交错的路灯（杆 + 自发光灯头 + 地面光斑）、高架灯带。
    *  曾只有每条主干道路段中点一盏不发光的灯，夜里道路是一片黑——现在街道有"灯线"，这是夜景像城市的关键。 */
-  private buildNightLights(): NightLights {
-    const heads = new THREE.MeshBasicMaterial({ color: "#ffc773", toneMapped: false });
-    // 光斑用径向渐变贴图（中心亮、边缘衰减到 0）：纯色圆片在夜里像一个个米色沙盘圆点，不像灯光。
-    const glow = createRenderCanvas();
-    glow.width = glow.height = 64;
-    const gctx = glow.getContext("2d");
-    if (gctx) {
-      const gradient = gctx.createRadialGradient(32, 32, 0, 32, 32, 32);
-      gradient.addColorStop(0, "rgba(255,255,255,1)");
-      gradient.addColorStop(0.35, "rgba(255,255,255,0.45)");
-      gradient.addColorStop(1, "rgba(255,255,255,0)");
-      gctx.fillStyle = gradient;
-      gctx.fillRect(0, 0, 64, 64);
-    }
-    const glowTexture = new THREE.CanvasTexture(glow);
-    const pools = new THREE.MeshBasicMaterial({ color: "#ff9e4d", map: glowTexture, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
-    this.disposables.push(glowTexture);
-    pools.visible = false;
-    const strips = new THREE.MeshBasicMaterial({ color: "#ffb366", toneMapped: false });
-    const neon = new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false });
-    const poles = this.makeInstanced(new THREE.CylinderGeometry(0.1, 0.14, 1, 5).translate(0, 0.5, 0), new THREE.MeshLambertMaterial({ color: "#59636a" }), 4600);
-    const headMesh = this.makeInstanced(new THREE.BoxGeometry(0.5, 0.22, 0.9), heads, 4600);
-    const poolMesh = this.makeInstanced(new THREE.CircleGeometry(1, 14).rotateX(-Math.PI / 2), pools, 4600);
-    poolMesh.renderOrder = 2;
-    const stripMesh = this.makeInstanced(BOX, strips, 2200);
-    const spacing = 30;
-    let lamps = 0;
-    const lamp = (x: number, z: number, nx: number, nz: number, base: number, yaw: number, poolReach = 3.2, poolRadius = 9.5, tier = 1) => {
-      if (lamps >= 4600) return;
-      poolRadius *= 0.6 + 0.4 * tier; // N3：路灯按道路等级分档——主干最亮最大，支路/步道小而暗
-      headMesh.setColorAt(lamps, this.color.setScalar(0.5 + 0.5 * tier));
-      poolMesh.setColorAt(lamps, this.color.setScalar(0.4 + 0.6 * tier));
-      this.compose(x, base, z, 0, 1, 4.6, 1);
-      poles.setMatrixAt(lamps, this.matrix);
-      // 灯头悬在路中心一侧（臂长 0.7），朝路面。
-      this.compose(x - nx * 0.45, base + 4.55, z - nz * 0.45, yaw, 1, 1, 1); // 灯头长 0.9：一端贴住灯杆，不再悬空
-      headMesh.setMatrixAt(lamps, this.matrix);
-      this.compose(x - nx * poolReach, base + 0.12, z - nz * poolReach, 0, poolRadius, 1, poolRadius);
-      poolMesh.setMatrixAt(lamps, this.matrix);
-      lamps += 1;
-    };
-    // 沿合并后的整条路（roadPaintPlan 的 run）按弧长每 30 放一盏，间距跨路段累计。曾逐条路段放、
-    // 且跳过 <18 的段：滨海大道细分成 ~15 的短段，整条一盏灯都没有（真机夜景：海滨道路漆黑）。
-    for (const run of roadPaintPlan(this.layout.roadEdges).runs) {
-      if (run.kind !== "arterial") continue;
-      const tier = lampTier(run.width);
-      let walked = 0; let next = spacing / 2; let index = 0;
-      for (let i = 1; i < run.points.length; i += 1) {
-        const a = run.points[i - 1]; const b = run.points[i];
-        const length = Math.hypot(b.x - a.x, b.z - a.z);
-        if (length < 1e-3) continue;
-        const dx = (b.x - a.x) / length; const dz = (b.z - a.z) / length;
-        const nx = -dz; const nz = dx;
-        const yaw = -Math.atan2(dz, dx);
-        while (next <= walked + length) {
-          const t = next - walked;
-          const side = index % 2 === 0 ? 1 : -1; // 两侧交错
-          const x = a.x + dx * t + nx * side * (run.width / 2 + 0.9);
-          const z = a.z + dz * t + nz * side * (run.width / 2 + 0.9);
-          lamp(x, z, nx * side, nz * side, Math.max(0, this.layout.terrain.height(x, z)), yaw, 3.2, 9.5, tier);
-          next += spacing * (tier >= 1 ? 1 : tier >= 0.6 ? 1.2 : 1.5); index += 1;
-        }
-        walked += length;
-      }
-    }
-    // 公园：沿园路一圈路灯（外圈 8 盏），灯头朝内。
-    for (const site of this.layout.publicSites) {
-      if (site.kind !== "park") continue;
-      const ring = Math.max(10, site.radius * 0.7);
-      for (let i = 0; i < 8; i += 1) {
-        const t = (i / 8) * Math.PI * 2;
-        const ox = Math.cos(t); const oz = Math.sin(t);
-        const x = site.x + ox * ring; const z = site.z + oz * ring;
-        lamp(x, z, ox, oz, Math.max(0, this.layout.terrain.height(x, z)), -Math.atan2(ox, -oz) + Math.PI / 2);
-      }
-    }
-    // 高架：桥面两侧交错路灯，灯头朝路中心。立在行车面（板顶）上；光斑圆心落到桥面中线、
-    // 半径不超过半幅桥宽——地面路灯的 9.5 光斑在 10.5 宽桥面上大半悬空，看起来是灯光穿透到桥下。
-    for (const run of this.layout.highways ?? []) {
-      const heights = expresswayDeckHeights(run, (x, z) => this.layout.terrain.height(x, z));
-      let carry = 0;
-      for (let i = 1; i < run.length; i += 1) {
-        const a = run[i - 1]; const b = run[i];
-        const length = Math.hypot(b.x - a.x, b.z - a.z);
-        if (length < 1) continue;
-        const dx = (b.x - a.x) / length; const dz = (b.z - a.z) / length;
-        const yaw = -Math.atan2(dz, dx);
-        for (let t = 14 - carry; t < length; t += 34) {
-          const side = Math.floor((t + length * 0.37 + a.x) / 34) % 2 === 0 ? 1 : -1;
-          const deckTop = heights[i - 1] + (heights[i] - heights[i - 1]) * (t / length) + EXPRESSWAY_DECK_THICKNESS;
-          lamp(a.x + dx * t - dz * side * 5.1, a.z + dz * t + dx * side * 5.1, -dz * side, dx * side, deckTop, yaw, 5.1, EXPRESSWAY_DECK_WIDTH / 2 - 0.3);
-        }
-        carry = (length - (14 - carry)) % 34;
-      }
-    }
-    poles.count = lamps; headMesh.count = lamps; poolMesh.count = lamps;
-    for (const mesh of [poles, headMesh, poolMesh]) { mesh.instanceMatrix.needsUpdate = true; mesh.frustumCulled = false; }
-    for (const mesh of [headMesh, poolMesh]) if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    // 高架灯带：沿环线两侧护栏上沿的发光细条（桥面高 8.2，护栏在 ±5.1）。
-    let strip = 0;
-    for (const run of this.layout.highways ?? []) {
-      const heights = expresswayDeckHeights(run, (x, z) => this.layout.terrain.height(x, z));
-      for (let i = 1; i < run.length && strip < 2190; i += 1) {
-        const a = run[i - 1]; const b = run[i];
-        const length = Math.hypot(b.x - a.x, b.z - a.z);
-        if (length < 6) continue;
-        if (Math.abs(heights[i] - heights[i - 1]) > 0.15) continue; // 匝道坡段不挂水平灯带（会悬空/插进桥面）
-        const yaw = -Math.atan2(b.z - a.z, b.x - a.x);
-        const sx = Math.sin(yaw); const sz = Math.cos(yaw);
-        for (const offset of [-5.1, 5.1]) {
-          this.compose((a.x + b.x) / 2 + sx * offset, (heights[i] + heights[i - 1]) / 2 + EXPRESSWAY_DECK_THICKNESS + 0.35, (a.z + b.z) / 2 + sz * offset, yaw, length, 0.14, 0.14);
-          stripMesh.setMatrixAt(strip, this.matrix);
-          strip += 1;
-        }
-      }
-    }
-    stripMesh.count = strip;
-    stripMesh.instanceMatrix.needsUpdate = true;
-    stripMesh.frustumCulled = false;
-    this.disposables.push(heads, pools, strips, neon);
-    return { heads, pools, strips, neon };
-  }
+  private buildNightLights(): NightLights { return buildNightLights(this as unknown as NightHost); }
 
   /** 致敬型地标（程序化几何，不复刻具体建筑）。城市身份地标有 70 单位最低天际线预算，
    *  不随会话数缩小；会话楼仍保留真实 token 高度，数据建筑与装饰地标语义分离。 */
@@ -1258,30 +1110,7 @@ export class CityParts {
     }
   }
 
-  private buildLabels(): void {
-    for (const district of this.layout.districts) {
-      const palette = paletteFor(district.id);
-      const detail = `${district.sessionCount} sessions`;
-      const { texture, aspect } = makeLabelSprite(district.label, detail, palette.accent);
-      texture.colorSpace = THREE.SRGBColorSpace;
-      const material = new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true, sizeAttenuation: false });
-      const sprite = new THREE.Sprite(material);
-      // 标签略放大，且彼此靠近（<150）时逐个抬高，避免重叠（多视角评估：标签小且叠在一起）。
-      const height = 0.024;
-      sprite.scale.set(height * aspect, height, 1);
-      sprite.renderOrder = 20;
-      // 标签立在本区地标正上方（用户：把城区标签放到地标建筑上方）；没有地标时退回城区中心上空。
-      const landmark = (this.layout.districtLandmarks ?? []).find((l) => l.districtId === district.id);
-      if (landmark) sprite.position.set(landmark.x, Math.max(0.3, landmark.y) + this.districtLandmarkHeight(district.id) + 22, landmark.z);
-      else {
-        const crowd = this.labels.filter((other) => Math.hypot(other.position.x - district.center.x, other.position.z - district.center.z) < 150).length;
-        sprite.position.set(district.center.x, district.plaza.y + 45 + crowd * 34, district.center.z);
-      }
-      this.group.add(sprite);
-      this.labels.push(sprite);
-      this.disposables.push(material, texture);
-    }
-  }
+  private buildLabels(): void { buildLabels(this as unknown as UiOverlayHost); }
 
   private buildWater(): THREE.Mesh { return buildWater(this as unknown as TerrainHost); }
 
@@ -1861,78 +1690,23 @@ export class CityParts {
   }
 
   /** 拍照用：暂时藏起标签与悬停/选中环（不改 labelsVisible 偏好），返回恢复函数。 */
-  hideOverlaysForPhoto(): () => void {
-    const labels = this.labels.map((label) => label.visible);
-    const rings = [this.hoverRing.visible, this.selectRing.visible];
-    const scaffold = this.scaffoldMesh.visible;
-    // 「计划高度」脚手架壳在照片里读作悬空的半透明方块（航拍/导出也藏它）。
-    this.scaffoldMesh.visible = false;
-    for (const label of this.labels) label.visible = false;
-    this.hoverRing.visible = false;
-    this.selectRing.visible = false;
-    return () => {
-      this.labels.forEach((label, index) => { label.visible = labels[index]; });
-      this.hoverRing.visible = rings[0];
-      this.selectRing.visible = rings[1];
-      this.scaffoldMesh.visible = scaffold;
-    };
-  }
+  hideOverlaysForPhoto(): () => void { return hideOverlaysForPhoto(this as unknown as UiOverlayHost); }
 
-  setLabelsVisible(visible: boolean): void {
-    this.labelsVisible = visible;
-    for (const label of this.labels) label.visible = visible;
-  }
+  setLabelsVisible(visible: boolean): void { setLabelsVisible(this as unknown as UiOverlayHost, visible); }
 
   private decorTargetsCache: THREE.Object3D[] | null = null;
 
   /** 非会话建筑的拾取目标（酒店、地标、配套、市政设施、背景楼、聚合楼群、海滨装饰、火山）：
    *  首次使用时沿场景树按网格名收集一次；它们曾不在拾取范围内，点了毫无反应。 */
-  get decorTargets(): THREE.Object3D[] {
-    if (this.decorTargetsCache) return this.decorTargetsCache;
-    const out: THREE.Object3D[] = [];
-    this.group.traverse((object) => {
-      if (!(object as THREE.Mesh).isMesh || !object.visible) return;
-      for (let node: THREE.Object3D | null = object; node; node = node.parent) {
-        if (decorKindForName(node.name)) { out.push(object); return; }
-      }
-    });
-    this.decorTargetsCache = out;
-    return out;
-  }
+  get decorTargets(): THREE.Object3D[] { return decorTargets(this as unknown as UiOverlayHost); }
 
   /** 命中的非会话网格 → `decor:<kind>[:<detail>]`；配套按实例反查学校/商场/医院。 */
-  decorAt(mesh: THREE.Object3D, instanceId: number | undefined, point?: THREE.Vector3): string | null {
-    for (let node: THREE.Object3D | null = mesh; node; node = node.parent) {
-      const kind = decorKindForName(node.name);
-      if (!kind) continue;
-      if (kind === "civic" && instanceId !== undefined) {
-        const meshIndex = this.civicMeshes.indexOf(mesh as THREE.InstancedMesh);
-        const piece = this.civicPieces.find((item) => item.mesh === meshIndex && item.index === instanceId);
-        const civic = piece ? (this.layout.civics ?? [])[piece.civic] : undefined;
-        return civic ? `decor:civic:${civic.kind}` : "decor:civic";
-      }
-      // 公共用地是一批合并网格：按命中点找最近的用地，市政厅（civic）面板展示全城信息。
-      if (kind === "site" && point) {
-        const site = [...this.layout.publicSites].sort((a, b) => Math.hypot(a.x - point.x, a.z - point.z) - Math.hypot(b.x - point.x, b.z - point.z))[0];
-        if (site && Math.hypot(site.x - point.x, site.z - point.z) < site.radius * 1.4) return `decor:site:${site.kind}`;
-      }
-      return `decor:${kind}`;
-    }
-    return null;
-  }
+  decorAt(mesh: THREE.Object3D, instanceId: number | undefined, point?: THREE.Vector3): string | null { return decorAt(this as unknown as UiOverlayHost, mesh, instanceId, point); }
 
-  idAt(mesh: THREE.Object3D, instanceId: number): string | null {
-    const index = this.shaftMeshes.indexOf(mesh as THREE.InstancedMesh);
-    if (index < 0) return null;
-    return this.shaftIdByInstance[index].get(instanceId) ?? null;
-  }
+  idAt(mesh: THREE.Object3D, instanceId: number): string | null { return idAt(this as unknown as UiOverlayHost, mesh, instanceId); }
 
   /** 所有楼的锚点（航拍挑主角用）：只读快照，不暴露 runtime。 */
-  anchors(): Map<string, { x: number; z: number; height: number; ground: number }> {
-    const out = new Map<string, { x: number; z: number; height: number; ground: number }>();
-    for (const [id, runtime] of this.runtimeById) out.set(id, { x: runtime.slot.x, z: runtime.slot.z, height: runtime.building.height, ground: runtime.groundY });
-    return out;
-  }
+  anchors(): Map<string, { x: number; z: number; height: number; ground: number }> { return anchors(this as unknown as UiOverlayHost); }
 
   /** 云层材质（昼夜循环驱动透明度）。 */
   get cloudMaterial(): (THREE.Material & { opacity: number }) | null {
@@ -1953,103 +1727,16 @@ export class CityParts {
   private yachtMesh: THREE.InstancedMesh | null = null;
   private yachtIndices: number[] = [];
 
-  setNightGlow(selfLit: number): void {
-    this.nightGlow = selfLit;
-    // 电灯用自己的「夜」量：DAY 档 selfLit = 0.05（立面的白天余光），直接拿来点灯会让正午的光斑/霓虹
-    // 越过 0.03/0.04 的开灯阈值、灯头也带着亮度（审计实测正午灯全开）。≤0.1 一律算白天 = 0。
-    const night = nightFactor(selfLit);
-    this.applyNightOverlay();
-    const beamMaterial = this.heroParts?.beam?.material as THREE.MeshBasicMaterial | undefined;
-    if (beamMaterial) {
-      beamMaterial.visible = night > 0.05;
-      beamMaterial.opacity = 0.22 * Math.min(1, night * 1.5);
-    }
-    const lights = this.nightLights;
-    if (lights) {
-      // 电灯白天完全熄灭（0），随 night 线性亮起：此前留的 0.12/0.1「白天底线」
-      // 在 4600 盏灯的规模下肉眼可见，读作「灯没关」；灯杆由 Lambert 灰呈现，
-      // 灯头不需要白天亮度。
-      lights.heads.color.setRGB(1, 0.78, 0.45).multiplyScalar(night * LIGHT_BUDGET.street.head);
-      lights.pools.color.setRGB(1, 0.62, 0.3).multiplyScalar(night * LIGHT_BUDGET.street.pool);
-      lights.pools.visible = night > 0.03;
-      lights.strips.color.setRGB(1, 0.7, 0.4).multiplyScalar(night * LIGHT_BUDGET.street.strip);
-      // 霓虹/边缘光：实例色决定色相（青/洋红/暖白），这里只管亮度；白天熄灭。
-      lights.neon.color.setRGB(1, 1, 1).multiplyScalar(night * LIGHT_BUDGET.neon.bridge);
-      // 白天整体关掉：近黑的实例色在日光下读作一块块深色方块（桥塔上的霓虹点实测）。
-      lights.neon.visible = night > 0.04;
-    }
-    // 地标玻璃幕墙：夜里换亮窗贴图并加亮，白天回到立面贴图 + 少量托底自发光。
-    for (const entry of this.landmarkWindows) {
-      const lit = night > 0.05;
-      if (lit) { entry.material.emissiveMap = entry.lit; entry.material.emissive.setRGB(1, 1, 1).multiplyScalar(LIGHT_BUDGET.landmark.base + night * LIGHT_BUDGET.landmark.gain); }
-      else { entry.material.emissiveMap = entry.day; entry.material.emissive.copy(entry.dayEmissive); }
-    }
-    // 救生塔夜间指示灯（VICE S1）：独立 MeshBasic，不依赖路灯照亮。
-    if (this.lifeguardGlowMaterial) {
-      const parent = this.lifeguardGlowMaterial.opacity !== undefined;
-      this.lifeguardGlowMaterial.transparent = true;
-      this.lifeguardGlowMaterial.opacity = night;
-      // 通过材质找到 mesh 并切可见性。
-      this.group.traverse((child) => {
-        if (child instanceof THREE.InstancedMesh && child.material === this.lifeguardGlowMaterial) {
-          child.visible = night > 0.05;
-        }
-      });
-    }
-    // 酒店招牌霓虹（VICE S2）：白天完全熄灭，夜间亮起。
-    if (this.signageNeonMaterial) {
-      this.group.traverse((child) => {
-        if (child instanceof THREE.InstancedMesh && child.material === this.signageNeonMaterial) {
-          child.visible = night > 0.05;
-        }
-      });
-    }
-  }
+  setNightGlow(selfLit: number): void { setNightGlow(this as unknown as NightHost, selfLit); }
 
   /** theme 基线 + 夜晚抬升的合成值（theme 切换后由昼夜 tick 重新应用）。 */
-  applySelfLit(themeBase: number): void {
-    for (const uniforms of this.facadeUniforms) {
-      // 夜里不再抬升墙面自发光（只点亮窗格，见 uWindowGlow）；墙面保持主题基线。
-      // N1：墙面按自身颜色发光是「塑料」感的来源——夜里把基线随夜色压到 ~10%，只有窗格是光源。
-      const night = Math.max(0, (this.nightGlow - 0.1) / 0.9);
-      uniforms.uSelfLit.value = themeBase * (1 - 0.9 * Math.min(1, night));
-      uniforms.uWindowGlow.value = this.nightGlow;
-    }
-  }
+  applySelfLit(themeBase: number): void { applySelfLit(this as unknown as NightHost, themeBase); }
 
-  anchorFor(id: string): { x: number; z: number; height: number; ground: number } | null {
-    const runtime = this.runtimeById.get(id);
-    if (!runtime) return null;
-    return { x: runtime.slot.x, z: runtime.slot.z, height: runtime.building.height, ground: runtime.groundY };
-  }
+  anchorFor(id: string): { x: number; z: number; height: number; ground: number } | null { return anchorFor(this as unknown as UiOverlayHost, id); }
 
-  setHovered(id: string | null): void {
-    this.hoveredId = id;
-    const anchor = id ? this.anchorFor(id) : null;
-    if (!anchor) {
-      this.hoverRing.visible = false;
-      return;
-    }
-    const runtime = id ? this.runtimeById.get(id) : null;
-    const ringRadius = runtime ? runtime.building.footprint * 1.5 : 3;
-    this.hoverRing.scale.set(ringRadius, 1, ringRadius);
-    this.hoverRing.position.set(anchor.x, anchor.ground + 0.18, anchor.z);
-    this.hoverRing.visible = true;
-  }
+  setHovered(id: string | null): void { setHovered(this as unknown as UiOverlayHost, id); }
 
-  setSelected(id: string | null): void {
-    this.selectedId = id;
-    const anchor = id ? this.anchorFor(id) : null;
-    if (!anchor) {
-      this.selectRing.visible = false;
-      return;
-    }
-    const runtime = id ? this.runtimeById.get(id) : null;
-    const ringRadius = runtime ? runtime.building.footprint * 1.7 : 3.4;
-    this.selectRing.scale.set(ringRadius, 1, ringRadius);
-    this.selectRing.position.set(anchor.x, anchor.ground + 0.2, anchor.z);
-    this.selectRing.visible = true;
-  }
+  setSelected(id: string | null): void { setSelected(this as unknown as UiOverlayHost, id); }
 
   /** 每帧增量更新。返回是否有矩阵写入（供引擎决定是否强制重绘）。 */
   update(dt: number, elapsed: number): boolean {
