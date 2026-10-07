@@ -18,6 +18,7 @@ import { solvePlan } from "./planner/solve";
 import { isDeepWater, isDry, polylineDistance, wetCount } from "./planner/footprint";
 import { buildGeography } from "./planner/geography";
 import { chooseCore } from "./planner/skeleton";
+import { addNetworkEdge, emptyNetwork, keyOf, type Network } from "./planner/network";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
 
 export function segmentDistance(p: Vec2, a: Vec2, b: Vec2): number {
@@ -278,17 +279,13 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // ── L2 骨架（CITY_PLANNING_SPEC §4.3）──
   // 主干道从核心放射、沿陆地延伸到海边，过河处自动成桥；环线高架绕核心一圈（沿陆地断续）；
   // 主干道之间每个扇区各铺一张朝向沿扇区放射方向的街网——不再是全岛一张方格（曾经整张方格盖在岛上）。
-  const nodes = new Map<string, RoadNode>(); const edges = new Map<string, RoadEdge>();
+  // 路网原语（V2 步 2b-lite）：nodes/edges/key/addEdge 由 planner/network.ts 唯一实现，此处只留薄包装。
+  const network = emptyNetwork();
+  const { nodes, edges } = network;
   const coastalRoadEdgeIds = new Set<string>();
   const coastalRoadNodeIds = new Set<string>();
-  const key = (p: Vec2) => ({ x: Math.round(p.x * 100) / 100, z: Math.round(p.z * 100) / 100 });
-  const addEdge = (a0: Vec2, b0: Vec2, arterial: boolean, bridge = false, primary = false) => {
-    const a = key(a0); const b = key(b0);
-    const from = roadNodeId(a); const to = roadNodeId(b); if (from === to) return;
-    const id = [from, to].sort().join("/");
-    nodes.set(from, { ...a, id: from }); nodes.set(to, { ...b, id: to });
-    if (!edges.has(id)) edges.set(id, { id, from, to, width: primary ? 12 : arterial ? 8 : 5, kind: arterial ? "arterial" : "local", points: [a, b], bridge });
-  };
+  const key = keyOf;
+  const addEdge = (a0: Vec2, b0: Vec2, arterial: boolean, bridge = false, primary = false) => addNetworkEdge(network, a0, b0, arterial, bridge, primary);
   const inRiver = (x: number, z: number) => hasRiver && coastDistance(x, z) > 0 && Math.abs(x - riverX(z)) < riverWidth(z);
   // 占地谓词统一走 planner/footprint（V2 步 1）：此处只注入地理闭包；河岸带口径（不含 coastDistance）与
   // inRiver 不同，历史上就是两套判断，按原语义各自保留。
@@ -1300,7 +1297,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // ── F1 闭环（CITY_ROAD_F1_ALGORITHM_SPEC）：路网不是一次生成就完事——所有改路步骤（接入路、断头路收尾、
   // 碎边合并）之后，对违规的用地/断头修复。修复遍已搬到 planner/repairs.ts，由 planner/solve.ts 的策略表按原顺序执行
   // （临街 → 推开穿路用地 → 绕行被截断的路 → 延伸断头；顺序见 solve.ts 头注释）。
-  const repairCtx: RepairContext = { nodes, edges, addEdge, key, height, inRiver, publicSites, landmarks, blocks, ringRuns, coast, core, nearBridgeEnd, distanceToTrunks, safeRoadLink, crosses, SHORE_SITE_KINDS, carPaths };
+  const repairCtx: RepairContext = { network, height, inRiver, publicSites, landmarks, blocks, ringRuns, coast, core, nearBridgeEnd, distanceToTrunks, safeRoadLink, crosses, SHORE_SITE_KINDS, carPaths };
   if (!skipSolve) solvePlan(repairCtx);
   // 车流折线的收口放在求解之后：修复（删冗余路段、切 T 路口、近距接入）会增删路段，车流必须按最终路网校验——
   // 曾放在求解之前，删路后海滨车流折线引用了已不存在的路段（verify-react-city-seaside 抓到）。

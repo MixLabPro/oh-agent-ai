@@ -2,6 +2,7 @@ import { DetMath as Math } from "../detMath"; // 跨引擎确定性：与 cityPl
 import { clearsHighways, roadNodeId, segmentDistance } from "../cityPlan";
 import type { RoadEdge, Vec2 } from "../cityLayout";
 import { polylineClosest, wetCount } from "./footprint";
+import { addNetworkEdge, keyOf } from "./network";
 import type { RepairContext } from "./context";
 
 // 规划尾部的修复遍（CITY_ARCHITECTURE §2 迁移步 5b）：逐字从 cityPlan.ts 的 buildPlan 尾部搬来，闭包引用改为 ctx 解构，
@@ -9,7 +10,7 @@ import type { RepairContext } from "./context";
 
 /** 用地修复遍共用的几何：可挪动的用地、最近非桥路段（含垂足）、占地圈湿点数。路网在这些遍内不变，所以每个遍各算一份与原先共用一份等价。 */
 function siteGeometry(ctx: RepairContext) {
-  const { edges, publicSites, landmarks, height, inRiver } = ctx;
+  const { publicSites, landmarks, height, inRiver } = ctx; const { edges } = ctx.network;
   const movable = [...publicSites, ...landmarks].filter((s) => s.radius && s.kind !== "civic" && s.kind !== "arch" && !(s as { shore?: Vec2 }).shore);
   const solidRuns = [...edges.values()].filter((e) => !e.bridge).map((e) => e.points);
   const geo = { height, inRiver };
@@ -133,7 +134,7 @@ export function nudgeSitesOffRoads(ctx: RepairContext): number {
 
 /** 被用地截断的路：两个共线断头隔着同一块用地时，用绕用地外缘的折线接起来。返回新增折线数。 */
 export function detourAroundSites(ctx: RepairContext): number {
-  const { nodes, edges, addEdge, key, height, inRiver, publicSites, landmarks } = ctx;
+  const { height, inRiver, publicSites, landmarks } = ctx; const { nodes, edges } = ctx.network; const addEdge = (a: Vec2, b: Vec2, arterial: boolean, bridge = false, primary = false) => addNetworkEdge(ctx.network, a, b, arterial, bridge, primary); const key = keyOf;
   let joined = 0;
     const solid = () => [...edges.values()].filter((e) => !e.bridge);
     const degree = new Map<string, RoadEdge[]>();
@@ -180,7 +181,7 @@ export function detourAroundSites(ctx: RepairContext): number {
 
 /** 断头顺着自己的方向直接延伸到下一条路（两遍）。返回接上的断头数。 */
 export function extendLooseEnds(ctx: RepairContext): number {
-  const { nodes, edges, addEdge, key, height, publicSites, landmarks, safeRoadLink, crosses } = ctx;
+  const { height, publicSites, landmarks, safeRoadLink, crosses } = ctx; const { nodes, edges } = ctx.network; const addEdge = (a: Vec2, b: Vec2, arterial: boolean, bridge = false, primary = false) => addNetworkEdge(ctx.network, a, b, arterial, bridge, primary); const key = keyOf;
   let total = 0;
     for (let pass = 0; pass < 2; pass += 1) {
       const solidEdges = [...edges.values()].filter((e) => !e.bridge);

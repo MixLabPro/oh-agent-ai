@@ -18,7 +18,7 @@ type S = { x: number; z: number; radius: number; kind: string; shore?: Vec2 };
 
 export function resiteViolatingSites(ctx: RepairContext): number {
   const all = [...ctx.publicSites, ...ctx.landmarks].filter((s) => s.radius) as S[];
-  const solid = [...ctx.edges.values()].filter((e) => !e.bridge);
+  const solid = [...ctx.network.edges.values()].filter((e) => !e.bridge);
   const geo = { height: ctx.height, inRiver: ctx.inRiver };
   const nearestRoad = (x: number, z: number) => polylineDistance(solid.map((e) => e.points), { x, z });
   const limit = (s: S) => (ctx.SHORE_SITE_KINDS.has(s.kind) ? 3 : 0);

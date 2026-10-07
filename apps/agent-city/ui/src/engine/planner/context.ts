@@ -1,19 +1,15 @@
 import type { Landmark } from "../cityPlan";
-import type { CityBlock, PublicSite, RoadEdge, RoadNode, Vec2 } from "../cityLayout";
+import type { CityBlock, PublicSite, Vec2 } from "../cityLayout";
+import type { Network } from "./network";
 
 /**
- * 规划尾部修复遍用到的闭包成员（CITY_ARCHITECTURE §2 迁移步 5b）。
+ * 规划尾部修复遍用到的成员（CITY_ARCHITECTURE §2 迁移步 5b；V2 步 2b-lite 起路网原语走 network 对象）。
  * 原先这些遍内联在 buildPlan 末尾、直接引用闭包变量；现在显式列出——一个遍用到什么，一眼可见。
- * 全是「引用」：nodes/edges/publicSites/landmarks/blocks 就是 buildPlan 里的同一份可变对象，修复遍原地改它们。
+ * 全是「引用」：network/sites/blocks 就是 buildPlan 里的同一份可变对象，修复遍原地改它们（加边走 addNetworkEdge）。
  * 只收尾部遍真正读的成员；要加新遍用到新成员，先加到这里。
  */
 export interface RepairContext {
-  nodes: Map<string, RoadNode>;
-  edges: Map<string, RoadEdge>;
-  /** 加一条路段（端点取整、同 id 不重复）。 */
-  addEdge: (a0: Vec2, b0: Vec2, arterial: boolean, bridge?: boolean, primary?: boolean) => void;
-  /** 坐标取整到 0.01（路网节点的规范化键）。 */
-  key: (p: Vec2) => Vec2;
+  network: Network;
   height: (x: number, z: number) => number;
   inRiver: (x: number, z: number) => boolean;
   publicSites: PublicSite[];
