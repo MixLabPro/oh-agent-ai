@@ -7,23 +7,15 @@
 //   4. 凯旋门骑路：有主干道从中心 3 内穿过，且开口轴（局部 z）与该路方向夹角 < 15°；
 //   5. 互不重叠、不压地块：两两中心距 ≥ 半径和；没有地块中心落在用地半径内。
 import assert from "node:assert/strict";
-import path from "node:path";
-import vm from "node:vm";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { cachedPlan, loadCity } from "./city-kit/index.mjs";
 
-const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const city = path.join(repo, "apps/agent-city/ui/src");
-const { buildSync } = createRequire(path.join(repo, "apps/desktop/ui-dev/package.json"))("esbuild");
-const out = buildSync({
-  stdin: { contents: `export { createCityPlan } from ${JSON.stringify(path.join(city, "engine/cityPlan.ts"))};
-export { MIAMI_COASTAL } from ${JSON.stringify(path.join(city, "engine/citySeaside.ts"))};
-export { planAirport, roadSamples } from ${JSON.stringify(path.join(city, "engine/cityAirport.ts"))};`, resolveDir: city },
-  bundle: true, write: false, format: "cjs", platform: "node", logLevel: "silent",
+// 原生加载（不进 vm）+ 进程内缓存：下面五段循环原先各自重新生成同一批 30 个岛。
+const { createCityPlan: rawPlan, MIAMI_COASTAL, planAirport, roadSamples } = await loadCity({
+  "engine/cityPlan.ts": ["createCityPlan"],
+  "engine/citySeaside.ts": ["MIAMI_COASTAL"],
+  "engine/cityAirport.ts": ["planAirport", "roadSamples"],
 });
-const mod = { exports: {} };
-vm.runInNewContext(out.outputFiles[0].text, { module: mod, exports: mod.exports, process, console, Math, Map, Set });
-const { createCityPlan, MIAMI_COASTAL, planAirport, roadSamples } = mod.exports;
+const createCityPlan = (seed, tier, config) => cachedPlan(rawPlan, seed, tier, config);
 
 const seg = (p, a, b) => { const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz || 1; const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / l2)); return Math.hypot(p.x - a.x - dx * t, p.z - a.z - dz * t); };
 const SHORE = new Set(["harbor", "lighthouse", "sail-opera", "ferris-wheel", "villa-complex"]);

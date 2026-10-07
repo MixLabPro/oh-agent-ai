@@ -4,26 +4,14 @@
 // 锐角路口 45、被道路穿过的用地 196、门前无路 10；R1/R2 后 5 / 3 / 3。阈值给少量余量，
 // 防止退回旧的「最近节点直连」与「主干道穿过用地」。
 import assert from "node:assert/strict";
-import path from "node:path";
-import vm from "node:vm";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { cachedPlan, loadCity } from "./city-kit/index.mjs";
 
-const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const ui = path.join(repo, "apps/desktop/ui-dev");
-const city = path.join(repo, "apps/agent-city/ui/src");
-const { buildSync } = createRequire(path.join(ui, "package.json"))("esbuild");
-const out = buildSync({
-  stdin: {
-    contents: `export { createCityPlan } from ${JSON.stringify(path.join(city, "engine/cityPlan.ts"))};
-export { MIAMI_COASTAL } from ${JSON.stringify(path.join(city, "engine/citySeaside.ts"))};`,
-    resolveDir: city,
-  },
-  bundle: true, write: false, format: "cjs", platform: "node", logLevel: "silent",
+// 原生加载 + 进程内缓存（CITY_ARCHITECTURE 迁移步 1）。
+const { createCityPlan: rawPlan, MIAMI_COASTAL } = await loadCity({
+  "engine/cityPlan.ts": ["createCityPlan"],
+  "engine/citySeaside.ts": ["MIAMI_COASTAL"],
 });
-const mod = { exports: {} };
-vm.runInNewContext(out.outputFiles[0].text, { module: mod, exports: mod.exports, process, console, Math, Map, Set });
-const { createCityPlan, MIAMI_COASTAL } = mod.exports;
+const createCityPlan = (seed, tier, config) => cachedPlan(rawPlan, seed, tier, config);
 
 const segDist = (p, a, b) => {
   const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
