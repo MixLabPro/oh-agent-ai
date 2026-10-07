@@ -4,7 +4,7 @@ import { detourAroundSites, extendLooseEnds, frontStationsAndStadiums, nudgeSite
 /**
  * 规划求解循环（CITY_ARCHITECTURE §2 迁移步 5b）：把 buildPlan 尾部内联的修复遍登记成「约束 id → 修复策略」的表。
  *
- * 本步只搬家、不改行为：表的顺序就是原先内联块的执行顺序，每个策略恰好跑一次（nudge 内部自带「最多 6 轮直到没有挪动」，
+ * 本步只搬家、不改行为：表的顺序就是原先内联块的执行顺序，每个策略每轮跑一次；整张表重复到不动点（最多 MAX_SOLVE_ROUNDS 轮，见 solvePlan）（nudge 内部自带「最多 6 轮直到没有挪动」，
  * 保持原语义）。顺序是承重的——后一步改了路/用地位置，前一步接好的关系就可能失效：
  *   1. frontStationsAndStadiums  车站/体育场临街（先拉近，再转车站正面朝路）       ← stationDoorFacesRoad
  *   2. nudgeSitesOffRoads        路穿过用地中心的，沿离路方向推开（≤6 轮；岸边用地推不开则沿海岸换位，
@@ -25,7 +25,20 @@ export const REPAIR_STRATEGIES: RepairStrategy[] = [
 
 export type SolveReport = Array<{ constraint: string; name: string; changes: number }>;
 
-/** 按表顺序跑完所有修复策略，返回每个策略的改动数。 */
-export function solvePlan(ctx: RepairContext): SolveReport {
-  return REPAIR_STRATEGIES.map((s) => ({ constraint: s.constraint, name: s.name, changes: s.run(ctx) }));
+/** 外层循环上限：规划是确定性的，没有改动就是不动点，三轮足够；封顶防止两个策略互相撤销时无限振荡。 */
+export const MAX_SOLVE_ROUNDS = 3;
+
+/**
+ * 按表顺序跑修复策略；一轮里只要有任何策略改动了东西，就整张表再跑一轮（后一步的改动可能让前一步重新有活可干，
+ * 例如断头延伸接通后，原来被「路离用地太近」挡住的推开现在能执行了），直到一整轮零改动或达到 MAX_SOLVE_ROUNDS。
+ * 返回每个策略在所有轮次里的改动数合计。
+ */
+export function solvePlan(ctx: RepairContext, maxRounds = MAX_SOLVE_ROUNDS): SolveReport {
+  const report: SolveReport = REPAIR_STRATEGIES.map((s) => ({ constraint: s.constraint, name: s.name, changes: 0 }));
+  for (let round = 0; round < maxRounds; round += 1) {
+    let changed = 0;
+    REPAIR_STRATEGIES.forEach((s, i) => { const n = s.run(ctx); report[i].changes += n; changed += n; });
+    if (!changed) break;
+  }
+  return report;
 }
