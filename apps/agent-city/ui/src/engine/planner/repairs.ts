@@ -1,27 +1,20 @@
 import { DetMath as Math } from "../detMath"; // 跨引擎确定性：与 cityPlan.ts 同一份 Math（见 detMath.ts）
 import { clearsHighways, roadNodeId, segmentDistance } from "../cityPlan";
 import type { RoadEdge, Vec2 } from "../cityLayout";
+import { polylineClosest, wetCount } from "./footprint";
 import type { RepairContext } from "./context";
 
 // 规划尾部的修复遍（CITY_ARCHITECTURE §2 迁移步 5b）：逐字从 cityPlan.ts 的 buildPlan 尾部搬来，闭包引用改为 ctx 解构，
 // 迭代顺序、阈值与常数一律不变（planner 基线哈希是证明）。每个遍返回「改动数」，供 solve.ts 汇总。
 
-/** 用地修复遍共用的几何：可挪动的用地、最近非桥路段、占地圈湿点数。路网在这些遍内不变，所以每个遍各算一份与原先共用一份等价。 */
+/** 用地修复遍共用的几何：可挪动的用地、最近非桥路段（含垂足）、占地圈湿点数。路网在这些遍内不变，所以每个遍各算一份与原先共用一份等价。 */
 function siteGeometry(ctx: RepairContext) {
   const { edges, publicSites, landmarks, height, inRiver } = ctx;
   const movable = [...publicSites, ...landmarks].filter((s) => s.radius && s.kind !== "civic" && s.kind !== "arch" && !(s as { shore?: Vec2 }).shore);
-  const solid = [...edges.values()].filter((e) => !e.bridge);
-  const nearestRoad = (x: number, z: number) => {
-    let best: { d: number; q: Vec2 } | null = null;
-    for (const e of solid) {
-      const [a, b] = e.points; const dx = b.x - a.x; const dz = b.z - a.z; const l2 = dx * dx + dz * dz || 1;
-      const t = Math.max(0, Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / l2));
-      const q = { x: a.x + dx * t, z: a.z + dz * t }; const d = Math.hypot(q.x - x, q.z - z);
-      if (!best || d < best.d) best = { d, q };
-    }
-    return best;
-  };
-  const wetAt = (site: { radius: number }, x: number, z: number) => { let n = 0; for (let k = 0; k < 16; k += 1) { const t = (k / 16) * Math.PI * 2; const r = k % 2 ? site.radius : site.radius * 0.6; const px = x + Math.cos(t) * r; const pz = z + Math.sin(t) * r; if (height(px, pz) < 0.5 || inRiver(px, pz)) n += 1; } return n; };
+  const solidRuns = [...edges.values()].filter((e) => !e.bridge).map((e) => e.points);
+  const geo = { height, inRiver };
+  const nearestRoad = (x: number, z: number) => polylineClosest(solidRuns, { x, z });
+  const wetAt = (site: { radius: number }, x: number, z: number) => wetCount(geo, { x, z }, site.radius, { river: true });
   return { movable, nearestRoad, wetAt };
 }
 type SiteGeometry = ReturnType<typeof siteGeometry>;
