@@ -1,4 +1,6 @@
 import type { RepairContext } from "./context";
+import { resiteViolatingSites } from "./siting";
+import { joinNearMissEnds, pruneShortSpurs, resolveAcuteJunctions, resolveCrowdedArterials } from "./networkRepairs";
 import { detourAroundSites, extendLooseEnds, frontStationsAndStadiums, nudgeSitesOffRoads } from "./repairs";
 
 /**
@@ -21,6 +23,13 @@ export const REPAIR_STRATEGIES: RepairStrategy[] = [
   { constraint: "roadThroughSite", name: "nudgeSitesOffRoads", run: nudgeSitesOffRoads },
   { constraint: "looseInlandRoadEnds", name: "detourAroundSites", run: detourAroundSites },
   { constraint: "looseInlandRoadEnds", name: "extendLooseEnds", run: extendLooseEnds },
+  // 以下三条会改变规划（删冗余路段），见 networkRepairs.ts 的三道保险；顺序在断头延伸之后，让「删出来的新断头」下一轮被延伸/修剪。
+  { constraint: "crowdedArterials", name: "resolveCrowdedArterials", run: resolveCrowdedArterials },
+  { constraint: "acuteJunctions", name: "resolveAcuteJunctions", run: resolveAcuteJunctions },
+  { constraint: "looseInlandRoadEnds", name: "joinNearMissEnds", run: joinNearMissEnds },
+  { constraint: "looseInlandRoadEnds", name: "pruneShortSpurs", run: pruneShortSpurs },
+  // 选址后置（siting.ts）：路网定型后，对仍然入水/重叠的用地在候选表里重新落位。放在表尾，不动点循环会让前面的策略对新位置再跑一遍。
+  { constraint: "siteInWater", name: "resiteViolatingSites", run: resiteViolatingSites },
 ];
 
 export type SolveReport = Array<{ constraint: string; name: string; changes: number }>;

@@ -114,7 +114,7 @@
   }
  },
  "1600/day": {
-  "all": "7aa39534239b5dc3",
+  "all": "f02e20b5dcdb8190",
   "sections": {
    "city-beach": "1:602edeb096c4",
    "city-beach-furniture": "3:9fa69108d8f3",
@@ -128,7 +128,7 @@
    "city-garden-rocks": "1:edfff59d07b8",
    "city-garden-roofs": "1:e117bc923081",
    "city-garden-trees": "1:b852bb366fa3",
-   "city-infrastructure-decorative": "1:1f3d8ce14684",
+   "city-infrastructure-decorative": "1:380af704a53e",
    "city-landmark-airport": "100:7b57fa330b5a",
    "city-landmark-arch": "31:5c3fe3cb8190",
    "city-landmark-district:claude-code": "8:7e6450d42659",
@@ -172,7 +172,7 @@
   }
  },
  "1600/night": {
-  "all": "6af304781336d76c",
+  "all": "7c106412ed863b4d",
   "sections": {
    "city-beach": "1:602edeb096c4",
    "city-beach-furniture": "3:9fa69108d8f3",
@@ -186,7 +186,7 @@
    "city-garden-rocks": "1:edfff59d07b8",
    "city-garden-roofs": "1:e117bc923081",
    "city-garden-trees": "1:b852bb366fa3",
-   "city-infrastructure-decorative": "1:1f3d8ce14684",
+   "city-infrastructure-decorative": "1:380af704a53e",
    "city-landmark-airport": "100:ce5bf5115c92",
    "city-landmark-arch": "31:5c3fe3cb8190",
    "city-landmark-district:claude-code": "8:2ebc126a4442",

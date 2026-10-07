@@ -32,9 +32,10 @@ for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
   totals.crowded += byId.crowdedArterials.measure(plan).length;
 }
 // 2026-10-07 碎边合并后 2，收紧到 5；同日固定地标增至 5 座后路网变动到 6（两条短支路之间的夹角），放到 8（仍低于原 10、远低于起点 45）。
-assert(totals.acute <= 8, `acute junctions ${totals.acute} > 8 across ${totals.islands} islands (was 45 before R1)`);
+// 2026-10-08 solve 循环新增 resolveAcuteJunctions / resolveCrowdedArterials / joinNearMissEnds / pruneShortSpurs 后实测 0 / 3 / 2，阈值收紧到实测 + 少量余量。
+assert(totals.acute <= 2, `acute junctions ${totals.acute} > 2 across ${totals.islands} islands (was 45 before R1, 8 before the solve repairs)`);
 assert(totals.inside <= 8, `sites with a road through them ${totals.inside} > 8 (was 196 before R2)`);
-assert(totals.loose <= 8, `loose inland road ends ${totals.loose} > 8 over 30 islands`);
+assert(totals.loose <= 4, `loose inland road ends ${totals.loose} > 4 over 30 islands`);
 assert(totals.far <= 5, `sites without a road at the door ${totals.far} > 3`);
-assert(totals.crowded <= 10, `crowded arterial pairs ${totals.crowded} > 10`);
+assert(totals.crowded <= 5, `crowded arterial pairs ${totals.crowded} > 5`);
 console.log(`City planning: ${totals.islands} islands — acute junctions ${totals.acute}, roads through sites ${totals.inside}, sites without access ${totals.far}, crowded arterials ${totals.crowded}, loose inland ends ${totals.loose} passed.`);

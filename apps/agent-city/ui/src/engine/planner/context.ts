@@ -30,4 +30,6 @@ export interface RepairContext {
   /** 线段 ab 与 cd 是否真相交（不含共端点）。 */
   crosses: (a: Vec2, b: Vec2, c: Vec2, d: Vec2) => boolean;
   SHORE_SITE_KINDS: Set<string>;
+  /** 车流折线（海滨大道回路、街区回路）：去冗余的修复不得拆掉它们走的路段，否则整条回路被丢弃。 */
+  carPaths: Vec2[][];
 }

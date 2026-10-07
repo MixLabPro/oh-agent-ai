@@ -44,7 +44,7 @@ assert.equal(bad.arch.length, 0, `arch must straddle a main road:\n  ${bad.arch.
 assert(bad.through.length === 0, `roads through sites:\n  ${bad.through.join("\n  ")}`);
 assert(bad.frontage.length <= 2, `stations/stadiums set back from the road:\n  ${bad.frontage.join("\n  ")}`);
 assert.equal(bad.parcel.length, 0, `lots inside sites:\n  ${bad.parcel.slice(0, 8).join("\n  ")}`);
-assert(bad.overlap.length <= 2, `overlapping sites:\n  ${bad.overlap.join("\n  ")}`);
+assert(bad.overlap.length === 0, `overlapping sites:\n  ${bad.overlap.join("\n  ")}`);
 assert(bad.wet.length <= 3, `sites standing in water:\n  ${bad.wet.join("\n  ")}`);
 assert(bad.noRoad.length <= 3, `sites without a road at the door:\n  ${bad.noRoad.join("\n  ")}`);
 console.log(`City context: ${checked} sites/landmarks on 30 islands — ${report} passed.`);
