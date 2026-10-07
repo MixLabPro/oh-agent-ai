@@ -5,7 +5,7 @@
  */
 export type BuildingSemantics = "data" | "scale" | "decor"; // = CatalogKind
 
-export const PART_ROLES = ["wall", "trim", "roof", "glass", "structure", "water", "lit"] as const;
+export const PART_ROLES = ["wall", "trim", "roof", "glass", "structure", "water", "lit", "beam"] as const;
 export type PartRole = (typeof PART_ROLES)[number];
 
 /** 发光取灯光预算类别（cityLightBudget.ts），不接受自由倍率。 */
@@ -59,6 +59,10 @@ type PartCommon = {
   anchor?: "base" | "center"; // base = y 为底面：几何沿 +y 平移半高（仅 box/cylinder/cone；这三种缺省 base，其余缺省 center）
   rot?: Vec3; // 网格欧拉角（xyz 序）
   bake?: BakedRotation;
+  /** 烘焙平移，施加在 bake 旋转「之前」（旧造型 `.translate(...).rotateZ(...)` 的顺序，如灯塔光束锥）。 */
+  preShift?: Vec3;
+  /** 挂到哪个 group 件之下（at/rot 相对该 group）；group 必须先于子件出现。 */
+  parent?: string;
   /** 烘焙平移（几何自身 translate，在 anchor 平移之后）；旧造型把几何整体 translate(0,-h/2,0) 之类的写法靠它逐位保留。 */
   shift?: Vec3;
   role: PartRole;
@@ -73,11 +77,15 @@ type PartCommon = {
   emissive?: number;
 };
 
+/** 容器件：一个空 Group（摩天轮转盘、灯塔光束），子件用 `parent` 引用它的 id；lifecycle.spin 转的就是它。 */
+export type GroupPart = { kind: "group"; id: string; at: Vec3; rot?: Vec3; parent?: string };
+
 export type Part =
+  | GroupPart
   | (PartCommon & { kind: "box"; size: Vec3 })
   /** size = [底面直径, 高, 底面直径]；radiusTop 是顶面绝对半径（缺省 = 底面半径）。 */
   | (PartCommon & { kind: "cylinder"; size: Vec3; radiusTop?: number; open?: boolean; /** 角度范围 [thetaStart, thetaLength]，缺省整圈（半圆拱券内壁用）。 */ arc?: [number, number]; segments?: number })
-  | (PartCommon & { kind: "cone"; size: Vec3; segments?: number })
+  | (PartCommon & { kind: "cone"; size: Vec3; segments?: number; open?: boolean })
   /** size = 三轴半径（非均匀时在球几何上烘焙缩放）；segments = [经向, 纬向]。 */
   | (PartCommon & { kind: "sphere"; size: Vec3; /** 烘焙非均匀缩放：先建半径 size[0] 的球再 scale(stretch)，逐位复刻旧 `new SphereGeometry(r).scale(a,b,c)`；缺省时由 size 三轴半径推出。 */ stretch?: Vec3; segments?: [number, number]; phi?: [number, number]; theta?: [number, number] })
   /** segments = [管截面, 环向]；arc 缺省整圈。 */
