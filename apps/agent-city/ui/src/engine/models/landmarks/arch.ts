@@ -1,33 +1,48 @@
-import * as THREE from "three";
-import type { LandmarkCtx } from "../landmarkContext";
+import type { BuildingModel, Part } from "../model";
 
-/** 地标「arch」的程序化造型（从 cityParts.buildLandmarks 的 if 链原样搬出，行为不变）。 */
-export function drawArch({ group, mesh, material, cap }: LandmarkCtx): void {
-  // 凯旋门（细化）：基座 → 两侧墩身（每面一对附柱）→ 半圆拱券开口 → 檐口 → 顶楼（attic）→ 顶部雕像组。
-  // 曾是两根方柱 + 横梁（用户：「请细化这些建筑模型」）。全部为通用古典语汇，不参照具体建筑。
-  const h = Math.min(cap, 26);
-  const stone = material("#ece5d6"); const trim = material("#d6ccb7"); const bronze = material("#8a7a52");
-  const W = 31; const D = 9; const pierW = 7.5; const openW = W - pierW * 2; const springY = h * 0.55; // 开口 16：骑在 12 宽主干道上 const openW = W - pierW * 2; const springY = h * 0.55;
-  // 基座只在两墩下：开口里是路面，不能被基座盖住（骑路后截图发现）。
-  for (const side of [-1, 1]) mesh(new THREE.BoxGeometry(pierW + 1.5, 1.6, D + 3).translate(0, 0.8, 0), trim, group, side * (openW / 2 + pierW / 2 + 0.75), 0, 0);
-  for (const side of [-1, 1]) {
-    const cx = side * (openW / 2 + pierW / 2);
-    mesh(new THREE.BoxGeometry(pierW, h, D).translate(0, h / 2, 0), stone, group, cx, 1.6, 0);          // 墩身
-    for (const face of [-1, 1]) for (const k of [-1, 1]) {                                              // 每面一对附柱
-      mesh(new THREE.CylinderGeometry(0.55, 0.6, h - 2.4, 10).translate(0, (h - 2.4) / 2, 0), trim, group, cx + k * 2.4, 2.8, face * (D / 2 + 0.35));
-      mesh(new THREE.BoxGeometry(1.6, 0.8, 1.2).translate(0, 0.4, 0), trim, group, cx + k * 2.4, 1.6, face * (D / 2 + 0.35));
+const STONE = "#ece5d6";
+const TRIM = "#d6ccb7";
+const BRONZE = "#8a7a52";
+
+/**
+ * 地标「arch」：声明式 BuildingModel（批 1）。几何与旧 drawArch 逐位一致（golden/city-landmark-baseline.json 钉住）。
+ * 凯旋门（细化）：基座 → 两侧墩身（每面一对附柱）→ 半圆拱券开口 → 檐口 → 顶楼 → 顶部雕像组。全部为通用古典语汇，不参照具体建筑。
+ * 拱券内壁 = 开口半圆柱（cylinder.open + arc，双面）；拱圈线脚 = 半环（torus.arc）。
+ */
+export const archModel: BuildingModel = {
+  id: "arch",
+  group: "地标",
+  semantics: "decor",
+  title: "凯旋拱门",
+  body: "立在主干道旁的纪念拱门。由岛屿种子挑选，不代表会话。",
+  sitingKey: "landmark:arch",
+  geometry: ({ sizing }) => {
+    const h = Math.min(sizing?.cap ?? 70, 26);
+    const W = 31; const D = 9; const pierW = 7.5; const openW = W - pierW * 2; const springY = h * 0.55; // 开口 16：骑在 12 宽主干道上
+    const parts: Part[] = [];
+    // 基座只在两墩下：开口里是路面，不能被基座盖住。
+    for (const side of [-1, 1]) parts.push({ kind: "box", at: [side * (openW / 2 + pierW / 2 + 0.75), 0, 0], size: [pierW + 1.5, 1.6, D + 3], role: "trim", color: TRIM });
+    for (const side of [-1, 1]) {
+      const cx = side * (openW / 2 + pierW / 2);
+      parts.push({ kind: "box", at: [cx, 1.6, 0], size: [pierW, h, D], role: "wall", color: STONE }); // 墩身
+      for (const face of [-1, 1]) for (const k of [-1, 1]) { // 每面一对附柱
+        parts.push({ kind: "cylinder", at: [cx + k * 2.4, 2.8, face * (D / 2 + 0.35)], size: [1.2, h - 2.4, 1.2], radiusTop: 0.55, segments: 10, role: "trim", color: TRIM });
+        parts.push({ kind: "box", at: [cx + k * 2.4, 1.6, face * (D / 2 + 0.35)], size: [1.6, 0.8, 1.2], role: "trim", color: TRIM });
+      }
+      parts.push({ kind: "box", at: [cx, springY + 3, D / 2 + 0.25], size: [3.4, 4.2, 0.4], anchor: "center", role: "trim", color: BRONZE }); // 浮雕板
     }
-    mesh(new THREE.BoxGeometry(3.4, 4.2, 0.4), bronze, group, cx, springY + 3, D / 2 + 0.25);          // 浮雕板
-  }
-  // 拱券：开口上方实体，减去半圆——用半圆柱面（内侧）+ 两侧拱肩块近似。
-  mesh(new THREE.BoxGeometry(openW, h - springY - openW / 2, D).translate(0, (h - springY - openW / 2) / 2, 0), stone, group, 0, 1.6 + springY + openW / 2, 0);
-  const vault = new THREE.CylinderGeometry(openW / 2, openW / 2, D, 24, 1, true, Math.PI / 2, Math.PI).rotateX(Math.PI / 2);
-  mesh(vault, material("#e2dac8", 0, { side: "double" }), group, 0, 1.6 + springY, 0); // 内壁可见：造时就是双面，不再事后改共享材质
-  mesh(new THREE.TorusGeometry(openW / 2 + 0.3, 0.35, 6, 24, Math.PI), trim, group, 0, 1.6 + springY, D / 2 + 0.05);        // 拱圈线脚
-  mesh(new THREE.BoxGeometry(W + 1.6, 1.1, D + 1.6).translate(0, 0.55, 0), trim, group, 0, h + 1.6, 0); // 檐口
-  mesh(new THREE.BoxGeometry(W - 2, 5, D - 1).translate(0, 2.5, 0), stone, group, 0, h + 2.7, 0);       // 顶楼
-  mesh(new THREE.BoxGeometry(W - 6, 2.2, 0.3), bronze, group, 0, h + 5.2, (D - 1) / 2 + 0.2);           // 题铭板（无文字）
-  mesh(new THREE.BoxGeometry(W - 1, 0.7, D).translate(0, 0.35, 0), trim, group, 0, h + 7.7, 0);
-  mesh(new THREE.BoxGeometry(5, 2.2, 3).translate(0, 1.1, 0), bronze, group, 0, h + 8.4, 0);            // 顶部雕像组（抽象体块）
-  mesh(new THREE.ConeGeometry(1.1, 3.4, 6).translate(0, 1.7, 0), bronze, group, 0, h + 10.6, 0);
-}
+    // 拱券：开口上方实体 + 半圆柱面内壁（双面）。
+    parts.push({ kind: "box", at: [0, 1.6 + springY + openW / 2, 0], size: [openW, h - springY - openW / 2, D], role: "wall", color: STONE });
+    parts.push({ kind: "cylinder", id: "vault", at: [0, 1.6 + springY, 0], size: [openW, D, openW], open: true, arc: [Math.PI / 2, Math.PI], segments: 24, bake: { x: Math.PI / 2 }, anchor: "center", side: "double", role: "wall", color: "#e2dac8" });
+    parts.push({ kind: "torus", at: [0, 1.6 + springY, D / 2 + 0.05], radius: openW / 2 + 0.3, tube: 0.35, arc: Math.PI, segments: [6, 24], role: "trim", color: TRIM }); // 拱圈线脚
+    parts.push({ kind: "box", at: [0, h + 1.6, 0], size: [W + 1.6, 1.1, D + 1.6], role: "trim", color: TRIM }); // 檐口
+    parts.push({ kind: "box", at: [0, h + 2.7, 0], size: [W - 2, 5, D - 1], role: "wall", color: STONE }); // 顶楼
+    parts.push({ kind: "box", at: [0, h + 5.2, (D - 1) / 2 + 0.2], size: [W - 6, 2.2, 0.3], anchor: "center", role: "trim", color: BRONZE }); // 题铭板（无文字）
+    parts.push({ kind: "box", at: [0, h + 7.7, 0], size: [W - 1, 0.7, D], role: "trim", color: TRIM });
+    parts.push({ kind: "box", at: [0, h + 8.4, 0], size: [5, 2.2, 3], role: "trim", color: BRONZE }); // 顶部雕像组（抽象体块）
+    parts.push({ kind: "cone", at: [0, h + 10.6, 0], size: [2.2, 3.4, 2.2], segments: 6, role: "trim", color: BRONZE });
+    return parts;
+  },
+  lifecycle: {},
+  picking: { decorId: "decor:landmark:arch", category: "致敬地标 · 装饰", describe: "由岛屿种子挑选的城市地标。不代表任何会话，不随数据变化。" },
+};

@@ -5,17 +5,28 @@ import type { BuildingModel } from "./model";
 import { tvTowerModel } from "./landmarks/tvTower";
 import { drawTwinTowers } from "./landmarks/twinTowers";
 import { drawTwistTower } from "./landmarks/twistTower";
-import { drawArch } from "./landmarks/arch";
-import { drawSailOpera } from "./landmarks/sailOpera";
-import { drawLighthouse } from "./landmarks/lighthouse";
-import { drawFerrisWheel } from "./landmarks/ferrisWheel";
+import { archModel } from "./landmarks/arch";
+import { sailOperaModel } from "./landmarks/sailOpera";
+import { lighthouseModel } from "./landmarks/lighthouse";
+import { ferrisWheelModel } from "./landmarks/ferrisWheel";
 import { pagodaModel } from "./landmarks/pagoda";
 import { drawVillaComplex } from "./landmarks/villaComplex";
 import { drawSuspensionBridge } from "./landmarks/suspensionBridge";
 
 /** 已声明化（BuildingModel）的建筑；其余 kind 仍走下面的手写 drawX（批 1 逐个迁）。守卫 verify-city-models 按这张表驱动。 */
-export const BUILDING_MODELS: BuildingModel[] = [tvTowerModel, pagodaModel];
+export const BUILDING_MODELS: BuildingModel[] = [tvTowerModel, pagodaModel, archModel, sailOperaModel, lighthouseModel, ferrisWheelModel];
 const modelBuilder = (model: BuildingModel) => compiledBuilder(model, hashSeed);
+
+/**
+ * 豁免白名单（CITY_BUILDING_MODEL_SPEC §9「禁止静默」）：LANDMARK_BUILDERS 里仍走手写 drawX 的 kind，必须在这里登记一行理由。
+ * verify-city-models 断言「每个 kind 要么在 BUILDING_MODELS、要么在这里，不同时」且条数 ≤ 6——不能悄悄变长；转成 model 就从这里删掉。
+ */
+export const UNPARADIGMED: Record<string, string> = {
+  "twin-towers": "运行时 renderCanvas 窗贴图 + 日/夜两张贴图经 host.landmarkWindows 切换（需 panel 件与夜窗通道，批 3 一并做）",
+  "twist-tower": "运行时 renderCanvas 窗贴图 + 日/夜两张贴图经 host.landmarkWindows 切换（同 twin-towers）",
+  "villa-complex": "自包含模块 cityLandmarkVilla（件数组自带，另行收编）",
+  "suspension-bridge": "路径依赖：随过河桥与路网高度定形（SPEC §7 定为不迁），灯串直接加进 host.group",
+};
 
 /**
  * 建筑模型注册表：每个地标造型一个独立文件（models/landmarks/*.ts），这里是 kind → 造型函数 + 中文名的唯一入口。
@@ -25,10 +36,10 @@ export const LANDMARK_BUILDERS: Record<string, (ctx: LandmarkCtx) => void> = {
   "tv-tower": modelBuilder(tvTowerModel),
   "twin-towers": drawTwinTowers,
   "twist-tower": drawTwistTower,
-  "arch": drawArch,
-  "sail-opera": drawSailOpera,
-  "lighthouse": drawLighthouse,
-  "ferris-wheel": drawFerrisWheel,
+  "arch": modelBuilder(archModel),
+  "sail-opera": modelBuilder(sailOperaModel),
+  "lighthouse": modelBuilder(lighthouseModel),
+  "ferris-wheel": modelBuilder(ferrisWheelModel),
   "pagoda": modelBuilder(pagodaModel),
   "villa-complex": drawVillaComplex,
   "suspension-bridge": drawSuspensionBridge,
