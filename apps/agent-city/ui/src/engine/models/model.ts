@@ -74,7 +74,7 @@ type PartCommon = {
 export type Part =
   | (PartCommon & { kind: "box"; size: Vec3 })
   /** size = [底面直径, 高, 底面直径]；radiusTop 是顶面绝对半径（缺省 = 底面半径）。 */
-  | (PartCommon & { kind: "cylinder"; size: Vec3; radiusTop?: number; open?: boolean; segments?: number })
+  | (PartCommon & { kind: "cylinder"; size: Vec3; radiusTop?: number; open?: boolean; /** 角度范围 [thetaStart, thetaLength]，缺省整圈（半圆拱券内壁用）。 */ arc?: [number, number]; segments?: number })
   | (PartCommon & { kind: "cone"; size: Vec3; segments?: number })
   /** size = 三轴半径（非均匀时在球几何上烘焙缩放）；segments = [经向, 纬向]。 */
   | (PartCommon & { kind: "sphere"; size: Vec3; segments?: [number, number]; phi?: [number, number]; theta?: [number, number] })

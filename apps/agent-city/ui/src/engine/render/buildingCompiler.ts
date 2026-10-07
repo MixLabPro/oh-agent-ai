@@ -35,7 +35,7 @@ function baseGeometry(part: Part): THREE.BufferGeometry {
     case "box": return new THREE.BoxGeometry(...part.size);
     case "cylinder": {
       const r = part.size[0] / 2;
-      return new THREE.CylinderGeometry(part.radiusTop ?? r, r, part.size[1], part.segments ?? 8, 1, part.open ?? false);
+      return new THREE.CylinderGeometry(part.radiusTop ?? r, r, part.size[1], part.segments ?? 8, 1, part.open ?? false, ...(part.arc ?? []));
     }
     case "cone": return new THREE.ConeGeometry(part.size[0] / 2, part.size[1], part.segments ?? 8);
     case "sphere": {
