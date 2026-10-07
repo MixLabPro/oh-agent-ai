@@ -10,9 +10,9 @@ import { loadCity, citySrc } from "./city-kit/index.mjs";
 import { installCanvasShim } from "./city-kit/scene-hash.mjs";
 
 installCanvasShim();
-const { THREE, BUILDING_MODELS, LANDMARK_BUILDERS, LANDMARK_LABELS, PART_ROLES, LIGHT_KINDS, compileBuilding, createMaterialFactory } = await loadCity({
+const { THREE, BUILDING_MODELS, LANDMARK_BUILDERS, LANDMARK_LABELS, UNPARADIGMED, PART_ROLES, LIGHT_KINDS, compileBuilding, createMaterialFactory } = await loadCity({
   "pkg:three": ["* as THREE"],
-  "engine/models/registry.ts": ["BUILDING_MODELS", "LANDMARK_BUILDERS", "LANDMARK_LABELS"],
+  "engine/models/registry.ts": ["BUILDING_MODELS", "LANDMARK_BUILDERS", "LANDMARK_LABELS", "UNPARADIGMED"],
   "engine/models/model.ts": ["PART_ROLES", "LIGHT_KINDS"],
   "engine/render/buildingCompiler.ts": ["compileBuilding"],
   "engine/models/landmarkMaterials.ts": ["createMaterialFactory"],
@@ -30,6 +30,11 @@ const HEX = /^#[0-9a-fA-F]{6}$/;
 const TOKEN = /^district:(wall|roof|accent)$/;
 const PRISM = new Set(["box", "cylinder", "cone"]);
 assert(BUILDING_MODELS.length >= 2, "registry exposes the converted models");
+// 豁免白名单（SPEC §9 禁止静默）：每个地标 kind 要么已声明化、要么登记理由，不同时；白名单有上限，不能悄悄变长。
+const modelIds = new Set(BUILDING_MODELS.map((m) => m.id));
+for (const kind of Object.keys(LANDMARK_BUILDERS)) assert(modelIds.has(kind) !== (kind in UNPARADIGMED), `${kind}: must be exactly one of BUILDING_MODELS / UNPARADIGMED`);
+for (const [kind, reason] of Object.entries(UNPARADIGMED)) assert(kind in LANDMARK_BUILDERS && typeof reason === "string" && reason.length >= 10, `UNPARADIGMED.${kind}: names a real landmark kind and gives a reason`);
+assert(Object.keys(UNPARADIGMED).length <= 6, `UNPARADIGMED whitelist capped at 6 (got ${Object.keys(UNPARADIGMED).length})`);
 assert.equal(new Set(BUILDING_MODELS.map((m) => m.id)).size, BUILDING_MODELS.length, "model ids unique");
 
 // 形态参数组合：缺省 / 霓虹开关 / 不同塔高上限，覆盖 geometry 依赖 sizing 的分支。
@@ -80,9 +85,13 @@ for (const model of BUILDING_MODELS) {
     assert.equal(byId.size, ids.length, where("id → object table complete"));
     const distinct = new Set(group.getObjectsByProperty("isMesh", true).map((c) => c.material));
     assert(distinct.size < a.length, where("materials are shared across parts"));
+    // lifecycle.spin：plan 里存在的被引用件都登记成 spinner（光束只在霓虹开时出现，所以数量按 plan 算）。
+    const spinners = [];
+    compileBuilding(a, { group: new THREE.Group(), material: createMaterialFactory(), disposables: [], spinners, spin: model.lifecycle.spin }, input);
+    assert.equal(spinners.length, (model.lifecycle.spin ?? []).flatMap((sp) => sp.parts).filter((id) => ids.includes(id)).length, where("spin parts registered as spinners"));
     parts += a.length;
   }
   const lc = model.lifecycle;
   for (const ref of [...(lc.night?.litParts ?? []), ...(lc.spin ?? []).flatMap((s) => s.parts), ...(lc.blink?.parts ?? [])]) assert(seenIds.has(ref), where(`lifecycle references unknown part ${ref}`));
 }
-console.log(`City models: ${BUILDING_MODELS.length} declarative models (${BUILDING_MODELS.map((m) => m.id).join(", ")}) × ${inputs.length} inputs — determinism, ids, roles/colours/lights, lifecycle refs, catalog and registry dispatch passed (${parts} parts compiled).`);
+console.log(`City models: ${BUILDING_MODELS.length} declarative models (${BUILDING_MODELS.map((m) => m.id).join(", ")}) × ${inputs.length} inputs — determinism, ids, roles/colours/lights, lifecycle refs, catalog and registry dispatch passed (${parts} parts compiled); ${Object.keys(UNPARADIGMED).length} exempt landmarks (${Object.keys(UNPARADIGMED).join(", ")}).`);
