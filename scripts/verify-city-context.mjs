@@ -10,52 +10,32 @@ import assert from "node:assert/strict";
 import { cachedPlan, loadCity } from "./city-kit/index.mjs";
 
 // 原生加载（不进 vm）+ 进程内缓存：下面五段循环原先各自重新生成同一批 30 个岛。
-const { createCityPlan: rawPlan, MIAMI_COASTAL, planAirport, roadSamples } = await loadCity({
+const { createCityPlan: rawPlan, MIAMI_COASTAL, planAirport, roadSamples, CONSTRAINTS, planSites } = await loadCity({
+  "engine/planner/constraints.ts": ["CONSTRAINTS", "planSites"],
   "engine/cityPlan.ts": ["createCityPlan"],
   "engine/citySeaside.ts": ["MIAMI_COASTAL"],
   "engine/cityAirport.ts": ["planAirport", "roadSamples"],
 });
 const createCityPlan = (seed, tier, config) => cachedPlan(rawPlan, seed, tier, config);
 
-const seg = (p, a, b) => { const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz || 1; const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / l2)); return Math.hypot(p.x - a.x - dx * t, p.z - a.z - dz * t); };
-const SHORE = new Set(["harbor", "lighthouse", "sail-opera", "ferris-wheel", "villa-complex"]);
+// 度量来自共享模块 engine/planner/constraints.ts（规划器与守卫同一份 measure）；容忍计数留在下面的断言里。
+const byId = Object.fromEntries(CONSTRAINTS.map((c) => [c.id, c]));
 const bad = { wet: [], noRoad: [], through: [], arch: [], overlap: [], parcel: [], frontage: [] };
 let checked = 0;
 for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
   const seed = 1703294958 + i * 7919;
   const plan = createCityPlan(seed, tier, MIAMI_COASTAL);
-  const sites = [...plan.publicSites, ...plan.landmarks].filter((s) => s.radius);
-  const roads = plan.roadEdges.filter((e) => !e.bridge);
-  const tag = (s) => `${seed}/t${tier} ${s.kind}`;
-  for (const s of sites) {
-    checked += 1;
-    let wet = 0;
-    for (let k = 0; k < 16; k += 1) { const t = (k / 16) * Math.PI * 2, r = k % 2 ? s.radius : s.radius * 0.6; if (plan.terrain.height(s.x + Math.cos(t) * r, s.z + Math.sin(t) * r) < 0.5) wet += 1; }
-    if (s.kind !== "harbor" && !s.shore && wet > (SHORE.has(s.kind) ? 4 : 0)) bad.wet.push(`${tag(s)} wet=${wet}`);
-    const near = Math.min(...roads.map((e) => seg(s, e.points[0], e.points.at(-1))));
-    const nearAny = Math.min(near, ...plan.roadEdges.filter((e) => e.bridge).map((e) => seg(s, e.points[0], e.points.at(-1)))); // 门口直接起桥（岸边地标隔河）也是门前有路
-    if (nearAny > s.radius + 20) bad.noRoad.push(`${tag(s)} gap=${Math.round(nearAny - s.radius)}`);
-    // 车站/体育场正面贴路：中心到路 ≤ 半径（占地前沿贴着人行道），不再停在「半径 + 20」外。
-    if ((s.kind === "station" || s.kind === "stadium") && near > s.radius * 1.3 && near <= s.radius + 90) bad.frontage.push(`${tag(s)} d=${Math.round(near)} r=${s.radius}`);
-    // 车站/体育场正面贴路：中心到路 ≤ 半径（占地前沿贴着人行道），不再停在「半径 + 20」外。
-    // 车站正门（局部 +z）朝向最近的路：站房入口与路面方向夹角 < 45°。
-    if (s.kind === "station" && near <= s.radius + 90) {
-      let best = null; for (const e of roads) { const [a, b] = [e.points[0], e.points.at(-1)]; const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz || 1; const t = Math.max(0, Math.min(1, ((s.x - a.x) * dx + (s.z - a.z) * dz) / l2)); const q = { x: a.x + dx * t, z: a.z + dz * t }; const d = Math.hypot(q.x - s.x, q.z - s.z); if (!best || d < best.d) best = { d, q }; }
-      const cos = (Math.sin(s.yaw) * (best.q.x - s.x) + Math.cos(s.yaw) * (best.q.z - s.z)) / (best.d || 1);
-      if (cos < Math.cos((45 * Math.PI) / 180)) bad.frontage.push(`${tag(s)} door faces away from the road (cos ${cos.toFixed(2)})`);
-    }
-    if (s.kind === "arch") {
-      const host = roads.filter((e) => e.width >= 12).find((e) => seg(s, e.points[0], e.points.at(-1)) < 3);
-      if (!host) bad.arch.push(`${tag(s)} not on a road`);
-      else {
-        const dir = Math.atan2(host.points.at(-1).x - host.points[0].x, host.points.at(-1).z - host.points[0].z);
-        let d = Math.abs(dir - s.yaw) % Math.PI; d = Math.min(d, Math.PI - d);
-        if (d > (15 * Math.PI) / 180) bad.arch.push(`${tag(s)} opening off road by ${Math.round((d * 180) / Math.PI)}deg`);
-      }
-    } else if (s.kind !== "civic" && near < s.radius * 0.7) bad.through.push(`${tag(s)} d=${Math.round(near)}`);
-    for (const o of sites) if (o !== s && o.kind > s.kind && Math.hypot(o.x - s.x, o.z - s.z) < o.radius + s.radius) bad.overlap.push(`${tag(s)} x ${o.kind}`);
-    for (const b of plan.blocks) for (const p of b.parcels) if (Math.hypot(p.x - s.x, p.z - s.z) < s.radius) { bad.parcel.push(`${tag(s)} parcel ${p.id}`); break; }
-  }
+  checked += planSites(plan).length;
+  const tag = `${seed}/t${tier}`;
+  const push = (list, id) => { for (const x of byId[id].measure(plan)) list.push(`${tag} ${x.detail}`); };
+  push(bad.wet, "siteInWater");
+  push(bad.noRoad, "siteWithoutDoorRoad");
+  push(bad.frontage, "stationStadiumSetback");
+  push(bad.frontage, "stationDoorFacesRoad");
+  push(bad.arch, "archStraddlesRoad");
+  push(bad.through, "roadThroughSite");
+  push(bad.overlap, "sitesOverlap");
+  push(bad.parcel, "parcelInsideSite");
 }
 const report = Object.entries(bad).map(([k, v]) => `${k} ${v.length}`).join(", ");
 // 上限：沿用规划守卫口径——0 容忍穿路/压地块/凯旋门不骑路；陆地与入口给少量余量（岸边地形噪声）。
@@ -103,10 +83,7 @@ for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
   const plan = createCityPlan(seed, tier, MIAMI_COASTAL);
   const bridge = plan.landmarks.find((l) => l.kind === "suspension-bridge");
   if (!bridge) continue; suspension += 1;
-  for (const run of plan.highways ?? []) for (let k = 1; k < run.length; k += 1) for (let u = 0; u <= 10; u += 1) {
-    const p = { x: bridge.x + (bridge.to.x - bridge.x) * (u / 10), z: bridge.z + (bridge.to.z - bridge.z) * (u / 10) };
-    assert(seg(p, run[k - 1], run[k]) >= 35, `expressway runs through the suspension bridge (seed ${seed} t${tier})`);
-  }
+  assert.equal(byId.suspensionBridgeClearOfHighways.measure(plan).length, 0, `expressway runs through the suspension bridge (seed ${seed} t${tier})`);
 }
 console.log(`City suspension bridge: ${suspension}/30 islands have one, none crossed by the elevated ring road.`);
 
@@ -115,8 +92,7 @@ let plazaOff = 0;
 for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
   const seed = 1703294958 + i * 7919;
   const plan = createCityPlan(seed, tier, MIAMI_COASTAL);
-  const civic = plan.publicSites.find((s) => s.kind === "civic");
-  if (civic && Math.hypot(civic.x - plan.core.x, civic.z - plan.core.z) > 4) plazaOff += 1;
+  plazaOff += byId.civicPlazaCentred.measure(plan).length;
 }
 assert.equal(plazaOff, 0, `civic plaza is off the roundabout centre on ${plazaOff} islands`);
 console.log("City plaza: the civic plaza sits at the roundabout centre on all 30 islands.");
