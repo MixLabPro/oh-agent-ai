@@ -1378,6 +1378,13 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     for (const id of [...nodes.keys()]) if (![...edges.values()].some((e) => e.from === id || e.to === id)) nodes.delete(id);
   }
 
+  // ── F1 闭环（CITY_ROAD_F1_ALGORITHM_SPEC）：路网不是一次生成就完事——所有改路步骤（接入路、断头路收尾、
+  // 碎边合并）之后，对违规的用地/断头修复。修复遍已搬到 planner/repairs.ts，由 planner/solve.ts 的策略表按原顺序执行
+  // （临街 → 推开穿路用地 → 绕行被截断的路 → 延伸断头；顺序见 solve.ts 头注释）。
+  const repairCtx: RepairContext = { nodes, edges, addEdge, key, height, inRiver, publicSites, landmarks, blocks, ringRuns, coast, core, nearBridgeEnd, distanceToTrunks, safeRoadLink, crosses, SHORE_SITE_KINDS, carPaths };
+  if (!skipSolve) solvePlan(repairCtx);
+  // 车流折线的收口放在求解之后：修复（删冗余路段、切 T 路口、近距接入）会增删路段，车流必须按最终路网校验——
+  // 曾放在求解之前，删路后海滨车流折线引用了已不存在的路段（verify-react-city-seaside 抓到）。
   // 接入路把已有路段切成 T 路口后，车流折线还按旧端点走：把落在线段上的路口节点按顺序插回去。
   {
     const allNodes = [...nodes.values()];
@@ -1407,11 +1414,6 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       if (!ok) carPaths.splice(r, 1);
     }
   }
-  // ── F1 闭环（CITY_ROAD_F1_ALGORITHM_SPEC）：路网不是一次生成就完事——所有改路步骤（接入路、断头路收尾、
-  // 碎边合并）之后，对违规的用地/断头修复。修复遍已搬到 planner/repairs.ts，由 planner/solve.ts 的策略表按原顺序执行
-  // （临街 → 推开穿路用地 → 绕行被截断的路 → 延伸断头；顺序见 solve.ts 头注释）。
-  const repairCtx: RepairContext = { nodes, edges, addEdge, key, height, inRiver, publicSites, landmarks, blocks, ringRuns, coast, core, nearBridgeEnd, distanceToTrunks, safeRoadLink, crosses, SHORE_SITE_KINDS };
-  if (!skipSolve) solvePlan(repairCtx);
   // 终筛：所有改路步骤（接入路、断头路收尾、碎边合并）之后，对每个地块统一核对「到任何路段的距离」。
   // 曾放在断头路收尾与碎边合并之前：那两步新增/移动的路段会压到地块上（凯旋门骑路改位后布局守卫抓到 gap 6.2）。
   // 块级检查只看街区四角与中心到主干道的距离，边中点更近的地块会漏过；连接支路又长达上百单位直穿街区、
