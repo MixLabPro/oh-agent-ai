@@ -1,7 +1,7 @@
 import type * as THREE from "three";
 import type { Landmark } from "../cityPlan";
 import type { CityLayout } from "../cityLayout";
-import type { NightLights } from "../cityParts";
+import type { NightLights } from "../render/types";
 
 /** 造型函数访问渲染器内部状态的窄接口（原先是 cityParts 的 this.*）。 */
 export type LandmarkHost = {

@@ -6,7 +6,8 @@
 import * as THREE from "three";
 import { hashSeed } from "../../cityModel";
 import type { CityLayout, Vec2 } from "../cityLayout";
-import { baseSpeedOf, mergeGeometries, samplePolyline, type Car, type CarPath } from "../cityParts";
+import { baseSpeedOf, mergeGeometries, samplePolyline } from "../render/shared";
+import type { Car, CarPath } from "../render/types";
 import { createRenderCanvas } from "../renderCanvas";
 
 /** ambientSystem 用到的 CityParts 成员（调用方以 `this as unknown as AmbientHost` 传入）。 */

@@ -11,7 +11,7 @@ import { SegmentIndex } from "../cityPlan";
 import { promenadeSegments } from "../citySeaside";
 import { roadPaintPlan } from "../cityRoadPaint";
 import { activeTheme } from "../cityTheme";
-import { EXPRESSWAY_DECK_WIDTH, mergeGeometries } from "../cityParts";
+import { EXPRESSWAY_DECK_WIDTH, mergeGeometries } from "../render/shared";
 
 /** natureSystem 用到的 CityParts 成员（调用方以 `this as unknown as NatureHost` 传入）。 */
 export interface NatureHost {

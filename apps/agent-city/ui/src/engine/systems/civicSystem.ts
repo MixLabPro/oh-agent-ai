@@ -6,7 +6,8 @@ import * as THREE from "three";
 import { hashSeed, type CityModel } from "../../cityModel";
 import type { CityLayout } from "../cityLayout";
 import { paletteFor } from "../cityTextures";
-import { BOX, CYLINDER, selfLitMaterial, type NightLights } from "../cityParts";
+import { BOX, CYLINDER, selfLitMaterial } from "../render/shared";
+import type { NightLights } from "../render/types";
 
 export interface CivicSystemHost {
   model: CityModel;

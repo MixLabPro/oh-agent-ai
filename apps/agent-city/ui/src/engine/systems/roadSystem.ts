@@ -5,7 +5,7 @@
 
 import * as THREE from "three";
 import type { CityLayout } from "../cityLayout";
-import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, expresswayDeckHeights } from "../cityParts";
+import { BOX, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, expresswayDeckHeights } from "../render/shared";
 
 /** 本系统读写的 CityParts 成员（精确清单；CityParts 以 `this as unknown as RoadHost` 传入）。 */
 export interface RoadHost {

@@ -8,7 +8,8 @@ import { hashSeed } from "../../cityModel";
 import type { CityLayout, Vec2 } from "../cityLayout";
 import { SegmentIndex, polygonDistance } from "../cityPlan";
 import { validRuns } from "../citySeaside";
-import { mergeGeometries, type NightLights } from "../cityParts";
+import { mergeGeometries } from "../render/shared";
+import type { NightLights } from "../render/types";
 
 /** 本系统读写的 CityParts 成员（精确清单；CityParts 以 `this as unknown as SeasideHost` 传入）。 */
 export interface SeasideHost {
