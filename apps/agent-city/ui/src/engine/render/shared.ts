@@ -100,3 +100,33 @@ export function mergeGeometries(geometries: THREE.BufferGeometry[]): THREE.Buffe
   merged.setIndex(indices);
   return merged;
 }
+
+/** Low-poly Art Deco tower silhouette: chamfered corners, podium, and stepped crown. */
+export function artDecoTowerGeometry(): THREE.BufferGeometry {
+  const profiles: Array<[number, number]> = [
+    [0, 0.92], [0.08, 1], [0.14, 0.88], [0.82, 0.88],
+    [0.9, 0.78], [0.95, 0.68], [1, 0.68],
+  ];
+  const corners: Array<[number, number]> = [
+    [-0.36, -0.5], [0.36, -0.5], [0.5, -0.36], [0.5, 0.36],
+    [0.36, 0.5], [-0.36, 0.5], [-0.5, 0.36], [-0.5, -0.36],
+  ];
+  const positions: number[] = []; const uvs: number[] = []; const indices: number[] = [];
+  profiles.forEach(([y, scale], ring) => corners.forEach(([x, z], corner) => {
+    positions.push(x * scale, y, z * scale);
+    uvs.push(corner / corners.length, y);
+    if (ring > 0) {
+      const previous = (ring - 1) * corners.length + corner;
+      const next = (ring - 1) * corners.length + (corner + 1) % corners.length;
+      const current = ring * corners.length + corner;
+      const currentNext = ring * corners.length + (corner + 1) % corners.length;
+      indices.push(previous, current, currentNext, previous, currentNext, next);
+    }
+  }));
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
+}

@@ -14,9 +14,9 @@ const { buildSync } = require("esbuild");
 // 集成面源级检查：makeInstanced 的初始 count 是 0，新实例网格漏设 count 会让整批件在城里
 // 隐形（鳍片曾中招——模块守卫全绿但城市里一顶冠都没有），这里钉住每个批次必须有 count 赋值。
 {
-  const cityParts = fs.readFileSync(path.join(engine, "cityParts.ts"), "utf8");
+  const cityParts = ["cityParts.ts", ...fs.readdirSync(path.join(engine, "systems")).map((f) => `systems/${f}`)].map((f) => fs.readFileSync(path.join(engine, f), "utf8")).join("\n");
   for (const mesh of ["crownFinMesh", "crownStripMesh", "signPostMesh", "signPanelMesh", "signFrameMesh", "signStripeMesh"]) {
-    assert.ok(new RegExp(`this\\.${mesh}\\.count\\s*=`).test(cityParts), `cityParts must assign ${mesh}.count`);
+    assert.ok(new RegExp(`(?:this|host)\\.${mesh}\\.count\\s*=`).test(cityParts), `cityParts must assign ${mesh}.count`);
   }
 }
 // 三个地标/构件模块各自独立打包（引擎如何消费它们由布局/基础设施守卫覆盖，这里管模块契约本身）。

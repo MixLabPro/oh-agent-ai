@@ -37,40 +37,12 @@ import { urbanPromenadeSegments, buildPromenade, buildBeachFurniture, buildBeach
 import { applySelfLit, applyNightOverlay, buildNightLights, setNightGlow, setNightHour, setNightWater, setSkyMix, type NightHost } from "./render/nightLighting";
 import { anchorFor, anchors, buildLabels, decorAt, decorTargets, hideOverlaysForPhoto, idAt, makeGroundRing, setHovered, setLabelsVisible, setSelected, type UiOverlayHost } from "./systems/uiOverlays";
 
-import { BOX, CYLINDER, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, baseSpeedOf, expresswayDeckHeights, mergeGeometries, originOf, samplePolyline, selfLitMaterial } from "./render/shared";
+import { artDecoTowerGeometry, BOX, CYLINDER, EXPRESSWAY_DECK_THICKNESS, EXPRESSWAY_DECK_WIDTH, baseSpeedOf, expresswayDeckHeights, mergeGeometries, originOf, samplePolyline, selfLitMaterial } from "./render/shared";
 import type { BuildingRuntime, Car, CarPath, NightLights, QualityLevel } from "./render/types";
 export type { QualityLevel };
 import { FACADE_GRIDS, facadeMaterial, type FacadeUniforms } from "./render/facadeMaterial";
+import { applyConstruction, applyCraneArm, buildAnomalyMarkers, buildHeroCrown, buildMassing, buildRoadsideSigns, buildRuntimes, buildUrbanContext, facadeFor, hideAll, percentileOf, placeHeroCrown, roofKindFor, updateContext, writeContext, type BuildingSystemHost } from "./systems/buildingSystem";
 
-/** Low-poly Art Deco tower silhouette: chamfered corners, podium, and stepped crown. */
-function artDecoTowerGeometry(): THREE.BufferGeometry {
-  const profiles: Array<[number, number]> = [
-    [0, 0.92], [0.08, 1], [0.14, 0.88], [0.82, 0.88],
-    [0.9, 0.78], [0.95, 0.68], [1, 0.68],
-  ];
-  const corners: Array<[number, number]> = [
-    [-0.36, -0.5], [0.36, -0.5], [0.5, -0.36], [0.5, 0.36],
-    [0.36, 0.5], [-0.36, 0.5], [-0.5, 0.36], [-0.5, -0.36],
-  ];
-  const positions: number[] = []; const uvs: number[] = []; const indices: number[] = [];
-  profiles.forEach(([y, scale], ring) => corners.forEach(([x, z], corner) => {
-    positions.push(x * scale, y, z * scale);
-    uvs.push(corner / corners.length, y);
-    if (ring > 0) {
-      const previous = (ring - 1) * corners.length + corner;
-      const next = (ring - 1) * corners.length + (corner + 1) % corners.length;
-      const current = ring * corners.length + corner;
-      const currentNext = ring * corners.length + (corner + 1) % corners.length;
-      indices.push(previous, current, currentNext, previous, currentNext, next);
-    }
-  }));
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-  geometry.setIndex(indices);
-  geometry.computeVertexNormals();
-  return geometry;
-}
 /** 静态城（只依赖 seed 的部分：地形/基建/高架/公共设施/地标/远山/树/水面/
  *  车/船/云/花园）。模块级缓存——数据刷新重建时整段复用，重建成本只剩建筑层；
  *  只保留最近一个 seed（换岛时旧静态城整体释放）。 */
@@ -553,72 +525,12 @@ export class CityParts {
   private updateCivics(dt: number): void { updateCivics(this as unknown as CivicSystemHost, dt); }
 
   /** 屋顶轮廓选择：只依赖 (分区, 楼型, 立面, seed)，同一份数据永远同一种屋顶。 */
-  private roofKindFor(building: CityBuilding, facade: number): number {
-    if (facade === 3) return 0; // 装饰艺术楼有自己的阶梯冠
-    const zone = this.zoneById.get(building.id);
-    const r = building.seed;
-    if (this.formOf(building) === "landmark" || this.formOf(building) === "tower") return r > 0.66 ? 2 : r > 0.3 ? 3 : 0;
-    if ((zone === "residential" || zone === "waterfront") && building.height < 30) return r < 0.55 ? 1 : 0;
-    if (zone === "commercial") return r < 0.4 ? 4 : r < 0.6 ? 3 : 0;
-    if (zone === "downtown") return r < 0.35 ? 3 : 0;
-    return 0;
-  }
+  private roofKindFor(building: CityBuilding, facade: number): number { return roofKindFor(this as unknown as BuildingSystemHost, building, facade); }
 
   /** 地标塔冠顶：金属尖顶 + 三道自发光灯环；日落霓虹主题再加一道向上的光束（进 bloom）。 */
-  private buildHeroCrown(hero: BuildingRuntime): void {
-    const palette = paletteFor(hero.building.districtId);
-    const spireMaterial = new THREE.MeshLambertMaterial({ color: "#dfe6ea", emissive: new THREE.Color(palette.accent).multiplyScalar(0.12) });
-    const spire = new THREE.Mesh(new THREE.ConeGeometry(1, 1, 8, 1).translate(0, 0.5, 0), spireMaterial);
-    spire.castShadow = true;
-    const ringMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color(palette.accent).multiplyScalar(activeTheme().neon ? 3 : 1.4), toneMapped: false });
-    const rings = [0, 1, 2].map(() => new THREE.Mesh(new THREE.TorusGeometry(1, 0.06, 6, 40).rotateX(Math.PI / 2), ringMaterial));
-    let beam: THREE.Mesh | null = null;
-    const disposables: Array<{ dispose(): void }> = [spire.geometry, spireMaterial, ringMaterial, ...rings.map((ring) => ring.geometry)];
-    if (activeTheme().neon) {
-      const beamMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color(palette.accent).lerp(new THREE.Color("#ffffff"), 0.4).multiplyScalar(2.2), transparent: true, opacity: 0.22, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
-      // 光柱自下而上淡出（加色混合下顶点色 → 黑 = 透明）：曾是等亮度的 900 高圆柱，近看顶端是一截平切的白块。
-      const beamGeometry = new THREE.CylinderGeometry(0.6, 1.6, 1, 16, 6, true).translate(0, 0.5, 0);
-      const fade = new Float32Array(beamGeometry.attributes.position.count * 3);
-      for (let i = 0; i < beamGeometry.attributes.position.count; i += 1) {
-        const y = beamGeometry.attributes.position.getY(i);
-        const k = Math.min(1, y / 0.03) * Math.pow(1 - y, 1.6); // 底部 ~12 单位淡入：近看不再是一截硬边白块
-        fade[i * 3] = fade[i * 3 + 1] = fade[i * 3 + 2] = k;
-      }
-      beamGeometry.setAttribute("color", new THREE.BufferAttribute(fade, 3));
-      beamMaterial.vertexColors = true;
-      beamMaterial.visible = false; // 只在夜里亮（setNightGlow），白天天上不再挂一根白线
-      beam = new THREE.Mesh(beamGeometry, beamMaterial);
-      beam.renderOrder = 5;
-      disposables.push(beam.geometry, beamMaterial);
-      this.group.add(beam);
-    }
-    this.group.add(spire, ...rings);
-    this.disposables.push(...disposables);
-    this.heroParts = { spire, rings, beam };
-  }
+  private buildHeroCrown(hero: BuildingRuntime): void { buildHeroCrown(this as unknown as BuildingSystemHost, hero); }
 
-  private placeHeroCrown(x: number, top: number, z: number, width: number, depth: number, h: number, capped: boolean): void {
-    const parts = this.heroParts;
-    if (!parts) return;
-    const visible = capped;
-    const radius = Math.min(width, depth) * 0.42;
-    const spireHeight = Math.max(14, h * 0.4);
-    parts.spire.visible = visible;
-    parts.spire.position.set(x, top, z);
-    parts.spire.scale.set(radius, spireHeight, radius);
-    parts.rings.forEach((ring, index) => {
-      ring.visible = visible;
-      const t = 0.12 + index * 0.2;
-      ring.position.set(x, top + spireHeight * t, z);
-      const r = radius * (1 - t) + 0.6;
-      ring.scale.set(r, 1, r);
-    });
-    if (parts.beam) {
-      parts.beam.visible = visible;
-      parts.beam.position.set(x, top + spireHeight, z);
-      parts.beam.scale.set(1, 420, 1);
-    }
-  }
+  private placeHeroCrown(x: number, top: number, z: number, width: number, depth: number, h: number, capped: boolean): void { placeHeroCrown(this as unknown as BuildingSystemHost, x, top, z, width, depth, h, capped); }
 
   /** 分区驱动立面：downtown 玻璃 / commercial 横带 / residential 窗洞 /
    *  waterfront 混合。无地块信息的楼（不应出现）退回模型层的 hash 立面。 */
@@ -661,102 +573,18 @@ export class CityParts {
     return percentile >= 0.75 ? "tower" : percentile < 0.3 ? (building.seed < 0.5 ? "slab" : "block") : building.archetype;
   }
 
-  private percentileOf(building: CityBuilding): number | undefined {
-    if (!this.landValueCache) this.formOf(building);
-    return this.landValueCache?.get(building.id);
-  }
+  private percentileOf(building: CityBuilding): number | undefined { return percentileOf(this as unknown as BuildingSystemHost, building); }
 
 
-  facadeFor(building: CityBuilding): number {
-    const zone = this.zoneById.get(building.id);
-    if (!zone) return building.facade;
-    // 海滨（非地标、楼高 ≤ 36）→ 装饰艺术灰泥立面：粉彩墙、水平饰带、圆角转角。曾限定「低于 22」，
-    // 但楼高由 token 决定，真实会话几乎都高于 22，一栋都没命中；迈阿密海滨的装饰艺术酒店本来也有十几层。
-    // 楼高仍由 token 决定（数据语义不变），只是低矮的海滨楼换一种建筑语汇。
-    if (zone === "waterfront" && building.height <= 36 && this.formOf(building) !== "landmark") return 3;
-    // S5：地块只有 ~7 宽，体量差异被地块裁平（截图验收：同区仍千篇一律）。地价改由材质读出来——
-    // 区内最贵的四分之一用玻璃幕墙（downtown 立面），最便宜的三成用住宅立面。
-    const percentile = this.percentileOf(building);
-    if (percentile !== undefined && percentile >= 0.75) return 2;
-    if (percentile !== undefined && percentile < 0.3) return 0;
-    if (zone === "downtown") return 2;
-    if (zone === "commercial") return 1;
-    if (zone === "residential") return 0;
-    return building.seed > 0.5 ? 1 : 0;
-  }
+  facadeFor(building: CityBuilding): number { return facadeFor(this as unknown as BuildingSystemHost, building); }
 
   /** 溢出会话的背景楼群：低细节体量块，可数不可点——数据没被丢，只是不占独立地块。 */
-  private buildMassing(): void {
-    const blocks = this.layout.massing ?? [];
-    if (!blocks.length) return;
-    const mesh = this.makeInstanced(BOX, new THREE.MeshLambertMaterial({ color: "#c9c7bd" }), blocks.length);
-    blocks.forEach((block, index) => {
-      this.compose(block.x, block.y, block.z, hashSeed(`mass:${block.districtId}:${index}`) * 0.6 - 0.3, 16, block.height, 12);
-      mesh.setMatrixAt(index, this.matrix);
-      mesh.setColorAt(index, this.color.set(index % 2 ? "#c4c2b6" : "#cdcbbf"));
-    });
-    mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    mesh.castShadow = true;
-    mesh.name = "city-massing";
-  }
+  private buildMassing(): void { buildMassing(this as unknown as BuildingSystemHost); }
 
   /** Deterministic Miami skyline fabric on vacant inner commercial lots.
    *  Decorative only: no session id, label, hit target, growth or HUD count.
    *  Two instanced batches keep the skyline affordable even on low-end GPUs. */
-  private buildUrbanContext(): void {
-    const buildings = this.layout.contextBuildings ?? [];
-    if (!buildings.length) return;
-    const facade = makeDecoFacadeTexture();
-    facade.colorSpace = THREE.SRGBColorSpace;
-    facade.repeat.set(8, 5.5); // one facade tile per chamfered face; 2-floor tile × 5.5 gives ~11-floor rhythm.
-    const bodyGeometry = artDecoTowerGeometry();
-    const bodyMaterial = new THREE.MeshLambertMaterial({ map: facade });
-    const bodies = new THREE.InstancedMesh(bodyGeometry, bodyMaterial, buildings.length);
-    const crownGeometry = BOX.clone();
-    const crownMaterial = new THREE.MeshLambertMaterial({ color: "#f4e5d3" });
-    const crowns = new THREE.InstancedMesh(crownGeometry, crownMaterial, buildings.length);
-    const colorsByZone: Record<string, string[]> = {
-      downtown: ["#91c8cf", "#d89bb6", "#b4a4d5", "#dfc49a"],
-      commercial: ["#a8c9bf", "#d9ad9e", "#c5b9a2", "#9dbdcc"],
-      waterfront: ["#e6c6a9", "#e5a8ad", "#b1d3cd", "#ead6b9"],
-      residential: ["#c8c2a9", "#b5c3b0", "#d5bfa9", "#b8c3c5"],
-    };
-    for (let index = 0; index < buildings.length; index += 1) {
-      const building = buildings[index];
-      const colors = colorsByZone[building.zone] ?? colorsByZone.commercial;
-      this.compose(building.x, building.y, building.z, building.yaw, building.width, building.height, building.depth);
-      bodies.setMatrixAt(index, this.matrix);
-      // F3：降饱和、略压明度——远看仍是统一天际线，近看一眼分出「我的楼」（会话楼保持执行环境色相与屋顶霓虹）。
-      this.color.set(colors[Math.floor(building.seed * colors.length) % colors.length]);
-      this.color.getHSL(this.hsl);
-      bodies.setColorAt(index, this.color.setHSL(this.hsl.h, this.hsl.s * 0.45, this.hsl.l * 0.92));
-      const roofScale = building.zone === "residential" ? 0.88 : 0.68;
-      this.compose(building.x, building.y + building.height, building.z, building.yaw, building.width * roofScale, 1.2 + building.seed * 2.1, building.depth * roofScale);
-      crowns.setMatrixAt(index, this.matrix);
-      crowns.setColorAt(index, this.color.set(building.zone === "downtown"
-        ? colors[(Math.floor(building.seed * colors.length) + 1) % colors.length]
-        : colors[Math.floor(building.seed * colors.length) % colors.length]).multiplyScalar(building.zone === "residential" ? 0.9 : 1.05));
-    }
-    for (const mesh of [bodies, crowns]) {
-      mesh.instanceMatrix.needsUpdate = true;
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      mesh.frustumCulled = false;
-    }
-    bodies.name = "city-vice-context-facades";
-    crowns.name = "city-vice-context-rooftops";
-    // F2：记下每栋的完整矩阵（落成态），回放时按进度在 y 方向缩放写回。
-    const matrices = new Float32Array(buildings.length * 32);
-    for (let index = 0; index < buildings.length; index += 1) {
-      bodies.getMatrixAt(index, this.matrix); this.matrix.toArray(matrices, index * 32);
-      crowns.getMatrixAt(index, this.matrix); this.matrix.toArray(matrices, index * 32 + 16);
-    }
-    this.context = { bodies, crowns, matrices };
-    this.group.add(bodies, crowns);
-    this.disposables.push(bodyGeometry, bodyMaterial, facade, crownGeometry, crownMaterial);
-  }
+  private buildUrbanContext(): void { buildUrbanContext(this as unknown as BuildingSystemHost); }
 
   private context: { bodies: THREE.InstancedMesh; crowns: THREE.InstancedMesh; matrices: Float32Array } | null = null;
   private contextTarget = new Float32Array(0);
@@ -765,36 +593,9 @@ export class CityParts {
   private readonly contextScale = new THREE.Matrix4();
 
   /** 背景楼进度 → 矩阵：落成态矩阵左乘「以楼底为原点的 y 缩放」（BOX/塔几何都以底面为原点，直接右乘缩放即可）。 */
-  private writeContext(): void {
-    const context = this.context;
-    if (!context) return;
-    const count = Math.min(this.contextProgress.length, context.bodies.count);
-    for (let index = 0; index < count; index += 1) {
-      const t = this.contextProgress[index];
-      const ease = t * t * (3 - 2 * t);
-      for (const [mesh, offset] of [[context.bodies, 0], [context.crowns, 16]] as const) {
-        this.contextScratch.fromArray(context.matrices, index * 32 + offset);
-        // 屋顶冠在楼顶：楼还在长时先藏起（就地缩放会悬在半空），封顶后再出现。
-        if (ease <= 0.001 || (offset === 16 && ease < 0.999)) this.contextScratch.makeScale(0, 0, 0).setPosition(0, -40, 0);
-        else if (ease < 0.999) this.contextScratch.multiply(this.contextScale.makeScale(1, ease, 1));
-        mesh.setMatrixAt(index, this.contextScratch);
-      }
-    }
-    context.bodies.instanceMatrix.needsUpdate = true;
-    context.crowns.instanceMatrix.needsUpdate = true;
-  }
+  private writeContext(): void { writeContext(this as unknown as BuildingSystemHost); }
 
-  private updateContext(dt: number): void {
-    let dirty = false;
-    for (let index = 0; index < this.contextTarget.length; index += 1) {
-      const current = this.contextProgress[index];
-      const target = this.contextTarget[index];
-      if (current === target) continue;
-      this.contextProgress[index] = target > current ? Math.min(target, current + dt / 1.2) : Math.max(target, current - dt / 0.6);
-      dirty = true;
-    }
-    if (dirty) this.writeContext();
-  }
+  private updateContext(dt: number): void { updateContext(this as unknown as BuildingSystemHost, dt); }
 
   private buildSeaMountains(): void { buildSeaMountains(this as unknown as TerrainHost); }
 
@@ -843,287 +644,17 @@ export class CityParts {
 
   private buildClouds(): { mesh: THREE.InstancedMesh; clouds: Array<{ x: number; z: number; y: number; speed: number; scale: number }> } { return buildClouds(this as unknown as AmbientHost); }
 
-  private buildAnomalyMarkers(): void {
-    for (const district of this.layout.districts) {
-      if (!district.anomaly) continue;
-      const color = district.anomaly.severity === "critical" ? "#d64545" : district.anomaly.severity === "warning" ? "#e0940f" : "#4a7fa0";
-      const geometry = new THREE.OctahedronGeometry(1.15);
-      const material = new THREE.MeshBasicMaterial({ color });
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.position.set(district.plaza.x, district.plaza.y + 9, district.plaza.z);
-      mesh.renderOrder = 2;
-      const ringGeometry = new THREE.RingGeometry(2.6, 3.0, 44).rotateX(-Math.PI / 2);
-      const ringMaterial = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.5, depthWrite: false });
-      const ring = new THREE.Mesh(ringGeometry, ringMaterial);
-      ring.position.set(district.plaza.x, district.plaza.y + 0.16, district.plaza.z);
-      ring.renderOrder = 3;
-      this.group.add(mesh, ring);
-      this.anomalyMarkers.push({ mesh, ring, baseY: district.plaza.y + 9, phase: hashSeed(`anom:${district.id}`) * Math.PI * 2 });
-      this.disposables.push(geometry, material, ringGeometry, ringMaterial);
-    }
-  }
+  private buildAnomalyMarkers(): void { buildAnomalyMarkers(this as unknown as BuildingSystemHost); }
 
   private buildLabels(): void { buildLabels(this as unknown as UiOverlayHost); }
 
   private buildWater(): THREE.Mesh { return buildWater(this as unknown as TerrainHost); }
 
-  private buildRuntimes(): void {
-    const districtsById = new Map(this.layout.districts.map((district) => [district.id, district]));
-    let podiumCount = 0;
-    let roofCount = 0;
-    let scaffoldCount = 0;
-    let antennaCount = 0;
-    let beaconCount = 0;
-    let craneCount = 0;
-    let cylinderCount = 0;
-    const shaftCursor = [0, 0, 0, 0];
-    let decoCursor = 0;
-    let crownCursor = 0;
-    let crownFinCursor = 0;
-    let signCursor = 0;
-
-    const ordered = [...this.model.buildings].sort((left, right) => left.startedAt - right.startedAt);
-    for (const building of ordered) {
-      const district = districtsById.get(building.districtId);
-      const slot = district?.slots.get(building.id);
-      if (!district || !slot) continue;
-      const palette = paletteFor(building.districtId);
-      const runtime: BuildingRuntime = {
-        building,
-        slot,
-        facade: -1,
-        groundY: district.grounds.get(building.id) ?? 0,
-        paletteWall: new THREE.Color(palette.wall).multiplyScalar(0.92 + building.seed * 0.16),
-        display: this.previousDisplays?.get(building.id) ?? 0,
-        target: building.builtFraction,
-        settled: this.previousDisplays ? this.previousDisplays.has(building.id) : true,
-        district,
-        shaftPrimary: -1,
-        shaftUpper: -1,
-        podium: -1,
-        roof: -1,
-        scaffold: -1,
-        antenna: -1,
-        beacon: -1,
-        craneMast: -1,
-        craneArm: -1,
-        cranePhase: building.seed * Math.PI * 2,
-        craneX: 0,
-        craneZ: 0,
-        blinkPhase: hashSeed(`blink:${building.id}`) * Math.PI * 2,
-        deco: -1,
-        roofKind: 0,
-        hero: false,
-        cylinder: -1,
-        crownBase: -1,
-        crown: null,
-        signBase: -1,
-        signPlan: null,
-      };
-
-      runtime.facade = this.facadeFor(building);
-      if (runtime.facade === 3) {
-        runtime.deco = decoCursor;
-        decoCursor += 1;
-        // 装饰艺术楼墙面用执行环境强调色的粉彩版（而不是执行环境的浅墙色）：浅墙色在黄昏暖光下被压成灰，
-        // 海滨要的是一眼能认出的粉、薄荷、青、紫。
-        runtime.paletteWall = new THREE.Color(palette.accent).lerp(new THREE.Color("#ffffff"), 0.52).multiplyScalar(0.96 + building.seed * 0.08);
-        // 转角柱与墙同色略亮；女儿墙与遮阳棚用执行环境强调色的粉彩版——海滨一眼看出是哪个执行环境。
-        const accent = new THREE.Color(palette.accent).lerp(new THREE.Color("#ffffff"), 0.35);
-        this.decoCornerMesh.setColorAt(runtime.deco, runtime.paletteWall.clone().multiplyScalar(1.06));
-        this.decoTrimMesh.setColorAt(runtime.deco * 2, accent);
-        this.decoTrimMesh.setColorAt(runtime.deco * 2 + 1, accent.clone().multiplyScalar(0.92));
-      }
-      const mesh = this.shaftMeshes[runtime.facade];
-      const instanceMap = this.shaftIdByInstance[runtime.facade];
-      const wantsUpper = this.formOf(building) === "tower" || this.formOf(building) === "landmark";
-      const zone = this.zoneById.get(building.id);
-      if (this.formOf(building) === "tower" && zone !== "waterfront" && hashSeed(`cylinder:${building.id}`) < 0.14 && cylinderCount < 64) { runtime.cylinder = cylinderCount; cylinderCount += 1; }
-      runtime.shaftPrimary = shaftCursor[runtime.facade];
-      mesh.setColorAt(runtime.shaftPrimary, runtime.paletteWall);
-      (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftPrimary, Math.max(2, Math.round(building.height / 3.1)));
-      (mesh.geometry.getAttribute("aLight") as THREE.InstancedBufferAttribute).setXY(runtime.shaftPrimary, useOfZone(zone) === "office" ? 1 : 0, building.active ? 1 : 0);
-      instanceMap.set(runtime.shaftPrimary, building.id);
-      shaftCursor[runtime.facade] += 1;
-      if (wantsUpper) {
-        runtime.shaftUpper = shaftCursor[runtime.facade];
-        mesh.setColorAt(runtime.shaftUpper, runtime.paletteWall.clone().multiplyScalar(0.94));
-        (mesh.geometry.getAttribute("aFloors") as THREE.InstancedBufferAttribute).setX(runtime.shaftUpper, Math.max(2, Math.round((building.height * 0.28) / 3.1)));
-        (mesh.geometry.getAttribute("aLight") as THREE.InstancedBufferAttribute).setXY(runtime.shaftUpper, useOfZone(zone) === "office" ? 1 : 0, building.active ? 1 : 0);
-        instanceMap.set(runtime.shaftUpper, building.id);
-        shaftCursor[runtime.facade] += 1;
-      }
-
-      const needsPodium = this.formOf(building) !== "tower" && this.formOf(building) !== "landmark";
-      if (needsPodium) {
-        runtime.podium = podiumCount;
-        this.podiumMesh.setColorAt(podiumCount, runtime.paletteWall.clone().multiplyScalar(0.88));
-        podiumCount += 1;
-      }
-      runtime.roof = roofCount;
-      this.roofMesh.setColorAt(roofCount, new THREE.Color(palette.roof).multiplyScalar(0.94 + building.seed * 0.12));
-      runtime.roofKind = this.roofKindFor(building, runtime.facade);
-      const roofColor = new THREE.Color(palette.roof).multiplyScalar(0.94 + building.seed * 0.12);
-      const profileColors = [roofColor, new THREE.Color(palette.accent).lerp(new THREE.Color("#e8eef0"), 0.55), runtime.paletteWall.clone().multiplyScalar(0.96), new THREE.Color("#7fae6a")];
-      this.roofProfiles.forEach((mesh, index) => mesh.setColorAt(roofCount, profileColors[index]));
-      // 乘 3.2 让亮度越过 bloom 阈值（MeshBasicMaterial 不吃光照，toneMapped=false 保留 HDR 值）。
-      // N1：霓虹描边只留给高楼与酒店冠，普通会话楼不再每栋一圈彩边（荧光玩具感）；其余实例色置黑 = 不发光。
-      this.neonMesh.setColorAt(roofCount, new THREE.Color(palette.accent).multiplyScalar(building.height >= 24 || slot.blockId.startsWith("hotel:") ? LIGHT_BUDGET.neon.roof : 0));
-      roofCount += 1;
-      // 海滨酒店冠（L-1）：方案在建模期算一次存住；冠底霓虹带走独立实例（neonMesh 与 roofCount
-      // 是 1:1 索引，每楼可变条数会破坏该映射）。
-      if (slot.blockId.startsWith("hotel:")) {
-        const plan = hotelCrownPlan(slot.width, slot.depth, building.height, building.seed);
-        if (plan) {
-          runtime.crown = plan;
-          runtime.crownBase = crownCursor;
-          crownFinCursor += plan.fins.length;
-          this.crownStripMesh.setColorAt(crownCursor, new THREE.Color(palette.accent).multiplyScalar(3.2));
-          crownCursor += 1;
-        }
-      } else if (runtime.roofKind === 0 && (slot.zone === "commercial" || slot.zone === "downtown" || (this.percentileOf(building) ?? 0) >= 0.6) && building.height >= 18 && signCursor < 24) {
-        // 屋顶立牌（L-2）：商业区高楼的尺度符号；已有尖顶/退台冠的楼让位（roofKind ≠ 0 不立牌）。
-        // roofY 传 0：模块给的件 y 都是「屋顶面相对高度」，写矩阵时再加地面 + 楼高。
-        const plan = rooftopSignPlan(slot.width, slot.depth, 0, building.seed);
-        if (plan) {
-          runtime.signPlan = plan;
-          runtime.signBase = signCursor;
-          const frameColor = new THREE.Color(palette.accent).multiplyScalar(3.2);
-          plan.frame.forEach((_, k) => this.signFrameMesh.setColorAt(signCursor * 4 + k, frameColor));
-          const stripeColors = [new THREE.Color(palette.accent).multiplyScalar(2.4), new THREE.Color("#f8f4ea").multiplyScalar(2.4), new THREE.Color(palette.roof).multiplyScalar(2.4)];
-          plan.stripes.forEach((_, k) => this.signStripeMesh.setColorAt(signCursor * 3 + k, stripeColors[k % 3]));
-          signCursor += 1;
-        }
-      }
-      runtime.scaffold = scaffoldCount;
-      scaffoldCount += 1;
-      // C-2 轮廓配件：≥24 高、无尖顶冠（roofKind 0）的楼按种子约三成立天线 + 航空灯，打断板楼单调的天际线（backlog C-2）。
-      const roofline = runtime.roofKind === 0 && !slot.blockId.startsWith("hotel:") && building.height >= 24 && hashSeed(`roofline:${building.id}`) < 0.32;
-      if ((this.formOf(building) === "landmark" || roofline) && antennaCount < 94) {
-        runtime.antenna = antennaCount;
-        antennaCount += 1;
-        runtime.beacon = beaconCount;
-        beaconCount += 1;
-      }
-      if (building.active && craneCount < 46) {
-        runtime.craneMast = craneCount;
-        runtime.craneArm = craneCount;
-        craneCount += 1;
-      }
-
-      this.runtimes.push(runtime);
-      this.runtimeById.set(building.id, runtime);
-    }
-    this.buildGroundSpill();
-
-    this.shaftMeshes.forEach((mesh, variant) => {
-      mesh.count = shaftCursor[variant];
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    });
-    this.podiumMesh.count = podiumCount;
-    if (this.podiumMesh.instanceColor) this.podiumMesh.instanceColor.needsUpdate = true;
-    this.roofMesh.count = roofCount;
-    for (const mesh of this.roofProfiles) {
-      mesh.count = roofCount;
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    }
-    this.gardenTreeMesh.count = roofCount * 3;
-    // 天际线焦点：token 最多的会话。楼高本就是 token 的单调函数，它已是（或几乎是）最高楼；
-    // 这里只给它专属冠顶，不改高度——高度是数据语义。
-    let hero: BuildingRuntime | null = null;
-    for (const runtime of this.runtimes) if (!hero || runtime.building.tokensTotal > hero.building.tokensTotal) hero = runtime;
-    if (hero) {
-      hero.hero = true;
-      hero.roofKind = 0;
-      this.buildHeroCrown(hero);
-    }
-    this.neonMesh.count = activeTheme().neon ? roofCount : 0;
-    if (this.neonMesh.instanceColor) this.neonMesh.instanceColor.needsUpdate = true;
-    if (this.roofMesh.instanceColor) this.roofMesh.instanceColor.needsUpdate = true;
-    this.scaffoldMesh.count = scaffoldCount;
-    this.antennaMesh.count = antennaCount;
-    this.cylinderMesh.count = cylinderCount;
-    this.beaconMesh.count = beaconCount;
-    this.craneMastMesh.count = craneCount;
-    this.decoCornerMesh.count = decoCursor;
-    this.decoTrimMesh.count = decoCursor * 2;
-    if (this.decoCornerMesh.instanceColor) this.decoCornerMesh.instanceColor.needsUpdate = true;
-    if (this.decoTrimMesh.instanceColor) this.decoTrimMesh.instanceColor.needsUpdate = true;
-    this.craneArmMesh.count = craneCount;
-    // 霓虹载体（冠底带/牌框/色条）与 neonMesh 同一门控：非霓虹主题整体收起，物理件（鳍片/柱/板）常在。
-    // 鳍片按实际片数收口——曾漏设 count（makeInstanced 初始为 0），城里所有酒店冠都不渲染。
-    this.crownFinMesh.count = crownFinCursor;
-    this.crownStripMesh.count = activeTheme().neon ? crownCursor : 0;
-    if (this.crownStripMesh.instanceColor) this.crownStripMesh.instanceColor.needsUpdate = true;
-    this.buildRoadsideSigns(signCursor);
-    // 路边牌占位后才知道四批次的实际用量：屋顶牌 0..signCursor-1，路边牌 signCursor..。
-    this.signPostMesh.count = this.signPostCount * 2;
-    this.signPanelMesh.count = this.signPostCount;
-    this.signFrameMesh.count = activeTheme().neon ? this.signPostCount * 4 : 0;
-    this.signStripeMesh.count = activeTheme().neon ? this.signPostCount * 3 : 0;
-    if (this.signFrameMesh.instanceColor) this.signFrameMesh.instanceColor.needsUpdate = true;
-    if (this.signStripeMesh.instanceColor) this.signStripeMesh.instanceColor.needsUpdate = true;
-
-    // 初次落矩阵：回访的楼按已知高度写（settled），新到的楼从 display=0 藏起，
-    // 由 update 循环长入——immediate=true 会按 target 写满高，新楼会先闪一下。
-    for (const runtime of this.runtimes) this.applyConstruction(runtime, runtime.settled);
-  }
+  private buildRuntimes(): void { buildRuntimes(this as unknown as BuildingSystemHost); }
 
   /** 路边双柱广告牌（L-2）：主干道长段中点的外侧净空点，静态摆件；牌位编址接在屋顶牌之后。
    *  与屋顶牌共用四批次网格，但不动施工状态——路面和牌不随会话生长。 */
-  private buildRoadsideSigns(rooftopCount: number): void {
-    // 按合并后的整条路取候选：路网被 T 路口切分、滨海路按 ~15 细分后，单条路段几乎没有 ≥60 的，
-    // 曾因此一块牌都没立（实例全藏在 y=-40，建筑说明取景时发现）。整条路 ≥60 时取其最长一段的中点。
-    const candidates = roadPaintPlan(this.layout.roadEdges ?? [])
-      .runs.filter((run) => run.kind === "arterial" && run.width >= 8)
-      .flatMap((run) => {
-        let best: { a: Vec2; b: Vec2; len: number } | null = null; let total = 0;
-        for (let i = 1; i < run.points.length; i += 1) {
-          const a = run.points[i - 1]; const b = run.points[i]; const len = Math.hypot(b.x - a.x, b.z - a.z);
-          total += len; if (!best || len > best.len) best = { a, b, len };
-        }
-        return best && total >= 60 && best.len >= 14 ? [{ edge: { width: run.width }, a: best.a, b: best.b, total }] : [];
-      })
-      .sort((p, q) => q.total - p.total);
-    // 宿主边自己距牌位 ≥ 10（width/2+6），closerThan(7) 命中的只会是路口和邻路。
-    const otherRoads = new SegmentIndex((this.layout.roadEdges ?? []).map((edge) => [edge.points[0], edge.points[edge.points.length - 1]]));
-    const placed: Vec2[] = [];
-    let cursor = rooftopCount;
-    for (const { edge, a, b } of candidates) {
-      if (cursor >= 32 || placed.length >= 8) break;
-      const len = Math.hypot(b.x - a.x, b.z - a.z);
-      const mid = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
-      const normal = { x: -(b.z - a.z) / len, z: (b.x - a.x) / len };
-      const pos = { x: mid.x + normal.x * (edge.width / 2 + 6), z: mid.z + normal.z * (edge.width / 2 + 6) };
-      const groundY = this.layout.terrain.height(pos.x, pos.z);
-      if (groundY < 0.5) continue; // 水面/桥上不立牌
-      if (otherRoads.closerThan(pos, 7)) continue;
-      if (placed.some((p) => Math.hypot(p.x - pos.x, p.z - pos.z) < 140)) continue;
-      // 面板法线（局部 +Z）朝道路法向：牌面平行道路，双向车流都读到（模块两面同构图）。
-      const yaw = Math.atan2(normal.x, normal.z);
-      const plan = roadsideSignPlan(yaw, groundY, hashSeed(`roadsign:${pos.x.toFixed(1)}:${pos.z.toFixed(1)}`));
-      const place = (pieces: Array<{ x: number; y: number; z: number; sx: number; sy: number; sz: number; rotY: number }>, mesh: THREE.InstancedMesh, stride: number) => {
-        // 件的 x/z 是牌的局部偏移（未旋转）：按 compose 约定（局部 x = (cos, −sin)，局部 z = (sin, cos)）旋转后加上牌位。
-        // 曾直接当世界坐标写——全城路边牌都叠在原点附近，路边一块都看不到（建筑说明取景时发现）。
-        const c = Math.cos(yaw); const sn = Math.sin(yaw);
-        pieces.forEach((piece, index) => {
-          const wx = pos.x + piece.x * c + piece.z * sn; const wz = pos.z - piece.x * sn + piece.z * c;
-          this.compose(wx, piece.y, wz, piece.rotY, piece.sx, piece.sy, piece.sz);
-          mesh.setMatrixAt(cursor * stride + index, this.matrix);
-        });
-      };
-      place(plan.pieces.slice(0, 2), this.signPostMesh, 2);
-      place([plan.pieces[2]], this.signPanelMesh, 1);
-      place(plan.frame, this.signFrameMesh, 4);
-      place(plan.stripes, this.signStripeMesh, 3);
-      // 路边牌不属于任何执行环境城区，框/条用主题外的中性 Vice 色板（与街区霓虹不抢色相）。
-      plan.frame.forEach((_, k) => this.signFrameMesh.setColorAt(cursor * 4 + k, new THREE.Color("#38e8ff").multiplyScalar(3.2)));
-      plan.stripes.forEach((_, k) => this.signStripeMesh.setColorAt(cursor * 3 + k, new THREE.Color(k % 2 ? "#ff4fd8" : "#ffd166").multiplyScalar(2.4)));
-      placed.push(pos);
-      cursor += 1;
-    }
-    this.signPostCount = cursor;
-  }
+  private buildRoadsideSigns(rooftopCount: number): void { buildRoadsideSigns(this as unknown as BuildingSystemHost, rooftopCount); }
 
   private compose(x: number, y: number, z: number, rotationY: number, sx: number, sy: number, sz: number): void {
     this.euler.set(0, rotationY, 0);
@@ -1135,237 +666,11 @@ export class CityParts {
 
   /** 施工矩阵：显示进度 display ∈ [0,1] → 主体/退台/屋面/脚手架/天线/吊车。
    *  所有 y 以地基海拔 groundY 为基准 —— 楼长在起伏地形上。 */
-  private applyConstruction(runtime: BuildingRuntime, immediate: boolean): void {
-    const building = runtime.building;
-    const { x, z } = runtime.slot;
-    const g = runtime.groundY;
-    const visible = immediate ? runtime.target : runtime.display;
-    const fraction = Math.max(0, Math.min(1, visible));
-    if (fraction <= 0.001) {
-      this.hideAll(runtime);
-      return;
-    }
-    const h = building.height;
-    const fp = building.footprint;
-    const built = Math.max(0.5, fraction * h);
-    const split = this.formOf(building) === "tower" || this.formOf(building) === "landmark" ? 0.72 : 1;
-    const podiumHeight = runtime.podium >= 0 ? Math.min(built, 1.5) : 0;
+  private applyConstruction(runtime: BuildingRuntime, immediate: boolean): void { applyConstruction(this as unknown as BuildingSystemHost, runtime, immediate); }
 
-    let widths: [number, number];
-    if (this.formOf(building) === "slab") widths = [fp * 1.3, fp * 0.58];
-    else if (this.formOf(building) === "block") widths = [fp * 1.2, fp * 0.85];
-    else if (this.formOf(building) === "tower" || this.formOf(building) === "landmark") widths = [fp * 0.72, fp * 0.72]; // 细方塔（曾 0.86×0.55，与板楼裁平后难分）
-    else widths = [fp, fp];
-    const streetWidth = runtime.slot.width * (runtime.slot.zone === "downtown" ? 0.8 : 0.88);
-    if (this.formOf(building) !== "tower" && this.formOf(building) !== "landmark") widths[0] = Math.max(widths[0], streetWidth);
-    widths[0] = Math.min(widths[0], runtime.slot.width - 0.8);
-    widths[1] = Math.min(widths[1], runtime.slot.depth - 2);
-    // 海滨酒店地块上的会话楼：铺满宽地块成为一栋酒店（低楼走装饰艺术立面，见 facadeFor 的海滨规则）。
-    // 楼高仍由 token 决定——酒店是会话，不是装饰。
-    if (runtime.slot.blockId.startsWith("hotel:")) widths = [runtime.slot.width * 0.92, runtime.slot.depth * 0.9];
+  private applyCraneArm(runtime: BuildingRuntime, cornerX: number, cornerZ: number, groundY: number, mastHeight: number, armRotation: number): void { applyCraneArm(this as unknown as BuildingSystemHost, runtime, cornerX, cornerZ, groundY, mastHeight, armRotation); }
 
-    // Parcel frontage owns orientation; podium, shaft and roof share it.
-    const yaw = runtime.slot.yaw;
-    // 主体段。
-    const shaftBottom = g + podiumHeight;
-    const shaftTop = g + Math.min(built, h * split);
-    const shaftHeight = Math.max(0, shaftTop - shaftBottom);
-    if (runtime.shaftPrimary >= 0) {
-      if (shaftHeight < 0.15) {
-        this.compose(x, -40, z, 0, 0, 0, 0);
-      } else {
-        this.compose(x, shaftBottom, z, yaw, widths[0], shaftHeight, widths[1]);
-      }
-      if (runtime.cylinder >= 0) {
-        // 圆筒塔：圆柱取代方形主体与退台（直径取较短边 × 1.1），方楼实例藏起。
-        const dia = Math.min(widths[0], widths[1]) * 1.1;
-        this.compose(x, shaftBottom, z, yaw, dia, Math.max(0, g + built - shaftBottom), dia);
-        this.cylinderMesh.setMatrixAt(runtime.cylinder, this.matrix);
-        this.compose(x, -40, z, 0, 0, 0, 0);
-      }
-      this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftPrimary, this.matrix);
-    }
-    // 退台段（tower/landmark）。
-    if (runtime.shaftUpper >= 0) {
-      const upperHeight = Math.max(0, built - h * split);
-      if (upperHeight < 0.15) {
-        this.compose(x, -40, z, 0, 0, 0, 0);
-      } else {
-        this.compose(x, g + h * split, z, yaw, widths[0] * 0.72, upperHeight, widths[1] * 0.72);
-      }
-      if (runtime.cylinder >= 0) this.compose(x, -40, z, 0, 0, 0, 0);
-      this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftUpper, this.matrix);
-    }
-    if (runtime.podium >= 0) {
-      this.compose(x, g, z, yaw, fp * 1.16, podiumHeight > 0.1 ? podiumHeight : 0, fp * 1.16);
-      this.podiumMesh.setMatrixAt(runtime.podium, this.matrix);
-    }
-    if (runtime.roof >= 0) {
-      const roofY = g + Math.max(0.4, built - 0.18);
-      const roofWidth = runtime.shaftUpper >= 0 && built > h * split ? widths[0] * 0.78 : widths[0] * 1.06;
-      const roofDepth = runtime.shaftUpper >= 0 && built > h * split ? widths[1] * 0.78 : widths[1] * 1.06;
-      this.compose(x, roofY, z, yaw, roofWidth, 0.34, roofDepth);
-      this.roofMesh.setMatrixAt(runtime.roof, this.matrix);
-      this.compose(x, roofY - 0.12, z, yaw, roofWidth * 1.16, 0.3, roofDepth * 1.16);
-      this.neonMesh.setMatrixAt(runtime.roof, this.matrix);
-      // 屋顶轮廓只在封顶后出现：施工中的楼顶是脚手架。
-      const capped = fraction > 0.985;
-      const top = roofY + 0.34;
-      this.roofProfiles.forEach((mesh, index) => {
-        const kind = index + 1;
-        if (!capped || runtime.roofKind !== kind) this.compose(x, -40, z, 0, 0, 0, 0);
-        else if (kind === 1) this.compose(x, top, z, yaw, roofWidth, Math.min(roofWidth, roofDepth) * 0.42, roofDepth);
-        else if (kind === 2) this.compose(x, top, z, yaw, roofWidth * 0.92, Math.max(6, h * 0.22), roofDepth * 0.92);
-        else if (kind === 3) this.compose(x, top, z, yaw, roofWidth * 0.62, Math.max(2.4, h * 0.06), roofDepth * 0.62);
-        else this.compose(x, top, z, yaw, roofWidth * 0.86, 0.35, roofDepth * 0.86);
-        mesh.setMatrixAt(runtime.roof, this.matrix);
-      });
-      for (let tree = 0; tree < 3; tree += 1) {
-        if (capped && runtime.roofKind === 4) {
-          const angle = runtime.building.seed * 6.283 + tree * 2.1;
-          const reach = Math.min(roofWidth, roofDepth) * 0.28;
-          const scale = 0.7 + ((runtime.building.seed * 7 + tree) % 1) * 0.5;
-          this.compose(x + Math.cos(angle) * reach, top + 0.3, z + Math.sin(angle) * reach, 0, scale, scale * 1.1, scale);
-        } else this.compose(x, -40, z, 0, 0, 0, 0);
-        this.gardenTreeMesh.setMatrixAt(runtime.roof * 3 + tree, this.matrix);
-      }
-      if (runtime.hero) this.placeHeroCrown(x, roofY + 0.34, z, roofWidth, roofDepth, h, capped);
-    }
-    // 脚手架：包住"计划高度"的剩余部分——楼还没到的地方先看见壳。
-    if (runtime.scaffold >= 0) {
-      const remaining = h - built;
-      if (fraction < 0.985 && remaining > 0.6) {
-        this.compose(x, g + built, z, yaw, widths[0] * 1.14, remaining, widths[1] * 1.14);
-      } else {
-        this.compose(x, -40, z, 0, 0, 0, 0);
-      }
-      this.scaffoldMesh.setMatrixAt(runtime.scaffold, this.matrix);
-    }
-    // 装饰艺术附件：圆角转角柱随楼长高；封顶后立起阶梯女儿墙；底层有遮阳棚。
-    if (runtime.deco >= 0) {
-      const local = (lx: number, lz: number) => ({ x: x + lx * Math.cos(yaw) + lz * Math.sin(yaw), z: z - lx * Math.sin(yaw) + lz * Math.cos(yaw) });
-      const radius = Math.min(widths[0], widths[1]) * 0.24;
-      const corner = local(widths[0] / 2 - radius * 0.55, widths[1] / 2 - radius * 0.55);
-      this.compose(corner.x, g, corner.z, 0, radius, Math.max(0.2, built + 0.4), radius);
-      this.decoCornerMesh.setMatrixAt(runtime.deco, this.matrix);
-      const done = fraction > 0.985;
-      const crown = local(0, widths[1] * 0.1);
-      this.compose(crown.x, g + built, crown.z, yaw, done ? widths[0] * 0.42 : 0, done ? 2.4 : 0, done ? widths[1] * 0.7 : 0);
-      this.decoTrimMesh.setMatrixAt(runtime.deco * 2, this.matrix);
-      const awning = local(-widths[0] * 0.08, widths[1] / 2 + 0.8);
-      const awningOn = built > 3.4;
-      this.compose(awning.x, g + 2.7, awning.z, yaw, awningOn ? widths[0] * 0.66 : 0, awningOn ? 0.28 : 0, awningOn ? 1.7 : 0);
-      this.decoTrimMesh.setMatrixAt(runtime.deco * 2 + 1, this.matrix);
-    }
-    // 海滨酒店冠（L-1）：封顶才戴上。鳍片几何是箱心锚定（crownFinMesh 用了不带 translate 的
-    // BoxGeometry），所以 y 直接写 fin.y；冠底霓虹带走底面锚定的 BOX，底边贴 stripY。
-    if (runtime.crown && runtime.crownBase >= 0) {
-      const capped = fraction > 0.985;
-      const crownLocal = (lx: number, lz: number) => ({ x: x + lx * Math.cos(yaw) + lz * Math.sin(yaw), z: z - lx * Math.sin(yaw) + lz * Math.cos(yaw) });
-      runtime.crown.fins.forEach((fin, index) => {
-        if (!capped) this.compose(x, -40, z, 0, 0, 0, 0);
-        else {
-          const p = crownLocal(fin.x, fin.z);
-          this.compose(p.x, g + fin.y, p.z, yaw, fin.sx, fin.sy, fin.sz);
-        }
-        this.crownFinMesh.setMatrixAt(runtime.crownBase + index, this.matrix);
-      });
-      if (!capped) this.compose(x, -40, z, 0, 0, 0, 0);
-      else this.compose(x, g + runtime.crown.stripY, z, yaw, runtime.slot.width * 0.88, 0.28, runtime.slot.depth * 0.8);
-      this.crownStripMesh.setMatrixAt(runtime.crownBase, this.matrix);
-    }
-    // 屋顶立牌（L-2）：封顶后立起；件 y 是屋顶面相对高度（建模期 roofY 传 0），世界 y = 地面 + 楼高。
-    if (runtime.signPlan && runtime.signBase >= 0) {
-      const capped = fraction > 0.985;
-      const signY = g + h;
-      const signLocal = (lx: number, lz: number) => ({ x: x + lx * Math.cos(yaw) + lz * Math.sin(yaw), z: z - lx * Math.sin(yaw) + lz * Math.cos(yaw) });
-      const place = (pieces: Array<{ x: number; y: number; z: number; sx: number; sy: number; sz: number; rotY: number }>, mesh: THREE.InstancedMesh, stride: number) => {
-        pieces.forEach((piece, index) => {
-          if (!capped) this.compose(x, -40, z, 0, 0, 0, 0);
-          else {
-            const p = signLocal(piece.x, piece.z);
-            this.compose(p.x, signY + piece.y, p.z, yaw + piece.rotY, piece.sx, piece.sy, piece.sz);
-          }
-          mesh.setMatrixAt(runtime.signBase * stride + index, this.matrix);
-        });
-      };
-      place(runtime.signPlan.posts, this.signPostMesh, 2);
-      place([runtime.signPlan.panel], this.signPanelMesh, 1);
-      place(runtime.signPlan.frame, this.signFrameMesh, 4);
-      place(runtime.signPlan.stripes, this.signStripeMesh, 3);
-    }
-    // 天线（landmark 封顶后立起）。
-    if (runtime.antenna >= 0) {
-      const done = fraction > 0.985;
-      this.compose(x, g + h, z, 0, 1, done ? h * 0.1 + 3.4 : 0, 1);
-      this.antennaMesh.setMatrixAt(runtime.antenna, this.matrix);
-      this.compose(x, g + h + (done ? h * 0.1 + 3.4 : 0), z, 0, 1, 1, 1);
-      this.beaconMesh.setMatrixAt(runtime.beacon >= 0 ? runtime.beacon : 0, this.matrix);
-    }
-    // 吊车（活跃会话）。
-    if (runtime.craneMast >= 0) {
-      const mastHeight = h * 1.02 + 6.5;
-      // 立柱立在地块局部坐标的一角（随 slot.yaw 旋转），不再按世界轴偏移而被楼体吞掉。
-      const localX = widths[0] * 0.5 + 0.6;
-      const localZ = widths[1] * 0.5 + 0.6;
-      const cornerX = x + localX * Math.cos(yaw) + localZ * Math.sin(yaw);
-      const cornerZ = z - localX * Math.sin(yaw) + localZ * Math.cos(yaw);
-      runtime.craneX = cornerX;
-      runtime.craneZ = cornerZ;
-      this.compose(cornerX, g, cornerZ, 0, 1, mastHeight, 1);
-      this.craneMastMesh.setMatrixAt(runtime.craneMast, this.matrix);
-      this.applyCraneArm(runtime, cornerX, cornerZ, g, mastHeight, 0);
-    }
-  }
-
-  private applyCraneArm(runtime: BuildingRuntime, cornerX: number, cornerZ: number, groundY: number, mastHeight: number, armRotation: number): void {
-    const armLength = runtime.building.footprint * 2.4 + 3.4;
-    const angle = runtime.cranePhase + armRotation;
-    const centerX = cornerX + Math.cos(angle) * armLength * 0.34;
-    const centerZ = cornerZ - Math.sin(angle) * armLength * 0.34;
-    // three.js 绕 Y 转 θ 后 x 轴指向 (cosθ, -sinθ)，与上面的中心偏移同向，必须传 +angle；
-    // 曾传 -angle，悬臂被镜像到另一侧，脱离立柱悬在空中。
-    this.compose(centerX, groundY + mastHeight + 0.1, centerZ, angle, armLength, 2.2, 2.2);
-    this.craneArmMesh.setMatrixAt(runtime.craneArm, this.matrix);
-  }
-
-  private hideAll(runtime: BuildingRuntime): void {
-    this.compose(0, -40, 0, 0, 0, 0, 0);
-    const building = runtime.building;
-    if (runtime.shaftPrimary >= 0) this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftPrimary, this.matrix);
-    if (runtime.shaftUpper >= 0) this.shaftMeshes[runtime.facade].setMatrixAt(runtime.shaftUpper, this.matrix);
-    if (runtime.cylinder >= 0) this.cylinderMesh.setMatrixAt(runtime.cylinder, this.matrix);
-    if (runtime.podium >= 0) this.podiumMesh.setMatrixAt(runtime.podium, this.matrix);
-    if (runtime.deco >= 0) {
-      this.decoCornerMesh.setMatrixAt(runtime.deco, this.matrix);
-      this.decoTrimMesh.setMatrixAt(runtime.deco * 2, this.matrix);
-      this.decoTrimMesh.setMatrixAt(runtime.deco * 2 + 1, this.matrix);
-    }
-    if (runtime.roof >= 0) {
-      this.roofMesh.setMatrixAt(runtime.roof, this.matrix);
-      this.neonMesh.setMatrixAt(runtime.roof, this.matrix);
-      for (const mesh of this.roofProfiles) mesh.setMatrixAt(runtime.roof, this.matrix);
-      for (let tree = 0; tree < 3; tree += 1) this.gardenTreeMesh.setMatrixAt(runtime.roof * 3 + tree, this.matrix);
-      if (runtime.hero && this.heroParts) this.placeHeroCrown(0, -40, 0, 0, 0, 0, false);
-    }
-    if (runtime.scaffold >= 0) this.scaffoldMesh.setMatrixAt(runtime.scaffold, this.matrix);
-    if (runtime.crown && runtime.crownBase >= 0) {
-      for (let index = 0; index < runtime.crown.fins.length; index += 1) this.crownFinMesh.setMatrixAt(runtime.crownBase + index, this.matrix);
-      this.crownStripMesh.setMatrixAt(runtime.crownBase, this.matrix);
-    }
-    if (runtime.signPlan && runtime.signBase >= 0) {
-      for (let index = 0; index < 2; index += 1) this.signPostMesh.setMatrixAt(runtime.signBase * 2 + index, this.matrix);
-      this.signPanelMesh.setMatrixAt(runtime.signBase, this.matrix);
-      for (let index = 0; index < 4; index += 1) this.signFrameMesh.setMatrixAt(runtime.signBase * 4 + index, this.matrix);
-      for (let index = 0; index < 3; index += 1) this.signStripeMesh.setMatrixAt(runtime.signBase * 3 + index, this.matrix);
-    }
-    if (runtime.antenna >= 0) this.antennaMesh.setMatrixAt(runtime.antenna, this.matrix);
-    if (runtime.beacon >= 0) this.beaconMesh.setMatrixAt(runtime.beacon, this.matrix);
-    if (runtime.craneMast >= 0) {
-      this.craneMastMesh.setMatrixAt(runtime.craneMast, this.matrix);
-      this.craneArmMesh.setMatrixAt(runtime.craneArm, this.matrix);
-    }
-  }
+  private hideAll(runtime: BuildingRuntime): void { hideAll(this as unknown as BuildingSystemHost, runtime); }
 
   /** pace>0 时按回放节奏夹住升起时长（见 builtFractionAt）；live 或未回放时传 0。 */
   applyCursor(cursor: number, live: boolean, paceMsPerSec = 0): void {
