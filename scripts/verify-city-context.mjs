@@ -103,3 +103,17 @@ for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
 }
 assert(airports >= airportIslands - 3, `airport placed on only ${airports}/${airportIslands} islands`);
 console.log(`City airport: ${airports}/${airportIslands} islands placed with the whole platform over water.`);
+
+// 悬索桥（门式塔高 34）不得被环线高架穿过：桥身整段离高架 ≥ 36（用户截图：高架从塔架中间穿过）。
+let suspension = 0;
+for (const tier of [1, 2, 5]) for (let i = 0; i < 10; i += 1) {
+  const seed = 1703294958 + i * 7919;
+  const plan = createCityPlan(seed, tier, MIAMI_COASTAL);
+  const bridge = plan.landmarks.find((l) => l.kind === "suspension-bridge");
+  if (!bridge) continue; suspension += 1;
+  for (const run of plan.highways ?? []) for (let k = 1; k < run.length; k += 1) for (let u = 0; u <= 10; u += 1) {
+    const p = { x: bridge.x + (bridge.to.x - bridge.x) * (u / 10), z: bridge.z + (bridge.to.z - bridge.z) * (u / 10) };
+    assert(seg(p, run[k - 1], run[k]) >= 35, `expressway runs through the suspension bridge (seed ${seed} t${tier})`);
+  }
+}
+console.log(`City suspension bridge: ${suspension}/30 islands have one, none crossed by the elevated ring road.`);
