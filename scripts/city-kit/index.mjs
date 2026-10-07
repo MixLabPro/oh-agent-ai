@@ -23,7 +23,8 @@ const loaded = new Map();
 /** 按 { 导出名: 相对 src 的模块路径 } 打包并原生加载；同一组导出只打包一次。 */
 export async function loadCity(exportsByModule) {
   const lines = Object.entries(exportsByModule)
-    .map(([module, names]) => `export { ${names.join(", ")} } from ${JSON.stringify(path.join(citySrc, module))};`)
+    // "pkg:three" = 包名，其余是相对 src 的模块路径。
+    .map(([module, names]) => `export ${names.length === 1 && names[0].startsWith("* as ") ? names[0] : `{ ${names.join(", ")} }`} from ${JSON.stringify(module.startsWith("pkg:") ? module.slice(4) : path.join(citySrc, module))};`)
     .join("\n");
   const key = crypto.createHash("sha1").update(lines).digest("hex").slice(0, 16);
   if (loaded.has(key)) return loaded.get(key);
