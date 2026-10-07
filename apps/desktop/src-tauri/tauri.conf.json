@@ -27,7 +27,8 @@
         "hiddenTitle": true,
         "center": true,
         "visible": false,
-        "skipTaskbar": false
+        "skipTaskbar": false,
+        "backgroundColor": "#FAFAFA"
       }
     ],
     "security": {
