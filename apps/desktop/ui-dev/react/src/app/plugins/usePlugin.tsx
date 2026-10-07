@@ -23,7 +23,7 @@ export function usePlugin(active: boolean, { id: pluginId, name }: PluginPresent
   const locale = useLanguage();
   const localeRef = useRef(locale); localeRef.current = locale;
   const currentId = useRef<string | null>(null);
-  const syncLayoutRef = useRef<(() => Promise<void>) | null>(null);
+  const syncLayoutRef = useRef<(() => void) | null>(null);
   // React layout changes (including position-only changes) should not wait for
   // a ResizeObserver plus another animation frame before moving the native view.
   useLayoutEffect(() => { if (active) void syncLayoutRef.current?.(); });
@@ -66,24 +66,24 @@ export function usePlugin(active: boolean, { id: pluginId, name }: PluginPresent
         if (!restart) await invoke("plugin_invalidate", { instanceId: id }).catch(() => {});
         if (cancelled) return;
         let layoutSeq = 0;
-        const syncLayout = async () => {
-          layoutPending = true;
-          if (layoutRunning) return;
-          layoutRunning = true;
-          try {
-            while (layoutPending && !cancelled && id) {
-              layoutPending = false;
+        let rafId = 0;
+        // P1 §4.3: rAF-aligned latest-value override — new bounds overwrite the
+        // pending value; only one IPC per animation frame. No await-chain stacking.
+        const syncLayout = () => {
+          if (cancelled || !id) return;
+          if (rafId) return; // already scheduled for this frame
+          rafId = requestAnimationFrame(async () => {
+            rafId = 0;
+            if (cancelled || !id) return;
+            try {
               const next = bounds();
               const key = JSON.stringify(next);
-              if (key === lastBounds) continue;
+              if (key === lastBounds) return;
               layoutSeq += 1;
-              // P0: epoch-ms timestamp for Rust-side jsToRxMs measurement.
-              const jsTs = performance.timeOrigin + performance.now();
-              await invoke("plugin_open", { pluginId, bounds: next, restart: false, instanceId: id, boundsOnly: true, jsTs, seq: layoutSeq });
+              await invoke("plugin_set_bounds", { instanceId: id, bounds: next, seq: layoutSeq });
               lastBounds = key;
-            }
-          } catch { if (!cancelled) setError("plugin_layout_failed"); }
-          finally { layoutRunning = false; }
+            } catch { if (!cancelled) setError("plugin_layout_failed"); }
+          });
         };
         syncLayoutRef.current = syncLayout;
         observer = new ResizeObserver(() => { if (!cancelled && id) void syncLayout(); });

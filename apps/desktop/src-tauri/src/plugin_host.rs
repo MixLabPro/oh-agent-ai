@@ -182,6 +182,11 @@ fn validate_plugin_request(request: &PluginRequestV1) -> Result<(), &'static str
     Ok(())
 }
 
+fn valid_bounds(bounds: &Bounds) -> bool {
+    [bounds.x, bounds.y, bounds.width, bounds.height].iter().all(|v| v.is_finite())
+        && bounds.x >= 0.0 && bounds.y >= 0.0 && bounds.width >= 1.0 && bounds.height >= 1.0
+}
+
 fn host_only(view: &Webview) -> Result<(), String> {
     if view.label() == "workbench" { Ok(()) } else { Err("plugin_host_only".into()) }
 }
@@ -391,6 +396,42 @@ pub async fn plugin_open(app: tauri::AppHandle, webview: Webview, state: tauri::
     ensure_native_attachment(&app, &view)?;
     let _ = view.set_focus();
     Ok(id)
+}
+
+/// P1: lightweight bounds-only command — no asset check, no watchdog, no show(),
+/// no eval, no operation lock. Synchronous (reduces scheduling hops vs async).
+#[tauri::command]
+pub fn plugin_set_bounds(
+    app: tauri::AppHandle,
+    webview: Webview,
+    state: tauri::State<'_, PluginHost>,
+    instance_id: String,
+    bounds: Bounds,
+    seq: Option<u64>,
+) -> Result<(), String> {
+    host_only(&webview)?;
+    if !valid_bounds(&bounds) { return Err("plugin_bounds_invalid".into()); }
+    let current_id = {
+        let host = state.0.lock().unwrap();
+        let instance = host.current.as_ref().ok_or("plugin_instance_mismatch")?;
+        if instance.id != instance_id { return Err("plugin_instance_mismatch".into()); }
+        if instance.suspended || instance.failed.is_some() { return Err("plugin_instance_unavailable".into()); }
+        instance.id.clone()
+    };
+    if let Some(view) = app.get_webview(&current_id) {
+        let t_start = std::time::Instant::now();
+        view.set_bounds(tauri::Rect {
+            position: tauri::LogicalPosition::new(bounds.x, bounds.y).into(),
+            size: tauri::LogicalSize::new(bounds.width, bounds.height).into(),
+        }).map_err(|_| "plugin_layout_failed")?;
+        let rx_to_set = t_start.elapsed().as_millis() as u64;
+        if let Some(i) = state.0.lock().unwrap().current.as_mut() {
+            note_layout_sync(i, 0, rx_to_set, seq.unwrap_or(0));
+        }
+        Ok(())
+    } else {
+        Err("plugin_instance_mismatch".into())
+    }
 }
 
 #[tauri::command]

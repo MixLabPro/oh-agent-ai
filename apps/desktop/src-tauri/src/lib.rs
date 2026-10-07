@@ -5658,6 +5658,7 @@ pub fn run() {
         .invoke_handler({
             let handler: Box<dyn Fn(tauri::ipc::Invoke) -> bool + Send + Sync> = Box::new(tauri::generate_handler![
             plugin_host::plugin_open,
+            plugin_host::plugin_set_bounds,
             plugin_host::plugin_close,
             plugin_host::plugin_snapshot,
             plugin_host::plugin_command,
