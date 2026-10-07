@@ -33,7 +33,7 @@ assert.equal(B.nightFactor(1), 1);
 const modelsDir = path.join(engine, "models/landmarks");
 const splitDirs = ["render", "systems"].map((d) => path.join(engine, d)).filter((d) => fs.existsSync(d));
 const splitFiles = splitDirs.flatMap((d) => fs.readdirSync(d).filter((f) => f.endsWith(".ts")).map((f) => path.join(d, f)));
-const parts = [path.join(engine, "cityParts.ts"), ...splitFiles, ...fs.readdirSync(modelsDir).map((f) => path.join(modelsDir, f))].map((f) => fs.readFileSync(f, "utf8")).join("\n");
+const parts = [path.join(engine, "cityParts.ts"), ...splitFiles, ...fs.readdirSync(modelsDir).map((f) => path.join(modelsDir, f)), ...fs.readdirSync(path.join(engine, "models")).filter((f) => f.endsWith(".ts")).map((f) => path.join(engine, "models", f))].map((f) => fs.readFileSync(f, "utf8")).join("\n");
 const eng = fs.readFileSync(path.join(engine, "CityEngine.ts"), "utf8");
 assert(!/uniforms\.uSelfLit\.value = themeBase;/.test(parts), "walls must dim at night (uSelfLit tied to night)");
 assert(!/setColorAt\(roofCount, new THREE\.Color\(palette\.accent\)\.multiplyScalar\(3\.2\)\)/.test(parts), "roof neon must be gated to tall/hotel via the budget");

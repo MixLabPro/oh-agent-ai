@@ -22,8 +22,7 @@ export function drawArch({ group, mesh, material, cap }: LandmarkCtx): void {
   // 拱券：开口上方实体，减去半圆——用半圆柱面（内侧）+ 两侧拱肩块近似。
   mesh(new THREE.BoxGeometry(openW, h - springY - openW / 2, D).translate(0, (h - springY - openW / 2) / 2, 0), stone, group, 0, 1.6 + springY + openW / 2, 0);
   const vault = new THREE.CylinderGeometry(openW / 2, openW / 2, D, 24, 1, true, Math.PI / 2, Math.PI).rotateX(Math.PI / 2);
-  const vaultMesh = mesh(vault, material("#e2dac8"), group, 0, 1.6 + springY, 0);
-  (vaultMesh.material as THREE.MeshLambertMaterial).side = THREE.DoubleSide;
+  mesh(vault, material("#e2dac8", 0, { side: "double" }), group, 0, 1.6 + springY, 0); // 内壁可见：造时就是双面，不再事后改共享材质
   mesh(new THREE.TorusGeometry(openW / 2 + 0.3, 0.35, 6, 24, Math.PI), trim, group, 0, 1.6 + springY, D / 2 + 0.05);        // 拱圈线脚
   mesh(new THREE.BoxGeometry(W + 1.6, 1.1, D + 1.6).translate(0, 0.55, 0), trim, group, 0, h + 1.6, 0); // 檐口
   mesh(new THREE.BoxGeometry(W - 2, 5, D - 1).translate(0, 2.5, 0), stone, group, 0, h + 2.7, 0);       // 顶楼
