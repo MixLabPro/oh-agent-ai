@@ -20,10 +20,52 @@ readSessions / readFindings / revision 失效事件
   → cityModel.ts：Session / Harness / Token / Finding 的视觉模型
   → cityLayout.ts：连续地形、街区、地块、道路图与地址分配
   → cityTextures.ts：共享地面图集、路面标线、立面、标签
-  → cityParts.ts：instancing、基础设施、车辆、拾取、施工
+  → cityParts.ts：渲染编排器（构造器、update 主循环、游标/动画；各系统见下节「引擎目录结构」）
   → CityEngine.ts：相机、生命周期、画质、上一版布局
   → CityPage.tsx：HUD、Replay、SessionDetail
 ```
+
+## 引擎目录结构（`apps/agent-city/ui/src/engine/`）
+
+2026-10-08 起 `cityParts.ts` 由 4430 行单体拆成编排器（约 1000 行）+ 下列模块；拆分是纯搬迁，行为不变
+（整座城场景图哈希在每一步前后相等）。设计见 `CITY_ARCHITECTURE.md`、`CITY_ENGINE_SPLIT_SPEC.md`、`CITY_BUILDING_MODEL_SPEC.md`。
+
+```text
+engine/
+├── CityEngine.ts           相机、生命周期、画质（对外 API 不变）
+├── cityParts.ts            编排器：构造器、update 主循环、applyCursor、动画状态；其余方法是一行转发
+├── cityPlan.ts             规划：地形 → 骨架 → 选址 → 路网 → 街区地块（纯函数、确定性，不依赖 three）
+├── planner/
+│   ├── constraints.ts      13 条规划约束的 measure（守卫与规划器共用）
+│   ├── context.ts          RepairContext：修复步骤用到的规划闭包成员
+│   ├── repairs.ts          修复手段（推开用地、车站贴路、绕行、断头延伸、岸边换位）
+│   └── solve.ts            REPAIR_STRATEGIES 表 + solvePlan（目前按原顺序跑一遍）
+├── systems/                按领域拆的渲染系统（host 接口 + 函数，cityParts 里留转发）
+│   ├── terrainSystem / natureSystem / ambientSystem
+│   ├── roadSystem / seasideSystem / civicSystem / landmarkSystem
+│   └── buildingSystem（会话楼施工、屋顶件、皇冠、聚合楼、牌、背景楼）/ uiOverlays（标签、选中圈、拾取）
+├── render/
+│   ├── shared.ts           共享常量与几何辅助（BOX、CYLINDER、高架尺寸、mergeGeometries …）
+│   ├── types.ts            BuildingRuntime / Car / NightLights 等共享类型
+│   ├── facadeMaterial.ts   立面材质与窗光 shader
+│   ├── nightLighting.ts    夜灯、日夜切换、夜间光照叠层
+│   └── buildingCompiler.ts 声明式建筑（Part[]）→ THREE.Group，材质按 (role,color,side) 缓存
+├── models/
+│   ├── model.ts            BuildingModel / Part 类型
+│   ├── registry.ts         LANDMARK_BUILDERS、BUILDING_MODELS（声明式）、UNPARADIGMED（白名单，上限 6）
+│   ├── landmarkMaterials.ts 地标材质缓存工厂
+│   └── landmarks/*.ts      每个地标一个文件（已声明式：tv-tower、pagoda、arch、sail-opera、lighthouse、ferris-wheel）
+└── cityLightBudget.ts      灯光预算（窗光、路灯、霓虹、地标、环境、叠层）
+```
+
+依赖方向：`systems/`、`render/`、`models/` 不得 import `cityParts.ts`（cityParts 向下依赖它们）。
+
+### 验证（`apps/desktop/ui-dev` 下 `npm run verify:city`，约 4 分钟）
+
+- 守卫用 `scripts/city-kit/` 原生加载并在进程内缓存规划结果（原先 vm 沙箱约 25–30 分钟）。
+- 三条基线哈希（`golden/city-{plan,landmark,scene}-baseline.json`）是重构的「零行为变化」证明：规划 30 岛、地标 21 个造型、
+  整座城场景图（380/1600 会话 × 日/夜）。有意改规划/造型时才 `--update`，且先 `--diff` 审阅（反射性 `--update` 会让基线失去意义）。
+- `verify-city-constraints / -solve / -models` 分别守卫约束模块、修复循环不劣化、声明式模型契约与白名单上限。
 
 ## 城市空间
 
