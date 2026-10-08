@@ -14,6 +14,7 @@
 // 边界：这里只放「单个违规的几何定义」（如中心到路 < 0.7 半径算穿路）；
 // 「允许多少条」的容忍计数是策略，留在守卫里。逻辑逐字取自两个守卫，勿在此改语义。
 import type { createCityPlan } from "../cityPlan";
+import { isPlannedRoadEnd } from "./endpoints";
 import { wetCount } from "./footprint";
 
 export type CityPlan = ReturnType<typeof createCityPlan>;
@@ -168,16 +169,20 @@ export const suspensionBridgeClearOfHighways: Constraint = {
 };
 
 export const looseInlandRoadEnds: Constraint = {
-  id: "looseInlandRoadEnds", description: "内陆断头：度为 1、地形 ≥ 2.5、离任何用地边缘 > 12、且不是滨海大道端点的路端",
+  id: "looseInlandRoadEnds", description: "内陆断头：度为 1 且不属于计划内终点（滨海大道端/门前终点/沿河海路 run 端/近水终止）的路端；地形高度不参与判定",
   measure(plan) {
     const out: Violation[] = [];
     const deg = new Map<string, number>(); for (const e of plan.roadEdges) if (!e.bridge) for (const id of [e.from, e.to]) deg.set(id, (deg.get(id) || 0) + 1);
     const nodes = new Map<string, Site>(plan.roadNodes.map((n: Site) => [n.id, n]));
-    const sites = planSites(plan);
-    // 滨海大道的端点是合法终点：海滨景观带按设计在无效样本（河口、陡岸、港区缺口）处断开、不跨接（citySeaside 的段规则），
-    // 实测样本外 16 个「断头」里 15 个是大道端点。大道样本的点在 plan.seaside.samples[].boulevard 里。
-    const boulevardEnds: Site[] = (plan.seaside?.samples ?? []).filter((s: Site) => s.valid && s.boulevard).map((s: Site) => s.boulevard);
-    for (const [id, d] of deg) { if (d !== 1) continue; const q = nodes.get(id); if (!q || plan.terrain.height(q.x, q.z) < 2.5) continue; if (boulevardEnds.some((b: Site) => Math.hypot(b.x - q.x, b.z - q.z) < 1)) continue; if (sites.some((s: Site) => Math.hypot(s.x - q.x, s.z - q.z) < s.radius + 12)) continue; out.push({ constraint: "looseInlandRoadEnds", at: { x: q.x, z: q.z }, detail: `node ${id}` }); }
+    // 豁免改用语义判定（planner/endpoints.ts，网络优先设计批次 1）：旧 height ≥ 2.5 是「靠水断头=合法」的
+    // 地形代理，把平岛的内陆断头全部藏进盲区（四档 75–90% 的岛至少 1 个，2026-10-08 实测）。
+    const world = {
+      sites: planSites(plan),
+      boulevardEnds: (plan.seaside?.samples ?? []).filter((s: Site) => s.valid && s.boulevard).map((s: Site) => s.boulevard),
+      coastRoadRunEnds: (plan.coastRoads ?? []).flatMap((r: Site[]) => [r[0], r[r.length - 1]]),
+      coast: plan.coast ?? [], river: plan.river ?? null,
+    };
+    for (const [id, d] of deg) { if (d !== 1) continue; const q = nodes.get(id); if (!q || isPlannedRoadEnd(q, world)) continue; out.push({ constraint: "looseInlandRoadEnds", at: { x: q.x, z: q.z }, detail: `node ${id}` }); }
     return out;
   },
 };

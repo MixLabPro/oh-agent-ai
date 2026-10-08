@@ -1,0 +1,59 @@
+/**
+ * 路端语义判定（CITY_NETWORK_FIRST_CODE_DESIGN §2 / 迁移批次 1）：度为 1 的路端是「计划内终点」还是「松断头」。
+ *
+ * 旧判据用 height ≥ 2.5 当「内陆」代理——本意是豁免靠水断头（滨海/河岸路按设计停在岸边），
+ * 副作用是整座平岛的内陆断头对检测与修复全部隐形（2026-10-08 实测：普查四档 75–90% 的岛
+ * 至少藏 1 个真断头；t1 的 753 个盲区端里 186 个不属于任何合法豁免类）。
+ * 本模块把豁免从地形代理改为语义分类，高度不再参与判定。
+ *
+ * 计划内终点（不计违例）：
+ *  - 滨海大道端点：海滨景观带按设计在无效样本（河口、陡岸、港区缺口）处断开、不跨接（citySeaside 段规则）；
+ *  - 用地门前终点：主干道到岸边用地门口为止，那一段就是它的入口路；
+ *  - 沿海/河岸路的 run 端点：遇主干道/桥头/预留地按设计断开，段端以 T 路口接入路网；
+ *  - 近水终止（离海或河道折线 ≤ WATER_STOP_MARGIN）：路到水边自然停止的近似带，
+ *    覆盖 run 端邻域、河口与小的合法尽端。
+ * 其余度为 1 的路端 = 松断头（looseInlandRoadEnds），与地形高度无关。
+ *
+ * 批次 1（2026-10-08）：检测（constraints.looseInlandRoadEnds）与修复
+ * （networkRepairs 的 pruneShortSpurs / joinNearMissEnds）同批切换到本谓词——只改检测会让
+ * 「检测语义化、修复剪地形」两套口径并存，且 solve 守卫的逐约束单调在删边制造平地短枝时
+ * 立即打架（实测 seed 1703318715/t2、1703429581/t5）。修复效果：普查松断头
+ * t1 45→29 / t3 26→8 / t5 18→8 / t10 7→2，回归 30 岛 65→16。剩余断头由统一连接器批次接手。
+ */
+import type { Vec2 } from "../cityLayout";
+
+/** 近水终止带宽：沿海/河岸路中心线离水 14–22，端头与 run 端邻域再放宽。 */
+export const WATER_STOP_MARGIN = 40;
+
+export type PlannedEndInputs = {
+  sites: Array<{ x: number; z: number; radius: number }>;
+  /** 滨海大道合法断点（plan.seaside.samples[].boulevard，仅 valid 采样）。 */
+  boulevardEnds: Vec2[];
+  /** 沿海/河岸路各 run 的首尾点。 */
+  coastRoadRunEnds: Vec2[];
+  coast: Vec2[];
+  river: Vec2[] | null;
+};
+
+const segDistance = (p: Vec2, a: Vec2, b: Vec2): number => {
+  const dx = b.x - a.x; const dz = b.z - a.z;
+  const l2 = dx * dx + dz * dz || 1;
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / l2));
+  return Math.hypot(a.x + dx * t - p.x, a.z + dz * t - p.z);
+};
+
+const polylineDistance = (pts: Vec2[], p: Vec2): number => {
+  let d = Infinity;
+  for (let k = 1; k < pts.length; k += 1) d = Math.min(d, segDistance(p, pts[k - 1], pts[k]));
+  return d;
+};
+
+/** 度为 1 的路端是否属于计划内终点（见模块头）。除 node 外全部是只读数据，无随机。 */
+export function isPlannedRoadEnd(node: Vec2, world: PlannedEndInputs): boolean {
+  if (world.boulevardEnds.some((b) => Math.hypot(b.x - node.x, b.z - node.z) < 1)) return true;
+  if (world.sites.some((s) => Math.hypot(s.x - node.x, s.z - node.z) < s.radius + 12)) return true;
+  if (world.coastRoadRunEnds.some((c) => Math.hypot(c.x - node.x, c.z - node.z) < 1)) return true;
+  if (polylineDistance(world.coast, node) <= WATER_STOP_MARGIN) return true;
+  if (world.river && polylineDistance(world.river, node) <= WATER_STOP_MARGIN) return true;
+  return false;
+}

@@ -1,9 +1,10 @@
 import { DetMath as Math } from "../detMath";
 import { segmentDistance } from "../cityPlan";
-import type { RoadEdge } from "../cityLayout";
+import type { RoadEdge, Vec2 } from "../cityLayout";
 import { addNetworkEdge, keyOf } from "./network";
 import { crosses, safeRoadLink } from "./footprint";
 import type { RepairContext } from "./context";
+import { isPlannedRoadEnd, type PlannedEndInputs } from "./endpoints";
 
 // 路网修复手段（CITY_ROAD_NETWORK_SPEC §6：no-parallel / no-acute / no-loose-end）。与 repairs.ts 不同，这些会**改变**规划结果
 // （删冗余路段），所以每条都有三道保险：① 只删窄路（局部街 5 / 次干 8），主干 12、桥、沿岸大道一律不动；
@@ -58,7 +59,20 @@ function onCarPath(ctx: RepairContext, edge: RoadEdge): boolean {
   return false;
 }
 
-/** 能删吗：窄路、非桥、不切断、不夺门前路、不拆车流回路。 */
+
+/** 修复策略的计划内终点视图（与 constraints.ts 的 measure 同一谓词、同一数据）。 */
+function plannedEndWorld(ctx: RepairContext, sites: Array<{ x: number; z: number; radius: number }>): PlannedEndInputs {
+  return {
+    sites,
+    boulevardEnds: (ctx.seaside?.samples ?? []).filter((s: { valid: boolean; boulevard?: Vec2 }) => s.valid && s.boulevard).map((s: { boulevard?: Vec2 }) => s.boulevard!),
+    coastRoadRunEnds: ctx.coastRoadRunEnds,
+    coast: ctx.coast,
+    river: ctx.geo.river,
+  };
+}
+
+/** 能删吗：窄路、非桥、不切断、不夺门前路、不拆车流回路。删出来的短枝由表尾的 pruneShortSpurs 收尾
+ *  （策略顺序见 solve.ts 注释）；2026-10-08 起 prune 不再有高度盲区，平地短枝同样会被收掉。 */
 function removable(ctx: RepairContext, edge: RoadEdge, baseline: number): boolean {
   if (edge.bridge || edge.width >= 12) return false;
   if (components(ctx, edge.id) > baseline) return false;
@@ -120,14 +134,14 @@ export function resolveAcuteJunctions(ctx: RepairContext): number {
 export function pruneShortSpurs(ctx: RepairContext): number {
   let removed = 0;
   const sites = [...ctx.publicSites, ...ctx.landmarks].filter((s) => s.radius);
+  const plannedWorld = plannedEndWorld(ctx, sites);
   for (let pass = 0; pass < 4; pass += 1) {
     const deg = new Map<string, RoadEdge[]>();
     for (const e of ctx.network.edges.values()) if (!e.bridge) for (const id of [e.from, e.to]) (deg.get(id) ?? deg.set(id, []).get(id)!).push(e);
     let changed = 0;
     for (const [id, list] of deg) {
       if (list.length !== 1) continue;
-      const node = ctx.network.nodes.get(id); if (!node || ctx.height(node.x, node.z) < 2.5) continue;
-      if (sites.some((s) => Math.hypot(s.x - node.x, s.z - node.z) < s.radius + 12)) continue; // 门前终点
+      const node = ctx.network.nodes.get(id); if (!node || isPlannedRoadEnd(node, plannedWorld)) continue;
       const chain: RoadEdge[] = []; let cur = id; let prev: RoadEdge | null = null; let len = 0; let ok = true;
       for (let step = 0; step < 12; step += 1) {
         const next: RoadEdge | undefined = (deg.get(cur) ?? []).find((e) => e !== prev && ctx.network.edges.has(e.id));
@@ -154,12 +168,12 @@ export function pruneShortSpurs(ctx: RepairContext): number {
 export function joinNearMissEnds(ctx: RepairContext): number {
   let joined = 0;
   const sites = [...ctx.publicSites, ...ctx.landmarks].filter((s) => s.radius);
+  const plannedWorld = plannedEndWorld(ctx, sites);
   const deg = new Map<string, RoadEdge[]>();
   for (const e of ctx.network.edges.values()) if (!e.bridge) for (const id of [e.from, e.to]) (deg.get(id) ?? deg.set(id, []).get(id)!).push(e);
   for (const [id, list] of deg) {
     if (list.length !== 1) continue;
-    const node = ctx.network.nodes.get(id); if (!node || ctx.height(node.x, node.z) < 2.5) continue;
-    if (sites.some((s) => Math.hypot(s.x - node.x, s.z - node.z) < s.radius + 12)) continue;
+    const node = ctx.network.nodes.get(id); if (!node || isPlannedRoadEnd(node, plannedWorld)) continue;
     const own = list[0];
     let best: { edge: RoadEdge; p: { x: number; z: number }; d: number } | null = null;
     for (const e of ctx.network.edges.values()) {
