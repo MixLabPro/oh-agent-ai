@@ -121,13 +121,15 @@ export function createCityPlan(seed: number, tier = 2, config: CoastalConfig | n
   // 起始估计：390 半径 ≈ 一档 400 会话的地皮，再按实测地块数校正。
   let radius = 390 * Math.sqrt(tier);
   let plan = buildPlan(seed, radius, shape, biome, config, tier, !!opts.skipSolve);
+  let radiusAttempts = 0; // 诊断（批次 8 §5.7「先测再做」）：半径校正实际重建次数的分布
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const parcels = plan.blocks.reduce((sum, block) => sum + block.parcels.length, 0);
     if (parcels >= targetParcels(tier)) break;
     radius *= Math.sqrt(targetParcels(tier) / Math.max(1, parcels)) * 1.04;
     plan = buildPlan(seed, radius, shape, biome, config, tier, !!opts.skipSolve);
+    radiusAttempts += 1;
   }
-  return { ...plan, scaleTier: tier, biome };
+  return { ...plan, scaleTier: tier, biome, radiusAttempts };
 }
 
 function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: CoastalConfig | null, tier: number, skipSolve: boolean) {
@@ -1007,7 +1009,7 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // ── F1 闭环（CITY_ROAD_F1_ALGORITHM_SPEC）：路网不是一次生成就完事——所有改路步骤（接入路、断头路收尾、
   // 碎边合并）之后，对违规的用地/断头修复。修复遍已搬到 planner/repairs.ts，由 planner/solve.ts 的策略表按原顺序执行
   // （临街 → 推开穿路用地 → 绕行被截断的路 → 延伸断头；顺序见 solve.ts 头注释）。
-  const repairCtx: RepairContext = { network, geo, height, inRiver, trunkRuns, bridges, publicSites, landmarks, blocks, ringRuns, coast, core, SHORE_SITE_KINDS, carPaths, seaside, coastRoadRunEnds: coastRoadRuns.flatMap((r) => [r[0], r[r.length - 1]]) };
+  const repairCtx: RepairContext = { network, geo, height, inRiver, trunkRuns, bridges, publicSites, landmarks, blocks, ringRuns, coast, core, SHORE_SITE_KINDS, carPaths, seaside, coastRoadRunEnds: coastRoadRuns.flatMap((r) => [r[0], r[r.length - 1]]), coastRoadRuns, riverRoadRuns: coastRoadRuns.slice(coastalRunCount) };
   if (!skipSolve) solvePlan(repairCtx);
   // 车流折线的收口放在求解之后：修复（删冗余路段、切 T 路口、近距接入）会增删路段，车流必须按最终路网校验——
   // 曾放在求解之前，删路后海滨车流折线引用了已不存在的路段（verify-react-city-seaside 抓到）。

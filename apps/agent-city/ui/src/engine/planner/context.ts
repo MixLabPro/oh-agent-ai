@@ -34,4 +34,8 @@ export interface RepairContext {
   seaside: SeasideBand | null;
   /** 沿海/河岸路各 run 的首尾点（计划内终点；批次 1）。 */
   coastRoadRunEnds: Vec2[];
+  /** 沿海路段（批次 8：solve 的违例测量需要 plan 视图）。 */
+  coastRoadRuns: Vec2[][];
+  /** 河岸路段（同上）。 */
+  riverRoadRuns: Vec2[][];
 }
