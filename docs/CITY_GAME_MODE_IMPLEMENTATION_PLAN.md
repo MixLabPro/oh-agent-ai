@@ -1,6 +1,6 @@
 # Agent City 飞机游戏模式：设计与实施方案
 
-日期：2026-10-04。状态：实施提案，尚未实现；本文的参数是首轮调试起点，性能数字是验收目标，不是现有测试结果。
+日期：2026-10-04。状态（2026-10-08 更新）：G1–G3 已在分支 `worktree-city-game-mode` 实现——状态机/FlightWorld/相机所有权（G1.1–G1.2）、飞行/输入/追尾相机/碰撞/练习 HUD/接入（G1.3–G1.5）、确定性路线与穿环任务闭环（G2）、plugin.state 端口与档案持久化（G3.1–G3.2）均已通过对应 verify 脚本（controller/world/flight/race/profile）与浏览器冒烟；Rust `cargo test --release`、`clippy -D warnings`、`cargo tauri build --bundles app` 通过。入口仍为开发开关（`?cityGame=1` 或 `localStorage.cityGameDev=1`，经城市设置进入）；**§12 的原生 bundle 全流程 UAT（练习→挑战→暂停→成功/失败→重试→退出→切 Overview→重启看成绩）尚未执行，验收前不得默认开放入口**。本文的参数是首轮调试起点，性能数字是验收目标，不是现有测试结果。
 
 ## 1. 交付目标
 
