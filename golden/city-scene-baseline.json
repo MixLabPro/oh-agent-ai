@@ -118,11 +118,13 @@
   }
  },
  "1600/day": {
-  "all": "c7db194dd8d44f2c",
+  "all": "e9ae2d01b7a49e2b",
   "sections": {
    "city-beach": "1:602edeb096c4",
    "city-beach-furniture": "3:9fa69108d8f3",
    "city-beach-people": "2:d2ccd626bc95",
+   "city-channel-flares": "1:088fd81b27db",
+   "city-channel-islands": "1:f4b6da174a67",
    "city-civic-boxes": "1:2945b37530e3",
    "city-civic-cylinders": "1:f403a3a5e5a8",
    "city-civic-glow": "1:1275802f6dd8",
@@ -178,11 +180,13 @@
   }
  },
  "1600/night": {
-  "all": "d9df8accd145a2a2",
+  "all": "e1d1298dab490698",
   "sections": {
    "city-beach": "1:602edeb096c4",
    "city-beach-furniture": "3:9fa69108d8f3",
    "city-beach-people": "2:d2ccd626bc95",
+   "city-channel-flares": "1:088fd81b27db",
+   "city-channel-islands": "1:f4b6da174a67",
    "city-civic-boxes": "1:2945b37530e3",
    "city-civic-cylinders": "1:f403a3a5e5a8",
    "city-civic-glow": "1:6700ae4fec6b",
