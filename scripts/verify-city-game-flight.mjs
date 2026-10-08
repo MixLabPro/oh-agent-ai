@@ -3,7 +3,9 @@
 // 1) 固定物理步 + 相同输入，30/60/120 Hz 渲染分帧 → 终态一致（帧率不影响轨迹）；
 // 2) 模拟状态无 NaN（含极端输入防护）；
 // 3) sweepFlight 扫掠命中（楼体/地形/硬边界；大步跨越也检出，不只测当前点）；
-// 4) FlightInput 按键映射、输入框忽略、失焦清空（DOM shim）。
+// 4) FlightInput 按键映射、输入框忽略、失焦清空（DOM shim）；
+// 5) 校准回放（CITY_GAME_FLIGHT_CALIBRATION_SPEC §9）：SPEC 点名的六个场景在
+//    当前物理上留基线曲线并断言不变量；R1 候选档位（转弯减速等）在此对照。
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { createRequire } from "node:module";
@@ -56,6 +58,59 @@ for (const state of [at30, at120]) {
 assert.ok(at60.simTime > 9.8 && at60.simTime <= 10 + FIXED, "模拟时钟按固定步推进");
 assert.ok(at60.speed <= params.maxSpeed + 1e-9 && at60.speed >= params.minSpeed - 1e-9, "速度在 [min,max] 内");
 assert.ok(Math.abs(at60.bank) <= params.bankMax + 1e-9, "倾斜不超上限");
+
+// ── 1b) 校准回放（CALIBRATION_SPEC §9 运动行）：确定性输入场景 + 基线曲线输出 ──
+// 场景驱动固定 1/60 步；inputOf(state, step) 返回该步输入，录制速度/转向率曲线。
+const EMPTY = { throttleUp: false, throttleDown: false, turnLeft: false, turnRight: false, pitchUp: false, pitchDown: false };
+const W = { ...EMPTY, throttleUp: true };
+const S = { ...EMPTY, throttleDown: true };
+const A = { ...EMPTY, turnLeft: true };
+function replay(name, inputOf, seconds) {
+  let state = sim.initialSimState({ x: 0, y: 400, z: 0, heading: 0 }, params);
+  const steps = Math.round(seconds / FIXED);
+  const curve = [];
+  for (let step = 0; step < steps; step += 1) {
+    state = sim.stepFlight(state, inputOf(state, step), FIXED, params);
+    if (step % Math.round(0.5 / FIXED) === 0 || step === steps - 1) curve.push({ t: +(step * FIXED).toFixed(2), speed: +state.speed.toFixed(2), turnRate: +state.turnRate.toFixed(3) });
+  }
+  for (const field of ["speed", "turnRate", "verticalSpeed", "bank"]) {
+    assert.ok(Number.isFinite(state[field]), `${name}: ${field} 有限`);
+  }
+  assert.ok(state.speed >= params.minSpeed - 1e-9 && state.speed <= params.maxSpeed + 1e-9, `${name}: 速度边界`);
+  return { name, curve, end: state };
+}
+// 场景 1：稳定巡航 + 满舵 3 秒（R1 转弯减速候选的主对照；当前物理速度应保持巡航）。
+const fullRudder = replay("cruise-full-rudder-3s", () => A, 3.0);
+assert.ok(Math.abs(fullRudder.end.speed - params.cruiseSpeed) < 0.01, "场景1 基线：现物理转向不损失速度（候选档位将改变此断言）");
+// 场景 2：满舵 1 秒后松舵——转向率应单调衰减到 0（指数平滑）。
+const rudderDecay = replay("rudder-release-decay", (_state, step) => (step * FIXED < 1 ? A : EMPTY), 3.0);
+const decayTurns = rudderDecay.curve.filter((point) => point.t >= 1).map((point) => Math.abs(point.turnRate));
+assert.ok(decayTurns.every((value, index) => index === 0 || value <= decayTurns[index - 1] + 1e-6), "场景2 松舵后转向率单调衰减");
+assert.ok(Math.abs(rudderDecay.end.turnRate) < 0.01, "场景2 转向率归零");
+// 场景 3：W 冲到极速后纯松油门——速度回落巡航但不得跌破 min。
+const releaseThrottle = replay("release-throttle", (_state, step) => (step * FIXED < 2 ? W : EMPTY), 4.0);
+assert.ok(releaseThrottle.curve[3].speed > params.cruiseSpeed * 1.2, "场景3 两秒内显著超过巡航");
+assert.ok(Math.abs(releaseThrottle.end.speed - params.cruiseSpeed) < params.cruiseSpeed * 0.05, "场景3 松手回到巡航附近");
+// 场景 4：W 冲到极速后 S 刹车到底——逼近 min 且不越界。
+const brake = replay("brake-to-min", (_state, step) => (step * FIXED < 2 ? W : S), 4.0);
+assert.ok(brake.end.speed <= params.minSpeed + params.cruiseSpeed * 0.05, "场景4 刹车逼近 min");
+assert.ok(brake.end.speed >= params.minSpeed - 1e-9, "场景4 刹车不穿 min");
+// 场景 5/6：组合输入 W+转弯 / S+转弯——边界内且有限。
+const wPlusTurn = replay("w-plus-turn", () => ({ ...W, turnLeft: true }), 3.0);
+assert.ok(wPlusTurn.end.speed <= params.maxSpeed + 1e-9, "场景5 W+转弯不越 max");
+const sPlusTurn = replay("s-plus-turn", () => ({ ...S, turnLeft: true }), 3.0);
+assert.ok(sPlusTurn.end.speed >= params.minSpeed - 1e-9, "场景6 S+转弯不穿 min");
+// 组合顺序确定性：W+转弯 与 先W后转弯 的终速一致（固定步顺序无关性）。
+{
+  const both = replay("w-and-turn-together", () => ({ ...W, turnLeft: true }), 2.0);
+  let staged = sim.initialSimState({ x: 0, y: 400, z: 0, heading: 0 }, params);
+  for (let step = 0; step < Math.round(1 / FIXED); step += 1) staged = sim.stepFlight(staged, W, FIXED, params);
+  for (let step = 0; step < Math.round(1 / FIXED); step += 1) staged = sim.stepFlight(staged, { ...W, turnLeft: true }, FIXED, params);
+  assert.ok(Math.abs(both.end.speed - staged.speed) < 0.01, "组合输入顺序确定性");
+}
+// 基线曲线输出（一行一场景，供候选档位 diff；格式 calibration-replay/<物理版本>）。
+console.log(`calibration-replay/p${sim.PHYSICS_VERSION}: ` + [fullRudder, rudderDecay, releaseThrottle, brake, wPlusTurn, sPlusTurn]
+  .map((scenario) => `${scenario.name}=${scenario.curve.map((point) => point.speed).join("/")}`).join(" | "));
 
 // ── 2) NaN 防护：非有限状态不外泄 ──
 {
