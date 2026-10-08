@@ -20,6 +20,7 @@ import { coastalSitingKinds } from "./planner/sitespec";
 import { frontSitesOnTrunks, resnapSitesOntoDryLand, restickSitesClearOfRingRuns, straddleSitesAcrossTrunk, type FrontageMoveContext } from "./planner/access";
 import { retreatShoreSitesToDryLand, settleHarborOnCoast, settleSailOperaOffshore, settleShoreSitesOnCoast, type ShoreMoveContext } from "./planner/siting";
 import { buildGeography } from "./planner/geography";
+import { diagnoseNetwork } from "./planner/intent";
 import { buildSkeleton, chooseCore } from "./planner/skeleton";
 import { addNetworkEdge, emptyNetwork, keyOf, type Network } from "./planner/network";
 import { runConnection, endpointClear, commitFixedLink, type ConnectionAttempt, type ConnectorWorld } from "./planner/connect";
@@ -1067,9 +1068,18 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
     }
   }
 
-  return { blocks, roadNodes: [...nodes.values()], roadEdges: [...edges.values()], terrain, extent, coast, river, publicSites, parkTrees,
+  // ── 尽端回车点（路网形态批 §5-3，docs/CITY_PLANNER_V2_FINDINGS.md §5）：合法尽端
+  // （EndpointRole cul-de-sac：滨海大道计划断点 planned-local / 近水终止 coast）语义上
+  // 是计划内终点，几何上却是路戛然而止——把它们的坐标作为加性字段输出，渲染层据此画
+  // 死胡同回车圈。classifyEndpoints 经 diagnoseNetwork 调用，只读（verify-city-intent
+  // 已证诊断前后 plan 深比较一致），不改任何路网/用地字段，计划基线哈希不受影响。
+  const plan = { blocks, roadNodes: [...nodes.values()], roadEdges: [...edges.values()], terrain, extent, coast, river, publicSites, parkTrees,
     urbanBounds, bridges, boundsRadius, carPaths, coastRoads: coastRoadRuns.slice(0, coastalRunCount), riverRoadRuns: coastRoadRuns.slice(coastalRunCount), districtAnchors, highways: highwayRuns, core, islandRadius: R, landmarks: withBridgeLandmark(landmarks, bridges, random, highwayRuns), seaside,
     connections: connectionLog };
+  const culDeSacEnds: Vec2[] = (diagnoseNetwork(plan)?.endpoints ?? [])
+    .filter((endpoint) => endpoint.role.kind === "cul-de-sac")
+    .map((endpoint) => endpoint.at);
+  return { ...plan, culDeSacEnds };
 }
 
 /** 悬索大桥：有河桥时把最长的那座做成悬索桥（地标，不改路网）。曾按 55% 概率：用户的岛恰好没抽中。 */
