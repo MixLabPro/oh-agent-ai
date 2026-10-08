@@ -87,6 +87,8 @@ export type ConnectionProposal = {
   cost: number;
   strategy: ConnectionStrategy;
   policy: CorridorPolicy;
+  /** 该连接是否检查与既有路交叉（滨海互接的历史档不查——提交期草稿复核沿用同一口径）。 */
+  crossings: boolean;
 };
 export type ConnectionResult =
   | ({ ok: true; version?: number } & ConnectionProposal)
@@ -449,7 +451,7 @@ function draftProblem(world: ConnectorWorld, proposed: ConnectionProposal, draft
     const e = proposed.patch.addEdges[k];
     const failure = corridorFailure(world, e.a, e.b, proposed.policy);
     if (failure) return failure;
-    for (const other of draft.edges.values()) if (crosses(e.a, e.b, other.points[0], other.points[1])) return `${proposed.strategy}-crossing ${other.id}`;
+    if (proposed.crossings) for (const other of draft.edges.values()) if (crosses(e.a, e.b, other.points[0], other.points[1])) return `${proposed.strategy}-crossing ${other.id}`;
   }
   return null;
 }
@@ -467,7 +469,7 @@ export function proposeConnection(request: ConnectionRequest, world: ConnectorWo
       : proposeGridAStar(request, world);
     if (outcome.ok) {
       const policy = strategy === "direct-projection" ? directPolicy(world) : fallbackPolicy(world, strategy === "node-merge" ? options.siteMargin : undefined);
-      return { ok: true, patch: buildPatch(world, request, outcome.join, outcome.polyline), cost: outcome.cost, strategy, policy };
+      return { ok: true, patch: buildPatch(world, request, outcome.join, outcome.polyline), cost: outcome.cost, strategy, policy, crossings: options.crossings !== false };
     }
     lastReason = outcome.reason;
     failures.push(`${strategy}:${outcome.reason}`);

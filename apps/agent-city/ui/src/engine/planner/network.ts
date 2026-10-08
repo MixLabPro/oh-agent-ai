@@ -88,7 +88,9 @@ export function commitNetworkPatch(
   if (problem) return { ok: false, reason: "validation", detail: problem };
   // §4.3「版本匹配后一次替换」：交换前复核（validate 回调不得重入提交同一网络——契约见函数头）。
   if ((network.version ?? 0) !== patch.baseVersion) return { ok: false, reason: "stale-base", detail: "version changed during validation" };
-  network.nodes = draft.nodes; network.edges = draft.edges;
+  // 批次 4-2：就地清写而非换 Map——buildPlan 顶部解构的 { nodes, edges } 引用在事务提交后仍指向正式网络。
+  network.nodes.clear(); for (const [k, n] of draft.nodes) network.nodes.set(k, n);
+  network.edges.clear(); for (const [k, e] of draft.edges) network.edges.set(k, e);
   network.version = (network.version ?? 0) + 1;
   return { ok: true, version: network.version };
 }

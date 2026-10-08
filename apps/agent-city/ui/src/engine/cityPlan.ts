@@ -19,6 +19,7 @@ import { isDeepWater, isDry, polylineDistance, wetCount } from "./planner/footpr
 import { buildGeography } from "./planner/geography";
 import { buildSkeleton, chooseCore } from "./planner/skeleton";
 import { addNetworkEdge, emptyNetwork, keyOf, type Network } from "./planner/network";
+import { runConnection, endpointClear, type ConnectorWorld } from "./planner/connect";
 import type { CityBlock, CityLayout, Parcel, PublicSite, RoadEdge, RoadNode, TerrainField, Vec2, Zone } from "./cityLayout";
 
 export function segmentDistance(p: Vec2, a: Vec2, b: Vec2): number {
@@ -588,60 +589,22 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
   // 落点把那条路切成 T 路口；落点离路段端点 <12 时吸附到端点（不留碎段）。拒绝：与被接道路夹角 <60°、
   // 与其它道路交叉、穿过水面/陡坡/预留地。曾经直连「700/400 内最近的主干道节点」：
   // 不看角度、不看沿途道路——真机里那束 X 形长斜线与 8° 锐角路口都出自这里（docs/CITY_ROAD_PLANNING_AUDIT.md）。
-  const crosses = (a: Vec2, b: Vec2, c: Vec2, d: Vec2) => {
-    const o = (p: Vec2, q: Vec2, r: Vec2) => (q.x - p.x) * (r.z - p.z) - (q.z - p.z) * (r.x - p.x);
-    return o(a, b, c) * o(a, b, d) < 0 && o(c, d, a) * o(c, d, b) < 0;
-  };
-  const clearAngle = (at: Vec2, toward: Vec2) => {
-    const id = roadNodeId(key(at));
-    const ux = toward.x - at.x; const uz = toward.z - at.z; const ul = Math.hypot(ux, uz) || 1;
-    for (const edge of edges.values()) {
-      if (edge.from !== id && edge.to !== id) continue;
-      const other = edge.from === id ? edge.points[edge.points.length - 1] : edge.points[0];
-      const vx = other.x - at.x; const vz = other.z - at.z; const vl = Math.hypot(vx, vz) || 1;
-      if ((ux * vx + uz * vz) / (ul * vl) > Math.cos((35 * Math.PI) / 180)) return false;
-    }
-    return true;
-  };
-  const connectToNetwork = (endpoint: Vec2, maxDistance: number, arterial: boolean, exclude: (edge: RoadEdge) => boolean = () => false, minAngle = 60): boolean => {
-    let best: { edge: RoadEdge; p: Vec2; d: number } | null = null;
-    for (const edge of edges.values()) {
-      if (edge.bridge || exclude(edge)) continue;
-      const [a, b] = edge.points;
-      const dx = b.x - a.x; const dz = b.z - a.z; const len = Math.hypot(dx, dz) || 1;
-      const t = Math.max(0, Math.min(1, ((endpoint.x - a.x) * dx + (endpoint.z - a.z) * dz) / (len * len)));
-      let p = key({ x: a.x + dx * t, z: a.z + dz * t });
-      if (t * len < 12) p = a; else if ((1 - t) * len < 12) p = b;
-      const d = Math.hypot(p.x - endpoint.x, p.z - endpoint.z);
-      if (d < 0.5 || d > maxDistance || (best && d >= best.d)) continue;
-      // 夹角：落在路段中段时要求接近垂直（≥60°）；吸附到端点时由端点处的其它路决定，不再限制。
-      const onEnd = p === a || p === b;
-      if (!onEnd) {
-        const cos = Math.abs(((p.x - endpoint.x) * dx + (p.z - endpoint.z) * dz) / (d * len));
-        if (cos > Math.cos((minAngle * Math.PI) / 180)) continue;
-      }
-      if (!safeRoadLink(endpoint, p)) continue;
-      // 两端都不能和已有道路成 <35° 的夹角：吸附到端点时曾不查角度，接入路沿着被接道路折回去（0° 重叠 / 10° 三角）。
-      if (!clearAngle(p, endpoint) || !clearAngle(endpoint, p)) continue;
-      let blocked = false;
-      for (const other of edges.values()) {
-        if (other === edge) continue;
-        if (crosses(endpoint, p, other.points[0], other.points[1])) { blocked = true; break; }
-      }
-      if (blocked) continue;
-      best = { edge, p, d };
-    }
-    if (!best) return false;
-    const { edge, p } = best;
-    const [a, b] = edge.points;
-    if (p !== a && p !== b) {
-      edges.delete(edge.id);
-      const primary = edge.width >= 12; const art = edge.kind === "arterial";
-      addEdge(a, p, art, false, primary); addEdge(p, b, art, false, primary);
-    }
-    addEdge(endpoint, p, arterial);
-    return true;
-  };
+  // ── 统一连接器（网络优先批次 4-2）：本函数改走 planner/connect.ts 的 direct-projection 策略，
+  // 经 commitNetworkPatch 事务提交；搜索判据逐字保留（投影/吸附/夹角/safeRoadLink/clearAngle/交叉），
+  // 规划基线哈希不变是行为等价的证明。
+  const connectorWorld: ConnectorWorld = { network, geo, inRiver, reservations };
+  let connectSeq = 0;
+  const connectToNetwork = (endpoint: Vec2, maxDistance: number, arterial: boolean, exclude: (edge: RoadEdge) => boolean = () => false, minAngle = 60): boolean =>
+    runConnection({
+      id: `connect:${connectSeq += 1}`,
+      source: endpoint,
+      target: { kind: "edges", include: (edge) => !exclude(edge) },
+      purpose: "district-access",
+      allowBridge: false,
+      maxLength: maxDistance,
+      roadClass: arterial ? "arterial" : "local",
+      minAngleDeg: minAngle,
+    }, connectorWorld, { strategies: ["direct-projection"] }).ok;
   for (const p of trimmedTrunkEnds) connectToNetwork(p, 40, true, (edge) => !coastalRoadEdgeIds.has(edge.id), 35);
   for (const segment of coastalRoadRuns) {
     if (segment.length < 2) continue;
@@ -811,7 +774,10 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
 
   // 沿海路 / 河岸路的断头互接：一段的端点 80 内有另一段（或同段另一端）的断头，就直连成一条（不过水、不穿用地）。
   // 河岸路在入海口附近停下、环岛路在河口另一侧停下，两端都是断头却互不相接（真机截图）。
+  // 批次 4-2：互接的加边改走连接器 node-merge（目标 = 指名节点），校验口径保留历史档
+  // （safeRoadLink 同判据 + 两端净空角，不查交叉），经 commitNetworkPatch 事务提交。
   {
+    let coastalJoinSeq = 0;
     const deg = () => { const d = new Map<string, number>(); for (const e of edges.values()) for (const n of [e.from, e.to]) d.set(n, (d.get(n) ?? 0) + 1); return d; };
     const ends = coastRoadRuns.flatMap((run, r) => [{ p: run[0], r }, { p: run[run.length - 1], r }]);
     const joined = new Set<string>();
@@ -821,10 +787,19 @@ function buildPlan(seed: number, R: number, shape: Shape, biome: Biome, config: 
       const mate = ends
         .filter((b) => b !== a && (d.get(roadNodeId(key(b.p))) ?? 0) === 1 && !joined.has(roadNodeId(key(b.p))))
         .map((b) => ({ b, dist: Math.hypot(b.p.x - a.p.x, b.p.z - a.p.z) }))
-        .filter(({ dist, b }) => dist > 1 && dist < 80 && safeRoadLink(a.p, b.p) && clearAngle(a.p, b.p) && clearAngle(b.p, a.p))
+        .filter(({ dist, b }) => dist > 1 && dist < 80 && safeRoadLink(a.p, b.p) && endpointClear(network, a.p, b.p) && endpointClear(network, b.p, a.p))
         .sort((x, y) => x.dist - y.dist)[0];
       if (!mate) continue;
-      addEdge(a.p, mate.b.p, true, false, true);
+      runConnection({
+        id: `coastal-join:${coastalJoinSeq += 1}`,
+        source: a.p,
+        target: { kind: "node", id: roadNodeId(key(mate.b.p)) },
+        purpose: "coastal-link",
+        allowBridge: false,
+        maxLength: 80,
+        roadClass: "arterial",
+        primary: true,
+      }, connectorWorld, { strategies: ["node-merge"], siteMargin: 5, crossings: false });
       joined.add(ida); joined.add(roadNodeId(key(mate.b.p)));
     }
   }
