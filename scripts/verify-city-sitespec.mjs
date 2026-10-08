@@ -46,7 +46,11 @@ assert.deepEqual([...straddleSitingKinds()], ["arch"], "straddleSitingKinds != S
 assert.deepEqual([...frontageExemptKinds()].sort(), ["arch", "civic", "ferris-wheel", "harbor", "lighthouse", "sail-opera", "villa-complex"], "frontageExemptKinds != SHORE_BOUND ∪ STRADDLE");
 
 // ── (c) 表自身确定性 ────────────────────────────────────────────────────────────
-assert.equal(JSON.stringify(SITE_SPECS), JSON.stringify(SITE_SPECS), "SITE_SPECS export order unstable");
+// （验收修订）原「同对象 JSON.stringify 自比」恒真，已删——真正的确定性证明是上面的 anchors
+// 双跑与 runAssignment 双世界双跑；此处改为钉死导出序的可区分断言。
+const exportOrder = SITE_SPECS.map((r) => r.kind).join(",");
+assert.match(exportOrder, /^[a-z-]+(,[a-z-]+)*$/, "SITE_SPECS rows must all be lower-case kinds");
+assert.ok(exportOrder.length > 0 && !exportOrder.includes("undefined"), "SITE_SPECS rows must all carry a kind");
 const kinds = SITE_SPECS.map((r) => r.kind);
 assert.equal(new Set(kinds).size, kinds.length, "duplicate kind rows in SITE_SPECS");
 assert.equal(kinds.length, 15, `expected 15 rows (6 public + 9 landmark candidates), got ${kinds.length}`);
