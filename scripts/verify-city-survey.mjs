@@ -19,15 +19,20 @@ const TIERS = [
   { tier: 10, seeds: 10 },
 ];
 // 0 = 当前实测为 0 的约束必须保持为 0；非 0 的是已知残留。tier>1 的表覆盖 tier1 表（未列键沿用）。
+// disconnectedComponents / bridgeheadContinuity（批次 5-3 新增，诊断口径，阈值=实测值）：
+// 前者度量最终图的孤立分量（多数为断头收尾/修复删边再造的隔离，与批次 4-3 前实测相同——
+// 24/12/6/3 岛；删除 tolerance 非法直连没有改变最终分量数），后者度量悬空桥头
+// （16/9/6/1 岛，桥建成后接续地面路被后续阶段删除——批次 5-3 前同样不可见）。
 const CEILING = {
   siteInWater: 2, siteWithoutDoorRoad: 0, roadThroughSite: 0, sitesOverlap: 1, parcelInsideSite: 0,
   stationStadiumSetback: 0, stationDoorFacesRoad: 0, archStraddlesRoad: 0, civicPlazaCentred: 0,
   suspensionBridgeClearOfHighways: 0, looseInlandRoadEnds: 17, acuteJunctions: 5, crowdedArterials: 4,
+  disconnectedComponents: 24, bridgeheadContinuity: 16,
 };
 const TIER_CEILING = {
-  3: { siteInWater: 4, looseInlandRoadEnds: 4, acuteJunctions: 2, crowdedArterials: 2 },
-  5: { siteInWater: 2, looseInlandRoadEnds: 5, acuteJunctions: 4, crowdedArterials: 3 },
-  10: { siteInWater: 1, looseInlandRoadEnds: 2, acuteJunctions: 4, crowdedArterials: 3 },
+  3: { siteInWater: 4, looseInlandRoadEnds: 4, acuteJunctions: 2, crowdedArterials: 2, disconnectedComponents: 12, bridgeheadContinuity: 9 },
+  5: { siteInWater: 2, looseInlandRoadEnds: 5, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 6, bridgeheadContinuity: 6 },
+  10: { siteInWater: 1, looseInlandRoadEnds: 2, acuteJunctions: 4, crowdedArterials: 3, disconnectedComponents: 3, bridgeheadContinuity: 1 },
 };
 const { createCityPlan, MIAMI_COASTAL, CONSTRAINTS, scorePlan } = await loadCity({
   "engine/cityPlan.ts": ["createCityPlan"], "engine/citySeaside.ts": ["MIAMI_COASTAL"],

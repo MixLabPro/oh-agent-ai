@@ -16,9 +16,10 @@ const { runConnection, proposeConnection, commitConnection, emptyNetwork, addNet
   "engine/planner/network.ts": ["emptyNetwork", "addNetworkEdge"],
 });
 
-/** 合成地理：半径 1000 的平岛（高 1.2），可选竖直河道（x = riverX，宽 riverWidth）与圆形湖。 */
-function makeWorld({ riverX = -400, riverWidth = 18, lake = null, sites = [] } = {}) {
+/** 合成地理：半径 1000 的平岛（高 1.2），可选竖直河道（x = riverX，宽 riverWidth）、圆形湖与陡坡盘。 */
+function makeWorld({ riverX = -400, riverWidth = 18, lake = null, slopeDisc = null, sites = [] } = {}) {
   const inLake = (x, z) => !!lake && Math.hypot(x - lake.x, z - lake.z) < lake.r;
+  const inSlope = (x, z) => !!slopeDisc && Math.hypot(x - slopeDisc.x, z - slopeDisc.z) < slopeDisc.r;
   const height = (x, z) => (Math.hypot(x, z) < 1000 && !inLake(x, z) && Math.abs(x - riverX) >= riverWidth) ? 1.2 : -1;
   const buildable = (x, z) => Math.hypot(x, z) < 988 && !inLake(x, z) && Math.abs(x - riverX) > riverWidth + 12 && (!lake || Math.hypot(x - lake.x, z - lake.z) > lake.r + 12);
   const geo = {
@@ -28,7 +29,7 @@ function makeWorld({ riverX = -400, riverWidth = 18, lake = null, sites = [] } =
     landClearance: (x, z) => Math.min(1000 - Math.hypot(x, z), Math.abs(x - riverX) - riverWidth),
     hillAngle: 0, hillDir: { x: 0, z: 1 }, hillLine: 5000, hillProj: () => -1,
     height, buildable,
-    terrain: { height, slope: () => 0.2, buildable, center: { x: 0, z: 0 }, radius: 1200, coastRadius: () => 1200, hasRiver: true },
+    terrain: { height, slope: (x, z) => (inSlope(x, z) ? 2 : 0.2), buildable, center: { x: 0, z: 0 }, radius: 1200, coastRadius: () => 1200, hasRiver: true },
   };
   return { network: emptyNetwork(), geo, inRiver: (x, z) => Math.abs(x - riverX) < riverWidth, reservations: () => sites };
 }
@@ -201,4 +202,28 @@ const request = (over) => ({ id: "req", source: { x: 0, z: 0 }, target: { kind: 
   assert.equal(snap(w2.network), frozen, "refused bridge mutated the network");
 }
 
-console.log("City connect: direct projection with attribute-preserving splits, node merge, site detour, bounded grid A* (heading state, expansion budget), search-budget/no-target/stale-base failures with zero side effects, primary-component targeting, explicit ground-bridge-ground candidates (narrow river only), deterministic.");
+// (j) 反向/共线端点（§8「反向端点」）：接入线沿悬挂边折回（<35°）时按 junction-angle 拒绝，
+//     不产生 0° 重叠的假路口；坡度超限（§8「坡度超限」）：陡坡盘挡住直线，A* 绕过去。
+{
+  const w = makeWorld();
+  addNetworkEdge(w.network, { x: 0, z: 0 }, { x: -120, z: 0 }, false);   // 悬挂边沿 -x
+  addNetworkEdge(w.network, { x: -200, z: 0 }, { x: -320, z: 0 }, true); // 目标边在悬挂边的延长线上
+  const folded = runConnection(request({ id: "fold" }), w, { strategies: ["direct-projection"] });
+  assert.ok(!folded.ok && folded.reason === "junction-angle", `fold-back must be refused: ${JSON.stringify(folded)}`);
+  assert.ok(!w.network.edges.has(edgeId("0:0", "-200:0")), "a collinear fold-back edge must not appear");
+  const w2 = makeWorld({ slopeDisc: { x: 0, z: 0, r: 90 } });
+  addNetworkEdge(w2.network, { x: -200, z: 0 }, { x: -320, z: 0 }, false);
+  addNetworkEdge(w2.network, { x: 200, z: 0 }, { x: 320, z: 0 }, true);
+  const steep = runConnection(request({ id: "slope", source: { x: -200, z: 0 }, maxLength: 600 }), w2);
+  assert.ok(steep.ok && steep.strategy === "grid-astar", `A* around the steep disc expected: ${JSON.stringify(steep)}`);
+  for (const e of steep.patch.addEdges) {
+    const steps = Math.max(1, Math.ceil(Math.hypot(e.b.x - e.a.x, e.b.z - e.a.z) / 4));
+    for (let k = 0; k <= steps; k += 1) {
+      const p = { x: e.a.x + (e.b.x - e.a.x) * k / steps, z: e.a.z + (e.b.z - e.a.z) * k / steps };
+      assert.ok(Math.hypot(p.x, p.z) >= 90, `route crosses the steep disc at (${p.x.toFixed(1)}, ${p.z.toFixed(1)})`);
+    }
+  }
+  assert.ok(connected(w2.network, "-200:0", "320:0"), "slope detour did not join the components");
+}
+
+console.log("City connect: direct projection with attribute-preserving splits, node merge, site detour, bounded grid A* (heading state, expansion budget), search-budget/no-target/stale-base failures with zero side effects, primary-component targeting, explicit ground-bridge-ground candidates (narrow river only), fold-back endpoints refused, slope discs detoured, deterministic.");
